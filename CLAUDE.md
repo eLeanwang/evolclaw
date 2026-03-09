@@ -64,13 +64,10 @@ npm run test:hooks
 - **`src/index.ts`** - Main entry (default, production use)
   - Full feature set: project commands, interrupt mechanism, batch sending, session persistence
   - Uses `AgentRunner` for direct SDK calls
-  - Configured with PreCompact Hook for compact event handling
 
-- **`src/index-gateway.ts`** - Gateway mode (experimental, reference only)
-  - **Status**: Not used in production, preserved for future reference
-  - **Value**: Instance pool management (max 20 instances), comprehensive Hook monitoring (Stop, PostToolUse, SubagentStart/Stop, Notification)
-  - **Purpose**: Reference implementation for future high-concurrency scenarios or advanced monitoring needs
-  - **Note**: Missing features compared to main entry (no interrupt, no batch sending, no project switching)
+- **`src/index-gateway.ts`** - Gateway mode (experimental, not used)
+  - Preserved for reference: instance pool management, comprehensive Hook monitoring
+  - See `GATEWAY_MODE.md` for details
 
 Default entry: `src/index.ts` (via `package.json` main field)
 
@@ -412,71 +409,11 @@ ACP channel (`src/channels/acp.ts`) is currently a placeholder implementation. R
 4. Build with `npm run build` before committing
 5. Verify with `evolclaw` command (after `npm link`)
 
-## Gateway Mode (Experimental)
+## Gateway Mode
 
-**Status**: Experimental, not used in production. Preserved as reference implementation.
+**Status**: Experimental, not used in production. See `GATEWAY_MODE.md` for details.
 
-### What is Gateway Mode?
-
-Gateway mode (`src/index-gateway.ts`) is an alternative entry point that provides:
-
-1. **Instance Pool Management** (`src/gateway/instance-manager.ts`)
-   - Manages up to 20 concurrent Claude Agent SDK instances
-   - Automatic instance cleanup after 30 minutes idle
-   - State tracking: IDLE → BUSY → IDLE
-
-2. **Comprehensive Hook Monitoring** (`src/gateway/claude-instance.ts`)
-   - Stop Hook: Dialogue completion sync point
-   - PostToolUse Hook: Tool call monitoring
-   - SubagentStart/Stop Hook: Subagent lifecycle tracking
-   - Notification Hook: System notification handling
-   - All hooks emit events for monitoring layer
-
-3. **Failure Recovery** (`src/gateway/failure-handler.ts`)
-   - Retry mechanism: 3 attempts with exponential backoff
-   - Instance restart: Up to 5 restarts with 60s cooldown
-   - Circuit breaker: Prevents cascading failures
-
-### Why Not Used in Production?
-
-The main entry (`src/index.ts`) provides better features for current use cases:
-- Interrupt mechanism (cancel long-running tasks)
-- Batch sending (3-second window for tool activities)
-- Project switching (/switch, /bind commands)
-- Session persistence (SQLite + JSONL)
-- Unified message processing (MessageProcessor)
-
-Gateway mode lacks these features and is more complex for single-user scenarios.
-
-### When to Use Gateway Mode?
-
-Consider Gateway mode for future scenarios:
-- **High concurrency**: Multiple users, need instance pool management
-- **Advanced monitoring**: Need comprehensive Hook event tracking
-- **Fault tolerance**: Need circuit breaker and automatic recovery
-- **Resource limits**: Need strict instance count control
-
-### How to Use Gateway Mode?
-
-1. Change `package.json` main field:
-   ```json
-   "main": "dist/index-gateway.js"
-   ```
-
-2. Build and run:
-   ```bash
-   npm run build
-   npm start
-   ```
-
-3. Note: Gateway mode uses a separate database (`data/gateway.db`) for message deduplication.
-
-### Migration Path
-
-If you need Gateway mode features in the main entry:
-- Copy Hook configuration from `claude-instance.ts` to `agent-runner.ts`
-- Integrate `InstanceManager` for instance pool management
-- Add `FailureHandler` for retry/restart logic
+**Value**: Instance pool management, comprehensive Hook monitoring, failure recovery mechanisms.
 
 ## Critical Files
 
