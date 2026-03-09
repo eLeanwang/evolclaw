@@ -312,8 +312,22 @@ async function main() {
 
   processor.registerChannel(acpAdapter);
 
+  // 命令列表（用于快速检查）
+  const commands = ['/new', '/pwd', '/plist', '/switch', '/bind', '/help', '/status', '/restart'];
+  const isCommand = (content: string) => commands.some(cmd => content.startsWith(cmd));
+
   // Feishu 消息处理
   feishu.onMessage(async (chatId, content, images) => {
+    // 命令立即处理，不进入队列
+    if (isCommand(content)) {
+      const cmdResult = await commandHandler(content, 'feishu', chatId);
+      if (cmdResult) {
+        await feishu.sendMessage(chatId, cmdResult);
+        return;
+      }
+    }
+
+    // 普通消息进入队列
     await messageQueue.enqueue(
       `feishu-${chatId}`,
       { channel: 'feishu', channelId: chatId, content, images, timestamp: Date.now() }
@@ -322,6 +336,16 @@ async function main() {
 
   // ACP 消息处理
   acp.onMessage(async (sessionId, content) => {
+    // 命令立即处理，不进入队列
+    if (isCommand(content)) {
+      const cmdResult = await commandHandler(content, 'acp', sessionId);
+      if (cmdResult) {
+        await acp.sendMessage(sessionId, cmdResult);
+        return;
+      }
+    }
+
+    // 普通消息进入队列
     await messageQueue.enqueue(
       `acp-${sessionId}`,
       { channel: 'acp', channelId: sessionId, content, timestamp: Date.now() }
