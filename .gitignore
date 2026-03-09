@@ -1,0 +1,41 @@
+# 配置文件（包含敏感信息）
+data/config.json
+data/config.json.backup
+
+# 数据库
+data/*.db
+data/*.db-*
+
+# 日志
+logs/
+data/stdout.log
+data/*.log
+
+# 运行时文件
+data/*.pid
+data/restart-pending.json
+
+# Node.js
+node_modules/
+dist/
+coverage/
+
+# 项目目录
+projects/
+
+# Claude 临时文件
+.claude/
+
+# 测试文件
+test-*.js
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 系统文件
+.DS_Store
+Thumbs.db

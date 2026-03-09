@@ -1,0 +1,25 @@
+{
+  "anthropic": {
+    "baseUrl": "https://api.anthropic.com",
+    "apiKey": "your-api-key-here"
+  },
+  "feishu": {
+    "appId": "your-feishu-app-id",
+    "appSecret": "your-feishu-app-secret"
+  },
+  "acp": {
+    "domain": "your-acp-domain",
+    "agentName": "your-agent-name"
+  },
+  "projects": {
+    "defaultPath": "/path/to/default/project",
+    "autoCreate": true,
+    "list": {
+      "project1": "/path/to/project1",
+      "project2": "/path/to/project2"
+    }
+  },
+  "server": {
+    "port": 3000
+  }
+}
