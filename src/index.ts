@@ -35,10 +35,7 @@ async function handleProjectCommand(
   const isCommand = commands.some(cmd => content.startsWith(cmd));
   if (!isCommand) return null;
 
-  const session = await sessionManager.getSession(channel, channelId);
-  if (!session) return '会话未初始化';
-
-  // /help 命令：显示帮助信息
+  // /help 命令不需要会话
   if (content === '/help') {
     return `可用命令：
 📁 项目管理：
@@ -55,6 +52,13 @@ async function handleProjectCommand(
 ❓ 帮助：
   /help - 显示此帮助信息`;
   }
+
+  // 其他命令需要会话，如果不存在则创建
+  const session = await sessionManager.getOrCreateSession(
+    channel,
+    channelId,
+    config.projects?.defaultPath || process.cwd()
+  );
 
   // /status 命令：显示会话状态
   if (content === '/status') {
