@@ -275,6 +275,11 @@ async function main() {
     commandHandler
   );
 
+  // 设置 compact 开始回调
+  agentRunner.setCompactStartCallback((sessionId) => {
+    processor.handleCompactStart();
+  });
+
   // 创建消息队列
   const messageQueue = new MessageQueue(async (message) => {
     await processor.processMessage(message);

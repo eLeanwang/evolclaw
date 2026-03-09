@@ -11,10 +11,18 @@ export class AgentRunner {
   private activeSessions: Map<string, string> = new Map();
   private activeStreams = new Map<string, AsyncIterable<any>>();
   private onSessionIdUpdate?: (sessionId: string, claudeSessionId: string) => void;
+  private onCompactStart?: (sessionId: string) => void;
 
-  constructor(apiKey: string, onSessionIdUpdate?: (sessionId: string, claudeSessionId: string) => void) {
+  constructor(
+    apiKey: string,
+    onSessionIdUpdate?: (sessionId: string, claudeSessionId: string) => void
+  ) {
     this.apiKey = apiKey;
     this.onSessionIdUpdate = onSessionIdUpdate;
+  }
+
+  setCompactStartCallback(callback: (sessionId: string) => void): void {
+    this.onCompactStart = callback;
   }
 
   async runQuery(sessionId: string, prompt: string, projectPath: string, initialClaudeSessionId?: string, images?: ImageData[], systemPromptAppend?: string): Promise<AsyncIterable<any>> {
@@ -23,6 +31,14 @@ export class AgentRunner {
 
     // 优先使用传入的 claudeSessionId（从数据库恢复），否则使用内存中的
     const claudeSessionId = initialClaudeSessionId || this.activeSessions.get(sessionId);
+
+    // PreCompact Hook - 在压缩开始时触发
+    const preCompactHook = async () => {
+      if (this.onCompactStart) {
+        this.onCompactStart(sessionId);
+      }
+      return {};
+    };
 
     return simpleRetry(async () => {
       if (images && images.length > 0) {
@@ -38,6 +54,9 @@ export class AgentRunner {
           options: {
             cwd: projectPath,
             canUseTool,
+            hooks: {
+              PreCompact: [{ matcher: '.*', hooks: [preCompactHook] }]
+            },
             ...(systemPromptAppend ? {
               systemPrompt: {
                 type: 'preset' as const,
@@ -63,6 +82,9 @@ export class AgentRunner {
           options: {
             cwd: projectPath,
             canUseTool,
+            hooks: {
+              PreCompact: [{ matcher: '.*', hooks: [preCompactHook] }]
+            },
             ...(claudeSessionId ? { resume: claudeSessionId } : {}),
             ...(systemPromptAppend ? {
               systemPrompt: {

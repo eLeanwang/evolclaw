@@ -12,6 +12,7 @@ import type { Message, Config, Session, ChannelAdapter, ChannelOptions, CommandH
  */
 export class MessageProcessor {
   private channels = new Map<string, { adapter: ChannelAdapter; options?: ChannelOptions }>();
+  private currentFlusher?: StreamFlusher;
 
   constructor(
     private agentRunner: AgentRunner,
@@ -25,6 +26,15 @@ export class MessageProcessor {
    */
   registerChannel(adapter: ChannelAdapter, options?: ChannelOptions): void {
     this.channels.set(adapter.name, { adapter, options });
+  }
+
+  /**
+   * 处理 compact 开始事件
+   */
+  handleCompactStart(): void {
+    if (this.currentFlusher) {
+      this.currentFlusher.addActivity('⏳ 会话压缩中...');
+    }
   }
 
   /**
@@ -81,6 +91,9 @@ export class MessageProcessor {
         3000,
         options?.fileMarkerPattern
       );
+
+      // 保存当前 flusher，用于 compact 事件
+      this.currentFlusher = flusher;
 
       // 调用 AgentRunner
       const stream = await this.agentRunner.runQuery(
@@ -204,11 +217,10 @@ export class MessageProcessor {
         this.agentRunner.updateSessionId(sessionId, event.session_id);
       }
 
-      // 系统事件：立即发送
+      // 系统事件：compact_boundary
       if (event.type === 'system' && event.subtype === 'compact_boundary') {
-        const trigger = event.compact_metadata?.trigger || 'auto';
         const preTokens = event.compact_metadata?.pre_tokens || 0;
-        await adapter.sendText(channelId, `💡 会话已自动压缩（触发方式: ${trigger}, 压缩前 tokens: ${preTokens}）`);
+        flusher.addActivity(`💡 会话压缩完成，继续执行...（压缩前 tokens: ${preTokens}）`);
       }
 
       // Assistant 事件：提取工具调用
