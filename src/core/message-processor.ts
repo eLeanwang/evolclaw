@@ -75,10 +75,11 @@ export class MessageProcessor {
 
       const startTime = Date.now();
 
-      // 创建 StreamFlusher
+      // 创建 StreamFlusher，传入文件标记模式用于自动过滤
       const flusher = new StreamFlusher(
         (text) => adapter.sendText(message.channelId, text),
-        3000
+        3000,
+        options?.fileMarkerPattern
       );
 
       // 调用 AgentRunner
@@ -101,7 +102,7 @@ export class MessageProcessor {
         flusher
       );
 
-      // 处理文件标记（Feishu 专用）- 在 flush 之前处理
+      // 处理文件标记（Feishu 专用）- 提取并发送文件
       if (options?.fileMarkerPattern && adapter.sendFile) {
         const fullText = flusher.getFinalText();
         const fileMatches = [...fullText.matchAll(options.fileMarkerPattern)];
@@ -114,12 +115,9 @@ export class MessageProcessor {
           logger.info(`[${adapter.name}] Sending file: ${absoluteFilePath}`);
           await adapter.sendFile(message.channelId, absoluteFilePath);
         }
-
-        // 从 buffer 中移除文件标记
-        flusher.stripFromBuffer(options.fileMarkerPattern);
       }
 
-      // Flush 剩余内容（已移除文件标记）
+      // Flush 剩余内容（文件标记已在 flush 时自动移除）
       await flusher.flush();
 
       // 清理 activeStreams（正常完成）

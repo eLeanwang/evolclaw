@@ -9,11 +9,15 @@ export class StreamFlusher {
   private lastFlush = Date.now();
   private allText = '';
   private sentContent = false;
+  private fileMarkerPattern?: RegExp;
 
   constructor(
     private send: (text: string) => Promise<void>,
-    private interval = 3000
-  ) {}
+    private interval = 3000,
+    fileMarkerPattern?: RegExp
+  ) {
+    this.fileMarkerPattern = fileMarkerPattern;
+  }
 
   addText(text: string) {
     this.buffer += text;
@@ -72,6 +76,11 @@ export class StreamFlusher {
     if (this.buffer) {
       output += this.buffer;
       this.buffer = '';
+    }
+
+    // 移除文件标记（如果配置了）
+    if (output && this.fileMarkerPattern) {
+      output = output.replace(this.fileMarkerPattern, '').trim();
     }
 
     if (output) {
