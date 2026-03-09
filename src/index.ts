@@ -165,9 +165,6 @@ async function handleProjectCommand(
     // 使用新的 switchProject 方法
     const newSession = await sessionManager.switchProject(channel, channelId, projectPath);
 
-    // 关闭旧会话的 Agent Runner 实例
-    await agentRunner.closeSession(session.id);
-
     // 提示信息
     const hasExistingSession = newSession.claudeSessionId ? '（恢复已有会话）' : '（新建会话）';
     return `✓ 已切换到项目: ${projectName}\n  路径: ${projectPath}\n  ${hasExistingSession}`;
@@ -188,7 +185,6 @@ async function handleProjectCommand(
 
     // 使用 switchProject 方法
     const newSession = await sessionManager.switchProject(channel, channelId, projectPath);
-    await agentRunner.closeSession(session.id);
 
     const hasExistingSession = newSession.claudeSessionId ? '（恢复已有会话）' : '（新建会话）';
     return `✓ 已绑定项目目录: ${projectPath}\n  ${hasExistingSession}`;
