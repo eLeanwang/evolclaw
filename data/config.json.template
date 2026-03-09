@@ -18,8 +18,5 @@
       "project1": "/path/to/project1",
       "project2": "/path/to/project2"
     }
-  },
-  "server": {
-    "port": 3000
   }
 }

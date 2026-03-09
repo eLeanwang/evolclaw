@@ -19,9 +19,6 @@ export interface Config {
     autoCreate: boolean;
     list?: Record<string, string>;
   };
-  server?: {
-    port: number;
-  };
 }
 
 export interface Session {
