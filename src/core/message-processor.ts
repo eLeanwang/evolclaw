@@ -221,9 +221,7 @@ export class MessageProcessor {
 
       // Result 事件：累积文本
       if (event.type === 'result' && event.result) {
-        if (!flusher.hasSentContent()) {
-          flusher.addText(event.result);
-        }
+        flusher.addText(event.result);
       }
     }
   }
