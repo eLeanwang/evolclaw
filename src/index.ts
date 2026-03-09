@@ -3,9 +3,10 @@ import { SessionManager } from './session-manager.js';
 import { AgentRunner } from './agent-runner.js';
 import { FeishuChannel } from './channels/feishu.js';
 import { ACPChannel } from './channels/acp.js';
-import { Config } from './types.js';
+import { MessageProcessor } from './core/message-processor.js';
+import { MessageQueue } from './core/message-queue.js';
+import { Config, ChannelAdapter, ChannelOptions, CommandHandler } from './types.js';
 import { logger } from './utils/logger.js';
-import { getErrorMessage } from './utils/error-handler.js';
 import path from 'path';
 import fs from 'fs';
 
@@ -259,266 +260,68 @@ async function main() {
       : path.resolve(process.cwd(), session.projectPath);
   });
 
-  feishu.onMessage(async (chatId, content, images) => {
-    const messageId = `feishu_${chatId}_${Date.now()}`;
-    try {
-      const session = await sessionManager.getOrCreateSession('feishu', chatId, config.projects?.defaultPath || process.cwd());
-
-      // 记录收到消息
-      logger.message({
-        msgId: messageId,
-        sessionId: session.id,
-        dir: 'inbound',
-        status: 'received'
-      });
-
-      // 将相对路径转换为绝对路径
-      const absoluteProjectPath = path.isAbsolute(session.projectPath)
-        ? session.projectPath
-        : path.resolve(process.cwd(), session.projectPath);
-
-      // 如果有图片，在日志中标注
-      const imageInfo = images && images.length > 0 ? ` [${images.length} image(s)]` : '';
-      logger.info(`[Feishu] ${chatId}: ${content}${imageInfo}`);
-
-      // 检查是否是命令
-      const cmdResult = await handleProjectCommand(content, 'feishu', chatId, sessionManager, agentRunner, config);
-      if (cmdResult) {
-        await feishu.sendMessage(chatId, cmdResult);
-        return;
-      }
-
-      // 记录开始处理
-      logger.message({
-        msgId: messageId,
-        sessionId: session.id,
-        dir: 'inbound',
-        status: 'processing'
-      });
-
-      const startTime = Date.now();
-      const stream = await agentRunner.runQuery(
-        session.id,
-        content,
-        absoluteProjectPath,
-        session.claudeSessionId,
-        images,
-        '[重要系统功能] 你可以通过飞书发送文件给用户。方法：在响应中使用 [SEND_FILE:文件路径] 标记。示例：文件已准备好！[SEND_FILE:/path/to/file.txt] 系统会自动上传并发送。'
-      );
-      let response = '';
-
-      for await (const event of stream) {
-        // 提取 session ID（所有消息都有 session_id 字段）
-        if (event.session_id) {
-          agentRunner.updateSessionId(session.id, event.session_id);
-        }
-
-        // 监听 compact 事件
-        if (event.type === 'system' && event.subtype === 'compact_boundary') {
-          const trigger = event.compact_metadata?.trigger || 'auto';
-          const preTokens = event.compact_metadata?.pre_tokens || 0;
-          await feishu.sendMessage(chatId, `💡 会话已自动压缩（触发方式: ${trigger}, 压缩前 tokens: ${preTokens}）`);
-        }
-
-        // 处理文本响应
-        if (event.type === 'text_delta') {
-          response += event.text;
-          logger.debug('[Feishu] Got text_delta:', event.text?.substring(0, 50));
-        } else if (event.type === 'assistant' && event.message?.content) {
-          // 处理 assistant 消息（完整消息格式）
-          logger.debug('[Feishu] Got assistant message, content items:', event.message.content.length);
-          for (const content of event.message.content) {
-            if (content.type === 'text' && content.text) {
-              response += content.text;
-              logger.debug('[Feishu] Extracted text:', content.text.substring(0, 50));
-            }
-          }
-        } else if (event.type === 'result' && event.result) {
-          // 如果还没有响应，使用 result 字段
-          logger.debug('[Feishu] Got result:', event.result?.substring(0, 50));
-          if (!response) {
-            response = event.result;
-          }
-        }
-      }
-
-      logger.debug(`[Feishu] Response length: ${response.length}, preview: ${response.substring(0, 100)}`);
-
-      const duration = Date.now() - startTime;
-      // 记录处理完成
-      logger.message({
-        msgId: messageId,
-        sessionId: session.id,
-        dir: 'inbound',
-        status: 'completed',
-        duration
-      });
-
-      // 处理文件发送标记 [SEND_FILE:路径]
-      const fileSendPattern = /\[SEND_FILE:([^\]]+)\]/g;
-      const fileMatches = [...response.matchAll(fileSendPattern)];
-
-      for (const match of fileMatches) {
-        const filePath = match[1].trim();
-        // 转换相对路径为绝对路径
-        const absoluteFilePath = path.isAbsolute(filePath)
-          ? filePath
-          : path.join(absoluteProjectPath, filePath);
-        logger.info(`[Feishu] Sending file: ${absoluteFilePath}`);
-        await feishu.sendFile(chatId, absoluteFilePath);
-      }
-
-      // 移除文件发送标记
-      response = response.replace(fileSendPattern, '').trim();
-
-      logger.debug(`[Feishu] Sending message to ${chatId}`);
-      if (response) {
-        await feishu.sendMessage(chatId, response);
-        logger.debug(`[Feishu] Message sent successfully`);
-      }
-
-      // 记录发送响应
-      logger.message({
-        msgId: `${messageId}_reply`,
-        sessionId: session?.id || chatId,
-        dir: 'outbound',
-        status: 'sent'
-      });
-    } catch (error) {
-      logger.error('[Feishu] Error:', error);
-
-      // 记录处理失败
-      logger.message({
-        msgId: messageId,
-        sessionId: chatId,
-        dir: 'inbound',
-        status: 'failed',
-        error: error instanceof Error ? error.message : String(error)
-      });
-
-      if (error instanceof Error) {
-        logger.error('[Feishu] Error stack:', error.stack);
-      }
-
-      // 使用错误处理工具生成用户友好的错误消息
-      const userMessage = getErrorMessage(error);
-      await feishu.sendMessage(chatId, userMessage);
-    }
-  });
-
   // ACP 渠道
   const acp = new ACPChannel({ domain: config.acp.domain, agentName: config.acp.agentName });
+
+  // 创建命令处理器
+  const commandHandler: CommandHandler = (content, channel, channelId) =>
+    handleProjectCommand(content, channel, channelId, sessionManager, agentRunner, config);
+
+  // 创建消息处理器
+  const processor = new MessageProcessor(
+    agentRunner,
+    sessionManager,
+    config,
+    commandHandler
+  );
+
+  // 创建消息队列
+  const messageQueue = new MessageQueue(async (message) => {
+    await processor.processMessage(message);
+  });
+
+  // 设置中断回调
+  messageQueue.setInterruptCallback(async (sessionKey) => {
+    await agentRunner.interrupt(sessionKey);
+  });
+
+  // 注册 Feishu 适配器
+  const feishuAdapter: ChannelAdapter = {
+    name: 'feishu',
+    sendText: (channelId, text) => feishu.sendMessage(channelId, text),
+    sendFile: (channelId, filePath) => feishu.sendFile(channelId, filePath),
+  };
+
+  const feishuOptions: ChannelOptions = {
+    systemPromptAppend: '[重要系统功能] 你可以通过飞书发送文件给用户。方法：在响应中使用 [SEND_FILE:文件路径] 标记。示例：文件已准备好！[SEND_FILE:/path/to/file.txt] 系统会自动上传并发送。',
+    fileMarkerPattern: /\[SEND_FILE:([^\]]+)\]/g,
+    supportsImages: true,
+  };
+
+  processor.registerChannel(feishuAdapter, feishuOptions);
+
+  // 注册 ACP 适配器
+  const acpAdapter: ChannelAdapter = {
+    name: 'acp',
+    sendText: (channelId, text) => acp.sendMessage(channelId, text),
+  };
+
+  processor.registerChannel(acpAdapter);
+
+  // Feishu 消息处理
+  feishu.onMessage(async (chatId, content, images) => {
+    await messageQueue.enqueue(
+      `feishu-${chatId}`,
+      { channel: 'feishu', channelId: chatId, content, images, timestamp: Date.now() }
+    );
+  });
+
+  // ACP 消息处理
   acp.onMessage(async (sessionId, content) => {
-    const messageId = `acp_${sessionId}_${Date.now()}`;
-    try {
-      const session = await sessionManager.getOrCreateSession('acp', sessionId, config.projects?.defaultPath || process.cwd());
-
-      // 记录收到消息
-      logger.message({
-        msgId: messageId,
-        sessionId: session.id,
-        dir: 'inbound',
-        status: 'received'
-      });
-
-      logger.info(`[ACP] ${sessionId}: ${content}`);
-
-      // 将相对路径转换为绝对路径
-      const absoluteProjectPath = path.isAbsolute(session.projectPath)
-        ? session.projectPath
-        : path.resolve(process.cwd(), session.projectPath);
-
-      // 检查是否是命令
-      const cmdResult = await handleProjectCommand(content, 'acp', sessionId, sessionManager, agentRunner, config);
-      if (cmdResult) {
-        await acp.sendMessage(sessionId, cmdResult);
-        return;
-      }
-
-      // 记录开始处理
-      logger.message({
-        msgId: messageId,
-        sessionId: session.id,
-        dir: 'inbound',
-        status: 'processing'
-      });
-
-      const startTime = Date.now();
-
-      const stream = await agentRunner.runQuery(
-        session.id,
-        content,
-        absoluteProjectPath,
-        session.claudeSessionId // 从数据库恢复 session ID
-      );
-      let response = '';
-
-      for await (const event of stream) {
-        // 提取 session ID（所有消息都有 session_id 字段）
-        if (event.session_id) {
-          agentRunner.updateSessionId(session.id, event.session_id);
-        }
-
-        // 监听 compact 事件
-        if (event.type === 'system' && event.subtype === 'compact_boundary') {
-          const trigger = event.compact_metadata?.trigger || 'auto';
-          const preTokens = event.compact_metadata?.pre_tokens || 0;
-          await acp.sendMessage(sessionId, `💡 会话已自动压缩（触发方式: ${trigger}, 压缩前 tokens: ${preTokens}）`);
-        }
-
-        // 处理文本响应
-        if (event.type === 'text_delta') {
-          response += event.text;
-        } else if (event.type === 'assistant' && event.message?.content) {
-          // 处理 assistant 消息（完整消息格式）
-          for (const content of event.message.content) {
-            if (content.type === 'text' && content.text) {
-              response += content.text;
-            }
-          }
-        } else if (event.type === 'result' && event.result) {
-          // 如果还没有响应，使用 result 字段
-          if (!response) {
-            response = event.result;
-          }
-        }
-      }
-
-      const duration = Date.now() - startTime;
-      // 记录处理完成
-      logger.message({
-        msgId: messageId,
-        sessionId: session.id,
-        dir: 'inbound',
-        status: 'completed',
-        duration
-      });
-
-      await acp.sendMessage(sessionId, response);
-
-      // 记录发送响应
-      logger.message({
-        msgId: `${messageId}_reply`,
-        sessionId: session?.id || sessionId,
-        dir: 'outbound',
-        status: 'sent'
-      });
-    } catch (error) {
-      logger.error('[ACP] Error:', error);
-
-      // 记录处理失败
-      logger.message({
-        msgId: messageId,
-        sessionId: sessionId,
-        dir: 'inbound',
-        status: 'failed',
-        error: error instanceof Error ? error.message : String(error)
-      });
-
-      // 使用错误处理工具生成用户友好的错误消息
-      const userMessage = getErrorMessage(error);
-      await acp.sendMessage(sessionId, userMessage);
-    }
+    await messageQueue.enqueue(
+      `acp-${sessionId}`,
+      { channel: 'acp', channelId: sessionId, content, timestamp: Date.now() }
+    );
   });
 
   // 连接渠道

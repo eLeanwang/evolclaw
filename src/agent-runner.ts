@@ -4,10 +4,12 @@ import path from 'path';
 import { MessageStream, ImageData } from './message-stream.js';
 import { logger } from './utils/logger.js';
 import { simpleRetry } from './utils/retry.js';
+import { canUseTool } from './core/permission.js';
 
 export class AgentRunner {
   private apiKey: string;
   private activeSessions: Map<string, string> = new Map();
+  private activeStreams = new Map<string, AsyncIterable<any>>();
   private onSessionIdUpdate?: (sessionId: string, claudeSessionId: string) => void;
 
   constructor(apiKey: string, onSessionIdUpdate?: (sessionId: string, claudeSessionId: string) => void) {
@@ -22,9 +24,7 @@ export class AgentRunner {
     // 优先使用传入的 claudeSessionId（从数据库恢复），否则使用内存中的
     const claudeSessionId = initialClaudeSessionId || this.activeSessions.get(sessionId);
 
-    // 使用重试机制包装 query 调用
     return simpleRetry(async () => {
-      // 只有当有图片时才使用 MessageStream，否则使用简单字符串
       if (images && images.length > 0) {
         logger.debug('[AgentRunner] Creating query with images, images:', images.length);
         logger.debug('[AgentRunner] Skipping resume for image message to avoid history conflict');
@@ -33,11 +33,11 @@ export class AgentRunner {
         stream.push(prompt, images);
         stream.end();
 
-        // 图片消息不使用 resume，避免会话历史冲突
-        return query({
+        const queryStream = query({
           prompt: stream,
           options: {
             cwd: projectPath,
+            canUseTool,
             ...(systemPromptAppend ? {
               systemPrompt: {
                 type: 'preset' as const,
@@ -53,14 +53,16 @@ export class AgentRunner {
             }
           }
         });
+        this.activeStreams.set(sessionId, queryStream);
+        return queryStream;
       } else {
-        logger.debug('[AgentRunner] Creating query with text only, claudeSessionId:', claudeSessionId);
+        logger.debug('[AgentRunner] Creating query with text only, claudeSessionId:', initialClaudeSessionId);
 
-        // 文本消息使用 resume 保持上下文
-        return query({
+        const queryStream = query({
           prompt: prompt,
           options: {
             cwd: projectPath,
+            canUseTool,
             ...(claudeSessionId ? { resume: claudeSessionId } : {}),
             ...(systemPromptAppend ? {
               systemPrompt: {
@@ -77,13 +79,27 @@ export class AgentRunner {
             }
           }
         });
+        this.activeStreams.set(sessionId, queryStream);
+        return queryStream;
       }
     }, 3);
   }
 
+  async interrupt(sessionId: string): Promise<void> {
+    const stream = this.activeStreams.get(sessionId);
+    if (stream && 'interrupt' in stream && typeof (stream as any).interrupt === 'function') {
+      await (stream as any).interrupt();
+      this.activeStreams.delete(sessionId);
+      logger.info(`[AgentRunner] Interrupted session: ${sessionId}`);
+    }
+  }
+
+  cleanupStream(sessionId: string): void {
+    this.activeStreams.delete(sessionId);
+  }
+
   updateSessionId(sessionId: string, claudeSessionId: string): void {
     this.activeSessions.set(sessionId, claudeSessionId);
-    // 触发回调，通知外部持久化
     if (this.onSessionIdUpdate) {
       this.onSessionIdUpdate(sessionId, claudeSessionId);
     }
@@ -91,5 +107,6 @@ export class AgentRunner {
 
   async closeSession(sessionId: string): Promise<void> {
     this.activeSessions.delete(sessionId);
+    this.activeStreams.delete(sessionId);
   }
 }
