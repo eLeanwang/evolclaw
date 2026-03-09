@@ -94,6 +94,10 @@ export class AgentRunner {
     }
   }
 
+  registerStream(key: string, stream: AsyncIterable<any>): void {
+    this.activeStreams.set(key, stream);
+  }
+
   cleanupStream(sessionId: string): void {
     this.activeStreams.delete(sessionId);
   }

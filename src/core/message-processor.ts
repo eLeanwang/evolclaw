@@ -92,6 +92,10 @@ export class MessageProcessor {
         options?.systemPromptAppend
       );
 
+      // 使用 channelId 作为 stream key 存储，便于中断
+      const streamKey = `${message.channel}-${message.channelId}`;
+      this.agentRunner.registerStream(streamKey, stream);
+
       // 处理事件流
       await this.processEventStream(
         stream,
@@ -121,7 +125,7 @@ export class MessageProcessor {
       await flusher.flush();
 
       // 清理 activeStreams（正常完成）
-      this.agentRunner.cleanupStream(session.id);
+      this.agentRunner.cleanupStream(streamKey);
 
       const duration = Date.now() - startTime;
 
