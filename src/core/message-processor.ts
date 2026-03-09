@@ -101,7 +101,25 @@ export class MessageProcessor {
         flusher
       );
 
-      // Flush 剩余内容
+      // 处理文件标记（Feishu 专用）- 在 flush 之前处理
+      if (options?.fileMarkerPattern && adapter.sendFile) {
+        const fullText = flusher.getFinalText();
+        const fileMatches = [...fullText.matchAll(options.fileMarkerPattern)];
+
+        for (const match of fileMatches) {
+          const filePath = match[1].trim();
+          const absoluteFilePath = path.isAbsolute(filePath)
+            ? filePath
+            : path.join(absoluteProjectPath, filePath);
+          logger.info(`[${adapter.name}] Sending file: ${absoluteFilePath}`);
+          await adapter.sendFile(message.channelId, absoluteFilePath);
+        }
+
+        // 从 buffer 中移除文件标记
+        flusher.stripFromBuffer(options.fileMarkerPattern);
+      }
+
+      // Flush 剩余内容（已移除文件标记）
       await flusher.flush();
 
       // 清理 activeStreams（正常完成）
@@ -117,23 +135,6 @@ export class MessageProcessor {
         status: 'completed',
         duration
       });
-
-      // 处理文件标记（Feishu 专用）
-      let finalResponse = flusher.getRemainingText();
-      if (options?.fileMarkerPattern && adapter.sendFile) {
-        finalResponse = await this.handleFileMarkers(
-          flusher.getFinalText(),
-          message.channelId,
-          absoluteProjectPath,
-          adapter,
-          options.fileMarkerPattern
-        );
-      }
-
-      // 发送最终响应
-      if (finalResponse) {
-        await adapter.sendText(message.channelId, finalResponse);
-      }
 
       // 记录发送响应
       logger.message({
@@ -244,35 +245,5 @@ export class MessageProcessor {
       (typeof input.query === 'string' ? input.query.substring(0, 80) : undefined) ||
       ''
     );
-  }
-
-  /**
-   * 处理文件标记（Feishu 专用）
-   */
-  private async handleFileMarkers(
-    response: string,
-    channelId: string,
-    projectPath: string,
-    adapter: ChannelAdapter,
-    pattern: RegExp
-  ): Promise<string> {
-    if (!adapter.sendFile) {
-      return response;
-    }
-
-    const fileMatches = [...response.matchAll(pattern)];
-
-    for (const match of fileMatches) {
-      const filePath = match[1].trim();
-      // 转换相对路径为绝对路径
-      const absoluteFilePath = path.isAbsolute(filePath)
-        ? filePath
-        : path.join(projectPath, filePath);
-      logger.info(`[${adapter.name}] Sending file: ${absoluteFilePath}`);
-      await adapter.sendFile(channelId, absoluteFilePath);
-    }
-
-    // 移除文件发送标记
-    return response.replace(pattern, '').trim();
   }
 }
