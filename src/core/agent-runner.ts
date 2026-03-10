@@ -1,10 +1,10 @@
 import { query } from '@anthropic-ai/claude-agent-sdk';
-import { ensureDir } from './config.js';
+import { ensureDir } from '../config.js';
 import path from 'path';
 import { MessageStream, ImageData } from './message-stream.js';
-import { logger } from './utils/logger.js';
-import { simpleRetry } from './utils/retry.js';
-import { canUseTool } from './core/permission.js';
+import { logger } from '../utils/logger.js';
+import { simpleRetry } from '../utils/retry.js';
+import { canUseTool } from '../utils/permission.js';
 
 export class AgentRunner {
   private apiKey: string;

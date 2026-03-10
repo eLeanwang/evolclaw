@@ -1,6 +1,6 @@
 import { loadConfig, ensureDir } from './config.js';
-import { SessionManager } from './session-manager.js';
-import { AgentRunner } from './agent-runner.js';
+import { SessionManager } from './core/session-manager.js';
+import { AgentRunner } from './core/agent-runner.js';
 import { FeishuChannel } from './channels/feishu.js';
 import { ACPChannel } from './channels/acp.js';
 import { MessageProcessor } from './core/message-processor.js';

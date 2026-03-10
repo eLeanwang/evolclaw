@@ -1,10 +1,10 @@
 import { InstanceManager } from './gateway/instance-manager.js';
 import { FailureHandler } from './gateway/failure-handler.js';
-import { FeishuChannel } from './channels/feishu.js';
-import { ACPChannel } from './channels/acp.js';
-import { SessionManager } from './core/session-manager.js';
-import { loadConfig, ensureDir } from './config.js';
-import { logger } from './utils/logger.js';
+import { FeishuChannel } from '../channels/feishu.js';
+import { ACPChannel } from '../channels/acp.js';
+import { SessionManager } from '../core/session-manager.js';
+import { loadConfig, ensureDir } from '../config.js';
+import { logger } from '../utils/logger.js';
 import Database from 'better-sqlite3';
 
 async function main() {

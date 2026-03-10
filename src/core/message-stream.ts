@@ -3,7 +3,7 @@
  * Based on HappyClaw's implementation.
  */
 
-import { logger } from './utils/logger.js';
+import { logger } from '../utils/logger.js';
 
 export interface ImageData {
   data: string;      // base64 encoded
