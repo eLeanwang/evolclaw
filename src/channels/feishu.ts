@@ -2,6 +2,7 @@ import * as lark from '@larksuiteoapi/node-sdk';
 import fs from 'fs';
 import path from 'path';
 import Database from 'better-sqlite3';
+import imageType from 'image-type';
 import { ensureDir } from '../config.js';
 import { logger } from '../utils/logger.js';
 
@@ -247,12 +248,33 @@ export class FeishuChannel {
           return null;
         }
 
+        // 使用 image-type 检测真实的图片格式
+        const type = await imageType(buffer);
+
+        if (!type) {
+          logger.warn('[Feishu] Unable to detect image type');
+          return null;
+        }
+
+        // 白名单验证：只允许常见的图片格式
+        const allowedMimes = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
+        if (!allowedMimes.includes(type.mime)) {
+          logger.warn('[Feishu] Unsupported image type:', type.mime);
+          return null;
+        }
+
+        // 大小限制：10MB
+        if (buffer.length > 10 * 1024 * 1024) {
+          logger.warn('[Feishu] Image too large:', buffer.length, 'bytes');
+          return null;
+        }
+
         const base64Data = buffer.toString('base64');
-        logger.debug('[Feishu] Image downloaded successfully, size:', base64Data.length);
+        logger.debug('[Feishu] Image downloaded successfully, type:', type.mime, 'size:', base64Data.length);
 
         return {
           data: base64Data,
-          mimeType: 'image/png' // 飞书图片通常是 PNG
+          mimeType: type.mime  // 使用真实检测的 MIME 类型
         };
       }
 
