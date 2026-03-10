@@ -68,6 +68,7 @@ export class AgentRunner {
               ...process.env,
               ANTHROPIC_API_KEY: this.apiKey,
               PATH: process.env.PATH,
+              CLAUDECODE: undefined,  // 避免嵌套会话冲突
               ...(process.env.ANTHROPIC_BASE_URL ? { ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL } : {})
             }
           }
@@ -97,6 +98,7 @@ export class AgentRunner {
               ...process.env,
               ANTHROPIC_API_KEY: this.apiKey,
               PATH: process.env.PATH,
+              CLAUDECODE: undefined,  // 避免嵌套会话冲突
               ...(process.env.ANTHROPIC_BASE_URL ? { ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL } : {})
             }
           }

@@ -26,6 +26,8 @@ export class StreamFlusher {
   }
 
   addActivity(desc: string) {
+    // 如果 interval 为 -1，不添加活动消息
+    if (this.interval === -1) return;
     this.activities.push(desc);
     this.scheduleFlush();
   }

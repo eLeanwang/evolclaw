@@ -19,6 +19,7 @@ export interface Config {
     autoCreate: boolean;
     list?: Record<string, string>;
   };
+  flushDelay?: number;
 }
 
 export interface Session {

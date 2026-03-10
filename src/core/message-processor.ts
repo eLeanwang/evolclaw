@@ -88,7 +88,7 @@ export class MessageProcessor {
       // 创建 StreamFlusher，传入文件标记模式用于自动过滤
       const flusher = new StreamFlusher(
         (text) => adapter.sendText(message.channelId, text),
-        3000,
+        this.config.flushDelay ?? 5000,
         options?.fileMarkerPattern
       );
 
