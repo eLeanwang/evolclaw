@@ -66,6 +66,7 @@ export class AgentRunner {
             cwd: projectPath,
             model: this.model,
             canUseTool,
+            permissionMode: 'dontAsk',  // 不弹出权限请求，但保留 canUseTool 的安全检查
             hooks: {
               PreCompact: [{ matcher: '.*', hooks: [preCompactHook] }]
             },
@@ -95,6 +96,7 @@ export class AgentRunner {
             cwd: projectPath,
             model: this.model,
             canUseTool,
+            permissionMode: 'dontAsk',  // 不弹出权限请求，但保留 canUseTool 的安全检查
             hooks: {
               PreCompact: [{ matcher: '.*', hooks: [preCompactHook] }]
             },

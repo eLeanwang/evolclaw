@@ -5,6 +5,7 @@ import Database from 'better-sqlite3';
 import imageType from 'image-type';
 import { ensureDir } from '../config.js';
 import { logger } from '../utils/logger.js';
+import { markdownToFeishuPost, hasMarkdownSyntax } from '../utils/markdown-to-feishu.js';
 
 export interface FeishuConfig {
   appId: string;
@@ -149,14 +150,33 @@ export class FeishuChannel {
     logger.debug(`[Feishu] sendMessage called, chatId: ${chatId}, content length: ${content.length}`);
 
     try {
-      await this.client.im.message.create({
-        params: { receive_id_type: 'chat_id' },
-        data: {
-          receive_id: chatId,
-          msg_type: 'text',
-          content: JSON.stringify({ text: content })
-        }
-      });
+      // 自动检测 Markdown 语法并转换为富文本
+      const useMarkdown = hasMarkdownSyntax(content);
+
+      if (useMarkdown) {
+        // 使用 post 类型发送富文本消息
+        const postContent = markdownToFeishuPost(content);
+        await this.client.im.message.create({
+          params: { receive_id_type: 'chat_id' },
+          data: {
+            receive_id: chatId,
+            msg_type: 'post',
+            content: JSON.stringify(postContent)
+          }
+        });
+        logger.debug('[Feishu] Sent message as post (Markdown)');
+      } else {
+        // 使用 text 类型发送普通文本消息
+        await this.client.im.message.create({
+          params: { receive_id_type: 'chat_id' },
+          data: {
+            receive_id: chatId,
+            msg_type: 'text',
+            content: JSON.stringify({ text: content })
+          }
+        });
+        logger.debug('[Feishu] Sent message as text');
+      }
     } catch (error) {
       logger.error('[Feishu] Failed to send message:', error);
       throw error;

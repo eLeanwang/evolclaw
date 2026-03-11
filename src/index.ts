@@ -34,6 +34,39 @@ async function fetchAvailableModels(apiKey: string, baseUrl?: string): Promise<v
   }
 }
 
+/**
+ * 计算两个字符串的 Levenshtein 距离（编辑距离）
+ */
+function levenshteinDistance(str1: string, str2: string): number {
+  const len1 = str1.length;
+  const len2 = str2.length;
+  const matrix: number[][] = [];
+
+  for (let i = 0; i <= len1; i++) {
+    matrix[i] = [i];
+  }
+
+  for (let j = 0; j <= len2; j++) {
+    matrix[0][j] = j;
+  }
+
+  for (let i = 1; i <= len1; i++) {
+    for (let j = 1; j <= len2; j++) {
+      if (str1[i - 1] === str2[j - 1]) {
+        matrix[i][j] = matrix[i - 1][j - 1];
+      } else {
+        matrix[i][j] = Math.min(
+          matrix[i - 1][j - 1] + 1, // 替换
+          matrix[i][j - 1] + 1,     // 插入
+          matrix[i - 1][j] + 1      // 删除
+        );
+      }
+    }
+  }
+
+  return matrix[len1][len2];
+}
+
 function formatIdleTime(ms: number): string {
   const seconds = Math.floor(ms / 1000);
   const minutes = Math.floor(seconds / 60);
@@ -60,6 +93,27 @@ async function handleProjectCommand(
 ): Promise<string | null> {
   // 支持的命令列表
   const commands = ['/new', '/pwd', '/plist', '/switch', '/bind', '/help', '/status', '/restart', '/model'];
+
+  // 检查是否以 / 开头（可能是命令）
+  if (content.startsWith('/')) {
+    const inputCmd = content.split(' ')[0];
+    const isValidCommand = commands.some(cmd => content.startsWith(cmd));
+
+    if (!isValidCommand) {
+      // 尝试模糊匹配，找到相似的命令
+      const similar = commands.find(cmd => {
+        const distance = levenshteinDistance(inputCmd, cmd);
+        return distance <= 2; // 允许 2 个字符的差异
+      });
+
+      if (similar) {
+        return `❌ 未知命令: ${inputCmd}\n💡 你是不是想输入: ${similar}\n\n输入 /help 查看所有可用命令`;
+      } else {
+        return `❌ 未知命令: ${inputCmd}\n\n输入 /help 查看所有可用命令`;
+      }
+    }
+  }
+
   const isCommand = commands.some(cmd => content.startsWith(cmd));
   if (!isCommand) return null;
 
