@@ -1,0 +1,16 @@
+[2026-03-07T17:47:18.150Z] 开始边缘场景测试...
+[2026-03-07T17:47:18.151Z] 
+=== 测试 1: 权限请求场景 ===
+[2026-03-07T17:47:29.775Z] [Stop Hook] session=2d4dcf66
+[2026-03-07T17:47:29.781Z] 结果: Done. I've created test.txt with 'hello' as the content.
+[2026-03-07T17:47:30.241Z] 
+=== 测试 2: 工具执行失败 ===
+[2026-03-07T17:47:42.112Z] [Stop Hook] session=99d7f797, transcript=/root/.claude/projects/-home-happyclaw-data-groups-main-evolclaw/99d7f797-32f7-416e-b281-ddddce758e00.jsonl
+[2026-03-07T17:47:42.115Z] 结果: The file `/nonexistent/file.txt` doesn't exist, as expected. The read operation returned an error confirming the file is not found.
+[2026-03-07T17:47:42.629Z] 
+=== 测试 3: 超时中断模拟 ===
+[2026-03-07T17:47:47.629Z] 触发超时中断...
+[2026-03-07T17:48:15.604Z] [Stop Hook] 触发，transcript=/root/.claude/projects/-home-happyclaw-data-groups-main-evolclaw/99ab44d7-4c29-4b7c-bc66-73f6f49ccf0c.jsonl
+[2026-03-07T17:48:15.608Z] 结果: 计算完成！前 1000 个质数的第一个是 2，第 1000 个是 7919。
+[2026-03-07T17:48:16.136Z] 
+测试完成！

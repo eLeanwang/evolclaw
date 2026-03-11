@@ -1,0 +1,18 @@
+{
+  "anthropic": {
+    "apiKey": "YOUR_ANTHROPIC_API_KEY"
+  },
+  "feishu": {
+    "appId": "YOUR_FEISHU_APP_ID",
+    "appSecret": "YOUR_FEISHU_APP_SECRET",
+    "verificationToken": "YOUR_VERIFICATION_TOKEN",
+    "encryptKey": "YOUR_ENCRYPT_KEY"
+  },
+  "acp": {
+    "domain": "https://api.claude.ai",
+    "agentName": "evolclaw"
+  },
+  "projects": {
+    "defaultPath": "/path/to/your/projects"
+  }
+}

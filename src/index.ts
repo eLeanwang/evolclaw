@@ -1,14 +1,38 @@
-import { loadConfig, ensureDir } from './config.js';
-import { SessionManager } from './core/session-manager.js';
-import { AgentRunner } from './core/agent-runner.js';
+import { loadConfig, saveConfig, ensureDir } from './config.js';
+import { SessionManager } from './session-manager.js';
+import { AgentRunner } from './agent-runner.js';
 import { FeishuChannel } from './channels/feishu.js';
 import { ACPChannel } from './channels/acp.js';
 import { MessageProcessor } from './core/message-processor.js';
 import { MessageQueue } from './core/message-queue.js';
+import { MessageCache } from './core/message-cache.js';
 import { Config, ChannelAdapter, ChannelOptions, CommandHandler } from './types.js';
 import { logger } from './utils/logger.js';
 import path from 'path';
 import fs from 'fs';
+
+let availableModels: string[] = [];
+
+async function fetchAvailableModels(apiKey: string, baseUrl?: string): Promise<void> {
+  try {
+    const url = `${baseUrl || 'https://api.anthropic.com'}/v1/models`;
+    const response = await fetch(url, {
+      headers: {
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01'
+      }
+    });
+
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+    const data = await response.json();
+    availableModels = data.data.map((m: any) => m.id);
+    logger.info(`✓ Loaded ${availableModels.length} available models`);
+  } catch (error) {
+    logger.error('Failed to fetch models, using defaults:', error);
+    availableModels = ['claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5-20251001'];
+  }
+}
 
 function formatIdleTime(ms: number): string {
   const seconds = Math.floor(ms / 1000);
@@ -28,10 +52,14 @@ async function handleProjectCommand(
   channelId: string,
   sessionManager: SessionManager,
   agentRunner: AgentRunner,
-  config: Config
+  config: Config,
+  messageCache: MessageCache,
+  processor: MessageProcessor,
+  messageQueue: MessageQueue,
+  sendMessage?: (channelId: string, text: string) => Promise<void>
 ): Promise<string | null> {
   // 支持的命令列表
-  const commands = ['/new', '/pwd', '/plist', '/switch', '/bind', '/help', '/status', '/restart'];
+  const commands = ['/new', '/pwd', '/plist', '/switch', '/bind', '/help', '/status', '/restart', '/model'];
   const isCommand = commands.some(cmd => content.startsWith(cmd));
   if (!isCommand) return null;
 
@@ -49,8 +77,39 @@ async function handleProjectCommand(
   /status - 显示会话状态
   /restart - 重启服务
 
+🤖 模型管理：
+  /model - 显示当前模型
+  /model <model-id> - 切换模型
+
 ❓ 帮助：
   /help - 显示此帮助信息`;
+  }
+
+  // /model 命令：查看或切换模型
+  if (content.startsWith('/model')) {
+    const args = content.slice(6).trim();
+
+    if (!args) {
+      // 显示当前模型
+      const currentModel = agentRunner.getModel();
+      const modelList = availableModels.map(m => `- ${m}`).join('\n');
+      return `当前模型: ${currentModel}\n\n可用模型：\n${modelList}\n\n用法: /model <model-id>`;
+    }
+
+    // 切换模型
+    if (!availableModels.includes(args)) {
+      const modelList = availableModels.map(m => `- ${m}`).join('\n');
+      return `❌ 无效的模型ID: ${args}\n\n可用模型：\n${modelList}`;
+    }
+
+    // 更新配置
+    config.anthropic.model = args;
+    saveConfig(config);
+
+    // 更新 AgentRunner
+    agentRunner.setModel(args);
+
+    return `✓ 已切换到模型: ${args}`;
   }
 
   // 其他命令需要会话，如果不存在则创建
@@ -75,15 +134,57 @@ async function handleProjectCommand(
     return lines.join('\n');
   }
 
-  // /new 命令：清除会话，开始新对话
+  // /new 命令：清除会话，立即创建新会话
   if (content === '/new') {
     await sessionManager.clearClaudeSessionId(channel, channelId);
     await agentRunner.closeSession(session.id);
-    return '✓ 已清除会话，下次对话将开始新会话（旧会话已保留在 .claude/ 目录）';
+
+    // 立即创建新会话
+    const newSession = await sessionManager.getOrCreateSession(
+      channel,
+      channelId,
+      session.projectPath
+    );
+
+    return '✓ 已创建新会话';
   }
 
   // /restart 命令：重启服务
   if (content === '/restart') {
+    // 检查是否有未读消息
+    const allSessions = await sessionManager.listSessions(channel, channelId);
+    const sessionsWithMessages = allSessions
+      .filter(s => messageCache.hasMessages(s.id))
+      .map(s => {
+        const count = messageCache.getCount(s.id);
+        return `${s.projectPath} 有 ${count} 条新消息`;
+      });
+
+    if (sessionsWithMessages.length > 0) {
+      // 检查是否是第二次 /restart（10秒内）
+      const restartKey = `${channel}-${channelId}`;
+      const restartConfirmFile = `./data/restart-confirm-${restartKey}.json`;
+
+      if (fs.existsSync(restartConfirmFile)) {
+        const confirmInfo = JSON.parse(fs.readFileSync(restartConfirmFile, 'utf-8'));
+        const now = Date.now();
+
+        // 10秒内的第二次 /restart，执行重启
+        if (now - confirmInfo.timestamp < 10000) {
+          fs.unlinkSync(restartConfirmFile);
+          // 继续执行重启逻辑
+        } else {
+          // 超过10秒，重新提示
+          fs.writeFileSync(restartConfirmFile, JSON.stringify({ timestamp: now }));
+          return sessionsWithMessages.join('\n') + '\n再次输入 /restart 将强制重启。';
+        }
+      } else {
+        // 首次 /restart，提示未读消息
+        fs.writeFileSync(restartConfirmFile, JSON.stringify({ timestamp: Date.now() }));
+        return sessionsWithMessages.join('\n') + '\n再次输入 /restart 将强制重启。';
+      }
+    }
+
     // 保存重启信息到文件
     const restartInfo = {
       channel,
@@ -116,18 +217,53 @@ async function handleProjectCommand(
   if (content === '/plist') {
     const projects = config.projects?.list || {};
     const lines = ['可用项目:'];
+    const sessionKey = `${channel}-${channelId}`;
+    const processingProject = messageQueue.getProcessingProject(sessionKey);
+    const queueLength = messageQueue.getQueueLength(sessionKey);
+
+    // 路径规范化函数
+    const normalizePath = (p: string) => p.replace(/\/+$/, '');
+
     for (const [name, projectPath] of Object.entries(projects)) {
-      const current = session.projectPath === projectPath ? ' ✓ (当前)' : '';
+      const isCurrent = session.projectPath === projectPath;
+      const prefix = isCurrent ? '  ✓' : '   ';
 
       // 查询该项目的会话
       const projectSession = await sessionManager.getSessionByProjectPath(channel, channelId, projectPath);
-      let idleInfo = '';
-      if (projectSession) {
-        const idleMs = Date.now() - projectSession.updatedAt;
-        idleInfo = ` (${formatIdleTime(idleMs)})`;
+
+      if (!projectSession) {
+        lines.push(`${prefix} ${name} (${projectPath}) - 无会话`);
+        continue;
       }
 
-      lines.push(`  ${name}: ${projectPath}${current}${idleInfo}`);
+      const statusParts = [];
+
+      // 活跃状态或空闲时间
+      if (isCurrent) {
+        statusParts.push('活跃');
+      } else {
+        const idleMs = Date.now() - projectSession.updatedAt;
+        statusParts.push(formatIdleTime(idleMs));
+      }
+
+      // 处理状态
+      if (processingProject && normalizePath(processingProject) === normalizePath(projectPath)) {
+        if (queueLength > 1) {
+          statusParts.push(`[处理中，队列${queueLength - 1}条]`);
+        } else {
+          statusParts.push('[处理中]');
+        }
+      }
+
+      // 未读消息
+      const unreadCount = messageCache.getCount(projectSession.id);
+      if (unreadCount > 0) {
+        statusParts.push(`[${unreadCount}条新消息]`);
+      } else if (!processingProject || normalizePath(processingProject) !== normalizePath(projectPath)) {
+        statusParts.push('[空闲]');
+      }
+
+      lines.push(`${prefix} ${name} (${projectPath}) - ${statusParts.join(' ')}`);
     }
     return lines.join('\n');
   }
@@ -137,6 +273,13 @@ async function handleProjectCommand(
     const arg = content.slice(8).trim();
 
     if (!arg) return '用法: /switch <name|path>';
+
+    // 检查当前队列，如果有排队消息则拒绝切换
+    const sessionKey = `${channel}-${channelId}`;
+    const queueLength = messageQueue.getQueueLength(sessionKey);
+    if (queueLength > 0) {
+      return `❌ 当前有 ${queueLength} 条消息正在排队，请等待处理完成后再切换项目`;
+    }
 
     let projectPath: string;
     let projectName: string;
@@ -162,12 +305,52 @@ async function handleProjectCommand(
       projectName = arg;
     }
 
+    // 检查是否切换到当前项目（规范化路径后比较）
+    const normalizedSessionPath = path.resolve(session.projectPath);
+    const normalizedProjectPath = path.resolve(projectPath);
+    if (normalizedSessionPath === normalizedProjectPath) {
+      return `当前已在项目: ${projectName}\n  路径: ${projectPath}`;
+    }
+
     // 使用新的 switchProject 方法
     const newSession = await sessionManager.switchProject(channel, channelId, projectPath);
 
+    // 检查缓存事件
+    const cachedEvents = messageCache.getEvents(newSession.id);
+
     // 提示信息
     const hasExistingSession = newSession.claudeSessionId ? '（恢复已有会话）' : '（新建会话）';
-    return `✓ 已切换到项目: ${projectName}\n  路径: ${projectPath}\n  ${hasExistingSession}`;
+    let response = `✓ 已切换到项目: ${projectName}\n  路径: ${projectPath}\n  ${hasExistingSession}`;
+
+    // 如果有缓存事件，先发送切换消息，再发送完整缓存内容
+    if (cachedEvents.length > 0 && sendMessage) {
+      // 添加简短通知到切换消息
+      for (const event of cachedEvents) {
+        if (event.type === 'completed') {
+          response += `\n\n后台任务完成`;
+          if (event.metadata?.duration) {
+            response += ` (耗时: ${Math.round(event.metadata.duration / 1000)}s)`;
+          }
+        } else if (event.type === 'error') {
+          response += `\n\n后台任务失败: ${event.metadata?.errorType || '未知错误'}`;
+        }
+      }
+
+      // 发送切换消息
+      await sendMessage(channelId, response);
+
+      // 发送完整缓存内容（文件标记由sendMessage回调处理）
+      for (const event of cachedEvents) {
+        await sendMessage(channelId, event.message);
+      }
+
+      // 清空缓存
+      messageCache.clearEvents(newSession.id);
+
+      return ''; // 已经发送，返回空字符串表示命令已处理
+    }
+
+    return response;
   }
 
   // /bind 命令：绑定新项目目录
@@ -186,8 +369,33 @@ async function handleProjectCommand(
     // 使用 switchProject 方法
     const newSession = await sessionManager.switchProject(channel, channelId, projectPath);
 
+    // 检查缓存事件
+    const cachedEvents = messageCache.getEvents(newSession.id);
+
     const hasExistingSession = newSession.claudeSessionId ? '（恢复已有会话）' : '（新建会话）';
-    return `✓ 已绑定项目目录: ${projectPath}\n  ${hasExistingSession}`;
+    let response = `✓ 已绑定项目目录: ${projectPath}\n  ${hasExistingSession}`;
+
+    // 如果有缓存事件，显示并清空
+    if (cachedEvents.length > 0) {
+      response += `\n\n后台任务结果:`;
+      for (const event of cachedEvents) {
+        if (event.type === 'completed') {
+          response += `\n✓ 任务完成`;
+          if (event.metadata?.duration) {
+            response += ` (耗时: ${Math.round(event.metadata.duration / 1000)}s)`;
+          }
+          const summary = event.message.substring(0, 200);
+          response += `\n${summary}${event.message.length > 200 ? '...' : ''}`;
+        } else if (event.type === 'error') {
+          response += `\n❌ 任务失败: ${event.metadata?.errorType || '未知错误'}`;
+          response += `\n${event.message}`;
+        }
+      }
+
+      messageCache.clearEvents(newSession.id);
+    }
+
+    return response;
   }
 
   return null;
@@ -225,6 +433,9 @@ async function main() {
     logger.info(`✓ Using custom API base URL: ${config.anthropic.baseUrl}`);
   }
 
+  // 获取可用模型列表
+  await fetchAvailableModels(config.anthropic.apiKey, config.anthropic.baseUrl);
+
   // 初始化数据库
   ensureDir('./data');
   const sessionManager = new SessionManager();
@@ -233,17 +444,22 @@ async function main() {
   // 初始化 Agent Runner（带持久化回调）
   const agentRunner = new AgentRunner(
     config.anthropic.apiKey,
+    config.anthropic.model,
     async (sessionId, claudeSessionId) => {
-      // 从 sessionId 解析出 channel 和 channelId
-      const parts = sessionId.split('-');
-      if (parts.length >= 2) {
-        const channel = parts[0] as 'feishu' | 'acp';
-        const channelId = parts.slice(1, -1).join('-'); // 去掉最后的时间戳
-        await sessionManager.updateClaudeSessionId(channel, channelId, claudeSessionId);
-      }
+      // 直接根据 sessionId 更新，避免错误更新其他项目的会话
+      await sessionManager.updateClaudeSessionIdBySessionId(sessionId, claudeSessionId);
     }
   );
   logger.info('✓ Agent runner ready');
+
+  // 创建消息缓存
+  const messageCache = new MessageCache();
+  logger.info('✓ Message cache initialized');
+
+  // 定期清理过期消息（每小时）
+  setInterval(() => {
+    messageCache.cleanupExpired();
+  }, 60 * 60 * 1000);
 
   // 飞书渠道
   const feishu = new FeishuChannel({
@@ -263,15 +479,45 @@ async function main() {
   // ACP 渠道
   const acp = new ACPChannel({ domain: config.acp.domain, agentName: config.acp.agentName });
 
+  // 创建消息处理器（需要先创建，因为 commandHandler 需要引用它）
+  let processor: MessageProcessor;
+  let messageQueue: MessageQueue;
+
   // 创建命令处理器
   const commandHandler: CommandHandler = (content, channel, channelId) =>
-    handleProjectCommand(content, channel, channelId, sessionManager, agentRunner, config);
+    handleProjectCommand(content, channel, channelId, sessionManager, agentRunner, config, messageCache, processor, messageQueue,
+      async (id, text) => {
+        // 处理文件标记（仅Feishu）
+        const fileMarkerPattern = /\[SEND_FILE:([^\]]+)\]/g;
+        if (channel === 'feishu') {
+          const fileMatches = [...text.matchAll(fileMarkerPattern)];
+          for (const match of fileMatches) {
+            const filePath = match[1].trim();
+            const session = await sessionManager.getActiveSession(channel, channelId);
+            const projectPath = session?.projectPath || process.cwd();
+            const absoluteFilePath = path.isAbsolute(filePath) ? filePath : path.join(projectPath, filePath);
+            try {
+              await feishu.sendFile(id, absoluteFilePath);
+            } catch (error) {
+              logger.error(`[Feishu] Failed to send file: ${absoluteFilePath}`, error);
+            }
+          }
+          text = text.replace(fileMarkerPattern, '').trim();
+        }
+
+        if (text) {
+          if (channel === 'feishu') await feishu.sendMessage(id, text);
+          else if (channel === 'acp') await acp.sendMessage(id, text);
+        }
+      }
+    );
 
   // 创建消息处理器
-  const processor = new MessageProcessor(
+  processor = new MessageProcessor(
     agentRunner,
     sessionManager,
     config,
+    messageCache,
     commandHandler
   );
 
@@ -281,7 +527,7 @@ async function main() {
   });
 
   // 创建消息队列
-  const messageQueue = new MessageQueue(async (message) => {
+  messageQueue = new MessageQueue(async (message) => {
     await processor.processMessage(message);
   });
 
@@ -314,24 +560,31 @@ async function main() {
   processor.registerChannel(acpAdapter);
 
   // 命令列表（用于快速检查）
-  const commands = ['/new', '/pwd', '/plist', '/switch', '/bind', '/help', '/status', '/restart'];
+  const commands = ['/new', '/pwd', '/plist', '/switch', '/bind', '/help', '/status', '/restart', '/model'];
   const isCommand = (content: string) => commands.some(cmd => content.startsWith(cmd));
 
   // Feishu 消息处理
   feishu.onMessage(async (chatId, content, images) => {
+    content = content.trim();
     // 命令立即处理，不进入队列
     if (isCommand(content)) {
       const cmdResult = await commandHandler(content, 'feishu', chatId);
-      if (cmdResult) {
-        await feishu.sendMessage(chatId, cmdResult);
-        return;
+      if (cmdResult !== null) {
+        if (cmdResult) {
+          await feishu.sendMessage(chatId, cmdResult);
+        }
+        return; // 命令已处理，无论是否有返回值
       }
     }
+
+    // 获取当前项目路径
+    const session = await sessionManager.getOrCreateSession('feishu', chatId, config.projects?.defaultPath || process.cwd());
 
     // 普通消息进入队列
     await messageQueue.enqueue(
       `feishu-${chatId}`,
-      { channel: 'feishu', channelId: chatId, content, images, timestamp: Date.now() }
+      { channel: 'feishu', channelId: chatId, content, images, timestamp: Date.now() },
+      session.projectPath
     );
   });
 
@@ -346,10 +599,14 @@ async function main() {
       }
     }
 
+    // 获取当前项目路径
+    const session = await sessionManager.getOrCreateSession('acp', sessionId, config.projects?.defaultPath || process.cwd());
+
     // 普通消息进入队列
     await messageQueue.enqueue(
       `acp-${sessionId}`,
-      { channel: 'acp', channelId: sessionId, content, timestamp: Date.now() }
+      { channel: 'acp', channelId: sessionId, content, timestamp: Date.now() },
+      session.projectPath
     );
   });
 

@@ -15,6 +15,10 @@ export function loadConfig(configPath: string = './data/config.json'): Config {
   return config;
 }
 
+export function saveConfig(config: Config, configPath: string = './data/config.json'): void {
+  fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf-8');
+}
+
 function validateConfig(config: any): asserts config is Config {
   if (!config.anthropic?.apiKey) throw new Error('Missing anthropic.apiKey');
 

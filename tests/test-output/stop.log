@@ -1,0 +1,20 @@
+[Stop] 2026-03-07T17:37:56.015Z
+{
+  "session_id": "fce948bb-09f6-490d-943f-9a98be9a54e4",
+  "transcript_path": "/root/.claude/projects/-home-happyclaw-data-groups-main-evolclaw/fce948bb-09f6-490d-943f-9a98be9a54e4.jsonl",
+  "cwd": "/home/happyclaw/data/groups/main/evolclaw",
+  "permission_mode": "default",
+  "hook_event_name": "Stop",
+  "stop_hook_active": false
+}
+
+[Stop] 2026-03-07T17:38:10.758Z
+{
+  "session_id": "adbee24d-09df-4384-88bb-1b9c4b1543da",
+  "transcript_path": "/root/.claude/projects/-home-happyclaw-data-groups-main-evolclaw/adbee24d-09df-4384-88bb-1b9c4b1543da.jsonl",
+  "cwd": "/home/happyclaw/data/groups/main/evolclaw",
+  "permission_mode": "default",
+  "hook_event_name": "Stop",
+  "stop_hook_active": false
+}
+

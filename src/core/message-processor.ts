@@ -1,7 +1,8 @@
 import path from 'path';
-import { AgentRunner } from './agent-runner.js';
-import { SessionManager } from './session-manager.js';
+import { AgentRunner } from '../agent-runner.js';
+import { SessionManager } from '../session-manager.js';
 import { StreamFlusher } from './stream-flusher.js';
+import { MessageCache } from './message-cache.js';
 import { logger } from '../utils/logger.js';
 import { getErrorMessage } from '../utils/error-handler.js';
 import type { Message, Config, Session, ChannelAdapter, ChannelOptions, CommandHandler } from '../types.js';
@@ -18,6 +19,7 @@ export class MessageProcessor {
     private agentRunner: AgentRunner,
     private sessionManager: SessionManager,
     private config: Config,
+    private messageCache: MessageCache,
     private commandHandler?: CommandHandler
   ) {}
 
@@ -64,6 +66,10 @@ export class MessageProcessor {
       // 解析会话和项目路径
       const { session, absoluteProjectPath } = await this.resolveSession(message);
 
+      // 判断是否是后台任务
+      const activeSession = await this.sessionManager.getActiveSession(message.channel, message.channelId);
+      const isBackground = activeSession ? session.id !== activeSession.id : false;
+
       // 记录收到消息
       logger.message({
         msgId: messageId,
@@ -73,7 +79,8 @@ export class MessageProcessor {
       });
 
       const imageInfo = message.images && message.images.length > 0 ? ` [${message.images.length} image(s)]` : '';
-      logger.info(`[${message.channel}] ${message.channelId}: ${message.content}${imageInfo}`);
+      const modeInfo = isBackground ? ' [后台]' : '';
+      logger.info(`[${message.channel}] ${message.channelId}: ${message.content}${imageInfo}${modeInfo}`);
 
       // 记录开始处理
       logger.message({
@@ -86,9 +93,19 @@ export class MessageProcessor {
       const startTime = Date.now();
 
       // 创建 StreamFlusher，传入文件标记模式用于自动过滤
+      // 使用动态判断，确保切换项目后不会继续输出
       const flusher = new StreamFlusher(
-        (text) => adapter.sendText(message.channelId, text),
-        this.config.flushDelay ?? 4000,
+        async (text) => {
+          // 动态判断是否是后台任务
+          const currentActiveSession = await this.sessionManager.getActiveSession(message.channel, message.channelId);
+          const isCurrentlyBackground = currentActiveSession ? session.id !== currentActiveSession.id : false;
+
+          if (!isCurrentlyBackground) {
+            await adapter.sendText(message.channelId, text);
+          }
+          // 后台任务：静默，不发送输出
+        },
+        3000,
         options?.fileMarkerPattern
       );
 
@@ -112,11 +129,12 @@ export class MessageProcessor {
       // 处理事件流
       await this.processEventStream(
         stream,
-        session.id,
+        session,
         message.channelId,
         adapter,
         options,
-        flusher
+        flusher,
+        isBackground
       );
 
       // 处理文件标记（Feishu 专用）- 提取并发送文件
@@ -139,6 +157,16 @@ export class MessageProcessor {
 
       // 清理 activeStreams（正常完成）
       this.agentRunner.cleanupStream(streamKey);
+
+      // 动态判断是否是后台任务，决定是否发送通知
+      const currentActive = await this.sessionManager.getActiveSession(message.channel, message.channelId);
+      const isFinallyBackground = currentActive ? session.id !== currentActive.id : false;
+
+      if (isFinallyBackground) {
+        const projectName = path.basename(session.projectPath);
+        const count = this.messageCache.getCount(session.id);
+        await adapter.sendText(message.channelId, `[后台-${projectName}] ✓ 任务完成 (${count}条消息已缓存)`);
+      }
 
       const duration = Date.now() - startTime;
 
@@ -205,37 +233,73 @@ export class MessageProcessor {
    */
   private async processEventStream(
     stream: AsyncIterable<any>,
-    sessionId: string,
+    session: Session,
     channelId: string,
     adapter: ChannelAdapter,
     options: ChannelOptions | undefined,
-    flusher: StreamFlusher
+    flusher: StreamFlusher,
+    isBackground: boolean
   ): Promise<void> {
     for await (const event of stream) {
       // 提取 session_id
       if (event.session_id) {
-        this.agentRunner.updateSessionId(sessionId, event.session_id);
+        this.agentRunner.updateSessionId(session.id, event.session_id);
       }
 
-      // 系统事件：compact_boundary
-      if (event.type === 'system' && event.subtype === 'compact_boundary') {
-        const preTokens = event.compact_metadata?.pre_tokens || 0;
-        flusher.addActivity(`💡 会话压缩完成，继续执行...（压缩前 tokens: ${preTokens}）`);
-      }
+      // 动态判断当前是否是后台任务
+      const currentActive = await this.sessionManager.getActiveSession(session.channel, session.channelId);
+      const isCurrentlyBackground = currentActive ? session.id !== currentActive.id : false;
 
-      // Assistant 事件：提取工具调用
-      if (event.type === 'assistant' && event.message?.content) {
-        for (const content of event.message.content) {
-          if (content.type === 'tool_use') {
-            const desc = this.formatToolDescription(content);
-            flusher.addActivity(`🔧 ${content.name}${desc ? ': ' + desc : ''}`);
+      // === 前台任务：正常处理所有事件 ===
+      if (!isCurrentlyBackground) {
+        // 系统事件：compact_boundary
+        if (event.type === 'system' && event.subtype === 'compact_boundary') {
+          const preTokens = event.compact_metadata?.pre_tokens || 0;
+          flusher.addActivity(`💡 会话压缩完成，继续执行...（压缩前 tokens: ${preTokens}）`);
+        }
+
+        // Assistant 事件：提取工具调用
+        if (event.type === 'assistant' && event.message?.content) {
+          for (const content of event.message.content) {
+            if (content.type === 'tool_use') {
+              const desc = this.formatToolDescription(content);
+              flusher.addActivity(`🔧 ${content.name}${desc ? ': ' + desc : ''}`);
+            }
           }
         }
+
+        // Result 事件：累积文本
+        if (event.type === 'result' && event.result) {
+          flusher.addText(event.result);
+        }
+
+        continue;
       }
 
-      // Result 事件：累积文本
-      if (event.type === 'result' && event.result) {
-        flusher.addText(event.result);
+      // === 后台任务：只处理 result 事件，仅缓存不发送 ===
+      if (event.type !== 'result') {
+        continue;
+      }
+
+      if (event.subtype === 'success') {
+        this.messageCache.addEvent(session.id, {
+          type: 'completed',
+          message: event.result,
+          timestamp: Date.now(),
+          metadata: {
+            duration: event.duration_ms,
+            cost: event.total_cost_usd
+          }
+        });
+      } else if (event.is_error === true) {
+        this.messageCache.addEvent(session.id, {
+          type: 'error',
+          message: event.errors?.join('\n') || '未知错误',
+          timestamp: Date.now(),
+          metadata: {
+            errorType: event.subtype
+          }
+        });
       }
     }
   }

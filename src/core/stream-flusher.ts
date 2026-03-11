@@ -10,7 +10,6 @@ export class StreamFlusher {
   private allText = '';
   private sentContent = false;
   private fileMarkerPattern?: RegExp;
-  private flushCount = 0;
 
   constructor(
     private send: (text: string) => Promise<void>,
@@ -27,8 +26,6 @@ export class StreamFlusher {
   }
 
   addActivity(desc: string) {
-    // 如果 interval 为 -1，不添加活动消息
-    if (this.interval === -1) return;
     this.activities.push(desc);
     this.scheduleFlush();
   }
@@ -60,19 +57,8 @@ export class StreamFlusher {
 
   private scheduleFlush() {
     if (this.timer) return;
-
-    // 渐进式延迟：首条0ms，第2-4条 interval/2，后续 interval
-    let targetDelay: number;
-    if (this.flushCount === 0) {
-      targetDelay = 0;
-    } else if (this.flushCount <= 3) {
-      targetDelay = Math.ceil(this.interval / 2);
-    } else {
-      targetDelay = this.interval;
-    }
-
     const elapsed = Date.now() - this.lastFlush;
-    const delay = Math.max(0, targetDelay - elapsed);
+    const delay = Math.max(0, this.interval - elapsed);
     this.timer = setTimeout(() => this.flush(), delay);
   }
 
@@ -101,7 +87,6 @@ export class StreamFlusher {
       await this.send(output);
       this.sentContent = true;
       this.lastFlush = Date.now();
-      this.flushCount++;
     }
   }
 }

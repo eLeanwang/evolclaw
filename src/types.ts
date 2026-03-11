@@ -2,6 +2,7 @@ export interface Config {
   anthropic: {
     apiKey: string;
     baseUrl?: string;
+    model?: string;
   };
   claude?: {
     apiKey: string;
@@ -19,7 +20,6 @@ export interface Config {
     autoCreate: boolean;
     list?: Record<string, string>;
   };
-  flushDelay?: number;
 }
 
 export interface Session {

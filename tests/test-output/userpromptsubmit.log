@@ -1,0 +1,10 @@
+[UserPromptSubmit] 2026-03-07T17:37:50.797Z
+{
+  "session_id": "fce948bb-09f6-490d-943f-9a98be9a54e4",
+  "transcript_path": "/root/.claude/projects/-home-happyclaw-data-groups-main-evolclaw/fce948bb-09f6-490d-943f-9a98be9a54e4.jsonl",
+  "cwd": "/home/happyclaw/data/groups/main/evolclaw",
+  "permission_mode": "default",
+  "hook_event_name": "UserPromptSubmit",
+  "prompt": "请用一句话介绍你自己，不要使用任何工具"
+}
+

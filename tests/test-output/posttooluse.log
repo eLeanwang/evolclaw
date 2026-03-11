@@ -1,0 +1,24 @@
+[PostToolUse] 2026-03-07T17:38:05.124Z
+{
+  "session_id": "adbee24d-09df-4384-88bb-1b9c4b1543da",
+  "transcript_path": "/root/.claude/projects/-home-happyclaw-data-groups-main-evolclaw/adbee24d-09df-4384-88bb-1b9c4b1543da.jsonl",
+  "cwd": "/home/happyclaw/data/groups/main/evolclaw",
+  "permission_mode": "default",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Read",
+  "tool_input": {
+    "file_path": "package.json"
+  },
+  "tool_response": {
+    "type": "text",
+    "file": {
+      "filePath": "package.json",
+      "content": "{\n  \"name\": \"evolclaw\",\n  \"version\": \"1.0.0\",\n  \"description\": \"Lightweight AI Agent with Feishu and ACP integration\",\n  \"type\": \"module\",\n  \"main\": \"dist/index.js\",\n  \"scripts\": {\n    \"dev\": \"tsx watch src/index.ts\",\n    \"build\": \"tsc\",\n    \"start\": \"node dist/index.js\",\n    \"test:hooks\": \"tsx test-sdk-hooks.ts\"\n  },\n  \"dependencies\": {\n    \"@anthropic-ai/claude-agent-sdk\": \"^0.1.0\",\n    \"@larksuiteoapi/node-sdk\": \"^1.30.0\",\n    \"acp-ts\": \"latest\",\n    \"better-sqlite3\": \"^11.0.0\",\n    \"dotenv\": \"^16.4.0\"\n  },\n  \"devDependencies\": {\n    \"@types/node\": \"^22.0.0\",\n    \"@types/better-sqlite3\": \"^7.6.0\",\n    \"typescript\": \"^5.6.0\",\n    \"tsx\": \"^4.19.0\"\n  }\n}\n",
+      "numLines": 27,
+      "startLine": 1,
+      "totalLines": 27
+    }
+  },
+  "tool_use_id": "toolu_01cZMVtapjJr3HGzMbFMWTus"
+}
+
