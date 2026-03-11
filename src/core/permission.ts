@@ -19,6 +19,10 @@ export async function canUseTool(
   input: Record<string, unknown>
 ): Promise<{ behavior: 'allow'; updatedInput: Record<string, unknown> } | { behavior: 'deny'; message: string }> {
 
+  // 日志：验证此函数是否在 bypassPermissions 模式下被调用
+  const cmd = (input.command as string)?.substring(0, 50) || 'N/A';
+  console.error(`[canUseTool] 工具=${toolName}, 命令=${cmd}`);
+
   // 只检查 Bash 工具，其余工具全部放行
   if (toolName === 'Bash') {
     const cmd = (input.command as string) || '';
@@ -31,6 +35,7 @@ export async function canUseTool(
     // 检查黑名单
     for (const pattern of DANGEROUS_PATTERNS) {
       if (pattern.test(cmd)) {
+        console.error(`[canUseTool] 🚫 拦截危险命令: ${cmd.substring(0, 80)}`);
         return {
           behavior: 'deny',
           message: `⛔ 危险命令被拦截: ${cmd.substring(0, 80)}`
@@ -39,6 +44,7 @@ export async function canUseTool(
     }
   }
 
+  console.error(`[canUseTool] ✅ 允许执行`);
   // 默认允许
   return { behavior: 'allow', updatedInput: input };
 }

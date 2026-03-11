@@ -56,6 +56,19 @@ export class AgentRunner {
       return {};
     };
 
+    // PreToolUse Hook - 工具执行前安全检查
+    const preToolUseHook = async (input: any) => {
+      const result = await canUseTool(input.tool_name, input.tool_input || {});
+      if (result.behavior === 'deny') {
+        // 使用 decision: 'block' 来拒绝工具执行
+        return {
+          decision: 'block' as const,
+          reason: result.message
+        };
+      }
+      return {};
+    };
+
     // PostToolUseFailure Hook - 工具执行失败时触发
     const postToolUseFailureHook = async (input: any) => {
       if (this.onToolFailure) {
@@ -79,9 +92,10 @@ export class AgentRunner {
             cwd: projectPath,
             model: this.model,
             canUseTool,
-            permissionMode: 'dontAsk',  // 不弹出权限请求，但保留 canUseTool 的安全检查
+            permissionMode: 'bypassPermissions',  // 绕过权限请求，canUseTool 仍会执行安全检查
             hooks: {
               PreCompact: [{ matcher: '.*', hooks: [preCompactHook] }],
+              PreToolUse: [{ matcher: '.*', hooks: [preToolUseHook] }],
               PostToolUseFailure: [{ matcher: '.*', hooks: [postToolUseFailureHook] }]
             },
             ...(systemPromptAppend ? {
@@ -110,9 +124,10 @@ export class AgentRunner {
             cwd: projectPath,
             model: this.model,
             canUseTool,
-            permissionMode: 'dontAsk',  // 不弹出权限请求，但保留 canUseTool 的安全检查
+            permissionMode: 'bypassPermissions',  // 绕过权限请求，canUseTool 仍会执行安全检查
             hooks: {
               PreCompact: [{ matcher: '.*', hooks: [preCompactHook] }],
+              PreToolUse: [{ matcher: '.*', hooks: [preToolUseHook] }],
               PostToolUseFailure: [{ matcher: '.*', hooks: [postToolUseFailureHook] }]
             },
             ...(claudeSessionId ? { resume: claudeSessionId } : {}),

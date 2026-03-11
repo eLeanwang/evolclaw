@@ -1,5 +1,6 @@
 import { Message } from '../types.js';
 import path from 'path';
+import { logger } from '../utils/logger.js';
 
 type MessageHandler = (message: Message) => Promise<void>;
 
@@ -36,6 +37,7 @@ export class MessageQueue {
 
   async enqueue(sessionKey: string, message: Message, projectPath: string): Promise<void> {
     const queueKey = this.getQueueKey(sessionKey, projectPath);
+    logger.debug(`[Queue] Enqueuing message for ${queueKey}`);
 
     return new Promise((resolve, reject) => {
       if (!this.queues.has(queueKey)) {
@@ -46,10 +48,12 @@ export class MessageQueue {
 
       // 如果正在处理，触发中断
       if (this.processing.has(queueKey)) {
+        logger.debug(`[Queue] ${queueKey} is processing, triggering interrupt`);
         if (this.interruptCallback) {
           this.interruptCallback(sessionKey).catch(() => {});
         }
       } else {
+        logger.debug(`[Queue] Starting to process ${queueKey}`);
         this.processNext(queueKey);
       }
     });
@@ -57,10 +61,12 @@ export class MessageQueue {
 
   private async processNext(queueKey: string): Promise<void> {
     this.processing.add(queueKey);
+    logger.debug(`[Queue] Processing queue ${queueKey}`);
 
     while (true) {
       const queue = this.queues.get(queueKey);
       if (!queue || queue.length === 0) {
+        logger.debug(`[Queue] Queue ${queueKey} is empty, stopping`);
         this.processing.delete(queueKey);
         this.currentSessionKey = undefined;
         this.currentProjectPath = undefined;
@@ -71,10 +77,13 @@ export class MessageQueue {
       this.currentSessionKey = queueKey;
       this.currentProjectPath = projectPath;
 
+      logger.debug(`[Queue] Processing message from ${message.channel}:${message.channelId}`);
       try {
         await this.handler(message);
+        logger.debug(`[Queue] Message processed successfully`);
         resolve();
       } catch (error) {
+        logger.error(`[Queue] Message processing failed:`, error);
         reject(error as Error);
       }
     }
