@@ -201,6 +201,7 @@ export class FeishuChannel {
       logger.info('[Feishu] File message sent successfully');
     } catch (error) {
       logger.error('[Feishu] Failed to send file:', error);
+      throw error;
     }
   }
 

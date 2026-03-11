@@ -210,7 +210,21 @@ async function handleProjectCommand(
 
   // /pwd 命令：显示当前项目路径
   if (content === '/pwd') {
-    return `当前项目: ${session.projectPath}`;
+    const projects = config.projects?.list || {};
+    // 查找项目名称
+    let projectName = '';
+    for (const [name, path] of Object.entries(projects)) {
+      if (path === session.projectPath) {
+        projectName = name;
+        break;
+      }
+    }
+
+    if (projectName) {
+      return `当前项目: ${projectName}\n路径: ${session.projectPath}`;
+    } else {
+      return `当前项目: ${session.projectPath}`;
+    }
   }
 
   // /plist 命令：列出所有项目
@@ -590,6 +604,7 @@ async function main() {
 
   // ACP 消息处理
   acp.onMessage(async (sessionId, content) => {
+    content = content.trim();
     // 命令立即处理，不进入队列
     if (isCommand(content)) {
       const cmdResult = await commandHandler(content, 'acp', sessionId);

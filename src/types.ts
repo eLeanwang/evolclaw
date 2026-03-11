@@ -20,6 +20,7 @@ export interface Config {
     autoCreate: boolean;
     list?: Record<string, string>;
   };
+  flushDelay?: number;  // 消息批量发送间隔(ms)，默认 4000
 }
 
 export interface Session {

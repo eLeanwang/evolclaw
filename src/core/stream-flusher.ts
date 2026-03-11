@@ -1,6 +1,15 @@
 /**
  * 流式输出缓冲器
  * 按时间窗口批量推送文本和活动事件
+ *
+ * 延迟策略：
+ * - 第1次：立即发送（0ms）
+ * - 第2-4次：半延迟（interval / 2）
+ * - 第5次起：动态自适应延迟
+ *   - 计算最近10条消息的平均间隔
+ *   - 动态延迟 = 平均间隔 * 3
+ *   - 下限：interval（额定值）
+ *   - 上限：interval * 2.5
  */
 export class StreamFlusher {
   private buffer = '';
@@ -10,10 +19,12 @@ export class StreamFlusher {
   private allText = '';
   private sentContent = false;
   private fileMarkerPattern?: RegExp;
+  private flushCount = 0;
+  private messageTimestamps: number[] = [];
 
   constructor(
     private send: (text: string) => Promise<void>,
-    private interval = 3000,
+    private interval = 4000,
     fileMarkerPattern?: RegExp
   ) {
     this.fileMarkerPattern = fileMarkerPattern;
@@ -22,11 +33,13 @@ export class StreamFlusher {
   addText(text: string) {
     this.buffer += text;
     this.allText += text;
+    this.messageTimestamps.push(Date.now());
     this.scheduleFlush();
   }
 
   addActivity(desc: string) {
     this.activities.push(desc);
+    this.messageTimestamps.push(Date.now());
     this.scheduleFlush();
   }
 
@@ -57,9 +70,57 @@ export class StreamFlusher {
 
   private scheduleFlush() {
     if (this.timer) return;
+
+    // 计算目标延迟
+    let targetDelay: number;
+
+    if (this.flushCount === 0) {
+      // 第1次：立即发送
+      targetDelay = 0;
+    } else if (this.flushCount <= 3) {
+      // 第2-4次：半延迟
+      targetDelay = Math.ceil(this.interval / 2);
+    } else if (this.messageTimestamps.length >= 5) {
+      // 第5次起：动态自适应
+      targetDelay = this.calculateDynamicDelay();
+    } else {
+      // 样本不足，使用额定延迟
+      targetDelay = this.interval;
+    }
+
     const elapsed = Date.now() - this.lastFlush;
-    const delay = Math.max(0, this.interval - elapsed);
+    const delay = Math.max(0, targetDelay - elapsed);
     this.timer = setTimeout(() => this.flush(), delay);
+  }
+
+  /**
+   * 计算动态延迟
+   * 基于最近10条消息的平均间隔
+   */
+  private calculateDynamicDelay(): number {
+    // 取最近10条（或实际条数）
+    const recent = this.messageTimestamps.slice(-10);
+
+    // 计算平均间隔
+    const intervals: number[] = [];
+    for (let i = 1; i < recent.length; i++) {
+      intervals.push(recent[i] - recent[i - 1]);
+    }
+
+    if (intervals.length === 0) {
+      return this.interval;
+    }
+
+    const avgInterval = intervals.reduce((a, b) => a + b) / intervals.length;
+
+    // 动态延迟 = 平均间隔 * 3
+    let dynamicDelay = avgInterval * 3;
+
+    // 边界限制
+    const minDelay = this.interval;           // 下限：额定值
+    const maxDelay = this.interval * 2.5;     // 上限：额定值 * 2.5
+
+    return Math.max(minDelay, Math.min(maxDelay, dynamicDelay));
   }
 
   async flush() {
@@ -87,6 +148,7 @@ export class StreamFlusher {
       await this.send(output);
       this.sentContent = true;
       this.lastFlush = Date.now();
+      this.flushCount++;
     }
   }
 }

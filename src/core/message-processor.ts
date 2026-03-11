@@ -1,4 +1,5 @@
 import path from 'path';
+import fs from 'fs';
 import { AgentRunner } from '../agent-runner.js';
 import { SessionManager } from '../session-manager.js';
 import { StreamFlusher } from './stream-flusher.js';
@@ -105,7 +106,7 @@ export class MessageProcessor {
           }
           // 后台任务：静默，不发送输出
         },
-        3000,
+        this.config.flushDelay ?? 4000,
         options?.fileMarkerPattern
       );
 
@@ -144,11 +145,14 @@ export class MessageProcessor {
 
         for (const match of fileMatches) {
           const filePath = match[1].trim();
-          const absoluteFilePath = path.isAbsolute(filePath)
-            ? filePath
-            : path.join(absoluteProjectPath, filePath);
-          logger.info(`[${adapter.name}] Sending file: ${absoluteFilePath}`);
-          await adapter.sendFile(message.channelId, absoluteFilePath);
+          const resolvedPath = this.resolveFilePath(filePath, absoluteProjectPath);
+          logger.info(`[${adapter.name}] Sending file: ${resolvedPath}`);
+          try {
+            await adapter.sendFile(message.channelId, resolvedPath);
+          } catch (error) {
+            logger.error(`[${adapter.name}] Failed to send file: ${resolvedPath}`, error);
+            await adapter.sendText(message.channelId, `❌ 文件发送失败: ${filePath}`);
+          }
         }
       }
 
@@ -268,9 +272,10 @@ export class MessageProcessor {
           }
         }
 
-        // Result 事件：累积文本
+        // Result 事件：累积文本并立即 flush（任务结束）
         if (event.type === 'result' && event.result) {
           flusher.addText(event.result);
+          await flusher.flush();
         }
 
         continue;
@@ -321,5 +326,37 @@ export class MessageProcessor {
       (typeof input.query === 'string' ? input.query.substring(0, 80) : undefined) ||
       ''
     );
+  }
+
+  /**
+   * 解析文件路径，支持相对路径和绝对路径修正
+   * Claude 工作在 .openclaw/workspace/ 目录下
+   */
+  private resolveFilePath(filePath: string, projectPath: string): string {
+    const claudeWorkDir = path.join(projectPath, '.openclaw', 'workspace');
+
+    // 相对路径：基于 Claude 工作目录
+    if (!path.isAbsolute(filePath)) {
+      return path.join(claudeWorkDir, filePath);
+    }
+
+    // 绝对路径：先检查是否存在
+    if (fs.existsSync(filePath)) {
+      return filePath;
+    }
+
+    // 绝对路径不存在，尝试修正：
+    // 如果路径包含 .openclaw/workspace，提取相对部分并重新拼接
+    const workspaceMatch = filePath.match(/\.openclaw\/workspace\/(.+)$/);
+    if (workspaceMatch) {
+      const relativePart = workspaceMatch[1];
+      const correctedPath = path.join(claudeWorkDir, relativePart);
+      if (fs.existsSync(correctedPath)) {
+        return correctedPath;
+      }
+    }
+
+    // 无法修正，返回原路径（让后续报错）
+    return filePath;
   }
 }
