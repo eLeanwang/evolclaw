@@ -41,6 +41,15 @@ export class MessageProcessor {
   }
 
   /**
+   * 处理工具执行失败事件
+   */
+  handleToolFailure(toolName: string, error: string): void {
+    if (this.currentFlusher) {
+      this.currentFlusher.addActivity(`⚠️ ${toolName} 执行失败: ${error}`);
+    }
+  }
+
+  /**
    * 处理消息（主入口）
    */
   async processMessage(message: Message): Promise<void> {

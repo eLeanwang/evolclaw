@@ -13,6 +13,7 @@ export class AgentRunner {
   private activeStreams = new Map<string, AsyncIterable<any>>();
   private onSessionIdUpdate?: (sessionId: string, claudeSessionId: string) => void;
   private onCompactStart?: (sessionId: string) => void;
+  private onToolFailure?: (sessionId: string, toolName: string, error: string) => void;
 
   constructor(
     apiKey: string,
@@ -36,6 +37,10 @@ export class AgentRunner {
     this.onCompactStart = callback;
   }
 
+  setToolFailureCallback(callback: (sessionId: string, toolName: string, error: string) => void): void {
+    this.onToolFailure = callback;
+  }
+
   async runQuery(sessionId: string, prompt: string, projectPath: string, initialClaudeSessionId?: string, images?: ImageData[], systemPromptAppend?: string): Promise<AsyncIterable<any>> {
     ensureDir(projectPath);
     ensureDir(path.join(projectPath, '.claude'));
@@ -47,6 +52,14 @@ export class AgentRunner {
     const preCompactHook = async () => {
       if (this.onCompactStart) {
         this.onCompactStart(sessionId);
+      }
+      return {};
+    };
+
+    // PostToolUseFailure Hook - 工具执行失败时触发
+    const postToolUseFailureHook = async (input: any) => {
+      if (this.onToolFailure) {
+        this.onToolFailure(sessionId, input.tool_name, input.error);
       }
       return {};
     };
@@ -68,7 +81,8 @@ export class AgentRunner {
             canUseTool,
             permissionMode: 'dontAsk',  // 不弹出权限请求，但保留 canUseTool 的安全检查
             hooks: {
-              PreCompact: [{ matcher: '.*', hooks: [preCompactHook] }]
+              PreCompact: [{ matcher: '.*', hooks: [preCompactHook] }],
+              PostToolUseFailure: [{ matcher: '.*', hooks: [postToolUseFailureHook] }]
             },
             ...(systemPromptAppend ? {
               systemPrompt: {
@@ -98,7 +112,8 @@ export class AgentRunner {
             canUseTool,
             permissionMode: 'dontAsk',  // 不弹出权限请求，但保留 canUseTool 的安全检查
             hooks: {
-              PreCompact: [{ matcher: '.*', hooks: [preCompactHook] }]
+              PreCompact: [{ matcher: '.*', hooks: [preCompactHook] }],
+              PostToolUseFailure: [{ matcher: '.*', hooks: [postToolUseFailureHook] }]
             },
             ...(claudeSessionId ? { resume: claudeSessionId } : {}),
             ...(systemPromptAppend ? {

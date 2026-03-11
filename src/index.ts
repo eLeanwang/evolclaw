@@ -594,6 +594,11 @@ async function main() {
     processor.handleCompactStart();
   });
 
+  // 设置工具失败回调
+  agentRunner.setToolFailureCallback((sessionId, toolName, error) => {
+    processor.handleToolFailure(toolName, error);
+  });
+
   // 创建消息队列
   messageQueue = new MessageQueue(async (message) => {
     await processor.processMessage(message);
