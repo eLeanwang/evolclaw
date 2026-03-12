@@ -59,14 +59,67 @@ export class FeishuChannel {
             return;
           }
           this.markSeen(msg.message_id);
+          this.addAckReaction(msg.message_id);
 
           if (!this.messageHandler) return;
 
           try {
+            // 处理引用消息
+            let quotedText = '';
+            let quotedImages: Array<{ data: string; mimeType: string }> = [];
+
+            if (msg.parent_id && this.client) {
+              try {
+                const res = await this.client.im.message.get({
+                  path: { message_id: msg.parent_id }
+                });
+
+                if (!res.data?.items?.[0]?.body) {
+                  throw new Error('Invalid response');
+                }
+
+                const quotedMsgType = res.data.items[0].msg_type;
+                const quotedContent = res.data.items[0].body.content;
+
+                if (quotedMsgType === 'text') {
+                  const parsed = JSON.parse(quotedContent);
+                  quotedText = `> ${parsed.text}\n\n`;
+                } else if (quotedMsgType === 'image') {
+                  const parsed = JSON.parse(quotedContent);
+                  const imageKey = parsed.image_key;
+
+                  const projectPath = this.projectPathProvider
+                    ? await this.projectPathProvider(msg.chat_id)
+                    : process.cwd();
+
+                  const imageData = await this.downloadAndSaveImage(
+                    imageKey,
+                    msg.chat_id,
+                    msg.parent_id,
+                    projectPath
+                  );
+
+                  if (imageData) {
+                    quotedImages.push(imageData);
+                    quotedText = `> [引用的图片]\n\n`;
+                  } else {
+                    quotedText = `> [图片消息]\n\n`;
+                  }
+                } else if (quotedMsgType === 'file') {
+                  quotedText = `> [文件消息]\n\n`;
+                } else {
+                  quotedText = `> [${quotedMsgType}消息]\n\n`;
+                }
+              } catch (err) {
+                logger.warn({ err }, '[Feishu] Failed to fetch quoted message');
+              }
+            }
+
             // 处理文本消息
             if (msg.message_type === 'text') {
               const content = JSON.parse(msg.content).text;
-              await this.messageHandler(msg.chat_id, content);
+              const finalContent = quotedText + content;
+              await this.messageHandler(msg.chat_id, finalContent, quotedImages.length > 0 ? quotedImages : undefined);
             }
             // 处理图片消息
             else if (msg.message_type === 'image') {
@@ -80,10 +133,12 @@ export class FeishuChannel {
 
               const imageData = await this.downloadAndSaveImage(imageKey, msg.chat_id, msg.message_id, projectPath);
               if (imageData) {
-                const prompt = '用户发送了一张图片，请分析这张图片的内容。';
-                await this.messageHandler(msg.chat_id, prompt, [imageData]);
+                const allImages = [...quotedImages, imageData];
+                const prompt = quotedText + '用户发送了一张图片，请分析这张图片的内容。';
+                await this.messageHandler(msg.chat_id, prompt, allImages);
               } else {
-                await this.messageHandler(msg.chat_id, '[图片下载失败] 应用可能缺少 im:resource 权限');
+                const prompt = quotedText + '[图片下载失败] 应用可能缺少 im:resource 权限';
+                await this.messageHandler(msg.chat_id, prompt, quotedImages.length > 0 ? quotedImages : undefined);
               }
             }
             // 处理文件消息
@@ -99,16 +154,18 @@ export class FeishuChannel {
 
               const filePath = await this.downloadFile(fileKey, fileName, msg.message_id, projectPath);
               if (filePath) {
-                const prompt = `用户发送了文件：${fileName}\n文件已保存到：${filePath}\n请使用 Read 工具读取并分析文件内容。`;
-                await this.messageHandler(msg.chat_id, prompt);
+                const prompt = quotedText + `用户发送了文件：${fileName}\n文件已保存到：${filePath}\n请使用 Read 工具读取并分析文件内容。`;
+                await this.messageHandler(msg.chat_id, prompt, quotedImages.length > 0 ? quotedImages : undefined);
               } else {
-                await this.messageHandler(msg.chat_id, '[文件下载失败] 应用可能缺少 im:resource 权限');
+                const prompt = quotedText + '[文件下载失败] 应用可能缺少 im:resource 权限';
+                await this.messageHandler(msg.chat_id, prompt, quotedImages.length > 0 ? quotedImages : undefined);
               }
             }
             // 处理其他类型消息
             else {
               logger.debug('[Feishu] Unsupported message type:', msg.message_type);
-              await this.messageHandler(msg.chat_id, `[不支持的消息类型: ${msg.message_type}]`);
+              const prompt = quotedText + `[不支持的消息类型: ${msg.message_type}]`;
+              await this.messageHandler(msg.chat_id, prompt, quotedImages.length > 0 ? quotedImages : undefined);
             }
           } catch (error) {
             logger.error('[Feishu] Failed to process message:', error);
@@ -371,6 +428,17 @@ export class FeishuChannel {
     this.db.prepare(
       'INSERT OR IGNORE INTO processed_messages (message_id, channel, channel_id, processed_at) VALUES (?, ?, ?, ?)'
     ).run(msgId, 'feishu', '', Date.now());
+  }
+
+  private addAckReaction(messageId: string): void {
+    if (!this.client) return;
+
+    this.client.im.messageReaction.create({
+      path: { message_id: messageId },
+      data: {
+        reaction_type: { emoji_type: 'CheckMark' }
+      }
+    }).catch(() => {});
   }
 
   private startCleanupTask(): void {
