@@ -1,6 +1,6 @@
 import { query, type Query, type Options } from '@anthropic-ai/claude-agent-sdk';
 import { EventEmitter } from 'events';
-import { logger } from '../utils/logger.js';
+import { logger } from '../../utils/logger.js';
 
 export enum InstanceState {
   IDLE = 'idle',

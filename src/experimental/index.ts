@@ -5,5 +5,5 @@ export interface MessageChannel {
   disconnect(): Promise<void>;
 }
 
-export { FeishuChannel, type FeishuConfig } from './feishu.js';
-export { ACPChannel, type ACPConfig } from './acp.js';
+export { FeishuChannel, type FeishuConfig } from '../channels/feishu.js';
+export { ACPChannel, type ACPConfig } from '../channels/acp.js';

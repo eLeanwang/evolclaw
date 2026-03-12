@@ -39,3 +39,15 @@ test-*.js
 # 系统文件
 .DS_Store
 Thumbs.db
+
+# 归档和对话记录
+archive/
+conversations/
+
+# 打包文件
+*.tar.gz
+*.zip
+
+# 临时脚本
+*.sh.bak
+阿里云仓库配置脚本.sh

@@ -1,10 +1,10 @@
 import { InstanceManager } from './gateway/instance-manager.js';
 import { FailureHandler } from './gateway/failure-handler.js';
-import { FeishuChannel } from './channels/feishu.js';
-import { ACPChannel } from './channels/acp.js';
-import { SessionManager } from './core/session-manager.js';
-import { loadConfig, ensureDir } from './config.js';
-import { logger } from './utils/logger.js';
+import { FeishuChannel } from '../channels/feishu.js';
+import { ACPChannel } from '../channels/acp.js';
+import { SessionManager } from '../core/session-manager.js';
+import { loadConfig, ensureDir } from '../config.js';
+import { logger } from '../utils/logger.js';
 import Database from 'better-sqlite3';
 
 async function main() {
@@ -49,7 +49,8 @@ async function main() {
   // 消息处理函数
   async function handleMessage(channel: 'feishu' | 'acp', channelId: string, content: string) {
     const message = { channel, channelId, content, timestamp: Date.now() };
-    const claudeSessionId = sessionManager.getClaudeSessionId(message);
+    // TODO: 旧版 API 已废弃，需要适配新的 SessionManager API
+    const claudeSessionId = `${channel}-${channelId}`;
 
     const instance = await instanceManager.getOrCreateInstance(claudeSessionId, config.projects?.defaultPath || process.cwd());
     const response = await instance.query(content);

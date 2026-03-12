@@ -21,6 +21,12 @@ export LOG_LEVEL="${LOG_LEVEL:-INFO}"
 export MESSAGE_LOG="${MESSAGE_LOG:-true}"
 export EVENT_LOG="${EVENT_LOG:-true}"
 
+# 清理 Claude Code 环境变量，防止 SDK 认为是嵌套会话
+unset CLAUDECODE
+unset CLAUDE_CODE_ENTRYPOINT
+unset CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS
+unset CLAUDE_CONFIG_DIR
+
 # 确保 PATH 包含 claude 命令
 CLAUDE_PATH=$(which claude 2>/dev/null)
 if [ -n "$CLAUDE_PATH" ]; then

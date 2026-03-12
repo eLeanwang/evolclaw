@@ -1,7 +1,7 @@
 import path from 'path';
 import fs from 'fs';
-import { AgentRunner } from '../agent-runner.js';
-import { SessionManager } from '../session-manager.js';
+import { AgentRunner } from './agent-runner.js';
+import { SessionManager } from './session-manager.js';
 import { StreamFlusher } from './stream-flusher.js';
 import { MessageCache } from './message-cache.js';
 import { logger } from '../utils/logger.js';
