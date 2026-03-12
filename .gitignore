@@ -28,6 +28,8 @@ projects/
 
 # 测试文件
 test-*.js
+tests/test-output/
+tests/test-results/
 
 # 编辑器
 .vscode/
