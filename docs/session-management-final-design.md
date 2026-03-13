@@ -1,23 +1,59 @@
 # 会话管理最终设计方案
 
+## ⚠️ SDK 限制说明 (2026-03-14 更新)
+
+**以下功能因技术限制或需求变更不再实现**:
+
+### 1. 群聊物理隔离 (SDK限制)
+
+**原因**: Claude Agent SDK 的会话文件管理机制限制
+
+1. **SDK 自主决定文件路径**
+   - SDK 根据传入的 `projectPath` 参数自动生成存储路径
+   - 路径格式: `~/.claude/projects/{encoded-path}/{uuid}.jsonl`
+   - 我们无法控制 SDK 在子目录(如 `group/`)中创建文件
+
+2. **文件命名由 SDK 控制**
+   - SDK 生成的会话文件名是 UUID 格式(如 `c9ecd142-ba10-4efc-b43f-b74aa379dfc6.jsonl`)
+   - 我们无法自定义文件名(如 `agent-*.jsonl` 或 `feishu-*.jsonl`)
+   - 数据库中的 `session.id` 和 SDK 的 `claude_session_id` 是两个独立的标识
+
+3. **实际实现方案**
+   - **逻辑隔离**而非物理隔离
+   - 所有会话文件存储在同一目录: `~/.claude/projects/{encoded-path}/`
+   - 通过数据库字段区分: `channel` (feishu/acp) 和 `channel_id` (ou_xxx/oc_xxx)
+
+### 2. CLI 会话自动恢复 (需求变更)
+
+**原因**: 不需要实现此功能
+
+- 原设计: 私聊首次切换项目时,自动扫描并使用最新的CLI会话
+- **决定**: 不实现自动恢复,保持当前简单的会话管理方式
+- 用户可以通过 `/new` 命令手动创建新会话
+
+### 影响
+
+- ❌ 无法实现 `group/` 子目录物理隔离
+- ❌ 无法通过文件名区分群聊和私聊
+- ❌ 不支持CLI会话自动恢复
+- ✅ 数据库层面的隔离依然有效
+- ✅ 不影响会话管理的核心功能
+
+---
+
 ## 一、核心架构
 
-### 1.1 会话存储策略
+### 1.1 会话存储策略 (已修订)
 
-**私聊/CLI 会话**：
-- 路径：`~/.claude/projects/{encoded-path}/agent-*.jsonl`
-- 命名：`agent-{7位hash}.jsonl`
-- 特点：私聊和 CLI 共享，可互相恢复
+**实际存储方式**：
+- 路径：`~/.claude/projects/{encoded-path}/{uuid}.jsonl`
+- 命名：SDK 生成的 UUID 格式
+- 所有会话(私聊/群聊/CLI)存储在同一目录
 
-**群聊会话**：
-- 路径：`~/.claude/projects/{encoded-path}/group/feishu-{group-id}-{hash}.jsonl`
-- 命名：`feishu-{完整群组ID}-{7位hash}.jsonl`
-- 特点：独立子目录，CLI 不会扫描，支持多个会话
-
-**隔离原理**：
-- 物理隔离：群聊会话在 `group/` 子目录
-- CLI 的 `-c` 参数只扫描顶层 `.jsonl` 文件
-- 确保 CLI 永远不会恢复群聊会话
+**隔离方式**：
+- 数据库逻辑隔离：通过 `channel` 和 `channel_id` 字段区分
+- 群聊 channelId: `oc_` 开头
+- 私聊 channelId: `ou_` 开头
 
 ### 1.2 数据库结构
 
@@ -36,53 +72,9 @@ CREATE TABLE sessions (
 )
 ```
 
-## 二、自动恢复策略
+## 二、命令设计
 
-### 2.1 私聊场景
-
-**首次切换项目**：
-1. 检查数据库：当前聊天在目标项目的会话记录
-2. 如果 `claude_session_id` 为空（首次使用该项目）
-3. 扫描 `agent-*.jsonl` 文件，找到最新修改的
-4. 自动使用该 CLI 会话
-5. 提示用户：
-   ```
-   ✓ 已切换到项目: /home/evolclaw
-   📌 自动使用最新 CLI 会话: agent-abc1234
-      最后活动: 30分钟前
-
-   如需创建新会话，请发送 /new
-   ```
-
-**已有会话**：
-- 保持当前会话，不自动切换
-- 用户可通过 `/slist` 查看和切换
-
-**特点**：
-- 会话稳定：切换回来还是原来的会话
-- 上下文连续：不会意外丢失对话历史
-- 用户可控：通过 `/slist` 和 `/sws` 主动切换到新的 CLI 会话
-
-### 2.2 群聊场景
-
-**绑定项目**（首次）：
-- 群聊必须先绑定项目才能使用
-- 使用 `/bind <路径>` 命令
-- 绑定后创建第一个会话
-
-**切换会话**：
-- 群聊不支持切换项目（一个群聊绑定一个项目）
-- 可以在同一项目下创建多个会话
-- 可以在会话之间切换
-
-**隔离保证**：
-- 群聊 A 不会看到群聊 B 的会话
-- 群聊不会看到 CLI 会话
-- 群聊不会看到私聊会话
-
-## 三、命令设计
-
-### 3.1 命令列表
+### 2.1 命令列表
 
 | 命令 | 功能 | 参数 | 适用 |
 |------|------|------|------|
@@ -156,9 +148,9 @@ CREATE TABLE sessions (
 **私聊输出格式**：
 ```
 当前项目 evolclaw 的会话列表:
-  ✓ agent-abc1234 - 2小时前 [空闲]
-  1. agent-def5678 - 30分钟前 [CLI] [空闲]
-  2. agent-ghi9012 - 1天前 [CLI] [空闲]
+  ✓ feishu-ou_xxx-abc1234 - 2小时前 [空闲]
+  1. feishu-ou_xxx-def5678 - 30分钟前 [空闲]
+  2. feishu-ou_xxx-ghi9012 - 1天前 [空闲]
 
 使用 /sws <序号|会话ID> 切换会话
 ```
@@ -174,27 +166,27 @@ CREATE TABLE sessions (
 ```
 
 **显示规则**：
-- 当前会话：用 `✓` 标记，不显示序号，不显示 `[当前]` 文字
+- 当前会话：用 `✓` 标记，不显示序号
 - 其他会话：显示序号（从 1 开始）
-- 显示：会话ID - 最后活动时间 [来源] [状态]
-- 私聊会显示 `[CLI]` 标记（如果是 CLI 创建的会话）
+- 显示：会话ID - 最后活动时间 [状态]
 
 ### 3.6 `/sws` - 切换会话
 
 **支持方式**：
 ```bash
-/sws 2                    # 按序号切换
-/sws agent-abc1234        # 按会话 ID 切换（私聊）
-/sws feishu-oc_xxx-abc    # 按会话 ID 切换（群聊）
+/sws 2                              # 按序号切换
+/sws feishu-ou_xxx-1234567890      # 按会话 ID 切换（私聊）
+/sws feishu-oc_xxx-1234567890      # 按会话 ID 切换（群聊）
 ```
 
 **会话 ID 格式**：
-- 私聊：`agent-abc1234`（不含路径和 `.jsonl`）
-- 群聊：`feishu-oc_xxx-abc1234`（不含路径和 `.jsonl`）
+- 私聊：`feishu-ou_{channelId}-{timestamp}`
+- 群聊：`feishu-oc_{channelId}-{timestamp}`
+- 格式：`{channel}-{channelId}-{timestamp}`
 
 **解析逻辑**：
 1. 检查是否为纯数字 → 按序号切换
-2. 检查是否以 `agent-` 或 `feishu-` 或 `group-` 开头 → 按会话 ID 切换
+2. 检查是否以 `feishu-` 或 `acp-` 开头 → 按会话 ID 切换
 3. 否则 → 报错
 
 **限制**：
@@ -207,7 +199,7 @@ CREATE TABLE sessions (
 ```
 📌 当前会话信息：
 
-会话ID: agent-abc1234
+会话ID: feishu-ou_xxx-1234567890
 项目路径: /home/evolclaw
 渠道: 飞书私聊
 状态: 活跃
@@ -239,14 +231,12 @@ CREATE TABLE sessions (
 
 **保证**：
 - ✅ 群聊 A 不会看到群聊 B 的会话
-- ✅ 群聊不会看到 CLI 会话
-- ✅ CLI 不会恢复群聊会话
-- ✅ 私聊可以恢复 CLI 会话（用户自己的）
+- ✅ 群聊不会看到私聊会话
+- ✅ 私聊不会看到群聊会话
 
 **机制**：
-- 物理隔离：群聊会话在独立子目录 `group/`
-- 逻辑隔离：代码层面的权限检查
-- 命名隔离：不同渠道使用不同命名规则
+- 数据库逻辑隔离：通过 `channel` 和 `channel_id` 字段区分
+- 会话查询限制：只返回当前聊天的会话
 
 ### 4.2 任务处理保护
 
@@ -279,32 +269,23 @@ CREATE TABLE sessions (
 
 ## 五、使用场景
 
-### 5.1 私聊：CLI 和飞书无缝切换
-
-```
-1. CLI 中对话 → 创建 agent-abc
-2. 飞书私聊切换项目 → 自动使用 agent-abc
-3. 飞书中继续对话 → 更新 agent-abc
-4. CLI 中 claude chat -c → 看到飞书的对话
-```
-
-### 5.2 私聊：查看和切换会话
+### 5.1 私聊：查看和切换会话
 
 ```
 用户: /slist
 
 系统: 当前项目 evolclaw 的会话列表:
-      ✓ agent-abc1234 - 2小时前 [空闲]
-      1. agent-def5678 - 30分钟前 [CLI] [空闲]
-      2. agent-ghi9012 - 1天前 [CLI] [空闲]
+      ✓ feishu-ou_xxx-abc1234 - 2小时前 [空闲]
+      1. feishu-ou_xxx-def5678 - 30分钟前 [空闲]
+      2. feishu-ou_xxx-ghi9012 - 1天前 [空闲]
 
 用户: /sws 1
 
-系统: ✓ 已切换到会话: agent-def5678
-      将继续 CLI 的对话历史
+系统: ✓ 已切换到会话: feishu-ou_xxx-def5678
+      将继续之前的对话历史
 ```
 
-### 5.3 私聊：快速切换项目
+### 5.2 私聊：快速切换项目
 
 ```
 用户: /plist
@@ -317,10 +298,9 @@ CREATE TABLE sessions (
 用户: /swp 2
 
 系统: ✓ 已切换到项目: /home/molbox
-      📌 自动使用最新 CLI 会话: agent-xyz9999
 ```
 
-### 5.4 群聊：绑定和使用
+### 5.3 群聊：绑定和使用
 
 ```
 用户: 你好
@@ -396,9 +376,8 @@ arg.startsWith('/')  // 绝对路径
 
 **会话 ID 检测**：
 ```typescript
-arg.startsWith('agent-') ||
 arg.startsWith('feishu-') ||
-arg.startsWith('group-')
+arg.startsWith('acp-')
 ```
 
 ### 6.3 状态检查
@@ -411,69 +390,25 @@ if (queueLength > 0) {
 }
 ```
 
-### 6.4 CLI 会话扫描
+### 6.4 会话文件验证
 
-**扫描逻辑**：
-```typescript
-function getLatestCliSession(projectPath: string): string | null {
-  const homeDir = os.homedir();
-  const encodedPath = projectPath.replace(/\//g, '-').replace(/^-/, '');
-  const sessionDir = path.join(homeDir, '.claude', 'projects', encodedPath);
-
-  const files = fs.readdirSync(sessionDir)
-    .filter(f => f.startsWith('agent-') && f.endsWith('.jsonl'))
-    .map(f => ({
-      name: f.replace('.jsonl', ''),
-      mtime: fs.statSync(path.join(sessionDir, f)).mtime.getTime()
-    }))
-    .sort((a, b) => b.mtime - a.mtime);
-
-  return files[0]?.name || null;
-}
-```
-
-**调用时机**：
-- 仅在首次切换到项目时调用
-- 如果数据库中 `claude_session_id` 为空
-
-### 6.5 群聊会话路径
-
-**生成逻辑**：
-```typescript
-function getGroupSessionPath(
-  projectPath: string,
-  channelId: string,
-  sessionId: string
-): string {
-  const homeDir = os.homedir();
-  const encodedPath = projectPath.replace(/\//g, '-').replace(/^-/, '');
-  const groupDir = path.join(
-    homeDir,
-    '.claude',
-    'projects',
-    encodedPath,
-    'group'
-  );
-  fs.mkdirSync(groupDir, { recursive: true });
-  return path.join(groupDir, `${sessionId}.jsonl`);
-}
-```
+**已实现**：
+- 切换会话前验证文件是否存在
+- 文件不存在时自动创建新会话
+- 更新数据库状态
 
 ## 七、实现优先级
 
 ### 高优先级（核心功能）
-1. 群聊会话物理隔离（`group/` 子目录）
-2. 私聊自动恢复 CLI 会话（首次切换）
-3. `/slist` 命令（列出会话）
-4. `/sws` 命令（切换会话，支持序号和会话ID）
-5. `/swp` 命令（支持序号切换）
-6. 任务处理中的保护机制
+1. `/slist` 命令（列出会话）
+2. `/sws` 命令（切换会话，支持序号和会话ID）
+3. `/swp` 命令（支持序号切换）
+4. 任务处理中的保护机制
 
 ### 中优先级（增强功能）
 1. `/plist` 显示序号
-2. 会话来源标识（CLI/飞书）
-3. `/bind` 命令（群聊绑定项目）
-4. 群聊多会话支持
+2. `/bind` 命令（群聊绑定项目）
+3. 群聊多会话支持
 
 ### 低优先级（优化功能）
 1. 会话搜索和过滤
@@ -509,7 +444,7 @@ function getGroupSessionPath(
 
 ### 9.2 会话不存在
 ```
-❌ 会话不存在: agent-abc1234
+❌ 会话不存在: feishu-ou_xxx-1234567890
 ```
 
 ### 9.3 任务处理中

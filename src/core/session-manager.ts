@@ -24,7 +24,6 @@ export class SessionManager {
   }
 
   private getSessionFilePath(projectPath: string, sessionId: string): string {
-    // SDK 使用 os.homedir() 存储会话文件
     const homeDir = os.homedir();
     const encodedPath = this.getProjectDirName(projectPath);
     return path.join(homeDir, '.claude', 'projects', encodedPath, `${sessionId}.jsonl`);

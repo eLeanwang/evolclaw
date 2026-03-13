@@ -303,6 +303,7 @@ export class MessageProcessor {
 
         // Result 事件：仅在没有流式文本时使用 result 作为最终输出
         if (event.type === 'result' && event.result) {
+          logger.debug(`[MessageProcessor] result event: hasReceivedText=${hasReceivedText}, result="${event.result}"`);
           if (!hasReceivedText) {
             // 没有通过 text_delta 或 assistant 收到文本，使用 result 作为兜底
             flusher.addText(event.result);

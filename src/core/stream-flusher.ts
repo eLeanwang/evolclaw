@@ -153,8 +153,14 @@ export class StreamFlusher {
 
     // 移除文件标记（如果配置了）
     if (output && this.fileMarkerPattern) {
+      const before = output;
       output = output.replace(this.fileMarkerPattern, '').trim();
+      if (before !== output) {
+        console.log('[StreamFlusher] Removed file markers, before length:', before.length, 'after:', output.length);
+      }
     }
+
+    console.log('[StreamFlusher] flush called, output length:', output.length, 'isEmpty:', !output, 'preview:', output.substring(0, 100));
 
     if (output) {
       await this.send(output);
