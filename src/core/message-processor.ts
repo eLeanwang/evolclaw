@@ -41,15 +41,6 @@ export class MessageProcessor {
   }
 
   /**
-   * 处理工具执行失败事件
-   */
-  handleToolFailure(toolName: string, error: string): void {
-    if (this.currentFlusher) {
-      this.currentFlusher.addActivity(`⚠️ ${toolName} 执行失败: ${error}`);
-    }
-  }
-
-  /**
    * 处理消息（主入口）
    */
   async processMessage(message: Message): Promise<void> {
@@ -253,9 +244,16 @@ export class MessageProcessor {
     flusher: StreamFlusher,
     isBackground: boolean
   ): Promise<void> {
+    let hasTextDelta = false;
+    let hasReceivedText = false;
+
     for await (const event of stream) {
+      // 调试：记录所有事件类型
+      logger.debug(`[MessageProcessor] Event: type=${event.type}, subtype=${event.subtype || 'none'}`);
+
       // 提取 session_id
       if (event.session_id) {
+        logger.info(`[MessageProcessor] Extracted session_id: ${event.session_id} for session: ${session.id}`);
         this.agentRunner.updateSessionId(session.id, event.session_id);
       }
 
@@ -265,25 +263,50 @@ export class MessageProcessor {
 
       // === 前台任务：正常处理所有事件 ===
       if (!isCurrentlyBackground) {
+        // 流式文本事件
+        if (event.type === 'text_delta' && event.text) {
+          hasTextDelta = true;
+          hasReceivedText = true;
+          flusher.addText(event.text);
+        }
+
         // 系统事件：compact_boundary
         if (event.type === 'system' && event.subtype === 'compact_boundary') {
           const preTokens = event.compact_metadata?.pre_tokens || 0;
           flusher.addActivity(`💡 会话压缩完成，继续执行...（压缩前 tokens: ${preTokens}）`);
         }
 
-        // Assistant 事件：提取工具调用
+        // Assistant 事件：提取工具调用和文本内容
         if (event.type === 'assistant' && event.message?.content) {
           for (const content of event.message.content) {
             if (content.type === 'tool_use') {
               const desc = this.formatToolDescription(content);
               flusher.addActivity(`🔧 ${content.name}${desc ? ': ' + desc : ''}`);
+            } else if (content.type === 'text' && content.text && !hasTextDelta) {
+              // 仅在没有 text_delta 事件时从 assistant 事件提取文本，避免重复
+              hasReceivedText = true;
+              flusher.addTextBlock(content.text);
             }
           }
         }
 
-        // Result 事件：累积文本并立即 flush（任务结束）
+        // 工具结果事件：显示失败信息（包括权限拒绝、执行失败等所有场景）
+        if (event.type === 'tool_result') {
+          logger.debug(`[MessageProcessor] tool_result: is_error=${event.is_error}, error=${event.error}, content=${typeof event.content}`);
+
+          if (event.is_error) {
+            const toolName = event.tool_name || '工具';
+            const errorMsg = event.error || (typeof event.content === 'string' ? event.content : JSON.stringify(event.content)) || '执行失败';
+            flusher.addActivity(`⚠️ ${toolName}: ${errorMsg}`);
+          }
+        }
+
+        // Result 事件：仅在没有流式文本时使用 result 作为最终输出
         if (event.type === 'result' && event.result) {
-          flusher.addText(event.result);
+          if (!hasReceivedText) {
+            // 没有通过 text_delta 或 assistant 收到文本，使用 result 作为兜底
+            flusher.addText(event.result);
+          }
           await flusher.flush();
         }
 

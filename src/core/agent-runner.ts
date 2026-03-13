@@ -15,7 +15,6 @@ export class AgentRunner {
   private activeStreams = new Map<string, AsyncIterable<any>>();
   private onSessionIdUpdate?: (sessionId: string, claudeSessionId: string) => void;
   private onCompactStart?: (sessionId: string) => void;
-  private onToolFailure?: (sessionId: string, toolName: string, error: string) => void;
 
   constructor(
     apiKey: string,
@@ -39,10 +38,6 @@ export class AgentRunner {
     this.onCompactStart = callback;
   }
 
-  setToolFailureCallback(callback: (sessionId: string, toolName: string, error: string) => void): void {
-    this.onToolFailure = callback;
-  }
-
   async runQuery(sessionId: string, prompt: string, projectPath: string, initialClaudeSessionId?: string, images?: ImageData[], systemPromptAppend?: string): Promise<AsyncIterable<any>> {
     ensureDir(projectPath);
     ensureDir(path.join(projectPath, '.claude'));
@@ -52,8 +47,9 @@ export class AgentRunner {
 
     // 验证会话文件是否存在，防止 SDK 因恢复不存在的会话而崩溃
     if (claudeSessionId) {
+      // SDK 使用 os.homedir() 存储会话文件，不是 projectPath
       const homeDir = os.homedir();
-      const encodedPath = projectPath.replace(/\//g, '-').replace(/^-/, '');
+      const encodedPath = projectPath.replace(/\//g, '-');
       const sessionFile = path.join(homeDir, '.claude', 'projects', encodedPath, `${claudeSessionId}.jsonl`);
       if (!fs.existsSync(sessionFile)) {
         logger.warn(`[AgentRunner] Session file not found: ${sessionFile}, starting new session`);
@@ -88,86 +84,52 @@ export class AgentRunner {
       return {};
     };
 
-    // PostToolUseFailure Hook - 工具执行失败时触发
-    const postToolUseFailureHook = async (input: any) => {
-      if (this.onToolFailure) {
-        this.onToolFailure(sessionId, input.tool_name, input.error);
-      }
-      return {};
+    const createQuery = (promptInput: string | MessageStream, resumeSessionId?: string) => {
+      return query({
+        prompt: promptInput,
+        options: {
+          cwd: projectPath,
+          model: this.model,
+          canUseTool,
+          permissionMode: 'default',
+          persistSession: true,
+          hooks: {
+            PreCompact: [{ matcher: '.*', hooks: [preCompactHook] }],
+            PreToolUse: [{ matcher: '.*', hooks: [preToolUseHook] }]
+          },
+          ...(resumeSessionId ? { resume: resumeSessionId } : {}),
+          ...(systemPromptAppend ? {
+            systemPrompt: {
+              type: 'preset' as const,
+              preset: 'claude_code' as const,
+              append: systemPromptAppend
+            }
+          } : {}),
+          env: {
+            ...process.env,
+            ANTHROPIC_API_KEY: this.apiKey,
+            PATH: process.env.PATH,
+            ...(process.env.ANTHROPIC_BASE_URL ? { ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL } : {})
+          }
+        }
+      });
     };
 
     return simpleRetry(async () => {
+      let queryStream;
       if (images && images.length > 0) {
         logger.debug('[AgentRunner] Creating query with images, images:', images.length);
         logger.debug('[AgentRunner] Skipping resume for image message to avoid history conflict');
-
         const stream = new MessageStream();
         stream.push(prompt, images);
         stream.end();
-
-        const queryStream = query({
-          prompt: stream,
-          options: {
-            cwd: projectPath,
-            model: this.model,
-            canUseTool,
-            permissionMode: 'dontAsk',  // 自动批准权限请求，canUseTool 仍会执行安全检查
-            hooks: {
-              PreCompact: [{ matcher: '.*', hooks: [preCompactHook] }],
-              PreToolUse: [{ matcher: '.*', hooks: [preToolUseHook] }],
-              PostToolUseFailure: [{ matcher: '.*', hooks: [postToolUseFailureHook] }]
-            },
-            ...(systemPromptAppend ? {
-              systemPrompt: {
-                type: 'preset' as const,
-                preset: 'claude_code' as const,
-                append: systemPromptAppend
-              }
-            } : {}),
-            env: {
-              ...process.env,
-              ANTHROPIC_API_KEY: this.apiKey,
-              PATH: process.env.PATH,
-              ...(process.env.ANTHROPIC_BASE_URL ? { ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL } : {})
-            }
-          }
-        });
-        this.activeStreams.set(sessionId, queryStream);
-        return queryStream;
+        queryStream = createQuery(stream);
       } else {
         logger.debug('[AgentRunner] Creating query with text only, claudeSessionId:', initialClaudeSessionId);
-
-        const queryStream = query({
-          prompt: prompt,
-          options: {
-            cwd: projectPath,
-            model: this.model,
-            canUseTool,
-            permissionMode: 'dontAsk',  // 自动批准权限请求，canUseTool 仍会执行安全检查
-            hooks: {
-              PreCompact: [{ matcher: '.*', hooks: [preCompactHook] }],
-              PreToolUse: [{ matcher: '.*', hooks: [preToolUseHook] }],
-              PostToolUseFailure: [{ matcher: '.*', hooks: [postToolUseFailureHook] }]
-            },
-            ...(claudeSessionId ? { resume: claudeSessionId } : {}),
-            ...(systemPromptAppend ? {
-              systemPrompt: {
-                type: 'preset' as const,
-                preset: 'claude_code' as const,
-                append: systemPromptAppend
-              }
-            } : {}),
-            env: {
-              ...process.env,
-              ANTHROPIC_API_KEY: this.apiKey,
-              PATH: process.env.PATH,
-              ...(process.env.ANTHROPIC_BASE_URL ? { ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL } : {})
-            }
-          }
-        });
-        this.activeStreams.set(sessionId, queryStream);
-        return queryStream;
+        queryStream = createQuery(prompt, claudeSessionId);
       }
+      this.activeStreams.set(sessionId, queryStream);
+      return queryStream;
     }, 3);
   }
 
@@ -189,6 +151,7 @@ export class AgentRunner {
   }
 
   updateSessionId(sessionId: string, claudeSessionId: string): void {
+    logger.info(`[AgentRunner] updateSessionId called: sessionId=${sessionId}, claudeSessionId=${claudeSessionId}`);
     this.activeSessions.set(sessionId, claudeSessionId);
     if (this.onSessionIdUpdate) {
       this.onSessionIdUpdate(sessionId, claudeSessionId);

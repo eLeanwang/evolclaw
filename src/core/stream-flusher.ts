@@ -37,6 +37,18 @@ export class StreamFlusher {
     this.scheduleFlush();
   }
 
+  addTextBlock(text: string) {
+    // 用于 assistant 事件的完整文本块，需要换行分隔
+    if (this.buffer && !this.buffer.endsWith('\n')) {
+      this.buffer += '\n\n';
+      this.allText += '\n\n';
+    }
+    this.buffer += text;
+    this.allText += text;
+    this.messageTimestamps.push(Date.now());
+    this.scheduleFlush();
+  }
+
   addActivity(desc: string) {
     this.activities.push(desc);
     this.messageTimestamps.push(Date.now());

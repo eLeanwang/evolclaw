@@ -3,6 +3,8 @@ import { Session } from '../types.js';
 import { ensureDir } from '../config.js';
 import { logger } from '../utils/logger.js';
 import path from 'path';
+import fs from 'fs';
+import os from 'os';
 
 export class SessionManager {
   private db: Database.Database;
@@ -15,6 +17,17 @@ export class SessionManager {
 
   getDatabase(): Database.Database {
     return this.db;
+  }
+
+  private getProjectDirName(projectPath: string): string {
+    return projectPath.replace(/\//g, '-');
+  }
+
+  private getSessionFilePath(projectPath: string, sessionId: string): string {
+    // SDK 使用 os.homedir() 存储会话文件
+    const homeDir = os.homedir();
+    const encodedPath = this.getProjectDirName(projectPath);
+    return path.join(homeDir, '.claude', 'projects', encodedPath, `${sessionId}.jsonl`);
   }
 
   private initDatabase(): void {
@@ -88,12 +101,23 @@ export class SessionManager {
     `).get(channel, channelId) as any;
 
     if (active) {
+      // 验证会话文件是否存在
+      let validSessionId = active.claude_session_id;
+      if (validSessionId) {
+        const sessionFile = this.getSessionFilePath(active.project_path, validSessionId);
+        if (!fs.existsSync(sessionFile)) {
+          logger.warn(`Session file not found: ${sessionFile}, clearing session ID`);
+          validSessionId = null;
+          this.db.prepare(`UPDATE sessions SET claude_session_id = NULL WHERE id = ?`).run(active.id);
+        }
+      }
+
       return {
         id: active.id,
         channel: active.channel,
         channelId: active.channel_id,
         projectPath: active.project_path,
-        claudeSessionId: active.claude_session_id,
+        claudeSessionId: validSessionId,
         isActive: active.is_active === 1,
         createdAt: active.created_at,
         updatedAt: active.updated_at
@@ -107,6 +131,17 @@ export class SessionManager {
     `).get(channel, channelId, defaultProjectPath) as any;
 
     if (existing) {
+      // 验证会话文件是否存在
+      let validSessionId = existing.claude_session_id;
+      if (validSessionId) {
+        const sessionFile = this.getSessionFilePath(existing.project_path, validSessionId);
+        if (!fs.existsSync(sessionFile)) {
+          logger.warn(`Session file not found: ${sessionFile}, clearing session ID`);
+          validSessionId = null;
+          this.db.prepare(`UPDATE sessions SET claude_session_id = NULL WHERE id = ?`).run(existing.id);
+        }
+      }
+
       // 激活该会话
       this.db.prepare(`
         UPDATE sessions SET is_active = 1, updated_at = ?
@@ -118,7 +153,7 @@ export class SessionManager {
         channel: existing.channel,
         channelId: existing.channel_id,
         projectPath: existing.project_path,
-        claudeSessionId: existing.claude_session_id,
+        claudeSessionId: validSessionId,
         isActive: true,
         createdAt: existing.created_at,
         updatedAt: existing.updated_at
@@ -165,6 +200,17 @@ export class SessionManager {
     `).get(channel, channelId, newProjectPath) as any;
 
     if (target) {
+      // 验证会话文件是否存在
+      let validSessionId = target.claude_session_id;
+      if (validSessionId) {
+        const sessionFile = this.getSessionFilePath(newProjectPath, validSessionId);
+        if (!fs.existsSync(sessionFile)) {
+          logger.warn(`Session file not found: ${sessionFile}, clearing session ID`);
+          validSessionId = null;
+          this.db.prepare(`UPDATE sessions SET claude_session_id = NULL WHERE id = ?`).run(target.id);
+        }
+      }
+
       // 激活已有会话
       this.db.prepare(`
         UPDATE sessions SET is_active = 1, updated_at = ?
@@ -176,7 +222,7 @@ export class SessionManager {
         channel: target.channel,
         channelId: target.channel_id,
         projectPath: target.project_path,
-        claudeSessionId: target.claude_session_id,
+        claudeSessionId: validSessionId,
         isActive: true,
         createdAt: target.created_at,
         updatedAt: target.updated_at
@@ -218,6 +264,7 @@ export class SessionManager {
 
   async updateClaudeSessionIdBySessionId(sessionId: string, claudeSessionId: string): Promise<void> {
     // 根据 sessionId 直接更新
+    logger.info(`[SessionManager] Updating claude_session_id: sessionId=${sessionId}, claudeSessionId=${claudeSessionId}`);
     this.db.prepare(`
       UPDATE sessions
       SET claude_session_id = ?, updated_at = ?

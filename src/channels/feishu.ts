@@ -84,6 +84,20 @@ export class FeishuChannel {
                 if (quotedMsgType === 'text') {
                   const parsed = JSON.parse(quotedContent);
                   quotedText = `> ${parsed.text}\n\n`;
+                } else if (quotedMsgType === 'post') {
+                  const parsed = JSON.parse(quotedContent);
+                  logger.info('[Feishu] Post message structure:', JSON.stringify(parsed, null, 2));
+                  let text = '';
+                  const content = parsed.zh_cn?.content || parsed.en_us?.content || parsed.content;
+                  if (content) {
+                    for (const line of content) {
+                      for (const elem of line) {
+                        if (elem.text) text += elem.text;
+                      }
+                      text += '\n';
+                    }
+                  }
+                  quotedText = `> ${text.trim()}\n\n`;
                 } else if (quotedMsgType === 'image') {
                   const parsed = JSON.parse(quotedContent);
                   const imageKey = parsed.image_key;
