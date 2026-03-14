@@ -29,6 +29,7 @@ export interface Session {
   channelId: string;
   projectPath: string;
   claudeSessionId?: string;
+  name?: string;
   isActive: boolean;
   createdAt: number;
   updatedAt: number;

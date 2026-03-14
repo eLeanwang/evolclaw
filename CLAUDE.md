@@ -229,6 +229,7 @@ CREATE TABLE sessions (
   channel_id TEXT NOT NULL,
   project_path TEXT NOT NULL,
   claude_session_id TEXT,
+  name TEXT,
   is_active INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
@@ -238,6 +239,7 @@ CREATE TABLE sessions (
 
 **Key design**:
 - Each `(channel, channel_id, project_path)` combination has its own session
+- `name` field allows user-friendly session naming (e.g., "CLI开发", "前端重构")
 - `is_active` marks the currently active project for each chat
 - Multiple chats (group A, group B, DM A, DM B) work independently
 - Each chat can switch between projects while preserving session history
@@ -274,25 +276,47 @@ Tests verify:
 EvolClaw supports slash commands for project and session management:
 
 ### Project Management
-- `/pwd` or `/project current` - Show current project path
-- `/plist` or `/project list` - List all configured projects with session idle time
+- `/pwd` - Show current project path
+- `/plist` - List all configured projects with session idle time
   - Shows last session activity time for each project (e.g., "2小时前", "30分钟前", "刚刚")
   - Empty if project has no session history
   - Current active project marked with ✓
-- `/switch <name|path>` or `/project switch <name>` - Switch project
+- `/p <name|path>`, `/project <name|path>` - Switch project
   - Supports project name (from config) or absolute path
   - **Preserves session history** - restores previous session if exists
   - Shows "(恢复已有会话)" or "(新建会话)" in response
-- `/bind <path>` or `/project bind <path>` - Bind new project directory
+- `/bind <path>` - Bind new project directory (群聊首次使用)
   - Must be absolute path
   - Preserves session history like `/switch`
 
-### Session Management
-- `/new` - Clear **active project's** session only (other projects unaffected)
-- `/status` - Show session status (channel, IDs, project, active status, timestamps)
+### Session Management (New in v2.1)
+- `/new [名称]` - Create new session with optional name
+  - Example: `/new CLI开发` creates a session named "CLI开发"
+  - Default name: "默认会话" if no name provided
+  - Previous session history preserved, accessible via `/slist`
+- `/slist` - List all sessions in current project
+  - Shows session names, last activity time, and status
+  - Active session marked with ✓
+- `/s <名称>`, `/session <名称>` - Switch to session by name
+  - Example: `/s CLI开发` switches to session named "CLI开发"
+  - Continues previous conversation history
+  - **Protection**: Cannot switch while processing messages (same project)
+- `/name <新名称>`, `/rename <新名称>` - Rename current session
+  - Example: `/name 前端重构` renames current session
+  - Name must be unique within the same chat
+- `/status` - Show session status (channel, IDs, name, project, active status, timestamps)
+
+### Model Management
+- `/model` - Show current model and available models
+- `/model <model-id>` - Switch to different model
 
 ### Help
 - `/help` - Show all available commands
+
+**Command Aliases**:
+- `/p` = `/project` (quick project switching)
+- `/s` = `/session` (quick session switching)
+- `/name` = `/rename` (quick renaming)
 
 All commands are processed in `handleProjectCommand()` before being passed to the Agent.
 

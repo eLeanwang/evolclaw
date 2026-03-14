@@ -91,13 +91,29 @@ async function handleProjectCommand(
   messageQueue: MessageQueue,
   sendMessage?: (channelId: string, text: string) => Promise<void>
 ): Promise<string | null> {
+  // 命令别名映射
+  const aliases: Record<string, string> = {
+    '/p': '/project',
+    '/s': '/session',
+    '/name': '/rename'
+  };
+
+  // 规范化命令（将别名转换为完整命令）
+  let normalizedContent = content;
+  for (const [alias, full] of Object.entries(aliases)) {
+    if (content === alias || content.startsWith(alias + ' ')) {
+      normalizedContent = content.replace(alias, full);
+      break;
+    }
+  }
+
   // 支持的命令列表
-  const commands = ['/new', '/pwd', '/plist', '/switch', '/bind', '/help', '/status', '/restart', '/model'];
+  const commands = ['/new', '/pwd', '/plist', '/switch', '/project', '/bind', '/help', '/status', '/restart', '/model', '/slist', '/session', '/rename'];
 
   // 检查是否以 / 开头（可能是命令）
-  if (content.startsWith('/')) {
-    const inputCmd = content.split(' ')[0];
-    const isValidCommand = commands.some(cmd => content.startsWith(cmd));
+  if (normalizedContent.startsWith('/')) {
+    const inputCmd = normalizedContent.split(' ')[0];
+    const isValidCommand = commands.some(cmd => normalizedContent.startsWith(cmd));
 
     if (!isValidCommand) {
       // 尝试模糊匹配，找到相似的命令
@@ -114,20 +130,23 @@ async function handleProjectCommand(
     }
   }
 
-  const isCommand = commands.some(cmd => content.startsWith(cmd));
+  const isCommand = commands.some(cmd => normalizedContent.startsWith(cmd));
   if (!isCommand) return null;
 
   // /help 命令不需要会话
-  if (content === '/help') {
+  if (normalizedContent === '/help') {
     return `可用命令：
 📁 项目管理：
   /pwd - 显示当前项目路径
   /plist - 列出所有配置的项目
-  /switch <name|path> - 切换项目
+  /p, /project <name|path> - 切换项目
   /bind <path> - 绑定新项目目录
 
 🔄 会话管理：
-  /new - 清除会话，开始新对话
+  /new [名称] - 创建新会话（可选命名）
+  /slist - 列出当前项目的所有会话
+  /s, /session <名称> - 切换到指定会话
+  /name, /rename <新名称> - 重命名当前会话
   /status - 显示会话状态
   /restart - 重启服务
 
@@ -140,8 +159,8 @@ async function handleProjectCommand(
   }
 
   // /model 命令：查看或切换模型
-  if (content.startsWith('/model')) {
-    const args = content.slice(6).trim();
+  if (normalizedContent.startsWith('/model')) {
+    const args = normalizedContent.slice(6).trim();
 
     if (!args) {
       // 显示当前模型
@@ -174,11 +193,12 @@ async function handleProjectCommand(
   );
 
   // /status 命令：显示会话状态
-  if (content === '/status') {
+  if (normalizedContent === '/status') {
     const lines = [
       '📊 会话状态：',
       `渠道: ${channel}`,
       `会话ID: ${session.id}`,
+      `会话名称: ${session.name || '(未命名)'}`,
       `项目路径: ${session.projectPath}`,
       `活跃状态: ${session.isActive ? '✓ 活跃' : '休眠'}`,
       `Claude会话: ${session.claudeSessionId || '(未初始化)'}`,
@@ -188,23 +208,33 @@ async function handleProjectCommand(
     return lines.join('\n');
   }
 
-  // /new 命令：清除会话，立即创建新会话
-  if (content === '/new') {
-    await sessionManager.clearClaudeSessionId(channel, channelId);
-    await agentRunner.closeSession(session.id);
+  // /new 命令：创建新会话（支持命名）
+  if (normalizedContent.startsWith('/new')) {
+    const sessionName = normalizedContent.slice(4).trim() || undefined;
 
-    // 立即创建新会话
-    const newSession = await sessionManager.getOrCreateSession(
+    // 检查名称是否已存在
+    if (sessionName) {
+      const existing = await sessionManager.getSessionByName(channel, channelId, sessionName);
+      if (existing) {
+        return `❌ 会话名称 "${sessionName}" 已存在，请使用其他名称`;
+      }
+    }
+
+    // 创建新会话
+    const newSession = await sessionManager.createNewSession(
       channel,
       channelId,
-      session.projectPath
+      session.projectPath,
+      sessionName
     );
 
-    return '✓ 已创建新会话';
+    await agentRunner.closeSession(session.id);
+
+    return `✓ 已创建新会话${sessionName ? `: ${sessionName}` : ''}\n  之前的对话历史已保留，可通过 /slist 查看`;
   }
 
   // /restart 命令：重启服务
-  if (content === '/restart') {
+  if (normalizedContent === '/restart') {
     // 检查是否有未读消息
     const allSessions = await sessionManager.listSessions(channel, channelId);
     const sessionsWithMessages = allSessions
@@ -263,7 +293,7 @@ async function handleProjectCommand(
   }
 
   // /pwd 命令：显示当前项目路径
-  if (content === '/pwd') {
+  if (normalizedContent === '/pwd') {
     const projects = config.projects?.list || {};
     // 查找项目名称
     let projectName = '';
@@ -282,7 +312,7 @@ async function handleProjectCommand(
   }
 
   // /plist 命令：列出所有项目
-  if (content === '/plist') {
+  if (normalizedContent === '/plist') {
     const projects = config.projects?.list || {};
     const lines = ['可用项目:'];
     const sessionKey = `${channel}-${channelId}`;
@@ -336,18 +366,13 @@ async function handleProjectCommand(
     return lines.join('\n');
   }
 
-  // /switch 命令：切换项目（支持名称或路径）
-  if (content.startsWith('/switch ')) {
-    const arg = content.slice(8).trim();
+  // /switch 或 /project 命令：切换项目（支持名称或路径）
+  if (normalizedContent.startsWith('/switch ') || normalizedContent.startsWith('/project ')) {
+    const arg = normalizedContent.startsWith('/switch ')
+      ? normalizedContent.slice(8).trim()
+      : normalizedContent.slice(9).trim();
 
-    if (!arg) return '用法: /switch <name|path>';
-
-    // 检查当前队列，如果有排队消息则拒绝切换
-    const sessionKey = `${channel}-${channelId}`;
-    const queueLength = messageQueue.getQueueLength(sessionKey);
-    if (queueLength > 0) {
-      return `❌ 当前有 ${queueLength} 条消息正在排队，请等待处理完成后再切换项目`;
-    }
+    if (!arg) return '用法: /p <name|path> 或 /project <name|path>';
 
     let projectPath: string;
     let projectName: string;
@@ -422,8 +447,8 @@ async function handleProjectCommand(
   }
 
   // /bind 命令：绑定新项目目录
-  if (content.startsWith('/bind ')) {
-    const projectPath = content.slice(6).trim();
+  if (normalizedContent.startsWith('/bind ')) {
+    const projectPath = normalizedContent.slice(6).trim();
 
     if (!projectPath) return '用法: /bind <path>';
 
@@ -464,6 +489,126 @@ async function handleProjectCommand(
     }
 
     return response;
+  }
+
+  // /slist 命令：列出当前项目的所有会话
+  if (normalizedContent === '/slist') {
+    const sessions = await sessionManager.listSessions(channel, channelId);
+    const currentProjectSessions = sessions.filter(s => s.projectPath === session.projectPath);
+
+    // 扫描 CLI 会话（最新5个）
+    const cliSessions = await sessionManager.scanCliSessions(session.projectPath);
+    const dbSessionIds = new Set(currentProjectSessions.map(s => s.claudeSessionId).filter(Boolean));
+
+    const lines = [`当前项目 ${path.basename(session.projectPath)} 的会话列表:\n`];
+
+    // 显示数据库会话
+    if (currentProjectSessions.length > 0) {
+      lines.push('【EvolClaw 会话】');
+      for (const s of currentProjectSessions) {
+        const prefix = s.isActive ? '  ✓' : '   ';
+        const name = s.name || '(未命名)';
+        const uuid = s.claudeSessionId ? `(${s.claudeSessionId.substring(0, 8)})` : '';
+        const idleTime = formatIdleTime(Date.now() - s.updatedAt);
+
+        // 检查文件是否存在
+        if (s.claudeSessionId && !sessionManager.checkSessionFileExists(s.projectPath, s.claudeSessionId)) {
+          lines.push(`${prefix} ❌ ${name} ${uuid} - ${idleTime} [会话文件缺失]`);
+        } else {
+          const status = s.isActive ? '[活跃]' : '[空闲]';
+          lines.push(`${prefix} ${name} ${uuid} - ${idleTime} ${status}`);
+        }
+      }
+      lines.push('');
+    }
+
+    // 显示 CLI 会话（数据库中不存在的）
+    const orphanCliSessions = cliSessions.filter(c => !dbSessionIds.has(c.uuid)).slice(0, 5);
+    if (orphanCliSessions.length > 0) {
+      lines.push('【CLI 会话】(最新5个)');
+      for (const c of orphanCliSessions) {
+        const time = new Date(c.mtime).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+        const message = sessionManager.readSessionFirstMessage(session.projectPath, c.uuid) || '(无消息)';
+        const uuid = c.uuid.substring(0, 8);
+        lines.push(`  ${time}  "${message}"  (${uuid})`);
+      }
+      lines.push('');
+    }
+
+    lines.push('使用 /s <会话名称或前8位UUID> 切换/导入会话');
+    return lines.join('\n');
+  }
+
+  // /session 或 /s 命令：切换会话
+  if (normalizedContent.startsWith('/session ')) {
+    const sessionName = normalizedContent.slice(9).trim();
+
+    if (!sessionName) return '用法: /s <会话名称或前8位UUID>';
+
+    // 检查是否正在处理消息
+    const sessionKey = `${channel}-${channelId}`;
+    const queueLength = messageQueue.getQueueLength(sessionKey);
+    if (queueLength > 0) {
+      return `⚠️ 当前正在处理消息，无法切换会话\n请等待当前任务完成后再试`;
+    }
+
+    // 优先按名称查找
+    let targetSession = await sessionManager.getSessionByName(channel, channelId, sessionName);
+
+    // 如果按名称没找到，尝试按 UUID 前缀查找数据库会话
+    if (!targetSession && sessionName.length === 8) {
+      targetSession = await sessionManager.getSessionByUuidPrefix(channel, channelId, sessionName);
+    }
+
+    // 如果还是没找到，尝试导入 CLI 会话
+    if (!targetSession && sessionName.length === 8) {
+      const cliSessions = await sessionManager.scanCliSessions(session.projectPath);
+      const cliSession = cliSessions.find(c => c.uuid.startsWith(sessionName));
+
+      if (cliSession) {
+        const imported = await sessionManager.importCliSession(channel, channelId, session.projectPath, cliSession.uuid);
+        return `✓ 已导入 CLI 会话: ${imported.name}\n  将继续之前的对话历史`;
+      }
+    }
+
+    if (!targetSession) {
+      return `❌ 会话不存在: ${sessionName}\n使用 /slist 查看可用会话`;
+    }
+
+    if (targetSession.id === session.id) {
+      return `当前已在会话: ${targetSession.name || sessionName}`;
+    }
+
+    // 切换会话
+    const switched = await sessionManager.switchToSession(channel, channelId, targetSession.id);
+
+    if (!switched) {
+      return `❌ 切换会话失败`;
+    }
+
+    return `✓ 已切换到会话: ${targetSession.name || sessionName}\n  将继续之前的对话历史`;
+  }
+
+  // /rename 或 /name 命令：重命名当前会话
+  if (normalizedContent.startsWith('/rename ')) {
+    const newName = normalizedContent.slice(8).trim();
+
+    if (!newName) return '用法: /name <新名称> 或 /rename <新名称>';
+
+    // 检查名称是否已存在
+    const existing = await sessionManager.getSessionByName(channel, channelId, newName);
+    if (existing && existing.id !== session.id) {
+      return `❌ 会话名称 "${newName}" 已存在，请使用其他名称`;
+    }
+
+    // 重命名
+    const success = await sessionManager.renameSession(session.id, newName);
+
+    if (!success) {
+      return `❌ 重命名失败`;
+    }
+
+    return `✓ 已将当前会话重命名为: ${newName}`;
   }
 
   return null;
