@@ -131,7 +131,11 @@ export class FeishuChannel {
 
             // 处理文本消息
             if (msg.message_type === 'text') {
-              const content = JSON.parse(msg.content).text;
+              const parsed = JSON.parse(msg.content);
+              // 优先使用 text_without_at_bot（去除机器人 @），否则使用 text
+              let content = parsed.text_without_at_bot || parsed.text;
+              // 去除消息中所有的 @ 提及（支持命令在前或在后）
+              content = content.replace(/@[^\s]+\s*/g, '').trim();
               const finalContent = quotedText + content;
               await this.messageHandler(msg.chat_id, finalContent, quotedImages.length > 0 ? quotedImages : undefined);
             }

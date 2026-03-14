@@ -247,14 +247,18 @@ export class MessageProcessor {
     let hasTextDelta = false;
     let hasReceivedText = false;
 
-    for await (const event of stream) {
+    let lastSessionId: string | undefined;
+
+    try {
+      for await (const event of stream) {
       // 调试：记录所有事件类型
       logger.debug(`[MessageProcessor] Event: type=${event.type}, subtype=${event.subtype || 'none'}`);
 
-      // 提取 session_id
-      if (event.session_id) {
+      // 提取 session_id（只在首次或变化时更新）
+      if (event.session_id && event.session_id !== lastSessionId) {
         logger.info(`[MessageProcessor] Extracted session_id: ${event.session_id} for session: ${session.id}`);
         this.agentRunner.updateSessionId(session.id, event.session_id);
+        lastSessionId = event.session_id;
       }
 
       // 动态判断当前是否是后台任务
@@ -339,6 +343,14 @@ export class MessageProcessor {
           }
         });
       }
+    }
+    } catch (error) {
+      // 捕获 SDK 进程崩溃或流迭代错误
+      logger.error('[MessageProcessor] Stream processing error:', error);
+      if (error instanceof Error && error.message.includes('process exited')) {
+        flusher.addActivity('❌ Claude Code 进程异常退出，请重试');
+      }
+      throw error; // 重新抛出，让外层处理
     }
   }
 
