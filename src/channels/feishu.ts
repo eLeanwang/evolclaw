@@ -28,9 +28,21 @@ export class FeishuChannel {
   private projectPathProvider?: ProjectPathProvider;
   private db: Database.Database;
   private cleanupInterval?: NodeJS.Timeout;
+  private chatTypeCache: Map<string, string> = new Map();
 
   constructor(private config: FeishuConfig) {
     this.db = config.db;
+    this.initChatTypeTable();
+  }
+
+  private initChatTypeTable(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS chat_types (
+        chat_id TEXT PRIMARY KEY,
+        chat_mode TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      )
+    `);
   }
 
   async connect(): Promise<void> {
@@ -53,6 +65,7 @@ export class FeishuChannel {
         'im.message.receive_v1': async (data) => {
           const msg = data.message;
           logger.debug('[Feishu] Received message, message_id:', msg.message_id, 'type:', msg.message_type);
+          logger.debug('[Feishu] Full data object:', JSON.stringify(data, null, 2));
 
           if (!msg.message_id || this.isDuplicate(msg.message_id)) {
             logger.debug('[Feishu] Duplicate message ignored:', msg.message_id);
@@ -212,6 +225,43 @@ export class FeishuChannel {
 
   onProjectPathRequest(provider: ProjectPathProvider): void {
     this.projectPathProvider = provider;
+  }
+
+  async getChatMode(chatId: string): Promise<string> {
+    logger.info(`[Feishu] getChatMode called for chatId: ${chatId}`);
+
+    // 检查缓存
+    if (this.chatTypeCache.has(chatId)) {
+      logger.info(`[Feishu] getChatMode from cache: ${this.chatTypeCache.get(chatId)}`);
+      return this.chatTypeCache.get(chatId)!;
+    }
+
+    // 检查数据库
+    const row = this.db.prepare('SELECT chat_mode FROM chat_types WHERE chat_id = ?').get(chatId) as { chat_mode: string } | undefined;
+    if (row) {
+      logger.info(`[Feishu] getChatMode from db: ${row.chat_mode}`);
+      this.chatTypeCache.set(chatId, row.chat_mode);
+      return row.chat_mode;
+    }
+
+    // 调用 API 获取
+    if (!this.client) return 'p2p';
+
+    try {
+      logger.info(`[Feishu] Calling API to get chat mode for ${chatId}`);
+      const res = await this.client.im.chat.get({ path: { chat_id: chatId } });
+      const chatMode = res.data?.chat_mode || 'p2p';
+      logger.info(`[Feishu] API returned chat_mode: ${chatMode}`);
+
+      // 保存到数据库和缓存
+      this.db.prepare('INSERT OR REPLACE INTO chat_types (chat_id, chat_mode, updated_at) VALUES (?, ?, ?)').run(chatId, chatMode, Date.now());
+      this.chatTypeCache.set(chatId, chatMode);
+
+      return chatMode;
+    } catch (error) {
+      logger.warn('[Feishu] Failed to get chat mode, defaulting to p2p:', error);
+      return 'p2p';
+    }
   }
 
   async sendMessage(chatId: string, content: string): Promise<void> {

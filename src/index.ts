@@ -81,11 +81,22 @@ function formatIdleTime(ms: number): string {
 
 // 判断是否是群聊
 function isGroupChat(channel: string, channelId: string): boolean {
+  // 飞书暂时都按单聊处理，支持多项目切换
+  // 如需群聊支持，可在配置文件中指定群聊 ID 列表
   if (channel === 'feishu') {
-    // Feishu 群聊 ID 以 oc_ 开头
-    return channelId.startsWith('oc_');
+    return false;
   }
   // ACP 暂时假设都是单聊
+  return false;
+}
+
+async function isGroupChatAsync(channel: string, channelId: string, feishuChannel?: any): Promise<boolean> {
+  console.log(`[DEBUG] isGroupChatAsync called: channel=${channel}, channelId=${channelId}, feishuChannel=${!!feishuChannel}`);
+  if (channel === 'feishu' && feishuChannel) {
+    const chatMode = await feishuChannel.getChatMode(channelId);
+    console.log(`[DEBUG] isGroupChatAsync chatMode=${chatMode}, isGroup=${chatMode === 'group'}`);
+    return chatMode === 'group';
+  }
   return false;
 }
 
@@ -99,7 +110,8 @@ async function handleProjectCommand(
   messageCache: MessageCache,
   processor: MessageProcessor,
   messageQueue: MessageQueue,
-  sendMessage?: (channelId: string, text: string) => Promise<void>
+  sendMessage?: (channelId: string, text: string) => Promise<void>,
+  feishuChannel?: any
 ): Promise<string | null> {
   // 命令别名映射
   const aliases: Record<string, string> = {
@@ -383,8 +395,12 @@ async function handleProjectCommand(
   if (normalizedContent === '/plist') {
     const projects = config.projects?.list || {};
 
+    // 调试日志
+    console.log(`[DEBUG] /plist - channel: ${channel}, channelId: ${channelId}, isGroupChat: ${isGroupChat(channel, channelId)}`);
+
     // 群聊只显示当前绑定的项目
-    if (isGroupChat(channel, channelId)) {
+    const isGroup = await isGroupChatAsync(channel, channelId, feishuChannel);
+    if (isGroup) {
       if (!session) {
         return `❌ 当前群聊未绑定项目
 
@@ -461,7 +477,8 @@ async function handleProjectCommand(
   // /project 命令：切换项目（支持名称或路径）
   if (normalizedContent.startsWith('/project ')) {
     // 群聊禁止切换项目
-    if (isGroupChat(channel, channelId)) {
+    const isGroup = await isGroupChatAsync(channel, channelId, feishuChannel);
+    if (isGroup) {
       return `❌ 群聊不支持切换项目
 
 群聊只能绑定一个项目。如需更换项目，请联系管理员重新配置。`;
@@ -605,7 +622,8 @@ async function handleProjectCommand(
     const currentProjectSessions = sessions.filter(s => s.projectPath === session.projectPath);
 
     // 扫描 CLI 会话（最新5个，仅单聊支持）
-    const cliSessions = isGroupChat(channel, channelId)
+    const isGroup = await isGroupChatAsync(channel, channelId, feishuChannel);
+    const cliSessions = isGroup
       ? []
       : await sessionManager.scanCliSessions(session.projectPath);
     const dbSessionIds = new Set(currentProjectSessions.map(s => s.claudeSessionId).filter(Boolean));
@@ -682,7 +700,8 @@ async function handleProjectCommand(
     }
 
     // 如果还是没找到，尝试导入 CLI 会话（仅单聊支持）
-    if (!targetSession && sessionName.length === 8 && !isGroupChat(channel, channelId)) {
+    const isGroup = await isGroupChatAsync(channel, channelId, feishuChannel);
+    if (!targetSession && sessionName.length === 8 && !isGroup) {
       // 扫描所有配置的项目目录
       const projects = config.projects?.list || {};
       const projectPaths = Object.values(projects);
@@ -875,7 +894,8 @@ async function main() {
           if (channel === 'feishu') await feishu.sendMessage(id, text);
           else if (channel === 'acp') await acp.sendMessage(id, text);
         }
-      }
+      },
+      feishu
     );
 
   // 创建消息处理器
