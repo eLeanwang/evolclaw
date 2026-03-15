@@ -106,6 +106,22 @@ export class SessionManager {
       );
       CREATE INDEX IF NOT EXISTS idx_processed_at ON processed_messages(processed_at);
     `);
+
+    // 创建会话健康状态表
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS session_health (
+        session_id TEXT PRIMARY KEY,
+        consecutive_errors INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        last_error_type TEXT,
+        safe_mode INTEGER NOT NULL DEFAULT 0,
+        last_success_time INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_session_health_safe_mode ON session_health(safe_mode);
+    `);
   }
 
   async getOrCreateSession(channel: 'feishu' | 'acp', channelId: string, defaultProjectPath: string, name?: string): Promise<Session> {
@@ -189,10 +205,34 @@ export class SessionManager {
       updatedAt: Date.now()
     };
 
-    this.db.prepare(`
-      INSERT INTO sessions (id, channel, channel_id, project_path, claude_session_id, name, is_active, created_at, updated_at)
+    // 使用 INSERT OR IGNORE 避免并发时的 UNIQUE 约束冲突
+    const result = this.db.prepare(`
+      INSERT OR IGNORE INTO sessions (id, channel, channel_id, project_path, claude_session_id, name, is_active, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(session.id, session.channel, session.channelId, session.projectPath, session.claudeSessionId, session.name, 1, session.createdAt, session.updatedAt);
+
+    // 如果插入被忽略（已存在），重新查询
+    if (result.changes === 0) {
+      const existing = this.db.prepare(`
+        SELECT * FROM sessions
+        WHERE channel = ? AND channel_id = ? AND project_path = ?
+      `).get(channel, channelId, defaultProjectPath) as any;
+
+      if (existing) {
+        this.db.prepare(`UPDATE sessions SET is_active = 1, updated_at = ? WHERE id = ?`).run(Date.now(), existing.id);
+        return {
+          id: existing.id,
+          channel: existing.channel,
+          channelId: existing.channel_id,
+          projectPath: existing.project_path,
+          claudeSessionId: existing.claude_session_id,
+          name: existing.name,
+          isActive: true,
+          createdAt: existing.created_at,
+          updatedAt: Date.now()
+        };
+      }
+    }
 
     return session;
   }
@@ -262,7 +302,7 @@ export class SessionManager {
     };
 
     this.db.prepare(`
-      INSERT INTO sessions (id, channel, channel_id, project_path, claude_session_id, name, is_active, created_at, updated_at)
+      INSERT OR IGNORE INTO sessions (id, channel, channel_id, project_path, claude_session_id, name, is_active, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(session.id, session.channel, session.channelId, session.projectPath, null, session.name, 1, session.createdAt, session.updatedAt);
 
@@ -460,7 +500,7 @@ export class SessionManager {
     };
 
     this.db.prepare(`
-      INSERT INTO sessions (id, channel, channel_id, project_path, claude_session_id, name, is_active, created_at, updated_at)
+      INSERT OR IGNORE INTO sessions (id, channel, channel_id, project_path, claude_session_id, name, is_active, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(session.id, session.channel, session.channelId, session.projectPath, null, session.name, 1, session.createdAt, session.updatedAt);
 
@@ -554,6 +594,37 @@ export class SessionManager {
   }
 
   async importCliSession(channel: 'feishu' | 'acp', channelId: string, projectPath: string, claudeSessionId: string): Promise<Session> {
+    // 检查是否已存在相同项目路径的会话
+    const existingByPath = this.db.prepare(`
+      SELECT * FROM sessions
+      WHERE channel = ? AND channel_id = ? AND project_path = ?
+    `).get(channel, channelId, projectPath) as any;
+
+    if (existingByPath) {
+      // 更新 claude_session_id 并激活
+      this.db.prepare(`
+        UPDATE sessions SET is_active = 0, updated_at = ?
+        WHERE channel = ? AND channel_id = ? AND is_active = 1 AND id != ?
+      `).run(Date.now(), channel, channelId, existingByPath.id);
+
+      this.db.prepare(`
+        UPDATE sessions SET claude_session_id = ?, is_active = 1, updated_at = ?
+        WHERE id = ?
+      `).run(claudeSessionId, Date.now(), existingByPath.id);
+
+      return {
+        id: existingByPath.id,
+        channel: existingByPath.channel,
+        channelId: existingByPath.channel_id,
+        projectPath: existingByPath.project_path,
+        claudeSessionId,
+        name: existingByPath.name,
+        isActive: true,
+        createdAt: existingByPath.created_at,
+        updatedAt: Date.now()
+      };
+    }
+
     // 取消当前活跃会话
     this.db.prepare(`
       UPDATE sessions SET is_active = 0, updated_at = ?
@@ -574,11 +645,117 @@ export class SessionManager {
     };
 
     this.db.prepare(`
-      INSERT INTO sessions (id, channel, channel_id, project_path, claude_session_id, name, is_active, created_at, updated_at)
+      INSERT OR IGNORE INTO sessions (id, channel, channel_id, project_path, claude_session_id, name, is_active, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(session.id, session.channel, session.channelId, session.projectPath, session.claudeSessionId, session.name, 1, session.createdAt, session.updatedAt);
 
     return session;
+  }
+
+  // ==================== 健康状态管理 ====================
+
+  /**
+   * 获取会话健康状态
+   */
+  async getHealthStatus(sessionId: string): Promise<{
+    consecutiveErrors: number;
+    lastError?: string;
+    lastErrorType?: string;
+    safeMode: boolean;
+    lastSuccessTime: number;
+  }> {
+    const row = this.db.prepare(`
+      SELECT * FROM session_health WHERE session_id = ?
+    `).get(sessionId) as any;
+
+    if (!row) {
+      // 首次查询，创建默认记录
+      const now = Date.now();
+      this.db.prepare(`
+        INSERT INTO session_health (session_id, consecutive_errors, safe_mode, last_success_time, created_at, updated_at)
+        VALUES (?, 0, 0, ?, ?, ?)
+      `).run(sessionId, now, now, now);
+
+      return {
+        consecutiveErrors: 0,
+        safeMode: false,
+        lastSuccessTime: now
+      };
+    }
+
+    return {
+      consecutiveErrors: row.consecutive_errors,
+      lastError: row.last_error,
+      lastErrorType: row.last_error_type,
+      safeMode: row.safe_mode === 1,
+      lastSuccessTime: row.last_success_time
+    };
+  }
+
+  /**
+   * 记录成功响应（重置错误计数）
+   */
+  async recordSuccess(sessionId: string): Promise<void> {
+    const now = Date.now();
+    this.db.prepare(`
+      INSERT INTO session_health (session_id, consecutive_errors, safe_mode, last_success_time, created_at, updated_at)
+      VALUES (?, 0, 0, ?, ?, ?)
+      ON CONFLICT(session_id) DO UPDATE SET
+        consecutive_errors = 0,
+        last_success_time = ?,
+        updated_at = ?
+    `).run(sessionId, now, now, now, now, now);
+  }
+
+  /**
+   * 记录错误（增加计数）
+   */
+  async recordError(sessionId: string, errorType: string, errorMessage: string): Promise<void> {
+    const now = Date.now();
+    const health = await this.getHealthStatus(sessionId);
+
+    this.db.prepare(`
+      INSERT INTO session_health (session_id, consecutive_errors, last_error, last_error_type, safe_mode, last_success_time, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(session_id) DO UPDATE SET
+        consecutive_errors = consecutive_errors + 1,
+        last_error = ?,
+        last_error_type = ?,
+        updated_at = ?
+    `).run(sessionId, health.consecutiveErrors + 1, errorMessage, errorType, health.safeMode ? 1 : 0, health.lastSuccessTime, now, now, errorMessage, errorType, now);
+  }
+
+  /**
+   * 设置安全模式
+   */
+  async setSafeMode(sessionId: string, enabled: boolean): Promise<void> {
+    const now = Date.now();
+    const health = await this.getHealthStatus(sessionId);
+
+    this.db.prepare(`
+      INSERT INTO session_health (session_id, consecutive_errors, safe_mode, last_success_time, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(session_id) DO UPDATE SET
+        safe_mode = ?,
+        updated_at = ?
+    `).run(sessionId, health.consecutiveErrors, enabled ? 1 : 0, health.lastSuccessTime, now, now, enabled ? 1 : 0, now);
+  }
+
+  /**
+   * 重置健康状态（用于修复后）
+   */
+  async resetHealthStatus(sessionId: string): Promise<void> {
+    const now = Date.now();
+    this.db.prepare(`
+      INSERT INTO session_health (session_id, consecutive_errors, safe_mode, last_success_time, created_at, updated_at)
+      VALUES (?, 0, 0, ?, ?, ?)
+      ON CONFLICT(session_id) DO UPDATE SET
+        consecutive_errors = 0,
+        last_error = NULL,
+        last_error_type = NULL,
+        safe_mode = 0,
+        updated_at = ?
+    `).run(sessionId, now, now, now, now);
   }
 
   close(): void {

@@ -34,7 +34,7 @@ function log(level: string, ...args: any[]) {
   if (!shouldLog(level)) return;
   const timestamp = new Date().toISOString();
   const msg = `[${timestamp}] [${level}] ${args.join(' ')}`;
-  console.log(msg);
+  // 只写文件，不输出到 console（避免重定向时重复）
   write(streams.main, msg);
 }
 

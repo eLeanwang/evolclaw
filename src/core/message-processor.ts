@@ -6,6 +6,7 @@ import { StreamFlusher } from './stream-flusher.js';
 import { MessageCache } from './message-cache.js';
 import { logger } from '../utils/logger.js';
 import { getErrorMessage } from '../utils/error-handler.js';
+import { classifyError } from '../utils/error-classifier.js';
 import type { Message, Config, Session, ChannelAdapter, ChannelOptions, CommandHandler } from '../types.js';
 
 /**
@@ -44,6 +45,81 @@ export class MessageProcessor {
    * 处理消息（主入口）
    */
   async processMessage(message: Message): Promise<void> {
+    const timeout = 120000; // 120秒超时（给长上下文更多时间）
+    const streamKey = `${message.channel}-${message.channelId}`;
+
+    let timer: NodeJS.Timeout;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timer = setTimeout(async () => {
+        // 超时时主动中断 SDK 子进程，防止孤儿进程
+        logger.warn(`[MessageProcessor] Timeout after 120s, interrupting stream: ${streamKey}`);
+        try {
+          await this.agentRunner.interrupt(streamKey);
+        } catch (e) {
+          logger.debug(`[MessageProcessor] Interrupt failed (may already be cleaned up):`, e);
+        }
+        reject(new Error('SDK_TIMEOUT'));
+      }, timeout);
+    });
+
+    try {
+      await Promise.race([
+        this._processMessageInternal(message),
+        timeoutPromise
+      ]);
+    } catch (error: any) {
+      // 记录错误到健康状态
+      const channelInfo = this.channels.get(message.channel);
+      if (channelInfo) {
+        try {
+          const session = await this.sessionManager.getOrCreateSession(
+            message.channel as 'feishu' | 'acp',
+            message.channelId,
+            this.config.projects?.defaultPath || process.cwd()
+          );
+
+          const errorType = classifyError(error);
+          await this.sessionManager.recordError(session.id, errorType, error.message);
+
+          // 检查是否需要进入安全模式
+          const health = await this.sessionManager.getHealthStatus(session.id);
+          if (health.consecutiveErrors >= 3 && !health.safeMode) {
+            await this.sessionManager.setSafeMode(session.id, true);
+            logger.warn(`[MessageProcessor] Session ${session.id} entered safe mode after ${health.consecutiveErrors} errors`);
+
+            // 发送安全模式提示
+            await channelInfo.adapter.sendText(
+              message.channelId,
+              `⚠️ 安全模式已启用（连续 ${health.consecutiveErrors} 次异常）
+
+当前限制：
+- 无法记住之前的对话
+- 每次提问需要提供完整上下文
+
+建议操作：
+1. /repair - 检查并修复会话（推荐，保留历史）
+2. /new [名称] - 创建新会话（清空历史）
+3. /status - 查看详细状态`
+            );
+          } else if (health.consecutiveErrors === 2) {
+            // 第2次错误，发送警告
+            await channelInfo.adapter.sendText(
+              message.channelId,
+              `⚠️ 检测到异常（${health.consecutiveErrors}/3）\n\n如果问题持续，系统将自动进入安全模式。建议使用 /status 查看状态。`
+            );
+          }
+        } catch (healthError) {
+          logger.error('[MessageProcessor] Failed to update health status:', healthError);
+        }
+      }
+
+      throw error;
+    } finally {
+      clearTimeout(timer!);
+    }
+  }
+
+  private async _processMessageInternal(message: Message): Promise<void> {
     const messageId = `${message.channel}_${message.channelId}_${message.timestamp || Date.now()}`;
     const channelInfo = this.channels.get(message.channel);
 
@@ -120,7 +196,8 @@ export class MessageProcessor {
         absoluteProjectPath,
         session.claudeSessionId,
         message.images,
-        options?.systemPromptAppend
+        options?.systemPromptAppend,
+        this.sessionManager
       );
 
       // 使用 channelId 作为 stream key 存储，便于中断
@@ -161,6 +238,9 @@ export class MessageProcessor {
 
       // 清理 activeStreams（正常完成）
       this.agentRunner.cleanupStream(streamKey);
+
+      // 记录成功响应（重置错误计数）
+      await this.sessionManager.recordSuccess(session.id);
 
       // 动态判断是否是后台任务，决定是否发送通知
       const currentActive = await this.sessionManager.getActiveSession(message.channel, message.channelId);
@@ -251,8 +331,8 @@ export class MessageProcessor {
 
     try {
       for await (const event of stream) {
-      // 调试：记录所有事件类型
-      logger.debug(`[MessageProcessor] Event: type=${event.type}, subtype=${event.subtype || 'none'}`);
+      // 记录所有事件类型（INFO级别，便于诊断）
+      logger.info(`[MessageProcessor] Event: type=${event.type}, subtype=${event.subtype || 'none'}`);
 
       // 提取 session_id（只在首次或变化时更新）
       if (event.session_id && event.session_id !== lastSessionId) {

@@ -11,28 +11,7 @@ import { logger } from './utils/logger.js';
 import path from 'path';
 import fs from 'fs';
 
-let availableModels: string[] = [];
-
-async function fetchAvailableModels(apiKey: string, baseUrl?: string): Promise<void> {
-  try {
-    const url = `${baseUrl || 'https://api.anthropic.com'}/v1/models`;
-    const response = await fetch(url, {
-      headers: {
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01'
-      }
-    });
-
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-
-    const data = await response.json();
-    availableModels = data.data.map((m: any) => m.id);
-    logger.info(`✓ Loaded ${availableModels.length} available models`);
-  } catch (error) {
-    logger.error('Failed to fetch models, using defaults:', error);
-    availableModels = ['claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5-20251001'];
-  }
-}
+const availableModels: string[] = ['claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5-20251001'];
 
 /**
  * 计算两个字符串的 Levenshtein 距离（编辑距离）
@@ -130,7 +109,7 @@ async function handleProjectCommand(
   }
 
   // 支持的命令列表
-  const commands = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/slist', '/session', '/rename', '/stop'];
+  const commands = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/slist', '/session', '/rename', '/stop', '/clear', '/repair', '/safe'];
 
   // 检查是否以 / 开头（可能是命令）
   if (normalizedContent.startsWith('/')) {
@@ -170,8 +149,13 @@ async function handleProjectCommand(
   /s, /session <名称> - 切换到指定会话
   /name, /rename <新名称> - 重命名当前会话
   /status - 显示会话状态
+  /clear - 清空当前会话的对话历史
   /stop - 中断当前任务
   /restart - 重启服务
+
+🛠️ 会话修复：
+  /repair - 检查并修复会话
+  /safe - 进入安全模式
 
 🤖 模型管理：
   /model - 显示当前模型
@@ -222,6 +206,17 @@ async function handleProjectCommand(
     return '✓ 已发送中断信号，任务将尽快停止';
   }
 
+  // /clear 命令：清空当前会话的对话历史
+  if (normalizedContent === '/clear') {
+    const session = await sessionManager.getSession(channel, channelId);
+    if (!session) {
+      return '❌ 当前没有活跃会话\n使用 /new 创建新会话';
+    }
+
+    await agentRunner.clearHistory(session.id);
+    return '✓ 已清空当前会话的对话历史';
+  }
+
   // 尝试获取活跃会话（所有命令都尝试获取，但不强制）
   let session = await sessionManager.getActiveSession(channel, channelId);
 
@@ -248,14 +243,18 @@ async function handleProjectCommand(
 提示：发送任意消息或使用 /new 命令创建会话`;
     }
 
-    // 检查处理状态
+    // 检查处理状态（isProcessing 检查是否有任务正在执行，getQueueLength 检查队列中等待的任务）
     const sessionKey = `${channel}-${channelId}`;
+    const isCurrentlyProcessing = messageQueue.isProcessing(sessionKey);
     const queueLength = messageQueue.getQueueLength(sessionKey);
-    const isProcessing = queueLength > 0;
 
     let activeStatus = session.isActive ? '✓ 活跃' : '休眠';
-    if (session.isActive && isProcessing) {
-      activeStatus += ' [处理中]';
+    if (session.isActive && isCurrentlyProcessing) {
+      if (queueLength > 0) {
+        activeStatus += ` [处理中，队列${queueLength}条]`;
+      } else {
+        activeStatus += ' [处理中]';
+      }
     }
 
     // 获取项目名称
@@ -263,16 +262,42 @@ async function handleProjectCommand(
     const projectName = Object.entries(projects)
       .find(([_, p]) => p === session.projectPath)?.[0] || path.basename(session.projectPath);
 
+    // 获取健康状态
+    const health = await sessionManager.getHealthStatus(session.id);
+    const timeSinceSuccess = Date.now() - health.lastSuccessTime;
+    const timeStr = timeSinceSuccess < 60000 ? '刚刚' :
+                    timeSinceSuccess < 3600000 ? `${Math.floor(timeSinceSuccess / 60000)}分钟前` :
+                    `${Math.floor(timeSinceSuccess / 3600000)}小时前`;
+
     const lines = [
       '📊 会话状态：',
-      `渠道:${channel} / 项目:${projectName} / 会话:${session.name || '(未命名)'}`,
+      `渠道: ${channel} / 项目: ${projectName} / 会话: ${session.name || '(未命名)'}`,
       `会话ID: ${session.id}`,
       `项目路径: ${session.projectPath}`,
       `活跃状态: ${activeStatus}`,
+      `异常计数: ${health.consecutiveErrors}`,
+      `安全模式: ${health.safeMode ? '是 ⚠️' : '否 ✓'}`,
+      `最后成功: ${timeStr}`,
       `Claude会话: ${session.claudeSessionId || '(未初始化)'}`,
       `创建时间: ${new Date(session.createdAt).toLocaleString('zh-CN')}`,
       `更新时间: ${new Date(session.updatedAt).toLocaleString('zh-CN')}`
     ];
+
+    if (health.safeMode) {
+      lines.push('');
+      lines.push('⚠️ 当前处于安全模式（历史上下文已禁用）');
+      lines.push('');
+      lines.push('退出方式：');
+      lines.push('1. /repair - 检查并修复会话（推荐，保留历史）');
+      lines.push('2. /new [名称] - 创建新会话（清空历史）');
+    }
+
+    if (health.lastError) {
+      lines.push('');
+      lines.push(`最后错误: ${health.lastErrorType || 'unknown'}`);
+      lines.push(`错误信息: ${health.lastError.substring(0, 100)}`);
+    }
+
     return lines.join('\n');
   }
 
@@ -632,8 +657,7 @@ async function handleProjectCommand(
 
     // 获取处理状态
     const sessionKey = `${channel}-${channelId}`;
-    const queueLength = messageQueue.getQueueLength(sessionKey);
-    const isProcessing = queueLength > 0;
+    const isProcessing = messageQueue.isProcessing(sessionKey);
 
     // 显示数据库会话
     if (currentProjectSessions.length > 0) {
@@ -783,6 +807,110 @@ async function handleProjectCommand(
     return `✓ 已将当前会话重命名为: ${newName}`;
   }
 
+  // /repair 命令：检查并修复会话
+  if (normalizedContent === '/repair') {
+    if (!session) {
+      return `❌ 当前未创建会话，无需修复`;
+    }
+
+    // 检查是否在安全模式下
+    const health = await sessionManager.getHealthStatus(session.id);
+    if (!health.safeMode) {
+      return `当前不在安全模式，无需修复\n\n如需进入安全模式，请使用 /safe`;
+    }
+
+    const { checkSessionFileHealth, backupClaudeDir } = await import('./utils/session-file-health.js');
+    const fs = await import('fs/promises');
+
+    try {
+      // 备份当前会话目录
+      const backupDir = await backupClaudeDir(session.projectPath);
+
+      // 检查会话文件健康度
+      if (!session.claudeSessionId) {
+        // 没有 Claude 会话 ID，直接重置健康状态
+        await sessionManager.resetHealthStatus(session.id);
+        return `✓ 修复完成，已退出安全模式
+
+修复内容：
+- 未发现问题（新会话）
+- 已重置异常计数器
+- 已恢复正常会话模式
+
+备份位置：${backupDir}`;
+      }
+
+      const healthCheck = await checkSessionFileHealth(session.projectPath, session.claudeSessionId);
+
+      if (healthCheck.corrupt) {
+        // 文件损坏，删除并清空 claude_session_id
+        const sessionFile = path.join(session.projectPath, '.claude', `${session.claudeSessionId}.jsonl`);
+        await fs.unlink(sessionFile);
+        await sessionManager.updateClaudeSessionId(session.channel, session.channelId, '');
+        await sessionManager.resetHealthStatus(session.id);
+
+        return `✓ 修复完成，已退出安全模式
+
+检测到问题：
+${healthCheck.issues.map(i => `- ${i}`).join('\n')}
+
+修复操作：
+- 已删除损坏文件
+- 已创建新会话
+- 已重置异常计数器
+
+备份位置：${backupDir}`;
+      }
+
+      if (healthCheck.issues.length > 0) {
+        // 有问题但未损坏（如文件过大）
+        await sessionManager.resetHealthStatus(session.id);
+        return `⚠️ 检测到问题：
+${healthCheck.issues.map(i => `- ${i}`).join('\n')}
+
+建议：
+1. 使用 /new 创建新会话
+2. 旧会话已备份到：${backupDir}
+
+已重置异常计数器，可继续使用当前会话。`;
+      }
+
+      // 没有问题，只重置健康状态
+      await sessionManager.resetHealthStatus(session.id);
+      return `✓ 修复完成，已退出安全模式
+
+修复内容：
+- 未发现问题
+- 已重置异常计数器
+- 已恢复正常会话模式
+
+备份位置：${backupDir}`;
+    } catch (error: any) {
+      logger.error('[Repair] Failed:', error);
+      return `❌ 修复失败: ${error.message}`;
+    }
+  }
+
+  // /safe 命令：手动进入安全模式
+  if (normalizedContent === '/safe') {
+    if (!session) {
+      return `❌ 当前未创建会话`;
+    }
+
+    await sessionManager.setSafeMode(session.id, true);
+
+    return `✓ 已进入安全模式
+
+当前行为：
+- 暂时不加载会话历史（每次对话独立）
+- 所有功能正常可用（读写文件、执行命令等）
+- 不会丢失历史数据（仍保存在 .claude/ 目录）
+
+退出安全模式：
+- 使用 /repair 检查并修复会话
+- 使用 /new 创建全新会话`;
+  }
+
   return null;
 }
 
@@ -817,9 +945,6 @@ async function main() {
     process.env.ANTHROPIC_BASE_URL = config.anthropic.baseUrl;
     logger.info(`✓ Using custom API base URL: ${config.anthropic.baseUrl}`);
   }
-
-  // 获取可用模型列表
-  await fetchAvailableModels(config.anthropic.apiKey, config.anthropic.baseUrl);
 
   // 初始化数据库
   ensureDir('./data');
@@ -945,9 +1070,10 @@ async function main() {
 
   processor.registerChannel(acpAdapter);
 
-  // 命令列表（用于快速检查）
-  const commands = ['/new', '/pwd', '/plist', '/switch', '/bind', '/help', '/status', '/restart', '/model'];
-  const isCommand = (content: string) => commands.some(cmd => content.startsWith(cmd));
+  // 命令列表（用于快速检查，必须与 handleProjectCommand 中的 commands 保持同步）
+  // 注意：/stop, /clear, /safe 故意不在此列表中，它们需要进入队列触发中断机制
+  const commandPrefixes = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/slist', '/session', '/rename', '/repair', '/p ', '/s ', '/name '];
+  const isCommand = (content: string) => content === '/p' || content === '/s' || commandPrefixes.some(cmd => content.startsWith(cmd));
 
   // Feishu 消息处理
   feishu.onMessage(async (chatId, content, images) => {

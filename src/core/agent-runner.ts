@@ -38,25 +38,56 @@ export class AgentRunner {
     this.onCompactStart = callback;
   }
 
-  async runQuery(sessionId: string, prompt: string, projectPath: string, initialClaudeSessionId?: string, images?: ImageData[], systemPromptAppend?: string): Promise<AsyncIterable<any>> {
+  async runQuery(sessionId: string, prompt: string, projectPath: string, initialClaudeSessionId?: string, images?: ImageData[], systemPromptAppend?: string, sessionManager?: any): Promise<AsyncIterable<any>> {
     ensureDir(projectPath);
     ensureDir(path.join(projectPath, '.claude'));
 
     // 优先使用传入的 claudeSessionId（从数据库恢复），否则使用内存中的
     let claudeSessionId = initialClaudeSessionId || this.activeSessions.get(sessionId);
 
-    // 验证会话文件是否存在，防止 SDK 因恢复不存在的会话而崩溃
-    if (claudeSessionId) {
-      // SDK 使用 os.homedir() 存储会话文件，不是 projectPath
+    // 检查是否在安全模式
+    if (sessionManager) {
+      const health = await sessionManager.getHealthStatus(sessionId);
+      if (health.safeMode) {
+        // 安全模式：不使用 resume，每次都是新对话
+        claudeSessionId = undefined;
+        logger.warn(`[AgentRunner] Safe mode enabled for ${sessionId}, not resuming session`);
+      }
+    }
+
+    // 验证会话文件是否存在且有效（仅在非安全模式下）
+    if (claudeSessionId && (!sessionManager || !(await sessionManager.getHealthStatus(sessionId)).safeMode)) {
       const homeDir = os.homedir();
       const encodedPath = projectPath.replace(/\//g, '-');
       const sessionFile = path.join(homeDir, '.claude', 'projects', encodedPath, `${claudeSessionId}.jsonl`);
-      if (!fs.existsSync(sessionFile)) {
-        logger.warn(`[AgentRunner] Session file not found: ${sessionFile}, starting new session`);
+
+      let isValid = false;
+      if (fs.existsSync(sessionFile)) {
+        try {
+          // 验证文件包含真正的会话数据（不只是 queue-operation）
+          const content = fs.readFileSync(sessionFile, 'utf-8');
+          const lines = content.split('\n').filter(l => l.trim());
+          // 至少需要2行：queue-operation + 实际会话数据
+          if (lines.length >= 2) {
+            const sessionData = JSON.parse(lines[1]);
+            // 真正的会话数据包含 sessionId 和 version 字段
+            if (sessionData.sessionId && sessionData.version) {
+              isValid = true;
+            } else {
+              logger.warn(`[AgentRunner] Session file missing session data: ${sessionFile}`);
+            }
+          } else {
+            logger.warn(`[AgentRunner] Session file incomplete (only ${lines.length} line(s)): ${sessionFile}`);
+          }
+        } catch (error) {
+          logger.warn(`[AgentRunner] Session file corrupted: ${sessionFile}`);
+        }
+      }
+
+      if (!isValid) {
+        logger.warn(`[AgentRunner] Invalid session file, starting new session`);
         claudeSessionId = undefined;
-        // 清理内存中的无效会话
         this.activeSessions.delete(sessionId);
-        // 通知上层清理数据库中的无效 claudeSessionId（传 null 使数据库字段置空）
         if (this.onSessionIdUpdate) {
           this.onSessionIdUpdate(sessionId, '');
         }
@@ -105,10 +136,19 @@ export class AgentRunner {
               append: systemPromptAppend
             }
           } : {}),
+          stderr: (msg: string) => {
+            // 捕获 Claude 子进程的 stderr 输出
+            if (msg.includes('[ERROR]') || msg.includes('[WARN]') || msg.includes('Stream started')) {
+              logger.info(`[Claude-stderr] ${msg.trim()}`);
+            } else {
+              logger.debug(`[Claude-stderr] ${msg.trim()}`);
+            }
+          },
           env: {
             ...process.env,
             ANTHROPIC_API_KEY: this.apiKey,
             PATH: process.env.PATH,
+            DISABLE_AUTOUPDATER: '1',
             ...(process.env.ANTHROPIC_BASE_URL ? { ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL } : {})
           }
         }
@@ -140,6 +180,13 @@ export class AgentRunner {
       this.activeStreams.delete(sessionId);
       logger.info(`[AgentRunner] Interrupted session: ${sessionId}`);
     }
+  }
+
+  async clearHistory(sessionId: string): Promise<void> {
+    // 只清除内存中的 claudeSessionId，下次对话会创建新的历史
+    // 但保留数据库中的会话记录
+    this.activeSessions.delete(sessionId);
+    logger.info(`[AgentRunner] Cleared history for session: ${sessionId}`);
   }
 
   registerStream(key: string, stream: AsyncIterable<any>): void {
