@@ -1020,7 +1020,7 @@ async function main() {
           else if (channel === 'acp') await acp.sendMessage(id, text);
         }
       },
-      feishu
+      channel === 'feishu' ? feishu : undefined
     );
 
   // 创建消息处理器
