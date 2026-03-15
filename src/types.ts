@@ -21,6 +21,9 @@ export interface Config {
     list?: Record<string, string>;
   };
   flushDelay?: number;  // 消息批量发送间隔(ms)，默认 4000
+  timeout?: {
+    idle?: number;  // 无输出超时(ms)，默认 120000
+  };
 }
 
 export interface Session {

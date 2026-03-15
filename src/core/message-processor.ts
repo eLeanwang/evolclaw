@@ -45,29 +45,47 @@ export class MessageProcessor {
    * 处理消息（主入口）
    */
   async processMessage(message: Message): Promise<void> {
-    const timeout = 120000; // 120秒超时（给长上下文更多时间）
+    const idleMs = this.config.timeout?.idle ?? 120000;
     const streamKey = `${message.channel}-${message.channelId}`;
 
     let timer: NodeJS.Timeout;
-    const timeoutPromise = new Promise<never>((_, reject) => {
+    let rejectFn: (err: Error) => void;
+
+    const resetTimer = () => {
+      clearTimeout(timer);
       timer = setTimeout(async () => {
-        // 超时时主动中断 SDK 子进程，防止孤儿进程
-        logger.warn(`[MessageProcessor] Timeout after 120s, interrupting stream: ${streamKey}`);
+        logger.warn(`[MessageProcessor] Idle timeout after ${idleMs / 1000}s, interrupting stream: ${streamKey}`);
         try {
           await this.agentRunner.interrupt(streamKey);
         } catch (e) {
           logger.debug(`[MessageProcessor] Interrupt failed (may already be cleaned up):`, e);
         }
-        reject(new Error('SDK_TIMEOUT'));
-      }, timeout);
+        rejectFn(new Error('SDK_TIMEOUT'));
+      }, idleMs);
+    };
+
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      rejectFn = reject;
+      resetTimer();
     });
 
     try {
       await Promise.race([
-        this._processMessageInternal(message),
+        this._processMessageInternal(message, resetTimer),
         timeoutPromise
       ]);
     } catch (error: any) {
+      // 超时错误：发送用户提示
+      if (error.message === 'SDK_TIMEOUT') {
+        const channelInfo = this.channels.get(message.channel);
+        if (channelInfo) {
+          await channelInfo.adapter.sendText(
+            message.channelId,
+            `⚠️ 任务超时（${idleMs / 1000}秒无响应），已自动中断`
+          );
+        }
+      }
+
       // 记录错误到健康状态
       const channelInfo = this.channels.get(message.channel);
       if (channelInfo) {
@@ -119,7 +137,7 @@ export class MessageProcessor {
     }
   }
 
-  private async _processMessageInternal(message: Message): Promise<void> {
+  private async _processMessageInternal(message: Message, resetTimer: () => void): Promise<void> {
     const messageId = `${message.channel}_${message.channelId}_${message.timestamp || Date.now()}`;
     const channelInfo = this.channels.get(message.channel);
 
@@ -212,7 +230,8 @@ export class MessageProcessor {
         adapter,
         options,
         flusher,
-        isBackground
+        isBackground,
+        resetTimer
       );
 
       // 处理文件标记（Feishu 专用）- 提取并发送文件
@@ -322,7 +341,8 @@ export class MessageProcessor {
     adapter: ChannelAdapter,
     options: ChannelOptions | undefined,
     flusher: StreamFlusher,
-    isBackground: boolean
+    isBackground: boolean,
+    resetTimer: () => void
   ): Promise<void> {
     let hasTextDelta = false;
     let hasReceivedText = false;
@@ -331,6 +351,9 @@ export class MessageProcessor {
 
     try {
       for await (const event of stream) {
+      // 每收到事件重置空闲超时
+      resetTimer();
+
       // 记录所有事件类型（INFO级别，便于诊断）
       logger.info(`[MessageProcessor] Event: type=${event.type}, subtype=${event.subtype || 'none'}`);
 
