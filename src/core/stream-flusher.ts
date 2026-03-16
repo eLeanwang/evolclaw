@@ -23,7 +23,7 @@ export class StreamFlusher {
   private messageTimestamps: number[] = [];
 
   constructor(
-    private send: (text: string) => Promise<void>,
+    private send: (text: string, isFinal?: boolean) => Promise<void>,
     private interval = 4000,
     fileMarkerPattern?: RegExp
   ) {
@@ -135,7 +135,7 @@ export class StreamFlusher {
     return Math.max(minDelay, Math.min(maxDelay, dynamicDelay));
   }
 
-  async flush() {
+  async flush(isFinal?: boolean) {
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = undefined;
@@ -163,7 +163,7 @@ export class StreamFlusher {
     console.log('[StreamFlusher] flush called, output length:', output.length, 'isEmpty:', !output, 'preview:', output.substring(0, 100));
 
     if (output) {
-      await this.send(output);
+      await this.send(output, isFinal);
       this.sentContent = true;
       this.lastFlush = Date.now();
       this.flushCount++;

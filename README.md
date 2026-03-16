@@ -1,12 +1,13 @@
 # EvolClaw
 
-轻量化 AI Agent 网关系统，支持飞书和 ACP 双渠道接入，基于 Claude Agent SDK 构建。
+轻量级多终端接力开发工具，支持飞书和 ACP 双渠道接入，基于 Claude Agent SDK 构建。
 
 ## 核心特性
 
+- 🔄 **多终端接力**：跨终端共享会话、环境、工具、skills，无缝切换开发体验
 - 🚀 **轻量化设计**：进程模式运行，无容器依赖，代码量 ~1000 行
-- 🔄 **统一消息处理**：Channel Adapter 模式，新增渠道只需 ~15 行代码
-- 📊 **Hook 驱动监控**：基于 SDK Hook 的状态监控和超时检测
+- 🎯 **直接集成**：基于 Claude Agent SDK，无需 ACP 协议转换层
+- 📊 **统一消息处理**：Channel Adapter 模式，新增渠道只需 ~15 行代码
 - 🌐 **双渠道接入**：飞书 WebSocket + ACP 协议
 - 📁 **多项目支持**：每个项目独立会话，支持动态切换
 - 💾 **会话持久化**：SQLite + JSONL 双重保障，服务重启不丢失会话
@@ -80,18 +81,34 @@ npm run test:watch
 
 ## 项目定位
 
-EvolClaw 是一个**轻量化的 AI Agent 网关系统**，定位于比 HappyClaw 更简洁、更专注的单用户场景。
+EvolClaw 是一个**轻量级多终端接力开发工具**，基于 Claude Agent SDK 实现。
+
+### 核心价值
+
+**多终端接力开发**：支持在不同终端（飞书、命令行、Web 等）间无缝切换，共享会话、环境、工具、skills 等一切资源，最大化还原不同终端的开发体验。
+
+**技术架构**：
+```
+evolclaw → Claude Agent SDK → Claude API
+```
+
+与 ACPX 等基于 ACP 协议的工具不同，evolclaw 直接使用 Claude Agent SDK，架构更简洁：
+- **无协议转换**：直接调用 Claude API，无需 ACP 协议层
+- **无外部依赖**：不依赖其他 CLI 工具的 ACP 支持
+- **完全自主**：可自定义所有功能、工具和会话管理
+- **专注场景**：针对多终端接力开发优化
 
 ### 与其他项目对比
 
-| 特性 | EvolClaw | HappyClaw | OpenClaw |
-|------|----------|-----------|----------|
-| **定位** | 轻量化网关 | 自托管 AI Agent | 多渠道 AI 网关 |
-| **用户模式** | 单用户 | 多用户 RBAC | 单用户/多账号 |
-| **运行模式** | 进程 | Docker 容器 | 单容器 |
-| **消息渠道** | 2 个（飞书、ACP） | 3 个（飞书、Telegram、Web） | 8+ 个 |
-| **代码规模** | ~1000 行 | 完整系统 | 完整系统 |
-| **适用场景** | 个人轻量部署 | 个人/团队协作 | Agent 网络 |
+| 特性 | EvolClaw | ACPX | HappyClaw |
+|------|----------|------|-----------|
+| **定位** | 多终端接力开发 | 代理编排工具 | 自托管 AI Agent |
+| **技术栈** | Claude Agent SDK | ACP 协议客户端 | 完整系统 |
+| **架构** | SDK → API | 管道 → CLI → API | Docker 容器 |
+| **依赖** | 无外部依赖 | 需 CLI 支持 ACP | 容器环境 |
+| **消息渠道** | 2 个（飞书、ACP） | 编排多个 Agent | 3 个（飞书、Telegram、Web） |
+| **代码规模** | ~1000 行 | 协议客户端 | 完整系统 |
+| **适用场景** | 个人多终端开发 | Agent 间通信 | 个人/团队协作 |
 
 ## 系统架构
 
@@ -195,7 +212,7 @@ evolclaw/
 │   └── integration/                # 集成测试
 ├── data/
 │   ├── config.json                 # 配置文件（不在 git）
-│   ├── config.json.template        # 配置模板
+│   ├── config.sample.json          # 配置模板
 │   ├── sessions.db                 # 会话数据库
 │   └── README.md                   # 配置管理说明
 ├── docs/                           # 文档目录

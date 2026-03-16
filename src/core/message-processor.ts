@@ -235,13 +235,14 @@ export class MessageProcessor {
       // 创建 StreamFlusher，传入文件标记模式用于自动过滤
       // 使用动态判断，确保切换项目后不会继续输出
       const flusher = new StreamFlusher(
-        async (text) => {
+        async (text, isFinal) => {
           // 动态判断是否是后台任务
           const currentActiveSession = await this.sessionManager.getActiveSession(message.channel, message.channelId);
           const isCurrentlyBackground = currentActiveSession ? session.id !== currentActiveSession.id : false;
 
           if (!isCurrentlyBackground) {
-            await adapter.sendText(message.channelId, text);
+            const title = isFinal ? '最终回复:' : undefined;
+            await adapter.sendText(message.channelId, text, title ? { title } : undefined);
           }
           // 后台任务：静默，不发送输出
         },
@@ -338,7 +339,7 @@ export class MessageProcessor {
       }
 
       // Flush 剩余内容（文件标记已在 flush 时自动移除）
-      await flusher.flush();
+      await flusher.flush(true);
 
       // 清理 activeStreams（正常完成）
       this.agentRunner.cleanupStream(streamKey);

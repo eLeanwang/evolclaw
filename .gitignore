@@ -8,7 +8,6 @@ data/*.db-*
 
 # 日志
 logs/
-data/stdout.log
 data/*.log
 
 # 运行时文件

@@ -1095,7 +1095,7 @@ async function main() {
   // 注册 Feishu 适配器
   const feishuAdapter: ChannelAdapter = {
     name: 'feishu',
-    sendText: (channelId, text) => feishu.sendMessage(channelId, text),
+    sendText: (channelId, text, options) => feishu.sendMessage(channelId, text, options),
     sendFile: (channelId, filePath) => feishu.sendFile(channelId, filePath),
   };
 

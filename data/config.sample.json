@@ -1,18 +1,22 @@
 {
   "anthropic": {
-    "apiKey": "YOUR_ANTHROPIC_API_KEY"
+    "baseUrl": "https://api.anthropic.com",
+    "apiKey": "your-api-key-here"
   },
   "feishu": {
-    "appId": "YOUR_FEISHU_APP_ID",
-    "appSecret": "YOUR_FEISHU_APP_SECRET",
-    "verificationToken": "YOUR_VERIFICATION_TOKEN",
-    "encryptKey": "YOUR_ENCRYPT_KEY"
+    "appId": "your-feishu-app-id",
+    "appSecret": "your-feishu-app-secret"
   },
   "acp": {
-    "domain": "https://api.claude.ai",
-    "agentName": "evolclaw"
+    "domain": "your-acp-domain",
+    "agentName": "your-agent-name"
   },
   "projects": {
-    "defaultPath": "/path/to/your/projects"
+    "defaultPath": "/path/to/default/project",
+    "autoCreate": true,
+    "list": {
+      "project1": "/path/to/project1",
+      "project2": "/path/to/project2"
+    }
   }
 }

@@ -20,7 +20,7 @@ interface PostContent {
 /**
  * 将 Markdown 文本转换为飞书 post 消息格式
  */
-export function markdownToFeishuPost(markdown: string): PostContent {
+export function markdownToFeishuPost(markdown: string, defaultTitle?: string): PostContent {
   const lines = markdown.split('\n');
   const content: Array<Array<TextElement>> = [];
   let title = '';
@@ -96,9 +96,9 @@ export function markdownToFeishuPost(markdown: string): PostContent {
     }
   }
 
-  // 如果没有提取到标题，使用默认标题
+  // 如果没有提取到标题，使用传入的默认标题或空字符串
   if (!title) {
-    title = '消息';
+    title = defaultTitle ?? '';
   }
 
   return {

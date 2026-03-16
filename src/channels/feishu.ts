@@ -264,7 +264,7 @@ export class FeishuChannel {
     }
   }
 
-  async sendMessage(chatId: string, content: string): Promise<void> {
+  async sendMessage(chatId: string, content: string, options?: { title?: string }): Promise<void> {
     if (!this.client) return;
 
     if (!content || content.trim() === '') {
@@ -280,7 +280,7 @@ export class FeishuChannel {
 
       if (useMarkdown) {
         // 使用 post 类型发送富文本消息
-        const postContent = markdownToFeishuPost(content);
+        const postContent = markdownToFeishuPost(content, options?.title);
         await this.client.im.message.create({
           params: { receive_id_type: 'chat_id' },
           data: {

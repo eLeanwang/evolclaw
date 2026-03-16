@@ -12,7 +12,7 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
 PID_FILE="$SCRIPT_DIR/data/evolclaw.pid"
 LOG_DIR="$SCRIPT_DIR/logs"
-STDOUT_LOG="$SCRIPT_DIR/data/stdout.log"
+STDOUT_LOG="$SCRIPT_DIR/logs/stdout.log"
 NODE_BIN="node"
 APP_MAIN="$SCRIPT_DIR/dist/index.js"
 

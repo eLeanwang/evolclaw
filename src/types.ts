@@ -49,7 +49,7 @@ export interface Message {
 // 渠道适配器接口
 export interface ChannelAdapter {
   readonly name: 'feishu' | 'acp';
-  sendText(channelId: string, text: string): Promise<void>;
+  sendText(channelId: string, text: string, options?: { title?: string }): Promise<void>;
   sendFile?(channelId: string, filePath: string): Promise<void>;
 }
 

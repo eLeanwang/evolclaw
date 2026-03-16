@@ -3,8 +3,8 @@
 # EvolClaw 自动重启监控脚本
 
 PID_FILE="/home/evolclaw/data/evolclaw.pid"
-LOG_FILE="/home/evolclaw/data/evolclaw.log"
-RESTART_LOG="/home/evolclaw/data/restart.log"
+LOG_FILE="/home/evolclaw/logs/stdout.log"
+RESTART_LOG="/home/evolclaw/logs/restart.log"
 
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Restart monitor started" >> "$RESTART_LOG"
 
