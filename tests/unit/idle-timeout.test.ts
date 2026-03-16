@@ -90,7 +90,7 @@ function createMessage(content = 'hello'): Message {
   return { channel: 'feishu', channelId: 'test-channel', content, timestamp: Date.now() };
 }
 
-describe('Idle Timeout', () => {
+describe('Idle Timeout with Health Check', () => {
   beforeEach(() => {
     vi.useFakeTimers();
   });
@@ -138,19 +138,17 @@ describe('Idle Timeout', () => {
 
     // 不应调用 interrupt
     expect(runner.interruptCalled()).toBe(false);
-    // 不应有超时提示消息
-    expect(adapter.sentMessages.every(m => !m.includes('超时'))).toBe(true);
+    // 不应有超时或健康检查消息
+    expect(adapter.sentMessages.every(m => !m.includes('超时') && !m.includes('健康检查'))).toBe(true);
   });
 
-  it('should timeout when no events arrive within idle window', async () => {
+  it('should send notify at 1x idle, warn at 2.5x, and kill at 5x', async () => {
     // 创建一个永远不产生事件的流
     const runner = createMockAgentRunner([], 0);
-    // 覆盖 runQuery 返回一个永远挂起的流
     runner.runQuery.mockImplementation(async () => ({
       [Symbol.asyncIterator]() {
         return {
           async next() {
-            // 永远不返回，模拟无输出
             return new Promise(() => {});
           }
         };
@@ -165,7 +163,7 @@ describe('Idle Timeout', () => {
       anthropic: { apiKey: 'test' },
       feishu: { appId: '', appSecret: '' },
       acp: { domain: '', agentName: '' },
-      timeout: { idle: 500 },  // 500ms 空闲超时
+      timeout: { idle: 500 },  // 500ms idle threshold for fast tests
     };
 
     const processor = new MessageProcessor(
@@ -178,18 +176,18 @@ describe('Idle Timeout', () => {
 
     const processPromise = processor.processMessage(createMessage()).catch(e => e);
 
-    // 推进 500ms 触发超时
-    await vi.advanceTimersByTimeAsync(500);
+    // Health check interval is 30s, but with fake timers we need to advance past thresholds
+    // notify at 500ms (1×), warn at 1250ms (2.5×), kill at 2500ms (5×)
+    // The 30s interval with a 500ms idle → first check at 30s already past kill threshold
 
-    // 等待 promise 完成
+    // For this test, advance time in 30s chunks (the health check interval)
+    // At 30s check: idle=30000ms, way past 500ms×5=2500ms → triggers notify, warn, then kill
+    await vi.advanceTimersByTimeAsync(30000);
+
     const error = await processPromise;
     expect(error).toBeInstanceOf(Error);
     expect(error.message).toBe('SDK_TIMEOUT');
-
-    // 应调用 interrupt
     expect(runner.interrupt).toHaveBeenCalled();
-    // 应发送超时提示
-    expect(adapter.sentMessages.some(m => m.includes('超时'))).toBe(true);
   });
 
   it('should use default 120s when config.timeout.idle is not set', async () => {
@@ -208,7 +206,7 @@ describe('Idle Timeout', () => {
     const messageCache = createMockMessageCache();
     const adapter = createMockAdapter();
 
-    // 不设置 timeout 配置
+    // 不设置 timeout 配置 → 默认 120000ms
     const config: Config = {
       anthropic: { apiKey: 'test' },
       feishu: { appId: '', appSecret: '' },
@@ -225,12 +223,26 @@ describe('Idle Timeout', () => {
 
     const processPromise = processor.processMessage(createMessage()).catch(e => e);
 
-    // 119秒不应超时
-    await vi.advanceTimersByTimeAsync(119000);
+    // Health check interval is 30s
+    // Default idle = 120s, notify at 120s, warn at 300s, kill at 600s
+
+    // At 30s: no threshold reached yet (idle < 120s)
+    await vi.advanceTimersByTimeAsync(30000);
     expect(runner.interrupt).not.toHaveBeenCalled();
 
-    // 120秒应超时
-    await vi.advanceTimersByTimeAsync(1000);
+    // At 90s: still no threshold
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(runner.interrupt).not.toHaveBeenCalled();
+
+    // At 120s: notify threshold reached, but health check fires every 30s
+    // Next check at 120s → should trigger notify
+    await vi.advanceTimersByTimeAsync(30000);
+    // notify sent but not killed
+    expect(runner.interrupt).not.toHaveBeenCalled();
+    expect(adapter.sentMessages.some(m => m.includes('健康检查'))).toBe(true);
+
+    // Advance to 600s (kill threshold) — 480s more
+    await vi.advanceTimersByTimeAsync(480000);
 
     const error = await processPromise;
     expect(error).toBeInstanceOf(Error);
@@ -279,7 +291,73 @@ describe('Idle Timeout', () => {
     await processPromise;
 
     expect(runner.interruptCalled()).toBe(false);
-    expect(adapter.sentMessages.every(m => !m.includes('超时'))).toBe(true);
+    expect(adapter.sentMessages.every(m => !m.includes('超时') && !m.includes('健康检查'))).toBe(true);
+  });
+
+  it('should send diagnostic info with tool name and event count', async () => {
+    // 流先产生一些事件，然后挂住
+    let resolveHang: () => void;
+    const hangPromise = new Promise<void>(r => { resolveHang = r; });
+    let eventIndex = 0;
+    const events = [
+      { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Bash', input: { command: 'npm test' } }] } },
+      { type: 'text_delta', text: 'Running...' },
+    ];
+
+    const runner = createMockAgentRunner([], 0);
+    runner.runQuery.mockImplementation(async () => ({
+      [Symbol.asyncIterator]() {
+        return {
+          async next(): Promise<{ done: boolean; value: any }> {
+            if (eventIndex < events.length) {
+              return { done: false, value: events[eventIndex++] };
+            }
+            // 挂住，模拟长时间无输出
+            await hangPromise;
+            return { done: true, value: undefined };
+          }
+        };
+      }
+    }));
+
+    const sessionManager = createMockSessionManager();
+    const messageCache = createMockMessageCache();
+    const adapter = createMockAdapter();
+
+    const config: Config = {
+      anthropic: { apiKey: 'test' },
+      feishu: { appId: '', appSecret: '' },
+      acp: { domain: '', agentName: '' },
+      timeout: { idle: 500 },
+    };
+
+    const processor = new MessageProcessor(
+      runner as any,
+      sessionManager as any,
+      config,
+      messageCache as any,
+    );
+    processor.registerChannel(adapter);
+
+    const processPromise = processor.processMessage(createMessage()).catch(e => e);
+
+    // Let initial events process
+    await vi.advanceTimersByTimeAsync(100);
+
+    // Advance past health check interval (30s) to trigger check
+    // At this point idle > 500ms × 5 = 2500ms (well past kill at 30s)
+    await vi.advanceTimersByTimeAsync(30000);
+
+    // Resolve the hang so stream finishes
+    resolveHang!();
+
+    const error = await processPromise;
+    expect(error).toBeInstanceOf(Error);
+    expect(error.message).toBe('SDK_TIMEOUT');
+
+    // The kill message should reference the last tool (🛑 is the kill prefix)
+    const killMsg = adapter.sentMessages.find(m => m.includes('🛑') || m.includes('自动中断'));
+    expect(killMsg).toBeDefined();
+    expect(killMsg).toContain('Bash');
   });
 });
-

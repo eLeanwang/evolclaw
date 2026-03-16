@@ -568,6 +568,30 @@ export class SessionManager {
     return null;
   }
 
+  /**
+   * 统计会话回合数（用户消息数）
+   */
+  countSessionTurns(projectPath: string, claudeSessionId: string): number {
+    const sessionFile = this.getSessionFilePath(projectPath, claudeSessionId);
+    if (!fs.existsSync(sessionFile)) return 0;
+
+    try {
+      const content = fs.readFileSync(sessionFile, 'utf-8');
+      const lines = content.split('\n').filter(l => l.trim());
+      let turns = 0;
+      for (const line of lines) {
+        const event = JSON.parse(line);
+        if (event.type === 'user' && event.message?.role === 'user') {
+          turns++;
+        }
+      }
+      return turns;
+    } catch (error) {
+      logger.warn(`Failed to count session turns: ${sessionFile}`, error);
+      return 0;
+    }
+  }
+
   async getSessionByUuidPrefix(channel: 'feishu' | 'acp', channelId: string, uuidPrefix: string): Promise<Session | undefined> {
     const rows = this.db.prepare(`
       SELECT * FROM sessions

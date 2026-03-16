@@ -109,7 +109,7 @@ async function handleProjectCommand(
   }
 
   // 支持的命令列表
-  const commands = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/slist', '/session', '/rename', '/stop', '/clear', '/repair', '/safe'];
+  const commands = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/slist', '/session', '/rename', '/stop', '/clear', '/compact', '/repair', '/safe'];
 
   // 检查是否以 / 开头（可能是命令）
   if (normalizedContent.startsWith('/')) {
@@ -150,6 +150,7 @@ async function handleProjectCommand(
   /name, /rename <新名称> - 重命名当前会话
   /status - 显示会话状态
   /clear - 清空当前会话的对话历史
+  /compact - 压缩会话上下文（减少 token 用量）
   /stop - 中断当前任务
   /restart - 重启服务
 
@@ -206,15 +207,58 @@ async function handleProjectCommand(
     return '✓ 已发送中断信号，任务将尽快停止';
   }
 
-  // /clear 命令：清空当前会话的对话历史
+  // /clear 命令：通过 SDK /clear 清空会话历史
   if (normalizedContent === '/clear') {
     const session = await sessionManager.getSession(channel, channelId);
     if (!session) {
       return '❌ 当前没有活跃会话\n使用 /new 创建新会话';
     }
 
-    await agentRunner.clearHistory(session.id);
-    return '✓ 已清空当前会话的对话历史';
+    if (!session.claudeSessionId) {
+      return '❌ 当前会话没有历史记录，无需清空';
+    }
+
+    const projectPath = path.isAbsolute(session.projectPath)
+      ? session.projectPath
+      : path.resolve(process.cwd(), session.projectPath);
+
+    const cleared = await agentRunner.clearSession(session.claudeSessionId, projectPath);
+    if (cleared) {
+      // 清除数据库和内存中的 claudeSessionId，下次查询将创建新会话
+      await sessionManager.updateClaudeSessionIdBySessionId(session.id, '');
+      agentRunner.updateSessionId(session.id, '');
+      return '✅ 已清空当前会话的对话历史';
+    } else {
+      return '❌ 清空会话失败，请稍后重试';
+    }
+  }
+
+  // /compact 命令：手动压缩会话上下文
+  if (normalizedContent === '/compact') {
+    const session = await sessionManager.getSession(channel, channelId);
+    if (!session) {
+      return '❌ 当前没有活跃会话\n使用 /new 创建新会话';
+    }
+
+    if (!session.claudeSessionId) {
+      return '❌ 当前会话没有历史记录，无需压缩';
+    }
+
+    const projectPath = path.isAbsolute(session.projectPath)
+      ? session.projectPath
+      : path.resolve(process.cwd(), session.projectPath);
+
+    // 先发送提示，再执行压缩
+    if (sendMessage) {
+      await sendMessage(channelId, '⏳ 正在压缩会话上下文...');
+    }
+
+    const compacted = await agentRunner.compactSession(session.id, session.claudeSessionId, projectPath);
+    if (compacted) {
+      return '✅ 会话上下文已压缩';
+    } else {
+      return '❌ 会话压缩失败，请稍后重试';
+    }
   }
 
   // 尝试获取活跃会话（所有命令都尝试获取，但不强制）
@@ -275,6 +319,7 @@ async function handleProjectCommand(
       `会话ID: ${session.id}`,
       `项目路径: ${session.projectPath}`,
       `活跃状态: ${activeStatus}`,
+      `会话轮数: ${session.claudeSessionId ? sessionManager.countSessionTurns(session.projectPath, session.claudeSessionId) : 0}`,
       `异常计数: ${health.consecutiveErrors}`,
       `安全模式: ${health.safeMode ? '是 ⚠️' : '否 ✓'}`,
       `最后成功: ${timeStr}`,
@@ -1071,7 +1116,7 @@ async function main() {
   processor.registerChannel(acpAdapter);
 
   // 命令列表（用于快速检查，必须与 handleProjectCommand 中的 commands 保持同步）
-  // 注意：/stop, /clear, /safe 故意不在此列表中，它们需要进入队列触发中断机制
+  // 注意：/stop, /clear, /compact, /safe 故意不在此列表中，它们需要进入队列触发中断机制
   const commandPrefixes = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/slist', '/session', '/rename', '/repair', '/p ', '/s ', '/name '];
   const isCommand = (content: string) => content === '/p' || content === '/s' || commandPrefixes.some(cmd => content.startsWith(cmd));
 

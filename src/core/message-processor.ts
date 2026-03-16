@@ -4,9 +4,10 @@ import { AgentRunner } from './agent-runner.js';
 import { SessionManager } from './session-manager.js';
 import { StreamFlusher } from './stream-flusher.js';
 import { MessageCache } from './message-cache.js';
+import { IdleHealthTracker } from './idle-health-tracker.js';
 import { logger } from '../utils/logger.js';
 import { getErrorMessage } from '../utils/error-handler.js';
-import { classifyError } from '../utils/error-classifier.js';
+import { classifyError, ErrorType } from '../utils/error-classifier.js';
 import type { Message, Config, Session, ChannelAdapter, ChannelOptions, CommandHandler } from '../types.js';
 
 /**
@@ -47,26 +48,45 @@ export class MessageProcessor {
   async processMessage(message: Message): Promise<void> {
     const idleMs = this.config.timeout?.idle ?? 120000;
     const streamKey = `${message.channel}-${message.channelId}`;
+    const channelInfo = this.channels.get(message.channel);
 
-    let timer: NodeJS.Timeout;
+    const tracker = new IdleHealthTracker(idleMs);
+    let healthInterval: ReturnType<typeof setInterval>;
     let rejectFn: (err: Error) => void;
 
-    const resetTimer = () => {
-      clearTimeout(timer);
-      timer = setTimeout(async () => {
-        logger.warn(`[MessageProcessor] Idle timeout after ${idleMs / 1000}s, interrupting stream: ${streamKey}`);
-        try {
-          await this.agentRunner.interrupt(streamKey);
-        } catch (e) {
-          logger.debug(`[MessageProcessor] Interrupt failed (may already be cleaned up):`, e);
-        }
-        rejectFn(new Error('SDK_TIMEOUT'));
-      }, idleMs);
+    const resetTimer = (eventType?: string, toolName?: string) => {
+      tracker.recordEvent(eventType || 'unknown', toolName);
     };
 
     const timeoutPromise = new Promise<never>((_, reject) => {
       rejectFn = reject;
-      resetTimer();
+      healthInterval = setInterval(async () => {
+        // Drain all pending levels in one tick
+        let result = tracker.checkHealth();
+        while (result) {
+          if (result.action === 'kill') {
+            logger.warn(`[MessageProcessor] Health check: kill after ${result.idleSec}s idle, stream: ${streamKey}`);
+            try {
+              await this.agentRunner.interrupt(streamKey);
+            } catch (e) {
+              logger.debug(`[MessageProcessor] Interrupt failed (may already be cleaned up):`, e);
+            }
+            rejectFn(new Error('SDK_TIMEOUT'));
+            return;
+          } else {
+            // notify or warn: send diagnostic message, task continues
+            logger.info(`[MessageProcessor] Health check: ${result.action} after ${result.idleSec}s idle, stream: ${streamKey}`);
+            if (channelInfo) {
+              try {
+                await channelInfo.adapter.sendText(message.channelId, result.message);
+              } catch (e) {
+                logger.debug(`[MessageProcessor] Failed to send health check message:`, e);
+              }
+            }
+          }
+          result = tracker.checkHealth();
+        }
+      }, 30000);
     });
 
     try {
@@ -75,19 +95,10 @@ export class MessageProcessor {
         timeoutPromise
       ]);
     } catch (error: any) {
-      // 超时错误：发送用户提示
-      if (error.message === 'SDK_TIMEOUT') {
-        const channelInfo = this.channels.get(message.channel);
-        if (channelInfo) {
-          await channelInfo.adapter.sendText(
-            message.channelId,
-            `⚠️ 任务超时（${idleMs / 1000}秒无响应），已自动中断`
-          );
-        }
-      }
+      // 超时错误：kill 级别已发送诊断信息，无需再发
+      // 非超时错误走通用处理
 
       // 记录错误到健康状态
-      const channelInfo = this.channels.get(message.channel);
       if (channelInfo) {
         try {
           const session = await this.sessionManager.getOrCreateSession(
@@ -97,18 +108,22 @@ export class MessageProcessor {
           );
 
           const errorType = classifyError(error);
-          await this.sessionManager.recordError(session.id, errorType, error.message);
 
-          // 检查是否需要进入安全模式
-          const health = await this.sessionManager.getHealthStatus(session.id);
-          if (health.consecutiveErrors >= 3 && !health.safeMode) {
-            await this.sessionManager.setSafeMode(session.id, true);
-            logger.warn(`[MessageProcessor] Session ${session.id} entered safe mode after ${health.consecutiveErrors} errors`);
+          // 上下文过长是可恢复错误，不累计触发安全模式
+          if (errorType === ErrorType.CONTEXT_TOO_LONG) {
+            logger.info(`[MessageProcessor] Context too long error, skipping safe mode accumulation`);
+          } else if (error.message === 'SDK_TIMEOUT') {
+            // 仅 kill 级别记录错误
+            await this.sessionManager.recordError(session.id, errorType, error.message);
 
-            // 发送安全模式提示
-            await channelInfo.adapter.sendText(
-              message.channelId,
-              `⚠️ 安全模式已启用（连续 ${health.consecutiveErrors} 次异常）
+            const health = await this.sessionManager.getHealthStatus(session.id);
+            if (health.consecutiveErrors >= 3 && !health.safeMode) {
+              await this.sessionManager.setSafeMode(session.id, true);
+              logger.warn(`[MessageProcessor] Session ${session.id} entered safe mode after ${health.consecutiveErrors} errors`);
+
+              await channelInfo.adapter.sendText(
+                message.channelId,
+                `⚠️ 安全模式已启用（连续 ${health.consecutiveErrors} 次异常）
 
 当前限制：
 - 无法记住之前的对话
@@ -118,13 +133,43 @@ export class MessageProcessor {
 1. /repair - 检查并修复会话（推荐，保留历史）
 2. /new [名称] - 创建新会话（清空历史）
 3. /status - 查看详细状态`
-            );
-          } else if (health.consecutiveErrors === 2) {
-            // 第2次错误，发送警告
-            await channelInfo.adapter.sendText(
-              message.channelId,
-              `⚠️ 检测到异常（${health.consecutiveErrors}/3）\n\n如果问题持续，系统将自动进入安全模式。建议使用 /status 查看状态。`
-            );
+              );
+            } else if (health.consecutiveErrors === 2) {
+              await channelInfo.adapter.sendText(
+                message.channelId,
+                `⚠️ 检测到异常（${health.consecutiveErrors}/3）\n\n如果问题持续，系统将自动进入安全模式。建议使用 /status 查看状态。`
+              );
+            }
+          } else {
+            await this.sessionManager.recordError(session.id, errorType, error.message);
+
+            // 检查是否需要进入安全模式
+            const health = await this.sessionManager.getHealthStatus(session.id);
+            if (health.consecutiveErrors >= 3 && !health.safeMode) {
+              await this.sessionManager.setSafeMode(session.id, true);
+              logger.warn(`[MessageProcessor] Session ${session.id} entered safe mode after ${health.consecutiveErrors} errors`);
+
+              // 发送安全模式提示
+              await channelInfo.adapter.sendText(
+                message.channelId,
+                `⚠️ 安全模式已启用（连续 ${health.consecutiveErrors} 次异常）
+
+当前限制：
+- 无法记住之前的对话
+- 每次提问需要提供完整上下文
+
+建议操作：
+1. /repair - 检查并修复会话（推荐，保留历史）
+2. /new [名称] - 创建新会话（清空历史）
+3. /status - 查看详细状态`
+              );
+            } else if (health.consecutiveErrors === 2) {
+              // 第2次错误，发送警告
+              await channelInfo.adapter.sendText(
+                message.channelId,
+                `⚠️ 检测到异常（${health.consecutiveErrors}/3）\n\n如果问题持续，系统将自动进入安全模式。建议使用 /status 查看状态。`
+              );
+            }
           }
         } catch (healthError) {
           logger.error('[MessageProcessor] Failed to update health status:', healthError);
@@ -133,11 +178,11 @@ export class MessageProcessor {
 
       throw error;
     } finally {
-      clearTimeout(timer!);
+      clearInterval(healthInterval!);
     }
   }
 
-  private async _processMessageInternal(message: Message, resetTimer: () => void): Promise<void> {
+  private async _processMessageInternal(message: Message, resetTimer: (eventType?: string, toolName?: string) => void): Promise<void> {
     const messageId = `${message.channel}_${message.channelId}_${message.timestamp || Date.now()}`;
     const channelInfo = this.channels.get(message.channel);
 
@@ -207,32 +252,72 @@ export class MessageProcessor {
       // 保存当前 flusher，用于 compact 事件
       this.currentFlusher = flusher;
 
-      // 调用 AgentRunner
-      const stream = await this.agentRunner.runQuery(
-        session.id,
-        message.content,
-        absoluteProjectPath,
-        session.claudeSessionId,
-        message.images,
-        options?.systemPromptAppend,
-        this.sessionManager
-      );
-
-      // 使用 channelId 作为 stream key 存储，便于中断
+      // 调用 AgentRunner（含上下文过长自动 compact 重试）
       const streamKey = `${message.channel}-${message.channelId}`;
-      this.agentRunner.registerStream(streamKey, stream);
 
-      // 处理事件流
-      await this.processEventStream(
-        stream,
-        session,
-        message.channelId,
-        adapter,
-        options,
-        flusher,
-        isBackground,
-        resetTimer
-      );
+      try {
+        const stream = await this.agentRunner.runQuery(
+          session.id,
+          message.content,
+          absoluteProjectPath,
+          session.claudeSessionId,
+          message.images,
+          options?.systemPromptAppend,
+          this.sessionManager
+        );
+        this.agentRunner.registerStream(streamKey, stream);
+
+        await this.processEventStream(
+          stream,
+          session,
+          message.channelId,
+          adapter,
+          options,
+          flusher,
+          isBackground,
+          resetTimer
+        );
+      } catch (error) {
+        if (this.isContextTooLongError(error) && session.claudeSessionId) {
+          // 尝试 compact 压缩会话
+          flusher.addActivity('⚠️ 上下文过长，正在压缩会话...');
+          await flusher.flush();
+
+          const compacted = await this.agentRunner.compactSession(
+            session.id, session.claudeSessionId, absoluteProjectPath
+          );
+
+          if (compacted) {
+            // compact 成功，带 resume 重试
+            flusher.addActivity('✅ 压缩完成，正在重试...');
+            const retryStream = await this.agentRunner.runQuery(
+              session.id,
+              message.content,
+              absoluteProjectPath,
+              session.claudeSessionId,
+              message.images,
+              options?.systemPromptAppend,
+              this.sessionManager
+            );
+            this.agentRunner.registerStream(streamKey, retryStream);
+
+            await this.processEventStream(
+              retryStream,
+              session,
+              message.channelId,
+              adapter,
+              options,
+              flusher,
+              isBackground,
+              resetTimer
+            );
+          } else {
+            throw new Error('CONTEXT_COMPACT_FAILED');
+          }
+        } else {
+          throw error;
+        }
+      }
 
       // 处理文件标记（Feishu 专用）- 提取并发送文件
       if (options?.fileMarkerPattern && adapter.sendFile) {
@@ -342,7 +427,7 @@ export class MessageProcessor {
     options: ChannelOptions | undefined,
     flusher: StreamFlusher,
     isBackground: boolean,
-    resetTimer: () => void
+    resetTimer: (eventType?: string, toolName?: string) => void
   ): Promise<void> {
     let hasTextDelta = false;
     let hasReceivedText = false;
@@ -351,8 +436,11 @@ export class MessageProcessor {
 
     try {
       for await (const event of stream) {
-      // 每收到事件重置空闲超时
-      resetTimer();
+      // 每收到事件重置空闲超时，传入事件类型和工具名
+      const toolName = event.type === 'assistant'
+        ? event.message?.content?.find((c: any) => c.type === 'tool_use')?.name
+        : undefined;
+      resetTimer(event.type, toolName);
 
       // 记录所有事件类型（INFO级别，便于诊断）
       logger.info(`[MessageProcessor] Event: type=${event.type}, subtype=${event.subtype || 'none'}`);
@@ -458,6 +546,15 @@ export class MessageProcessor {
   }
 
   /**
+   * 判断是否为上下文过长错误
+   */
+  private isContextTooLongError(error: any): boolean {
+    const msg = (error?.message || String(error)).toLowerCase();
+    return msg.includes('上下文过长') || msg.includes('context too long')
+      || msg.includes('context_length_exceeded');
+  }
+
+  /**
    * 格式化工具描述（通用）
    */
   private formatToolDescription(toolUse: {
@@ -477,34 +574,27 @@ export class MessageProcessor {
   }
 
   /**
-   * 解析文件路径，支持相对路径和绝对路径修正
-   * Claude 工作在 .openclaw/workspace/ 目录下
+   * 解析文件路径，支持相对路径和绝对路径
+   * 优先在项目根目录查找，兜底尝试 .openclaw/workspace/
    */
   private resolveFilePath(filePath: string, projectPath: string): string {
-    const claudeWorkDir = path.join(projectPath, '.openclaw', 'workspace');
-
-    // 相对路径：基于 Claude 工作目录
-    if (!path.isAbsolute(filePath)) {
-      return path.join(claudeWorkDir, filePath);
-    }
-
-    // 绝对路径：先检查是否存在
-    if (fs.existsSync(filePath)) {
+    if (path.isAbsolute(filePath)) {
       return filePath;
     }
 
-    // 绝对路径不存在，尝试修正：
-    // 如果路径包含 .openclaw/workspace，提取相对部分并重新拼接
-    const workspaceMatch = filePath.match(/\.openclaw\/workspace\/(.+)$/);
-    if (workspaceMatch) {
-      const relativePart = workspaceMatch[1];
-      const correctedPath = path.join(claudeWorkDir, relativePart);
-      if (fs.existsSync(correctedPath)) {
-        return correctedPath;
-      }
+    // 优先在项目根目录查找
+    const rootPath = path.join(projectPath, filePath);
+    if (fs.existsSync(rootPath)) {
+      return rootPath;
     }
 
-    // 无法修正，返回原路径（让后续报错）
-    return filePath;
+    // 兜底：尝试 .openclaw/workspace/
+    const workspacePath = path.join(projectPath, '.openclaw', 'workspace', filePath);
+    if (fs.existsSync(workspacePath)) {
+      return workspacePath;
+    }
+
+    // 都找不到，返回项目根目录路径
+    return rootPath;
   }
 }
