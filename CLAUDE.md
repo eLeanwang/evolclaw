@@ -66,8 +66,9 @@ npm run test:hooks
 7. **Storage Layer** - JSONL files (SDK-managed) + SQLite metadata
 
 ### Entry Points
-- **`src/index.ts`** - Main entry (default, production use)
-  - Full feature set: project commands, interrupt mechanism, batch sending, session persistence
+- **`src/index.ts`** - Main entry (~320 lines, default, production use)
+  - Initialization, channel wiring, message queue setup
+  - Command processing delegated to `CommandHandler`
   - Uses `AgentRunner` for direct SDK calls
 
 - **`src/index-gateway.ts`** - Gateway mode (experimental, not used)
@@ -87,9 +88,10 @@ Default entry: `src/index.ts` (via `package.json` main field)
 **Channel Adapter Pattern**:
 ```typescript
 interface ChannelAdapter {
-  name: 'feishu' | 'acp';
+  name: string;
   sendText(channelId: string, text: string): Promise<void>;
   sendFile?(channelId: string, filePath: string): Promise<void>;
+  isGroupChat?(channelId: string): Promise<boolean>;  // 群聊检测，不实现则默认 false
 }
 ```
 
@@ -169,10 +171,10 @@ formatToolDescription(toolUse) {
 
 ### Message Flow
 ```
-Channel → handleProjectCommand() → AgentRunner.runQuery() → Extract session_id → Accumulate response → Send to channel
+Channel → CommandHandler.handle() → AgentRunner.runQuery() → Extract session_id → Accumulate response → Send to channel
 ```
 
-Messages starting with `/project` are intercepted as commands before reaching the Agent.
+Messages starting with `/` are intercepted by `CommandHandler` before reaching the Agent.
 
 ### File Handling (Feishu Channel)
 
@@ -323,11 +325,11 @@ EvolClaw supports slash commands for project and session management:
 - `/s` = `/session` (quick session switching)
 - `/name` = `/rename` (quick renaming)
 
-All commands are processed in `handleProjectCommand()` before being passed to the Agent.
+All commands are processed in `CommandHandler` (`src/core/command-handler.ts`) before being passed to the Agent.
 
 ### Adding a New Command
-1. Add command check in `handleProjectCommand()` in `src/index.ts`
-2. Parse arguments and validate
+1. Add command to the `commands` array in `src/core/command-handler.ts`
+2. Add handler logic in `CommandHandler.handle()` method
 3. Interact with `SessionManager` or `AgentRunner` as needed
 4. Return response string (or null to pass to Agent)
 
@@ -342,15 +344,17 @@ All commands are processed in `handleProjectCommand()` before being passed to th
      name: 'channel-name',
      sendText: (channelId, text) => channel.sendMessage(channelId, text),
      sendFile: (channelId, filePath) => channel.sendFile(channelId, filePath), // optional
+     isGroupChat: (channelId) => channel.isGroup(channelId), // optional
    };
    ```
-3. Register adapter with `MessageProcessor`:
+3. Register adapter with `MessageProcessor` and `CommandHandler`:
    ```typescript
    processor.registerChannel(adapter, {
      systemPromptAppend: 'channel-specific instructions',
      fileMarkerPattern: /\[PATTERN:([^\]]+)\]/g,  // optional
      supportsImages: true  // optional
    });
+   cmdHandler.registerAdapter(adapter);
    ```
 4. Wire up message queue:
    ```typescript
@@ -390,7 +394,7 @@ Hook events are collected by `HookCollector` and stored in `session_events` tabl
 - `assistant` events: Complete message format (event.message.content[].text)
 - `result` events: Final result (event.result)
 
-**Critical**: Code must handle all three formats. Current implementation in `src/index.ts`:
+**Critical**: Code must handle all three formats. Current implementation in `src/core/message-processor.ts`:
 ```typescript
 if (event.type === 'text_delta') {
   response += event.text;
@@ -443,14 +447,15 @@ ACP channel (`src/channels/acp.ts`) is currently a placeholder implementation. R
 
 ## Critical Files
 
-- `src/index.ts` - Main entry point with channel setup and message queue
+- `src/index.ts` - Main entry point (~320 lines): channel setup, adapter wiring, message queue
+- `src/core/command-handler.ts` - Slash command processing (CommandHandler class)
 - `src/core/message-processor.ts` - Unified event processing engine
 - `src/core/message-queue.ts` - Serial processing with interrupt support
 - `src/core/stream-flusher.ts` - Batched message sending (3s window)
-- `src/agent-runner.ts` - Claude Agent SDK wrapper with interrupt support
-- `src/session-manager.ts` - Session-to-project mapping
+- `src/core/agent-runner.ts` - Claude Agent SDK wrapper with interrupt support
+- `src/core/session-manager.ts` - Session-to-project mapping (SQLite-backed)
 - `src/channels/feishu.ts` - Production-grade Feishu connection
-- `src/gateway/claude-instance.ts` - SDK instance with Hook configuration
+- `src/gateway/claude-instance.ts` - SDK instance with Hook configuration (experimental)
 - `data/config.json` - Runtime configuration (not in git, contains secrets)
 
 ## Service Management
