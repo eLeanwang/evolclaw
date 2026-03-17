@@ -4,7 +4,7 @@ import { AgentRunner } from './agent-runner.js';
 import { SessionManager } from './session-manager.js';
 import { StreamFlusher } from './stream-flusher.js';
 import { MessageCache } from './message-cache.js';
-import { IdleHealthTracker } from './idle-health-tracker.js';
+import { IdleHealthTracker } from '../utils/idle-health-tracker.js';
 import { logger } from '../utils/logger.js';
 import { getErrorMessage } from '../utils/error-handler.js';
 import { classifyError, ErrorType } from '../utils/error-classifier.js';

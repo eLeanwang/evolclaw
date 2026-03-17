@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { IdleHealthTracker } from '../../src/core/idle-health-tracker.js';
+import { IdleHealthTracker } from '../../src/utils/idle-health-tracker.js';
 
 describe('IdleHealthTracker', () => {
   beforeEach(() => {
