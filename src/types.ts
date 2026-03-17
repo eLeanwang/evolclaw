@@ -1,6 +1,6 @@
 export interface Config {
-  anthropic: {
-    apiKey: string;
+  anthropic?: {
+    apiKey?: string;
     baseUrl?: string;
     model?: string;
   };

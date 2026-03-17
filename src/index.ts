@@ -1,4 +1,4 @@
-import { loadConfig, saveConfig, ensureDir } from './config.js';
+import { loadConfig, saveConfig, ensureDir, resolveAnthropicConfig } from './config.js';
 import { SessionManager } from './core/session-manager.js';
 import { AgentRunner } from './core/agent-runner.js';
 import { FeishuChannel } from './channels/feishu.js';
@@ -11,7 +11,7 @@ import { logger } from './utils/logger.js';
 import path from 'path';
 import fs from 'fs';
 
-const availableModels: string[] = ['claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5-20251001'];
+const availableModels: string[] = ['opus', 'sonnet', 'haiku', 'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5-20251001'];
 
 /**
  * 计算两个字符串的 Levenshtein 距离（编辑距离）
@@ -193,6 +193,7 @@ async function handleProjectCommand(
     }
 
     // 更新配置
+    if (!config.anthropic) config.anthropic = {};
     config.anthropic.model = args;
     saveConfig(config);
 
@@ -992,12 +993,12 @@ async function main() {
 
   // 加载配置
   const config = loadConfig();
+  const anthropic = resolveAnthropicConfig(config);
   logger.info('✓ Config loaded (API keys hidden)');
 
-  // 设置环境变量（如果配置了 baseUrl）
-  if (config.anthropic.baseUrl) {
-    process.env.ANTHROPIC_BASE_URL = config.anthropic.baseUrl;
-    logger.info(`✓ Using custom API base URL: ${config.anthropic.baseUrl}`);
+  // baseUrl 由 resolveAnthropicConfig 处理，不再手动设置 process.env
+  if (anthropic.baseUrl) {
+    logger.info(`✓ Using custom API base URL: ${anthropic.baseUrl}`);
   }
 
   // 初始化数据库
@@ -1007,12 +1008,13 @@ async function main() {
 
   // 初始化 Agent Runner（带持久化回调）
   const agentRunner = new AgentRunner(
-    config.anthropic.apiKey,
-    config.anthropic.model,
+    anthropic.apiKey,
+    anthropic.model,
     async (sessionId, claudeSessionId) => {
       // 直接根据 sessionId 更新，避免错误更新其他项目的会话
       await sessionManager.updateClaudeSessionIdBySessionId(sessionId, claudeSessionId);
-    }
+    },
+    anthropic.baseUrl
   );
   logger.info('✓ Agent runner ready');
 

@@ -11,6 +11,7 @@ import { canUseTool } from '../utils/permission.js';
 export class AgentRunner {
   private apiKey: string;
   private model: string;
+  private baseUrl?: string;
   private activeSessions: Map<string, string> = new Map();
   private activeStreams = new Map<string, AsyncIterable<any>>();
   private onSessionIdUpdate?: (sessionId: string, claudeSessionId: string) => void;
@@ -19,10 +20,12 @@ export class AgentRunner {
   constructor(
     apiKey: string,
     model?: string,
-    onSessionIdUpdate?: (sessionId: string, claudeSessionId: string) => void
+    onSessionIdUpdate?: (sessionId: string, claudeSessionId: string) => void,
+    baseUrl?: string
   ) {
     this.apiKey = apiKey;
-    this.model = model || 'claude-sonnet-4-6';
+    this.model = model || 'sonnet';
+    this.baseUrl = baseUrl;
     this.onSessionIdUpdate = onSessionIdUpdate;
   }
 
@@ -126,6 +129,14 @@ export class AgentRunner {
       return '';
     })();
 
+    // 读取项目级 CLAUDE.md（按优先级拼接）
+    const projectClaudeMds = [
+      path.join(projectPath, 'CLAUDE.md'),
+      path.join(projectPath, '.claude', 'CLAUDE.md'),
+    ].map(p => {
+      try { return fs.existsSync(p) ? fs.readFileSync(p, 'utf-8').trim() : ''; } catch { return ''; }
+    }).filter(Boolean);
+
     // 读取全局 MCP 服务器配置
     const globalMcpServers = (() => {
       try {
@@ -138,8 +149,8 @@ export class AgentRunner {
       return {};
     })();
 
-    // 合并全局指令和 channel 级别的 systemPromptAppend
-    const fullAppend = [globalClaudeMd, systemPromptAppend].filter(Boolean).join('\n\n');
+    // 合并指令：项目 CLAUDE.md → 项目 .claude/CLAUDE.md → 全局 CLAUDE.md → channel 级别
+    const fullAppend = [...projectClaudeMds, globalClaudeMd, systemPromptAppend].filter(Boolean).join('\n\n');
 
     const createQuery = (promptInput: string | MessageStream, resumeSessionId?: string) => {
       return query({
@@ -173,10 +184,10 @@ export class AgentRunner {
           },
           env: {
             ...process.env,
-            ANTHROPIC_API_KEY: this.apiKey,
+            ANTHROPIC_AUTH_TOKEN: this.apiKey,
             PATH: process.env.PATH,
             DISABLE_AUTOUPDATER: '1',
-            ...(process.env.ANTHROPIC_BASE_URL ? { ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL } : {})
+            ...(this.baseUrl ? { ANTHROPIC_BASE_URL: this.baseUrl } : {})
           }
         }
       });
@@ -241,9 +252,9 @@ export class AgentRunner {
           permissionMode: 'default',
           env: {
             ...process.env,
-            ANTHROPIC_API_KEY: this.apiKey,
+            ANTHROPIC_AUTH_TOKEN: this.apiKey,
             DISABLE_AUTOUPDATER: '1',
-            ...(process.env.ANTHROPIC_BASE_URL ? { ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL } : {})
+            ...(this.baseUrl ? { ANTHROPIC_BASE_URL: this.baseUrl } : {})
           }
         }
       });
@@ -276,9 +287,9 @@ export class AgentRunner {
           permissionMode: 'default',
           env: {
             ...process.env,
-            ANTHROPIC_API_KEY: this.apiKey,
+            ANTHROPIC_AUTH_TOKEN: this.apiKey,
             DISABLE_AUTOUPDATER: '1',
-            ...(process.env.ANTHROPIC_BASE_URL ? { ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL } : {})
+            ...(this.baseUrl ? { ANTHROPIC_BASE_URL: this.baseUrl } : {})
           }
         }
       });

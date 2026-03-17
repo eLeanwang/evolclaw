@@ -1,7 +1,48 @@
 import fs from 'fs';
 import path from 'path';
+import os from 'os';
 import { Config } from './types.js';
 import { logger } from './utils/logger.js';
+
+export interface AnthropicResolved {
+  apiKey: string;
+  baseUrl?: string;
+  model: string;
+}
+
+function loadClaudeSettings(): { env?: Record<string, string>; model?: string } {
+  try {
+    const settingsPath = path.join(os.homedir(), '.claude', 'settings.json');
+    if (fs.existsSync(settingsPath)) {
+      return JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+    }
+  } catch {}
+  return {};
+}
+
+export function resolveAnthropicConfig(config: Config): AnthropicResolved {
+  const settings = loadClaudeSettings();
+
+  const apiKey = config.anthropic?.apiKey
+    || process.env.ANTHROPIC_AUTH_TOKEN
+    || settings.env?.ANTHROPIC_AUTH_TOKEN;
+
+  if (!apiKey) {
+    throw new Error(
+      'No API key found. Set one of: config.anthropic.apiKey, env ANTHROPIC_AUTH_TOKEN, or ~/.claude/settings.json env.ANTHROPIC_AUTH_TOKEN'
+    );
+  }
+
+  const baseUrl = config.anthropic?.baseUrl
+    || process.env.ANTHROPIC_BASE_URL
+    || settings.env?.ANTHROPIC_BASE_URL;
+
+  const model = config.anthropic?.model
+    || settings.model
+    || 'sonnet';
+
+  return { apiKey, baseUrl, model };
+}
 
 export function loadConfig(configPath: string = './data/config.json'): Config {
   if (!fs.existsSync(configPath)) {
@@ -36,7 +77,7 @@ export function isOwner(config: Config, channel: 'feishu' | 'acp', userId: strin
 }
 
 function validateConfig(config: any): asserts config is Config {
-  if (!config.anthropic?.apiKey) throw new Error('Missing anthropic.apiKey');
+  // anthropic 部分不再强制校验，由 resolveAnthropicConfig() 处理
 
   // Feishu 配置可选，但如果配置了就要完整
   if (config.feishu) {
