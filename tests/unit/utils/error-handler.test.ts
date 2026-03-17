@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { getErrorMessage } from '../../../src/utils/error-handler.js';
+import { getErrorMessage } from '../../../src/utils/error-utils.js';
 
 describe('Error Handler', () => {
   it('should identify API 429 error', () => {

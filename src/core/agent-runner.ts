@@ -5,7 +5,6 @@ import fs from 'fs';
 import os from 'os';
 import { MessageStream, ImageData } from './message-stream.js';
 import { logger } from '../utils/logger.js';
-import { simpleRetry } from '../utils/retry.js';
 import { canUseTool } from '../utils/permission.js';
 
 export class AgentRunner {
@@ -193,22 +192,31 @@ export class AgentRunner {
       });
     };
 
-    return simpleRetry(async () => {
-      let queryStream;
-      if (images && images.length > 0) {
-        logger.debug('[AgentRunner] Creating query with images, images:', images.length);
-        logger.debug('[AgentRunner] Skipping resume for image message to avoid history conflict');
-        const stream = new MessageStream();
-        stream.push(prompt, images);
-        stream.end();
-        queryStream = createQuery(stream);
-      } else {
-        logger.debug('[AgentRunner] Creating query with text only, claudeSessionId:', initialClaudeSessionId);
-        queryStream = createQuery(prompt, claudeSessionId);
+    let lastError: any;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        let queryStream;
+        if (images && images.length > 0) {
+          logger.debug('[AgentRunner] Creating query with images, images:', images.length);
+          logger.debug('[AgentRunner] Skipping resume for image message to avoid history conflict');
+          const stream = new MessageStream();
+          stream.push(prompt, images);
+          stream.end();
+          queryStream = createQuery(stream);
+        } else {
+          logger.debug('[AgentRunner] Creating query with text only, claudeSessionId:', initialClaudeSessionId);
+          queryStream = createQuery(prompt, claudeSessionId);
+        }
+        this.activeStreams.set(sessionId, queryStream);
+        return queryStream;
+      } catch (error) {
+        lastError = error;
+        if (attempt < 2) {
+          await new Promise(resolve => setTimeout(resolve, (attempt + 1) * 1000));
+        }
       }
-      this.activeStreams.set(sessionId, queryStream);
-      return queryStream;
-    }, 3);
+    }
+    throw lastError;
   }
 
   async interrupt(sessionId: string): Promise<void> {

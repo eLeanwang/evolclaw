@@ -11,7 +11,7 @@ import { logger } from './utils/logger.js';
 import path from 'path';
 import fs from 'fs';
 
-const availableModels: string[] = ['opus', 'sonnet', 'haiku', 'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5-20251001'];
+const availableModels: string[] = ['opus', 'sonnet', 'haiku'];
 
 /**
  * 计算两个字符串的 Levenshtein 距离（编辑距离）

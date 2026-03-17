@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { StreamFlusher } from '../../src/core/stream-flusher.js';
+import { StreamFlusher } from '../../src/utils/stream-flusher.js';
 
 describe('StreamFlusher', () => {
   beforeEach(() => {
