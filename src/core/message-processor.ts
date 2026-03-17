@@ -131,10 +131,6 @@ export class MessageProcessor {
           // 上下文过长是可恢复错误，不累计触发安全模式
           if (errorType === ErrorType.CONTEXT_TOO_LONG) {
             logger.info(`[MessageProcessor] Context too long error, skipping safe mode accumulation`);
-          } else if (error.message === 'SDK_TIMEOUT') {
-            // 仅 kill 级别记录错误
-            await this.sessionManager.recordError(session.id, errorType, error.message);
-            await this.checkSafeMode(session.id, message.channelId, channelInfo.adapter, isGroup, safeModeThreshold);
           } else {
             await this.sessionManager.recordError(session.id, errorType, error.message);
             await this.checkSafeMode(session.id, message.channelId, channelInfo.adapter, isGroup, safeModeThreshold);
