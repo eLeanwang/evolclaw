@@ -52,26 +52,35 @@ export class MessageProcessor {
     const streamKey = `${message.channel}-${message.channelId}`;
     const channelInfo = this.channels.get(message.channel);
 
-    const tracker = new IdleHealthTracker(idleMs);
-    let healthInterval: ReturnType<typeof setInterval>;
+    const healthEnabled = this.config.healthCheck?.enabled !== false;
+    const safeModeThreshold = this.config.healthCheck?.safeModeThreshold ?? 3;
+
+    let tracker: IdleHealthTracker | undefined;
+    let healthInterval: ReturnType<typeof setInterval> | undefined;
     let rejectFn: (err: Error) => void;
 
     const resetTimer = (eventType?: string, toolName?: string) => {
-      tracker.recordEvent(eventType || 'unknown', toolName);
+      tracker?.recordEvent(eventType || 'unknown', toolName);
     };
 
     const timeoutPromise = new Promise<never>((_, reject) => {
       rejectFn = reject;
+      if (!healthEnabled) return;
+
+      tracker = new IdleHealthTracker(idleMs);
       healthInterval = setInterval(async () => {
         // Drain all pending levels in one tick
-        let result = tracker.checkHealth();
+        let result = tracker!.checkHealth();
         while (result) {
           if (result.action === 'kill') {
             logger.warn(`[MessageProcessor] Health check: kill after ${result.idleSec}s idle, stream: ${streamKey}`);
-            // 先发送诊断信息，让用户知道发生了什么（群聊时静默）
-            if (channelInfo && !isGroup) {
+            // 先发送诊断信息，让用户知道发生了什么
+            if (channelInfo) {
               try {
-                await channelInfo.adapter.sendText(message.channelId, result.message);
+                const msg = isGroup
+                  ? `⚠️ 任务超时（${result.idleSec}秒无响应），已自动中断`
+                  : result.message;
+                await channelInfo.adapter.sendText(message.channelId, msg);
               } catch (e) {
                 logger.debug(`[MessageProcessor] Failed to send kill diagnostic message:`, e);
               }
@@ -94,7 +103,7 @@ export class MessageProcessor {
               }
             }
           }
-          result = tracker.checkHealth();
+          result = tracker!.checkHealth();
         }
       }, 30000);
     });
@@ -125,69 +134,10 @@ export class MessageProcessor {
           } else if (error.message === 'SDK_TIMEOUT') {
             // 仅 kill 级别记录错误
             await this.sessionManager.recordError(session.id, errorType, error.message);
-
-            const health = await this.sessionManager.getHealthStatus(session.id);
-            if (health.consecutiveErrors >= 3 && !health.safeMode) {
-              await this.sessionManager.setSafeMode(session.id, true);
-              logger.warn(`[MessageProcessor] Session ${session.id} entered safe mode after ${health.consecutiveErrors} errors`);
-
-              if (!isGroup) {
-                await channelInfo.adapter.sendText(
-                  message.channelId,
-                  `⚠️ 安全模式已启用（连续 ${health.consecutiveErrors} 次异常）
-
-当前限制：
-- 无法记住之前的对话
-- 每次提问需要提供完整上下文
-
-建议操作：
-1. /repair - 检查并修复会话（推荐，保留历史）
-2. /new [名称] - 创建新会话（清空历史）
-3. /status - 查看详细状态`
-                );
-              }
-            } else if (health.consecutiveErrors === 2) {
-              if (!isGroup) {
-                await channelInfo.adapter.sendText(
-                  message.channelId,
-                  `⚠️ 检测到异常（${health.consecutiveErrors}/3）\n\n如果问题持续，系统将自动进入安全模式。建议使用 /status 查看状态。`
-                );
-              }
-            }
+            await this.checkSafeMode(session.id, message.channelId, channelInfo.adapter, isGroup, safeModeThreshold);
           } else {
             await this.sessionManager.recordError(session.id, errorType, error.message);
-
-            // 检查是否需要进入安全模式
-            const health = await this.sessionManager.getHealthStatus(session.id);
-            if (health.consecutiveErrors >= 3 && !health.safeMode) {
-              await this.sessionManager.setSafeMode(session.id, true);
-              logger.warn(`[MessageProcessor] Session ${session.id} entered safe mode after ${health.consecutiveErrors} errors`);
-
-              // 发送安全模式提示（群聊时静默）
-              if (!isGroup) {
-                await channelInfo.adapter.sendText(
-                  message.channelId,
-                  `⚠️ 安全模式已启用（连续 ${health.consecutiveErrors} 次异常）
-
-当前限制：
-- 无法记住之前的对话
-- 每次提问需要提供完整上下文
-
-建议操作：
-1. /repair - 检查并修复会话（推荐，保留历史）
-2. /new [名称] - 创建新会话（清空历史）
-3. /status - 查看详细状态`
-                );
-              }
-            } else if (health.consecutiveErrors === 2) {
-              // 第2次错误，发送警告（群聊时静默）
-              if (!isGroup) {
-                await channelInfo.adapter.sendText(
-                  message.channelId,
-                  `⚠️ 检测到异常（${health.consecutiveErrors}/3）\n\n如果问题持续，系统将自动进入安全模式。建议使用 /status 查看状态。`
-                );
-              }
-            }
+            await this.checkSafeMode(session.id, message.channelId, channelInfo.adapter, isGroup, safeModeThreshold);
           }
         } catch (healthError) {
           logger.error('[MessageProcessor] Failed to update health status:', healthError);
@@ -196,7 +146,55 @@ export class MessageProcessor {
 
       throw error;
     } finally {
-      clearInterval(healthInterval!);
+      if (healthInterval) clearInterval(healthInterval);
+    }
+  }
+
+  /**
+   * 检查是否需要进入安全模式（safeModeThreshold 为 0 时跳过）
+   */
+  private async checkSafeMode(
+    sessionId: string,
+    channelId: string,
+    adapter: ChannelAdapter,
+    isGroup: boolean,
+    safeModeThreshold: number
+  ): Promise<void> {
+    if (safeModeThreshold <= 0) return;
+
+    const health = await this.sessionManager.getHealthStatus(sessionId);
+    if (health.consecutiveErrors >= safeModeThreshold && !health.safeMode) {
+      await this.sessionManager.setSafeMode(sessionId, true);
+      logger.warn(`[MessageProcessor] Session ${sessionId} entered safe mode after ${health.consecutiveErrors} errors`);
+
+      if (isGroup) {
+        await adapter.sendText(
+          channelId,
+          `⚠️ 连续 ${health.consecutiveErrors} 次异常，已进入安全模式（上下文暂时不可用）\n使用 /repair 修复 或 /new 新建会话`
+        );
+      } else {
+        await adapter.sendText(
+          channelId,
+          `⚠️ 安全模式已启用（连续 ${health.consecutiveErrors} 次异常）
+
+当前限制：
+- 无法记住之前的对话
+- 每次提问需要提供完整上下文
+
+建议操作：
+1. /repair - 检查并修复会话（推荐，保留历史）
+2. /new [名称] - 创建新会话（清空历史）
+3. /status - 查看详细状态`
+        );
+      }
+    } else if (safeModeThreshold >= 2 && health.consecutiveErrors === safeModeThreshold - 1) {
+      // 阈值前一次错误，发送警告（群聊时静默）
+      if (!isGroup) {
+        await adapter.sendText(
+          channelId,
+          `⚠️ 检测到异常（${health.consecutiveErrors}/${safeModeThreshold}）\n\n如果问题持续，系统将自动进入安全模式。建议使用 /status 查看状态。`
+        );
+      }
     }
   }
 
