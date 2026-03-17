@@ -66,6 +66,14 @@ export class MessageProcessor {
         while (result) {
           if (result.action === 'kill') {
             logger.warn(`[MessageProcessor] Health check: kill after ${result.idleSec}s idle, stream: ${streamKey}`);
+            // 先发送诊断信息，让用户知道发生了什么
+            if (channelInfo) {
+              try {
+                await channelInfo.adapter.sendText(message.channelId, result.message);
+              } catch (e) {
+                logger.debug(`[MessageProcessor] Failed to send kill diagnostic message:`, e);
+              }
+            }
             try {
               await this.agentRunner.interrupt(streamKey);
             } catch (e) {
