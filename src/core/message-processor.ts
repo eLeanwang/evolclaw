@@ -7,6 +7,7 @@ import { MessageCache } from './message-cache.js';
 import { IdleHealthTracker } from '../utils/idle-health-tracker.js';
 import { logger } from '../utils/logger.js';
 import { getErrorMessage, classifyError, ErrorType } from '../utils/error-utils.js';
+import { isOwner } from '../config.js';
 import type { Message, Config, Session, ChannelAdapter, ChannelOptions, CommandHandler } from '../types.js';
 
 /**
@@ -117,7 +118,7 @@ export class MessageProcessor {
       // 超时错误：kill 级别已发送诊断信息，无需再发
       // 非超时错误走通用处理
 
-      // 记录错误到健康状态
+      // 记录错误到健康状态（仅主人的错误累计触发安全模式）
       if (channelInfo) {
         try {
           const session = await this.sessionManager.getOrCreateSession(
@@ -127,13 +128,17 @@ export class MessageProcessor {
           );
 
           const errorType = classifyError(error);
+          const isOwnerUser = isOwner(this.config, message.channel, message.userId || '');
 
           // 上下文过长是可恢复错误，不累计触发安全模式
           if (errorType === ErrorType.CONTEXT_TOO_LONG) {
             logger.info(`[MessageProcessor] Context too long error, skipping safe mode accumulation`);
+          } else if (!isOwnerUser) {
+            // 非主人的错误只记日志，不累计
+            logger.info(`[MessageProcessor] Non-owner error (user=${message.userId}), skipping safe mode accumulation`);
           } else {
-            await this.sessionManager.recordError(session.id, errorType, error.message);
-            await this.checkSafeMode(session.id, message.channelId, channelInfo.adapter, isGroup, safeModeThreshold);
+            const newCount = await this.sessionManager.recordError(session.id, errorType, error.message);
+            await this.checkSafeMode(session.id, message.channelId, channelInfo.adapter, isGroup, safeModeThreshold, newCount);
           }
         } catch (healthError) {
           logger.error('[MessageProcessor] Failed to update health status:', healthError);
@@ -148,30 +153,29 @@ export class MessageProcessor {
 
   /**
    * 检查是否需要进入安全模式（safeModeThreshold 为 0 时跳过）
+   * 群聊中不触发安全模式，只有单聊主人会话才能进入
    */
   private async checkSafeMode(
     sessionId: string,
     channelId: string,
     adapter: ChannelAdapter,
     isGroup: boolean,
-    safeModeThreshold: number
+    safeModeThreshold: number,
+    consecutiveErrors: number
   ): Promise<void> {
     if (safeModeThreshold <= 0) return;
 
-    const health = await this.sessionManager.getHealthStatus(sessionId);
-    if (health.consecutiveErrors >= safeModeThreshold && !health.safeMode) {
-      await this.sessionManager.setSafeMode(sessionId, true);
-      logger.warn(`[MessageProcessor] Session ${sessionId} entered safe mode after ${health.consecutiveErrors} errors`);
+    // 群聊中不触发安全模式
+    if (isGroup) return;
 
-      if (isGroup) {
-        await adapter.sendText(
-          channelId,
-          `⚠️ 连续 ${health.consecutiveErrors} 次异常，已进入安全模式（上下文暂时不可用）\n使用 /repair 修复 或 /new 新建会话`
-        );
-      } else {
-        await adapter.sendText(
-          channelId,
-          `⚠️ 安全模式已启用（连续 ${health.consecutiveErrors} 次异常）
+    const health = await this.sessionManager.getHealthStatus(sessionId);
+    if (consecutiveErrors >= safeModeThreshold && !health.safeMode) {
+      await this.sessionManager.setSafeMode(sessionId, true);
+      logger.warn(`[MessageProcessor] Session ${sessionId} entered safe mode after ${consecutiveErrors} errors`);
+
+      await adapter.sendText(
+        channelId,
+        `⚠️ 安全模式已启用（连续 ${consecutiveErrors} 次异常）
 
 当前限制：
 - 无法记住之前的对话
@@ -181,16 +185,13 @@ export class MessageProcessor {
 1. /repair - 检查并修复会话（推荐，保留历史）
 2. /new [名称] - 创建新会话（清空历史）
 3. /status - 查看详细状态`
-        );
-      }
-    } else if (safeModeThreshold >= 2 && health.consecutiveErrors === safeModeThreshold - 1) {
-      // 阈值前一次错误，发送警告（群聊时静默）
-      if (!isGroup) {
-        await adapter.sendText(
-          channelId,
-          `⚠️ 检测到异常（${health.consecutiveErrors}/${safeModeThreshold}）\n\n如果问题持续，系统将自动进入安全模式。建议使用 /status 查看状态。`
-        );
-      }
+      );
+    } else if (safeModeThreshold >= 2 && consecutiveErrors === safeModeThreshold - 1) {
+      // 阈值前一次错误，发送警告
+      await adapter.sendText(
+        channelId,
+        `⚠️ 检测到异常（${consecutiveErrors}/${safeModeThreshold}）\n\n如果问题持续，系统将自动进入安全模式。建议使用 /status 查看状态。`
+      );
     }
   }
 
@@ -360,6 +361,12 @@ export class MessageProcessor {
       // Flush 剩余内容（文件标记已在 flush 时自动移除）
       await flusher.flush(true);
 
+      // 安全模式尾部提示：如果当前会话处于安全模式，追加提醒
+      const healthStatus = await this.sessionManager.getHealthStatus(session.id);
+      if (healthStatus.safeMode) {
+        await adapter.sendText(message.channelId, '\n\n⚠️ 当前处于安全模式（无上下文记忆）。使用 /repair 修复 或 /new 新建会话');
+      }
+
       // 清理 activeStreams（正常完成）
       this.agentRunner.cleanupStream(streamKey);
 
@@ -410,9 +417,13 @@ export class MessageProcessor {
         logger.error(`[${message.channel}] Error stack:`, error.stack);
       }
 
-      // 发送用户友好的错误消息
-      const userMessage = getErrorMessage(error);
-      await adapter.sendText(message.channelId, userMessage);
+      // 发送用户友好的错误消息（SDK_TIMEOUT 已在 kill 级别发过提示，跳过）
+      if (error instanceof Error && error.message === 'SDK_TIMEOUT') {
+        logger.info(`[MessageProcessor] SDK_TIMEOUT error, skip sending duplicate message`);
+      } else {
+        const userMessage = getErrorMessage(error);
+        await adapter.sendText(message.channelId, userMessage);
+      }
     }
   }
 

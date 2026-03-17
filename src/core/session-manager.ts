@@ -755,9 +755,10 @@ export class SessionManager {
   /**
    * 记录错误（增加计数）
    */
-  async recordError(sessionId: string, errorType: string, errorMessage: string): Promise<void> {
+  async recordError(sessionId: string, errorType: string, errorMessage: string): Promise<number> {
     const now = Date.now();
     const health = await this.getHealthStatus(sessionId);
+    const newCount = health.consecutiveErrors + 1;
 
     this.db.prepare(`
       INSERT INTO session_health (session_id, consecutive_errors, last_error, last_error_type, safe_mode, last_success_time, created_at, updated_at)
@@ -767,7 +768,9 @@ export class SessionManager {
         last_error = ?,
         last_error_type = ?,
         updated_at = ?
-    `).run(sessionId, health.consecutiveErrors + 1, errorMessage, errorType, health.safeMode ? 1 : 0, health.lastSuccessTime, now, now, errorMessage, errorType, now);
+    `).run(sessionId, newCount, errorMessage, errorType, health.safeMode ? 1 : 0, health.lastSuccessTime, now, now, errorMessage, errorType, now);
+
+    return newCount;
   }
 
   /**

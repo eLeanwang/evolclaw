@@ -48,17 +48,19 @@ export class AgentRunner {
     let claudeSessionId = initialClaudeSessionId || this.activeSessions.get(sessionId);
 
     // 检查是否在安全模式
+    let skipResume = false;
     if (sessionManager) {
       const health = await sessionManager.getHealthStatus(sessionId);
       if (health.safeMode) {
         // 安全模式：不使用 resume，每次都是新对话
         claudeSessionId = undefined;
+        skipResume = true;
         logger.warn(`[AgentRunner] Safe mode enabled for ${sessionId}, not resuming session`);
       }
     }
 
-    // 验证会话文件是否存在且有效（仅在非安全模式下）
-    if (claudeSessionId && (!sessionManager || !(await sessionManager.getHealthStatus(sessionId)).safeMode)) {
+    // 验证会话文件是否存在且有效（仅在非安全模式且有 claudeSessionId 时）
+    if (claudeSessionId && !skipResume) {
       const homeDir = os.homedir();
       const encodedPath = projectPath.replace(/\//g, '-');
       const sessionFile = path.join(homeDir, '.claude', 'projects', encodedPath, `${claudeSessionId}.jsonl`);
