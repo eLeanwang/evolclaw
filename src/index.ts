@@ -1,4 +1,4 @@
-import { loadConfig, saveConfig, ensureDir, resolveAnthropicConfig } from './config.js';
+import { loadConfig, ensureDir, resolveAnthropicConfig } from './config.js';
 import { SessionManager } from './core/session-manager.js';
 import { AgentRunner } from './core/agent-runner.js';
 import { FeishuChannel } from './channels/feishu.js';
@@ -6,968 +6,11 @@ import { ACPChannel } from './channels/acp.js';
 import { MessageProcessor } from './core/message-processor.js';
 import { MessageQueue } from './core/message-queue.js';
 import { MessageCache } from './core/message-cache.js';
-import { Config, ChannelAdapter, ChannelOptions, CommandHandler } from './types.js';
+import { CommandHandler } from './core/command-handler.js';
+import { ChannelAdapter, ChannelOptions } from './types.js';
 import { logger } from './utils/logger.js';
 import path from 'path';
 import fs from 'fs';
-
-const availableModels: string[] = ['opus', 'sonnet', 'haiku'];
-
-/**
- * 计算两个字符串的 Levenshtein 距离（编辑距离）
- */
-function levenshteinDistance(str1: string, str2: string): number {
-  const len1 = str1.length;
-  const len2 = str2.length;
-  const matrix: number[][] = [];
-
-  for (let i = 0; i <= len1; i++) {
-    matrix[i] = [i];
-  }
-
-  for (let j = 0; j <= len2; j++) {
-    matrix[0][j] = j;
-  }
-
-  for (let i = 1; i <= len1; i++) {
-    for (let j = 1; j <= len2; j++) {
-      if (str1[i - 1] === str2[j - 1]) {
-        matrix[i][j] = matrix[i - 1][j - 1];
-      } else {
-        matrix[i][j] = Math.min(
-          matrix[i - 1][j - 1] + 1, // 替换
-          matrix[i][j - 1] + 1,     // 插入
-          matrix[i - 1][j] + 1      // 删除
-        );
-      }
-    }
-  }
-
-  return matrix[len1][len2];
-}
-
-function formatIdleTime(ms: number): string {
-  const seconds = Math.floor(ms / 1000);
-  const minutes = Math.floor(seconds / 60);
-  const hours = Math.floor(minutes / 60);
-  const days = Math.floor(hours / 24);
-
-  if (days > 0) return `${days}天前`;
-  if (hours > 0) return `${hours}小时前`;
-  if (minutes > 0) return `${minutes}分钟前`;
-  return '刚刚';
-}
-
-// 判断是否是群聊
-function isGroupChat(channel: string, channelId: string): boolean {
-  // 飞书暂时都按单聊处理，支持多项目切换
-  // 如需群聊支持，可在配置文件中指定群聊 ID 列表
-  if (channel === 'feishu') {
-    return false;
-  }
-  // ACP 暂时假设都是单聊
-  return false;
-}
-
-async function isGroupChatAsync(channel: string, channelId: string, feishuChannel?: any): Promise<boolean> {
-  console.log(`[DEBUG] isGroupChatAsync called: channel=${channel}, channelId=${channelId}, feishuChannel=${!!feishuChannel}`);
-  if (channel === 'feishu' && feishuChannel) {
-    const chatMode = await feishuChannel.getChatMode(channelId);
-    console.log(`[DEBUG] isGroupChatAsync chatMode=${chatMode}, isGroup=${chatMode === 'group'}`);
-    return chatMode === 'group';
-  }
-  return false;
-}
-
-async function handleProjectCommand(
-  content: string,
-  channel: 'feishu' | 'acp',
-  channelId: string,
-  sessionManager: SessionManager,
-  agentRunner: AgentRunner,
-  config: Config,
-  messageCache: MessageCache,
-  processor: MessageProcessor,
-  messageQueue: MessageQueue,
-  sendMessage?: (channelId: string, text: string) => Promise<void>,
-  feishuChannel?: any,
-  userId?: string
-): Promise<string | null> {
-  // 命令别名映射
-  const aliases: Record<string, string> = {
-    '/p': '/project',
-    '/s': '/session',
-    '/name': '/rename'
-  };
-
-  // 规范化命令（将别名转换为完整命令）
-  let normalizedContent = content;
-  for (const [alias, full] of Object.entries(aliases)) {
-    if (content === alias || content.startsWith(alias + ' ')) {
-      normalizedContent = content.replace(alias, full);
-      break;
-    }
-  }
-
-  // 权限检查：只有主人可以执行斜杠命令
-  if (normalizedContent.startsWith('/')) {
-    const { isOwner } = await import('./config.js');
-    if (userId && !isOwner(config, channel, userId)) {
-      return '❌ 无权限：只有主人可以执行命令';
-    }
-  }
-
-  // 支持的命令列表
-  const commands = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/slist', '/session', '/rename', '/stop', '/clear', '/compact', '/repair', '/safe'];
-
-  // 检查是否以 / 开头（可能是命令）
-  if (normalizedContent.startsWith('/')) {
-    const inputCmd = normalizedContent.split(' ')[0];
-    const isValidCommand = commands.some(cmd => normalizedContent.startsWith(cmd));
-
-    if (!isValidCommand) {
-      // 尝试模糊匹配，找到相似的命令
-      const similar = commands.find(cmd => {
-        const distance = levenshteinDistance(inputCmd, cmd);
-        return distance <= 2; // 允许 2 个字符的差异
-      });
-
-      if (similar) {
-        return `❌ 未知命令: ${inputCmd}\n💡 你是不是想输入: ${similar}\n\n输入 /help 查看所有可用命令`;
-      } else {
-        return `❌ 未知命令: ${inputCmd}\n\n输入 /help 查看所有可用命令`;
-      }
-    }
-  }
-
-  const isCommand = commands.some(cmd => normalizedContent.startsWith(cmd));
-  if (!isCommand) return null;
-
-  // /help 命令不需要会话
-  if (normalizedContent === '/help') {
-    return `可用命令：
-📁 项目管理：
-  /pwd - 显示当前项目路径
-  /plist - 列出所有配置的项目
-  /p, /project <name|path> - 切换项目
-  /bind <path> - 绑定新项目目录
-
-🔄 会话管理：
-  /new [名称] - 创建新会话（可选命名）
-  /slist - 列出当前项目的所有会话
-  /s, /session <名称> - 切换到指定会话
-  /name, /rename <新名称> - 重命名当前会话
-  /status - 显示会话状态
-  /clear - 清空当前会话的对话历史
-  /compact - 压缩会话上下文（减少 token 用量）
-  /stop - 中断当前任务
-  /restart - 重启服务
-
-🛠️ 会话修复：
-  /repair - 检查并修复会话
-  /safe - 进入安全模式
-
-🤖 模型管理：
-  /model - 显示当前模型
-  /model <model-id> - 切换模型
-
-❓ 帮助：
-  /help - 显示此帮助信息`;
-  }
-
-  // /model 命令：查看或切换模型
-  if (normalizedContent.startsWith('/model')) {
-    const args = normalizedContent.slice(6).trim();
-
-    if (!args) {
-      // 显示当前模型
-      const currentModel = agentRunner.getModel();
-      const modelList = availableModels.map(m => `- ${m}`).join('\n');
-      return `当前模型: ${currentModel}\n\n可用模型：\n${modelList}\n\n用法: /model <model-id>`;
-    }
-
-    // 切换模型
-    if (!availableModels.includes(args)) {
-      const modelList = availableModels.map(m => `- ${m}`).join('\n');
-      return `❌ 无效的模型ID: ${args}\n\n可用模型：\n${modelList}`;
-    }
-
-    // 更新配置
-    if (!config.anthropic) config.anthropic = {};
-    config.anthropic.model = args;
-    saveConfig(config);
-
-    // 更新 AgentRunner
-    agentRunner.setModel(args);
-
-    return `✓ 已切换到模型: ${args}`;
-  }
-
-  // /stop 命令：中断当前任务
-  if (normalizedContent === '/stop') {
-    const sessionKey = `${channel}-${channelId}`;
-    const queueLength = messageQueue.getQueueLength(sessionKey);
-
-    if (queueLength === 0) {
-      return '当前没有正在处理的任务';
-    }
-
-    // 触发中断
-    await agentRunner.interrupt(sessionKey);
-    return '✓ 已发送中断信号，任务将尽快停止';
-  }
-
-  // /clear 命令：通过 SDK /clear 清空会话历史
-  if (normalizedContent === '/clear') {
-    const session = await sessionManager.getSession(channel, channelId);
-    if (!session) {
-      return '❌ 当前没有活跃会话\n使用 /new 创建新会话';
-    }
-
-    if (!session.claudeSessionId) {
-      return '❌ 当前会话没有历史记录，无需清空';
-    }
-
-    const projectPath = path.isAbsolute(session.projectPath)
-      ? session.projectPath
-      : path.resolve(process.cwd(), session.projectPath);
-
-    const cleared = await agentRunner.clearSession(session.claudeSessionId, projectPath);
-    if (cleared) {
-      // 清除数据库和内存中的 claudeSessionId，下次查询将创建新会话
-      await sessionManager.updateClaudeSessionIdBySessionId(session.id, '');
-      agentRunner.updateSessionId(session.id, '');
-      return '✅ 已清空当前会话的对话历史';
-    } else {
-      return '❌ 清空会话失败，请稍后重试';
-    }
-  }
-
-  // /compact 命令：手动压缩会话上下文
-  if (normalizedContent === '/compact') {
-    const session = await sessionManager.getSession(channel, channelId);
-    if (!session) {
-      return '❌ 当前没有活跃会话\n使用 /new 创建新会话';
-    }
-
-    if (!session.claudeSessionId) {
-      return '❌ 当前会话没有历史记录，无需压缩';
-    }
-
-    const projectPath = path.isAbsolute(session.projectPath)
-      ? session.projectPath
-      : path.resolve(process.cwd(), session.projectPath);
-
-    // 先发送提示，再执行压缩
-    if (sendMessage) {
-      await sendMessage(channelId, '⏳ 正在压缩会话上下文...');
-    }
-
-    const compacted = await agentRunner.compactSession(session.id, session.claudeSessionId, projectPath);
-    if (compacted) {
-      return '✅ 会话上下文已压缩';
-    } else {
-      return '❌ 会话压缩失败，请稍后重试';
-    }
-  }
-
-  // 尝试获取活跃会话（所有命令都尝试获取，但不强制）
-  let session = await sessionManager.getActiveSession(channel, channelId);
-
-  // 对于需要创建会话的命令，如果没有会话则创建
-  if (!session && (
-    normalizedContent.startsWith('/new') ||
-    normalizedContent.startsWith('/bind') ||
-    normalizedContent.startsWith('/project')
-  )) {
-    session = await sessionManager.getOrCreateSession(
-      channel,
-      channelId,
-      config.projects?.defaultPath || process.cwd()
-    );
-  }
-
-  // /status 命令：显示会话状态
-  if (normalizedContent === '/status') {
-    if (!session) {
-      return `📊 会话状态：
-
-❌ 当前未创建会话
-
-提示：发送任意消息或使用 /new 命令创建会话`;
-    }
-
-    // 检查处理状态（isProcessing 检查是否有任务正在执行，getQueueLength 检查队列中等待的任务）
-    const sessionKey = `${channel}-${channelId}`;
-    const isCurrentlyProcessing = messageQueue.isProcessing(sessionKey);
-    const queueLength = messageQueue.getQueueLength(sessionKey);
-
-    let activeStatus = session.isActive ? '✓ 活跃' : '休眠';
-    if (session.isActive && isCurrentlyProcessing) {
-      if (queueLength > 0) {
-        activeStatus += ` [处理中，队列${queueLength}条]`;
-      } else {
-        activeStatus += ' [处理中]';
-      }
-    }
-
-    // 获取项目名称
-    const projects = config.projects?.list || {};
-    const projectName = Object.entries(projects)
-      .find(([_, p]) => p === session.projectPath)?.[0] || path.basename(session.projectPath);
-
-    // 获取健康状态
-    const health = await sessionManager.getHealthStatus(session.id);
-    const timeSinceSuccess = Date.now() - health.lastSuccessTime;
-    const timeStr = timeSinceSuccess < 60000 ? '刚刚' :
-                    timeSinceSuccess < 3600000 ? `${Math.floor(timeSinceSuccess / 60000)}分钟前` :
-                    `${Math.floor(timeSinceSuccess / 3600000)}小时前`;
-
-    const lines = [
-      '📊 会话状态：',
-      `渠道: ${channel} / 项目: ${projectName} / 会话: ${session.name || '(未命名)'}`,
-      `会话ID: ${session.id}`,
-      `项目路径: ${session.projectPath}`,
-      `活跃状态: ${activeStatus}`,
-      `会话轮数: ${session.claudeSessionId ? sessionManager.countSessionTurns(session.projectPath, session.claudeSessionId) : 0}`,
-      `异常计数: ${health.consecutiveErrors}`,
-      `安全模式: ${health.safeMode ? '是 ⚠️' : '否 ✓'}`,
-      `最后成功: ${timeStr}`,
-      `Claude会话: ${session.claudeSessionId || '(未初始化)'}`,
-      `创建时间: ${new Date(session.createdAt).toLocaleString('zh-CN')}`,
-      `更新时间: ${new Date(session.updatedAt).toLocaleString('zh-CN')}`
-    ];
-
-    if (health.safeMode) {
-      lines.push('');
-      lines.push('⚠️ 当前处于安全模式（历史上下文已禁用）');
-      lines.push('');
-      lines.push('退出方式：');
-      lines.push('1. /repair - 检查并修复会话（推荐，保留历史）');
-      lines.push('2. /new [名称] - 创建新会话（清空历史）');
-    }
-
-    if (health.lastError) {
-      lines.push('');
-      lines.push(`最后错误: ${health.lastErrorType || 'unknown'}`);
-      lines.push(`错误信息: ${health.lastError.substring(0, 100)}`);
-    }
-
-    return lines.join('\n');
-  }
-
-  // /new 命令：创建新会话（支持命名）
-  if (normalizedContent.startsWith('/new')) {
-    const sessionName = normalizedContent.slice(4).trim() || undefined;
-
-    // 检查名称是否已存在
-    if (sessionName) {
-      const existing = await sessionManager.getSessionByName(channel, channelId, sessionName);
-      if (existing) {
-        return `❌ 会话名称 "${sessionName}" 已存在，请使用其他名称`;
-      }
-    }
-
-    // 获取项目路径（从当前会话或使用默认路径）
-    const projectPath = session?.projectPath || config.projects?.defaultPath || process.cwd();
-
-    // 创建新会话
-    const newSession = await sessionManager.createNewSession(
-      channel,
-      channelId,
-      projectPath,
-      sessionName
-    );
-
-    // 如果有旧会话，关闭它
-    if (session) {
-      await agentRunner.closeSession(session.id);
-    }
-
-    return `✓ 已创建新会话${sessionName ? `: ${sessionName}` : ''}\n  之前的对话历史已保留，可通过 /slist 查看`;
-  }
-
-  // /restart 命令：重启服务
-  if (normalizedContent === '/restart') {
-    // 检查是否有未读消息
-    const allSessions = await sessionManager.listSessions(channel, channelId);
-    const sessionsWithMessages = allSessions
-      .filter(s => messageCache.hasMessages(s.id))
-      .map(s => {
-        const count = messageCache.getCount(s.id);
-        return `${s.projectPath} 有 ${count} 条新消息`;
-      });
-
-    if (sessionsWithMessages.length > 0) {
-      // 检查是否是第二次 /restart（10秒内）
-      const restartKey = `${channel}-${channelId}`;
-      const restartConfirmFile = `./data/restart-confirm-${restartKey}.json`;
-
-      if (fs.existsSync(restartConfirmFile)) {
-        const confirmInfo = JSON.parse(fs.readFileSync(restartConfirmFile, 'utf-8'));
-        const now = Date.now();
-
-        // 10秒内的第二次 /restart，执行重启
-        if (now - confirmInfo.timestamp < 10000) {
-          fs.unlinkSync(restartConfirmFile);
-          // 继续执行重启逻辑
-        } else {
-          // 超过10秒，重新提示
-          fs.writeFileSync(restartConfirmFile, JSON.stringify({ timestamp: now }));
-          return sessionsWithMessages.join('\n') + '\n再次输入 /restart 将强制重启。';
-        }
-      } else {
-        // 首次 /restart，提示未读消息
-        fs.writeFileSync(restartConfirmFile, JSON.stringify({ timestamp: Date.now() }));
-        return sessionsWithMessages.join('\n') + '\n再次输入 /restart 将强制重启。';
-      }
-    }
-
-    // 保存重启信息到文件
-    const restartInfo = {
-      channel,
-      channelId,
-      timestamp: Date.now()
-    };
-    fs.writeFileSync('./data/restart-pending.json', JSON.stringify(restartInfo));
-
-    // 启动后台监控脚本
-    const { spawn } = await import('child_process');
-    spawn('/home/evolclaw/restart-monitor.sh', [], {
-      detached: true,
-      stdio: 'ignore'
-    }).unref();
-
-    // 延迟退出，让响应消息先发送
-    setTimeout(() => {
-      logger.info('[System] Restarting by user command...');
-      process.exit(0);
-    }, 1000);
-    return '🔄 服务正在重启，请稍候...（约 5 秒后恢复）';
-  }
-
-  // /pwd 命令：显示当前项目路径
-  if (normalizedContent === '/pwd') {
-    if (!session) {
-      return `❌ 当前没有活跃会话
-
-提示：发送任意消息或使用 /new 命令创建会话`;
-    }
-
-    const projects = config.projects?.list || {};
-    // 查找项目名称
-    let projectName = '';
-    for (const [name, path] of Object.entries(projects)) {
-      if (path === session.projectPath) {
-        projectName = name;
-        break;
-      }
-    }
-
-    if (projectName) {
-      return `当前项目: ${projectName}\n路径: ${session.projectPath}`;
-    } else {
-      return `当前项目: ${session.projectPath}`;
-    }
-  }
-
-  // /plist 命令：列出所有项目
-  if (normalizedContent === '/plist') {
-    const projects = config.projects?.list || {};
-
-    // 调试日志
-    console.log(`[DEBUG] /plist - channel: ${channel}, channelId: ${channelId}, isGroupChat: ${isGroupChat(channel, channelId)}`);
-
-    // 群聊只显示当前绑定的项目
-    const isGroup = await isGroupChatAsync(channel, channelId, feishuChannel);
-    if (isGroup) {
-      if (!session) {
-        return `❌ 当前群聊未绑定项目
-
-请使用 /bind <项目路径> 绑定项目`;
-      }
-
-      const projectName = Object.entries(projects)
-        .find(([_, p]) => p === session.projectPath)?.[0] || path.basename(session.projectPath);
-
-      // 检查处理状态
-      const sessionKey = `${channel}-${channelId}`;
-      const queueLength = messageQueue.getQueueLength(sessionKey);
-      const status = queueLength > 0 ? '[处理中]' : '[空闲]';
-
-      return `当前群聊绑定的项目：
-  ${projectName} (${session.projectPath}) - ${status}
-
-提示：群聊不支持切换项目`;
-    }
-
-    // 单聊显示所有项目
-    const lines = ['可用项目:'];
-    const sessionKey = `${channel}-${channelId}`;
-    const processingProject = messageQueue.getProcessingProject(sessionKey);
-    const queueLength = messageQueue.getQueueLength(sessionKey);
-
-    // 路径规范化函数
-    const normalizePath = (p: string) => p.replace(/\/+$/, '');
-
-    for (const [name, projectPath] of Object.entries(projects)) {
-      const isCurrent = session?.projectPath === projectPath;
-      const prefix = isCurrent ? '  ✓' : '   ';
-
-      // 查询该项目的会话
-      const projectSession = await sessionManager.getSessionByProjectPath(channel, channelId, projectPath);
-
-      if (!projectSession) {
-        lines.push(`${prefix} ${name} (${projectPath}) - 无会话`);
-        continue;
-      }
-
-      const statusParts = [];
-
-      // 活跃状态或空闲时间
-      if (isCurrent) {
-        statusParts.push('活跃');
-      } else {
-        const idleMs = Date.now() - projectSession.updatedAt;
-        statusParts.push(formatIdleTime(idleMs));
-      }
-
-      // 处理状态
-      if (processingProject && normalizePath(processingProject) === normalizePath(projectPath)) {
-        if (queueLength > 1) {
-          statusParts.push(`[处理中，队列${queueLength - 1}条]`);
-        } else {
-          statusParts.push('[处理中]');
-        }
-      }
-
-      // 未读消息
-      const unreadCount = messageCache.getCount(projectSession.id);
-      if (unreadCount > 0) {
-        statusParts.push(`[${unreadCount}条新消息]`);
-      } else if (!processingProject || normalizePath(processingProject) !== normalizePath(projectPath)) {
-        statusParts.push('[空闲]');
-      }
-
-      lines.push(`${prefix} ${name} (${projectPath}) - ${statusParts.join(' ')}`);
-    }
-    return lines.join('\n');
-  }
-
-  // /project 命令：切换项目（支持名称或路径）
-  if (normalizedContent.startsWith('/project ')) {
-    // 群聊禁止切换项目
-    const isGroup = await isGroupChatAsync(channel, channelId, feishuChannel);
-    if (isGroup) {
-      return `❌ 群聊不支持切换项目
-
-群聊只能绑定一个项目。如需更换项目，请联系管理员重新配置。`;
-    }
-
-    const arg = normalizedContent.slice(9).trim();
-
-    if (!arg) return '用法: /p <name|path> 或 /project <name|path>';
-
-    let projectPath: string;
-    let projectName: string;
-
-    // 判断是路径还是名称
-    if (arg.includes('/')) {
-      // 路径模式
-      if (!path.isAbsolute(arg)) {
-        return '❌ 项目路径必须是绝对路径';
-      }
-      if (!fs.existsSync(arg)) {
-        return `❌ 路径不存在: ${arg}`;
-      }
-      projectPath = arg;
-      projectName = path.basename(arg);
-    } else {
-      // 名称模式
-      const projects = config.projects?.list || {};
-      projectPath = projects[arg];
-      if (!projectPath) {
-        return `❌ 项目 "${arg}" 不存在\n提示: 使用 /plist 查看可用项目`;
-      }
-      projectName = arg;
-    }
-
-    // 检查是否切换到当前项目（规范化路径后比较）
-    if (session) {
-      const normalizedSessionPath = path.resolve(session.projectPath);
-      const normalizedProjectPath = path.resolve(projectPath);
-      if (normalizedSessionPath === normalizedProjectPath) {
-        return `当前已在项目: ${projectName}\n  路径: ${projectPath}`;
-      }
-    }
-
-    // 使用新的 switchProject 方法
-    const newSession = await sessionManager.switchProject(channel, channelId, projectPath);
-
-    // 检查缓存事件
-    const cachedEvents = messageCache.getEvents(newSession.id);
-
-    // 提示信息
-    const hasExistingSession = newSession.claudeSessionId ? '（恢复已有会话）' : '（新建会话）';
-    let response = `✓ 已切换到项目: ${projectName}\n  路径: ${projectPath}\n  ${hasExistingSession}`;
-
-    // 如果有缓存事件，先发送切换消息，再发送完整缓存内容
-    if (cachedEvents.length > 0 && sendMessage) {
-      // 添加简短通知到切换消息
-      for (const event of cachedEvents) {
-        if (event.type === 'completed') {
-          response += `\n\n后台任务完成`;
-          if (event.metadata?.duration) {
-            response += ` (耗时: ${Math.round(event.metadata.duration / 1000)}s)`;
-          }
-        } else if (event.type === 'error') {
-          response += `\n\n后台任务失败: ${event.metadata?.errorType || '未知错误'}`;
-        }
-      }
-
-      // 发送切换消息
-      await sendMessage(channelId, response);
-
-      // 发送完整缓存内容（文件标记由sendMessage回调处理）
-      for (const event of cachedEvents) {
-        await sendMessage(channelId, event.message);
-      }
-
-      // 清空缓存
-      messageCache.clearEvents(newSession.id);
-
-      return ''; // 已经发送，返回空字符串表示命令已处理
-    }
-
-    return response;
-  }
-
-  // /bind 命令：绑定新项目目录
-  if (normalizedContent.startsWith('/bind ')) {
-    const projectPath = normalizedContent.slice(6).trim();
-
-    if (!projectPath) return '用法: /bind <path>';
-
-    if (!path.isAbsolute(projectPath)) {
-      return '❌ 项目路径必须是绝对路径';
-    }
-    if (!fs.existsSync(projectPath)) {
-      return `❌ 路径不存在: ${projectPath}`;
-    }
-
-    // 使用 switchProject 方法
-    const newSession = await sessionManager.switchProject(channel, channelId, projectPath);
-
-    // 检查缓存事件
-    const cachedEvents = messageCache.getEvents(newSession.id);
-
-    const hasExistingSession = newSession.claudeSessionId ? '（恢复已有会话）' : '（新建会话）';
-    let response = `✓ 已绑定项目目录: ${projectPath}\n  ${hasExistingSession}`;
-
-    // 如果有缓存事件，显示并清空
-    if (cachedEvents.length > 0) {
-      response += `\n\n后台任务结果:`;
-      for (const event of cachedEvents) {
-        if (event.type === 'completed') {
-          response += `\n✓ 任务完成`;
-          if (event.metadata?.duration) {
-            response += ` (耗时: ${Math.round(event.metadata.duration / 1000)}s)`;
-          }
-          const summary = event.message.substring(0, 200);
-          response += `\n${summary}${event.message.length > 200 ? '...' : ''}`;
-        } else if (event.type === 'error') {
-          response += `\n❌ 任务失败: ${event.metadata?.errorType || '未知错误'}`;
-          response += `\n${event.message}`;
-        }
-      }
-
-      messageCache.clearEvents(newSession.id);
-    }
-
-    return response;
-  }
-
-  // /slist 命令：列出当前项目的所有会话
-  if (normalizedContent === '/slist') {
-    if (!session) {
-      return `❌ 当前没有活跃会话
-
-请先执行以下操作之一：
-1. 发送任意消息 - 自动创建新会话
-2. /new [名称] - 创建命名会话
-3. /project <项目> - 切换到指定项目`;
-    }
-
-    const sessions = await sessionManager.listSessions(channel, channelId);
-    const currentProjectSessions = sessions.filter(s => s.projectPath === session.projectPath);
-
-    // 扫描 CLI 会话（最新5个，仅单聊支持）
-    const isGroup = await isGroupChatAsync(channel, channelId, feishuChannel);
-    const cliSessions = isGroup
-      ? []
-      : await sessionManager.scanCliSessions(session.projectPath);
-    const dbSessionIds = new Set(currentProjectSessions.map(s => s.claudeSessionId).filter(Boolean));
-
-    const lines = [`当前项目 ${path.basename(session.projectPath)} 的会话列表:\n`];
-
-    // 获取处理状态
-    const sessionKey = `${channel}-${channelId}`;
-    const isProcessing = messageQueue.isProcessing(sessionKey);
-
-    // 显示数据库会话
-    if (currentProjectSessions.length > 0) {
-      lines.push('【EvolClaw 会话】');
-      for (const s of currentProjectSessions) {
-        const prefix = s.isActive ? '  ✓' : '   ';
-        const name = s.name || '(未命名)';
-        const uuid = s.claudeSessionId ? `(${s.claudeSessionId.substring(0, 8)})` : '';
-        const idleTime = formatIdleTime(Date.now() - s.updatedAt);
-
-        // 检查文件是否存在
-        if (s.claudeSessionId && !sessionManager.checkSessionFileExists(s.projectPath, s.claudeSessionId)) {
-          lines.push(`${prefix} ❌ ${name} ${uuid} - ${idleTime} [会话文件缺失]`);
-        } else {
-          // 显示处理状态
-          let status = '[空闲]';
-          if (s.isActive && isProcessing) {
-            status = '[处理中]';
-          } else if (s.isActive) {
-            status = '[活跃]';
-          }
-          lines.push(`${prefix} ${name} ${uuid} - ${idleTime} ${status}`);
-        }
-      }
-      lines.push('');
-    }
-
-    // 显示 CLI 会话（数据库中不存在的）
-    const orphanCliSessions = cliSessions.filter(c => !dbSessionIds.has(c.uuid)).slice(0, 5);
-    if (orphanCliSessions.length > 0) {
-      lines.push('【CLI 会话】(最新5个)');
-      for (const c of orphanCliSessions) {
-        const time = new Date(c.mtime).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
-        const message = sessionManager.readSessionFirstMessage(session.projectPath, c.uuid) || '(无消息)';
-        const uuid = c.uuid.substring(0, 8);
-        lines.push(`  ${time}  "${message}"  (${uuid})`);
-      }
-      lines.push('');
-    }
-
-    lines.push('使用 /s <name或8位uuid> 切换会话');
-    return lines.join('\n');
-  }
-
-  // /session 或 /s 命令：切换会话
-  if (normalizedContent.startsWith('/session ')) {
-    const sessionName = normalizedContent.slice(9).trim();
-
-    if (!sessionName) return '用法: /s <会话名称或前8位UUID>';
-
-    // 检查是否正在处理消息
-    const sessionKey = `${channel}-${channelId}`;
-    const queueLength = messageQueue.getQueueLength(sessionKey);
-    if (queueLength > 0) {
-      return `⚠️ 当前正在处理消息，无法切换会话\n请等待当前任务完成后再试`;
-    }
-
-    // 优先按名称查找
-    let targetSession = await sessionManager.getSessionByName(channel, channelId, sessionName);
-
-    // 如果按名称没找到，尝试按 UUID 前缀查找数据库会话
-    if (!targetSession && sessionName.length === 8) {
-      targetSession = await sessionManager.getSessionByUuidPrefix(channel, channelId, sessionName);
-    }
-
-    // 如果还是没找到，尝试导入 CLI 会话（仅单聊支持）
-    const isGroup = await isGroupChatAsync(channel, channelId, feishuChannel);
-    if (!targetSession && sessionName.length === 8 && !isGroup) {
-      // 扫描所有配置的项目目录
-      const projects = config.projects?.list || {};
-      const projectPaths = Object.values(projects);
-
-      // 如果有活跃会话，优先扫描当前项目
-      if (session) {
-        projectPaths.unshift(session.projectPath);
-      }
-
-      // 扫描所有项目，查找匹配的 CLI 会话
-      for (const projectPath of projectPaths) {
-        const cliSessions = await sessionManager.scanCliSessions(projectPath);
-        const cliSession = cliSessions.find(c => c.uuid.startsWith(sessionName));
-
-        if (cliSession) {
-          const imported = await sessionManager.importCliSession(channel, channelId, projectPath, cliSession.uuid);
-          const projectName = Object.entries(projects).find(([_, p]) => p === projectPath)?.[0] || path.basename(projectPath);
-          return `✓ 已导入 CLI 会话: ${imported.name}\n  项目: ${projectName}\n  将继续之前的对话历史`;
-        }
-      }
-    }
-
-    if (!targetSession) {
-      return `❌ 会话不存在: ${sessionName}\n使用 /slist 查看可用会话`;
-    }
-
-    // 如果没有活跃会话，直接切换到目标会话
-    if (!session) {
-      const switched = await sessionManager.switchToSession(channel, channelId, targetSession.id);
-      if (!switched) {
-        return `❌ 切换会话失败`;
-      }
-      return `✓ 已切换到会话: ${targetSession.name || sessionName}\n  项目: ${path.basename(targetSession.projectPath)}`;
-    }
-
-    if (targetSession.id === session.id) {
-      return `当前已在会话: ${targetSession.name || sessionName}`;
-    }
-
-    // 切换会话
-    const switched = await sessionManager.switchToSession(channel, channelId, targetSession.id);
-
-    if (!switched) {
-      return `❌ 切换会话失败`;
-    }
-
-    return `✓ 已切换到会话: ${targetSession.name || sessionName}\n  将继续之前的对话历史`;
-  }
-
-  // /rename 或 /name 命令：重命名当前会话
-  if (normalizedContent.startsWith('/rename ')) {
-    const newName = normalizedContent.slice(8).trim();
-
-    if (!newName) return '用法: /name <新名称> 或 /rename <新名称>';
-
-    // 必须有活跃会话
-    if (!session) {
-      return `❌ 当前没有活跃会话
-
-请先执行以下操作之一：
-1. 发送任意消息 - 自动创建新会话
-2. /new [名称] - 创建命名会话
-3. /session <名称> - 切换到已有会话`;
-    }
-
-    // 检查名称是否已存在
-    const existing = await sessionManager.getSessionByName(channel, channelId, newName);
-    if (existing && existing.id !== session.id) {
-      return `❌ 会话名称 "${newName}" 已存在，请使用其他名称`;
-    }
-
-    // 重命名
-    const success = await sessionManager.renameSession(session.id, newName);
-
-    if (!success) {
-      return `❌ 重命名失败`;
-    }
-
-    return `✓ 已将当前会话重命名为: ${newName}`;
-  }
-
-  // /repair 命令：检查并修复会话
-  if (normalizedContent === '/repair') {
-    if (!session) {
-      return `❌ 当前未创建会话，无需修复`;
-    }
-
-    // 检查是否在安全模式下
-    const health = await sessionManager.getHealthStatus(session.id);
-    if (!health.safeMode) {
-      return `当前不在安全模式，无需修复\n\n如需进入安全模式，请使用 /safe`;
-    }
-
-    const { checkSessionFileHealth, backupClaudeDir } = await import('./utils/session-file-health.js');
-    const fs = await import('fs/promises');
-
-    try {
-      // 备份当前会话目录
-      const backupDir = await backupClaudeDir(session.projectPath);
-
-      // 检查会话文件健康度
-      if (!session.claudeSessionId) {
-        // 没有 Claude 会话 ID，直接重置健康状态
-        await sessionManager.resetHealthStatus(session.id);
-        return `✓ 修复完成，已退出安全模式
-
-修复内容：
-- 未发现问题（新会话）
-- 已重置异常计数器
-- 已恢复正常会话模式
-
-备份位置：${backupDir}`;
-      }
-
-      const healthCheck = await checkSessionFileHealth(session.projectPath, session.claudeSessionId);
-
-      if (healthCheck.corrupt) {
-        // 文件损坏，删除并清空 claude_session_id
-        const sessionFile = path.join(session.projectPath, '.claude', `${session.claudeSessionId}.jsonl`);
-        await fs.unlink(sessionFile);
-        await sessionManager.updateClaudeSessionId(session.channel, session.channelId, '');
-        await sessionManager.resetHealthStatus(session.id);
-
-        return `✓ 修复完成，已退出安全模式
-
-检测到问题：
-${healthCheck.issues.map(i => `- ${i}`).join('\n')}
-
-修复操作：
-- 已删除损坏文件
-- 已创建新会话
-- 已重置异常计数器
-
-备份位置：${backupDir}`;
-      }
-
-      if (healthCheck.issues.length > 0) {
-        // 有问题但未损坏（如文件过大）
-        await sessionManager.resetHealthStatus(session.id);
-        return `⚠️ 检测到问题：
-${healthCheck.issues.map(i => `- ${i}`).join('\n')}
-
-建议：
-1. 使用 /new 创建新会话
-2. 旧会话已备份到：${backupDir}
-
-已重置异常计数器，可继续使用当前会话。`;
-      }
-
-      // 没有问题，只重置健康状态
-      await sessionManager.resetHealthStatus(session.id);
-      return `✓ 修复完成，已退出安全模式
-
-修复内容：
-- 未发现问题
-- 已重置异常计数器
-- 已恢复正常会话模式
-
-备份位置：${backupDir}`;
-    } catch (error: any) {
-      logger.error('[Repair] Failed:', error);
-      return `❌ 修复失败: ${error.message}`;
-    }
-  }
-
-  // /safe 命令：手动进入安全模式
-  if (normalizedContent === '/safe') {
-    if (!session) {
-      return `❌ 当前未创建会话`;
-    }
-
-    await sessionManager.setSafeMode(session.id, true);
-
-    return `✓ 已进入安全模式
-
-当前行为：
-- 暂时不加载会话历史（每次对话独立）
-- 所有功能正常可用（读写文件、执行命令等）
-- 不会丢失历史数据（仍保存在 .claude/ 目录）
-
-退出安全模式：
-- 使用 /repair 检查并修复会话
-- 使用 /new 创建全新会话`;
-  }
-
-  return null;
-}
 
 async function main() {
   // 过滤飞书 SDK 的 info 日志
@@ -996,7 +39,6 @@ async function main() {
   const anthropic = resolveAnthropicConfig(config);
   logger.info('✓ Config loaded (API keys hidden)');
 
-  // baseUrl 由 resolveAnthropicConfig 处理，不再手动设置 process.env
   if (anthropic.baseUrl) {
     logger.info(`✓ Using custom API base URL: ${anthropic.baseUrl}`);
   }
@@ -1011,7 +53,6 @@ async function main() {
     anthropic.apiKey,
     anthropic.model,
     async (sessionId, claudeSessionId) => {
-      // 直接根据 sessionId 更新，避免错误更新其他项目的会话
       await sessionManager.updateClaudeSessionIdBySessionId(sessionId, claudeSessionId);
     },
     anthropic.baseUrl
@@ -1045,15 +86,17 @@ async function main() {
   // ACP 渠道
   const acp = new ACPChannel({ domain: config.acp.domain, agentName: config.acp.agentName });
 
-  // 创建消息处理器（需要先创建，因为 commandHandler 需要引用它）
-  let processor: MessageProcessor;
-  let messageQueue: MessageQueue;
-
   // 创建命令处理器
-  const commandHandler: CommandHandler = (content, channel, channelId, userId) =>
-    handleProjectCommand(content, channel, channelId, sessionManager, agentRunner, config, messageCache, processor, messageQueue,
-      async (id, text) => {
-        // 处理文件标记（仅Feishu）
+  const cmdHandler = new CommandHandler(sessionManager, agentRunner, config, messageCache);
+
+  // 创建消息处理器
+  const processor = new MessageProcessor(
+    agentRunner,
+    sessionManager,
+    config,
+    messageCache,
+    (content, channel, channelId, userId) => {
+      const sendFn = async (id: string, text: string) => {
         const fileMarkerPattern = /\[SEND_FILE:([^\]]+)\]/g;
         if (channel === 'feishu') {
           const fileMatches = [...text.matchAll(fileMarkerPattern)];
@@ -1075,19 +118,13 @@ async function main() {
           if (channel === 'feishu') await feishu.sendMessage(id, text);
           else if (channel === 'acp') await acp.sendMessage(id, text);
         }
-      },
-      channel === 'feishu' ? feishu : undefined,
-      userId
-    );
-
-  // 创建消息处理器
-  processor = new MessageProcessor(
-    agentRunner,
-    sessionManager,
-    config,
-    messageCache,
-    commandHandler
+      };
+      return cmdHandler.handle(content, channel, channelId, sendFn, userId);
+    }
   );
+
+  // 回填 processor 和 messageQueue 的引用
+  cmdHandler.setProcessor(processor);
 
   // 设置 compact 开始回调
   agentRunner.setCompactStartCallback((sessionId) => {
@@ -1095,7 +132,7 @@ async function main() {
   });
 
   // 创建消息队列
-  messageQueue = new MessageQueue(async (message) => {
+  const messageQueue = new MessageQueue(async (message) => {
     await processor.processMessage(message);
   });
 
@@ -1104,11 +141,15 @@ async function main() {
     await agentRunner.interrupt(sessionKey);
   });
 
+  // 回填 messageQueue 引用
+  cmdHandler.setMessageQueue(messageQueue);
+
   // 注册 Feishu 适配器
   const feishuAdapter: ChannelAdapter = {
     name: 'feishu',
     sendText: (channelId, text, options) => feishu.sendMessage(channelId, text, options),
     sendFile: (channelId, filePath) => feishu.sendFile(channelId, filePath),
+    isGroupChat: (channelId) => feishu.getChatMode(channelId).then(m => m === 'group'),
   };
 
   const feishuOptions: ChannelOptions = {
@@ -1118,6 +159,7 @@ async function main() {
   };
 
   processor.registerChannel(feishuAdapter, feishuOptions);
+  cmdHandler.registerAdapter(feishuAdapter);
 
   // 注册 ACP 适配器
   const acpAdapter: ChannelAdapter = {
@@ -1126,11 +168,7 @@ async function main() {
   };
 
   processor.registerChannel(acpAdapter);
-
-  // 命令列表（用于快速检查，必须与 handleProjectCommand 中的 commands 保持同步）
-  // 注意：/stop, /clear, /compact, /safe 故意不在此列表中，它们需要进入队列触发中断机制
-  const commandPrefixes = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/slist', '/session', '/rename', '/repair', '/p ', '/s ', '/name '];
-  const isCommand = (content: string) => content === '/p' || content === '/s' || commandPrefixes.some(cmd => content.startsWith(cmd));
+  cmdHandler.registerAdapter(acpAdapter);
 
   // Feishu 消息处理
   feishu.onMessage(async (chatId, content, images, userId, userName, messageId) => {
@@ -1144,8 +182,8 @@ async function main() {
     }
 
     // 命令立即处理，不进入队列
-    if (isCommand(content)) {
-      const cmdResult = await commandHandler(content, 'feishu', chatId, userId);
+    if (cmdHandler.isCommand(content)) {
+      const cmdResult = await cmdHandler.handle(content, 'feishu', chatId, undefined, userId);
       if (cmdResult !== null) {
         if (cmdResult) {
           try {
@@ -1187,8 +225,8 @@ async function main() {
     }
 
     // 命令立即处理，不进入队列
-    if (isCommand(content)) {
-      const cmdResult = await commandHandler(content, 'acp', sessionId, sessionId);
+    if (cmdHandler.isCommand(content)) {
+      const cmdResult = await cmdHandler.handle(content, 'acp', sessionId, undefined, sessionId);
       if (cmdResult) {
         await acp.sendMessage(sessionId, cmdResult);
         return;
@@ -1209,7 +247,6 @@ async function main() {
   // 连接渠道
   const channels: string[] = [];
 
-  // 飞书渠道
   try {
     await feishu.connect();
     logger.info('✓ Feishu connected');
@@ -1221,7 +258,6 @@ async function main() {
     }
   }
 
-  // ACP 渠道
   try {
     await acp.connect();
     logger.info('✓ ACP connected');
@@ -1242,11 +278,9 @@ async function main() {
       const restartInfo = JSON.parse(fs.readFileSync(restartPendingFile, 'utf-8'));
       const { channel, channelId, timestamp } = restartInfo;
 
-      // 检查时间戳，避免发送过期的消息（超过 1 分钟）
       if (Date.now() - timestamp < 60000) {
         logger.info(`[System] Sending restart success message to ${channel}:${channelId}`);
 
-        // 延迟 2 秒发送，确保 channel 连接已建立
         setTimeout(async () => {
           try {
             if (channel === 'feishu') {
@@ -1261,7 +295,6 @@ async function main() {
         }, 2000);
       }
 
-      // 删除文件
       fs.unlinkSync(restartPendingFile);
     } catch (error) {
       logger.error('[System] Failed to process restart-pending.json:', error);

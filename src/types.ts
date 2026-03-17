@@ -24,6 +24,10 @@ export interface Config {
   timeout?: {
     idle?: number;  // 无输出超时(ms)，默认 120000
   };
+  healthCheck?: {
+    enabled?: boolean;              // 是否启用健康检查，默认 true
+    safeModeThreshold?: number;     // 连续错误几次进入安全模式，默认 3；设为 0 关闭 safe mode
+  };
   owners?: {
     feishu?: string;
     acp?: string;
@@ -56,9 +60,10 @@ export interface Message {
 
 // 渠道适配器接口
 export interface ChannelAdapter {
-  readonly name: 'feishu' | 'acp';
+  readonly name: string;
   sendText(channelId: string, text: string, options?: { title?: string; replyToMessageId?: string }): Promise<void>;
   sendFile?(channelId: string, filePath: string): Promise<void>;
+  isGroupChat?(channelId: string): Promise<boolean>;
 }
 
 // 渠道配置选项
