@@ -51,6 +51,7 @@ export interface Message {
   userId?: string;
   userName?: string;
   messageId?: string;
+  isGroup?: boolean;
 }
 
 // 渠道适配器接口

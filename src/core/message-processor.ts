@@ -17,6 +17,7 @@ import type { Message, Config, Session, ChannelAdapter, ChannelOptions, CommandH
 export class MessageProcessor {
   private channels = new Map<string, { adapter: ChannelAdapter; options?: ChannelOptions }>();
   private currentFlusher?: StreamFlusher;
+  private currentIsGroup = false;
 
   constructor(
     private agentRunner: AgentRunner,
@@ -37,7 +38,7 @@ export class MessageProcessor {
    * 处理 compact 开始事件
    */
   handleCompactStart(): void {
-    if (this.currentFlusher) {
+    if (this.currentFlusher && !this.currentIsGroup) {
       this.currentFlusher.addActivity('⏳ 会话压缩中...');
     }
   }
@@ -46,6 +47,8 @@ export class MessageProcessor {
    * 处理消息（主入口）
    */
   async processMessage(message: Message): Promise<void> {
+    const isGroup = message.isGroup ?? false;
+    this.currentIsGroup = isGroup;
     const idleMs = this.config.timeout?.idle ?? 120000;
     const streamKey = `${message.channel}-${message.channelId}`;
     const channelInfo = this.channels.get(message.channel);
@@ -66,8 +69,8 @@ export class MessageProcessor {
         while (result) {
           if (result.action === 'kill') {
             logger.warn(`[MessageProcessor] Health check: kill after ${result.idleSec}s idle, stream: ${streamKey}`);
-            // 先发送诊断信息，让用户知道发生了什么
-            if (channelInfo) {
+            // 先发送诊断信息，让用户知道发生了什么（群聊时静默）
+            if (channelInfo && !isGroup) {
               try {
                 await channelInfo.adapter.sendText(message.channelId, result.message);
               } catch (e) {
@@ -82,9 +85,9 @@ export class MessageProcessor {
             rejectFn(new Error('SDK_TIMEOUT'));
             return;
           } else {
-            // notify or warn: send diagnostic message, task continues
+            // notify or warn: send diagnostic message, task continues（群聊时静默）
             logger.info(`[MessageProcessor] Health check: ${result.action} after ${result.idleSec}s idle, stream: ${streamKey}`);
-            if (channelInfo) {
+            if (channelInfo && !isGroup) {
               try {
                 await channelInfo.adapter.sendText(message.channelId, result.message);
               } catch (e) {
@@ -129,9 +132,10 @@ export class MessageProcessor {
               await this.sessionManager.setSafeMode(session.id, true);
               logger.warn(`[MessageProcessor] Session ${session.id} entered safe mode after ${health.consecutiveErrors} errors`);
 
-              await channelInfo.adapter.sendText(
-                message.channelId,
-                `⚠️ 安全模式已启用（连续 ${health.consecutiveErrors} 次异常）
+              if (!isGroup) {
+                await channelInfo.adapter.sendText(
+                  message.channelId,
+                  `⚠️ 安全模式已启用（连续 ${health.consecutiveErrors} 次异常）
 
 当前限制：
 - 无法记住之前的对话
@@ -141,12 +145,15 @@ export class MessageProcessor {
 1. /repair - 检查并修复会话（推荐，保留历史）
 2. /new [名称] - 创建新会话（清空历史）
 3. /status - 查看详细状态`
-              );
+                );
+              }
             } else if (health.consecutiveErrors === 2) {
-              await channelInfo.adapter.sendText(
-                message.channelId,
-                `⚠️ 检测到异常（${health.consecutiveErrors}/3）\n\n如果问题持续，系统将自动进入安全模式。建议使用 /status 查看状态。`
-              );
+              if (!isGroup) {
+                await channelInfo.adapter.sendText(
+                  message.channelId,
+                  `⚠️ 检测到异常（${health.consecutiveErrors}/3）\n\n如果问题持续，系统将自动进入安全模式。建议使用 /status 查看状态。`
+                );
+              }
             }
           } else {
             await this.sessionManager.recordError(session.id, errorType, error.message);
@@ -157,10 +164,11 @@ export class MessageProcessor {
               await this.sessionManager.setSafeMode(session.id, true);
               logger.warn(`[MessageProcessor] Session ${session.id} entered safe mode after ${health.consecutiveErrors} errors`);
 
-              // 发送安全模式提示
-              await channelInfo.adapter.sendText(
-                message.channelId,
-                `⚠️ 安全模式已启用（连续 ${health.consecutiveErrors} 次异常）
+              // 发送安全模式提示（群聊时静默）
+              if (!isGroup) {
+                await channelInfo.adapter.sendText(
+                  message.channelId,
+                  `⚠️ 安全模式已启用（连续 ${health.consecutiveErrors} 次异常）
 
 当前限制：
 - 无法记住之前的对话
@@ -170,13 +178,16 @@ export class MessageProcessor {
 1. /repair - 检查并修复会话（推荐，保留历史）
 2. /new [名称] - 创建新会话（清空历史）
 3. /status - 查看详细状态`
-              );
+                );
+              }
             } else if (health.consecutiveErrors === 2) {
-              // 第2次错误，发送警告
-              await channelInfo.adapter.sendText(
-                message.channelId,
-                `⚠️ 检测到异常（${health.consecutiveErrors}/3）\n\n如果问题持续，系统将自动进入安全模式。建议使用 /status 查看状态。`
-              );
+              // 第2次错误，发送警告（群聊时静默）
+              if (!isGroup) {
+                await channelInfo.adapter.sendText(
+                  message.channelId,
+                  `⚠️ 检测到异常（${health.consecutiveErrors}/3）\n\n如果问题持续，系统将自动进入安全模式。建议使用 /status 查看状态。`
+                );
+              }
             }
           }
         } catch (healthError) {
@@ -481,10 +492,12 @@ export class MessageProcessor {
           flusher.addText(event.text);
         }
 
-        // 系统事件：compact_boundary
+        // 系统事件：compact_boundary（群聊时静默）
         if (event.type === 'system' && event.subtype === 'compact_boundary') {
-          const preTokens = event.compact_metadata?.pre_tokens || 0;
-          flusher.addActivity(`💡 会话压缩完成，继续执行...（压缩前 tokens: ${preTokens}）`);
+          if (!this.currentIsGroup) {
+            const preTokens = event.compact_metadata?.pre_tokens || 0;
+            flusher.addActivity(`💡 会话压缩完成，继续执行...（压缩前 tokens: ${preTokens}）`);
+          }
         }
 
         // Assistant 事件：提取工具调用和文本内容

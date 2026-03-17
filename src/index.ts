@@ -1170,7 +1170,7 @@ async function main() {
     // 普通消息进入队列
     await messageQueue.enqueue(
       `feishu-${chatId}`,
-      { channel: 'feishu', channelId: chatId, content, images, timestamp: Date.now(), userId, userName, messageId },
+      { channel: 'feishu', channelId: chatId, content, images, timestamp: Date.now(), userId, userName, messageId, isGroup: chatMode === 'group' },
       session.projectPath
     );
   });
