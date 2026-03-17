@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-EvolClaw is a lightweight AI Agent gateway system (~1000 lines) that connects Claude Agent SDK to messaging channels (Feishu and ACP). It uses a seven-layer architecture with unified message processing, Hook-driven monitoring, and supports both shared and isolated session modes.
+EvolClaw is a lightweight AI Agent gateway system that connects Claude Agent SDK to messaging channels (Feishu). It uses unified message processing, a Channel Adapter pattern, and supports multi-project session management.
 
 **Recent Architecture Improvements** (2026-03):
 - Unified message processing eliminates ~250 lines of duplicate code
@@ -56,26 +56,19 @@ npm run test:hooks
 
 ## Architecture
 
-### Seven-Layer Design
-1. **Message Channel Layer** (`src/channels/`) - Feishu WebSocket + ACP protocol
+### Architecture
+1. **Message Channel Layer** (`src/channels/`) - Feishu WebSocket
 2. **Message Queue Layer** (`src/core/message-queue.ts`) - Session-level serial processing with interrupt support
-3. **Message Processing Layer** (`src/core/message-processor.ts`) - Unified event handling for all channels
-4. **Monitoring Layer** (`src/monitor/`) - Hook-driven state tracking (experimental, not used in main entry)
+3. **Command Processing Layer** (`src/core/command-handler.ts`) - Slash command handling (CommandHandler class)
+4. **Message Processing Layer** (`src/core/message-processor.ts`) - Unified event handling for all channels
 5. **Session Management Layer** (`src/core/session-manager.ts`) - Multi-project session management
-6. **Instance Management Layer** (`src/gateway/`) - Experimental: Instance pool, Hook monitoring (not used in main entry)
-7. **Storage Layer** - JSONL files (SDK-managed) + SQLite metadata
+6. **Storage Layer** - JSONL files (SDK-managed) + SQLite metadata
 
-### Entry Points
+### Entry Point
 - **`src/index.ts`** - Main entry (~320 lines, default, production use)
   - Initialization, channel wiring, message queue setup
   - Command processing delegated to `CommandHandler`
   - Uses `AgentRunner` for direct SDK calls
-
-- **`src/index-gateway.ts`** - Gateway mode (experimental, not used)
-  - Preserved for reference: instance pool management, comprehensive Hook monitoring
-  - See `GATEWAY_MODE.md` for details
-
-Default entry: `src/index.ts` (via `package.json` main field)
 
 ### Message Processing Architecture
 
@@ -125,17 +118,7 @@ MessageProcessor.processMessage
 
 ### Session Modes
 - **Isolated mode** (default): Each channel session → separate Claude session
-- **Shared mode**: All sessions in same channel → single Claude session
 - Configured via `data/config.json` `session.mode` field
-
-### Hook-Driven Monitoring
-The system relies on Claude Agent SDK Hooks for state management:
-- **Stop Hook**: Triggered after every response (100% reliable) - primary sync point
-- **PostToolUse Hook**: Triggered after tool calls - used for activity monitoring
-- **SubagentStart/Stop Hook**: Subagent lifecycle tracking
-- **Notification Hook**: System notifications from Agent
-
-Critical: Stop Hook is the only reliable sync mechanism that covers all scenarios (text + tool use).
 
 ## Key Implementation Details
 
@@ -202,7 +185,6 @@ Session IDs are automatically extracted and persisted to database:
 - The system extracts session IDs during event iteration
 - `AgentRunner.updateSessionId()` triggers a callback that persists to database
 - The `resume` parameter uses database-stored session IDs to continue sessions
-- Both `src/index.ts` and `src/gateway/claude-instance.ts` implement extraction
 - Database field mapping: snake_case (`claude_session_id`) ↔ camelCase (`claudeSessionId`)
 
 **Persistence flow**:
@@ -257,18 +239,7 @@ CREATE TABLE sessions (
 
 ### Test Structure
 - `tests/unit/` - Unit tests for core components
-- `tests/integration/` - Integration tests for channels and E2E flows
-- `tests/test-sdk-hooks.ts` - Hook behavior verification
-- `tests/test-multi-session.ts` - Multi-session management tests
-- `tests/test-verify-multi-chat.ts` - Multi-chat independence verification
-
-### Hook Testing
-Multiple test files verify Hook triggering conditions:
-- `test-sdk-hooks.ts` - Basic Hook verification
-- `test-all-hooks-comprehensive.ts` - Comprehensive Hook coverage
-- `test-hook-comparison.ts` - Compare Hook reliability
-
-Key finding: Stop Hook is the only 100% reliable sync point.
+- `tests/integration/` - Integration tests for channels
 
 ### Multi-Session Testing
 Tests verify:
@@ -370,12 +341,6 @@ All commands are processed in `CommandHandler` (`src/core/command-handler.ts`) b
 
 Total code needed: ~15 lines. All event processing is handled automatically.
 
-### Monitoring Hook Events
-Hook events are collected by `HookCollector` and stored in `session_events` table. To add new Hook monitoring:
-1. Register Hook in `ClaudeInstance` constructor (`src/gateway/claude-instance.ts`)
-2. Emit event via `this.emit('hook', { type: 'hookName', data: input })`
-3. `InstanceManager` forwards to monitoring layer
-
 ## Important Constraints
 
 ### TypeScript Module System
@@ -419,9 +384,6 @@ Console log filtering is applied in `src/index.ts` to suppress noisy Feishu SDK 
 - Content is properly formatted as JSON: `{ text: "..." }`
 - Current implementation includes empty message check in `FeishuChannel.sendMessage()`
 
-### ACP Channel Status
-ACP channel (`src/channels/acp.ts`) is currently a placeholder implementation. Real integration with `acp-ts` library is pending.
-
 ## Documentation
 
 - `docs/architecture.md` - Detailed architecture and module descriptions
@@ -439,12 +401,6 @@ ACP channel (`src/channels/acp.ts`) is currently a placeholder implementation. R
 4. Build with `npm run build` before committing
 5. Verify with `evolclaw` command (after `npm link`)
 
-## Gateway Mode
-
-**Status**: Experimental, not used in production. See `GATEWAY_MODE.md` for details.
-
-**Value**: Instance pool management, comprehensive Hook monitoring, failure recovery mechanisms.
-
 ## Critical Files
 
 - `src/index.ts` - Main entry point (~320 lines): channel setup, adapter wiring, message queue
@@ -455,7 +411,6 @@ ACP channel (`src/channels/acp.ts`) is currently a placeholder implementation. R
 - `src/core/agent-runner.ts` - Claude Agent SDK wrapper with interrupt support
 - `src/core/session-manager.ts` - Session-to-project mapping (SQLite-backed)
 - `src/channels/feishu.ts` - Production-grade Feishu connection
-- `src/gateway/claude-instance.ts` - SDK instance with Hook configuration (experimental)
 - `data/config.json` - Runtime configuration (not in git, contains secrets)
 
 ## Service Management
