@@ -44,8 +44,13 @@ npm run test:hooks
 
 ### Configuration
 - Config file: `data/config.json`
-- Required fields: `anthropic.apiKey`, `acp.domain`, `acp.agentName`, `projects.defaultPath`
-- Optional fields: `anthropic.baseUrl` (for custom API endpoints/proxies)
+- Required fields: `acp.domain`, `acp.agentName`, `projects.defaultPath`
+- `anthropic` section is entirely optional — auto-inherited from CLI config:
+  ```
+  token:   config.anthropic.apiKey  → env.ANTHROPIC_AUTH_TOKEN → ~/.claude/settings.json env.ANTHROPIC_AUTH_TOKEN
+  baseUrl: config.anthropic.baseUrl → env.ANTHROPIC_BASE_URL   → ~/.claude/settings.json env.ANTHROPIC_BASE_URL
+  model:   config.anthropic.model   → ~/.claude/settings.json model → 'sonnet'
+  ```
 - Feishu credentials optional (channel disabled if missing)
 - Project list: `projects.list` maps names to absolute paths
 
@@ -400,10 +405,7 @@ if (event.type === 'text_delta') {
 }
 ```
 
-**Custom API endpoints**: If using custom `baseUrl` in config:
-- Set `ANTHROPIC_BASE_URL` environment variable on startup
-- Pass through to SDK via `env` option in query()
-- Required for proxy/custom API endpoints
+**Custom API endpoints**: `baseUrl` is resolved via the fallback chain (config → env → settings.json) and passed directly to `AgentRunner`. No manual `process.env` setup needed.
 
 ### Feishu SDK Logging
 Console log filtering is applied in `src/index.ts` to suppress noisy Feishu SDK logs (`[info]`, `[ws]` prefixes).
