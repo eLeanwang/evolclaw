@@ -21,7 +21,7 @@ describe('StreamFlusher', () => {
 
     await vi.advanceTimersByTimeAsync(3000);
 
-    expect(send).toHaveBeenCalledWith('Hello World');
+    expect(send.mock.calls[0][0]).toBe('Hello World');
   });
 
   it('should combine activities and text', async () => {
@@ -33,7 +33,7 @@ describe('StreamFlusher', () => {
 
     await vi.advanceTimersByTimeAsync(3000);
 
-    expect(send).toHaveBeenCalledWith('🔧 Read: file.ts\n\nContent here');
+    expect(send.mock.calls[0][0]).toBe('🔧 Read: file.ts\n\nContent here');
   });
 
   it('should flush immediately when called', async () => {
@@ -43,7 +43,7 @@ describe('StreamFlusher', () => {
     flusher.addText('Immediate');
     await flusher.flush();
 
-    expect(send).toHaveBeenCalledWith('Immediate');
+    expect(send.mock.calls[0][0]).toBe('Immediate');
   });
 
   it('should track all text in getFinalText', async () => {
@@ -102,7 +102,7 @@ describe('StreamFlusher', () => {
     flusher.stripFromBuffer(/\[SEND_FILE:[^\]]+\]/g);
     await flusher.flush();
 
-    expect(send).toHaveBeenCalledWith('Hello  World');
+    expect(send.mock.calls[0][0]).toBe('Hello  World');
   });
 
   it('should return remaining buffer text', () => {
