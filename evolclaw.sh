@@ -175,6 +175,66 @@ restart() {
     start
 }
 
+# 人性化时间差
+format_age() {
+    local ts_ms="$1"
+    if [ -z "$ts_ms" ] || [ "$ts_ms" = "null" ]; then
+        echo "N/A"
+        return
+    fi
+    local now_s=$(date +%s)
+    local ts_s=$((ts_ms / 1000))
+    local diff=$((now_s - ts_s))
+    if [ "$diff" -lt 60 ]; then
+        echo "${diff}秒前"
+    elif [ "$diff" -lt 3600 ]; then
+        echo "$((diff / 60))分钟前"
+    elif [ "$diff" -lt 86400 ]; then
+        echo "$((diff / 3600))小时前"
+    else
+        echo "$((diff / 86400))天前"
+    fi
+}
+
+# 项目和会话统计
+show_session_stats() {
+    local DB="$SCRIPT_DIR/data/sessions.db"
+    if [ ! -f "$DB" ]; then
+        echo "  (数据库不存在)"
+        return
+    fi
+
+    local total=$(sqlite3 "$DB" "SELECT count(*) FROM sessions;" 2>/dev/null)
+    local active=$(sqlite3 "$DB" "SELECT count(*) FROM sessions WHERE is_active=1;" 2>/dev/null)
+    local channels=$(sqlite3 "$DB" "SELECT count(DISTINCT channel_id) FROM sessions;" 2>/dev/null)
+    local projects=$(sqlite3 "$DB" "SELECT count(DISTINCT project_path) FROM sessions;" 2>/dev/null)
+    local msgs=$(sqlite3 "$DB" "SELECT count(*) FROM processed_messages;" 2>/dev/null)
+    local errors=$(sqlite3 "$DB" "SELECT count(*) FROM session_health WHERE consecutive_errors>0;" 2>/dev/null)
+
+    echo "  会话总数: $total (活跃: $active)"
+    echo "  独立会话: $channels 个"
+    echo "  涉及项目: $projects 个"
+    echo "  已处理消息: $msgs 条"
+    if [ "$errors" -gt 0 ]; then
+        echo "  异常会话: $errors 个"
+    fi
+
+    # 按项目统计
+    echo ""
+    echo "  按项目分布:"
+    sqlite3 "$DB" "
+        SELECT s.project_path, count(*) as cnt, sum(s.is_active) as act, max(s.updated_at) as last_update
+        FROM sessions s GROUP BY s.project_path ORDER BY last_update DESC;
+    " 2>/dev/null | while IFS='|' read -r path cnt act last_ts; do
+        # 从 config 反查项目名
+        local name=$(basename "$path")
+        local age=$(format_age "$last_ts")
+        local marker=""
+        if [ "$act" -gt 0 ]; then marker=" ✓"; fi
+        echo "    $name: ${cnt}个会话, 最近活跃 $age$marker"
+    done
+}
+
 # 查看状态
 status() {
     if is_running; then
@@ -186,6 +246,9 @@ status() {
         echo "  CPU: $(ps -p "$PID" -o %cpu= | xargs)%"
         echo "  Memory: $(ps -p "$PID" -o rss= | xargs) KB"
         echo "  Working Dir: $SCRIPT_DIR"
+        echo ""
+        echo "📦 Sessions & Projects:"
+        show_session_stats
         echo ""
         echo "📁 Log Files:"
         echo "  Main log: $LOG_DIR/evolclaw.log"
@@ -209,9 +272,9 @@ status() {
         echo "  Message log: $MESSAGE_LOG"
         echo "  Event log: $EVENT_LOG"
         echo ""
-        echo "📝 Recent activity (last 5 lines):"
+        echo "📝 Recent activity (last 10 lines):"
         if [ -f "$LOG_DIR/evolclaw.log" ]; then
-            tail -5 "$LOG_DIR/evolclaw.log" | sed 's/^/  /'
+            tail -10 "$LOG_DIR/evolclaw.log" | sed 's/^/  /'
         else
             echo "  (no log file yet)"
         fi
@@ -221,9 +284,15 @@ status() {
         if [ -f "$PID_FILE" ]; then
             echo "  Stale PID file found: $PID_FILE"
         fi
+        echo ""
+        echo "📦 Sessions & Projects:"
+        show_session_stats
+        echo ""
+        echo "📝 Last log entries (last 10 lines):"
         if [ -f "$LOG_DIR/evolclaw.log" ]; then
-            echo "📝 Last log entries:"
-            tail -5 "$LOG_DIR/evolclaw.log" | sed 's/^/  /'
+            tail -10 "$LOG_DIR/evolclaw.log" | sed 's/^/  /'
+        else
+            echo "  (no log file)"
         fi
     fi
 }
