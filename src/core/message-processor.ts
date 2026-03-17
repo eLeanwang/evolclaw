@@ -55,6 +55,9 @@ export class MessageProcessor {
 
     const healthEnabled = this.config.healthCheck?.enabled !== false;
     const safeModeThreshold = this.config.healthCheck?.safeModeThreshold ?? 3;
+    const isOwnerUser = isOwner(this.config, message.channel, message.userId || '');
+    // 非主人（群聊或单聊）：健康检查静默/简短
+    const quietMode = isGroup || !isOwnerUser;
 
     let tracker: IdleHealthTracker | undefined;
     let healthInterval: ReturnType<typeof setInterval> | undefined;
@@ -78,7 +81,7 @@ export class MessageProcessor {
             // 先发送诊断信息，让用户知道发生了什么
             if (channelInfo) {
               try {
-                const msg = isGroup
+                const msg = quietMode
                   ? `⚠️ 任务超时（${result.idleSec}秒无响应），已自动中断`
                   : result.message;
                 await channelInfo.adapter.sendText(message.channelId, msg);
@@ -94,9 +97,9 @@ export class MessageProcessor {
             rejectFn(new Error('SDK_TIMEOUT'));
             return;
           } else {
-            // notify or warn: send diagnostic message, task continues（群聊时静默）
+            // notify or warn: send diagnostic message, task continues（非主人时静默）
             logger.info(`[MessageProcessor] Health check: ${result.action} after ${result.idleSec}s idle, stream: ${streamKey}`);
-            if (channelInfo && !isGroup) {
+            if (channelInfo && !quietMode) {
               try {
                 await channelInfo.adapter.sendText(message.channelId, result.message);
               } catch (e) {
@@ -128,17 +131,13 @@ export class MessageProcessor {
           );
 
           const errorType = classifyError(error);
-          const isOwnerUser = isOwner(this.config, message.channel, message.userId || '');
 
           // 上下文过长是可恢复错误，不累计触发安全模式
           if (errorType === ErrorType.CONTEXT_TOO_LONG) {
             logger.info(`[MessageProcessor] Context too long error, skipping safe mode accumulation`);
-          } else if (isGroup) {
-            // 群聊中不累计错误、不触发安全模式
-            logger.info(`[MessageProcessor] Group chat error, skipping safe mode accumulation`);
-          } else if (!isOwnerUser) {
-            // 非主人的错误只记日志，不累计
-            logger.info(`[MessageProcessor] Non-owner error (user=${message.userId}), skipping safe mode accumulation`);
+          } else if (quietMode) {
+            // 群聊或非主人的错误只记日志，不累计
+            logger.info(`[MessageProcessor] Non-owner/group error (user=${message.userId}, group=${isGroup}), skipping safe mode accumulation`);
           } else {
             const newCount = await this.sessionManager.recordError(session.id, errorType, error.message);
             await this.checkSafeMode(session.id, message.channelId, channelInfo.adapter, safeModeThreshold, newCount);
