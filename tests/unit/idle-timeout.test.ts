@@ -87,7 +87,7 @@ function createMockAdapter(): ChannelAdapter & { sentMessages: string[] } {
 }
 
 function createMessage(content = 'hello'): Message {
-  return { channel: 'feishu', channelId: 'test-channel', content, timestamp: Date.now() };
+  return { channel: 'feishu', channelId: 'test-channel', content, userId: 'owner-123', timestamp: Date.now() };
 }
 
 describe('Idle Timeout with Health Check', () => {
@@ -117,6 +117,7 @@ describe('Idle Timeout with Health Check', () => {
       feishu: { appId: '', appSecret: '' },
       acp: { domain: '', agentName: '' },
       timeout: { idle: 200 },
+      owners: { feishu: 'owner-123' },
     };
 
     const processor = new MessageProcessor(
@@ -164,6 +165,7 @@ describe('Idle Timeout with Health Check', () => {
       feishu: { appId: '', appSecret: '' },
       acp: { domain: '', agentName: '' },
       timeout: { idle: 500 },  // 500ms idle threshold for fast tests
+      owners: { feishu: 'owner-123' },
     };
 
     const processor = new MessageProcessor(
@@ -211,6 +213,7 @@ describe('Idle Timeout with Health Check', () => {
       anthropic: { apiKey: 'test' },
       feishu: { appId: '', appSecret: '' },
       acp: { domain: '', agentName: '' },
+      owners: { feishu: 'owner-123' },
     };
 
     const processor = new MessageProcessor(
@@ -329,6 +332,7 @@ describe('Idle Timeout with Health Check', () => {
       feishu: { appId: '', appSecret: '' },
       acp: { domain: '', agentName: '' },
       timeout: { idle: 500 },
+      owners: { feishu: 'owner-123' },
     };
 
     const processor = new MessageProcessor(
