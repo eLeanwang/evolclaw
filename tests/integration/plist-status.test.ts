@@ -128,9 +128,9 @@ describe('/plist 状态显示集成测试', () => {
   it('应该正确跟踪未读消息数', () => {
     const sessionId = 'feishu-chat-1-12345';
 
-    messageCache.add(sessionId, '消息1');
-    messageCache.add(sessionId, '消息2');
-    messageCache.add(sessionId, '消息3');
+    messageCache.addEvent(sessionId, { type: 'completed', message: '消息1', timestamp: Date.now() });
+    messageCache.addEvent(sessionId, { type: 'completed', message: '消息2', timestamp: Date.now() });
+    messageCache.addEvent(sessionId, { type: 'completed', message: '消息3', timestamp: Date.now() });
 
     expect(messageCache.getCount(sessionId)).toBe(3);
   });

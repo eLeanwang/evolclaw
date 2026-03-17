@@ -224,7 +224,7 @@ describe('MessageQueue 项目路径检查', () => {
     expect(processedMessages[0].content).toBe('正常消息');
   });
 
-  it('应该处理相同项目路径但不同格式', async () => {
+  it('应该处理相同项目路径但不同格式（尾部斜杠）', async () => {
     const sessionKey = 'feishu-chat-1';
     const projectPathA = '/test/project-a';
     const projectPathB = '/test/project-a/'; // 带尾部斜杠
@@ -254,8 +254,8 @@ describe('MessageQueue 项目路径检查', () => {
 
     await Promise.all([promise1, promise2]);
 
-    // 路径不完全相同，不应该触发中断
-    expect(interruptCalled).toBe(false);
+    // path.basename 会规范化尾部斜杠，两个路径映射到同一个队列，应该触发中断
+    expect(interruptCalled).toBe(true);
   });
 
   it('应该处理空的项目路径', async () => {
