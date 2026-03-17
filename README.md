@@ -112,27 +112,18 @@ evolclaw → Claude Agent SDK → Claude API
 
 ## 系统架构
 
-七层架构设计：
-
 ```
-消息渠道层 → 消息队列层 → 消息处理层 → 监控层 → 会话管理层 → 实例管理层 → 存储层
+消息渠道层 → 消息队列层 → 命令处理层 → 消息处理层 → 会话管理层 → 存储层
 ```
 
 ### 核心组件
 
 1. **消息渠道层** (`src/channels/`) - Feishu WebSocket + ACP 协议
 2. **消息队列层** (`src/core/message-queue.ts`) - 会话级串行处理 + 中断支持
-3. **消息处理层** (`src/core/message-processor.ts`) - 统一事件处理引擎
-4. **命令处理层** (`src/core/command-handler.ts`) - 斜杠命令处理（CommandHandler 类）
-5. **监控层** (`src/monitor/`) - Hook 驱动的状态监控（实验性，未启用）
-6. **会话管理层** (`src/core/session-manager.ts`) - 多项目会话管理
-7. **实例管理层** (`src/gateway/`) - 实例池管理（实验性，未启用，保留作参考）
-8. **存储层** - JSONL 文件（SDK 管理）+ SQLite 元数据
-
-**注**：监控层和实例管理层为实验性功能，当前未在主入口使用。保留目的：
-- 实例池管理：未来高并发场景的参考实现
-- Hook 监控：完整的 Hook 事件追踪机制（Stop、PostToolUse、SubagentStart/Stop、Notification）
-- 故障恢复：重试、重启、熔断机制
+3. **命令处理层** (`src/core/command-handler.ts`) - 斜杠命令处理（CommandHandler 类）
+4. **消息处理层** (`src/core/message-processor.ts`) - 统一事件处理引擎
+5. **会话管理层** (`src/core/session-manager.ts`) - 多项目会话管理
+6. **存储层** - JSONL 文件（SDK 管理）+ SQLite 元数据
 
 ### 消息流转
 
@@ -183,10 +174,6 @@ MessageProcessor.processMessage()
 ```
 evolclaw/
 ├── src/
-│   ├── gateway/
-│   │   ├── claude-instance.ts      # Claude Agent SDK 实例封装
-│   │   ├── instance-manager.ts     # 实例池管理（最多20个实例）
-│   │   └── failure-handler.ts      # 故障恢复（重试+重启）
 │   ├── core/
 │   │   ├── command-handler.ts       # 斜杠命令处理（CommandHandler 类）
 │   │   ├── session-manager.ts       # 会话管理（多项目支持）
@@ -194,36 +181,23 @@ evolclaw/
 │   │   ├── message-processor.ts     # 统一消息处理引擎
 │   │   ├── stream-flusher.ts        # 批量发送（3秒窗口）
 │   │   ├── agent-runner.ts          # Claude Agent SDK 调用封装
-│   │   ├── message-cache.ts         # 消息缓存
-│   │   ├── database.ts              # SQLite 数据库
-│   │   └── message-sync.ts          # 消息同步
-│   ├── monitor/
-│   │   ├── hook-collector.ts       # Hook 事件收集
-│   │   ├── hook-monitor.ts         # 超时检测
-│   │   ├── circuit-breaker.ts      # 熔断保护
-│   │   ├── state-recovery.ts       # 状态恢复
-│   │   └── notification.ts         # 通知处理
+│   │   └── message-cache.ts         # 消息缓存
 │   ├── channels/
 │   │   ├── feishu.ts               # 飞书 WebSocket 渠道
 │   │   └── acp.ts                  # ACP 协议渠道
-│   ├── agent-runner.ts             # (已迁移到 core/)
+│   ├── utils/                      # 工具函数
 │   ├── types.ts                    # 类型定义
 │   ├── config.ts                   # 配置加载
-│   ├── index.ts                    # 主入口（~320行，初始化+接线）
-│   └── index-gateway.ts            # Gateway 模式入口
+│   └── index.ts                    # 主入口（~320行，初始化+接线）
 ├── tests/
 │   ├── unit/                       # 单元测试
 │   └── integration/                # 集成测试
 ├── data/
 │   ├── config.json                 # 配置文件（不在 git）
 │   ├── config.sample.json          # 配置模板
-│   ├── sessions.db                 # 会话数据库
-│   └── README.md                   # 配置管理说明
+│   └── sessions.db                 # 会话数据库
 ├── docs/                           # 文档目录
-├── logs/                           # 日志目录
-└── projects/                       # 项目工作目录
-    └── default/
-        └── .claude/                # Claude 会话数据
+└── logs/                           # 日志目录
 ```
 
 ## 核心功能
@@ -358,94 +332,27 @@ bash evolclaw.sh restart
 - 发送文件：使用 `[SEND_FILE:路径]` 标记
 - 标记自动隐藏：系统自动移除标记，用户看不到
 
-### 实例管理
-- 实例池：最多 20 个并发实例
-- 自动清理：空闲 30 分钟回收
-- 状态流转：IDLE → BUSY → IDLE
-
 ### 消息队列
 - 会话级串行：保证消息顺序
 - 跨会话并发：提高处理效率
 - 去重机制：防止重复处理
 - 中断支持：新消息立即中断当前任务
 
-### Hook 驱动监控
-
-基于 Claude Agent SDK 的 Hook 机制：
-- **Stop Hook**：对话结束同步点（100% 可靠）
-- **PostToolUse Hook**：工具调用监控
-- **SubagentStart/Stop Hook**：子 Agent 生命周期
-- **Notification Hook**：系统通知处理
-- **Compact Hook**：会话压缩通知
-
-**关键发现**：Stop Hook 是唯一 100% 可靠的同步点，覆盖所有场景（纯文本 + 工具调用）。
-
 详见 [架构设计文档](./docs/architecture.md)
 
 ## 测试
 
 ```bash
-# 运行所有测试
-npm test
-
-# 监听模式
-npm run test:watch
-
-# 测试覆盖率
-npm test -- --coverage
-
-# Hook 测试
-npm run test:hooks
+npm test              # 运行所有测试
+npm run test:watch    # 监听模式
+npm test -- --coverage  # 覆盖率
 ```
-
-测试结构：
-- `tests/unit/` - 单元测试（消息队列、会话管理、数据库）
-- `tests/integration/` - 集成测试（Feishu、ACP、端到端）
-- `tests/test-sdk-hooks.ts` - SDK Hook 验证测试
-- `tests/test-multi-session.ts` - 多会话管理测试
-
-**重要**：测试必须使用独立目录（如 `./data/test-db/`），不能使用 `./data/` 以避免删除生产配置。
-
-## 监控与指标
-
-查看实例状态：
-```bash
-curl http://localhost:3000/metrics
-```
-
-系统自动收集 Hook 事件（Stop、PostToolUse、SubagentStart/Stop、Notification），基于 Hook 活动时间进行超时检测和状态恢复。
-
-详见 [架构设计文档](./docs/architecture.md)
-
-## 故障恢复机制
-
-### 自动重试
-- 最多 3 次重试
-- 指数退避策略（1s, 2s, 4s）
-- 适用于临时性错误
-
-### 实例重启
-- 进程崩溃自动重启
-- 最多 5 次重启尝试
-- 冷却时间 60 秒
-
-### 熔断保护
-- 连续失败达到阈值时触发熔断
-- 半开状态定期尝试恢复
-- 避免资源浪费和级联故障
-
-### 资源清理
-- 空闲超时：30 分钟
-- 自动清理空闲实例
-- 释放系统资源
 
 ## 技术栈
 
 - **运行时**：Node.js + TypeScript
 - **AI SDK**：@anthropic-ai/claude-agent-sdk
-- **消息渠道**：
-  - 飞书：@larksuiteoapi/node-sdk
-  - ACP：acp-ts
+- **消息渠道**：飞书（@larksuiteoapi/node-sdk）
 - **数据存储**：better-sqlite3
 - **测试框架**：Vitest
 
@@ -509,8 +416,6 @@ curl http://localhost:3000/metrics
 
 ### 🚧 开发中
 
-- ACP 协议完整集成
-- 监控面板
 - 更多测试用例
 
 ## 许可证
