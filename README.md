@@ -5,7 +5,7 @@
 ## 核心特性
 
 - 🔄 **多终端接力**：跨终端共享会话、环境、工具、skills，无缝切换开发体验
-- 🚀 **轻量化设计**：进程模式运行，无容器依赖，代码量 ~1000 行
+- 🚀 **轻量化设计**：进程模式运行，无容器依赖
 - 🎯 **直接集成**：基于 Claude Agent SDK，无需 ACP 协议转换层
 - 📊 **统一消息处理**：Channel Adapter 模式，新增渠道只需 ~15 行代码
 - 🌐 **双渠道接入**：飞书 WebSocket + ACP 协议
@@ -107,7 +107,7 @@ evolclaw → Claude Agent SDK → Claude API
 | **架构** | SDK → API | 管道 → CLI → API | Docker 容器 |
 | **依赖** | 无外部依赖 | 需 CLI 支持 ACP | 容器环境 |
 | **消息渠道** | 2 个（飞书、ACP） | 编排多个 Agent | 3 个（飞书、Telegram、Web） |
-| **代码规模** | ~1000 行 | 协议客户端 | 完整系统 |
+| **代码规模** | ~1500 行 | 协议客户端 | 完整系统 |
 | **适用场景** | 个人多终端开发 | Agent 间通信 | 个人/团队协作 |
 
 ## 系统架构
@@ -123,10 +123,11 @@ evolclaw → Claude Agent SDK → Claude API
 1. **消息渠道层** (`src/channels/`) - Feishu WebSocket + ACP 协议
 2. **消息队列层** (`src/core/message-queue.ts`) - 会话级串行处理 + 中断支持
 3. **消息处理层** (`src/core/message-processor.ts`) - 统一事件处理引擎
-4. **监控层** (`src/monitor/`) - Hook 驱动的状态监控（实验性，未启用）
-5. **会话管理层** (`src/session-manager.ts`) - 多项目会话管理
-6. **实例管理层** (`src/gateway/`) - 实例池管理（实验性，未启用，保留作参考）
-7. **存储层** - JSONL 文件（SDK 管理）+ SQLite 元数据
+4. **命令处理层** (`src/core/command-handler.ts`) - 斜杠命令处理（CommandHandler 类）
+5. **监控层** (`src/monitor/`) - Hook 驱动的状态监控（实验性，未启用）
+6. **会话管理层** (`src/core/session-manager.ts`) - 多项目会话管理
+7. **实例管理层** (`src/gateway/`) - 实例池管理（实验性，未启用，保留作参考）
+8. **存储层** - JSONL 文件（SDK 管理）+ SQLite 元数据
 
 **注**：监控层和实例管理层为实验性功能，当前未在主入口使用。保留目的：
 - 实例池管理：未来高并发场景的参考实现
@@ -140,7 +141,7 @@ evolclaw → Claude Agent SDK → Claude API
     ↓
 Channel.onMessage
     ↓
-检查命令 → 是 → 立即响应（绕过队列）
+检查命令 → 是 → CommandHandler.handle() → 立即响应（绕过队列）
     ↓ 否
 MessageQueue.enqueue(streamKey, message)
     ↓
@@ -187,12 +188,15 @@ evolclaw/
 │   │   ├── instance-manager.ts     # 实例池管理（最多20个实例）
 │   │   └── failure-handler.ts      # 故障恢复（重试+重启）
 │   ├── core/
-│   │   ├── session-manager.ts      # 会话管理（多项目支持）
-│   │   ├── message-queue.ts        # 消息队列（会话级串行+中断）
-│   │   ├── message-processor.ts    # 统一消息处理引擎
-│   │   ├── stream-flusher.ts       # 批量发送（3秒窗口）
-│   │   ├── database.ts             # SQLite 数据库
-│   │   └── message-sync.ts         # 消息同步
+│   │   ├── command-handler.ts       # 斜杠命令处理（CommandHandler 类）
+│   │   ├── session-manager.ts       # 会话管理（多项目支持）
+│   │   ├── message-queue.ts         # 消息队列（会话级串行+中断）
+│   │   ├── message-processor.ts     # 统一消息处理引擎
+│   │   ├── stream-flusher.ts        # 批量发送（3秒窗口）
+│   │   ├── agent-runner.ts          # Claude Agent SDK 调用封装
+│   │   ├── message-cache.ts         # 消息缓存
+│   │   ├── database.ts              # SQLite 数据库
+│   │   └── message-sync.ts          # 消息同步
 │   ├── monitor/
 │   │   ├── hook-collector.ts       # Hook 事件收集
 │   │   ├── hook-monitor.ts         # 超时检测
@@ -202,10 +206,10 @@ evolclaw/
 │   ├── channels/
 │   │   ├── feishu.ts               # 飞书 WebSocket 渠道
 │   │   └── acp.ts                  # ACP 协议渠道
-│   ├── agent-runner.ts             # Claude Agent SDK 调用封装
+│   ├── agent-runner.ts             # (已迁移到 core/)
 │   ├── types.ts                    # 类型定义
 │   ├── config.ts                   # 配置加载
-│   ├── index.ts                    # 主入口（完整功能）
+│   ├── index.ts                    # 主入口（~320行，初始化+接线）
 │   └── index-gateway.ts            # Gateway 模式入口
 ├── tests/
 │   ├── unit/                       # 单元测试
@@ -264,14 +268,25 @@ evolclaw/
 支持项目和会话管理命令：
 
 **项目管理**：
-- `/pwd` 或 `/project current` - 显示当前项目路径
-- `/plist` 或 `/project list` - 列出所有项目（显示会话空闲时间）
-- `/switch <name|path>` 或 `/project switch <name>` - 切换项目（保留会话历史）
-- `/bind <path>` 或 `/project bind <path>` - 绑定新项目目录
+- `/pwd` - 显示当前项目路径
+- `/plist` - 列出所有项目（显示会话空闲时间）
+- `/p <name|path>`, `/project <name|path>` - 切换项目（保留会话历史）
+- `/bind <path>` - 绑定新项目目录
 
 **会话管理**：
-- `/new` - 清除当前项目的会话（其他项目不受影响）
+- `/new [名称]` - 创建新会话（可选命名）
+- `/slist` - 列出当前项目的所有会话
+- `/s <名称>`, `/session <名称>` - 切换到指定会话
+- `/name <新名称>`, `/rename <新名称>` - 重命名当前会话
 - `/status` - 显示会话状态（渠道、ID、项目、时间戳）
+- `/clear` - 清空当前会话的对话历史
+- `/compact` - 压缩会话上下文（减少 token 用量）
+- `/stop` - 中断当前任务
+- `/restart` - 重启服务
+
+**会话修复**：
+- `/repair` - 检查并修复会话
+- `/safe` - 进入安全模式
 
 **模型管理**：
 - `/model` - 显示当前模型和可用模型列表
@@ -281,10 +296,9 @@ evolclaw/
 - `/help` - 显示所有可用命令
 
 **特点**：
-- 命令不进队列，立即响应
+- 命令不进队列，立即响应（由 `CommandHandler` 处理）
 - 任务执行中也能立即查看状态
-- 支持简化命令（如 `/switch`）和完整命令（如 `/project switch`）
-- 模型列表启动时自动从 API 获取，失败时使用默认列表
+- 支持命令别名（`/p` = `/project`，`/s` = `/session`，`/name` = `/rename`）
 
 详见 [多项目支持文档](./docs/multi-project-and-commands.md)
 
