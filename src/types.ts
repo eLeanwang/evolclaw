@@ -24,6 +24,10 @@ export interface Config {
   timeout?: {
     idle?: number;  // 无输出超时(ms)，默认 120000
   };
+  owners?: {
+    feishu?: string;
+    acp?: string;
+  };
 }
 
 export interface Session {
@@ -44,12 +48,15 @@ export interface Message {
   content: string;
   images?: Array<{ data: string; mimeType: string }>;
   timestamp?: number;
+  userId?: string;
+  userName?: string;
+  messageId?: string;
 }
 
 // 渠道适配器接口
 export interface ChannelAdapter {
   readonly name: 'feishu' | 'acp';
-  sendText(channelId: string, text: string, options?: { title?: string }): Promise<void>;
+  sendText(channelId: string, text: string, options?: { title?: string; replyToMessageId?: string }): Promise<void>;
   sendFile?(channelId: string, filePath: string): Promise<void>;
 }
 
@@ -64,5 +71,6 @@ export interface ChannelOptions {
 export type CommandHandler = (
   content: string,
   channel: 'feishu' | 'acp',
-  channelId: string
+  channelId: string,
+  userId?: string
 ) => Promise<string | null>;

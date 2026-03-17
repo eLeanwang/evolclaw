@@ -19,6 +19,22 @@ export function saveConfig(config: Config, configPath: string = './data/config.j
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf-8');
 }
 
+export function getOwner(config: Config, channel: 'feishu' | 'acp'): string | undefined {
+  return config.owners?.[channel];
+}
+
+export function setOwner(config: Config, channel: 'feishu' | 'acp', userId: string, configPath: string = './data/config.json'): void {
+  if (!config.owners) {
+    config.owners = {};
+  }
+  config.owners[channel] = userId;
+  saveConfig(config, configPath);
+}
+
+export function isOwner(config: Config, channel: 'feishu' | 'acp', userId: string): boolean {
+  return config.owners?.[channel] === userId;
+}
+
 function validateConfig(config: any): asserts config is Config {
   if (!config.anthropic?.apiKey) throw new Error('Missing anthropic.apiKey');
 

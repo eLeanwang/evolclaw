@@ -21,12 +21,10 @@
     "acp-ts": "latest",
     "better-sqlite3": "^11.0.0",
     "dotenv": "^16.4.0",
-    "express": "^5.2.1",
     "image-type": "^6.0.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.0",
-    "@types/express": "^5.0.6",
     "@types/node": "^22.0.0",
     "@vitest/coverage-v8": "^2.1.9",
     "tsx": "^4.19.0",

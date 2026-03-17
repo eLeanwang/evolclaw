@@ -132,10 +132,10 @@ export class IdleHealthTracker {
     }
 
     if (action === 'warn') {
-      return `⚠️ 健康检查：任务已 ${idleSec} 秒无输出\n\n执行状态：\n- 已处理 ${this.state.totalEvents} 个事件，${this.state.totalToolCalls} 次工具调用\n- 最后活动：${lastToolInfo}（${timeSinceLastEvent}秒前）\n- 可能正在等待工具执行完成\n\n如果任务无响应，将在 ${Math.round((this.idleMs * KILL_MULTIPLIER - idleDuration) / 1000)} 秒后自动中断。\n使用 /stop 可立即中断当前任务。`;
+      return `⚠️ 健康检查：任务已 ${idleSec} 秒无输出\n\n执行状态：\n- 已处理 ${this.state.totalEvents} 个事件，${this.state.totalToolCalls} 次工具调用\n- 最后活动：${lastToolInfo}（${timeSinceLastEvent}秒前）\n\n如果任务无响应，将在 ${Math.round((this.idleMs * KILL_MULTIPLIER - idleDuration) / 1000)} 秒后自动中断。\n使用 /stop 可立即中断当前任务。`;
     }
 
     // notify
-    return `🔍 健康检查：任务已 ${idleSec} 秒无输出\n\n执行状态：\n- 已处理 ${this.state.totalEvents} 个事件，${this.state.totalToolCalls} 次工具调用\n- 最后活动：${lastToolInfo}（${timeSinceLastEvent}秒前）\n- 可能正在等待工具执行完成\n\n任务仍在运行中。使用 /stop 可中断当前任务。`;
+    return `🔍 健康检查：任务已 ${idleSec} 秒无输出\n\n执行状态：\n- 已处理 ${this.state.totalEvents} 个事件，${this.state.totalToolCalls} 次工具调用\n- 最后活动：${lastToolInfo}（${timeSinceLastEvent}秒前）\n\n任务仍在运行中。使用 /stop 可中断当前任务。`;
   }
 }

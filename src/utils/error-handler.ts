@@ -1,6 +1,12 @@
 export function getErrorMessage(error: any): string {
   const msg = error?.message || String(error);
 
+  if (msg.includes('CONTEXT_COMPACT_FAILED')) {
+    return '⚠️ 上下文过长，自动压缩失败，请手动输入 /compact 重试';
+  }
+  if (msg.includes('上下文过长') || msg.includes('context too long') || msg.includes('context_length_exceeded')) {
+    return '⚠️ 上下文过长，自动压缩重试失败，请手动输入 /compact 重试';
+  }
   if (msg.includes('API Error: 400')) {
     return '⚠️ 请求格式错误，请检查输入内容';
   }

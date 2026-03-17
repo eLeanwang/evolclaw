@@ -14,7 +14,7 @@ export interface FeishuConfig {
 }
 
 export interface MessageHandler {
-  (channelId: string, content: string, images?: Array<{ data: string; mimeType: string }>): Promise<void>;
+  (channelId: string, content: string, images?: Array<{ data: string; mimeType: string }>, userId?: string, userName?: string, messageId?: string): Promise<void>;
 }
 
 export interface ProjectPathProvider {
@@ -75,6 +75,15 @@ export class FeishuChannel {
           this.addAckReaction(msg.message_id);
 
           if (!this.messageHandler) return;
+
+          // 提取发送者信息
+          const userId = data.sender?.sender_id?.open_id;
+          let userName: string | undefined;
+          try {
+            userName = await this.getUserName(userId);
+          } catch {
+            userName = undefined;
+          }
 
           try {
             // 处理引用消息
@@ -150,7 +159,7 @@ export class FeishuChannel {
               // 去除消息中所有的 @ 提及（支持命令在前或在后）
               content = content.replace(/@[^\s]+\s*/g, '').trim();
               const finalContent = quotedText + content;
-              await this.messageHandler(msg.chat_id, finalContent, quotedImages.length > 0 ? quotedImages : undefined);
+              await this.messageHandler(msg.chat_id, finalContent, quotedImages.length > 0 ? quotedImages : undefined, userId, userName, msg.message_id);
             }
             // 处理图片消息
             else if (msg.message_type === 'image') {
@@ -166,10 +175,10 @@ export class FeishuChannel {
               if (imageData) {
                 const allImages = [...quotedImages, imageData];
                 const prompt = quotedText + '用户发送了一张图片，请分析这张图片的内容。';
-                await this.messageHandler(msg.chat_id, prompt, allImages);
+                await this.messageHandler(msg.chat_id, prompt, allImages, userId, userName, msg.message_id);
               } else {
                 const prompt = quotedText + '[图片下载失败] 应用可能缺少 im:resource 权限';
-                await this.messageHandler(msg.chat_id, prompt, quotedImages.length > 0 ? quotedImages : undefined);
+                await this.messageHandler(msg.chat_id, prompt, quotedImages.length > 0 ? quotedImages : undefined, userId, userName, msg.message_id);
               }
             }
             // 处理文件消息
@@ -186,17 +195,17 @@ export class FeishuChannel {
               const filePath = await this.downloadFile(fileKey, fileName, msg.message_id, projectPath);
               if (filePath) {
                 const prompt = quotedText + `用户发送了文件：${fileName}\n文件已保存到：${filePath}\n请使用 Read 工具读取并分析文件内容。`;
-                await this.messageHandler(msg.chat_id, prompt, quotedImages.length > 0 ? quotedImages : undefined);
+                await this.messageHandler(msg.chat_id, prompt, quotedImages.length > 0 ? quotedImages : undefined, userId, userName, msg.message_id);
               } else {
                 const prompt = quotedText + '[文件下载失败] 应用可能缺少 im:resource 权限';
-                await this.messageHandler(msg.chat_id, prompt, quotedImages.length > 0 ? quotedImages : undefined);
+                await this.messageHandler(msg.chat_id, prompt, quotedImages.length > 0 ? quotedImages : undefined, userId, userName, msg.message_id);
               }
             }
             // 处理其他类型消息
             else {
               logger.debug('[Feishu] Unsupported message type:', msg.message_type);
               const prompt = quotedText + `[不支持的消息类型: ${msg.message_type}]`;
-              await this.messageHandler(msg.chat_id, prompt, quotedImages.length > 0 ? quotedImages : undefined);
+              await this.messageHandler(msg.chat_id, prompt, quotedImages.length > 0 ? quotedImages : undefined, userId, userName, msg.message_id);
             }
           } catch (error) {
             logger.error('[Feishu] Failed to process message:', error);
@@ -264,7 +273,12 @@ export class FeishuChannel {
     }
   }
 
-  async sendMessage(chatId: string, content: string, options?: { title?: string }): Promise<void> {
+  private async getUserName(_userId?: string): Promise<string | undefined> {
+    // TODO: 需要开通 contact:contact.base:readonly 权限后启用
+    return undefined;
+  }
+
+  async sendMessage(chatId: string, content: string, options?: { title?: string; replyToMessageId?: string }): Promise<void> {
     if (!this.client) return;
 
     if (!content || content.trim() === '') {
@@ -278,30 +292,32 @@ export class FeishuChannel {
       // 自动检测 Markdown 语法并转换为富文本
       const useMarkdown = hasMarkdownSyntax(content);
 
-      if (useMarkdown) {
-        // 使用 post 类型发送富文本消息
-        const postContent = markdownToFeishuPost(content, options?.title);
-        await this.client.im.message.create({
-          params: { receive_id_type: 'chat_id' },
+      const baseParams: any = {
+        params: { receive_id_type: 'chat_id' },
+        data: {
+          receive_id: chatId,
+          msg_type: useMarkdown ? 'post' : 'text',
+          content: useMarkdown
+            ? JSON.stringify(markdownToFeishuPost(content, options?.title))
+            : JSON.stringify({ text: content })
+        }
+      };
+
+      // 如果有 replyToMessageId，使用 reply API
+      if (options?.replyToMessageId) {
+        await this.client.im.message.reply({
+          path: { message_id: options.replyToMessageId },
           data: {
-            receive_id: chatId,
-            msg_type: 'post',
-            content: JSON.stringify(postContent)
+            msg_type: useMarkdown ? 'post' : 'text',
+            content: useMarkdown
+              ? JSON.stringify(markdownToFeishuPost(content, options?.title))
+              : JSON.stringify({ text: content })
           }
         });
-        logger.debug('[Feishu] Sent message as post (Markdown)');
       } else {
-        // 使用 text 类型发送普通文本消息
-        await this.client.im.message.create({
-          params: { receive_id_type: 'chat_id' },
-          data: {
-            receive_id: chatId,
-            msg_type: 'text',
-            content: JSON.stringify({ text: content })
-          }
-        });
-        logger.debug('[Feishu] Sent message as text');
+        await this.client.im.message.create(baseParams);
       }
+      logger.debug(`[Feishu] Sent message as ${useMarkdown ? 'post (Markdown)' : 'text'}`);
     } catch (error) {
       logger.error('[Feishu] Failed to send message:', error);
       throw error;

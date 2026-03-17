@@ -90,7 +90,8 @@ async function handleProjectCommand(
   processor: MessageProcessor,
   messageQueue: MessageQueue,
   sendMessage?: (channelId: string, text: string) => Promise<void>,
-  feishuChannel?: any
+  feishuChannel?: any,
+  userId?: string
 ): Promise<string | null> {
   // 命令别名映射
   const aliases: Record<string, string> = {
@@ -105,6 +106,14 @@ async function handleProjectCommand(
     if (content === alias || content.startsWith(alias + ' ')) {
       normalizedContent = content.replace(alias, full);
       break;
+    }
+  }
+
+  // 权限检查：只有主人可以执行斜杠命令
+  if (normalizedContent.startsWith('/')) {
+    const { isOwner } = await import('./config.js');
+    if (userId && !isOwner(config, channel, userId)) {
+      return '❌ 无权限：只有主人可以执行命令';
     }
   }
 
@@ -1039,7 +1048,7 @@ async function main() {
   let messageQueue: MessageQueue;
 
   // 创建命令处理器
-  const commandHandler: CommandHandler = (content, channel, channelId) =>
+  const commandHandler: CommandHandler = (content, channel, channelId, userId) =>
     handleProjectCommand(content, channel, channelId, sessionManager, agentRunner, config, messageCache, processor, messageQueue,
       async (id, text) => {
         // 处理文件标记（仅Feishu）
@@ -1065,7 +1074,8 @@ async function main() {
           else if (channel === 'acp') await acp.sendMessage(id, text);
         }
       },
-      channel === 'feishu' ? feishu : undefined
+      channel === 'feishu' ? feishu : undefined,
+      userId
     );
 
   // 创建消息处理器
@@ -1121,26 +1131,44 @@ async function main() {
   const isCommand = (content: string) => content === '/p' || content === '/s' || commandPrefixes.some(cmd => content.startsWith(cmd));
 
   // Feishu 消息处理
-  feishu.onMessage(async (chatId, content, images) => {
+  feishu.onMessage(async (chatId, content, images, userId, userName, messageId) => {
     content = content.trim();
+
+    // 首次交互自动绑定主人
+    if (userId && !config.owners?.feishu) {
+      const { setOwner } = await import('./config.js');
+      setOwner(config, 'feishu', userId);
+      logger.info(`[Owner] Auto-bound owner: ${userName} (${userId})`);
+    }
+
     // 命令立即处理，不进入队列
     if (isCommand(content)) {
-      const cmdResult = await commandHandler(content, 'feishu', chatId);
+      const cmdResult = await commandHandler(content, 'feishu', chatId, userId);
       if (cmdResult !== null) {
         if (cmdResult) {
-          await feishu.sendMessage(chatId, cmdResult);
+          try {
+            await feishu.sendMessage(chatId, cmdResult);
+          } catch (error) {
+            logger.error('[Feishu] Failed to send command response:', error);
+          }
         }
-        return; // 命令已处理，无论是否有返回值
+        return;
       }
     }
 
     // 获取当前项目路径
     const session = await sessionManager.getOrCreateSession('feishu', chatId, config.projects?.defaultPath || process.cwd());
 
+    // 群聊消息添加用户名前缀
+    const chatMode = await feishu.getChatMode(chatId);
+    if (chatMode === 'group' && userName) {
+      content = `[${userName}] ${content}`;
+    }
+
     // 普通消息进入队列
     await messageQueue.enqueue(
       `feishu-${chatId}`,
-      { channel: 'feishu', channelId: chatId, content, images, timestamp: Date.now() },
+      { channel: 'feishu', channelId: chatId, content, images, timestamp: Date.now(), userId, userName, messageId },
       session.projectPath
     );
   });
@@ -1148,9 +1176,17 @@ async function main() {
   // ACP 消息处理
   acp.onMessage(async (sessionId, content) => {
     content = content.trim();
+
+    // 首次交互自动绑定主人
+    if (!config.owners?.acp) {
+      const { setOwner } = await import('./config.js');
+      setOwner(config, 'acp', sessionId);
+      logger.info(`[Owner] Auto-bound ACP owner: ${sessionId}`);
+    }
+
     // 命令立即处理，不进入队列
     if (isCommand(content)) {
-      const cmdResult = await commandHandler(content, 'acp', sessionId);
+      const cmdResult = await commandHandler(content, 'acp', sessionId, sessionId);
       if (cmdResult) {
         await acp.sendMessage(sessionId, cmdResult);
         return;
@@ -1163,7 +1199,7 @@ async function main() {
     // 普通消息进入队列
     await messageQueue.enqueue(
       `acp-${sessionId}`,
-      { channel: 'acp', channelId: sessionId, content, timestamp: Date.now() },
+      { channel: 'acp', channelId: sessionId, content, timestamp: Date.now(), userId: sessionId },
       session.projectPath
     );
   });

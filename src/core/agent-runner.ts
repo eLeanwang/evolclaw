@@ -115,6 +115,32 @@ export class AgentRunner {
       return {};
     };
 
+    // 读取全局 CLAUDE.md 指令
+    const globalClaudeMd = (() => {
+      try {
+        const globalPath = path.join(os.homedir(), '.claude', 'CLAUDE.md');
+        if (fs.existsSync(globalPath)) {
+          return fs.readFileSync(globalPath, 'utf-8').trim();
+        }
+      } catch {}
+      return '';
+    })();
+
+    // 读取全局 MCP 服务器配置
+    const globalMcpServers = (() => {
+      try {
+        const mcpPath = path.join(os.homedir(), '.claude', 'mcp.json');
+        if (fs.existsSync(mcpPath)) {
+          const config = JSON.parse(fs.readFileSync(mcpPath, 'utf-8'));
+          return config.mcpServers || {};
+        }
+      } catch {}
+      return {};
+    })();
+
+    // 合并全局指令和 channel 级别的 systemPromptAppend
+    const fullAppend = [globalClaudeMd, systemPromptAppend].filter(Boolean).join('\n\n');
+
     const createQuery = (promptInput: string | MessageStream, resumeSessionId?: string) => {
       return query({
         prompt: promptInput,
@@ -129,11 +155,12 @@ export class AgentRunner {
             PreToolUse: [{ matcher: '.*', hooks: [preToolUseHook] }]
           },
           ...(resumeSessionId ? { resume: resumeSessionId } : {}),
-          ...(systemPromptAppend ? {
+          ...(Object.keys(globalMcpServers).length > 0 ? { mcpServers: globalMcpServers } : {}),
+          ...(fullAppend ? {
             systemPrompt: {
               type: 'preset' as const,
               preset: 'claude_code' as const,
-              append: systemPromptAppend
+              append: fullAppend
             }
           } : {}),
           stderr: (msg: string) => {
@@ -182,13 +209,6 @@ export class AgentRunner {
     }
   }
 
-  async clearHistory(sessionId: string): Promise<void> {
-    // 只清除内存中的 claudeSessionId，下次对话会创建新的历史
-    // 但保留数据库中的会话记录
-    this.activeSessions.delete(sessionId);
-    logger.info(`[AgentRunner] Cleared history for session: ${sessionId}`);
-  }
-
   registerStream(key: string, stream: AsyncIterable<any>): void {
     this.activeStreams.set(key, stream);
   }
@@ -202,6 +222,73 @@ export class AgentRunner {
     this.activeSessions.set(sessionId, claudeSessionId);
     if (this.onSessionIdUpdate) {
       this.onSessionIdUpdate(sessionId, claudeSessionId);
+    }
+  }
+
+  /**
+   * 主动压缩会话上下文
+   */
+  async compactSession(sessionId: string, claudeSessionId: string, projectPath: string): Promise<boolean> {
+    try {
+      logger.info(`[AgentRunner] Compacting session: ${claudeSessionId}`);
+      const stream = query({
+        prompt: '/compact',
+        options: {
+          cwd: projectPath,
+          model: this.model,
+          resume: claudeSessionId,
+          maxTurns: 1,
+          permissionMode: 'default',
+          env: {
+            ...process.env,
+            ANTHROPIC_API_KEY: this.apiKey,
+            DISABLE_AUTOUPDATER: '1',
+            ...(process.env.ANTHROPIC_BASE_URL ? { ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL } : {})
+          }
+        }
+      });
+      for await (const event of stream) {
+        if (event.type === 'system' && event.subtype === 'compact_boundary') {
+          logger.info(`[AgentRunner] Compact completed, pre_tokens: ${event.compact_metadata?.pre_tokens}`);
+          return true;
+        }
+      }
+      return true; // 正常结束也算成功
+    } catch (error) {
+      logger.error('[AgentRunner] Compact failed:', error);
+      return false;
+    }
+  }
+
+  /**
+   * 通过 SDK /clear 命令清空会话历史
+   */
+  async clearSession(claudeSessionId: string, projectPath: string): Promise<boolean> {
+    try {
+      logger.info(`[AgentRunner] Clearing session via SDK: ${claudeSessionId}`);
+      const stream = query({
+        prompt: '/clear',
+        options: {
+          cwd: projectPath,
+          model: this.model,
+          resume: claudeSessionId,
+          maxTurns: 1,
+          permissionMode: 'default',
+          env: {
+            ...process.env,
+            ANTHROPIC_API_KEY: this.apiKey,
+            DISABLE_AUTOUPDATER: '1',
+            ...(process.env.ANTHROPIC_BASE_URL ? { ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL } : {})
+          }
+        }
+      });
+      for await (const event of stream) {
+        logger.debug(`[AgentRunner] Clear event: type=${event.type}, subtype=${(event as any).subtype || 'none'}`);
+      }
+      return true;
+    } catch (error) {
+      logger.error('[AgentRunner] Clear session failed:', error);
+      return false;
     }
   }
 

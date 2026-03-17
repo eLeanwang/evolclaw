@@ -196,7 +196,7 @@ export class MessageProcessor {
     try {
       // 检查是否为命令
       if (this.commandHandler) {
-        const cmdResult = await this.commandHandler(message.content, message.channel, message.channelId);
+        const cmdResult = await this.commandHandler(message.content, message.channel, message.channelId, message.userId);
         if (cmdResult) {
           await adapter.sendText(message.channelId, cmdResult);
           return;
@@ -234,6 +234,7 @@ export class MessageProcessor {
 
       // 创建 StreamFlusher，传入文件标记模式用于自动过滤
       // 使用动态判断，确保切换项目后不会继续输出
+      let firstReply = true;
       const flusher = new StreamFlusher(
         async (text, isFinal) => {
           // 动态判断是否是后台任务
@@ -241,8 +242,14 @@ export class MessageProcessor {
           const isCurrentlyBackground = currentActiveSession ? session.id !== currentActiveSession.id : false;
 
           if (!isCurrentlyBackground) {
-            const title = isFinal ? '最终回复:' : undefined;
-            await adapter.sendText(message.channelId, text, title ? { title } : undefined);
+            const opts: { title?: string; replyToMessageId?: string } = {};
+            if (isFinal) opts.title = '最终回复:';
+            // 首条消息引用回复用户原消息
+            if (firstReply && message.messageId) {
+              opts.replyToMessageId = message.messageId;
+              firstReply = false;
+            }
+            await adapter.sendText(message.channelId, text, Object.keys(opts).length ? opts : undefined);
           }
           // 后台任务：静默，不发送输出
         },

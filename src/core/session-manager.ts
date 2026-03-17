@@ -80,6 +80,27 @@ export class SessionManager {
         `);
       }
       logger.info('✓ Schema updated');
+    } else if (hasUniqueConstraint) {
+      logger.info('Removing stale unique constraint...');
+      this.db.exec(`DROP TABLE IF EXISTS sessions_new`);
+      this.db.exec(`
+        CREATE TABLE sessions_new (
+          id TEXT PRIMARY KEY,
+          channel TEXT NOT NULL,
+          channel_id TEXT NOT NULL,
+          project_path TEXT NOT NULL,
+          claude_session_id TEXT,
+          name TEXT,
+          is_active INTEGER NOT NULL DEFAULT 0,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        INSERT INTO sessions_new (id, channel, channel_id, project_path, claude_session_id, name, is_active, created_at, updated_at)
+          SELECT id, channel, channel_id, project_path, claude_session_id, name, is_active, created_at, updated_at FROM sessions;
+        DROP TABLE sessions;
+        ALTER TABLE sessions_new RENAME TO sessions;
+      `);
+      logger.info('✓ Unique constraint removed');
     } else {
       this.db.exec(`
         CREATE TABLE IF NOT EXISTS sessions (
@@ -500,7 +521,7 @@ export class SessionManager {
     };
 
     this.db.prepare(`
-      INSERT OR IGNORE INTO sessions (id, channel, channel_id, project_path, claude_session_id, name, is_active, created_at, updated_at)
+      INSERT INTO sessions (id, channel, channel_id, project_path, claude_session_id, name, is_active, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(session.id, session.channel, session.channelId, session.projectPath, null, session.name, 1, session.createdAt, session.updatedAt);
 
