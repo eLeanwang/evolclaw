@@ -133,12 +133,15 @@ export class MessageProcessor {
           // 上下文过长是可恢复错误，不累计触发安全模式
           if (errorType === ErrorType.CONTEXT_TOO_LONG) {
             logger.info(`[MessageProcessor] Context too long error, skipping safe mode accumulation`);
+          } else if (isGroup) {
+            // 群聊中不累计错误、不触发安全模式
+            logger.info(`[MessageProcessor] Group chat error, skipping safe mode accumulation`);
           } else if (!isOwnerUser) {
             // 非主人的错误只记日志，不累计
             logger.info(`[MessageProcessor] Non-owner error (user=${message.userId}), skipping safe mode accumulation`);
           } else {
             const newCount = await this.sessionManager.recordError(session.id, errorType, error.message);
-            await this.checkSafeMode(session.id, message.channelId, channelInfo.adapter, isGroup, safeModeThreshold, newCount);
+            await this.checkSafeMode(session.id, message.channelId, channelInfo.adapter, safeModeThreshold, newCount);
           }
         } catch (healthError) {
           logger.error('[MessageProcessor] Failed to update health status:', healthError);
@@ -153,20 +156,16 @@ export class MessageProcessor {
 
   /**
    * 检查是否需要进入安全模式（safeModeThreshold 为 0 时跳过）
-   * 群聊中不触发安全模式，只有单聊主人会话才能进入
+   * 仅单聊主人会话调用（群聊和非主人已在调用侧过滤）
    */
   private async checkSafeMode(
     sessionId: string,
     channelId: string,
     adapter: ChannelAdapter,
-    isGroup: boolean,
     safeModeThreshold: number,
     consecutiveErrors: number
   ): Promise<void> {
     if (safeModeThreshold <= 0) return;
-
-    // 群聊中不触发安全模式
-    if (isGroup) return;
 
     const health = await this.sessionManager.getHealthStatus(sessionId);
     if (consecutiveErrors >= safeModeThreshold && !health.safeMode) {
