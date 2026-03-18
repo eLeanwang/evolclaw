@@ -11,7 +11,7 @@
     "dist/",
     "!dist/experimental/",
     "bin/",
-    "data/config.sample.json"
+    "data/evolclaw.sample.json"
   ],
   "scripts": {
     "dev": "tsx watch src/index.ts",
