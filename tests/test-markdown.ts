@@ -17,7 +17,7 @@ testCases.forEach(({ text, expected }) => {
   console.log(`${status} "${text}" => ${result} (expected: ${expected})`);
 });
 
-console.log('\n=== 测试 Markdown 转换 ===\n');
+console.log('\n=== 测试 Markdown 转换 (md tag) ===\n');
 
 const markdown = `# 测试标题
 
@@ -51,9 +51,21 @@ const result = markdownToFeishuPost(markdown);
 console.log('转换结果：');
 console.log(JSON.stringify(result, null, 2));
 
-console.log('\n=== 测试简单文本 ===\n');
+// 验证结构
+console.log('\n=== 结构验证 ===\n');
+console.log('标题提取:', result.zh_cn.title === '测试标题' ? '✓' : '✗');
+console.log('使用 md tag:', result.zh_cn.content[0][0].tag === 'md' ? '✓' : '✗');
+console.log('body 不含 # 标题:', !result.zh_cn.content[0][0].text?.startsWith('# ') ? '✓' : '✗');
 
-const simpleText = 'Hello, this is a simple message without markdown.';
-const simpleResult = markdownToFeishuPost(simpleText);
-console.log('简单文本转换结果：');
-console.log(JSON.stringify(simpleResult, null, 2));
+console.log('\n=== 测试无标题文本 ===\n');
+
+const noTitle = '这是一段没有标题的 **Markdown** 文本。';
+const noTitleResult = markdownToFeishuPost(noTitle);
+console.log('无标题结果：');
+console.log(JSON.stringify(noTitleResult, null, 2));
+console.log('标题为空:', noTitleResult.zh_cn.title === '' ? '✓' : '✗');
+
+console.log('\n=== 测试 defaultTitle ===\n');
+
+const withDefault = markdownToFeishuPost(noTitle, '默认标题');
+console.log('使用 defaultTitle:', withDefault.zh_cn.title === '默认标题' ? '✓' : '✗');
