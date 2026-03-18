@@ -1,4 +1,4 @@
-import { loadConfig, ensureDir, resolveAnthropicConfig } from './config.js';
+import { loadConfig, ensureDir, ensureDataDirs, resolvePaths, resolveAnthropicConfig } from './config.js';
 import { SessionManager } from './core/session-manager.js';
 import { AgentRunner } from './core/agent-runner.js';
 import { FeishuChannel } from './channels/feishu.js';
@@ -34,6 +34,9 @@ async function main() {
 
   logger.info('EvolClaw starting...');
 
+  // 确保数据目录存在
+  ensureDataDirs();
+
   // 加载配置
   const config = loadConfig();
   const anthropic = resolveAnthropicConfig(config);
@@ -44,7 +47,6 @@ async function main() {
   }
 
   // 初始化数据库
-  ensureDir('./data');
   const sessionManager = new SessionManager();
   logger.info('✓ Database initialized');
 
@@ -55,7 +57,8 @@ async function main() {
     async (sessionId, claudeSessionId) => {
       await sessionManager.updateClaudeSessionIdBySessionId(sessionId, claudeSessionId);
     },
-    anthropic.baseUrl
+    anthropic.baseUrl,
+    config
   );
   logger.info('✓ Agent runner ready');
 
@@ -187,7 +190,7 @@ async function main() {
       if (cmdResult !== null) {
         if (cmdResult) {
           try {
-            await feishu.sendMessage(chatId, cmdResult);
+            await feishu.sendMessage(chatId, cmdResult, { forceText: true });
           } catch (error) {
             logger.error('[Feishu] Failed to send command response:', error);
           }
@@ -272,7 +275,7 @@ async function main() {
   logger.info(`\n🚀 EvolClaw is running with ${channels.length} channel(s): ${channels.join(', ')}\n`);
 
   // 检查是否有待发送的重启成功消息
-  const restartPendingFile = './data/restart-pending.json';
+  const restartPendingFile = path.join(resolvePaths().dataDir, 'restart-pending.json');
   if (fs.existsSync(restartPendingFile)) {
     try {
       const restartInfo = JSON.parse(fs.readFileSync(restartPendingFile, 'utf-8'));

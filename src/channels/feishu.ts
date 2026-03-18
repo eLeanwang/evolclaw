@@ -210,7 +210,8 @@ export class FeishuChannel {
           } catch (error) {
             logger.error('[Feishu] Failed to process message:', error);
           }
-        }
+        },
+        'im.message.message_read_v1': async () => {}
       });
 
       this.wsClient = new lark.WSClient({
@@ -278,7 +279,7 @@ export class FeishuChannel {
     return undefined;
   }
 
-  async sendMessage(chatId: string, content: string, options?: { title?: string; replyToMessageId?: string }): Promise<void> {
+  async sendMessage(chatId: string, content: string, options?: { title?: string; replyToMessageId?: string; forceText?: boolean }): Promise<void> {
     if (!this.client) return;
 
     if (!content || content.trim() === '') {
@@ -289,33 +290,23 @@ export class FeishuChannel {
     logger.debug(`[Feishu] sendMessage called, chatId: ${chatId}, content length: ${content.length}`);
 
     try {
-      // 自动检测 Markdown 语法并转换为富文本
-      const useMarkdown = hasMarkdownSyntax(content);
+      const useMarkdown = !options?.forceText && hasMarkdownSyntax(content);
 
-      const baseParams: any = {
-        params: { receive_id_type: 'chat_id' },
-        data: {
-          receive_id: chatId,
-          msg_type: useMarkdown ? 'post' : 'text',
-          content: useMarkdown
-            ? JSON.stringify(markdownToFeishuPost(content, options?.title))
-            : JSON.stringify({ text: content })
-        }
-      };
+      const msgType = useMarkdown ? 'post' : 'text';
+      const msgContent = useMarkdown
+        ? JSON.stringify(markdownToFeishuPost(content, options?.title))
+        : JSON.stringify({ text: content });
 
-      // 如果有 replyToMessageId，使用 reply API
       if (options?.replyToMessageId) {
         await this.client.im.message.reply({
           path: { message_id: options.replyToMessageId },
-          data: {
-            msg_type: useMarkdown ? 'post' : 'text',
-            content: useMarkdown
-              ? JSON.stringify(markdownToFeishuPost(content, options?.title))
-              : JSON.stringify({ text: content })
-          }
+          data: { msg_type: msgType, content: msgContent }
         });
       } else {
-        await this.client.im.message.create(baseParams);
+        await this.client.im.message.create({
+          params: { receive_id_type: 'chat_id' },
+          data: { receive_id: chatId, msg_type: msgType, content: msgContent }
+        });
       }
       logger.debug(`[Feishu] Sent message as ${useMarkdown ? 'post (Markdown)' : 'text'}`);
     } catch (error) {

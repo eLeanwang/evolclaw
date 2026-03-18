@@ -3,6 +3,10 @@ import path from 'path';
 import os from 'os';
 import { Config } from './types.js';
 import { logger } from './utils/logger.js';
+import { resolvePaths } from './paths.js';
+
+// Re-export path utilities for backward compatibility
+export { resolveRoot, resolvePaths, ensureDataDirs, getPackageRoot } from './paths.js';
 
 export interface AnthropicResolved {
   apiKey: string;
@@ -44,7 +48,7 @@ export function resolveAnthropicConfig(config: Config): AnthropicResolved {
   return { apiKey, baseUrl, model };
 }
 
-export function loadConfig(configPath: string = './data/config.json'): Config {
+export function loadConfig(configPath: string = resolvePaths().config): Config {
   if (!fs.existsSync(configPath)) {
     throw new Error(`Config file not found: ${configPath}`);
   }
@@ -56,7 +60,7 @@ export function loadConfig(configPath: string = './data/config.json'): Config {
   return config;
 }
 
-export function saveConfig(config: Config, configPath: string = './data/config.json'): void {
+export function saveConfig(config: Config, configPath: string = resolvePaths().config): void {
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf-8');
 }
 
@@ -64,7 +68,7 @@ export function getOwner(config: Config, channel: 'feishu' | 'acp'): string | un
   return config.owners?.[channel];
 }
 
-export function setOwner(config: Config, channel: 'feishu' | 'acp', userId: string, configPath: string = './data/config.json'): void {
+export function setOwner(config: Config, channel: 'feishu' | 'acp', userId: string, configPath: string = resolvePaths().config): void {
   if (!config.owners) {
     config.owners = {};
   }

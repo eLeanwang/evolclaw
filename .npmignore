@@ -1,0 +1,13 @@
+src/
+tests/
+docs/
+*.ts
+!dist/**
+tsconfig.json
+vitest.config.ts
+.claude/
+coverage/
+isolated/
+openclaw-control-center/
+CLAUDE.md
+DESIGN-v2.md

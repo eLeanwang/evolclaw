@@ -7,13 +7,19 @@
   "bin": {
     "evolclaw": "./bin/evolclaw"
   },
+  "files": [
+    "dist/",
+    "bin/",
+    "data/config.sample.json"
+  ],
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:hooks": "tsx test-sdk-hooks.ts"
+    "test:hooks": "tsx test-sdk-hooks.ts",
+    "prepublishOnly": "npm run build && npm test"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.77",

@@ -1,6 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { Session } from '../types.js';
 import { ensureDir } from '../config.js';
+import { resolvePaths } from '../paths.js';
 import { logger } from '../utils/logger.js';
 import path from 'path';
 import fs from 'fs';
@@ -9,7 +10,7 @@ import os from 'os';
 export class SessionManager {
   private db: DatabaseSync;
 
-  constructor(dbPath: string = './data/sessions.db') {
+  constructor(dbPath: string = resolvePaths().db) {
     ensureDir(path.dirname(dbPath));
     this.db = new DatabaseSync(dbPath);
     this.initDatabase();
@@ -624,6 +625,38 @@ export class SessionManager {
       }
     } catch (error) {
       logger.warn(`Failed to read session file: ${sessionFile}`, error);
+    }
+    return null;
+  }
+
+  readSessionLastUserMessage(projectPath: string, claudeSessionId: string): string | null {
+    const sessionFile = this.getSessionFilePath(projectPath, claudeSessionId);
+    if (!fs.existsSync(sessionFile)) return null;
+
+    try {
+      const content = fs.readFileSync(sessionFile, 'utf-8');
+      const lines = content.split('\n').filter(l => l.trim());
+      let lastMessage: string | null = null;
+
+      for (const line of lines) {
+        const event = JSON.parse(line);
+        if (event.type === 'user' && event.message?.role === 'user') {
+          const messageContent = event.message.content;
+          if (typeof messageContent === 'string') {
+            const text = messageContent.trim();
+            lastMessage = text.substring(0, 50) + (text.length > 50 ? '...' : '');
+          } else if (Array.isArray(messageContent)) {
+            const textContent = messageContent.find((c: any) => c.type === 'text');
+            if (textContent?.text) {
+              const text = textContent.text.trim();
+              lastMessage = text.substring(0, 50) + (text.length > 50 ? '...' : '');
+            }
+          }
+        }
+      }
+      return lastMessage;
+    } catch (error) {
+      logger.warn(`Failed to read last message from session file: ${sessionFile}`, error);
     }
     return null;
   }

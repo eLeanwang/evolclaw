@@ -3,8 +3,9 @@ import { SessionManager } from './session-manager.js';
 import { AgentRunner } from './agent-runner.js';
 import { MessageCache } from './message-cache.js';
 import { MessageProcessor } from './message-processor.js';
+import { renameSession as sdkRenameSession, forkSession as sdkForkSession, listSessions as sdkListSessions } from '@anthropic-ai/claude-agent-sdk';
 import { MessageQueue } from './message-queue.js';
-import { saveConfig } from '../config.js';
+import { saveConfig, resolvePaths, getPackageRoot } from '../config.js';
 import { logger } from '../utils/logger.js';
 import path from 'path';
 import fs from 'fs';
@@ -57,7 +58,7 @@ function formatIdleTime(ms: number): string {
 }
 
 // 支持的命令列表
-const commands = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/slist', '/session', '/rename', '/stop', '/clear', '/compact', '/repair', '/safe'];
+const commands = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/slist', '/session', '/rename', '/stop', '/clear', '/compact', '/repair', '/safe', '/fork'];
 
 // 命令别名映射
 const aliases: Record<string, string> = {
@@ -68,7 +69,7 @@ const aliases: Record<string, string> = {
 
 // 命令快速路径前缀（不进入消息队列的命令）
 // 注意：/stop, /clear, /compact, /safe 故意不在此列表中，它们需要进入队列触发中断机制
-const quickCommandPrefixes = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/slist', '/session', '/rename', '/repair', '/p ', '/s ', '/name '];
+const quickCommandPrefixes = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/slist', '/session', '/rename', '/repair', '/fork', '/p ', '/s ', '/name '];
 
 export class CommandHandler {
   private adapters = new Map<string, ChannelAdapter>();
@@ -164,6 +165,7 @@ export class CommandHandler {
   /slist - 列出当前项目的所有会话
   /s, /session <名称> - 切换到指定会话
   /name, /rename <新名称> - 重命名当前会话
+  /fork [名称] - 分支当前会话（从当前对话点创建分支）
   /status - 显示会话状态
   /clear - 清空当前会话的对话历史
   /compact - 压缩会话上下文（减少 token 用量）
@@ -175,8 +177,7 @@ export class CommandHandler {
   /safe - 进入安全模式
 
 🤖 模型管理：
-  /model - 显示当前模型
-  /model <model-id> - 切换模型
+  /model [model-id] - 查看或切换模型
 
 ❓ 帮助：
   /help - 显示此帮助信息`;
@@ -319,13 +320,24 @@ export class CommandHandler {
                       timeSinceSuccess < 3600000 ? `${Math.floor(timeSinceSuccess / 60000)}分钟前` :
                       `${Math.floor(timeSinceSuccess / 3600000)}小时前`;
 
+      // 获取会话文件信息并同步 name
+      let sessionTurns = 0;
+      if (session.claudeSessionId) {
+        const fileInfo = this.sessionManager.getSessionFileInfo(session.projectPath, session.claudeSessionId);
+        sessionTurns = fileInfo.turns;
+        if (fileInfo.title && fileInfo.title !== session.name) {
+          await this.sessionManager.renameSession(session.id, fileInfo.title);
+          session.name = fileInfo.title;
+        }
+      }
+
       const lines = [
         '📊 会话状态：',
         `渠道: ${channel} / 项目: ${projectName} / 会话: ${session.name || '(未命名)'}`,
         `会话ID: ${session.id}`,
         `项目路径: ${session.projectPath}`,
         `活跃状态: ${activeStatus}`,
-        `会话轮数: ${session.claudeSessionId ? this.sessionManager.countSessionTurns(session.projectPath, session.claudeSessionId) : 0}`,
+        `会话轮数: ${sessionTurns}`,
         `异常计数: ${health.consecutiveErrors}`,
         `安全模式: ${health.safeMode ? '是 ⚠️' : '否 ✓'}`,
         `最后成功: ${timeStr}`,
@@ -391,7 +403,7 @@ export class CommandHandler {
 
       if (sessionsWithMessages.length > 0) {
         const restartKey = `${channel}-${channelId}`;
-        const restartConfirmFile = `./data/restart-confirm-${restartKey}.json`;
+        const restartConfirmFile = path.join(resolvePaths().dataDir, `restart-confirm-${restartKey}.json`);
 
         if (fs.existsSync(restartConfirmFile)) {
           const confirmInfo = JSON.parse(fs.readFileSync(restartConfirmFile, 'utf-8'));
@@ -414,12 +426,13 @@ export class CommandHandler {
         channelId,
         timestamp: Date.now()
       };
-      fs.writeFileSync('./data/restart-pending.json', JSON.stringify(restartInfo));
+      fs.writeFileSync(path.join(resolvePaths().dataDir, 'restart-pending.json'), JSON.stringify(restartInfo));
 
       const { spawn } = await import('child_process');
-      spawn('/home/evolclaw/restart-monitor.sh', [], {
+      spawn('node', [path.join(getPackageRoot(), 'dist', 'cli.js'), 'restart-monitor'], {
         detached: true,
-        stdio: 'ignore'
+        stdio: 'ignore',
+        env: { ...process.env, EVOLCLAW_HOME: resolvePaths().root }
       }).unref();
 
       setTimeout(() => {
@@ -656,6 +669,22 @@ export class CommandHandler {
       const sessions = await this.sessionManager.listSessions(channel, channelId);
       const currentProjectSessions = sessions.filter(s => s.projectPath === session.projectPath);
 
+      // 从 SDK 同步会话名称（发现 CLI 改名）
+      try {
+        const sdkSessions = await sdkListSessions({ dir: session.projectPath });
+        for (const sdkSession of sdkSessions) {
+          const sdkName = sdkSession.customTitle || undefined;
+          if (!sdkName) continue;
+          const dbSession = currentProjectSessions.find(s => s.claudeSessionId === sdkSession.sessionId);
+          if (dbSession && sdkName !== dbSession.name) {
+            await this.sessionManager.renameSession(dbSession.id, sdkName);
+            dbSession.name = sdkName;
+          }
+        }
+      } catch (error) {
+        logger.debug('[CommandHandler] SDK listSessions sync failed (non-critical):', error);
+      }
+
       const isGroup = await this.isGroupChat(channel, channelId);
       const cliSessions = isGroup
         ? []
@@ -697,7 +726,7 @@ export class CommandHandler {
           const time = new Date(c.mtime).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
           const message = this.sessionManager.readSessionFirstMessage(session.projectPath, c.uuid) || '(无消息)';
           const uuid = c.uuid.substring(0, 8);
-          lines.push(`  ${time}  "${message}"  (${uuid})`);
+          lines.push(`  ${time}  (${uuid})  "${message}"`);
         }
         lines.push('');
       }
@@ -749,12 +778,17 @@ export class CommandHandler {
         return `❌ 会话不存在: ${sessionName}\n使用 /slist 查看可用会话`;
       }
 
+      const lastInput = targetSession.claudeSessionId
+        ? this.sessionManager.readSessionLastUserMessage(targetSession.projectPath, targetSession.claudeSessionId)
+        : null;
+      const lastInputLine = lastInput ? `\n  最后输入: "${lastInput}"` : '';
+
       if (!session) {
         const switched = await this.sessionManager.switchToSession(channel, channelId, targetSession.id);
         if (!switched) {
           return `❌ 切换会话失败`;
         }
-        return `✓ 已切换到会话: ${targetSession.name || sessionName}\n  项目: ${path.basename(targetSession.projectPath)}`;
+        return `✓ 已切换到会话: ${targetSession.name || sessionName}\n  项目: ${path.basename(targetSession.projectPath)}${lastInputLine}`;
       }
 
       if (targetSession.id === session.id) {
@@ -767,7 +801,7 @@ export class CommandHandler {
         return `❌ 切换会话失败`;
       }
 
-      return `✓ 已切换到会话: ${targetSession.name || sessionName}\n  将继续之前的对话历史`;
+      return `✓ 已切换到会话: ${targetSession.name || sessionName}\n  将继续之前的对话历史${lastInputLine}`;
     }
 
     // /rename 或 /name 命令：重命名当前会话
@@ -790,6 +824,14 @@ export class CommandHandler {
         return `❌ 会话名称 "${newName}" 已存在，请使用其他名称`;
       }
 
+      // 双写：SDK + 数据库
+      if (session.claudeSessionId) {
+        try {
+          await sdkRenameSession(session.claudeSessionId, newName, { dir: session.projectPath });
+        } catch (error) {
+          logger.warn(`[CommandHandler] SDK renameSession failed (continuing with db update):`, error);
+        }
+      }
       const success = await this.sessionManager.renameSession(session.id, newName);
 
       if (!success) {
@@ -797,6 +839,29 @@ export class CommandHandler {
       }
 
       return `✓ 已将当前会话重命名为: ${newName}`;
+    }
+
+    // /fork 命令：分支当前会话
+    if (normalizedContent === '/fork' || normalizedContent.startsWith('/fork ')) {
+      const forkName = normalizedContent.slice(5).trim() || undefined;
+
+      if (!session) {
+        return `❌ 当前没有活跃会话，无法分支`;
+      }
+
+      if (!session.claudeSessionId) {
+        return `❌ 当前会话尚未初始化 Claude 对话，无法分支\n\n请先发送一条消息，然后再使用 /fork`;
+      }
+
+      try {
+        const forkResult = await sdkForkSession(session.claudeSessionId, { dir: session.projectPath, title: forkName });
+        const newSession = await this.sessionManager.createForkedSession(session, forkResult.sessionId, forkName);
+
+        return `✅ 会话已分支: ${newSession.name}\n新会话已激活，可以继续对话\n\n使用 /slist 查看所有会话，/s <名称> 切换回原会话`;
+      } catch (error) {
+        logger.error('[CommandHandler] Fork session failed:', error);
+        return `❌ 会话分支失败: ${error instanceof Error ? error.message : '未知错误'}`;
+      }
     }
 
     // /repair 命令：检查并修复会话

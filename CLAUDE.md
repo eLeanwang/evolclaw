@@ -43,7 +43,7 @@ npm run test:hooks
 ```
 
 ### Configuration
-- Config file: `data/config.json`
+- Config file: `{EVOLCLAW_HOME}/data/config.json` (default: `~/.evolclaw/data/config.json`)
 - Required fields: `acp.domain`, `acp.agentName`, `projects.defaultPath`
 - `anthropic` section is entirely optional — auto-inherited from CLI config:
   ```
@@ -53,8 +53,30 @@ npm run test:hooks
   ```
 - Feishu credentials optional (channel disabled if missing)
 - Project list: `projects.list` maps names to absolute paths
+- Development mode: set `EVOLCLAW_HOME=/home/evolclaw` to use project directory
 
 ## Architecture
+
+### Data Directory
+All runtime data is decoupled from the package directory via `EVOLCLAW_HOME`:
+```
+{EVOLCLAW_HOME}/                # default: ~/.evolclaw
+├── data/
+│   ├── config.json
+│   ├── sessions.db
+│   └── evolclaw.pid
+└── logs/
+    ├── evolclaw.log
+    ├── stdout.log
+    ├── messages.log
+    └── line-stats.log
+```
+
+Path resolution (`src/paths.ts`):
+- `resolveRoot()` → `EVOLCLAW_HOME` env var or `~/.evolclaw`
+- `resolvePaths()` → all derived paths (config, db, pid, logs, etc.)
+- `ensureDataDirs()` → creates data/ and logs/ directories
+- `getPackageRoot()` → package installation directory (via `import.meta.url`)
 
 ### Architecture
 1. **Message Channel Layer** (`src/channels/`) - Feishu WebSocket
@@ -404,6 +426,9 @@ Console log filtering is applied in `src/index.ts` to suppress noisy Feishu SDK 
 ## Critical Files
 
 - `src/index.ts` - Main entry point (~320 lines): channel setup, adapter wiring, message queue
+- `src/paths.ts` - Path resolution: `resolveRoot`/`resolvePaths`/`ensureDataDirs`/`getPackageRoot`
+- `src/config.ts` - Config loading/saving, re-exports path utilities
+- `src/cli.ts` - CLI subcommands (init/start/stop/restart/status/logs), replaces evolclaw.sh
 - `src/core/command-handler.ts` - Slash command processing (CommandHandler class)
 - `src/core/message-processor.ts` - Unified event processing engine
 - `src/core/message-queue.ts` - Serial processing with interrupt support
@@ -415,9 +440,12 @@ Console log filtering is applied in `src/index.ts` to suppress noisy Feishu SDK 
 
 ## Service Management
 
-Use the `evolclaw.sh` script for service control:
+Use the `evolclaw` CLI for service control (after `npm link`):
 
 ```bash
+# Initialize config (creates ~/.evolclaw/data/config.json)
+evolclaw init
+
 # Start service
 evolclaw start
 
@@ -434,4 +462,10 @@ evolclaw status
 evolclaw logs
 ```
 
-**Error Handling**: If startup fails, the script displays the last 10 lines of stdout log showing the actual error (e.g., missing config file, API key issues).
+Environment variables:
+- `EVOLCLAW_HOME` - Data directory (default: `~/.evolclaw`)
+- `LOG_LEVEL` - Log level (default: `INFO`)
+- `MESSAGE_LOG` - Enable message logging (default: `true`)
+- `EVENT_LOG` - Enable event logging (default: `true`)
+
+**Error Handling**: If startup fails, the CLI displays the last 10 lines of stdout log showing the actual error (e.g., missing config file, API key issues).

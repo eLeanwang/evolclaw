@@ -1,7 +1,8 @@
 import fs from 'fs';
 import path from 'path';
+import { resolvePaths } from '../paths.js';
 
-const LOG_DIR = 'logs';
+const LOG_DIR = resolvePaths().logs;
 const LOG_LEVEL = process.env.LOG_LEVEL || 'INFO';
 const LEVELS = { DEBUG: 0, INFO: 1, WARN: 2, ERROR: 3 };
 
