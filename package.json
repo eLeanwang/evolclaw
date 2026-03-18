@@ -9,6 +9,7 @@
   },
   "files": [
     "dist/",
+    "!dist/experimental/",
     "bin/",
     "data/config.sample.json"
   ],

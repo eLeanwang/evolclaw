@@ -3,6 +3,7 @@ tests/
 docs/
 *.ts
 !dist/**
+dist/experimental/
 tsconfig.json
 vitest.config.ts
 .claude/
