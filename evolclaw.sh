@@ -95,6 +95,96 @@ rotate_logs() {
     find "$LOG_DIR" -name "*.log.*" -mtime +7 -delete 2>/dev/null
 }
 
+# 代码行数统计
+count_lines() {
+    local STATS_FILE="$LOG_DIR/line-stats.log"
+
+    echo "[launcher] 正在统计代码行数..."
+    echo ""
+
+    local core=$(find "$SCRIPT_DIR/src/core" -name '*.ts' 2>/dev/null | xargs cat 2>/dev/null | wc -l)
+    local channels=$(find "$SCRIPT_DIR/src/channels" -name '*.ts' ! -path '*/experimental/*' 2>/dev/null | xargs cat 2>/dev/null | wc -l)
+    local utils=$(find "$SCRIPT_DIR/src/utils" -name '*.ts' 2>/dev/null | xargs cat 2>/dev/null | wc -l)
+    local entry=0
+    for f in src/index.ts src/config.ts src/types.ts; do
+        [ -f "$SCRIPT_DIR/$f" ] && entry=$((entry + $(wc -l < "$SCRIPT_DIR/$f")))
+    done
+    local total=$((core + channels + utils + entry))
+
+    echo "=================================================="
+    echo "EvolClaw 代码统计"
+    echo "=================================================="
+    printf "核心模块:         %8d 行\n" "$core"
+    printf "渠道适配:         %8d 行\n" "$channels"
+    printf "工具库:           %8d 行\n" "$utils"
+    printf "入口与配置:       %8d 行\n" "$entry"
+    echo "--------------------------------------------------"
+    printf "总计:             %8d 行\n" "$total"
+    echo "=================================================="
+
+    # 追加历史记录
+    local now=$(date '+%Y-%m-%d %H:%M:%S')
+    echo -e "${now}\t${core}\t${channels}\t${utils}\t${entry}\t${total}" >> "$STATS_FILE"
+
+    # 显示历史记录
+    show_history "$STATS_FILE"
+}
+
+# 显示历史记录和每日新增
+show_history() {
+    local STATS_FILE="$1"
+    if [ ! -f "$STATS_FILE" ] || [ "$(wc -l < "$STATS_FILE")" -lt 2 ]; then
+        return
+    fi
+
+    echo ""
+    echo "=================================================="
+    echo "历史记录（最近 8 次）"
+    echo "=================================================="
+    printf "%-20s %6s %6s %6s %6s %6s %8s\n" "时间" "核心" "渠道" "工具" "入口" "总计" "变化"
+    echo "--------------------------------------------------"
+
+    local tmpfile=$(mktemp)
+    tail -8 "$STATS_FILE" > "$tmpfile"
+    local prev_total=""
+    while IFS=$'\t' read -r time core ch utils entry total; do
+        local diff="-"
+        if [ -n "$prev_total" ]; then
+            local change=$((total - prev_total))
+            if [ "$change" -ge 0 ]; then diff="+${change}"; else diff="${change}"; fi
+        fi
+        printf "%-20s %6d %6d %6d %6d %6d %8s\n" "$time" "$core" "$ch" "$utils" "$entry" "$total" "$diff"
+        prev_total="$total"
+    done < "$tmpfile"
+    rm -f "$tmpfile"
+
+    echo "=================================================="
+
+    # 每日新增统计
+    local days=$(awk -F'\t' '{print $1}' "$STATS_FILE" | cut -d' ' -f1 | sort -u | tail -10)
+    local day_count=$(echo "$days" | wc -l)
+    if [ "$day_count" -ge 2 ]; then
+        echo ""
+        echo "=================================================="
+        echo "每日新增代码行数"
+        echo "=================================================="
+        printf "%-20s %8s\n" "日期" "新增行数"
+        echo "--------------------------------------------------"
+
+        local prev_day_total=""
+        for day in $days; do
+            local day_total=$(grep "^${day}" "$STATS_FILE" | tail -1 | awk -F'\t' '{print $NF}')
+            if [ -n "$prev_day_total" ]; then
+                local change=$((day_total - prev_day_total))
+                printf "%-20s %+8d\n" "$day" "$change"
+            fi
+            prev_day_total="$day_total"
+        done
+
+        echo "=================================================="
+    fi
+}
+
 # 启动服务
 start() {
     if is_running; then
@@ -125,6 +215,10 @@ start() {
         echo "  Message log: $MESSAGE_LOG"
         echo "  Event log: $EVENT_LOG"
         echo "  Logs: $LOG_DIR/"
+        echo ""
+
+        # 代码统计
+        count_lines
     else
         echo "❌ Failed to start EvolClaw"
         echo ""
