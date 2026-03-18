@@ -5,15 +5,15 @@ import { ACPChannel } from '../channels/acp.js';
 import { SessionManager } from '../core/session-manager.js';
 import { loadConfig, ensureDir } from '../config.js';
 import { logger } from '../utils/logger.js';
-import Database from 'better-sqlite3';
+import { DatabaseSync } from 'node:sqlite';
 
 async function main() {
   const config = loadConfig();
 
   // 初始化数据库（用于消息去重）
   ensureDir('./data');
-  const db = new Database('./data/gateway.db');
-  db.pragma('journal_mode = WAL');
+  const db = new DatabaseSync('./data/gateway.db');
+  db.exec('PRAGMA journal_mode = WAL');
   db.exec(`
     CREATE TABLE IF NOT EXISTS processed_messages (
       message_id TEXT PRIMARY KEY,

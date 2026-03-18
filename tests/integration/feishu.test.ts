@@ -1,13 +1,13 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import Database from 'better-sqlite3';
+import { DatabaseSync } from 'node:sqlite';
 import { FeishuChannel } from '../../src/channels/feishu.js';
 
 describe('Feishu Channel Integration', () => {
   let channel: FeishuChannel;
-  let mockDb: Database.Database;
+  let mockDb: DatabaseSync;
 
   beforeEach(() => {
-    mockDb = new Database(':memory:');
+    mockDb = new DatabaseSync(':memory:');
     channel = new FeishuChannel({ appId: 'test-app', appSecret: 'test-secret', db: mockDb });
   });
 
@@ -17,7 +17,7 @@ describe('Feishu Channel Integration', () => {
     });
 
     it('should accept valid credentials', () => {
-      const db = new Database(':memory:');
+      const db = new DatabaseSync(':memory:');
       const ch = new FeishuChannel({ appId: 'id', appSecret: 'secret', db });
       expect(ch).toBeDefined();
     });

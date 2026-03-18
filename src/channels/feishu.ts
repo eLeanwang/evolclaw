@@ -1,7 +1,7 @@
 import * as lark from '@larksuiteoapi/node-sdk';
 import fs from 'fs';
 import path from 'path';
-import Database from 'better-sqlite3';
+import { DatabaseSync } from 'node:sqlite';
 import imageType from 'image-type';
 import { ensureDir } from '../config.js';
 import { logger } from '../utils/logger.js';
@@ -10,7 +10,7 @@ import { markdownToFeishuPost, hasMarkdownSyntax } from '../utils/markdown-to-fe
 export interface FeishuConfig {
   appId: string;
   appSecret: string;
-  db: Database.Database;
+  db: DatabaseSync;
 }
 
 export interface MessageHandler {
@@ -26,7 +26,7 @@ export class FeishuChannel {
   private wsClient: lark.WSClient | null = null;
   private messageHandler?: MessageHandler;
   private projectPathProvider?: ProjectPathProvider;
-  private db: Database.Database;
+  private db: DatabaseSync;
   private cleanupInterval?: NodeJS.Timeout;
   private chatTypeCache: Map<string, string> = new Map();
 

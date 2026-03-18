@@ -1,4 +1,4 @@
-import Database from 'better-sqlite3';
+import { DatabaseSync, StatementSync } from 'node:sqlite';
 
 export type HookEventType =
   | 'SessionStart'
@@ -18,10 +18,10 @@ export interface HookEvent {
 }
 
 export class HookCollector {
-  private db: Database.Database;
-  private insertStmt: Database.Statement;
+  private db: DatabaseSync;
+  private insertStmt: StatementSync;
 
-  constructor(db: Database.Database) {
+  constructor(db: DatabaseSync) {
     this.db = db;
     this.initSchema();
     this.insertStmt = this.db.prepare(`

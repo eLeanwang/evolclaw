@@ -16,14 +16,12 @@
     "test:hooks": "tsx test-sdk-hooks.ts"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.1.77",
+    "@anthropic-ai/claude-agent-sdk": "^0.2.77",
     "@larksuiteoapi/node-sdk": "^1.59.0",
-    "better-sqlite3": "^11.10.0",
     "dotenv": "^16.6.1",
     "image-type": "^6.0.0"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.0",
     "@types/node": "^22.0.0",
     "@vitest/coverage-v8": "^2.1.9",
     "tsx": "^4.19.0",

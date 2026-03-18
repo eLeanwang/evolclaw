@@ -1,4 +1,4 @@
-import Database from 'better-sqlite3';
+import { DatabaseSync } from 'node:sqlite';
 import { Session } from '../types.js';
 import { ensureDir } from '../config.js';
 import { logger } from '../utils/logger.js';
@@ -7,15 +7,15 @@ import fs from 'fs';
 import os from 'os';
 
 export class SessionManager {
-  private db: Database.Database;
+  private db: DatabaseSync;
 
   constructor(dbPath: string = './data/sessions.db') {
     ensureDir(path.dirname(dbPath));
-    this.db = new Database(dbPath);
+    this.db = new DatabaseSync(dbPath);
     this.initDatabase();
   }
 
-  getDatabase(): Database.Database {
+  getDatabase(): DatabaseSync {
     return this.db;
   }
 
@@ -30,12 +30,12 @@ export class SessionManager {
   }
 
   private initDatabase(): void {
-    const tableInfo = this.db.pragma('table_info(sessions)') as any[];
+    const tableInfo = this.db.prepare('PRAGMA table_info(sessions)').all() as any[];
     const hasIsActive = tableInfo.some((col: any) => col.name === 'is_active');
     const hasName = tableInfo.some((col: any) => col.name === 'name');
 
     // 检查是否有唯一约束
-    const indexes = this.db.pragma('index_list(sessions)') as any[];
+    const indexes = this.db.prepare('PRAGMA index_list(sessions)').all() as any[];
     const hasUniqueConstraint = indexes.some((idx: any) => idx.origin === 'u');
 
     if (!hasIsActive && tableInfo.length > 0) {
@@ -230,7 +230,7 @@ export class SessionManager {
     const result = this.db.prepare(`
       INSERT OR IGNORE INTO sessions (id, channel, channel_id, project_path, claude_session_id, name, is_active, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(session.id, session.channel, session.channelId, session.projectPath, session.claudeSessionId, session.name, 1, session.createdAt, session.updatedAt);
+    `).run(session.id, session.channel, session.channelId, session.projectPath, session.claudeSessionId ?? null, session.name ?? null, 1, session.createdAt, session.updatedAt);
 
     // 如果插入被忽略（已存在），重新查询
     if (result.changes === 0) {
@@ -260,7 +260,12 @@ export class SessionManager {
 
   async updateSession(sessionId: string, updates: Partial<Session>): Promise<void> {
     const fields = Object.keys(updates).filter(k => k !== 'id').map(k => `${k} = ?`).join(', ');
-    const values = Object.keys(updates).filter(k => k !== 'id').map(k => updates[k as keyof Session]);
+    const values = Object.keys(updates).filter(k => k !== 'id').map(k => {
+      const v = updates[k as keyof Session];
+      if (v === undefined) return null;
+      if (typeof v === 'boolean') return v ? 1 : 0;
+      return v;
+    });
 
     this.db.prepare(`UPDATE sessions SET ${fields}, updated_at = ? WHERE id = ?`).run(...values, Date.now(), sessionId);
   }
@@ -325,7 +330,7 @@ export class SessionManager {
     this.db.prepare(`
       INSERT OR IGNORE INTO sessions (id, channel, channel_id, project_path, claude_session_id, name, is_active, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(session.id, session.channel, session.channelId, session.projectPath, null, session.name, 1, session.createdAt, session.updatedAt);
+    `).run(session.id, session.channel, session.channelId, session.projectPath, null, session.name ?? null, 1, session.createdAt, session.updatedAt);
 
     return session;
   }
@@ -523,7 +528,41 @@ export class SessionManager {
     this.db.prepare(`
       INSERT INTO sessions (id, channel, channel_id, project_path, claude_session_id, name, is_active, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(session.id, session.channel, session.channelId, session.projectPath, null, session.name, 1, session.createdAt, session.updatedAt);
+    `).run(session.id, session.channel, session.channelId, session.projectPath, null, session.name ?? null, 1, session.createdAt, session.updatedAt);
+
+    return session;
+  }
+
+  /**
+   * 基于现有会话创建分支会话
+   */
+  async createForkedSession(
+    sourceSession: Session,
+    forkedClaudeSessionId: string,
+    name?: string
+  ): Promise<Session> {
+    // 取消当前活跃会话
+    this.db.prepare(`
+      UPDATE sessions SET is_active = 0, updated_at = ?
+      WHERE channel = ? AND channel_id = ? AND is_active = 1
+    `).run(Date.now(), sourceSession.channel, sourceSession.channelId);
+
+    const session: Session = {
+      id: `${sourceSession.channel}-${sourceSession.channelId}-${Date.now()}`,
+      channel: sourceSession.channel,
+      channelId: sourceSession.channelId,
+      projectPath: sourceSession.projectPath,
+      claudeSessionId: forkedClaudeSessionId,
+      name: name || `${sourceSession.name || '会话'}-分支`,
+      isActive: true,
+      createdAt: Date.now(),
+      updatedAt: Date.now()
+    };
+
+    this.db.prepare(`
+      INSERT INTO sessions (id, channel, channel_id, project_path, claude_session_id, name, is_active, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(session.id, session.channel, session.channelId, session.projectPath, session.claudeSessionId ?? null, session.name ?? null, 1, session.createdAt, session.updatedAt);
 
     return session;
   }
@@ -590,27 +629,42 @@ export class SessionManager {
   }
 
   /**
-   * 统计会话回合数（用户消息数）
+   * 获取会话文件信息（回合数 + 标题）
    */
-  countSessionTurns(projectPath: string, claudeSessionId: string): number {
+  getSessionFileInfo(projectPath: string, claudeSessionId: string): { turns: number; title?: string } {
     const sessionFile = this.getSessionFilePath(projectPath, claudeSessionId);
-    if (!fs.existsSync(sessionFile)) return 0;
+    if (!fs.existsSync(sessionFile)) return { turns: 0 };
 
     try {
       const content = fs.readFileSync(sessionFile, 'utf-8');
       const lines = content.split('\n').filter(l => l.trim());
       let turns = 0;
+      let title: string | undefined;
       for (const line of lines) {
         const event = JSON.parse(line);
         if (event.type === 'user' && event.message?.role === 'user') {
           turns++;
         }
+        // 提取会话标题（从 session 元数据中）
+        if (event.title && !title) {
+          title = event.title;
+        }
+        if (event.sessionTitle && !title) {
+          title = event.sessionTitle;
+        }
       }
-      return turns;
+      return { turns, title };
     } catch (error) {
-      logger.warn(`Failed to count session turns: ${sessionFile}`, error);
-      return 0;
+      logger.warn(`Failed to read session file info: ${sessionFile}`, error);
+      return { turns: 0 };
     }
+  }
+
+  /**
+   * 统计会话回合数（用户消息数）— 兼容旧调用
+   */
+  countSessionTurns(projectPath: string, claudeSessionId: string): number {
+    return this.getSessionFileInfo(projectPath, claudeSessionId).turns;
   }
 
   async getSessionByUuidPrefix(channel: 'feishu' | 'acp', channelId: string, uuidPrefix: string): Promise<Session | undefined> {
@@ -692,7 +746,7 @@ export class SessionManager {
     this.db.prepare(`
       INSERT OR IGNORE INTO sessions (id, channel, channel_id, project_path, claude_session_id, name, is_active, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(session.id, session.channel, session.channelId, session.projectPath, session.claudeSessionId, session.name, 1, session.createdAt, session.updatedAt);
+    `).run(session.id, session.channel, session.channelId, session.projectPath, session.claudeSessionId ?? null, session.name ?? null, 1, session.createdAt, session.updatedAt);
 
     return session;
   }
