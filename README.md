@@ -118,6 +118,8 @@ MessageProcessor.processMessage()
 
 ```
 evolclaw/
+├── bin/
+│   └── evolclaw                    # CLI 入口（npm link）
 ├── src/
 │   ├── core/
 │   │   ├── command-handler.ts       # 斜杠命令处理
@@ -136,12 +138,8 @@ evolclaw/
 │   ├── paths.ts                    # 路径解析
 │   ├── cli.ts                      # CLI 命令（init/start/stop/...）
 │   └── index.ts                    # 主入口
-├── tests/
-│   ├── unit/                       # 单元测试
-│   └── integration/                # 集成测试
-├── data/
-│   └── evolclaw.sample.json        # 配置模板
-└── docs/                           # 文档目录
+└── data/
+    └── evolclaw.sample.json        # 配置模板
 ```
 
 ## 斜杠命令
