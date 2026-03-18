@@ -69,7 +69,11 @@ All runtime data is decoupled from the package directory via `EVOLCLAW_HOME`:
     ├── evolclaw.log
     ├── stdout.log
     ├── messages.log
-    └── line-stats.log
+    ├── line-stats.log
+    ├── ready.signal          # 启动成功信号（时间戳）
+    ├── restart.log           # restart-monitor 日志
+    ├── self-heal.md          # 自愈修复记录（活跃）
+    └── self-heal-*.md        # 自愈修复记录（归档）
 ```
 
 Path resolution (`src/paths.ts`):
@@ -469,3 +473,30 @@ Environment variables:
 - `EVENT_LOG` - Enable event logging (default: `true`)
 
 **Error Handling**: If startup fails, the CLI displays the last 10 lines of stdout log showing the actual error (e.g., missing config file, API key issues).
+
+### Self-Heal Mechanism
+
+When `/restart` triggers `restart-monitor` and the new process fails to start, the system automatically attempts self-repair:
+
+**Ready Signal**: `src/index.ts` writes `logs/ready.signal` (timestamp) after all initialization completes. Both `cmdStart()` and `restart-monitor` use this signal (15s timeout) instead of simple PID checks.
+
+**Self-Heal Flow**:
+1. `restart-monitor` detects startup failure (no ready signal within 15s)
+2. Invokes `claude -p` CLI with a diagnostic prompt (project dir, log paths, self-heal.md path)
+3. Claude reads error logs, analyzes root cause, fixes code, runs `npm run build`
+4. Claude appends fix details to `logs/self-heal.md`
+5. `restart-monitor` attempts startup again
+6. Repeats up to 3 times; notifies Feishu at each step
+
+**self-heal.md Lifecycle**:
+- During healing: Claude appends each fix attempt to `logs/self-heal.md`
+- On success: Renamed to `logs/self-heal-{timestamp}.md` (archived)
+- Next failure: Fresh `self-heal.md` = new problem; archives available for reference
+
+**Feishu Notifications**: Uses lightweight `lark.Client` directly (no FeishuChannel needed), reads credentials from `evolclaw.json` and channel info from `restart-pending.json`.
+
+**Key functions** in `src/cli.ts`:
+- `spawnAndWaitReady()` - Spawn process + poll for ready.signal
+- `invokeClaude()` - Call `claude -p` with diagnostic prompt
+- `archiveSelfHealLog()` - Rename self-heal.md on success
+- `notifyFeishu()` - Lightweight Feishu API notification

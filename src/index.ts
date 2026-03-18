@@ -274,36 +274,10 @@ async function main() {
 
   logger.info(`\n🚀 EvolClaw is running with ${channels.length} channel(s): ${channels.join(', ')}\n`);
 
-  // 检查是否有待发送的重启成功消息
-  const restartPendingFile = path.join(resolvePaths().dataDir, 'restart-pending.json');
-  if (fs.existsSync(restartPendingFile)) {
-    try {
-      const restartInfo = JSON.parse(fs.readFileSync(restartPendingFile, 'utf-8'));
-      const { channel, channelId, timestamp } = restartInfo;
-
-      if (Date.now() - timestamp < 60000) {
-        logger.info(`[System] Sending restart success message to ${channel}:${channelId}`);
-
-        setTimeout(async () => {
-          try {
-            if (channel === 'feishu') {
-              await feishu.sendMessage(channelId, '✅ 服务重启成功！');
-            } else if (channel === 'aun') {
-              await aun.sendMessage(channelId, '✅ 服务重启成功！');
-            }
-            logger.info('[System] Restart success message sent');
-          } catch (error) {
-            logger.error('[System] Failed to send restart success message:', error);
-          }
-        }, 2000);
-      }
-
-      fs.unlinkSync(restartPendingFile);
-    } catch (error) {
-      logger.error('[System] Failed to process restart-pending.json:', error);
-      fs.unlinkSync(restartPendingFile);
-    }
-  }
+  // 写入 ready 信号，供 restart-monitor 检测启动成功
+  const readySignalPath = resolvePaths().readySignal;
+  fs.writeFileSync(readySignalPath, String(Date.now()));
+  logger.info(`✓ Ready signal written: ${readySignalPath}`);
 
   // 优雅关闭
   const shutdown = async () => {

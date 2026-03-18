@@ -3,8 +3,11 @@ import path from 'path';
 import os from 'os';
 import readline from 'readline';
 import { createRequire } from 'module';
-import { spawn, execFileSync } from 'child_process';
+import { spawn, execFileSync, execFile } from 'child_process';
+import { promisify } from 'util';
 import { resolveRoot, resolvePaths, ensureDataDirs, getPackageRoot } from './paths.js';
+
+const execFileAsync = promisify(execFile);
 
 // 清理 Claude Code 环境变量，防止 SDK 认为是嵌套会话
 function cleanEnv() {
@@ -346,6 +349,9 @@ function cmdStart() {
   rotateLogs(p.logs);
   cleanEnv();
 
+  // 删除旧的 ready signal
+  try { fs.unlinkSync(p.readySignal); } catch {}
+
   const stdoutLog = path.join(p.logs, 'stdout.log');
   const out = fs.openSync(stdoutLog, 'a');
   const err = fs.openSync(stdoutLog, 'a');
@@ -365,15 +371,11 @@ function cmdStart() {
   fs.writeFileSync(p.pid, String(child.pid));
   child.unref();
 
-  setTimeout(() => {
-    const running = isRunning(p.pid);
-    if (running) {
-      console.log(`✓ EvolClaw started successfully (PID: ${running})`);
-      console.log(`  EVOLCLAW_HOME: ${resolveRoot()}`);
-      console.log(`  Logs: ${p.logs}/`);
-      console.log('');
-      countLines(getPackageRoot(), p.logs);
-    } else {
+  // 等待 ready signal（最多 15 秒）
+  const startTime = Date.now();
+  const checkReady = () => {
+    // 进程已退出
+    if (!isRunning(p.pid)) {
       console.log('❌ Failed to start EvolClaw');
       console.log('');
       console.log('📝 Error details (last 10 lines of stdout):');
@@ -382,8 +384,37 @@ function cmdStart() {
         console.log(content.slice(-10).map(l => `  ${l}`).join('\n'));
       }
       process.exit(1);
+      return;
     }
-  }, 2000);
+
+    // ready signal 出现
+    if (fs.existsSync(p.readySignal)) {
+      const pid = isRunning(p.pid);
+      console.log(`✓ EvolClaw started successfully (PID: ${pid})`);
+      console.log(`  EVOLCLAW_HOME: ${resolveRoot()}`);
+      console.log(`  Logs: ${p.logs}/`);
+      console.log('');
+      countLines(getPackageRoot(), p.logs);
+      return;
+    }
+
+    // 超时
+    if (Date.now() - startTime > 15000) {
+      console.log('❌ Failed to start EvolClaw (ready signal timeout)');
+      console.log('');
+      console.log('📝 Error details (last 10 lines of stdout):');
+      if (fs.existsSync(stdoutLog)) {
+        const content = fs.readFileSync(stdoutLog, 'utf-8').trim().split('\n');
+        console.log(content.slice(-10).map(l => `  ${l}`).join('\n'));
+      }
+      process.exit(1);
+      return;
+    }
+
+    setTimeout(checkReady, 500);
+  };
+
+  setTimeout(checkReady, 1000);
 }
 
 function cmdStop() {
@@ -511,10 +542,13 @@ function cmdLogs() {
 
 /**
  * restart-monitor: 内部命令，由 /restart 命令调用
+ * 支持 self-heal：启动失败时调用 claude CLI 自动修复，最多重试 3 次
  */
-function cmdRestartMonitor() {
+async function cmdRestartMonitor() {
   const p = resolvePaths();
   const restartLog = path.join(p.logs, 'restart.log');
+  const MAX_HEAL_ATTEMPTS = 3;
+  const READY_TIMEOUT = 15000; // 15s
 
   const log = (msg: string) => {
     const line = `[${new Date().toISOString().replace('T', ' ').slice(0, 19)}] ${msg}\n`;
@@ -523,67 +557,276 @@ function cmdRestartMonitor() {
 
   log('Restart monitor started');
 
-  if (!fs.existsSync(p.pid)) {
-    log('ERROR: PID file not found');
-    process.exit(1);
+  // 读取 restart-pending.json 用于后续通知
+  const pendingFile = path.join(p.dataDir, 'restart-pending.json');
+  let pendingInfo: { channel: string; channelId: string; timestamp: number } | null = null;
+  try {
+    if (fs.existsSync(pendingFile)) {
+      pendingInfo = JSON.parse(fs.readFileSync(pendingFile, 'utf-8'));
+    }
+  } catch {}
+
+  // 等待旧进程退出
+  if (fs.existsSync(p.pid)) {
+    const oldPid = parseInt(fs.readFileSync(p.pid, 'utf-8').trim(), 10);
+    log(`Monitoring process PID: ${oldPid}`);
+
+    await new Promise<void>((resolve) => {
+      let waited = 0;
+      const interval = setInterval(() => {
+        waited++;
+        try {
+          process.kill(oldPid, 0);
+        } catch {
+          clearInterval(interval);
+          log(`Process ${oldPid} has exited`);
+          resolve();
+          return;
+        }
+        if (waited >= 30) {
+          clearInterval(interval);
+          log('ERROR: Process still running after 30s, force killing');
+          try { process.kill(oldPid, 9); } catch {}
+          resolve();
+        }
+      }, 1000);
+    });
+
+    await sleep(3000);
   }
 
-  const oldPid = parseInt(fs.readFileSync(p.pid, 'utf-8').trim(), 10);
-  log(`Monitoring process PID: ${oldPid}`);
+  // 启动并检测 ready signal
+  let started = await spawnAndWaitReady(p, log, READY_TIMEOUT);
 
-  let waited = 0;
-  const waitInterval = setInterval(() => {
-    waited++;
-    try {
-      process.kill(oldPid, 0);
-    } catch {
-      clearInterval(waitInterval);
-      log(`Process ${oldPid} has exited`);
-      startAfterWait();
-      return;
+  if (started) {
+    log('✓ Service restarted successfully');
+    archiveSelfHealLog(p, log);
+    await notifyFeishu(p, pendingInfo, '✅ 服务重启成功！', log);
+    cleanupPendingFile(pendingFile, log);
+    process.exit(0);
+  }
+
+  // 启动失败，进入 self-heal 循环
+  log('❌ Service failed to start, entering self-heal loop');
+  await notifyFeishu(p, pendingInfo, '⚠️ 服务启动失败，正在尝试自动修复...', log);
+
+  for (let attempt = 1; attempt <= MAX_HEAL_ATTEMPTS; attempt++) {
+    log(`Self-heal attempt ${attempt}/${MAX_HEAL_ATTEMPTS}`);
+    await notifyFeishu(p, pendingInfo, `🔧 自动修复中（第 ${attempt}/${MAX_HEAL_ATTEMPTS} 次）...`, log);
+
+    // 调用 claude CLI 修复
+    const healed = await invokeClaude(p, attempt, MAX_HEAL_ATTEMPTS, log);
+    if (!healed) {
+      log(`Self-heal attempt ${attempt} failed (claude invocation error)`);
+      continue;
     }
-    if (waited >= 30) {
-      clearInterval(waitInterval);
-      log('ERROR: Process still running after 30s');
-      process.exit(1);
+
+    // 重新启动
+    started = await spawnAndWaitReady(p, log, READY_TIMEOUT);
+    if (started) {
+      log(`✓ Self-heal succeeded on attempt ${attempt}`);
+      archiveSelfHealLog(p, log);
+      await notifyFeishu(p, pendingInfo, `✅ 自愈成功！（第 ${attempt} 次修复后恢复）`, log);
+      cleanupPendingFile(pendingFile, log);
+      process.exit(0);
     }
-  }, 1000);
 
-  function startAfterWait() {
-    log('Waiting 3 seconds before restart...');
-    setTimeout(() => {
-      log('Starting new process...');
-      cleanEnv();
+    log(`Attempt ${attempt}: still failing after fix`);
+  }
 
-      const stdoutLog = path.join(p.logs, 'stdout.log');
-      const out = fs.openSync(stdoutLog, 'a');
-      const err = fs.openSync(stdoutLog, 'a');
+  // 全部失败
+  log(`❌ All ${MAX_HEAL_ATTEMPTS} self-heal attempts failed`);
+  await notifyFeishu(p, pendingInfo, `❌ ${MAX_HEAL_ATTEMPTS} 次自动修复均失败，需要人工介入。\n修复记录：${p.selfHealLog}`, log);
+  cleanupPendingFile(pendingFile, log);
+  process.exit(1);
+}
 
-      const appMain = path.join(getPackageRoot(), 'dist', 'index.js');
-      const child = spawn('node', [appMain], {
-        detached: true,
-        stdio: ['ignore', out, err],
-        env: {
-          ...process.env,
-          LOG_LEVEL: process.env.LOG_LEVEL || 'INFO',
-          MESSAGE_LOG: process.env.MESSAGE_LOG || 'true',
-          EVENT_LOG: process.env.EVENT_LOG || 'true',
-        }
-      });
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
 
-      fs.writeFileSync(p.pid, String(child.pid));
-      child.unref();
+function cleanupPendingFile(filePath: string, log: (msg: string) => void) {
+  try {
+    if (fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath);
+      log('Cleaned up restart-pending.json');
+    }
+  } catch {}
+}
 
-      setTimeout(() => {
-        const running = isRunning(p.pid);
-        if (running) {
-          log(`✓ Service restarted successfully (PID: ${running})`);
-        } else {
-          log('❌ Failed to start service');
-        }
-        process.exit(running ? 0 : 1);
-      }, 2000);
-    }, 3000);
+/**
+ * 启动新进程并等待 ready.signal
+ */
+async function spawnAndWaitReady(
+  p: ReturnType<typeof resolvePaths>,
+  log: (msg: string) => void,
+  timeout: number
+): Promise<boolean> {
+  // 删除旧的 ready signal
+  try { fs.unlinkSync(p.readySignal); } catch {}
+  // 杀掉可能残留的进程
+  try { fs.unlinkSync(p.pid); } catch {}
+
+  cleanEnv();
+
+  const stdoutLog = path.join(p.logs, 'stdout.log');
+  const out = fs.openSync(stdoutLog, 'a');
+  const err = fs.openSync(stdoutLog, 'a');
+
+  const appMain = path.join(getPackageRoot(), 'dist', 'index.js');
+  const child = spawn('node', [appMain], {
+    detached: true,
+    stdio: ['ignore', out, err],
+    env: {
+      ...process.env,
+      LOG_LEVEL: process.env.LOG_LEVEL || 'INFO',
+      MESSAGE_LOG: process.env.MESSAGE_LOG || 'true',
+      EVENT_LOG: process.env.EVENT_LOG || 'true',
+    }
+  });
+
+  fs.writeFileSync(p.pid, String(child.pid));
+  child.unref();
+
+  log(`Spawned new process PID: ${child.pid}, waiting for ready signal...`);
+
+  // 轮询等待 ready.signal 出现
+  const start = Date.now();
+  while (Date.now() - start < timeout) {
+    await sleep(500);
+
+    // 进程已退出则提前失败
+    if (!isRunning(p.pid)) {
+      log('Process exited before ready signal');
+      return false;
+    }
+
+    if (fs.existsSync(p.readySignal)) {
+      log('Ready signal detected');
+      return true;
+    }
+  }
+
+  log(`Ready signal not received within ${timeout / 1000}s`);
+  // 超时后杀掉进程
+  const pid = isRunning(p.pid);
+  if (pid) {
+    try { process.kill(pid); } catch {}
+    try { fs.unlinkSync(p.pid); } catch {}
+  }
+  return false;
+}
+
+/**
+ * 调用 claude CLI 进行自动修复
+ */
+async function invokeClaude(
+  p: ReturnType<typeof resolvePaths>,
+  attempt: number,
+  maxAttempts: number,
+  log: (msg: string) => void
+): Promise<boolean> {
+  const projectDir = getPackageRoot();
+  const selfHealLog = p.selfHealLog;
+  const stdoutLog = path.join(p.logs, 'stdout.log');
+
+  const selfHealExists = fs.existsSync(selfHealLog) ? '存在，请先阅读之前的修复记录' : '不存在（首次修复）';
+
+  const prompt = `EvolClaw 服务启动失败，需要你诊断并修复。这是第 ${attempt}/${maxAttempts} 次自动修复尝试。
+
+关键信息：
+- 项目目录：${projectDir}
+- 错误日志：${stdoutLog}（请读取最后 50 行分析错误原因）
+- 主日志：${path.join(p.logs, 'evolclaw.log')}（可能包含更多上下文）
+- 修复记录：${selfHealLog}（${selfHealExists}）
+
+请执行以下步骤：
+1. 读取错误日志，分析启动失败的根本原因
+2. 如果 ${selfHealLog} 存在，先阅读之前的修复记录，避免重复尝试已失败的方案
+3. 修复代码问题
+4. 执行 npm run build 确认编译通过
+5. 将本次修复内容追加到 ${selfHealLog}，格式：
+   ## 第 ${attempt} 次修复 - {时间}
+   - 错误原因：...
+   - 修复方案：...
+   - 修改文件：...
+
+注意：只修复导致启动失败的问题，不要做额外的重构或优化。`;
+
+  try {
+    log(`Invoking claude CLI (attempt ${attempt})...`);
+
+    const { stdout, stderr } = await execFileAsync('claude', [
+      '-p', prompt,
+      '--allowedTools', 'Read,Write,Edit,Bash,Glob,Grep',
+      '--output-format', 'text',
+    ], {
+      cwd: projectDir,
+      timeout: 5 * 60 * 1000, // 5 分钟超时
+      env: { ...process.env, CLAUDE_CODE_ENTRYPOINT: 'cli' },
+      maxBuffer: 10 * 1024 * 1024,
+    });
+
+    if (stdout) log(`Claude output: ${stdout.slice(0, 500)}`);
+    if (stderr) log(`Claude stderr: ${stderr.slice(0, 200)}`);
+
+    log(`Claude CLI completed (attempt ${attempt})`);
+    return true;
+  } catch (error: any) {
+    log(`Claude CLI error: ${error.message?.slice(0, 300) || error}`);
+    return false;
+  }
+}
+
+/**
+ * 归档 self-heal.md
+ */
+function archiveSelfHealLog(
+  p: ReturnType<typeof resolvePaths>,
+  log: (msg: string) => void
+) {
+  if (!fs.existsSync(p.selfHealLog)) return;
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '').slice(0, 15);
+  const archivePath = path.join(p.logs, `self-heal-${timestamp}.md`);
+  fs.renameSync(p.selfHealLog, archivePath);
+  log(`Archived self-heal log to ${archivePath}`);
+}
+
+/**
+ * 通过 Feishu API 发送通知（轻量级，不依赖 FeishuChannel）
+ */
+async function notifyFeishu(
+  p: ReturnType<typeof resolvePaths>,
+  pendingInfo: { channel: string; channelId: string } | null,
+  message: string,
+  log: (msg: string) => void
+) {
+  if (!pendingInfo || pendingInfo.channel !== 'feishu') return;
+
+  try {
+    const configPath = path.join(p.dataDir, 'evolclaw.json');
+    if (!fs.existsSync(configPath)) return;
+    const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    if (!config.feishu?.appId || !config.feishu?.appSecret) return;
+
+    const lark = await import('@larksuiteoapi/node-sdk');
+    const client = new lark.Client({
+      appId: config.feishu.appId,
+      appSecret: config.feishu.appSecret,
+    });
+
+    await client.im.message.create({
+      params: { receive_id_type: 'chat_id' },
+      data: {
+        receive_id: pendingInfo.channelId,
+        msg_type: 'text',
+        content: JSON.stringify({ text: message }),
+      },
+    });
+
+    log(`Feishu notification sent: ${message.slice(0, 50)}`);
+  } catch (error: any) {
+    log(`Feishu notification failed: ${error.message?.slice(0, 200) || error}`);
   }
 }
 
@@ -612,7 +855,7 @@ export async function main(args: string[]) {
       cmdLogs();
       break;
     case 'restart-monitor':
-      cmdRestartMonitor();
+      await cmdRestartMonitor();
       break;
     default:
       console.log(`Usage: evolclaw {init|start|stop|restart|status|logs}

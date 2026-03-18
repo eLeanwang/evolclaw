@@ -32,6 +32,8 @@ export function resolvePaths() {
     dataDir: path.join(root, 'data'),
     logs: path.join(root, 'logs'),
     lineStats: path.join(root, 'logs', 'line-stats.log'),
+    readySignal: path.join(root, 'logs', 'ready.signal'),
+    selfHealLog: path.join(root, 'logs', 'self-heal.md'),
   };
 }
 
