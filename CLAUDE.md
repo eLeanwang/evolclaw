@@ -43,7 +43,7 @@ npm run test:hooks
 ```
 
 ### Configuration
-- Config file: `{EVOLCLAW_HOME}/data/config.json` (default: `~/.evolclaw/data/config.json`)
+- Config file: `{EVOLCLAW_HOME}/data/evolclaw.json` (default: `~/.evolclaw/data/evolclaw.json`)
 - Required fields: `aun.domain`, `aun.agentName`, `projects.defaultPath`
 - `anthropic` section is entirely optional — auto-inherited from CLI config:
   ```
@@ -62,10 +62,10 @@ All runtime data is decoupled from the package directory via `EVOLCLAW_HOME`:
 ```
 {EVOLCLAW_HOME}/                # default: ~/.evolclaw
 ├── data/
-│   ├── config.json
-│   ├── sessions.db
-│   └── evolclaw.pid
+│   ├── evolclaw.json
+│   └── sessions.db
 └── logs/
+    ├── evolclaw.pid
     ├── evolclaw.log
     ├── stdout.log
     ├── messages.log
@@ -140,7 +140,7 @@ MessageProcessor.processMessage
 
 ### Session Modes
 - **Isolated mode** (default): Each channel session → separate Claude session
-- Configured via `data/config.json` `session.mode` field
+- Configured via `data/evolclaw.json` `session.mode` field
 
 ## Key Implementation Details
 
@@ -436,14 +436,14 @@ Console log filtering is applied in `src/index.ts` to suppress noisy Feishu SDK 
 - `src/core/agent-runner.ts` - Claude Agent SDK wrapper with interrupt support
 - `src/core/session-manager.ts` - Session-to-project mapping (SQLite-backed)
 - `src/channels/feishu.ts` - Production-grade Feishu connection
-- `data/config.json` - Runtime configuration (not in git, contains secrets)
+- `data/evolclaw.json` - Runtime configuration (not in git, contains secrets)
 
 ## Service Management
 
 Use the `evolclaw` CLI for service control (after `npm link`):
 
 ```bash
-# Initialize config (creates ~/.evolclaw/data/config.json)
+# Initialize config (creates ~/.evolclaw/data/evolclaw.json)
 evolclaw init
 
 # Start service
