@@ -1,5 +1,8 @@
 import fs from 'fs';
 import path from 'path';
+import os from 'os';
+import readline from 'readline';
+import { createRequire } from 'module';
 import { spawn, execFileSync } from 'child_process';
 import { resolveRoot, resolvePaths, ensureDataDirs, getPackageRoot } from './paths.js';
 
@@ -162,7 +165,84 @@ function showHistory(statsFile: string) {
 
 // ==================== Commands ====================
 
-function cmdInit() {
+function checkEnvironment() {
+  console.log('🔍 环境检查...\n');
+  let allGood = true;
+
+  // Node.js >= 22
+  const nodeVer = parseInt(process.versions.node.split('.')[0], 10);
+  if (nodeVer >= 22) {
+    console.log(`  ✓ Node.js v${process.versions.node}`);
+  } else {
+    console.log(`  ⚠ Node.js v${process.versions.node} — 需要 >= 22（node:sqlite 依赖）`);
+    allGood = false;
+  }
+
+  // claude CLI
+  try {
+    execFileSync('which', ['claude'], { encoding: 'utf-8' });
+    console.log('  ✓ claude CLI 已安装');
+  } catch {
+    console.log('  ⚠ claude CLI 未找到 — 请先安装 Claude Code');
+    allGood = false;
+  }
+
+  // @anthropic-ai/claude-agent-sdk >= 0.2.75
+  try {
+    const esmRequire = createRequire(import.meta.url);
+    const sdkPkgPath = esmRequire.resolve('@anthropic-ai/claude-agent-sdk/package.json');
+    const sdkPkg = JSON.parse(fs.readFileSync(sdkPkgPath, 'utf-8'));
+    const sdkVer = sdkPkg.version as string;
+    const parts = sdkVer.split('.').map(Number);
+    const sdkOk = parts[0] > 0 || parts[1] > 2 || (parts[1] === 2 && parts[2] >= 75);
+    if (sdkOk) {
+      console.log(`  ✓ claude-agent-sdk v${sdkVer}`);
+    } else {
+      console.log(`  ⚠ claude-agent-sdk v${sdkVer} — 需要 >= 0.2.75（forkSession 支持）`);
+      allGood = false;
+    }
+  } catch {
+    console.log('  ⚠ claude-agent-sdk 未安装');
+    allGood = false;
+  }
+
+  console.log('');
+  if (!allGood) {
+    console.log('  部分检查未通过，可继续初始化，但运行时可能出错\n');
+  }
+}
+
+function ask(rl: readline.Interface, question: string): Promise<string> {
+  return new Promise(resolve => rl.question(question, resolve));
+}
+
+function setupEnvVar(home: string): void {
+  const exportLine = `export EVOLCLAW_HOME="${home}"`;
+
+  // Detect shell profile
+  const shell = process.env.SHELL || '/bin/bash';
+  let profilePath: string;
+  if (shell.endsWith('zsh')) {
+    profilePath = path.join(os.homedir(), '.zshrc');
+  } else {
+    profilePath = path.join(os.homedir(), '.bashrc');
+  }
+
+  // Check if already set
+  if (fs.existsSync(profilePath)) {
+    const content = fs.readFileSync(profilePath, 'utf-8');
+    if (content.includes('EVOLCLAW_HOME')) {
+      console.log(`  ✓ EVOLCLAW_HOME 已在 ${profilePath} 中配置`);
+      return;
+    }
+  }
+
+  fs.appendFileSync(profilePath, `\n# EvolClaw\n${exportLine}\n`);
+  console.log(`  ✓ 已写入 ${profilePath}: ${exportLine}`);
+  console.log(`  ⚠ 请执行 source ${profilePath} 或重新打开终端使其生效`);
+}
+
+async function cmdInit() {
   const p = resolvePaths();
   ensureDataDirs();
 
@@ -172,12 +252,62 @@ function cmdInit() {
   }
 
   const sampleSrc = path.join(getPackageRoot(), 'data', 'config.sample.json');
-  if (fs.existsSync(sampleSrc)) {
-    fs.copyFileSync(sampleSrc, p.config);
-    console.log(`✓ 已创建配置文件: ${p.config}`);
-    console.log('  请编辑配置文件填入实际参数');
-  } else {
+  if (!fs.existsSync(sampleSrc)) {
     console.log(`❌ 找不到示例配置: ${sampleSrc}`);
+    return;
+  }
+
+  checkEnvironment();
+
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+
+  try {
+    console.log('📝 交互式配置\n');
+
+    // feishu.appId
+    let appId = '';
+    while (!appId) {
+      appId = (await ask(rl, '  飞书 App ID: ')).trim();
+      if (!appId) console.log('  ⚠ 不能为空');
+    }
+
+    // feishu.appSecret
+    let appSecret = '';
+    while (!appSecret) {
+      appSecret = (await ask(rl, '  飞书 App Secret: ')).trim();
+      if (!appSecret) console.log('  ⚠ 不能为空');
+    }
+
+    // projects.defaultPath
+    let defaultPath = '';
+    while (!defaultPath) {
+      defaultPath = (await ask(rl, '  默认项目路径: ')).trim();
+      if (!defaultPath) {
+        console.log('  ⚠ 不能为空');
+      } else if (!fs.existsSync(defaultPath)) {
+        console.log(`  ⚠ 路径不存在: ${defaultPath}`);
+        defaultPath = '';
+      }
+    }
+
+    // anthropic.model
+    const modelInput = (await ask(rl, '  模型 [sonnet(默认)/opus/haiku]: ')).trim().toLowerCase();
+    const model = ['opus', 'haiku'].includes(modelInput) ? modelInput : 'sonnet';
+
+    // Generate config
+    const config = JSON.parse(fs.readFileSync(sampleSrc, 'utf-8'));
+    config.feishu.appId = appId;
+    config.feishu.appSecret = appSecret;
+    config.projects.defaultPath = defaultPath;
+    config.anthropic.model = model;
+
+    fs.writeFileSync(p.config, JSON.stringify(config, null, 2) + '\n');
+    console.log(`\n✓ 已创建配置文件: ${p.config}`);
+
+    // Setup EVOLCLAW_HOME in shell profile
+    setupEnvVar(resolveRoot());
+  } finally {
+    rl.close();
   }
 }
 
@@ -459,12 +589,12 @@ function cmdRestartMonitor() {
 
 // ==================== Main ====================
 
-export function main(args: string[]) {
+export async function main(args: string[]) {
   const cmd = args[0] || 'start';
 
   switch (cmd) {
     case 'init':
-      cmdInit();
+      await cmdInit();
       break;
     case 'start':
       cmdStart();

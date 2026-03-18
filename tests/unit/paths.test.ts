@@ -22,9 +22,34 @@ describe('paths', () => {
   });
 
   describe('resolveRoot', () => {
-    it('should default to ~/.evolclaw', () => {
-      const root = resolveRoot();
-      expect(root).toBe(path.join(os.homedir(), '.evolclaw'));
+    it('should default to ~/.evolclaw when no cwd config exists', () => {
+      // cwd 下有 data/evolclaw.json 时会命中 cwd 检测，所以用 chdir 到临时目录
+      const origCwd = process.cwd();
+      const tmpDir = path.join(os.tmpdir(), `evolclaw-paths-test-${Date.now()}`);
+      fs.mkdirSync(tmpDir, { recursive: true });
+      process.chdir(tmpDir);
+      try {
+        const root = resolveRoot();
+        expect(root).toBe(path.join(os.homedir(), '.evolclaw'));
+      } finally {
+        process.chdir(origCwd);
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it('should detect cwd when data/evolclaw.json exists', () => {
+      const tmpDir = path.join(os.tmpdir(), `evolclaw-cwd-test-${Date.now()}`);
+      fs.mkdirSync(path.join(tmpDir, 'data'), { recursive: true });
+      fs.writeFileSync(path.join(tmpDir, 'data', 'evolclaw.json'), '{}');
+      const origCwd = process.cwd();
+      process.chdir(tmpDir);
+      try {
+        const root = resolveRoot();
+        expect(root).toBe(tmpDir);
+      } finally {
+        process.chdir(origCwd);
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
     });
 
     it('should use EVOLCLAW_HOME env var when set', () => {
@@ -56,7 +81,7 @@ describe('paths', () => {
       process.env.EVOLCLAW_HOME = '/tmp/test-evolclaw';
       const p = resolvePaths();
       expect(p.root).toBe('/tmp/test-evolclaw');
-      expect(p.config).toBe('/tmp/test-evolclaw/data/config.json');
+      expect(p.config).toBe('/tmp/test-evolclaw/data/evolclaw.json');
       expect(p.configSample).toBe('/tmp/test-evolclaw/data/config.sample.json');
       expect(p.db).toBe('/tmp/test-evolclaw/data/sessions.db');
       expect(p.pid).toBe('/tmp/test-evolclaw/data/evolclaw.pid');

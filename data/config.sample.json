@@ -1,14 +1,15 @@
 {
   "anthropic": {
     "baseUrl": "https://api.anthropic.com",
-    "apiKey": "your-api-key-here"
+    "apiKey": "your-api-key-here",
+    "model": "sonnet"
   },
   "feishu": {
     "appId": "your-feishu-app-id",
     "appSecret": "your-feishu-app-secret"
   },
-  "acp": {
-    "domain": "your-acp-domain",
+  "aun": {
+    "domain": "your-aun-domain",
     "agentName": "your-agent-name"
   },
   "projects": {
@@ -18,5 +19,21 @@
       "project1": "/path/to/project1",
       "project2": "/path/to/project2"
     }
+  },
+  "flushDelay": 4000,
+  "timeout": {
+    "idle": 120000
+  },
+  "idleMonitor": {
+    "enabled": true,
+    "safeModeThreshold": 3
+  },
+  "sdk": {
+    "useSettingSources": true,
+    "agentProgressSummaries": true
+  },
+  "owners": {
+    "feishu": "",
+    "aun": ""
   }
 }
