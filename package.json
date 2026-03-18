@@ -1,7 +1,7 @@
 {
   "name": "evolclaw",
-  "version": "1.0.0",
-  "description": "Lightweight AI Agent with Feishu and ACP integration",
+  "version": "2.0.0",
+  "description": "Lightweight AI Agent gateway connecting Claude Agent SDK to messaging channels (Feishu, ACP) with multi-project session management",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
@@ -16,11 +16,11 @@
     "test:hooks": "tsx test-sdk-hooks.ts"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.1.0",
-    "@larksuiteoapi/node-sdk": "^1.30.0",
-    "acp-ts": "latest",
-    "better-sqlite3": "^11.0.0",
-    "dotenv": "^16.4.0",
+    "@anthropic-ai/claude-agent-sdk": "^0.1.77",
+    "@larksuiteoapi/node-sdk": "^1.59.0",
+    "acp-ts": "^1.2.8",
+    "better-sqlite3": "^11.10.0",
+    "dotenv": "^16.6.1",
     "image-type": "^6.0.0"
   },
   "devDependencies": {
