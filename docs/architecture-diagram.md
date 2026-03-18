@@ -4,7 +4,7 @@
 graph TB
     subgraph Layer1["第一层：消息渠道层"]
         Feishu[飞书 WebSocket<br/>src/channels/feishu.ts]
-        ACP[ACP 协议<br/>src/channels/acp.ts]
+        AUN[AUN 协议<br/>src/channels/aun.ts]
     end
 
     subgraph Layer2["第二层：消息队列层"]
@@ -35,7 +35,7 @@ graph TB
     end
 
     Feishu --> Queue
-    ACP --> Queue
+    AUN --> Queue
     Queue --> Processor
     Processor --> Flusher
     Processor -.-> Monitor

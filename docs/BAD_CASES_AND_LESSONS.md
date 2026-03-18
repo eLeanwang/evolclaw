@@ -51,7 +51,7 @@
 **实现**：
 ```typescript
 async getOrCreateSessionWithoutActivating(
-  channel: 'feishu' | 'acp',
+  channel: 'feishu' | 'aun',
   channelId: string,
   projectPath: string
 ): Promise<Session> {

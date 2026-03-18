@@ -1,11 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { ACPChannel } from '../../src/channels/acp.js';
+import { AUNChannel } from '../../src/channels/aun.js';
 
-describe('ACP Channel Integration', () => {
-  let channel: ACPChannel;
+describe('AUN Channel Integration', () => {
+  let channel: AUNChannel;
 
   beforeEach(async () => {
-    channel = new ACPChannel({ domain: 'test.acp', agentName: 'test-agent' });
+    channel = new AUNChannel({ domain: 'test.aun', agentName: 'test-agent' });
     await channel.connect();
   });
 

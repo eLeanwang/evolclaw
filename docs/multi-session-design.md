@@ -57,7 +57,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 
 ```typescript
 async getOrCreateSession(
-  channel: 'feishu' | 'acp',
+  channel: 'feishu' | 'aun',
   channelId: string,
   defaultProjectPath: string
 ): Promise<Session> {
@@ -114,7 +114,7 @@ async getOrCreateSession(
 
 ```typescript
 async switchProject(
-  channel: 'feishu' | 'acp',
+  channel: 'feishu' | 'aun',
   channelId: string,
   newProjectPath: string
 ): Promise<Session> {
@@ -167,7 +167,7 @@ async switchProject(
 
 ```typescript
 async updateClaudeSessionId(
-  channel: 'feishu' | 'acp',
+  channel: 'feishu' | 'aun',
   channelId: string,
   claudeSessionId: string
 ): Promise<void> {
@@ -184,7 +184,7 @@ async updateClaudeSessionId(
 
 ```typescript
 async clearActiveSession(
-  channel: 'feishu' | 'acp',
+  channel: 'feishu' | 'aun',
   channelId: string
 ): Promise<void> {
   // 清除当前活跃会话的 Claude Session ID

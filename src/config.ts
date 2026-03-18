@@ -64,11 +64,11 @@ export function saveConfig(config: Config, configPath: string = resolvePaths().c
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf-8');
 }
 
-export function getOwner(config: Config, channel: 'feishu' | 'acp'): string | undefined {
+export function getOwner(config: Config, channel: 'feishu' | 'aun'): string | undefined {
   return config.owners?.[channel];
 }
 
-export function setOwner(config: Config, channel: 'feishu' | 'acp', userId: string, configPath: string = resolvePaths().config): void {
+export function setOwner(config: Config, channel: 'feishu' | 'aun', userId: string, configPath: string = resolvePaths().config): void {
   if (!config.owners) {
     config.owners = {};
   }
@@ -76,7 +76,7 @@ export function setOwner(config: Config, channel: 'feishu' | 'acp', userId: stri
   saveConfig(config, configPath);
 }
 
-export function isOwner(config: Config, channel: 'feishu' | 'acp', userId: string): boolean {
+export function isOwner(config: Config, channel: 'feishu' | 'aun', userId: string): boolean {
   return config.owners?.[channel] === userId;
 }
 
@@ -93,8 +93,8 @@ function validateConfig(config: any): asserts config is Config {
     }
   }
 
-  if (!config.acp?.domain) throw new Error('Missing acp.domain');
-  if (!config.acp?.agentName) throw new Error('Missing acp.agentName');
+  if (!config.aun?.domain) throw new Error('Missing aun.domain');
+  if (!config.aun?.agentName) throw new Error('Missing aun.agentName');
   if (!config.projects?.defaultPath) throw new Error('Missing projects.defaultPath');
 }
 

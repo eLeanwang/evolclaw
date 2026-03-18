@@ -142,7 +142,7 @@
 
 5. ✅ 多聊天/多channel独立性
    - 每个聊天的缓存独立
-   - 不同channel（Feishu/ACP）独立
+   - 不同channel（Feishu/AUN）独立
    - 互不干扰
 
 ### 边界情况覆盖

@@ -25,7 +25,7 @@
 
 - ✅ 所有项目切换场景
 - ✅ 所有消息类型（文本、命令、文件）
-- ✅ 所有渠道（Feishu、ACP）
+- ✅ 所有渠道（Feishu、AUN）
 
 ## 根本原因
 
@@ -77,7 +77,7 @@
 
 ```typescript
 export interface Message {
-  channel: 'feishu' | 'acp';
+  channel: 'feishu' | 'aun';
   channelId: string;
   content: string;
   images?: Array<{ data: string; mimeType: string }>;
@@ -112,7 +112,7 @@ try {
 
 ```typescript
 async getOrCreateSessionWithoutActivating(
-  channel: 'feishu' | 'acp',
+  channel: 'feishu' | 'aun',
   channelId: string,
   projectPath: string
 ): Promise<Session> {

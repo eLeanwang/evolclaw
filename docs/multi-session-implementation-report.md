@@ -93,7 +93,7 @@ private initDatabase(): void {
 
 ```typescript
 async switchProject(
-  channel: 'feishu' | 'acp',
+  channel: 'feishu' | 'aun',
   channelId: string,
   newProjectPath: string
 ): Promise<Session> {
@@ -137,7 +137,7 @@ async switchProject(
 
 ```typescript
 async getOrCreateSession(
-  channel: 'feishu' | 'acp',
+  channel: 'feishu' | 'aun',
   channelId: string,
   defaultProjectPath: string
 ): Promise<Session> {
@@ -184,7 +184,7 @@ async getOrCreateSession(
 
 ```typescript
 async clearActiveSession(
-  channel: 'feishu' | 'acp',
+  channel: 'feishu' | 'aun',
   channelId: string
 ): Promise<void> {
   // 清除当前活跃会话的 Claude Session ID
@@ -207,7 +207,7 @@ async clearActiveSession(
 
 ```typescript
 async listSessions(
-  channel: 'feishu' | 'acp',
+  channel: 'feishu' | 'aun',
   channelId: string
 ): Promise<Session[]> {
   const rows = this.db.prepare(`
@@ -287,7 +287,7 @@ const lines = [
 ```typescript
 export interface Session {
   id: string;
-  channel: 'feishu' | 'acp';
+  channel: 'feishu' | 'aun';
   channelId: string;
   projectPath: string;
   claudeSessionId?: string;

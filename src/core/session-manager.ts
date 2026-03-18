@@ -146,7 +146,7 @@ export class SessionManager {
     `);
   }
 
-  async getOrCreateSession(channel: 'feishu' | 'acp', channelId: string, defaultProjectPath: string, name?: string): Promise<Session> {
+  async getOrCreateSession(channel: 'feishu' | 'aun', channelId: string, defaultProjectPath: string, name?: string): Promise<Session> {
     // 1. 查找该聊天的活跃会话
     const active = this.db.prepare(`
       SELECT * FROM sessions
@@ -271,7 +271,7 @@ export class SessionManager {
     this.db.prepare(`UPDATE sessions SET ${fields}, updated_at = ? WHERE id = ?`).run(...values, Date.now(), sessionId);
   }
 
-  async switchProject(channel: 'feishu' | 'acp', channelId: string, newProjectPath: string): Promise<Session> {
+  async switchProject(channel: 'feishu' | 'aun', channelId: string, newProjectPath: string): Promise<Session> {
     // 1. 取消当前活跃会话
     this.db.prepare(`
       UPDATE sessions SET is_active = 0, updated_at = ?
@@ -336,12 +336,12 @@ export class SessionManager {
     return session;
   }
 
-  async updateProjectPath(channel: 'feishu' | 'acp', channelId: string, projectPath: string): Promise<void> {
+  async updateProjectPath(channel: 'feishu' | 'aun', channelId: string, projectPath: string): Promise<void> {
     this.db.prepare('UPDATE sessions SET project_path = ?, updated_at = ? WHERE channel = ? AND channel_id = ?')
       .run(projectPath, Date.now(), channel, channelId);
   }
 
-  async updateClaudeSessionId(channel: 'feishu' | 'acp', channelId: string, claudeSessionId: string): Promise<void> {
+  async updateClaudeSessionId(channel: 'feishu' | 'aun', channelId: string, claudeSessionId: string): Promise<void> {
     // 只更新当前活跃会话的 Claude Session ID
     this.db.prepare(`
       UPDATE sessions
@@ -360,7 +360,7 @@ export class SessionManager {
     `).run(claudeSessionId, Date.now(), sessionId);
   }
 
-  async clearActiveSession(channel: 'feishu' | 'acp', channelId: string): Promise<void> {
+  async clearActiveSession(channel: 'feishu' | 'aun', channelId: string): Promise<void> {
     // 清除当前活跃会话的 Claude Session ID
     this.db.prepare(`
       UPDATE sessions
@@ -369,12 +369,12 @@ export class SessionManager {
     `).run(Date.now(), channel, channelId);
   }
 
-  async clearClaudeSessionId(channel: 'feishu' | 'acp', channelId: string): Promise<void> {
+  async clearClaudeSessionId(channel: 'feishu' | 'aun', channelId: string): Promise<void> {
     // 向后兼容的别名
     await this.clearActiveSession(channel, channelId);
   }
 
-  async getSession(channel: 'feishu' | 'acp', channelId: string): Promise<Session | undefined> {
+  async getSession(channel: 'feishu' | 'aun', channelId: string): Promise<Session | undefined> {
     // 获取活跃会话
     const row = this.db.prepare(`
       SELECT * FROM sessions
@@ -399,11 +399,11 @@ export class SessionManager {
   /**
    * 获取活跃会话（getSession 的别名，语义更清晰）
    */
-  async getActiveSession(channel: 'feishu' | 'acp', channelId: string): Promise<Session | undefined> {
+  async getActiveSession(channel: 'feishu' | 'aun', channelId: string): Promise<Session | undefined> {
     return this.getSession(channel, channelId);
   }
 
-  async listSessions(channel: 'feishu' | 'acp', channelId: string): Promise<Session[]> {
+  async listSessions(channel: 'feishu' | 'aun', channelId: string): Promise<Session[]> {
     // 列出该聊天的所有会话
     const rows = this.db.prepare(`
       SELECT * FROM sessions
@@ -424,7 +424,7 @@ export class SessionManager {
     }));
   }
 
-  async getSessionByProjectPath(channel: 'feishu' | 'acp', channelId: string, projectPath: string): Promise<Session | undefined> {
+  async getSessionByProjectPath(channel: 'feishu' | 'aun', channelId: string, projectPath: string): Promise<Session | undefined> {
     const row = this.db.prepare(`
       SELECT * FROM sessions
       WHERE channel = ? AND channel_id = ? AND project_path = ?
@@ -445,7 +445,7 @@ export class SessionManager {
     };
   }
 
-  async getSessionByName(channel: 'feishu' | 'acp', channelId: string, name: string): Promise<Session | undefined> {
+  async getSessionByName(channel: 'feishu' | 'aun', channelId: string, name: string): Promise<Session | undefined> {
     const row = this.db.prepare(`
       SELECT * FROM sessions
       WHERE channel = ? AND channel_id = ? AND name = ?
@@ -466,7 +466,7 @@ export class SessionManager {
     };
   }
 
-  async switchToSession(channel: 'feishu' | 'acp', channelId: string, targetSessionId: string): Promise<Session | null> {
+  async switchToSession(channel: 'feishu' | 'aun', channelId: string, targetSessionId: string): Promise<Session | null> {
     // 验证目标会话存在
     const target = this.db.prepare(`
       SELECT * FROM sessions WHERE id = ? AND channel = ? AND channel_id = ?
@@ -507,7 +507,7 @@ export class SessionManager {
     return result.changes > 0;
   }
 
-  async createNewSession(channel: 'feishu' | 'acp', channelId: string, projectPath: string, name?: string): Promise<Session> {
+  async createNewSession(channel: 'feishu' | 'aun', channelId: string, projectPath: string, name?: string): Promise<Session> {
     // 取消当前活跃会话
     this.db.prepare(`
       UPDATE sessions SET is_active = 0, updated_at = ?
@@ -700,7 +700,7 @@ export class SessionManager {
     return this.getSessionFileInfo(projectPath, claudeSessionId).turns;
   }
 
-  async getSessionByUuidPrefix(channel: 'feishu' | 'acp', channelId: string, uuidPrefix: string): Promise<Session | undefined> {
+  async getSessionByUuidPrefix(channel: 'feishu' | 'aun', channelId: string, uuidPrefix: string): Promise<Session | undefined> {
     const rows = this.db.prepare(`
       SELECT * FROM sessions
       WHERE channel = ? AND channel_id = ? AND claude_session_id LIKE ?
@@ -725,7 +725,7 @@ export class SessionManager {
     };
   }
 
-  async importCliSession(channel: 'feishu' | 'acp', channelId: string, projectPath: string, claudeSessionId: string): Promise<Session> {
+  async importCliSession(channel: 'feishu' | 'aun', channelId: string, projectPath: string, claudeSessionId: string): Promise<Session> {
     // 检查是否已存在相同项目路径的会话
     const existingByPath = this.db.prepare(`
       SELECT * FROM sessions

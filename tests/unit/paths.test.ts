@@ -82,9 +82,9 @@ describe('paths', () => {
       const p = resolvePaths();
       expect(p.root).toBe('/tmp/test-evolclaw');
       expect(p.config).toBe('/tmp/test-evolclaw/data/evolclaw.json');
-      expect(p.configSample).toBe('/tmp/test-evolclaw/data/config.sample.json');
+      expect(p.configSample).toBe('/tmp/test-evolclaw/data/evolclaw.sample.json');
       expect(p.db).toBe('/tmp/test-evolclaw/data/sessions.db');
-      expect(p.pid).toBe('/tmp/test-evolclaw/data/evolclaw.pid');
+      expect(p.pid).toBe('/tmp/test-evolclaw/logs/evolclaw.pid');
       expect(p.dataDir).toBe('/tmp/test-evolclaw/data');
       expect(p.logs).toBe('/tmp/test-evolclaw/logs');
       expect(p.lineStats).toBe('/tmp/test-evolclaw/logs/line-stats.log');

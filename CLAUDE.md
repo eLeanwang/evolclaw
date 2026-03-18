@@ -44,7 +44,7 @@ npm run test:hooks
 
 ### Configuration
 - Config file: `{EVOLCLAW_HOME}/data/config.json` (default: `~/.evolclaw/data/config.json`)
-- Required fields: `acp.domain`, `acp.agentName`, `projects.defaultPath`
+- Required fields: `aun.domain`, `aun.agentName`, `projects.defaultPath`
 - `anthropic` section is entirely optional — auto-inherited from CLI config:
   ```
   token:   config.anthropic.apiKey  → env.ANTHROPIC_AUTH_TOKEN → ~/.claude/settings.json env.ANTHROPIC_AUTH_TOKEN
@@ -148,7 +148,7 @@ MessageProcessor.processMessage
 
 **MessageProcessor** (`src/core/message-processor.ts`) is the central event processing engine:
 - Handles all channel messages through a single code path
-- Eliminates ~250 lines of duplicate code between Feishu and ACP handlers
+- Eliminates ~250 lines of duplicate code between Feishu and AUN handlers
 - Supports any tool type (MCP, Skill, Agent, built-in tools) via generic description extraction
 - Integrates StreamFlusher for batched tool activity display
 

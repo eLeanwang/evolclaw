@@ -11,7 +11,7 @@ tests/
 │   └── hook-collector.test.ts
 └── integration/             # 集成测试
     ├── feishu.test.ts
-    ├── acp.test.ts
+    ├── aun.test.ts
     └── e2e.test.ts
 ```
 
@@ -46,7 +46,7 @@ npm test -- --coverage
 ### 集成测试
 
 - **Feishu**: 连接、消息收发
-- **ACP**: 协议集成、消息路由
+- **AUN**: 协议集成、消息路由
 - **E2E**: 端到端流程
 
 ## 测试数据

@@ -24,7 +24,7 @@ async function testSessionPersistence() {
       // 格式: feishu-test-chat-123-1772985089750
       const parts = sessionId.split('-');
       if (parts.length >= 3) {
-        const channel = parts[0] as 'feishu' | 'acp';
+        const channel = parts[0] as 'feishu' | 'aun';
         // channelId 是中间部分（去掉 channel 和最后的时间戳）
         const channelId = parts.slice(1, -1).join('-');
         console.log(`   解析: channel=${channel}, channelId=${channelId}`);

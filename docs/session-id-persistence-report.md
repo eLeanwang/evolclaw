@@ -16,14 +16,14 @@
 
 #### updateClaudeSessionId()
 ```typescript
-async updateClaudeSessionId(channel: 'feishu' | 'acp', channelId: string, claudeSessionId: string): Promise<void>
+async updateClaudeSessionId(channel: 'feishu' | 'aun', channelId: string, claudeSessionId: string): Promise<void>
 ```
 - 更新数据库中的 `claude_session_id` 字段
 - 同时更新 `updated_at` 时间戳
 
 #### clearClaudeSessionId()
 ```typescript
-async clearClaudeSessionId(channel: 'feishu' | 'acp', channelId: string): Promise<void>
+async clearClaudeSessionId(channel: 'feishu' | 'aun', channelId: string): Promise<void>
 ```
 - 将 `claude_session_id` 设置为 NULL
 - 用于 `/new` 命令和项目切换
@@ -82,7 +82,7 @@ const agentRunner = new AgentRunner(
     // 从 sessionId 解析出 channel 和 channelId
     const parts = sessionId.split('-');
     if (parts.length >= 2) {
-      const channel = parts[0] as 'feishu' | 'acp';
+      const channel = parts[0] as 'feishu' | 'aun';
       const channelId = parts.slice(1, -1).join('-');
       await sessionManager.updateClaudeSessionId(channel, channelId, claudeSessionId);
     }

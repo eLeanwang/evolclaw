@@ -12,7 +12,7 @@ Error: Claude Code process exited with code 1
 
 ## 症状
 
-- 服务启动正常，Feishu 和 ACP 通道连接成功
+- 服务启动正常，Feishu 和 AUN 通道连接成功
 - 每次用户发送消息时，SDK 子进程立即崩溃
 - 错误发生在 `ProcessTransport.getProcessExitError`
 - 无详细错误堆栈，仅显示退出码 1

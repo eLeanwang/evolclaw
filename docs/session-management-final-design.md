@@ -38,7 +38,7 @@
 3. **实际实现方案**
    - **逻辑隔离**而非物理隔离
    - 所有会话文件存储在同一目录: `~/.claude/projects/{encoded-path}/`
-   - 通过数据库字段区分: `channel` (feishu/acp) 和 `channel_id` (ou_xxx/oc_xxx)
+   - 通过数据库字段区分: `channel` (feishu/aun) 和 `channel_id` (ou_xxx/oc_xxx)
 
 ### 2. CLI 会话自动恢复 (需求变更)
 
@@ -203,7 +203,7 @@ CREATE TABLE sessions (
 
 **解析逻辑**：
 1. 检查是否为纯数字 → 按序号切换
-2. 检查是否以 `feishu-` 或 `acp-` 开头 → 按会话 ID 切换
+2. 检查是否以 `feishu-` 或 `aun-` 开头 → 按会话 ID 切换
 3. 否则 → 报错
 
 **限制**：
@@ -394,7 +394,7 @@ arg.startsWith('/')  // 绝对路径
 **会话 ID 检测**：
 ```typescript
 arg.startsWith('feishu-') ||
-arg.startsWith('acp-')
+arg.startsWith('aun-')
 ```
 
 ### 6.3 状态检查

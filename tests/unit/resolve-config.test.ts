@@ -12,7 +12,7 @@ function makeConfig(anthropic?: Config['anthropic']): Config {
   return {
     anthropic,
     feishu: { appId: 'test', appSecret: 'test' },
-    acp: { domain: 'test', agentName: 'test' },
+    aun: { domain: 'test', agentName: 'test' },
     projects: { defaultPath: '/tmp', autoCreate: false },
   };
 }

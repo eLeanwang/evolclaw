@@ -36,7 +36,7 @@
 ```typescript
 async function handleProjectCommand(
   content: string,
-  channel: 'feishu' | 'acp',
+  channel: 'feishu' | 'aun',
   channelId: string,
   sessionManager: SessionManager,
   agentRunner: AgentRunner,
@@ -86,7 +86,7 @@ Claude会话: 334ad03b-5e60-4687-b846-c1e88b2e25a3
 ```
 
 **显示内容**：
-- 渠道类型（feishu/acp）
+- 渠道类型（feishu/aun）
 - 会话 ID
 - 当前项目路径
 - Claude session ID（如果有）
@@ -154,7 +154,7 @@ if (event.type === 'system' && event.subtype === 'compact_boundary') {
 
 **应用场景**：
 - 飞书渠道：立即发送通知消息
-- ACP 渠道：同样发送通知消息
+- AUN 渠道：同样发送通知消息
 
 ### 6. 用户体验优化
 

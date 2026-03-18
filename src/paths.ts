@@ -26,9 +26,9 @@ export function resolvePaths() {
   return {
     root,
     config: path.join(root, 'data', 'evolclaw.json'),
-    configSample: path.join(root, 'data', 'config.sample.json'),
+    configSample: path.join(root, 'data', 'evolclaw.sample.json'),
     db: path.join(root, 'data', 'sessions.db'),
-    pid: path.join(root, 'data', 'evolclaw.pid'),
+    pid: path.join(root, 'logs', 'evolclaw.pid'),
     dataDir: path.join(root, 'data'),
     logs: path.join(root, 'logs'),
     lineStats: path.join(root, 'logs', 'line-stats.log'),

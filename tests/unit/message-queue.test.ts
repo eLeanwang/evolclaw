@@ -29,7 +29,7 @@ describe('MessageQueue', () => {
 
   it('should process different sessions in parallel', async () => {
     const msg1: Message = { channel: 'feishu', channelId: 'c1', content: '1', timestamp: Date.now() };
-    const msg2: Message = { channel: 'acp', channelId: 'c2', content: '2', timestamp: Date.now() };
+    const msg2: Message = { channel: 'aun', channelId: 'c2', content: '2', timestamp: Date.now() };
 
     await Promise.all([
       queue.enqueue('session1', msg1, '/test/project1'),

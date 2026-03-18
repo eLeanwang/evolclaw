@@ -1,6 +1,6 @@
 # 配置文件（包含敏感信息）
-data/config.json
-data/config.json.backup
+data/evolclaw.json
+data/evolclaw.json.backup
 
 # 数据库
 data/*.db
@@ -11,7 +11,6 @@ logs/
 data/*.log
 
 # 运行时文件
-data/*.pid
 data/restart-pending.json
 
 # Node.js

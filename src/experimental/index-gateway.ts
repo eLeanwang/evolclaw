@@ -1,7 +1,7 @@
 import { InstanceManager } from './gateway/instance-manager.js';
 import { FailureHandler } from './gateway/failure-handler.js';
 import { FeishuChannel } from '../channels/feishu.js';
-import { ACPChannel } from '../channels/acp.js';
+import { AUNChannel } from '../channels/aun.js';
 import { SessionManager } from '../core/session-manager.js';
 import { loadConfig, ensureDir } from '../config.js';
 import { logger } from '../utils/logger.js';
@@ -47,7 +47,7 @@ async function main() {
   const sessionManager = new SessionManager();
 
   // 消息处理函数
-  async function handleMessage(channel: 'feishu' | 'acp', channelId: string, content: string) {
+  async function handleMessage(channel: 'feishu' | 'aun', channelId: string, content: string) {
     const message = { channel, channelId, content, timestamp: Date.now() };
     // TODO: 旧版 API 已废弃，需要适配新的 SessionManager API
     const claudeSessionId = `${channel}-${channelId}`;
@@ -73,19 +73,19 @@ async function main() {
     }
   });
 
-  // ACP 渠道
-  const acp = new ACPChannel({ domain: config.acp.domain, agentName: config.acp.agentName });
-  acp.onMessage(async (sessionId, content) => {
+  // AUN 渠道
+  const aun = new AUNChannel({ domain: config.aun.domain, agentName: config.aun.agentName });
+  aun.onMessage(async (sessionId, content) => {
     try {
-      const response = await handleMessage('acp', sessionId, content);
-      await acp.sendMessage(sessionId, response);
+      const response = await handleMessage('aun', sessionId, content);
+      await aun.sendMessage(sessionId, response);
     } catch (error) {
-      logger.error('ACP message error:', error);
+      logger.error('AUN message error:', error);
     }
   });
 
   await feishu.connect();
-  await acp.connect();
+  await aun.connect();
 
   logger.info('EvolClaw Gateway started');
   logger.info(`- Max instances: ${instanceManager.getMetrics().total}`);
@@ -94,7 +94,7 @@ async function main() {
   process.on('SIGINT', async () => {
     logger.info('\nShutting down...');
     await feishu.disconnect();
-    await acp.disconnect();
+    await aun.disconnect();
     await instanceManager.shutdown();
     process.exit(0);
   });

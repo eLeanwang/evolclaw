@@ -402,7 +402,7 @@ describe('MessageQueue 项目路径检查', () => {
 
   it('应该处理不同channel的消息', async () => {
     const feishuKey = 'feishu-chat-1';
-    const acpKey = 'acp-session-1';
+    const aunKey = 'aun-session-1';
     const projectPath = '/test/project-a';
 
     await Promise.all([
@@ -412,8 +412,8 @@ describe('MessageQueue 项目路径检查', () => {
         projectPath
       ),
       queue.enqueue(
-        acpKey,
-        { channel: 'acp', channelId: 'session-1', content: 'ACP消息', timestamp: Date.now() },
+        aunKey,
+        { channel: 'aun', channelId: 'session-1', content: 'AUN消息', timestamp: Date.now() },
         projectPath
       )
     ]);
@@ -422,7 +422,7 @@ describe('MessageQueue 项目路径检查', () => {
 
     expect(processedMessages.length).toBe(2);
     expect(processedMessages.some(m => m.content === 'Feishu消息')).toBe(true);
-    expect(processedMessages.some(m => m.content === 'ACP消息')).toBe(true);
+    expect(processedMessages.some(m => m.content === 'AUN消息')).toBe(true);
   });
 
   it('应该处理消息处理时间很长的情况', async () => {

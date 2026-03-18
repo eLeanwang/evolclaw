@@ -11,7 +11,7 @@ export interface Config {
     appId: string;
     appSecret: string;
   };
-  acp: {
+  aun: {
     domain: string;
     agentName: string;
   };
@@ -24,19 +24,23 @@ export interface Config {
   timeout?: {
     idle?: number;  // 无输出超时(ms)，默认 120000
   };
-  healthCheck?: {
-    enabled?: boolean;              // 是否启用健康检查，默认 true
+  idleMonitor?: {
+    enabled?: boolean;              // 是否启用空闲监控，默认 true
     safeModeThreshold?: number;     // 连续错误几次进入安全模式，默认 3；设为 0 关闭 safe mode
+  };
+  sdk?: {
+    useSettingSources?: boolean;        // 使用 SDK 原生配置加载，默认 true
+    agentProgressSummaries?: boolean;   // 启用 AI 生成的子任务进度摘要，默认 true
   };
   owners?: {
     feishu?: string;
-    acp?: string;
+    aun?: string;
   };
 }
 
 export interface Session {
   id: string;
-  channel: 'feishu' | 'acp';
+  channel: 'feishu' | 'aun';
   channelId: string;
   projectPath: string;
   claudeSessionId?: string;
@@ -47,7 +51,7 @@ export interface Session {
 }
 
 export interface Message {
-  channel: 'feishu' | 'acp';
+  channel: 'feishu' | 'aun';
   channelId: string;
   content: string;
   images?: Array<{ data: string; mimeType: string }>;
@@ -70,13 +74,13 @@ export interface ChannelAdapter {
 export interface ChannelOptions {
   systemPromptAppend?: string;      // Feishu: [SEND_FILE:] 指令
   fileMarkerPattern?: RegExp;       // Feishu: /\[SEND_FILE:([^\]]+)\]/g
-  supportsImages?: boolean;         // Feishu: true, ACP: false
+  supportsImages?: boolean;         // Feishu: true, AUN: false
 }
 
 // 命令处理器类型
 export type CommandHandler = (
   content: string,
-  channel: 'feishu' | 'acp',
+  channel: 'feishu' | 'aun',
   channelId: string,
   userId?: string
 ) => Promise<string | null>;

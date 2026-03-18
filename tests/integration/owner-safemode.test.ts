@@ -80,10 +80,10 @@ function createMockAdapter(): ChannelAdapter & { sentMessages: string[] } {
 function createConfig(ownerUserId?: string): Config {
   return {
     feishu: { appId: '', appSecret: '' },
-    acp: { domain: '', agentName: '' },
+    aun: { domain: '', agentName: '' },
     projects: { defaultPath: '/tmp/test-project', autoCreate: false },
     timeout: { idle: 500 },
-    healthCheck: { enabled: true, safeModeThreshold: 3 },
+    idleMonitor: { enabled: true, safeModeThreshold: 3 },
     ...(ownerUserId ? { owners: { feishu: ownerUserId } } : {}),
   };
 }

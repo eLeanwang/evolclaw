@@ -1,4 +1,4 @@
-import { FeishuChannel, ACPChannel } from '../src/channels/index.js';
+import { FeishuChannel, AUNChannel } from '../src/channels/index.js';
 
 async function testFeishu() {
   console.log('Testing FeishuChannel...');
@@ -14,10 +14,10 @@ async function testFeishu() {
   console.log('✓ FeishuChannel interface OK');
 }
 
-async function testACP() {
-  console.log('Testing ACPChannel...');
-  const channel = new ACPChannel({
-    domain: 'test.acp',
+async function testAUN() {
+  console.log('Testing AUNChannel...');
+  const channel = new AUNChannel({
+    domain: 'test.aun',
     agentName: 'test-agent'
   });
 
@@ -27,12 +27,12 @@ async function testACP() {
   });
   await channel.disconnect();
 
-  console.log('✓ ACPChannel interface OK');
+  console.log('✓ AUNChannel interface OK');
 }
 
 async function main() {
   await testFeishu();
-  await testACP();
+  await testAUN();
   console.log('\n✓ All channel tests passed');
 }
 

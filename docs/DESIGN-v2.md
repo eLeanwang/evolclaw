@@ -11,7 +11,7 @@ EvolClaw 是一个**轻量化的 AI Agent 网关系统**，定位于比 HappyCla
 **核心特点**：
 - **轻量化**：进程模式运行，无容器依赖，代码量控制在 ~1000 行
 - **单用户**：专注个人使用场景，无需复杂的多用户管理
-- **双渠道**：支持飞书和 ACP 两个消息渠道
+- **双渠道**：支持飞书和 AUN 两个消息渠道
 - **Agent 友好**：基于 Claude Agent SDK，会话日志对 Agent 透明可读
 - **生产级可靠**：复用 HappyClaw 的成熟组件，完整的状态监控机制
 
@@ -35,7 +35,7 @@ EvolClaw 是一个**轻量化的 AI Agent 网关系统**，定位于比 HappyCla
 | **定位** | 轻量化网关 | 自托管 AI Agent | 多渠道 AI 网关 |
 | **用户模式** | 单用户 | 多用户 RBAC | 单用户/多账号 |
 | **运行模式** | 进程 | Docker 容器 | 单容器 |
-| **消息渠道** | 2 个（飞书、ACP） | 3 个（飞书、Telegram、Web） | 8+ 个 |
+| **消息渠道** | 2 个（飞书、AUN） | 3 个（飞书、Telegram、Web） | 8+ 个 |
 | **代码规模** | ~500 行 | 完整系统 | 完整系统 |
 | **适用场景** | 个人轻量部署 | 个人/团队协作 | Agent 网络 |
 
@@ -54,7 +54,7 @@ EvolClaw 是一个**轻量化的 AI Agent 网关系统**，定位于比 HappyCla
 ┌─────────────────────────────────────────────────────────┐
 │                      消息渠道层                           │
 │  ┌──────────────┐              ┌──────────────┐         │
-│  │ Feishu       │              │ ACP          │         │
+│  │ Feishu       │              │ AUN          │         │
 │  │ (HappyClaw)  │              │ (简化客户端)  │         │
 │  └──────┬───────┘              └──────┬───────┘         │
 └─────────┼──────────────────────────────┼─────────────────┘
@@ -112,9 +112,9 @@ EvolClaw 是一个**轻量化的 AI Agent 网关系统**，定位于比 HappyCla
   - 自动重连
   - 消息去重（LRU 1000 条，30min TTL）
   - Backfill 机制（重连后回填 5 分钟消息）
-- `ACPChannel`：简化的 ACP 客户端
+- `AUNChannel`：简化的 AUN 客户端
   - 基于 `agentcp_node` 库
-  - 接收来自 ACP 网络的消息
+  - 接收来自 AUN 网络的消息
 
 **消息队列层**：
 - `MessageQueue`：会话级消息队列
@@ -182,7 +182,7 @@ evolclaw/
 ├── src/
 │   ├── channels/
 │   │   ├── feishu.ts          # 飞书渠道（复用 HappyClaw）
-│   │   └── acp.ts             # ACP 渠道
+│   │   └── aun.ts             # AUN 渠道
 │   ├── core/
 │   │   ├── session-manager.ts # 会话管理
 │   │   ├── message-queue.ts   # 消息队列
@@ -309,10 +309,10 @@ interface StopHookInput {
 - SDK 自动处理：token 获取、刷新、WebSocket 认证
 - 配置：`{ "appId": "cli_xxx", "appSecret": "xxx" }`
 
-**ACP**：
+**AUN**：
 - 认证方式：AID（Agent Identity）基于 X.509 数字证书
 - 实现：通过 `agentcp_node` 处理
-- 证书管理：从 CA 服务器获取，存储在 `.acp-storage/AIDs/{aid}/`
+- 证书管理：从 CA 服务器获取，存储在 `.aun-storage/AIDs/{aid}/`
 - 配置：`{ "domain": "aid.pub", "agentName": "evolclaw" }`
 
 **流式返回支持**：
@@ -334,7 +334,7 @@ Claude SDK 流式输出 → 累积完整响应 → 一次性发送到渠道
 
 **限制原因**：
 - 飞书不支持流式消息，必须累积完整响应
-- 为保持双渠道一致性，ACP 也采用相同策略
+- 为保持双渠道一致性，AUN 也采用相同策略
 - 保持轻量化实现（无需实现复杂的流式协议适配）
 
 **代价**：
@@ -356,7 +356,7 @@ Claude SDK 流式输出 → 累积完整响应 → 一次性发送到渠道
 ### 4.1 消息处理流程（Hook 驱动监控）
 
 ```
-1. 飞书/ACP 消息到达
+1. 飞书/AUN 消息到达
    ↓
 2. MessageQueue 入队（会话级）
    ↓
@@ -404,7 +404,7 @@ Claude SDK 流式输出 → 累积完整响应 → 一次性发送到渠道
 飞书群 A → feishu-shared → Claude Session 001
 飞书群 B → feishu-shared → Claude Session 001
 飞书群 C → feishu-shared → Claude Session 001
-ACP 会话 → acp-shared   → Claude Session 002
+AUN 会话 → aun-shared   → Claude Session 002
 ```
 
 **Isolated 模式映射**：
@@ -412,7 +412,7 @@ ACP 会话 → acp-shared   → Claude Session 002
 飞书群 A → feishu-chatA-xxx → Claude Session 001
 飞书群 B → feishu-chatB-xxx → Claude Session 002
 飞书群 C → feishu-chatC-xxx → Claude Session 003
-ACP 会话 → acp-chatX-xxx   → Claude Session 004
+AUN 会话 → aun-chatX-xxx   → Claude Session 004
 ```
 
 ### 4.3 Hook 同步流程（已验证）
@@ -482,16 +482,16 @@ MessageSync.syncAllIfNeeded()
 - Notification Hook 能推送通知到前端
 - 所有异常场景有完整覆盖
 
-**阶段 3：ACP 集成（2-3 天）**
+**阶段 3：AUN 集成（2-3 天）**
 
 任务：
 1. 集成 `agentcp_node` 库
-2. 实现 ACP 消息接收
-3. 测试 ACP 连接稳定性
+2. 实现 AUN 消息接收
+3. 测试 AUN 连接稳定性
 
 验收标准：
-- ACP 连接正常建立
-- 可以接收 ACP 消息
+- AUN 连接正常建立
+- 可以接收 AUN 消息
 - 消息正确路由到 Claude Agent
 
 **阶段 4：测试与优化（3-4 天）**
@@ -526,7 +526,7 @@ MessageSync.syncAllIfNeeded()
 - 会话管理：~100 行
 - 消息同步：~120 行（增加定期同步）
 - 实例管理：~80 行
-- ACP 集成：~100 行
+- AUN 集成：~100 行
 - **小计**：~500 行
 
 **状态监控模块（Hook 驱动）**：
@@ -549,7 +549,7 @@ MessageSync.syncAllIfNeeded()
     "appId": "cli_xxx",
     "appSecret": "xxx"
   },
-  "acp": {
+  "aun": {
     "domain": "aid.pub",
     "agentName": "evolclaw"
   },

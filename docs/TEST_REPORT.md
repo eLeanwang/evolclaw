@@ -88,8 +88,8 @@
   - ✅ 消息接收
   - ✅ 错误处理
 
-#### ACP 集成
-- **文件**: `tests/integration/acp.test.ts`
+#### AUN 集成
+- **文件**: `tests/integration/aun.test.ts`
 - **状态**: ✅ 全部通过 (9/9)
 - **测试项**:
   - ✅ 连接/断开
@@ -180,7 +180,7 @@
 - ✅ Instance Manager 功能完整
 - ✅ Claude Instance 集成正常
 - ✅ Feishu 通道正常
-- ✅ ACP 通道正常
+- ✅ AUN 通道正常
 
 ### 兼容性
 - ✅ 所有现有测试通过
@@ -210,7 +210,7 @@
 
 ### 集成测试覆盖
 - Feishu 集成: 完整覆盖
-- ACP 集成: 完整覆盖
+- AUN 集成: 完整覆盖
 - 消息流程: 完整覆盖
 - 监控系统: 完整覆盖
 

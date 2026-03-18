@@ -75,7 +75,7 @@ if (command === '/switch') {
   }
 
   // 2. 检查是否为会话ID
-  if (arg.startsWith('feishu-') || arg.startsWith('acp-')) {
+  if (arg.startsWith('feishu-') || arg.startsWith('aun-')) {
     const targetSession = await sessionManager.getSessionById(arg);
 
     if (!targetSession) {

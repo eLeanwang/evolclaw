@@ -251,7 +251,7 @@ async function cmdInit() {
     return;
   }
 
-  const sampleSrc = path.join(getPackageRoot(), 'data', 'config.sample.json');
+  const sampleSrc = path.join(getPackageRoot(), 'data', 'evolclaw.sample.json');
   if (!fs.existsSync(sampleSrc)) {
     console.log(`❌ 找不到示例配置: ${sampleSrc}`);
     return;

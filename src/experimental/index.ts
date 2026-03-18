@@ -6,4 +6,4 @@ export interface MessageChannel {
 }
 
 export { FeishuChannel, type FeishuConfig } from '../channels/feishu.js';
-export { ACPChannel, type ACPConfig } from '../channels/acp.js';
+export { AUNChannel, type AUNConfig } from '../channels/aun.js';

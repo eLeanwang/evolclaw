@@ -1,5 +1,6 @@
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { ensureDir } from '../config.js';
+import { Config } from '../types.js';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
@@ -11,6 +12,7 @@ export class AgentRunner {
   private apiKey: string;
   private model: string;
   private baseUrl?: string;
+  private config?: Config;
   private activeSessions: Map<string, string> = new Map();
   private activeStreams = new Map<string, AsyncIterable<any>>();
   private onSessionIdUpdate?: (sessionId: string, claudeSessionId: string) => void;
@@ -20,11 +22,13 @@ export class AgentRunner {
     apiKey: string,
     model?: string,
     onSessionIdUpdate?: (sessionId: string, claudeSessionId: string) => void,
-    baseUrl?: string
+    baseUrl?: string,
+    config?: Config
   ) {
     this.apiKey = apiKey;
     this.model = model || 'sonnet';
     this.baseUrl = baseUrl;
+    this.config = config;
     this.onSessionIdUpdate = onSessionIdUpdate;
   }
 
@@ -68,20 +72,20 @@ export class AgentRunner {
       let isValid = false;
       if (fs.existsSync(sessionFile)) {
         try {
-          // 验证文件包含真正的会话数据（不只是 queue-operation）
           const content = fs.readFileSync(sessionFile, 'utf-8');
           const lines = content.split('\n').filter(l => l.trim());
-          // 至少需要2行：queue-operation + 实际会话数据
-          if (lines.length >= 2) {
-            const sessionData = JSON.parse(lines[1]);
-            // 真正的会话数据包含 sessionId 和 version 字段
-            if (sessionData.sessionId && sessionData.version) {
-              isValid = true;
-            } else {
-              logger.warn(`[AgentRunner] Session file missing session data: ${sessionFile}`);
-            }
-          } else {
-            logger.warn(`[AgentRunner] Session file incomplete (only ${lines.length} line(s)): ${sessionFile}`);
+          // 查找第一个包含 sessionId 和 version 的行（跳过 queue-operation）
+          for (const line of lines) {
+            try {
+              const data = JSON.parse(line);
+              if (data.sessionId && data.version) {
+                isValid = true;
+                break;
+              }
+            } catch {}
+          }
+          if (!isValid) {
+            logger.warn(`[AgentRunner] Session file missing session data: ${sessionFile}`);
           }
         } catch (error) {
           logger.warn(`[AgentRunner] Session file corrupted: ${sessionFile}`);
@@ -119,79 +123,101 @@ export class AgentRunner {
       return {};
     };
 
-    // 读取全局 CLAUDE.md 指令
-    const globalClaudeMd = (() => {
-      try {
-        const globalPath = path.join(os.homedir(), '.claude', 'CLAUDE.md');
-        if (fs.existsSync(globalPath)) {
-          return fs.readFileSync(globalPath, 'utf-8').trim();
+    const useSettingSources = this.config?.sdk?.useSettingSources !== false;
+    const enableSummaries = this.config?.sdk?.agentProgressSummaries !== false;
+
+    // 公共 options（新旧模式共用）
+    const commonOptions = {
+      cwd: projectPath,
+      model: this.model,
+      canUseTool,
+      permissionMode: 'default' as const,
+      persistSession: true,
+      hooks: {
+        PreCompact: [{ matcher: '.*', hooks: [preCompactHook] }],
+        PreToolUse: [{ matcher: '.*', hooks: [preToolUseHook] }]
+      },
+      ...(enableSummaries ? { agentProgressSummaries: true } : {}),
+      stderr: (msg: string) => {
+        if (msg.includes('[ERROR]') || msg.includes('[WARN]') || msg.includes('Stream started')) {
+          logger.info(`[Claude-stderr] ${msg.trim()}`);
+        } else {
+          logger.debug(`[Claude-stderr] ${msg.trim()}`);
         }
-      } catch {}
-      return '';
-    })();
-
-    // 读取项目级 CLAUDE.md（按优先级拼接）
-    const projectClaudeMds = [
-      path.join(projectPath, 'CLAUDE.md'),
-      path.join(projectPath, '.claude', 'CLAUDE.md'),
-    ].map(p => {
-      try { return fs.existsSync(p) ? fs.readFileSync(p, 'utf-8').trim() : ''; } catch { return ''; }
-    }).filter(Boolean);
-
-    // 读取全局 MCP 服务器配置
-    const globalMcpServers = (() => {
-      try {
-        const mcpPath = path.join(os.homedir(), '.claude', 'mcp.json');
-        if (fs.existsSync(mcpPath)) {
-          const config = JSON.parse(fs.readFileSync(mcpPath, 'utf-8'));
-          return config.mcpServers || {};
-        }
-      } catch {}
-      return {};
-    })();
-
-    // 合并指令：项目 CLAUDE.md → 项目 .claude/CLAUDE.md → 全局 CLAUDE.md → channel 级别
-    const fullAppend = [...projectClaudeMds, globalClaudeMd, systemPromptAppend].filter(Boolean).join('\n\n');
+      },
+      env: {
+        ...process.env,
+        ANTHROPIC_AUTH_TOKEN: this.apiKey,
+        PATH: process.env.PATH,
+        DISABLE_AUTOUPDATER: '1',
+        ...(this.baseUrl ? { ANTHROPIC_BASE_URL: this.baseUrl } : {})
+      }
+    };
 
     const createQuery = (promptInput: string | MessageStream, resumeSessionId?: string) => {
-      return query({
-        prompt: promptInput,
-        options: {
-          cwd: projectPath,
-          model: this.model,
-          canUseTool,
-          permissionMode: 'default',
-          persistSession: true,
-          hooks: {
-            PreCompact: [{ matcher: '.*', hooks: [preCompactHook] }],
-            PreToolUse: [{ matcher: '.*', hooks: [preToolUseHook] }]
-          },
-          ...(resumeSessionId ? { resume: resumeSessionId } : {}),
-          ...(Object.keys(globalMcpServers).length > 0 ? { mcpServers: globalMcpServers } : {}),
-          ...(fullAppend ? {
+      if (useSettingSources) {
+        // 新方式：SDK 自动加载 CLAUDE.md 和 MCP 配置
+        return query({
+          prompt: promptInput,
+          options: {
+            ...commonOptions,
+            settingSources: ['project', 'user'],
             systemPrompt: {
               type: 'preset' as const,
               preset: 'claude_code' as const,
-              append: fullAppend
-            }
-          } : {}),
-          stderr: (msg: string) => {
-            // 捕获 Claude 子进程的 stderr 输出
-            if (msg.includes('[ERROR]') || msg.includes('[WARN]') || msg.includes('Stream started')) {
-              logger.info(`[Claude-stderr] ${msg.trim()}`);
-            } else {
-              logger.debug(`[Claude-stderr] ${msg.trim()}`);
-            }
-          },
-          env: {
-            ...process.env,
-            ANTHROPIC_AUTH_TOKEN: this.apiKey,
-            PATH: process.env.PATH,
-            DISABLE_AUTOUPDATER: '1',
-            ...(this.baseUrl ? { ANTHROPIC_BASE_URL: this.baseUrl } : {})
+              ...(systemPromptAppend ? { append: systemPromptAppend } : {})
+            },
+            ...(resumeSessionId ? { resume: resumeSessionId } : {}),
           }
-        }
-      });
+        });
+      } else {
+        // 旧方式：手动加载 CLAUDE.md 和 MCP 配置（保留用于回滚）
+        const globalClaudeMd = (() => {
+          try {
+            const globalPath = path.join(os.homedir(), '.claude', 'CLAUDE.md');
+            if (fs.existsSync(globalPath)) {
+              return fs.readFileSync(globalPath, 'utf-8').trim();
+            }
+          } catch {}
+          return '';
+        })();
+
+        const projectClaudeMds = [
+          path.join(projectPath, 'CLAUDE.md'),
+          path.join(projectPath, '.claude', 'CLAUDE.md'),
+        ].map(p => {
+          try { return fs.existsSync(p) ? fs.readFileSync(p, 'utf-8').trim() : ''; } catch { return ''; }
+        }).filter(Boolean);
+
+        const globalMcpServers = (() => {
+          try {
+            const mcpPath = path.join(os.homedir(), '.claude', 'mcp.json');
+            if (fs.existsSync(mcpPath)) {
+              const config = JSON.parse(fs.readFileSync(mcpPath, 'utf-8'));
+              return config.mcpServers || {};
+            }
+          } catch {}
+          return {};
+        })();
+
+        const fullAppend = [...projectClaudeMds, globalClaudeMd, systemPromptAppend].filter(Boolean).join('\n\n');
+
+        return query({
+          prompt: promptInput,
+          options: {
+            ...commonOptions,
+            ...(resumeSessionId ? { resume: resumeSessionId } : {}),
+            ...(Object.keys(globalMcpServers).length > 0 ? { mcpServers: globalMcpServers } : {}),
+            ...(fullAppend ? {
+              systemPrompt: {
+                type: 'preset' as const,
+                preset: 'claude_code' as const,
+                append: fullAppend
+              }
+            } : {}),
+          }
+        });
+      }
     };
 
     let lastError: any;

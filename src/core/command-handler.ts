@@ -107,7 +107,7 @@ export class CommandHandler {
    */
   async handle(
     content: string,
-    channel: 'feishu' | 'acp',
+    channel: 'feishu' | 'aun',
     channelId: string,
     sendMessage?: (channelId: string, text: string) => Promise<void>,
     userId?: string,

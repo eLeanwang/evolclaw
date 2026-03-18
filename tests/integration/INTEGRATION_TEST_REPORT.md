@@ -9,7 +9,7 @@
 | 测试套件 | 测试用例数 | 通过 | 失败 | 耗时 |
 |---------|-----------|------|------|------|
 | Feishu Channel | 12 | 12 | 0 | 4ms |
-| ACP Channel | 10 | 10 | 0 | 3ms |
+| AUN Channel | 10 | 10 | 0 | 3ms |
 | Message Flow | 12 | 12 | 0 | 5ms |
 | Monitoring | 10 | 10 | 0 | 4ms |
 | End-to-End | 6 | 6 | 0 | 5ms |

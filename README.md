@@ -1,14 +1,14 @@
 # EvolClaw
 
-轻量级多终端接力开发工具，支持飞书和 ACP 双渠道接入，基于 Claude Agent SDK 构建。
+轻量级多终端接力开发工具，支持飞书和 AUN 双渠道接入，基于 Claude Agent SDK 构建。
 
 ## 核心特性
 
 - 🔄 **多终端接力**：跨终端共享会话、环境、工具、skills，无缝切换开发体验
 - 🚀 **轻量化设计**：进程模式运行，无容器依赖
-- 🎯 **直接集成**：基于 Claude Agent SDK，无需 ACP 协议转换层
+- 🎯 **直接集成**：基于 Claude Agent SDK，无需 AUN 协议转换层
 - 📊 **统一消息处理**：Channel Adapter 模式，新增渠道只需 ~15 行代码
-- 🌐 **双渠道接入**：飞书 WebSocket + ACP 协议
+- 🌐 **双渠道接入**：飞书 WebSocket + AUN 协议
 - 📁 **多项目支持**：每个项目独立会话，支持动态切换
 - 💾 **会话持久化**：SQLite + JSONL 双重保障，服务重启不丢失会话
 - ⚡ **任务中断**：新消息立即中断当前任务，响应更快
@@ -39,7 +39,7 @@ npm install
     "appId": "cli_xxx",
     "appSecret": "xxx"
   },
-  "acp": {
+  "aun": {
     "domain": "aid.pub",
     "agentName": "evolclaw"
   },
@@ -92,21 +92,21 @@ EvolClaw 是一个**轻量级多终端接力开发工具**，基于 Claude Agent
 evolclaw → Claude Agent SDK → Claude API
 ```
 
-与 ACPX 等基于 ACP 协议的工具不同，evolclaw 直接使用 Claude Agent SDK，架构更简洁：
-- **无协议转换**：直接调用 Claude API，无需 ACP 协议层
-- **无外部依赖**：不依赖其他 CLI 工具的 ACP 支持
+与 AUNX 等基于 AUN 协议的工具不同，evolclaw 直接使用 Claude Agent SDK，架构更简洁：
+- **无协议转换**：直接调用 Claude API，无需 AUN 协议层
+- **无外部依赖**：不依赖其他 CLI 工具的 AUN 支持
 - **完全自主**：可自定义所有功能、工具和会话管理
 - **专注场景**：针对多终端接力开发优化
 
 ### 与其他项目对比
 
-| 特性 | EvolClaw | ACPX | HappyClaw |
+| 特性 | EvolClaw | AUNX | HappyClaw |
 |------|----------|------|-----------|
 | **定位** | 多终端接力开发 | 代理编排工具 | 自托管 AI Agent |
-| **技术栈** | Claude Agent SDK | ACP 协议客户端 | 完整系统 |
+| **技术栈** | Claude Agent SDK | AUN 协议客户端 | 完整系统 |
 | **架构** | SDK → API | 管道 → CLI → API | Docker 容器 |
-| **依赖** | 无外部依赖 | 需 CLI 支持 ACP | 容器环境 |
-| **消息渠道** | 2 个（飞书、ACP） | 编排多个 Agent | 3 个（飞书、Telegram、Web） |
+| **依赖** | 无外部依赖 | 需 CLI 支持 AUN | 容器环境 |
+| **消息渠道** | 2 个（飞书、AUN） | 编排多个 Agent | 3 个（飞书、Telegram、Web） |
 | **代码规模** | ~1500 行 | 协议客户端 | 完整系统 |
 | **适用场景** | 个人多终端开发 | Agent 间通信 | 个人/团队协作 |
 
@@ -118,7 +118,7 @@ evolclaw → Claude Agent SDK → Claude API
 
 ### 核心组件
 
-1. **消息渠道层** (`src/channels/`) - Feishu WebSocket + ACP 协议
+1. **消息渠道层** (`src/channels/`) - Feishu WebSocket + AUN 协议
 2. **消息队列层** (`src/core/message-queue.ts`) - 会话级串行处理 + 中断支持
 3. **命令处理层** (`src/core/command-handler.ts`) - 斜杠命令处理（CommandHandler 类）
 4. **消息处理层** (`src/core/message-processor.ts`) - 统一事件处理引擎
@@ -184,7 +184,7 @@ evolclaw/
 │   │   └── message-cache.ts         # 消息缓存
 │   ├── channels/
 │   │   ├── feishu.ts               # 飞书 WebSocket 渠道
-│   │   └── acp.ts                  # ACP 协议渠道
+│   │   └── aun.ts                  # AUN 协议渠道
 │   ├── utils/                      # 工具函数
 │   ├── types.ts                    # 类型定义
 │   ├── config.ts                   # 配置加载

@@ -4,7 +4,7 @@ import { AgentRunner } from './agent-runner.js';
 import { SessionManager } from './session-manager.js';
 import { StreamFlusher } from '../utils/stream-flusher.js';
 import { MessageCache } from './message-cache.js';
-import { IdleHealthTracker } from '../utils/idle-health-tracker.js';
+import { StreamIdleMonitor } from '../utils/stream-idle-monitor.js';
 import { logger } from '../utils/logger.js';
 import { getErrorMessage, classifyError, ErrorType } from '../utils/error-utils.js';
 import { isOwner } from '../config.js';
@@ -53,31 +53,31 @@ export class MessageProcessor {
     const streamKey = `${message.channel}-${message.channelId}`;
     const channelInfo = this.channels.get(message.channel);
 
-    const healthEnabled = this.config.healthCheck?.enabled !== false;
-    const safeModeThreshold = this.config.healthCheck?.safeModeThreshold ?? 3;
+    const monitorEnabled = this.config.idleMonitor?.enabled !== false;
+    const safeModeThreshold = this.config.idleMonitor?.safeModeThreshold ?? 3;
     const isOwnerUser = isOwner(this.config, message.channel, message.userId || '');
-    // 非主人（群聊或单聊）：健康检查静默/简短
+    // 非主人（群聊或单聊）：空闲监控静默/简短
     const quietMode = isGroup || !isOwnerUser;
 
-    let tracker: IdleHealthTracker | undefined;
-    let healthInterval: ReturnType<typeof setInterval> | undefined;
+    let monitor: StreamIdleMonitor | undefined;
+    let monitorInterval: ReturnType<typeof setInterval> | undefined;
     let rejectFn: (err: Error) => void;
 
     const resetTimer = (eventType?: string, toolName?: string) => {
-      tracker?.recordEvent(eventType || 'unknown', toolName);
+      monitor?.recordEvent(eventType || 'unknown', toolName);
     };
 
     const timeoutPromise = new Promise<never>((_, reject) => {
       rejectFn = reject;
-      if (!healthEnabled) return;
+      if (!monitorEnabled) return;
 
-      tracker = new IdleHealthTracker(idleMs);
-      healthInterval = setInterval(async () => {
+      monitor = new StreamIdleMonitor(idleMs);
+      monitorInterval = setInterval(async () => {
         // Drain all pending levels in one tick
-        let result = tracker!.checkHealth();
+        let result = monitor!.check();
         while (result) {
           if (result.action === 'kill') {
-            logger.warn(`[MessageProcessor] Health check: kill after ${result.idleSec}s idle, stream: ${streamKey}`);
+            logger.warn(`[MessageProcessor] Idle monitor: kill after ${result.idleSec}s idle, stream: ${streamKey}`);
             // 先发送诊断信息，让用户知道发生了什么
             if (channelInfo) {
               try {
@@ -98,16 +98,16 @@ export class MessageProcessor {
             return;
           } else {
             // notify or warn: send diagnostic message, task continues（非主人时静默）
-            logger.info(`[MessageProcessor] Health check: ${result.action} after ${result.idleSec}s idle, stream: ${streamKey}`);
+            logger.info(`[MessageProcessor] Idle monitor: ${result.action} after ${result.idleSec}s idle, stream: ${streamKey}`);
             if (channelInfo && !quietMode) {
               try {
                 await channelInfo.adapter.sendText(message.channelId, result.message);
               } catch (e) {
-                logger.debug(`[MessageProcessor] Failed to send health check message:`, e);
+                logger.debug(`[MessageProcessor] Failed to send idle monitor message:`, e);
               }
             }
           }
-          result = tracker!.checkHealth();
+          result = monitor!.check();
         }
       }, 30000);
     });
@@ -125,7 +125,7 @@ export class MessageProcessor {
       if (channelInfo) {
         try {
           const session = await this.sessionManager.getOrCreateSession(
-            message.channel as 'feishu' | 'acp',
+            message.channel as 'feishu' | 'aun',
             message.channelId,
             this.config.projects?.defaultPath || process.cwd()
           );
@@ -142,14 +142,14 @@ export class MessageProcessor {
             const newCount = await this.sessionManager.recordError(session.id, errorType, error.message);
             await this.checkSafeMode(session.id, message.channelId, channelInfo.adapter, safeModeThreshold, newCount);
           }
-        } catch (healthError) {
-          logger.error('[MessageProcessor] Failed to update health status:', healthError);
+        } catch (statusError) {
+          logger.error('[MessageProcessor] Failed to update health status:', statusError);
         }
       }
 
       throw error;
     } finally {
-      if (healthInterval) clearInterval(healthInterval);
+      if (monitorInterval) clearInterval(monitorInterval);
     }
   }
 
@@ -499,6 +499,20 @@ export class MessageProcessor {
           if (!this.currentIsGroup) {
             const preTokens = event.compact_metadata?.pre_tokens || 0;
             flusher.addActivity(`💡 会话压缩完成，继续执行...（压缩前 tokens: ${preTokens}）`);
+          }
+        }
+
+        // 系统事件：task_progress（子任务进度）
+        if (event.type === 'system' && event.subtype === 'task_progress') {
+          const tools = event.tool_uses ?? 0;
+          const duration = event.duration_ms ? `${Math.round(event.duration_ms / 1000)}s` : '';
+          const summary = event.summary;
+          const stats = [tools > 0 ? `${tools}次工具调用` : '', duration].filter(Boolean).join(', ');
+
+          if (summary) {
+            flusher.addActivity(`⏳ 子任务: ${summary}${stats ? ` (${stats})` : ''}`);
+          } else if (stats) {
+            flusher.addActivity(`⏳ 子任务进行中: ${stats}`);
           }
         }
 

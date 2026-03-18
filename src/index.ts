@@ -2,7 +2,7 @@ import { loadConfig, ensureDir, ensureDataDirs, resolvePaths, resolveAnthropicCo
 import { SessionManager } from './core/session-manager.js';
 import { AgentRunner } from './core/agent-runner.js';
 import { FeishuChannel } from './channels/feishu.js';
-import { ACPChannel } from './channels/acp.js';
+import { AUNChannel } from './channels/aun.js';
 import { MessageProcessor } from './core/message-processor.js';
 import { MessageQueue } from './core/message-queue.js';
 import { MessageCache } from './core/message-cache.js';
@@ -86,8 +86,8 @@ async function main() {
       : path.resolve(process.cwd(), session.projectPath);
   });
 
-  // ACP 渠道
-  const acp = new ACPChannel({ domain: config.acp.domain, agentName: config.acp.agentName });
+  // AUN 渠道
+  const aun = new AUNChannel({ domain: config.aun.domain, agentName: config.aun.agentName });
 
   // 创建命令处理器
   const cmdHandler = new CommandHandler(sessionManager, agentRunner, config, messageCache);
@@ -119,7 +119,7 @@ async function main() {
 
         if (text) {
           if (channel === 'feishu') await feishu.sendMessage(id, text);
-          else if (channel === 'acp') await acp.sendMessage(id, text);
+          else if (channel === 'aun') await aun.sendMessage(id, text);
         }
       };
       return cmdHandler.handle(content, channel, channelId, sendFn, userId);
@@ -164,14 +164,14 @@ async function main() {
   processor.registerChannel(feishuAdapter, feishuOptions);
   cmdHandler.registerAdapter(feishuAdapter);
 
-  // 注册 ACP 适配器
-  const acpAdapter: ChannelAdapter = {
-    name: 'acp',
-    sendText: (channelId, text) => acp.sendMessage(channelId, text),
+  // 注册 AUN 适配器
+  const aunAdapter: ChannelAdapter = {
+    name: 'aun',
+    sendText: (channelId, text) => aun.sendMessage(channelId, text),
   };
 
-  processor.registerChannel(acpAdapter);
-  cmdHandler.registerAdapter(acpAdapter);
+  processor.registerChannel(aunAdapter);
+  cmdHandler.registerAdapter(aunAdapter);
 
   // Feishu 消息处理
   feishu.onMessage(async (chatId, content, images, userId, userName, messageId) => {
@@ -216,33 +216,33 @@ async function main() {
     );
   });
 
-  // ACP 消息处理
-  acp.onMessage(async (sessionId, content) => {
+  // AUN 消息处理
+  aun.onMessage(async (sessionId, content) => {
     content = content.trim();
 
     // 首次交互自动绑定主人
-    if (!config.owners?.acp) {
+    if (!config.owners?.aun) {
       const { setOwner } = await import('./config.js');
-      setOwner(config, 'acp', sessionId);
-      logger.info(`[Owner] Auto-bound ACP owner: ${sessionId}`);
+      setOwner(config, 'aun', sessionId);
+      logger.info(`[Owner] Auto-bound AUN owner: ${sessionId}`);
     }
 
     // 命令立即处理，不进入队列
     if (cmdHandler.isCommand(content)) {
-      const cmdResult = await cmdHandler.handle(content, 'acp', sessionId, undefined, sessionId);
+      const cmdResult = await cmdHandler.handle(content, 'aun', sessionId, undefined, sessionId);
       if (cmdResult) {
-        await acp.sendMessage(sessionId, cmdResult);
+        await aun.sendMessage(sessionId, cmdResult);
         return;
       }
     }
 
     // 获取当前项目路径
-    const session = await sessionManager.getOrCreateSession('acp', sessionId, config.projects?.defaultPath || process.cwd());
+    const session = await sessionManager.getOrCreateSession('aun', sessionId, config.projects?.defaultPath || process.cwd());
 
     // 普通消息进入队列
     await messageQueue.enqueue(
-      `acp-${sessionId}`,
-      { channel: 'acp', channelId: sessionId, content, timestamp: Date.now(), userId: sessionId },
+      `aun-${sessionId}`,
+      { channel: 'aun', channelId: sessionId, content, timestamp: Date.now(), userId: sessionId },
       session.projectPath
     );
   });
@@ -262,11 +262,11 @@ async function main() {
   }
 
   try {
-    await acp.connect();
-    logger.info('✓ ACP connected');
-    channels.push('ACP');
+    await aun.connect();
+    logger.info('✓ AUN connected');
+    channels.push('AUN');
   } catch (error) {
-    logger.warn('⚠ ACP connection failed (will continue without it)');
+    logger.warn('⚠ AUN connection failed (will continue without it)');
     if (error instanceof Error) {
       logger.warn(`  Reason: ${error.message}`);
     }
@@ -288,8 +288,8 @@ async function main() {
           try {
             if (channel === 'feishu') {
               await feishu.sendMessage(channelId, '✅ 服务重启成功！');
-            } else if (channel === 'acp') {
-              await acp.sendMessage(channelId, '✅ 服务重启成功！');
+            } else if (channel === 'aun') {
+              await aun.sendMessage(channelId, '✅ 服务重启成功！');
             }
             logger.info('[System] Restart success message sent');
           } catch (error) {
@@ -309,7 +309,7 @@ async function main() {
   const shutdown = async () => {
     logger.info('\n\nShutting down gracefully...');
     await feishu.disconnect();
-    await acp.disconnect();
+    await aun.disconnect();
     sessionManager.close();
     logger.info('✓ Shutdown complete');
     process.exit(0);

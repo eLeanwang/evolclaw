@@ -10,7 +10,7 @@
 ┌─────────────────────────────────────────────────────────┐
 │                      消息渠道层                           │
 │  ┌──────────────┐              ┌──────────────┐         │
-│  │ Feishu       │              │ ACP          │         │
+│  │ Feishu       │              │ AUN          │         │
 │  │ (WebSocket)  │              │ (协议客户端)  │         │
 │  └──────┬───────┘              └──────┬───────┘         │
 └─────────┼──────────────────────────────┼─────────────────┘
@@ -63,13 +63,13 @@
 
 **代码位置**：`src/channels/feishu.ts`
 
-#### ACP Channel
-- **实现**：基于 `acp-ts`
+#### AUN Channel
+- **实现**：基于 `aun-ts`
 - **连接方式**：ACP 协议客户端
 - **认证**：AID（Agent Identity）基于 X.509 数字证书
 - **状态**：当前为占位符实现，待完整集成
 
-**代码位置**：`src/channels/acp.ts`
+**代码位置**：`src/channels/aun.ts`
 
 ### 2. 消息队列层
 
@@ -156,7 +156,7 @@
 飞书群 A → feishu-shared → Claude Session 001
 飞书群 B → feishu-shared → Claude Session 001
 飞书群 C → feishu-shared → Claude Session 001
-ACP 会话 → acp-shared   → Claude Session 002
+AUN 会话 → aun-shared   → Claude Session 002
 ```
 
 **Isolated 模式映射**：
@@ -164,7 +164,7 @@ ACP 会话 → acp-shared   → Claude Session 002
 飞书群 A → feishu-chatA-xxx → Claude Session 001
 飞书群 B → feishu-chatB-xxx → Claude Session 002
 飞书群 C → feishu-chatC-xxx → Claude Session 003
-ACP 会话 → acp-chatX-xxx   → Claude Session 004
+AUN 会话 → aun-chatX-xxx   → Claude Session 004
 ```
 
 ### 5. 实例管理层
@@ -220,7 +220,7 @@ ACP 会话 → acp-chatX-xxx   → Claude Session 004
 ## 消息处理流程
 
 ```
-1. 飞书/ACP 消息到达
+1. 飞书/AUN 消息到达
    ↓
 2. MessageQueue 入队（会话级）
    ↓
@@ -362,7 +362,7 @@ MessageSync.syncAllIfNeeded()
     "appId": "cli_xxx",
     "appSecret": "xxx"
   },
-  "acp": {
+  "aun": {
     "domain": "aid.pub",
     "agentName": "evolclaw"
   },

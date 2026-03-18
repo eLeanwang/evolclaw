@@ -90,7 +90,7 @@ function createMessage(content = 'hello'): Message {
   return { channel: 'feishu', channelId: 'test-channel', content, userId: 'owner-123', timestamp: Date.now() };
 }
 
-describe('Idle Timeout with Health Check', () => {
+describe('Idle Timeout with StreamIdleMonitor', () => {
   beforeEach(() => {
     vi.useFakeTimers();
   });
@@ -115,7 +115,7 @@ describe('Idle Timeout with Health Check', () => {
     const config: Config = {
       anthropic: { apiKey: 'test' },
       feishu: { appId: '', appSecret: '' },
-      acp: { domain: '', agentName: '' },
+      aun: { domain: '', agentName: '' },
       timeout: { idle: 200 },
       owners: { feishu: 'owner-123' },
     };
@@ -139,8 +139,8 @@ describe('Idle Timeout with Health Check', () => {
 
     // 不应调用 interrupt
     expect(runner.interruptCalled()).toBe(false);
-    // 不应有超时或健康检查消息
-    expect(adapter.sentMessages.every(m => !m.includes('超时') && !m.includes('健康检查'))).toBe(true);
+    // 不应有超时或监控消息
+    expect(adapter.sentMessages.every(m => !m.includes('超时') && !m.includes('执行监控'))).toBe(true);
   });
 
   it('should send notify at 1x idle, warn at 2.5x, and kill at 5x', async () => {
@@ -163,7 +163,7 @@ describe('Idle Timeout with Health Check', () => {
     const config: Config = {
       anthropic: { apiKey: 'test' },
       feishu: { appId: '', appSecret: '' },
-      acp: { domain: '', agentName: '' },
+      aun: { domain: '', agentName: '' },
       timeout: { idle: 500 },  // 500ms idle threshold for fast tests
       owners: { feishu: 'owner-123' },
     };
@@ -178,11 +178,11 @@ describe('Idle Timeout with Health Check', () => {
 
     const processPromise = processor.processMessage(createMessage()).catch(e => e);
 
-    // Health check interval is 30s, but with fake timers we need to advance past thresholds
+    // Monitor interval is 30s, but with fake timers we need to advance past thresholds
     // notify at 500ms (1×), warn at 1250ms (2.5×), kill at 2500ms (5×)
     // The 30s interval with a 500ms idle → first check at 30s already past kill threshold
 
-    // For this test, advance time in 30s chunks (the health check interval)
+    // For this test, advance time in 30s chunks (the monitor interval)
     // At 30s check: idle=30000ms, way past 500ms×5=2500ms → triggers notify, warn, then kill
     await vi.advanceTimersByTimeAsync(30000);
 
@@ -212,7 +212,7 @@ describe('Idle Timeout with Health Check', () => {
     const config: Config = {
       anthropic: { apiKey: 'test' },
       feishu: { appId: '', appSecret: '' },
-      acp: { domain: '', agentName: '' },
+      aun: { domain: '', agentName: '' },
       owners: { feishu: 'owner-123' },
     };
 
@@ -226,7 +226,7 @@ describe('Idle Timeout with Health Check', () => {
 
     const processPromise = processor.processMessage(createMessage()).catch(e => e);
 
-    // Health check interval is 30s
+    // Monitor interval is 30s
     // Default idle = 120s, notify at 120s, warn at 300s, kill at 600s
 
     // At 30s: no threshold reached yet (idle < 120s)
@@ -237,12 +237,12 @@ describe('Idle Timeout with Health Check', () => {
     await vi.advanceTimersByTimeAsync(60000);
     expect(runner.interrupt).not.toHaveBeenCalled();
 
-    // At 120s: notify threshold reached, but health check fires every 30s
+    // At 120s: notify threshold reached, but monitor fires every 30s
     // Next check at 120s → should trigger notify
     await vi.advanceTimersByTimeAsync(30000);
     // notify sent but not killed
     expect(runner.interrupt).not.toHaveBeenCalled();
-    expect(adapter.sentMessages.some(m => m.includes('健康检查'))).toBe(true);
+    expect(adapter.sentMessages.some(m => m.includes('执行监控'))).toBe(true);
 
     // Advance to 600s (kill threshold) — 480s more
     await vi.advanceTimersByTimeAsync(480000);
@@ -272,7 +272,7 @@ describe('Idle Timeout with Health Check', () => {
     const config: Config = {
       anthropic: { apiKey: 'test' },
       feishu: { appId: '', appSecret: '' },
-      acp: { domain: '', agentName: '' },
+      aun: { domain: '', agentName: '' },
       timeout: { idle: 400 },
     };
 
@@ -294,7 +294,7 @@ describe('Idle Timeout with Health Check', () => {
     await processPromise;
 
     expect(runner.interruptCalled()).toBe(false);
-    expect(adapter.sentMessages.every(m => !m.includes('超时') && !m.includes('健康检查'))).toBe(true);
+    expect(adapter.sentMessages.every(m => !m.includes('超时') && !m.includes('执行监控'))).toBe(true);
   });
 
   it('should send diagnostic info with tool name and event count', async () => {
@@ -330,7 +330,7 @@ describe('Idle Timeout with Health Check', () => {
     const config: Config = {
       anthropic: { apiKey: 'test' },
       feishu: { appId: '', appSecret: '' },
-      acp: { domain: '', agentName: '' },
+      aun: { domain: '', agentName: '' },
       timeout: { idle: 500 },
       owners: { feishu: 'owner-123' },
     };
@@ -348,7 +348,7 @@ describe('Idle Timeout with Health Check', () => {
     // Let initial events process
     await vi.advanceTimersByTimeAsync(100);
 
-    // Advance past health check interval (30s) to trigger check
+    // Advance past monitor interval (30s) to trigger check
     // At this point idle > 500ms × 5 = 2500ms (well past kill at 30s)
     await vi.advanceTimersByTimeAsync(30000);
 

@@ -123,7 +123,7 @@
 
 ### 组件 6：消息入队逻辑（改造）
 
-**位置**：`src/index.ts` 的 `feishu.onMessage` 和 `acp.onMessage`
+**位置**：`src/index.ts` 的 `feishu.onMessage` 和 `aun.onMessage`
 
 **改动**：
 - `messageQueue.enqueue` 调用时传入 `session.projectPath`

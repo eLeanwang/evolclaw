@@ -239,7 +239,7 @@ app.get('/health', (req, res) => {
     timestamp: Date.now(),
     channels: {
       feishu: feishu ? 'connected' : 'disconnected',
-      acp: acp ? 'connected' : 'disconnected'
+      aun: aun ? 'connected' : 'disconnected'
     },
     database: {
       sessions: db.prepare('SELECT COUNT(*) as count FROM sessions').get(),
@@ -257,7 +257,7 @@ app.get('/health', (req, res) => {
 
 - ❌ 图片接收功能修复（等待后期实现）
 - ❌ 文件收发支持（等待后期实现）
-- ❌ ACP 渠道实现（保持占位符）
+- ❌ AUN 渠道实现（保持占位符）
 - ❌ 配置文件加密（风险可控）
 - ❌ 性能监控（后期优化）
 - ❌ 数据库备份（后期优化）

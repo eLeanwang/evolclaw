@@ -47,7 +47,7 @@
 
 ### 其他模块（>40%）
 - `src/index.ts`
-- `src/channels/acp.ts`
+- `src/channels/aun.ts`
 
 ## 测试文件组织
 
