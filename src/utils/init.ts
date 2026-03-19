@@ -29,11 +29,19 @@ async function npmInstallGlobal(pkg: string): Promise<void> {
 }
 
 async function sudoExec(cmd: string, args: string[]): Promise<void> {
+  // 让 n 安装到当前 node 所在的 prefix 目录
+  const env = { ...process.env };
+  if (cmd === 'n' && !env.N_PREFIX) {
+    try {
+      const nodePrefix = execFileSync('node', ['-e', 'process.stdout.write(process.config.variables.node_prefix)'], { encoding: 'utf-8' });
+      if (nodePrefix) env.N_PREFIX = nodePrefix;
+    } catch {}
+  }
   try {
-    await execFileAsync(cmd, args, { timeout: 120000 });
+    await execFileAsync(cmd, args, { timeout: 120000, env });
   } catch (e: any) {
     if (e.stderr?.includes('EACCES') || e.message?.includes('EACCES') || e.code === 'EACCES') {
-      await execFileAsync('sudo', [cmd, ...args], { timeout: 120000 });
+      await execFileAsync('sudo', [cmd, ...args], { timeout: 120000, env });
     } else {
       throw e;
     }
@@ -52,6 +60,16 @@ async function checkEnvironment(rl: readline.Interface): Promise<boolean> {
   } else {
     console.log(`  ✗ Node.js v${process.versions.node} — 需要 >= 22（node:sqlite 依赖）`);
     // 检测 nvm
+    // 检测 bash 是否存在（nvm 和 n 都依赖 bash）
+    let hasBash = false;
+    try { execFileSync('which', ['bash'], { encoding: 'utf-8' }); hasBash = true; } catch {}
+
+    if (!hasBash) {
+      console.log('  ⚠ 当前环境没有 bash（Alpine 容器？），无法自动升级 Node.js');
+      console.log('  → 请手动升级: apk add nodejs-current 或重建容器使用 node:22-alpine');
+      return false;
+    }
+
     const hasNvm = !!process.env.NVM_DIR && fs.existsSync(process.env.NVM_DIR);
     if (hasNvm) {
       const answer = (await ask(rl, '  → 是否通过 nvm 升级到 Node.js 22？[Y/n] ')).trim().toLowerCase();
@@ -64,7 +82,8 @@ async function checkEnvironment(rl: readline.Interface): Promise<boolean> {
         const nvmDir = process.env.NVM_DIR;
         const { stdout } = await execFileAsync('bash', ['-c', `source "${nvmDir}/nvm.sh" && nvm install 22 && nvm alias default 22`], { timeout: 120000 });
         console.log(stdout.trim().split('\n').map(l => `  ${l}`).join('\n'));
-        console.log('  ✓ Node.js 升级完成，请重新运行 evolclaw init');
+        console.log('  ✓ Node.js 升级完成');
+        console.log('  → 请打开新终端后重新运行 evolclaw init');
         return false;
       } catch (e: any) {
         console.log(`  ✗ 升级失败: ${e.message?.slice(0, 200) || e}`);
@@ -83,7 +102,8 @@ async function checkEnvironment(rl: readline.Interface): Promise<boolean> {
         console.log('  正在升级 Node.js...');
         try {
           await sudoExec('n', ['22']);
-          console.log('  ✓ Node.js 升级完成，请重新运行 evolclaw init');
+          console.log('  ✓ Node.js 升级完成');
+          console.log('  → 请打开新终端后重新运行 evolclaw init');
           return false;
         } catch (e: any) {
           console.log(`  ✗ 升级失败: ${e.message?.slice(0, 200) || e}`);
