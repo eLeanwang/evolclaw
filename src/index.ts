@@ -250,25 +250,19 @@ async function main() {
   // 连接渠道
   const channels: string[] = [];
 
-  try {
-    await feishu.connect();
-    logger.info('✓ Feishu connected');
-    channels.push('Feishu');
-  } catch (error) {
-    logger.warn('⚠ Feishu connection failed (will continue without it)');
-    if (error instanceof Error) {
-      logger.warn(`  Reason: ${error.message}`);
-    }
-  }
-
-  try {
-    await aun.connect();
-    logger.info('✓ AUN connected');
-    channels.push('AUN');
-  } catch (error) {
-    logger.warn('⚠ AUN connection failed (will continue without it)');
-    if (error instanceof Error) {
-      logger.warn(`  Reason: ${error.message}`);
+  for (const { name, instance } of [
+    { name: 'Feishu', instance: feishu },
+    { name: 'AUN', instance: aun },
+  ]) {
+    try {
+      await instance.connect();
+      logger.info(`✓ ${name} connected`);
+      channels.push(name);
+    } catch (error) {
+      logger.warn(`⚠ ${name} connection failed (will continue without it)`);
+      if (error instanceof Error) {
+        logger.warn(`  Reason: ${error.message}`);
+      }
     }
   }
 

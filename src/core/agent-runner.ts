@@ -32,6 +32,16 @@ export class AgentRunner {
     this.onSessionIdUpdate = onSessionIdUpdate;
   }
 
+  private getAgentEnv(): Record<string, string | undefined> {
+    return {
+      ...process.env,
+      ANTHROPIC_AUTH_TOKEN: this.apiKey,
+      PATH: process.env.PATH,
+      DISABLE_AUTOUPDATER: '1',
+      ...(this.baseUrl ? { ANTHROPIC_BASE_URL: this.baseUrl } : {})
+    };
+  }
+
   setModel(model: string): void {
     this.model = model;
   }
@@ -145,13 +155,7 @@ export class AgentRunner {
           logger.debug(`[Claude-stderr] ${msg.trim()}`);
         }
       },
-      env: {
-        ...process.env,
-        ANTHROPIC_AUTH_TOKEN: this.apiKey,
-        PATH: process.env.PATH,
-        DISABLE_AUTOUPDATER: '1',
-        ...(this.baseUrl ? { ANTHROPIC_BASE_URL: this.baseUrl } : {})
-      }
+      env: this.getAgentEnv()
     };
 
     const createQuery = (promptInput: string | MessageStream, resumeSessionId?: string) => {
@@ -272,28 +276,27 @@ export class AgentRunner {
     }
   }
 
+  private runSessionCommand(prompt: string, claudeSessionId: string, projectPath: string) {
+    return query({
+      prompt,
+      options: {
+        cwd: projectPath,
+        model: this.model,
+        resume: claudeSessionId,
+        maxTurns: 1,
+        permissionMode: 'default',
+        env: this.getAgentEnv()
+      }
+    });
+  }
+
   /**
    * 主动压缩会话上下文
    */
   async compactSession(sessionId: string, claudeSessionId: string, projectPath: string): Promise<boolean> {
     try {
       logger.info(`[AgentRunner] Compacting session: ${claudeSessionId}`);
-      const stream = query({
-        prompt: '/compact',
-        options: {
-          cwd: projectPath,
-          model: this.model,
-          resume: claudeSessionId,
-          maxTurns: 1,
-          permissionMode: 'default',
-          env: {
-            ...process.env,
-            ANTHROPIC_AUTH_TOKEN: this.apiKey,
-            DISABLE_AUTOUPDATER: '1',
-            ...(this.baseUrl ? { ANTHROPIC_BASE_URL: this.baseUrl } : {})
-          }
-        }
-      });
+      const stream = this.runSessionCommand('/compact', claudeSessionId, projectPath);
       for await (const event of stream) {
         if (event.type === 'system' && event.subtype === 'compact_boundary') {
           logger.info(`[AgentRunner] Compact completed, pre_tokens: ${event.compact_metadata?.pre_tokens}`);
@@ -313,22 +316,7 @@ export class AgentRunner {
   async clearSession(claudeSessionId: string, projectPath: string): Promise<boolean> {
     try {
       logger.info(`[AgentRunner] Clearing session via SDK: ${claudeSessionId}`);
-      const stream = query({
-        prompt: '/clear',
-        options: {
-          cwd: projectPath,
-          model: this.model,
-          resume: claudeSessionId,
-          maxTurns: 1,
-          permissionMode: 'default',
-          env: {
-            ...process.env,
-            ANTHROPIC_AUTH_TOKEN: this.apiKey,
-            DISABLE_AUTOUPDATER: '1',
-            ...(this.baseUrl ? { ANTHROPIC_BASE_URL: this.baseUrl } : {})
-          }
-        }
-      });
+      const stream = this.runSessionCommand('/clear', claudeSessionId, projectPath);
       for await (const event of stream) {
         logger.debug(`[AgentRunner] Clear event: type=${event.type}, subtype=${(event as any).subtype || 'none'}`);
       }

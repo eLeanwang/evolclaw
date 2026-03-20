@@ -30,6 +30,58 @@ export class SessionManager {
     return path.join(homeDir, '.claude', 'projects', encodedPath, `${sessionId}.jsonl`);
   }
 
+  private rowToSession(row: any): Session {
+    return {
+      id: row.id,
+      channel: row.channel,
+      channelId: row.channel_id,
+      projectPath: row.project_path,
+      claudeSessionId: row.claude_session_id,
+      name: row.name,
+      isActive: row.is_active === 1,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  private deactivateAll(channel: string, channelId: string): void {
+    this.db.prepare(`
+      UPDATE sessions SET is_active = 0, updated_at = ?
+      WHERE channel = ? AND channel_id = ? AND is_active = 1
+    `).run(Date.now(), channel, channelId);
+  }
+
+  private validateSessionFile(row: any): string | undefined {
+    const claudeSessionId = row.claude_session_id;
+    if (!claudeSessionId) return undefined;
+    const sessionFile = this.getSessionFilePath(row.project_path, claudeSessionId);
+    if (fs.existsSync(sessionFile)) return claudeSessionId;
+    logger.warn(`Session file not found: ${sessionFile}, clearing session ID`);
+    this.db.prepare(`UPDATE sessions SET claude_session_id = NULL WHERE id = ?`).run(row.id);
+    return undefined;
+  }
+
+  private insertSession(session: Session): void {
+    this.db.prepare(`
+      INSERT OR IGNORE INTO sessions (id, channel, channel_id, project_path, claude_session_id, name, is_active, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(session.id, session.channel, session.channelId, session.projectPath, session.claudeSessionId ?? null, session.name ?? null, session.isActive ? 1 : 0, session.createdAt, session.updatedAt);
+  }
+
+  private extractUserMessageText(messageContent: any): string | null {
+    if (typeof messageContent === 'string') {
+      const text = messageContent.trim();
+      return text.substring(0, 50) + (text.length > 50 ? '...' : '');
+    } else if (Array.isArray(messageContent)) {
+      const textContent = messageContent.find((c: any) => c.type === 'text');
+      if (textContent?.text) {
+        const text = textContent.text.trim();
+        return text.substring(0, 50) + (text.length > 50 ? '...' : '');
+      }
+    }
+    return null;
+  }
+
   private initDatabase(): void {
     const tableInfo = this.db.prepare('PRAGMA table_info(sessions)').all() as any[];
     const hasIsActive = tableInfo.some((col: any) => col.name === 'is_active');
@@ -154,27 +206,8 @@ export class SessionManager {
     `).get(channel, channelId) as any;
 
     if (active) {
-      // 验证会话文件是否存在
-      let validSessionId = active.claude_session_id;
-      if (validSessionId) {
-        const sessionFile = this.getSessionFilePath(active.project_path, validSessionId);
-        if (!fs.existsSync(sessionFile)) {
-          logger.warn(`Session file not found: ${sessionFile}`);
-          validSessionId = null;
-        }
-      }
-
-      return {
-        id: active.id,
-        channel: active.channel,
-        channelId: active.channel_id,
-        projectPath: active.project_path,
-        claudeSessionId: validSessionId,
-        name: active.name,
-        isActive: active.is_active === 1,
-        createdAt: active.created_at,
-        updatedAt: active.updated_at
-      };
+      const validSessionId = this.validateSessionFile(active);
+      return { ...this.rowToSession(active), claudeSessionId: validSessionId };
     }
 
     // 2. 没有活跃会话，查找该聊天在默认项目的会话
@@ -185,16 +218,7 @@ export class SessionManager {
     `).get(channel, channelId, defaultProjectPath) as any;
 
     if (existing) {
-      // 验证会话文件是否存在
-      let validSessionId = existing.claude_session_id;
-      if (validSessionId) {
-        const sessionFile = this.getSessionFilePath(existing.project_path, validSessionId);
-        if (!fs.existsSync(sessionFile)) {
-          logger.warn(`Session file not found: ${sessionFile}, clearing session ID`);
-          validSessionId = null;
-          this.db.prepare(`UPDATE sessions SET claude_session_id = NULL WHERE id = ?`).run(existing.id);
-        }
-      }
+      const validSessionId = this.validateSessionFile(existing);
 
       // 激活该会话
       this.db.prepare(`
@@ -202,17 +226,7 @@ export class SessionManager {
         WHERE id = ?
       `).run(Date.now(), existing.id);
 
-      return {
-        id: existing.id,
-        channel: existing.channel,
-        channelId: existing.channel_id,
-        projectPath: existing.project_path,
-        claudeSessionId: validSessionId,
-        name: existing.name,
-        isActive: true,
-        createdAt: existing.created_at,
-        updatedAt: existing.updated_at
-      };
+      return { ...this.rowToSession(existing), claudeSessionId: validSessionId, isActive: true };
     }
 
     // 3. 创建新会话（默认为活跃）
@@ -235,24 +249,14 @@ export class SessionManager {
 
     // 如果插入被忽略（已存在），重新查询
     if (result.changes === 0) {
-      const existing = this.db.prepare(`
+      const recheck = this.db.prepare(`
         SELECT * FROM sessions
         WHERE channel = ? AND channel_id = ? AND project_path = ?
       `).get(channel, channelId, defaultProjectPath) as any;
 
-      if (existing) {
-        this.db.prepare(`UPDATE sessions SET is_active = 1, updated_at = ? WHERE id = ?`).run(Date.now(), existing.id);
-        return {
-          id: existing.id,
-          channel: existing.channel,
-          channelId: existing.channel_id,
-          projectPath: existing.project_path,
-          claudeSessionId: existing.claude_session_id,
-          name: existing.name,
-          isActive: true,
-          createdAt: existing.created_at,
-          updatedAt: Date.now()
-        };
+      if (recheck) {
+        this.db.prepare(`UPDATE sessions SET is_active = 1, updated_at = ? WHERE id = ?`).run(Date.now(), recheck.id);
+        return { ...this.rowToSession(recheck), isActive: true, updatedAt: Date.now() };
       }
     }
 
@@ -273,10 +277,7 @@ export class SessionManager {
 
   async switchProject(channel: 'feishu' | 'aun', channelId: string, newProjectPath: string): Promise<Session> {
     // 1. 取消当前活跃会话
-    this.db.prepare(`
-      UPDATE sessions SET is_active = 0, updated_at = ?
-      WHERE channel = ? AND channel_id = ? AND is_active = 1
-    `).run(Date.now(), channel, channelId);
+    this.deactivateAll(channel, channelId);
 
     // 2. 查找目标项目的会话
     const target = this.db.prepare(`
@@ -286,16 +287,7 @@ export class SessionManager {
     `).get(channel, channelId, newProjectPath) as any;
 
     if (target) {
-      // 验证会话文件是否存在
-      let validSessionId = target.claude_session_id;
-      if (validSessionId) {
-        const sessionFile = this.getSessionFilePath(newProjectPath, validSessionId);
-        if (!fs.existsSync(sessionFile)) {
-          logger.warn(`Session file not found: ${sessionFile}, clearing session ID`);
-          validSessionId = null;
-          this.db.prepare(`UPDATE sessions SET claude_session_id = NULL WHERE id = ?`).run(target.id);
-        }
-      }
+      const validSessionId = this.validateSessionFile(target);
 
       // 激活已有会话
       this.db.prepare(`
@@ -303,17 +295,7 @@ export class SessionManager {
         WHERE id = ?
       `).run(Date.now(), target.id);
 
-      return {
-        id: target.id,
-        channel: target.channel,
-        channelId: target.channel_id,
-        projectPath: target.project_path,
-        claudeSessionId: validSessionId,
-        name: target.name,
-        isActive: true,
-        createdAt: target.created_at,
-        updatedAt: target.updated_at
-      };
+      return { ...this.rowToSession(target), claudeSessionId: validSessionId, isActive: true };
     }
 
     // 3. 创建新会话
@@ -328,17 +310,9 @@ export class SessionManager {
       updatedAt: Date.now()
     };
 
-    this.db.prepare(`
-      INSERT OR IGNORE INTO sessions (id, channel, channel_id, project_path, claude_session_id, name, is_active, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(session.id, session.channel, session.channelId, session.projectPath, null, session.name ?? null, 1, session.createdAt, session.updatedAt);
+    this.insertSession(session);
 
     return session;
-  }
-
-  async updateProjectPath(channel: 'feishu' | 'aun', channelId: string, projectPath: string): Promise<void> {
-    this.db.prepare('UPDATE sessions SET project_path = ?, updated_at = ? WHERE channel = ? AND channel_id = ?')
-      .run(projectPath, Date.now(), channel, channelId);
   }
 
   async updateClaudeSessionId(channel: 'feishu' | 'aun', channelId: string, claudeSessionId: string): Promise<void> {
@@ -369,38 +343,14 @@ export class SessionManager {
     `).run(Date.now(), channel, channelId);
   }
 
-  async clearClaudeSessionId(channel: 'feishu' | 'aun', channelId: string): Promise<void> {
-    // 向后兼容的别名
-    await this.clearActiveSession(channel, channelId);
-  }
-
-  async getSession(channel: 'feishu' | 'aun', channelId: string): Promise<Session | undefined> {
-    // 获取活跃会话
+  async getActiveSession(channel: 'feishu' | 'aun', channelId: string): Promise<Session | undefined> {
     const row = this.db.prepare(`
       SELECT * FROM sessions
       WHERE channel = ? AND channel_id = ? AND is_active = 1
     `).get(channel, channelId) as any;
 
     if (!row) return undefined;
-
-    return {
-      id: row.id,
-      channel: row.channel,
-      channelId: row.channel_id,
-      projectPath: row.project_path,
-      claudeSessionId: row.claude_session_id,
-      name: row.name,
-      isActive: row.is_active === 1,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at
-    };
-  }
-
-  /**
-   * 获取活跃会话（getSession 的别名，语义更清晰）
-   */
-  async getActiveSession(channel: 'feishu' | 'aun', channelId: string): Promise<Session | undefined> {
-    return this.getSession(channel, channelId);
+    return this.rowToSession(row);
   }
 
   async listSessions(channel: 'feishu' | 'aun', channelId: string): Promise<Session[]> {
@@ -411,17 +361,7 @@ export class SessionManager {
       ORDER BY updated_at DESC
     `).all(channel, channelId) as any[];
 
-    return rows.map(row => ({
-      id: row.id,
-      channel: row.channel,
-      channelId: row.channel_id,
-      projectPath: row.project_path,
-      claudeSessionId: row.claude_session_id,
-      name: row.name,
-      isActive: row.is_active === 1,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at
-    }));
+    return rows.map(row => this.rowToSession(row));
   }
 
   async getSessionByProjectPath(channel: 'feishu' | 'aun', channelId: string, projectPath: string): Promise<Session | undefined> {
@@ -431,18 +371,7 @@ export class SessionManager {
     `).get(channel, channelId, projectPath) as any;
 
     if (!row) return undefined;
-
-    return {
-      id: row.id,
-      channel: row.channel,
-      channelId: row.channel_id,
-      projectPath: row.project_path,
-      claudeSessionId: row.claude_session_id,
-      name: row.name,
-      isActive: row.is_active === 1,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at
-    };
+    return this.rowToSession(row);
   }
 
   async getSessionByName(channel: 'feishu' | 'aun', channelId: string, name: string): Promise<Session | undefined> {
@@ -452,18 +381,7 @@ export class SessionManager {
     `).get(channel, channelId, name) as any;
 
     if (!row) return undefined;
-
-    return {
-      id: row.id,
-      channel: row.channel,
-      channelId: row.channel_id,
-      projectPath: row.project_path,
-      claudeSessionId: row.claude_session_id,
-      name: row.name,
-      isActive: row.is_active === 1,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at
-    };
+    return this.rowToSession(row);
   }
 
   async switchToSession(channel: 'feishu' | 'aun', channelId: string, targetSessionId: string): Promise<Session | null> {
@@ -475,10 +393,7 @@ export class SessionManager {
     if (!target) return null;
 
     // 取消当前活跃会话
-    this.db.prepare(`
-      UPDATE sessions SET is_active = 0, updated_at = ?
-      WHERE channel = ? AND channel_id = ? AND is_active = 1
-    `).run(Date.now(), channel, channelId);
+    this.deactivateAll(channel, channelId);
 
     // 激活目标会话
     this.db.prepare(`
@@ -486,17 +401,7 @@ export class SessionManager {
       WHERE id = ?
     `).run(Date.now(), targetSessionId);
 
-    return {
-      id: target.id,
-      channel: target.channel,
-      channelId: target.channel_id,
-      projectPath: target.project_path,
-      claudeSessionId: target.claude_session_id,
-      name: target.name,
-      isActive: true,
-      createdAt: target.created_at,
-      updatedAt: Date.now()
-    };
+    return { ...this.rowToSession(target), isActive: true, updatedAt: Date.now() };
   }
 
   async renameSession(sessionId: string, newName: string): Promise<boolean> {
@@ -509,10 +414,7 @@ export class SessionManager {
 
   async createNewSession(channel: 'feishu' | 'aun', channelId: string, projectPath: string, name?: string): Promise<Session> {
     // 取消当前活跃会话
-    this.db.prepare(`
-      UPDATE sessions SET is_active = 0, updated_at = ?
-      WHERE channel = ? AND channel_id = ? AND is_active = 1
-    `).run(Date.now(), channel, channelId);
+    this.deactivateAll(channel, channelId);
 
     // 创建新会话
     const session: Session = {
@@ -526,10 +428,7 @@ export class SessionManager {
       updatedAt: Date.now()
     };
 
-    this.db.prepare(`
-      INSERT INTO sessions (id, channel, channel_id, project_path, claude_session_id, name, is_active, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(session.id, session.channel, session.channelId, session.projectPath, null, session.name ?? null, 1, session.createdAt, session.updatedAt);
+    this.insertSession(session);
 
     return session;
   }
@@ -543,10 +442,7 @@ export class SessionManager {
     name?: string
   ): Promise<Session> {
     // 取消当前活跃会话
-    this.db.prepare(`
-      UPDATE sessions SET is_active = 0, updated_at = ?
-      WHERE channel = ? AND channel_id = ? AND is_active = 1
-    `).run(Date.now(), sourceSession.channel, sourceSession.channelId);
+    this.deactivateAll(sourceSession.channel, sourceSession.channelId);
 
     const session: Session = {
       id: `${sourceSession.channel}-${sourceSession.channelId}-${Date.now()}`,
@@ -560,10 +456,7 @@ export class SessionManager {
       updatedAt: Date.now()
     };
 
-    this.db.prepare(`
-      INSERT INTO sessions (id, channel, channel_id, project_path, claude_session_id, name, is_active, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(session.id, session.channel, session.channelId, session.projectPath, session.claudeSessionId ?? null, session.name ?? null, 1, session.createdAt, session.updatedAt);
+    this.insertSession(session);
 
     return session;
   }
@@ -605,22 +498,9 @@ export class SessionManager {
 
       for (const line of lines) {
         const event = JSON.parse(line);
-
-        // 格式: {type: "user", message: {role: "user", content: ...}}
         if (event.type === 'user' && event.message?.role === 'user') {
-          const messageContent = event.message.content;
-
-          // content 可能是字符串或数组
-          if (typeof messageContent === 'string') {
-            const text = messageContent.trim();
-            return text.substring(0, 50) + (text.length > 50 ? '...' : '');
-          } else if (Array.isArray(messageContent)) {
-            const textContent = messageContent.find((c: any) => c.type === 'text');
-            if (textContent?.text) {
-              const text = textContent.text.trim();
-              return text.substring(0, 50) + (text.length > 50 ? '...' : '');
-            }
-          }
+          const text = this.extractUserMessageText(event.message.content);
+          if (text) return text;
         }
       }
     } catch (error) {
@@ -641,17 +521,7 @@ export class SessionManager {
       for (const line of lines) {
         const event = JSON.parse(line);
         if (event.type === 'user' && event.message?.role === 'user') {
-          const messageContent = event.message.content;
-          if (typeof messageContent === 'string') {
-            const text = messageContent.trim();
-            lastMessage = text.substring(0, 50) + (text.length > 50 ? '...' : '');
-          } else if (Array.isArray(messageContent)) {
-            const textContent = messageContent.find((c: any) => c.type === 'text');
-            if (textContent?.text) {
-              const text = textContent.text.trim();
-              lastMessage = text.substring(0, 50) + (text.length > 50 ? '...' : '');
-            }
-          }
+          lastMessage = this.extractUserMessageText(event.message.content) ?? lastMessage;
         }
       }
       return lastMessage;
@@ -693,13 +563,6 @@ export class SessionManager {
     }
   }
 
-  /**
-   * 统计会话回合数（用户消息数）— 兼容旧调用
-   */
-  countSessionTurns(projectPath: string, claudeSessionId: string): number {
-    return this.getSessionFileInfo(projectPath, claudeSessionId).turns;
-  }
-
   async getSessionByUuidPrefix(channel: 'feishu' | 'aun', channelId: string, uuidPrefix: string): Promise<Session | undefined> {
     const rows = this.db.prepare(`
       SELECT * FROM sessions
@@ -711,18 +574,7 @@ export class SessionManager {
       logger.warn(`Multiple sessions found with UUID prefix: ${uuidPrefix}`);
     }
 
-    const row = rows[0];
-    return {
-      id: row.id,
-      channel: row.channel,
-      channelId: row.channel_id,
-      projectPath: row.project_path,
-      claudeSessionId: row.claude_session_id,
-      name: row.name,
-      isActive: row.is_active === 1,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at
-    };
+    return this.rowToSession(rows[0]);
   }
 
   async importCliSession(channel: 'feishu' | 'aun', channelId: string, projectPath: string, claudeSessionId: string): Promise<Session> {
@@ -744,24 +596,11 @@ export class SessionManager {
         WHERE id = ?
       `).run(claudeSessionId, Date.now(), existingByPath.id);
 
-      return {
-        id: existingByPath.id,
-        channel: existingByPath.channel,
-        channelId: existingByPath.channel_id,
-        projectPath: existingByPath.project_path,
-        claudeSessionId,
-        name: existingByPath.name,
-        isActive: true,
-        createdAt: existingByPath.created_at,
-        updatedAt: Date.now()
-      };
+      return { ...this.rowToSession(existingByPath), claudeSessionId, isActive: true, updatedAt: Date.now() };
     }
 
     // 取消当前活跃会话
-    this.db.prepare(`
-      UPDATE sessions SET is_active = 0, updated_at = ?
-      WHERE channel = ? AND channel_id = ? AND is_active = 1
-    `).run(Date.now(), channel, channelId);
+    this.deactivateAll(channel, channelId);
 
     // 创建会话记录
     const session: Session = {
@@ -776,10 +615,7 @@ export class SessionManager {
       updatedAt: Date.now()
     };
 
-    this.db.prepare(`
-      INSERT OR IGNORE INTO sessions (id, channel, channel_id, project_path, claude_session_id, name, is_active, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(session.id, session.channel, session.channelId, session.projectPath, session.claudeSessionId ?? null, session.name ?? null, 1, session.createdAt, session.updatedAt);
+    this.insertSession(session);
 
     return session;
   }

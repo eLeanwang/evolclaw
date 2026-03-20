@@ -28,6 +28,13 @@ export class MessageQueue {
   }
 
   /**
+   * 检查队列 key 是否属于指定 sessionKey
+   */
+  private matchesSession(key: string, sessionKey: string): boolean {
+    return key.startsWith(sessionKey + '-');
+  }
+
+  /**
    * 生成项目级别的队列 key
    */
   private getQueueKey(sessionKey: string, projectPath: string): string {
@@ -93,7 +100,7 @@ export class MessageQueue {
     // 计算该 sessionKey 下所有项目队列的总长度
     let total = 0;
     for (const [key, queue] of this.queues.entries()) {
-      if (key.startsWith(sessionKey + '-')) {
+      if (this.matchesSession(key, sessionKey)) {
         total += queue.length;
       }
     }
@@ -103,7 +110,7 @@ export class MessageQueue {
   isProcessing(sessionKey: string): boolean {
     // 检查该 sessionKey 下是否有任何项目队列在处理
     for (const key of this.processing.keys()) {
-      if (key.startsWith(sessionKey + '-')) {
+      if (this.matchesSession(key, sessionKey)) {
         return true;
       }
     }
@@ -116,7 +123,7 @@ export class MessageQueue {
   getProcessingProject(sessionKey: string): string | undefined {
     // 查找该 sessionKey 下正在处理的项目
     for (const key of this.processing.keys()) {
-      if (key.startsWith(sessionKey + '-')) {
+      if (this.matchesSession(key, sessionKey)) {
         // 从 processing 中找到对应的队列，获取 projectPath
         const queue = this.queues.get(key);
         if (queue && queue.length > 0) {

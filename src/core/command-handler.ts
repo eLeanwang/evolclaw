@@ -1,4 +1,4 @@
-import { Config, ChannelAdapter } from '../types.js';
+import { Config, ChannelAdapter, Session } from '../types.js';
 import { SessionManager } from './session-manager.js';
 import { AgentRunner } from './agent-runner.js';
 import { MessageCache } from './message-cache.js';
@@ -82,6 +82,25 @@ export class CommandHandler {
     private config: Config,
     private messageCache: MessageCache,
   ) {}
+
+  /** 项目列表快捷访问 */
+  private get projects(): Record<string, string> {
+    return this.config.projects?.list || {};
+  }
+
+  /** 根据项目路径查找项目名称 */
+  private getProjectName(projectPath: string): string {
+    return Object.entries(this.projects).find(([_, p]) => p === projectPath)?.[0] || path.basename(projectPath);
+  }
+
+  /** 获取活跃会话，无会话时返回统一错误提示 */
+  private async ensureSession(channel: 'feishu' | 'aun', channelId: string): Promise<{ session: Session } | { error: string }> {
+    const session = await this.sessionManager.getActiveSession(channel, channelId);
+    if (!session) {
+      return { error: '❌ 当前没有活跃会话\n使用 /new 创建新会话' };
+    }
+    return { session };
+  }
 
   setProcessor(processor: MessageProcessor): void {
     this.processor = processor;
@@ -221,10 +240,9 @@ export class CommandHandler {
 
     // /clear 命令：通过 SDK /clear 清空会话历史
     if (normalizedContent === '/clear') {
-      const session = await this.sessionManager.getSession(channel, channelId);
-      if (!session) {
-        return '❌ 当前没有活跃会话\n使用 /new 创建新会话';
-      }
+      const result = await this.ensureSession(channel, channelId);
+      if ('error' in result) return result.error;
+      const { session } = result;
 
       if (!session.claudeSessionId) {
         return '❌ 当前会话没有历史记录，无需清空';
@@ -246,10 +264,9 @@ export class CommandHandler {
 
     // /compact 命令：手动压缩会话上下文
     if (normalizedContent === '/compact') {
-      const session = await this.sessionManager.getSession(channel, channelId);
-      if (!session) {
-        return '❌ 当前没有活跃会话\n使用 /new 创建新会话';
-      }
+      const result = await this.ensureSession(channel, channelId);
+      if ('error' in result) return result.error;
+      const { session } = result;
 
       if (!session.claudeSessionId) {
         return '❌ 当前会话没有历史记录，无需压缩';
@@ -310,9 +327,7 @@ export class CommandHandler {
         }
       }
 
-      const projects = this.config.projects?.list || {};
-      const projectName = Object.entries(projects)
-        .find(([_, p]) => p === session.projectPath)?.[0] || path.basename(session.projectPath);
+      const projectName = this.getProjectName(session.projectPath);
 
       const health = await this.sessionManager.getHealthStatus(session.id);
       const timeSinceSuccess = Date.now() - health.lastSuccessTime;
@@ -450,17 +465,9 @@ export class CommandHandler {
 提示：发送任意消息或使用 /new 命令创建会话`;
       }
 
-      const projects = this.config.projects?.list || {};
-      let projectName = '';
-      for (const [name, projectPath] of Object.entries(projects)) {
-        if (projectPath === session.projectPath) {
-          projectName = name;
-          break;
-        }
-      }
-
-      if (projectName) {
-        return `当前项目: ${projectName}\n路径: ${session.projectPath}`;
+      const configName = Object.entries(this.projects).find(([_, p]) => p === session.projectPath)?.[0];
+      if (configName) {
+        return `当前项目: ${configName}\n路径: ${session.projectPath}`;
       } else {
         return `当前项目: ${session.projectPath}`;
       }
@@ -468,8 +475,6 @@ export class CommandHandler {
 
     // /plist 命令：列出所有项目
     if (normalizedContent === '/plist') {
-      const projects = this.config.projects?.list || {};
-
       const isGroup = await this.isGroupChat(channel, channelId);
       if (isGroup) {
         if (!session) {
@@ -478,8 +483,7 @@ export class CommandHandler {
 请使用 /bind <项目路径> 绑定项目`;
         }
 
-        const projectName = Object.entries(projects)
-          .find(([_, p]) => p === session.projectPath)?.[0] || path.basename(session.projectPath);
+        const projectName = this.getProjectName(session.projectPath);
 
         const sessionKey = `${channel}-${channelId}`;
         const queueLength = this.messageQueue.getQueueLength(sessionKey);
@@ -498,7 +502,7 @@ export class CommandHandler {
 
       const normalizePath = (p: string) => p.replace(/\/+$/, '');
 
-      for (const [name, projectPath] of Object.entries(projects)) {
+      for (const [name, projectPath] of Object.entries(this.projects)) {
         const isCurrent = session?.projectPath === projectPath;
         const prefix = isCurrent ? '  ✓' : '   ';
 
@@ -564,8 +568,7 @@ export class CommandHandler {
         projectPath = arg;
         projectName = path.basename(arg);
       } else {
-        const projects = this.config.projects?.list || {};
-        projectPath = projects[arg];
+        projectPath = this.projects[arg];
         if (!projectPath) {
           return `❌ 项目 "${arg}" 不存在\n提示: 使用 /plist 查看可用项目`;
         }
@@ -755,8 +758,7 @@ export class CommandHandler {
 
       const isGroup = await this.isGroupChat(channel, channelId);
       if (!targetSession && sessionName.length === 8 && !isGroup) {
-        const projects = this.config.projects?.list || {};
-        const projectPaths = Object.values(projects);
+        const projectPaths = Object.values(this.projects);
 
         if (session) {
           projectPaths.unshift(session.projectPath);
@@ -768,7 +770,7 @@ export class CommandHandler {
 
           if (cliSession) {
             const imported = await this.sessionManager.importCliSession(channel, channelId, projectPath, cliSession.uuid);
-            const projectName = Object.entries(projects).find(([_, p]) => p === projectPath)?.[0] || path.basename(projectPath);
+            const projectName = this.getProjectName(projectPath);
             return `✓ 已导入 CLI 会话: ${imported.name}\n  项目: ${projectName}\n  将继续之前的对话历史`;
           }
         }

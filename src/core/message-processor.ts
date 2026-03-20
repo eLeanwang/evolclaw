@@ -297,7 +297,7 @@ export class MessageProcessor {
           resetTimer
         );
       } catch (error) {
-        if (this.isContextTooLongError(error) && session.claudeSessionId) {
+        if (classifyError(error) === ErrorType.CONTEXT_TOO_LONG && session.claudeSessionId) {
           // 尝试 compact 压缩会话
           flusher.addActivity('⚠️ 上下文过长，正在压缩会话...');
           await flusher.flush();
@@ -588,15 +588,6 @@ export class MessageProcessor {
       }
       throw error; // 重新抛出，让外层处理
     }
-  }
-
-  /**
-   * 判断是否为上下文过长错误
-   */
-  private isContextTooLongError(error: any): boolean {
-    const msg = (error?.message || String(error)).toLowerCase();
-    return msg.includes('上下文过长') || msg.includes('context too long')
-      || msg.includes('context_length_exceeded');
   }
 
   /**

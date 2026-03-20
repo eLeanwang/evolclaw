@@ -5,6 +5,7 @@ data/evolclaw.json.backup
 # 数据库
 data/*.db
 data/*.db-*
+isolated
 
 # 日志
 logs/
@@ -46,6 +47,7 @@ conversations/
 
 # 打包文件
 *.tar.gz
+*.tgz
 *.zip
 
 # 临时脚本

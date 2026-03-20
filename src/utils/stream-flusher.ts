@@ -1,3 +1,5 @@
+import { logger } from './logger.js';
+
 /**
  * 流式输出缓冲器
  * 按时间窗口批量推送文本和活动事件
@@ -156,11 +158,11 @@ export class StreamFlusher {
       const before = output;
       output = output.replace(this.fileMarkerPattern, '').trim();
       if (before !== output) {
-        console.log('[StreamFlusher] Removed file markers, before length:', before.length, 'after:', output.length);
+        logger.debug('[StreamFlusher] Removed file markers, before length:', before.length, 'after:', output.length);
       }
     }
 
-    console.log('[StreamFlusher] flush called, output length:', output.length, 'isEmpty:', !output, 'preview:', output.substring(0, 100));
+    logger.debug('[StreamFlusher] flush called, output length:', output.length, 'isEmpty:', !output, 'preview:', output.substring(0, 100));
 
     if (output) {
       await this.send(output, isFinal);

@@ -30,41 +30,28 @@ function isRunning(pidFile: string): number | null {
   }
 }
 
-function killAllInstances() {
-  try {
-    const output = execFileSync('pgrep', ['-f', 'node.*dist/index.js'], { encoding: 'utf-8' }).trim();
-    if (output) {
-      const pids = output.split('\n');
-      console.log(`  Found ${pids.length} running instance(s), stopping them...`);
-      for (const pid of pids) {
-        try { process.kill(parseInt(pid, 10)); } catch {}
-      }
-    }
-  } catch {}
-}
-
 function rotateLogs(logDir: string) {
   if (!fs.existsSync(logDir)) return;
   const MAX_SIZE = 10 * 1024 * 1024; // 10MB
-  for (const file of fs.readdirSync(logDir)) {
-    if (!file.endsWith('.log')) continue;
-    const filePath = path.join(logDir, file);
-    const stat = fs.statSync(filePath);
-    if (stat.size > MAX_SIZE) {
-      const timestamp = new Date().toISOString().replace(/[:.]/g, '').slice(0, 15);
-      const newPath = `${filePath}.${timestamp}`;
-      fs.renameSync(filePath, newPath);
-      console.log(`  Rotated: ${file} -> ${path.basename(newPath)}`);
-    }
-  }
-  // 清理 7 天前的旧日志
   const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+
   for (const file of fs.readdirSync(logDir)) {
-    if (!file.includes('.log.')) continue;
     const filePath = path.join(logDir, file);
-    const stat = fs.statSync(filePath);
-    if (stat.mtimeMs < cutoff) {
-      fs.unlinkSync(filePath);
+    if (file.endsWith('.log')) {
+      // 轮转超大日志
+      const stat = fs.statSync(filePath);
+      if (stat.size > MAX_SIZE) {
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '').slice(0, 15);
+        const newPath = `${filePath}.${timestamp}`;
+        fs.renameSync(filePath, newPath);
+        console.log(`  Rotated: ${file} -> ${path.basename(newPath)}`);
+      }
+    } else if (file.includes('.log.')) {
+      // 清理 7 天前的旧日志
+      const stat = fs.statSync(filePath);
+      if (stat.mtimeMs < cutoff) {
+        fs.unlinkSync(filePath);
+      }
     }
   }
 }
@@ -278,60 +265,54 @@ function cmdStart() {
   setTimeout(checkReady, 1000);
 }
 
-function cmdStop() {
+/**
+ * 停止进程并等待退出，返回 Promise
+ */
+async function stopAndWait(pidFile: string): Promise<void> {
+  const pid = isRunning(pidFile);
+  if (!pid) return;
+
+  console.log(`🛑 Stopping EvolClaw (PID: ${pid})...`);
+  process.kill(pid);
+
+  await new Promise<void>((resolve) => {
+    let waited = 0;
+    const check = setInterval(() => {
+      waited++;
+      try {
+        process.kill(pid, 0);
+      } catch {
+        clearInterval(check);
+        try { fs.unlinkSync(pidFile); } catch {}
+        console.log('✓ EvolClaw stopped');
+        resolve();
+        return;
+      }
+      if (waited >= 10) {
+        clearInterval(check);
+        try { process.kill(pid, 9); } catch {}
+        try { fs.unlinkSync(pidFile); } catch {}
+        console.log('✓ EvolClaw stopped (forced)');
+        resolve();
+      }
+    }, 1000);
+  });
+}
+
+async function cmdStop() {
   const p = resolvePaths();
   const pid = isRunning(p.pid);
   if (!pid) {
     console.log('⚠ EvolClaw is not running');
     return;
   }
-
-  console.log(`🛑 Stopping EvolClaw (PID: ${pid})...`);
-  process.kill(pid);
-
-  let waited = 0;
-  const check = setInterval(() => {
-    waited++;
-    try {
-      process.kill(pid, 0);
-    } catch {
-      clearInterval(check);
-      try { fs.unlinkSync(p.pid); } catch {}
-      console.log('✓ EvolClaw stopped');
-      return;
-    }
-    if (waited >= 10) {
-      clearInterval(check);
-      try { process.kill(pid, 9); } catch {}
-      try { fs.unlinkSync(p.pid); } catch {}
-      console.log('✓ EvolClaw stopped (forced)');
-    }
-  }, 1000);
+  await stopAndWait(p.pid);
 }
 
-function cmdRestart() {
+async function cmdRestart() {
   console.log('🔄 Restarting EvolClaw...');
   const p = resolvePaths();
-  const pid = isRunning(p.pid);
-
-  if (pid) {
-    process.kill(pid);
-    let waited = 0;
-    while (waited < 10) {
-      try {
-        process.kill(pid, 0);
-        execFileSync('sleep', ['1']);
-        waited++;
-      } catch {
-        break;
-      }
-    }
-    if (waited >= 10) {
-      try { process.kill(pid, 9); } catch {}
-    }
-    try { fs.unlinkSync(p.pid); } catch {}
-  }
-
+  await stopAndWait(p.pid);
   setTimeout(() => cmdStart(), 1000);
 }
 
@@ -748,10 +729,10 @@ export async function main(args: string[]) {
       cmdStart();
       break;
     case 'stop':
-      cmdStop();
+      await cmdStop();
       break;
     case 'restart':
-      cmdRestart();
+      await cmdRestart();
       break;
     case 'status':
       await cmdStatus();

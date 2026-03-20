@@ -32,10 +32,8 @@ async function sudoExec(cmd: string, args: string[]): Promise<void> {
   // 让 n 安装到当前 node 所在的 prefix 目录
   const env = { ...process.env };
   if (cmd === 'n' && !env.N_PREFIX) {
-    try {
-      const nodePrefix = execFileSync('node', ['-e', 'process.stdout.write(process.config.variables.node_prefix)'], { encoding: 'utf-8' });
-      if (nodePrefix) env.N_PREFIX = nodePrefix;
-    } catch {}
+    const nodePrefix = (process.config as any).variables?.node_prefix;
+    if (nodePrefix) env.N_PREFIX = nodePrefix;
   }
   try {
     await execFileAsync(cmd, args, { timeout: 120000, env });
@@ -121,7 +119,8 @@ async function checkEnvironment(rl: readline.Interface): Promise<boolean> {
         await npmInstallGlobal('n');
         console.log('  正在升级 Node.js...');
         await sudoExec('n', ['22']);
-        console.log('  ✓ Node.js 升级完成，请重新运行 evolclaw init');
+        console.log('  ✓ Node.js 升级完成');
+        console.log('  → 请打开新终端后重新运行 evolclaw init');
         return false;
       } catch (e: any) {
         console.log(`  ✗ 升级失败: ${e.message?.slice(0, 200) || e}`);
