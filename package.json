@@ -23,18 +23,18 @@
     "prepublishOnly": "npm run build && npm test"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.2.77",
+    "@anthropic-ai/claude-agent-sdk": "^0.2.81",
     "@larksuiteoapi/node-sdk": "^1.59.0",
-    "dotenv": "^16.6.1",
+    "dotenv": "^17.3.1",
     "image-type": "^6.0.0",
     "qrcode-terminal": "^0.12.0"
   },
   "devDependencies": {
-    "@types/node": "^22.0.0",
+    "@types/node": "^25.5.0",
     "@types/qrcode-terminal": "^0.12.2",
-    "@vitest/coverage-v8": "^2.1.9",
+    "@vitest/coverage-v8": "^4.1.0",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0",
-    "vitest": "^2.1.9"
+    "vitest": "^4.1.0"
   }
 }
