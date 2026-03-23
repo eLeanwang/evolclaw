@@ -5,6 +5,7 @@ import { promisify } from 'util';
 import { resolveRoot, resolvePaths, ensureDataDirs, getPackageRoot } from './paths.js';
 import { cmdInit } from './utils/init.js';
 import { cmdInitWechat } from './utils/init-wechat.js';
+import { cmdInitFeishu } from './utils/init-feishu.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -362,16 +363,16 @@ async function cmdStatus() {
     console.log('🔌 渠道配置:');
     try {
       const config = JSON.parse(fs.readFileSync(p.config, 'utf-8'));
-      if (config.feishu?.appId && config.feishu?.appSecret) {
+      if (config.channels?.feishu?.appId && config.channels?.feishu?.appSecret) {
         // 验证飞书凭证连通性
         try {
           const lark = await import('@larksuiteoapi/node-sdk');
-          const client = new lark.Client({ appId: config.feishu.appId, appSecret: config.feishu.appSecret });
+          const client = new lark.Client({ appId: config.channels!.feishu!.appId, appSecret: config.channels!.feishu!.appSecret });
           const res = await client.auth.tenantAccessToken.internal({
-            data: { app_id: config.feishu.appId, app_secret: config.feishu.appSecret },
+            data: { app_id: config.channels!.feishu!.appId, app_secret: config.channels!.feishu!.appSecret },
           });
           if (res.code === 0) {
-            console.log(`  飞书: ✓ 已连接 (App ID: ${config.feishu.appId.slice(0, 8)}...)`);
+            console.log(`  飞书: ✓ 已连接 (App ID: ${config.channels!.feishu!.appId.slice(0, 8)}...)`);
           } else {
             console.log(`  飞书: ✗ 连接拒绝 (${res.msg})`);
           }
@@ -386,13 +387,13 @@ async function cmdStatus() {
       } else {
         console.log('  飞书: - 未配置');
       }
-      if (config.aun?.domain && config.aun?.agentName) {
-        console.log(`  AUN: ✓ 已配置 (${config.aun.agentName}@${config.aun.domain})`);
+      if (config.channels?.aun?.domain && config.channels?.aun?.agentName) {
+        console.log(`  AUN: ✓ 已配置 (${config.channels!.aun!.agentName}@${config.channels!.aun!.domain})`);
       } else {
         console.log('  AUN: - 未配置');
       }
-      if (config.anthropic?.model) {
-        console.log(`  模型: ${config.anthropic.model}`);
+      if (config.agents?.anthropic?.model) {
+        console.log(`  模型: ${config.agents.anthropic.model}`);
       }
       if (config.projects?.defaultPath) {
         console.log(`  默认项目: ${config.projects.defaultPath}`);
@@ -697,12 +698,12 @@ async function notifyChannel(
 
   if (pendingInfo.channel === 'feishu') {
     try {
-      if (!config.feishu?.appId || !config.feishu?.appSecret) return;
+      if (!config.channels?.feishu?.appId || !config.channels?.feishu?.appSecret) return;
 
       const lark = await import('@larksuiteoapi/node-sdk');
       const client = new lark.Client({
-        appId: config.feishu.appId,
-        appSecret: config.feishu.appSecret,
+        appId: config.channels!.feishu!.appId,
+        appSecret: config.channels!.feishu!.appSecret,
       });
 
       await client.im.message.create({
@@ -720,11 +721,11 @@ async function notifyChannel(
     }
   } else if (pendingInfo.channel === 'wechat') {
     try {
-      if (!config.wechat?.token) return;
+      if (!config.channels?.wechat?.token) return;
 
       const crypto = await import('node:crypto');
-      const baseUrl = (config.wechat.baseUrl || 'https://ilinkai.weixin.qq.com').replace(/\/$/, '');
-      const token = config.wechat.token;
+      const baseUrl = (config.channels!.wechat!.baseUrl || 'https://ilinkai.weixin.qq.com').replace(/\/$/, '');
+      const token = config.channels!.wechat!.token;
 
       // 读取缓存的 context_token
       const syncBufPath = path.join(p.dataDir, 'wechat-context-tokens.json');
@@ -788,6 +789,8 @@ export async function main(args: string[]) {
     case 'init':
       if (args[1] === 'wechat') {
         await cmdInitWechat();
+      } else if (args[1] === 'feishu') {
+        await cmdInitFeishu();
       } else {
         await cmdInit();
       }
@@ -816,6 +819,7 @@ export async function main(args: string[]) {
 Commands:
   init          创建配置文件 (${resolvePaths().config})
   init wechat   微信扫码登录并写入配置
+  init feishu   飞书扫码登录并写入配置
   start         启动服务 (默认)
   stop          停止服务
   restart       重启服务

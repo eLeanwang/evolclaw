@@ -27,21 +27,31 @@ function loadClaudeSettings(): { env?: Record<string, string>; model?: string } 
 export function resolveAnthropicConfig(config: Config): AnthropicResolved {
   const settings = loadClaudeSettings();
 
-  const apiKey = config.anthropic?.apiKey
+  // 过滤占位符，视为未配置
+  const configApiKey = config.agents?.anthropic?.apiKey;
+  const isPlaceholderKey = !configApiKey ||
+    configApiKey.includes('your-') ||
+    configApiKey.includes('placeholder');
+
+  const apiKey = (isPlaceholderKey ? null : configApiKey)
     || process.env.ANTHROPIC_AUTH_TOKEN
     || settings.env?.ANTHROPIC_AUTH_TOKEN;
 
   if (!apiKey) {
     throw new Error(
-      'No API key found. Set one of: config.anthropic.apiKey, env ANTHROPIC_AUTH_TOKEN, or ~/.claude/settings.json env.ANTHROPIC_AUTH_TOKEN'
+      'No API key found. Set one of: agents.anthropic.apiKey, env ANTHROPIC_AUTH_TOKEN, or ~/.claude/settings.json env.ANTHROPIC_AUTH_TOKEN'
     );
   }
 
-  const baseUrl = config.anthropic?.baseUrl
+  // baseUrl 也过滤占位符
+  const configBaseUrl = config.agents?.anthropic?.baseUrl;
+  const isPlaceholderUrl = configBaseUrl?.includes('api.anthropic.com');
+
+  const baseUrl = (isPlaceholderUrl ? null : configBaseUrl)
     || process.env.ANTHROPIC_BASE_URL
     || settings.env?.ANTHROPIC_BASE_URL;
 
-  const model = config.anthropic?.model
+  const model = config.agents?.anthropic?.model
     || settings.model
     || 'sonnet';
 
@@ -65,40 +75,41 @@ export function saveConfig(config: Config, configPath: string = resolvePaths().c
 }
 
 export function getOwner(config: Config, channel: string): string | undefined {
-  return config.owners?.[channel];
+  const ch = (config.channels as any)?.[channel];
+  return ch?.owner;
 }
 
 export function setOwner(config: Config, channel: string, userId: string, configPath: string = resolvePaths().config): void {
-  if (!config.owners) {
-    config.owners = {};
-  }
-  config.owners[channel] = userId;
+  if (!config.channels) config.channels = {};
+  const channels = config.channels as any;
+  if (!channels[channel]) channels[channel] = {};
+  channels[channel].owner = userId;
   saveConfig(config, configPath);
 }
 
 export function isOwner(config: Config, channel: string, userId: string): boolean {
-  return config.owners?.[channel] === userId;
+  return getOwner(config, channel) === userId;
 }
 
 function validateConfig(config: any): asserts config is Config {
   // anthropic 部分不再强制校验，由 resolveAnthropicConfig() 处理
 
   // Feishu 配置可选，但如果配置了就要完整
-  if (config.feishu) {
-    if (!config.feishu.appId || config.feishu.appId.startsWith('YOUR_')) {
+  if (config.channels?.feishu) {
+    if (!config.channels.feishu.appId || config.channels.feishu.appId.startsWith('YOUR_')) {
       logger.warn('⚠ Feishu appId not configured (Feishu channel will be disabled)');
     }
-    if (!config.feishu.appSecret || config.feishu.appSecret.startsWith('YOUR_')) {
+    if (!config.channels.feishu.appSecret || config.channels.feishu.appSecret.startsWith('YOUR_')) {
       logger.warn('⚠ Feishu appSecret not configured (Feishu channel will be disabled)');
     }
   }
 
-  if (!config.aun?.domain) throw new Error('Missing aun.domain');
-  if (!config.aun?.agentName) throw new Error('Missing aun.agentName');
+  if (!config.channels?.aun?.domain) throw new Error('Missing channels.aun.domain');
+  if (!config.channels?.aun?.agentName) throw new Error('Missing channels.aun.agentName');
   if (!config.projects?.defaultPath) throw new Error('Missing projects.defaultPath');
 
   // WeChat 配置可选，但如果启用了就需要 token
-  if (config.wechat?.enabled && !config.wechat?.token) {
+  if (config.channels?.wechat?.enabled && !config.channels?.wechat?.token) {
     logger.warn('⚠ WeChat enabled but token not configured (WeChat channel will be disabled)');
   }
 }

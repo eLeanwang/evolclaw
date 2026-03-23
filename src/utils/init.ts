@@ -174,18 +174,11 @@ async function checkEnvironment(rl: readline.Interface): Promise<boolean> {
   // @anthropic-ai/claude-agent-sdk >= 0.2.75
   let sdkAction: 'ok' | 'install' | 'upgrade' = 'ok';
   try {
-    let sdkPkgPath: string | null = null;
+    // 用 require.resolve 找到 SDK 入口，推导 package.json 路径
     const esmRequire = createRequire(import.meta.url);
-    try {
-      sdkPkgPath = esmRequire.resolve('@anthropic-ai/claude-agent-sdk/package.json');
-    } catch {
-      try {
-        const globalRoot = execFileSync('npm', ['root', '-g'], { encoding: 'utf-8' }).trim();
-        const globalPath = path.join(globalRoot, '@anthropic-ai', 'claude-agent-sdk', 'package.json');
-        if (fs.existsSync(globalPath)) sdkPkgPath = globalPath;
-      } catch {}
-    }
-    if (!sdkPkgPath) throw new Error('not found');
+    const sdkEntry = esmRequire.resolve('@anthropic-ai/claude-agent-sdk');
+    const sdkPkgPath = path.join(path.dirname(sdkEntry), 'package.json');
+
     const sdkPkg = JSON.parse(fs.readFileSync(sdkPkgPath, 'utf-8'));
     const sdkVer = sdkPkg.version as string;
     const parts = sdkVer.split('.').map(Number);
@@ -259,13 +252,53 @@ function setupEnvVar(home: string): void {
   console.log('  ⚠ 请重新打开终端或执行 source 使其生效');
 }
 
+// ==================== Feishu Manual Input ====================
+
+async function initFeishuManual(rl: readline.Interface, config: any): Promise<boolean> {
+  let appId = '';
+  while (!appId) {
+    appId = (await ask(rl, '  飞书 App ID: ')).trim();
+    if (!appId) console.log('  ⚠ 不能为空');
+  }
+
+  let appSecret = '';
+  while (!appSecret) {
+    appSecret = (await ask(rl, '  飞书 App Secret: ')).trim();
+    if (!appSecret) console.log('  ⚠ 不能为空');
+  }
+
+  console.log('  正在验证飞书凭证...');
+  try {
+    const lark = await import('@larksuiteoapi/node-sdk');
+    const client = new lark.Client({ appId, appSecret });
+    const res = await client.auth.tenantAccessToken.internal({
+      data: { app_id: appId, app_secret: appSecret },
+    });
+    if (res.code === 0) {
+      console.log('  ✓ 飞书凭证验证通过');
+    } else {
+      console.log(`  ✗ 飞书凭证验证失败: ${res.msg}`);
+      const answer = (await ask(rl, '  → 是否继续？[y/N] ')).trim().toLowerCase();
+      if (answer !== 'y' && answer !== 'yes') {
+        return false;
+      }
+    }
+  } catch (e: any) {
+    console.log(`  ⚠ 飞书凭证验证跳过: ${e.message?.slice(0, 100) || e}`);
+  }
+
+  config.channels.feishu.appId = appId;
+  config.channels.feishu.appSecret = appSecret;
+  config.channels.feishu.enabled = true;
+  return true;
+}
+
 // ==================== Main ====================
 
 export async function cmdInit() {
   const p = resolvePaths();
   ensureDataDirs();
 
-  // 检查服务是否在运行
   if (fs.existsSync(p.pid)) {
     const pid = parseInt(fs.readFileSync(p.pid, 'utf-8').trim(), 10);
     try {
@@ -298,48 +331,10 @@ export async function cmdInit() {
 
     console.log('📝 交互式配置\n');
 
-    // feishu.appId
-    let appId = '';
-    while (!appId) {
-      appId = (await ask(rl, '  飞书 App ID: ')).trim();
-      if (!appId) console.log('  ⚠ 不能为空');
-    }
-
-    // feishu.appSecret
-    let appSecret = '';
-    while (!appSecret) {
-      appSecret = (await ask(rl, '  飞书 App Secret: ')).trim();
-      if (!appSecret) console.log('  ⚠ 不能为空');
-    }
-
-    // 验证飞书凭证
-    console.log('  正在验证飞书凭证...');
-    try {
-      const lark = await import('@larksuiteoapi/node-sdk');
-      const client = new lark.Client({ appId, appSecret });
-      const res = await client.auth.tenantAccessToken.internal({
-        data: { app_id: appId, app_secret: appSecret },
-      });
-      if (res.code === 0) {
-        console.log('  ✓ 飞书凭证验证通过');
-      } else {
-        console.log(`  ✗ 飞书凭证验证失败: ${res.msg}`);
-        const answer = (await ask(rl, '  → 是否继续？[y/N] ')).trim().toLowerCase();
-        if (answer !== 'y' && answer !== 'yes') {
-          console.log('  已取消');
-          return;
-        }
-      }
-    } catch (e: any) {
-      console.log(`  ⚠ 飞书凭证验证跳过: ${e.message?.slice(0, 100) || e}`);
-    }
-
-    // projects.defaultPath
+    // 通用配置
     const defaultSuggestion = path.join(os.homedir(), 'evolclaw-project');
     let defaultPath = (await ask(rl, `  默认项目路径 [${defaultSuggestion}]: `)).trim();
-    if (!defaultPath) {
-      defaultPath = defaultSuggestion;
-    }
+    if (!defaultPath) defaultPath = defaultSuggestion;
     if (defaultPath.startsWith('~/')) {
       defaultPath = path.join(os.homedir(), defaultPath.slice(2));
     } else if (defaultPath === '~') {
@@ -350,22 +345,62 @@ export async function cmdInit() {
       console.log(`  ✓ 已创建目录: ${defaultPath}`);
     }
 
-    // anthropic.model
     const modelInput = (await ask(rl, '  模型 [sonnet(默认)/opus/haiku]: ')).trim().toLowerCase();
     const model = ['opus', 'haiku'].includes(modelInput) ? modelInput : 'sonnet';
 
-    // Generate config
+    // 渠道选择
+    console.log('\n选择消息渠道:');
+    console.log('  1. 飞书 (Feishu)');
+    console.log('  2. 微信 (WeChat)');
+    const channelChoice = (await ask(rl, '请选择 [1]: ')).trim() || '1';
+
     const config = JSON.parse(fs.readFileSync(sampleSrc, 'utf-8'));
-    config.feishu.appId = appId;
-    config.feishu.appSecret = appSecret;
     config.projects.defaultPath = defaultPath;
     config.projects.list = { [path.basename(defaultPath)]: defaultPath };
-    config.anthropic.model = model;
+    config.agents.anthropic.model = model;
+
+    if (channelChoice === '1') {
+      console.log('\n飞书配置方式:');
+      console.log('  1. 扫码自动注册（推荐）');
+      console.log('  2. 手动输入 App ID/Secret');
+      const feishuMethod = (await ask(rl, '请选择 [1]: ')).trim() || '1';
+
+      if (feishuMethod === '1') {
+        const { runFeishuQrFlow } = await import('./init-feishu.js');
+        const result = await runFeishuQrFlow();
+        if (!result) {
+          console.log('已取消');
+          return;
+        }
+        config.channels.feishu.appId = result.appId;
+        config.channels.feishu.appSecret = result.appSecret;
+        config.channels.feishu.enabled = true;
+        if (result.openId) config.channels.feishu.owner = result.openId;
+      } else {
+        if (!await initFeishuManual(rl, config)) {
+          console.log('已取消');
+          return;
+        }
+      }
+    } else if (channelChoice === '2') {
+      const { runWechatQrFlow } = await import('./init-wechat.js');
+      const result = await runWechatQrFlow();
+      if (!result) {
+        console.log('已取消');
+        return;
+      }
+      config.channels.wechat = {
+        enabled: true,
+        baseUrl: result.baseUrl,
+        token: result.token,
+      };
+    } else {
+      console.log('无效选择');
+      return;
+    }
 
     fs.writeFileSync(p.config, JSON.stringify(config, null, 2) + '\n');
     console.log(`\n✓ 已创建配置文件: ${p.config}`);
-
-    // Setup EVOLCLAW_HOME in shell profile
     setupEnvVar(resolveRoot());
   } finally {
     rl.close();
