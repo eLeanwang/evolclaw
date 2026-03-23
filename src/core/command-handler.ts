@@ -88,9 +88,14 @@ export class CommandHandler {
     return this.config.projects?.list || {};
   }
 
-  /** 根据项目路径查找项目名称 */
+  /** 根据项目路径查找配置中的项目名称 */
+  private getConfiguredProjectName(projectPath: string): string | undefined {
+    return Object.entries(this.projects).find(([_, p]) => p === projectPath)?.[0];
+  }
+
+  /** 根据项目路径查找项目名称（未配置时回退到目录名） */
   private getProjectName(projectPath: string): string {
-    return Object.entries(this.projects).find(([_, p]) => p === projectPath)?.[0] || path.basename(projectPath);
+    return this.getConfiguredProjectName(projectPath) || path.basename(projectPath);
   }
 
   /** 获取活跃会话，无会话时返回统一错误提示 */
@@ -465,12 +470,11 @@ export class CommandHandler {
 提示：发送任意消息或使用 /new 命令创建会话`;
       }
 
-      const configName = Object.entries(this.projects).find(([_, p]) => p === session.projectPath)?.[0];
+      const configName = this.getConfiguredProjectName(session.projectPath);
       if (configName) {
         return `当前项目: ${configName}\n路径: ${session.projectPath}`;
-      } else {
-        return `当前项目: ${session.projectPath}`;
       }
+      return `当前项目: ${session.projectPath}`;
     }
 
     // /plist 命令：列出所有项目
