@@ -350,21 +350,21 @@ async function cmdStatus() {
         'SELECT count(*) FROM sessions; SELECT count(*) FROM sessions WHERE is_active=1; SELECT count(DISTINCT channel_id) FROM sessions; SELECT count(DISTINCT project_path) FROM sessions;'
       ], { encoding: 'utf-8' }).trim().split('\n');
       if (output.length >= 4) {
-        console.log(`  会话总数: ${output[0]} (活跃: ${output[1]})`);
-        console.log(`  独立会话: ${output[2]} 个`);
-        console.log(`  涉及项目: ${output[3]} 个`);
+        console.log(`  Total sessions: ${output[0]} (active: ${output[1]})`);
+        console.log(`  Unique chats: ${output[2]}`);
+        console.log(`  Projects: ${output[3]}`);
       }
     } catch {}
   }
 
-  // 渠道配置状态
+  // Channel configuration status
   if (fs.existsSync(p.config)) {
     console.log('');
-    console.log('🔌 渠道配置:');
+    console.log('🔌 Channels:');
     try {
       const config = JSON.parse(fs.readFileSync(p.config, 'utf-8'));
       if (config.channels?.feishu?.appId && config.channels?.feishu?.appSecret) {
-        // 验证飞书凭证连通性
+        // Verify Feishu credentials connectivity
         try {
           const lark = await import('@larksuiteoapi/node-sdk');
           const client = new lark.Client({ appId: config.channels!.feishu!.appId, appSecret: config.channels!.feishu!.appSecret });
@@ -372,31 +372,43 @@ async function cmdStatus() {
             data: { app_id: config.channels!.feishu!.appId, app_secret: config.channels!.feishu!.appSecret },
           });
           if (res.code === 0) {
-            console.log(`  飞书: ✓ 已连接 (App ID: ${config.channels!.feishu!.appId.slice(0, 8)}...)`);
+            console.log(`  Feishu: ✓ Connected (App ID: ${config.channels!.feishu!.appId.slice(0, 8)}...)`);
           } else {
-            console.log(`  飞书: ✗ 连接拒绝 (${res.msg})`);
+            console.log(`  Feishu: ✗ Connection refused (${res.msg})`);
           }
         } catch (e: any) {
           const msg = e.message || '';
           if (msg.includes('ETIMEDOUT') || msg.includes('ENETUNREACH') || msg.includes('ENOTFOUND')) {
-            console.log('  飞书: ✗ 连接超时（网络不可达）');
+            console.log('  Feishu: ✗ Connection timeout (network unreachable)');
           } else {
-            console.log(`  飞书: ✗ 连接失败 (${msg.slice(0, 80)})`);
+            console.log(`  Feishu: ✗ Connection failed (${msg.slice(0, 80)})`);
           }
         }
       } else {
-        console.log('  飞书: - 未配置');
+        console.log('  Feishu: - Not configured');
       }
-      if (config.channels?.aun?.domain && config.channels?.aun?.agentName) {
-        console.log(`  AUN: ✓ 已配置 (${config.channels!.aun!.agentName}@${config.channels!.aun!.domain})`);
+      if (config.channels?.wechat?.token) {
+        const tokenPreview = config.channels.wechat.token.slice(0, 20);
+        console.log(`  WeChat: ✓ Configured (Token: ${tokenPreview}...)`);
       } else {
-        console.log('  AUN: - 未配置');
+        console.log('  WeChat: - Not configured');
+      }
+      // Check AUN with placeholder detection
+      const aunDomain = config.channels?.aun?.domain;
+      const aunAgent = config.channels?.aun?.agentName;
+      const isAunPlaceholder = !aunDomain || !aunAgent ||
+        aunDomain.includes('your-') || aunDomain.includes('placeholder') ||
+        aunAgent.includes('your-') || aunAgent.includes('placeholder');
+      if (aunDomain && aunAgent && !isAunPlaceholder) {
+        console.log(`  AUN: ✓ Configured (${aunAgent}@${aunDomain})`);
+      } else {
+        console.log('  AUN: - Not configured');
       }
       if (config.agents?.anthropic?.model) {
-        console.log(`  模型: ${config.agents.anthropic.model}`);
+        console.log(`  Model: ${config.agents.anthropic.model}`);
       }
       if (config.projects?.defaultPath) {
-        console.log(`  默认项目: ${config.projects.defaultPath}`);
+        console.log(`  Default project: ${config.projects.defaultPath}`);
       }
     } catch {}
   }
