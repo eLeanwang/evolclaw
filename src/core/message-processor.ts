@@ -345,7 +345,22 @@ export class MessageProcessor {
 
         for (const match of fileMatches) {
           const filePath = match[1].trim();
+
+          // 占位符/示例检测：静默跳过，不打扰用户
+          if (this.isPlaceholderPath(filePath)) {
+            logger.info(`[${adapter.name}] Skipped placeholder file marker: [SEND_FILE:${filePath}]`);
+            continue;
+          }
+
           const resolvedPath = this.resolveFilePath(filePath, absoluteProjectPath);
+
+          // 文件存在性检查：真实路径但文件不存在，告知用户
+          if (!fs.existsSync(resolvedPath)) {
+            logger.warn(`[${adapter.name}] File not found: ${resolvedPath}`);
+            await adapter.sendText(message.channelId, `⚠️ 文件未找到: ${filePath}`);
+            continue;
+          }
+
           logger.info(`[${adapter.name}] Sending file: ${resolvedPath}`);
           try {
             await adapter.sendFile(message.channelId, resolvedPath);
@@ -632,5 +647,29 @@ export class MessageProcessor {
 
     // 都找不到，返回项目根目录路径
     return rootPath;
+  }
+
+  /**
+   * 判断文件路径是否为占位符/示例文本
+   * 用于过滤大模型在说明文字中误写的 [SEND_FILE:...] 标记
+   */
+  private isPlaceholderPath(filePath: string): boolean {
+    if (!filePath) return true;
+
+    // 精确占位符
+    const exactPlaceholders = ['...', '…', 'path', 'file', 'file_path', 'filepath',
+      '路径', '文件路径', '文件', 'filename', 'xxx'];
+    if (exactPlaceholders.includes(filePath.toLowerCase())) return true;
+
+    // 示例路径前缀
+    if (/^(\/path\/to\/|\.\/path\/to\/|example\/|示例|\/example)/i.test(filePath)) return true;
+
+    // 含模板变量
+    if (/\$\{.+\}|\{\{.+\}\}|<.+>/.test(filePath)) return true;
+
+    // 纯标点/特殊字符（非路径字符）
+    if (/^[.\s…]+$/.test(filePath)) return true;
+
+    return false;
   }
 }
