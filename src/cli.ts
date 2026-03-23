@@ -4,6 +4,7 @@ import { spawn, execFileSync, execFile } from 'child_process';
 import { promisify } from 'util';
 import { resolveRoot, resolvePaths, ensureDataDirs, getPackageRoot } from './paths.js';
 import { cmdInit } from './utils/init.js';
+import { cmdInitWechat } from './utils/init-wechat.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -723,7 +724,11 @@ export async function main(args: string[]) {
 
   switch (cmd) {
     case 'init':
-      await cmdInit();
+      if (args[1] === 'wechat') {
+        await cmdInitWechat();
+      } else {
+        await cmdInit();
+      }
       break;
     case 'start':
       cmdStart();
@@ -747,12 +752,13 @@ export async function main(args: string[]) {
       console.log(`Usage: evolclaw {init|start|stop|restart|status|logs}
 
 Commands:
-  init      创建配置文件 (${resolvePaths().config})
-  start     启动服务 (默认)
-  stop      停止服务
-  restart   重启服务
-  status    查看状态
-  logs      查看日志 (tail -f)
+  init          创建配置文件 (${resolvePaths().config})
+  init wechat   微信扫码登录并写入配置
+  start         启动服务 (默认)
+  stop          停止服务
+  restart       重启服务
+  status        查看状态
+  logs          查看日志 (tail -f)
 
 Environment:
   EVOLCLAW_HOME   数据目录 (默认: ~/.evolclaw)
