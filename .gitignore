@@ -60,3 +60,5 @@ conversations/
 # 项目文档（不公开）
 CLAUDE.md
 DEPLOYMENT.md
+docs/
+src/experimental/
