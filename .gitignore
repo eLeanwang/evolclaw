@@ -57,3 +57,7 @@ conversations/
 # 临时脚本
 *.sh.bak
 阿里云仓库配置脚本.sh
+
+# 项目文档（不公开）
+CLAUDE.md
+DEPLOYMENT.md
