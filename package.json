@@ -23,9 +23,8 @@
     "prepublishOnly": "npm run build && npm test"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.2.81",
+    "@anthropic-ai/claude-agent-sdk": "^0.2.75",
     "@larksuiteoapi/node-sdk": "^1.59.0",
-    "dotenv": "^17.3.1",
     "image-type": "^6.0.0",
     "qrcode-terminal": "^0.12.0"
   },
