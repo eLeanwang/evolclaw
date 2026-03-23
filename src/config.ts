@@ -64,11 +64,11 @@ export function saveConfig(config: Config, configPath: string = resolvePaths().c
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf-8');
 }
 
-export function getOwner(config: Config, channel: 'feishu' | 'aun'): string | undefined {
+export function getOwner(config: Config, channel: string): string | undefined {
   return config.owners?.[channel];
 }
 
-export function setOwner(config: Config, channel: 'feishu' | 'aun', userId: string, configPath: string = resolvePaths().config): void {
+export function setOwner(config: Config, channel: string, userId: string, configPath: string = resolvePaths().config): void {
   if (!config.owners) {
     config.owners = {};
   }
@@ -76,7 +76,7 @@ export function setOwner(config: Config, channel: 'feishu' | 'aun', userId: stri
   saveConfig(config, configPath);
 }
 
-export function isOwner(config: Config, channel: 'feishu' | 'aun', userId: string): boolean {
+export function isOwner(config: Config, channel: string, userId: string): boolean {
   return config.owners?.[channel] === userId;
 }
 
@@ -96,6 +96,11 @@ function validateConfig(config: any): asserts config is Config {
   if (!config.aun?.domain) throw new Error('Missing aun.domain');
   if (!config.aun?.agentName) throw new Error('Missing aun.agentName');
   if (!config.projects?.defaultPath) throw new Error('Missing projects.defaultPath');
+
+  // WeChat 配置可选，但如果启用了就需要 token
+  if (config.wechat?.enabled && !config.wechat?.token) {
+    logger.warn('⚠ WeChat enabled but token not configured (WeChat channel will be disabled)');
+  }
 }
 
 export function ensureDir(dirPath: string): void {

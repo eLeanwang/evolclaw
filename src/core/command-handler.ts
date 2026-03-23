@@ -99,7 +99,7 @@ export class CommandHandler {
   }
 
   /** 获取活跃会话，无会话时返回统一错误提示 */
-  private async ensureSession(channel: 'feishu' | 'aun', channelId: string): Promise<{ session: Session } | { error: string }> {
+  private async ensureSession(channel: string, channelId: string): Promise<{ session: Session } | { error: string }> {
     const session = await this.sessionManager.getActiveSession(channel, channelId);
     if (!session) {
       return { error: '❌ 当前没有活跃会话\n使用 /new 创建新会话' };
@@ -119,6 +119,10 @@ export class CommandHandler {
     this.adapters.set(adapter.name, adapter);
   }
 
+  getAdapter(channelName: string): ChannelAdapter | undefined {
+    return this.adapters.get(channelName);
+  }
+
   /**
    * 快速判断是否为命令（不进队列的命令）
    */
@@ -131,7 +135,7 @@ export class CommandHandler {
    */
   async handle(
     content: string,
-    channel: 'feishu' | 'aun',
+    channel: string,
     channelId: string,
     sendMessage?: (channelId: string, text: string) => Promise<void>,
     userId?: string,

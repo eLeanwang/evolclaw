@@ -15,6 +15,11 @@ export interface Config {
     domain: string;
     agentName: string;
   };
+  wechat?: {
+    enabled?: boolean;
+    baseUrl?: string;
+    token?: string;
+  };
   projects?: {
     defaultPath: string;
     autoCreate: boolean;
@@ -32,15 +37,12 @@ export interface Config {
     useSettingSources?: boolean;        // 使用 SDK 原生配置加载，默认 true
     agentProgressSummaries?: boolean;   // 启用 AI 生成的子任务进度摘要，默认 true
   };
-  owners?: {
-    feishu?: string;
-    aun?: string;
-  };
+  owners?: Record<string, string>;
 }
 
 export interface Session {
   id: string;
-  channel: 'feishu' | 'aun';
+  channel: string;
   channelId: string;
   projectPath: string;
   claudeSessionId?: string;
@@ -51,7 +53,7 @@ export interface Session {
 }
 
 export interface Message {
-  channel: 'feishu' | 'aun';
+  channel: string;
   channelId: string;
   content: string;
   images?: Array<{ data: string; mimeType: string }>;
@@ -80,7 +82,7 @@ export interface ChannelOptions {
 // 命令处理器类型
 export type CommandHandler = (
   content: string,
-  channel: 'feishu' | 'aun',
+  channel: string,
   channelId: string,
   userId?: string
 ) => Promise<string | null>;

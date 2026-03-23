@@ -100,8 +100,12 @@ async function main() {
     messageCache,
     (content, channel, channelId, userId) => {
       const sendFn = async (id: string, text: string) => {
-        const fileMarkerPattern = /\[SEND_FILE:([^\]]+)\]/g;
-        if (channel === 'feishu') {
+        const adapter = cmdHandler.getAdapter(channel);
+        if (!adapter) return;
+
+        // 文件标记处理（通过 adapter.sendFile 能力判断，不按渠道名分支）
+        if (adapter.sendFile) {
+          const fileMarkerPattern = /\[SEND_FILE:([^\]]+)\]/g;
           const fileMatches = [...text.matchAll(fileMarkerPattern)];
           for (const match of fileMatches) {
             const filePath = match[1].trim();
@@ -109,17 +113,16 @@ async function main() {
             const projectPath = session?.projectPath || process.cwd();
             const absoluteFilePath = path.isAbsolute(filePath) ? filePath : path.join(projectPath, filePath);
             try {
-              await feishu.sendFile(id, absoluteFilePath);
+              await adapter.sendFile(id, absoluteFilePath);
             } catch (error) {
-              logger.error(`[Feishu] Failed to send file: ${absoluteFilePath}`, error);
+              logger.error(`[${channel}] Failed to send file: ${absoluteFilePath}`, error);
             }
           }
           text = text.replace(fileMarkerPattern, '').trim();
         }
 
         if (text) {
-          if (channel === 'feishu') await feishu.sendMessage(id, text);
-          else if (channel === 'aun') await aun.sendMessage(id, text);
+          await adapter.sendText(id, text);
         }
       };
       return cmdHandler.handle(content, channel, channelId, sendFn, userId);

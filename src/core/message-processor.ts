@@ -125,7 +125,7 @@ export class MessageProcessor {
       if (channelInfo) {
         try {
           const session = await this.sessionManager.getOrCreateSession(
-            message.channel as 'feishu' | 'aun',
+            message.channel,
             message.channelId,
             this.config.projects?.defaultPath || process.cwd()
           );

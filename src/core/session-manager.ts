@@ -198,7 +198,7 @@ export class SessionManager {
     `);
   }
 
-  async getOrCreateSession(channel: 'feishu' | 'aun', channelId: string, defaultProjectPath: string, name?: string): Promise<Session> {
+  async getOrCreateSession(channel: string, channelId: string, defaultProjectPath: string, name?: string): Promise<Session> {
     // 1. 查找该聊天的活跃会话
     const active = this.db.prepare(`
       SELECT * FROM sessions
@@ -275,7 +275,7 @@ export class SessionManager {
     this.db.prepare(`UPDATE sessions SET ${fields}, updated_at = ? WHERE id = ?`).run(...values, Date.now(), sessionId);
   }
 
-  async switchProject(channel: 'feishu' | 'aun', channelId: string, newProjectPath: string): Promise<Session> {
+  async switchProject(channel: string, channelId: string, newProjectPath: string): Promise<Session> {
     // 1. 取消当前活跃会话
     this.deactivateAll(channel, channelId);
 
@@ -315,7 +315,7 @@ export class SessionManager {
     return session;
   }
 
-  async updateClaudeSessionId(channel: 'feishu' | 'aun', channelId: string, claudeSessionId: string): Promise<void> {
+  async updateClaudeSessionId(channel: string, channelId: string, claudeSessionId: string): Promise<void> {
     // 只更新当前活跃会话的 Claude Session ID
     this.db.prepare(`
       UPDATE sessions
@@ -334,7 +334,7 @@ export class SessionManager {
     `).run(claudeSessionId, Date.now(), sessionId);
   }
 
-  async clearActiveSession(channel: 'feishu' | 'aun', channelId: string): Promise<void> {
+  async clearActiveSession(channel: string, channelId: string): Promise<void> {
     // 清除当前活跃会话的 Claude Session ID
     this.db.prepare(`
       UPDATE sessions
@@ -343,7 +343,7 @@ export class SessionManager {
     `).run(Date.now(), channel, channelId);
   }
 
-  async getActiveSession(channel: 'feishu' | 'aun', channelId: string): Promise<Session | undefined> {
+  async getActiveSession(channel: string, channelId: string): Promise<Session | undefined> {
     const row = this.db.prepare(`
       SELECT * FROM sessions
       WHERE channel = ? AND channel_id = ? AND is_active = 1
@@ -353,7 +353,7 @@ export class SessionManager {
     return this.rowToSession(row);
   }
 
-  async listSessions(channel: 'feishu' | 'aun', channelId: string): Promise<Session[]> {
+  async listSessions(channel: string, channelId: string): Promise<Session[]> {
     // 列出该聊天的所有会话
     const rows = this.db.prepare(`
       SELECT * FROM sessions
@@ -364,7 +364,7 @@ export class SessionManager {
     return rows.map(row => this.rowToSession(row));
   }
 
-  async getSessionByProjectPath(channel: 'feishu' | 'aun', channelId: string, projectPath: string): Promise<Session | undefined> {
+  async getSessionByProjectPath(channel: string, channelId: string, projectPath: string): Promise<Session | undefined> {
     const row = this.db.prepare(`
       SELECT * FROM sessions
       WHERE channel = ? AND channel_id = ? AND project_path = ?
@@ -374,7 +374,7 @@ export class SessionManager {
     return this.rowToSession(row);
   }
 
-  async getSessionByName(channel: 'feishu' | 'aun', channelId: string, name: string): Promise<Session | undefined> {
+  async getSessionByName(channel: string, channelId: string, name: string): Promise<Session | undefined> {
     const row = this.db.prepare(`
       SELECT * FROM sessions
       WHERE channel = ? AND channel_id = ? AND name = ?
@@ -384,7 +384,7 @@ export class SessionManager {
     return this.rowToSession(row);
   }
 
-  async switchToSession(channel: 'feishu' | 'aun', channelId: string, targetSessionId: string): Promise<Session | null> {
+  async switchToSession(channel: string, channelId: string, targetSessionId: string): Promise<Session | null> {
     // 验证目标会话存在
     const target = this.db.prepare(`
       SELECT * FROM sessions WHERE id = ? AND channel = ? AND channel_id = ?
@@ -412,7 +412,7 @@ export class SessionManager {
     return result.changes > 0;
   }
 
-  async createNewSession(channel: 'feishu' | 'aun', channelId: string, projectPath: string, name?: string): Promise<Session> {
+  async createNewSession(channel: string, channelId: string, projectPath: string, name?: string): Promise<Session> {
     // 取消当前活跃会话
     this.deactivateAll(channel, channelId);
 
@@ -563,7 +563,7 @@ export class SessionManager {
     }
   }
 
-  async getSessionByUuidPrefix(channel: 'feishu' | 'aun', channelId: string, uuidPrefix: string): Promise<Session | undefined> {
+  async getSessionByUuidPrefix(channel: string, channelId: string, uuidPrefix: string): Promise<Session | undefined> {
     const rows = this.db.prepare(`
       SELECT * FROM sessions
       WHERE channel = ? AND channel_id = ? AND claude_session_id LIKE ?
@@ -577,7 +577,7 @@ export class SessionManager {
     return this.rowToSession(rows[0]);
   }
 
-  async importCliSession(channel: 'feishu' | 'aun', channelId: string, projectPath: string, claudeSessionId: string): Promise<Session> {
+  async importCliSession(channel: string, channelId: string, projectPath: string, claudeSessionId: string): Promise<Session> {
     // 检查是否已存在相同项目路径的会话
     const existingByPath = this.db.prepare(`
       SELECT * FROM sessions
