@@ -23,6 +23,9 @@ const MAX_CONSECUTIVE_FAILURES = 3;
 const BACKOFF_DELAY_MS = 30_000;
 const RETRY_DELAY_MS = 2_000;
 const TYPING_TICKET_TTL_MS = 5 * 60 * 1000; // 5 min cache
+const SESSION_EXPIRED_ERRCODE = -14;
+const SESSION_RETRY_DELAY_MS = 30_000;      // 短暂停：30s 后重试一次
+const SESSION_PAUSE_DURATION_MS = 10 * 60 * 1000; // 长暂停：10 分钟
 
 // ── ilink Protocol Types ────────────────────────────────────────────────────
 
@@ -135,6 +138,10 @@ export class WechatChannel {
   private getUpdatesBuf = '';
   private syncBufPath: string;
 
+  // Session expired 状态
+  private sessionPausedUntil = 0;
+  private onSessionExpired?: (message: string) => void;
+
   constructor(config: WechatConfig) {
     this.config = config;
     this.syncBufPath = path.join(resolvePaths().dataDir, 'wechat-sync-buf.txt');
@@ -144,6 +151,16 @@ export class WechatChannel {
 
   onMessage(handler: WechatMessageHandler): void {
     this.messageHandler = handler;
+  }
+
+  /** 注册 session 过期通知回调（用于跨渠道通知用户） */
+  onSessionExpiredNotify(handler: (message: string) => void): void {
+    this.onSessionExpired = handler;
+  }
+
+  /** 当前是否处于 session 暂停状态 */
+  isSessionPaused(): boolean {
+    return Date.now() < this.sessionPausedUntil;
   }
 
   async connect(): Promise<void> {
@@ -182,6 +199,13 @@ export class WechatChannel {
   async sendMessage(to: string, text: string): Promise<void> {
     if (!text || text.trim() === '') {
       logger.warn('[WeChat] Attempted to send empty message, skipping');
+      return;
+    }
+
+    // Session 暂停期间拒绝发送
+    if (this.isSessionPaused()) {
+      const remainingMin = Math.ceil((this.sessionPausedUntil - Date.now()) / 60_000);
+      logger.warn(`[WeChat] Session paused, ${remainingMin}min remaining, dropping outbound to ${to}`);
       return;
     }
 
@@ -256,6 +280,68 @@ export class WechatChannel {
           (resp.ret !== undefined && resp.ret !== 0) ||
           (resp.errcode !== undefined && resp.errcode !== 0);
         if (isError) {
+          // Session expired 专用处理
+          const isSessionExpired =
+            resp.errcode === SESSION_EXPIRED_ERRCODE || resp.ret === SESSION_EXPIRED_ERRCODE;
+
+          if (isSessionExpired) {
+            consecutiveFailures = 0;
+            logger.error(`[WeChat] Session expired (errcode=${resp.errcode}), retrying in ${SESSION_RETRY_DELAY_MS / 1000}s...`);
+
+            // 短暂停后重试一次
+            await this.sleep(SESSION_RETRY_DELAY_MS, signal);
+            if (signal.aborted) return;
+
+            // 重试 getupdates
+            try {
+              const retryBody = JSON.stringify({
+                get_updates_buf: this.getUpdatesBuf,
+                base_info: { channel_version: CHANNEL_VERSION },
+              });
+              const retryRaw = await this.apiFetch('ilink/bot/getupdates', retryBody, nextTimeoutMs, signal);
+              const retryResp: GetUpdatesResp = JSON.parse(retryRaw);
+              const retryExpired =
+                retryResp.errcode === SESSION_EXPIRED_ERRCODE || retryResp.ret === SESSION_EXPIRED_ERRCODE;
+
+              if (!retryExpired) {
+                // 恢复成功，静默继续
+                logger.info('[WeChat] Session recovered after retry');
+                // 把 retryResp 当正常响应处理（更新游标和消息）
+                if (retryResp.get_updates_buf) {
+                  this.getUpdatesBuf = retryResp.get_updates_buf;
+                  try { fs.writeFileSync(this.syncBufPath, this.getUpdatesBuf, 'utf-8'); } catch {}
+                }
+                for (const msg of retryResp.msgs ?? []) {
+                  await this.handleInboundMessage(msg);
+                }
+                continue;
+              }
+            } catch (retryErr) {
+              if (signal.aborted) return;
+              logger.error('[WeChat] Retry after session expired also failed:', retryErr);
+            }
+
+            // 重试仍失败，进入长暂停
+            const pauseMin = SESSION_PAUSE_DURATION_MS / 60_000;
+            this.sessionPausedUntil = Date.now() + SESSION_PAUSE_DURATION_MS;
+            logger.error(`[WeChat] Session still expired, pausing for ${pauseMin}min`);
+
+            // 通知用户（通过其他渠道）
+            if (this.onSessionExpired) {
+              this.onSessionExpired(
+                `⚠️ 微信 token 已过期，通道暂停 ${pauseMin} 分钟后自动重试。\n如需立即恢复，请运行: evolclaw init wechat`
+              );
+            }
+
+            await this.sleep(SESSION_PAUSE_DURATION_MS, signal);
+            if (signal.aborted) return;
+
+            // 长暂停结束，清除暂停状态，循环自动重试
+            this.sessionPausedUntil = 0;
+            logger.info('[WeChat] Session pause ended, resuming polling');
+            continue;
+          }
+
           consecutiveFailures++;
           logger.error(`[WeChat] getUpdates failed: ret=${resp.ret} errcode=${resp.errcode} errmsg=${resp.errmsg ?? ''}`);
           if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
@@ -282,31 +368,7 @@ export class WechatChannel {
 
         // 处理消息
         for (const msg of resp.msgs ?? []) {
-          if (msg.message_type !== MSG_TYPE_USER) continue;
-
-          const text = extractTextFromMessage(msg);
-          if (!text) continue;
-
-          const fromUserId = msg.from_user_id ?? '';
-
-          // 缓存 context_token
-          if (msg.context_token) {
-            this.contextTokenCache.set(fromUserId, msg.context_token);
-          }
-
-          logger.info(`[WeChat] Received: from=${fromUserId} text=${text.slice(0, 50)}...`);
-
-          // 发送 typing 指示器（异步，不阻塞）
-          this.acknowledgeMessage(fromUserId, msg.context_token).catch(() => {});
-
-          // 回调主流程
-          if (this.messageHandler) {
-            try {
-              await this.messageHandler(fromUserId, text, fromUserId);
-            } catch (err) {
-              logger.error('[WeChat] Message handler error:', err);
-            }
-          }
+          await this.handleInboundMessage(msg);
         }
       } catch (err) {
         if (signal.aborted) return;
@@ -318,6 +380,36 @@ export class WechatChannel {
         } else {
           await this.sleep(RETRY_DELAY_MS, signal);
         }
+      }
+    }
+  }
+
+  // ── Inbound Message Handler ──────────────────────────────────────────
+
+  private async handleInboundMessage(msg: WeixinMessage): Promise<void> {
+    if (msg.message_type !== MSG_TYPE_USER) return;
+
+    const text = extractTextFromMessage(msg);
+    if (!text) return;
+
+    const fromUserId = msg.from_user_id ?? '';
+
+    // 缓存 context_token
+    if (msg.context_token) {
+      this.contextTokenCache.set(fromUserId, msg.context_token);
+    }
+
+    logger.info(`[WeChat] Received: from=${fromUserId} text=${text.slice(0, 50)}...`);
+
+    // 发送 typing 指示器（异步，不阻塞）
+    this.acknowledgeMessage(fromUserId, msg.context_token).catch(() => {});
+
+    // 回调主流程
+    if (this.messageHandler) {
+      try {
+        await this.messageHandler(fromUserId, text, fromUserId);
+      } catch (err) {
+        logger.error('[WeChat] Message handler error:', err);
       }
     }
   }

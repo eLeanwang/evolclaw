@@ -194,6 +194,21 @@ async function main() {
     processor.registerChannel(wechatAdapter);
     cmdHandler.registerAdapter(wechatAdapter);
 
+    // Session 过期通知（通过 Feishu 等其他渠道告知用户）
+    wechat.onSessionExpiredNotify(async (message) => {
+      // 尝试通过已注册的 Feishu owner 通知
+      const feishuOwner = config.owners?.feishu;
+      if (feishuOwner) {
+        try {
+          // Feishu owner ID 是 open_id，但 sendMessage 需要 chat_id
+          // 这里只记日志，因为 owner 的 chat_id 需要从 session 中获取
+          logger.warn(`[WeChat] ${message}`);
+        } catch {}
+      } else {
+        logger.warn(`[WeChat] ${message}`);
+      }
+    });
+
     wechat.onMessage(async (channelId, content, userId) => {
       content = content.trim();
 
