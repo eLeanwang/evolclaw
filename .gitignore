@@ -1,4 +1,5 @@
 # 配置文件（包含敏感信息）
+config.toml
 data/evolclaw.json
 data/evolclaw.json.backup
 
@@ -13,6 +14,9 @@ data/*.log
 
 # 运行时文件
 data/restart-pending.json
+data/restart-confirm-*.json
+data/wechat-*.txt
+data/wechat-*.json
 
 # Node.js
 node_modules/
