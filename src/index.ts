@@ -3,6 +3,7 @@ import { SessionManager } from './core/session-manager.js';
 import { AgentRunner } from './core/agent-runner.js';
 import { FeishuChannel } from './channels/feishu.js';
 import { AUNChannel } from './channels/aun.js';
+import { WechatChannel } from './channels/wechat.js';
 import { MessageProcessor } from './core/message-processor.js';
 import { MessageQueue } from './core/message-queue.js';
 import { MessageCache } from './core/message-cache.js';
@@ -176,6 +177,60 @@ async function main() {
   processor.registerChannel(aunAdapter);
   cmdHandler.registerAdapter(aunAdapter);
 
+  // ── WeChat 渠道（条件初始化）──
+  let wechat: WechatChannel | null = null;
+
+  if (config.wechat?.enabled && config.wechat?.token) {
+    wechat = new WechatChannel({
+      baseUrl: config.wechat.baseUrl || 'https://ilinkai.weixin.qq.com',
+      token: config.wechat.token,
+    });
+
+    const wechatAdapter: ChannelAdapter = {
+      name: 'wechat',
+      sendText: (channelId, text) => wechat!.sendMessage(channelId, text),
+    };
+
+    processor.registerChannel(wechatAdapter);
+    cmdHandler.registerAdapter(wechatAdapter);
+
+    wechat.onMessage(async (channelId, content, userId) => {
+      content = content.trim();
+
+      // 首次交互自动绑定主人
+      if (userId && !config.owners?.wechat) {
+        const { setOwner } = await import('./config.js');
+        setOwner(config, 'wechat', userId);
+        logger.info(`[Owner] Auto-bound WeChat owner: ${userId}`);
+      }
+
+      // 命令快速路径
+      if (cmdHandler.isCommand(content)) {
+        const cmdResult = await cmdHandler.handle(content, 'wechat', channelId, undefined, userId);
+        if (cmdResult !== null) {
+          if (cmdResult) {
+            try {
+              await wechat!.sendMessage(channelId, cmdResult);
+            } catch (error) {
+              logger.error('[WeChat] Failed to send command response:', error);
+            }
+          }
+          return;
+        }
+      }
+
+      // 获取当前项目路径
+      const session = await sessionManager.getOrCreateSession('wechat', channelId, config.projects?.defaultPath || process.cwd());
+
+      // 普通消息进入队列
+      await messageQueue.enqueue(
+        `wechat-${channelId}`,
+        { channel: 'wechat', channelId, content, timestamp: Date.now(), userId },
+        session.projectPath
+      );
+    });
+  }
+
   // Feishu 消息处理
   feishu.onMessage(async (chatId, content, images, userId, userName, messageId) => {
     content = content.trim();
@@ -253,10 +308,13 @@ async function main() {
   // 连接渠道
   const channels: string[] = [];
 
-  for (const { name, instance } of [
+  const channelInstances: { name: string; instance: { connect(): Promise<void>; disconnect(): Promise<void> } }[] = [
     { name: 'Feishu', instance: feishu },
     { name: 'AUN', instance: aun },
-  ]) {
+    ...(wechat ? [{ name: 'WeChat', instance: wechat }] : []),
+  ];
+
+  for (const { name, instance } of channelInstances) {
     try {
       await instance.connect();
       logger.info(`✓ ${name} connected`);
@@ -281,6 +339,7 @@ async function main() {
     logger.info('\n\nShutting down gracefully...');
     await feishu.disconnect();
     await aun.disconnect();
+    if (wechat) await wechat.disconnect();
     sessionManager.close();
     logger.info('✓ Shutdown complete');
     process.exit(0);
