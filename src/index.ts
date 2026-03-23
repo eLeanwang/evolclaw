@@ -72,23 +72,31 @@ async function main() {
     messageCache.cleanupExpired();
   }, 60 * 60 * 1000);
 
-  // 飞书渠道
-  const feishu = new FeishuChannel({
-    appId: config.feishu.appId,
-    appSecret: config.feishu.appSecret,
-    db: sessionManager.getDatabase()
-  });
+  // 飞书渠道（条件初始化）
+  let feishu: FeishuChannel | null = null;
 
-  // 设置项目路径提供器
-  feishu.onProjectPathRequest(async (chatId) => {
-    const session = await sessionManager.getOrCreateSession('feishu', chatId, config.projects?.defaultPath || process.cwd());
-    return path.isAbsolute(session.projectPath)
-      ? session.projectPath
-      : path.resolve(process.cwd(), session.projectPath);
-  });
+  if (config.channels?.feishu?.enabled !== false && config.channels?.feishu?.appId) {
+    feishu = new FeishuChannel({
+      appId: config.channels.feishu.appId,
+      appSecret: config.channels.feishu.appSecret,
+      db: sessionManager.getDatabase()
+    });
 
-  // AUN 渠道
-  const aun = new AUNChannel({ domain: config.aun.domain, agentName: config.aun.agentName });
+    // 设置项目路径提供器
+    feishu.onProjectPathRequest(async (chatId) => {
+      const session = await sessionManager.getOrCreateSession('feishu', chatId, config.projects?.defaultPath || process.cwd());
+      return path.isAbsolute(session.projectPath)
+        ? session.projectPath
+        : path.resolve(process.cwd(), session.projectPath);
+    });
+  }
+
+  // AUN 渠道（条件初始化）
+  let aun: AUNChannel | null = null;
+
+  if (config.channels?.aun?.enabled !== false && config.channels?.aun?.domain) {
+    aun = new AUNChannel({ domain: config.channels.aun.domain, agentName: config.channels.aun.agentName });
+  }
 
   // 创建命令处理器
   const cmdHandler = new CommandHandler(sessionManager, agentRunner, config, messageCache);
@@ -151,39 +159,43 @@ async function main() {
   // 回填 messageQueue 引用
   cmdHandler.setMessageQueue(messageQueue);
 
-  // 注册 Feishu 适配器
-  const feishuAdapter: ChannelAdapter = {
-    name: 'feishu',
-    sendText: (channelId, text, options) => feishu.sendMessage(channelId, text, options),
-    sendFile: (channelId, filePath) => feishu.sendFile(channelId, filePath),
-    isGroupChat: (channelId) => feishu.getChatMode(channelId).then(m => m === 'group'),
-  };
+  // 注册 Feishu 适配器（如果已初始化）
+  if (feishu) {
+    const feishuAdapter: ChannelAdapter = {
+      name: 'feishu',
+      sendText: (channelId, text, options) => feishu!.sendMessage(channelId, text, options),
+      sendFile: (channelId, filePath) => feishu!.sendFile(channelId, filePath),
+      isGroupChat: (channelId) => feishu!.getChatMode(channelId).then(m => m === 'group'),
+    };
 
-  const feishuOptions: ChannelOptions = {
-    systemPromptAppend: '[重要系统功能] 你可以通过飞书发送文件给用户。方法：在响应中使用 [SEND_FILE:文件路径] 标记。示例：文件已准备好！[SEND_FILE:/path/to/file.txt] 系统会自动上传并发送。',
-    fileMarkerPattern: /\[SEND_FILE:([^\]]+)\]/g,
-    supportsImages: true,
-  };
+    const feishuOptions: ChannelOptions = {
+      systemPromptAppend: '[重要系统功能] 你可以通过飞书发送文件给用户。方法：在响应中使用 [SEND_FILE:文件路径] 标记。示例：文件已准备好！[SEND_FILE:/path/to/file.txt] 系统会自动上传并发送。',
+      fileMarkerPattern: /\[SEND_FILE:([^\]]+)\]/g,
+      supportsImages: true,
+    };
 
-  processor.registerChannel(feishuAdapter, feishuOptions);
-  cmdHandler.registerAdapter(feishuAdapter);
+    processor.registerChannel(feishuAdapter, feishuOptions);
+    cmdHandler.registerAdapter(feishuAdapter);
+  }
 
-  // 注册 AUN 适配器
-  const aunAdapter: ChannelAdapter = {
-    name: 'aun',
-    sendText: (channelId, text) => aun.sendMessage(channelId, text),
-  };
+  // 注册 AUN 适配器（如果已初始化）
+  if (aun) {
+    const aunAdapter: ChannelAdapter = {
+      name: 'aun',
+      sendText: (channelId, text) => aun!.sendMessage(channelId, text),
+    };
 
-  processor.registerChannel(aunAdapter);
-  cmdHandler.registerAdapter(aunAdapter);
+    processor.registerChannel(aunAdapter);
+    cmdHandler.registerAdapter(aunAdapter);
+  }
 
   // ── WeChat 渠道（条件初始化）──
   let wechat: WechatChannel | null = null;
 
-  if (config.wechat?.enabled && config.wechat?.token) {
+  if (config.channels?.wechat?.enabled && config.channels?.wechat?.token) {
     wechat = new WechatChannel({
-      baseUrl: config.wechat.baseUrl || 'https://ilinkai.weixin.qq.com',
-      token: config.wechat.token,
+      baseUrl: config.channels.wechat.baseUrl || 'https://ilinkai.weixin.qq.com',
+      token: config.channels.wechat.token,
     });
 
     const wechatAdapter: ChannelAdapter = {
@@ -197,7 +209,7 @@ async function main() {
     // Session 过期通知（通过 Feishu 等其他渠道告知用户）
     wechat.onSessionExpiredNotify(async (message) => {
       // 尝试通过已注册的 Feishu owner 通知
-      const feishuOwner = config.owners?.feishu;
+      const feishuOwner = config.channels?.feishu?.owner;
       if (feishuOwner) {
         try {
           // Feishu owner ID 是 open_id，但 sendMessage 需要 chat_id
@@ -213,7 +225,7 @@ async function main() {
       content = content.trim();
 
       // 首次交互自动绑定主人
-      if (userId && !config.owners?.wechat) {
+      if (userId && !config.channels?.wechat?.owner) {
         const { setOwner } = await import('./config.js');
         setOwner(config, 'wechat', userId);
         logger.info(`[Owner] Auto-bound WeChat owner: ${userId}`);
@@ -247,91 +259,102 @@ async function main() {
   }
 
   // Feishu 消息处理
-  feishu.onMessage(async (chatId, content, images, userId, userName, messageId) => {
-    content = content.trim();
+  if (feishu) {
+    feishu.onMessage(async (chatId, content, images, userId, userName, messageId) => {
+      content = content.trim();
 
-    // 首次交互自动绑定主人
-    if (userId && !config.owners?.feishu) {
-      const { setOwner } = await import('./config.js');
-      setOwner(config, 'feishu', userId);
-      logger.info(`[Owner] Auto-bound owner: ${userName} (${userId})`);
-    }
-
-    // 命令立即处理，不进入队列
-    if (cmdHandler.isCommand(content)) {
-      const cmdResult = await cmdHandler.handle(content, 'feishu', chatId, undefined, userId);
-      if (cmdResult !== null) {
-        if (cmdResult) {
-          try {
-            await feishu.sendMessage(chatId, cmdResult, { forceText: true });
-          } catch (error) {
-            logger.error('[Feishu] Failed to send command response:', error);
-          }
-        }
-        return;
+      // 首次交互自动绑定主人
+      if (userId && !config.channels?.feishu?.owner) {
+        const { setOwner } = await import('./config.js');
+        setOwner(config, 'feishu', userId);
+        logger.info(`[Owner] Auto-bound owner: ${userName} (${userId})`);
       }
-    }
 
-    // 获取当前项目路径
-    const session = await sessionManager.getOrCreateSession('feishu', chatId, config.projects?.defaultPath || process.cwd());
+      // 命令立即处理，不进入队列
+      if (cmdHandler.isCommand(content)) {
+        const cmdResult = await cmdHandler.handle(content, 'feishu', chatId, undefined, userId);
+        if (cmdResult !== null) {
+          if (cmdResult) {
+            try {
+              await feishu!.sendMessage(chatId, cmdResult, { forceText: true });
+            } catch (error) {
+              logger.error('[Feishu] Failed to send command response:', error);
+            }
+          }
+          return;
+        }
+      }
 
-    // 群聊消息添加用户名前缀
-    const chatMode = await feishu.getChatMode(chatId);
-    if (chatMode === 'group' && userName) {
-      content = `[${userName}] ${content}`;
-    }
+      // 获取当前项目路径
+      const session = await sessionManager.getOrCreateSession('feishu', chatId, config.projects?.defaultPath || process.cwd());
 
-    // 普通消息进入队列
-    await messageQueue.enqueue(
-      `feishu-${chatId}`,
-      { channel: 'feishu', channelId: chatId, content, images, timestamp: Date.now(), userId, userName, messageId, isGroup: chatMode === 'group' },
-      session.projectPath
-    );
-  });
+      // 群聊消息添加用户名前缀
+      const chatMode = await feishu!.getChatMode(chatId);
+      if (chatMode === 'group' && userName) {
+        content = `[${userName}] ${content}`;
+      }
+
+      // 普通消息进入队列
+      await messageQueue.enqueue(
+        `feishu-${chatId}`,
+        { channel: 'feishu', channelId: chatId, content, images, timestamp: Date.now(), userId, userName, messageId, isGroup: chatMode === 'group' },
+        session.projectPath
+      );
+    });
+  }
 
   // AUN 消息处理
-  aun.onMessage(async (sessionId, content) => {
-    content = content.trim();
+  if (aun) {
+    aun.onMessage(async (sessionId, content) => {
+      content = content.trim();
 
-    // 首次交互自动绑定主人
-    if (!config.owners?.aun) {
-      const { setOwner } = await import('./config.js');
-      setOwner(config, 'aun', sessionId);
-      logger.info(`[Owner] Auto-bound AUN owner: ${sessionId}`);
-    }
-
-    // 命令立即处理，不进入队列
-    if (cmdHandler.isCommand(content)) {
-      const cmdResult = await cmdHandler.handle(content, 'aun', sessionId, undefined, sessionId);
-      if (cmdResult) {
-        await aun.sendMessage(sessionId, cmdResult);
-        return;
+      // 首次交互自动绑定主人
+      if (!config.channels?.aun?.owner) {
+        const { setOwner } = await import('./config.js');
+        setOwner(config, 'aun', sessionId);
+        logger.info(`[Owner] Auto-bound AUN owner: ${sessionId}`);
       }
-    }
 
-    // 获取当前项目路径
-    const session = await sessionManager.getOrCreateSession('aun', sessionId, config.projects?.defaultPath || process.cwd());
+      // 命令立即处理，不进入队列
+      if (cmdHandler.isCommand(content)) {
+        const cmdResult = await cmdHandler.handle(content, 'aun', sessionId, undefined, sessionId);
+        if (cmdResult) {
+          await aun!.sendMessage(sessionId, cmdResult);
+          return;
+        }
+      }
 
-    // 普通消息进入队列
-    await messageQueue.enqueue(
-      `aun-${sessionId}`,
-      { channel: 'aun', channelId: sessionId, content, timestamp: Date.now(), userId: sessionId },
-      session.projectPath
-    );
-  });
+      // 获取当前项目路径
+      const session = await sessionManager.getOrCreateSession('aun', sessionId, config.projects?.defaultPath || process.cwd());
+
+      // 普通消息进入队列
+      await messageQueue.enqueue(
+        `aun-${sessionId}`,
+        { channel: 'aun', channelId: sessionId, content, timestamp: Date.now(), userId: sessionId },
+        session.projectPath
+      );
+    });
+  }
 
   // 连接渠道
   const channels: string[] = [];
 
-  const channelInstances: { name: string; instance: { connect(): Promise<void>; disconnect(): Promise<void> } }[] = [
-    { name: 'Feishu', instance: feishu },
-    { name: 'AUN', instance: aun },
+  const channelInstances: { name: string; instance: { connect(): Promise<void>; disconnect(): Promise<void> }; timeout?: number }[] = [
+    ...(feishu ? [{ name: 'Feishu', instance: feishu, timeout: 5000 }] : []),
+    ...(aun ? [{ name: 'AUN', instance: aun }] : []),
     ...(wechat ? [{ name: 'WeChat', instance: wechat }] : []),
   ];
 
-  for (const { name, instance } of channelInstances) {
+  for (const { name, instance, timeout } of channelInstances) {
     try {
-      await instance.connect();
+      if (timeout) {
+        await Promise.race([
+          instance.connect(),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('Connection timeout')), timeout))
+        ]);
+      } else {
+        await instance.connect();
+      }
       logger.info(`✓ ${name} connected`);
       channels.push(name);
     } catch (error) {
@@ -352,8 +375,8 @@ async function main() {
   // 优雅关闭
   const shutdown = async () => {
     logger.info('\n\nShutting down gracefully...');
-    await feishu.disconnect();
-    await aun.disconnect();
+    if (feishu) await feishu.disconnect();
+    if (aun) await aun.disconnect();
     if (wechat) await wechat.disconnect();
     sessionManager.close();
     logger.info('✓ Shutdown complete');
