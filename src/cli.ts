@@ -488,18 +488,18 @@ async function cmdRestartMonitor() {
   if (started) {
     log('✓ Service restarted successfully');
     archiveSelfHealLog(p, log);
-    await notifyFeishu(p, pendingInfo, '✅ 服务重启成功！', log);
+    await notifyChannel(p, pendingInfo, '✅ 服务重启成功！', log);
     cleanupPendingFile(pendingFile, log);
     process.exit(0);
   }
 
   // 启动失败，进入 self-heal 循环
   log('❌ Service failed to start, entering self-heal loop');
-  await notifyFeishu(p, pendingInfo, '⚠️ 服务启动失败，正在尝试自动修复...', log);
+  await notifyChannel(p, pendingInfo, '⚠️ 服务启动失败，正在尝试自动修复...', log);
 
   for (let attempt = 1; attempt <= MAX_HEAL_ATTEMPTS; attempt++) {
     log(`Self-heal attempt ${attempt}/${MAX_HEAL_ATTEMPTS}`);
-    await notifyFeishu(p, pendingInfo, `🔧 自动修复中（第 ${attempt}/${MAX_HEAL_ATTEMPTS} 次）...`, log);
+    await notifyChannel(p, pendingInfo, `🔧 自动修复中（第 ${attempt}/${MAX_HEAL_ATTEMPTS} 次）...`, log);
 
     // 调用 claude CLI 修复
     const healed = await invokeClaude(p, attempt, MAX_HEAL_ATTEMPTS, log);
@@ -513,7 +513,7 @@ async function cmdRestartMonitor() {
     if (started) {
       log(`✓ Self-heal succeeded on attempt ${attempt}`);
       archiveSelfHealLog(p, log);
-      await notifyFeishu(p, pendingInfo, `✅ 自愈成功！（第 ${attempt} 次修复后恢复）`, log);
+      await notifyChannel(p, pendingInfo, `✅ 自愈成功！（第 ${attempt} 次修复后恢复）`, log);
       cleanupPendingFile(pendingFile, log);
       process.exit(0);
     }
@@ -523,7 +523,7 @@ async function cmdRestartMonitor() {
 
   // 全部失败
   log(`❌ All ${MAX_HEAL_ATTEMPTS} self-heal attempts failed`);
-  await notifyFeishu(p, pendingInfo, `❌ ${MAX_HEAL_ATTEMPTS} 次自动修复均失败，需要人工介入。\n修复记录：${p.selfHealLog}`, log);
+  await notifyChannel(p, pendingInfo, `❌ ${MAX_HEAL_ATTEMPTS} 次自动修复均失败，需要人工介入。\n修复记录：${p.selfHealLog}`, log);
   cleanupPendingFile(pendingFile, log);
   process.exit(1);
 }
@@ -680,40 +680,102 @@ function archiveSelfHealLog(
 }
 
 /**
- * 通过 Feishu API 发送通知（轻量级，不依赖 FeishuChannel）
+ * 通过对应渠道 API 发送通知（轻量级，不依赖 Channel 实例）
+ * 支持 feishu / wechat，根据 pendingInfo.channel 路由
  */
-async function notifyFeishu(
+async function notifyChannel(
   p: ReturnType<typeof resolvePaths>,
   pendingInfo: { channel: string; channelId: string } | null,
   message: string,
   log: (msg: string) => void
 ) {
-  if (!pendingInfo || pendingInfo.channel !== 'feishu') return;
+  if (!pendingInfo) return;
 
-  try {
-    const configPath = path.join(p.dataDir, 'evolclaw.json');
-    if (!fs.existsSync(configPath)) return;
-    const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-    if (!config.feishu?.appId || !config.feishu?.appSecret) return;
+  const configPath = path.join(p.dataDir, 'evolclaw.json');
+  if (!fs.existsSync(configPath)) return;
+  const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
 
-    const lark = await import('@larksuiteoapi/node-sdk');
-    const client = new lark.Client({
-      appId: config.feishu.appId,
-      appSecret: config.feishu.appSecret,
-    });
+  if (pendingInfo.channel === 'feishu') {
+    try {
+      if (!config.feishu?.appId || !config.feishu?.appSecret) return;
 
-    await client.im.message.create({
-      params: { receive_id_type: 'chat_id' },
-      data: {
-        receive_id: pendingInfo.channelId,
-        msg_type: 'text',
-        content: JSON.stringify({ text: message }),
-      },
-    });
+      const lark = await import('@larksuiteoapi/node-sdk');
+      const client = new lark.Client({
+        appId: config.feishu.appId,
+        appSecret: config.feishu.appSecret,
+      });
 
-    log(`Feishu notification sent: ${message.slice(0, 50)}`);
-  } catch (error: any) {
-    log(`Feishu notification failed: ${error.message?.slice(0, 200) || error}`);
+      await client.im.message.create({
+        params: { receive_id_type: 'chat_id' },
+        data: {
+          receive_id: pendingInfo.channelId,
+          msg_type: 'text',
+          content: JSON.stringify({ text: message }),
+        },
+      });
+
+      log(`Feishu notification sent: ${message.slice(0, 50)}`);
+    } catch (error: any) {
+      log(`Feishu notification failed: ${error.message?.slice(0, 200) || error}`);
+    }
+  } else if (pendingInfo.channel === 'wechat') {
+    try {
+      if (!config.wechat?.token) return;
+
+      const crypto = await import('node:crypto');
+      const baseUrl = (config.wechat.baseUrl || 'https://ilinkai.weixin.qq.com').replace(/\/$/, '');
+      const token = config.wechat.token;
+
+      // 读取缓存的 context_token
+      const syncBufPath = path.join(p.dataDir, 'wechat-context-tokens.json');
+      let contextToken: string | undefined;
+      try {
+        if (fs.existsSync(syncBufPath)) {
+          const tokens = JSON.parse(fs.readFileSync(syncBufPath, 'utf-8'));
+          contextToken = tokens[pendingInfo.channelId];
+        }
+      } catch {}
+
+      if (!contextToken) {
+        log(`WeChat notification skipped: no context_token for ${pendingInfo.channelId}`);
+        return;
+      }
+
+      const uint32 = crypto.randomBytes(4).readUInt32BE(0);
+      const wechatUin = Buffer.from(String(uint32), 'utf-8').toString('base64');
+      const body = JSON.stringify({
+        msg: {
+          from_user_id: '',
+          to_user_id: pendingInfo.channelId,
+          client_id: `evolclaw-restart:${Date.now()}`,
+          message_type: 2,
+          message_state: 2,
+          item_list: [{ type: 1, text_item: { text: message } }],
+          context_token: contextToken,
+        },
+        base_info: { channel_version: '1.0.0' },
+      });
+
+      const res = await fetch(`${baseUrl}/ilink/bot/sendmessage`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'AuthorizationType': 'ilink_bot_token',
+          'Authorization': `Bearer ${token.trim()}`,
+          'X-WECHAT-UIN': wechatUin,
+          'Content-Length': String(Buffer.byteLength(body, 'utf-8')),
+        },
+        body,
+      });
+
+      if (res.ok) {
+        log(`WeChat notification sent: ${message.slice(0, 50)}`);
+      } else {
+        log(`WeChat notification failed: HTTP ${res.status}`);
+      }
+    } catch (error: any) {
+      log(`WeChat notification failed: ${error.message?.slice(0, 200) || error}`);
+    }
   }
 }
 

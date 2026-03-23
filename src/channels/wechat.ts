@@ -137,6 +137,7 @@ export class WechatChannel {
   private typingTicketCache = new Map<string, { ticket: string; fetchedAt: number }>();
   private getUpdatesBuf = '';
   private syncBufPath: string;
+  private contextTokensPath: string;
 
   // Session expired 状态
   private sessionPausedUntil = 0;
@@ -144,7 +145,9 @@ export class WechatChannel {
 
   constructor(config: WechatConfig) {
     this.config = config;
-    this.syncBufPath = path.join(resolvePaths().dataDir, 'wechat-sync-buf.txt');
+    const dataDir = resolvePaths().dataDir;
+    this.syncBufPath = path.join(dataDir, 'wechat-sync-buf.txt');
+    this.contextTokensPath = path.join(dataDir, 'wechat-context-tokens.json');
   }
 
   // ── Public API ──────────────────────────────────────────────────────────
@@ -397,6 +400,7 @@ export class WechatChannel {
     // 缓存 context_token
     if (msg.context_token) {
       this.contextTokenCache.set(fromUserId, msg.context_token);
+      this.persistContextTokens();
     }
 
     logger.info(`[WeChat] Received: from=${fromUserId} text=${text.slice(0, 50)}...`);
@@ -508,6 +512,21 @@ export class WechatChannel {
     }
 
     return headers;
+  }
+
+  // ── Persistence ────────────────────────────────────────────────────
+
+  /** 持久化 context_token 到文件，供 restart-monitor 等外部进程读取 */
+  private persistContextTokens(): void {
+    try {
+      const obj: Record<string, string> = {};
+      for (const [k, v] of this.contextTokenCache) {
+        obj[k] = v;
+      }
+      fs.writeFileSync(this.contextTokensPath, JSON.stringify(obj), 'utf-8');
+    } catch {
+      // best-effort
+    }
   }
 
   // ── Utilities ─────────────────────────────────────────────────────────
