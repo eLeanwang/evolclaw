@@ -30,9 +30,8 @@ projects/
 .claude/
 
 # 测试文件
+tests/
 test-*.js
-tests/test-output/
-tests/test-results/
 
 # 编辑器
 .vscode/
