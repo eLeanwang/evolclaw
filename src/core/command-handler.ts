@@ -149,11 +149,17 @@ export class CommandHandler {
       }
     }
 
-    // 权限检查：只有主人可以执行斜杠命令
+    // 权限检查：区分用户级命令和管理级命令
+    const { isOwner: checkOwner } = await import('../config.js');
+    const isAdmin = !userId || checkOwner(this.config, channel, userId);
+
     if (normalizedContent.startsWith('/')) {
-      const { isOwner } = await import('../config.js');
-      if (userId && !isOwner(this.config, channel, userId)) {
-        return '❌ 无权限：只有主人可以执行命令';
+      const userCommands = ['/slist', '/new', '/session', '/rename', '/name', '/status', '/help', '/s '];
+      const isUserCommand = userCommands.some(cmd =>
+        normalizedContent === cmd.trimEnd() || normalizedContent.startsWith(cmd)
+      );
+      if (!isUserCommand && !isAdmin) {
+        return '❌ 无权限：此命令仅限管理员使用';
       }
     }
 
@@ -181,6 +187,19 @@ export class CommandHandler {
 
     // /help 命令不需要会话
     if (normalizedContent === '/help') {
+      if (!isAdmin) {
+        return `可用命令：
+🔄 会话管理：
+  /new [名称] - 创建新会话（可选命名）
+  /slist - 列出当前项目的所有会话
+  /s, /session <名称> - 切换到指定会话
+  /name, /rename <新名称> - 重命名当前会话
+  /status - 显示会话状态
+
+❓ 帮助：
+  /help - 显示此帮助信息`;
+      }
+
       return `可用命令：
 📁 项目管理：
   /pwd - 显示当前项目路径
@@ -355,20 +374,31 @@ export class CommandHandler {
         }
       }
 
-      const lines = [
-        '📊 会话状态：',
-        `渠道: ${channel} / 项目: ${projectName} / 会话: ${session.name || '(未命名)'}`,
-        `会话ID: ${session.id}`,
-        `项目路径: ${session.projectPath}`,
-        `活跃状态: ${activeStatus}`,
-        `会话轮数: ${sessionTurns}`,
-        `异常计数: ${health.consecutiveErrors}`,
-        `安全模式: ${health.safeMode ? '是 ⚠️' : '否 ✓'}`,
-        `最后成功: ${timeStr}`,
-        `Claude会话: ${session.claudeSessionId || '(未初始化)'}`,
-        `创建时间: ${new Date(session.createdAt).toLocaleString('zh-CN')}`,
-        `更新时间: ${new Date(session.updatedAt).toLocaleString('zh-CN')}`
-      ];
+      const lines: string[] = [];
+      if (isAdmin) {
+        lines.push(
+          '📊 会话状态：',
+          `渠道: ${channel} / 项目: ${projectName} / 会话: ${session.name || '(未命名)'}`,
+          `会话ID: ${session.id}`,
+          `项目路径: ${session.projectPath}`,
+          `活跃状态: ${activeStatus}`,
+          `会话轮数: ${sessionTurns}`,
+          `异常计数: ${health.consecutiveErrors}`,
+          `安全模式: ${health.safeMode ? '是 ⚠️' : '否 ✓'}`,
+          `最后成功: ${timeStr}`,
+          `Claude会话: ${session.claudeSessionId || '(未初始化)'}`,
+          `创建时间: ${new Date(session.createdAt).toLocaleString('zh-CN')}`,
+          `更新时间: ${new Date(session.updatedAt).toLocaleString('zh-CN')}`
+        );
+      } else {
+        lines.push(
+          '📊 会话状态：',
+          `会话: ${session.name || '(未命名)'}`,
+          `状态: ${activeStatus}`,
+          `会话轮数: ${sessionTurns}`,
+          `最后活跃: ${timeStr}`
+        );
+      }
 
       if (health.safeMode) {
         lines.push('');
