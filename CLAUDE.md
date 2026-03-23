@@ -48,15 +48,16 @@ npm run test:hooks
 
 ### Configuration
 - Config file: `{EVOLCLAW_HOME}/data/evolclaw.json` (default: `~/.evolclaw/data/evolclaw.json`)
-- Required fields: `aun.domain`, `aun.agentName`, `projects.defaultPath`
-- `anthropic` section is entirely optional — auto-inherited from CLI config:
+- Required fields: `channels.aun.domain`, `channels.aun.agentName`, `projects.defaultPath`
+- `agents.anthropic` section is entirely optional — auto-inherited from CLI config:
   ```
-  token:   config.anthropic.apiKey  → env.ANTHROPIC_AUTH_TOKEN → ~/.claude/settings.json env.ANTHROPIC_AUTH_TOKEN
-  baseUrl: config.anthropic.baseUrl → env.ANTHROPIC_BASE_URL   → ~/.claude/settings.json env.ANTHROPIC_BASE_URL
-  model:   config.anthropic.model   → ~/.claude/settings.json model → 'sonnet'
+  token:   config.agents.anthropic.apiKey  → env.ANTHROPIC_AUTH_TOKEN → ~/.claude/settings.json env.ANTHROPIC_AUTH_TOKEN
+  baseUrl: config.agents.anthropic.baseUrl → env.ANTHROPIC_BASE_URL   → ~/.claude/settings.json env.ANTHROPIC_BASE_URL
+  model:   config.agents.anthropic.model   → ~/.claude/settings.json model → 'sonnet'
   ```
-- Feishu credentials optional (channel disabled if missing)
-- WeChat config optional: `wechat.enabled` + `wechat.token` (channel disabled if missing)
+  - Placeholder values (e.g., `your-api-key-here`, `api.anthropic.com`) are automatically ignored and fall back to environment variables
+- Feishu credentials: use `evolclaw init feishu` for QR code login (channel disabled if missing)
+- WeChat config: use `evolclaw init wechat` for QR code login (channel disabled if missing)
 - Project list: `projects.list` maps names to absolute paths
 - Development mode: set `EVOLCLAW_HOME=/home/evolclaw` to use project directory
 
@@ -513,6 +514,9 @@ evolclaw init
 
 # WeChat QR code login (writes token to evolclaw.json)
 evolclaw init wechat
+
+# Feishu QR code login (writes appId/appSecret to evolclaw.json)
+evolclaw init feishu
 
 # Start service
 evolclaw start
