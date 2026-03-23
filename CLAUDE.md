@@ -4,13 +4,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-EvolClaw is a lightweight AI Agent gateway system that connects Claude Agent SDK to messaging channels (Feishu). It uses unified message processing, a Channel Adapter pattern, and supports multi-project session management.
+EvolClaw is a lightweight AI Agent gateway system that connects Claude Agent SDK to messaging channels (Feishu, WeChat). It uses unified message processing, a Channel Adapter pattern, and supports multi-project session management.
 
 **Recent Architecture Improvements** (2026-03):
 - Unified message processing eliminates ~250 lines of duplicate code
 - Interrupt mechanism allows canceling long-running tasks
 - Channel adapter pattern makes adding new channels trivial (~15 lines)
 - StreamFlusher batches tool activities for better UX
+- WeChat ClawBot ilink channel integration (official API, HTTP long-poll)
+- Channel type decoupled from core: `Session.channel`/`Message.channel` are `string`, not enum
+- Tiered command permissions: user-level vs admin-level commands
+- Restart-monitor notifications support all channels (Feishu + WeChat)
 
 ## Development Commands
 
@@ -52,6 +56,7 @@ npm run test:hooks
   model:   config.anthropic.model   → ~/.claude/settings.json model → 'sonnet'
   ```
 - Feishu credentials optional (channel disabled if missing)
+- WeChat config optional: `wechat.enabled` + `wechat.token` (channel disabled if missing)
 - Project list: `projects.list` maps names to absolute paths
 - Development mode: set `EVOLCLAW_HOME=/home/evolclaw` to use project directory
 
@@ -63,7 +68,9 @@ All runtime data is decoupled from the package directory via `EVOLCLAW_HOME`:
 {EVOLCLAW_HOME}/                # default: ~/.evolclaw
 ├── data/
 │   ├── evolclaw.json
-│   └── sessions.db
+│   ├── sessions.db
+│   ├── wechat-sync-buf.txt      # WeChat 长轮询游标（持久化）
+│   └── wechat-context-tokens.json # WeChat context_token 缓存（供 restart-monitor 读取）
 └── logs/
     ├── evolclaw.pid
     ├── evolclaw.log
@@ -83,7 +90,7 @@ Path resolution (`src/paths.ts`):
 - `getPackageRoot()` → package installation directory (via `import.meta.url`)
 
 ### Architecture
-1. **Message Channel Layer** (`src/channels/`) - Feishu WebSocket
+1. **Message Channel Layer** (`src/channels/`) - Feishu WebSocket, WeChat HTTP long-poll
 2. **Message Queue Layer** (`src/core/message-queue.ts`) - Session-level serial processing with interrupt support
 3. **Command Processing Layer** (`src/core/command-handler.ts`) - Slash command handling (CommandHandler class)
 4. **Message Processing Layer** (`src/core/message-processor.ts`) - Unified event handling for all channels
@@ -104,7 +111,7 @@ Path resolution (`src/paths.ts`):
 - `StreamFlusher` batches tool activities in 3-second windows
 - Interrupt mechanism allows users to cancel long-running tasks
 
-**Channel Adapter Pattern**:
+**Channel Adapter Pattern** (channel-agnostic core):
 ```typescript
 interface ChannelAdapter {
   name: string;
@@ -113,6 +120,10 @@ interface ChannelAdapter {
   isGroupChat?(channelId: string): Promise<boolean>;  // 群聊检测，不实现则默认 false
 }
 ```
+
+**Channel decoupling**: Core types (`Session.channel`, `Message.channel`, `CommandHandler`) use `string`, not a union enum. Adding a new channel requires zero changes to `session-manager.ts`, `message-processor.ts`, or `command-handler.ts`. All channel-specific state (e.g., WeChat `context_token`, Feishu `replyToMessageId`) stays inside the channel implementation.
+
+**File handling dispatch**: `index.ts` uses `adapter.sendFile` capability check (not channel name) to decide whether to process `[SEND_FILE:]` markers. No `if (channel === 'feishu')` branches in core.
 
 **Message Flow**:
 ```
@@ -184,6 +195,33 @@ Channel → CommandHandler.handle() → AgentRunner.runQuery() → Extract sessi
 ```
 
 Messages starting with `/` are intercepted by `CommandHandler` before reaching the Agent.
+
+### WeChat Channel (`src/channels/wechat.ts`)
+
+**Protocol**: Official WeChat ClawBot ilink API (`ilinkai.weixin.qq.com`), same as `@tencent-weixin/openclaw-weixin`.
+
+**Message flow**: HTTP long-poll (`getupdates`) → extract text + cache `context_token` → `sendTyping` ack → callback to main pipeline → Agent processes → `sendmessage` with `context_token`.
+
+**Internal state** (channel-internal, not exposed to core):
+- `contextTokenCache: Map<string, string>` — `from_user_id → context_token` (required for every outbound send)
+- `typingTicketCache` — `from_user_id → typing_ticket` with 5min TTL
+- `getUpdatesBuf` — sync cursor, persisted to `{EVOLCLAW_HOME}/data/wechat-sync-buf.txt`
+- `context_token` also persisted to `wechat-context-tokens.json` for restart-monitor
+
+**Session expired handling** (errcode `-14`):
+1. Short pause 30s → retry once
+2. If recovered, silently resume
+3. If still expired → 10min long pause (outbound blocked via `isSessionPaused()`)
+4. After pause, auto-resume polling
+
+**Acknowledge**: `sendTyping(status=1)` on message receipt (counterpart to Feishu's ✓ reaction). Requires `typing_ticket` from `getConfig` API, cached with TTL.
+
+**Markdown**: Agent output converted to plain text via `markdownToPlainText()` before sending (WeChat doesn't render markdown).
+
+**Current limitations** (planned for future):
+- Text only (no image/file/video CDN upload/download)
+- Single chat only (ClawBot doesn't support groups yet)
+- Manual token setup via `evolclaw init wechat` (no auto-refresh on expiry)
 
 ### File Handling (Feishu Channel)
 
@@ -277,9 +315,21 @@ Tests verify:
 
 ## Available Commands
 
-EvolClaw supports slash commands for project and session management:
+EvolClaw supports slash commands with **tiered permissions**:
 
-### Project Management
+### Command Permissions
+
+| Level | Commands | Who can use |
+|-------|----------|-------------|
+| **User** | `/new` `/slist` `/s` `/session` `/name` `/rename` `/status` `/help` | All users |
+| **Admin** | `/pwd` `/plist` `/project` `/bind` `/restart` `/stop` `/model` `/clear` `/compact` `/repair` `/safe` `/fork` | Owner only |
+
+- Owner is auto-bound on first interaction per channel (stored in `config.owners`)
+- Non-admin `/help` only shows user-level commands
+- Non-admin `/status` shows simplified info (no paths, IDs, or error details)
+- Each user gets isolated sessions via unique `channelId` (Feishu `chat_id`, WeChat `from_user_id`)
+
+### Project Management (Admin)
 - `/pwd` - Show current project path
 - `/plist` - List all configured projects with session idle time
   - Shows last session activity time for each project (e.g., "2小时前", "30分钟前", "刚刚")
@@ -367,6 +417,14 @@ All commands are processed in `CommandHandler` (`src/core/command-handler.ts`) b
 
 Total code needed: ~15 lines. All event processing is handled automatically.
 
+### Adding WeChat Channel (Reference Implementation)
+WeChat uses a different transport model from Feishu (HTTP long-poll vs WebSocket push), but the adapter pattern makes this transparent to the core:
+- `WechatChannel.connect()` starts a background poll loop (not awaited)
+- `WechatChannel.sendMessage()` internally manages `context_token` lookup
+- `WechatChannel.acknowledgeMessage()` sends typing indicator (counterpart to Feishu ✓ reaction)
+- Session expired (`errcode=-14`) handled internally with retry + pause logic
+- All channel-specific state stays inside `WechatChannel`, core layer is unaware
+
 ## Important Constraints
 
 ### TypeScript Module System
@@ -416,6 +474,7 @@ Console log filtering is applied in `src/index.ts` to suppress noisy Feishu SDK 
 - `docs/multi-project-and-commands.md` - Multi-project support and command reference (v2.0)
 - `docs/multi-session-design.md` - Multi-session management design document
 - `docs/multi-session-implementation-report.md` - Implementation details and test results
+- `docs/wechat-integration-plan.md` - WeChat ilink channel integration plan and design
 - `DESIGN-v2.md` - Complete design document with technical validation results
 - `README.md` - Quick start and overview
 
@@ -439,7 +498,9 @@ Console log filtering is applied in `src/index.ts` to suppress noisy Feishu SDK 
 - `src/core/stream-flusher.ts` - Batched message sending (3s window)
 - `src/core/agent-runner.ts` - Claude Agent SDK wrapper with interrupt support
 - `src/core/session-manager.ts` - Session-to-project mapping (SQLite-backed)
-- `src/channels/feishu.ts` - Production-grade Feishu connection
+- `src/channels/feishu.ts` - Production-grade Feishu connection (WebSocket push)
+- `src/channels/wechat.ts` - WeChat ClawBot ilink channel (HTTP long-poll)
+- `src/utils/init-wechat.ts` - WeChat QR code login setup
 - `data/evolclaw.json` - Runtime configuration (not in git, contains secrets)
 
 ## Service Management
@@ -449,6 +510,9 @@ Use the `evolclaw` CLI for service control (after `npm link`):
 ```bash
 # Initialize config (creates ~/.evolclaw/data/evolclaw.json)
 evolclaw init
+
+# WeChat QR code login (writes token to evolclaw.json)
+evolclaw init wechat
 
 # Start service
 evolclaw start
@@ -493,10 +557,12 @@ When `/restart` triggers `restart-monitor` and the new process fails to start, t
 - On success: Renamed to `logs/self-heal-{timestamp}.md` (archived)
 - Next failure: Fresh `self-heal.md` = new problem; archives available for reference
 
-**Feishu Notifications**: Uses lightweight `lark.Client` directly (no FeishuChannel needed), reads credentials from `evolclaw.json` and channel info from `restart-pending.json`.
+**Channel Notifications**: `notifyChannel()` in `src/cli.ts` routes notifications by `pendingInfo.channel`:
+- Feishu: lightweight `lark.Client` directly (no FeishuChannel needed)
+- WeChat: direct `ilink/bot/sendmessage` call, reads `context_token` from `wechat-context-tokens.json`
 
 **Key functions** in `src/cli.ts`:
 - `spawnAndWaitReady()` - Spawn process + poll for ready.signal
 - `invokeClaude()` - Call `claude -p` with diagnostic prompt
 - `archiveSelfHealLog()` - Rename self-heal.md on success
-- `notifyFeishu()` - Lightweight Feishu API notification
+- `notifyChannel()` - Lightweight channel-routed notification (Feishu / WeChat)
