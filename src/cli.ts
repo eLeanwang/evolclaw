@@ -848,6 +848,12 @@ Environment:
 }
 
 // 直接运行时自动执行（node dist/cli.js ...）
-if (import.meta.url === `file://${process.argv[1]}`) {
+// 用 realpath 解析 symlink，否则 npm link 的 bin 路径与实际文件路径不匹配
+const __selfUrl = import.meta.url;
+const __argv1 = process.argv[1];
+if (__argv1 && (
+  __selfUrl === `file://${__argv1}` ||
+  __selfUrl === `file://${fs.realpathSync(__argv1)}`
+)) {
   main(process.argv.slice(2));
 }

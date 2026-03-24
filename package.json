@@ -5,17 +5,16 @@
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "evolclaw": "./bin/evolclaw"
+    "evolclaw": "./dist/cli.js"
   },
   "files": [
     "dist/",
     "!dist/experimental/",
-    "bin/",
     "data/evolclaw.sample.json"
   ],
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "tsc",
+    "build": "tsc && node -e \"const f='dist/cli.js',c=require('fs').readFileSync(f,'utf8');if(!c.startsWith('#!'))require('fs').writeFileSync(f,'#!/usr/bin/env node\\n'+c)\" && chmod +x dist/cli.js",
     "start": "node dist/index.js",
     "test": "vitest run",
     "test:watch": "vitest",
