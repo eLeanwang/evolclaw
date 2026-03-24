@@ -235,3 +235,11 @@ evolclaw/
 ## 许可证
 
 MIT — 详见 [LICENSE](LICENSE) 声明
+
+## 交流群
+
+EvolClaw 正在内测中，欢迎加入微信群交流使用体验、反馈问题或参与讨论：
+
+<img src="assets/wechat-group-qr.jpeg" width="300" alt="EvolClaw 内测群二维码" />
+
+> 二维码过期后可在 [Issues](https://github.com/eLeanwang/evolclaw/issues) 中留言，我会更新邀请链接。
