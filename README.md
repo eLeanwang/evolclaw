@@ -215,14 +215,6 @@ evolclaw/
 - `/model` - 显示当前模型和可用列表
 - `/model <model-id>` - 切换模型
 
-## TODO
-
-- [ ] Windows 系统 CLI 命令支持
-- [ ] 微信插件支持图片/文件的收发
-- [ ] 自动授权可配置（自动放行/自动拒绝）
-- [ ] 手动授权支持（飞书卡片/文本回复）
-- [ ] ACP 协议支持（接入 Codex / Gemini CLI）
-
 ## 技术栈
 
 - **运行时**：Node.js >= 22 + TypeScript（ES modules）
@@ -230,6 +222,14 @@ evolclaw/
 - **消息渠道**：飞书（@larksuiteoapi/node-sdk）、微信（ClawBot ilink API）
 - **数据存储**：node:sqlite（内置模块）+ JSONL（CLI 共用）
 - **测试框架**：Vitest
+
+## TODO
+
+- [ ] Windows 系统 CLI 命令支持
+- [ ] 微信插件支持图片/文件的收发
+- [ ] 自动授权可配置（自动放行/自动拒绝）
+- [ ] 手动授权支持（飞书卡片/文本回复）
+- [ ] ACP 协议支持（接入 Codex / Gemini CLI）
 
 
 ## 许可证
