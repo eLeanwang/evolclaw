@@ -1,39 +1,35 @@
 {
-  "anthropic": {
-    "baseUrl": "https://api.anthropic.com",
-    "apiKey": "your-api-key-here",
-    "model": "sonnet"
+  "agents": {
+    "anthropic": {
+      "model": "sonnet"
+    }
   },
-  "feishu": {
-    "appId": "your-feishu-app-id",
-    "appSecret": "your-feishu-app-secret"
-  },
-  "aun": {
-    "domain": "your-aun-domain",
-    "agentName": "your-agent-name"
+  "channels": {
+    "feishu": {
+      "enabled": true,
+      "appId": "",
+      "appSecret": ""
+    },
+    "wechat": {
+      "enabled": false,
+      "baseUrl": "https://ilinkai.weixin.qq.com",
+      "token": ""
+    },
+    "aun": {
+      "enabled": true,
+      "domain": "your-aun-domain",
+      "agentName": "your-agent-name"
+    }
   },
   "projects": {
     "defaultPath": "/path/to/default/project",
     "autoCreate": true,
-    "list": {
-      "project1": "/path/to/project1",
-      "project2": "/path/to/project2"
-    }
-  },
-  "flushDelay": 4000,
-  "timeout": {
-    "idle": 120000
+    "list": {}
   },
   "idleMonitor": {
     "enabled": true,
+    "timeout": 120000,
     "safeModeThreshold": 3
   },
-  "sdk": {
-    "useSettingSources": true,
-    "agentProgressSummaries": true
-  },
-  "owners": {
-    "feishu": "",
-    "aun": ""
-  }
+  "flushDelay": 4000
 }
