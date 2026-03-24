@@ -1,24 +1,32 @@
 export interface Config {
-  anthropic?: {
-    apiKey?: string;
-    baseUrl?: string;
-    model?: string;
+  agents?: {
+    anthropic?: {
+      apiKey?: string;
+      baseUrl?: string;
+      model?: string;
+      useSettingSources?: boolean;        // 使用 SDK 原生配置加载，默认 true
+      agentProgressSummaries?: boolean;   // 启用 AI 生成的子任务进度摘要，默认 true
+    };
   };
-  claude?: {
-    apiKey: string;
-  };
-  feishu: {
-    appId: string;
-    appSecret: string;
-  };
-  aun: {
-    domain: string;
-    agentName: string;
-  };
-  wechat?: {
-    enabled?: boolean;
-    baseUrl?: string;
-    token?: string;
+  channels?: {
+    feishu?: {
+      enabled?: boolean;
+      appId: string;
+      appSecret: string;
+      owner?: string;
+    };
+    wechat?: {
+      enabled?: boolean;
+      baseUrl?: string;
+      token?: string;
+      owner?: string;
+    };
+    aun?: {
+      enabled?: boolean;
+      domain: string;
+      agentName: string;
+      owner?: string;
+    };
   };
   projects?: {
     defaultPath: string;
@@ -26,18 +34,11 @@ export interface Config {
     list?: Record<string, string>;
   };
   flushDelay?: number;  // 消息批量发送间隔(ms)，默认 4000
-  timeout?: {
-    idle?: number;  // 无输出超时(ms)，默认 120000
-  };
   idleMonitor?: {
     enabled?: boolean;              // 是否启用空闲监控，默认 true
     safeModeThreshold?: number;     // 连续错误几次进入安全模式，默认 3；设为 0 关闭 safe mode
+    timeout?: number;               // 无输出超时(ms)，默认 120000
   };
-  sdk?: {
-    useSettingSources?: boolean;        // 使用 SDK 原生配置加载，默认 true
-    agentProgressSummaries?: boolean;   // 启用 AI 生成的子任务进度摘要，默认 true
-  };
-  owners?: Record<string, string>;
 }
 
 export interface Session {

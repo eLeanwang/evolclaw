@@ -49,7 +49,7 @@ export class MessageProcessor {
   async processMessage(message: Message): Promise<void> {
     const isGroup = message.isGroup ?? false;
     this.currentIsGroup = isGroup;
-    const idleMs = this.config.timeout?.idle ?? 120000;
+    const idleMs = this.config.idleMonitor?.timeout ?? 120000;
     const streamKey = `${message.channel}-${message.channelId}`;
     const channelInfo = this.channels.get(message.channel);
 

@@ -245,8 +245,9 @@ export class CommandHandler {
         return `❌ 无效的模型ID: ${args}\n\n可用模型：\n${modelList}`;
       }
 
-      if (!this.config.anthropic) this.config.anthropic = {};
-      this.config.anthropic.model = args;
+      if (!this.config.agents) this.config.agents = {};
+      if (!this.config.agents.anthropic) this.config.agents.anthropic = {};
+      this.config.agents.anthropic.model = args;
       saveConfig(this.config);
       this.agentRunner.setModel(args);
 

@@ -133,8 +133,8 @@ export class AgentRunner {
       return {};
     };
 
-    const useSettingSources = this.config?.sdk?.useSettingSources !== false;
-    const enableSummaries = this.config?.sdk?.agentProgressSummaries !== false;
+    const useSettingSources = this.config?.agents?.anthropic?.useSettingSources !== false;
+    const enableSummaries = this.config?.agents?.anthropic?.agentProgressSummaries !== false;
 
     // 公共 options（新旧模式共用）
     const commonOptions = {

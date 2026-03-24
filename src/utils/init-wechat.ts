@@ -55,6 +55,60 @@ async function pollQRStatus(baseUrl: string, qrcode: string): Promise<QRStatusRe
   }
 }
 
+export async function runWechatQrFlow(): Promise<{ baseUrl: string; token: string } | null> {
+  const qrResp = await fetchQRCode(DEFAULT_BASE_URL);
+
+  try {
+    const qrterm = await import('qrcode-terminal');
+    await new Promise<void>(resolve => {
+      qrterm.default.generate(qrResp.qrcode_img_content, { small: true }, (qr: string) => {
+        console.log(qr);
+        resolve();
+      });
+    });
+  } catch {
+    console.log(`请在浏览器中打开此链接扫码: ${qrResp.qrcode_img_content}\n`);
+  }
+
+  console.log('请用微信扫描上方二维码...\n');
+
+  const deadline = Date.now() + LOGIN_TIMEOUT_MS;
+  let scannedPrinted = false;
+
+  while (Date.now() < deadline) {
+    const status = await pollQRStatus(DEFAULT_BASE_URL, qrResp.qrcode);
+
+    switch (status.status) {
+      case 'wait':
+        process.stdout.write('.');
+        break;
+      case 'scaned':
+        if (!scannedPrinted) {
+          console.log('\n👀 已扫码，请在微信中确认...');
+          scannedPrinted = true;
+        }
+        break;
+      case 'expired':
+        console.error('\n二维码已过期');
+        return null;
+      case 'confirmed':
+        if (!status.ilink_bot_id || !status.bot_token) {
+          console.error('\n登录失败：服务器未返回完整信息');
+          return null;
+        }
+        return {
+          baseUrl: status.baseurl || DEFAULT_BASE_URL,
+          token: status.bot_token,
+        };
+    }
+
+    await new Promise(r => setTimeout(r, 1000));
+  }
+
+  console.log('\n登录超时');
+  return null;
+}
+
 export async function cmdInitWechat(): Promise<void> {
   const p = resolvePaths();
 
@@ -66,7 +120,7 @@ export async function cmdInitWechat(): Promise<void> {
   const config = JSON.parse(fs.readFileSync(p.config, 'utf-8'));
 
   // 检查已有配置
-  if (config.wechat?.token) {
+  if (config.channels?.wechat?.token) {
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
     try {
       const answer = (await ask(rl, '已有微信配置，是否重新登录？[y/N] ')).trim().toLowerCase();
@@ -125,7 +179,8 @@ export async function cmdInitWechat(): Promise<void> {
         }
 
         // 写入配置
-        config.wechat = {
+        if (!config.channels) config.channels = {};
+        config.channels.wechat = {
           enabled: true,
           baseUrl: status.baseurl || DEFAULT_BASE_URL,
           token: status.bot_token,
