@@ -234,4 +234,4 @@ evolclaw/
 
 ## 许可证
 
-[MIT](LICENSE)
+MIT — 详见 [LICENSE](LICENSE) 声明
