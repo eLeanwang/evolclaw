@@ -32,6 +32,9 @@ async function npmInstallGlobal(pkg: string): Promise<void> {
     await execFileAsync('npm', ['install', '-g', pkg], { timeout: 120000 });
   } catch (e: any) {
     if (e.stderr?.includes('EACCES') || e.message?.includes('EACCES')) {
+      if (isWindows) {
+        throw new Error('权限不足。请以管理员身份运行 PowerShell 或 CMD，然后重试');
+      }
       await execFileAsync('sudo', ['npm', 'install', '-g', pkg], { timeout: 120000 });
     } else {
       throw e;
@@ -50,6 +53,9 @@ async function sudoExec(cmd: string, args: string[]): Promise<void> {
     await execFileAsync(cmd, args, { timeout: 120000, env });
   } catch (e: any) {
     if (e.stderr?.includes('EACCES') || e.message?.includes('EACCES') || e.code === 'EACCES') {
+      if (isWindows) {
+        throw new Error('权限不足。请以管理员身份运行 PowerShell 或 CMD，然后重试');
+      }
       await execFileAsync('sudo', [cmd, ...args], { timeout: 120000, env });
     } else {
       throw e;
