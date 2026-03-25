@@ -670,6 +670,9 @@ export class MessageProcessor {
     // 纯标点/特殊字符（非路径字符）
     if (/^[.\s…]+$/.test(filePath)) return true;
 
+    // 含正则/代码特殊字符（Agent 在说明中引用了代码或正则表达式）
+    if (/[\\[\]{}*+?|^$]/.test(filePath)) return true;
+
     return false;
   }
 }

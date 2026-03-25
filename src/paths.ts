@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { fileURLToPath } from 'url';
 
 let _root: string | null = null;
 
@@ -44,5 +45,5 @@ export function ensureDataDirs(): void {
 }
 
 export function getPackageRoot(): string {
-  return path.resolve(new URL('.', import.meta.url).pathname, '..');
+  return path.resolve(fileURLToPath(new URL('.', import.meta.url)), '..');
 }

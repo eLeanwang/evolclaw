@@ -14,7 +14,7 @@
   ],
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "tsc && node -e \"const f='dist/cli.js',c=require('fs').readFileSync(f,'utf8');if(!c.startsWith('#!'))require('fs').writeFileSync(f,'#!/usr/bin/env node\\n'+c)\" && chmod +x dist/cli.js",
+    "build": "tsc && node -e \"const f='dist/cli.js',c=require('fs').readFileSync(f,'utf8');if(!c.startsWith('#!'))require('fs').writeFileSync(f,'#!/usr/bin/env node\\n'+c)\" && node -e \"try{require('child_process').execFileSync('chmod',['+x','dist/cli.js'])}catch{}\"",
     "start": "node dist/index.js",
     "test": "vitest run",
     "test:watch": "vitest",

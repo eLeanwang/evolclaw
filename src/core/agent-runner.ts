@@ -7,6 +7,7 @@ import os from 'os';
 import { MessageStream, ImageData } from './message-stream.js';
 import { logger } from '../utils/logger.js';
 import { canUseTool } from '../utils/permission.js';
+import { encodePath } from '../utils/platform.js';
 
 export class AgentRunner {
   private apiKey: string;
@@ -76,8 +77,8 @@ export class AgentRunner {
     // 验证会话文件是否存在且有效（仅在非安全模式且有 claudeSessionId 时）
     if (claudeSessionId && !skipResume) {
       const homeDir = os.homedir();
-      const encodedPath = projectPath.replace(/\//g, '-');
-      const sessionFile = path.join(homeDir, '.claude', 'projects', encodedPath, `${claudeSessionId}.jsonl`);
+      const encodedProjectPath = encodePath(projectPath);
+      const sessionFile = path.join(homeDir, '.claude', 'projects', encodedProjectPath, `${claudeSessionId}.jsonl`);
 
       let isValid = false;
       if (fs.existsSync(sessionFile)) {

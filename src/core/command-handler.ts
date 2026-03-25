@@ -539,7 +539,7 @@ export class CommandHandler {
       const processingProject = this.messageQueue.getProcessingProject(sessionKey);
       const queueLength = this.messageQueue.getQueueLength(sessionKey);
 
-      const normalizePath = (p: string) => p.replace(/\/+$/, '');
+      const normalizePath = (p: string) => p.replace(/[/\\]+$/, '');
 
       for (const [name, projectPath] of Object.entries(this.projects)) {
         const isCurrent = session?.projectPath === projectPath;

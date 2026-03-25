@@ -3,6 +3,7 @@ import { Session } from '../types.js';
 import { ensureDir } from '../config.js';
 import { resolvePaths } from '../paths.js';
 import { logger } from '../utils/logger.js';
+import { encodePath } from '../utils/platform.js';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
@@ -21,7 +22,7 @@ export class SessionManager {
   }
 
   private getProjectDirName(projectPath: string): string {
-    return projectPath.replace(/\//g, '-');
+    return encodePath(projectPath);
   }
 
   private getSessionFilePath(projectPath: string, sessionId: string): string {
@@ -70,12 +71,12 @@ export class SessionManager {
 
   private extractUserMessageText(messageContent: any): string | null {
     if (typeof messageContent === 'string') {
-      const text = messageContent.trim();
+      const text = messageContent.trim().replace(/\s+/g, ' ');
       return text.substring(0, 50) + (text.length > 50 ? '...' : '');
     } else if (Array.isArray(messageContent)) {
       const textContent = messageContent.find((c: any) => c.type === 'text');
       if (textContent?.text) {
-        const text = textContent.text.trim();
+        const text = textContent.text.trim().replace(/\s+/g, ' ');
         return text.substring(0, 50) + (text.length > 50 ? '...' : '');
       }
     }

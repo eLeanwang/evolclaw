@@ -10,6 +10,17 @@ import { resolveRoot, resolvePaths, ensureDataDirs, getPackageRoot } from '../pa
 
 const execFileAsync = promisify(execFile);
 
+const isWindows = process.platform === 'win32';
+
+function whichCmd(cmd: string): boolean {
+  try {
+    execFileSync(isWindows ? 'where' : 'which', [cmd], { encoding: 'utf-8', stdio: 'pipe' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // ==================== Helpers ====================
 
 function ask(rl: readline.Interface, question: string): Promise<string> {
@@ -59,12 +70,15 @@ async function checkEnvironment(rl: readline.Interface): Promise<boolean> {
     console.log(`  ✗ Node.js v${process.versions.node} — 需要 >= 22（node:sqlite 依赖）`);
     // 检测 nvm
     // 检测 bash 是否存在（nvm 和 n 都依赖 bash）
-    let hasBash = false;
-    try { execFileSync('which', ['bash'], { encoding: 'utf-8' }); hasBash = true; } catch {}
+    const hasBash = whichCmd('bash');
 
     if (!hasBash) {
-      console.log('  ⚠ 当前环境没有 bash（Alpine 容器？），无法自动升级 Node.js');
-      console.log('  → 请手动升级: apk add nodejs-current 或重建容器使用 node:22-alpine');
+      if (isWindows) {
+        console.log('  ⚠ Windows 环境，请从 https://nodejs.org 下载安装 Node.js 22+');
+      } else {
+        console.log('  ⚠ 当前环境没有 bash（Alpine 容器？），无法自动升级 Node.js');
+        console.log('  → 请手动升级: apk add nodejs-current 或重建容器使用 node:22-alpine');
+      }
       return false;
     }
 
@@ -89,8 +103,7 @@ async function checkEnvironment(rl: readline.Interface): Promise<boolean> {
       }
     } else {
       // 检测 n
-      let hasN = false;
-      try { execFileSync('which', ['n'], { encoding: 'utf-8' }); hasN = true; } catch {}
+      const hasN = whichCmd('n');
       if (hasN) {
         const answer = (await ask(rl, '  → 是否通过 n 升级到 Node.js 22？[Y/n] ')).trim().toLowerCase();
         if (answer === 'n' || answer === 'no') {
@@ -131,44 +144,44 @@ async function checkEnvironment(rl: readline.Interface): Promise<boolean> {
 
   // claude CLI >= 2.1.32
   const MIN_CLAUDE_VER = [2, 1, 32];
-  let claudeInstalled = false;
-  try {
-    execFileSync('which', ['claude'], { encoding: 'utf-8' });
-    claudeInstalled = true;
-    const verOutput = execFileSync('claude', ['--version'], { encoding: 'utf-8' }).trim();
-    const verMatch = verOutput.match(/^(\d+\.\d+\.\d+)/);
-    if (verMatch) {
-      const parts = verMatch[1].split('.').map(Number);
-      const isOk = parts[0] > MIN_CLAUDE_VER[0]
-        || (parts[0] === MIN_CLAUDE_VER[0] && parts[1] > MIN_CLAUDE_VER[1])
-        || (parts[0] === MIN_CLAUDE_VER[0] && parts[1] === MIN_CLAUDE_VER[1] && parts[2] >= MIN_CLAUDE_VER[2]);
-      if (isOk) {
-        console.log(`  ✓ claude CLI v${verMatch[1]}`);
+  const claudeInstalled = whichCmd('claude');
+  if (claudeInstalled) {
+    try {
+      const verOutput = execFileSync('claude', ['--version'], { encoding: 'utf-8' }).trim();
+      const verMatch = verOutput.match(/^(\d+\.\d+\.\d+)/);
+      if (verMatch) {
+        const parts = verMatch[1].split('.').map(Number);
+        const isOk = parts[0] > MIN_CLAUDE_VER[0]
+          || (parts[0] === MIN_CLAUDE_VER[0] && parts[1] > MIN_CLAUDE_VER[1])
+          || (parts[0] === MIN_CLAUDE_VER[0] && parts[1] === MIN_CLAUDE_VER[1] && parts[2] >= MIN_CLAUDE_VER[2]);
+        if (isOk) {
+          console.log(`  ✓ claude CLI v${verMatch[1]}`);
+        } else {
+          console.log(`  ✗ claude CLI v${verMatch[1]} — 需要 >= ${MIN_CLAUDE_VER.join('.')}`);
+          const answer = (await ask(rl, '  → 是否升级 claude CLI？[Y/n] ')).trim().toLowerCase();
+          if (answer === 'n' || answer === 'no') {
+            console.log('  已取消');
+            return false;
+          }
+          console.log('  正在升级 claude CLI...');
+          try {
+            await npmInstallGlobal('@anthropic-ai/claude-code@latest');
+            console.log('  ✓ claude CLI 升级完成');
+          } catch (e: any) {
+            console.log(`  ✗ 升级失败: ${e.message?.slice(0, 200) || e}`);
+            return false;
+          }
+        }
       } else {
-        console.log(`  ✗ claude CLI v${verMatch[1]} — 需要 >= ${MIN_CLAUDE_VER.join('.')}`);
-        const answer = (await ask(rl, '  → 是否升级 claude CLI？[Y/n] ')).trim().toLowerCase();
-        if (answer === 'n' || answer === 'no') {
-          console.log('  已取消');
-          return false;
-        }
-        console.log('  正在升级 claude CLI...');
-        try {
-          await npmInstallGlobal('@anthropic-ai/claude-code@latest');
-          console.log('  ✓ claude CLI 升级完成');
-        } catch (e: any) {
-          console.log(`  ✗ 升级失败: ${e.message?.slice(0, 200) || e}`);
-          return false;
-        }
+        console.log(`  ✓ claude CLI (${verOutput})`);
       }
-    } else {
-      console.log(`  ✓ claude CLI (${verOutput})`);
+    } catch {
+      // claude command exists but --version failed
     }
-  } catch {
-    if (!claudeInstalled) {
-      console.log('  ✗ claude CLI 未找到');
-      console.log('  → 请先安装: npm install -g @anthropic-ai/claude-code');
-      return false;
-    }
+  } else {
+    console.log('  ✗ claude CLI 未找到');
+    console.log('  → 请先安装: npm install -g @anthropic-ai/claude-code');
+    return false;
   }
 
   // @anthropic-ai/claude-agent-sdk >= 0.2.75
@@ -218,6 +231,19 @@ async function checkEnvironment(rl: readline.Interface): Promise<boolean> {
 // ==================== Shell Profile ====================
 
 function setupEnvVar(home: string): void {
+  if (isWindows) {
+    // Windows: use setx to set user environment variable
+    try {
+      execFileSync('setx', ['EVOLCLAW_HOME', home], { encoding: 'utf-8', stdio: 'pipe' });
+      console.log(`  ✓ 已设置用户环境变量: EVOLCLAW_HOME=${home}`);
+      console.log('  ⚠ 请重新打开终端使其生效');
+    } catch (e: any) {
+      console.log(`  ⚠ 设置环境变量失败: ${e.message?.slice(0, 100) || e}`);
+      console.log(`  → 请手动设置环境变量 EVOLCLAW_HOME=${home}`);
+    }
+    return;
+  }
+
   const exportLine = `export EVOLCLAW_HOME="${home}"`;
 
   const candidates = [

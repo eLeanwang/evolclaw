@@ -118,6 +118,8 @@ async function main() {
           const fileMatches = [...text.matchAll(fileMarkerPattern)];
           for (const match of fileMatches) {
             const filePath = match[1].trim();
+            // 跳过占位符/代码片段中的伪路径
+            if (!filePath || /[\\[\]{}*+?|^$]/.test(filePath)) continue;
             const session = await sessionManager.getActiveSession(channel, channelId);
             const projectPath = session?.projectPath || process.cwd();
             const absoluteFilePath = path.isAbsolute(filePath) ? filePath : path.join(projectPath, filePath);
@@ -169,7 +171,7 @@ async function main() {
     };
 
     const feishuOptions: ChannelOptions = {
-      systemPromptAppend: '[重要系统功能] 你可以通过飞书发送文件给用户。方法：在响应中使用 [SEND_FILE:文件路径] 标记。示例：文件已准备好！[SEND_FILE:/path/to/file.txt] 系统会自动上传并发送。',
+      systemPromptAppend: '[重要系统功能] 你可以通过飞书发送文件给用户。方法：在响应中使用 [SEND_FILE:文件路径] 标记。示例：文件已准备好！[SEND_FILE:./report.txt] 路径支持相对路径（相对项目目录）或绝对路径。系统会自动上传并发送。',
       fileMarkerPattern: /\[SEND_FILE:([^\]]+)\]/g,
       supportsImages: true,
     };

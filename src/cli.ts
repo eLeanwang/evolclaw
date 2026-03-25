@@ -6,6 +6,7 @@ import { resolveRoot, resolvePaths, ensureDataDirs, getPackageRoot } from './pat
 import { cmdInit } from './utils/init.js';
 import { cmdInitWechat } from './utils/init-wechat.js';
 import { cmdInitFeishu } from './utils/init-feishu.js';
+import * as platform from './utils/platform.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -23,13 +24,11 @@ function cleanEnv() {
 function isRunning(pidFile: string): number | null {
   if (!fs.existsSync(pidFile)) return null;
   const pid = parseInt(fs.readFileSync(pidFile, 'utf-8').trim(), 10);
-  try {
-    process.kill(pid, 0);
+  if (platform.isProcessRunning(pid)) {
     return pid;
-  } catch {
-    fs.unlinkSync(pidFile);
-    return null;
   }
+  fs.unlinkSync(pidFile);
+  return null;
 }
 
 function rotateLogs(logDir: string) {
@@ -155,7 +154,7 @@ function showHistory(statsFile: string) {
 
 // ==================== Commands ====================
 
-function cmdStart() {
+async function cmdStart() {
   const p = resolvePaths();
   ensureDataDirs();
 
@@ -175,21 +174,18 @@ function cmdStart() {
 
   // 检查是否有残留进程（PID 文件已丢失但进程还在）
   let hasOrphan = false;
-  try {
-    const output = execFileSync('pgrep', ['-f', 'node.*dist/index.js'], { encoding: 'utf-8' }).trim();
-    if (output) {
-      const pids = output.split('\n');
-      console.log(`⚠ 发现 ${pids.length} 个残留进程，正在清理...`);
-      for (const p of pids) {
-        try { process.kill(parseInt(p, 10)); } catch {}
-      }
-      hasOrphan = true;
+  const orphanPids = platform.findProcesses('node.*dist/index.js');
+  if (orphanPids.length > 0) {
+    console.log(`⚠ 发现 ${orphanPids.length} 个残留进程，正在清理...`);
+    for (const p of orphanPids) {
+      platform.killProcess(p);
     }
-  } catch {}
+    hasOrphan = true;
+  }
 
   // 如果清理了残留进程，等待它们退出
   if (hasOrphan) {
-    execFileSync('sleep', ['2']);
+    await sleep(2000);
   }
 
   console.log('🚀 Starting EvolClaw...');
@@ -275,15 +271,13 @@ async function stopAndWait(pidFile: string): Promise<void> {
   if (!pid) return;
 
   console.log(`🛑 Stopping EvolClaw (PID: ${pid})...`);
-  process.kill(pid);
+  platform.killProcess(pid);
 
   await new Promise<void>((resolve) => {
     let waited = 0;
     const check = setInterval(() => {
       waited++;
-      try {
-        process.kill(pid, 0);
-      } catch {
+      if (!platform.isProcessRunning(pid)) {
         clearInterval(check);
         try { fs.unlinkSync(pidFile); } catch {}
         console.log('✓ EvolClaw stopped');
@@ -292,7 +286,7 @@ async function stopAndWait(pidFile: string): Promise<void> {
       }
       if (waited >= 10) {
         clearInterval(check);
-        try { process.kill(pid, 9); } catch {}
+        platform.killProcess(pid, true);
         try { fs.unlinkSync(pidFile); } catch {}
         console.log('✓ EvolClaw stopped (forced)');
         resolve();
@@ -327,12 +321,10 @@ async function cmdStatus() {
     console.log('');
     console.log('📊 Process Info:');
     try {
-      const uptime = execFileSync('ps', ['-p', String(pid), '-o', 'etime='], { encoding: 'utf-8' }).trim();
-      const cpu = execFileSync('ps', ['-p', String(pid), '-o', '%cpu='], { encoding: 'utf-8' }).trim();
-      const mem = execFileSync('ps', ['-p', String(pid), '-o', 'rss='], { encoding: 'utf-8' }).trim();
-      console.log(`  Uptime: ${uptime}`);
-      console.log(`  CPU: ${cpu}%`);
-      console.log(`  Memory: ${mem} KB`);
+      const info = platform.getProcessInfo(pid);
+      if (info.uptime) console.log(`  Uptime: ${info.uptime}`);
+      if (info.cpu) console.log(`  CPU: ${info.cpu}%`);
+      if (info.memory) console.log(`  Memory: ${info.memory} KB`);
     } catch {}
     console.log(`  EVOLCLAW_HOME: ${resolveRoot()}`);
   } else {
@@ -346,14 +338,17 @@ async function cmdStatus() {
     console.log('');
     console.log('📦 Sessions & Projects:');
     try {
-      const output = execFileSync('sqlite3', [p.db,
-        'SELECT count(*) FROM sessions; SELECT count(*) FROM sessions WHERE is_active=1; SELECT count(DISTINCT channel_id) FROM sessions; SELECT count(DISTINCT project_path) FROM sessions;'
-      ], { encoding: 'utf-8' }).trim().split('\n');
-      if (output.length >= 4) {
-        console.log(`  Total sessions: ${output[0]} (active: ${output[1]})`);
-        console.log(`  Unique chats: ${output[2]}`);
-        console.log(`  Projects: ${output[3]}`);
-      }
+      const Database = await import('node:sqlite');
+      const db = new Database.DatabaseSync(p.db);
+      const totalSessions = db.prepare('SELECT count(*) as cnt FROM sessions').get() as { cnt: number };
+      const activeSessions = db.prepare('SELECT count(*) as cnt FROM sessions WHERE is_active=1').get() as { cnt: number };
+      const uniqueChats = db.prepare('SELECT count(DISTINCT channel_id) as cnt FROM sessions').get() as { cnt: number };
+      const projects = db.prepare('SELECT count(DISTINCT project_path) as cnt FROM sessions').get() as { cnt: number };
+      db.close();
+
+      console.log(`  Total sessions: ${totalSessions.cnt} (active: ${activeSessions.cnt})`);
+      console.log(`  Unique chats: ${uniqueChats.cnt}`);
+      console.log(`  Projects: ${projects.cnt}`);
     } catch {}
   }
 
@@ -389,7 +384,39 @@ async function cmdStatus() {
       }
       if (config.channels?.wechat?.token) {
         const tokenPreview = config.channels.wechat.token.slice(0, 20);
-        console.log(`  WeChat: ✓ Configured (Token: ${tokenPreview}...)`);
+        // Validate token by calling getconfig API
+        try {
+          const baseUrl = (config.channels.wechat.baseUrl || 'https://ilinkai.weixin.qq.com').replace(/\/$/, '');
+          const body = JSON.stringify({ base_info: { channel_version: '1.0.0' } });
+          const uint32 = (await import('node:crypto')).default.randomBytes(4).readUInt32BE(0);
+          const wechatUin = Buffer.from(String(uint32), 'utf-8').toString('base64');
+          const res = await fetch(`${baseUrl}/ilink/bot/getconfig`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'AuthorizationType': 'ilink_bot_token',
+              'Authorization': `Bearer ${config.channels.wechat.token.trim()}`,
+              'X-WECHAT-UIN': wechatUin,
+            },
+            body,
+            signal: AbortSignal.timeout(10_000),
+          });
+          const resp = JSON.parse(await res.text()) as { ret?: number; errcode?: number };
+          const isExpired = resp.errcode === -14 || resp.ret === -14;
+          if (isExpired) {
+            console.log(`  WeChat: ✗ Token expired (Token: ${tokenPreview}...)`);
+            console.log('          Run: evolclaw init wechat && evolclaw restart');
+          } else {
+            console.log(`  WeChat: ✓ Connected (Token: ${tokenPreview}...)`);
+          }
+        } catch (e: any) {
+          const msg = e.message || '';
+          if (msg.includes('ETIMEDOUT') || msg.includes('ENETUNREACH') || msg.includes('ENOTFOUND')) {
+            console.log(`  WeChat: ✗ Connection timeout (Token: ${tokenPreview}...)`);
+          } else {
+            console.log(`  WeChat: ✓ Configured (Token: ${tokenPreview}...)`);
+          }
+        }
       } else {
         console.log('  WeChat: - Not configured');
       }
@@ -436,8 +463,16 @@ function cmdLogs() {
     console.log(`❌ Log file not found: ${mainLog}`);
     process.exit(1);
   }
-  const child = spawn('tail', ['-f', mainLog], { stdio: 'inherit' });
-  child.on('exit', (code) => process.exit(code || 0));
+
+  if (platform.isWindows) {
+    // Windows: use fs.watch for live tail
+    const tail = platform.tailFile(mainLog);
+    platform.onShutdown(() => tail.abort());
+  } else {
+    // Unix: use tail -f
+    const child = spawn('tail', ['-f', mainLog], { stdio: 'inherit' });
+    child.on('exit', (code) => process.exit(code || 0));
+  }
 }
 
 /**
@@ -475,9 +510,7 @@ async function cmdRestartMonitor() {
       let waited = 0;
       const interval = setInterval(() => {
         waited++;
-        try {
-          process.kill(oldPid, 0);
-        } catch {
+        if (!platform.isProcessRunning(oldPid)) {
           clearInterval(interval);
           log(`Process ${oldPid} has exited`);
           resolve();
@@ -486,7 +519,7 @@ async function cmdRestartMonitor() {
         if (waited >= 30) {
           clearInterval(interval);
           log('ERROR: Process still running after 30s, force killing');
-          try { process.kill(oldPid, 9); } catch {}
+          platform.killProcess(oldPid, true);
           resolve();
         }
       }, 1000);
@@ -611,7 +644,7 @@ async function spawnAndWaitReady(
   // 超时后杀掉进程
   const pid = isRunning(p.pid);
   if (pid) {
-    try { process.kill(pid); } catch {}
+    platform.killProcess(pid);
     try { fs.unlinkSync(p.pid); } catch {}
   }
   return false;
@@ -808,7 +841,7 @@ export async function main(args: string[]) {
       }
       break;
     case 'start':
-      cmdStart();
+      await cmdStart();
       break;
     case 'stop':
       await cmdStop();
