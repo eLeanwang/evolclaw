@@ -728,7 +728,7 @@ export class CommandHandler {
       }
 
       const isGroup = await this.isGroupChat(channel, channelId);
-      const cliSessions = isGroup
+      const cliSessions = (isGroup || !isAdmin)
         ? []
         : await this.sessionManager.scanCliSessions(session.projectPath);
       const dbSessionIds = new Set(currentProjectSessions.map(s => s.claudeSessionId).filter(Boolean));
@@ -796,7 +796,7 @@ export class CommandHandler {
       }
 
       const isGroup = await this.isGroupChat(channel, channelId);
-      if (!targetSession && sessionName.length === 8 && !isGroup) {
+      if (!targetSession && sessionName.length === 8 && !isGroup && isAdmin) {
         const projectPaths = Object.values(this.projects);
 
         if (session) {
