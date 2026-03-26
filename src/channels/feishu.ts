@@ -14,7 +14,7 @@ export interface FeishuConfig {
 }
 
 export interface MessageHandler {
-  (channelId: string, content: string, images?: Array<{ data: string; mimeType: string }>, userId?: string, userName?: string, messageId?: string): Promise<void>;
+  (channelId: string, content: string, images?: Array<{ data: string; mimeType: string }>, userId?: string, userName?: string, messageId?: string, mentions?: Array<{ userId: string; name?: string; key?: string }>): Promise<void>;
 }
 
 export interface ProjectPathProvider {
@@ -75,6 +75,13 @@ export class FeishuChannel {
           this.addAckReaction(msg.message_id);
 
           if (!this.messageHandler) return;
+
+          // 提取 @ 提及列表（排除机器人自身）
+          const mentions = (msg.mentions || []).map((m: any) => ({
+            userId: m.id?.open_id || '',
+            name: m.name,
+            key: m.key
+          })).filter((m: any) => m.userId && m.userId !== this.config.appId);
 
           // 提取发送者信息
           const userId = data.sender?.sender_id?.open_id;
@@ -142,7 +149,20 @@ export class FeishuChannel {
                     quotedText = `> [图片消息]\n\n`;
                   }
                 } else if (quotedMsgType === 'file') {
-                  quotedText = `> [文件消息]\n\n`;
+                  const parsedFile = JSON.parse(quotedContent);
+                  const quotedFileKey = parsedFile.file_key;
+                  const quotedFileName = parsedFile.file_name || 'unknown';
+
+                  const projectPath = this.projectPathProvider
+                    ? await this.projectPathProvider(msg.chat_id)
+                    : process.cwd();
+
+                  const quotedFilePath = await this.downloadFile(quotedFileKey, quotedFileName, msg.parent_id, projectPath);
+                  if (quotedFilePath) {
+                    quotedText = `> [引用的文件：${quotedFileName}]\n> 文件已保存到：${quotedFilePath}\n\n`;
+                  } else {
+                    quotedText = `> [文件消息]\n\n`;
+                  }
                 } else {
                   quotedText = `> [${quotedMsgType}消息]\n\n`;
                 }
@@ -155,11 +175,9 @@ export class FeishuChannel {
             if (msg.message_type === 'text') {
               const parsed = JSON.parse(msg.content);
               // 优先使用 text_without_at_bot（去除机器人 @），否则使用 text
-              let content = parsed.text_without_at_bot || parsed.text;
-              // 去除消息中所有的 @ 提及（支持命令在前或在后）
-              content = content.replace(/@[^\s]+\s*/g, '').trim();
+              const content = parsed.text_without_at_bot || parsed.text;
               const finalContent = quotedText + content;
-              await this.messageHandler(msg.chat_id, finalContent, quotedImages.length > 0 ? quotedImages : undefined, userId, userName, msg.message_id);
+              await this.messageHandler(msg.chat_id, finalContent, quotedImages.length > 0 ? quotedImages : undefined, userId, userName, msg.message_id, mentions.length > 0 ? mentions : undefined);
             }
             // 处理图片消息
             else if (msg.message_type === 'image') {
@@ -177,7 +195,7 @@ export class FeishuChannel {
                 const prompt = quotedText + '用户发送了一张图片，请分析这张图片的内容。';
                 await this.messageHandler(msg.chat_id, prompt, allImages, userId, userName, msg.message_id);
               } else {
-                const prompt = quotedText + '[图片下载失败] 应用可能缺少 im:resource 权限';
+                const prompt = quotedText + '[图片下载失败] 应用可能缺少 im:message 或 im:message:readonly 权限';
                 await this.messageHandler(msg.chat_id, prompt, quotedImages.length > 0 ? quotedImages : undefined, userId, userName, msg.message_id);
               }
             }
@@ -200,6 +218,25 @@ export class FeishuChannel {
                 const prompt = quotedText + '[文件下载失败] 应用可能缺少 im:resource 权限';
                 await this.messageHandler(msg.chat_id, prompt, quotedImages.length > 0 ? quotedImages : undefined, userId, userName, msg.message_id);
               }
+            }
+            // 处理富文本消息
+            else if (msg.message_type === 'post') {
+              const parsed = JSON.parse(msg.content);
+              let text = '';
+              const title = parsed.zh_cn?.title || parsed.en_us?.title || parsed.title;
+              const content = parsed.zh_cn?.content || parsed.en_us?.content || parsed.content;
+              if (content) {
+                for (const line of content) {
+                  for (const elem of line) {
+                    if (elem.text) text += elem.text;
+                  }
+                  text += '\n';
+                }
+              }
+              let finalContent = text.trim();
+              if (title) finalContent = `${title}\n${finalContent}`;
+              finalContent = quotedText + finalContent;
+              await this.messageHandler(msg.chat_id, finalContent, quotedImages.length > 0 ? quotedImages : undefined, userId, userName, msg.message_id);
             }
             // 处理其他类型消息
             else {
@@ -279,7 +316,7 @@ export class FeishuChannel {
     return undefined;
   }
 
-  async sendMessage(chatId: string, content: string, options?: { title?: string; replyToMessageId?: string; forceText?: boolean }): Promise<void> {
+  async sendMessage(chatId: string, content: string, options?: { title?: string; replyToMessageId?: string; forceText?: boolean; mentionUserIds?: string[] }): Promise<void> {
     if (!this.client) return;
 
     if (!content || content.trim() === '') {
@@ -291,11 +328,29 @@ export class FeishuChannel {
 
     try {
       const useMarkdown = !options?.forceText && hasMarkdownSyntax(content);
+      const hasMention = !!(options?.mentionUserIds && options.mentionUserIds.length > 0);
 
-      const msgType = useMarkdown ? 'post' : 'text';
-      const msgContent = useMarkdown
-        ? JSON.stringify(markdownToFeishuPost(content, options?.title))
-        : JSON.stringify({ text: content });
+      // 如果需要 @，强制使用 post 格式
+      const msgType = (useMarkdown || hasMention) ? 'post' : 'text';
+
+      let msgContent: string;
+      if (hasMention) {
+        // 构造带 @ 的富文本消息
+        const postData = useMarkdown
+          ? markdownToFeishuPost(content, options?.title)
+          : { zh_cn: { title: options?.title || '', content: [[{ tag: 'text', text: content }]] } };
+
+        // 在第一行开头插入所有 @ 标签
+        if (postData.zh_cn.content.length > 0) {
+          const atTags = options!.mentionUserIds!.map(uid => ({ tag: 'at', user_id: uid }));
+          postData.zh_cn.content[0].unshift(...atTags);
+        }
+        msgContent = JSON.stringify(postData);
+      } else {
+        msgContent = useMarkdown
+          ? JSON.stringify(markdownToFeishuPost(content, options?.title))
+          : JSON.stringify({ text: content });
+      }
 
       if (options?.replyToMessageId) {
         await this.client.im.message.reply({
