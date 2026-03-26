@@ -200,12 +200,26 @@ async function main() {
       token: config.channels.wechat.token,
     });
 
+    // 设置项目路径提供器（用于接收文件保存）
+    wechat.onProjectPathRequest(async (channelId) => {
+      const session = await sessionManager.getOrCreateSession('wechat', channelId, config.projects?.defaultPath || process.cwd());
+      return path.isAbsolute(session.projectPath)
+        ? session.projectPath
+        : path.resolve(process.cwd(), session.projectPath);
+    });
+
     const wechatAdapter: ChannelAdapter = {
       name: 'wechat',
       sendText: (channelId, text) => wechat!.sendMessage(channelId, text),
+      sendFile: (channelId, filePath) => wechat!.sendFile(channelId, filePath),
     };
 
-    processor.registerChannel(wechatAdapter);
+    const wechatOptions: ChannelOptions = {
+      systemPromptAppend: '[系统功能] 你可以发送文件给用户。方法：在响应中使用 [SEND_FILE:文件路径] 标记。示例：文件已准备好！[SEND_FILE:./report.txt]',
+      fileMarkerPattern: /\[SEND_FILE:([^\]]+)\]/g,
+    };
+
+    processor.registerChannel(wechatAdapter, wechatOptions);
     cmdHandler.registerAdapter(wechatAdapter);
 
     // Session 过期通知（通过 Feishu 等其他渠道告知用户）
@@ -223,7 +237,7 @@ async function main() {
       }
     });
 
-    wechat.onMessage(async (channelId, content, userId) => {
+    wechat.onMessage(async (channelId, content, userId, images) => {
       content = content.trim();
 
       // 首次交互自动绑定主人
@@ -254,7 +268,7 @@ async function main() {
       // 普通消息进入队列
       await messageQueue.enqueue(
         `wechat-${channelId}`,
-        { channel: 'wechat', channelId, content, timestamp: Date.now(), userId },
+        { channel: 'wechat', channelId, content, images, timestamp: Date.now(), userId },
         session.projectPath
       );
     });
@@ -262,7 +276,7 @@ async function main() {
 
   // Feishu 消息处理
   if (feishu) {
-    feishu.onMessage(async (chatId, content, images, userId, userName, messageId) => {
+    feishu.onMessage(async (chatId, content, images, userId, userName, messageId, mentions) => {
       content = content.trim();
 
       // 首次交互自动绑定主人
@@ -299,7 +313,7 @@ async function main() {
       // 普通消息进入队列
       await messageQueue.enqueue(
         `feishu-${chatId}`,
-        { channel: 'feishu', channelId: chatId, content, images, timestamp: Date.now(), userId, userName, messageId, isGroup: chatMode === 'group' },
+        { channel: 'feishu', channelId: chatId, content, images, timestamp: Date.now(), userId, userName, messageId, isGroup: chatMode === 'group', mentions },
         session.projectPath
       );
     });

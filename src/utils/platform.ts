@@ -27,17 +27,7 @@ export function isProcessRunning(pid: number): boolean {
     process.kill(pid, 0);
     return true;
   } catch (e: any) {
-    // Unix: ESRCH = not found, EPERM = exists but no permission
-    // Windows: EPERM can also mean not found
-    if (isWindows) {
-      // On Windows, use tasklist to verify
-      try {
-        const output = execFileSync('tasklist', ['/FI', `PID eq ${pid}`, '/NH'], { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
-        return output.includes(String(pid));
-      } catch {
-        return false;
-      }
-    }
+    // ESRCH = process not found; EPERM = exists but no permission
     return e.code === 'EPERM';
   }
 }

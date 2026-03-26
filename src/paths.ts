@@ -45,5 +45,7 @@ export function ensureDataDirs(): void {
 }
 
 export function getPackageRoot(): string {
-  return path.resolve(fileURLToPath(new URL('.', import.meta.url)), '..');
+  // import.meta.dirname is available in Node.js 21.2+ and always returns
+  // the correct OS-native path, regardless of Git Bash or MSYS2 environment.
+  return path.resolve(import.meta.dirname, '..');
 }

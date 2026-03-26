@@ -67,6 +67,11 @@ export class FeishuChannel {
           logger.debug('[Feishu] Received message, message_id:', msg.message_id, 'type:', msg.message_type);
           logger.debug('[Feishu] Full data object:', JSON.stringify(data, null, 2));
 
+          // 诊断：话题消息检测
+          if (msg.thread_id) {
+            logger.info('[Feishu] Thread message detected, thread_id:', msg.thread_id, 'parent_id:', msg.parent_id, 'root_id:', msg.root_id);
+          }
+
           if (!msg.message_id || this.isDuplicate(msg.message_id)) {
             logger.debug('[Feishu] Duplicate message ignored:', msg.message_id);
             return;

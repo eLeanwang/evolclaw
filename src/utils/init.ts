@@ -7,19 +7,9 @@ import { execFileSync } from 'child_process';
 import { promisify } from 'util';
 import { execFile } from 'child_process';
 import { resolveRoot, resolvePaths, ensureDataDirs, getPackageRoot } from '../paths.js';
+import { isWindows, commandExists } from './platform.js';
 
 const execFileAsync = promisify(execFile);
-
-const isWindows = process.platform === 'win32';
-
-function whichCmd(cmd: string): boolean {
-  try {
-    execFileSync(isWindows ? 'where' : 'which', [cmd], { encoding: 'utf-8', stdio: 'pipe' });
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 // ==================== Helpers ====================
 
@@ -76,7 +66,7 @@ async function checkEnvironment(rl: readline.Interface): Promise<boolean> {
     console.log(`  ✗ Node.js v${process.versions.node} — 需要 >= 22（node:sqlite 依赖）`);
     // 检测 nvm
     // 检测 bash 是否存在（nvm 和 n 都依赖 bash）
-    const hasBash = whichCmd('bash');
+    const hasBash = commandExists('bash');
 
     if (!hasBash) {
       if (isWindows) {
@@ -109,7 +99,7 @@ async function checkEnvironment(rl: readline.Interface): Promise<boolean> {
       }
     } else {
       // 检测 n
-      const hasN = whichCmd('n');
+      const hasN = commandExists('n');
       if (hasN) {
         const answer = (await ask(rl, '  → 是否通过 n 升级到 Node.js 22？[Y/n] ')).trim().toLowerCase();
         if (answer === 'n' || answer === 'no') {
@@ -150,7 +140,7 @@ async function checkEnvironment(rl: readline.Interface): Promise<boolean> {
 
   // claude CLI >= 2.1.32
   const MIN_CLAUDE_VER = [2, 1, 32];
-  const claudeInstalled = whichCmd('claude');
+  const claudeInstalled = commandExists('claude');
   if (claudeInstalled) {
     try {
       const verOutput = execFileSync('claude', ['--version'], { encoding: 'utf-8' }).trim();

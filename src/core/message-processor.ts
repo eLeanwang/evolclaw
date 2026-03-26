@@ -114,7 +114,7 @@ export class MessageProcessor {
 
     try {
       await Promise.race([
-        this._processMessageInternal(message, resetTimer),
+        this._processMessageInternal(message, resetTimer, isGroup),
         timeoutPromise
       ]);
     } catch (error: any) {
@@ -193,7 +193,7 @@ export class MessageProcessor {
     }
   }
 
-  private async _processMessageInternal(message: Message, resetTimer: (eventType?: string, toolName?: string) => void): Promise<void> {
+  private async _processMessageInternal(message: Message, resetTimer: (eventType?: string, toolName?: string) => void, isGroup: boolean): Promise<void> {
     const messageId = `${message.channel}_${message.channelId}_${message.timestamp || Date.now()}`;
     const channelInfo = this.channels.get(message.channel);
 
@@ -246,6 +246,7 @@ export class MessageProcessor {
       // 创建 StreamFlusher，传入文件标记模式用于自动过滤
       // 使用动态判断，确保切换项目后不会继续输出
       let firstReply = true;
+      const messageIsGroup = isGroup; // 捕获 isGroup 供闭包使用
       const flusher = new StreamFlusher(
         async (text, isFinal) => {
           // 动态判断是否是后台任务
@@ -253,7 +254,7 @@ export class MessageProcessor {
           const isCurrentlyBackground = currentActiveSession ? session.id !== currentActiveSession.id : false;
 
           if (!isCurrentlyBackground) {
-            const opts: { title?: string; replyToMessageId?: string } = {};
+            const opts: { title?: string; replyToMessageId?: string; mentionUserIds?: string[] } = {};
             if (isFinal) opts.title = '最终回复:';
             // 首条消息引用回复用户原消息
             if (firstReply && message.messageId) {

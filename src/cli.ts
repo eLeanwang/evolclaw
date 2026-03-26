@@ -8,6 +8,10 @@ import { cmdInitWechat } from './utils/init-wechat.js';
 import { cmdInitFeishu } from './utils/init-feishu.js';
 import * as platform from './utils/platform.js';
 
+// Suppress Node.js ExperimentalWarning (e.g. SQLite) from cluttering CLI output
+process.removeAllListeners('warning');
+process.on('warning', (w) => { if (w.name === 'ExperimentalWarning') return; process.stderr.write((w.stack ?? String(w)) + '\n'); });
+
 const execFileAsync = promisify(execFile);
 
 // 清理 Claude Code 环境变量，防止 SDK 认为是嵌套会话
@@ -15,7 +19,7 @@ function cleanEnv() {
   for (const key of [
     'CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT',
     'CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS',
-    'CLAUDE_CONFIG_DIR', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL'
+    'CLAUDE_CONFIG_DIR',
   ]) {
     delete process.env[key];
   }
@@ -200,7 +204,7 @@ async function cmdStart() {
   const err = fs.openSync(stdoutLog, 'a');
 
   const appMain = path.join(getPackageRoot(), 'dist', 'index.js');
-  const child = spawn('node', [appMain], {
+  const child = spawn('node', ['--no-warnings=ExperimentalWarning', appMain], {
     detached: true,
     stdio: ['ignore', out, err],
     env: {
@@ -217,20 +221,7 @@ async function cmdStart() {
   // 等待 ready signal（最多 15 秒）
   const startTime = Date.now();
   const checkReady = () => {
-    // 进程已退出
-    if (!isRunning(p.pid)) {
-      console.log('❌ Failed to start EvolClaw');
-      console.log('');
-      console.log('📝 Error details (last 10 lines of stdout):');
-      if (fs.existsSync(stdoutLog)) {
-        const content = fs.readFileSync(stdoutLog, 'utf-8').trim().split('\n');
-        console.log(content.slice(-10).map(l => `  ${l}`).join('\n'));
-      }
-      process.exit(1);
-      return;
-    }
-
-    // ready signal 出现
+    // ready signal 出现（优先检查，避免 Windows 上 isRunning 误判）
     if (fs.existsSync(p.readySignal)) {
       const pid = isRunning(p.pid);
       console.log(`✓ EvolClaw started successfully (PID: ${pid})`);
@@ -255,6 +246,22 @@ async function cmdStart() {
       }
       process.exit(1);
       return;
+    }
+
+    // 进程已退出且无 ready signal
+    if (!isRunning(p.pid)) {
+      // 给进程一点时间写 ready signal（可能刚好在写入中）
+      if (Date.now() - startTime > 3000) {
+        console.log('❌ Failed to start EvolClaw');
+        console.log('');
+        console.log('📝 Error details (last 10 lines of stdout):');
+        if (fs.existsSync(stdoutLog)) {
+          const content = fs.readFileSync(stdoutLog, 'utf-8').trim().split('\n');
+          console.log(content.slice(-10).map(l => `  ${l}`).join('\n'));
+        }
+        process.exit(1);
+        return;
+      }
     }
 
     setTimeout(checkReady, 500);
@@ -607,7 +614,7 @@ async function spawnAndWaitReady(
   const err = fs.openSync(stdoutLog, 'a');
 
   const appMain = path.join(getPackageRoot(), 'dist', 'index.js');
-  const child = spawn('node', [appMain], {
+  const child = spawn('node', ['--no-warnings=ExperimentalWarning', appMain], {
     detached: true,
     stdio: ['ignore', out, err],
     env: {
@@ -881,12 +888,6 @@ Environment:
 }
 
 // 直接运行时自动执行（node dist/cli.js ...）
-// 用 realpath 解析 symlink，否则 npm link 的 bin 路径与实际文件路径不匹配
-const __selfUrl = import.meta.url;
-const __argv1 = process.argv[1];
-if (__argv1 && (
-  __selfUrl === `file://${__argv1}` ||
-  __selfUrl === `file://${fs.realpathSync(__argv1)}`
-)) {
+if (platform.isMainScript(import.meta.url)) {
   main(process.argv.slice(2));
 }

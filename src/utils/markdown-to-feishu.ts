@@ -6,6 +6,7 @@
 interface PostElement {
   tag: string;
   text?: string;
+  user_id?: string;
 }
 
 interface PostContent {

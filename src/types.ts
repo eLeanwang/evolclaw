@@ -63,12 +63,13 @@ export interface Message {
   userName?: string;
   messageId?: string;
   isGroup?: boolean;
+  mentions?: Array<{ userId: string; name?: string; key?: string }>;
 }
 
 // 渠道适配器接口
 export interface ChannelAdapter {
   readonly name: string;
-  sendText(channelId: string, text: string, options?: { title?: string; replyToMessageId?: string }): Promise<void>;
+  sendText(channelId: string, text: string, options?: { title?: string; replyToMessageId?: string; mentionUserIds?: string[] }): Promise<void>;
   sendFile?(channelId: string, filePath: string): Promise<void>;
   isGroupChat?(channelId: string): Promise<boolean>;
 }
