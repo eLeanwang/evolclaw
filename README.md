@@ -71,7 +71,7 @@ MessageProcessor.processMessage()
 
 ### 环境要求
 
-- **操作系统**：macOS / Linux（Windows 暂不支持，见 TODO）
+- **操作系统**：macOS / Linux / Windows
 - **Node.js** >= 22（需要 node:sqlite 内置模块支持）
 - **Claude Code** >= 2.1.32（`npm install -g @anthropic-ai/claude-code`）
 
@@ -82,6 +82,8 @@ MessageProcessor.processMessage()
 ```bash
 npm install -g evolclaw
 ```
+
+> **Windows 用户**：首次运行前可能需要执行 `Set-ExecutionPolicy RemoteSigned -Scope CurrentUser`
 
 **从源码安装**：
 
@@ -111,7 +113,7 @@ evolclaw init wechat
 - 渠道选择（飞书/微信）并扫码登录
 - 默认项目路径
 - 模型选择（sonnet/opus/haiku）
-- 自动写入 `EVOLCLAW_HOME` 到 shell profile
+- 自动写入 `EVOLCLAW_HOME` 到 shell profile（Unix）或用户环境变量（Windows）
 
 配置文件生成在 `{EVOLCLAW_HOME}/data/evolclaw.json`（默认 `~/.evolclaw/data/evolclaw.json`）。
 
@@ -159,8 +161,6 @@ npm test
 
 ```
 evolclaw/
-├── bin/
-│   └── evolclaw                    # CLI 入口（npm link）
 ├── src/
 │   ├── core/
 │   │   ├── command-handler.ts       # 斜杠命令处理
@@ -225,8 +225,8 @@ evolclaw/
 
 ## TODO
 
-- [ ] Windows 系统 CLI 命令支持
-- [ ] 微信插件支持图片/文件的收发
+- [x] Windows 系统 CLI 命令支持
+- [x] 微信插件支持图片/文件的收发
 - [ ] 自动授权可配置（自动放行/自动拒绝）
 - [ ] 手动授权支持（飞书卡片/文本回复）
 - [ ] ACP 协议支持（接入 Codex / Gemini CLI）
