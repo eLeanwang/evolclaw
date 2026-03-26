@@ -33,11 +33,22 @@ export interface Config {
     autoCreate: boolean;
     list?: Record<string, string>;
   };
-  flushDelay?: number;  // 消息批量发送间隔(ms)，默认 4000
+  flushDelay?: number;  // 消息批量发送间隔(秒)，默认 4
   idleMonitor?: {
     enabled?: boolean;              // 是否启用空闲监控，默认 true
     safeModeThreshold?: number;     // 连续错误几次进入安全模式，默认 3；设为 0 关闭 safe mode
-    timeout?: number;               // 无输出超时(ms)，默认 120000
+    timeout?: number;               // 无输出超时(秒)，默认 120
+  };
+  showActivities?: 'all' | 'dm-only' | 'owner-dm-only';  // 工具活动和中间消息显示范围，默认 'all'
+}
+
+export interface SessionMetadata {
+  feishu?: {
+    rootId?: string;
+  };
+  agentSessions?: {
+    codex?: string;
+    gemini?: string;
   };
 }
 
@@ -46,7 +57,10 @@ export interface Session {
   channel: string;
   channelId: string;
   projectPath: string;
-  claudeSessionId?: string;
+  threadId: string;
+  agentType: string;
+  agentSessionId?: string;
+  metadata?: SessionMetadata;
   name?: string;
   isActive: boolean;
   createdAt: number;

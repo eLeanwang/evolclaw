@@ -273,7 +273,7 @@ export class CommandHandler {
       if ('error' in result) return result.error;
       const { session } = result;
 
-      if (!session.claudeSessionId) {
+      if (!session.agentSessionId) {
         return '❌ 当前会话没有历史记录，无需清空';
       }
 
@@ -281,9 +281,9 @@ export class CommandHandler {
         ? session.projectPath
         : path.resolve(process.cwd(), session.projectPath);
 
-      const cleared = await this.agentRunner.clearSession(session.claudeSessionId, projectPath);
+      const cleared = await this.agentRunner.clearSession(session.agentSessionId, projectPath);
       if (cleared) {
-        await this.sessionManager.updateClaudeSessionIdBySessionId(session.id, '');
+        await this.sessionManager.updateAgentSessionIdBySessionId(session.id, '');
         this.agentRunner.updateSessionId(session.id, '');
         return '✅ 已清空当前会话的对话历史';
       } else {
@@ -297,7 +297,7 @@ export class CommandHandler {
       if ('error' in result) return result.error;
       const { session } = result;
 
-      if (!session.claudeSessionId) {
+      if (!session.agentSessionId) {
         return '❌ 当前会话没有历史记录，无需压缩';
       }
 
@@ -309,7 +309,7 @@ export class CommandHandler {
         await sendMessage(channelId, '⏳ 正在压缩会话上下文...');
       }
 
-      const compacted = await this.agentRunner.compactSession(session.id, session.claudeSessionId, projectPath);
+      const compacted = await this.agentRunner.compactSession(session.id, session.agentSessionId, projectPath);
       if (compacted) {
         return '✅ 会话上下文已压缩';
       } else {
@@ -366,8 +366,8 @@ export class CommandHandler {
 
       // 获取会话文件信息并同步 name
       let sessionTurns = 0;
-      if (session.claudeSessionId) {
-        const fileInfo = this.sessionManager.getSessionFileInfo(session.projectPath, session.claudeSessionId);
+      if (session.agentSessionId) {
+        const fileInfo = this.sessionManager.getSessionFileInfo(session.projectPath, session.agentSessionId);
         sessionTurns = fileInfo.turns;
         if (fileInfo.title && fileInfo.title !== session.name) {
           await this.sessionManager.renameSession(session.id, fileInfo.title);
@@ -387,7 +387,7 @@ export class CommandHandler {
           `异常计数: ${health.consecutiveErrors}`,
           `安全模式: ${health.safeMode ? '是 ⚠️' : '否 ✓'}`,
           `最后成功: ${timeStr}`,
-          `Claude会话: ${session.claudeSessionId || '(未初始化)'}`,
+          `Claude会话: ${session.agentSessionId || '(未初始化)'}`,
           `创建时间: ${new Date(session.createdAt).toLocaleString('zh-CN')}`,
           `更新时间: ${new Date(session.updatedAt).toLocaleString('zh-CN')}`
         );
@@ -626,7 +626,7 @@ export class CommandHandler {
 
       const cachedEvents = this.messageCache.getEvents(newSession.id);
 
-      const hasExistingSession = newSession.claudeSessionId ? '（恢复已有会话）' : '（新建会话）';
+      const hasExistingSession = newSession.agentSessionId ? '（恢复已有会话）' : '（新建会话）';
       let response = `✓ 已切换到项目: ${projectName}\n  路径: ${projectPath}\n  ${hasExistingSession}`;
 
       if (cachedEvents.length > 0 && sendMessage) {
@@ -672,7 +672,7 @@ export class CommandHandler {
 
       const cachedEvents = this.messageCache.getEvents(newSession.id);
 
-      const hasExistingSession = newSession.claudeSessionId ? '（恢复已有会话）' : '（新建会话）';
+      const hasExistingSession = newSession.agentSessionId ? '（恢复已有会话）' : '（新建会话）';
       let response = `✓ 已绑定项目目录: ${projectPath}\n  ${hasExistingSession}`;
 
       if (cachedEvents.length > 0) {
@@ -717,7 +717,7 @@ export class CommandHandler {
         for (const sdkSession of sdkSessions) {
           const sdkName = sdkSession.customTitle || undefined;
           if (!sdkName) continue;
-          const dbSession = currentProjectSessions.find(s => s.claudeSessionId === sdkSession.sessionId);
+          const dbSession = currentProjectSessions.find(s => s.agentSessionId === sdkSession.sessionId);
           if (dbSession && sdkName !== dbSession.name) {
             await this.sessionManager.renameSession(dbSession.id, sdkName);
             dbSession.name = sdkName;
@@ -731,7 +731,7 @@ export class CommandHandler {
       const cliSessions = (isGroup || !isAdmin)
         ? []
         : await this.sessionManager.scanCliSessions(session.projectPath);
-      const dbSessionIds = new Set(currentProjectSessions.map(s => s.claudeSessionId).filter(Boolean));
+      const dbSessionIds = new Set(currentProjectSessions.map(s => s.agentSessionId).filter(Boolean));
 
       const lines = [`当前项目 ${path.basename(session.projectPath)} 的会话列表:\n`];
 
@@ -743,10 +743,10 @@ export class CommandHandler {
         for (const s of currentProjectSessions) {
           const prefix = s.isActive ? '  ✓' : '   ';
           const name = s.name || '(未命名)';
-          const uuid = s.claudeSessionId ? `(${s.claudeSessionId.substring(0, 8)})` : '';
+          const uuid = s.agentSessionId ? `(${s.agentSessionId.substring(0, 8)})` : '';
           const idleTime = formatIdleTime(Date.now() - s.updatedAt);
 
-          if (s.claudeSessionId && !this.sessionManager.checkSessionFileExists(s.projectPath, s.claudeSessionId)) {
+          if (s.agentSessionId && !this.sessionManager.checkSessionFileExists(s.projectPath, s.agentSessionId)) {
             lines.push(`${prefix} ❌ ${name} ${uuid} - ${idleTime} [会话文件缺失]`);
           } else {
             let status = '[空闲]';
@@ -819,8 +819,8 @@ export class CommandHandler {
         return `❌ 会话不存在: ${sessionName}\n使用 /slist 查看可用会话`;
       }
 
-      const lastInput = targetSession.claudeSessionId
-        ? this.sessionManager.readSessionLastUserMessage(targetSession.projectPath, targetSession.claudeSessionId)
+      const lastInput = targetSession.agentSessionId
+        ? this.sessionManager.readSessionLastUserMessage(targetSession.projectPath, targetSession.agentSessionId)
         : null;
       const lastInputLine = lastInput ? `\n  最后输入: "${lastInput}"` : '';
 
@@ -866,9 +866,9 @@ export class CommandHandler {
       }
 
       // 双写：SDK + 数据库
-      if (session.claudeSessionId) {
+      if (session.agentSessionId) {
         try {
-          await sdkRenameSession(session.claudeSessionId, newName, { dir: session.projectPath });
+          await sdkRenameSession(session.agentSessionId, newName, { dir: session.projectPath });
         } catch (error) {
           logger.warn(`[CommandHandler] SDK renameSession failed (continuing with db update):`, error);
         }
@@ -890,12 +890,12 @@ export class CommandHandler {
         return `❌ 当前没有活跃会话，无法分支`;
       }
 
-      if (!session.claudeSessionId) {
+      if (!session.agentSessionId) {
         return `❌ 当前会话尚未初始化 Claude 对话，无法分支\n\n请先发送一条消息，然后再使用 /fork`;
       }
 
       try {
-        const forkResult = await sdkForkSession(session.claudeSessionId, { dir: session.projectPath, title: forkName });
+        const forkResult = await sdkForkSession(session.agentSessionId, { dir: session.projectPath, title: forkName });
         const newSession = await this.sessionManager.createForkedSession(session, forkResult.sessionId, forkName);
 
         return `✅ 会话已分支: ${newSession.name}\n新会话已激活，可以继续对话\n\n使用 /slist 查看所有会话，/s <名称> 切换回原会话`;
@@ -922,7 +922,7 @@ export class CommandHandler {
       try {
         const backupDir = await backupClaudeDir(session.projectPath);
 
-        if (!session.claudeSessionId) {
+        if (!session.agentSessionId) {
           await this.sessionManager.resetHealthStatus(session.id);
           return `✓ 修复完成，已退出安全模式
 
@@ -934,12 +934,12 @@ export class CommandHandler {
 备份位置：${backupDir}`;
         }
 
-        const healthCheck = await checkSessionFileHealth(session.projectPath, session.claudeSessionId);
+        const healthCheck = await checkSessionFileHealth(session.projectPath, session.agentSessionId);
 
         if (healthCheck.corrupt) {
-          const sessionFile = path.join(session.projectPath, '.claude', `${session.claudeSessionId}.jsonl`);
+          const sessionFile = path.join(session.projectPath, '.claude', `${session.agentSessionId}.jsonl`);
           await fsPromises.unlink(sessionFile);
-          await this.sessionManager.updateClaudeSessionId(session.channel, session.channelId, '');
+          await this.sessionManager.updateAgentSessionId(session.channel, session.channelId, '');
           await this.sessionManager.resetHealthStatus(session.id);
 
           return `✓ 修复完成，已退出安全模式

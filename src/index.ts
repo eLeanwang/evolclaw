@@ -55,8 +55,8 @@ async function main() {
   const agentRunner = new AgentRunner(
     anthropic.apiKey,
     anthropic.model,
-    async (sessionId, claudeSessionId) => {
-      await sessionManager.updateClaudeSessionIdBySessionId(sessionId, claudeSessionId);
+    async (sessionId, agentSessionId) => {
+      await sessionManager.updateAgentSessionIdBySessionId(sessionId, agentSessionId);
     },
     anthropic.baseUrl,
     config

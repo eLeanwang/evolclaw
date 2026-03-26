@@ -16,13 +16,13 @@ export class AgentRunner {
   private config?: Config;
   private activeSessions: Map<string, string> = new Map();
   private activeStreams = new Map<string, AsyncIterable<any>>();
-  private onSessionIdUpdate?: (sessionId: string, claudeSessionId: string) => void;
+  private onSessionIdUpdate?: (sessionId: string, agentSessionId: string) => void;
   private onCompactStart?: (sessionId: string) => void;
 
   constructor(
     apiKey: string,
     model?: string,
-    onSessionIdUpdate?: (sessionId: string, claudeSessionId: string) => void,
+    onSessionIdUpdate?: (sessionId: string, agentSessionId: string) => void,
     baseUrl?: string,
     config?: Config
   ) {
@@ -59,8 +59,8 @@ export class AgentRunner {
     ensureDir(projectPath);
     ensureDir(path.join(projectPath, '.claude'));
 
-    // 优先使用传入的 claudeSessionId（从数据库恢复），否则使用内存中的
-    let claudeSessionId = initialClaudeSessionId || this.activeSessions.get(sessionId);
+    // 优先使用传入的 agentSessionId（从数据库恢复），否则使用内存中的
+    let agentSessionId = initialClaudeSessionId || this.activeSessions.get(sessionId);
 
     // 检查是否在安全模式
     let skipResume = false;
@@ -68,17 +68,17 @@ export class AgentRunner {
       const health = await sessionManager.getHealthStatus(sessionId);
       if (health.safeMode) {
         // 安全模式：不使用 resume，每次都是新对话
-        claudeSessionId = undefined;
+        agentSessionId = undefined;
         skipResume = true;
         logger.warn(`[AgentRunner] Safe mode enabled for ${sessionId}, not resuming session`);
       }
     }
 
-    // 验证会话文件是否存在且有效（仅在非安全模式且有 claudeSessionId 时）
-    if (claudeSessionId && !skipResume) {
+    // 验证会话文件是否存在且有效（仅在非安全模式且有 agentSessionId 时）
+    if (agentSessionId && !skipResume) {
       const homeDir = os.homedir();
       const encodedProjectPath = encodePath(projectPath);
-      const sessionFile = path.join(homeDir, '.claude', 'projects', encodedProjectPath, `${claudeSessionId}.jsonl`);
+      const sessionFile = path.join(homeDir, '.claude', 'projects', encodedProjectPath, `${agentSessionId}.jsonl`);
 
       let isValid = false;
       if (fs.existsSync(sessionFile)) {
@@ -105,7 +105,7 @@ export class AgentRunner {
 
       if (!isValid) {
         logger.warn(`[AgentRunner] Invalid session file, starting new session`);
-        claudeSessionId = undefined;
+        agentSessionId = undefined;
         this.activeSessions.delete(sessionId);
         if (this.onSessionIdUpdate) {
           this.onSessionIdUpdate(sessionId, '');
@@ -237,8 +237,8 @@ export class AgentRunner {
           stream.end();
           queryStream = createQuery(stream);
         } else {
-          logger.debug('[AgentRunner] Creating query with text only, claudeSessionId:', initialClaudeSessionId);
-          queryStream = createQuery(prompt, claudeSessionId);
+          logger.debug('[AgentRunner] Creating query with text only, agentSessionId:', initialClaudeSessionId);
+          queryStream = createQuery(prompt, agentSessionId);
         }
         this.activeStreams.set(sessionId, queryStream);
         return queryStream;
@@ -269,21 +269,21 @@ export class AgentRunner {
     this.activeStreams.delete(sessionId);
   }
 
-  updateSessionId(sessionId: string, claudeSessionId: string): void {
-    logger.info(`[AgentRunner] updateSessionId called: sessionId=${sessionId}, claudeSessionId=${claudeSessionId}`);
-    this.activeSessions.set(sessionId, claudeSessionId);
+  updateSessionId(sessionId: string, agentSessionId: string): void {
+    logger.info(`[AgentRunner] updateSessionId called: sessionId=${sessionId}, agentSessionId=${agentSessionId}`);
+    this.activeSessions.set(sessionId, agentSessionId);
     if (this.onSessionIdUpdate) {
-      this.onSessionIdUpdate(sessionId, claudeSessionId);
+      this.onSessionIdUpdate(sessionId, agentSessionId);
     }
   }
 
-  private runSessionCommand(prompt: string, claudeSessionId: string, projectPath: string) {
+  private runSessionCommand(prompt: string, agentSessionId: string, projectPath: string) {
     return query({
       prompt,
       options: {
         cwd: projectPath,
         model: this.model,
-        resume: claudeSessionId,
+        resume: agentSessionId,
         maxTurns: 1,
         permissionMode: 'default',
         env: this.getAgentEnv()
@@ -294,10 +294,10 @@ export class AgentRunner {
   /**
    * 主动压缩会话上下文
    */
-  async compactSession(sessionId: string, claudeSessionId: string, projectPath: string): Promise<boolean> {
+  async compactSession(sessionId: string, agentSessionId: string, projectPath: string): Promise<boolean> {
     try {
-      logger.info(`[AgentRunner] Compacting session: ${claudeSessionId}`);
-      const stream = this.runSessionCommand('/compact', claudeSessionId, projectPath);
+      logger.info(`[AgentRunner] Compacting session: ${agentSessionId}`);
+      const stream = this.runSessionCommand('/compact', agentSessionId, projectPath);
       for await (const event of stream) {
         if (event.type === 'system' && event.subtype === 'compact_boundary') {
           logger.info(`[AgentRunner] Compact completed, pre_tokens: ${event.compact_metadata?.pre_tokens}`);
@@ -314,10 +314,10 @@ export class AgentRunner {
   /**
    * 通过 SDK /clear 命令清空会话历史
    */
-  async clearSession(claudeSessionId: string, projectPath: string): Promise<boolean> {
+  async clearSession(agentSessionId: string, projectPath: string): Promise<boolean> {
     try {
-      logger.info(`[AgentRunner] Clearing session via SDK: ${claudeSessionId}`);
-      const stream = this.runSessionCommand('/clear', claudeSessionId, projectPath);
+      logger.info(`[AgentRunner] Clearing session via SDK: ${agentSessionId}`);
+      const stream = this.runSessionCommand('/clear', agentSessionId, projectPath);
       for await (const event of stream) {
         logger.debug(`[AgentRunner] Clear event: type=${event.type}, subtype=${(event as any).subtype || 'none'}`);
       }

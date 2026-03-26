@@ -29,10 +29,10 @@ async function fileExists(filePath: string): Promise<boolean> {
  */
 export async function checkSessionFileHealth(
   projectPath: string,
-  claudeSessionId: string
+  agentSessionId: string
 ): Promise<SessionFileHealthResult> {
   const issues: string[] = [];
-  const sessionFile = path.join(projectPath, '.claude', `${claudeSessionId}.jsonl`);
+  const sessionFile = path.join(projectPath, '.claude', `${agentSessionId}.jsonl`);
 
   // 检查文件是否存在
   if (!(await fileExists(sessionFile))) {

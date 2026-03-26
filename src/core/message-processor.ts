@@ -18,6 +18,7 @@ export class MessageProcessor {
   private channels = new Map<string, { adapter: ChannelAdapter; options?: ChannelOptions }>();
   private currentFlusher?: StreamFlusher;
   private currentIsGroup = false;
+  private shouldSuppressActivities = false;
 
   constructor(
     private agentRunner: AgentRunner,
@@ -38,7 +39,7 @@ export class MessageProcessor {
    * 处理 compact 开始事件
    */
   handleCompactStart(): void {
-    if (this.currentFlusher && !this.currentIsGroup) {
+    if (this.currentFlusher && !this.currentIsGroup && !this.shouldSuppressActivities) {
       this.currentFlusher.addActivity('⏳ 会话压缩中...');
     }
   }
@@ -49,7 +50,7 @@ export class MessageProcessor {
   async processMessage(message: Message): Promise<void> {
     const isGroup = message.isGroup ?? false;
     this.currentIsGroup = isGroup;
-    const idleMs = this.config.idleMonitor?.timeout ?? 120000;
+    const idleMs = (this.config.idleMonitor?.timeout ?? 120) * 1000;
     const streamKey = `${message.channel}-${message.channelId}`;
     const channelInfo = this.channels.get(message.channel);
 
@@ -58,6 +59,16 @@ export class MessageProcessor {
     const isOwnerUser = isOwner(this.config, message.channel, message.userId || '');
     // 非主人（群聊或单聊）：空闲监控静默/简短
     const quietMode = isGroup || !isOwnerUser;
+
+    // 计算是否抑制活动输出
+    const shouldSuppress = (): boolean => {
+      const mode = this.config.showActivities ?? 'all';
+      if (mode === 'all') return false;
+      if (mode === 'dm-only') return isGroup;
+      if (mode === 'owner-dm-only') return isGroup || !isOwnerUser;
+      return false;
+    };
+    this.shouldSuppressActivities = shouldSuppress();
 
     let monitor: StreamIdleMonitor | undefined;
     let monitorInterval: ReturnType<typeof setInterval> | undefined;
@@ -99,7 +110,7 @@ export class MessageProcessor {
           } else {
             // notify or warn: send diagnostic message, task continues（非主人时静默）
             logger.info(`[MessageProcessor] Idle monitor: ${result.action} after ${result.idleSec}s idle, stream: ${streamKey}`);
-            if (channelInfo && !quietMode) {
+            if (channelInfo && !quietMode && !shouldSuppress()) {
               try {
                 await channelInfo.adapter.sendText(message.channelId, result.message);
               } catch (e) {
@@ -114,7 +125,7 @@ export class MessageProcessor {
 
     try {
       await Promise.race([
-        this._processMessageInternal(message, resetTimer, isGroup),
+        this._processMessageInternal(message, resetTimer, isGroup, shouldSuppress),
         timeoutPromise
       ]);
     } catch (error: any) {
@@ -193,7 +204,7 @@ export class MessageProcessor {
     }
   }
 
-  private async _processMessageInternal(message: Message, resetTimer: (eventType?: string, toolName?: string) => void, isGroup: boolean): Promise<void> {
+  private async _processMessageInternal(message: Message, resetTimer: (eventType?: string, toolName?: string) => void, isGroup: boolean, shouldSuppress: () => boolean): Promise<void> {
     const messageId = `${message.channel}_${message.channelId}_${message.timestamp || Date.now()}`;
     const channelInfo = this.channels.get(message.channel);
 
@@ -265,7 +276,7 @@ export class MessageProcessor {
           }
           // 后台任务：静默，不发送输出
         },
-        this.config.flushDelay ?? 4000,
+        this.config.flushDelay ? this.config.flushDelay * 1000 : 4000,
         options?.fileMarkerPattern
       );
 
@@ -280,7 +291,7 @@ export class MessageProcessor {
           session.id,
           message.content,
           absoluteProjectPath,
-          session.claudeSessionId,
+          session.agentSessionId,
           message.images,
           options?.systemPromptAppend,
           this.sessionManager
@@ -295,16 +306,17 @@ export class MessageProcessor {
           options,
           flusher,
           isBackground,
-          resetTimer
+          resetTimer,
+          shouldSuppress
         );
       } catch (error) {
-        if (classifyError(error) === ErrorType.CONTEXT_TOO_LONG && session.claudeSessionId) {
+        if (classifyError(error) === ErrorType.CONTEXT_TOO_LONG && session.agentSessionId) {
           // 尝试 compact 压缩会话
           flusher.addActivity('⚠️ 上下文过长，正在压缩会话...');
           await flusher.flush();
 
           const compacted = await this.agentRunner.compactSession(
-            session.id, session.claudeSessionId, absoluteProjectPath
+            session.id, session.agentSessionId, absoluteProjectPath
           );
 
           if (compacted) {
@@ -314,7 +326,7 @@ export class MessageProcessor {
               session.id,
               message.content,
               absoluteProjectPath,
-              session.claudeSessionId,
+              session.agentSessionId,
               message.images,
               options?.systemPromptAppend,
               this.sessionManager
@@ -329,7 +341,8 @@ export class MessageProcessor {
               options,
               flusher,
               isBackground,
-              resetTimer
+              resetTimer,
+              shouldSuppress
             );
           } else {
             throw new Error('CONTEXT_COMPACT_FAILED');
@@ -472,7 +485,8 @@ export class MessageProcessor {
     options: ChannelOptions | undefined,
     flusher: StreamFlusher,
     isBackground: boolean,
-    resetTimer: (eventType?: string, toolName?: string) => void
+    resetTimer: (eventType?: string, toolName?: string) => void,
+    shouldSuppress: () => boolean
   ): Promise<void> {
     let hasTextDelta = false;
     let hasReceivedText = false;
@@ -512,7 +526,7 @@ export class MessageProcessor {
 
         // 系统事件：compact_boundary（群聊时静默）
         if (event.type === 'system' && event.subtype === 'compact_boundary') {
-          if (!this.currentIsGroup) {
+          if (!this.currentIsGroup && !shouldSuppress()) {
             const preTokens = event.compact_metadata?.pre_tokens || 0;
             flusher.addActivity(`💡 会话压缩完成，继续执行...（压缩前 tokens: ${preTokens}）`);
           }
@@ -525,9 +539,9 @@ export class MessageProcessor {
           const summary = event.summary;
           const stats = [tools > 0 ? `${tools}次工具调用` : '', duration].filter(Boolean).join(', ');
 
-          if (summary) {
+          if (summary && !shouldSuppress()) {
             flusher.addActivity(`⏳ 子任务: ${summary}${stats ? ` (${stats})` : ''}`);
-          } else if (stats) {
+          } else if (stats && !shouldSuppress()) {
             flusher.addActivity(`⏳ 子任务进行中: ${stats}`);
           }
         }
@@ -536,8 +550,10 @@ export class MessageProcessor {
         if (event.type === 'assistant' && event.message?.content) {
           for (const content of event.message.content) {
             if (content.type === 'tool_use') {
-              const desc = this.formatToolDescription(content);
-              flusher.addActivity(`🔧 ${content.name}${desc ? ': ' + desc : ''}`);
+              if (!shouldSuppress()) {
+                const desc = this.formatToolDescription(content);
+                flusher.addActivity(`🔧 ${content.name}${desc ? ': ' + desc : ''}`);
+              }
             } else if (content.type === 'text' && content.text && !hasTextDelta) {
               // 仅在没有 text_delta 事件时从 assistant 事件提取文本，避免重复
               hasReceivedText = true;
@@ -550,7 +566,7 @@ export class MessageProcessor {
         if (event.type === 'tool_result') {
           logger.debug(`[MessageProcessor] tool_result: is_error=${event.is_error}, error=${event.error}, content=${typeof event.content}`);
 
-          if (event.is_error) {
+          if (event.is_error && !shouldSuppress()) {
             const toolName = event.tool_name || '工具';
             const errorMsg = event.error || (typeof event.content === 'string' ? event.content : JSON.stringify(event.content)) || '执行失败';
             flusher.addActivity(`⚠️ ${toolName}: ${errorMsg}`);
