@@ -1,8 +1,52 @@
 # Changelog
 
+## v2.1.0 (2026-03-27)
+
+### New Features
+
+- **Feishu thread (话题) support** — threads create independent sessions with isolated conversation context
+  - Each thread gets its own session (inherits project from main session)
+  - Thread sessions run in parallel via `session.id` as queue key
+  - Thread-creating message carries quoted content from the original message
+  - Thread reply routing: all responses use `reply_in_thread` API
+  - Thread command blocking: `/new`, `/slist`, `/fork` etc. disabled in threads
+- **Database schema upgrade** — new fields for thread and multi-agent support
+  - `thread_id` with partial unique index for thread session isolation
+  - `agent_type` / `agent_session_id` (renamed from `claude_session_id`) for future multi-agent support
+  - `metadata` JSON field for extensible per-session data (e.g. Feishu `rootId`)
+  - Automatic migration preserves existing data
+- **Feishu MessageHandler refactor** — 9 positional parameters replaced with `MessageHandlerOptions` interface
+- **`/stop` accuracy** — now a quick command with `hasActiveStream()` check, no longer misreports "no active task"
+
+### Bug Fixes
+
+- **Thread command routing** — `/status`, `/help`, `/clear`, `/safe` responses now go to the thread, not main chat
+- **Safe mode in threads** — notifications route to thread; hint uses `/clear` instead of `/new`
+- **`/restart` in threads** — success notification replies in-thread via saved `rootId`
+- **`/stop` in threads** — uses `session.id` as queue key to match thread message routing
+- **`backupClaudeDir` EINVAL** — backup to sibling directory instead of inside `.claude` (self-copy error)
+- **Thread quote detection** — DB-backed `hasThreadSession()` replaces in-memory Set (survives restarts)
+- **Background task detection** — `isBackgroundSession()` helper consolidates 4 duplicate checks; thread sessions never flagged as background
+
+### Code Quality
+
+- Extract `isBackgroundSession()` helper in message-processor (replaces 4 duplicated blocks)
+- Extract `getOrCreateThreadSession()` private method in session-manager
+- Extract `getThreadSendOpts()` helper for consistent thread reply routing
+- Add `AgentRunner.hasActiveStream()` for stream state inspection
+- Pass `threadId` through `CommandHandler` type signature and all call sites
+- Thread command blocking centralized in `CommandHandler.handle()`
+
+---
+
+**Full diff**: 31 files changed, +1973 / -411 lines
+
 ## v2.0.7 (2026-03-26)
 
-> 版本号与 npm 统一，内容与 v2.0.6 相同。
+### Bug Fixes
+
+- **Session turn count accuracy** — `/status` now shows only real user input turns, excluding auto-generated `tool_result` messages
+- **Windows path encoding** — `encodePath()` strips colons from drive letters to match Claude SDK convention
 
 ## v2.0.6 (2026-03-26)
 
@@ -21,8 +65,6 @@
 
 ### Bug Fixes
 
-- **Session turn count accuracy** — `/status` now shows only real user input turns, excluding auto-generated `tool_result` messages
-- **Windows path encoding** — `encodePath()` now strips colons from drive letters (e.g. `C:\Users\...` → `C-Users-...`) to match Claude SDK convention
 - **WeChat token validation** — skip placeholder tokens during startup validation
 - **SEND_FILE false positives** — filter out illustrative `[SEND_FILE:...]` markers in explanatory text
 - **Feishu table rendering** — markdown tables now converted to structured Feishu card format
@@ -33,7 +75,7 @@
 
 - Deduplicate `init.ts`: reuse `isWindows` and `commandExists` from `platform.ts`
 - Reuse `platform.isMainScript()` for CLI entry point detection
-- Add `platform.ts` with cross-platform process management (137 unit tests)
+- Add `platform.ts` with cross-platform process management
 
 ### Breaking Changes
 
@@ -42,5 +84,3 @@ None.
 ---
 
 **Full diff**: 18 files changed, +1001 / -174 lines
-
-**npm**: `npm install -g evolclaw@2.0.7`
