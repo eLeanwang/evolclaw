@@ -13,10 +13,10 @@ export const isWindows = process.platform === 'win32';
  * Encode project path as directory name (Claude SDK convention).
  * Replace all path separators with '-'.
  * e.g. /home/user/project -> -home-user-project
- *      C:\Users\project -> C-Users-project
+ *      C:\Users\project -> C--Users-project
  */
 export function encodePath(projectPath: string): string {
-  return projectPath.replace(/[/\\]/g, '-');
+  return projectPath.replace(/[/\\:]/g, '-');
 }
 
 /**
