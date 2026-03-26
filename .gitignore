@@ -28,6 +28,7 @@ projects/
 
 # Claude 临时文件
 .claude/
+.claude-backup-*/
 
 # 测试文件
 tests/
@@ -56,6 +57,8 @@ conversations/
 # 临时脚本
 *.sh.bak
 阿里云仓库配置脚本.sh
+scripts/
+test-*.ts
 
 # 项目文档（不公开）
 CLAUDE.md
