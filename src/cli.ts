@@ -738,7 +738,7 @@ function archiveSelfHealLog(
  */
 async function notifyChannel(
   p: ReturnType<typeof resolvePaths>,
-  pendingInfo: { channel: string; channelId: string } | null,
+  pendingInfo: { channel: string; channelId: string; rootId?: string } | null,
   message: string,
   log: (msg: string) => void
 ) {
@@ -758,14 +758,25 @@ async function notifyChannel(
         appSecret: config.channels!.feishu!.appSecret,
       });
 
-      await client.im.message.create({
-        params: { receive_id_type: 'chat_id' },
-        data: {
-          receive_id: pendingInfo.channelId,
-          msg_type: 'text',
-          content: JSON.stringify({ text: message }),
-        },
-      });
+      if (pendingInfo.rootId) {
+        await client.im.message.reply({
+          path: { message_id: pendingInfo.rootId },
+          data: {
+            msg_type: 'text',
+            content: JSON.stringify({ text: message }),
+            reply_in_thread: true,
+          },
+        });
+      } else {
+        await client.im.message.create({
+          params: { receive_id_type: 'chat_id' },
+          data: {
+            receive_id: pendingInfo.channelId,
+            msg_type: 'text',
+            content: JSON.stringify({ text: message }),
+          },
+        });
+      }
 
       log(`Feishu notification sent: ${message.slice(0, 50)}`);
     } catch (error: any) {

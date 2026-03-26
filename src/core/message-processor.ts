@@ -20,6 +20,13 @@ export class MessageProcessor {
   private currentIsGroup = false;
   private shouldSuppressActivities = false;
 
+  /** 话题 session 永远不是后台任务；主 session 与当前活跃 session 比对 */
+  private async isBackgroundSession(session: Session, channel: string, channelId: string): Promise<boolean> {
+    if (session.threadId) return false;
+    const active = await this.sessionManager.getActiveSession(channel, channelId);
+    return active ? session.id !== active.id : false;
+  }
+
   constructor(
     private agentRunner: AgentRunner,
     private sessionManager: SessionManager,
@@ -138,7 +145,8 @@ export class MessageProcessor {
           const session = await this.sessionManager.getOrCreateSession(
             message.channel,
             message.channelId,
-            this.config.projects?.defaultPath || process.cwd()
+            this.config.projects?.defaultPath || process.cwd(),
+            message.threadId
           );
 
           const errorType = classifyError(error);
@@ -151,7 +159,7 @@ export class MessageProcessor {
             logger.info(`[MessageProcessor] Non-owner/group error (user=${message.userId}, group=${isGroup}), skipping safe mode accumulation`);
           } else {
             const newCount = await this.sessionManager.recordError(session.id, errorType, error.message);
-            await this.checkSafeMode(session.id, message.channelId, channelInfo.adapter, safeModeThreshold, newCount);
+            await this.checkSafeMode(session, message.channelId, channelInfo.adapter, safeModeThreshold, newCount);
           }
         } catch (statusError) {
           logger.error('[MessageProcessor] Failed to update health status:', statusError);
@@ -164,12 +172,18 @@ export class MessageProcessor {
     }
   }
 
+  /** 从 session 提取话题回复选项 */
+  private getThreadSendOpts(session: Session): { replyToMessageId: string; replyInThread: true } | undefined {
+    const rootId = session.metadata?.feishu?.rootId;
+    return rootId ? { replyToMessageId: rootId, replyInThread: true } : undefined;
+  }
+
   /**
    * 检查是否需要进入安全模式（safeModeThreshold 为 0 时跳过）
    * 仅单聊主人会话调用（群聊和非主人已在调用侧过滤）
    */
   private async checkSafeMode(
-    sessionId: string,
+    session: Session,
     channelId: string,
     adapter: ChannelAdapter,
     safeModeThreshold: number,
@@ -177,10 +191,16 @@ export class MessageProcessor {
   ): Promise<void> {
     if (safeModeThreshold <= 0) return;
 
-    const health = await this.sessionManager.getHealthStatus(sessionId);
+    const health = await this.sessionManager.getHealthStatus(session.id);
+    const sendOpts = this.getThreadSendOpts(session);
+    const isThread = !!session.threadId;
     if (consecutiveErrors >= safeModeThreshold && !health.safeMode) {
-      await this.sessionManager.setSafeMode(sessionId, true);
-      logger.warn(`[MessageProcessor] Session ${sessionId} entered safe mode after ${consecutiveErrors} errors`);
+      await this.sessionManager.setSafeMode(session.id, true);
+      logger.warn(`[MessageProcessor] Session ${session.id} entered safe mode after ${consecutiveErrors} errors`);
+
+      const suggestions = isThread
+        ? `1. /repair - 检查并修复会话（推荐，保留历史）\n2. /clear - 清空会话历史\n3. /status - 查看详细状态`
+        : `1. /repair - 检查并修复会话（推荐，保留历史）\n2. /new [名称] - 创建新会话（清空历史）\n3. /status - 查看详细状态`;
 
       await adapter.sendText(
         channelId,
@@ -191,15 +211,14 @@ export class MessageProcessor {
 - 每次提问需要提供完整上下文
 
 建议操作：
-1. /repair - 检查并修复会话（推荐，保留历史）
-2. /new [名称] - 创建新会话（清空历史）
-3. /status - 查看详细状态`
+${suggestions}`,
+        sendOpts
       );
     } else if (safeModeThreshold >= 2 && consecutiveErrors === safeModeThreshold - 1) {
-      // 阈值前一次错误，发送警告
       await adapter.sendText(
         channelId,
-        `⚠️ 检测到异常（${consecutiveErrors}/${safeModeThreshold}）\n\n如果问题持续，系统将自动进入安全模式。建议使用 /status 查看状态。`
+        `⚠️ 检测到异常（${consecutiveErrors}/${safeModeThreshold}）\n\n如果问题持续，系统将自动进入安全模式。建议使用 /status 查看状态。`,
+        sendOpts
       );
     }
   }
@@ -218,9 +237,13 @@ export class MessageProcessor {
     try {
       // 检查是否为命令
       if (this.commandHandler) {
-        const cmdResult = await this.commandHandler(message.content, message.channel, message.channelId, message.userId);
+        const cmdResult = await this.commandHandler(message.content, message.channel, message.channelId, message.userId, message.threadId);
         if (cmdResult) {
-          await adapter.sendText(message.channelId, cmdResult);
+          // 话题消息：通过 rootId 回复到话题内
+          const session = message.threadId ? await this.sessionManager.getOrCreateSession(message.channel, message.channelId, this.config.projects?.defaultPath || process.cwd(), message.threadId) : undefined;
+          const rootId = session?.metadata?.feishu?.rootId;
+          const sendOpts = rootId ? { replyToMessageId: rootId, replyInThread: true } : undefined;
+          await adapter.sendText(message.channelId, cmdResult, sendOpts);
           return;
         }
       }
@@ -228,9 +251,7 @@ export class MessageProcessor {
       // 解析会话和项目路径
       const { session, absoluteProjectPath } = await this.resolveSession(message);
 
-      // 判断是否是后台任务
-      const activeSession = await this.sessionManager.getActiveSession(message.channel, message.channelId);
-      const isBackground = activeSession ? session.id !== activeSession.id : false;
+      const isBackground = await this.isBackgroundSession(session, message.channel, message.channelId);
 
       // 记录收到消息
       logger.message({
@@ -260,15 +281,18 @@ export class MessageProcessor {
       const messageIsGroup = isGroup; // 捕获 isGroup 供闭包使用
       const flusher = new StreamFlusher(
         async (text, isFinal) => {
-          // 动态判断是否是后台任务
-          const currentActiveSession = await this.sessionManager.getActiveSession(message.channel, message.channelId);
-          const isCurrentlyBackground = currentActiveSession ? session.id !== currentActiveSession.id : false;
+          const isCurrentlyBackground = await this.isBackgroundSession(session, message.channel, message.channelId);
 
           if (!isCurrentlyBackground) {
-            const opts: { title?: string; replyToMessageId?: string; mentionUserIds?: string[] } = {};
+            const opts: { title?: string; replyToMessageId?: string; mentionUserIds?: string[]; replyInThread?: boolean } = {};
             if (isFinal) opts.title = '最终回复:';
-            // 首条消息引用回复用户原消息
-            if (firstReply && message.messageId) {
+            // 话题会话：所有回复指向 rootId + reply_in_thread（确保消息进入话题）
+            const rootId = session.metadata?.feishu?.rootId;
+            if (rootId) {
+              opts.replyToMessageId = rootId;
+              opts.replyInThread = true;
+            } else if (firstReply && message.messageId) {
+              // 主会话：首条消息引用回复用户原消息
               opts.replyToMessageId = message.messageId;
               firstReply = false;
             }
@@ -391,7 +415,10 @@ export class MessageProcessor {
       // 安全模式尾部提示：如果当前会话处于安全模式，追加提醒
       const healthStatus = await this.sessionManager.getHealthStatus(session.id);
       if (healthStatus.safeMode) {
-        await adapter.sendText(message.channelId, '\n\n⚠️ 当前处于安全模式（无上下文记忆）。使用 /repair 修复 或 /new 新建会话');
+        const hint = session.threadId
+          ? '\n\n⚠️ 当前处于安全模式（无上下文记忆）。使用 /repair 修复 或 /clear 清空会话'
+          : '\n\n⚠️ 当前处于安全模式（无上下文记忆）。使用 /repair 修复 或 /new 新建会话';
+        await adapter.sendText(message.channelId, hint, this.getThreadSendOpts(session));
       }
 
       // 清理 activeStreams（正常完成）
@@ -400,9 +427,7 @@ export class MessageProcessor {
       // 记录成功响应（重置错误计数）
       await this.sessionManager.recordSuccess(session.id);
 
-      // 动态判断是否是后台任务，决定是否发送通知
-      const currentActive = await this.sessionManager.getActiveSession(message.channel, message.channelId);
-      const isFinallyBackground = currentActive ? session.id !== currentActive.id : false;
+      const isFinallyBackground = await this.isBackgroundSession(session, message.channel, message.channelId);
 
       if (isFinallyBackground) {
         const projectName = path.basename(session.projectPath);
@@ -464,7 +489,8 @@ export class MessageProcessor {
     const session = await this.sessionManager.getOrCreateSession(
       message.channel,
       message.channelId,
-      this.config.projects?.defaultPath || process.cwd()
+      this.config.projects?.defaultPath || process.cwd(),
+      message.threadId
     );
 
     const absoluteProjectPath = path.isAbsolute(session.projectPath)
@@ -511,9 +537,7 @@ export class MessageProcessor {
         lastSessionId = event.session_id;
       }
 
-      // 动态判断当前是否是后台任务
-      const currentActive = await this.sessionManager.getActiveSession(session.channel, session.channelId);
-      const isCurrentlyBackground = currentActive ? session.id !== currentActive.id : false;
+      const isCurrentlyBackground = await this.isBackgroundSession(session, session.channel, session.channelId);
 
       // === 前台任务：正常处理所有事件 ===
       if (!isCurrentlyBackground) {

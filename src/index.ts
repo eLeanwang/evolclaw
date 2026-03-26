@@ -1,4 +1,4 @@
-import { loadConfig, ensureDir, ensureDataDirs, resolvePaths, resolveAnthropicConfig } from './config.js';
+import { loadConfig, ensureDataDirs, resolvePaths, resolveAnthropicConfig } from './config.js';
 import { SessionManager } from './core/session-manager.js';
 import { AgentRunner } from './core/agent-runner.js';
 import { FeishuChannel } from './channels/feishu.js';
@@ -107,7 +107,7 @@ async function main() {
     sessionManager,
     config,
     messageCache,
-    (content, channel, channelId, userId) => {
+    (content, channel, channelId, userId, threadId) => {
       const sendFn = async (id: string, text: string) => {
         const adapter = cmdHandler.getAdapter(channel);
         if (!adapter) return;
@@ -136,7 +136,7 @@ async function main() {
           await adapter.sendText(id, text);
         }
       };
-      return cmdHandler.handle(content, channel, channelId, sendFn, userId);
+      return cmdHandler.handle(content, channel, channelId, sendFn, userId, threadId);
     }
   );
 
@@ -276,8 +276,8 @@ async function main() {
 
   // Feishu 消息处理
   if (feishu) {
-    feishu.onMessage(async (chatId, content, images, userId, userName, messageId, mentions) => {
-      content = content.trim();
+    feishu.onMessage(async ({ channelId: chatId, content: rawContent, images, userId, userName, messageId, mentions, threadId, rootId }) => {
+      let content = rawContent.trim();
 
       // 首次交互自动绑定主人
       if (userId && !config.channels?.feishu?.owner) {
@@ -288,11 +288,11 @@ async function main() {
 
       // 命令立即处理，不进入队列
       if (cmdHandler.isCommand(content)) {
-        const cmdResult = await cmdHandler.handle(content, 'feishu', chatId, undefined, userId);
+        const cmdResult = await cmdHandler.handle(content, 'feishu', chatId, undefined, userId, threadId);
         if (cmdResult !== null) {
           if (cmdResult) {
             try {
-              await feishu!.sendMessage(chatId, cmdResult, { forceText: true });
+              await feishu!.sendMessage(chatId, cmdResult, { forceText: true, replyToMessageId: rootId, replyInThread: true });
             } catch (error) {
               logger.error('[Feishu] Failed to send command response:', error);
             }
@@ -301,8 +301,12 @@ async function main() {
         }
       }
 
-      // 获取当前项目路径
-      const session = await sessionManager.getOrCreateSession('feishu', chatId, config.projects?.defaultPath || process.cwd());
+      // 获取当前项目路径（话题会话自动创建，携带 metadata）
+      const metadata = rootId ? { feishu: { rootId } } : undefined;
+      const session = await sessionManager.getOrCreateSession(
+        'feishu', chatId, config.projects?.defaultPath || process.cwd(),
+        threadId, metadata
+      );
 
       // 群聊消息添加用户名前缀
       const chatMode = await feishu!.getChatMode(chatId);
@@ -310,10 +314,10 @@ async function main() {
         content = `[${userName}] ${content}`;
       }
 
-      // 普通消息进入队列
+      // 普通消息进入队列（使用 session.id 作为 key，话题间可并行）
       await messageQueue.enqueue(
-        `feishu-${chatId}`,
-        { channel: 'feishu', channelId: chatId, content, images, timestamp: Date.now(), userId, userName, messageId, isGroup: chatMode === 'group', mentions },
+        session.id,
+        { channel: 'feishu', channelId: chatId, content, images, timestamp: Date.now(), userId, userName, messageId, isGroup: chatMode === 'group', mentions, threadId },
         session.projectPath
       );
     });

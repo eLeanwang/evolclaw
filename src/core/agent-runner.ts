@@ -261,6 +261,10 @@ export class AgentRunner {
     }
   }
 
+  hasActiveStream(sessionId: string): boolean {
+    return this.activeStreams.has(sessionId);
+  }
+
   registerStream(key: string, stream: AsyncIterable<any>): void {
     this.activeStreams.set(key, stream);
   }

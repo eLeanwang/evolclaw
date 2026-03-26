@@ -79,7 +79,8 @@ export async function checkSessionFileHealth(
  */
 export async function backupClaudeDir(projectPath: string): Promise<string> {
   const claudeDir = path.join(projectPath, '.claude');
-  const backupDir = path.join(claudeDir, `backup-${Date.now()}`);
+  const dirName = path.basename(claudeDir);
+  const backupDir = path.join(path.dirname(claudeDir), `${dirName}-backup-${Date.now()}`);
 
   await fs.cp(claudeDir, backupDir, { recursive: true });
   logger.info(`[SessionFileHealth] Backup created: ${backupDir}`);

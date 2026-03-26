@@ -78,12 +78,13 @@ export interface Message {
   messageId?: string;
   isGroup?: boolean;
   mentions?: Array<{ userId: string; name?: string; key?: string }>;
+  threadId?: string;
 }
 
 // 渠道适配器接口
 export interface ChannelAdapter {
   readonly name: string;
-  sendText(channelId: string, text: string, options?: { title?: string; replyToMessageId?: string; mentionUserIds?: string[] }): Promise<void>;
+  sendText(channelId: string, text: string, options?: { title?: string; replyToMessageId?: string; mentionUserIds?: string[]; replyInThread?: boolean }): Promise<void>;
   sendFile?(channelId: string, filePath: string): Promise<void>;
   isGroupChat?(channelId: string): Promise<boolean>;
 }
@@ -100,5 +101,6 @@ export type CommandHandler = (
   content: string,
   channel: string,
   channelId: string,
-  userId?: string
+  userId?: string,
+  threadId?: string
 ) => Promise<string | null>;

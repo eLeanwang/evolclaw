@@ -28,8 +28,9 @@
   },
   "idleMonitor": {
     "enabled": true,
-    "timeout": 120000,
+    "timeout": 120,
     "safeModeThreshold": 3
   },
-  "flushDelay": 4000
+  "flushDelay": 4,
+  "showActivities": "all"
 }

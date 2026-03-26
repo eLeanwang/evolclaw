@@ -68,8 +68,9 @@ const aliases: Record<string, string> = {
 };
 
 // 命令快速路径前缀（不进入消息队列的命令）
-// 注意：/stop, /clear, /compact, /safe 故意不在此列表中，它们需要进入队列触发中断机制
-const quickCommandPrefixes = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/slist', '/session', '/rename', '/repair', '/fork', '/p ', '/s ', '/name '];
+// 注意：/clear, /compact, /safe 故意不在此列表中，它们需要进入队列触发中断机制
+// /stop 是快速命令：直接调用 agentRunner.interrupt()，不走队列（否则队列自动中断后 /stop 检测不到活跃任务）
+const quickCommandPrefixes = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/slist', '/session', '/rename', '/repair', '/fork', '/stop', '/p ', '/s ', '/name '];
 
 export class CommandHandler {
   private adapters = new Map<string, ChannelAdapter>();
@@ -98,8 +99,19 @@ export class CommandHandler {
     return this.getConfiguredProjectName(projectPath) || path.basename(projectPath);
   }
 
+  /** 获取消息队列 key：话题用 session.id，主会话用 channel-channelId */
+  private getQueueKey(session: Session | undefined, channel: string, channelId: string): string {
+    if (session?.threadId) return session.id;
+    return `${channel}-${channelId}`;
+  }
+
   /** 获取活跃会话，无会话时返回统一错误提示 */
-  private async ensureSession(channel: string, channelId: string): Promise<{ session: Session } | { error: string }> {
+  private async ensureSession(channel: string, channelId: string, threadId?: string): Promise<{ session: Session } | { error: string }> {
+    if (threadId) {
+      // 话题会话：按 thread_id 查找
+      const session = await this.sessionManager.getOrCreateSession(channel, channelId, this.config.projects?.defaultPath || process.cwd(), threadId);
+      return { session };
+    }
     const session = await this.sessionManager.getActiveSession(channel, channelId);
     if (!session) {
       return { error: '❌ 当前没有活跃会话\n使用 /new 创建新会话' };
@@ -139,6 +151,7 @@ export class CommandHandler {
     channelId: string,
     sendMessage?: (channelId: string, text: string) => Promise<void>,
     userId?: string,
+    threadId?: string,
   ): Promise<string | null> {
     // 规范化命令（将别名转换为完整命令）
     let normalizedContent = content;
@@ -151,6 +164,13 @@ export class CommandHandler {
 
     // 权限检查：区分用户级命令和管理级命令
     const { isOwner: checkOwner } = await import('../config.js');
+
+    // 话题内禁用部分命令
+    if (threadId) {
+      const threadBlocked = ['/new', '/slist', '/plist', '/bind', '/s', '/session', '/project', '/p', '/fork'];
+      const isBlocked = threadBlocked.some(c => normalizedContent === c || normalizedContent.startsWith(c + ' '));
+      if (isBlocked) return '⚠️ 话题中不支持此命令';
+    }
     const isAdmin = !userId || checkOwner(this.config, channel, userId);
 
     if (normalizedContent.startsWith('/')) {
@@ -256,10 +276,18 @@ export class CommandHandler {
 
     // /stop 命令：中断当前任务
     if (normalizedContent === '/stop') {
-      const sessionKey = `${channel}-${channelId}`;
+      // 话题使用 session.id 作为队列 key，主会话使用 channel-channelId
+      let sessionKey: string;
+      if (threadId) {
+        const threadSession = await this.sessionManager.getOrCreateSession(channel, channelId, this.config.projects?.defaultPath || process.cwd(), threadId);
+        sessionKey = threadSession.id;
+      } else {
+        sessionKey = `${channel}-${channelId}`;
+      }
       const queueLength = this.messageQueue.getQueueLength(sessionKey);
+      const hasActive = this.agentRunner.hasActiveStream(sessionKey);
 
-      if (queueLength === 0) {
+      if (queueLength === 0 && !hasActive) {
         return '当前没有正在处理的任务';
       }
 
@@ -269,7 +297,7 @@ export class CommandHandler {
 
     // /clear 命令：通过 SDK /clear 清空会话历史
     if (normalizedContent === '/clear') {
-      const result = await this.ensureSession(channel, channelId);
+      const result = await this.ensureSession(channel, channelId, threadId);
       if ('error' in result) return result.error;
       const { session } = result;
 
@@ -293,7 +321,7 @@ export class CommandHandler {
 
     // /compact 命令：手动压缩会话上下文
     if (normalizedContent === '/compact') {
-      const result = await this.ensureSession(channel, channelId);
+      const result = await this.ensureSession(channel, channelId, threadId);
       if ('error' in result) return result.error;
       const { session } = result;
 
@@ -317,8 +345,13 @@ export class CommandHandler {
       }
     }
 
-    // 尝试获取活跃会话（所有命令都尝试获取，但不强制）
-    let session = await this.sessionManager.getActiveSession(channel, channelId);
+    // 尝试获取活跃会话（话题时直接查找话题 session）
+    let session: Session | undefined;
+    if (threadId) {
+      session = await this.sessionManager.getOrCreateSession(channel, channelId, this.config.projects?.defaultPath || process.cwd(), threadId);
+    } else {
+      session = await this.sessionManager.getActiveSession(channel, channelId);
+    }
 
     // 对于需要创建会话的命令，如果没有会话则创建
     if (!session && (
@@ -343,12 +376,13 @@ export class CommandHandler {
 提示：发送任意消息或使用 /new 命令创建会话`;
       }
 
-      const sessionKey = `${channel}-${channelId}`;
+      const sessionKey = this.getQueueKey(session, channel, channelId);
       const isCurrentlyProcessing = this.messageQueue.isProcessing(sessionKey);
       const queueLength = this.messageQueue.getQueueLength(sessionKey);
 
-      let activeStatus = session.isActive ? '✓ 活跃' : '休眠';
-      if (session.isActive && isCurrentlyProcessing) {
+      const isThread = !!session.threadId;
+      let activeStatus = isThread ? '话题' : (session.isActive ? '✓ 活跃' : '休眠');
+      if ((isThread || session.isActive) && isCurrentlyProcessing) {
         if (queueLength > 0) {
           activeStatus += ` [处理中，队列${queueLength}条]`;
         } else {
@@ -378,7 +412,7 @@ export class CommandHandler {
       const lines: string[] = [];
       if (isAdmin) {
         lines.push(
-          '📊 会话状态：',
+          `📊 ${isThread ? '话题' : '会话'}状态：`,
           `渠道: ${channel} / 项目: ${projectName} / 会话: ${session.name || '(未命名)'}`,
           `会话ID: ${session.id}`,
           `项目路径: ${session.projectPath}`,
@@ -393,7 +427,7 @@ export class CommandHandler {
         );
       } else {
         lines.push(
-          '📊 会话状态：',
+          `📊 ${isThread ? '话题' : '会话'}状态：`,
           `会话: ${session.name || '(未命名)'}`,
           `状态: ${activeStatus}`,
           `会话轮数: ${sessionTurns}`,
@@ -476,10 +510,17 @@ export class CommandHandler {
         }
       }
 
-      const restartInfo = {
+      // 话题中 restart 时保存 rootId 用于重启后回复到话题
+      let rootId: string | undefined;
+      if (threadId) {
+        const threadSession = await this.sessionManager.getOrCreateSession(channel, channelId, this.config.projects?.defaultPath || process.cwd(), threadId);
+        rootId = threadSession.metadata?.feishu?.rootId;
+      }
+      const restartInfo: Record<string, any> = {
         channel,
         channelId,
-        timestamp: Date.now()
+        timestamp: Date.now(),
+        ...(rootId ? { rootId } : {})
       };
       fs.writeFileSync(path.join(resolvePaths().dataDir, 'restart-pending.json'), JSON.stringify(restartInfo));
 

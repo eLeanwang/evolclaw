@@ -13,8 +13,20 @@ export interface FeishuConfig {
   db: DatabaseSync;
 }
 
+export interface MessageHandlerOptions {
+  channelId: string;
+  content: string;
+  images?: Array<{ data: string; mimeType: string }>;
+  userId?: string;
+  userName?: string;
+  messageId?: string;
+  mentions?: Array<{ userId: string; name?: string; key?: string }>;
+  threadId?: string;
+  rootId?: string;
+}
+
 export interface MessageHandler {
-  (channelId: string, content: string, images?: Array<{ data: string; mimeType: string }>, userId?: string, userName?: string, messageId?: string, mentions?: Array<{ userId: string; name?: string; key?: string }>): Promise<void>;
+  (options: MessageHandlerOptions): Promise<void>;
 }
 
 export interface ProjectPathProvider {
@@ -67,11 +79,6 @@ export class FeishuChannel {
           logger.debug('[Feishu] Received message, message_id:', msg.message_id, 'type:', msg.message_type);
           logger.debug('[Feishu] Full data object:', JSON.stringify(data, null, 2));
 
-          // 诊断：话题消息检测
-          if (msg.thread_id) {
-            logger.info('[Feishu] Thread message detected, thread_id:', msg.thread_id, 'parent_id:', msg.parent_id, 'root_id:', msg.root_id);
-          }
-
           if (!msg.message_id || this.isDuplicate(msg.message_id)) {
             logger.debug('[Feishu] Duplicate message ignored:', msg.message_id);
             return;
@@ -80,6 +87,11 @@ export class FeishuChannel {
           this.addAckReaction(msg.message_id);
 
           if (!this.messageHandler) return;
+
+          // 话题消息检测日志（去重后）
+          if (msg.thread_id) {
+            logger.info('[Feishu] Thread message, thread_id:', msg.thread_id, 'root_id:', msg.root_id);
+          }
 
           // 提取 @ 提及列表（排除机器人自身）
           const mentions = (msg.mentions || []).map((m: any) => ({
@@ -98,11 +110,18 @@ export class FeishuChannel {
           }
 
           try {
-            // 处理引用消息
+            // 提取话题信息
+            const threadId = msg.thread_id || undefined;
+            const rootId = msg.root_id || undefined;
+
+            // 处理引用消息（话题内消息跳过，避免每条都拼接引用前缀）
             let quotedText = '';
             let quotedImages: Array<{ data: string; mimeType: string }> = [];
 
-            if (msg.parent_id && this.client) {
+            // 话题创建消息检测：DB 中无对应 thread session 时为首条消息
+            const isThreadCreating = threadId && !this.hasThreadSession(threadId);
+
+            if (msg.parent_id && (!msg.thread_id || isThreadCreating) && this.client) {
               try {
                 const res = await this.client.im.message.get({
                   path: { message_id: msg.parent_id }
@@ -182,7 +201,7 @@ export class FeishuChannel {
               // 优先使用 text_without_at_bot（去除机器人 @），否则使用 text
               const content = parsed.text_without_at_bot || parsed.text;
               const finalContent = quotedText + content;
-              await this.messageHandler(msg.chat_id, finalContent, quotedImages.length > 0 ? quotedImages : undefined, userId, userName, msg.message_id, mentions.length > 0 ? mentions : undefined);
+              await this.messageHandler({ channelId: msg.chat_id, content: finalContent, images: quotedImages.length > 0 ? quotedImages : undefined, userId, userName, messageId: msg.message_id, mentions: mentions.length > 0 ? mentions : undefined, threadId, rootId });
             }
             // 处理图片消息
             else if (msg.message_type === 'image') {
@@ -198,10 +217,10 @@ export class FeishuChannel {
               if (imageData) {
                 const allImages = [...quotedImages, imageData];
                 const prompt = quotedText + '用户发送了一张图片，请分析这张图片的内容。';
-                await this.messageHandler(msg.chat_id, prompt, allImages, userId, userName, msg.message_id);
+                await this.messageHandler({ channelId: msg.chat_id, content: prompt, images: allImages, userId, userName, messageId: msg.message_id, threadId, rootId });
               } else {
                 const prompt = quotedText + '[图片下载失败] 应用可能缺少 im:message 或 im:message:readonly 权限';
-                await this.messageHandler(msg.chat_id, prompt, quotedImages.length > 0 ? quotedImages : undefined, userId, userName, msg.message_id);
+                await this.messageHandler({ channelId: msg.chat_id, content: prompt, images: quotedImages.length > 0 ? quotedImages : undefined, userId, userName, messageId: msg.message_id, threadId, rootId });
               }
             }
             // 处理文件消息
@@ -218,10 +237,10 @@ export class FeishuChannel {
               const filePath = await this.downloadFile(fileKey, fileName, msg.message_id, projectPath);
               if (filePath) {
                 const prompt = quotedText + `用户发送了文件：${fileName}\n文件已保存到：${filePath}\n请使用 Read 工具读取并分析文件内容。`;
-                await this.messageHandler(msg.chat_id, prompt, quotedImages.length > 0 ? quotedImages : undefined, userId, userName, msg.message_id);
+                await this.messageHandler({ channelId: msg.chat_id, content: prompt, images: quotedImages.length > 0 ? quotedImages : undefined, userId, userName, messageId: msg.message_id, threadId, rootId });
               } else {
                 const prompt = quotedText + '[文件下载失败] 应用可能缺少 im:resource 权限';
-                await this.messageHandler(msg.chat_id, prompt, quotedImages.length > 0 ? quotedImages : undefined, userId, userName, msg.message_id);
+                await this.messageHandler({ channelId: msg.chat_id, content: prompt, images: quotedImages.length > 0 ? quotedImages : undefined, userId, userName, messageId: msg.message_id, threadId, rootId });
               }
             }
             // 处理富文本消息
@@ -241,13 +260,13 @@ export class FeishuChannel {
               let finalContent = text.trim();
               if (title) finalContent = `${title}\n${finalContent}`;
               finalContent = quotedText + finalContent;
-              await this.messageHandler(msg.chat_id, finalContent, quotedImages.length > 0 ? quotedImages : undefined, userId, userName, msg.message_id);
+              await this.messageHandler({ channelId: msg.chat_id, content: finalContent, images: quotedImages.length > 0 ? quotedImages : undefined, userId, userName, messageId: msg.message_id, threadId, rootId });
             }
             // 处理其他类型消息
             else {
               logger.debug('[Feishu] Unsupported message type:', msg.message_type);
               const prompt = quotedText + `[不支持的消息类型: ${msg.message_type}]`;
-              await this.messageHandler(msg.chat_id, prompt, quotedImages.length > 0 ? quotedImages : undefined, userId, userName, msg.message_id);
+              await this.messageHandler({ channelId: msg.chat_id, content: prompt, images: quotedImages.length > 0 ? quotedImages : undefined, userId, userName, messageId: msg.message_id, threadId, rootId });
             }
           } catch (error) {
             logger.error('[Feishu] Failed to process message:', error);
@@ -321,7 +340,7 @@ export class FeishuChannel {
     return undefined;
   }
 
-  async sendMessage(chatId: string, content: string, options?: { title?: string; replyToMessageId?: string; forceText?: boolean; mentionUserIds?: string[] }): Promise<void> {
+  async sendMessage(chatId: string, content: string, options?: { title?: string; replyToMessageId?: string; forceText?: boolean; mentionUserIds?: string[]; replyInThread?: boolean }): Promise<void> {
     if (!this.client) return;
 
     if (!content || content.trim() === '') {
@@ -358,9 +377,13 @@ export class FeishuChannel {
       }
 
       if (options?.replyToMessageId) {
+        const replyData: any = { msg_type: msgType, content: msgContent };
+        if (options.replyInThread) {
+          replyData.reply_in_thread = true;
+        }
         await this.client.im.message.reply({
           path: { message_id: options.replyToMessageId },
-          data: { msg_type: msgType, content: msgContent }
+          data: replyData
         });
       } else {
         await this.client.im.message.create({
@@ -414,6 +437,15 @@ export class FeishuChannel {
     } catch (error) {
       logger.error('[Feishu] Failed to send file:', error);
       throw error;
+    }
+  }
+
+  private hasThreadSession(threadId: string): boolean {
+    try {
+      const row = this.db.prepare('SELECT 1 FROM sessions WHERE thread_id = ? LIMIT 1').get(threadId);
+      return !!row;
+    } catch {
+      return false;
     }
   }
 

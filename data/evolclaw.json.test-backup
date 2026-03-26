@@ -1,0 +1,44 @@
+{
+  "anthropic": {
+    "baseUrl": "https://mg.aid.pub/claude-proxy",
+    "apiKey": "sk-ccb8a491-fd64-478e-851e-d901b9dea308",
+    "model": "opus"
+  },
+  "feishu": {
+    "appId": "cli_a927d1717e78dcce",
+    "appSecret": "aUxpkNyIG0pBd3oBasCqybLW85bdWepQ"
+  },
+  "aun": {
+    "domain": "test.aun",
+    "agentName": "evolclaw-agent"
+  },
+  "projects": {
+    "defaultPath": "/home/evolclaw/projects/default",
+    "autoCreate": true,
+    "list": {
+      "default": "/home/evolclaw/projects/default",
+      "evolclaw": "/home/evolclaw",
+      "happyclaw": "/home/happyclaw",
+      "openclaw": "/data/openclaw-root",
+      "molbox": "/home/molbox"
+    }
+  },
+  "logging": {
+    "level": "INFO"
+  },
+  "timeout": {
+    "idle": 120000
+  },
+  "sdk": {
+    "useSettingSources": true
+  },
+  "owners": {
+    "feishu": "ou_2114acae0d376b26dfbc14bbca5b1f7e",
+    "wechat": "o9cq80yplcYnoKnrQe-H6J1Vat50@im.wechat"
+  },
+  "wechat": {
+    "enabled": true,
+    "baseUrl": "https://ilinkai.weixin.qq.com",
+    "token": "b5b8cfc2ea71@im.bot:060000c5c0deb5e01789a7d689284a51019a96"
+  }
+}

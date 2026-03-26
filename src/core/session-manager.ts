@@ -143,7 +143,6 @@ export class SessionManager {
           WHERE thread_id != ''
       `);
       logger.info('✓ Database migration completed (thread support added)');
-      return;
     }
 
     // 创建新表（首次初始化）
@@ -201,10 +200,16 @@ export class SessionManager {
   async getOrCreateSession(channel: string, channelId: string, defaultProjectPath: string, threadId?: string, metadata?: any, name?: string): Promise<Session> {
     const normalizedThreadId = threadId || '';
 
+    // 话题会话：直接按 thread_id 查找/创建
+    if (normalizedThreadId) {
+      return this.getOrCreateThreadSession(channel, channelId, normalizedThreadId, defaultProjectPath, metadata, name);
+    }
+
+    // 主会话：原有逻辑
     // 1. 查找该聊天的活跃会话
     const active = this.db.prepare(`
       SELECT * FROM sessions
-      WHERE channel = ? AND channel_id = ? AND is_active = 1
+      WHERE channel = ? AND channel_id = ? AND is_active = 1 AND thread_id = ''
     `).get(channel, channelId) as any;
 
     if (active) {
@@ -292,6 +297,69 @@ export class SessionManager {
     });
 
     this.db.prepare(`UPDATE sessions SET ${fields}, updated_at = ? WHERE id = ?`).run(...values, Date.now(), sessionId);
+  }
+
+  private getOrCreateThreadSession(
+    channel: string,
+    channelId: string,
+    threadId: string,
+    defaultProjectPath: string,
+    metadata?: any,
+    name?: string
+  ): Session {
+    const existing = this.db.prepare(`
+      SELECT * FROM sessions
+      WHERE channel = ? AND channel_id = ? AND thread_id = ?
+      LIMIT 1
+    `).get(channel, channelId, threadId) as any;
+
+    if (existing) {
+      const validSessionId = this.validateSessionFile(existing);
+      const existingMeta = this.rowToSession(existing).metadata;
+      if (metadata) {
+        const merged = existingMeta ? { ...existingMeta, ...metadata } : metadata;
+        this.db.prepare(`UPDATE sessions SET metadata = ?, updated_at = ? WHERE id = ?`)
+          .run(JSON.stringify(merged), Date.now(), existing.id);
+        return { ...this.rowToSession(existing), agentSessionId: validSessionId, metadata: merged };
+      }
+      return { ...this.rowToSession(existing), agentSessionId: validSessionId };
+    }
+
+    const activeSession = this.db.prepare(`
+      SELECT project_path FROM sessions
+      WHERE channel = ? AND channel_id = ? AND is_active = 1 AND thread_id = ''
+      LIMIT 1
+    `).get(channel, channelId) as any;
+
+    const projectPath = activeSession?.project_path || defaultProjectPath;
+    const session: Session = {
+      id: `${channel}-${channelId}-${Date.now()}`,
+      channel,
+      channelId,
+      projectPath,
+      threadId,
+      agentType: 'claude',
+      metadata,
+      name: name || '话题会话',
+      isActive: false,
+      createdAt: Date.now(),
+      updatedAt: Date.now()
+    };
+
+    this.insertSession(session);
+
+    // Race condition 保护
+    const recheck = this.db.prepare(`
+      SELECT * FROM sessions
+      WHERE channel = ? AND channel_id = ? AND thread_id = ?
+      LIMIT 1
+    `).get(channel, channelId, threadId) as any;
+
+    if (recheck && recheck.id !== session.id) {
+      return this.rowToSession(recheck);
+    }
+
+    return session;
   }
 
   async switchProject(channel: string, channelId: string, newProjectPath: string): Promise<Session> {
