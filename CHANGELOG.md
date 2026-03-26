@@ -1,5 +1,9 @@
 # Changelog
 
+## v2.0.7 (2026-03-26)
+
+> 版本号与 npm 统一，内容与 v2.0.6 相同。
+
 ## v2.0.6 (2026-03-26)
 
 ### New Features
@@ -39,4 +43,4 @@ None.
 
 **Full diff**: 18 files changed, +1001 / -174 lines
 
-**npm**: `npm install -g evolclaw@2.0.6`
+**npm**: `npm install -g evolclaw@2.0.7`
