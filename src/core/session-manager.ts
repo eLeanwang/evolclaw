@@ -547,7 +547,12 @@ export class SessionManager {
       for (const line of lines) {
         const event = JSON.parse(line);
         if (event.type === 'user' && event.message?.role === 'user') {
-          turns++;
+          // Only count real user input, skip auto-generated tool_result messages
+          const content = event.message.content;
+          const isToolResult = Array.isArray(content) && content.every((c: any) => c.type === 'tool_result');
+          if (!isToolResult) {
+            turns++;
+          }
         }
         // 提取会话标题（从 session 元数据中）
         if (event.title && !title) {
