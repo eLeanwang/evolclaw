@@ -192,6 +192,7 @@ evolclaw/
 - `/slist` - 列出当前项目的所有会话
 - `/s <名称>` - 切换到指定会话
 - `/name <新名称>` - 重命名当前会话
+- `/del <名称>` - 删除指定会话（仅解绑，不删除文件）
 - `/status` - 显示会话状态
 - `/help` - 显示所有命令
 
@@ -212,8 +213,11 @@ evolclaw/
 - `/safe` - 进入安全模式
 
 **模型管理**：
-- `/model` - 显示当前模型和可用列表
-- `/model <model-id>` - 切换模型
+- `/model` - 显示当前模型和推理强度
+- `/model <model>` - 切换模型
+- `/model <effort>` - 切换推理强度（low / medium / high / max）
+- `/model <model> <effort>` - 同时切换模型和推理强度
+- `/model auto` - 恢复 SDK 默认推理强度
 
 ## 技术栈
 

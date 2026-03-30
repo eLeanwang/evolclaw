@@ -1,5 +1,35 @@
 # Changelog
 
+## v2.1.1 (2026-03-30)
+
+### New Features
+
+- **`/model` effort support** — display and switch model reasoning strength (effort)
+  - Syntax: `/model` (show current), `/model <model>`, `/model <effort>`, `/model <model> <effort>`, `/model auto`
+  - Visual effort indicator: `low ◆◇◇◇`, `medium ◆◆◇◇`, `high ◆◆◆◇`, `max ◆◆◆◆`
+  - `max` effort restricted to Opus models only
+  - `auto` clears effort setting, letting SDK decide
+- **`/del` command** — unbind a session without deleting conversation files
+  - Removes session from database while preserving `.claude/` JSONL files
+  - Cannot delete the currently active session
+- **`/fork` in threads** — fork now works correctly inside Feishu threads
+
+### Improvements
+
+- **Settings write target** — `/model` writes to `~/.claude/settings.json` (user-level), matching Claude CLI behavior
+- **Runtime config sync** — model/effort synced from `~/.claude/settings.json` on every query (picks up CLI changes)
+- **Config fallback chain** — `evolclaw.json → ~/.claude/settings.json → defaults` for model and effort
+- **Thread session tags** — `/slist` shows `[话题]` tag for thread sessions
+- **Empty session hint** — `/slist` shows `(空)` for sessions with no conversation history
+
+### Bug Fixes
+
+- **flushDelay double-conversion** — config value in seconds was multiplied by 1000 twice
+- **Thread routing for `/compact`** — compact notifications now route to the correct thread
+- **Session switch protection** — block cross-context session switching (main ↔ thread)
+
+---
+
 ## v2.1.0 (2026-03-27)
 
 ### New Features
