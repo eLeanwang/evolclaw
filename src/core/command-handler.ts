@@ -58,7 +58,7 @@ function formatIdleTime(ms: number): string {
 }
 
 // 支持的命令列表
-const commands = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/slist', '/session', '/rename', '/stop', '/clear', '/compact', '/repair', '/safe', '/fork'];
+const commands = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/slist', '/session', '/rename', '/stop', '/clear', '/compact', '/repair', '/safe', '/fork', '/del'];
 
 // 命令别名映射
 const aliases: Record<string, string> = {
@@ -70,7 +70,7 @@ const aliases: Record<string, string> = {
 // 命令快速路径前缀（不进入消息队列的命令）
 // 注意：/clear, /compact, /safe 故意不在此列表中，它们需要进入队列触发中断机制
 // /stop 是快速命令：直接调用 agentRunner.interrupt()，不走队列（否则队列自动中断后 /stop 检测不到活跃任务）
-const quickCommandPrefixes = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/slist', '/session', '/rename', '/repair', '/fork', '/stop', '/p ', '/s ', '/name '];
+const quickCommandPrefixes = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/slist', '/session', '/rename', '/repair', '/fork', '/stop', '/del', '/p ', '/s ', '/name '];
 
 export class CommandHandler {
   private adapters = new Map<string, ChannelAdapter>();
@@ -173,14 +173,14 @@ export class CommandHandler {
 
     // 话题内禁用部分命令
     if (threadId) {
-      const threadBlocked = ['/new', '/slist', '/plist', '/bind', '/s', '/session', '/project', '/p', '/fork'];
+      const threadBlocked = ['/new', '/slist', '/plist', '/bind', '/s', '/session', '/project', '/p', '/fork', '/del'];
       const isBlocked = threadBlocked.some(c => normalizedContent === c || normalizedContent.startsWith(c + ' '));
       if (isBlocked) return '⚠️ 话题中不支持此命令';
     }
     const isAdmin = !userId || checkOwner(this.config, channel, userId);
 
     if (normalizedContent.startsWith('/')) {
-      const userCommands = ['/slist', '/new', '/session', '/rename', '/name', '/status', '/help', '/s '];
+      const userCommands = ['/slist', '/new', '/session', '/rename', '/name', '/status', '/help', '/del', '/s '];
       const isUserCommand = userCommands.some(cmd =>
         normalizedContent === cmd.trimEnd() || normalizedContent.startsWith(cmd)
       );
@@ -220,6 +220,7 @@ export class CommandHandler {
   /slist - 列出当前项目的所有会话
   /s, /session <名称> - 切换到指定会话
   /name, /rename <新名称> - 重命名当前会话
+  /del <名称> - 删除指定会话（仅解绑，不删除文件）
   /status - 显示会话状态
 
 ❓ 帮助：
@@ -238,6 +239,7 @@ export class CommandHandler {
   /slist - 列出当前项目的所有会话
   /s, /session <名称> - 切换到指定会话
   /name, /rename <新名称> - 重命名当前会话
+  /del <名称> - 删除指定会话（仅解绑，不删除文件）
   /fork [名称] - 分支当前会话（从当前对话点创建分支）
   /status - 显示会话状态
   /clear - 清空当前会话的对话历史
@@ -941,6 +943,59 @@ export class CommandHandler {
       }
 
       return `✓ 已将当前会话重命名为: ${newName}`;
+    }
+
+    // /del 命令：删除指定会话（仅解绑，不删除文件）
+    if (normalizedContent.startsWith('/del ')) {
+      const sessionName = normalizedContent.slice(5).trim();
+
+      if (!sessionName) return '用法: /del <序号、会话名称或前8位UUID>';
+
+      if (!session) {
+        return `❌ 当前没有活跃会话`;
+      }
+
+      // 群聊权限检查：只有管理员可以删除
+      const isGroup = await this.isGroupChat(channel, channelId);
+      if (isGroup && !isAdmin) {
+        return `❌ 无权限：群聊中仅管理员可删除会话`;
+      }
+
+      let targetSession = await this.sessionManager.getSessionByName(channel, channelId, sessionName);
+
+      // 序号删除
+      if (!targetSession && /^\d+$/.test(sessionName)) {
+        const idx = parseInt(sessionName, 10);
+        const allSessions = await this.sessionManager.listSessions(channel, channelId);
+        const projectSessions = allSessions.filter(s => s.projectPath === session.projectPath);
+        if (idx >= 1 && idx <= projectSessions.length) {
+          targetSession = projectSessions[idx - 1];
+        } else {
+          return `❌ 序号超出范围 (1-${projectSessions.length})\n使用 /slist 查看可用会话`;
+        }
+      }
+
+      if (!targetSession && sessionName.length === 8) {
+        targetSession = await this.sessionManager.getSessionByUuidPrefix(channel, channelId, sessionName);
+      }
+
+      if (!targetSession) {
+        return `❌ 会话不存在: ${sessionName}\n使用 /slist 查看可用会话`;
+      }
+
+      if (targetSession.id === session.id) {
+        return `❌ 无法删除当前活跃会话\n请先切换到其他会话`;
+      }
+
+      const success = await this.sessionManager.unbindSession(targetSession.id);
+
+      if (!success) {
+        return `❌ 删除失败`;
+      }
+
+      await this.agentRunner.closeSession(targetSession.id);
+
+      return `✓ 已删除会话: ${targetSession.name || sessionName}\n会话文件已保留，可通过 CLI 访问`;
     }
 
     // /fork 命令：分支当前会话

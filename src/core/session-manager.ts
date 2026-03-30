@@ -452,6 +452,14 @@ export class SessionManager {
     return result.changes > 0;
   }
 
+  async unbindSession(sessionId: string): Promise<boolean> {
+    const result = this.db.prepare(`
+      DELETE FROM sessions WHERE id = ?
+    `).run(sessionId);
+
+    return result.changes > 0;
+  }
+
   async createNewSession(channel: string, channelId: string, projectPath: string, name?: string): Promise<Session> {
     // 取消当前活跃会话
     this.deactivateAll(channel, channelId);
