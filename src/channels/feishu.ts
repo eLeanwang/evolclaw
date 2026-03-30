@@ -393,7 +393,12 @@ export class FeishuChannel {
         });
       }
       logger.debug(`[Feishu] Sent message as ${useMarkdown ? 'post (Markdown)' : 'text'}`);
-    } catch (error) {
+    } catch (error: any) {
+      // 230011: 消息已被撤回，降级为普通消息重试
+      if (error.response?.data?.code === 230011 && options?.replyToMessageId) {
+        logger.warn('[Feishu] Message withdrawn (230011), retrying without reply');
+        return this.sendMessage(chatId, content, { ...options, replyToMessageId: undefined });
+      }
       logger.error('[Feishu] Failed to send message:', error);
       throw error;
     }

@@ -9,6 +9,7 @@ import { saveConfig, resolvePaths, getPackageRoot } from '../config.js';
 import { logger } from '../utils/logger.js';
 import path from 'path';
 import fs from 'fs';
+import os from 'os';
 
 const availableModels: string[] = ['opus', 'sonnet', 'haiku', 'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5-20251001'];
 const availableEfforts = ['low', 'medium', 'high', 'max'] as const;
@@ -22,11 +23,11 @@ function effortBar(level: string): string {
 }
 
 /**
- * 写入项目级 .claude/settings.json
+ * 写入用户级 ~/.claude/settings.json（与 Claude CLI 行为一致）
  */
-function writeProjectSettings(projectPath: string, updates: { model?: string; effortLevel?: string | null }): { success: boolean; error?: string } {
+function writeUserSettings(updates: { model?: string; effortLevel?: string | null }): { success: boolean; error?: string } {
   try {
-    const settingsPath = path.join(projectPath, '.claude', 'settings.json');
+    const settingsPath = path.join(os.homedir(), '.claude', 'settings.json');
     let settings: any = {};
 
     if (fs.existsSync(settingsPath)) {
@@ -42,7 +43,7 @@ function writeProjectSettings(projectPath: string, updates: { model?: string; ef
       }
     }
 
-    const claudeDir = path.join(projectPath, '.claude');
+    const claudeDir = path.join(os.homedir(), '.claude');
     if (!fs.existsSync(claudeDir)) {
       fs.mkdirSync(claudeDir, { recursive: true });
     }
@@ -324,9 +325,9 @@ export class CommandHandler {
           if ('error' in result) return result.error;
           const { session } = result;
 
-          const writeResult = writeProjectSettings(session.projectPath, { effortLevel: null });
+          const writeResult = writeUserSettings({ effortLevel: null });
           if (!writeResult.success) {
-            return `⚠️ 写入项目配置失败: ${writeResult.error}\n已更新运行时配置，但未持久化到 .claude/settings.json`;
+            return `⚠️ 写入用户配置失败: ${writeResult.error}\n已更新运行时配置，但未持久化到 ~/.claude/settings.json`;
           }
 
           this.agentRunner.setEffort(undefined);
@@ -381,10 +382,10 @@ export class CommandHandler {
         changes.push(`推理强度: ${newEffort} ${effortBar(newEffort)}`);
       }
 
-      // 写入项目级 settings.json
-      const writeResult = writeProjectSettings(session.projectPath, updates);
+      // 写入用户级 ~/.claude/settings.json（与 Claude CLI 行为一致）
+      const writeResult = writeUserSettings(updates);
       if (!writeResult.success) {
-        return `⚠️ 写入项目配置失败: ${writeResult.error}\n已更新运行时配置，但未持久化到 .claude/settings.json`;
+        return `⚠️ 写入用户配置失败: ${writeResult.error}\n已更新运行时配置，但未持久化到 ~/.claude/settings.json`;
       }
 
       return `✓ 已切换\n  ${changes.join('\n  ')}`;

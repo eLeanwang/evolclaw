@@ -61,11 +61,36 @@ export class AgentRunner {
     return this.effort;
   }
 
+  private syncFromUserSettings(): void {
+    try {
+      const settingsPath = path.join(os.homedir(), '.claude', 'settings.json');
+      if (!fs.existsSync(settingsPath)) return;
+
+      const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+
+      if (settings.model && settings.model !== this.model) {
+        logger.info(`[AgentRunner] Synced model from ~/.claude/settings.json: ${settings.model}`);
+        this.model = settings.model;
+      }
+
+      const newEffort = settings.effortLevel || undefined;
+      if (newEffort !== this.effort) {
+        logger.info(`[AgentRunner] Synced effort from ~/.claude/settings.json: ${newEffort ?? 'auto'}`);
+        this.effort = newEffort;
+      }
+    } catch (error) {
+      logger.debug(`[AgentRunner] Failed to sync from ~/.claude/settings.json:`, error);
+    }
+  }
+
   setCompactStartCallback(callback: (sessionId: string) => void): void {
     this.onCompactStart = callback;
   }
 
   async runQuery(sessionId: string, prompt: string, projectPath: string, initialClaudeSessionId?: string, images?: ImageData[], systemPromptAppend?: string, sessionManager?: any): Promise<AsyncIterable<any>> {
+    // 同步用户级配置到内存
+    this.syncFromUserSettings();
+
     ensureDir(projectPath);
     ensureDir(path.join(projectPath, '.claude'));
 
