@@ -27,6 +27,8 @@
 - **flushDelay double-conversion** — config value in seconds was multiplied by 1000 twice
 - **Thread routing for `/compact`** — compact notifications now route to the correct thread
 - **Session switch protection** — block cross-context session switching (main ↔ thread)
+- **Context limit detection** — SDK throws `"Prompt is too long"` but `classifyError` didn't match it, causing auto-compact to never trigger. Added `prompt is too long` and `context limit` patterns
+- **CLI session import** — `importCliSession` now reads session title from JSONL file and always creates a new session record
 
 ---
 

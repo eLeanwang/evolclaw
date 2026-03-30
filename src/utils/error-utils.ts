@@ -11,7 +11,8 @@ export function classifyError(error: any): ErrorType {
   const msg = (error?.message || '').toLowerCase();
 
   if (msg.includes('上下文过长') || msg.includes('context too long')
-    || msg.includes('context_length_exceeded') || msg.includes('context_compact_failed')) {
+    || msg.includes('context_length_exceeded') || msg.includes('context_compact_failed')
+    || msg.includes('prompt is too long') || msg.includes('context limit')) {
     return ErrorType.CONTEXT_TOO_LONG;
   }
 
@@ -40,7 +41,8 @@ export function getErrorMessage(error: any): string {
   if (msg.includes('CONTEXT_COMPACT_FAILED')) {
     return '⚠️ 上下文过长，自动压缩失败，请手动输入 /compact 重试';
   }
-  if (msg.includes('上下文过长') || msg.includes('context too long') || msg.includes('context_length_exceeded')) {
+  if (msg.includes('上下文过长') || msg.includes('context too long') || msg.includes('context_length_exceeded')
+    || msg.includes('Prompt is too long') || msg.includes('Context limit')) {
     return '⚠️ 上下文过长，自动压缩重试失败，请手动输入 /compact 重试';
   }
   if (msg.includes('API Error: 400')) {

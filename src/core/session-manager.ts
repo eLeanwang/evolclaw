@@ -635,31 +635,14 @@ export class SessionManager {
   }
 
   async importCliSession(channel: string, channelId: string, projectPath: string, agentSessionId: string): Promise<Session> {
-    // 检查是否已存在相同项目路径的会话
-    const existingByPath = this.db.prepare(`
-      SELECT * FROM sessions
-      WHERE channel = ? AND channel_id = ? AND project_path = ?
-    `).get(channel, channelId, projectPath) as any;
-
-    if (existingByPath) {
-      // 更新 agent_session_id 并激活
-      this.db.prepare(`
-        UPDATE sessions SET is_active = 0, updated_at = ?
-        WHERE channel = ? AND channel_id = ? AND is_active = 1 AND id != ?
-      `).run(Date.now(), channel, channelId, existingByPath.id);
-
-      this.db.prepare(`
-        UPDATE sessions SET agent_session_id = ?, is_active = 1, updated_at = ?
-        WHERE id = ?
-      `).run(agentSessionId, Date.now(), existingByPath.id);
-
-      return { ...this.rowToSession(existingByPath), agentSessionId, isActive: true, updatedAt: Date.now() };
-    }
-
     // 取消当前活跃会话
     this.deactivateAll(channel, channelId);
 
-    // 创建会话记录
+    // 从 CLI 会话文件读取标题
+    const fileInfo = this.getSessionFileInfo(projectPath, agentSessionId);
+    const name = fileInfo.title || `CLI会话-${new Date().toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}`;
+
+    // 创建新会话记录
     const session: Session = {
       id: `${channel}-${channelId}-${Date.now()}`,
       channel,
@@ -668,7 +651,7 @@ export class SessionManager {
       threadId: '',
       agentType: 'claude',
       agentSessionId,
-      name: `CLI会话-${new Date().toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}`,
+      name,
       isActive: true,
       createdAt: Date.now(),
       updatedAt: Date.now()
