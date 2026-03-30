@@ -780,14 +780,17 @@ export class CommandHandler {
 
       if (currentProjectSessions.length > 0) {
         lines.push('【EvolClaw 会话】');
-        for (const s of currentProjectSessions) {
+        for (let i = 0; i < currentProjectSessions.length; i++) {
+          const s = currentProjectSessions[i];
           const prefix = s.isActive ? '  ✓' : '   ';
+          const num = `${i + 1}.`;
+          const threadTag = s.threadId ? '[话题] ' : '';
           const name = s.name || '(未命名)';
           const uuid = s.agentSessionId ? `(${s.agentSessionId.substring(0, 8)})` : '';
           const idleTime = formatIdleTime(Date.now() - s.updatedAt);
 
           if (s.agentSessionId && !this.sessionManager.checkSessionFileExists(s.projectPath, s.agentSessionId)) {
-            lines.push(`${prefix} ❌ ${name} ${uuid} - ${idleTime} [会话文件缺失]`);
+            lines.push(`${prefix} ${num} ${threadTag}❌ ${name} ${uuid} - ${idleTime} [会话文件缺失]`);
           } else {
             let status = '[空闲]';
             if (s.isActive && isProcessing) {
@@ -795,7 +798,7 @@ export class CommandHandler {
             } else if (s.isActive) {
               status = '[活跃]';
             }
-            lines.push(`${prefix} ${name} ${uuid} - ${idleTime} ${status}`);
+            lines.push(`${prefix} ${num} ${threadTag}${name} ${uuid} - ${idleTime} ${status}`);
           }
         }
         lines.push('');
@@ -813,7 +816,7 @@ export class CommandHandler {
         lines.push('');
       }
 
-      lines.push('使用 /s <name或8位uuid> 切换会话');
+      lines.push('使用 /s <序号、name或8位uuid> 切换会话');
       return lines.join('\n');
     }
 
@@ -821,7 +824,7 @@ export class CommandHandler {
     if (normalizedContent.startsWith('/session ')) {
       const sessionName = normalizedContent.slice(9).trim();
 
-      if (!sessionName) return '用法: /s <会话名称或前8位UUID>';
+      if (!sessionName) return '用法: /s <序号、会话名称或前8位UUID>';
 
       const sessionKey = `${channel}-${channelId}`;
       const queueLength = this.messageQueue.getQueueLength(sessionKey);
@@ -830,6 +833,18 @@ export class CommandHandler {
       }
 
       let targetSession = await this.sessionManager.getSessionByName(channel, channelId, sessionName);
+
+      // 序号切换：纯数字时按当前项目会话列表序号匹配
+      if (!targetSession && /^\d+$/.test(sessionName) && session) {
+        const idx = parseInt(sessionName, 10);
+        const allSessions = await this.sessionManager.listSessions(channel, channelId);
+        const projectSessions = allSessions.filter(s => s.projectPath === session.projectPath);
+        if (idx >= 1 && idx <= projectSessions.length) {
+          targetSession = projectSessions[idx - 1];
+        } else {
+          return `❌ 序号超出范围 (1-${projectSessions.length})\n使用 /slist 查看可用会话`;
+        }
+      }
 
       if (!targetSession && sessionName.length === 8) {
         targetSession = await this.sessionManager.getSessionByUuidPrefix(channel, channelId, sessionName);
@@ -876,13 +891,19 @@ export class CommandHandler {
         return `当前已在会话: ${targetSession.name || sessionName}`;
       }
 
+      // 阻止从主会话切换到话题会话
+      if (!session.threadId && targetSession.threadId) {
+        return `❌ 无法从主会话切换到话题会话\n话题会话仅在对应话题内可用`;
+      }
+
       const switched = await this.sessionManager.switchToSession(channel, channelId, targetSession.id);
 
       if (!switched) {
         return `❌ 切换会话失败`;
       }
 
-      return `✓ 已切换到会话: ${targetSession.name || sessionName}\n  将继续之前的对话历史${lastInputLine}`;
+      const continueHint = lastInput ? '\n  将继续之前的对话历史' : '\n  当前会话未有发言';
+      return `✓ 已切换到会话: ${targetSession.name || sessionName}${continueHint}${lastInputLine}`;
     }
 
     // /rename 或 /name 命令：重命名当前会话
