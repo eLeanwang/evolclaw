@@ -108,7 +108,7 @@ async function main() {
     config,
     messageCache,
     (content, channel, channelId, userId, threadId) => {
-      const sendFn = async (id: string, text: string) => {
+      const sendFn = async (id: string, text: string, opts?: { replyToMessageId?: string; replyInThread?: boolean }) => {
         const adapter = cmdHandler.getAdapter(channel);
         if (!adapter) return;
 
@@ -133,7 +133,7 @@ async function main() {
         }
 
         if (text) {
-          await adapter.sendText(id, text);
+          await adapter.sendText(id, text, opts);
         }
       };
       return cmdHandler.handle(content, channel, channelId, sendFn, userId, threadId);

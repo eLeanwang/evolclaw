@@ -198,15 +198,12 @@ export class SessionManager {
   }
 
   async getOrCreateSession(channel: string, channelId: string, defaultProjectPath: string, threadId?: string, metadata?: any, name?: string): Promise<Session> {
-    const normalizedThreadId = threadId || '';
-
-    // 话题会话：直接按 thread_id 查找/创建
-    if (normalizedThreadId) {
-      return this.getOrCreateThreadSession(channel, channelId, normalizedThreadId, defaultProjectPath, metadata, name);
+    // 话题会话：独立查找/创建，不参与 isActive 竞争
+    if (threadId) {
+      return this.getOrCreateThreadSession(channel, channelId, threadId, defaultProjectPath, metadata, name);
     }
 
-    // 主会话：原有逻辑
-    // 1. 查找该聊天的活跃会话
+    // 主会话：查找活跃会话
     const active = this.db.prepare(`
       SELECT * FROM sessions
       WHERE channel = ? AND channel_id = ? AND is_active = 1 AND thread_id = ''
@@ -217,32 +214,26 @@ export class SessionManager {
       return { ...this.rowToSession(active), agentSessionId: validSessionId };
     }
 
-    // 2. 没有活跃会话，查找该聊天在默认项目的会话（匹配 thread_id）
+    // 查找默认项目的主会话
     const existing = this.db.prepare(`
       SELECT * FROM sessions
-      WHERE channel = ? AND channel_id = ? AND project_path = ? AND thread_id = ?
+      WHERE channel = ? AND channel_id = ? AND project_path = ? AND thread_id = ''
       ORDER BY updated_at DESC LIMIT 1
-    `).get(channel, channelId, defaultProjectPath, normalizedThreadId) as any;
+    `).get(channel, channelId, defaultProjectPath) as any;
 
     if (existing) {
       const validSessionId = this.validateSessionFile(existing);
-
-      // 激活该会话
-      this.db.prepare(`
-        UPDATE sessions SET is_active = 1, updated_at = ?
-        WHERE id = ?
-      `).run(Date.now(), existing.id);
-
+      this.db.prepare(`UPDATE sessions SET is_active = 1, updated_at = ? WHERE id = ?`).run(Date.now(), existing.id);
       return { ...this.rowToSession(existing), agentSessionId: validSessionId, isActive: true };
     }
 
-    // 3. 创建新会话（默认为活跃）
+    // 创建新主会话
     const session: Session = {
       id: `${channel}-${channelId}-${Date.now()}`,
       channel,
       channelId,
       projectPath: defaultProjectPath,
-      threadId: normalizedThreadId,
+      threadId: '',
       agentType: 'claude',
       metadata,
       name: name || '默认会话',
@@ -251,38 +242,7 @@ export class SessionManager {
       updatedAt: Date.now()
     };
 
-    // 使用 INSERT OR IGNORE 避免并发时的 UNIQUE 约束冲突
-    const result = this.db.prepare(`
-      INSERT OR IGNORE INTO sessions (id, channel, channel_id, project_path, thread_id, agent_type, agent_session_id, name, is_active, created_at, updated_at, metadata)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      session.id,
-      session.channel,
-      session.channelId,
-      session.projectPath,
-      session.threadId,
-      session.agentType,
-      session.agentSessionId ?? null,
-      session.name ?? null,
-      1,
-      session.createdAt,
-      session.updatedAt,
-      session.metadata ? JSON.stringify(session.metadata) : null
-    );
-
-    // 如果插入被忽略（已存在），重新查询
-    if (result.changes === 0) {
-      const recheck = this.db.prepare(`
-        SELECT * FROM sessions
-        WHERE channel = ? AND channel_id = ? AND project_path = ? AND thread_id = ?
-      `).get(channel, channelId, defaultProjectPath, normalizedThreadId) as any;
-
-      if (recheck) {
-        this.db.prepare(`UPDATE sessions SET is_active = 1, updated_at = ? WHERE id = ?`).run(Date.now(), recheck.id);
-        return { ...this.rowToSession(recheck), isActive: true, updatedAt: Date.now() };
-      }
-    }
-
+    this.insertSession(session);
     return session;
   }
 
@@ -307,16 +267,17 @@ export class SessionManager {
     metadata?: any,
     name?: string
   ): Session {
+    // 查找已有话题会话
     const existing = this.db.prepare(`
       SELECT * FROM sessions
       WHERE channel = ? AND channel_id = ? AND thread_id = ?
-      LIMIT 1
     `).get(channel, channelId, threadId) as any;
 
     if (existing) {
       const validSessionId = this.validateSessionFile(existing);
-      const existingMeta = this.rowToSession(existing).metadata;
+      // 合并 metadata（如果提供）
       if (metadata) {
+        const existingMeta = this.rowToSession(existing).metadata;
         const merged = existingMeta ? { ...existingMeta, ...metadata } : metadata;
         this.db.prepare(`UPDATE sessions SET metadata = ?, updated_at = ? WHERE id = ?`)
           .run(JSON.stringify(merged), Date.now(), existing.id);
@@ -325,13 +286,15 @@ export class SessionManager {
       return { ...this.rowToSession(existing), agentSessionId: validSessionId };
     }
 
-    const activeSession = this.db.prepare(`
+    // 继承当前活跃主会话的项目路径
+    const activeMain = this.db.prepare(`
       SELECT project_path FROM sessions
       WHERE channel = ? AND channel_id = ? AND is_active = 1 AND thread_id = ''
-      LIMIT 1
     `).get(channel, channelId) as any;
 
-    const projectPath = activeSession?.project_path || defaultProjectPath;
+    const projectPath = activeMain?.project_path || defaultProjectPath;
+
+    // 创建新话题会话（isActive 固定为 false）
     const session: Session = {
       id: `${channel}-${channelId}-${Date.now()}`,
       channel,
@@ -347,18 +310,6 @@ export class SessionManager {
     };
 
     this.insertSession(session);
-
-    // Race condition 保护
-    const recheck = this.db.prepare(`
-      SELECT * FROM sessions
-      WHERE channel = ? AND channel_id = ? AND thread_id = ?
-      LIMIT 1
-    `).get(channel, channelId, threadId) as any;
-
-    if (recheck && recheck.id !== session.id) {
-      return this.rowToSession(recheck);
-    }
-
     return session;
   }
 

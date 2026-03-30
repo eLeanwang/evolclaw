@@ -105,6 +105,12 @@ export class CommandHandler {
     return `${channel}-${channelId}`;
   }
 
+  /** 从 session 提取话题回复选项 */
+  private getThreadSendOpts(session: Session): { replyToMessageId: string; replyInThread: true } | undefined {
+    const rootId = session.metadata?.feishu?.rootId;
+    return rootId ? { replyToMessageId: rootId, replyInThread: true } : undefined;
+  }
+
   /** 获取活跃会话，无会话时返回统一错误提示 */
   private async ensureSession(channel: string, channelId: string, threadId?: string): Promise<{ session: Session } | { error: string }> {
     if (threadId) {
@@ -149,7 +155,7 @@ export class CommandHandler {
     content: string,
     channel: string,
     channelId: string,
-    sendMessage?: (channelId: string, text: string) => Promise<void>,
+    sendMessage?: (channelId: string, text: string, opts?: { replyToMessageId?: string; replyInThread?: boolean }) => Promise<void>,
     userId?: string,
     threadId?: string,
   ): Promise<string | null> {
@@ -334,7 +340,7 @@ export class CommandHandler {
         : path.resolve(process.cwd(), session.projectPath);
 
       if (sendMessage) {
-        await sendMessage(channelId, '⏳ 正在压缩会话上下文...');
+        await sendMessage(channelId, '⏳ 正在压缩会话上下文...', this.getThreadSendOpts(session));
       }
 
       const compacted = await this.agentRunner.compactSession(session.id, session.agentSessionId, projectPath);
@@ -381,14 +387,7 @@ export class CommandHandler {
       const queueLength = this.messageQueue.getQueueLength(sessionKey);
 
       const isThread = !!session.threadId;
-      let activeStatus = isThread ? '话题' : (session.isActive ? '✓ 活跃' : '休眠');
-      if ((isThread || session.isActive) && isCurrentlyProcessing) {
-        if (queueLength > 0) {
-          activeStatus += ` [处理中，队列${queueLength}条]`;
-        } else {
-          activeStatus += ' [处理中]';
-        }
-      }
+      const sessionStatus = isCurrentlyProcessing ? '处理中' : '空闲';
 
       const projectName = this.getProjectName(session.projectPath);
 
@@ -416,7 +415,7 @@ export class CommandHandler {
           `渠道: ${channel} / 项目: ${projectName} / 会话: ${session.name || '(未命名)'}`,
           `会话ID: ${session.id}`,
           `项目路径: ${session.projectPath}`,
-          `活跃状态: ${activeStatus}`,
+          `会话状态: ${sessionStatus}`,
           `会话轮数: ${sessionTurns}`,
           `异常计数: ${health.consecutiveErrors}`,
           `安全模式: ${health.safeMode ? '是 ⚠️' : '否 ✓'}`,
@@ -429,7 +428,7 @@ export class CommandHandler {
         lines.push(
           `📊 ${isThread ? '话题' : '会话'}状态：`,
           `会话: ${session.name || '(未命名)'}`,
-          `状态: ${activeStatus}`,
+          `状态: ${sessionStatus}`,
           `会话轮数: ${sessionTurns}`,
           `最后活跃: ${timeStr}`
         );

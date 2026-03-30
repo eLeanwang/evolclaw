@@ -34,12 +34,15 @@ export interface Config {
     list?: Record<string, string>;
   };
   flushDelay?: number;  // 消息批量发送间隔(秒)，默认 4
+  debug?: {
+    flusherDiag?: boolean;  // 启用 StreamFlusher 诊断日志 (flusher-diag.log)
+  };
   idleMonitor?: {
     enabled?: boolean;              // 是否启用空闲监控，默认 true
     safeModeThreshold?: number;     // 连续错误几次进入安全模式，默认 3；设为 0 关闭 safe mode
     timeout?: number;               // 无输出超时(秒)，默认 120
   };
-  showActivities?: 'all' | 'dm-only' | 'owner-dm-only';  // 工具活动和中间消息显示范围，默认 'all'
+  showActivities?: 'all' | 'dm-only' | 'owner-dm-only' | 'none';  // 中间输出显示范围（工具活动+流式文本），默认 'all'
 }
 
 export interface SessionMetadata {

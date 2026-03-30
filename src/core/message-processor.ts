@@ -20,9 +20,11 @@ export class MessageProcessor {
   private currentIsGroup = false;
   private shouldSuppressActivities = false;
 
-  /** 话题 session 永远不是后台任务；主 session 与当前活跃 session 比对 */
+  /** 判断是否为后台会话（仅主会话参与判断，话题会话独立） */
   private async isBackgroundSession(session: Session, channel: string, channelId: string): Promise<boolean> {
+    // 话题会话独立运行，不是后台任务
     if (session.threadId) return false;
+    // 主会话：与当前活跃会话比对
     const active = await this.sessionManager.getActiveSession(channel, channelId);
     return active ? session.id !== active.id : false;
   }
@@ -67,12 +69,13 @@ export class MessageProcessor {
     // 非主人（群聊或单聊）：空闲监控静默/简短
     const quietMode = isGroup || !isOwnerUser;
 
-    // 计算是否抑制活动输出
+    // 计算是否抑制中间输出（工具活动 + 流式文本）
     const shouldSuppress = (): boolean => {
       const mode = this.config.showActivities ?? 'all';
       if (mode === 'all') return false;
       if (mode === 'dm-only') return isGroup;
       if (mode === 'owner-dm-only') return isGroup || !isOwnerUser;
+      if (mode === 'none') return true;
       return false;
     };
     this.shouldSuppressActivities = shouldSuppress();
@@ -300,8 +303,9 @@ ${suggestions}`,
           }
           // 后台任务：静默，不发送输出
         },
-        this.config.flushDelay ? this.config.flushDelay * 1000 : 4000,
-        options?.fileMarkerPattern
+        (this.config.flushDelay || 4) * 1000,
+        options?.fileMarkerPattern,
+        this.config.debug?.flusherDiag
       );
 
       // 保存当前 flusher，用于 compact 事件
@@ -395,7 +399,7 @@ ${suggestions}`,
           // 文件存在性检查：真实路径但文件不存在，告知用户
           if (!fs.existsSync(resolvedPath)) {
             logger.warn(`[${adapter.name}] File not found: ${resolvedPath}`);
-            await adapter.sendText(message.channelId, `⚠️ 文件未找到: ${filePath}`);
+            await adapter.sendText(message.channelId, `⚠️ 文件未找到: ${filePath}`, this.getThreadSendOpts(session));
             continue;
           }
 
@@ -404,7 +408,7 @@ ${suggestions}`,
             await adapter.sendFile(message.channelId, resolvedPath);
           } catch (error) {
             logger.error(`[${adapter.name}] Failed to send file: ${resolvedPath}`, error);
-            await adapter.sendText(message.channelId, `❌ 文件发送失败: ${filePath}`);
+            await adapter.sendText(message.channelId, `❌ 文件发送失败: ${filePath}`, this.getThreadSendOpts(session));
           }
         }
       }
@@ -474,7 +478,18 @@ ${suggestions}`,
         logger.info(`[MessageProcessor] SDK_TIMEOUT error, skip sending duplicate message`);
       } else {
         const userMessage = getErrorMessage(error);
-        await adapter.sendText(message.channelId, userMessage);
+        // 获取 session 用于话题回复（如果 resolveSession 已执行）
+        let sendOpts: { replyToMessageId?: string; replyInThread?: boolean } | undefined;
+        try {
+          const session = await this.sessionManager.getOrCreateSession(
+            message.channel,
+            message.channelId,
+            this.config.projects?.defaultPath || process.cwd(),
+            message.threadId
+          );
+          sendOpts = this.getThreadSendOpts(session);
+        } catch {}
+        await adapter.sendText(message.channelId, userMessage, sendOpts);
       }
     }
   }
@@ -486,11 +501,17 @@ ${suggestions}`,
     session: Session;
     absoluteProjectPath: string;
   }> {
+    // 话题会话：传入 rootId metadata（首条消息的 messageId 作为 rootId）
+    const metadata = message.threadId && message.messageId
+      ? { feishu: { rootId: message.messageId } }
+      : undefined;
+
     const session = await this.sessionManager.getOrCreateSession(
       message.channel,
       message.channelId,
       this.config.projects?.defaultPath || process.cwd(),
-      message.threadId
+      message.threadId,
+      metadata
     );
 
     const absoluteProjectPath = path.isAbsolute(session.projectPath)
@@ -541,11 +562,13 @@ ${suggestions}`,
 
       // === 前台任务：正常处理所有事件 ===
       if (!isCurrentlyBackground) {
-        // 流式文本事件
+        // 流式文本事件（抑制时跳过，只累积到 allText）
         if (event.type === 'text_delta' && event.text) {
           hasTextDelta = true;
           hasReceivedText = true;
-          flusher.addText(event.text);
+          if (!shouldSuppress()) {
+            flusher.addText(event.text);
+          }
         }
 
         // 系统事件：compact_boundary（群聊时静默）
@@ -581,7 +604,9 @@ ${suggestions}`,
             } else if (content.type === 'text' && content.text && !hasTextDelta) {
               // 仅在没有 text_delta 事件时从 assistant 事件提取文本，避免重复
               hasReceivedText = true;
-              flusher.addTextBlock(content.text);
+              if (!shouldSuppress()) {
+                flusher.addTextBlock(content.text);
+              }
             }
           }
         }
@@ -597,14 +622,20 @@ ${suggestions}`,
           }
         }
 
-        // Result 事件：仅在没有流式文本时使用 result 作为最终输出
+        // Result 事件：最终输出
         if (event.type === 'result' && event.result) {
-          logger.debug(`[MessageProcessor] result event: hasReceivedText=${hasReceivedText}, result="${event.result}"`);
-          if (!hasReceivedText) {
-            // 没有通过 text_delta 或 assistant 收到文本，使用 result 作为兜底
+          logger.debug(`[MessageProcessor] result event: hasReceivedText=${hasReceivedText}, shouldSuppress=${shouldSuppress()}, result="${event.result}"`);
+
+          if (shouldSuppress()) {
+            // 抑制模式：直接发送 result（跳过中间输出）
+            flusher.addText(event.result);
+          } else if (!hasReceivedText) {
+            // 非抑制模式 + 无流式文本：使用 result 作为兜底
             flusher.addText(event.result);
           }
-          await flusher.flush();
+          // 非抑制模式 + 有流式文本：已通过 text_delta 累积，无需再添加
+
+          await flusher.flush(true);  // isFinal=true 标记最终输出
         }
 
         continue;
