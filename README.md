@@ -128,10 +128,10 @@ evolclaw init wechat
   },
   "idleMonitor": {
     "enabled": true,                            // 任务超时监控开关
-    "timeout": 120000,                          // 超时阈值（ms），默认 2 分钟
+    "timeout": 120,                             // 超时阈值（秒），默认 120 秒
     "safeModeThreshold": 3                      // 连续超时 N 次后进入安全模式（设为 0 禁用安全模式）
   },
-  "flushDelay": 4000                            // 工具活动消息聚合发送间隔（ms），默认 4 秒
+  "flushDelay": 4                               // 工具活动消息聚合发送间隔（秒），默认 4 秒
 }
 ```
 
@@ -139,6 +139,7 @@ evolclaw init wechat
 - `apiKey`：配置文件 → `ANTHROPIC_AUTH_TOKEN` 环境变量 → `~/.claude/settings.json`
 - `baseUrl`：配置文件 → `ANTHROPIC_BASE_URL` 环境变量 → `~/.claude/settings.json`
 - `model`：配置文件 → `~/.claude/settings.json` → 默认 `sonnet`
+- `effort`：配置文件 → `~/.claude/settings.json` → SDK 默认值（`auto`）
 
 ### 3. 运行
 
