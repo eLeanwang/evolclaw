@@ -272,7 +272,8 @@ export class FeishuChannel {
             logger.error('[Feishu] Failed to process message:', error);
           }
         },
-        'im.message.message_read_v1': async () => {}
+        'im.message.message_read_v1': async () => {},
+        'im.message.reaction.created_v1': async () => {}
       });
 
       this.wsClient = new lark.WSClient({

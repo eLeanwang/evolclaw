@@ -554,8 +554,9 @@ async function cmdRestartMonitor() {
     log(`Self-heal attempt ${attempt}/${MAX_HEAL_ATTEMPTS}`);
     await notifyChannel(p, pendingInfo, `🔧 自动修复中（第 ${attempt}/${MAX_HEAL_ATTEMPTS} 次）...`, log);
 
-    // 调用 claude CLI 修复
-    const healed = await invokeClaude(p, attempt, MAX_HEAL_ATTEMPTS, log);
+    // 调用 claude CLI 修复（递增超时：3/4/5 分钟）
+    const timeout = (2 + attempt) * 60 * 1000;
+    const healed = await invokeClaude(p, attempt, MAX_HEAL_ATTEMPTS, timeout, log);
     if (!healed) {
       log(`Self-heal attempt ${attempt} failed (claude invocation error)`);
       continue;
@@ -664,6 +665,7 @@ async function invokeClaude(
   p: ReturnType<typeof resolvePaths>,
   attempt: number,
   maxAttempts: number,
+  timeout: number,
   log: (msg: string) => void
 ): Promise<boolean> {
   const projectDir = getPackageRoot();
@@ -694,7 +696,7 @@ async function invokeClaude(
 注意：只修复导致启动失败的问题，不要做额外的重构或优化。`;
 
   try {
-    log(`Invoking claude CLI (attempt ${attempt})...`);
+    log(`Invoking claude CLI (attempt ${attempt}, timeout ${timeout / 60000}min)...`);
 
     const { stdout, stderr } = await execFileAsync('claude', [
       '-p', prompt,
@@ -702,18 +704,21 @@ async function invokeClaude(
       '--output-format', 'text',
     ], {
       cwd: projectDir,
-      timeout: 5 * 60 * 1000, // 5 分钟超时
+      timeout,
       env: { ...process.env, CLAUDE_CODE_ENTRYPOINT: 'cli' },
       maxBuffer: 10 * 1024 * 1024,
     });
 
     if (stdout) log(`Claude output: ${stdout.slice(0, 500)}`);
-    if (stderr) log(`Claude stderr: ${stderr.slice(0, 200)}`);
+    if (stderr) log(`Claude stderr: ${stderr.slice(0, 500)}`);
 
     log(`Claude CLI completed (attempt ${attempt})`);
     return true;
   } catch (error: any) {
-    log(`Claude CLI error: ${error.message?.slice(0, 300) || error}`);
+    const msg = error.message || String(error);
+    log(`Claude CLI error: ${msg.slice(0, 800)}`);
+    if (error.stdout) log(`Stdout: ${String(error.stdout).slice(0, 500)}`);
+    if (error.stderr) log(`Stderr: ${String(error.stderr).slice(0, 500)}`);
     return false;
   }
 }

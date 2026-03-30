@@ -11,6 +11,48 @@ import path from 'path';
 import fs from 'fs';
 
 const availableModels: string[] = ['opus', 'sonnet', 'haiku', 'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5-20251001'];
+const availableEfforts = ['low', 'medium', 'high', 'max'] as const;
+type Effort = typeof availableEfforts[number];
+
+function effortBar(level: string): string {
+  const levels: Record<string, string> = {
+    low: '◆◇◇◇', medium: '◆◆◇◇', high: '◆◆◆◇', max: '◆◆◆◆'
+  };
+  return levels[level] || '◆◆◇◇';
+}
+
+/**
+ * 写入项目级 .claude/settings.json
+ */
+function writeProjectSettings(projectPath: string, updates: { model?: string; effortLevel?: string | null }): { success: boolean; error?: string } {
+  try {
+    const settingsPath = path.join(projectPath, '.claude', 'settings.json');
+    let settings: any = {};
+
+    if (fs.existsSync(settingsPath)) {
+      settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+    }
+
+    if (updates.model !== undefined) settings.model = updates.model;
+    if (updates.effortLevel !== undefined) {
+      if (updates.effortLevel === null) {
+        delete settings.effortLevel;
+      } else {
+        settings.effortLevel = updates.effortLevel;
+      }
+    }
+
+    const claudeDir = path.join(projectPath, '.claude');
+    if (!fs.existsSync(claudeDir)) {
+      fs.mkdirSync(claudeDir, { recursive: true });
+    }
+
+    fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf-8');
+    return { success: true };
+  } catch (error: any) {
+    return { success: false, error: error.message };
+  }
+}
 
 /**
  * 计算两个字符串的 Levenshtein 距离（编辑距离）
@@ -252,34 +294,100 @@ export class CommandHandler {
   /safe - 进入安全模式
 
 🤖 模型管理：
-  /model [model-id] - 查看或切换模型
+  /model [model] [effort] - 查看或切换模型/推理强度
 
 ❓ 帮助：
   /help - 显示此帮助信息`;
     }
 
-    // /model 命令：查看或切换模型
+    // /model 命令：查看或切换模型/推理强度
     if (normalizedContent.startsWith('/model')) {
       const args = normalizedContent.slice(6).trim();
 
       if (!args) {
         const currentModel = this.agentRunner.getModel();
+        const currentEffort = this.agentRunner.getEffort() || 'auto';
+        const effortDisplay = currentEffort === 'auto' ? 'auto (SDK默认)' : `${currentEffort} ${effortBar(currentEffort)}`;
         const modelList = availableModels.map(m => `- ${m}`).join('\n');
-        return `当前模型: ${currentModel}\n\n可用模型：\n${modelList}\n\n用法: /model <model-id>`;
+        return `当前模型: ${currentModel}\n推理强度: ${effortDisplay}\n\n可用模型：\n${modelList}\n\n推理强度: ${availableEfforts.join(' / ')} / auto\n\n用法:\n  /model <model>           切换模型\n  /model <model> <effort>  切换模型+推理强度\n  /model <effort>          仅切换推理强度\n  /model auto              恢复SDK默认`;
       }
 
-      if (!availableModels.includes(args)) {
-        const modelList = availableModels.map(m => `- ${m}`).join('\n');
-        return `❌ 无效的模型ID: ${args}\n\n可用模型：\n${modelList}`;
+      const parts = args.split(/\s+/);
+      let newModel: string | undefined;
+      let newEffort: Effort | undefined;
+
+      if (parts.length === 1) {
+        const arg = parts[0];
+        if (arg === 'auto') {
+          // 清除 effort，恢复 SDK 默认
+          const result = await this.ensureSession(channel, channelId, threadId);
+          if ('error' in result) return result.error;
+          const { session } = result;
+
+          const writeResult = writeProjectSettings(session.projectPath, { effortLevel: null });
+          if (!writeResult.success) {
+            return `⚠️ 写入项目配置失败: ${writeResult.error}\n已更新运行时配置，但未持久化到 .claude/settings.json`;
+          }
+
+          this.agentRunner.setEffort(undefined);
+          return '✓ 推理强度已恢复为 auto (SDK默认)';
+        }
+        // 单参数：模型 或 effort
+        if ((availableEfforts as readonly string[]).includes(arg)) {
+          newEffort = arg as Effort;
+        } else if (availableModels.includes(arg)) {
+          newModel = arg;
+        } else {
+          const modelList = availableModels.map(m => `- ${m}`).join('\n');
+          return `❌ 无效参数: ${arg}\n\n可用模型：\n${modelList}\n\n推理强度: ${availableEfforts.join(' / ')}`;
+        }
+      } else {
+        // 双参数：model effort
+        const [modelArg, effortArg] = parts;
+        if (!availableModels.includes(modelArg)) {
+          return `❌ 无效的模型ID: ${modelArg}`;
+        }
+        if (!(availableEfforts as readonly string[]).includes(effortArg)) {
+          return `❌ 无效的推理强度: ${effortArg}\n可选: ${availableEfforts.join(' / ')}`;
+        }
+        newModel = modelArg;
+        newEffort = effortArg as Effort;
       }
 
       if (!this.config.agents) this.config.agents = {};
       if (!this.config.agents.anthropic) this.config.agents.anthropic = {};
-      this.config.agents.anthropic.model = args;
-      saveConfig(this.config);
-      this.agentRunner.setModel(args);
 
-      return `✓ 已切换到模型: ${args}`;
+      // 获取当前会话的项目路径
+      const result = await this.ensureSession(channel, channelId, threadId);
+      if ('error' in result) return result.error;
+      const { session } = result;
+
+      const changes: string[] = [];
+      const updates: { model?: string; effortLevel?: string } = {};
+
+      if (newModel) {
+        updates.model = newModel;
+        this.agentRunner.setModel(newModel);
+        changes.push(`模型: ${newModel}`);
+      }
+
+      if (newEffort) {
+        const modelAfterSwitch = newModel ?? this.agentRunner.getModel();
+        if (newEffort === 'max' && !modelAfterSwitch.includes('opus')) {
+          return '⚠️ max 推理强度仅 Opus 模型支持（opus / claude-opus-4-6）';
+        }
+        updates.effortLevel = newEffort;
+        this.agentRunner.setEffort(newEffort);
+        changes.push(`推理强度: ${newEffort} ${effortBar(newEffort)}`);
+      }
+
+      // 写入项目级 settings.json
+      const writeResult = writeProjectSettings(session.projectPath, updates);
+      if (!writeResult.success) {
+        return `⚠️ 写入项目配置失败: ${writeResult.error}\n已更新运行时配置，但未持久化到 .claude/settings.json`;
+      }
+
+      return `✓ 已切换\n  ${changes.join('\n  ')}`;
     }
 
     // /stop 命令：中断当前任务

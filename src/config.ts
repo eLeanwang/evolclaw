@@ -12,9 +12,10 @@ export interface AnthropicResolved {
   apiKey: string;
   baseUrl?: string;
   model: string;
+  effort?: 'low' | 'medium' | 'high' | 'max';
 }
 
-function loadClaudeSettings(): { env?: Record<string, string>; model?: string } {
+function loadClaudeSettings(): { env?: Record<string, string>; model?: string; effortLevel?: 'low' | 'medium' | 'high' } {
   try {
     const settingsPath = path.join(os.homedir(), '.claude', 'settings.json');
     if (fs.existsSync(settingsPath)) {
@@ -55,7 +56,11 @@ export function resolveAnthropicConfig(config: Config): AnthropicResolved {
     || settings.model
     || 'sonnet';
 
-  return { apiKey, baseUrl, model };
+  const effort = config.agents?.anthropic?.effort
+    || settings.effortLevel
+    || undefined;
+
+  return { apiKey, baseUrl, model, effort };
 }
 
 export function loadConfig(configPath: string = resolvePaths().config): Config {

@@ -61,6 +61,9 @@ async function main() {
     anthropic.baseUrl,
     config
   );
+  if (anthropic.effort) {
+    agentRunner.setEffort(anthropic.effort);
+  }
   logger.info('✓ Agent runner ready');
 
   // 创建消息缓存

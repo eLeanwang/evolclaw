@@ -12,6 +12,7 @@ import { encodePath } from '../utils/platform.js';
 export class AgentRunner {
   private apiKey: string;
   private model: string;
+  private effort?: 'low' | 'medium' | 'high' | 'max';
   private baseUrl?: string;
   private config?: Config;
   private activeSessions: Map<string, string> = new Map();
@@ -28,6 +29,7 @@ export class AgentRunner {
   ) {
     this.apiKey = apiKey;
     this.model = model || 'sonnet';
+    this.effort = undefined;
     this.baseUrl = baseUrl;
     this.config = config;
     this.onSessionIdUpdate = onSessionIdUpdate;
@@ -49,6 +51,14 @@ export class AgentRunner {
 
   getModel(): string {
     return this.model;
+  }
+
+  setEffort(effort: 'low' | 'medium' | 'high' | 'max' | undefined): void {
+    this.effort = effort;
+  }
+
+  getEffort(): string | undefined {
+    return this.effort;
   }
 
   setCompactStartCallback(callback: (sessionId: string) => void): void {
@@ -138,9 +148,11 @@ export class AgentRunner {
     const enableSummaries = this.config?.agents?.anthropic?.agentProgressSummaries !== false;
 
     // 公共 options（新旧模式共用）
+    logger.info(`[AgentRunner] runQuery model=${this.model} effort=${this.effort ?? 'auto'}`);
     const commonOptions = {
       cwd: projectPath,
       model: this.model,
+      ...(this.effort ? { effort: this.effort } : {}),
       canUseTool,
       permissionMode: 'default' as const,
       persistSession: true,

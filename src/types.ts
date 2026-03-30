@@ -4,6 +4,7 @@ export interface Config {
       apiKey?: string;
       baseUrl?: string;
       model?: string;
+      effort?: 'low' | 'medium' | 'high' | 'max';
       useSettingSources?: boolean;        // 使用 SDK 原生配置加载，默认 true
       agentProgressSummaries?: boolean;   // 启用 AI 生成的子任务进度摘要，默认 true
     };
