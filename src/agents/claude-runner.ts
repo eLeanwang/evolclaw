@@ -1,6 +1,7 @@
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { ensureDir, resolveAnthropicConfig } from '../config.js';
 import type { Config } from '../types.js';
+import type { PermissionGateway } from '../core/permission.js';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
@@ -158,13 +159,15 @@ export class AgentRunner {
   private apiKey: string;
   private model: string;
   private effort?: 'low' | 'medium' | 'high' | 'max';
-  private permissionMode: string = 'default';
+  private permissionMode: string = 'auto';
   private baseUrl?: string;
   private config?: Config;
   private activeSessions: Map<string, string> = new Map();
   private activeStreams = new Map<string, AsyncIterable<any>>();
   private onSessionIdUpdate?: (sessionId: string, agentSessionId: string) => void;
   private onCompactStart?: (sessionId: string) => void;
+  private permissionGateway?: PermissionGateway;
+  private sendPromptFn?: (text: string) => Promise<void>;
 
   constructor(
     apiKey: string,
@@ -223,10 +226,18 @@ export class AgentRunner {
 
   listModes(): PermissionMode[] {
     return [
-      { key: 'default', nameZh: '默认', description: '仅允许安全工具（Read/Glob/Grep/WebSearch）' },
-      { key: 'approve', nameZh: '审批', description: '危险工具需人工审批（Bash/Write/Edit）' },
-      { key: 'trust', nameZh: '信任', description: '允许所有工具（不推荐）' },
+      { key: 'auto', nameZh: '自动', description: 'SDK 默认策略，无需手动审批' },
+      { key: 'manual', nameZh: '手动', description: '每个工具调用需人工审批' },
+      { key: 'edit', nameZh: '编辑', description: '自动接受文件编辑操作' },
     ];
+  }
+
+  setPermissionGateway(gateway: PermissionGateway): void {
+    this.permissionGateway = gateway;
+  }
+
+  setSendPrompt(fn: (text: string) => Promise<void>): void {
+    this.sendPromptFn = fn;
   }
 
   // ── Compactable 接口 ──
@@ -404,16 +415,33 @@ export class AgentRunner {
       return {};
     };
 
-    // PreToolUse Hook - 工具执行前安全检查
+    // PreToolUse Hook - 工具执行前安全检查 + 权限审批
     const preToolUseHook = async (input: any) => {
+      // 第1层：黑名单（不可绕过）
       const result = await canUseTool(input.tool_name, input.tool_input || {});
       if (result.behavior === 'deny') {
-        // 使用 decision: 'block' 来拒绝工具执行
         return {
           decision: 'block' as const,
           reason: result.message
         };
       }
+
+      // 第2层：manual 模式走人工审批
+      if (this.permissionMode === 'manual' && this.permissionGateway && this.sendPromptFn) {
+        const approved = await this.permissionGateway.requestPermission(
+          sessionId,
+          input.tool_name,
+          input.tool_input || {},
+          this.sendPromptFn
+        );
+        if (!approved) {
+          return {
+            decision: 'block' as const,
+            reason: '用户拒绝或审批超时'
+          };
+        }
+      }
+
       return {};
     };
 
@@ -421,13 +449,15 @@ export class AgentRunner {
     const enableSummaries = this.config?.agents?.anthropic?.agentProgressSummaries !== false;
 
     // 公共 options（新旧模式共用）
-    logger.info(`[AgentRunner] runQuery model=${this.model} effort=${this.effort ?? 'auto'}`);
+    const isEdit = this.permissionMode === 'edit';
+    const sdkPermissionMode = isEdit ? 'acceptEdits' as const : 'default' as const;
+    logger.info(`[AgentRunner] runQuery model=${this.model} effort=${this.effort ?? 'auto'} permMode=${this.permissionMode}`);
     const commonOptions = {
       cwd: projectPath,
       model: this.model,
       ...(this.effort ? { effort: this.effort } : {}),
       canUseTool,
-      permissionMode: 'default' as const,
+      permissionMode: sdkPermissionMode,
       persistSession: true,
       hooks: {
         PreCompact: [{ matcher: '.*', hooks: [preCompactHook] }],
@@ -576,7 +606,7 @@ export class AgentRunner {
         model: this.model,
         resume: agentSessionId,
         maxTurns: 1,
-        permissionMode: 'default',
+        permissionMode: this.permissionMode === 'bypass' ? 'bypassPermissions' as const : 'default' as const,
         env: this.getAgentEnv()
       }
     });
