@@ -99,11 +99,11 @@ export class MessageProcessor {
 
     const monitorEnabled = this.config.idleMonitor?.enabled !== false;
     const safeModeThreshold = this.config.idleMonitor?.safeModeThreshold ?? 3;
-    const quietMode = policy.quietMode(chatType, identityRole);
+    const muteIdleMonitor = policy.muteIdleMonitor(chatType, identityRole);
 
     // 计算是否抑制中间输出（工具活动 + 流式文本）
     const shouldSuppress = (): boolean => {
-      return !policy.showActivities(chatType, identityRole);
+      return !policy.showMiddleResult(chatType, identityRole);
     };
     this.shouldSuppressActivities = shouldSuppress();
 
@@ -130,7 +130,7 @@ export class MessageProcessor {
             // 先发送诊断信息，让用户知道发生了什么
             if (channelInfo) {
               try {
-                const msg = quietMode
+                const msg = muteIdleMonitor
                   ? `\u26a0\ufe0f 任务超时（${result.idleSec}秒无响应），已自动中断`
                   : result.message;
                 await channelInfo.adapter.sendText(message.channelId, msg);
@@ -148,7 +148,7 @@ export class MessageProcessor {
           } else {
             // notify or warn: send diagnostic message, task continues
             logger.info(`[MessageProcessor] Idle monitor: ${result.action} after ${result.idleSec}s idle, stream: ${streamKey}`);
-            if (channelInfo && !quietMode && !shouldSuppress()) {
+            if (channelInfo && !muteIdleMonitor && !shouldSuppress()) {
               try {
                 await channelInfo.adapter.sendText(message.channelId, result.message);
               } catch (e) {
@@ -350,6 +350,15 @@ ${suggestions}`,
       // 调用 AgentRunner（含上下文过长自动 compact 重试）
       const streamKey = `${message.channel}-${message.channelId}`;
 
+      // 设置权限审批的消息发送回调（指向当前渠道）
+      this.agentRunner.setSendPrompt(async (text: string) => {
+        await adapter.sendText(message.channelId, text, this.getThreadSendOpts(session));
+      });
+
+      // 设置 per-session 权限模式
+      const permissionMode = session.metadata?.permissionMode || 'auto';
+      this.agentRunner.setMode(permissionMode);
+
       try {
         const stream = await this.agentRunner.runQuery(
           session.id,
@@ -549,9 +558,9 @@ ${suggestions}`,
     session: Session;
     absoluteProjectPath: string;
   }> {
-    // 话题会话：首条消息的 messageId 作为 rootId，存入 replyOpts
-    const metadata = message.threadId && message.messageId
-      ? { replyOpts: { rootId: message.messageId } }
+    // 话题会话：从 replyOpts 中提取 rootId
+    const metadata = message.threadId && message.replyOpts?.rootId
+      ? { replyOpts: { rootId: message.replyOpts.rootId } }
       : undefined;
 
     const session = await this.sessionManager.getOrCreateSession(

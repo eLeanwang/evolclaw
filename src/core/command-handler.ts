@@ -1,6 +1,6 @@
 import { Config, ChannelAdapter, Session, ChannelPolicy } from '../types.js';
 import { SessionManager } from './session-manager.js';
-import { AgentRunner, hasModelSwitcher } from '../agents/claude-runner.js';
+import { AgentRunner, hasModelSwitcher, hasPermissionController } from '../agents/claude-runner.js';
 import { MessageCache } from './message-cache.js';
 import { MessageProcessor } from './message-processor.js';
 import { EventBus } from './event-bus.js';
@@ -204,8 +204,8 @@ export class CommandHandler {
       canDeleteSession: () => true,
       canImportCliSession: () => true,
       messagePrefix: () => '',
-      showActivities: () => true,
-      quietMode: () => false,
+      showMiddleResult: () => true,
+      muteIdleMonitor: () => false,
       accumulateErrors: () => true,
     };
   }
@@ -333,37 +333,80 @@ export class CommandHandler {
   /model [model] [effort] - 查看或切换模型/推理强度
 
 🔐 权限管理：
-  /perm <requestId> allow|deny - 审批权限请求
+  /perm - 查看当前权限模式
+  /perm <auto|manual|edit> - 切换权限模式
+  /perm allow|deny - 审批权限请求
 
 ❓ 帮助：
   /help - 显示此帮助信息`;
     }
 
-    // /perm 命令：权限审批（快速路径，不进入消息队列）
+    // /perm 命令：权限模式切换 + 权限审批（快速路径，不进入消息队列）
     if (normalizedContent.startsWith('/perm')) {
       const args = normalizedContent.slice(5).trim();
+
+      // /perm（无参数）：显示当前模式和可选模式
       if (!args) {
-        return '用法: /perm <requestId> allow|deny';
+        if (!hasPermissionController(this.agentRunner)) {
+          return '❌ 权限控制不可用';
+        }
+        const result = await this.ensureSession(channel, channelId, threadId);
+        if ('error' in result) return result.error;
+        const { session } = result;
+        const currentMode = session.metadata?.permissionMode || 'auto';
+        const modes = this.agentRunner.listModes();
+        const modeList = modes.map(m =>
+          `  ${m.key === currentMode ? '▶' : ' '} ${m.key} (${m.nameZh}) - ${m.description}`
+        ).join('\n');
+        return `🔐 当前权限模式: ${currentMode}\n\n${modeList}\n\n用法:\n  /perm <模式>       切换权限模式\n  /perm allow|deny   审批权限请求`;
       }
+
       const parts = args.split(/\s+/);
-      if (parts.length < 2) {
-        return '用法: /perm <requestId> allow|deny';
+
+      // /perm <mode> 或 /perm allow|deny：切换模式 / 快捷审批
+      if (parts.length === 1) {
+        const arg = parts[0];
+
+        // /perm allow|deny：快捷审批（自动找当前 session 唯一的 pending 请求）
+        if (arg === 'allow' || arg === 'deny') {
+          if (!this.permissionGateway) {
+            return '❌ 权限审批未启用';
+          }
+          const result = await this.ensureSession(channel, channelId, threadId);
+          if ('error' in result) return result.error;
+          const { session } = result;
+          const pendingIds = this.permissionGateway.getPendingRequests(session.id);
+          if (pendingIds.length === 0) {
+            return '❌ 当前没有待审批的权限请求';
+          }
+          if (pendingIds.length > 1) {
+            return `❌ 当前有 ${pendingIds.length} 个待审批请求，请指定 requestId：\n${pendingIds.map(id => `  /perm ${id} ${arg}`).join('\n')}`;
+          }
+          const requestId = pendingIds[0];
+          this.permissionGateway.resolvePermission(session.id, requestId, arg === 'allow');
+          return arg === 'allow' ? `✓ 已授权，继续执行……` : `✓ 已拒绝`;
+        }
+
+        // /perm <mode>：切换权限模式
+        if (hasPermissionController(this.agentRunner)) {
+          const modes = this.agentRunner.listModes();
+          const matched = modes.find(m => m.key === arg);
+          if (matched) {
+            const result = await this.ensureSession(channel, channelId, threadId);
+            if ('error' in result) return result.error;
+            const { session } = result;
+            const metadata = session.metadata || {};
+            metadata.permissionMode = arg as 'auto' | 'manual' | 'edit';
+            await this.sessionManager.updateSession(session.id, { metadata });
+            return `✓ 权限模式已切换为: ${matched.key} (${matched.nameZh})\n${matched.description}`;
+          }
+        }
+        // 不是已知模式名也不是 allow/deny
+        return `❌ 未知参数: ${arg}\n用法: /perm <auto|manual|edit> 或 /perm allow|deny`;
       }
-      const [requestId, action] = parts;
-      if (action !== 'allow' && action !== 'deny') {
-        return `❌ 无效操作: ${action}\n用法: /perm <requestId> allow|deny`;
-      }
-      if (!this.permissionGateway) {
-        return '❌ 权限审批未启用';
-      }
-      const result = await this.ensureSession(channel, channelId, threadId);
-      if ('error' in result) return result.error;
-      const { session } = result;
-      const resolved = this.permissionGateway.resolvePermission(session.id, requestId, action === 'allow');
-      if (!resolved) {
-        return `❌ 权限请求 ${requestId} 不存在或已过期`;
-      }
-      return action === 'allow' ? `✓ 已批准 ${requestId}` : `✓ 已拒绝 ${requestId}`;
+
+      // 双参数不再支持，提示正确用法
+      return `❌ 未知参数: ${args}\n用法: /perm <auto|manual|edit> 或 /perm allow|deny`;
     }
 
     // /model 命令：查看或切换模型/推理强度

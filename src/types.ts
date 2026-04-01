@@ -53,6 +53,7 @@ export interface SessionMetadata {
     codex?: string;
     gemini?: string;
   };
+  permissionMode?: 'auto' | 'manual' | 'edit';  // 权限模式（per-session）
 }
 
 export interface ReplyContext {
@@ -99,6 +100,7 @@ export interface Message {
   images?: Array<{ data: string; mimeType: string }>;
   mentions?: Array<{ userId: string; name?: string; key?: string }>;
   messageId?: string;
+  replyOpts?: Record<string, any>;  // 渠道特定回复上下文（如 Feishu 的 rootId）
   timestamp?: number;
 }
 
@@ -108,6 +110,7 @@ export interface InboundMessage {
   channelId: string;
   agentId?: string;  // 默认 'claude'
   threadId?: string;  // 默认 ''
+  chatType: 'private' | 'group';  // 由 Channel 层填充
   peerId: string;  // 发送者 ID
   peerName?: string;  // 发送者名称
   content: string;
@@ -123,7 +126,6 @@ export interface ChannelAdapter {
   sendText(channelId: string, text: string, context?: ReplyContext): Promise<void>;
   sendFile?(channelId: string, filePath: string): Promise<void>;
   acknowledge?(messageId: string): Promise<void>;
-  isGroupChat?(channelId: string): Promise<boolean>;
   onChatDissolved?(callback: (channelId: string) => void): void;
   connect?(): Promise<void>;
   disconnect?(): Promise<void>;
@@ -144,8 +146,8 @@ export interface ChannelPolicy {
   canDeleteSession(chatType: string, identity: string): boolean;
   canImportCliSession(chatType: string, identity: string): boolean;
   messagePrefix(chatType: string, peerName?: string): string;
-  showActivities(chatType: string, identity: string): boolean;
-  quietMode(chatType: string, identity: string): boolean;
+  showMiddleResult(chatType: string, identity: string): boolean;  // 重命名自 showActivities
+  muteIdleMonitor(chatType: string, identity: string): boolean;   // 重命名自 quietMode
   accumulateErrors(chatType: string, identity: string): boolean;
 }
 

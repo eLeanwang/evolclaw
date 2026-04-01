@@ -9,6 +9,7 @@ import { MessageQueue } from './core/message-queue.js';
 import { MessageCache } from './core/message-cache.js';
 import { CommandHandler } from './core/command-handler.js';
 import { EventBus } from './core/event-bus.js';
+import { PermissionGateway } from './core/permission.js';
 import { ChannelLoader } from './core/channel-loader.js';
 import { AgentLoader } from './core/agent-loader.js';
 import { ChannelAdapter } from './types.js';
@@ -73,6 +74,11 @@ async function main() {
   const agentRunner = agentInstances[0].agent;
   logger.info('✓ Agent runner ready');
 
+  // 权限审批网关
+  const permissionGateway = new PermissionGateway();
+  permissionGateway.setEventBus(eventBus);
+  agentRunner.setPermissionGateway(permissionGateway);
+
   // 创建消息缓存
   const messageCache = new MessageCache();
   logger.info('✓ Message cache initialized');
@@ -93,6 +99,7 @@ async function main() {
 
   // 创建命令处理器
   const cmdHandler = new CommandHandler(sessionManager, agentRunner, config, messageCache, eventBus);
+  cmdHandler.setPermissionGateway(permissionGateway);
 
   // 创建消息处理器
   const processor = new MessageProcessor(
@@ -164,8 +171,8 @@ async function main() {
     canDeleteSession: (chatType: string, role: string) => chatType === 'private' || role === 'owner',
     canImportCliSession: (chatType: string, role: string) => chatType === 'private' || role === 'owner',
     messagePrefix: () => '',
-    showActivities: () => true,
-    quietMode: () => false,
+    showMiddleResult: () => true,
+    muteIdleMonitor: () => false,
     accumulateErrors: () => true,
   };
 
@@ -243,18 +250,8 @@ async function main() {
         msg.peerId, msg.threadId
       )) return;
 
-      // 3. 检测 chatType（首次创建时查询）
-      let chatType: 'private' | 'group' = 'private';
-      if (adapter?.isGroupChat && !msg.threadId) {
-        try {
-          const isGroup = await adapter.isGroupChat(msg.channelId);
-          chatType = isGroup ? 'group' : 'private';
-        } catch (err) {
-          logger.debug(`[${channelName}] isGroupChat failed, defaulting to private:`, err);
-        }
-      }
-
-      // 4. session 解析（metadata 含 replyOpts）
+      // 3. session 解析（使用 Channel 层填充的 chatType）
+      const chatType = msg.chatType || 'private';
       const metadata = msg.replyOpts ? { replyOpts: msg.replyOpts } : undefined;
       const session = await sessionManager.getOrCreateSession(
         channelName, msg.channelId,
@@ -262,20 +259,21 @@ async function main() {
         msg.threadId, metadata, undefined, msg.peerId, chatType
       );
 
-      // 5. 消息前缀（由 policy 决定）
+      // 4. 消息前缀（由 policy 决定）
       const channelInfo = processor.getChannelInfo?.(channelName);
       if (channelInfo?.policy) {
         const prefix = channelInfo.policy.messagePrefix(session.chatType, msg.peerName);
         if (prefix) content = prefix + content;
       }
 
-      // 6. enqueue
+      // 5. enqueue
       await messageQueue.enqueue(session.id, {
         channel: channelName, channelId: msg.channelId, content,
         images: msg.images, timestamp: Date.now(),
         peerId: msg.peerId, peerName: msg.peerName,
         messageId: msg.messageId,
-        mentions: msg.mentions, threadId: msg.threadId
+        mentions: msg.mentions, threadId: msg.threadId,
+        replyOpts: msg.replyOpts
       }, session.projectPath);
     });
   }
@@ -286,9 +284,9 @@ async function main() {
   for (const inst of channelInstances) {
     if (inst.adapter.name === 'feishu') {
       wireChannel('feishu',
-        (handler) => inst.channel.onMessage(async ({ channelId: chatId, content, images, peerId, peerName, messageId, mentions, threadId, rootId }: any) => {
+        (handler) => inst.channel.onMessage(async ({ channelId: chatId, content, images, peerId, peerName, messageId, mentions, threadId, rootId, chatType }: any) => {
           handler({
-            channel: 'feishu', channelId: chatId, content, images,
+            channel: 'feishu', channelId: chatId, content, images, chatType,
             peerId: peerId || '', peerName, messageId, mentions, threadId,
             replyOpts: rootId ? { rootId } : undefined,
           });

@@ -13,7 +13,7 @@ export interface WechatConfig {
 
 export interface WechatMessageHandler {
   (channelId: string, content: string, peerId?: string,
-   images?: Array<{ data: string; mimeType: string }>): Promise<void>;
+   images?: Array<{ data: string; mimeType: string }>, chatType?: 'private' | 'group'): Promise<void>;
 }
 
 const CHANNEL_VERSION = '1.0.0';
@@ -558,7 +558,7 @@ export class WechatChannel {
     // 回调主流程
     if (this.messageHandler) {
       try {
-        await this.messageHandler(fromUserId, finalContent || '', fromUserId, media.images.length ? media.images : undefined);
+        await this.messageHandler(fromUserId, finalContent || '', fromUserId, media.images.length ? media.images : undefined, 'private');
       } catch (err) {
         logger.error('[WeChat] Message handler error:', err);
       }
@@ -856,14 +856,14 @@ export class WechatChannelPlugin implements ChannelPlugin {
       canDeleteSession: (chatType: string, identity: string) => true,
       canImportCliSession: (chatType: string, identity: string) => identity === 'owner',
       messagePrefix: (chatType: string, peerName?: string) => '',
-      showActivities: (chatType: string, identity: string) => {
+      showMiddleResult: (chatType: string, identity: string) => {
         const mode = config.showActivities || 'all';
         if (mode === 'none') return false;
         if (mode === 'dm-only') return chatType === 'private';
         if (mode === 'owner-dm-only') return chatType === 'private' && identity === 'owner';
         return true;
       },
-      quietMode: (chatType: string, identity: string) => false,
+      muteIdleMonitor: (chatType: string, identity: string) => false,
       accumulateErrors: (chatType: string, identity: string) => true,
     };
 

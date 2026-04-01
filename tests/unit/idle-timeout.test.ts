@@ -10,8 +10,8 @@ const testPolicy: ChannelPolicy = {
   canDeleteSession: () => true,
   canImportCliSession: () => true,
   messagePrefix: () => '',
-  showActivities: () => true,
-  quietMode: (chatType, identity) => chatType === 'group' || identity !== 'owner',
+  showMiddleResult: () => true,
+  muteIdleMonitor: (chatType, identity) => chatType === 'group' || identity !== 'owner',
   accumulateErrors: (chatType, identity) => chatType === 'private' && identity === 'owner',
 };
 
@@ -48,6 +48,8 @@ function createMockAgentRunner(streamEvents: any[], eventDelay = 0) {
     interrupt: vi.fn().mockImplementation(async () => { interruptCalled = true; }),
     updateSessionId: vi.fn(),
     closeSession: vi.fn(),
+    setSendPrompt: vi.fn(),
+    setMode: vi.fn(),
   };
 }
 

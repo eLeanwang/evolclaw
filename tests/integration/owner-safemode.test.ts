@@ -12,8 +12,8 @@ const testPolicy: ChannelPolicy = {
   canDeleteSession: () => true,
   canImportCliSession: () => true,
   messagePrefix: () => '',
-  showActivities: () => true,
-  quietMode: (chatType, identity) => chatType === 'group' || identity !== 'owner',
+  showMiddleResult: () => true,
+  muteIdleMonitor: (chatType, identity) => chatType === 'group' || identity !== 'owner',
   accumulateErrors: (chatType, identity) => chatType === 'private' && identity === 'owner',
 };
 
@@ -46,6 +46,8 @@ function createMockAgentRunner(streamEvents: any[], eventDelay = 0) {
     updateSessionId: vi.fn(),
     closeSession: vi.fn(),
     compactSession: vi.fn().mockResolvedValue(false),
+    setSendPrompt: vi.fn(),
+    setMode: vi.fn(),
   };
 }
 

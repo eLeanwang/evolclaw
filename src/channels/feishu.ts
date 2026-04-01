@@ -13,6 +13,7 @@ export interface FeishuConfig {
 export interface MessageHandlerOptions {
   channelId: string;
   content: string;
+  chatType: 'private' | 'group';
   images?: Array<{ data: string; mimeType: string }>;
   peerId?: string;
   peerName?: string;
@@ -71,6 +72,9 @@ export class FeishuChannel {
           this.addAckReaction(msg.message_id);
 
           if (!this.messageHandler) return;
+
+          // 提取 chatType（从 SDK 事件直接获取）
+          const chatType: 'private' | 'group' = msg.chat_type === 'group' ? 'group' : 'private';
 
           // 话题消息检测日志
           if (msg.thread_id) {
@@ -188,7 +192,7 @@ export class FeishuChannel {
                 content = content.replace(/@_user_\d+/g, '').trim();
               }
               const finalContent = quotedText + content;
-              await this.messageHandler({ channelId: msg.chat_id, content: finalContent, images: quotedImages.length > 0 ? quotedImages : undefined, peerId, peerName, messageId: msg.message_id, mentions: mentions.length > 0 ? mentions : undefined, threadId, rootId });
+              await this.messageHandler({ channelId: msg.chat_id, content: finalContent, images: quotedImages.length > 0 ? quotedImages : undefined, peerId, peerName, messageId: msg.message_id, mentions: mentions.length > 0 ? mentions : undefined, threadId, rootId, chatType });
             }
             // 处理图片消息
             else if (msg.message_type === 'image') {
@@ -204,10 +208,10 @@ export class FeishuChannel {
               if (imageData) {
                 const allImages = [...quotedImages, imageData];
                 const prompt = quotedText + '用户发送了一张图片，请分析这张图片的内容。';
-                await this.messageHandler({ channelId: msg.chat_id, content: prompt, images: allImages, peerId, peerName, messageId: msg.message_id, threadId, rootId });
+                await this.messageHandler({ channelId: msg.chat_id, content: prompt, images: allImages, peerId, peerName, messageId: msg.message_id, threadId, rootId, chatType });
               } else {
                 const prompt = quotedText + '[图片下载失败] 应用可能缺少 im:message 或 im:message:readonly 权限';
-                await this.messageHandler({ channelId: msg.chat_id, content: prompt, images: quotedImages.length > 0 ? quotedImages : undefined, peerId, peerName, messageId: msg.message_id, threadId, rootId });
+                await this.messageHandler({ channelId: msg.chat_id, content: prompt, images: quotedImages.length > 0 ? quotedImages : undefined, peerId, peerName, messageId: msg.message_id, threadId, rootId, chatType });
               }
             }
             // 处理文件消息
@@ -224,10 +228,10 @@ export class FeishuChannel {
               const filePath = await this.downloadFile(fileKey, fileName, msg.message_id, projectPath);
               if (filePath) {
                 const prompt = quotedText + `用户发送了文件：${fileName}\n文件已保存到：${filePath}\n请使用 Read 工具读取并分析文件内容。`;
-                await this.messageHandler({ channelId: msg.chat_id, content: prompt, images: quotedImages.length > 0 ? quotedImages : undefined, peerId, peerName, messageId: msg.message_id, threadId, rootId });
+                await this.messageHandler({ channelId: msg.chat_id, content: prompt, images: quotedImages.length > 0 ? quotedImages : undefined, peerId, peerName, messageId: msg.message_id, threadId, rootId, chatType });
               } else {
                 const prompt = quotedText + '[文件下载失败] 应用可能缺少 im:resource 权限';
-                await this.messageHandler({ channelId: msg.chat_id, content: prompt, images: quotedImages.length > 0 ? quotedImages : undefined, peerId, peerName, messageId: msg.message_id, threadId, rootId });
+                await this.messageHandler({ channelId: msg.chat_id, content: prompt, images: quotedImages.length > 0 ? quotedImages : undefined, peerId, peerName, messageId: msg.message_id, threadId, rootId, chatType });
               }
             }
             // 处理富文本消息
@@ -247,13 +251,13 @@ export class FeishuChannel {
               let finalContent = text.trim();
               if (title) finalContent = `${title}\n${finalContent}`;
               finalContent = quotedText + finalContent;
-              await this.messageHandler({ channelId: msg.chat_id, content: finalContent, images: quotedImages.length > 0 ? quotedImages : undefined, peerId, peerName, messageId: msg.message_id, threadId, rootId });
+              await this.messageHandler({ channelId: msg.chat_id, content: finalContent, images: quotedImages.length > 0 ? quotedImages : undefined, peerId, peerName, messageId: msg.message_id, threadId, rootId, chatType });
             }
             // 处理其他类型消息
             else {
               logger.debug('[Feishu] Unsupported message type:', msg.message_type);
               const prompt = quotedText + `[不支持的消息类型: ${msg.message_type}]`;
-              await this.messageHandler({ channelId: msg.chat_id, content: prompt, images: quotedImages.length > 0 ? quotedImages : undefined, peerId, peerName, messageId: msg.message_id, threadId, rootId });
+              await this.messageHandler({ channelId: msg.chat_id, content: prompt, images: quotedImages.length > 0 ? quotedImages : undefined, peerId, peerName, messageId: msg.message_id, threadId, rootId, chatType });
             }
           } catch (error) {
             logger.error('[Feishu] Failed to process message:', error);
@@ -425,16 +429,6 @@ export class FeishuChannel {
       this.wsClient = null;
     }
     this.client = null;
-  }
-
-  async isGroupChat(channelId: string): Promise<boolean> {
-    if (!this.client) return false;
-    try {
-      const res = await this.client.im.chat.get({ path: { chat_id: channelId } });
-      return res.data?.chat_type === 'group';
-    } catch {
-      return channelId.startsWith('oc_');
-    }
   }
 
   private async downloadAndSaveImage(imageKey: string, chatId: string, messageId: string, projectPath: string): Promise<{ data: string; mimeType: string } | null> {
@@ -678,7 +672,6 @@ export class FeishuChannelPlugin implements ChannelPlugin {
       name: 'feishu' as const,
       sendText: (id: string, text: string) => channel.sendMessage(id, text),
       sendFile: (id: string, filePath: string) => channel.sendFile(id, filePath),
-      isGroupChat: (id: string) => channel.isGroupChat(id),
     };
 
     const policy = {
@@ -688,14 +681,14 @@ export class FeishuChannelPlugin implements ChannelPlugin {
       canDeleteSession: (chatType: string, identity: string) => true,
       canImportCliSession: (chatType: string, identity: string) => identity === 'owner',
       messagePrefix: (chatType: string, peerName?: string) => (chatType === 'group' && peerName) ? `[${peerName}] ` : '',
-      showActivities: (chatType: string, identity: string) => {
+      showMiddleResult: (chatType: string, identity: string) => {
         const mode = config.showActivities || 'all';
         if (mode === 'none') return false;
         if (mode === 'dm-only') return chatType === 'private';
         if (mode === 'owner-dm-only') return chatType === 'private' && identity === 'owner';
         return true;
       },
-      quietMode: (chatType: string, identity: string) => false,
+      muteIdleMonitor: (chatType: string, identity: string) => false,
       accumulateErrors: (chatType: string, identity: string) => true,
     };
 

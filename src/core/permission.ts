@@ -1,4 +1,4 @@
-import { canUseTool, summarizeToolInput } from '../utils/permission-utils.js';
+import { summarizeToolInput } from '../utils/permission-utils.js';
 import type { EventBus } from './event-bus.js';
 
 interface PendingPermission {
@@ -16,28 +16,23 @@ export class PermissionGateway {
     this.eventBus = eventBus;
   }
 
+  /**
+   * 请求人工审批。调用方负责模式判断（仅 approve 模式调用此方法）。
+   * 黑名单检查由调用方（preToolUseHook）在调用此方法前完成。
+   */
   async requestPermission(
     sessionId: string,
     toolName: string,
     toolInput: Record<string, unknown>,
-    mode: string,
     sendPrompt: (text: string) => Promise<void>
   ): Promise<boolean> {
-    // 自主模式直接批准
-    if (mode === 'autonomous') return true;
-
-    // 先走黑名单检查
-    const blacklistResult = await canUseTool(toolName, toolInput);
-    if (blacklistResult.behavior === 'deny') return false;
-
     const requestId = `perm-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const summary = summarizeToolInput(toolName, toolInput);
 
     this.eventBus?.publish({ type: 'permission:requested', sessionId, requestId, toolName, input: summary });
 
     await sendPrompt(
-      `\ud83d\udd10 \u6743\u9650\u8bf7\u6c42 [${requestId}]\n\u5de5\u5177\uff1a${toolName}\n\u64cd\u4f5c\uff1a${summary}\n\n` +
-      `\u56de\u590d /perm ${requestId} allow \u6279\u51c6\n\u56de\u590d /perm ${requestId} deny \u62d2\u7edd`
+      `🔐 权限请求\n工具：${toolName}\n操作：${summary}\n\n回复 /perm allow 批准 或 /perm deny 拒绝`
     );
 
     return new Promise((resolve) => {
@@ -69,5 +64,16 @@ export class PermissionGateway {
         this.pending.delete(requestId);
       }
     }
+  }
+
+  /** 获取指定会话的所有 pending requestId */
+  getPendingRequests(sessionId: string): string[] {
+    const ids: string[] = [];
+    for (const [requestId, pending] of this.pending.entries()) {
+      if (pending.sessionId === sessionId) {
+        ids.push(requestId);
+      }
+    }
+    return ids;
   }
 }
