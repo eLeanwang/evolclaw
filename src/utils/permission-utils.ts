@@ -49,3 +49,33 @@ export async function canUseTool(
   // 默认允许
   return { behavior: 'allow', updatedInput: input };
 }
+
+/**
+ * 工具输入摘要（提取工具调用的可读描述，供权限审批和消息展示使用）
+ */
+export function summarizeToolInput(toolName: string, input: Record<string, unknown>): string {
+  if (!input) return '';
+
+  const extractors: Record<string, (i: any) => string | undefined> = {
+    'Read':  (i) => i.file_path,
+    'Edit':  (i) => i.file_path,
+    'Write': (i) => i.file_path,
+    'Bash':  (i) => i.command?.substring(0, 80),
+    'Grep':  (i) => `pattern: ${i.pattern}`,
+    'Glob':  (i) => `pattern: ${i.pattern}`,
+    'Agent': (i) => i.description || i.prompt?.substring(0, 80),
+  };
+
+  const extractor = extractors[toolName];
+  if (extractor) {
+    const result = extractor(input);
+    if (result) return result;
+  }
+
+  return (input as any).description
+    || (input as any).file_path
+    || (input as any).pattern
+    || (input as any).command?.substring(0, 80)
+    || (input as any).prompt?.substring(0, 80)
+    || '';
+}

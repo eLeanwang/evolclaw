@@ -59,7 +59,7 @@ export class StreamIdleMonitor {
       this.state.totalToolCalls++;
     }
 
-    if (type === 'text_delta' || type === 'result') {
+    if (type === 'text' || type === 'text_delta' || type === 'complete' || type === 'result') {
       this.state.hasReceivedText = true;
     }
 

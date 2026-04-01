@@ -1,7 +1,6 @@
 import * as lark from '@larksuiteoapi/node-sdk';
 import fs from 'fs';
 import path from 'path';
-import { DatabaseSync } from 'node:sqlite';
 import imageType from 'image-type';
 import { ensureDir } from '../config.js';
 import { logger } from '../utils/logger.js';
@@ -10,7 +9,6 @@ import { markdownToFeishuPost, hasMarkdownSyntax } from '../utils/markdown-to-fe
 export interface FeishuConfig {
   appId: string;
   appSecret: string;
-  db: DatabaseSync;
 }
 
 export interface MessageHandlerOptions {
@@ -38,23 +36,10 @@ export class FeishuChannel {
   private wsClient: lark.WSClient | null = null;
   private messageHandler?: MessageHandler;
   private projectPathProvider?: ProjectPathProvider;
-  private db: DatabaseSync;
   private cleanupInterval?: NodeJS.Timeout;
-  private chatTypeCache: Map<string, string> = new Map();
+  private seenMessages = new Map<string, number>();  // messageId -> timestamp
 
   constructor(private config: FeishuConfig) {
-    this.db = config.db;
-    this.initChatTypeTable();
-  }
-
-  private initChatTypeTable(): void {
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS chat_types (
-        chat_id TEXT PRIMARY KEY,
-        chat_mode TEXT NOT NULL,
-        updated_at INTEGER NOT NULL
-      )
-    `);
   }
 
   async connect(): Promise<void> {
@@ -88,7 +73,7 @@ export class FeishuChannel {
 
           if (!this.messageHandler) return;
 
-          // 话题消息检测日志（去重后）
+          // 话题消息检测日志
           if (msg.thread_id) {
             logger.info('[Feishu] Thread message, thread_id:', msg.thread_id, 'root_id:', msg.root_id);
           }
@@ -118,10 +103,9 @@ export class FeishuChannel {
             let quotedText = '';
             let quotedImages: Array<{ data: string; mimeType: string }> = [];
 
-            // 话题创建消息检测：DB 中无对应 thread session 时为首条消息
-            const isThreadCreating = threadId && !this.hasThreadSession(threadId);
-
-            if (msg.parent_id && (!msg.thread_id || isThreadCreating) && this.client) {
+            // 话题后续消息不拼接引用前缀（话题消息有 thread_id）
+            // 仅非话题消息（普通引用回复）才拼接引用
+            if (msg.parent_id && !msg.thread_id && this.client) {
               try {
                 const res = await this.client.im.message.get({
                   path: { message_id: msg.parent_id }
@@ -199,7 +183,11 @@ export class FeishuChannel {
             if (msg.message_type === 'text') {
               const parsed = JSON.parse(msg.content);
               // 优先使用 text_without_at_bot（去除机器人 @），否则使用 text
-              const content = parsed.text_without_at_bot || parsed.text;
+              let content = (parsed.text_without_at_bot || parsed.text || '').trim();
+              // 仅当内容以 / 开头（命令）时，清理残留的 mention 占位符
+              if (content.startsWith('/')) {
+                content = content.replace(/@_user_\d+/g, '').trim();
+              }
               const finalContent = quotedText + content;
               await this.messageHandler({ channelId: msg.chat_id, content: finalContent, images: quotedImages.length > 0 ? quotedImages : undefined, userId, userName, messageId: msg.message_id, mentions: mentions.length > 0 ? mentions : undefined, threadId, rootId });
             }
@@ -299,40 +287,16 @@ export class FeishuChannel {
     this.projectPathProvider = provider;
   }
 
-  async getChatMode(chatId: string): Promise<string> {
-    logger.info(`[Feishu] getChatMode called for chatId: ${chatId}`);
-
-    // 检查缓存
-    if (this.chatTypeCache.has(chatId)) {
-      logger.info(`[Feishu] getChatMode from cache: ${this.chatTypeCache.get(chatId)}`);
-      return this.chatTypeCache.get(chatId)!;
-    }
-
-    // 检查数据库
-    const row = this.db.prepare('SELECT chat_mode FROM chat_types WHERE chat_id = ?').get(chatId) as { chat_mode: string } | undefined;
-    if (row) {
-      logger.info(`[Feishu] getChatMode from db: ${row.chat_mode}`);
-      this.chatTypeCache.set(chatId, row.chat_mode);
-      return row.chat_mode;
-    }
-
-    // 调用 API 获取
-    if (!this.client) return 'p2p';
+  async isGroupChat(chatId: string): Promise<boolean> {
+    if (!this.client) return false;
 
     try {
-      logger.info(`[Feishu] Calling API to get chat mode for ${chatId}`);
       const res = await this.client.im.chat.get({ path: { chat_id: chatId } });
       const chatMode = res.data?.chat_mode || 'p2p';
-      logger.info(`[Feishu] API returned chat_mode: ${chatMode}`);
-
-      // 保存到数据库和缓存
-      this.db.prepare('INSERT OR REPLACE INTO chat_types (chat_id, chat_mode, updated_at) VALUES (?, ?, ?)').run(chatId, chatMode, Date.now());
-      this.chatTypeCache.set(chatId, chatMode);
-
-      return chatMode;
+      return chatMode === 'group';
     } catch (error) {
-      logger.warn('[Feishu] Failed to get chat mode, defaulting to p2p:', error);
-      return 'p2p';
+      logger.warn('[Feishu] Failed to get chat mode:', error);
+      return false;
     }
   }
 
@@ -446,13 +410,23 @@ export class FeishuChannel {
     }
   }
 
-  private hasThreadSession(threadId: string): boolean {
-    try {
-      const row = this.db.prepare('SELECT 1 FROM sessions WHERE thread_id = ? LIMIT 1').get(threadId);
-      return !!row;
-    } catch {
-      return false;
-    }
+  private isDuplicate(msgId: string): boolean {
+    return this.seenMessages.has(msgId);
+  }
+
+  private markSeen(msgId: string): void {
+    this.seenMessages.set(msgId, Date.now());
+  }
+
+  private startCleanupTask(): void {
+    this.cleanupInterval = setInterval(() => {
+      const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+      let cleaned = 0;
+      for (const [id, ts] of this.seenMessages) {
+        if (ts < cutoff) { this.seenMessages.delete(id); cleaned++; }
+      }
+      if (cleaned > 0) logger.info(`[Feishu] Cleaned ${cleaned} old message IDs`);
+    }, 60 * 60 * 1000);
   }
 
   async disconnect(): Promise<void> {
@@ -590,19 +564,6 @@ export class FeishuChannel {
     }
   }
 
-  private isDuplicate(msgId: string): boolean {
-    const result = this.db.prepare(
-      'SELECT 1 FROM processed_messages WHERE message_id = ? LIMIT 1'
-    ).get(msgId);
-    return !!result;
-  }
-
-  private markSeen(msgId: string): void {
-    this.db.prepare(
-      'INSERT OR IGNORE INTO processed_messages (message_id, channel, channel_id, processed_at) VALUES (?, ?, ?, ?)'
-    ).run(msgId, 'feishu', '', Date.now());
-  }
-
   private addAckReaction(messageId: string): void {
     if (!this.client) return;
 
@@ -614,15 +575,4 @@ export class FeishuChannel {
     }).catch(() => {});
   }
 
-  private startCleanupTask(): void {
-    this.cleanupInterval = setInterval(() => {
-      const cutoff = Date.now() - 24 * 60 * 60 * 1000;
-      const result = this.db.prepare(
-        'DELETE FROM processed_messages WHERE processed_at < ?'
-      ).run(cutoff);
-      if (result.changes > 0) {
-        logger.info(`[Feishu] Cleaned ${result.changes} old processed messages`);
-      }
-    }, 60 * 60 * 1000);
-  }
 }

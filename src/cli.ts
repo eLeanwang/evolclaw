@@ -7,6 +7,7 @@ import { cmdInit } from './utils/init.js';
 import { cmdInitWechat } from './utils/init-wechat.js';
 import { cmdInitFeishu } from './utils/init-feishu.js';
 import * as platform from './utils/platform.js';
+import { EventBus } from './core/event-bus.js';
 
 // Suppress Node.js ExperimentalWarning (e.g. SQLite) from cluttering CLI output
 process.removeAllListeners('warning');
@@ -319,6 +320,17 @@ async function cmdRestart() {
   setTimeout(() => cmdStart(), 1000);
 }
 
+function formatTimeAgo(ms: number): string {
+  const sec = Math.floor(ms / 1000);
+  if (sec < 60) return '刚刚';
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}分钟前`;
+  const hour = Math.floor(min / 60);
+  if (hour < 24) return `${hour}小时前`;
+  const day = Math.floor(hour / 24);
+  return `${day}天前`;
+}
+
 async function cmdStatus() {
   const p = resolvePaths();
   const pid = isRunning(p.pid);
@@ -334,6 +346,38 @@ async function cmdStatus() {
       if (info.memory) console.log(`  Memory: ${info.memory} KB`);
     } catch {}
     console.log(`  EVOLCLAW_HOME: ${resolveRoot()}`);
+
+    // Runtime statistics (only when running)
+    if (fs.existsSync(p.db)) {
+      try {
+        const Database = await import('node:sqlite');
+        const db = new Database.DatabaseSync(p.db);
+
+        // Get recent active sessions (last 5)
+        const recentSessions = db.prepare(`
+          SELECT id, project_path, name, channel, is_group, thread_id, updated_at
+          FROM sessions
+          WHERE deleted_at IS NULL
+          ORDER BY updated_at DESC
+          LIMIT 5
+        `).all() as Array<{ id: string; project_path: string; name: string | null; channel: string; is_group: number; thread_id: string; updated_at: number }>;
+
+        db.close();
+
+        if (recentSessions.length > 0) {
+          console.log('');
+          console.log('📋 Recent Active Sessions:');
+          for (const s of recentSessions) {
+            const projectName = path.basename(s.project_path);
+            const sessionType = s.thread_id ? '话题会话' : '主会话';
+            const chatType = s.is_group ? '群聊' : '单聊';
+            const sessionName = s.name || '默认会话';
+            const timeAgo = formatTimeAgo(Date.now() - s.updated_at);
+            console.log(`  • ${projectName} / ${sessionName} (${sessionType}, ${chatType}) - ${timeAgo}`);
+          }
+        }
+      } catch {}
+    }
   } else {
     console.log('⚠ EvolClaw is not running');
     if (fs.existsSync(p.pid)) {
@@ -341,16 +385,17 @@ async function cmdStatus() {
     }
   }
 
+  // Session & Project statistics (always show if DB exists)
   if (fs.existsSync(p.db)) {
     console.log('');
     console.log('📦 Sessions & Projects:');
     try {
       const Database = await import('node:sqlite');
       const db = new Database.DatabaseSync(p.db);
-      const totalSessions = db.prepare('SELECT count(*) as cnt FROM sessions').get() as { cnt: number };
-      const activeSessions = db.prepare('SELECT count(*) as cnt FROM sessions WHERE is_active=1').get() as { cnt: number };
-      const uniqueChats = db.prepare('SELECT count(DISTINCT channel_id) as cnt FROM sessions').get() as { cnt: number };
-      const projects = db.prepare('SELECT count(DISTINCT project_path) as cnt FROM sessions').get() as { cnt: number };
+      const totalSessions = db.prepare('SELECT count(*) as cnt FROM sessions WHERE deleted_at IS NULL').get() as { cnt: number };
+      const activeSessions = db.prepare('SELECT count(*) as cnt FROM sessions WHERE is_active=1 AND deleted_at IS NULL').get() as { cnt: number };
+      const uniqueChats = db.prepare('SELECT count(DISTINCT channel_id) as cnt FROM sessions WHERE deleted_at IS NULL').get() as { cnt: number };
+      const projects = db.prepare('SELECT count(DISTINCT project_path) as cnt FROM sessions WHERE deleted_at IS NULL').get() as { cnt: number };
       db.close();
 
       console.log(`  Total sessions: ${totalSessions.cnt} (active: ${activeSessions.cnt})`);
@@ -359,75 +404,90 @@ async function cmdStatus() {
     } catch {}
   }
 
-  // Channel configuration status
+  // Channel status - only show connection status if running
   if (fs.existsSync(p.config)) {
     console.log('');
-    console.log('🔌 Channels:');
+    console.log(pid ? '🔌 Channels:' : '🔌 Channel Configuration:');
     try {
       const config = JSON.parse(fs.readFileSync(p.config, 'utf-8'));
+
+      // Feishu
       if (config.channels?.feishu?.appId && config.channels?.feishu?.appSecret) {
-        // Verify Feishu credentials connectivity
-        try {
-          const lark = await import('@larksuiteoapi/node-sdk');
-          const client = new lark.Client({ appId: config.channels!.feishu!.appId, appSecret: config.channels!.feishu!.appSecret });
-          const res = await client.auth.tenantAccessToken.internal({
-            data: { app_id: config.channels!.feishu!.appId, app_secret: config.channels!.feishu!.appSecret },
-          });
-          if (res.code === 0) {
-            console.log(`  Feishu: ✓ Connected (App ID: ${config.channels!.feishu!.appId.slice(0, 8)}...)`);
-          } else {
-            console.log(`  Feishu: ✗ Connection refused (${res.msg})`);
+        if (pid) {
+          // Running: check actual connection
+          try {
+            const lark = await import('@larksuiteoapi/node-sdk');
+            const client = new lark.Client({ appId: config.channels!.feishu!.appId, appSecret: config.channels!.feishu!.appSecret });
+            const res = await client.auth.tenantAccessToken.internal({
+              data: { app_id: config.channels!.feishu!.appId, app_secret: config.channels!.feishu!.appSecret },
+            });
+            if (res.code === 0) {
+              console.log(`  Feishu: ✓ Connected (App ID: ${config.channels!.feishu!.appId.slice(0, 8)}...)`);
+            } else {
+              console.log(`  Feishu: ✗ Connection refused (${res.msg})`);
+            }
+          } catch (e: any) {
+            const msg = e.message || '';
+            if (msg.includes('ETIMEDOUT') || msg.includes('ENETUNREACH') || msg.includes('ENOTFOUND')) {
+              console.log('  Feishu: ✗ Connection timeout (network unreachable)');
+            } else {
+              console.log(`  Feishu: ✗ Connection failed (${msg.slice(0, 80)})`);
+            }
           }
-        } catch (e: any) {
-          const msg = e.message || '';
-          if (msg.includes('ETIMEDOUT') || msg.includes('ENETUNREACH') || msg.includes('ENOTFOUND')) {
-            console.log('  Feishu: ✗ Connection timeout (network unreachable)');
-          } else {
-            console.log(`  Feishu: ✗ Connection failed (${msg.slice(0, 80)})`);
-          }
+        } else {
+          // Not running: just show configured
+          console.log(`  Feishu: ✓ Configured (App ID: ${config.channels!.feishu!.appId.slice(0, 8)}...)`);
         }
       } else {
         console.log('  Feishu: - Not configured');
       }
+
+      // WeChat
       if (config.channels?.wechat?.token) {
         const tokenPreview = config.channels.wechat.token.slice(0, 20);
-        // Validate token by calling getconfig API
-        try {
-          const baseUrl = (config.channels.wechat.baseUrl || 'https://ilinkai.weixin.qq.com').replace(/\/$/, '');
-          const body = JSON.stringify({ base_info: { channel_version: '1.0.0' } });
-          const uint32 = (await import('node:crypto')).default.randomBytes(4).readUInt32BE(0);
-          const wechatUin = Buffer.from(String(uint32), 'utf-8').toString('base64');
-          const res = await fetch(`${baseUrl}/ilink/bot/getconfig`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'AuthorizationType': 'ilink_bot_token',
-              'Authorization': `Bearer ${config.channels.wechat.token.trim()}`,
-              'X-WECHAT-UIN': wechatUin,
-            },
-            body,
-            signal: AbortSignal.timeout(10_000),
-          });
-          const resp = JSON.parse(await res.text()) as { ret?: number; errcode?: number };
-          const isExpired = resp.errcode === -14 || resp.ret === -14;
-          if (isExpired) {
-            console.log(`  WeChat: ✗ Token expired (Token: ${tokenPreview}...)`);
-            console.log('          Run: evolclaw init wechat && evolclaw restart');
-          } else {
-            console.log(`  WeChat: ✓ Connected (Token: ${tokenPreview}...)`);
+        if (pid) {
+          // Running: validate token
+          try {
+            const baseUrl = (config.channels.wechat.baseUrl || 'https://ilinkai.weixin.qq.com').replace(/\/$/, '');
+            const body = JSON.stringify({ base_info: { channel_version: '1.0.0' } });
+            const uint32 = (await import('node:crypto')).default.randomBytes(4).readUInt32BE(0);
+            const wechatUin = Buffer.from(String(uint32), 'utf-8').toString('base64');
+            const res = await fetch(`${baseUrl}/ilink/bot/getconfig`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'AuthorizationType': 'ilink_bot_token',
+                'Authorization': `Bearer ${config.channels.wechat.token.trim()}`,
+                'X-WECHAT-UIN': wechatUin,
+              },
+              body,
+              signal: AbortSignal.timeout(10_000),
+            });
+            const resp = JSON.parse(await res.text()) as { ret?: number; errcode?: number };
+            const isExpired = resp.errcode === -14 || resp.ret === -14;
+            if (isExpired) {
+              console.log(`  WeChat: ✗ Token expired (Token: ${tokenPreview}...)`);
+              console.log('          Run: evolclaw init wechat && evolclaw restart');
+            } else {
+              console.log(`  WeChat: ✓ Connected (Token: ${tokenPreview}...)`);
+            }
+          } catch (e: any) {
+            const msg = e.message || '';
+            if (msg.includes('ETIMEDOUT') || msg.includes('ENETUNREACH') || msg.includes('ENOTFOUND')) {
+              console.log(`  WeChat: ✗ Connection timeout (Token: ${tokenPreview}...)`);
+            } else {
+              console.log(`  WeChat: ✓ Configured (Token: ${tokenPreview}...)`);
+            }
           }
-        } catch (e: any) {
-          const msg = e.message || '';
-          if (msg.includes('ETIMEDOUT') || msg.includes('ENETUNREACH') || msg.includes('ENOTFOUND')) {
-            console.log(`  WeChat: ✗ Connection timeout (Token: ${tokenPreview}...)`);
-          } else {
-            console.log(`  WeChat: ✓ Configured (Token: ${tokenPreview}...)`);
-          }
+        } else {
+          // Not running: just show configured
+          console.log(`  WeChat: ✓ Configured (Token: ${tokenPreview}...)`);
         }
       } else {
         console.log('  WeChat: - Not configured');
       }
-      // Check AUN with placeholder detection
+
+      // AUN
       const aunDomain = config.channels?.aun?.domain;
       const aunAgent = config.channels?.aun?.agentName;
       const isAunPlaceholder = !aunDomain || !aunAgent ||
@@ -438,6 +498,7 @@ async function cmdStatus() {
       } else {
         console.log('  AUN: - Not configured');
       }
+
       if (config.agents?.anthropic?.model) {
         console.log(`  Model: ${config.agents.anthropic.model}`);
       }
@@ -491,6 +552,7 @@ async function cmdRestartMonitor() {
   const restartLog = path.join(p.logs, 'restart.log');
   const MAX_HEAL_ATTEMPTS = 3;
   const READY_TIMEOUT = 15000; // 15s
+  const eventBus = new EventBus();
 
   const log = (msg: string) => {
     const line = `[${new Date().toISOString().replace('T', ' ').slice(0, 19)}] ${msg}\n`;
@@ -548,10 +610,12 @@ async function cmdRestartMonitor() {
 
   // 启动失败，进入 self-heal 循环
   log('❌ Service failed to start, entering self-heal loop');
+  eventBus.publish({ type: 'self-heal:started', reason: 'Service failed to start after restart' });
   await notifyChannel(p, pendingInfo, '⚠️ 服务启动失败，正在尝试自动修复...', log);
 
   for (let attempt = 1; attempt <= MAX_HEAL_ATTEMPTS; attempt++) {
     log(`Self-heal attempt ${attempt}/${MAX_HEAL_ATTEMPTS}`);
+    eventBus.publish({ type: 'self-heal:attempt', attemptNumber: attempt, maxAttempts: MAX_HEAL_ATTEMPTS });
     await notifyChannel(p, pendingInfo, `🔧 自动修复中（第 ${attempt}/${MAX_HEAL_ATTEMPTS} 次）...`, log);
 
     // 调用 claude CLI 修复（递增超时：3/4/5 分钟）
@@ -566,6 +630,7 @@ async function cmdRestartMonitor() {
     started = await spawnAndWaitReady(p, log, READY_TIMEOUT);
     if (started) {
       log(`✓ Self-heal succeeded on attempt ${attempt}`);
+      eventBus.publish({ type: 'self-heal:completed', success: true, attempts: attempt });
       archiveSelfHealLog(p, log);
       await notifyChannel(p, pendingInfo, `✅ 自愈成功！（第 ${attempt} 次修复后恢复）`, log);
       cleanupPendingFile(pendingFile, log);
@@ -577,6 +642,7 @@ async function cmdRestartMonitor() {
 
   // 全部失败
   log(`❌ All ${MAX_HEAL_ATTEMPTS} self-heal attempts failed`);
+  eventBus.publish({ type: 'self-heal:completed', success: false, attempts: MAX_HEAL_ATTEMPTS });
   await notifyChannel(p, pendingInfo, `❌ ${MAX_HEAL_ATTEMPTS} 次自动修复均失败，需要人工介入。\n修复记录：${p.selfHealLog}`, log);
   cleanupPendingFile(pendingFile, log);
   process.exit(1);

@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { MessageProcessor } from '../../src/core/message-processor.js';
+import { EventBus } from '../../src/core/event-bus.js';
 import type { Config, Message, ChannelAdapter } from '../../src/types.js';
 
 // Mock AgentRunner
@@ -41,7 +42,7 @@ function createMockAgentRunner(streamEvents: any[], eventDelay = 0) {
 // Mock SessionManager
 function createMockSessionManager() {
   return {
-    getOrCreateSession: vi.fn().mockResolvedValue({
+    getOrCreateSession: vi.fn().mockImplementation(async (_ch, _chId, _path, _tid, _meta, _name, userId) => ({
       id: 'test-session',
       channel: 'feishu',
       channelId: 'test-channel',
@@ -52,7 +53,8 @@ function createMockSessionManager() {
       isActive: true,
       createdAt: Date.now(),
       updatedAt: Date.now(),
-    }),
+      identity: userId === 'owner-123' ? { role: 'owner', mode: 'interactive' } : { role: 'guest', mode: 'interactive' },
+    })),
     getActiveSession: vi.fn().mockResolvedValue({
       id: 'test-session',
       channel: 'feishu',
@@ -106,9 +108,9 @@ describe('Idle Timeout with StreamIdleMonitor', () => {
   it('should not timeout when events arrive within idle window', async () => {
     // 事件间隔 50ms，空闲超时 200ms，不应超时
     const events = [
-      { type: 'text_delta', text: 'Hello ' },
-      { type: 'text_delta', text: 'World' },
-      { type: 'result', result: 'Hello World', subtype: 'success' },
+      { type: 'text', text: 'Hello ' },
+      { type: 'text', text: 'World' },
+      { type: 'complete', result: 'Hello World', subtype: 'success' },
     ];
 
     const runner = createMockAgentRunner(events, 50);
@@ -130,6 +132,7 @@ describe('Idle Timeout with StreamIdleMonitor', () => {
       sessionManager as any,
       config,
       messageCache as any,
+      new EventBus(),
     );
     processor.registerChannel(adapter);
 
@@ -179,6 +182,7 @@ describe('Idle Timeout with StreamIdleMonitor', () => {
       sessionManager as any,
       config,
       messageCache as any,
+      new EventBus(),
     );
     processor.registerChannel(adapter);
 
@@ -228,6 +232,7 @@ describe('Idle Timeout with StreamIdleMonitor', () => {
       sessionManager as any,
       config,
       messageCache as any,
+      new EventBus(),
     );
     processor.registerChannel(adapter);
 
@@ -264,11 +269,11 @@ describe('Idle Timeout with StreamIdleMonitor', () => {
     // 5个事件，每个间隔 300ms，空闲超时 400ms
     // 总时间 1500ms > 400ms，但每个事件间隔 < 400ms，不应超时
     const events = [
-      { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Read', input: { file_path: '/test' } }] } },
-      { type: 'text_delta', text: 'Reading ' },
-      { type: 'text_delta', text: 'file...' },
-      { type: 'text_delta', text: ' Done!' },
-      { type: 'result', result: 'Reading file... Done!', subtype: 'success' },
+      { type: 'tool_use', name: 'Read', input: { file_path: '/test' } },
+      { type: 'text', text: 'Reading ' },
+      { type: 'text', text: 'file...' },
+      { type: 'text', text: ' Done!' },
+      { type: 'complete', result: 'Reading file... Done!', subtype: 'success' },
     ];
 
     const runner = createMockAgentRunner(events, 300);
@@ -290,6 +295,7 @@ describe('Idle Timeout with StreamIdleMonitor', () => {
       sessionManager as any,
       config,
       messageCache as any,
+      new EventBus(),
     );
     processor.registerChannel(adapter);
 
@@ -312,8 +318,8 @@ describe('Idle Timeout with StreamIdleMonitor', () => {
     const hangPromise = new Promise<void>(r => { resolveHang = r; });
     let eventIndex = 0;
     const events = [
-      { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Bash', input: { command: 'npm test' } }] } },
-      { type: 'text_delta', text: 'Running...' },
+      { type: 'tool_use', name: 'Bash', input: { command: 'npm test' } },
+      { type: 'text', text: 'Running...' },
     ];
 
     const runner = createMockAgentRunner([], 0);
@@ -350,6 +356,7 @@ describe('Idle Timeout with StreamIdleMonitor', () => {
       sessionManager as any,
       config,
       messageCache as any,
+      new EventBus(),
     );
     processor.registerChannel(adapter);
 

@@ -1,8 +1,10 @@
 import { Config, ChannelAdapter, Session } from '../types.js';
 import { SessionManager } from './session-manager.js';
-import { AgentRunner } from './agent-runner.js';
+import { AgentRunner, hasModelSwitcher } from './agent-runner.js';
 import { MessageCache } from './message-cache.js';
 import { MessageProcessor } from './message-processor.js';
+import { EventBus } from './event-bus.js';
+import { PermissionGateway } from './permission.js';
 import { renameSession as sdkRenameSession, forkSession as sdkForkSession, listSessions as sdkListSessions } from '@anthropic-ai/claude-agent-sdk';
 import { MessageQueue } from './message-queue.js';
 import { saveConfig, resolvePaths, getPackageRoot } from '../config.js';
@@ -11,7 +13,6 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 
-const availableModels: string[] = ['opus', 'sonnet', 'haiku', 'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5-20251001'];
 const availableEfforts = ['low', 'medium', 'high', 'max'] as const;
 type Effort = typeof availableEfforts[number];
 
@@ -101,7 +102,7 @@ function formatIdleTime(ms: number): string {
 }
 
 // 支持的命令列表
-const commands = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/slist', '/session', '/rename', '/stop', '/clear', '/compact', '/repair', '/safe', '/fork', '/del'];
+const commands = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/slist', '/session', '/rename', '/stop', '/clear', '/compact', '/repair', '/safe', '/fork', '/del', '/perm'];
 
 // 命令别名映射
 const aliases: Record<string, string> = {
@@ -113,18 +114,20 @@ const aliases: Record<string, string> = {
 // 命令快速路径前缀（不进入消息队列的命令）
 // 注意：/clear, /compact, /safe 故意不在此列表中，它们需要进入队列触发中断机制
 // /stop 是快速命令：直接调用 agentRunner.interrupt()，不走队列（否则队列自动中断后 /stop 检测不到活跃任务）
-const quickCommandPrefixes = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/slist', '/session', '/rename', '/repair', '/fork', '/stop', '/del', '/p ', '/s ', '/name '];
+const quickCommandPrefixes = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/slist', '/session', '/rename', '/repair', '/fork', '/stop', '/del', '/perm', '/p ', '/s ', '/name '];
 
 export class CommandHandler {
   private adapters = new Map<string, ChannelAdapter>();
   private processor!: MessageProcessor;
   private messageQueue!: MessageQueue;
+  private permissionGateway?: PermissionGateway;
 
   constructor(
     private sessionManager: SessionManager,
     private agentRunner: AgentRunner,
     private config: Config,
     private messageCache: MessageCache,
+    private eventBus: EventBus,
   ) {}
 
   /** 项目列表快捷访问 */
@@ -150,7 +153,7 @@ export class CommandHandler {
 
   /** 从 session 提取话题回复选项 */
   private getThreadSendOpts(session: Session): { replyToMessageId: string; replyInThread: true } | undefined {
-    const rootId = session.metadata?.feishu?.rootId;
+    const rootId = session.metadata?.replyOpts?.rootId;
     return rootId ? { replyToMessageId: rootId, replyInThread: true } : undefined;
   }
 
@@ -174,6 +177,10 @@ export class CommandHandler {
 
   setMessageQueue(messageQueue: MessageQueue): void {
     this.messageQueue = messageQueue;
+  }
+
+  setPermissionGateway(gateway: PermissionGateway): void {
+    this.permissionGateway = gateway;
   }
 
   registerAdapter(adapter: ChannelAdapter): void {
@@ -211,16 +218,27 @@ export class CommandHandler {
       }
     }
 
-    // 权限检查：区分用户级命令和管理级命令
-    const { isOwner: checkOwner } = await import('../config.js');
+    if (normalizedContent !== content) {
+      logger.debug(`[CommandHandler] normalized: "${content}" -> "${normalizedContent}"`);
+    }
 
     // 话题内禁用部分命令
     if (threadId) {
       const threadBlocked = ['/new', '/slist', '/plist', '/bind', '/s', '/session', '/project', '/p', '/fork', '/del'];
       const isBlocked = threadBlocked.some(c => normalizedContent === c || normalizedContent.startsWith(c + ' '));
-      if (isBlocked) return '⚠️ 话题中不支持此命令';
+      if (isBlocked) {
+        return '⚠️ 话题中不支持此命令';
+      }
     }
-    const isAdmin = !userId || checkOwner(this.config, channel, userId);
+
+    // 权限检查：区分用户级命令和管理级命令
+    // 提前解析会话以获取 identity
+    const tempSession = await this.sessionManager.getOrCreateSession(
+      channel, channelId,
+      this.config.projects?.defaultPath || process.cwd(),
+      threadId, undefined, undefined, userId
+    );
+    const isAdmin = tempSession.identity?.role === 'owner';
 
     if (normalizedContent.startsWith('/')) {
       const userCommands = ['/slist', '/new', '/session', '/rename', '/name', '/status', '/help', '/del', '/s '];
@@ -297,19 +315,50 @@ export class CommandHandler {
 🤖 模型管理：
   /model [model] [effort] - 查看或切换模型/推理强度
 
+🔐 权限管理：
+  /perm <requestId> allow|deny - 审批权限请求
+
 ❓ 帮助：
   /help - 显示此帮助信息`;
+    }
+
+    // /perm 命令：权限审批（快速路径，不进入消息队列）
+    if (normalizedContent.startsWith('/perm')) {
+      const args = normalizedContent.slice(5).trim();
+      if (!args) {
+        return '用法: /perm <requestId> allow|deny';
+      }
+      const parts = args.split(/\s+/);
+      if (parts.length < 2) {
+        return '用法: /perm <requestId> allow|deny';
+      }
+      const [requestId, action] = parts;
+      if (action !== 'allow' && action !== 'deny') {
+        return `❌ 无效操作: ${action}\n用法: /perm <requestId> allow|deny`;
+      }
+      if (!this.permissionGateway) {
+        return '❌ 权限审批未启用';
+      }
+      const result = await this.ensureSession(channel, channelId, threadId);
+      if ('error' in result) return result.error;
+      const { session } = result;
+      const resolved = this.permissionGateway.resolvePermission(session.id, requestId, action === 'allow');
+      if (!resolved) {
+        return `❌ 权限请求 ${requestId} 不存在或已过期`;
+      }
+      return action === 'allow' ? `✓ 已批准 ${requestId}` : `✓ 已拒绝 ${requestId}`;
     }
 
     // /model 命令：查看或切换模型/推理强度
     if (normalizedContent.startsWith('/model')) {
       const args = normalizedContent.slice(6).trim();
+      const models = hasModelSwitcher(this.agentRunner) ? this.agentRunner.listModels() : [];
 
       if (!args) {
         const currentModel = this.agentRunner.getModel();
         const currentEffort = this.agentRunner.getEffort() || 'auto';
         const effortDisplay = currentEffort === 'auto' ? 'auto (SDK默认)' : `${currentEffort} ${effortBar(currentEffort)}`;
-        const modelList = availableModels.map(m => `- ${m}`).join('\n');
+        const modelList = models.map(m => `- ${m}`).join('\n');
         return `当前模型: ${currentModel}\n推理强度: ${effortDisplay}\n\n可用模型：\n${modelList}\n\n推理强度: ${availableEfforts.join(' / ')} / auto\n\n用法:\n  /model <model>           切换模型\n  /model <model> <effort>  切换模型+推理强度\n  /model <effort>          仅切换推理强度\n  /model auto              恢复SDK默认`;
       }
 
@@ -336,16 +385,16 @@ export class CommandHandler {
         // 单参数：模型 或 effort
         if ((availableEfforts as readonly string[]).includes(arg)) {
           newEffort = arg as Effort;
-        } else if (availableModels.includes(arg)) {
+        } else if (models.includes(arg)) {
           newModel = arg;
         } else {
-          const modelList = availableModels.map(m => `- ${m}`).join('\n');
+          const modelList = models.map(m => `- ${m}`).join('\n');
           return `❌ 无效参数: ${arg}\n\n可用模型：\n${modelList}\n\n推理强度: ${availableEfforts.join(' / ')}`;
         }
       } else {
         // 双参数：model effort
         const [modelArg, effortArg] = parts;
-        if (!availableModels.includes(modelArg)) {
+        if (!models.includes(modelArg)) {
           return `❌ 无效的模型ID: ${modelArg}`;
         }
         if (!(availableEfforts as readonly string[]).includes(effortArg)) {
@@ -369,6 +418,12 @@ export class CommandHandler {
       if (newModel) {
         updates.model = newModel;
         this.agentRunner.setModel(newModel);
+        this.eventBus.publish({
+          type: 'agent:model-changed',
+          sessionId: session.id,
+          model: newModel,
+          timestamp: Date.now()
+        });
         changes.push(`模型: ${newModel}`);
       }
 
@@ -583,6 +638,16 @@ export class CommandHandler {
         sessionName
       );
 
+      this.eventBus.publish({
+        type: 'session:created',
+        sessionId: newSession.id,
+        channel,
+        channelId,
+        projectPath,
+        name: sessionName,
+        timestamp: Date.now()
+      });
+
       if (session) {
         await this.agentRunner.closeSession(session.id);
       }
@@ -624,7 +689,7 @@ export class CommandHandler {
       let rootId: string | undefined;
       if (threadId) {
         const threadSession = await this.sessionManager.getOrCreateSession(channel, channelId, this.config.projects?.defaultPath || process.cwd(), threadId);
-        rootId = threadSession.metadata?.feishu?.rootId;
+        rootId = threadSession.metadata?.replyOpts?.rootId;
       }
       const restartInfo: Record<string, any> = {
         channel,
@@ -640,6 +705,8 @@ export class CommandHandler {
         stdio: 'ignore',
         env: { ...process.env, EVOLCLAW_HOME: resolvePaths().root }
       }).unref();
+
+      this.eventBus.publish({ type: 'system:restart', channel, channelId });
 
       setTimeout(() => {
         logger.info('[System] Restarting by user command...');
@@ -775,6 +842,15 @@ export class CommandHandler {
 
       const newSession = await this.sessionManager.switchProject(channel, channelId, projectPath);
 
+      this.eventBus.publish({
+        type: 'project:switched',
+        sessionId: newSession.id,
+        channel,
+        channelId,
+        projectPath,
+        timestamp: Date.now()
+      });
+
       const cachedEvents = this.messageCache.getEvents(newSession.id);
 
       const hasExistingSession = newSession.agentSessionId ? '（恢复已有会话）' : '（新建会话）';
@@ -820,6 +896,15 @@ export class CommandHandler {
       }
 
       const newSession = await this.sessionManager.switchProject(channel, channelId, projectPath);
+
+      this.eventBus.publish({
+        type: 'project:bound',
+        sessionId: newSession.id,
+        channel,
+        channelId,
+        projectPath,
+        timestamp: Date.now()
+      });
 
       const cachedEvents = this.messageCache.getEvents(newSession.id);
 
@@ -886,9 +971,6 @@ export class CommandHandler {
 
       const lines = [`当前项目 ${path.basename(session.projectPath)} 的会话列表:\n`];
 
-      const sessionKey = `${channel}-${channelId}`;
-      const isProcessing = this.messageQueue.isProcessing(sessionKey);
-
       if (currentProjectSessions.length > 0) {
         lines.push('【EvolClaw 会话】');
         for (let i = 0; i < currentProjectSessions.length; i++) {
@@ -903,8 +985,10 @@ export class CommandHandler {
           if (s.agentSessionId && !this.sessionManager.checkSessionFileExists(s.projectPath, s.agentSessionId)) {
             lines.push(`${prefix} ${num} ${threadTag}❌ ${name} ${uuid} - ${idleTime} [会话文件缺失]`);
           } else {
+            const sQueueKey = s.threadId ? s.id : `${channel}-${channelId}`;
+            const sIsProcessing = this.messageQueue.isProcessing(sQueueKey);
             let status = '[空闲]';
-            if (s.isActive && isProcessing) {
+            if (sIsProcessing) {
               status = '[处理中]';
             } else if (s.isActive) {
               status = '[活跃]';
@@ -975,6 +1059,7 @@ export class CommandHandler {
 
           if (cliSession) {
             const imported = await this.sessionManager.importCliSession(channel, channelId, projectPath, cliSession.uuid);
+            this.eventBus.publish({ type: 'session:imported', sessionId: imported.id, agentSessionId: cliSession.uuid, projectPath });
             const projectName = this.getProjectName(projectPath);
             return `✓ 已导入 CLI 会话: ${imported.name}\n  项目: ${projectName}\n  将继续之前的对话历史`;
           }
@@ -1013,6 +1098,8 @@ export class CommandHandler {
         return `❌ 切换会话失败`;
       }
 
+      this.eventBus.publish({ type: 'session:switched', sessionId: targetSession.id, fromSessionId: session.id, toSessionId: targetSession.id });
+
       const continueHint = lastInput ? '\n  将继续之前的对话历史' : '\n  当前会话未有发言';
       return `✓ 已切换到会话: ${targetSession.name || sessionName}${continueHint}${lastInputLine}`;
     }
@@ -1045,11 +1132,14 @@ export class CommandHandler {
           logger.warn(`[CommandHandler] SDK renameSession failed (continuing with db update):`, error);
         }
       }
+      const oldName = session.name || '(未命名)';
       const success = await this.sessionManager.renameSession(session.id, newName);
 
       if (!success) {
         return `❌ 重命名失败`;
       }
+
+      this.eventBus.publish({ type: 'session:renamed', sessionId: session.id, oldName, newName });
 
       return `✓ 已将当前会话重命名为: ${newName}`;
     }
@@ -1102,6 +1192,8 @@ export class CommandHandler {
         return `❌ 删除失败`;
       }
 
+      this.eventBus.publish({ type: 'session:deleted', sessionId: targetSession.id });
+
       await this.agentRunner.closeSession(targetSession.id);
 
       return `✓ 已删除会话: ${targetSession.name || sessionName}\n会话文件已保留，可通过 CLI 访问`;
@@ -1122,6 +1214,8 @@ export class CommandHandler {
       try {
         const forkResult = await sdkForkSession(session.agentSessionId, { dir: session.projectPath, title: forkName });
         const newSession = await this.sessionManager.createForkedSession(session, forkResult.sessionId, forkName);
+
+        this.eventBus.publish({ type: 'session:forked', sessionId: newSession.id, sourceSessionId: session.id, name: forkName });
 
         return `✅ 会话已分支: ${newSession.name}\n新会话已激活，可以继续对话\n\n使用 /slist 查看所有会话，/s <名称> 切换回原会话`;
       } catch (error) {
@@ -1149,6 +1243,7 @@ export class CommandHandler {
 
         if (!session.agentSessionId) {
           await this.sessionManager.resetHealthStatus(session.id);
+          this.eventBus.publish({ type: 'session:safe-mode-exited', sessionId: session.id, method: 'repair' });
           return `✓ 修复完成，已退出安全模式
 
 修复内容：
@@ -1166,6 +1261,7 @@ export class CommandHandler {
           await fsPromises.unlink(sessionFile);
           await this.sessionManager.updateAgentSessionId(session.channel, session.channelId, '');
           await this.sessionManager.resetHealthStatus(session.id);
+          this.eventBus.publish({ type: 'session:safe-mode-exited', sessionId: session.id, method: 'repair' });
 
           return `✓ 修复完成，已退出安全模式
 
@@ -1182,6 +1278,7 @@ ${healthCheck.issues.map((i: string) => `- ${i}`).join('\n')}
 
         if (healthCheck.issues.length > 0) {
           await this.sessionManager.resetHealthStatus(session.id);
+          this.eventBus.publish({ type: 'session:safe-mode-exited', sessionId: session.id, method: 'repair' });
           return `⚠️ 检测到问题：
 ${healthCheck.issues.map((i: string) => `- ${i}`).join('\n')}
 
@@ -1193,6 +1290,7 @@ ${healthCheck.issues.map((i: string) => `- ${i}`).join('\n')}
         }
 
         await this.sessionManager.resetHealthStatus(session.id);
+        this.eventBus.publish({ type: 'session:safe-mode-exited', sessionId: session.id, method: 'repair' });
         return `✓ 修复完成，已退出安全模式
 
 修复内容：
@@ -1214,6 +1312,8 @@ ${healthCheck.issues.map((i: string) => `- ${i}`).join('\n')}
       }
 
       await this.sessionManager.setSafeMode(session.id, true);
+
+      this.eventBus.publish({ type: 'session:safe-mode-entered', sessionId: session.id, reason: 'manual' });
 
       return `✓ 已进入安全模式
 

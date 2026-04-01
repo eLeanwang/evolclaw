@@ -6,13 +6,78 @@ import fs from 'fs';
 import os from 'os';
 import { MessageStream, ImageData } from './message-stream.js';
 import { logger } from '../utils/logger.js';
-import { canUseTool } from '../utils/permission.js';
+import { canUseTool } from '../utils/permission-utils.js';
 import { encodePath } from '../utils/platform.js';
+
+// ── 标准事件流（Gateway 消费的统一事件类型）──
+export type AgentEvent =
+  | { type: 'text'; text: string }
+  | { type: 'tool_use'; name: string; input: any }
+  | { type: 'tool_result'; name: string; result: any; isError?: boolean; error?: string }
+  | { type: 'compact'; preTokens: number }
+  | { type: 'task_progress'; summary?: string; toolUses?: number; durationMs?: number }
+  | { type: 'session_id'; sessionId: string }
+  | { type: 'complete'; result?: string; subtype?: string; isError?: boolean; errors?: string[]; durationMs?: number; costUsd?: number }
+  | { type: 'error'; error: string; errorType: 'context_too_long' | 'auth' | 'network' | 'unknown' };
+
+export interface QueryRequest {
+  sessionId: string;
+  prompt: string;
+  projectPath: string;
+  agentSessionId?: string;
+  images?: ImageData[];
+  systemPromptAppend?: string;
+}
+
+// ── 核心接口 ──
+export interface AgentRunnerInterface {
+  readonly name: string;
+  runQuery(request: QueryRequest): AsyncIterable<AgentEvent>;
+  interrupt(sessionKey: string): Promise<void>;
+  dispose?(): Promise<void>;
+}
+
+// ── 可选能力接口 ──
+export interface ModelSwitcher {
+  setModel(model: string): void;
+  getModel(): string;
+  listModels(): string[];
+}
+
+export interface Compactable {
+  compact(sessionId: string, agentSessionId: string, projectPath: string): Promise<boolean>;
+}
+
+export interface PermissionController {
+  setMode(mode: string): void;
+  getMode(): string;
+  listModes(): PermissionMode[];
+}
+
+export interface PermissionMode {
+  key: string;
+  nameZh: string;
+  description: string;
+}
+
+// ── 类型守卫 ──
+export function hasModelSwitcher(agent: any): agent is ModelSwitcher {
+  return typeof agent.setModel === 'function' && typeof agent.listModels === 'function';
+}
+
+export function hasPermissionController(agent: any): agent is PermissionController {
+  return typeof agent.setMode === 'function' && typeof agent.listModes === 'function';
+}
+
+export function hasCompact(agent: any): agent is Compactable {
+  return typeof agent.compact === 'function';
+}
 
 export class AgentRunner {
   private apiKey: string;
   private model: string;
   private effort?: 'low' | 'medium' | 'high' | 'max';
+  private permissionMode: string = 'default';
   private baseUrl?: string;
   private config?: Config;
   private activeSessions: Map<string, string> = new Map();
@@ -53,12 +118,40 @@ export class AgentRunner {
     return this.model;
   }
 
+  listModels(): string[] {
+    return ['opus', 'sonnet', 'haiku'];
+  }
+
   setEffort(effort: 'low' | 'medium' | 'high' | 'max' | undefined): void {
     this.effort = effort;
   }
 
   getEffort(): string | undefined {
     return this.effort;
+  }
+
+  // ── PermissionController 接口 ──
+
+  setMode(mode: string): void {
+    this.permissionMode = mode;
+  }
+
+  getMode(): string {
+    return this.permissionMode;
+  }
+
+  listModes(): PermissionMode[] {
+    return [
+      { key: 'default', nameZh: '默认', description: '仅允许安全工具（Read/Glob/Grep/WebSearch）' },
+      { key: 'approve', nameZh: '审批', description: '危险工具需人工审批（Bash/Write/Edit）' },
+      { key: 'trust', nameZh: '信任', description: '允许所有工具（不推荐）' },
+    ];
+  }
+
+  // ── Compactable 接口 ──
+
+  async compact(sessionId: string, agentSessionId: string, projectPath: string): Promise<boolean> {
+    return this.compactSession(sessionId, agentSessionId, projectPath);
   }
 
   private syncFromUserSettings(): void {
@@ -87,7 +180,81 @@ export class AgentRunner {
     this.onCompactStart = callback;
   }
 
-  async runQuery(sessionId: string, prompt: string, projectPath: string, initialClaudeSessionId?: string, images?: ImageData[], systemPromptAppend?: string, sessionManager?: any): Promise<AsyncIterable<any>> {
+  /**
+   * SDK 原始事件 → 标准 AgentEvent 转换
+   * 所有 SDK 特有的事件类型引用封装在此方法内
+   */
+  private async *transformStream(sdkStream: AsyncIterable<any>, sessionId: string): AsyncGenerator<AgentEvent> {
+    let hasTextDelta = false;
+    let lastSessionId: string | undefined;
+
+    for await (const event of sdkStream) {
+      // 提取 session_id（任意 SDK 事件都可能携带）
+      if (event.session_id && event.session_id !== lastSessionId) {
+        lastSessionId = event.session_id;
+        this.updateSessionId(sessionId, event.session_id);
+        yield { type: 'session_id', sessionId: event.session_id };
+      }
+
+      // text_delta → text
+      if (event.type === 'text_delta' && event.text) {
+        hasTextDelta = true;
+        yield { type: 'text', text: event.text };
+      }
+
+      // system: compact_boundary → compact
+      if (event.type === 'system' && event.subtype === 'compact_boundary') {
+        yield { type: 'compact', preTokens: event.compact_metadata?.pre_tokens || 0 };
+      }
+
+      // system: task_progress → task_progress
+      if (event.type === 'system' && event.subtype === 'task_progress') {
+        yield {
+          type: 'task_progress',
+          summary: event.summary,
+          toolUses: event.tool_uses,
+          durationMs: event.duration_ms,
+        };
+      }
+
+      // assistant: 提取 tool_use 和文本（仅无 text_delta 时提取文本）
+      if (event.type === 'assistant' && event.message?.content) {
+        for (const content of event.message.content) {
+          if (content.type === 'tool_use') {
+            yield { type: 'tool_use', name: content.name, input: content.input };
+          } else if (content.type === 'text' && content.text && !hasTextDelta) {
+            yield { type: 'text', text: content.text };
+          }
+        }
+      }
+
+      // tool_result → tool_result
+      if (event.type === 'tool_result') {
+        yield {
+          type: 'tool_result',
+          name: event.tool_name || '',
+          result: event.content,
+          isError: event.is_error,
+          error: event.error,
+        };
+      }
+
+      // result → complete
+      if (event.type === 'result') {
+        yield {
+          type: 'complete',
+          result: event.result,
+          subtype: event.subtype,
+          isError: event.is_error,
+          errors: event.errors,
+          durationMs: event.duration_ms,
+          costUsd: event.total_cost_usd,
+        };
+      }
+    }
+  }
+
+  async runQuery(sessionId: string, prompt: string, projectPath: string, initialClaudeSessionId?: string, images?: ImageData[], systemPromptAppend?: string, sessionManager?: any): Promise<AsyncIterable<AgentEvent>> {
     // 同步用户级配置到内存
     this.syncFromUserSettings();
 
@@ -265,20 +432,22 @@ export class AgentRunner {
     let lastError: any;
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        let queryStream;
+        let sdkStream;
         if (images && images.length > 0) {
           logger.debug('[AgentRunner] Creating query with images, images:', images.length);
           logger.debug('[AgentRunner] Skipping resume for image message to avoid history conflict');
           const stream = new MessageStream();
           stream.push(prompt, images);
           stream.end();
-          queryStream = createQuery(stream);
+          sdkStream = createQuery(stream);
         } else {
           logger.debug('[AgentRunner] Creating query with text only, agentSessionId:', initialClaudeSessionId);
-          queryStream = createQuery(prompt, agentSessionId);
+          sdkStream = createQuery(prompt, agentSessionId);
         }
-        this.activeStreams.set(sessionId, queryStream);
-        return queryStream;
+        // 保留原始 SDK stream 用于 interrupt
+        this.activeStreams.set(sessionId, sdkStream);
+        // 返回标准 AgentEvent 流
+        return this.transformStream(sdkStream, sessionId);
       } catch (error) {
         lastError = error;
         if (attempt < 2) {

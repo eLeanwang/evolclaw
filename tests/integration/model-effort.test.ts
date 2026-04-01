@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { AgentRunner } from '../../src/core/agent-runner.js';
 import { CommandHandler } from '../../src/core/command-handler.js';
+import { EventBus } from '../../src/core/event-bus.js';
 import { Config } from '../../src/types.js';
 
 function makeRunner(effort?: string) {
@@ -18,16 +19,19 @@ function makeMockSessionManager() {
     getActiveSession: vi.fn().mockResolvedValue({
       id: 'test-session', channel: 'test', channelId: 'test-ch',
       projectPath: '/tmp', isActive: true,
+      identity: { role: 'owner', mode: 'interactive' },
     }),
     getOrCreateSession: vi.fn().mockResolvedValue({
       id: 'test-session', channel: 'test', channelId: 'test-ch',
       projectPath: '/tmp', isActive: true,
+      identity: { role: 'owner', mode: 'interactive' },
     }),
   };
 }
 
 function makeHandler(runner: AgentRunner, config: Config) {
-  return new CommandHandler(makeMockSessionManager() as any, runner, config, null as any);
+  const eventBus = new EventBus();
+  return new CommandHandler(makeMockSessionManager() as any, runner, config, null as any, eventBus);
 }
 
 async function cmd(handler: CommandHandler, input: string) {

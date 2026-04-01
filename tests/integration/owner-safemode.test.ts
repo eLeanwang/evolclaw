@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { MessageProcessor } from '../../src/core/message-processor.js';
+import { EventBus } from '../../src/core/event-bus.js';
 import type { Config, Message, ChannelAdapter } from '../../src/types.js';
 
 // === Mock Factories ===
@@ -38,12 +39,13 @@ function createMockAgentRunner(streamEvents: any[], eventDelay = 0) {
 
 function createMockSessionManager(overrides: Record<string, any> = {}) {
   return {
-    getOrCreateSession: vi.fn().mockResolvedValue({
+    getOrCreateSession: vi.fn().mockImplementation(async (_ch, _chId, _path, _tid, _meta, _name, userId) => ({
       id: 'test-session', channel: 'feishu', channelId: 'test-channel',
       projectPath: '/tmp/test-project', threadId: '', agentType: 'claude',
       agentSessionId: 'test-claude-session',
       isActive: true, createdAt: Date.now(), updatedAt: Date.now(),
-    }),
+      identity: userId === 'owner-123' ? { role: 'owner', mode: 'interactive' } : { role: 'guest', mode: 'interactive' },
+    })),
     getActiveSession: vi.fn().mockResolvedValue({
       id: 'test-session', channel: 'feishu', channelId: 'test-channel',
       projectPath: '/tmp/test-project', threadId: '', agentType: 'claude',
@@ -125,7 +127,7 @@ describe('Owner SafeMode & QuietMode', () => {
     const adapter = createMockAdapter();
     const config = createConfig('owner-123');
 
-    const processor = new MessageProcessor(runner as any, sessionManager as any, config, createMockMessageCache() as any);
+    const processor = new MessageProcessor(runner as any, sessionManager as any, config, createMockMessageCache() as any, new EventBus());
     processor.registerChannel(adapter);
 
     // 非主人单聊
@@ -144,7 +146,7 @@ describe('Owner SafeMode & QuietMode', () => {
     const adapter = createMockAdapter();
     const config = createConfig('owner-123');
 
-    const processor = new MessageProcessor(runner as any, sessionManager as any, config, createMockMessageCache() as any);
+    const processor = new MessageProcessor(runner as any, sessionManager as any, config, createMockMessageCache() as any, new EventBus());
     processor.registerChannel(adapter);
 
     // 主人群聊
@@ -170,7 +172,7 @@ describe('Owner SafeMode & QuietMode', () => {
     const adapter = createMockAdapter();
     const config = createConfig('owner-123');
 
-    const processor = new MessageProcessor(runner as any, sessionManager as any, config, createMockMessageCache() as any);
+    const processor = new MessageProcessor(runner as any, sessionManager as any, config, createMockMessageCache() as any, new EventBus());
     processor.registerChannel(adapter);
 
     const promise = processor.processMessage(createMessage({ userId: 'owner-123' })).catch(e => e);
@@ -186,8 +188,8 @@ describe('Owner SafeMode & QuietMode', () => {
 
   it('should append safe mode hint after successful reply when in safe mode', async () => {
     const events = [
-      { type: 'text_delta', text: 'Hello' },
-      { type: 'result', result: 'Hello', subtype: 'success' },
+      { type: 'text', text: 'Hello' },
+      { type: 'complete', result: 'Hello', subtype: 'success' },
     ];
     const runner = createMockAgentRunner(events, 50);
     const sessionManager = createMockSessionManager({
@@ -198,7 +200,7 @@ describe('Owner SafeMode & QuietMode', () => {
     const adapter = createMockAdapter();
     const config = createConfig('owner-123');
 
-    const processor = new MessageProcessor(runner as any, sessionManager as any, config, createMockMessageCache() as any);
+    const processor = new MessageProcessor(runner as any, sessionManager as any, config, createMockMessageCache() as any, new EventBus());
     processor.registerChannel(adapter);
 
     const promise = processor.processMessage(createMessage({ userId: 'owner-123' }));
@@ -219,7 +221,7 @@ describe('Owner SafeMode & QuietMode', () => {
     const adapter = createMockAdapter();
     const config = createConfig('owner-123');
 
-    const processor = new MessageProcessor(runner as any, sessionManager as any, config, createMockMessageCache() as any);
+    const processor = new MessageProcessor(runner as any, sessionManager as any, config, createMockMessageCache() as any, new EventBus());
     processor.registerChannel(adapter);
 
     const promise = processor.processMessage(createMessage({ userId: 'owner-123' })).catch(e => e);
@@ -238,7 +240,7 @@ describe('Owner SafeMode & QuietMode', () => {
     const adapter = createMockAdapter();
     const config = createConfig('owner-123');
 
-    const processor = new MessageProcessor(runner as any, sessionManager as any, config, createMockMessageCache() as any);
+    const processor = new MessageProcessor(runner as any, sessionManager as any, config, createMockMessageCache() as any, new EventBus());
     processor.registerChannel(adapter);
 
     const promise = processor.processMessage(createMessage({ userId: 'stranger-456' })).catch(e => e);
@@ -259,7 +261,7 @@ describe('Owner SafeMode & QuietMode', () => {
     // 非主人：quietMode，notify/warn 静默，只有 kill 发一条简短消息
     const config = createConfig('owner-123');
 
-    const processor = new MessageProcessor(runner as any, sessionManager as any, config, createMockMessageCache() as any);
+    const processor = new MessageProcessor(runner as any, sessionManager as any, config, createMockMessageCache() as any, new EventBus());
     processor.registerChannel(adapter);
 
     const promise = processor.processMessage(createMessage({ userId: 'stranger-456' })).catch(e => e);

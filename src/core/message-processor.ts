@@ -1,13 +1,14 @@
 import path from 'path';
 import fs from 'fs';
-import { AgentRunner } from './agent-runner.js';
+import { AgentRunner, hasCompact, AgentEvent } from './agent-runner.js';
 import { SessionManager } from './session-manager.js';
 import { StreamFlusher } from '../utils/stream-flusher.js';
 import { MessageCache } from './message-cache.js';
 import { StreamIdleMonitor } from '../utils/stream-idle-monitor.js';
 import { logger } from '../utils/logger.js';
 import { getErrorMessage, classifyError, ErrorType } from '../utils/error-utils.js';
-import { isOwner } from '../config.js';
+import { EventBus } from './event-bus.js';
+import { summarizeToolInput } from '../utils/permission-utils.js';
 import type { Message, Config, Session, ChannelAdapter, ChannelOptions, CommandHandler } from '../types.js';
 
 /**
@@ -34,6 +35,7 @@ export class MessageProcessor {
     private sessionManager: SessionManager,
     private config: Config,
     private messageCache: MessageCache,
+    private eventBus: EventBus,
     private commandHandler?: CommandHandler
   ) {}
 
@@ -45,9 +47,19 @@ export class MessageProcessor {
   }
 
   /**
+   * 获取渠道适配器
+   */
+  getAdapter(channelName: string): ChannelAdapter | undefined {
+    return this.channels.get(channelName)?.adapter;
+  }
+
+  /**
    * 处理 compact 开始事件
    */
-  handleCompactStart(): void {
+  handleCompactStart(sessionId?: string): void {
+    if (sessionId) {
+      this.eventBus.publish({ type: 'agent:compact-start', sessionId });
+    }
     if (this.currentFlusher && !this.currentIsGroup && !this.shouldSuppressActivities) {
       this.currentFlusher.addActivity('⏳ 会话压缩中...');
     }
@@ -63,9 +75,20 @@ export class MessageProcessor {
     const streamKey = `${message.channel}-${message.channelId}`;
     const channelInfo = this.channels.get(message.channel);
 
+    // 提前解析会话以获取 identity
+    const tempSession = await this.sessionManager.getOrCreateSession(
+      message.channel,
+      message.channelId,
+      this.config.projects?.defaultPath || process.cwd(),
+      message.threadId,
+      undefined,
+      undefined,
+      message.userId
+    );
+    const isOwnerUser = tempSession.identity?.role === 'owner';
+
     const monitorEnabled = this.config.idleMonitor?.enabled !== false;
     const safeModeThreshold = this.config.idleMonitor?.safeModeThreshold ?? 3;
-    const isOwnerUser = isOwner(this.config, message.channel, message.userId || '');
     // 非主人（群聊或单聊）：空闲监控静默/简短
     const quietMode = isGroup || !isOwnerUser;
 
@@ -99,6 +122,7 @@ export class MessageProcessor {
         while (result) {
           if (result.action === 'kill') {
             logger.warn(`[MessageProcessor] Idle monitor: kill after ${result.idleSec}s idle, stream: ${streamKey}`);
+            this.eventBus.publish({ type: 'agent:idle-timeout', sessionId: streamKey, idleSec: result.idleSec });
             // 先发送诊断信息，让用户知道发生了什么
             if (channelInfo) {
               try {
@@ -177,7 +201,7 @@ export class MessageProcessor {
 
   /** 从 session 提取话题回复选项 */
   private getThreadSendOpts(session: Session): { replyToMessageId: string; replyInThread: true } | undefined {
-    const rootId = session.metadata?.feishu?.rootId;
+    const rootId = session.metadata?.replyOpts?.rootId;
     return rootId ? { replyToMessageId: rootId, replyInThread: true } : undefined;
   }
 
@@ -200,6 +224,7 @@ export class MessageProcessor {
     if (consecutiveErrors >= safeModeThreshold && !health.safeMode) {
       await this.sessionManager.setSafeMode(session.id, true);
       logger.warn(`[MessageProcessor] Session ${session.id} entered safe mode after ${consecutiveErrors} errors`);
+      this.eventBus.publish({ type: 'session:safe-mode-entered', sessionId: session.id, consecutiveErrors });
 
       const suggestions = isThread
         ? `1. /repair - 检查并修复会话（推荐，保留历史）\n2. /clear - 清空会话历史\n3. /status - 查看详细状态`
@@ -244,8 +269,7 @@ ${suggestions}`,
         if (cmdResult) {
           // 话题消息：通过 rootId 回复到话题内
           const session = message.threadId ? await this.sessionManager.getOrCreateSession(message.channel, message.channelId, this.config.projects?.defaultPath || process.cwd(), message.threadId) : undefined;
-          const rootId = session?.metadata?.feishu?.rootId;
-          const sendOpts = rootId ? { replyToMessageId: rootId, replyInThread: true } : undefined;
+          const sendOpts = session ? this.getThreadSendOpts(session) : undefined;
           await adapter.sendText(message.channelId, cmdResult, sendOpts);
           return;
         }
@@ -264,11 +288,22 @@ ${suggestions}`,
         status: 'received'
       });
 
+      this.eventBus.publish({
+        type: 'message:received',
+        sessionId: session.id,
+        channel: message.channel,
+        channelId: message.channelId,
+        content: message.content,
+        timestamp: Date.now()
+      });
+
       const imageInfo = message.images && message.images.length > 0 ? ` [${message.images.length} image(s)]` : '';
       const modeInfo = isBackground ? ' [后台]' : '';
       logger.info(`[${message.channel}] ${message.channelId}: ${message.content}${imageInfo}${modeInfo}`);
 
       // 记录开始处理
+      this.eventBus.publish({ type: 'message:processing', sessionId: session.id });
+
       logger.message({
         msgId: messageId,
         sessionId: session.id,
@@ -290,7 +325,7 @@ ${suggestions}`,
             const opts: { title?: string; replyToMessageId?: string; mentionUserIds?: string[]; replyInThread?: boolean } = {};
             if (isFinal) opts.title = '最终回复:';
             // 话题会话：所有回复指向 rootId + reply_in_thread（确保消息进入话题）
-            const rootId = session.metadata?.feishu?.rootId;
+            const rootId = session.metadata?.replyOpts?.rootId;
             if (rootId) {
               opts.replyToMessageId = rootId;
               opts.replyInThread = true;
@@ -329,21 +364,17 @@ ${suggestions}`,
         await this.processEventStream(
           stream,
           session,
-          message.channelId,
-          adapter,
-          options,
           flusher,
-          isBackground,
           resetTimer,
           shouldSuppress
         );
       } catch (error) {
-        if (classifyError(error) === ErrorType.CONTEXT_TOO_LONG && session.agentSessionId) {
+        if (classifyError(error) === ErrorType.CONTEXT_TOO_LONG && session.agentSessionId && hasCompact(this.agentRunner)) {
           // 尝试 compact 压缩会话
           flusher.addActivity('⚠️ 上下文过长，正在压缩会话...');
           await flusher.flush();
 
-          const compacted = await this.agentRunner.compactSession(
+          const compacted = await this.agentRunner.compact(
             session.id, session.agentSessionId, absoluteProjectPath
           );
 
@@ -364,11 +395,7 @@ ${suggestions}`,
             await this.processEventStream(
               retryStream,
               session,
-              message.channelId,
-              adapter,
-              options,
               flusher,
-              isBackground,
               resetTimer,
               shouldSuppress
             );
@@ -406,6 +433,7 @@ ${suggestions}`,
           logger.info(`[${adapter.name}] Sending file: ${resolvedPath}`);
           try {
             await adapter.sendFile(message.channelId, resolvedPath);
+            this.eventBus.publish({ type: 'agent:file-sent', sessionId: session.id, filePath: resolvedPath, channel: message.channel });
           } catch (error) {
             logger.error(`[${adapter.name}] Failed to send file: ${resolvedPath}`, error);
             await adapter.sendText(message.channelId, `❌ 文件发送失败: ${filePath}`, this.getThreadSendOpts(session));
@@ -430,6 +458,15 @@ ${suggestions}`,
 
       // 记录成功响应（重置错误计数）
       await this.sessionManager.recordSuccess(session.id);
+
+      this.eventBus.publish({
+        type: 'message:completed',
+        sessionId: session.id,
+        channel: message.channel,
+        channelId: message.channelId,
+        durationMs: Date.now() - startTime,
+        timestamp: Date.now()
+      });
 
       const isFinallyBackground = await this.isBackgroundSession(session, message.channel, message.channelId);
 
@@ -459,6 +496,16 @@ ${suggestions}`,
       });
     } catch (error) {
       logger.error(`[${message.channel}] Error:`, error);
+
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      const errorType = classifyError(error);
+
+      this.eventBus.publish({
+        type: 'message:error',
+        sessionId: message.channelId,
+        error: errorMsg,
+        errorType: String(errorType)
+      });
 
       // 记录处理失败
       logger.message({
@@ -501,9 +548,9 @@ ${suggestions}`,
     session: Session;
     absoluteProjectPath: string;
   }> {
-    // 话题会话：传入 rootId metadata（首条消息的 messageId 作为 rootId）
+    // 话题会话：首条消息的 messageId 作为 rootId，存入 replyOpts
     const metadata = message.threadId && message.messageId
-      ? { feishu: { rootId: message.messageId } }
+      ? { replyOpts: { rootId: message.messageId } }
       : undefined;
 
     const session = await this.sessionManager.getOrCreateSession(
@@ -522,141 +569,135 @@ ${suggestions}`,
   }
 
   /**
-   * 处理事件流
+   * 处理标准事件流（AgentEvent）
+   *
+   * 此方法只消费标准 AgentEvent 类型，不引用任何 SDK 特有事件。
+   * SDK 事件 → AgentEvent 的转换在 AgentRunner.transformStream() 中完成。
    */
   private async processEventStream(
-    stream: AsyncIterable<any>,
+    stream: AsyncIterable<AgentEvent>,
     session: Session,
-    channelId: string,
-    adapter: ChannelAdapter,
-    options: ChannelOptions | undefined,
     flusher: StreamFlusher,
-    isBackground: boolean,
     resetTimer: (eventType?: string, toolName?: string) => void,
     shouldSuppress: () => boolean
   ): Promise<void> {
-    let hasTextDelta = false;
     let hasReceivedText = false;
-
-    let lastSessionId: string | undefined;
 
     try {
       for await (const event of stream) {
-      // 每收到事件重置空闲超时，传入事件类型和工具名
-      const toolName = event.type === 'assistant'
-        ? event.message?.content?.find((c: any) => c.type === 'tool_use')?.name
-        : undefined;
+      // 每收到事件重置空闲超时
+      const toolName = event.type === 'tool_use' ? event.name : undefined;
       resetTimer(event.type, toolName);
 
-      // 记录所有事件类型（INFO级别，便于诊断）
-      logger.info(`[MessageProcessor] Event: type=${event.type}, subtype=${event.subtype || 'none'}`);
+      // 记录所有事件类型
+      logger.info(`[MessageProcessor] Event: type=${event.type}`);
 
-      // 提取 session_id（只在首次或变化时更新）
-      if (event.session_id && event.session_id !== lastSessionId) {
-        logger.info(`[MessageProcessor] Extracted session_id: ${event.session_id} for session: ${session.id}`);
-        this.agentRunner.updateSessionId(session.id, event.session_id);
-        lastSessionId = event.session_id;
+      // session_id 已在 AgentRunner.transformStream 中处理，此处仅记录
+      if (event.type === 'session_id') {
+        logger.info(`[MessageProcessor] Session ID updated: ${event.sessionId} for session: ${session.id}`);
+        continue;
       }
 
       const isCurrentlyBackground = await this.isBackgroundSession(session, session.channel, session.channelId);
 
       // === 前台任务：正常处理所有事件 ===
       if (!isCurrentlyBackground) {
-        // 流式文本事件（抑制时跳过，只累积到 allText）
-        if (event.type === 'text_delta' && event.text) {
-          hasTextDelta = true;
+        // 流式文本
+        if (event.type === 'text') {
           hasReceivedText = true;
+          this.eventBus.publish({ type: 'message:text', sessionId: session.id, text: event.text, isFinal: false });
           if (!shouldSuppress()) {
             flusher.addText(event.text);
           }
         }
 
-        // 系统事件：compact_boundary（群聊时静默）
-        if (event.type === 'system' && event.subtype === 'compact_boundary') {
+        // compact 完成
+        if (event.type === 'compact') {
+          this.eventBus.publish({ type: 'agent:compact-complete', sessionId: session.id, preTokens: event.preTokens });
           if (!this.currentIsGroup && !shouldSuppress()) {
-            const preTokens = event.compact_metadata?.pre_tokens || 0;
-            flusher.addActivity(`💡 会话压缩完成，继续执行...（压缩前 tokens: ${preTokens}）`);
+            flusher.addActivity(`💡 会话压缩完成，继续执行...（压缩前 tokens: ${event.preTokens}）`);
           }
         }
 
-        // 系统事件：task_progress（子任务进度）
-        if (event.type === 'system' && event.subtype === 'task_progress') {
-          const tools = event.tool_uses ?? 0;
-          const duration = event.duration_ms ? `${Math.round(event.duration_ms / 1000)}s` : '';
-          const summary = event.summary;
+        // 子任务进度
+        if (event.type === 'task_progress') {
+          const tools = event.toolUses ?? 0;
+          const duration = event.durationMs ? `${Math.round(event.durationMs / 1000)}s` : '';
           const stats = [tools > 0 ? `${tools}次工具调用` : '', duration].filter(Boolean).join(', ');
 
-          if (summary && !shouldSuppress()) {
-            flusher.addActivity(`⏳ 子任务: ${summary}${stats ? ` (${stats})` : ''}`);
+          if (event.summary && !shouldSuppress()) {
+            flusher.addActivity(`⏳ 子任务: ${event.summary}${stats ? ` (${stats})` : ''}`);
           } else if (stats && !shouldSuppress()) {
             flusher.addActivity(`⏳ 子任务进行中: ${stats}`);
           }
         }
 
-        // Assistant 事件：提取工具调用和文本内容
-        if (event.type === 'assistant' && event.message?.content) {
-          for (const content of event.message.content) {
-            if (content.type === 'tool_use') {
-              if (!shouldSuppress()) {
-                const desc = this.formatToolDescription(content);
-                flusher.addActivity(`🔧 ${content.name}${desc ? ': ' + desc : ''}`);
-              }
-            } else if (content.type === 'text' && content.text && !hasTextDelta) {
-              // 仅在没有 text_delta 事件时从 assistant 事件提取文本，避免重复
-              hasReceivedText = true;
-              if (!shouldSuppress()) {
-                flusher.addTextBlock(content.text);
-              }
-            }
+        // 工具调用
+        if (event.type === 'tool_use') {
+          this.eventBus.publish({
+            type: 'tool:use',
+            sessionId: session.id,
+            toolName: event.name,
+            input: event.input,
+            timestamp: Date.now()
+          });
+          if (!shouldSuppress()) {
+            const desc = summarizeToolInput(event.name, event.input || {});
+            flusher.addActivity(`🔧 ${event.name}${desc ? ': ' + desc : ''}`);
           }
         }
 
-        // 工具结果事件：显示失败信息（包括权限拒绝、执行失败等所有场景）
+        // 工具结果
         if (event.type === 'tool_result') {
-          logger.debug(`[MessageProcessor] tool_result: is_error=${event.is_error}, error=${event.error}, content=${typeof event.content}`);
+          logger.debug(`[MessageProcessor] tool_result: name=${event.name}, is_error=${event.isError}`);
 
-          if (event.is_error && !shouldSuppress()) {
-            const toolName = event.tool_name || '工具';
-            const errorMsg = event.error || (typeof event.content === 'string' ? event.content : JSON.stringify(event.content)) || '执行失败';
-            flusher.addActivity(`⚠️ ${toolName}: ${errorMsg}`);
+          this.eventBus.publish({
+            type: 'tool:result',
+            sessionId: session.id,
+            toolName: event.name,
+            isError: event.isError,
+            content: event.result,
+            timestamp: Date.now()
+          });
+
+          if (event.isError && !shouldSuppress()) {
+            const errorMsg = event.error || (typeof event.result === 'string' ? event.result : JSON.stringify(event.result)) || '执行失败';
+            flusher.addActivity(`⚠️ ${event.name || '工具'}: ${errorMsg}`);
           }
         }
 
-        // Result 事件：最终输出
-        if (event.type === 'result' && event.result) {
-          logger.debug(`[MessageProcessor] result event: hasReceivedText=${hasReceivedText}, shouldSuppress=${shouldSuppress()}, result="${event.result}"`);
+        // 完成事件
+        if (event.type === 'complete' && event.result) {
+          logger.debug(`[MessageProcessor] complete event: hasReceivedText=${hasReceivedText}, shouldSuppress=${shouldSuppress()}`);
 
           if (shouldSuppress()) {
-            // 抑制模式：直接发送 result（跳过中间输出）
             flusher.addText(event.result);
           } else if (!hasReceivedText) {
-            // 非抑制模式 + 无流式文本：使用 result 作为兜底
             flusher.addText(event.result);
           }
-          // 非抑制模式 + 有流式文本：已通过 text_delta 累积，无需再添加
 
-          await flusher.flush(true);  // isFinal=true 标记最终输出
+          await flusher.flush(true);
         }
 
         continue;
       }
 
-      // === 后台任务：只处理 result 事件，仅缓存不发送 ===
-      if (event.type !== 'result') {
+      // === 后台任务：只处理 complete 事件，仅缓存不发送 ===
+      if (event.type !== 'complete') {
         continue;
       }
 
       if (event.subtype === 'success') {
         this.messageCache.addEvent(session.id, {
           type: 'completed',
-          message: event.result,
+          message: event.result || '',
           timestamp: Date.now(),
           metadata: {
-            duration: event.duration_ms,
-            cost: event.total_cost_usd
+            duration: event.durationMs,
+            cost: event.costUsd
           }
         });
-      } else if (event.is_error === true) {
+      } else if (event.isError === true) {
         this.messageCache.addEvent(session.id, {
           type: 'error',
           message: event.errors?.join('\n') || '未知错误',
@@ -668,32 +709,12 @@ ${suggestions}`,
       }
     }
     } catch (error) {
-      // 捕获 SDK 进程崩溃或流迭代错误
       logger.error('[MessageProcessor] Stream processing error:', error);
       if (error instanceof Error && error.message.includes('process exited')) {
         flusher.addActivity('❌ Claude Code 进程异常退出，请重试');
       }
-      throw error; // 重新抛出，让外层处理
+      throw error;
     }
-  }
-
-  /**
-   * 格式化工具描述（通用）
-   */
-  private formatToolDescription(toolUse: {
-    name: string;
-    input: Record<string, any>;
-  }): string {
-    const input = toolUse.input || {};
-    return (
-      input.description ||
-      input.file_path ||
-      input.pattern ||
-      (typeof input.command === 'string' ? input.command.substring(0, 80) : undefined) ||
-      (typeof input.prompt === 'string' ? input.prompt.substring(0, 80) : undefined) ||
-      (typeof input.query === 'string' ? input.query.substring(0, 80) : undefined) ||
-      ''
-    );
   }
 
   /**

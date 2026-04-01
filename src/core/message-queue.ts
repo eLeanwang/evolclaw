@@ -1,6 +1,7 @@
 import { Message } from '../types.js';
 import path from 'path';
 import { logger } from '../utils/logger.js';
+import type { EventBus } from './event-bus.js';
 
 type MessageHandler = (message: Message) => Promise<void>;
 
@@ -18,6 +19,9 @@ export class MessageQueue {
   private currentSessionKey?: string;
   private currentProjectPath?: string;
   private interruptCallback?: (sessionKey: string) => Promise<void>;
+  private eventBus?: EventBus;
+  private recentMessageIds = new Set<string>();
+  private readonly DEDUP_WINDOW = 60_000; // 1 分钟窗口
 
   constructor(handler: MessageHandler) {
     this.handler = handler;
@@ -27,11 +31,29 @@ export class MessageQueue {
     this.interruptCallback = callback;
   }
 
+  setEventBus(eventBus: EventBus): void {
+    this.eventBus = eventBus;
+  }
+
+  /**
+   * 检查消息是否应该处理（去重）
+   */
+  private shouldProcess(message: Message): boolean {
+    if (!message.messageId) return true; // 无 ID 的消息不去重
+    if (this.recentMessageIds.has(message.messageId)) {
+      logger.debug(`[Queue] Duplicate message ${message.messageId}, skipping`);
+      return false;
+    }
+    this.recentMessageIds.add(message.messageId);
+    setTimeout(() => this.recentMessageIds.delete(message.messageId!), this.DEDUP_WINDOW);
+    return true;
+  }
+
   /**
    * 检查队列 key 是否属于指定 sessionKey
    */
   private matchesSession(key: string, sessionKey: string): boolean {
-    return key.startsWith(sessionKey + '-');
+    return key.startsWith(sessionKey + '::');
   }
 
   /**
@@ -39,10 +61,15 @@ export class MessageQueue {
    */
   private getQueueKey(sessionKey: string, projectPath: string): string {
     const projectName = path.basename(projectPath);
-    return `${sessionKey}-${projectName}`;
+    return `${sessionKey}::${projectName}`;
   }
 
   async enqueue(sessionKey: string, message: Message, projectPath: string): Promise<void> {
+    // 消息去重检查
+    if (!this.shouldProcess(message)) {
+      return Promise.resolve();
+    }
+
     const queueKey = this.getQueueKey(sessionKey, projectPath);
     logger.debug(`[Queue] Enqueuing message for ${queueKey}`);
 
@@ -56,6 +83,7 @@ export class MessageQueue {
       // 如果正在处理，触发中断
       if (this.processing.has(queueKey)) {
         logger.debug(`[Queue] ${queueKey} is processing, triggering interrupt`);
+        this.eventBus?.publish({ type: 'message:interrupted', sessionId: sessionKey, reason: 'new_message' });
         if (this.interruptCallback) {
           this.interruptCallback(sessionKey).catch(() => {});
         }
