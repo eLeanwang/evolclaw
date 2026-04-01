@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { AgentRunner } from '../../src/core/agent-runner.js';
+import { AgentRunner } from '../../src/agents/claude-runner.js';
 import { Config } from '../../src/types.js';
 
 // Mock SDK query to capture options

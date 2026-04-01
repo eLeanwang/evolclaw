@@ -1,16 +1,17 @@
 import { loadConfig, ensureDataDirs, resolvePaths, resolveAnthropicConfig, isOwner } from './config.js';
 import { SessionManager } from './core/session-manager.js';
-import { AgentRunner } from './core/agent-runner.js';
-import { FeishuChannel } from './channels/feishu.js';
-import { AUNChannel } from './channels/aun.js';
-import { WechatChannel } from './channels/wechat.js';
+import { ClaudeAgentPlugin } from './agents/claude-runner.js';
+import { FeishuChannelPlugin } from './channels/feishu.js';
+import { WechatChannelPlugin } from './channels/wechat.js';
+import { AUNChannelPlugin } from './channels/aun.js';
 import { MessageProcessor } from './core/message-processor.js';
 import { MessageQueue } from './core/message-queue.js';
 import { MessageCache } from './core/message-cache.js';
 import { CommandHandler } from './core/command-handler.js';
-import { ChannelRegistry, AgentRegistry } from './core/registry.js';
 import { EventBus } from './core/event-bus.js';
-import { ChannelAdapter, ChannelOptions } from './types.js';
+import { ChannelLoader } from './core/channel-loader.js';
+import { AgentLoader } from './core/agent-loader.js';
+import { ChannelAdapter } from './types.js';
 import { logger } from './utils/logger.js';
 import path from 'path';
 import fs from 'fs';
@@ -59,28 +60,17 @@ async function main() {
   });
   logger.info('✓ Database initialized');
 
-  // 插件注册
-  const channelRegistry = new ChannelRegistry();
-  channelRegistry.register('feishu', (cfg) => new FeishuChannel(cfg));
-  channelRegistry.register('wechat', (cfg) => new WechatChannel(cfg));
-  channelRegistry.register('aun', (cfg) => new AUNChannel(cfg));
+  // Agent 插件系统
+  const agentLoader = new AgentLoader();
+  agentLoader.register(new ClaudeAgentPlugin());
 
-  const agentRegistry = new AgentRegistry();
-  agentRegistry.register('claude', (cfg) => new AgentRunner(cfg.apiKey, cfg.model, cfg.onSessionIdUpdate, cfg.baseUrl, cfg.config));
-
-  // 初始化 Agent Runner（带持久化回调）
-  const agentRunner = new AgentRunner(
-    anthropic.apiKey,
-    anthropic.model,
-    async (sessionId, agentSessionId) => {
+  const agentInstances = agentLoader.createAll(config, {
+    onSessionIdUpdate: async (sessionId: string, agentSessionId: string) => {
       await sessionManager.updateAgentSessionIdBySessionId(sessionId, agentSessionId);
     },
-    anthropic.baseUrl,
-    config
-  );
-  if (anthropic.effort) {
-    agentRunner.setEffort(anthropic.effort);
-  }
+  });
+
+  const agentRunner = agentInstances[0].agent;
   logger.info('✓ Agent runner ready');
 
   // 创建消息缓存
@@ -92,30 +82,14 @@ async function main() {
     messageCache.cleanupExpired();
   }, 60 * 60 * 1000);
 
-  // 飞书渠道（条件初始化）
-  let feishu: FeishuChannel | null = null;
+  // 渠道插件系统
+  const channelLoader = new ChannelLoader();
+  channelLoader.register(new FeishuChannelPlugin());
+  channelLoader.register(new WechatChannelPlugin());
+  channelLoader.register(new AUNChannelPlugin());
 
-  if (config.channels?.feishu?.enabled !== false && config.channels?.feishu?.appId) {
-    feishu = new FeishuChannel({
-      appId: config.channels.feishu.appId,
-      appSecret: config.channels.feishu.appSecret,
-    });
-
-    // 设置项目路径提供器
-    feishu.onProjectPathRequest(async (chatId) => {
-      const session = await sessionManager.getOrCreateSession('feishu', chatId, config.projects?.defaultPath || process.cwd(), undefined, undefined, undefined, undefined);
-      return path.isAbsolute(session.projectPath)
-        ? session.projectPath
-        : path.resolve(process.cwd(), session.projectPath);
-    });
-  }
-
-  // AUN 渠道（条件初始化）
-  let aun: AUNChannel | null = null;
-
-  if (config.channels?.aun?.enabled !== false && config.channels?.aun?.domain) {
-    aun = new AUNChannel({ domain: config.channels.aun.domain, agentName: config.channels.aun.agentName });
-  }
+  const channelInstances = await channelLoader.createAll(config);
+  logger.info(`✓ Created ${channelInstances.length} channel instance(s)`);
 
   // 创建命令处理器
   const cmdHandler = new CommandHandler(sessionManager, agentRunner, config, messageCache, eventBus);
@@ -164,7 +138,7 @@ async function main() {
   cmdHandler.setProcessor(processor);
 
   // 设置 compact 开始回调
-  agentRunner.setCompactStartCallback((sessionId) => {
+  agentRunner.setCompactStartCallback((sessionId: string) => {
     processor.handleCompactStart(sessionId);
   });
 
@@ -182,81 +156,41 @@ async function main() {
   // 回填 messageQueue 引用
   cmdHandler.setMessageQueue(messageQueue);
 
-  // 注册 Feishu 适配器（如果已初始化）
-  if (feishu) {
-    const feishuAdapter: ChannelAdapter = {
-      name: 'feishu',
-      sendText: (channelId, text, options) => feishu!.sendMessage(channelId, text, options),
-      sendFile: (channelId, filePath) => feishu!.sendFile(channelId, filePath),
-      isGroupChat: (channelId) => feishu!.isGroupChat(channelId),
-    };
+  // 默认策略
+  const defaultPolicy = {
+    canSwitchProject: (chatType: string, role: string) => chatType === 'private' || role === 'owner',
+    canListProjects: (chatType: string, role: string) => chatType === 'private' || role === 'owner',
+    canCreateSession: () => true,
+    canDeleteSession: (chatType: string, role: string) => chatType === 'private' || role === 'owner',
+    canImportCliSession: (chatType: string, role: string) => chatType === 'private' || role === 'owner',
+    messagePrefix: () => '',
+    showActivities: () => true,
+    quietMode: () => false,
+    accumulateErrors: () => true,
+  };
 
-    const feishuOptions: ChannelOptions = {
-      systemPromptAppend: '[重要系统功能] 你可以通过飞书发送文件给用户。方法：在响应中使用 [SEND_FILE:文件路径] 标记。示例：文件已准备好！[SEND_FILE:./report.txt] 路径支持相对路径（相对项目目录）或绝对路径。系统会自动上传并发送。',
-      fileMarkerPattern: /\[SEND_FILE:([^\]]+)\]/g,
-      supportsImages: true,
-    };
+  // 注册渠道插件的 adapter 和 policy
+  for (const inst of channelInstances) {
+    // 设置项目路径提供器（如果需要）
+    if (inst.onProjectPathRequest && inst.channel.onProjectPathRequest) {
+      inst.channel.onProjectPathRequest(async (channelId: string) => {
+        const session = await sessionManager.getOrCreateSession(
+          inst.adapter.name, channelId,
+          config.projects?.defaultPath || process.cwd(),
+          undefined, undefined, undefined, undefined
+        );
+        return path.isAbsolute(session.projectPath)
+          ? session.projectPath
+          : path.resolve(process.cwd(), session.projectPath);
+      });
+    }
 
-    processor.registerChannel(feishuAdapter, feishuOptions);
-    cmdHandler.registerAdapter(feishuAdapter);
-  }
-
-  // 注册 AUN 适配器（如果已初始化）
-  if (aun) {
-    const aunAdapter: ChannelAdapter = {
-      name: 'aun',
-      sendText: (channelId, text) => aun!.sendMessage(channelId, text),
-    };
-
-    processor.registerChannel(aunAdapter);
-    cmdHandler.registerAdapter(aunAdapter);
-  }
-
-  // ── WeChat 渠道（条件初始化）──
-  let wechat: WechatChannel | null = null;
-
-  if (config.channels?.wechat?.enabled && config.channels?.wechat?.token) {
-    wechat = new WechatChannel({
-      baseUrl: config.channels.wechat.baseUrl || 'https://ilinkai.weixin.qq.com',
-      token: config.channels.wechat.token,
-    });
-
-    // 设置项目路径提供器（用于接收文件保存）
-    wechat.onProjectPathRequest(async (channelId) => {
-      const session = await sessionManager.getOrCreateSession('wechat', channelId, config.projects?.defaultPath || process.cwd(), undefined, undefined, undefined, undefined);
-      return path.isAbsolute(session.projectPath)
-        ? session.projectPath
-        : path.resolve(process.cwd(), session.projectPath);
-    });
-
-    const wechatAdapter: ChannelAdapter = {
-      name: 'wechat',
-      sendText: (channelId, text) => wechat!.sendMessage(channelId, text),
-      sendFile: (channelId, filePath) => wechat!.sendFile(channelId, filePath),
-    };
-
-    const wechatOptions: ChannelOptions = {
-      systemPromptAppend: '[系统功能] 你可以发送文件给用户。方法：在响应中使用 [SEND_FILE:文件路径] 标记。示例：文件已准备好！[SEND_FILE:./report.txt]',
-      fileMarkerPattern: /\[SEND_FILE:([^\]]+)\]/g,
-    };
-
-    processor.registerChannel(wechatAdapter, wechatOptions);
-    cmdHandler.registerAdapter(wechatAdapter);
-
-    // Session 过期通知（通过 Feishu 等其他渠道告知用户）
-    wechat.onSessionExpiredNotify(async (message) => {
-      // 尝试通过已注册的 Feishu owner 通知
-      const feishuOwner = config.channels?.feishu?.owner;
-      if (feishuOwner) {
-        try {
-          // Feishu owner ID 是 open_id，但 sendMessage 需要 chat_id
-          // 这里只记日志，因为 owner 的 chat_id 需要从 session 中获取
-          logger.warn(`[WeChat] ${message}`);
-        } catch {}
-      } else {
-        logger.warn(`[WeChat] ${message}`);
-      }
-    });
+    // 注册 adapter、policy 和 options
+    processor.registerChannel(inst.adapter, inst.policy || defaultPolicy, inst.options);
+    cmdHandler.registerAdapter(inst.adapter);
+    if (inst.policy) {
+      cmdHandler.registerPolicy(inst.adapter.name, inst.policy);
+    }
   }
 
   // ── 公共消息处理辅助函数 ──
@@ -293,54 +227,54 @@ async function main() {
   async function wireChannel(
     channelName: string,
     onMessageCallback: (handler: (msg: import('./types.js').InboundMessage) => Promise<void>) => void,
-    sendReply: (channelId: string, text: string, replyOpts?: Record<string, any>) => Promise<void>
+    sendReply: (channelId: string, text: string, replyOpts?: Record<string, any>) => Promise<void>,
+    adapter?: ChannelAdapter
   ): Promise<void> {
     onMessageCallback(async (msg) => {
       let content = msg.content.trim();
 
       // 1. owner 绑定
-      if (msg.userId) await autoBindOwner(channelName, msg.userId);
+      if (msg.peerId) await autoBindOwner(channelName, msg.peerId);
 
       // 2. 命令快速路径（去除引用前缀后检查，兼容话题中引用上文的情况）
       const contentForCmd = content.replace(/^(>[^\n]*\n)+\n?/, '').trim();
       if (await handleCommand(contentForCmd || content, channelName, msg.channelId,
         (text) => sendReply(msg.channelId, text, msg.replyOpts),
-        msg.userId, msg.threadId
+        msg.peerId, msg.threadId
       )) return;
 
-      // 3. session 解析（metadata 含 replyOpts）
+      // 3. 检测 chatType（首次创建时查询）
+      let chatType: 'private' | 'group' = 'private';
+      if (adapter?.isGroupChat && !msg.threadId) {
+        try {
+          const isGroup = await adapter.isGroupChat(msg.channelId);
+          chatType = isGroup ? 'group' : 'private';
+        } catch (err) {
+          logger.debug(`[${channelName}] isGroupChat failed, defaulting to private:`, err);
+        }
+      }
+
+      // 4. session 解析（metadata 含 replyOpts）
       const metadata = msg.replyOpts ? { replyOpts: msg.replyOpts } : undefined;
       const session = await sessionManager.getOrCreateSession(
         channelName, msg.channelId,
         config.projects?.defaultPath || process.cwd(),
-        msg.threadId, metadata, undefined, msg.userId
+        msg.threadId, metadata, undefined, msg.peerId, chatType
       );
 
-      // 3.5 群聊检测：首次消息时查询并持久化
-      if (session.isGroup === undefined || session.isGroup === false) {
-        const adapter = processor.getAdapter(channelName);
-        if (adapter?.isGroupChat) {
-          try {
-            const isGroup = await adapter.isGroupChat(msg.channelId);
-            if (isGroup) {
-              session.isGroup = true;
-              sessionManager.updateSession(session.id, { isGroup: true });
-            }
-          } catch {}
-        }
+      // 5. 消息前缀（由 policy 决定）
+      const channelInfo = processor.getChannelInfo?.(channelName);
+      if (channelInfo?.policy) {
+        const prefix = channelInfo.policy.messagePrefix(session.chatType, msg.peerName);
+        if (prefix) content = prefix + content;
       }
 
-      // 4. 群聊前缀
-      if ((session.isGroup ?? msg.isGroup) && msg.userName) {
-        content = `[${msg.userName}] ${content}`;
-      }
-
-      // 5. enqueue
+      // 6. enqueue
       await messageQueue.enqueue(session.id, {
         channel: channelName, channelId: msg.channelId, content,
         images: msg.images, timestamp: Date.now(),
-        userId: msg.userId, userName: msg.userName,
-        messageId: msg.messageId, isGroup: session.isGroup ?? msg.isGroup,
+        peerId: msg.peerId, peerName: msg.peerName,
+        messageId: msg.messageId,
         mentions: msg.mentions, threadId: msg.threadId
       }, session.projectPath);
     });
@@ -348,82 +282,42 @@ async function main() {
 
   // ── 渠道消息注册 ──
 
-  if (wechat) {
-    wireChannel('wechat',
-      (handler) => wechat!.onMessage(async (channelId, content, userId, images) => {
-        handler({ channel: 'wechat', channelId, content, userId, images });
-      }),
-      (channelId, text) => wechat!.sendMessage(channelId, text)
-    );
-  }
-
-  // Feishu 消息处理
-  if (feishu) {
-    wireChannel('feishu',
-      (handler) => feishu!.onMessage(async ({ channelId: chatId, content, images, userId, userName, messageId, mentions, threadId, rootId }) => {
-        handler({
-          channel: 'feishu', channelId: chatId, content, images,
-          userId, userName, messageId, mentions, threadId,
-          replyOpts: rootId ? { rootId } : undefined,
-        });
-      }),
-      (channelId, text, replyOpts) => feishu!.sendMessage(channelId, text, {
-        forceText: true,
-        replyToMessageId: replyOpts?.rootId,
-        replyInThread: true,
-      })
-    );
-  }
-
-  // AUN 消息处理
-  if (aun) {
-    wireChannel('aun',
-      (handler) => aun!.onMessage(async (sessionId, content) => {
-        handler({ channel: 'aun', channelId: sessionId, content, userId: sessionId });
-      }),
-      (channelId, text) => aun!.sendMessage(channelId, text)
-    );
-  }
-
-  // 连接渠道
-  const channels: string[] = [];
-
-  const channelInstances: { name: string; instance: { connect(): Promise<void>; disconnect(): Promise<void> }; timeout?: number }[] = [
-    ...(feishu ? [{ name: 'Feishu', instance: feishu, timeout: 5000 }] : []),
-    ...(aun ? [{ name: 'AUN', instance: aun }] : []),
-    ...(wechat ? [{ name: 'WeChat', instance: wechat }] : []),
-  ];
-
-  for (const { name, instance, timeout } of channelInstances) {
-    try {
-      if (timeout) {
-        await Promise.race([
-          instance.connect(),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('Connection timeout')), timeout))
-        ]);
-      } else {
-        await instance.connect();
-      }
-      logger.info(`✓ ${name} connected`);
-      channels.push(name);
-      eventBus.publish({
-        type: 'channel:connected',
-        channel: name.toLowerCase(),
-        timestamp: Date.now()
-      });
-    } catch (error) {
-      logger.warn(`⚠ ${name} connection failed (will continue without it)`);
-      eventBus.publish({ type: 'channel:disconnected', channel: name.toLowerCase(), reason: error instanceof Error ? error.message : String(error) });
-      if (error instanceof Error) {
-        logger.warn(`  Reason: ${error.message}`);
-      }
+  // 连接插件系统的渠道
+  for (const inst of channelInstances) {
+    if (inst.adapter.name === 'feishu') {
+      wireChannel('feishu',
+        (handler) => inst.channel.onMessage(async ({ channelId: chatId, content, images, peerId, peerName, messageId, mentions, threadId, rootId }: any) => {
+          handler({
+            channel: 'feishu', channelId: chatId, content, images,
+            peerId: peerId || '', peerName, messageId, mentions, threadId,
+            replyOpts: rootId ? { rootId } : undefined,
+          });
+        }),
+        (channelId, text, replyOpts) => inst.channel.sendMessage(channelId, text, {
+          forceText: true,
+          replyToMessageId: replyOpts?.rootId,
+          replyInThread: true,
+        }),
+        inst.adapter
+      );
     }
   }
 
-  logger.info(`\n🚀 EvolClaw is running with ${channels.length} channel(s): ${channels.join(', ')}\n`);
+  // ── 连接所有渠道 ──
+  const connected = await channelLoader.connectAll(channelInstances);
+
+  for (const name of connected) {
+    eventBus.publish({
+      type: 'channel:connected',
+      channel: name.toLowerCase(),
+      timestamp: Date.now()
+    });
+  }
+
+  logger.info(`\n🚀 EvolClaw is running with ${connected.length} channel(s): ${connected.join(', ')}\n`);
   eventBus.publish({
     type: 'system:started',
-    channels: channels.map(c => c.toLowerCase()),
+    channels: connected.map(c => c.toLowerCase()),
     timestamp: Date.now()
   });
 
@@ -439,9 +333,13 @@ async function main() {
       type: 'system:shutdown',
       timestamp: Date.now()
     });
-    if (feishu) { await feishu.disconnect(); eventBus.publish({ type: 'channel:disconnected', channel: 'feishu', reason: 'shutdown' }); }
-    if (aun) { await aun.disconnect(); eventBus.publish({ type: 'channel:disconnected', channel: 'aun', reason: 'shutdown' }); }
-    if (wechat) { await wechat.disconnect(); eventBus.publish({ type: 'channel:disconnected', channel: 'wechat', reason: 'shutdown' }); }
+
+    // 断开插件系统的渠道
+    await channelLoader.disconnectAll(channelInstances);
+    for (const inst of channelInstances) {
+      eventBus.publish({ type: 'channel:disconnected', channel: inst.adapter.name, reason: 'shutdown' });
+    }
+
     sessionManager.close();
     logger.info('✓ Shutdown complete');
     process.exit(0);

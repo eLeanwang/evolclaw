@@ -1,13 +1,93 @@
 import { query } from '@anthropic-ai/claude-agent-sdk';
-import { ensureDir } from '../config.js';
-import { Config } from '../types.js';
+import { ensureDir, resolveAnthropicConfig } from '../config.js';
+import type { Config } from '../types.js';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
-import { MessageStream, ImageData } from './message-stream.js';
 import { logger } from '../utils/logger.js';
 import { canUseTool } from '../utils/permission-utils.js';
 import { encodePath } from '../utils/platform.js';
+import type { AgentPlugin, AgentInstance, AgentCallbacks } from '../core/agent-loader.js';
+
+// ── SDK 消息流（Claude Agent SDK 专有格式）──
+
+export interface ImageData {
+  data: string;      // base64 encoded
+  mimeType?: string; // e.g., 'image/png'
+}
+
+interface SDKUserMessage {
+  type: 'user';
+  message: {
+    role: 'user';
+    content: string | Array<
+      | { type: 'text'; text: string }
+      | { type: 'image'; source: { type: 'base64'; media_type: string; data: string } }
+    >;
+  };
+  parent_tool_use_id: null;
+  session_id: string;
+}
+
+class MessageStream {
+  private queue: SDKUserMessage[] = [];
+  private waiting: (() => void) | null = null;
+  private done = false;
+
+  push(text: string, images?: ImageData[]): void {
+    let content:
+      | string
+      | Array<
+          | { type: 'text'; text: string }
+          | { type: 'image'; source: { type: 'base64'; media_type: string; data: string } }
+        >;
+
+    if (images && images.length > 0) {
+      logger.debug('[MessageStream] Creating multimodal message with', images.length, 'images');
+      content = [
+        { type: 'text', text },
+        ...images.map((img) => ({
+          type: 'image' as const,
+          source: {
+            type: 'base64' as const,
+            media_type: img.mimeType || 'image/png',
+            data: img.data,
+          },
+        })),
+      ];
+    } else {
+      content = text;
+    }
+
+    const message: SDKUserMessage = {
+      type: 'user',
+      message: { role: 'user', content },
+      parent_tool_use_id: null,
+      session_id: '',
+    };
+
+    this.queue.push(message);
+    this.waiting?.();
+  }
+
+  end(): void {
+    this.done = true;
+    this.waiting?.();
+  }
+
+  async *[Symbol.asyncIterator](): AsyncGenerator<SDKUserMessage> {
+    while (true) {
+      while (this.queue.length > 0) {
+        yield this.queue.shift()!;
+      }
+      if (this.done) return;
+      await new Promise<void>((r) => {
+        this.waiting = r;
+      });
+      this.waiting = null;
+    }
+  }
+}
 
 // ── 标准事件流（Gateway 消费的统一事件类型）──
 export type AgentEvent =
@@ -74,6 +154,7 @@ export function hasCompact(agent: any): agent is Compactable {
 }
 
 export class AgentRunner {
+  readonly name: string = 'claude';
   private apiKey: string;
   private model: string;
   private effort?: 'low' | 'medium' | 'high' | 'max';
@@ -541,5 +622,29 @@ export class AgentRunner {
   async closeSession(sessionId: string): Promise<void> {
     this.activeSessions.delete(sessionId);
     this.activeStreams.delete(sessionId);
+  }
+}
+
+// Plugin implementation
+export class ClaudeAgentPlugin implements AgentPlugin {
+  readonly name = 'claude';
+
+  isEnabled(config: Config): boolean {
+    return true;
+  }
+
+  createAgent(config: Config, callbacks: AgentCallbacks): AgentInstance {
+    const anthropic = resolveAnthropicConfig(config);
+    const agentRunner = new AgentRunner(
+      anthropic.apiKey,
+      anthropic.model,
+      callbacks.onSessionIdUpdate,
+      anthropic.baseUrl,
+      config
+    );
+    if (anthropic.effort) {
+      agentRunner.setEffort(anthropic.effort);
+    }
+    return { agent: agentRunner };
   }
 }

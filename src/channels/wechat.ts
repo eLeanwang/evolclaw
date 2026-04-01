@@ -12,7 +12,7 @@ export interface WechatConfig {
 }
 
 export interface WechatMessageHandler {
-  (channelId: string, content: string, userId?: string,
+  (channelId: string, content: string, peerId?: string,
    images?: Array<{ data: string; mimeType: string }>): Promise<void>;
 }
 
@@ -818,5 +818,69 @@ export class WechatChannel {
         reject(new Error('aborted'));
       }, { once: true });
     });
+  }
+}
+
+// Plugin implementation
+import type { ChannelPlugin, ChannelInstance } from '../core/channel-loader.js';
+import type { Config } from '../types.js';
+
+export class WechatChannelPlugin implements ChannelPlugin {
+  readonly name = 'wechat';
+
+  isEnabled(config: Config): boolean {
+    return config.channels?.wechat?.enabled === true && !!config.channels?.wechat?.token;
+  }
+
+  async createChannel(config: Config): Promise<ChannelInstance> {
+    const wechatConfig = config.channels?.wechat;
+    if (!wechatConfig?.token) {
+      throw new Error('WeChat config missing');
+    }
+
+    const channel = new WechatChannel({
+      baseUrl: wechatConfig.baseUrl || 'https://ilinkai.weixin.qq.com',
+      token: wechatConfig.token,
+    });
+
+    const adapter = {
+      name: 'wechat' as const,
+      sendText: (id: string, text: string) => channel.sendMessage(id, text),
+      sendFile: (id: string, filePath: string) => channel.sendFile(id, filePath),
+    };
+
+    const policy = {
+      canSwitchProject: (chatType: string, identity: string) => identity === 'owner',
+      canListProjects: (chatType: string, identity: string) => identity === 'owner',
+      canCreateSession: (chatType: string, identity: string) => true,
+      canDeleteSession: (chatType: string, identity: string) => true,
+      canImportCliSession: (chatType: string, identity: string) => identity === 'owner',
+      messagePrefix: (chatType: string, peerName?: string) => '',
+      showActivities: (chatType: string, identity: string) => {
+        const mode = config.showActivities || 'all';
+        if (mode === 'none') return false;
+        if (mode === 'dm-only') return chatType === 'private';
+        if (mode === 'owner-dm-only') return chatType === 'private' && identity === 'owner';
+        return true;
+      },
+      quietMode: (chatType: string, identity: string) => false,
+      accumulateErrors: (chatType: string, identity: string) => true,
+    };
+
+    const options = {
+      systemPromptAppend: '[系统功能] 你可以发送文件给用户。方法：在响应中使用 [SEND_FILE:文件路径] 标记。示例：文件已准备好！[SEND_FILE:./report.txt]',
+      fileMarkerPattern: /\[SEND_FILE:([^\]]+)\]/g,
+    };
+
+    return {
+      adapter,
+      channel,
+      policy,
+      options,
+      connect: () => channel.connect(),
+      disconnect: () => channel.disconnect(),
+      onProjectPathRequest: (channelId: string) =>
+        Promise.resolve(config.projects?.defaultPath || process.cwd()),
+    };
   }
 }

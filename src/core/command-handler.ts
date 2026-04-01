@@ -1,6 +1,6 @@
-import { Config, ChannelAdapter, Session } from '../types.js';
+import { Config, ChannelAdapter, Session, ChannelPolicy } from '../types.js';
 import { SessionManager } from './session-manager.js';
-import { AgentRunner, hasModelSwitcher } from './agent-runner.js';
+import { AgentRunner, hasModelSwitcher } from '../agents/claude-runner.js';
 import { MessageCache } from './message-cache.js';
 import { MessageProcessor } from './message-processor.js';
 import { EventBus } from './event-bus.js';
@@ -118,6 +118,7 @@ const quickCommandPrefixes = ['/new', '/pwd', '/plist', '/project', '/bind', '/h
 
 export class CommandHandler {
   private adapters = new Map<string, ChannelAdapter>();
+  private policies = new Map<string, ChannelPolicy>();
   private processor!: MessageProcessor;
   private messageQueue!: MessageQueue;
   private permissionGateway?: PermissionGateway;
@@ -187,8 +188,26 @@ export class CommandHandler {
     this.adapters.set(adapter.name, adapter);
   }
 
+  registerPolicy(channelName: string, policy: ChannelPolicy): void {
+    this.policies.set(channelName, policy);
+  }
+
   getAdapter(channelName: string): ChannelAdapter | undefined {
     return this.adapters.get(channelName);
+  }
+
+  private getPolicy(channel: string): ChannelPolicy {
+    return this.policies.get(channel) || {
+      canSwitchProject: () => true,
+      canListProjects: () => true,
+      canCreateSession: () => true,
+      canDeleteSession: () => true,
+      canImportCliSession: () => true,
+      messagePrefix: () => '',
+      showActivities: () => true,
+      quietMode: () => false,
+      accumulateErrors: () => true,
+    };
   }
 
   /**
@@ -209,6 +228,10 @@ export class CommandHandler {
     userId?: string,
     threadId?: string,
   ): Promise<string | null> {
+    // 解析身份
+    const identity = this.sessionManager.resolveIdentity(channel, userId);
+    const policy = this.getPolicy(channel);
+
     // 规范化命令（将别名转换为完整命令）
     let normalizedContent = content;
     for (const [alias, full] of Object.entries(aliases)) {
@@ -232,13 +255,7 @@ export class CommandHandler {
     }
 
     // 权限检查：区分用户级命令和管理级命令
-    // 提前解析会话以获取 identity
-    const tempSession = await this.sessionManager.getOrCreateSession(
-      channel, channelId,
-      this.config.projects?.defaultPath || process.cwd(),
-      threadId, undefined, undefined, userId
-    );
-    const isAdmin = tempSession.identity?.role === 'owner';
+    const isAdmin = identity.role === 'owner';
 
     if (normalizedContent.startsWith('/')) {
       const userCommands = ['/slist', '/new', '/session', '/rename', '/name', '/status', '/help', '/del', '/s '];
@@ -358,7 +375,7 @@ export class CommandHandler {
         const currentModel = this.agentRunner.getModel();
         const currentEffort = this.agentRunner.getEffort() || 'auto';
         const effortDisplay = currentEffort === 'auto' ? 'auto (SDK默认)' : `${currentEffort} ${effortBar(currentEffort)}`;
-        const modelList = models.map(m => `- ${m}`).join('\n');
+        const modelList = models.map((m: string) => `- ${m}`).join('\n');
         return `当前模型: ${currentModel}\n推理强度: ${effortDisplay}\n\n可用模型：\n${modelList}\n\n推理强度: ${availableEfforts.join(' / ')} / auto\n\n用法:\n  /model <model>           切换模型\n  /model <model> <effort>  切换模型+推理强度\n  /model <effort>          仅切换推理强度\n  /model auto              恢复SDK默认`;
       }
 
@@ -388,7 +405,7 @@ export class CommandHandler {
         } else if (models.includes(arg)) {
           newModel = arg;
         } else {
-          const modelList = models.map(m => `- ${m}`).join('\n');
+          const modelList = models.map((m: string) => `- ${m}`).join('\n');
           return `❌ 无效参数: ${arg}\n\n可用模型：\n${modelList}\n\n推理强度: ${availableEfforts.join(' / ')}`;
         }
       } else {
@@ -732,8 +749,7 @@ export class CommandHandler {
 
     // /plist 命令：列出所有项目
     if (normalizedContent === '/plist') {
-      const isGroup = await this.isGroupChat(channel, channelId);
-      if (isGroup) {
+      if (!policy.canListProjects(session?.chatType || 'private', identity.role)) {
         if (!session) {
           return `❌ 当前群聊未绑定项目
 
@@ -801,8 +817,7 @@ export class CommandHandler {
 
     // /project 命令：切换项目（支持名称或路径）
     if (normalizedContent.startsWith('/project ')) {
-      const isGroup = await this.isGroupChat(channel, channelId);
-      if (isGroup) {
+      if (!policy.canSwitchProject(session?.chatType || 'private', identity.role)) {
         return `❌ 群聊不支持切换项目
 
 群聊只能绑定一个项目。如需更换项目，请联系管理员重新配置。`;
@@ -963,10 +978,10 @@ export class CommandHandler {
         logger.debug('[CommandHandler] SDK listSessions sync failed (non-critical):', error);
       }
 
-      const isGroup = await this.isGroupChat(channel, channelId);
-      const cliSessions = (isGroup || !isAdmin)
-        ? []
-        : await this.sessionManager.scanCliSessions(session.projectPath);
+      const canImportCli = policy.canImportCliSession(session.chatType || 'private', identity.role);
+      const cliSessions = canImportCli
+        ? await this.sessionManager.scanCliSessions(session.projectPath)
+        : [];
       const dbSessionIds = new Set(currentProjectSessions.map(s => s.agentSessionId).filter(Boolean));
 
       const lines = [`当前项目 ${path.basename(session.projectPath)} 的会话列表:\n`];
@@ -975,7 +990,8 @@ export class CommandHandler {
         lines.push('【EvolClaw 会话】');
         for (let i = 0; i < currentProjectSessions.length; i++) {
           const s = currentProjectSessions[i];
-          const prefix = s.isActive ? '  ✓' : '   ';
+          const isActive = (s.metadata as any)?.isActive === true;
+          const prefix = isActive ? '  ✓' : '   ';
           const num = `${i + 1}.`;
           const threadTag = s.threadId ? '[话题] ' : '';
           const name = s.name || '(未命名)';
@@ -990,7 +1006,7 @@ export class CommandHandler {
             let status = '[空闲]';
             if (sIsProcessing) {
               status = '[处理中]';
-            } else if (s.isActive) {
+            } else if (isActive) {
               status = '[活跃]';
             }
             lines.push(`${prefix} ${num} ${threadTag}${name} ${uuid} - ${idleTime} ${status}`);
@@ -1045,8 +1061,8 @@ export class CommandHandler {
         targetSession = await this.sessionManager.getSessionByUuidPrefix(channel, channelId, sessionName);
       }
 
-      const isGroup = await this.isGroupChat(channel, channelId);
-      if (!targetSession && sessionName.length === 8 && !isGroup && isAdmin) {
+      const canImport = policy.canImportCliSession(session?.chatType || 'private', identity.role);
+      if (!targetSession && sessionName.length === 8 && canImport) {
         const projectPaths = Object.values(this.projects);
 
         if (session) {
@@ -1154,9 +1170,8 @@ export class CommandHandler {
         return `❌ 当前没有活跃会话`;
       }
 
-      // 群聊权限检查：只有管理员可以删除
-      const isGroup = await this.isGroupChat(channel, channelId);
-      if (isGroup && !isAdmin) {
+      // 权限检查：policy 控制谁可以删除会话
+      if (!policy.canDeleteSession(session.chatType || 'private', identity.role)) {
         return `❌ 无权限：群聊中仅管理员可删除会话`;
       }
 
@@ -1328,13 +1343,5 @@ ${healthCheck.issues.map((i: string) => `- ${i}`).join('\n')}
     }
 
     return null;
-  }
-
-  /**
-   * 通过 adapter 查询是否为群聊
-   */
-  private async isGroupChat(channel: string, channelId: string): Promise<boolean> {
-    const adapter = this.adapters.get(channel);
-    return await adapter?.isGroupChat?.(channelId) ?? false;
   }
 }

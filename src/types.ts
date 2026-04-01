@@ -47,6 +47,7 @@ export interface Config {
 }
 
 export interface SessionMetadata {
+  isActive?: boolean;  // 由 Channel 维护，存储在 metadata 中
   replyOpts?: Record<string, any>;  // 渠道特定回复上下文（如 { rootId: 'om_xxx' }）
   agentSessions?: {
     codex?: string;
@@ -73,15 +74,15 @@ export interface Session {
   id: string;
   channel: string;
   channelId: string;
+  agentId: string;  // 路由维度，默认 'claude'
+  threadId: string;  // 路由维度，默认 ''
+  chatType: string;  // 'private' | 'group'，由 Channel 填充
+  sessionMode: string;  // 'interactive' | 'autonomous'
   projectPath: string;
-  threadId: string;
-  agentType: string;
   agentSessionId?: string;
-  metadata?: SessionMetadata;
-  identity?: SessionIdentity;
   name?: string;
-  isGroup?: boolean;  // 会话创建时由 Channel 提供，持久化到数据库
-  isActive: boolean;
+  metadata?: SessionMetadata;
+  identity?: SessionIdentity;  // 运行时计算，不持久化
   createdAt: number;
   updatedAt: number;
   deletedAt?: number;  // 软删除时间戳（null=活跃）
@@ -90,28 +91,28 @@ export interface Session {
 export interface Message {
   channel: string;
   channelId: string;
+  agentId?: string;  // 默认 'claude'
+  threadId?: string;  // 默认 ''
+  peerId: string;  // 发送者 ID
+  peerName?: string;  // 发送者名称
   content: string;
   images?: Array<{ data: string; mimeType: string }>;
-  timestamp?: number;
-  userId?: string;
-  userName?: string;
-  messageId?: string;
-  isGroup?: boolean;
   mentions?: Array<{ userId: string; name?: string; key?: string }>;
-  threadId?: string;
+  messageId?: string;
+  timestamp?: number;
 }
 
 // 入站消息（渠道 → Gateway 的统一格式）
 export interface InboundMessage {
   channel: string;
   channelId: string;
+  agentId?: string;  // 默认 'claude'
+  threadId?: string;  // 默认 ''
+  peerId: string;  // 发送者 ID
+  peerName?: string;  // 发送者名称
   content: string;
-  userId?: string;
-  userName?: string;
   messageId?: string;
   images?: Array<{ data: string; mimeType: string }>;
-  threadId?: string;
-  isGroup?: boolean;
   mentions?: Array<{ userId: string; name?: string; key?: string }>;
   replyOpts?: Record<string, any>;  // 渠道特定回复上下文（如 Feishu 的 rootId）
 }
@@ -121,8 +122,8 @@ export interface ChannelAdapter {
   readonly name: string;
   sendText(channelId: string, text: string, context?: ReplyContext): Promise<void>;
   sendFile?(channelId: string, filePath: string): Promise<void>;
-  isGroupChat?(channelId: string): Promise<boolean>;
   acknowledge?(messageId: string): Promise<void>;
+  isGroupChat?(channelId: string): Promise<boolean>;
   onChatDissolved?(callback: (channelId: string) => void): void;
   connect?(): Promise<void>;
   disconnect?(): Promise<void>;
@@ -133,6 +134,19 @@ export interface ChannelOptions {
   systemPromptAppend?: string;      // Feishu: [SEND_FILE:] 指令
   fileMarkerPattern?: RegExp;       // Feishu: /\[SEND_FILE:([^\]]+)\]/g
   supportsImages?: boolean;         // Feishu: true, AUN: false
+}
+
+// 渠道策略接口
+export interface ChannelPolicy {
+  canSwitchProject(chatType: string, identity: string): boolean;
+  canListProjects(chatType: string, identity: string): boolean;
+  canCreateSession(chatType: string, identity: string): boolean;
+  canDeleteSession(chatType: string, identity: string): boolean;
+  canImportCliSession(chatType: string, identity: string): boolean;
+  messagePrefix(chatType: string, peerName?: string): string;
+  showActivities(chatType: string, identity: string): boolean;
+  quietMode(chatType: string, identity: string): boolean;
+  accumulateErrors(chatType: string, identity: string): boolean;
 }
 
 // 命令处理器类型

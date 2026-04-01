@@ -37,3 +37,39 @@ export class AUNChannel {
     logger.info('[AUN] Disconnected');
   }
 }
+
+// Plugin implementation
+import type { ChannelPlugin, ChannelInstance } from '../core/channel-loader.js';
+import type { Config } from '../types.js';
+
+export class AUNChannelPlugin implements ChannelPlugin {
+  readonly name = 'aun';
+
+  isEnabled(config: Config): boolean {
+    return config.channels?.aun?.enabled !== false && !!config.channels?.aun?.domain;
+  }
+
+  async createChannel(config: Config): Promise<ChannelInstance> {
+    const aunConfig = config.channels?.aun;
+    if (!aunConfig?.domain || !aunConfig?.agentName) {
+      throw new Error('AUN config missing');
+    }
+
+    const channel = new AUNChannel({
+      domain: aunConfig.domain,
+      agentName: aunConfig.agentName,
+    });
+
+    const adapter = {
+      name: 'aun' as const,
+      sendText: (id: string, text: string) => channel.sendMessage(id, text),
+    };
+
+    return {
+      adapter,
+      channel,
+      connect: () => channel.connect(),
+      disconnect: () => channel.disconnect(),
+    };
+  }
+}

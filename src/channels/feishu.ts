@@ -4,7 +4,6 @@ import path from 'path';
 import imageType from 'image-type';
 import { ensureDir } from '../config.js';
 import { logger } from '../utils/logger.js';
-import { markdownToFeishuPost, hasMarkdownSyntax } from '../utils/markdown-to-feishu.js';
 
 export interface FeishuConfig {
   appId: string;
@@ -15,8 +14,8 @@ export interface MessageHandlerOptions {
   channelId: string;
   content: string;
   images?: Array<{ data: string; mimeType: string }>;
-  userId?: string;
-  userName?: string;
+  peerId?: string;
+  peerName?: string;
   messageId?: string;
   mentions?: Array<{ userId: string; name?: string; key?: string }>;
   threadId?: string;
@@ -86,12 +85,12 @@ export class FeishuChannel {
           })).filter((m: any) => m.userId && m.userId !== this.config.appId);
 
           // 提取发送者信息
-          const userId = data.sender?.sender_id?.open_id;
-          let userName: string | undefined;
+          const peerId = data.sender?.sender_id?.open_id;
+          let peerName: string | undefined;
           try {
-            userName = await this.getUserName(userId);
+            peerName = await this.getUserName(peerId);
           } catch {
-            userName = undefined;
+            peerName = undefined;
           }
 
           try {
@@ -189,7 +188,7 @@ export class FeishuChannel {
                 content = content.replace(/@_user_\d+/g, '').trim();
               }
               const finalContent = quotedText + content;
-              await this.messageHandler({ channelId: msg.chat_id, content: finalContent, images: quotedImages.length > 0 ? quotedImages : undefined, userId, userName, messageId: msg.message_id, mentions: mentions.length > 0 ? mentions : undefined, threadId, rootId });
+              await this.messageHandler({ channelId: msg.chat_id, content: finalContent, images: quotedImages.length > 0 ? quotedImages : undefined, peerId, peerName, messageId: msg.message_id, mentions: mentions.length > 0 ? mentions : undefined, threadId, rootId });
             }
             // 处理图片消息
             else if (msg.message_type === 'image') {
@@ -205,10 +204,10 @@ export class FeishuChannel {
               if (imageData) {
                 const allImages = [...quotedImages, imageData];
                 const prompt = quotedText + '用户发送了一张图片，请分析这张图片的内容。';
-                await this.messageHandler({ channelId: msg.chat_id, content: prompt, images: allImages, userId, userName, messageId: msg.message_id, threadId, rootId });
+                await this.messageHandler({ channelId: msg.chat_id, content: prompt, images: allImages, peerId, peerName, messageId: msg.message_id, threadId, rootId });
               } else {
                 const prompt = quotedText + '[图片下载失败] 应用可能缺少 im:message 或 im:message:readonly 权限';
-                await this.messageHandler({ channelId: msg.chat_id, content: prompt, images: quotedImages.length > 0 ? quotedImages : undefined, userId, userName, messageId: msg.message_id, threadId, rootId });
+                await this.messageHandler({ channelId: msg.chat_id, content: prompt, images: quotedImages.length > 0 ? quotedImages : undefined, peerId, peerName, messageId: msg.message_id, threadId, rootId });
               }
             }
             // 处理文件消息
@@ -225,10 +224,10 @@ export class FeishuChannel {
               const filePath = await this.downloadFile(fileKey, fileName, msg.message_id, projectPath);
               if (filePath) {
                 const prompt = quotedText + `用户发送了文件：${fileName}\n文件已保存到：${filePath}\n请使用 Read 工具读取并分析文件内容。`;
-                await this.messageHandler({ channelId: msg.chat_id, content: prompt, images: quotedImages.length > 0 ? quotedImages : undefined, userId, userName, messageId: msg.message_id, threadId, rootId });
+                await this.messageHandler({ channelId: msg.chat_id, content: prompt, images: quotedImages.length > 0 ? quotedImages : undefined, peerId, peerName, messageId: msg.message_id, threadId, rootId });
               } else {
                 const prompt = quotedText + '[文件下载失败] 应用可能缺少 im:resource 权限';
-                await this.messageHandler({ channelId: msg.chat_id, content: prompt, images: quotedImages.length > 0 ? quotedImages : undefined, userId, userName, messageId: msg.message_id, threadId, rootId });
+                await this.messageHandler({ channelId: msg.chat_id, content: prompt, images: quotedImages.length > 0 ? quotedImages : undefined, peerId, peerName, messageId: msg.message_id, threadId, rootId });
               }
             }
             // 处理富文本消息
@@ -248,13 +247,13 @@ export class FeishuChannel {
               let finalContent = text.trim();
               if (title) finalContent = `${title}\n${finalContent}`;
               finalContent = quotedText + finalContent;
-              await this.messageHandler({ channelId: msg.chat_id, content: finalContent, images: quotedImages.length > 0 ? quotedImages : undefined, userId, userName, messageId: msg.message_id, threadId, rootId });
+              await this.messageHandler({ channelId: msg.chat_id, content: finalContent, images: quotedImages.length > 0 ? quotedImages : undefined, peerId, peerName, messageId: msg.message_id, threadId, rootId });
             }
             // 处理其他类型消息
             else {
               logger.debug('[Feishu] Unsupported message type:', msg.message_type);
               const prompt = quotedText + `[不支持的消息类型: ${msg.message_type}]`;
-              await this.messageHandler({ channelId: msg.chat_id, content: prompt, images: quotedImages.length > 0 ? quotedImages : undefined, userId, userName, messageId: msg.message_id, threadId, rootId });
+              await this.messageHandler({ channelId: msg.chat_id, content: prompt, images: quotedImages.length > 0 ? quotedImages : undefined, peerId, peerName, messageId: msg.message_id, threadId, rootId });
             }
           } catch (error) {
             logger.error('[Feishu] Failed to process message:', error);
@@ -285,19 +284,6 @@ export class FeishuChannel {
 
   onProjectPathRequest(provider: ProjectPathProvider): void {
     this.projectPathProvider = provider;
-  }
-
-  async isGroupChat(chatId: string): Promise<boolean> {
-    if (!this.client) return false;
-
-    try {
-      const res = await this.client.im.chat.get({ path: { chat_id: chatId } });
-      const chatMode = res.data?.chat_mode || 'p2p';
-      return chatMode === 'group';
-    } catch (error) {
-      logger.warn('[Feishu] Failed to get chat mode:', error);
-      return false;
-    }
   }
 
   private async getUserName(_userId?: string): Promise<string | undefined> {
@@ -441,6 +427,16 @@ export class FeishuChannel {
     this.client = null;
   }
 
+  async isGroupChat(channelId: string): Promise<boolean> {
+    if (!this.client) return false;
+    try {
+      const res = await this.client.im.chat.get({ path: { chat_id: channelId } });
+      return res.data?.chat_type === 'group';
+    } catch {
+      return channelId.startsWith('oc_');
+    }
+  }
+
   private async downloadAndSaveImage(imageKey: string, chatId: string, messageId: string, projectPath: string): Promise<{ data: string; mimeType: string } | null> {
     if (!this.client) return null;
 
@@ -566,7 +562,6 @@ export class FeishuChannel {
 
   private addAckReaction(messageId: string): void {
     if (!this.client) return;
-
     this.client.im.messageReaction.create({
       path: { message_id: messageId },
       data: {
@@ -574,5 +569,151 @@ export class FeishuChannel {
       }
     }).catch(() => {});
   }
+}
 
+// ── Markdown 转换工具（合并自 markdown-to-feishu.ts）──
+
+interface PostElement {
+  tag: string;
+  text?: string;
+  user_id?: string;
+}
+
+interface PostContent {
+  zh_cn: {
+    title: string;
+    content: Array<Array<PostElement>>;
+  };
+}
+
+function displayWidth(str: string): number {
+  let width = 0;
+  for (const ch of str) {
+    const code = ch.codePointAt(0)!;
+    if (
+      (code >= 0x4E00 && code <= 0x9FFF) ||
+      (code >= 0x3400 && code <= 0x4DBF) ||
+      (code >= 0xF900 && code <= 0xFAFF) ||
+      (code >= 0xFF01 && code <= 0xFF60) ||
+      (code >= 0x3000 && code <= 0x303F)
+    ) {
+      width += 2;
+    } else {
+      width += 1;
+    }
+  }
+  return width;
+}
+
+function padToWidth(str: string, targetWidth: number): string {
+  const current = displayWidth(str);
+  const padding = Math.max(0, targetWidth - current);
+  return str + ' '.repeat(padding);
+}
+
+function convertTablesToText(text: string): string {
+  const tableRegex = /^(\|.+\|)\n(\|[\s:|-]+\|)\n((?:\|.+\|\n?)+)/gm;
+  return text.replace(tableRegex, (_match, headerLine: string, _sep: string, bodyBlock: string) => {
+    const parseRow = (line: string) => line.split('|').slice(1, -1).map((c: string) => c.trim());
+    const headers = parseRow(headerLine);
+    const rows = bodyBlock.trim().split('\n').map(parseRow);
+    const colWidths = headers.map((h, i) => {
+      const cellWidths = rows.map(r => displayWidth(r[i] || ''));
+      return Math.max(displayWidth(h), ...cellWidths);
+    });
+    const headerStr = headers.map((h, i) => padToWidth(h, colWidths[i])).join('  ');
+    const sepStr = colWidths.map(w => '-'.repeat(w)).join('  ');
+    const rowStrs = rows.map(r =>
+      headers.map((_, i) => padToWidth(r[i] || '', colWidths[i])).join('  ')
+    );
+    return '```\n' + [headerStr, sepStr, ...rowStrs].join('\n') + '\n```';
+  });
+}
+
+export function markdownToFeishuPost(markdown: string, defaultTitle?: string): PostContent {
+  const match = markdown.match(/^# (.+)$/m);
+  const title = match?.[1] ?? defaultTitle ?? '';
+  let body = match ? markdown.replace(/^# .+\n?/, '') : markdown;
+  body = convertTablesToText(body);
+  return {
+    zh_cn: {
+      title,
+      content: [[{ tag: 'md', text: body.trim() }]]
+    }
+  };
+}
+
+export function hasMarkdownSyntax(text: string): boolean {
+  const markdownPatterns = [
+    /^#{1,6}\s/m, /\*\*.*?\*\*/, /\*.*?\*/, /__.*?__/, /_.*?_/, /~~.*?~~/,
+    /`.*?`/, /```[\s\S]*?```/, /\[.*?\]\(.*?\)/, /^[\s]*[-*+]\s/m,
+    /^[\s]*\d+\.\s/m, /^\|.+\|$/m
+  ];
+  return markdownPatterns.some(pattern => pattern.test(text));
+}
+
+// Plugin implementation
+import type { ChannelPlugin, ChannelInstance } from '../core/channel-loader.js';
+import type { Config } from '../types.js';
+
+export class FeishuChannelPlugin implements ChannelPlugin {
+  readonly name = 'feishu';
+
+  isEnabled(config: Config): boolean {
+    return config.channels?.feishu?.enabled !== false;
+  }
+
+  async createChannel(config: Config): Promise<ChannelInstance> {
+    const feishuConfig = config.channels?.feishu;
+    if (!feishuConfig?.appId || !feishuConfig?.appSecret) {
+      throw new Error('Feishu config missing');
+    }
+
+    const channel = new FeishuChannel({
+      appId: feishuConfig.appId,
+      appSecret: feishuConfig.appSecret,
+    });
+
+    const adapter = {
+      name: 'feishu' as const,
+      sendText: (id: string, text: string) => channel.sendMessage(id, text),
+      sendFile: (id: string, filePath: string) => channel.sendFile(id, filePath),
+      isGroupChat: (id: string) => channel.isGroupChat(id),
+    };
+
+    const policy = {
+      canSwitchProject: (chatType: string, identity: string) => identity === 'owner',
+      canListProjects: (chatType: string, identity: string) => identity === 'owner',
+      canCreateSession: (chatType: string, identity: string) => true,
+      canDeleteSession: (chatType: string, identity: string) => true,
+      canImportCliSession: (chatType: string, identity: string) => identity === 'owner',
+      messagePrefix: (chatType: string, peerName?: string) => (chatType === 'group' && peerName) ? `[${peerName}] ` : '',
+      showActivities: (chatType: string, identity: string) => {
+        const mode = config.showActivities || 'all';
+        if (mode === 'none') return false;
+        if (mode === 'dm-only') return chatType === 'private';
+        if (mode === 'owner-dm-only') return chatType === 'private' && identity === 'owner';
+        return true;
+      },
+      quietMode: (chatType: string, identity: string) => false,
+      accumulateErrors: (chatType: string, identity: string) => true,
+    };
+
+    const options = {
+      systemPromptAppend: '[重要系统功能] 你可以通过飞书发送文件给用户。方法：在响应中使用 [SEND_FILE:文件路径] 标记。示例：文件已准备好！[SEND_FILE:./report.txt] 路径支持相对路径（相对项目目录）或绝对路径。系统会自动上传并发送。',
+      fileMarkerPattern: /\[SEND_FILE:([^\]]+)\]/g,
+      supportsImages: true,
+    };
+
+    return {
+      adapter,
+      channel,
+      policy,
+      options,
+      connect: () => channel.connect(),
+      disconnect: () => channel.disconnect(),
+      onProjectPathRequest: (channelId: string) =>
+        Promise.resolve(config.projects?.defaultPath || process.cwd()),
+    };
+  }
 }

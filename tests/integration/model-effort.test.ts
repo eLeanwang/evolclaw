@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { AgentRunner } from '../../src/core/agent-runner.js';
+import { AgentRunner } from '../../src/agents/claude-runner.js';
 import { CommandHandler } from '../../src/core/command-handler.js';
 import { EventBus } from '../../src/core/event-bus.js';
 import { Config } from '../../src/types.js';
@@ -18,14 +18,15 @@ function makeMockSessionManager() {
   return {
     getActiveSession: vi.fn().mockResolvedValue({
       id: 'test-session', channel: 'test', channelId: 'test-ch',
-      projectPath: '/tmp', isActive: true,
+      projectPath: '/tmp', agentId: 'claude', chatType: 'private', sessionMode: 'interactive',
       identity: { role: 'owner', mode: 'interactive' },
     }),
     getOrCreateSession: vi.fn().mockResolvedValue({
       id: 'test-session', channel: 'test', channelId: 'test-ch',
-      projectPath: '/tmp', isActive: true,
+      projectPath: '/tmp', agentId: 'claude', chatType: 'private', sessionMode: 'interactive',
       identity: { role: 'owner', mode: 'interactive' },
     }),
+    resolveIdentity: vi.fn().mockReturnValue({ role: 'owner', mode: 'interactive' }),
   };
 }
 

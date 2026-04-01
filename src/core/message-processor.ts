@@ -1,6 +1,6 @@
 import path from 'path';
 import fs from 'fs';
-import { AgentRunner, hasCompact, AgentEvent } from './agent-runner.js';
+import { AgentRunner, hasCompact, AgentEvent } from '../agents/claude-runner.js';
 import { SessionManager } from './session-manager.js';
 import { StreamFlusher } from '../utils/stream-flusher.js';
 import { MessageCache } from './message-cache.js';
@@ -9,23 +9,20 @@ import { logger } from '../utils/logger.js';
 import { getErrorMessage, classifyError, ErrorType } from '../utils/error-utils.js';
 import { EventBus } from './event-bus.js';
 import { summarizeToolInput } from '../utils/permission-utils.js';
-import type { Message, Config, Session, ChannelAdapter, ChannelOptions, CommandHandler } from '../types.js';
+import type { Message, Config, Session, ChannelAdapter, ChannelOptions, ChannelPolicy, CommandHandler } from '../types.js';
 
 /**
  * 统一消息处理器
  * 负责处理来自不同渠道的消息，协调事件流处理
  */
 export class MessageProcessor {
-  private channels = new Map<string, { adapter: ChannelAdapter; options?: ChannelOptions }>();
+  private channels = new Map<string, { adapter: ChannelAdapter; options?: ChannelOptions; policy: ChannelPolicy }>();
   private currentFlusher?: StreamFlusher;
-  private currentIsGroup = false;
   private shouldSuppressActivities = false;
 
   /** 判断是否为后台会话（仅主会话参与判断，话题会话独立） */
   private async isBackgroundSession(session: Session, channel: string, channelId: string): Promise<boolean> {
-    // 话题会话独立运行，不是后台任务
     if (session.threadId) return false;
-    // 主会话：与当前活跃会话比对
     const active = await this.sessionManager.getActiveSession(channel, channelId);
     return active ? session.id !== active.id : false;
   }
@@ -42,8 +39,8 @@ export class MessageProcessor {
   /**
    * 注册渠道适配器
    */
-  registerChannel(adapter: ChannelAdapter, options?: ChannelOptions): void {
-    this.channels.set(adapter.name, { adapter, options });
+  registerChannel(adapter: ChannelAdapter, policy: ChannelPolicy, options?: ChannelOptions): void {
+    this.channels.set(adapter.name, { adapter, options, policy });
   }
 
   /**
@@ -54,14 +51,21 @@ export class MessageProcessor {
   }
 
   /**
+   * 获取渠道信息（含 policy）
+   */
+  getChannelInfo(channelName: string): { adapter: ChannelAdapter; options?: ChannelOptions; policy: ChannelPolicy } | undefined {
+    return this.channels.get(channelName);
+  }
+
+  /**
    * 处理 compact 开始事件
    */
   handleCompactStart(sessionId?: string): void {
     if (sessionId) {
       this.eventBus.publish({ type: 'agent:compact-start', sessionId });
     }
-    if (this.currentFlusher && !this.currentIsGroup && !this.shouldSuppressActivities) {
-      this.currentFlusher.addActivity('⏳ 会话压缩中...');
+    if (this.currentFlusher && !this.shouldSuppressActivities) {
+      this.currentFlusher.addActivity('\u23f3 会话压缩中...');
     }
   }
 
@@ -69,11 +73,16 @@ export class MessageProcessor {
    * 处理消息（主入口）
    */
   async processMessage(message: Message): Promise<void> {
-    const isGroup = message.isGroup ?? false;
-    this.currentIsGroup = isGroup;
     const idleMs = (this.config.idleMonitor?.timeout ?? 120) * 1000;
     const streamKey = `${message.channel}-${message.channelId}`;
     const channelInfo = this.channels.get(message.channel);
+
+    if (!channelInfo) {
+      logger.error(`[MessageProcessor] Unknown channel: ${message.channel}`);
+      return;
+    }
+
+    const { policy } = channelInfo;
 
     // 提前解析会话以获取 identity
     const tempSession = await this.sessionManager.getOrCreateSession(
@@ -83,23 +92,18 @@ export class MessageProcessor {
       message.threadId,
       undefined,
       undefined,
-      message.userId
+      message.peerId
     );
-    const isOwnerUser = tempSession.identity?.role === 'owner';
+    const chatType = tempSession.chatType;
+    const identityRole = tempSession.identity?.role || 'anonymous';
 
     const monitorEnabled = this.config.idleMonitor?.enabled !== false;
     const safeModeThreshold = this.config.idleMonitor?.safeModeThreshold ?? 3;
-    // 非主人（群聊或单聊）：空闲监控静默/简短
-    const quietMode = isGroup || !isOwnerUser;
+    const quietMode = policy.quietMode(chatType, identityRole);
 
     // 计算是否抑制中间输出（工具活动 + 流式文本）
     const shouldSuppress = (): boolean => {
-      const mode = this.config.showActivities ?? 'all';
-      if (mode === 'all') return false;
-      if (mode === 'dm-only') return isGroup;
-      if (mode === 'owner-dm-only') return isGroup || !isOwnerUser;
-      if (mode === 'none') return true;
-      return false;
+      return !policy.showActivities(chatType, identityRole);
     };
     this.shouldSuppressActivities = shouldSuppress();
 
@@ -127,7 +131,7 @@ export class MessageProcessor {
             if (channelInfo) {
               try {
                 const msg = quietMode
-                  ? `⚠️ 任务超时（${result.idleSec}秒无响应），已自动中断`
+                  ? `\u26a0\ufe0f 任务超时（${result.idleSec}秒无响应），已自动中断`
                   : result.message;
                 await channelInfo.adapter.sendText(message.channelId, msg);
               } catch (e) {
@@ -142,7 +146,7 @@ export class MessageProcessor {
             rejectFn(new Error('SDK_TIMEOUT'));
             return;
           } else {
-            // notify or warn: send diagnostic message, task continues（非主人时静默）
+            // notify or warn: send diagnostic message, task continues
             logger.info(`[MessageProcessor] Idle monitor: ${result.action} after ${result.idleSec}s idle, stream: ${streamKey}`);
             if (channelInfo && !quietMode && !shouldSuppress()) {
               try {
@@ -159,14 +163,14 @@ export class MessageProcessor {
 
     try {
       await Promise.race([
-        this._processMessageInternal(message, resetTimer, isGroup, shouldSuppress),
+        this._processMessageInternal(message, resetTimer, shouldSuppress),
         timeoutPromise
       ]);
     } catch (error: any) {
       // 超时错误：kill 级别已发送诊断信息，无需再发
       // 非超时错误走通用处理
 
-      // 记录错误到健康状态（仅主人的错误累计触发安全模式）
+      // 记录错误到健康状态
       if (channelInfo) {
         try {
           const session = await this.sessionManager.getOrCreateSession(
@@ -181,9 +185,8 @@ export class MessageProcessor {
           // 上下文过长是可恢复错误，不累计触发安全模式
           if (errorType === ErrorType.CONTEXT_TOO_LONG) {
             logger.info(`[MessageProcessor] Context too long error, skipping safe mode accumulation`);
-          } else if (quietMode) {
-            // 群聊或非主人的错误只记日志，不累计
-            logger.info(`[MessageProcessor] Non-owner/group error (user=${message.userId}, group=${isGroup}), skipping safe mode accumulation`);
+          } else if (!policy.accumulateErrors(chatType, identityRole)) {
+            logger.info(`[MessageProcessor] Non-accumulating error (chatType=${chatType}, identity=${identityRole}), skipping safe mode accumulation`);
           } else {
             const newCount = await this.sessionManager.recordError(session.id, errorType, error.message);
             await this.checkSafeMode(session, message.channelId, channelInfo.adapter, safeModeThreshold, newCount);
@@ -207,7 +210,6 @@ export class MessageProcessor {
 
   /**
    * 检查是否需要进入安全模式（safeModeThreshold 为 0 时跳过）
-   * 仅单聊主人会话调用（群聊和非主人已在调用侧过滤）
    */
   private async checkSafeMode(
     session: Session,
@@ -232,7 +234,7 @@ export class MessageProcessor {
 
       await adapter.sendText(
         channelId,
-        `⚠️ 安全模式已启用（连续 ${consecutiveErrors} 次异常）
+        `\u26a0\ufe0f 安全模式已启用（连续 ${consecutiveErrors} 次异常）
 
 当前限制：
 - 无法记住之前的对话
@@ -245,13 +247,13 @@ ${suggestions}`,
     } else if (safeModeThreshold >= 2 && consecutiveErrors === safeModeThreshold - 1) {
       await adapter.sendText(
         channelId,
-        `⚠️ 检测到异常（${consecutiveErrors}/${safeModeThreshold}）\n\n如果问题持续，系统将自动进入安全模式。建议使用 /status 查看状态。`,
+        `\u26a0\ufe0f 检测到异常（${consecutiveErrors}/${safeModeThreshold}）\n\n如果问题持续，系统将自动进入安全模式。建议使用 /status 查看状态。`,
         sendOpts
       );
     }
   }
 
-  private async _processMessageInternal(message: Message, resetTimer: (eventType?: string, toolName?: string) => void, isGroup: boolean, shouldSuppress: () => boolean): Promise<void> {
+  private async _processMessageInternal(message: Message, resetTimer: (eventType?: string, toolName?: string) => void, shouldSuppress: () => boolean): Promise<void> {
     const messageId = `${message.channel}_${message.channelId}_${message.timestamp || Date.now()}`;
     const channelInfo = this.channels.get(message.channel);
 
@@ -265,7 +267,7 @@ ${suggestions}`,
     try {
       // 检查是否为命令
       if (this.commandHandler) {
-        const cmdResult = await this.commandHandler(message.content, message.channel, message.channelId, message.userId, message.threadId);
+        const cmdResult = await this.commandHandler(message.content, message.channel, message.channelId, message.peerId, message.threadId);
         if (cmdResult) {
           // 话题消息：通过 rootId 回复到话题内
           const session = message.threadId ? await this.sessionManager.getOrCreateSession(message.channel, message.channelId, this.config.projects?.defaultPath || process.cwd(), message.threadId) : undefined;
@@ -298,7 +300,7 @@ ${suggestions}`,
       });
 
       const imageInfo = message.images && message.images.length > 0 ? ` [${message.images.length} image(s)]` : '';
-      const modeInfo = isBackground ? ' [后台]' : '';
+      const modeInfo = isBackground ? ' [\u540e\u53f0]' : '';
       logger.info(`[${message.channel}] ${message.channelId}: ${message.content}${imageInfo}${modeInfo}`);
 
       // 记录开始处理
@@ -316,14 +318,13 @@ ${suggestions}`,
       // 创建 StreamFlusher，传入文件标记模式用于自动过滤
       // 使用动态判断，确保切换项目后不会继续输出
       let firstReply = true;
-      const messageIsGroup = isGroup; // 捕获 isGroup 供闭包使用
       const flusher = new StreamFlusher(
         async (text, isFinal) => {
           const isCurrentlyBackground = await this.isBackgroundSession(session, message.channel, message.channelId);
 
           if (!isCurrentlyBackground) {
             const opts: { title?: string; replyToMessageId?: string; mentionUserIds?: string[]; replyInThread?: boolean } = {};
-            if (isFinal) opts.title = '最终回复:';
+            if (isFinal) opts.title = '\u6700\u7ec8\u56de\u590d:';
             // 话题会话：所有回复指向 rootId + reply_in_thread（确保消息进入话题）
             const rootId = session.metadata?.replyOpts?.rootId;
             if (rootId) {
@@ -371,7 +372,7 @@ ${suggestions}`,
       } catch (error) {
         if (classifyError(error) === ErrorType.CONTEXT_TOO_LONG && session.agentSessionId && hasCompact(this.agentRunner)) {
           // 尝试 compact 压缩会话
-          flusher.addActivity('⚠️ 上下文过长，正在压缩会话...');
+          flusher.addActivity('\u26a0\ufe0f 上下文过长，正在压缩会话...');
           await flusher.flush();
 
           const compacted = await this.agentRunner.compact(
@@ -380,7 +381,7 @@ ${suggestions}`,
 
           if (compacted) {
             // compact 成功，带 resume 重试
-            flusher.addActivity('✅ 压缩完成，正在重试...');
+            flusher.addActivity('\u2705 压缩完成，正在重试...');
             const retryStream = await this.agentRunner.runQuery(
               session.id,
               message.content,
@@ -426,7 +427,7 @@ ${suggestions}`,
           // 文件存在性检查：真实路径但文件不存在，告知用户
           if (!fs.existsSync(resolvedPath)) {
             logger.warn(`[${adapter.name}] File not found: ${resolvedPath}`);
-            await adapter.sendText(message.channelId, `⚠️ 文件未找到: ${filePath}`, this.getThreadSendOpts(session));
+            await adapter.sendText(message.channelId, `\u26a0\ufe0f 文件未找到: ${filePath}`, this.getThreadSendOpts(session));
             continue;
           }
 
@@ -436,7 +437,7 @@ ${suggestions}`,
             this.eventBus.publish({ type: 'agent:file-sent', sessionId: session.id, filePath: resolvedPath, channel: message.channel });
           } catch (error) {
             logger.error(`[${adapter.name}] Failed to send file: ${resolvedPath}`, error);
-            await adapter.sendText(message.channelId, `❌ 文件发送失败: ${filePath}`, this.getThreadSendOpts(session));
+            await adapter.sendText(message.channelId, `\u274c 文件发送失败: ${filePath}`, this.getThreadSendOpts(session));
           }
         }
       }
@@ -448,8 +449,8 @@ ${suggestions}`,
       const healthStatus = await this.sessionManager.getHealthStatus(session.id);
       if (healthStatus.safeMode) {
         const hint = session.threadId
-          ? '\n\n⚠️ 当前处于安全模式（无上下文记忆）。使用 /repair 修复 或 /clear 清空会话'
-          : '\n\n⚠️ 当前处于安全模式（无上下文记忆）。使用 /repair 修复 或 /new 新建会话';
+          ? '\n\n\u26a0\ufe0f 当前处于安全模式（无上下文记忆）。使用 /repair 修复 或 /clear 清空会话'
+          : '\n\n\u26a0\ufe0f 当前处于安全模式（无上下文记忆）。使用 /repair 修复 或 /new 新建会话';
         await adapter.sendText(message.channelId, hint, this.getThreadSendOpts(session));
       }
 
@@ -473,7 +474,7 @@ ${suggestions}`,
       if (isFinallyBackground) {
         const projectName = path.basename(session.projectPath);
         const count = this.messageCache.getCount(session.id);
-        await adapter.sendText(message.channelId, `[后台-${projectName}] ✓ 任务完成 (${count}条消息已缓存)`);
+        await adapter.sendText(message.channelId, `[\u540e\u53f0-${projectName}] \u2713 任务完成 (${count}条消息已缓存)`);
       }
 
       const duration = Date.now() - startTime;
@@ -614,8 +615,8 @@ ${suggestions}`,
         // compact 完成
         if (event.type === 'compact') {
           this.eventBus.publish({ type: 'agent:compact-complete', sessionId: session.id, preTokens: event.preTokens });
-          if (!this.currentIsGroup && !shouldSuppress()) {
-            flusher.addActivity(`💡 会话压缩完成，继续执行...（压缩前 tokens: ${event.preTokens}）`);
+          if (!shouldSuppress()) {
+            flusher.addActivity(`\ud83d\udca1 会话压缩完成，继续执行...（压缩前 tokens: ${event.preTokens}）`);
           }
         }
 
@@ -623,12 +624,12 @@ ${suggestions}`,
         if (event.type === 'task_progress') {
           const tools = event.toolUses ?? 0;
           const duration = event.durationMs ? `${Math.round(event.durationMs / 1000)}s` : '';
-          const stats = [tools > 0 ? `${tools}次工具调用` : '', duration].filter(Boolean).join(', ');
+          const stats = [tools > 0 ? `${tools}\u6b21\u5de5\u5177\u8c03\u7528` : '', duration].filter(Boolean).join(', ');
 
           if (event.summary && !shouldSuppress()) {
-            flusher.addActivity(`⏳ 子任务: ${event.summary}${stats ? ` (${stats})` : ''}`);
+            flusher.addActivity(`\u23f3 \u5b50\u4efb\u52a1: ${event.summary}${stats ? ` (${stats})` : ''}`);
           } else if (stats && !shouldSuppress()) {
-            flusher.addActivity(`⏳ 子任务进行中: ${stats}`);
+            flusher.addActivity(`\u23f3 \u5b50\u4efb\u52a1\u8fdb\u884c\u4e2d: ${stats}`);
           }
         }
 
@@ -643,7 +644,7 @@ ${suggestions}`,
           });
           if (!shouldSuppress()) {
             const desc = summarizeToolInput(event.name, event.input || {});
-            flusher.addActivity(`🔧 ${event.name}${desc ? ': ' + desc : ''}`);
+            flusher.addActivity(`\ud83d\udd27 ${event.name}${desc ? ': ' + desc : ''}`);
           }
         }
 
@@ -661,8 +662,8 @@ ${suggestions}`,
           });
 
           if (event.isError && !shouldSuppress()) {
-            const errorMsg = event.error || (typeof event.result === 'string' ? event.result : JSON.stringify(event.result)) || '执行失败';
-            flusher.addActivity(`⚠️ ${event.name || '工具'}: ${errorMsg}`);
+            const errorMsg = event.error || (typeof event.result === 'string' ? event.result : JSON.stringify(event.result)) || '\u6267\u884c\u5931\u8d25';
+            flusher.addActivity(`\u26a0\ufe0f ${event.name || '\u5de5\u5177'}: ${errorMsg}`);
           }
         }
 
@@ -700,7 +701,7 @@ ${suggestions}`,
       } else if (event.isError === true) {
         this.messageCache.addEvent(session.id, {
           type: 'error',
-          message: event.errors?.join('\n') || '未知错误',
+          message: event.errors?.join('\n') || '\u672a\u77e5\u9519\u8bef',
           timestamp: Date.now(),
           metadata: {
             errorType: event.subtype
@@ -711,7 +712,7 @@ ${suggestions}`,
     } catch (error) {
       logger.error('[MessageProcessor] Stream processing error:', error);
       if (error instanceof Error && error.message.includes('process exited')) {
-        flusher.addActivity('❌ Claude Code 进程异常退出，请重试');
+        flusher.addActivity('\u274c Claude Code \u8fdb\u7a0b\u5f02\u5e38\u9000\u51fa\uff0c\u8bf7\u91cd\u8bd5');
       }
       throw error;
     }
@@ -750,18 +751,18 @@ ${suggestions}`,
     if (!filePath) return true;
 
     // 精确占位符
-    const exactPlaceholders = ['...', '…', 'path', 'file', 'file_path', 'filepath',
-      '路径', '文件路径', '文件', 'filename', 'xxx'];
+    const exactPlaceholders = ['...', '\u2026', 'path', 'file', 'file_path', 'filepath',
+      '\u8def\u5f84', '\u6587\u4ef6\u8def\u5f84', '\u6587\u4ef6', 'filename', 'xxx'];
     if (exactPlaceholders.includes(filePath.toLowerCase())) return true;
 
     // 示例路径前缀
-    if (/^(\/path\/to\/|\.\/path\/to\/|example\/|示例|\/example)/i.test(filePath)) return true;
+    if (/^(\/path\/to\/|\.\/path\/to\/|example\/|\u793a\u4f8b|\/example)/i.test(filePath)) return true;
 
     // 含模板变量
     if (/\$\{.+\}|\{\{.+\}\}|<.+>/.test(filePath)) return true;
 
     // 纯标点/特殊字符（非路径字符）
-    if (/^[.\s…]+$/.test(filePath)) return true;
+    if (/^[.\s\u2026]+$/.test(filePath)) return true;
 
     // 含正则/代码特殊字符（Agent 在说明中引用了代码或正则表达式）
     if (/[\\[\]{}*+?|^$]/.test(filePath)) return true;

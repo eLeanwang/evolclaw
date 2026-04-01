@@ -1,9 +1,21 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { MessageProcessor } from '../../src/core/message-processor.js';
 import { EventBus } from '../../src/core/event-bus.js';
-import type { Config, Message, ChannelAdapter } from '../../src/types.js';
+import type { Config, Message, ChannelAdapter, ChannelPolicy } from '../../src/types.js';
 
 // === Mock Factories ===
+
+const testPolicy: ChannelPolicy = {
+  canSwitchProject: () => true,
+  canListProjects: () => true,
+  canCreateSession: () => true,
+  canDeleteSession: () => true,
+  canImportCliSession: () => true,
+  messagePrefix: () => '',
+  showActivities: () => true,
+  quietMode: (chatType, identity) => chatType === 'group' || identity !== 'owner',
+  accumulateErrors: (chatType, identity) => chatType === 'private' && identity === 'owner',
+};
 
 function createMockAgentRunner(streamEvents: any[], eventDelay = 0) {
   let interruptCalled = false;
@@ -41,16 +53,18 @@ function createMockSessionManager(overrides: Record<string, any> = {}) {
   return {
     getOrCreateSession: vi.fn().mockImplementation(async (_ch, _chId, _path, _tid, _meta, _name, userId) => ({
       id: 'test-session', channel: 'feishu', channelId: 'test-channel',
-      projectPath: '/tmp/test-project', threadId: '', agentType: 'claude',
+      projectPath: '/tmp/test-project', threadId: '', agentId: 'claude',
+      chatType: 'private', sessionMode: 'interactive',
       agentSessionId: 'test-claude-session',
-      isActive: true, createdAt: Date.now(), updatedAt: Date.now(),
+      createdAt: Date.now(), updatedAt: Date.now(),
       identity: userId === 'owner-123' ? { role: 'owner', mode: 'interactive' } : { role: 'guest', mode: 'interactive' },
     })),
     getActiveSession: vi.fn().mockResolvedValue({
       id: 'test-session', channel: 'feishu', channelId: 'test-channel',
-      projectPath: '/tmp/test-project', threadId: '', agentType: 'claude',
-      isActive: true,
+      projectPath: '/tmp/test-project', threadId: '', agentId: 'claude',
+      chatType: 'private', sessionMode: 'interactive',
     }),
+    resolveIdentity: vi.fn().mockReturnValue({ role: 'owner', mode: 'interactive' }),
     recordSuccess: vi.fn().mockResolvedValue(undefined),
     recordError: vi.fn().mockResolvedValue(0),
     getHealthStatus: vi.fn().mockResolvedValue({
@@ -92,13 +106,12 @@ function createConfig(ownerUserId?: string): Config {
   };
 }
 
-function createMessage(opts: { userId?: string; isGroup?: boolean; content?: string } = {}): Message {
+function createMessage(opts: { peerId?: string; chatType?: string; content?: string } = {}): Message {
   return {
     channel: 'feishu',
     channelId: 'test-channel',
     content: opts.content || 'hello',
-    userId: opts.userId,
-    isGroup: opts.isGroup ?? false,
+    peerId: opts.peerId || '',
     timestamp: Date.now(),
   };
 }
@@ -128,10 +141,10 @@ describe('Owner SafeMode & QuietMode', () => {
     const config = createConfig('owner-123');
 
     const processor = new MessageProcessor(runner as any, sessionManager as any, config, createMockMessageCache() as any, new EventBus());
-    processor.registerChannel(adapter);
+    processor.registerChannel(adapter, testPolicy);
 
     // 非主人单聊
-    const promise = processor.processMessage(createMessage({ userId: 'stranger-456' })).catch(e => e);
+    const promise = processor.processMessage(createMessage({ peerId: 'stranger-456' })).catch(e => e);
     await vi.advanceTimersByTimeAsync(100);
     await promise;
 
@@ -142,15 +155,24 @@ describe('Owner SafeMode & QuietMode', () => {
   it('should NOT accumulate errors in group chat even for owner', async () => {
     const runner = createMockAgentRunner([], 0);
     runner.runQuery.mockRejectedValue(new Error('some SDK error'));
-    const sessionManager = createMockSessionManager();
+    const sessionManager = createMockSessionManager({
+      getOrCreateSession: vi.fn().mockResolvedValue({
+        id: 'test-session', channel: 'feishu', channelId: 'test-channel',
+        projectPath: '/tmp/test-project', threadId: '', agentId: 'claude',
+        chatType: 'group', sessionMode: 'interactive',
+        agentSessionId: 'test-claude-session',
+        createdAt: Date.now(), updatedAt: Date.now(),
+        identity: { role: 'owner', mode: 'interactive' },
+      }),
+    });
     const adapter = createMockAdapter();
     const config = createConfig('owner-123');
 
     const processor = new MessageProcessor(runner as any, sessionManager as any, config, createMockMessageCache() as any, new EventBus());
-    processor.registerChannel(adapter);
+    processor.registerChannel(adapter, testPolicy);
 
     // 主人群聊
-    const promise = processor.processMessage(createMessage({ userId: 'owner-123', isGroup: true })).catch(e => e);
+    const promise = processor.processMessage(createMessage({ peerId: 'owner-123' })).catch(e => e);
     await vi.advanceTimersByTimeAsync(100);
     await promise;
 
@@ -173,9 +195,9 @@ describe('Owner SafeMode & QuietMode', () => {
     const config = createConfig('owner-123');
 
     const processor = new MessageProcessor(runner as any, sessionManager as any, config, createMockMessageCache() as any, new EventBus());
-    processor.registerChannel(adapter);
+    processor.registerChannel(adapter, testPolicy);
 
-    const promise = processor.processMessage(createMessage({ userId: 'owner-123' })).catch(e => e);
+    const promise = processor.processMessage(createMessage({ peerId: 'owner-123' })).catch(e => e);
     await vi.advanceTimersByTimeAsync(30000);
     const error = await promise;
 
@@ -201,9 +223,9 @@ describe('Owner SafeMode & QuietMode', () => {
     const config = createConfig('owner-123');
 
     const processor = new MessageProcessor(runner as any, sessionManager as any, config, createMockMessageCache() as any, new EventBus());
-    processor.registerChannel(adapter);
+    processor.registerChannel(adapter, testPolicy);
 
-    const promise = processor.processMessage(createMessage({ userId: 'owner-123' }));
+    const promise = processor.processMessage(createMessage({ peerId: 'owner-123' }));
     for (let i = 0; i < 10; i++) await vi.advanceTimersByTimeAsync(50);
     // flush delay
     await vi.advanceTimersByTimeAsync(5000);
@@ -222,9 +244,9 @@ describe('Owner SafeMode & QuietMode', () => {
     const config = createConfig('owner-123');
 
     const processor = new MessageProcessor(runner as any, sessionManager as any, config, createMockMessageCache() as any, new EventBus());
-    processor.registerChannel(adapter);
+    processor.registerChannel(adapter, testPolicy);
 
-    const promise = processor.processMessage(createMessage({ userId: 'owner-123' })).catch(e => e);
+    const promise = processor.processMessage(createMessage({ peerId: 'owner-123' })).catch(e => e);
     await vi.advanceTimersByTimeAsync(30000);
     const error = await promise;
 
@@ -241,9 +263,9 @@ describe('Owner SafeMode & QuietMode', () => {
     const config = createConfig('owner-123');
 
     const processor = new MessageProcessor(runner as any, sessionManager as any, config, createMockMessageCache() as any, new EventBus());
-    processor.registerChannel(adapter);
+    processor.registerChannel(adapter, testPolicy);
 
-    const promise = processor.processMessage(createMessage({ userId: 'stranger-456' })).catch(e => e);
+    const promise = processor.processMessage(createMessage({ peerId: 'stranger-456' })).catch(e => e);
     await vi.advanceTimersByTimeAsync(30000);
     const error = await promise;
 
@@ -262,9 +284,9 @@ describe('Owner SafeMode & QuietMode', () => {
     const config = createConfig('owner-123');
 
     const processor = new MessageProcessor(runner as any, sessionManager as any, config, createMockMessageCache() as any, new EventBus());
-    processor.registerChannel(adapter);
+    processor.registerChannel(adapter, testPolicy);
 
-    const promise = processor.processMessage(createMessage({ userId: 'stranger-456' })).catch(e => e);
+    const promise = processor.processMessage(createMessage({ peerId: 'stranger-456' })).catch(e => e);
     await vi.advanceTimersByTimeAsync(30000);
     await promise;
 

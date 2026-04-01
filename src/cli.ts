@@ -89,18 +89,20 @@ function countLines(pkgRoot: string, logDir: string) {
   console.log('\n[launcher] 正在统计代码行数...\n');
 
   const core = countDir(path.join(srcDir, 'core'));
+  const agents = countDir(path.join(srcDir, 'agents'));
   const channels = countDir(path.join(srcDir, 'channels'), 'experimental');
   const utils = countDir(path.join(srcDir, 'utils'));
   const entry = countFile(path.join(srcDir, 'index.ts'))
     + countFile(path.join(srcDir, 'config.ts'))
     + countFile(path.join(srcDir, 'types.ts'))
     + countFile(path.join(srcDir, 'cli.ts'));
-  const total = core + channels + utils + entry;
+  const total = core + agents + channels + utils + entry;
 
   console.log('==================================================');
   console.log('EvolClaw 代码统计');
   console.log('==================================================');
   console.log(`核心模块:         ${String(core).padStart(8)} 行`);
+  console.log(`Agent 模块:       ${String(agents).padStart(8)} 行`);
   console.log(`渠道适配:         ${String(channels).padStart(8)} 行`);
   console.log(`工具库:           ${String(utils).padStart(8)} 行`);
   console.log(`入口与配置:       ${String(entry).padStart(8)} 行`);
@@ -122,7 +124,7 @@ function countLines(pkgRoot: string, logDir: string) {
   }
   if (shouldAppend) {
     const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
-    fs.appendFileSync(statsFile, `${now}\t${core}\t${channels}\t${utils}\t${entry}\t${total}\n`);
+    fs.appendFileSync(statsFile, `${now}\t${core}\t${agents}\t${channels}\t${utils}\t${entry}\t${total}\n`);
   }
 
   showHistory(statsFile);
@@ -137,21 +139,29 @@ function showHistory(statsFile: string) {
   console.log('\n==================================================');
   console.log('历史记录（最近 8 次）');
   console.log('==================================================');
-  console.log(`${'时间'.padEnd(20)} ${'核心'.padStart(6)} ${'渠道'.padStart(6)} ${'工具'.padStart(6)} ${'入口'.padStart(6)} ${'总计'.padStart(6)} ${'变化'.padStart(8)}`);
+  console.log(`${'时间'.padEnd(20)} ${'核心'.padStart(6)} ${'Agent'.padStart(6)} ${'渠道'.padStart(6)} ${'工具'.padStart(6)} ${'入口'.padStart(6)} ${'总计'.padStart(6)} ${'变化'.padStart(8)}`);
   console.log('--------------------------------------------------');
 
   let prevTotal: number | null = null;
   for (const line of recent) {
     const parts = line.split('\t');
-    if (parts.length < 6) continue;
-    const [time, c, ch, u, e, t] = parts;
+    // 兼容旧格式（6列: time,core,ch,utils,entry,total）和新格式（7列: +agents）
+    let time: string, c: string, a: string, ch: string, u: string, e: string, t: string;
+    if (parts.length >= 7) {
+      [time, c, a, ch, u, e, t] = parts;
+    } else if (parts.length >= 6) {
+      [time, c, ch, u, e, t] = parts;
+      a = '-';
+    } else {
+      continue;
+    }
     const total = parseInt(t, 10);
     let diff = '-';
     if (prevTotal !== null) {
       const change = total - prevTotal;
       diff = change >= 0 ? `+${change}` : `${change}`;
     }
-    console.log(`${time.padEnd(20)} ${c.padStart(6)} ${ch.padStart(6)} ${u.padStart(6)} ${e.padStart(6)} ${t.padStart(6)} ${diff.padStart(8)}`);
+    console.log(`${time.padEnd(20)} ${c.padStart(6)} ${a.padStart(6)} ${ch.padStart(6)} ${u.padStart(6)} ${e.padStart(6)} ${t.padStart(6)} ${diff.padStart(8)}`);
     prevTotal = total;
   }
   console.log('==================================================');
@@ -355,12 +365,12 @@ async function cmdStatus() {
 
         // Get recent active sessions (last 5)
         const recentSessions = db.prepare(`
-          SELECT id, project_path, name, channel, is_group, thread_id, updated_at
+          SELECT id, project_path, name, channel, chat_type, thread_id, updated_at
           FROM sessions
           WHERE deleted_at IS NULL
           ORDER BY updated_at DESC
           LIMIT 5
-        `).all() as Array<{ id: string; project_path: string; name: string | null; channel: string; is_group: number; thread_id: string; updated_at: number }>;
+        `).all() as Array<{ id: string; project_path: string; name: string | null; channel: string; chat_type: string; thread_id: string; updated_at: number }>;
 
         db.close();
 
@@ -370,7 +380,7 @@ async function cmdStatus() {
           for (const s of recentSessions) {
             const projectName = path.basename(s.project_path);
             const sessionType = s.thread_id ? '话题会话' : '主会话';
-            const chatType = s.is_group ? '群聊' : '单聊';
+            const chatType = s.chat_type === 'group' ? '群聊' : '单聊';
             const sessionName = s.name || '默认会话';
             const timeAgo = formatTimeAgo(Date.now() - s.updated_at);
             console.log(`  • ${projectName} / ${sessionName} (${sessionType}, ${chatType}) - ${timeAgo}`);
@@ -393,7 +403,7 @@ async function cmdStatus() {
       const Database = await import('node:sqlite');
       const db = new Database.DatabaseSync(p.db);
       const totalSessions = db.prepare('SELECT count(*) as cnt FROM sessions WHERE deleted_at IS NULL').get() as { cnt: number };
-      const activeSessions = db.prepare('SELECT count(*) as cnt FROM sessions WHERE is_active=1 AND deleted_at IS NULL').get() as { cnt: number };
+      const activeSessions = db.prepare("SELECT count(*) as cnt FROM sessions WHERE json_extract(metadata, '$.isActive') = true AND deleted_at IS NULL").get() as { cnt: number };
       const uniqueChats = db.prepare('SELECT count(DISTINCT channel_id) as cnt FROM sessions WHERE deleted_at IS NULL').get() as { cnt: number };
       const projects = db.prepare('SELECT count(DISTINCT project_path) as cnt FROM sessions WHERE deleted_at IS NULL').get() as { cnt: number };
       db.close();

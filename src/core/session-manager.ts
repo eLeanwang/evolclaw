@@ -44,18 +44,19 @@ export class SessionManager {
   }
 
   private rowToSession(row: any): Session {
+    const metadata = row.metadata ? JSON.parse(row.metadata) : undefined;
     return {
       id: row.id,
       channel: row.channel,
       channelId: row.channel_id,
       projectPath: row.project_path,
       threadId: row.thread_id || '',
-      agentType: row.agent_type || 'claude',
+      agentId: row.agent_id || 'claude',
+      chatType: row.chat_type || 'private',
+      sessionMode: row.session_mode || 'interactive',
       agentSessionId: row.agent_session_id,
-      metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
+      metadata,
       name: row.name,
-      isGroup: row.is_group === 1,
-      isActive: row.is_active === 1,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       deletedAt: row.deleted_at ?? undefined,
@@ -76,11 +77,20 @@ export class SessionManager {
     logger.debug(`[SessionManager] updateIdentity: sessionId=${sessionId}, role=${identity.role}`);
   }
 
-  private deactivateAll(channel: string, channelId: string): void {
-    this.db.prepare(`
-      UPDATE sessions SET is_active = 0, updated_at = ?
-      WHERE channel = ? AND channel_id = ? AND is_active = 1
-    `).run(Date.now(), channel, channelId);
+  /** 取消所有活跃会话（通过 metadata.isActive） */
+  private deactivateAllMetadata(channel: string, channelId: string): void {
+    const rows = this.db.prepare(`
+      SELECT id, metadata FROM sessions
+      WHERE channel = ? AND channel_id = ? AND json_extract(metadata, '$.isActive') = true
+    `).all(channel, channelId) as any[];
+
+    for (const row of rows) {
+      const metadata = row.metadata ? JSON.parse(row.metadata) : {};
+      metadata.isActive = false;
+      this.db.prepare(`
+        UPDATE sessions SET metadata = ?, updated_at = ? WHERE id = ?
+      `).run(JSON.stringify(metadata), Date.now(), row.id);
+    }
   }
 
   private validateSessionFile(row: any): string | undefined {
@@ -95,7 +105,7 @@ export class SessionManager {
 
   private insertSession(session: Session): void {
     this.db.prepare(`
-      INSERT OR IGNORE INTO sessions (id, channel, channel_id, project_path, thread_id, agent_type, agent_session_id, name, is_active, is_group, created_at, updated_at, metadata)
+      INSERT OR IGNORE INTO sessions (id, channel, channel_id, project_path, thread_id, agent_id, chat_type, session_mode, agent_session_id, name, created_at, updated_at, metadata)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       session.id,
@@ -103,11 +113,11 @@ export class SessionManager {
       session.channelId,
       session.projectPath,
       session.threadId || '',
-      session.agentType || 'claude',
+      session.agentId || 'claude',
+      session.chatType || 'private',
+      session.sessionMode || 'interactive',
       session.agentSessionId ?? null,
       session.name ?? null,
-      session.isActive ? 1 : 0,
-      session.isGroup ? 1 : 0,
       session.createdAt,
       session.updatedAt,
       session.metadata ? JSON.stringify(session.metadata) : null
@@ -134,65 +144,139 @@ export class SessionManager {
     const hasName = tableInfo.some((col: any) => col.name === 'name');
     const hasThreadId = tableInfo.some((col: any) => col.name === 'thread_id');
     const hasAgentType = tableInfo.some((col: any) => col.name === 'agent_type');
+    const hasAgentId = tableInfo.some((col: any) => col.name === 'agent_id');
     const hasAgentSessionId = tableInfo.some((col: any) => col.name === 'agent_session_id');
     const hasMetadata = tableInfo.some((col: any) => col.name === 'metadata');
     const hasIsGroup = tableInfo.some((col: any) => col.name === 'is_group');
+    const hasChatType = tableInfo.some((col: any) => col.name === 'chat_type');
+    const hasSessionMode = tableInfo.some((col: any) => col.name === 'session_mode');
     const hasDeletedAt = tableInfo.some((col: any) => col.name === 'deleted_at');
 
-    // 检查是否有唯一约束
-    const indexes = this.db.prepare('PRAGMA index_list(sessions)').all() as any[];
-    const hasUniqueConstraint = indexes.some((idx: any) => idx.origin === 'u');
+    // 检测是否需要 schema 重构迁移（旧字段存在，新字段不存在）
+    const needsSchemaRefactor = tableInfo.length > 0 && (hasIsGroup || hasIsActive || hasAgentType) && (!hasChatType || !hasAgentId || !hasSessionMode);
 
-    // 迁移到新表结构（添加 thread_id, agent_type, agent_session_id, metadata）
-    if (!hasThreadId && tableInfo.length > 0) {
-      logger.info('Migrating database schema (adding thread support)...');
+    // Schema 重构迁移：is_group → chat_type, agent_type → agent_id, 移除 is_active
+    if (needsSchemaRefactor) {
+      logger.info('Migrating database schema (session model refactor)...');
       this.db.exec(`DROP TABLE IF EXISTS sessions_new`);
       this.db.exec(`
         CREATE TABLE sessions_new (
           id TEXT PRIMARY KEY,
           channel TEXT NOT NULL,
           channel_id TEXT NOT NULL,
-          project_path TEXT NOT NULL,
+          agent_id TEXT NOT NULL DEFAULT 'claude',
           thread_id TEXT NOT NULL DEFAULT '',
-          agent_type TEXT NOT NULL DEFAULT 'claude',
+          chat_type TEXT NOT NULL DEFAULT 'private',
+          session_mode TEXT NOT NULL DEFAULT 'interactive',
+          project_path TEXT NOT NULL,
           agent_session_id TEXT,
           name TEXT,
-          is_active INTEGER NOT NULL DEFAULT 0,
           created_at INTEGER NOT NULL,
           updated_at INTEGER NOT NULL,
-          metadata TEXT
-        );
-        INSERT INTO sessions_new (id, channel, channel_id, project_path, thread_id, agent_type, agent_session_id, name, is_active, created_at, updated_at, metadata)
-          SELECT id, channel, channel_id, project_path, '', 'claude', claude_session_id, name, is_active, created_at, updated_at, NULL FROM sessions;
-        DROP TABLE sessions;
-        ALTER TABLE sessions_new RENAME TO sessions;
+          metadata TEXT,
+          deleted_at INTEGER
+        )
       `);
-      // 话题会话唯一约束（thread_id 非空时才生效）
+
+      // 迁移数据：is_group → chat_type, agent_type → agent_id
       this.db.exec(`
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_thread
-          ON sessions(channel, channel_id, project_path, thread_id)
-          WHERE thread_id != ''
+        INSERT INTO sessions_new (id, channel, channel_id, agent_id, thread_id, chat_type, session_mode, project_path, agent_session_id, name, created_at, updated_at, metadata, deleted_at)
+        SELECT
+          id,
+          channel,
+          channel_id,
+          COALESCE(agent_type, 'claude'),
+          COALESCE(thread_id, ''),
+          CASE WHEN is_group = 1 THEN 'group' ELSE 'private' END,
+          'interactive',
+          project_path,
+          agent_session_id,
+          name,
+          created_at,
+          updated_at,
+          metadata,
+          deleted_at
+        FROM sessions
       `);
-      logger.info('✓ Database migration completed (thread support added)');
+
+      this.db.exec(`DROP TABLE sessions`);
+      this.db.exec(`ALTER TABLE sessions_new RENAME TO sessions`);
+
+      // 创建新索引
+      this.db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_session_space
+          ON sessions(channel, channel_id, agent_id, thread_id)
+          WHERE deleted_at IS NULL
+      `);
+      this.db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_session_active
+          ON sessions(channel, channel_id)
+          WHERE deleted_at IS NULL
+      `);
+
+      logger.info('✓ Database migration completed (session model refactored)');
     }
 
-    // Migration: add is_group column
-    if (!hasIsGroup && tableInfo.length > 0) {
-      logger.info('Migrating database schema (adding is_group)...');
-      const addIsGroupCol = 'ALTER TABLE sessions ADD COLUMN is_group INTEGER NOT NULL DEFAULT 0';
-      this.db.exec(addIsGroupCol);
-      logger.info('✓ Database migration completed (is_group added)');
-    }
+    // ── 旧 schema 迁移（仅当旧字段存在、新字段还未迁移时运行）──
+    // 这些迁移按顺序将最旧的 schema 逐步升级到包含 is_group 的中间格式，
+    // 然后由上面的 needsSchemaRefactor 迁移一步到位转为新 schema。
+    if (!needsSchemaRefactor && tableInfo.length > 0 && hasAgentType) {
+      // 检查是否有唯一约束
+      const indexes = this.db.prepare('PRAGMA index_list(sessions)').all() as any[];
+      const hasUniqueConstraint = indexes.some((idx: any) => idx.origin === 'u');
 
-    // Reset incorrect is_group values (oc_ prefix doesn't reliably indicate group chat)
-    const resetIncorrectIsGroup = "UPDATE sessions SET is_group = 0 WHERE channel = 'feishu'";
-    this.db.exec(resetIncorrectIsGroup);
+      // 迁移到新表结构（添加 thread_id, agent_type, agent_session_id, metadata）
+      if (!hasThreadId) {
+        logger.info('Migrating database schema (adding thread support)...');
+        this.db.exec(`DROP TABLE IF EXISTS sessions_new`);
+        this.db.exec(`
+          CREATE TABLE sessions_new (
+            id TEXT PRIMARY KEY,
+            channel TEXT NOT NULL,
+            channel_id TEXT NOT NULL,
+            project_path TEXT NOT NULL,
+            thread_id TEXT NOT NULL DEFAULT '',
+            agent_type TEXT NOT NULL DEFAULT 'claude',
+            agent_session_id TEXT,
+            name TEXT,
+            is_active INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            metadata TEXT
+          );
+          INSERT INTO sessions_new (id, channel, channel_id, project_path, thread_id, agent_type, agent_session_id, name, is_active, created_at, updated_at, metadata)
+            SELECT id, channel, channel_id, project_path, '', 'claude', claude_session_id, name, is_active, created_at, updated_at, NULL FROM sessions;
+          DROP TABLE sessions;
+          ALTER TABLE sessions_new RENAME TO sessions;
+        `);
+        // 话题会话唯一约束（thread_id 非空时才生效）
+        this.db.exec(`
+          CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_thread
+            ON sessions(channel, channel_id, project_path, thread_id)
+            WHERE thread_id != ''
+        `);
+        logger.info('✓ Database migration completed (thread support added)');
+      }
 
-    // Migration: add deleted_at column
-    if (!hasDeletedAt && tableInfo.length > 0) {
-      logger.info('Migrating database schema (adding deleted_at)...');
-      this.db.exec(`ALTER TABLE sessions ADD COLUMN deleted_at INTEGER`);
-      logger.info('✓ Database migration completed (deleted_at added)');
+      // Migration: add is_group column
+      if (!hasIsGroup) {
+        logger.info('Migrating database schema (adding is_group)...');
+        const addIsGroupCol = 'ALTER TABLE sessions ADD COLUMN is_group INTEGER NOT NULL DEFAULT 0';
+        this.db.exec(addIsGroupCol);
+        logger.info('✓ Database migration completed (is_group added)');
+      }
+
+      // Reset incorrect is_group values (oc_ prefix doesn't reliably indicate group chat)
+      if (hasIsGroup) {
+        this.db.exec("UPDATE sessions SET is_group = 0 WHERE channel = 'feishu'");
+      }
+
+      // Migration: add deleted_at column
+      if (!hasDeletedAt) {
+        logger.info('Migrating database schema (adding deleted_at)...');
+        this.db.exec(`ALTER TABLE sessions ADD COLUMN deleted_at INTEGER`);
+        logger.info('✓ Database migration completed (deleted_at added)');
+      }
     }
 
     // Migration: normalize metadata rootId (feishu.rootId / threadRootId → replyOpts.rootId)
@@ -230,24 +314,29 @@ export class SessionManager {
         id TEXT PRIMARY KEY,
         channel TEXT NOT NULL,
         channel_id TEXT NOT NULL,
-        project_path TEXT NOT NULL,
+        agent_id TEXT NOT NULL DEFAULT 'claude',
         thread_id TEXT NOT NULL DEFAULT '',
-        agent_type TEXT NOT NULL DEFAULT 'claude',
+        chat_type TEXT NOT NULL DEFAULT 'private',
+        session_mode TEXT NOT NULL DEFAULT 'interactive',
+        project_path TEXT NOT NULL,
         agent_session_id TEXT,
         name TEXT,
-        is_active INTEGER NOT NULL DEFAULT 0,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
         metadata TEXT,
-        is_group INTEGER NOT NULL DEFAULT 0,
         deleted_at INTEGER
       )
     `);
-    // 话题会话唯一约束（thread_id 非空时才生效）
+    // 会话空间索引（查询优化，无唯一约束）
     this.db.exec(`
-      CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_thread
-        ON sessions(channel, channel_id, project_path, thread_id)
-        WHERE thread_id != ''
+      CREATE INDEX IF NOT EXISTS idx_session_space
+        ON sessions(channel, channel_id, agent_id, thread_id)
+        WHERE deleted_at IS NULL
+    `);
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_session_active
+        ON sessions(channel, channel_id)
+        WHERE deleted_at IS NULL
     `);
 
     // 创建消息去重表
@@ -285,9 +374,10 @@ export class SessionManager {
     threadId?: string,
     metadata?: any,
     name?: string,
-    userId?: string
+    userId?: string,
+    chatType?: 'private' | 'group'
   ): Promise<Session> {
-    // 话题会话：独立查找/创建，不参与 isActive 竞争
+    // 话题会话：独立查找/创建
     if (threadId) {
       const session = this.getOrCreateThreadSession(channel, channelId, threadId, defaultProjectPath, metadata, name);
       session.identity = this.resolveIdentity(channel, userId);
@@ -297,7 +387,7 @@ export class SessionManager {
     // 主会话：查找活跃会话
     const active = this.db.prepare(`
       SELECT * FROM sessions
-      WHERE channel = ? AND channel_id = ? AND is_active = 1 AND thread_id = '' AND deleted_at IS NULL
+      WHERE channel = ? AND channel_id = ? AND json_extract(metadata, '$.isActive') = true AND thread_id = '' AND deleted_at IS NULL
     `).get(channel, channelId) as any;
 
     if (active) {
@@ -316,27 +406,33 @@ export class SessionManager {
 
     if (existing) {
       const validSessionId = this.validateSessionFile(existing);
-      this.db.prepare(`UPDATE sessions SET is_active = 1, updated_at = ? WHERE id = ?`).run(Date.now(), existing.id);
-      const session = { ...this.rowToSession(existing), agentSessionId: validSessionId, isActive: true };
+      // 激活此会话
+      const existingMeta = existing.metadata ? JSON.parse(existing.metadata) : {};
+      existingMeta.isActive = true;
+      this.db.prepare(`UPDATE sessions SET metadata = ?, updated_at = ? WHERE id = ?`)
+        .run(JSON.stringify(existingMeta), Date.now(), existing.id);
+      const session = { ...this.rowToSession(existing), agentSessionId: validSessionId, metadata: existingMeta };
       session.identity = this.resolveIdentity(channel, userId);
       return session;
     }
 
     // 创建新主会话
+    const sessionMetadata = { ...metadata, isActive: true };
     const session: Session = {
       id: `${channel}-${channelId}-${Date.now()}`,
       channel,
       channelId,
       projectPath: defaultProjectPath,
       threadId: '',
-      agentType: 'claude',
-      metadata,
+      agentId: 'claude',
+      chatType: chatType || 'private',
+      sessionMode: 'interactive',
+      metadata: sessionMetadata,
       name: name || '默认会话',
-      identity: this.resolveIdentity(channel, userId),
-      isActive: true,
       createdAt: Date.now(),
       updatedAt: Date.now()
     };
+    session.identity = this.resolveIdentity(channel, userId);
 
     this.insertSession(session);
     this.eventBus.publish({
@@ -346,17 +442,18 @@ export class SessionManager {
       channelId,
       projectPath: defaultProjectPath,
       name: session.name,
+      chatType: session.chatType,
       timestamp: Date.now()
     });
     return session;
   }
 
-  async updateSession(sessionId: string, updates: Partial<Pick<Session, 'isGroup' | 'name' | 'metadata'>>): Promise<void> {
+  async updateSession(sessionId: string, updates: Partial<Pick<Session, 'chatType' | 'name' | 'metadata'>>): Promise<void> {
     const sets: string[] = [];
     const values: any[] = [];
-    if (updates.isGroup !== undefined) {
-      sets.push('is_group = ?');
-      values.push(updates.isGroup ? 1 : 0);
+    if (updates.chatType !== undefined) {
+      sets.push('chat_type = ?');
+      values.push(updates.chatType);
     }
     if (updates.name !== undefined) {
       sets.push('name = ?');
@@ -403,22 +500,23 @@ export class SessionManager {
     // 继承当前活跃主会话的项目路径
     const activeMain = this.db.prepare(`
       SELECT project_path FROM sessions
-      WHERE channel = ? AND channel_id = ? AND is_active = 1 AND thread_id = ''
+      WHERE channel = ? AND channel_id = ? AND json_extract(metadata, '$.isActive') = true AND thread_id = ''
     `).get(channel, channelId) as any;
 
     const projectPath = activeMain?.project_path || defaultProjectPath;
 
-    // 创建新话题会话（isActive 固定为 false）
+    // 创建新话题会话
     const session: Session = {
       id: `${channel}-${channelId}-${Date.now()}`,
       channel,
       channelId,
       projectPath,
       threadId,
-      agentType: 'claude',
+      agentId: 'claude',
+      chatType: 'private',
+      sessionMode: 'interactive',
       metadata,
       name: name || '话题会话',
-      isActive: false,
       createdAt: Date.now(),
       updatedAt: Date.now()
     };
@@ -438,7 +536,7 @@ export class SessionManager {
 
   async switchProject(channel: string, channelId: string, newProjectPath: string): Promise<Session> {
     // 1. 取消当前活跃会话
-    this.deactivateAll(channel, channelId);
+    this.deactivateAllMetadata(channel, channelId);
 
     // 2. 查找目标项目的会话
     const target = this.db.prepare(`
@@ -449,14 +547,12 @@ export class SessionManager {
 
     if (target) {
       const validSessionId = this.validateSessionFile(target);
-
-      // 激活已有会话
-      this.db.prepare(`
-        UPDATE sessions SET is_active = 1, updated_at = ?
-        WHERE id = ?
-      `).run(Date.now(), target.id);
-
-      return { ...this.rowToSession(target), agentSessionId: validSessionId, isActive: true };
+      // 激活目标会话
+      const metadata = target.metadata ? JSON.parse(target.metadata) : {};
+      metadata.isActive = true;
+      this.db.prepare(`UPDATE sessions SET metadata = ?, updated_at = ? WHERE id = ?`)
+        .run(JSON.stringify(metadata), Date.now(), target.id);
+      return { ...this.rowToSession(target), agentSessionId: validSessionId, metadata };
     }
 
     // 3. 创建新会话
@@ -466,9 +562,11 @@ export class SessionManager {
       channelId,
       projectPath: newProjectPath,
       threadId: '',
-      agentType: 'claude',
+      agentId: 'claude',
+      chatType: 'private',
+      sessionMode: 'interactive',
+      metadata: { isActive: true },
       name: '默认会话',
-      isActive: true,
       createdAt: Date.now(),
       updatedAt: Date.now()
     };
@@ -492,7 +590,7 @@ export class SessionManager {
     this.db.prepare(`
       UPDATE sessions
       SET agent_session_id = ?, updated_at = ?
-      WHERE channel = ? AND channel_id = ? AND is_active = 1
+      WHERE channel = ? AND channel_id = ? AND json_extract(metadata, '$.isActive') = true
     `).run(agentSessionId, Date.now(), channel, channelId);
   }
 
@@ -511,14 +609,14 @@ export class SessionManager {
     this.db.prepare(`
       UPDATE sessions
       SET agent_session_id = NULL, updated_at = ?
-      WHERE channel = ? AND channel_id = ? AND is_active = 1
+      WHERE channel = ? AND channel_id = ? AND json_extract(metadata, '$.isActive') = true
     `).run(Date.now(), channel, channelId);
   }
 
   async getActiveSession(channel: string, channelId: string): Promise<Session | undefined> {
     const row = this.db.prepare(`
       SELECT * FROM sessions
-      WHERE channel = ? AND channel_id = ? AND is_active = 1 AND deleted_at IS NULL
+      WHERE channel = ? AND channel_id = ? AND json_extract(metadata, '$.isActive') = true AND deleted_at IS NULL
     `).get(channel, channelId) as any;
 
     if (!row) return undefined;
@@ -565,15 +663,15 @@ export class SessionManager {
     if (!target) return null;
 
     // 取消当前活跃会话
-    this.deactivateAll(channel, channelId);
+    this.deactivateAllMetadata(channel, channelId);
 
     // 激活目标会话
-    this.db.prepare(`
-      UPDATE sessions SET is_active = 1, updated_at = ?
-      WHERE id = ?
-    `).run(Date.now(), targetSessionId);
+    const metadata = target.metadata ? JSON.parse(target.metadata) : {};
+    metadata.isActive = true;
+    this.db.prepare(`UPDATE sessions SET metadata = ?, updated_at = ? WHERE id = ?`)
+      .run(JSON.stringify(metadata), Date.now(), targetSessionId);
 
-    return { ...this.rowToSession(target), isActive: true, updatedAt: Date.now() };
+    return { ...this.rowToSession(target), metadata, updatedAt: Date.now() };
   }
 
   async renameSession(sessionId: string, newName: string): Promise<boolean> {
@@ -600,7 +698,7 @@ export class SessionManager {
 
   async createNewSession(channel: string, channelId: string, projectPath: string, name?: string): Promise<Session> {
     // 取消当前活跃会话
-    this.deactivateAll(channel, channelId);
+    this.deactivateAllMetadata(channel, channelId);
 
     // 创建新会话
     const session: Session = {
@@ -609,9 +707,11 @@ export class SessionManager {
       channelId,
       projectPath,
       threadId: '',
-      agentType: 'claude',
+      agentId: 'claude',
+      chatType: 'private',
+      sessionMode: 'interactive',
+      metadata: { isActive: true },
       name: name || '默认会话',
-      isActive: true,
       createdAt: Date.now(),
       updatedAt: Date.now()
     };
@@ -639,7 +739,7 @@ export class SessionManager {
     name?: string
   ): Promise<Session> {
     // 取消当前活跃会话
-    this.deactivateAll(sourceSession.channel, sourceSession.channelId);
+    this.deactivateAllMetadata(sourceSession.channel, sourceSession.channelId);
 
     const session: Session = {
       id: `${sourceSession.channel}-${sourceSession.channelId}-${Date.now()}`,
@@ -647,10 +747,12 @@ export class SessionManager {
       channelId: sourceSession.channelId,
       projectPath: sourceSession.projectPath,
       threadId: sourceSession.threadId || '',
-      agentType: sourceSession.agentType || 'claude',
+      agentId: sourceSession.agentId || 'claude',
+      chatType: sourceSession.chatType || 'private',
+      sessionMode: sourceSession.sessionMode || 'interactive',
       agentSessionId: forkedAgentSessionId,
+      metadata: { isActive: true },
       name: name || `${sourceSession.name || '会话'}-分支`,
-      isActive: true,
       createdAt: Date.now(),
       updatedAt: Date.now()
     };
@@ -792,7 +894,7 @@ export class SessionManager {
 
   async importCliSession(channel: string, channelId: string, projectPath: string, agentSessionId: string): Promise<Session> {
     // 取消当前活跃会话
-    this.deactivateAll(channel, channelId);
+    this.deactivateAllMetadata(channel, channelId);
 
     // 从 CLI 会话文件读取标题
     const fileInfo = this.getSessionFileInfo(projectPath, agentSessionId);
@@ -805,10 +907,12 @@ export class SessionManager {
       channelId,
       projectPath,
       threadId: '',
-      agentType: 'claude',
+      agentId: 'claude',
+      chatType: 'private',
+      sessionMode: 'interactive',
       agentSessionId,
+      metadata: { isActive: true },
       name,
-      isActive: true,
       createdAt: Date.now(),
       updatedAt: Date.now()
     };

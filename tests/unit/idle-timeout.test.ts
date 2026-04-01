@@ -1,7 +1,19 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { MessageProcessor } from '../../src/core/message-processor.js';
 import { EventBus } from '../../src/core/event-bus.js';
-import type { Config, Message, ChannelAdapter } from '../../src/types.js';
+import type { Config, Message, ChannelAdapter, ChannelPolicy } from '../../src/types.js';
+
+const testPolicy: ChannelPolicy = {
+  canSwitchProject: () => true,
+  canListProjects: () => true,
+  canCreateSession: () => true,
+  canDeleteSession: () => true,
+  canImportCliSession: () => true,
+  messagePrefix: () => '',
+  showActivities: () => true,
+  quietMode: (chatType, identity) => chatType === 'group' || identity !== 'owner',
+  accumulateErrors: (chatType, identity) => chatType === 'private' && identity === 'owner',
+};
 
 // Mock AgentRunner
 function createMockAgentRunner(streamEvents: any[], eventDelay = 0) {
@@ -48,9 +60,10 @@ function createMockSessionManager() {
       channelId: 'test-channel',
       projectPath: '/tmp/test-project',
       threadId: '',
-      agentType: 'claude',
+      agentId: 'claude',
+      chatType: 'private',
+      sessionMode: 'interactive',
       agentSessionId: 'test-claude-session',
-      isActive: true,
       createdAt: Date.now(),
       updatedAt: Date.now(),
       identity: userId === 'owner-123' ? { role: 'owner', mode: 'interactive' } : { role: 'guest', mode: 'interactive' },
@@ -61,8 +74,9 @@ function createMockSessionManager() {
       channelId: 'test-channel',
       projectPath: '/tmp/test-project',
       threadId: '',
-      agentType: 'claude',
-      isActive: true,
+      agentId: 'claude',
+      chatType: 'private',
+      sessionMode: 'interactive',
     }),
     recordSuccess: vi.fn().mockResolvedValue(undefined),
     recordError: vi.fn().mockResolvedValue(undefined),
@@ -93,7 +107,7 @@ function createMockAdapter(): ChannelAdapter & { sentMessages: string[] } {
 }
 
 function createMessage(content = 'hello'): Message {
-  return { channel: 'feishu', channelId: 'test-channel', content, userId: 'owner-123', timestamp: Date.now() };
+  return { channel: 'feishu', channelId: 'test-channel', content, peerId: 'owner-123', timestamp: Date.now() };
 }
 
 describe('Idle Timeout with StreamIdleMonitor', () => {
@@ -134,7 +148,7 @@ describe('Idle Timeout with StreamIdleMonitor', () => {
       messageCache as any,
       new EventBus(),
     );
-    processor.registerChannel(adapter);
+    processor.registerChannel(adapter, testPolicy);
 
     const processPromise = processor.processMessage(createMessage());
 
@@ -184,7 +198,7 @@ describe('Idle Timeout with StreamIdleMonitor', () => {
       messageCache as any,
       new EventBus(),
     );
-    processor.registerChannel(adapter);
+    processor.registerChannel(adapter, testPolicy);
 
     const processPromise = processor.processMessage(createMessage()).catch(e => e);
 
@@ -234,7 +248,7 @@ describe('Idle Timeout with StreamIdleMonitor', () => {
       messageCache as any,
       new EventBus(),
     );
-    processor.registerChannel(adapter);
+    processor.registerChannel(adapter, testPolicy);
 
     const processPromise = processor.processMessage(createMessage()).catch(e => e);
 
@@ -297,7 +311,7 @@ describe('Idle Timeout with StreamIdleMonitor', () => {
       messageCache as any,
       new EventBus(),
     );
-    processor.registerChannel(adapter);
+    processor.registerChannel(adapter, testPolicy);
 
     const processPromise = processor.processMessage(createMessage());
 
@@ -358,7 +372,7 @@ describe('Idle Timeout with StreamIdleMonitor', () => {
       messageCache as any,
       new EventBus(),
     );
-    processor.registerChannel(adapter);
+    processor.registerChannel(adapter, testPolicy);
 
     const processPromise = processor.processMessage(createMessage()).catch(e => e);
 
