@@ -205,7 +205,7 @@ export class CommandHandler {
       canImportCliSession: () => true,
       messagePrefix: () => '',
       showMiddleResult: () => true,
-      muteIdleMonitor: () => false,
+      showIdleMonitor: () => true,
       accumulateErrors: () => true,
     };
   }

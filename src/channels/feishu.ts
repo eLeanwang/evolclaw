@@ -670,7 +670,7 @@ export class FeishuChannelPlugin implements ChannelPlugin {
 
     const adapter = {
       name: 'feishu' as const,
-      sendText: (id: string, text: string) => channel.sendMessage(id, text),
+      sendText: (id: string, text: string, context?: any) => channel.sendMessage(id, text, context),
       sendFile: (id: string, filePath: string) => channel.sendFile(id, filePath),
     };
 
@@ -688,7 +688,13 @@ export class FeishuChannelPlugin implements ChannelPlugin {
         if (mode === 'owner-dm-only') return chatType === 'private' && identity === 'owner';
         return true;
       },
-      muteIdleMonitor: (chatType: string, identity: string) => false,
+      showIdleMonitor: (chatType: string, identity: string) => {
+        const mode = config.showActivities || 'all';
+        if (mode === 'none') return false;
+        if (mode === 'dm-only') return chatType === 'private';
+        if (mode === 'owner-dm-only') return chatType === 'private' && identity === 'owner';
+        return true;
+      },
       accumulateErrors: (chatType: string, identity: string) => true,
     };
 

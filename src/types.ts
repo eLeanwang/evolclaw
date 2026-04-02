@@ -146,8 +146,8 @@ export interface ChannelPolicy {
   canDeleteSession(chatType: string, identity: string): boolean;
   canImportCliSession(chatType: string, identity: string): boolean;
   messagePrefix(chatType: string, peerName?: string): string;
-  showMiddleResult(chatType: string, identity: string): boolean;  // 重命名自 showActivities
-  muteIdleMonitor(chatType: string, identity: string): boolean;   // 重命名自 quietMode
+  showMiddleResult(chatType: string, identity: string): boolean;
+  showIdleMonitor(chatType: string, identity: string): boolean;
   accumulateErrors(chatType: string, identity: string): boolean;
 }
 

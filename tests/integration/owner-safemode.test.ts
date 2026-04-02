@@ -13,7 +13,7 @@ const testPolicy: ChannelPolicy = {
   canImportCliSession: () => true,
   messagePrefix: () => '',
   showMiddleResult: () => true,
-  muteIdleMonitor: (chatType, identity) => chatType === 'group' || identity !== 'owner',
+  showIdleMonitor: (chatType, identity) => !(chatType === 'group' || identity !== 'owner'),
   accumulateErrors: (chatType, identity) => chatType === 'private' && identity === 'owner',
 };
 

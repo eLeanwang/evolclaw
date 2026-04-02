@@ -84,22 +84,14 @@ export class MessageProcessor {
 
     const { policy } = channelInfo;
 
-    // 提前解析会话以获取 identity
-    const tempSession = await this.sessionManager.getOrCreateSession(
-      message.channel,
-      message.channelId,
-      this.config.projects?.defaultPath || process.cwd(),
-      message.threadId,
-      undefined,
-      undefined,
-      message.peerId
-    );
-    const chatType = tempSession.chatType;
-    const identityRole = tempSession.identity?.role || 'anonymous';
+    // 解析会话（唯一的 getOrCreateSession 调用点）
+    const { session, absoluteProjectPath } = await this.resolveSession(message);
+    const chatType = session.chatType;
+    const identityRole = session.identity?.role || 'anonymous';
 
     const monitorEnabled = this.config.idleMonitor?.enabled !== false;
     const safeModeThreshold = this.config.idleMonitor?.safeModeThreshold ?? 3;
-    const muteIdleMonitor = policy.muteIdleMonitor(chatType, identityRole);
+    const showIdleMonitor = policy.showIdleMonitor(chatType, identityRole);
 
     // 计算是否抑制中间输出（工具活动 + 流式文本）
     const shouldSuppress = (): boolean => {
@@ -130,9 +122,9 @@ export class MessageProcessor {
             // 先发送诊断信息，让用户知道发生了什么
             if (channelInfo) {
               try {
-                const msg = muteIdleMonitor
-                  ? `\u26a0\ufe0f 任务超时（${result.idleSec}秒无响应），已自动中断`
-                  : result.message;
+                const msg = showIdleMonitor
+                  ? result.message
+                  : `\u26a0\ufe0f 任务超时（${result.idleSec}秒无响应），已自动中断`;
                 await channelInfo.adapter.sendText(message.channelId, msg);
               } catch (e) {
                 logger.debug(`[MessageProcessor] Failed to send kill diagnostic message:`, e);
@@ -148,7 +140,7 @@ export class MessageProcessor {
           } else {
             // notify or warn: send diagnostic message, task continues
             logger.info(`[MessageProcessor] Idle monitor: ${result.action} after ${result.idleSec}s idle, stream: ${streamKey}`);
-            if (channelInfo && !muteIdleMonitor && !shouldSuppress()) {
+            if (channelInfo && showIdleMonitor && !shouldSuppress()) {
               try {
                 await channelInfo.adapter.sendText(message.channelId, result.message);
               } catch (e) {
@@ -163,23 +155,16 @@ export class MessageProcessor {
 
     try {
       await Promise.race([
-        this._processMessageInternal(message, resetTimer, shouldSuppress),
+        this._processMessageInternal(message, session, absoluteProjectPath, resetTimer, shouldSuppress),
         timeoutPromise
       ]);
     } catch (error: any) {
       // 超时错误：kill 级别已发送诊断信息，无需再发
       // 非超时错误走通用处理
 
-      // 记录错误到健康状态
+      // 记录错误到健康状态（复用已有 session）
       if (channelInfo) {
         try {
-          const session = await this.sessionManager.getOrCreateSession(
-            message.channel,
-            message.channelId,
-            this.config.projects?.defaultPath || process.cwd(),
-            message.threadId
-          );
-
           const errorType = classifyError(error);
 
           // 上下文过长是可恢复错误，不累计触发安全模式
@@ -253,7 +238,7 @@ ${suggestions}`,
     }
   }
 
-  private async _processMessageInternal(message: Message, resetTimer: (eventType?: string, toolName?: string) => void, shouldSuppress: () => boolean): Promise<void> {
+  private async _processMessageInternal(message: Message, session: Session, absoluteProjectPath: string, resetTimer: (eventType?: string, toolName?: string) => void, shouldSuppress: () => boolean): Promise<void> {
     const messageId = `${message.channel}_${message.channelId}_${message.timestamp || Date.now()}`;
     const channelInfo = this.channels.get(message.channel);
 
@@ -265,21 +250,6 @@ ${suggestions}`,
     const { adapter, options } = channelInfo;
 
     try {
-      // 检查是否为命令
-      if (this.commandHandler) {
-        const cmdResult = await this.commandHandler(message.content, message.channel, message.channelId, message.peerId, message.threadId);
-        if (cmdResult) {
-          // 话题消息：通过 rootId 回复到话题内
-          const session = message.threadId ? await this.sessionManager.getOrCreateSession(message.channel, message.channelId, this.config.projects?.defaultPath || process.cwd(), message.threadId) : undefined;
-          const sendOpts = session ? this.getThreadSendOpts(session) : undefined;
-          await adapter.sendText(message.channelId, cmdResult, sendOpts);
-          return;
-        }
-      }
-
-      // 解析会话和项目路径
-      const { session, absoluteProjectPath } = await this.resolveSession(message);
-
       const isBackground = await this.isBackgroundSession(session, message.channel, message.channelId);
 
       // 记录收到消息
@@ -339,7 +309,7 @@ ${suggestions}`,
           }
           // 后台任务：静默，不发送输出
         },
-        (this.config.flushDelay || 4) * 1000,
+        (this.config.flushDelay ?? 4) * 1000,
         options?.fileMarkerPattern,
         this.config.debug?.flusherDiag
       );
@@ -568,7 +538,9 @@ ${suggestions}`,
       message.channelId,
       this.config.projects?.defaultPath || process.cwd(),
       message.threadId,
-      metadata
+      metadata,
+      undefined,
+      message.peerId
     );
 
     const absoluteProjectPath = path.isAbsolute(session.projectPath)

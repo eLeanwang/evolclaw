@@ -172,7 +172,7 @@ async function main() {
     canImportCliSession: (chatType: string, role: string) => chatType === 'private' || role === 'owner',
     messagePrefix: () => '',
     showMiddleResult: () => true,
-    muteIdleMonitor: () => false,
+    showIdleMonitor: () => true,
     accumulateErrors: () => true,
   };
 

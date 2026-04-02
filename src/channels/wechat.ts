@@ -863,7 +863,13 @@ export class WechatChannelPlugin implements ChannelPlugin {
         if (mode === 'owner-dm-only') return chatType === 'private' && identity === 'owner';
         return true;
       },
-      muteIdleMonitor: (chatType: string, identity: string) => false,
+      showIdleMonitor: (chatType: string, identity: string) => {
+        const mode = config.showActivities || 'all';
+        if (mode === 'none') return false;
+        if (mode === 'dm-only') return chatType === 'private';
+        if (mode === 'owner-dm-only') return chatType === 'private' && identity === 'owner';
+        return true;
+      },
       accumulateErrors: (chatType: string, identity: string) => true,
     };
 
