@@ -38,6 +38,7 @@ export class FeishuChannel {
   private projectPathProvider?: ProjectPathProvider;
   private cleanupInterval?: NodeJS.Timeout;
   private seenMessages = new Map<string, number>();  // messageId -> timestamp
+  private seenThreads = new Set<string>();  // 已见的 thread_id，用于判断话题创建消息
 
   constructor(private config: FeishuConfig) {
   }
@@ -69,7 +70,6 @@ export class FeishuChannel {
             return;
           }
           this.markSeen(msg.message_id);
-          this.addAckReaction(msg.message_id);
 
           if (!this.messageHandler) return;
 
@@ -102,13 +102,15 @@ export class FeishuChannel {
             const threadId = msg.thread_id || undefined;
             const rootId = msg.root_id || undefined;
 
-            // 处理引用消息（话题内消息跳过，避免每条都拼接引用前缀）
+            // 处理引用消息（话题内后续消息跳过，避免每条都拼接引用前缀）
             let quotedText = '';
             let quotedImages: Array<{ data: string; mimeType: string }> = [];
 
-            // 话题后续消息不拼接引用前缀（话题消息有 thread_id）
-            // 仅非话题消息（普通引用回复）才拼接引用
-            if (msg.parent_id && !msg.thread_id && this.client) {
+            // 创建话题的第一条消息应带引用，提供话题上下文
+            // 判断依据：首次见到的 thread_id（后续消息已在 seenThreads 中）
+            const isThreadCreation = !!(msg.thread_id && msg.parent_id && !this.seenThreads.has(msg.thread_id));
+            if (msg.thread_id) this.seenThreads.add(msg.thread_id);
+            if (msg.parent_id && (!msg.thread_id || isThreadCreation) && this.client) {
               try {
                 const res = await this.client.im.message.get({
                   path: { message_id: msg.parent_id }
@@ -416,6 +418,8 @@ export class FeishuChannel {
         if (ts < cutoff) { this.seenMessages.delete(id); cleaned++; }
       }
       if (cleaned > 0) logger.info(`[Feishu] Cleaned ${cleaned} old message IDs`);
+      // seenThreads 无时间戳，仅限容量（话题持久存在，不按时间清理）
+      if (this.seenThreads.size > 1000) this.seenThreads.clear();
     }, 60 * 60 * 1000);
   }
 
@@ -554,7 +558,7 @@ export class FeishuChannel {
     }
   }
 
-  private addAckReaction(messageId: string): void {
+  addAckReaction(messageId: string): void {
     if (!this.client) return;
     this.client.im.messageReaction.create({
       path: { message_id: messageId },
@@ -672,6 +676,7 @@ export class FeishuChannelPlugin implements ChannelPlugin {
       name: 'feishu' as const,
       sendText: (id: string, text: string, context?: any) => channel.sendMessage(id, text, context),
       sendFile: (id: string, filePath: string) => channel.sendFile(id, filePath),
+      acknowledge: (messageId: string) => { channel.addAckReaction(messageId); return Promise.resolve(); },
     };
 
     const policy = {
@@ -702,6 +707,7 @@ export class FeishuChannelPlugin implements ChannelPlugin {
       systemPromptAppend: '[重要系统功能] 你可以通过飞书发送文件给用户。方法：在响应中使用 [SEND_FILE:文件路径] 标记。示例：文件已准备好！[SEND_FILE:./report.txt] 路径支持相对路径（相对项目目录）或绝对路径。系统会自动上传并发送。',
       fileMarkerPattern: /\[SEND_FILE:([^\]]+)\]/g,
       supportsImages: true,
+      flushDelay: feishuConfig.flushDelay,
     };
 
     return {
