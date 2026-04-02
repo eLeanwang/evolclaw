@@ -1,6 +1,6 @@
 # 出站事件订阅架构改造计划
 
-> 状态：阶段 0-2 已完成，阶段 3-6 待实施
+> 状态：阶段 0-2 已完成，阶段 3-6 已修订为配置注入方案（见下文）
 
 ## 已完成
 
@@ -10,6 +10,8 @@
 | **1** | 入站优化：chatType 前置到 Channel 层、消除 `isGroupChat` API 调用、`getOrCreateSession` 去重 |
 | **2** | 入站清理：命令双重检查移除、`getOrCreateSession` 合并为单次调用（`processMessage` → `resolveSession`） |
 | **补充** | `flushDelay=0` 修正（`\|\|` → `??`）；`muteIdleMonitor` → `showIdleMonitor`（语义翻转 + 统一配置）；话题回复 Bug 修复 |
+| **3（修订）** | Per-channel flushDelay：`ChannelOptions.flushDelay` + `Config.channels.*.flushDelay`，MessageProcessor 优先级链 `channelOptions → config → 4` |
+| **4（修订）** | Reply Context 泛化：`replyOpts` → `replyContext`（Channel 预构建 `ReplyContext`），Gateway 透传不做转换 |
 
 ## 整体架构目标
 
@@ -218,3 +220,34 @@ output:complete  ──> flusher.flush(final=true) → 销毁
 | 话题回复参数 | | ✓ |
 | API 调用 (sendText/sendFile) | | ✓ |
 | 异步队列保护 | | ✓ |
+
+---
+
+## 修订说明（2026-04）
+
+阶段 3-6 原设计为 EventBus + Channel Subscriber 模式，经分析后放弃，改为**配置注入方案**。
+
+### 放弃原因
+
+1. EvolClaw 不存在跨渠道广播场景（每条消息从一个渠道进、同一渠道出），EventBus 是过度设计
+2. 现有 `ChannelPolicy` + `ChannelOptions` 已实现策略和配置的渠道下沉
+3. EventBus 方案新增 Channel 成本从 ~15 行膨胀到 ~100+ 行（Subscriber + AsyncQueue + 策略）
+
+### 修订方案
+
+保留核心设计原则（Gateway 不硬编码渠道差异、Channel 声明自身行为），通过两个小改动达成目标：
+
+1. **Per-channel flushDelay**：`ChannelOptions.flushDelay` 覆盖全局值，优先级链 `channelOptions → config.flushDelay → 4`
+2. **Reply Context 泛化**：Channel 在入站时预构建标准 `ReplyContext`，Gateway 透传不做 `rootId → replyToMessageId` 转换
+
+### 各层最终职责（修订版）
+
+| 职责 | Gateway (MessageProcessor) | Channel (Policy + Options) |
+|:-----|:---------------------------|:---------------------------|
+| 流式事件迭代 | ✓ | |
+| StreamFlusher 创建（使用渠道级 delay） | ✓ | 声明 flushDelay |
+| 安全模式管理 | ✓ | |
+| 策略判断 | 执行 | 声明（ChannelPolicy） |
+| 消息聚合 (StreamFlusher) | 创建 + 管理 | 配置时序 |
+| 回复上下文 | 透传 replyContext | 预构建 ReplyContext |
+| API 调用 (sendText/sendFile) | 通过 adapter 调用 | 实现 adapter 方法 |

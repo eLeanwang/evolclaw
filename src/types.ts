@@ -15,18 +15,21 @@ export interface Config {
       appId: string;
       appSecret: string;
       owner?: string;
+      flushDelay?: number;  // flush 间隔(秒)，默认使用全局值
     };
     wechat?: {
       enabled?: boolean;
       baseUrl?: string;
       token?: string;
       owner?: string;
+      flushDelay?: number;  // flush 间隔(秒)，默认 2
     };
     aun?: {
       enabled?: boolean;
       domain: string;
       agentName: string;
       owner?: string;
+      flushDelay?: number;  // flush 间隔(秒)，默认使用全局值
     };
   };
   projects?: {
@@ -35,6 +38,7 @@ export interface Config {
     list?: Record<string, string>;
   };
   flushDelay?: number;  // 消息批量发送间隔(秒)，默认 4
+  debounce?: number;    // 入站消息去抖间隔(秒)，默认 2，设 0 关闭
   debug?: {
     flusherDiag?: boolean;  // 启用 StreamFlusher 诊断日志 (flusher-diag.log)
   };
@@ -48,7 +52,7 @@ export interface Config {
 
 export interface SessionMetadata {
   isActive?: boolean;  // 由 Channel 维护，存储在 metadata 中
-  replyOpts?: Record<string, any>;  // 渠道特定回复上下文（如 { rootId: 'om_xxx' }）
+  replyContext?: ReplyContext;       // Channel 预构建的回复上下文（渠道无关）
   agentSessions?: {
     codex?: string;
     gemini?: string;
@@ -100,7 +104,7 @@ export interface Message {
   images?: Array<{ data: string; mimeType: string }>;
   mentions?: Array<{ userId: string; name?: string; key?: string }>;
   messageId?: string;
-  replyOpts?: Record<string, any>;  // 渠道特定回复上下文（如 Feishu 的 rootId）
+  replyContext?: ReplyContext;       // Channel 预构建的回复上下文（渠道无关）
   timestamp?: number;
 }
 
@@ -117,7 +121,7 @@ export interface InboundMessage {
   messageId?: string;
   images?: Array<{ data: string; mimeType: string }>;
   mentions?: Array<{ userId: string; name?: string; key?: string }>;
-  replyOpts?: Record<string, any>;  // 渠道特定回复上下文（如 Feishu 的 rootId）
+  replyContext?: ReplyContext;       // Channel 预构建的回复上下文（渠道无关）
 }
 
 // 渠道适配器接口
@@ -136,6 +140,7 @@ export interface ChannelOptions {
   systemPromptAppend?: string;      // Feishu: [SEND_FILE:] 指令
   fileMarkerPattern?: RegExp;       // Feishu: /\[SEND_FILE:([^\]]+)\]/g
   supportsImages?: boolean;         // Feishu: true, AUN: false
+  flushDelay?: number;              // 渠道级 flush 间隔(秒)，覆盖全局 config.flushDelay
 }
 
 // 渠道策略接口

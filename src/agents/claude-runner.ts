@@ -7,7 +7,7 @@ import fs from 'fs';
 import os from 'os';
 import { logger } from '../utils/logger.js';
 import { canUseTool } from '../utils/permission-utils.js';
-import { encodePath } from '../utils/platform.js';
+import { encodePath } from '../utils/cross-platform.js';
 import type { AgentPlugin, AgentInstance, AgentCallbacks } from '../core/agent-loader.js';
 
 // ── SDK 消息流（Claude Agent SDK 专有格式）──

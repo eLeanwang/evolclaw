@@ -1,7 +1,7 @@
 import { Config, ChannelAdapter, Session, ChannelPolicy } from '../types.js';
 import { SessionManager } from './session-manager.js';
 import { AgentRunner, hasModelSwitcher, hasPermissionController } from '../agents/claude-runner.js';
-import { MessageCache } from './message-cache.js';
+import { MessageCache } from '../utils/message-cache.js';
 import { MessageProcessor } from './message-processor.js';
 import { EventBus } from './event-bus.js';
 import { PermissionGateway } from './permission.js';
@@ -152,10 +152,9 @@ export class CommandHandler {
     return `${channel}-${channelId}`;
   }
 
-  /** 从 session 提取话题回复选项 */
-  private getThreadSendOpts(session: Session): { replyToMessageId: string; replyInThread: true } | undefined {
-    const rootId = session.metadata?.replyOpts?.rootId;
-    return rootId ? { replyToMessageId: rootId, replyInThread: true } : undefined;
+  /** 从 session 提取渠道预构建的回复上下文 */
+  private getReplyContext(session: Session): import('../types.js').ReplyContext | undefined {
+    return session.metadata?.replyContext;
   }
 
   /** 获取活跃会话，无会话时返回统一错误提示 */
@@ -566,7 +565,7 @@ export class CommandHandler {
         : path.resolve(process.cwd(), session.projectPath);
 
       if (sendMessage) {
-        await sendMessage(channelId, '⏳ 正在压缩会话上下文...', this.getThreadSendOpts(session));
+        await sendMessage(channelId, '⏳ 正在压缩会话上下文...', this.getReplyContext(session));
       }
 
       const compacted = await this.agentRunner.compactSession(session.id, session.agentSessionId, projectPath);
@@ -745,17 +744,17 @@ export class CommandHandler {
         }
       }
 
-      // 话题中 restart 时保存 rootId 用于重启后回复到话题
-      let rootId: string | undefined;
+      // 话题中 restart 时保存 replyContext 用于重启后回复到话题
+      let replyContext: import('../types.js').ReplyContext | undefined;
       if (threadId) {
         const threadSession = await this.sessionManager.getOrCreateSession(channel, channelId, this.config.projects?.defaultPath || process.cwd(), threadId);
-        rootId = threadSession.metadata?.replyOpts?.rootId;
+        replyContext = this.getReplyContext(threadSession);
       }
       const restartInfo: Record<string, any> = {
         channel,
         channelId,
         timestamp: Date.now(),
-        ...(rootId ? { rootId } : {})
+        ...(replyContext?.replyToMessageId ? { rootId: replyContext.replyToMessageId } : {}),
       };
       fs.writeFileSync(path.join(resolvePaths().dataDir, 'restart-pending.json'), JSON.stringify(restartInfo));
 

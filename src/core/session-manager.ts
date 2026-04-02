@@ -3,7 +3,7 @@ import { Session, SessionIdentity } from '../types.js';
 import { ensureDir } from '../config.js';
 import { resolvePaths } from '../paths.js';
 import { logger } from '../utils/logger.js';
-import { encodePath } from '../utils/platform.js';
+import { encodePath } from '../utils/cross-platform.js';
 import { EventBus } from './event-bus.js';
 import path from 'path';
 import fs from 'fs';
@@ -279,7 +279,7 @@ export class SessionManager {
       }
     }
 
-    // Migration: normalize metadata rootId (feishu.rootId / threadRootId → replyOpts.rootId)
+    // Migration: normalize legacy metadata rootId → replyContext
     if (hasMetadata && tableInfo.length > 0) {
       const rows = this.db.prepare(
         `SELECT id, metadata FROM sessions WHERE metadata IS NOT NULL AND metadata != ''`
@@ -288,23 +288,23 @@ export class SessionManager {
       for (const row of rows) {
         try {
           const meta = JSON.parse(row.metadata);
-          const legacyRootId = meta.feishu?.rootId ?? meta.threadRootId;
-          if (!legacyRootId) continue;
-          // Already normalized
-          if (meta.replyOpts?.rootId === legacyRootId) {
-            // Just clean up legacy keys
-          } else {
-            meta.replyOpts = { ...meta.replyOpts, rootId: legacyRootId };
+          const rootId = meta.feishu?.rootId ?? meta.threadRootId ?? meta.replyOpts?.rootId;
+          if (!rootId && !meta.feishu && !meta.threadRootId && !meta.replyOpts) continue;
+          // Generate replyContext from rootId if missing
+          if (rootId && !meta.replyContext) {
+            meta.replyContext = { replyToMessageId: rootId, replyInThread: true };
           }
+          // Clean up all legacy fields
           delete meta.feishu;
           delete meta.threadRootId;
+          delete meta.replyOpts;
           this.db.prepare('UPDATE sessions SET metadata = ? WHERE id = ?')
             .run(JSON.stringify(meta), row.id);
           migrated++;
         } catch { /* skip malformed JSON */ }
       }
       if (migrated > 0) {
-        logger.info(`✓ Migrated ${migrated} session(s): rootId normalized to replyOpts.rootId`);
+        logger.info(`✓ Migrated ${migrated} session(s): rootId normalized to replyContext`);
       }
     }
 

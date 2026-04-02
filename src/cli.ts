@@ -6,7 +6,7 @@ import { resolveRoot, resolvePaths, ensureDataDirs, getPackageRoot } from './pat
 import { cmdInit } from './utils/init.js';
 import { cmdInitWechat } from './utils/init-wechat.js';
 import { cmdInitFeishu } from './utils/init-feishu.js';
-import * as platform from './utils/platform.js';
+import * as platform from './utils/cross-platform.js';
 import { EventBus } from './core/event-bus.js';
 
 // Suppress Node.js ExperimentalWarning (e.g. SQLite) from cluttering CLI output

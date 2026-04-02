@@ -3,7 +3,7 @@ import fs from 'fs';
 import { AgentRunner, hasCompact, AgentEvent } from '../agents/claude-runner.js';
 import { SessionManager } from './session-manager.js';
 import { StreamFlusher } from '../utils/stream-flusher.js';
-import { MessageCache } from './message-cache.js';
+import { MessageCache } from '../utils/message-cache.js';
 import { StreamIdleMonitor } from '../utils/stream-idle-monitor.js';
 import { logger } from '../utils/logger.js';
 import { getErrorMessage, classifyError, ErrorType } from '../utils/error-utils.js';
@@ -187,10 +187,9 @@ export class MessageProcessor {
     }
   }
 
-  /** 从 session 提取话题回复选项 */
-  private getThreadSendOpts(session: Session): { replyToMessageId: string; replyInThread: true } | undefined {
-    const rootId = session.metadata?.replyOpts?.rootId;
-    return rootId ? { replyToMessageId: rootId, replyInThread: true } : undefined;
+  /** 从 session 提取渠道预构建的回复上下文 */
+  private getReplyContext(session: Session): import('../types.js').ReplyContext | undefined {
+    return session.metadata?.replyContext;
   }
 
   /**
@@ -206,7 +205,7 @@ export class MessageProcessor {
     if (safeModeThreshold <= 0) return;
 
     const health = await this.sessionManager.getHealthStatus(session.id);
-    const sendOpts = this.getThreadSendOpts(session);
+    const sendOpts = this.getReplyContext(session);
     const isThread = !!session.threadId;
     if (consecutiveErrors >= safeModeThreshold && !health.safeMode) {
       await this.sessionManager.setSafeMode(session.id, true);
@@ -295,11 +294,10 @@ ${suggestions}`,
           if (!isCurrentlyBackground) {
             const opts: { title?: string; replyToMessageId?: string; mentionUserIds?: string[]; replyInThread?: boolean } = {};
             if (isFinal) opts.title = '\u6700\u7ec8\u56de\u590d:';
-            // 话题会话：所有回复指向 rootId + reply_in_thread（确保消息进入话题）
-            const rootId = session.metadata?.replyOpts?.rootId;
-            if (rootId) {
-              opts.replyToMessageId = rootId;
-              opts.replyInThread = true;
+            // 话题会话：使用 Channel 预构建的 replyContext（确保消息进入话题）
+            const replyCtx = session.metadata?.replyContext;
+            if (replyCtx) {
+              Object.assign(opts, replyCtx);
             } else if (firstReply && message.messageId) {
               // 主会话：首条消息引用回复用户原消息
               opts.replyToMessageId = message.messageId;
@@ -309,7 +307,7 @@ ${suggestions}`,
           }
           // 后台任务：静默，不发送输出
         },
-        (this.config.flushDelay ?? 4) * 1000,
+        (options?.flushDelay ?? this.config.flushDelay ?? 4) * 1000,
         options?.fileMarkerPattern,
         this.config.debug?.flusherDiag
       );
@@ -322,7 +320,7 @@ ${suggestions}`,
 
       // 设置权限审批的消息发送回调（指向当前渠道）
       this.agentRunner.setSendPrompt(async (text: string) => {
-        await adapter.sendText(message.channelId, text, this.getThreadSendOpts(session));
+        await adapter.sendText(message.channelId, text, this.getReplyContext(session));
       });
 
       // 设置 per-session 权限模式
@@ -406,7 +404,7 @@ ${suggestions}`,
           // 文件存在性检查：真实路径但文件不存在，告知用户
           if (!fs.existsSync(resolvedPath)) {
             logger.warn(`[${adapter.name}] File not found: ${resolvedPath}`);
-            await adapter.sendText(message.channelId, `\u26a0\ufe0f 文件未找到: ${filePath}`, this.getThreadSendOpts(session));
+            await adapter.sendText(message.channelId, `\u26a0\ufe0f 文件未找到: ${filePath}`, this.getReplyContext(session));
             continue;
           }
 
@@ -416,7 +414,7 @@ ${suggestions}`,
             this.eventBus.publish({ type: 'agent:file-sent', sessionId: session.id, filePath: resolvedPath, channel: message.channel });
           } catch (error) {
             logger.error(`[${adapter.name}] Failed to send file: ${resolvedPath}`, error);
-            await adapter.sendText(message.channelId, `\u274c 文件发送失败: ${filePath}`, this.getThreadSendOpts(session));
+            await adapter.sendText(message.channelId, `\u274c 文件发送失败: ${filePath}`, this.getReplyContext(session));
           }
         }
       }
@@ -430,7 +428,7 @@ ${suggestions}`,
         const hint = session.threadId
           ? '\n\n\u26a0\ufe0f 当前处于安全模式（无上下文记忆）。使用 /repair 修复 或 /clear 清空会话'
           : '\n\n\u26a0\ufe0f 当前处于安全模式（无上下文记忆）。使用 /repair 修复 或 /new 新建会话';
-        await adapter.sendText(message.channelId, hint, this.getThreadSendOpts(session));
+        await adapter.sendText(message.channelId, hint, this.getReplyContext(session));
       }
 
       // 清理 activeStreams（正常完成）
@@ -514,7 +512,7 @@ ${suggestions}`,
             this.config.projects?.defaultPath || process.cwd(),
             message.threadId
           );
-          sendOpts = this.getThreadSendOpts(session);
+          sendOpts = this.getReplyContext(session);
         } catch {}
         await adapter.sendText(message.channelId, userMessage, sendOpts);
       }
@@ -528,9 +526,9 @@ ${suggestions}`,
     session: Session;
     absoluteProjectPath: string;
   }> {
-    // 话题会话：从 replyOpts 中提取 rootId
-    const metadata = message.threadId && message.replyOpts?.rootId
-      ? { replyOpts: { rootId: message.replyOpts.rootId } }
+    // 话题会话：使用 Channel 预构建的 replyContext
+    const metadata = message.replyContext
+      ? { replyContext: message.replyContext }
       : undefined;
 
     const session = await this.sessionManager.getOrCreateSession(

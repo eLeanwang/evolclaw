@@ -6,7 +6,8 @@ import { WechatChannelPlugin } from './channels/wechat.js';
 import { AUNChannelPlugin } from './channels/aun.js';
 import { MessageProcessor } from './core/message-processor.js';
 import { MessageQueue } from './core/message-queue.js';
-import { MessageCache } from './core/message-cache.js';
+import { MsgBridge } from './core/message-bridge.js';
+import { MessageCache } from './utils/message-cache.js';
 import { CommandHandler } from './core/command-handler.js';
 import { EventBus } from './core/event-bus.js';
 import { PermissionGateway } from './core/permission.js';
@@ -200,100 +201,26 @@ async function main() {
     }
   }
 
-  // ── 公共消息处理辅助函数 ──
+  // ── MsgBridge：Channel ↔ Core 消息桥梁 ──
 
-  /** 首次交互自动绑定 owner */
-  async function autoBindOwner(channel: string, userId: string): Promise<void> {
-    const channelConfig = (config.channels as any)?.[channel];
-    if (channelConfig && !channelConfig.owner) {
-      const { setOwner } = await import('./config.js');
-      setOwner(config, channel, userId);
-      logger.info(`[Owner] Auto-bound ${channel} owner: ${userId}`);
-      eventBus.publish({ type: 'channel:owner-bound', channel, userId });
-    }
-  }
-
-  /** 命令快速路径：返回 true 表示已处理 */
-  async function handleCommand(
-    content: string, channel: string, channelId: string,
-    sendReply: (text: string) => Promise<void>,
-    userId?: string, threadId?: string
-  ): Promise<boolean> {
-    if (!cmdHandler.isCommand(content)) return false;
-    const cmdResult = await cmdHandler.handle(content, channel, channelId, undefined, userId, threadId);
-    if (cmdResult === null) return false;
-    if (cmdResult) {
-      try { await sendReply(cmdResult); } catch (error) {
-        logger.error(`[${channel}] Failed to send command response:`, error);
-      }
-    }
-    return true;
-  }
-
-  /** 统一消息处理：将 InboundMessage 转换为 Message 并入队 */
-  async function wireChannel(
-    channelName: string,
-    onMessageCallback: (handler: (msg: import('./types.js').InboundMessage) => Promise<void>) => void,
-    sendReply: (channelId: string, text: string, replyOpts?: Record<string, any>) => Promise<void>,
-    adapter?: ChannelAdapter
-  ): Promise<void> {
-    onMessageCallback(async (msg) => {
-      let content = msg.content.trim();
-
-      // 1. owner 绑定
-      if (msg.peerId) await autoBindOwner(channelName, msg.peerId);
-
-      // 2. 命令快速路径（去除引用前缀后检查，兼容话题中引用上文的情况）
-      const contentForCmd = content.replace(/^(>[^\n]*\n)+\n?/, '').trim();
-      if (await handleCommand(contentForCmd || content, channelName, msg.channelId,
-        (text) => sendReply(msg.channelId, text, msg.replyOpts),
-        msg.peerId, msg.threadId
-      )) return;
-
-      // 3. session 解析（使用 Channel 层填充的 chatType）
-      const chatType = msg.chatType || 'private';
-      const metadata = msg.replyOpts ? { replyOpts: msg.replyOpts } : undefined;
-      const session = await sessionManager.getOrCreateSession(
-        channelName, msg.channelId,
-        config.projects?.defaultPath || process.cwd(),
-        msg.threadId, metadata, undefined, msg.peerId, chatType
-      );
-
-      // 4. 消息前缀（由 policy 决定）
-      const channelInfo = processor.getChannelInfo?.(channelName);
-      if (channelInfo?.policy) {
-        const prefix = channelInfo.policy.messagePrefix(session.chatType, msg.peerName);
-        if (prefix) content = prefix + content;
-      }
-
-      // 5. enqueue
-      await messageQueue.enqueue(session.id, {
-        channel: channelName, channelId: msg.channelId, content,
-        images: msg.images, timestamp: Date.now(),
-        peerId: msg.peerId, peerName: msg.peerName,
-        messageId: msg.messageId,
-        mentions: msg.mentions, threadId: msg.threadId,
-        replyOpts: msg.replyOpts
-      }, session.projectPath);
-    });
-  }
+  const msgBridge = new MsgBridge(config, sessionManager, processor, messageQueue, cmdHandler, eventBus);
 
   // ── 渠道消息注册 ──
 
   // 连接插件系统的渠道
   for (const inst of channelInstances) {
     if (inst.adapter.name === 'feishu') {
-      wireChannel('feishu',
+      msgBridge.register('feishu',
         (handler) => inst.channel.onMessage(async ({ channelId: chatId, content, images, peerId, peerName, messageId, mentions, threadId, rootId, chatType }: any) => {
           handler({
             channel: 'feishu', channelId: chatId, content, images, chatType,
             peerId: peerId || '', peerName, messageId, mentions, threadId,
-            replyOpts: rootId ? { rootId } : undefined,
+            replyContext: rootId ? { replyToMessageId: rootId, replyInThread: true } : undefined,
           });
         }),
-        (channelId, text, replyOpts) => inst.channel.sendMessage(channelId, text, {
+        (channelId, text, replyContext) => inst.channel.sendMessage(channelId, text, {
           forceText: true,
-          replyToMessageId: replyOpts?.rootId,
+          replyToMessageId: replyContext?.replyToMessageId,
           replyInThread: true,
         }),
         inst.adapter

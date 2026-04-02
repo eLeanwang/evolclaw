@@ -7,7 +7,7 @@ import { execFileSync } from 'child_process';
 import { promisify } from 'util';
 import { execFile } from 'child_process';
 import { resolveRoot, resolvePaths, ensureDataDirs, getPackageRoot } from '../paths.js';
-import { isWindows, commandExists } from './platform.js';
+import { isWindows, commandExists } from './cross-platform.js';
 
 const execFileAsync = promisify(execFile);
 

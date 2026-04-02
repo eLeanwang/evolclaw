@@ -876,6 +876,7 @@ export class WechatChannelPlugin implements ChannelPlugin {
     const options = {
       systemPromptAppend: '[系统功能] 你可以发送文件给用户。方法：在响应中使用 [SEND_FILE:文件路径] 标记。示例：文件已准备好！[SEND_FILE:./report.txt]',
       fileMarkerPattern: /\[SEND_FILE:([^\]]+)\]/g,
+      flushDelay: wechatConfig.flushDelay ?? 2,  // WeChat 默认 2s
     };
 
     return {
