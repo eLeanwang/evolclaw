@@ -7,6 +7,7 @@ interface PendingDebounce {
   mentions: Array<{ userId: string; name?: string; key?: string }>;
   lastMessage: Omit<Message, 'content' | 'images' | 'mentions'>;
   timer: ReturnType<typeof setTimeout>;
+  maxWaitTimer: ReturnType<typeof setTimeout>;
   resolves: Array<() => void>;
   rejects: Array<(e: Error) => void>;
 }
@@ -24,9 +25,13 @@ export type EnqueueFn = (message: Message) => Promise<void>;
 export class StreamDebouncer {
   private pending = new Map<string, PendingDebounce>();
   private readonly delayMs: number;
+  private readonly maxWaitMs: number;
+  private readonly maxMessages: number;
 
-  constructor(debounceSeconds: number) {
+  constructor(debounceSeconds: number, maxMessages = 5) {
     this.delayMs = debounceSeconds * 1000;
+    this.maxWaitMs = this.delayMs * 3;
+    this.maxMessages = maxMessages;
   }
 
   get enabled(): boolean {
@@ -54,20 +59,31 @@ export class StreamDebouncer {
         existing.lastMessage = rest;
         existing.resolves.push(resolve);
         existing.rejects.push(reject);
+
+        // 检查是否达到最大消息数，立即触发
+        if (existing.contents.length >= this.maxMessages) {
+          logger.debug(`[Debounce] Max messages (${this.maxMessages}) reached for ${key}, flushing immediately`);
+          clearTimeout(existing.maxWaitTimer);
+          this.flush(key, enqueue);
+          return;
+        }
+
         existing.timer = setTimeout(() => this.flush(key, enqueue), this.delayMs);
         logger.debug(`[Debounce] Appended message for ${key}, ${existing.contents.length} pending`);
       } else {
         const timer = setTimeout(() => this.flush(key, enqueue), this.delayMs);
+        const maxWaitTimer = setTimeout(() => this.flush(key, enqueue), this.maxWaitMs);
         this.pending.set(key, {
           contents: [content],
           images: images ? [...images] : [],
           mentions: mentions ? [...mentions] : [],
           lastMessage: rest,
           timer,
+          maxWaitTimer,
           resolves: [resolve],
           rejects: [reject],
         });
-        logger.debug(`[Debounce] New window for ${key}, ${this.delayMs}ms`);
+        logger.debug(`[Debounce] New window for ${key}, debounce=${this.delayMs}ms, maxWait=${this.maxWaitMs}ms`);
       }
     });
   }
@@ -76,6 +92,10 @@ export class StreamDebouncer {
     const entry = this.pending.get(key);
     if (!entry) return;
     this.pending.delete(key);
+
+    // 清理两个 timer
+    clearTimeout(entry.timer);
+    clearTimeout(entry.maxWaitTimer);
 
     const { contents, images, mentions, lastMessage, resolves, rejects } = entry;
     const merged: Message = {
@@ -100,6 +120,7 @@ export class StreamDebouncer {
   dispose(): void {
     for (const entry of this.pending.values()) {
       clearTimeout(entry.timer);
+      clearTimeout(entry.maxWaitTimer);
     }
     this.pending.clear();
   }

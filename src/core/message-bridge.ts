@@ -8,13 +8,13 @@ import type { EventBus } from './event-bus.js';
 import type { Config, Message, InboundMessage, ChannelAdapter, ReplyContext } from '../types.js';
 
 /**
- * MsgBridge — Channel 与 Core 之间的消息桥梁
+ * MessageBridge — Channel 与 Core 之间的消息桥梁
  *
  * 入站管线：Channel.onMessage → owner 绑定 → 命令路由 → session 解析
  *          → 策略前缀 → 构造 Message → debounce → ACK → enqueue
  * 出站：命令响应通过 sendReply 回调直接发送到渠道
  */
-export class MsgBridge {
+export class MessageBridge {
   private debouncer: StreamDebouncer;
 
   constructor(
@@ -67,13 +67,14 @@ export class MsgBridge {
       // 4. 消息前缀（由 policy 决定）
       const channelInfo = this.processor.getChannelInfo?.(channelName);
       if (channelInfo?.policy) {
-        const prefix = channelInfo.policy.messagePrefix(session.chatType, msg.peerName);
+        const prefix = channelInfo.policy.messagePrefix(chatType, msg.peerName);
         if (prefix) content = prefix + content;
       }
 
       // 5. 构造完整消息
       const fullMessage: Message = {
         channel: channelName, channelId: msg.channelId, content,
+        chatType,
         images: msg.images, timestamp: Date.now(),
         peerId: msg.peerId, peerName: msg.peerName,
         messageId: msg.messageId,
@@ -84,7 +85,9 @@ export class MsgBridge {
       // 6. debounce + ACK + enqueue
       const doEnqueue = async (m: Message) => {
         if (m.messageId) adapter?.acknowledge?.(m.messageId).catch(() => {});
-        return this.messageQueue.enqueue(session.id, m, session.projectPath);
+        return this.messageQueue.enqueue(session.id, m, session.projectPath, {
+          interruptible: chatType !== 'group',
+        });
       };
       if (this.debouncer.enabled) {
         await this.debouncer.submit(session.id, fullMessage, doEnqueue);

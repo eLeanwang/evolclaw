@@ -64,7 +64,7 @@ export class MessageQueue {
     return `${sessionKey}::${projectName}`;
   }
 
-  async enqueue(sessionKey: string, message: Message, projectPath: string): Promise<void> {
+  async enqueue(sessionKey: string, message: Message, projectPath: string, options?: { interruptible?: boolean }): Promise<void> {
     // 消息去重检查
     if (!this.shouldProcess(message)) {
       return Promise.resolve();
@@ -80,12 +80,18 @@ export class MessageQueue {
 
       this.queues.get(queueKey)!.push({ message, projectPath, resolve, reject });
 
-      // 如果正在处理，触发中断
+      // 根据 interruptible 选项决定是否触发中断
       if (this.processing.has(queueKey)) {
-        logger.debug(`[Queue] ${queueKey} is processing, triggering interrupt`);
-        this.eventBus?.publish({ type: 'message:interrupted', sessionId: sessionKey, reason: 'new_message' });
-        if (this.interruptCallback) {
-          this.interruptCallback(sessionKey).catch(() => {});
+        if (options?.interruptible !== false) {
+          // 单聊：保留中断行为
+          logger.debug(`[Queue] ${queueKey} is processing, triggering interrupt`);
+          this.eventBus?.publish({ type: 'message:interrupted', sessionId: sessionKey, reason: 'new_message' });
+          if (this.interruptCallback) {
+            this.interruptCallback(sessionKey).catch(() => {});
+          }
+        } else {
+          // 群聊：FIFO，不打断
+          logger.debug(`[Queue] ${queueKey} is processing, message queued (FIFO)`);
         }
       } else {
         logger.debug(`[Queue] Starting to process ${queueKey}`);

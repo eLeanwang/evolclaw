@@ -111,10 +111,8 @@ const aliases: Record<string, string> = {
   '/name': '/rename'
 };
 
-// 命令快速路径前缀（不进入消息队列的命令）
-// 注意：/clear, /compact, /safe 故意不在此列表中，它们需要进入队列触发中断机制
-// /stop 是快速命令：直接调用 agentRunner.interrupt()，不走队列（否则队列自动中断后 /stop 检测不到活跃任务）
-const quickCommandPrefixes = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/slist', '/session', '/rename', '/repair', '/fork', '/stop', '/del', '/perm', '/p ', '/s ', '/name '];
+// 命令快速路径前缀（所有命令都不进入消息队列）
+const quickCommandPrefixes = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/slist', '/session', '/rename', '/repair', '/fork', '/stop', '/clear', '/compact', '/safe', '/del', '/perm', '/p ', '/s ', '/name '];
 
 export class CommandHandler {
   private adapters = new Map<string, ChannelAdapter>();
@@ -263,6 +261,15 @@ export class CommandHandler {
       );
       if (!isUserCommand && !isAdmin) {
         return '❌ 无权限：此命令仅限管理员使用';
+      }
+    }
+
+    // 空闲检查：某些命令需要等待当前会话空闲
+    const requiresIdle = ['/new', '/clear', '/compact', '/safe', '/repair', '/fork', '/bind'];
+    if (requiresIdle.some(cmd => normalizedContent === cmd || normalizedContent.startsWith(cmd + ' '))) {
+      const streamKey = `${channel}-${channelId}`;
+      if (this.agentRunner.hasActiveStream(streamKey)) {
+        return '⚠️ 当前正在处理消息，请稍后再试\n使用 /stop 中断当前任务后重试';
       }
     }
 
