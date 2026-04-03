@@ -115,7 +115,9 @@ export class MessageBridge {
     userId?: string, threadId?: string
   ): Promise<boolean> {
     if (!this.cmdHandler.isCommand(content)) return false;
-    const cmdResult = await this.cmdHandler.handle(content, channel, channelId, undefined, userId, threadId);
+    const cmdResult = await this.cmdHandler.handle(content, channel, channelId,
+      (_cid, text, opts) => sendReply(text),
+      userId, threadId);
     if (cmdResult === null) return false;
     if (cmdResult) {
       try { await sendReply(cmdResult); } catch (error) {
