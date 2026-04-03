@@ -666,9 +666,15 @@ export class AgentRunner {
   async interrupt(sessionId: string): Promise<void> {
     const stream = this.activeStreams.get(sessionId);
     if (stream && 'interrupt' in stream && typeof (stream as any).interrupt === 'function') {
-      await (stream as any).interrupt();
-      this.activeStreams.delete(sessionId);
-      logger.info(`[AgentRunner] Interrupted session: ${sessionId}`);
+      try {
+        await (stream as any).interrupt();
+        this.activeStreams.delete(sessionId);
+        logger.info(`[AgentRunner] Interrupted session: ${sessionId}`);
+      } catch (error) {
+        // ProcessTransport may already be closed/terminated
+        this.activeStreams.delete(sessionId);
+        logger.warn(`[AgentRunner] Interrupt failed (transport closed): ${sessionId}`);
+      }
     }
   }
 

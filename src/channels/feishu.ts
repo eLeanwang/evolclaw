@@ -4,6 +4,7 @@ import path from 'path';
 import imageType from 'image-type';
 import { ensureDir } from '../config.js';
 import { logger } from '../utils/logger.js';
+import { hasRichContent, renderAllRichContent } from '../utils/rich-content-renderer.js';
 
 export interface FeishuConfig {
   appId: string;
@@ -42,6 +43,16 @@ export class FeishuChannel {
   private userNameCache = new Map<string, string>();  // userId -> userName
 
   constructor(private config: FeishuConfig) {
+  }
+
+  /**
+   * 预填充已知的 thread_id（重启后从数据库恢复，避免误判话题创建）
+   */
+  preloadThreads(threadIds: string[]): void {
+    for (const id of threadIds) this.seenThreads.add(id);
+    if (threadIds.length > 0) {
+      logger.info(`[Feishu] Preloaded ${threadIds.length} known thread(s)`);
+    }
   }
 
   async connect(): Promise<void> {
@@ -116,8 +127,10 @@ export class FeishuChannel {
             let quotedText = '';
             let quotedImages: Array<{ data: string; mimeType: string }> = [];
 
-            // 创建话题的第一条消息应带引用，提供话题上下文
-            // 判断依据：首次见到的 thread_id（后续消息已在 seenThreads 中）
+            // 引用消息处理：
+            // - 非话题：直接回复某条消息时，拉取被引用的消息内容
+            // - 话题首条：创建话题时，拉取根消息内容作为上下文
+            // - 话题后续：不拉取（上下文由 session 维护）
             const isThreadCreation = !!(msg.thread_id && msg.parent_id && !this.seenThreads.has(msg.thread_id));
             if (msg.thread_id) this.seenThreads.add(msg.thread_id);
             if (msg.parent_id && (!msg.thread_id || isThreadCreation) && this.client) {
@@ -337,29 +350,78 @@ export class FeishuChannel {
     logger.debug(`[Feishu] sendMessage called, chatId: ${chatId}, content length: ${content.length}`);
 
     try {
+      // 检测富内容并渲染
+      const richItems = hasRichContent(content) ? await renderAllRichContent(content) : [];
+
+      // 上传所有图片获取 image_key，建立位置映射
+      const richItemsWithKeys: Array<{ start: number; end: number; imageKey: string }> = [];
+      for (const item of richItems) {
+        try {
+          const uploadResponse = await this.client.im.image.create({
+            data: { image_type: 'message', image: Buffer.from(item.png) as any }
+          });
+          if (uploadResponse?.image_key) {
+            richItemsWithKeys.push({ start: item.start, end: item.end, imageKey: uploadResponse.image_key });
+            logger.debug(`[Feishu] Uploaded ${item.type} image, image_key:`, uploadResponse.image_key);
+          }
+        } catch (err) {
+          logger.warn(`[Feishu] Failed to upload ${item.type} image:`, err);
+        }
+      }
+
       const useMarkdown = !options?.forceText && hasMarkdownSyntax(content);
       const hasMention = !!(options?.mentionUserIds && options.mentionUserIds.length > 0);
+      const hasRichImages = richItemsWithKeys.length > 0;
 
-      // 如果需要 @，强制使用 post 格式
-      const msgType = (useMarkdown || hasMention) ? 'post' : 'text';
+      // 如果有富内容图片、Markdown 或 @，使用 post 格式
+      const msgType = (useMarkdown || hasMention || hasRichImages) ? 'post' : 'text';
 
       let msgContent: string;
-      if (hasMention) {
-        // 构造带 @ 的富文本消息
-        const postData = useMarkdown
-          ? markdownToFeishuPost(content, options?.title)
-          : { zh_cn: { title: options?.title || '', content: [[{ tag: 'text', text: content }]] } };
+      if (msgType === 'post') {
+        let postData: any;
+
+        if (hasRichImages) {
+          // 有富内容图片：按位置分段文本并插入图片
+          postData = { zh_cn: { title: options?.title || '', content: [] } };
+          const sorted = [...richItemsWithKeys].sort((a, b) => a.start - b.start);
+          let lastEnd = 0;
+
+          for (const item of sorted) {
+            // 插入图片前的文本段
+            if (item.start > lastEnd) {
+              const textSegment = content.slice(lastEnd, item.start).trim();
+              if (textSegment) {
+                postData.zh_cn.content.push([{ tag: 'text', text: textSegment }]);
+              }
+            }
+            // 插入图片
+            postData.zh_cn.content.push([{ tag: 'img', image_key: item.imageKey }]);
+            lastEnd = item.end;
+          }
+
+          // 插入最后一段文本
+          if (lastEnd < content.length) {
+            const textSegment = content.slice(lastEnd).trim();
+            if (textSegment) {
+              postData.zh_cn.content.push([{ tag: 'text', text: textSegment }]);
+            }
+          }
+        } else {
+          // 无富内容图片：使用原有逻辑
+          postData = useMarkdown
+            ? markdownToFeishuPost(content, options?.title)
+            : { zh_cn: { title: options?.title || '', content: [[{ tag: 'text', text: content }]] } };
+        }
 
         // 在第一行开头插入所有 @ 标签
-        if (postData.zh_cn.content.length > 0) {
+        if (hasMention && postData.zh_cn.content.length > 0) {
           const atTags = options!.mentionUserIds!.map(uid => ({ tag: 'at', user_id: uid }));
           postData.zh_cn.content[0].unshift(...atTags);
         }
+
         msgContent = JSON.stringify(postData);
       } else {
-        msgContent = useMarkdown
-          ? JSON.stringify(markdownToFeishuPost(content, options?.title))
-          : JSON.stringify({ text: content });
+        msgContent = JSON.stringify({ text: content });
       }
 
       if (options?.replyToMessageId) {
@@ -377,7 +439,12 @@ export class FeishuChannel {
           data: { receive_id: chatId, msg_type: msgType, content: msgContent }
         });
       }
-      logger.debug(`[Feishu] Sent message as ${useMarkdown ? 'post (Markdown)' : 'text'}`);
+
+      if (hasRichImages) {
+        logger.info(`[Feishu] Sent message with ${richItemsWithKeys.length} embedded images`);
+      } else {
+        logger.debug(`[Feishu] Sent message as ${useMarkdown ? 'post (Markdown)' : 'text'}`);
+      }
     } catch (error: any) {
       // 230011: 消息已被撤回，降级为普通消息重试
       if (error.response?.data?.code === 230011 && options?.replyToMessageId) {
@@ -427,6 +494,48 @@ export class FeishuChannel {
       logger.info('[Feishu] File message sent successfully');
     } catch (error) {
       logger.error('[Feishu] Failed to send file:', error);
+      throw error;
+    }
+  }
+
+  async sendImage(chatId: string, png: Buffer, options?: { replyToMessageId?: string; replyInThread?: boolean }): Promise<void> {
+    if (!this.client) return;
+
+    try {
+      const uploadResponse = await this.client.im.image.create({
+        data: {
+          image_type: 'message',
+          image: Buffer.from(png) as any,
+        }
+      });
+
+      const imageKey = uploadResponse?.image_key;
+      if (!imageKey) {
+        logger.error('[Feishu] Image upload failed: no image_key returned');
+        return;
+      }
+
+      logger.debug('[Feishu] Image uploaded, image_key:', imageKey);
+
+      const msgContent = JSON.stringify({ image_key: imageKey });
+
+      if (options?.replyToMessageId) {
+        const replyData: any = { msg_type: 'image', content: msgContent };
+        if (options.replyInThread) replyData.reply_in_thread = true;
+        await this.client.im.message.reply({
+          path: { message_id: options.replyToMessageId },
+          data: replyData
+        });
+      } else {
+        await this.client.im.message.create({
+          params: { receive_id_type: 'chat_id' },
+          data: { receive_id: chatId, msg_type: 'image', content: msgContent }
+        });
+      }
+
+      logger.debug('[Feishu] Image message sent successfully');
+    } catch (error) {
+      logger.error('[Feishu] Failed to send image:', error);
       throw error;
     }
   }
@@ -604,6 +713,7 @@ interface PostElement {
   tag: string;
   text?: string;
   user_id?: string;
+  image_key?: string;
 }
 
 interface PostContent {
@@ -705,6 +815,7 @@ export class FeishuChannelPlugin implements ChannelPlugin {
       name: 'feishu' as const,
       sendText: (id: string, text: string, context?: any) => channel.sendMessage(id, text, context),
       sendFile: (id: string, filePath: string) => channel.sendFile(id, filePath),
+      sendImage: (id: string, png: Buffer, context?: any) => channel.sendImage(id, png, context),
       acknowledge: (messageId: string) => { channel.addAckReaction(messageId); return Promise.resolve(); },
     };
 

@@ -257,6 +257,14 @@ async function main() {
   // ── 连接所有渠道 ──
   const connected = await channelLoader.connectAll(channelInstances);
 
+  // 预填充 Feishu 已知 thread_id（重启后避免误判话题创建）
+  for (const inst of channelInstances) {
+    if (inst.adapter.name === 'feishu' && 'preloadThreads' in inst.channel) {
+      const threadIds = sessionManager.getKnownThreadIds('feishu');
+      (inst.channel as any).preloadThreads(threadIds);
+    }
+  }
+
   for (const name of connected) {
     eventBus.publish({
       type: 'channel:connected',

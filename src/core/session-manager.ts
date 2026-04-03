@@ -385,6 +385,17 @@ export class SessionManager {
     `);
   }
 
+  /**
+   * 获取指定渠道所有已知的 thread_id（用于重启后预填充 seenThreads）
+   */
+  getKnownThreadIds(channel: string): string[] {
+    const rows = this.db.prepare(`
+      SELECT DISTINCT thread_id FROM sessions
+      WHERE channel = ? AND thread_id != '' AND deleted_at IS NULL
+    `).all(channel) as any[];
+    return rows.map(r => r.thread_id);
+  }
+
   async getOrCreateSession(
     channel: string,
     channelId: string,
