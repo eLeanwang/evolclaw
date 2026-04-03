@@ -153,24 +153,4 @@ export class MessageQueue {
     return false;
   }
 
-  /**
-   * 获取正在处理的项目路径
-   */
-  getProcessingProject(sessionKey: string): string | undefined {
-    // 查找该 sessionKey 下正在处理的项目
-    for (const key of this.processing.keys()) {
-      if (this.matchesSession(key, sessionKey)) {
-        // 从 processing 中找到对应的队列，获取 projectPath
-        const queue = this.queues.get(key);
-        if (queue && queue.length > 0) {
-          return queue[0].projectPath;
-        }
-        // 如果队列为空但仍在处理，返回当前正在处理的项目路径
-        if (this.currentSessionKey === key) {
-          return this.currentProjectPath;
-        }
-      }
-    }
-    return undefined;
-  }
 }

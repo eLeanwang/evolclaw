@@ -161,9 +161,9 @@ export class CommandHandler {
   }
 
   /** 获取消息队列 key：话题用 session.id，主会话用 channel-channelId */
-  private getQueueKey(session: Session | undefined, channel: string, channelId: string): string {
-    if (session?.threadId) return session.id;
-    return `${channel}-${channelId}`;
+  private getQueueKey(session: Session | undefined, _channel: string, _channelId: string): string {
+    // 队列和 agent 均使用 session.id 作为 key
+    return session?.id || '';
   }
 
   /** 从 session 提取渠道预构建的回复上下文 */
@@ -287,8 +287,7 @@ export class CommandHandler {
     // 空闲检查：某些命令需要等待当前会话空闲
     const requiresIdle = ['/new', '/clear', '/compact', '/safe', '/repair', '/fork', '/bind'];
     if (requiresIdle.some(cmd => normalizedContent === cmd || normalizedContent.startsWith(cmd + ' '))) {
-      const streamKey = `${channel}-${channelId}`;
-      if (agent.hasActiveStream(streamKey)) {
+      if (activeSession && agent.hasActiveStream(activeSession.id)) {
         return '⚠️ 当前正在处理消息，请稍后再试\n使用 /stop 中断当前任务后重试';
       }
     }
@@ -574,13 +573,15 @@ export class CommandHandler {
 
     // /stop 命令：中断当前任务
     if (normalizedContent === '/stop') {
-      // 话题使用 session.id 作为队列 key，主会话使用 channel-channelId
+      // 使用 session.id 作为队列 key（与 enqueue/runQuery 一致）
       let sessionKey: string;
       if (threadId) {
         const threadSession = await this.sessionManager.getOrCreateSession(channel, channelId, this.config.projects?.defaultPath || process.cwd(), threadId);
         sessionKey = threadSession.id;
+      } else if (activeSession) {
+        sessionKey = activeSession.id;
       } else {
-        sessionKey = `${channel}-${channelId}`;
+        return '当前没有正在处理的任务';
       }
       const queueLength = this.messageQueue.getQueueLength(sessionKey);
       const hasActive = agent.hasActiveStream(sessionKey);
@@ -876,9 +877,8 @@ export class CommandHandler {
 
         const projectName = this.getProjectName(session.projectPath);
 
-        const sessionKey = `${channel}-${channelId}`;
-        const queueLength = this.messageQueue.getQueueLength(sessionKey);
-        const status = queueLength > 0 ? '[处理中]' : '[空闲]';
+        const isProcessing = this.messageQueue.isProcessing(session.id);
+        const status = isProcessing ? '[处理中]' : '[空闲]';
 
         return `当前群聊绑定的项目：
   ${projectName} (${session.projectPath}) - ${status}
@@ -887,17 +887,27 @@ export class CommandHandler {
       }
 
       const lines = ['可用项目:'];
-      const sessionKey = `${channel}-${channelId}`;
-      const processingProject = this.messageQueue.getProcessingProject(sessionKey);
-      const queueLength = this.messageQueue.getQueueLength(sessionKey);
 
-      const normalizePath = (p: string) => p.replace(/[/\\]+$/, '');
+      // 收集项目信息并按最近活跃排序
+      const entries: { name: string; projectPath: string; projectSession: any; isCurrent: boolean; updatedAt: number }[] = [];
 
       for (const [name, projectPath] of Object.entries(this.projects)) {
         const isCurrent = session?.projectPath === projectPath;
-        const prefix = isCurrent ? '  ✓' : '   ';
-
         const projectSession = await this.sessionManager.getSessionByProjectPath(channel, channelId, projectPath);
+        entries.push({
+          name, projectPath, projectSession, isCurrent,
+          updatedAt: projectSession?.updatedAt ?? 0,
+        });
+      }
+
+      // 当前活跃项目置顶，其余按 updatedAt 降序
+      entries.sort((a, b) => {
+        if (a.isCurrent !== b.isCurrent) return a.isCurrent ? -1 : 1;
+        return b.updatedAt - a.updatedAt;
+      });
+
+      for (const { name, projectPath, projectSession, isCurrent } of entries) {
+        const prefix = isCurrent ? '  ✓' : '   ';
 
         if (!projectSession) {
           lines.push(`${prefix} ${name} (${projectPath}) - 无会话`);
@@ -913,9 +923,12 @@ export class CommandHandler {
           statusParts.push(formatIdleTime(idleMs));
         }
 
-        if (processingProject && normalizePath(processingProject) === normalizePath(projectPath)) {
-          if (queueLength > 1) {
-            statusParts.push(`[处理中，队列${queueLength - 1}条]`);
+        // 用 session.id 查询队列状态（修复 key 不匹配问题）
+        const isProcessing = this.messageQueue.isProcessing(projectSession.id);
+        if (isProcessing) {
+          const queueLength = this.messageQueue.getQueueLength(projectSession.id);
+          if (queueLength > 0) {
+            statusParts.push(`[处理中，队列${queueLength}条]`);
           } else {
             statusParts.push('[处理中]');
           }
@@ -924,7 +937,7 @@ export class CommandHandler {
         const unreadCount = this.messageCache.getCount(projectSession.id);
         if (unreadCount > 0) {
           statusParts.push(`[${unreadCount}条新消息]`);
-        } else if (!processingProject || normalizePath(processingProject) !== normalizePath(projectPath)) {
+        } else if (!isProcessing && !isCurrent) {
           statusParts.push('[空闲]');
         }
 
@@ -1107,12 +1120,20 @@ export class CommandHandler {
       const lines = [`当前项目 ${path.basename(session.projectPath)} 的会话列表:\n`];
 
       if (currentProjectSessions.length > 0) {
+        // 超过10个会话时隐藏话题会话（/slist 只能在主会话调用，话题内已禁用）
+        const hideTopics = currentProjectSessions.length > 10;
+        const topicCount = hideTopics ? currentProjectSessions.filter(s => s.threadId).length : 0;
+
         lines.push('【EvolClaw 会话】');
+        let displayIndex = 0;
         for (let i = 0; i < currentProjectSessions.length; i++) {
           const s = currentProjectSessions[i];
+          if (hideTopics && s.threadId) continue;
+
           const isActive = (s.metadata as any)?.isActive === true;
+          displayIndex++;
           const prefix = isActive ? '  ✓' : '   ';
-          const num = `${i + 1}.`;
+          const num = `${displayIndex}.`;
           const threadTag = s.threadId ? '[话题] ' : '';
           const name = s.name || '(未命名)';
           const uuid = s.agentSessionId ? `(${s.agentSessionId.substring(0, 8)})` : '';
@@ -1121,8 +1142,8 @@ export class CommandHandler {
           if (s.agentSessionId && !this.sessionManager.checkSessionFileExists(s.projectPath, s.agentSessionId, s.agentId)) {
             lines.push(`${prefix} ${num} ${threadTag}❌ ${name} ${uuid} - ${idleTime} [会话文件缺失]`);
           } else {
-            const sQueueKey = s.threadId ? s.id : `${channel}-${channelId}`;
-            const sIsProcessing = this.messageQueue.isProcessing(sQueueKey);
+            const sIsProcessing = this.messageQueue.isProcessing(s.id);
+            logger.debug(`[/slist] session "${name}" id=${s.id}, isProcessing=${sIsProcessing}, processingKeys=${JSON.stringify([...(this.messageQueue as any).processing])}`);
             let status = '[空闲]';
             if (sIsProcessing) {
               status = '[处理中]';
@@ -1131,6 +1152,9 @@ export class CommandHandler {
             }
             lines.push(`${prefix} ${num} ${threadTag}${name} ${uuid} - ${idleTime} ${status}`);
           }
+        }
+        if (topicCount > 0) {
+          lines.push(`\n  (已隐藏 ${topicCount} 个话题会话，话题会话仅在对应话题内可用)`);
         }
         lines.push('');
       }
@@ -1157,23 +1181,27 @@ export class CommandHandler {
 
       if (!sessionName) return '用法: /s <序号、会话名称或前8位UUID>';
 
-      const sessionKey = `${channel}-${channelId}`;
-      const queueLength = this.messageQueue.getQueueLength(sessionKey);
-      if (queueLength > 0) {
+      const isProcessing = session && this.messageQueue.isProcessing(session.id);
+      if (isProcessing) {
         return `⚠️ 当前正在处理消息，无法切换会话\n请等待当前任务完成后再试`;
       }
 
       let targetSession = await this.sessionManager.getSessionByName(channel, channelId, sessionName);
 
-      // 序号切换：纯数字时按当前项目会话列表序号匹配
+      // 序号切换：纯数字时按 /slist 显示的序号匹配（超过10个时隐藏非活跃话题会话）
       if (!targetSession && /^\d+$/.test(sessionName) && session) {
         const idx = parseInt(sessionName, 10);
         const allSessions = await this.sessionManager.listSessions(channel, channelId);
         const projectSessions = allSessions.filter(s => s.projectPath === session.projectPath && s.agentId === session.agentId);
-        if (idx >= 1 && idx <= projectSessions.length) {
-          targetSession = projectSessions[idx - 1];
+        // 与 /slist 显示逻辑一致：超过10个时隐藏非活跃话题会话
+        const hideTopics = projectSessions.length > 10;
+        const visibleSessions = hideTopics
+          ? projectSessions.filter(s => !s.threadId)
+          : projectSessions;
+        if (idx >= 1 && idx <= visibleSessions.length) {
+          targetSession = visibleSessions[idx - 1];
         } else {
-          return `❌ 序号超出范围 (1-${projectSessions.length})\n使用 /slist 查看可用会话`;
+          return `❌ 序号超出范围 (1-${visibleSessions.length})\n使用 /slist 查看可用会话`;
         }
       }
 
@@ -1290,15 +1318,19 @@ export class CommandHandler {
 
       let targetSession = await this.sessionManager.getSessionByName(channel, channelId, sessionName);
 
-      // 序号删除
+      // 序号删除（与 /slist 显示序号一致）
       if (!targetSession && /^\d+$/.test(sessionName)) {
         const idx = parseInt(sessionName, 10);
         const allSessions = await this.sessionManager.listSessions(channel, channelId);
         const projectSessions = allSessions.filter(s => s.projectPath === session.projectPath && s.agentId === session.agentId);
-        if (idx >= 1 && idx <= projectSessions.length) {
-          targetSession = projectSessions[idx - 1];
+        const hideTopics = projectSessions.length > 10;
+        const visibleSessions = hideTopics
+          ? projectSessions.filter(s => !s.threadId)
+          : projectSessions;
+        if (idx >= 1 && idx <= visibleSessions.length) {
+          targetSession = visibleSessions[idx - 1];
         } else {
-          return `❌ 序号超出范围 (1-${projectSessions.length})\n使用 /slist 查看可用会话`;
+          return `❌ 序号超出范围 (1-${visibleSessions.length})\n使用 /slist 查看可用会话`;
         }
       }
 

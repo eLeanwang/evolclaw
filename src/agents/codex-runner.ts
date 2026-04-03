@@ -6,7 +6,7 @@
  * so MessageProcessor and CommandHandler can work with it transparently.
  */
 
-import { Codex, type ThreadEvent, type ThreadItem, type ThreadOptions, type ModelReasoningEffort, type ApprovalMode } from '@openai/codex-sdk';
+import { Codex, type ThreadEvent, type ThreadItem, type ThreadOptions, type ModelReasoningEffort, type ApprovalMode, type UserInput, type Input } from '@openai/codex-sdk';
 import type { Config } from '../types.js';
 import type { AgentPlugin, AgentInstance, AgentCallbacks } from '../core/agent-loader.js';
 import type { AgentEvent, AgentRunnerFull, ModelSwitcher, PermissionModeInfo } from './claude-runner.js';
@@ -15,6 +15,14 @@ import { logger } from '../utils/logger.js';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+
+// ── MIME → 扩展名映射 ──
+const MIME_EXT: Record<string, string> = {
+  'image/png': '.png',
+  'image/jpeg': '.jpg',
+  'image/gif': '.gif',
+  'image/webp': '.webp',
+};
 
 // ── Codex 模型列表 ──
 const CODEX_MODELS = ['gpt-5.3-codex', 'gpt-5.2-codex', 'gpt-5-codex', 'gpt-5.2', 'gpt-5.4'];
@@ -131,15 +139,33 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
     const controller = new AbortController();
     this.activeAbortControllers.set(sessionId, controller);
 
-    // 构建输入
-    // 注意：Codex SDK 的图片输入是 local_image (文件路径)，不是 base64
-    // EvolClaw 的图片是 base64 格式，暂不支持直接传递
-    const input = prompt;
+    // 构建输入：将 base64 图片写入临时文件，转换为 Codex SDK 的 local_image 格式
+    const tempFiles: string[] = [];
+    let input: Input;
+
+    if (images?.length) {
+      const tmpDir = os.tmpdir();
+      const parts: UserInput[] = [{ type: 'text', text: prompt }];
+
+      for (let i = 0; i < images.length; i++) {
+        const img = images[i];
+        const ext = MIME_EXT[img.mimeType || ''] || '.jpg';
+        const tmpPath = path.join(tmpDir, `evolclaw-img-${Date.now()}-${i}${ext}`);
+        fs.writeFileSync(tmpPath, Buffer.from(img.data, 'base64'));
+        tempFiles.push(tmpPath);
+        parts.push({ type: 'local_image', path: tmpPath });
+      }
+
+      input = parts;
+      logger.info(`[CodexRunner] Attached ${images.length} image(s) as local_image`);
+    } else {
+      input = prompt;
+    }
 
     const { events } = await thread.runStreamed(input, { signal: controller.signal });
 
     // 包装为 AgentEvent 流
-    return this.transformStream(events, sessionId, thread);
+    return this.transformStream(events, sessionId, thread, tempFiles);
   }
 
   // ── Interrupt ──
@@ -214,7 +240,8 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
   private async *transformStream(
     events: AsyncGenerator<ThreadEvent>,
     sessionId: string,
-    thread: any
+    thread: any,
+    tempFiles?: string[]
   ): AsyncGenerator<AgentEvent> {
     try {
       for await (const event of events) {
@@ -222,6 +249,12 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
       }
     } finally {
       this.activeAbortControllers.delete(sessionId);
+      // 清理临时图片文件
+      if (tempFiles?.length) {
+        for (const f of tempFiles) {
+          try { fs.unlinkSync(f); } catch { /* ignore */ }
+        }
+      }
     }
   }
 
