@@ -393,11 +393,12 @@ export class SessionManager {
     metadata?: any,
     name?: string,
     userId?: string,
-    chatType?: 'private' | 'group'
+    chatType?: 'private' | 'group',
+    agentId?: string
   ): Promise<Session> {
     // 话题会话：独立查找/创建
     if (threadId) {
-      const session = this.getOrCreateThreadSession(channel, channelId, threadId, defaultProjectPath, metadata, name);
+      const session = this.getOrCreateThreadSession(channel, channelId, threadId, defaultProjectPath, metadata, name, agentId);
       session.identity = this.resolveIdentity(channel, userId);
       return session;
     }
@@ -442,7 +443,7 @@ export class SessionManager {
       channelId,
       projectPath: defaultProjectPath,
       threadId: '',
-      agentId: 'claude',
+      agentId: agentId || 'claude',
       chatType: chatType || 'private',
       sessionMode: 'interactive',
       metadata: sessionMetadata,
@@ -494,7 +495,8 @@ export class SessionManager {
     threadId: string,
     defaultProjectPath: string,
     metadata?: any,
-    name?: string
+    name?: string,
+    agentId?: string
   ): Session {
     // 查找已有话题会话
     const existing = this.db.prepare(`
@@ -530,7 +532,7 @@ export class SessionManager {
       channelId,
       projectPath,
       threadId,
-      agentId: 'claude',
+      agentId: agentId || 'claude',
       chatType: 'private',
       sessionMode: 'interactive',
       metadata,
@@ -766,7 +768,7 @@ export class SessionManager {
     `).run(Date.now(), Date.now(), channelId);
   }
 
-  async createNewSession(channel: string, channelId: string, projectPath: string, name?: string): Promise<Session> {
+  async createNewSession(channel: string, channelId: string, projectPath: string, name?: string, agentId?: string): Promise<Session> {
     // 取消当前活跃会话
     this.deactivateAllMetadata(channel, channelId);
 
@@ -777,7 +779,7 @@ export class SessionManager {
       channelId,
       projectPath,
       threadId: '',
-      agentId: 'claude',
+      agentId: agentId || 'claude',
       chatType: 'private',
       sessionMode: 'interactive',
       metadata: { isActive: true },

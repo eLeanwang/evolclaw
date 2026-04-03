@@ -264,7 +264,7 @@ export class CommandHandler {
 
     // 话题内禁用部分命令
     if (threadId) {
-      const threadBlocked = ['/new', '/slist', '/plist', '/bind', '/s', '/session', '/project', '/p', '/fork', '/del'];
+      const threadBlocked = ['/new', '/slist', '/plist', '/bind', '/s', '/session', '/project', '/p', '/fork', '/del', '/agent'];
       const isBlocked = threadBlocked.some(c => normalizedContent === c || normalizedContent.startsWith(c + ' '));
       if (isBlocked) {
         return '⚠️ 话题中不支持此命令';
@@ -769,7 +769,8 @@ export class CommandHandler {
         channel,
         channelId,
         projectPath,
-        sessionName
+        sessionName,
+        session?.agentId || this.defaultAgentId
       );
 
       this.eventBus.publish({
