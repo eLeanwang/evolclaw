@@ -604,6 +604,31 @@ export class SessionManager {
     `).run(agentSessionId, Date.now(), sessionId);
   }
 
+  async switchAgent(channel: string, channelId: string, projectPath: string, newAgentId: string): Promise<Session> {
+    // 1. 取消当前活跃会话
+    this.deactivateAllMetadata(channel, channelId);
+
+    // 2. 查找目标 agent 在当前项目下的会话
+    const target = this.db.prepare(`
+      SELECT * FROM sessions
+      WHERE channel = ? AND channel_id = ? AND project_path = ? AND agent_id = ? AND thread_id = '' AND deleted_at IS NULL
+      ORDER BY updated_at DESC LIMIT 1
+    `).get(channel, channelId, projectPath, newAgentId) as any;
+
+    if (target) {
+      const validSessionId = this.validateSessionFile(target);
+      // 激活目标会话
+      const metadata = target.metadata ? JSON.parse(target.metadata) : {};
+      metadata.isActive = true;
+      this.db.prepare(`UPDATE sessions SET metadata = ?, updated_at = ? WHERE id = ?`)
+        .run(JSON.stringify(metadata), Date.now(), target.id);
+      return { ...this.rowToSession(target), agentSessionId: validSessionId, metadata };
+    }
+
+    // 3. 没有找到，创建新会话
+    return this.getOrCreateSession(channel, channelId, projectPath, undefined, undefined, undefined, newAgentId);
+  }
+
   async clearActiveSession(channel: string, channelId: string): Promise<void> {
     // 清除当前活跃会话的 Agent Session ID
     this.db.prepare(`

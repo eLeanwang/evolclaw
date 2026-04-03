@@ -1,6 +1,6 @@
 import { Config, ChannelAdapter, Session, ChannelPolicy } from '../types.js';
 import { SessionManager } from './session-manager.js';
-import { AgentRunner, hasModelSwitcher, hasPermissionController } from '../agents/claude-runner.js';
+import { type AgentRunnerFull, hasModelSwitcher, hasPermissionController } from '../agents/claude-runner.js';
 import { MessageCache } from '../utils/message-cache.js';
 import { MessageProcessor } from './message-processor.js';
 import { EventBus } from './event-bus.js';
@@ -112,7 +112,7 @@ const aliases: Record<string, string> = {
 };
 
 // 命令快速路径前缀（所有命令都不进入消息队列）
-const quickCommandPrefixes = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/slist', '/session', '/rename', '/repair', '/fork', '/stop', '/clear', '/compact', '/safe', '/del', '/perm', '/p ', '/s ', '/name '];
+const quickCommandPrefixes = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/agent', '/slist', '/session', '/rename', '/repair', '/fork', '/stop', '/clear', '/compact', '/safe', '/del', '/perm', '/p ', '/s ', '/name '];
 
 export class CommandHandler {
   private adapters = new Map<string, ChannelAdapter>();
@@ -120,14 +120,31 @@ export class CommandHandler {
   private processor!: MessageProcessor;
   private messageQueue!: MessageQueue;
   private permissionGateway?: PermissionGateway;
+  private agentMap: Map<string, AgentRunnerFull>;
+  private defaultAgentId: string;
+
+  /** 按 agentId 获取 agent，回退到默认 */
+  private getAgent(agentId?: string): AgentRunnerFull {
+    if (agentId && this.agentMap.has(agentId)) return this.agentMap.get(agentId)!;
+    return this.agentMap.get(this.defaultAgentId) || this.agentMap.values().next().value!;
+  }
 
   constructor(
     private sessionManager: SessionManager,
-    private agentRunner: AgentRunner,
+    agentRunnerOrMap: AgentRunnerFull | Map<string, AgentRunnerFull>,
     private config: Config,
     private messageCache: MessageCache,
     private eventBus: EventBus,
-  ) {}
+    defaultAgentId?: string
+  ) {
+    if (agentRunnerOrMap instanceof Map) {
+      this.agentMap = agentRunnerOrMap;
+      this.defaultAgentId = defaultAgentId || 'claude';
+    } else {
+      this.agentMap = new Map([[agentRunnerOrMap.name, agentRunnerOrMap]]);
+      this.defaultAgentId = agentRunnerOrMap.name;
+    }
+  }
 
   /** 项目列表快捷访问 */
   private get projects(): Record<string, string> {
@@ -229,6 +246,10 @@ export class CommandHandler {
     const identity = this.sessionManager.resolveIdentity(channel, userId);
     const policy = this.getPolicy(channel);
 
+    // 按当前会话选择 agent 后端
+    const activeSession = await this.sessionManager.getActiveSession(channel, channelId);
+    const agent = this.getAgent(activeSession?.agentId);
+
     // 规范化命令（将别名转换为完整命令）
     let normalizedContent = content;
     for (const [alias, full] of Object.entries(aliases)) {
@@ -268,7 +289,7 @@ export class CommandHandler {
     const requiresIdle = ['/new', '/clear', '/compact', '/safe', '/repair', '/fork', '/bind'];
     if (requiresIdle.some(cmd => normalizedContent === cmd || normalizedContent.startsWith(cmd + ' '))) {
       const streamKey = `${channel}-${channelId}`;
-      if (this.agentRunner.hasActiveStream(streamKey)) {
+      if (agent.hasActiveStream(streamKey)) {
         return '⚠️ 当前正在处理消息，请稍后再试\n使用 /stop 中断当前任务后重试';
       }
     }
@@ -353,14 +374,14 @@ export class CommandHandler {
 
       // /perm（无参数）：显示当前模式和可选模式
       if (!args) {
-        if (!hasPermissionController(this.agentRunner)) {
+        if (!hasPermissionController(agent)) {
           return '❌ 权限控制不可用';
         }
         const result = await this.ensureSession(channel, channelId, threadId);
         if ('error' in result) return result.error;
         const { session } = result;
         const currentMode = session.metadata?.permissionMode || 'auto';
-        const modes = this.agentRunner.listModes();
+        const modes = agent.listModes();
         const modeList = modes.map(m =>
           `  ${m.key === currentMode ? '▶' : ' '} ${m.key} (${m.nameZh}) - ${m.description}`
         ).join('\n');
@@ -394,8 +415,8 @@ export class CommandHandler {
         }
 
         // /perm <mode>：切换权限模式
-        if (hasPermissionController(this.agentRunner)) {
-          const modes = this.agentRunner.listModes();
+        if (hasPermissionController(agent)) {
+          const modes = agent.listModes();
           const matched = modes.find(m => m.key === arg);
           if (matched) {
             const result = await this.ensureSession(channel, channelId, threadId);
@@ -415,14 +436,40 @@ export class CommandHandler {
       return `❌ 未知参数: ${args}\n用法: /perm <auto|manual|edit> 或 /perm allow|deny`;
     }
 
+    // /agent 命令：查看或切换 Agent 后端
+    if (normalizedContent.startsWith('/agent')) {
+      if (!isAdmin) return '❌ 无权限：此命令仅限管理员使用';
+      const args = normalizedContent.slice(6).trim();
+      const available = [...this.agentMap.keys()];
+
+      if (!args) {
+        const currentAgent = activeSession?.agentId || this.defaultAgentId;
+        const list = available.map(a => `${a === currentAgent ? '✓' : '-'} ${a}`).join('\n');
+        return `当前 Agent: ${currentAgent}\n\n可用:\n${list}\n\n用法: /agent <name>`;
+      }
+
+      if (!this.agentMap.has(args)) {
+        return `❌ 未知 Agent: ${args}\n可用: ${available.join(', ')}`;
+      }
+
+      const result = await this.ensureSession(channel, channelId, threadId);
+      if ('error' in result) return result.error;
+      const { session } = result;
+
+      // 切换到目标 agent（恢复已有会话或创建新会话）
+      const newSession = await this.sessionManager.switchAgent(channel, channelId, session.projectPath, args);
+      const isRestore = newSession.agentSessionId ? '(恢复已有会话)' : '(新建会话)';
+      return `✓ 已切换 Agent 后端: ${args} ${isRestore}`;
+    }
+
     // /model 命令：查看或切换模型/推理强度
     if (normalizedContent.startsWith('/model')) {
       const args = normalizedContent.slice(6).trim();
-      const models = hasModelSwitcher(this.agentRunner) ? this.agentRunner.listModels() : [];
+      const models = hasModelSwitcher(agent) ? agent.listModels() : [];
 
       if (!args) {
-        const currentModel = this.agentRunner.getModel();
-        const currentEffort = this.agentRunner.getEffort() || 'auto';
+        const currentModel = hasModelSwitcher(agent) ? agent.getModel() : agent.name;
+        const currentEffort = agent.getEffort?.() || 'auto';
         const effortDisplay = currentEffort === 'auto' ? 'auto (SDK默认)' : `${currentEffort} ${effortBar(currentEffort)}`;
         const modelList = models.map((m: string) => `- ${m}`).join('\n');
         return `当前模型: ${currentModel}\n推理强度: ${effortDisplay}\n\n可用模型：\n${modelList}\n\n推理强度: ${availableEfforts.join(' / ')} / auto\n\n用法:\n  /model <model>           切换模型\n  /model <model> <effort>  切换模型+推理强度\n  /model <effort>          仅切换推理强度\n  /model auto              恢复SDK默认`;
@@ -445,7 +492,7 @@ export class CommandHandler {
             return `⚠️ 写入用户配置失败: ${writeResult.error}\n已更新运行时配置，但未持久化到 ~/.claude/settings.json`;
           }
 
-          this.agentRunner.setEffort(undefined);
+          agent.setEffort?.(undefined);
           return '✓ 推理强度已恢复为 auto (SDK默认)';
         }
         // 单参数：模型 或 effort
@@ -483,7 +530,7 @@ export class CommandHandler {
 
       if (newModel) {
         updates.model = newModel;
-        this.agentRunner.setModel(newModel);
+        agent.setModel?.(newModel);
         this.eventBus.publish({
           type: 'agent:model-changed',
           sessionId: session.id,
@@ -494,12 +541,12 @@ export class CommandHandler {
       }
 
       if (newEffort) {
-        const modelAfterSwitch = newModel ?? this.agentRunner.getModel();
+        const modelAfterSwitch = newModel ?? (hasModelSwitcher(agent) ? agent.getModel() : agent.name);
         if (newEffort === 'max' && !modelAfterSwitch.includes('opus')) {
           return '⚠️ max 推理强度仅 Opus 模型支持（opus / claude-opus-4-6）';
         }
         updates.effortLevel = newEffort;
-        this.agentRunner.setEffort(newEffort);
+        agent.setEffort?.(newEffort);
         changes.push(`推理强度: ${newEffort} ${effortBar(newEffort)}`);
       }
 
@@ -523,13 +570,13 @@ export class CommandHandler {
         sessionKey = `${channel}-${channelId}`;
       }
       const queueLength = this.messageQueue.getQueueLength(sessionKey);
-      const hasActive = this.agentRunner.hasActiveStream(sessionKey);
+      const hasActive = agent.hasActiveStream(sessionKey);
 
       if (queueLength === 0 && !hasActive) {
         return '当前没有正在处理的任务';
       }
 
-      await this.agentRunner.interrupt(sessionKey);
+      await agent.interrupt(sessionKey);
       return '✓ 已发送中断信号，任务将尽快停止';
     }
 
@@ -547,10 +594,10 @@ export class CommandHandler {
         ? session.projectPath
         : path.resolve(process.cwd(), session.projectPath);
 
-      const cleared = await this.agentRunner.clearSession(session.agentSessionId, projectPath);
+      const cleared = await agent.clearSession(session.agentSessionId, projectPath);
       if (cleared) {
         await this.sessionManager.updateAgentSessionIdBySessionId(session.id, '');
-        this.agentRunner.updateSessionId(session.id, '');
+        agent.updateSessionId(session.id, '');
         return '✅ 已清空当前会话的对话历史';
       } else {
         return '❌ 清空会话失败，请稍后重试';
@@ -575,7 +622,7 @@ export class CommandHandler {
         await sendMessage(channelId, '⏳ 正在压缩会话上下文...', this.getReplyContext(session));
       }
 
-      const compacted = await this.agentRunner.compactSession(session.id, session.agentSessionId, projectPath);
+      const compacted = await agent.compactSession(session.id, session.agentSessionId, projectPath);
       if (compacted) {
         return '✅ 会话上下文已压缩';
       } else {
@@ -715,7 +762,7 @@ export class CommandHandler {
       });
 
       if (session) {
-        await this.agentRunner.closeSession(session.id);
+        await agent.closeSession(session.id);
       }
 
       return `✓ 已创建新会话${sessionName ? `: ${sessionName}` : ''}\n  之前的对话历史已保留，可通过 /slist 查看`;
@@ -918,7 +965,8 @@ export class CommandHandler {
       const cachedEvents = this.messageCache.getEvents(newSession.id);
 
       const hasExistingSession = newSession.agentSessionId ? '（恢复已有会话）' : '（新建会话）';
-      let response = `✓ 已切换到项目: ${projectName}\n  路径: ${projectPath}\n  ${hasExistingSession}`;
+      const currentAgent = newSession.agentId || this.defaultAgentId;
+      let response = `✓ 已切换到项目: ${projectName}\n  路径: ${projectPath}\n  Agent: ${currentAgent}\n  ${hasExistingSession}`;
 
       if (cachedEvents.length > 0 && sendMessage) {
         for (const event of cachedEvents) {
@@ -1258,7 +1306,7 @@ export class CommandHandler {
 
       this.eventBus.publish({ type: 'session:deleted', sessionId: targetSession.id });
 
-      await this.agentRunner.closeSession(targetSession.id);
+      await agent.closeSession(targetSession.id);
 
       return `✓ 已删除会话: ${targetSession.name || sessionName}\n会话文件已保留，可通过 CLI 访问`;
     }

@@ -2,7 +2,14 @@
   "agents": {
     "anthropic": {
       "model": "sonnet"
-    }
+    },
+    "openai": {
+      "apiKey": "your-openai-api-key",
+      "baseUrl": "https://api.openai.com/v1",
+      "model": "gpt-5.2-codex",
+      "effort": "medium"
+    },
+    "defaultAgent": "claude"
   },
   "channels": {
     "feishu": {

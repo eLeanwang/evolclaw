@@ -18,7 +18,8 @@ export class MessageQueue {
   private handler: MessageHandler;
   private currentSessionKey?: string;
   private currentProjectPath?: string;
-  private interruptCallback?: (sessionKey: string) => Promise<void>;
+  private currentAgentId?: string;
+  private interruptCallback?: (sessionKey: string, agentId?: string) => Promise<void>;
   private eventBus?: EventBus;
   private recentMessageIds = new Set<string>();
   private readonly DEDUP_WINDOW = 60_000; // 1 分钟窗口
@@ -27,7 +28,7 @@ export class MessageQueue {
     this.handler = handler;
   }
 
-  setInterruptCallback(callback: (sessionKey: string) => Promise<void>): void {
+  setInterruptCallback(callback: (sessionKey: string, agentId?: string) => Promise<void>): void {
     this.interruptCallback = callback;
   }
 
@@ -87,7 +88,7 @@ export class MessageQueue {
           logger.debug(`[Queue] ${queueKey} is processing, triggering interrupt`);
           this.eventBus?.publish({ type: 'message:interrupted', sessionId: sessionKey, reason: 'new_message' });
           if (this.interruptCallback) {
-            this.interruptCallback(sessionKey).catch(() => {});
+            this.interruptCallback(sessionKey, this.currentAgentId).catch(() => {});
           }
         } else {
           // 群聊：FIFO，不打断
@@ -117,6 +118,7 @@ export class MessageQueue {
       const { message, projectPath, resolve, reject } = queue.shift()!;
       this.currentSessionKey = queueKey;
       this.currentProjectPath = projectPath;
+      this.currentAgentId = message.agentId;
 
       logger.debug(`[Queue] Processing message from ${message.channel}:${message.channelId}`);
       try {

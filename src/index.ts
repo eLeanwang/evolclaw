@@ -1,12 +1,13 @@
 import { loadConfig, ensureDataDirs, resolvePaths, resolveAnthropicConfig, isOwner } from './config.js';
 import { SessionManager } from './core/session-manager.js';
 import { ClaudeAgentPlugin } from './agents/claude-runner.js';
+import { CodexAgentPlugin } from './agents/codex-runner.js';
 import { FeishuChannelPlugin } from './channels/feishu.js';
 import { WechatChannelPlugin } from './channels/wechat.js';
 import { AUNChannelPlugin } from './channels/aun.js';
 import { MessageProcessor } from './core/message-processor.js';
 import { MessageQueue } from './core/message-queue.js';
-import { MsgBridge } from './core/message-bridge.js';
+import { MessageBridge } from './core/message-bridge.js';
 import { MessageCache } from './utils/message-cache.js';
 import { CommandHandler } from './core/command-handler.js';
 import { EventBus } from './core/event-bus.js';
@@ -65,6 +66,7 @@ async function main() {
   // Agent 插件系统
   const agentLoader = new AgentLoader();
   agentLoader.register(new ClaudeAgentPlugin());
+  agentLoader.register(new CodexAgentPlugin());
 
   const agentInstances = agentLoader.createAll(config, {
     onSessionIdUpdate: async (sessionId: string, agentSessionId: string) => {
@@ -72,13 +74,25 @@ async function main() {
     },
   });
 
-  const agentRunner = agentInstances[0].agent;
-  logger.info('✓ Agent runner ready');
+  // 构建 agent map，支持按 agentId 路由（当前默认使用第一个 agent）
+  const agentMap = new Map<string, any>();
+  for (const inst of agentInstances) {
+    agentMap.set(inst.agent.name, inst.agent);
+  }
+  const defaultAgent = config.agents?.defaultAgent || 'claude';
+  const agentRunner = agentMap.get(defaultAgent) || agentInstances[0]?.agent;
+  if (!agentRunner) {
+    throw new Error('No agent backend available. Check agents config.');
+  }
+  logger.info(`✓ Agent runner ready (default: ${agentRunner.name}, available: ${[...agentMap.keys()].join(', ')})`);
 
   // 权限审批网关
   const permissionGateway = new PermissionGateway();
   permissionGateway.setEventBus(eventBus);
-  agentRunner.setPermissionGateway(permissionGateway);
+  // 为所有支持权限的 agent 设置 gateway
+  for (const inst of agentInstances) {
+    inst.agent.setPermissionGateway?.(permissionGateway);
+  }
 
   // 创建消息缓存
   const messageCache = new MessageCache();
@@ -99,12 +113,12 @@ async function main() {
   logger.info(`✓ Created ${channelInstances.length} channel instance(s)`);
 
   // 创建命令处理器
-  const cmdHandler = new CommandHandler(sessionManager, agentRunner, config, messageCache, eventBus);
+  const cmdHandler = new CommandHandler(sessionManager, agentMap, config, messageCache, eventBus, defaultAgent);
   cmdHandler.setPermissionGateway(permissionGateway);
 
   // 创建消息处理器
   const processor = new MessageProcessor(
-    agentRunner,
+    agentMap,
     sessionManager,
     config,
     messageCache,
@@ -139,25 +153,31 @@ async function main() {
         }
       };
       return cmdHandler.handle(content, channel, channelId, sendFn, userId, threadId);
-    }
+    },
+    defaultAgent
   );
 
   // 回填 processor 和 messageQueue 的引用
   cmdHandler.setProcessor(processor);
 
-  // 设置 compact 开始回调
-  agentRunner.setCompactStartCallback((sessionId: string) => {
-    processor.handleCompactStart(sessionId);
-  });
+  // 设置 compact 开始回调（对所有支持的 agent）
+  for (const inst of agentInstances) {
+    inst.agent.setCompactStartCallback?.((sessionId: string) => {
+      processor.handleCompactStart(sessionId);
+    });
+  }
 
   // 创建消息队列
   const messageQueue = new MessageQueue(async (message) => {
     await processor.processMessage(message);
   });
 
-  // 设置中断回调
-  messageQueue.setInterruptCallback(async (sessionKey) => {
-    await agentRunner.interrupt(sessionKey);
+  // 设置中断回调（精确中断正在处理的 agent）
+  messageQueue.setInterruptCallback(async (sessionKey, agentId) => {
+    const agent = agentMap.get(agentId || defaultAgent);
+    if (agent?.hasActiveStream(sessionKey)) {
+      await agent.interrupt(sessionKey);
+    }
   });
   messageQueue.setEventBus(eventBus);
 
@@ -201,9 +221,9 @@ async function main() {
     }
   }
 
-  // ── MsgBridge：Channel ↔ Core 消息桥梁 ──
+  // ── MessageBridge：Channel ↔ Core 消息桥梁 ──
 
-  const msgBridge = new MsgBridge(config, sessionManager, processor, messageQueue, cmdHandler, eventBus);
+  const msgBridge = new MessageBridge(config, sessionManager, processor, messageQueue, cmdHandler, eventBus);
 
   // ── 渠道消息注册 ──
 
