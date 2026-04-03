@@ -92,6 +92,7 @@ export interface Session {
   projectPath: string;
   agentSessionId?: string;
   name?: string;
+  processingState?: string;  // null=空闲, 'processing'=处理中（含时间戳）
   metadata?: SessionMetadata;
   identity?: SessionIdentity;  // 运行时计算，不持久化
   createdAt: number;

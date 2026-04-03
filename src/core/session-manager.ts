@@ -68,6 +68,7 @@ export class SessionManager {
       agentSessionId: row.agent_session_id,
       metadata,
       name: row.name,
+      processingState: row.processing_state || undefined,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       deletedAt: row.deleted_at ?? undefined,
@@ -297,6 +298,16 @@ export class SessionManager {
       }
     }
 
+    // Migration: add processing_state column (独立于 schema 重构)
+    if (tableInfo.length > 0) {
+      const hasProcessingState = tableInfo.some((col: any) => col.name === 'processing_state');
+      if (!hasProcessingState) {
+        logger.info('Migrating database schema (adding processing_state)...');
+        this.db.exec(`ALTER TABLE sessions ADD COLUMN processing_state TEXT`);
+        logger.info('✓ Database migration completed (processing_state added)');
+      }
+    }
+
     // Migration: normalize legacy metadata rootId → replyContext
     if (hasMetadata && tableInfo.length > 0) {
       const rows = this.db.prepare(
@@ -339,6 +350,7 @@ export class SessionManager {
         project_path TEXT NOT NULL,
         agent_session_id TEXT,
         name TEXT,
+        processing_state TEXT,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
         metadata TEXT,
@@ -394,6 +406,47 @@ export class SessionManager {
       WHERE channel = ? AND thread_id != '' AND deleted_at IS NULL
     `).all(channel) as any[];
     return rows.map(r => r.thread_id);
+  }
+
+  /**
+   * 标记会话为处理中（实时写 DB，crash 也能恢复）
+   */
+  markProcessing(sessionId: string): void {
+    this.db.prepare(`UPDATE sessions SET processing_state = ? WHERE id = ?`)
+      .run(String(Date.now()), sessionId);
+  }
+
+  /**
+   * 清除会话处理中状态
+   */
+  clearProcessing(sessionId: string): void {
+    this.db.prepare(`UPDATE sessions SET processing_state = NULL WHERE id = ?`)
+      .run(sessionId);
+  }
+
+  /**
+   * 获取所有处于 processing 状态的会话（用于重启后恢复）
+   * @param maxAgeMs 最大存活时间（超过则视为超时，清除状态）默认 1 小时
+   */
+  getPendingProcessingSessions(maxAgeMs: number = 60 * 60 * 1000): Session[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM sessions
+      WHERE processing_state IS NOT NULL AND deleted_at IS NULL
+    `).all() as any[];
+
+    const now = Date.now();
+    const result: Session[] = [];
+    for (const row of rows) {
+      const ts = parseInt(row.processing_state, 10);
+      if (!isNaN(ts) && (now - ts) < maxAgeMs) {
+        result.push(this.rowToSession(row));
+      } else {
+        // 超时：清除过期状态
+        this.db.prepare(`UPDATE sessions SET processing_state = NULL WHERE id = ?`)
+          .run(row.id);
+      }
+    }
+    return result;
   }
 
   async getOrCreateSession(

@@ -354,6 +354,9 @@ ${suggestions}`,
       const permissionMode = session.metadata?.permissionMode || 'default';
       agent.setMode(permissionMode);
 
+      // 标记会话为处理中（实时持久化，重启后可恢复）
+      this.sessionManager.markProcessing(session.id);
+
       try {
         const stream = await agent.runQuery(
           session.id,
@@ -384,14 +387,14 @@ ${suggestions}`,
           );
 
           if (compacted) {
-            // compact 成功，带 resume 重试
+            // compact 成功，带 resume 重试（不重复原始消息，让 Agent 继续未完成的工作）
             flusher.addActivity('\u2705 压缩完成，正在重试...');
             const retryStream = await agent.runQuery(
               session.id,
-              message.content,
+              '上下文已自动压缩，请继续之前未完成的任务。',
               absoluteProjectPath,
               session.agentSessionId,
-              message.images,
+              undefined,
               options?.systemPromptAppend,
               this.sessionManager
             );
@@ -461,7 +464,8 @@ ${suggestions}`,
       // 清理 activeStreams（正常完成）
       agent.cleanupStream(streamKey);
 
-      // 记录成功响应（重置错误计数）
+      // 清除处理中状态 + 记录成功响应
+      this.sessionManager.clearProcessing(session.id);
       await this.sessionManager.recordSuccess(session.id);
 
       this.eventBus.publish({
@@ -500,6 +504,9 @@ ${suggestions}`,
         status: 'sent'
       });
     } catch (error) {
+      // 清除处理中状态（异常时也要清除）
+      try { this.sessionManager.clearProcessing(session.id); } catch {}
+
       logger.error(`[${message.channel}] Error:`, error);
 
       const errorMsg = error instanceof Error ? error.message : String(error);

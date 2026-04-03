@@ -16,7 +16,7 @@ import { EventBus } from './core/event-bus.js';
 import { PermissionGateway } from './core/permission.js';
 import { ChannelLoader } from './core/channel-loader.js';
 import { AgentLoader } from './core/agent-loader.js';
-import { ChannelAdapter } from './types.js';
+import { ChannelAdapter, Message } from './types.js';
 import { logger } from './utils/logger.js';
 import path from 'path';
 import fs from 'fs';
@@ -279,6 +279,38 @@ async function main() {
     channels: connected.map(c => c.toLowerCase()),
     timestamp: Date.now()
   });
+
+  // 恢复重启前未完成的会话
+  const pendingSessions = sessionManager.getPendingProcessingSessions();
+  if (pendingSessions.length > 0) {
+    logger.info(`[Resume] Found ${pendingSessions.length} pending session(s) from before restart`);
+    for (const session of pendingSessions) {
+      if (!session.agentSessionId) {
+        sessionManager.clearProcessing(session.id);
+        continue;
+      }
+      const agent = agentMap.get(session.agentId) || agentMap.get(defaultAgent);
+      if (!agent) {
+        sessionManager.clearProcessing(session.id);
+        continue;
+      }
+      logger.info(`[Resume] Resuming session: ${session.id} (agent: ${session.agentId})`);
+      const resumeMessage: Message = {
+        channel: session.channel,
+        channelId: session.channelId,
+        content: '服务已重启，请继续之前未完成的任务。',
+        timestamp: Date.now(),
+        peerId: '',
+        threadId: session.threadId || undefined,
+        replyContext: (session.metadata as any)?.replyContext,
+      };
+      // 清除状态后入队（processMessage 会重新标记）
+      sessionManager.clearProcessing(session.id);
+      messageQueue.enqueue(session.id, resumeMessage, session.projectPath).catch(err => {
+        logger.error(`[Resume] Failed to resume session ${session.id}:`, err);
+      });
+    }
+  }
 
   // 写入 ready 信号，供 restart-monitor 检测启动成功
   const readySignalPath = resolvePaths().readySignal;

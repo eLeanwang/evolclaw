@@ -357,6 +357,8 @@ export class AgentRunner {
   private async *transformStream(sdkStream: AsyncIterable<any>, sessionId: string): AsyncGenerator<AgentEvent> {
     let hasTextDelta = false;
     let lastSessionId: string | undefined;
+    // tool_use_id → tool_name 映射，用于从 SDKUserMessage 的 tool_result 块中还原工具名
+    const toolUseNames = new Map<string, string>();
 
     for await (const event of sdkStream) {
       // 提取 session_id（任意 SDK 事件都可能携带）
@@ -391,6 +393,8 @@ export class AgentRunner {
       if (event.type === 'assistant' && event.message?.content) {
         for (const content of event.message.content) {
           if (content.type === 'tool_use') {
+            // 记录 id → name 映射，供后续 tool_result 使用
+            if (content.id) toolUseNames.set(content.id, content.name);
             yield { type: 'tool_use', name: content.name, input: content.input };
           } else if (content.type === 'text' && content.text && !hasTextDelta) {
             yield { type: 'text', text: content.text };
@@ -398,19 +402,41 @@ export class AgentRunner {
         }
       }
 
-      // tool_result → tool_result
-      if (event.type === 'tool_result') {
-        yield {
-          type: 'tool_result',
-          name: event.tool_name || '',
-          result: event.content,
-          isError: event.is_error,
-          error: event.error,
-        };
+      // user: 提取 tool_result 块（SDK 将工具结果嵌套在 SDKUserMessage 中）
+      if (event.type === 'user' && event.message?.content) {
+        const contentArray = Array.isArray(event.message.content) ? event.message.content : [];
+        for (const block of contentArray) {
+          if (typeof block === 'object' && block !== null && block.type === 'tool_result') {
+            const toolName = toolUseNames.get(block.tool_use_id) || '';
+            const resultContent = typeof block.content === 'string'
+              ? block.content
+              : block.content != null ? JSON.stringify(block.content) : '';
+            yield {
+              type: 'tool_result',
+              name: toolName,
+              result: resultContent,
+              isError: block.is_error === true,
+              error: block.is_error === true ? resultContent : undefined,
+            };
+          }
+        }
       }
 
-      // result → complete
+      // result → complete（含 permission_denials 提取）
       if (event.type === 'result') {
+        // 先发出被拒绝的权限事件
+        if (Array.isArray(event.permission_denials)) {
+          for (const denial of event.permission_denials) {
+            yield {
+              type: 'tool_result',
+              name: denial.tool_name || '',
+              result: '',
+              isError: true,
+              error: `权限被拒绝: ${denial.tool_name}`,
+            };
+          }
+        }
+
         yield {
           type: 'complete',
           result: event.result,

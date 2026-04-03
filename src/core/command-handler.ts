@@ -575,22 +575,26 @@ export class CommandHandler {
     if (normalizedContent === '/stop') {
       // 使用 session.id 作为队列 key（与 enqueue/runQuery 一致）
       let sessionKey: string;
+      let stopAgent = agent;  // 默认用主会话的 agent
       if (threadId) {
         const threadSession = await this.sessionManager.getOrCreateSession(channel, channelId, this.config.projects?.defaultPath || process.cwd(), threadId);
         sessionKey = threadSession.id;
+        stopAgent = this.getAgent(threadSession.agentId);  // 话题可能用不同的 agent
       } else if (activeSession) {
         sessionKey = activeSession.id;
       } else {
         return '当前没有正在处理的任务';
       }
       const queueLength = this.messageQueue.getQueueLength(sessionKey);
-      const hasActive = agent.hasActiveStream(sessionKey);
+      const hasActive = stopAgent.hasActiveStream(sessionKey);
 
       if (queueLength === 0 && !hasActive) {
         return '当前没有正在处理的任务';
       }
 
-      await agent.interrupt(sessionKey);
+      await stopAgent.interrupt(sessionKey);
+      // 强制清除 processing_state
+      this.sessionManager.clearProcessing(sessionKey);
       return '✓ 已发送中断信号，任务将尽快停止';
     }
 
@@ -688,7 +692,17 @@ export class CommandHandler {
       const queueLength = this.messageQueue.getQueueLength(sessionKey);
 
       const isThread = !!session.threadId;
-      const sessionStatus = isCurrentlyProcessing ? '处理中' : '空闲';
+      let sessionStatus = isCurrentlyProcessing ? '处理中' : '空闲';
+      // 处理中时显示时长
+      if (isCurrentlyProcessing) {
+        const elapsed = Date.now() - parseInt(session.processingState!, 10);
+        if (!isNaN(elapsed) && elapsed > 0) {
+          const sec = Math.floor(elapsed / 1000);
+          sessionStatus = sec < 60 ? `处理中 (${sec}秒)` :
+                          sec < 3600 ? `处理中 (${Math.floor(sec / 60)}分钟)` :
+                          `处理中 (${Math.floor(sec / 3600)}小时)`;
+        }
+      }
 
       const projectName = this.getProjectName(session.projectPath);
 
@@ -877,7 +891,7 @@ export class CommandHandler {
 
         const projectName = this.getProjectName(session.projectPath);
 
-        const isProcessing = this.messageQueue.isProcessing(session.id);
+        const isProcessing = !!session.processingState;
         const status = isProcessing ? '[处理中]' : '[空闲]';
 
         return `当前群聊绑定的项目：
@@ -923,8 +937,8 @@ export class CommandHandler {
           statusParts.push(formatIdleTime(idleMs));
         }
 
-        // 用 session.id 查询队列状态（修复 key 不匹配问题）
-        const isProcessing = this.messageQueue.isProcessing(projectSession.id);
+        // 用 DB processingState 判断处理状态
+        const isProcessing = !!projectSession.processingState;
         if (isProcessing) {
           const queueLength = this.messageQueue.getQueueLength(projectSession.id);
           if (queueLength > 0) {
@@ -1123,12 +1137,14 @@ export class CommandHandler {
         // 超过10个会话时隐藏话题会话（/slist 只能在主会话调用，话题内已禁用）
         const hideTopics = currentProjectSessions.length > 10;
         const topicCount = hideTopics ? currentProjectSessions.filter(s => s.threadId).length : 0;
+        const maxDisplay = 10;
 
         lines.push('【EvolClaw 会话】');
         let displayIndex = 0;
         for (let i = 0; i < currentProjectSessions.length; i++) {
           const s = currentProjectSessions[i];
           if (hideTopics && s.threadId) continue;
+          if (displayIndex >= maxDisplay) break;
 
           const isActive = (s.metadata as any)?.isActive === true;
           displayIndex++;
@@ -1142,8 +1158,7 @@ export class CommandHandler {
           if (s.agentSessionId && !this.sessionManager.checkSessionFileExists(s.projectPath, s.agentSessionId, s.agentId)) {
             lines.push(`${prefix} ${num} ${threadTag}❌ ${name} ${uuid} - ${idleTime} [会话文件缺失]`);
           } else {
-            const sIsProcessing = this.messageQueue.isProcessing(s.id);
-            logger.debug(`[/slist] session "${name}" id=${s.id}, isProcessing=${sIsProcessing}, processingKeys=${JSON.stringify([...(this.messageQueue as any).processing])}`);
+            const sIsProcessing = !!s.processingState;
             let status = '[空闲]';
             if (sIsProcessing) {
               status = '[处理中]';
@@ -1153,8 +1168,12 @@ export class CommandHandler {
             lines.push(`${prefix} ${num} ${threadTag}${name} ${uuid} - ${idleTime} ${status}`);
           }
         }
-        if (topicCount > 0) {
-          lines.push(`\n  (已隐藏 ${topicCount} 个话题会话，话题会话仅在对应话题内可用)`);
+        const hiddenCount = currentProjectSessions.length - displayIndex - topicCount;
+        if (topicCount > 0 || hiddenCount > 0) {
+          const parts: string[] = [];
+          if (hiddenCount > 0) parts.push(`${hiddenCount} 个更早的会话`);
+          if (topicCount > 0) parts.push(`${topicCount} 个话题会话`);
+          lines.push(`\n  (已隐藏 ${parts.join('、')})`);
         }
         lines.push('');
       }
@@ -1181,7 +1200,7 @@ export class CommandHandler {
 
       if (!sessionName) return '用法: /s <序号、会话名称或前8位UUID>';
 
-      const isProcessing = session && this.messageQueue.isProcessing(session.id);
+      const isProcessing = !!session?.processingState;
       if (isProcessing) {
         return `⚠️ 当前正在处理消息，无法切换会话\n请等待当前任务完成后再试`;
       }
