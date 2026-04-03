@@ -24,15 +24,18 @@ export class PermissionGateway {
     sessionId: string,
     toolName: string,
     toolInput: Record<string, unknown>,
-    sendPrompt: (text: string) => Promise<void>
+    sendPrompt: (text: string) => Promise<void>,
+    summary?: string,
+    reason?: string
   ): Promise<boolean> {
     const requestId = `perm-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const summary = summarizeToolInput(toolName, toolInput);
+    const displaySummary = summary || summarizeToolInput(toolName, toolInput);
+    const reasonLine = reason ? `\n原因：${reason}` : '';
 
-    this.eventBus?.publish({ type: 'permission:requested', sessionId, requestId, toolName, input: summary });
+    this.eventBus?.publish({ type: 'permission:requested', sessionId, requestId, toolName, input: displaySummary });
 
     await sendPrompt(
-      `🔐 权限请求\n工具：${toolName}\n操作：${summary}\n\n回复 /perm allow 批准 或 /perm deny 拒绝`
+      `🔐 权限请求\n工具：${toolName}\n操作：${displaySummary}${reasonLine}\n\n回复 /perm allow 批准 或 /perm deny 拒绝`
     );
 
     return new Promise((resolve) => {

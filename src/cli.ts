@@ -365,12 +365,12 @@ async function cmdStatus() {
 
         // Get recent active sessions (last 5)
         const recentSessions = db.prepare(`
-          SELECT id, project_path, name, channel, chat_type, thread_id, updated_at
+          SELECT id, project_path, name, channel, chat_type, thread_id, agent_session_id, agent_id, metadata, updated_at
           FROM sessions
           WHERE deleted_at IS NULL
           ORDER BY updated_at DESC
           LIMIT 5
-        `).all() as Array<{ id: string; project_path: string; name: string | null; channel: string; chat_type: string; thread_id: string; updated_at: number }>;
+        `).all() as Array<{ id: string; project_path: string; name: string | null; channel: string; chat_type: string; thread_id: string; agent_session_id: string | null; agent_id: string | null; metadata: string | null; updated_at: number }>;
 
         db.close();
 
@@ -383,7 +383,11 @@ async function cmdStatus() {
             const chatType = s.chat_type === 'group' ? '群聊' : '单聊';
             const sessionName = s.name || '默认会话';
             const timeAgo = formatTimeAgo(Date.now() - s.updated_at);
-            console.log(`  • ${projectName} / ${sessionName} (${sessionType}, ${chatType}) - ${timeAgo}`);
+            const meta = s.metadata ? JSON.parse(s.metadata) : {};
+            const dot = meta.isActive ? '•' : '○';
+            const agentId = s.agent_session_id ? ` [${s.agent_session_id}]` : '';
+            const agentType = s.agent_id || 'claude';
+            console.log(`  ${dot} [${agentType}] ${projectName} / ${sessionName} (${sessionType}, ${chatType})${agentId} - ${timeAgo}`);
           }
         }
       } catch {}

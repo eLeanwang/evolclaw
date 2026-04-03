@@ -25,6 +25,39 @@ function loadClaudeSettings(): { env?: Record<string, string>; model?: string; e
   return {};
 }
 
+function loadCodexSettings(): { apiKey?: string; baseUrl?: string; model?: string } {
+  try {
+    // Read auth.json for API key
+    const authPath = path.join(os.homedir(), '.codex', 'auth.json');
+    let apiKey: string | undefined;
+    if (fs.existsSync(authPath)) {
+      const auth = JSON.parse(fs.readFileSync(authPath, 'utf-8'));
+      apiKey = auth.OPENAI_API_KEY;
+    }
+
+    // Read config.toml for model and baseUrl (simple TOML parsing)
+    const configPath = path.join(os.homedir(), '.codex', 'config.toml');
+    let model: string | undefined;
+    let baseUrl: string | undefined;
+    if (fs.existsSync(configPath)) {
+      const content = fs.readFileSync(configPath, 'utf-8');
+      const modelMatch = content.match(/^model\s*=\s*"([^"]+)"/m);
+      if (modelMatch) model = modelMatch[1];
+
+      // Extract base_url from model_providers section
+      const providerMatch = content.match(/^model_provider\s*=\s*"([^"]+)"/m);
+      if (providerMatch) {
+        const provider = providerMatch[1];
+        const baseUrlMatch = content.match(new RegExp(`\\[model_providers\\.${provider}\\][\\s\\S]*?base_url\\s*=\\s*"([^"]+)"`, 'm'));
+        if (baseUrlMatch) baseUrl = baseUrlMatch[1];
+      }
+    }
+
+    return { apiKey, baseUrl, model };
+  } catch {}
+  return {};
+}
+
 export function resolveAnthropicConfig(config: Config): AnthropicResolved {
   const settings = loadClaudeSettings();
 
@@ -61,6 +94,47 @@ export function resolveAnthropicConfig(config: Config): AnthropicResolved {
     || undefined;
 
   return { apiKey, baseUrl, model, effort };
+}
+
+export interface OpenaiResolved {
+  apiKey: string;
+  baseUrl?: string;
+  model: string;
+}
+
+export function resolveOpenaiConfig(config: Config): OpenaiResolved {
+  const codexSettings = loadCodexSettings();
+
+  // 过滤占位符，视为未配置
+  const configApiKey = config.agents?.openai?.apiKey;
+  const isPlaceholderKey = !configApiKey ||
+    configApiKey.includes('your-') ||
+    configApiKey.includes('placeholder');
+
+  const apiKey = (isPlaceholderKey ? null : configApiKey)
+    || process.env.OPENAI_API_KEY
+    || codexSettings.apiKey;
+
+  if (!apiKey) {
+    throw new Error(
+      'No OpenAI API key found. Set one of: agents.openai.apiKey, env OPENAI_API_KEY, or ~/.codex/auth.json'
+    );
+  }
+
+  // baseUrl 也过滤占位符（与 anthropic 保持一致：只检查默认域名）
+  const configBaseUrl = config.agents?.openai?.baseUrl;
+  const isPlaceholderUrl = configBaseUrl?.includes('api.openai.com');
+
+  const baseUrl = (isPlaceholderUrl ? null : configBaseUrl)
+    || process.env.OPENAI_BASE_URL
+    || codexSettings.baseUrl
+    || undefined;
+
+  const model = config.agents?.openai?.model
+    || codexSettings.model
+    || 'gpt-5.2-codex';
+
+  return { apiKey, baseUrl, model };
 }
 
 export function loadConfig(configPath: string = resolvePaths().config): Config {

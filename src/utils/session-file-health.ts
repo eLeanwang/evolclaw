@@ -1,4 +1,4 @@
-import fs from 'fs/promises';
+import fsPromises from 'fs/promises';
 import path from 'path';
 import { logger } from './logger.js';
 
@@ -13,44 +13,20 @@ export interface SessionFileHealthResult {
 }
 
 /**
- * 检查会话文件是否存在
+ * 检查会话文件健康度（接收完整文件路径）
  */
-async function fileExists(filePath: string): Promise<boolean> {
-  try {
-    await fs.access(filePath);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * 检查会话文件健康度
- */
-export async function checkSessionFileHealth(
-  projectPath: string,
-  agentSessionId: string
-): Promise<SessionFileHealthResult> {
+export async function checkSessionFile(sessionFile: string): Promise<SessionFileHealthResult> {
   const issues: string[] = [];
-  const sessionFile = path.join(projectPath, '.claude', `${agentSessionId}.jsonl`);
-
-  // 检查文件是否存在
-  if (!(await fileExists(sessionFile))) {
-    // 新会话没有文件是正常的
-    return { healthy: true, issues: [] };
-  }
 
   try {
-    // 检查文件大小
-    const stats = await fs.stat(sessionFile);
+    const stats = await fsPromises.stat(sessionFile);
     const sizeMB = stats.size / (1024 * 1024);
 
     if (stats.size > 50 * 1024 * 1024) {
       issues.push(`会话文件过大: ${sizeMB.toFixed(1)}MB`);
     }
 
-    // 检查 JSON 格式
-    const content = await fs.readFile(sessionFile, 'utf-8');
+    const content = await fsPromises.readFile(sessionFile, 'utf-8');
     const lines = content.split('\n').filter(l => l.trim());
 
     for (let i = 0; i < lines.length; i++) {
@@ -75,15 +51,11 @@ export async function checkSessionFileHealth(
 }
 
 /**
- * 备份会话目录
+ * 备份单个会话文件（在同目录下创建 .bak 副本）
  */
-export async function backupClaudeDir(projectPath: string): Promise<string> {
-  const claudeDir = path.join(projectPath, '.claude');
-  const dirName = path.basename(claudeDir);
-  const backupDir = path.join(path.dirname(claudeDir), `${dirName}-backup-${Date.now()}`);
-
-  await fs.cp(claudeDir, backupDir, { recursive: true });
-  logger.info(`[SessionFileHealth] Backup created: ${backupDir}`);
-
-  return backupDir;
+export async function backupSessionFile(sessionFile: string): Promise<string> {
+  const backupPath = `${sessionFile}.bak-${Date.now()}`;
+  await fsPromises.copyFile(sessionFile, backupPath);
+  logger.info(`[SessionFileHealth] Backup created: ${backupPath}`);
+  return backupPath;
 }

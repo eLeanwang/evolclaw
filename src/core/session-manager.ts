@@ -5,6 +5,7 @@ import { resolvePaths } from '../paths.js';
 import { logger } from '../utils/logger.js';
 import { encodePath } from '../utils/cross-platform.js';
 import { EventBus } from './event-bus.js';
+import type { SessionFileAdapter, SessionFileInfo, CliSessionEntry, SdkSessionEntry } from './session-file-adapter.js';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
@@ -16,6 +17,7 @@ export class SessionManager {
   private db: DatabaseSync;
   private eventBus: EventBus;
   private ownerResolver?: OwnerResolver;
+  private fileAdapters = new Map<string, SessionFileAdapter>();
 
   constructor(dbPath: string = resolvePaths().db, eventBus: EventBus, ownerResolver?: OwnerResolver) {
     ensureDir(path.dirname(dbPath));
@@ -27,6 +29,15 @@ export class SessionManager {
 
   setOwnerResolver(resolver: OwnerResolver): void {
     this.ownerResolver = resolver;
+  }
+
+  registerFileAdapter(adapter: SessionFileAdapter): void {
+    this.fileAdapters.set(adapter.agentId, adapter);
+    logger.debug(`[SessionManager] Registered file adapter: ${adapter.agentId}`);
+  }
+
+  private getFileAdapter(agentId: string): SessionFileAdapter | undefined {
+    return this.fileAdapters.get(agentId);
   }
 
   getDatabase(): DatabaseSync {
@@ -96,9 +107,16 @@ export class SessionManager {
   private validateSessionFile(row: any): string | undefined {
     const agentSessionId = row.agent_session_id;
     if (!agentSessionId) return undefined;
-    const sessionFile = this.getSessionFilePath(row.project_path, agentSessionId);
-    if (fs.existsSync(sessionFile)) return agentSessionId;
-    logger.warn(`Session file not found: ${sessionFile}, clearing session ID`);
+    const agentId = row.agent_id || 'claude';
+    const adapter = this.getFileAdapter(agentId);
+    if (!adapter) {
+      // 无适配器时回退到 Claude 路径检查
+      const sessionFile = this.getSessionFilePath(row.project_path, agentSessionId);
+      if (fs.existsSync(sessionFile)) return agentSessionId;
+    } else if (adapter.checkExists(row.project_path, agentSessionId)) {
+      return agentSessionId;
+    }
+    logger.warn(`Session file not found for ${agentId}: ${agentSessionId}, clearing session ID`);
     this.db.prepare(`UPDATE sessions SET agent_session_id = NULL WHERE id = ?`).run(row.id);
     return undefined;
   }
@@ -534,16 +552,17 @@ export class SessionManager {
     return session;
   }
 
-  async switchProject(channel: string, channelId: string, newProjectPath: string): Promise<Session> {
+  async switchProject(channel: string, channelId: string, newProjectPath: string, currentAgentId?: string): Promise<Session> {
+    const agentId = currentAgentId || 'claude';
     // 1. 取消当前活跃会话
     this.deactivateAllMetadata(channel, channelId);
 
-    // 2. 查找目标项目的会话
+    // 2. 查找目标项目 + 当前 agent 的会话
     const target = this.db.prepare(`
       SELECT * FROM sessions
-      WHERE channel = ? AND channel_id = ? AND project_path = ? AND thread_id = '' AND deleted_at IS NULL
+      WHERE channel = ? AND channel_id = ? AND project_path = ? AND agent_id = ? AND thread_id = '' AND deleted_at IS NULL
       ORDER BY updated_at DESC LIMIT 1
-    `).get(channel, channelId, newProjectPath) as any;
+    `).get(channel, channelId, newProjectPath, agentId) as any;
 
     if (target) {
       const validSessionId = this.validateSessionFile(target);
@@ -562,7 +581,7 @@ export class SessionManager {
       channelId,
       projectPath: newProjectPath,
       threadId: '',
-      agentId: 'claude',
+      agentId,
       chatType: 'private',
       sessionMode: 'interactive',
       metadata: { isActive: true },
@@ -625,8 +644,34 @@ export class SessionManager {
       return { ...this.rowToSession(target), agentSessionId: validSessionId, metadata };
     }
 
-    // 3. 没有找到，创建新会话
-    return this.getOrCreateSession(channel, channelId, projectPath, undefined, undefined, undefined, newAgentId);
+    // 3. 创建新会话（与 switchProject 保持一致）
+    const session: Session = {
+      id: `${channel}-${channelId}-${Date.now()}`,
+      channel,
+      channelId,
+      projectPath,
+      threadId: '',
+      agentId: newAgentId,
+      chatType: 'private',
+      sessionMode: 'interactive',
+      metadata: { isActive: true },
+      name: '默认会话',
+      createdAt: Date.now(),
+      updatedAt: Date.now()
+    };
+
+    this.insertSession(session);
+    this.eventBus.publish({
+      type: 'session:created',
+      sessionId: session.id,
+      channel,
+      channelId,
+      projectPath,
+      name: session.name,
+      timestamp: Date.now()
+    });
+
+    return session;
   }
 
   async clearActiveSession(channel: string, channelId: string): Promise<void> {
@@ -796,111 +841,46 @@ export class SessionManager {
     return session;
   }
 
-  async scanCliSessions(projectPath: string): Promise<Array<{ uuid: string; mtime: number }>> {
-    const homeDir = os.homedir();
-    const encodedPath = this.getProjectDirName(projectPath);
-    const sessionDir = path.join(homeDir, '.claude', 'projects', encodedPath);
-
-    if (!fs.existsSync(sessionDir)) return [];
-
-    const files = fs.readdirSync(sessionDir)
-      .filter(f => f.endsWith('.jsonl'))
-      .filter(f => !f.startsWith('agent-'))  // 过滤子代理会话
-      .map(f => {
-        const filePath = path.join(sessionDir, f);
-        const stat = fs.statSync(filePath);
-        return { uuid: f.replace('.jsonl', ''), mtime: stat.mtimeMs, size: stat.size };
-      })
-      .filter(f => f.size > 0)  // 过滤空文件
-      .sort((a, b) => b.mtime - a.mtime)
-      .slice(0, 10);
-
-    return files.map(f => ({ uuid: f.uuid, mtime: f.mtime }));
+  async scanCliSessions(projectPath: string, agentId: string): Promise<CliSessionEntry[]> {
+    const adapter = this.getFileAdapter(agentId);
+    if (!adapter) return [];
+    return adapter.scanCliSessions(projectPath);
   }
 
-  checkSessionFileExists(projectPath: string, agentSessionId: string): boolean {
-    const sessionFile = this.getSessionFilePath(projectPath, agentSessionId);
-    return fs.existsSync(sessionFile);
+  checkSessionFileExists(projectPath: string, agentSessionId: string, agentId: string): boolean {
+    const adapter = this.getFileAdapter(agentId);
+    if (!adapter) return false;
+    return adapter.checkExists(projectPath, agentSessionId);
   }
 
-  readSessionFirstMessage(projectPath: string, agentSessionId: string): string | null {
-    const sessionFile = this.getSessionFilePath(projectPath, agentSessionId);
-    if (!fs.existsSync(sessionFile)) return null;
-
-    try {
-      const content = fs.readFileSync(sessionFile, 'utf-8');
-      const lines = content.split('\n').filter(l => l.trim());
-
-      for (const line of lines) {
-        const event = JSON.parse(line);
-        if (event.type === 'user' && event.message?.role === 'user') {
-          const text = this.extractUserMessageText(event.message.content);
-          if (text) return text;
-        }
-      }
-    } catch (error) {
-      logger.warn(`Failed to read session file: ${sessionFile}`, error);
-    }
-    return null;
+  readSessionFirstMessage(projectPath: string, agentSessionId: string, agentId: string): string | null {
+    const adapter = this.getFileAdapter(agentId);
+    if (!adapter) return null;
+    return adapter.readFirstMessage(projectPath, agentSessionId);
   }
 
-  readSessionLastUserMessage(projectPath: string, agentSessionId: string): string | null {
-    const sessionFile = this.getSessionFilePath(projectPath, agentSessionId);
-    if (!fs.existsSync(sessionFile)) return null;
-
-    try {
-      const content = fs.readFileSync(sessionFile, 'utf-8');
-      const lines = content.split('\n').filter(l => l.trim());
-      let lastMessage: string | null = null;
-
-      for (const line of lines) {
-        const event = JSON.parse(line);
-        if (event.type === 'user' && event.message?.role === 'user') {
-          lastMessage = this.extractUserMessageText(event.message.content) ?? lastMessage;
-        }
-      }
-      return lastMessage;
-    } catch (error) {
-      logger.warn(`Failed to read last message from session file: ${sessionFile}`, error);
-    }
-    return null;
+  readSessionLastUserMessage(projectPath: string, agentSessionId: string, agentId: string): string | null {
+    const adapter = this.getFileAdapter(agentId);
+    if (!adapter) return null;
+    return adapter.readLastUserMessage(projectPath, agentSessionId);
   }
 
   /**
    * 获取会话文件信息（回合数 + 标题）
    */
-  getSessionFileInfo(projectPath: string, agentSessionId: string): { turns: number; title?: string } {
-    const sessionFile = this.getSessionFilePath(projectPath, agentSessionId);
-    if (!fs.existsSync(sessionFile)) return { turns: 0 };
+  getSessionFileInfo(projectPath: string, agentSessionId: string, agentId: string): SessionFileInfo {
+    const adapter = this.getFileAdapter(agentId);
+    if (!adapter) return { turns: 0 };
+    return adapter.getFileInfo(projectPath, agentSessionId);
+  }
 
-    try {
-      const content = fs.readFileSync(sessionFile, 'utf-8');
-      const lines = content.split('\n').filter(l => l.trim());
-      let turns = 0;
-      let title: string | undefined;
-      for (const line of lines) {
-        const event = JSON.parse(line);
-        if (event.type === 'user' && event.message?.role === 'user') {
-          // Only count real user input, skip auto-generated tool_result messages
-          const content = event.message.content;
-          const isToolResult = Array.isArray(content) && content.every((c: any) => c.type === 'tool_result');
-          if (!isToolResult) {
-            turns++;
-          }
-        }
-        // 提取会话标题（从 session 元数据中）
-        if (event.title && !title) {
-          title = event.title;
-        }
-        if (event.sessionTitle && !title) {
-          title = event.sessionTitle;
-        }
-      }
-      return { turns, title };
-    } catch (error) {
-      logger.warn(`Failed to read session file info: ${sessionFile}`, error);
-      return { turns: 0 };
-    }
+  /**
+   * 列出 SDK 侧的会话列表（用于名称同步）
+   */
+  async listSdkSessions(projectPath: string, agentId: string): Promise<SdkSessionEntry[]> {
+    const adapter = this.getFileAdapter(agentId);
+    if (!adapter?.listSdkSessions) return [];
+    return adapter.listSdkSessions(projectPath);
   }
 
   async getSessionByUuidPrefix(channel: string, channelId: string, uuidPrefix: string): Promise<Session | undefined> {
@@ -917,12 +897,12 @@ export class SessionManager {
     return this.rowToSession(rows[0]);
   }
 
-  async importCliSession(channel: string, channelId: string, projectPath: string, agentSessionId: string): Promise<Session> {
+  async importCliSession(channel: string, channelId: string, projectPath: string, agentSessionId: string, agentId: string = 'claude'): Promise<Session> {
     // 取消当前活跃会话
     this.deactivateAllMetadata(channel, channelId);
 
     // 从 CLI 会话文件读取标题
-    const fileInfo = this.getSessionFileInfo(projectPath, agentSessionId);
+    const fileInfo = this.getSessionFileInfo(projectPath, agentSessionId, agentId);
     const name = fileInfo.title || `CLI会话-${new Date().toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}`;
 
     // 创建新会话记录
@@ -932,7 +912,7 @@ export class SessionManager {
       channelId,
       projectPath,
       threadId: '',
-      agentId: 'claude',
+      agentId,
       chatType: 'private',
       sessionMode: 'interactive',
       agentSessionId,
@@ -1066,6 +1046,7 @@ export class SessionManager {
   }
 
   close(): void {
+    for (const adapter of this.fileAdapters.values()) adapter.close?.();
     this.db.close();
   }
 }

@@ -18,10 +18,10 @@ const DANGEROUS_PATTERNS = [
 ];
 
 /**
- * 权限检查回调函数
- * 符合 Claude Agent SDK 的 can_use_tool 接口
+ * 黑名单检查（用于 PreToolUse hook）
+ * 检查危险命令模式，非黑名单一律放行
  */
-export async function canUseTool(
+export async function checkBlacklist(
   toolName: string,
   input: Record<string, unknown>
 ): Promise<{ behavior: 'allow'; updatedInput: Record<string, unknown> } | { behavior: 'deny'; message: string }> {

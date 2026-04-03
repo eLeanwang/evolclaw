@@ -8,6 +8,12 @@ export interface Config {
       useSettingSources?: boolean;        // 使用 SDK 原生配置加载，默认 true
       agentProgressSummaries?: boolean;   // 启用 AI 生成的子任务进度摘要，默认 true
     };
+    openai?: {
+      apiKey?: string;
+      baseUrl?: string;
+      model?: string;     // 默认 'gpt-5.2-codex'
+    };
+    defaultAgent?: string;  // 默认 'claude'
   };
   channels?: {
     feishu?: {
@@ -57,7 +63,7 @@ export interface SessionMetadata {
     codex?: string;
     gemini?: string;
   };
-  permissionMode?: 'auto' | 'manual' | 'edit';  // 权限模式（per-session）
+  permissionMode?: string;  // 权限模式（per-session）: default | request | edit | plan | noask
 }
 
 export interface ReplyContext {
@@ -98,6 +104,7 @@ export interface Message {
   channelId: string;
   agentId?: string;  // 默认 'claude'
   threadId?: string;  // 默认 ''
+  chatType?: 'private' | 'group';  // 由 Channel 层填充
   peerId: string;  // 发送者 ID
   peerName?: string;  // 发送者名称
   content: string;

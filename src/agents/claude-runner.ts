@@ -1,4 +1,4 @@
-import { query } from '@anthropic-ai/claude-agent-sdk';
+import { query, forkSession as sdkForkSession } from '@anthropic-ai/claude-agent-sdk';
 import { ensureDir, resolveAnthropicConfig } from '../config.js';
 import type { Config } from '../types.js';
 import type { PermissionGateway } from '../core/permission.js';
@@ -6,7 +6,7 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import { logger } from '../utils/logger.js';
-import { canUseTool } from '../utils/permission-utils.js';
+import { checkBlacklist, summarizeToolInput } from '../utils/permission-utils.js';
 import { encodePath } from '../utils/cross-platform.js';
 import type { AgentPlugin, AgentInstance, AgentCallbacks } from '../core/agent-loader.js';
 
@@ -118,6 +118,68 @@ export interface AgentRunnerInterface {
   dispose?(): Promise<void>;
 }
 
+/**
+ * 完整 Agent 接口 — MessageProcessor 和 CommandHandler 实际使用的方法集合。
+ * AgentRunner (Claude) 和 CodexRunner 都实现此接口。
+ */
+export interface AgentRunnerFull {
+  readonly name: string;
+
+  // 核心查询
+  runQuery(
+    sessionId: string,
+    prompt: string,
+    projectPath: string,
+    initialAgentSessionId?: string,
+    images?: ImageData[],
+    systemPromptAppend?: string,
+    sessionManager?: any
+  ): Promise<AsyncIterable<AgentEvent>>;
+
+  // 中断
+  interrupt(sessionKey: string): Promise<void>;
+
+  // 流管理（MessageProcessor 需要）
+  registerStream(key: string, stream: AsyncIterable<any>): void;
+  cleanupStream(key: string): void;
+  hasActiveStream(key: string): boolean;
+
+  // 会话管理（CommandHandler 需要）
+  updateSessionId(sessionId: string, agentSessionId: string): void;
+  closeSession(sessionId: string): Promise<void>;
+  clearSession(agentSessionId: string, projectPath: string): Promise<boolean>;
+  compactSession(sessionId: string, agentSessionId: string, projectPath: string): Promise<boolean>;
+
+  // 权限回调（MessageProcessor 需要）
+  setSendPrompt(fn: (text: string) => Promise<void>): void;
+  setMode(mode: string): void;
+  getMode(): string;
+
+  /** Agent 支持的会话操作能力 — 缺省视为全部不支持 */
+  readonly capabilities?: {
+    clear?: boolean;
+    compact?: boolean;
+    fork?: boolean;
+  };
+
+  /** 解析 agent session 文件路径（用于健康检查），返回 null 表示无法定位 */
+  resolveSessionFile?(agentSessionId: string, projectPath: string): string | null;
+
+  /** 分支会话，返回新的 agentSessionId */
+  forkSession?(agentSessionId: string, projectPath: string, title?: string): Promise<string>;
+
+  // 可选能力（通过类型守卫检测）
+  setModel?(model: string): void;
+  getModel?(): string;
+  listModels?(): string[];
+  setEffort?(effort: any): void;
+  getEffort?(): string | undefined;
+  listModes?(): PermissionModeInfo[];
+  compact?(sessionId: string, agentSessionId: string, projectPath: string): Promise<boolean>;
+  setPermissionGateway?(gateway: any): void;
+  setCompactStartCallback?(callback: (sessionId: string) => void): void;
+}
+
 // ── 可选能力接口 ──
 export interface ModelSwitcher {
   setModel(model: string): void;
@@ -132,13 +194,15 @@ export interface Compactable {
 export interface PermissionController {
   setMode(mode: string): void;
   getMode(): string;
-  listModes(): PermissionMode[];
+  listModes(): PermissionModeInfo[];
 }
 
-export interface PermissionMode {
+export interface PermissionModeInfo {
   key: string;
   nameZh: string;
   description: string;
+  available: boolean;
+  unavailableReason?: string;
 }
 
 // ── 类型守卫 ──
@@ -156,10 +220,11 @@ export function hasCompact(agent: any): agent is Compactable {
 
 export class AgentRunner {
   readonly name: string = 'claude';
+  readonly capabilities = { clear: true, compact: true, fork: true };
   private apiKey: string;
   private model: string;
   private effort?: 'low' | 'medium' | 'high' | 'max';
-  private permissionMode: string = 'auto';
+  private permissionMode: string = 'default';  // default = 全部自动放行
   private baseUrl?: string;
   private config?: Config;
   private activeSessions: Map<string, string> = new Map();
@@ -224,11 +289,13 @@ export class AgentRunner {
     return this.permissionMode;
   }
 
-  listModes(): PermissionMode[] {
+  listModes(): PermissionModeInfo[] {
     return [
-      { key: 'auto', nameZh: '自动', description: 'SDK 默认策略，无需手动审批' },
-      { key: 'manual', nameZh: '手动', description: '每个工具调用需人工审批' },
-      { key: 'edit', nameZh: '编辑', description: '自动接受文件编辑操作' },
+      { key: 'default', nameZh: '默认', description: '全部自动放行', available: true },
+      { key: 'request', nameZh: '审批', description: '部分自动，部分询问', available: true },
+      { key: 'edit', nameZh: '编辑', description: '自动接受编辑，其他询问', available: true },
+      { key: 'plan', nameZh: '规划', description: '只规划不执行', available: true },
+      { key: 'noask', nameZh: '静默', description: '未批准则拒绝', available: true },
     ];
   }
 
@@ -238,6 +305,17 @@ export class AgentRunner {
 
   setSendPrompt(fn: (text: string) => Promise<void>): void {
     this.sendPromptFn = fn;
+  }
+
+  private toSdkPermissionMode(): 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan' | 'dontAsk' {
+    const map: Record<string, 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan' | 'dontAsk'> = {
+      'default': 'default',   // 全部自动放行，靠 canUseTool 一律 allow 实现
+      'request': 'default',   // 部分自动，部分询问
+      'edit': 'acceptEdits',
+      'plan': 'plan',
+      'noask': 'dontAsk',
+    };
+    return map[this.permissionMode] || 'default';
   }
 
   // ── Compactable 接口 ──
@@ -415,48 +493,64 @@ export class AgentRunner {
       return {};
     };
 
-    // PreToolUse Hook - 工具执行前安全检查 + 权限审批
+    // PreToolUse Hook - 黑名单检查（不可绕过，所有模式都走）
     const preToolUseHook = async (input: any) => {
-      // 第1层：黑名单（不可绕过）
-      const result = await canUseTool(input.tool_name, input.tool_input || {});
+      const result = await checkBlacklist(input.tool_name, input.tool_input || {});
       if (result.behavior === 'deny') {
         return {
           decision: 'block' as const,
           reason: result.message
         };
       }
+      return {};
+    };
 
-      // 第2层：manual 模式走人工审批
-      if (this.permissionMode === 'manual' && this.permissionGateway && this.sendPromptFn) {
-        const approved = await this.permissionGateway.requestPermission(
-          sessionId,
-          input.tool_name,
-          input.tool_input || {},
-          this.sendPromptFn
-        );
-        if (!approved) {
-          return {
-            decision: 'block' as const,
-            reason: '用户拒绝或审批超时'
-          };
-        }
+    // SDK-level canUseTool 回调：接入 PermissionGateway 的用户审批入口
+    // 只在 SDK 认为此工具需要用户确认时触发（黑名单已在 PreToolUse hook 拦截）
+    const canUseToolCallback = async (
+      toolName: string,
+      input: Record<string, unknown>,
+      options: { signal: AbortSignal; title?: string; description?: string; decisionReason?: string; toolUseID: string; [key: string]: any }
+    ) => {
+      // default 模式：一律 allow（替代有缺陷的 bypassPermissions）
+      if (this.permissionMode === 'default') {
+        return { behavior: 'allow' as const, updatedInput: input };
       }
 
-      return {};
+      // 如果 PermissionGateway 未设置（如测试环境），回退到一律 allow
+      if (!this.permissionGateway || !this.sendPromptFn) {
+        return { behavior: 'allow' as const, updatedInput: input };
+      }
+
+      const summary = options.title
+        || options.description
+        || summarizeToolInput(toolName, input);
+
+      const approved = await this.permissionGateway.requestPermission(
+        sessionId,
+        toolName,
+        input,
+        this.sendPromptFn,
+        summary,
+        options.decisionReason
+      );
+
+      return approved
+        ? { behavior: 'allow' as const, updatedInput: input }
+        : { behavior: 'deny' as const, message: '用户拒绝或审批超时' };
     };
 
     const useSettingSources = this.config?.agents?.anthropic?.useSettingSources !== false;
     const enableSummaries = this.config?.agents?.anthropic?.agentProgressSummaries !== false;
 
     // 公共 options（新旧模式共用）
-    const isEdit = this.permissionMode === 'edit';
-    const sdkPermissionMode = isEdit ? 'acceptEdits' as const : 'default' as const;
-    logger.info(`[AgentRunner] runQuery model=${this.model} effort=${this.effort ?? 'auto'} permMode=${this.permissionMode}`);
+    const sdkPermissionMode = this.toSdkPermissionMode();
+    logger.info(`[AgentRunner] runQuery model=${this.model} effort=${this.effort ?? 'auto'} permMode=${this.permissionMode} sdkMode=${sdkPermissionMode}`);
     const commonOptions = {
       cwd: projectPath,
       model: this.model,
       ...(this.effort ? { effort: this.effort } : {}),
-      canUseTool,
+      canUseTool: canUseToolCallback,
       permissionMode: sdkPermissionMode,
       persistSession: true,
       hooks: {
@@ -606,7 +700,7 @@ export class AgentRunner {
         model: this.model,
         resume: agentSessionId,
         maxTurns: 1,
-        permissionMode: this.permissionMode === 'bypass' ? 'bypassPermissions' as const : 'default' as const,
+        permissionMode: this.toSdkPermissionMode(),
         env: this.getAgentEnv()
       }
     });
@@ -652,6 +746,17 @@ export class AgentRunner {
   async closeSession(sessionId: string): Promise<void> {
     this.activeSessions.delete(sessionId);
     this.activeStreams.delete(sessionId);
+  }
+
+  resolveSessionFile(agentSessionId: string, projectPath: string): string | null {
+    const encodedProjectPath = encodePath(projectPath);
+    const sessionFile = path.join(os.homedir(), '.claude', 'projects', encodedProjectPath, `${agentSessionId}.jsonl`);
+    return fs.existsSync(sessionFile) ? sessionFile : null;
+  }
+
+  async forkSession(agentSessionId: string, projectPath: string, title?: string): Promise<string> {
+    const result = await sdkForkSession(agentSessionId, { dir: projectPath, title });
+    return result.sessionId;
   }
 }
 

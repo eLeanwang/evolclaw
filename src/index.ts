@@ -1,3 +1,5 @@
+import { ClaudeSessionFileAdapter } from './core/adapters/claude-session-file-adapter.js';
+import { CodexSessionFileAdapter } from './core/adapters/codex-session-file-adapter.js';
 import { loadConfig, ensureDataDirs, resolvePaths, resolveAnthropicConfig, isOwner } from './config.js';
 import { SessionManager } from './core/session-manager.js';
 import { ClaudeAgentPlugin } from './agents/claude-runner.js';
@@ -62,6 +64,10 @@ async function main() {
     return isOwner(config, channel, userId);
   });
   logger.info('✓ Database initialized');
+
+  // 注册会话文件适配器（Claude / Codex 各自的会话文件操作）
+  sessionManager.registerFileAdapter(new ClaudeSessionFileAdapter());
+  sessionManager.registerFileAdapter(new CodexSessionFileAdapter());
 
   // Agent 插件系统
   const agentLoader = new AgentLoader();

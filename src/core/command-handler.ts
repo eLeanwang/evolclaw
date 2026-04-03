@@ -5,7 +5,6 @@ import { MessageCache } from '../utils/message-cache.js';
 import { MessageProcessor } from './message-processor.js';
 import { EventBus } from './event-bus.js';
 import { PermissionGateway } from './permission.js';
-import { renameSession as sdkRenameSession, forkSession as sdkForkSession, listSessions as sdkListSessions } from '@anthropic-ai/claude-agent-sdk';
 import { MessageQueue } from './message-queue.js';
 import { saveConfig, resolvePaths, getPackageRoot } from '../config.js';
 import { logger } from '../utils/logger.js';
@@ -102,7 +101,7 @@ function formatIdleTime(ms: number): string {
 }
 
 // 支持的命令列表
-const commands = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/slist', '/session', '/rename', '/stop', '/clear', '/compact', '/repair', '/safe', '/fork', '/del', '/perm'];
+const commands = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/agent', '/slist', '/session', '/rename', '/stop', '/clear', '/compact', '/repair', '/safe', '/fork', '/del', '/perm'];
 
 // 命令别名映射
 const aliases: Record<string, string> = {
@@ -346,23 +345,24 @@ export class CommandHandler {
   /name, /rename <新名称> - 重命名当前会话
   /del <名称> - 删除指定会话（仅解绑，不删除文件）
   /fork [名称] - 分支当前会话（从当前对话点创建分支）
-  /status - 显示会话状态
   /clear - 清空当前会话的对话历史
   /compact - 压缩会话上下文（减少 token 用量）
-  /stop - 中断当前任务
-  /restart - 重启服务
 
-🛠️ 会话修复：
-  /repair - 检查并修复会话
-  /safe - 进入安全模式
-
-🤖 模型管理：
+🤖 Agent 与模型：
+  /agent [name] - 查看或切换 Agent 后端
   /model [model] [effort] - 查看或切换模型/推理强度
 
 🔐 权限管理：
   /perm - 查看当前权限模式
-  /perm <auto|manual|edit> - 切换权限模式
+  /perm <default|request|edit|plan|noask> - 切换权限模式
   /perm allow|deny - 审批权限请求
+
+🛠️ 运维：
+  /status - 显示会话状态
+  /stop - 中断当前任务
+  /restart - 重启服务
+  /repair - 检查并修复会话
+  /safe - 进入安全模式
 
 ❓ 帮助：
   /help - 显示此帮助信息`;
@@ -380,11 +380,13 @@ export class CommandHandler {
         const result = await this.ensureSession(channel, channelId, threadId);
         if ('error' in result) return result.error;
         const { session } = result;
-        const currentMode = session.metadata?.permissionMode || 'auto';
+        const currentMode = session.metadata?.permissionMode || 'default';
         const modes = agent.listModes();
-        const modeList = modes.map(m =>
-          `  ${m.key === currentMode ? '▶' : ' '} ${m.key} (${m.nameZh}) - ${m.description}`
-        ).join('\n');
+        const modeList = modes.map(m => {
+          const prefix = m.key === currentMode ? '▶' : ' ';
+          const suffix = m.available ? '' : ' ⚠️ 不可用';
+          return `  ${prefix} ${m.key} (${m.nameZh}) - ${m.description}${suffix}`;
+        }).join('\n');
         return `🔐 当前权限模式: ${currentMode}\n\n${modeList}\n\n用法:\n  /perm <模式>       切换权限模式\n  /perm allow|deny   审批权限请求`;
       }
 
@@ -419,21 +421,26 @@ export class CommandHandler {
           const modes = agent.listModes();
           const matched = modes.find(m => m.key === arg);
           if (matched) {
+            if (!matched.available) {
+              return `❌ ${matched.key} 模式当前不可用：${matched.unavailableReason}`;
+            }
             const result = await this.ensureSession(channel, channelId, threadId);
             if ('error' in result) return result.error;
             const { session } = result;
             const metadata = session.metadata || {};
-            metadata.permissionMode = arg as 'auto' | 'manual' | 'edit';
+            metadata.permissionMode = arg;
             await this.sessionManager.updateSession(session.id, { metadata });
             return `✓ 权限模式已切换为: ${matched.key} (${matched.nameZh})\n${matched.description}`;
           }
         }
         // 不是已知模式名也不是 allow/deny
-        return `❌ 未知参数: ${arg}\n用法: /perm <auto|manual|edit> 或 /perm allow|deny`;
+        const modeKeys = hasPermissionController(agent) ? agent.listModes().map(m => m.key).join('|') : 'default|request|edit|plan|noask';
+        return `❌ 未知参数: ${arg}\n用法: /perm <${modeKeys}> 或 /perm allow|deny`;
       }
 
       // 双参数不再支持，提示正确用法
-      return `❌ 未知参数: ${args}\n用法: /perm <auto|manual|edit> 或 /perm allow|deny`;
+      const allModeKeys = hasPermissionController(agent) ? agent.listModes().map(m => m.key).join('|') : 'default|request|edit|plan|noask';
+      return `❌ 未知参数: ${args}\n用法: /perm <${allModeKeys}> 或 /perm allow|deny`;
     }
 
     // /agent 命令：查看或切换 Agent 后端
@@ -456,10 +463,16 @@ export class CommandHandler {
       if ('error' in result) return result.error;
       const { session } = result;
 
+      // 取消原会话的 pending 权限请求
+      if (this.permissionGateway) {
+        this.permissionGateway.cancelAll(session.id);
+      }
+
       // 切换到目标 agent（恢复已有会话或创建新会话）
       const newSession = await this.sessionManager.switchAgent(channel, channelId, session.projectPath, args);
-      const isRestore = newSession.agentSessionId ? '(恢复已有会话)' : '(新建会话)';
-      return `✓ 已切换 Agent 后端: ${args} ${isRestore}`;
+      const hasExistingSession = newSession.agentSessionId ? '（恢复已有会话）' : '（新建会话）';
+      const projectName = this.getProjectName(session.projectPath);
+      return `✓ 已切换 Agent: ${args}\n  项目: ${projectName}\n  会话: ${newSession.name || '(未命名)'}\n  ${hasExistingSession}`;
     }
 
     // /model 命令：查看或切换模型/推理强度
@@ -586,6 +599,10 @@ export class CommandHandler {
       if ('error' in result) return result.error;
       const { session } = result;
 
+      if (!agent.capabilities?.clear) {
+        return `❌ 当前 Agent (${agent.name}) 不支持 /clear\n\n可使用 /new 创建新会话替代`;
+      }
+
       if (!session.agentSessionId) {
         return '❌ 当前会话没有历史记录，无需清空';
       }
@@ -609,6 +626,10 @@ export class CommandHandler {
       const result = await this.ensureSession(channel, channelId, threadId);
       if ('error' in result) return result.error;
       const { session } = result;
+
+      if (!agent.capabilities?.compact) {
+        return `❌ 当前 Agent (${agent.name}) 不支持 /compact`;
+      }
 
       if (!session.agentSessionId) {
         return '❌ 当前会话没有历史记录，无需压缩';
@@ -662,7 +683,7 @@ export class CommandHandler {
       }
 
       const sessionKey = this.getQueueKey(session, channel, channelId);
-      const isCurrentlyProcessing = this.messageQueue.isProcessing(sessionKey);
+      const isCurrentlyProcessing = this.messageQueue.isProcessing(sessionKey) || agent.hasActiveStream(sessionKey);
       const queueLength = this.messageQueue.getQueueLength(sessionKey);
 
       const isThread = !!session.threadId;
@@ -679,7 +700,7 @@ export class CommandHandler {
       // 获取会话文件信息并同步 name
       let sessionTurns = 0;
       if (session.agentSessionId) {
-        const fileInfo = this.sessionManager.getSessionFileInfo(session.projectPath, session.agentSessionId);
+        const fileInfo = this.sessionManager.getSessionFileInfo(session.projectPath, session.agentSessionId, session.agentId);
         sessionTurns = fileInfo.turns;
         if (fileInfo.title && fileInfo.title !== session.name) {
           await this.sessionManager.renameSession(session.id, fileInfo.title);
@@ -699,7 +720,7 @@ export class CommandHandler {
           `异常计数: ${health.consecutiveErrors}`,
           `安全模式: ${health.safeMode ? '是 ⚠️' : '否 ✓'}`,
           `最后成功: ${timeStr}`,
-          `Claude会话: ${session.agentSessionId || '(未初始化)'}`,
+          `${session.agentId}会话: ${session.agentSessionId || '(未初始化)'}`,
           `创建时间: ${new Date(session.createdAt).toLocaleString('zh-CN')}`,
           `更新时间: ${new Date(session.updatedAt).toLocaleString('zh-CN')}`
         );
@@ -951,7 +972,8 @@ export class CommandHandler {
         }
       }
 
-      const newSession = await this.sessionManager.switchProject(channel, channelId, projectPath);
+      const currentAgentId = activeSession?.agentId || this.defaultAgentId;
+      const newSession = await this.sessionManager.switchProject(channel, channelId, projectPath, currentAgentId);
 
       this.eventBus.publish({
         type: 'project:switched',
@@ -1007,7 +1029,8 @@ export class CommandHandler {
         return `❌ 路径不存在: ${projectPath}`;
       }
 
-      const newSession = await this.sessionManager.switchProject(channel, channelId, projectPath);
+      const currentAgentId = activeSession?.agentId || this.defaultAgentId;
+      const newSession = await this.sessionManager.switchProject(channel, channelId, projectPath, currentAgentId);
 
       this.eventBus.publish({
         type: 'project:bound',
@@ -1057,18 +1080,17 @@ export class CommandHandler {
       }
 
       const sessions = await this.sessionManager.listSessions(channel, channelId);
-      const currentProjectSessions = sessions.filter(s => s.projectPath === session.projectPath);
+      const currentProjectSessions = sessions.filter(s => s.projectPath === session.projectPath && s.agentId === session.agentId);
 
       // 从 SDK 同步会话名称（发现 CLI 改名）
       try {
-        const sdkSessions = await sdkListSessions({ dir: session.projectPath });
+        const sdkSessions = await this.sessionManager.listSdkSessions(session.projectPath, session.agentId);
         for (const sdkSession of sdkSessions) {
-          const sdkName = sdkSession.customTitle || undefined;
-          if (!sdkName) continue;
+          if (!sdkSession.title) continue;
           const dbSession = currentProjectSessions.find(s => s.agentSessionId === sdkSession.sessionId);
-          if (dbSession && sdkName !== dbSession.name) {
-            await this.sessionManager.renameSession(dbSession.id, sdkName);
-            dbSession.name = sdkName;
+          if (dbSession && sdkSession.title !== dbSession.name) {
+            await this.sessionManager.renameSession(dbSession.id, sdkSession.title);
+            dbSession.name = sdkSession.title;
           }
         }
       } catch (error) {
@@ -1077,7 +1099,7 @@ export class CommandHandler {
 
       const canImportCli = policy.canImportCliSession(session.chatType || 'private', identity.role);
       const cliSessions = canImportCli
-        ? await this.sessionManager.scanCliSessions(session.projectPath)
+        ? await this.sessionManager.scanCliSessions(session.projectPath, session.agentId)
         : [];
       const dbSessionIds = new Set(currentProjectSessions.map(s => s.agentSessionId).filter(Boolean));
 
@@ -1095,7 +1117,7 @@ export class CommandHandler {
           const uuid = s.agentSessionId ? `(${s.agentSessionId.substring(0, 8)})` : '';
           const idleTime = formatIdleTime(Date.now() - s.updatedAt);
 
-          if (s.agentSessionId && !this.sessionManager.checkSessionFileExists(s.projectPath, s.agentSessionId)) {
+          if (s.agentSessionId && !this.sessionManager.checkSessionFileExists(s.projectPath, s.agentSessionId, s.agentId)) {
             lines.push(`${prefix} ${num} ${threadTag}❌ ${name} ${uuid} - ${idleTime} [会话文件缺失]`);
           } else {
             const sQueueKey = s.threadId ? s.id : `${channel}-${channelId}`;
@@ -1117,7 +1139,7 @@ export class CommandHandler {
         lines.push('【CLI 会话】(最新5个)');
         for (const c of orphanCliSessions) {
           const time = new Date(c.mtime).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
-          const message = this.sessionManager.readSessionFirstMessage(session.projectPath, c.uuid) || '(无消息)';
+          const message = this.sessionManager.readSessionFirstMessage(session.projectPath, c.uuid, session.agentId) || '(无消息)';
           const uuid = c.uuid.substring(0, 8);
           lines.push(`  ${time}  (${uuid})  "${message}"`);
         }
@@ -1146,7 +1168,7 @@ export class CommandHandler {
       if (!targetSession && /^\d+$/.test(sessionName) && session) {
         const idx = parseInt(sessionName, 10);
         const allSessions = await this.sessionManager.listSessions(channel, channelId);
-        const projectSessions = allSessions.filter(s => s.projectPath === session.projectPath);
+        const projectSessions = allSessions.filter(s => s.projectPath === session.projectPath && s.agentId === session.agentId);
         if (idx >= 1 && idx <= projectSessions.length) {
           targetSession = projectSessions[idx - 1];
         } else {
@@ -1167,11 +1189,12 @@ export class CommandHandler {
         }
 
         for (const projectPath of projectPaths) {
-          const cliSessions = await this.sessionManager.scanCliSessions(projectPath);
+          const currentAgentId = session?.agentId || this.defaultAgentId;
+          const cliSessions = await this.sessionManager.scanCliSessions(projectPath, currentAgentId);
           const cliSession = cliSessions.find(c => c.uuid.startsWith(sessionName));
 
           if (cliSession) {
-            const imported = await this.sessionManager.importCliSession(channel, channelId, projectPath, cliSession.uuid);
+            const imported = await this.sessionManager.importCliSession(channel, channelId, projectPath, cliSession.uuid, currentAgentId);
             this.eventBus.publish({ type: 'session:imported', sessionId: imported.id, agentSessionId: cliSession.uuid, projectPath });
             const projectName = this.getProjectName(projectPath);
             return `✓ 已导入 CLI 会话: ${imported.name}\n  项目: ${projectName}\n  将继续之前的对话历史`;
@@ -1184,7 +1207,7 @@ export class CommandHandler {
       }
 
       const lastInput = targetSession.agentSessionId
-        ? this.sessionManager.readSessionLastUserMessage(targetSession.projectPath, targetSession.agentSessionId)
+        ? this.sessionManager.readSessionLastUserMessage(targetSession.projectPath, targetSession.agentSessionId, targetSession.agentId)
         : null;
       const lastInputLine = lastInput ? `\n  最后输入: "${lastInput}"` : '';
 
@@ -1237,14 +1260,6 @@ export class CommandHandler {
         return `❌ 会话名称 "${newName}" 已存在，请使用其他名称`;
       }
 
-      // 双写：SDK + 数据库
-      if (session.agentSessionId) {
-        try {
-          await sdkRenameSession(session.agentSessionId, newName, { dir: session.projectPath });
-        } catch (error) {
-          logger.warn(`[CommandHandler] SDK renameSession failed (continuing with db update):`, error);
-        }
-      }
       const oldName = session.name || '(未命名)';
       const success = await this.sessionManager.renameSession(session.id, newName);
 
@@ -1278,7 +1293,7 @@ export class CommandHandler {
       if (!targetSession && /^\d+$/.test(sessionName)) {
         const idx = parseInt(sessionName, 10);
         const allSessions = await this.sessionManager.listSessions(channel, channelId);
-        const projectSessions = allSessions.filter(s => s.projectPath === session.projectPath);
+        const projectSessions = allSessions.filter(s => s.projectPath === session.projectPath && s.agentId === session.agentId);
         if (idx >= 1 && idx <= projectSessions.length) {
           targetSession = projectSessions[idx - 1];
         } else {
@@ -1320,12 +1335,16 @@ export class CommandHandler {
       }
 
       if (!session.agentSessionId) {
-        return `❌ 当前会话尚未初始化 Claude 对话，无法分支\n\n请先发送一条消息，然后再使用 /fork`;
+        return `❌ 当前会话尚未初始化对话，无法分支\n\n请先发送一条消息，然后再使用 /fork`;
+      }
+
+      if (!agent.capabilities?.fork) {
+        return `❌ 当前 Agent (${agent.name}) 不支持 /fork\n\n可使用 /new 创建新会话替代`;
       }
 
       try {
-        const forkResult = await sdkForkSession(session.agentSessionId, { dir: session.projectPath, title: forkName });
-        const newSession = await this.sessionManager.createForkedSession(session, forkResult.sessionId, forkName);
+        const forkedSessionId = await agent.forkSession!(session.agentSessionId, session.projectPath, forkName);
+        const newSession = await this.sessionManager.createForkedSession(session, forkedSessionId, forkName);
 
         this.eventBus.publish({ type: 'session:forked', sessionId: newSession.id, sourceSessionId: session.id, name: forkName });
 
@@ -1347,70 +1366,48 @@ export class CommandHandler {
         return `当前不在安全模式，无需修复\n\n如需进入安全模式，请使用 /safe`;
       }
 
-      const { checkSessionFileHealth, backupClaudeDir } = await import('../utils/session-file-health.js');
-      const fsPromises = await import('fs/promises');
+      const { checkSessionFile, backupSessionFile } = await import('../utils/session-file-health.js');
 
       try {
-        const backupDir = await backupClaudeDir(session.projectPath);
-
         if (!session.agentSessionId) {
           await this.sessionManager.resetHealthStatus(session.id);
           this.eventBus.publish({ type: 'session:safe-mode-exited', sessionId: session.id, method: 'repair' });
-          return `✓ 修复完成，已退出安全模式
-
-修复内容：
-- 未发现问题（新会话）
-- 已重置异常计数器
-- 已恢复正常会话模式
-
-备份位置：${backupDir}`;
+          return `✓ 修复完成，已退出安全模式\n\n修复内容：\n- 未发现问题（新会话）\n- 已重置异常计数器\n- 已恢复正常会话模式`;
         }
 
-        const healthCheck = await checkSessionFileHealth(session.projectPath, session.agentSessionId);
+        // 通过 agent 定位 session 文件
+        const sessionFile = agent.resolveSessionFile?.(session.agentSessionId, session.projectPath) ?? null;
+
+        if (!sessionFile) {
+          // 文件不存在（已被删除或从未创建），直接重置
+          await this.sessionManager.resetHealthStatus(session.id);
+          this.eventBus.publish({ type: 'session:safe-mode-exited', sessionId: session.id, method: 'repair' });
+          return `✓ 修复完成，已退出安全模式\n\n修复内容：\n- 会话文件不存在（可能已被清理）\n- 已重置异常计数器\n- 已恢复正常会话模式`;
+        }
+
+        const healthCheck = await checkSessionFile(sessionFile);
 
         if (healthCheck.corrupt) {
-          const sessionFile = path.join(session.projectPath, '.claude', `${session.agentSessionId}.jsonl`);
+          const backupPath = await backupSessionFile(sessionFile);
+          const fsPromises = await import('fs/promises');
           await fsPromises.unlink(sessionFile);
-          await this.sessionManager.updateAgentSessionId(session.channel, session.channelId, '');
+          await this.sessionManager.updateAgentSessionIdBySessionId(session.id, '');
+          agent.updateSessionId(session.id, '');
           await this.sessionManager.resetHealthStatus(session.id);
           this.eventBus.publish({ type: 'session:safe-mode-exited', sessionId: session.id, method: 'repair' });
 
-          return `✓ 修复完成，已退出安全模式
-
-检测到问题：
-${healthCheck.issues.map((i: string) => `- ${i}`).join('\n')}
-
-修复操作：
-- 已删除损坏文件
-- 已创建新会话
-- 已重置异常计数器
-
-备份位置：${backupDir}`;
+          return `✓ 修复完成，已退出安全模式\n\n检测到问题：\n${healthCheck.issues.map((i: string) => `- ${i}`).join('\n')}\n\n修复操作：\n- 已备份损坏文件\n- 已删除损坏文件\n- 已重置异常计数器\n\n备份位置：${backupPath}`;
         }
 
         if (healthCheck.issues.length > 0) {
           await this.sessionManager.resetHealthStatus(session.id);
           this.eventBus.publish({ type: 'session:safe-mode-exited', sessionId: session.id, method: 'repair' });
-          return `⚠️ 检测到问题：
-${healthCheck.issues.map((i: string) => `- ${i}`).join('\n')}
-
-建议：
-1. 使用 /new 创建新会话
-2. 旧会话已备份到：${backupDir}
-
-已重置异常计数器，可继续使用当前会话。`;
+          return `⚠️ 检测到问题：\n${healthCheck.issues.map((i: string) => `- ${i}`).join('\n')}\n\n建议使用 /new 创建新会话\n\n已重置异常计数器，可继续使用当前会话。`;
         }
 
         await this.sessionManager.resetHealthStatus(session.id);
         this.eventBus.publish({ type: 'session:safe-mode-exited', sessionId: session.id, method: 'repair' });
-        return `✓ 修复完成，已退出安全模式
-
-修复内容：
-- 未发现问题
-- 已重置异常计数器
-- 已恢复正常会话模式
-
-备份位置：${backupDir}`;
+        return `✓ 修复完成，已退出安全模式\n\n修复内容：\n- 未发现问题\n- 已重置异常计数器\n- 已恢复正常会话模式`;
       } catch (error: any) {
         logger.error('[Repair] Failed:', error);
         return `❌ 修复失败: ${error.message}`;

@@ -1,6 +1,6 @@
 import path from 'path';
 import fs from 'fs';
-import { AgentRunner, hasCompact, AgentEvent } from '../agents/claude-runner.js';
+import { type AgentRunnerFull, hasCompact, type AgentEvent } from '../agents/claude-runner.js';
 import { SessionManager } from './session-manager.js';
 import { StreamFlusher } from '../utils/stream-flusher.js';
 import { MessageCache } from '../utils/message-cache.js';
@@ -19,6 +19,19 @@ export class MessageProcessor {
   private channels = new Map<string, { adapter: ChannelAdapter; options?: ChannelOptions; policy: ChannelPolicy }>();
   private currentFlusher?: StreamFlusher;
   private shouldSuppressActivities = false;
+  private agentMap: Map<string, AgentRunnerFull>;
+  private defaultAgentId: string;
+
+  /** 按 agentId 获取 agent，回退到默认 */
+  getAgent(agentId?: string): AgentRunnerFull {
+    if (agentId && this.agentMap.has(agentId)) return this.agentMap.get(agentId)!;
+    return this.agentMap.get(this.defaultAgentId) || this.agentMap.values().next().value!;
+  }
+
+  /** 获取可用 agent 列表 */
+  getAvailableAgents(): string[] {
+    return [...this.agentMap.keys()];
+  }
 
   /** 判断是否为后台会话（仅主会话参与判断，话题会话独立） */
   private async isBackgroundSession(session: Session, channel: string, channelId: string): Promise<boolean> {
@@ -28,13 +41,23 @@ export class MessageProcessor {
   }
 
   constructor(
-    private agentRunner: AgentRunner,
+    agentRunnerOrMap: AgentRunnerFull | Map<string, AgentRunnerFull>,
     private sessionManager: SessionManager,
     private config: Config,
     private messageCache: MessageCache,
     private eventBus: EventBus,
-    private commandHandler?: CommandHandler
-  ) {}
+    private commandHandler?: CommandHandler,
+    defaultAgentId?: string
+  ) {
+    if (agentRunnerOrMap instanceof Map) {
+      this.agentMap = agentRunnerOrMap;
+      this.defaultAgentId = defaultAgentId || 'claude';
+    } else {
+      // 向后兼容：单个 agentRunner
+      this.agentMap = new Map([[agentRunnerOrMap.name, agentRunnerOrMap]]);
+      this.defaultAgentId = agentRunnerOrMap.name;
+    }
+  }
 
   /**
    * 注册渠道适配器
@@ -86,8 +109,11 @@ export class MessageProcessor {
 
     // 解析会话（唯一的 getOrCreateSession 调用点）
     const { session, absoluteProjectPath } = await this.resolveSession(message);
-    const chatType = session.chatType;
+    const chatType = message.chatType || 'private';
     const identityRole = session.identity?.role || 'anonymous';
+
+    // 按 session.agentId 选择 agent 后端
+    const agent = this.getAgent(session.agentId);
 
     const monitorEnabled = this.config.idleMonitor?.enabled !== false;
     const safeModeThreshold = this.config.idleMonitor?.safeModeThreshold ?? 3;
@@ -131,7 +157,7 @@ export class MessageProcessor {
               }
             }
             try {
-              await this.agentRunner.interrupt(streamKey);
+              await agent.interrupt(streamKey);
             } catch (e) {
               logger.debug(`[MessageProcessor] Interrupt failed (may already be cleaned up):`, e);
             }
@@ -247,6 +273,7 @@ ${suggestions}`,
     }
 
     const { adapter, options } = channelInfo;
+    const agent = this.getAgent(session.agentId);
 
     try {
       const isBackground = await this.isBackgroundSession(session, message.channel, message.channelId);
@@ -319,16 +346,16 @@ ${suggestions}`,
       const streamKey = `${message.channel}-${message.channelId}`;
 
       // 设置权限审批的消息发送回调（指向当前渠道）
-      this.agentRunner.setSendPrompt(async (text: string) => {
+      agent.setSendPrompt(async (text: string) => {
         await adapter.sendText(message.channelId, text, this.getReplyContext(session));
       });
 
       // 设置 per-session 权限模式
-      const permissionMode = session.metadata?.permissionMode || 'auto';
-      this.agentRunner.setMode(permissionMode);
+      const permissionMode = session.metadata?.permissionMode || 'default';
+      agent.setMode(permissionMode);
 
       try {
-        const stream = await this.agentRunner.runQuery(
+        const stream = await agent.runQuery(
           session.id,
           message.content,
           absoluteProjectPath,
@@ -337,7 +364,7 @@ ${suggestions}`,
           options?.systemPromptAppend,
           this.sessionManager
         );
-        this.agentRunner.registerStream(streamKey, stream);
+        agent.registerStream(streamKey, stream);
 
         await this.processEventStream(
           stream,
@@ -347,19 +374,19 @@ ${suggestions}`,
           shouldSuppress
         );
       } catch (error) {
-        if (classifyError(error) === ErrorType.CONTEXT_TOO_LONG && session.agentSessionId && hasCompact(this.agentRunner)) {
+        if (classifyError(error) === ErrorType.CONTEXT_TOO_LONG && session.agentSessionId && hasCompact(agent)) {
           // 尝试 compact 压缩会话
           flusher.addActivity('\u26a0\ufe0f 上下文过长，正在压缩会话...');
           await flusher.flush();
 
-          const compacted = await this.agentRunner.compact(
+          const compacted = await agent.compact(
             session.id, session.agentSessionId, absoluteProjectPath
           );
 
           if (compacted) {
             // compact 成功，带 resume 重试
             flusher.addActivity('\u2705 压缩完成，正在重试...');
-            const retryStream = await this.agentRunner.runQuery(
+            const retryStream = await agent.runQuery(
               session.id,
               message.content,
               absoluteProjectPath,
@@ -368,7 +395,7 @@ ${suggestions}`,
               options?.systemPromptAppend,
               this.sessionManager
             );
-            this.agentRunner.registerStream(streamKey, retryStream);
+            agent.registerStream(streamKey, retryStream);
 
             await this.processEventStream(
               retryStream,
@@ -432,7 +459,7 @@ ${suggestions}`,
       }
 
       // 清理 activeStreams（正常完成）
-      this.agentRunner.cleanupStream(streamKey);
+      agent.cleanupStream(streamKey);
 
       // 记录成功响应（重置错误计数）
       await this.sessionManager.recordSuccess(session.id);

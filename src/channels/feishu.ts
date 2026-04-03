@@ -39,6 +39,7 @@ export class FeishuChannel {
   private cleanupInterval?: NodeJS.Timeout;
   private seenMessages = new Map<string, number>();  // messageId -> timestamp
   private seenThreads = new Set<string>();  // 已见的 thread_id，用于判断话题创建消息
+  private userNameCache = new Map<string, string>();  // userId -> userName
 
   constructor(private config: FeishuConfig) {
   }
@@ -90,11 +91,20 @@ export class FeishuChannel {
 
           // 提取发送者信息
           const peerId = data.sender?.sender_id?.open_id;
+          // 尝试从 mentions 中查找发送者名字（群聊中可能包含）
           let peerName: string | undefined;
-          try {
-            peerName = await this.getUserName(peerId);
-          } catch {
-            peerName = undefined;
+          if (mentions.length > 0) {
+            const senderMention = mentions.find((m: any) => m.userId === peerId);
+            peerName = senderMention?.name;
+          }
+
+          // 如果 mentions 中没有，尝试调用 API 获取
+          if (!peerName && peerId) {
+            try {
+              peerName = await this.getUserName(peerId);
+            } catch (err) {
+              logger.debug('[Feishu] getUserName error:', err);
+            }
           }
 
           try {
@@ -189,10 +199,8 @@ export class FeishuChannel {
               const parsed = JSON.parse(msg.content);
               // 优先使用 text_without_at_bot（去除机器人 @），否则使用 text
               let content = (parsed.text_without_at_bot || parsed.text || '').trim();
-              // 仅当内容以 / 开头（命令）时，清理残留的 mention 占位符
-              if (content.startsWith('/')) {
-                content = content.replace(/@_user_\d+/g, '').trim();
-              }
+              // 清理残留的 mention 占位符（@_user_N 代表机器人）
+              content = content.replace(/@_user_\d+/g, '').trim();
               const finalContent = quotedText + content;
               await this.messageHandler({ channelId: msg.chat_id, content: finalContent, images: quotedImages.length > 0 ? quotedImages : undefined, peerId, peerName, messageId: msg.message_id, mentions: mentions.length > 0 ? mentions : undefined, threadId, rootId, chatType });
             }
@@ -292,8 +300,29 @@ export class FeishuChannel {
     this.projectPathProvider = provider;
   }
 
-  private async getUserName(_userId?: string): Promise<string | undefined> {
-    // TODO: 需要开通 contact:contact.base:readonly 权限后启用
+  private async getUserName(userId?: string): Promise<string | undefined> {
+    if (!userId || !this.client) return undefined;
+
+    // 检查缓存
+    if (this.userNameCache.has(userId)) {
+      return this.userNameCache.get(userId);
+    }
+
+    try {
+      const res = await this.client.contact.user.get({
+        path: { user_id: userId },
+        params: { user_id_type: 'open_id' }
+      });
+
+      const userName = res.data?.user?.name;
+      if (userName) {
+        this.userNameCache.set(userId, userName);
+        return userName;
+      }
+    } catch (err: any) {
+      logger.debug('[Feishu] Failed to get user name, code:', err?.code, 'msg:', err?.message);
+    }
+
     return undefined;
   }
 
