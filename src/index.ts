@@ -134,26 +134,6 @@ async function main() {
         const adapter = cmdHandler.getAdapter(channel);
         if (!adapter) return;
 
-        // 文件标记处理（通过 adapter.sendFile 能力判断，不按渠道名分支）
-        if (adapter.sendFile) {
-          const fileMarkerPattern = /\[SEND_FILE:([^\]]+)\]/g;
-          const fileMatches = [...text.matchAll(fileMarkerPattern)];
-          for (const match of fileMatches) {
-            const filePath = match[1].trim();
-            // 跳过占位符/代码片段中的伪路径
-            if (!filePath || /[\\[\]{}*+?|^$]/.test(filePath)) continue;
-            const session = await sessionManager.getActiveSession(channel, channelId);
-            const projectPath = session?.projectPath || process.cwd();
-            const absoluteFilePath = path.isAbsolute(filePath) ? filePath : path.join(projectPath, filePath);
-            try {
-              await adapter.sendFile(id, absoluteFilePath);
-            } catch (error) {
-              logger.error(`[${channel}] Failed to send file: ${absoluteFilePath}`, error);
-            }
-          }
-          text = text.replace(fileMarkerPattern, '').trim();
-        }
-
         if (text) {
           await adapter.sendText(id, text, opts);
         }

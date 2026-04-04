@@ -759,6 +759,20 @@ export class SessionManager {
     return this.rowToSession(row);
   }
 
+  /**
+   * 查询话题会话（不创建）
+   */
+  async getThreadSession(channel: string, channelId: string, threadId: string): Promise<Session | undefined> {
+    const row = this.db.prepare(`
+      SELECT * FROM sessions
+      WHERE channel = ? AND channel_id = ? AND thread_id = ? AND deleted_at IS NULL
+    `).get(channel, channelId, threadId) as any;
+
+    if (!row) return undefined;
+    const validSessionId = this.validateSessionFile(row);
+    return { ...this.rowToSession(row), agentSessionId: validSessionId };
+  }
+
   async listSessions(channel: string, channelId: string): Promise<Session[]> {
     // 列出该聊天的所有会话
     const rows = this.db.prepare(`

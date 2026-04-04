@@ -456,10 +456,22 @@ export class FeishuChannel {
     }
   }
 
-  async sendFile(chatId: string, filePath: string): Promise<void> {
+  async sendFile(chatId: string, filePath: string, options?: { replyToMessageId?: string; replyInThread?: boolean }): Promise<void> {
     if (!this.client) return;
 
     try {
+      // 检测是否为图片，是则走 sendImage（内联预览）而非文件卡片
+      const header = Buffer.alloc(12);
+      const fd = fs.openSync(filePath, 'r');
+      fs.readSync(fd, header, 0, 12, 0);
+      fs.closeSync(fd);
+      const imgType = await imageType(header);
+      if (imgType) {
+        logger.info(`[Feishu] Detected image (${imgType.mime}), sending as inline image:`, filePath);
+        const buf = fs.readFileSync(filePath);
+        return this.sendImage(chatId, buf, options);
+      }
+
       logger.info('[Feishu] Uploading file:', filePath);
 
       const fileStream = fs.createReadStream(filePath);
@@ -479,20 +491,37 @@ export class FeishuChannel {
       }
 
       const fileKey = uploadResponse.file_key;
+      const msgContent = JSON.stringify({ file_key: fileKey });
 
       logger.info('[Feishu] File uploaded, file_key:', fileKey);
 
-      await this.client.im.message.create({
-        params: { receive_id_type: 'chat_id' },
-        data: {
-          receive_id: chatId,
-          msg_type: 'file',
-          content: JSON.stringify({ file_key: fileKey })
+      if (options?.replyToMessageId) {
+        const replyData: any = { msg_type: 'file', content: msgContent };
+        if (options.replyInThread) {
+          replyData.reply_in_thread = true;
         }
-      });
+        await this.client.im.message.reply({
+          path: { message_id: options.replyToMessageId },
+          data: replyData
+        });
+      } else {
+        await this.client.im.message.create({
+          params: { receive_id_type: 'chat_id' },
+          data: {
+            receive_id: chatId,
+            msg_type: 'file',
+            content: msgContent
+          }
+        });
+      }
 
       logger.info('[Feishu] File message sent successfully');
-    } catch (error) {
+    } catch (error: any) {
+      // 230011: 消息已被撤回，降级为普通消息重试
+      if (error.response?.data?.code === 230011 && options?.replyToMessageId) {
+        logger.warn('[Feishu] Message withdrawn (230011), retrying file send without reply');
+        return this.sendFile(chatId, filePath);
+      }
       logger.error('[Feishu] Failed to send file:', error);
       throw error;
     }
@@ -814,7 +843,7 @@ export class FeishuChannelPlugin implements ChannelPlugin {
     const adapter = {
       name: 'feishu' as const,
       sendText: (id: string, text: string, context?: any) => channel.sendMessage(id, text, context),
-      sendFile: (id: string, filePath: string) => channel.sendFile(id, filePath),
+      sendFile: (id: string, filePath: string, context?: any) => channel.sendFile(id, filePath, context),
       sendImage: (id: string, png: Buffer, context?: any) => channel.sendImage(id, png, context),
       acknowledge: (messageId: string) => { channel.addAckReaction(messageId); return Promise.resolve(); },
     };

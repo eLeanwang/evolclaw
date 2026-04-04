@@ -136,7 +136,7 @@ export interface InboundMessage {
 export interface ChannelAdapter {
   readonly name: string;
   sendText(channelId: string, text: string, context?: ReplyContext): Promise<void>;
-  sendFile?(channelId: string, filePath: string): Promise<void>;
+  sendFile?(channelId: string, filePath: string, context?: ReplyContext): Promise<void>;
   sendImage?(channelId: string, png: Buffer, context?: ReplyContext): Promise<void>;
   acknowledge?(messageId: string): Promise<void>;
   onChatDissolved?(callback: (channelId: string) => void): void;

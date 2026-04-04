@@ -274,6 +274,7 @@ ${suggestions}`,
 
     const { adapter, options } = channelInfo;
     const agent = this.getAgent(session.agentId);
+    const streamKey = `${message.channel}-${message.channelId}`;
 
     try {
       const isBackground = await this.isBackgroundSession(session, message.channel, message.channelId);
@@ -343,7 +344,6 @@ ${suggestions}`,
       this.currentFlusher = flusher;
 
       // 调用 AgentRunner（含上下文过长自动 compact 重试）
-      const streamKey = `${message.channel}-${message.channelId}`;
 
       // 设置权限审批的消息发送回调（指向当前渠道）
       agent.setSendPrompt(async (text: string) => {
@@ -440,7 +440,7 @@ ${suggestions}`,
 
           logger.info(`[${adapter.name}] Sending file: ${resolvedPath}`);
           try {
-            await adapter.sendFile(message.channelId, resolvedPath);
+            await adapter.sendFile(message.channelId, resolvedPath, this.getReplyContext(session));
             this.eventBus.publish({ type: 'agent:file-sent', sessionId: session.id, filePath: resolvedPath, channel: message.channel });
           } catch (error) {
             logger.error(`[${adapter.name}] Failed to send file: ${resolvedPath}`, error);
@@ -504,7 +504,8 @@ ${suggestions}`,
         status: 'sent'
       });
     } catch (error) {
-      // 清除处理中状态（异常时也要清除）
+      // 清理流和处理中状态（异常时也要清除）
+      agent.cleanupStream(streamKey);
       try { this.sessionManager.clearProcessing(session.id); } catch {}
 
       logger.error(`[${message.channel}] Error:`, error);
@@ -596,6 +597,7 @@ ${suggestions}`,
     shouldSuppress: () => boolean
   ): Promise<void> {
     let hasReceivedText = false;
+    let hasErrorResult = false;  // 是否已有 tool_result/error 事件输出过错误
 
     try {
       for await (const event of stream) {
@@ -675,19 +677,41 @@ ${suggestions}`,
           });
 
           if (event.isError && !shouldSuppress()) {
-            const errorMsg = event.error || (typeof event.result === 'string' ? event.result : JSON.stringify(event.result)) || '\u6267\u884c\u5931\u8d25';
+            hasErrorResult = true;
+            let errorMsg = event.error || (typeof event.result === 'string' ? event.result : JSON.stringify(event.result)) || '\u6267\u884c\u5931\u8d25';
+            // 移除 XML 风格的错误标签
+            errorMsg = errorMsg.replace(/<tool_use_error>(.*?)<\/tool_use_error>/gs, '$1');
             flusher.addActivity(`\u26a0\ufe0f ${event.name || '\u5de5\u5177'}: ${errorMsg}`);
           }
         }
 
-        // 完成事件
-        if (event.type === 'complete' && event.result) {
-          logger.debug(`[MessageProcessor] complete event: hasReceivedText=${hasReceivedText}, shouldSuppress=${shouldSuppress()}`);
+        // 运行时错误（Codex: turn.failed / item error）
+        if (event.type === 'error') {
+          logger.warn(`[MessageProcessor] error event: ${event.errorType}: ${event.error}`);
 
-          if (shouldSuppress()) {
-            flusher.addText(event.result);
-          } else if (!hasReceivedText) {
-            flusher.addText(event.result);
+          if (!hasErrorResult && !shouldSuppress()) {
+            hasErrorResult = true;
+            flusher.addActivity(`\u26a0\ufe0f ${event.error}`);
+          }
+        }
+
+        // 完成事件
+        if (event.type === 'complete') {
+          logger.debug(`[MessageProcessor] complete event: hasReceivedText=${hasReceivedText}, isError=${event.isError}, shouldSuppress=${shouldSuppress()}`);
+
+          // 失败且无前置错误输出：显示 errors 摘要
+          if (event.isError && !hasErrorResult && !shouldSuppress()) {
+            const errorSummary = event.errors?.join('; ') || '\u4efb\u52a1\u6267\u884c\u5931\u8d25';
+            flusher.addActivity(`\u26a0\ufe0f ${errorSummary}`);
+          }
+
+          // 成功结果文本：suppressed 模式下总是添加，否则仅在无流式文本时添加
+          if (event.result) {
+            if (shouldSuppress()) {
+              flusher.addText(event.result);
+            } else if (!hasReceivedText) {
+              flusher.addText(event.result);
+            }
           }
 
           await flusher.flush(true);
