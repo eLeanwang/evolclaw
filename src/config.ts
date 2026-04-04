@@ -183,8 +183,16 @@ function validateConfig(config: any): asserts config is Config {
     }
   }
 
-  if (!config.channels?.aun?.domain) throw new Error('Missing channels.aun.domain');
-  if (!config.channels?.aun?.agentName) throw new Error('Missing channels.aun.agentName');
+  // AUN 配置可选，但如果配置了就要有 domain 和 agentName
+  if (config.channels?.aun?.enabled !== false && config.channels?.aun) {
+    if (!config.channels.aun.domain) {
+      logger.warn('⚠ AUN domain not configured (AUN channel will be disabled)');
+    }
+    if (!config.channels.aun.agentName) {
+      logger.warn('⚠ AUN agentName not configured (AUN channel will be disabled)');
+    }
+  }
+
   if (!config.projects?.defaultPath) throw new Error('Missing projects.defaultPath');
 
   // WeChat 配置可选，但如果启用了就需要 token

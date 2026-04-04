@@ -28,14 +28,18 @@ export interface Config {
       baseUrl?: string;
       token?: string;
       owner?: string;
-      flushDelay?: number;  // flush 间隔(秒)，默认 2
+      flushDelay?: number;  // flush 间隔(秒)，默认 3
     };
     aun?: {
       enabled?: boolean;
       domain: string;
       agentName: string;
+      keystorePath?: string;  // AUN keystore 路径，默认 ~/.aun/AIDs/
+      gatewayUrl?: string;    // Gateway WebSocket URL
+      accessToken?: string;   // 认证 access token
       owner?: string;
-      flushDelay?: number;  // flush 间隔(秒)，默认使用全局值
+      flushDelay?: number;  // flush 间隔(秒)，默认 3
+      pythonBin?: string;   // Python 可执行路径，默认 python3
     };
   };
   projects?: {

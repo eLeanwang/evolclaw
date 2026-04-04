@@ -886,7 +886,9 @@ export class CommandHandler {
 
     // /send 命令：发送项目内文件
     if (normalizedContent.startsWith('/send')) {
-      const filePath = normalizedContent.slice(5).trim();
+      // 飞书会将 .md 等后缀自动转为 Markdown 链接: foo.md → [foo.md](http://foo.md/)
+      // 还原: 将 [text](url) 替换为 text
+      const filePath = normalizedContent.slice(5).trim().replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
       if (!filePath) {
         return '用法: /send <相对路径>\n示例: /send src/index.ts';
       }

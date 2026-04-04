@@ -232,6 +232,26 @@ async function main() {
         inst.adapter
       );
     }
+
+    if (inst.adapter.name === 'aun') {
+      msgBridge.register('aun',
+        (handler) => inst.channel.onMessage(async (opts: any) => {
+          handler({
+            channel: 'aun',
+            channelId: opts.channelId,
+            content: opts.content,
+            chatType: opts.chatType || 'private',
+            peerId: opts.peerId || '',
+            messageId: opts.messageId,
+            mentions: opts.mentions,
+            threadId: opts.threadId,
+            replyContext: opts.replyContext,
+          });
+        }),
+        (channelId, text, replyContext) => inst.channel.sendMessage(channelId, text, replyContext),
+        inst.adapter
+      );
+    }
   }
 
   // ── 连接所有渠道 ──

@@ -335,7 +335,7 @@ ${suggestions}`,
           }
           // 后台任务：静默，不发送输出
         },
-        (options?.flushDelay ?? this.config.flushDelay ?? 4) * 1000,
+        (options?.flushDelay ?? this.config.flushDelay ?? 3) * 1000,
         options?.fileMarkerPattern,
         this.config.debug?.flusherDiag
       );
