@@ -101,7 +101,7 @@ function formatIdleTime(ms: number): string {
 }
 
 // 支持的命令列表
-const commands = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/agent', '/slist', '/session', '/rename', '/stop', '/clear', '/compact', '/repair', '/safe', '/fork', '/del', '/perm'];
+const commands = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/agent', '/slist', '/session', '/rename', '/stop', '/clear', '/compact', '/repair', '/safe', '/fork', '/del', '/perm', '/send'];
 
 // 命令别名映射
 const aliases: Record<string, string> = {
@@ -111,7 +111,7 @@ const aliases: Record<string, string> = {
 };
 
 // 命令快速路径前缀（所有命令都不进入消息队列）
-const quickCommandPrefixes = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/agent', '/slist', '/session', '/rename', '/repair', '/fork', '/stop', '/clear', '/compact', '/safe', '/del', '/perm', '/p ', '/s ', '/name '];
+const quickCommandPrefixes = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/agent', '/slist', '/session', '/rename', '/repair', '/fork', '/stop', '/clear', '/compact', '/safe', '/del', '/perm', '/send', '/p ', '/s ', '/name '];
 
 export class CommandHandler {
   private adapters = new Map<string, ChannelAdapter>();
@@ -374,6 +374,7 @@ export class CommandHandler {
   /restart - 重启服务
   /repair - 检查并修复会话
   /safe - 进入安全模式
+  /send <路径> - 发送项目内文件
 
 ❓ 帮助：
   /help - 显示此帮助信息`;
@@ -883,6 +884,74 @@ export class CommandHandler {
       return `当前项目: ${session.projectPath}`;
     }
 
+    // /send 命令：发送项目内文件
+    if (normalizedContent.startsWith('/send')) {
+      const filePath = normalizedContent.slice(5).trim();
+      if (!filePath) {
+        return '用法: /send <相对路径>\n示例: /send src/index.ts';
+      }
+
+      // 获取 adapter
+      const sendAdapter = this.adapters.get(channel);
+      if (!sendAdapter?.sendFile) {
+        return '❌ 当前渠道不支持文件发送';
+      }
+
+      // 获取 session（需要 projectPath 和 replyContext）
+      const sendResult = await this.ensureSession(channel, channelId, threadId);
+      if ('error' in sendResult) return sendResult.error;
+      const sendSession = sendResult.session;
+
+      // 路径安全校验
+      if (path.isAbsolute(filePath)) {
+        return '❌ 不支持绝对路径\n请使用项目内的相对路径';
+      }
+      if (filePath.split(path.sep).includes('..') || filePath.split('/').includes('..')) {
+        return '❌ 不支持 .. 路径穿越';
+      }
+
+      const resolvedPath = path.resolve(sendSession.projectPath, filePath);
+
+      // 存在性检查
+      if (!fs.existsSync(resolvedPath)) {
+        return `❌ 文件不存在: ${filePath}`;
+      }
+
+      // 符号链接安全：realpath 后验证仍在项目目录内
+      const realPath = fs.realpathSync(resolvedPath);
+      const realProjectPath = fs.realpathSync(sendSession.projectPath);
+      if (!realPath.startsWith(realProjectPath + path.sep) && realPath !== realProjectPath) {
+        return '❌ 路径不允许: 文件不在项目目录内';
+      }
+
+      const stat = fs.statSync(resolvedPath);
+
+      // 目录检查（一期不支持）
+      if (stat.isDirectory()) {
+        return '❌ 暂不支持发送目录\n目录打包发送将在后续版本支持';
+      }
+
+      // 大小检查（10MB）
+      const MAX_SIZE = 10 * 1024 * 1024;
+      if (stat.size > MAX_SIZE) {
+        const sizeMB = (stat.size / 1024 / 1024).toFixed(1);
+        return `❌ 文件过大: ${sizeMB} MB (限制 10 MB)`;
+      }
+
+      // 发送文件
+      try {
+        const replyCtx = this.getReplyContext(sendSession);
+        await sendAdapter.sendFile(channelId, realPath, replyCtx);
+        const sizeStr = stat.size < 1024 ? `${stat.size} B`
+          : stat.size < 1024 * 1024 ? `${(stat.size / 1024).toFixed(1)} KB`
+          : `${(stat.size / 1024 / 1024).toFixed(1)} MB`;
+        return `✅ 已发送: ${filePath} (${sizeStr})`;
+      } catch (error: any) {
+        logger.error('[CommandHandler] /send failed:', error);
+        return `❌ 文件发送失败: ${error.message || error}`;
+      }
+    }
+
     // /plist 命令：列出所有项目
     if (normalizedContent === '/plist') {
       if (!policy.canListProjects(session?.chatType || 'private', identity.role)) {
@@ -908,13 +977,28 @@ export class CommandHandler {
       // 收集项目信息并按最近活跃排序
       const entries: { name: string; projectPath: string; projectSession: any; isCurrent: boolean; updatedAt: number }[] = [];
 
+      const configuredPaths = new Set<string>();
       for (const [name, projectPath] of Object.entries(this.projects)) {
+        configuredPaths.add(projectPath);
         const isCurrent = session?.projectPath === projectPath;
         const projectSession = await this.sessionManager.getSessionByProjectPath(channel, channelId, projectPath);
         entries.push({
           name, projectPath, projectSession, isCurrent,
           updatedAt: projectSession?.updatedAt ?? 0,
         });
+      }
+
+      // Include bound projects not in config (created via /bind)
+      const allSessions = await this.sessionManager.listSessions(channel, channelId);
+      for (const s of allSessions) {
+        if (!configuredPaths.has(s.projectPath)) {
+          configuredPaths.add(s.projectPath);
+          const isCurrent = session?.projectPath === s.projectPath;
+          entries.push({
+            name: path.basename(s.projectPath), projectPath: s.projectPath, projectSession: s, isCurrent,
+            updatedAt: s.updatedAt ?? 0,
+          });
+        }
       }
 
       // 当前活跃项目置顶，其余按 updatedAt 降序
@@ -971,9 +1055,15 @@ export class CommandHandler {
 群聊只能绑定一个项目。如需更换项目，请联系管理员重新配置。`;
       }
 
-      const arg = normalizedContent.slice(9).trim();
+      let arg = normalizedContent.slice(9).trim();
 
       if (!arg) return '用法: /p <name|path> 或 /project <name|path>';
+
+      // 检查确认标志
+      const hasConfirm = arg.endsWith(' --confirm');
+      if (hasConfirm) {
+        arg = arg.slice(0, -10).trim();
+      }
 
       let projectPath: string;
       let projectName: string;
@@ -1001,6 +1091,20 @@ export class CommandHandler {
         if (normalizedSessionPath === normalizedProjectPath) {
           return `当前已在项目: ${projectName}\n  路径: ${projectPath}`;
         }
+      }
+
+      // 群聊切换项目需要确认
+      const isGroupChat = session?.chatType === 'group';
+      if (isGroupChat && !hasConfirm) {
+        return `⚠️ 群聊切换项目风险提示：
+
+切换项目将影响所有群成员的对话上下文，可能导致：
+  • 当前项目的会话历史被切换
+  • 正在处理的任务被中断
+  • 其他成员的工作受到影响
+
+确认切换请执行：
+  /p ${projectName} --confirm`;
       }
 
       const currentAgentId = activeSession?.agentId || this.defaultAgentId;
@@ -1047,11 +1151,11 @@ export class CommandHandler {
       return response;
     }
 
-    // /bind 命令：绑定新项目目录
+    // /bind 命令：持久化项目到配置（不切换）
     if (normalizedContent.startsWith('/bind ')) {
       const projectPath = normalizedContent.slice(6).trim();
 
-      if (!projectPath) return '用法: /bind <path>';
+      if (!projectPath) return '用法: /bind <路径>';
 
       if (!path.isAbsolute(projectPath)) {
         return '❌ 项目路径必须是绝对路径';
@@ -1060,43 +1164,35 @@ export class CommandHandler {
         return `❌ 路径不存在: ${projectPath}`;
       }
 
-      const currentAgentId = activeSession?.agentId || this.defaultAgentId;
-      const newSession = await this.sessionManager.switchProject(channel, channelId, projectPath, currentAgentId);
+      // 生成项目名称（使用目录名）
+      const projectName = path.basename(projectPath);
 
-      this.eventBus.publish({
-        type: 'project:bound',
-        sessionId: newSession.id,
-        channel,
-        channelId,
-        projectPath,
-        timestamp: Date.now()
-      });
-
-      const cachedEvents = this.messageCache.getEvents(newSession.id);
-
-      const hasExistingSession = newSession.agentSessionId ? '（恢复已有会话）' : '（新建会话）';
-      let response = `✓ 已绑定项目目录: ${projectPath}\n  ${hasExistingSession}`;
-
-      if (cachedEvents.length > 0) {
-        response += `\n\n后台任务结果:`;
-        for (const event of cachedEvents) {
-          if (event.type === 'completed') {
-            response += `\n✓ 任务完成`;
-            if (event.metadata?.duration) {
-              response += ` (耗时: ${Math.round(event.metadata.duration / 1000)}s)`;
-            }
-            const summary = event.message.substring(0, 200);
-            response += `\n${summary}${event.message.length > 200 ? '...' : ''}`;
-          } else if (event.type === 'error') {
-            response += `\n❌ 任务失败: ${event.metadata?.errorType || '未知错误'}`;
-            response += `\n${event.message}`;
-          }
+      // 检查是否已存在
+      if (this.projects[projectName]) {
+        const existingPath = this.projects[projectName];
+        if (existingPath === projectPath) {
+          return `项目 "${projectName}" 已存在\n  路径: ${projectPath}\n\n使用 /p ${projectName} 切换到该项目`;
         }
-
-        this.messageCache.clearEvents(newSession.id);
+        return `❌ 项目名称 "${projectName}" 已被占用\n  现有路径: ${existingPath}\n  新路径: ${projectPath}\n\n请重命名目录或手动编辑配置文件`;
       }
 
-      return response;
+      // 添加到配置
+      if (!this.config.projects) {
+        this.config.projects = { defaultPath: process.cwd(), autoCreate: false, list: {} };
+      }
+      if (!this.config.projects.list) {
+        this.config.projects.list = {};
+      }
+      this.config.projects.list[projectName] = projectPath;
+
+      // 保存配置
+      const { saveConfig } = await import('../config.js');
+      saveConfig(this.config);
+
+      // 更新内存中的项目列表
+      this.projects[projectName] = projectPath;
+
+      return `✓ 已添加项目: ${projectName}\n  路径: ${projectPath}\n\n使用 /p ${projectName} 切换到该项目`;
     }
 
     // /slist 命令：列出当前项目的所有会话
