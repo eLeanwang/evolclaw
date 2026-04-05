@@ -262,12 +262,21 @@ export class FeishuChannel {
             else if (msg.message_type === 'post') {
               const parsed = JSON.parse(msg.content);
               let text = '';
+              const postImages: { data: string; mimeType: string }[] = [];
               const title = parsed.zh_cn?.title || parsed.en_us?.title || parsed.title;
               const content = parsed.zh_cn?.content || parsed.en_us?.content || parsed.content;
               if (content) {
+                const projectPath = this.projectPathProvider
+                  ? await this.projectPathProvider(msg.chat_id)
+                  : process.cwd();
                 for (const line of content) {
                   for (const elem of line) {
-                    if (elem.text) text += elem.text;
+                    if (elem.tag === 'img' && elem.image_key) {
+                      const imageData = await this.downloadAndSaveImage(elem.image_key, msg.chat_id, msg.message_id, projectPath);
+                      if (imageData) postImages.push(imageData);
+                    } else if (elem.text) {
+                      text += elem.text;
+                    }
                   }
                   text += '\n';
                 }
@@ -275,7 +284,8 @@ export class FeishuChannel {
               let finalContent = text.trim();
               if (title) finalContent = `${title}\n${finalContent}`;
               finalContent = quotedText + finalContent;
-              await this.messageHandler({ channelId: msg.chat_id, content: finalContent, images: quotedImages.length > 0 ? quotedImages : undefined, peerId, peerName, messageId: msg.message_id, threadId, rootId, chatType });
+              const allImages = [...quotedImages, ...postImages];
+              await this.messageHandler({ channelId: msg.chat_id, content: finalContent, images: allImages.length > 0 ? allImages : undefined, peerId, peerName, messageId: msg.message_id, threadId, rootId, chatType });
             }
             // 处理其他类型消息
             else {
