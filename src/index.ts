@@ -231,6 +231,9 @@ async function main() {
         }),
         inst.adapter
       );
+      inst.channel.onRecall?.((messageId: string) => {
+        msgBridge.cancel(messageId);
+      });
     }
 
     if (inst.adapter.name === 'aun') {

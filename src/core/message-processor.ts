@@ -97,7 +97,6 @@ export class MessageProcessor {
    */
   async processMessage(message: Message): Promise<void> {
     const idleMs = (this.config.idleMonitor?.timeout ?? 120) * 1000;
-    const streamKey = `${message.channel}-${message.channelId}`;
     const channelInfo = this.channels.get(message.channel);
 
     if (!channelInfo) {
@@ -109,6 +108,7 @@ export class MessageProcessor {
 
     // 解析会话（唯一的 getOrCreateSession 调用点）
     const { session, absoluteProjectPath } = await this.resolveSession(message);
+    const streamKey = session.id;
     const chatType = message.chatType || 'private';
     const identityRole = session.identity?.role || 'anonymous';
 
@@ -274,7 +274,7 @@ ${suggestions}`,
 
     const { adapter, options } = channelInfo;
     const agent = this.getAgent(session.agentId);
-    const streamKey = `${message.channel}-${message.channelId}`;
+    const streamKey = session.id;
 
     try {
       const isBackground = await this.isBackgroundSession(session, message.channel, message.channelId);

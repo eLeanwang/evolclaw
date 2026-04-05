@@ -115,21 +115,85 @@ export class MessageQueue {
         return;
       }
 
-      const { message, projectPath, resolve, reject } = queue.shift()!;
-      this.currentSessionKey = queueKey;
-      this.currentProjectPath = projectPath;
-      this.currentAgentId = message.agentId;
+      // FIFO 贪心合并：弹出队首连续同 peerId 的消息
+      const items = this.dequeueGreedy(queue);
+      const merged = items.length === 1 ? items[0] : this.mergeItems(items);
 
-      logger.debug(`[Queue] Processing message from ${message.channel}:${message.channelId}`);
+      this.currentSessionKey = queueKey;
+      this.currentProjectPath = merged.projectPath;
+      this.currentAgentId = merged.message.agentId;
+
+      const resolves = items.map(i => i.resolve);
+      const rejects = items.map(i => i.reject);
+
+      logger.debug(`[Queue] Processing ${items.length} message(s) from ${merged.message.channel}:${merged.message.channelId}`);
       try {
-        await this.handler(message);
+        await this.handler(merged.message);
         logger.debug(`[Queue] Message processed successfully`);
-        resolve();
+        resolves.forEach(r => r());
       } catch (error) {
         logger.error(`[Queue] Message processing failed:`, error);
-        reject(error as Error);
+        rejects.forEach(r => r(error as Error));
       }
     }
+  }
+
+  /**
+   * 贪心弹出队首连续同 peerId 的消息。
+   * 遇到不同 peerId 或队列为空时停止。
+   */
+  private dequeueGreedy(queue: QueuedMessage[]): QueuedMessage[] {
+    const first = queue.shift()!;
+    const result = [first];
+    const peerId = first.message.peerId;
+
+    while (queue.length > 0 && queue[0].message.peerId === peerId) {
+      result.push(queue.shift()!);
+    }
+
+    if (result.length > 1) {
+      logger.debug(`[Queue] Greedy dequeue: merged ${result.length} messages from peerId=${peerId}`);
+    }
+
+    return result;
+  }
+
+  /**
+   * 合并多条同 peerId 消息：
+   * - content: \n 连接
+   * - images / mentions: 扁平合并
+   * - messageId: 逗号分隔
+   * - replyContext / peerName / 其余字段: 取最后一条
+   */
+  private mergeItems(items: QueuedMessage[]): QueuedMessage {
+    const contents: string[] = [];
+    const allImages: Array<{ data: string; mimeType: string }> = [];
+    const allMentions: Array<{ userId: string; name?: string; key?: string }> = [];
+    const messageIds: string[] = [];
+
+    for (const item of items) {
+      const m = item.message;
+      contents.push(m.content);
+      if (m.images) allImages.push(...m.images);
+      if (m.mentions) allMentions.push(...m.mentions);
+      if (m.messageId) messageIds.push(m.messageId);
+    }
+
+    const last = items[items.length - 1];
+    const merged: Message = {
+      ...last.message,
+      content: contents.join('\n'),
+      images: allImages.length > 0 ? allImages : undefined,
+      mentions: allMentions.length > 0 ? allMentions : undefined,
+      messageId: messageIds.length > 0 ? messageIds.join(',') : undefined,
+    };
+
+    return {
+      message: merged,
+      projectPath: last.projectPath,
+      resolve: () => {},  // 由调用方管理
+      reject: () => {},
+    };
   }
 
   getQueueLength(sessionKey: string): number {
@@ -147,6 +211,19 @@ export class MessageQueue {
     // 检查该 sessionKey 下是否有任何项目队列在处理
     for (const key of this.processing.keys()) {
       if (this.matchesSession(key, sessionKey)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  cancel(messageId: string): boolean {
+    for (const queue of this.queues.values()) {
+      const idx = queue.findIndex(q => q.message.messageId === messageId);
+      if (idx !== -1) {
+        const [removed] = queue.splice(idx, 1);
+        removed.resolve();
+        logger.info(`[Queue] Cancelled queued message ${messageId}`);
         return true;
       }
     }

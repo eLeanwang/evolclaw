@@ -101,7 +101,7 @@ function createConfig(ownerUserId?: string): Config {
   return {
     channels: {
       feishu: { appId: '', appSecret: '', ...(ownerUserId ? { owner: ownerUserId } : {}) },
-      aun: { domain: '', agentName: '' },
+      aun: { aid: '' },
     },
     projects: { defaultPath: '/tmp/test-project', autoCreate: false },
     idleMonitor: { enabled: true, safeModeThreshold: 3, timeout: 0.5 },

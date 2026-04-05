@@ -380,7 +380,11 @@ describe('MessageQueue 项目路径检查', () => {
 
     await Promise.all(promises);
 
-    expect(processedMessages.length).toBe(10);
+    // 贪心合并：第一条立即处理，剩余 9 条同 peerId(undefined) 被合并
+    expect(processedMessages.length).toBe(2);
+    expect(processedMessages[0].content).toBe('消息0');
+    expect(processedMessages[1].content).toContain('消息1');
+    expect(processedMessages[1].content).toContain('消息9');
   });
 
   it('应该在队列为空时正确报告状态', async () => {

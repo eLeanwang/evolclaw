@@ -7,8 +7,7 @@ import type { ChannelPlugin, ChannelInstance } from '../core/channel-loader.js';
 import type { Config, ReplyContext } from '../types.js';
 
 export interface AUNConfig {
-  domain: string;
-  agentName: string;
+  aid: string;
   keystorePath?: string;
   gatewayUrl?: string;
   accessToken?: string;
@@ -35,6 +34,7 @@ export class AUNChannel {
   private connected = false;
   private aid?: string;
   private seenMessages = new Map<string, number>();
+  private messageSeqMap = new Map<string, number>();  // messageId → seq (for ack)
 
   constructor(private config: AUNConfig) {}
 
@@ -46,8 +46,8 @@ export class AUNChannel {
     if (this.config.keystorePath) env.AUN_PATH = this.config.keystorePath;
     if (this.config.gatewayUrl) env.AUN_GATEWAY = this.config.gatewayUrl;
     if (this.config.accessToken) env.AUN_ACCESS_TOKEN = this.config.accessToken;
-    // Pass AID for authenticate() — constructed from config
-    env.AUN_AID = `${this.config.agentName}.${this.config.domain}`;
+    // Pass AID for authenticate()
+    env.AUN_AID = this.config.aid;
 
     // Resolve Python executable: config.pythonBin → AUN_PYTHON env → system python3
     const pythonBin = this.config.pythonBin || process.env.AUN_PYTHON || 'python3';
@@ -129,6 +129,10 @@ export class AUNChannel {
     if (event.messageId) {
       if (this.seenMessages.has(event.messageId)) return;
       this.seenMessages.set(event.messageId, Date.now());
+      // Track seq for acknowledge
+      if (event.seq != null) {
+        this.messageSeqMap.set(event.messageId, event.seq);
+      }
     }
 
     if (!this.messageHandler) return;
@@ -185,6 +189,14 @@ export class AUNChannel {
     }
   }
 
+  acknowledge(messageId: string): void {
+    const seq = this.messageSeqMap.get(messageId);
+    if (seq != null) {
+      this.write({ method: 'ack', params: { seq } });
+      this.messageSeqMap.delete(messageId);
+    }
+  }
+
   async disconnect(): Promise<void> {
     if (this.sidecar) {
       this.sidecar.kill('SIGTERM');
@@ -200,18 +212,17 @@ export class AUNChannelPlugin implements ChannelPlugin {
   readonly name = 'aun';
 
   isEnabled(config: Config): boolean {
-    return config.channels?.aun?.enabled !== false && !!config.channels?.aun?.domain;
+    return config.channels?.aun?.enabled !== false && !!config.channels?.aun?.aid;
   }
 
   async createChannel(config: Config): Promise<ChannelInstance> {
     const aunConfig = config.channels?.aun;
-    if (!aunConfig?.domain || !aunConfig?.agentName) {
-      throw new Error('AUN config missing (domain and agentName required)');
+    if (!aunConfig?.aid) {
+      throw new Error('AUN config missing (aid required, e.g. "mybot.agentid.pub")');
     }
 
     const channel = new AUNChannel({
-      domain: aunConfig.domain,
-      agentName: aunConfig.agentName,
+      aid: aunConfig.aid,
       keystorePath: aunConfig.keystorePath,
       gatewayUrl: aunConfig.gatewayUrl,
       accessToken: aunConfig.accessToken,
@@ -222,6 +233,7 @@ export class AUNChannelPlugin implements ChannelPlugin {
     const adapter = {
       name: 'aun' as const,
       sendText: (id: string, text: string, context?: ReplyContext) => channel.sendMessage(id, text, context),
+      acknowledge: (messageId: string) => { channel.acknowledge(messageId); return Promise.resolve(); },
     };
 
     const policy = {
@@ -232,14 +244,14 @@ export class AUNChannelPlugin implements ChannelPlugin {
       canImportCliSession: (chatType: string, identity: string) => identity === 'owner',
       messagePrefix: (chatType: string, peerName?: string) => (chatType === 'group' && peerName) ? `[${peerName}] ` : '',
       showMiddleResult: (chatType: string, identity: string) => {
-        const mode = config.showActivities || 'all';
+        const mode = aunConfig.showActivities ?? config.showActivities ?? 'all';
         if (mode === 'none') return false;
         if (mode === 'dm-only') return chatType === 'private';
         if (mode === 'owner-dm-only') return chatType === 'private' && identity === 'owner';
         return true;
       },
       showIdleMonitor: (chatType: string, identity: string) => {
-        const mode = config.showActivities || 'all';
+        const mode = aunConfig.showActivities ?? config.showActivities ?? 'all';
         if (mode === 'none') return false;
         if (mode === 'dm-only') return chatType === 'private';
         if (mode === 'owner-dm-only') return chatType === 'private' && identity === 'owner';

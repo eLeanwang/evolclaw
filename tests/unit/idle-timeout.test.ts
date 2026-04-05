@@ -138,7 +138,7 @@ describe('Idle Timeout with StreamIdleMonitor', () => {
       agents: { anthropic: { apiKey: 'test' } },
       channels: {
         feishu: { appId: '', appSecret: '', owner: 'owner-123' },
-        aun: { domain: '', agentName: '' },
+        aun: { aid: '' },
       },
       idleMonitor: { timeout: 0.2 },
     };
@@ -188,7 +188,7 @@ describe('Idle Timeout with StreamIdleMonitor', () => {
       agents: { anthropic: { apiKey: 'test' } },
       channels: {
         feishu: { appId: '', appSecret: '', owner: 'owner-123' },
-        aun: { domain: '', agentName: '' },
+        aun: { aid: '' },
       },
       idleMonitor: { timeout: 0.5 },  // 0.5s idle threshold for fast tests
     };
@@ -239,7 +239,7 @@ describe('Idle Timeout with StreamIdleMonitor', () => {
       agents: { anthropic: { apiKey: 'test' } },
       channels: {
         feishu: { appId: '', appSecret: '', owner: 'owner-123' },
-        aun: { domain: '', agentName: '' },
+        aun: { aid: '' },
       },
     };
 
@@ -301,7 +301,7 @@ describe('Idle Timeout with StreamIdleMonitor', () => {
       agents: { anthropic: { apiKey: 'test' } },
       channels: {
         feishu: { appId: '', appSecret: '' },
-        aun: { domain: '', agentName: '' },
+        aun: { aid: '' },
       },
       idleMonitor: { timeout: 0.4 },
     };
@@ -362,7 +362,7 @@ describe('Idle Timeout with StreamIdleMonitor', () => {
       agents: { anthropic: { apiKey: 'test' } },
       channels: {
         feishu: { appId: '', appSecret: '', owner: 'owner-123' },
-        aun: { domain: '', agentName: '' },
+        aun: { aid: '' },
       },
       idleMonitor: { timeout: 0.5 },
     };

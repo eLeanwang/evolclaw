@@ -15,7 +15,8 @@ import type { Config, Message, InboundMessage, ChannelAdapter, ReplyContext } fr
  * 出站：命令响应通过 sendReply 回调直接发送到渠道
  */
 export class MessageBridge {
-  private debouncer: StreamDebouncer;
+  private debouncers = new Map<string, StreamDebouncer>();
+  private defaultDebounce: number;
 
   constructor(
     private config: Config,
@@ -25,7 +26,18 @@ export class MessageBridge {
     private cmdHandler: CmdHandler,
     private eventBus: EventBus,
   ) {
-    this.debouncer = new StreamDebouncer(config.debounce ?? 2);
+    this.defaultDebounce = config.debounce ?? 2;
+  }
+
+  private getDebouncer(channelName: string): StreamDebouncer {
+    let d = this.debouncers.get(channelName);
+    if (!d) {
+      const chConfig = (this.config.channels as any)?.[channelName];
+      const seconds = chConfig?.debounce ?? this.defaultDebounce;
+      d = new StreamDebouncer(seconds);
+      this.debouncers.set(channelName, d);
+    }
+    return d;
   }
 
   /**
@@ -83,15 +95,26 @@ export class MessageBridge {
       };
 
       // 6. debounce + ACK + enqueue
+      //    Interrupt 模式（单聊）→ 入队前 debounce 合并
+      //    FIFO 模式（群聊）    → 跳过 debouncer，独立入队，出队时贪心合并
+      const isInterrupt = chatType !== 'group';
       const doEnqueue = async (m: Message) => {
         if (m.messageId) adapter?.acknowledge?.(m.messageId).catch(() => {});
         return this.messageQueue.enqueue(session.id, m, session.projectPath, {
-          interruptible: chatType !== 'group',
+          interruptible: isInterrupt,
         });
       };
-      if (this.debouncer.enabled) {
-        await this.debouncer.submit(session.id, fullMessage, doEnqueue);
+
+      if (isInterrupt) {
+        const debouncer = this.getDebouncer(channelName);
+        if (debouncer.enabled) {
+          const debounceKey = msg.peerId ? `${session.id}:${msg.peerId}` : session.id;
+          await debouncer.submit(debounceKey, fullMessage, doEnqueue);
+        } else {
+          await doEnqueue(fullMessage);
+        }
       } else {
+        // 群聊 FIFO：直接入队，由 MessageQueue.processNext 出队时合并
         await doEnqueue(fullMessage);
       }
     });
@@ -127,8 +150,22 @@ export class MessageBridge {
     return true;
   }
 
+  /**
+   * 撤回消息：先查 debounce 窗口，再查 message queue。
+   * @returns true 如果找到并取消
+   */
+  cancel(messageId: string): boolean {
+    // 阶段 1: debounce 窗口（尚未入队）
+    for (const d of this.debouncers.values()) {
+      if (d.cancel(messageId)) return true;
+    }
+    // 阶段 2: 已入队但未处理（合并后 messageId 可能是逗号分隔的多个 id）
+    return this.messageQueue.cancel(messageId);
+  }
+
   /** 清理资源 */
   dispose(): void {
-    this.debouncer.dispose();
+    for (const d of this.debouncers.values()) d.dispose();
+    this.debouncers.clear();
   }
 }

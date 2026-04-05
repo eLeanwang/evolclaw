@@ -21,7 +21,7 @@ function makeConfig(extra?: Partial<Config>): Config {
   return {
     channels: {
       feishu: { appId: 'test', appSecret: 'test' },
-      aun: { domain: 'test', agentName: 'test' },
+      aun: { aid: 'test.test' },
     },
     projects: { defaultPath: '/tmp/test', autoCreate: false },
     ...extra,

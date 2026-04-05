@@ -41,6 +41,7 @@ export class FeishuChannel {
   private seenMessages = new Map<string, number>();  // messageId -> timestamp
   private seenThreads = new Set<string>();  // 已见的 thread_id，用于判断话题创建消息
   private userNameCache = new Map<string, string>();  // userId -> userName
+  private recallHandler?: (messageId: string) => void;
 
   constructor(private config: FeishuConfig) {
   }
@@ -286,6 +287,13 @@ export class FeishuChannel {
             logger.error('[Feishu] Failed to process message:', error);
           }
         },
+        'im.message.recalled_v1': async (data: any) => {
+          const messageId = data?.message_id;
+          if (messageId) {
+            logger.info('[Feishu] Message recalled:', messageId);
+            this.recallHandler?.(messageId);
+          }
+        },
         'im.message.message_read_v1': async () => {},
         'im.message.reaction.created_v1': async () => {}
       });
@@ -307,6 +315,10 @@ export class FeishuChannel {
 
   onMessage(handler: MessageHandler): void {
     this.messageHandler = handler;
+  }
+
+  onRecall(handler: (messageId: string) => void): void {
+    this.recallHandler = handler;
   }
 
   onProjectPathRequest(provider: ProjectPathProvider): void {
@@ -856,14 +868,14 @@ export class FeishuChannelPlugin implements ChannelPlugin {
       canImportCliSession: (chatType: string, identity: string) => identity === 'owner',
       messagePrefix: (chatType: string, peerName?: string) => (chatType === 'group' && peerName) ? `[${peerName}] ` : '',
       showMiddleResult: (chatType: string, identity: string) => {
-        const mode = config.showActivities || 'all';
+        const mode = feishuConfig.showActivities ?? config.showActivities ?? 'all';
         if (mode === 'none') return false;
         if (mode === 'dm-only') return chatType === 'private';
         if (mode === 'owner-dm-only') return chatType === 'private' && identity === 'owner';
         return true;
       },
       showIdleMonitor: (chatType: string, identity: string) => {
-        const mode = config.showActivities || 'all';
+        const mode = feishuConfig.showActivities ?? config.showActivities ?? 'all';
         if (mode === 'none') return false;
         if (mode === 'dm-only') return chatType === 'private';
         if (mode === 'owner-dm-only') return chatType === 'private' && identity === 'owner';

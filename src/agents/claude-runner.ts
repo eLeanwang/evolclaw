@@ -229,6 +229,7 @@ export class AgentRunner {
   private config?: Config;
   private activeSessions: Map<string, string> = new Map();
   private activeStreams = new Map<string, AsyncIterable<any>>();
+  private interruptFns = new Map<string, () => Promise<void>>();
   private onSessionIdUpdate?: (sessionId: string, agentSessionId: string) => void;
   private onCompactStart?: (sessionId: string) => void;
   private permissionGateway?: PermissionGateway;
@@ -675,8 +676,10 @@ export class AgentRunner {
           logger.debug('[AgentRunner] Creating query with text only, agentSessionId:', initialClaudeSessionId);
           sdkStream = createQuery(prompt, agentSessionId);
         }
-        // 保留原始 SDK stream 用于 interrupt
-        this.activeStreams.set(sessionId, sdkStream);
+        // 保存 interrupt 能力（不写 activeStreams，由 registerStream 管理活跃状态）
+        if ('interrupt' in sdkStream && typeof (sdkStream as any).interrupt === 'function') {
+          this.interruptFns.set(sessionId, () => (sdkStream as any).interrupt());
+        }
         // 返回标准 AgentEvent 流
         return this.transformStream(sdkStream, sessionId);
       } catch (error) {
@@ -690,18 +693,17 @@ export class AgentRunner {
   }
 
   async interrupt(sessionId: string): Promise<void> {
-    const stream = this.activeStreams.get(sessionId);
-    if (stream && 'interrupt' in stream && typeof (stream as any).interrupt === 'function') {
+    const fn = this.interruptFns.get(sessionId);
+    if (fn) {
       try {
-        await (stream as any).interrupt();
-        this.activeStreams.delete(sessionId);
+        await fn();
         logger.info(`[AgentRunner] Interrupted session: ${sessionId}`);
       } catch (error) {
-        // ProcessTransport may already be closed/terminated
-        this.activeStreams.delete(sessionId);
         logger.warn(`[AgentRunner] Interrupt failed (transport closed): ${sessionId}`);
       }
     }
+    this.interruptFns.delete(sessionId);
+    this.activeStreams.delete(sessionId);
   }
 
   hasActiveStream(sessionId: string): boolean {
@@ -714,6 +716,7 @@ export class AgentRunner {
 
   cleanupStream(sessionId: string): void {
     this.activeStreams.delete(sessionId);
+    this.interruptFns.delete(sessionId);
   }
 
   updateSessionId(sessionId: string, agentSessionId: string): void {
@@ -778,6 +781,7 @@ export class AgentRunner {
   async closeSession(sessionId: string): Promise<void> {
     this.activeSessions.delete(sessionId);
     this.activeStreams.delete(sessionId);
+    this.interruptFns.delete(sessionId);
   }
 
   resolveSessionFile(agentSessionId: string, projectPath: string): string | null {

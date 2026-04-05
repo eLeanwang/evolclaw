@@ -22,6 +22,8 @@ export interface Config {
       appSecret: string;
       owner?: string;
       flushDelay?: number;  // flush 间隔(秒)，默认使用全局值
+      debounce?: number;    // 入站消息去抖间隔(秒)，覆盖全局 debounce
+      showActivities?: 'all' | 'dm-only' | 'owner-dm-only' | 'none';  // 覆盖全局 showActivities
     };
     wechat?: {
       enabled?: boolean;
@@ -29,17 +31,20 @@ export interface Config {
       token?: string;
       owner?: string;
       flushDelay?: number;  // flush 间隔(秒)，默认 3
+      debounce?: number;    // 入站消息去抖间隔(秒)，覆盖全局 debounce
+      showActivities?: 'all' | 'dm-only' | 'owner-dm-only' | 'none';  // 覆盖全局 showActivities
     };
     aun?: {
       enabled?: boolean;
-      domain: string;
-      agentName: string;
+      aid: string;            // 完整 AID，如 evolclaw-ai.agentid.pub
       keystorePath?: string;  // AUN keystore 路径，默认 ~/.aun/AIDs/
       gatewayUrl?: string;    // Gateway WebSocket URL
       accessToken?: string;   // 认证 access token
       owner?: string;
       flushDelay?: number;  // flush 间隔(秒)，默认 3
+      debounce?: number;    // 入站消息去抖间隔(秒)，覆盖全局 debounce
       pythonBin?: string;   // Python 可执行路径，默认 python3
+      showActivities?: 'all' | 'dm-only' | 'owner-dm-only' | 'none';  // 覆盖全局 showActivities
     };
   };
   projects?: {
@@ -154,6 +159,7 @@ export interface ChannelOptions {
   fileMarkerPattern?: RegExp;       // Feishu: /\[SEND_FILE:([^\]]+)\]/g
   supportsImages?: boolean;         // Feishu: true, AUN: false
   flushDelay?: number;              // 渠道级 flush 间隔(秒)，覆盖全局 config.flushDelay
+  showActivities?: 'all' | 'dm-only' | 'owner-dm-only' | 'none';  // 覆盖全局 showActivities
 }
 
 // 渠道策略接口

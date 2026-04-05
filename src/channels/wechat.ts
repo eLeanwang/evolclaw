@@ -857,14 +857,14 @@ export class WechatChannelPlugin implements ChannelPlugin {
       canImportCliSession: (chatType: string, identity: string) => identity === 'owner',
       messagePrefix: (chatType: string, peerName?: string) => '',
       showMiddleResult: (chatType: string, identity: string) => {
-        const mode = config.showActivities || 'all';
+        const mode = wechatConfig.showActivities ?? config.showActivities ?? 'all';
         if (mode === 'none') return false;
         if (mode === 'dm-only') return chatType === 'private';
         if (mode === 'owner-dm-only') return chatType === 'private' && identity === 'owner';
         return true;
       },
       showIdleMonitor: (chatType: string, identity: string) => {
-        const mode = config.showActivities || 'all';
+        const mode = wechatConfig.showActivities ?? config.showActivities ?? 'all';
         if (mode === 'none') return false;
         if (mode === 'dm-only') return chatType === 'private';
         if (mode === 'owner-dm-only') return chatType === 'private' && identity === 'owner';

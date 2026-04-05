@@ -125,6 +125,7 @@ class AUNBridge:
             task_id = data.get('task_id')
             parent_task_id = data.get('parent_task_id')
             message_id = data.get('message_id', '')
+            seq = data.get('seq')
 
             # Detect @mentions in text
             mentions = []
@@ -139,6 +140,8 @@ class AUNBridge:
                 'chatType': 'private',
                 'messageId': message_id,
             }
+            if seq is not None:
+                event['seq'] = seq
             if task_id:
                 event['taskId'] = task_id
             if parent_task_id:
@@ -162,6 +165,7 @@ class AUNBridge:
             text = payload if isinstance(payload, str) else json.dumps(payload) if payload else ''
             task_id = data.get('task_id')
             message_id = data.get('message_id', '')
+            seq = data.get('seq')
 
             # Detect @mentions
             mentions = []
@@ -176,6 +180,8 @@ class AUNBridge:
                 'chatType': 'group',
                 'messageId': message_id,
             }
+            if seq is not None:
+                event['seq'] = seq
             if task_id:
                 event['taskId'] = task_id
             if mentions:
@@ -222,6 +228,8 @@ class AUNBridge:
 
         if method == 'send':
             await self._handle_send(params)
+        elif method == 'ack':
+            await self._handle_ack(params)
         else:
             log(f'Unknown method: {method}')
 
@@ -259,6 +267,19 @@ class AUNBridge:
             log(f'Sent to {channel_id}')
         except Exception as e:
             log(f'Send failed to {channel_id}: {e}')
+
+    async def _handle_ack(self, params: dict) -> None:
+        """Acknowledge messages up to a given seq."""
+        if not self.client:
+            return
+        seq = params.get('seq')
+        if seq is None:
+            return
+        try:
+            await self.client.call('message.ack', {'seq': seq})
+            log(f'Acked seq {seq}')
+        except Exception as e:
+            log(f'Ack failed: {e}')
 
     async def shutdown(self) -> None:
         """Clean shutdown."""
