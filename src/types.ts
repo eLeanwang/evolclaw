@@ -148,6 +148,8 @@ export interface ChannelAdapter {
   sendFile?(channelId: string, filePath: string, context?: ReplyContext): Promise<void>;
   sendImage?(channelId: string, png: Buffer, context?: ReplyContext): Promise<void>;
   acknowledge?(messageId: string): Promise<void>;
+  sendProcessingStatus?(channelId: string, status: 'start' | 'done' | 'interrupted' | 'error' | 'timeout', sessionId: string, context?: ReplyContext): void;
+  sendCustomPayload?(channelId: string, payload: string): void;
   onChatDissolved?(callback: (channelId: string) => void): void;
   connect?(): Promise<void>;
   disconnect?(): Promise<void>;

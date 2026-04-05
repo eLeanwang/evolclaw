@@ -230,6 +230,10 @@ class AUNBridge:
             await self._handle_send(params)
         elif method == 'ack':
             await self._handle_ack(params)
+        elif method == 'processing':
+            await self._handle_processing(params)
+        elif method == 'custom_payload':
+            await self._handle_custom_payload(params)
         else:
             log(f'Unknown method: {method}')
 
@@ -280,6 +284,50 @@ class AUNBridge:
             log(f'Acked seq {seq}')
         except Exception as e:
             log(f'Ack failed: {e}')
+
+    async def _handle_processing(self, params: dict) -> None:
+        """Send processing status notification to client (persist: false)."""
+        if not self.client:
+            return
+        channel_id = params.get('channelId', '')
+        status = params.get('status', 'start')
+        session_id = params.get('sessionId', '')
+        if not channel_id:
+            return
+        import time
+        payload = json.dumps({
+            'type': 'processing',
+            'status': status,
+            'sessionId': session_id,
+            'timestamp': int(time.time()),
+        })
+        try:
+            send_params: dict[str, Any] = {
+                'to': channel_id, 'payload': payload,
+                'encrypt': True, 'persist': False,
+            }
+            task_id = params.get('taskId')
+            if task_id:
+                send_params['task_id'] = task_id
+            await self.client.call('message.send', send_params)
+        except Exception as e:
+            log(f'Processing status failed: {e}')
+
+    async def _handle_custom_payload(self, params: dict) -> None:
+        """Send a custom JSON payload to client (persist: false)."""
+        if not self.client:
+            return
+        channel_id = params.get('channelId', '')
+        payload = params.get('payload', '')
+        if not channel_id or not payload:
+            return
+        try:
+            await self.client.call('message.send', {
+                'to': channel_id, 'payload': payload,
+                'encrypt': True, 'persist': False,
+            })
+        except Exception as e:
+            log(f'Custom payload failed: {e}')
 
     async def shutdown(self) -> None:
         """Clean shutdown."""

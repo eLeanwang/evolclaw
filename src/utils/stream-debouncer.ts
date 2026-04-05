@@ -119,13 +119,11 @@ export class StreamDebouncer {
     const allImages: Array<{ data: string; mimeType: string }> = [];
     const allMentions: Array<{ userId: string; name?: string; key?: string }> = [];
     const contents: string[] = [];
-    const messageIds: string[] = [];
 
     for (const e of entries) {
       contents.push(e.content);
       if (e.images) allImages.push(...e.images);
       if (e.mentions) allMentions.push(...e.mentions);
-      if (e.messageId) messageIds.push(e.messageId);
     }
 
     const last = entries[entries.length - 1];
@@ -135,8 +133,7 @@ export class StreamDebouncer {
       images: allImages.length > 0 ? allImages : undefined,
       mentions: allMentions.length > 0 ? allMentions : undefined,
       replyContext: last.replyContext,
-      // 保留所有原始 messageId，用逗号分隔；单条时保持原样
-      messageId: messageIds.length > 0 ? messageIds.join(',') : undefined,
+      messageId: entries.length > 1 ? undefined : last.messageId,
     };
 
     const resolves = entries.map(e => e.resolve);

@@ -35,6 +35,7 @@ export class AUNChannel {
   private aid?: string;
   private seenMessages = new Map<string, number>();
   private messageSeqMap = new Map<string, number>();  // messageId → seq (for ack)
+  private sentCount = new Map<string, number>();  // channelId → 已发消息计数（用于判断最终回复）
 
   constructor(private config: AUNConfig) {}
 
@@ -179,6 +180,11 @@ export class AUNChannel {
 
     const params: Record<string, any> = { channelId, text };
     if (context?.threadId) params.taskId = context.threadId;
+    // 多轮工具调用后的最终回复：仅在已有中间消息时添加前缀
+    if (context?.title && (this.sentCount.get(channelId) || 0) > 0) {
+      params.text = '最终回复\n' + text;
+    }
+    this.sentCount.set(channelId, (this.sentCount.get(channelId) || 0) + 1);
 
     this.write({ method: 'send', params });
   }
@@ -195,6 +201,17 @@ export class AUNChannel {
       this.write({ method: 'ack', params: { seq } });
       this.messageSeqMap.delete(messageId);
     }
+  }
+
+  sendProcessingStatus(channelId: string, status: 'start' | 'done' | 'interrupted' | 'error' | 'timeout', sessionId: string, context?: ReplyContext): void {
+    if (status === 'start') this.sentCount.delete(channelId);  // 新任务开始，重置计数
+    const params: Record<string, any> = { channelId, status, sessionId };
+    if (context?.threadId) params.taskId = context.threadId;
+    this.write({ method: 'processing', params });
+  }
+
+  sendCustomPayload(channelId: string, payload: string): void {
+    this.write({ method: 'custom_payload', params: { channelId, payload } });
   }
 
   async disconnect(): Promise<void> {
@@ -234,6 +251,8 @@ export class AUNChannelPlugin implements ChannelPlugin {
       name: 'aun' as const,
       sendText: (id: string, text: string, context?: ReplyContext) => channel.sendMessage(id, text, context),
       acknowledge: (messageId: string) => { channel.acknowledge(messageId); return Promise.resolve(); },
+      sendProcessingStatus: (id: string, status: 'start' | 'done', sessionId: string, context?: ReplyContext) => channel.sendProcessingStatus(id, status, sessionId, context),
+      sendCustomPayload: (id: string, payload: string) => channel.sendCustomPayload(id, payload),
     };
 
     const policy = {

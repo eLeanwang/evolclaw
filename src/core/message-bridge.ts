@@ -57,6 +57,9 @@ export class MessageBridge {
     onMessage(async (msg) => {
       let content = msg.content.trim();
 
+      // 0. 自定义消息快速路径（menu.query 等）
+      if (await this.handleCustomPayload(content, channelName, msg, sendReply, adapter)) return;
+
       // 1. owner 绑定
       if (msg.peerId) await this.autoBindOwner(channelName, msg.peerId);
 
@@ -94,12 +97,14 @@ export class MessageBridge {
         replyContext: msg.replyContext,
       };
 
-      // 6. debounce + ACK + enqueue
+      // 6. ACK + debounce/enqueue
+      //    ACK 在到达时立即做（每条独立 ACK），不等合并
       //    Interrupt 模式（单聊）→ 入队前 debounce 合并
       //    FIFO 模式（群聊）    → 跳过 debouncer，独立入队，出队时贪心合并
+      if (fullMessage.messageId) adapter?.acknowledge?.(fullMessage.messageId).catch(() => {});
+
       const isInterrupt = chatType !== 'group';
       const doEnqueue = async (m: Message) => {
-        if (m.messageId) adapter?.acknowledge?.(m.messageId).catch(() => {});
         return this.messageQueue.enqueue(session.id, m, session.projectPath, {
           interruptible: isInterrupt,
         });
@@ -118,6 +123,33 @@ export class MessageBridge {
         await doEnqueue(fullMessage);
       }
     });
+  }
+
+  /** 自定义消息快速路径：拦截 menu.query 等自定义 payload，返回 true 表示已处理 */
+  private async handleCustomPayload(
+    content: string, channel: string, msg: InboundMessage,
+    sendReply: (channelId: string, text: string, replyContext?: ReplyContext) => Promise<void>,
+    adapter?: ChannelAdapter
+  ): Promise<boolean> {
+    let parsed: any;
+    try { parsed = JSON.parse(content); } catch { return false; }
+    if (!parsed || typeof parsed !== 'object' || !parsed.type) return false;
+
+    if (parsed.type === 'menu.query') {
+      const identity = this.sessionManager.resolveIdentity(channel, msg.peerId);
+      const isAdmin = identity.role === 'owner';
+      const items = this.cmdHandler.getMenuItems(isAdmin);
+      const response = JSON.stringify({ type: 'menu.response', items });
+
+      if (adapter?.sendCustomPayload) {
+        adapter.sendCustomPayload(msg.channelId, response);
+      } else {
+        await sendReply(msg.channelId, response);
+      }
+      return true;
+    }
+
+    return false;
   }
 
   /** 首次交互自动绑定 owner */

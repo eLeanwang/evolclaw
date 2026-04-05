@@ -617,8 +617,7 @@ async function cmdRestartMonitor() {
   if (started) {
     log('✓ Service restarted successfully');
     archiveSelfHealLog(p, log);
-    await notifyChannel(p, pendingInfo, '✅ 服务重启成功！', log);
-    cleanupPendingFile(pendingFile, log);
+    // 通知由新进程自行发送（channel-agnostic），此处不再调用 notifyChannel
     process.exit(0);
   }
 
@@ -646,8 +645,7 @@ async function cmdRestartMonitor() {
       log(`✓ Self-heal succeeded on attempt ${attempt}`);
       eventBus.publish({ type: 'self-heal:completed', success: true, attempts: attempt });
       archiveSelfHealLog(p, log);
-      await notifyChannel(p, pendingInfo, `✅ 自愈成功！（第 ${attempt} 次修复后恢复）`, log);
-      cleanupPendingFile(pendingFile, log);
+      // 通知由新进程自行发送（channel-agnostic），此处不再调用 notifyChannel
       process.exit(0);
     }
 

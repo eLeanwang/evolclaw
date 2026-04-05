@@ -15,6 +15,7 @@ interface QueuedMessage {
 export class MessageQueue {
   private queues = new Map<string, QueuedMessage[]>();
   private processing = new Set<string>();
+  private externalLocks = new Map<string, Promise<void>>();
   private handler: MessageHandler;
   private currentSessionKey?: string;
   private currentProjectPath?: string;
@@ -106,6 +107,13 @@ export class MessageQueue {
     logger.debug(`[Queue] Processing queue ${queueKey}`);
 
     while (true) {
+      // 等待外部锁释放（/compact, /clear 等快速命令）
+      const lock = this.getExternalLock(queueKey);
+      if (lock) {
+        logger.debug(`[Queue] Waiting for external lock on ${queueKey}`);
+        await lock;
+      }
+
       const queue = this.queues.get(queueKey);
       if (!queue || queue.length === 0) {
         logger.debug(`[Queue] Queue ${queueKey} is empty, stopping`);
@@ -162,21 +170,19 @@ export class MessageQueue {
    * 合并多条同 peerId 消息：
    * - content: \n 连接
    * - images / mentions: 扁平合并
-   * - messageId: 逗号分隔
+   * - messageId: 置空（合并后不代表某一条具体消息）
    * - replyContext / peerName / 其余字段: 取最后一条
    */
   private mergeItems(items: QueuedMessage[]): QueuedMessage {
     const contents: string[] = [];
     const allImages: Array<{ data: string; mimeType: string }> = [];
     const allMentions: Array<{ userId: string; name?: string; key?: string }> = [];
-    const messageIds: string[] = [];
 
     for (const item of items) {
       const m = item.message;
       contents.push(m.content);
       if (m.images) allImages.push(...m.images);
       if (m.mentions) allMentions.push(...m.mentions);
-      if (m.messageId) messageIds.push(m.messageId);
     }
 
     const last = items[items.length - 1];
@@ -185,7 +191,7 @@ export class MessageQueue {
       content: contents.join('\n'),
       images: allImages.length > 0 ? allImages : undefined,
       mentions: allMentions.length > 0 ? allMentions : undefined,
-      messageId: messageIds.length > 0 ? messageIds.join(',') : undefined,
+      messageId: undefined,
     };
 
     return {
@@ -230,4 +236,25 @@ export class MessageQueue {
     return false;
   }
 
+  /**
+   * 外部锁：快速命令（/compact, /clear）执行期间阻塞队列处理
+   * 返回 release 函数
+   */
+  acquireLock(sessionKey: string): () => void {
+    let releaseFn!: () => void;
+    const promise = new Promise<void>(resolve => { releaseFn = resolve; });
+    this.externalLocks.set(sessionKey, promise);
+    return () => {
+      this.externalLocks.delete(sessionKey);
+      releaseFn();
+    };
+  }
+
+  /** 检查是否有外部锁 */
+  private getExternalLock(queueKey: string): Promise<void> | undefined {
+    for (const [key, promise] of this.externalLocks) {
+      if (this.matchesSession(queueKey, key)) return promise;
+    }
+    return undefined;
+  }
 }

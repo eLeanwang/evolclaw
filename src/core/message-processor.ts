@@ -21,6 +21,7 @@ export class MessageProcessor {
   private shouldSuppressActivities = false;
   private agentMap: Map<string, AgentRunnerFull>;
   private defaultAgentId: string;
+  private interruptedSessions = new Map<string, string>();  // sessionId → reason ('new_message' | 'stop' | ...)
 
   /** 按 agentId 获取 agent，回退到默认 */
   getAgent(agentId?: string): AgentRunnerFull {
@@ -57,6 +58,13 @@ export class MessageProcessor {
       this.agentMap = new Map([[agentRunnerOrMap.name, agentRunnerOrMap]]);
       this.defaultAgentId = agentRunnerOrMap.name;
     }
+
+    // 监听中断事件，标记被中断的 session
+    this.eventBus.subscribe('message:interrupted', (event) => {
+      if ('sessionId' in event && event.sessionId) {
+        this.interruptedSessions.set(event.sessionId as string, (event as any).reason || 'unknown');
+      }
+    });
   }
 
   /**
@@ -302,6 +310,7 @@ ${suggestions}`,
 
       // 记录开始处理
       this.eventBus.publish({ type: 'message:processing', sessionId: session.id });
+      adapter.sendProcessingStatus?.(message.channelId, 'start', session.id, this.getReplyContext(session));
 
       logger.message({
         msgId: messageId,
@@ -357,10 +366,17 @@ ${suggestions}`,
       // 标记会话为处理中（实时持久化，重启后可恢复）
       this.sessionManager.markProcessing(session.id);
 
+      // 检查是否因新消息自动中断 — 包装 prompt 让 Agent 知道上下文
+      const prevInterruptReason = this.interruptedSessions.get(session.id);
+      this.interruptedSessions.delete(session.id);
+      const effectivePrompt = prevInterruptReason === 'new_message' && session.agentSessionId
+        ? `【新消息插入】\n\n${message.content}\n\n【请无视之前中断继续处理】`
+        : message.content;
+
       try {
         const stream = await agent.runQuery(
           session.id,
-          message.content,
+          effectivePrompt,
           absoluteProjectPath,
           session.agentSessionId,
           message.images,
@@ -466,6 +482,9 @@ ${suggestions}`,
 
       // 清除处理中状态 + 记录成功响应
       this.sessionManager.clearProcessing(session.id);
+      // 注意：不在此处清除 interruptedSessions，由下一条消息的 prompt 包装逻辑消费
+      const interruptReason = this.interruptedSessions.get(session.id);
+      adapter.sendProcessingStatus?.(message.channelId, interruptReason ? 'interrupted' : 'done', session.id, this.getReplyContext(session));
       await this.sessionManager.recordSuccess(session.id);
 
       this.eventBus.publish({
@@ -507,11 +526,19 @@ ${suggestions}`,
       // 清理流和处理中状态（异常时也要清除）
       agent.cleanupStream(streamKey);
       try { this.sessionManager.clearProcessing(session.id); } catch {}
+      // 注意：不在此处清除 interruptedSessions，由下一条消息的 prompt 包装逻辑消费
+
+      // 区分超时 / 中断 / 错误
+      const errType = classifyError(error);
+      const procStatus = errType === ErrorType.SDK_TIMEOUT ? 'timeout' as const
+        : errType === ErrorType.STREAM_ERROR ? 'interrupted' as const
+        : 'error' as const;
+      try { adapter.sendProcessingStatus?.(message.channelId, procStatus, session.id, this.getReplyContext(session)); } catch {}
 
       logger.error(`[${message.channel}] Error:`, error);
 
       const errorMsg = error instanceof Error ? error.message : String(error);
-      const errorType = classifyError(error);
+      const errorType = errType;
 
       this.eventBus.publish({
         type: 'message:error',

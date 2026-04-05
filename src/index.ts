@@ -315,6 +315,25 @@ async function main() {
     }
   }
 
+  // 重启通知：通过渠道 adapter 发送（channel-agnostic）
+  const pendingFile = path.join(resolvePaths().dataDir, 'restart-pending.json');
+  if (fs.existsSync(pendingFile)) {
+    try {
+      const pending = JSON.parse(fs.readFileSync(pendingFile, 'utf-8'));
+      const adapter = cmdHandler.getAdapter(pending.channel);
+      if (adapter) {
+        const replyContext = pending.rootId
+          ? { replyToMessageId: pending.rootId, replyInThread: true }
+          : undefined;
+        await adapter.sendText(pending.channelId, '✅ 服务重启成功！', replyContext);
+        logger.info(`[Restart] Notification sent via ${pending.channel}`);
+      }
+      fs.unlinkSync(pendingFile);
+    } catch (e) {
+      logger.error('[Restart] Failed to send restart notification:', e);
+    }
+  }
+
   // 写入 ready 信号，供 restart-monitor 检测启动成功
   const readySignalPath = resolvePaths().readySignal;
   fs.writeFileSync(readySignalPath, String(Date.now()));

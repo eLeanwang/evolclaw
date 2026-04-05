@@ -227,6 +227,87 @@ export class CommandHandler {
   }
 
   /**
+   * 返回结构化命令菜单（供 menu.query 使用）
+   * admin 看到全部命令分组，guest 仅看到用户级命令
+   */
+  getMenuItems(isAdmin: boolean): { group: string; commands: { cmd: string; args?: string; label: string }[] }[] {
+    const items: { group: string; commands: { cmd: string; args?: string; label: string }[] }[] = [];
+
+    if (isAdmin) {
+      items.push({
+        group: '项目管理',
+        commands: [
+          { cmd: '/pwd', label: '显示当前项目路径' },
+          { cmd: '/plist', label: '列出所有配置的项目' },
+          { cmd: '/p', args: '<name|path>', label: '切换项目' },
+          { cmd: '/bind', args: '<path>', label: '绑定新项目目录' },
+        ]
+      });
+    }
+
+    items.push({
+      group: '会话管理',
+      commands: [
+        { cmd: '/new', args: '[name]', label: '创建新会话' },
+        { cmd: '/slist', label: '列出当前项目的所有会话' },
+        { cmd: '/s', args: '<name|index|uuid>', label: '切换到指定会话' },
+        { cmd: '/name', args: '<name>', label: '重命名当前会话' },
+        { cmd: '/del', args: '<name>', label: '删除指定会话' },
+        ...(isAdmin ? [
+          { cmd: '/fork', args: '[name]', label: '分支当前会话' },
+          { cmd: '/clear', label: '清空会话对话历史' },
+          { cmd: '/compact', label: '压缩会话上下文' },
+        ] : []),
+      ]
+    });
+
+    if (isAdmin) {
+      items.push({
+        group: 'Agent 与模型',
+        commands: [
+          { cmd: '/agent', args: '[name]', label: '查看或切换 Agent 后端' },
+          { cmd: '/model', args: '[model] [effort]', label: '查看或切换模型' },
+        ]
+      });
+
+      items.push({
+        group: '权限管理',
+        commands: [
+          { cmd: '/perm', args: '[mode|allow|deny]', label: '权限模式管理' },
+        ]
+      });
+
+      items.push({
+        group: '运维',
+        commands: [
+          { cmd: '/status', label: '显示会话状态' },
+          { cmd: '/stop', label: '中断当前任务' },
+          { cmd: '/restart', label: '重启服务' },
+          { cmd: '/repair', label: '检查并修复会话' },
+          { cmd: '/safe', label: '进入安全模式' },
+          { cmd: '/send', args: '<path>', label: '发送项目内文件' },
+        ]
+      });
+    } else {
+      items.push({
+        group: '其他',
+        commands: [
+          { cmd: '/status', label: '显示会话状态' },
+        ]
+      });
+    }
+
+    items.push({
+      group: '帮助',
+      commands: [
+        { cmd: '/help', label: '显示帮助信息' },
+      ]
+    });
+
+    return items;
+  }
+
+  /**
    * 快速判断是否为命令（不进队列的命令）
    */
   isCommand(content: string): boolean {
@@ -329,55 +410,63 @@ export class CommandHandler {
     // /help 命令不需要会话
     if (normalizedContent === '/help') {
       if (!isAdmin) {
-        return `可用命令：
-🔄 会话管理：
-  /new [名称] - 创建新会话（可选命名）
-  /slist - 列出当前项目的所有会话
-  /s, /session <名称> - 切换到指定会话
-  /name, /rename <新名称> - 重命名当前会话
-  /del <名称> - 删除指定会话（仅解绑，不删除文件）
-  /status - 显示会话状态
-
-❓ 帮助：
-  /help - 显示此帮助信息`;
+        const lines = [
+          '可用命令：',
+          '',
+          '🔄 会话管理：',
+          '  /new [名称] - 创建新会话（可选命名）',
+          '  /slist - 列出当前项目的所有会话',
+          '  /s, /session <名称|序号|uuid> - 切换到指定会话',
+          '  /name, /rename <新名称> - 重命名当前会话',
+          '  /del <名称> - 删除指定会话（仅解绑，不删除文件）',
+          '  /status - 显示会话状态',
+          '',
+          '❓ 帮助：',
+          '  /help - 显示此帮助信息',
+        ];
+        return lines.join('\n');
       }
 
-      return `可用命令：
-📁 项目管理：
-  /pwd - 显示当前项目路径
-  /plist - 列出所有配置的项目
-  /p, /project <name|path> - 切换项目
-  /bind <path> - 绑定新项目目录
-
-🔄 会话管理：
-  /new [名称] - 创建新会话（可选命名）
-  /slist - 列出当前项目的所有会话
-  /s, /session <名称> - 切换到指定会话
-  /name, /rename <新名称> - 重命名当前会话
-  /del <名称> - 删除指定会话（仅解绑，不删除文件）
-  /fork [名称] - 分支当前会话（从当前对话点创建分支）
-  /clear - 清空当前会话的对话历史
-  /compact - 压缩会话上下文（减少 token 用量）
-
-🤖 Agent 与模型：
-  /agent [name] - 查看或切换 Agent 后端
-  /model [model] [effort] - 查看或切换模型/推理强度
-
-🔐 权限管理：
-  /perm - 查看当前权限模式
-  /perm <default|request|edit|plan|noask> - 切换权限模式
-  /perm allow|deny - 审批权限请求
-
-🛠️ 运维：
-  /status - 显示会话状态
-  /stop - 中断当前任务
-  /restart - 重启服务
-  /repair - 检查并修复会话
-  /safe - 进入安全模式
-  /send <路径> - 发送项目内文件
-
-❓ 帮助：
-  /help - 显示此帮助信息`;
+      const lines = [
+        '可用命令：',
+        '',
+        '📁 项目管理：',
+        '  /pwd - 显示当前项目路径',
+        '  /plist - 列出所有配置的项目',
+        '  /p, /project <name|path> - 切换项目',
+        '  /bind <path> - 绑定新项目目录',
+        '',
+        '🔄 会话管理：',
+        '  /new [名称] - 创建新会话（可选命名）',
+        '  /slist - 列出当前项目的所有会话',
+        '  /s, /session <名称> - 切换到指定会话',
+        '  /name, /rename <新名称> - 重命名当前会话',
+        '  /del <名称> - 删除指定会话（仅解绑，不删除文件）',
+        '  /fork [名称] - 分支当前会话（从当前对话点创建分支）',
+        '  /clear - 清空当前会话的对话历史',
+        '  /compact - 压缩会话上下文（减少 token 用量）',
+        '',
+        '🤖 Agent 与模型：',
+        '  /agent [name] - 查看或切换 Agent 后端',
+        '  /model [model] [effort] - 查看或切换模型/推理强度',
+        '',
+        '🔐 权限管理：',
+        '  /perm - 查看当前权限模式',
+        '  /perm <default|request|edit|plan|noask> - 切换权限模式',
+        '  /perm allow|deny - 审批权限请求',
+        '',
+        '🛠️ 运维：',
+        '  /status - 显示会话状态',
+        '  /stop - 中断当前任务',
+        '  /restart - 重启服务',
+        '  /repair - 检查并修复会话',
+        '  /safe - 进入安全模式',
+        '  /send <路径> - 发送项目内文件',
+        '',
+        '❓ 帮助：',
+        '  /help - 显示此帮助信息',
+      ];
+      return lines.join('\n');
     }
 
     // /perm 命令：权限模式切换 + 权限审批（快速路径，不进入消息队列）
@@ -618,13 +707,18 @@ export class CommandHandler {
         ? session.projectPath
         : path.resolve(process.cwd(), session.projectPath);
 
-      const cleared = await sessionAgent.clearSession(session.agentSessionId, projectPath);
-      if (cleared) {
-        await this.sessionManager.updateAgentSessionIdBySessionId(session.id, '');
-        sessionAgent.updateSessionId(session.id, '');
-        return '✅ 已清空当前会话的对话历史';
-      } else {
-        return '❌ 清空会话失败，请稍后重试';
+      const releaseLock = this.messageQueue.acquireLock(session.id);
+      try {
+        const cleared = await sessionAgent.clearSession(session.id, session.agentSessionId, projectPath);
+        if (cleared) {
+          await this.sessionManager.updateAgentSessionIdBySessionId(session.id, '');
+          sessionAgent.updateSessionId(session.id, '');
+          return '✅ 已清空当前会话的对话历史';
+        } else {
+          return '❌ 清空会话失败，请稍后重试';
+        }
+      } finally {
+        releaseLock();
       }
     }
 
@@ -647,15 +741,20 @@ export class CommandHandler {
         ? session.projectPath
         : path.resolve(process.cwd(), session.projectPath);
 
-      if (sendMessage) {
-        await sendMessage(channelId, '⏳ 正在压缩会话上下文...', this.getReplyContext(session));
-      }
+      const releaseLock = this.messageQueue.acquireLock(session.id);
+      try {
+        if (sendMessage) {
+          await sendMessage(channelId, '⏳ 正在压缩会话上下文...', this.getReplyContext(session));
+        }
 
-      const compacted = await sessionAgent.compactSession(session.id, session.agentSessionId, projectPath);
-      if (compacted) {
-        return '✅ 会话上下文已压缩';
-      } else {
-        return '❌ 会话压缩失败，请稍后重试';
+        const compacted = await sessionAgent.compactSession(session.id, session.agentSessionId, projectPath);
+        if (compacted) {
+          return '✅ 会话上下文已压缩';
+        } else {
+          return '❌ 会话压缩失败，请稍后重试';
+        }
+      } finally {
+        releaseLock();
       }
     }
 
@@ -1232,7 +1331,7 @@ export class CommandHandler {
         : [];
       const dbSessionIds = new Set(currentProjectSessions.map(s => s.agentSessionId).filter(Boolean));
 
-      const lines = [`当前项目 ${path.basename(session.projectPath)} 的会话列表:\n`];
+      const lines = [`当前项目 ${path.basename(session.projectPath)} 的会话列表:`, ''];
 
       if (currentProjectSessions.length > 0) {
         // 超过10个会话时隐藏话题会话（/slist 只能在主会话调用，话题内已禁用）

@@ -218,7 +218,7 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
     return search(sessionsDir);
   }
 
-  async clearSession(_agentSessionId: string, _projectPath: string): Promise<boolean> {
+  async clearSession(_sessionId: string, _agentSessionId: string, _projectPath: string): Promise<boolean> {
     // Codex: 清空会话 = 下次 runQuery 不传 resumeId，自动创建新 thread
     return true;
   }

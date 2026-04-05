@@ -147,7 +147,7 @@ export interface AgentRunnerFull {
   // 会话管理（CommandHandler 需要）
   updateSessionId(sessionId: string, agentSessionId: string): void;
   closeSession(sessionId: string): Promise<void>;
-  clearSession(agentSessionId: string, projectPath: string): Promise<boolean>;
+  clearSession(sessionId: string, agentSessionId: string, projectPath: string): Promise<boolean>;
   compactSession(sessionId: string, agentSessionId: string, projectPath: string): Promise<boolean>;
 
   // 权限回调（MessageProcessor 需要）
@@ -748,13 +748,18 @@ export class AgentRunner {
     try {
       logger.info(`[AgentRunner] Compacting session: ${agentSessionId}`);
       const stream = this.runSessionCommand('/compact', agentSessionId, projectPath);
-      for await (const event of stream) {
-        if (event.type === 'system' && event.subtype === 'compact_boundary') {
-          logger.info(`[AgentRunner] Compact completed, pre_tokens: ${event.compact_metadata?.pre_tokens}`);
-          return true;
+      this.activeStreams.set(sessionId, stream);
+      try {
+        for await (const event of stream) {
+          if (event.type === 'system' && event.subtype === 'compact_boundary') {
+            logger.info(`[AgentRunner] Compact completed, pre_tokens: ${event.compact_metadata?.pre_tokens}`);
+            return true;
+          }
         }
+        return true;
+      } finally {
+        this.activeStreams.delete(sessionId);
       }
-      return true; // 正常结束也算成功
     } catch (error) {
       logger.error('[AgentRunner] Compact failed:', error);
       return false;
@@ -764,14 +769,19 @@ export class AgentRunner {
   /**
    * 通过 SDK /clear 命令清空会话历史
    */
-  async clearSession(agentSessionId: string, projectPath: string): Promise<boolean> {
+  async clearSession(sessionId: string, agentSessionId: string, projectPath: string): Promise<boolean> {
     try {
       logger.info(`[AgentRunner] Clearing session via SDK: ${agentSessionId}`);
       const stream = this.runSessionCommand('/clear', agentSessionId, projectPath);
-      for await (const event of stream) {
-        logger.debug(`[AgentRunner] Clear event: type=${event.type}, subtype=${(event as any).subtype || 'none'}`);
+      this.activeStreams.set(sessionId, stream);
+      try {
+        for await (const event of stream) {
+          logger.debug(`[AgentRunner] Clear event: type=${event.type}, subtype=${(event as any).subtype || 'none'}`);
+        }
+        return true;
+      } finally {
+        this.activeStreams.delete(sessionId);
       }
-      return true;
     } catch (error) {
       logger.error('[AgentRunner] Clear session failed:', error);
       return false;
