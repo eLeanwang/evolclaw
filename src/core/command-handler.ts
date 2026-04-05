@@ -683,6 +683,8 @@ export class CommandHandler {
       }
 
       await stopAgent.interrupt(sessionKey);
+      // 发布中断事件，让 MessageProcessor 标记为 interrupted（而非 done）
+      this.eventBus.publish({ type: 'message:interrupted', sessionId: sessionKey, reason: 'stop' });
       // 强制清除 processing_state
       this.sessionManager.clearProcessing(sessionKey);
       return '✓ 已发送中断信号，任务将尽快停止';
