@@ -62,8 +62,8 @@ export class MessageQueue {
    * 生成项目级别的队列 key
    */
   private getQueueKey(sessionKey: string, projectPath: string): string {
-    const projectName = path.basename(projectPath);
-    return `${sessionKey}::${projectName}`;
+    const normalized = projectPath ? path.resolve(projectPath) : '';
+    return `${sessionKey}::${normalized}`;
   }
 
   async enqueue(sessionKey: string, message: Message, projectPath: string, options?: { interruptible?: boolean }): Promise<void> {

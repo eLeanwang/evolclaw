@@ -647,7 +647,7 @@ export class WechatChannel {
     const projectPath = this.projectPathResolver
       ? await this.projectPathResolver(channelId)
       : process.cwd();
-    const uploadsDir = path.join(projectPath, '.claude', 'uploads');
+    const uploadsDir = path.join(projectPath, '.evolclaw', 'uploads');
     fs.mkdirSync(uploadsDir, { recursive: true });
     const savePath = path.join(uploadsDir, fileName);
     fs.writeFileSync(savePath, buf);

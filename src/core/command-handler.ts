@@ -631,13 +631,11 @@ export class CommandHandler {
       }
 
       if (!this.config.agents) this.config.agents = {};
-      if (!this.config.agents.anthropic) this.config.agents.anthropic = {};
 
+      const isCodexAgent = modelAgent.name === 'codex';
       const changes: string[] = [];
-      const updates: { model?: string; effortLevel?: string } = {};
 
       if (newModel) {
-        updates.model = newModel;
         modelAgent.setModel?.(newModel);
         this.eventBus.publish({
           type: 'agent:model-changed',
@@ -653,15 +651,27 @@ export class CommandHandler {
         if (newEffort === 'max' && !modelAfterSwitch.includes('opus')) {
           return '⚠️ max 推理强度仅 Opus 模型支持（opus / claude-opus-4-6）';
         }
-        updates.effortLevel = newEffort;
         modelAgent.setEffort?.(newEffort);
         changes.push(`推理强度: ${newEffort} ${effortBar(newEffort)}`);
       }
 
-      // 写入用户级 ~/.claude/settings.json（与 Claude CLI 行为一致）
-      const writeResult = writeUserSettings(updates);
-      if (!writeResult.success) {
-        return `⚠️ 写入用户配置失败: ${writeResult.error}\n已更新运行时配置，但未持久化到 ~/.claude/settings.json`;
+      // 持久化：Codex agent 写入 evolclaw.json，Claude agent 写入 ~/.claude/settings.json
+      if (isCodexAgent) {
+        if (!this.config.agents.openai) this.config.agents.openai = {};
+        if (newModel) this.config.agents.openai.model = newModel;
+        try {
+          saveConfig(this.config);
+        } catch (error: any) {
+          return `⚠️ 写入 evolclaw.json 失败: ${error.message}\n已更新运行时配置，但未持久化`;
+        }
+      } else {
+        const updates: { model?: string; effortLevel?: string } = {};
+        if (newModel) updates.model = newModel;
+        if (newEffort) updates.effortLevel = newEffort;
+        const writeResult = writeUserSettings(updates);
+        if (!writeResult.success) {
+          return `⚠️ 写入用户配置失败: ${writeResult.error}\n已更新运行时配置，但未持久化到 ~/.claude/settings.json`;
+        }
       }
 
       return `✓ 已切换\n  ${changes.join('\n  ')}`;

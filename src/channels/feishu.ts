@@ -729,7 +729,7 @@ export class FeishuChannel {
           return null;
         }
 
-        const uploadsDir = path.join(projectPath, '.claude', 'uploads');
+        const uploadsDir = path.join(projectPath, '.evolclaw', 'uploads');
         ensureDir(uploadsDir);
 
         const filePath = path.join(uploadsDir, fileName);

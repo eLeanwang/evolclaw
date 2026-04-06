@@ -254,7 +254,7 @@ describe('MessageQueue 项目路径检查', () => {
 
     await Promise.all([promise1, promise2]);
 
-    // path.basename 会规范化尾部斜杠，两个路径映射到同一个队列，应该触发中断
+    // path.resolve 会规范化尾部斜杠，两个路径映射到同一个队列，应该触发中断
     expect(interruptCalled).toBe(true);
   });
 

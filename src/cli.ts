@@ -3,6 +3,7 @@ import path from 'path';
 import { spawn, execFileSync, execFile } from 'child_process';
 import { promisify } from 'util';
 import { resolveRoot, resolvePaths, ensureDataDirs, getPackageRoot } from './paths.js';
+import { migrateProject } from './utils/migrate-project.js';
 import { cmdInit } from './utils/init.js';
 import { cmdInitWechat } from './utils/init-wechat.js';
 import { cmdInitFeishu } from './utils/init-feishu.js';
@@ -565,7 +566,7 @@ async function cmdRestartMonitor() {
   const p = resolvePaths();
   const restartLog = path.join(p.logs, 'restart.log');
   const MAX_HEAL_ATTEMPTS = 3;
-  const READY_TIMEOUT = 15000; // 15s
+  const READY_TIMEOUT = 30000; // 30s（AUN sidecar 10s + Feishu 连接 12s）
   const eventBus = new EventBus();
 
   const log = (msg: string) => {
@@ -926,6 +927,36 @@ async function notifyChannel(
   }
 }
 
+// ==================== Migrate ====================
+
+async function cmdMv(oldDir?: string, newDir?: string) {
+  if (!oldDir || !newDir) {
+    console.log('Usage: evolclaw mv <old_directory> <new_directory>');
+    console.log('Example: evolclaw mv ~/projects/old-name ~/projects/new-name');
+    process.exit(1);
+  }
+
+  const oldAbs = path.resolve(oldDir);
+  const newAbs = path.resolve(newDir);
+  console.log(`迁移项目: ${oldAbs} → ${newAbs}\n`);
+
+  try {
+    const r = await migrateProject(oldAbs, newAbs);
+
+    if (r.claudeSessionsMoved) console.log('✓ Claude Code 会话目录已迁移');
+    if (r.claudeHistoryUpdated) console.log('✓ Claude Code history.jsonl 已更新');
+    if (r.codexUpdated > 0) console.log(`✓ Codex 数据库已更新 (${r.codexUpdated} 个会话)`);
+    if (r.directoryMoved) console.log('✓ 项目目录已移动');
+    if (r.evolclawDbUpdated > 0) console.log(`✓ EvolClaw sessions.db 已更新 (${r.evolclawDbUpdated} 个会话)`);
+    if (r.evolclawConfigUpdated) console.log('✓ evolclaw.json projects.list 已更新');
+
+    console.log('\n迁移完成！');
+  } catch (e) {
+    console.error(`迁移失败: ${e instanceof Error ? e.message : e}`);
+    process.exit(1);
+  }
+}
+
 // ==================== Main ====================
 
 export async function main(args: string[]) {
@@ -959,8 +990,11 @@ export async function main(args: string[]) {
     case 'restart-monitor':
       await cmdRestartMonitor();
       break;
+    case 'mv':
+      await cmdMv(args[1], args[2]);
+      break;
     default:
-      console.log(`Usage: evolclaw {init|start|stop|restart|status|logs}
+      console.log(`Usage: evolclaw {init|start|stop|restart|status|logs|mv}
 
 Commands:
   init          创建配置文件 (${resolvePaths().config})
@@ -971,6 +1005,7 @@ Commands:
   restart       重启服务
   status        查看状态
   logs          查看日志 (tail -f)
+  mv <old> <new>  迁移项目目录（保留 Claude/Codex/EvolClaw 会话）
 
 Environment:
   EVOLCLAW_HOME   数据目录 (默认: ~/.evolclaw)
