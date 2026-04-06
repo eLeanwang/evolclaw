@@ -12,6 +12,7 @@ export interface Config {
       apiKey?: string;
       baseUrl?: string;
       model?: string;     // 默认 'gpt-5.2-codex'
+      reasoning?: string; // 推理强度: low / medium / high / max
     };
     defaultAgent?: string;  // 默认 'claude'
   };

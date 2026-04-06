@@ -26,8 +26,6 @@
     "@larksuiteoapi/node-sdk": "^1.59.0",
     "@openai/codex-sdk": "^0.118.0",
     "image-type": "^6.0.0",
-    "katex": "^0.16.44",
-    "mermaid": "^11.14.0",
     "qrcode-terminal": "^0.12.0"
   },
   "devDependencies": {

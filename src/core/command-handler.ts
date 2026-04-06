@@ -659,6 +659,7 @@ export class CommandHandler {
       if (isCodexAgent) {
         if (!this.config.agents.openai) this.config.agents.openai = {};
         if (newModel) this.config.agents.openai.model = newModel;
+        if (newEffort) this.config.agents.openai.reasoning = newEffort;
         try {
           saveConfig(this.config);
         } catch (error: any) {
@@ -1343,7 +1344,7 @@ export class CommandHandler {
         : [];
       const dbSessionIds = new Set(currentProjectSessions.map(s => s.agentSessionId).filter(Boolean));
 
-      const lines = [`当前项目 ${path.basename(session.projectPath)} 的会话列表:`, ''];
+      const lines = [`当前项目 ${path.basename(session.projectPath)} 的 [${session.agentId}] 会话列表:`, ''];
 
       if (currentProjectSessions.length > 0) {
         // 超过10个会话时隐藏话题会话（/slist 只能在主会话调用，话题内已禁用）

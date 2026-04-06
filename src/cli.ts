@@ -4,7 +4,7 @@ import { spawn, execFileSync, execFile } from 'child_process';
 import { promisify } from 'util';
 import { resolveRoot, resolvePaths, ensureDataDirs, getPackageRoot } from './paths.js';
 import { migrateProject } from './utils/migrate-project.js';
-import { cmdInit } from './utils/init.js';
+import { cmdInit, cmdInitAun } from './utils/init.js';
 import { cmdInitWechat } from './utils/init-wechat.js';
 import { cmdInitFeishu } from './utils/init-feishu.js';
 import * as platform from './utils/cross-platform.js';
@@ -190,7 +190,8 @@ async function cmdStart() {
 
   // 检查是否有残留进程（PID 文件已丢失但进程还在）
   let hasOrphan = false;
-  const orphanPids = platform.findProcesses('node.*dist/index.js');
+  const evolclawMain = path.join(getPackageRoot(), 'dist', 'index.js');
+  const orphanPids = platform.findProcesses(evolclawMain.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
   if (orphanPids.length > 0) {
     console.log(`⚠ 发现 ${orphanPids.length} 个残留进程，正在清理...`);
     for (const p of orphanPids) {
@@ -230,7 +231,7 @@ async function cmdStart() {
   fs.writeFileSync(p.pid, String(child.pid));
   child.unref();
 
-  // 等待 ready signal（最多 15 秒）
+  // 等待 ready signal（最多 30 秒，AUN sidecar 超时 15s + 其他通道连接）
   const startTime = Date.now();
   const checkReady = () => {
     // ready signal 出现（优先检查，避免 Windows 上 isRunning 误判）
@@ -239,6 +240,41 @@ async function cmdStart() {
       console.log(`✓ EvolClaw started successfully (PID: ${pid})`);
       console.log(`  EVOLCLAW_HOME: ${resolveRoot()}`);
       console.log(`  Logs: ${p.logs}/`);
+
+      // 从主日志提取渠道连接摘要
+      const mainLog = path.join(p.logs, 'evolclaw.log');
+      if (fs.existsSync(mainLog)) {
+        const logLines = fs.readFileSync(mainLog, 'utf-8').split('\n');
+        // 从末尾往前找最近一次启动的摘要
+        let channelSummary = '';
+        for (let i = logLines.length - 1; i >= 0; i--) {
+          if (logLines[i].includes('EvolClaw is running with')) {
+            channelSummary = logLines[i];
+            break;
+          }
+        }
+        if (channelSummary) {
+          const match = channelSummary.match(/running with .+/);
+          if (match) console.log(`  ${match[0]}`);
+        }
+        // 最近一次启动的失败信息
+        let lastReadyIdx = -1;
+        for (let i = logLines.length - 1; i >= 0; i--) {
+          if (logLines[i].includes('Ready signal written')) {
+            lastReadyIdx = i;
+            break;
+          }
+        }
+        if (lastReadyIdx > 0) {
+          for (let i = Math.max(0, lastReadyIdx - 20); i < lastReadyIdx; i++) {
+            const line = logLines[i];
+            if (line.includes('failed to connect') || line.includes('Failed to create channel')) {
+              const match = line.match(/\[WARN\]\s*(.+)/);
+              console.log(`  ⚠ ${match ? match[1] : line.trim()}`);
+            }
+          }
+        }
+      }
       console.log('');
       // 代码统计仅在开发环境显示（EVOLCLAW_HOME 指向包目录）
       if (resolveRoot() === getPackageRoot()) {
@@ -248,7 +284,7 @@ async function cmdStart() {
     }
 
     // 超时
-    if (Date.now() - startTime > 15000) {
+    if (Date.now() - startTime > 30000) {
       console.log('❌ Failed to start EvolClaw (ready signal timeout)');
       console.log('');
       console.log('📝 Error details (last 10 lines of stdout):');
@@ -503,13 +539,11 @@ async function cmdStatus() {
       }
 
       // AUN
-      const aunDomain = config.channels?.aun?.domain;
-      const aunAgent = config.channels?.aun?.agentName;
-      const isAunPlaceholder = !aunDomain || !aunAgent ||
-        aunDomain.includes('your-') || aunDomain.includes('placeholder') ||
-        aunAgent.includes('your-') || aunAgent.includes('placeholder');
-      if (aunDomain && aunAgent && !isAunPlaceholder) {
-        console.log(`  AUN: ✓ Configured (${aunAgent}@${aunDomain})`);
+      const aunAid = config.channels?.aun?.aid;
+      const isAunPlaceholder = !aunAid ||
+        aunAid.includes('your-') || aunAid.includes('placeholder');
+      if (aunAid && !isAunPlaceholder) {
+        console.log(`  AUN: ✓ Configured (${aunAid})`);
       } else {
         console.log('  AUN: - Not configured');
       }
@@ -968,6 +1002,8 @@ export async function main(args: string[]) {
         await cmdInitWechat();
       } else if (args[1] === 'feishu') {
         await cmdInitFeishu();
+      } else if (args[1] === 'aun') {
+        await cmdInitAun();
       } else {
         await cmdInit();
       }
@@ -998,8 +1034,9 @@ export async function main(args: string[]) {
 
 Commands:
   init          创建配置文件 (${resolvePaths().config})
-  init wechat   微信扫码登录并写入配置
   init feishu   飞书扫码登录并写入配置
+  init wechat   微信扫码登录并写入配置
+  init aun      AUN (AgentUnin.Network) 配置
   start         启动服务 (默认)
   stop          停止服务
   restart       重启服务

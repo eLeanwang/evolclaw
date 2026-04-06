@@ -47,6 +47,7 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
       baseUrl: resolved.baseUrl,
     });
     this.model = resolved.model;
+    if (resolved.reasoning) this.effort = resolved.reasoning as ModelReasoningEffort;
     this.onSessionIdUpdate = callbacks.onSessionIdUpdate;
   }
 

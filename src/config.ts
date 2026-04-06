@@ -100,6 +100,7 @@ export interface OpenaiResolved {
   apiKey: string;
   baseUrl?: string;
   model: string;
+  reasoning?: string;
 }
 
 export function resolveOpenaiConfig(config: Config): OpenaiResolved {
@@ -134,7 +135,9 @@ export function resolveOpenaiConfig(config: Config): OpenaiResolved {
     || codexSettings.model
     || 'gpt-5.2-codex';
 
-  return { apiKey, baseUrl, model };
+  const reasoning = config.agents?.openai?.reasoning || undefined;
+
+  return { apiKey, baseUrl, model, reasoning };
 }
 
 export function loadConfig(configPath: string = resolvePaths().config): Config {

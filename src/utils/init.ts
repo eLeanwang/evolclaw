@@ -180,42 +180,70 @@ async function checkEnvironment(rl: readline.Interface): Promise<boolean> {
     return false;
   }
 
-  // @anthropic-ai/claude-agent-sdk >= 0.2.75
-  let sdkAction: 'ok' | 'install' | 'upgrade' = 'ok';
+  // Agent SDK 检查：claude-agent-sdk / codex-sdk，至少需要一个
+  const MIN_CLAUDE_SDK = [0, 2, 75];
+  let hasClaudeSdk = false;
+  let hasCodexSdk = false;
+
+  // Check claude-agent-sdk
   try {
-    // 用 require.resolve 找到 SDK 入口，推导 package.json 路径
     const esmRequire = createRequire(import.meta.url);
     const sdkEntry = esmRequire.resolve('@anthropic-ai/claude-agent-sdk');
     const sdkPkgPath = path.join(path.dirname(sdkEntry), 'package.json');
-
     const sdkPkg = JSON.parse(fs.readFileSync(sdkPkgPath, 'utf-8'));
     const sdkVer = sdkPkg.version as string;
     const parts = sdkVer.split('.').map(Number);
-    const sdkOk = parts[0] > 0 || parts[1] > 2 || (parts[1] === 2 && parts[2] >= 75);
+    const sdkOk = parts[0] > MIN_CLAUDE_SDK[0]
+      || (parts[0] === MIN_CLAUDE_SDK[0] && parts[1] > MIN_CLAUDE_SDK[1])
+      || (parts[0] === MIN_CLAUDE_SDK[0] && parts[1] === MIN_CLAUDE_SDK[1] && parts[2] >= MIN_CLAUDE_SDK[2]);
     if (sdkOk) {
       console.log(`  ✓ claude-agent-sdk v${sdkVer}`);
+      hasClaudeSdk = true;
     } else {
-      console.log(`  ✗ claude-agent-sdk v${sdkVer} — 需要 >= 0.2.75`);
-      sdkAction = 'upgrade';
+      console.log(`  ✗ claude-agent-sdk v${sdkVer} — 需要 >= ${MIN_CLAUDE_SDK.join('.')}`);
+      const answer = (await ask(rl, '  → 是否升级 claude-agent-sdk？[Y/n] ')).trim().toLowerCase();
+      if (answer !== 'n' && answer !== 'no') {
+        console.log('  正在升级 claude-agent-sdk...');
+        try {
+          await npmInstallGlobal('@anthropic-ai/claude-agent-sdk@latest');
+          console.log('  ✓ claude-agent-sdk 升级完成');
+          hasClaudeSdk = true;
+        } catch (e: any) {
+          console.log(`  ✗ 升级失败: ${e.message?.slice(0, 200) || e}`);
+        }
+      }
     }
   } catch {
-    console.log('  ✗ claude-agent-sdk 未安装');
-    sdkAction = 'install';
+    console.log('  - claude-agent-sdk 未安装');
   }
 
-  if (sdkAction !== 'ok') {
-    const verb = sdkAction === 'install' ? '安装' : '升级';
-    const answer = (await ask(rl, `  → 是否${verb} claude-agent-sdk？[Y/n] `)).trim().toLowerCase();
+  // Check @openai/codex-sdk (ESM-only, cannot use require.resolve)
+  try {
+    const codexPkgPath = path.join(getPackageRoot(), 'node_modules', '@openai', 'codex-sdk', 'package.json');
+    if (fs.existsSync(codexPkgPath)) {
+      const codexPkg = JSON.parse(fs.readFileSync(codexPkgPath, 'utf-8'));
+      console.log(`  ✓ codex-sdk v${codexPkg.version}`);
+      hasCodexSdk = true;
+    } else {
+      console.log('  - codex-sdk 未安装');
+    }
+  } catch {
+    console.log('  - codex-sdk 未安装');
+  }
+
+  if (!hasClaudeSdk && !hasCodexSdk) {
+    console.log('\n  ✗ 需要至少安装一个 Agent SDK：claude-agent-sdk 或 codex-sdk');
+    const answer = (await ask(rl, '  → 是否安装 claude-agent-sdk？[Y/n] ')).trim().toLowerCase();
     if (answer === 'n' || answer === 'no') {
       console.log('  已取消');
       return false;
     }
-    console.log(`  正在${verb} claude-agent-sdk...`);
+    console.log('  正在安装 claude-agent-sdk...');
     try {
       await npmInstallGlobal('@anthropic-ai/claude-agent-sdk@latest');
-      console.log(`  ✓ claude-agent-sdk ${verb}完成`);
+      console.log('  ✓ claude-agent-sdk 安装完成');
     } catch (e: any) {
-      console.log(`  ✗ ${verb}失败: ${e.message?.slice(0, 200) || e}`);
+      console.log(`  ✗ 安装失败: ${e.message?.slice(0, 200) || e}`);
       return false;
     }
   }
@@ -315,6 +343,128 @@ async function initFeishuManual(rl: readline.Interface, config: any): Promise<bo
   return true;
 }
 
+// ==================== AUN Environment Check ====================
+
+async function checkAunEnvironment(rl: readline.Interface): Promise<boolean> {
+  console.log('\n🔍 AUN 环境检查...\n');
+
+  // Check python3
+  if (!commandExists('python3')) {
+    console.log('  ✗ python3 未找到');
+    console.log('  → 请先安装 Python 3: https://www.python.org/downloads/');
+    const answer = (await ask(rl, '  → 返回重新选择渠道？[Y/n] ')).trim().toLowerCase();
+    if (answer === 'n' || answer === 'no') process.exit(0);
+    return false;
+  }
+  console.log('  ✓ python3');
+
+  // Check aun_core
+  try {
+    execFileSync('python3', ['-c', 'import aun_core'], { encoding: 'utf-8', stdio: 'pipe' });
+    console.log('  ✓ aun_core');
+  } catch {
+    console.log('  - aun_core 未安装');
+    const answer = (await ask(rl, '  → 是否自动安装 aun-core？[Y/n] ')).trim().toLowerCase();
+    if (answer === 'n' || answer === 'no') {
+      const back = (await ask(rl, '  → 返回重新选择渠道？[Y/n] ')).trim().toLowerCase();
+      if (back === 'n' || back === 'no') process.exit(0);
+      return false;
+    }
+
+    console.log('  正在安装 aun-core（可能需要 1-2 分钟）...');
+    try {
+      await execFileAsync('pip3', ['install', '--user', 'aun-core'], { timeout: 120000 });
+      console.log('  ✓ aun-core 安装完成');
+    } catch (e: any) {
+      const msg = e.message || '';
+      if (e.killed || msg.includes('ETIMEDOUT') || msg.includes('timed out')) {
+        console.log('  ✗ 安装超时，网络可能较慢');
+      } else {
+        console.log(`  ✗ 安装失败: ${msg.slice(0, 200)}`);
+      }
+      console.log('  → 可手动安装: pip3 install aun-core');
+      const back = (await ask(rl, '  → 返回重新选择渠道？[Y/n] ')).trim().toLowerCase();
+      if (back === 'n' || back === 'no') process.exit(0);
+      return false;
+    }
+  }
+
+  console.log('');
+  return true;
+}
+
+// ==================== Rich Content Renderer ====================
+
+async function offerRichContentRenderer(rl: readline.Interface): Promise<void> {
+  const answer = (await ask(rl, '\n是否启用 LaTeX + Mermaid 渲染模块（约 35MB）？[y/N] ')).trim().toLowerCase();
+  if (answer !== 'y' && answer !== 'yes') return;
+
+  console.log('  正在安装 katex 和 mermaid（可能需要 1-2 分钟）...');
+  try {
+    await npmInstallGlobal('katex');
+    await npmInstallGlobal('mermaid');
+    console.log('  ✓ LaTeX + Mermaid 渲染模块安装完成');
+  } catch (e: any) {
+    const msg = e.message || '';
+    if (e.killed || msg.includes('ETIMEDOUT') || msg.includes('timed out')) {
+      console.log('  ✗ 安装超时，网络可能较慢');
+    } else {
+      console.log(`  ✗ 安装失败: ${msg.slice(0, 200)}`);
+    }
+    console.log('  → 可稍后手动安装: npm install -g katex mermaid');
+  }
+}
+
+// ==================== Init AUN (standalone) ====================
+
+export async function cmdInitAun(): Promise<void> {
+  const p = resolvePaths();
+
+  if (!fs.existsSync(p.config)) {
+    console.log('❌ 配置文件不存在，请先运行 evolclaw init');
+    return;
+  }
+
+  const config = JSON.parse(fs.readFileSync(p.config, 'utf-8'));
+
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    if (config.channels?.aun?.aid) {
+      const answer = (await ask(rl, '已有 AUN 配置，是否重新配置？[y/N] ')).trim().toLowerCase();
+      if (answer !== 'y' && answer !== 'yes') {
+        console.log('已取消');
+        return;
+      }
+    }
+
+    if (!await checkAunEnvironment(rl)) {
+      return;
+    }
+
+    let aid = '';
+    while (!aid) {
+      aid = (await ask(rl, '  AUN Agent ID (例: mybot.agentid.pub): ')).trim();
+      if (!aid) console.log('  ⚠ 不能为空');
+    }
+
+    const gatewayUrl = (await ask(rl, '  Gateway URL [留空使用默认]: ')).trim() || undefined;
+    const accessToken = (await ask(rl, '  Access Token [留空跳过]: ')).trim() || undefined;
+
+    if (!config.channels) config.channels = {};
+    config.channels.aun = {
+      enabled: true,
+      aid,
+      ...(gatewayUrl && { gatewayUrl }),
+      ...(accessToken && { accessToken }),
+    };
+
+    fs.writeFileSync(p.config, JSON.stringify(config, null, 2) + '\n');
+    console.log('\n✓ AUN 配置已写入');
+  } finally {
+    rl.close();
+  }
+}
+
 // ==================== Main ====================
 
 export async function cmdInit() {
@@ -370,56 +520,87 @@ export async function cmdInit() {
     const modelInput = (await ask(rl, '  模型 [sonnet(默认)/opus/haiku]: ')).trim().toLowerCase();
     const model = ['opus', 'haiku'].includes(modelInput) ? modelInput : 'sonnet';
 
-    // 渠道选择
-    console.log('\n选择消息渠道:');
-    console.log('  1. 飞书 (Feishu)');
-    console.log('  2. 微信 (WeChat)');
-    const channelChoice = (await ask(rl, '请选择 [1]: ')).trim() || '1';
-
+    // 渠道选择（支持退回重选）
     const config = JSON.parse(fs.readFileSync(sampleSrc, 'utf-8'));
     config.projects.defaultPath = defaultPath;
     config.projects.list = { [path.basename(defaultPath)]: defaultPath };
     config.agents.anthropic.model = model;
 
-    if (channelChoice === '1') {
-      console.log('\n飞书配置方式:');
-      console.log('  1. 扫码自动注册（推荐）');
-      console.log('  2. 手动输入 App ID/Secret');
-      const feishuMethod = (await ask(rl, '请选择 [1]: ')).trim() || '1';
+    let channelConfigured = false;
+    while (!channelConfigured) {
+      console.log('\n选择消息渠道:');
+      console.log('  1. 飞书 (Feishu)');
+      console.log('  2. 微信 (WeChat)');
+      console.log('  3. AUN (AgentUnin.Network)');
+      const channelChoice = (await ask(rl, '请选择 [1]: ')).trim() || '1';
 
-      if (feishuMethod === '1') {
-        const { runFeishuQrFlow } = await import('./init-feishu.js');
-        const result = await runFeishuQrFlow();
+      if (channelChoice === '1') {
+        console.log('\n飞书配置方式:');
+        console.log('  1. 扫码自动注册（推荐）');
+        console.log('  2. 手动输入 App ID/Secret');
+        const feishuMethod = (await ask(rl, '请选择 [1]: ')).trim() || '1';
+
+        if (feishuMethod === '1') {
+          const { runFeishuQrFlow } = await import('./init-feishu.js');
+          const result = await runFeishuQrFlow();
+          if (!result) {
+            console.log('已取消');
+            return;
+          }
+          config.channels.feishu.appId = result.appId;
+          config.channels.feishu.appSecret = result.appSecret;
+          config.channels.feishu.enabled = true;
+          if (result.openId) config.channels.feishu.owner = result.openId;
+        } else {
+          if (!await initFeishuManual(rl, config)) {
+            console.log('已取消');
+            return;
+          }
+        }
+        channelConfigured = true;
+
+      } else if (channelChoice === '2') {
+        const { runWechatQrFlow } = await import('./init-wechat.js');
+        const result = await runWechatQrFlow();
         if (!result) {
           console.log('已取消');
           return;
         }
-        config.channels.feishu.appId = result.appId;
-        config.channels.feishu.appSecret = result.appSecret;
-        config.channels.feishu.enabled = true;
-        if (result.openId) config.channels.feishu.owner = result.openId;
-      } else {
-        if (!await initFeishuManual(rl, config)) {
-          console.log('已取消');
-          return;
+        config.channels.wechat = {
+          enabled: true,
+          baseUrl: result.baseUrl,
+          token: result.token,
+        };
+        channelConfigured = true;
+
+      } else if (channelChoice === '3') {
+        const aunReady = await checkAunEnvironment(rl);
+        if (!aunReady) continue; // 退回重选渠道
+
+        let aid = '';
+        while (!aid) {
+          aid = (await ask(rl, '  AUN Agent ID (例: mybot.agentid.pub): ')).trim();
+          if (!aid) console.log('  ⚠ 不能为空');
         }
+
+        const gatewayUrl = (await ask(rl, '  Gateway URL [留空使用默认]: ')).trim() || undefined;
+        const accessToken = (await ask(rl, '  Access Token [留空跳过]: ')).trim() || undefined;
+
+        config.channels.aun = {
+          enabled: true,
+          aid,
+          ...(gatewayUrl && { gatewayUrl }),
+          ...(accessToken && { accessToken }),
+        };
+        channelConfigured = true;
+
+      } else {
+        console.log('  无效选择，请重新输入');
       }
-    } else if (channelChoice === '2') {
-      const { runWechatQrFlow } = await import('./init-wechat.js');
-      const result = await runWechatQrFlow();
-      if (!result) {
-        console.log('已取消');
-        return;
-      }
-      config.channels.wechat = {
-        enabled: true,
-        baseUrl: result.baseUrl,
-        token: result.token,
-      };
-    } else {
-      console.log('无效选择');
-      return;
     }
+
+    // 可选：富内容渲染模块
+    await offerRichContentRenderer(rl);
 
     fs.writeFileSync(p.config, JSON.stringify(config, null, 2) + '\n');
     console.log(`\n✓ 已创建配置文件: ${p.config}`);
