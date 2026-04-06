@@ -848,7 +848,9 @@ export class FeishuChannelPlugin implements ChannelPlugin {
   readonly name = 'feishu';
 
   isEnabled(config: Config): boolean {
-    return config.channels?.feishu?.enabled !== false;
+    const feishuConfig = config.channels?.feishu;
+    if (feishuConfig?.enabled === false) return false;
+    return !!(feishuConfig?.appId && feishuConfig?.appSecret);
   }
 
   async createChannel(config: Config): Promise<ChannelInstance> {

@@ -600,12 +600,25 @@ export class CommandHandler {
       if (parts.length === 1) {
         const arg = parts[0];
         if (arg === 'auto') {
-          const writeResult = writeUserSettings({ effortLevel: null });
-          if (!writeResult.success) {
-            return `⚠️ 写入用户配置失败: ${writeResult.error}\n已更新运行时配置，但未持久化到 ~/.claude/settings.json`;
+          modelAgent.setEffort?.(undefined);
+
+          // 写回来源
+          const isCodex = modelAgent.name === 'codex';
+          if (isCodex) {
+            if (this.config.agents?.openai?.reasoning) {
+              delete this.config.agents.openai.reasoning;
+              try { saveConfig(this.config); } catch {}
+            }
+          } else {
+            const configuredInEvolclaw = !!this.config.agents?.anthropic?.effort;
+            if (configuredInEvolclaw) {
+              delete (this.config.agents!.anthropic as any).effort;
+              try { saveConfig(this.config); } catch {}
+            } else {
+              writeUserSettings({ effortLevel: null });
+            }
           }
 
-          modelAgent.setEffort?.(undefined);
           return '✓ 推理强度已恢复为 auto (SDK默认)';
         }
         // 单参数：模型 或 effort
@@ -655,23 +668,50 @@ export class CommandHandler {
         changes.push(`推理强度: ${newEffort} ${effortBar(newEffort)}`);
       }
 
-      // 持久化：Codex agent 写入 evolclaw.json，Claude agent 写入 ~/.claude/settings.json
+      // 持久化：写回来源（就近原则）
+      // evolclaw.json 配了 → 写 evolclaw.json
+      // evolclaw.json 没配 → 写 agent 全局配置
       if (isCodexAgent) {
-        if (!this.config.agents.openai) this.config.agents.openai = {};
-        if (newModel) this.config.agents.openai.model = newModel;
-        if (newEffort) this.config.agents.openai.reasoning = newEffort;
-        try {
-          saveConfig(this.config);
-        } catch (error: any) {
-          return `⚠️ 写入 evolclaw.json 失败: ${error.message}\n已更新运行时配置，但未持久化`;
+        const configuredInEvolclaw = !!(this.config.agents?.openai?.model || this.config.agents?.openai?.reasoning);
+        if (configuredInEvolclaw) {
+          if (!this.config.agents!.openai) this.config.agents!.openai = {};
+          if (newModel) this.config.agents!.openai.model = newModel;
+          if (newEffort) this.config.agents!.openai.reasoning = newEffort;
+          try {
+            saveConfig(this.config);
+          } catch (error: any) {
+            return `⚠️ 写入 evolclaw.json 失败: ${error.message}\n已更新运行时配置，但未持久化`;
+          }
+        } else {
+          // Codex 全局配置（~/.codex/config.toml）目前不支持写入，回退到 evolclaw.json
+          if (!this.config.agents!.openai) this.config.agents!.openai = {};
+          if (newModel) this.config.agents!.openai.model = newModel;
+          if (newEffort) this.config.agents!.openai.reasoning = newEffort;
+          try {
+            saveConfig(this.config);
+          } catch (error: any) {
+            return `⚠️ 写入 evolclaw.json 失败: ${error.message}\n已更新运行时配置，但未持久化`;
+          }
         }
       } else {
-        const updates: { model?: string; effortLevel?: string } = {};
-        if (newModel) updates.model = newModel;
-        if (newEffort) updates.effortLevel = newEffort;
-        const writeResult = writeUserSettings(updates);
-        if (!writeResult.success) {
-          return `⚠️ 写入用户配置失败: ${writeResult.error}\n已更新运行时配置，但未持久化到 ~/.claude/settings.json`;
+        const configuredInEvolclaw = !!(this.config.agents?.anthropic?.model || this.config.agents?.anthropic?.effort);
+        if (configuredInEvolclaw) {
+          if (!this.config.agents!.anthropic) this.config.agents!.anthropic = {};
+          if (newModel) this.config.agents!.anthropic.model = newModel;
+          if (newEffort) this.config.agents!.anthropic.effort = newEffort as any;
+          try {
+            saveConfig(this.config);
+          } catch (error: any) {
+            return `⚠️ 写入 evolclaw.json 失败: ${error.message}\n已更新运行时配置，但未持久化`;
+          }
+        } else {
+          const updates: { model?: string; effortLevel?: string } = {};
+          if (newModel) updates.model = newModel;
+          if (newEffort) updates.effortLevel = newEffort;
+          const writeResult = writeUserSettings(updates);
+          if (!writeResult.success) {
+            return `⚠️ 写入用户配置失败: ${writeResult.error}\n已更新运行时配置，但未持久化到 ~/.claude/settings.json`;
+          }
         }
       }
 
