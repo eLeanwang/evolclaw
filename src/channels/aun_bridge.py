@@ -95,11 +95,11 @@ class AUNBridge:
                 return
             log(f'Auth failed ({e}), using AUN_ACCESS_TOKEN fallback')
 
-        # Connect
+        # Connect (SDK auto_reconnect handles transient failures: 5 attempts, exp backoff up to 30s)
         try:
             await self.client.connect(
                 {'access_token': access_token, 'gateway': gateway},
-                {'auto_reconnect': True}
+                {'auto_reconnect': True, 'retry': {'max_attempts': 5, 'initial_delay': 1.0, 'max_delay': 30.0}}
             )
             self.aid = self.client.aid
             emit({'event': 'ready', 'aid': self.aid or ''})
@@ -193,10 +193,23 @@ class AUNBridge:
 
     async def _on_connection_state(self, data: Any) -> None:
         """Handle connection state changes."""
-        if isinstance(data, dict) and data.get('state') == 'disconnected':
+        if not isinstance(data, dict):
+            return
+        state = data.get('state', '')
+        if state == 'disconnected':
             reason = str(data.get('error', 'unknown'))
             emit({'event': 'disconnected', 'reason': reason})
             log(f'Disconnected: {reason}')
+        elif state == 'reconnecting':
+            attempt = data.get('attempt', '?')
+            max_attempts = data.get('max_attempts', '?')
+            emit({'event': 'reconnecting', 'attempt': attempt, 'maxAttempts': max_attempts})
+            log(f'Reconnecting attempt {attempt}/{max_attempts}')
+        elif state == 'terminal_failed':
+            error = str(data.get('error', 'unknown'))
+            emit({'event': 'terminal_failed', 'reason': error})
+            log(f'Terminal failure: {error}, exiting for TS-layer restart')
+            sys.exit(1)
 
     async def _read_stdin(self) -> None:
         """Read JSON-RPC commands from stdin."""

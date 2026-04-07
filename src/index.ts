@@ -202,6 +202,7 @@ async function main() {
     // 注册 adapter、policy 和 options
     processor.registerChannel(inst.adapter, inst.policy || defaultPolicy, inst.options);
     cmdHandler.registerAdapter(inst.adapter);
+    cmdHandler.registerChannel(inst.adapter.name, inst.channel);
     if (inst.policy) {
       cmdHandler.registerPolicy(inst.adapter.name, inst.policy);
     }
@@ -225,7 +226,6 @@ async function main() {
           });
         }),
         (channelId, text, replyContext) => inst.channel.sendMessage(channelId, text, {
-          forceText: true,
           replyToMessageId: replyContext?.replyToMessageId,
           replyInThread: true,
         }),
@@ -274,6 +274,26 @@ async function main() {
       channel: name.toLowerCase(),
       timestamp: Date.now()
     });
+  }
+
+  // AUN 重连失败通知：通过其他渠道给 owner 发消息
+  for (const inst of channelInstances) {
+    if (inst.adapter.name === 'aun' && inst.channel.setOnChannelDown) {
+      inst.channel.setOnChannelDown(() => {
+        logger.error('[AUN] All reconnect attempts exhausted, notifying owners');
+        const msg = '⚠️ AUN 渠道断连，自动重试已用尽。\n使用 /check reconnect 手动重连';
+        for (const other of channelInstances) {
+          if (other.adapter.name === inst.adapter.name) continue;
+          const ownerCfg = config.channels?.[other.adapter.name as keyof typeof config.channels];
+          const ownerId = (ownerCfg as any)?.owner;
+          if (ownerId) {
+            other.adapter.sendText(ownerId, msg).catch(err => {
+              logger.error(`[AUN] Failed to notify ${other.adapter.name} owner:`, err);
+            });
+          }
+        }
+      });
+    }
   }
 
   logger.info(`\n🚀 EvolClaw is running with ${connected.length} channel(s): ${connected.join(', ')}\n`);

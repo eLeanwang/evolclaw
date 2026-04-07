@@ -6,7 +6,7 @@ import { MessageProcessor } from './message-processor.js';
 import { EventBus } from './event-bus.js';
 import { PermissionGateway } from './permission.js';
 import { MessageQueue } from './message-queue.js';
-import { saveConfig, resolvePaths, getPackageRoot } from '../config.js';
+import { saveConfig, resolvePaths, getPackageRoot, getOwner } from '../config.js';
 import { logger } from '../utils/logger.js';
 import path from 'path';
 import fs from 'fs';
@@ -101,7 +101,7 @@ function formatIdleTime(ms: number): string {
 }
 
 // 支持的命令列表
-const commands = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/agent', '/slist', '/session', '/rename', '/stop', '/clear', '/compact', '/repair', '/safe', '/fork', '/del', '/perm', '/send'];
+const commands = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/agent', '/slist', '/session', '/rename', '/stop', '/clear', '/compact', '/repair', '/safe', '/fork', '/del', '/perm', '/send', '/check'];
 
 // 命令别名映射
 const aliases: Record<string, string> = {
@@ -111,11 +111,12 @@ const aliases: Record<string, string> = {
 };
 
 // 命令快速路径前缀（所有命令都不进入消息队列）
-const quickCommandPrefixes = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/agent', '/slist', '/session', '/rename', '/repair', '/fork', '/stop', '/clear', '/compact', '/safe', '/del', '/perm', '/send', '/p ', '/s ', '/name '];
+const quickCommandPrefixes = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/agent', '/slist', '/session', '/rename', '/repair', '/fork', '/stop', '/clear', '/compact', '/safe', '/del', '/perm', '/send', '/check', '/p ', '/s ', '/name '];
 
 export class CommandHandler {
   private adapters = new Map<string, ChannelAdapter>();
   private policies = new Map<string, ChannelPolicy>();
+  private channelObjects = new Map<string, any>();  // name → actual channel instance (for /check)
   private processor!: MessageProcessor;
   private messageQueue!: MessageQueue;
   private permissionGateway?: PermissionGateway;
@@ -204,6 +205,10 @@ export class CommandHandler {
     this.adapters.set(adapter.name, adapter);
   }
 
+  registerChannel(name: string, channel: any): void {
+    this.channelObjects.set(name, channel);
+  }
+
   registerPolicy(channelName: string, policy: ChannelPolicy): void {
     this.policies.set(channelName, policy);
   }
@@ -285,7 +290,8 @@ export class CommandHandler {
           { cmd: '/restart', label: '重启服务' },
           { cmd: '/repair', label: '检查并修复会话' },
           { cmd: '/safe', label: '进入安全模式' },
-          { cmd: '/send', args: '<path>', label: '发送项目内文件' },
+          { cmd: '/send', args: '[渠道] <path>', label: '发送项目内文件' },
+          { cmd: '/check', args: '[rty <channel>]', label: '检查渠道状态或重连指定渠道' },
         ]
       });
     } else {
@@ -461,7 +467,7 @@ export class CommandHandler {
         '  /restart - 重启服务',
         '  /repair - 检查并修复会话',
         '  /safe - 进入安全模式',
-        '  /send <路径> - 发送项目内文件',
+        '  /send [渠道] <路径> - 发送项目内文件',
         '',
         '❓ 帮助：',
         '  /help - 显示此帮助信息',
@@ -898,7 +904,7 @@ export class CommandHandler {
       } else {
         lines.push(
           `📊 ${isThread ? '话题' : '会话'}状态：`,
-          `会话: ${session.name || '(未命名)'}`,
+          `渠道: ${channel} / 项目: ${projectName} / ${session.agentId}会话`,
           `状态: ${sessionStatus}`,
           `会话轮数: ${sessionTurns}`,
           `最后活跃: ${timeStr}`
@@ -959,6 +965,45 @@ export class CommandHandler {
       }
 
       return `✓ 已创建新会话${sessionName ? `: ${sessionName}` : ''}\n  之前的对话历史已保留，可通过 /slist 查看`;
+    }
+
+    // /check 命令：检查渠道状态 / 手动重连指定渠道
+    if (normalizedContent === '/check' || normalizedContent.startsWith('/check ')) {
+      if (!isAdmin) return '❌ 无权限：此命令仅限管理员使用';
+      const subCmd = normalizedContent.slice('/check'.length).trim();
+
+      // /check rty <channel> — 重连指定渠道
+      if (subCmd.startsWith('rty')) {
+        const target = subCmd.slice('rty'.length).trim();
+        if (!target) {
+          return '❌ 请指定渠道名称，例如：/check rty feishu';
+        }
+        const ch = this.channelObjects.get(target);
+        if (!ch) {
+          const available = [...this.channelObjects.keys()].join(', ') || '无';
+          return `❌ 未找到渠道 "${target}"，可用渠道：${available}`;
+        }
+        if (!ch.reconnect) {
+          return `❌ 渠道 "${target}" 不支持重连`;
+        }
+        const result = await ch.reconnect();
+        return `🔄 ${target} 重连: ${result}`;
+      }
+
+      // Default: show status of all channels
+      const lines: string[] = ['📡 渠道状态：'];
+      for (const [name] of this.adapters) {
+        const ch = this.channelObjects.get(name);
+        if (ch?.getStatus) {
+          const s = ch.getStatus();
+          const status = s.connected ? '✓ 已连接' : s.reconnectAttempt > 0 ? `⏳ 重连中 (${s.reconnectAttempt}/${s.maxAttempts})` : '✗ 断开';
+          lines.push(`  ${name}: ${status}`);
+        } else {
+          lines.push(`  ${name}: ✓ 已注册`);
+        }
+      }
+      lines.push('', '💡 /check rty <channel> — 重连指定渠道');
+      return lines.join('\n');
     }
 
     // /restart 命令：重启服务
@@ -1036,22 +1081,40 @@ export class CommandHandler {
       return `当前项目: ${session.projectPath}`;
     }
 
-    // /send 命令：发送项目内文件
+    // /send 命令：发送项目内文件，支持 /send path 和 /send channel path
     if (normalizedContent.startsWith('/send')) {
       // 飞书会将 .md 等后缀自动转为 Markdown 链接: foo.md → [foo.md](http://foo.md/)
       // 还原: 将 [text](url) 替换为 text
-      const filePath = normalizedContent.slice(5).trim().replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
-      if (!filePath) {
-        return '用法: /send <相对路径>\n示例: /send src/index.ts';
+      const rawArg = normalizedContent.slice(5).trim().replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
+      if (!rawArg) {
+        return '用法: /send <相对路径> 或 /send <渠道> <相对路径>\n示例: /send src/index.ts\n示例: /send feishu report.md';
       }
 
-      // 获取 adapter
-      const sendAdapter = this.adapters.get(channel);
-      if (!sendAdapter?.sendFile) {
-        return '❌ 当前渠道不支持文件发送';
+      // 解析目标通道：第一个 token 若匹配已注册通道名则为目标通道
+      const tokens = rawArg.split(/\s+/);
+      const knownChannels = [...this.adapters.keys()];
+      let targetChannel = channel;
+      let filePath = rawArg;
+      if (tokens.length >= 2 && knownChannels.includes(tokens[0])) {
+        targetChannel = tokens[0];
+        filePath = tokens.slice(1).join(' ');
       }
 
-      // 获取 session（需要 projectPath 和 replyContext）
+      // 跨通道仅限 owner
+      if (targetChannel !== channel && identity.role !== 'owner') {
+        return '❌ 跨通道发送仅限管理员';
+      }
+
+      // 找目标 adapter
+      const targetAdapter = this.adapters.get(targetChannel);
+      if (!targetAdapter) {
+        return `❌ 通道 ${targetChannel} 未启用或不存在`;
+      }
+      if (!targetAdapter.sendFile) {
+        return `❌ 通道 ${targetChannel} 不支持文件发送`;
+      }
+
+      // 获取 session（需要 projectPath）
       const sendResult = await this.ensureSession(channel, channelId, threadId);
       if ('error' in sendResult) return sendResult.error;
       const sendSession = sendResult.session;
@@ -1079,27 +1142,34 @@ export class CommandHandler {
       }
 
       const stat = fs.statSync(resolvedPath);
-
-      // 目录检查（一期不支持）
       if (stat.isDirectory()) {
         return '❌ 暂不支持发送目录\n目录打包发送将在后续版本支持';
       }
-
-      // 大小检查（10MB）
       const MAX_SIZE = 10 * 1024 * 1024;
       if (stat.size > MAX_SIZE) {
-        const sizeMB = (stat.size / 1024 / 1024).toFixed(1);
-        return `❌ 文件过大: ${sizeMB} MB (限制 10 MB)`;
+        return `❌ 文件过大: ${(stat.size / 1024 / 1024).toFixed(1)} MB (限制 10 MB)`;
+      }
+
+      // 找目标 channelId
+      let targetChannelId = channelId;
+      if (targetChannel !== channel) {
+        const ownerPeerId = getOwner(this.config, targetChannel);
+        targetChannelId = ownerPeerId ? (this.sessionManager.getOwnerChatId(targetChannel, ownerPeerId) ?? '') : '';
+        if (!targetChannelId) {
+          return `❌ 未找到 ${targetChannel} 的私聊会话，请先在该通道发送一条消息`;
+        }
       }
 
       // 发送文件
       try {
-        const replyCtx = this.getReplyContext(sendSession);
-        await sendAdapter.sendFile(channelId, realPath, replyCtx);
+        const replyCtx = targetChannel === channel ? this.getReplyContext(sendSession) : undefined;
+        await targetAdapter.sendFile(targetChannelId, realPath, replyCtx);
         const sizeStr = stat.size < 1024 ? `${stat.size} B`
           : stat.size < 1024 * 1024 ? `${(stat.size / 1024).toFixed(1)} KB`
           : `${(stat.size / 1024 / 1024).toFixed(1)} MB`;
-        return `✅ 已发送: ${filePath} (${sizeStr})`;
+        return targetChannel !== channel
+          ? `📎 文件已通过 ${targetChannel} 发送: ${filePath} (${sizeStr})`
+          : `✅ 已发送: ${filePath} (${sizeStr})`;
       } catch (error: any) {
         logger.error('[CommandHandler] /send failed:', error);
         return `❌ 文件发送失败: ${error.message || error}`;

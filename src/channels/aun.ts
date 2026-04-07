@@ -37,9 +37,30 @@ export class AUNChannel {
   private messageSeqMap = new Map<string, number>();  // messageId → seq (for ack)
   private sentCount = new Map<string, number>();  // channelId → 已发消息计数（用于判断最终回复）
 
+  // Reconnect state
+  private intentionalDisconnect = false;
+  private reconnectAttempt = 0;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private static readonly RECONNECT_DELAYS = [60, 120, 300, 600];  // seconds
+  private onChannelDown?: () => void;
+
   constructor(private config: AUNConfig) {}
 
   async connect(): Promise<void> {
+    this.intentionalDisconnect = false;
+    this.reconnectAttempt = 0;
+    await this.spawnSidecar();
+  }
+
+  private async spawnSidecar(): Promise<void> {
+    // Clean up existing sidecar if any
+    if (this.sidecar) {
+      this.sidecar.removeAllListeners();
+      this.sidecar.kill('SIGTERM');
+      this.sidecar = null;
+    }
+    this.connected = false;
+
     const bridgePath = path.join(getPackageRoot(), 'src', 'channels', 'aun_bridge.py');
 
     // Build env for sidecar
@@ -61,6 +82,9 @@ export class AUNChannel {
     this.sidecar.on('exit', (code) => {
       logger.warn(`[AUN] Sidecar exited with code ${code}`);
       this.connected = false;
+      if (!this.intentionalDisconnect) {
+        this.scheduleReconnect();
+      }
     });
 
     this.sidecar.on('error', (err) => {
@@ -105,13 +129,27 @@ export class AUNChannel {
     if (event.event === 'ready') {
       this.aid = event.aid;
       this.connected = true;
+      this.reconnectAttempt = 0;  // Reset on successful connection
       logger.info(`[AUN] Connected as ${this.aid}`);
+      return;
+    }
+
+    if (event.event === 'reconnecting') {
+      logger.info(`[AUN] SDK reconnecting (attempt ${event.attempt}/${event.maxAttempts})`);
       return;
     }
 
     if (event.event === 'disconnected') {
       this.connected = false;
       logger.warn(`[AUN] Disconnected: ${event.reason}`);
+      // Sidecar will handle SDK auto_reconnect; if that fails → terminal_failed → exit → our exit handler fires
+      return;
+    }
+
+    if (event.event === 'terminal_failed') {
+      this.connected = false;
+      logger.error(`[AUN] Terminal failure: ${event.reason}`);
+      // Sidecar will exit(1), our exit handler will call scheduleReconnect()
       return;
     }
 
@@ -130,6 +168,7 @@ export class AUNChannel {
     if (event.messageId) {
       if (this.seenMessages.has(event.messageId)) return;
       this.seenMessages.set(event.messageId, Date.now());
+      setTimeout(() => this.seenMessages.delete(event.messageId), 5 * 60 * 1000);
       // Track seq for acknowledge
       if (event.seq != null) {
         this.messageSeqMap.set(event.messageId, event.seq);
@@ -215,12 +254,80 @@ export class AUNChannel {
   }
 
   async disconnect(): Promise<void> {
+    this.intentionalDisconnect = true;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
     if (this.sidecar) {
+      this.sidecar.removeAllListeners();
       this.sidecar.kill('SIGTERM');
       this.sidecar = null;
     }
     this.connected = false;
     logger.info('[AUN] Disconnected');
+  }
+
+  /** Schedule a sidecar restart with exponential backoff */
+  private scheduleReconnect(): void {
+    if (this.intentionalDisconnect) return;
+    if (this.reconnectTimer) return;  // Already scheduled
+
+    const delays = AUNChannel.RECONNECT_DELAYS;
+    if (this.reconnectAttempt >= delays.length) {
+      logger.error(`[AUN] All ${delays.length} reconnect attempts exhausted, giving up`);
+      this.onChannelDown?.();
+      return;
+    }
+
+    const delay = delays[this.reconnectAttempt];
+    this.reconnectAttempt++;
+    logger.info(`[AUN] Scheduling reconnect #${this.reconnectAttempt}/${delays.length} in ${delay}s`);
+
+    this.reconnectTimer = setTimeout(async () => {
+      this.reconnectTimer = null;
+      try {
+        logger.info(`[AUN] Reconnect #${this.reconnectAttempt} starting...`);
+        await this.spawnSidecar();
+        logger.info(`[AUN] Reconnect #${this.reconnectAttempt} succeeded`);
+        // reconnectAttempt is reset in handleEvent on 'ready'
+      } catch (err) {
+        logger.error(`[AUN] Reconnect #${this.reconnectAttempt} failed:`, err);
+        this.scheduleReconnect();
+      }
+    }, delay * 1000);
+  }
+
+  /** Manually trigger reconnect (e.g. from /check reconnect command) */
+  async reconnect(): Promise<string> {
+    if (this.connected) return '已连接，无需重连';
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    this.reconnectAttempt = 0;
+    try {
+      await this.spawnSidecar();
+      return `重连成功 (${this.aid})`;
+    } catch (err) {
+      this.scheduleReconnect();
+      return `重连失败: ${err}，已安排自动重试`;
+    }
+  }
+
+  /** Set callback for when all reconnect attempts are exhausted */
+  setOnChannelDown(callback: () => void): void {
+    this.onChannelDown = callback;
+  }
+
+  /** Get current connection status */
+  getStatus(): { connected: boolean; aid?: string; reconnectAttempt: number; maxAttempts: number } {
+    return {
+      connected: this.connected,
+      aid: this.aid,
+      reconnectAttempt: this.reconnectAttempt,
+      maxAttempts: AUNChannel.RECONNECT_DELAYS.length,
+    };
   }
 }
 
@@ -281,6 +388,7 @@ export class AUNChannelPlugin implements ChannelPlugin {
 
     const options = {
       flushDelay: aunConfig.flushDelay ?? 3,
+      fileMarkerPattern: /\[SEND_FILE:(?:(\w+):)?([^\]]+)\]/g,
     };
 
     return {

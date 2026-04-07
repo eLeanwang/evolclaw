@@ -198,6 +198,7 @@ export class WechatChannel {
   private config: WechatConfig;
   private messageHandler?: WechatMessageHandler;
   private abortController?: AbortController;
+  private connected = false;
 
   // 内部状态（不外泄到核心层）
   private contextTokenCache = new Map<string, string>();
@@ -256,17 +257,36 @@ export class WechatChannel {
     this.pollLoop(this.abortController.signal).catch(err => {
       if (this.abortController?.signal.aborted) return;
       logger.error('[WeChat] Poll loop fatal error:', err);
+      this.connected = false;
     });
 
+    this.connected = true;
     logger.info('[WeChat] Channel connected');
   }
 
   async disconnect(): Promise<void> {
+    this.connected = false;
     if (this.abortController) {
       this.abortController.abort();
       this.abortController = undefined;
     }
     logger.info('[WeChat] Channel disconnected');
+  }
+
+  /** Get current connection status */
+  getStatus(): { connected: boolean } {
+    return { connected: this.connected };
+  }
+
+  /** Reconnect: disconnect then connect again */
+  async reconnect(): Promise<string> {
+    await this.disconnect();
+    try {
+      await this.connect();
+      return '重连成功';
+    } catch (err) {
+      return `重连失败: ${err instanceof Error ? err.message : String(err)}`;
+    }
   }
 
   async sendMessage(to: string, text: string): Promise<void> {
@@ -875,7 +895,7 @@ export class WechatChannelPlugin implements ChannelPlugin {
 
     const options = {
       systemPromptAppend: '[系统功能] 你可以发送文件给用户。方法：在响应中使用 [SEND_FILE:文件路径] 标记。示例：文件已准备好！[SEND_FILE:./report.txt]',
-      fileMarkerPattern: /\[SEND_FILE:([^\]]+)\]/g,
+      fileMarkerPattern: /\[SEND_FILE:(?:(\w+):)?([^\]]+)\]/g,
       flushDelay: wechatConfig.flushDelay ?? 3,  // WeChat 默认 3s
     };
 

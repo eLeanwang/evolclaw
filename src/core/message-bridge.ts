@@ -72,11 +72,13 @@ export class MessageBridge {
 
       // 3. session 解析（使用 Channel 层填充的 chatType）
       const chatType = msg.chatType || 'private';
-      const metadata = msg.replyContext ? { replyContext: msg.replyContext } : undefined;
+      const metadata: Record<string, any> = {};
+      if (msg.replyContext) metadata.replyContext = msg.replyContext;
+      if (chatType === 'private' && msg.peerId) metadata.peerId = msg.peerId;
       const session = await this.sessionManager.getOrCreateSession(
         channelName, msg.channelId,
         this.config.projects?.defaultPath || process.cwd(),
-        msg.threadId, metadata, undefined, msg.peerId, chatType
+        msg.threadId, Object.keys(metadata).length ? metadata : undefined, undefined, msg.peerId, chatType
       );
 
       // 4. 消息前缀（由 policy 决定）

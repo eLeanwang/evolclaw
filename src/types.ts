@@ -69,6 +69,7 @@ export interface Config {
 export interface SessionMetadata {
   isActive?: boolean;  // 由 Channel 维护，存储在 metadata 中
   replyContext?: ReplyContext;       // Channel 预构建的回复上下文（渠道无关）
+  peerId?: string;                  // 私聊时存发送者 ID，用于跨通道文件投递查 channelId
   agentSessions?: {
     codex?: string;
     gemini?: string;

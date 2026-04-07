@@ -10,6 +10,7 @@ import { getErrorMessage, classifyError, ErrorType } from '../utils/error-utils.
 import { EventBus } from './event-bus.js';
 import { summarizeToolInput } from '../utils/permission-utils.js';
 import type { Message, Config, Session, ChannelAdapter, ChannelOptions, ChannelPolicy, CommandHandler } from '../types.js';
+import { getOwner } from '../config.js';
 
 /**
  * 统一消息处理器
@@ -374,13 +375,24 @@ ${suggestions}`,
         : message.content;
 
       try {
+        // 动态构建跨通道文件发送提示
+        const fileChannels = [...this.channels.entries()]
+          .filter(([, info]) => info.adapter.sendFile)
+          .map(([name]) => name);
+        const crossChannels = fileChannels.filter(n => n !== message.channel);
+        const fileSendHint = fileChannels.length === 0 ? undefined
+          : crossChannels.length > 0
+            ? `发送文件: [SEND_FILE:路径] 发到当前通道，[SEND_FILE:CHANNEL:路径] 发到指定通道（可用: ${crossChannels.join('/')}）`
+            : `发送文件: [SEND_FILE:路径]`;
+        const effectiveSystemPrompt = [options?.systemPromptAppend, fileSendHint].filter(Boolean).join('\n') || undefined;
+
         const stream = await agent.runQuery(
           session.id,
           effectivePrompt,
           absoluteProjectPath,
           session.agentSessionId,
           message.images,
-          options?.systemPromptAppend,
+          effectiveSystemPrompt,
           this.sessionManager
         );
         agent.registerStream(streamKey, stream);
@@ -431,37 +443,68 @@ ${suggestions}`,
         }
       }
 
-      // 处理文件标记（Feishu 专用）- 提取并发送文件
-      if (options?.fileMarkerPattern && adapter.sendFile) {
-        const fullText = flusher.getFinalText();
-        const fileMatches = [...fullText.matchAll(options.fileMarkerPattern)];
+      // 处理文件标记 - 支持 [SEND_FILE:path] 和 [SEND_FILE:channel:path]
+      const FILE_MARKER_RE = /\[SEND_FILE:(?:(\w+):)?([^\]]+)\]/g;
+      const markerPattern = options?.fileMarkerPattern ?? FILE_MARKER_RE;
+      const fullText = flusher.getFinalText();
+      const fileMatches = [...fullText.matchAll(markerPattern)];
 
-        for (const match of fileMatches) {
-          const filePath = match[1].trim();
+      for (const match of fileMatches) {
+        // 兼容旧格式 (1组) 和新格式 (2组)
+        const hasChannelGroup = match.length >= 3;
+        const targetChannelName = hasChannelGroup ? (match[1] ?? message.channel) : message.channel;
+        const filePath = (hasChannelGroup ? match[2] : match[1]).trim();
 
-          // 占位符/示例检测：静默跳过，不打扰用户
-          if (this.isPlaceholderPath(filePath)) {
-            logger.info(`[${adapter.name}] Skipped placeholder file marker: [SEND_FILE:${filePath}]`);
+        if (this.isPlaceholderPath(filePath)) {
+          logger.info(`[${adapter.name}] Skipped placeholder file marker: [SEND_FILE:${filePath}]`);
+          continue;
+        }
+
+        // 跨通道仅限 owner
+        if (targetChannelName !== message.channel && session.identity?.role !== 'owner') {
+          await adapter.sendText(message.channelId, `\u274c 跨通道发送仅限管理员`, this.getReplyContext(session));
+          continue;
+        }
+
+        const resolvedPath = this.resolveFilePath(filePath, absoluteProjectPath);
+        if (!fs.existsSync(resolvedPath)) {
+          logger.warn(`[${adapter.name}] File not found: ${resolvedPath}`);
+          await adapter.sendText(message.channelId, `\u26a0\ufe0f 文件未找到: ${filePath}`, this.getReplyContext(session));
+          continue;
+        }
+
+        // 找目标 adapter
+        const targetInfo = this.channels.get(targetChannelName);
+        if (!targetInfo) {
+          await adapter.sendText(message.channelId, `\u274c 通道 ${targetChannelName} 未启用或不存在`, this.getReplyContext(session));
+          continue;
+        }
+        if (!targetInfo.adapter.sendFile) {
+          await adapter.sendText(message.channelId, `\u274c 通道 ${targetChannelName} 不支持文件发送`, this.getReplyContext(session));
+          continue;
+        }
+
+        // 找目标 channelId
+        let targetChannelId = message.channelId;
+        if (targetChannelName !== message.channel) {
+          const ownerPeerId = getOwner(this.config, targetChannelName);
+          targetChannelId = ownerPeerId ? (this.sessionManager.getOwnerChatId(targetChannelName, ownerPeerId) ?? '') : '';
+          if (!targetChannelId) {
+            await adapter.sendText(message.channelId, `\u274c 未找到 ${targetChannelName} 的私聊会话，请先在该通道发送一条消息`, this.getReplyContext(session));
             continue;
           }
+        }
 
-          const resolvedPath = this.resolveFilePath(filePath, absoluteProjectPath);
-
-          // 文件存在性检查：真实路径但文件不存在，告知用户
-          if (!fs.existsSync(resolvedPath)) {
-            logger.warn(`[${adapter.name}] File not found: ${resolvedPath}`);
-            await adapter.sendText(message.channelId, `\u26a0\ufe0f 文件未找到: ${filePath}`, this.getReplyContext(session));
-            continue;
+        logger.info(`[${adapter.name}] Sending file via ${targetChannelName}: ${resolvedPath}`);
+        try {
+          await targetInfo.adapter.sendFile(targetChannelId, resolvedPath, this.getReplyContext(session));
+          this.eventBus.publish({ type: 'agent:file-sent', sessionId: session.id, filePath: resolvedPath, channel: targetChannelName });
+          if (targetChannelName !== message.channel) {
+            await adapter.sendText(message.channelId, `\ud83d\udcce 文件已通过 ${targetChannelName} 发送`, this.getReplyContext(session));
           }
-
-          logger.info(`[${adapter.name}] Sending file: ${resolvedPath}`);
-          try {
-            await adapter.sendFile(message.channelId, resolvedPath, this.getReplyContext(session));
-            this.eventBus.publish({ type: 'agent:file-sent', sessionId: session.id, filePath: resolvedPath, channel: message.channel });
-          } catch (error) {
-            logger.error(`[${adapter.name}] Failed to send file: ${resolvedPath}`, error);
-            await adapter.sendText(message.channelId, `\u274c 文件发送失败: ${filePath}`, this.getReplyContext(session));
-          }
+        } catch (error) {
+          logger.error(`[${adapter.name}] Failed to send file: ${resolvedPath}`, error);
+          await adapter.sendText(message.channelId, `\u274c 文件发送失败: ${filePath}`, this.getReplyContext(session));
         }
       }
 

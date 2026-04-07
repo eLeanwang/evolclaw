@@ -749,6 +749,18 @@ export class SessionManager {
     `).run(Date.now(), channel, channelId);
   }
 
+  /** 查找 owner 在目标通道的私聊 channelId（用于跨通道文件投递） */
+  getOwnerChatId(targetChannel: string, ownerPeerId: string): string | undefined {
+    const row = this.db.prepare(`
+      SELECT channel_id FROM sessions
+      WHERE channel = ? AND chat_type = 'private'
+        AND json_extract(metadata, '$.peerId') = ?
+        AND deleted_at IS NULL
+      ORDER BY updated_at DESC LIMIT 1
+    `).get(targetChannel, ownerPeerId) as any;
+    return row?.channel_id;
+  }
+
   async getActiveSession(channel: string, channelId: string): Promise<Session | undefined> {
     const row = this.db.prepare(`
       SELECT * FROM sessions

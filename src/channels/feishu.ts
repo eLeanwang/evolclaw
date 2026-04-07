@@ -42,6 +42,7 @@ export class FeishuChannel {
   private seenThreads = new Set<string>();  // 已见的 thread_id，用于判断话题创建消息
   private userNameCache = new Map<string, string>();  // userId -> userName
   private recallHandler?: (messageId: string) => void;
+  private connected = false;
 
   constructor(private config: FeishuConfig) {
   }
@@ -314,6 +315,7 @@ export class FeishuChannel {
       });
 
       await this.wsClient.start({ eventDispatcher });
+      this.connected = true;
       this.startCleanupTask();
     } catch (error) {
       if (error instanceof Error) {
@@ -613,6 +615,7 @@ export class FeishuChannel {
   }
 
   async disconnect(): Promise<void> {
+    this.connected = false;
     if (this.cleanupInterval) {
       clearInterval(this.cleanupInterval);
       this.cleanupInterval = undefined;
@@ -622,6 +625,24 @@ export class FeishuChannel {
       this.wsClient = null;
     }
     this.client = null;
+  }
+
+  /** Get current connection status */
+  getStatus(): { connected: boolean } {
+    return { connected: this.connected };
+  }
+
+  /** Reconnect: disconnect then connect again */
+  async reconnect(): Promise<string> {
+    if (this.connected) {
+      await this.disconnect();
+    }
+    try {
+      await this.connect();
+      return '重连成功';
+    } catch (err) {
+      return `重连失败: ${err instanceof Error ? err.message : String(err)}`;
+    }
   }
 
   private async downloadAndSaveImage(imageKey: string, chatId: string, messageId: string, projectPath: string): Promise<{ data: string; mimeType: string } | null> {
@@ -898,7 +919,7 @@ export class FeishuChannelPlugin implements ChannelPlugin {
 
     const options = {
       systemPromptAppend: '[重要系统功能] 你可以通过飞书发送文件给用户。方法：在响应中使用 [SEND_FILE:文件路径] 标记。示例：文件已准备好！[SEND_FILE:./report.txt] 路径支持相对路径（相对项目目录）或绝对路径。系统会自动上传并发送。',
-      fileMarkerPattern: /\[SEND_FILE:([^\]]+)\]/g,
+      fileMarkerPattern: /\[SEND_FILE:(?:(\w+):)?([^\]]+)\]/g,
       supportsImages: true,
       flushDelay: feishuConfig.flushDelay,
     };
