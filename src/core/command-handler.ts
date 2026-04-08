@@ -913,8 +913,14 @@ export class CommandHandler {
           `项目路径: ${session.projectPath}`,
           `会话状态: ${sessionStatus}`,
           `会话轮数: ${sessionTurns}`,
-          `异常计数: ${health.consecutiveErrors}`,
-          `安全模式: ${health.safeMode ? '是 ⚠️' : '否 ✓'}`,
+        );
+        if (health.consecutiveErrors > 0) {
+          lines.push(`异常计数: ${health.consecutiveErrors}`);
+        }
+        if (health.safeMode) {
+          lines.push(`安全模式: 是 ⚠️`);
+        }
+        lines.push(
           `最后成功: ${timeStr}`,
           `${session.agentId}会话: ${session.agentSessionId || '(未初始化)'}`,
           `创建时间: ${new Date(session.createdAt).toLocaleString('zh-CN')}`,
