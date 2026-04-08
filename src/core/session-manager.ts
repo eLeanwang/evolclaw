@@ -412,16 +412,17 @@ export class SessionManager {
    * 标记会话为处理中（实时写 DB，crash 也能恢复）
    */
   markProcessing(sessionId: string): void {
-    this.db.prepare(`UPDATE sessions SET processing_state = ? WHERE id = ?`)
-      .run(String(Date.now()), sessionId);
+    const now = Date.now();
+    this.db.prepare(`UPDATE sessions SET processing_state = ?, updated_at = ? WHERE id = ?`)
+      .run(String(now), now, sessionId);
   }
 
   /**
    * 清除会话处理中状态
    */
   clearProcessing(sessionId: string): void {
-    this.db.prepare(`UPDATE sessions SET processing_state = NULL WHERE id = ?`)
-      .run(sessionId);
+    this.db.prepare(`UPDATE sessions SET processing_state = NULL, updated_at = ? WHERE id = ?`)
+      .run(Date.now(), sessionId);
   }
 
   /**
@@ -800,6 +801,8 @@ export class SessionManager {
     const row = this.db.prepare(`
       SELECT * FROM sessions
       WHERE channel = ? AND channel_id = ? AND project_path = ? AND deleted_at IS NULL
+      ORDER BY processing_state IS NOT NULL DESC, updated_at DESC
+      LIMIT 1
     `).get(channel, channelId, projectPath) as any;
 
     if (!row) return undefined;
@@ -1066,6 +1069,12 @@ export class SessionManager {
       safeMode: row.safe_mode === 1,
       lastSuccessTime: row.last_success_time
     };
+  }
+
+  /** 当前处于安全模式的会话数 */
+  getSafeModeSessionCount(): number {
+    const row = this.db.prepare(`SELECT COUNT(*) as count FROM session_health WHERE safe_mode = 1`).get() as any;
+    return row?.count ?? 0;
   }
 
   /**

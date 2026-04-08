@@ -301,6 +301,8 @@ export async function cmdInitFeishu(): Promise<void> {
     delete config.channels.feishu.owner;
   }
 
+  if (!config.channels.defaultChannel) config.channels.defaultChannel = 'feishu';
+
   fs.writeFileSync(p.config, JSON.stringify(config, null, 2) + '\n');
 
   console.log(`\n✅ 飞书连接成功！`);

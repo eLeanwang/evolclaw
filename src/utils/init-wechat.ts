@@ -185,6 +185,7 @@ export async function cmdInitWechat(): Promise<void> {
           baseUrl: status.baseurl || DEFAULT_BASE_URL,
           token: status.bot_token,
         };
+        if (!config.channels.defaultChannel) config.channels.defaultChannel = 'wechat';
 
         fs.writeFileSync(p.config, JSON.stringify(config, null, 2) + '\n');
 

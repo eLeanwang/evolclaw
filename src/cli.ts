@@ -3,6 +3,7 @@ import path from 'path';
 import { spawn, execFileSync, execFile } from 'child_process';
 import { promisify } from 'util';
 import { resolveRoot, resolvePaths, ensureDataDirs, getPackageRoot } from './paths.js';
+import { loadConfig, validateConfigIntegrity } from './config.js';
 import { migrateProject } from './utils/migrate-project.js';
 import { cmdInit, cmdInitAun } from './utils/init.js';
 import { cmdInitWechat } from './utils/init-wechat.js';
@@ -177,6 +178,23 @@ async function cmdStart() {
   // 检查配置文件
   if (!fs.existsSync(p.config)) {
     console.log('❌ 配置文件不存在，请先运行 evolclaw init');
+    process.exit(1);
+  }
+
+  // 配置完整性校验
+  try {
+    const config = loadConfig(p.config);
+    const integrity = validateConfigIntegrity(config);
+    if (!integrity.valid) {
+      console.log(`❌ 配置文件完整性校验失败:`);
+      for (const reason of integrity.reasons) {
+        console.log(`  - ${reason}`);
+      }
+      console.log(`\n配置文件: ${p.config}`);
+      process.exit(1);
+    }
+  } catch (e: any) {
+    console.log(`❌ 配置文件加载失败: ${e.message}`);
     process.exit(1);
   }
 

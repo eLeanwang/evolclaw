@@ -12,6 +12,7 @@
     "defaultAgent": "claude"
   },
   "channels": {
+    "defaultChannel": "feishu",
     "feishu": {
       "enabled": true,
       "appId": "",

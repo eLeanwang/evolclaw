@@ -1,6 +1,6 @@
 import { ClaudeSessionFileAdapter } from './core/adapters/claude-session-file-adapter.js';
 import { CodexSessionFileAdapter } from './core/adapters/codex-session-file-adapter.js';
-import { loadConfig, ensureDataDirs, resolvePaths, resolveAnthropicConfig, isOwner } from './config.js';
+import { loadConfig, ensureDataDirs, resolvePaths, resolveAnthropicConfig, isOwner, validateConfigIntegrity } from './config.js';
 import { SessionManager } from './core/session-manager.js';
 import { ClaudeAgentPlugin } from './agents/claude-runner.js';
 import { CodexAgentPlugin } from './agents/codex-runner.js';
@@ -13,6 +13,7 @@ import { MessageBridge } from './core/message-bridge.js';
 import { MessageCache } from './utils/message-cache.js';
 import { CommandHandler } from './core/command-handler.js';
 import { EventBus } from './core/event-bus.js';
+import { StatsCollector } from './core/stats-collector.js';
 import { PermissionGateway } from './core/permission.js';
 import { ChannelLoader } from './core/channel-loader.js';
 import { AgentLoader } from './core/agent-loader.js';
@@ -48,6 +49,14 @@ async function main() {
 
   // 加载配置
   const config = loadConfig();
+
+  // 配置完整性校验
+  const integrity = validateConfigIntegrity(config);
+  if (!integrity.valid) {
+    logger.error(`❌ Config integrity check failed:\n  ${integrity.reasons.join('\n  ')}`);
+    process.exit(1);
+  }
+
   const anthropic = resolveAnthropicConfig(config);
   logger.info('✓ Config loaded (API keys hidden)');
 
@@ -58,6 +67,9 @@ async function main() {
   // 创建事件总线
   const eventBus = new EventBus();
   logger.info('✓ Event bus initialized');
+
+  // 统计收集器（近 1 小时滚动统计）
+  const statsCollector = new StatsCollector(eventBus);
 
   // 初始化数据库（带 ownerResolver）
   const sessionManager = new SessionManager(undefined, eventBus, (channel, userId) => {
@@ -121,6 +133,7 @@ async function main() {
   // 创建命令处理器
   const cmdHandler = new CommandHandler(sessionManager, agentMap, config, messageCache, eventBus, defaultAgent);
   cmdHandler.setPermissionGateway(permissionGateway);
+  cmdHandler.setStatsCollector(statsCollector);
 
   // 创建消息处理器
   const processor = new MessageProcessor(
@@ -234,6 +247,24 @@ async function main() {
       inst.channel.onRecall?.((messageId: string) => {
         msgBridge.cancel(messageId);
       });
+    }
+
+    if (inst.adapter.name === 'wechat') {
+      msgBridge.register('wechat',
+        (handler) => inst.channel.onMessage(async (channelId: string, content: string, peerId?: string,
+          images?: Array<{ data: string; mimeType: string }>, chatType?: 'private' | 'group') => {
+          handler({
+            channel: 'wechat',
+            channelId,
+            content,
+            images,
+            chatType: chatType || 'private',
+            peerId: peerId || '',
+          });
+        }),
+        (channelId, text) => inst.channel.sendMessage(channelId, text),
+        inst.adapter
+      );
     }
 
     if (inst.adapter.name === 'aun') {
@@ -359,9 +390,37 @@ async function main() {
   fs.writeFileSync(readySignalPath, String(Date.now()));
   logger.info(`✓ Ready signal written: ${readySignalPath}`);
 
+  // 运行时配置文件监控
+  const configPath = resolvePaths().config;
+  fs.watchFile(configPath, { interval: 5000 }, (_curr, _prev) => {
+    let newConfig;
+    try {
+      newConfig = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    } catch {
+      // JSON 解析失败 → 视为坏文件，备份内存中的好副本
+      const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      const backupPath = path.join(resolvePaths().dataDir, `evolclaw-${ts}.json`);
+      fs.writeFileSync(backupPath, JSON.stringify(config, null, 2));
+      logger.warn(`[Config Watch] Config file is not valid JSON. In-memory snapshot saved to ${backupPath}`);
+      eventBus.publish({ type: 'config:corrupted', backupPath, reasons: ['Invalid JSON'] });
+      return;
+    }
+    const result = validateConfigIntegrity(newConfig);
+    if (!result.valid) {
+      const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      const backupPath = path.join(resolvePaths().dataDir, `evolclaw-${ts}.json`);
+      fs.writeFileSync(backupPath, JSON.stringify(config, null, 2));
+      logger.warn(`[Config Watch] Bad config write detected. Reasons: ${result.reasons.join('; ')}. In-memory snapshot saved to ${backupPath}`);
+      eventBus.publish({ type: 'config:corrupted', backupPath, reasons: result.reasons });
+    } else {
+      logger.debug(`[Config Watch] Config file modified, passes integrity check`);
+    }
+  });
+
   // 优雅关闭
   const shutdown = async () => {
     logger.info('\n\nShutting down gracefully...');
+    fs.unwatchFile(configPath);
     eventBus.publish({
       type: 'system:shutdown',
       timestamp: Date.now()

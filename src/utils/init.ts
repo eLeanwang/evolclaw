@@ -457,6 +457,7 @@ export async function cmdInitAun(): Promise<void> {
       ...(gatewayUrl && { gatewayUrl }),
       ...(accessToken && { accessToken }),
     };
+    if (!config.channels.defaultChannel) config.channels.defaultChannel = 'aun';
 
     fs.writeFileSync(p.config, JSON.stringify(config, null, 2) + '\n');
     console.log('\n✓ AUN 配置已写入');
@@ -558,6 +559,7 @@ export async function cmdInit() {
           }
         }
         channelConfigured = true;
+        config.channels.defaultChannel = 'feishu';
 
       } else if (channelChoice === '2') {
         const { runWechatQrFlow } = await import('./init-wechat.js');
@@ -572,6 +574,7 @@ export async function cmdInit() {
           token: result.token,
         };
         channelConfigured = true;
+        config.channels.defaultChannel = 'wechat';
 
       } else if (channelChoice === '3') {
         const aunReady = await checkAunEnvironment(rl);
@@ -593,6 +596,7 @@ export async function cmdInit() {
           ...(accessToken && { accessToken }),
         };
         channelConfigured = true;
+        config.channels.defaultChannel = 'aun';
 
       } else {
         console.log('  无效选择，请重新输入');

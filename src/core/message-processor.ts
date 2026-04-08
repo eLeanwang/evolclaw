@@ -154,8 +154,9 @@ export class MessageProcessor {
           if (result.action === 'kill') {
             logger.warn(`[MessageProcessor] Idle monitor: kill after ${result.idleSec}s idle, stream: ${streamKey}`);
             this.eventBus.publish({ type: 'agent:idle-timeout', sessionId: streamKey, idleSec: result.idleSec });
-            // 先发送诊断信息，让用户知道发生了什么
-            if (channelInfo) {
+            // 后台任务也需要中断（释放资源），但不发送通知
+            const isBg = await this.isBackgroundSession(session, message.channel, message.channelId);
+            if (channelInfo && !isBg) {
               try {
                 const msg = showIdleMonitor
                   ? result.message
@@ -176,10 +177,13 @@ export class MessageProcessor {
             // notify or warn: send diagnostic message, task continues
             logger.info(`[MessageProcessor] Idle monitor: ${result.action} after ${result.idleSec}s idle, stream: ${streamKey}`);
             if (channelInfo && showIdleMonitor && !shouldSuppress()) {
-              try {
-                await channelInfo.adapter.sendText(message.channelId, result.message);
-              } catch (e) {
-                logger.debug(`[MessageProcessor] Failed to send idle monitor message:`, e);
+              const isBg = await this.isBackgroundSession(session, message.channel, message.channelId);
+              if (!isBg) {
+                try {
+                  await channelInfo.adapter.sendText(message.channelId, result.message);
+                } catch (e) {
+                  logger.debug(`[MessageProcessor] Failed to send idle monitor message:`, e);
+                }
               }
             }
           }
@@ -382,7 +386,7 @@ ${suggestions}`,
         const crossChannels = fileChannels.filter(n => n !== message.channel);
         const fileSendHint = fileChannels.length === 0 ? undefined
           : crossChannels.length > 0
-            ? `发送文件: [SEND_FILE:路径] 发到当前通道，[SEND_FILE:CHANNEL:路径] 发到指定通道（可用: ${crossChannels.join('/')}）`
+            ? `发送文件: [SEND_FILE:路径] 发到当前通道（${message.channel}），[SEND_FILE:${crossChannels[0]}:路径] 发到其他通道（可用: ${crossChannels.join('/')}）`
             : `发送文件: [SEND_FILE:路径]`;
         const effectiveSystemPrompt = [options?.systemPromptAppend, fileSendHint].filter(Boolean).join('\n') || undefined;
 

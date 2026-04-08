@@ -17,6 +17,7 @@ export interface Config {
     defaultAgent?: string;  // 默认 'claude'
   };
   channels?: {
+    defaultChannel?: string;  // 默认渠道，完整性校验锚点
     feishu?: {
       enabled?: boolean;
       appId: string;

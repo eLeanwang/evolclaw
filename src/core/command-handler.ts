@@ -4,6 +4,7 @@ import { type AgentRunnerFull, hasModelSwitcher, hasPermissionController } from 
 import { MessageCache } from '../utils/message-cache.js';
 import { MessageProcessor } from './message-processor.js';
 import { EventBus } from './event-bus.js';
+import type { StatsCollector } from './stats-collector.js';
 import { PermissionGateway } from './permission.js';
 import { MessageQueue } from './message-queue.js';
 import { saveConfig, resolvePaths, getPackageRoot, getOwner } from '../config.js';
@@ -120,6 +121,7 @@ export class CommandHandler {
   private processor!: MessageProcessor;
   private messageQueue!: MessageQueue;
   private permissionGateway?: PermissionGateway;
+  private statsCollector?: StatsCollector;
   private agentMap: Map<string, AgentRunnerFull>;
   private defaultAgentId: string;
 
@@ -161,6 +163,19 @@ export class CommandHandler {
     return this.getConfiguredProjectName(projectPath) || path.basename(projectPath);
   }
 
+  /** 格式化运行时间 */
+  private formatUptime(ms: number): string {
+    const sec = Math.floor(ms / 1000);
+    const d = Math.floor(sec / 86400);
+    const h = Math.floor((sec % 86400) / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    const parts: string[] = [];
+    if (d > 0) parts.push(`${d}天`);
+    if (h > 0) parts.push(`${h}时`);
+    parts.push(`${m}分`);
+    return parts.join('');
+  }
+
   /** 获取消息队列 key：话题用 session.id，主会话用 channel-channelId */
   private getQueueKey(session: Session | undefined, _channel: string, _channelId: string): string {
     // 队列和 agent 均使用 session.id 作为 key
@@ -199,6 +214,10 @@ export class CommandHandler {
 
   setPermissionGateway(gateway: PermissionGateway): void {
     this.permissionGateway = gateway;
+  }
+
+  setStatsCollector(collector: StatsCollector): void {
+    this.statsCollector = collector;
   }
 
   registerAdapter(adapter: ChannelAdapter): void {
@@ -825,11 +844,14 @@ export class CommandHandler {
       session = await this.sessionManager.getActiveSession(channel, channelId);
     }
 
-    // 对于需要创建会话的命令，如果没有会话则创建
+    // 对于需要会话的命令，如果没有会话则使用默认项目创建临时会话
+    // 这样 /pwd、/status 等命令可以在没有活跃会话时返回默认项目信息
     if (!session && (
       normalizedContent.startsWith('/new') ||
       normalizedContent.startsWith('/bind') ||
-      normalizedContent.startsWith('/project')
+      normalizedContent.startsWith('/project') ||
+      normalizedContent === '/pwd' ||
+      normalizedContent === '/status'
     )) {
       session = await this.sessionManager.getOrCreateSession(
         channel,
@@ -840,12 +862,9 @@ export class CommandHandler {
 
     // /status 命令：显示会话状态
     if (normalizedContent === '/status') {
+      // session 现在总是存在（上面已自动创建）
       if (!session) {
-        return `📊 会话状态：
-
-❌ 当前未创建会话
-
-提示：发送任意消息或使用 /new 命令创建会话`;
+        return `❌ 无法创建会话，请检查配置`;
       }
 
       const sessionKey = this.getQueueKey(session, channel, channelId);
@@ -990,7 +1009,7 @@ export class CommandHandler {
         return `🔄 ${target} 重连: ${result}`;
       }
 
-      // Default: show status of all channels
+      // Default: show full system health check
       const lines: string[] = ['📡 渠道状态：'];
       for (const [name] of this.adapters) {
         const ch = this.channelObjects.get(name);
@@ -1002,6 +1021,40 @@ export class CommandHandler {
           lines.push(`  ${name}: ✓ 已注册`);
         }
       }
+
+      // 队列状态
+      lines.push('', '📬 队列状态：');
+      lines.push(`  待处理消息: ${this.messageQueue.getGlobalQueueLength()}`);
+      lines.push(`  处理中队列: ${this.messageQueue.getGlobalProcessingCount()}`);
+
+      // 运行概况
+      lines.push('', '🖥️ 运行概况：');
+      const uptimeMs = this.statsCollector
+        ? this.statsCollector.getSnapshot().uptimeMs
+        : process.uptime() * 1000;
+      lines.push(`  运行时间: ${this.formatUptime(uptimeMs)}`);
+      lines.push(`  当前安全模式会话: ${this.sessionManager.getSafeModeSessionCount()}`);
+
+      // 近 1 小时统计
+      if (this.statsCollector) {
+        const snap = this.statsCollector.getSnapshot();
+        const h = snap.lastHour;
+        lines.push('', '📊 近 1 小时统计：');
+        lines.push(`  收到消息: ${h.received}`);
+        lines.push(`  完成处理: ${h.completed}`);
+        if (h.errors > 0) {
+          const breakdown = Object.entries(h.errorsByType).map(([t, c]) => `${t}: ${c}`).join(', ');
+          lines.push(`  处理出错: ${h.errors} (${breakdown})`);
+        } else {
+          lines.push(`  处理出错: 0`);
+        }
+        lines.push(`  被中断: ${h.interrupts}`);
+        lines.push(`  进入安全模式: ${h.safeModeEntries}`);
+        if (h.completed > 0) {
+          lines.push(`  平均响应耗时: ${(h.avgResponseMs / 1000).toFixed(1)}s`);
+        }
+      }
+
       lines.push('', '💡 /check rty <channel> — 重连指定渠道');
       return lines.join('\n');
     }
@@ -1068,10 +1121,9 @@ export class CommandHandler {
 
     // /pwd 命令：显示当前项目路径
     if (normalizedContent === '/pwd') {
+      // session 现在总是存在（上面已自动创建）
       if (!session) {
-        return `❌ 当前没有活跃会话
-
-提示：发送任意消息或使用 /new 命令创建会话`;
+        return `❌ 无法创建会话，请检查配置`;
       }
 
       const configName = this.getConfiguredProjectName(session.projectPath);

@@ -257,4 +257,22 @@ export class MessageQueue {
     }
     return undefined;
   }
+
+  /**
+   * 获取全局队列长度（所有会话的待处理消息总数）
+   */
+  getGlobalQueueLength(): number {
+    let total = 0;
+    for (const queue of this.queues.values()) {
+      total += queue.length;
+    }
+    return total;
+  }
+
+  /**
+   * 获取全局处理中队列数量
+   */
+  getGlobalProcessingCount(): number {
+    return this.processing.size;
+  }
 }

@@ -209,3 +209,42 @@ export function ensureDir(dirPath: string): void {
     fs.mkdirSync(dirPath, { recursive: true });
   }
 }
+
+// agents.defaultAgent → config key 映射
+const agentKeyMap: Record<string, string> = { claude: 'anthropic', codex: 'openai' };
+
+/**
+ * 配置结构完整性校验（不校验凭据有效性）。
+ * 要求 agents/channels/projects 三段同时具备必要的锚点字段。
+ */
+export function validateConfigIntegrity(config: any): { valid: boolean; reasons: string[] } {
+  const reasons: string[] = [];
+
+  // agents
+  const defaultAgent = config.agents?.defaultAgent;
+  if (!defaultAgent) {
+    reasons.push('Missing agents.defaultAgent');
+  } else {
+    const key = agentKeyMap[defaultAgent] || defaultAgent;
+    if (!config.agents?.[key]) {
+      reasons.push(`agents.defaultAgent='${defaultAgent}' but agents.${key} does not exist`);
+    }
+  }
+
+  // channels
+  const defaultChannel = config.channels?.defaultChannel;
+  if (!defaultChannel) {
+    reasons.push('Missing channels.defaultChannel');
+  } else {
+    if (!config.channels?.[defaultChannel]) {
+      reasons.push(`channels.defaultChannel='${defaultChannel}' but channels.${defaultChannel} does not exist`);
+    }
+  }
+
+  // projects
+  if (!config.projects?.defaultPath) {
+    reasons.push('Missing projects.defaultPath');
+  }
+
+  return { valid: reasons.length === 0, reasons };
+}
