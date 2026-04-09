@@ -1,5 +1,0 @@
-include LICENSE
-include README.md
-include src/aun_core/py.typed
-recursive-include src/aun_core/certs *.crt
-recursive-include src/aun_core/docs *.md *.py

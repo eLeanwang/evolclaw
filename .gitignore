@@ -19,6 +19,8 @@ data/wechat-*.txt
 data/wechat-*.json
 data/evolclaw-*.json
 data/evolclaw.backup.json
+data/evolclaw.json.bak
+data/evolclaw.json.test-backup
 data/*.pid
 
 # Node.js
@@ -78,8 +80,13 @@ OrgMind*.html
 space-elevator-analysis.md
 architecture-flowchart.md
 
-# AUN CLI 凭据（含私钥）
+# AUN 辅助目录 / 示例 / 演示 / 外部 SDK
 aun-cli/
+aun/aun-sdk-core/
+aun/examples/
+aun/presentations/
+aun/docs/
+src/channels/aun_bridge.py
 
 # macOS 残留
 __MACOSX/
