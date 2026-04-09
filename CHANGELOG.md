@@ -1,5 +1,42 @@
 # Changelog
 
+## v2.2.0 (2026-04-09)
+
+### New Features
+
+- **Multi-agent backend** — Claude + Codex dual-agent support with adapter pattern, per-session agent routing
+- **AUN channel** — full sidecar-based AUN mesh network channel with auto-reconnect, health monitoring, and `evolclaw init aun` setup wizard
+- **Rich content rendering** — LaTeX formula (KaTeX) and Mermaid diagram rendering to PNG images
+- **`/check` dashboard** — config integrity validation, stats collector, system health at a glance
+- **`/send` command** — cross-channel file send with `[SEND_FILE:]` marker
+- **Message recall** — recall/unsend support with FIFO greedy merge
+- **Feishu image extraction** — extract images from rich-text (post) messages and pass to Agent
+- **Processing status & menu system** — visual processing indicators, interactive menu for commands
+- **Project migration** — `evolclaw migrate` command for upgrading project structures
+- **IPC status server** — Unix socket daemon status query from CLI
+
+### Improvements
+
+- **Plugin architecture** — agents and channels loaded via plugin system
+- **Event bus** — decoupled internal event routing
+- **Permission gateway** — tiered permission enforcement refactored as middleware
+- **Outbound architecture** — optimized message stream with StreamFlusher per-channel `flushDelay`
+- **Group chat FIFO queue** — debounce ceiling and command idle check for group scenarios
+- **Persistent processing state** — restart recovery for in-flight messages
+- **AUN SDK core** — multi-language reference implementation (Go/JS/Python/TS) added to repository
+
+### Bug Fixes
+
+- **`/status` output** — cleaner display, backfill peerId for legacy private sessions
+- **`/stop` interrupt** — publish interrupt event correctly on `/stop` command
+- **Feishu isEnabled** — require credentials before marking channel enabled
+- **`/model` write-back** — persist model changes to correct config source
+- **Thread message leak** — prevent thread messages from leaking to Agent SDK after restart
+- **Session agentId** — preserve agentId when creating new sessions
+- **Test compatibility** — skip rich-content-renderer tests when optional deps not installed
+
+---
+
 ## v2.1.1 (2026-03-30)
 
 ### New Features

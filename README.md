@@ -35,7 +35,7 @@ EvolClaw 是一个轻量级 AI Agent 网关，基于 Claude Agent SDK 构建。�
 
 ### 核心组件
 
-1. **消息渠道层** (`src/channels/`) - Feishu WebSocket + WeChat HTTP 长轮询
+1. **消息渠道层** (`src/channels/`) - Feishu WebSocket + WeChat HTTP 长轮询 + AUN Mesh 网络
 2. **消息队列层** (`src/core/message-queue.ts`) - 会话级串行处理 + 中断支持
 3. **命令处理层** (`src/core/command-handler.ts`) - 斜杠命令处理（CommandHandler 类）
 4. **消息处理层** (`src/core/message-processor.ts`) - 统一事件处理引擎
@@ -106,6 +106,9 @@ evolclaw init feishu
 
 # 单独配置微信（扫码登录）
 evolclaw init wechat
+
+# 单独配置 AUN（Mesh 网络通道）
+evolclaw init aun
 ```
 
 交互式引导完成以下配置：
@@ -173,7 +176,8 @@ evolclaw/
 │   │   └── message-cache.ts         # 消息缓存
 │   ├── channels/
 │   │   ├── feishu.ts               # 飞书 WebSocket 渠道
-│   │   └── wechat.ts               # 微信 ClawBot 渠道
+│   │   ├── wechat.ts               # 微信 ClawBot 渠道
+│   │   └── aun.ts                  # AUN Mesh 网络渠道
 │   ├── utils/                      # 工具函数
 │   ├── types.ts                    # 类型定义
 │   ├── config.ts                   # 配置加载
@@ -209,6 +213,8 @@ evolclaw/
 - `/clear` - 清空对话历史
 - `/compact` - 压缩会话上下文
 - `/stop` - 中断当前任务
+- `/send <文件路径>` - 发送文件给用户
+- `/check` - 系统健康检查面板
 - `/restart` - 重启服务（自愈机制）
 - `/repair` - 检查并修复会话
 - `/safe` - 进入安全模式
@@ -224,7 +230,7 @@ evolclaw/
 
 - **运行时**：Node.js >= 22 + TypeScript（ES modules）
 - **AI SDK**：@anthropic-ai/claude-agent-sdk >= 0.2.75
-- **消息渠道**：飞书（@larksuiteoapi/node-sdk）、微信（ClawBot ilink API）
+- **消息渠道**：飞书（@larksuiteoapi/node-sdk）、微信（ClawBot ilink API）、AUN Mesh 网络
 - **数据存储**：node:sqlite（内置模块）+ JSONL（CLI 共用）
 - **测试框架**：Vitest
 
@@ -232,6 +238,7 @@ evolclaw/
 
 - [x] Windows 系统 CLI 命令支持
 - [x] 微信插件支持图片/文件的收发
+- [x] AUN Mesh 网络通道接入
 - [ ] 自动授权可配置（自动放行/自动拒绝）
 - [ ] 手动授权支持（飞书卡片/文本回复）
 - [ ] ACP 协议支持（接入 Codex / Gemini CLI）
