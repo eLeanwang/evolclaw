@@ -1,7 +1,4 @@
-import { spawn, type ChildProcess } from 'node:child_process';
-import { createInterface } from 'node:readline';
-import path from 'path';
-import { getPackageRoot } from '../paths.js';
+import { AUNClient, FileSecretStore } from '@aun/core-node';
 import { logger } from '../utils/logger.js';
 import type { ChannelPlugin, ChannelInstance } from '../core/channel-loader.js';
 import type { Config, ReplyContext } from '../types.js';
@@ -9,10 +6,11 @@ import type { Config, ReplyContext } from '../types.js';
 export interface AUNConfig {
   aid: string;
   keystorePath?: string;
-  gatewayUrl?: string;
+  gatewayPort?: number;
+  gatewayUrl?: string;    // 兼容旧配置，优先级高于 gatewayPort
   accessToken?: string;
   flushDelay?: number;
-  pythonBin?: string;
+  encryptionSeed?: string;
 }
 
 export interface AUNMessageHandler {
@@ -29,15 +27,15 @@ export interface AUNMessageHandler {
 }
 
 export class AUNChannel {
-  private sidecar: ChildProcess | null = null;
+  private client: AUNClient | null = null;
   private messageHandler?: AUNMessageHandler;
   private connected = false;
-  private aid?: string;
+  private _aid?: string;
   private seenMessages = new Map<string, number>();
   private messageSeqMap = new Map<string, number>();  // messageId → seq (for ack)
   private sentCount = new Map<string, number>();  // channelId → 已发消息计数（用于判断最终回复）
 
-  // Reconnect state
+  // Reconnect state (TS-layer fallback, on top of SDK auto_reconnect)
   private intentionalDisconnect = false;
   private reconnectAttempt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -49,121 +47,158 @@ export class AUNChannel {
   async connect(): Promise<void> {
     this.intentionalDisconnect = false;
     this.reconnectAttempt = 0;
-    await this.spawnSidecar();
+    await this.initClient();
   }
 
-  private async spawnSidecar(): Promise<void> {
-    // Clean up existing sidecar if any
-    if (this.sidecar) {
-      this.sidecar.removeAllListeners();
-      this.sidecar.kill('SIGTERM');
-      this.sidecar = null;
+  private async initClient(): Promise<void> {
+    // Clean up existing client if any
+    if (this.client) {
+      try { await this.client.close(); } catch { /* ignore */ }
+      this.client = null;
     }
     this.connected = false;
 
-    const bridgePath = path.join(getPackageRoot(), 'src', 'channels', 'aun_bridge.py');
+    const aunPath = this.config.keystorePath || `${process.env.HOME || '~'}/.aun`;
+    const aidName = this.config.aid;
+    const encryptionSeed = this.config.encryptionSeed || process.env.AUN_ENCRYPTION_SEED || undefined;
 
-    // Build env for sidecar
-    const env: Record<string, string> = { ...process.env as Record<string, string> };
-    if (this.config.keystorePath) env.AUN_PATH = this.config.keystorePath;
-    if (this.config.gatewayUrl) env.AUN_GATEWAY = this.config.gatewayUrl;
-    if (this.config.accessToken) env.AUN_ACCESS_TOKEN = this.config.accessToken;
-    // Pass AID for authenticate()
-    env.AUN_AID = this.config.aid;
-
-    // Resolve Python executable: config.pythonBin → AUN_PYTHON env → system python3
-    const pythonBin = this.config.pythonBin || process.env.AUN_PYTHON || 'python3';
-
-    this.sidecar = spawn(pythonBin, [bridgePath], {
-      stdio: ['pipe', 'pipe', 'inherit'],
-      env,
-    });
-
-    this.sidecar.on('exit', (code) => {
-      logger.warn(`[AUN] Sidecar exited with code ${code}`);
-      this.connected = false;
-      if (!this.intentionalDisconnect) {
-        this.scheduleReconnect();
+    // Gateway URL: 旧配置 gatewayUrl 优先，否则从 AID 推导
+    let gateway = this.config.gatewayUrl || '';
+    if (!gateway) {
+      const parts = aidName.split('.');
+      if (parts.length >= 3) {
+        const domain = parts.slice(1).join('.');  // alice.agentid.pub → agentid.pub
+        const port = this.config.gatewayPort || 443;
+        gateway = `wss://gateway.${domain}:${port}/aun`;
       }
-    });
-
-    this.sidecar.on('error', (err) => {
-      logger.error('[AUN] Sidecar error:', err);
-      this.connected = false;
-    });
-
-    // Read stdout line by line
-    if (this.sidecar.stdout) {
-      const rl = createInterface({ input: this.sidecar.stdout });
-      rl.on('line', (line) => {
-        try {
-          const event = JSON.parse(line);
-          this.handleEvent(event);
-        } catch {
-          logger.debug('[AUN] Non-JSON output:', line);
-        }
-      });
     }
 
-    // Wait for ready event (timeout 15s)
-    await new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error('AUN sidecar ready timeout')), 15000);
-      const checkReady = () => {
-        if (this.connected) {
-          clearTimeout(timeout);
-          resolve();
-        } else {
-          setTimeout(checkReady, 100);
-        }
-      };
-      // Also check for early exit
-      this.sidecar!.on('exit', () => {
-        clearTimeout(timeout);
-        if (!this.connected) reject(new Error('AUN sidecar exited before ready'));
-      });
-      checkReady();
-    });
-  }
+    if (!gateway) {
+      logger.error('[AUN] Cannot derive gateway URL from AID');
+      return;
+    }
 
-  private handleEvent(event: any): void {
-    if (event.event === 'ready') {
-      this.aid = event.aid;
+    logger.info(`[AUN] Initializing: aid=${aidName}, gateway=${gateway}, aun_path=${aunPath}`);
+
+    // Create client with FileSecretStore (AES-256-GCM)
+    // 不传 encryption_seed 时，SDK 自动从 {aun_path}/.seed 文件派生密钥（与 aun_cli.py 对齐）
+    this.client = new AUNClient({
+      aun_path: aunPath,
+      ...(encryptionSeed && { encryption_seed: encryptionSeed }),
+    });
+    // Set gateway URL (internal property, same as Python SDK)
+    (this.client as any)._gatewayUrl = gateway;
+
+    // Register event handlers before connecting
+    this.client.on('message.received', (data: unknown) => this.handleIncomingPrivateMessage(data));
+    this.client.on('group.message_created', (data: unknown) => this.handleIncomingGroupMessage(data));
+    this.client.on('connection.state', (data: unknown) => this.handleConnectionState(data));
+
+    // Authenticate
+    let accessToken: string;
+    try {
+      logger.info(`[AUN] Authenticating as ${aidName}...`);
+      const auth = await this.client.auth.authenticate(aidName ? { aid: aidName } : undefined);
+      accessToken = auth.access_token as string;
+      const resolvedGateway = (auth.gateway as string) || gateway;
+      (this.client as any)._gatewayUrl = resolvedGateway;
+      logger.info(`[AUN] Authenticated as ${auth.aid ?? '?'}, gateway=${resolvedGateway}`);
+    } catch (e: any) {
+      const errMsg = e.message || String(e);
+      const errName = e.constructor?.name || 'Error';
+      logger.error(`[AUN] Authentication failed (${errName}): ${errMsg}`);
+      if (e.stack) logger.debug(`[AUN] Auth stack: ${e.stack}`);
+      // Fallback: try direct token from env/config (legacy)
+      accessToken = this.config.accessToken || process.env.AUN_ACCESS_TOKEN || '';
+      if (!accessToken) {
+        logger.error(`[AUN] No accessToken fallback available, AUN channel disabled`);
+        return;
+      }
+      logger.warn(`[AUN] Using accessToken fallback`);
+    }
+
+    // Connect (SDK auto_reconnect handles transient failures)
+    try {
+      await this.client.connect(
+        { access_token: accessToken, gateway: (this.client as any)._gatewayUrl },
+        { auto_reconnect: true, retry: { max_attempts: 5, initial_delay: 1.0, max_delay: 30.0 } },
+      );
+      this._aid = this.client.aid ?? undefined;
       this.connected = true;
-      this.reconnectAttempt = 0;  // Reset on successful connection
-      logger.info(`[AUN] Connected as ${this.aid}`);
+      this.reconnectAttempt = 0;
+      logger.info(`[AUN] Connected as ${this._aid}`);
+    } catch (e) {
+      logger.error(`[AUN] Connection failed: ${e}`);
       return;
-    }
-
-    if (event.event === 'reconnecting') {
-      logger.info(`[AUN] SDK reconnecting (attempt ${event.attempt}/${event.maxAttempts})`);
-      return;
-    }
-
-    if (event.event === 'disconnected') {
-      this.connected = false;
-      logger.warn(`[AUN] Disconnected: ${event.reason}`);
-      // Sidecar will handle SDK auto_reconnect; if that fails → terminal_failed → exit → our exit handler fires
-      return;
-    }
-
-    if (event.event === 'terminal_failed') {
-      this.connected = false;
-      logger.error(`[AUN] Terminal failure: ${event.reason}`);
-      // Sidecar will exit(1), our exit handler will call scheduleReconnect()
-      return;
-    }
-
-    if (event.event === 'error') {
-      logger.error(`[AUN] Error: ${event.message}`);
-      return;
-    }
-
-    if (event.event === 'message') {
-      this.handleInboundMessage(event);
     }
   }
 
-  private async handleInboundMessage(event: any): Promise<void> {
+  // ── Event handlers ──────────────────────────────────────────
+
+  private async handleIncomingPrivateMessage(data: unknown): Promise<void> {
+    if (!data || typeof data !== 'object') return;
+    const msg = data as Record<string, any>;
+
+    const fromAid = msg.from ?? '';
+    const payload = msg.payload ?? '';
+    const text = typeof payload === 'string' ? payload : (payload ? JSON.stringify(payload) : '');
+    const taskId = msg.task_id;
+    const messageId = msg.message_id ?? '';
+    const seq = msg.seq;
+
+    // Detect @mentions
+    const mentions: string[] = [];
+    if (this._aid && text.includes(`@${this._aid}`)) {
+      mentions.push(this._aid);
+    }
+
+    this.dispatchMessage({
+      channelId: fromAid,
+      userId: fromAid,
+      text,
+      chatType: 'private',
+      messageId,
+      seq,
+      taskId,
+      mentions,
+    });
+  }
+
+  private async handleIncomingGroupMessage(data: unknown): Promise<void> {
+    if (!data || typeof data !== 'object') return;
+    const msg = data as Record<string, any>;
+
+    const groupId = msg.group_id ?? '';
+    const senderAid = msg.sender_aid ?? msg.from ?? '';
+    const payload = msg.payload ?? '';
+    const text = typeof payload === 'string' ? payload : (payload ? JSON.stringify(payload) : '');
+    const taskId = msg.task_id;
+    const messageId = msg.message_id ?? '';
+    const seq = msg.seq;
+
+    // Detect @mentions
+    const mentions: string[] = [];
+    if (this._aid && text.includes(`@${this._aid}`)) {
+      mentions.push(this._aid);
+    }
+
+    this.dispatchMessage({
+      channelId: groupId,
+      userId: senderAid,
+      text,
+      chatType: 'group',
+      messageId,
+      seq,
+      taskId,
+      mentions,
+    });
+  }
+
+  private dispatchMessage(event: {
+    channelId: string; userId: string; text: string;
+    chatType: 'private' | 'group'; messageId: string;
+    seq?: number; taskId?: string; mentions?: string[];
+  }): void {
     // Dedup
     if (event.messageId) {
       if (this.seenMessages.has(event.messageId)) return;
@@ -177,37 +212,57 @@ export class AUNChannel {
 
     if (!this.messageHandler) return;
 
-    // Map sidecar event to handler options
-    const mentions = event.mentions?.map((aid: string) => ({ userId: aid }));
-
-    // Build replyContext from taskId
+    const mentionObjects = event.mentions?.map(aid => ({ userId: aid }));
     let replyContext: ReplyContext | undefined;
     if (event.taskId) {
       replyContext = { threadId: event.taskId };
     }
 
-    try {
-      await this.messageHandler({
-        channelId: event.channelId || '',
-        content: event.text || '',
-        chatType: event.chatType || 'private',
-        peerId: event.userId || event.channelId || '',
-        messageId: event.messageId,
-        threadId: event.taskId,  // AUN task_id = EvolClaw thread concept
-        mentions,
-        replyContext,
-      });
-    } catch (err) {
+    this.messageHandler({
+      channelId: event.channelId || '',
+      content: event.text || '',
+      chatType: event.chatType,
+      peerId: event.userId || event.channelId || '',
+      messageId: event.messageId,
+      threadId: event.taskId,
+      mentions: mentionObjects,
+      replyContext,
+    }).catch(err => {
       logger.error('[AUN] Message handler error:', err);
+    });
+  }
+
+  private handleConnectionState(data: unknown): void {
+    if (!data || typeof data !== 'object') return;
+    const state = (data as Record<string, any>).state ?? '';
+
+    if (state === 'connected') {
+      this.connected = true;
+      this.reconnectAttempt = 0;
+      logger.info('[AUN] Connected');
+    } else if (state === 'disconnected') {
+      this.connected = false;
+      logger.warn(`[AUN] Disconnected: ${(data as Record<string, any>).error ?? 'unknown'}`);
+    } else if (state === 'reconnecting') {
+      logger.info(`[AUN] SDK reconnecting (attempt ${(data as Record<string, any>).attempt})`);
+    } else if (state === 'terminal_failed') {
+      this.connected = false;
+      logger.error(`[AUN] Terminal failure: ${(data as Record<string, any>).error ?? 'unknown'}`);
+      // SDK auto_reconnect exhausted; fall back to TS-layer reconnect
+      if (!this.intentionalDisconnect) {
+        this.scheduleReconnect();
+      }
     }
   }
+
+  // ── Public API (same interface as before) ───────────────────
 
   onMessage(handler: AUNMessageHandler): void {
     this.messageHandler = handler;
   }
 
   async sendMessage(channelId: string, text: string, context?: ReplyContext): Promise<void> {
-    if (!this.connected || !this.sidecar?.stdin) {
+    if (!this.connected || !this.client) {
       logger.warn('[AUN] Cannot send: not connected');
       return;
     }
@@ -217,40 +272,70 @@ export class AUNChannel {
       return;
     }
 
-    const params: Record<string, any> = { channelId, text };
-    if (context?.threadId) params.taskId = context.threadId;
+    let finalText = text;
     // 多轮工具调用后的最终回复：仅在已有中间消息时添加前缀
     if (context?.title && (this.sentCount.get(channelId) || 0) > 0) {
-      params.text = '最终回复\n' + text;
+      finalText = '最终回复\n' + text;
     }
     this.sentCount.set(channelId, (this.sentCount.get(channelId) || 0) + 1);
 
-    this.write({ method: 'send', params });
-  }
+    const params: Record<string, any> = { payload: finalText, encrypt: true };
+    if (context?.threadId) params.task_id = context.threadId;
 
-  private write(data: any): void {
-    if (this.sidecar?.stdin?.writable) {
-      this.sidecar.stdin.write(JSON.stringify(data) + '\n');
+    try {
+      if (channelId.startsWith('grp_')) {
+        params.group_id = channelId;
+        await this.client.call('group.send', params);
+      } else {
+        params.to = channelId;
+        await this.client.call('message.send', params);
+      }
+    } catch (e) {
+      logger.error(`[AUN] Send failed to ${channelId}: ${e}`);
     }
   }
 
   acknowledge(messageId: string): void {
     const seq = this.messageSeqMap.get(messageId);
-    if (seq != null) {
-      this.write({ method: 'ack', params: { seq } });
+    if (seq != null && this.client) {
+      this.client.call('message.ack', { seq }).catch(e => {
+        logger.debug(`[AUN] Ack failed: ${e}`);
+      });
       this.messageSeqMap.delete(messageId);
     }
   }
 
   sendProcessingStatus(channelId: string, status: 'start' | 'done' | 'interrupted' | 'error' | 'timeout', sessionId: string, context?: ReplyContext): void {
     if (status === 'start') this.sentCount.delete(channelId);  // 新任务开始，重置计数
-    const params: Record<string, any> = { channelId, status, sessionId };
-    if (context?.threadId) params.taskId = context.threadId;
-    this.write({ method: 'processing', params });
+    if (!this.client || !this.connected) return;
+
+    const payload = JSON.stringify({
+      type: 'processing',
+      status,
+      sessionId,
+      timestamp: Math.floor(Date.now() / 1000),
+    });
+
+    const params: Record<string, any> = {
+      to: channelId, payload,
+      encrypt: true, persist: false,
+    };
+    if (context?.threadId) params.task_id = context.threadId;
+
+    this.client.call('message.send', params).catch(e => {
+      logger.debug(`[AUN] Processing status failed: ${e}`);
+    });
   }
 
   sendCustomPayload(channelId: string, payload: string): void {
-    this.write({ method: 'custom_payload', params: { channelId, payload } });
+    if (!this.client || !this.connected) return;
+
+    this.client.call('message.send', {
+      to: channelId, payload,
+      encrypt: true, persist: false,
+    }).catch(e => {
+      logger.debug(`[AUN] Custom payload failed: ${e}`);
+    });
   }
 
   async disconnect(): Promise<void> {
@@ -259,19 +344,19 @@ export class AUNChannel {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
-    if (this.sidecar) {
-      this.sidecar.removeAllListeners();
-      this.sidecar.kill('SIGTERM');
-      this.sidecar = null;
+    if (this.client) {
+      try { await this.client.close(); } catch { /* ignore */ }
+      this.client = null;
     }
     this.connected = false;
     logger.info('[AUN] Disconnected');
   }
 
-  /** Schedule a sidecar restart with exponential backoff */
+  // ── TS-layer reconnect (fallback when SDK auto_reconnect exhausted) ──
+
   private scheduleReconnect(): void {
     if (this.intentionalDisconnect) return;
-    if (this.reconnectTimer) return;  // Already scheduled
+    if (this.reconnectTimer) return;
 
     const delays = AUNChannel.RECONNECT_DELAYS;
     if (this.reconnectAttempt >= delays.length) {
@@ -288,9 +373,8 @@ export class AUNChannel {
       this.reconnectTimer = null;
       try {
         logger.info(`[AUN] Reconnect #${this.reconnectAttempt} starting...`);
-        await this.spawnSidecar();
+        await this.initClient();
         logger.info(`[AUN] Reconnect #${this.reconnectAttempt} succeeded`);
-        // reconnectAttempt is reset in handleEvent on 'ready'
       } catch (err) {
         logger.error(`[AUN] Reconnect #${this.reconnectAttempt} failed:`, err);
         this.scheduleReconnect();
@@ -307,8 +391,8 @@ export class AUNChannel {
     }
     this.reconnectAttempt = 0;
     try {
-      await this.spawnSidecar();
-      return `重连成功 (${this.aid})`;
+      await this.initClient();
+      return `重连成功 (${this._aid})`;
     } catch (err) {
       this.scheduleReconnect();
       return `重连失败: ${err}，已安排自动重试`;
@@ -324,7 +408,7 @@ export class AUNChannel {
   getStatus(): { connected: boolean; aid?: string; reconnectAttempt: number; maxAttempts: number } {
     return {
       connected: this.connected,
-      aid: this.aid,
+      aid: this._aid,
       reconnectAttempt: this.reconnectAttempt,
       maxAttempts: AUNChannel.RECONNECT_DELAYS.length,
     };
@@ -348,10 +432,11 @@ export class AUNChannelPlugin implements ChannelPlugin {
     const channel = new AUNChannel({
       aid: aunConfig.aid,
       keystorePath: aunConfig.keystorePath,
+      gatewayPort: aunConfig.gatewayPort,
       gatewayUrl: aunConfig.gatewayUrl,
       accessToken: aunConfig.accessToken,
       flushDelay: aunConfig.flushDelay,
-      pythonBin: aunConfig.pythonBin,
+      encryptionSeed: aunConfig.encryptionSeed,
     });
 
     const adapter = {

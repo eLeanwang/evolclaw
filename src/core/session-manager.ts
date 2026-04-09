@@ -478,11 +478,13 @@ export class SessionManager {
       const validSessionId = this.validateSessionFile(active);
       const session = { ...this.rowToSession(active), agentSessionId: validSessionId };
       session.identity = this.resolveIdentity(channel, userId);
-      // 补写 peerId（私聊 session 可能在此字段引入前创建）
+      // 补写 peerId/peerName（私聊 session 可能在此字段引入前创建）
       if (chatType === 'private' && userId) {
         const activeMeta = active.metadata ? JSON.parse(active.metadata) : {};
-        if (!activeMeta.peerId) {
-          activeMeta.peerId = userId;
+        let updated = false;
+        if (!activeMeta.peerId) { activeMeta.peerId = userId; updated = true; }
+        if (!activeMeta.peerName && metadata?.peerName) { activeMeta.peerName = metadata.peerName; updated = true; }
+        if (updated) {
           this.db.prepare(`UPDATE sessions SET metadata = ?, updated_at = ? WHERE id = ?`)
             .run(JSON.stringify(activeMeta), Date.now(), active.id);
           session.metadata = activeMeta;
@@ -503,9 +505,12 @@ export class SessionManager {
       // 激活此会话
       const existingMeta = existing.metadata ? JSON.parse(existing.metadata) : {};
       existingMeta.isActive = true;
-      // 补写 peerId
+      // 补写 peerId/peerName
       if (chatType === 'private' && userId && !existingMeta.peerId) {
         existingMeta.peerId = userId;
+      }
+      if (chatType === 'private' && metadata?.peerName && !existingMeta.peerName) {
+        existingMeta.peerName = metadata.peerName;
       }
       this.db.prepare(`UPDATE sessions SET metadata = ?, updated_at = ? WHERE id = ?`)
         .run(JSON.stringify(existingMeta), Date.now(), existing.id);

@@ -74,7 +74,10 @@ export class MessageBridge {
       const chatType = msg.chatType || 'private';
       const metadata: Record<string, any> = {};
       if (msg.replyContext) metadata.replyContext = msg.replyContext;
-      if (chatType === 'private' && msg.peerId) metadata.peerId = msg.peerId;
+      if (chatType === 'private' && msg.peerId) {
+        metadata.peerId = msg.peerId;
+        if (msg.peerName) metadata.peerName = msg.peerName;
+      }
       const session = await this.sessionManager.getOrCreateSession(
         channelName, msg.channelId,
         this.config.projects?.defaultPath || process.cwd(),

@@ -21,6 +21,9 @@ let katexCSS: string | null = null;
 let katexJS: string | null = null;
 let mermaidJS: string | null = null;
 
+// Dependency availability check (cached)
+let dependenciesAvailable: boolean | null = null;
+
 function getKatexCSS(): string {
   if (katexCSS) return katexCSS;
   const katexDir = path.join(getPackageRoot(), 'node_modules', 'katex', 'dist');
@@ -215,6 +218,32 @@ export async function renderAllRichContent(text: string): Promise<Array<{
   }
 
   return results;
+}
+
+/**
+ * 检查富内容渲染依赖是否可用（playwright、katex、mermaid）
+ */
+export function checkDependencies(): boolean {
+  if (dependenciesAvailable !== null) return dependenciesAvailable;
+
+  try {
+    const pkgRoot = getPackageRoot();
+    const playwrightPath = path.join(pkgRoot, 'node_modules', 'playwright');
+    const katexPath = path.join(pkgRoot, 'node_modules', 'katex', 'dist', 'katex.min.js');
+    const mermaidPath = path.join(pkgRoot, 'node_modules', 'mermaid', 'dist', 'mermaid.min.js');
+
+    dependenciesAvailable = fs.existsSync(playwrightPath) && fs.existsSync(katexPath) && fs.existsSync(mermaidPath);
+
+    if (!dependenciesAvailable) {
+      logger.warn('[RichContent] Dependencies not installed (playwright/katex/mermaid), rich content rendering disabled');
+    }
+
+    return dependenciesAvailable;
+  } catch (err) {
+    logger.warn('[RichContent] Failed to check dependencies:', err);
+    dependenciesAvailable = false;
+    return false;
+  }
 }
 
 export function hasRichContent(text: string): boolean {

@@ -4,11 +4,12 @@ import path from 'path';
 import imageType from 'image-type';
 import { ensureDir } from '../config.js';
 import { logger } from '../utils/logger.js';
-import { hasRichContent, renderAllRichContent } from '../utils/rich-content-renderer.js';
+import { hasRichContent, renderAllRichContent, checkDependencies } from '../utils/rich-content-renderer.js';
 
 export interface FeishuConfig {
   appId: string;
   appSecret: string;
+  enableRichContent?: boolean;  // 是否启用富内容渲染（LaTeX/Mermaid等），默认 true
 }
 
 export interface MessageHandlerOptions {
@@ -43,8 +44,10 @@ export class FeishuChannel {
   private userNameCache = new Map<string, string>();  // userId -> userName
   private recallHandler?: (messageId: string) => void;
   private connected = false;
+  private enableRichContent: boolean;
 
   constructor(private config: FeishuConfig) {
+    this.enableRichContent = config.enableRichContent ?? true;  // 默认启用
   }
 
   /**
@@ -374,8 +377,10 @@ export class FeishuChannel {
     logger.debug(`[Feishu] sendMessage called, chatId: ${chatId}, content length: ${content.length}`);
 
     try {
-      // 检测富内容并渲染
-      const richItems = hasRichContent(content) ? await renderAllRichContent(content) : [];
+      // 检测富内容并渲染（受 enableRichContent 开关控制，且依赖必须可用）
+      const richItems = (this.enableRichContent && checkDependencies() && hasRichContent(content))
+        ? await renderAllRichContent(content)
+        : [];
 
       // 上传所有图片获取 image_key，建立位置映射
       const richItemsWithKeys: Array<{ start: number; end: number; imageKey: string }> = [];
@@ -883,6 +888,7 @@ export class FeishuChannelPlugin implements ChannelPlugin {
     const channel = new FeishuChannel({
       appId: feishuConfig.appId,
       appSecret: feishuConfig.appSecret,
+      enableRichContent: feishuConfig.enableRichContent,
     });
 
     const adapter = {
@@ -918,7 +924,6 @@ export class FeishuChannelPlugin implements ChannelPlugin {
     };
 
     const options = {
-      systemPromptAppend: '[重要系统功能] 你可以通过飞书发送文件给用户。方法：在响应中使用 [SEND_FILE:文件路径] 标记。示例：文件已准备好！[SEND_FILE:./report.txt] 路径支持相对路径（相对项目目录）或绝对路径。系统会自动上传并发送。',
       fileMarkerPattern: /\[SEND_FILE:(?:(\w+):)?([^\]]+)\]/g,
       supportsImages: true,
       flushDelay: feishuConfig.flushDelay,

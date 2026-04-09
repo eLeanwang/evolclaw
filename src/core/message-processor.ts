@@ -142,12 +142,15 @@ export class MessageProcessor {
       monitor?.recordEvent(eventType || 'unknown', toolName);
     };
 
+    // Cache background status to avoid async call inside setInterval
+    const isBackground = await this.isBackgroundSession(session, message.channel, message.channelId);
+
     const timeoutPromise = new Promise<never>((_, reject) => {
       rejectFn = reject;
       if (!monitorEnabled) return;
 
       monitor = new StreamIdleMonitor(idleMs);
-      monitorInterval = setInterval(async () => {
+      monitorInterval = setInterval(() => {
         // Drain all pending levels in one tick
         let result = monitor!.check();
         while (result) {
@@ -155,35 +158,27 @@ export class MessageProcessor {
             logger.warn(`[MessageProcessor] Idle monitor: kill after ${result.idleSec}s idle, stream: ${streamKey}`);
             this.eventBus.publish({ type: 'agent:idle-timeout', sessionId: streamKey, idleSec: result.idleSec });
             // 后台任务也需要中断（释放资源），但不发送通知
-            const isBg = await this.isBackgroundSession(session, message.channel, message.channelId);
-            if (channelInfo && !isBg) {
-              try {
-                const msg = showIdleMonitor
-                  ? result.message
-                  : `\u26a0\ufe0f 任务超时（${result.idleSec}秒无响应），已自动中断`;
-                await channelInfo.adapter.sendText(message.channelId, msg);
-              } catch (e) {
+            if (channelInfo && !isBackground) {
+              const msg = showIdleMonitor
+                ? result.message
+                : `\u26a0\ufe0f 任务超时（${result.idleSec}秒无响应），已自动中断`;
+              channelInfo.adapter.sendText(message.channelId, msg).catch(e => {
                 logger.debug(`[MessageProcessor] Failed to send kill diagnostic message:`, e);
-              }
+              });
             }
-            try {
-              await agent.interrupt(streamKey);
-            } catch (e) {
+            agent.interrupt(streamKey).catch(e => {
               logger.debug(`[MessageProcessor] Interrupt failed (may already be cleaned up):`, e);
-            }
+            });
             rejectFn(new Error('SDK_TIMEOUT'));
             return;
           } else {
             // notify or warn: send diagnostic message, task continues
             logger.info(`[MessageProcessor] Idle monitor: ${result.action} after ${result.idleSec}s idle, stream: ${streamKey}`);
             if (channelInfo && showIdleMonitor && !shouldSuppress()) {
-              const isBg = await this.isBackgroundSession(session, message.channel, message.channelId);
-              if (!isBg) {
-                try {
-                  await channelInfo.adapter.sendText(message.channelId, result.message);
-                } catch (e) {
+              if (!isBackground) {
+                channelInfo.adapter.sendText(message.channelId, result.message).catch(e => {
                   logger.debug(`[MessageProcessor] Failed to send idle monitor message:`, e);
-                }
+                });
               }
             }
           }
@@ -379,16 +374,36 @@ ${suggestions}`,
         : message.content;
 
       try {
-        // 动态构建跨通道文件发送提示
+        // 动态构建运行时上下文提示
+        const contextParts: string[] = [];
+
+        // 1. 当前环境信息
+        const peerLabel = session.identity?.role || 'unknown';
+        const sessionName = session.name || '默认会话';
+        const peerName = message.peerName || session.metadata?.peerName;
+        const envParts = [
+          `会话通道: ${message.channel}`,
+          `当前项目: ${path.basename(absoluteProjectPath)}`,
+        ];
+        if (session.name) envParts.push(`会话名称: ${session.name}`);
+        envParts.push(`对端身份: ${peerLabel}`);
+        if (peerName) envParts.push(`对端名称: ${peerName}`);
+        contextParts.push(`[当前环境] ${envParts.join(' | ')}`);
+
+        // 2. 文件发送能力
         const fileChannels = [...this.channels.entries()]
           .filter(([, info]) => info.adapter.sendFile)
           .map(([name]) => name);
+        const currentCanSend = fileChannels.includes(message.channel);
         const crossChannels = fileChannels.filter(n => n !== message.channel);
-        const fileSendHint = fileChannels.length === 0 ? undefined
-          : crossChannels.length > 0
-            ? `发送文件: [SEND_FILE:路径] 发到当前通道（${message.channel}），[SEND_FILE:${crossChannels[0]}:路径] 发到其他通道（可用: ${crossChannels.join('/')}）`
-            : `发送文件: [SEND_FILE:路径]`;
-        const effectiveSystemPrompt = [options?.systemPromptAppend, fileSendHint].filter(Boolean).join('\n') || undefined;
+        if (currentCanSend || crossChannels.length > 0) {
+          const hints: string[] = [];
+          if (currentCanSend) hints.push(`[SEND_FILE:路径] 发送文件到当前通道`);
+          if (crossChannels.length > 0) hints.push(`[SEND_FILE:${crossChannels[0]}:路径] 发送文件到指定通道（可用: ${crossChannels.join('/')}）`);
+          contextParts.push(hints.join('，'));
+        }
+
+        const effectiveSystemPrompt = [options?.systemPromptAppend, ...contextParts].filter(Boolean).join('\n') || undefined;
 
         const stream = await agent.runQuery(
           session.id,

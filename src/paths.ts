@@ -35,6 +35,7 @@ export function resolvePaths() {
     lineStats: path.join(root, 'logs', 'line-stats.log'),
     readySignal: path.join(root, 'logs', 'ready.signal'),
     selfHealLog: path.join(root, 'logs', 'self-heal.md'),
+    socket: path.join(root, 'logs', 'evolclaw.sock'),
   };
 }
 

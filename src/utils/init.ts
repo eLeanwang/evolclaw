@@ -345,10 +345,10 @@ async function initFeishuManual(rl: readline.Interface, config: any): Promise<bo
 
 // ==================== AUN Environment Check ====================
 
-async function checkAunEnvironment(rl: readline.Interface): Promise<boolean> {
+export async function checkAunEnvironment(rl: readline.Interface): Promise<boolean> {
   console.log('\n🔍 AUN 环境检查...\n');
 
-  // Check python3
+  // Check python3 (needed for aun_cli.py AID management)
   if (!commandExists('python3')) {
     console.log('  ✗ python3 未找到');
     console.log('  → 请先安装 Python 3: https://www.python.org/downloads/');
@@ -363,30 +363,11 @@ async function checkAunEnvironment(rl: readline.Interface): Promise<boolean> {
     execFileSync('python3', ['-c', 'import aun_core'], { encoding: 'utf-8', stdio: 'pipe' });
     console.log('  ✓ aun_core');
   } catch {
-    console.log('  - aun_core 未安装');
-    const answer = (await ask(rl, '  → 是否自动安装 aun-core？[Y/n] ')).trim().toLowerCase();
-    if (answer === 'n' || answer === 'no') {
-      const back = (await ask(rl, '  → 返回重新选择渠道？[Y/n] ')).trim().toLowerCase();
-      if (back === 'n' || back === 'no') process.exit(0);
-      return false;
-    }
-
-    console.log('  正在安装 aun-core（可能需要 1-2 分钟）...');
-    try {
-      await execFileAsync('pip3', ['install', '--user', 'aun-core'], { timeout: 120000 });
-      console.log('  ✓ aun-core 安装完成');
-    } catch (e: any) {
-      const msg = e.message || '';
-      if (e.killed || msg.includes('ETIMEDOUT') || msg.includes('timed out')) {
-        console.log('  ✗ 安装超时，网络可能较慢');
-      } else {
-        console.log(`  ✗ 安装失败: ${msg.slice(0, 200)}`);
-      }
-      console.log('  → 可手动安装: pip3 install aun-core');
-      const back = (await ask(rl, '  → 返回重新选择渠道？[Y/n] ')).trim().toLowerCase();
-      if (back === 'n' || back === 'no') process.exit(0);
-      return false;
-    }
+    console.log('  ✗ aun_core 未安装');
+    console.log('  → 请安装: pip3 install aun-core');
+    const answer = (await ask(rl, '  → 返回重新选择渠道？[Y/n] ')).trim().toLowerCase();
+    if (answer === 'n' || answer === 'no') process.exit(0);
+    return false;
   }
 
   console.log('');
@@ -395,9 +376,19 @@ async function checkAunEnvironment(rl: readline.Interface): Promise<boolean> {
 
 // ==================== Rich Content Renderer ====================
 
-async function offerRichContentRenderer(rl: readline.Interface): Promise<void> {
+async function offerRichContentRenderer(rl: readline.Interface, config: any): Promise<void> {
   const answer = (await ask(rl, '\n是否启用 LaTeX + Mermaid 渲染模块（约 35MB）？[y/N] ')).trim().toLowerCase();
-  if (answer !== 'y' && answer !== 'yes') return;
+  const enableRich = answer === 'y' || answer === 'yes';
+
+  // 记录用户选择到配置文件（仅 Feishu 通道需要）
+  if (config.channels?.feishu) {
+    config.channels.feishu.enableRichContent = enableRich;
+  }
+
+  if (!enableRich) {
+    console.log('  ✓ 已跳过富内容渲染模块安装');
+    return;
+  }
 
   console.log('  正在安装 katex 和 mermaid（可能需要 1-2 分钟）...');
   try {
@@ -412,7 +403,91 @@ async function offerRichContentRenderer(rl: readline.Interface): Promise<void> {
       console.log(`  ✗ 安装失败: ${msg.slice(0, 200)}`);
     }
     console.log('  → 可稍后手动安装: npm install -g katex mermaid');
+    // 安装失败时，将配置设为 false
+    if (config.channels?.feishu) {
+      config.channels.feishu.enableRichContent = false;
+    }
   }
+}
+
+// ==================== AUN AID Helpers ====================
+
+function isValidAid(name: string): boolean {
+  const labels = name.split('.');
+  return labels.length >= 3 && labels.every(l => /^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?$/.test(l));
+}
+
+async function setupAunAid(rl: readline.Interface, config: any): Promise<{ aid: string; gatewayPort?: number } | null> {
+  const pythonBin = config.channels?.aun?.pythonBin || process.env.AUN_PYTHON || 'python3';
+  const cliScript = path.join(getPackageRoot(), 'aun', 'aun_cli.py');
+
+  let aid = '';
+  let gatewayPort: number | undefined;
+
+  // Outer loop: allows retrying with a different AID
+  while (true) {
+    // Ask AID with format validation
+    aid = '';
+    while (!aid) {
+      aid = (await ask(rl, '  AUN Agent ID (例: mybot.agentid.pub): ')).trim();
+      if (!aid) { console.log('  ⚠ 不能为空'); continue; }
+      if (!isValidAid(aid)) {
+        console.log('  ⚠ 无效 AID 格式（需要合法域名，至少三级，如 alice.agentid.pub）');
+        aid = '';
+      }
+    }
+
+    const portStr = (await ask(rl, '  Gateway 端口 [留空使用默认 443]: ')).trim();
+    gatewayPort = portStr ? parseInt(portStr, 10) : undefined;
+    if (gatewayPort !== undefined && (isNaN(gatewayPort) || gatewayPort < 1 || gatewayPort > 65535)) {
+      console.log('  ⚠ 端口号无效，使用默认 443');
+      gatewayPort = undefined;
+    }
+
+    // Check if AID exists locally
+    const aidDir = path.join(os.homedir(), '.aun', 'AIDs', aid);
+    if (fs.existsSync(aidDir)) {
+      console.log(`  ✓ AID ${aid} 已存在`);
+      break;
+    }
+
+    const answer = (await ask(rl, `  ⚠ AID ${aid} 本地不存在，是否创建？[Y/n] `)).trim().toLowerCase();
+    if (answer === 'n' || answer === 'no') {
+      console.log('  已跳过 AID 创建（启动时可能连接失败）');
+      break;
+    }
+
+    // Try creating
+    console.log('  正在创建 AID...');
+    const args = [cliScript, 'aid', 'new', aid];
+    if (gatewayPort) args.push('-p', String(gatewayPort));
+
+    let failed = false;
+    try {
+      const { stdout, stderr } = await execFileAsync(pythonBin, args, { timeout: 30000, encoding: 'utf-8' });
+      const output = (stdout + stderr).trim();
+      if (output) console.log(`  ${output}`);
+      // aun_cli.py 可能 exit 0 但输出包含错误
+      failed = output.includes('✗') || output.includes('失败');
+    } catch (e: any) {
+      const msg = e.stderr || e.stdout || e.message || '';
+      console.log(`  ✗ AID 创建失败: ${msg.trim().slice(0, 200)}`);
+      failed = true;
+    }
+
+    if (!failed) {
+      console.log(`  ✓ AID ${aid} 创建成功`);
+      break;
+    }
+
+    // Creation failed — retry or give up
+    const retry = (await ask(rl, '  → 重新输入 (r) / 跳过 (s) / 取消 (c)？[r/s/c] ')).trim().toLowerCase();
+    if (retry === 'c') return null;
+    if (retry === 's') break;
+    // default: retry with new AID
+  }
+
+  return { aid, gatewayPort };
 }
 
 // ==================== Init AUN (standalone) ====================
@@ -441,21 +516,14 @@ export async function cmdInitAun(): Promise<void> {
       return;
     }
 
-    let aid = '';
-    while (!aid) {
-      aid = (await ask(rl, '  AUN Agent ID (例: mybot.agentid.pub): ')).trim();
-      if (!aid) console.log('  ⚠ 不能为空');
-    }
-
-    const gatewayUrl = (await ask(rl, '  Gateway URL [留空使用默认]: ')).trim() || undefined;
-    const accessToken = (await ask(rl, '  Access Token [留空跳过]: ')).trim() || undefined;
+    const result = await setupAunAid(rl, config);
+    if (!result) return;
 
     if (!config.channels) config.channels = {};
     config.channels.aun = {
       enabled: true,
-      aid,
-      ...(gatewayUrl && { gatewayUrl }),
-      ...(accessToken && { accessToken }),
+      aid: result.aid,
+      ...(result.gatewayPort && { gatewayPort: result.gatewayPort }),
     };
     if (!config.channels.defaultChannel) config.channels.defaultChannel = 'aun';
 
@@ -580,20 +648,13 @@ export async function cmdInit() {
         const aunReady = await checkAunEnvironment(rl);
         if (!aunReady) continue; // 退回重选渠道
 
-        let aid = '';
-        while (!aid) {
-          aid = (await ask(rl, '  AUN Agent ID (例: mybot.agentid.pub): ')).trim();
-          if (!aid) console.log('  ⚠ 不能为空');
-        }
-
-        const gatewayUrl = (await ask(rl, '  Gateway URL [留空使用默认]: ')).trim() || undefined;
-        const accessToken = (await ask(rl, '  Access Token [留空跳过]: ')).trim() || undefined;
+        const result = await setupAunAid(rl, config);
+        if (!result) continue;
 
         config.channels.aun = {
           enabled: true,
-          aid,
-          ...(gatewayUrl && { gatewayUrl }),
-          ...(accessToken && { accessToken }),
+          aid: result.aid,
+          ...(result.gatewayPort && { gatewayPort: result.gatewayPort }),
         };
         channelConfigured = true;
         config.channels.defaultChannel = 'aun';
@@ -603,8 +664,10 @@ export async function cmdInit() {
       }
     }
 
-    // 可选：富内容渲染模块
-    await offerRichContentRenderer(rl);
+    // 可选：富内容渲染模块（仅 Feishu 通道需要）
+    if (config.channels?.feishu?.enabled) {
+      await offerRichContentRenderer(rl, config);
+    }
 
     fs.writeFileSync(p.config, JSON.stringify(config, null, 2) + '\n');
     console.log(`\n✓ 已创建配置文件: ${p.config}`);

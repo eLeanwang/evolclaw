@@ -26,6 +26,7 @@ export interface Config {
       flushDelay?: number;  // flush 间隔(秒)，默认使用全局值
       debounce?: number;    // 入站消息去抖间隔(秒)，覆盖全局 debounce
       showActivities?: 'all' | 'dm-only' | 'owner-dm-only' | 'none';  // 覆盖全局 showActivities
+      enableRichContent?: boolean;  // 是否启用富内容渲染（LaTeX/Mermaid等），默认 true
     };
     wechat?: {
       enabled?: boolean;
@@ -39,13 +40,14 @@ export interface Config {
     aun?: {
       enabled?: boolean;
       aid: string;            // 完整 AID，如 evolclaw-ai.agentid.pub
-      keystorePath?: string;  // AUN keystore 路径，默认 ~/.aun/AIDs/
-      gatewayUrl?: string;    // Gateway WebSocket URL
-      accessToken?: string;   // 认证 access token
+      keystorePath?: string;  // AUN keystore 路径，默认 ~/.aun
+      gatewayPort?: number;   // Gateway 端口，默认 443（域名从 AID 推导）
+      gatewayUrl?: string;    // Gateway WebSocket URL（兼容旧配置，优先级高于 gatewayPort）
+      accessToken?: string;   // 认证 access token（降级 fallback）
       owner?: string;
       flushDelay?: number;  // flush 间隔(秒)，默认 3
-      debounce?: number;    // 入站消息去抖间隔(秒)，覆盖全局 debounce
-      pythonBin?: string;   // Python 可执行路径，默认 python3
+      pythonBin?: string;   // Python 可执行路径（仅 evolclaw tui 命令使用），默认 python3
+      encryptionSeed?: string; // FileSecretStore 加密种子，默认 evolclaw-aun-production-seed-2026
       showActivities?: 'all' | 'dm-only' | 'owner-dm-only' | 'none';  // 覆盖全局 showActivities
     };
   };
@@ -71,6 +73,7 @@ export interface SessionMetadata {
   isActive?: boolean;  // 由 Channel 维护，存储在 metadata 中
   replyContext?: ReplyContext;       // Channel 预构建的回复上下文（渠道无关）
   peerId?: string;                  // 私聊时存发送者 ID，用于跨通道文件投递查 channelId
+  peerName?: string;                // 私聊时存发送者名称
   agentSessions?: {
     codex?: string;
     gemini?: string;

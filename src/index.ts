@@ -17,6 +17,7 @@ import { StatsCollector } from './core/stats-collector.js';
 import { PermissionGateway } from './core/permission.js';
 import { ChannelLoader } from './core/channel-loader.js';
 import { AgentLoader } from './core/agent-loader.js';
+import { IpcServer, IpcStatusResponse, ChannelStatus } from './core/ipc-server.js';
 import { ChannelAdapter, Message } from './types.js';
 import { logger } from './utils/logger.js';
 import path from 'path';
@@ -53,7 +54,9 @@ async function main() {
   // 配置完整性校验
   const integrity = validateConfigIntegrity(config);
   if (!integrity.valid) {
-    logger.error(`❌ Config integrity check failed:\n  ${integrity.reasons.join('\n  ')}`);
+    const msg = `❌ Config integrity check failed:\n  ${integrity.reasons.join('\n  ')}`;
+    logger.error(msg);
+    console.error(msg);  // ensure it lands in stdout.log for self-heal diagnostics
     process.exit(1);
   }
 
@@ -390,6 +393,32 @@ async function main() {
   fs.writeFileSync(readySignalPath, String(Date.now()));
   logger.info(`✓ Ready signal written: ${readySignalPath}`);
 
+  // IPC server — 供 CLI 查询实时状态
+  const ipcServer = new IpcServer(resolvePaths().socket, (): IpcStatusResponse => {
+    const channels: Record<string, ChannelStatus> = {};
+    for (const inst of channelInstances) {
+      const name = inst.adapter.name;
+      channels[name] = inst.channel.getStatus?.() ?? { connected: true };
+    }
+    const snap = statsCollector.getSnapshot();
+    return {
+      pid: process.pid,
+      uptime: snap.uptimeMs,
+      channels,
+      queue: {
+        pending: messageQueue.getGlobalQueueLength(),
+        processing: messageQueue.getGlobalProcessingCount(),
+      },
+      stats: {
+        received: snap.lastHour.received,
+        completed: snap.lastHour.completed,
+        errors: snap.lastHour.errors,
+        avgResponseMs: snap.lastHour.avgResponseMs,
+      },
+    };
+  });
+  ipcServer.start();
+
   // 运行时配置文件监控
   const configPath = resolvePaths().config;
   fs.watchFile(configPath, { interval: 5000 }, (_curr, _prev) => {
@@ -421,6 +450,7 @@ async function main() {
   const shutdown = async () => {
     logger.info('\n\nShutting down gracefully...');
     fs.unwatchFile(configPath);
+    ipcServer.stop();
     eventBus.publish({
       type: 'system:shutdown',
       timestamp: Date.now()
@@ -442,6 +472,8 @@ async function main() {
 }
 
 main().catch((error) => {
+  const msg = `Fatal error: ${error?.stack || error}`;
   logger.error('Fatal error:', error);
+  console.error(msg);  // ensure it lands in stdout.log for self-heal diagnostics
   process.exit(1);
 });

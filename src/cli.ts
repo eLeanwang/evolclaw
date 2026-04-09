@@ -3,9 +3,11 @@ import path from 'path';
 import { spawn, execFileSync, execFile } from 'child_process';
 import { promisify } from 'util';
 import { resolveRoot, resolvePaths, ensureDataDirs, getPackageRoot } from './paths.js';
-import { loadConfig, validateConfigIntegrity } from './config.js';
+import { loadConfig, validateConfigIntegrity, resolveAnthropicConfig } from './config.js';
 import { migrateProject } from './utils/migrate-project.js';
-import { cmdInit, cmdInitAun } from './utils/init.js';
+import readline from 'readline';
+import { cmdInit, cmdInitAun, checkAunEnvironment } from './utils/init.js';
+import { ipcQuery } from './utils/ipc-client.js';
 import { cmdInitWechat } from './utils/init-wechat.js';
 import { cmdInitFeishu } from './utils/init-feishu.js';
 import * as platform from './utils/cross-platform.js';
@@ -396,6 +398,28 @@ function formatTimeAgo(ms: number): string {
   return `${day}天前`;
 }
 
+function showConfigChannels(config: any) {
+  // Feishu
+  if (config.channels?.feishu?.appId) {
+    console.log(`  feishu: Configured (App ID: ${config.channels.feishu.appId.slice(0, 8)}...)`);
+  } else {
+    console.log('  feishu: - Not configured');
+  }
+  // WeChat
+  if (config.channels?.wechat?.token) {
+    console.log(`  wechat: Configured (Token: ${config.channels.wechat.token.slice(0, 20)}...)`);
+  } else {
+    console.log('  wechat: - Not configured');
+  }
+  // AUN
+  const aunAid = config.channels?.aun?.aid;
+  if (aunAid && !aunAid.includes('your-') && !aunAid.includes('placeholder')) {
+    console.log(`  aun: Configured (${aunAid})`);
+  } else {
+    console.log('  aun: - Not configured');
+  }
+}
+
 async function cmdStatus() {
   const p = resolvePaths();
   const pid = isRunning(p.pid);
@@ -473,106 +497,40 @@ async function cmdStatus() {
     } catch {}
   }
 
-  // Channel status - only show connection status if running
+  // Channel status
   if (fs.existsSync(p.config)) {
     console.log('');
-    console.log(pid ? '🔌 Channels:' : '🔌 Channel Configuration:');
-    try {
-      const config = JSON.parse(fs.readFileSync(p.config, 'utf-8'));
+    const config = JSON.parse(fs.readFileSync(p.config, 'utf-8'));
 
-      // Feishu
-      if (config.channels?.feishu?.appId && config.channels?.feishu?.appSecret) {
-        if (pid) {
-          // Running: check actual connection
-          try {
-            const lark = await import('@larksuiteoapi/node-sdk');
-            const client = new lark.Client({ appId: config.channels!.feishu!.appId, appSecret: config.channels!.feishu!.appSecret });
-            const res = await client.auth.tenantAccessToken.internal({
-              data: { app_id: config.channels!.feishu!.appId, app_secret: config.channels!.feishu!.appSecret },
-            });
-            if (res.code === 0) {
-              console.log(`  Feishu: ✓ Connected (App ID: ${config.channels!.feishu!.appId.slice(0, 8)}...)`);
-            } else {
-              console.log(`  Feishu: ✗ Connection refused (${res.msg})`);
-            }
-          } catch (e: any) {
-            const msg = e.message || '';
-            if (msg.includes('ETIMEDOUT') || msg.includes('ENETUNREACH') || msg.includes('ENOTFOUND')) {
-              console.log('  Feishu: ✗ Connection timeout (network unreachable)');
-            } else {
-              console.log(`  Feishu: ✗ Connection failed (${msg.slice(0, 80)})`);
-            }
-          }
-        } else {
-          // Not running: just show configured
-          console.log(`  Feishu: ✓ Configured (App ID: ${config.channels!.feishu!.appId.slice(0, 8)}...)`);
+    if (pid) {
+      // Running: query IPC for real-time status
+      const status = await ipcQuery(p.socket, { type: 'status' });
+      if (status) {
+        console.log('🔌 Channels (live):');
+        for (const [name, ch] of Object.entries(status.channels)) {
+          const label = ch.connected
+            ? '✓ Connected'
+            : ch.reconnectAttempt
+              ? `⏳ Reconnecting (${ch.reconnectAttempt}/${ch.maxAttempts})`
+              : '✗ Disconnected';
+          console.log(`  ${name}: ${label}`);
+        }
+        if (status.stats) {
+          console.log('');
+          console.log('📊 Last hour:');
+          console.log(`  Messages: ${status.stats.received} received, ${status.stats.completed} completed`);
+          if (status.stats.errors > 0) console.log(`  Errors: ${status.stats.errors}`);
+          if (status.stats.completed > 0) console.log(`  Avg response: ${(status.stats.avgResponseMs / 1000).toFixed(1)}s`);
         }
       } else {
-        console.log('  Feishu: - Not configured');
+        // IPC unreachable but PID exists — show config only
+        console.log('🔌 Channels (IPC unreachable):');
+        showConfigChannels(config);
       }
-
-      // WeChat
-      if (config.channels?.wechat?.token) {
-        const tokenPreview = config.channels.wechat.token.slice(0, 20);
-        if (pid) {
-          // Running: validate token
-          try {
-            const baseUrl = (config.channels.wechat.baseUrl || 'https://ilinkai.weixin.qq.com').replace(/\/$/, '');
-            const body = JSON.stringify({ base_info: { channel_version: '1.0.0' } });
-            const uint32 = (await import('node:crypto')).default.randomBytes(4).readUInt32BE(0);
-            const wechatUin = Buffer.from(String(uint32), 'utf-8').toString('base64');
-            const res = await fetch(`${baseUrl}/ilink/bot/getconfig`, {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                'AuthorizationType': 'ilink_bot_token',
-                'Authorization': `Bearer ${config.channels.wechat.token.trim()}`,
-                'X-WECHAT-UIN': wechatUin,
-              },
-              body,
-              signal: AbortSignal.timeout(10_000),
-            });
-            const resp = JSON.parse(await res.text()) as { ret?: number; errcode?: number };
-            const isExpired = resp.errcode === -14 || resp.ret === -14;
-            if (isExpired) {
-              console.log(`  WeChat: ✗ Token expired (Token: ${tokenPreview}...)`);
-              console.log('          Run: evolclaw init wechat && evolclaw restart');
-            } else {
-              console.log(`  WeChat: ✓ Connected (Token: ${tokenPreview}...)`);
-            }
-          } catch (e: any) {
-            const msg = e.message || '';
-            if (msg.includes('ETIMEDOUT') || msg.includes('ENETUNREACH') || msg.includes('ENOTFOUND')) {
-              console.log(`  WeChat: ✗ Connection timeout (Token: ${tokenPreview}...)`);
-            } else {
-              console.log(`  WeChat: ✓ Configured (Token: ${tokenPreview}...)`);
-            }
-          }
-        } else {
-          // Not running: just show configured
-          console.log(`  WeChat: ✓ Configured (Token: ${tokenPreview}...)`);
-        }
-      } else {
-        console.log('  WeChat: - Not configured');
-      }
-
-      // AUN
-      const aunAid = config.channels?.aun?.aid;
-      const isAunPlaceholder = !aunAid ||
-        aunAid.includes('your-') || aunAid.includes('placeholder');
-      if (aunAid && !isAunPlaceholder) {
-        console.log(`  AUN: ✓ Configured (${aunAid})`);
-      } else {
-        console.log('  AUN: - Not configured');
-      }
-
-      if (config.agents?.anthropic?.model) {
-        console.log(`  Model: ${config.agents.anthropic.model}`);
-      }
-      if (config.projects?.defaultPath) {
-        console.log(`  Default project: ${config.projects.defaultPath}`);
-      }
-    } catch {}
+    } else {
+      console.log('🔌 Channel Configuration:');
+      showConfigChannels(config);
+    }
   }
 
   console.log('');
@@ -619,11 +577,17 @@ async function cmdRestartMonitor() {
   const restartLog = path.join(p.logs, 'restart.log');
   const MAX_HEAL_ATTEMPTS = 3;
   const READY_TIMEOUT = 30000; // 30s（AUN sidecar 10s + Feishu 连接 12s）
+  const HEAL_TIMEOUT = 30 * 60 * 1000; // 30 分钟，让 claude 自然结束
   const eventBus = new EventBus();
 
   const log = (msg: string) => {
     const line = `[${new Date().toISOString().replace('T', ' ').slice(0, 19)}] ${msg}\n`;
     fs.appendFileSync(restartLog, line);
+  };
+
+  /** 检查服务是否已经在运行（ready signal 存在 + 进程存活） */
+  const isServiceAlive = (): boolean => {
+    return fs.existsSync(p.readySignal) && isRunning(p.pid) !== null;
   };
 
   log('Restart monitor started');
@@ -680,37 +644,94 @@ async function cmdRestartMonitor() {
   await notifyChannel(p, pendingInfo, '⚠️ 服务启动失败，正在尝试自动修复...', log);
 
   for (let attempt = 1; attempt <= MAX_HEAL_ATTEMPTS; attempt++) {
+    // 前置检查：服务可能已被上一轮 claude 修复并启动
+    if (isServiceAlive()) {
+      log(`✓ Service already running before attempt ${attempt}, skipping`);
+      await sendHealSummary(p, pendingInfo, attempt - 1, log);
+      eventBus.publish({ type: 'self-heal:completed', success: true, attempts: attempt - 1 });
+      archiveSelfHealLog(p, log);
+      cleanupPendingFile(pendingFile, log);
+      process.exit(0);
+    }
+
     log(`Self-heal attempt ${attempt}/${MAX_HEAL_ATTEMPTS}`);
     eventBus.publish({ type: 'self-heal:attempt', attemptNumber: attempt, maxAttempts: MAX_HEAL_ATTEMPTS });
     await notifyChannel(p, pendingInfo, `🔧 自动修复中（第 ${attempt}/${MAX_HEAL_ATTEMPTS} 次）...`, log);
 
-    // 调用 claude CLI 修复（递增超时：3/4/5 分钟）
-    const timeout = (2 + attempt) * 60 * 1000;
-    const healed = await invokeClaude(p, attempt, MAX_HEAL_ATTEMPTS, timeout, log);
+    const healed = await invokeClaude(p, attempt, MAX_HEAL_ATTEMPTS, HEAL_TIMEOUT, log);
+
+    // 后置检查：不管 invokeClaude 返回什么，都检查服务实际状态
+    if (isServiceAlive()) {
+      log(`✓ Service is running after attempt ${attempt}`);
+      await sendHealSummary(p, pendingInfo, attempt, log);
+      eventBus.publish({ type: 'self-heal:completed', success: true, attempts: attempt });
+      archiveSelfHealLog(p, log);
+      cleanupPendingFile(pendingFile, log);
+      process.exit(0);
+    }
+
     if (!healed) {
       log(`Self-heal attempt ${attempt} failed (claude invocation error)`);
       continue;
     }
 
-    // 重新启动
+    // claude 正常完成但服务没自动启动，尝试 spawn
     started = await spawnAndWaitReady(p, log, READY_TIMEOUT);
     if (started) {
       log(`✓ Self-heal succeeded on attempt ${attempt}`);
+      await sendHealSummary(p, pendingInfo, attempt, log);
       eventBus.publish({ type: 'self-heal:completed', success: true, attempts: attempt });
       archiveSelfHealLog(p, log);
-      // 通知由新进程自行发送（channel-agnostic），此处不再调用 notifyChannel
+      cleanupPendingFile(pendingFile, log);
       process.exit(0);
     }
 
     log(`Attempt ${attempt}: still failing after fix`);
   }
 
-  // 全部失败
+  // 全部失败 — 最后再检查一次
+  if (isServiceAlive()) {
+    log('✓ Service recovered during final check');
+    await sendHealSummary(p, pendingInfo, MAX_HEAL_ATTEMPTS, log);
+    eventBus.publish({ type: 'self-heal:completed', success: true, attempts: MAX_HEAL_ATTEMPTS });
+    archiveSelfHealLog(p, log);
+    cleanupPendingFile(pendingFile, log);
+    process.exit(0);
+  }
+
   log(`❌ All ${MAX_HEAL_ATTEMPTS} self-heal attempts failed`);
   eventBus.publish({ type: 'self-heal:completed', success: false, attempts: MAX_HEAL_ATTEMPTS });
   await notifyChannel(p, pendingInfo, `❌ ${MAX_HEAL_ATTEMPTS} 次自动修复均失败，需要人工介入。\n修复记录：${p.selfHealLog}`, log);
   cleanupPendingFile(pendingFile, log);
   process.exit(1);
+}
+
+/**
+ * 发送 self-heal 修复成功小结（从 self-heal.md 提取摘要）
+ */
+async function sendHealSummary(
+  p: ReturnType<typeof resolvePaths>,
+  pendingInfo: { channel: string; channelId: string } | null,
+  attempts: number,
+  log: (msg: string) => void
+) {
+  let summary = `✅ 自动修复成功（第 ${attempts || 1} 次尝试）`;
+  try {
+    if (fs.existsSync(p.selfHealLog)) {
+      const content = fs.readFileSync(p.selfHealLog, 'utf-8');
+      // 提取最后一个 ## 章节的要点
+      const sections = content.split(/^## /m).filter(Boolean);
+      const last = sections[sections.length - 1];
+      if (last) {
+        const lines = last.split('\n').filter(l => l.startsWith('- ')).map(l => l.trim());
+        if (lines.length > 0) {
+          summary += '\n' + lines.join('\n');
+        }
+      }
+    }
+  } catch {}
+  summary += '\n\n⚠️ 修复前进行中的任务已中断，如需继续请重新发送。';
+  await notifyChannel(p, pendingInfo, summary, log);
 }
 
 function sleep(ms: number): Promise<void> {
@@ -809,16 +830,27 @@ async function invokeClaude(
 
 关键信息：
 - 项目目录：${projectDir}
-- 错误日志：${stdoutLog}（请读取最后 50 行分析错误原因）
-- 主日志：${path.join(p.logs, 'evolclaw.log')}（可能包含更多上下文）
+- EVOLCLAW_HOME：${p.root}
+- 错误日志：${stdoutLog}
+- 主日志：${path.join(p.logs, 'evolclaw.log')}（logger 输出在这里，包含 config 校验失败等关键错误）
 - 修复记录：${selfHealLog}（${selfHealExists}）
 
+⚠️ 重要诊断技巧：
+- stdout.log 可能是空的（进程秒退时 logger 输出不会到 stdout），一定要同时读 evolclaw.log
+- 必须实际运行进程来复现错误：\`EVOLCLAW_HOME=${p.root} node dist/index.js 2>&1\`，观察输出和退出码
+- 检查是否有旧进程仍在运行：\`ps aux | grep 'node.*dist/index.js' | grep -v grep\`，旧进程可能占用端口或锁文件
+- 可以运行 \`EVOLCLAW_HOME=${p.root} node dist/cli.js diagnose\` 快速检查配置和数据库
+- 如果进程无任何输出就 exit(1)，说明是 process.exit(1) 被显式调用，搜索源码中所有 process.exit(1) 位置
+- evolclaw.json 有自动备份机制：运行时 config watch 检测到文件损坏会自动保存内存快照到 \`data/evolclaw-{timestamp}.json\`，同时 \`data/evolclaw.backup.json\` 是最近一次完整配置的备份。如果 evolclaw.json 损坏或缺失，可以从这些备份恢复
+
 请执行以下步骤：
-1. 读取错误日志，分析启动失败的根本原因
-2. 如果 ${selfHealLog} 存在，先阅读之前的修复记录，避免重复尝试已失败的方案
-3. 修复代码问题
-4. 执行 npm run build 确认编译通过
-5. 将本次修复内容追加到 ${selfHealLog}，格式：
+1. 读取 ${stdoutLog} 和 ${path.join(p.logs, 'evolclaw.log')} 的最后 50 行
+2. 运行 \`EVOLCLAW_HOME=${p.root} node dist/index.js 2>&1\` 复现错误（设置 10 秒超时）
+3. 如果 ${selfHealLog} 存在，先阅读之前的修复记录，避免重复尝试已失败的方案
+4. 根据实际复现的错误修复代码
+5. 执行 npm run build 确认编译通过
+6. 验证修复：启动服务确认 ready.signal 已写入，然后执行 \`EVOLCLAW_HOME=${p.root} node dist/cli.js stop\` 优雅停止（restart-monitor 会负责最终启动）
+7. 将本次修复内容追加到 ${selfHealLog}，格式：
    ## 第 ${attempt} 次修复 - {时间}
    - 错误原因：...
    - 修复方案：...
@@ -846,10 +878,16 @@ async function invokeClaude(
     log(`Claude CLI completed (attempt ${attempt})`);
     return true;
   } catch (error: any) {
-    const msg = error.message || String(error);
-    log(`Claude CLI error: ${msg.slice(0, 800)}`);
-    if (error.stdout) log(`Stdout: ${String(error.stdout).slice(0, 500)}`);
-    if (error.stderr) log(`Stderr: ${String(error.stderr).slice(0, 500)}`);
+    if (error.killed) {
+      log(`Claude CLI timeout after ${timeout / 60000}min (attempt ${attempt})`);
+    } else {
+      log(`Claude CLI error: exit code ${error.code ?? 'unknown'} (attempt ${attempt})`);
+    }
+    if (error.stdout) log(`Claude output: ${String(error.stdout).slice(0, 500)}`);
+    if (error.stderr) {
+      const stderr = String(error.stderr).replace(/Warning: no stdin.*\n?/g, '').trim();
+      if (stderr) log(`Claude stderr: ${stderr.slice(0, 300)}`);
+    }
     return false;
   }
 }
@@ -1009,6 +1047,109 @@ async function cmdMv(oldDir?: string, newDir?: string) {
   }
 }
 
+// ==================== Diagnose ====================
+
+async function cmdDiagnose() {
+  const p = resolvePaths();
+  let hasError = false;
+
+  // 1. 检查数据目录
+  console.log(`[diagnose] EVOLCLAW_HOME = ${p.root}`);
+  if (!fs.existsSync(p.root)) {
+    console.error(`[diagnose] ❌ 数据目录不存在: ${p.root}`);
+    hasError = true;
+  } else {
+    console.log(`[diagnose] ✓ 数据目录存在`);
+  }
+
+  // 2. 加载并校验配置
+  try {
+    const config = loadConfig();
+    console.log(`[diagnose] ✓ 配置文件加载成功: ${p.config}`);
+
+    const integrity = validateConfigIntegrity(config);
+    if (!integrity.valid) {
+      console.error(`[diagnose] ❌ 配置完整性校验失败:\n  ${integrity.reasons.join('\n  ')}`);
+      hasError = true;
+    } else {
+      console.log(`[diagnose] ✓ 配置完整性校验通过`);
+    }
+
+    // 3. 检查 Anthropic 配置
+    try {
+      const anthropic = resolveAnthropicConfig(config);
+      console.log(`[diagnose] ✓ Anthropic 配置解析成功 (apiKey: ${anthropic.apiKey ? '已设置' : '❌ 未设置'}, model: ${anthropic.model || 'default'})`);
+    } catch (e) {
+      console.error(`[diagnose] ❌ Anthropic 配置解析失败: ${e instanceof Error ? e.message : e}`);
+      hasError = true;
+    }
+  } catch (e) {
+    console.error(`[diagnose] ❌ 配置文件加载失败: ${e instanceof Error ? e.message : e}`);
+    hasError = true;
+  }
+
+  // 4. 检查数据库
+  try {
+    const { SessionManager } = await import('./core/session-manager.js');
+    const eventBus = new EventBus();
+    new SessionManager(p.db, eventBus);
+    console.log(`[diagnose] ✓ 数据库初始化成功: ${p.db}`);
+  } catch (e) {
+    console.error(`[diagnose] ❌ 数据库初始化失败: ${e instanceof Error ? e.message : e}`);
+    hasError = true;
+  }
+
+  // 5. 检查残留进程
+  try {
+    const pid = isRunning(p.pid);
+    if (pid) {
+      console.log(`[diagnose] ⚠️ 已有进程运行中: PID ${pid}`);
+    } else {
+      console.log(`[diagnose] ✓ 无残留进程`);
+    }
+  } catch {
+    console.log(`[diagnose] ✓ 无 PID 文件`);
+  }
+
+  // 6. 检查关键文件
+  const appMain = path.join(getPackageRoot(), 'dist', 'index.js');
+  if (!fs.existsSync(appMain)) {
+    console.error(`[diagnose] ❌ 编译产物不存在: ${appMain}`);
+    hasError = true;
+  } else {
+    console.log(`[diagnose] ✓ 编译产物存在: ${appMain}`);
+  }
+
+  if (hasError) {
+    console.error('\n[diagnose] ❌ 诊断发现问题，请修复后重试');
+    process.exit(1);
+  } else {
+    console.log('\n[diagnose] ✓ 所有检查通过');
+  }
+}
+
+async function cmdTui() {
+  const config = loadConfig();
+  const aun = config.channels?.aun;
+  if (!aun?.owner || !aun?.aid) {
+    console.error('[tui] AUN 未配置，请先运行: evolclaw init aun');
+    process.exit(1);
+  }
+
+  // Check Python + aun_core, interactive install if missing
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  const ready = await checkAunEnvironment(rl);
+  rl.close();
+  if (!ready) {
+    process.exit(1);
+  }
+
+  const pythonBin = aun.pythonBin || process.env.AUN_PYTHON || 'python3';
+  const cliScript = path.join(getPackageRoot(), 'aun', 'aun_cli.py');
+  const child = spawn(pythonBin, [cliScript, '-a', aun.owner, '-t', aun.aid], { stdio: 'inherit' });
+  child.on('exit', (code) => process.exit(code ?? 0));
+}
+
 // ==================== Main ====================
 
 export async function main(args: string[]) {
@@ -1047,8 +1188,14 @@ export async function main(args: string[]) {
     case 'mv':
       await cmdMv(args[1], args[2]);
       break;
+    case 'diagnose':
+      await cmdDiagnose();
+      break;
+    case 'tui':
+      await cmdTui();
+      break;
     default:
-      console.log(`Usage: evolclaw {init|start|stop|restart|status|logs|mv}
+      console.log(`Usage: evolclaw {init|start|stop|restart|status|logs|tui|diagnose|mv}
 
 Commands:
   init          创建配置文件 (${resolvePaths().config})
@@ -1060,6 +1207,8 @@ Commands:
   restart       重启服务
   status        查看状态
   logs          查看日志 (tail -f)
+  tui           启动 AUN TUI 客户端
+  diagnose      诊断启动环境（配置、数据库、进程）
   mv <old> <new>  迁移项目目录（保留 Claude/Codex/EvolClaw 会话）
 
 Environment:
