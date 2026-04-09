@@ -73,6 +73,8 @@ function createMockSessionManager(overrides: Record<string, any> = {}) {
       consecutiveErrors: 0, safeMode: false, lastSuccessTime: Date.now(),
     }),
     setSafeMode: vi.fn().mockResolvedValue(undefined),
+    markProcessing: vi.fn(),
+    clearProcessing: vi.fn(),
     ...overrides,
   };
 }

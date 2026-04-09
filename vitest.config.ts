@@ -32,6 +32,9 @@ export default defineConfig({
   test: {
     globals: true,
     environment: 'node',
+    globalSetup: ['./tests/global-setup.ts'],
+    setupFiles: ['./tests/setup.ts'],
+    exclude: ['**/node_modules/**', '**/dist/**', 'aun/**'],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json', 'html'],

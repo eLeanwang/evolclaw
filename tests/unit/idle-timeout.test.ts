@@ -84,6 +84,8 @@ function createMockSessionManager() {
     recordError: vi.fn().mockResolvedValue(undefined),
     getHealthStatus: vi.fn().mockResolvedValue({ consecutiveErrors: 0, safeMode: false, lastSuccessTime: Date.now() }),
     setSafeMode: vi.fn().mockResolvedValue(undefined),
+    markProcessing: vi.fn(),
+    clearProcessing: vi.fn(),
   };
 }
 
