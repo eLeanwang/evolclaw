@@ -88,7 +88,6 @@ _ensure_ssl_certs()
 from aun_core import AUNClient
 from aun_core.keystore.file import FileKeyStore
 from prompt_toolkit import Application, PromptSession
-from prompt_toolkit.application import get_app_or_none
 from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.document import Document
@@ -158,23 +157,6 @@ def _save_config(cfg: dict):
         _CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
         _CONFIG_FILE.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
-def _load_evolclaw_config():
-    """尝试从 evolclaw.json 读取 AUN 通道配置，返回 (owner, aid) 或 (None, None)。"""
-    env = os.environ.get("EVOLCLAW_HOME", "").strip()
-    candidates = []
-    if env:
-        candidates.append(Path(env) / "data" / "evolclaw.json")
-    candidates.append(Path.home() / ".evolclaw" / "data" / "evolclaw.json")
-    for p in candidates:
-        if p.exists():
-            try:
-                cfg = json.loads(p.read_text(encoding="utf-8"))
-                aun = cfg.get("channels", {}).get("aun", {})
-                return aun.get("owner"), aun.get("aid")
-            except (json.JSONDecodeError, OSError):
-                pass
-    return None, None
-
 def _resolve_aid(name: str) -> str:
     """AID 是域名，保留供未来扩展（如别名映射）。"""
     return name
@@ -217,6 +199,7 @@ def _get_keystore() -> "FileKeyStore":
 
 STYLE = Style.from_dict({
     "prompt":              "#ffff00 bold",
+    "spinner":             "#888888",
     "bottom-toolbar":      "bg:#1a1a2e #aaaaaa",
     "validation-toolbar":  "bg:#1a1a2e #ff6666",
 })
@@ -600,10 +583,6 @@ class AUNCli:
         self._last_sent = None     # 最近发送时间
         self._processing = set()   # 正在处理中的 sessionId 集合
         self._proc_start = {}      # sessionId → 开始时间（event loop time）
-        self._spinner_task = None  # spinner 动画 asyncio.Task
-        self._spinner_aid = ""     # spinner 显示的 AID 名称
-        self._spinner_frame = 0
-        self._spinner_elapsed = 0
         # debug 菜单
         self.debug_mode = cfg.get("debug", False)
         self._last_raw_message = None   # /rawdata 用
@@ -620,9 +599,51 @@ class AUNCli:
         self._suppress_next = False     # silent send 时抑制下一条回复
         self._raw_log = []              # rawdata 条目缓冲 (每条是一个 dict: {ts, data})
         self._raw_monitor_app = None    # 活跃的监控 Application 引用
+        # spinner 动态提示
+        self._spinner_task = None       # asyncio.Task for _spinner_loop
+        self._spinner_aid = None        # 当前处理中的 AID (None=不显示)
+        self._spinner_frame = 0         # 当前帧索引
+        self._spinner_elapsed = 0       # 已运行秒数
+        self._spinner_session = None    # PromptSession 引用（供 invalidate）
         # 重连退避
         self._reconn_failures = 0       # 连续重连失败次数
         self._reconn_cooldown_until = 0 # 冷却截止时间（event loop time）
+
+    _SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+
+    def _start_spinner(self, aid: str):
+        """启动 spinner：记录 AID 并启动刷新循环。"""
+        name = aid.split(".")[0] if aid else "?"
+        self._spinner_aid = name
+        self._spinner_frame = 0
+        self._spinner_elapsed = 0
+        if self._spinner_task is None or self._spinner_task.done():
+            self._spinner_task = asyncio.ensure_future(self._spinner_loop())
+
+    def _stop_spinner(self):
+        """停止 spinner：清除状态，触发最后一次重绘去掉 spinner 行。"""
+        self._spinner_aid = None
+        if self._spinner_task and not self._spinner_task.done():
+            self._spinner_task.cancel()
+            self._spinner_task = None
+        # 触发重绘以移除 spinner 行
+        if self._spinner_session and self._spinner_session.app:
+            self._spinner_session.app.invalidate()
+
+    async def _spinner_loop(self):
+        """每 100ms 更新帧，每秒递增计时，通过 app.invalidate() 触发重绘。"""
+        ticks = 0  # 100ms 计数器
+        try:
+            while self._spinner_aid:
+                await asyncio.sleep(0.1)
+                ticks += 1
+                self._spinner_frame = (self._spinner_frame + 1) % len(self._SPINNER_FRAMES)
+                if ticks % 10 == 0:
+                    self._spinner_elapsed += 1
+                if self._spinner_session and self._spinner_session.app:
+                    self._spinner_session.app.invalidate()
+        except asyncio.CancelledError:
+            pass
 
     async def start(self):
         await self._try_start(self.my_aid)
@@ -673,40 +694,6 @@ class AUNCli:
             # 连接成功后预加载远端菜单
             asyncio.ensure_future(self.query_menu())
 
-    # ── Spinner 动画 ──────────────────────────────────────────────────────
-
-    _SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-
-    async def _spinner_loop(self, start_time: float):
-        """递增帧计数器，toolbar 刷新时读取。"""
-        try:
-            while True:
-                self._spinner_elapsed = int(asyncio.get_event_loop().time() - start_time)
-                self._spinner_frame = (self._spinner_frame + 1) % len(self._SPINNER_FRAMES)
-                app = get_app_or_none()
-                if app:
-                    app.invalidate()
-                await asyncio.sleep(0.1)
-        except asyncio.CancelledError:
-            pass
-
-    def _start_spinner(self, from_aid: str, start_time: float):
-        name = from_aid.split('.')[0]
-        self._stop_spinner()
-        self._spinner_aid = name
-        self._spinner_frame = 0
-        self._spinner_elapsed = 0
-        self._spinner_task = asyncio.ensure_future(self._spinner_loop(start_time))
-
-    def _stop_spinner(self):
-        if self._spinner_task and not self._spinner_task.done():
-            self._spinner_task.cancel()
-        self._spinner_task = None
-        self._spinner_aid = ""
-        app = get_app_or_none()
-        if app:
-            app.invalidate()
-
     # ─────────────────────────────────────────────────────────────────────
 
     async def _on_message(self, data):
@@ -750,12 +737,12 @@ class AUNCli:
             if status == "start":
                 self._processing.add(sid)
                 self._proc_start[sid] = asyncio.get_event_loop().time()
+                self._start_spinner(from_aid)
                 if self.debug_mode and self._last_sent is not None:
                     delay_ms = int((asyncio.get_event_loop().time() - self._last_sent) * 1000)
                     print_status(from_aid, "▶", C.CYAN, f"开始处理 ({delay_ms}ms)")
                 else:
                     print_status(from_aid, "▶", C.CYAN, "开始处理")
-                self._start_spinner(from_aid, self._proc_start[sid])
             elif status == "done":
                 self._stop_spinner()
                 self._processing.discard(sid)
@@ -1244,12 +1231,7 @@ async def repl(c: AUNCli):
         enc  = "🔒 E2EE" if c.encrypt else "🔓 明文"
         rej  = f"拒收: {c.rejected}  " if c.rejected else ""
         dbg  = "  [DEBUG]" if c.debug_mode else ""
-        line1 = f" <b>{conn}</b>  {me}  →  {tgt}  消息: {c.msg_count}  {rej}{enc}{dbg}"
-        if c._spinner_aid:
-            frame = c._SPINNER_FRAMES[c._spinner_frame]
-            line2 = f" <b>{frame} {c._spinner_aid} 处理中… {c._spinner_elapsed}s</b>"
-            return HTML(line1 + "\n" + line2)
-        return HTML(line1)
+        return HTML(f" <b>{conn}</b>  {me}  →  {tgt}  消息: {c.msg_count}  {rej}{enc}{dbg}")
 
     session = PromptSession(
         completer=AUNCompleter(cli_ref=c),
@@ -1278,11 +1260,21 @@ async def repl(c: AUNCli):
             _resize_handle[0] = loop.call_later(0.3, _orig_on_resize)
         session.app._on_resize = _debounced_resize
 
+    c._spinner_session = session
+
+    def prompt_msg():
+        parts = []
+        if c._spinner_aid:
+            frame = c._SPINNER_FRAMES[c._spinner_frame]
+            parts.append(("class:spinner", f"  {frame} {c._spinner_aid} 处理中… {c._spinner_elapsed}s\n"))
+        parts.append(("class:prompt", " ❯ "))
+        return parts
+
     with patch_stdout():
         while True:
             try:
                 line = await session.prompt_async(
-                    [("class:prompt", " ❯ ")],
+                    prompt_msg,
                     style=STYLE,
                 )
             except (EOFError, KeyboardInterrupt):
@@ -1530,9 +1522,7 @@ examples:
             aid_p.print_help()
         return
 
-    ec_owner, ec_aid = _load_evolclaw_config()
-    cli_cfg = _load_config()
-    aid = args.aid or ec_owner or cli_cfg.get("aid")
+    aid = args.aid if args.aid else _load_config().get("aid")
     if not aid:
         error("未指定 AID，请先创建: aun aid new <aid>")
         return
@@ -1540,12 +1530,10 @@ examples:
         error(f"无效 AID: {aid}（需要合法域名格式）")
         return
 
-    target = args.target or ec_aid or cli_cfg.get("target")
+    target = args.target if args.target else None
     if target and not _is_valid_aid(target):
         error(f"无效目标 AID: {target}（需要合法域名格式）")
         return
-    if ec_owner or ec_aid:
-        info("使用 EvolClaw 配置 (channels.aun)")
 
     c = AUNCli(aid=aid, target=target)
     try:

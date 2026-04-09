@@ -17,6 +17,9 @@ data/restart-pending.json
 data/restart-confirm-*.json
 data/wechat-*.txt
 data/wechat-*.json
+data/evolclaw-*.json
+data/evolclaw.backup.json
+data/*.pid
 
 # Node.js
 node_modules/
@@ -29,6 +32,7 @@ projects/
 # Claude 临时文件
 .claude/
 .claude-backup-*/
+.evolclaw/
 
 # 测试文件
 tests/
@@ -59,6 +63,27 @@ conversations/
 阿里云仓库配置脚本.sh
 scripts/
 test-*.ts
+
+# 备份文件
+*.bak
+
+# 临时/测试产物
+123.txt
+demo-render.ts
+latex-boxed.png
+mermaid-flowchart.png
+
+# 外部文档
+OrgMind*.html
+space-elevator-analysis.md
+architecture-flowchart.md
+
+# AUN CLI 凭据（含私钥）
+aun-cli/
+
+# macOS 残留
+__MACOSX/
+aun/__MACOSX/
 
 # 项目文档（不公开）
 CLAUDE.md

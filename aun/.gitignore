@@ -3,36 +3,27 @@
 __pycache__/
 *.egg-info/
 *.pyc
-*.pyo
-*.pyd
+
+# Local runtime data (AID keys, SDK, cli data, testers)
+.local/
 
 # Claude Code
 .claude/
 
-# History and logs
+# Temp files
 .history
 .codex
 *.log
 *.txt
-
-# AID directories (test accounts)
-evolclaw-tester-*/
 default_aid
-
-# AUN CLI data (keys, config, tokens)
-aun-cli/
 .seed
 
 # Backups
-*.bak/
-*-backup/
-ec-aid-backup/
-evolclaw-aid-backup/
-
-# SDK (local modifications, not tracked)
-aun-sdk-core/
-aun-sdk-core.bak/
+backup/
 
 # OS
 .DS_Store
 Thumbs.db
+
+# Override parent gitignore
+!docs/
