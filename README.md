@@ -188,8 +188,11 @@ evolclaw/
 │   ├── types.ts                    # 类型定义
 │   ├── config.ts                   # 配置加载
 │   ├── paths.ts                    # 路径解析
-│   ├── cli.ts                      # CLI 命令（init/start/stop/...）
+│   ├── cli.ts                      # CLI 命令（init/start/stop/tui/mv/...）
 │   └── index.ts                    # 主入口
+├── aun/
+│   ├── aun_cli.py                  # AUN TUI 客户端（Python）
+│   └── pyproject.toml              # AUN CLI 依赖声明
 └── data/
     └── evolclaw.sample.json        # 配置模板
 ```
