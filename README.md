@@ -1,8 +1,8 @@
 # EvolClaw
 
-> 把 Claude Code 装进飞书和微信 —— 随时随地，接力开发
+> AI Agent 统一网关 —— 连接 IM、终端、Agent 网络
 
-EvolClaw 是一个轻量级 AI Agent 网关，基于 Claude Agent SDK 构建。它将终端中的 Claude Code 能力延伸到飞书、微信等即时通讯工具，让你在手机上也能review 代码、调试问题、管理项目，真正实现多终端无缝接力开发。
+EvolClaw 是一个轻量级 AI Agent 网关系统。它为 Claude Code / Codex 等 AI Agent 提供统一接入层，支持飞书、微信、AUN Mesh 网络和终端 TUI 四种通道。人类可以通过手机 IM 随时接力开发，其他 Agent 也可以通过 AUN 网络直接调用你的 Agent —— 不只是人机交互，也是 Agent 间协作的基础设施。
 
 ## 核心特性
 
@@ -11,9 +11,11 @@ EvolClaw 是一个轻量级 AI Agent 网关，基于 Claude Agent SDK 构建。�
 - 🚀 **轻量化设计**：进程模式运行，CLI 命令行管理，无端口开放，无容器依赖，无 UI 界面
 - 📁 **多项目支持**：每个项目独立会话，支持动态切换
 - 👥 **双模式会话**：多用户私聊会话隔离，群聊会话共享，满足不同协作场景
-- 🌐 **多渠道接入**：Channel Adapter 模式，飞书 + 微信扫码一键接入
+- 🌐 **多渠道接入**：Channel Adapter 模式，飞书 + 微信 + AUN Mesh 网络，扫码一键接入
+- 🤖 **Agent 间互联**：通过 AUN 网络，你的 Agent 可被其他 Agent 发现和调用
+- 🖥️ **终端 TUI 客户端**：`evolclaw tui` 直接在终端与远程 Agent 对话，无需 IM
 - 🔐 **分层权限**：用户级/管理员级命令分离，多用户安全隔离
-- 📊 **统一消息处理**：消息处理与渠道解耦，新增渠道仅需 ~15 行代码
+- 📦 **项目搬家**：`evolclaw mv` 一键迁移项目目录，保留 Claude/Codex/EvolClaw 全部会话历史
 - 💾 **会话持久化**：会话数据与 CLI 工具共享，不额外存储，服务重启不丢失
 - ⚡ **执行中插入**：任务执行中可发送新消息，自动中断当前任务并处理新请求
 - 🔕 **消息智能发送**：前台任务动态聚合批量发送，后台任务静默完成后通知
@@ -23,7 +25,8 @@ EvolClaw 是一个轻量级 AI Agent 网关，基于 Claude Agent SDK 构建。�
 
 - **通勤路上**：手机打开飞书，继续昨晚的代码 review，到公司无缝切回终端
 - **会议间隙**：微信快速问一句「这个接口的返回格式是什么」，Agent 直接查代码回复
-- **下班之后**：躺在沙发上用手机跟进 CI 报错，让 Agent 定位问题并修复
+- **终端直连**：`evolclaw tui` 在任意终端直接与远程 Agent 对话，无需打开 IM
+- **Agent 协作**：通过 AUN 网络，让你的 Agent 被其他 Agent 调用，组成分布式协作
 - **外出离开工位**：不带电脑也能通过 IM 给 Agent 下达任务，回来看结果
 - **团队协作**：拉个飞书群，成员共享同一个 Agent 会话，一起讨论和调试
 
@@ -153,6 +156,9 @@ evolclaw stop       # 停止服务
 evolclaw restart    # 重启服务
 evolclaw status     # 查看状态
 evolclaw logs       # 查看日志（tail -f）
+evolclaw tui        # 启动 AUN TUI 终端客户端
+evolclaw mv <old> <new>  # 项目搬家（保留全部会话）
+evolclaw diagnose   # 诊断启动环境
 
 # 开发模式（热重载）
 npm run dev
@@ -239,6 +245,8 @@ evolclaw/
 - [x] Windows 系统 CLI 命令支持
 - [x] 微信插件支持图片/文件的收发
 - [x] AUN Mesh 网络通道接入
+- [x] TUI 终端客户端（`evolclaw tui`）
+- [x] 项目搬家工具（`evolclaw mv`）
 - [ ] 自动授权可配置（自动放行/自动拒绝）
 - [ ] 手动授权支持（飞书卡片/文本回复）
 - [ ] ACP 协议支持（接入 Codex / Gemini CLI）
