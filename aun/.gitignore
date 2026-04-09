@@ -1,0 +1,38 @@
+# Python
+.venv/
+__pycache__/
+*.egg-info/
+*.pyc
+*.pyo
+*.pyd
+
+# Claude Code
+.claude/
+
+# History and logs
+.history
+.codex
+*.log
+*.txt
+
+# AID directories (test accounts)
+evolclaw-tester-*/
+default_aid
+
+# AUN CLI data (keys, config, tokens)
+aun-cli/
+.seed
+
+# Backups
+*.bak/
+*-backup/
+ec-aid-backup/
+evolclaw-aid-backup/
+
+# SDK (local modifications, not tracked)
+aun-sdk-core/
+aun-sdk-core.bak/
+
+# OS
+.DS_Store
+Thumbs.db
