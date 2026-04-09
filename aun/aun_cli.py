@@ -99,7 +99,7 @@ from prompt_toolkit.layout.layout import Layout
 from prompt_toolkit.output import ColorDepth
 from prompt_toolkit.validation import Validator, ValidationError
 from prompt_toolkit.patch_stdout import patch_stdout
-from prompt_toolkit.shortcuts import print_formatted_text, message_dialog
+from prompt_toolkit.shortcuts import print_formatted_text
 from prompt_toolkit.styles import Style
 from rich.console import Console as RichConsole
 from rich.markdown import Markdown as RichMarkdown
@@ -107,7 +107,9 @@ from rich.theme import Theme as RichTheme
 
 # ── 配置 ──────────────────────────────────────────────────────────────────
 
-GATEWAY_URL = "wss://gateway.agentid.pub:20001/aun"
+GATEWAY_HOST = "gateway.agentid.pub"
+DEFAULT_GATEWAY_PORT = None  # 默认不指定端口（使用标准 443）
+GATEWAY_URL = None  # 运行时由 _init_globals() 设置
 
 def _gateway_cert_url(aid: str) -> str:
     """构造 Gateway 证书查询 URL。"""
@@ -128,19 +130,27 @@ async def _aid_exists(aid: str) -> bool:
         return False
 
 # 全局变量（运行时初始化）
-DATA_DIR = None
+AUN_PATH = None   # SDK 数据根目录（~/.aun），AIDs 在 {AUN_PATH}/AIDs/ 下
+DATA_DIR = None   # CLI 私有数据（~/.aun/aun-cli），存 history、config
 HISTORY_FILE = None
 _CONFIG_FILE = None
 
 def _init_globals():
     """初始化全局配置变量。"""
-    global DATA_DIR, HISTORY_FILE, _CONFIG_FILE
+    global AUN_PATH, DATA_DIR, HISTORY_FILE, _CONFIG_FILE, GATEWAY_URL
     env = os.environ.get("AUN_CLI_DATA", "").strip()
     base = Path(env) if env else Path.home() / ".aun"
+    AUN_PATH = base
     DATA_DIR = base / "aun-cli"
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     HISTORY_FILE = DATA_DIR / ".history"
     _CONFIG_FILE = DATA_DIR / "config.json"
+    # gateway port: config > default (empty = standard 443)
+    port = str(_load_config().get("gateway_port", "") or "")
+    if port:
+        GATEWAY_URL = f"wss://{GATEWAY_HOST}:{port}/aun"
+    else:
+        GATEWAY_URL = f"wss://{GATEWAY_HOST}/aun"
 
 def _load_config() -> dict:
     """加载 CLI 配置。"""
@@ -157,10 +167,6 @@ def _save_config(cfg: dict):
         _CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
         _CONFIG_FILE.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
-def _resolve_aid(name: str) -> str:
-    """AID 是域名，保留供未来扩展（如别名映射）。"""
-    return name
-
 # AID 合法性：域名格式，每段只允许字母、数字、连字符，至少三段（name.domain.tld）
 _AID_LABEL_RE = re.compile(r'^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?$')
 
@@ -169,53 +175,74 @@ def _is_valid_aid(name: str) -> bool:
     labels = name.split('.')
     return len(labels) >= 3 and all(_AID_LABEL_RE.match(label) for label in labels)
 
+def _validate_aid(name: str) -> bool:
+    """校验 AID 格式，无效时打印错误。返回是否有效。"""
+    if _is_valid_aid(name):
+        return True
+    error(f"无效 AID: {name}（需要合法域名格式）")
+    return False
+
+def _short_name(aid: str) -> str:
+    """AID → 首段短名（如 alice.agentid.pub → alice）。"""
+    return aid.split(".")[0] if aid else "?"
+
 MAX_RECENT_PEERS = 7
 _last_recorded_peer = None  # 避免对同一 peer 连续写磁盘
+_peers_cache = None          # 内存缓存，避免补全时每次按键读磁盘
 
 def _record_peer(aid: str):
     """记录成功通信过的 peer AID（最近 7 个，最新在前）。"""
-    global _last_recorded_peer
+    global _last_recorded_peer, _peers_cache
     if not aid or aid == "?" or aid == _last_recorded_peer:
         return
     _last_recorded_peer = aid
     cfg = _load_config()
     peers = cfg.get("recent_peers", [])
     if peers and peers[0] == aid:
+        _peers_cache = peers
         return  # 已在最前，无需写入
     peers = [p for p in peers if p != aid]
     peers.insert(0, aid)
     cfg["recent_peers"] = peers[:MAX_RECENT_PEERS]
     _save_config(cfg)
+    _peers_cache = cfg["recent_peers"]
+
+def _get_recent_peers() -> list:
+    """返回最近联系人列表（优先内存缓存）。"""
+    global _peers_cache
+    if _peers_cache is None:
+        _peers_cache = _load_config().get("recent_peers", [])
+    return _peers_cache
 
 def _make_client() -> "AUNClient":
     """构造 AUNClient，统一 aun_path 配置。"""
-    return AUNClient({"aun_path": str(DATA_DIR)})
+    return AUNClient({"aun_path": str(AUN_PATH)})
 
 def _get_keystore() -> "FileKeyStore":
     """获取与 _make_client 同路径的 FileKeyStore 实例。"""
-    return FileKeyStore(DATA_DIR)
+    return FileKeyStore(AUN_PATH)
 
 # ── 样式 ──────────────────────────────────────────────────────────────────
 
 STYLE = Style.from_dict({
     "prompt":              "#ffff00 bold",
-    "spinner":             "#888888",
+    "spinner":             "#888888 nobold",
     "bottom-toolbar":      "bg:#1a1a2e #aaaaaa",
     "validation-toolbar":  "bg:#1a1a2e #ff6666",
 })
 
 _LOCAL_CMDS = [
-    ("//debug",      "//debug",           "//debug",   "",    "toggle 调试模式"),
-    ("//plain",      "//plain",           "//plain",   "",    "切换 明文/E2EE"),
-    ("//target",     "//target <aid>",    "//target",  "aid", "设置目标（或用 @）"),
-    ("//ping",       "//ping",            "//ping",    "",    "Ping 网关"),
-    ("//processing", "//processing",      "//processing", "", "当前处理状态"),
-    ("//rawdata",    "//rawdata",         "//rawdata", "",    "最后消息原始内容"),
-    ("//e2ee",       "//e2ee",            "//e2ee",    "",    "E2EE 状态"),
-    ("//status",     "//status",          "//status",  "",    "连接状态"),
-    ("//aid",        "//aid <cmd>",       "//aid",     "cmd", "AID 管理"),
-    ("//help",       "//help",            "//help",    "",    "帮助"),
-    ("//quit",       "//quit",            "//quit",    "",    "退出"),
+    ("//debug",      "",    "toggle 调试模式"),
+    ("//plain",      "",    "切换 明文/E2EE"),
+    ("//target",     "aid", "设置目标（或用 @）"),
+    ("//ping",       "",    "Ping 网关"),
+    ("//processing", "",    "当前处理状态"),
+    ("//rawdata",    "",    "最后消息原始内容"),
+    ("//e2ee",       "",    "E2EE 状态"),
+    ("//status",     "",    "连接状态"),
+    ("//aid",        "cmd", "AID 管理"),
+    ("//help",       "",    "帮助"),
+    ("//quit",       "",    "退出"),
 ]
 
 class AUNValidator(Validator):
@@ -244,8 +271,7 @@ class AUNCompleter(Completer):
 
         # @ 前缀：最近通信过的 peer AID（@aid 或 @aid 消息）
         if text[0] == '@':
-            cfg = _load_config()
-            peers = cfg.get("recent_peers", [])
+            peers = _get_recent_peers()
             if not peers:
                 yield Completion("@", start_position=-len(text),
                                  display="(无最近联系人)", display_meta="使用 //target 设置")
@@ -257,7 +283,7 @@ class AUNCompleter(Completer):
             filter_text = after_at
             current_target = self.cli_ref.target_aid if self.cli_ref else None
             for aid in peers:
-                short = aid.split(".")[0]  # 第一段作为显示短名
+                short = _short_name(aid)
                 is_current = " ✓" if aid == current_target else ""
                 if aid.startswith(filter_text) or short.startswith(filter_text):
                     # 补全文本用完整 AID + 尾部空格，方便直接输入消息
@@ -270,17 +296,16 @@ class AUNCompleter(Completer):
 
         # // 前缀：本地命令菜单
         if text.startswith("//"):
-            filter_text = text[2:]  # // 后面的内容
-            for _cmd, display, comp_text, args, meta in _LOCAL_CMDS:
-                cmd_bare = _cmd.lstrip('/')  # e.g. "/debug"
-                match_word = cmd_bare
-                if match_word.startswith(filter_text):
-                    ct = comp_text + " " if match_word == filter_text else comp_text
-                    full_display = f"{display}" if not args else display
+            filter_text = text[2:]
+            for cmd, args, meta in _LOCAL_CMDS:
+                cmd_bare = cmd.lstrip('/')
+                display = f"{cmd} <{args}>" if args else cmd
+                if cmd_bare.startswith(filter_text):
+                    ct = cmd + " " if cmd_bare == filter_text else cmd
                     yield Completion(ct, start_position=-len(text),
-                                     display=full_display, display_meta=meta)
-                elif filter_text.startswith(match_word) and (
-                    len(filter_text) == len(match_word) or filter_text[len(match_word)] == ' '
+                                     display=display, display_meta=meta)
+                elif filter_text.startswith(cmd_bare) and (
+                    len(filter_text) == len(cmd_bare) or filter_text[len(cmd_bare)] == ' '
                 ):
                     yield Completion(text + " ", start_position=-len(text),
                                      display=display, display_meta=meta)
@@ -476,8 +501,6 @@ class C:
 def _p(s):
     print_formatted_text(ANSI(s), color_depth=ColorDepth.TRUE_COLOR)
 
-_ANSI_RE = re.compile(r'\033\[[0-9;]*[A-Za-z]')
-
 # ── Markdown 渲染 ─────────────────────────────────────────────────────────
 
 # Markdown 特征：至少包含一个 Markdown 语法元素才走 rich 渲染
@@ -494,6 +517,7 @@ _MD_HINT_RE = re.compile(
 )
 
 _RICH_THEME = RichTheme({"code": "green", "markdown.code": "green"})
+_MULTI_NL_RE = re.compile(r'\n{3,}')
 
 # Emoji 短码替换（:smile: → 😄）
 from rich._emoji_codes import EMOJI as _EMOJI_CODES
@@ -516,7 +540,7 @@ def _render_md(text: str) -> str:
         console.print(RichMarkdown(text, hyperlinks=False), end="")
         rendered = buf.getvalue().rstrip('\n')
         # rich 段落间会插空行，压缩连续空行为单个
-        rendered = re.sub(r'\n{3,}', '\n\n', rendered)
+        rendered = _MULTI_NL_RE.sub('\n\n', rendered)
         return rendered
     except Exception:
         return text
@@ -538,14 +562,12 @@ def info(msg):  _sys("·", C.CYAN, msg)
 def error(msg): _sys("✗", C.RED, msg)
 
 def print_recv(from_aid, text, extra=""):
-    name = from_aid.split(".")[0] if from_aid else "?"
+    name = _short_name(from_aid)
     ts = datetime.now().strftime('%H:%M:%S')
     text = _replace_emoji(text)
     rendered = _render_md(text)
     lines = rendered.rstrip().split('\n')
-    is_multiline = len(lines) > 1
-    # 首行：多行时 header 独占一行，单行时 header + 内容同行
-    if is_multiline:
+    if len(lines) > 1:
         header = f"{C.DIM}{ts}\033[22m {C.GREEN}◀ {name}\033[39m"
         _p(header)
         for i, line in enumerate(lines):
@@ -555,14 +577,8 @@ def print_recv(from_aid, text, extra=""):
         first = f"{C.DIM}{ts}\033[22m {C.GREEN}◀ {name}\033[39m  {lines[0]}{extra}"
         _p(first)
 
-def print_sent(to_aid, text):
-    name = to_aid.split(".")[0] if to_aid else "?"
-    ts = datetime.now().strftime('%H:%M:%S')
-    content = f"{C.DIM}{ts}\033[22m {C.YELLOW}▶ {name}\033[39m  {C.DIM}{text}\033[22m"
-    _p(content)
-
 def print_status(from_aid, icon, color, text):
-    name = from_aid.split(".")[0] if from_aid else "?"
+    name = _short_name(from_aid)
     ts = datetime.now().strftime('%H:%M:%S')
     content = f"{C.DIM}{ts}\033[22m {color}{icon} {name}\033[39m  {C.DIM}{text}\033[22m"
     _p(content)
@@ -583,15 +599,19 @@ class AUNCli:
         self._last_sent = None     # 最近发送时间
         self._processing = set()   # 正在处理中的 sessionId 集合
         self._proc_start = {}      # sessionId → 开始时间（event loop time）
+        # spinner 动态提示
+        self._spinner_task = None       # asyncio.Task for _spinner_loop
+        self._spinner_aid = None        # 当前处理中的 AID (None=不显示)
+        self._spinner_frame = 0         # 当前帧索引
+        self._spinner_elapsed = 0       # 已运行秒数
+        self._spinner_session = None    # PromptSession 引用（供 invalidate）
         # debug 菜单
         self.debug_mode = cfg.get("debug", False)
-        self._last_raw_message = None   # /rawdata 用
         self._last_e2ee_event = None    # /e2ee 用 {type, data, time}
         self._e2ee_restore_timer = None # token.refreshed 3秒恢复定时器
         self._pending_menu = None       # menu.response 缓存（成功后保留）
         self._menu_fresh = False        # 标记本轮查询是否收到新响应
         self._menu_querying = False     # 菜单查询进行中标记
-        self._menu_acked = False        # 菜单查询消息是否被对方 ACK
         self._menu_failures = 0         # 连续菜单查询失败次数
         self._menu_cooldown_until = 0   # 菜单冷却截止时间（event loop time）
         self._menu_cached_at = 0        # 缓存写入时间（event loop time）
@@ -599,58 +619,13 @@ class AUNCli:
         self._suppress_next = False     # silent send 时抑制下一条回复
         self._raw_log = []              # rawdata 条目缓冲 (每条是一个 dict: {ts, data})
         self._raw_monitor_app = None    # 活跃的监控 Application 引用
-        # spinner 动态提示
-        self._spinner_task = None       # asyncio.Task for _spinner_loop
-        self._spinner_aid = None        # 当前处理中的 AID (None=不显示)
-        self._spinner_frame = 0         # 当前帧索引
-        self._spinner_elapsed = 0       # 已运行秒数
-        self._spinner_session = None    # PromptSession 引用（供 invalidate）
         # 重连退避
         self._reconn_failures = 0       # 连续重连失败次数
         self._reconn_cooldown_until = 0 # 冷却截止时间（event loop time）
 
-    _SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
-
-    def _start_spinner(self, aid: str):
-        """启动 spinner：记录 AID 并启动刷新循环。"""
-        name = aid.split(".")[0] if aid else "?"
-        self._spinner_aid = name
-        self._spinner_frame = 0
-        self._spinner_elapsed = 0
-        if self._spinner_task is None or self._spinner_task.done():
-            self._spinner_task = asyncio.ensure_future(self._spinner_loop())
-
-    def _stop_spinner(self):
-        """停止 spinner：清除状态，触发最后一次重绘去掉 spinner 行。"""
-        self._spinner_aid = None
-        if self._spinner_task and not self._spinner_task.done():
-            self._spinner_task.cancel()
-            self._spinner_task = None
-        # 触发重绘以移除 spinner 行
-        if self._spinner_session and self._spinner_session.app:
-            self._spinner_session.app.invalidate()
-
-    async def _spinner_loop(self):
-        """每 100ms 更新帧，每秒递增计时，通过 app.invalidate() 触发重绘。"""
-        ticks = 0  # 100ms 计数器
-        try:
-            while self._spinner_aid:
-                await asyncio.sleep(0.1)
-                ticks += 1
-                self._spinner_frame = (self._spinner_frame + 1) % len(self._SPINNER_FRAMES)
-                if ticks % 10 == 0:
-                    self._spinner_elapsed += 1
-                if self._spinner_session and self._spinner_session.app:
-                    self._spinner_session.app.invalidate()
-        except asyncio.CancelledError:
-            pass
-
     async def start(self):
-        await self._try_start(self.my_aid)
-
-    async def _try_start(self, aid):
-        """用指定 AID 启动，AID 不存在则报错退出。"""
-        self.my_aid = aid
+        """用 self.my_aid 启动，AID 不存在则报错退出。"""
+        aid = self.my_aid
 
         self.client = _make_client()
         self.client._gateway_url = GATEWAY_URL
@@ -694,6 +669,44 @@ class AUNCli:
             # 连接成功后预加载远端菜单
             asyncio.ensure_future(self.query_menu())
 
+    # ── Spinner 动画 ──────────────────────────────────────────────────────
+
+    _SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+
+    def _start_spinner(self, aid: str):
+        """启动 spinner：记录 AID 并启动刷新循环。"""
+        name = _short_name(aid)
+        self._spinner_aid = name
+        self._spinner_frame = 0
+        self._spinner_elapsed = 0
+        if self._spinner_task is None or self._spinner_task.done():
+            self._spinner_task = asyncio.ensure_future(self._spinner_loop())
+
+    def _stop_spinner(self):
+        """停止 spinner：清除状态，触发最后一次重绘去掉 spinner 行。"""
+        self._spinner_aid = None
+        if self._spinner_task and not self._spinner_task.done():
+            self._spinner_task.cancel()
+            self._spinner_task = None
+        # 触发重绘以移除 spinner 行
+        if self._spinner_session and self._spinner_session.app:
+            self._spinner_session.app.invalidate()
+
+    async def _spinner_loop(self):
+        """每 100ms 更新帧，每秒递增计时，通过 app.invalidate() 触发重绘。"""
+        ticks = 0  # 100ms 计数器
+        try:
+            while self._spinner_aid:
+                await asyncio.sleep(0.1)
+                ticks += 1
+                self._spinner_frame = (self._spinner_frame + 1) % len(self._SPINNER_FRAMES)
+                if ticks % 10 == 0:
+                    self._spinner_elapsed += 1
+                if self._spinner_session and self._spinner_session.app:
+                    self._spinner_session.app.invalidate()
+        except asyncio.CancelledError:
+            pass
+
     # ─────────────────────────────────────────────────────────────────────
 
     async def _on_message(self, data):
@@ -703,9 +716,6 @@ class AUNCli:
         payload  = data.get("payload", "")
         task_id  = data.get("task_id", "")
         e2ee     = data.get("e2ee", {})
-
-        # 保存原始消息供 /rawdata 使用
-        self._last_raw_message = data
 
         # 记录到 raw log（供监控台显示）
         # 非 debug: 保留最近 5 条；debug: 保留最近 20 条；监控台打开时无上限累积（滑动窗口 500 条）
@@ -733,16 +743,15 @@ class AUNCli:
         if isinstance(proc_payload, dict) and proc_payload.get("type") == "processing":
             sid = proc_payload.get("sessionId", "?")
             status = proc_payload.get("status", "")
-            name = from_aid.split('.')[0]
             if status == "start":
                 self._processing.add(sid)
                 self._proc_start[sid] = asyncio.get_event_loop().time()
-                self._start_spinner(from_aid)
                 if self.debug_mode and self._last_sent is not None:
                     delay_ms = int((asyncio.get_event_loop().time() - self._last_sent) * 1000)
                     print_status(from_aid, "▶", C.CYAN, f"开始处理 ({delay_ms}ms)")
                 else:
                     print_status(from_aid, "▶", C.CYAN, "开始处理")
+                self._start_spinner(from_aid)
             elif status == "done":
                 self._stop_spinner()
                 self._processing.discard(sid)
@@ -819,7 +828,6 @@ class AUNCli:
         extra = ""
         if task_id: extra += f"  {C.DIM}[task:{task_id}]\033[22m"
 
-        self._stop_spinner()
         print_recv(from_aid, text, extra)
 
     async def _on_state(self, data):
@@ -880,15 +888,17 @@ class AUNCli:
             self._suppress_next = True
         try:
             t0 = asyncio.get_event_loop().time()
-            await self.client.call("message.send", {
+            result = await self.client.call("message.send", {
                 "to": self.target_aid, "payload": text,
                 "encrypt": encrypt, "persist": False,
             })
             self._last_sent = asyncio.get_event_loop().time()
             _record_peer(self.target_aid)
+            status = result.get("status") if isinstance(result, dict) else None
+            label = "已送达" if status == "delivered" else "已发送"
             if self.debug_mode:
                 ms = int((self._last_sent - t0) * 1000)
-                print_status(self.target_aid, "▶", C.YELLOW, f"已发送 ({ms}ms)")
+                print_status(self.target_aid, "▶", C.YELLOW, f"{label} ({ms}ms)")
             # 发新消息时清理旧的 processing 状态（/stop 时保留 _proc_start 供耗时统计）
             self._processing.clear()
             if text != '/stop':
@@ -916,14 +926,16 @@ class AUNCli:
         if cache_valid and not manual:
             return True
         self._menu_querying = True
-        self._menu_acked = False
         self._menu_fresh = False        # 重置，等待新响应
+        send_status = None              # message.send 响应中的 status
         try:
-            await self.client.call("message.send", {
+            result = await self.client.call("message.send", {
                 "to": self.target_aid,
                 "payload": json.dumps({"type": "menu.query"}),
                 "encrypt": True, "persist": False,
             })
+            if isinstance(result, dict):
+                send_status = result.get("status")
         except Exception as e:
             self._menu_querying = False
             self._menu_failures += 1
@@ -933,10 +945,10 @@ class AUNCli:
             return False
         if manual: info("菜单查询已发送，等待响应…")
         # 后台等待响应
-        asyncio.ensure_future(self._wait_menu_response(manual))
+        asyncio.ensure_future(self._wait_menu_response(manual, send_status))
 
-    async def _wait_menu_response(self, manual=False):
-        """后台等待 menu.response，超时后根据 ACK 状态给出提示。"""
+    async def _wait_menu_response(self, manual=False, send_status=None):
+        """后台等待 menu.response，超时后根据 send_status 给出提示。"""
         for _ in range(50):
             if self._menu_fresh:
                 break
@@ -953,10 +965,12 @@ class AUNCli:
             cooldown = min(5 * (2 ** (self._menu_failures - 1)), 60)
             self._menu_cooldown_until = asyncio.get_event_loop().time() + cooldown
             if manual:
-                if self._menu_acked:
+                if send_status == "delivered":
                     info("对端不支持菜单查询")
-                else:
+                elif send_status == "sent":
                     info("对端不在线")
+                else:
+                    info("菜单查询超时")
 
     async def ping(self):
         if not self.client:
@@ -983,6 +997,24 @@ class AUNCli:
             style=_HELP_STYLE,
         )
 
+    async def set_target(self, name: str) -> bool:
+        """校验 AID → 查询 Gateway → 设为目标并持久化。成功返回 True。"""
+        if not _validate_aid(name):
+            return False
+        info(f"正在验证 {name} …")
+        if not await _aid_exists(name):
+            error(f"AID 不存在或 Gateway 不可达: {name}")
+            return False
+        self.target_aid = name
+        _record_peer(name)
+        cfg = _load_config()
+        cfg["target"] = name
+        _save_config(cfg)
+        info(f"目标 AID: {name}")
+        self._pending_menu = None
+        asyncio.ensure_future(self.query_menu())
+        return True
+
     async def close(self):
         if self.client:
             try:
@@ -994,13 +1026,13 @@ class AUNCli:
     # ── SDK 事件处理 ──────────────────────────────────────────────────────
 
     async def _on_ack(self, data):
-        if self._menu_querying:
-            self._menu_acked = True
-        if self.debug_mode and isinstance(data, dict):
-            seq = data.get("seq", "?")
+        if isinstance(data, dict):
             from_aid = data.get("from", self.target_aid or "?")
-            name = from_aid.split(".")[0] if from_aid else "?"
-            print_status(from_aid, "·", C.DIM, f"ACK seq={seq}")
+            if self.debug_mode:
+                seq = data.get("seq", "?")
+                print_status(from_aid, "✓✓", C.DIM, f"已送达 seq={seq}")
+            else:
+                print_status(from_aid, "✓✓", C.DIM, "已送达")
 
     async def _on_token_refreshed(self, data):
         self._last_e2ee_event = {"type": "token.refreshed", "data": data, "time": datetime.now()}
@@ -1166,17 +1198,12 @@ _HELP_STYLE = Style.from_dict({
     "button.focused":      "bg:#2a3a4a #ffffff bold",
 })
 
-async def _msg_dialog(**kwargs):
+async def _msg_dialog(title="", text="", ok_text="Ok", style=None):
     """message_dialog wrapper：禁用鼠标捕获，允许终端原生选择复制。"""
     from prompt_toolkit.widgets import Dialog, Label, Button
     from prompt_toolkit.key_binding.defaults import load_key_bindings
     from prompt_toolkit.key_binding import merge_key_bindings, KeyBindings as KB
     from prompt_toolkit.key_binding.bindings.focus import focus_next, focus_previous
-
-    title = kwargs.get("title", "")
-    text = kwargs.get("text", "")
-    ok_text = kwargs.get("ok_text", "Ok")
-    style = kwargs.get("style", None)
 
     def _return_none():
         app.exit()
@@ -1191,6 +1218,7 @@ async def _msg_dialog(**kwargs):
     kb = KB()
     kb.add("tab")(focus_next)
     kb.add("s-tab")(focus_previous)
+    kb.add("escape", eager=True)(lambda event: app.exit())
 
     app = Application(
         layout=Layout(dialog),
@@ -1292,25 +1320,8 @@ async def repl(c: AUNCli):
                 message = parts[1] if len(parts) > 1 else ""
                 if not name:
                     continue
-                if not _is_valid_aid(name):
-                    error(f"无效 AID: {name}（需要合法域名格式）")
+                if not await c.set_target(name):
                     continue
-                aid = _resolve_aid(name)
-                # Gateway 验证 AID 是否存在
-                info(f"正在验证 {aid} …")
-                if not await _aid_exists(aid):
-                    error(f"AID 不存在或 Gateway 不可达: {aid}")
-                    continue
-                c.target_aid = aid
-                _record_peer(aid)
-                cfg = _load_config()
-                cfg["target"] = aid
-                _save_config(cfg)
-                info(f"目标 AID: {aid}")
-                # 切换后预加载远端菜单
-                c._pending_menu = None
-                asyncio.ensure_future(c.query_menu())
-                # @aid 消息 → 切换并发送
                 if message:
                     await c.send(message, encrypt=c.encrypt)
                 continue
@@ -1331,22 +1342,7 @@ async def repl(c: AUNCli):
                     break
                 elif cmd == "target":
                     if arg:
-                        if not _is_valid_aid(arg):
-                            error(f"无效 AID: {arg}（需要合法域名格式）")
-                        else:
-                            aid = _resolve_aid(arg)
-                            info(f"正在验证 {aid} …")
-                            if not await _aid_exists(aid):
-                                error(f"AID 不存在或 Gateway 不可达: {aid}")
-                            else:
-                                c.target_aid = aid
-                                _record_peer(aid)
-                                cfg = _load_config()
-                                cfg["target"] = aid
-                                _save_config(cfg)
-                                info(f"目标 AID: {aid}")
-                                c._pending_menu = None
-                                asyncio.ensure_future(c.query_menu())
+                        await c.set_target(arg)
                     else:
                         error("用法: //target <aid>")
                 elif cmd == "ping":
@@ -1379,9 +1375,7 @@ async def repl(c: AUNCli):
                         cmd_aid_list()
                     elif action == "new":
                         if arg2:
-                            if not _is_valid_aid(arg2):
-                                error(f"无效 AID: {arg2}（需要合法域名格式）")
-                            else:
+                            if _validate_aid(arg2):
                                 try:
                                     await cmd_aid_create(arg2)
                                 except Exception as e:
@@ -1390,9 +1384,7 @@ async def repl(c: AUNCli):
                             error("用法: //aid new <aid>")
                     elif action == "delete":
                         if arg2:
-                            if not _is_valid_aid(arg2):
-                                error(f"无效 AID: {arg2}（需要合法域名格式）")
-                            else:
+                            if _validate_aid(arg2):
                                 cmd_aid_delete(arg2)
                         else:
                             error("用法: //aid delete <aid>")
@@ -1430,35 +1422,33 @@ def cmd_aid_list():
         info(f"{aid}{marker}")
 
 async def cmd_aid_create(name: str):
-    aid = _resolve_aid(name)
     client = _make_client()
     client._gateway_url = GATEWAY_URL
-    local = _get_keystore().load_identity(aid)
+    local = _get_keystore().load_identity(name)
     if local and "private_key_pem" in local:
-        error(f"AID {aid} 已存在"); return
-    result = await client.auth.create_aid({"aid": aid})
+        error(f"AID {name} 已存在"); return
+    result = await client.auth.create_aid({"aid": name})
     info(f"AID 创建成功: {result['aid']}")
     cfg = _load_config()
     if not cfg.get("aid"):
-        cfg["aid"] = aid
+        cfg["aid"] = name
         _save_config(cfg)
         info("已设为默认 AID")
 
 def cmd_aid_delete(name: str):
-    aid = _resolve_aid(name)
     ks = _get_keystore()
-    local = ks.load_identity(aid)
+    local = ks.load_identity(name)
     if local is None:
-        error(f"AID {aid} 不存在"); return
-    confirm = input(f"删除 {aid}？[y/N] ").strip().lower()
+        error(f"AID {name} 不存在"); return
+    confirm = input(f"删除 {name}？[y/N] ").strip().lower()
     if confirm != 'y':
         info("已取消"); return
-    ks.delete_identity(aid)
+    ks.delete_identity(name)
     cfg = _load_config()
-    if cfg.get("aid") == aid:
+    if cfg.get("aid") == name:
         del cfg["aid"]
         _save_config(cfg)
-    info(f"已删除 {aid}")
+    info(f"已删除 {name}")
 
 async def main():
     import argparse
@@ -1479,7 +1469,7 @@ commands:
   aun aid delete <aid>      删除本地 AID
 
 examples:
-  aun aid new alice.agentid.pub    创建 AID
+  aun aid new alice.agentid.pub -p 20001  创建 AID（指定 Gateway 端口）
   aun -a my.agentid.pub -t bot.agentid.pub  指定本地和目标 AID 启动
   aun                              使用上次的 AID 和目标直接启动
   aun -s "你好"                    发送单条消息后退出""")
@@ -1498,25 +1488,27 @@ examples:
     parser.add_argument("--aid", "-a", help="本地 AID（默认从 config.json 读取）")
     parser.add_argument("--target", "-t", help="目标 AID")
     parser.add_argument("--send", "-s", help="发送单条消息后退出")
+    parser.add_argument("--port", "-p", type=int, help="Gateway 端口（覆盖 config）")
 
-    args = parser.parse_args()
+    args, _ = parser.parse_known_args()
     _init_globals()
+
+    # --port 覆盖 config / env
+    if args.port:
+        global GATEWAY_URL
+        GATEWAY_URL = f"wss://{GATEWAY_HOST}:{args.port}/aun"
 
     if args.subcmd == "aid":
         if args.action == "list":
             cmd_aid_list()
         elif args.action == "new":
-            if not _is_valid_aid(args.name):
-                error(f"无效 AID: {args.name}（需要合法域名格式）")
-            else:
+            if _validate_aid(args.name):
                 try:
                     await cmd_aid_create(args.name)
                 except Exception as e:
                     error(f"创建失败: {e}")
         elif args.action == "delete":
-            if not _is_valid_aid(args.name):
-                error(f"无效 AID: {args.name}（需要合法域名格式）")
-            else:
+            if _validate_aid(args.name):
                 cmd_aid_delete(args.name)
         else:
             aid_p.print_help()
@@ -1526,13 +1518,11 @@ examples:
     if not aid:
         error("未指定 AID，请先创建: aun aid new <aid>")
         return
-    if not _is_valid_aid(aid):
-        error(f"无效 AID: {aid}（需要合法域名格式）")
+    if not _validate_aid(aid):
         return
 
     target = args.target if args.target else None
-    if target and not _is_valid_aid(target):
-        error(f"无效目标 AID: {target}（需要合法域名格式）")
+    if target and not _validate_aid(target):
         return
 
     c = AUNCli(aid=aid, target=target)
@@ -1551,7 +1541,7 @@ examples:
     except Exception as e:
         error(f"启动失败: {e}")
     finally:
-        short_aid = (c.my_aid or 'unknown').split('.')[0]
+        short_aid = _short_name(c.my_aid or 'unknown')
         _p(f"  {C.DIM}{short_aid} 正在退出…{C.RESET}")
         info("断开连接…")
         await c.close()

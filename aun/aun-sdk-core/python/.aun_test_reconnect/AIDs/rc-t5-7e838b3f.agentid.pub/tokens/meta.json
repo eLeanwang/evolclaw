@@ -1,0 +1,60 @@
+{
+  "aid": "rc-t5-7e838b3f.agentid.pub",
+  "private_key_protection": {
+    "scheme": "file_aes",
+    "name": "identity/private_key",
+    "persisted": true,
+    "nonce": "BWuvAd+nesdkpWfi",
+    "ciphertext": "kHC1IIqzg76nlJsMyGpR4EUikJdFs+LKuEKJoMFYap9u9x8O1+wD2QA8tX3kBxmq3OoHsrGG+RNWFJmdvgLCtHVuWXp+tOcclMtA0j7S084YdNDbKLl/5QsBSE3QCLgWdhJRTnZE+jlLMqQB+2KbjcOS6G8Dn6fdlzarOZ2DTgRDbdc82FqDQTDf0MITFS4m4y6clhm2bPhGMuHRDrZ0N+HFwmWP/UVzMmcv/4VTMVjVJoQw/jN8utonLrBIz9h+auyqKOzRhFBlABNlFWsIyjl11AVCSkSp/SxJuj89vmVzHNpheGuY8+h7GXQgccCL3g==",
+    "tag": "n7l3Fk4RnL+mQx9jXlGGNQ=="
+  },
+  "access_token_expires_at": 1775562658,
+  "access_token_protection": {
+    "scheme": "file_aes",
+    "name": "access_token",
+    "persisted": true,
+    "nonce": "1Sv9qO7HXN8rNlJb",
+    "ciphertext": "B8NpsyxQG+YVmTYh3xvVUjiKw0hNiZd3ok+hqcFHC1gOcwA1xdlenEKHypyxU6dRUjA2ROeox/xjBNQWP39+rNqz652NSHxKKVx3wlxgpHrE5PQYGVEpANJody0cJcb/sCjcFPPKHqaO6Ym1umIvg2GpYFh025Pz1dvUMmxV3grbycoedxSKSZZ1FFQ5XWRMk3JcwMkUGABLtGV7JsBrAOB4sUfkL1gp74lQAgnL0jm+/3HQlTHIhTFYBDuC/EPXd15Znt9Av7+/l3RuGpSBgQyxK2gUbNfCD3ANoLeAcqYBLkx0m6D9XG36pieBQefH4eQeFPbbxSQZpabA2d1C7YRtAVfnqOaty7M4J5ncWSdQGVG2ZcipjFJEDYoENn5cxccbqqE7uBiCTnmJW/dvtItROp0EB/0ZmqM28RGQEumsfLVD2cajrZawFCqTTptGRtVah3a/trdybhsKumrFMLT+rGaiGtZg9SHscF2t9MYY6j6CZ7/y66XhsIcDm9zShqt4pNUk0AkympoDgCVsmNcdw5PMaT6xLHt4qZGm8wTZMyeUGuRlkY7WCwJlPxWC",
+    "tag": "7dZ084NssYVobKg6Z017QA=="
+  },
+  "refresh_token_protection": {
+    "scheme": "file_aes",
+    "name": "refresh_token",
+    "persisted": true,
+    "nonce": "upMX9vFomO92pB5V",
+    "ciphertext": "FLQYia0j0r3a/PFhyS3VSPKPkMz73pGuUJb2mngbINiNbHNDVwwjOQD8utwUhae8oJCeDiWLqCA=",
+    "tag": "yJSqbHQsF0LbAe/4RXSoEQ=="
+  },
+  "kite_token_protection": {
+    "scheme": "file_aes",
+    "name": "kite_token",
+    "persisted": true,
+    "nonce": "v/564OXdyZ4XDujb",
+    "ciphertext": "1I9yONiyn5pM0lLKM0AZz+MkM9Jg7a7fCzZJxwBFYfUR0UJk1yEeP2CsXdRdpCfh",
+    "tag": "gHsl/Ak3Gep8IDmk9mPEgA=="
+  },
+  "e2ee_prekeys": {
+    "81c2af4f-3733-4370-8223-2f8e85ef8b10": {
+      "created_at": 1775559058481,
+      "private_key_protection": {
+        "scheme": "file_aes",
+        "name": "e2ee_prekeys/81c2af4f-3733-4370-8223-2f8e85ef8b10/private_key",
+        "persisted": true,
+        "nonce": "kwxR0mPCOdBdYw3o",
+        "ciphertext": "h21Qad3R/+jtPM6agVQnpVt9ex3vtQpadGaahYmQOnkYcID4wx3UP02mT+CFQGZnRZjVa8cCWiPStbnPqyX/YJKQxy1+2URnykTN3kdn32fPkLRXyjuRYVU9fHP8DsywEG+Viqlub+zbzPOVeo6ZTPLDnaeGr2S1kNhVcKscpUpA+i5Uan7jGY4ZQv6aFZ/cGmw2NEH+CffH9pGO025kX3qExhV685ddEbksYLbP2E8OC+8qSllf39T/AALJph0UgjHE304Jhq1Y75bpVOmKOm/ABEPA9cJSvSI+3sRHo3gUgLrmi3ng+dUZeTK38q8uvA==",
+        "tag": "KK5rvobaB2dvIPxH0lEIhw=="
+      }
+    },
+    "2b46d713-f15f-4743-a20f-fade09077468": {
+      "created_at": 1775559077748,
+      "private_key_protection": {
+        "scheme": "file_aes",
+        "name": "e2ee_prekeys/2b46d713-f15f-4743-a20f-fade09077468/private_key",
+        "persisted": true,
+        "nonce": "qaI7oImG4WTjQ+Nv",
+        "ciphertext": "CMJiR0OD1zEXlx+c3z+yOssLlPC59bO2Vt7GASEFxaAP/zYWVAvkNezN3Z5tuKoZxLDmhptCrCxcIWM4G5PWkzo46fY1nxlrMTpbNfwpFhtZP109fJVqAO4u4J95/vCD4Gm5uxWTCU7yd8sGz9qyoFgfstNyhoINd+Dx+wmmdet/OBb8WOzZrXQdJsD9ZPPbugDdq9Wi3ErBBIvxwAplunK04cnTtt0dOUzEffmzHeyH7O739ehMwxJYEscoOuA7ACjKvyRFtPhjZrhiRSw64UeEF2BeHnb1QIOwZCNfWKJSViiw9v7M+ASAU/FdBmSoGg==",
+        "tag": "iud6FGGL1HP/iqCE4Yd7zw=="
+      }
+    }
+  }
+}

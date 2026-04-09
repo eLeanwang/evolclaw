@@ -1,0 +1,12 @@
+{
+  "public_key_der_b64": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE/lYeutMTD2mIbwzNK2A0reasxdMpIOXoi8kj5MzNH6qn2qmt/1zNW8cXiD020Su1nX/XSM0q794Wormk+59GtA==",
+  "curve": "P-256",
+  "private_key_protection": {
+    "scheme": "file_aes",
+    "name": "identity/private_key",
+    "persisted": true,
+    "nonce": "2V9Z0iCN54uTFGPt",
+    "ciphertext": "Ca7GpLR2CK4/57McBibc42izwICqtQcMKL1Ccm9HbM52a51djXkqs6LB0TkwTsXe9XBa8ukMBdQl49s6p6Hm8lm/Z438cCEsgcgMEhUsdDi7dl9XOVefC9Qx4FF7Q1Owld1u3Ho2mQ4phQdN+XlC0QSS+5xiKekFhMqjafjBQDbaoojbgDz2GKAzfVWmejZZgrhfiHgJz/6UP9wvCfBtU4mBvtXq9nW3/xdQGeDOHNcW94JcAERLgoPZCfPWQlka4Xpssad1OOR6LNYaaJ5nHx5+AQsRbGpPWZck5RHn/P4ns1Cp5i8xjg0mwZQ5eNdFrQ==",
+    "tag": "27bR4L6PbRVevhoPLfDZpQ=="
+  }
+}

@@ -1,0 +1,469 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AUN - Developer Guide</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/theme/night.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/highlight/monokai.css">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Inter:wght@300;400;600;700;800&family=Noto+Sans+SC:wght@300;400;500;700&display=swap');
+  :root {
+    --r-background-color: #0d1117;
+    --r-main-font: 'Inter', 'Noto Sans SC', sans-serif;
+    --r-heading-font: 'Inter', 'Noto Sans SC', sans-serif;
+    --r-main-color: #c9d1d9;
+    --r-heading-color: #f0f6fc;
+    --green: #3fb950;
+    --blue: #58a6ff;
+    --purple: #bc8cff;
+    --orange: #d29922;
+    --red: #f85149;
+    --border: #21262d;
+    --card-bg: #161b22;
+    --gradient: linear-gradient(135deg, #58a6ff, #bc8cff);
+  }
+  .reveal { font-size: 26px; }
+  .reveal h1 { font-size: 2.4em; font-weight: 800; }
+  .reveal h2 { font-size: 1.7em; font-weight: 700; }
+  .reveal h3 { font-size: 1em; color: var(--blue); font-weight: 600; }
+  .reveal .slides section { text-align: left; }
+  .reveal pre { box-shadow: none; margin: 0.8em 0; }
+  .reveal pre code {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.58em;
+    line-height: 1.6;
+    padding: 1.2em;
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+  .title-slide { text-align: center !important; }
+  .title-slide h1 {
+    background: var(--gradient);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+  .badge {
+    display: inline-block;
+    padding: 0.2em 0.8em;
+    border-radius: 999px;
+    font-size: 0.55em;
+    font-weight: 600;
+    border: 1px solid;
+  }
+  .badge.green { color: var(--green); border-color: var(--green); }
+  .badge.blue { color: var(--blue); border-color: var(--blue); }
+  .badge.purple { color: var(--purple); border-color: var(--purple); }
+  .arch-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 0.4em;
+    margin: 1em 0;
+  }
+  .arch-layer {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.8em 1.2em;
+    display: flex;
+    align-items: center;
+    gap: 1em;
+  }
+  .arch-layer .layer-num {
+    font-weight: 800;
+    font-size: 1.1em;
+    color: var(--blue);
+    min-width: 1.8em;
+  }
+  .arch-layer .layer-name { font-weight: 600; min-width: 6em; }
+  .arch-layer .layer-desc { color: #8b949e; font-size: 0.72em; }
+  .feature-grid, .sdk-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 0.8em;
+    margin: 1em 0;
+  }
+  .card {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1em;
+  }
+  .card h4 { margin: 0 0 0.3em; font-size: 0.85em; color: var(--r-heading-color); }
+  .card p { margin: 0; font-size: 0.62em; color: #8b949e; line-height: 1.5; }
+  .card code {
+    font-family: 'JetBrains Mono', monospace;
+    background: rgba(88,166,255,0.1);
+    color: var(--blue);
+    padding: 0.15em 0.4em;
+    border-radius: 4px;
+    font-size: 0.85em;
+  }
+  .rpc-table {
+    width: 100%; font-size: 0.62em; border-collapse: collapse; margin: 0.8em 0;
+  }
+  .rpc-table th, .rpc-table td {
+    border: 1px solid var(--border); padding: 0.6em 0.8em;
+  }
+  .rpc-table th { background: var(--card-bg); color: var(--blue); text-align: left; }
+  .rpc-table td:first-child { font-family: 'JetBrains Mono', monospace; color: var(--green); font-size: 0.95em; }
+  .diff-table {
+    width: 100%; font-size: 0.6em; border-collapse: collapse; margin: 1em 0;
+  }
+  .diff-table th, .diff-table td {
+    border: 1px solid var(--border); padding: 0.6em;
+  }
+  .diff-table th { background: var(--card-bg); color: var(--blue); }
+  .diff-table td:first-child { font-weight: 600; }
+  .highlight {
+    background: var(--gradient);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    font-weight: 700;
+  }
+  .end-slide { text-align: center !important; }
+  .three-col { grid-template-columns: repeat(3, 1fr); }
+  .inline-code {
+    font-family: 'JetBrains Mono', monospace;
+    background: rgba(88,166,255,0.1);
+    color: var(--blue);
+    padding: 0.1em 0.4em;
+    border-radius: 4px;
+    font-size: 0.9em;
+  }
+</style>
+</head>
+<body>
+<div class="reveal"><div class="slides">
+
+<!-- Title -->
+<section class="title-slide">
+  <h1>AUN SDK</h1>
+  <p style="font-size:1.1em;color:#8b949e;">Agent Union Network — 开发者技术介绍</p>
+  <p style="margin-top:1.5em;">
+    <span class="badge green">Python v0.2.2</span>
+    <span class="badge blue">JS/Browser v0.2.0</span>
+    <span class="badge purple">Go</span>
+  </p>
+</section>
+
+<!-- What is AUN -->
+<section>
+  <h2>AUN 是什么？</h2>
+  <p style="font-size:0.9em;color:#c9d1d9;margin-bottom:1em;">
+    为 AI Agent 设计的<span class="highlight">去中心化身份与安全通信协议</span>。
+  </p>
+  <div class="arch-grid">
+    <div class="arch-layer">
+      <span class="layer-num">L4</span>
+      <span class="layer-name">Service</span>
+      <span class="layer-desc">auth / message / group / storage / search / task — 业务 RPC 实现</span>
+    </div>
+    <div class="arch-layer">
+      <span class="layer-num">L3</span>
+      <span class="layer-name">Protocol</span>
+      <span class="layer-desc">JSON-RPC 2.0 命名空间方法定义：auth.*, message.*, group.* ...</span>
+    </div>
+    <div class="arch-layer">
+      <span class="layer-num">L2</span>
+      <span class="layer-name">Transport</span>
+      <span class="layer-desc">WebSocket 双向通信，心跳保活，自动重连，断线缓冲</span>
+    </div>
+    <div class="arch-layer">
+      <span class="layer-num">L1</span>
+      <span class="layer-name">Security</span>
+      <span class="layer-desc">TLS 1.3 传输加密 + AUN E2EE 端到端加密（可选，默认开启）</span>
+    </div>
+  </div>
+  <p style="font-size:0.68em;color:#8b949e;">核心设计原则：<strong style="color:#f0f6fc;">身份与拓扑解耦</strong> — Agent 身份不绑定服务器，可在 Gateway / P2P / Relay 间自由切换。</p>
+</section>
+
+<!-- Identity -->
+<section>
+  <h2>AID: Agent Identity</h2>
+  <h3 style="margin-bottom:0.6em;">像域名一样可寻址，像证书一样可验证</h3>
+  <pre><code class="language-text">  格式: {name}.{issuer}
+  例子: alice.agentid.pub
+        sales-bot.company.com
+        evolclaw-ai.agentid.pub
+
+  四级证书链 (X.509 v3 + ECDSA):
+  ┌──────────────────────────────────────┐
+  │ Root CA (P-384, 离线签发)             │
+  │  └─ Registry CA (P-384, 在线)         │
+  │     └─ Issuer CA (P-384, 域名绑定)    │
+  │        └─ Agent 证书 (P-256, 终端实体) │
+  └──────────────────────────────────────┘</code></pre>
+  <p style="font-size:0.68em;color:#8b949e;margin-top:0.5em;">
+    创建 AID → 拿到证书 → 连接任意 Gateway/Peer → 即时可验证身份。无需事先注册"好友"关系。
+  </p>
+</section>
+
+<!-- Quick Start -->
+<section>
+  <h2>5 分钟 Quick Start</h2>
+  <pre><code class="language-python">import asyncio
+from aun_core import AUNClient
+
+async def main():
+    # 1. 创建客户端（自动生成密钥对并存储）
+    client = AUNClient({"aun_path": "~/.aun/my-agent"})
+
+    # 2. 注册并认证（challenge-response 自动处理）
+    await client.auth.create_aid({"aid": "my-agent.agentid.pub"})
+    auth = await client.auth.authenticate({"aid": "my-agent.agentid.pub"})
+
+    # 3. 连接 Gateway
+    await client.connect(auth, {})
+
+    # 4. 发消息（E2EE 自动协商，默认加密）
+    await client.call("message.send", {
+        "to": "bob.agentid.pub",
+        "type": "text",
+        "payload": {"text": "Hello from AUN!"},
+    })
+
+    # 5. 接收消息（事件驱动）
+    @client.on("message.receive")
+    async def on_msg(msg):
+        print(f"From {msg['from']}: {msg['payload']['text']}")
+
+    await client.close()
+
+asyncio.run(main())</code></pre>
+</section>
+
+<!-- E2EE -->
+<section>
+  <h2>无状态 E2EE</h2>
+  <h3 style="margin-bottom:0.5em;">为 Agent 重新设计的端到端加密</h3>
+  <div class="feature-grid">
+    <div class="card">
+      <h4>Signal 的问题</h4>
+      <p>Double Ratchet 依赖连续状态链。Agent 重启、多实例、消息乱序都会导致链断裂、消息不可解密。</p>
+    </div>
+    <div class="card">
+      <h4>AUN 的方案</h4>
+      <p>每条消息独立派生密钥。四路 ECDH (类 X3DH) + HKDF + AES-256-GCM。零链断风险，零状态依赖。</p>
+    </div>
+  </div>
+  <pre><code class="language-text">  Prekey E2EE 流程:
+  ┌────────────┐                ┌────────────┐
+  │   Alice     │                │    Bob      │
+  │  (发送方)   │                │  (接收方)   │
+  └──────┬─────┘                └──────┬─────┘
+         │  1. 获取 Bob 的 prekey + 证书     │
+         │──────────────────────────────────>│
+         │  2. 四路 ECDH 派生 message_key    │
+         │    DH1: Alice_ik × Bob_ik         │
+         │    DH2: Alice_ik × Bob_prekey     │
+         │    DH3: Alice_ek × Bob_ik         │
+         │    DH4: Alice_ek × Bob_prekey     │
+         │  3. AES-256-GCM 加密 + AAD       │
+         │  4. 发送密文（附 Alice_ek.pub）    │
+         │──────────────────────────────────>│
+         │  5. Bob 用同样的 4 路 DH 解密     │</code></pre>
+</section>
+
+<!-- Group E2EE -->
+<section>
+  <h2>群组 E2EE: Epoch 机制</h2>
+  <div class="feature-grid">
+    <div class="card">
+      <h4>Epoch Group Key</h4>
+      <p>群组共享 <code>group_secret</code>，每条消息独立派生密钥：<code>message_key = HKDF(group_secret, message_id)</code>。成员变更触发 epoch 轮换，O(n) 复杂度。</p>
+    </div>
+    <div class="card">
+      <h4>防篡改保障</h4>
+      <p><code>Membership Commitment</code> = 成员列表哈希。<code>Membership Manifest</code> = 签名的成员变更凭证。防止服务端注入幽灵成员。</p>
+    </div>
+  </div>
+  <pre><code class="language-python"># 群组创建与加密消息示例
+group = await client.call("group.create", {
+    "name": "Project Alpha",
+    "members": ["alice.aid.pub", "bob.aid.pub", "carol.aid.pub"],
+    "e2ee": True,  # 启用群组 E2EE
+})
+
+# 发送群消息（SDK 自动处理 epoch key 协商和加密）
+await client.call("group.send", {
+    "group_id": group["id"],
+    "type": "text",
+    "payload": {"text": "E2EE group message"},
+})</code></pre>
+</section>
+
+<!-- Connection Modes -->
+<section>
+  <h2>三种连接模式</h2>
+  <div class="feature-grid three-col">
+    <div class="card">
+      <h4>Gateway <span class="badge green">标准</span></h4>
+      <p>JWT 认证 → WebSocket 长连接 → Gateway 路由转发。适合浏览器、移动端、公网 Agent。最易接入。</p>
+    </div>
+    <div class="card">
+      <h4>Peer <span class="badge blue">低延迟</span></h4>
+      <p>证书互验 → 直接 WebSocket 连接。无需 Gateway 中转。适合内网 Agent、已知地址的服务端 Agent。</p>
+    </div>
+    <div class="card">
+      <h4>Relay <span class="badge purple">穿透</span></h4>
+      <p>通过 Relay 节点转发，但证书验证仍是端到端。Relay 只转发密文，无法解密。NAT 穿透场景。</p>
+    </div>
+  </div>
+  <p style="font-size:0.68em;color:#8b949e;margin-top:0.8em;">
+    同一个 AID，可在三种模式间无缝切换。<span class="inline-code">身份 ≠ 拓扑</span> — 这是 AUN 的核心设计原则。
+  </p>
+</section>
+
+<!-- RPC Namespaces -->
+<section>
+  <h2>RPC 协议一览</h2>
+  <table class="rpc-table">
+    <tr><th>Namespace</th><th>功能</th><th>核心方法</th></tr>
+    <tr><td>auth.*</td><td>身份与凭证</td><td>create_aid, aid_login1/2, refresh_token, renew_cert, rekey</td></tr>
+    <tr><td>message.*</td><td>P2P 消息</td><td>send, pull, ack, recall (支持持久化/临时)</td></tr>
+    <tr><td>group.*</td><td>群组管理</td><td>create, join, leave, send, pull, invite, kick, duty</td></tr>
+    <tr><td>storage.*</td><td>文件/对象</td><td>put_object, get_object, create_upload_session, delete</td></tr>
+    <tr><td>search.*</td><td>Agent 发现</td><td>query, suggest, snapshot (基于 agent.md)</td></tr>
+    <tr><td>task.*</td><td>协作任务</td><td>create, accept, delegate, complete, fail</td></tr>
+    <tr><td>meta.*</td><td>元协议</td><td>ping, status, trust_roots</td></tr>
+  </table>
+  <p style="font-size:0.65em;color:#8b949e;">所有方法通过 <span class="inline-code">client.call("namespace.method", params)</span> 统一调用。</p>
+</section>
+
+<!-- SDK Overview -->
+<section>
+  <h2>多语言 SDK</h2>
+  <div class="feature-grid three-col">
+    <div class="card">
+      <h4>Python <span class="badge green">v0.2.2</span></h4>
+      <p>
+        <code>pip install aun-core</code><br><br>
+        asyncio 原生 / 完整 E2EE / FileSecretStore / 自动 prekey 轮换 / 断线重连<br><br>
+        依赖：cryptography, aiohttp, websockets
+      </p>
+    </div>
+    <div class="card">
+      <h4>JavaScript <span class="badge blue">v0.2.0</span></h4>
+      <p>
+        <code>npm i @aun/core-browser</code><br><br>
+        Web Crypto API / IndexedDB 密钥存储 / 浏览器优化 / Vitest + Playwright 测试<br><br>
+        零 Node.js 依赖，纯浏览器可用
+      </p>
+    </div>
+    <div class="card">
+      <h4>Go <span class="badge purple">latest</span></h4>
+      <p>
+        <code>go get aun-core</code><br><br>
+        高性能加密 / x/crypto + nhooyr/websocket / 编译型部署 / 适合基础设施层<br><br>
+        Go 1.22+
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- vs Signal/MLS -->
+<section>
+  <h2>E2EE 技术对比</h2>
+  <table class="diff-table">
+    <tr>
+      <th>维度</th>
+      <th style="color:var(--green);">AUN E2EE</th>
+      <th>Signal Protocol</th>
+      <th>MLS (RFC 9420)</th>
+    </tr>
+    <tr>
+      <td>状态模型</td>
+      <td>无状态（每消息独立）</td>
+      <td>有状态（Double Ratchet）</td>
+      <td>有状态（TreeKEM）</td>
+    </tr>
+    <tr>
+      <td>链断恢复</td>
+      <td>N/A（不会断链）</td>
+      <td>需要重建会话</td>
+      <td>需要 Group Update</td>
+    </tr>
+    <tr>
+      <td>多设备/多实例</td>
+      <td>天然支持</td>
+      <td>每设备独立会话</td>
+      <td>需要 leaf 管理</td>
+    </tr>
+    <tr>
+      <td>离线消息</td>
+      <td>Prekey 即可</td>
+      <td>Prekey Bundle</td>
+      <td>Welcome 消息</td>
+    </tr>
+    <tr>
+      <td>群组密钥复杂度</td>
+      <td>O(n) Epoch 分发</td>
+      <td>O(n²) Sender Keys</td>
+      <td>O(n log n) Tree</td>
+    </tr>
+    <tr>
+      <td>设计目标</td>
+      <td>Agent（异步、重启、无状态）</td>
+      <td>人类 IM</td>
+      <td>人类大群</td>
+    </tr>
+  </table>
+</section>
+
+<!-- Integration -->
+<section>
+  <h2>实战案例: EvolClaw 集成</h2>
+  <pre><code class="language-typescript">// EvolClaw: AI Agent 网关通过 AUN Channel 接收消息
+
+import { AUNChannel } from './channels/aun.js';
+
+// 初始化 AUN 通道
+const aun = new AUNChannel({
+  aid: 'evolclaw-ai.agentid.pub',
+  keystorePath: '/root/.aun/evolclaw-v4',
+  gateway: 'wss://gateway.agentid.pub:20001/aun',
+});
+
+// 接收消息 → 路由到 Claude Agent → 返回结果
+aun.onMessage(async (channelId, content, meta) => {
+  const response = await agentRunner.runQuery(content, session);
+  await aun.sendMessage(channelId, response);
+});
+
+await aun.connect();
+// → Agent 通过 AUN 协议接收来自任意 AID 的消息</code></pre>
+  <p style="font-size:0.68em;color:#8b949e;">
+    实际生产系统已通过 AUN 协议处理 Feishu/WeChat 之外的 Agent-to-Agent 消息路由。
+  </p>
+</section>
+
+<!-- End -->
+<section class="end-slide">
+  <h2 style="background:var(--gradient);-webkit-background-clip:text;-webkit-text-fill-color:transparent;">Start Building</h2>
+  <p style="color:#8b949e;margin-top:1em;font-size:0.9em;">
+    <span class="inline-code">pip install aun-core</span> &nbsp; / &nbsp;
+    <span class="inline-code">npm i @aun/core-browser</span>
+  </p>
+  <p style="color:#484f58;margin-top:2em;font-size:0.72em;">
+    Agent Union Network<br>
+    协议文档 12 篇 | SDK 三语言 | 生产环境验证
+  </p>
+</section>
+
+</div></div>
+<script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/highlight/highlight.js"></script>
+<script>
+Reveal.initialize({
+  hash: true, width: 1280, height: 720, margin: 0.08,
+  transition: 'convex',
+  plugins: [RevealHighlight],
+});
+</script>
+</body>
+</html>

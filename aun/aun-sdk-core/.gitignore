@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+
+# Go
+go/go.sum
+
+# Node.js / TypeScript / JavaScript
+node_modules/
+dist/
+build/
+*.tsbuildinfo
+test-results/
+playwright-report/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project local
+.aun_test/
+.claude/
+.tmp/
+AGENTS.md
+CLAUDE.md

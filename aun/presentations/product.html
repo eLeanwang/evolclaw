@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AUN - 产品人员介绍</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/theme/white.css">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;800&family=Noto+Sans+SC:wght@300;400;500;700;900&display=swap');
+  :root {
+    --r-main-font: 'Inter', 'Noto Sans SC', sans-serif;
+    --r-heading-font: 'Inter', 'Noto Sans SC', sans-serif;
+    --primary: #2563eb;
+    --secondary: #7c3aed;
+    --success: #059669;
+    --light: #f8fafc;
+    --text: #0f172a;
+    --muted: #64748b;
+    --gradient: linear-gradient(135deg, #2563eb 0%, #7c3aed 100%);
+  }
+  .reveal { font-size: 28px; color: var(--text); }
+  .reveal .slides section { text-align: left; }
+  .reveal h1 { font-size: 2.2em; font-weight: 800; }
+  .reveal h2 { font-size: 1.7em; font-weight: 700; color: var(--text); }
+  .reveal h3 { font-size: 1.1em; font-weight: 600; color: var(--primary); }
+  .title-slide { text-align: center !important; }
+  .title-slide h1 {
+    background: var(--gradient);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+  .title-slide .subtitle { color: var(--muted); font-size: 1.2em; }
+  .title-slide .label {
+    display: inline-block;
+    background: rgba(37,99,235,0.1);
+    color: var(--primary);
+    padding: 0.4em 1em;
+    border-radius: 999px;
+    font-size: 0.6em;
+    font-weight: 600;
+    margin-top: 1.5em;
+  }
+  .problem-grid, .scenario-grid, .feature-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 1em;
+    margin: 1em 0;
+  }
+  .card {
+    background: #fff;
+    border: 1px solid #e2e8f0;
+    border-radius: 16px;
+    padding: 1.2em;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.04);
+  }
+  .card h4 { margin: 0 0 0.4em; font-size: 0.9em; }
+  .card p { margin: 0; font-size: 0.68em; color: var(--muted); line-height: 1.55; }
+  .flow {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 1em;
+    margin: 2em 0;
+  }
+  .flow-step {
+    flex: 1;
+    background: linear-gradient(135deg, rgba(37,99,235,0.05), rgba(124,58,237,0.05));
+    border: 1px solid rgba(37,99,235,0.12);
+    border-radius: 16px;
+    padding: 1.2em;
+    text-align: center;
+  }
+  .flow-step .num {
+    width: 36px; height: 36px; line-height: 36px;
+    border-radius: 50%; background: var(--gradient); color: white;
+    margin: 0 auto 0.6em; font-weight: 700; font-size: 0.7em;
+  }
+  .flow-step h4 { font-size: 0.82em; margin: 0 0 0.3em; }
+  .flow-step p { font-size: 0.62em; color: var(--muted); margin: 0; line-height: 1.45; }
+  .arrow { color: var(--primary); font-size: 1.5em; }
+  .compare-table {
+    width: 100%; border-collapse: collapse; font-size: 0.68em; margin-top: 1em;
+  }
+  .compare-table th, .compare-table td {
+    border: 1px solid #e2e8f0; padding: 0.75em; text-align: center;
+  }
+  .compare-table th { background: #f8fafc; color: var(--primary); }
+  .compare-table td:first-child, .compare-table th:first-child { text-align: left; }
+  .tag {
+    display: inline-block; padding: 0.15em 0.6em; border-radius: 999px;
+    font-size: 0.55em; font-weight: 600; margin-left: 0.5em;
+  }
+  .tag.blue { background: rgba(37,99,235,0.1); color: var(--primary); }
+  .tag.green { background: rgba(5,150,105,0.1); color: var(--success); }
+  .roadmap {
+    margin-top: 1.5em;
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 1em;
+  }
+  .roadmap-card {
+    border-left: 4px solid var(--primary); background: #f8fafc; padding: 1em; border-radius: 0 12px 12px 0;
+  }
+  .roadmap-card .phase { color: var(--primary); font-weight: 700; font-size: 0.75em; }
+  .roadmap-card ul { margin: 0.4em 0 0 1em; font-size: 0.62em; color: var(--muted); line-height: 1.6; }
+  .highlight { color: var(--primary); font-weight: 700; }
+  .end-slide { text-align: center !important; }
+</style>
+</head>
+<body>
+<div class="reveal"><div class="slides">
+
+<section class="title-slide">
+  <h1>AUN for Product</h1>
+  <p class="subtitle">把 Agent 从“单点工具”变成“可协作网络”</p>
+  <div class="label">产品人员版</div>
+</section>
+
+<section>
+  <h2>产品问题定义</h2>
+  <div class="problem-grid">
+    <div class="card">
+      <h4>今天的 Agent 只能在平台内工作</h4>
+      <p>大多数 Agent 只在自己的宿主平台里可用：聊天工具、企业系统、某个大模型厂商生态。跨系统协作几乎不可复用。</p>
+    </div>
+    <div class="card">
+      <h4>跨团队流程无法标准化</h4>
+      <p>销售 Agent、客服 Agent、法务 Agent、开发 Agent 各自分散，组织无法把“协作”设计成产品能力。</p>
+    </div>
+    <div class="card">
+      <h4>安全和权限阻碍产品落地</h4>
+      <p>一旦涉及客户数据、文件共享、组织边界，产品团队就必须重新解决身份、认证、消息可信和权限隔离。</p>
+    </div>
+    <div class="card">
+      <h4>用户体验被基础设施拖累</h4>
+      <p>没有统一通信层，产品团队被迫在每个集成点重复造轮子，导致交付慢、成本高、体验碎片化。</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>AUN 提供什么产品能力？</h2>
+  <div class="feature-grid">
+    <div class="card">
+      <h4>统一身份层 <span class="tag blue">AID</span></h4>
+      <p>每个 Agent 拥有可验证身份，像邮箱地址一样可寻址，但具备证书级安全性。产品可以围绕身份做目录、权限、品牌和信任展示。</p>
+    </div>
+    <div class="card">
+      <h4>统一消息层 <span class="tag blue">Message</span></h4>
+      <p>Agent 之间可直接发消息、回执、撤回、拉取离线记录。产品团队不需要自行设计 Agent 间协议。</p>
+    </div>
+    <div class="card">
+      <h4>统一群组协作层 <span class="tag green">Group</span></h4>
+      <p>一个任务可由多个 Agent 加入群组协作：讨论、广播、轮值、权限控制、成员管理、群组 E2EE。</p>
+    </div>
+    <div class="card">
+      <h4>统一文件与资源层 <span class="tag green">Storage</span></h4>
+      <p>支持文件上传、下载、对象存储、权限隔离。让 Agent 不止能“对话”，还能共享上下文和交付物。</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>一个典型产品流程</h2>
+  <div class="flow">
+    <div class="flow-step">
+      <div class="num">1</div>
+      <h4>发现</h4>
+      <p>用户或系统发现可协作 Agent<br>通过 AID / Search 查询能力</p>
+    </div>
+    <div class="arrow">→</div>
+    <div class="flow-step">
+      <div class="num">2</div>
+      <h4>认证</h4>
+      <p>完成身份校验与信任建立<br>自动分发访问凭证</p>
+    </div>
+    <div class="arrow">→</div>
+    <div class="flow-step">
+      <div class="num">3</div>
+      <h4>协作</h4>
+      <p>消息、群组、文件同步推进<br>支持异步和离线处理</p>
+    </div>
+    <div class="arrow">→</div>
+    <div class="flow-step">
+      <div class="num">4</div>
+      <h4>交付</h4>
+      <p>返回结果、状态、文件产物<br>形成可追踪闭环</p>
+    </div>
+  </div>
+  <p style="font-size:0.72em;color:#64748b;">对产品团队而言，AUN 把“Agent 协作”从定制开发能力，变成平台级标准能力。</p>
+</section>
+
+<section>
+  <h2>适合哪些产品场景？</h2>
+  <div class="scenario-grid">
+    <div class="card">
+      <h4>企业内部多 Agent 工作流</h4>
+      <p>一个销售线索从线索分析 Agent → 商机评分 Agent → 合同审查 Agent → 客户回复 Agent，全链路协作。</p>
+    </div>
+    <div class="card">
+      <h4>跨组织 Agent 协作</h4>
+      <p>品牌方、代理商、供应商、渠道商各自有自己的 Agent，通过 AUN 建立可信合作关系，而非共享同一后台系统。</p>
+    </div>
+    <div class="card">
+      <h4>Agent Marketplace</h4>
+      <p>像 App Store 一样发现 Agent，但不止“调用工具”，而是让外部 Agent 以可信身份加入你的业务流程。</p>
+    </div>
+    <div class="card">
+      <h4>高合规数据流转</h4>
+      <p>医疗、金融、法务场景需要验证发送方身份、保护消息内容、审计群组变更。AUN 原生支持这些基础要求。</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>从产品视角看，AUN 和 A2A / MCP 的关系</h2>
+  <table class="compare-table">
+    <tr>
+      <th>维度</th>
+      <th>AUN</th>
+      <th>A2A</th>
+      <th>MCP</th>
+    </tr>
+    <tr>
+      <td>解决什么问题</td>
+      <td>Agent 身份 + 安全通信 + 协作</td>
+      <td>Agent 发现与对接</td>
+      <td>模型调用工具/资源</td>
+    </tr>
+    <tr>
+      <td>产品价值</td>
+      <td>让 Agent 成为网络节点</td>
+      <td>让 Agent 可被找到</td>
+      <td>让 Agent 能调用外部能力</td>
+    </tr>
+    <tr>
+      <td>是否跨组织可信</td>
+      <td>是，基于证书体系</td>
+      <td>部分，偏接口描述</td>
+      <td>弱，偏单应用内部</td>
+    </tr>
+    <tr>
+      <td>是否支持加密群协作</td>
+      <td>是</td>
+      <td>否</td>
+      <td>否</td>
+    </tr>
+    <tr>
+      <td>是否适合做平台底座</td>
+      <td>高</td>
+      <td>中</td>
+      <td>中</td>
+    </tr>
+  </table>
+  <p style="font-size:0.68em;color:#64748b;margin-top:0.8em;">如果你的产品目标是“让更多 Agent 协作”，AUN 更像底层网络层，而不是单一接口标准。</p>
+</section>
+
+<section>
+  <h2>产品设计的关键优势</h2>
+  <div class="feature-grid">
+    <div class="card">
+      <h4>不用重新定义信任</h4>
+      <p>每个 Agent 自带身份与证书，产品功能可以直接依赖这一层做授权、品牌、审计、组织边界管理。</p>
+    </div>
+    <div class="card">
+      <h4>天然支持异步协作</h4>
+      <p>AUN 的无状态 E2EE 适合 Agent 断线、重启、异步处理的真实工作流，不会像 IM 协议一样被链状态卡死。</p>
+    </div>
+    <div class="card">
+      <h4>支持从 1 对 1 到群协作演进</h4>
+      <p>先从两个 Agent 协作开始，后续平滑升级到多 Agent 群组任务、轮值处理、文件共享，不需要换底层架构。</p>
+    </div>
+    <div class="card">
+      <h4>适合做平台能力而不是一次性项目</h4>
+      <p>适用于 CRM、客服、知识管理、企业办公、SaaS 平台等产品长期演化，而不是单点 demo。</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>产品路线图建议</h2>
+  <div class="roadmap">
+    <div class="roadmap-card">
+      <div class="phase">Phase 1 · 接入期</div>
+      <ul>
+        <li>接入 AID 身份体系</li>
+        <li>支持 1 对 1 Agent 消息</li>
+        <li>完成基础权限验证</li>
+      </ul>
+    </div>
+    <div class="roadmap-card">
+      <div class="phase">Phase 2 · 协作期</div>
+      <ul>
+        <li>支持群组协作与文件交换</li>
+        <li>引入 Agent 搜索与目录</li>
+        <li>建立任务状态流转</li>
+      </ul>
+    </div>
+    <div class="roadmap-card">
+      <div class="phase">Phase 3 · 生态期</div>
+      <ul>
+        <li>开放外部 Agent 接入</li>
+        <li>建设 Marketplace / 联盟网络</li>
+        <li>推出多方合作场景</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section class="end-slide">
+  <h2>AUN 的产品意义</h2>
+  <p style="font-size:1.15em;color:#334155;line-height:1.7;">
+    不是再做一个 Agent<br>
+    而是给所有 Agent 一个可协作的网络层
+  </p>
+  <p style="font-size:0.8em;color:#64748b;margin-top:1.8em;">
+    对产品团队来说，AUN 最重要的价值是：<br>
+    <span class="highlight">把“Agent 协作”从项目能力，升级为平台能力。</span>
+  </p>
+</section>
+
+</div></div>
+<script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.js"></script>
+<script>
+Reveal.initialize({ hash: true, width: 1280, height: 720, margin: 0.08, transition: 'slide' });
+</script>
+</body>
+</html>
