@@ -172,13 +172,18 @@ npm test
 ```
 evolclaw/
 ├── src/
+│   ├── agents/
+│   │   ├── claude-runner.ts        # Claude Agent SDK 封装
+│   │   └── codex-runner.ts         # Codex Agent 封装
 │   ├── core/
+│   │   ├── adapters/
+│   │   │   ├── claude-session-file-adapter.ts
+│   │   │   └── codex-session-file-adapter.ts
 │   │   ├── command-handler.ts       # 斜杠命令处理
 │   │   ├── session-manager.ts       # 会话管理（多项目支持）
 │   │   ├── message-queue.ts         # 消息队列（串行+中断）
 │   │   ├── message-processor.ts     # 统一消息处理引擎
 │   │   ├── stream-flusher.ts        # 批量发送（3秒窗口）
-│   │   ├── agent-runner.ts          # Claude Agent SDK 封装
 │   │   └── message-cache.ts         # 消息缓存
 │   ├── channels/
 │   │   ├── feishu.ts               # 飞书 WebSocket 渠道
