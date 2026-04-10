@@ -907,6 +907,25 @@ function archiveSelfHealLog(
 }
 
 /**
+ * Resolve a channel instance name to its type and config object.
+ * Searches across all channel types (feishu, wechat, aun) for a matching instance.
+ */
+function resolveInstanceConfig(config: any, instanceName: string): { type: string; config: any } | null {
+  for (const type of ['feishu', 'wechat', 'aun']) {
+    const raw = config.channels?.[type];
+    if (!raw) continue;
+    if (Array.isArray(raw)) {
+      const inst = raw.find((i: any) => i.name === instanceName);
+      if (inst) return { type, config: inst };
+    } else {
+      const name = raw.name || type;
+      if (name === instanceName) return { type, config: raw };
+    }
+  }
+  return null;
+}
+
+/**
  * 通过对应渠道 API 发送通知（轻量级，不依赖 Channel 实例）
  * 支持 feishu / wechat，根据 pendingInfo.channel 路由
  */
@@ -922,14 +941,21 @@ async function notifyChannel(
   if (!fs.existsSync(configPath)) return;
   const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
 
-  if (pendingInfo.channel === 'feishu') {
+  const resolved = resolveInstanceConfig(config, pendingInfo.channel);
+  if (!resolved) {
+    log(`Channel instance "${pendingInfo.channel}" not found in config`);
+    return;
+  }
+
+  if (resolved.type === 'feishu') {
     try {
-      if (!config.channels?.feishu?.appId || !config.channels?.feishu?.appSecret) return;
+      const inst = resolved.config;
+      if (!inst.appId || !inst.appSecret) return;
 
       const lark = await import('@larksuiteoapi/node-sdk');
       const client = new lark.Client({
-        appId: config.channels!.feishu!.appId,
-        appSecret: config.channels!.feishu!.appSecret,
+        appId: inst.appId,
+        appSecret: inst.appSecret,
       });
 
       if (pendingInfo.rootId) {
@@ -956,13 +982,14 @@ async function notifyChannel(
     } catch (error: any) {
       log(`Feishu notification failed: ${error.message?.slice(0, 200) || error}`);
     }
-  } else if (pendingInfo.channel === 'wechat') {
+  } else if (resolved.type === 'wechat') {
     try {
-      if (!config.channels?.wechat?.token) return;
+      const inst = resolved.config;
+      if (!inst.token) return;
 
       const crypto = await import('node:crypto');
-      const baseUrl = (config.channels!.wechat!.baseUrl || 'https://ilinkai.weixin.qq.com').replace(/\/$/, '');
-      const token = config.channels!.wechat!.token;
+      const baseUrl = (inst.baseUrl || 'https://ilinkai.weixin.qq.com').replace(/\/$/, '');
+      const token = inst.token;
 
       // 读取缓存的 context_token
       const syncBufPath = path.join(p.dataDir, 'wechat-context-tokens.json');
@@ -1130,7 +1157,9 @@ async function cmdDiagnose() {
 
 async function cmdTui() {
   const config = loadConfig();
-  const aun = config.channels?.aun;
+  // Find the first AUN instance (TUI connects to one AUN instance)
+  const aunResolved = resolveInstanceConfig(config as any, 'aun');
+  const aun = aunResolved?.type === 'aun' ? aunResolved.config : null;
   if (!aun?.owner || !aun?.aid) {
     console.error('[tui] AUN 未配置，请先运行: evolclaw init aun');
     process.exit(1);

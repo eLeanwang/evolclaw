@@ -32,8 +32,17 @@ export class MessageBridge {
   private getDebouncer(channelName: string): StreamDebouncer {
     let d = this.debouncers.get(channelName);
     if (!d) {
-      const chConfig = (this.config.channels as any)?.[channelName];
-      const seconds = chConfig?.debounce ?? this.defaultDebounce;
+      let seconds = this.defaultDebounce;
+      for (const type of ['feishu', 'wechat', 'aun'] as const) {
+        const raw = (this.config.channels as any)?.[type];
+        if (!raw) continue;
+        if (Array.isArray(raw)) {
+          const inst = raw.find((i: any) => (i.name || type) === channelName);
+          if (inst?.debounce !== undefined) { seconds = inst.debounce; break; }
+        } else if ((raw.name || type) === channelName) {
+          if (raw.debounce !== undefined) { seconds = raw.debounce; break; }
+        }
+      }
       d = new StreamDebouncer(seconds);
       this.debouncers.set(channelName, d);
     }
@@ -159,9 +168,11 @@ export class MessageBridge {
 
   /** 首次交互自动绑定 owner */
   private async autoBindOwner(channel: string, userId: string): Promise<void> {
-    const channelConfig = (this.config.channels as any)?.[channel];
-    if (channelConfig && !channelConfig.owner) {
-      const { setOwner } = await import('../config.js');
+    const { getOwner, setOwner } = await import('../config.js');
+    const currentOwner = getOwner(this.config, channel);
+    // currentOwner === undefined means either no owner set, or instance not found
+    // In both cases, try to set — setOwner is a no-op for unknown instances
+    if (currentOwner === undefined) {
       setOwner(this.config, channel, userId);
       logger.info(`[Owner] Auto-bound ${channel} owner: ${userId}`);
       this.eventBus.publish({ type: 'channel:owner-bound', channel, userId });

@@ -1,6 +1,6 @@
 import { ClaudeSessionFileAdapter } from './core/adapters/claude-session-file-adapter.js';
 import { CodexSessionFileAdapter } from './core/adapters/codex-session-file-adapter.js';
-import { loadConfig, ensureDataDirs, resolvePaths, resolveAnthropicConfig, isOwner, validateConfigIntegrity } from './config.js';
+import { loadConfig, ensureDataDirs, resolvePaths, resolveAnthropicConfig, isOwner, validateConfigIntegrity, validateChannelInstanceNames, getOwner } from './config.js';
 import { SessionManager } from './core/session-manager.js';
 import { ClaudeAgentPlugin } from './agents/claude-runner.js';
 import { CodexAgentPlugin } from './agents/codex-runner.js';
@@ -63,6 +63,9 @@ async function main() {
 
   const anthropic = resolveAnthropicConfig(config);
   logger.info('✓ Config loaded (API keys hidden)');
+
+  // Channel instance name uniqueness check
+  validateChannelInstanceNames(config);
 
   if (anthropic.baseUrl) {
     logger.info(`✓ Using custom API base URL: ${anthropic.baseUrl}`);
@@ -234,11 +237,13 @@ async function main() {
 
   // 连接插件系统的渠道
   for (const inst of channelInstances) {
-    if (inst.adapter.name === 'feishu') {
-      msgBridge.register('feishu',
+    const channelType = inst.channelType || inst.adapter.name;
+
+    if (channelType === 'feishu') {
+      msgBridge.register(inst.adapter.name,
         (handler) => inst.channel.onMessage(async ({ channelId: chatId, content, images, peerId, peerName, messageId, mentions, threadId, rootId, chatType }: any) => {
           handler({
-            channel: 'feishu', channelId: chatId, content, images, chatType,
+            channel: inst.adapter.name, channelId: chatId, content, images, chatType,
             peerId: peerId || '', peerName, messageId, mentions, threadId,
             replyContext: rootId ? { replyToMessageId: rootId, replyInThread: true } : undefined,
           });
@@ -254,16 +259,16 @@ async function main() {
       });
     }
 
-    if (inst.adapter.name === 'wechat') {
+    if (channelType === 'wechat') {
       // 注入 EventBus（用于 channel:health 事件）
       if (inst.channel.setEventBus) {
         inst.channel.setEventBus(eventBus);
       }
-      msgBridge.register('wechat',
+      msgBridge.register(inst.adapter.name,
         (handler) => inst.channel.onMessage(async (channelId: string, content: string, peerId?: string,
           images?: Array<{ data: string; mimeType: string }>, chatType?: 'private' | 'group') => {
           handler({
-            channel: 'wechat',
+            channel: inst.adapter.name,
             channelId,
             content,
             images,
@@ -276,11 +281,11 @@ async function main() {
       );
     }
 
-    if (inst.adapter.name === 'aun') {
-      msgBridge.register('aun',
+    if (channelType === 'aun') {
+      msgBridge.register(inst.adapter.name,
         (handler) => inst.channel.onMessage(async (opts: any) => {
           handler({
-            channel: 'aun',
+            channel: inst.adapter.name,
             channelId: opts.channelId,
             content: opts.content,
             chatType: opts.chatType || 'private',
@@ -303,8 +308,9 @@ async function main() {
 
   // 预填充 Feishu 已知 thread_id（重启后避免误判话题创建）
   for (const inst of channelInstances) {
-    if (inst.adapter.name === 'feishu' && 'preloadThreads' in inst.channel) {
-      const threadIds = sessionManager.getKnownThreadIds('feishu');
+    const channelType = inst.channelType || inst.adapter.name;
+    if (channelType === 'feishu' && 'preloadThreads' in inst.channel) {
+      const threadIds = sessionManager.getKnownThreadIds(inst.adapter.name);
       (inst.channel as any).preloadThreads(threadIds);
     }
   }
@@ -319,13 +325,14 @@ async function main() {
 
   // AUN 重连失败通知：通过 channel:health 事件
   for (const inst of channelInstances) {
-    if (inst.adapter.name === 'aun' && inst.channel.setOnChannelDown) {
+    const channelType = inst.channelType || inst.adapter.name;
+    if (channelType === 'aun' && inst.channel.setOnChannelDown) {
       inst.channel.setOnChannelDown(() => {
         eventBus.publish({
           type: 'channel:health',
-          channel: 'aun',
+          channel: inst.adapter.name,
           status: 'auth_error',
-          message: '⚠️ AUN 渠道断连，自动重试已用尽。\n使用 /check rty aun 手动重连',
+          message: `⚠️ AUN 渠道 ${inst.adapter.name} 断连，自动重试已用尽。\n使用 /check rty aun 手动重连`,
           timestamp: Date.now(),
         });
       });
@@ -341,8 +348,7 @@ async function main() {
 
     for (const other of channelInstances) {
       if (other.adapter.name === sourceChannel) continue;
-      const ownerCfg = config.channels?.[other.adapter.name as keyof typeof config.channels];
-      const ownerId = (ownerCfg as any)?.owner;
+      const ownerId = getOwner(config, other.adapter.name);
       if (ownerId) {
         other.adapter.sendText(ownerId, msg).catch(err => {
           logger.error(`[ChannelHealth] Failed to notify ${other.adapter.name} owner:`, err);
