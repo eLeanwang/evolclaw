@@ -1,6 +1,8 @@
 import fs from 'fs';
 import readline from 'readline';
 import { resolvePaths } from '../paths.js';
+import { normalizeChannelInstances } from '../config.js';
+import { selectInstance, InstanceChoice } from './init-common.js';
 
 const FEISHU_PROD_URL = 'https://accounts.feishu.cn';
 const LARK_PROD_URL = 'https://accounts.larksuite.com';
@@ -228,35 +230,24 @@ export async function cmdInitFeishu(): Promise<void> {
 
   const config = JSON.parse(fs.readFileSync(p.config, 'utf-8'));
 
-  // 检查已有配置 — 提示破坏性风险（排除占位符）
-  const existingFeishu = config.channels?.feishu;
-  const isPlaceholder =
-    !existingFeishu?.appId ||
-    !existingFeishu?.appSecret ||
-    existingFeishu.appId.includes('your-') ||
-    existingFeishu.appId.includes('placeholder') ||
-    existingFeishu.appSecret.includes('your-') ||
-    existingFeishu.appSecret.includes('placeholder');
+  // Normalize existing instances and filter out placeholders
+  const allInstances = normalizeChannelInstances(config.channels?.feishu, 'feishu');
+  const validInstances: Array<{ name: string; originalIndex: number; [key: string]: any }> = [];
+  for (let i = 0; i < allInstances.length; i++) {
+    const inst = allInstances[i];
+    if (!inst.appId || !inst.appSecret) continue;
+    if (inst.appId.includes('your-') || inst.appId.includes('placeholder')) continue;
+    if (inst.appSecret.includes('your-') || inst.appSecret.includes('placeholder')) continue;
+    validInstances.push({ ...inst, originalIndex: i });
+  }
 
-  if (existingFeishu && !isPlaceholder) {
+  let choice: InstanceChoice | null = null;
+
+  if (validInstances.length > 0) {
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
     try {
-      console.log('⚠️  检测到已有飞书配置：');
-      console.log(`  App ID: ${existingFeishu.appId}`);
-      if (existingFeishu.owner) {
-        console.log(`  当前 Owner: ${existingFeishu.owner}`);
-      }
-      console.log('');
-      console.log('重新初始化将：');
-      console.log('  - 替换当前飞书机器人凭证（旧机器人停止工作）');
-      console.log('  - 重置 Owner 绑定为新扫码账号');
-      console.log('  - 现有会话数据保留，但需用新机器人重新发起对话');
-      console.log('');
-      const answer = (await ask(rl, '确认重新初始化？[y/N] ')).trim().toLowerCase();
-      if (answer !== 'y' && answer !== 'yes') {
-        console.log('已取消');
-        return;
-      }
+      choice = await selectInstance(rl, 'feishu', validInstances);
+      if (choice === null) return; // user cancelled
     } finally {
       rl.close();
     }
@@ -288,17 +279,50 @@ export async function cmdInitFeishu(): Promise<void> {
     process.exit(1);
   }
 
-  // 写入配置：使用最新结构 channels.feishu
+  // Write config to the correct slot
   if (!config.channels) config.channels = {};
-  config.channels.feishu = config.channels.feishu || {};
-  config.channels.feishu.appId = result.appId;
-  config.channels.feishu.appSecret = result.appSecret;
-  config.channels.feishu.enabled = true;
 
-  if (result.openId) {
-    config.channels.feishu.owner = result.openId;
+  if (choice && choice.action === 'overwrite' && Array.isArray(config.channels.feishu)) {
+    // Overwrite existing instance in array — use originalIndex to find the right slot
+    const idx = validInstances[choice.index]?.originalIndex ?? choice.index;
+    config.channels.feishu[idx].appId = result.appId;
+    config.channels.feishu[idx].appSecret = result.appSecret;
+    config.channels.feishu[idx].enabled = true;
+    if (result.openId) config.channels.feishu[idx].owner = result.openId;
+  } else if (choice && choice.action === 'overwrite' && !Array.isArray(config.channels.feishu)) {
+    // Overwrite single-object
+    config.channels.feishu = config.channels.feishu || {};
+    config.channels.feishu.appId = result.appId;
+    config.channels.feishu.appSecret = result.appSecret;
+    config.channels.feishu.enabled = true;
+    if (result.openId) config.channels.feishu.owner = result.openId;
+    else delete config.channels.feishu.owner;
+  } else if (choice && choice.action === 'add') {
+    // Add new instance — upgrade to array if needed
+    const newInst = {
+      name: choice.name,
+      appId: result.appId,
+      appSecret: result.appSecret,
+      enabled: true,
+      ...(result.openId ? { owner: result.openId } : {}),
+    };
+    if (Array.isArray(config.channels.feishu)) {
+      config.channels.feishu.push(newInst);
+    } else if (config.channels.feishu) {
+      // Upgrade single object to array
+      const oldInst = { ...config.channels.feishu, name: config.channels.feishu.name || 'feishu' };
+      config.channels.feishu = [oldInst, newInst];
+    } else {
+      config.channels.feishu = [newInst];
+    }
   } else {
-    delete config.channels.feishu.owner;
+    // First instance — single object format (backward compat)
+    config.channels.feishu = config.channels.feishu || {};
+    config.channels.feishu.appId = result.appId;
+    config.channels.feishu.appSecret = result.appSecret;
+    config.channels.feishu.enabled = true;
+    if (result.openId) config.channels.feishu.owner = result.openId;
+    else delete config.channels.feishu.owner;
   }
 
   if (!config.channels.defaultChannel) config.channels.defaultChannel = 'feishu';
@@ -312,6 +336,9 @@ export async function cmdInitFeishu(): Promise<void> {
   }
   if (result.domain !== 'unknown') {
     console.log(`  Domain: ${result.domain}`);
+  }
+  if (choice) {
+    console.log(`  实例: ${choice.name} (${choice.action === 'add' ? '新增' : '覆盖'})`);
   }
   console.log(`  配置已写入: ${p.config}`);
   console.log(`\n现在可以启动服务: evolclaw restart`);

@@ -1,16 +1,13 @@
-import crypto from 'node:crypto';
 import fs from 'fs';
 import readline from 'readline';
 import { resolvePaths } from '../paths.js';
+import { normalizeChannelInstances } from '../config.js';
+import { selectInstance, InstanceChoice } from './init-common.js';
 
 const DEFAULT_BASE_URL = 'https://ilinkai.weixin.qq.com';
 const BOT_TYPE = '3';
 const QR_POLL_TIMEOUT_MS = 35_000;
 const LOGIN_TIMEOUT_MS = 480_000;
-
-function ask(rl: readline.Interface, question: string): Promise<string> {
-  return new Promise(resolve => rl.question(question, resolve));
-}
 
 interface QRCodeResponse {
   qrcode: string;
@@ -119,15 +116,23 @@ export async function cmdInitWechat(): Promise<void> {
 
   const config = JSON.parse(fs.readFileSync(p.config, 'utf-8'));
 
-  // 检查已有配置
-  if (config.channels?.wechat?.token) {
+  // Normalize existing instances and filter out placeholders
+  const allInstances = normalizeChannelInstances(config.channels?.wechat, 'wechat');
+  const validInstances: Array<{ name: string; originalIndex: number; [key: string]: any }> = [];
+  for (let i = 0; i < allInstances.length; i++) {
+    const inst = allInstances[i];
+    if (!inst.token) continue;
+    if (inst.token.includes('your-') || inst.token.includes('placeholder')) continue;
+    validInstances.push({ ...inst, originalIndex: i });
+  }
+
+  let choice: InstanceChoice | null = null;
+
+  if (validInstances.length > 0) {
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
     try {
-      const answer = (await ask(rl, '已有微信配置，是否重新登录？[y/N] ')).trim().toLowerCase();
-      if (answer !== 'y' && answer !== 'yes') {
-        console.log('已取消');
-        return;
-      }
+      choice = await selectInstance(rl, 'wechat', validInstances);
+      if (choice === null) return; // user cancelled
     } finally {
       rl.close();
     }
@@ -164,7 +169,7 @@ export async function cmdInitWechat(): Promise<void> {
         break;
       case 'scaned':
         if (!scannedPrinted) {
-          console.log('\n👀 已扫码，请在微信中确认...');
+          console.log('\n\ud83d\udc40 已扫码，请在微信中确认...');
           scannedPrinted = true;
         }
         break;
@@ -178,13 +183,50 @@ export async function cmdInitWechat(): Promise<void> {
           process.exit(1);
         }
 
-        // 写入配置
+        const baseUrl = status.baseurl || DEFAULT_BASE_URL;
+        const token = status.bot_token;
+
+        // Write config to the correct slot
         if (!config.channels) config.channels = {};
-        config.channels.wechat = {
-          enabled: true,
-          baseUrl: status.baseurl || DEFAULT_BASE_URL,
-          token: status.bot_token,
-        };
+
+        if (choice && choice.action === 'overwrite' && Array.isArray(config.channels.wechat)) {
+          // Overwrite existing instance in array — use originalIndex to find the right slot
+          const idx = validInstances[choice.index]?.originalIndex ?? choice.index;
+          config.channels.wechat[idx].enabled = true;
+          config.channels.wechat[idx].baseUrl = baseUrl;
+          config.channels.wechat[idx].token = token;
+        } else if (choice && choice.action === 'overwrite' && !Array.isArray(config.channels.wechat)) {
+          // Overwrite single-object
+          config.channels.wechat = config.channels.wechat || {};
+          config.channels.wechat.enabled = true;
+          config.channels.wechat.baseUrl = baseUrl;
+          config.channels.wechat.token = token;
+        } else if (choice && choice.action === 'add') {
+          // Add new instance — upgrade to array if needed
+          const newInst = {
+            name: choice.name,
+            enabled: true,
+            baseUrl,
+            token,
+          };
+          if (Array.isArray(config.channels.wechat)) {
+            config.channels.wechat.push(newInst);
+          } else if (config.channels.wechat) {
+            // Upgrade single object to array
+            const oldInst = { ...config.channels.wechat, name: config.channels.wechat.name || 'wechat' };
+            config.channels.wechat = [oldInst, newInst];
+          } else {
+            config.channels.wechat = [newInst];
+          }
+        } else {
+          // First instance — single object format (backward compat)
+          config.channels.wechat = {
+            enabled: true,
+            baseUrl,
+            token,
+          };
+        }
+
         if (!config.channels.defaultChannel) config.channels.defaultChannel = 'wechat';
 
         fs.writeFileSync(p.config, JSON.stringify(config, null, 2) + '\n');
@@ -192,6 +234,9 @@ export async function cmdInitWechat(): Promise<void> {
         console.log(`\n✅ 微信连接成功！`);
         console.log(`  Bot ID: ${status.ilink_bot_id}`);
         console.log(`  User ID: ${status.ilink_user_id}`);
+        if (choice) {
+          console.log(`  实例: ${choice.name} (${choice.action === 'add' ? '新增' : '覆盖'})`);
+        }
         console.log(`  配置已写入: ${p.config}`);
         console.log(`\n现在可以启动服务: evolclaw restart`);
         return;
