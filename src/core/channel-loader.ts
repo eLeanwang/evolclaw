@@ -14,6 +14,9 @@ import { logger } from '../utils/logger.js';
  * Channel instance returned by plugin
  */
 export interface ChannelInstance {
+  /** Channel type (e.g., 'feishu', 'wechat', 'aun') — used for message bridge wiring */
+  channelType?: string;
+
   /** Channel adapter for message sending */
   adapter: ChannelAdapter;
 
@@ -51,6 +54,9 @@ export interface ChannelPlugin {
 
   /** Create channel instance */
   createChannel(config: Config): Promise<ChannelInstance>;
+
+  /** Optional: create multiple instances from array config */
+  createChannels?(config: Config): Promise<ChannelInstance[]>;
 }
 
 /**
@@ -79,9 +85,15 @@ export class ChannelLoader {
       }
 
       try {
-        const instance = await plugin.createChannel(config);
-        instances.push(instance);
-        logger.info(`✓ Channel '${name}' instance created`);
+        if (plugin.createChannels) {
+          const channelInstances = await plugin.createChannels(config);
+          instances.push(...channelInstances);
+          logger.info(`✓ Channel '${name}' created ${channelInstances.length} instance(s)`);
+        } else {
+          const instance = await plugin.createChannel(config);
+          instances.push(instance);
+          logger.info(`✓ Channel '${name}' instance created`);
+        }
       } catch (error) {
         logger.error(`✗ Failed to create channel '${name}':`, error);
       }

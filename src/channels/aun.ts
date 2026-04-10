@@ -1,7 +1,8 @@
 import { AUNClient, FileSecretStore } from '@eleans/aun-core-node';
 import { logger } from '../utils/logger.js';
 import type { ChannelPlugin, ChannelInstance } from '../core/channel-loader.js';
-import type { Config, ReplyContext } from '../types.js';
+import type { Config, ReplyContext, AunChannelConfig } from '../types.js';
+import { normalizeChannelInstances } from '../config.js';
 
 export interface AUNConfig {
   aid: string;
@@ -528,69 +529,90 @@ export class AUNChannelPlugin implements ChannelPlugin {
   readonly name = 'aun';
 
   isEnabled(config: Config): boolean {
-    return config.channels?.aun?.enabled !== false && !!config.channels?.aun?.aid;
+    const raw = config.channels?.aun;
+    if (!raw) return false;
+    if (Array.isArray(raw)) {
+      return raw.some(inst => inst.enabled !== false && !!inst.aid);
+    }
+    return raw.enabled !== false && !!raw.aid;
+  }
+
+  async createChannels(config: Config): Promise<ChannelInstance[]> {
+    const instances = normalizeChannelInstances<AunChannelConfig>(
+      config.channels?.aun,
+      'aun',
+    );
+
+    const result: ChannelInstance[] = [];
+    for (const inst of instances) {
+      if (inst.enabled === false || !inst.aid) continue;
+
+      const channel = new AUNChannel({
+        aid: inst.aid,
+        keystorePath: inst.keystorePath,
+        gatewayPort: inst.gatewayPort,
+        gatewayUrl: inst.gatewayUrl,
+        accessToken: inst.accessToken,
+        flushDelay: inst.flushDelay,
+        encryptionSeed: inst.encryptionSeed,
+      });
+
+      const adapter = {
+        name: inst.name,
+        sendText: (id: string, text: string, context?: ReplyContext) => channel.sendMessage(id, text, context),
+        acknowledge: (messageId: string) => { channel.acknowledge(messageId); return Promise.resolve(); },
+        sendProcessingStatus: (id: string, status: 'start' | 'done', sessionId: string, context?: ReplyContext) => channel.sendProcessingStatus(id, status, sessionId, context),
+        sendCustomPayload: (id: string, payload: string) => channel.sendCustomPayload(id, payload),
+      };
+
+      const policy = {
+        canSwitchProject: (chatType: string, identity: string) => identity === 'owner',
+        canListProjects: (chatType: string, identity: string) => identity === 'owner',
+        canCreateSession: (chatType: string, identity: string) => true,
+        canDeleteSession: (chatType: string, identity: string) => true,
+        canImportCliSession: (chatType: string, identity: string) => identity === 'owner',
+        messagePrefix: () => '',
+        showMiddleResult: (chatType: string, identity: string) => {
+          const mode = inst.showActivities ?? config.showActivities ?? 'all';
+          if (mode === 'none') return false;
+          if (mode === 'dm-only') return chatType === 'private';
+          if (mode === 'owner-dm-only') return chatType === 'private' && identity === 'owner';
+          return true;
+        },
+        showIdleMonitor: (chatType: string, identity: string) => {
+          const mode = inst.showActivities ?? config.showActivities ?? 'all';
+          if (mode === 'none') return false;
+          if (mode === 'dm-only') return chatType === 'private';
+          if (mode === 'owner-dm-only') return chatType === 'private' && identity === 'owner';
+          return true;
+        },
+        accumulateErrors: (chatType: string, identity: string) => true,
+      };
+
+      const options = {
+        flushDelay: inst.flushDelay ?? 3,
+        fileMarkerPattern: /\[SEND_FILE:(?:(\w+):)?([^\]]+)\]/g,
+      };
+
+      result.push({
+        channelType: 'aun',
+        adapter,
+        channel,
+        policy,
+        options,
+        connect: () => channel.connect(),
+        disconnect: () => channel.disconnect(),
+      });
+    }
+
+    return result;
   }
 
   async createChannel(config: Config): Promise<ChannelInstance> {
-    const aunConfig = config.channels?.aun;
-    if (!aunConfig?.aid) {
+    const instances = await this.createChannels(config);
+    if (instances.length === 0) {
       throw new Error('AUN config missing (aid required, e.g. "mybot.agentid.pub")');
     }
-
-    const channel = new AUNChannel({
-      aid: aunConfig.aid,
-      keystorePath: aunConfig.keystorePath,
-      gatewayPort: aunConfig.gatewayPort,
-      gatewayUrl: aunConfig.gatewayUrl,
-      accessToken: aunConfig.accessToken,
-      flushDelay: aunConfig.flushDelay,
-      encryptionSeed: aunConfig.encryptionSeed,
-    });
-
-    const adapter = {
-      name: 'aun' as const,
-      sendText: (id: string, text: string, context?: ReplyContext) => channel.sendMessage(id, text, context),
-      acknowledge: (messageId: string) => { channel.acknowledge(messageId); return Promise.resolve(); },
-      sendProcessingStatus: (id: string, status: 'start' | 'done', sessionId: string, context?: ReplyContext) => channel.sendProcessingStatus(id, status, sessionId, context),
-      sendCustomPayload: (id: string, payload: string) => channel.sendCustomPayload(id, payload),
-    };
-
-    const policy = {
-      canSwitchProject: (chatType: string, identity: string) => identity === 'owner',
-      canListProjects: (chatType: string, identity: string) => identity === 'owner',
-      canCreateSession: (chatType: string, identity: string) => true,
-      canDeleteSession: (chatType: string, identity: string) => true,
-      canImportCliSession: (chatType: string, identity: string) => identity === 'owner',
-      messagePrefix: () => '',
-      showMiddleResult: (chatType: string, identity: string) => {
-        const mode = aunConfig.showActivities ?? config.showActivities ?? 'all';
-        if (mode === 'none') return false;
-        if (mode === 'dm-only') return chatType === 'private';
-        if (mode === 'owner-dm-only') return chatType === 'private' && identity === 'owner';
-        return true;
-      },
-      showIdleMonitor: (chatType: string, identity: string) => {
-        const mode = aunConfig.showActivities ?? config.showActivities ?? 'all';
-        if (mode === 'none') return false;
-        if (mode === 'dm-only') return chatType === 'private';
-        if (mode === 'owner-dm-only') return chatType === 'private' && identity === 'owner';
-        return true;
-      },
-      accumulateErrors: (chatType: string, identity: string) => true,
-    };
-
-    const options = {
-      flushDelay: aunConfig.flushDelay ?? 3,
-      fileMarkerPattern: /\[SEND_FILE:(?:(\w+):)?([^\]]+)\]/g,
-    };
-
-    return {
-      adapter,
-      channel,
-      policy,
-      options,
-      connect: () => channel.connect(),
-      disconnect: () => channel.disconnect(),
-    };
+    return instances[0];
   }
 }

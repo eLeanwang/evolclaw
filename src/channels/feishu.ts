@@ -848,76 +848,97 @@ export function hasMarkdownSyntax(text: string): boolean {
 
 // Plugin implementation
 import type { ChannelPlugin, ChannelInstance } from '../core/channel-loader.js';
-import type { Config } from '../types.js';
+import type { Config, FeishuChannelConfig } from '../types.js';
+import { normalizeChannelInstances } from '../config.js';
 
 export class FeishuChannelPlugin implements ChannelPlugin {
   readonly name = 'feishu';
 
   isEnabled(config: Config): boolean {
-    const feishuConfig = config.channels?.feishu;
-    if (feishuConfig?.enabled === false) return false;
-    return !!(feishuConfig?.appId && feishuConfig?.appSecret);
+    const raw = config.channels?.feishu;
+    if (!raw) return false;
+    if (Array.isArray(raw)) {
+      return raw.some(inst => inst.enabled !== false && inst.appId && inst.appSecret);
+    }
+    if (raw.enabled === false) return false;
+    return !!(raw.appId && raw.appSecret);
+  }
+
+  async createChannels(config: Config): Promise<ChannelInstance[]> {
+    const instances = normalizeChannelInstances<FeishuChannelConfig>(
+      config.channels?.feishu,
+      'feishu',
+    );
+
+    const result: ChannelInstance[] = [];
+    for (const inst of instances) {
+      if (inst.enabled === false || !inst.appId || !inst.appSecret) continue;
+
+      const channel = new FeishuChannel({
+        appId: inst.appId,
+        appSecret: inst.appSecret,
+        enableRichContent: inst.enableRichContent,
+      });
+
+      const adapter = {
+        name: inst.name,
+        sendText: (id: string, text: string, context?: any) => channel.sendMessage(id, text, context),
+        sendFile: (id: string, filePath: string, context?: any) => channel.sendFile(id, filePath, context),
+        sendImage: (id: string, png: Buffer, context?: any) => channel.sendImage(id, png, context),
+        acknowledge: (messageId: string) => { channel.addAckReaction(messageId); return Promise.resolve(); },
+      };
+
+      const policy = {
+        canSwitchProject: (chatType: string, identity: string) => identity === 'owner',
+        canListProjects: (chatType: string, identity: string) => identity === 'owner',
+        canCreateSession: (chatType: string, identity: string) => true,
+        canDeleteSession: (chatType: string, identity: string) => true,
+        canImportCliSession: (chatType: string, identity: string) => identity === 'owner',
+        messagePrefix: (chatType: string, peerName?: string) => (chatType === 'group' && peerName) ? `[${peerName}] ` : '',
+        showMiddleResult: (chatType: string, identity: string) => {
+          const mode = inst.showActivities ?? config.showActivities ?? 'all';
+          if (mode === 'none') return false;
+          if (mode === 'dm-only') return chatType === 'private';
+          if (mode === 'owner-dm-only') return chatType === 'private' && identity === 'owner';
+          return true;
+        },
+        showIdleMonitor: (chatType: string, identity: string) => {
+          const mode = inst.showActivities ?? config.showActivities ?? 'all';
+          if (mode === 'none') return false;
+          if (mode === 'dm-only') return chatType === 'private';
+          if (mode === 'owner-dm-only') return chatType === 'private' && identity === 'owner';
+          return true;
+        },
+        accumulateErrors: (chatType: string, identity: string) => true,
+      };
+
+      const options = {
+        fileMarkerPattern: /\[SEND_FILE:(?:(\w+):)?([^\]]+)\]/g,
+        supportsImages: true,
+        flushDelay: inst.flushDelay,
+      };
+
+      result.push({
+        channelType: 'feishu',
+        adapter,
+        channel,
+        policy,
+        options,
+        connect: () => channel.connect(),
+        disconnect: () => channel.disconnect(),
+        onProjectPathRequest: (channelId: string) =>
+          Promise.resolve(config.projects?.defaultPath || process.cwd()),
+      });
+    }
+
+    return result;
   }
 
   async createChannel(config: Config): Promise<ChannelInstance> {
-    const feishuConfig = config.channels?.feishu;
-    if (!feishuConfig?.appId || !feishuConfig?.appSecret) {
+    const instances = await this.createChannels(config);
+    if (instances.length === 0) {
       throw new Error('Feishu config missing');
     }
-
-    const channel = new FeishuChannel({
-      appId: feishuConfig.appId,
-      appSecret: feishuConfig.appSecret,
-      enableRichContent: feishuConfig.enableRichContent,
-    });
-
-    const adapter = {
-      name: 'feishu' as const,
-      sendText: (id: string, text: string, context?: any) => channel.sendMessage(id, text, context),
-      sendFile: (id: string, filePath: string, context?: any) => channel.sendFile(id, filePath, context),
-      sendImage: (id: string, png: Buffer, context?: any) => channel.sendImage(id, png, context),
-      acknowledge: (messageId: string) => { channel.addAckReaction(messageId); return Promise.resolve(); },
-    };
-
-    const policy = {
-      canSwitchProject: (chatType: string, identity: string) => identity === 'owner',
-      canListProjects: (chatType: string, identity: string) => identity === 'owner',
-      canCreateSession: (chatType: string, identity: string) => true,
-      canDeleteSession: (chatType: string, identity: string) => true,
-      canImportCliSession: (chatType: string, identity: string) => identity === 'owner',
-      messagePrefix: (chatType: string, peerName?: string) => (chatType === 'group' && peerName) ? `[${peerName}] ` : '',
-      showMiddleResult: (chatType: string, identity: string) => {
-        const mode = feishuConfig.showActivities ?? config.showActivities ?? 'all';
-        if (mode === 'none') return false;
-        if (mode === 'dm-only') return chatType === 'private';
-        if (mode === 'owner-dm-only') return chatType === 'private' && identity === 'owner';
-        return true;
-      },
-      showIdleMonitor: (chatType: string, identity: string) => {
-        const mode = feishuConfig.showActivities ?? config.showActivities ?? 'all';
-        if (mode === 'none') return false;
-        if (mode === 'dm-only') return chatType === 'private';
-        if (mode === 'owner-dm-only') return chatType === 'private' && identity === 'owner';
-        return true;
-      },
-      accumulateErrors: (chatType: string, identity: string) => true,
-    };
-
-    const options = {
-      fileMarkerPattern: /\[SEND_FILE:(?:(\w+):)?([^\]]+)\]/g,
-      supportsImages: true,
-      flushDelay: feishuConfig.flushDelay,
-    };
-
-    return {
-      adapter,
-      channel,
-      policy,
-      options,
-      connect: () => channel.connect(),
-      disconnect: () => channel.disconnect(),
-      onProjectPathRequest: (channelId: string) =>
-        Promise.resolve(config.projects?.defaultPath || process.cwd()),
-    };
+    return instances[0];
   }
 }

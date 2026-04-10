@@ -848,70 +848,92 @@ export class WechatChannel {
 
 // Plugin implementation
 import type { ChannelPlugin, ChannelInstance } from '../core/channel-loader.js';
-import type { Config } from '../types.js';
+import type { Config, WechatChannelConfig } from '../types.js';
+import { normalizeChannelInstances } from '../config.js';
 
 export class WechatChannelPlugin implements ChannelPlugin {
   readonly name = 'wechat';
 
   isEnabled(config: Config): boolean {
-    return config.channels?.wechat?.enabled === true && !!config.channels?.wechat?.token;
+    const raw = config.channels?.wechat;
+    if (!raw) return false;
+    if (Array.isArray(raw)) {
+      return raw.some(inst => inst.enabled !== false && !!inst.token);
+    }
+    return raw.enabled === true && !!raw.token;
+  }
+
+  async createChannels(config: Config): Promise<ChannelInstance[]> {
+    const instances = normalizeChannelInstances<WechatChannelConfig>(
+      config.channels?.wechat,
+      'wechat',
+    );
+
+    const result: ChannelInstance[] = [];
+    for (const inst of instances) {
+      if (inst.enabled === false || !inst.token) continue;
+
+      const channel = new WechatChannel({
+        baseUrl: inst.baseUrl || 'https://ilinkai.weixin.qq.com',
+        token: inst.token,
+      });
+
+      const adapter = {
+        name: inst.name,
+        sendText: (id: string, text: string) => channel.sendMessage(id, text),
+        sendFile: (id: string, filePath: string) => channel.sendFile(id, filePath),
+      };
+
+      const policy = {
+        canSwitchProject: (chatType: string, identity: string) => identity === 'owner',
+        canListProjects: (chatType: string, identity: string) => identity === 'owner',
+        canCreateSession: (chatType: string, identity: string) => true,
+        canDeleteSession: (chatType: string, identity: string) => true,
+        canImportCliSession: (chatType: string, identity: string) => identity === 'owner',
+        messagePrefix: (chatType: string, peerName?: string) => '',
+        showMiddleResult: (chatType: string, identity: string) => {
+          const mode = inst.showActivities ?? config.showActivities ?? 'all';
+          if (mode === 'none') return false;
+          if (mode === 'dm-only') return chatType === 'private';
+          if (mode === 'owner-dm-only') return chatType === 'private' && identity === 'owner';
+          return true;
+        },
+        showIdleMonitor: (chatType: string, identity: string) => {
+          const mode = inst.showActivities ?? config.showActivities ?? 'all';
+          if (mode === 'none') return false;
+          if (mode === 'dm-only') return chatType === 'private';
+          if (mode === 'owner-dm-only') return chatType === 'private' && identity === 'owner';
+          return true;
+        },
+        accumulateErrors: (chatType: string, identity: string) => true,
+      };
+
+      const options = {
+        fileMarkerPattern: /\[SEND_FILE:(?:(\w+):)?([^\]]+)\]/g,
+        flushDelay: inst.flushDelay ?? 3,  // WeChat 默认 3s
+      };
+
+      result.push({
+        channelType: 'wechat',
+        adapter,
+        channel,
+        policy,
+        options,
+        connect: () => channel.connect(),
+        disconnect: () => channel.disconnect(),
+        onProjectPathRequest: (channelId: string) =>
+          Promise.resolve(config.projects?.defaultPath || process.cwd()),
+      });
+    }
+
+    return result;
   }
 
   async createChannel(config: Config): Promise<ChannelInstance> {
-    const wechatConfig = config.channels?.wechat;
-    if (!wechatConfig?.token) {
+    const instances = await this.createChannels(config);
+    if (instances.length === 0) {
       throw new Error('WeChat config missing');
     }
-
-    const channel = new WechatChannel({
-      baseUrl: wechatConfig.baseUrl || 'https://ilinkai.weixin.qq.com',
-      token: wechatConfig.token,
-    });
-
-    const adapter = {
-      name: 'wechat' as const,
-      sendText: (id: string, text: string) => channel.sendMessage(id, text),
-      sendFile: (id: string, filePath: string) => channel.sendFile(id, filePath),
-    };
-
-    const policy = {
-      canSwitchProject: (chatType: string, identity: string) => identity === 'owner',
-      canListProjects: (chatType: string, identity: string) => identity === 'owner',
-      canCreateSession: (chatType: string, identity: string) => true,
-      canDeleteSession: (chatType: string, identity: string) => true,
-      canImportCliSession: (chatType: string, identity: string) => identity === 'owner',
-      messagePrefix: (chatType: string, peerName?: string) => '',
-      showMiddleResult: (chatType: string, identity: string) => {
-        const mode = wechatConfig.showActivities ?? config.showActivities ?? 'all';
-        if (mode === 'none') return false;
-        if (mode === 'dm-only') return chatType === 'private';
-        if (mode === 'owner-dm-only') return chatType === 'private' && identity === 'owner';
-        return true;
-      },
-      showIdleMonitor: (chatType: string, identity: string) => {
-        const mode = wechatConfig.showActivities ?? config.showActivities ?? 'all';
-        if (mode === 'none') return false;
-        if (mode === 'dm-only') return chatType === 'private';
-        if (mode === 'owner-dm-only') return chatType === 'private' && identity === 'owner';
-        return true;
-      },
-      accumulateErrors: (chatType: string, identity: string) => true,
-    };
-
-    const options = {
-      fileMarkerPattern: /\[SEND_FILE:(?:(\w+):)?([^\]]+)\]/g,
-      flushDelay: wechatConfig.flushDelay ?? 3,  // WeChat 默认 3s
-    };
-
-    return {
-      adapter,
-      channel,
-      policy,
-      options,
-      connect: () => channel.connect(),
-      disconnect: () => channel.disconnect(),
-      onProjectPathRequest: (channelId: string) =>
-        Promise.resolve(config.projects?.defaultPath || process.cwd()),
-    };
+    return instances[0];
   }
 }
