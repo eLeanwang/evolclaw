@@ -1,3 +1,57 @@
+// ── Channel config types ──
+// Single-object form: `name` is optional (defaults to channel type name).
+// Array form: `name` is required to distinguish instances.
+
+export interface FeishuChannelConfig {
+  name?: string;
+  enabled?: boolean;
+  appId: string;
+  appSecret: string;
+  owner?: string;
+  flushDelay?: number;  // flush 间隔(秒)，默认使用全局值
+  debounce?: number;    // 入站消息去抖间隔(秒)，覆盖全局 debounce
+  showActivities?: 'all' | 'dm-only' | 'owner-dm-only' | 'none';  // 覆盖全局 showActivities
+  enableRichContent?: boolean;  // 是否启用富内容渲染（LaTeX/Mermaid等），默认 true
+}
+
+export interface FeishuChannelInstanceConfig extends FeishuChannelConfig {
+  name: string;  // required in array form
+}
+
+export interface WechatChannelConfig {
+  name?: string;
+  enabled?: boolean;
+  baseUrl?: string;
+  token?: string;
+  owner?: string;
+  flushDelay?: number;  // flush 间隔(秒)，默认 3
+  debounce?: number;    // 入站消息去抖间隔(秒)，覆盖全局 debounce
+  showActivities?: 'all' | 'dm-only' | 'owner-dm-only' | 'none';  // 覆盖全局 showActivities
+}
+
+export interface WechatChannelInstanceConfig extends WechatChannelConfig {
+  name: string;  // required in array form
+}
+
+export interface AunChannelConfig {
+  name?: string;
+  enabled?: boolean;
+  aid: string;            // 完整 AID，如 evolclaw-ai.agentid.pub
+  keystorePath?: string;  // AUN keystore 路径，默认 ~/.aun
+  gatewayPort?: number;   // Gateway 端口，默认 443（域名从 AID 推导）
+  gatewayUrl?: string;    // Gateway WebSocket URL（兼容旧配置，优先级高于 gatewayPort）
+  accessToken?: string;   // 认证 access token（降级 fallback）
+  owner?: string;
+  flushDelay?: number;  // flush 间隔(秒)，默认 3
+  pythonBin?: string;   // Python 可执行路径（仅 evolclaw tui 命令使用），默认 python3
+  encryptionSeed?: string; // FileSecretStore 加密种子，默认 evolclaw-aun-production-seed-2026
+  showActivities?: 'all' | 'dm-only' | 'owner-dm-only' | 'none';  // 覆盖全局 showActivities
+}
+
+export interface AunChannelInstanceConfig extends AunChannelConfig {
+  name: string;  // required in array form
+}
+
 export interface Config {
   agents?: {
     anthropic?: {
@@ -26,38 +80,9 @@ export interface Config {
   };
   channels?: {
     defaultChannel?: string;  // 默认渠道，完整性校验锚点
-    feishu?: {
-      enabled?: boolean;
-      appId: string;
-      appSecret: string;
-      owner?: string;
-      flushDelay?: number;  // flush 间隔(秒)，默认使用全局值
-      debounce?: number;    // 入站消息去抖间隔(秒)，覆盖全局 debounce
-      showActivities?: 'all' | 'dm-only' | 'owner-dm-only' | 'none';  // 覆盖全局 showActivities
-      enableRichContent?: boolean;  // 是否启用富内容渲染（LaTeX/Mermaid等），默认 true
-    };
-    wechat?: {
-      enabled?: boolean;
-      baseUrl?: string;
-      token?: string;
-      owner?: string;
-      flushDelay?: number;  // flush 间隔(秒)，默认 3
-      debounce?: number;    // 入站消息去抖间隔(秒)，覆盖全局 debounce
-      showActivities?: 'all' | 'dm-only' | 'owner-dm-only' | 'none';  // 覆盖全局 showActivities
-    };
-    aun?: {
-      enabled?: boolean;
-      aid: string;            // 完整 AID，如 evolclaw-ai.agentid.pub
-      keystorePath?: string;  // AUN keystore 路径，默认 ~/.aun
-      gatewayPort?: number;   // Gateway 端口，默认 443（域名从 AID 推导）
-      gatewayUrl?: string;    // Gateway WebSocket URL（兼容旧配置，优先级高于 gatewayPort）
-      accessToken?: string;   // 认证 access token（降级 fallback）
-      owner?: string;
-      flushDelay?: number;  // flush 间隔(秒)，默认 3
-      pythonBin?: string;   // Python 可执行路径（仅 evolclaw tui 命令使用），默认 python3
-      encryptionSeed?: string; // FileSecretStore 加密种子，默认 evolclaw-aun-production-seed-2026
-      showActivities?: 'all' | 'dm-only' | 'owner-dm-only' | 'none';  // 覆盖全局 showActivities
-    };
+    feishu?: FeishuChannelConfig | FeishuChannelInstanceConfig[];
+    wechat?: WechatChannelConfig | WechatChannelInstanceConfig[];
+    aun?: AunChannelConfig | AunChannelInstanceConfig[];
   };
   projects?: {
     defaultPath: string;

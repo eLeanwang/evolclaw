@@ -216,21 +216,97 @@ export function saveConfig(config: Config, configPath: string = resolvePaths().c
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf-8');
 }
 
-export function getOwner(config: Config, channel: string): string | undefined {
-  const ch = (config.channels as any)?.[channel];
-  return ch?.owner;
+// ── Channel instance normalization ──
+
+export const channelTypes = ['feishu', 'wechat', 'aun'] as const;
+
+/**
+ * Normalize a channel config value (single object, array, or undefined) into an array
+ * where every element has a `name` field.
+ * - undefined → []
+ * - single object → [{ ...obj, name: obj.name ?? defaultName }]
+ * - array → passthrough (names must already be present)
+ */
+export function normalizeChannelInstances<T extends { name?: string }>(
+  cfg: T | T[] | undefined,
+  defaultName: string,
+): (T & { name: string })[] {
+  if (cfg === undefined || cfg === null) return [];
+  if (Array.isArray(cfg)) {
+    return cfg as (T & { name: string })[];
+  }
+  return [{ ...cfg, name: cfg.name ?? defaultName } as T & { name: string }];
 }
 
-export function setOwner(config: Config, channel: string, userId: string, configPath: string = resolvePaths().config): void {
+/**
+ * Validate that all channel instance names are unique across all channel types.
+ * Throws if duplicate names are found.
+ */
+export function validateChannelInstanceNames(config: Config): void {
+  const seen = new Map<string, string>(); // name → channel type
+  for (const type of channelTypes) {
+    const instances = normalizeChannelInstances(
+      (config.channels as any)?.[type],
+      type,
+    );
+    for (const inst of instances) {
+      const prev = seen.get(inst.name);
+      if (prev !== undefined) {
+        throw new Error(
+          `Duplicate channel instance name "${inst.name}" (found in ${prev} and ${type})`,
+        );
+      }
+      seen.set(inst.name, type);
+    }
+  }
+}
+
+export function getOwner(config: Config, instanceName: string): string | undefined {
+  for (const type of channelTypes) {
+    const raw = (config.channels as any)?.[type];
+    const instances = normalizeChannelInstances(raw, type);
+    const found = instances.find((inst) => inst.name === instanceName);
+    if (found) return (found as any).owner;
+  }
+  return undefined;
+}
+
+export function setOwner(config: Config, instanceName: string, userId: string, configPath: string = resolvePaths().config): void {
   if (!config.channels) config.channels = {};
   const channels = config.channels as any;
-  if (!channels[channel]) channels[channel] = {};
-  channels[channel].owner = userId;
-  saveConfig(config, configPath);
+
+  for (const type of channelTypes) {
+    const raw = channels[type];
+    if (raw === undefined) continue;
+
+    if (Array.isArray(raw)) {
+      const inst = raw.find((item: any) => item.name === instanceName);
+      if (inst) {
+        inst.owner = userId;
+        saveConfig(config, configPath);
+        return;
+      }
+    } else {
+      // Single-object form: match if name matches (or defaults to type name)
+      const effectiveName = raw.name ?? type;
+      if (effectiveName === instanceName) {
+        raw.owner = userId;
+        saveConfig(config, configPath);
+        return;
+      }
+    }
+  }
+
+  // Fallback: if instanceName matches a channel type with no config, create it
+  if (channelTypes.includes(instanceName as any)) {
+    channels[instanceName] = { owner: userId };
+    saveConfig(config, configPath);
+    return;
+  }
 }
 
-export function isOwner(config: Config, channel: string, userId: string): boolean {
-  return getOwner(config, channel) === userId;
+export function isOwner(config: Config, instanceName: string, userId: string): boolean {
+  return getOwner(config, instanceName) === userId;
 }
 
 function validateConfig(config: any): asserts config is Config {
