@@ -520,7 +520,7 @@ export class AgentRunner {
       return {};
     };
 
-    // PreToolUse Hook - 黑名单检查（不可绕过，所有模式都走）
+    // PreToolUse Hook - 黑名单检查 + input 修正（不可绕过，所有模式都走）
     const preToolUseHook = async (input: any) => {
       const result = await checkBlacklist(input.tool_name, input.tool_input || {});
       if (result.behavior === 'deny') {
@@ -529,6 +529,28 @@ export class AgentRunner {
           reason: result.message
         };
       }
+
+      // 修正 SDK schema 不兼容问题：部分工具被 system prompt 或 skills 指示传入
+      // SDK 未定义的参数（如 EnterPlanMode 的 reason），导致 InputValidationError
+      const toolInput = input.tool_input || {};
+      const sanitizeRules: Record<string, string[]> = {
+        'EnterPlanMode': ['reason'],
+        'ExitPlanMode': ['reason'],
+        'ExitWorktree': ['reason'],
+      };
+      const fieldsToRemove = sanitizeRules[input.tool_name];
+      if (fieldsToRemove && fieldsToRemove.some((f: string) => f in toolInput)) {
+        const cleaned = { ...toolInput };
+        for (const f of fieldsToRemove) delete cleaned[f];
+        return {
+          hookSpecificOutput: {
+            hookEventName: 'PreToolUse' as const,
+            permissionDecision: 'allow' as const,
+            updatedInput: cleaned
+          }
+        };
+      }
+
       return {};
     };
 

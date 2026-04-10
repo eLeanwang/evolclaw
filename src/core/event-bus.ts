@@ -10,6 +10,7 @@ export type SystemEvent =
 export type ChannelEvent =
   | { type: 'channel:connected'; channel: string; timestamp?: number }
   | { type: 'channel:disconnected'; channel: string; reason?: string }
+  | { type: 'channel:health'; channel: string; status: 'auth_error'; message: string; timestamp?: number }
   | { type: 'channel:owner-bound'; channel: string; userId: string };
 
 // ── 会话事件 ──

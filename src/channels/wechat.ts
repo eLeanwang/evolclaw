@@ -3,6 +3,8 @@ import fs from 'fs';
 import path from 'path';
 import { resolvePaths } from '../paths.js';
 import { logger } from '../utils/logger.js';
+import { sanitizeFileName, saveToUploads, safeFetch } from '../utils/media-cache.js';
+import type { EventBus } from '../core/event-bus.js';
 
 // ── Config ──────────────────────────────────────────────────────────────────
 
@@ -124,9 +126,7 @@ async function downloadMedia(cdnMedia: CDNMedia, hexKey?: string): Promise<Buffe
 
   const url = `${CDN_BASE_URL}/download?encrypted_query_param=${
     encodeURIComponent(cdnMedia.encrypt_query_param)}`;
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`CDN download failed: ${res.status}`);
-  const encrypted = Buffer.from(await res.arrayBuffer());
+  const encrypted = await safeFetch(url);
 
   if (!aesKeyBase64) return encrypted;  // 无 key = 明文
   return decryptAesEcb(encrypted, parseAesKey(aesKeyBase64));
@@ -210,6 +210,7 @@ export class WechatChannel {
   // Session expired 状态
   private sessionPausedUntil = 0;
   private onSessionExpired?: (message: string) => void;
+  private eventBus?: EventBus;
 
   // Project path resolver（用于保存文件到 uploads 目录）
   private projectPathResolver?: (channelId: string) => Promise<string>;
@@ -230,6 +231,11 @@ export class WechatChannel {
   /** 注册 session 过期通知回调（用于跨渠道通知用户） */
   onSessionExpiredNotify(handler: (message: string) => void): void {
     this.onSessionExpired = handler;
+  }
+
+  /** 注册事件总线（推荐，替代 onSessionExpiredNotify） */
+  setEventBus(bus: EventBus): void {
+    this.eventBus = bus;
   }
 
   /** 当前是否处于 session 暂停状态 */
@@ -487,11 +493,18 @@ export class WechatChannel {
             this.sessionPausedUntil = Date.now() + SESSION_PAUSE_DURATION_MS;
             logger.error(`[WeChat] Session still expired, pausing for ${pauseMin}min`);
 
-            // 通知用户（通过其他渠道）
-            if (this.onSessionExpired) {
-              this.onSessionExpired(
-                `⚠️ 微信 token 已过期，通道暂停 ${pauseMin} 分钟后自动重试。\n如需立即恢复，请运行: evolclaw init wechat`
-              );
+            // 通知用户（通过事件总线或回调）
+            const authMsg = `⚠️ 微信 token 已过期，通道暂停 ${pauseMin} 分钟后自动重试。\n如需立即恢复，请运行: evolclaw init wechat`;
+            if (this.eventBus) {
+              this.eventBus.publish({
+                type: 'channel:health',
+                channel: 'wechat',
+                status: 'auth_error',
+                message: authMsg,
+                timestamp: Date.now(),
+              });
+            } else if (this.onSessionExpired) {
+              this.onSessionExpired(authMsg);
             }
 
             await this.sleep(SESSION_PAUSE_DURATION_MS, signal);
@@ -646,13 +659,13 @@ export class WechatChannel {
           images.push({ data: buf.toString('base64'), mimeType: 'image/jpeg' });
         } else if (item.type === MSG_ITEM_FILE && item.file_item?.media) {
           const buf = await downloadMedia(item.file_item.media);
-          const fileName = this.sanitizeFileName(item.file_item.file_name || `file_${Date.now()}`);
-          const savePath = await this.saveToUploads(buf, fileName, channelId);
+          const fileName = sanitizeFileName(item.file_item.file_name || `file_${Date.now()}`);
+          const savePath = await this.saveToUploadsLocal(buf, fileName, channelId);
           prompts.push(`用户发送了文件：${fileName}\n文件已保存到：${savePath}\n请使用 Read 工具读取并分析文件内容。`);
         } else if (item.type === MSG_ITEM_VIDEO && item.video_item?.media) {
           const buf = await downloadMedia(item.video_item.media);
           const fileName = `video_${Date.now()}.mp4`;
-          const savePath = await this.saveToUploads(buf, fileName, channelId);
+          const savePath = await this.saveToUploadsLocal(buf, fileName, channelId);
           prompts.push(`用户发送了视频：${fileName}\n文件已保存到：${savePath}`);
         }
       } catch (err) {
@@ -663,20 +676,12 @@ export class WechatChannel {
     return { prompt: prompts.join('\n\n'), images };
   }
 
-  private async saveToUploads(buf: Buffer, fileName: string, channelId: string): Promise<string> {
+  private async saveToUploadsLocal(buf: Buffer, fileName: string, channelId: string): Promise<string> {
     const projectPath = this.projectPathResolver
       ? await this.projectPathResolver(channelId)
       : process.cwd();
-    const uploadsDir = path.join(projectPath, '.evolclaw', 'uploads');
-    fs.mkdirSync(uploadsDir, { recursive: true });
-    const savePath = path.join(uploadsDir, fileName);
-    fs.writeFileSync(savePath, buf);
-    return savePath;
-  }
-
-  /** 清理文件名：移除路径穿越字符，只保留 basename */
-  private sanitizeFileName(name: string): string {
-    return path.basename(name).replace(/[<>:"|?*\x00-\x1f]/g, '_') || `file_${Date.now()}`;
+    const { filePath } = saveToUploads(buf, fileName, projectPath);
+    return filePath;
   }
 
   // ── Media Upload (Outbound) ──────────────────────────────────────────

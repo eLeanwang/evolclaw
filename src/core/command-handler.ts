@@ -1054,6 +1054,10 @@ export class CommandHandler {
         } else {
           lines.push(`  处理出错: 0`);
         }
+        if (h.toolErrors > 0) {
+          const toolBreakdown = Object.entries(h.toolErrorsByName).map(([t, c]) => `${t}: ${c}`).join(', ');
+          lines.push(`  工具失败: ${h.toolErrors} (${toolBreakdown})`);
+        }
         lines.push(`  被中断: ${h.interrupts}`);
         lines.push(`  进入安全模式: ${h.safeModeEntries}`);
         if (h.completed > 0) {

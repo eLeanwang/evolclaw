@@ -3,7 +3,7 @@ import path from 'path';
 import os from 'os';
 import { Config } from './types.js';
 import { logger } from './utils/logger.js';
-import { resolvePaths } from './paths.js';
+import { resolvePaths, getPackageRoot as _getPackageRoot } from './paths.js';
 
 // Re-export path utilities for backward compatibility
 export { resolveRoot, resolvePaths, ensureDataDirs, getPackageRoot } from './paths.js';
@@ -140,6 +140,66 @@ export function resolveOpenaiConfig(config: Config): OpenaiResolved {
   return { apiKey, baseUrl, model, reasoning };
 }
 
+// ── Hermes config ──
+
+export interface HermesResolved {
+  pythonPath: string;
+  bridgePath: string;
+  hermesProjectPath: string;  // hermes-agent 项目路径（传给 bridge 做 sys.path）
+  model: string;
+  provider: string;
+  baseUrl?: string;
+  apiKey?: string;
+}
+
+function loadHermesSettings(): { apiKey?: string; baseUrl?: string; model?: string; provider?: string } {
+  try {
+    const envPath = path.join(os.homedir(), '.hermes', '.env');
+    if (fs.existsSync(envPath)) {
+      const content = fs.readFileSync(envPath, 'utf-8');
+      const apiKeyMatch = content.match(/^OPENAI_API_KEY\s*=\s*(.+)$/m);
+      return { apiKey: apiKeyMatch?.[1]?.trim() };
+    }
+  } catch {}
+  return {};
+}
+
+export function resolveHermesConfig(config: Config): HermesResolved {
+  const hermesSettings = loadHermesSettings();
+  const hermesCfg = config.agents?.hermes;
+
+  // Hermes project path: from projects list or default
+  const hermesProjectPath = config.projects?.list?.['hermes']
+    || path.join(os.homedir(), 'projects', 'hermes-agent');
+
+  // Python path: config → hermes project venv
+  const pythonPath = hermesCfg?.pythonPath
+    || path.join(hermesProjectPath, '.venv', 'bin', 'python');
+
+  // Bridge path: config → evolclaw project's hermes/hermes_bridge.py
+  const defaultBridgePath = path.join(_getPackageRoot(), 'hermes', 'hermes_bridge.py');
+  const bridgePath = hermesCfg?.bridgePath || defaultBridgePath;
+
+  // API key: config → env → ~/.hermes/.env
+  const configApiKey = hermesCfg?.apiKey;
+  const isPlaceholder = !configApiKey || configApiKey.includes('your-') || configApiKey.includes('placeholder');
+  const apiKey = (isPlaceholder ? undefined : configApiKey)
+    || process.env.HERMES_API_KEY
+    || hermesSettings.apiKey
+    || undefined;
+
+  // Base URL
+  const baseUrl = hermesCfg?.baseUrl
+    || process.env.HERMES_BASE_URL
+    || hermesSettings.baseUrl
+    || undefined;
+
+  const model = hermesCfg?.model || 'Claude-Sonnet-4.6';
+  const provider = hermesCfg?.provider || hermesSettings.provider || 'custom';
+
+  return { pythonPath, bridgePath, hermesProjectPath, model, provider, baseUrl, apiKey };
+}
+
 export function loadConfig(configPath: string = resolvePaths().config): Config {
   if (!fs.existsSync(configPath)) {
     throw new Error(`Config file not found: ${configPath}`);
@@ -211,7 +271,7 @@ export function ensureDir(dirPath: string): void {
 }
 
 // agents.defaultAgent → config key 映射
-const agentKeyMap: Record<string, string> = { claude: 'anthropic', codex: 'openai' };
+const agentKeyMap: Record<string, string> = { claude: 'anthropic', codex: 'openai', hermes: 'hermes' };
 
 /**
  * 配置结构完整性校验（不校验凭据有效性）。

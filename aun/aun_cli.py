@@ -186,33 +186,99 @@ def _short_name(aid: str) -> str:
     """AID → 首段短名（如 alice.agentid.pub → alice）。"""
     return aid.split(".")[0] if aid else "?"
 
-MAX_RECENT_PEERS = 7
-_last_recorded_peer = None  # 避免对同一 peer 连续写磁盘
-_peers_cache = None          # 内存缓存，避免补全时每次按键读磁盘
+MAX_RECENT_TARGETS = 10
+_last_recorded_target = None  # 避免对同一 target 连续写磁盘
+_targets_cache = None          # 内存缓存，避免补全时每次按键读磁盘
 
-def _record_peer(aid: str):
-    """记录成功通信过的 peer AID（最近 7 个，最新在前）。"""
-    global _last_recorded_peer, _peers_cache
-    if not aid or aid == "?" or aid == _last_recorded_peer:
-        return
-    _last_recorded_peer = aid
-    cfg = _load_config()
+# ── Target 模型 ───────────────────────────────────────────────────────────
+# target 统一结构：{"type": "peer"|"group", "id": str, "name": str}
+
+def _is_peer_target(target) -> bool:
+    return isinstance(target, dict) and target.get("type") == "peer"
+
+def _is_group_target(target) -> bool:
+    return isinstance(target, dict) and target.get("type") == "group"
+
+def _is_group_id(value: str) -> bool:
+    """判断字符串是否为 group_id（以 grp_ 开头）。"""
+    return bool(value) and value.startswith("grp_")
+
+def _normalize_target(value) -> dict | None:
+    """将各种输入格式规范化为 target dict。"""
+    if isinstance(value, dict) and value.get("type") in ("peer", "group"):
+        return value
+    if isinstance(value, str) and value:
+        if _is_group_id(value):
+            return {"type": "group", "id": value, "name": value}
+        if _is_valid_aid(value):
+            return {"type": "peer", "id": value, "name": _short_name(value)}
+    return None
+
+def _normalize_recent_targets(cfg: dict) -> list[dict]:
+    """从配置加载 recent_targets，兼容旧 recent_peers 格式。"""
+    # 新格式优先
+    targets = cfg.get("recent_targets", [])
+    if targets and isinstance(targets[0], dict):
+        return [t for t in targets if isinstance(t, dict) and t.get("type")]
+    # 旧格式迁移
     peers = cfg.get("recent_peers", [])
-    if peers and peers[0] == aid:
-        _peers_cache = peers
-        return  # 已在最前，无需写入
-    peers = [p for p in peers if p != aid]
-    peers.insert(0, aid)
-    cfg["recent_peers"] = peers[:MAX_RECENT_PEERS]
-    _save_config(cfg)
-    _peers_cache = cfg["recent_peers"]
+    return [{"type": "peer", "id": p, "name": _short_name(p)} for p in peers if p]
 
-def _get_recent_peers() -> list:
-    """返回最近联系人列表（优先内存缓存）。"""
-    global _peers_cache
-    if _peers_cache is None:
-        _peers_cache = _load_config().get("recent_peers", [])
-    return _peers_cache
+def _target_label(target) -> str:
+    """返回 target 的显示标签。peer: AID, group: [群名]"""
+    if not isinstance(target, dict):
+        return str(target) if target else "未设置"
+    if target.get("type") == "group":
+        return f'[{target.get("name", target.get("id", "?"))}]'
+    return target.get("id", "?")
+
+def _target_short_name(target) -> str:
+    """返回 target 的短名。peer: 首段, group: 群名"""
+    if not isinstance(target, dict):
+        return _short_name(str(target)) if target else "?"
+    if target.get("type") == "group":
+        return target.get("name", target.get("id", "?"))
+    return _short_name(target.get("id", "?"))
+
+def _record_target(target: dict):
+    """记录成功通信过的 target（最近 10 个，最新在前）。"""
+    global _last_recorded_target, _targets_cache
+    if not target or not isinstance(target, dict):
+        return
+    tid = target.get("id")
+    if not tid or tid == "?" or (isinstance(_last_recorded_target, dict) and _last_recorded_target.get("id") == tid):
+        return
+    _last_recorded_target = target
+    cfg = _load_config()
+    targets = _normalize_recent_targets(cfg)
+    if targets and targets[0].get("id") == tid:
+        # 可能 name 有更新，覆盖
+        targets[0] = target
+        cfg["recent_targets"] = targets
+        _save_config(cfg)
+        _targets_cache = targets
+        return
+    targets = [t for t in targets if t.get("id") != tid]
+    targets.insert(0, target)
+    cfg["recent_targets"] = targets[:MAX_RECENT_TARGETS]
+    _save_config(cfg)
+    _targets_cache = cfg["recent_targets"]
+
+def _get_recent_targets() -> list[dict]:
+    """返回最近目标列表（优先内存缓存）。"""
+    global _targets_cache
+    if _targets_cache is None:
+        _targets_cache = _normalize_recent_targets(_load_config())
+    return _targets_cache
+
+def _find_group_in_targets(value: str) -> dict | None:
+    """在 recent_targets 中按 group_id 或群名查找 group target。"""
+    for t in _get_recent_targets():
+        if t.get("type") != "group":
+            continue
+        if t.get("id") == value or t.get("name") == value:
+            return t
+    return None
 
 def _make_client() -> "AUNClient":
     """构造 AUNClient，统一 aun_path 配置。"""
@@ -245,20 +311,62 @@ _LOCAL_CMDS = [
     ("//quit",       "",    "退出"),
 ]
 
+# 群命令表: (命令名, 别名列表, 描述, 需要当前群, 菜单可见)
+_GROUP_COMMANDS = [
+    ("create",   ["add"],    "创建群组",                        False, True),
+    ("list",     ["ls"],     "列出我的群组",                    False, True),
+    ("search",   ["so"],     "搜索公开群组",                    False, True),
+    ("info",     [],         "群组信息",                        True,  True),
+    ("name",     [],         "修改群名",                        True,  True),
+    ("desc",     [],         "修改群描述",                      True,  True),
+    ("notice",   [],         "查看/更新公告",                   True,  True),
+    ("rules",    [],         "查看/更新规则",                   True,  True),
+    ("role",     [],         "设置成员角色",                    True,  True),
+    ("transfer", [],         "转让群主",                        True,  True),
+    ("quit",     [],         "退出群组",                        True,  True),
+    ("suspend",  [],         "暂停群组",                        True,  True),
+    ("resume",   [],         "恢复群组",                        True,  True),
+    ("user",     ["u"],      "成员列表（查看u 添加u+ 踢出u-）",   True,  True),
+    ("user+",    ["u+"],     "添加成员",                          True,  False),
+    ("user-",    ["u-"],     "踢出成员",                          True,  False),
+    ("invite",   ["inv"],    "邀请码（查看inv 创建inv+ 撤销inv-）", True, True),
+    ("invite+",  ["inv+"],   "创建邀请码",                        True,  False),
+    ("invite-",  ["inv-"],   "撤销邀请码",                        True,  False),
+    ("request",  ["req"],    "入群申请（列表req 批准req+ 拒绝req-）", True, True),
+    ("request+", ["req+"],   "批准入群申请",                      True,  False),
+    ("request-", ["req-"],   "拒绝入群申请",                      True,  False),
+    ("ban",      [],         "封禁成员（列表ban 封禁ban+ 解封ban-）", True, True),
+    ("ban+",     [],         "封禁成员",                          True,  False),
+    ("ban-",     [],         "解封成员",                          True,  False),
+]
+
+# 构建命令查找表: name/alias → (cmd_name, need_group)
+_GROUP_CMD_LOOKUP = {}
+for _cn, _aliases, _desc, _ng, _vis in _GROUP_COMMANDS:
+    _GROUP_CMD_LOOKUP[_cn] = (_cn, _ng)
+    for _a in _aliases:
+        _GROUP_CMD_LOOKUP[_a] = (_cn, _ng)
+
+async def _async_input(prompt_text: str) -> str:
+    """在 asyncio 环境中异步读取用户输入。"""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, lambda: input(prompt_text))
+
 class AUNValidator(Validator):
-    """输入验证：@ 后的 AID 格式检查。"""
+    """输入验证：@ 后的目标格式检查（AID / group_id / 群名）。"""
     def validate(self, document):
         text = document.text.strip()
         if text.startswith("@"):
             parts = text[1:].split(None, 1)
             name = parts[0] if parts else ""
-            if name and not _is_valid_aid(name):
-                # 光标定位到 AID 起始位置
-                raise ValidationError(cursor_position=1,
-                    message=f"无效 AID: 需要至少三级域名（如 name.agentid.pub）")
+            # 空值、AID、group_id、群名都放行
+            if name and not _is_valid_aid(name) and not _is_group_id(name):
+                # 可能是群名，不强校验
+                pass
+        # / 前缀的群命令通过 repl 分发，不做强约束
 
 class AUNCompleter(Completer):
-    """补全菜单：/ 远端命令，// 本地命令。"""
+    """补全菜单：/ 远端命令，// 本地命令，@ 目标切换（peer+group），# 群命令。"""
 
     def __init__(self, cli_ref=None):
         self.cli_ref = cli_ref  # AUNCli 实例引用，用于读取 _pending_menu
@@ -269,26 +377,42 @@ class AUNCompleter(Completer):
         if not text:
             return
 
-        # @ 前缀：最近通信过的 peer AID（@aid 或 @aid 消息）
+        # @ 前缀：统一目标切换（peer + group）
         if text[0] == '@':
-            peers = _get_recent_peers()
-            if not peers:
+            targets = _get_recent_targets()
+            # 补充 group cache 中不在 recent 中的群
+            group_cache = self.cli_ref._group_cache if self.cli_ref else []
+            recent_ids = {t.get("id") for t in targets}
+            extra_groups = []
+            for g in (group_cache or []):
+                gid = g.get("group_id", "")
+                if gid and gid not in recent_ids:
+                    extra_groups.append({"type": "group", "id": gid, "name": g.get("name", gid)})
+            all_targets = targets + extra_groups
+            if not all_targets:
                 yield Completion("@", start_position=-len(text),
-                                 display="(无最近联系人)", display_meta="使用 //target 设置")
+                                 display="(无最近联系人)", display_meta="使用 @aid 或 @group_id")
                 return
-            after_at = text[1:]  # @ 后面的全部内容
-            # 有空格 → AID 已输入完毕（正在输消息），不再补全
+            after_at = text[1:]
             if ' ' in after_at:
-                return
-            filter_text = after_at
-            current_target = self.cli_ref.target_aid if self.cli_ref else None
-            for aid in peers:
-                short = _short_name(aid)
-                is_current = " ✓" if aid == current_target else ""
-                if aid.startswith(filter_text) or short.startswith(filter_text):
-                    # 补全文本用完整 AID + 尾部空格，方便直接输入消息
-                    yield Completion(f"@{aid} ", start_position=-len(text),
-                                     display=f"@{short}{is_current}", display_meta=aid)
+                return  # 目标已选定，后面是消息
+            filter_text = after_at.lower()
+            current_id = self.cli_ref.target.get("id") if self.cli_ref and self.cli_ref.target else None
+            for t in all_targets:
+                tid = t.get("id", "")
+                tname = t.get("name", "")
+                ttype = t.get("type", "")
+                is_current = " ✓" if tid == current_id else ""
+                if ttype == "peer":
+                    display = f"{tname}{is_current}"
+                    meta = tid
+                else:
+                    display = f"{tname}{is_current}"
+                    meta = tid
+                if filter_text and not (tname.lower().startswith(filter_text) or tid.lower().startswith(filter_text)):
+                    continue
+                yield Completion(f"@{tid} ", start_position=-len(text),
+                                 display=display, display_meta=meta)
             return
 
         if text[0] != '/':
@@ -311,8 +435,29 @@ class AUNCompleter(Completer):
                                      display=display, display_meta=meta)
             return
 
-        # / 前缀：远端命令菜单
-        # 无缓存或缓存过期时，后台触发刷新（不阻塞，过期时仍用旧缓存展示）
+        # / 前缀：group target → 群命令菜单，peer target → 远端命令菜单
+        is_group = self.cli_ref and self.cli_ref.target and _is_group_target(self.cli_ref.target)
+        if is_group:
+            # 群命令补全
+            filter_text = text[1:]
+            if ' ' in filter_text:
+                return
+            for cmd_name, aliases, _desc, _need_group, _visible in _GROUP_COMMANDS:
+                if not _visible:
+                    continue
+                matched = cmd_name.startswith(filter_text)
+                if not matched:
+                    matched = any(a.startswith(filter_text) for a in aliases)
+                if matched:
+                    ct = f"/{cmd_name} " if cmd_name == filter_text else f"/{cmd_name}"
+                    yield Completion(ct, start_position=-len(text),
+                                     display=f"/{cmd_name}", display_meta=_desc)
+            # 始终提供本地命令入口
+            if not filter_text or "".startswith(filter_text):
+                yield Completion("//", start_position=-len(text),
+                                 display="// 本地命令", display_meta="调试 · 设置")
+            return
+        # peer target → 远端命令菜单
         if text == "/" and self.cli_ref and not self.cli_ref._menu_querying and self.cli_ref.connected \
                 and asyncio.get_event_loop().time() >= self.cli_ref._menu_cooldown_until:
             now = asyncio.get_event_loop().time()
@@ -368,8 +513,9 @@ def _on_ctrlc(event):
     cli = _ctrlc_state.get('_cli')
     # 有处理中任务：单击 Ctrl+C 发送 /stop
     if cli and cli._processing:
-        print_status(cli.target_aid or "?", "!", C.YELLOW, "正在中断…")
-        asyncio.ensure_future(cli.send("/stop", silent=True))
+        label = _target_label(cli.target) if cli.target else "?"
+        print_status(label, "!", C.YELLOW, "正在中断…")
+        asyncio.ensure_future(cli.send("/stop", encrypt=cli.encrypt, silent=True))
         return
     # 无任务：清空输入 / 双击退出
     if buf.text:
@@ -589,7 +735,9 @@ class AUNCli:
     def __init__(self, aid=None, target=None):
         cfg = _load_config()
         self.my_aid     = aid or cfg.get("aid")
-        self.target_aid = target or cfg.get("target")
+        # target 统一为 dict: {"type": "peer"|"group", "id": str, "name": str}
+        raw_target = target or cfg.get("target")
+        self.target     = _normalize_target(raw_target)
         self.client     = None
         self.connected  = False
         self.msg_count  = 0
@@ -622,6 +770,11 @@ class AUNCli:
         # 重连退避
         self._reconn_failures = 0       # 连续重连失败次数
         self._reconn_cooldown_until = 0 # 冷却截止时间（event loop time）
+        # 群缓存
+        self._group_cache = []          # group.list_my 结果
+        self._group_cache_at = 0        # 缓存写入时间
+        self._group_cache_ttl = 300     # 缓存有效期（秒）
+        self._group_cache_refreshing = False
 
     async def start(self):
         """用 self.my_aid 启动，AID 不存在则报错退出。"""
@@ -635,6 +788,8 @@ class AUNCli:
         self.client.on("token.refreshed",   self._on_token_refreshed)
         self.client.on("e2ee.degraded",     self._on_e2ee_degraded)
         self.client.on("e2ee.orchestration_error", self._on_e2ee_error)
+        self.client.on("group.message_created", self._on_group_message)
+        self.client.on("group.changed",     self._on_group_changed)
 
         info(f"AID: {C.BOLD}{aid}{C.RESET}")
 
@@ -663,11 +818,14 @@ class AUNCli:
         cfg["aid"] = self.my_aid
         _save_config(cfg)
         info(f"{C.GREEN}已连接{C.RESET}  AID = {self.client.aid}")
-        if self.target_aid:
-            info(f"目标: {self.target_aid}")
-            _record_peer(self.target_aid)
-            # 连接成功后预加载远端菜单
-            asyncio.ensure_future(self.query_menu())
+        if self.target:
+            info(f"目标: {_target_label(self.target)}")
+            _record_target(self.target)
+            # 连接成功后预加载远端菜单（仅 peer target）
+            if _is_peer_target(self.target):
+                asyncio.ensure_future(self.query_menu())
+            # 后台刷新群缓存
+            asyncio.ensure_future(self._refresh_group_cache())
 
     # ── Spinner 动画 ──────────────────────────────────────────────────────
 
@@ -812,7 +970,7 @@ class AUNCli:
             return
 
         self.msg_count += 1
-        _record_peer(from_aid)
+        _record_target({"type": "peer", "id": from_aid, "name": _short_name(from_aid)})
 
         # debug: 收到第一条回复数据时显示延迟
         if self.debug_mode and self._last_sent is not None:
@@ -840,8 +998,8 @@ class AUNCli:
         elif state == "connected":
             self.connected = True
             info("重新连接成功")
-            # 重连后刷新远端菜单
-            if self.target_aid:
+            # 重连后刷新远端菜单（仅 peer target）
+            if self.target and _is_peer_target(self.target):
                 self._pending_menu = None
                 asyncio.ensure_future(self.query_menu())
 
@@ -882,41 +1040,54 @@ class AUNCli:
         if not self.connected:
             if not await self._reconnect():
                 return
-        if not self.target_aid:
-            error("未设置目标 AID，使用 /target <aid>"); return
+        if not self.target:
+            error("未设置目标，使用 @aid 或 @group_id"); return
         if silent:
             self._suppress_next = True
+        target_id = self.target["id"]
+        target_label = _target_label(self.target)
         try:
             t0 = asyncio.get_event_loop().time()
-            result = await self.client.call("message.send", {
-                "to": self.target_aid, "payload": text,
-                "encrypt": encrypt, "persist": False,
-            })
+            if _is_group_target(self.target):
+                result = await self.client.call("group.send", {
+                    "group_id": target_id,
+                    "payload": {"text": text},
+                    "type": "text",
+                    "encrypt": encrypt,
+                })
+            else:
+                result = await self.client.call("message.send", {
+                    "to": target_id, "payload": text,
+                    "encrypt": encrypt, "persist": False,
+                })
             self._last_sent = asyncio.get_event_loop().time()
-            _record_peer(self.target_aid)
+            _record_target(self.target)
             status = result.get("status") if isinstance(result, dict) else None
             label = "已送达" if status == "delivered" else "已发送"
             if self.debug_mode:
                 ms = int((self._last_sent - t0) * 1000)
-                print_status(self.target_aid, "▶", C.YELLOW, f"{label} ({ms}ms)")
-            # 发新消息时清理旧的 processing 状态（/stop 时保留 _proc_start 供耗时统计）
+                print_status(target_label, "▶", C.YELLOW, f"{label} ({ms}ms)")
+            # 发新消息时清理旧的 processing 状态
             self._processing.clear()
             if text != '/stop':
                 self._proc_start.clear()
         except asyncio.TimeoutError:
-            print_status(self.target_aid, "x", C.RED, "发送超时")
+            self._suppress_next = False
+            print_status(target_label, "x", C.RED, "发送超时")
         except Exception as e:
-            print_status(self.target_aid, "x", C.RED, f"发送失败: {e}")
+            self._suppress_next = False
+            print_status(target_label, "x", C.RED, f"发送失败: {e}")
 
     async def query_menu(self, manual=False):
         """查询远端菜单并缓存到 _pending_menu（供 AUNCompleter 读取）。
-        已有缓存时跳过，除非 manual=True 强制刷新。"""
+        已有缓存时跳过，除非 manual=True 强制刷新。仅 peer target 生效。"""
         if not self.client or not self.connected:
             if manual: error("未连接")
             return False
-        if not self.target_aid:
-            if manual: error("未设置目标 AID")
+        if not self.target or not _is_peer_target(self.target):
+            if manual: error("仅对 peer 目标有效")
             return False
+        target_id = self.target["id"]
         if self._menu_querying:
             if manual: info("菜单查询中…")
             return False
@@ -930,7 +1101,7 @@ class AUNCli:
         send_status = None              # message.send 响应中的 status
         try:
             result = await self.client.call("message.send", {
-                "to": self.target_aid,
+                "to": target_id,
                 "payload": json.dumps({"type": "menu.query"}),
                 "encrypt": True, "persist": False,
             })
@@ -984,9 +1155,10 @@ class AUNCli:
     async def status(self):
         conn = "🟢 已连接" if self.connected else "🔴 未连接"
         sdk = self.client.state if self.client else "N/A"
+        tgt = _target_label(self.target) if self.target else "(未设置)"
         lines = (
             f'  我的 AID:   {self.my_aid}\n'
-            f'  目标 AID:   {self.target_aid or "(未设置)"}\n'
+            f'  目标:       {tgt}\n'
             f'  连接状态:   {conn}\n'
             f'  收到消息:   {self.msg_count} 条\n'
             f'  SDK 状态:   {sdk}'
@@ -997,23 +1169,751 @@ class AUNCli:
             style=_HELP_STYLE,
         )
 
-    async def set_target(self, name: str) -> bool:
-        """校验 AID → 查询 Gateway → 设为目标并持久化。成功返回 True。"""
+    async def set_peer_target(self, name: str) -> bool:
+        """校验 AID → 查询 Gateway → 设为 peer 目标并持久化。成功返回 True。"""
         if not _validate_aid(name):
             return False
         info(f"正在验证 {name} …")
         if not await _aid_exists(name):
             error(f"AID 不存在或 Gateway 不可达: {name}")
             return False
-        self.target_aid = name
-        _record_peer(name)
+        target = {"type": "peer", "id": name, "name": _short_name(name)}
+        self.target = target
+        _record_target(target)
         cfg = _load_config()
-        cfg["target"] = name
+        cfg["target"] = target
         _save_config(cfg)
-        info(f"目标 AID: {name}")
+        info(f"目标: {name}")
         self._pending_menu = None
         asyncio.ensure_future(self.query_menu())
         return True
+
+    def set_group_target(self, group_id: str, group_name: str = None) -> bool:
+        """设为 group 目标并持久化。"""
+        name = group_name or group_id
+        target = {"type": "group", "id": group_id, "name": name}
+        self.target = target
+        _record_target(target)
+        cfg = _load_config()
+        cfg["target"] = target
+        _save_config(cfg)
+        info(f"目标: [{name}]")
+        self._pending_menu = None  # 群不支持远端菜单
+        return True
+
+    async def resolve_and_switch_target(self, value: str, message: str = "") -> bool:
+        """解析 @ 后的值并切换目标。支持 AID、group_id、群名。"""
+        # AID 格式
+        if _is_valid_aid(value):
+            if not await self.set_peer_target(value):
+                return False
+            if message:
+                await self.send(message, encrypt=self.encrypt)
+            return True
+        # group_id 格式
+        if _is_group_id(value):
+            # 先在本地缓存中查找
+            for g in self._group_cache:
+                if g.get("group_id") == value:
+                    self.set_group_target(value, g.get("name", value))
+                    if message:
+                        await self.send(message, encrypt=self.encrypt)
+                    return True
+            # recent_targets 中查
+            found = _find_group_in_targets(value)
+            if found:
+                self.set_group_target(value, found.get("name", value))
+                if message:
+                    await self.send(message, encrypt=self.encrypt)
+                return True
+            # 未找到 → 入群引导
+            joined = await self._join_group_flow(value)
+            if joined and message:
+                await self.send(message, encrypt=self.encrypt)
+            return True
+        # 群名匹配
+        for g in self._group_cache:
+            if g.get("name") == value:
+                self.set_group_target(g["group_id"], value)
+                if message:
+                    await self.send(message, encrypt=self.encrypt)
+                return True
+        found = _find_group_in_targets(value)
+        if found:
+            self.set_group_target(found["id"], found.get("name", value))
+            if message:
+                await self.send(message, encrypt=self.encrypt)
+            return True
+        error(f"未找到目标: {value}")
+        return False
+
+    async def _join_group_flow(self, group_id: str) -> bool:
+        """入群引导流程。成功加入返回 True。"""
+        info(f"查询群 {group_id} 的入群要求…")
+        try:
+            result = await self.client.call("group.get_join_requirements", {"group_id": group_id})
+        except Exception as e:
+            error(f"查询失败: {e}")
+            return False
+        reqs = result.get("join_requirements", {})
+        mode = reqs.get("mode", "closed")
+        if mode == "closed":
+            error("该群组已关闭，不接受新成员")
+            return False
+        if mode == "invite_only":
+            info("加入此群需要邀请码")
+            try:
+                code = await _async_input("请输入邀请码: ")
+            except (EOFError, KeyboardInterrupt):
+                info("已取消"); return False
+            if not code:
+                info("已取消"); return False
+            try:
+                join_result = await self.client.call("group.use_invite_code", {"code": code.strip()})
+                group = join_result.get("group", {})
+                self.set_group_target(group_id, group.get("name", group_id))
+                info("已加入群组")
+                await self._refresh_group_cache()
+                return True
+            except Exception as e:
+                error(f"加入失败: {e}")
+            return False
+        # open / approval
+        try:
+            confirm = await _async_input(f"是否申请加入群 {group_id}？[y/N] ")
+        except (EOFError, KeyboardInterrupt):
+            info("已取消"); return False
+        if confirm.strip().lower() != 'y':
+            info("已取消"); return False
+        try:
+            join_result = await self.client.call("group.request_join", {"group_id": group_id})
+            status = join_result.get("status", "")
+            if status == "joined":
+                group = join_result.get("group", {})
+                self.set_group_target(group_id, group.get("name", group_id))
+                info("已加入群组")
+                await self._refresh_group_cache()
+                return True
+            elif status == "question_required":
+                question = join_result.get("question", "请回答入群问题")
+                info(f"入群问题: {question}")
+                try:
+                    answer = await _async_input("请输入答案: ")
+                except (EOFError, KeyboardInterrupt):
+                    info("已取消"); return False
+                if not answer:
+                    info("已取消"); return False
+                join_result2 = await self.client.call("group.request_join", {
+                    "group_id": group_id, "answer": answer.strip()
+                })
+                status2 = join_result2.get("status", "")
+                if status2 == "joined":
+                    group = join_result2.get("group", {})
+                    self.set_group_target(group_id, group.get("name", group_id))
+                    info("已加入群组")
+                    await self._refresh_group_cache()
+                    return True
+                elif status2 == "pending":
+                    info("入群申请已提交，等待管理员审批")
+                else:
+                    info(f"入群结果: {status2}")
+            elif status == "pending":
+                info("入群申请已提交，等待管理员审批")
+            else:
+                info(f"入群结果: {status}")
+        except Exception as e:
+            error(f"申请失败: {e}")
+        return False
+
+    async def _refresh_group_cache(self):
+        """后台刷新群缓存。"""
+        if self._group_cache_refreshing:
+            return
+        if not self.client or not self.connected:
+            return
+        self._group_cache_refreshing = True
+        try:
+            result = await self.client.call("group.list_my", {"size": 200})
+            self._group_cache = result.get("items", [])
+            self._group_cache_at = asyncio.get_event_loop().time()
+        except Exception:
+            pass
+        finally:
+            self._group_cache_refreshing = False
+
+    def _get_group_name(self, group_id: str) -> str:
+        """从缓存获取群名，未找到则返回 group_id。"""
+        for g in self._group_cache:
+            if g.get("group_id") == group_id:
+                return g.get("name", group_id)
+        found = _find_group_in_targets(group_id)
+        if found:
+            return found.get("name", group_id)
+        return group_id
+
+    def _clear_target(self):
+        """清除当前目标并持久化。"""
+        self.target = None
+        cfg = _load_config()
+        cfg.pop("target", None)
+        _save_config(cfg)
+
+    def _require_group_target(self) -> bool:
+        """校验当前 target 是否为 group，否则报错。"""
+        if not self.target or not _is_group_target(self.target):
+            error("当前目标不是群组，请用 @group_id 切换")
+            return False
+        return True
+
+    async def _on_group_message(self, data):
+        """处理群消息事件。"""
+        if not isinstance(data, dict):
+            return
+        group_id = data.get("group_id", "")
+        msg = data.get("message", data)  # SDK 解密后可能直接在 data 层
+        sender_aid = msg.get("sender_aid", "?")
+        payload = msg.get("payload", {})
+        msg_type = msg.get("message_type", msg.get("type", "text"))
+
+        # 忽略自己发的消息
+        if sender_aid == self.my_aid:
+            return
+
+        # 提取文本
+        if isinstance(payload, dict):
+            text = payload.get("text", json.dumps(payload, ensure_ascii=False))
+        elif isinstance(payload, str):
+            text = payload
+        else:
+            text = str(payload)
+
+        # raw log
+        ts = datetime.now().strftime('%H:%M:%S')
+        entry = f"[{ts}] [group] {json.dumps(data, ensure_ascii=False, default=str)}"
+        self._raw_log.append(entry)
+        cap = 500 if self._raw_monitor_app else (20 if self.debug_mode else 5)
+        if len(self._raw_log) > cap:
+            self._raw_log = self._raw_log[-cap:]
+        if self._raw_monitor_app is not None:
+            self._raw_monitor_app.invalidate()
+
+        # 群名
+        group_name = self._get_group_name(group_id)
+        sender_name = _short_name(sender_aid)
+
+        # 记录到最近目标
+        _record_target({"type": "group", "id": group_id, "name": group_name})
+
+        self.msg_count += 1
+        text = _replace_emoji(text)
+        rendered = _render_md(text)
+        lines = rendered.rstrip().split('\n')
+        header = f"{C.DIM}{ts}\033[22m {C.GREEN}◀ [{group_name}] {sender_name}\033[39m"
+        if len(lines) > 1:
+            _p(header)
+            for line in lines:
+                _p(line)
+        else:
+            _p(f"{header}  {lines[0]}")
+
+    async def _on_group_changed(self, data):
+        """处理群变更事件。"""
+        if not isinstance(data, dict):
+            return
+        group_id = data.get("group_id", "")
+        action = data.get("action", "")
+        group_name = self._get_group_name(group_id)
+
+        # raw log
+        ts = datetime.now().strftime('%H:%M:%S')
+        entry = f"[{ts}] [group.changed] {json.dumps(data, ensure_ascii=False, default=str)}"
+        self._raw_log.append(entry)
+        cap = 500 if self._raw_monitor_app else (20 if self.debug_mode else 5)
+        if len(self._raw_log) > cap:
+            self._raw_log = self._raw_log[-cap:]
+        if self._raw_monitor_app is not None:
+            self._raw_monitor_app.invalidate()
+
+        _ACTION_LABELS = {
+            "member_added": "有新成员加入",
+            "member_left": "有成员离开",
+            "member_removed": "有成员被移除",
+            "role_changed": "角色已变更",
+            "owner_transferred": "群主已转让",
+            "rules_updated": "群规则已更新",
+            "announcement_updated": "公告已更新",
+            "join_requested": "收到入群申请",
+            "joined": "有新成员加入",
+            "join_approved": "入群申请已通过",
+            "join_rejected": "入群申请已拒绝",
+            "invite_code_created": "邀请码已创建",
+            "invite_code_used": "邀请码已使用",
+            "invite_code_revoked": "邀请码已撤销",
+            "member_banned": "有成员被封禁",
+            "member_unbanned": "有成员被解封",
+            "suspended": "群组已暂停",
+            "resumed": "群组已恢复",
+            "dissolved": "群组已解散",
+            "update": "群信息已更新",
+            "upsert": "群信息已更新",
+        }
+        label = _ACTION_LABELS.get(action, action)
+        _p(f"{C.DIM}{ts}\033[22m {C.CYAN}· [{group_name}]\033[39m  {C.DIM}{label}\033[22m")
+
+        # 刷新群缓存（成员变化/群信息变化时）
+        if action in ("member_added", "member_left", "member_removed", "joined",
+                       "join_approved", "update", "upsert", "dissolved"):
+            asyncio.ensure_future(self._refresh_group_cache())
+
+    # ── 群命令处理 ────────────────────────────────────────────────────────
+
+    async def _dispatch_group_cmd(self, cmd_name: str, arg: str):
+        """分发 # 群命令。"""
+        handler = getattr(self, f"_cmd_group_{cmd_name.replace('-', '_').replace('+', '_add').replace('user_add', 'user_add').replace('user-', 'user_kick')}", None)
+        # 用查找表映射
+        method_map = {
+            "create": "_cmd_group_create",
+            "list": "_cmd_group_list",
+            "search": "_cmd_group_search",
+            "info": "_cmd_group_info",
+            "name": "_cmd_group_name",
+            "desc": "_cmd_group_desc",
+            "notice": "_cmd_group_notice",
+            "rules": "_cmd_group_rules",
+            "role": "_cmd_group_role",
+            "transfer": "_cmd_group_transfer",
+            "quit": "_cmd_group_quit",
+            "suspend": "_cmd_group_suspend",
+            "resume": "_cmd_group_resume",
+            "user": "_cmd_group_user",
+            "user+": "_cmd_group_user_add",
+            "user-": "_cmd_group_user_kick",
+            "invite": "_cmd_group_invite_list",
+            "invite+": "_cmd_group_invite_create",
+            "invite-": "_cmd_group_invite_revoke",
+            "request": "_cmd_group_request_list",
+            "request+": "_cmd_group_request_approve",
+            "request-": "_cmd_group_request_reject",
+            "ban": "_cmd_group_ban_list",
+            "ban+": "_cmd_group_ban_add",
+            "ban-": "_cmd_group_ban_remove",
+        }
+        method_name = method_map.get(cmd_name)
+        if not method_name:
+            error(f"未知群命令: #{cmd_name}")
+            return
+        method = getattr(self, method_name, None)
+        if not method:
+            error(f"命令未实现: #{cmd_name}")
+            return
+        await method(arg)
+
+    async def _cmd_group_create(self, arg: str):
+        parts = arg.split(None, 2) if arg else []
+        name = parts[0] if parts else ""
+        visibility = parts[1] if len(parts) > 1 else "private"
+        join_mode = parts[2] if len(parts) > 2 else "open"
+        if not name:
+            try:
+                name = await _async_input("群名称: ")
+            except (EOFError, KeyboardInterrupt):
+                info("已取消"); return
+            if not name.strip():
+                info("已取消"); return
+            name = name.strip()
+        try:
+            result = await self.client.call("group.create", {
+                "name": name, "visibility": visibility, "join_mode": join_mode,
+            })
+            group = result.get("group", {})
+            gid = group.get("group_id", "")
+            info(f"群组已创建: {name} ({gid})")
+            self.set_group_target(gid, name)
+            await self._refresh_group_cache()
+        except Exception as e:
+            error(f"创建失败: {e}")
+
+    async def _cmd_group_list(self, arg: str):
+        try:
+            result = await self.client.call("group.list_my", {"size": 200})
+            items = result.get("items", [])
+            if not items:
+                info("未加入任何群组"); return
+            current_gid = self.target["id"] if self.target and _is_group_target(self.target) else ""
+            for g in items:
+                gid = g.get("group_id", "")
+                gname = g.get("name", gid)
+                count = g.get("member_count", "?")
+                marker = " ✓" if gid == current_gid else ""
+                info(f"  {gname}  ({gid})  {count}人{marker}")
+            info(f"共 {len(items)} 个群组")
+        except Exception as e:
+            error(f"查询失败: {e}")
+
+    async def _cmd_group_search(self, arg: str):
+        query = arg.strip() if arg else ""
+        try:
+            params = {"size": 20}
+            if query:
+                params["query"] = query
+            result = await self.client.call("group.search", params)
+            items = result.get("items", [])
+            if not items:
+                info("未找到公开群组"); return
+            for g in items:
+                gid = g.get("group_id", "")
+                gname = g.get("name", gid)
+                count = g.get("member_count", "?")
+                info(f"  {gname}  ({gid})  {count}人")
+            info(f"共 {len(items)} 个结果")
+        except Exception as e:
+            error(f"搜索失败: {e}")
+
+    async def _cmd_group_info(self, arg: str):
+        if not self._require_group_target(): return
+        try:
+            result = await self.client.call("group.get", {"group_id": self.target["id"]})
+            g = result.get("group", {})
+            info(f"  名称:     {g.get('name', '?')}")
+            info(f"  ID:       {g.get('group_id', '?')}")
+            info(f"  群主:     {g.get('owner_aid', '?')}")
+            info(f"  可见性:   {g.get('visibility', '?')}")
+            info(f"  状态:     {g.get('status', '?')}")
+            info(f"  成员数:   {g.get('member_count', '?')}")
+            info(f"  消息序号: {g.get('message_seq', 0)}")
+            desc = g.get("description", "")
+            if desc:
+                info(f"  描述:     {desc}")
+        except Exception as e:
+            error(f"查询失败: {e}")
+
+    async def _cmd_group_name(self, arg: str):
+        if not self._require_group_target(): return
+        new_name = arg.strip()
+        if not new_name:
+            error("用法: /name <新名称>"); return
+        try:
+            await self.client.call("group.update", {"group_id": self.target["id"], "name": new_name})
+            self.target["name"] = new_name
+            _record_target(self.target)
+            cfg = _load_config()
+            cfg["target"] = self.target
+            _save_config(cfg)
+            info(f"群名已更新: {new_name}")
+            await self._refresh_group_cache()
+        except Exception as e:
+            error(f"更新失败: {e}")
+
+    async def _cmd_group_desc(self, arg: str):
+        if not self._require_group_target(): return
+        desc = arg.strip()
+        if not desc:
+            error("用法: /desc <描述>"); return
+        try:
+            await self.client.call("group.update", {"group_id": self.target["id"], "description": desc})
+            info("群描述已更新")
+        except Exception as e:
+            error(f"更新失败: {e}")
+
+    async def _cmd_group_notice(self, arg: str):
+        if not self._require_group_target(): return
+        gid = self.target["id"]
+        if not arg.strip():
+            # 查看公告
+            try:
+                result = await self.client.call("group.get_announcement", {"group_id": gid})
+                ann = result.get("announcement", {})
+                content = ann.get("content", "")
+                if content:
+                    info(f"公告: {content}")
+                else:
+                    info("暂无公告")
+            except Exception as e:
+                error(f"查询失败: {e}")
+        else:
+            # 更新公告
+            try:
+                await self.client.call("group.update_announcement", {"group_id": gid, "content": arg.strip()})
+                info("公告已更新")
+            except Exception as e:
+                error(f"更新失败: {e}")
+
+    async def _cmd_group_rules(self, arg: str):
+        if not self._require_group_target(): return
+        gid = self.target["id"]
+        if not arg.strip():
+            try:
+                result = await self.client.call("group.get_rules", {"group_id": gid})
+                rules = result.get("rules", result.get("requirements", {}))
+                info(f"  加入模式: {rules.get('mode', '?')}")
+                q = rules.get("question", "")
+                if q:
+                    info(f"  入群问题: {q}")
+            except Exception as e:
+                error(f"查询失败: {e}")
+        else:
+            # #rules mode=approval question=xxx
+            params = {"group_id": gid}
+            for kv in arg.strip().split():
+                if "=" in kv:
+                    k, v = kv.split("=", 1)
+                    params[k] = v
+            try:
+                await self.client.call("group.update_rules", params)
+                info("规则已更新")
+            except Exception as e:
+                error(f"更新失败: {e}")
+
+    async def _cmd_group_role(self, arg: str):
+        if not self._require_group_target(): return
+        parts = arg.strip().split()
+        if len(parts) < 2:
+            error("用法: /role <aid> <admin|member>"); return
+        aid, role = parts[0], parts[1]
+        try:
+            await self.client.call("group.set_role", {"group_id": self.target["id"], "aid": aid, "role": role})
+            info(f"{_short_name(aid)} 角色已设为 {role}")
+        except Exception as e:
+            error(f"设置失败: {e}")
+
+    async def _cmd_group_transfer(self, arg: str):
+        if not self._require_group_target(): return
+        aid = arg.strip()
+        if not aid:
+            error("用法: /transfer <aid>"); return
+        try:
+            await self.client.call("group.transfer_owner", {"group_id": self.target["id"], "new_owner": aid})
+            info(f"群主已转让给 {_short_name(aid)}")
+        except Exception as e:
+            error(f"转让失败: {e}")
+
+    async def _cmd_group_quit(self, arg: str):
+        if not self._require_group_target(): return
+        gid = self.target["id"]
+        gname = self.target.get("name", gid)
+        try:
+            result = await self.client.call("group.get", {"group_id": gid})
+            group = result.get("group", {})
+            is_owner = group.get("owner_aid") == self.my_aid
+        except Exception:
+            is_owner = False
+        if is_owner:
+            info("你是群主，请选择操作:")
+            info("  1. 解散群组")
+            info("  2. 转让群主后退出")
+            try:
+                choice = await _async_input("请选择 [1/2]: ")
+            except (EOFError, KeyboardInterrupt):
+                info("已取消"); return
+            if choice.strip() == "1":
+                try:
+                    await self.client.call("group.dissolve", {"group_id": gid})
+                    info(f"群组 [{gname}] 已解散")
+                    self._clear_target()
+                    await self._refresh_group_cache()
+                except Exception as e:
+                    error(f"解散失败: {e}")
+            elif choice.strip() == "2":
+                try:
+                    new_aid = await _async_input("转让给 (AID): ")
+                except (EOFError, KeyboardInterrupt):
+                    info("已取消"); return
+                if not new_aid.strip():
+                    info("已取消"); return
+                try:
+                    await self.client.call("group.transfer_owner", {"group_id": gid, "new_owner": new_aid.strip()})
+                    await self.client.call("group.leave", {"group_id": gid})
+                    info(f"已退出群组 [{gname}]")
+                    self._clear_target()
+                    await self._refresh_group_cache()
+                except Exception as e:
+                    error(f"操作失败: {e}")
+            else:
+                info("已取消")
+        else:
+            try:
+                await self.client.call("group.leave", {"group_id": gid})
+                info(f"已退出群组 [{gname}]")
+                self._clear_target()
+                await self._refresh_group_cache()
+            except Exception as e:
+                error(f"退出失败: {e}")
+
+    async def _cmd_group_suspend(self, arg: str):
+        if not self._require_group_target(): return
+        try:
+            await self.client.call("group.suspend", {"group_id": self.target["id"]})
+            info("群组已暂停")
+        except Exception as e:
+            error(f"暂停失败: {e}")
+
+    async def _cmd_group_resume(self, arg: str):
+        if not self._require_group_target(): return
+        try:
+            await self.client.call("group.resume", {"group_id": self.target["id"]})
+            info("群组已恢复")
+        except Exception as e:
+            error(f"恢复失败: {e}")
+
+    async def _cmd_group_user(self, arg: str):
+        if not self._require_group_target(): return
+        try:
+            result = await self.client.call("group.get_members", {"group_id": self.target["id"], "size": 200})
+            members = result.get("members", [])
+            if not members:
+                info("暂无成员"); return
+            for m in members:
+                aid = m.get("aid", "?")
+                role = m.get("role", "member")
+                role_icon = {"owner": "👑", "admin": "⭐"}.get(role, "  ")
+                info(f"  {role_icon} {_short_name(aid)}  ({aid})  {role}")
+            info(f"共 {len(members)} 名成员")
+        except Exception as e:
+            error(f"查询失败: {e}")
+
+    async def _cmd_group_user_add(self, arg: str):
+        if not self._require_group_target(): return
+        aid = arg.strip()
+        if not aid:
+            error("用法: /u+ <aid>"); return
+        try:
+            await self.client.call("group.add_member", {"group_id": self.target["id"], "aid": aid})
+            info(f"已添加成员 {_short_name(aid)}")
+        except Exception as e:
+            error(f"添加失败: {e}")
+
+    async def _cmd_group_user_kick(self, arg: str):
+        if not self._require_group_target(): return
+        aid = arg.strip()
+        if not aid:
+            error("用法: /u- <aid>"); return
+        try:
+            await self.client.call("group.kick", {"group_id": self.target["id"], "aid": aid})
+            info(f"已移除成员 {_short_name(aid)}")
+        except Exception as e:
+            error(f"移除失败: {e}")
+
+    async def _cmd_group_invite_list(self, arg: str):
+        if not self._require_group_target(): return
+        try:
+            result = await self.client.call("group.list_invite_codes", {"group_id": self.target["id"]})
+            items = result.get("items", [])
+            if not items:
+                info("暂无邀请码"); return
+            for inv in items:
+                code = inv.get("code", "?")
+                uses = inv.get("use_count", 0)
+                max_uses = inv.get("max_uses", 1)
+                status = inv.get("status", "?")
+                info(f"  {code}  {uses}/{max_uses}  {status}")
+        except Exception as e:
+            error(f"查询失败: {e}")
+
+    async def _cmd_group_invite_create(self, arg: str):
+        if not self._require_group_target(): return
+        params = {"group_id": self.target["id"]}
+        if arg.strip():
+            # 可选参数: max_uses
+            try:
+                params["max_uses"] = int(arg.strip())
+            except ValueError:
+                params["code"] = arg.strip()
+        try:
+            result = await self.client.call("group.create_invite_code", params)
+            inv = result.get("invite_code", {})
+            info(f"邀请码: {inv.get('code', '?')}")
+        except Exception as e:
+            error(f"创建失败: {e}")
+
+    async def _cmd_group_invite_revoke(self, arg: str):
+        if not self._require_group_target(): return
+        code = arg.strip()
+        if not code:
+            error("用法: /inv- <code>"); return
+        try:
+            await self.client.call("group.revoke_invite_code", {"group_id": self.target["id"], "code": code})
+            info(f"邀请码已撤销: {code}")
+        except Exception as e:
+            error(f"撤销失败: {e}")
+
+    async def _cmd_group_request_list(self, arg: str):
+        if not self._require_group_target(): return
+        try:
+            result = await self.client.call("group.list_join_requests", {"group_id": self.target["id"]})
+            items = result.get("items", [])
+            if not items:
+                info("暂无入群申请"); return
+            for req in items:
+                aid = req.get("aid", "?")
+                status = req.get("status", "?")
+                msg = req.get("message", "")
+                line = f"  {_short_name(aid)}  ({aid})  {status}"
+                if msg:
+                    line += f"  \"{msg}\""
+                info(line)
+        except Exception as e:
+            error(f"查询失败: {e}")
+
+    async def _cmd_group_request_approve(self, arg: str):
+        if not self._require_group_target(): return
+        aid = arg.strip()
+        if not aid:
+            error("用法: /req+ <aid>"); return
+        try:
+            await self.client.call("group.review_join_request", {
+                "group_id": self.target["id"], "aid": aid, "approve": True,
+            })
+            info(f"已批准 {_short_name(aid)} 的入群申请")
+        except Exception as e:
+            error(f"操作失败: {e}")
+
+    async def _cmd_group_request_reject(self, arg: str):
+        if not self._require_group_target(): return
+        aid = arg.strip()
+        if not aid:
+            error("用法: /req- <aid>"); return
+        try:
+            await self.client.call("group.review_join_request", {
+                "group_id": self.target["id"], "aid": aid, "approve": False,
+            })
+            info(f"已拒绝 {_short_name(aid)} 的入群申请")
+        except Exception as e:
+            error(f"操作失败: {e}")
+
+    async def _cmd_group_ban_list(self, arg: str):
+        if not self._require_group_target(): return
+        try:
+            result = await self.client.call("group.get_banlist", {"group_id": self.target["id"]})
+            items = result.get("items", [])
+            if not items:
+                info("暂无封禁成员"); return
+            for b in items:
+                aid = b.get("aid", "?")
+                info(f"  {_short_name(aid)}  ({aid})")
+        except Exception as e:
+            error(f"查询失败: {e}")
+
+    async def _cmd_group_ban_add(self, arg: str):
+        if not self._require_group_target(): return
+        aid = arg.strip()
+        if not aid:
+            error("用法: /ban+ <aid>"); return
+        try:
+            await self.client.call("group.ban", {"group_id": self.target["id"], "aid": aid})
+            info(f"已封禁 {_short_name(aid)}")
+        except Exception as e:
+            error(f"封禁失败: {e}")
+
+    async def _cmd_group_ban_remove(self, arg: str):
+        if not self._require_group_target(): return
+        aid = arg.strip()
+        if not aid:
+            error("用法: /ban- <aid>"); return
+        try:
+            await self.client.call("group.unban", {"group_id": self.target["id"], "aid": aid})
+            info(f"已解封 {_short_name(aid)}")
+        except Exception as e:
+            error(f"解封失败: {e}")
 
     async def close(self):
         if self.client:
@@ -1027,7 +1927,7 @@ class AUNCli:
 
     async def _on_ack(self, data):
         if isinstance(data, dict):
-            from_aid = data.get("from", self.target_aid or "?")
+            from_aid = data.get("from", self.target["id"] if self.target else "?")
             if self.debug_mode:
                 seq = data.get("seq", "?")
                 print_status(from_aid, "✓✓", C.DIM, f"已送达 seq={seq}")
@@ -1234,15 +2134,31 @@ async def _show_help():
         title=HTML('<style bg="#2a3a4a" fg="#ffff00"> AUN CLI </style>'),
         text=HTML(
             '<b>快捷键</b>\n'
-            '  <ansiyellow>/</ansiyellow>              远端命令菜单\n'
+            '  <ansiyellow>/</ansiyellow>              命令菜单（peer→远端 群→群管理）\n'
             '  <ansiyellow>//</ansiyellow>             本地命令菜单\n'
-            '  <ansiyellow>@</ansiyellow>              最近联系人\n'
+            '  <ansiyellow>@</ansiyellow>              切换目标（peer / 群组）\n'
             '  <ansiyellow>Ctrl+J</ansiyellow>         换行（多行输入）\n'
             '  <ansiyellow>Ctrl+L</ansiyellow>         清屏\n'
             '  <ansiyellow>Ctrl+R</ansiyellow>         原始数据监控\n'
             '  <ansiyellow>Ctrl+D</ansiyellow>         toggle 调试模式\n'
             '  <ansiyellow>Esc</ansiyellow>            关闭菜单\n'
-            '  <ansiyellow>Ctrl+C</ansiyellow>         中断任务 / 清空输入 / 双击退出'
+            '  <ansiyellow>Ctrl+C</ansiyellow>         中断任务 / 清空输入 / 双击退出\n\n'
+            '<b>目标切换 (@)</b>\n'
+            '  <ansiyellow>@aid</ansiyellow>           切换到 peer\n'
+            '  <ansiyellow>@grp_xxx</ansiyellow>       切换到群组\n'
+            '  <ansiyellow>@群名</ansiyellow>          按名称切换群组\n'
+            '  <ansiyellow>@target msg</ansiyellow>    切换并发消息\n\n'
+            '<b>群命令（目标为群时 / 触发）</b>\n'
+            '  <ansiyellow>/ls</ansiyellow>            列出我的群\n'
+            '  <ansiyellow>/add</ansiyellow>           创建群组\n'
+            '  <ansiyellow>/so query</ansiyellow>      搜索公开群\n'
+            '  <ansiyellow>/info</ansiyellow>          群信息\n'
+            '  <ansiyellow>/u</ansiyellow>             成员列表\n'
+            '  <ansiyellow>/u+ aid</ansiyellow>        添加成员\n'
+            '  <ansiyellow>/u- aid</ansiyellow>        踢出成员\n'
+            '  <ansiyellow>/inv</ansiyellow>           邀请码列表\n'
+            '  <ansiyellow>/inv+</ansiyellow>          创建邀请码\n'
+            '  <ansiyellow>/quit</ansiyellow>          退出群组'
         ),
         style=_HELP_STYLE,
     )
@@ -1254,7 +2170,7 @@ async def repl(c: AUNCli):
         if _ctrlc_state['hint']:
             return HTML(f" <b>{_ctrlc_state['hint']}</b>")
         conn = "🟢 已连接" if c.connected else "🔴 未连接"
-        tgt  = c.target_aid or "未设置"
+        tgt  = _target_label(c.target) if c.target else "未设置"
         me   = c.my_aid
         enc  = "🔒 E2EE" if c.encrypt else "🔓 明文"
         rej  = f"拒收: {c.rejected}  " if c.rejected else ""
@@ -1312,7 +2228,7 @@ async def repl(c: AUNCli):
             if not line:
                 continue
 
-            # @ 前缀：切换目标 AID（@aid 仅切换，@aid 消息 切换并发送）
+            # @ 前缀：统一目标切换（peer + group）
             if line.startswith("@"):
                 rest = line[1:]
                 parts = rest.split(None, 1)
@@ -1320,10 +2236,8 @@ async def repl(c: AUNCli):
                 message = parts[1] if len(parts) > 1 else ""
                 if not name:
                     continue
-                if not await c.set_target(name):
+                if not await c.resolve_and_switch_target(name, message):
                     continue
-                if message:
-                    await c.send(message, encrypt=c.encrypt)
                 continue
 
             if line == "//remote menu":
@@ -1342,9 +2256,9 @@ async def repl(c: AUNCli):
                     break
                 elif cmd == "target":
                     if arg:
-                        await c.set_target(arg)
+                        await c.resolve_and_switch_target(arg)
                     else:
-                        error("用法: //target <aid>")
+                        error("用法: //target <aid|group_id>")
                 elif cmd == "ping":
                     await c.ping()
                 elif cmd == "status":
@@ -1394,8 +2308,25 @@ async def repl(c: AUNCli):
                     error(f"未知命令: //{cmd}")
                 continue
 
-            if line.startswith("/"):
-                # / 前缀：转发到远端（直接发送，无需去前缀）
+            if line.startswith("/") and not line.startswith("//"):
+                # / 前缀：group target → 群命令，peer target → 远端转发
+                if c.target and _is_group_target(c.target):
+                    rest = line[1:]
+                    parts = rest.split(None, 1)
+                    cmd_input = parts[0] if parts else ""
+                    arg = parts[1] if len(parts) > 1 else ""
+                    if cmd_input:
+                        lookup = _GROUP_CMD_LOOKUP.get(cmd_input)
+                        if lookup:
+                            cmd_name, need_group = lookup
+                            if need_group and not c._require_group_target():
+                                continue
+                            await c._dispatch_group_cmd(cmd_name, arg)
+                            continue
+                        else:
+                            error(f"未知群命令: /{cmd_input}")
+                            continue
+                # peer target 或 target 未设置：转发到远端
                 await c.send(line)
                 continue
             else:
@@ -1486,7 +2417,7 @@ examples:
     aid_del_p.add_argument("name", help="AID 名称")
 
     parser.add_argument("--aid", "-a", help="本地 AID（默认从 config.json 读取）")
-    parser.add_argument("--target", "-t", help="目标 AID")
+    parser.add_argument("--target", "-t", help="目标 AID 或 group_id")
     parser.add_argument("--send", "-s", help="发送单条消息后退出")
     parser.add_argument("--port", "-p", type=int, help="Gateway 端口（覆盖 config）")
 
@@ -1522,7 +2453,8 @@ examples:
         return
 
     target = args.target if args.target else None
-    if target and not _validate_aid(target):
+    if target and not _is_valid_aid(target) and not _is_group_id(target):
+        error(f"无效目标: {target}（需要 AID 或 group_id 格式）")
         return
 
     c = AUNCli(aid=aid, target=target)

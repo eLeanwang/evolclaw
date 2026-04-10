@@ -4,6 +4,7 @@ import { loadConfig, ensureDataDirs, resolvePaths, resolveAnthropicConfig, isOwn
 import { SessionManager } from './core/session-manager.js';
 import { ClaudeAgentPlugin } from './agents/claude-runner.js';
 import { CodexAgentPlugin } from './agents/codex-runner.js';
+import { HermesAgentPlugin } from './agents/hermes-runner.js';
 import { FeishuChannelPlugin } from './channels/feishu.js';
 import { WechatChannelPlugin } from './channels/wechat.js';
 import { AUNChannelPlugin } from './channels/aun.js';
@@ -88,6 +89,7 @@ async function main() {
   const agentLoader = new AgentLoader();
   agentLoader.register(new ClaudeAgentPlugin());
   agentLoader.register(new CodexAgentPlugin());
+  agentLoader.register(new HermesAgentPlugin());
 
   const agentInstances = agentLoader.createAll(config, {
     onSessionIdUpdate: async (sessionId: string, agentSessionId: string) => {
@@ -253,6 +255,10 @@ async function main() {
     }
 
     if (inst.adapter.name === 'wechat') {
+      // 注入 EventBus（用于 channel:health 事件）
+      if (inst.channel.setEventBus) {
+        inst.channel.setEventBus(eventBus);
+      }
       msgBridge.register('wechat',
         (handler) => inst.channel.onMessage(async (channelId: string, content: string, peerId?: string,
           images?: Array<{ data: string; mimeType: string }>, chatType?: 'private' | 'group') => {
@@ -279,6 +285,7 @@ async function main() {
             content: opts.content,
             chatType: opts.chatType || 'private',
             peerId: opts.peerId || '',
+            peerName: opts.peerName,
             messageId: opts.messageId,
             mentions: opts.mentions,
             threadId: opts.threadId,
@@ -310,25 +317,39 @@ async function main() {
     });
   }
 
-  // AUN 重连失败通知：通过其他渠道给 owner 发消息
+  // AUN 重连失败通知：通过 channel:health 事件
   for (const inst of channelInstances) {
     if (inst.adapter.name === 'aun' && inst.channel.setOnChannelDown) {
       inst.channel.setOnChannelDown(() => {
-        logger.error('[AUN] All reconnect attempts exhausted, notifying owners');
-        const msg = '⚠️ AUN 渠道断连，自动重试已用尽。\n使用 /check reconnect 手动重连';
-        for (const other of channelInstances) {
-          if (other.adapter.name === inst.adapter.name) continue;
-          const ownerCfg = config.channels?.[other.adapter.name as keyof typeof config.channels];
-          const ownerId = (ownerCfg as any)?.owner;
-          if (ownerId) {
-            other.adapter.sendText(ownerId, msg).catch(err => {
-              logger.error(`[AUN] Failed to notify ${other.adapter.name} owner:`, err);
-            });
-          }
-        }
+        eventBus.publish({
+          type: 'channel:health',
+          channel: 'aun',
+          status: 'auth_error',
+          message: '⚠️ AUN 渠道断连，自动重试已用尽。\n使用 /check rty aun 手动重连',
+          timestamp: Date.now(),
+        });
       });
     }
   }
+
+  // 统一 channel:health 跨通道通知（仅 auth_error）
+  eventBus.subscribe('channel:health', (event) => {
+    if (event.type !== 'channel:health' || event.status !== 'auth_error') return;
+    const sourceChannel = event.channel;
+    const msg = event.message;
+    logger.error(`[ChannelHealth] ${sourceChannel} auth_error: ${msg}`);
+
+    for (const other of channelInstances) {
+      if (other.adapter.name === sourceChannel) continue;
+      const ownerCfg = config.channels?.[other.adapter.name as keyof typeof config.channels];
+      const ownerId = (ownerCfg as any)?.owner;
+      if (ownerId) {
+        other.adapter.sendText(ownerId, msg).catch(err => {
+          logger.error(`[ChannelHealth] Failed to notify ${other.adapter.name} owner:`, err);
+        });
+      }
+    }
+  });
 
   logger.info(`\n🚀 EvolClaw is running with ${connected.length} channel(s): ${connected.join(', ')}\n`);
   eventBus.publish({

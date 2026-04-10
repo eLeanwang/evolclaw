@@ -2,7 +2,7 @@ import * as lark from '@larksuiteoapi/node-sdk';
 import fs from 'fs';
 import path from 'path';
 import imageType from 'image-type';
-import { ensureDir } from '../config.js';
+import { sanitizeFileName, saveToUploads, validateImage } from '../utils/media-cache.js';
 import { logger } from '../utils/logger.js';
 import { hasRichContent, renderAllRichContent, checkDependencies } from '../utils/rich-content-renderer.js';
 
@@ -682,33 +682,19 @@ export class FeishuChannel {
           return null;
         }
 
-        // 使用 image-type 检测真实的图片格式
-        const type = await imageType(buffer);
-
-        if (!type) {
-          logger.warn('[Feishu] Unable to detect image type');
-          return null;
-        }
-
-        // 白名单验证：只允许常见的图片格式
-        const allowedMimes = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
-        if (!allowedMimes.includes(type.mime)) {
-          logger.warn('[Feishu] Unsupported image type:', type.mime);
-          return null;
-        }
-
-        // 大小限制：10MB
-        if (buffer.length > 10 * 1024 * 1024) {
-          logger.warn('[Feishu] Image too large:', buffer.length, 'bytes');
+        // 统一图片验证（类型白名单 + 大小限制）
+        const result = await validateImage(buffer);
+        if (result.mime === null) {
+          logger.warn(`[Feishu] Image validation failed: ${result.reason}`);
           return null;
         }
 
         const base64Data = buffer.toString('base64');
-        logger.debug('[Feishu] Image downloaded successfully, type:', type.mime, 'size:', base64Data.length);
+        logger.debug('[Feishu] Image downloaded successfully, type:', result.mime, 'size:', base64Data.length);
 
         return {
           data: base64Data,
-          mimeType: type.mime  // 使用真实检测的 MIME 类型
+          mimeType: result.mime
         };
       }
 
@@ -755,13 +741,7 @@ export class FeishuChannel {
           return null;
         }
 
-        const uploadsDir = path.join(projectPath, '.evolclaw', 'uploads');
-        ensureDir(uploadsDir);
-
-        const filePath = path.join(uploadsDir, fileName);
-        fs.writeFileSync(filePath, buffer);
-
-        logger.info('[Feishu] File downloaded successfully:', filePath, 'size:', buffer.length);
+        const { filePath } = saveToUploads(buffer, sanitizeFileName(fileName), projectPath);
         return filePath;
       }
 

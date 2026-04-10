@@ -6,7 +6,7 @@ import { StreamFlusher } from '../utils/stream-flusher.js';
 import { MessageCache } from '../utils/message-cache.js';
 import { StreamIdleMonitor } from '../utils/stream-idle-monitor.js';
 import { logger } from '../utils/logger.js';
-import { getErrorMessage, classifyError, ErrorType } from '../utils/error-utils.js';
+import { getErrorMessage, classifyError, ErrorType, ERROR_PREFIX, isInfraError, prefixErrorType } from '../utils/error-utils.js';
 import { EventBus } from './event-bus.js';
 import { summarizeToolInput } from '../utils/permission-utils.js';
 import type { Message, Config, Session, ChannelAdapter, ChannelOptions, ChannelPolicy, CommandHandler } from '../types.js';
@@ -207,7 +207,8 @@ export class MessageProcessor {
           } else if (!policy.accumulateErrors(chatType, identityRole)) {
             logger.info(`[MessageProcessor] Non-accumulating error (chatType=${chatType}, identity=${identityRole}), skipping safe mode accumulation`);
           } else {
-            const newCount = await this.sessionManager.recordError(session.id, errorType, error.message);
+            const prefixed = prefixErrorType(ERROR_PREFIX.INFRA, errorType);
+            const newCount = await this.sessionManager.recordError(session.id, prefixed, error.message);
             await this.checkSafeMode(session, message.channelId, channelInfo.adapter, safeModeThreshold, newCount);
           }
         } catch (statusError) {
@@ -373,6 +374,8 @@ ${suggestions}`,
         ? `【新消息插入】\n\n${message.content}\n\n【请无视之前中断继续处理】`
         : message.content;
 
+      let streamResult: { isError: boolean; subtype?: string; errors?: string[]; lastReplyText: string; fullText: string } = { isError: false, lastReplyText: '', fullText: '' };
+
       try {
         // 动态构建运行时上下文提示
         const contextParts: string[] = [];
@@ -388,6 +391,8 @@ ${suggestions}`,
         if (session.name) envParts.push(`会话名称: ${session.name}`);
         envParts.push(`对端身份: ${peerLabel}`);
         if (peerName) envParts.push(`对端名称: ${peerName}`);
+        if (session.chatType) envParts.push(`聊天类型: ${session.chatType}`);
+        if (session.agentId && session.agentId !== 'claude') envParts.push(`当前Agent: ${session.agentId}`);
         contextParts.push(`[当前环境] ${envParts.join(' | ')}`);
 
         // 2. 文件发送能力
@@ -403,6 +408,15 @@ ${suggestions}`,
           contextParts.push(hints.join('，'));
         }
 
+        // 3. 当前通道能力
+        const capParts: string[] = [];
+        if (options?.supportsImages) capParts.push('图片输入');
+        if (channelInfo.adapter.sendImage) capParts.push('图片输出');
+        if (channelInfo.adapter.sendFile) capParts.push('文件发送');
+        if (capParts.length > 0) {
+          contextParts.push(`[通道能力] ${capParts.join('、')}`);
+        }
+
         const effectiveSystemPrompt = [options?.systemPromptAppend, ...contextParts].filter(Boolean).join('\n') || undefined;
 
         const stream = await agent.runQuery(
@@ -416,7 +430,7 @@ ${suggestions}`,
         );
         agent.registerStream(streamKey, stream);
 
-        await this.processEventStream(
+        streamResult = await this.processEventStream(
           stream,
           session,
           flusher,
@@ -447,7 +461,7 @@ ${suggestions}`,
             );
             agent.registerStream(streamKey, retryStream);
 
-            await this.processEventStream(
+            streamResult = await this.processEventStream(
               retryStream,
               session,
               flusher,
@@ -463,9 +477,12 @@ ${suggestions}`,
       }
 
       // 处理文件标记 - 支持 [SEND_FILE:path] 和 [SEND_FILE:channel:path]
+      // 注意：始终扫描全部文本（含中间轮），因为文件标记可能出现在任意轮次
+      // suppressed 模式下 flusher 只有最后一轮文本，需要用 streamResult.fullText（SDK 全文）兜底
       const FILE_MARKER_RE = /\[SEND_FILE:(?:(\w+):)?([^\]]+)\]/g;
       const markerPattern = options?.fileMarkerPattern ?? FILE_MARKER_RE;
-      const fullText = flusher.getFinalText();
+      const flusherText = flusher.getFinalText();
+      const fullText = flusherText.length >= (streamResult.fullText?.length || 0) ? flusherText : streamResult.fullText;
       const fileMatches = [...fullText.matchAll(markerPattern)];
 
       for (const match of fileMatches) {
@@ -542,40 +559,75 @@ ${suggestions}`,
       // 清理 activeStreams（正常完成）
       agent.cleanupStream(streamKey);
 
-      // 清除处理中状态 + 记录成功响应
+      // 清除处理中状态
       this.sessionManager.clearProcessing(session.id);
       // 注意：不在此处清除 interruptedSessions，由下一条消息的 prompt 包装逻辑消费
       const interruptReason = this.interruptedSessions.get(session.id);
-      adapter.sendProcessingStatus?.(message.channelId, interruptReason ? 'interrupted' : 'done', session.id, this.getReplyContext(session));
-      await this.sessionManager.recordSuccess(session.id);
 
-      this.eventBus.publish({
-        type: 'message:completed',
-        sessionId: session.id,
-        channel: message.channel,
-        channelId: message.channelId,
-        durationMs: Date.now() - startTime,
-        timestamp: Date.now()
-      });
+      if (streamResult.isError) {
+        // Agent 流正常结束但任务结果失败（权限被拒、max turns、工具链失败等）
+        const errorSummary = streamResult.errors?.join('; ') || '任务执行失败';
+        const rawSubtype = streamResult.subtype || 'agent_error';
+        const errorType = prefixErrorType(ERROR_PREFIX.AGENT, rawSubtype);
+        adapter.sendProcessingStatus?.(message.channelId, 'error', session.id, this.getReplyContext(session));
+
+        this.eventBus.publish({
+          type: 'message:error',
+          sessionId: session.id,
+          error: errorSummary,
+          errorType
+        });
+
+        // 仅系统级 subtype 累计安全模式（权限拒绝、max turns 等用户操作不累计）
+        if (isInfraError(rawSubtype)) {
+          const chatType = message.chatType || 'private';
+          const identityRole = session.identity?.role || 'anonymous';
+          const safeModeThreshold = this.config.idleMonitor?.safeModeThreshold ?? 3;
+          const { policy } = channelInfo;
+          if (policy.accumulateErrors(chatType, identityRole)) {
+            const newCount = await this.sessionManager.recordError(session.id, errorType, errorSummary);
+            await this.checkSafeMode(session, message.channelId, adapter, safeModeThreshold, newCount);
+          }
+        }
+
+        logger.message({
+          msgId: messageId,
+          sessionId: session.id,
+          dir: 'inbound',
+          status: 'failed',
+          error: errorSummary
+        });
+      } else {
+        // 真正的成功
+        adapter.sendProcessingStatus?.(message.channelId, interruptReason ? 'interrupted' : 'done', session.id, this.getReplyContext(session));
+        await this.sessionManager.recordSuccess(session.id);
+
+        this.eventBus.publish({
+          type: 'message:completed',
+          sessionId: session.id,
+          channel: message.channel,
+          channelId: message.channelId,
+          finalText: streamResult.lastReplyText || undefined,
+          durationMs: Date.now() - startTime,
+          timestamp: Date.now()
+        });
+
+        // 记录处理完成
+        logger.message({
+          msgId: messageId,
+          sessionId: session.id,
+          dir: 'inbound',
+          status: 'completed',
+          duration: Date.now() - startTime
+        });
+      }
 
       const isFinallyBackground = await this.isBackgroundSession(session, message.channel, message.channelId);
-
       if (isFinallyBackground) {
         const projectName = path.basename(session.projectPath);
         const count = this.messageCache.getCount(session.id);
         await adapter.sendText(message.channelId, `[\u540e\u53f0-${projectName}] \u2713 任务完成 (${count}条消息已缓存)`);
       }
-
-      const duration = Date.now() - startTime;
-
-      // 记录处理完成
-      logger.message({
-        msgId: messageId,
-        sessionId: session.id,
-        dir: 'inbound',
-        status: 'completed',
-        duration
-      });
 
       // 记录发送响应
       logger.message({
@@ -600,19 +652,19 @@ ${suggestions}`,
       logger.error(`[${message.channel}] Error:`, error);
 
       const errorMsg = error instanceof Error ? error.message : String(error);
-      const errorType = errType;
+      const errorType = prefixErrorType(ERROR_PREFIX.INFRA, errType);
 
       this.eventBus.publish({
         type: 'message:error',
-        sessionId: message.channelId,
+        sessionId: session.id,
         error: errorMsg,
-        errorType: String(errorType)
+        errorType
       });
 
       // 记录处理失败
       logger.message({
         msgId: messageId,
-        sessionId: message.channelId,
+        sessionId: session.id,
         dir: 'inbound',
         status: 'failed',
         error: error instanceof Error ? error.message : String(error)
@@ -684,9 +736,13 @@ ${suggestions}`,
     flusher: StreamFlusher,
     resetTimer: (eventType?: string, toolName?: string) => void,
     shouldSuppress: () => boolean
-  ): Promise<void> {
+  ): Promise<{ isError: boolean; subtype?: string; errors?: string[]; lastReplyText: string; fullText: string }> {
     let hasReceivedText = false;
     let hasErrorResult = false;  // 是否已有 tool_result/error 事件输出过错误
+    let completeResult: { isError: boolean; subtype?: string; errors?: string[]; lastReplyText: string; fullText: string } = { isError: false, lastReplyText: '', fullText: '' };
+
+    // 追踪最后一轮 assistant 回复文本（tool_use 之后的纯文本）
+    let lastReplyText = '';
 
     try {
       for await (const event of stream) {
@@ -710,6 +766,7 @@ ${suggestions}`,
         // 流式文本
         if (event.type === 'text') {
           hasReceivedText = true;
+          lastReplyText += event.text;
           this.eventBus.publish({ type: 'message:text', sessionId: session.id, text: event.text, isFinal: false });
           if (!shouldSuppress()) {
             flusher.addText(event.text);
@@ -739,6 +796,8 @@ ${suggestions}`,
 
         // 工具调用
         if (event.type === 'tool_use') {
+          // 工具调用意味着当前文本是中间轮，重置最后回复追踪
+          lastReplyText = '';
           this.eventBus.publish({
             type: 'tool:use',
             sessionId: session.id,
@@ -788,18 +847,25 @@ ${suggestions}`,
         if (event.type === 'complete') {
           logger.debug(`[MessageProcessor] complete event: hasReceivedText=${hasReceivedText}, isError=${event.isError}, shouldSuppress=${shouldSuppress()}`);
 
+          // 记录完成状态 + 最后一轮回复文本
+          completeResult = { isError: !!event.isError, subtype: event.subtype, errors: event.errors, lastReplyText, fullText: event.result || '' };
+
           // 失败且无前置错误输出：显示 errors 摘要
           if (event.isError && !hasErrorResult && !shouldSuppress()) {
             const errorSummary = event.errors?.join('; ') || '\u4efb\u52a1\u6267\u884c\u5931\u8d25';
             flusher.addActivity(`\u26a0\ufe0f ${errorSummary}`);
           }
 
-          // 成功结果文本：suppressed 模式下总是添加，否则仅在无流式文本时添加
-          if (event.result) {
+          // 最终回复文本
+          // suppressed 模式：中间流式文本未推送，使用最后一轮回复（回退到全文）
+          // 非 suppressed 且无流式文本：同上
+          // 非 suppressed 且有流式文本：已经逐步推送过了，不重复添加
+          const finalText = lastReplyText || event.result;
+          if (finalText) {
             if (shouldSuppress()) {
-              flusher.addText(event.result);
+              flusher.addText(finalText);
             } else if (!hasReceivedText) {
-              flusher.addText(event.result);
+              flusher.addText(finalText);
             }
           }
 
@@ -809,22 +875,41 @@ ${suggestions}`,
         continue;
       }
 
-      // === 后台任务：只处理 complete 事件，仅缓存不发送 ===
+      // === 后台任务：追踪最后回复文本，但只处理 complete 事件 ===
+      if (event.type === 'text') {
+        lastReplyText += event.text;
+      } else if (event.type === 'tool_use') {
+        lastReplyText = '';
+      }
       if (event.type !== 'complete') {
         continue;
       }
 
+      // 记录完成状态
+      completeResult = { isError: !!event.isError, subtype: event.subtype, errors: event.errors, lastReplyText, fullText: event.result || '' };
+
       if (event.subtype === 'success') {
         this.messageCache.addEvent(session.id, {
           type: 'completed',
-          message: event.result || '',
+          message: lastReplyText || event.result || '',
           timestamp: Date.now(),
           metadata: {
             duration: event.durationMs,
             cost: event.costUsd
           }
         });
+        // 后台任务完成也纳入统计
+        this.eventBus.publish({
+          type: 'message:completed',
+          sessionId: session.id,
+          channel: session.channel,
+          channelId: session.channelId,
+          finalText: lastReplyText || event.result || undefined,
+          durationMs: event.durationMs,
+          timestamp: Date.now()
+        });
       } else if (event.isError === true) {
+        const bgErrorType = prefixErrorType(ERROR_PREFIX.AGENT, event.subtype || 'agent_error');
         this.messageCache.addEvent(session.id, {
           type: 'error',
           message: event.errors?.join('\n') || '\u672a\u77e5\u9519\u8bef',
@@ -832,6 +917,13 @@ ${suggestions}`,
           metadata: {
             errorType: event.subtype
           }
+        });
+        // 后台任务失败也纳入统计
+        this.eventBus.publish({
+          type: 'message:error',
+          sessionId: session.id,
+          error: event.errors?.join('; ') || '\u672a\u77e5\u9519\u8bef',
+          errorType: bgErrorType
         });
       }
     }
@@ -842,6 +934,8 @@ ${suggestions}`,
       }
       throw error;
     }
+
+    return completeResult;
   }
 
   /**

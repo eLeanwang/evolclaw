@@ -1136,16 +1136,22 @@ async function cmdTui() {
     process.exit(1);
   }
 
-  // Check Python + aun_core, interactive install if missing
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  const ready = await checkAunEnvironment(rl);
-  rl.close();
-  if (!ready) {
+  // TUI requires Python + aun_core (independent of init aun which is now pure TS)
+  const pythonCheck = aun.pythonBin || process.env.AUN_PYTHON || 'python3';
+  if (!platform.commandExists(pythonCheck)) {
+    console.error(`[tui] Python 未找到 (${pythonCheck})`);
+    console.error('  → TUI 依赖 Python 和 aun-core: pip3 install aun-core');
     process.exit(1);
   }
 
   const pythonBin = aun.pythonBin || process.env.AUN_PYTHON || 'python3';
   const cliScript = path.join(getPackageRoot(), 'aun', 'aun_cli.py');
+  if (!fs.existsSync(cliScript)) {
+    console.error(`[tui] aun_cli.py 不存在: ${cliScript}`);
+    console.error('  → TUI 需要 AUN CLI 工具，请确认源码目录包含 aun/aun_cli.py');
+    console.error('  → 安装: pip3 install aun-core && 从源码仓库获取 aun_cli.py');
+    process.exit(1);
+  }
   const child = spawn(pythonBin, [cliScript, '-a', aun.owner, '-t', aun.aid], { stdio: 'inherit' });
   child.on('exit', (code) => process.exit(code ?? 0));
 }

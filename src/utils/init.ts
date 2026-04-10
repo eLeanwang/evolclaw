@@ -347,29 +347,8 @@ async function initFeishuManual(rl: readline.Interface, config: any): Promise<bo
 
 export async function checkAunEnvironment(rl: readline.Interface): Promise<boolean> {
   console.log('\n🔍 AUN 环境检查...\n');
-
-  // Check python3 (needed for aun_cli.py AID management)
-  if (!commandExists('python3')) {
-    console.log('  ✗ python3 未找到');
-    console.log('  → 请先安装 Python 3: https://www.python.org/downloads/');
-    const answer = (await ask(rl, '  → 返回重新选择渠道？[Y/n] ')).trim().toLowerCase();
-    if (answer === 'n' || answer === 'no') process.exit(0);
-    return false;
-  }
-  console.log('  ✓ python3');
-
-  // Check aun_core
-  try {
-    execFileSync('python3', ['-c', 'import aun_core'], { encoding: 'utf-8', stdio: 'pipe' });
-    console.log('  ✓ aun_core');
-  } catch {
-    console.log('  ✗ aun_core 未安装');
-    console.log('  → 请安装: pip3 install aun-core');
-    const answer = (await ask(rl, '  → 返回重新选择渠道？[Y/n] ')).trim().toLowerCase();
-    if (answer === 'n' || answer === 'no') process.exit(0);
-    return false;
-  }
-
+  // TS SDK (@eleans/aun-core-node) is bundled as npm dependency — no external deps needed
+  console.log('  ✓ @eleans/aun-core-node (TS SDK)');
   console.log('');
   return true;
 }
@@ -417,10 +396,7 @@ function isValidAid(name: string): boolean {
   return labels.length >= 3 && labels.every(l => /^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?$/.test(l));
 }
 
-async function setupAunAid(rl: readline.Interface, config: any): Promise<{ aid: string; gatewayPort?: number } | null> {
-  const pythonBin = config.channels?.aun?.pythonBin || process.env.AUN_PYTHON || 'python3';
-  const cliScript = path.join(getPackageRoot(), 'aun', 'aun_cli.py');
-
+async function setupAunAid(rl: readline.Interface, _config: any): Promise<{ aid: string; gatewayPort?: number } | null> {
   let aid = '';
   let gatewayPort: number | undefined;
 
@@ -445,8 +421,9 @@ async function setupAunAid(rl: readline.Interface, config: any): Promise<{ aid: 
     }
 
     // Check if AID exists locally
-    const aidDir = path.join(os.homedir(), '.aun', 'AIDs', aid);
-    if (fs.existsSync(aidDir)) {
+    const aunPath = path.join(os.homedir(), '.aun');
+    const aidDir = path.join(aunPath, 'AIDs', aid);
+    if (fs.existsSync(aidDir) && fs.existsSync(path.join(aidDir, 'private'))) {
       console.log(`  ✓ AID ${aid} 已存在`);
       break;
     }
@@ -457,28 +434,28 @@ async function setupAunAid(rl: readline.Interface, config: any): Promise<{ aid: 
       break;
     }
 
-    // Try creating
+    // Create AID using TS SDK directly
     console.log('  正在创建 AID...');
-    const args = [cliScript, 'aid', 'new', aid];
-    if (gatewayPort) args.push('-p', String(gatewayPort));
-
     let failed = false;
     try {
-      const { stdout, stderr } = await execFileAsync(pythonBin, args, { timeout: 30000, encoding: 'utf-8' });
-      const output = (stdout + stderr).trim();
-      if (output) console.log(`  ${output}`);
-      // aun_cli.py 可能 exit 0 但输出包含错误
-      failed = output.includes('✗') || output.includes('失败');
+      const { AUNClient } = await import('@eleans/aun-core-node');
+      const client = new AUNClient({ aun_path: aunPath });
+
+      // Set gateway URL from AID domain + port
+      const domain = aid.split('.').slice(1).join('.');
+      const port = gatewayPort || 443;
+      (client as any)._gatewayUrl = `wss://gateway.${domain}:${port}/aun`;
+
+      const result = await client.auth.createAid({ aid });
+      console.log(`  ✓ AID ${result.aid} 创建成功`);
+      try { await client.close(); } catch { /* ignore */ }
     } catch (e: any) {
-      const msg = e.stderr || e.stdout || e.message || '';
-      console.log(`  ✗ AID 创建失败: ${msg.trim().slice(0, 200)}`);
+      const msg = e.message || String(e);
+      console.log(`  ✗ AID 创建失败: ${msg.slice(0, 200)}`);
       failed = true;
     }
 
-    if (!failed) {
-      console.log(`  ✓ AID ${aid} 创建成功`);
-      break;
-    }
+    if (!failed) break;
 
     // Creation failed — retry or give up
     const retry = (await ask(rl, '  → 重新输入 (r) / 跳过 (s) / 取消 (c)？[r/s/c] ')).trim().toLowerCase();

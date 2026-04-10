@@ -5,6 +5,7 @@ interface EventRecord {
   timestamp: number;
   durationMs?: number;
   errorType?: string;
+  toolName?: string;
 }
 
 export interface StatsSnapshot {
@@ -14,6 +15,8 @@ export interface StatsSnapshot {
     completed: number;
     errors: number;
     errorsByType: Record<string, number>;
+    toolErrors: number;
+    toolErrorsByName: Record<string, number>;
     interrupts: number;
     safeModeEntries: number;
     avgResponseMs: number;
@@ -51,6 +54,13 @@ export class StatsCollector {
     eventBus.subscribe('session:safe-mode-entered', (_event) => {
       this.recordEvent({ type: 'safe-mode-entered', timestamp: Date.now() });
     });
+
+    eventBus.subscribe('tool:result', (event) => {
+      const e = event as { isError?: boolean; toolName?: string };
+      if (e.isError) {
+        this.recordEvent({ type: 'tool-error', timestamp: Date.now(), toolName: e.toolName });
+      }
+    });
   }
 
   private recordEvent(record: EventRecord): void {
@@ -72,6 +82,8 @@ export class StatsCollector {
     let completed = 0;
     let errors = 0;
     const errorsByType: Record<string, number> = {};
+    let toolErrors = 0;
+    const toolErrorsByName: Record<string, number> = {};
     let interrupts = 0;
     let safeModeEntries = 0;
     let totalDuration = 0;
@@ -95,6 +107,12 @@ export class StatsCollector {
             errorsByType[event.errorType] = (errorsByType[event.errorType] || 0) + 1;
           }
           break;
+        case 'tool-error':
+          toolErrors++;
+          if (event.toolName) {
+            toolErrorsByName[event.toolName] = (toolErrorsByName[event.toolName] || 0) + 1;
+          }
+          break;
         case 'interrupted':
           interrupts++;
           break;
@@ -111,6 +129,8 @@ export class StatsCollector {
         completed,
         errors,
         errorsByType,
+        toolErrors,
+        toolErrorsByName,
         interrupts,
         safeModeEntries,
         avgResponseMs: durationCount > 0 ? totalDuration / durationCount : 0

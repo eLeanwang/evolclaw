@@ -1,4 +1,4 @@
-import { AUNClient, FileSecretStore } from '@aun/core-node';
+import { AUNClient, FileSecretStore } from '@eleans/aun-core-node';
 import { logger } from '../utils/logger.js';
 import type { ChannelPlugin, ChannelInstance } from '../core/channel-loader.js';
 import type { Config, ReplyContext } from '../types.js';
@@ -19,6 +19,7 @@ export interface AUNMessageHandler {
     content: string;
     chatType: 'private' | 'group';
     peerId: string;
+    peerName?: string;
     messageId?: string;
     threadId?: string;
     mentions?: Array<{ userId: string; name?: string }>;
@@ -30,6 +31,58 @@ export class AUNChannel {
   private client: AUNClient | null = null;
   private messageHandler?: AUNMessageHandler;
   private connected = false;
+
+  private getShortAid(aid?: string): string | undefined {
+    if (!aid) return undefined;
+    const trimmed = aid.trim();
+    if (!trimmed) return undefined;
+    return trimmed.split('.')[0] || trimmed;
+  }
+
+  private extractTextPayload(payload: unknown): string {
+    if (typeof payload === 'string') return payload;
+    if (payload && typeof payload === 'object') {
+      const text = (payload as Record<string, unknown>).text;
+      if (typeof text === 'string') return text;
+      return JSON.stringify(payload);
+    }
+    return '';
+  }
+
+  private hasExplicitMention(text: string, target: string): boolean {
+    const escaped = target.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`(^|\\s)@${escaped}(?=$|\\s|[.,!?;:，。！？；：]|[\\u4e00-\\u9fff])`).test(text);
+  }
+
+  private stripTriggerMentions(text: string, selfAid?: string): string {
+    let result = text;
+    if (selfAid) {
+      const escapedAid = selfAid.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      result = result.replace(new RegExp(`(^|\\s)@${escapedAid}(?=$|\\s|[.,!?;:，。！？；：]|[\\u4e00-\\u9fff])`, 'g'), '$1');
+    }
+    result = result.replace(/(^|\s)@all(?=$|\s|[.,!?;:，。！？；：]|[\u4e00-\u9fff])/gi, '$1');
+    return result.replace(/[ \t]+/g, ' ').trim();
+  }
+
+  private buildGroupReplyContext(taskId: string | undefined, senderAid: string, text: string): ReplyContext {
+    const replyContext: ReplyContext = {};
+    if (taskId) replyContext.threadId = taskId;
+    if (this.hasExplicitMention(text, 'all')) {
+      replyContext.mentionUserIds = ['all'];
+    } else {
+      replyContext.mentionUserIds = [senderAid];
+    }
+    return replyContext;
+  }
+
+  private acknowledgeImmediately(messageId: string | undefined, seq?: number): void {
+    if (seq != null && this.client) {
+      this.client.call('message.ack', { seq }).catch(e => {
+        logger.debug(`[AUN] Immediate ack failed: ${e}`);
+      });
+    }
+    if (messageId) this.messageSeqMap.delete(messageId);
+  }
   private _aid?: string;
   private seenMessages = new Map<string, number>();
   private messageSeqMap = new Map<string, number>();  // messageId → seq (for ack)
@@ -90,8 +143,18 @@ export class AUNChannel {
     (this.client as any)._gatewayUrl = gateway;
 
     // Register event handlers before connecting
-    this.client.on('message.received', (data: unknown) => this.handleIncomingPrivateMessage(data));
-    this.client.on('group.message_created', (data: unknown) => this.handleIncomingGroupMessage(data));
+    this.client.on('message.received', (data: unknown) => {
+      const kind = (data && typeof data === 'object') ? (data as any).kind ?? '' : '';
+      const keys = (data && typeof data === 'object') ? Object.keys(data as any).join(',') : typeof data;
+      logger.info(`[AUN][DIAG] message.received: kind=${kind} keys=${keys}`);
+      this.handleIncomingPrivateMessage(data);
+    });
+    this.client.on('group.message_created', (data: unknown) => {
+      const gid = (data && typeof data === 'object') ? (data as any).group_id ?? '' : '';
+      const sender = (data && typeof data === 'object') ? (data as any).sender_aid ?? '' : '';
+      logger.info(`[AUN][DIAG] group.message_created: group_id=${gid} sender=${sender}`);
+      this.handleIncomingGroupMessage(data);
+    });
     this.client.on('connection.state', (data: unknown) => this.handleConnectionState(data));
 
     // Authenticate
@@ -141,7 +204,7 @@ export class AUNChannel {
 
     const fromAid = msg.from ?? '';
     const payload = msg.payload ?? '';
-    const text = typeof payload === 'string' ? payload : (payload ? JSON.stringify(payload) : '');
+    const text = this.extractTextPayload(payload);
     const taskId = msg.task_id;
     const messageId = msg.message_id ?? '';
     const seq = msg.seq;
@@ -171,33 +234,58 @@ export class AUNChannel {
     const groupId = msg.group_id ?? '';
     const senderAid = msg.sender_aid ?? msg.from ?? '';
     const payload = msg.payload ?? '';
-    const text = typeof payload === 'string' ? payload : (payload ? JSON.stringify(payload) : '');
+    const text = this.extractTextPayload(payload);
     const taskId = msg.task_id;
     const messageId = msg.message_id ?? '';
     const seq = msg.seq;
 
-    // Detect @mentions
-    const mentions: string[] = [];
-    if (this._aid && text.includes(`@${this._aid}`)) {
-      mentions.push(this._aid);
+    logger.info(`[AUN][DIAG-GRP] full_msg=${JSON.stringify(msg).substring(0, 500)}`);
+
+    if (!groupId || !senderAid) {
+      this.acknowledgeImmediately(messageId, seq);
+      return;
     }
+
+    if (this._aid && senderAid === this._aid) {
+      this.acknowledgeImmediately(messageId, seq);
+      return;
+    }
+
+    const mentionedSelf = this._aid ? this.hasExplicitMention(text, this._aid) : false;
+    const mentionedAll = this.hasExplicitMention(text, 'all');
+    if (!mentionedSelf && !mentionedAll) {
+      this.acknowledgeImmediately(messageId, seq);
+      return;
+    }
+
+    const strippedText = this.stripTriggerMentions(text, this._aid);
+    if (!strippedText) {
+      this.acknowledgeImmediately(messageId, seq);
+      return;
+    }
+
+    const mentions: string[] = mentionedAll ? ['all'] : (this._aid ? [this._aid] : []);
 
     this.dispatchMessage({
       channelId: groupId,
       userId: senderAid,
-      text,
+      peerName: this.getShortAid(senderAid),
+      text: strippedText,
       chatType: 'group',
       messageId,
       seq,
       taskId,
       mentions,
+      replyContext: this.buildGroupReplyContext(taskId, senderAid, text),
     });
   }
 
   private dispatchMessage(event: {
     channelId: string; userId: string; text: string;
     chatType: 'private' | 'group'; messageId: string;
+    peerName?: string;
     seq?: number; taskId?: string; mentions?: string[];
+    replyContext?: ReplyContext;
   }): void {
     // Dedup
     if (event.messageId) {
@@ -213,8 +301,11 @@ export class AUNChannel {
     if (!this.messageHandler) return;
 
     const mentionObjects = event.mentions?.map(aid => ({ userId: aid }));
-    let replyContext: ReplyContext | undefined;
-    if (event.taskId) {
+
+    // Use caller-supplied replyContext (group path builds mentionUserIds);
+    // fall back to simple threadId-only context for private messages
+    let replyContext: ReplyContext | undefined = event.replyContext;
+    if (!replyContext && event.taskId) {
       replyContext = { threadId: event.taskId };
     }
 
@@ -223,6 +314,7 @@ export class AUNChannel {
       content: event.text || '',
       chatType: event.chatType,
       peerId: event.userId || event.channelId || '',
+      peerName: event.peerName,
       messageId: event.messageId,
       threadId: event.taskId,
       mentions: mentionObjects,
@@ -279,6 +371,14 @@ export class AUNChannel {
     }
     this.sentCount.set(channelId, (this.sentCount.get(channelId) || 0) + 1);
 
+    // Render outbound mentions for group sends
+    if (channelId.startsWith('grp_') && context?.mentionUserIds?.length) {
+      const mentionPrefix = context.mentionUserIds.includes('all')
+        ? '@all '
+        : context.mentionUserIds.map(id => `@${id}`).join(' ') + ' ';
+      finalText = mentionPrefix + finalText;
+    }
+
     const params: Record<string, any> = { payload: finalText, encrypt: true };
     if (context?.threadId) params.task_id = context.threadId;
 
@@ -317,14 +417,22 @@ export class AUNChannel {
     });
 
     const params: Record<string, any> = {
-      to: channelId, payload,
+      payload,
       encrypt: true, persist: false,
     };
     if (context?.threadId) params.task_id = context.threadId;
 
-    this.client.call('message.send', params).catch(e => {
-      logger.debug(`[AUN] Processing status failed: ${e}`);
-    });
+    if (channelId.startsWith('grp_')) {
+      params.group_id = channelId;
+      this.client.call('group.send', params).catch(e => {
+        logger.debug(`[AUN] Processing status failed: ${e}`);
+      });
+    } else {
+      params.to = channelId;
+      this.client.call('message.send', params).catch(e => {
+        logger.debug(`[AUN] Processing status failed: ${e}`);
+      });
+    }
   }
 
   sendCustomPayload(channelId: string, payload: string): void {
@@ -453,7 +561,7 @@ export class AUNChannelPlugin implements ChannelPlugin {
       canCreateSession: (chatType: string, identity: string) => true,
       canDeleteSession: (chatType: string, identity: string) => true,
       canImportCliSession: (chatType: string, identity: string) => identity === 'owner',
-      messagePrefix: (chatType: string, peerName?: string) => (chatType === 'group' && peerName) ? `[${peerName}] ` : '',
+      messagePrefix: () => '',
       showMiddleResult: (chatType: string, identity: string) => {
         const mode = aunConfig.showActivities ?? config.showActivities ?? 'all';
         if (mode === 'none') return false;

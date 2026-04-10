@@ -14,6 +14,14 @@ export interface Config {
       model?: string;     // 默认 'gpt-5.2-codex'
       reasoning?: string; // 推理强度: low / medium / high / max
     };
+    hermes?: {
+      pythonPath?: string;   // Python 解释器路径（默认 hermes-agent/.venv/bin/python）
+      bridgePath?: string;   // bridge.py 路径（默认 hermes-agent/evolclaw_bridge.py）
+      model?: string;        // 默认模型
+      provider?: string;     // custom/openrouter/anthropic
+      baseUrl?: string;      // API endpoint
+      apiKey?: string;       // API key（可选，优先用 env）
+    };
     defaultAgent?: string;  // 默认 'claude'
   };
   channels?: {

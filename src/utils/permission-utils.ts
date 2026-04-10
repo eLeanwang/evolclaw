@@ -64,6 +64,18 @@ export function summarizeToolInput(toolName: string, input: Record<string, unkno
     'Grep':  (i) => `pattern: ${i.pattern}`,
     'Glob':  (i) => `pattern: ${i.pattern}`,
     'Agent': (i) => i.description || i.prompt?.substring(0, 80),
+    'Skill': (i) => i.skill ? `${i.skill}${i.args ? ' ' + i.args : ''}` : undefined,
+    'TodoWrite': (i) => {
+      if (Array.isArray(i.todos)) {
+        return i.todos.map((t: any) => t.content || t.task || t.text).filter(Boolean).join(', ').substring(0, 80);
+      }
+      return undefined;
+    },
+    'TaskCreate': (i) => i.subject || i.description?.substring(0, 80),
+    'TaskUpdate': (i) => i.status ? `${i.taskId} → ${i.status}` : i.taskId,
+    'NotebookEdit': (i) => i.notebook_path,
+    'WebFetch': (i) => i.url,
+    'WebSearch': (i) => i.query?.substring(0, 80),
   };
 
   const extractor = extractors[toolName];
@@ -73,9 +85,13 @@ export function summarizeToolInput(toolName: string, input: Record<string, unkno
   }
 
   return (input as any).description
+    || (input as any).subject
     || (input as any).file_path
     || (input as any).pattern
     || (input as any).command?.substring(0, 80)
     || (input as any).prompt?.substring(0, 80)
+    || (input as any).query?.substring(0, 80)
+    || (input as any).skill
+    || (input as any).url
     || '';
 }
