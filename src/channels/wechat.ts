@@ -879,7 +879,7 @@ export class WechatChannelPlugin implements ChannelPlugin {
       });
 
       const adapter = {
-        name: inst.name,
+        channelName: inst.name,
         sendText: (id: string, text: string) => channel.sendMessage(id, text),
         sendFile: (id: string, filePath: string) => channel.sendFile(id, filePath),
       };

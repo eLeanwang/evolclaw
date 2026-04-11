@@ -61,6 +61,7 @@ export interface Config {
       effort?: 'low' | 'medium' | 'high' | 'max';
       useSettingSources?: boolean;        // 使用 SDK 原生配置加载，默认 true
       agentProgressSummaries?: boolean;   // 启用 AI 生成的子任务进度摘要，默认 true
+      excludeDynamicSections?: boolean;   // 从 system prompt 移除动态内容以提升跨用户 prompt cache 命中率，默认 false
     };
     openai?: {
       apiKey?: string;
@@ -75,6 +76,15 @@ export interface Config {
       provider?: string;     // custom/openrouter/anthropic
       baseUrl?: string;      // API endpoint
       apiKey?: string;       // API key（可选，优先用 env）
+    };
+    google?: {
+      apiKey?: string;       // GEMINI_API_KEY（可选，CLI 有 OAuth）
+      model?: string;        // 默认 'gemini-2.5-flash'
+      cliPath?: string;      // gemini CLI 路径（可选，默认 PATH 查找）
+      mode?: 'cli' | 'sdk';  // 运行模式，默认 'cli'
+      useVertex?: boolean;   // 是否使用 Vertex AI
+      project?: string;      // Vertex AI 项目 ID
+      location?: string;     // Vertex AI 区域，如 'us-central1'
     };
     defaultAgent?: string;  // 默认 'claude'
   };
@@ -107,11 +117,12 @@ export interface SessionMetadata {
   replyContext?: ReplyContext;       // Channel 预构建的回复上下文（渠道无关）
   peerId?: string;                  // 私聊时存发送者 ID，用于跨通道文件投递查 channelId
   peerName?: string;                // 私聊时存发送者名称
+  channelName?: string;             // 渠道实例名（审计/精确出站路由）
   agentSessions?: {
     codex?: string;
     gemini?: string;
   };
-  permissionMode?: string;  // 权限模式（per-session）: default | request | edit | plan | noask
+  permissionMode?: string;  // 权限模式（per-session）: auto | bypass | request | edit | plan | noask
 }
 
 export interface ReplyContext {
@@ -182,7 +193,7 @@ export interface InboundMessage {
 
 // 渠道适配器接口
 export interface ChannelAdapter {
-  readonly name: string;
+  readonly channelName: string;
   sendText(channelId: string, text: string, context?: ReplyContext): Promise<void>;
   sendFile?(channelId: string, filePath: string, context?: ReplyContext): Promise<void>;
   sendImage?(channelId: string, png: Buffer, context?: ReplyContext): Promise<void>;
@@ -196,7 +207,8 @@ export interface ChannelAdapter {
 
 // 渠道配置选项
 export interface ChannelOptions {
-  systemPromptAppend?: string;      // Feishu: [SEND_FILE:] 指令
+  channelType?: string;             // 渠道类型（第一级），多实例时与 adapter.channelName 不同
+  systemPromptAppend?: string;      // 渠道专属系统提示追加
   fileMarkerPattern?: RegExp;       // Feishu: /\[SEND_FILE:([^\]]+)\]/g
   supportsImages?: boolean;         // Feishu: true, AUN: false
   flushDelay?: number;              // 渠道级 flush 间隔(秒)，覆盖全局 config.flushDelay

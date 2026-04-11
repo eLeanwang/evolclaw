@@ -1,7 +1,7 @@
 import { query, forkSession as sdkForkSession } from '@anthropic-ai/claude-agent-sdk';
 import { ensureDir, resolveAnthropicConfig } from '../config.js';
 import type { Config } from '../types.js';
-import type { PermissionGateway } from '../core/permission.js';
+import type { PermissionGateway, PermissionDecision } from '../core/permission.js';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
@@ -93,12 +93,14 @@ class MessageStream {
 // ── 标准事件流（Gateway 消费的统一事件类型）──
 export type AgentEvent =
   | { type: 'text'; text: string }
+  | { type: 'status'; subtype: string; message: string }
   | { type: 'tool_use'; name: string; input: any }
   | { type: 'tool_result'; name: string; result: any; isError?: boolean; error?: string }
   | { type: 'compact'; preTokens: number }
   | { type: 'task_progress'; summary?: string; toolUses?: number; durationMs?: number }
   | { type: 'session_id'; sessionId: string }
-  | { type: 'complete'; result?: string; subtype?: string; isError?: boolean; errors?: string[]; durationMs?: number; costUsd?: number }
+  | { type: 'state_changed'; state: 'idle' | 'running' | 'requires_action' }
+  | { type: 'complete'; result?: string; subtype?: string; isError?: boolean; errors?: string[]; durationMs?: number; costUsd?: number; terminalReason?: string; sessionTitle?: string }
   | { type: 'error'; error: string; errorType: 'context_too_long' | 'auth' | 'network' | 'unknown' };
 
 export interface QueryRequest {
@@ -224,7 +226,7 @@ export class AgentRunner {
   private apiKey: string;
   private model: string;
   private effort?: 'low' | 'medium' | 'high' | 'max';
-  private permissionMode: string = 'default';  // default = 全部自动放行
+  private permissionMode: string = 'auto';  // auto = AI 分类器自动判断
   private baseUrl?: string;
   private config?: Config;
   private activeSessions: Map<string, string> = new Map();
@@ -292,7 +294,8 @@ export class AgentRunner {
 
   listModes(): PermissionModeInfo[] {
     return [
-      { key: 'default', nameZh: '默认', description: '全部自动放行', available: true },
+      { key: 'auto', nameZh: '自动', description: 'AI 分类器自动判断（推荐）', available: true },
+      { key: 'bypass', nameZh: '放行', description: '全部自动放行', available: true },
       { key: 'request', nameZh: '审批', description: '部分自动，部分询问', available: true },
       { key: 'edit', nameZh: '编辑', description: '自动接受编辑，其他询问', available: true },
       { key: 'plan', nameZh: '规划', description: '只规划不执行', available: true },
@@ -308,15 +311,16 @@ export class AgentRunner {
     this.sendPromptFn = fn;
   }
 
-  private toSdkPermissionMode(): 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan' | 'dontAsk' {
-    const map: Record<string, 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan' | 'dontAsk'> = {
-      'default': 'default',   // 全部自动放行，靠 canUseTool 一律 allow 实现
+  private toSdkPermissionMode(): 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan' | 'dontAsk' | 'auto' {
+    const map: Record<string, 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan' | 'dontAsk' | 'auto'> = {
+      'auto': 'auto',         // AI 分类器自动判断
+      'bypass': 'default',    // 全部自动放行（通过 canUseTool 一律 allow，保留 hook 安全检查）
       'request': 'default',   // 部分自动，部分询问
       'edit': 'acceptEdits',
       'plan': 'plan',
       'noask': 'dontAsk',
     };
-    return map[this.permissionMode] || 'default';
+    return map[this.permissionMode] || 'auto';
   }
 
   // ── Compactable 接口 ──
@@ -390,6 +394,11 @@ export class AgentRunner {
         };
       }
 
+      // system: session_state_changed → state_changed
+      if (event.type === 'system' && event.subtype === 'session_state_changed') {
+        yield { type: 'state_changed', state: event.state };
+      }
+
       // assistant: 提取 tool_use 和文本（仅无 text_delta 时提取文本）
       if (event.type === 'assistant' && event.message?.content) {
         for (const content of event.message.content) {
@@ -446,6 +455,8 @@ export class AgentRunner {
           errors: event.errors,
           durationMs: event.duration_ms,
           costUsd: event.total_cost_usd,
+          terminalReason: event.terminal_reason,
+          sessionTitle: event.session_title,
         };
       }
     }
@@ -554,6 +565,21 @@ export class AgentRunner {
       return {};
     };
 
+    // PermissionDenied Hook - auto 模式下 SDK 拒绝操作时通知用户
+    const permissionDeniedHook = async (input: any) => {
+      if (this.permissionMode === 'auto' && this.sendPromptFn) {
+        const toolName = input.tool_name || '未知工具';
+        const reason = input.reason || 'AI 判断此操作有风险';
+        const message = `⚠️ 操作已自动拦截\n工具: ${toolName}\n原因: ${reason}`;
+        try {
+          await this.sendPromptFn(message);
+        } catch (err) {
+          logger.error('[PermissionDenied] Failed to send notification:', err);
+        }
+      }
+      return {};
+    };
+
     // SDK-level canUseTool 回调：接入 PermissionGateway 的用户审批入口
     // 只在 SDK 认为此工具需要用户确认时触发（黑名单已在 PreToolUse hook 拦截）
     const canUseToolCallback = async (
@@ -561,21 +587,32 @@ export class AgentRunner {
       input: Record<string, unknown>,
       options: { signal: AbortSignal; title?: string; description?: string; decisionReason?: string; toolUseID: string; [key: string]: any }
     ) => {
-      // default 模式：一律 allow（替代有缺陷的 bypassPermissions）
-      if (this.permissionMode === 'default') {
-        return { behavior: 'allow' as const, updatedInput: input };
+      // bypass 模式：一律 allow
+      if (this.permissionMode === 'bypass') {
+        return { behavior: 'allow' as const, updatedInput: input, decisionClassification: 'user_permanent' as const };
+      }
+
+      // auto 模式：SDK 内置分类器自动判断，正常情况下不会触发 canUseTool 回调。
+      // 防御性兜底：确保即使 SDK 边界场景或版本变化意外调用了此回调，也不会阻塞流程。
+      if (this.permissionMode === 'auto') {
+        return { behavior: 'allow' as const, updatedInput: input, decisionClassification: 'user_permanent' as const };
       }
 
       // 如果 PermissionGateway 未设置（如测试环境），回退到一律 allow
       if (!this.permissionGateway || !this.sendPromptFn) {
-        return { behavior: 'allow' as const, updatedInput: input };
+        return { behavior: 'allow' as const, updatedInput: input, decisionClassification: 'user_permanent' as const };
+      }
+
+      // always-allow 缓存命中：直接放行
+      if (this.permissionGateway.isAlwaysAllowed(toolName)) {
+        return { behavior: 'allow' as const, updatedInput: input, decisionClassification: 'user_permanent' as const };
       }
 
       const summary = options.title
         || options.description
         || summarizeToolInput(toolName, input);
 
-      const approved = await this.permissionGateway.requestPermission(
+      const decision: PermissionDecision = await this.permissionGateway.requestPermission(
         sessionId,
         toolName,
         input,
@@ -584,13 +621,19 @@ export class AgentRunner {
         options.decisionReason
       );
 
-      return approved
-        ? { behavior: 'allow' as const, updatedInput: input }
-        : { behavior: 'deny' as const, message: '用户拒绝或审批超时' };
+      if (decision === 'deny') {
+        return { behavior: 'deny' as const, message: '用户拒绝或审批超时', decisionClassification: 'user_reject' as const };
+      }
+      return {
+        behavior: 'allow' as const,
+        updatedInput: input,
+        decisionClassification: decision === 'always' ? 'user_permanent' as const : 'user_temporary' as const
+      };
     };
 
     const useSettingSources = this.config?.agents?.anthropic?.useSettingSources !== false;
     const enableSummaries = this.config?.agents?.anthropic?.agentProgressSummaries !== false;
+    const excludeDynamic = this.config?.agents?.anthropic?.excludeDynamicSections === true;
 
     // 公共 options（新旧模式共用）
     const sdkPermissionMode = this.toSdkPermissionMode();
@@ -599,12 +642,15 @@ export class AgentRunner {
       cwd: projectPath,
       model: this.model,
       ...(this.effort ? { effort: this.effort } : {}),
+      autoCompactWindow: 200000,
+      advisorModel: 'haiku',
       canUseTool: canUseToolCallback,
       permissionMode: sdkPermissionMode,
       persistSession: true,
       hooks: {
         PreCompact: [{ matcher: '.*', hooks: [preCompactHook] }],
-        PreToolUse: [{ matcher: '.*', hooks: [preToolUseHook] }]
+        PreToolUse: [{ matcher: '.*', hooks: [preToolUseHook] }],
+        PermissionDenied: [{ matcher: '.*', hooks: [permissionDeniedHook] }]
       },
       ...(enableSummaries ? { agentProgressSummaries: true } : {}),
       stderr: (msg: string) => {
@@ -621,13 +667,14 @@ export class AgentRunner {
       if (useSettingSources) {
         // 新方式：SDK 自动加载 CLAUDE.md 和 MCP 配置
         return query({
-          prompt: promptInput,
+          prompt: promptInput as any,
           options: {
             ...commonOptions,
             settingSources: ['project', 'user'],
             systemPrompt: {
               type: 'preset' as const,
               preset: 'claude_code' as const,
+              ...(excludeDynamic ? { excludeDynamicSections: true } : {}),
               ...(systemPromptAppend ? { append: systemPromptAppend } : {})
             },
             ...(resumeSessionId ? { resume: resumeSessionId } : {}),
@@ -666,7 +713,7 @@ export class AgentRunner {
         const fullAppend = [...projectClaudeMds, globalClaudeMd, systemPromptAppend].filter(Boolean).join('\n\n');
 
         return query({
-          prompt: promptInput,
+          prompt: promptInput as any,
           options: {
             ...commonOptions,
             ...(resumeSessionId ? { resume: resumeSessionId } : {}),
@@ -683,35 +730,24 @@ export class AgentRunner {
       }
     };
 
-    let lastError: any;
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try {
-        let sdkStream;
-        if (images && images.length > 0) {
-          logger.debug('[AgentRunner] Creating query with images, images:', images.length);
-          logger.debug('[AgentRunner] Skipping resume for image message to avoid history conflict');
-          const stream = new MessageStream();
-          stream.push(prompt, images);
-          stream.end();
-          sdkStream = createQuery(stream);
-        } else {
-          logger.debug('[AgentRunner] Creating query with text only, agentSessionId:', initialClaudeSessionId);
-          sdkStream = createQuery(prompt, agentSessionId);
-        }
-        // 保存 interrupt 能力（不写 activeStreams，由 registerStream 管理活跃状态）
-        if ('interrupt' in sdkStream && typeof (sdkStream as any).interrupt === 'function') {
-          this.interruptFns.set(sessionId, () => (sdkStream as any).interrupt());
-        }
-        // 返回标准 AgentEvent 流
-        return this.transformStream(sdkStream, sessionId);
-      } catch (error) {
-        lastError = error;
-        if (attempt < 2) {
-          await new Promise(resolve => setTimeout(resolve, (attempt + 1) * 1000));
-        }
-      }
+    let sdkStream;
+    if (images && images.length > 0) {
+      logger.debug('[AgentRunner] Creating query with images, images:', images.length);
+      logger.debug('[AgentRunner] Skipping resume for image message to avoid history conflict');
+      const stream = new MessageStream();
+      stream.push(prompt, images);
+      stream.end();
+      sdkStream = createQuery(stream);
+    } else {
+      logger.debug('[AgentRunner] Creating query with text only, agentSessionId:', initialClaudeSessionId);
+      sdkStream = createQuery(prompt, agentSessionId);
     }
-    throw lastError;
+    // 保存 interrupt 能力（不写 activeStreams，由 registerStream 管理活跃状态）
+    if ('interrupt' in sdkStream && typeof (sdkStream as any).interrupt === 'function') {
+      this.interruptFns.set(sessionId, () => (sdkStream as any).interrupt());
+    }
+    // 返回标准 AgentEvent 流（重试由 MessageProcessor 层负责）
+    return this.transformStream(sdkStream, sessionId);
   }
 
   async interrupt(sessionId: string): Promise<void> {

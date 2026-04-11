@@ -6,7 +6,7 @@ import { StreamFlusher } from '../utils/stream-flusher.js';
 import { MessageCache } from '../utils/message-cache.js';
 import { StreamIdleMonitor } from '../utils/stream-idle-monitor.js';
 import { logger } from '../utils/logger.js';
-import { getErrorMessage, classifyError, ErrorType, ERROR_PREFIX, isInfraError, prefixErrorType } from '../utils/error-utils.js';
+import { getErrorMessage, classifyError, ErrorType, ERROR_PREFIX, isInfraError, prefixErrorType, isRetryableError } from '../utils/error-utils.js';
 import { EventBus } from './event-bus.js';
 import { summarizeToolInput } from '../utils/permission-utils.js';
 import type { Message, Config, Session, ChannelAdapter, ChannelOptions, ChannelPolicy, CommandHandler } from '../types.js';
@@ -18,6 +18,7 @@ import { getOwner } from '../config.js';
  */
 export class MessageProcessor {
   private channels = new Map<string, { adapter: ChannelAdapter; options?: ChannelOptions; policy: ChannelPolicy }>();
+  private channelTypeMap = new Map<string, string>();  // channelType → channelName（首个实例）
   private currentFlusher?: StreamFlusher;
   private shouldSuppressActivities = false;
   private agentMap: Map<string, AgentRunnerFull>;
@@ -72,21 +73,26 @@ export class MessageProcessor {
    * 注册渠道适配器
    */
   registerChannel(adapter: ChannelAdapter, policy: ChannelPolicy, options?: ChannelOptions): void {
-    this.channels.set(adapter.name, { adapter, options, policy });
+    this.channels.set(adapter.channelName, { adapter, options, policy });
+    // 维护 channelType → channelName 映射（首个实例优先）
+    const type = options?.channelType || adapter.channelName;
+    if (!this.channelTypeMap.has(type)) {
+      this.channelTypeMap.set(type, adapter.channelName);
+    }
   }
 
   /**
-   * 获取渠道适配器
+   * 获取渠道适配器（支持实例名和 channelType）
    */
   getAdapter(channelName: string): ChannelAdapter | undefined {
-    return this.channels.get(channelName)?.adapter;
+    return this.resolveChannelInfo(channelName)?.adapter;
   }
 
   /**
-   * 获取渠道信息（含 policy）
+   * 获取渠道信息（含 policy，支持实例名和 channelType）
    */
   getChannelInfo(channelName: string): { adapter: ChannelAdapter; options?: ChannelOptions; policy: ChannelPolicy } | undefined {
-    return this.channels.get(channelName);
+    return this.resolveChannelInfo(channelName);
   }
 
   /**
@@ -102,21 +108,37 @@ export class MessageProcessor {
   }
 
   /**
+   * 根据 channel 标识查找渠道信息
+   * 先按实例名精确匹配，再按 channelType 映射到实例名
+   */
+  private resolveChannelInfo(channel: string): { adapter: ChannelAdapter; options?: ChannelOptions; policy: ChannelPolicy } | undefined {
+    // 1. 精确匹配实例名
+    let info = this.channels.get(channel);
+    if (info) return info;
+    // 2. 按 channelType 查找（message.channel 现在存渠道类型）
+    const instanceName = this.channelTypeMap.get(channel);
+    if (instanceName) info = this.channels.get(instanceName);
+    return info;
+  }
+
+  /**
    * 处理消息（主入口）
    */
   async processMessage(message: Message): Promise<void> {
     const idleMs = (this.config.idleMonitor?.timeout ?? 120) * 1000;
-    const channelInfo = this.channels.get(message.channel);
+
+    // 先解析会话，再优先用 session.metadata.channelName 精确定位实例级 adapter
+    // message.channel 现在统一是 channelType，直接用它会在多实例同通道下退化为“首个实例”路由
+    const { session, absoluteProjectPath } = await this.resolveSession(message);
+    const channelKey = session.metadata?.channelName || message.channel;
+    const channelInfo = this.resolveChannelInfo(channelKey);
 
     if (!channelInfo) {
-      logger.error(`[MessageProcessor] Unknown channel: ${message.channel}`);
+      logger.error(`[MessageProcessor] Unknown channel: ${channelKey}`);
       return;
     }
 
     const { policy } = channelInfo;
-
-    // 解析会话（唯一的 getOrCreateSession 调用点）
-    const { session, absoluteProjectPath } = await this.resolveSession(message);
     const streamKey = session.id;
     const chatType = message.chatType || 'private';
     const identityRole = session.identity?.role || 'anonymous';
@@ -204,6 +226,9 @@ export class MessageProcessor {
           // 上下文过长是可恢复错误，不累计触发安全模式
           if (errorType === ErrorType.CONTEXT_TOO_LONG) {
             logger.info(`[MessageProcessor] Context too long error, skipping safe mode accumulation`);
+          // 认证错误（401 / Invalid API Key）不是会话问题，安全模式无法修复，不累计
+          } else if (errorType === ErrorType.AUTH_ERROR) {
+            logger.info(`[MessageProcessor] Auth error (invalid API key), skipping safe mode accumulation`);
           } else if (!policy.accumulateErrors(chatType, identityRole)) {
             logger.info(`[MessageProcessor] Non-accumulating error (chatType=${chatType}, identity=${identityRole}), skipping safe mode accumulation`);
           } else {
@@ -274,10 +299,11 @@ ${suggestions}`,
 
   private async _processMessageInternal(message: Message, session: Session, absoluteProjectPath: string, resetTimer: (eventType?: string, toolName?: string) => void, shouldSuppress: () => boolean): Promise<void> {
     const messageId = `${message.channel}_${message.channelId}_${message.timestamp || Date.now()}`;
-    const channelInfo = this.channels.get(message.channel);
+    const channelKey = session.metadata?.channelName || message.channel;
+    const channelInfo = this.resolveChannelInfo(channelKey);
 
     if (!channelInfo) {
-      logger.error(`[MessageProcessor] Unknown channel: ${message.channel}`);
+      logger.error(`[MessageProcessor] Unknown channel: ${channelKey}`);
       return;
     }
 
@@ -331,7 +357,7 @@ ${suggestions}`,
 
           if (!isCurrentlyBackground) {
             const opts: { title?: string; replyToMessageId?: string; mentionUserIds?: string[]; replyInThread?: boolean } = {};
-            if (isFinal) opts.title = '\u6700\u7ec8\u56de\u590d:';
+            if (isFinal) opts.title = '\u2713 \u6700\u7ec8\u56de\u590d:';
             // 话题会话：使用 Channel 预构建的 replyContext（确保消息进入话题）
             const replyCtx = session.metadata?.replyContext;
             if (replyCtx) {
@@ -360,8 +386,9 @@ ${suggestions}`,
         await adapter.sendText(message.channelId, text, this.getReplyContext(session));
       });
 
-      // 设置 per-session 权限模式
-      const permissionMode = session.metadata?.permissionMode || 'default';
+      // 设置 per-session 权限模式（管理员默认 bypass，普通用户默认 auto）
+      const defaultMode = session.identity?.role === 'owner' ? 'bypass' : 'auto';
+      const permissionMode = session.metadata?.permissionMode || defaultMode;
       agent.setMode(permissionMode);
 
       // 标记会话为处理中（实时持久化，重启后可恢复）
@@ -374,18 +401,18 @@ ${suggestions}`,
         ? `【新消息插入】\n\n${message.content}\n\n【请无视之前中断继续处理】`
         : message.content;
 
-      let streamResult: { isError: boolean; subtype?: string; errors?: string[]; lastReplyText: string; fullText: string } = { isError: false, lastReplyText: '', fullText: '' };
+      let streamResult: { isError: boolean; subtype?: string; errors?: string[]; terminalReason?: string; lastReplyText: string; fullText: string; hasReceivedText: boolean } = { isError: false, lastReplyText: '', fullText: '', hasReceivedText: false };
 
       try {
         // 动态构建运行时上下文提示
         const contextParts: string[] = [];
+        const currentChannelType = options?.channelType || message.channel;
 
         // 1. 当前环境信息
         const peerLabel = session.identity?.role || 'unknown';
-        const sessionName = session.name || '默认会话';
         const peerName = message.peerName || session.metadata?.peerName;
         const envParts = [
-          `会话通道: ${message.channel}`,
+          `会话通道: ${currentChannelType}`,
           `当前项目: ${path.basename(absoluteProjectPath)}`,
         ];
         if (session.name) envParts.push(`会话名称: ${session.name}`);
@@ -395,16 +422,19 @@ ${suggestions}`,
         if (session.agentId && session.agentId !== 'claude') envParts.push(`当前Agent: ${session.agentId}`);
         contextParts.push(`[当前环境] ${envParts.join(' | ')}`);
 
-        // 2. 文件发送能力
-        const fileChannels = [...this.channels.entries()]
-          .filter(([, info]) => info.adapter.sendFile)
-          .map(([name]) => name);
-        const currentCanSend = fileChannels.includes(message.channel);
-        const crossChannels = fileChannels.filter(n => n !== message.channel);
-        if (currentCanSend || crossChannels.length > 0) {
+        // 2. 文件发送能力（按 channelType 去重，提示词只展示第一级通道名）
+        const fileChannelTypes = new Set<string>();
+        const currentCanSend = !!channelInfo.adapter.sendFile;
+        for (const [, info] of this.channels) {
+          if (info.adapter.sendFile) {
+            fileChannelTypes.add(info.options?.channelType || info.adapter.channelName);
+          }
+        }
+        const crossChannelTypes = [...fileChannelTypes].filter(t => t !== currentChannelType);
+        if (currentCanSend || crossChannelTypes.length > 0) {
           const hints: string[] = [];
           if (currentCanSend) hints.push(`[SEND_FILE:路径] 发送文件到当前通道`);
-          if (crossChannels.length > 0) hints.push(`[SEND_FILE:${crossChannels[0]}:路径] 发送文件到指定通道（可用: ${crossChannels.join('/')}）`);
+          if (crossChannelTypes.length > 0) hints.push(`[SEND_FILE:${crossChannelTypes[0]}:路径] 发送文件到指定通道（可用: ${crossChannelTypes.join('/')}）`);
           contextParts.push(hints.join('，'));
         }
 
@@ -419,24 +449,46 @@ ${suggestions}`,
 
         const effectiveSystemPrompt = [options?.systemPromptAppend, ...contextParts].filter(Boolean).join('\n') || undefined;
 
-        const stream = await agent.runQuery(
-          session.id,
-          effectivePrompt,
-          absoluteProjectPath,
-          session.agentSessionId,
-          message.images,
-          effectiveSystemPrompt,
-          this.sessionManager
-        );
-        agent.registerStream(streamKey, stream);
+        // 可重试错误（403/429/5xx）指数退避重试，最多 3 次
+        const MAX_RETRIES = 3;
+        for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+          let streamRegistered = false;
+          try {
+            const stream = await agent.runQuery(
+              session.id,
+              effectivePrompt,
+              absoluteProjectPath,
+              session.agentSessionId,
+              message.images,
+              effectiveSystemPrompt,
+              this.sessionManager
+            );
+            agent.registerStream(streamKey, stream);
+            streamRegistered = true;
 
-        streamResult = await this.processEventStream(
-          stream,
-          session,
-          flusher,
-          resetTimer,
-          shouldSuppress
-        );
+            streamResult = await this.processEventStream(
+              stream,
+              session,
+              flusher,
+              resetTimer,
+              shouldSuppress
+            );
+            break; // 成功，跳出重试循环
+          } catch (retryError) {
+            if (streamRegistered) {
+              agent.cleanupStream(streamKey);
+            }
+            if (attempt < MAX_RETRIES && isRetryableError(retryError)) {
+              const delay = Math.pow(2, attempt) * 1000; // 2s, 4s
+              logger.warn(`[MessageProcessor] Retryable error (attempt ${attempt}/${MAX_RETRIES}), retrying in ${delay}ms:`, retryError);
+              flusher.addActivity(`⚠️ API 暂时不可用，${delay / 1000}秒后重试 (${attempt}/${MAX_RETRIES})...`);
+              await flusher.flush();
+              await new Promise(resolve => setTimeout(resolve, delay));
+              continue;
+            }
+            throw retryError; // 不可重试或已耗尽重试次数
+          }
+        }
       } catch (error) {
         if (classifyError(error) === ErrorType.CONTEXT_TOO_LONG && session.agentSessionId && hasCompact(agent)) {
           // 尝试 compact 压缩会话
@@ -488,59 +540,88 @@ ${suggestions}`,
       for (const match of fileMatches) {
         // 兼容旧格式 (1组) 和新格式 (2组)
         const hasChannelGroup = match.length >= 3;
-        const targetChannelName = hasChannelGroup ? (match[1] ?? message.channel) : message.channel;
+        const targetSpec = hasChannelGroup ? (match[1] ?? undefined) : undefined;
         const filePath = (hasChannelGroup ? match[2] : match[1]).trim();
 
         if (this.isPlaceholderPath(filePath)) {
-          logger.info(`[${adapter.name}] Skipped placeholder file marker: [SEND_FILE:${filePath}]`);
+          logger.info(`[${adapter.channelName}] Skipped placeholder file marker: [SEND_FILE:${filePath}]`);
           continue;
         }
 
+        // 解析目标：按实例名匹配，再按 channelType 映射
+        let targetInfo = targetSpec ? this.channels.get(targetSpec) : channelInfo;
+        let targetLabel = targetSpec || message.channel;
+        if (targetSpec && !targetInfo) {
+          // 按 channelType 查找首个匹配的实例
+          const instanceName = this.channelTypeMap.get(targetSpec);
+          if (instanceName) targetInfo = this.channels.get(instanceName);
+        }
+        const currentChannelType = channelInfo.options?.channelType || adapter.channelName;
+        const isCrossChannel = targetSpec && targetSpec !== message.channel
+          && targetSpec !== currentChannelType;
+
         // 跨通道仅限 owner
-        if (targetChannelName !== message.channel && session.identity?.role !== 'owner') {
+        if (isCrossChannel && session.identity?.role !== 'owner') {
           await adapter.sendText(message.channelId, `\u274c 跨通道发送仅限管理员`, this.getReplyContext(session));
           continue;
         }
 
         const resolvedPath = this.resolveFilePath(filePath, absoluteProjectPath);
         if (!fs.existsSync(resolvedPath)) {
-          logger.warn(`[${adapter.name}] File not found: ${resolvedPath}`);
+          logger.warn(`[${adapter.channelName}] File not found: ${resolvedPath}`);
           await adapter.sendText(message.channelId, `\u26a0\ufe0f 文件未找到: ${filePath}`, this.getReplyContext(session));
           continue;
         }
 
         // 找目标 adapter
-        const targetInfo = this.channels.get(targetChannelName);
         if (!targetInfo) {
-          await adapter.sendText(message.channelId, `\u274c 通道 ${targetChannelName} 未启用或不存在`, this.getReplyContext(session));
+          await adapter.sendText(message.channelId, `\u274c 通道 ${targetLabel} 未启用或不存在`, this.getReplyContext(session));
           continue;
         }
         if (!targetInfo.adapter.sendFile) {
-          await adapter.sendText(message.channelId, `\u274c 通道 ${targetChannelName} 不支持文件发送`, this.getReplyContext(session));
+          await adapter.sendText(message.channelId, `\u274c 通道 ${targetLabel} 不支持文件发送`, this.getReplyContext(session));
           continue;
         }
 
         // 找目标 channelId
         let targetChannelId = message.channelId;
-        if (targetChannelName !== message.channel) {
-          const ownerPeerId = getOwner(this.config, targetChannelName);
-          targetChannelId = ownerPeerId ? (this.sessionManager.getOwnerChatId(targetChannelName, ownerPeerId) ?? '') : '';
+        if (isCrossChannel) {
+          const targetAdapterName = targetInfo.adapter.channelName;
+          const targetChannelType = targetInfo.options?.channelType || targetAdapterName;
+          const ownerPeerId = getOwner(this.config, targetAdapterName);
+          targetChannelId = ownerPeerId ? (this.sessionManager.getOwnerChatId(targetChannelType, ownerPeerId) ?? '') : '';
           if (!targetChannelId) {
-            await adapter.sendText(message.channelId, `\u274c 未找到 ${targetChannelName} 的私聊会话，请先在该通道发送一条消息`, this.getReplyContext(session));
+            await adapter.sendText(message.channelId, `\u274c 未找到 ${targetLabel} 的私聊会话，请先在该通道发送一条消息`, this.getReplyContext(session));
             continue;
           }
         }
 
-        logger.info(`[${adapter.name}] Sending file via ${targetChannelName}: ${resolvedPath}`);
+        logger.info(`[${adapter.channelName}] Sending file via ${targetInfo.adapter.channelName}: ${resolvedPath}`);
         try {
           await targetInfo.adapter.sendFile(targetChannelId, resolvedPath, this.getReplyContext(session));
-          this.eventBus.publish({ type: 'agent:file-sent', sessionId: session.id, filePath: resolvedPath, channel: targetChannelName });
-          if (targetChannelName !== message.channel) {
-            await adapter.sendText(message.channelId, `\ud83d\udcce 文件已通过 ${targetChannelName} 发送`, this.getReplyContext(session));
+          this.eventBus.publish({ type: 'agent:file-sent', sessionId: session.id, filePath: resolvedPath, channel: targetInfo.adapter.channelName });
+          if (isCrossChannel) {
+            await adapter.sendText(message.channelId, `\ud83d\udcce 文件已通过 ${targetLabel} 发送`, this.getReplyContext(session));
           }
         } catch (error) {
-          logger.error(`[${adapter.name}] Failed to send file: ${resolvedPath}`, error);
+          logger.error(`[${adapter.channelName}] Failed to send file: ${resolvedPath}`, error);
           await adapter.sendText(message.channelId, `\u274c 文件发送失败: ${filePath}`, this.getReplyContext(session));
+        }
+      }
+
+      // 最终回复文本添加到 flusher（统一在流结束后处理，避免多 complete 事件重复发送）
+      // suppressed 模式：中间流式文本未推送，使用最后一轮回复（回退到全文）
+      // 非 suppressed 且无流式文本：同上
+      // 非 suppressed 且有流式文本：已经逐步推送过了，不重复添加
+      //   但如果 flusher 既未发送过内容也没有 pending 内容（如 text 事件全为空），仍需兜底
+      const finalReplyText = streamResult.lastReplyText || streamResult.fullText;
+      // Hermes bridge 在 resume 无实际回复时返回字面量 "(empty)"，过滤掉
+      const isPlaceholder = finalReplyText === '(empty)';
+      if (finalReplyText && !isPlaceholder) {
+        if (shouldSuppress()) {
+          flusher.addText(finalReplyText);
+        } else if (!streamResult.hasReceivedText || (!flusher.hasSentContent() && !flusher.hasContent())) {
+          flusher.addText(finalReplyText);
         }
       }
 
@@ -575,11 +656,12 @@ ${suggestions}`,
           type: 'message:error',
           sessionId: session.id,
           error: errorSummary,
-          errorType
+          errorType,
+          terminalReason: streamResult.terminalReason
         });
 
         // 仅系统级 subtype 累计安全模式（权限拒绝、max turns 等用户操作不累计）
-        if (isInfraError(rawSubtype)) {
+        if (isInfraError(rawSubtype, streamResult.terminalReason)) {
           const chatType = message.chatType || 'private';
           const identityRole = session.identity?.role || 'anonymous';
           const safeModeThreshold = this.config.idleMonitor?.safeModeThreshold ?? 3;
@@ -595,7 +677,8 @@ ${suggestions}`,
           sessionId: session.id,
           dir: 'inbound',
           status: 'failed',
-          error: errorSummary
+          error: errorSummary,
+          terminalReason: streamResult.terminalReason
         });
       } else {
         // 真正的成功
@@ -607,6 +690,7 @@ ${suggestions}`,
           sessionId: session.id,
           channel: message.channel,
           channelId: message.channelId,
+          terminalReason: streamResult.terminalReason,
           finalText: streamResult.lastReplyText || undefined,
           durationMs: Date.now() - startTime,
           timestamp: Date.now()
@@ -644,10 +728,16 @@ ${suggestions}`,
 
       // 区分超时 / 中断 / 错误
       const errType = classifyError(error);
+      const interruptReason = this.interruptedSessions.get(session.id);
+      const isUserInterrupt = interruptReason === 'new_message' || interruptReason === 'stop';
       const procStatus = errType === ErrorType.SDK_TIMEOUT ? 'timeout' as const
         : errType === ErrorType.STREAM_ERROR ? 'interrupted' as const
         : 'error' as const;
-      try { adapter.sendProcessingStatus?.(message.channelId, procStatus, session.id, this.getReplyContext(session)); } catch {}
+
+      // 用户主动中断（新消息打断 或 /stop 命令）时静默，不发送中断/错误提示
+      if (!isUserInterrupt) {
+        try { adapter.sendProcessingStatus?.(message.channelId, procStatus, session.id, this.getReplyContext(session)); } catch {}
+      }
 
       logger.error(`[${message.channel}] Error:`, error);
 
@@ -675,10 +765,16 @@ ${suggestions}`,
       }
 
       // 发送用户友好的错误消息（SDK_TIMEOUT 已在 kill 级别发过提示，跳过）
+      // 用户主动中断（新消息打断 或 /stop 命令）时静默，不发送错误提示
+      // processEventStream 已通过 flusher 发过错误时也跳过
       if (error instanceof Error && error.message === 'SDK_TIMEOUT') {
         logger.info(`[MessageProcessor] SDK_TIMEOUT error, skip sending duplicate message`);
+      } else if (isUserInterrupt) {
+        logger.info(`[MessageProcessor] User interrupt by new_message, skip sending error message`);
+      } else if ((error as any)?._errorAlreadySent) {
+        logger.info(`[MessageProcessor] Error already sent via flusher, skip sending duplicate message`);
       } else {
-        const userMessage = getErrorMessage(error);
+        const userMessage = getErrorMessage(error, undefined);
         // 获取 session 用于话题回复（如果 resolveSession 已执行）
         let sendOpts: { replyToMessageId?: string; replyInThread?: boolean } | undefined;
         try {
@@ -736,10 +832,10 @@ ${suggestions}`,
     flusher: StreamFlusher,
     resetTimer: (eventType?: string, toolName?: string) => void,
     shouldSuppress: () => boolean
-  ): Promise<{ isError: boolean; subtype?: string; errors?: string[]; lastReplyText: string; fullText: string }> {
+  ): Promise<{ isError: boolean; subtype?: string; errors?: string[]; terminalReason?: string; lastReplyText: string; fullText: string; hasReceivedText: boolean }> {
     let hasReceivedText = false;
     let hasErrorResult = false;  // 是否已有 tool_result/error 事件输出过错误
-    let completeResult: { isError: boolean; subtype?: string; errors?: string[]; lastReplyText: string; fullText: string } = { isError: false, lastReplyText: '', fullText: '' };
+    let completeResult: { isError: boolean; subtype?: string; errors?: string[]; terminalReason?: string; lastReplyText: string; fullText: string; hasReceivedText: boolean } = { isError: false, lastReplyText: '', fullText: '', hasReceivedText: false };
 
     // 追踪最后一轮 assistant 回复文本（tool_use 之后的纯文本）
     let lastReplyText = '';
@@ -756,6 +852,26 @@ ${suggestions}`,
       // session_id 已在 AgentRunner.transformStream 中处理，此处仅记录
       if (event.type === 'session_id') {
         logger.info(`[MessageProcessor] Session ID updated: ${event.sessionId} for session: ${session.id}`);
+        continue;
+      }
+
+      // session 状态变更（idle/running/requires_action）
+      if (event.type === 'state_changed') {
+        logger.info(`[MessageProcessor] Session state: ${event.state} for session: ${session.id}`);
+        this.eventBus.publish({ type: 'agent:state-changed', sessionId: session.id, state: event.state });
+        continue;
+      }
+
+      // agent 状态通知（仅事件，不直出给用户）
+      if (event.type === 'status') {
+        logger.info(`[MessageProcessor] Agent status: ${event.subtype}: ${event.message}`);
+        this.eventBus.publish({
+          type: 'agent:status',
+          sessionId: session.id,
+          subtype: event.subtype,
+          message: event.message,
+          timestamp: Date.now()
+        });
         continue;
       }
 
@@ -839,37 +955,43 @@ ${suggestions}`,
 
           if (!hasErrorResult && !shouldSuppress()) {
             hasErrorResult = true;
-            flusher.addActivity(`\u26a0\ufe0f ${event.error}`);
+            flusher.addActivity(`\u274c ${event.error}`);
           }
         }
 
         // 完成事件
+        // SDK 可能产生多个 complete 事件（如 subagent 或 auto-compact 二次查询），
+        // 仅记录状态，最终 flush(true) 在流结束后统一执行
         if (event.type === 'complete') {
           logger.debug(`[MessageProcessor] complete event: hasReceivedText=${hasReceivedText}, isError=${event.isError}, shouldSuppress=${shouldSuppress()}`);
 
-          // 记录完成状态 + 最后一轮回复文本
-          completeResult = { isError: !!event.isError, subtype: event.subtype, errors: event.errors, lastReplyText, fullText: event.result || '' };
+          // 自动回填会话名称
+          if (event.sessionTitle && session.name === '默认会话') {
+            await this.sessionManager.renameSession(session.id, event.sessionTitle);
+            logger.info(`[MessageProcessor] Auto-filled session name: ${event.sessionTitle}`);
+          }
+
+          // 记录完成状态 + 最后一轮回复文本（后续 complete 覆盖前序）
+          completeResult = { isError: !!event.isError, subtype: event.subtype, errors: event.errors, terminalReason: event.terminalReason, lastReplyText, fullText: event.result || '', hasReceivedText };
 
           // 失败且无前置错误输出：显示 errors 摘要
-          if (event.isError && !hasErrorResult && !shouldSuppress()) {
+          // 但用户主动中断（新消息打断 或 /stop 命令）时不显示错误提示
+          const interruptReason = this.interruptedSessions.get(session.id);
+          const isUserInterrupt = interruptReason === 'new_message' || interruptReason === 'stop';
+          if (event.isError && !hasErrorResult && !shouldSuppress() && !isUserInterrupt) {
             const errorSummary = event.errors?.join('; ') || '\u4efb\u52a1\u6267\u884c\u5931\u8d25';
-            flusher.addActivity(`\u26a0\ufe0f ${errorSummary}`);
+            // 使用 terminalReason 提供更友好的错误提示
+            const userFriendlyMessage = event.terminalReason
+              ? getErrorMessage(null, event.terminalReason)
+              : `\u274c ${errorSummary}`;
+            flusher.addActivity(userFriendlyMessage);
           }
 
-          // 最终回复文本
-          // suppressed 模式：中间流式文本未推送，使用最后一轮回复（回退到全文）
-          // 非 suppressed 且无流式文本：同上
-          // 非 suppressed 且有流式文本：已经逐步推送过了，不重复添加
-          const finalText = lastReplyText || event.result;
-          if (finalText) {
-            if (shouldSuppress()) {
-              flusher.addText(finalText);
-            } else if (!hasReceivedText) {
-              flusher.addText(finalText);
-            }
+          // 中间 complete：flush 掉已有 activities（不带 isFinal），让中间结果及时显示
+          // 最终文本留给流结束后的统一 flush(true)
+          if (flusher.hasContent()) {
+            await flusher.flushActivitiesOnly();
           }
-
-          await flusher.flush(true);
         }
 
         continue;
@@ -885,8 +1007,14 @@ ${suggestions}`,
         continue;
       }
 
+      // 自动回填会话名称
+      if (event.sessionTitle && session.name === '默认会话') {
+        await this.sessionManager.renameSession(session.id, event.sessionTitle);
+        logger.info(`[MessageProcessor] Auto-filled session name: ${event.sessionTitle}`);
+      }
+
       // 记录完成状态
-      completeResult = { isError: !!event.isError, subtype: event.subtype, errors: event.errors, lastReplyText, fullText: event.result || '' };
+      completeResult = { isError: !!event.isError, subtype: event.subtype, errors: event.errors, terminalReason: event.terminalReason, lastReplyText, fullText: event.result || '', hasReceivedText };
 
       if (event.subtype === 'success') {
         this.messageCache.addEvent(session.id, {
@@ -927,14 +1055,24 @@ ${suggestions}`,
         });
       }
     }
+
     } catch (error) {
       logger.error('[MessageProcessor] Stream processing error:', error);
       if (error instanceof Error && error.message.includes('process exited')) {
         flusher.addActivity('\u274c Claude Code \u8fdb\u7a0b\u5f02\u5e38\u9000\u51fa\uff0c\u8bf7\u91cd\u8bd5');
       }
+      // Flush any pending error activities before re-throwing,
+      // and mark the error so outer catch won't send a duplicate message
+      if (hasErrorResult || flusher.hasContent()) {
+        try { await flusher.flush(true); } catch {}
+        if (error instanceof Error) {
+          (error as any)._errorAlreadySent = true;
+        }
+      }
       throw error;
     }
 
+    completeResult.hasReceivedText = hasReceivedText;
     return completeResult;
   }
 

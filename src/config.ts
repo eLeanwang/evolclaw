@@ -4,6 +4,7 @@ import os from 'os';
 import { Config } from './types.js';
 import { logger } from './utils/logger.js';
 import { resolvePaths, getPackageRoot as _getPackageRoot } from './paths.js';
+import { commandExists } from './utils/cross-platform.js';
 
 // Re-export path utilities for backward compatibility
 export { resolveRoot, resolvePaths, ensureDataDirs, getPackageRoot } from './paths.js';
@@ -140,6 +141,46 @@ export function resolveOpenaiConfig(config: Config): OpenaiResolved {
   return { apiKey, baseUrl, model, reasoning };
 }
 
+// ── Google (Gemini) config ──
+
+export interface GoogleResolved {
+  cliPath: string;    // gemini CLI 可执行文件路径
+  model: string;
+  apiKey?: string;
+  mode: 'cli' | 'sdk';
+  useVertex?: boolean;
+  project?: string;
+  location?: string;
+}
+
+export function resolveGoogleConfig(config: Config): GoogleResolved {
+  const googleCfg = config.agents?.google;
+
+  // CLI path: config → which gemini
+  let cliPath = googleCfg?.cliPath || '';
+  if (!cliPath) {
+    cliPath = commandExists('gemini') ? 'gemini' : '';
+  }
+
+  // Model: config → default
+  const model = googleCfg?.model || 'gemini-2.5-flash';
+
+  // API key: config → env (optional, CLI has OAuth)
+  const configApiKey = googleCfg?.apiKey;
+  const isPlaceholder = !configApiKey || configApiKey.includes('your-') || configApiKey.includes('placeholder');
+  const apiKey = (isPlaceholder ? undefined : configApiKey)
+    || process.env.GEMINI_API_KEY
+    || process.env.GOOGLE_API_KEY
+    || undefined;
+
+  const mode = googleCfg?.mode || 'cli';
+  const useVertex = googleCfg?.useVertex || false;
+  const project = googleCfg?.project || process.env.GOOGLE_CLOUD_PROJECT || undefined;
+  const location = googleCfg?.location || process.env.GOOGLE_CLOUD_LOCATION || 'us-central1';
+
+  return { cliPath, model, apiKey, mode, useVertex, project, location };
+}
+
 // ── Hermes config ──
 
 export interface HermesResolved {
@@ -261,12 +302,21 @@ export function validateChannelInstanceNames(config: Config): void {
   }
 }
 
-export function getOwner(config: Config, instanceName: string): string | undefined {
+export function getOwner(config: Config, channelOrType: string): string | undefined {
   for (const type of channelTypes) {
     const raw = (config.channels as any)?.[type];
     const instances = normalizeChannelInstances(raw, type);
-    const found = instances.find((inst) => inst.name === instanceName);
+
+    // 按实例名查找
+    const found = instances.find((inst) => inst.name === channelOrType);
     if (found) return (found as any).owner;
+
+    // 按 channelType 查找：返回该类型下第一个有 owner 的实例
+    if (type === channelOrType) {
+      for (const inst of instances) {
+        if ((inst as any).owner) return (inst as any).owner;
+      }
+    }
   }
   return undefined;
 }
@@ -305,8 +355,19 @@ export function setOwner(config: Config, instanceName: string, userId: string, c
   }
 }
 
-export function isOwner(config: Config, instanceName: string, userId: string): boolean {
-  return getOwner(config, instanceName) === userId;
+export function isOwner(config: Config, channelOrType: string, userId: string): boolean {
+  // 按实例名精确匹配
+  if (getOwner(config, channelOrType) === userId) return true;
+  // 按 channelType 匹配：检查该类型下所有实例
+  for (const type of channelTypes) {
+    if (type !== channelOrType) continue;
+    const raw = (config.channels as any)?.[type];
+    const instances = normalizeChannelInstances(raw, type);
+    for (const inst of instances) {
+      if ((inst as any).owner === userId) return true;
+    }
+  }
+  return false;
 }
 
 function validateConfig(config: any): asserts config is Config {
@@ -347,7 +408,7 @@ export function ensureDir(dirPath: string): void {
 }
 
 // agents.defaultAgent → config key 映射
-const agentKeyMap: Record<string, string> = { claude: 'anthropic', codex: 'openai', hermes: 'hermes' };
+const agentKeyMap: Record<string, string> = { claude: 'anthropic', codex: 'openai', hermes: 'hermes', gemini: 'google' };
 
 /**
  * 配置结构完整性校验（不校验凭据有效性）。

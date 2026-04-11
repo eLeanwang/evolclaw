@@ -153,7 +153,7 @@ export class FeishuChannel {
 
                 if (quotedMsgType === 'text') {
                   const parsed = JSON.parse(quotedContent);
-                  quotedText = `> ${parsed.text}\n\n`;
+                  quotedText = `> 以下是引用的原消息\n> ================\n> ${parsed.text}\n> ================\n\n`;
                 } else if (quotedMsgType === 'post') {
                   const parsed = JSON.parse(quotedContent);
                   logger.info('[Feishu] Post message structure:', JSON.stringify(parsed, null, 2));
@@ -167,7 +167,7 @@ export class FeishuChannel {
                       text += '\n';
                     }
                   }
-                  quotedText = `> ${text.trim()}\n\n`;
+                  quotedText = `> 以下是引用的原消息\n> ================\n> ${text.trim()}\n> ================\n\n`;
                 } else if (quotedMsgType === 'image') {
                   const parsed = JSON.parse(quotedContent);
                   const imageKey = parsed.image_key;
@@ -185,9 +185,9 @@ export class FeishuChannel {
 
                   if (imageData) {
                     quotedImages.push(imageData);
-                    quotedText = `> [引用的图片]\n\n`;
+                    quotedText = `> 以下是引用的原消息\n> ================\n> [引用的图片]\n> ================\n\n`;
                   } else {
-                    quotedText = `> [图片消息]\n\n`;
+                    quotedText = `> 以下是引用的原消息\n> ================\n> [图片消息]\n> ================\n\n`;
                   }
                 } else if (quotedMsgType === 'file') {
                   const parsedFile = JSON.parse(quotedContent);
@@ -200,12 +200,12 @@ export class FeishuChannel {
 
                   const quotedFilePath = await this.downloadFile(quotedFileKey, quotedFileName, msg.parent_id, projectPath);
                   if (quotedFilePath) {
-                    quotedText = `> [引用的文件：${quotedFileName}]\n> 文件已保存到：${quotedFilePath}\n\n`;
+                    quotedText = `> 以下是引用的原消息\n> ================\n> [引用的文件：${quotedFileName}]\n> 文件已保存到：${quotedFilePath}\n> ================\n\n`;
                   } else {
-                    quotedText = `> [文件消息]\n\n`;
+                    quotedText = `> 以下是引用的原消息\n> ================\n> [文件消息]\n> ================\n\n`;
                   }
                 } else {
-                  quotedText = `> [${quotedMsgType}消息]\n\n`;
+                  quotedText = `> 以下是引用的原消息\n> ================\n> [${quotedMsgType}消息]\n> ================\n\n`;
                 }
               } catch (err) {
                 logger.warn({ err }, '[Feishu] Failed to fetch quoted message');
@@ -374,6 +374,20 @@ export class FeishuChannel {
       return;
     }
 
+    // 飞书消息内容限制约 30KB（text）/ 150KB（post），安全阈值 28000 字符
+    // 超长消息自动拆分，按段落边界分割
+    const MAX_CONTENT_LENGTH = 28000;
+    if (content.length > MAX_CONTENT_LENGTH) {
+      logger.info(`[Feishu] Message too long (${content.length} chars), splitting into parts`);
+      const parts = splitLongMessage(content, MAX_CONTENT_LENGTH);
+      for (let i = 0; i < parts.length; i++) {
+        // 首条消息保留 reply 选项，后续消息不再 reply
+        const partOptions = i === 0 ? options : { ...options, replyToMessageId: undefined };
+        await this.sendMessage(chatId, parts[i], partOptions);
+      }
+      return;
+    }
+
     logger.debug(`[Feishu] sendMessage called, chatId: ${chatId}, content length: ${content.length}`);
 
     try {
@@ -402,7 +416,7 @@ export class FeishuChannel {
       const hasMention = !!(options?.mentionUserIds && options.mentionUserIds.length > 0);
       const hasRichImages = richItemsWithKeys.length > 0;
 
-      // 如果有富内容图片、Markdown 或 @，使用 post 格式
+      // 消息类型决策：有 Markdown / @ / 富内容图片 → post，否则 text
       const msgType = (useMarkdown || hasMention || hasRichImages) ? 'post' : 'text';
 
       let msgContent: string;
@@ -479,6 +493,12 @@ export class FeishuChannel {
       if (error.response?.data?.code === 230011 && options?.replyToMessageId) {
         logger.warn('[Feishu] Message withdrawn (230011), retrying without reply');
         return this.sendMessage(chatId, content, { ...options, replyToMessageId: undefined });
+      }
+      // 230025: 消息内容超长，截断后重试
+      if (error.response?.data?.code === 230025) {
+        logger.warn(`[Feishu] Message too long (230025, ${content.length} chars), truncating`);
+        const truncated = content.slice(0, 28000) + '\n\n⚠️ 消息过长，已截断';
+        return this.sendMessage(chatId, truncated, options);
       }
       logger.error('[Feishu] Failed to send message:', error);
       throw error;
@@ -824,6 +844,27 @@ function convertTablesToText(text: string): string {
   });
 }
 
+/**
+ * 按段落边界拆分超长消息
+ * 优先在 \n\n 处分割，其次 \n，最后强制截断
+ */
+function splitLongMessage(content: string, maxLength: number): string[] {
+  const parts: string[] = [];
+  let remaining = content;
+
+  while (remaining.length > maxLength) {
+    let splitAt = remaining.lastIndexOf('\n\n', maxLength);
+    if (splitAt <= 0) splitAt = remaining.lastIndexOf('\n', maxLength);
+    if (splitAt <= 0) splitAt = maxLength;
+
+    parts.push(remaining.slice(0, splitAt).trimEnd());
+    remaining = remaining.slice(splitAt).trimStart();
+  }
+
+  if (remaining) parts.push(remaining);
+  return parts;
+}
+
 export function markdownToFeishuPost(markdown: string, defaultTitle?: string): PostContent {
   const match = markdown.match(/^# (.+)$/m);
   const title = match?.[1] ?? defaultTitle ?? '';
@@ -835,6 +876,33 @@ export function markdownToFeishuPost(markdown: string, defaultTitle?: string): P
       content: [[{ tag: 'md', text: body.trim() }]]
     }
   };
+}
+
+/**
+ * 将 Markdown 内容转为飞书消息卡片格式（interactive msg_type）
+ * 飞书卡片的 markdown 组件支持完整 Markdown 渲染（代码块、表格、列表等）
+ * 当前消息类型决策统一走 post + md tag，此函数为 interactive 卡片场景预留。
+ */
+export function markdownToFeishuCard(markdown: string, defaultTitle?: string): object {
+  const match = markdown.match(/^# (.+)$/m);
+  const title = match?.[1] ?? defaultTitle;
+  let body = match ? markdown.replace(/^# .+\n?/, '') : markdown;
+  body = convertTablesToText(body).trim();
+
+  const card: any = {
+    config: { wide_screen_mode: true },
+    elements: [
+      { tag: 'markdown', content: body }
+    ]
+  };
+
+  if (title) {
+    card.header = {
+      title: { tag: 'plain_text', content: title }
+    };
+  }
+
+  return card;
 }
 
 export function hasMarkdownSyntax(text: string): boolean {
@@ -881,7 +949,7 @@ export class FeishuChannelPlugin implements ChannelPlugin {
       });
 
       const adapter = {
-        name: inst.name,
+        channelName: inst.name,
         sendText: (id: string, text: string, context?: any) => channel.sendMessage(id, text, context),
         sendFile: (id: string, filePath: string, context?: any) => channel.sendFile(id, filePath, context),
         sendImage: (id: string, png: Buffer, context?: any) => channel.sendImage(id, png, context),

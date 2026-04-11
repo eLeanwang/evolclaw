@@ -145,6 +145,35 @@ export class StreamFlusher {
     return Math.max(minDelay, Math.min(maxDelay, dynamicDelay));
   }
 
+  /**
+   * 只 flush activities，保留 text buffer 不动
+   * 用于 complete 事件前清空 pending activities，让最终文本留给 flush(true) 发送
+   */
+  async flushActivitiesOnly() {
+    if (this.activities.length === 0) return;
+
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = undefined;
+    }
+
+    let output = this.activities.join('\n') + '\n\n';
+    this.activities = [];
+
+    if (output && this.fileMarkerPattern) {
+      output = output.replace(this.fileMarkerPattern, '').trim();
+    }
+
+    if (this.diagEnabled) diag(this.instanceId, 'flushActivitiesOnly', { outputLen: output.length });
+
+    if (output) {
+      await this.send(output);
+      this.sentContent = true;
+      this.lastFlush = Date.now();
+      this.flushCount++;
+    }
+  }
+
   async flush(isFinal?: boolean) {
     if (this.timer) {
       clearTimeout(this.timer);
@@ -152,11 +181,14 @@ export class StreamFlusher {
     }
 
     let output = '';
-    if (this.activities.length > 0) {
+    const hasActivities = this.activities.length > 0;
+    const hasText = this.buffer.length > 0;
+
+    if (hasActivities) {
       output += this.activities.join('\n') + '\n\n';
       this.activities = [];
     }
-    if (this.buffer) {
+    if (hasText) {
       output += this.buffer;
       this.buffer = '';
     }

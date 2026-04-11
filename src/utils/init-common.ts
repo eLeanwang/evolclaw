@@ -36,12 +36,12 @@ export async function selectInstance(
   console.log(`  ${addLetter}. 添加新机器人`);
   console.log('');
 
-  const validOptions = letters.slice(0, instances.length + 1);
+  const validOptions = letters.slice(0, instances.length + 1).split('');
   let choice = '';
   while (!validOptions.includes(choice)) {
     choice = (await ask(rl, '请选择: ')).trim().toLowerCase();
     if (!validOptions.includes(choice)) {
-      console.log(`无效选择，请输入 ${validOptions.split('').join('/')}`);
+      console.log(`无效选择，请输入 ${validOptions.join('/')}`);
     }
   }
 
@@ -62,7 +62,8 @@ export async function selectInstance(
 
   // Overwrite — requires confirmation
   const target = instances[choiceIndex];
-  const confirm = (await ask(rl, `即将覆盖 "${target.name}" 的配置，确认？(y/N) `)).trim().toLowerCase();
+  console.log(`\n已选择：${target.name}`);
+  const confirm = (await ask(rl, `⚠️ 即将覆盖该机器人配置，确认？(y/N) `)).trim().toLowerCase();
   if (confirm !== 'y' && confirm !== 'yes') {
     console.log('已取消');
     return null;

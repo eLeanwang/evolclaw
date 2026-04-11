@@ -8,14 +8,14 @@ export type SystemEvent =
 
 // ── 渠道事件 ──
 export type ChannelEvent =
-  | { type: 'channel:connected'; channel: string; timestamp?: number }
-  | { type: 'channel:disconnected'; channel: string; reason?: string }
-  | { type: 'channel:health'; channel: string; status: 'auth_error'; message: string; timestamp?: number }
-  | { type: 'channel:owner-bound'; channel: string; userId: string };
+  | { type: 'channel:connected'; channel: string; channelName?: string; timestamp?: number }
+  | { type: 'channel:disconnected'; channel: string; channelName?: string; reason?: string }
+  | { type: 'channel:health'; channel: string; channelName?: string; status: 'auth_error'; message: string; timestamp?: number }
+  | { type: 'channel:owner-bound'; channel: string; channelName?: string; userId: string };
 
 // ── 会话事件 ──
 export type SessionEvent =
-  | { type: 'session:created'; sessionId: string; channel: string; channelId: string; projectPath?: string; name?: string; chatType?: string; threadId?: string; timestamp?: number }
+  | { type: 'session:created'; sessionId: string; channel: string; channelName?: string; channelId: string; projectPath?: string; name?: string; chatType?: string; threadId?: string; timestamp?: number }
   | { type: 'session:switched'; sessionId: string; fromSessionId: string; toSessionId: string }
   | { type: 'session:deleted'; sessionId: string }
   | { type: 'session:renamed'; sessionId: string; oldName: string; newName: string }
@@ -31,11 +31,11 @@ export type ProjectEvent =
 
 // ── 消息事件 ──
 export type MessageEvent =
-  | { type: 'message:received'; sessionId: string; channel: string; channelId: string; content: string; userId?: string; timestamp?: number }
+  | { type: 'message:received'; sessionId: string; channel: string; channelName?: string; channelId: string; content: string; userId?: string; timestamp?: number }
   | { type: 'message:processing'; sessionId: string }
   | { type: 'message:text'; sessionId: string; text: string; isFinal: boolean }
-  | { type: 'message:completed'; sessionId: string; channel: string; channelId: string; finalText?: string; durationMs?: number; timestamp?: number }
-  | { type: 'message:error'; sessionId: string; error: string; errorType: string }
+  | { type: 'message:completed'; sessionId: string; channel: string; channelName?: string; channelId: string; finalText?: string; durationMs?: number; terminalReason?: string; timestamp?: number }
+  | { type: 'message:error'; sessionId: string; error: string; errorType: string; terminalReason?: string }
   | { type: 'message:interrupted'; sessionId: string; reason?: string };
 
 // ── 工具事件 ──
@@ -55,7 +55,9 @@ export type AgentEvent =
   | { type: 'agent:compact-complete'; sessionId: string; preTokens: number }
   | { type: 'agent:model-changed'; sessionId?: string; oldModel?: string; newModel?: string; model?: string; timestamp?: number }
   | { type: 'agent:idle-timeout'; sessionId: string; idleSec: number }
-  | { type: 'agent:file-sent'; sessionId: string; filePath: string; channel: string };
+  | { type: 'agent:file-sent'; sessionId: string; filePath: string; channel: string; channelName?: string }
+  | { type: 'agent:state-changed'; sessionId: string; state: string }
+  | { type: 'agent:status'; sessionId: string; subtype: string; message: string; timestamp?: number };
 
 // ── 自愈事件 ──
 export type SelfHealEvent =
@@ -112,4 +114,3 @@ export class EventBus extends EventEmitter {
     this.off(eventType, handler);
   }
 }
-

@@ -64,12 +64,13 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
 
   // ── Permission ──
 
-  private currentMode: string = 'default';
+  private currentMode: string = 'auto';
   private approvalPolicy: ApprovalMode = 'never';
 
   setMode(mode: string): void {
     const map: Record<string, ApprovalMode> = {
-      'default': 'never',
+      'auto': 'never',
+      'bypass': 'never',
       'request': 'on-request',
       'noask': 'untrusted',
     };
@@ -79,7 +80,8 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
   getMode(): string { return this.currentMode; }
   listModes(): PermissionModeInfo[] {
     return [
-      { key: 'default', nameZh: '默认', description: '全部自动（受 sandbox 约束）', available: true },
+      { key: 'auto', nameZh: '自动', description: '全部自动（受 sandbox 约束）', available: true },
+      { key: 'bypass', nameZh: '放行', description: '全部自动（受 sandbox 约束）', available: true },
       { key: 'request', nameZh: '审批', description: '需要审批时询问', available: true },
       { key: 'noask', nameZh: '静默', description: '只执行已知安全操作', available: true },
     ];

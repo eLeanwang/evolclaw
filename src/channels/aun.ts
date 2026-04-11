@@ -558,7 +558,7 @@ export class AUNChannelPlugin implements ChannelPlugin {
       });
 
       const adapter = {
-        name: inst.name,
+        channelName: inst.name,
         sendText: (id: string, text: string, context?: ReplyContext) => channel.sendMessage(id, text, context),
         acknowledge: (messageId: string) => { channel.acknowledge(messageId); return Promise.resolve(); },
         sendProcessingStatus: (id: string, status: 'start' | 'done', sessionId: string, context?: ReplyContext) => channel.sendProcessingStatus(id, status, sessionId, context),

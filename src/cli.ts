@@ -399,24 +399,35 @@ function formatTimeAgo(ms: number): string {
 }
 
 function showConfigChannels(config: any) {
-  // Feishu
-  if (config.channels?.feishu?.appId) {
-    console.log(`  feishu: Configured (App ID: ${config.channels.feishu.appId.slice(0, 8)}...)`);
-  } else {
-    console.log('  feishu: - Not configured');
+  const groups: Array<{ type: string; instances: string[] }> = [];
+
+  const channelChecks: Array<{ type: string; isValid: (inst: any) => boolean }> = [
+    { type: 'feishu', isValid: (inst: any) => !!inst.appId && inst.enabled !== false },
+    { type: 'wechat', isValid: (inst: any) => !!inst.token && inst.enabled !== false },
+    { type: 'aun', isValid: (inst: any) => !!inst.aid && inst.enabled !== false && !inst.aid.includes('your-') && !inst.aid.includes('placeholder') },
+  ];
+
+  for (const { type, isValid } of channelChecks) {
+    const raw = config.channels?.[type];
+    if (!raw) continue;
+    if (Array.isArray(raw)) {
+      const names = raw.filter(isValid).map((inst: any) => inst.name || type);
+      if (names.length > 0) groups.push({ type, instances: names });
+    } else if (isValid(raw)) {
+      groups.push({ type, instances: [raw.name || type] });
+    }
   }
-  // WeChat
-  if (config.channels?.wechat?.token) {
-    console.log(`  wechat: Configured (Token: ${config.channels.wechat.token.slice(0, 20)}...)`);
+
+  if (groups.length > 0) {
+    for (const g of groups) {
+      if (g.instances.length === 1) {
+        console.log(`  ${g.instances[0]}: ✓ Configured`);
+      } else {
+        console.log(`  ${g.type}: [${g.instances.join(', ')}]`);
+      }
+    }
   } else {
-    console.log('  wechat: - Not configured');
-  }
-  // AUN
-  const aunAid = config.channels?.aun?.aid;
-  if (aunAid && !aunAid.includes('your-') && !aunAid.includes('placeholder')) {
-    console.log(`  aun: Configured (${aunAid})`);
-  } else {
-    console.log('  aun: - Not configured');
+    console.log('  (no channels configured)');
   }
 }
 
@@ -432,7 +443,11 @@ async function cmdStatus() {
       const info = platform.getProcessInfo(pid);
       if (info.uptime) console.log(`  Uptime: ${info.uptime}`);
       if (info.cpu) console.log(`  CPU: ${info.cpu}%`);
-      if (info.memory) console.log(`  Memory: ${info.memory} KB`);
+      if (info.memory) {
+        const memKB = parseInt(info.memory, 10);
+        const memStr = memKB >= 1024 ? `${(memKB / 1024).toFixed(0)} MB` : `${memKB} KB`;
+        console.log(`  Memory: ${memStr}`);
+      }
     } catch {}
     console.log(`  EVOLCLAW_HOME: ${resolveRoot()}`);
 
@@ -507,13 +522,27 @@ async function cmdStatus() {
       const status = await ipcQuery(p.socket, { type: 'status' });
       if (status) {
         console.log('🔌 Channels (live):');
+        // Group channels by channelType
+        const groups = new Map<string, Array<{ name: string; ch: any }>>();
         for (const [name, ch] of Object.entries(status.channels)) {
-          const label = ch.connected
-            ? '✓ Connected'
-            : ch.reconnectAttempt
-              ? `⏳ Reconnecting (${ch.reconnectAttempt}/${ch.maxAttempts})`
-              : '✗ Disconnected';
-          console.log(`  ${name}: ${label}`);
+          const type = (ch as any).channelType || name;
+          if (!groups.has(type)) groups.set(type, []);
+          groups.get(type)!.push({ name, ch: ch as any });
+        }
+        for (const [type, instances] of groups) {
+          if (instances.length === 1) {
+            // Single instance: show instance name directly
+            const { name, ch } = instances[0];
+            const label = ch.connected ? '✓ Connected' : ch.reconnectAttempt ? `⏳ Reconnecting (${ch.reconnectAttempt}/${ch.maxAttempts})` : '✗ Disconnected';
+            console.log(`  ${name}: ${label}`);
+          } else {
+            // Multi-instance: feishu [name1 ✓, name2 ✗]
+            const parts = instances.map(({ name, ch }) => {
+              const icon = ch.connected ? '✓' : ch.reconnectAttempt ? '⏳' : '✗';
+              return `${name} ${icon}`;
+            });
+            console.log(`  ${type}: [${parts.join(', ')}]`);
+          }
         }
         if (status.stats) {
           console.log('');

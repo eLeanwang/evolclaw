@@ -13,6 +13,7 @@ import { createInterface, Interface } from 'readline';
 import type { Config } from '../types.js';
 import type { AgentPlugin, AgentInstance, AgentCallbacks } from '../core/agent-loader.js';
 import type { AgentEvent, AgentRunnerFull, ModelSwitcher, PermissionModeInfo } from './claude-runner.js';
+import type { PermissionGateway, PermissionDecision } from '../core/permission.js';
 import { resolveHermesConfig, type HermesResolved } from '../config.js';
 import { logger } from '../utils/logger.js';
 
@@ -28,9 +29,13 @@ export class HermesRunner implements AgentRunnerFull, ModelSwitcher {
   private activeStreams = new Map<string, AsyncIterable<any>>();
   private activeSessions = new Map<string, string>(); // sessionId → hermesSessionId
   private onSessionIdUpdate?: (sessionId: string, agentSessionId: string) => void;
-  private currentMode: string = 'default';
+  private currentMode: string = 'auto';
   private pendingLines: Map<string, ((line: string) => void)[]> = new Map();
   private onBridgeExit: (() => void) | null = null; // notify active streams on crash
+  private sendPromptFn?: (text: string) => Promise<void>;
+  private permissionGateway?: PermissionGateway;
+  /** Active session ID for forwarding approval requests to PermissionGateway */
+  private activeQuerySessionId?: string;
 
   constructor(config: Config, callbacks: AgentCallbacks) {
     this.resolved = resolveHermesConfig(config);
@@ -90,6 +95,11 @@ export class HermesRunner implements AgentRunnerFull, ModelSwitcher {
     });
 
     logger.info(`[HermesRunner] Bridge started: pid=${this.process.pid}`);
+
+    // Sync current approval mode to bridge
+    const hermesMode = HermesRunner.MODE_MAP[this.currentMode] || 'manual';
+    this.sendCommand('set_approval_mode', { mode: hermesMode });
+
     return this.process;
   }
 
@@ -147,15 +157,50 @@ export class HermesRunner implements AgentRunnerFull, ModelSwitcher {
 
   // ── Permission ──
 
-  setMode(mode: string): void { this.currentMode = mode; }
+  /**
+   * Maps EvolClaw permission modes to Hermes approval modes:
+   *   auto    → smart (LLM-assisted evaluation, falls back to manual)
+   *   bypass  → off   (YOLO, skip all checks)
+   *   request → manual (always prompt user)
+   *   noask   → deny  (auto-deny everything)
+   *   edit/plan → not available for Hermes
+   */
+  private static readonly MODE_MAP: Record<string, string> = {
+    'auto': 'smart',
+    'bypass': 'off',
+    'request': 'manual',
+    'noask': 'deny',
+  };
+
+  setMode(mode: string): void {
+    this.currentMode = mode;
+    const hermesMode = HermesRunner.MODE_MAP[mode] || 'manual';
+    // Send to bridge if running
+    if (this.process && !this.process.killed) {
+      this.sendCommand('set_approval_mode', { mode: hermesMode });
+    }
+  }
+
   getMode(): string { return this.currentMode; }
+
   listModes(): PermissionModeInfo[] {
     return [
-      { key: 'default', nameZh: '默认', description: 'Hermes 自主执行', available: true },
+      { key: 'auto', nameZh: '自动', description: 'Hermes Smart 审批（LLM 辅助评估）', available: true },
+      { key: 'bypass', nameZh: '放行', description: '跳过所有审批检查', available: true },
+      { key: 'request', nameZh: '审批', description: '危险命令需人工确认', available: true },
+      { key: 'edit', nameZh: '编辑', description: '仅 Claude 支持', available: false, unavailableReason: 'Hermes 不支持此模式' },
+      { key: 'plan', nameZh: '规划', description: '仅 Claude 支持', available: false, unavailableReason: 'Hermes 不支持此模式' },
+      { key: 'noask', nameZh: '静默', description: '自动拒绝所有危险操作', available: true },
     ];
   }
-  setSendPrompt(_fn: (text: string) => Promise<void>): void {}
-  setPermissionGateway(_gw: any): void {}
+
+  setSendPrompt(fn: (text: string) => Promise<void>): void {
+    this.sendPromptFn = fn;
+  }
+
+  setPermissionGateway(gw: PermissionGateway): void {
+    this.permissionGateway = gw;
+  }
 
   // ── Effort (not applicable to Hermes) ──
 
@@ -190,6 +235,9 @@ export class HermesRunner implements AgentRunnerFull, ModelSwitcher {
     const hermesSessionId = initialAgentSessionId || this.activeSessions.get(sessionId);
 
     this.ensureBridge();
+
+    // Track active session for approval request forwarding
+    this.activeQuerySessionId = sessionId;
 
     // Send query command
     this.sendCommand('query', {
@@ -249,7 +297,17 @@ export class HermesRunner implements AgentRunnerFull, ModelSwitcher {
               }
 
               case 'text':
-                yield { type: 'text', text: event.text || '' };
+                if (event.text) {
+                  yield { type: 'text', text: event.text };
+                }
+                break;
+
+              case 'status':
+                yield {
+                  type: 'status',
+                  subtype: event.subtype || 'info',
+                  message: event.message || '',
+                };
                 break;
 
               case 'tool_use':
@@ -266,6 +324,38 @@ export class HermesRunner implements AgentRunnerFull, ModelSwitcher {
                 };
                 break;
 
+              case 'approval_request': {
+                // Hermes detected a dangerous command and is blocking the agent
+                // thread until we send approval_response.  Forward to
+                // PermissionGateway which notifies the user via chat channel.
+                const command = event.command || '';
+                const description = event.description || '';
+
+                if (self.permissionGateway && self.sendPromptFn && self.activeQuerySessionId) {
+                  // Forward to EvolClaw's PermissionGateway for user decision
+                  const decision: PermissionDecision = await self.permissionGateway.requestPermission(
+                    self.activeQuerySessionId,
+                    `Hermes:Terminal`,
+                    { command, description },
+                    self.sendPromptFn,
+                    `${description}\n命令: ${command.substring(0, 80)}`,
+                  );
+
+                  // Map EvolClaw decision → Hermes choice
+                  const choiceMap: Record<PermissionDecision, string> = {
+                    'allow': 'once',
+                    'always': 'session',
+                    'deny': 'deny',
+                  };
+                  self.sendCommand('approval_response', { choice: choiceMap[decision] });
+                } else {
+                  // No PermissionGateway available — auto-deny for safety
+                  logger.warn('[HermesRunner] approval_request received but no PermissionGateway, auto-denying');
+                  self.sendCommand('approval_response', { choice: 'deny' });
+                }
+                break;
+              }
+
               case 'error':
                 yield {
                   type: 'error',
@@ -277,7 +367,7 @@ export class HermesRunner implements AgentRunnerFull, ModelSwitcher {
               case 'complete':
                 yield {
                   type: 'complete',
-                  result: event.result,
+                  result: event.result === '(empty)' ? '' : event.result,
                   subtype: event.subtype,
                   isError: event.isError,
                   errors: event.errors,
@@ -306,6 +396,7 @@ export class HermesRunner implements AgentRunnerFull, ModelSwitcher {
         }
       } finally {
         self.removeLineListener('query', listener);
+        self.activeQuerySessionId = undefined;
         if (self.onBridgeExit === exitHandler) {
           self.onBridgeExit = null;
         }

@@ -6,7 +6,7 @@ const DANGEROUS_PATTERNS = [
   /\bmkfs\b/,                 // mkfs (格式化文件系统)
   /\bdd\s+if=/,               // dd (磁盘操作)
   /\bchmod\s+777/,            // chmod 777 (危险权限)
-  />\s*\/dev\//,              // 重定向到设备文件
+  />\s*\/dev\/(?!null\b)/,    // 重定向到设备文件（排除 /dev/null）
   /\bshutdown\b/,             // 关机
   /\breboot\b/,               // 重启
   // Windows

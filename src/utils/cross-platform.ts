@@ -88,13 +88,28 @@ export function getProcessInfo(pid: number): ProcessInfo {
         return { memory: memKB ? `${memKB}` : undefined };
       }
     } else {
-      const uptime = execFileSync('ps', ['-p', String(pid), '-o', 'etime='], { encoding: 'utf-8' }).trim();
+      const etimes = execFileSync('ps', ['-p', String(pid), '-o', 'etimes='], { encoding: 'utf-8' }).trim();
       const cpu = execFileSync('ps', ['-p', String(pid), '-o', '%cpu='], { encoding: 'utf-8' }).trim();
       const mem = execFileSync('ps', ['-p', String(pid), '-o', 'rss='], { encoding: 'utf-8' }).trim();
+      const uptime = formatUptime(parseInt(etimes, 10));
       return { uptime, cpu, memory: mem };
     }
   } catch {}
   return {};
+}
+
+function formatUptime(totalSeconds: number): string {
+  if (isNaN(totalSeconds) || totalSeconds < 0) return 'unknown';
+  const days = Math.floor(totalSeconds / 86400);
+  const hours = Math.floor((totalSeconds % 86400) / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const parts: string[] = [];
+  if (days > 0) parts.push(`${days}d`);
+  if (hours > 0) parts.push(`${hours}h`);
+  if (minutes > 0) parts.push(`${minutes}m`);
+  if (parts.length === 0) parts.push(`${seconds}s`);
+  return parts.join(' ');
 }
 
 /**

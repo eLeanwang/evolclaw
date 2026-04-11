@@ -111,10 +111,10 @@ export class SessionManager {
     const agentId = row.agent_id || 'claude';
     const adapter = this.getFileAdapter(agentId);
     if (!adapter) {
-      // 无适配器时回退到 Claude 路径检查
-      const sessionFile = this.getSessionFilePath(row.project_path, agentSessionId);
-      if (fs.existsSync(sessionFile)) return agentSessionId;
-    } else if (adapter.checkExists(row.project_path, agentSessionId)) {
+      // 无适配器：无法验证文件，信任 DB 记录
+      return agentSessionId;
+    }
+    if (adapter.checkExists(row.project_path, agentSessionId)) {
       return agentSessionId;
     }
     logger.warn(`Session file not found for ${agentId}: ${agentSessionId}, clearing session ID`);
@@ -398,6 +398,30 @@ export class SessionManager {
   }
 
   /**
+   * 启动时迁移：将 sessions.channel 列中的旧实例名回填为 channelType。
+   * @param instanceToType 实例名 → channelType 映射表（外部构建）
+   */
+  migrateChannelNames(instanceToType: Map<string, string>): void {
+    if (instanceToType.size === 0) return;
+
+    let migrated = 0;
+    for (const [instanceName, channelType] of instanceToType) {
+      if (instanceName === channelType) continue;
+      const result = this.db.prepare(
+        `UPDATE sessions SET channel = ? WHERE channel = ?`
+      ).run(channelType, instanceName);
+      const changes = (result as any).changes ?? 0;
+      if (changes > 0) {
+        migrated += changes;
+        logger.info(`[Migration] Renamed channel '${instanceName}' -> '${channelType}' (${changes} sessions)`);
+      }
+    }
+    if (migrated > 0) {
+      logger.info(`Channel name migration completed (${migrated} sessions updated)`);
+    }
+  }
+
+  /**
    * 获取指定渠道所有已知的 thread_id（用于重启后预填充 seenThreads）
    */
   getKnownThreadIds(channel: string): string[] {
@@ -478,13 +502,24 @@ export class SessionManager {
       const validSessionId = this.validateSessionFile(active);
       const session = { ...this.rowToSession(active), agentSessionId: validSessionId };
       session.identity = this.resolveIdentity(channel, userId);
-      // 补写 peerId/peerName（私聊 session 可能在此字段引入前创建）
+      // 补写 peerId/peerName/channelName（旧 session 可能在这些字段引入前创建）
       if (chatType === 'private' && userId) {
         const activeMeta = active.metadata ? JSON.parse(active.metadata) : {};
         let updated = false;
         if (!activeMeta.peerId) { activeMeta.peerId = userId; updated = true; }
         if (!activeMeta.peerName && metadata?.peerName) { activeMeta.peerName = metadata.peerName; updated = true; }
+        if (metadata?.channelName && activeMeta.channelName !== metadata.channelName) { activeMeta.channelName = metadata.channelName; updated = true; }
         if (updated) {
+          this.db.prepare(`UPDATE sessions SET metadata = ?, updated_at = ? WHERE id = ?`)
+            .run(JSON.stringify(activeMeta), Date.now(), active.id);
+          session.metadata = activeMeta;
+        }
+      }
+      // 补写 channelName（非私聊时也需要）
+      if (metadata?.channelName && chatType !== 'private') {
+        const activeMeta = active.metadata ? JSON.parse(active.metadata) : {};
+        if (activeMeta.channelName !== metadata.channelName) {
+          activeMeta.channelName = metadata.channelName;
           this.db.prepare(`UPDATE sessions SET metadata = ?, updated_at = ? WHERE id = ?`)
             .run(JSON.stringify(activeMeta), Date.now(), active.id);
           session.metadata = activeMeta;
@@ -1106,6 +1141,8 @@ export class SessionManager {
       VALUES (?, 0, 0, ?, ?, ?)
       ON CONFLICT(session_id) DO UPDATE SET
         consecutive_errors = 0,
+        last_error = NULL,
+        last_error_type = NULL,
         last_success_time = ?,
         updated_at = ?
     `).run(sessionId, now, now, now, now, now);

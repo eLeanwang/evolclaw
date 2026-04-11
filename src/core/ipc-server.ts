@@ -4,6 +4,7 @@ import { logger } from '../utils/logger.js';
 
 export interface ChannelStatus {
   connected: boolean;
+  channelType?: string;
   reconnectAttempt?: number;
   maxAttempts?: number;
   [key: string]: unknown;
@@ -13,6 +14,7 @@ export interface IpcStatusResponse {
   pid: number;
   uptime: number;
   channels: Record<string, ChannelStatus>;
+  channelsByType?: Record<string, string[]>;  // channelType → instance names
   queue: { pending: number; processing: number };
   stats?: {
     received: number;

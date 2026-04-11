@@ -106,7 +106,7 @@ export class ChannelLoader {
     const results = await Promise.allSettled(
       instances.map(async (inst) => {
         await inst.connect();
-        return inst.adapter.name;
+        return inst.adapter.channelName;
       })
     );
 

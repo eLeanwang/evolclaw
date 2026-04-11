@@ -29,18 +29,19 @@ export class MessageBridge {
     this.defaultDebounce = config.debounce ?? 2;
   }
 
-  private getDebouncer(channelName: string): StreamDebouncer {
+  private getDebouncer(channelName: string, channelType?: string): StreamDebouncer {
     let d = this.debouncers.get(channelName);
     if (!d) {
       let seconds = this.defaultDebounce;
-      for (const type of ['feishu', 'wechat', 'aun'] as const) {
-        const raw = (this.config.channels as any)?.[type];
-        if (!raw) continue;
+      // 查找渠道级 debounce 配置：先用 channelType（如 'feishu'）在 config.channels 里查
+      const type = channelType || channelName;
+      const raw = (this.config.channels as any)?.[type];
+      if (raw) {
         if (Array.isArray(raw)) {
           const inst = raw.find((i: any) => (i.name || type) === channelName);
-          if (inst?.debounce !== undefined) { seconds = inst.debounce; break; }
-        } else if ((raw.name || type) === channelName) {
-          if (raw.debounce !== undefined) { seconds = raw.debounce; break; }
+          if (inst?.debounce !== undefined) seconds = inst.debounce;
+        } else if (raw.debounce !== undefined) {
+          seconds = raw.debounce;
         }
       }
       d = new StreamDebouncer(seconds);
@@ -52,89 +53,98 @@ export class MessageBridge {
   /**
    * 为渠道注册消息桥梁：入站处理管线 + 出站命令响应
    *
-   * @param channelName     渠道标识
+   * @param channelName     渠道实例名（用于 debounce 隔离）
    * @param onMessage       注册入站消息监听
    * @param sendReply       出站：命令响应发送回调
    * @param adapter         渠道适配器（用于 ACK）
+   * @param channelType     渠道类型（feishu/wechat/aun），用于 session 和 message.channel
    */
   register(
     channelName: string,
     onMessage: (handler: (msg: InboundMessage) => Promise<void>) => void,
     sendReply: (channelId: string, text: string, replyContext?: ReplyContext) => Promise<void>,
-    adapter?: ChannelAdapter
+    adapter?: ChannelAdapter,
+    channelType?: string
   ): void {
+    const effectiveChannelType = channelType || channelName;
     onMessage(async (msg) => {
-      let content = msg.content.trim();
+      try {
+        let content = msg.content.trim();
 
-      // 0. 自定义消息快速路径（menu.query 等）
-      if (await this.handleCustomPayload(content, channelName, msg, sendReply, adapter)) return;
+        // 0. 自定义消息快速路径（menu.query 等）
+        if (await this.handleCustomPayload(content, channelName, msg, sendReply, adapter)) return;
 
-      // 1. owner 绑定
-      if (msg.peerId) await this.autoBindOwner(channelName, msg.peerId);
+        // 1. owner 绑定（按实例名绑定）
+        if (msg.peerId) await this.autoBindOwner(channelName, msg.peerId);
 
-      // 2. 命令快速路径（去除引用前缀后检查，兼容话题中引用上文的情况）
-      const contentForCmd = content.replace(/^(>[^\n]*\n)+\n?/, '').trim();
-      if (await this.handleCommand(contentForCmd || content, channelName, msg.channelId,
-        (text) => sendReply(msg.channelId, text, msg.replyContext),
-        msg.peerId, msg.threadId
-      )) return;
+        // 2. 命令快速路径（去除引用前缀后检查，兼容话题中引用上文的情况）
+        const contentForCmd = content.replace(/^(>[^\n]*\n)+\n?/, '').trim();
+        if (await this.handleCommand(contentForCmd || content, channelName, msg.channelId,
+          (text) => sendReply(msg.channelId, text, msg.replyContext),
+          msg.peerId, msg.threadId
+        )) return;
 
-      // 3. session 解析（使用 Channel 层填充的 chatType）
-      const chatType = msg.chatType || 'private';
-      const metadata: Record<string, any> = {};
-      if (msg.replyContext) metadata.replyContext = msg.replyContext;
-      if (chatType === 'private' && msg.peerId) {
-        metadata.peerId = msg.peerId;
-        if (msg.peerName) metadata.peerName = msg.peerName;
-      }
-      const session = await this.sessionManager.getOrCreateSession(
-        channelName, msg.channelId,
-        this.config.projects?.defaultPath || process.cwd(),
-        msg.threadId, Object.keys(metadata).length ? metadata : undefined, undefined, msg.peerId, chatType
-      );
+        // 3. session 解析（使用 Channel 层填充的 chatType）
+        const chatType = msg.chatType || 'private';
+        const metadata: Record<string, any> = {};
+        if (msg.replyContext) metadata.replyContext = msg.replyContext;
+        // 写入实例名（审计 + 精确出站路由）
+        metadata.channelName = channelName;
+        if (chatType === 'private' && msg.peerId) {
+          metadata.peerId = msg.peerId;
+          if (msg.peerName) metadata.peerName = msg.peerName;
+        }
+        const session = await this.sessionManager.getOrCreateSession(
+          effectiveChannelType, msg.channelId,
+          this.config.projects?.defaultPath || process.cwd(),
+          msg.threadId, Object.keys(metadata).length ? metadata : undefined, undefined, msg.peerId, chatType
+        );
 
-      // 4. 消息前缀（由 policy 决定）
-      const channelInfo = this.processor.getChannelInfo?.(channelName);
-      if (channelInfo?.policy) {
-        const prefix = channelInfo.policy.messagePrefix(chatType, msg.peerName);
-        if (prefix) content = prefix + content;
-      }
+        // 4. 消息前缀（由 policy 决定）
+        const channelInfo = this.processor.getChannelInfo?.(channelName);
+        if (channelInfo?.policy) {
+          const prefix = channelInfo.policy.messagePrefix(chatType, msg.peerName);
+          if (prefix) content = prefix + content;
+        }
 
-      // 5. 构造完整消息
-      const fullMessage: Message = {
-        channel: channelName, channelId: msg.channelId, content,
-        chatType,
-        images: msg.images, timestamp: Date.now(),
-        peerId: msg.peerId, peerName: msg.peerName,
-        messageId: msg.messageId,
-        mentions: msg.mentions, threadId: msg.threadId,
-        replyContext: msg.replyContext,
-      };
+        // 5. 构造完整消息（channel 字段存渠道类型，不存实例名）
+        const fullMessage: Message = {
+          channel: effectiveChannelType, channelId: msg.channelId, content,
+          chatType,
+          images: msg.images, timestamp: Date.now(),
+          peerId: msg.peerId, peerName: msg.peerName,
+          messageId: msg.messageId,
+          mentions: msg.mentions, threadId: msg.threadId,
+          replyContext: msg.replyContext,
+        };
 
-      // 6. ACK + debounce/enqueue
-      //    ACK 在到达时立即做（每条独立 ACK），不等合并
-      //    Interrupt 模式（单聊）→ 入队前 debounce 合并
-      //    FIFO 模式（群聊）    → 跳过 debouncer，独立入队，出队时贪心合并
-      if (fullMessage.messageId) adapter?.acknowledge?.(fullMessage.messageId).catch(() => {});
+        // 6. ACK + debounce/enqueue
+        //    ACK 在到达时立即做（每条独立 ACK），不等合并
+        //    Interrupt 模式（单聊）→ 入队前 debounce 合并
+        //    FIFO 模式（群聊）    → 跳过 debouncer，独立入队，出队时贪心合并
+        if (fullMessage.messageId) adapter?.acknowledge?.(fullMessage.messageId).catch(() => {});
 
-      const isInterrupt = chatType !== 'group';
-      const doEnqueue = async (m: Message) => {
-        return this.messageQueue.enqueue(session.id, m, session.projectPath, {
-          interruptible: isInterrupt,
-        });
-      };
+        const isInterrupt = chatType !== 'group';
+        const doEnqueue = async (m: Message) => {
+          return this.messageQueue.enqueue(session.id, m, session.projectPath, {
+            interruptible: isInterrupt,
+          });
+        };
 
-      if (isInterrupt) {
-        const debouncer = this.getDebouncer(channelName);
-        if (debouncer.enabled) {
-          const debounceKey = msg.peerId ? `${session.id}:${msg.peerId}` : session.id;
-          await debouncer.submit(debounceKey, fullMessage, doEnqueue);
+        if (isInterrupt) {
+          const debouncer = this.getDebouncer(channelName, effectiveChannelType);
+          if (debouncer.enabled) {
+            const debounceKey = msg.peerId ? `${session.id}:${msg.peerId}` : session.id;
+            await debouncer.submit(debounceKey, fullMessage, doEnqueue);
+          } else {
+            await doEnqueue(fullMessage);
+          }
         } else {
+          // 群聊 FIFO：直接入队，由 MessageQueue.processNext 出队时合并
           await doEnqueue(fullMessage);
         }
-      } else {
-        // 群聊 FIFO：直接入队，由 MessageQueue.processNext 出队时合并
-        await doEnqueue(fullMessage);
+      } catch (error) {
+        logger.error(`[MessageBridge] Error in onMessage handler for ${channelName}:`, error);
       }
     });
   }

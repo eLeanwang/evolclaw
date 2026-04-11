@@ -1,10 +1,13 @@
 import { ClaudeSessionFileAdapter } from './core/adapters/claude-session-file-adapter.js';
 import { CodexSessionFileAdapter } from './core/adapters/codex-session-file-adapter.js';
+import { HermesSessionFileAdapter } from './core/adapters/hermes-session-file-adapter.js';
+import { GeminiSessionFileAdapter } from './core/adapters/gemini-session-file-adapter.js';
 import { loadConfig, ensureDataDirs, resolvePaths, resolveAnthropicConfig, isOwner, validateConfigIntegrity, validateChannelInstanceNames, getOwner } from './config.js';
 import { SessionManager } from './core/session-manager.js';
 import { ClaudeAgentPlugin } from './agents/claude-runner.js';
 import { CodexAgentPlugin } from './agents/codex-runner.js';
 import { HermesAgentPlugin } from './agents/hermes-runner.js';
+import { GeminiAgentPlugin } from './agents/gemini-runner.js';
 import { FeishuChannelPlugin } from './channels/feishu.js';
 import { WechatChannelPlugin } from './channels/wechat.js';
 import { AUNChannelPlugin } from './channels/aun.js';
@@ -87,12 +90,15 @@ async function main() {
   // 注册会话文件适配器（Claude / Codex 各自的会话文件操作）
   sessionManager.registerFileAdapter(new ClaudeSessionFileAdapter());
   sessionManager.registerFileAdapter(new CodexSessionFileAdapter());
+  sessionManager.registerFileAdapter(new HermesSessionFileAdapter());
+  sessionManager.registerFileAdapter(new GeminiSessionFileAdapter());
 
   // Agent 插件系统
   const agentLoader = new AgentLoader();
   agentLoader.register(new ClaudeAgentPlugin());
   agentLoader.register(new CodexAgentPlugin());
   agentLoader.register(new HermesAgentPlugin());
+  agentLoader.register(new GeminiAgentPlugin());
 
   const agentInstances = agentLoader.createAll(config, {
     onSessionIdUpdate: async (sessionId: string, agentSessionId: string) => {
@@ -137,6 +143,14 @@ async function main() {
 
   const channelInstances = await channelLoader.createAll(config);
   logger.info(`✓ Created ${channelInstances.length} channel instance(s)`);
+
+  // 启动迁移：将 sessions.channel 中的旧实例名回填为 channelType
+  const instanceToType = new Map<string, string>();
+  for (const inst of channelInstances) {
+    const type = inst.channelType || inst.adapter.channelName;
+    instanceToType.set(inst.adapter.channelName, type);
+  }
+  sessionManager.migrateChannelNames(instanceToType);
 
   // 创建命令处理器
   const cmdHandler = new CommandHandler(sessionManager, agentMap, config, messageCache, eventBus, defaultAgent);
@@ -210,7 +224,7 @@ async function main() {
     if (inst.onProjectPathRequest && inst.channel.onProjectPathRequest) {
       inst.channel.onProjectPathRequest(async (channelId: string) => {
         const session = await sessionManager.getOrCreateSession(
-          inst.adapter.name, channelId,
+          inst.adapter.channelName, channelId,
           config.projects?.defaultPath || process.cwd(),
           undefined, undefined, undefined, undefined
         );
@@ -220,12 +234,15 @@ async function main() {
       });
     }
 
-    // 注册 adapter、policy 和 options
-    processor.registerChannel(inst.adapter, inst.policy || defaultPolicy, inst.options);
+    // 注册 adapter、policy 和 options（注入 channelType）
+    const opts = inst.channelType
+      ? { ...inst.options, channelType: inst.channelType }
+      : inst.options;
+    processor.registerChannel(inst.adapter, inst.policy || defaultPolicy, opts);
     cmdHandler.registerAdapter(inst.adapter);
-    cmdHandler.registerChannel(inst.adapter.name, inst.channel);
+    cmdHandler.registerChannel(inst.adapter.channelName, inst.channel, inst.channelType);
     if (inst.policy) {
-      cmdHandler.registerPolicy(inst.adapter.name, inst.policy);
+      cmdHandler.registerPolicy(inst.adapter.channelName, inst.policy);
     }
   }
 
@@ -237,13 +254,13 @@ async function main() {
 
   // 连接插件系统的渠道
   for (const inst of channelInstances) {
-    const channelType = inst.channelType || inst.adapter.name;
+    const channelType = inst.channelType || inst.adapter.channelName;
 
     if (channelType === 'feishu') {
-      msgBridge.register(inst.adapter.name,
+      msgBridge.register(inst.adapter.channelName,
         (handler) => inst.channel.onMessage(async ({ channelId: chatId, content, images, peerId, peerName, messageId, mentions, threadId, rootId, chatType }: any) => {
           handler({
-            channel: inst.adapter.name, channelId: chatId, content, images, chatType,
+            channel: channelType, channelId: chatId, content, images, chatType,
             peerId: peerId || '', peerName, messageId, mentions, threadId,
             replyContext: rootId ? { replyToMessageId: rootId, replyInThread: true } : undefined,
           });
@@ -252,7 +269,8 @@ async function main() {
           replyToMessageId: replyContext?.replyToMessageId,
           replyInThread: true,
         }),
-        inst.adapter
+        inst.adapter,
+        channelType
       );
       inst.channel.onRecall?.((messageId: string) => {
         msgBridge.cancel(messageId);
@@ -264,11 +282,11 @@ async function main() {
       if (inst.channel.setEventBus) {
         inst.channel.setEventBus(eventBus);
       }
-      msgBridge.register(inst.adapter.name,
+      msgBridge.register(inst.adapter.channelName,
         (handler) => inst.channel.onMessage(async (channelId: string, content: string, peerId?: string,
           images?: Array<{ data: string; mimeType: string }>, chatType?: 'private' | 'group') => {
           handler({
-            channel: inst.adapter.name,
+            channel: channelType,
             channelId,
             content,
             images,
@@ -277,15 +295,16 @@ async function main() {
           });
         }),
         (channelId, text) => inst.channel.sendMessage(channelId, text),
-        inst.adapter
+        inst.adapter,
+        channelType
       );
     }
 
     if (channelType === 'aun') {
-      msgBridge.register(inst.adapter.name,
+      msgBridge.register(inst.adapter.channelName,
         (handler) => inst.channel.onMessage(async (opts: any) => {
           handler({
-            channel: inst.adapter.name,
+            channel: channelType,
             channelId: opts.channelId,
             content: opts.content,
             chatType: opts.chatType || 'private',
@@ -298,7 +317,8 @@ async function main() {
           });
         }),
         (channelId, text, replyContext) => inst.channel.sendMessage(channelId, text, replyContext),
-        inst.adapter
+        inst.adapter,
+        channelType
       );
     }
   }
@@ -308,31 +328,36 @@ async function main() {
 
   // 预填充 Feishu 已知 thread_id（重启后避免误判话题创建）
   for (const inst of channelInstances) {
-    const channelType = inst.channelType || inst.adapter.name;
+    const channelType = inst.channelType || inst.adapter.channelName;
     if (channelType === 'feishu' && 'preloadThreads' in inst.channel) {
-      const threadIds = sessionManager.getKnownThreadIds(inst.adapter.name);
+      const threadIds = sessionManager.getKnownThreadIds(channelType);
       (inst.channel as any).preloadThreads(threadIds);
     }
   }
 
   for (const name of connected) {
+    // 查找对应实例以获取 channelType
+    const inst = channelInstances.find(i => i.adapter.channelName === name);
+    const type = inst?.channelType || name;
     eventBus.publish({
       type: 'channel:connected',
-      channel: name.toLowerCase(),
+      channel: type.toLowerCase(),
+      channelName: name,
       timestamp: Date.now()
     });
   }
 
   // AUN 重连失败通知：通过 channel:health 事件
   for (const inst of channelInstances) {
-    const channelType = inst.channelType || inst.adapter.name;
+    const channelType = inst.channelType || inst.adapter.channelName;
     if (channelType === 'aun' && inst.channel.setOnChannelDown) {
       inst.channel.setOnChannelDown(() => {
         eventBus.publish({
           type: 'channel:health',
-          channel: inst.adapter.name,
+          channel: channelType,
+          channelName: inst.adapter.channelName,
           status: 'auth_error',
-          message: `⚠️ AUN 渠道 ${inst.adapter.name} 断连，自动重试已用尽。\n使用 /check rty aun 手动重连`,
+          message: `⚠️ AUN 渠道 ${inst.adapter.channelName} 断连，自动重试已用尽。\n使用 /check rty aun 手动重连`,
           timestamp: Date.now(),
         });
       });
@@ -340,24 +365,44 @@ async function main() {
   }
 
   // 统一 channel:health 跨通道通知（仅 auth_error）
+  // 按 (channelType, ownerId) 去重，避免同类型多实例重复通知
   eventBus.subscribe('channel:health', (event) => {
     if (event.type !== 'channel:health' || event.status !== 'auth_error') return;
-    const sourceChannel = event.channel;
+    const sourceChannelType = event.channel;
+    const sourceChannelName = (event as any).channelName || sourceChannelType;
     const msg = event.message;
-    logger.error(`[ChannelHealth] ${sourceChannel} auth_error: ${msg}`);
+    logger.error(`[ChannelHealth] ${sourceChannelName} auth_error: ${msg}`);
 
+    const notified = new Set<string>();  // channelType:ownerId 去重
     for (const other of channelInstances) {
-      if (other.adapter.name === sourceChannel) continue;
-      const ownerId = getOwner(config, other.adapter.name);
-      if (ownerId) {
-        other.adapter.sendText(ownerId, msg).catch(err => {
-          logger.error(`[ChannelHealth] Failed to notify ${other.adapter.name} owner:`, err);
-        });
-      }
+      const otherType = other.channelType || other.adapter.channelName;
+      if (otherType === sourceChannelType) continue;  // 跳过同类型通道
+      const ownerId = getOwner(config, other.adapter.channelName);
+      if (!ownerId) continue;
+      const key = `${otherType}:${ownerId}`;
+      if (notified.has(key)) continue;  // 同类型已通知过此 owner
+      notified.add(key);
+      other.adapter.sendText(ownerId, msg).catch(err => {
+        logger.error(`[ChannelHealth] Failed to notify ${other.adapter.channelName} owner:`, err);
+      });
     }
   });
 
-  logger.info(`\n🚀 EvolClaw is running with ${connected.length} channel(s): ${connected.join(', ')}\n`);
+  // 按 channelType 归组显示连接摘要
+  const connectedGroups = new Map<string, string[]>();
+  for (const inst of channelInstances) {
+    const name = inst.adapter.channelName;
+    if (!connected.includes(name)) continue;
+    const type = inst.channelType || name;
+    if (!connectedGroups.has(type)) connectedGroups.set(type, []);
+    connectedGroups.get(type)!.push(name);
+  }
+  const channelSummary = Array.from(connectedGroups.entries())
+    .map(([type, names]) => names.length === 1 ? names[0] : `${type}[${names.join(', ')}]`)
+    .join(', ');
+  const totalCount = connected.length;
+
+  logger.info(`\n🚀 EvolClaw is running with ${totalCount} channel(s): ${channelSummary}\n`);
   eventBus.publish({
     type: 'system:started',
     channels: connected.map(c => c.toLowerCase()),
@@ -423,15 +468,21 @@ async function main() {
   // IPC server — 供 CLI 查询实时状态
   const ipcServer = new IpcServer(resolvePaths().socket, (): IpcStatusResponse => {
     const channels: Record<string, ChannelStatus> = {};
+    const channelsByType: Record<string, string[]> = {};
     for (const inst of channelInstances) {
-      const name = inst.adapter.name;
-      channels[name] = inst.channel.getStatus?.() ?? { connected: true };
+      const name = inst.adapter.channelName;
+      const status = inst.channel.getStatus?.() ?? { connected: true };
+      const channelType = inst.channelType || name;
+      channels[name] = { ...status, channelType };
+      if (!channelsByType[channelType]) channelsByType[channelType] = [];
+      channelsByType[channelType].push(name);
     }
     const snap = statsCollector.getSnapshot();
     return {
       pid: process.pid,
       uptime: snap.uptimeMs,
       channels,
+      channelsByType,
       queue: {
         pending: messageQueue.getGlobalQueueLength(),
         processing: messageQueue.getGlobalProcessingCount(),
@@ -486,7 +537,8 @@ async function main() {
     // 断开插件系统的渠道
     await channelLoader.disconnectAll(channelInstances);
     for (const inst of channelInstances) {
-      eventBus.publish({ type: 'channel:disconnected', channel: inst.adapter.name, reason: 'shutdown' });
+      const type = inst.channelType || inst.adapter.channelName;
+      eventBus.publish({ type: 'channel:disconnected', channel: type, channelName: inst.adapter.channelName, reason: 'shutdown' });
     }
 
     sessionManager.close();
