@@ -345,13 +345,7 @@ async function initFeishuManual(rl: readline.Interface, config: any): Promise<bo
 
 // ==================== AUN Environment Check ====================
 
-export async function checkAunEnvironment(rl: readline.Interface): Promise<boolean> {
-  console.log('\n🔍 AUN 环境检查...\n');
-  // TS SDK (@eleans/aun-core-node) is bundled as npm dependency — no external deps needed
-  console.log('  ✓ @eleans/aun-core-node (TS SDK)');
-  console.log('');
-  return true;
-}
+// Moved to init-channel.ts
 
 // ==================== Rich Content Renderer ====================
 
@@ -391,125 +385,7 @@ async function offerRichContentRenderer(rl: readline.Interface, config: any): Pr
 
 // ==================== AUN AID Helpers ====================
 
-function isValidAid(name: string): boolean {
-  const labels = name.split('.');
-  return labels.length >= 3 && labels.every(l => /^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?$/.test(l));
-}
-
-async function setupAunAid(rl: readline.Interface, _config: any): Promise<{ aid: string; gatewayPort?: number } | null> {
-  let aid = '';
-  let gatewayPort: number | undefined;
-
-  // Outer loop: allows retrying with a different AID
-  while (true) {
-    // Ask AID with format validation
-    aid = '';
-    while (!aid) {
-      aid = (await ask(rl, '  AUN Agent ID (例: mybot.agentid.pub): ')).trim();
-      if (!aid) { console.log('  ⚠ 不能为空'); continue; }
-      if (!isValidAid(aid)) {
-        console.log('  ⚠ 无效 AID 格式（需要合法域名，至少三级，如 alice.agentid.pub）');
-        aid = '';
-      }
-    }
-
-    const portStr = (await ask(rl, '  Gateway 端口 [留空使用默认 443]: ')).trim();
-    gatewayPort = portStr ? parseInt(portStr, 10) : undefined;
-    if (gatewayPort !== undefined && (isNaN(gatewayPort) || gatewayPort < 1 || gatewayPort > 65535)) {
-      console.log('  ⚠ 端口号无效，使用默认 443');
-      gatewayPort = undefined;
-    }
-
-    // Check if AID exists locally
-    const aunPath = path.join(os.homedir(), '.aun');
-    const aidDir = path.join(aunPath, 'AIDs', aid);
-    if (fs.existsSync(aidDir) && fs.existsSync(path.join(aidDir, 'private'))) {
-      console.log(`  ✓ AID ${aid} 已存在`);
-      break;
-    }
-
-    const answer = (await ask(rl, `  ⚠ AID ${aid} 本地不存在，是否创建？[Y/n] `)).trim().toLowerCase();
-    if (answer === 'n' || answer === 'no') {
-      console.log('  已跳过 AID 创建（启动时可能连接失败）');
-      break;
-    }
-
-    // Create AID using TS SDK directly
-    console.log('  正在创建 AID...');
-    let failed = false;
-    try {
-      const { AUNClient } = await import('@eleans/aun-core-node');
-      const client = new AUNClient({ aun_path: aunPath });
-
-      // Set gateway URL from AID domain + port
-      const domain = aid.split('.').slice(1).join('.');
-      const port = gatewayPort || 443;
-      (client as any)._gatewayUrl = `wss://gateway.${domain}:${port}/aun`;
-
-      const result = await client.auth.createAid({ aid });
-      console.log(`  ✓ AID ${result.aid} 创建成功`);
-      try { await client.close(); } catch { /* ignore */ }
-    } catch (e: any) {
-      const msg = e.message || String(e);
-      console.log(`  ✗ AID 创建失败: ${msg.slice(0, 200)}`);
-      failed = true;
-    }
-
-    if (!failed) break;
-
-    // Creation failed — retry or give up
-    const retry = (await ask(rl, '  → 重新输入 (r) / 跳过 (s) / 取消 (c)？[r/s/c] ')).trim().toLowerCase();
-    if (retry === 'c') return null;
-    if (retry === 's') break;
-    // default: retry with new AID
-  }
-
-  return { aid, gatewayPort };
-}
-
-// ==================== Init AUN (standalone) ====================
-
-export async function cmdInitAun(): Promise<void> {
-  const p = resolvePaths();
-
-  if (!fs.existsSync(p.config)) {
-    console.log('❌ 配置文件不存在，请先运行 evolclaw init');
-    return;
-  }
-
-  const config = JSON.parse(fs.readFileSync(p.config, 'utf-8'));
-
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  try {
-    if (config.channels?.aun?.aid) {
-      const answer = (await ask(rl, '已有 AUN 配置，是否重新配置？[y/N] ')).trim().toLowerCase();
-      if (answer !== 'y' && answer !== 'yes') {
-        console.log('已取消');
-        return;
-      }
-    }
-
-    if (!await checkAunEnvironment(rl)) {
-      return;
-    }
-
-    const result = await setupAunAid(rl, config);
-    if (!result) return;
-
-    if (!config.channels) config.channels = {};
-    config.channels.aun = {
-      enabled: true,
-      aid: result.aid,
-      ...(result.gatewayPort && { gatewayPort: result.gatewayPort }),
-    };
-    if (!config.channels.defaultChannel) config.channels.defaultChannel = 'aun';
-
-    fs.writeFileSync(p.config, JSON.stringify(config, null, 2) + '\n');
-    console.log('\n✓ AUN 配置已写入');
-  } finally {
-    rl.close();
-  }
-}
+// Moved to init-channel.ts
 
 // ==================== Main ====================
 
@@ -587,7 +463,7 @@ export async function cmdInit() {
         const feishuMethod = (await ask(rl, '请选择 [1]: ')).trim() || '1';
 
         if (feishuMethod === '1') {
-          const { runFeishuQrFlow } = await import('./init-feishu.js');
+          const { runFeishuQrFlow } = await import('./init-channel.js');
           const result = await runFeishuQrFlow();
           if (!result) {
             console.log('已取消');
@@ -607,7 +483,7 @@ export async function cmdInit() {
         config.channels.defaultChannel = 'feishu';
 
       } else if (channelChoice === '2') {
-        const { runWechatQrFlow } = await import('./init-wechat.js');
+        const { runWechatQrFlow } = await import('./init-channel.js');
         const result = await runWechatQrFlow();
         if (!result) {
           console.log('已取消');
@@ -622,6 +498,7 @@ export async function cmdInit() {
         config.channels.defaultChannel = 'wechat';
 
       } else if (channelChoice === '3') {
+        const { checkAunEnvironment, setupAunAid } = await import('./init-channel.js');
         const aunReady = await checkAunEnvironment(rl);
         if (!aunReady) continue; // 退回重选渠道
 
@@ -652,4 +529,74 @@ export async function cmdInit() {
   } finally {
     rl.close();
   }
+}
+
+// ==================== Instance Selection (from init-common) ====================
+
+export interface OverwriteChoice {
+  action: 'overwrite';
+  index: number;
+  name: string;
+}
+
+export interface AddChoice {
+  action: 'add';
+  name: string;
+}
+
+export type InstanceChoice = OverwriteChoice | AddChoice;
+
+/**
+ * Present instance selection menu when existing instances are found.
+ * Returns the user's choice, or null if cancelled.
+ */
+export async function selectInstance(
+  rl: readline.Interface,
+  channelType: string,
+  instances: Array<{ name: string; [key: string]: any }>
+): Promise<InstanceChoice | null> {
+  const typeLabel = channelType === 'feishu' ? '飞书' : channelType === 'wechat' ? '微信' : 'AUN';
+  console.log(`\n发现已有 ${typeLabel} 机器人：`);
+  const letters = 'abcdefghijklmnopqrstuvwxyz';
+  for (let i = 0; i < instances.length; i++) {
+    console.log(`  ${letters[i]}. ${instances[i].name}`);
+  }
+  const addLetter = letters[instances.length];
+  console.log(`  ${addLetter}. 添加新机器人`);
+  console.log('');
+
+  const validOptions = letters.slice(0, instances.length + 1).split('');
+  let choice = '';
+  while (!validOptions.includes(choice)) {
+    choice = (await ask(rl, '请选择: ')).trim().toLowerCase();
+    if (!validOptions.includes(choice)) {
+      console.log(`无效选择，请输入 ${validOptions.join('/')}`);
+    }
+  }
+
+  const choiceIndex = letters.indexOf(choice);
+  if (choiceIndex === instances.length) {
+    // Add new — ask for name
+    let name = '';
+    while (!name) {
+      name = (await ask(rl, '请输入新机器人名称: ')).trim();
+      if (!name) console.log('  名称不能为空');
+      if (instances.some(i => i.name === name)) {
+        console.log(`  名称 "${name}" 已存在，请换一个`);
+        name = '';
+      }
+    }
+    return { action: 'add', name };
+  }
+
+  // Overwrite — requires confirmation
+  const target = instances[choiceIndex];
+  console.log(`\n已选择：${target.name}`);
+  const confirm = (await ask(rl, `⚠️ 即将覆盖该机器人配置，确认？(y/N) `)).trim().toLowerCase();
+  if (confirm !== 'y' && confirm !== 'yes') {
+    console.log('已取消');
+    return null;
+  }
+
+  return { action: 'overwrite', index: choiceIndex, name: target.name };
 }

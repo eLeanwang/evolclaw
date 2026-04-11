@@ -1,7 +1,7 @@
-import { Message } from '../types.js';
+import { Message } from '../../types.js';
 import path from 'path';
-import { logger } from '../utils/logger.js';
-import type { EventBus } from './event-bus.js';
+import { logger } from '../../utils/logger.js';
+import type { EventBus } from '../event-bus.js';
 
 type MessageHandler = (message: Message) => Promise<void>;
 

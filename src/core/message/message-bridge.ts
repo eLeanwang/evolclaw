@@ -1,11 +1,11 @@
-import { logger } from '../utils/logger.js';
-import { StreamDebouncer } from '../utils/stream-debouncer.js';
-import type { SessionManager } from './session-manager.js';
+import { logger } from '../../utils/logger.js';
+import { StreamDebouncer } from './stream-debouncer.js';
+import type { SessionManager } from '../session/session-manager.js';
 import type { MessageProcessor } from './message-processor.js';
 import type { MessageQueue } from './message-queue.js';
-import type { CommandHandler as CmdHandler } from './command-handler.js';
-import type { EventBus } from './event-bus.js';
-import type { Config, Message, InboundMessage, ChannelAdapter, ReplyContext } from '../types.js';
+import type { CommandHandler as CmdHandler } from '../command-handler.js';
+import type { EventBus } from '../event-bus.js';
+import type { Config, Message, InboundMessage, ChannelAdapter, ReplyContext } from '../../types.js';
 
 /**
  * MessageBridge — Channel 与 Core 之间的消息桥梁
@@ -178,7 +178,7 @@ export class MessageBridge {
 
   /** 首次交互自动绑定 owner */
   private async autoBindOwner(channel: string, userId: string): Promise<void> {
-    const { getOwner, setOwner } = await import('../config.js');
+    const { getOwner, setOwner } = await import('../../config.js');
     const currentOwner = getOwner(this.config, channel);
     // currentOwner === undefined means either no owner set, or instance not found
     // In both cases, try to set — setOwner is a no-op for unknown instances

@@ -11,8 +11,8 @@
  * Messages have type: 'user' | 'gemini' (not 'role').
  */
 
-import type { CliSessionEntry, SdkSessionEntry, SessionFileAdapter, SessionFileInfo } from '../session-file-adapter.js';
-import { logger } from '../../utils/logger.js';
+import type { CliSessionEntry, SdkSessionEntry, SessionFileAdapter, SessionFileInfo } from './session-file-adapter.js';
+import { logger } from '../../../utils/logger.js';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';

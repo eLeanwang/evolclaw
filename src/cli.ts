@@ -6,10 +6,9 @@ import { resolveRoot, resolvePaths, ensureDataDirs, getPackageRoot } from './pat
 import { loadConfig, validateConfigIntegrity, resolveAnthropicConfig } from './config.js';
 import { migrateProject } from './utils/migrate-project.js';
 import readline from 'readline';
-import { cmdInit, cmdInitAun, checkAunEnvironment } from './utils/init.js';
-import { ipcQuery } from './utils/ipc-client.js';
-import { cmdInitWechat } from './utils/init-wechat.js';
-import { cmdInitFeishu } from './utils/init-feishu.js';
+import { cmdInit } from './utils/init.js';
+import { ipcQuery } from './ipc.js';
+import { cmdInitWechat, cmdInitFeishu, cmdInitAun, checkAunEnvironment } from './utils/init-channel.js';
 import * as platform from './utils/cross-platform.js';
 import { EventBus } from './core/event-bus.js';
 
@@ -1146,7 +1145,7 @@ async function cmdDiagnose() {
 
   // 4. 检查数据库
   try {
-    const { SessionManager } = await import('./core/session-manager.js');
+    const { SessionManager } = await import('./core/session/session-manager.js');
     const eventBus = new EventBus();
     new SessionManager(p.db, eventBus);
     console.log(`[diagnose] ✓ 数据库初始化成功: ${p.db}`);

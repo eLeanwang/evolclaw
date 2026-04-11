@@ -5,10 +5,10 @@
  * and wraps sdkListSessions for name synchronization.
  */
 
-import type { SessionFileAdapter, SessionFileInfo, CliSessionEntry, SdkSessionEntry } from '../session-file-adapter.js';
+import type { SessionFileAdapter, SessionFileInfo, CliSessionEntry, SdkSessionEntry } from './session-file-adapter.js';
 import { listSessions as sdkListSessions } from '@anthropic-ai/claude-agent-sdk';
-import { encodePath } from '../../utils/cross-platform.js';
-import { logger } from '../../utils/logger.js';
+import { encodePath } from '../../../utils/cross-platform.js';
+import { logger } from '../../../utils/logger.js';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';

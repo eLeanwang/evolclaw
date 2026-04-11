@@ -1,7 +1,7 @@
-import { logger } from './logger.js';
+import { logger } from '../../utils/logger.js';
 import fs from 'fs';
 import path from 'path';
-import { resolvePaths } from '../paths.js';
+import { resolvePaths } from '../../paths.js';
 
 // 诊断日志（按需启用，通过 config.debug.flusherDiag 控制）
 let diagStream: fs.WriteStream | null = null;

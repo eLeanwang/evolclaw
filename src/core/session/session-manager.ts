@@ -1,11 +1,11 @@
 import { DatabaseSync } from 'node:sqlite';
-import { Session, SessionIdentity } from '../types.js';
-import { ensureDir } from '../config.js';
-import { resolvePaths } from '../paths.js';
-import { logger } from '../utils/logger.js';
-import { encodePath } from '../utils/cross-platform.js';
-import { EventBus } from './event-bus.js';
-import type { SessionFileAdapter, SessionFileInfo, CliSessionEntry, SdkSessionEntry } from './session-file-adapter.js';
+import { Session, SessionIdentity } from '../../types.js';
+import { ensureDir } from '../../config.js';
+import { resolvePaths } from '../../paths.js';
+import { logger } from '../../utils/logger.js';
+import { encodePath } from '../../utils/cross-platform.js';
+import { EventBus } from '../event-bus.js';
+import type { SessionFileAdapter, SessionFileInfo, CliSessionEntry, SdkSessionEntry } from './adapters/session-file-adapter.js';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';

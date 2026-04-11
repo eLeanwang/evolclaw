@@ -18,7 +18,7 @@ import type { Config } from '../types.js';
 import type { AgentPlugin, AgentInstance, AgentCallbacks } from '../core/agent-loader.js';
 import type { AgentEvent, AgentRunnerFull, ModelSwitcher, PermissionModeInfo } from './claude-runner.js';
 import { resolveGoogleConfig, type GoogleResolved } from '../config.js';
-import { GeminiSessionFileAdapter } from '../core/adapters/gemini-session-file-adapter.js';
+import { GeminiSessionFileAdapter } from '../core/session/adapters/gemini-session-file-adapter.js';
 import { logger } from '../utils/logger.js';
 
 // Strip ANSI escape codes from Gemini CLI text output.

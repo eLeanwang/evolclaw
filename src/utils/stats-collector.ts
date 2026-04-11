@@ -1,4 +1,4 @@
-import { EventBus, GatewayEvent } from './event-bus.js';
+import { EventBus, GatewayEvent } from '../core/event-bus.js';
 
 interface EventRecord {
   type: string;

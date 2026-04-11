@@ -1,6 +1,6 @@
 import fsPromises from 'fs/promises';
 import path from 'path';
-import { logger } from './logger.js';
+import { logger } from '../../utils/logger.js';
 
 /**
  * 会话文件健康检查结果

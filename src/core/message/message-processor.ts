@@ -1,16 +1,16 @@
 import path from 'path';
 import fs from 'fs';
-import { type AgentRunnerFull, hasCompact, type AgentEvent } from '../agents/claude-runner.js';
-import { SessionManager } from './session-manager.js';
-import { StreamFlusher } from '../utils/stream-flusher.js';
-import { MessageCache } from '../utils/message-cache.js';
-import { StreamIdleMonitor } from '../utils/stream-idle-monitor.js';
-import { logger } from '../utils/logger.js';
-import { getErrorMessage, classifyError, ErrorType, ERROR_PREFIX, isInfraError, prefixErrorType, isRetryableError } from '../utils/error-utils.js';
-import { EventBus } from './event-bus.js';
-import { summarizeToolInput } from '../utils/permission-utils.js';
-import type { Message, Config, Session, ChannelAdapter, ChannelOptions, ChannelPolicy, CommandHandler } from '../types.js';
-import { getOwner } from '../config.js';
+import { type AgentRunnerFull, hasCompact, type AgentEvent } from '../../agents/claude-runner.js';
+import { SessionManager } from '../session/session-manager.js';
+import { StreamFlusher } from './stream-flusher.js';
+import { MessageCache } from './message-cache.js';
+import { StreamIdleMonitor } from './stream-idle-monitor.js';
+import { logger } from '../../utils/logger.js';
+import { getErrorMessage, classifyError, ErrorType, ERROR_PREFIX, isInfraError, prefixErrorType, isRetryableError } from '../../utils/error-utils.js';
+import { EventBus } from '../event-bus.js';
+import { summarizeToolInput } from '../permission.js';
+import type { Message, Config, Session, ChannelAdapter, ChannelOptions, ChannelPolicy, CommandHandler } from '../../types.js';
+import { getOwner } from '../../config.js';
 
 /**
  * 统一消息处理器
@@ -248,7 +248,7 @@ export class MessageProcessor {
   }
 
   /** 从 session 提取渠道预构建的回复上下文 */
-  private getReplyContext(session: Session): import('../types.js').ReplyContext | undefined {
+  private getReplyContext(session: Session): import('../../types.js').ReplyContext | undefined {
     return session.metadata?.replyContext;
   }
 

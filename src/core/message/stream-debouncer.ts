@@ -1,5 +1,5 @@
-import { logger } from './logger.js';
-import type { Message } from '../types.js';
+import { logger } from '../../utils/logger.js';
+import type { Message } from '../../types.js';
 
 /** 窗口内的单条消息快照 */
 interface DebouncedEntry {

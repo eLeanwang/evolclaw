@@ -6,7 +6,7 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import { logger } from '../utils/logger.js';
-import { checkBlacklist, summarizeToolInput } from '../utils/permission-utils.js';
+import { checkBlacklist, summarizeToolInput } from '../core/permission.js';
 import { encodePath } from '../utils/cross-platform.js';
 import type { AgentPlugin, AgentInstance, AgentCallbacks } from '../core/agent-loader.js';
 

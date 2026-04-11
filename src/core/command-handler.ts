@@ -1,12 +1,12 @@
 import { Config, ChannelAdapter, Session, ChannelPolicy } from '../types.js';
-import { SessionManager } from './session-manager.js';
+import { SessionManager } from './session/session-manager.js';
 import { type AgentRunnerFull, hasModelSwitcher, hasPermissionController } from '../agents/claude-runner.js';
-import { MessageCache } from '../utils/message-cache.js';
-import { MessageProcessor } from './message-processor.js';
+import { MessageCache } from './message/message-cache.js';
+import { MessageProcessor } from './message/message-processor.js';
 import { EventBus } from './event-bus.js';
-import type { StatsCollector } from './stats-collector.js';
+import type { StatsCollector } from '../utils/stats-collector.js';
 import { PermissionGateway, type PermissionDecision } from './permission.js';
-import { MessageQueue } from './message-queue.js';
+import { MessageQueue } from './message/message-queue.js';
 import { saveConfig, resolvePaths, getPackageRoot, getOwner } from '../config.js';
 import { logger } from '../utils/logger.js';
 import path from 'path';
@@ -1878,7 +1878,7 @@ export class CommandHandler {
       }
 
       const repairAgent = this.getAgent(repairSession.agentId);
-      const { checkSessionFile, backupSessionFile } = await import('../utils/session-file-health.js');
+      const { checkSessionFile, backupSessionFile } = await import('./session/session-file-health.js');
 
       try {
         if (!repairSession.agentSessionId) {
