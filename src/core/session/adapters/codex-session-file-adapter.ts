@@ -6,7 +6,7 @@
  */
 
 import { DatabaseSync } from 'node:sqlite';
-import type { SessionFileAdapter, SessionFileInfo, CliSessionEntry, SdkSessionEntry } from './session-file-adapter.js';
+import type { SessionFileAdapter, SessionFileInfo, CliSessionEntry, SdkSessionEntry } from '../session-file-adapter.js';
 import { logger } from '../../../utils/logger.js';
 import path from 'path';
 import fs from 'fs';
