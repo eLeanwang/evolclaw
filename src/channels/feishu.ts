@@ -9,7 +9,7 @@ import { hasRichContent, renderAllRichContent, checkDependencies } from '../util
 export interface FeishuConfig {
   appId: string;
   appSecret: string;
-  enableRichContent?: boolean;  // 是否启用富内容渲染（LaTeX/Mermaid等），默认 true
+  enableRichContent?: boolean;  // 全局开关，默认 false
 }
 
 export interface MessageHandlerOptions {
@@ -47,7 +47,7 @@ export class FeishuChannel {
   private enableRichContent: boolean;
 
   constructor(private config: FeishuConfig) {
-    this.enableRichContent = config.enableRichContent ?? true;  // 默认启用
+    this.enableRichContent = config.enableRichContent ?? false;  // 默认关闭
   }
 
   /**
@@ -478,7 +478,7 @@ export class FeishuChannel {
         });
       } else {
         await this.client.im.message.create({
-          params: { receive_id_type: 'chat_id' },
+          params: { receive_id_type: chatId.startsWith('ou_') ? 'open_id' : chatId.startsWith('on_') ? 'union_id' : 'chat_id' },
           data: { receive_id: chatId, msg_type: msgType, content: msgContent }
         });
       }
@@ -555,7 +555,7 @@ export class FeishuChannel {
         });
       } else {
         await this.client.im.message.create({
-          params: { receive_id_type: 'chat_id' },
+          params: { receive_id_type: chatId.startsWith('ou_') ? 'open_id' : chatId.startsWith('on_') ? 'union_id' : 'chat_id' },
           data: {
             receive_id: chatId,
             msg_type: 'file',
@@ -606,7 +606,7 @@ export class FeishuChannel {
         });
       } else {
         await this.client.im.message.create({
-          params: { receive_id_type: 'chat_id' },
+          params: { receive_id_type: chatId.startsWith('ou_') ? 'open_id' : chatId.startsWith('on_') ? 'union_id' : 'chat_id' },
           data: { receive_id: chatId, msg_type: 'image', content: msgContent }
         });
       }
@@ -945,7 +945,7 @@ export class FeishuChannelPlugin implements ChannelPlugin {
       const channel = new FeishuChannel({
         appId: inst.appId,
         appSecret: inst.appSecret,
-        enableRichContent: inst.enableRichContent,
+        enableRichContent: config.enableRichContent,
       });
 
       const adapter = {

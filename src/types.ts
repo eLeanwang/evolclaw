@@ -11,7 +11,6 @@ export interface FeishuChannelConfig {
   flushDelay?: number;  // flush 间隔(秒)，默认使用全局值
   debounce?: number;    // 入站消息去抖间隔(秒)，覆盖全局 debounce
   showActivities?: 'all' | 'dm-only' | 'owner-dm-only' | 'none';  // 覆盖全局 showActivities
-  enableRichContent?: boolean;  // 是否启用富内容渲染（LaTeX/Mermaid等），默认 true
 }
 
 export interface FeishuChannelInstanceConfig extends FeishuChannelConfig {
@@ -99,6 +98,7 @@ export interface Config {
     autoCreate: boolean;
     list?: Record<string, string>;
   };
+  enableRichContent?: boolean;  // 启用富内容渲染（LaTeX/Mermaid），默认 false
   flushDelay?: number;  // 消息批量发送间隔(秒)，默认 4
   debounce?: number;    // 入站消息去抖间隔(秒)，默认 2，设 0 关闭
   debug?: {

@@ -211,9 +211,9 @@ export function resolveHermesConfig(config: Config): HermesResolved {
 
   // Hermes project path: from projects list or default
   const hermesProjectPath = config.projects?.list?.['hermes']
-    || path.join(os.homedir(), 'projects', 'hermes-agent');
+    || path.join(os.homedir(), '.hermes', 'hermes-agent');
 
-  // Python path: config → hermes project venv
+  // Python path: config → hermes project .venv
   const pythonPath = hermesCfg?.pythonPath
     || path.join(hermesProjectPath, '.venv', 'bin', 'python');
 
@@ -373,31 +373,37 @@ export function isOwner(config: Config, channelOrType: string, userId: string): 
 function validateConfig(config: any): asserts config is Config {
   // anthropic 部分不再强制校验，由 resolveAnthropicConfig() 处理
 
-  // Feishu 配置可选，但如果配置了就要完整
-  if (config.channels?.feishu) {
-    if (!config.channels.feishu.appId || config.channels.feishu.appId.startsWith('YOUR_')) {
-      logger.warn('⚠ Feishu appId not configured (Feishu channel will be disabled)');
+  // Feishu 配置可选，但如果配置了就要完整（支持 array / object 两种格式）
+  const feishuInstances = normalizeChannelInstances(config.channels?.feishu, 'feishu');
+  for (const inst of feishuInstances) {
+    const label = feishuInstances.length > 1 ? ` [${inst.name}]` : '';
+    if (!(inst as any).appId || (inst as any).appId.startsWith('YOUR_')) {
+      logger.warn(`⚠ Feishu${label} appId not configured (Feishu channel will be disabled)`);
     }
-    if (!config.channels.feishu.appSecret || config.channels.feishu.appSecret.startsWith('YOUR_')) {
-      logger.warn('⚠ Feishu appSecret not configured (Feishu channel will be disabled)');
+    if (!(inst as any).appSecret || (inst as any).appSecret.startsWith('YOUR_')) {
+      logger.warn(`⚠ Feishu${label} appSecret not configured (Feishu channel will be disabled)`);
     }
   }
 
-  // AUN 配置可选，但如果配置了就要有 domain 和 agentName
-  if (config.channels?.aun?.enabled !== false && config.channels?.aun) {
-    if (!config.channels.aun.domain) {
-      logger.warn('⚠ AUN domain not configured (AUN channel will be disabled)');
-    }
-    if (!config.channels.aun.agentName) {
-      logger.warn('⚠ AUN agentName not configured (AUN channel will be disabled)');
+  // AUN 配置可选，但如果配置了就要有 aid（支持 array / object 两种格式）
+  const aunInstances = normalizeChannelInstances(config.channels?.aun, 'aun');
+  for (const inst of aunInstances) {
+    if ((inst as any).enabled === false) continue;
+    const label = aunInstances.length > 1 ? ` [${inst.name}]` : '';
+    if (!(inst as any).aid) {
+      logger.warn(`⚠ AUN${label} aid not configured (AUN channel will be disabled)`);
     }
   }
 
   if (!config.projects?.defaultPath) throw new Error('Missing projects.defaultPath');
 
-  // WeChat 配置可选，但如果启用了就需要 token
-  if (config.channels?.wechat?.enabled && !config.channels?.wechat?.token) {
-    logger.warn('⚠ WeChat enabled but token not configured (WeChat channel will be disabled)');
+  // WeChat 配置可选，但如果启用了就需要 token（支持 array / object 两种格式）
+  const wechatInstances = normalizeChannelInstances(config.channels?.wechat, 'wechat');
+  for (const inst of wechatInstances) {
+    if ((inst as any).enabled && !(inst as any).token) {
+      const label = wechatInstances.length > 1 ? ` [${inst.name}]` : '';
+      logger.warn(`⚠ WeChat${label} enabled but token not configured (WeChat channel will be disabled)`);
+    }
   }
 }
 

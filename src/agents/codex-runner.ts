@@ -248,6 +248,7 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
   ): AsyncGenerator<AgentEvent> {
     try {
       for await (const event of events) {
+        if (!this.activeAbortControllers.has(sessionId)) break;
         yield* this.mapEvent(event, sessionId, thread);
       }
     } finally {

@@ -234,11 +234,11 @@ evolclaw/
 - `/safe` - 进入安全模式
 
 **模型管理**：
-- `/model` - 显示当前模型和推理强度
+- `/model` - 显示当前模型；支持思考预算的模型会额外显示推理强度
 - `/model <model>` - 切换模型
-- `/model <effort>` - 切换推理强度（low / medium / high / max）
-- `/model <model> <effort>` - 同时切换模型和推理强度
-- `/model auto` - 恢复 SDK 默认推理强度
+- `/model <effort>` - 切换推理强度（仅支持的模型）
+- `/model <model> <effort>` - 同时切换模型和推理强度（仅支持的模型）
+- `/model auto` - 恢复 SDK 默认推理强度（仅支持的模型）
 
 ## 技术栈
 

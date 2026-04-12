@@ -196,6 +196,8 @@ class AgentManager:
         self.provider: str = os.environ.get('HERMES_PROVIDER', 'custom')
         self.session_db = SessionDB()
         self._lock = threading.Lock()
+        self._interrupt_timer: threading.Timer | None = None
+        self._interrupt_emitted = False  # guards against duplicate complete events
 
         # Register gateway approval callback — when Hermes' approval.py
         # detects a dangerous command, it calls this callback to emit an
@@ -278,6 +280,7 @@ class AgentManager:
             return
 
         start = time.time()
+        self._interrupt_emitted = False
 
         global _text_buffer
         _text_buffer = TextBuffer()
@@ -306,6 +309,15 @@ class AgentManager:
 
             # Flush remaining buffered text (covers pure-text replies with no tool calls)
             _text_buffer.flush()
+
+            # Cancel interrupt timer if it hasn't fired yet
+            if self._interrupt_timer:
+                self._interrupt_timer.cancel()
+                self._interrupt_timer = None
+
+            # Skip emitting complete if the interrupt timer already emitted it
+            if self._interrupt_emitted:
+                return
 
             duration_ms = int((time.time() - start) * 1000)
             final_response = result.get('final_response', '') or ''
@@ -336,6 +348,11 @@ class AgentManager:
                 })
 
         except Exception as e:
+            if self._interrupt_timer:
+                self._interrupt_timer.cancel()
+                self._interrupt_timer = None
+            if self._interrupt_emitted:
+                return
             if _text_buffer:
                 _text_buffer.flush()
             duration_ms = int((time.time() - start) * 1000)
@@ -351,12 +368,38 @@ class AgentManager:
             self.agent = None
 
     def handle_interrupt(self) -> None:
-        """Interrupt the current agent operation."""
+        """Interrupt the current agent operation.
+
+        Two-phase interrupt:
+        1. Call agent.interrupt() to set the cooperative flag
+        2. Start a 3s timer — if run_conversation hasn't returned by then,
+           emit a complete event directly so the TS side doesn't hang
+        """
         if self.agent:
             try:
-                self.agent.request_interrupt()
+                self.agent.interrupt()
             except Exception:
                 pass
+
+            # 3s timeout fallback: if agent doesn't respond to interrupt,
+            # emit complete directly so the event stream terminates
+            def _timeout_emit():
+                if not self._interrupt_emitted:
+                    self._interrupt_emitted = True
+                    if _text_buffer:
+                        _text_buffer.flush()
+                    emit({
+                        'type': 'complete',
+                        'result': '',
+                        'subtype': 'interrupted',
+                        'durationMs': 0,
+                    })
+
+            if self._interrupt_timer:
+                self._interrupt_timer.cancel()
+            self._interrupt_timer = threading.Timer(3.0, _timeout_emit)
+            self._interrupt_timer.daemon = True
+            self._interrupt_timer.start()
 
     def handle_reset_agent(self) -> None:
         """Discard the current agent instance, if any."""

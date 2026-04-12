@@ -569,9 +569,9 @@ async function cmdStatus() {
     const sizeMB = (stat.size / 1024 / 1024).toFixed(1);
     console.log(`  Main log: ${mainLog} (${sizeMB} MB)`);
     console.log('');
-    console.log('📝 Recent activity (last 10 lines):');
+    console.log('📝 Recent activity (last 30 lines):');
     const content = fs.readFileSync(mainLog, 'utf-8').trim().split('\n');
-    console.log(content.slice(-10).map(l => `  ${l}`).join('\n'));
+    console.log(content.slice(-30).map(l => `  ${l}`).join('\n'));
   } else {
     console.log('  (no log file yet)');
   }

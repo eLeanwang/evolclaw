@@ -57,88 +57,127 @@ export class CodexSessionFileAdapter implements SessionFileAdapter {
   }
 
   checkExists(projectPath: string, agentSessionId: string): boolean {
+    // 1. 优先查 state_*.sqlite（覆盖 CLI 创建的线程）
     const db = this.getDb();
-    if (!db) return false;
+    if (db) {
+      try {
+        const row = db.prepare(
+          'SELECT 1 FROM threads WHERE id = ? AND archived = 0'
+        ).get(agentSessionId) as any;
+        if (row) return true;
+      } catch (error) {
+        logger.warn(`[CodexAdapter] checkExists DB query failed:`, error);
+      }
+    }
+
+    // 2. Fallback: 扫 ~/.codex/sessions/ 下的 rollout JSONL
+    //    SDK 创建的 thread 不写 state_*.sqlite，但会持久化到 sessions 目录
+    return !!this.findRolloutFile(agentSessionId);
+  }
+
+  /**
+   * 在 ~/.codex/sessions/ 下递归查找含 agentSessionId 的 rollout JSONL 文件
+   */
+  private findRolloutFile(agentSessionId: string): string | null {
+    const sessionsDir = path.join(os.homedir(), '.codex', 'sessions');
+    if (!fs.existsSync(sessionsDir)) return null;
 
     try {
-      const row = db.prepare(
-        'SELECT 1 FROM threads WHERE id = ? AND archived = 0'
-      ).get(agentSessionId) as any;
-      return !!row;
-    } catch (error) {
-      logger.warn(`[CodexAdapter] checkExists failed:`, error);
-      return false;
+      const search = (dir: string): string | null => {
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+          if (entry.isDirectory()) {
+            const found = search(path.join(dir, entry.name));
+            if (found) return found;
+          } else if (entry.name.endsWith('.jsonl') && entry.name.includes(agentSessionId)) {
+            return path.join(dir, entry.name);
+          }
+        }
+        return null;
+      };
+      return search(sessionsDir);
+    } catch {
+      return null;
     }
   }
 
   getFileInfo(projectPath: string, agentSessionId: string): SessionFileInfo {
+    // 1. 优先查 state DB
     const db = this.getDb();
-    if (!db) return { turns: 0 };
+    if (db) {
+      try {
+        const row = db.prepare(
+          'SELECT title, rollout_path FROM threads WHERE id = ?'
+        ).get(agentSessionId) as any;
 
-    try {
-      const row = db.prepare(
-        'SELECT title, rollout_path FROM threads WHERE id = ?'
-      ).get(agentSessionId) as any;
-
-      if (!row) return { turns: 0 };
-
-      const title = row.title || undefined;
-      const turns = this.countTurnsFromRollout(row.rollout_path);
-
-      return { turns, title };
-    } catch (error) {
-      logger.warn(`[CodexAdapter] getFileInfo failed:`, error);
-      return { turns: 0 };
+        if (row) {
+          return {
+            turns: this.countTurnsFromRollout(row.rollout_path),
+            title: row.title || undefined,
+          };
+        }
+      } catch (error) {
+        logger.warn(`[CodexAdapter] getFileInfo DB query failed:`, error);
+      }
     }
+
+    // 2. Fallback: 从 sessions 目录查找 rollout 文件
+    const rolloutPath = this.findRolloutFile(agentSessionId);
+    if (rolloutPath) {
+      return { turns: this.countTurnsFromRollout(rolloutPath) };
+    }
+
+    return { turns: 0 };
   }
 
   readFirstMessage(projectPath: string, agentSessionId: string): string | null {
+    // 1. 优先查 state DB
     const db = this.getDb();
-    if (!db) return null;
+    if (db) {
+      try {
+        const row = db.prepare(
+          'SELECT first_user_message FROM threads WHERE id = ?'
+        ).get(agentSessionId) as any;
 
-    try {
-      const row = db.prepare(
-        'SELECT first_user_message FROM threads WHERE id = ?'
-      ).get(agentSessionId) as any;
-
-      if (!row?.first_user_message) return null;
-      const text = row.first_user_message.trim().replace(/\s+/g, ' ');
-      return text.substring(0, 50) + (text.length > 50 ? '...' : '');
-    } catch (error) {
-      logger.warn(`[CodexAdapter] readFirstMessage failed:`, error);
-      return null;
+        if (row?.first_user_message) {
+          const text = row.first_user_message.trim().replace(/\s+/g, ' ');
+          return text.substring(0, 50) + (text.length > 50 ? '...' : '');
+        }
+      } catch (error) {
+        logger.warn(`[CodexAdapter] readFirstMessage DB query failed:`, error);
+      }
     }
+
+    // 2. Fallback: 从 rollout JSONL 读取第一条 user_message
+    const rolloutPath = this.findRolloutFile(agentSessionId);
+    if (!rolloutPath) return null;
+    return this.readUserMessageFromRollout(rolloutPath, 'first');
   }
 
   readLastUserMessage(projectPath: string, agentSessionId: string): string | null {
+    // 1. 优先查 state DB 获取 rollout_path
     const db = this.getDb();
-    if (!db) return null;
+    let rolloutPath: string | null = null;
 
-    try {
-      const row = db.prepare(
-        'SELECT rollout_path FROM threads WHERE id = ?'
-      ).get(agentSessionId) as any;
-
-      if (!row?.rollout_path || !fs.existsSync(row.rollout_path)) return null;
-
-      const content = fs.readFileSync(row.rollout_path, 'utf-8');
-      const lines = content.split('\n').filter(l => l.trim());
-      let lastMessage: string | null = null;
-
-      for (const line of lines) {
-        try {
-          const event = JSON.parse(line);
-          if (event.type === 'event_msg' && event.payload?.type === 'user_message' && event.payload.message) {
-            const text = event.payload.message.trim().replace(/\s+/g, ' ');
-            lastMessage = text.substring(0, 50) + (text.length > 50 ? '...' : '');
-          }
-        } catch { /* skip malformed line */ }
+    if (db) {
+      try {
+        const row = db.prepare(
+          'SELECT rollout_path FROM threads WHERE id = ?'
+        ).get(agentSessionId) as any;
+        if (row?.rollout_path && fs.existsSync(row.rollout_path)) {
+          rolloutPath = row.rollout_path;
+        }
+      } catch (error) {
+        logger.warn(`[CodexAdapter] readLastUserMessage DB query failed:`, error);
       }
-      return lastMessage;
-    } catch (error) {
-      logger.warn(`[CodexAdapter] readLastUserMessage failed:`, error);
-      return null;
     }
+
+    // 2. Fallback: 从 sessions 目录查找 rollout 文件
+    if (!rolloutPath) {
+      rolloutPath = this.findRolloutFile(agentSessionId);
+    }
+
+    if (!rolloutPath) return null;
+    return this.readUserMessageFromRollout(rolloutPath, 'last');
   }
 
   scanCliSessions(projectPath: string): CliSessionEntry[] {
@@ -187,6 +226,32 @@ export class CodexSessionFileAdapter implements SessionFileAdapter {
       this.db = null;
     }
     this.dbInitialized = false;
+  }
+
+  /**
+   * 从 rollout JSONL 读取第一条或最后一条 user_message
+   */
+  private readUserMessageFromRollout(rolloutPath: string, which: 'first' | 'last'): string | null {
+    try {
+      const content = fs.readFileSync(rolloutPath, 'utf-8');
+      const lines = content.split('\n').filter(l => l.trim());
+      let result: string | null = null;
+
+      for (const line of lines) {
+        try {
+          const event = JSON.parse(line);
+          if (event.type === 'event_msg' && event.payload?.type === 'user_message' && event.payload.message) {
+            const text = event.payload.message.trim().replace(/\s+/g, ' ');
+            const truncated = text.substring(0, 50) + (text.length > 50 ? '...' : '');
+            if (which === 'first') return truncated;
+            result = truncated;
+          }
+        } catch { /* skip malformed line */ }
+      }
+      return result;
+    } catch {
+      return null;
+    }
   }
 
   /**

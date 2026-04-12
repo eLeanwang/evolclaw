@@ -240,6 +240,13 @@ export class GeminiRunner implements AgentRunnerFull, ModelSwitcher {
       if (isStreamDone()) resolve?.();
     });
 
+    // Handle race: process may have already exited before we registered the listener.
+    // Real ChildProcess sets exitCode (number) on exit; null means still running.
+    if (!processExited && child.exitCode != null) {
+      processExited = true;
+      exitCode = child.exitCode;
+    }
+
     child.on('error', (err) => {
       logger.error(`[GeminiRunner] Process error: ${err.message}`);
       rlClosed = true;
@@ -408,8 +415,14 @@ export class GeminiRunner implements AgentRunnerFull, ModelSwitcher {
   async interrupt(sessionKey: string): Promise<void> {
     const child = this.activeProcesses.get(sessionKey);
     if (child && !child.killed) {
-      child.kill('SIGTERM');
-      logger.info(`[GeminiRunner] Interrupted session: ${sessionKey}`);
+      child.kill('SIGINT');
+      setTimeout(() => {
+        if (!child.killed) {
+          child.kill('SIGTERM');
+          logger.info(`[GeminiRunner] SIGTERM fallback for: ${sessionKey}`);
+        }
+      }, 3000);
+      logger.info(`[GeminiRunner] Interrupted session: ${sessionKey} (SIGINT, SIGTERM fallback in 3s)`);
     }
     this.activeProcesses.delete(sessionKey);
     this.activeStreams.delete(sessionKey);

@@ -739,7 +739,12 @@ ${suggestions}`,
         try { adapter.sendProcessingStatus?.(message.channelId, procStatus, session.id, this.getReplyContext(session)); } catch {}
       }
 
-      logger.error(`[${message.channel}] Error:`, error);
+      // 用户主动中断时降级日志；其余仍按 error 记录
+      if (isUserInterrupt) {
+        logger.info(`[${message.channel}] Interrupted by user (${interruptReason})`);
+      } else {
+        logger.error(`[${message.channel}] Error:`, error);
+      }
 
       const errorMsg = error instanceof Error ? error.message : String(error);
       const errorType = prefixErrorType(ERROR_PREFIX.INFRA, errType);
@@ -760,7 +765,7 @@ ${suggestions}`,
         error: error instanceof Error ? error.message : String(error)
       });
 
-      if (error instanceof Error) {
+      if (error instanceof Error && !isUserInterrupt) {
         logger.error(`[${message.channel}] Error stack:`, error.stack);
       }
 
@@ -1057,7 +1062,12 @@ ${suggestions}`,
     }
 
     } catch (error) {
-      logger.error('[MessageProcessor] Stream processing error:', error);
+      // User interrupt (AbortError) is expected, log at info level
+      if (error instanceof Error && error.name === 'AbortError') {
+        logger.info('[MessageProcessor] Stream interrupted (AbortError)');
+      } else {
+        logger.error('[MessageProcessor] Stream processing error:', error);
+      }
       if (error instanceof Error && error.message.includes('process exited')) {
         flusher.addActivity('\u274c Claude Code \u8fdb\u7a0b\u5f02\u5e38\u9000\u51fa\uff0c\u8bf7\u91cd\u8bd5');
       }

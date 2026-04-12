@@ -15,10 +15,19 @@ import os from 'os';
 
 const allEfforts = ['low', 'medium', 'high', 'max'] as const;
 type Effort = typeof allEfforts[number];
+const nonMaxEfforts = allEfforts.filter(e => e !== 'max') as readonly Effort[];
 
-function getAvailableEfforts(model: string): readonly Effort[] {
-  if (model.includes('opus')) return allEfforts;
-  return allEfforts.filter(e => e !== 'max');
+function getAvailableEfforts(agent: AgentRunnerFull, model: string): readonly Effort[] {
+  if (agent.name === 'claude') {
+    if (model.includes('opus')) return allEfforts;
+    return nonMaxEfforts;
+  }
+
+  if (agent.name === 'codex') {
+    return nonMaxEfforts;
+  }
+
+  return [];
 }
 
 function effortBar(level: string): string {
@@ -26,6 +35,22 @@ function effortBar(level: string): string {
     low: '◆◇◇◇', medium: '◆◆◇◇', high: '◆◆◆◇', max: '◆◆◆◆'
   };
   return levels[level] || '◆◆◇◇';
+}
+
+function formatModelUsage(agent: AgentRunnerFull, model: string): string {
+  const efforts = getAvailableEfforts(agent, model);
+  const lines = [
+    '用法:',
+    '  /model <model>           切换模型',
+  ];
+
+  if (efforts.length > 0) {
+    lines.push('  /model <model> <effort>  切换模型+推理强度');
+    lines.push('  /model <effort>          仅切换推理强度');
+    lines.push('  /model auto              恢复SDK默认');
+  }
+
+  return lines.join('\n');
 }
 
 /**
@@ -647,11 +672,16 @@ export class CommandHandler {
 
       if (!args) {
         const currentModel = hasModelSwitcher(modelAgent) ? modelAgent.getModel() : modelAgent.name;
-        const currentEffort = modelAgent.getEffort?.() || 'auto';
-        const effortDisplay = currentEffort === 'auto' ? 'auto (SDK默认)' : `${currentEffort} ${effortBar(currentEffort)}`;
+        const efforts = getAvailableEfforts(modelAgent, currentModel);
         const modelList = models.map((m: string) => `- ${m}`).join('\n');
-        const efforts = getAvailableEfforts(currentModel);
-        return `当前模型: ${currentModel}\n推理强度: ${effortDisplay}\n\n可用模型：\n${modelList}\n\n推理强度: ${efforts.join(' / ')} / auto\n\n用法:\n  /model <model>           切换模型\n  /model <model> <effort>  切换模型+推理强度\n  /model <effort>          仅切换推理强度\n  /model auto              恢复SDK默认`;
+        const currentEffort = modelAgent.getEffort?.() || 'auto';
+        const effortDisplay = efforts.length > 0
+          ? `\n推理强度: ${currentEffort === 'auto' ? 'auto (SDK默认)' : `${currentEffort} ${effortBar(currentEffort)}`}`
+          : '';
+        const effortList = efforts.length > 0
+          ? `\n\n推理强度: ${efforts.join(' / ')} / auto`
+          : '';
+        return `当前模型: ${currentModel}${effortDisplay}\n\n可用模型：\n${modelList}${effortList}\n\n${formatModelUsage(modelAgent, currentModel)}`;
       }
 
       const parts = args.split(/\s+/);
@@ -660,16 +690,24 @@ export class CommandHandler {
 
       if (parts.length === 1) {
         const arg = parts[0];
+        const currentModel = hasModelSwitcher(modelAgent) ? modelAgent.getModel() : modelAgent.name;
+        const efforts = getAvailableEfforts(modelAgent, currentModel);
         if (arg === 'auto') {
+          if (efforts.length === 0) {
+            return '⚠️ 当前模型不支持推理强度设置';
+          }
           modelAgent.setEffort?.(undefined);
 
           // 写回来源
           const isCodex = modelAgent.name === 'codex';
+          const isHermes = modelAgent.name === 'hermes';
           if (isCodex) {
             if (this.config.agents?.openai?.reasoning) {
               delete this.config.agents.openai.reasoning;
               try { saveConfig(this.config); } catch {}
             }
+          } else if (isHermes) {
+            return '⚠️ 当前模型不支持推理强度设置';
           } else {
             const configuredInEvolclaw = !!this.config.agents?.anthropic?.effort;
             if (configuredInEvolclaw) {
@@ -683,18 +721,19 @@ export class CommandHandler {
           return '✓ 推理强度已恢复为 auto (SDK默认)';
         }
         // 单参数：模型 或 effort
-        const currentModel = hasModelSwitcher(modelAgent) ? modelAgent.getModel() : modelAgent.name;
-        const efforts = getAvailableEfforts(currentModel);
         if ((efforts as readonly string[]).includes(arg)) {
           newEffort = arg as Effort;
         } else if ((allEfforts as readonly string[]).includes(arg)) {
-          // 是合法 effort 但当前模型不支持
-          return `⚠️ ${arg} 推理强度仅 Opus 模型支持（opus / claude-opus-4-6）`;
+          if (efforts.length === 0) {
+            return '⚠️ 当前模型不支持推理强度设置';
+          }
+          return `⚠️ ${currentModel} 不支持 ${arg} 推理强度\n可选: ${efforts.join(' / ')}`;
         } else if (models.includes(arg)) {
           newModel = arg;
         } else {
           const modelList = models.map((m: string) => `- ${m}`).join('\n');
-          return `❌ 无效参数: ${arg}\n\n可用模型：\n${modelList}\n\n推理强度: ${efforts.join(' / ')}`;
+          const effortHint = efforts.length > 0 ? `\n\n推理强度: ${efforts.join(' / ')}` : '';
+          return `❌ 无效参数: ${arg}\n\n可用模型：\n${modelList}${effortHint}`;
         }
       } else {
         // 双参数：model effort
@@ -702,12 +741,13 @@ export class CommandHandler {
         if (!models.includes(modelArg)) {
           return `❌ 无效的模型ID: ${modelArg}`;
         }
-        const targetEfforts = getAvailableEfforts(modelArg);
+        const targetEfforts = getAvailableEfforts(modelAgent, modelArg);
+        if (targetEfforts.length === 0) {
+          return `⚠️ ${modelArg} 不支持推理强度设置`;
+        }
         if (!(targetEfforts as readonly string[]).includes(effortArg)) {
-          if ((allEfforts as readonly string[]).includes(effortArg)) {
-            return `⚠️ ${effortArg} 推理强度仅 Opus 模型支持（opus / claude-opus-4-6）`;
-          }
-          return `❌ 无效的推理强度: ${effortArg}\n可选: ${targetEfforts.join(' / ')}`;
+          const errorLabel = (allEfforts as readonly string[]).includes(effortArg) ? '⚠️' : '❌';
+          return `${errorLabel} ${modelArg} 不支持 ${effortArg} 推理强度\n可选: ${targetEfforts.join(' / ')}`;
         }
         newModel = modelArg;
         newEffort = effortArg as Effort;
@@ -716,6 +756,7 @@ export class CommandHandler {
       if (!this.config.agents) this.config.agents = {};
 
       const isCodexAgent = modelAgent.name === 'codex';
+      const isHermesAgent = modelAgent.name === 'hermes';
       const changes: string[] = [];
 
       if (newModel) {
@@ -758,6 +799,14 @@ export class CommandHandler {
           } catch (error: any) {
             return `⚠️ 写入 evolclaw.json 失败: ${error.message}\n已更新运行时配置，但未持久化`;
           }
+        }
+      } else if (isHermesAgent) {
+        if (!this.config.agents!.hermes) this.config.agents!.hermes = {};
+        if (newModel) this.config.agents!.hermes.model = newModel;
+        try {
+          saveConfig(this.config);
+        } catch (error: any) {
+          return `⚠️ 写入 evolclaw.json 失败: ${error.message}\n已更新运行时配置，但未持久化`;
         }
       } else {
         const configuredInEvolclaw = !!(this.config.agents?.anthropic?.model || this.config.agents?.anthropic?.effort);
