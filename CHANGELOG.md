@@ -1,5 +1,41 @@
 # Changelog
 
+## v2.3.0 (2026-04-14)
+
+### New Features
+
+- **Interactive card UI** — `/perm`、`/model`、`/effort`、`/agent`、`/plist`、`/slist` 命令在飞书中以交互卡片呈现，支持一键操作，不支持卡片的渠道自动降级为纯文本
+- **`/effort` command** — 独立的推理强度控制命令（从 `/model` 拆出），支持交互卡片选择
+- **Readonly permission mode** — 只读权限模式，拦截所有写入操作（文件写入仅允许 `.evolclaw/tmp/`，Bash 写入命令黑名单）
+- **Multi-instance channel support** — 同一渠道类型可配置多个实例（如多个飞书 bot），每个实例独立会话和配置
+- **CLI session listing** — `/slist cli` 列出未导入的 CLI 会话，支持卡片一键导入
+- **Gemini session resume** — Gemini 后端支持会话恢复（`-r sessionId`）
+
+### Improvements
+
+- **InteractionRouter** — 通用交互路由器，管理卡片回调注册、超时清理、会话级取消
+- **Channel routing refactor** — session.channel 存储实例名（非渠道类型），多实例场景精确路由
+- **Config auto-recovery** — 配置文件丢失时自动从备份恢复（`evolclaw.backup.json` → timestamped → sample）
+- **AUN trace logging** — 可选数据追踪日志（`debug.aunTrace`），记录所有收发数据
+- **AUN SDK payload update** — payload 格式从字符串升级为对象（适配 SDK 0.3.0 E2EE）
+- **Process isolation** — `EVOLCLAW_HOME` 级别进程隔离，orphan cleanup 不再误杀其他实例
+- **Local timestamps** — 日志时间戳使用本地时间（替代 UTC ISO 格式）
+- **Source directory reorganization** — `src/core/message/`、`src/core/session/` 子目录结构
+
+### Bug Fixes
+
+- **Codex session persistence** — 修复 Codex 会话 ID 未正确持久化的问题
+- **Startup warnings** — 消除启动时的冗余日志和警告
+- **Error classification** — 新增 "is not valid JSON" API 错误模式（算力池切换场景）
+- **`/new` session reset** — 创建新会话时正确清理后端状态（`clearSession`）
+- **Self-heal test skip** — 测试环境跳过 self-heal 流程，避免误触 `claude -p`
+
+### Removals
+
+- **Hermes backend archived** — 移除 `hermes-runner.ts`、`hermes-session-file-adapter.ts` 和配置解析器
+
+---
+
 ## v2.2.0 (2026-04-09)
 
 ### New Features

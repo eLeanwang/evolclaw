@@ -39,11 +39,12 @@ EvolClaw 是一个轻量级 AI Agent 网关系统。它为 Claude Code / Codex �
 ### 核心组件
 
 1. **消息渠道层** (`src/channels/`) - Feishu WebSocket + WeChat HTTP 长轮询 + AUN Mesh 网络
-2. **消息队列层** (`src/core/message-queue.ts`) - 会话级串行处理 + 中断支持
+2. **消息队列层** (`src/core/message/message-queue.ts`) - 会话级串行处理 + 中断支持
 3. **命令处理层** (`src/core/command-handler.ts`) - 斜杠命令处理（CommandHandler 类）
-4. **消息处理层** (`src/core/message-processor.ts`) - 统一事件处理引擎
-5. **会话管理层** (`src/core/session-manager.ts`) - 多项目会话管理
-6. **会话存储层** - JSONL 文件（CLI 共用）+ SQLite 元数据
+4. **消息处理层** (`src/core/message/message-processor.ts`) - 统一事件处理引擎
+5. **会话管理层** (`src/core/session/session-manager.ts`) - 多项目会话管理
+6. **交互路由层** (`src/core/interaction-router.ts`) - 卡片交互回调注册与路由
+7. **会话存储层** - JSONL 文件（CLI 共用）+ SQLite 元数据
 
 ### 消息流转
 
@@ -174,17 +175,21 @@ evolclaw/
 ├── src/
 │   ├── agents/
 │   │   ├── claude-runner.ts        # Claude Agent SDK 封装
-│   │   └── codex-runner.ts         # Codex Agent 封装
+│   │   ├── codex-runner.ts         # Codex Agent 封装
+│   │   └── gemini-runner.ts        # Gemini CLI 封装
 │   ├── core/
-│   │   ├── adapters/
-│   │   │   ├── claude-session-file-adapter.ts
-│   │   │   └── codex-session-file-adapter.ts
-│   │   ├── command-handler.ts       # 斜杠命令处理
-│   │   ├── session-manager.ts       # 会话管理（多项目支持）
-│   │   ├── message-queue.ts         # 消息队列（串行+中断）
-│   │   ├── message-processor.ts     # 统一消息处理引擎
-│   │   ├── stream-flusher.ts        # 批量发送（3秒窗口）
-│   │   └── message-cache.ts         # 消息缓存
+│   │   ├── message/
+│   │   │   ├── message-bridge.ts   # 渠道 ↔ 核心消息桥
+│   │   │   ├── message-processor.ts # 统一消息处理引擎
+│   │   │   ├── message-queue.ts    # 消息队列（串行+中断）
+│   │   │   ├── message-cache.ts    # 消息缓存
+│   │   │   └── stream-flusher.ts   # 批量发送（3秒窗口）
+│   │   ├── session/
+│   │   │   ├── adapters/           # 各后端会话文件适配器
+│   │   │   └── session-manager.ts  # 会话管理（多项目支持）
+│   │   ├── command-handler.ts      # 斜杠命令处理
+│   │   ├── interaction-router.ts   # 卡片交互回调路由
+│   │   └── permission.ts           # 权限网关
 │   ├── channels/
 │   │   ├── feishu.ts               # 飞书 WebSocket 渠道
 │   │   ├── wechat.ts               # 微信 ClawBot 渠道
@@ -209,7 +214,8 @@ evolclaw/
 **会话管理**：
 - `/new [名称]` - 创建新会话
 - `/slist` - 列出当前项目的所有会话
-- `/s <名称>` - 切换到指定会话
+- `/slist cli` - 列出未导入的 CLI 会话
+- `/s <名称|序号|uuid>` - 切换到指定会话
 - `/name <新名称>` - 重命名当前会话
 - `/del <名称>` - 删除指定会话（仅解绑，不删除文件）
 - `/status` - 显示会话状态
@@ -223,6 +229,12 @@ evolclaw/
 - `/p <name|path>` - 切换项目（保留会话历史）
 - `/bind <path>` - 绑定新项目目录
 
+**Agent 与模型**：
+- `/agent [name]` - 查看或切换 Agent 后端（claude / codex / gemini）
+- `/model [model]` - 查看或切换模型
+- `/effort [level]` - 查看或切换推理强度（low / medium / high / max / auto）
+- `/perm [mode]` - 查看或切换权限模式（auto / edit / default / readonly）
+
 **系统管理**：
 - `/clear` - 清空对话历史
 - `/compact` - 压缩会话上下文
@@ -233,17 +245,10 @@ evolclaw/
 - `/repair` - 检查并修复会话
 - `/safe` - 进入安全模式
 
-**模型管理**：
-- `/model` - 显示当前模型；支持思考预算的模型会额外显示推理强度
-- `/model <model>` - 切换模型
-- `/model <effort>` - 切换推理强度（仅支持的模型）
-- `/model <model> <effort>` - 同时切换模型和推理强度（仅支持的模型）
-- `/model auto` - 恢复 SDK 默认推理强度（仅支持的模型）
-
 ## 技术栈
 
 - **运行时**：Node.js >= 22 + TypeScript（ES modules）
-- **AI SDK**：@anthropic-ai/claude-agent-sdk >= 0.2.75
+- **AI SDK**：@anthropic-ai/claude-agent-sdk >= 0.2.75、@openai/codex-sdk、Gemini CLI
 - **消息渠道**：飞书（@larksuiteoapi/node-sdk）、微信（ClawBot ilink API）、AUN Mesh 网络
 - **数据存储**：node:sqlite（内置模块）+ JSONL（CLI 共用）
 - **测试框架**：Vitest
@@ -257,7 +262,7 @@ evolclaw/
 - [x] 项目搬家工具（`evolclaw mv`）
 - [ ] 自动授权可配置（自动放行/自动拒绝）
 - [x] 手动授权支持（文本回复）
-- [ ] 手动授权支持（飞书卡片）
+- [x] 手动授权支持（飞书卡片）
 - [ ] ACP 协议支持（接入 Codex / Gemini CLI）
 
 
