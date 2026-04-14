@@ -1,4 +1,4 @@
-import { Config, ChannelAdapter, Session, ChannelPolicy } from '../types.js';
+import { Config, ChannelAdapter, Session, ChannelPolicy, InteractionRequest, ReplyContext, ActionInteraction } from '../types.js';
 import { SessionManager } from './session/session-manager.js';
 import { type AgentRunnerFull, hasModelSwitcher, hasPermissionController } from '../agents/claude-runner.js';
 import { MessageCache } from './message/message-cache.js';
@@ -6,9 +6,11 @@ import { MessageProcessor } from './message/message-processor.js';
 import { EventBus } from './event-bus.js';
 import type { StatsCollector } from '../utils/stats-collector.js';
 import { PermissionGateway, type PermissionDecision } from './permission.js';
+import { InteractionRouter } from './interaction-router.js';
 import { MessageQueue } from './message/message-queue.js';
 import { saveConfig, resolvePaths, getPackageRoot, getOwner } from '../config.js';
 import { logger } from '../utils/logger.js';
+import crypto from 'crypto';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
@@ -46,8 +48,7 @@ function formatModelUsage(agent: AgentRunnerFull, model: string): string {
 
   if (efforts.length > 0) {
     lines.push('  /model <model> <effort>  切换模型+推理强度');
-    lines.push('  /model <effort>          仅切换推理强度');
-    lines.push('  /model auto              恢复SDK默认');
+    lines.push('  /effort [level]          查看或切换推理强度');
   }
 
   return lines.join('\n');
@@ -132,7 +133,7 @@ function formatIdleTime(ms: number): string {
 }
 
 // 支持的命令列表
-const commands = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/agent', '/slist', '/session', '/rename', '/stop', '/clear', '/compact', '/repair', '/safe', '/fork', '/del', '/perm', '/send', '/check'];
+const commands = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/effort', '/agent', '/slist', '/session', '/rename', '/stop', '/clear', '/compact', '/repair', '/safe', '/fork', '/del', '/perm', '/send', '/check'];
 
 // 命令别名映射
 const aliases: Record<string, string> = {
@@ -152,6 +153,7 @@ export class CommandHandler {
   private processor!: MessageProcessor;
   private messageQueue!: MessageQueue;
   private permissionGateway?: PermissionGateway;
+  private interactionRouter?: InteractionRouter;
   private statsCollector?: StatsCollector;
   private agentMap: Map<string, AgentRunnerFull>;
   private defaultAgentId: string;
@@ -220,18 +222,37 @@ export class CommandHandler {
     return session.metadata?.replyContext;
   }
 
+  /**
+   * 尝试通过渠道适配器发送交互卡片。
+   * 返回 true 表示卡片已发送（用户将通过卡片操作回复），false 表示降级为文本。
+   */
+  private async trySendInteraction(
+    channel: string,
+    channelId: string,
+    interaction: InteractionRequest,
+    replyContext?: ReplyContext,
+  ): Promise<boolean> {
+    const adapter = this.adapters.get(channel);
+    if (!adapter?.sendInteraction) return false;
+    try {
+      return await adapter.sendInteraction(channelId, interaction, replyContext);
+    } catch (e) {
+      logger.warn(`[CommandHandler] sendInteraction failed: ${e}`);
+      return false;
+    }
+  }
+
   /** 获取活跃会话，无会话时返回统一错误提示 */
   private async ensureSession(channel: string, channelId: string, threadId?: string): Promise<{ session: Session } | { error: string }> {
-    const channelType = this.resolveChannelType(channel);
     if (threadId) {
       // 话题会话：仅查询，不创建
-      const session = await this.sessionManager.getThreadSession(channelType, channelId, threadId);
+      const session = await this.sessionManager.getThreadSession(channel, channelId, threadId);
       if (!session) {
         return { error: '❌ 话题中尚未创建会话\n发送消息后自动创建' };
       }
       return { session };
     }
-    const session = await this.sessionManager.getActiveSession(channelType, channelId);
+    const session = await this.sessionManager.getActiveSession(channel, channelId);
     if (!session) {
       return { error: '❌ 当前没有活跃会话\n使用 /new 创建新会话' };
     }
@@ -248,6 +269,10 @@ export class CommandHandler {
 
   setPermissionGateway(gateway: PermissionGateway): void {
     this.permissionGateway = gateway;
+  }
+
+  setInteractionRouter(router: InteractionRouter): void {
+    this.interactionRouter = router;
   }
 
   setStatsCollector(collector: StatsCollector): void {
@@ -320,6 +345,7 @@ export class CommandHandler {
       commands: [
         { cmd: '/new', args: '[name]', label: '创建新会话' },
         { cmd: '/slist', label: '列出当前项目的所有会话' },
+        { cmd: '/slist', args: 'cli', label: '列出 CLI 会话（未导入的）' },
         { cmd: '/s', args: '<name|index|uuid>', label: '切换到指定会话' },
         { cmd: '/name', args: '<name>', label: '重命名当前会话' },
         { cmd: '/del', args: '<name>', label: '删除指定会话' },
@@ -336,7 +362,8 @@ export class CommandHandler {
         group: 'Agent 与模型',
         commands: [
           { cmd: '/agent', args: '[name]', label: '查看或切换 Agent 后端' },
-          { cmd: '/model', args: '[model] [effort]', label: '查看或切换模型' },
+          { cmd: '/model', args: '[model]', label: '查看或切换模型' },
+          { cmd: '/effort', args: '[level]', label: '查看或切换推理强度' },
         ]
       });
 
@@ -395,14 +422,13 @@ export class CommandHandler {
     sendMessage?: (channelId: string, text: string, opts?: { replyToMessageId?: string; replyInThread?: boolean }) => Promise<void>,
     userId?: string,
     threadId?: string,
-  ): Promise<string | null> {
+  ): Promise<string | null | undefined> {
     // 解析身份（按实例名）
     const identity = this.sessionManager.resolveIdentity(channel, userId);
     const policy = this.getPolicy(channel);
 
-    // 按当前会话选择 agent 后端（session 查询用 channelType）
-    const channelType = this.resolveChannelType(channel);
-    const activeSession = await this.sessionManager.getActiveSession(channelType, channelId);
+    // 按当前会话选择 agent 后端
+    const activeSession = await this.sessionManager.getActiveSession(channel, channelId);
     const agent = this.getAgent(activeSession?.agentId);
 
     // 规范化命令（将别名转换为完整命令）
@@ -445,7 +471,7 @@ export class CommandHandler {
     if (requiresIdle.some(cmd => normalizedContent === cmd || normalizedContent.startsWith(cmd + ' '))) {
       if (threadId) {
         // 话题中：检查话题 session 是否在处理（不创建）
-        const threadSession = await this.sessionManager.getThreadSession(channelType, channelId, threadId);
+        const threadSession = await this.sessionManager.getThreadSession(channel, channelId, threadId);
         if (threadSession) {
           const threadAgent = this.getAgent(threadSession.agentId);
           if (threadAgent.hasActiveStream(threadSession.id)) {
@@ -477,7 +503,7 @@ export class CommandHandler {
     }
 
     const isCmd = commands.some(cmd => normalizedContent.startsWith(cmd));
-    if (!isCmd) return null;
+    if (!isCmd) return undefined;
 
     // /help 命令不需要会话
     if (normalizedContent === '/help') {
@@ -488,6 +514,7 @@ export class CommandHandler {
           '🔄 会话管理：',
           '  /new [名称] - 创建新会话（可选命名）',
           '  /slist - 列出当前项目的所有会话',
+          '  /slist cli - 列出 CLI 会话（未导入的）',
           '  /s, /session <名称|序号|uuid> - 切换到指定会话',
           '  /name, /rename <新名称> - 重命名当前会话',
           '  /del <名称> - 删除指定会话（仅解绑，不删除文件）',
@@ -520,7 +547,8 @@ export class CommandHandler {
         '',
         '🤖 Agent 与模型：',
         '  /agent [name] - 查看或切换 Agent 后端',
-        '  /model [model] [effort] - 查看或切换模型/推理强度',
+        '  /model [model] - 查看或切换模型',
+        '  /effort [level] - 查看或切换推理强度',
         '',
         '🔐 权限管理：',
         '  /perm - 查看当前权限模式',
@@ -558,6 +586,46 @@ export class CommandHandler {
         }
         const currentMode = permSession.metadata?.permissionMode || 'auto';
         const modes = permAgent.listModes();
+
+        // 尝试发送交互卡片
+        if (this.interactionRouter) {
+          const requestId = `perm-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+          const availableModes = modes.filter(m => m.available);
+          const interaction: InteractionRequest = {
+            type: 'interaction',
+            id: requestId,
+            channelId,
+            sessionId: permSession.id,
+            kind: {
+              kind: 'action',
+              title: '🔐 权限模式',
+              body: availableModes.map(m => `${m.key === currentMode ? '▶' : '•'} **${m.key}** (${m.nameZh}) - ${m.description}`).join('\n'),
+              buttons: availableModes.map(m => ({
+                key: m.key,
+                label: m.key === currentMode ? `✓ ${m.key}` : m.key,
+                style: m.key === currentMode ? 'primary' : 'default',
+              })),
+            },
+          };
+
+          const replyCtx = this.getReplyContext(permSession);
+          const sent = await this.trySendInteraction(channel, channelId, interaction, replyCtx);
+          if (sent) {
+            this.interactionRouter.register(requestId, permSession.id, async (action, _values, operatorId) => {
+              if (action !== currentMode) {
+                if (userId && operatorId && operatorId !== userId) return;
+                const result = await this.handle(`/perm ${action}`, channel, channelId, undefined, userId, threadId);
+                if (result) {
+                  const adapter = this.adapters.get(channel);
+                  adapter?.sendText(channelId, result, replyCtx);
+                }
+              }
+            }, 120_000);
+            return null;
+          }
+        }
+
+        // 降级：文本
         const modeList = modes.map(m => {
           const prefix = m.key === currentMode ? '▶' : ' ';
           const suffix = m.available ? '' : ' ⚠️ 不可用';
@@ -603,6 +671,10 @@ export class CommandHandler {
             if (!matched.available) {
               return `❌ ${matched.key} 模式当前不可用：${matched.unavailableReason}`;
             }
+            // guest 用户只能保持 readonly 模式
+            if (identity.role !== 'owner' && arg !== 'readonly') {
+              return '❌ 当前身份无法切换权限模式';
+            }
             const metadata = permSession.metadata || {};
             metadata.permissionMode = arg;
             await this.sessionManager.updateSession(permSession.id, { metadata });
@@ -627,6 +699,44 @@ export class CommandHandler {
 
       if (!args) {
         const currentAgent = activeSession?.agentId || this.defaultAgentId;
+
+        // 尝试发送交互卡片
+        if (this.interactionRouter && available.length > 1) {
+          const requestId = `agent-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+          const interaction: InteractionRequest = {
+            type: 'interaction',
+            id: requestId,
+            channelId,
+            sessionId: activeSession?.id || requestId,
+            kind: {
+              kind: 'action',
+              title: '🔌 切换 Agent',
+              buttons: available.map(a => ({
+                key: a,
+                label: a === currentAgent ? `✓ ${a}` : a,
+                style: a === currentAgent ? 'primary' : 'default',
+              })),
+            },
+          };
+
+          const replyCtx = activeSession ? this.getReplyContext(activeSession) : undefined;
+          const sent = await this.trySendInteraction(channel, channelId, interaction, replyCtx);
+          if (sent) {
+            this.interactionRouter.register(requestId, activeSession?.id || requestId, async (action, _values, operatorId) => {
+              if (action !== currentAgent) {
+                if (userId && operatorId && operatorId !== userId) return;
+                const result = await this.handle(`/agent ${action}`, channel, channelId, undefined, userId, threadId);
+                if (result) {
+                  const adapter = this.adapters.get(channel);
+                  adapter?.sendText(channelId, result, replyCtx);
+                }
+              }
+            }, 120_000);
+            return null;
+          }
+        }
+
+        // 降级：文本
         const list = available.map(a => `${a === currentAgent ? ' ✓' : '  '} ${a}`).join('\n');
         return `当前 Agent: ${currentAgent}\n\n可用:\n${list}\n\n用法: /agent <name>`;
       }
@@ -639,13 +749,16 @@ export class CommandHandler {
       if ('error' in result) return result.error;
       const { session } = result;
 
-      // 取消原会话的 pending 权限请求
+      // 取消原会话的 pending 权限请求和交互卡片
       if (this.permissionGateway) {
         this.permissionGateway.cancelAll(session.id);
       }
+      if (this.interactionRouter) {
+        this.interactionRouter.cancelAll(session.id);
+      }
 
       // 切换到目标 agent（恢复已有会话或创建新会话）
-      const newSession = await this.sessionManager.switchAgent(channelType, channelId, session.projectPath, args);
+      const newSession = await this.sessionManager.switchAgent(channel, channelId, session.projectPath, args);
       const hasExistingSession = newSession.agentSessionId ? '（恢复已有会话）' : '（新建会话）';
       const projectName = this.getProjectName(session.projectPath);
       let agentSwitchResponse = `✓ 已切换 Agent: ${args}\n  项目: ${projectName}\n  会话: ${newSession.name || '(未命名)'}\n  ${hasExistingSession}`;
@@ -673,15 +786,50 @@ export class CommandHandler {
       if (!args) {
         const currentModel = hasModelSwitcher(modelAgent) ? modelAgent.getModel() : modelAgent.name;
         const efforts = getAvailableEfforts(modelAgent, currentModel);
-        const modelList = models.map((m: string) => `- ${m}`).join('\n');
         const currentEffort = modelAgent.getEffort?.() || 'auto';
-        const effortDisplay = efforts.length > 0
-          ? `\n推理强度: ${currentEffort === 'auto' ? 'auto (SDK默认)' : `${currentEffort} ${effortBar(currentEffort)}`}`
+
+        // 尝试发送交互卡片
+        if (this.interactionRouter && models.length > 0) {
+          const requestId = `model-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+          const interaction: InteractionRequest = {
+            type: 'interaction',
+            id: requestId,
+            channelId,
+            sessionId: modelSession.id,
+            kind: {
+              kind: 'action',
+              title: '🤖 切换模型',
+              buttons: models.map((m: string) => ({
+                key: m,
+                label: m === currentModel ? `✓ ${m}` : m,
+                style: m === currentModel ? 'primary' : 'default',
+              })),
+            },
+          };
+
+          const replyCtx = this.getReplyContext(modelSession);
+          const sent = await this.trySendInteraction(channel, channelId, interaction, replyCtx);
+          if (sent) {
+            this.interactionRouter.register(requestId, modelSession.id, async (action, _values, operatorId) => {
+              if (action !== currentModel) {
+                if (userId && operatorId && operatorId !== userId) return;
+                const result = await this.handle(`/model ${action}`, channel, channelId, undefined, userId, threadId);
+                if (result) {
+                  const adapter = this.adapters.get(channel);
+                  adapter?.sendText(channelId, result, replyCtx);
+                }
+              }
+            }, 120_000);
+            return null;
+          }
+        }
+
+        // 降级：文本
+        const modelList = models.map((m: string) => `- ${m}`).join('\n');
+        const effortHint = efforts.length > 0
+          ? `\n推理强度: ${currentEffort === 'auto' ? 'auto (SDK默认)' : `${currentEffort} ${effortBar(currentEffort)}`}  (使用 /effort 调整)`
           : '';
-        const effortList = efforts.length > 0
-          ? `\n\n推理强度: ${efforts.join(' / ')} / auto`
-          : '';
-        return `当前模型: ${currentModel}${effortDisplay}\n\n可用模型：\n${modelList}${effortList}\n\n${formatModelUsage(modelAgent, currentModel)}`;
+        return `当前模型: ${currentModel}${effortHint}\n\n可用模型：\n${modelList}\n\n${formatModelUsage(modelAgent, currentModel)}`;
       }
 
       const parts = args.split(/\s+/);
@@ -692,47 +840,16 @@ export class CommandHandler {
         const arg = parts[0];
         const currentModel = hasModelSwitcher(modelAgent) ? modelAgent.getModel() : modelAgent.name;
         const efforts = getAvailableEfforts(modelAgent, currentModel);
-        if (arg === 'auto') {
-          if (efforts.length === 0) {
-            return '⚠️ 当前模型不支持推理强度设置';
-          }
-          modelAgent.setEffort?.(undefined);
-
-          // 写回来源
-          const isCodex = modelAgent.name === 'codex';
-          const isHermes = modelAgent.name === 'hermes';
-          if (isCodex) {
-            if (this.config.agents?.openai?.reasoning) {
-              delete this.config.agents.openai.reasoning;
-              try { saveConfig(this.config); } catch {}
-            }
-          } else if (isHermes) {
-            return '⚠️ 当前模型不支持推理强度设置';
-          } else {
-            const configuredInEvolclaw = !!this.config.agents?.anthropic?.effort;
-            if (configuredInEvolclaw) {
-              delete (this.config.agents!.anthropic as any).effort;
-              try { saveConfig(this.config); } catch {}
-            } else {
-              writeUserSettings({ effortLevel: null });
-            }
-          }
-
-          return '✓ 推理强度已恢复为 auto (SDK默认)';
-        }
-        // 单参数：模型 或 effort
-        if ((efforts as readonly string[]).includes(arg)) {
-          newEffort = arg as Effort;
+        // effort 相关参数统一转发到 /effort
+        if ((efforts as readonly string[]).includes(arg) || arg === 'auto') {
+          return this.handle(`/effort ${arg}`, channel, channelId, undefined, userId, threadId);
         } else if ((allEfforts as readonly string[]).includes(arg)) {
-          if (efforts.length === 0) {
-            return '⚠️ 当前模型不支持推理强度设置';
-          }
-          return `⚠️ ${currentModel} 不支持 ${arg} 推理强度\n可选: ${efforts.join(' / ')}`;
+          return `⚠️ 请使用 /effort ${arg} 调整推理强度`;
         } else if (models.includes(arg)) {
           newModel = arg;
         } else {
           const modelList = models.map((m: string) => `- ${m}`).join('\n');
-          const effortHint = efforts.length > 0 ? `\n\n推理强度: ${efforts.join(' / ')}` : '';
+          const effortHint = efforts.length > 0 ? `\n\n推理强度请使用 /effort 命令` : '';
           return `❌ 无效参数: ${arg}\n\n可用模型：\n${modelList}${effortHint}`;
         }
       } else {
@@ -756,7 +873,6 @@ export class CommandHandler {
       if (!this.config.agents) this.config.agents = {};
 
       const isCodexAgent = modelAgent.name === 'codex';
-      const isHermesAgent = modelAgent.name === 'hermes';
       const changes: string[] = [];
 
       if (newModel) {
@@ -800,14 +916,6 @@ export class CommandHandler {
             return `⚠️ 写入 evolclaw.json 失败: ${error.message}\n已更新运行时配置，但未持久化`;
           }
         }
-      } else if (isHermesAgent) {
-        if (!this.config.agents!.hermes) this.config.agents!.hermes = {};
-        if (newModel) this.config.agents!.hermes.model = newModel;
-        try {
-          saveConfig(this.config);
-        } catch (error: any) {
-          return `⚠️ 写入 evolclaw.json 失败: ${error.message}\n已更新运行时配置，但未持久化`;
-        }
       } else {
         const configuredInEvolclaw = !!(this.config.agents?.anthropic?.model || this.config.agents?.anthropic?.effort);
         if (configuredInEvolclaw) {
@@ -831,6 +939,130 @@ export class CommandHandler {
       }
 
       return `✓ 已切换\n  ${changes.join('\n  ')}`;
+    }
+
+    // /effort 命令：查看或切换推理强度
+    if (normalizedContent.startsWith('/effort')) {
+      const args = normalizedContent.slice(7).trim();
+
+      const effortResult = await this.ensureSession(channel, channelId, threadId);
+      if ('error' in effortResult) return effortResult.error;
+      const { session: effortSession } = effortResult;
+      const effortAgent = this.getAgent(effortSession.agentId);
+
+      const currentModel = hasModelSwitcher(effortAgent) ? effortAgent.getModel() : effortAgent.name;
+      const efforts = getAvailableEfforts(effortAgent, currentModel);
+      const currentEffort = effortAgent.getEffort?.() || 'auto';
+
+      if (efforts.length === 0) {
+        return '⚠️ 当前模型不支持推理强度设置';
+      }
+
+      if (!args) {
+        // /effort（无参数）：显示当前推理强度 + 发送 Action 卡片
+        if (this.interactionRouter) {
+          const requestId = `effort-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+          const buttons: ActionInteraction['buttons'] = [
+            ...efforts.map(e => ({
+              key: e,
+              label: e === currentEffort ? `✓ ${e} ${effortBar(e)}` : `${e} ${effortBar(e)}`,
+              style: e === currentEffort ? 'primary' as const : 'default' as const,
+            })),
+            {
+              key: 'auto',
+              label: currentEffort === 'auto' ? '✓ auto' : 'auto',
+              style: currentEffort === 'auto' ? 'primary' as const : 'default' as const,
+            },
+          ];
+
+          const interaction: InteractionRequest = {
+            type: 'interaction',
+            id: requestId,
+            channelId,
+            sessionId: effortSession.id,
+            kind: {
+              kind: 'action',
+              title: '⚡ 推理强度',
+              buttons,
+            },
+          };
+
+          const replyCtx = this.getReplyContext(effortSession);
+          const sent = await this.trySendInteraction(channel, channelId, interaction, replyCtx);
+          if (sent) {
+            this.interactionRouter.register(requestId, effortSession.id, async (action, _values, operatorId) => {
+              if (action !== currentEffort) {
+                if (userId && operatorId && operatorId !== userId) return;
+                const result = await this.handle(`/effort ${action}`, channel, channelId, undefined, userId, threadId);
+                if (result) {
+                  const adapter = this.adapters.get(channel);
+                  adapter?.sendText(channelId, result, replyCtx);
+                }
+              }
+            }, 120_000);
+            return null;
+          }
+        }
+
+        // 降级：文本
+        const effortDisplay = currentEffort === 'auto' ? 'auto (SDK默认)' : `${currentEffort} ${effortBar(currentEffort)}`;
+        const effortList = efforts.map(e => `${e === currentEffort ? '  ✓' : '   '} ${e} ${effortBar(e)}`).join('\n');
+        return `⚡ 推理强度: ${effortDisplay}\n\n可选:\n${effortList}\n   ${currentEffort === 'auto' ? '  ✓' : '   '} auto\n\n用法: /effort <level>`;
+      }
+
+      // /effort auto：恢复 SDK 默认
+      if (args === 'auto') {
+        effortAgent.setEffort?.(undefined);
+
+        const isCodex = effortAgent.name === 'codex';
+        if (isCodex) {
+          if (this.config.agents?.openai?.reasoning) {
+            delete this.config.agents.openai.reasoning;
+            try { saveConfig(this.config); } catch {}
+          }
+        } else {
+          const configuredInEvolclaw = !!this.config.agents?.anthropic?.effort;
+          if (configuredInEvolclaw) {
+            delete (this.config.agents!.anthropic as any).effort;
+            try { saveConfig(this.config); } catch {}
+          } else {
+            writeUserSettings({ effortLevel: null });
+          }
+        }
+
+        return '✓ 推理强度已恢复为 auto (SDK默认)';
+      }
+
+      // /effort <level>：切换推理强度
+      if (!(efforts as readonly string[]).includes(args)) {
+        if ((allEfforts as readonly string[]).includes(args)) {
+          return `⚠️ ${currentModel} 不支持 ${args} 推理强度\n可选: ${efforts.join(' / ')}`;
+        }
+        return `❌ 无效参数: ${args}\n可选: ${efforts.join(' / ')} / auto`;
+      }
+
+      const newEffort = args as Effort;
+      effortAgent.setEffort?.(newEffort);
+
+      // 持久化
+      if (!this.config.agents) this.config.agents = {};
+      const isCodex = effortAgent.name === 'codex';
+      if (isCodex) {
+        if (!this.config.agents.openai) this.config.agents.openai = {};
+        this.config.agents.openai.reasoning = newEffort;
+        try { saveConfig(this.config); } catch {}
+      } else {
+        const configuredInEvolclaw = !!(this.config.agents?.anthropic?.model || this.config.agents?.anthropic?.effort);
+        if (configuredInEvolclaw) {
+          if (!this.config.agents.anthropic) this.config.agents.anthropic = {};
+          this.config.agents.anthropic.effort = newEffort as any;
+          try { saveConfig(this.config); } catch {}
+        } else {
+          writeUserSettings({ effortLevel: newEffort });
+        }
+      }
+
+      return `✓ 推理强度: ${newEffort} ${effortBar(newEffort)}`;
     }
 
     // /stop 命令：中断当前任务
@@ -929,9 +1161,9 @@ export class CommandHandler {
     // 尝试获取活跃会话（话题时直接查找话题 session）
     let session: Session | undefined;
     if (threadId) {
-      session = await this.sessionManager.getOrCreateSession(channelType, channelId, this.config.projects?.defaultPath || process.cwd(), threadId);
+      session = await this.sessionManager.getOrCreateSession(channel, channelId, this.config.projects?.defaultPath || process.cwd(), threadId);
     } else {
-      session = await this.sessionManager.getActiveSession(channelType, channelId);
+      session = await this.sessionManager.getActiveSession(channel, channelId);
     }
 
     // 对于需要会话的命令，如果没有会话则使用默认项目创建临时会话
@@ -944,7 +1176,7 @@ export class CommandHandler {
       normalizedContent === '/status'
     )) {
       session = await this.sessionManager.getOrCreateSession(
-        channelType,
+        channel,
         channelId,
         this.config.projects?.defaultPath || process.cwd()
       );
@@ -998,7 +1230,7 @@ export class CommandHandler {
       if (isAdmin) {
         lines.push(
           `📊 ${isThread ? '话题' : '会话'}状态：`,
-          `渠道: ${channel} / 项目: ${projectName} / 会话: ${session.name || '(未命名)'}`,
+          `渠道: ${this.resolveChannelType(channel)} / 项目: ${projectName} / 会话: ${session.name || '(未命名)'}`,
           `会话ID: ${session.id}`,
           `项目路径: ${session.projectPath}`,
           `会话状态: ${sessionStatus}`,
@@ -1049,7 +1281,7 @@ export class CommandHandler {
       const sessionName = normalizedContent.slice(4).trim() || undefined;
 
       if (sessionName) {
-        const existing = await this.sessionManager.getSessionByName(channelType, channelId, sessionName);
+        const existing = await this.sessionManager.getSessionByName(channel, channelId, sessionName);
         if (existing) {
           return `❌ 会话名称 "${sessionName}" 已存在，请使用其他名称`;
         }
@@ -1076,6 +1308,9 @@ export class CommandHandler {
       });
 
       if (session) {
+        // Reset agent backend state so the new
+        // session starts with a fresh conversation history
+        await agent.clearSession(session.id, session.agentSessionId || '', session.projectPath);
         await agent.closeSession(session.id);
       }
 
@@ -1174,7 +1409,7 @@ export class CommandHandler {
 
     // /restart 命令：重启服务
     if (normalizedContent === '/restart') {
-      const allSessions = await this.sessionManager.listSessions(channelType, channelId);
+      const allSessions = await this.sessionManager.listSessions(channel, channelId);
       const sessionsWithMessages = allSessions
         .filter(s => this.messageCache.hasMessages(s.id))
         .map(s => {
@@ -1182,6 +1417,37 @@ export class CommandHandler {
           return `${s.projectPath} 有 ${count} 条新消息`;
         });
 
+      // 执行重启逻辑（共用于卡片回调和文本确认）
+      const executeRestart = async () => {
+        let replyContext: ReplyContext | undefined;
+        if (threadId) {
+          const threadSession = await this.sessionManager.getOrCreateSession(channel, channelId, this.config.projects?.defaultPath || process.cwd(), threadId);
+          replyContext = this.getReplyContext(threadSession);
+        }
+        const restartInfo: Record<string, any> = {
+          channel,
+          channelId,
+          timestamp: Date.now(),
+          ...(replyContext?.replyToMessageId ? { rootId: replyContext.replyToMessageId } : {}),
+        };
+        fs.writeFileSync(path.join(resolvePaths().dataDir, 'restart-pending.json'), JSON.stringify(restartInfo));
+
+        const { spawn } = await import('child_process');
+        spawn('node', [path.join(getPackageRoot(), 'dist', 'cli.js'), 'restart-monitor'], {
+          detached: true,
+          stdio: 'ignore',
+          env: { ...process.env, EVOLCLAW_HOME: resolvePaths().root }
+        }).unref();
+
+        this.eventBus.publish({ type: 'system:restart', channel, channelId });
+
+        setTimeout(() => {
+          logger.info('[System] Restarting by user command...');
+          process.exit(0);
+        }, 1000);
+      };
+
+      // 文本确认流程
       if (sessionsWithMessages.length > 0) {
         const restartKey = `${channel}-${channelId}`;
         const restartConfirmFile = path.join(resolvePaths().dataDir, `restart-confirm-${restartKey}.json`);
@@ -1202,33 +1468,7 @@ export class CommandHandler {
         }
       }
 
-      // 话题中 restart 时保存 replyContext 用于重启后回复到话题
-      let replyContext: import('../types.js').ReplyContext | undefined;
-      if (threadId) {
-        const threadSession = await this.sessionManager.getOrCreateSession(channelType, channelId, this.config.projects?.defaultPath || process.cwd(), threadId);
-        replyContext = this.getReplyContext(threadSession);
-      }
-      const restartInfo: Record<string, any> = {
-        channel,
-        channelId,
-        timestamp: Date.now(),
-        ...(replyContext?.replyToMessageId ? { rootId: replyContext.replyToMessageId } : {}),
-      };
-      fs.writeFileSync(path.join(resolvePaths().dataDir, 'restart-pending.json'), JSON.stringify(restartInfo));
-
-      const { spawn } = await import('child_process');
-      spawn('node', [path.join(getPackageRoot(), 'dist', 'cli.js'), 'restart-monitor'], {
-        detached: true,
-        stdio: 'ignore',
-        env: { ...process.env, EVOLCLAW_HOME: resolvePaths().root }
-      }).unref();
-
-      this.eventBus.publish({ type: 'system:restart', channel, channelId });
-
-      setTimeout(() => {
-        logger.info('[System] Restarting by user command...');
-        process.exit(0);
-      }, 1000);
+      await executeRestart();
       return '🔄 服务正在重启，请稍候...（约 5 秒后恢复）';
     }
 
@@ -1335,8 +1575,7 @@ export class CommandHandler {
       let targetChannelId = channelId;
       if (isCrossChannel) {
         const ownerPeerId = getOwner(this.config, targetChannel);
-        const targetType = this.resolveChannelType(targetChannel);
-        targetChannelId = ownerPeerId ? (this.sessionManager.getOwnerChatId(targetType, ownerPeerId) ?? '') : '';
+        targetChannelId = ownerPeerId ? (this.sessionManager.getOwnerChatId(targetChannel, ownerPeerId) ?? '') : '';
         if (!targetChannelId) {
           return `❌ 未找到 ${targetLabel} 的私聊会话，请先在该通道发送一条消息`;
         }
@@ -1378,33 +1617,18 @@ export class CommandHandler {
 提示：群聊不支持切换项目`;
       }
 
-      const lines = ['可用项目:'];
-
-      // 收集项目信息并按最近活跃排序
+      // 收集项目信息并按最近活跃排序（唯一来源：evolclaw.json projects.list）
       const entries: { name: string; projectPath: string; projectSession: any; isCurrent: boolean; updatedAt: number }[] = [];
 
-      const configuredPaths = new Set<string>();
       for (const [name, projectPath] of Object.entries(this.projects)) {
-        configuredPaths.add(projectPath);
-        const isCurrent = session?.projectPath === projectPath;
-        const projectSession = await this.sessionManager.getSessionByProjectPath(channelType, channelId, projectPath);
+        // 跳过不存在的路径
+        if (!fs.existsSync(projectPath)) continue;
+        const isCurrent = session ? path.resolve(session.projectPath) === path.resolve(projectPath) : false;
+        const projectSession = await this.sessionManager.getSessionByProjectPath(channel, channelId, projectPath);
         entries.push({
           name, projectPath, projectSession, isCurrent,
           updatedAt: projectSession?.updatedAt ?? 0,
         });
-      }
-
-      // Include bound projects not in config (created via /bind)
-      const allSessions = await this.sessionManager.listSessions(channelType, channelId);
-      for (const s of allSessions) {
-        if (!configuredPaths.has(s.projectPath)) {
-          configuredPaths.add(s.projectPath);
-          const isCurrent = session?.projectPath === s.projectPath;
-          entries.push({
-            name: path.basename(s.projectPath), projectPath: s.projectPath, projectSession: s, isCurrent,
-            updatedAt: s.updatedAt ?? 0,
-          });
-        }
       }
 
       // 当前活跃项目置顶，其余按 updatedAt 降序
@@ -1413,44 +1637,84 @@ export class CommandHandler {
         return b.updatedAt - a.updatedAt;
       });
 
-      for (const { name, projectPath, projectSession, isCurrent } of entries) {
-        const prefix = isCurrent ? '  ✓' : '   ';
-
-        if (!projectSession) {
-          lines.push(`${prefix} ${name} (${projectPath}) - 无会话`);
-          continue;
-        }
-
-        const statusParts = [];
-
-        if (isCurrent) {
-          statusParts.push('活跃');
-        } else {
-          const idleMs = Date.now() - projectSession.updatedAt;
-          statusParts.push(formatIdleTime(idleMs));
-        }
-
-        // 用 DB processingState 判断处理状态
+      // 构建项目状态文本的辅助函数
+      const buildStatusText = (entry: typeof entries[0]) => {
+        const { projectSession, isCurrent } = entry;
+        if (!projectSession) return '无会话';
+        const parts: string[] = [];
+        if (isCurrent) { parts.push('活跃'); } else { parts.push(formatIdleTime(Date.now() - projectSession.updatedAt)); }
         const isProcessing = !!projectSession.processingState;
         if (isProcessing) {
-          const queueLength = this.messageQueue.getQueueLength(projectSession.id);
-          if (queueLength > 0) {
-            statusParts.push(`[处理中，队列${queueLength}条]`);
-          } else {
-            statusParts.push('[处理中]');
-          }
+          const qLen = this.messageQueue.getQueueLength(projectSession.id);
+          parts.push(qLen > 0 ? `[处理中，队列${qLen}条]` : '[处理中]');
         }
+        const unread = this.messageCache.getCount(projectSession.id);
+        if (unread > 0) { parts.push(`[${unread}条新消息]`); }
+        else if (!isProcessing && !isCurrent) { parts.push('[空闲]'); }
+        return parts.join(' ');
+      };
 
-        const unreadCount = this.messageCache.getCount(projectSession.id);
-        if (unreadCount > 0) {
-          statusParts.push(`[${unreadCount}条新消息]`);
-        } else if (!isProcessing && !isCurrent) {
-          statusParts.push('[空闲]');
+      // 尝试发送 ActionInteraction 卡片（每个项目一个按钮，一键切换）
+      if (this.interactionRouter && entries.length > 0) {
+        const requestId = `plist-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+        const buttons: ActionInteraction['buttons'] = entries.map(e => ({
+          key: e.name,
+          label: e.isCurrent ? `✓ ${e.name}` : e.name,
+          style: e.isCurrent ? 'primary' as const : 'default' as const,
+        }));
+
+        const bodyLines = entries.map(e => {
+          const status = buildStatusText(e);
+          const prefix = e.isCurrent ? '▶' : '•';
+          return `${prefix} **${e.name}** (${e.projectPath})  ${status}`;
+        });
+
+        const interaction: InteractionRequest = {
+          type: 'interaction',
+          id: requestId,
+          channelId,
+          sessionId: activeSession?.id || requestId,
+          kind: {
+            kind: 'action',
+            title: '📂 项目列表',
+            body: bodyLines.join('\n'),
+            buttons,
+          },
+        };
+
+        const replyCtx = activeSession ? this.getReplyContext(activeSession) : undefined;
+        const sent = await this.trySendInteraction(channel, channelId, interaction, replyCtx);
+        if (sent) {
+          this.interactionRouter.register(requestId, activeSession?.id || requestId, async (action, _values, operatorId) => {
+            if (userId && operatorId && operatorId !== userId) return;
+            const selectedEntry = entries.find(e => e.name === action);
+            if (selectedEntry && !selectedEntry.isCurrent) {
+              const result = await this.handle(`/project ${action}`, channel, channelId, undefined, userId, threadId);
+              if (result) {
+                const adapter = this.adapters.get(channel);
+                adapter?.sendText(channelId, result, replyCtx);
+              }
+            }
+          }, 120_000);
+          return null;
         }
+      }
 
-        lines.push(`${prefix} ${name} (${projectPath}) - ${statusParts.join(' ')}`);
+      // 降级：文本列表
+      const lines = ['可用项目:'];
+      for (const entry of entries) {
+        const prefix = entry.isCurrent ? '  ✓' : '   ';
+        lines.push(`${prefix} ${entry.name} (${entry.projectPath}) - ${buildStatusText(entry)}`);
       }
       return lines.join('\n');
+    }
+
+    // /project（无参数）：直接复用 /plist 逻辑（含卡片交互）
+    if (normalizedContent === '/project') {
+      if (!policy.canSwitchProject(session?.chatType || 'private', identity.role)) {
+        // 群聊不能切换项目，交由 /plist 逻辑处理
+      }
+      return this.handle('/plist', channel, channelId, undefined, userId, threadId);
     }
 
     // /project 命令：切换项目（支持名称或路径）
@@ -1514,7 +1778,7 @@ export class CommandHandler {
       }
 
       const currentAgentId = activeSession?.agentId || this.defaultAgentId;
-      const newSession = await this.sessionManager.switchProject(channelType, channelId, projectPath, currentAgentId);
+      const newSession = await this.sessionManager.switchProject(channel, channelId, projectPath, currentAgentId);
 
       this.eventBus.publish({
         type: 'project:switched',
@@ -1607,8 +1871,10 @@ export class CommandHandler {
       return `✓ 已添加项目: ${projectName}\n  路径: ${projectPath}\n\n使用 /p ${projectName} 切换到该项目`;
     }
 
-    // /slist 命令：列出当前项目的所有会话
-    if (normalizedContent === '/slist') {
+    // /slist 命令：列出当前项目的会话
+    // /slist      — 仅 EvolClaw 会话
+    // /slist cli  — 仅 CLI 会话（未导入的）
+    if (normalizedContent === '/slist' || normalizedContent === '/slist cli') {
       if (!session) {
         return `❌ 当前没有活跃会话
 
@@ -1618,7 +1884,87 @@ export class CommandHandler {
 3. /project <项目> - 切换到指定项目`;
       }
 
-      const sessions = await this.sessionManager.listSessions(channelType, channelId);
+      const showCliOnly = normalizedContent === '/slist cli';
+
+      // /slist cli — 仅显示 CLI 会话
+      if (showCliOnly) {
+        const canImportCli = policy.canImportCliSession(session.chatType || 'private', identity.role);
+        if (!canImportCli) {
+          return '❌ 当前无权查看 CLI 会话';
+        }
+
+        const cliSessions = await this.sessionManager.scanCliSessions(session.projectPath, session.agentId);
+        const sessions = await this.sessionManager.listSessions(channel, channelId);
+        const currentProjectSessions = sessions.filter(s => s.projectPath === session.projectPath && s.agentId === session.agentId);
+        const dbSessionIds = new Set(currentProjectSessions.map(s => s.agentSessionId).filter(Boolean));
+        const orphanCliSessions = cliSessions.filter(c => !dbSessionIds.has(c.uuid));
+
+        if (orphanCliSessions.length === 0) {
+          return `当前项目 ${path.basename(session.projectPath)} 没有未导入的 CLI 会话`;
+        }
+
+        // 构建显示数据（复用于卡片和文本）
+        const cliDisplayItems = orphanCliSessions.map(c => {
+          const time = new Date(c.mtime).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+          const message = this.sessionManager.readSessionFirstMessage(session.projectPath, c.uuid, session.agentId) || '(无消息)';
+          const uuid = c.uuid.substring(0, 8);
+          return { uuid, fullUuid: c.uuid, time, message };
+        });
+
+        // 尝试发送 ActionInteraction 卡片
+        if (this.interactionRouter && cliDisplayItems.length > 0) {
+          const requestId = `slist-cli-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+          const buttons: ActionInteraction['buttons'] = cliDisplayItems.map(item => ({
+            key: item.uuid,
+            label: item.uuid,
+            style: 'default' as const,
+          }));
+
+          const bodyLines = cliDisplayItems.map(item =>
+            `• ${item.time}  (${item.uuid})  "${item.message}"`
+          );
+
+          const interaction: InteractionRequest = {
+            type: 'interaction',
+            id: requestId,
+            channelId,
+            sessionId: session.id,
+            kind: {
+              kind: 'action',
+              title: `📋 ${path.basename(session.projectPath)} CLI 会话 (${cliDisplayItems.length})`,
+              body: bodyLines.join('\n'),
+              buttons,
+            },
+          };
+
+          const replyCtx = this.getReplyContext(session);
+          const sent = await this.trySendInteraction(channel, channelId, interaction, replyCtx);
+          if (sent) {
+            this.interactionRouter.register(requestId, session.id, async (action, _values, operatorId) => {
+              if (userId && operatorId && operatorId !== userId) return;
+              // action 是 uuid 前缀，用 /s 导入
+              const result = await this.handle(`/session ${action}`, channel, channelId, undefined, userId, threadId);
+              if (result) {
+                const adapter = this.adapters.get(channel);
+                adapter?.sendText(channelId, result, replyCtx);
+              }
+            }, 120_000);
+            return null;
+          }
+        }
+
+        // 降级：文本列表
+        const lines = [`当前项目 ${path.basename(session.projectPath)} 的 CLI 会话 (共 ${orphanCliSessions.length} 个):`, ''];
+        for (const item of cliDisplayItems) {
+          lines.push(`  ${item.time}  (${item.uuid})  "${item.message}"`);
+        }
+        lines.push('');
+        lines.push('使用 /s <8位uuid> 导入并切换到 CLI 会话');
+        return lines.join('\n');
+      }
+
+      // /slist — 仅显示 EvolClaw 会话
+      const sessions = await this.sessionManager.listSessions(channel, channelId);
       const currentProjectSessions = sessions.filter(s => s.projectPath === session.projectPath && s.agentId === session.agentId);
 
       // 从 SDK 同步会话名称（发现 CLI 改名）
@@ -1636,47 +1982,101 @@ export class CommandHandler {
         logger.debug('[CommandHandler] SDK listSessions sync failed (non-critical):', error);
       }
 
-      const canImportCli = policy.canImportCliSession(session.chatType || 'private', identity.role);
-      const cliSessions = canImportCli
-        ? await this.sessionManager.scanCliSessions(session.projectPath, session.agentId)
-        : [];
-      const dbSessionIds = new Set(currentProjectSessions.map(s => s.agentSessionId).filter(Boolean));
+      // 构建可显示会话列表（复用于卡片和文本）
+      const hideTopics = currentProjectSessions.length > 10;
+      const topicCount = hideTopics ? currentProjectSessions.filter(s => s.threadId).length : 0;
+      const maxDisplay = 10;
 
+      const displaySessions: Array<{ session: any; index: number; isActive: boolean; name: string; status: string; idleTime: string; fileMissing: boolean }> = [];
+      let displayIndex = 0;
+      for (let i = 0; i < currentProjectSessions.length; i++) {
+        const s = currentProjectSessions[i];
+        if (hideTopics && s.threadId) continue;
+        if (displayIndex >= maxDisplay) break;
+
+        const isActive = (s.metadata as any)?.isActive === true;
+        displayIndex++;
+        const name = s.name || '(未命名)';
+        const idleTime = formatIdleTime(Date.now() - s.updatedAt);
+        const fileMissing = !!(s.agentSessionId && !this.sessionManager.checkSessionFileExists(s.projectPath, s.agentSessionId, s.agentId));
+
+        let status = '[空闲]';
+        if (fileMissing) {
+          status = '[会话文件缺失]';
+        } else if (!!s.processingState) {
+          status = '[处理中]';
+        } else if (isActive) {
+          status = '[活跃]';
+        }
+
+        displaySessions.push({ session: s, index: displayIndex, isActive, name, status, idleTime, fileMissing });
+      }
+
+      // 尝试发送 ActionInteraction 卡片（每个会话一个按钮，一键切换）
+      if (this.interactionRouter && displaySessions.length >= 1) {
+        const requestId = `slist-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+        const buttons: ActionInteraction['buttons'] = displaySessions.map(ds => {
+          const shortId = ds.session.agentSessionId ? ds.session.agentSessionId.substring(0, 8) : ds.name;
+          return {
+            key: String(ds.index),
+            label: ds.isActive ? `✓ ${ds.index}. ${shortId}` : `${ds.index}. ${shortId}`,
+            style: ds.isActive ? 'primary' as const : 'default' as const,
+          };
+        });
+
+        const bodyLines = displaySessions.map(ds => {
+          const prefix = ds.isActive ? '▶' : '•';
+          const threadTag = ds.session.threadId ? '[话题] ' : '';
+          const uuid = ds.session.agentSessionId ? `(${ds.session.agentSessionId.substring(0, 8)})` : '';
+          const fileMark = ds.fileMissing ? '❌ ' : '';
+          return `${prefix} ${ds.index}. ${threadTag}${fileMark}**${ds.name}** ${uuid}  ${ds.idleTime} ${ds.status}`;
+        });
+
+        const interaction: InteractionRequest = {
+          type: 'interaction',
+          id: requestId,
+          channelId,
+          sessionId: session.id,
+          kind: {
+            kind: 'action',
+            title: `📋 ${path.basename(session.projectPath)} 会话列表`,
+            body: bodyLines.join('\n'),
+            buttons,
+          },
+        };
+
+        const replyCtx = this.getReplyContext(session);
+        const sent = await this.trySendInteraction(channel, channelId, interaction, replyCtx);
+        if (sent) {
+          this.interactionRouter.register(requestId, session.id, async (action, _values, operatorId) => {
+            if (userId && operatorId && operatorId !== userId) return;
+            // action 是按钮 key（序号）
+            const target = displaySessions.find(ds => String(ds.index) === action);
+            if (target && !target.isActive) {
+              const result = await this.handle(`/session ${action}`, channel, channelId, undefined, userId, threadId);
+              if (result) {
+                const adapter = this.adapters.get(channel);
+                adapter?.sendText(channelId, result, replyCtx);
+              }
+            }
+          }, 120_000);
+          return null;
+        }
+      }
+
+      // 降级：文本列表
       const lines = [`当前项目 ${path.basename(session.projectPath)} 的 [${session.agentId}] 会话列表:`, ''];
 
       if (currentProjectSessions.length > 0) {
-        // 超过10个会话时隐藏话题会话（/slist 只能在主会话调用，话题内已禁用）
-        const hideTopics = currentProjectSessions.length > 10;
-        const topicCount = hideTopics ? currentProjectSessions.filter(s => s.threadId).length : 0;
-        const maxDisplay = 10;
-
-        lines.push('【EvolClaw 会话】');
-        let displayIndex = 0;
-        for (let i = 0; i < currentProjectSessions.length; i++) {
-          const s = currentProjectSessions[i];
-          if (hideTopics && s.threadId) continue;
-          if (displayIndex >= maxDisplay) break;
-
-          const isActive = (s.metadata as any)?.isActive === true;
-          displayIndex++;
-          const prefix = isActive ? '  ✓' : '   ';
-          const num = `${displayIndex}.`;
-          const threadTag = s.threadId ? '[话题] ' : '';
-          const name = s.name || '(未命名)';
-          const uuid = s.agentSessionId ? `(${s.agentSessionId.substring(0, 8)})` : '';
-          const idleTime = formatIdleTime(Date.now() - s.updatedAt);
-
-          if (s.agentSessionId && !this.sessionManager.checkSessionFileExists(s.projectPath, s.agentSessionId, s.agentId)) {
-            lines.push(`${prefix} ${num} ${threadTag}❌ ${name} ${uuid} - ${idleTime} [会话文件缺失]`);
+        for (const ds of displaySessions) {
+          const prefix = ds.isActive ? '  ✓' : '   ';
+          const num = `${ds.index}.`;
+          const threadTag = ds.session.threadId ? '[话题] ' : '';
+          const uuid = ds.session.agentSessionId ? `(${ds.session.agentSessionId.substring(0, 8)})` : '';
+          if (ds.fileMissing) {
+            lines.push(`${prefix} ${num} ${threadTag}❌ ${ds.name} ${uuid} - ${ds.idleTime} ${ds.status}`);
           } else {
-            const sIsProcessing = !!s.processingState;
-            let status = '[空闲]';
-            if (sIsProcessing) {
-              status = '[处理中]';
-            } else if (isActive) {
-              status = '[活跃]';
-            }
-            lines.push(`${prefix} ${num} ${threadTag}${name} ${uuid} - ${idleTime} ${status}`);
+            lines.push(`${prefix} ${num} ${threadTag}${ds.name} ${uuid} - ${ds.idleTime} ${ds.status}`);
           }
         }
         const hiddenCount = currentProjectSessions.length - displayIndex - topicCount;
@@ -1689,20 +2089,14 @@ export class CommandHandler {
         lines.push('');
       }
 
-      const orphanCliSessions = cliSessions.filter(c => !dbSessionIds.has(c.uuid)).slice(0, 5);
-      if (orphanCliSessions.length > 0) {
-        lines.push('【CLI 会话】(最新5个)');
-        for (const c of orphanCliSessions) {
-          const time = new Date(c.mtime).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
-          const message = this.sessionManager.readSessionFirstMessage(session.projectPath, c.uuid, session.agentId) || '(无消息)';
-          const uuid = c.uuid.substring(0, 8);
-          lines.push(`  ${time}  (${uuid})  "${message}"`);
-        }
-        lines.push('');
-      }
-
       lines.push('使用 /s <序号、name或8位uuid> 切换会话');
+      lines.push('使用 /slist cli 查看 CLI 会话');
       return lines.join('\n');
+    }
+
+    // /session（无参数）：直接复用 /slist 逻辑（含卡片交互）
+    if (normalizedContent === '/session') {
+      return this.handle('/slist', channel, channelId, undefined, userId, threadId);
     }
 
     // /session 或 /s 命令：切换会话
@@ -1711,12 +2105,12 @@ export class CommandHandler {
 
       if (!sessionName) return '用法: /s <序号、会话名称或前8位UUID>';
 
-      let targetSession = await this.sessionManager.getSessionByName(channelType, channelId, sessionName);
+      let targetSession = await this.sessionManager.getSessionByName(channel, channelId, sessionName);
 
       // 序号切换：纯数字时按 /slist 显示的序号匹配（超过10个时隐藏非活跃话题会话）
       if (!targetSession && /^\d+$/.test(sessionName) && session) {
         const idx = parseInt(sessionName, 10);
-        const allSessions = await this.sessionManager.listSessions(channelType, channelId);
+        const allSessions = await this.sessionManager.listSessions(channel, channelId);
         const projectSessions = allSessions.filter(s => s.projectPath === session.projectPath && s.agentId === session.agentId);
         // 与 /slist 显示逻辑一致：超过10个时隐藏非活跃话题会话
         const hideTopics = projectSessions.length > 10;
@@ -1731,7 +2125,7 @@ export class CommandHandler {
       }
 
       if (!targetSession && sessionName.length === 8) {
-        targetSession = await this.sessionManager.getSessionByUuidPrefix(channelType, channelId, sessionName);
+        targetSession = await this.sessionManager.getSessionByUuidPrefix(channel, channelId, sessionName);
       }
 
       const canImport = policy.canImportCliSession(session?.chatType || 'private', identity.role);
@@ -1748,7 +2142,7 @@ export class CommandHandler {
           const cliSession = cliSessions.find(c => c.uuid.startsWith(sessionName));
 
           if (cliSession) {
-            const imported = await this.sessionManager.importCliSession(channelType, channelId, projectPath, cliSession.uuid, currentAgentId);
+            const imported = await this.sessionManager.importCliSession(channel, channelId, projectPath, cliSession.uuid, currentAgentId);
             this.eventBus.publish({ type: 'session:imported', sessionId: imported.id, agentSessionId: cliSession.uuid, projectPath });
             const projectName = this.getProjectName(projectPath);
             return `✓ 已导入 CLI 会话: ${imported.name}\n  项目: ${projectName}\n  将继续之前的对话历史`;
@@ -1766,7 +2160,7 @@ export class CommandHandler {
       const lastInputLine = lastInput ? `\n  最后输入: "${lastInput}"` : '';
 
       if (!session) {
-        const switched = await this.sessionManager.switchToSession(channelType, channelId, targetSession.id);
+        const switched = await this.sessionManager.switchToSession(channel, channelId, targetSession.id);
         if (!switched) {
           return `❌ 切换会话失败`;
         }
@@ -1782,7 +2176,7 @@ export class CommandHandler {
         return `❌ 无法从主会话切换到话题会话\n话题会话仅在对应话题内可用`;
       }
 
-      const switched = await this.sessionManager.switchToSession(channelType, channelId, targetSession.id);
+      const switched = await this.sessionManager.switchToSession(channel, channelId, targetSession.id);
 
       if (!switched) {
         return `❌ 切换会话失败`;
@@ -1809,7 +2203,7 @@ export class CommandHandler {
 3. /session <名称> - 切换到已有会话`;
       }
 
-      const existing = await this.sessionManager.getSessionByName(channelType, channelId, newName);
+      const existing = await this.sessionManager.getSessionByName(channel, channelId, newName);
       if (existing && existing.id !== session.id) {
         return `❌ 会话名称 "${newName}" 已存在，请使用其他名称`;
       }
@@ -1841,12 +2235,12 @@ export class CommandHandler {
         return `❌ 无权限：群聊中仅管理员可删除会话`;
       }
 
-      let targetSession = await this.sessionManager.getSessionByName(channelType, channelId, sessionName);
+      let targetSession = await this.sessionManager.getSessionByName(channel, channelId, sessionName);
 
       // 序号删除（与 /slist 显示序号一致）
       if (!targetSession && /^\d+$/.test(sessionName)) {
         const idx = parseInt(sessionName, 10);
-        const allSessions = await this.sessionManager.listSessions(channelType, channelId);
+        const allSessions = await this.sessionManager.listSessions(channel, channelId);
         const projectSessions = allSessions.filter(s => s.projectPath === session.projectPath && s.agentId === session.agentId);
         const hideTopics = projectSessions.length > 10;
         const visibleSessions = hideTopics
@@ -1860,7 +2254,7 @@ export class CommandHandler {
       }
 
       if (!targetSession && sessionName.length === 8) {
-        targetSession = await this.sessionManager.getSessionByUuidPrefix(channelType, channelId, sessionName);
+        targetSession = await this.sessionManager.getSessionByUuidPrefix(channel, channelId, sessionName);
       }
 
       if (!targetSession) {

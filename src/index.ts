@@ -1,12 +1,10 @@
 import { ClaudeSessionFileAdapter } from './core/session/adapters/claude-session-file-adapter.js';
 import { CodexSessionFileAdapter } from './core/session/adapters/codex-session-file-adapter.js';
-import { HermesSessionFileAdapter } from './core/session/adapters/hermes-session-file-adapter.js';
 import { GeminiSessionFileAdapter } from './core/session/adapters/gemini-session-file-adapter.js';
 import { loadConfig, ensureDataDirs, resolvePaths, resolveAnthropicConfig, isOwner, validateConfigIntegrity, validateChannelInstanceNames, getOwner } from './config.js';
 import { SessionManager } from './core/session/session-manager.js';
 import { ClaudeAgentPlugin } from './agents/claude-runner.js';
 import { CodexAgentPlugin } from './agents/codex-runner.js';
-import { HermesAgentPlugin } from './agents/hermes-runner.js';
 import { GeminiAgentPlugin } from './agents/gemini-runner.js';
 import { FeishuChannelPlugin } from './channels/feishu.js';
 import { WechatChannelPlugin } from './channels/wechat.js';
@@ -19,6 +17,7 @@ import { CommandHandler } from './core/command-handler.js';
 import { EventBus } from './core/event-bus.js';
 import { StatsCollector } from './utils/stats-collector.js';
 import { PermissionGateway } from './core/permission.js';
+import { InteractionRouter } from './core/interaction-router.js';
 import { ChannelLoader } from './core/channel-loader.js';
 import { AgentLoader } from './core/agent-loader.js';
 import { IpcServer, IpcStatusResponse, ChannelStatus } from './ipc.js';
@@ -90,14 +89,12 @@ async function main() {
   // 注册会话文件适配器（Claude / Codex 各自的会话文件操作）
   sessionManager.registerFileAdapter(new ClaudeSessionFileAdapter());
   sessionManager.registerFileAdapter(new CodexSessionFileAdapter());
-  sessionManager.registerFileAdapter(new HermesSessionFileAdapter());
   sessionManager.registerFileAdapter(new GeminiSessionFileAdapter());
 
   // Agent 插件系统
   const agentLoader = new AgentLoader();
   agentLoader.register(new ClaudeAgentPlugin());
   agentLoader.register(new CodexAgentPlugin());
-  agentLoader.register(new HermesAgentPlugin());
   agentLoader.register(new GeminiAgentPlugin());
 
   const agentInstances = agentLoader.createAll(config, {
@@ -121,6 +118,10 @@ async function main() {
   // 权限审批网关
   const permissionGateway = new PermissionGateway();
   permissionGateway.setEventBus(eventBus);
+
+  // 交互路由器
+  const interactionRouter = new InteractionRouter();
+
   // 为所有支持权限的 agent 设置 gateway
   for (const inst of agentInstances) {
     inst.agent.setPermissionGateway?.(permissionGateway);
@@ -144,17 +145,13 @@ async function main() {
   const channelInstances = await channelLoader.createAll(config);
   logger.info(`✓ Created ${channelInstances.length} channel instance(s)`);
 
-  // 启动迁移：将 sessions.channel 中的旧实例名回填为 channelType
-  const instanceToType = new Map<string, string>();
-  for (const inst of channelInstances) {
-    const type = inst.channelType || inst.adapter.channelName;
-    instanceToType.set(inst.adapter.channelName, type);
-  }
-  sessionManager.migrateChannelNames(instanceToType);
+  // 启动迁移：将 sessions.channel 从 channelType 回填为实例名
+  sessionManager.migrateChannelToInstanceName();
 
   // 创建命令处理器
   const cmdHandler = new CommandHandler(sessionManager, agentMap, config, messageCache, eventBus, defaultAgent);
   cmdHandler.setPermissionGateway(permissionGateway);
+  cmdHandler.setInteractionRouter(interactionRouter);
   cmdHandler.setStatsCollector(statsCollector);
 
   // 创建消息处理器
@@ -180,6 +177,9 @@ async function main() {
 
   // 回填 processor 和 messageQueue 的引用
   cmdHandler.setProcessor(processor);
+
+  // 设置交互路由器
+  processor.setInteractionRouter(interactionRouter);
 
   // 设置 compact 开始回调（对所有支持的 agent）
   for (const inst of agentInstances) {
@@ -244,6 +244,13 @@ async function main() {
     if (inst.policy) {
       cmdHandler.registerPolicy(inst.adapter.channelName, inst.policy);
     }
+
+    // 注册交互回调：渠道收到用户操作后路由到 InteractionRouter
+    if (inst.adapter.onInteraction) {
+      inst.adapter.onInteraction((response) => {
+        interactionRouter.handle(response);
+      });
+    }
   }
 
   // ── MessageBridge：Channel ↔ Core 消息桥梁 ──
@@ -259,7 +266,7 @@ async function main() {
     if (channelType === 'feishu') {
       msgBridge.register(inst.adapter.channelName,
         (handler) => inst.channel.onMessage(async ({ channelId: chatId, content, images, peerId, peerName, messageId, mentions, threadId, rootId, chatType }: any) => {
-          handler({
+          await handler({
             channel: channelType, channelId: chatId, content, images, chatType,
             peerId: peerId || '', peerName, messageId, mentions, threadId,
             replyContext: rootId ? { replyToMessageId: rootId, replyInThread: true } : undefined,
@@ -330,7 +337,7 @@ async function main() {
   for (const inst of channelInstances) {
     const channelType = inst.channelType || inst.adapter.channelName;
     if (channelType === 'feishu' && 'preloadThreads' in inst.channel) {
-      const threadIds = sessionManager.getKnownThreadIds(channelType);
+      const threadIds = sessionManager.getKnownThreadIds(inst.adapter.channelName);
       (inst.channel as any).preloadThreads(threadIds);
     }
   }
@@ -525,8 +532,12 @@ async function main() {
   });
 
   // 优雅关闭
-  const shutdown = async () => {
-    logger.info('\n\nShutting down gracefully...');
+  let shutdownSignal = 'unknown';
+  const shutdown = async (signal?: string) => {
+    if (signal) shutdownSignal = signal;
+    const pid = process.pid;
+    const ppid = process.ppid;
+    logger.info(`\n\nShutting down gracefully... (signal=${shutdownSignal}, pid=${pid}, ppid=${ppid})`);
     fs.unwatchFile(configPath);
     ipcServer.stop();
     eventBus.publish({
@@ -546,8 +557,8 @@ async function main() {
     process.exit(0);
   };
 
-  process.on('SIGINT', shutdown);
-  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
 }
 
 main().catch((error) => {

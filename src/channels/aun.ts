@@ -1,8 +1,11 @@
-import { AUNClient, FileSecretStore } from '@eleans/aun-core-node';
-import { logger } from '../utils/logger.js';
+import { AUNClient, FileSecretStore, type JsonObject } from '@eleans/aun-core-node';
+import fs from 'fs';
+import path from 'path';
+import { logger, localTimestamp } from '../utils/logger.js';
 import type { ChannelPlugin, ChannelInstance } from '../core/channel-loader.js';
 import type { Config, ReplyContext, AunChannelConfig } from '../types.js';
 import { normalizeChannelInstances } from '../config.js';
+import { resolvePaths } from '../paths.js';
 
 export interface AUNConfig {
   aid: string;
@@ -12,6 +15,7 @@ export interface AUNConfig {
   accessToken?: string;
   flushDelay?: number;
   encryptionSeed?: string;
+  aunTrace?: boolean;     // 启用数据追踪日志
 }
 
 export interface AUNMessageHandler {
@@ -32,6 +36,13 @@ export class AUNChannel {
   private client: AUNClient | null = null;
   private messageHandler?: AUNMessageHandler;
   private connected = false;
+  private traceStream: fs.WriteStream | null = null;
+
+  private trace(dir: 'IN' | 'OUT', event: string, data: unknown): void {
+    if (!this.traceStream) return;
+    const line = JSON.stringify({ ts: localTimestamp(), dir, event, data });
+    this.traceStream.write(line + '\n');
+  }
 
   private getShortAid(aid?: string): string | undefined {
     if (!aid) return undefined;
@@ -96,7 +107,13 @@ export class AUNChannel {
   private static readonly RECONNECT_DELAYS = [60, 120, 300, 600];  // seconds
   private onChannelDown?: () => void;
 
-  constructor(private config: AUNConfig) {}
+  constructor(private config: AUNConfig) {
+    if (config.aunTrace) {
+      const logPath = path.join(resolvePaths().logs, 'aun-trace.log');
+      this.traceStream = fs.createWriteStream(logPath, { flags: 'a' });
+      logger.info(`[AUN] Trace logging enabled: ${logPath}`);
+    }
+  }
 
   async connect(): Promise<void> {
     this.intentionalDisconnect = false;
@@ -136,8 +153,10 @@ export class AUNChannel {
 
     // Create client with FileSecretStore (AES-256-GCM)
     // 不传 encryption_seed 时，SDK 自动从 {aun_path}/.seed 文件派生密钥（与 aun_cli.py 对齐）
+    const rootCaPath = `${aunPath}/CA/root/root.crt`;
     this.client = new AUNClient({
       aun_path: aunPath,
+      root_ca_path: rootCaPath,
       ...(encryptionSeed && { encryption_seed: encryptionSeed }),
     });
     // Set gateway URL (internal property, same as Python SDK)
@@ -145,24 +164,30 @@ export class AUNChannel {
 
     // Register event handlers before connecting
     this.client.on('message.received', (data: unknown) => {
+      this.trace('IN', 'message.received', data);
       const kind = (data && typeof data === 'object') ? (data as any).kind ?? '' : '';
       const keys = (data && typeof data === 'object') ? Object.keys(data as any).join(',') : typeof data;
       logger.info(`[AUN][DIAG] message.received: kind=${kind} keys=${keys}`);
       this.handleIncomingPrivateMessage(data);
     });
     this.client.on('group.message_created', (data: unknown) => {
+      this.trace('IN', 'group.message_created', data);
       const gid = (data && typeof data === 'object') ? (data as any).group_id ?? '' : '';
       const sender = (data && typeof data === 'object') ? (data as any).sender_aid ?? '' : '';
       logger.info(`[AUN][DIAG] group.message_created: group_id=${gid} sender=${sender}`);
       this.handleIncomingGroupMessage(data);
     });
-    this.client.on('connection.state', (data: unknown) => this.handleConnectionState(data));
+    this.client.on('connection.state', (data: unknown) => {
+      this.trace('IN', 'connection.state', data);
+      this.handleConnectionState(data);
+    });
 
     // Authenticate
     let accessToken: string;
     try {
       logger.info(`[AUN] Authenticating as ${aidName}...`);
       const auth = await this.client.auth.authenticate(aidName ? { aid: aidName } : undefined);
+      this.trace('IN', 'auth.result', { aid: auth.aid, gateway: auth.gateway, hasToken: !!auth.access_token });
       accessToken = auth.access_token as string;
       const resolvedGateway = (auth.gateway as string) || gateway;
       (this.client as any)._gatewayUrl = resolvedGateway;
@@ -380,18 +405,21 @@ export class AUNChannel {
       finalText = mentionPrefix + finalText;
     }
 
-    const params: Record<string, any> = { payload: finalText, encrypt: true };
+    const params: Record<string, any> = { payload: { text: finalText }, encrypt: true };
     if (context?.threadId) params.task_id = context.threadId;
 
     try {
       if (channelId.startsWith('grp_')) {
         params.group_id = channelId;
+        this.trace('OUT', 'group.send', params);
         await this.client.call('group.send', params);
       } else {
         params.to = channelId;
+        this.trace('OUT', 'message.send', params);
         await this.client.call('message.send', params);
       }
     } catch (e) {
+      this.trace('OUT', 'send.error', { channelId, error: String(e) });
       logger.error(`[AUN] Send failed to ${channelId}: ${e}`);
     }
   }
@@ -410,12 +438,12 @@ export class AUNChannel {
     if (status === 'start') this.sentCount.delete(channelId);  // 新任务开始，重置计数
     if (!this.client || !this.connected) return;
 
-    const payload = JSON.stringify({
+    const payload = {
       type: 'processing',
       status,
       sessionId,
       timestamp: Math.floor(Date.now() / 1000),
-    });
+    };
 
     const params: Record<string, any> = {
       payload,
@@ -425,11 +453,13 @@ export class AUNChannel {
 
     if (channelId.startsWith('grp_')) {
       params.group_id = channelId;
+      this.trace('OUT', 'group.send.status', params);
       this.client.call('group.send', params).catch(e => {
         logger.debug(`[AUN] Processing status failed: ${e}`);
       });
     } else {
       params.to = channelId;
+      this.trace('OUT', 'message.send.status', params);
       this.client.call('message.send', params).catch(e => {
         logger.debug(`[AUN] Processing status failed: ${e}`);
       });
@@ -439,10 +469,20 @@ export class AUNChannel {
   sendCustomPayload(channelId: string, payload: string): void {
     if (!this.client || !this.connected) return;
 
-    this.client.call('message.send', {
-      to: channelId, payload,
+    // SDK 0.3.0 E2EE requires payload to be an object
+    let payloadObj: JsonObject;
+    try {
+      const parsed = JSON.parse(payload);
+      payloadObj = (parsed && typeof parsed === 'object' && !Array.isArray(parsed))
+        ? parsed as JsonObject : { text: payload };
+    } catch { payloadObj = { text: payload }; }
+
+    const sendParams = {
+      to: channelId, payload: payloadObj,
       encrypt: true, persist: false,
-    }).catch(e => {
+    };
+    this.trace('OUT', 'message.send.custom', sendParams);
+    this.client.call('message.send', sendParams).catch(e => {
       logger.debug(`[AUN] Custom payload failed: ${e}`);
     });
   }
@@ -458,6 +498,10 @@ export class AUNChannel {
       this.client = null;
     }
     this.connected = false;
+    if (this.traceStream) {
+      this.traceStream.end();
+      this.traceStream = null;
+    }
     logger.info('[AUN] Disconnected');
   }
 
@@ -555,6 +599,7 @@ export class AUNChannelPlugin implements ChannelPlugin {
         accessToken: inst.accessToken,
         flushDelay: inst.flushDelay,
         encryptionSeed: inst.encryptionSeed,
+        aunTrace: config.debug?.aunTrace,
       });
 
       const adapter = {

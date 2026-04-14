@@ -11,6 +11,7 @@ import { EventBus } from '../event-bus.js';
 import { summarizeToolInput } from '../permission.js';
 import type { Message, Config, Session, ChannelAdapter, ChannelOptions, ChannelPolicy, CommandHandler } from '../../types.js';
 import { getOwner } from '../../config.js';
+import type { InteractionRouter } from '../interaction-router.js';
 
 /**
  * 统一消息处理器
@@ -24,6 +25,7 @@ export class MessageProcessor {
   private agentMap: Map<string, AgentRunnerFull>;
   private defaultAgentId: string;
   private interruptedSessions = new Map<string, string>();  // sessionId → reason ('new_message' | 'stop' | ...)
+  private interactionRouter?: InteractionRouter;
 
   /** 按 agentId 获取 agent，回退到默认 */
   getAgent(agentId?: string): AgentRunnerFull {
@@ -67,6 +69,10 @@ export class MessageProcessor {
         this.interruptedSessions.set(event.sessionId as string, (event as any).reason || 'unknown');
       }
     });
+  }
+
+  setInteractionRouter(router: InteractionRouter): void {
+    this.interactionRouter = router;
   }
 
   /**
@@ -115,10 +121,24 @@ export class MessageProcessor {
     // 1. 精确匹配实例名
     let info = this.channels.get(channel);
     if (info) return info;
-    // 2. 按 channelType 查找（message.channel 现在存渠道类型）
+    // 2. 按 channelType 查找（兼容按类型名路由）
     const instanceName = this.channelTypeMap.get(channel);
     if (instanceName) info = this.channels.get(instanceName);
     return info;
+  }
+
+  // 命令前缀列表（与 CommandHandler.quickCommandPrefixes 保持同步）
+  private static readonly COMMAND_PREFIXES = [
+    '/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart',
+    '/model', '/effort', '/agent', '/slist', '/session', '/rename', '/repair', '/fork',
+    '/stop', '/clear', '/compact', '/safe', '/del', '/perm', '/send', '/check',
+    '/p ', '/s ', '/name ',
+  ];
+
+  /** 判断消息内容是否为已知命令 */
+  private isKnownCommand(content: string): boolean {
+    return content === '/p' || content === '/s' ||
+      MessageProcessor.COMMAND_PREFIXES.some(cmd => content.startsWith(cmd));
   }
 
   /**
@@ -128,7 +148,7 @@ export class MessageProcessor {
     const idleMs = (this.config.idleMonitor?.timeout ?? 120) * 1000;
 
     // 先解析会话，再优先用 session.metadata.channelName 精确定位实例级 adapter
-    // message.channel 现在统一是 channelType，直接用它会在多实例同通道下退化为“首个实例”路由
+    // message.channel 现在存实例名（channelName），可直接用于精确路由
     const { session, absoluteProjectPath } = await this.resolveSession(message);
     const channelKey = session.metadata?.channelName || message.channel;
     const channelInfo = this.resolveChannelInfo(channelKey);
@@ -184,7 +204,7 @@ export class MessageProcessor {
               const msg = showIdleMonitor
                 ? result.message
                 : `\u26a0\ufe0f 任务超时（${result.idleSec}秒无响应），已自动中断`;
-              channelInfo.adapter.sendText(message.channelId, msg).catch(e => {
+              channelInfo.adapter.sendText(message.channelId, msg, this.getReplyContext(session)).catch(e => {
                 logger.debug(`[MessageProcessor] Failed to send kill diagnostic message:`, e);
               });
             }
@@ -198,7 +218,7 @@ export class MessageProcessor {
             logger.info(`[MessageProcessor] Idle monitor: ${result.action} after ${result.idleSec}s idle, stream: ${streamKey}`);
             if (channelInfo && showIdleMonitor && !shouldSuppress()) {
               if (!isBackground) {
-                channelInfo.adapter.sendText(message.channelId, result.message).catch(e => {
+                channelInfo.adapter.sendText(message.channelId, result.message, this.getReplyContext(session)).catch(e => {
                   logger.debug(`[MessageProcessor] Failed to send idle monitor message:`, e);
                 });
               }
@@ -229,6 +249,9 @@ export class MessageProcessor {
           // 认证错误（401 / Invalid API Key）不是会话问题，安全模式无法修复，不累计
           } else if (errorType === ErrorType.AUTH_ERROR) {
             logger.info(`[MessageProcessor] Auth error (invalid API key), skipping safe mode accumulation`);
+          // API 错误（5xx / 算力池切换等）是平台暂时性问题，安全模式无法修复，不累计
+          } else if (errorType === ErrorType.API_ERROR) {
+            logger.info(`[MessageProcessor] API error, skipping safe mode accumulation`);
           } else if (!policy.accumulateErrors(chatType, identityRole)) {
             logger.info(`[MessageProcessor] Non-accumulating error (chatType=${chatType}, identity=${identityRole}), skipping safe mode accumulation`);
           } else {
@@ -304,6 +327,14 @@ ${suggestions}`,
 
     if (!channelInfo) {
       logger.error(`[MessageProcessor] Unknown channel: ${channelKey}`);
+      return;
+    }
+
+    // 二次拦截：如果命令消息绕过 MessageBridge 的 handleCommand 泄漏到这里，
+    // 静默丢弃而不是发送给 Agent（命令已在 MessageBridge 层处理过）
+    const rawContent = message.content.replace(/^(>[^\n]*\n)+\n?/, '').trim();
+    if (rawContent.startsWith('/') && this.isKnownCommand(rawContent)) {
+      logger.warn(`[MessageProcessor] Command leaked past MessageBridge, dropped: "${rawContent.substring(0, 40)}"`);
       return;
     }
 
@@ -386,8 +417,16 @@ ${suggestions}`,
         await adapter.sendText(message.channelId, text, this.getReplyContext(session));
       });
 
-      // 设置 per-session 权限模式（管理员默认 bypass，普通用户默认 auto）
-      const defaultMode = session.identity?.role === 'owner' ? 'bypass' : 'auto';
+      // 设置权限审批的交互上下文（支持交互卡片）
+      agent.setPermissionContext?.({
+        adapter,
+        channelId: message.channelId,
+        replyContext: this.getReplyContext(session),
+        interactionRouter: this.interactionRouter,
+      });
+
+      // 设置 per-session 权限模式（管理员默认 bypass，普通用户默认 readonly）
+      const defaultMode = session.identity?.role === 'owner' ? 'bypass' : 'readonly';
       const permissionMode = session.metadata?.permissionMode || defaultMode;
       agent.setMode(permissionMode);
 
@@ -421,6 +460,11 @@ ${suggestions}`,
         if (session.chatType) envParts.push(`聊天类型: ${session.chatType}`);
         if (session.agentId && session.agentId !== 'claude') envParts.push(`当前Agent: ${session.agentId}`);
         contextParts.push(`[当前环境] ${envParts.join(' | ')}`);
+
+        // 只读模式提示
+        if (permissionMode === 'readonly') {
+          contextParts.push('[只读模式] 禁止修改项目文件。如需生成文件供用户下载，请写入 .evolclaw/tmp/ 目录后使用 [SEND_FILE:] 发送');
+        }
 
         // 2. 文件发送能力（按 channelType 去重，提示词只展示第一级通道名）
         const fileChannelTypes = new Set<string>();
@@ -615,9 +659,7 @@ ${suggestions}`,
       // 非 suppressed 且有流式文本：已经逐步推送过了，不重复添加
       //   但如果 flusher 既未发送过内容也没有 pending 内容（如 text 事件全为空），仍需兜底
       const finalReplyText = streamResult.lastReplyText || streamResult.fullText;
-      // Hermes bridge 在 resume 无实际回复时返回字面量 "(empty)"，过滤掉
-      const isPlaceholder = finalReplyText === '(empty)';
-      if (finalReplyText && !isPlaceholder) {
+      if (finalReplyText) {
         if (shouldSuppress()) {
           flusher.addText(finalReplyText);
         } else if (!streamResult.hasReceivedText || (!flusher.hasSentContent() && !flusher.hasContent())) {

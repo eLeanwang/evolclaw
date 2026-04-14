@@ -101,7 +101,7 @@ export interface OpenaiResolved {
   apiKey: string;
   baseUrl?: string;
   model: string;
-  reasoning?: string;
+  effort?: string;
 }
 
 export function resolveOpenaiConfig(config: Config): OpenaiResolved {
@@ -136,9 +136,9 @@ export function resolveOpenaiConfig(config: Config): OpenaiResolved {
     || codexSettings.model
     || 'gpt-5.2-codex';
 
-  const reasoning = config.agents?.openai?.reasoning || undefined;
+  const effort = config.agents?.openai?.effort || config.agents?.openai?.reasoning || undefined;
 
-  return { apiKey, baseUrl, model, reasoning };
+  return { apiKey, baseUrl, model, effort };
 }
 
 // ── Google (Gemini) config ──
@@ -181,69 +181,44 @@ export function resolveGoogleConfig(config: Config): GoogleResolved {
   return { cliPath, model, apiKey, mode, useVertex, project, location };
 }
 
-// ── Hermes config ──
-
-export interface HermesResolved {
-  pythonPath: string;
-  bridgePath: string;
-  hermesProjectPath: string;  // hermes-agent 项目路径（传给 bridge 做 sys.path）
-  model: string;
-  provider: string;
-  baseUrl?: string;
-  apiKey?: string;
-}
-
-function loadHermesSettings(): { apiKey?: string; baseUrl?: string; model?: string; provider?: string } {
-  try {
-    const envPath = path.join(os.homedir(), '.hermes', '.env');
-    if (fs.existsSync(envPath)) {
-      const content = fs.readFileSync(envPath, 'utf-8');
-      const apiKeyMatch = content.match(/^OPENAI_API_KEY\s*=\s*(.+)$/m);
-      return { apiKey: apiKeyMatch?.[1]?.trim() };
-    }
-  } catch {}
-  return {};
-}
-
-export function resolveHermesConfig(config: Config): HermesResolved {
-  const hermesSettings = loadHermesSettings();
-  const hermesCfg = config.agents?.hermes;
-
-  // Hermes project path: from projects list or default
-  const hermesProjectPath = config.projects?.list?.['hermes']
-    || path.join(os.homedir(), '.hermes', 'hermes-agent');
-
-  // Python path: config → hermes project .venv
-  const pythonPath = hermesCfg?.pythonPath
-    || path.join(hermesProjectPath, '.venv', 'bin', 'python');
-
-  // Bridge path: config → evolclaw project's hermes/hermes_bridge.py
-  const defaultBridgePath = path.join(_getPackageRoot(), 'hermes', 'hermes_bridge.py');
-  const bridgePath = hermesCfg?.bridgePath || defaultBridgePath;
-
-  // API key: config → env → ~/.hermes/.env
-  const configApiKey = hermesCfg?.apiKey;
-  const isPlaceholder = !configApiKey || configApiKey.includes('your-') || configApiKey.includes('placeholder');
-  const apiKey = (isPlaceholder ? undefined : configApiKey)
-    || process.env.HERMES_API_KEY
-    || hermesSettings.apiKey
-    || undefined;
-
-  // Base URL
-  const baseUrl = hermesCfg?.baseUrl
-    || process.env.HERMES_BASE_URL
-    || hermesSettings.baseUrl
-    || undefined;
-
-  const model = hermesCfg?.model || 'Claude-Sonnet-4.6';
-  const provider = hermesCfg?.provider || hermesSettings.provider || 'custom';
-
-  return { pythonPath, bridgePath, hermesProjectPath, model, provider, baseUrl, apiKey };
-}
-
 export function loadConfig(configPath: string = resolvePaths().config): Config {
   if (!fs.existsSync(configPath)) {
-    throw new Error(`Config file not found: ${configPath}`);
+    // Try to recover from backup files
+    const dataDir = path.dirname(configPath);
+    const backupPath = path.join(dataDir, 'evolclaw.backup.json');
+    if (fs.existsSync(backupPath)) {
+      logger.warn(`Config file missing, restoring from backup: ${backupPath}`);
+      fs.copyFileSync(backupPath, configPath);
+    } else {
+      // Look for timestamped backups (evolclaw-YYYYMMDD-HHMMSS.json)
+      const timestampedBackups = fs.existsSync(dataDir)
+        ? fs.readdirSync(dataDir)
+            .filter(f => /^evolclaw-\d{8}-\d{6}\.json$/.test(f))
+            .sort()
+            .reverse()
+        : [];
+      if (timestampedBackups.length > 0) {
+        const latest = path.join(dataDir, timestampedBackups[0]);
+        logger.warn(`Config file missing, restoring from timestamped backup: ${latest}`);
+        fs.copyFileSync(latest, configPath);
+      } else {
+        // Create minimal config from sample
+        const samplePath = path.join(_getPackageRoot(), 'data', 'evolclaw.sample.json');
+        if (fs.existsSync(samplePath)) {
+          logger.warn(`Config file missing, creating from sample: ${samplePath}`);
+          const sample = JSON.parse(fs.readFileSync(samplePath, 'utf-8'));
+          // Set a usable defaultPath
+          const defaultProjectDir = path.join(os.homedir(), 'evolclaw-project');
+          sample.projects.defaultPath = defaultProjectDir;
+          if (!fs.existsSync(defaultProjectDir)) {
+            fs.mkdirSync(defaultProjectDir, { recursive: true });
+          }
+          fs.writeFileSync(configPath, JSON.stringify(sample, null, 2), 'utf-8');
+        } else {
+          throw new Error(`Config file not found: ${configPath}`);
+        }
+      }
+    }
   }
 
   const content = fs.readFileSync(configPath, 'utf-8');
@@ -414,7 +389,7 @@ export function ensureDir(dirPath: string): void {
 }
 
 // agents.defaultAgent → config key 映射
-const agentKeyMap: Record<string, string> = { claude: 'anthropic', codex: 'openai', hermes: 'hermes', gemini: 'google' };
+const agentKeyMap: Record<string, string> = { claude: 'anthropic', codex: 'openai', gemini: 'google' };
 
 /**
  * 配置结构完整性校验（不校验凭据有效性）。

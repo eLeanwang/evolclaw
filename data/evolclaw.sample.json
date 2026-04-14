@@ -9,6 +9,9 @@
       "model": "gpt-5.2-codex",
       "effort": "medium"
     },
+    "google": {
+      "model": "gemini-2.5-flash"
+    },
     "defaultAgent": "claude"
   },
   "channels": {
@@ -24,9 +27,9 @@
       "token": ""
     },
     "aun": {
-      "enabled": true,
-      "domain": "your-aun-domain",
-      "agentName": "your-agent-name"
+      "enabled": false,
+      "aid": "your-agent.agentid.pub",
+      "gatewayPort": 443
     }
   },
   "projects": {

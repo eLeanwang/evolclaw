@@ -31,9 +31,15 @@ function write(stream: fs.WriteStream | null, data: any) {
   stream.write(`${line}\n`);
 }
 
+export function localTimestamp(): string {
+  const d = new Date();
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${String(d.getMilliseconds()).padStart(3, '0')}`;
+}
+
 function log(level: string, ...args: any[]) {
   if (!shouldLog(level)) return;
-  const timestamp = new Date().toISOString();
+  const timestamp = localTimestamp();
   const msg = `[${timestamp}] [${level}] ${args.join(' ')}`;
   // 只写文件，不输出到 console（避免重定向时重复）
   write(streams.main, msg);
@@ -46,10 +52,10 @@ export const logger = {
   error: (...args: any[]) => log('ERROR', ...args),
 
   message: (data: any) => {
-    write(streams.message, { ts: new Date().toISOString(), ...data });
+    write(streams.message, { ts: localTimestamp(), ...data });
   },
 
   event: (data: any) => {
-    write(streams.event, { ts: new Date().toISOString(), ...data });
+    write(streams.event, { ts: localTimestamp(), ...data });
   }
 };

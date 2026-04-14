@@ -1,12 +1,11 @@
 # 配置文件（包含敏感信息）
 config.toml
 data/evolclaw.json
-data/evolclaw.json.backup
+data/evolclaw.json.*
 
 # 数据库
 data/*.db
 data/*.db-*
-isolated
 
 # 日志
 logs/
@@ -18,9 +17,6 @@ data/restart-confirm-*.json
 data/wechat-*.txt
 data/wechat-*.json
 data/evolclaw-*.json
-data/evolclaw.backup.json
-data/evolclaw.json.bak
-data/evolclaw.json.test-backup
 data/*.pid
 
 # Node.js
@@ -39,6 +35,7 @@ projects/
 # 测试文件
 tests/
 test-*.js
+test-*.ts
 
 # 编辑器
 .vscode/
@@ -62,23 +59,13 @@ conversations/
 
 # 临时脚本
 *.sh.bak
-阿里云仓库配置脚本.sh
 scripts/
-test-*.ts
 
 # 备份文件
 *.bak
 
-# 临时/测试产物
-123.txt
-demo-render.ts
-latex-boxed.png
-mermaid-flowchart.png
-
-# 外部文档
-OrgMind*.html
-space-elevator-analysis.md
-architecture-flowchart.md
+# Hermes（已归档）
+hermes/
 
 # AUN 辅助目录 / 示例 / 演示 / 外部 SDK
 aun-cli/

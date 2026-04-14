@@ -1,4 +1,7 @@
+import path from 'path';
 import type { EventBus } from './event-bus.js';
+import type { ChannelAdapter, ReplyContext, InteractionRequest } from '../types.js';
+import type { InteractionRouter } from './interaction-router.js';
 
 // 危险命令黑名单（正则表达式）
 const DANGEROUS_PATTERNS = [
@@ -18,6 +21,50 @@ const DANGEROUS_PATTERNS = [
   /\breg\s+delete/i,          // reg delete (删除注册表)
   /\bnet\s+stop/i,            // net stop (停止服务)
 ];
+
+// 只读模式写入命令黑名单
+const READONLY_WRITE_PATTERNS = [
+  /\bmkdir\b/, /\btouch\b/, /\btee\b/, /\bcp\b/, /\bmv\b/,
+  /\brm\b/, /\brmdir\b/, /\bchmod\b/, /\bchown\b/, /\bln\b/,
+  />>?\s/,
+  /\bgit\s+(commit|push|merge|rebase|reset|stash|checkout|cherry-pick|revert|tag|branch\s+-[dDmM])/,
+  /\bgit\s+am\b/,
+  /\bnpm\s+(install|ci|uninstall|update|link|publish|run|exec|init)\b/,
+  /\bnpx\b/, /\byarn\b/, /\bpnpm\b/, /\bpip\s+install\b/,
+  /\bsed\s+-i\b/, /\bawk\s+-i\b/, /\bpatch\b/,
+];
+
+/**
+ * 只读模式检查（用于 PreToolUse hook 和 canUseTool callback）
+ * Write/Edit/NotebookEdit 仅允许写入 {projectPath}/.evolclaw/tmp/
+ * Bash 拦截所有写入意图命令
+ */
+export function checkReadonly(
+  toolName: string,
+  input: Record<string, unknown>,
+  projectPath: string
+): { behavior: 'allow' } | { behavior: 'deny'; message: string } {
+  if (toolName === 'Write' || toolName === 'Edit' || toolName === 'NotebookEdit') {
+    const filePath = (input.file_path || input.notebook_path) as string | undefined;
+    if (!filePath) return { behavior: 'allow' };
+    const tmpDir = path.join(projectPath, '.evolclaw', 'tmp') + path.sep;
+    const resolved = path.resolve(projectPath, filePath) + (filePath.endsWith(path.sep) ? path.sep : '');
+    if (!resolved.startsWith(tmpDir) && resolved !== tmpDir.slice(0, -1)) {
+      return { behavior: 'deny', message: '🔒 只读模式：禁止修改项目文件。如需生成文件请写入 .evolclaw/tmp/ 目录' };
+    }
+  }
+
+  if (toolName === 'Bash') {
+    const cmd = (input.command as string) || '';
+    for (const pattern of READONLY_WRITE_PATTERNS) {
+      if (pattern.test(cmd)) {
+        return { behavior: 'deny', message: '🔒 只读模式：禁止执行写入操作' };
+      }
+    }
+  }
+
+  return { behavior: 'allow' };
+}
 
 /**
  * 黑名单检查（用于 PreToolUse hook）
@@ -157,6 +204,12 @@ export class PermissionGateway {
     toolName: string,
     toolInput: Record<string, unknown>,
     sendPrompt: (text: string) => Promise<void>,
+    context?: {
+      adapter?: ChannelAdapter;
+      channelId?: string;
+      replyContext?: ReplyContext;
+      interactionRouter?: InteractionRouter;
+    },
     summary?: string,
     reason?: string
   ): Promise<PermissionDecision> {
@@ -171,17 +224,62 @@ export class PermissionGateway {
 
     this.eventBus?.publish({ type: 'permission:requested', sessionId, requestId, toolName, input: displaySummary });
 
-    await sendPrompt(
-      `🔐 权限请求\n工具：${toolName}\n操作：${displaySummary}${reasonLine}\n\n回复 /perm allow 本次允许 | always 始终允许 | deny 拒绝`
-    );
+    // 构造 ActionInteraction
+    const interaction: InteractionRequest = {
+      type: 'interaction',
+      id: requestId,
+      kind: {
+        kind: 'action',
+        title: '🔐 权限请求',
+        body: `工具：${toolName}\n操作：${displaySummary}${reasonLine}`,
+        buttons: [
+          { key: 'allow',  label: '✅ 允许',     style: 'primary' },
+          { key: 'always', label: '🔓 始终允许',  style: 'default' },
+          { key: 'deny',   label: '❌ 拒绝',     style: 'danger' },
+        ],
+      },
+      channelId: context?.channelId || '',
+      sessionId,
+      expiresAt: Date.now() + this.timeout,
+    };
+
+    // 尝试富交互
+    let interactionSent = false;
+    if (context?.adapter?.sendInteraction && context.channelId) {
+      try {
+        interactionSent = await context.adapter.sendInteraction(
+          context.channelId, interaction, context.replyContext
+        );
+      } catch (err) {
+        // sendInteraction 失败，fallback 到文本
+      }
+    }
+
+    // fallback 到文本
+    if (!interactionSent) {
+      await sendPrompt(
+        `🔐 权限请求\n工具：${toolName}\n操作：${displaySummary}${reasonLine}\n\n回复 /perm allow 本次允许 | always 始终允许 | deny 拒绝`
+      );
+    }
 
     return new Promise((resolve) => {
       const timer = setTimeout(() => {
         this.pending.delete(requestId);
+        // 清理 router 注册（仅删除本次请求，不影响其他交互）
+        if (interactionSent && context?.interactionRouter) {
+          context.interactionRouter.cancel(requestId);
+        }
         this.eventBus?.publish({ type: 'permission:timeout', sessionId, requestId });
         resolve('deny');
       }, this.timeout);
       this.pending.set(requestId, { sessionId, toolName, resolve, timer });
+
+      // 如果发了交互卡片，同时注册到 InteractionRouter
+      if (interactionSent && context?.interactionRouter) {
+        context.interactionRouter.register(requestId, sessionId, (action) => {
+          this.resolvePermission(sessionId, requestId, action as PermissionDecision);
+        });
+      }
     });
   }
 

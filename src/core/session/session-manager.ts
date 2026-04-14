@@ -398,26 +398,28 @@ export class SessionManager {
   }
 
   /**
-   * 启动时迁移：将 sessions.channel 列中的旧实例名回填为 channelType。
-   * @param instanceToType 实例名 → channelType 映射表（外部构建）
+   * 启动时迁移：将 sessions.channel 从 channelType 回填为实例名（channelName）。
+   * 读取每行 metadata.channelName，若与 channel 列不同则更新。
    */
-  migrateChannelNames(instanceToType: Map<string, string>): void {
-    if (instanceToType.size === 0) return;
+  migrateChannelToInstanceName(): void {
+    const rows = this.db.prepare(
+      `SELECT id, channel, metadata FROM sessions WHERE metadata IS NOT NULL AND metadata != ''`
+    ).all() as { id: string; channel: string; metadata: string }[];
 
     let migrated = 0;
-    for (const [instanceName, channelType] of instanceToType) {
-      if (instanceName === channelType) continue;
-      const result = this.db.prepare(
-        `UPDATE sessions SET channel = ? WHERE channel = ?`
-      ).run(channelType, instanceName);
-      const changes = (result as any).changes ?? 0;
-      if (changes > 0) {
-        migrated += changes;
-        logger.info(`[Migration] Renamed channel '${instanceName}' -> '${channelType}' (${changes} sessions)`);
-      }
+    for (const row of rows) {
+      try {
+        const meta = JSON.parse(row.metadata);
+        if (meta.channelName && meta.channelName !== row.channel) {
+          this.db.prepare(`UPDATE sessions SET channel = ?, updated_at = ? WHERE id = ?`)
+            .run(meta.channelName, Date.now(), row.id);
+          migrated++;
+          logger.info(`[Migration] Restored channel '${row.channel}' -> '${meta.channelName}' (session ${row.id})`);
+        }
+      } catch { /* skip invalid metadata */ }
     }
     if (migrated > 0) {
-      logger.info(`Channel name migration completed (${migrated} sessions updated)`);
+      logger.info(`Channel instance name migration completed (${migrated} sessions updated)`);
     }
   }
 

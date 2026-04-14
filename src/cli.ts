@@ -208,9 +208,11 @@ async function cmdStart() {
   }
 
   // 检查是否有残留进程（PID 文件已丢失但进程还在）
+  // 只清理属于当前 EVOLCLAW_HOME 的进程，避免误杀其他实例
   let hasOrphan = false;
   const evolclawMain = path.join(getPackageRoot(), 'dist', 'index.js');
-  const orphanPids = platform.findProcesses(evolclawMain.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  const allPids = platform.findProcesses(evolclawMain.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  const orphanPids = allPids.filter(pid => platform.getProcessEnv(pid, 'EVOLCLAW_HOME') === p.root);
   if (orphanPids.length > 0) {
     console.log(`⚠ 发现 ${orphanPids.length} 个残留进程，正在清理...`);
     for (const p of orphanPids) {
@@ -241,6 +243,7 @@ async function cmdStart() {
     stdio: ['ignore', out, err],
     env: {
       ...process.env,
+      EVOLCLAW_HOME: p.root,
       LOG_LEVEL: process.env.LOG_LEVEL || 'INFO',
       MESSAGE_LOG: process.env.MESSAGE_LOG || 'true',
       EVENT_LOG: process.env.EVENT_LOG || 'true',
@@ -666,6 +669,14 @@ async function cmdRestartMonitor() {
     process.exit(0);
   }
 
+  // 启动失败 — 测试环境下跳过 self-heal（避免 claude -p 污染会话列表、误杀生产进程）
+  if (p.root.startsWith('/tmp/') || process.env.EVOLCLAW_TEST === '1') {
+    log('❌ Service failed to start (test environment detected, skipping self-heal)');
+    await notifyChannel(p, pendingInfo, '❌ 服务启动失败（测试环境，已跳过自动修复）', log);
+    cleanupPendingFile(pendingFile, log);
+    process.exit(1);
+  }
+
   // 启动失败，进入 self-heal 循环
   log('❌ Service failed to start, entering self-heal loop');
   eventBus.publish({ type: 'self-heal:started', reason: 'Service failed to start after restart' });
@@ -785,7 +796,11 @@ async function spawnAndWaitReady(
 ): Promise<boolean> {
   // 删除旧的 ready signal
   try { fs.unlinkSync(p.readySignal); } catch {}
-  // 杀掉可能残留的进程
+  // 杀掉可能残留的进程（先读 PID 再删文件，避免数据库锁）
+  try {
+    const stalePid = parseInt(fs.readFileSync(p.pid, 'utf-8').trim(), 10);
+    if (!isNaN(stalePid)) platform.killProcess(stalePid, true);
+  } catch {}
   try { fs.unlinkSync(p.pid); } catch {}
 
   cleanEnv();
@@ -800,6 +815,7 @@ async function spawnAndWaitReady(
     stdio: ['ignore', out, err],
     env: {
       ...process.env,
+      EVOLCLAW_HOME: p.root,
       LOG_LEVEL: process.env.LOG_LEVEL || 'INFO',
       MESSAGE_LOG: process.env.MESSAGE_LOG || 'true',
       EVENT_LOG: process.env.EVENT_LOG || 'true',
@@ -893,6 +909,7 @@ async function invokeClaude(
       '-p', prompt,
       '--allowedTools', 'Read,Write,Edit,Bash,Glob,Grep',
       '--output-format', 'text',
+      '--no-session-persistence',
     ], {
       cwd: projectDir,
       timeout,

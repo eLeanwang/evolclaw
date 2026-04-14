@@ -299,6 +299,7 @@ STYLE = Style.from_dict({
 
 _LOCAL_CMDS = [
     ("//debug",      "",    "toggle 调试模式"),
+    ("//log",        "",    "toggle 数据日志（写入文件）"),
     ("//plain",      "",    "切换 明文/E2EE"),
     ("//target",     "aid", "设置目标（或用 @）"),
     ("//ping",       "",    "Ping 网关"),
@@ -633,6 +634,13 @@ def _toggle_debug(event):
     if cli:
         cli.cmd_debug()
 
+# Ctrl+G：toggle 数据日志
+@_kb.add('c-g')
+def _toggle_log(event):
+    cli = _ctrlc_state.get('_cli')
+    if cli:
+        cli.cmd_log()
+
 # ── 颜色输出 ──────────────────────────────────────────────────────────────
 
 class C:
@@ -775,6 +783,10 @@ class AUNCli:
         self._group_cache_at = 0        # 缓存写入时间
         self._group_cache_ttl = 300     # 缓存有效期（秒）
         self._group_cache_refreshing = False
+        # 数据日志
+        self._log_enabled = cfg.get("log", False)  # 从 config 恢复
+        self._log_file = None           # 日志文件句柄
+        self._log_date = None           # 当前日志文件对应的日期字符串
 
     async def start(self):
         """用 self.my_aid 启动，AID 不存在则报错退出。"""
@@ -818,6 +830,9 @@ class AUNCli:
         cfg["aid"] = self.my_aid
         _save_config(cfg)
         info(f"{C.GREEN}已连接{C.RESET}  AID = {self.client.aid}")
+        # 恢复数据日志
+        if self._log_enabled and not self._log_file:
+            self._open_log_file()
         if self.target:
             info(f"目标: {_target_label(self.target)}")
             _record_target(self.target)
@@ -890,6 +905,9 @@ class AUNCli:
             self._raw_log = self._raw_log[-cap:]
         if self._raw_monitor_app is not None:
             self._raw_monitor_app.invalidate()
+
+        # 数据日志
+        self._log_write("RECV", data)
 
         # 尝试解析 processing 状态通知
         proc_payload = payload
@@ -991,6 +1009,7 @@ class AUNCli:
     async def _on_state(self, data):
         if not isinstance(data, dict):
             return
+        self._log_write("EVENT", {"type": "connection.state", **data})
         state = data.get("state", "")
         if state == "disconnected":
             self.connected = False
@@ -1062,6 +1081,11 @@ class AUNCli:
                 })
             self._last_sent = asyncio.get_event_loop().time()
             _record_target(self.target)
+            # 数据日志
+            self._log_write("SEND", {
+                "to": target_id, "text": text,
+                "encrypt": encrypt, "result": result,
+            })
             status = result.get("status") if isinstance(result, dict) else None
             label = "已送达" if status == "delivered" else "已发送"
             if self.debug_mode:
@@ -1397,6 +1421,9 @@ class AUNCli:
         if self._raw_monitor_app is not None:
             self._raw_monitor_app.invalidate()
 
+        # 数据日志
+        self._log_write("RECV_GROUP", data)
+
         # 群名
         group_name = self._get_group_name(group_id)
         sender_name = _short_name(sender_aid)
@@ -1433,6 +1460,9 @@ class AUNCli:
             self._raw_log = self._raw_log[-cap:]
         if self._raw_monitor_app is not None:
             self._raw_monitor_app.invalidate()
+
+        # 数据日志
+        self._log_write("EVENT_GROUP", data)
 
         _ACTION_LABELS = {
             "member_added": "有新成员加入",
@@ -1916,6 +1946,15 @@ class AUNCli:
             error(f"解封失败: {e}")
 
     async def close(self):
+        if self._log_enabled and self._log_file:
+            self._log_write("SYSTEM", "=== 日志结束 ===")
+            try:
+                self._log_file.close()
+            except Exception:
+                pass
+            self._log_file = None
+            self._log_date = None
+            # 注意：不改 _log_enabled 和 config，下次启动自动恢复
         if self.client:
             try:
                 await self.client.close()
@@ -1927,6 +1966,7 @@ class AUNCli:
 
     async def _on_ack(self, data):
         if isinstance(data, dict):
+            self._log_write("EVENT", {"type": "message.ack", **data})
             from_aid = data.get("from", self.target["id"] if self.target else "?")
             if self.debug_mode:
                 seq = data.get("seq", "?")
@@ -1935,6 +1975,7 @@ class AUNCli:
                 print_status(from_aid, "✓✓", C.DIM, "已送达")
 
     async def _on_token_refreshed(self, data):
+        self._log_write("EVENT", {"type": "token.refreshed", "data": data})
         self._last_e2ee_event = {"type": "token.refreshed", "data": data, "time": datetime.now()}
         self.last_e2ee = "🔑 Token已刷新"
         # 3秒后恢复
@@ -1948,10 +1989,12 @@ class AUNCli:
         self._e2ee_restore_timer = None
 
     async def _on_e2ee_degraded(self, data):
+        self._log_write("EVENT", {"type": "e2ee.degraded", "data": data})
         self._last_e2ee_event = {"type": "e2ee.degraded", "data": data if isinstance(data, dict) else {}, "time": datetime.now()}
         self.last_e2ee = "⚠️ E2EE降级"
 
     async def _on_e2ee_error(self, data):
+        self._log_write("EVENT", {"type": "e2ee.orchestration_error", "data": data})
         self._last_e2ee_event = {"type": "e2ee.orchestration_error", "data": data if isinstance(data, dict) else {}, "time": datetime.now()}
         self.last_e2ee = "❌ E2EE错误"
 
@@ -1964,6 +2007,78 @@ class AUNCli:
         _save_config(cfg)
         state = "已开启" if self.debug_mode else "已关闭"
         info(f"debug 模式{state}")
+
+    def _open_log_file(self):
+        """打开（或轮转到）当天的日志文件。"""
+        date_str = datetime.now().strftime('%Y%m%d')
+        if self._log_file and self._log_date == date_str:
+            return True  # 已是当天文件
+        # 关闭旧文件
+        if self._log_file:
+            try:
+                self._log_file.close()
+            except Exception:
+                pass
+        log_dir = DATA_DIR / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / f"aun-{date_str}.log"
+        try:
+            self._log_file = open(log_path, "a", encoding="utf-8")
+            self._log_date = date_str
+            return True
+        except Exception as e:
+            self._log_file = None
+            self._log_date = None
+            error(f"日志文件打开失败: {e}")
+            return False
+
+    def _log_write(self, direction: str, data):
+        """写入一条日志。direction: 'SEND'/'RECV'/'EVENT' 等标签。"""
+        if not self._log_enabled:
+            return
+        # 跨天自动轮转
+        date_str = datetime.now().strftime('%Y%m%d')
+        if self._log_date != date_str:
+            if not self._open_log_file():
+                return
+        if not self._log_file:
+            return
+        ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+        try:
+            line = json.dumps(data, ensure_ascii=False, default=str) if not isinstance(data, str) else data
+            self._log_file.write(f"[{ts}] [{direction}] {line}\n")
+            self._log_file.flush()
+        except Exception:
+            pass
+
+    def cmd_log(self):
+        """toggle 数据日志开关。"""
+        if self._log_enabled:
+            # 关闭
+            self._log_write("SYSTEM", "=== 日志关闭 ===")
+            self._log_enabled = False
+            if self._log_file:
+                try:
+                    self._log_file.close()
+                except Exception:
+                    pass
+                self._log_file = None
+                self._log_date = None
+            cfg = _load_config()
+            cfg["log"] = False
+            _save_config(cfg)
+            info("数据日志已关闭")
+        else:
+            # 开启
+            self._log_enabled = True
+            if self._open_log_file():
+                self._log_write("SYSTEM", f"=== 日志开始 AID={self.my_aid} ===")
+                cfg = _load_config()
+                cfg["log"] = True
+                _save_config(cfg)
+                info(f"数据日志已开启: {self._log_file.name}")
+            else:
+                self._log_enabled = False
 
     async def cmd_processing(self):
         if not self._processing:
@@ -2141,6 +2256,7 @@ async def _show_help():
             '  <ansiyellow>Ctrl+L</ansiyellow>         清屏\n'
             '  <ansiyellow>Ctrl+R</ansiyellow>         原始数据监控\n'
             '  <ansiyellow>Ctrl+D</ansiyellow>         toggle 调试模式\n'
+            '  <ansiyellow>Ctrl+G</ansiyellow>         toggle 数据日志\n'
             '  <ansiyellow>Esc</ansiyellow>            关闭菜单\n'
             '  <ansiyellow>Ctrl+C</ansiyellow>         中断任务 / 清空输入 / 双击退出\n\n'
             '<b>目标切换 (@)</b>\n'
@@ -2175,7 +2291,8 @@ async def repl(c: AUNCli):
         enc  = "🔒 E2EE" if c.encrypt else "🔓 明文"
         rej  = f"拒收: {c.rejected}  " if c.rejected else ""
         dbg  = "  [DEBUG]" if c.debug_mode else ""
-        return HTML(f" <b>{conn}</b>  {me}  →  {tgt}  消息: {c.msg_count}  {rej}{enc}{dbg}")
+        log  = "  [LOG]" if c._log_enabled else ""
+        return HTML(f" <b>{conn}</b>  {me}  →  {tgt}  消息: {c.msg_count}  {rej}{enc}{dbg}{log}")
 
     session = PromptSession(
         completer=AUNCompleter(cli_ref=c),
@@ -2273,6 +2390,8 @@ async def repl(c: AUNCli):
                     info(f"收发模式: {mode}")
                 elif cmd == "debug":
                     c.cmd_debug()
+                elif cmd == "log":
+                    c.cmd_log()
                 elif cmd == "processing":
                     await c.cmd_processing()
                 elif cmd == "rawdata":

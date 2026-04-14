@@ -23,7 +23,7 @@
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.100",
-    "@eleans/aun-core-node": "^0.2.1",
+    "@eleans/aun-core-node": "^0.3.0",
     "@larksuiteoapi/node-sdk": "^1.59.0",
     "@openai/codex-sdk": "^0.118.0",
     "image-type": "^6.0.0",

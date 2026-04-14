@@ -47,7 +47,7 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
       baseUrl: resolved.baseUrl,
     });
     this.model = resolved.model;
-    if (resolved.reasoning) this.effort = resolved.reasoning as ModelReasoningEffort;
+    if (resolved.effort) this.effort = resolved.effort as ModelReasoningEffort;
     this.onSessionIdUpdate = callbacks.onSessionIdUpdate;
   }
 
@@ -84,6 +84,7 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
       { key: 'bypass', nameZh: '放行', description: '全部自动（受 sandbox 约束）', available: true },
       { key: 'request', nameZh: '审批', description: '需要审批时询问', available: true },
       { key: 'noask', nameZh: '静默', description: '只执行已知安全操作', available: true },
+      { key: 'readonly', nameZh: '只读', description: '禁止修改项目文件，可在临时目录生成文件', available: true },
     ];
   }
   setSendPrompt(_fn: (text: string) => Promise<void>): void {}

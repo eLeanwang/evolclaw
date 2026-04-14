@@ -1,14 +1,23 @@
 import { query, forkSession as sdkForkSession } from '@anthropic-ai/claude-agent-sdk';
 import { ensureDir, resolveAnthropicConfig } from '../config.js';
-import type { Config } from '../types.js';
+import type { Config, ChannelAdapter, ReplyContext } from '../types.js';
 import type { PermissionGateway, PermissionDecision } from '../core/permission.js';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import { logger } from '../utils/logger.js';
-import { checkBlacklist, summarizeToolInput } from '../core/permission.js';
+import { checkBlacklist, checkReadonly, summarizeToolInput } from '../core/permission.js';
 import { encodePath } from '../utils/cross-platform.js';
 import type { AgentPlugin, AgentInstance, AgentCallbacks } from '../core/agent-loader.js';
+import type { InteractionRouter } from '../core/interaction-router.js';
+
+/** 权限审批的渠道交互上下文 */
+export interface PermissionContext {
+  adapter?: ChannelAdapter;
+  channelId?: string;
+  replyContext?: ReplyContext;
+  interactionRouter?: InteractionRouter;
+}
 
 // ── SDK 消息流（Claude Agent SDK 专有格式）──
 
@@ -154,6 +163,7 @@ export interface AgentRunnerFull {
 
   // 权限回调（MessageProcessor 需要）
   setSendPrompt(fn: (text: string) => Promise<void>): void;
+  setPermissionContext?(context: PermissionContext): void;
   setMode(mode: string): void;
   getMode(): string;
 
@@ -236,6 +246,7 @@ export class AgentRunner {
   private onCompactStart?: (sessionId: string) => void;
   private permissionGateway?: PermissionGateway;
   private sendPromptFn?: (text: string) => Promise<void>;
+  private permissionContext?: PermissionContext;
 
   constructor(
     apiKey: string,
@@ -300,6 +311,7 @@ export class AgentRunner {
       { key: 'edit', nameZh: '编辑', description: '自动接受编辑，其他询问', available: true },
       { key: 'plan', nameZh: '规划', description: '只规划不执行', available: true },
       { key: 'noask', nameZh: '静默', description: '未批准则拒绝', available: true },
+      { key: 'readonly', nameZh: '只读', description: '禁止修改项目文件，可在临时目录生成文件', available: true },
     ];
   }
 
@@ -311,6 +323,10 @@ export class AgentRunner {
     this.sendPromptFn = fn;
   }
 
+  setPermissionContext(context: PermissionContext): void {
+    this.permissionContext = context;
+  }
+
   private toSdkPermissionMode(): 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan' | 'dontAsk' | 'auto' {
     const map: Record<string, 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan' | 'dontAsk' | 'auto'> = {
       'auto': 'auto',         // AI 分类器自动判断
@@ -319,6 +335,7 @@ export class AgentRunner {
       'edit': 'acceptEdits',
       'plan': 'plan',
       'noask': 'dontAsk',
+      'readonly': 'default',
     };
     return map[this.permissionMode] || 'auto';
   }
@@ -336,15 +353,20 @@ export class AgentRunner {
 
       const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
 
-      if (settings.model && settings.model !== this.model) {
+      // evolclaw.json 显式配置优先，不被 settings.json 覆盖
+      const configModel = this.config?.agents?.anthropic?.model;
+      if (!configModel && settings.model && settings.model !== this.model) {
         logger.info(`[AgentRunner] Synced model from ~/.claude/settings.json: ${settings.model}`);
         this.model = settings.model;
       }
 
-      const newEffort = settings.effortLevel || undefined;
-      if (newEffort !== this.effort) {
-        logger.info(`[AgentRunner] Synced effort from ~/.claude/settings.json: ${newEffort ?? 'auto'}`);
-        this.effort = newEffort;
+      const configEffort = this.config?.agents?.anthropic?.effort;
+      if (!configEffort) {
+        const newEffort = settings.effortLevel || undefined;
+        if (newEffort !== this.effort) {
+          logger.info(`[AgentRunner] Synced effort from ~/.claude/settings.json: ${newEffort ?? 'auto'}`);
+          this.effort = newEffort;
+        }
       }
     } catch (error) {
       logger.debug(`[AgentRunner] Failed to sync from ~/.claude/settings.json:`, error);
@@ -535,10 +557,14 @@ export class AgentRunner {
     const preToolUseHook = async (input: any) => {
       const result = await checkBlacklist(input.tool_name, input.tool_input || {});
       if (result.behavior === 'deny') {
-        return {
-          decision: 'block' as const,
-          reason: result.message
-        };
+        return { decision: 'block' as const, reason: result.message };
+      }
+
+      if (this.permissionMode === 'readonly') {
+        const roResult = checkReadonly(input.tool_name, input.tool_input || {}, projectPath);
+        if (roResult.behavior === 'deny') {
+          return { decision: 'block' as const, reason: roResult.message };
+        }
       }
 
       // 修正 SDK schema 不兼容问题：部分工具被 system prompt 或 skills 指示传入
@@ -592,6 +618,15 @@ export class AgentRunner {
         return { behavior: 'allow' as const, updatedInput: input, decisionClassification: 'user_permanent' as const };
       }
 
+      // readonly 模式：二次拦截（belt-and-suspenders）
+      if (this.permissionMode === 'readonly') {
+        const roResult = checkReadonly(toolName, input, projectPath);
+        if (roResult.behavior === 'deny') {
+          return { behavior: 'deny' as const, message: roResult.message, decisionClassification: 'user_reject' as const };
+        }
+        return { behavior: 'allow' as const, updatedInput: input, decisionClassification: 'user_permanent' as const };
+      }
+
       // auto 模式：SDK 内置分类器自动判断，正常情况下不会触发 canUseTool 回调。
       // 防御性兜底：确保即使 SDK 边界场景或版本变化意外调用了此回调，也不会阻塞流程。
       if (this.permissionMode === 'auto') {
@@ -617,6 +652,7 @@ export class AgentRunner {
         toolName,
         input,
         this.sendPromptFn,
+        this.permissionContext,
         summary,
         options.decisionReason
       );

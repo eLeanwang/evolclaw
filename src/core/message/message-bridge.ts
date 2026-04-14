@@ -79,7 +79,11 @@ export class MessageBridge {
 
         // 2. 命令快速路径（去除引用前缀后检查，兼容话题中引用上文的情况）
         const contentForCmd = content.replace(/^(>[^\n]*\n)+\n?/, '').trim();
-        if (await this.handleCommand(contentForCmd || content, channelName, msg.channelId,
+        const cmdContent = contentForCmd || content;
+        if (this.cmdHandler.isCommand(cmdContent)) {
+          logger.debug(`[MessageBridge] Command detected: "${cmdContent}", routing to handler`);
+        }
+        if (await this.handleCommand(cmdContent, channelName, msg.channelId,
           (text) => sendReply(msg.channelId, text, msg.replyContext),
           msg.peerId, msg.threadId
         )) return;
@@ -95,7 +99,7 @@ export class MessageBridge {
           if (msg.peerName) metadata.peerName = msg.peerName;
         }
         const session = await this.sessionManager.getOrCreateSession(
-          effectiveChannelType, msg.channelId,
+          channelName, msg.channelId,
           this.config.projects?.defaultPath || process.cwd(),
           msg.threadId, Object.keys(metadata).length ? metadata : undefined, undefined, msg.peerId, chatType
         );
@@ -107,9 +111,9 @@ export class MessageBridge {
           if (prefix) content = prefix + content;
         }
 
-        // 5. 构造完整消息（channel 字段存渠道类型，不存实例名）
+        // 5. 构造完整消息（channel 字段存实例名，用于 session 精确匹配）
         const fullMessage: Message = {
-          channel: effectiveChannelType, channelId: msg.channelId, content,
+          channel: channelName, channelId: msg.channelId, content,
           chatType,
           images: msg.images, timestamp: Date.now(),
           peerId: msg.peerId, peerName: msg.peerName,
@@ -196,10 +200,12 @@ export class MessageBridge {
     userId?: string, threadId?: string
   ): Promise<boolean> {
     if (!this.cmdHandler.isCommand(content)) return false;
+    logger.info(`[${channel}] ${channelId}: ${content}`);
     const cmdResult = await this.cmdHandler.handle(content, channel, channelId,
       (_cid, text, opts) => sendReply(text),
       userId, threadId);
-    if (cmdResult === null) return false;
+    logger.debug(`[MessageBridge] handleCommand: result type=${typeof cmdResult}, value=${cmdResult === null ? 'null' : cmdResult === undefined ? 'undefined' : 'string'}`);
+    if (cmdResult === undefined) return false;
     if (cmdResult) {
       try { await sendReply(cmdResult); } catch (error) {
         logger.error(`[${channel}] Failed to send command response:`, error);

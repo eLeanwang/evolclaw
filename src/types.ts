@@ -66,15 +66,8 @@ export interface Config {
       apiKey?: string;
       baseUrl?: string;
       model?: string;     // 默认 'gpt-5.2-codex'
-      reasoning?: string; // 推理强度: low / medium / high / max
-    };
-    hermes?: {
-      pythonPath?: string;   // Python 解释器路径（默认 hermes-agent/.venv/bin/python）
-      bridgePath?: string;   // bridge.py 路径（默认 hermes-agent/evolclaw_bridge.py）
-      model?: string;        // 默认模型
-      provider?: string;     // custom/openrouter/anthropic
-      baseUrl?: string;      // API endpoint
-      apiKey?: string;       // API key（可选，优先用 env）
+      effort?: string;    // 推理强度: low / medium / high / max
+      reasoning?: string; // 别名（兼容旧配置）
     };
     google?: {
       apiKey?: string;       // GEMINI_API_KEY（可选，CLI 有 OAuth）
@@ -103,6 +96,7 @@ export interface Config {
   debounce?: number;    // 入站消息去抖间隔(秒)，默认 2，设 0 关闭
   debug?: {
     flusherDiag?: boolean;  // 启用 StreamFlusher 诊断日志 (flusher-diag.log)
+    aunTrace?: boolean;     // 启用 AUN 通道数据追踪日志 (aun-trace.log)，记录所有收发数据
   };
   idleMonitor?: {
     enabled?: boolean;              // 是否启用空闲监控，默认 true
@@ -191,6 +185,114 @@ export interface InboundMessage {
   replyContext?: ReplyContext;       // Channel 预构建的回复上下文（渠道无关）
 }
 
+// ── 交互协议类型（渠道无关） ──
+
+interface FieldBase {
+  type: string;
+  key: string;
+  label: string;
+  hint?: string;
+}
+
+export interface TextField extends FieldBase {
+  type: 'text';
+  placeholder?: string;
+  defaultValue?: string;
+  validation?: 'text' | 'number' | 'path';
+  required?: boolean;
+}
+
+export interface SelectField extends FieldBase {
+  type: 'select';
+  placeholder?: string;
+  options: Array<{
+    value: string;
+    label: string;
+    description?: string;
+    selected?: boolean;
+  }>;
+  required?: boolean;
+}
+
+export interface MultiSelectField extends FieldBase {
+  type: 'multi-select';
+  options: Array<{
+    value: string;
+    label: string;
+    selected?: boolean;
+  }>;
+  minSelect?: number;
+  maxSelect?: number;
+}
+
+export interface ToggleField extends FieldBase {
+  type: 'toggle';
+  defaultValue?: boolean;
+}
+
+export type InteractionField = TextField | SelectField | MultiSelectField | ToggleField;
+
+export interface ActionInteraction {
+  kind: 'action';
+  title: string;
+  body?: string;
+  buttons: Array<{
+    key: string;
+    label: string;
+    style?: 'primary' | 'danger' | 'default';
+    confirm?: {
+      title: string;
+      body: string;
+    };
+  }>;
+}
+
+export interface FormInteraction {
+  kind: 'form';
+  title: string;
+  body?: string;
+  fields: InteractionField[];
+  submitLabel?: string;
+  submitStyle?: 'primary' | 'danger';
+  submitConfirm?: {
+    title: string;
+    body: string;
+  };
+  cancelable?: boolean;
+}
+
+export interface MenuInteraction {
+  kind: 'menu';
+  groups: Array<{
+    group: string;
+    items: Array<{
+      key: string;
+      label: string;
+      args?: string;
+      interaction?: 'form' | 'confirm';
+    }>;
+  }>;
+}
+
+export type InteractionKind = ActionInteraction | FormInteraction | MenuInteraction;
+
+export interface InteractionRequest {
+  type: 'interaction';
+  id: string;
+  channelId: string;
+  sessionId: string;
+  expiresAt?: number;
+  kind: InteractionKind;
+}
+
+export interface InteractionResponse {
+  type: 'interaction.response';
+  id: string;
+  action: string;
+  values?: Record<string, unknown>;
+  operatorId?: string;
+}
+
 // 渠道适配器接口
 export interface ChannelAdapter {
   readonly channelName: string;
@@ -200,6 +302,8 @@ export interface ChannelAdapter {
   acknowledge?(messageId: string): Promise<void>;
   sendProcessingStatus?(channelId: string, status: 'start' | 'done' | 'interrupted' | 'error' | 'timeout', sessionId: string, context?: ReplyContext): void;
   sendCustomPayload?(channelId: string, payload: string): void;
+  sendInteraction?(channelId: string, interaction: InteractionRequest, context?: ReplyContext): Promise<boolean>;
+  onInteraction?(callback: (response: InteractionResponse) => void): void;
   onChatDissolved?(callback: (channelId: string) => void): void;
   connect?(): Promise<void>;
   disconnect?(): Promise<void>;
@@ -235,4 +339,4 @@ export type CommandHandler = (
   channelId: string,
   userId?: string,
   threadId?: string
-) => Promise<string | null>;
+) => Promise<string | null | undefined>;

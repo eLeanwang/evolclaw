@@ -5,6 +5,7 @@ import imageType from 'image-type';
 import { sanitizeFileName, saveToUploads, validateImage } from '../utils/media-cache.js';
 import { logger } from '../utils/logger.js';
 import { hasRichContent, renderAllRichContent, checkDependencies } from '../utils/rich-content-renderer.js';
+import type { InteractionRequest, InteractionResponse, InteractionField, ActionInteraction, FormInteraction } from '../types.js';
 
 export interface FeishuConfig {
   appId: string;
@@ -43,6 +44,7 @@ export class FeishuChannel {
   private seenThreads = new Set<string>();  // 已见的 thread_id，用于判断话题创建消息
   private userNameCache = new Map<string, string>();  // userId -> userName
   private recallHandler?: (messageId: string) => void;
+  private interactionCallback?: (response: InteractionResponse) => void;
   private connected = false;
   private enableRichContent: boolean;
 
@@ -309,7 +311,51 @@ export class FeishuChannel {
           }
         },
         'im.message.message_read_v1': async () => {},
-        'im.message.reaction.created_v1': async () => {}
+        'im.message.reaction.created_v1': async () => {},
+        'card.action.trigger': async (data: any) => {
+          try {
+            const action = data?.action;
+            if (!action?.value) return;
+
+            const value = action.value;
+            const requestId = value._request_id;
+            if (!requestId) {
+              logger.debug('[Feishu] Card action without _request_id, ignoring');
+              return;
+            }
+
+            // Legacy field change (non-form select_static with _field_key): ignore silently
+            if (value._field_key) {
+              logger.debug(`[Feishu] Legacy field change: requestId=${requestId}, field=${value._field_key}`);
+              return;
+            }
+
+            // Form submit: `action.form_value` contains all field values from form container
+            const formValues = action.form_value || {};
+
+            const response: InteractionResponse = {
+              type: 'interaction.response',
+              id: requestId,
+              action: value._action || 'submit',
+              values: { ...formValues, ...value },
+              operatorId: data.operator?.open_id,
+            };
+
+            // Remove internal fields from values
+            delete response.values!._request_id;
+            delete response.values!._action;
+            delete response.values!._card_title;
+
+            logger.info(`[Feishu] Card action: requestId=${requestId}, action=${response.action}, values=${JSON.stringify(response.values)}`);
+            this.interactionCallback?.(response);
+
+            // Return updated card (buttons disabled + result shown)
+            const cardTitle = value._card_title || '操作';
+            return this.buildResolvedCard(cardTitle, response);
+          } catch (err) {
+            logger.error('[Feishu] Failed to handle card action:', err);
+          }
+        },
       });
 
       this.wsClient = new lark.WSClient({
@@ -334,6 +380,10 @@ export class FeishuChannel {
 
   onRecall(handler: (messageId: string) => void): void {
     this.recallHandler = handler;
+  }
+
+  onInteraction(callback: (response: InteractionResponse) => void): void {
+    this.interactionCallback = callback;
   }
 
   onProjectPathRequest(provider: ProjectPathProvider): void {
@@ -773,6 +823,93 @@ export class FeishuChannel {
     }
   }
 
+  async sendInteraction(
+    chatId: string,
+    interaction: InteractionRequest,
+    options?: { replyToMessageId?: string; replyInThread?: boolean }
+  ): Promise<boolean> {
+    if (!this.client) return false;
+
+    const card = buildInteractionCard(interaction);
+    if (!card) return false;
+
+    try {
+      if (options?.replyToMessageId) {
+        const replyData: any = {
+          msg_type: 'interactive',
+          content: JSON.stringify(card),
+        };
+        if (options.replyInThread) replyData.reply_in_thread = true;
+        await this.client.im.message.reply({
+          path: { message_id: options.replyToMessageId },
+          data: replyData,
+        });
+      } else {
+        await this.client.im.message.create({
+          params: { receive_id_type: chatId.startsWith('ou_') ? 'open_id' : chatId.startsWith('on_') ? 'union_id' : 'chat_id' },
+          data: {
+            receive_id: chatId,
+            msg_type: 'interactive',
+            content: JSON.stringify(card),
+          },
+        });
+      }
+      logger.info(`[Feishu] Sent interaction card: ${interaction.id}`);
+      return true;
+    } catch (error: any) {
+      const detail = error?.response?.data || error?.message || error;
+      logger.error(`[Feishu] Failed to send interaction card (id=${interaction.id}, replyTo=${options?.replyToMessageId || 'none'}):`, detail);
+      return false;
+    }
+  }
+
+  private buildResolvedCard(cardTitle: string, response: InteractionResponse): object | undefined {
+    const action = response.action;
+
+    const labelMap: Record<string, string> = {
+      'allow': '✅ 已允许',
+      'always': '🔓 已设为始终允许',
+      'deny': '❌ 已拒绝',
+      'cancel': '取消',
+      'submit': '✅ 已提交',
+    };
+    const statusText = labelMap[action] || `✅ ${action}`;
+
+    const now = new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+
+    // Build summary of selected values
+    const elements: any[] = [];
+    if (response.values && action === 'submit') {
+      const entries = Object.entries(response.values).filter(([k]) => !k.startsWith('_'));
+      if (entries.length > 0) {
+        const lines = entries.map(([k, v]) => {
+          const display = Array.isArray(v) ? v.join(', ') : String(v);
+          return `**${k}**: ${display}`;
+        });
+        elements.push({ tag: 'markdown', content: lines.join('\n') });
+      }
+    }
+    elements.push({ tag: 'markdown', content: `操作时间：${now}` });
+
+    return {
+      toast: {
+        type: 'success',
+        content: statusText,
+      },
+      card: {
+        type: 'raw',
+        data: {
+          config: { wide_screen_mode: true },
+          header: {
+            template: action === 'deny' ? 'red' : 'green',
+            title: { tag: 'plain_text', content: `${cardTitle} — ${statusText}` },
+          },
+          elements,
+        },
+      },
+    };
+  }
+
   addAckReaction(messageId: string): void {
     if (!this.client) return;
     this.client.im.messageReaction.create({
@@ -781,6 +918,294 @@ export class FeishuChannel {
         reaction_type: { emoji_type: 'CheckMark' }
       }
     }).catch(() => {});
+  }
+}
+
+// ── 交互卡片构建工具 ──
+
+export function buildInteractionCard(interaction: InteractionRequest): object | null {
+  const { kind } = interaction;
+
+  if (kind.kind === 'action') {
+    return buildActionCard(interaction.id, kind);
+  }
+  if (kind.kind === 'form') {
+    return buildFormCard(interaction.id, kind);
+  }
+  // menu kind: not rendered as card (handled via menu.response JSON)
+  return null;
+}
+
+export function buildActionCard(requestId: string, action: ActionInteraction): object {
+  const elements: any[] = [];
+
+  // Body text
+  if (action.body) {
+    elements.push({ tag: 'markdown', content: action.body });
+  }
+
+  // Buttons row
+  const buttons = action.buttons.map(btn => {
+    const buttonEl: any = {
+      tag: 'button',
+      text: { tag: 'plain_text', content: btn.label },
+      type: btn.style === 'danger' ? 'danger' : btn.style === 'primary' ? 'primary' : 'default',
+      value: {
+        _request_id: requestId,
+        _action: btn.key,
+        _card_title: action.title,
+      },
+    };
+
+    if (btn.confirm) {
+      buttonEl.confirm = {
+        title: { tag: 'plain_text', content: btn.confirm.title },
+        text: { tag: 'plain_text', content: btn.confirm.body },
+      };
+    }
+
+    return buttonEl;
+  });
+
+  elements.push({
+    tag: 'action',
+    actions: buttons,
+  });
+
+  return {
+    config: { wide_screen_mode: true },
+    header: {
+      template: 'blue',
+      title: { tag: 'plain_text', content: action.title },
+    },
+    elements,
+  };
+}
+
+export function buildFormCard(requestId: string, form: FormInteraction): object {
+  // Use Feishu card v2 form container: all fields wrapped in a `form` tag.
+  // On submit, callback receives `action.form_value` with all field values keyed by `name`.
+  // This eliminates per-field callbacks when selecting dropdown options.
+
+  const formElements: any[] = [];
+
+  // Body text
+  if (form.body) {
+    formElements.push({ tag: 'markdown', content: form.body });
+  }
+
+  // Fields — inside form, components use `name` (not `value`) for identification
+  for (const field of form.fields) {
+    formElements.push(buildFormFieldElement(field));
+    if (field.hint) {
+      formElements.push({
+        tag: 'note',
+        elements: [{ tag: 'plain_text', content: field.hint }],
+      });
+    }
+  }
+
+  // Submit button (inside form, uses form_action_type)
+  const submitBtn: any = {
+    tag: 'button',
+    text: { tag: 'plain_text', content: form.submitLabel || '确认' },
+    type: form.submitStyle === 'danger' ? 'danger' : 'primary',
+    form_action_type: 'submit',
+    name: 'submit',
+    value: {
+      _request_id: requestId,
+      _action: 'submit',
+      _card_title: form.title,
+    },
+  };
+
+  if (form.submitConfirm) {
+    submitBtn.confirm = {
+      title: { tag: 'plain_text', content: form.submitConfirm.title },
+      text: { tag: 'plain_text', content: form.submitConfirm.body },
+    };
+  }
+
+  const actions: any[] = [submitBtn];
+
+  if (form.cancelable !== false) {
+    actions.push({
+      tag: 'button',
+      text: { tag: 'plain_text', content: '取消' },
+      type: 'default',
+      // Cancel is NOT form_action_type — it's a regular button that triggers callback directly
+      value: {
+        _request_id: requestId,
+        _action: 'cancel',
+        _card_title: form.title,
+      },
+    });
+  }
+
+  formElements.push({ tag: 'action', actions });
+
+  return {
+    schema: '2.0',
+    config: { update_multi: true },
+    header: {
+      template: 'blue',
+      title: { tag: 'plain_text', content: form.title },
+    },
+    body: {
+      elements: [
+        {
+          tag: 'form',
+          name: requestId,
+          elements: formElements,
+        },
+      ],
+    },
+  };
+}
+
+/** Build a field element for use inside a form container (uses `name` for identification) */
+export function buildFormFieldElement(field: InteractionField): any {
+  switch (field.type) {
+    case 'select': {
+      const options = field.options.map(opt => ({
+        text: { tag: 'plain_text', content: opt.label },
+        value: opt.value,
+      }));
+      const selectedOpt = field.options.find(opt => opt.selected);
+      return {
+        tag: 'select_static',
+        name: field.key,
+        placeholder: { tag: 'plain_text', content: field.placeholder || `选择${field.label}` },
+        options,
+        ...(selectedOpt ? { initial_option: selectedOpt.value } : {}),
+      };
+    }
+
+    case 'text': {
+      return {
+        tag: 'input',
+        name: field.key,
+        placeholder: { tag: 'plain_text', content: field.placeholder || `输入${field.label}` },
+        ...(field.defaultValue != null ? { default_value: String(field.defaultValue) } : {}),
+      };
+    }
+
+    case 'toggle': {
+      const checked = field.defaultValue ?? false;
+      return {
+        tag: 'select_static',
+        name: field.key,
+        placeholder: { tag: 'plain_text', content: field.label },
+        options: [
+          { text: { tag: 'plain_text', content: '开启' }, value: 'true' },
+          { text: { tag: 'plain_text', content: '关闭' }, value: 'false' },
+        ],
+        initial_option: checked ? 'true' : 'false',
+      };
+    }
+
+    case 'multi-select': {
+      const options = field.options.map(opt => ({
+        text: { tag: 'plain_text', content: opt.label },
+        value: opt.value,
+      }));
+      const selectedValues = field.options.filter(opt => opt.selected).map(opt => opt.value);
+      return {
+        tag: 'multi_select_static',
+        name: field.key,
+        placeholder: { tag: 'plain_text', content: `选择${field.label}` },
+        options,
+        ...(selectedValues.length > 0 ? { initial_options: selectedValues } : {}),
+      };
+    }
+
+    default:
+      return { tag: 'markdown', content: `[不支持的字段类型: ${(field as any).type}]` };
+  }
+}
+
+export function buildFieldElement(requestId: string, field: InteractionField): any {
+  switch (field.type) {
+    case 'select': {
+      const options = field.options.map(opt => ({
+        text: { tag: 'plain_text', content: opt.label },
+        value: opt.value,
+      }));
+
+      const selectedOpt = field.options.find(opt => opt.selected);
+
+      return {
+        tag: 'action',
+        actions: [{
+          tag: 'select_static',
+          placeholder: { tag: 'plain_text', content: field.placeholder || `选择${field.label}` },
+          options,
+          ...(selectedOpt ? { initial_option: selectedOpt.value } : {}),
+          value: {
+            _request_id: requestId,
+            _field_key: field.key,
+          },
+        }],
+      };
+    }
+
+    case 'text': {
+      // Feishu cards don't have a native text input component.
+      // Use a note element as placeholder label; actual input via form submit.
+      return {
+        tag: 'note',
+        elements: [
+          { tag: 'plain_text', content: `${field.label}: ${field.placeholder || '(请在提交时输入)'}` },
+        ],
+      };
+    }
+
+    case 'toggle': {
+      const checked = field.defaultValue ?? false;
+      return {
+        tag: 'action',
+        actions: [{
+          tag: 'select_static',
+          placeholder: { tag: 'plain_text', content: field.label },
+          options: [
+            { text: { tag: 'plain_text', content: '开启' }, value: 'true' },
+            { text: { tag: 'plain_text', content: '关闭' }, value: 'false' },
+          ],
+          initial_option: checked ? 'true' : 'false',
+          value: {
+            _request_id: requestId,
+            _field_key: field.key,
+          },
+        }],
+      };
+    }
+
+    case 'multi-select': {
+      // Feishu cards: use multi_select_static (checker)
+      const options = field.options.map(opt => ({
+        text: { tag: 'plain_text', content: opt.label },
+        value: opt.value,
+      }));
+
+      const selectedValues = field.options.filter(opt => opt.selected).map(opt => opt.value);
+
+      return {
+        tag: 'action',
+        actions: [{
+          tag: 'multi_select_static',
+          placeholder: { tag: 'plain_text', content: `选择${field.label}` },
+          options,
+          ...(selectedValues.length > 0 ? { initial_options: selectedValues } : {}),
+          value: {
+            _request_id: requestId,
+            _field_key: field.key,
+          },
+        }],
+      };
+    }
+
+    default:
+      return { tag: 'markdown', content: `[不支持的字段类型: ${(field as any).type}]` };
   }
 }
 
@@ -954,6 +1379,8 @@ export class FeishuChannelPlugin implements ChannelPlugin {
         sendFile: (id: string, filePath: string, context?: any) => channel.sendFile(id, filePath, context),
         sendImage: (id: string, png: Buffer, context?: any) => channel.sendImage(id, png, context),
         acknowledge: (messageId: string) => { channel.addAckReaction(messageId); return Promise.resolve(); },
+        sendInteraction: (id: string, interaction: InteractionRequest, context?: any) => channel.sendInteraction(id, interaction, context),
+        onInteraction: (callback: (response: InteractionResponse) => void) => channel.onInteraction(callback),
       };
 
       const policy = {

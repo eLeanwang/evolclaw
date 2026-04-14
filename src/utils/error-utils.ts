@@ -90,6 +90,11 @@ export function classifyError(error: any): ErrorType {
     return ErrorType.API_ERROR;
   }
 
+  // "X is not valid JSON" — API 返回了非 JSON 响应（如算力池切换提示），属于 API 错误
+  if (msg.includes('is not valid json')) {
+    return ErrorType.API_ERROR;
+  }
+
   if (msg.includes('enoent') || msg.includes('corrupt') || msg.includes('invalid json')) {
     return ErrorType.FILE_CORRUPT;
   }

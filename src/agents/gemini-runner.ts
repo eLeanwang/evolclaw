@@ -88,6 +88,7 @@ export class GeminiRunner implements AgentRunnerFull, ModelSwitcher {
       { key: 'edit', nameZh: '编辑', description: '仅 Claude 支持', available: false, unavailableReason: 'Gemini CLI 不支持此模式' },
       { key: 'plan', nameZh: '规划', description: 'Gemini 规划模式', available: true },
       { key: 'noask', nameZh: '静默', description: '仅 Claude 支持', available: false, unavailableReason: 'Gemini CLI 不支持此模式' },
+      { key: 'readonly', nameZh: '只读', description: '禁止修改项目文件，可在临时目录生成文件', available: true },
     ];
   }
 
@@ -259,8 +260,7 @@ export class GeminiRunner implements AgentRunnerFull, ModelSwitcher {
       let accumulatedText = '';
       // TextBuffer: accumulate streaming text tokens, flush as a single
       // text event on boundary signals (tool_use / result / error / exit).
-      // This mirrors Hermes bridge's TextBuffer pattern and prevents
-      // StreamFlusher from splitting a single reply into multiple messages.
+      // Prevents StreamFlusher from splitting a single reply into multiple messages.
       let textBuffer = '';
 
       const flushTextBuffer = function* (): Generator<AgentEvent> {
