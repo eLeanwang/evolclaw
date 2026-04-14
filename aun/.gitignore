@@ -25,5 +25,5 @@ backup/
 .DS_Store
 Thumbs.db
 
-# Override parent gitignore
-!docs/
+# Docs (local only)
+docs/

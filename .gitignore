@@ -2,6 +2,7 @@
 config.toml
 data/evolclaw.json
 data/evolclaw.json.*
+data/evolclaw.backup.json
 
 # 数据库
 data/*.db
