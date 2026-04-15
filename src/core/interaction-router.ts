@@ -5,6 +5,7 @@ interface PendingInteraction {
   callback: (action: string, values?: Record<string, unknown>, operatorId?: string) => void | Promise<void>;
   timer?: NodeJS.Timeout;
   sessionId: string;
+  messageId?: string;
 }
 
 export class InteractionRouter {
@@ -14,23 +15,22 @@ export class InteractionRouter {
     id: string,
     sessionId: string,
     callback: (action: string, values?: Record<string, unknown>, operatorId?: string) => void | Promise<void>,
-    timeoutMs?: number,
-    onTimeout?: () => void,
+    opts?: { timeoutMs?: number; onTimeout?: () => void; messageId?: string },
   ): void {
     // Clear any existing handler for this ID
     const existing = this.handlers.get(id);
     if (existing?.timer) clearTimeout(existing.timer);
 
     let timer: NodeJS.Timeout | undefined;
-    if (timeoutMs && timeoutMs > 0) {
+    if (opts?.timeoutMs && opts.timeoutMs > 0) {
       timer = setTimeout(() => {
         this.handlers.delete(id);
         logger.debug(`[InteractionRouter] Timeout for interaction: ${id}`);
-        onTimeout?.();
-      }, timeoutMs);
+        opts.onTimeout?.();
+      }, opts.timeoutMs);
     }
 
-    this.handlers.set(id, { callback, timer, sessionId });
+    this.handlers.set(id, { callback, timer, sessionId, messageId: opts?.messageId });
   }
 
   handle(response: InteractionResponse): boolean {
@@ -63,7 +63,6 @@ export class InteractionRouter {
     }
   }
 
-  /** Cancel a single interaction by ID */
   cancel(id: string): void {
     const handler = this.handlers.get(id);
     if (handler) {
@@ -78,5 +77,9 @@ export class InteractionRouter {
       if (handler.sessionId === sessionId) ids.push(id);
     }
     return ids;
+  }
+
+  getMessageId(id: string): string | undefined {
+    return this.handlers.get(id)?.messageId;
   }
 }

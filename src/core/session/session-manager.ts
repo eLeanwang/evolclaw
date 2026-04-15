@@ -491,6 +491,12 @@ export class SessionManager {
     if (threadId) {
       const session = this.getOrCreateThreadSession(channel, channelId, threadId, defaultProjectPath, metadata, name, agentId);
       session.identity = this.resolveIdentity(channel, userId);
+      // 新话题会话补写默认权限模式
+      if (session.metadata && !session.metadata.permissionMode) {
+        session.metadata.permissionMode = session.identity?.role === 'owner' ? 'bypass' : 'readonly';
+        this.db.prepare(`UPDATE sessions SET metadata = ?, updated_at = ? WHERE id = ?`)
+          .run(JSON.stringify(session.metadata), Date.now(), session.id);
+      }
       return session;
     }
 
@@ -573,6 +579,10 @@ export class SessionManager {
       updatedAt: Date.now()
     };
     session.identity = this.resolveIdentity(channel, userId);
+    // 写入默认权限模式（基于角色，只在首次创建时设置）
+    if (!sessionMetadata.permissionMode) {
+      sessionMetadata.permissionMode = session.identity?.role === 'owner' ? 'bypass' : 'readonly';
+    }
 
     this.insertSession(session);
     this.eventBus.publish({

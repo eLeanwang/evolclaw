@@ -33,9 +33,11 @@ function diag(instanceId: string, action: string, meta: Record<string, any> = {}
  */
 let instanceCounter = 0;
 
+type QueueEntry = { kind: 'activity'; text: string } | { kind: 'text' };
+
 export class StreamFlusher {
   private buffer = '';
-  private activities: string[] = [];
+  private queue: QueueEntry[] = [];  // 按入队顺序记录 activity 和 text 段
   private timer?: NodeJS.Timeout;
   private lastFlush = Date.now();
   private allText = '';
@@ -46,9 +48,10 @@ export class StreamFlusher {
   private instanceId: string;
   private createTime = Date.now();
   private diagEnabled: boolean;
+  private sendChain: Promise<void> = Promise.resolve();  // 串行发送队列，保证消息按序到达
 
   constructor(
-    private send: (text: string, isFinal?: boolean) => Promise<void>,
+    private send: (text: string, isFinal?: boolean, hasText?: boolean) => Promise<void>,
     private interval = 4000,
     fileMarkerPattern?: RegExp,
     diagEnabled = false
@@ -60,10 +63,13 @@ export class StreamFlusher {
   }
 
   addText(text: string) {
+    if (this.buffer.length === 0 && text.length > 0) {
+      this.queue.push({ kind: 'text' });
+    }
     this.buffer += text;
     this.allText += text;
     this.messageTimestamps.push(Date.now());
-    if (this.diagEnabled) diag(this.instanceId, 'addText', { len: text.length, preview: text.substring(0, 60), bufLen: this.buffer.length, actCount: this.activities.length });
+    if (this.diagEnabled) diag(this.instanceId, 'addText', { len: text.length, preview: text.substring(0, 60), bufLen: this.buffer.length, queueLen: this.queue.length });
     this.scheduleFlush();
   }
 
@@ -74,20 +80,21 @@ export class StreamFlusher {
     }
     this.buffer += text;
     this.allText += text;
+    this.queue.push({ kind: 'text' });
     this.messageTimestamps.push(Date.now());
     if (this.diagEnabled) diag(this.instanceId, 'addTextBlock', { len: text.length, preview: text.substring(0, 60), bufLen: this.buffer.length });
     this.scheduleFlush();
   }
 
   addActivity(desc: string) {
-    this.activities.push(desc);
+    this.queue.push({ kind: 'activity', text: desc });
     this.messageTimestamps.push(Date.now());
-    if (this.diagEnabled) diag(this.instanceId, 'addActivity', { desc: desc.substring(0, 80), actCount: this.activities.length });
+    if (this.diagEnabled) diag(this.instanceId, 'addActivity', { desc: desc.substring(0, 80), queueLen: this.queue.length });
     this.scheduleFlush();
   }
 
   hasContent(): boolean {
-    return this.buffer.length > 0 || this.activities.length > 0;
+    return this.buffer.length > 0 || this.queue.some(e => e.kind === 'activity');
   }
 
   hasSentContent(): boolean {
@@ -115,7 +122,7 @@ export class StreamFlusher {
     let targetDelay: number;
 
     if (this.flushCount === 0) {
-      targetDelay = 0;
+      targetDelay = 500;
     } else if (this.flushCount <= 3) {
       targetDelay = Math.ceil(this.interval / 2);
     } else if (this.messageTimestamps.length >= 5) {
@@ -150,15 +157,19 @@ export class StreamFlusher {
    * 用于 complete 事件前清空 pending activities，让最终文本留给 flush(true) 发送
    */
   async flushActivitiesOnly() {
-    if (this.activities.length === 0) return;
+    const hasActivities = this.queue.some(e => e.kind === 'activity');
+    if (!hasActivities) return;
 
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = undefined;
     }
 
-    let output = this.activities.join('\n') + '\n\n';
-    this.activities = [];
+    // 只取 activity 条目，保留 text 条目在 queue 中
+    const activities = this.queue.filter(e => e.kind === 'activity') as { kind: 'activity'; text: string }[];
+    this.queue = this.queue.filter(e => e.kind === 'text');
+
+    let output = activities.map(e => e.text).join('\n') + '\n\n';
 
     if (output && this.fileMarkerPattern) {
       output = output.replace(this.fileMarkerPattern, '').trim();
@@ -167,7 +178,12 @@ export class StreamFlusher {
     if (this.diagEnabled) diag(this.instanceId, 'flushActivitiesOnly', { outputLen: output.length });
 
     if (output) {
-      await this.send(output);
+      const text = output;
+      // chain 保持不断裂：单条失败不阻塞后续（catch → resolve）
+      this.sendChain = this.sendChain
+        .then(() => this.send(text, false, false))
+        .catch(e => { logger.warn('[StreamFlusher] send failed:', e); });
+      await this.sendChain;
       this.sentContent = true;
       this.lastFlush = Date.now();
       this.flushCount++;
@@ -181,17 +197,28 @@ export class StreamFlusher {
     }
 
     let output = '';
-    const hasActivities = this.activities.length > 0;
     const hasText = this.buffer.length > 0;
 
-    if (hasActivities) {
-      output += this.activities.join('\n') + '\n\n';
-      this.activities = [];
+    // 按入队顺序合并：遇到 text 条目时插入 buffer 内容，遇到 activity 直接追加
+    let textInserted = false;
+    for (const entry of this.queue) {
+      if (entry.kind === 'activity') {
+        // 确保 activity 前有换行分隔（text 末尾可能没有换行）
+        if (output && !output.endsWith('\n')) output += '\n';
+        output += entry.text + '\n';
+      } else if (!textInserted) {
+        if (output) output += output.endsWith('\n') ? '\n' : '\n\n';
+        output += this.buffer;
+        textInserted = true;
+      }
     }
-    if (hasText) {
+    // 如果 queue 为空但有 buffer（纯文本情况）
+    if (!textInserted && hasText) {
       output += this.buffer;
-      this.buffer = '';
     }
+
+    this.queue = [];
+    this.buffer = '';
 
     if (output && this.fileMarkerPattern) {
       output = output.replace(this.fileMarkerPattern, '').trim();
@@ -200,7 +227,13 @@ export class StreamFlusher {
     if (this.diagEnabled) diag(this.instanceId, 'flush', { isFinal, outputLen: output.length, flushCount: this.flushCount, sinceLastFlush: Date.now() - this.lastFlush, preview: output.substring(0, 80) });
 
     if (output) {
-      await this.send(output, isFinal);
+      const text = output;
+      const final = isFinal;
+      const ht = hasText;
+      this.sendChain = this.sendChain
+        .then(() => this.send(text, final, ht))
+        .catch(e => { logger.warn('[StreamFlusher] send failed:', e); });
+      await this.sendChain;
       this.sentContent = true;
       this.lastFlush = Date.now();
       this.flushCount++;

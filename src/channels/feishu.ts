@@ -827,25 +827,27 @@ export class FeishuChannel {
     chatId: string,
     interaction: InteractionRequest,
     options?: { replyToMessageId?: string; replyInThread?: boolean }
-  ): Promise<boolean> {
+  ): Promise<string | false> {
     if (!this.client) return false;
 
     const card = buildInteractionCard(interaction);
     if (!card) return false;
 
     try {
+      let messageId: string | undefined;
       if (options?.replyToMessageId) {
         const replyData: any = {
           msg_type: 'interactive',
           content: JSON.stringify(card),
         };
         if (options.replyInThread) replyData.reply_in_thread = true;
-        await this.client.im.message.reply({
+        const res = await this.client.im.message.reply({
           path: { message_id: options.replyToMessageId },
           data: replyData,
         });
+        messageId = (res as any)?.data?.message_id;
       } else {
-        await this.client.im.message.create({
+        const res = await this.client.im.message.create({
           params: { receive_id_type: chatId.startsWith('ou_') ? 'open_id' : chatId.startsWith('on_') ? 'union_id' : 'chat_id' },
           data: {
             receive_id: chatId,
@@ -853,13 +855,26 @@ export class FeishuChannel {
             content: JSON.stringify(card),
           },
         });
+        messageId = (res as any)?.data?.message_id;
       }
-      logger.info(`[Feishu] Sent interaction card: ${interaction.id}`);
-      return true;
+      logger.info(`[Feishu] Sent interaction card: ${interaction.id}, messageId=${messageId}`);
+      return messageId || false;
     } catch (error: any) {
       const detail = error?.response?.data || error?.message || error;
       logger.error(`[Feishu] Failed to send interaction card (id=${interaction.id}, replyTo=${options?.replyToMessageId || 'none'}):`, detail);
       return false;
+    }
+  }
+
+  async patchInteractionCard(messageId: string, card: object): Promise<void> {
+    if (!this.client) return;
+    try {
+      await (this.client.im.message as any).patch({
+        path: { message_id: messageId },
+        data: { content: JSON.stringify(card) },
+      });
+    } catch (error: any) {
+      logger.warn(`[Feishu] Failed to patch card ${messageId}:`, error?.response?.data || error?.message);
     }
   }
 
@@ -1380,6 +1395,7 @@ export class FeishuChannelPlugin implements ChannelPlugin {
         sendImage: (id: string, png: Buffer, context?: any) => channel.sendImage(id, png, context),
         acknowledge: (messageId: string) => { channel.addAckReaction(messageId); return Promise.resolve(); },
         sendInteraction: (id: string, interaction: InteractionRequest, context?: any) => channel.sendInteraction(id, interaction, context),
+        patchInteractionCard: (messageId: string, card: object) => channel.patchInteractionCard(messageId, card),
         onInteraction: (callback: (response: InteractionResponse) => void) => channel.onInteraction(callback),
       };
 

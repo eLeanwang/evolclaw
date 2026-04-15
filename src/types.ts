@@ -302,7 +302,8 @@ export interface ChannelAdapter {
   acknowledge?(messageId: string): Promise<void>;
   sendProcessingStatus?(channelId: string, status: 'start' | 'done' | 'interrupted' | 'error' | 'timeout', sessionId: string, context?: ReplyContext): void;
   sendCustomPayload?(channelId: string, payload: string): void;
-  sendInteraction?(channelId: string, interaction: InteractionRequest, context?: ReplyContext): Promise<boolean>;
+  sendInteraction?(channelId: string, interaction: InteractionRequest, context?: ReplyContext): Promise<string | false>;
+  patchInteractionCard?(messageId: string, card: object): Promise<void>;
   onInteraction?(callback: (response: InteractionResponse) => void): void;
   onChatDissolved?(callback: (channelId: string) => void): void;
   connect?(): Promise<void>;

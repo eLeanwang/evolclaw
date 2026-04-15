@@ -247,9 +247,10 @@ export class PermissionGateway {
     let interactionSent = false;
     if (context?.adapter?.sendInteraction && context.channelId) {
       try {
-        interactionSent = await context.adapter.sendInteraction(
+        const result = await context.adapter.sendInteraction(
           context.channelId, interaction, context.replyContext
         );
+        interactionSent = !!result;
       } catch (err) {
         // sendInteraction 失败，fallback 到文本
       }

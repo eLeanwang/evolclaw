@@ -236,7 +236,7 @@ export class AgentRunner {
   private apiKey: string;
   private model: string;
   private effort?: 'low' | 'medium' | 'high' | 'max';
-  private permissionMode: string = 'auto';  // auto = AI 分类器自动判断
+  private permissionMode: string = 'auto';
   private baseUrl?: string;
   private config?: Config;
   private activeSessions: Map<string, string> = new Map();
@@ -305,7 +305,7 @@ export class AgentRunner {
 
   listModes(): PermissionModeInfo[] {
     return [
-      { key: 'auto', nameZh: '自动', description: 'AI 分类器自动判断（推荐）', available: true },
+      { key: 'auto', nameZh: '自动', description: 'AI 分类器自动判断', available: true },
       { key: 'bypass', nameZh: '放行', description: '全部自动放行', available: true },
       { key: 'request', nameZh: '审批', description: '部分自动，部分询问', available: true },
       { key: 'edit', nameZh: '编辑', description: '自动接受编辑，其他询问', available: true },

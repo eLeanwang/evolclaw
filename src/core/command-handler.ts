@@ -32,12 +32,6 @@ function getAvailableEfforts(agent: AgentRunnerFull, model: string): readonly Ef
   return [];
 }
 
-function effortBar(level: string): string {
-  const levels: Record<string, string> = {
-    low: '◆◇◇◇', medium: '◆◆◇◇', high: '◆◆◆◇', max: '◆◆◆◆'
-  };
-  return levels[level] || '◆◆◇◇';
-}
 
 function formatModelUsage(agent: AgentRunnerFull, model: string): string {
   const efforts = getAvailableEfforts(agent, model);
@@ -143,7 +137,7 @@ const aliases: Record<string, string> = {
 };
 
 // 命令快速路径前缀（所有命令都不进入消息队列）
-const quickCommandPrefixes = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/agent', '/slist', '/session', '/rename', '/repair', '/fork', '/stop', '/clear', '/compact', '/safe', '/del', '/perm', '/send', '/check', '/p ', '/s ', '/name '];
+const quickCommandPrefixes = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/effort', '/agent', '/slist', '/session', '/rename', '/repair', '/fork', '/stop', '/clear', '/compact', '/safe', '/del', '/perm', '/send', '/check', '/p ', '/s ', '/name '];
 
 export class CommandHandler {
   private adapters = new Map<string, ChannelAdapter>();
@@ -224,14 +218,14 @@ export class CommandHandler {
 
   /**
    * 尝试通过渠道适配器发送交互卡片。
-   * 返回 true 表示卡片已发送（用户将通过卡片操作回复），false 表示降级为文本。
+   * 返回 message_id 表示卡片已发送，false 表示降级为文本。
    */
   private async trySendInteraction(
     channel: string,
     channelId: string,
     interaction: InteractionRequest,
     replyContext?: ReplyContext,
-  ): Promise<boolean> {
+  ): Promise<string | false> {
     const adapter = this.adapters.get(channel);
     if (!adapter?.sendInteraction) return false;
     try {
@@ -240,6 +234,59 @@ export class CommandHandler {
       logger.warn(`[CommandHandler] sendInteraction failed: ${e}`);
       return false;
     }
+  }
+
+  /** 作废某 session 下所有 pending 交互卡片（PATCH 禁用 + cancel） */
+  private async invalidateOldCards(channel: string, sessionId: string): Promise<void> {
+    if (!this.interactionRouter) return;
+    const adapter = this.adapters.get(channel);
+    const pending = this.interactionRouter.getPending(sessionId);
+    if (pending.length === 0) return;
+    const disabledCard = {
+      config: { wide_screen_mode: true },
+      header: { template: 'grey', title: { tag: 'plain_text', content: '已过期' } },
+      elements: [{ tag: 'markdown', content: '此卡片已过期，请查看最新卡片。' }],
+    };
+    for (const id of pending) {
+      const msgId = this.interactionRouter.getMessageId(id);
+      if (msgId && adapter?.patchInteractionCard) {
+        adapter.patchInteractionCard(msgId, disabledCard).catch(() => {});
+      }
+      this.interactionRouter.cancel(id);
+    }
+  }
+
+  /**
+   * 发送交互卡片并注册回调。作废旧卡片 → 发送新卡片 → 注册到 interactionRouter。
+   * 返回 true 表示卡片已发送（调用方应 return null），false 表示降级到文本。
+   */
+  private async sendInteractionCard(opts: {
+    channel: string;
+    channelId: string;
+    sessionId: string;
+    requestId: string;
+    interaction: InteractionRequest;
+    replyCtx?: ReplyContext;
+    callback: (action: string, values?: Record<string, unknown>, operatorId?: string) => void | Promise<void>;
+  }): Promise<boolean> {
+    if (!this.interactionRouter) return false;
+    await this.invalidateOldCards(opts.channel, opts.sessionId);
+    const messageId = await this.trySendInteraction(opts.channel, opts.channelId, opts.interaction, opts.replyCtx);
+    if (!messageId) return false;
+    const wrappedCallback: typeof opts.callback = async (action, values, operatorId) => {
+      await opts.callback(action, values, operatorId);
+      const adapter = this.adapters.get(opts.channel);
+      if (adapter?.patchInteractionCard) {
+        const disabledCard = {
+          config: { wide_screen_mode: true },
+          header: { template: 'grey', title: { tag: 'plain_text', content: '已过期' } },
+          elements: [{ tag: 'markdown', content: '此卡片已过期，请查看最新卡片。' }],
+        };
+        adapter.patchInteractionCard(messageId, disabledCard).catch(() => {});
+      }
+    };
+    this.interactionRouter.register(opts.requestId, opts.sessionId, wrappedCallback, { timeoutMs: 120_000, messageId });
+    return true;
   }
 
   /** 获取活跃会话，无会话时返回统一错误提示 */
@@ -467,7 +514,7 @@ export class CommandHandler {
     }
 
     // 空闲检查：某些命令需要等待当前会话空闲
-    const requiresIdle = ['/new', '/session', '/clear', '/compact', '/safe', '/repair', '/fork', '/bind'];
+    const requiresIdle = ['/new', '/session', '/clear', '/compact', '/safe', '/repair', '/fork', '/bind', '/project', '/agent'];
     if (requiresIdle.some(cmd => normalizedContent === cmd || normalizedContent.startsWith(cmd + ' '))) {
       if (threadId) {
         // 话题中：检查话题 session 是否在处理（不创建）
@@ -584,7 +631,7 @@ export class CommandHandler {
         if (!hasPermissionController(permAgent)) {
           return '❌ 权限控制不可用';
         }
-        const currentMode = permSession.metadata?.permissionMode || 'auto';
+        const currentMode = permSession.metadata?.permissionMode ?? 'bypass';
         const modes = permAgent.listModes();
 
         // 尝试发送交互卡片
@@ -609,9 +656,9 @@ export class CommandHandler {
           };
 
           const replyCtx = this.getReplyContext(permSession);
-          const sent = await this.trySendInteraction(channel, channelId, interaction, replyCtx);
-          if (sent) {
-            this.interactionRouter.register(requestId, permSession.id, async (action, _values, operatorId) => {
+          const cardSent = await this.sendInteractionCard({
+            channel, channelId, sessionId: permSession.id, requestId, interaction, replyCtx,
+            callback: async (action, _values, operatorId) => {
               if (action !== currentMode) {
                 if (userId && operatorId && operatorId !== userId) return;
                 const result = await this.handle(`/perm ${action}`, channel, channelId, undefined, userId, threadId);
@@ -620,9 +667,9 @@ export class CommandHandler {
                   adapter?.sendText(channelId, result, replyCtx);
                 }
               }
-            }, 120_000);
-            return null;
-          }
+            },
+          });
+          if (cardSent) return null;
         }
 
         // 降级：文本
@@ -720,9 +767,9 @@ export class CommandHandler {
           };
 
           const replyCtx = activeSession ? this.getReplyContext(activeSession) : undefined;
-          const sent = await this.trySendInteraction(channel, channelId, interaction, replyCtx);
-          if (sent) {
-            this.interactionRouter.register(requestId, activeSession?.id || requestId, async (action, _values, operatorId) => {
+          const cardSent = await this.sendInteractionCard({
+            channel, channelId, sessionId: activeSession?.id || requestId, requestId, interaction, replyCtx,
+            callback: async (action, _values, operatorId) => {
               if (action !== currentAgent) {
                 if (userId && operatorId && operatorId !== userId) return;
                 const result = await this.handle(`/agent ${action}`, channel, channelId, undefined, userId, threadId);
@@ -731,9 +778,9 @@ export class CommandHandler {
                   adapter?.sendText(channelId, result, replyCtx);
                 }
               }
-            }, 120_000);
-            return null;
-          }
+            },
+          });
+          if (cardSent) return null;
         }
 
         // 降级：文本
@@ -762,11 +809,6 @@ export class CommandHandler {
       const hasExistingSession = newSession.agentSessionId ? '（恢复已有会话）' : '（新建会话）';
       const projectName = this.getProjectName(session.projectPath);
       let agentSwitchResponse = `✓ 已切换 Agent: ${args}\n  项目: ${projectName}\n  会话: ${newSession.name || '(未命名)'}\n  ${hasExistingSession}`;
-
-      // 提示旧会话有正在运行的任务
-      if (agent.hasActiveStream(session.id)) {
-        agentSwitchResponse += `\n\n⚠️ ${session.agentId || this.defaultAgentId} 有任务正在处理，已转为后台运行`;
-      }
 
       return agentSwitchResponse;
     }
@@ -808,9 +850,9 @@ export class CommandHandler {
           };
 
           const replyCtx = this.getReplyContext(modelSession);
-          const sent = await this.trySendInteraction(channel, channelId, interaction, replyCtx);
-          if (sent) {
-            this.interactionRouter.register(requestId, modelSession.id, async (action, _values, operatorId) => {
+          const cardSent = await this.sendInteractionCard({
+            channel, channelId, sessionId: modelSession.id, requestId, interaction, replyCtx,
+            callback: async (action, _values, operatorId) => {
               if (action !== currentModel) {
                 if (userId && operatorId && operatorId !== userId) return;
                 const result = await this.handle(`/model ${action}`, channel, channelId, undefined, userId, threadId);
@@ -819,15 +861,15 @@ export class CommandHandler {
                   adapter?.sendText(channelId, result, replyCtx);
                 }
               }
-            }, 120_000);
-            return null;
-          }
+            },
+          });
+          if (cardSent) return null;
         }
 
         // 降级：文本
         const modelList = models.map((m: string) => `- ${m}`).join('\n');
         const effortHint = efforts.length > 0
-          ? `\n推理强度: ${currentEffort === 'auto' ? 'auto (SDK默认)' : `${currentEffort} ${effortBar(currentEffort)}`}  (使用 /effort 调整)`
+          ? `\n推理强度: ${currentEffort === 'auto' ? 'auto (SDK默认)' : currentEffort}  (使用 /effort 调整)`
           : '';
         return `当前模型: ${currentModel}${effortHint}\n\n可用模型：\n${modelList}\n\n${formatModelUsage(modelAgent, currentModel)}`;
       }
@@ -888,7 +930,7 @@ export class CommandHandler {
 
       if (newEffort) {
         modelAgent.setEffort?.(newEffort);
-        changes.push(`推理强度: ${newEffort} ${effortBar(newEffort)}`);
+        changes.push(`推理强度: ${newEffort}`);
       }
 
       // 持久化：写回来源（就近原则）
@@ -965,7 +1007,7 @@ export class CommandHandler {
           const buttons: ActionInteraction['buttons'] = [
             ...efforts.map(e => ({
               key: e,
-              label: e === currentEffort ? `✓ ${e} ${effortBar(e)}` : `${e} ${effortBar(e)}`,
+              label: e === currentEffort ? `✓ ${e}` : e,
               style: e === currentEffort ? 'primary' as const : 'default' as const,
             })),
             {
@@ -988,9 +1030,9 @@ export class CommandHandler {
           };
 
           const replyCtx = this.getReplyContext(effortSession);
-          const sent = await this.trySendInteraction(channel, channelId, interaction, replyCtx);
-          if (sent) {
-            this.interactionRouter.register(requestId, effortSession.id, async (action, _values, operatorId) => {
+          const cardSent = await this.sendInteractionCard({
+            channel, channelId, sessionId: effortSession.id, requestId, interaction, replyCtx,
+            callback: async (action, _values, operatorId) => {
               if (action !== currentEffort) {
                 if (userId && operatorId && operatorId !== userId) return;
                 const result = await this.handle(`/effort ${action}`, channel, channelId, undefined, userId, threadId);
@@ -999,14 +1041,14 @@ export class CommandHandler {
                   adapter?.sendText(channelId, result, replyCtx);
                 }
               }
-            }, 120_000);
-            return null;
-          }
+            },
+          });
+          if (cardSent) return null;
         }
 
         // 降级：文本
-        const effortDisplay = currentEffort === 'auto' ? 'auto (SDK默认)' : `${currentEffort} ${effortBar(currentEffort)}`;
-        const effortList = efforts.map(e => `${e === currentEffort ? '  ✓' : '   '} ${e} ${effortBar(e)}`).join('\n');
+        const effortDisplay = currentEffort === 'auto' ? 'auto (SDK默认)' : currentEffort;
+        const effortList = efforts.map(e => `${e === currentEffort ? '  ✓' : '   '} ${e}`).join('\n');
         return `⚡ 推理强度: ${effortDisplay}\n\n可选:\n${effortList}\n   ${currentEffort === 'auto' ? '  ✓' : '   '} auto\n\n用法: /effort <level>`;
       }
 
@@ -1062,7 +1104,7 @@ export class CommandHandler {
         }
       }
 
-      return `✓ 推理强度: ${newEffort} ${effortBar(newEffort)}`;
+      return `✓ 推理强度: ${newEffort}`;
     }
 
     // /stop 命令：中断当前任务
@@ -1683,9 +1725,9 @@ export class CommandHandler {
         };
 
         const replyCtx = activeSession ? this.getReplyContext(activeSession) : undefined;
-        const sent = await this.trySendInteraction(channel, channelId, interaction, replyCtx);
-        if (sent) {
-          this.interactionRouter.register(requestId, activeSession?.id || requestId, async (action, _values, operatorId) => {
+        const cardSent = await this.sendInteractionCard({
+          channel, channelId, sessionId: activeSession?.id || requestId, requestId, interaction, replyCtx,
+          callback: async (action, _values, operatorId) => {
             if (userId && operatorId && operatorId !== userId) return;
             const selectedEntry = entries.find(e => e.name === action);
             if (selectedEntry && !selectedEntry.isCurrent) {
@@ -1695,9 +1737,9 @@ export class CommandHandler {
                 adapter?.sendText(channelId, result, replyCtx);
               }
             }
-          }, 120_000);
-          return null;
-        }
+          },
+        });
+        if (cardSent) return null;
       }
 
       // 降级：文本列表
@@ -1794,12 +1836,6 @@ export class CommandHandler {
       const hasExistingSession = newSession.agentSessionId ? '（恢复已有会话）' : '（新建会话）';
       const currentAgent = newSession.agentId || this.defaultAgentId;
       let response = `✓ 已切换到项目: ${projectName}\n  路径: ${projectPath}\n  Agent: ${currentAgent}\n  ${hasExistingSession}`;
-
-      // 提示旧会话有正在运行的任务
-      if (activeSession && agent.hasActiveStream(activeSession.id)) {
-        const oldProjectName = this.getProjectName(activeSession.projectPath) || path.basename(activeSession.projectPath);
-        response += `\n\n⚠️ ${oldProjectName} 有任务正在处理，已转为后台运行`;
-      }
 
       if (cachedEvents.length > 0 && sendMessage) {
         for (const event of cachedEvents) {
@@ -1938,19 +1974,18 @@ export class CommandHandler {
           };
 
           const replyCtx = this.getReplyContext(session);
-          const sent = await this.trySendInteraction(channel, channelId, interaction, replyCtx);
-          if (sent) {
-            this.interactionRouter.register(requestId, session.id, async (action, _values, operatorId) => {
+          const cardSent = await this.sendInteractionCard({
+            channel, channelId, sessionId: session.id, requestId, interaction, replyCtx,
+            callback: async (action, _values, operatorId) => {
               if (userId && operatorId && operatorId !== userId) return;
-              // action 是 uuid 前缀，用 /s 导入
               const result = await this.handle(`/session ${action}`, channel, channelId, undefined, userId, threadId);
               if (result) {
                 const adapter = this.adapters.get(channel);
                 adapter?.sendText(channelId, result, replyCtx);
               }
-            }, 120_000);
-            return null;
-          }
+            },
+          });
+          if (cardSent) return null;
         }
 
         // 降级：文本列表
@@ -2046,11 +2081,10 @@ export class CommandHandler {
         };
 
         const replyCtx = this.getReplyContext(session);
-        const sent = await this.trySendInteraction(channel, channelId, interaction, replyCtx);
-        if (sent) {
-          this.interactionRouter.register(requestId, session.id, async (action, _values, operatorId) => {
+        const cardSent = await this.sendInteractionCard({
+          channel, channelId, sessionId: session.id, requestId, interaction, replyCtx,
+          callback: async (action, _values, operatorId) => {
             if (userId && operatorId && operatorId !== userId) return;
-            // action 是按钮 key（序号）
             const target = displaySessions.find(ds => String(ds.index) === action);
             if (target && !target.isActive) {
               const result = await this.handle(`/session ${action}`, channel, channelId, undefined, userId, threadId);
@@ -2059,9 +2093,9 @@ export class CommandHandler {
                 adapter?.sendText(channelId, result, replyCtx);
               }
             }
-          }, 120_000);
-          return null;
-        }
+          },
+        });
+        if (cardSent) return null;
       }
 
       // 降级：文本列表

@@ -383,7 +383,7 @@ ${suggestions}`,
       // 使用动态判断，确保切换项目后不会继续输出
       let firstReply = true;
       const flusher = new StreamFlusher(
-        async (text, isFinal) => {
+        async (text, isFinal, hasText) => {
           const isCurrentlyBackground = await this.isBackgroundSession(session, message.channel, message.channelId);
 
           if (!isCurrentlyBackground) {
@@ -394,9 +394,11 @@ ${suggestions}`,
             if (replyCtx) {
               Object.assign(opts, replyCtx);
             } else if (firstReply && message.messageId) {
-              // 主会话：首条消息引用回复用户原消息
-              opts.replyToMessageId = message.messageId;
-              firstReply = false;
+              // 主会话：首条消息引用回复用户原消息（只在含真实文字时消费）
+              if (hasText) {
+                opts.replyToMessageId = message.messageId;
+                firstReply = false;
+              }
             }
             await adapter.sendText(message.channelId, text, Object.keys(opts).length ? opts : undefined);
           }
@@ -425,10 +427,8 @@ ${suggestions}`,
         interactionRouter: this.interactionRouter,
       });
 
-      // 设置 per-session 权限模式（管理员默认 bypass，普通用户默认 readonly）
-      const defaultMode = session.identity?.role === 'owner' ? 'bypass' : 'readonly';
-      const permissionMode = session.metadata?.permissionMode || defaultMode;
-      agent.setMode(permissionMode);
+      // 设置 per-session 权限模式
+      agent.setMode(session.metadata?.permissionMode ?? 'bypass');
 
       // 标记会话为处理中（实时持久化，重启后可恢复）
       this.sessionManager.markProcessing(session.id);
@@ -462,7 +462,7 @@ ${suggestions}`,
         contextParts.push(`[当前环境] ${envParts.join(' | ')}`);
 
         // 只读模式提示
-        if (permissionMode === 'readonly') {
+        if (session.metadata?.permissionMode === 'readonly') {
           contextParts.push('[只读模式] 禁止修改项目文件。如需生成文件供用户下载，请写入 .evolclaw/tmp/ 目录后使用 [SEND_FILE:] 发送');
         }
 

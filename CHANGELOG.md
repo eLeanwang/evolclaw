@@ -1,6 +1,6 @@
 # Changelog
 
-## v2.3.0 (2026-04-14)
+## v2.3.0 (2026-04-15)
 
 ### New Features
 
@@ -14,6 +14,9 @@
 ### Improvements
 
 - **InteractionRouter** — 通用交互路由器，管理卡片回调注册、超时清理、会话级取消
+- **Card lifecycle management** — 发送新卡片时自动作废旧卡片（PATCH 置灰 + 取消回调），避免过期卡片误操作
+- **Permission mode defaults** — 会话创建时即写入默认权限模式（owner → bypass，guest → readonly），无需运行时推断
+- **Reply quote precision** — StreamFlusher 仅在含真实文字时消费 replyToMessageId，避免纯工具活动消息占用引用
 - **Channel routing refactor** — session.channel 存储实例名（非渠道类型），多实例场景精确路由
 - **Config auto-recovery** — 配置文件丢失时自动从备份恢复（`evolclaw.backup.json` → timestamped → sample）
 - **AUN trace logging** — 可选数据追踪日志（`debug.aunTrace`），记录所有收发数据
