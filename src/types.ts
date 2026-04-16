@@ -102,6 +102,7 @@ export interface Config {
     enabled?: boolean;              // 是否启用空闲监控，默认 true
     safeModeThreshold?: number;     // 连续错误几次进入安全模式，默认 3；设为 0 关闭 safe mode
     timeout?: number;               // 无输出超时(秒)，默认 120
+    connectionTimeout?: number;     // 连接阶段超时(秒)，默认 30；query() 调用到流开始前的最大等待
   };
   showActivities?: 'all' | 'dm-only' | 'owner-dm-only' | 'none';  // 中间输出显示范围（工具活动+流式文本），默认 'all'
 }
