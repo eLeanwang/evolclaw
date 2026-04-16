@@ -17,7 +17,7 @@ import os from 'os';
 import type { Config } from '../types.js';
 import type { AgentPlugin, AgentInstance, AgentCallbacks } from '../core/agent-loader.js';
 import type { AgentEvent, AgentRunnerFull, ModelSwitcher, PermissionModeInfo } from './claude-runner.js';
-import { resolveGoogleConfig, type GoogleResolved } from '../config.js';
+import { resolveGoogleConfig, loadMenus, type GoogleResolved } from '../config.js';
 import { GeminiSessionFileAdapter } from '../core/session/adapters/gemini-session-file-adapter.js';
 import { logger } from '../utils/logger.js';
 
@@ -38,8 +38,8 @@ const MIME_EXT: Record<string, string> = {
   'image/webp': '.webp',
 };
 
-// ── Gemini 模型列表 ──
-const GEMINI_MODELS = [
+// ── Gemini 模型列表（回退默认值） ──
+const GEMINI_MODELS_DEFAULT = [
   'gemini-2.5-pro',
   'gemini-2.5-flash',
   'gemini-2.5-flash-lite',
@@ -69,7 +69,7 @@ export class GeminiRunner implements AgentRunnerFull, ModelSwitcher {
 
   setModel(model: string): void { this.model = model; }
   getModel(): string { return this.model; }
-  listModels(): string[] { return GEMINI_MODELS; }
+  listModels(): string[] { return loadMenus().models['gemini'] ?? GEMINI_MODELS_DEFAULT; }
 
   // ── Effort (not applicable) ──
 

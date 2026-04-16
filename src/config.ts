@@ -9,6 +9,50 @@ import { commandExists } from './utils/cross-platform.js';
 // Re-export path utilities for backward compatibility
 export { resolveRoot, resolvePaths, ensureDataDirs, getPackageRoot } from './paths.js';
 
+// ── Menus config (external model/effort lists) ──
+
+export interface MenusConfig {
+  models: Record<string, string[]>;
+  efforts: string[];
+}
+
+const DEFAULT_MENUS: MenusConfig = {
+  models: {
+    claude: ['opus', 'sonnet', 'haiku'],
+    codex: ['gpt-5.3-codex', 'gpt-5.2-codex', 'gpt-5-codex', 'gpt-5.2', 'gpt-5.4'],
+    gemini: ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'],
+  },
+  efforts: ['low', 'medium', 'high', 'max'],
+};
+
+let cachedMenus: MenusConfig | null = null;
+
+/**
+ * Load menus.json from data/ directory, falling back to hardcoded defaults.
+ * Result is cached after first successful load.
+ */
+export function loadMenus(): MenusConfig {
+  if (cachedMenus) return cachedMenus;
+
+  try {
+    const menusPath = path.join(_getPackageRoot(), 'data', 'menus.json');
+    if (fs.existsSync(menusPath)) {
+      const raw = JSON.parse(fs.readFileSync(menusPath, 'utf-8'));
+      if (raw.models && typeof raw.models === 'object' && Array.isArray(raw.efforts)) {
+        cachedMenus = raw as MenusConfig;
+        return cachedMenus;
+      }
+      logger.warn('menus.json has invalid structure, using defaults');
+    }
+  } catch (e) {
+    logger.warn(`Failed to load menus.json: ${e}`);
+  }
+
+  cachedMenus = DEFAULT_MENUS;
+  return cachedMenus;
+}
+
+
 export interface AnthropicResolved {
   apiKey: string;
   baseUrl?: string;

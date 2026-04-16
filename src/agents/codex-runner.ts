@@ -10,7 +10,7 @@ import { Codex, type ThreadEvent, type ThreadItem, type ThreadOptions, type Mode
 import type { Config } from '../types.js';
 import type { AgentPlugin, AgentInstance, AgentCallbacks } from '../core/agent-loader.js';
 import type { AgentEvent, AgentRunnerFull, ModelSwitcher, PermissionModeInfo } from './claude-runner.js';
-import { resolveOpenaiConfig } from '../config.js';
+import { resolveOpenaiConfig, loadMenus } from '../config.js';
 import { logger } from '../utils/logger.js';
 import fs from 'fs';
 import path from 'path';
@@ -24,8 +24,8 @@ const MIME_EXT: Record<string, string> = {
   'image/webp': '.webp',
 };
 
-// ── Codex 模型列表 ──
-const CODEX_MODELS = ['gpt-5.3-codex', 'gpt-5.2-codex', 'gpt-5-codex', 'gpt-5.2', 'gpt-5.4'];
+// ── Codex 模型列表（回退默认值） ──
+const CODEX_MODELS_DEFAULT = ['gpt-5.3-codex', 'gpt-5.2-codex', 'gpt-5-codex', 'gpt-5.2', 'gpt-5.4'];
 
 // ── Codex Runner ──
 
@@ -55,7 +55,7 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
 
   setModel(model: string): void { this.model = model; }
   getModel(): string { return this.model; }
-  listModels(): string[] { return CODEX_MODELS; }
+  listModels(): string[] { return loadMenus().models['codex'] ?? CODEX_MODELS_DEFAULT; }
 
   // ── Effort ──
 
