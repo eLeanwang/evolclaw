@@ -90,3 +90,63 @@ describe('DingtalkChannel', () => {
     });
   });
 });
+
+describe('DingtalkChannelPlugin', () => {
+  async function createPlugin() {
+    const { DingtalkChannelPlugin } = await import('../../src/channels/dingtalk.js');
+    return new DingtalkChannelPlugin();
+  }
+
+  describe('name', () => {
+    it('should be dingtalk', async () => {
+      const plugin = await createPlugin();
+      expect(plugin.name).toBe('dingtalk');
+    });
+  });
+
+  describe('isEnabled', () => {
+    it('should return false when no dingtalk config', async () => {
+      const plugin = await createPlugin();
+      expect(plugin.isEnabled({ projects: { defaultPath: '/tmp', autoCreate: false } } as any)).toBe(false);
+    });
+
+    it('should return true with valid credentials', async () => {
+      const plugin = await createPlugin();
+      const config = {
+        channels: { dingtalk: { clientId: 'abc', clientSecret: 'xyz' } },
+        projects: { defaultPath: '/tmp', autoCreate: false },
+      } as any;
+      expect(plugin.isEnabled(config)).toBe(true);
+    });
+
+    it('should return false when explicitly disabled', async () => {
+      const plugin = await createPlugin();
+      const config = {
+        channels: { dingtalk: { clientId: 'abc', clientSecret: 'xyz', enabled: false } },
+        projects: { defaultPath: '/tmp', autoCreate: false },
+      } as any;
+      expect(plugin.isEnabled(config)).toBe(false);
+    });
+
+    it('should return true with array form if any instance valid', async () => {
+      const plugin = await createPlugin();
+      const config = {
+        channels: { dingtalk: [
+          { name: 'dt1', clientId: '', clientSecret: '' },
+          { name: 'dt2', clientId: 'abc', clientSecret: 'xyz' },
+        ] },
+        projects: { defaultPath: '/tmp', autoCreate: false },
+      } as any;
+      expect(plugin.isEnabled(config)).toBe(true);
+    });
+
+    it('should return false with placeholder credentials', async () => {
+      const plugin = await createPlugin();
+      const config = {
+        channels: { dingtalk: { clientId: 'your-app-key', clientSecret: 'your-app-secret' } },
+        projects: { defaultPath: '/tmp', autoCreate: false },
+      } as any;
+      expect(plugin.isEnabled(config)).toBe(false);
+    });
+  });
+});
