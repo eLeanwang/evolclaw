@@ -580,7 +580,70 @@ async function cmdStatus() {
   }
 }
 
-function cmdLogs() {
+// Log line pattern: [timestamp] [LEVEL] [Module?] message
+const LOG_RE = /^(\[[^\]]+\]) (\[(?:INFO|WARN|ERROR|DEBUG)\]) ((?:\[[^\]]+\] )*)(.*)$/;
+const MAX_MSG = 200; // truncate long messages
+
+function makeColors(enabled: boolean) {
+  const e = (code: string) => enabled ? code : '';
+  return {
+    reset: e('\x1b[0m'), dim: e('\x1b[2m'), bold: e('\x1b[1m'),
+    red: e('\x1b[31m'), yellow: e('\x1b[33m'), cyan: e('\x1b[36m'),
+    magenta: e('\x1b[35m'), gray: e('\x1b[90m'),
+  };
+}
+
+function renderLogLine(line: string, opts: { level?: string; module?: string; color: boolean }): string | null {
+  const m = line.match(LOG_RE);
+  if (!m) return line; // passthrough non-standard lines (stack traces etc.)
+
+  const [, ts, levelTag, modulePart, msg] = m;
+  const level = levelTag.slice(1, -1); // strip brackets
+
+  // Level filter
+  if (opts.level) {
+    const want = opts.level.toUpperCase();
+    if (want === 'ERROR' && level !== 'ERROR') return null;
+    if (want === 'WARN' && level !== 'WARN' && level !== 'ERROR') return null;
+  }
+
+  // Module filter (case-insensitive substring match)
+  if (opts.module) {
+    const mod = modulePart.toLowerCase();
+    if (!mod.includes(opts.module.toLowerCase())) return null;
+  }
+
+  // Truncate long messages (always, regardless of color)
+  const truncated = msg.length > MAX_MSG ? msg.slice(0, MAX_MSG) + '…' : msg;
+
+  const C = makeColors(opts.color);
+
+  // Color by level
+  const levelColor = level === 'ERROR' ? C.red : level === 'WARN' ? C.yellow : level === 'DEBUG' ? C.gray : '';
+
+  // Highlight user messages: [channel] channelId: text
+  const isUserMsg = modulePart && /^\S+: .+$/.test(truncated);
+  const renderedMsg = isUserMsg
+    ? C.cyan + truncated + C.reset
+    : levelColor + truncated + C.reset;
+
+  return (
+    C.dim + ts + C.reset + ' ' +
+    levelColor + C.bold + levelTag + C.reset + ' ' +
+    C.magenta + modulePart.trimEnd() + C.reset +
+    (modulePart ? ' ' : '') +
+    renderedMsg
+  );
+}
+
+function cmdLogs(args: string[]) {
+  const raw = args.includes('--raw');
+  const noColor = args.includes('--no-color');
+  const levelIdx = args.indexOf('--level');
+  const moduleIdx = args.indexOf('--module');
+  const level = levelIdx !== -1 ? args[levelIdx + 1] : undefined;
+  const module = moduleIdx !== -1 ? args[moduleIdx + 1] : undefined;
+
   const p = resolvePaths();
   const mainLog = path.join(p.logs, 'evolclaw.log');
   if (!fs.existsSync(mainLog)) {
@@ -588,14 +651,50 @@ function cmdLogs() {
     process.exit(1);
   }
 
+  if (raw) {
+    // Raw mode: plain tail -f, no rendering at all
+    if (platform.isWindows) {
+      const tail = platform.tailFile(mainLog);
+      platform.onShutdown(() => tail.abort());
+    } else {
+      const child = spawn('tail', ['-f', '-n', '50', mainLog], { stdio: 'inherit' });
+      child.on('exit', (code) => process.exit(code || 0));
+    }
+    return;
+  }
+
+  // Rendered mode: always filter+truncate, color depends on TTY
+  const useColor = !noColor && !!process.stdout.isTTY;
+  const opts = { level, module, color: useColor };
+
+  function processLine(line: string) {
+    const rendered = renderLogLine(line, opts);
+    if (rendered !== null) process.stdout.write(rendered + '\n');
+  }
+
   if (platform.isWindows) {
-    // Windows: use fs.watch for live tail
-    const tail = platform.tailFile(mainLog);
-    platform.onShutdown(() => tail.abort());
+    // Windows: read existing content + watch
+    const existing = fs.readFileSync(mainLog, 'utf-8').split('\n').slice(-50);
+    existing.forEach(processLine);
+    let size = fs.statSync(mainLog).size;
+    const watcher = fs.watch(mainLog, () => {
+      const newSize = fs.statSync(mainLog).size;
+      if (newSize <= size) return;
+      const buf = Buffer.alloc(newSize - size);
+      const fd = fs.openSync(mainLog, 'r');
+      fs.readSync(fd, buf, 0, buf.length, size);
+      fs.closeSync(fd);
+      size = newSize;
+      buf.toString().split('\n').forEach(l => l && processLine(l));
+    });
+    platform.onShutdown(() => watcher.close());
   } else {
-    // Unix: use tail -f
-    const child = spawn('tail', ['-f', mainLog], { stdio: 'inherit' });
+    // Unix: spawn tail -f, pipe through renderer
+    const child = spawn('tail', ['-f', '-n', '50', mainLog]);
+    const rl = readline.createInterface({ input: child.stdout });
+    rl.on('line', processLine);
     child.on('exit', (code) => process.exit(code || 0));
+    platform.onShutdown(() => { child.kill(); });
   }
 }
 
@@ -1260,7 +1359,7 @@ export async function main(args: string[]) {
       await cmdStatus();
       break;
     case 'logs':
-      cmdLogs();
+      cmdLogs(args.slice(1));
       break;
     case 'restart-monitor':
       await cmdRestartMonitor();
@@ -1286,7 +1385,10 @@ Commands:
   stop          停止服务
   restart       重启服务
   status        查看状态
-  logs          查看日志 (tail -f)
+  logs          查看日志 (tail -f, 着色渲染)
+                  --level error|warn   只显示指定级别及以上
+                  --module <name>      只显示指定模块（如 feishu、AgentRunner）
+                  --raw                原始输出，不着色
   tui           启动 AUN TUI 客户端
   diagnose      诊断启动环境（配置、数据库、进程）
   mv <old> <new>  迁移项目目录（保留 Claude/Codex/EvolClaw 会话）

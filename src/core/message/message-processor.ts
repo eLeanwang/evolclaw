@@ -204,7 +204,7 @@ export class MessageProcessor {
               const msg = showIdleMonitor
                 ? result.message
                 : `\u26a0\ufe0f 任务超时（${result.idleSec}秒无响应），已自动中断`;
-              channelInfo.adapter.sendText(message.channelId, msg, this.getReplyContext(session)).catch(e => {
+              channelInfo.adapter.sendText(message.channelId, msg, this.getReplyContext(message)).catch(e => {
                 logger.debug(`[MessageProcessor] Failed to send kill diagnostic message:`, e);
               });
             }
@@ -218,7 +218,7 @@ export class MessageProcessor {
             logger.info(`[MessageProcessor] Idle monitor: ${result.action} after ${result.idleSec}s idle, stream: ${streamKey}`);
             if (channelInfo && showIdleMonitor && !shouldSuppress()) {
               if (!isBackground) {
-                channelInfo.adapter.sendText(message.channelId, result.message, this.getReplyContext(session)).catch(e => {
+                channelInfo.adapter.sendText(message.channelId, result.message, this.getReplyContext(message)).catch(e => {
                   logger.debug(`[MessageProcessor] Failed to send idle monitor message:`, e);
                 });
               }
@@ -257,7 +257,7 @@ export class MessageProcessor {
           } else {
             const prefixed = prefixErrorType(ERROR_PREFIX.INFRA, errorType);
             const newCount = await this.sessionManager.recordError(session.id, prefixed, error.message);
-            await this.checkSafeMode(session, message.channelId, channelInfo.adapter, safeModeThreshold, newCount);
+            await this.checkSafeMode(session, message.channelId, channelInfo.adapter, safeModeThreshold, newCount, message);
           }
         } catch (statusError) {
           logger.error('[MessageProcessor] Failed to update health status:', statusError);
@@ -270,9 +270,9 @@ export class MessageProcessor {
     }
   }
 
-  /** 从 session 提取渠道预构建的回复上下文 */
-  private getReplyContext(session: Session): import('../../types.js').ReplyContext | undefined {
-    return session.metadata?.replyContext;
+  /** 获取回复上下文（跟着任务走） */
+  private getReplyContext(message: Message): import('../../types.js').ReplyContext | undefined {
+    return message.replyContext;
   }
 
   /**
@@ -283,12 +283,13 @@ export class MessageProcessor {
     channelId: string,
     adapter: ChannelAdapter,
     safeModeThreshold: number,
-    consecutiveErrors: number
+    consecutiveErrors: number,
+    message: Message
   ): Promise<void> {
     if (safeModeThreshold <= 0) return;
 
     const health = await this.sessionManager.getHealthStatus(session.id);
-    const sendOpts = this.getReplyContext(session);
+    const sendOpts = this.getReplyContext(message);
     const isThread = !!session.threadId;
     if (consecutiveErrors >= safeModeThreshold && !health.safeMode) {
       await this.sessionManager.setSafeMode(session.id, true);
@@ -368,7 +369,7 @@ ${suggestions}`,
 
       // 记录开始处理
       this.eventBus.publish({ type: 'message:processing', sessionId: session.id });
-      adapter.sendProcessingStatus?.(message.channelId, 'start', session.id, this.getReplyContext(session));
+      adapter.sendProcessingStatus?.(message.channelId, 'start', session.id, this.getReplyContext(message));
 
       logger.message({
         msgId: messageId,
@@ -389,8 +390,8 @@ ${suggestions}`,
           if (!isCurrentlyBackground) {
             const opts: { title?: string; replyToMessageId?: string; mentionUserIds?: string[]; replyInThread?: boolean } = {};
             if (isFinal) opts.title = '\u2713 \u6700\u7ec8\u56de\u590d:';
-            // 话题会话：使用 Channel 预构建的 replyContext（确保消息进入话题）
-            const replyCtx = session.metadata?.replyContext;
+            // replyContext 跟着任务走：优先用当前 message 的，兜底用 session 的（话题会话创建时写入）
+            const replyCtx = this.getReplyContext(message);
             if (replyCtx) {
               Object.assign(opts, replyCtx);
             } else if (firstReply && message.messageId) {
@@ -416,19 +417,20 @@ ${suggestions}`,
 
       // 设置权限审批的消息发送回调（指向当前渠道）
       agent.setSendPrompt(async (text: string) => {
-        await adapter.sendText(message.channelId, text, this.getReplyContext(session));
+        await adapter.sendText(message.channelId, text, this.getReplyContext(message));
       });
 
       // 设置权限审批的交互上下文（支持交互卡片）
       agent.setPermissionContext?.({
         adapter,
         channelId: message.channelId,
-        replyContext: this.getReplyContext(session),
+        replyContext: this.getReplyContext(message),
         interactionRouter: this.interactionRouter,
       });
 
-      // 设置 per-session 权限模式
-      agent.setMode(session.metadata?.permissionMode ?? 'bypass');
+      // 设置 per-session 权限模式（动态默认值：owner → bypass，guest → readonly）
+      const defaultPermMode = session.identity?.role === 'owner' ? 'bypass' : 'readonly';
+      agent.setMode(session.metadata?.permissionMode ?? defaultPermMode);
 
       // 标记会话为处理中（实时持久化，重启后可恢复）
       this.sessionManager.markProcessing(session.id);
@@ -489,6 +491,11 @@ ${suggestions}`,
         if (channelInfo.adapter.sendFile) capParts.push('文件发送');
         if (capParts.length > 0) {
           contextParts.push(`[通道能力] ${capParts.join('、')}`);
+        }
+
+        // 4. 群聊 @ 规则：告知 agent 应该 @ 谁，由 agent 自行在回复中添加
+        if (message.chatType === 'group' && message.peerId) {
+          contextParts.push(`[群聊回复规则] 回复时必须在开头添加 @${message.peerId} 来通知对方`);
         }
 
         const effectiveSystemPrompt = [options?.systemPromptAppend, ...contextParts].filter(Boolean).join('\n') || undefined;
@@ -606,24 +613,24 @@ ${suggestions}`,
 
         // 跨通道仅限 owner
         if (isCrossChannel && session.identity?.role !== 'owner') {
-          await adapter.sendText(message.channelId, `\u274c 跨通道发送仅限管理员`, this.getReplyContext(session));
+          await adapter.sendText(message.channelId, `\u274c 跨通道发送仅限管理员`, this.getReplyContext(message));
           continue;
         }
 
         const resolvedPath = this.resolveFilePath(filePath, absoluteProjectPath);
         if (!fs.existsSync(resolvedPath)) {
           logger.warn(`[${adapter.channelName}] File not found: ${resolvedPath}`);
-          await adapter.sendText(message.channelId, `\u26a0\ufe0f 文件未找到: ${filePath}`, this.getReplyContext(session));
+          await adapter.sendText(message.channelId, `\u26a0\ufe0f 文件未找到: ${filePath}`, this.getReplyContext(message));
           continue;
         }
 
         // 找目标 adapter
         if (!targetInfo) {
-          await adapter.sendText(message.channelId, `\u274c 通道 ${targetLabel} 未启用或不存在`, this.getReplyContext(session));
+          await adapter.sendText(message.channelId, `\u274c 通道 ${targetLabel} 未启用或不存在`, this.getReplyContext(message));
           continue;
         }
         if (!targetInfo.adapter.sendFile) {
-          await adapter.sendText(message.channelId, `\u274c 通道 ${targetLabel} 不支持文件发送`, this.getReplyContext(session));
+          await adapter.sendText(message.channelId, `\u274c 通道 ${targetLabel} 不支持文件发送`, this.getReplyContext(message));
           continue;
         }
 
@@ -635,21 +642,21 @@ ${suggestions}`,
           const ownerPeerId = getOwner(this.config, targetAdapterName);
           targetChannelId = ownerPeerId ? (this.sessionManager.getOwnerChatId(targetChannelType, ownerPeerId) ?? '') : '';
           if (!targetChannelId) {
-            await adapter.sendText(message.channelId, `\u274c 未找到 ${targetLabel} 的私聊会话，请先在该通道发送一条消息`, this.getReplyContext(session));
+            await adapter.sendText(message.channelId, `\u274c 未找到 ${targetLabel} 的私聊会话，请先在该通道发送一条消息`, this.getReplyContext(message));
             continue;
           }
         }
 
         logger.info(`[${adapter.channelName}] Sending file via ${targetInfo.adapter.channelName}: ${resolvedPath}`);
         try {
-          await targetInfo.adapter.sendFile(targetChannelId, resolvedPath, this.getReplyContext(session));
+          await targetInfo.adapter.sendFile(targetChannelId, resolvedPath, this.getReplyContext(message));
           this.eventBus.publish({ type: 'agent:file-sent', sessionId: session.id, filePath: resolvedPath, channel: targetInfo.adapter.channelName });
           if (isCrossChannel) {
-            await adapter.sendText(message.channelId, `\ud83d\udcce 文件已通过 ${targetLabel} 发送`, this.getReplyContext(session));
+            await adapter.sendText(message.channelId, `\ud83d\udcce 文件已通过 ${targetLabel} 发送`, this.getReplyContext(message));
           }
         } catch (error) {
           logger.error(`[${adapter.channelName}] Failed to send file: ${resolvedPath}`, error);
-          await adapter.sendText(message.channelId, `\u274c 文件发送失败: ${filePath}`, this.getReplyContext(session));
+          await adapter.sendText(message.channelId, `\u274c 文件发送失败: ${filePath}`, this.getReplyContext(message));
         }
       }
 
@@ -676,7 +683,7 @@ ${suggestions}`,
         const hint = session.threadId
           ? '\n\n\u26a0\ufe0f 当前处于安全模式（无上下文记忆）。使用 /repair 修复 或 /clear 清空会话'
           : '\n\n\u26a0\ufe0f 当前处于安全模式（无上下文记忆）。使用 /repair 修复 或 /new 新建会话';
-        await adapter.sendText(message.channelId, hint, this.getReplyContext(session));
+        await adapter.sendText(message.channelId, hint, this.getReplyContext(message));
       }
 
       // 清理 activeStreams（正常完成）
@@ -692,7 +699,7 @@ ${suggestions}`,
         const errorSummary = streamResult.errors?.join('; ') || '任务执行失败';
         const rawSubtype = streamResult.subtype || 'agent_error';
         const errorType = prefixErrorType(ERROR_PREFIX.AGENT, rawSubtype);
-        adapter.sendProcessingStatus?.(message.channelId, 'error', session.id, this.getReplyContext(session));
+        adapter.sendProcessingStatus?.(message.channelId, 'error', session.id, this.getReplyContext(message));
 
         this.eventBus.publish({
           type: 'message:error',
@@ -710,7 +717,7 @@ ${suggestions}`,
           const { policy } = channelInfo;
           if (policy.accumulateErrors(chatType, identityRole)) {
             const newCount = await this.sessionManager.recordError(session.id, errorType, errorSummary);
-            await this.checkSafeMode(session, message.channelId, adapter, safeModeThreshold, newCount);
+            await this.checkSafeMode(session, message.channelId, adapter, safeModeThreshold, newCount, message);
           }
         }
 
@@ -724,7 +731,7 @@ ${suggestions}`,
         });
       } else {
         // 真正的成功
-        adapter.sendProcessingStatus?.(message.channelId, interruptReason ? 'interrupted' : 'done', session.id, this.getReplyContext(session));
+        adapter.sendProcessingStatus?.(message.channelId, interruptReason ? 'interrupted' : 'done', session.id, this.getReplyContext(message));
         await this.sessionManager.recordSuccess(session.id);
 
         this.eventBus.publish({
@@ -778,7 +785,7 @@ ${suggestions}`,
 
       // 用户主动中断（新消息打断 或 /stop 命令）时静默，不发送中断/错误提示
       if (!isUserInterrupt) {
-        try { adapter.sendProcessingStatus?.(message.channelId, procStatus, session.id, this.getReplyContext(session)); } catch {}
+        try { adapter.sendProcessingStatus?.(message.channelId, procStatus, session.id, this.getReplyContext(message)); } catch {}
       }
 
       // 用户主动中断时降级日志；其余仍按 error 记录
@@ -831,7 +838,7 @@ ${suggestions}`,
             this.config.projects?.defaultPath || process.cwd(),
             message.threadId
           );
-          sendOpts = this.getReplyContext(session);
+          sendOpts = this.getReplyContext(message);
         } catch {}
         await adapter.sendText(message.channelId, userMessage, sendOpts);
       }
@@ -845,8 +852,8 @@ ${suggestions}`,
     session: Session;
     absoluteProjectPath: string;
   }> {
-    // 话题会话：使用 Channel 预构建的 replyContext
-    const metadata = message.replyContext
+    // 话题会话创建时写入 replyContext（threadId 路由）；主会话不写（避免群聊覆盖）
+    const metadata = (message.threadId && message.replyContext)
       ? { replyContext: message.replyContext }
       : undefined;
 
@@ -859,6 +866,8 @@ ${suggestions}`,
       undefined,
       message.peerId
     );
+
+    // replyContext 不再写入 session.metadata（跟着 message 走，避免群聊多人覆盖）
 
     const absoluteProjectPath = path.isAbsolute(session.projectPath)
       ? session.projectPath

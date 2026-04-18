@@ -269,12 +269,12 @@ async function main() {
           await handler({
             channel: channelType, channelId: chatId, content, images, chatType,
             peerId: peerId || '', peerName, messageId, mentions, threadId,
-            replyContext: rootId ? { replyToMessageId: rootId, replyInThread: true } : undefined,
+            replyContext: rootId ? { replyToMessageId: rootId, replyInThread: !!threadId } : undefined,
           });
         }),
         (channelId, text, replyContext) => inst.channel.sendMessage(channelId, text, {
           replyToMessageId: replyContext?.replyToMessageId,
-          replyInThread: true,
+          replyInThread: replyContext?.replyInThread,
         }),
         inst.adapter,
         channelType
@@ -380,15 +380,14 @@ async function main() {
     const msg = event.message;
     logger.error(`[ChannelHealth] ${sourceChannelName} auth_error: ${msg}`);
 
-    const notified = new Set<string>();  // channelType:ownerId 去重
+    const notified = new Set<string>();  // channelType 去重（同类型只通知一次）
     for (const other of channelInstances) {
       const otherType = other.channelType || other.adapter.channelName;
       if (otherType === sourceChannelType) continue;  // 跳过同类型通道
+      if (notified.has(otherType)) continue;  // 同类型已通知过
       const ownerId = getOwner(config, other.adapter.channelName);
       if (!ownerId) continue;
-      const key = `${otherType}:${ownerId}`;
-      if (notified.has(key)) continue;  // 同类型已通知过此 owner
-      notified.add(key);
+      notified.add(otherType);
       other.adapter.sendText(ownerId, msg).catch(err => {
         logger.error(`[ChannelHealth] Failed to notify ${other.adapter.channelName} owner:`, err);
       });
@@ -456,7 +455,7 @@ async function main() {
       const adapter = cmdHandler.getAdapter(pending.channel);
       if (adapter) {
         const replyContext = pending.rootId
-          ? { replyToMessageId: pending.rootId, replyInThread: true }
+          ? { replyToMessageId: pending.rootId, replyInThread: !!pending.threadId }
           : undefined;
         await adapter.sendText(pending.channelId, '✅ 服务重启成功！', replyContext);
         logger.info(`[Restart] Notification sent via ${pending.channel}`);

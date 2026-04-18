@@ -108,7 +108,7 @@ export interface Config {
 
 export interface SessionMetadata {
   isActive?: boolean;  // 由 Channel 维护，存储在 metadata 中
-  replyContext?: ReplyContext;       // Channel 预构建的回复上下文（渠道无关）
+  replyContext?: ReplyContext;       // 仅话题会话：创建时写入，用于 threadId 路由（不做 per-message 刷新）
   peerId?: string;                  // 私聊时存发送者 ID，用于跨通道文件投递查 channelId
   peerName?: string;                // 私聊时存发送者名称
   channelName?: string;             // 渠道实例名（审计/精确出站路由）
@@ -127,6 +127,7 @@ export interface ReplyContext {
   replyToMessageId?: string;
   mentionUserIds?: string[];
   replyInThread?: boolean;
+  peerId?: string;  // 发送者 ID，出站时兜底 @ 补全用
 }
 
 export interface SessionIdentity {

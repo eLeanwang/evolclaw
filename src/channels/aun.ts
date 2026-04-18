@@ -44,6 +44,11 @@ export class AUNChannel {
     this.traceStream.write(line + '\n');
   }
 
+  /** 判断 channelId 是否为群组 ID（g-xxx.agentid.pub 或 grp_ 前缀） */
+  private isGroupId(id: string): boolean {
+    return id.startsWith('grp_') || (id.startsWith('g-') && id.includes('.'));
+  }
+
   private getShortAid(aid?: string): string | undefined {
     if (!aid) return undefined;
     const trimmed = aid.trim();
@@ -76,14 +81,10 @@ export class AUNChannel {
     return result.replace(/[ \t]+/g, ' ').trim();
   }
 
-  private buildGroupReplyContext(taskId: string | undefined, senderAid: string, text: string): ReplyContext {
+  private buildGroupReplyContext(taskId: string | undefined, senderAid: string): ReplyContext {
     const replyContext: ReplyContext = {};
     if (taskId) replyContext.threadId = taskId;
-    if (this.hasExplicitMention(text, 'all')) {
-      replyContext.mentionUserIds = ['all'];
-    } else {
-      replyContext.mentionUserIds = [senderAid];
-    }
+    replyContext.peerId = senderAid;
     return replyContext;
   }
 
@@ -183,6 +184,18 @@ export class AUNChannel {
     });
 
     // Authenticate
+    // Workaround: SDK 0.3.x _loadIdentityOrRaise doesn't set identity.aid from requested aid,
+    // causing gateway "missing aid" error. Patch to backfill aid on loaded identity.
+    const authFlow = (this.client as any)._auth;
+    if (authFlow && typeof authFlow._loadIdentityOrRaise === 'function') {
+      const origLoad = authFlow._loadIdentityOrRaise.bind(authFlow);
+      authFlow._loadIdentityOrRaise = (aid?: string) => {
+        const identity = origLoad(aid);
+        if (identity && !identity.aid) identity.aid = aid ?? authFlow._aid;
+        return identity;
+      };
+    }
+
     let accessToken: string;
     try {
       logger.info(`[AUN] Authenticating as ${aidName}...`);
@@ -200,7 +213,8 @@ export class AUNChannel {
       // Fallback: try direct token from env/config (legacy)
       accessToken = this.config.accessToken || process.env.AUN_ACCESS_TOKEN || '';
       if (!accessToken) {
-        logger.error(`[AUN] No accessToken fallback available, AUN channel disabled`);
+        logger.error(`[AUN] No accessToken fallback available, scheduling retry`);
+        this.scheduleReconnect();
         return;
       }
       logger.warn(`[AUN] Using accessToken fallback`);
@@ -215,9 +229,23 @@ export class AUNChannel {
       this._aid = this.client.aid ?? undefined;
       this.connected = true;
       this.reconnectAttempt = 0;
+
+      // Workaround: SDK e2ee uses _identity.cert for sender_cert_fingerprint;
+      // if cert is missing, it falls back to public key SPKI fingerprint which
+      // causes peer cert lookup failures. Backfill from keystore if needed.
+      const clientAny = this.client as any;
+      if (clientAny._identity && !clientAny._identity.cert) {
+        const cert = clientAny._keystore?.loadCert?.(aidName);
+        if (cert) {
+          clientAny._identity.cert = cert;
+          logger.info('[AUN] Backfilled identity.cert from keystore for e2ee fingerprint');
+        }
+      }
+
       logger.info(`[AUN] Connected as ${this._aid}`);
     } catch (e) {
       logger.error(`[AUN] Connection failed: ${e}`);
+      this.scheduleReconnect();
       return;
     }
   }
@@ -265,6 +293,11 @@ export class AUNChannel {
     const messageId = msg.message_id ?? '';
     const seq = msg.seq;
 
+    // Extract structured mentions from payload (e.g. payload.mentions: ["evolai.agentid.pub"])
+    const payloadMentions: string[] = Array.isArray((payload as any)?.mentions)
+      ? (payload as any).mentions.filter((m: unknown) => typeof m === 'string')
+      : [];
+
     logger.info(`[AUN][DIAG-GRP] full_msg=${JSON.stringify(msg).substring(0, 500)}`);
 
     if (!groupId || !senderAid) {
@@ -277,8 +310,10 @@ export class AUNChannel {
       return;
     }
 
-    const mentionedSelf = this._aid ? this.hasExplicitMention(text, this._aid) : false;
-    const mentionedAll = this.hasExplicitMention(text, 'all');
+    const mentionedSelf = this._aid
+      ? (this.hasExplicitMention(text, this._aid) || payloadMentions.includes(this._aid))
+      : false;
+    const mentionedAll = this.hasExplicitMention(text, 'all') || payloadMentions.includes('all');
     if (!mentionedSelf && !mentionedAll) {
       this.acknowledgeImmediately(messageId, seq);
       return;
@@ -302,7 +337,7 @@ export class AUNChannel {
       seq,
       taskId,
       mentions,
-      replyContext: this.buildGroupReplyContext(taskId, senderAid, text),
+      replyContext: this.buildGroupReplyContext(taskId, senderAid),
     });
   }
 
@@ -397,19 +432,18 @@ export class AUNChannel {
     }
     this.sentCount.set(channelId, (this.sentCount.get(channelId) || 0) + 1);
 
-    // Render outbound mentions for group sends
-    if (channelId.startsWith('grp_') && context?.mentionUserIds?.length) {
-      const mentionPrefix = context.mentionUserIds.includes('all')
-        ? '@all '
-        : context.mentionUserIds.map(id => `@${id}`).join(' ') + ' ';
-      finalText = mentionPrefix + finalText;
+    // 群聊 @ 兜底：提示词已告知 agent 要 @，但如果 agent 没写，系统自动补上
+    if (this.isGroupId(channelId) && context?.peerId) {
+      if (!finalText.includes(`@${context.peerId}`)) {
+        finalText = `@${context.peerId} ` + finalText;
+      }
     }
 
     const params: Record<string, any> = { payload: { text: finalText }, encrypt: true };
     if (context?.threadId) params.task_id = context.threadId;
 
     try {
-      if (channelId.startsWith('grp_')) {
+      if (this.isGroupId(channelId)) {
         params.group_id = channelId;
         this.trace('OUT', 'group.send', params);
         await this.client.call('group.send', params);
@@ -425,13 +459,9 @@ export class AUNChannel {
   }
 
   acknowledge(messageId: string): void {
-    const seq = this.messageSeqMap.get(messageId);
-    if (seq != null && this.client) {
-      this.client.call('message.ack', { seq }).catch(e => {
-        logger.debug(`[AUN] Ack failed: ${e}`);
-      });
-      this.messageSeqMap.delete(messageId);
-    }
+    // Gateway auto-delivery-ack is sufficient; skip explicit message.ack RPC
+    // to avoid duplicate "已送达" at the sender CLI
+    this.messageSeqMap.delete(messageId);
   }
 
   sendProcessingStatus(channelId: string, status: 'start' | 'done' | 'interrupted' | 'error' | 'timeout', sessionId: string, context?: ReplyContext): void {
@@ -447,11 +477,11 @@ export class AUNChannel {
 
     const params: Record<string, any> = {
       payload,
-      encrypt: true, persist: false,
+      encrypt: true,
     };
     if (context?.threadId) params.task_id = context.threadId;
 
-    if (channelId.startsWith('grp_')) {
+    if (this.isGroupId(channelId)) {
       params.group_id = channelId;
       this.trace('OUT', 'group.send.status', params);
       this.client.call('group.send', params).catch(e => {
@@ -479,7 +509,7 @@ export class AUNChannel {
 
     const sendParams = {
       to: channelId, payload: payloadObj,
-      encrypt: true, persist: false,
+      encrypt: true,
     };
     this.trace('OUT', 'message.send.custom', sendParams);
     this.client.call('message.send', sendParams).catch(e => {
@@ -616,7 +646,7 @@ export class AUNChannelPlugin implements ChannelPlugin {
         canCreateSession: (chatType: string, identity: string) => true,
         canDeleteSession: (chatType: string, identity: string) => true,
         canImportCliSession: (chatType: string, identity: string) => identity === 'owner',
-        messagePrefix: () => '',
+        messagePrefix: (chatType: string, peerName?: string) => (chatType === 'group' && peerName) ? `[${peerName}] ` : '',
         showMiddleResult: (chatType: string, identity: string) => {
           const mode = inst.showActivities ?? config.showActivities ?? 'all';
           if (mode === 'none') return false;

@@ -905,6 +905,11 @@ export class SessionManager {
     return { ...this.rowToSession(target), metadata, updatedAt: Date.now() };
   }
 
+  updateMetadata(sessionId: string, metadata: Record<string, any>): void {
+    this.db.prepare(`UPDATE sessions SET metadata = ?, updated_at = ? WHERE id = ?`)
+      .run(JSON.stringify(metadata), Date.now(), sessionId);
+  }
+
   async renameSession(sessionId: string, newName: string): Promise<boolean> {
     const result = this.db.prepare(`
       UPDATE sessions SET name = ?, updated_at = ? WHERE id = ?

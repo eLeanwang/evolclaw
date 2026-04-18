@@ -91,7 +91,8 @@ export class MessageBridge {
         // 3. session 解析（使用 Channel 层填充的 chatType）
         const chatType = msg.chatType || 'private';
         const metadata: Record<string, any> = {};
-        if (msg.replyContext) metadata.replyContext = msg.replyContext;
+        // 话题会话创建时写入 replyContext（用于 threadId 路由）；主会话不写（避免群聊覆盖）
+        if (msg.threadId && msg.replyContext) metadata.replyContext = msg.replyContext;
         // 写入实例名（审计 + 精确出站路由）
         metadata.channelName = channelName;
         if (chatType === 'private' && msg.peerId) {
@@ -166,7 +167,7 @@ export class MessageBridge {
     if (parsed.type === 'menu.query') {
       const identity = this.sessionManager.resolveIdentity(channel, msg.peerId);
       const isAdmin = identity.role === 'owner';
-      const items = this.cmdHandler.getMenuItems(isAdmin);
+      const items = this.cmdHandler.getMenuItems(isAdmin, msg.chatType || 'private');
       const response = JSON.stringify({ type: 'menu.response', items });
 
       if (adapter?.sendCustomPayload) {

@@ -372,16 +372,27 @@ export class CommandHandler {
    * 返回结构化命令菜单（供 menu.query 使用）
    * admin 看到全部命令分组，guest 仅看到用户级命令
    */
-  getMenuItems(isAdmin: boolean): { group: string; commands: { cmd: string; args?: string; label: string }[] }[] {
+  getMenuItems(isAdmin: boolean, chatType: string = 'private'): { group: string; commands: { cmd: string; args?: string; label: string }[] }[] {
     const items: { group: string; commands: { cmd: string; args?: string; label: string }[] }[] = [];
+
+    if (!isAdmin && chatType === 'group') {
+      return [
+        {
+          group: '其他',
+          commands: [
+            { cmd: '/status', label: '显示会话状态' },
+            { cmd: '/help', label: '显示帮助信息' },
+          ]
+        }
+      ];
+    }
 
     if (isAdmin) {
       items.push({
         group: '项目管理',
         commands: [
           { cmd: '/pwd', label: '显示当前项目路径' },
-          { cmd: '/plist', label: '列出所有配置的项目' },
-          { cmd: '/p', args: '<name|path>', label: '切换项目' },
+          { cmd: '/p', args: '[name|path]', label: '列出或切换项目' },
           { cmd: '/bind', args: '<path>', label: '绑定新项目目录' },
         ]
       });
@@ -390,15 +401,12 @@ export class CommandHandler {
     items.push({
       group: '会话管理',
       commands: [
-        { cmd: '/new', args: '[name]', label: '创建新会话' },
-        { cmd: '/slist', label: '列出当前项目的所有会话' },
-        { cmd: '/slist', args: 'cli', label: '列出 CLI 会话（未导入的）' },
-        { cmd: '/s', args: '<name|index|uuid>', label: '切换到指定会话' },
+        { cmd: '/new', args: '[name]', label: '创建新会话（清空历史请用此命令）' },
+        { cmd: '/s', args: '[cli|name|index|uuid]', label: '列出或切换会话（cli 查看未导入的 CLI 会话）' },
         { cmd: '/name', args: '<name>', label: '重命名当前会话' },
         { cmd: '/del', args: '<name>', label: '删除指定会话' },
         ...(isAdmin ? [
           { cmd: '/fork', args: '[name]', label: '分支当前会话' },
-          { cmd: '/clear', label: '清空会话对话历史' },
           { cmd: '/compact', label: '压缩会话上下文' },
         ] : []),
       ]
@@ -427,9 +435,7 @@ export class CommandHandler {
           { cmd: '/status', label: '显示会话状态' },
           { cmd: '/stop', label: '中断当前任务' },
           { cmd: '/restart', label: '重启服务' },
-          { cmd: '/repair', label: '检查并修复会话' },
-          { cmd: '/safe', label: '进入安全模式' },
-          { cmd: '/send', args: '[渠道] <path>', label: '发送项目内文件' },
+          { cmd: '/send', args: '[channel] <path>', label: '发送项目内文件' },
           { cmd: '/check', args: '[rty <channel>]', label: '检查渠道状态或重连指定渠道' },
         ]
       });
@@ -502,14 +508,18 @@ export class CommandHandler {
 
     // 权限检查：区分用户级命令和管理级命令
     const isAdmin = identity.role === 'owner';
+    const activeChatType = activeSession?.chatType || 'private';
 
     if (normalizedContent.startsWith('/')) {
-      const userCommands = ['/slist', '/new', '/session', '/rename', '/name', '/status', '/help', '/del', '/s '];
+      const guestGroupCommands = ['/status', '/help'];
+      const userCommands = activeChatType === 'group' && !isAdmin
+        ? guestGroupCommands
+        : ['/slist', '/new', '/session', '/rename', '/name', '/status', '/help', '/del', '/s '];
       const isUserCommand = userCommands.some(cmd =>
         normalizedContent === cmd.trimEnd() || normalizedContent.startsWith(cmd)
       );
       if (!isUserCommand && !isAdmin) {
-        return '❌ 无权限：此命令仅限管理员使用';
+        return '❌ 无权限：当前群聊仅支持 /status 和 /help';
       }
     }
 
@@ -554,16 +564,25 @@ export class CommandHandler {
 
     // /help 命令不需要会话
     if (normalizedContent === '/help') {
+      if (!isAdmin && activeChatType === 'group') {
+        const lines = [
+          '可用命令：',
+          '',
+          '其他：',
+          '  /status - 显示会话状态',
+          '  /help - 显示此帮助信息',
+        ];
+        return lines.join('\n');
+      }
+
       if (!isAdmin) {
         const lines = [
           '可用命令：',
           '',
           '🔄 会话管理：',
-          '  /new [名称] - 创建新会话（可选命名）',
-          '  /slist - 列出当前项目的所有会话',
-          '  /slist cli - 列出 CLI 会话（未导入的）',
-          '  /s, /session <名称|序号|uuid> - 切换到指定会话',
-          '  /name, /rename <新名称> - 重命名当前会话',
+          '  /new [名称] - 创建新会话（清空历史请用此命令，可选命名）',
+          '  /s [cli|名称|序号|uuid] - 列出或切换会话（cli 查看未导入的 CLI 会话）',
+          '  /name <新名称> - 重命名当前会话',
           '  /del <名称> - 删除指定会话（仅解绑，不删除文件）',
           '  /status - 显示会话状态',
           '',
@@ -578,18 +597,15 @@ export class CommandHandler {
         '',
         '📁 项目管理：',
         '  /pwd - 显示当前项目路径',
-        '  /plist - 列出所有配置的项目',
-        '  /p, /project <name|path> - 切换项目',
+        '  /p [name|path] - 列出或切换项目',
         '  /bind <path> - 绑定新项目目录',
         '',
         '🔄 会话管理：',
-        '  /new [名称] - 创建新会话（可选命名）',
-        '  /slist - 列出当前项目的所有会话',
-        '  /s, /session <名称> - 切换到指定会话',
-        '  /name, /rename <新名称> - 重命名当前会话',
+        '  /new [名称] - 创建新会话（清空历史请用此命令，可选命名）',
+        '  /s [cli|名称|序号|uuid] - 列出或切换会话（cli 查看未导入的 CLI 会话）',
+        '  /name <新名称> - 重命名当前会话',
         '  /del <名称> - 删除指定会话（仅解绑，不删除文件）',
         '  /fork [名称] - 分支当前会话（从当前对话点创建分支）',
-        '  /clear - 清空当前会话的对话历史',
         '  /compact - 压缩会话上下文（减少 token 用量）',
         '',
         '🤖 Agent 与模型：',
@@ -606,9 +622,7 @@ export class CommandHandler {
         '  /status - 显示会话状态',
         '  /stop - 中断当前任务',
         '  /restart - 重启服务',
-        '  /repair - 检查并修复会话',
-        '  /safe - 进入安全模式',
-        '  /send [渠道] <路径> - 发送项目内文件',
+        '  /send [channel] <path> - 发送项目内文件',
         '',
         '❓ 帮助：',
         '  /help - 显示此帮助信息',
@@ -631,7 +645,8 @@ export class CommandHandler {
         if (!hasPermissionController(permAgent)) {
           return '❌ 权限控制不可用';
         }
-        const currentMode = permSession.metadata?.permissionMode ?? 'bypass';
+        const defaultPermMode = identity.role === 'owner' ? 'bypass' : 'readonly';
+        const currentMode = permSession.metadata?.permissionMode ?? defaultPermMode;
         const modes = permAgent.listModes();
 
         // 尝试发送交互卡片
@@ -1305,8 +1320,8 @@ export class CommandHandler {
         lines.push('⚠️ 当前处于安全模式（历史上下文已禁用）');
         lines.push('');
         lines.push('退出方式：');
-        lines.push('1. /repair - 检查并修复会话（推荐，保留历史）');
-        lines.push('2. /new [名称] - 创建新会话（清空历史）');
+        lines.push('1. /new [名称] - 创建新会话（清空历史）');
+        lines.push('2. 联系管理员使用 /repair 检查并修复会话');
       }
 
       if (health.lastError) {
@@ -1356,7 +1371,7 @@ export class CommandHandler {
         await agent.closeSession(session.id);
       }
 
-      return `✓ 已创建新会话${sessionName ? `: ${sessionName}` : ''}\n  之前的对话历史已保留，可通过 /slist 查看`;
+      return `✓ 已创建新会话${sessionName ? `: ${sessionName}` : ''}\n  之前的对话历史已保留，可通过 /s 查看`;
     }
 
     // /check 命令：检查渠道状态 / 手动重连指定渠道
@@ -1419,7 +1434,6 @@ export class CommandHandler {
         ? this.statsCollector.getSnapshot().uptimeMs
         : process.uptime() * 1000;
       lines.push(`  运行时间: ${this.formatUptime(uptimeMs)}`);
-      lines.push(`  当前安全模式会话: ${this.sessionManager.getSafeModeSessionCount()}`);
 
       // 近 1 小时统计
       if (this.statsCollector) {
@@ -1439,7 +1453,6 @@ export class CommandHandler {
           lines.push(`  工具失败: ${h.toolErrors} (${toolBreakdown})`);
         }
         lines.push(`  被中断: ${h.interrupts}`);
-        lines.push(`  进入安全模式: ${h.safeModeEntries}`);
         if (h.completed > 0) {
           lines.push(`  平均响应耗时: ${(h.avgResponseMs / 1000).toFixed(1)}s`);
         }
@@ -1792,7 +1805,7 @@ export class CommandHandler {
       } else {
         projectPath = this.projects[arg];
         if (!projectPath) {
-          return `❌ 项目 "${arg}" 不存在\n提示: 使用 /plist 查看可用项目`;
+          return `❌ 项目 "${arg}" 不存在\n提示: 使用 /p 查看可用项目`;
         }
         projectName = arg;
       }
@@ -1917,7 +1930,7 @@ export class CommandHandler {
 请先执行以下操作之一：
 1. 发送任意消息 - 自动创建新会话
 2. /new [名称] - 创建命名会话
-3. /project <项目> - 切换到指定项目`;
+3. /p <项目> - 切换到指定项目`;
       }
 
       const showCliOnly = normalizedContent === '/slist cli';
@@ -2124,13 +2137,18 @@ export class CommandHandler {
       }
 
       lines.push('使用 /s <序号、name或8位uuid> 切换会话');
-      lines.push('使用 /slist cli 查看 CLI 会话');
+      lines.push('使用 /s cli 查看 CLI 会话');
       return lines.join('\n');
     }
 
     // /session（无参数）：直接复用 /slist 逻辑（含卡片交互）
     if (normalizedContent === '/session') {
       return this.handle('/slist', channel, channelId, undefined, userId, threadId);
+    }
+
+    // /session cli（= /s cli）：列出未导入的 CLI 会话
+    if (normalizedContent === '/session cli') {
+      return this.handle('/slist cli', channel, channelId, undefined, userId, threadId);
     }
 
     // /session 或 /s 命令：切换会话
@@ -2154,7 +2172,7 @@ export class CommandHandler {
         if (idx >= 1 && idx <= visibleSessions.length) {
           targetSession = visibleSessions[idx - 1];
         } else {
-          return `❌ 序号超出范围 (1-${visibleSessions.length})\n使用 /slist 查看可用会话`;
+          return `❌ 序号超出范围 (1-${visibleSessions.length})\n使用 /s 查看可用会话`;
         }
       }
 
@@ -2185,7 +2203,7 @@ export class CommandHandler {
       }
 
       if (!targetSession) {
-        return `❌ 会话不存在: ${sessionName}\n使用 /slist 查看可用会话`;
+        return `❌ 会话不存在: ${sessionName}\n使用 /s 查看可用会话`;
       }
 
       const lastInput = targetSession.agentSessionId
@@ -2283,7 +2301,7 @@ export class CommandHandler {
         if (idx >= 1 && idx <= visibleSessions.length) {
           targetSession = visibleSessions[idx - 1];
         } else {
-          return `❌ 序号超出范围 (1-${visibleSessions.length})\n使用 /slist 查看可用会话`;
+          return `❌ 序号超出范围 (1-${visibleSessions.length})\n使用 /s 查看可用会话`;
         }
       }
 
@@ -2292,7 +2310,7 @@ export class CommandHandler {
       }
 
       if (!targetSession) {
-        return `❌ 会话不存在: ${sessionName}\n使用 /slist 查看可用会话`;
+        return `❌ 会话不存在: ${sessionName}\n使用 /s 查看可用会话`;
       }
 
       if (targetSession.id === session.id) {
@@ -2336,7 +2354,7 @@ export class CommandHandler {
 
         this.eventBus.publish({ type: 'session:forked', sessionId: newSession.id, sourceSessionId: session.id, name: forkName });
 
-        return `✅ 会话已分支: ${newSession.name}\n新会话已激活，可以继续对话\n\n使用 /slist 查看所有会话，/s <名称> 切换回原会话`;
+        return `✅ 会话已分支: ${newSession.name}\n新会话已激活，可以继续对话\n\n使用 /s 查看所有会话，/s <名称> 切换回原会话`;
       } catch (error) {
         logger.error('[CommandHandler] Fork session failed:', error);
         return `❌ 会话分支失败: ${error instanceof Error ? error.message : '未知错误'}`;
