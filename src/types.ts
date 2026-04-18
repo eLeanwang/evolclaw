@@ -51,6 +51,23 @@ export interface AunChannelInstanceConfig extends AunChannelConfig {
   name: string;  // required in array form
 }
 
+export interface DingtalkChannelConfig {
+  name?: string;
+  enabled?: boolean;
+  clientId: string;
+  clientSecret: string;
+  owner?: string;
+  flushDelay?: number;
+  debounce?: number;
+  showActivities?: 'all' | 'dm-only' | 'owner-dm-only' | 'none';
+  requireMention?: boolean;       // default true — group chats require @mention
+  freeResponseChats?: string[];   // conversationId whitelist (skip @mention gate)
+}
+
+export interface DingtalkChannelInstanceConfig extends DingtalkChannelConfig {
+  name: string;
+}
+
 export interface Config {
   agents?: {
     anthropic?: {
@@ -85,6 +102,7 @@ export interface Config {
     feishu?: FeishuChannelConfig | FeishuChannelInstanceConfig[];
     wechat?: WechatChannelConfig | WechatChannelInstanceConfig[];
     aun?: AunChannelConfig | AunChannelInstanceConfig[];
+    dingtalk?: DingtalkChannelConfig | DingtalkChannelInstanceConfig[];
   };
   projects?: {
     defaultPath: string;
