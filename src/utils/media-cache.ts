@@ -28,6 +28,8 @@ const ALLOWED_CDN_HOSTS = new Set([
   'novac2c.cdn.weixin.qq.com',
   'open.feishu.cn',
   'internal-api-lark-file.feishu.cn',
+  'oapi.dingtalk.com',
+  'api.dingtalk.com',
 ]);
 
 /** 私有 IP 段正则（IPv4） */

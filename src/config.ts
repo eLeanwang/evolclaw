@@ -234,7 +234,7 @@ export function saveConfig(config: Config, configPath: string = resolvePaths().c
 
 // ── Channel instance normalization ──
 
-export const channelTypes = ['feishu', 'wechat', 'aun'] as const;
+export const channelTypes = ['feishu', 'wechat', 'aun', 'dingtalk'] as const;
 
 /**
  * Normalize a channel config value (single object, array, or undefined) into an array
@@ -378,6 +378,18 @@ function validateConfig(config: any): asserts config is Config {
     if ((inst as any).enabled && !(inst as any).token) {
       const label = wechatInstances.length > 1 ? ` [${inst.name}]` : '';
       logger.warn(`⚠ WeChat${label} enabled but token not configured (WeChat channel will be disabled)`);
+    }
+  }
+
+  // DingTalk 配置可选，但如果配置了就需要 clientId + clientSecret
+  const dingtalkInstances = normalizeChannelInstances(config.channels?.dingtalk, 'dingtalk');
+  for (const inst of dingtalkInstances) {
+    if ((inst as any).enabled === false) continue;
+    const label = dingtalkInstances.length > 1 ? ` [${inst.name}]` : '';
+    const hasClientId = !!(inst as any).clientId && !(inst as any).clientId.includes('your-');
+    const hasClientSecret = !!(inst as any).clientSecret && !(inst as any).clientSecret.includes('your-');
+    if (hasClientId !== hasClientSecret) {
+      logger.warn(`⚠ DingTalk${label} clientId/clientSecret incomplete (DingTalk channel will be disabled)`);
     }
   }
 }
