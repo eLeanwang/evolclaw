@@ -34,7 +34,7 @@ export default defineConfig({
     environment: 'node',
     globalSetup: ['./tests/global-setup.ts'],
     setupFiles: ['./tests/setup.ts'],
-    exclude: ['**/node_modules/**', '**/dist/**', 'aun/**', 'projects/hermes-agent/**/*.test.mjs'],
+    exclude: ['**/node_modules/**', '**/dist/**', 'aun/**', 'projects/**'],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json', 'html'],
