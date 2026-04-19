@@ -9,6 +9,8 @@ import { GeminiAgentPlugin } from './agents/gemini-runner.js';
 import { FeishuChannelPlugin } from './channels/feishu.js';
 import { WechatChannelPlugin } from './channels/wechat.js';
 import { AUNChannelPlugin } from './channels/aun.js';
+import { DingtalkChannelPlugin } from './channels/dingtalk.js';
+import { QQBotChannelPlugin } from './channels/qqbot.js';
 import { MessageProcessor } from './core/message/message-processor.js';
 import { MessageQueue } from './core/message/message-queue.js';
 import { MessageBridge } from './core/message/message-bridge.js';
@@ -53,6 +55,8 @@ async function main() {
 
   // 加载配置
   const config = loadConfig();
+
+  const paths = resolvePaths();
 
   // 配置完整性校验
   const integrity = validateConfigIntegrity(config);
@@ -141,6 +145,8 @@ async function main() {
   channelLoader.register(new FeishuChannelPlugin());
   channelLoader.register(new WechatChannelPlugin());
   channelLoader.register(new AUNChannelPlugin());
+  channelLoader.register(new DingtalkChannelPlugin());
+  channelLoader.register(new QQBotChannelPlugin());
 
   const channelInstances = await channelLoader.createAll(config);
   logger.info(`✓ Created ${channelInstances.length} channel instance(s)`);
@@ -324,6 +330,46 @@ async function main() {
           });
         }),
         (channelId, text, replyContext) => inst.channel.sendMessage(channelId, text, replyContext),
+        inst.adapter,
+        channelType
+      );
+    }
+
+    if (channelType === 'dingtalk') {
+      msgBridge.register(inst.adapter.channelName,
+        (handler) => inst.channel.onMessage(async (event: any) => {
+          handler({
+            channel: channelType,
+            channelId: event.channelId,
+            content: event.content,
+            images: event.images,
+            chatType: event.chatType || 'private',
+            peerId: event.peerId || '',
+            peerName: event.peerName,
+            messageId: event.messageId,
+          });
+        }),
+        (channelId, text) => inst.channel.sendMessage(channelId, text),
+        inst.adapter,
+        channelType
+      );
+    }
+
+    if (channelType === 'qqbot') {
+      msgBridge.register(inst.adapter.channelName,
+        (handler) => inst.channel.onMessage(async (event: any) => {
+          handler({
+            channel: channelType,
+            channelId: event.channelId,
+            content: event.content,
+            images: event.images,
+            chatType: event.chatType || 'private',
+            peerId: event.peerId || '',
+            peerName: event.peerName,
+            messageId: event.messageId,
+          });
+        }),
+        (channelId, text) => inst.channel.sendMessage(channelId, text),
         inst.adapter,
         channelType
       );
