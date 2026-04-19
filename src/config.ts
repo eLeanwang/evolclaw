@@ -234,7 +234,7 @@ export function saveConfig(config: Config, configPath: string = resolvePaths().c
 
 // ── Channel instance normalization ──
 
-export const channelTypes = ['feishu', 'wechat', 'aun', 'dingtalk'] as const;
+export const channelTypes = ['feishu', 'wechat', 'aun', 'dingtalk', 'qqbot'] as const;
 
 /**
  * Normalize a channel config value (single object, array, or undefined) into an array
@@ -390,6 +390,18 @@ function validateConfig(config: any): asserts config is Config {
     const hasClientSecret = !!(inst as any).clientSecret && !(inst as any).clientSecret.includes('your-');
     if (hasClientId !== hasClientSecret) {
       logger.warn(`⚠ DingTalk${label} clientId/clientSecret incomplete (DingTalk channel will be disabled)`);
+    }
+  }
+
+  // QQBot 配置可选，但如果配置了就需要 appId + clientSecret
+  const qqbotInstances = normalizeChannelInstances(config.channels?.qqbot, 'qqbot');
+  for (const inst of qqbotInstances) {
+    if ((inst as any).enabled === false) continue;
+    const label = qqbotInstances.length > 1 ? ` [${inst.name}]` : '';
+    const hasAppId = !!(inst as any).appId && !(inst as any).appId.includes('your-');
+    const hasSecret = !!(inst as any).clientSecret && !(inst as any).clientSecret.includes('your-');
+    if (hasAppId !== hasSecret) {
+      logger.warn(`⚠ QQBot${label} appId/clientSecret incomplete (QQBot channel will be disabled)`);
     }
   }
 }
