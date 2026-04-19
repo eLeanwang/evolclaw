@@ -64,3 +64,64 @@ describe('QQBotChannel', () => {
     });
   });
 });
+
+describe('QQBotChannelPlugin', () => {
+  describe('isEnabled', () => {
+    it('should return false when no qqbot config', async () => {
+      const { QQBotChannelPlugin } = await import('../../src/channels/qqbot.js');
+      const plugin = new QQBotChannelPlugin();
+      expect(plugin.isEnabled({ projects: { defaultPath: '/tmp', autoCreate: false } } as any)).toBe(false);
+    });
+
+    it('should return true with valid credentials', async () => {
+      const { QQBotChannelPlugin } = await import('../../src/channels/qqbot.js');
+      const plugin = new QQBotChannelPlugin();
+      const config = {
+        channels: { qqbot: { appId: 'abc', clientSecret: 'xyz' } },
+        projects: { defaultPath: '/tmp', autoCreate: false },
+      };
+      expect(plugin.isEnabled(config as any)).toBe(true);
+    });
+
+    it('should return false when explicitly disabled', async () => {
+      const { QQBotChannelPlugin } = await import('../../src/channels/qqbot.js');
+      const plugin = new QQBotChannelPlugin();
+      const config = {
+        channels: { qqbot: { appId: 'abc', clientSecret: 'xyz', enabled: false } },
+        projects: { defaultPath: '/tmp', autoCreate: false },
+      };
+      expect(plugin.isEnabled(config as any)).toBe(false);
+    });
+
+    it('should return true with array form if any instance valid', async () => {
+      const { QQBotChannelPlugin } = await import('../../src/channels/qqbot.js');
+      const plugin = new QQBotChannelPlugin();
+      const config = {
+        channels: { qqbot: [
+          { name: 'qq1', appId: '', clientSecret: '' },
+          { name: 'qq2', appId: 'abc', clientSecret: 'xyz' },
+        ] },
+        projects: { defaultPath: '/tmp', autoCreate: false },
+      };
+      expect(plugin.isEnabled(config as any)).toBe(true);
+    });
+
+    it('should return false with placeholder credentials', async () => {
+      const { QQBotChannelPlugin } = await import('../../src/channels/qqbot.js');
+      const plugin = new QQBotChannelPlugin();
+      const config = {
+        channels: { qqbot: { appId: 'your-app-id', clientSecret: 'your-secret' } },
+        projects: { defaultPath: '/tmp', autoCreate: false },
+      };
+      expect(plugin.isEnabled(config as any)).toBe(false);
+    });
+  });
+
+  describe('name', () => {
+    it('should be qqbot', async () => {
+      const { QQBotChannelPlugin } = await import('../../src/channels/qqbot.js');
+      const plugin = new QQBotChannelPlugin();
+      expect(plugin.name).toBe('qqbot');
+    });
+  });
+});

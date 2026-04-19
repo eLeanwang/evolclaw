@@ -1,5 +1,8 @@
 import { logger } from '../utils/logger.js';
 import { markdownToPlainText } from '../utils/format.js';
+import type { ChannelPlugin, ChannelInstance } from '../core/channel-loader.js';
+import type { Config, QQBotChannelConfig } from '../types.js';
+import { normalizeChannelInstances } from '../config.js';
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -349,5 +352,102 @@ export class QQBotChannel {
     } catch (error: any) {
       logger.error(`[QQBot] sendFile failed for ${chatId}:`, error?.message || error);
     }
+  }
+}
+
+// ── Plugin ─────────────────────────────────────────────────────────────────────
+
+function isValidCredential(value: string | undefined): boolean {
+  return !!value && !value.includes('your-') && !value.includes('placeholder');
+}
+
+export class QQBotChannelPlugin implements ChannelPlugin {
+  readonly name = 'qqbot';
+
+  isEnabled(config: Config): boolean {
+    const raw = config.channels?.qqbot;
+    if (!raw) return false;
+    if (Array.isArray(raw)) {
+      return raw.some(inst => inst.enabled !== false && isValidCredential(inst.appId) && isValidCredential(inst.clientSecret));
+    }
+    if (raw.enabled === false) return false;
+    return isValidCredential(raw.appId) && isValidCredential(raw.clientSecret);
+  }
+
+  async createChannels(config: Config): Promise<ChannelInstance[]> {
+    const instances = normalizeChannelInstances<QQBotChannelConfig>(
+      config.channels?.qqbot,
+      'qqbot',
+    );
+
+    const result: ChannelInstance[] = [];
+    for (const inst of instances) {
+      if (inst.enabled === false) continue;
+      if (!isValidCredential(inst.appId) || !isValidCredential(inst.clientSecret)) continue;
+
+      const channel = new QQBotChannel({
+        appId: inst.appId,
+        clientSecret: inst.clientSecret,
+      });
+
+      const adapter = {
+        channelName: inst.name || 'qqbot',
+        sendText: (id: string, text: string) => channel.sendMessage(id, text),
+        sendFile: (id: string, filePath: string) => channel.sendFile(id, filePath),
+        sendImage: (id: string, png: Buffer) => channel.sendImage(id, png),
+      };
+
+      const policy = {
+        canSwitchProject: (_chatType: string, identity: string) => identity === 'owner',
+        canListProjects: (_chatType: string, identity: string) => identity === 'owner',
+        canCreateSession: () => true,
+        canDeleteSession: () => true,
+        canImportCliSession: (_chatType: string, identity: string) => identity === 'owner',
+        messagePrefix: (chatType: string, peerName?: string) => (chatType === 'group' && peerName) ? `[${peerName}] ` : '',
+        showMiddleResult: (chatType: string, identity: string) => {
+          const mode = inst.showActivities ?? config.showActivities ?? 'all';
+          if (mode === 'none') return false;
+          if (mode === 'dm-only') return chatType === 'private';
+          if (mode === 'owner-dm-only') return chatType === 'private' && identity === 'owner';
+          return true;
+        },
+        showIdleMonitor: (chatType: string, identity: string) => {
+          const mode = inst.showActivities ?? config.showActivities ?? 'all';
+          if (mode === 'none') return false;
+          if (mode === 'dm-only') return chatType === 'private';
+          if (mode === 'owner-dm-only') return chatType === 'private' && identity === 'owner';
+          return true;
+        },
+        accumulateErrors: () => true,
+      };
+
+      const options = {
+        fileMarkerPattern: /\[SEND_FILE:(?:(\w+):)?([^\]]+)\]/g,
+        supportsImages: true,
+        flushDelay: inst.flushDelay,
+      };
+
+      result.push({
+        channelType: 'qqbot',
+        adapter,
+        channel,
+        policy,
+        options,
+        connect: () => channel.connect(),
+        disconnect: () => channel.disconnect(),
+        onProjectPathRequest: () =>
+          Promise.resolve(config.projects?.defaultPath || process.cwd()),
+      });
+    }
+
+    return result;
+  }
+
+  async createChannel(config: Config): Promise<ChannelInstance> {
+    const instances = await this.createChannels(config);
+    if (instances.length === 0) {
+      throw new Error('QQBot config missing or invalid');
+    }
+    return instances[0];
   }
 }
