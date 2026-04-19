@@ -26,8 +26,11 @@
     "@eleans/aun-core-node": "^0.3.0",
     "@larksuiteoapi/node-sdk": "^1.59.0",
     "@openai/codex-sdk": "^0.118.0",
+    "@types/form-data": "^2.2.1",
     "dingtalk-stream": "^2.1.6-beta.1",
+    "form-data": "^4.0.5",
     "image-type": "^6.0.0",
+    "pure-qqbot": "^2.0.0",
     "qrcode-terminal": "^0.12.0"
   },
   "devDependencies": {

@@ -68,6 +68,21 @@ export interface DingtalkChannelInstanceConfig extends DingtalkChannelConfig {
   name: string;
 }
 
+export interface QQBotChannelConfig {
+  name?: string;
+  enabled?: boolean;
+  appId: string;
+  clientSecret: string;
+  owner?: string;
+  flushDelay?: number;
+  debounce?: number;
+  showActivities?: 'all' | 'dm-only' | 'owner-dm-only' | 'none';
+}
+
+export interface QQBotChannelInstanceConfig extends QQBotChannelConfig {
+  name: string;
+}
+
 export interface Config {
   agents?: {
     anthropic?: {
@@ -103,6 +118,7 @@ export interface Config {
     wechat?: WechatChannelConfig | WechatChannelInstanceConfig[];
     aun?: AunChannelConfig | AunChannelInstanceConfig[];
     dingtalk?: DingtalkChannelConfig | DingtalkChannelInstanceConfig[];
+    qqbot?: QQBotChannelConfig | QQBotChannelInstanceConfig[];
   };
   projects?: {
     defaultPath: string;
@@ -124,6 +140,15 @@ export interface Config {
   showActivities?: 'all' | 'dm-only' | 'owner-dm-only' | 'none';  // 中间输出显示范围（工具活动+流式文本），默认 'all'
 }
 
+/** 错误字典规则 — 按数组顺序匹配，首条命中即决定行为 */
+export interface ErrorRule {
+  id: string;                              // 唯一标识，用于日志追踪
+  match: string;                           // 字符串包含匹配（大小写不敏感）
+  action: 'retry' | 'stop' | 'ignore';    // retry=可重试, stop=不可重试, ignore=静默忽略
+  type?: string;                           // ErrorType 枚举值（可选，省略时按 action 推断）
+  message?: string;                        // 用户提示（可选，覆盖默认消息）
+}
+
 export interface SessionMetadata {
   isActive?: boolean;  // 由 Channel 维护，存储在 metadata 中
   replyContext?: ReplyContext;       // 仅话题会话：创建时写入，用于 threadId 路由（不做 per-message 刷新）
@@ -135,6 +160,7 @@ export interface SessionMetadata {
     gemini?: string;
   };
   permissionMode?: string;  // 权限模式（per-session）: auto | bypass | request | edit | plan | noask
+  resumeAt?: string;  // /rewind chat 标记的回退点（assistant message uuid）
 }
 
 export interface ReplyContext {
