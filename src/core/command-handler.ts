@@ -8,7 +8,7 @@ import type { StatsCollector } from '../utils/stats-collector.js';
 import { PermissionGateway, type PermissionDecision } from './permission.js';
 import { InteractionRouter } from './interaction-router.js';
 import { MessageQueue } from './message/message-queue.js';
-import { saveConfig, resolvePaths, getPackageRoot, getOwner } from '../config.js';
+import { saveConfig, resolvePaths, getPackageRoot, getOwner, loadMenus } from '../config.js';
 import { logger } from '../utils/logger.js';
 import crypto from 'crypto';
 import path from 'path';
@@ -18,6 +18,19 @@ import os from 'os';
 const allEfforts = ['low', 'medium', 'high', 'max'] as const;
 type Effort = typeof allEfforts[number];
 const nonMaxEfforts = allEfforts.filter(e => e !== 'max') as readonly Effort[];
+
+// ── Numbered menu pending selection state ──
+interface PendingSelection {
+  type: 'model' | 'effort';
+  items: string[];
+  createdAt: number;
+  channel: string;
+  channelId: string;
+  threadId?: string;
+}
+
+const PENDING_SELECTION_EXPIRY_MS = 60_000;
+
 
 function getAvailableEfforts(agent: AgentRunnerFull, model: string): readonly Effort[] {
   if (agent.name === 'claude') {
@@ -149,6 +162,7 @@ export class CommandHandler {
   private permissionGateway?: PermissionGateway;
   private interactionRouter?: InteractionRouter;
   private statsCollector?: StatsCollector;
+  private pendingSelections = new Map<string, PendingSelection>();
   private agentMap: Map<string, AgentRunnerFull>;
   private defaultAgentId: string;
 
@@ -214,6 +228,43 @@ export class CommandHandler {
   /** 从 session 提取渠道预构建的回复上下文 */
   private getReplyContext(session: Session): import('../types.js').ReplyContext | undefined {
     return session.metadata?.replyContext;
+  }
+
+
+  /** 生成 pending selection 的 key */
+  private pendingKey(channel: string, channelId: string, userId?: string): string {
+    return `${channel}:${channelId}:${userId || '_'}`;
+  }
+
+  /** 设置 pending selection（60s 过期） */
+  private setPending(channel: string, channelId: string, userId: string | undefined, pending: Omit<PendingSelection, 'createdAt'>): void {
+    const key = this.pendingKey(channel, channelId, userId);
+    this.pendingSelections.set(key, { ...pending, createdAt: Date.now() });
+  }
+
+  /** 获取未过期的 pending selection，过期则清除 */
+  private getPending(channel: string, channelId: string, userId?: string): PendingSelection | undefined {
+    const key = this.pendingKey(channel, channelId, userId);
+    const pending = this.pendingSelections.get(key);
+    if (!pending) return undefined;
+    if (Date.now() - pending.createdAt > PENDING_SELECTION_EXPIRY_MS) {
+      this.pendingSelections.delete(key);
+      return undefined;
+    }
+    return pending;
+  }
+
+  /** 清除 pending selection */
+  private clearPending(channel: string, channelId: string, userId?: string): void {
+    this.pendingSelections.delete(this.pendingKey(channel, channelId, userId));
+  }
+
+  /** 格式化编号菜单列表 */
+  private formatNumberedMenu(items: string[], currentValue?: string): string {
+    return items.map((item, i) => {
+      const marker = item === currentValue ? ' ✓' : '';
+      return `${i + 1}. ${item}${marker}`;
+    }).join('\n');
   }
 
   /**
@@ -462,7 +513,10 @@ export class CommandHandler {
    * 快速判断是否为命令（不进队列的命令）
    */
   isCommand(content: string): boolean {
-    return content === '/p' || content === '/s' || quickCommandPrefixes.some(cmd => content.startsWith(cmd));
+    if (content === '/p' || content === '/s' || quickCommandPrefixes.some(cmd => content.startsWith(cmd))) return true;
+    // 纯数字且有 pending 选择时也视为命令（快速路径）
+    if (/^\d+$/.test(content.trim()) && this.pendingSelections.size > 0) return true;
+    return false;
   }
 
   /**
@@ -495,6 +549,30 @@ export class CommandHandler {
 
     if (normalizedContent !== content) {
       logger.debug(`[CommandHandler] normalized: "${content}" -> "${normalizedContent}"`);
+    }
+
+
+    // ── 数字选择拦截：如果用户有 pending 的编号菜单，纯数字消息转为对应命令 ──
+    const pending = this.getPending(channel, channelId, userId);
+    if (pending) {
+      const trimmed = normalizedContent.trim();
+      if (/^\d+$/.test(trimmed)) {
+        const idx = parseInt(trimmed, 10) - 1;
+        if (idx >= 0 && idx < pending.items.length) {
+          const selected = pending.items[idx];
+          this.clearPending(channel, channelId, userId);
+          if (pending.type === 'model') {
+            return this.handle(`/model ${selected}`, channel, channelId, sendMessage, userId, threadId);
+          } else {
+            return this.handle(`/effort ${selected}`, channel, channelId, sendMessage, userId, threadId);
+          }
+        }
+        // 数字超出范围：清除 pending，提示
+        this.clearPending(channel, channelId, userId);
+        return `❌ 无效选项: ${trimmed}（可选 1-${pending.items.length}）`;
+      }
+      // 非数字消息：清除 pending，继续正常处理
+      this.clearPending(channel, channelId, userId);
     }
 
     // 话题内禁用部分命令
@@ -881,12 +959,13 @@ export class CommandHandler {
           if (cardSent) return null;
         }
 
-        // 降级：文本
-        const modelList = models.map((m: string) => `- ${m}`).join('\n');
+        // 降级：编号菜单（支持数字选择）
+        const modelList = this.formatNumberedMenu(models, currentModel);
         const effortHint = efforts.length > 0
           ? `\n推理强度: ${currentEffort === 'auto' ? 'auto (SDK默认)' : currentEffort}  (使用 /effort 调整)`
           : '';
-        return `当前模型: ${currentModel}${effortHint}\n\n可用模型：\n${modelList}\n\n${formatModelUsage(modelAgent, currentModel)}`;
+        this.setPending(channel, channelId, userId, { type: 'model', items: models, channel, channelId, threadId });
+        return `当前模型: ${currentModel}${effortHint}\n\n可用模型：\n${modelList}\n\n回复数字切换模型（60秒内有效）`;
       }
 
       const parts = args.split(/\s+/);
@@ -1061,10 +1140,12 @@ export class CommandHandler {
           if (cardSent) return null;
         }
 
-        // 降级：文本
+        // 降级：编号菜单（支持数字选择）
         const effortDisplay = currentEffort === 'auto' ? 'auto (SDK默认)' : currentEffort;
-        const effortList = efforts.map(e => `${e === currentEffort ? '  ✓' : '   '} ${e}`).join('\n');
-        return `⚡ 推理强度: ${effortDisplay}\n\n可选:\n${effortList}\n   ${currentEffort === 'auto' ? '  ✓' : '   '} auto\n\n用法: /effort <level>`;
+        const effortItems = [...efforts, 'auto'] as string[];
+        const effortList = this.formatNumberedMenu(effortItems, currentEffort);
+        this.setPending(channel, channelId, userId, { type: 'effort', items: effortItems, channel, channelId, threadId });
+        return `⚡ 推理强度: ${effortDisplay}\n\n可选：\n${effortList}\n\n回复数字切换推理强度（60秒内有效）`;
       }
 
       // /effort auto：恢复 SDK 默认

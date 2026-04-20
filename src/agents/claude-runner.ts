@@ -1,5 +1,5 @@
 import { query, forkSession as sdkForkSession } from '@anthropic-ai/claude-agent-sdk';
-import { ensureDir, resolveAnthropicConfig } from '../config.js';
+import { ensureDir, resolveAnthropicConfig, loadMenus } from '../config.js';
 import type { Config, ChannelAdapter, ReplyContext } from '../types.js';
 import type { PermissionGateway, PermissionDecision } from '../core/permission.js';
 import path from 'path';
@@ -282,7 +282,7 @@ export class AgentRunner {
   }
 
   listModels(): string[] {
-    return ['opus', 'sonnet', 'haiku'];
+    return loadMenus().models['claude'] ?? ['opus', 'sonnet', 'haiku'];
   }
 
   setEffort(effort: 'low' | 'medium' | 'high' | 'max' | undefined): void {
