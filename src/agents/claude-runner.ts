@@ -241,6 +241,7 @@ export class AgentRunner {
   private config?: Config;
   private activeSessions: Map<string, string> = new Map();
   private activeStreams = new Map<string, AsyncIterable<any>>();
+  private activeAbortControllers = new Map<string, AbortController>();
   private interruptFns = new Map<string, () => Promise<void>>();
   private onSessionIdUpdate?: (sessionId: string, agentSessionId: string) => void;
   private onCompactStart?: (sessionId: string) => void;
@@ -699,6 +700,11 @@ export class AgentRunner {
       env: this.getAgentEnv()
     };
 
+    // AbortController for this query — enables interrupt() to cancel both
+    // the connection phase and the streaming phase
+    const controller = new AbortController();
+    this.activeAbortControllers.set(sessionId, controller);
+
     const createQuery = (promptInput: string | MessageStream, resumeSessionId?: string) => {
       if (useSettingSources) {
         // 新方式：SDK 自动加载 CLAUDE.md 和 MCP 配置
@@ -706,6 +712,7 @@ export class AgentRunner {
           prompt: promptInput as any,
           options: {
             ...commonOptions,
+            abortController: controller,
             settingSources: ['project', 'user'],
             systemPrompt: {
               type: 'preset' as const,
@@ -752,6 +759,7 @@ export class AgentRunner {
           prompt: promptInput as any,
           options: {
             ...commonOptions,
+            abortController: controller,
             ...(resumeSessionId ? { resume: resumeSessionId } : {}),
             ...(Object.keys(globalMcpServers).length > 0 ? { mcpServers: globalMcpServers } : {}),
             ...(fullAppend ? {
@@ -787,6 +795,13 @@ export class AgentRunner {
   }
 
   async interrupt(sessionId: string): Promise<void> {
+    // Abort via controller first (covers connection phase before stream starts)
+    const controller = this.activeAbortControllers.get(sessionId);
+    if (controller) {
+      controller.abort('User interrupt');
+      this.activeAbortControllers.delete(sessionId);
+    }
+
     const fn = this.interruptFns.get(sessionId);
     if (fn) {
       try {
@@ -810,6 +825,7 @@ export class AgentRunner {
 
   cleanupStream(sessionId: string): void {
     this.activeStreams.delete(sessionId);
+    this.activeAbortControllers.delete(sessionId);
     this.interruptFns.delete(sessionId);
   }
 
@@ -885,6 +901,7 @@ export class AgentRunner {
   async closeSession(sessionId: string): Promise<void> {
     this.activeSessions.delete(sessionId);
     this.activeStreams.delete(sessionId);
+    this.activeAbortControllers.delete(sessionId);
     this.interruptFns.delete(sessionId);
   }
 

@@ -501,19 +501,31 @@ ${suggestions}`,
         const effectiveSystemPrompt = [options?.systemPromptAppend, ...contextParts].filter(Boolean).join('\n') || undefined;
 
         // 可重试错误（403/429/5xx）指数退避重试，最多 3 次
+        const connectionTimeoutMs = (this.config.idleMonitor?.connectionTimeout ?? 30) * 1000;
         const MAX_RETRIES = 3;
         for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
           let streamRegistered = false;
           try {
-            const stream = await agent.runQuery(
-              session.id,
-              effectivePrompt,
-              absoluteProjectPath,
-              session.agentSessionId,
-              message.images,
-              effectiveSystemPrompt,
-              this.sessionManager
-            );
+            // Connection-phase timeout: if runQuery() (API handshake) hangs
+            // beyond connectionTimeout, abort and throw a clear error.
+            let connectionTimer: ReturnType<typeof setTimeout> | undefined;
+            const stream = await Promise.race([
+              agent.runQuery(
+                session.id,
+                effectivePrompt,
+                absoluteProjectPath,
+                session.agentSessionId,
+                message.images,
+                effectiveSystemPrompt,
+                this.sessionManager
+              ).then(s => { clearTimeout(connectionTimer); return s; }),
+              new Promise<never>((_, reject) => {
+                connectionTimer = setTimeout(() => {
+                  agent.interrupt(streamKey).catch(() => {});
+                  reject(new Error('Connection timeout: agent failed to start stream within ' + (connectionTimeoutMs / 1000) + 's'));
+                }, connectionTimeoutMs);
+              }),
+            ]);
             agent.registerStream(streamKey, stream);
             streamRegistered = true;
 
