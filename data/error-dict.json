@@ -1,0 +1,112 @@
+{
+  "rules": [
+    {
+      "id": "context-too-long-cn",
+      "match": "上下文过长",
+      "action": "stop",
+      "type": "context_too_long",
+      "message": "⚠️ 上下文过长，请手动输入 /compact 压缩上下文"
+    },
+    {
+      "id": "context-too-long-en",
+      "match": "context too long",
+      "action": "stop",
+      "type": "context_too_long",
+      "message": "⚠️ 上下文过长，请手动输入 /compact 压缩上下文"
+    },
+    {
+      "id": "prompt-too-long",
+      "match": "prompt is too long",
+      "action": "stop",
+      "type": "context_too_long",
+      "message": "⚠️ 输入过长，请精简提问或使用 /compact 压缩上下文"
+    },
+    {
+      "id": "invalid-api-key",
+      "match": "invalid api key",
+      "action": "stop",
+      "type": "auth_error",
+      "message": "❌ API Key 无效，请检查密钥配置。使用 /status 查看当前配置"
+    },
+    {
+      "id": "key-not-found",
+      "match": "key_not_found",
+      "action": "stop",
+      "type": "auth_error",
+      "message": "❌ API Key 未找到，请检查密钥配置"
+    },
+    {
+      "id": "credit-query-timeout",
+      "match": "积分查询超时",
+      "action": "retry",
+      "type": "api_error",
+      "message": "⚠️ 积分查询超时，正在重试..."
+    },
+    {
+      "id": "api-error-400",
+      "match": "api error: 400",
+      "action": "stop",
+      "type": "api_error",
+      "message": "❌ 请求格式错误，请检查输入内容"
+    },
+    {
+      "id": "api-error-403",
+      "match": "api error: 403",
+      "action": "retry",
+      "type": "api_error",
+      "message": "⚠️ API 访问受限，正在重试..."
+    },
+    {
+      "id": "api-error-429",
+      "match": "api error: 429",
+      "action": "retry",
+      "type": "api_error",
+      "message": "⚠️ 请求过于频繁，正在重试..."
+    },
+    {
+      "id": "api-error-500",
+      "match": "api error: 500",
+      "action": "retry",
+      "type": "api_error",
+      "message": "❌ API 服务暂时不可用，正在重试..."
+    },
+    {
+      "id": "api-error-502",
+      "match": "api error: 502",
+      "action": "retry",
+      "type": "api_error"
+    },
+    {
+      "id": "api-error-503",
+      "match": "api error: 503",
+      "action": "retry",
+      "type": "api_error"
+    },
+    {
+      "id": "api-error-504",
+      "match": "api error: 504",
+      "action": "retry",
+      "type": "api_error"
+    },
+    {
+      "id": "not-valid-json",
+      "match": "is not valid json",
+      "action": "retry",
+      "type": "api_error",
+      "message": "⚠️ API 返回异常响应，正在重试..."
+    },
+    {
+      "id": "feishu-permission",
+      "match": "im:resource",
+      "action": "stop",
+      "type": "unknown",
+      "message": "❌ 权限不足，请联系管理员配置应用权限"
+    },
+    {
+      "id": "stream-error",
+      "match": "stream",
+      "action": "retry",
+      "type": "stream_error"
+    }
+  ]
+}

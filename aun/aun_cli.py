@@ -25,7 +25,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 # ── 依赖自检 ──────────────────────────────────────────────────────────────
 _REQUIRED_PACKAGES = [
-    {"import": "aun_core", "requirement": "aun-core>=0.2.4"},
+    {"import": "aun_core", "requirement": "aun-core>=0.2.5"},
     {"import": "prompt_toolkit", "requirement": "prompt-toolkit>=3.0.0"},
     {"import": "rich", "requirement": "rich>=13.0.0"},
 ]
@@ -427,7 +427,7 @@ def _validate_log_mode_args(argv: list, log_value: "int | None", subcmd: "str | 
     seen_log = False
     while i < len(args):
         arg = args[i]
-        if arg in ('--log', '-l'):
+        if arg in ('--log', '-L'):
             if seen_log or i + 1 >= len(args):
                 raise SystemExit(2)
             seen_log = True
@@ -576,11 +576,22 @@ def _normalize_target(value) -> dict | None:
     return None
 
 def _normalize_recent_targets(cfg: dict) -> list[dict]:
-    """从配置加载 recent_targets。"""
+    """从配置加载 recent_targets，并过滤掉结构无效的条目。"""
     targets = cfg.get("recent_targets", [])
     if not isinstance(targets, list):
         return []
-    return [t for t in targets if isinstance(t, dict) and t.get("type")]
+    normalized: list[dict] = []
+    for t in targets:
+        if not isinstance(t, dict):
+            continue
+        ttype = t.get("type")
+        tid = str(t.get("id") or "")
+        name = str(t.get("name") or tid)
+        if ttype == "peer" and _is_valid_aid(tid):
+            normalized.append({"type": "peer", "id": tid, "name": name})
+        elif ttype == "group" and _is_group_id(tid):
+            normalized.append({"type": "group", "id": tid, "name": name})
+    return normalized
 
 def _target_label(target) -> str:
     """返回 target 的显示标签。peer: AID, group: [群名]"""
@@ -638,6 +649,45 @@ def _find_group_in_targets(value: str) -> dict | None:
             return t
     return None
 
+
+def _is_group_not_joined_error(exc: Exception | str | None) -> bool:
+    if not exc:
+        return False
+    text = str(exc).lower()
+    return "no group secret" in text or "not a member" in text
+
+
+def _join_mode_from_requirements(result: dict | None, error: Exception | None = None) -> str:
+    reqs = result.get("join_requirements", {}) if isinstance(result, dict) else {}
+    mode = reqs.get("mode", "")
+    if mode == "closed":
+        return "closed"
+    if mode == "invite_only":
+        return "invite_only"
+    if mode in ("open", "approval"):
+        return mode
+    if _is_not_member_error(error):
+        return "unknown"
+    return mode or "unknown"
+
+
+def _should_handle_join_as_target_switch(line: str) -> bool:
+    if not line.startswith("@"):
+        return False
+    parts = line[1:].split(None, 1)
+    if not parts:
+        return False
+    target = parts[0]
+    return _is_group_id(target) or _is_valid_aid(target)
+
+
+def _split_target_switch_input(line: str) -> tuple[str, str]:
+    parts = line[1:].split(None, 1)
+    target = parts[0] if parts else ""
+    message = parts[1] if len(parts) > 1 else ""
+    return target, message
+
+
 def _make_client() -> "AUNClient":
     """构造 AUNClient，统一 aun_path 配置。"""
     return AUNClient({"aun_path": str(AUN_PATH)})
@@ -667,7 +717,8 @@ _LOCAL_CMDS = [
     ("//rawdata",    "",    "最后消息原始内容"),
     ("//e2ee",       "",    "E2EE 状态"),
     ("//status",     "",    "连接状态"),
-    ("//aid",        "[name|cmd]", "AID 切换/管理"),
+    ("//local",      "name", "切换本地 AID"),
+    ("//aid",        "cmd",  "AID 管理"),
     ("//qid",        "cmd", "群组管理"),
     ("//help",       "",    "帮助"),
     ("//quit",       "",    "退出"),
@@ -683,6 +734,13 @@ _GROUP_COMMANDS = [
     ("group",    ["g"],      "群管理（transfer/suspend/resume/dissolve）", True, True),
     ("quit",     [],          "退出群组",                         True,  True),
 ]
+_OWNER_ONLY_GROUP_COMMANDS = {"user", "join", "setup", "group"}
+
+
+def _filter_group_commands_for_owner(is_owner: bool | None):
+    if is_owner is not True:
+        return [cmd for cmd in _GROUP_COMMANDS if cmd[0] not in _OWNER_ONLY_GROUP_COMMANDS]
+    return list(_GROUP_COMMANDS)
 
 # 构建命令查找表: name/alias → (cmd_name, need_group)
 _GROUP_CMD_LOOKUP = {}
@@ -777,10 +835,10 @@ class AUNCompleter(Completer):
                         unread = {}
                     existing_ids = {t.get("id") for t in targets}
                     for cid in unread:
-                        if cid not in existing_ids:
-                            ctype = "group" if _is_group_id(cid) else "peer"
-                            cname = cid if ctype == "group" else _short_name(cid)
-                            targets.append({"type": ctype, "id": cid, "name": cname})
+                        if cid in existing_ids:
+                            continue
+                        if _is_valid_aid(cid):
+                            targets.append({"type": "peer", "id": cid, "name": _short_name(cid)})
                 else:
                     unread = {}
                 current_id = self.cli_ref.target.get("id") if self.cli_ref.target else None
@@ -812,10 +870,10 @@ class AUNCompleter(Completer):
                         unread = {}
                     existing_ids = {t.get("id") for t in targets}
                     for cid in unread:
-                        if cid not in existing_ids:
-                            ctype = "group" if _is_group_id(cid) else "peer"
-                            cname = cid if ctype == "group" else _short_name(cid)
-                            targets.append({"type": ctype, "id": cid, "name": cname})
+                        if cid in existing_ids:
+                            continue
+                        if _is_valid_aid(cid):
+                            targets.append({"type": "peer", "id": cid, "name": _short_name(cid)})
                 else:
                     unread = {}
                 if not targets:
@@ -854,20 +912,34 @@ class AUNCompleter(Completer):
         if text.startswith("//"):
             filter_text = text[2:]
 
-            # //aid 二级补全：本地 AID 列表
-            if filter_text.startswith("aid ") or filter_text == "aid":
-                aid_filter = filter_text[4:].lower() if len(filter_text) > 4 else ""
+            # //local 二级补全：本地 AID 列表（仅切换）
+            if filter_text.startswith("local ") or filter_text == "local":
+                aid_filter = filter_text[6:].lower() if len(filter_text) > 6 else ""
                 ks = _get_keystore()
                 aids_root = ks._aids_root
                 current_aid = self.cli_ref.my_aid if self.cli_ref else ""
-                sub_cmds = [("list", "列出所有 AID"), ("new", "创建新 AID"), ("delete", "删除 AID")]
                 if aids_root.exists():
-                    for aid_name in sorted(p.name for p in aids_root.iterdir() if p.is_dir()):
+                    valid_aids = []
+                    for p in aids_root.iterdir():
+                        if not p.is_dir():
+                            continue
+                        aid_name = p.name
+                        identity = ks.load_identity(aid_name)
+                        if not isinstance(identity, dict) or not identity.get("private_key_pem"):
+                            continue
+                        valid_aids.append(aid_name)
+                    for aid_name in sorted(valid_aids):
                         if aid_filter and not aid_name.lower().startswith(aid_filter):
                             continue
                         is_current = " ✓" if aid_name == current_aid else ""
-                        yield Completion(f"//aid {aid_name}", start_position=-len(text),
+                        yield Completion(f"//local {aid_name}", start_position=-len(text),
                                          display=f"{aid_name}{is_current}", display_meta="切换")
+                return
+
+            # //aid 二级补全：本地 AID 管理命令
+            if filter_text.startswith("aid ") or filter_text == "aid":
+                aid_filter = filter_text[4:].lower() if len(filter_text) > 4 else ""
+                sub_cmds = [("list", "列出所有 AID"), ("new", "创建新 AID"), ("delete", "删除 AID")]
                 for sc, desc in sub_cmds:
                     if aid_filter and not sc.startswith(aid_filter):
                         continue
@@ -892,10 +964,10 @@ class AUNCompleter(Completer):
                         unread = {}
                     existing_ids = {t.get("id") for t in targets}
                     for cid in unread:
-                        if cid not in existing_ids:
-                            ctype = "group" if _is_group_id(cid) else "peer"
-                            cname = cid if ctype == "group" else _short_name(cid)
-                            targets.append({"type": ctype, "id": cid, "name": cname})
+                        if cid in existing_ids:
+                            continue
+                        if _is_valid_aid(cid):
+                            targets.append({"type": "peer", "id": cid, "name": _short_name(cid)})
                 else:
                     unread = {}
                 def _sort_key(t):
@@ -944,7 +1016,10 @@ class AUNCompleter(Completer):
             filter_text = text[1:]
             if ' ' in filter_text:
                 return
-            for cmd_name, aliases, _desc, _need_group, _visible in _GROUP_COMMANDS:
+            is_owner = None
+            if self.cli_ref:
+                is_owner = self.cli_ref.is_current_group_owner_cached()
+            for cmd_name, aliases, _desc, _need_group, _visible in _filter_group_commands_for_owner(is_owner):
                 if not _visible:
                     continue
                 matched = cmd_name.startswith(filter_text)
@@ -1870,6 +1945,9 @@ class AUNCli:
             self._connected_at = time.monotonic()
             self._reconn_failures = 0
             self._reconn_cooldown_until = 0
+            if self.target and _is_group_target(self.target):
+                await self._refresh_group_cache()
+                await self._ensure_members_cache(self.target["id"], force=True)
             # 持久化为默认 AID
             cfg = _load_config()
             cfg["aid"] = new_aid
@@ -1942,6 +2020,9 @@ class AUNCli:
             print_status(target_label, "x", C.RED, "发送超时")
         except Exception as e:
             self._suppress_next = False
+            if _is_group_target(self.target) and _is_group_not_joined_error(e):
+                print_status(target_label, "x", C.RED, f"发送失败: 你当前不在群 {target_label}，请先加入群组")
+                return
             print_status(target_label, "x", C.RED, f"发送失败: {e}")
 
     async def send_file(self, file_path_str: str):
@@ -2352,6 +2433,9 @@ class AUNCli:
 
     async def resolve_and_switch_target(self, value: str, message: str = "") -> bool:
         """解析 @ 后的值并切换目标。支持 AID、group_id、群名。"""
+        if message and not _is_group_target(self.target):
+            error("非群聊状态不支持 @target msg，请先切换目标再发送消息")
+            return False
         # group_id 格式（必须在 AID 检查之前，因为 g-xxx.agentid.pub 同时满足 _is_valid_aid）
         if _is_group_id(value):
             # 先在本地缓存中查找
@@ -2399,13 +2483,18 @@ class AUNCli:
     async def _join_group_flow(self, group_id: str) -> bool:
         """入群引导流程。成功加入返回 True。"""
         info(f"查询群 {group_id} 的入群要求…")
+        requirements_result = None
+        requirements_error = None
         try:
-            result = await self.client.call("group.get_join_requirements", {"group_id": group_id})
+            requirements_result = await self.client.call("group.get_join_requirements", {"group_id": group_id})
         except Exception as e:
-            error(f"查询失败: {e}")
-            return False
-        reqs = result.get("join_requirements", {})
-        mode = reqs.get("mode", "closed")
+            requirements_error = e
+            if not _is_not_member_error(e):
+                error(f"查询失败: {e}")
+                return False
+            info("当前无法直接读取入群要求，尝试直接申请加入…")
+
+        mode = _join_mode_from_requirements(requirements_result, requirements_error)
         if mode == "closed":
             error("该群组已关闭，不接受新成员")
             return False
@@ -2427,7 +2516,6 @@ class AUNCli:
             except Exception as e:
                 error(f"加入失败: {e}")
             return False
-        # open / approval
         try:
             confirm = await _async_input(f"是否申请加入群 {group_id}？[y/N] ")
         except (EOFError, KeyboardInterrupt):
@@ -2499,6 +2587,35 @@ class AUNCli:
         if found:
             return found.get("name", group_id)
         return group_id
+
+    def is_current_group_owner_cached(self) -> bool | None:
+        if not self.target or not _is_group_target(self.target):
+            return None
+        gid = self.target.get("id")
+        for g in self._group_cache:
+            if g.get("group_id") == gid:
+                role = g.get("role")
+                if role:
+                    return role == "owner"
+        for m in self._members_cache.get(gid, []):
+            if m.get("aid") == self.my_aid:
+                role = m.get("role")
+                if role:
+                    return role == "owner"
+        return None
+
+    async def is_current_group_owner(self) -> bool | None:
+        cached = self.is_current_group_owner_cached()
+        if cached is not None:
+            return cached
+        if not self.target or not _is_group_target(self.target) or not self.client:
+            return None
+        try:
+            result = await self.client.call("group.get", {"group_id": self.target["id"]})
+            group = result.get("group", {}) if isinstance(result, dict) else {}
+            return group.get("owner_aid") == self.my_aid
+        except Exception:
+            return None
 
     async def _ensure_members_cache(self, group_id: str, force=False):
         """确保群成员缓存有效，过期则刷新。force=True 跳过 TTL 检查。"""
@@ -2960,7 +3077,7 @@ class AUNCli:
                 error(f"无效模式: {val}（可选: {', '.join(valid_modes)}）"); return
             api_mode = "invite_only" if val == "invite" else val
             try:
-                await self.client.call("group.update", {"group_id": gid, "join_mode": api_mode})
+                await self.client.call("group.update_join_requirements", {"group_id": gid, "mode": api_mode})
                 info(f"入群模式已更新: {val}")
             except Exception as e:
                 error(f"更新失败: {e}")
@@ -3153,8 +3270,9 @@ class AUNCli:
             info("你是群主，请选择操作:")
             info("  1. 解散群组")
             info("  2. 转让群主后退出")
+            info("  3. 取消操作")
             try:
-                choice = await _async_input("请选择 [1/2]: ")
+                choice = await _async_input("请选择 [1/2/3]: ")
             except (EOFError, KeyboardInterrupt):
                 info("已取消"); return
             if choice.strip() == "1":
@@ -3727,48 +3845,69 @@ async def _msg_dialog(title="", text="", ok_text="Ok", style=None):
     )
     await app.run_async()
 
-async def _show_help():
+def _build_help_text(is_group_owner: bool | None = None) -> str:
+    group_lines = [
+        '  <ansiyellow>/list</ansiyellow>             成员列表',
+        '  <ansiyellow>/info</ansiyellow>             群信息（含公告）',
+    ]
+    if is_group_owner is not False:
+        group_lines.extend([
+            '  <ansiyellow>/u + aid</ansiyellow>          添加成员',
+            '  <ansiyellow>/u - aid</ansiyellow>          踢出成员',
+            '  <ansiyellow>/u ban [aid]</ansiyellow>      封禁列表/封禁',
+            '  <ansiyellow>/u unban aid</ansiyellow>      解封成员',
+            '  <ansiyellow>/join inv [+/-]</ansiyellow>   邀请码管理',
+            '  <ansiyellow>/join req [+/-]</ansiyellow>   入群申请管理',
+            '  <ansiyellow>/setup name|desc|notice|mode|role</ansiyellow>  群设置',
+            '  <ansiyellow>/g transfer|suspend|resume</ansiyellow>  群管理',
+        ])
+    group_lines.append('  <ansiyellow>/quit</ansiyellow>             退出群组')
+    return (
+        '<b>快捷键</b>\n'
+        '  <ansiyellow>/</ansiyellow>              命令菜单（peer→远端 群→群管理）\n'
+        '  <ansiyellow>//</ansiyellow>             本地命令菜单\n'
+        '  <ansiyellow>@</ansiyellow>              切换目标 / 群聊 mention\n'
+        '  <ansiyellow>Ctrl+J</ansiyellow>         换行（多行输入）\n'
+        '  <ansiyellow>Ctrl+L</ansiyellow>         清屏\n'
+        '  <ansiyellow>Ctrl+R</ansiyellow>         原始数据监控\n'
+        '  <ansiyellow>Ctrl+D</ansiyellow>         toggle 调试模式\n'
+        '  <ansiyellow>Ctrl+G</ansiyellow>         toggle 数据日志\n'
+        '  <ansiyellow>Esc</ansiyellow>            关闭菜单\n'
+        '  <ansiyellow>Ctrl+C</ansiyellow>         中断任务 / 清空输入 / 双击退出\n\n'
+        '<b>目标切换 (@)</b>\n'
+        '  <ansiyellow>@aid</ansiyellow>           切换到 peer\n'
+        '  <ansiyellow>@grp_xxx</ansiyellow>       切换到群组\n'
+        '  <ansiyellow>@群名</ansiyellow>          按名称切换群组\n'
+        '  <ansiyellow>@aid msg</ansiyellow>       群聊中 mention 成员并发消息\n'
+        '  <ansiyellow>@切换目标</ansiyellow>      群聊中切换到其他会话\n\n'
+        '<b>本地身份 (//local / //aid)</b>\n'
+        '  <ansiyellow>//local &lt;name&gt;</ansiyellow>      切换本地 AID（类似 aun -l）\n'
+        '  <ansiyellow>//aid list</ansiyellow>           列出本地所有 AID\n'
+        '  <ansiyellow>//aid new &lt;aid&gt;</ansiyellow>     创建新 AID\n'
+        '  <ansiyellow>//aid delete &lt;aid&gt;</ansiyellow>  删除本地 AID\n\n'
+        '<b>群组 (//qid)</b>\n'
+        '  <ansiyellow>//qid add &lt;group_id&gt;</ansiyellow>    加入群组\n'
+        '  <ansiyellow>//qid quit &lt;group_id&gt;</ansiyellow>   退出群组\n'
+        '  <ansiyellow>//qid search &lt;关键词&gt;</ansiyellow>  搜索公开群组\n\n'
+        '<b>群命令（目标为群时 / 触发）</b>\n'
+        + '\n'.join(group_lines)
+        + '\n\n<b>文件收发</b>\n'
+        '  <ansiyellow>//sendfile path</ansiyellow>  发送文件到当前目标'
+    )
+
+
+async def _show_help(cli_ref=None):
+    is_group_owner = None
+    if cli_ref:
+        is_group_owner = await cli_ref.is_current_group_owner()
     await _msg_dialog(
         title=HTML('<style bg="#2a3a4a" fg="#ffff00"> AUN CLI </style>'),
-        text=HTML(
-            '<b>快捷键</b>\n'
-            '  <ansiyellow>/</ansiyellow>              命令菜单（peer→远端 群→群管理）\n'
-            '  <ansiyellow>//</ansiyellow>             本地命令菜单\n'
-            '  <ansiyellow>@</ansiyellow>              切换目标 / 群聊 mention\n'
-            '  <ansiyellow>Ctrl+J</ansiyellow>         换行（多行输入）\n'
-            '  <ansiyellow>Ctrl+L</ansiyellow>         清屏\n'
-            '  <ansiyellow>Ctrl+R</ansiyellow>         原始数据监控\n'
-            '  <ansiyellow>Ctrl+D</ansiyellow>         toggle 调试模式\n'
-            '  <ansiyellow>Ctrl+G</ansiyellow>         toggle 数据日志\n'
-            '  <ansiyellow>Esc</ansiyellow>            关闭菜单\n'
-            '  <ansiyellow>Ctrl+C</ansiyellow>         中断任务 / 清空输入 / 双击退出\n\n'
-            '<b>目标切换 (@)</b>\n'
-            '  <ansiyellow>@aid</ansiyellow>           切换到 peer\n'
-            '  <ansiyellow>@grp_xxx</ansiyellow>       切换到群组\n'
-            '  <ansiyellow>@群名</ansiyellow>          按名称切换群组\n'
-            '  <ansiyellow>@target msg</ansiyellow>    切换并发消息\n'
-            '  <ansiyellow>@aid msg</ansiyellow>       群聊中 mention 成员并发消息\n'
-            '  <ansiyellow>@切换目标</ansiyellow>      群聊中切换到其他会话\n\n'
-            '<b>群命令（目标为群时 / 触发）</b>\n'
-            '  <ansiyellow>/list</ansiyellow>             成员列表\n'
-            '  <ansiyellow>/info</ansiyellow>             群信息（含公告）\n'
-            '  <ansiyellow>/u + aid</ansiyellow>          添加成员\n'
-            '  <ansiyellow>/u - aid</ansiyellow>          踢出成员\n'
-            '  <ansiyellow>/u ban [aid]</ansiyellow>      封禁列表/封禁\n'
-            '  <ansiyellow>/u unban aid</ansiyellow>      解封成员\n'
-            '  <ansiyellow>/join inv [+/-]</ansiyellow>   邀请码管理\n'
-            '  <ansiyellow>/join req [+/-]</ansiyellow>   入群申请管理\n'
-            '  <ansiyellow>/setup name|desc|notice|mode|role</ansiyellow>  群设置\n'
-            '  <ansiyellow>/g transfer|suspend|resume</ansiyellow>  群管理\n'
-            '  <ansiyellow>/quit</ansiyellow>             退出群组\n\n'
-            '<b>文件收发</b>\n'
-            '  <ansiyellow>//sendfile path</ansiyellow>  发送文件到当前目标'
-        ),
+        text=HTML(_build_help_text(is_group_owner)),
         style=_HELP_STYLE,
     )
 
 async def repl(c: AUNCli):
-    await _show_help()
+    await _show_help(c)
     _p(f"  {C.DIM}直接输入文本发送消息{C.RESET}")
     def toolbar():
         if _ctrlc_state['hint']:
@@ -3897,43 +4036,13 @@ async def repl(c: AUNCli):
                     else:
                         error("用法: //sendfile <文件路径>")
                 elif cmd == "help":
-                    await _show_help()
+                    await _show_help(c)
+                elif cmd == "local":
+                    await _dispatch_local_local_command(c, arg)
                 elif cmd == "aid":
-                    parts2 = arg.split(None, 1)
-                    action = parts2[0].lower() if parts2 else ""
-                    arg2 = parts2[1] if len(parts2) > 1 else ""
-                    if not action or action == "list":
-                        cmd_aid_list()
-                    elif action == "new":
-                        if arg2:
-                            if _validate_aid(arg2):
-                                try:
-                                    await cmd_aid_create(arg2)
-                                except Exception as e:
-                                    error(f"创建失败: {e}")
-                        else:
-                            error("用法: //aid new <aid>")
-                    elif action == "delete":
-                        if arg2:
-                            if _validate_aid(arg2):
-                                cmd_aid_delete(arg2)
-                        else:
-                            error("用法: //aid delete <aid>")
-                    else:
-                        # //aid <name> → 切换 AID
-                        await c.switch_aid(action)
+                    await _dispatch_local_aid_command(c, arg)
                 elif cmd == "qid":
-                    parts2 = arg.split(None, 1)
-                    action = parts2[0].lower() if parts2 else ""
-                    arg2 = parts2[1] if len(parts2) > 1 else ""
-                    if action == "add":
-                        await cmd_qid_add(c, arg2)
-                    elif action == "delete":
-                        await cmd_qid_delete(c, arg2)
-                    elif action == "search":
-                        await cmd_qid_search(c, arg2)
-                    else:
-                        error("用法: //qid add <group_id> | delete <group_id> | search <关键词>")
+                    await _dispatch_local_qid_command(c, arg)
                 else:
                     error(f"未知命令: //{cmd}")
                 continue
@@ -3964,6 +4073,12 @@ async def repl(c: AUNCli):
                     continue
                 # 透传到远端（fall through）
 
+            if _should_handle_join_as_target_switch(line):
+                target, message = _split_target_switch_input(line)
+                if target:
+                    await c.resolve_and_switch_target(target, message)
+                    continue
+
             # 统一发送：群聊自动提取 @aid 作为 mentions
             if c.target and _is_group_target(c.target):
                 mentions = _extract_mentions(line)
@@ -3982,6 +4097,55 @@ def _load_history():
     except Exception:
         return InMemoryHistory()
 
+async def _dispatch_local_local_command(c, arg: str):
+    name = arg.strip()
+    if not name:
+        error("用法: //local <name>")
+        return
+    await c.switch_aid(name)
+
+
+async def _dispatch_local_aid_command(c, arg: str):
+    parts2 = arg.split(None, 1)
+    action = parts2[0].lower() if parts2 else ""
+    arg2 = parts2[1] if len(parts2) > 1 else ""
+    if action == "list":
+        cmd_aid_list()
+    elif action == "new":
+        if arg2:
+            if _validate_aid(arg2):
+                try:
+                    await cmd_aid_create(arg2)
+                except Exception as e:
+                    error(f"创建失败: {e}")
+        else:
+            error("用法: //aid new <aid>")
+    elif action == "delete":
+        if arg2:
+            if _validate_aid(arg2):
+                cmd_aid_delete(arg2)
+        else:
+            error("用法: //aid delete <aid>")
+    elif action:
+        error("切换本地 AID 请使用: //local <name>")
+    else:
+        error("用法: //aid list | new <aid> | delete <aid>")
+
+
+async def _dispatch_local_qid_command(c, arg: str):
+    parts2 = arg.split(None, 1)
+    action = parts2[0].lower() if parts2 else ""
+    arg2 = parts2[1] if len(parts2) > 1 else ""
+    if action == "add":
+        await cmd_qid_add(c, arg2)
+    elif action == "quit":
+        await cmd_qid_quit(c, arg2)
+    elif action == "search":
+        await cmd_qid_search(c, arg2)
+    else:
+        error("用法: //qid add <group_id> | quit <group_id> | search <关键词>")
+
+
 # ── 入口 ──────────────────────────────────────────────────────────────────
 
 def cmd_aid_list():
@@ -3999,8 +4163,15 @@ async def cmd_aid_create(name: str):
     client._gateway_url = GATEWAY_URL
     local = _get_keystore().load_identity(name)
     if local and "private_key_pem" in local:
-        error(f"AID {name} 已存在"); return
-    result = await client.auth.create_aid({"aid": name})
+        if local.get("cert"):
+            error(f"AID {name} 已存在"); return
+        info(f"检测到未完成的创建（本地已有密钥但未在服务端注册），继续尝试注册…")
+    try:
+        result = await client.auth.create_aid({"aid": name})
+    except Exception as e:
+        error(f"AID 创建失败: {e}")
+        info(f"本地密钥已保留，修复网络后重新执行 `aid new {name}` 可继续注册")
+        return
     info(f"AID 创建成功: {result['aid']}")
     cfg = _load_config()
     if not cfg.get("aid"):
@@ -4009,6 +4180,7 @@ async def cmd_aid_create(name: str):
         info("已设为默认 AID")
 
 def cmd_aid_delete(name: str):
+    import shutil
     ks = _get_keystore()
     local = ks.load_identity(name)
     if local is None:
@@ -4016,12 +4188,37 @@ def cmd_aid_delete(name: str):
     confirm = input(f"删除 {name}？[y/N] ").strip().lower()
     if confirm != 'y':
         info("已取消"); return
-    ks.delete_identity(name)
+
+    safe = ks._safe_aid(name)
+    removed: list[str] = []
+    identity_dir = ks._aids_root / safe
+    if identity_dir.exists():
+        shutil.rmtree(identity_dir, ignore_errors=True)
+        removed.append(str(identity_dir))
+    for legacy_root in ks._legacy_roots:
+        if not legacy_root.exists():
+            continue
+        for suffix in (".json", ".key.json", ".cert.pem"):
+            p = legacy_root / f"{safe}{suffix}"
+            if p.exists():
+                try:
+                    p.unlink()
+                    removed.append(str(p))
+                except OSError as e:
+                    error(f"删除 {p} 失败: {e}")
+        legacy_subdir = legacy_root / safe
+        if legacy_subdir.is_dir():
+            shutil.rmtree(legacy_subdir, ignore_errors=True)
+            removed.append(str(legacy_subdir))
+
     cfg = _load_config()
     if cfg.get("aid") == name:
         del cfg["aid"]
         _save_config(cfg)
-    info(f"已删除 {name}")
+    if removed:
+        info(f"已删除 {name}")
+    else:
+        error(f"未找到 {name} 的本地文件")
 
 # ── qid (群组管理) 独立函数 ──────────────────────────────────────────────
 
@@ -4033,10 +4230,10 @@ async def cmd_qid_add(cli_ref, name: str):
         error(f"无效 group_id: {name}（需要 g-xxx.agentid.pub 或 grp_ 格式）"); return
     await cli_ref._join_group_flow(name)
 
-async def cmd_qid_delete(cli_ref, name: str):
+async def cmd_qid_quit(cli_ref, name: str):
     """退出群组。"""
     if not name:
-        error("用法: //qid delete <group_id>"); return
+        error("用法: //qid quit <group_id>"); return
     if not _is_group_id(name):
         error(f"无效 group_id: {name}（需要 g-xxx.agentid.pub 或 grp_ 格式）"); return
     gname = cli_ref._get_group_name(name)
@@ -4076,30 +4273,48 @@ async def cmd_qid_search(cli_ref, keyword: str):
 
 async def main():
     import argparse
+
+    argv_tail = sys.argv[1:]
+    if (
+        len(argv_tail) >= 5
+        and argv_tail[0] == "aid"
+        and argv_tail[1] == "new"
+        and any(arg in ("-p", "--port") or arg.startswith("--port=") for arg in argv_tail[3:])
+    ):
+        print(
+            "错误：--port 是全局参数，放在子命令后面不会生效。\n"
+            f"正确写法：aun -p 20001 aid new {argv_tail[2]}",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
     parser = argparse.ArgumentParser(
         prog="aun",
-        usage="aun [-a NAME] [-t NAME] [-s MSG] | aun aid <command> | aun qid <command>",
+        usage="aun [-l AID] [-t AID] [-p PORT] [-s MSG] | aun aid <command> | aun qid <command>",
         description="AUN CLI 工具",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 options:
-  -a, --aid AID         本地 AID（默认从 config.json 读取）
-  -t, --target AID      目标 AID
+  -l, --local AID       本地 AID（默认从 config.json 读取）
+  -t, --target AID      目标 AID 或 group_id
+  -p, --port PORT       Gateway 端口（覆盖 config）
   -s, --send MSG        发送单条消息后退出
+  -L, --log N           打印最后 N 行日志并持续跟随
 
 commands:
-  aun aid list              列出本地所有 AID
-  aun aid new <aid>         创建新 AID
-  aun aid delete <aid>      删除本地 AID
-  aun qid add <group_id>   加入群组
-  aun qid delete <group_id> 退出群组
-  aun qid search <关键词>  搜索公开群组
+  aun aid list               列出本地所有 AID
+  aun aid new <aid>          创建新 AID
+  aun aid delete <aid>       删除本地 AID
+  aun qid add <group_id>     加入群组
+  aun qid quit <group_id>    退出群组
+  aun qid search <关键词>    搜索公开群组
 
 examples:
-  aun aid new alice.agentid.pub -p 20001  创建 AID（指定 Gateway 端口）
-  aun -a my.agentid.pub -t bot.agentid.pub  指定本地和目标 AID 启动
-  aun                              使用上次的 AID 和目标直接启动
-  aun -s "你好"                    发送单条消息后退出""")
+  aun -p 20001 aid new alice.agentid.pub               创建 AID（指定 Gateway 端口）
+  aun -l my.agentid.pub -t bot.agentid.pub             指定本地和目标 AID 启动
+  aun -L 50                                            查看最后 50 行日志并持续跟随
+  aun                                                  使用上次的本地 AID 和目标直接启动
+  aun -s "你好"                                        发送单条消息后退出""")
     parser._action_groups = []  # 隐藏自动生成的 options/positional 区块
     sub = parser.add_subparsers(dest="subcmd")
     sub.required = False
@@ -4116,16 +4331,16 @@ examples:
     qid_sub = qid_p.add_subparsers(dest="action")
     qid_add_p = qid_sub.add_parser("add", help="加入群组")
     qid_add_p.add_argument("name", help="group_id（g-xxx.agentid.pub 格式）")
-    qid_del_p = qid_sub.add_parser("delete", help="退出群组")
-    qid_del_p.add_argument("name", help="group_id")
+    qid_quit_p = qid_sub.add_parser("quit", help="退出群组")
+    qid_quit_p.add_argument("name", help="group_id")
     qid_search_p = qid_sub.add_parser("search", help="搜索公开群组")
     qid_search_p.add_argument("keyword", help="搜索关键词")
 
-    parser.add_argument("--aid", "-a", help="本地 AID（默认从 config.json 读取）")
+    parser.add_argument("--local", "-l", help="本地 AID（默认从 config.json 读取）")
     parser.add_argument("--target", "-t", help="目标 AID 或 group_id")
     parser.add_argument("--send", "-s", help="发送单条消息后退出")
-    parser.add_argument("--port", "-p", type=int, help="Gateway 端口（覆盖 config）")
-    parser.add_argument("--log", "-l", type=int, metavar="N", help="打印最后 N 行日志并持续跟随")
+    parser.add_argument("--port", "-p", type=int, metavar="PORT", help="Gateway 端口（覆盖 config）")
+    parser.add_argument("--log", "-L", type=int, metavar="N", help="打印最后 N 行日志并持续跟随")
 
     args, _ = parser.parse_known_args()
     _init_globals()
@@ -4157,16 +4372,19 @@ examples:
         return
 
     if args.subcmd == "qid":
-        aid = args.aid if hasattr(args, 'aid') and args.aid else _load_config().get("aid")
+        if not args.action:
+            qid_p.print_help()
+            return
+        aid = args.local if hasattr(args, 'local') and args.local else _load_config().get("aid")
         if not aid:
-            error("未指定 AID，请先创建: aun aid new <aid>"); return
+            error("未指定本地 AID，请先创建: aun aid new <aid>"); return
         c = AUNCli(aid=aid)
         try:
             await c.start()
             if args.action == "add":
                 await cmd_qid_add(c, args.name)
-            elif args.action == "delete":
-                await cmd_qid_delete(c, args.name)
+            elif args.action == "quit":
+                await cmd_qid_quit(c, args.name)
             elif args.action == "search":
                 await cmd_qid_search(c, args.keyword)
             else:
@@ -4175,9 +4393,9 @@ examples:
             await c.close()
         return
 
-    aid = args.aid if args.aid else _load_config().get("aid")
+    aid = args.local if args.local else _load_config().get("aid")
     if not aid:
-        error("未指定 AID，请先创建: aun aid new <aid>")
+        error("未指定本地 AID，请先创建: aun aid new <aid>")
         return
     if not _validate_aid(aid):
         return

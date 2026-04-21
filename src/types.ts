@@ -134,7 +134,7 @@ export interface Config {
   };
   idleMonitor?: {
     enabled?: boolean;              // 是否启用空闲监控，默认 true
-    safeModeThreshold?: number;     // 连续错误几次进入安全模式，默认 3；设为 0 关闭 safe mode
+    safeModeThreshold?: number;     // 连续错误几次进入安全模式，默认 0（已禁用）；设为正数启用
     timeout?: number;               // 无输出超时(秒)，默认 120
   };
   showActivities?: 'all' | 'dm-only' | 'owner-dm-only' | 'none';  // 中间输出显示范围（工具活动+流式文本），默认 'all'

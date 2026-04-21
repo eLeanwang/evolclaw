@@ -1,4 +1,4 @@
-import { AUNClient, FileSecretStore, type JsonObject } from '@eleans/aun-core-node';
+import { AUNClient, FileSecretStore, type JsonObject } from '@eleans/aun-core-sdk';
 import fs from 'fs';
 import path from 'path';
 import { logger, localTimestamp } from '../utils/logger.js';

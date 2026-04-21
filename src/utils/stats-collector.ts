@@ -18,7 +18,6 @@ export interface StatsSnapshot {
     toolErrors: number;
     toolErrorsByName: Record<string, number>;
     interrupts: number;
-    safeModeEntries: number;
     avgResponseMs: number;
   };
 }
@@ -51,10 +50,6 @@ export class StatsCollector {
       this.recordEvent({ type: 'interrupted', timestamp: Date.now() });
     });
 
-    eventBus.subscribe('session:safe-mode-entered', (_event) => {
-      this.recordEvent({ type: 'safe-mode-entered', timestamp: Date.now() });
-    });
-
     eventBus.subscribe('tool:result', (event) => {
       const e = event as { isError?: boolean; toolName?: string };
       if (e.isError) {
@@ -85,7 +80,6 @@ export class StatsCollector {
     let toolErrors = 0;
     const toolErrorsByName: Record<string, number> = {};
     let interrupts = 0;
-    let safeModeEntries = 0;
     let totalDuration = 0;
     let durationCount = 0;
 
@@ -116,9 +110,6 @@ export class StatsCollector {
         case 'interrupted':
           interrupts++;
           break;
-        case 'safe-mode-entered':
-          safeModeEntries++;
-          break;
       }
     }
 
@@ -132,7 +123,6 @@ export class StatsCollector {
         toolErrors,
         toolErrorsByName,
         interrupts,
-        safeModeEntries,
         avgResponseMs: durationCount > 0 ? totalDuration / durationCount : 0
       }
     };

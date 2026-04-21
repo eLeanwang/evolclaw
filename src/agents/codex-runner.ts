@@ -118,15 +118,6 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
   ): Promise<AsyncIterable<AgentEvent>> {
     let agentSessionId = initialAgentSessionId || this.activeSessions.get(sessionId);
 
-    // 安全模式：跳过 resume，创建新 thread
-    if (agentSessionId && sessionManager) {
-      const health = await sessionManager.getHealthStatus(sessionId);
-      if (health.safeMode) {
-        agentSessionId = undefined;
-        logger.warn(`[CodexRunner] Safe mode enabled for ${sessionId}, not resuming thread`);
-      }
-    }
-
     const threadOptions: ThreadOptions = {
       workingDirectory: projectPath,
       model: this.model,

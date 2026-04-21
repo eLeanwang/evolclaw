@@ -1,6 +1,6 @@
-import { query, forkSession as sdkForkSession } from '@anthropic-ai/claude-agent-sdk';
+import { query, forkSession as sdkForkSession, getSessionMessages as sdkGetSessionMessages } from '@anthropic-ai/claude-agent-sdk';
 import { ensureDir, resolveAnthropicConfig } from '../config.js';
-import type { Config, ChannelAdapter, ReplyContext } from '../types.js';
+import type { Config, ChannelAdapter, ReplyContext, InteractionRequest, InteractionField } from '../types.js';
 import type { PermissionGateway, PermissionDecision } from '../core/permission.js';
 import path from 'path';
 import fs from 'fs';
@@ -179,6 +179,24 @@ export interface AgentRunnerFull {
 
   /** 分支会话，返回新的 agentSessionId */
   forkSession?(agentSessionId: string, projectPath: string, title?: string): Promise<string>;
+
+  /** 读取会话消息历史 */
+  getSessionMessages?(agentSessionId: string, projectPath: string): Promise<Array<{
+    type: 'user' | 'assistant' | 'system';
+    uuid: string;
+    session_id: string;
+    message: unknown;
+    parent_tool_use_id: null;
+  }>>;
+
+  /** 回退文件到指定轮次 */
+  rewindFiles?(agentSessionId: string, projectPath: string, userMessageId: string): Promise<{
+    canRewind: boolean;
+    error?: string;
+    filesChanged?: string[];
+    insertions?: number;
+    deletions?: number;
+  }>;
 
   // 可选能力（通过类型守卫检测）
   setModel?(model: string): void;
@@ -378,6 +396,139 @@ export class AgentRunner {
   }
 
   /**
+   * 处理 AskUserQuestion 工具调用：将 SDK 问题转换为 Feishu 表单卡片，收集用户答案
+   * SDK 期望返回 updatedInput 中包含 answers 字段：{ [questionText]: selectedLabel | selectedLabel[] }
+   */
+  private async handleAskUserQuestion(
+    sessionId: string,
+    input: Record<string, unknown>,
+    options: { signal: AbortSignal; [key: string]: any }
+  ): Promise<any> {
+    const questions = input.questions as Array<{
+      question: string;
+      header?: string;
+      options: Array<{ label: string; description?: string }>;
+      multiSelect?: boolean;
+    }>;
+
+    // 没有交互上下文（无渠道适配器），回退到纯文本
+    if (!this.permissionContext?.adapter?.sendInteraction || !this.permissionContext?.channelId) {
+      return this.handleAskUserQuestionFallback(input, questions);
+    }
+
+    const requestId = `ask-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+    // 将 SDK questions 转换为 FormInteraction fields
+    const fields: InteractionField[] = questions.map((q, i) => {
+      const fieldOptions = q.options.map(opt => ({
+        value: opt.label,
+        label: opt.label,
+        description: opt.description,
+      }));
+
+      if (q.multiSelect) {
+        return {
+          type: 'multi-select' as const,
+          key: `q_${i}`,
+          label: q.question,
+          options: fieldOptions,
+        };
+      }
+      return {
+        type: 'select' as const,
+        key: `q_${i}`,
+        label: q.question,
+        options: fieldOptions,
+        required: true,
+      };
+    });
+
+    const interaction: InteractionRequest = {
+      type: 'interaction',
+      id: requestId,
+      kind: {
+        kind: 'form',
+        title: '💬 请选择',
+        fields,
+        submitLabel: '提交',
+        submitStyle: 'primary',
+        cancelable: true,
+      },
+      channelId: this.permissionContext.channelId,
+      sessionId,
+      expiresAt: Date.now() + 5 * 60 * 1000,
+    };
+
+    try {
+      const result = await this.permissionContext.adapter.sendInteraction(
+        this.permissionContext.channelId,
+        interaction,
+        this.permissionContext.replyContext
+      );
+
+      if (!result) {
+        return this.handleAskUserQuestionFallback(input, questions);
+      }
+    } catch (err) {
+      logger.warn('[AgentRunner] AskUserQuestion sendInteraction failed, falling back to text:', err);
+      return this.handleAskUserQuestionFallback(input, questions);
+    }
+
+    // 等待用户响应（通过 InteractionRouter）
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.permissionContext?.interactionRouter?.cancel(requestId);
+        logger.info(`[AgentRunner] AskUserQuestion timeout for ${requestId}`);
+        // 超时：允许工具继续但不带答案，SDK 会处理缺失答案的情况
+        resolve({ behavior: 'allow' as const, updatedInput: input, decisionClassification: 'user_temporary' as const });
+      }, 5 * 60 * 1000);
+
+      this.permissionContext?.interactionRouter?.register(requestId, sessionId, (action: string, values?: Record<string, unknown>) => {
+        clearTimeout(timer);
+
+        if (action === 'cancel') {
+          resolve({ behavior: 'deny' as const, message: '用户取消了问题', decisionClassification: 'user_reject' as const });
+          return;
+        }
+
+        // 从表单值中提取答案，映射回 SDK 期望的格式
+        const answers: Record<string, string> = {};
+        const formValues = values || {};
+
+        questions.forEach((q, i) => {
+          const key = `q_${i}`;
+          const val = formValues[key];
+          if (val != null) {
+            // 多选时 val 是数组，SDK answers 期望逗号分隔或数组都可以
+            answers[q.question] = String(val);
+          }
+        });
+
+        const updatedInput = { ...input, answers };
+        resolve({ behavior: 'allow' as const, updatedInput, decisionClassification: 'user_temporary' as const });
+      });
+    });
+  }
+
+  /**
+   * AskUserQuestion 纯文本 fallback：发送文本格式的问题，直接 allow
+   */
+  private async handleAskUserQuestionFallback(
+    input: Record<string, unknown>,
+    questions: Array<{ question: string; options: Array<{ label: string; description?: string }>; multiSelect?: boolean }>
+  ): Promise<any> {
+    if (this.sendPromptFn && questions?.length) {
+      const lines = questions.map(q => {
+        const optText = q.options.map((o, i) => `  ${i + 1}. ${o.label}${o.description ? ` — ${o.description}` : ''}`).join('\n');
+        return `${q.question}${q.multiSelect ? '（可多选）' : ''}\n${optText}`;
+      });
+      await this.sendPromptFn(`💬 请回答以下问题：\n\n${lines.join('\n\n')}`);
+    }
+    // 无法收集结构化答案，allow 让 SDK 继续（SDK 会将用户的下一条消息作为答案）
+    return { behavior: 'allow' as const, updatedInput: input, decisionClassification: 'user_temporary' as const };
+  }
+
+  /**
    * SDK 原始事件 → 标准 AgentEvent 转换
    * 所有 SDK 特有的事件类型引用封装在此方法内
    */
@@ -494,20 +645,8 @@ export class AgentRunner {
     // 优先使用传入的 agentSessionId（从数据库恢复），否则使用内存中的
     let agentSessionId = initialClaudeSessionId || this.activeSessions.get(sessionId);
 
-    // 检查是否在安全模式
-    let skipResume = false;
-    if (sessionManager) {
-      const health = await sessionManager.getHealthStatus(sessionId);
-      if (health.safeMode) {
-        // 安全模式：不使用 resume，每次都是新对话
-        agentSessionId = undefined;
-        skipResume = true;
-        logger.warn(`[AgentRunner] Safe mode enabled for ${sessionId}, not resuming session`);
-      }
-    }
-
-    // 验证会话文件是否存在且有效（仅在非安全模式且有 agentSessionId 时）
-    if (agentSessionId && !skipResume) {
+    // 验证会话文件是否存在且有效（仅在有 agentSessionId 时）
+    if (agentSessionId) {
       const homeDir = os.homedir();
       const encodedProjectPath = encodePath(projectPath);
       const sessionFile = path.join(homeDir, '.claude', 'projects', encodedProjectPath, `${agentSessionId}.jsonl`);
@@ -613,6 +752,12 @@ export class AgentRunner {
       input: Record<string, unknown>,
       options: { signal: AbortSignal; title?: string; description?: string; decisionReason?: string; toolUseID: string; [key: string]: any }
     ) => {
+      // 特殊处理：AskUserQuestion 工具（SDK 内置的用户交互工具）
+      // 这不是权限审批，而是收集用户答案，需要构造表单卡片
+      if (toolName === 'AskUserQuestion') {
+        return await this.handleAskUserQuestion(sessionId, input, options);
+      }
+
       // bypass 模式：一律 allow
       if (this.permissionMode === 'bypass') {
         return { behavior: 'allow' as const, updatedInput: input, decisionClassification: 'user_permanent' as const };
@@ -683,6 +828,7 @@ export class AgentRunner {
       canUseTool: canUseToolCallback,
       permissionMode: sdkPermissionMode,
       persistSession: true,
+      enableFileCheckpointing: true,
       hooks: {
         PreCompact: [{ matcher: '.*', hooks: [preCompactHook] }],
         PreToolUse: [{ matcher: '.*', hooks: [preToolUseHook] }],
@@ -699,7 +845,7 @@ export class AgentRunner {
       env: this.getAgentEnv()
     };
 
-    const createQuery = (promptInput: string | MessageStream, resumeSessionId?: string) => {
+    const createQuery = (promptInput: string | MessageStream, resumeSessionId?: string, resumeAt?: string) => {
       if (useSettingSources) {
         // 新方式：SDK 自动加载 CLAUDE.md 和 MCP 配置
         return query({
@@ -714,6 +860,7 @@ export class AgentRunner {
               ...(systemPromptAppend ? { append: systemPromptAppend } : {})
             },
             ...(resumeSessionId ? { resume: resumeSessionId } : {}),
+            ...(resumeAt ? { resumeSessionAt: resumeAt } : {}),
           }
         });
       } else {
@@ -753,6 +900,7 @@ export class AgentRunner {
           options: {
             ...commonOptions,
             ...(resumeSessionId ? { resume: resumeSessionId } : {}),
+            ...(resumeAt ? { resumeSessionAt: resumeAt } : {}),
             ...(Object.keys(globalMcpServers).length > 0 ? { mcpServers: globalMcpServers } : {}),
             ...(fullAppend ? {
               systemPrompt: {
@@ -766,6 +914,23 @@ export class AgentRunner {
       }
     };
 
+    // 检查待处理的 resumeAt（由 /rewind N chat 设置）
+    let resumeAt: string | undefined;
+    if (sessionManager && agentSessionId) {
+      try {
+        const currentSession = await sessionManager.getSessionById?.(sessionId);
+        if (currentSession?.metadata?.resumeAt) {
+          resumeAt = currentSession.metadata.resumeAt;
+          const newMeta = { ...currentSession.metadata };
+          delete newMeta.resumeAt;
+          await sessionManager.updateSession(sessionId, { metadata: newMeta });
+          logger.info(`[AgentRunner] Consuming resumeAt: ${resumeAt}`);
+        }
+      } catch (err) {
+        logger.warn('[AgentRunner] Failed to check resumeAt:', err);
+      }
+    }
+
     let sdkStream;
     if (images && images.length > 0) {
       logger.debug('[AgentRunner] Creating query with images, images:', images.length);
@@ -776,7 +941,7 @@ export class AgentRunner {
       sdkStream = createQuery(stream);
     } else {
       logger.debug('[AgentRunner] Creating query with text only, agentSessionId:', initialClaudeSessionId);
-      sdkStream = createQuery(prompt, agentSessionId);
+      sdkStream = createQuery(prompt, agentSessionId, resumeAt);
     }
     // 保存 interrupt 能力（不写 activeStreams，由 registerStream 管理活跃状态）
     if ('interrupt' in sdkStream && typeof (sdkStream as any).interrupt === 'function') {
@@ -897,6 +1062,29 @@ export class AgentRunner {
   async forkSession(agentSessionId: string, projectPath: string, title?: string): Promise<string> {
     const result = await sdkForkSession(agentSessionId, { dir: projectPath, title });
     return result.sessionId;
+  }
+
+  async getSessionMessages(agentSessionId: string, projectPath: string) {
+    return sdkGetSessionMessages(agentSessionId, { dir: projectPath });
+  }
+
+  async rewindFiles(agentSessionId: string, projectPath: string, userMessageId: string) {
+    const tempQuery = query({
+      prompt: '',
+      options: {
+        cwd: projectPath,
+        resume: agentSessionId,
+        enableFileCheckpointing: true,
+        permissionMode: 'bypassPermissions',
+      }
+    });
+    try {
+      return await tempQuery.rewindFiles(userMessageId);
+    } finally {
+      if ('interrupt' in tempQuery && typeof (tempQuery as any).interrupt === 'function') {
+        (tempQuery as any).interrupt();
+      }
+    }
   }
 }
 

@@ -20,6 +20,7 @@ export type SessionEvent =
   | { type: 'session:deleted'; sessionId: string }
   | { type: 'session:renamed'; sessionId: string; oldName: string; newName: string }
   | { type: 'session:forked'; sessionId: string; sourceSessionId: string; name?: string }
+  | { type: 'session:rewind'; sessionId: string; turnNum: number; mode: string }
   | { type: 'session:imported'; sessionId: string; agentSessionId: string; projectPath: string }
   | { type: 'session:safe-mode-entered'; sessionId: string; consecutiveErrors?: number; reason?: string }
   | { type: 'session:safe-mode-exited'; sessionId: string; method?: string };

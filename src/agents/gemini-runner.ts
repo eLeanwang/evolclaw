@@ -123,15 +123,6 @@ export class GeminiRunner implements AgentRunnerFull, ModelSwitcher {
   ): Promise<AsyncIterable<AgentEvent>> {
     let geminiSessionId = initialAgentSessionId || this.activeSessions.get(sessionId);
 
-    // Safe mode: skip resume
-    if (geminiSessionId && sessionManager) {
-      const health = await sessionManager.getHealthStatus(sessionId);
-      if (health.safeMode) {
-        geminiSessionId = undefined;
-        logger.warn(`[GeminiRunner] Safe mode enabled for ${sessionId}, not resuming session`);
-      }
-    }
-
     // Build CLI args
     const args: string[] = [];
 

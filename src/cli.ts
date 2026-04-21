@@ -8,7 +8,7 @@ import { migrateProject } from './utils/migrate-project.js';
 import readline from 'readline';
 import { cmdInit } from './utils/init.js';
 import { ipcQuery } from './ipc.js';
-import { cmdInitWechat, cmdInitFeishu, cmdInitAun, checkAunEnvironment } from './utils/init-channel.js';
+import { cmdInitWechat, cmdInitFeishu, cmdInitAun, cmdInitDingtalk, cmdInitQQBot, checkAunEnvironment } from './utils/init-channel.js';
 import * as platform from './utils/cross-platform.js';
 import { EventBus } from './core/event-bus.js';
 
@@ -407,6 +407,8 @@ function showConfigChannels(config: any) {
     { type: 'feishu', isValid: (inst: any) => !!inst.appId && inst.enabled !== false },
     { type: 'wechat', isValid: (inst: any) => !!inst.token && inst.enabled !== false },
     { type: 'aun', isValid: (inst: any) => !!inst.aid && inst.enabled !== false && !inst.aid.includes('your-') && !inst.aid.includes('placeholder') },
+    { type: 'dingtalk', isValid: (inst: any) => !!inst.clientId && inst.enabled !== false && !inst.clientId.includes('your-') && !inst.clientId.includes('placeholder') },
+    { type: 'qqbot', isValid: (inst: any) => !!inst.appId && inst.enabled !== false && !inst.appId.includes('your-') && !inst.appId.includes('placeholder') },
   ];
 
   for (const { type, isValid } of channelChecks) {
@@ -1055,7 +1057,7 @@ function archiveSelfHealLog(
  * Searches across all channel types (feishu, wechat, aun) for a matching instance.
  */
 function resolveInstanceConfig(config: any, instanceName: string): { type: string; config: any } | null {
-  for (const type of ['feishu', 'wechat', 'aun']) {
+  for (const type of ['feishu', 'wechat', 'aun', 'dingtalk', 'qqbot']) {
     const raw = config.channels?.[type];
     if (!raw) continue;
     if (Array.isArray(raw)) {
@@ -1313,7 +1315,7 @@ async function cmdTui() {
   const pythonCheck = aun.pythonBin || process.env.AUN_PYTHON || 'python3';
   if (!platform.commandExists(pythonCheck)) {
     console.error(`[tui] Python 未找到 (${pythonCheck})`);
-    console.error('  → TUI 依赖 Python 和 aun-core: pip3 install aun-core');
+    console.error('  → TUI 依赖 Python 和 aun-core (>=0.2.5): pip3 install -U aun-core');
     process.exit(1);
   }
 
@@ -1322,7 +1324,7 @@ async function cmdTui() {
   if (!fs.existsSync(cliScript)) {
     console.error(`[tui] aun_cli.py 不存在: ${cliScript}`);
     console.error('  → TUI 需要 AUN CLI 工具，请确认源码目录包含 aun/aun_cli.py');
-    console.error('  → 安装: pip3 install aun-core && 从源码仓库获取 aun_cli.py');
+    console.error('  → 安装: pip3 install -U aun-core && 从源码仓库获取 aun_cli.py');
     process.exit(1);
   }
   const child = spawn(pythonBin, [cliScript, '-a', aun.owner, '-t', aun.aid], { stdio: 'inherit' });
@@ -1342,6 +1344,10 @@ export async function main(args: string[]) {
         await cmdInitFeishu();
       } else if (args[1] === 'aun') {
         await cmdInitAun();
+      } else if (args[1] === 'dingtalk') {
+        await cmdInitDingtalk();
+      } else if (args[1] === 'qqbot') {
+        await cmdInitQQBot();
       } else {
         await cmdInit();
       }
@@ -1380,6 +1386,8 @@ Commands:
   init          创建配置文件 (${resolvePaths().config})
   init feishu   飞书扫码登录并写入配置
   init wechat   微信扫码登录并写入配置
+  init dingtalk 钉钉扫码登录并写入配置
+  init qqbot    QQ 机器人扫码绑定并写入配置
   init aun      AUN (AgentUnin.Network) 配置
   start         启动服务 (默认)
   stop          停止服务

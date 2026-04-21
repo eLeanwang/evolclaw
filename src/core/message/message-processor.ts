@@ -167,7 +167,6 @@ export class MessageProcessor {
     const agent = this.getAgent(session.agentId);
 
     const monitorEnabled = this.config.idleMonitor?.enabled !== false;
-    const safeModeThreshold = this.config.idleMonitor?.safeModeThreshold ?? 3;
     const showIdleMonitor = policy.showIdleMonitor(chatType, identityRole);
 
     // 计算是否抑制中间输出（工具活动 + 流式文本）
@@ -243,21 +242,20 @@ export class MessageProcessor {
         try {
           const errorType = classifyError(error);
 
-          // 上下文过长是可恢复错误，不累计触发安全模式
+          // 上下文过长是可恢复错误，不累计错误计数
           if (errorType === ErrorType.CONTEXT_TOO_LONG) {
-            logger.info(`[MessageProcessor] Context too long error, skipping safe mode accumulation`);
-          // 认证错误（401 / Invalid API Key）不是会话问题，安全模式无法修复，不累计
+            logger.info(`[MessageProcessor] Context too long error, skipping error accumulation`);
+          // 认证错误（401 / Invalid API Key）不是会话问题，不累计
           } else if (errorType === ErrorType.AUTH_ERROR) {
-            logger.info(`[MessageProcessor] Auth error (invalid API key), skipping safe mode accumulation`);
-          // API 错误（5xx / 算力池切换等）是平台暂时性问题，安全模式无法修复，不累计
+            logger.info(`[MessageProcessor] Auth error (invalid API key), skipping error accumulation`);
+          // API 错误（5xx / 算力池切换等）是平台暂时性问题，不累计
           } else if (errorType === ErrorType.API_ERROR) {
-            logger.info(`[MessageProcessor] API error, skipping safe mode accumulation`);
+            logger.info(`[MessageProcessor] API error, skipping error accumulation`);
           } else if (!policy.accumulateErrors(chatType, identityRole)) {
-            logger.info(`[MessageProcessor] Non-accumulating error (chatType=${chatType}, identity=${identityRole}), skipping safe mode accumulation`);
+            logger.info(`[MessageProcessor] Non-accumulating error (chatType=${chatType}, identity=${identityRole}), skipping error accumulation`);
           } else {
             const prefixed = prefixErrorType(ERROR_PREFIX.INFRA, errorType);
-            const newCount = await this.sessionManager.recordError(session.id, prefixed, error.message);
-            await this.checkSafeMode(session, message.channelId, channelInfo.adapter, safeModeThreshold, newCount, message);
+            await this.sessionManager.recordError(session.id, prefixed, error.message);
           }
         } catch (statusError) {
           logger.error('[MessageProcessor] Failed to update health status:', statusError);
@@ -275,52 +273,7 @@ export class MessageProcessor {
     return message.replyContext;
   }
 
-  /**
-   * 检查是否需要进入安全模式（safeModeThreshold 为 0 时跳过）
-   */
-  private async checkSafeMode(
-    session: Session,
-    channelId: string,
-    adapter: ChannelAdapter,
-    safeModeThreshold: number,
-    consecutiveErrors: number,
-    message: Message
-  ): Promise<void> {
-    if (safeModeThreshold <= 0) return;
-
-    const health = await this.sessionManager.getHealthStatus(session.id);
-    const sendOpts = this.getReplyContext(message);
-    const isThread = !!session.threadId;
-    if (consecutiveErrors >= safeModeThreshold && !health.safeMode) {
-      await this.sessionManager.setSafeMode(session.id, true);
-      logger.warn(`[MessageProcessor] Session ${session.id} entered safe mode after ${consecutiveErrors} errors`);
-      this.eventBus.publish({ type: 'session:safe-mode-entered', sessionId: session.id, consecutiveErrors });
-
-      const suggestions = isThread
-        ? `1. /repair - 检查并修复会话（推荐，保留历史）\n2. /clear - 清空会话历史\n3. /status - 查看详细状态`
-        : `1. /repair - 检查并修复会话（推荐，保留历史）\n2. /new [名称] - 创建新会话（清空历史）\n3. /status - 查看详细状态`;
-
-      await adapter.sendText(
-        channelId,
-        `\u26a0\ufe0f 安全模式已启用（连续 ${consecutiveErrors} 次异常）
-
-当前限制：
-- 无法记住之前的对话
-- 每次提问需要提供完整上下文
-
-建议操作：
-${suggestions}`,
-        sendOpts
-      );
-    } else if (safeModeThreshold >= 2 && consecutiveErrors === safeModeThreshold - 1) {
-      await adapter.sendText(
-        channelId,
-        `\u26a0\ufe0f 检测到异常（${consecutiveErrors}/${safeModeThreshold}）\n\n如果问题持续，系统将自动进入安全模式。建议使用 /status 查看状态。`,
-        sendOpts
-      );
-    }
-  }
-
+  /** 自动安全模式已禁用：仅保留错误计数，不再自动切换状态 */
   private async _processMessageInternal(message: Message, session: Session, absoluteProjectPath: string, resetTimer: (eventType?: string, toolName?: string) => void, shouldSuppress: () => boolean): Promise<void> {
     const messageId = `${message.channel}_${message.channelId}_${message.timestamp || Date.now()}`;
     const channelKey = session.metadata?.channelName || message.channel;
@@ -677,15 +630,6 @@ ${suggestions}`,
       // Flush 剩余内容（文件标记已在 flush 时自动移除）
       await flusher.flush(true);
 
-      // 安全模式尾部提示：如果当前会话处于安全模式，追加提醒
-      const healthStatus = await this.sessionManager.getHealthStatus(session.id);
-      if (healthStatus.safeMode) {
-        const hint = session.threadId
-          ? '\n\n\u26a0\ufe0f 当前处于安全模式（无上下文记忆）。使用 /repair 修复 或 /clear 清空会话'
-          : '\n\n\u26a0\ufe0f 当前处于安全模式（无上下文记忆）。使用 /repair 修复 或 /new 新建会话';
-        await adapter.sendText(message.channelId, hint, this.getReplyContext(message));
-      }
-
       // 清理 activeStreams（正常完成）
       agent.cleanupStream(streamKey);
 
@@ -709,15 +653,13 @@ ${suggestions}`,
           terminalReason: streamResult.terminalReason
         });
 
-        // 仅系统级 subtype 累计安全模式（权限拒绝、max turns 等用户操作不累计）
+        // 系统级 subtype 仍累计错误计数，供 /status 诊断使用
         if (isInfraError(rawSubtype, streamResult.terminalReason)) {
           const chatType = message.chatType || 'private';
           const identityRole = session.identity?.role || 'anonymous';
-          const safeModeThreshold = this.config.idleMonitor?.safeModeThreshold ?? 3;
           const { policy } = channelInfo;
           if (policy.accumulateErrors(chatType, identityRole)) {
-            const newCount = await this.sessionManager.recordError(session.id, errorType, errorSummary);
-            await this.checkSafeMode(session, message.channelId, adapter, safeModeThreshold, newCount, message);
+            await this.sessionManager.recordError(session.id, errorType, errorSummary);
           }
         }
 

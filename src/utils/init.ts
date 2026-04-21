@@ -450,6 +450,8 @@ export async function cmdInit() {
       console.log('  1. 飞书 (Feishu)');
       console.log('  2. 微信 (WeChat)');
       console.log('  3. AUN (AgentUnin.Network)');
+      console.log('  4. 钉钉 (DingTalk)');
+      console.log('  5. QQ 机器人 (QQBot)');
       const channelChoice = (await ask(rl, '请选择 [1]: ')).trim() || '1';
 
       if (channelChoice === '1') {
@@ -509,6 +511,36 @@ export async function cmdInit() {
         channelConfigured = true;
         config.channels.defaultChannel = 'aun';
 
+      } else if (channelChoice === '4') {
+        const { runDingtalkQrFlowSimple } = await import('./init-channel.js');
+        const result = await runDingtalkQrFlowSimple();
+        if (!result) {
+          console.log('已取消');
+          return;
+        }
+        config.channels.dingtalk = {
+          enabled: true,
+          clientId: result.clientId,
+          clientSecret: result.clientSecret,
+        };
+        channelConfigured = true;
+        config.channels.defaultChannel = 'dingtalk';
+
+      } else if (channelChoice === '5') {
+        const { runQQBotBindFlowSimple } = await import('./init-channel.js');
+        const result = await runQQBotBindFlowSimple();
+        if (!result) {
+          console.log('已取消');
+          return;
+        }
+        config.channels.qqbot = {
+          enabled: true,
+          appId: result.appId,
+          clientSecret: result.clientSecret,
+        };
+        channelConfigured = true;
+        config.channels.defaultChannel = 'qqbot';
+
       } else {
         console.log('  无效选择，请重新输入');
       }
@@ -551,7 +583,7 @@ export async function selectInstance(
   channelType: string,
   instances: Array<{ name: string; [key: string]: any }>
 ): Promise<InstanceChoice | null> {
-  const typeLabel = channelType === 'feishu' ? '飞书' : channelType === 'wechat' ? '微信' : 'AUN';
+  const typeLabel = channelType === 'feishu' ? '飞书' : channelType === 'wechat' ? '微信' : channelType === 'dingtalk' ? '钉钉' : channelType === 'qqbot' ? 'QQ机器人' : 'AUN';
   console.log(`\n发现已有 ${typeLabel} 机器人：`);
   const letters = 'abcdefghijklmnopqrstuvwxyz';
   for (let i = 0; i < instances.length; i++) {

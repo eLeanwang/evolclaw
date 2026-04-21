@@ -828,6 +828,12 @@ export class SessionManager {
     return row?.channel_id;
   }
 
+  async getSessionById(sessionId: string): Promise<Session | undefined> {
+    const row = this.db.prepare('SELECT * FROM sessions WHERE id = ? AND deleted_at IS NULL').get(sessionId) as any;
+    if (!row) return undefined;
+    return this.rowToSession(row);
+  }
+
   async getActiveSession(channel: string, channelId: string): Promise<Session | undefined> {
     const row = this.db.prepare(`
       SELECT * FROM sessions

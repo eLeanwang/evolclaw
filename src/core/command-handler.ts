@@ -127,17 +127,18 @@ function formatIdleTime(ms: number): string {
 }
 
 // 支持的命令列表
-const commands = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/effort', '/agent', '/slist', '/session', '/rename', '/stop', '/clear', '/compact', '/repair', '/safe', '/fork', '/del', '/perm', '/send', '/check'];
+const commands = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/effort', '/agent', '/slist', '/session', '/rename', '/stop', '/clear', '/compact', '/repair', '/safe', '/fork', '/del', '/perm', '/send', '/check', '/rewind'];
 
 // 命令别名映射
 const aliases: Record<string, string> = {
   '/p': '/project',
   '/s': '/session',
-  '/name': '/rename'
+  '/name': '/rename',
+  '/rw': '/rewind'
 };
 
 // 命令快速路径前缀（所有命令都不进入消息队列）
-const quickCommandPrefixes = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/effort', '/agent', '/slist', '/session', '/rename', '/repair', '/fork', '/stop', '/clear', '/compact', '/safe', '/del', '/perm', '/send', '/check', '/p ', '/s ', '/name '];
+const quickCommandPrefixes = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/effort', '/agent', '/slist', '/session', '/rename', '/repair', '/fork', '/stop', '/clear', '/compact', '/safe', '/del', '/perm', '/send', '/check', '/p ', '/s ', '/name ', '/rewind', '/rw', '/rw '];
 
 export class CommandHandler {
   private adapters = new Map<string, ChannelAdapter>();
@@ -407,6 +408,7 @@ export class CommandHandler {
         { cmd: '/del', args: '<name>', label: '删除指定会话' },
         ...(isAdmin ? [
           { cmd: '/fork', args: '[name]', label: '分支当前会话' },
+          { cmd: '/rewind', args: '[N] [chat|file|all]', label: '查看历史/回退会话 (别名: /rw)' },
           { cmd: '/compact', label: '压缩会话上下文' },
         ] : []),
       ]
@@ -524,7 +526,7 @@ export class CommandHandler {
     }
 
     // 空闲检查：某些命令需要等待当前会话空闲
-    const requiresIdle = ['/new', '/session', '/clear', '/compact', '/safe', '/repair', '/fork', '/bind', '/project', '/agent'];
+    const requiresIdle = ['/new', '/session', '/clear', '/compact', '/safe', '/repair', '/fork', '/bind', '/project', '/agent', '/rewind'];
     if (requiresIdle.some(cmd => normalizedContent === cmd || normalizedContent.startsWith(cmd + ' '))) {
       if (threadId) {
         // 话题中：检查话题 session 是否在处理（不创建）
@@ -606,6 +608,7 @@ export class CommandHandler {
         '  /name <新名称> - 重命名当前会话',
         '  /del <名称> - 删除指定会话（仅解绑，不删除文件）',
         '  /fork [名称] - 分支当前会话（从当前对话点创建分支）',
+        '  /rewind [N] [chat|file|all] - 查看历史/回退会话（别名: /rw）',
         '  /compact - 压缩会话上下文（减少 token 用量）',
         '',
         '🤖 Agent 与模型：',
@@ -1296,9 +1299,6 @@ export class CommandHandler {
         if (health.consecutiveErrors > 0) {
           lines.push(`异常计数: ${health.consecutiveErrors}`);
         }
-        if (health.safeMode) {
-          lines.push(`安全模式: 是 ⚠️`);
-        }
         lines.push(
           `最后成功: ${timeStr}`,
           `${session.agentId}会话: ${session.agentSessionId || '(未初始化)'}`,
@@ -1313,15 +1313,6 @@ export class CommandHandler {
           `会话轮数: ${sessionTurns}`,
           `最后活跃: ${timeStr}`
         );
-      }
-
-      if (health.safeMode) {
-        lines.push('');
-        lines.push('⚠️ 当前处于安全模式（历史上下文已禁用）');
-        lines.push('');
-        lines.push('退出方式：');
-        lines.push('1. /new [名称] - 创建新会话（清空历史）');
-        lines.push('2. 联系管理员使用 /repair 检查并修复会话');
       }
 
       if (health.lastError) {
@@ -2361,25 +2352,58 @@ export class CommandHandler {
       }
     }
 
-    // /repair 命令：检查并修复会话
+    // /rewind 命令：查看历史 / 回退会话
+    if (normalizedContent === '/rewind' || normalizedContent.startsWith('/rewind ')) {
+      const result = await this.ensureSession(channel, channelId, threadId);
+      if ('error' in result) return result.error;
+      const { session } = result;
+
+      const rewindAgent = this.getAgent(session.agentId);
+
+      if (rewindAgent.name !== 'claude') {
+        return '❌ /rewind 仅支持 Claude 后端';
+      }
+      if (!session.agentSessionId) {
+        return '❌ 当前会话无历史记录\n\n请先发送一条消息，然后再使用 /rewind';
+      }
+      if (!rewindAgent.getSessionMessages) {
+        return '❌ 当前 Agent 不支持 /rewind';
+      }
+
+      const args = normalizedContent.slice('/rewind'.length).trim();
+
+      if (!args) {
+        return await this.handleRewindList(session, rewindAgent);
+      }
+
+      const parts = args.split(/\s+/);
+      const turnNum = parseInt(parts[0], 10);
+      if (isNaN(turnNum) || turnNum < 1) {
+        return '❌ 无效轮次，用法：/rewind <N> chat|file|all';
+      }
+
+      const mode = parts[1]?.toLowerCase();
+      if (!mode) {
+        return `❌ 请指定回退模式：/rewind ${turnNum} chat | file | all`;
+      }
+      if (!['chat', 'file', 'all'].includes(mode)) {
+        return `❌ 无效模式 "${mode}"，可选：chat | file | all`;
+      }
+
+      return await this.handleRewind(session, rewindAgent, turnNum, mode as 'chat' | 'file' | 'all');
+    }
+
+    // /repair 命令：检查并修复会话文件
     if (normalizedContent === '/repair') {
       const repairResult = await this.ensureSession(channel, channelId, threadId);
       if ('error' in repairResult) return repairResult.error;
-      const { session: repairSession } = repairResult;
-
-      const health = await this.sessionManager.getHealthStatus(repairSession.id);
-      if (!health.safeMode) {
-        return `当前不在安全模式，无需修复\n\n如需进入安全模式，请使用 /safe`;
-      }
-
-      const repairAgent = this.getAgent(repairSession.agentId);
+      const { session: repairSession } = repairResult;      const repairAgent = this.getAgent(repairSession.agentId);
       const { checkSessionFile, backupSessionFile } = await import('./session/session-file-health.js');
 
       try {
         if (!repairSession.agentSessionId) {
           await this.sessionManager.resetHealthStatus(repairSession.id);
-          this.eventBus.publish({ type: 'session:safe-mode-exited', sessionId: repairSession.id, method: 'repair' });
-          return `✓ 修复完成，已退出安全模式\n\n修复内容：\n- 未发现问题（新会话）\n- 已重置异常计数器\n- 已恢复正常会话模式`;
+          return `✓ 修复完成\n\n修复内容：\n- 未发现问题（新会话）\n- 已重置异常计数器`;
         }
 
         // 通过 agent 定位 session 文件
@@ -2388,8 +2412,7 @@ export class CommandHandler {
         if (!sessionFile) {
           // 文件不存在（已被删除或从未创建），直接重置
           await this.sessionManager.resetHealthStatus(repairSession.id);
-          this.eventBus.publish({ type: 'session:safe-mode-exited', sessionId: repairSession.id, method: 'repair' });
-          return `✓ 修复完成，已退出安全模式\n\n修复内容：\n- 会话文件不存在（可能已被清理）\n- 已重置异常计数器\n- 已恢复正常会话模式`;
+          return `✓ 修复完成\n\n修复内容：\n- 会话文件不存在（可能已被清理）\n- 已重置异常计数器`;
         }
 
         const healthCheck = await checkSessionFile(sessionFile);
@@ -2401,48 +2424,158 @@ export class CommandHandler {
           await this.sessionManager.updateAgentSessionIdBySessionId(repairSession.id, '');
           repairAgent.updateSessionId(repairSession.id, '');
           await this.sessionManager.resetHealthStatus(repairSession.id);
-          this.eventBus.publish({ type: 'session:safe-mode-exited', sessionId: repairSession.id, method: 'repair' });
 
-          return `✓ 修复完成，已退出安全模式\n\n检测到问题：\n${healthCheck.issues.map((i: string) => `- ${i}`).join('\n')}\n\n修复操作：\n- 已备份损坏文件\n- 已删除损坏文件\n- 已重置异常计数器\n\n备份位置：${backupPath}`;
+          return `✓ 修复完成\n\n检测到问题：\n${healthCheck.issues.map((i: string) => `- ${i}`).join('\n')}\n\n修复操作：\n- 已备份损坏文件\n- 已删除损坏文件\n- 已重置异常计数器\n\n备份位置：${backupPath}`;
         }
 
         if (healthCheck.issues.length > 0) {
           await this.sessionManager.resetHealthStatus(repairSession.id);
-          this.eventBus.publish({ type: 'session:safe-mode-exited', sessionId: repairSession.id, method: 'repair' });
           return `⚠️ 检测到问题：\n${healthCheck.issues.map((i: string) => `- ${i}`).join('\n')}\n\n建议使用 /new 创建新会话\n\n已重置异常计数器，可继续使用当前会话。`;
         }
 
         await this.sessionManager.resetHealthStatus(repairSession.id);
-        this.eventBus.publish({ type: 'session:safe-mode-exited', sessionId: repairSession.id, method: 'repair' });
-        return `✓ 修复完成，已退出安全模式\n\n修复内容：\n- 未发现问题\n- 已重置异常计数器\n- 已恢复正常会话模式`;
+        return `✓ 修复完成\n\n修复内容：\n- 未发现问题\n- 已重置异常计数器`;
       } catch (error: any) {
         logger.error('[Repair] Failed:', error);
         return `❌ 修复失败: ${error.message}`;
       }
     }
 
-    // /safe 命令：手动进入安全模式
+    // /safe 命令：安全模式已禁用
     if (normalizedContent === '/safe') {
-      const safeResult = await this.ensureSession(channel, channelId, threadId);
-      if ('error' in safeResult) return safeResult.error;
-      const { session: safeSession } = safeResult;
-
-      await this.sessionManager.setSafeMode(safeSession.id, true);
-
-      this.eventBus.publish({ type: 'session:safe-mode-entered', sessionId: safeSession.id, reason: 'manual' });
-
-      return `✓ 已进入安全模式
-
-当前行为：
-- 暂时不加载会话历史（每次对话独立）
-- 所有功能正常可用（读写文件、执行命令等）
-- 不会丢失历史数据（仍保存在 .claude/ 目录）
-
-退出安全模式：
-- 使用 /repair 检查并修复会话
-- 使用 /new 创建全新会话`;
+      return `ℹ️ 安全模式已禁用\n\n如需重置会话，请使用 /new 创建新会话。`;
     }
 
     return null;
+  }
+
+  // ── /rewind helpers ──
+
+  private async handleRewindList(session: Session, agent: AgentRunnerFull): Promise<string> {
+    try {
+      const messages = await agent.getSessionMessages!(session.agentSessionId!, session.projectPath);
+      const turns = this.buildTurnList(messages);
+
+      if (turns.length === 0) {
+        return '📋 当前会话暂无对话记录';
+      }
+
+      const lines = turns.map(t => `#${t.index} ${t.userContent}`);
+      return [
+        `📋 会话历史 (共 ${turns.length} 轮)`,
+        '',
+        ...lines,
+        '',
+        '💡 /rewind <N> chat|file|all',
+      ].join('\n');
+    } catch (error) {
+      logger.error('[CommandHandler] Failed to read session messages:', error);
+      return `❌ 读取会话历史失败: ${error instanceof Error ? error.message : '未知错误'}`;
+    }
+  }
+
+  private async handleRewind(
+    session: Session,
+    agent: AgentRunnerFull,
+    turnNum: number,
+    mode: 'chat' | 'file' | 'all',
+  ): Promise<string> {
+    try {
+      const messages = await agent.getSessionMessages!(session.agentSessionId!, session.projectPath);
+      const turns = this.buildTurnList(messages);
+
+      if (turnNum > turns.length) {
+        return `❌ 轮次超出范围，当前共 ${turns.length} 轮`;
+      }
+      if (turnNum === turns.length) {
+        return '❌ 已在最新一轮，无需回退';
+      }
+
+      const target = turns[turnNum - 1];
+      const results: string[] = [];
+
+      // 文件回退（立即执行）
+      if (mode === 'file' || mode === 'all') {
+        if (!agent.rewindFiles) {
+          return '❌ 当前 Agent 不支持文件回退';
+        }
+        const fileResult = await agent.rewindFiles(session.agentSessionId!, session.projectPath, target.userUuid);
+        if (!fileResult.canRewind) {
+          if (mode === 'file') {
+            return `❌ 当前会话无文件快照，无法回退文件${fileResult.error ? `\n原因: ${fileResult.error}` : ''}`;
+          }
+          results.push(`⚠️ 文件回退失败${fileResult.error ? `: ${fileResult.error}` : '（无文件快照）'}`);
+        } else {
+          const count = fileResult.filesChanged?.length || 0;
+          results.push(`✅ 已恢复文件到第 ${turnNum} 轮的状态（恢复了 ${count} 个文件）`);
+        }
+      }
+
+      // 对话回退（延迟执行 — 下次发消息时生效）
+      if (mode === 'chat' || mode === 'all') {
+        const meta = { ...(session.metadata || {}), resumeAt: target.assistantUuid };
+        await this.sessionManager.updateSession(session.id, { metadata: meta });
+
+        const discarded = turns.length - turnNum;
+        results.push(
+          `✅ 已标记对话回退到第 ${turnNum} 轮："${target.userContent}"`,
+          `下次发言将从此处继续（后续 ${discarded} 轮对话将被丢弃）`
+        );
+      }
+
+      this.eventBus.publish({
+        type: 'session:rewind',
+        sessionId: session.id,
+        turnNum,
+        mode,
+      });
+
+      return results.join('\n');
+    } catch (error) {
+      logger.error('[CommandHandler] Rewind failed:', error);
+      return `❌ 回退失败: ${error instanceof Error ? error.message : '未知错误'}`;
+    }
+  }
+
+  private buildTurnList(messages: Array<{ type: string; uuid: string; message: unknown }>): Array<{
+    index: number; userContent: string; userUuid: string; assistantUuid: string;
+  }> {
+    const turns: Array<{ index: number; userContent: string; userUuid: string; assistantUuid: string }> = [];
+    let pendingUser: { content: string; uuid: string } | null = null;
+
+    for (const msg of messages) {
+      if (msg.type === 'user') {
+        const m = msg.message as any;
+        if (Array.isArray(m?.content) && m.content.every((c: any) => c.type === 'tool_result')) {
+          continue;
+        }
+        const content = this.extractUserContent(msg.message);
+        if (content) {
+          pendingUser = { content, uuid: msg.uuid };
+        }
+      } else if (msg.type === 'assistant' && pendingUser) {
+        turns.push({
+          index: turns.length + 1,
+          userContent: pendingUser.content,
+          userUuid: pendingUser.uuid,
+          assistantUuid: msg.uuid,
+        });
+        pendingUser = null;
+      }
+    }
+    return turns;
+  }
+
+  private extractUserContent(message: unknown): string {
+    const m = message as any;
+    let text = '';
+    if (typeof m?.content === 'string') {
+      text = m.content;
+    } else if (Array.isArray(m?.content)) {
+      text = m.content.filter((b: any) => b.type === 'text').map((b: any) => b.text).join(' ');
+    }
+    text = text.trim().replace(/\s+/g, ' ');
+    if (!text) return '';
+    return text.length > 50 ? text.substring(0, 50) + '…' : text;
   }
 }
