@@ -1,6 +1,6 @@
 import { query, forkSession as sdkForkSession, getSessionMessages as sdkGetSessionMessages } from '@anthropic-ai/claude-agent-sdk';
 import { ensureDir, resolveAnthropicConfig } from '../config.js';
-import type { Config, ChannelAdapter, ReplyContext, InteractionRequest, InteractionField } from '../types.js';
+import type { Config, ChannelAdapter, ReplyContext, InteractionRequest, Message } from '../types.js';
 import type { PermissionGateway, PermissionDecision } from '../core/permission.js';
 import path from 'path';
 import fs from 'fs';
@@ -17,6 +17,10 @@ export interface PermissionContext {
   channelId?: string;
   replyContext?: ReplyContext;
   interactionRouter?: InteractionRouter;
+  /** 一次性消息拦截：注册后下一条消息不入队不 interrupt，直接回调 */
+  interceptNextMessage?: (sessionKey: string, handler: (message: Message) => void) => void;
+  /** 取消消息拦截 */
+  cancelIntercept?: (sessionKey: string) => void;
 }
 
 // ── SDK 消息流（Claude Agent SDK 专有格式）──
@@ -163,7 +167,7 @@ export interface AgentRunnerFull {
 
   // 权限回调（MessageProcessor 需要）
   setSendPrompt(fn: (text: string) => Promise<void>): void;
-  setPermissionContext?(context: PermissionContext): void;
+  setPermissionContext?(sessionId: string, context: PermissionContext): void;
   setMode(mode: string): void;
   getMode(): string;
 
@@ -264,7 +268,7 @@ export class AgentRunner {
   private onCompactStart?: (sessionId: string) => void;
   private permissionGateway?: PermissionGateway;
   private sendPromptFn?: (text: string) => Promise<void>;
-  private permissionContext?: PermissionContext;
+  private permissionContexts = new Map<string, PermissionContext>();
 
   constructor(
     apiKey: string,
@@ -341,8 +345,8 @@ export class AgentRunner {
     this.sendPromptFn = fn;
   }
 
-  setPermissionContext(context: PermissionContext): void {
-    this.permissionContext = context;
+  setPermissionContext(sessionId: string, context: PermissionContext): void {
+    this.permissionContexts.set(sessionId, context);
   }
 
   private toSdkPermissionMode(): 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan' | 'dontAsk' | 'auto' {
@@ -396,7 +400,7 @@ export class AgentRunner {
   }
 
   /**
-   * 处理 AskUserQuestion 工具调用：将 SDK 问题转换为 Feishu 表单卡片，收集用户答案
+   * 处理 AskUserQuestion 工具调用：将 SDK 问题转换为飞书 action 卡片，逐个收集用户答案
    * SDK 期望返回 updatedInput 中包含 answers 字段：{ [questionText]: selectedLabel | selectedLabel[] }
    */
   private async handleAskUserQuestion(
@@ -412,102 +416,124 @@ export class AgentRunner {
     }>;
 
     // 没有交互上下文（无渠道适配器），回退到纯文本
-    if (!this.permissionContext?.adapter?.sendInteraction || !this.permissionContext?.channelId) {
+    const permCtx = this.permissionContexts.get(sessionId);
+    if (!permCtx?.adapter?.sendInteraction || !permCtx?.channelId) {
       return this.handleAskUserQuestionFallback(input, questions);
     }
 
-    const requestId = `ask-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const answers: Record<string, string | string[]> = {};
 
-    // 将 SDK questions 转换为 FormInteraction fields
-    const fields: InteractionField[] = questions.map((q, i) => {
-      const fieldOptions = q.options.map(opt => ({
-        value: opt.label,
-        label: opt.label,
-        description: opt.description,
-      }));
+    // 闭包捕获当前 sendPromptFn，避免异步等待期间被其他会话覆盖
+    const sendPrompt = this.sendPromptFn;
 
-      if (q.multiSelect) {
-        return {
-          type: 'multi-select' as const,
-          key: `q_${i}`,
-          label: q.question,
-          options: fieldOptions,
-        };
+    // 逐个 question 发送卡片并等待用户选择
+    for (let i = 0; i < questions.length; i++) {
+      const q = questions[i];
+
+      const requestId = `ask-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const cardTitle = q.header ? `💬 ${q.header}` : `💬 问题 ${i + 1}/${questions.length}`;
+
+      // 统一使用 action 按钮卡片（单选 / 多选均用按钮）
+      const bodyLines = [q.question];
+      if (q.options.some(opt => opt.description)) {
+        bodyLines.push('');
+        q.options.forEach((opt, idx) => {
+          bodyLines.push(`${idx + 1}. **${opt.label}**${opt.description ? ` — ${opt.description}` : ''}`);
+        });
       }
-      return {
-        type: 'select' as const,
-        key: `q_${i}`,
-        label: q.question,
-        options: fieldOptions,
-        required: true,
+
+      const interaction: InteractionRequest = {
+        type: 'interaction',
+        id: requestId,
+        kind: {
+          kind: 'action',
+          title: cardTitle,
+          body: bodyLines.join('\n'),
+          buttons: [
+            ...q.options.map(opt => ({
+              key: opt.label,
+              label: opt.label,
+              style: 'default' as const,
+            })),
+            ...(permCtx.interceptNextMessage ? [{
+              key: '_custom_input',
+              label: '✏️ 手动输入',
+              style: 'default' as const,
+            }] : []),
+          ],
+        },
+        channelId: permCtx.channelId,
+        sessionId,
+        expiresAt: Date.now() + 5 * 60 * 1000,
       };
-    });
 
-    const interaction: InteractionRequest = {
-      type: 'interaction',
-      id: requestId,
-      kind: {
-        kind: 'form',
-        title: '💬 请选择',
-        fields,
-        submitLabel: '提交',
-        submitStyle: 'primary',
-        cancelable: true,
-      },
-      channelId: this.permissionContext.channelId,
-      sessionId,
-      expiresAt: Date.now() + 5 * 60 * 1000,
-    };
-
-    try {
-      const result = await this.permissionContext.adapter.sendInteraction(
-        this.permissionContext.channelId,
-        interaction,
-        this.permissionContext.replyContext
-      );
-
-      if (!result) {
-        return this.handleAskUserQuestionFallback(input, questions);
+      let cardSent = false;
+      try {
+        const result = await permCtx.adapter.sendInteraction(
+          permCtx.channelId,
+          interaction,
+          permCtx.replyContext
+        );
+        cardSent = !!result;
+      } catch (err) {
+        logger.warn(`[AgentRunner] AskUserQuestion card send failed for q${i}:`, err);
       }
-    } catch (err) {
-      logger.warn('[AgentRunner] AskUserQuestion sendInteraction failed, falling back to text:', err);
-      return this.handleAskUserQuestionFallback(input, questions);
-    }
 
-    // 等待用户响应（通过 InteractionRouter）
-    return new Promise((resolve) => {
-      const timer = setTimeout(() => {
-        this.permissionContext?.interactionRouter?.cancel(requestId);
-        logger.info(`[AgentRunner] AskUserQuestion timeout for ${requestId}`);
-        // 超时：允许工具继续但不带答案，SDK 会处理缺失答案的情况
-        resolve({ behavior: 'allow' as const, updatedInput: input, decisionClassification: 'user_temporary' as const });
-      }, 5 * 60 * 1000);
-
-      this.permissionContext?.interactionRouter?.register(requestId, sessionId, (action: string, values?: Record<string, unknown>) => {
-        clearTimeout(timer);
-
-        if (action === 'cancel') {
-          resolve({ behavior: 'deny' as const, message: '用户取消了问题', decisionClassification: 'user_reject' as const });
-          return;
+      if (!cardSent) {
+        // 卡片发送失败，以纯文本展示选项并自动选推荐项
+        const firstLabel = q.options[0]?.label || '';
+        answers[q.question] = q.multiSelect ? [firstLabel] : firstLabel;
+        if (sendPrompt) {
+          const optText = q.options.map((o, idx) => `  ${idx + 1}. ${o.label}${o.description ? ` — ${o.description}` : ''}`).join('\n');
+          await sendPrompt(`💬 ${q.header || q.question}\n${q.header ? q.question + '\n' : ''}${optText}\n  → 自动选择：${firstLabel}`);
         }
+        continue;
+      }
 
-        // 从表单值中提取答案，映射回 SDK 期望的格式
-        const answers: Record<string, string> = {};
-        const formValues = values || {};
+      // 等待用户交互
+      const answer = await new Promise<string | string[] | null>((resolve) => {
+        const timer = setTimeout(() => {
+          permCtx?.interactionRouter?.cancel(requestId);
+          permCtx?.cancelIntercept?.(sessionId);
+          logger.info(`[AgentRunner] AskUserQuestion timeout for ${requestId}`);
+          resolve(null);
+        }, 5 * 60 * 1000);
 
-        questions.forEach((q, i) => {
-          const key = `q_${i}`;
-          const val = formValues[key];
-          if (val != null) {
-            // 多选时 val 是数组，SDK answers 期望逗号分隔或数组都可以
-            answers[q.question] = String(val);
+        permCtx?.interactionRouter?.register(requestId, sessionId, (action: string, values?: Record<string, any>) => {
+          clearTimeout(timer);
+          if (action === 'cancel') {
+            resolve(null);
+          } else if (action === '_custom_input' && permCtx.interceptNextMessage) {
+            // "手动输入"：发提示，拦截下一条消息
+            const sendHint = async () => {
+              if (sendPrompt) {
+                await sendPrompt('✏️ 请输入你的想法，回复后继续……');
+              }
+            };
+            sendHint().catch(() => {});
+            permCtx.interceptNextMessage(sessionId, (msg) => {
+              resolve(msg.content || null);
+            });
+          } else if (q.multiSelect) {
+            // multiSelect 按钮点击：包装为数组
+            resolve([action]);
+          } else {
+            resolve(action); // action = button key = option label
           }
         });
-
-        const updatedInput = { ...input, answers };
-        resolve({ behavior: 'allow' as const, updatedInput, decisionClassification: 'user_temporary' as const });
       });
-    });
+
+      if (answer === null) {
+        // 超时或取消，自动选第一项
+        const firstLabel = q.options[0]?.label || '';
+        answers[q.question] = q.multiSelect ? [firstLabel] : firstLabel;
+      } else {
+        answers[q.question] = answer;
+      }
+    }
+
+    const updatedInput = { ...input, answers };
+    return { behavior: 'allow' as const, updatedInput, decisionClassification: 'user_temporary' as const };
   }
 
   /**
@@ -517,15 +543,21 @@ export class AgentRunner {
     input: Record<string, unknown>,
     questions: Array<{ question: string; options: Array<{ label: string; description?: string }>; multiSelect?: boolean }>
   ): Promise<any> {
-    if (this.sendPromptFn && questions?.length) {
+    // 自动选择每个问题的第一个选项
+    const answers: Record<string, string> = {};
+    if (questions?.length) {
       const lines = questions.map(q => {
+        const firstLabel = q.options[0]?.label || '';
+        answers[q.question] = firstLabel;
         const optText = q.options.map((o, i) => `  ${i + 1}. ${o.label}${o.description ? ` — ${o.description}` : ''}`).join('\n');
-        return `${q.question}${q.multiSelect ? '（可多选）' : ''}\n${optText}`;
+        return `${q.question}\n${optText}\n  → 自动选择：${firstLabel}`;
       });
-      await this.sendPromptFn(`💬 请回答以下问题：\n\n${lines.join('\n\n')}`);
+      if (this.sendPromptFn) {
+        await this.sendPromptFn(`💬 以下问题已自动选择第一项：\n\n${lines.join('\n\n')}`);
+      }
     }
-    // 无法收集结构化答案，allow 让 SDK 继续（SDK 会将用户的下一条消息作为答案）
-    return { behavior: 'allow' as const, updatedInput: input, decisionClassification: 'user_temporary' as const };
+    const updatedInput = { ...input, answers };
+    return { behavior: 'allow' as const, updatedInput, decisionClassification: 'user_temporary' as const };
   }
 
   /**
@@ -620,9 +652,14 @@ export class AgentRunner {
           }
         }
 
+        // 剥离 SDK result 中混入的 <thinking>...</thinking> 块
+        const cleanResult = typeof event.result === 'string'
+          ? event.result.replace(/<thinking>[\s\S]*?<\/thinking>\s*/g, '').trim()
+          : event.result;
+
         yield {
           type: 'complete',
-          result: event.result,
+          result: cleanResult,
           subtype: event.subtype,
           isError: event.is_error,
           errors: event.errors,
@@ -797,7 +834,7 @@ export class AgentRunner {
         toolName,
         input,
         this.sendPromptFn,
-        this.permissionContext,
+        this.permissionContexts.get(sessionId),
         summary,
         options.decisionReason
       );
@@ -1051,6 +1088,7 @@ export class AgentRunner {
     this.activeSessions.delete(sessionId);
     this.activeStreams.delete(sessionId);
     this.interruptFns.delete(sessionId);
+    this.permissionContexts.delete(sessionId);
   }
 
   resolveSessionFile(agentSessionId: string, projectPath: string): string | null {

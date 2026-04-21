@@ -24,6 +24,7 @@ export class MessageQueue {
   private eventBus?: EventBus;
   private recentMessageIds = new Set<string>();
   private readonly DEDUP_WINDOW = 60_000; // 1 分钟窗口
+  private interceptors = new Map<string, (message: Message) => void>();
 
   constructor(handler: MessageHandler) {
     this.handler = handler;
@@ -35,6 +36,21 @@ export class MessageQueue {
 
   setEventBus(eventBus: EventBus): void {
     this.eventBus = eventBus;
+  }
+
+  /**
+   * 注册一次性消息拦截器：下一条来自 sessionKey 的消息不入队、不触发 interrupt，
+   * 直接传给 handler。用于 AskUserQuestion 的"手动输入"场景。
+   */
+  interceptNext(sessionKey: string, handler: (message: Message) => void): void {
+    this.interceptors.set(sessionKey, handler);
+  }
+
+  /**
+   * 取消拦截器（超时或卡片被其他方式回答时调用）
+   */
+  cancelIntercept(sessionKey: string): void {
+    this.interceptors.delete(sessionKey);
   }
 
   /**
@@ -69,6 +85,15 @@ export class MessageQueue {
   async enqueue(sessionKey: string, message: Message, projectPath: string, options?: { interruptible?: boolean }): Promise<void> {
     // 消息去重检查
     if (!this.shouldProcess(message)) {
+      return Promise.resolve();
+    }
+
+    // 拦截器检查：AskUserQuestion 等场景的一次性消息拦截
+    const interceptor = this.interceptors.get(sessionKey);
+    if (interceptor) {
+      this.interceptors.delete(sessionKey);
+      logger.debug(`[Queue] Message intercepted for ${sessionKey}`);
+      interceptor(message);
       return Promise.resolve();
     }
 

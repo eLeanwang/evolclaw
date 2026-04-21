@@ -4,6 +4,7 @@ import { type AgentRunnerFull, hasCompact, type AgentEvent } from '../../agents/
 import { SessionManager } from '../session/session-manager.js';
 import { StreamFlusher } from './stream-flusher.js';
 import { MessageCache } from './message-cache.js';
+import type { MessageQueue } from './message-queue.js';
 import { StreamIdleMonitor } from './stream-idle-monitor.js';
 import { logger } from '../../utils/logger.js';
 import { getErrorMessage, classifyError, ErrorType, ERROR_PREFIX, isInfraError, prefixErrorType, isRetryableError } from '../../utils/error-utils.js';
@@ -26,6 +27,7 @@ export class MessageProcessor {
   private defaultAgentId: string;
   private interruptedSessions = new Map<string, string>();  // sessionId → reason ('new_message' | 'stop' | ...)
   private interactionRouter?: InteractionRouter;
+  private messageQueue?: MessageQueue;
 
   /** 按 agentId 获取 agent，回退到默认 */
   getAgent(agentId?: string): AgentRunnerFull {
@@ -73,6 +75,10 @@ export class MessageProcessor {
 
   setInteractionRouter(router: InteractionRouter): void {
     this.interactionRouter = router;
+  }
+
+  setMessageQueue(queue: MessageQueue): void {
+    this.messageQueue = queue;
   }
 
   /**
@@ -374,11 +380,17 @@ export class MessageProcessor {
       });
 
       // 设置权限审批的交互上下文（支持交互卡片）
-      agent.setPermissionContext?.({
+      agent.setPermissionContext?.(session.id, {
         adapter,
         channelId: message.channelId,
         replyContext: this.getReplyContext(message),
         interactionRouter: this.interactionRouter,
+        interceptNextMessage: this.messageQueue
+          ? (sessionKey, handler) => this.messageQueue!.interceptNext(sessionKey, handler)
+          : undefined,
+        cancelIntercept: this.messageQueue
+          ? (sessionKey) => this.messageQueue!.cancelIntercept(sessionKey)
+          : undefined,
       });
 
       // 设置 per-session 权限模式（动态默认值：owner → bypass，guest → readonly）

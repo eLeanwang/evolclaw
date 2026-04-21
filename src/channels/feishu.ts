@@ -5,7 +5,7 @@ import imageType from 'image-type';
 import { sanitizeFileName, saveToUploads, validateImage } from '../utils/media-cache.js';
 import { logger } from '../utils/logger.js';
 import { hasRichContent, renderAllRichContent, checkDependencies } from '../utils/rich-content-renderer.js';
-import type { InteractionRequest, InteractionResponse, InteractionField, ActionInteraction, FormInteraction } from '../types.js';
+import type { InteractionRequest, InteractionResponse, ActionInteraction } from '../types.js';
 
 export interface FeishuConfig {
   appId: string;
@@ -345,13 +345,17 @@ export class FeishuChannel {
             delete response.values!._request_id;
             delete response.values!._action;
             delete response.values!._card_title;
+            const cardBody = value._card_body || '';
+            delete response.values!._card_body;
+            const btnLabel = value._btn_label || '';
+            delete response.values!._btn_label;
 
             logger.info(`[Feishu] Card action: requestId=${requestId}, action=${response.action}, values=${JSON.stringify(response.values)}`);
             this.interactionCallback?.(response);
 
             // Return updated card (buttons disabled + result shown)
             const cardTitle = value._card_title || '操作';
-            return this.buildResolvedCard(cardTitle, response);
+            return this.buildResolvedCard(cardTitle, response, cardBody, btnLabel);
           } catch (err) {
             logger.error('[Feishu] Failed to handle card action:', err);
           }
@@ -860,8 +864,16 @@ export class FeishuChannel {
       logger.info(`[Feishu] Sent interaction card: ${interaction.id}, messageId=${messageId}`);
       return messageId || false;
     } catch (error: any) {
-      const detail = error?.response?.data || error?.message || error;
-      logger.error(`[Feishu] Failed to send interaction card (id=${interaction.id}, replyTo=${options?.replyToMessageId || 'none'}):`, detail);
+      // 飞书 SDK 错误可能在 response.data、message 或 error 本身
+      const respData = error?.response?.data;
+      const detail = respData
+        ? JSON.stringify(respData)
+        : error?.message && error.message !== String(error)
+          ? error.message
+          : JSON.stringify(error, Object.getOwnPropertyNames(error));
+      logger.error(`[Feishu] Failed to send interaction card (id=${interaction.id}, replyTo=${options?.replyToMessageId || 'none'}): ${detail}`);
+      // 同时记录卡片内容以便调试
+      logger.debug(`[Feishu] Card payload for ${interaction.id}: ${JSON.stringify(buildInteractionCard(interaction))}`);
       return false;
     }
   }
@@ -878,7 +890,7 @@ export class FeishuChannel {
     }
   }
 
-  private buildResolvedCard(cardTitle: string, response: InteractionResponse): object | undefined {
+  private buildResolvedCard(cardTitle: string, response: InteractionResponse, cardBody?: string, btnLabel?: string): object | undefined {
     const action = response.action;
 
     const labelMap: Record<string, string> = {
@@ -886,25 +898,14 @@ export class FeishuChannel {
       'always': '🔓 已设为始终允许',
       'deny': '❌ 已拒绝',
       'cancel': '取消',
-      'submit': '✅ 已提交',
     };
-    const statusText = labelMap[action] || `✅ ${action}`;
+    const statusText = labelMap[action] || (btnLabel ? `✅ ${btnLabel}` : `✅ ${action}`);
 
-    const now = new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
-
-    // Build summary of selected values
+    // Build elements: original body only
     const elements: any[] = [];
-    if (response.values && action === 'submit') {
-      const entries = Object.entries(response.values).filter(([k]) => !k.startsWith('_'));
-      if (entries.length > 0) {
-        const lines = entries.map(([k, v]) => {
-          const display = Array.isArray(v) ? v.join(', ') : String(v);
-          return `**${k}**: ${display}`;
-        });
-        elements.push({ tag: 'markdown', content: lines.join('\n') });
-      }
+    if (cardBody) {
+      elements.push({ tag: 'markdown', content: cardBody });
     }
-    elements.push({ tag: 'markdown', content: `操作时间：${now}` });
 
     return {
       toast: {
@@ -944,10 +945,6 @@ export function buildInteractionCard(interaction: InteractionRequest): object | 
   if (kind.kind === 'action') {
     return buildActionCard(interaction.id, kind);
   }
-  if (kind.kind === 'form') {
-    return buildFormCard(interaction.id, kind);
-  }
-  // menu kind: not rendered as card (handled via menu.response JSON)
   return null;
 }
 
@@ -959,6 +956,10 @@ export function buildActionCard(requestId: string, action: ActionInteraction): o
     elements.push({ tag: 'markdown', content: action.body });
   }
 
+  // Build full card body for resolved state: original body + button labels
+  const btnLabels = action.buttons.map(btn => btn.label).join('  ·  ');
+  const fullCardBody = [action.body, btnLabels].filter(Boolean).join('\n\n');
+
   // Buttons row
   const buttons = action.buttons.map(btn => {
     const buttonEl: any = {
@@ -969,6 +970,8 @@ export function buildActionCard(requestId: string, action: ActionInteraction): o
         _request_id: requestId,
         _action: btn.key,
         _card_title: action.title,
+        _card_body: fullCardBody,
+        _btn_label: btn.label,
       },
     };
 
@@ -995,233 +998,6 @@ export function buildActionCard(requestId: string, action: ActionInteraction): o
     },
     elements,
   };
-}
-
-export function buildFormCard(requestId: string, form: FormInteraction): object {
-  // Use Feishu card v2 form container: all fields wrapped in a `form` tag.
-  // On submit, callback receives `action.form_value` with all field values keyed by `name`.
-  // This eliminates per-field callbacks when selecting dropdown options.
-
-  const formElements: any[] = [];
-
-  // Body text
-  if (form.body) {
-    formElements.push({ tag: 'markdown', content: form.body });
-  }
-
-  // Fields — inside form, components use `name` (not `value`) for identification
-  for (const field of form.fields) {
-    formElements.push(buildFormFieldElement(field));
-    if (field.hint) {
-      formElements.push({
-        tag: 'note',
-        elements: [{ tag: 'plain_text', content: field.hint }],
-      });
-    }
-  }
-
-  // Submit button (inside form, uses form_action_type)
-  const submitBtn: any = {
-    tag: 'button',
-    text: { tag: 'plain_text', content: form.submitLabel || '确认' },
-    type: form.submitStyle === 'danger' ? 'danger' : 'primary',
-    form_action_type: 'submit',
-    name: 'submit',
-    value: {
-      _request_id: requestId,
-      _action: 'submit',
-      _card_title: form.title,
-    },
-  };
-
-  if (form.submitConfirm) {
-    submitBtn.confirm = {
-      title: { tag: 'plain_text', content: form.submitConfirm.title },
-      text: { tag: 'plain_text', content: form.submitConfirm.body },
-    };
-  }
-
-  const actions: any[] = [submitBtn];
-
-  if (form.cancelable !== false) {
-    actions.push({
-      tag: 'button',
-      text: { tag: 'plain_text', content: '取消' },
-      type: 'default',
-      // Cancel is NOT form_action_type — it's a regular button that triggers callback directly
-      value: {
-        _request_id: requestId,
-        _action: 'cancel',
-        _card_title: form.title,
-      },
-    });
-  }
-
-  formElements.push({ tag: 'action', actions });
-
-  return {
-    schema: '2.0',
-    config: { update_multi: true },
-    header: {
-      template: 'blue',
-      title: { tag: 'plain_text', content: form.title },
-    },
-    body: {
-      elements: [
-        {
-          tag: 'form',
-          name: requestId,
-          elements: formElements,
-        },
-      ],
-    },
-  };
-}
-
-/** Build a field element for use inside a form container (uses `name` for identification) */
-export function buildFormFieldElement(field: InteractionField): any {
-  switch (field.type) {
-    case 'select': {
-      const options = field.options.map(opt => ({
-        text: { tag: 'plain_text', content: opt.label },
-        value: opt.value,
-      }));
-      const selectedOpt = field.options.find(opt => opt.selected);
-      return {
-        tag: 'select_static',
-        name: field.key,
-        placeholder: { tag: 'plain_text', content: field.placeholder || `选择${field.label}` },
-        options,
-        ...(selectedOpt ? { initial_option: selectedOpt.value } : {}),
-      };
-    }
-
-    case 'text': {
-      return {
-        tag: 'input',
-        name: field.key,
-        placeholder: { tag: 'plain_text', content: field.placeholder || `输入${field.label}` },
-        ...(field.defaultValue != null ? { default_value: String(field.defaultValue) } : {}),
-      };
-    }
-
-    case 'toggle': {
-      const checked = field.defaultValue ?? false;
-      return {
-        tag: 'select_static',
-        name: field.key,
-        placeholder: { tag: 'plain_text', content: field.label },
-        options: [
-          { text: { tag: 'plain_text', content: '开启' }, value: 'true' },
-          { text: { tag: 'plain_text', content: '关闭' }, value: 'false' },
-        ],
-        initial_option: checked ? 'true' : 'false',
-      };
-    }
-
-    case 'multi-select': {
-      const options = field.options.map(opt => ({
-        text: { tag: 'plain_text', content: opt.label },
-        value: opt.value,
-      }));
-      const selectedValues = field.options.filter(opt => opt.selected).map(opt => opt.value);
-      return {
-        tag: 'multi_select_static',
-        name: field.key,
-        placeholder: { tag: 'plain_text', content: `选择${field.label}` },
-        options,
-        ...(selectedValues.length > 0 ? { initial_options: selectedValues } : {}),
-      };
-    }
-
-    default:
-      return { tag: 'markdown', content: `[不支持的字段类型: ${(field as any).type}]` };
-  }
-}
-
-export function buildFieldElement(requestId: string, field: InteractionField): any {
-  switch (field.type) {
-    case 'select': {
-      const options = field.options.map(opt => ({
-        text: { tag: 'plain_text', content: opt.label },
-        value: opt.value,
-      }));
-
-      const selectedOpt = field.options.find(opt => opt.selected);
-
-      return {
-        tag: 'action',
-        actions: [{
-          tag: 'select_static',
-          placeholder: { tag: 'plain_text', content: field.placeholder || `选择${field.label}` },
-          options,
-          ...(selectedOpt ? { initial_option: selectedOpt.value } : {}),
-          value: {
-            _request_id: requestId,
-            _field_key: field.key,
-          },
-        }],
-      };
-    }
-
-    case 'text': {
-      // Feishu cards don't have a native text input component.
-      // Use a note element as placeholder label; actual input via form submit.
-      return {
-        tag: 'note',
-        elements: [
-          { tag: 'plain_text', content: `${field.label}: ${field.placeholder || '(请在提交时输入)'}` },
-        ],
-      };
-    }
-
-    case 'toggle': {
-      const checked = field.defaultValue ?? false;
-      return {
-        tag: 'action',
-        actions: [{
-          tag: 'select_static',
-          placeholder: { tag: 'plain_text', content: field.label },
-          options: [
-            { text: { tag: 'plain_text', content: '开启' }, value: 'true' },
-            { text: { tag: 'plain_text', content: '关闭' }, value: 'false' },
-          ],
-          initial_option: checked ? 'true' : 'false',
-          value: {
-            _request_id: requestId,
-            _field_key: field.key,
-          },
-        }],
-      };
-    }
-
-    case 'multi-select': {
-      // Feishu cards: use multi_select_static (checker)
-      const options = field.options.map(opt => ({
-        text: { tag: 'plain_text', content: opt.label },
-        value: opt.value,
-      }));
-
-      const selectedValues = field.options.filter(opt => opt.selected).map(opt => opt.value);
-
-      return {
-        tag: 'action',
-        actions: [{
-          tag: 'multi_select_static',
-          placeholder: { tag: 'plain_text', content: `选择${field.label}` },
-          options,
-          ...(selectedValues.length > 0 ? { initial_options: selectedValues } : {}),
-          value: {
-            _request_id: requestId,
-            _field_key: field.key,
-          },
-        }],
-      };
-    }
-
-    default:
-      return { tag: 'markdown', content: `[不支持的字段类型: ${(field as any).type}]` };
-  }
 }
 
 // ── Markdown 转换工具（合并自 markdown-to-feishu.ts）──

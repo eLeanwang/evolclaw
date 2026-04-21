@@ -598,7 +598,7 @@ export class SessionManager {
     return session;
   }
 
-  async updateSession(sessionId: string, updates: Partial<Pick<Session, 'chatType' | 'name' | 'metadata'>>): Promise<void> {
+  async updateSession(sessionId: string, updates: Partial<Pick<Session, 'chatType' | 'name' | 'metadata'>> & { agentSessionId?: string | null }): Promise<void> {
     const sets: string[] = [];
     const values: any[] = [];
     if (updates.chatType !== undefined) {
@@ -612,6 +612,10 @@ export class SessionManager {
     if (updates.metadata !== undefined) {
       sets.push('metadata = ?');
       values.push(updates.metadata ? JSON.stringify(updates.metadata) : null);
+    }
+    if ('agentSessionId' in updates) {
+      sets.push('claude_session_id = ?');
+      values.push(updates.agentSessionId ?? null);
     }
     if (sets.length === 0) return;
     sets.push('updated_at = ?');

@@ -178,13 +178,13 @@ export class StreamFlusher {
     if (this.diagEnabled) diag(this.instanceId, 'flushActivitiesOnly', { outputLen: output.length });
 
     if (output) {
+      this.sentContent = true;  // 同步标记，避免 timer flush 未 await 时的竞态
       const text = output;
       // chain 保持不断裂：单条失败不阻塞后续（catch → resolve）
       this.sendChain = this.sendChain
         .then(() => this.send(text, false, false))
         .catch(e => { logger.warn('[StreamFlusher] send failed:', e); });
       await this.sendChain;
-      this.sentContent = true;
       this.lastFlush = Date.now();
       this.flushCount++;
     }
@@ -227,6 +227,7 @@ export class StreamFlusher {
     if (this.diagEnabled) diag(this.instanceId, 'flush', { isFinal, outputLen: output.length, flushCount: this.flushCount, sinceLastFlush: Date.now() - this.lastFlush, preview: output.substring(0, 80) });
 
     if (output) {
+      this.sentContent = true;  // 同步标记，避免 timer flush 未 await 时的竞态
       const text = output;
       const final = isFinal;
       const ht = hasText;
@@ -234,7 +235,6 @@ export class StreamFlusher {
         .then(() => this.send(text, final, ht))
         .catch(e => { logger.warn('[StreamFlusher] send failed:', e); });
       await this.sendChain;
-      this.sentContent = true;
       this.lastFlush = Date.now();
       this.flushCount++;
     }

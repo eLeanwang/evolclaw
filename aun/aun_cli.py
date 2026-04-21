@@ -657,6 +657,13 @@ def _is_group_not_joined_error(exc: Exception | str | None) -> bool:
     return "no group secret" in text or "not a member" in text
 
 
+def _is_group_epoch_too_old_error(exc: Exception | str | None) -> bool:
+    if not exc:
+        return False
+    text = str(exc).lower()
+    return "epoch too old" in text
+
+
 def _join_mode_from_requirements(result: dict | None, error: Exception | None = None) -> str:
     reqs = result.get("join_requirements", {}) if isinstance(result, dict) else {}
     mode = reqs.get("mode", "")
@@ -671,8 +678,11 @@ def _join_mode_from_requirements(result: dict | None, error: Exception | None = 
     return mode or "unknown"
 
 
-def _should_handle_join_as_target_switch(line: str) -> bool:
+def _should_handle_join_as_target_switch(line: str, current_target=None) -> bool:
     if not line.startswith("@"):
+        return False
+    # 群聊下 @aid 统一作为 @mention 消息处理，不视为切目标
+    if _is_group_target(current_target):
         return False
     parts = line[1:].split(None, 1)
     if not parts:
@@ -710,14 +720,14 @@ _LOCAL_CMDS = [
     ("//log",        "",    "toggle 数据日志（写入文件）"),
     ("//history",    "N",   "查看历史消息（默认20条）"),
     ("//plain",      "",    "切换 明文/E2EE"),
-    ("//target",     "aid", "设置目标（或用 @）"),
+    ("//target",     "aid", "设置目标 / agent.md <aid>（或用 @）"),
     ("//sendfile",   "path","发送文件到当前目标"),
     ("//ping",       "",    "Ping 网关"),
     ("//processing", "",    "当前处理状态"),
     ("//rawdata",    "",    "最后消息原始内容"),
     ("//e2ee",       "",    "E2EE 状态"),
     ("//status",     "",    "连接状态"),
-    ("//local",      "name", "切换本地 AID"),
+    ("//local",      "name", "切换本地 AID / agent.md [upload <path>|set <text>]"),
     ("//aid",        "cmd",  "AID 管理"),
     ("//qid",        "cmd", "群组管理"),
     ("//help",       "",    "帮助"),
@@ -731,16 +741,18 @@ _GROUP_COMMANDS = [
     ("user",     ["u"],      "成员管理（+ 添加，- 踢出，ban/unban）", True, True),
     ("join",     [],          "入群管理（inv 邀请码，req 申请）", True,  True),
     ("setup",    ["set"],    "群设置（name/desc/notice/mode/role）", True, True),
-    ("group",    ["g"],      "群管理（transfer/suspend/resume/dissolve）", True, True),
+    ("group",    ["g"],      "群组信息与管理（info/transfer/suspend/resume/dissolve）", True, True),
     ("quit",     [],          "退出群组",                         True,  True),
 ]
 _OWNER_ONLY_GROUP_COMMANDS = {"user", "join", "setup", "group"}
 
 
-def _filter_group_commands_for_owner(is_owner: bool | None):
-    if is_owner is not True:
-        return [cmd for cmd in _GROUP_COMMANDS if cmd[0] not in _OWNER_ONLY_GROUP_COMMANDS]
-    return list(_GROUP_COMMANDS)
+def _filter_group_commands_for_owner(is_owner: bool | str | None):
+    if is_owner in (True, "owner"):
+        return list(_GROUP_COMMANDS)
+    if is_owner == "admin":
+        return [cmd for cmd in _GROUP_COMMANDS if cmd[0] != "group"]
+    return [cmd for cmd in _GROUP_COMMANDS if cmd[0] not in _OWNER_ONLY_GROUP_COMMANDS]
 
 # 构建命令查找表: name/alias → (cmd_name, need_group)
 _GROUP_CMD_LOOKUP = {}
@@ -813,9 +825,11 @@ class AUNCompleter(Completer):
                     if not mid or mid == self.cli_ref.my_aid:
                         continue
                     role = m.get("role", "")
+                    online = m.get("online", False)
                     role_tag = f" [{role}]" if role else ""
+                    online_tag = " [在线]" if online else ""
                     short = _short_name(mid)
-                    display = f"{short}{role_tag}"
+                    display = f"{short}{role_tag}{online_tag}"
                     if filter_text and not (short.lower().startswith(filter_text) or mid.lower().startswith(filter_text)):
                         continue
                     yield Completion(f"@{mid} ", start_position=-at_len,
@@ -1288,6 +1302,117 @@ def _termwidth():
     except OSError:
         return 80
 
+def _terminal_width() -> int:
+    return _termwidth()
+
+def _visible_len(s: str) -> int:
+    import unicodedata
+    total = 0
+    for ch in s:
+        if unicodedata.east_asian_width(ch) in ("F", "W"):
+            total += 2
+        elif ord(ch) >= 0x1F000:
+            total += 2
+        else:
+            total += 1
+    return total
+
+def _pad_visible(s: str, width: int) -> str:
+    pad = max(0, width - _visible_len(s))
+    return s + " " * pad
+
+def _collect_status_rows(cli, gateway_status: dict | None = None) -> list[tuple[tuple[str, str], tuple[str, str]]]:
+    me = str(getattr(cli, "my_aid", "") or "(未设置)")
+    tgt = _target_label(cli.target) if getattr(cli, "target", None) else "(未设置)"
+    connected = getattr(cli, "connected", False)
+    conn_label = "🟢 已连接" if connected else "🔴 未连接"
+    if connected and hasattr(cli, "_connected_at"):
+        elapsed = int(time.monotonic() - cli._connected_at)
+        h, m, s = elapsed // 3600, (elapsed % 3600) // 60, elapsed % 60
+        duration = f"{h}h {m}m" if h else (f"{m}m {s}s" if m else f"{s}s")
+        conn_label += f"  ({duration})"
+    client = getattr(cli, "client", None)
+    sdk_state = client.state if client and hasattr(client, "state") else "N/A"
+    proto_ver = gateway_status.get("protocol_version", "") if gateway_status else ""
+    if proto_ver:
+        sdk_state = f"{sdk_state}  v{proto_ver}"
+    gw_role = gateway_status.get("role", "") if gateway_status else ""
+    gw_connected_at = ""
+    if gateway_status and gateway_status.get("connected_at"):
+        try:
+            import datetime as _dt
+            ts_ms = int(gateway_status["connected_at"])
+            gw_connected_at = _dt.datetime.fromtimestamp(ts_ms / 1000).strftime("%H:%M:%S")
+        except Exception:
+            pass
+    enc = "🔒 E2EE" if getattr(cli, "encrypt", False) else "🔓 明文"
+    last_e2ee = getattr(cli, "last_e2ee", "") or "(无消息)"
+    debug = "开启" if getattr(cli, "debug_mode", False) else "关闭"
+    log_on = "开启" if getattr(cli, "_log_enabled", False) else "关闭"
+    raw_on = "开启" if getattr(cli, "_raw_monitor_app", None) else "关闭"
+    processing = "无" if not getattr(cli, "_processing", None) else f"{len(cli._processing)} 个"
+    try:
+        unread = cli.store.unread_counts() if getattr(cli, "store", None) else {}
+    except Exception:
+        unread = {}
+    unread_count = sum(1 for v in unread.values() if v)
+    msg_count = getattr(cli, "msg_count", 0)
+    plaintext_recv = getattr(cli, "plaintext_recv", 0)
+    left = [
+        ("本地 AID", me),
+        ("当前目标", tgt),
+        ("连接状态", conn_label),
+        ("SDK 状态", sdk_state),
+        ("处理中", processing),
+        ("消息计数", f"{msg_count} 条"),
+    ]
+    if gw_role:
+        left.append(("网关角色", gw_role))
+    if gw_connected_at:
+        left.append(("网关连接时间", gw_connected_at))
+    right = [
+        ("收发模式", enc),
+        ("最近 E2EE", last_e2ee),
+        ("调试模式", debug),
+        ("数据日志", log_on),
+        ("未读会话", f"{unread_count} 个"),
+        ("原始监控", raw_on),
+    ]
+    if plaintext_recv:
+        right.append(("明文接收", f"{plaintext_recv} 条"))
+    while len(right) < len(left):
+        right.append(("", ""))
+    while len(left) < len(right):
+        left.append(("", ""))
+    return list(zip(left, right))
+
+def _build_status_text(cli, width: int | None = None, gateway_status: dict | None = None) -> str:
+    if width is None:
+        width = _terminal_width()
+    rows = _collect_status_rows(cli, gateway_status=gateway_status)
+    label_w = max(_visible_len(l) for (l, _), _ in rows if l) + 1
+    value_w_left = max(_visible_len(v) for (_, v), _ in rows) if rows else 0
+    value_w_right = max(_visible_len(v) for _, (_, v) in rows if _) if any(rk for _, (rk, _) in rows) else 0
+    left_block = label_w + 2 + value_w_left
+    right_block = label_w + 2 + value_w_right
+    total_two_col = left_block + 4 + right_block
+    lines = ["── 状态 ──"]
+    if width >= total_two_col and right_block > 2:
+        for (lk, lv), (rk, rv) in rows:
+            left = _pad_visible(f"{_pad_visible(lk, label_w)} {lv}", left_block) if lk else " " * left_block
+            if rk:
+                right = f"{_pad_visible(rk, label_w)} {rv}"
+                lines.append(f"{left}    {right}")
+            else:
+                lines.append(left.rstrip())
+    else:
+        for (lk, lv), (rk, rv) in rows:
+            if lk:
+                lines.append(f"{_pad_visible(lk, label_w)} {lv}")
+            if rk:
+                lines.append(f"{_pad_visible(rk, label_w)} {rv}")
+    return "\n".join(lines)
+
 def _sys(icon, color, msg):
     ts = datetime.now().strftime('%H:%M:%S')
     content = f"{C.DIM}{ts}\033[22m {color}{icon}\033[39m {msg}"
@@ -1579,12 +1704,21 @@ class AUNCli:
         self._members_cache = {}        # group_id → [{"aid": ..., "role": ...}, ...]
         self._members_cache_at = {}     # group_id → timestamp
         self._members_cache_ttl = 300   # 缓存有效期（秒）
+        # target 在线状态缓存（供状态栏使用）
+        self._target_online: bool | None = None    # None=未知, True=在线, False=离线
+        self._target_online_aid: str | None = None # 上次查询的 AID
+        self._target_online_at: float = 0          # 查询时间（event loop time）
+        self._target_online_ttl: float = 30        # 缓存有效期（秒）
+        self._target_online_querying: bool = False
         # 数据日志
         self._log_enabled = cfg.get("log", False)  # 从 config 恢复
         self._log_file = None           # 日志文件句柄
         self._log_date = None           # 当前日志文件对应的日期字符串
         # 消息持久化
         self.store = MessageStore(str(DATA_DIR / "messages.db"))
+        # 群 epoch 补钥状态
+        self._group_recovery_sender = {}   # group_id → 最近一条解密失败消息的 sender_aid
+        self._group_recovery_failed = {}   # group_id → {aid → expire_time}
 
     async def start(self):
         """用 self.my_aid 启动，AID 不存在则报错退出。"""
@@ -1595,11 +1729,13 @@ class AUNCli:
         self.client.on("message.received", self._on_message)
         self.client.on("connection.state",  self._on_state)
         self.client.on("message.ack",       self._on_ack)
+        self.client.on("message.recalled",  self._on_recalled)
         self.client.on("token.refreshed",   self._on_token_refreshed)
         self.client.on("e2ee.degraded",     self._on_e2ee_degraded)
         self.client.on("e2ee.orchestration_error", self._on_e2ee_error)
         self.client.on("group.message_created", self._on_group_message)
         self.client.on("group.changed",     self._on_group_changed)
+        self.client.on("group.created",     self._on_group_created)
 
         from aun_core import __version__ as _sdk_ver
         info(f"AID: {C.BOLD}{aid}{C.RESET}  {C.DIM}(aun-core {_sdk_ver}){C.RESET}")
@@ -1609,12 +1745,62 @@ class AUNCli:
             error(f"AID {aid} 不存在，请先用 aun aid new <name> 创建")
             raise SystemExit(1)
         if "private_key_pem" not in (local or {}):
-            error(f"AID {aid} 私钥丢失，请删除后重新创建")
+            error(f"AID {aid} 私钥丢失，无法继续使用")
+            try:
+                ans = input(f"是否删除本地 AID {aid}？[y/N] ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                ans = ""
+                print()
+            if ans == "y":
+                try:
+                    cmd_aid_delete(aid, force=True)
+                except SystemExit:
+                    pass
+                except Exception as e:
+                    error(f"删除失败: {e}")
+                info(f"请重新创建: aun aid new {aid}")
+            else:
+                info(f"已取消。可手动执行: aun aid delete {aid}")
             raise SystemExit(1)
 
         info("已有本地身份")
         info("正在认证…")
-        auth = await self.client.auth.authenticate({"aid": aid})
+        try:
+            auth = await self.client.auth.authenticate({"aid": aid})
+        except Exception as e:
+            msg = str(e)
+            if "local certificate missing and recovery failed" in msg:
+                error(f"AID {aid} 本地证书丢失，尝试续期证书…")
+                try:
+                    await self.client.auth.renew_cert()
+                    info("证书续期成功，正在重新认证…")
+                    auth = await self.client.auth.authenticate({"aid": aid})
+                except Exception:
+                    info("续期失败，尝试用现有密钥重新注册证书…")
+                    try:
+                        await self.client.auth.create_aid({"aid": aid})
+                        info("证书恢复成功，正在重新认证…")
+                        auth = await self.client.auth.authenticate({"aid": aid})
+                    except Exception as recover_error:
+                        error(f"AID {aid} 证书恢复失败: {recover_error}")
+                    try:
+                        ans = input(f"是否删除本地 AID {aid}？[y/N] ").strip().lower()
+                    except (EOFError, KeyboardInterrupt):
+                        ans = ""
+                        print()
+                    if ans == "y":
+                        try:
+                            cmd_aid_delete(aid, force=True)
+                        except SystemExit:
+                            pass
+                        except Exception as delete_error:
+                            error(f"删除失败: {delete_error}")
+                        info(f"请重新创建: aun aid new {aid}")
+                        raise SystemExit(1)
+                    info(f"已取消。可手动执行: aun aid delete {aid}")
+                    raise SystemExit(1)
+            else:
+                raise
         info(f"认证成功  gateway: {auth.get('gateway')}")
 
         info("正在连接网关…")
@@ -1956,6 +2142,202 @@ class AUNCli:
         except Exception as e:
             error(f"切换失败: {e}")
 
+    async def _ensure_group_membership(self, group_id: str) -> None:
+        """群发送前先确认自己仍是群成员。不是成员时直接抛错。"""
+        members = []
+        try:
+            members_resp = await self.client.call("group.get_members", {"group_id": group_id})
+            raw_list = (members_resp or {}).get("members") or (members_resp or {}).get("items") or []
+            members = [m for m in raw_list if isinstance(m, dict)]
+            if members:
+                self._members_cache[group_id] = members
+                self._members_cache_at[group_id] = asyncio.get_event_loop().time()
+        except Exception as exc:
+            if _is_group_not_joined_error(exc):
+                raise
+            members = self._members_cache.get(group_id, []) or []
+            if getattr(self, "debug_mode", False):
+                info(f"group.get_members 失败，回退本地成员缓存: {exc}")
+
+        if members:
+            my_aid = str(self.my_aid or "")
+            member_aids = {str(m.get("aid") or "") for m in members}
+            if my_aid and my_aid not in member_aids:
+                raise RuntimeError(f"not a member of {group_id}")
+
+    async def _get_group_recovery_candidates(self, group_id: str) -> list[str]:
+        """按优先级返回补钥候选：
+        1) 最近一次解密失败消息的 sender
+        2) 最近在该群发言的活跃成员（倒序，时间近者靠前）
+        3) admin / owner
+        4) 统一候选池中的其他成员（本地 member_aids + 服务端 group.get_members + 活跃 sender 集合）
+        5) 最近失败黑名单中的成员排到最后
+        """
+        sender_first = self._group_recovery_sender.get(group_id) or ""
+        blacklist = dict(self._group_recovery_failed.get(group_id) or {})
+        # 清理过期黑名单条目
+        now_ts = asyncio.get_event_loop().time()
+        blacklist = {aid: exp for aid, exp in blacklist.items() if exp > now_ts}
+        self._group_recovery_failed[group_id] = blacklist
+
+        # 统一候选池
+        pool: set[str] = set()
+        # 本地 group_e2ee 成员列表
+        group_e2ee = getattr(self.client, "group_e2ee", None)
+        if group_e2ee is not None:
+            try:
+                for aid in group_e2ee.get_member_aids(group_id) or []:
+                    if aid:
+                        pool.add(aid)
+            except Exception:
+                pass
+
+        # 服务端权威成员列表 + 角色
+        role_map: dict[str, str] = {}
+        members_list: list[dict] = []
+        try:
+            members_resp = await self.client.call("group.get_members", {"group_id": group_id})
+            raw_list = (members_resp or {}).get("members") or (members_resp or {}).get("items") or []
+            for m in raw_list:
+                if not isinstance(m, dict):
+                    continue
+                aid = str(m.get("aid") or "")
+                if not aid:
+                    continue
+                pool.add(aid)
+                role_map[aid] = str(m.get("role") or "")
+                members_list.append(m)
+        except Exception as exc:
+            if getattr(self, "debug_mode", False):
+                info(f"拉群成员失败，使用本地候选: {exc}")
+            # 回退使用本地缓存
+            for m in (self._members_cache.get(group_id) or []):
+                if not isinstance(m, dict):
+                    continue
+                aid = str(m.get("aid") or "")
+                if not aid:
+                    continue
+                pool.add(aid)
+                role_map[aid] = str(m.get("role") or "")
+
+        # 活跃成员：按本地消息历史最近发言时间倒序
+        activity: dict[str, int] = {}
+        try:
+            history = self.store.get_history(group_id, limit=100)
+        except Exception:
+            history = []
+        for entry in history or []:
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("direction") not in (None, "recv"):
+                continue
+            aid = str(entry.get("sender") or "")
+            ts = int(entry.get("timestamp") or 0)
+            if not aid:
+                continue
+            pool.add(aid)
+            if ts > activity.get(aid, 0):
+                activity[aid] = ts
+
+        # 剔除自己与 sender_first
+        if self.my_aid in pool:
+            pool.discard(self.my_aid)
+        if sender_first:
+            pool.discard(sender_first)
+
+        def _role_rank(aid: str) -> int:
+            role = role_map.get(aid, "")
+            if role == "owner":
+                return 0
+            if role == "admin":
+                return 1
+            return 2
+
+        # 候选按活跃度倒序，然后 role_rank 升序，最后 aid 字典序稳定
+        ordered = sorted(
+            pool,
+            key=lambda aid: (
+                1 if aid in blacklist else 0,        # 黑名单最后
+                -activity.get(aid, 0),               # 活跃越近越前
+                _role_rank(aid),                      # owner/admin 更前
+                aid,
+            ),
+        )
+
+        candidates: list[str] = []
+        if sender_first and sender_first != self.my_aid:
+            candidates.append(sender_first)
+        candidates.extend(ordered)
+        # 去重保持顺序
+        seen: set[str] = set()
+        unique: list[str] = []
+        for aid in candidates:
+            if aid in seen:
+                continue
+            seen.add(aid)
+            unique.append(aid)
+        return unique
+
+    async def _ensure_group_epoch_fresh(self, group_id: str) -> None:
+        """群发送前对齐 epoch：服务端更高时主动发 key_request，等待本地补钥。"""
+        group_e2ee = getattr(self.client, "group_e2ee", None)
+        if group_e2ee is None:
+            return
+        try:
+            epoch_resp = await self.client.call("group.e2ee.get_epoch", {"group_id": group_id})
+        except Exception as exc:
+            if getattr(self, "debug_mode", False):
+                info(f"get_epoch 失败，跳过对齐: {exc}")
+            return
+        server_epoch = int((epoch_resp or {}).get("epoch") or 0)
+        local_epoch = int(group_e2ee.current_epoch(group_id) or 0)
+        if local_epoch >= server_epoch:
+            return
+
+        ordered = await self._get_group_recovery_candidates(group_id)
+        blacklist_ttl = 60.0  # 秒
+
+        for candidate in ordered:
+            try:
+                req = group_e2ee.build_recovery_request(group_id, server_epoch, sender_aid=candidate)
+            except Exception:
+                req = None
+            if not req:
+                continue
+            try:
+                await self.client.call("message.send", {
+                    "to": req["to"],
+                    "payload": req["payload"],
+                    "encrypt": True,
+                })
+            except Exception as exc:
+                if getattr(self, "debug_mode", False):
+                    info(f"补钥请求发送失败 → {candidate}: {exc}")
+                # 发送失败也计入短期黑名单，避免下次还把它排在前面
+                self._group_recovery_failed.setdefault(group_id, {})[candidate] = (
+                    asyncio.get_event_loop().time() + blacklist_ttl
+                )
+                continue
+            satisfied = False
+            for _ in range(20):
+                await asyncio.sleep(0.25)
+                if int(group_e2ee.current_epoch(group_id) or 0) >= server_epoch:
+                    satisfied = True
+                    break
+            if satisfied:
+                # 补到 key，清理该群的 sender/黑名单状态
+                self._group_recovery_sender.pop(group_id, None)
+                return
+            # 本次候选 5 秒内没能让本地 epoch 追上，短期加入黑名单
+            self._group_recovery_failed.setdefault(group_id, {})[candidate] = (
+                asyncio.get_event_loop().time() + blacklist_ttl
+            )
+
+        if int(group_e2ee.current_epoch(group_id) or 0) < server_epoch:
+            raise RuntimeError(
+                f"本地群密钥过期 (local={local_epoch}, server={server_epoch})，请等待管理员重新分发密钥"
+            )
+
     async def send(self, text, encrypt=True, silent=False):
         if not self.client:
             error("未连接"); return
@@ -1971,12 +2353,25 @@ class AUNCli:
         try:
             t0 = asyncio.get_event_loop().time()
             if _is_group_target(self.target):
-                result = await self.client.call("group.send", {
-                    "group_id": target_id,
-                    "payload": {"text": text},
-                    "type": "text",
-                    "encrypt": encrypt,
-                })
+                await self._ensure_group_membership(target_id)
+                await self._ensure_group_epoch_fresh(target_id)
+                try:
+                    result = await self.client.call("group.send", {
+                        "group_id": target_id,
+                        "payload": {"text": text},
+                        "type": "text",
+                        "encrypt": encrypt,
+                    })
+                except Exception as send_exc:
+                    if not _is_group_epoch_too_old_error(send_exc):
+                        raise
+                    await self._ensure_group_epoch_fresh(target_id)
+                    result = await self.client.call("group.send", {
+                        "group_id": target_id,
+                        "payload": {"text": text},
+                        "type": "text",
+                        "encrypt": encrypt,
+                    })
             else:
                 result = await self.client.call("message.send", {
                     "to": target_id, "payload": text,
@@ -1993,7 +2388,7 @@ class AUNCli:
             self._log_write("SEND", send_log)
             status = result.get("status") if isinstance(result, dict) else None
             label = "已送达" if status == "delivered" else "已发送"
-            if self.debug_mode:
+            if getattr(self, "debug_mode", False):
                 ms = int((self._last_sent - t0) * 1000)
                 print_status(target_label, "▶", C.YELLOW, f"{label} ({ms}ms)")
             # 发新消息时清理旧的 processing 状态
@@ -2300,19 +2695,16 @@ class AUNCli:
             error(f"Ping 失败: {e}")
 
     async def status(self):
-        conn = "🟢 已连接" if self.connected else "🔴 未连接"
-        sdk = self.client.state if self.client else "N/A"
-        tgt = _target_label(self.target) if self.target else "(未设置)"
-        lines = (
-            f'  我的 AID:   {self.my_aid}\n'
-            f'  目标:       {tgt}\n'
-            f'  连接状态:   {conn}\n'
-            f'  收到消息:   {self.msg_count} 条\n'
-            f'  SDK 状态:   {sdk}'
-        )
+        gateway_status = None
+        client = getattr(self, "client", None)
+        if client and getattr(self, "connected", False):
+            try:
+                gateway_status = await client.status()
+            except Exception:
+                pass
         await _msg_dialog(
             title="Status",
-            text=lines,
+            text=_build_status_text(self, gateway_status=gateway_status),
             style=_HELP_STYLE,
         )
 
@@ -2588,7 +2980,7 @@ class AUNCli:
             return found.get("name", group_id)
         return group_id
 
-    def is_current_group_owner_cached(self) -> bool | None:
+    def is_current_group_owner_cached(self) -> bool | str | None:
         if not self.target or not _is_group_target(self.target):
             return None
         gid = self.target.get("id")
@@ -2596,15 +2988,15 @@ class AUNCli:
             if g.get("group_id") == gid:
                 role = g.get("role")
                 if role:
-                    return role == "owner"
+                    return role
         for m in self._members_cache.get(gid, []):
             if m.get("aid") == self.my_aid:
                 role = m.get("role")
                 if role:
-                    return role == "owner"
+                    return role
         return None
 
-    async def is_current_group_owner(self) -> bool | None:
+    async def is_current_group_owner(self) -> bool | str | None:
         cached = self.is_current_group_owner_cached()
         if cached is not None:
             return cached
@@ -2613,7 +3005,7 @@ class AUNCli:
         try:
             result = await self.client.call("group.get", {"group_id": self.target["id"]})
             group = result.get("group", {}) if isinstance(result, dict) else {}
-            return group.get("owner_aid") == self.my_aid
+            return "owner" if group.get("owner_aid") == self.my_aid else None
         except Exception:
             return None
 
@@ -2625,8 +3017,25 @@ class AUNCli:
         if not self.client or not self.connected:
             return
         try:
-            result = await self.client.call("group.get_members", {"group_id": group_id, "size": 200})
-            self._members_cache[group_id] = result.get("members", [])
+            members_resp, online_resp = await asyncio.gather(
+                self.client.call("group.get_members", {"group_id": group_id, "size": 200}),
+                self.client.call("group.get_online_members", {"group_id": group_id}),
+                return_exceptions=True,
+            )
+            members = []
+            if not isinstance(members_resp, Exception):
+                members = members_resp.get("members", []) or members_resp.get("items", [])
+            online_aids: set[str] = set()
+            if not isinstance(online_resp, Exception):
+                for item in (online_resp.get("items") or []):
+                    aid = item.get("aid", "")
+                    if aid:
+                        online_aids.add(aid)
+            # 合并 online 标记
+            for m in members:
+                if isinstance(m, dict):
+                    m["online"] = m.get("aid", "") in online_aids
+            self._members_cache[group_id] = members
             self._members_cache_at[group_id] = now
         except Exception:
             pass
@@ -2729,6 +3138,14 @@ class AUNCli:
         if self.encrypt and not msg_encrypted:
             self.plaintext_recv += 1
 
+        # 记录无法解密的群密文包 sender，供下次补钥使用
+        try:
+            payload_type = payload.get("type") if isinstance(payload, dict) else None
+        except Exception:
+            payload_type = None
+        if payload_type == "e2ee.group_encrypted" and not msg_encrypted and group_id and sender_aid and sender_aid != "?":
+            self._group_recovery_sender[group_id] = sender_aid
+
         # 提取文本
         if isinstance(payload, dict):
             text = payload.get("text", json.dumps(payload, ensure_ascii=False))
@@ -2807,6 +3224,24 @@ class AUNCli:
             is_read=1,
         )
 
+    async def _on_group_created(self, data):
+        """处理群组创建事件。"""
+        if not isinstance(data, dict):
+            return
+        self._log_write("EVENT_GROUP", data)
+        ts = datetime.now().strftime('%H:%M:%S')
+        entry = f"[{ts}] [group.created] {json.dumps(data, ensure_ascii=False, default=str)}"
+        self._raw_log.append(entry)
+        cap = 500 if self._raw_monitor_app else (20 if self.debug_mode else 5)
+        if len(self._raw_log) > cap:
+            self._raw_log = self._raw_log[-cap:]
+        if self._raw_monitor_app is not None:
+            self._raw_monitor_app.invalidate()
+        group_id = data.get("group_id", "")
+        group_name = data.get("name") or data.get("group_name") or group_id
+        _p(f"{C.DIM}{ts}\033[22m {C.CYAN}· [{group_name}]\033[39m  {C.DIM}群组已创建\033[22m")
+        asyncio.ensure_future(self._refresh_group_cache())
+
     async def _on_group_changed(self, data):
         """处理群变更事件。"""
         if not isinstance(data, dict):
@@ -2864,8 +3299,12 @@ class AUNCli:
 
         # 刷新群缓存（成员变化/群信息变化时）
         if action in ("member_added", "member_left", "member_removed", "joined",
-                       "join_approved", "update", "upsert", "dissolved"):
+                       "join_approved", "update", "upsert", "dissolved", "role_changed"):
             asyncio.ensure_future(self._refresh_group_cache())
+        if action == "role_changed":
+            group_id = data.get("group_id") if isinstance(data, dict) else None
+            if group_id:
+                asyncio.ensure_future(self._ensure_members_cache(group_id, force=True))
 
     # ── 群命令处理 ────────────────────────────────────────────────────────
 
@@ -2985,11 +3424,26 @@ class AUNCli:
         if not self._require_group_target(): return
         gid = self.target["id"]
         try:
-            result = await self.client.call("group.get", {"group_id": gid})
+            calls = [
+                self.client.call("group.get", {"group_id": gid}),
+                self.client.call("group.get_summary", {"group_id": gid}),
+                self.client.call("group.get_stats", {"group_id": gid}),
+            ]
+            if self.debug_mode:
+                calls.append(self.client.call("group.get_metrics", {"group_id": gid}))
+            results = await asyncio.gather(*calls, return_exceptions=True)
+            result      = results[0] if not isinstance(results[0], Exception) else {}
+            summary     = results[1] if not isinstance(results[1], Exception) else {}
+            stats       = results[2] if not isinstance(results[2], Exception) else {}
+            metrics     = results[3] if len(results) > 3 and not isinstance(results[3], Exception) else {}
+
             g = result.get("group", {})
+            s = summary  # group.get_summary 直接返回字段，无嵌套
+            st = stats
+
             info(f"  名称:     {g.get('name', '?')}")
             info(f"  ID:       {g.get('group_id', '?')}")
-            info(f"  群主:     {g.get('owner_aid', '?')}")
+            info(f"  群主:     {g.get('owner_aid', s.get('owner_aid', '?'))}")
             info(f"  可见性:   {g.get('visibility', '?')}")
             join_mode = g.get('join_mode', '')
             if not join_mode:
@@ -3001,21 +3455,43 @@ class AUNCli:
             if join_mode == "invite_only":
                 join_mode = "invite"
             info(f"  入群模式: {join_mode}")
-            info(f"  状态:     {g.get('status', '?')}")
-            info(f"  成员数:   {g.get('member_count', '?')}")
-            info(f"  消息序号: {g.get('message_seq', 0)}")
-            desc = g.get("description", "")
-            if desc:
-                info(f"  描述:     {desc}")
-            # 群公告
-            try:
-                ann_result = await self.client.call("group.get_announcement", {"group_id": gid})
-                ann = ann_result.get("announcement", {})
-                content = ann.get("content", "")
-                if content:
-                    info(f"  公告:     {content}")
-            except Exception:
-                pass
+            info(f"  状态:     {g.get('status', s.get('status', '?'))}")
+            # 成员统计
+            member_count = s.get("member_count") or g.get("member_count", "?")
+            online_count = s.get("online_count") or st.get("online_count", "")
+            human_count  = s.get("human_count", "")
+            ai_count     = s.get("ai_count", "")
+            admin_count  = s.get("admin_count", "")
+            member_str = f"{member_count}"
+            if online_count != "":
+                member_str += f"（在线 {online_count}）"
+            info(f"  成员数:   {member_str}")
+            if human_count != "" or ai_count != "":
+                info(f"  成员构成: 人类 {human_count}  AI {ai_count}  管理员 {admin_count}")
+            # 管理统计（仅有数据时显示）
+            pending = st.get("pending_join_request_count", 0)
+            invite_codes = st.get("active_invite_code_count", 0)
+            ban_count = st.get("ban_count", 0)
+            admin_parts = []
+            if pending:
+                admin_parts.append(f"待审批申请 {pending}")
+            if invite_codes:
+                admin_parts.append(f"有效邀请码 {invite_codes}")
+            if ban_count:
+                admin_parts.append(f"封禁 {ban_count}")
+            if admin_parts:
+                info(f"  管理:     {' | '.join(admin_parts)}")
+            # 消息序号
+            info(f"  消息序号: {s.get('message_seq') or g.get('message_seq', 0)}")
+            # debug: E2EE metrics
+            if self.debug_mode and metrics:
+                epoch_count = metrics.get("epoch_count", "")
+                if epoch_count != "":
+                    info(f"  epoch 数: {epoch_count}")
+                epoch_ranges = metrics.get("epoch_ranges", [])
+                if epoch_ranges:
+                    for er in epoch_ranges[-3:]:  # 只显示最近3个
+                        info(f"    epoch {er.get('epoch', '?')}: {er.get('member_count', '?')} 人")
         except Exception as e:
             error(f"查询失败: {e}")
 
@@ -3082,6 +3558,25 @@ class AUNCli:
             except Exception as e:
                 error(f"更新失败: {e}")
 
+        elif sub == "vis":
+            valid_vis = ("public", "private")
+            if not val:
+                try:
+                    result = await self.client.call("group.get", {"group_id": gid})
+                    current = result.get("group", {}).get("visibility", "?")
+                    info(f"当前可见性: {current}")
+                    info(f"可选: {', '.join(valid_vis)}")
+                except Exception as e:
+                    error(f"查询失败: {e}")
+                return
+            if val not in valid_vis:
+                error(f"无效 vis: {val}（可选: {', '.join(valid_vis)}）"); return
+            try:
+                await self.client.call("group.update", {"group_id": gid, "visibility": val})
+                info(f"可见性已更新: {val}")
+            except Exception as e:
+                error(f"更新失败: {e}")
+
         elif sub == "role":
             parts2 = val.split() if val else []
             if len(parts2) < 2:
@@ -3089,16 +3584,19 @@ class AUNCli:
             aid, role = parts2[0], parts2[1]
             try:
                 await self.client.call("group.set_role", {"group_id": gid, "aid": aid, "role": role})
+                await self._refresh_group_cache()
+                await self._ensure_members_cache(gid, force=True)
                 info(f"{_short_name(aid)} 角色已设为 {role}")
             except Exception as e:
                 error(f"设置失败: {e}")
 
         else:
-            info("用法: /setup <name|desc|notice|mode|role> [值]")
+            info("用法: /setup <name|desc|notice|mode|vis|role> [值]")
             info("  /setup name 新群名")
             info("  /setup desc 群描述")
             info("  /setup notice [公告内容]   无参数则查看")
             info("  /setup mode [open|invite|approval|closed]")
+            info("  /setup vis [public|private]")
             info("  /setup role <aid> <admin|member>")
 
     async def _cmd_group_manage(self, arg: str):
@@ -3108,6 +3606,10 @@ class AUNCli:
         parts = arg.split(None, 1) if arg else []
         sub = parts[0].lower() if parts else ""
         val = parts[1].strip() if len(parts) > 1 else ""
+
+        if sub == "info":
+            await self._cmd_group_info("")
+            return
 
         if sub == "transfer":
             aid = val
@@ -3353,20 +3855,47 @@ class AUNCli:
     async def _cmd_group_user(self, arg: str):
         if not self._require_group_target(): return
         try:
-            result = await self.client.call("group.get_members", {"group_id": self.target["id"], "size": 200})
-            members = result.get("members", [])
-            # 回写 cache，保持 /user 和 @ 补全一致
             group_id = self.target["id"]
+            members_resp, online_resp = await asyncio.gather(
+                self.client.call("group.get_members", {"group_id": group_id, "size": 200}),
+                self.client.call("group.get_online_members", {"group_id": group_id}),
+                return_exceptions=True,
+            )
+            members = []
+            if not isinstance(members_resp, Exception):
+                members = members_resp.get("members", [])
+            online_aids: set[str] = set()
+            if not isinstance(online_resp, Exception):
+                for item in (online_resp.get("items") or []):
+                    aid = item.get("aid", "")
+                    if aid:
+                        online_aids.add(aid)
+            # 合并 online 并回写缓存
+            for m in members:
+                if isinstance(m, dict):
+                    m["online"] = m.get("aid", "") in online_aids
             self._members_cache[group_id] = members
             self._members_cache_at[group_id] = asyncio.get_event_loop().time()
             if not members:
                 info("暂无成员"); return
-            for m in members:
+            # 在线成员靠前，role 次排序
+            role_order = {"owner": 0, "admin": 1, "member": 2}
+            members_sorted = sorted(
+                members,
+                key=lambda m: (
+                    0 if m.get("online") else 1,
+                    role_order.get(m.get("role", "member"), 2),
+                    m.get("aid", ""),
+                ),
+            )
+            for m in members_sorted:
                 aid = m.get("aid", "?")
                 role = m.get("role", "member")
                 role_icon = {"owner": "👑", "admin": "⭐"}.get(role, "  ")
-                info(f"  {role_icon} {_short_name(aid)}  ({aid})  {role}")
-            info(f"共 {len(members)} 名成员")
+                online_tag = " [在线]" if m.get("online") else ""
+                info(f"  {role_icon} {_short_name(aid)}  ({aid})  {role}{online_tag}")
+            online_count = len(online_aids)
+            info(f"共 {len(members)} 名成员，在线 {online_count} 人")
         except Exception as e:
             error(f"查询失败: {e}")
 
@@ -3404,7 +3933,7 @@ class AUNCli:
                 if not items:
                     info("暂无封禁成员"); return
                 for b in items:
-                    a = b.get("aid", "?")
+                    a = b.get("subject") or b.get("aid", "?")
                     info(f"  {_short_name(a)}  ({a})")
             except Exception as e:
                 error(f"查询失败: {e}")
@@ -3457,7 +3986,7 @@ class AUNCli:
         else:
             info("用法: /join <inv|req> [+/-] [参数]")
             info("  /join inv          邀请码列表")
-            info("  /join inv +        创建邀请码")
+            info("  /join inv + [code [max_uses]]   创建邀请码（默认 1 次）")
             info("  /join inv - <code> 撤销邀请码")
             info("  /join req          入群申请列表")
             info("  /join req + <aid>  批准申请")
@@ -3472,7 +4001,7 @@ class AUNCli:
                 info("暂无邀请码"); return
             for inv in items:
                 code = inv.get("code", "?")
-                uses = inv.get("use_count", 0)
+                uses = inv.get("used_count", inv.get("use_count", 0))
                 max_uses = inv.get("max_uses", 1)
                 status = inv.get("status", "?")
                 info(f"  {code}  {uses}/{max_uses}  {status}")
@@ -3481,17 +4010,29 @@ class AUNCli:
 
     async def _cmd_group_invite_create(self, arg: str):
         if not self._require_group_target(): return
-        params = {"group_id": self.target["id"]}
-        if arg.strip():
-            # 可选参数: max_uses
-            try:
-                params["max_uses"] = int(arg.strip())
-            except ValueError:
-                params["code"] = arg.strip()
+        params = {"group_id": self.target["id"], "max_uses": 1}
+        tokens = arg.strip().split() if arg else []
+        if len(tokens) > 2:
+            error("用法: /join inv + [code [max_uses]]"); return
+        code_token = tokens[0] if tokens else None
+        max_uses_token = tokens[1] if len(tokens) > 1 else None
+        if code_token is not None and code_token.isdigit():
+            error("用法: /join inv + <code> [max_uses]（code 不能是纯数字）"); return
+        if code_token:
+            params["code"] = code_token
+        if max_uses_token:
+            if not max_uses_token.isdigit():
+                error("max_uses 必须为正整数"); return
+            n = int(max_uses_token)
+            if n <= 0:
+                error("max_uses 必须 > 0"); return
+            params["max_uses"] = n
         try:
             result = await self.client.call("group.create_invite_code", params)
             inv = result.get("invite_code", {})
-            info(f"邀请码: {inv.get('code', '?')}")
+            code = inv.get("code", "?")
+            max_uses = inv.get("max_uses", params["max_uses"])
+            info(f"邀请码: {code}  可用次数: {max_uses}")
         except Exception as e:
             error(f"创建失败: {e}")
 
@@ -3574,6 +4115,53 @@ class AUNCli:
         # 发送成功的提示由 send() 路径自行打印（debug 模式下显示耗时，非 debug 模式不展示）
         if isinstance(data, dict):
             self._log_write("EVENT", {"type": "message.ack", **data})
+
+    async def _on_recalled(self, data):
+        if not isinstance(data, dict):
+            return
+        self._log_write("EVENT", {"type": "message.recalled", **data})
+        message_ids = data.get("message_ids") or []
+        from_aid = data.get("from", data.get("sender", ""))
+        name = _short_name(from_aid) if from_aid else "对方"
+        ts = datetime.now().strftime('%H:%M:%S')
+        count = len(message_ids) if isinstance(message_ids, list) else 1
+        note = f"撤回了 {count} 条消息" if count > 1 else "撤回了一条消息"
+        content = f"{C.DIM}{ts}\033[22m {C.YELLOW}↩ {name}\033[39m  {C.DIM}{note}\033[22m"
+        _p(content)
+
+    def _refresh_target_online(self):
+        """后台异步刷新 target 的在线状态（每 TTL 秒查询一次）。"""
+        if not self.connected or not self.client:
+            return
+        target = self.target
+        if not target or target.get("type") != "peer":
+            self._target_online = None
+            return
+        aid = target.get("id", "")
+        if not aid:
+            return
+        now = asyncio.get_event_loop().time()
+        # AID 切换时立即失效缓存
+        if self._target_online_aid != aid:
+            self._target_online = None
+            self._target_online_aid = aid
+            self._target_online_at = 0
+        if self._target_online_querying:
+            return
+        if now - self._target_online_at < self._target_online_ttl:
+            return
+        self._target_online_querying = True
+        async def _query():
+            try:
+                result = await self.client.call("message.query_online", {"aids": [aid]})
+                online_map = result.get("online", {}) if isinstance(result, dict) else {}
+                self._target_online = bool(online_map.get(aid, False))
+                self._target_online_at = asyncio.get_event_loop().time()
+            except Exception:
+                pass
+            finally:
+                self._target_online_querying = False
+        asyncio.ensure_future(_query())
 
     async def _on_token_refreshed(self, data):
         self._log_write("EVENT", {"type": "token.refreshed", "data": data})
@@ -3775,33 +4363,72 @@ class AUNCli:
         finally:
             self._raw_monitor_app = None
 
-    def cmd_e2ee(self):
-        info("── E2EE ──")
-        # 当前收发模式
+    async def cmd_e2ee(self):
+        lines = ["── E2EE ──"]
         mode = "🔒 E2EE" if self.encrypt else "🔓 明文"
-        info(f"收发模式: {mode}")
-        # 最近收到消息的加密状态
+        lines.append(f"收发模式: {mode}")
         if self.last_e2ee:
-            info(f"最近收到: {self.last_e2ee}")
+            lines.append(f"最近收到: {self.last_e2ee}")
         else:
-            info(f"最近收到: (无消息)")
+            lines.append("最近收到: (无消息)")
         if self.plaintext_recv:
-            info(f"E2EE 模式下收到明文: {self.plaintext_recv}")
-        # 最近事件
+            lines.append(f"E2EE 模式下收到明文: {self.plaintext_recv}")
         ev = self._last_e2ee_event
         if ev is None:
-            info("最近事件: 无")
-            return
-        info(f"最近事件: {ev['type']}")
-        data = ev.get("data", {})
-        if isinstance(data, dict):
-            if data.get("peer"):
-                info(f"  peer:   {data['peer']}")
-            if data.get("reason"):
-                info(f"  reason: {data['reason']}")
-        t = ev.get("time")
-        if t:
-            info(f"  时间:   {t.strftime('%H:%M:%S')}")
+            lines.append("最近事件: 无")
+        else:
+            lines.append(f"最近事件: {ev['type']}")
+            data = ev.get("data", {})
+            if isinstance(data, dict):
+                if data.get("peer"):
+                    lines.append(f"  peer:   {data['peer']}")
+                if data.get("reason"):
+                    lines.append(f"  reason: {data['reason']}")
+            t = ev.get("time")
+            if t:
+                lines.append(f"  时间:   {t.strftime('%H:%M:%S')}")
+
+        # ── P2P 缓存（来自 client._cert_cache / _peer_prekeys_cache）──
+        client = getattr(self, "client", None)
+        if client:
+            cert_cache = getattr(client, "_cert_cache", {})
+            prekey_cache = getattr(client, "_peer_prekeys_cache", {})
+            lines.append("")
+            lines.append("── P2P 缓存 ──")
+            if cert_cache:
+                aids = sorted({k.split(":")[0] for k in cert_cache})
+                lines.append(f"证书缓存: {', '.join(aids)} ({len(cert_cache)} 条)")
+            else:
+                lines.append("证书缓存: (空)")
+            if prekey_cache:
+                now = time.time()
+                for aid, (prekeys, exp) in sorted(prekey_cache.items()):
+                    ttl = max(0, int(exp - now))
+                    lines.append(f"Prekey:   {_short_name(aid)}  {len(prekeys)} 本  TTL {ttl}s")
+            else:
+                lines.append("Prekey 缓存: (空)")
+
+        # ── 群组 E2EE（来自 keystore.load_all_group_secret_states）──
+        try:
+            ks = _get_keystore()
+            my_aid = getattr(self, "my_aid", None)
+            if my_aid and hasattr(ks, "load_all_group_secret_states"):
+                all_states = ks.load_all_group_secret_states(my_aid)
+                lines.append("")
+                lines.append("── 群组 E2EE ──")
+                if all_states:
+                    for gid, entry in sorted(all_states.items()):
+                        epoch = entry.get("epoch", "?")
+                        members = entry.get("member_aids", [])
+                        old_count = len(entry.get("old_epochs", []))
+                        old_str = f"  旧 epoch ×{old_count}" if old_count else ""
+                        lines.append(f"{_short_name(gid)}  epoch={epoch}  成员={len(members)}{old_str}")
+                else:
+                    lines.append("(无群组密钥)")
+        except Exception:
+            pass
+
+        await _msg_dialog(title="E2EE 状态", text="\n".join(lines), style=_HELP_STYLE)
 
 # ── REPL ──────────────────────────────────────────────────────────────────
 
@@ -3846,22 +4473,6 @@ async def _msg_dialog(title="", text="", ok_text="Ok", style=None):
     await app.run_async()
 
 def _build_help_text(is_group_owner: bool | None = None) -> str:
-    group_lines = [
-        '  <ansiyellow>/list</ansiyellow>             成员列表',
-        '  <ansiyellow>/info</ansiyellow>             群信息（含公告）',
-    ]
-    if is_group_owner is not False:
-        group_lines.extend([
-            '  <ansiyellow>/u + aid</ansiyellow>          添加成员',
-            '  <ansiyellow>/u - aid</ansiyellow>          踢出成员',
-            '  <ansiyellow>/u ban [aid]</ansiyellow>      封禁列表/封禁',
-            '  <ansiyellow>/u unban aid</ansiyellow>      解封成员',
-            '  <ansiyellow>/join inv [+/-]</ansiyellow>   邀请码管理',
-            '  <ansiyellow>/join req [+/-]</ansiyellow>   入群申请管理',
-            '  <ansiyellow>/setup name|desc|notice|mode|role</ansiyellow>  群设置',
-            '  <ansiyellow>/g transfer|suspend|resume</ansiyellow>  群管理',
-        ])
-    group_lines.append('  <ansiyellow>/quit</ansiyellow>             退出群组')
     return (
         '<b>快捷键</b>\n'
         '  <ansiyellow>/</ansiyellow>              命令菜单（peer→远端 群→群管理）\n'
@@ -3874,12 +4485,12 @@ def _build_help_text(is_group_owner: bool | None = None) -> str:
         '  <ansiyellow>Ctrl+G</ansiyellow>         toggle 数据日志\n'
         '  <ansiyellow>Esc</ansiyellow>            关闭菜单\n'
         '  <ansiyellow>Ctrl+C</ansiyellow>         中断任务 / 清空输入 / 双击退出\n\n'
-        '<b>目标切换 (@)</b>\n'
-        '  <ansiyellow>@aid</ansiyellow>           切换到 peer\n'
-        '  <ansiyellow>@grp_xxx</ansiyellow>       切换到群组\n'
-        '  <ansiyellow>@群名</ansiyellow>          按名称切换群组\n'
-        '  <ansiyellow>@aid msg</ansiyellow>       群聊中 mention 成员并发消息\n'
-        '  <ansiyellow>@切换目标</ansiyellow>      群聊中切换到其他会话\n\n'
+        '<b>目标切换 (@ / //target)</b>\n'
+        '  <ansiyellow>@aid</ansiyellow>                     切换到 peer\n'
+        '  <ansiyellow>@grp_xxx</ansiyellow>                 切换到群组\n'
+        '  <ansiyellow>@群名</ansiyellow>                    按名称切换群组\n'
+        '  <ansiyellow>//target &lt;aid|group_id&gt;</ansiyellow>  直接切换目标\n'
+        '  <ansiyellow>@aid msg</ansiyellow>                 群聊中 mention 成员并发消息\n\n'
         '<b>本地身份 (//local / //aid)</b>\n'
         '  <ansiyellow>//local &lt;name&gt;</ansiyellow>      切换本地 AID（类似 aun -l）\n'
         '  <ansiyellow>//aid list</ansiyellow>           列出本地所有 AID\n'
@@ -3889,9 +4500,7 @@ def _build_help_text(is_group_owner: bool | None = None) -> str:
         '  <ansiyellow>//qid add &lt;group_id&gt;</ansiyellow>    加入群组\n'
         '  <ansiyellow>//qid quit &lt;group_id&gt;</ansiyellow>   退出群组\n'
         '  <ansiyellow>//qid search &lt;关键词&gt;</ansiyellow>  搜索公开群组\n\n'
-        '<b>群命令（目标为群时 / 触发）</b>\n'
-        + '\n'.join(group_lines)
-        + '\n\n<b>文件收发</b>\n'
+        '<b>文件收发</b>\n'
         '  <ansiyellow>//sendfile path</ansiyellow>  发送文件到当前目标'
     )
 
@@ -3914,6 +4523,11 @@ async def repl(c: AUNCli):
             return HTML(f" <b>{_ctrlc_state['hint']}</b>")
         conn = "🟢 已连接" if c.connected else "🔴 未连接"
         tgt  = _target_label(c.target) if c.target else "未设置"
+        # peer target：查询在线状态，附加离线标志
+        if c.target and c.target.get("type") == "peer":
+            c._refresh_target_online()
+            if c._target_online is False:
+                tgt = f"{tgt} 🚫"
         me   = c.my_aid
         enc  = "🔒 E2EE" if c.encrypt else "🔓 明文"
         rej  = f"明文⚠ {c.plaintext_recv}  " if c.plaintext_recv else ""
@@ -4003,7 +4617,21 @@ async def repl(c: AUNCli):
                     break
                 elif cmd == "target":
                     if arg:
-                        await c.resolve_and_switch_target(arg)
+                        parts2 = arg.split(None, 1)
+                        subcmd = parts2[0].lower()
+                        subarg = parts2[1] if len(parts2) > 1 else ""
+                        if subcmd == "agent.md":
+                            target_aid = subarg.strip() or (c.target["id"] if c.target and c.target.get("type") == "peer" else "")
+                            if not target_aid:
+                                error("用法: //target agent.md <aid>  (或先 //target <aid> 再执行)")
+                            else:
+                                try:
+                                    content = await c.client.auth.download_agent_md(target_aid)
+                                    await _msg_dialog(title=f"agent.md — {_short_name(target_aid)}", text=content.strip(), style=_HELP_STYLE)
+                                except Exception as e:
+                                    error(f"获取 agent.md 失败: {e}")
+                        else:
+                            await c.resolve_and_switch_target(arg)
                     else:
                         error("用法: //target <aid|group_id>")
                 elif cmd == "ping":
@@ -4029,7 +4657,7 @@ async def repl(c: AUNCli):
                 elif cmd == "rawdata":
                     await c.cmd_rawdata()
                 elif cmd == "e2ee":
-                    c.cmd_e2ee()
+                    await c.cmd_e2ee()
                 elif cmd == "sendfile":
                     if arg:
                         await c.send_file(arg)
@@ -4073,7 +4701,7 @@ async def repl(c: AUNCli):
                     continue
                 # 透传到远端（fall through）
 
-            if _should_handle_join_as_target_switch(line):
+            if _should_handle_join_as_target_switch(line, c.target):
                 target, message = _split_target_switch_input(line)
                 if target:
                     await c.resolve_and_switch_target(target, message)
@@ -4098,9 +4726,57 @@ def _load_history():
         return InMemoryHistory()
 
 async def _dispatch_local_local_command(c, arg: str):
+    parts2 = arg.split(None, 1)
+    subcmd = parts2[0].lower() if parts2 else ""
+    subarg = parts2[1] if len(parts2) > 1 else ""
+
+    if subcmd == "agent.md":
+        # //local agent.md              — 查看当前 AID 的 agent.md
+        # //local agent.md upload <path> — 上传文件内容
+        # //local agent.md set <text>    — 直接上传文本
+        action_parts = subarg.split(None, 1)
+        action = action_parts[0].lower() if action_parts else ""
+        action_arg = action_parts[1] if len(action_parts) > 1 else ""
+        if action == "upload":
+            path = action_arg.strip()
+            if not path:
+                error("用法: //local agent.md upload <文件路径>")
+                return
+            try:
+                content = Path(path).read_text(encoding="utf-8")
+                await c.client.auth.upload_agent_md(content)
+                info("agent.md 上传成功")
+            except FileNotFoundError:
+                error(f"文件不存在: {path}")
+            except Exception as e:
+                error(f"上传失败: {e}")
+        elif action == "set":
+            text = action_arg.strip()
+            if not text:
+                error("用法: //local agent.md set <内容>")
+                return
+            try:
+                await c.client.auth.upload_agent_md(text)
+                info("agent.md 上传成功")
+            except Exception as e:
+                error(f"上传失败: {e}")
+        else:
+            # 无 action 或未知：下载并展示自己的 agent.md
+            my_aid = c.my_aid or ""
+            if not my_aid:
+                error("未连接，无法获取 agent.md")
+                return
+            try:
+                content = await c.client.auth.download_agent_md(my_aid)
+                await _msg_dialog(title=f"agent.md — {_short_name(my_aid)}", text=content.strip(), style=_HELP_STYLE)
+            except Exception as e:
+                error(f"获取 agent.md 失败: {e}")
+        return
+
+    # 原有逻辑：//local <name> 切换 AID
     name = arg.strip()
     if not name:
-        error("用法: //local <name>")
+        error("用法: //local <name> | agent.md [upload <path>|set <text>]")
         return
     await c.switch_aid(name)
 
@@ -4179,15 +4855,16 @@ async def cmd_aid_create(name: str):
         _save_config(cfg)
         info("已设为默认 AID")
 
-def cmd_aid_delete(name: str):
+def cmd_aid_delete(name: str, force: bool = False):
     import shutil
     ks = _get_keystore()
     local = ks.load_identity(name)
     if local is None:
         error(f"AID {name} 不存在"); return
-    confirm = input(f"删除 {name}？[y/N] ").strip().lower()
-    if confirm != 'y':
-        info("已取消"); return
+    if not force:
+        confirm = input(f"删除 {name}？[y/N] ").strip().lower()
+        if confirm != 'y':
+            info("已取消"); return
 
     safe = ks._safe_aid(name)
     removed: list[str] = []
@@ -4258,7 +4935,7 @@ async def cmd_qid_search(cli_ref, keyword: str):
     if not keyword:
         error("用法: //qid search <关键词>"); return
     try:
-        result = await cli_ref.client.call("group.search", {"keyword": keyword, "size": 20})
+        result = await cli_ref.client.call("group.search", {"query": keyword, "size": 20})
         items = result.get("items", [])
         if not items:
             info("未找到相关群组"); return
@@ -4389,6 +5066,10 @@ examples:
                 await cmd_qid_search(c, args.keyword)
             else:
                 qid_p.print_help()
+        except (ConnectionRefusedError, ConnectionError, OSError, TimeoutError) as e:
+            error(f"启动失败: 无法连接网关 ({e})。请检查网络或通过 -p <port> 指定网关端口")
+        except Exception as e:
+            error(f"启动失败: {e}")
         finally:
             await c.close()
         return

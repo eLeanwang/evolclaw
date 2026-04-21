@@ -276,15 +276,8 @@ export class CommandHandler {
     if (!messageId) return false;
     const wrappedCallback: typeof opts.callback = async (action, values, operatorId) => {
       await opts.callback(action, values, operatorId);
-      const adapter = this.adapters.get(opts.channel);
-      if (adapter?.patchInteractionCard) {
-        const disabledCard = {
-          config: { wide_screen_mode: true },
-          header: { template: 'grey', title: { tag: 'plain_text', content: '已过期' } },
-          elements: [{ tag: 'markdown', content: '此卡片已过期，请查看最新卡片。' }],
-        };
-        adapter.patchInteractionCard(messageId, disabledCard).catch(() => {});
-      }
+      // 已完成交互的卡片：保留原始内容，仅禁用按钮（不标记为"已过期"）
+      // "已过期"仅用于被新卡片替代的旧卡片（invalidateOldCards）
     };
     this.interactionRouter.register(opts.requestId, opts.sessionId, wrappedCallback, { timeoutMs: 120_000, messageId });
     return true;
@@ -408,7 +401,7 @@ export class CommandHandler {
         { cmd: '/del', args: '<name>', label: '删除指定会话' },
         ...(isAdmin ? [
           { cmd: '/fork', args: '[name]', label: '分支当前会话' },
-          { cmd: '/rewind', args: '[N] [chat|file|all]', label: '查看历史/回退会话 (别名: /rw)' },
+          { cmd: '/rewind', args: '[N] [chat|file|all]', label: '查看历史/撤销指定轮次 (别名: /rw)' },
           { cmd: '/compact', label: '压缩会话上下文' },
         ] : []),
       ]
@@ -608,7 +601,7 @@ export class CommandHandler {
         '  /name <新名称> - 重命名当前会话',
         '  /del <名称> - 删除指定会话（仅解绑，不删除文件）',
         '  /fork [名称] - 分支当前会话（从当前对话点创建分支）',
-        '  /rewind [N] [chat|file|all] - 查看历史/回退会话（别名: /rw）',
+        '  /rewind [N] [chat|file|all] - 查看历史/撤销指定轮次（别名: /rw）',
         '  /compact - 压缩会话上下文（减少 token 用量）',
         '',
         '🤖 Agent 与模型：',
@@ -2379,12 +2372,12 @@ export class CommandHandler {
       const parts = args.split(/\s+/);
       const turnNum = parseInt(parts[0], 10);
       if (isNaN(turnNum) || turnNum < 1) {
-        return '❌ 无效轮次，用法：/rewind <N> chat|file|all';
+        return '❌ 无效轮次，用法：/rewind <N> chat|file|all（撤销第N轮）';
       }
 
       const mode = parts[1]?.toLowerCase();
       if (!mode) {
-        return `❌ 请指定回退模式：/rewind ${turnNum} chat | file | all`;
+        return `❌ 请指定回退模式：/rewind ${turnNum} chat | file | all（撤销第${turnNum}轮）`;
       }
       if (!['chat', 'file', 'all'].includes(mode)) {
         return `❌ 无效模式 "${mode}"，可选：chat | file | all`;
@@ -2466,7 +2459,7 @@ export class CommandHandler {
         '',
         ...lines,
         '',
-        '💡 /rewind <N> chat|file|all',
+        '💡 /rewind <N> chat|file|all — 撤销第N轮',
       ].join('\n');
     } catch (error) {
       logger.error('[CommandHandler] Failed to read session messages:', error);
@@ -2484,14 +2477,13 @@ export class CommandHandler {
       const messages = await agent.getSessionMessages!(session.agentSessionId!, session.projectPath);
       const turns = this.buildTurnList(messages);
 
-      if (turnNum > turns.length) {
+      if (turnNum < 1 || turnNum > turns.length) {
         return `❌ 轮次超出范围，当前共 ${turns.length} 轮`;
       }
-      if (turnNum === turns.length) {
-        return '❌ 已在最新一轮，无需回退';
-      }
 
-      const target = turns[turnNum - 1];
+      // /rewind N = 撤销第N轮（及之后），保留 1..N-1
+      const rewindTarget = turns[turnNum - 1]; // 被撤销的轮次（用于文件回退）
+      const keepTarget = turnNum >= 2 ? turns[turnNum - 2] : null; // 保留到的轮次（用于对话回退）
       const results: string[] = [];
 
       // 文件回退（立即执行）
@@ -2499,7 +2491,7 @@ export class CommandHandler {
         if (!agent.rewindFiles) {
           return '❌ 当前 Agent 不支持文件回退';
         }
-        const fileResult = await agent.rewindFiles(session.agentSessionId!, session.projectPath, target.userUuid);
+        const fileResult = await agent.rewindFiles(session.agentSessionId!, session.projectPath, rewindTarget.userUuid);
         if (!fileResult.canRewind) {
           if (mode === 'file') {
             return `❌ 当前会话无文件快照，无法回退文件${fileResult.error ? `\n原因: ${fileResult.error}` : ''}`;
@@ -2507,19 +2499,32 @@ export class CommandHandler {
           results.push(`⚠️ 文件回退失败${fileResult.error ? `: ${fileResult.error}` : '（无文件快照）'}`);
         } else {
           const count = fileResult.filesChanged?.length || 0;
-          results.push(`✅ 已恢复文件到第 ${turnNum} 轮的状态（恢复了 ${count} 个文件）`);
+          results.push(`✅ 已恢复文件到第 ${turnNum} 轮之前的状态（恢复了 ${count} 个文件）`);
         }
       }
 
       // 对话回退（延迟执行 — 下次发消息时生效）
       if (mode === 'chat' || mode === 'all') {
-        const meta = { ...(session.metadata || {}), resumeAt: target.assistantUuid };
-        await this.sessionManager.updateSession(session.id, { metadata: meta });
+        if (keepTarget) {
+          const meta = { ...(session.metadata || {}), resumeAt: keepTarget.assistantUuid };
+          await this.sessionManager.updateSession(session.id, { metadata: meta });
+        } else {
+          // N=1：撤销全部对话，清空 session 从头开始
+          const meta = { ...(session.metadata || {}) };
+          delete meta.resumeAt;
+          await this.sessionManager.updateSession(session.id, {
+            metadata: meta,
+            agentSessionId: null,
+          });
+        }
 
-        const discarded = turns.length - turnNum;
+        const discarded = turns.length - turnNum + 1;
+        const keepDesc = keepTarget
+          ? `回退到第 ${turnNum - 1} 轮："${keepTarget.userContent}"`
+          : '已清空全部对话历史';
         results.push(
-          `✅ 已标记对话回退到第 ${turnNum} 轮："${target.userContent}"`,
-          `下次发言将从此处继续（后续 ${discarded} 轮对话将被丢弃）`
+          `✅ 已撤销第 ${turnNum} 轮${discarded > 1 ? `及后续共 ${discarded} 轮` : ''}`,
+          keepTarget ? `下次发言将从第 ${turnNum - 1} 轮继续` : '下次发言将开始全新对话'
         );
       }
 

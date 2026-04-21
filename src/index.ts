@@ -210,6 +210,7 @@ async function main() {
 
   // 回填 messageQueue 引用
   cmdHandler.setMessageQueue(messageQueue);
+  processor.setMessageQueue(messageQueue);
 
   // 默认策略
   const defaultPolicy = {

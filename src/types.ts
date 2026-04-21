@@ -232,51 +232,6 @@ export interface InboundMessage {
 
 // ── 交互协议类型（渠道无关） ──
 
-interface FieldBase {
-  type: string;
-  key: string;
-  label: string;
-  hint?: string;
-}
-
-export interface TextField extends FieldBase {
-  type: 'text';
-  placeholder?: string;
-  defaultValue?: string;
-  validation?: 'text' | 'number' | 'path';
-  required?: boolean;
-}
-
-export interface SelectField extends FieldBase {
-  type: 'select';
-  placeholder?: string;
-  options: Array<{
-    value: string;
-    label: string;
-    description?: string;
-    selected?: boolean;
-  }>;
-  required?: boolean;
-}
-
-export interface MultiSelectField extends FieldBase {
-  type: 'multi-select';
-  options: Array<{
-    value: string;
-    label: string;
-    selected?: boolean;
-  }>;
-  minSelect?: number;
-  maxSelect?: number;
-}
-
-export interface ToggleField extends FieldBase {
-  type: 'toggle';
-  defaultValue?: boolean;
-}
-
-export type InteractionField = TextField | SelectField | MultiSelectField | ToggleField;
-
 export interface ActionInteraction {
   kind: 'action';
   title: string;
@@ -292,34 +247,7 @@ export interface ActionInteraction {
   }>;
 }
 
-export interface FormInteraction {
-  kind: 'form';
-  title: string;
-  body?: string;
-  fields: InteractionField[];
-  submitLabel?: string;
-  submitStyle?: 'primary' | 'danger';
-  submitConfirm?: {
-    title: string;
-    body: string;
-  };
-  cancelable?: boolean;
-}
-
-export interface MenuInteraction {
-  kind: 'menu';
-  groups: Array<{
-    group: string;
-    items: Array<{
-      key: string;
-      label: string;
-      args?: string;
-      interaction?: 'form' | 'confirm';
-    }>;
-  }>;
-}
-
-export type InteractionKind = ActionInteraction | FormInteraction | MenuInteraction;
+export type InteractionKind = ActionInteraction;
 
 export interface InteractionRequest {
   type: 'interaction';
