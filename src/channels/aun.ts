@@ -336,10 +336,34 @@ export class AUNChannel {
       mentions.push(this._aid);
     }
 
+    // Process attachments
+    const rawAttachments: any[] = Array.isArray((payload as any)?.attachments)
+      ? (payload as any).attachments
+      : [];
+
+    let finalText = text;
+    if (rawAttachments.length > 0 && this.client) {
+      const fileParts: string[] = [];
+      for (const att of rawAttachments) {
+        const filePath = await this.downloadAttachment(att, fromAid);
+        if (filePath) {
+          const name = sanitizeFileName(att.filename || att.object_key?.split('/').pop() || 'file');
+          fileParts.push(`[文件: ${name} → ${filePath}]`);
+        }
+      }
+      if (fileParts.length > 0) {
+        const parts: string[] = [];
+        if (text) parts.push(text);
+        parts.push(...fileParts);
+        parts.push('请使用 Read 工具读取文件内容。');
+        finalText = parts.join('\n\n');
+      }
+    }
+
     this.dispatchMessage({
       channelId: fromAid,
       userId: fromAid,
-      text,
+      text: finalText,
       chatType: 'private',
       messageId,
       seq,
