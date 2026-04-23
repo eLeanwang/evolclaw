@@ -800,6 +800,8 @@ export class AUNChannelPlugin implements ChannelPlugin {
         options,
         connect: () => channel.connect(),
         disconnect: () => channel.disconnect(),
+        onProjectPathRequest: (channelId: string) =>
+          Promise.resolve(config.projects?.defaultPath || process.cwd()),
       });
     }
 
