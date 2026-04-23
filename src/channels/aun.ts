@@ -6,6 +6,7 @@ import type { ChannelPlugin, ChannelInstance } from '../core/channel-loader.js';
 import type { Config, ReplyContext, AunChannelConfig } from '../types.js';
 import { normalizeChannelInstances, getChannelShowActivities } from '../config.js';
 import { resolvePaths } from '../paths.js';
+import { saveToUploads, sanitizeFileName } from '../utils/media-cache.js';
 
 export interface AUNConfig {
   aid: string;
@@ -34,6 +35,7 @@ export interface AUNMessageHandler {
 
 export class AUNChannel {
   private client: AUNClient | null = null;
+  private projectPathProvider?: (channelId: string) => Promise<string>;
   private messageHandler?: AUNMessageHandler;
   private connected = false;
   private traceStream: fs.WriteStream | null = null;
@@ -409,6 +411,10 @@ export class AUNChannel {
   }
 
   // ── Public API (same interface as before) ───────────────────
+
+  onProjectPathRequest(provider: (channelId: string) => Promise<string>): void {
+    this.projectPathProvider = provider;
+  }
 
   onMessage(handler: AUNMessageHandler): void {
     this.messageHandler = handler;
