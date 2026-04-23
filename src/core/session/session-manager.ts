@@ -12,23 +12,31 @@ import os from 'os';
 
 /** 判定用户是否为指定渠道的 owner */
 export type OwnerResolver = (channel: string, userId: string) => boolean;
+/** 判定用户是否为指定渠道的 admin */
+export type AdminResolver = (channel: string, userId: string) => boolean;
 
 export class SessionManager {
   private db: DatabaseSync;
   private eventBus: EventBus;
   private ownerResolver?: OwnerResolver;
+  private adminResolver?: AdminResolver;
   private fileAdapters = new Map<string, SessionFileAdapter>();
 
-  constructor(dbPath: string = resolvePaths().db, eventBus: EventBus, ownerResolver?: OwnerResolver) {
+  constructor(dbPath: string = resolvePaths().db, eventBus: EventBus, ownerResolver?: OwnerResolver, adminResolver?: AdminResolver) {
     ensureDir(path.dirname(dbPath));
     this.db = new DatabaseSync(dbPath);
     this.eventBus = eventBus;
     this.ownerResolver = ownerResolver;
+    this.adminResolver = adminResolver;
     this.initDatabase();
   }
 
   setOwnerResolver(resolver: OwnerResolver): void {
     this.ownerResolver = resolver;
+  }
+
+  setAdminResolver(resolver: AdminResolver): void {
+    this.adminResolver = resolver;
   }
 
   registerFileAdapter(adapter: SessionFileAdapter): void {
@@ -78,8 +86,9 @@ export class SessionManager {
   /** 根据 userId 计算身份 */
   resolveIdentity(channel: string, userId?: string): SessionIdentity {
     if (!userId) return { role: 'anonymous', mode: 'interactive' };
-    const isOwner = this.ownerResolver?.(channel, userId) ?? false;
-    return { role: isOwner ? 'owner' : 'guest', mode: 'interactive' };
+    if (this.ownerResolver?.(channel, userId)) return { role: 'owner', mode: 'interactive' };
+    if (this.adminResolver?.(channel, userId)) return { role: 'admin', mode: 'interactive' };
+    return { role: 'guest', mode: 'interactive' };
   }
 
   /** 更新 session 的 identity（owner 绑定后调用） */

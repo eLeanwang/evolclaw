@@ -2,7 +2,7 @@ import { logger } from '../utils/logger.js';
 import { markdownToPlainText } from '../utils/format.js';
 import type { ChannelPlugin, ChannelInstance } from '../core/channel-loader.js';
 import type { Config, QQBotChannelConfig } from '../types.js';
-import { normalizeChannelInstances } from '../config.js';
+import { normalizeChannelInstances, getChannelShowActivities } from '../config.js';
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -398,21 +398,21 @@ export class QQBotChannelPlugin implements ChannelPlugin {
       };
 
       const policy = {
-        canSwitchProject: (_chatType: string, identity: string) => identity === 'owner',
-        canListProjects: (_chatType: string, identity: string) => identity === 'owner',
+        canSwitchProject: (_chatType: string, identity: string) => identity === 'owner' || identity === 'admin',
+        canListProjects: (_chatType: string, identity: string) => identity === 'owner' || identity === 'admin',
         canCreateSession: () => true,
         canDeleteSession: () => true,
-        canImportCliSession: (_chatType: string, identity: string) => identity === 'owner',
+        canImportCliSession: (_chatType: string, identity: string) => identity === 'owner' || identity === 'admin',
         messagePrefix: (chatType: string, peerName?: string) => (chatType === 'group' && peerName) ? `[${peerName}] ` : '',
         showMiddleResult: (chatType: string, identity: string) => {
-          const mode = inst.showActivities ?? config.showActivities ?? 'all';
+          const mode = getChannelShowActivities(config, inst.name);
           if (mode === 'none') return false;
           if (mode === 'dm-only') return chatType === 'private';
           if (mode === 'owner-dm-only') return chatType === 'private' && identity === 'owner';
           return true;
         },
         showIdleMonitor: (chatType: string, identity: string) => {
-          const mode = inst.showActivities ?? config.showActivities ?? 'all';
+          const mode = getChannelShowActivities(config, inst.name);
           if (mode === 'none') return false;
           if (mode === 'dm-only') return chatType === 'private';
           if (mode === 'owner-dm-only') return chatType === 'private' && identity === 'owner';

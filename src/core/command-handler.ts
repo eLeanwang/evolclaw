@@ -8,7 +8,7 @@ import type { StatsCollector } from '../utils/stats-collector.js';
 import { PermissionGateway, type PermissionDecision } from './permission.js';
 import { InteractionRouter } from './interaction-router.js';
 import { MessageQueue } from './message/message-queue.js';
-import { saveConfig, resolvePaths, getPackageRoot, getOwner } from '../config.js';
+import { saveConfig, resolvePaths, getPackageRoot, getOwner, getChannelShowActivities, setChannelShowActivities } from '../config.js';
 import { logger } from '../utils/logger.js';
 import crypto from 'crypto';
 import path from 'path';
@@ -37,11 +37,11 @@ function formatModelUsage(agent: AgentRunnerFull, model: string): string {
   const efforts = getAvailableEfforts(agent, model);
   const lines = [
     '用法:',
-    '  /model <model>           切换模型',
+    '  /model <模型>            切换模型',
   ];
 
   if (efforts.length > 0) {
-    lines.push('  /model <model> <effort>  切换模型+推理强度');
+    lines.push('  /model <模型> <强度>     切换模型+推理强度');
     lines.push('  /effort [level]          查看或切换推理强度');
   }
 
@@ -127,7 +127,7 @@ function formatIdleTime(ms: number): string {
 }
 
 // 支持的命令列表
-const commands = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/effort', '/agent', '/slist', '/session', '/rename', '/stop', '/clear', '/compact', '/repair', '/safe', '/fork', '/del', '/perm', '/send', '/check', '/rewind'];
+const commands = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/effort', '/agent', '/slist', '/session', '/rename', '/stop', '/clear', '/compact', '/repair', '/safe', '/fork', '/del', '/perm', '/send', '/check', '/rewind', '/activity'];
 
 // 命令别名映射
 const aliases: Record<string, string> = {
@@ -138,7 +138,7 @@ const aliases: Record<string, string> = {
 };
 
 // 命令快速路径前缀（所有命令都不进入消息队列）
-const quickCommandPrefixes = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/effort', '/agent', '/slist', '/session', '/rename', '/repair', '/fork', '/stop', '/clear', '/compact', '/safe', '/del', '/perm', '/send', '/check', '/p ', '/s ', '/name ', '/rewind', '/rw', '/rw '];
+const quickCommandPrefixes = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/effort', '/agent', '/slist', '/session', '/rename', '/repair', '/fork', '/stop', '/clear', '/compact', '/safe', '/del', '/perm', '/send', '/check', '/p ', '/s ', '/name ', '/rewind', '/rw', '/rw ', '/activity'];
 
 export class CommandHandler {
   private adapters = new Map<string, ChannelAdapter>();
@@ -364,9 +364,11 @@ export class CommandHandler {
 
   /**
    * 返回结构化命令菜单（供 menu.query 使用）
-   * admin 看到全部命令分组，guest 仅看到用户级命令
+   * owner 看到全部命令，admin 看到管理级命令（不含 owner-only），guest 仅看到用户级命令
    */
-  getMenuItems(isAdmin: boolean, chatType: string = 'private'): { group: string; commands: { cmd: string; args?: string; label: string }[] }[] {
+  getMenuItems(role: string, chatType: string = 'private'): { group: string; commands: { cmd: string; args?: string; label: string }[] }[] {
+    const isOwner = role === 'owner';
+    const isAdmin = role === 'owner' || role === 'admin';
     const items: { group: string; commands: { cmd: string; args?: string; label: string }[] }[] = [];
 
     if (!isAdmin && chatType === 'group') {
@@ -387,7 +389,7 @@ export class CommandHandler {
         commands: [
           { cmd: '/pwd', label: '显示当前项目路径' },
           { cmd: '/p', args: '[name|path]', label: '列出或切换项目' },
-          { cmd: '/bind', args: '<path>', label: '绑定新项目目录' },
+          ...(isOwner ? [{ cmd: '/bind', args: '<path>', label: '绑定新项目目录' }] : []),
         ]
       });
     }
@@ -420,7 +422,7 @@ export class CommandHandler {
       items.push({
         group: '权限管理',
         commands: [
-          { cmd: '/perm', args: '[mode|allow|always|deny]', label: '权限模式管理' },
+          { cmd: '/perm', args: isOwner ? '[mode|allow|always|deny]' : '[allow|always|deny]', label: '权限模式管理' },
         ]
       });
 
@@ -429,8 +431,11 @@ export class CommandHandler {
         commands: [
           { cmd: '/status', label: '显示会话状态' },
           { cmd: '/stop', label: '中断当前任务' },
-          { cmd: '/restart', label: '重启服务' },
-          { cmd: '/send', args: '[channel] <path>', label: '发送项目内文件' },
+          ...(isOwner ? [
+            { cmd: '/restart', label: '重启服务' },
+            { cmd: '/send', args: '[channel] <path>', label: '发送项目内文件' },
+            { cmd: '/activity', args: '[all|dm|owner|none]', label: '控制中间输出显示模式' },
+          ] : []),
           { cmd: '/check', args: '[rty <channel>]', label: '检查渠道状态或重连指定渠道' },
         ]
       });
@@ -502,7 +507,8 @@ export class CommandHandler {
     }
 
     // 权限检查：区分用户级命令和管理级命令
-    const isAdmin = identity.role === 'owner';
+    const isOwner = identity.role === 'owner';
+    const isAdmin = identity.role === 'owner' || identity.role === 'admin';
     const activeChatType = activeSession?.chatType || 'private';
 
     if (normalizedContent.startsWith('/')) {
@@ -514,7 +520,9 @@ export class CommandHandler {
         normalizedContent === cmd.trimEnd() || normalizedContent.startsWith(cmd)
       );
       if (!isUserCommand && !isAdmin) {
-        return '❌ 无权限：当前群聊仅支持 /status 和 /help';
+        return activeChatType === 'group'
+          ? '❌ 无权限：当前群聊仅支持 /status 和 /help'
+          : '❌ 无权限：此命令仅限管理员使用';
       }
     }
 
@@ -587,13 +595,14 @@ export class CommandHandler {
         return lines.join('\n');
       }
 
+      // admin+ 基础命令
       const lines = [
         '可用命令：',
         '',
         '📁 项目管理：',
         '  /pwd - 显示当前项目路径',
         '  /p [name|path] - 列出或切换项目',
-        '  /bind <path> - 绑定新项目目录',
+        ...(isOwner ? ['  /bind <path> - 绑定新项目目录'] : []),
         '',
         '🔄 会话管理：',
         '  /new [名称] - 创建新会话（清空历史请用此命令，可选命名）',
@@ -611,14 +620,17 @@ export class CommandHandler {
         '',
         '🔐 权限管理：',
         '  /perm - 查看当前权限模式',
-        '  /perm <auto|bypass|request|edit|plan|noask> - 切换权限模式',
+        ...(isOwner ? ['  /perm <auto|bypass|request|edit|plan|noask> - 切换权限模式'] : []),
         '  /perm allow|always|deny - 审批权限请求',
         '',
         '🛠️ 运维：',
         '  /status - 显示会话状态',
         '  /stop - 中断当前任务',
-        '  /restart - 重启服务',
-        '  /send [channel] <path> - 发送项目内文件',
+        ...(isOwner ? [
+          '  /restart - 重启服务',
+          '  /send [channel] <path> - 发送项目内文件',
+          '  /activity [all|dm|owner|none] - 控制中间输出显示模式',
+        ] : []),
         '',
         '❓ 帮助：',
         '  /help - 显示此帮助信息',
@@ -657,7 +669,7 @@ export class CommandHandler {
             kind: {
               kind: 'action',
               title: '🔐 权限模式',
-              body: availableModes.map(m => `${m.key === currentMode ? '▶' : '•'} **${m.key}** (${m.nameZh}) - ${m.description}`).join('\n'),
+              body: availableModes.map(m => `${m.key === currentMode ? '✓' : '•'} **${m.key}** (${m.nameZh}) - ${m.description}`).join('\n'),
               buttons: availableModes.map(m => ({
                 key: m.key,
                 label: m.key === currentMode ? `✓ ${m.key}` : m.key,
@@ -685,7 +697,7 @@ export class CommandHandler {
 
         // 降级：文本
         const modeList = modes.map(m => {
-          const prefix = m.key === currentMode ? '▶' : ' ';
+          const prefix = m.key === currentMode ? '✓' : ' ';
           const suffix = m.available ? '' : ' ⚠️ 不可用';
           return `  ${prefix} ${m.key} (${m.nameZh}) - ${m.description}${suffix}`;
         }).join('\n');
@@ -729,9 +741,9 @@ export class CommandHandler {
             if (!matched.available) {
               return `❌ ${matched.key} 模式当前不可用：${matched.unavailableReason}`;
             }
-            // guest 用户只能保持 readonly 模式
-            if (identity.role !== 'owner' && arg !== 'readonly') {
-              return '❌ 当前身份无法切换权限模式';
+            // guest 和 admin 用户不能切换权限模式（仅 owner）
+            if (!isOwner) {
+              return '❌ 权限模式切换仅限 owner';
             }
             const metadata = permSession.metadata || {};
             metadata.permissionMode = arg;
@@ -751,7 +763,8 @@ export class CommandHandler {
 
     // /agent 命令：查看或切换 Agent 后端
     if (normalizedContent.startsWith('/agent')) {
-      if (!isAdmin) return '❌ 无权限：此命令仅限管理员使用';
+      // 群聊中 owner only，私聊中 admin+
+      if (activeChatType === 'group' ? !isOwner : !isAdmin) return '❌ 无权限：此命令仅限管理员使用';
       const args = normalizedContent.slice(6).trim();
       const available = [...this.agentMap.keys()];
 
@@ -878,7 +891,7 @@ export class CommandHandler {
         }
 
         // 降级：文本
-        const modelList = models.map((m: string) => `- ${m}`).join('\n');
+        const modelList = models.map((m: string) => `  ${m === currentModel ? '✓' : ' '} ${m}`).join('\n');
         const effortHint = efforts.length > 0
           ? `\n推理强度: ${currentEffort === 'auto' ? 'auto (SDK默认)' : currentEffort}  (使用 /effort 调整)`
           : '';
@@ -901,7 +914,7 @@ export class CommandHandler {
         } else if (models.includes(arg)) {
           newModel = arg;
         } else {
-          const modelList = models.map((m: string) => `- ${m}`).join('\n');
+          const modelList = models.map((m: string) => `  ${m === currentModel ? '✓' : ' '} ${m}`).join('\n');
           const effortHint = efforts.length > 0 ? `\n\n推理强度请使用 /effort 命令` : '';
           return `❌ 无效参数: ${arg}\n\n可用模型：\n${modelList}${effortHint}`;
         }
@@ -1059,8 +1072,9 @@ export class CommandHandler {
 
         // 降级：文本
         const effortDisplay = currentEffort === 'auto' ? 'auto (SDK默认)' : currentEffort;
-        const effortList = efforts.map(e => `${e === currentEffort ? '  ✓' : '   '} ${e}`).join('\n');
-        return `⚡ 推理强度: ${effortDisplay}\n\n可选:\n${effortList}\n   ${currentEffort === 'auto' ? '  ✓' : '   '} auto\n\n用法: /effort <level>`;
+        const allItems = [...efforts, 'auto'];
+        const effortList = allItems.map(e => `  ${e === currentEffort ? '✓' : ' '} ${e}${e === 'auto' ? ' (SDK默认)' : ''}`).join('\n');
+        return `⚡ 推理强度: ${effortDisplay}\n\n可选:\n${effortList}\n\n用法: /effort <level>`;
       }
 
       // /effort auto：恢复 SDK 默认
@@ -1116,6 +1130,95 @@ export class CommandHandler {
       }
 
       return `✓ 推理强度: ${newEffort}`;
+    }
+
+    // /activity 命令：控制中间输出显示模式
+    if (normalizedContent === '/activity' || normalizedContent.startsWith('/activity ')) {
+      if (!isOwner) return '❌ 无权限：此命令仅限 owner 使用';
+
+      const activityArg = normalizedContent.slice(9).trim();
+      const modeMap: Record<string, 'all' | 'dm-only' | 'owner-dm-only' | 'none'> = {
+        all: 'all',
+        dm: 'dm-only',
+        owner: 'owner-dm-only',
+        none: 'none',
+      };
+
+      const currentMode = getChannelShowActivities(this.config, channel);
+
+      // 模式描述列表（用于 body 和文本降级）
+      const modeDescriptions: { key: string; configVal: string; label: string }[] = [
+        { key: 'all', configVal: 'all', label: '全部显示' },
+        { key: 'dm', configVal: 'dm-only', label: '仅私聊显示' },
+        { key: 'owner', configVal: 'owner-dm-only', label: '仅 owner 私聊显示' },
+        { key: 'none', configVal: 'none', label: '全部静默' },
+      ];
+
+      if (!activityArg) {
+        // 无参数：显示当前模式 + Action 卡片
+        if (this.interactionRouter) {
+          const requestId = `activity-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+          const body = modeDescriptions.map(m =>
+            `${m.configVal === currentMode ? '✓' : '•'} **${m.key}** (${m.label})`
+          ).join('\n');
+          const buttons: ActionInteraction['buttons'] = modeDescriptions.map(m => ({
+            key: m.key,
+            label: m.configVal === currentMode ? `✓ ${m.key}` : m.key,
+            style: m.configVal === currentMode ? 'primary' as const : 'default' as const,
+          }));
+
+          const interaction: InteractionRequest = {
+            type: 'interaction',
+            id: requestId,
+            channelId,
+            sessionId: activeSession?.id || requestId,
+            kind: {
+              kind: 'action',
+              title: '📋 中间输出模式',
+              body,
+              buttons,
+            },
+          };
+
+          const replyCtx = activeSession ? this.getReplyContext(activeSession) : undefined;
+          const cardSent = await this.sendInteractionCard({
+            channel, channelId, sessionId: activeSession?.id || requestId, requestId, interaction, replyCtx,
+            callback: async (action, _values, operatorId) => {
+              const newMode = modeMap[action];
+              if (newMode && newMode !== currentMode) {
+                if (userId && operatorId && operatorId !== userId) return;
+                const result = await this.handle(`/activity ${action}`, channel, channelId, undefined, userId, threadId);
+                if (result) {
+                  const adapter = this.adapters.get(channel);
+                  adapter?.sendText(channelId, result, replyCtx);
+                }
+              }
+            },
+          });
+          if (cardSent) return null;
+        }
+
+        // 降级：文本
+        const modeList = modeDescriptions.map(m => {
+          const prefix = m.configVal === currentMode ? '✓' : ' ';
+          return `  ${prefix} ${m.key} (${m.label})`;
+        }).join('\n');
+        return `📋 中间输出模式: ${currentMode}\n\n${modeList}\n\n用法:\n  /activity <模式>    切换中间输出显示模式`;
+      }
+
+      const newMode = modeMap[activityArg];
+      if (!newMode) {
+        return `❌ 无效参数: ${activityArg}\n可选: all / dm / owner / none`;
+      }
+
+      const label = modeDescriptions.find(m => m.configVal === newMode)?.label || newMode;
+
+      if (newMode === currentMode) {
+        return `📋 中间输出模式已是 ${activityArg}（${label}）`;
+      }
+
+      setChannelShowActivities(this.config, channel, newMode);
+      return `✅ 中间输出模式: ${activityArg}（${label}）`;
     }
 
     // /stop 命令：中断当前任务
@@ -1446,8 +1549,9 @@ export class CommandHandler {
       return lines.join('\n');
     }
 
-    // /restart 命令：重启服务
+    // /restart 命令：重启服务（owner only）
     if (normalizedContent === '/restart') {
+      if (!isOwner) return '❌ 无权限：此命令仅限 owner 使用';
       const allSessions = await this.sessionManager.listSessions(channel, channelId);
       const sessionsWithMessages = allSessions
         .filter(s => this.messageCache.hasMessages(s.id))
@@ -1525,8 +1629,9 @@ export class CommandHandler {
       return `当前项目: ${session.projectPath}`;
     }
 
-    // /send 命令：发送项目内文件，支持 /send path 和 /send channel path
+    // /send 命令：发送项目内文件，支持 /send path 和 /send channel path（owner only）
     if (normalizedContent.startsWith('/send')) {
+      if (!isOwner) return '❌ 无权限：此命令仅限 owner 使用';
       // 飞书会将 .md 等后缀自动转为 Markdown 链接: foo.md → [foo.md](http://foo.md/)
       // 还原: 将 [text](url) 替换为 text
       const rawArg = normalizedContent.slice(5).trim().replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
@@ -1704,7 +1809,7 @@ export class CommandHandler {
 
         const bodyLines = entries.map(e => {
           const status = buildStatusText(e);
-          const prefix = e.isCurrent ? '▶' : '•';
+          const prefix = e.isCurrent ? '✓' : '•';
           return `${prefix} **${e.name}** (${e.projectPath})  ${status}`;
         });
 
@@ -1860,8 +1965,9 @@ export class CommandHandler {
       return response;
     }
 
-    // /bind 命令：持久化项目到配置（不切换）
+    // /bind 命令：持久化项目到配置（不切换）（owner only）
     if (normalizedContent.startsWith('/bind ')) {
+      if (!isOwner) return '❌ 无权限：此命令仅限 owner 使用';
       const projectPath = normalizedContent.slice(6).trim();
 
       if (!projectPath) return '用法: /bind <路径>';
@@ -2057,7 +2163,7 @@ export class CommandHandler {
         });
 
         const bodyLines = displaySessions.map(ds => {
-          const prefix = ds.isActive ? '▶' : '•';
+          const prefix = ds.isActive ? '✓' : '•';
           const threadTag = ds.session.threadId ? '[话题] ' : '';
           const uuid = ds.session.agentSessionId ? `(${ds.session.agentSessionId.substring(0, 8)})` : '';
           const fileMark = ds.fileMissing ? '❌ ' : '';

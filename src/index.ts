@@ -1,7 +1,7 @@
 import { ClaudeSessionFileAdapter } from './core/session/adapters/claude-session-file-adapter.js';
 import { CodexSessionFileAdapter } from './core/session/adapters/codex-session-file-adapter.js';
 import { GeminiSessionFileAdapter } from './core/session/adapters/gemini-session-file-adapter.js';
-import { loadConfig, ensureDataDirs, resolvePaths, resolveAnthropicConfig, isOwner, validateConfigIntegrity, validateChannelInstanceNames, getOwner } from './config.js';
+import { loadConfig, ensureDataDirs, resolvePaths, resolveAnthropicConfig, isOwner, isAdmin, validateConfigIntegrity, validateChannelInstanceNames, getOwner } from './config.js';
 import { SessionManager } from './core/session/session-manager.js';
 import { ClaudeAgentPlugin } from './agents/claude-runner.js';
 import { CodexAgentPlugin } from './agents/codex-runner.js';
@@ -85,9 +85,10 @@ async function main() {
   const statsCollector = new StatsCollector(eventBus);
 
   // 初始化数据库（带 ownerResolver）
-  const sessionManager = new SessionManager(undefined, eventBus, (channel, userId) => {
-    return isOwner(config, channel, userId);
-  });
+  const sessionManager = new SessionManager(undefined, eventBus,
+    (channel, userId) => isOwner(config, channel, userId),
+    (channel, userId) => isAdmin(config, channel, userId)
+  );
   logger.info('✓ Database initialized');
 
   // 注册会话文件适配器（Claude / Codex 各自的会话文件操作）
@@ -214,11 +215,11 @@ async function main() {
 
   // 默认策略
   const defaultPolicy = {
-    canSwitchProject: (chatType: string, role: string) => chatType === 'private' || role === 'owner',
-    canListProjects: (chatType: string, role: string) => chatType === 'private' || role === 'owner',
+    canSwitchProject: (chatType: string, role: string) => chatType === 'private' ? (role === 'owner' || role === 'admin') : role === 'owner',
+    canListProjects: (chatType: string, role: string) => chatType === 'private' ? (role === 'owner' || role === 'admin') : role === 'owner',
     canCreateSession: () => true,
-    canDeleteSession: (chatType: string, role: string) => chatType === 'private' || role === 'owner',
-    canImportCliSession: (chatType: string, role: string) => chatType === 'private' || role === 'owner',
+    canDeleteSession: (chatType: string, role: string) => chatType === 'private' ? (role === 'owner' || role === 'admin') : role === 'owner',
+    canImportCliSession: (chatType: string, role: string) => chatType === 'private' ? (role === 'owner' || role === 'admin') : role === 'owner',
     messagePrefix: () => '',
     showMiddleResult: () => true,
     showIdleMonitor: () => true,

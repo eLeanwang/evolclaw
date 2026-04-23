@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "AUN CLI - Interactive command-line client for AUN protocol"
 requires-python = ">=3.10"
 dependencies = [
-    "aun-core>=0.2.5",
+    "aun-core>=0.2.6",
     "prompt-toolkit>=3.0.0",
     "rich>=13.0.0",
 ]

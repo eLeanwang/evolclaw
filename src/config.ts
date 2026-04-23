@@ -330,6 +330,49 @@ export function setOwner(config: Config, instanceName: string, userId: string, c
   }
 }
 
+type ShowActivitiesMode = 'all' | 'dm-only' | 'owner-dm-only' | 'none';
+
+export function getChannelShowActivities(config: Config, instanceName: string): ShowActivitiesMode {
+  for (const type of channelTypes) {
+    const raw = (config.channels as any)?.[type];
+    if (raw === undefined) continue;
+    if (Array.isArray(raw)) {
+      const inst = raw.find((item: any) => item.name === instanceName);
+      if (inst) return inst.showActivities ?? config.showActivities ?? 'all';
+    } else {
+      const effectiveName = raw.name ?? type;
+      if (effectiveName === instanceName) return raw.showActivities ?? config.showActivities ?? 'all';
+    }
+  }
+  return config.showActivities ?? 'all';
+}
+
+export function setChannelShowActivities(config: Config, instanceName: string, mode: ShowActivitiesMode): void {
+  if (!config.channels) config.channels = {};
+  const channels = config.channels as any;
+
+  for (const type of channelTypes) {
+    const raw = channels[type];
+    if (raw === undefined) continue;
+
+    if (Array.isArray(raw)) {
+      const inst = raw.find((item: any) => item.name === instanceName);
+      if (inst) {
+        inst.showActivities = mode;
+        saveConfig(config);
+        return;
+      }
+    } else {
+      const effectiveName = raw.name ?? type;
+      if (effectiveName === instanceName) {
+        raw.showActivities = mode;
+        saveConfig(config);
+        return;
+      }
+    }
+  }
+}
+
 export function isOwner(config: Config, channelOrType: string, userId: string): boolean {
   // 按实例名精确匹配
   if (getOwner(config, channelOrType) === userId) return true;
@@ -340,6 +383,30 @@ export function isOwner(config: Config, channelOrType: string, userId: string): 
     const instances = normalizeChannelInstances(raw, type);
     for (const inst of instances) {
       if ((inst as any).owner === userId) return true;
+    }
+  }
+  return false;
+}
+
+export function isAdmin(config: Config, channelOrType: string, userId: string): boolean {
+  // 按实例名精确匹配
+  for (const type of channelTypes) {
+    const raw = (config.channels as any)?.[type];
+    const instances = normalizeChannelInstances(raw, type);
+    const found = instances.find((inst) => inst.name === channelOrType);
+    if (found) {
+      const admins: string[] = (found as any).admins || [];
+      return admins.includes(userId);
+    }
+  }
+  // 按 channelType 匹配：检查该类型下所有实例
+  for (const type of channelTypes) {
+    if (type !== channelOrType) continue;
+    const raw = (config.channels as any)?.[type];
+    const instances = normalizeChannelInstances(raw, type);
+    for (const inst of instances) {
+      const admins: string[] = (inst as any).admins || [];
+      if (admins.includes(userId)) return true;
     }
   }
   return false;

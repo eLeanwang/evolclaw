@@ -393,8 +393,9 @@ export class MessageProcessor {
           : undefined,
       });
 
-      // 设置 per-session 权限模式（动态默认值：owner → bypass，guest → readonly）
-      const defaultPermMode = session.identity?.role === 'owner' ? 'bypass' : 'readonly';
+      // 设置 per-session 权限模式（动态默认值：owner → bypass，admin → auto，guest → readonly）
+      const role = session.identity?.role;
+      const defaultPermMode = role === 'owner' ? 'bypass' : role === 'admin' ? 'auto' : 'readonly';
       agent.setMode(session.metadata?.permissionMode ?? defaultPermMode);
 
       // 标记会话为处理中（实时持久化，重启后可恢复）
@@ -1070,6 +1071,9 @@ export class MessageProcessor {
       // User interrupt (AbortError) is expected, log at info level
       if (error instanceof Error && error.name === 'AbortError') {
         logger.info('[MessageProcessor] Stream interrupted (AbortError)');
+      } else if (isRetryableError(error)) {
+        // Retryable errors (network aborts, transient API failures) are noise at ERROR level
+        logger.warn('[MessageProcessor] Stream processing error (retryable):', (error as Error)?.message?.split('\n')[0]);
       } else {
         logger.error('[MessageProcessor] Stream processing error:', error);
       }

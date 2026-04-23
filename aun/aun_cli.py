@@ -25,7 +25,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 # ── 依赖自检 ──────────────────────────────────────────────────────────────
 _REQUIRED_PACKAGES = [
-    {"import": "aun_core", "requirement": "aun-core>=0.2.5"},
+    {"import": "aun_core", "requirement": "aun-core>=0.2.6"},
     {"import": "prompt_toolkit", "requirement": "prompt-toolkit>=3.0.0"},
     {"import": "rich", "requirement": "rich>=13.0.0"},
 ]
@@ -197,6 +197,9 @@ DATA_DIR = None   # CLI 私有数据（~/.aun/aun-cli），存 history、config
 DOWNLOADS_DIR = None  # 文件下载目录（~/.aun/aun-cli/downloads）
 HISTORY_FILE = None
 _CONFIG_FILE = None
+_silent = False   # -s 模式：抑制所有非正文输出
+_real_stderr = sys.stderr  # error() 始终使用真实 stderr
+_error_file = None  # -s 模式下 dup'd stderr（fd 级别独立于重定向）
 
 def _init_globals():
     """初始化全局配置变量。"""
@@ -664,6 +667,13 @@ def _is_group_epoch_too_old_error(exc: Exception | str | None) -> bool:
     return "epoch too old" in text
 
 
+def _is_group_banned_error(exc: Exception | str | None) -> bool:
+    if not exc:
+        return False
+    text = str(exc).lower()
+    return "banned" in text
+
+
 def _join_mode_from_requirements(result: dict | None, error: Exception | None = None) -> str:
     reqs = result.get("join_requirements", {}) if isinstance(result, dict) else {}
     mode = reqs.get("mode", "")
@@ -720,14 +730,15 @@ _LOCAL_CMDS = [
     ("//log",        "",    "toggle 数据日志（写入文件）"),
     ("//history",    "N",   "查看历史消息（默认20条）"),
     ("//plain",      "",    "切换 明文/E2EE"),
-    ("//target",     "aid", "设置目标 / agent.md <aid>（或用 @）"),
-    ("//sendfile",   "path","发送文件到当前目标"),
+    ("//target",     "aid", "设置目标（或用 @）"),
+    ("//agentmd",   "[aid]", "查看/管理 agent.md（不填 aid 为本地）"),
+    ("//file",       "cmd", "文件管理（输入 //file 查看帮助）"),
     ("//ping",       "",    "Ping 网关"),
     ("//processing", "",    "当前处理状态"),
     ("//rawdata",    "",    "最后消息原始内容"),
     ("//e2ee",       "",    "E2EE 状态"),
     ("//status",     "",    "连接状态"),
-    ("//local",      "name", "切换本地 AID / agent.md [upload <path>|set <text>]"),
+    ("//local",      "name", "切换本地 AID"),
     ("//aid",        "cmd",  "AID 管理"),
     ("//qid",        "cmd", "群组管理"),
     ("//help",       "",    "帮助"),
@@ -747,7 +758,9 @@ _GROUP_COMMANDS = [
 _OWNER_ONLY_GROUP_COMMANDS = {"user", "join", "setup", "group"}
 
 
-def _filter_group_commands_for_owner(is_owner: bool | str | None):
+def _filter_group_commands_for_owner(is_owner: bool | str | None, is_banned: bool = False):
+    if is_banned:
+        return [cmd for cmd in _GROUP_COMMANDS if cmd[0] in ("list", "info", "quit")]
     if is_owner in (True, "owner"):
         return list(_GROUP_COMMANDS)
     if is_owner == "admin":
@@ -950,6 +963,15 @@ class AUNCompleter(Completer):
                                          display=f"{aid_name}{is_current}", display_meta="切换")
                 return
 
+            # //agentmd 二级补全：put/set 子命令
+            if filter_text.startswith("agentmd ") or filter_text == "agentmd":
+                subarg = filter_text[8:] if len(filter_text) > 8 else ""
+                if not subarg:
+                    for sub, meta in [("put", "上传文件"), ("set", "直接设置文本")]:
+                        yield Completion(f"//agentmd {sub} ", start_position=-len(text),
+                                         display=sub, display_meta=meta)
+                return
+
             # //aid 二级补全：本地 AID 管理命令
             if filter_text.startswith("aid ") or filter_text == "aid":
                 aid_filter = filter_text[4:].lower() if len(filter_text) > 4 else ""
@@ -1031,9 +1053,11 @@ class AUNCompleter(Completer):
             if ' ' in filter_text:
                 return
             is_owner = None
+            is_banned = False
             if self.cli_ref:
                 is_owner = self.cli_ref.is_current_group_owner_cached()
-            for cmd_name, aliases, _desc, _need_group, _visible in _filter_group_commands_for_owner(is_owner):
+                is_banned = self.cli_ref._group_banned
+            for cmd_name, aliases, _desc, _need_group, _visible in _filter_group_commands_for_owner(is_owner, is_banned):
                 if not _visible:
                     continue
                 matched = cmd_name.startswith(filter_text)
@@ -1248,6 +1272,8 @@ class C:
     RESET  = "\033[0m"
 
 def _p(s):
+    if _silent:
+        return
     print_formatted_text(ANSI(s), color_depth=ColorDepth.TRUE_COLOR)
 
 # ── Markdown 渲染 ─────────────────────────────────────────────────────────
@@ -1414,12 +1440,19 @@ def _build_status_text(cli, width: int | None = None, gateway_status: dict | Non
     return "\n".join(lines)
 
 def _sys(icon, color, msg):
+    if _silent:
+        return
     ts = datetime.now().strftime('%H:%M:%S')
     content = f"{C.DIM}{ts}\033[22m {color}{icon}\033[39m {msg}"
     _p(content)
 
 def info(msg):  _sys("·", C.CYAN, msg)
-def error(msg): _sys("✗", C.RED, msg)
+def error(msg):
+    if _silent:
+        f = _error_file or _real_stderr
+        print(msg, file=f, flush=True)
+        return
+    _sys("✗", C.RED, msg)
 
 def print_recv(from_aid, text, extra=""):
     name = _short_name(from_aid)
@@ -1656,9 +1689,10 @@ def _save_to_downloads(data: bytes, filename: str, sender_aid: str) -> Path:
 # ── 客户端 ────────────────────────────────────────────────────────────────
 
 class AUNCli:
-    def __init__(self, aid=None, target=None):
+    def __init__(self, aid=None, target=None, slot_id=""):
         cfg = _load_config()
         self.my_aid     = aid or cfg.get("aid")
+        self.slot_id    = slot_id
         # target 统一为 dict: {"type": "peer"|"group", "id": str, "name": str}
         raw_target = target or cfg.get("target")
         self.target     = _normalize_target(raw_target)
@@ -1695,11 +1729,13 @@ class AUNCli:
         # 重连退避
         self._reconn_failures = 0       # 连续重连失败次数
         self._reconn_cooldown_until = 0 # 冷却截止时间（event loop time）
+        self._initial_connect_done = False  # 首次连接完成标记
         # 群缓存
         self._group_cache = []          # group.list_my 结果
         self._group_cache_at = 0        # 缓存写入时间
         self._group_cache_ttl = 300     # 缓存有效期（秒）
         self._group_cache_refreshing = False
+        self._group_banned = False
         # 群成员缓存
         self._members_cache = {}        # group_id → [{"aid": ..., "role": ...}, ...]
         self._members_cache_at = {}     # group_id → timestamp
@@ -1719,6 +1755,12 @@ class AUNCli:
         # 群 epoch 补钥状态
         self._group_recovery_sender = {}   # group_id → 最近一条解密失败消息的 sender_aid
         self._group_recovery_failed = {}   # group_id → {aid → expire_time}
+        # -s 模式：等待回复
+        self._send_reply_event = asyncio.Event()
+        self._send_reply_text = None
+        self._send_seen_seq = 0     # drain 阶段已收到的最大 seq
+        self._send_armed = False    # send 完成后设为 True
+        self._send_reply_from = None  # 群聊 -s：只接受该 aid 的回复（None=不限）
 
     async def start(self):
         """用 self.my_aid 启动，AID 不存在则报错退出。"""
@@ -1740,11 +1782,13 @@ class AUNCli:
         from aun_core import __version__ as _sdk_ver
         info(f"AID: {C.BOLD}{aid}{C.RESET}  {C.DIM}(aun-core {_sdk_ver}){C.RESET}")
 
-        local = _get_keystore().load_identity(aid)
-        if local is None:
+        ks = _get_keystore()
+        has_dir = (ks._aids_root / aid).is_dir()
+        local = ks.load_identity(aid)
+        if local is None and not has_dir:
             error(f"AID {aid} 不存在，请先用 aun aid new <name> 创建")
             raise SystemExit(1)
-        if "private_key_pem" not in (local or {}):
+        if local is None or "private_key_pem" not in (local or {}):
             error(f"AID {aid} 私钥丢失，无法继续使用")
             try:
                 ans = input(f"是否删除本地 AID {aid}？[y/N] ").strip().lower()
@@ -1808,10 +1852,11 @@ class AUNCli:
             "access_token": auth["access_token"],
             "gateway":      auth["gateway"],
             "auto_reconnect": True,
+            "slot_id":      self.slot_id,
         })
         self.connected = True
         self._connected_at = time.monotonic()
-        # 连接成功后持久化 AID
+        self._initial_connect_done = True
         cfg = _load_config()
         cfg["aid"] = self.my_aid
         _save_config(cfg)
@@ -1825,9 +1870,16 @@ class AUNCli:
             # 连接成功后预加载远端菜单（仅 peer target）
             if _is_peer_target(self.target):
                 asyncio.ensure_future(self.query_menu())
-            # 预加载当前群的成员缓存
+            # 群目标：验证成员资格（-s 模式下失败不清除 target，仍尝试发送）
             if _is_group_target(self.target):
-                asyncio.ensure_future(self._ensure_members_cache(self.target["id"]))
+                try:
+                    await self._ensure_group_membership(self.target["id"])
+                except Exception:
+                    if not _silent:
+                        error(f"你不在群 {_target_label(self.target)}，请先加入: //qid add {self.target['id']}")
+                        self.target = None
+                else:
+                    asyncio.ensure_future(self._ensure_members_cache(self.target["id"]))
             # 后台刷新群缓存
             asyncio.ensure_future(self._refresh_group_cache())
 
@@ -1975,12 +2027,27 @@ class AUNCli:
         if self._raw_monitor_app is not None:
             self._raw_monitor_app.invalidate()
 
-        # 数据日志
-        self._log_write("RECV", data)
-
         # processing / menu 状态通知
         if self._handle_status_payload(payload, from_aid):
+            self._log_write("RECV_IGNORED", data)
             return
+
+        # 群 E2EE 协议消息（key_request / key_distribution 等）以 P2P 通道传输，
+        # 不属于用户消息，静默丢弃，避免污染单聊未读和 recent_targets
+        _e2ee_type = None
+        if isinstance(payload, dict):
+            _e2ee_type = payload.get("type", "")
+        elif isinstance(payload, str):
+            try:
+                _e2ee_type = json.loads(payload).get("type", "")
+            except Exception:
+                pass
+        if isinstance(_e2ee_type, str) and _e2ee_type.startswith("e2ee."):
+            self._log_write("RECV_IGNORED", data)
+            return
+
+        # 数据日志
+        self._log_write("RECV", data)
 
         text = payload.get("text", json.dumps(payload, ensure_ascii=False)) \
                if isinstance(payload, dict) else str(payload)
@@ -2035,6 +2102,18 @@ class AUNCli:
         if msg_id and self.store.exists(msg_id):
             return
 
+        # -s 模式：跟踪 seq，只接受 send 后新消息
+        if _silent:
+            msg_seq = data.get("seq")
+            if isinstance(msg_seq, (int, float)):
+                msg_seq = int(msg_seq)
+                if not self._send_armed:
+                    self._send_seen_seq = max(self._send_seen_seq, msg_seq)
+                elif msg_seq > self._send_seen_seq:
+                    self._send_reply_text = text
+                    self._send_reply_event.set()
+            return
+
         extra = ""
         if task_id: extra += f"  {C.DIM}[task:{task_id}]\033[22m"
 
@@ -2067,11 +2146,15 @@ class AUNCli:
         state = data.get("state", "")
         if state == "disconnected":
             self.connected = False
+            if _silent:
+                self._send_reply_text = None
+                self._send_reply_event.set()
             error(f"连接断开: {data.get('error','unknown')}")
         elif state == "connected":
             self.connected = True
             self._connected_at = time.monotonic()
-            info("重新连接成功")
+            if self._initial_connect_done:
+                info("重新连接成功")
             # 重连后刷新远端菜单（仅 peer target）
             if self.target and _is_peer_target(self.target):
                 self._pending_menu = None
@@ -2094,6 +2177,7 @@ class AUNCli:
                 "access_token": auth["access_token"],
                 "gateway":      auth["gateway"],
                 "auto_reconnect": True,
+                "slot_id":      self.slot_id,
             })
             self.connected = True
             self._connected_at = time.monotonic()
@@ -2126,6 +2210,7 @@ class AUNCli:
                 "access_token": auth["access_token"],
                 "gateway":      auth["gateway"],
                 "auto_reconnect": True,
+                "slot_id":      self.slot_id,
             })
             self.connected = True
             self._connected_at = time.monotonic()
@@ -2413,24 +2498,90 @@ class AUNCli:
         except asyncio.TimeoutError:
             self._suppress_next = False
             print_status(target_label, "x", C.RED, "发送超时")
+            if _silent:
+                self._send_reply_text = None
+                self._send_reply_event.set()
         except Exception as e:
             self._suppress_next = False
             if _is_group_target(self.target) and _is_group_not_joined_error(e):
-                print_status(target_label, "x", C.RED, f"发送失败: 你当前不在群 {target_label}，请先加入群组")
+                group_id = self.target["id"]
+                error(f"你不在群 {target_label}，请先加入: //qid add {group_id}")
+                if _silent:
+                    self._send_reply_text = None
+                    self._send_reply_event.set()
+                return
+            if _is_group_target(self.target) and _is_group_banned_error(e):
+                self._group_banned = True
+                print_status(target_label, "x", C.RED, f"你已被封禁，无法发送消息")
+                if _silent:
+                    self._send_reply_text = None
+                    self._send_reply_event.set()
                 return
             print_status(target_label, "x", C.RED, f"发送失败: {e}")
+            if _silent:
+                self._send_reply_text = None
+                self._send_reply_event.set()
+
+    async def _upload_to_storage(self, file_path: Path, object_key: str, is_private: bool = True) -> dict:
+        """上传文件到 storage，返回上传结果 dict。
+
+        小文件 (≤64KB) 使用 inline put_object，大文件使用 ticket 上传。
+        调用前需自行校验 client/connected 状态。
+        """
+        import aiohttp
+
+        file_size = file_path.stat().st_size
+        content_type = _guess_mime(file_path)
+        sha256 = _hash_file(file_path, "sha256")
+
+        if file_size <= INLINE_THRESHOLD:
+            file_data = file_path.read_bytes()
+            content_b64 = base64.b64encode(file_data).decode()
+            result = await self.client.call("storage.put_object", {
+                "object_key": object_key,
+                "content": content_b64,
+                "content_type": content_type,
+                "is_private": is_private,
+                "overwrite": True,
+            })
+            if self.debug_mode:
+                info(f"  inline 上传完成: {result.get('object_key')}")
+        else:
+            file_data = file_path.read_bytes()
+            session_result = await self.client.call("storage.create_upload_session", {
+                "object_key": object_key,
+                "size_bytes": file_size,
+                "content_type": content_type,
+            })
+            upload_url = session_result["upload_url"]
+            if self.debug_mode:
+                info(f"  upload session 创建完成，正在上传…")
+
+            async with aiohttp.ClientSession() as http:
+                async with http.put(upload_url, data=file_data) as resp:
+                    if resp.status not in (200, 201):
+                        raise RuntimeError(f"HTTP 上传失败: {resp.status}")
+
+            result = await self.client.call("storage.complete_upload", {
+                "object_key": object_key,
+                "sha256": sha256,
+                "content_type": content_type,
+                "is_private": is_private,
+                "size_bytes": file_size,
+            })
+            if self.debug_mode:
+                info(f"  ticket 上传完成: {result.get('object_key')}")
+
+        return result
 
     async def send_file(self, file_path_str: str):
         """发送文件到当前 target。
 
         流程:
         1. 校验文件存在、可读、大小限制
-        2. 计算 sha256 / size / mime
-        3. 上传到 storage（inline ≤64KB，ticket >64KB）
-        4. 构造附件 payload 发消息
+        2. 上传到 storage
+        3. 构造附件 payload 发消息
         """
-        import aiohttp
-
         if not self.client:
             error("未连接"); return
         if not self.connected:
@@ -2439,7 +2590,6 @@ class AUNCli:
         if not self.target:
             error("未设置目标，使用 @aid 或 @group_id"); return
 
-        # 1. 校验文件
         file_path = Path(file_path_str).expanduser().resolve()
         if not file_path.exists():
             error(f"文件不存在: {file_path}"); return
@@ -2453,8 +2603,8 @@ class AUNCli:
             error(f"文件过大: {_format_size(file_size)}（上限 {_format_size(MAX_FILE_SIZE)}）"); return
 
         filename = file_path.name
-        content_type = _guess_mime(file_path)
         sha256 = _hash_file(file_path, "sha256")
+        content_type = _guess_mime(file_path)
         object_key = f"shared/{uuid.uuid4()}/{filename}"
 
         target_id = self.target["id"]
@@ -2462,49 +2612,8 @@ class AUNCli:
         info(f"📎 发送文件: {filename} ({_format_size(file_size)})")
 
         try:
-            # 2. 上传到 storage
-            if file_size <= INLINE_THRESHOLD:
-                # inline 上传
-                file_data = file_path.read_bytes()
-                content_b64 = base64.b64encode(file_data).decode()
-                result = await self.client.call("storage.put_object", {
-                    "object_key": object_key,
-                    "content": content_b64,
-                    "content_type": content_type,
-                    "is_private": False,
-                    "overwrite": True,
-                })
-                if self.debug_mode:
-                    info(f"  inline 上传完成: {result.get('object_key')}")
-            else:
-                # ticket 上传
-                file_data = file_path.read_bytes()
-                session_result = await self.client.call("storage.create_upload_session", {
-                    "object_key": object_key,
-                    "size_bytes": file_size,
-                    "content_type": content_type,
-                })
-                upload_url = session_result["upload_url"]
-                if self.debug_mode:
-                    info(f"  upload session 创建完成，正在上传…")
+            await self._upload_to_storage(file_path, object_key, is_private=False)
 
-                async with aiohttp.ClientSession() as http:
-                    async with http.put(upload_url, data=file_data) as resp:
-                        if resp.status not in (200, 201):
-                            error(f"HTTP 上传失败: {resp.status}")
-                            return
-
-                result = await self.client.call("storage.complete_upload", {
-                    "object_key": object_key,
-                    "sha256": sha256,
-                    "content_type": content_type,
-                    "is_private": False,
-                    "size_bytes": file_size,
-                })
-                if self.debug_mode:
-                    info(f"  ticket 上传完成: {result.get('object_key')}")
-
-            # 3. 构造附件 payload
             attachment = {
                 "owner_aid": self.my_aid,
                 "object_key": object_key,
@@ -2518,7 +2627,6 @@ class AUNCli:
                 "attachments": [attachment],
             }
 
-            # 4. 发消息
             if _is_group_target(self.target):
                 msg_result = await self.client.call("group.send", {
                     "group_id": target_id,
@@ -2543,7 +2651,6 @@ class AUNCli:
             })
             print_status(target_label, "▶", C.YELLOW, f"📎 {filename} 已发送")
 
-            # 持久化
             conv_type = "group" if _is_group_target(self.target) else "peer"
             msg_id = (msg_result.get("message_id") if isinstance(msg_result, dict) else None) \
                      or f"sent_{target_id}_{int(time.time()*1000)}"
@@ -2584,7 +2691,7 @@ class AUNCli:
             content_type = att.get("content_type", "")
 
             size_str = _format_size(expected_size) if expected_size else "?"
-            info(f"  📥 {filename} ({size_str})")
+            info(f"📥 {filename} ({size_str})")
 
             try:
                 # 获取下载 ticket
@@ -2614,11 +2721,174 @@ class AUNCli:
 
                 # 保存到本地
                 saved_path = _save_to_downloads(data, filename, from_aid)
-                info(f"    ✅ 已保存: {saved_path}")
+                info(f"✅ 已保存: {saved_path}")
 
             except Exception as e:
-                error(f"    📥 {filename} 下载失败: {e}")
+                error(f"📥 {filename} 下载失败: {e}")
                 # 不阻塞其他附件
+
+    # ── //file 子命令方法 ─────────────────────────────────────────────────
+
+    async def file_put(self, file_path_str: str, object_key: str):
+        """上传文件到 storage（不发消息）。"""
+        if not self.client:
+            error("未连接"); return
+        if not self.connected:
+            if not await self._reconnect():
+                return
+
+        file_path = Path(file_path_str).expanduser().resolve()
+        if not file_path.exists():
+            error(f"文件不存在: {file_path}"); return
+        if not file_path.is_file():
+            error(f"不是文件: {file_path}"); return
+
+        file_size = file_path.stat().st_size
+        if file_size == 0:
+            error("文件为空"); return
+        if file_size > MAX_FILE_SIZE:
+            error(f"文件过大: {_format_size(file_size)}（上限 {_format_size(MAX_FILE_SIZE)}）"); return
+
+        info(f"📤 上传: {file_path.name} ({_format_size(file_size)}) → {object_key}")
+        try:
+            result = await self._upload_to_storage(file_path, object_key)
+            info(f"  ✅ 上传完成: {result.get('object_key')} ({_format_size(result.get('size_bytes', 0))})")
+        except Exception as e:
+            error(f"上传失败: {e}")
+
+    async def file_get(self, object_key: str, local_path_str: str):
+        """从 storage 下载文件到本地。"""
+        import aiohttp
+
+        if not self.client:
+            error("未连接"); return
+        if not self.connected:
+            if not await self._reconnect():
+                return
+
+        save_path = Path(local_path_str).expanduser().resolve()
+        if save_path.is_dir():
+            filename = _sanitize_filename(object_key.rsplit("/", 1)[-1] or "unnamed")
+            save_path = save_path / filename
+
+        try:
+            meta = await self.client.call("storage.head_object", {
+                "object_key": object_key,
+            })
+        except Exception as e:
+            error(f"查询文件失败: {e}"); return
+
+        size_bytes = meta.get("size_bytes", 0)
+        content_type = meta.get("content_type", "")
+        info(f"📥 下载: {object_key} ({_format_size(size_bytes)}, {content_type})")
+
+        try:
+            if size_bytes <= INLINE_THRESHOLD:
+                result = await self.client.call("storage.get_object", {
+                    "object_key": object_key,
+                })
+                data = base64.b64decode(result["content"])
+                if self.debug_mode:
+                    info(f"  inline 读取完成")
+            else:
+                ticket = await self.client.call("storage.create_download_ticket", {
+                    "object_key": object_key,
+                })
+                download_url = ticket.get("download_url", "")
+                if not download_url:
+                    error("未获取到下载 URL"); return
+                async with aiohttp.ClientSession() as http:
+                    async with http.get(download_url) as resp:
+                        if resp.status != 200:
+                            error(f"HTTP 下载失败: {resp.status}"); return
+                        data = await resp.read()
+                if self.debug_mode:
+                    info(f"  ticket 下载完成")
+
+            expected_sha = meta.get("sha256", "")
+            if expected_sha:
+                actual_sha = hashlib.sha256(data).hexdigest()
+                if actual_sha != expected_sha:
+                    error(f"文件校验失败（期望 {expected_sha[:8]}…，实际 {actual_sha[:8]}…）")
+                    return
+
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            save_path.write_bytes(data)
+            info(f"  ✅ 已保存: {save_path}")
+
+        except Exception as e:
+            error(f"下载失败: {e}")
+
+    async def file_list(self, prefix: str = ""):
+        """列出 storage 中的文件和目录。"""
+        if not self.client:
+            error("未连接"); return
+        if not self.connected:
+            if not await self._reconnect():
+                return
+
+        try:
+            prefixes_result = await self.client.call("storage.list_prefixes", {
+                **({"prefix": prefix} if prefix else {}),
+            })
+            dirs = prefixes_result.get("prefixes", [])
+
+            objects_result = await self.client.call("storage.list_objects", {
+                **({"prefix": prefix} if prefix else {}),
+                "size": 200,
+            })
+            items = objects_result.get("items", [])
+            total = objects_result.get("total", len(items))
+
+            if not dirs and not items:
+                info("（空）")
+            else:
+                for d in dirs:
+                    info(f"  📁 {d}")
+
+                for obj in items:
+                    key = obj.get("object_key", "")
+                    size = _format_size(obj.get("size_bytes", 0))
+                    ts = obj.get("updated_at", 0)
+                    date_str = datetime.fromtimestamp(ts / 1000).strftime("%Y-%m-%d %H:%M") if ts else ""
+                    private = "🔒" if obj.get("is_private") else ""
+                    info(f"  {key:<40s}  {size:>8s}  {date_str}  {private}")
+
+                if total > len(items):
+                    info(f"  … 共 {total} 个文件，已显示 {len(items)} 个")
+
+            if not prefix:
+                try:
+                    quota = await self.client.call("storage.get_quota", {})
+                    used = _format_size(quota.get("used_bytes", 0))
+                    quota_bytes = quota.get("quota_bytes", 0)
+                    obj_count = quota.get("object_count", 0)
+                    limit_str = _format_size(quota_bytes) if quota_bytes else "无限制"
+                    info(f"  ── 存储: {used} / {limit_str}（{obj_count} 个文件）")
+                except Exception:
+                    pass
+
+        except Exception as e:
+            error(f"列出文件失败: {e}")
+
+    async def file_del(self, object_key: str):
+        """删除 storage 中的文件。"""
+        if not self.client:
+            error("未连接"); return
+        if not self.connected:
+            if not await self._reconnect():
+                return
+
+        try:
+            result = await self.client.call("storage.delete_object", {
+                "object_key": object_key,
+            })
+            if result.get("deleted"):
+                info(f"  ✅ 已删除: {object_key}")
+            else:
+                error(f"文件不存在: {object_key}")
+        except Exception as e:
+            error(f"删除失败: {e}")
 
     async def query_menu(self, manual=False):
         """查询远端菜单并缓存到 _pending_menu（供 AUNCompleter 读取）。
@@ -2716,6 +2986,7 @@ class AUNCli:
         self._suppress_next = False
         self._last_sent = None
         self._last_sent_seq = None
+        self._group_banned = False
 
     async def set_peer_target(self, name: str) -> bool:
         """校验 AID → 查询 Gateway → 设为 peer 目标并持久化。成功返回 True。"""
@@ -2830,25 +3101,31 @@ class AUNCli:
             return False
         # group_id 格式（必须在 AID 检查之前，因为 g-xxx.agentid.pub 同时满足 _is_valid_aid）
         if _is_group_id(value):
+            group_name = None
             # 先在本地缓存中查找
             for g in self._group_cache:
                 if g.get("group_id") == value:
-                    self.set_group_target(value, g.get("name", value))
-                    if message:
-                        await self.send(message, encrypt=self.encrypt)
-                    return True
+                    group_name = g.get("name", value)
+                    break
             # recent_targets 中查
-            found = _find_group_in_targets(value)
-            if found:
-                self.set_group_target(value, found.get("name", value))
+            if group_name is None:
+                found = _find_group_in_targets(value)
+                if found:
+                    group_name = found.get("name", value)
+            if group_name is not None:
+                # 验证成员资格
+                try:
+                    await self._ensure_group_membership(value)
+                except Exception:
+                    error(f"你不在群 [{group_name}]，请先加入: //qid add {value}")
+                    return False
+                self.set_group_target(value, group_name)
                 if message:
                     await self.send(message, encrypt=self.encrypt)
                 return True
-            # 未找到 → 入群引导
-            joined = await self._join_group_flow(value)
-            if joined and message:
-                await self.send(message, encrypt=self.encrypt)
-            return True
+            # 未找到 → 提示加群
+            error(f"你不在群 {value}，请先加入: //qid add {value}")
+            return False
         # AID 格式
         if _is_valid_aid(value):
             if not await self.set_peer_target(value):
@@ -2857,15 +3134,24 @@ class AUNCli:
                 await self.send(message, encrypt=self.encrypt)
             return True
         # 群名匹配
+        group_id = None
+        group_name = value
         for g in self._group_cache:
             if g.get("name") == value:
-                self.set_group_target(g["group_id"], value)
-                if message:
-                    await self.send(message, encrypt=self.encrypt)
-                return True
-        found = _find_group_in_targets(value)
-        if found:
-            self.set_group_target(found["id"], found.get("name", value))
+                group_id = g["group_id"]
+                break
+        if group_id is None:
+            found = _find_group_in_targets(value)
+            if found:
+                group_id = found["id"]
+                group_name = found.get("name", value)
+        if group_id is not None:
+            try:
+                await self._ensure_group_membership(group_id)
+            except Exception:
+                error(f"你不在群 [{group_name}]，请先加入: //qid add {group_id}")
+                return False
+            self.set_group_target(group_id, group_name)
             if message:
                 await self.send(message, encrypt=self.encrypt)
             return True
@@ -3029,7 +3315,7 @@ class AUNCli:
             if not isinstance(online_resp, Exception):
                 for item in (online_resp.get("items") or []):
                     aid = item.get("aid", "")
-                    if aid:
+                    if aid and item.get("online"):
                         online_aids.add(aid)
             # 合并 online 标记
             for m in members:
@@ -3085,6 +3371,9 @@ class AUNCli:
                 self._spinner_session.app.invalidate()
         except Exception as e:
             error(f"发送失败: {e}")
+            if _silent:
+                self._send_reply_text = None
+                self._send_reply_event.set()
 
     def _clear_target(self):
         """清除当前目标并持久化。"""
@@ -3112,6 +3401,7 @@ class AUNCli:
 
         # 忽略自己发的消息
         if sender_aid == self.my_aid:
+            self._log_write("RECV_GROUP_IGNORED", {"reason": "self", "group_id": group_id, "seq": msg.get("seq")})
             return
 
         # raw log
@@ -3124,12 +3414,13 @@ class AUNCli:
         if self._raw_monitor_app is not None:
             self._raw_monitor_app.invalidate()
 
-        # 数据日志
-        self._log_write("RECV_GROUP", data)
-
         # processing / menu 状态通知
         if self._handle_status_payload(payload, sender_aid, conversation_id=group_id):
+            self._log_write("RECV_GROUP_IGNORED", {"reason": "status_payload", "group_id": group_id, "sender": sender_aid, "seq": msg.get("seq")})
             return
+
+        # 数据日志
+        self._log_write("RECV_GROUP", data)
 
         # 更新加密状态指示器（群聊 MLS 或明文）
         e2ee = data.get("e2ee") or msg.get("e2ee") or {}
@@ -3169,6 +3460,12 @@ class AUNCli:
 
         # 非当前 target → 静默存储，不打印
         if not is_current:
+            if _silent:
+                self._log_write("RECV_GROUP_NOT_CURRENT", {
+                    "group_id": group_id,
+                    "target_id": self.target.get("id") if self.target else None,
+                    "target_type": self.target.get("type") if self.target else None,
+                })
             msg_obj = data.get("message", data)
             msg_id = msg_obj.get("message_id") or f"grp_{group_id}_{sender_aid}_{int(time.time()*1000)}"
             self.store.save(
@@ -3188,9 +3485,27 @@ class AUNCli:
                 asyncio.ensure_future(self._handle_attachments(attachments, sender_aid))
             return
 
-        # 去重：本地已有的消息跳过显示
+        # -s 模式：捕获群回复（必须在 dedup 之前，因为其他 CLI 实例可能先存了同一条消息）
         msg_obj = data.get("message", data)
         msg_id = msg_obj.get("message_id")
+        if _silent:
+            msg_seq = msg_obj.get("seq")
+            has_seq = isinstance(msg_seq, (int, float))
+            if has_seq:
+                msg_seq = int(msg_seq)
+                if not self._send_armed:
+                    self._send_seen_seq = max(self._send_seen_seq, msg_seq)
+                    return
+            if self._send_armed:
+                if has_seq and msg_seq <= self._send_seen_seq:
+                    return
+                if self._send_reply_from and sender_aid != self._send_reply_from:
+                    return
+                self._send_reply_text = text
+                self._send_reply_event.set()
+            return
+
+        # 去重：本地已有的消息跳过显示
         if msg_id and self.store.exists(msg_id):
             return
 
@@ -3305,6 +3620,10 @@ class AUNCli:
             group_id = data.get("group_id") if isinstance(data, dict) else None
             if group_id:
                 asyncio.ensure_future(self._ensure_members_cache(group_id, force=True))
+        if action in ("member_banned", "member_unbanned"):
+            target_aid = data.get("aid") or data.get("target_aid") or ""
+            if target_aid == self.my_aid:
+                self._group_banned = (action == "member_banned")
 
     # ── 群命令处理 ────────────────────────────────────────────────────────
 
@@ -3821,7 +4140,11 @@ class AUNCli:
                 self._clear_target()
                 await self._refresh_group_cache()
             except Exception as e:
-                error(f"退出失败: {e}")
+                if _is_group_not_joined_error(e):
+                    info(f"你当前不在群 [{gname}]")
+                    self._clear_target()
+                else:
+                    error(f"退出失败: {e}")
 
     async def _cmd_group_suspend(self, arg: str):
         if not self._require_group_target(): return
@@ -3862,13 +4185,17 @@ class AUNCli:
                 return_exceptions=True,
             )
             members = []
-            if not isinstance(members_resp, Exception):
+            if isinstance(members_resp, Exception):
+                if _is_group_not_joined_error(members_resp):
+                    error(f"你当前不在此群，无法查看成员列表")
+                    return
+            else:
                 members = members_resp.get("members", [])
             online_aids: set[str] = set()
             if not isinstance(online_resp, Exception):
                 for item in (online_resp.get("items") or []):
                     aid = item.get("aid", "")
-                    if aid:
+                    if aid and item.get("online"):
                         online_aids.add(aid)
             # 合并 online 并回写缓存
             for m in members:
@@ -4491,6 +4818,11 @@ def _build_help_text(is_group_owner: bool | None = None) -> str:
         '  <ansiyellow>@群名</ansiyellow>                    按名称切换群组\n'
         '  <ansiyellow>//target &lt;aid|group_id&gt;</ansiyellow>  直接切换目标\n'
         '  <ansiyellow>@aid msg</ansiyellow>                 群聊中 mention 成员并发消息\n\n'
+        '<b>agent.md (//agentmd)</b>\n'
+        '  <ansiyellow>//agentmd</ansiyellow>                查看本地 AID 的 agent.md\n'
+        '  <ansiyellow>//agentmd &lt;aid&gt;</ansiyellow>          查看指定 AID 的 agent.md\n'
+        '  <ansiyellow>//agentmd put &lt;path&gt;</ansiyellow>     从文件上传 agent.md\n'
+        '  <ansiyellow>//agentmd set &lt;text&gt;</ansiyellow>     直接设置 agent.md 文本\n\n'
         '<b>本地身份 (//local / //aid)</b>\n'
         '  <ansiyellow>//local &lt;name&gt;</ansiyellow>      切换本地 AID（类似 aun -l）\n'
         '  <ansiyellow>//aid list</ansiyellow>           列出本地所有 AID\n'
@@ -4500,8 +4832,8 @@ def _build_help_text(is_group_owner: bool | None = None) -> str:
         '  <ansiyellow>//qid add &lt;group_id&gt;</ansiyellow>    加入群组\n'
         '  <ansiyellow>//qid quit &lt;group_id&gt;</ansiyellow>   退出群组\n'
         '  <ansiyellow>//qid search &lt;关键词&gt;</ansiyellow>  搜索公开群组\n\n'
-        '<b>文件收发</b>\n'
-        '  <ansiyellow>//sendfile path</ansiyellow>  发送文件到当前目标'
+        '<b>文件管理</b>\n'
+        '  <ansiyellow>//file</ansiyellow>  文件管理（send|put|get|list|del|copy）'
     )
 
 
@@ -4617,21 +4949,7 @@ async def repl(c: AUNCli):
                     break
                 elif cmd == "target":
                     if arg:
-                        parts2 = arg.split(None, 1)
-                        subcmd = parts2[0].lower()
-                        subarg = parts2[1] if len(parts2) > 1 else ""
-                        if subcmd == "agent.md":
-                            target_aid = subarg.strip() or (c.target["id"] if c.target and c.target.get("type") == "peer" else "")
-                            if not target_aid:
-                                error("用法: //target agent.md <aid>  (或先 //target <aid> 再执行)")
-                            else:
-                                try:
-                                    content = await c.client.auth.download_agent_md(target_aid)
-                                    await _msg_dialog(title=f"agent.md — {_short_name(target_aid)}", text=content.strip(), style=_HELP_STYLE)
-                                except Exception as e:
-                                    error(f"获取 agent.md 失败: {e}")
-                        else:
-                            await c.resolve_and_switch_target(arg)
+                        await c.resolve_and_switch_target(arg)
                     else:
                         error("用法: //target <aid|group_id>")
                 elif cmd == "ping":
@@ -4658,13 +4976,12 @@ async def repl(c: AUNCli):
                     await c.cmd_rawdata()
                 elif cmd == "e2ee":
                     await c.cmd_e2ee()
-                elif cmd == "sendfile":
-                    if arg:
-                        await c.send_file(arg)
-                    else:
-                        error("用法: //sendfile <文件路径>")
+                elif cmd == "file":
+                    await _dispatch_local_file_command(c, arg)
                 elif cmd == "help":
                     await _show_help(c)
+                elif cmd == "agentmd":
+                    await _dispatch_agentmd_command(c, arg)
                 elif cmd == "local":
                     await _dispatch_local_local_command(c, arg)
                 elif cmd == "aid":
@@ -4725,60 +5042,69 @@ def _load_history():
     except Exception:
         return InMemoryHistory()
 
-async def _dispatch_local_local_command(c, arg: str):
-    parts2 = arg.split(None, 1)
-    subcmd = parts2[0].lower() if parts2 else ""
-    subarg = parts2[1] if len(parts2) > 1 else ""
+async def _dispatch_agentmd_command(c, arg: str):
+    # //agentmd [<aid>] [put <path> | set <text>]
+    # 解析：首个 token 若不是 put/set 则视为 aid
+    parts = arg.split(None, 1) if arg.strip() else []
+    first = parts[0].lower() if parts else ""
+    rest  = parts[1] if len(parts) > 1 else ""
 
-    if subcmd == "agent.md":
-        # //local agent.md              — 查看当前 AID 的 agent.md
-        # //local agent.md upload <path> — 上传文件内容
-        # //local agent.md set <text>    — 直接上传文本
-        action_parts = subarg.split(None, 1)
-        action = action_parts[0].lower() if action_parts else ""
-        action_arg = action_parts[1] if len(action_parts) > 1 else ""
-        if action == "upload":
-            path = action_arg.strip()
-            if not path:
-                error("用法: //local agent.md upload <文件路径>")
-                return
-            try:
-                content = Path(path).read_text(encoding="utf-8")
-                await c.client.auth.upload_agent_md(content)
-                info("agent.md 上传成功")
-            except FileNotFoundError:
-                error(f"文件不存在: {path}")
-            except Exception as e:
-                error(f"上传失败: {e}")
-        elif action == "set":
-            text = action_arg.strip()
-            if not text:
-                error("用法: //local agent.md set <内容>")
-                return
-            try:
-                await c.client.auth.upload_agent_md(text)
-                info("agent.md 上传成功")
-            except Exception as e:
-                error(f"上传失败: {e}")
-        else:
-            # 无 action 或未知：下载并展示自己的 agent.md
-            my_aid = c.my_aid or ""
-            if not my_aid:
-                error("未连接，无法获取 agent.md")
-                return
-            try:
-                content = await c.client.auth.download_agent_md(my_aid)
-                await _msg_dialog(title=f"agent.md — {_short_name(my_aid)}", text=content.strip(), style=_HELP_STYLE)
-            except Exception as e:
-                error(f"获取 agent.md 失败: {e}")
+    if first in ("put", "set"):
+        action, action_arg = first, rest.strip()
+        target_aid = c.my_aid or ""
+    elif first:
+        # 第一个 token 是 aid，后面可能跟 put/set
+        target_aid = parts[0]
+        rest_parts = rest.split(None, 1) if rest else []
+        action = rest_parts[0].lower() if rest_parts else ""
+        action_arg = rest_parts[1].strip() if len(rest_parts) > 1 else ""
+    else:
+        target_aid = c.my_aid or ""
+        action = ""
+        action_arg = ""
+
+    if not target_aid:
+        error("未连接，无法确定本地 AID")
         return
 
-    # 原有逻辑：//local <name> 切换 AID
+    if action == "put":
+        if not action_arg:
+            error("用法: //agentmd [<aid>] put <文件路径>")
+            return
+        try:
+            content = Path(action_arg).read_text(encoding="utf-8")
+            await c.client.auth.upload_agent_md(content)
+            info("agent.md 上传成功")
+        except FileNotFoundError:
+            error(f"文件不存在: {action_arg}")
+        except Exception as e:
+            error(f"上传失败: {e}")
+    elif action == "set":
+        if not action_arg:
+            error("用法: //agentmd [<aid>] set <内容>")
+            return
+        try:
+            await c.client.auth.upload_agent_md(action_arg)
+            info("agent.md 上传成功")
+        except Exception as e:
+            error(f"上传失败: {e}")
+    elif not action:
+        try:
+            content = await c.client.auth.download_agent_md(target_aid)
+            await _msg_dialog(title=f"agent.md — {_short_name(target_aid)}", text=content.strip(), style=_HELP_STYLE)
+        except Exception as e:
+            error(f"获取 agent.md 失败: {e}")
+    else:
+        error("用法: //agentmd [<aid>] [put <路径> | set <文本>]")
+
+
+async def _dispatch_local_local_command(c, arg: str):
     name = arg.strip()
     if not name:
-        error("用法: //local <name> | agent.md [upload <path>|set <text>]")
+        error("用法: //local <name>")
         return
     await c.switch_aid(name)
+
 
 
 async def _dispatch_local_aid_command(c, arg: str):
@@ -4822,6 +5148,44 @@ async def _dispatch_local_qid_command(c, arg: str):
         error("用法: //qid add <group_id> | quit <group_id> | search <关键词>")
 
 
+async def _dispatch_local_file_command(c, arg: str):
+    parts2 = arg.split(None, 1)
+    action = parts2[0].lower() if parts2 else ""
+    subarg = parts2[1] if len(parts2) > 1 else ""
+
+    if action == "send":
+        if subarg:
+            await c.send_file(subarg)
+        else:
+            error("用法: //file send <本地路径>")
+    elif action == "put":
+        parts3 = subarg.split(None, 1)
+        if len(parts3) == 2:
+            await c.file_put(parts3[0], parts3[1])
+        else:
+            error("用法: //file put <本地路径> <远程路径>")
+    elif action == "get":
+        parts3g = subarg.split(None, 1)
+        if len(parts3g) == 2:
+            await c.file_get(parts3g[0], parts3g[1])
+        else:
+            error("用法: //file get <远程路径> <本地路径>")
+    elif action == "list":
+        await c.file_list(subarg.strip())
+    elif action == "del":
+        if subarg:
+            await c.file_del(subarg.strip())
+        else:
+            error("用法: //file del <远程路径>")
+    else:
+        info("//file 子命令:")
+        info("  send <本地路径>                    发送文件给对方")
+        info("  put <本地路径> <远程路径>           上传到存储")
+        info("  get <远程路径> <本地路径>           下载文件到本地")
+        info("  list [远程目录]                    列出文件")
+        info("  del <远程路径>                     删除文件")
+
+
 # ── 入口 ──────────────────────────────────────────────────────────────────
 
 def cmd_aid_list():
@@ -4830,7 +5194,16 @@ def cmd_aid_list():
     if not aids_root.exists() or not any(aids_root.iterdir()):
         info("暂无本地 AID"); return
     default = _load_config().get("aid", "")
-    for aid in sorted(p.name for p in aids_root.iterdir() if p.is_dir()):
+    valid = []
+    for p in aids_root.iterdir():
+        if not p.is_dir():
+            continue
+        identity = ks.load_identity(p.name)
+        if isinstance(identity, dict) and identity.get("private_key_pem"):
+            valid.append(p.name)
+    if not valid:
+        info("暂无本地 AID"); return
+    for aid in sorted(valid):
         marker = " ✓" if aid == default else ""
         info(f"{aid}{marker}")
 
@@ -4948,6 +5321,7 @@ async def cmd_qid_search(cli_ref, keyword: str):
     except Exception as e:
         error(f"搜索失败: {e}")
 
+
 async def main():
     import argparse
 
@@ -4956,7 +5330,7 @@ async def main():
         len(argv_tail) >= 5
         and argv_tail[0] == "aid"
         and argv_tail[1] == "new"
-        and any(arg in ("-p", "--port") or arg.startswith("--port=") for arg in argv_tail[3:])
+        and any(arg in ("-P", "--port") or arg.startswith("--port=") for arg in argv_tail[3:])
     ):
         print(
             "错误：--port 是全局参数，放在子命令后面不会生效。\n"
@@ -4976,6 +5350,7 @@ options:
   -t, --target AID      目标 AID 或 group_id
   -p, --port PORT       Gateway 端口（覆盖 config）
   -s, --send MSG        发送单条消息后退出
+  -T, --timeout SEC     发送模式等待回复超时（默认 120s）
   -L, --log N           打印最后 N 行日志并持续跟随
 
 commands:
@@ -5015,8 +5390,10 @@ examples:
 
     parser.add_argument("--local", "-l", help="本地 AID（默认从 config.json 读取）")
     parser.add_argument("--target", "-t", help="目标 AID 或 group_id")
+    parser.add_argument("--slot", "-S", default="", metavar="SLOT", help="消费槽位 ID（同一 AID 多实例时使用，默认为空）")
     parser.add_argument("--send", "-s", help="发送单条消息后退出")
-    parser.add_argument("--port", "-p", type=int, metavar="PORT", help="Gateway 端口（覆盖 config）")
+    parser.add_argument("--timeout", "-T", type=int, default=120, metavar="SEC", help="发送模式等待回复的超时时间（默认 120s）")
+    parser.add_argument("--port", "-P", type=int, metavar="PORT", help="Gateway 端口（覆盖 config）")
     parser.add_argument("--log", "-L", type=int, metavar="N", help="打印最后 N 行日志并持续跟随")
 
     args, _ = parser.parse_known_args()
@@ -5086,27 +5463,66 @@ examples:
         error(f"无效目标: {target}（需要 AID 或 group_id 格式）")
         return
 
-    c = AUNCli(aid=aid, target=target)
+    c = AUNCli(aid=aid, target=target, slot_id=args.slot)
+    _orig_stderr_fd = None
     try:
+        if args.send:
+            global _silent
+            _silent = True
+            if not target:
+                error("使用 -s 发送消息需要指定目标: -t <aid>")
+                return
+            # 抑制 SDK 内部 stderr 输出（如 prekey replenish 失败）
+            # 必须在 fd 级别重定向，SDK 可能缓存了原始 stderr 引用
+            global _error_file
+            _orig_stderr_fd = os.dup(2)
+            _error_file = os.fdopen(_orig_stderr_fd, "w", closefd=False)
+            _devnull_fd = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(_devnull_fd, 2)
+            os.close(_devnull_fd)
         await c.start()
         if args.send:
-            await c.send(args.send)
-            info("等待回复 (10s)…")
-            await asyncio.sleep(10)
+            # 等待 gateway 推送完旧消息（_on_message 在此期间跟踪 max seq）
+            await asyncio.sleep(1)
+            c._send_armed = True
+            is_group = _is_group_target(c.target)
+            # 群聊：提取第一个 @mention 作为期望的回复者
+            if is_group:
+                mentions = _extract_mentions(args.send)
+                if mentions:
+                    c._send_reply_from = mentions[0]
+                    await c.send_with_mention(args.send, mentions)
+                else:
+                    await c.send(args.send, encrypt=c.encrypt)
+            else:
+                await c.send(args.send)
+            try:
+                await asyncio.wait_for(c._send_reply_event.wait(), timeout=args.timeout)
+            except asyncio.TimeoutError:
+                error(f"等待回复超时 ({args.timeout}s)")
+                raise SystemExit(1)
+            if c._send_reply_text is None:
+                raise SystemExit(1)
+            print(c._send_reply_text)
         else:
             await repl(c)
     except KeyboardInterrupt:
         pass
-    except SystemExit:
-        pass
+    except SystemExit as e:
+        raise e
     except Exception as e:
         error(f"启动失败: {e}")
     finally:
-        short_aid = _short_name(c.my_aid or 'unknown')
-        _p(f"  {C.DIM}{short_aid} 正在退出…{C.RESET}")
-        info("断开连接…")
+        if not _silent:
+            short_aid = _short_name(c.my_aid or 'unknown')
+            _p(f"  {C.DIM}{short_aid} 正在退出…{C.RESET}")
+            info("断开连接…")
         await c.close()
-        info("已退出")
+        if _error_file:
+            os.dup2(_error_file.fileno(), 2)
+            _error_file.close()
+        if not _silent:
+            info("已退出")
 
 def cli_main():
     """Entry point for console script"""

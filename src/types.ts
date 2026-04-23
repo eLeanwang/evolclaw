@@ -8,6 +8,7 @@ export interface FeishuChannelConfig {
   appId: string;
   appSecret: string;
   owner?: string;
+  admins?: string[];
   flushDelay?: number;  // flush 间隔(秒)，默认使用全局值
   debounce?: number;    // 入站消息去抖间隔(秒)，覆盖全局 debounce
   showActivities?: 'all' | 'dm-only' | 'owner-dm-only' | 'none';  // 覆盖全局 showActivities
@@ -23,6 +24,7 @@ export interface WechatChannelConfig {
   baseUrl?: string;
   token?: string;
   owner?: string;
+  admins?: string[];
   flushDelay?: number;  // flush 间隔(秒)，默认 3
   debounce?: number;    // 入站消息去抖间隔(秒)，覆盖全局 debounce
   showActivities?: 'all' | 'dm-only' | 'owner-dm-only' | 'none';  // 覆盖全局 showActivities
@@ -41,6 +43,7 @@ export interface AunChannelConfig {
   gatewayUrl?: string;    // Gateway WebSocket URL（兼容旧配置，优先级高于 gatewayPort）
   accessToken?: string;   // 认证 access token（降级 fallback）
   owner?: string;
+  admins?: string[];
   flushDelay?: number;  // flush 间隔(秒)，默认 3
   pythonBin?: string;   // Python 可执行路径（仅 evolclaw tui 命令使用），默认 python3
   encryptionSeed?: string; // FileSecretStore 加密种子，默认 evolclaw-aun-production-seed-2026
@@ -57,6 +60,7 @@ export interface DingtalkChannelConfig {
   clientId: string;
   clientSecret: string;
   owner?: string;
+  admins?: string[];
   flushDelay?: number;
   debounce?: number;
   showActivities?: 'all' | 'dm-only' | 'owner-dm-only' | 'none';
@@ -74,6 +78,7 @@ export interface QQBotChannelConfig {
   appId: string;
   clientSecret: string;
   owner?: string;
+  admins?: string[];
   flushDelay?: number;
   debounce?: number;
   showActivities?: 'all' | 'dm-only' | 'owner-dm-only' | 'none';
@@ -175,7 +180,7 @@ export interface ReplyContext {
 }
 
 export interface SessionIdentity {
-  role: 'owner' | 'guest' | 'anonymous';
+  role: 'owner' | 'admin' | 'guest' | 'anonymous';
   mode: 'interactive' | 'autonomous';
 }
 

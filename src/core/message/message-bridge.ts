@@ -166,8 +166,7 @@ export class MessageBridge {
 
     if (parsed.type === 'menu.query') {
       const identity = this.sessionManager.resolveIdentity(channel, msg.peerId);
-      const isAdmin = identity.role === 'owner';
-      const items = this.cmdHandler.getMenuItems(isAdmin, msg.chatType || 'private');
+      const items = this.cmdHandler.getMenuItems(identity.role, msg.chatType || 'private');
       const response = JSON.stringify({ type: 'menu.response', items });
 
       if (adapter?.sendCustomPayload) {
