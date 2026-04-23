@@ -411,18 +411,46 @@ export class AUNChannel {
     }
 
     const strippedText = this.stripTriggerMentions(text, this._aid);
-    if (!strippedText) {
+
+    // Detect attachments before the empty-text guard
+    const rawAttachments: any[] = Array.isArray((payload as any)?.attachments)
+      ? (payload as any).attachments
+      : [];
+    const hasAttachments = rawAttachments.length > 0;
+
+    // Allow through if there's text OR attachments; both-empty messages are silently dropped
+    if (!strippedText && !hasAttachments) {
       this.acknowledgeImmediately(messageId, seq);
       return;
     }
 
     const mentions: string[] = mentionedAll ? ['all'] : (this._aid ? [this._aid] : []);
 
+    // Process attachments
+    let finalText = strippedText;
+    if (hasAttachments && this.client) {
+      const fileParts: string[] = [];
+      for (const att of rawAttachments) {
+        const filePath = await this.downloadAttachment(att, groupId);
+        if (filePath) {
+          const name = sanitizeFileName(att.filename || att.object_key?.split('/').pop() || 'file');
+          fileParts.push(`[文件: ${name} → ${filePath}]`);
+        }
+      }
+      if (fileParts.length > 0) {
+        const parts: string[] = [];
+        if (strippedText) parts.push(strippedText);
+        parts.push(...fileParts);
+        parts.push('请使用 Read 工具读取文件内容。');
+        finalText = parts.join('\n\n');
+      }
+    }
+
     this.dispatchMessage({
       channelId: groupId,
       userId: senderAid,
       peerName: this.getShortAid(senderAid),
-      text: strippedText,
+      text: finalText,
       chatType: 'group',
       messageId,
       seq,
