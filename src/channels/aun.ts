@@ -254,6 +254,71 @@ export class AUNChannel {
 
   // ── Event handlers ──────────────────────────────────────────
 
+  private async downloadAttachment(
+    att: { owner_aid?: string; object_key: string; filename?: string; sha256?: string },
+    channelId: string
+  ): Promise<string | null> {
+    const ownerAid = att.owner_aid || this._aid || '';
+    const objectKey = att.object_key;
+    const filename = att.filename || objectKey.split('/').pop() || 'unknown';
+
+    if (!objectKey) {
+      logger.warn('[AUN] Attachment missing object_key, skipping');
+      return null;
+    }
+
+    let downloadUrl: string;
+    try {
+      const ticket = await this.client!.call('storage.create_download_ticket', {
+        owner_aid: ownerAid,
+        object_key: objectKey,
+      }) as Record<string, unknown>;
+      downloadUrl = (ticket.download_url as string) || '';
+      if (!downloadUrl) {
+        logger.warn(`[AUN] No download_url for attachment: ${filename}`);
+        return null;
+      }
+    } catch (e) {
+      logger.warn(`[AUN] create_download_ticket failed for ${filename}: ${e}`);
+      return null;
+    }
+
+    let buffer: Buffer;
+    try {
+      const res = await fetch(downloadUrl);
+      if (!res.ok) {
+        logger.warn(`[AUN] Download failed for ${filename}: HTTP ${res.status}`);
+        return null;
+      }
+      buffer = Buffer.from(await res.arrayBuffer());
+    } catch (e) {
+      logger.warn(`[AUN] Download error for ${filename}: ${e}`);
+      return null;
+    }
+
+    if (att.sha256) {
+      const { createHash } = await import('node:crypto');
+      const actual = createHash('sha256').update(buffer).digest('hex');
+      if (actual !== att.sha256) {
+        logger.warn(`[AUN] SHA256 mismatch for ${filename}: expected ${att.sha256.slice(0, 8)}… got ${actual.slice(0, 8)}…`);
+        return null;
+      }
+    }
+
+    const projectPath = this.projectPathProvider
+      ? await this.projectPathProvider(channelId)
+      : process.cwd();
+
+    try {
+      const result = saveToUploads(buffer, filename, projectPath);
+      logger.info(`[AUN] Saved attachment: ${result.filePath} (${result.size} bytes)`);
+      return result.filePath;
+    } catch (e) {
+      logger.warn(`[AUN] saveToUploads failed for ${filename}: ${e}`);
+      return null;
+    }
+  }
+
   private async handleIncomingPrivateMessage(data: unknown): Promise<void> {
     if (!data || typeof data !== 'object') return;
     const msg = data as Record<string, any>;
