@@ -1,4 +1,4 @@
-import { AUNClient, FileSecretStore, type JsonObject } from '@eleans/aun-core-sdk';
+import { AUNClient, FileSecretStore, GatewayDiscovery, type JsonObject } from '@eleans/aun-core-sdk';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
@@ -171,18 +171,22 @@ export class AUNChannel {
     const aidName = this.config.aid;
     const encryptionSeed = this.config.encryptionSeed || process.env.AUN_ENCRYPTION_SEED || undefined;
 
-    // Gateway URL: 旧配置 gatewayUrl 优先，否则从 AID 推导
+    // Gateway URL 解析：优先用配置的 gatewayUrl，否则通过 well-known 自动发现
     let gateway = this.config.gatewayUrl || '';
     if (!gateway) {
-      const parts = aidName.split('.');
-      if (parts.length >= 3) {
-        const domain = parts.slice(1).join('.');
-        gateway = `wss://gateway.${domain}:443/aun`;
+      // AID 本身即域名（如 evolai.agentid.pub），用其查询 well-known，与 Python SDK 行为对齐
+      const wellKnownUrl = `https://${aidName}/.well-known/aun-gateway`;
+      try {
+        const discovery = new GatewayDiscovery({});
+        gateway = await discovery.discover(wellKnownUrl);
+        logger.info(`[AUN] Gateway discovered: ${gateway}`);
+      } catch (e) {
+        logger.warn(`[AUN] Well-known discovery failed (${e}), no fallback available`);
       }
     }
 
     if (!gateway) {
-      logger.error('[AUN] Cannot derive gateway URL from AID');
+      logger.error('[AUN] Cannot resolve gateway URL from AID');
       return;
     }
 
