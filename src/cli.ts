@@ -55,8 +55,8 @@ function rotateLogs(logDir: string) {
         fs.renameSync(filePath, newPath);
         console.log(`  Rotated: ${file} -> ${path.basename(newPath)}`);
       }
-    } else if (file.includes('.log.')) {
-      // 清理 7 天前的旧日志
+    } else if (file.includes('.log.') || /^aun-\d{8}\.log$/.test(file)) {
+      // 清理 7 天前的旧日志（含按日轮转的 aun-YYYYMMDD.log）
       const stat = fs.statSync(filePath);
       if (stat.mtimeMs < cutoff) {
         fs.unlinkSync(filePath);
@@ -126,7 +126,9 @@ function countLines(pkgRoot: string, logDir: string) {
     }
   }
   if (shouldAppend) {
-    const now = new Date().toISOString().replace('T', ' ').slice(0, 19);
+    const _d = new Date();
+    const _p = (n: number) => String(n).padStart(2, '0');
+    const now = `${_d.getFullYear()}-${_p(_d.getMonth() + 1)}-${_p(_d.getDate())} ${_p(_d.getHours())}:${_p(_d.getMinutes())}:${_p(_d.getSeconds())}`;
     fs.appendFileSync(statsFile, `${now}\t${core}\t${agents}\t${channels}\t${utils}\t${entry}\t${total}\n`);
   }
 
@@ -713,7 +715,10 @@ async function cmdRestartMonitor() {
   const eventBus = new EventBus();
 
   const log = (msg: string) => {
-    const line = `[${new Date().toISOString().replace('T', ' ').slice(0, 19)}] ${msg}\n`;
+    const _d = new Date();
+    const _p = (n: number) => String(n).padStart(2, '0');
+    const ts = `${_d.getFullYear()}-${_p(_d.getMonth() + 1)}-${_p(_d.getDate())} ${_p(_d.getHours())}:${_p(_d.getMinutes())}:${_p(_d.getSeconds())}`;
+    const line = `[${ts}] ${msg}\n`;
     fs.appendFileSync(restartLog, line);
   };
 

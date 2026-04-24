@@ -1,4 +1,5 @@
 import { AUNClient, FileSecretStore, type JsonObject } from '@eleans/aun-core-sdk';
+import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { logger, localTimestamp } from '../utils/logger.js';
@@ -8,11 +9,30 @@ import { normalizeChannelInstances, getChannelShowActivities } from '../config.j
 import { resolvePaths } from '../paths.js';
 import { saveToUploads, sanitizeFileName } from '../utils/media-cache.js';
 
+function guessMime(filename: string): string {
+  const ext = path.extname(filename).toLowerCase();
+  const map: Record<string, string> = {
+    '.txt': 'text/plain', '.md': 'text/markdown', '.json': 'application/json',
+    '.js': 'text/javascript', '.ts': 'text/typescript', '.py': 'text/x-python',
+    '.html': 'text/html', '.css': 'text/css', '.csv': 'text/csv',
+    '.pdf': 'application/pdf', '.zip': 'application/zip', '.gz': 'application/gzip',
+    '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+    '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml',
+    '.xml': 'application/xml', '.yaml': 'application/x-yaml', '.yml': 'application/x-yaml',
+  };
+  return map[ext] || 'application/octet-stream';
+}
+
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1048576).toFixed(1)} MB`;
+}
+
 export interface AUNConfig {
   aid: string;
   keystorePath?: string;
-  gatewayPort?: number;
-  gatewayUrl?: string;    // 兼容旧配置，优先级高于 gatewayPort
+  gatewayUrl?: string;    // well-known 自动发现失败时的 fallback URL
   accessToken?: string;
   flushDelay?: number;
   encryptionSeed?: string;
@@ -39,11 +59,27 @@ export class AUNChannel {
   private messageHandler?: AUNMessageHandler;
   private connected = false;
   private traceStream: fs.WriteStream | null = null;
+  private traceDate: string = '';  // 当前 trace 文件对应的日期 (YYYYMMDD)
 
   private trace(dir: 'IN' | 'OUT', event: string, data: unknown): void {
+    if (!this.config.aunTrace) return;
+    this.rotateTraceIfNeeded();
     if (!this.traceStream) return;
     const line = JSON.stringify({ ts: localTimestamp(), dir, event, data });
     this.traceStream.write(line + '\n');
+  }
+
+  private rotateTraceIfNeeded(): void {
+    const d = new Date();
+    const today = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
+    if (this.traceDate === today && this.traceStream) return;
+    if (this.traceStream) {
+      this.traceStream.end();
+      this.traceStream = null;
+    }
+    this.traceDate = today;
+    const logPath = path.join(resolvePaths().logs, `aun-trace-${today}.log`);
+    this.traceStream = fs.createWriteStream(logPath, { flags: 'a' });
   }
 
   /** 判断 channelId 是否为群组 ID（g-xxx.agentid.pub 或 grp_ 前缀） */
@@ -112,9 +148,8 @@ export class AUNChannel {
 
   constructor(private config: AUNConfig) {
     if (config.aunTrace) {
-      const logPath = path.join(resolvePaths().logs, 'aun-trace.log');
-      this.traceStream = fs.createWriteStream(logPath, { flags: 'a' });
-      logger.info(`[AUN] Trace logging enabled: ${logPath}`);
+      this.rotateTraceIfNeeded();
+      logger.info(`[AUN] Trace logging enabled (daily rotation): ${resolvePaths().logs}/aun-trace-YYYYMMDD.log`);
     }
   }
 
@@ -141,9 +176,8 @@ export class AUNChannel {
     if (!gateway) {
       const parts = aidName.split('.');
       if (parts.length >= 3) {
-        const domain = parts.slice(1).join('.');  // alice.agentid.pub → agentid.pub
-        const port = this.config.gatewayPort || 443;
-        gateway = `wss://gateway.${domain}:${port}/aun`;
+        const domain = parts.slice(1).join('.');
+        gateway = `wss://gateway.${domain}:443/aun`;
       }
     }
 
@@ -330,6 +364,12 @@ export class AUNChannel {
     const messageId = msg.message_id ?? '';
     const seq = msg.seq;
 
+    // 自发自收兜底：丢弃 Bot 自身发出消息的 Gateway echo
+    if (this._aid && fromAid === this._aid) {
+      this.acknowledgeImmediately(messageId, seq);
+      return;
+    }
+
     // Detect @mentions
     const mentions: string[] = [];
     if (this._aid && text.includes(`@${this._aid}`)) {
@@ -360,8 +400,13 @@ export class AUNChannel {
       }
     }
 
+    // Extract chat_id from payload for multi-instance routing (falls back to fromAid)
+    const chatId = (typeof payload === 'object' && payload !== null && (payload as any).chat_id)
+      ? String((payload as any).chat_id)
+      : fromAid;
+
     this.dispatchMessage({
-      channelId: fromAid,
+      channelId: chatId,
       userId: fromAid,
       text: finalText,
       chatType: 'private',
@@ -565,19 +610,123 @@ export class AUNChannel {
     const params: Record<string, any> = { payload: { text: finalText }, encrypt: true };
     if (context?.threadId) params.task_id = context.threadId;
 
+    // Multi-instance routing: channelId may be "aid:device_id:slot_id"
+    const colonIdx = channelId.indexOf(':');
+    const targetAid = colonIdx > 0 ? channelId.substring(0, colonIdx) : channelId;
+    if (colonIdx > 0) {
+      params.payload.chat_id = channelId;
+    }
+
     try {
       if (this.isGroupId(channelId)) {
         params.group_id = channelId;
         this.trace('OUT', 'group.send', params);
         await this.client.call('group.send', params);
       } else {
-        params.to = channelId;
+        params.to = targetAid;
         this.trace('OUT', 'message.send', params);
         await this.client.call('message.send', params);
       }
     } catch (e) {
       this.trace('OUT', 'send.error', { channelId, error: String(e) });
       logger.error(`[AUN] Send failed to ${channelId}: ${e}`);
+    }
+  }
+
+  async sendFile(channelId: string, filePath: string, context?: ReplyContext): Promise<void> {
+    if (!this.connected || !this.client) {
+      logger.warn('[AUN] Cannot sendFile: not connected');
+      return;
+    }
+
+    const absPath = path.resolve(filePath);
+    if (!fs.existsSync(absPath)) {
+      logger.warn(`[AUN] sendFile: file not found: ${absPath}`);
+      return;
+    }
+    const stat = fs.statSync(absPath);
+    if (stat.size === 0) {
+      logger.warn('[AUN] sendFile: file is empty');
+      return;
+    }
+    if (stat.size > 10 * 1024 * 1024) {
+      logger.warn(`[AUN] sendFile: file too large (${formatSize(stat.size)}, max 10 MB)`);
+      return;
+    }
+
+    const filename = path.basename(absPath);
+    const fileData = fs.readFileSync(absPath);
+    const sha256 = crypto.createHash('sha256').update(fileData).digest('hex');
+    const contentType = guessMime(filename);
+    const objectKey = `shared/${crypto.randomUUID()}/${filename}`;
+
+    try {
+      // Upload to storage
+      if (stat.size <= 64 * 1024) {
+        // Inline upload for small files (≤64KB)
+        await this.client.call('storage.put_object', {
+          object_key: objectKey,
+          content: fileData.toString('base64'),
+          content_type: contentType,
+          is_private: false,
+          overwrite: true,
+        });
+      } else {
+        // Ticket upload for large files
+        const session = await this.client.call('storage.create_upload_session', {
+          object_key: objectKey,
+          size_bytes: stat.size,
+          content_type: contentType,
+        }) as Record<string, unknown>;
+        const uploadUrl = session.upload_url as string;
+        if (!uploadUrl) throw new Error('No upload_url in session response');
+        const uploadResp = await fetch(uploadUrl, { method: 'PUT', body: fileData });
+        if (!uploadResp.ok) throw new Error(`HTTP upload failed: ${uploadResp.status}`);
+        await this.client.call('storage.complete_upload', {
+          object_key: objectKey,
+          sha256,
+          content_type: contentType,
+          is_private: false,
+          size_bytes: stat.size,
+        });
+      }
+
+      // Send message with attachment
+      const attachment = {
+        owner_aid: this._aid || '',
+        object_key: objectKey,
+        filename,
+        size: stat.size,
+        sha256,
+        content_type: contentType,
+      };
+      const params: Record<string, any> = {
+        payload: { text: `📎 ${filename} (${formatSize(stat.size)})`, attachments: [attachment] },
+        type: 'file',
+        encrypt: true,
+      };
+      if (context?.threadId) params.task_id = context.threadId;
+
+      // Multi-instance routing
+      const fileColonIdx = channelId.indexOf(':');
+      const fileTargetAid = fileColonIdx > 0 ? channelId.substring(0, fileColonIdx) : channelId;
+      if (fileColonIdx > 0) {
+        params.payload.chat_id = channelId;
+      }
+
+      if (this.isGroupId(channelId)) {
+        params.group_id = channelId;
+        this.trace('OUT', 'group.send.file', params);
+        await this.client.call('group.send', params);
+      } else {
+        params.to = fileTargetAid;
+        this.trace('OUT', 'message.send.file', params);
+        await this.client.call('message.send', params);
+      }
+      logger.info(`[AUN] File sent: ${filename} (${formatSize(stat.size)}) → ${channelId}`);
+    } catch (e) {
+      this.trace('OUT', 'sendFile.error', { channelId, filePath, error: String(e) });
+      logger.error(`[AUN] sendFile failed for ${channelId}: ${e}`);
     }
   }
 
@@ -604,6 +753,13 @@ export class AUNChannel {
     };
     if (context?.threadId) params.task_id = context.threadId;
 
+    // Multi-instance routing
+    const statusColonIdx = channelId.indexOf(':');
+    const statusTargetAid = statusColonIdx > 0 ? channelId.substring(0, statusColonIdx) : channelId;
+    if (statusColonIdx > 0) {
+      (payload as any).chat_id = channelId;
+    }
+
     if (this.isGroupId(channelId)) {
       params.group_id = channelId;
       this.trace('OUT', 'group.send.status', params);
@@ -611,7 +767,7 @@ export class AUNChannel {
         logger.debug(`[AUN] Processing status failed: ${e}`);
       });
     } else {
-      params.to = channelId;
+      params.to = statusTargetAid;
       this.trace('OUT', 'message.send.status', params);
       this.client.call('message.send', params).catch(e => {
         logger.debug(`[AUN] Processing status failed: ${e}`);
@@ -630,8 +786,15 @@ export class AUNChannel {
         ? parsed as JsonObject : { text: payload };
     } catch { payloadObj = { text: payload }; }
 
+    // Multi-instance routing
+    const customColonIdx = channelId.indexOf(':');
+    const customTargetAid = customColonIdx > 0 ? channelId.substring(0, customColonIdx) : channelId;
+    if (customColonIdx > 0) {
+      payloadObj.chat_id = channelId;
+    }
+
     const sendParams = {
-      to: channelId, payload: payloadObj,
+      to: customTargetAid, payload: payloadObj,
       encrypt: true,
     };
     this.trace('OUT', 'message.send.custom', sendParams);
@@ -747,7 +910,6 @@ export class AUNChannelPlugin implements ChannelPlugin {
       const channel = new AUNChannel({
         aid: inst.aid,
         keystorePath: inst.keystorePath,
-        gatewayPort: inst.gatewayPort,
         gatewayUrl: inst.gatewayUrl,
         accessToken: inst.accessToken,
         flushDelay: inst.flushDelay,
@@ -758,6 +920,7 @@ export class AUNChannelPlugin implements ChannelPlugin {
       const adapter = {
         channelName: inst.name,
         sendText: (id: string, text: string, context?: ReplyContext) => channel.sendMessage(id, text, context),
+        sendFile: (id: string, filePath: string, context?: ReplyContext) => channel.sendFile(id, filePath, context),
         acknowledge: (messageId: string) => { channel.acknowledge(messageId); return Promise.resolve(); },
         sendProcessingStatus: (id: string, status: 'start' | 'done', sessionId: string, context?: ReplyContext) => channel.sendProcessingStatus(id, status, sessionId, context),
         sendCustomPayload: (id: string, payload: string) => channel.sendCustomPayload(id, payload),

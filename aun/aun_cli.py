@@ -105,47 +105,17 @@ from aun_core import AUNClient
 from aun_core.keystore.file import FileKeyStore
 
 # ── SDK monkey-patches ───────────────────────────────────────────────────────
-# Bug 1: E2EEManager 缺少 clean_expired_caches()，client._cache_cleanup_loop 会 AttributeError
-# Bug 2: GroupE2EEManager.clean_expired_caches 引用不存在的 _prekey_cache
-# Bug 3: _encrypt_with_prekey/_encrypt_with_long_term_key 中 sender_fingerprint fallback 到 SPKI
+# 服务端 replay guard 是 AID 级全局的，多 slot 实例 fanout 时后到的实例消息被误判重复
 def _patch_sdk():
-    from aun_core.e2ee import E2EEManager, GroupE2EEManager
-    from aun_core.errors import E2EEError
-    import time as _t
+    from aun_core.client import AUNClient as _AUNClient
+    _orig_check_replay = _AUNClient._check_replay_guard
 
-    if not hasattr(E2EEManager, "clean_expired_caches"):
-        def _clean_expired(self):
-            now = _t.time()
-            for k in list(self._prekey_cache):
-                _, exp = self._prekey_cache[k]
-                if now >= exp:
-                    del self._prekey_cache[k]
-        E2EEManager.clean_expired_caches = _clean_expired
+    async def _slotaware_check_replay(self, message_id, sender_aid, encryption_mode, message):
+        if getattr(self, "_slot_id", "") != "":
+            return True
+        return await _orig_check_replay(self, message_id, sender_aid, encryption_mode, message)
 
-    # GroupE2EEManager 无 _prekey_cache，原方法会崩溃，替换为 no-op
-    GroupE2EEManager.clean_expired_caches = lambda self: None
-
-    # sender_cert_fingerprint 必须是 cert DER fingerprint，不能 fallback 到 SPKI
-    # 修复 _encrypt_with_prekey 和 _encrypt_with_long_term_key 中的 fallback 逻辑
-    _orig_prekey = E2EEManager._encrypt_with_prekey
-    _orig_longterm = E2EEManager._encrypt_with_long_term_key
-
-    def _patched_prekey(self, peer_aid, payload, prekey, peer_cert_pem, *, message_id=None, timestamp=None):
-        # 调用原方法前，确保 _local_cert_fingerprint 不会 fallback
-        fp = self._local_cert_sha256_fingerprint()
-        if not fp:
-            raise E2EEError("local cert unavailable — cannot encrypt with prekey")
-        return _orig_prekey(self, peer_aid, payload, prekey, peer_cert_pem, message_id=message_id, timestamp=timestamp)
-
-    def _patched_longterm(self, peer_aid, payload, peer_cert_pem, *, message_id=None, timestamp=None):
-        # 调用原方法前，确保 _local_cert_fingerprint 不会 fallback
-        fp = self._local_cert_sha256_fingerprint()
-        if not fp:
-            raise E2EEError("local cert unavailable — cannot encrypt with long-term key")
-        return _orig_longterm(self, peer_aid, payload, peer_cert_pem, message_id=message_id, timestamp=timestamp)
-
-    E2EEManager._encrypt_with_prekey = _patched_prekey
-    E2EEManager._encrypt_with_long_term_key = _patched_longterm
+    _AUNClient._check_replay_guard = _slotaware_check_replay
 
 _patch_sdk()
 del _patch_sdk
@@ -169,21 +139,20 @@ from rich.theme import Theme as RichTheme
 
 # ── 配置 ──────────────────────────────────────────────────────────────────
 
-GATEWAY_HOST = "gateway.agentid.pub"
-DEFAULT_GATEWAY_PORT = None  # 默认不指定端口（使用标准 443）
-GATEWAY_URL = None  # 运行时由 _init_globals() 设置
 
-def _gateway_cert_url(aid: str) -> str:
-    """构造 Gateway 证书查询 URL。"""
+
+def _gateway_cert_url(gateway_url: str, aid: str) -> str:
+    """从已连接的 gateway_url 构造证书查询 URL。"""
     from urllib.parse import quote, urlparse, urlunparse
-    parsed = urlparse(GATEWAY_URL)
+    parsed = urlparse(gateway_url)
     scheme = "https" if parsed.scheme == "wss" else "http"
     return urlunparse((scheme, parsed.netloc, f"/pki/cert/{quote(aid, safe='')}", "", "", ""))
 
-async def _aid_exists(aid: str) -> bool:
+
+async def _aid_exists(gateway_url: str, aid: str) -> bool:
     """向 Gateway 查询 AID 是否存在（HTTP GET /pki/cert/{aid}）。"""
     import aiohttp
-    url = _gateway_cert_url(aid)
+    url = _gateway_cert_url(gateway_url, aid)
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
@@ -203,7 +172,7 @@ _error_file = None  # -s 模式下 dup'd stderr（fd 级别独立于重定向）
 
 def _init_globals():
     """初始化全局配置变量。"""
-    global AUN_PATH, DATA_DIR, DOWNLOADS_DIR, HISTORY_FILE, _CONFIG_FILE, GATEWAY_URL
+    global AUN_PATH, DATA_DIR, DOWNLOADS_DIR, HISTORY_FILE, _CONFIG_FILE
     env = os.environ.get("AUN_CLI_DATA", "").strip()
     base = Path(env) if env else Path.home() / ".aun"
     AUN_PATH = base
@@ -213,12 +182,6 @@ def _init_globals():
     DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
     HISTORY_FILE = DATA_DIR / ".history"
     _CONFIG_FILE = DATA_DIR / "config.json"
-    # gateway port: config > default (empty = standard 443)
-    port = str(_load_config().get("gateway_port", "") or "")
-    if port:
-        GATEWAY_URL = f"wss://{GATEWAY_HOST}:{port}/aun"
-    else:
-        GATEWAY_URL = f"wss://{GATEWAY_HOST}/aun"
 
 def _load_config() -> dict:
     """加载 CLI 配置。"""
@@ -1761,13 +1724,32 @@ class AUNCli:
         self._send_seen_seq = 0     # drain 阶段已收到的最大 seq
         self._send_armed = False    # send 完成后设为 True
         self._send_reply_from = None  # 群聊 -s：只接受该 aid 的回复（None=不限）
+        # chat_id: 实例唯一标识（aid:device_id:slot_id），用于多实例消息路由
+        self.chat_id = ""  # start() 中初始化
+
+    def _update_chat_id(self):
+        device_id = getattr(self.client, "_device_id", "") or ""
+        self.chat_id = f"{self.my_aid}:{device_id}:{self.slot_id}"
+
+    def _inject_chat_id(self, payload):
+        """向 P2P payload 注入 chat_id。返回 dict 形式的 payload。"""
+        if isinstance(payload, str):
+            try:
+                parsed = json.loads(payload)
+                payload = parsed if isinstance(parsed, dict) else {"text": payload}
+            except (json.JSONDecodeError, TypeError):
+                payload = {"text": payload}
+        elif not isinstance(payload, dict):
+            payload = {"text": str(payload)}
+        if self.chat_id:
+            payload["chat_id"] = self.chat_id
+        return payload
 
     async def start(self):
         """用 self.my_aid 启动，AID 不存在则报错退出。"""
         aid = self.my_aid
 
         self.client = _make_client()
-        self.client._gateway_url = GATEWAY_URL
         self.client.on("message.received", self._on_message)
         self.client.on("connection.state",  self._on_state)
         self.client.on("message.ack",       self._on_ack)
@@ -1857,6 +1839,7 @@ class AUNCli:
         self.connected = True
         self._connected_at = time.monotonic()
         self._initial_connect_done = True
+        self._update_chat_id()
         cfg = _load_config()
         cfg["aid"] = self.my_aid
         _save_config(cfg)
@@ -2007,6 +1990,8 @@ class AUNCli:
         if not isinstance(data, dict):
             return
         from_aid = data.get("from", "?")
+        if from_aid == self.my_aid:
+            return
         payload  = data.get("payload", "")
         task_id  = data.get("task_id", "")
         e2ee     = data.get("e2ee", {})
@@ -2028,21 +2013,13 @@ class AUNCli:
             self._raw_monitor_app.invalidate()
 
         # processing / menu 状态通知
-        if self._handle_status_payload(payload, from_aid):
+        # chat_id 过滤：仅接收发给本实例或无 chat_id 的消息
+        msg_chat_id = payload.get("chat_id", "") if isinstance(payload, dict) else ""
+        if msg_chat_id and self.chat_id and msg_chat_id != self.chat_id:
             self._log_write("RECV_IGNORED", data)
             return
 
-        # 群 E2EE 协议消息（key_request / key_distribution 等）以 P2P 通道传输，
-        # 不属于用户消息，静默丢弃，避免污染单聊未读和 recent_targets
-        _e2ee_type = None
-        if isinstance(payload, dict):
-            _e2ee_type = payload.get("type", "")
-        elif isinstance(payload, str):
-            try:
-                _e2ee_type = json.loads(payload).get("type", "")
-            except Exception:
-                pass
-        if isinstance(_e2ee_type, str) and _e2ee_type.startswith("e2ee."):
+        if self._handle_status_payload(payload, from_aid):
             self._log_write("RECV_IGNORED", data)
             return
 
@@ -2216,6 +2193,7 @@ class AUNCli:
             self._connected_at = time.monotonic()
             self._reconn_failures = 0
             self._reconn_cooldown_until = 0
+            self._update_chat_id()
             if self.target and _is_group_target(self.target):
                 await self._refresh_group_cache()
                 await self._ensure_members_cache(self.target["id"], force=True)
@@ -2459,7 +2437,7 @@ class AUNCli:
                     })
             else:
                 result = await self.client.call("message.send", {
-                    "to": target_id, "payload": text,
+                    "to": target_id, "payload": self._inject_chat_id(text),
                     "encrypt": encrypt,
                 })
             self._last_sent = asyncio.get_event_loop().time()
@@ -2637,7 +2615,7 @@ class AUNCli:
             else:
                 msg_result = await self.client.call("message.send", {
                     "to": target_id,
-                    "payload": payload,
+                    "payload": self._inject_chat_id(payload),
                     "type": "file",
                     "encrypt": self.encrypt,
                 })
@@ -2914,7 +2892,7 @@ class AUNCli:
         try:
             result = await self.client.call("message.send", {
                 "to": target_id,
-                "payload": json.dumps({"type": "menu.query"}),
+                "payload": self._inject_chat_id({"type": "menu.query"}),
                 "encrypt": True,
             })
             if isinstance(result, dict):
@@ -2993,8 +2971,11 @@ class AUNCli:
         if not _validate_aid(name):
             self._log_write("TARGET", {"action": "set_peer", "aid": name, "error": "invalid_format"})
             return False
+        if name == self.my_aid:
+            error("不能将自己设为目标")
+            return False
         info(f"正在验证 {name} …")
-        if not await _aid_exists(name):
+        if not await _aid_exists(self.client._gateway_url, name):
             self._log_write("TARGET", {"action": "set_peer", "aid": name, "error": "not_found"})
             error(f"AID 不存在或 Gateway 不可达: {name}")
             return False
@@ -5209,7 +5190,6 @@ def cmd_aid_list():
 
 async def cmd_aid_create(name: str):
     client = _make_client()
-    client._gateway_url = GATEWAY_URL
     local = _get_keystore().load_identity(name)
     if local and "private_key_pem" in local:
         if local.get("cert"):
@@ -5325,30 +5305,16 @@ async def cmd_qid_search(cli_ref, keyword: str):
 async def main():
     import argparse
 
-    argv_tail = sys.argv[1:]
-    if (
-        len(argv_tail) >= 5
-        and argv_tail[0] == "aid"
-        and argv_tail[1] == "new"
-        and any(arg in ("-P", "--port") or arg.startswith("--port=") for arg in argv_tail[3:])
-    ):
-        print(
-            "错误：--port 是全局参数，放在子命令后面不会生效。\n"
-            f"正确写法：aun -p 20001 aid new {argv_tail[2]}",
-            file=sys.stderr,
-        )
-        raise SystemExit(2)
-
     parser = argparse.ArgumentParser(
         prog="aun",
-        usage="aun [-l AID] [-t AID] [-p PORT] [-s MSG] | aun aid <command> | aun qid <command>",
+        usage="aun [-l AID] [-t AID] [-S SLOT] [-s MSG] | aun aid <command> | aun qid <command>",
         description="AUN CLI 工具",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 options:
   -l, --local AID       本地 AID（默认从 config.json 读取）
   -t, --target AID      目标 AID 或 group_id
-  -p, --port PORT       Gateway 端口（覆盖 config）
+  -S, --slot SLOT       消费槽位 ID（同一 AID 多实例时使用，默认为空）
   -s, --send MSG        发送单条消息后退出
   -T, --timeout SEC     发送模式等待回复超时（默认 120s）
   -L, --log N           打印最后 N 行日志并持续跟随
@@ -5362,8 +5328,8 @@ commands:
   aun qid search <关键词>    搜索公开群组
 
 examples:
-  aun -p 20001 aid new alice.agentid.pub               创建 AID（指定 Gateway 端口）
   aun -l my.agentid.pub -t bot.agentid.pub             指定本地和目标 AID 启动
+  aun -l my.agentid.pub -t bot.agentid.pub -S term-2   同一 AID 多终端并行（指定槽位）
   aun -L 50                                            查看最后 50 行日志并持续跟随
   aun                                                  使用上次的本地 AID 和目标直接启动
   aun -s "你好"                                        发送单条消息后退出""")
@@ -5393,7 +5359,6 @@ examples:
     parser.add_argument("--slot", "-S", default="", metavar="SLOT", help="消费槽位 ID（同一 AID 多实例时使用，默认为空）")
     parser.add_argument("--send", "-s", help="发送单条消息后退出")
     parser.add_argument("--timeout", "-T", type=int, default=120, metavar="SEC", help="发送模式等待回复的超时时间（默认 120s）")
-    parser.add_argument("--port", "-P", type=int, metavar="PORT", help="Gateway 端口（覆盖 config）")
     parser.add_argument("--log", "-L", type=int, metavar="N", help="打印最后 N 行日志并持续跟随")
 
     args, _ = parser.parse_known_args()
@@ -5403,11 +5368,6 @@ examples:
     if args.log is not None:
         await _follow_log_output(args.log)
         return
-
-    # --port 覆盖 config / env
-    if args.port:
-        global GATEWAY_URL
-        GATEWAY_URL = f"wss://{GATEWAY_HOST}:{args.port}/aun"
 
     if args.subcmd == "aid":
         if args.action == "list":

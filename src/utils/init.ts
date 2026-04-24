@@ -506,7 +506,6 @@ export async function cmdInit() {
         config.channels.aun = {
           enabled: true,
           aid: result.aid,
-          ...(result.gatewayPort && { gatewayPort: result.gatewayPort }),
         };
         channelConfigured = true;
         config.channels.defaultChannel = 'aun';

@@ -39,8 +39,7 @@ export interface AunChannelConfig {
   enabled?: boolean;
   aid: string;            // 完整 AID，如 evolclaw-ai.agentid.pub
   keystorePath?: string;  // AUN keystore 路径，默认 ~/.aun
-  gatewayPort?: number;   // Gateway 端口，默认 443（域名从 AID 推导）
-  gatewayUrl?: string;    // Gateway WebSocket URL（兼容旧配置，优先级高于 gatewayPort）
+  gatewayUrl?: string;    // Gateway WebSocket URL（well-known 自动发现失败时的 fallback）
   accessToken?: string;   // 认证 access token（降级 fallback）
   owner?: string;
   admins?: string[];

@@ -717,9 +717,9 @@ function isValidAid(name: string): boolean {
   return labels.length >= 3 && labels.every(l => /^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?$/.test(l));
 }
 
-export async function setupAunAid(rl: readline.Interface, _config: any): Promise<{ aid: string; gatewayPort?: number } | null> {
+export async function setupAunAid(rl: readline.Interface, _config: any): Promise<{ aid: string } | null> {
   let aid = '';
-  let gatewayPort: number | undefined;
+  let gatewayPort: number | undefined;  // only used locally for AID creation, not written to config
 
   // Outer loop: allows retrying with a different AID
   while (true) {
@@ -785,7 +785,7 @@ export async function setupAunAid(rl: readline.Interface, _config: any): Promise
     // default: retry with new AID
   }
 
-  return { aid, gatewayPort };
+  return { aid };
 }
 
 export async function cmdInitAun(): Promise<void> {
@@ -819,7 +819,6 @@ export async function cmdInitAun(): Promise<void> {
     config.channels.aun = {
       enabled: true,
       aid: result.aid,
-      ...(result.gatewayPort && { gatewayPort: result.gatewayPort }),
     };
     if (!config.channels.defaultChannel) config.channels.defaultChannel = 'aun';
 
