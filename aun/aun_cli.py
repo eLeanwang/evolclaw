@@ -25,7 +25,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 # ── 依赖自检 ──────────────────────────────────────────────────────────────
 _REQUIRED_PACKAGES = [
-    {"import": "aun_core", "requirement": "aun-core>=0.2.6"},
+    {"import": "aun_core", "requirement": "aun-core>=0.2.7"},
     {"import": "prompt_toolkit", "requirement": "prompt-toolkit>=3.0.0"},
     {"import": "rich", "requirement": "rich>=13.0.0"},
 ]
@@ -104,21 +104,6 @@ _ensure_ssl_certs()
 from aun_core import AUNClient
 from aun_core.keystore.file import FileKeyStore
 
-# ── SDK monkey-patches ───────────────────────────────────────────────────────
-# 服务端 replay guard 是 AID 级全局的，多 slot 实例 fanout 时后到的实例消息被误判重复
-def _patch_sdk():
-    from aun_core.client import AUNClient as _AUNClient
-    _orig_check_replay = _AUNClient._check_replay_guard
-
-    async def _slotaware_check_replay(self, message_id, sender_aid, encryption_mode, message):
-        if getattr(self, "_slot_id", "") != "":
-            return True
-        return await _orig_check_replay(self, message_id, sender_aid, encryption_mode, message)
-
-    _AUNClient._check_replay_guard = _slotaware_check_replay
-
-_patch_sdk()
-del _patch_sdk
 from prompt_toolkit import Application, PromptSession
 from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.buffer import Buffer
@@ -622,12 +607,6 @@ def _is_group_not_joined_error(exc: Exception | str | None) -> bool:
     text = str(exc).lower()
     return "no group secret" in text or "not a member" in text
 
-
-def _is_group_epoch_too_old_error(exc: Exception | str | None) -> bool:
-    if not exc:
-        return False
-    text = str(exc).lower()
-    return "epoch too old" in text
 
 
 def _is_group_banned_error(exc: Exception | str | None) -> bool:
@@ -1652,13 +1631,14 @@ def _save_to_downloads(data: bytes, filename: str, sender_aid: str) -> Path:
 # ── 客户端 ────────────────────────────────────────────────────────────────
 
 class AUNCli:
-    def __init__(self, aid=None, target=None, slot_id=""):
+    def __init__(self, aid=None, target=None):
         cfg = _load_config()
         self.my_aid     = aid or cfg.get("aid")
-        self.slot_id    = slot_id
         # target 统一为 dict: {"type": "peer"|"group", "id": str, "name": str}
         raw_target = target or cfg.get("target")
         self.target     = _normalize_target(raw_target)
+        # slot_id 自动从 target 推导，避免空 slot 被 Gateway 踢
+        self.slot_id    = self.target.get("id", "") if self.target else "default"
         self.client     = None
         self.connected  = False
         self.msg_count  = 0
@@ -1715,9 +1695,6 @@ class AUNCli:
         self._log_date = None           # 当前日志文件对应的日期字符串
         # 消息持久化
         self.store = MessageStore(str(DATA_DIR / "messages.db"))
-        # 群 epoch 补钥状态
-        self._group_recovery_sender = {}   # group_id → 最近一条解密失败消息的 sender_aid
-        self._group_recovery_failed = {}   # group_id → {aid → expire_time}
         # -s 模式：等待回复
         self._send_reply_event = asyncio.Event()
         self._send_reply_text = None
@@ -2013,9 +1990,10 @@ class AUNCli:
             self._raw_monitor_app.invalidate()
 
         # processing / menu 状态通知
-        # chat_id 过滤：仅接收发给本实例或无 chat_id 的消息
+        # chat_id 回声过滤：自己发出的消息会被 gateway fanout 回来，
+        # 只有 from_aid == self 且 chat_id 不匹配时才丢弃（说明是其它实例发的）
         msg_chat_id = payload.get("chat_id", "") if isinstance(payload, dict) else ""
-        if msg_chat_id and self.chat_id and msg_chat_id != self.chat_id:
+        if msg_chat_id and self.chat_id and from_aid == self.my_aid and msg_chat_id != self.chat_id:
             self._log_write("RECV_IGNORED", data)
             return
 
@@ -2130,12 +2108,30 @@ class AUNCli:
         elif state == "connected":
             self.connected = True
             self._connected_at = time.monotonic()
-            if self._initial_connect_done:
+            if self._initial_connect_done and not getattr(self, '_slot_reconnecting', False):
                 info("重新连接成功")
             # 重连后刷新远端菜单（仅 peer target）
             if self.target and _is_peer_target(self.target):
                 self._pending_menu = None
                 asyncio.ensure_future(self.query_menu())
+
+    async def _update_slot_for_target(self, target_id: str):
+        """target 切换后更新 slot_id，若已连接且 slot 变化则重连。"""
+        new_slot = target_id or ""
+        if new_slot == self.slot_id:
+            return
+        old_slot = self.slot_id
+        self.slot_id = new_slot
+        self._update_chat_id()
+        if self.connected:
+            info(f"slot 变更 ({_short_name(old_slot) or '空'} → {_short_name(new_slot)}), 正在重连…")
+            self._slot_reconnecting = True
+            try:
+                ok = await self._reconnect()
+                if ok:
+                    info(f"{C.GREEN}重连成功{C.RESET}")
+            finally:
+                self._slot_reconnecting = False
 
     async def _reconnect(self):
         """断线后尝试重新认证并连接，带指数退避冷却。"""
@@ -2145,7 +2141,8 @@ class AUNCli:
             remain = int(self._reconn_cooldown_until - now)
             error(f"未连接（{remain}秒后可重试）")
             return False
-        info("正在重连…")
+        if not getattr(self, '_slot_reconnecting', False):
+            info("正在重连…")
         try:
             # 先 close() 重置状态，否则 terminal_failed 下 connect() 会被拒绝
             await self.client.close()
@@ -2160,7 +2157,8 @@ class AUNCli:
             self._connected_at = time.monotonic()
             self._reconn_failures = 0
             self._reconn_cooldown_until = 0
-            info(f"{C.GREEN}重连成功{C.RESET}")
+            if not getattr(self, '_slot_reconnecting', False):
+                info(f"{C.GREEN}重连成功{C.RESET}")
             return True
         except Exception as e:
             self._reconn_failures += 1
@@ -2228,179 +2226,6 @@ class AUNCli:
             if my_aid and my_aid not in member_aids:
                 raise RuntimeError(f"not a member of {group_id}")
 
-    async def _get_group_recovery_candidates(self, group_id: str) -> list[str]:
-        """按优先级返回补钥候选：
-        1) 最近一次解密失败消息的 sender
-        2) 最近在该群发言的活跃成员（倒序，时间近者靠前）
-        3) admin / owner
-        4) 统一候选池中的其他成员（本地 member_aids + 服务端 group.get_members + 活跃 sender 集合）
-        5) 最近失败黑名单中的成员排到最后
-        """
-        sender_first = self._group_recovery_sender.get(group_id) or ""
-        blacklist = dict(self._group_recovery_failed.get(group_id) or {})
-        # 清理过期黑名单条目
-        now_ts = asyncio.get_event_loop().time()
-        blacklist = {aid: exp for aid, exp in blacklist.items() if exp > now_ts}
-        self._group_recovery_failed[group_id] = blacklist
-
-        # 统一候选池
-        pool: set[str] = set()
-        # 本地 group_e2ee 成员列表
-        group_e2ee = getattr(self.client, "group_e2ee", None)
-        if group_e2ee is not None:
-            try:
-                for aid in group_e2ee.get_member_aids(group_id) or []:
-                    if aid:
-                        pool.add(aid)
-            except Exception:
-                pass
-
-        # 服务端权威成员列表 + 角色
-        role_map: dict[str, str] = {}
-        members_list: list[dict] = []
-        try:
-            members_resp = await self.client.call("group.get_members", {"group_id": group_id})
-            raw_list = (members_resp or {}).get("members") or (members_resp or {}).get("items") or []
-            for m in raw_list:
-                if not isinstance(m, dict):
-                    continue
-                aid = str(m.get("aid") or "")
-                if not aid:
-                    continue
-                pool.add(aid)
-                role_map[aid] = str(m.get("role") or "")
-                members_list.append(m)
-        except Exception as exc:
-            if getattr(self, "debug_mode", False):
-                info(f"拉群成员失败，使用本地候选: {exc}")
-            # 回退使用本地缓存
-            for m in (self._members_cache.get(group_id) or []):
-                if not isinstance(m, dict):
-                    continue
-                aid = str(m.get("aid") or "")
-                if not aid:
-                    continue
-                pool.add(aid)
-                role_map[aid] = str(m.get("role") or "")
-
-        # 活跃成员：按本地消息历史最近发言时间倒序
-        activity: dict[str, int] = {}
-        try:
-            history = self.store.get_history(group_id, limit=100)
-        except Exception:
-            history = []
-        for entry in history or []:
-            if not isinstance(entry, dict):
-                continue
-            if entry.get("direction") not in (None, "recv"):
-                continue
-            aid = str(entry.get("sender") or "")
-            ts = int(entry.get("timestamp") or 0)
-            if not aid:
-                continue
-            pool.add(aid)
-            if ts > activity.get(aid, 0):
-                activity[aid] = ts
-
-        # 剔除自己与 sender_first
-        if self.my_aid in pool:
-            pool.discard(self.my_aid)
-        if sender_first:
-            pool.discard(sender_first)
-
-        def _role_rank(aid: str) -> int:
-            role = role_map.get(aid, "")
-            if role == "owner":
-                return 0
-            if role == "admin":
-                return 1
-            return 2
-
-        # 候选按活跃度倒序，然后 role_rank 升序，最后 aid 字典序稳定
-        ordered = sorted(
-            pool,
-            key=lambda aid: (
-                1 if aid in blacklist else 0,        # 黑名单最后
-                -activity.get(aid, 0),               # 活跃越近越前
-                _role_rank(aid),                      # owner/admin 更前
-                aid,
-            ),
-        )
-
-        candidates: list[str] = []
-        if sender_first and sender_first != self.my_aid:
-            candidates.append(sender_first)
-        candidates.extend(ordered)
-        # 去重保持顺序
-        seen: set[str] = set()
-        unique: list[str] = []
-        for aid in candidates:
-            if aid in seen:
-                continue
-            seen.add(aid)
-            unique.append(aid)
-        return unique
-
-    async def _ensure_group_epoch_fresh(self, group_id: str) -> None:
-        """群发送前对齐 epoch：服务端更高时主动发 key_request，等待本地补钥。"""
-        group_e2ee = getattr(self.client, "group_e2ee", None)
-        if group_e2ee is None:
-            return
-        try:
-            epoch_resp = await self.client.call("group.e2ee.get_epoch", {"group_id": group_id})
-        except Exception as exc:
-            if getattr(self, "debug_mode", False):
-                info(f"get_epoch 失败，跳过对齐: {exc}")
-            return
-        server_epoch = int((epoch_resp or {}).get("epoch") or 0)
-        local_epoch = int(group_e2ee.current_epoch(group_id) or 0)
-        if local_epoch >= server_epoch:
-            return
-
-        ordered = await self._get_group_recovery_candidates(group_id)
-        blacklist_ttl = 60.0  # 秒
-
-        for candidate in ordered:
-            try:
-                req = group_e2ee.build_recovery_request(group_id, server_epoch, sender_aid=candidate)
-            except Exception:
-                req = None
-            if not req:
-                continue
-            try:
-                await self.client.call("message.send", {
-                    "to": req["to"],
-                    "payload": req["payload"],
-                    "encrypt": True,
-                })
-            except Exception as exc:
-                if getattr(self, "debug_mode", False):
-                    info(f"补钥请求发送失败 → {candidate}: {exc}")
-                # 发送失败也计入短期黑名单，避免下次还把它排在前面
-                self._group_recovery_failed.setdefault(group_id, {})[candidate] = (
-                    asyncio.get_event_loop().time() + blacklist_ttl
-                )
-                continue
-            satisfied = False
-            for _ in range(20):
-                await asyncio.sleep(0.25)
-                if int(group_e2ee.current_epoch(group_id) or 0) >= server_epoch:
-                    satisfied = True
-                    break
-            if satisfied:
-                # 补到 key，清理该群的 sender/黑名单状态
-                self._group_recovery_sender.pop(group_id, None)
-                return
-            # 本次候选 5 秒内没能让本地 epoch 追上，短期加入黑名单
-            self._group_recovery_failed.setdefault(group_id, {})[candidate] = (
-                asyncio.get_event_loop().time() + blacklist_ttl
-            )
-
-        if int(group_e2ee.current_epoch(group_id) or 0) < server_epoch:
-            raise RuntimeError(
-                f"本地群密钥过期 (local={local_epoch}, server={server_epoch})，请等待管理员重新分发密钥"
-            )
-
     async def send(self, text, encrypt=True, silent=False):
         if not self.client:
             error("未连接"); return
@@ -2417,24 +2242,12 @@ class AUNCli:
             t0 = asyncio.get_event_loop().time()
             if _is_group_target(self.target):
                 await self._ensure_group_membership(target_id)
-                await self._ensure_group_epoch_fresh(target_id)
-                try:
-                    result = await self.client.call("group.send", {
-                        "group_id": target_id,
-                        "payload": {"text": text},
-                        "type": "text",
-                        "encrypt": encrypt,
-                    })
-                except Exception as send_exc:
-                    if not _is_group_epoch_too_old_error(send_exc):
-                        raise
-                    await self._ensure_group_epoch_fresh(target_id)
-                    result = await self.client.call("group.send", {
-                        "group_id": target_id,
-                        "payload": {"text": text},
-                        "type": "text",
-                        "encrypt": encrypt,
-                    })
+                result = await self.client.call("group.send", {
+                    "group_id": target_id,
+                    "payload": {"text": text},
+                    "type": "text",
+                    "encrypt": encrypt,
+                })
             else:
                 result = await self.client.call("message.send", {
                     "to": target_id, "payload": self._inject_chat_id(text),
@@ -2991,6 +2804,8 @@ class AUNCli:
         self._pending_menu = None
         asyncio.ensure_future(self.query_menu())
         self._show_unread(name)
+        # slot_id 跟随 target 更新，变化时重连以更新 Gateway 路由
+        await self._update_slot_for_target(name)
         return True
 
     def set_group_target(self, group_id: str, group_name: str = None) -> bool:
@@ -3009,6 +2824,8 @@ class AUNCli:
         self._show_unread(group_id)
         # 后台预加载群成员缓存
         asyncio.ensure_future(self._ensure_members_cache(group_id))
+        # slot_id 跟随 target 更新，变化时重连以更新 Gateway 路由
+        asyncio.ensure_future(self._update_slot_for_target(group_id))
         return True
 
     def _show_unread(self, conversation_id: str):
@@ -3409,14 +3226,6 @@ class AUNCli:
         self.last_e2ee = "🔒 E2EE" if msg_encrypted else "🔓 明文"
         if self.encrypt and not msg_encrypted:
             self.plaintext_recv += 1
-
-        # 记录无法解密的群密文包 sender，供下次补钥使用
-        try:
-            payload_type = payload.get("type") if isinstance(payload, dict) else None
-        except Exception:
-            payload_type = None
-        if payload_type == "e2ee.group_encrypted" and not msg_encrypted and group_id and sender_aid and sender_aid != "?":
-            self._group_recovery_sender[group_id] = sender_aid
 
         # 提取文本
         if isinstance(payload, dict):
@@ -5307,14 +5116,13 @@ async def main():
 
     parser = argparse.ArgumentParser(
         prog="aun",
-        usage="aun [-l AID] [-t AID] [-S SLOT] [-s MSG] | aun aid <command> | aun qid <command>",
+        usage="aun [-l AID] [-t AID] [-s MSG] | aun aid <command> | aun qid <command>",
         description="AUN CLI 工具",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 options:
   -l, --local AID       本地 AID（默认从 config.json 读取）
   -t, --target AID      目标 AID 或 group_id
-  -S, --slot SLOT       消费槽位 ID（同一 AID 多实例时使用，默认为空）
   -s, --send MSG        发送单条消息后退出
   -T, --timeout SEC     发送模式等待回复超时（默认 120s）
   -L, --log N           打印最后 N 行日志并持续跟随
@@ -5329,7 +5137,6 @@ commands:
 
 examples:
   aun -l my.agentid.pub -t bot.agentid.pub             指定本地和目标 AID 启动
-  aun -l my.agentid.pub -t bot.agentid.pub -S term-2   同一 AID 多终端并行（指定槽位）
   aun -L 50                                            查看最后 50 行日志并持续跟随
   aun                                                  使用上次的本地 AID 和目标直接启动
   aun -s "你好"                                        发送单条消息后退出""")
@@ -5356,7 +5163,6 @@ examples:
 
     parser.add_argument("--local", "-l", help="本地 AID（默认从 config.json 读取）")
     parser.add_argument("--target", "-t", help="目标 AID 或 group_id")
-    parser.add_argument("--slot", "-S", default="", metavar="SLOT", help="消费槽位 ID（同一 AID 多实例时使用，默认为空）")
     parser.add_argument("--send", "-s", help="发送单条消息后退出")
     parser.add_argument("--timeout", "-T", type=int, default=120, metavar="SEC", help="发送模式等待回复的超时时间（默认 120s）")
     parser.add_argument("--log", "-L", type=int, metavar="N", help="打印最后 N 行日志并持续跟随")
@@ -5423,7 +5229,7 @@ examples:
         error(f"无效目标: {target}（需要 AID 或 group_id 格式）")
         return
 
-    c = AUNCli(aid=aid, target=target, slot_id=args.slot)
+    c = AUNCli(aid=aid, target=target)
     _orig_stderr_fd = None
     try:
         if args.send:

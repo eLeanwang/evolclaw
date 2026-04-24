@@ -1320,7 +1320,7 @@ async function cmdTui() {
   const pythonCheck = aun.pythonBin || process.env.AUN_PYTHON || 'python3';
   if (!platform.commandExists(pythonCheck)) {
     console.error(`[tui] Python 未找到 (${pythonCheck})`);
-    console.error('  → TUI 依赖 Python 和 aun-core (>=0.2.6): pip3 install -U aun-core');
+    console.error('  → TUI 依赖 Python 和 aun-core (>=0.2.7): pip3 install -U aun-core');
     process.exit(1);
   }
 

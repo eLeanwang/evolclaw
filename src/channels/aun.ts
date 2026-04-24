@@ -78,7 +78,7 @@ export class AUNChannel {
       this.traceStream = null;
     }
     this.traceDate = today;
-    const logPath = path.join(resolvePaths().logs, `aun-trace-${today}.log`);
+    const logPath = path.join(resolvePaths().logs, `aun-${today}.log`);
     this.traceStream = fs.createWriteStream(logPath, { flags: 'a' });
   }
 
@@ -135,6 +135,7 @@ export class AUNChannel {
     if (messageId) this.messageSeqMap.delete(messageId);
   }
   private _aid?: string;
+  private _chatId = '';  // aid:device_id:slot_id — 多实例回声过滤
   private seenMessages = new Map<string, number>();
   private messageSeqMap = new Map<string, number>();  // messageId → seq (for ack)
   private sentCount = new Map<string, number>();  // channelId → 已发消息计数（用于判断最终回复）
@@ -146,10 +147,17 @@ export class AUNChannel {
   private static readonly RECONNECT_DELAYS = [60, 120, 300, 600];  // seconds
   private onChannelDown?: () => void;
 
+  // SDK reconnect throttling — avoid log spam when SDK enters tight reconnect loop
+  private lastReconnectLogTime = 0;
+  private lastReconnectLogAttempt = 0;
+  private static readonly RECONNECT_LOG_INTERVAL = 60_000;  // log at most every 60s
+  private static readonly RECONNECT_LOG_STEP = 100;         // or every 100 attempts
+  private static readonly SDK_RECONNECT_GIVEUP = 50;        // force TS-layer fallback after this many SDK attempts
+
   constructor(private config: AUNConfig) {
     if (config.aunTrace) {
       this.rotateTraceIfNeeded();
-      logger.info(`[AUN] Trace logging enabled (daily rotation): ${resolvePaths().logs}/aun-trace-YYYYMMDD.log`);
+      logger.info(`[AUN] Trace logging enabled (daily rotation): ${resolvePaths().logs}/aun-YYYYMMDD.log`);
     }
   }
 
@@ -219,7 +227,7 @@ export class AUNChannel {
       this.handleIncomingGroupMessage(data);
     });
     this.client.on('connection.state', (data: unknown) => {
-      this.trace('IN', 'connection.state', data);
+      // trace is handled inside handleConnectionState with throttling
       this.handleConnectionState(data);
     });
 
@@ -267,6 +275,8 @@ export class AUNChannel {
         { auto_reconnect: true, retry: { max_attempts: 5, initial_delay: 1.0, max_delay: 30.0 } },
       );
       this._aid = this.client.aid ?? undefined;
+      const deviceId = (this.client as any)._device_id ?? '';
+      this._chatId = this._aid ? `${this._aid}:${deviceId}:` : '';
       this.connected = true;
       this.reconnectAttempt = 0;
 
@@ -368,8 +378,10 @@ export class AUNChannel {
     const messageId = msg.message_id ?? '';
     const seq = msg.seq;
 
-    // 自发自收兜底：丢弃 Bot 自身发出消息的 Gateway echo
-    if (this._aid && fromAid === this._aid) {
+    // 回声过滤：自己发出的消息会被 gateway fanout 回来，
+    // 只有 from_aid == self 且 chat_id 不匹配时才丢弃（说明是其它实例发的）
+    const msgChatId = typeof payload === 'object' && payload !== null && (payload as any).chat_id;
+    if (this._aid && fromAid === this._aid && (!msgChatId || !this._chatId || msgChatId !== this._chatId)) {
       this.acknowledgeImmediately(messageId, seq);
       return;
     }
@@ -560,16 +572,43 @@ export class AUNChannel {
     if (state === 'connected') {
       this.connected = true;
       this.reconnectAttempt = 0;
+      this.lastReconnectLogTime = 0;
+      this.lastReconnectLogAttempt = 0;
       logger.info('[AUN] Connected');
     } else if (state === 'disconnected') {
       this.connected = false;
       logger.warn(`[AUN] Disconnected: ${(data as Record<string, any>).error ?? 'unknown'}`);
     } else if (state === 'reconnecting') {
-      logger.info(`[AUN] SDK reconnecting (attempt ${(data as Record<string, any>).attempt})`);
+      const attempt = (data as Record<string, any>).attempt ?? 0;
+      const now = Date.now();
+
+      // Throttled logging: first attempt, every N attempts, or every M seconds
+      const isFirst = attempt <= 1;
+      const isStep = attempt - this.lastReconnectLogAttempt >= AUNChannel.RECONNECT_LOG_STEP;
+      const isInterval = now - this.lastReconnectLogTime >= AUNChannel.RECONNECT_LOG_INTERVAL;
+      if (isFirst || isStep || isInterval) {
+        const suppressed = attempt - this.lastReconnectLogAttempt - 1;
+        const suffix = suppressed > 0 ? `, ${suppressed} suppressed since last log` : '';
+        logger.info(`[AUN] SDK reconnecting (attempt ${attempt}${suffix})`);
+        this.lastReconnectLogTime = now;
+        this.lastReconnectLogAttempt = attempt;
+        this.trace('IN', 'connection.state', data);
+      }
+
+      // Detect runaway SDK reconnect loop: force disconnect and use TS-layer backoff
+      if (attempt >= AUNChannel.SDK_RECONNECT_GIVEUP && !this.intentionalDisconnect) {
+        logger.warn(`[AUN] SDK reconnect stuck at attempt ${attempt}, forcing TS-layer reconnect with backoff`);
+        this.connected = false;
+        if (this.client) {
+          this.client.close().catch(() => {});
+          this.client = null;
+        }
+        this.scheduleReconnect();
+      }
     } else if (state === 'terminal_failed') {
       this.connected = false;
-      logger.error(`[AUN] Terminal failure: ${(data as Record<string, any>).error ?? 'unknown'}`);
-      // SDK auto_reconnect exhausted; fall back to TS-layer reconnect
+      const reason = (data as Record<string, any>).reason ?? '';
+      logger.error(`[AUN] Terminal failure: ${(data as Record<string, any>).error ?? 'unknown'}${reason ? ` (${reason})` : ''}`);
       if (!this.intentionalDisconnect) {
         this.scheduleReconnect();
       }
