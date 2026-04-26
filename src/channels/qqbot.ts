@@ -391,7 +391,7 @@ export class QQBotChannelPlugin implements ChannelPlugin {
       });
 
       const adapter = {
-        channelName: inst.name || 'qqbot',
+        channelName: inst.name,
         sendText: (id: string, text: string) => channel.sendMessage(id, text),
         sendFile: (id: string, filePath: string) => channel.sendFile(id, filePath),
         sendImage: (id: string, png: Buffer) => channel.sendImage(id, png),

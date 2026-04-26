@@ -25,7 +25,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 # ── 依赖自检 ──────────────────────────────────────────────────────────────
 _REQUIRED_PACKAGES = [
-    {"import": "aun_core", "requirement": "aun-core>=0.2.7"},
+    {"import": "aun_core", "requirement": "aun-core>=0.2.9"},
     {"import": "prompt_toolkit", "requirement": "prompt-toolkit>=3.0.0"},
     {"import": "rich", "requirement": "rich>=13.0.0"},
 ]
@@ -511,6 +511,18 @@ def _is_group_id(value: str) -> bool:
 
 _MENTION_RE = re.compile(r'@([a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?){2,})')
 
+
+def _extract_message_id(result) -> str:
+    """从 SDK 返回值提取 message_id（兼容 0.2.6 / 0.2.7 嵌套格式）。"""
+    if not isinstance(result, dict):
+        return ""
+    mid = result.get("message_id") or ""
+    if not mid:
+        msg = result.get("message")
+        if isinstance(msg, dict):
+            mid = msg.get("message_id") or ""
+    return mid
+
 def _extract_mentions(text: str) -> list[str]:
     """从文本中提取所有 @aid mention（不含行首 @）。"""
     return _MENTION_RE.findall(text)
@@ -650,9 +662,9 @@ def _split_target_switch_input(line: str) -> tuple[str, str]:
     return target, message
 
 
-def _make_client() -> "AUNClient":
+def _make_client(debug: bool = False) -> "AUNClient":
     """构造 AUNClient，统一 aun_path 配置。"""
-    return AUNClient({"aun_path": str(AUN_PATH)})
+    return AUNClient({"aun_path": str(AUN_PATH)}, debug=debug)
 
 def _get_keystore() -> "FileKeyStore":
     """获取与 _make_client 同路径的 FileKeyStore 实例。"""
@@ -669,6 +681,7 @@ STYLE = Style.from_dict({
 
 _LOCAL_CMDS = [
     ("//debug",      "",    "toggle 调试模式"),
+    ("//sdk_debug",  "",    "toggle SDK debug 日志"),
     ("//log",        "",    "toggle 数据日志（写入文件）"),
     ("//history",    "N",   "查看历史消息（默认20条）"),
     ("//plain",      "",    "切换 明文/E2EE"),
@@ -779,12 +792,10 @@ class AUNCompleter(Completer):
                     mid = m.get("aid", "")
                     if not mid or mid == self.cli_ref.my_aid:
                         continue
-                    role = m.get("role", "")
                     online = m.get("online", False)
-                    role_tag = f" [{role}]" if role else ""
-                    online_tag = " [在线]" if online else ""
+                    online_tag = f" {C.BLUE}[在线]{C.RESET}" if online else ""
                     short = _short_name(mid)
-                    display = f"{short}{role_tag}{online_tag}"
+                    display = f"{short}{online_tag}"
                     if filter_text and not (short.lower().startswith(filter_text) or mid.lower().startswith(filter_text)):
                         continue
                     yield Completion(f"@{mid} ", start_position=-at_len,
@@ -1205,6 +1216,7 @@ def _toggle_log(event):
 
 class C:
     CYAN   = "\033[36m"
+    BLUE   = "\033[94m"
     GREEN  = "\033[92m"
     YELLOW = "\033[93m"
     RED    = "\033[91m"
@@ -1316,6 +1328,7 @@ def _collect_status_rows(cli, gateway_status: dict | None = None) -> list[tuple[
     enc = "🔒 E2EE" if getattr(cli, "encrypt", False) else "🔓 明文"
     last_e2ee = getattr(cli, "last_e2ee", "") or "(无消息)"
     debug = "开启" if getattr(cli, "debug_mode", False) else "关闭"
+    sdk_dbg = "开启" if getattr(cli, "sdk_debug", False) else "关闭"
     log_on = "开启" if getattr(cli, "_log_enabled", False) else "关闭"
     raw_on = "开启" if getattr(cli, "_raw_monitor_app", None) else "关闭"
     processing = "无" if not getattr(cli, "_processing", None) else f"{len(cli._processing)} 个"
@@ -1342,6 +1355,7 @@ def _collect_status_rows(cli, gateway_status: dict | None = None) -> list[tuple[
         ("收发模式", enc),
         ("最近 E2EE", last_e2ee),
         ("调试模式", debug),
+        ("SDK debug", sdk_dbg),
         ("数据日志", log_on),
         ("未读会话", f"{unread_count} 个"),
         ("原始监控", raw_on),
@@ -1657,6 +1671,7 @@ class AUNCli:
         self._spinner_session = None    # PromptSession 引用（供 invalidate）
         # debug 菜单
         self.debug_mode = cfg.get("debug", False)
+        self.sdk_debug = cfg.get("sdk_debug", False)
         self._last_e2ee_event = None    # /e2ee 用 {type, data, time}
         self._e2ee_restore_timer = None # token.refreshed 3秒恢复定时器
         self._pending_menu = None       # menu.response 缓存（成功后保留）
@@ -1693,8 +1708,9 @@ class AUNCli:
         self._log_enabled = cfg.get("log", False)  # 从 config 恢复
         self._log_file = None           # 日志文件句柄
         self._log_date = None           # 当前日志文件对应的日期字符串
-        # 消息持久化
-        self.store = MessageStore(str(DATA_DIR / "messages.db"))
+        # 消息持久化（存入 SDK keystore 目录，按 AID 天然隔离）
+        _aid_db_dir = AUN_PATH / "AIDs" / self.my_aid if self.my_aid else DATA_DIR
+        self.store = MessageStore(str(_aid_db_dir / "messages.db"))
         # -s 模式：等待回复
         self._send_reply_event = asyncio.Event()
         self._send_reply_text = None
@@ -1703,6 +1719,7 @@ class AUNCli:
         self._send_reply_from = None  # 群聊 -s：只接受该 aid 的回复（None=不限）
         # chat_id: 实例唯一标识（aid:device_id:slot_id），用于多实例消息路由
         self.chat_id = ""  # start() 中初始化
+        self._sent_msg_ids: set[str] = set()  # 最近已发消息 ID，用于回声去重
 
     def _update_chat_id(self):
         device_id = getattr(self.client, "_device_id", "") or ""
@@ -1726,7 +1743,7 @@ class AUNCli:
         """用 self.my_aid 启动，AID 不存在则报错退出。"""
         aid = self.my_aid
 
-        self.client = _make_client()
+        self.client = _make_client(debug=self.sdk_debug)
         self.client.on("message.received", self._on_message)
         self.client.on("connection.state",  self._on_state)
         self.client.on("message.ack",       self._on_ack)
@@ -1828,7 +1845,7 @@ class AUNCli:
             info(f"目标: {_target_label(self.target)}")
             _record_target(self.target)
             # 连接成功后预加载远端菜单（仅 peer target）
-            if _is_peer_target(self.target):
+            if _is_peer_target(self.target) and not _silent:
                 asyncio.ensure_future(self.query_menu())
             # 群目标：验证成员资格（-s 模式下失败不清除 target，仍尝试发送）
             if _is_group_target(self.target):
@@ -2199,6 +2216,9 @@ class AUNCli:
             cfg = _load_config()
             cfg["aid"] = new_aid
             _save_config(cfg)
+            # 切换消息存储到新 AID 的 DB
+            _aid_db_dir = AUN_PATH / "AIDs" / new_aid if new_aid else DATA_DIR
+            self.store = MessageStore(str(_aid_db_dir / "messages.db"))
             info(f"{C.GREEN}已切换{C.RESET}  AID = {new_aid}")
         except Exception as e:
             error(f"切换失败: {e}")
@@ -2273,8 +2293,12 @@ class AUNCli:
                 self._proc_start.clear()
             # 持久化已发消息
             conv_type = "group" if _is_group_target(self.target) else "peer"
-            msg_id = (result.get("message_id") if isinstance(result, dict) else None) \
+            msg_id = _extract_message_id(result) \
                      or f"sent_{target_id}_{int(time.time()*1000)}"
+            if msg_id.startswith("gm-"):
+                self._sent_msg_ids.add(msg_id)
+                if len(self._sent_msg_ids) > 50:
+                    self._sent_msg_ids = set(list(self._sent_msg_ids)[-30:])
             self.store.save(
                 message_id=msg_id,
                 conversation_id=target_id,
@@ -2443,8 +2467,12 @@ class AUNCli:
             print_status(target_label, "▶", C.YELLOW, f"📎 {filename} 已发送")
 
             conv_type = "group" if _is_group_target(self.target) else "peer"
-            msg_id = (msg_result.get("message_id") if isinstance(msg_result, dict) else None) \
+            msg_id = _extract_message_id(msg_result) \
                      or f"sent_{target_id}_{int(time.time()*1000)}"
+            if msg_id.startswith("gm-"):
+                self._sent_msg_ids.add(msg_id)
+                if len(self._sent_msg_ids) > 50:
+                    self._sent_msg_ids = set(list(self._sent_msg_ids)[-30:])
             self.store.save(
                 message_id=msg_id,
                 conversation_id=target_id,
@@ -3111,7 +3139,7 @@ class AUNCli:
                 members = members_resp.get("members", []) or members_resp.get("items", [])
             online_aids: set[str] = set()
             if not isinstance(online_resp, Exception):
-                for item in (online_resp.get("items") or []):
+                for item in (online_resp.get("members") or []):
                     aid = item.get("aid", "")
                     if aid and item.get("online"):
                         online_aids.add(aid)
@@ -3151,8 +3179,12 @@ class AUNCli:
             if self.debug_mode:
                 print_status(target_label, "▶", C.YELLOW, f"已发送 ({elapsed}ms)")
             # 持久化已发消息
-            msg_id = (result.get("message_id") if isinstance(result, dict) else None) \
+            msg_id = _extract_message_id(result) \
                      or f"sent_{group_id}_{int(time.time()*1000)}"
+            if msg_id.startswith("gm-"):
+                self._sent_msg_ids.add(msg_id)
+                if len(self._sent_msg_ids) > 50:
+                    self._sent_msg_ids = set(list(self._sent_msg_ids)[-30:])
             self.store.save(
                 message_id=msg_id,
                 conversation_id=group_id,
@@ -3200,6 +3232,13 @@ class AUNCli:
         # 忽略自己发的消息
         if sender_aid == self.my_aid:
             self._log_write("RECV_GROUP_IGNORED", {"reason": "self", "group_id": group_id, "seq": msg.get("seq")})
+            return
+
+        # 二重防护：通过 message_id 识别自发回声（sender_aid 可能因 SDK 格式变化而漏判）
+        echo_msg_id = msg.get("message_id") or data.get("message_id") or ""
+        if echo_msg_id and echo_msg_id in self._sent_msg_ids:
+            self._sent_msg_ids.discard(echo_msg_id)
+            self._log_write("RECV_GROUP_IGNORED", {"reason": "self_echo", "group_id": group_id, "message_id": echo_msg_id})
             return
 
         # raw log
@@ -3250,12 +3289,11 @@ class AUNCli:
 
         # 非当前 target → 静默存储，不打印
         if not is_current:
-            if _silent:
-                self._log_write("RECV_GROUP_NOT_CURRENT", {
-                    "group_id": group_id,
-                    "target_id": self.target.get("id") if self.target else None,
-                    "target_type": self.target.get("type") if self.target else None,
-                })
+            self._log_write("RECV_GROUP_NOT_CURRENT", {
+                "group_id": group_id,
+                "target_id": self.target.get("id") if self.target else None,
+                "target_type": self.target.get("type") if self.target else None,
+            })
             msg_obj = data.get("message", data)
             msg_id = msg_obj.get("message_id") or f"grp_{group_id}_{sender_aid}_{int(time.time()*1000)}"
             self.store.save(
@@ -3983,7 +4021,7 @@ class AUNCli:
                 members = members_resp.get("members", [])
             online_aids: set[str] = set()
             if not isinstance(online_resp, Exception):
-                for item in (online_resp.get("items") or []):
+                for item in (online_resp.get("members") or []):
                     aid = item.get("aid", "")
                     if aid and item.get("online"):
                         online_aids.add(aid)
@@ -4009,8 +4047,8 @@ class AUNCli:
                 aid = m.get("aid", "?")
                 role = m.get("role", "member")
                 role_icon = {"owner": "👑", "admin": "⭐"}.get(role, "  ")
-                online_tag = " [在线]" if m.get("online") else ""
-                info(f"  {role_icon} {_short_name(aid)}  ({aid})  {role}{online_tag}")
+                online_tag = f" {C.BLUE}[在线]{C.RESET}" if m.get("online") else ""
+                info(f"  {role_icon} {_short_name(aid)}  {C.DIM}({aid}){C.RESET}{online_tag}")
             online_count = len(online_aids)
             info(f"共 {len(members)} 名成员，在线 {online_count} 人")
         except Exception as e:
@@ -4313,6 +4351,14 @@ class AUNCli:
         _save_config(cfg)
         state = "已开启" if self.debug_mode else "已关闭"
         info(f"debug 模式{state}")
+
+    def cmd_sdk_debug(self):
+        self.sdk_debug = not self.sdk_debug
+        cfg = _load_config()
+        cfg["sdk_debug"] = self.sdk_debug
+        _save_config(cfg)
+        state = "已开启" if self.sdk_debug else "已关闭"
+        info(f"SDK debug {state}（重连后生效）")
 
     def _open_log_file(self):
         """打开（或轮转到）当天的日志文件。"""
@@ -4654,6 +4700,7 @@ async def repl(c: AUNCli):
         enc  = "🔒 E2EE" if c.encrypt else "🔓 明文"
         rej  = f"明文⚠ {c.plaintext_recv}  " if c.plaintext_recv else ""
         dbg  = "  [DEBUG]" if c.debug_mode else ""
+        sdbg = "  [SDK_DBG]" if c.sdk_debug else ""
         log  = "  [LOG]" if c._log_enabled else ""
         # 未读计数
         unread_str = ""
@@ -4670,7 +4717,7 @@ async def repl(c: AUNCli):
                 unread_str = "  [" + " | ".join(parts) + "]"
         except Exception:
             pass
-        return HTML(f" <b>{conn}</b>  {me}  →  {tgt}  消息: {c.msg_count}  {rej}{enc}{dbg}{log}{unread_str}")
+        return HTML(f" <b>{conn}</b>  {me}  →  {tgt}  消息: {c.msg_count}  {rej}{enc}{dbg}{sdbg}{log}{unread_str}")
 
     session = PromptSession(
         completer=AUNCompleter(cli_ref=c),
@@ -4756,6 +4803,8 @@ async def repl(c: AUNCli):
                     info(f"收发模式: {mode}")
                 elif cmd == "debug":
                     c.cmd_debug()
+                elif cmd == "sdk_debug":
+                    c.cmd_sdk_debug()
                 elif cmd == "log":
                     c.cmd_log()
                 elif cmd == "history":

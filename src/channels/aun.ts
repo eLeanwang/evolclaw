@@ -109,14 +109,15 @@ export class AUNChannel {
     return new RegExp(`(^|\\s)@${escaped}(?=$|\\s|[.,!?;:，。！？；：]|[\\u4e00-\\u9fff])`).test(text);
   }
 
-  private stripTriggerMentions(text: string, selfAid?: string): string {
-    let result = text;
-    if (selfAid) {
-      const escapedAid = selfAid.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      result = result.replace(new RegExp(`(^|\\s)@${escapedAid}(?=$|\\s|[.,!?;:，。！？；：]|[\\u4e00-\\u9fff])`, 'g'), '$1');
-    }
-    result = result.replace(/(^|\s)@all(?=$|\s|[.,!?;:，。！？；：]|[\u4e00-\u9fff])/gi, '$1');
-    return result.replace(/[ \t]+/g, ' ').trim();
+  private stripSelfMentionIfOnly(text: string, selfAid?: string): string {
+    if (!selfAid) return text;
+    const mentions = text.match(/@[\w.-]+/g) || [];
+    if (mentions.length !== 1) return text;
+    const escapedAid = selfAid.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return text
+      .replace(new RegExp(`(^|\\s)@${escapedAid}(?=$|\\s|[.,!?;:，。！？；：]|[\\u4e00-\\u9fff])`, 'g'), '$1')
+      .replace(/[ \t]+/g, ' ')
+      .trim();
   }
 
   private buildGroupReplyContext(taskId: string | undefined, senderAid: string): ReplyContext {
@@ -471,7 +472,7 @@ export class AUNChannel {
       return;
     }
 
-    const strippedText = this.stripTriggerMentions(text, this._aid);
+    const strippedText = this.stripSelfMentionIfOnly(text, this._aid);
 
     // Detect attachments before the empty-text guard
     const rawAttachments: any[] = Array.isArray((payload as any)?.attachments)

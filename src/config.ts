@@ -249,7 +249,10 @@ export function normalizeChannelInstances<T extends { name?: string }>(
 ): (T & { name: string })[] {
   if (cfg === undefined || cfg === null) return [];
   if (Array.isArray(cfg)) {
-    return cfg as (T & { name: string })[];
+    return cfg.map((item, i) => ({
+      ...item,
+      name: item.name ?? (cfg.length === 1 ? defaultName : `${defaultName}-${i + 1}`),
+    })) as (T & { name: string })[];
   }
   return [{ ...cfg, name: cfg.name ?? defaultName } as T & { name: string }];
 }

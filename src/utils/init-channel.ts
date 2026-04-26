@@ -627,7 +627,7 @@ export async function cmdInitWechat(): Promise<void> {
 // ==================== AUN ====================
 
 // 最低 @eleans/aun-core-sdk 版本要求
-const MIN_AUN_CORE_SDK = [0, 2, 7] as const;
+const MIN_AUN_CORE_SDK = [0, 2, 9] as const;
 const AUN_CORE_SDK_PKG = '@eleans/aun-core-sdk';
 
 function compareVersion(a: string, min: readonly [number, number, number]): boolean {
