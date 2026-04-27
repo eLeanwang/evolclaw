@@ -860,7 +860,7 @@ export class AgentRunner {
 
     // 公共 options（新旧模式共用）
     const sdkPermissionMode = this.toSdkPermissionMode();
-    logger.info(`[AgentRunner] runQuery model=${this.model} effort=${this.effort ?? 'auto'} permMode=${this.permissionMode} sdkMode=${sdkPermissionMode}`);
+    logger.info(`[AgentRunner] runQuery model=${this.model} effort=${this.effort ?? 'auto'} permMode=${this.permissionMode} sdkMode=${sdkPermissionMode} systemPromptAppend=${systemPromptAppend ? systemPromptAppend.substring(0, 100) + '...' : 'none'}`);
     const commonOptions = {
       cwd: projectPath,
       model: this.model,

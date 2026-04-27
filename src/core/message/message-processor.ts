@@ -419,6 +419,7 @@ export class MessageProcessor {
         // 1. 当前环境信息
         const peerLabel = session.identity?.role || 'unknown';
         const peerName = message.peerName || session.metadata?.peerName;
+        const peerType = message.peerType;
         const envParts = [
           `会话通道: ${currentChannelType}`,
           `当前项目: ${path.basename(absoluteProjectPath)}`,
@@ -426,6 +427,7 @@ export class MessageProcessor {
         if (session.name) envParts.push(`会话名称: ${session.name}`);
         envParts.push(`对端身份: ${peerLabel}`);
         if (peerName) envParts.push(`对端名称: ${peerName}`);
+        if (peerType && peerType !== 'unknown') envParts.push(`对端类型: ${peerType}`);
         if (session.chatType) envParts.push(`聊天类型: ${session.chatType}`);
         if (session.agentId && session.agentId !== 'claude') envParts.push(`当前Agent: ${session.agentId}`);
         contextParts.push(`[当前环境] ${envParts.join(' | ')}`);
@@ -467,7 +469,10 @@ export class MessageProcessor {
 
         // 5. Agent ctl 自管理指令提示 + SKILLS.md 生成
         this.ensureSkillsFile(absoluteProjectPath);
-        contextParts.push(`[EvolClaw 自管理] 可通过 Bash 执行 \`evolclaw ctl <cmd>\` 管理运行时，详见 ${absoluteProjectPath}/.evolclaw/SKILLS.md`);
+        const skillsSummary = this.extractSkillsSummary(absoluteProjectPath);
+        if (skillsSummary) {
+          contextParts.push(`[EvolClaw 自管理] ${skillsSummary}`);
+        }
 
         const effectiveSystemPrompt = [options?.systemPromptAppend, ...contextParts].filter(Boolean).join('\n') || undefined;
 
@@ -1173,6 +1178,29 @@ export class MessageProcessor {
       fs.mkdirSync(targetDir, { recursive: true });
     }
     fs.writeFileSync(targetPath, templateContent, 'utf-8');
+  }
+
+  /**
+   * 从 SKILLS.md 提取 frontmatter 并生成简短提示
+   * 返回格式：可通过 Bash 执行 `evolclaw ctl <cmd>` 管理运行时：<description>。完整文档见 <path>
+   */
+  private extractSkillsSummary(projectPath: string): string | null {
+    try {
+      const skillsPath = path.join(projectPath, '.evolclaw', 'SKILLS.md');
+      if (!fs.existsSync(skillsPath)) return null;
+
+      const content = fs.readFileSync(skillsPath, 'utf-8');
+      const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---/);
+      if (!frontmatterMatch) return null;
+
+      const frontmatter = frontmatterMatch[1];
+      const descMatch = frontmatter.match(/^description:\s*(.+)$/m);
+      const description = descMatch ? descMatch[1].trim() : 'EvolClaw 运行时管理指令';
+
+      return `可通过 Bash 执行 \`evolclaw ctl <cmd>\` 管理运行时：${description}。完整文档见 ${skillsPath}`;
+    } catch {
+      return null;
+    }
   }
 
   /**

@@ -228,6 +228,7 @@ export interface Message {
   chatType?: 'private' | 'group';  // 由 Channel 层填充
   peerId: string;  // 发送者 ID
   peerName?: string;  // 发送者名称
+  peerType?: string;  // 对端类型 (human/ai/unknown)，由支持 agent.md 的渠道填充
   content: string;
   images?: Array<{ data: string; mimeType: string }>;
   mentions?: Array<{ userId: string; name?: string; key?: string }>;
@@ -245,6 +246,7 @@ export interface InboundMessage {
   chatType: 'private' | 'group';  // 由 Channel 层填充
   peerId: string;  // 发送者 ID
   peerName?: string;  // 发送者名称
+  peerType?: string;  // 对端类型 (human/ai/unknown)，由支持 agent.md 的渠道填充
   content: string;
   messageId?: string;
   images?: Array<{ data: string; mimeType: string }>;

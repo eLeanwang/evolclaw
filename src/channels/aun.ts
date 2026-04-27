@@ -46,6 +46,7 @@ export interface AUNMessageHandler {
     chatType: 'private' | 'group';
     peerId: string;
     peerName?: string;
+    peerType?: string;
     messageId?: string;
     threadId?: string;
     mentions?: Array<{ userId: string; name?: string }>;
@@ -450,7 +451,8 @@ export class AUNChannel {
       seq,
       taskId,
       mentions,
-      peerName: displayName ? `${displayName} (${peerInfo.type ?? 'unknown'})` : undefined,
+      peerName: displayName || undefined,
+      peerType: peerInfo.type || 'unknown',
     });
   }
 
@@ -534,7 +536,8 @@ export class AUNChannel {
     this.dispatchMessage({
       channelId: groupId,
       userId: senderAid,
-      peerName: displayName ? `${displayName} (${peerInfo.type ?? 'unknown'})` : undefined,
+      peerName: displayName || undefined,
+      peerType: peerInfo.type || 'unknown',
       text: finalText,
       chatType: 'group',
       messageId,
@@ -548,7 +551,7 @@ export class AUNChannel {
   private dispatchMessage(event: {
     channelId: string; userId: string; text: string;
     chatType: 'private' | 'group'; messageId: string;
-    peerName?: string;
+    peerName?: string; peerType?: string;
     seq?: number; taskId?: string; mentions?: string[];
     replyContext?: ReplyContext;
   }): void {
@@ -580,6 +583,7 @@ export class AUNChannel {
       chatType: event.chatType,
       peerId: event.userId || event.channelId || '',
       peerName: event.peerName,
+      peerType: event.peerType,
       messageId: event.messageId,
       threadId: event.taskId,
       mentions: mentionObjects,

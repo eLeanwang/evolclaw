@@ -674,6 +674,7 @@ def _get_keystore() -> "FileKeyStore":
 
 STYLE = Style.from_dict({
     "prompt":              "#ffff00 bold",
+    "":                    "#ffff00",
     "spinner":             "#888888 nobold",
     "bottom-toolbar":      "bg:#1a1a2e #aaaaaa",
     "validation-toolbar":  "bg:#1a1a2e #ff6666",
@@ -1680,6 +1681,7 @@ class AUNCli:
         self._menu_cached_at = 0        # 缓存写入时间（event loop time）
         self._menu_ttl = 300            # 缓存有效期（秒，默认 5 分钟）
         self._suppress_next = False     # silent send 时抑制下一条回复
+        self._seen_msg_ids = set()      # 内存级消息去重（防止 SDK 重复触发）
         self._raw_log = []              # rawdata 条目缓冲 (每条是一个 dict: {ts, data})
         self._raw_monitor_app = None    # 活跃的监控 Application 引用
         # 重连退避
@@ -2038,6 +2040,16 @@ class AUNCli:
     async def _on_message(self, data):
         if not isinstance(data, dict):
             return
+
+        # 内存级去重（比 DB 查询更快，覆盖 SDK 同步重复触发的竞争窗口）
+        msg_id = data.get("message_id")
+        if msg_id:
+            if msg_id in self._seen_msg_ids:
+                return
+            self._seen_msg_ids.add(msg_id)
+            if len(self._seen_msg_ids) > 500:
+                self._seen_msg_ids = set(list(self._seen_msg_ids)[-250:])
+
         from_aid = data.get("from", "?")
         if from_aid == self.my_aid:
             return
@@ -2123,12 +2135,6 @@ class AUNCli:
         # silent send 抑制回复（如 Ctrl+C 中断的 /stop 响应）
         if self._suppress_next:
             self._suppress_next = False
-            return
-
-        # 去重：本地已有的消息跳过显示（Gateway pull 重复推送）
-        # 未读消息已在 _show_unread() 切换 target 时批量展示
-        msg_id = data.get("message_id")
-        if msg_id and self.store.exists(msg_id):
             return
 
         # -s 模式：跟踪 seq，只接受 send 后新消息
@@ -3278,6 +3284,16 @@ class AUNCli:
         """处理群消息事件。"""
         if not isinstance(data, dict):
             return
+
+        # 内存级去重
+        raw_msg_id = (data.get("message", data) if isinstance(data.get("message"), dict) else data).get("message_id") or data.get("message_id")
+        if raw_msg_id:
+            if raw_msg_id in self._seen_msg_ids:
+                return
+            self._seen_msg_ids.add(raw_msg_id)
+            if len(self._seen_msg_ids) > 500:
+                self._seen_msg_ids = set(list(self._seen_msg_ids)[-250:])
+
         group_id = data.get("group_id", "")
         msg = data.get("message", data)  # SDK 解密后可能直接在 data 层
         sender_aid = msg.get("sender_aid", "?")

@@ -118,6 +118,7 @@ export class MessageBridge {
           chatType,
           images: msg.images, timestamp: Date.now(),
           peerId: msg.peerId, peerName: msg.peerName,
+          peerType: msg.peerType,
           messageId: msg.messageId,
           mentions: msg.mentions, threadId: msg.threadId,
           replyContext: msg.replyContext,
