@@ -434,9 +434,13 @@ export class CommandHandler {
           { cmd: '/stop', label: '中断当前任务' },
           { cmd: '/check', label: '检查渠道状态' },
           { cmd: '/activity', args: '[all|dm|owner|none]', label: '查看/控制中间输出显示模式' },
+          ...(isAdmin ? [
+            { cmd: '/restart', args: '<channel>', label: '重连指定渠道' },
+          ] : []),
           ...(isOwner ? [
             { cmd: '/restart', label: '重启服务' },
             { cmd: '/send', args: '[channel] <path>', label: '发送项目内文件' },
+            { cmd: '/agentmd', args: '[put|set <内容>]', label: '管理 agent.md' },
           ] : []),
         ]
       });
@@ -632,9 +636,13 @@ export class CommandHandler {
         '  /stop - 中断当前任务',
         '  /check - 检查渠道状态',
         '  /activity [all|dm|owner|none] - 查看/控制中间输出显示模式',
+        ...(isAdmin ? [
+          '  /restart <channel> - 重连指定渠道',
+        ] : []),
         ...(isOwner ? [
           '  /restart - 重启服务',
           '  /send [channel] <path> - 发送项目内文件',
+          '  /agentmd [put|set <内容>] - 管理 agent.md',
         ] : []),
         '',
         '❓ 帮助：',
@@ -767,7 +775,7 @@ export class CommandHandler {
     }
 
     // /agent 命令：查看或切换 Agent 后端
-    if (normalizedContent.startsWith('/agent')) {
+    if (normalizedContent === '/agent' || normalizedContent.startsWith('/agent ')) {
       // 群聊中 owner only，私聊中 admin+
       if (activeChatType === 'group' ? !isOwner : !isAdmin) return '❌ 无权限：此命令仅限管理员使用';
       const args = normalizedContent.slice(6).trim();
@@ -1533,25 +1541,6 @@ export class CommandHandler {
     if (normalizedContent === '/check' || normalizedContent.startsWith('/check ')) {
       const subCmd = normalizedContent.slice('/check'.length).trim();
 
-      // /check rty <channel> — 重连指定渠道（admin only）
-      if (subCmd.startsWith('rty')) {
-        if (!isAdmin) return '❌ 无权限：渠道重连仅限管理员使用';
-        const target = subCmd.slice('rty'.length).trim();
-        if (!target) {
-          return '❌ 请指定渠道名称，例如：/check rty feishu';
-        }
-        const ch = this.channelObjects.get(target);
-        if (!ch) {
-          const available = [...this.channelObjects.keys()].join(', ') || '无';
-          return `❌ 未找到渠道 "${target}"，可用渠道：${available}`;
-        }
-        if (!ch.reconnect) {
-          return `❌ 渠道 "${target}" 不支持重连`;
-        }
-        const result = await ch.reconnect();
-        return `🔄 ${target} 重连: ${result}`;
-      }
-
       // Default: show system health check (non-admin 仅看摘要)
       const lines: string[] = ['📡 渠道状态：'];
       // Group by channelType
@@ -1622,13 +1611,31 @@ export class CommandHandler {
         }
       }
 
-      lines.push('', '💡 /check rty <channel> — 重连指定渠道');
       return lines.join('\n');
     }
 
-    // /restart 命令：重启服务（owner only）
-    if (normalizedContent === '/restart') {
-      if (!isOwner) return '❌ 无权限：此命令仅限 owner 使用';
+    // /restart 命令：重启服务（owner only） / 重连指定渠道（admin+）
+    if (normalizedContent === '/restart' || normalizedContent.startsWith('/restart ')) {
+      const restartArg = normalizedContent.slice('/restart'.length).trim();
+
+      // /restart <channel> — 重连指定渠道（admin only）
+      if (restartArg) {
+        if (!isAdmin) return '❌ 无权限：渠道重连仅限管理员使用';
+        const target = restartArg;
+        const ch = this.channelObjects.get(target);
+        if (!ch) {
+          const available = [...this.channelObjects.keys()].join(', ') || '无';
+          return `❌ 未找到渠道 "${target}"，可用渠道：${available}`;
+        }
+        if (!ch.reconnect) {
+          return `❌ 渠道 "${target}" 不支持重连`;
+        }
+        const result = await ch.reconnect();
+        return `🔄 ${target} 重连: ${result}`;
+      }
+
+      // /restart（无参数）— 重启整个服务（owner only）
+      if (!isOwner) return '❌ 无权限：服务重启仅限 owner 使用';
       const allSessions = await this.sessionManager.listSessions(channel, channelId);
       const sessionsWithMessages = allSessions
         .filter(s => this.messageCache.hasMessages(s.id))
@@ -2762,7 +2769,7 @@ export class CommandHandler {
   private static readonly CTL_COMMANDS = [
     '/help', '/status', '/check',
     '/model', '/effort', '/perm',
-    '/compact', '/activity', '/send', '/restart',
+    '/compact', '/activity', '/send', '/restart', '/agentmd',
   ];
 
   /**

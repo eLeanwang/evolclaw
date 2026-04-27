@@ -12,7 +12,7 @@ import { EventBus } from '../event-bus.js';
 import { summarizeToolInput } from '../permission.js';
 import type { Message, Config, Session, ChannelAdapter, ChannelOptions, ChannelPolicy, CommandHandler } from '../../types.js';
 import { getOwner } from '../../config.js';
-import { getPackageRoot } from '../../paths.js';
+import { getPackageRoot, resolveRoot } from '../../paths.js';
 import type { InteractionRouter } from '../interaction-router.js';
 
 /**
@@ -29,6 +29,8 @@ export class MessageProcessor {
   private interruptedSessions = new Map<string, string>();  // sessionId → reason ('new_message' | 'stop' | ...)
   private interactionRouter?: InteractionRouter;
   private messageQueue?: MessageQueue;
+  private skillsHintDesc: string | null | undefined = undefined; // undefined=未加载, null=无模板, string=缓存描述
+  private skillsEnsured = false; // 全局 SKILLS.md 是否已确保
 
   /** 按 agentId 获取 agent，回退到默认 */
   getAgent(agentId?: string): AgentRunnerFull {
@@ -468,10 +470,13 @@ export class MessageProcessor {
         }
 
         // 5. Agent ctl 自管理指令提示 + SKILLS.md 生成
-        this.ensureSkillsFile(absoluteProjectPath);
-        const skillsSummary = this.extractSkillsSummary(absoluteProjectPath);
-        if (skillsSummary) {
-          contextParts.push(`[EvolClaw 自管理] ${skillsSummary}`);
+        if (!this.skillsEnsured) {
+          this.ensureSkillsFile();
+          this.skillsEnsured = true;
+        }
+        const skillsHint = this.getSkillsHint();
+        if (skillsHint) {
+          contextParts.push(`[EvolClaw 自管理] ${skillsHint}`);
         }
 
         const effectiveSystemPrompt = [options?.systemPromptAppend, ...contextParts].filter(Boolean).join('\n') || undefined;
@@ -1139,12 +1144,12 @@ export class MessageProcessor {
   }
 
   /**
-   * 确保项目目录下有最新版本的 SKILLS.md
-   * 从 src/templates/skills.md 模板复制，按版本号判断是否需要更新
+   * 确保全局数据目录下有最新版本的 SKILLS.md
+   * 目标：{EVOLCLAW_HOME}/data/SKILLS.md
    */
-  private ensureSkillsFile(projectPath: string): void {
+  private ensureSkillsFile(): void {
     try {
-      const targetDir = path.join(projectPath, '.evolclaw');
+      const targetDir = path.join(resolveRoot(), 'data');
       const targetPath = path.join(targetDir, 'SKILLS.md');
       const templatePath = path.join(getPackageRoot(), 'src', 'templates', 'skills.md');
 
@@ -1164,14 +1169,12 @@ export class MessageProcessor {
 
   private copySkillsIfNeeded(templatePath: string, targetDir: string, targetPath: string): void {
     const templateContent = fs.readFileSync(templatePath, 'utf-8');
-    const versionMatch = templateContent.match(/^version:\s*(\d+)/m);
-    const templateVersion = versionMatch ? parseInt(versionMatch[1], 10) : 0;
+    const templateVersion = templateContent.match(/^version:\s*(.+)$/m)?.[1]?.trim() || '0';
 
     if (fs.existsSync(targetPath)) {
       const existing = fs.readFileSync(targetPath, 'utf-8');
-      const existingMatch = existing.match(/^version:\s*(\d+)/m);
-      const existingVersion = existingMatch ? parseInt(existingMatch[1], 10) : 0;
-      if (existingVersion >= templateVersion) return; // 已是最新
+      const existingVersion = existing.match(/^version:\s*(.+)$/m)?.[1]?.trim() || '0';
+      if (this.compareSemver(existingVersion, templateVersion) >= 0) return; // 已是最新
     }
 
     if (!fs.existsSync(targetDir)) {
@@ -1180,24 +1183,57 @@ export class MessageProcessor {
     fs.writeFileSync(targetPath, templateContent, 'utf-8');
   }
 
+  /** 简易 semver 比较：支持 "1", "1.0", "1.0.0" 等格式，返回 -1/0/1 */
+  private compareSemver(a: string, b: string): number {
+    const pa = a.split('.').map(Number);
+    const pb = b.split('.').map(Number);
+    const len = Math.max(pa.length, pb.length);
+    for (let i = 0; i < len; i++) {
+      const na = pa[i] || 0;
+      const nb = pb[i] || 0;
+      if (na !== nb) return na > nb ? 1 : -1;
+    }
+    return 0;
+  }
+
   /**
-   * 从 SKILLS.md 提取 frontmatter 并生成简短提示
-   * 返回格式：可通过 Bash 执行 `evolclaw ctl <cmd>` 管理运行时：<description>。完整文档见 <path>
+   * 从模板 frontmatter 缓存提示（懒加载，整个进程只读一次模板文件）
    */
-  private extractSkillsSummary(projectPath: string): string | null {
+  private getSkillsHint(): string | null {
+    if (this.skillsHintDesc === undefined) {
+      this.skillsHintDesc = this.loadSkillsHint();
+    }
+    return this.skillsHintDesc;
+  }
+
+  /**
+   * 从包模板源读取 frontmatter 并生成提示（仅执行一次）
+   */
+  private loadSkillsHint(): string | null {
     try {
-      const skillsPath = path.join(projectPath, '.evolclaw', 'SKILLS.md');
-      if (!fs.existsSync(skillsPath)) return null;
+      const candidates = [
+        path.join(getPackageRoot(), 'src', 'templates', 'skills.md'),
+        path.join(getPackageRoot(), 'dist', 'templates', 'skills.md'),
+      ];
+      for (const templatePath of candidates) {
+        if (!fs.existsSync(templatePath)) continue;
+        const content = fs.readFileSync(templatePath, 'utf-8');
+        const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---/);
+        if (!frontmatterMatch) continue;
 
-      const content = fs.readFileSync(skillsPath, 'utf-8');
-      const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---/);
-      if (!frontmatterMatch) return null;
+        const fm = frontmatterMatch[1];
+        const desc = fm.match(/^description:\s*(.+)$/m)?.[1]?.trim() || 'EvolClaw 运行时管理指令';
+        const trigger = fm.match(/^trigger:\s*(.+)$/m)?.[1]?.trim() || '';
 
-      const frontmatter = frontmatterMatch[1];
-      const descMatch = frontmatter.match(/^description:\s*(.+)$/m);
-      const description = descMatch ? descMatch[1].trim() : 'EvolClaw 运行时管理指令';
-
-      return `可通过 Bash 执行 \`evolclaw ctl <cmd>\` 管理运行时：${description}。完整文档见 ${skillsPath}`;
+        const skillsPath = path.join(resolveRoot(), 'data', 'SKILLS.md');
+        const parts = [
+          `可通过 Bash 执行 \`evolclaw ctl <cmd>\` 管理运行时：${desc}`,
+          trigger ? `触发时机：${trigger}` : '',
+          `完整文档见 ${skillsPath}`,
+        ];
+        return parts.filter(Boolean).join('\n');
+      }
+      return null;
     } catch {
       return null;
     }

@@ -1037,7 +1037,6 @@ export class AUNChannelPlugin implements ChannelPlugin {
         uploadAgentMd: (content: string) => channel.uploadAgentMd(content),
         downloadAgentMd: (aid: string) => channel.downloadAgentMd(aid),
         _selfAid: () => channel.getStatus().aid,
-        _agentMdContent: inst.agentMd?.content ?? '',
       };
 
       const policy = {
