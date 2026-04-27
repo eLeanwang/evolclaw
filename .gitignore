@@ -34,7 +34,6 @@ projects/
 .evolclaw/
 
 # 测试文件
-tests/
 test-*.js
 test-*.ts
 

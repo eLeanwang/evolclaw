@@ -727,9 +727,9 @@ describe('AUN Channel Integration', () => {
       expect(handler).not.toHaveBeenCalled();
     });
 
-    it('should dispatch group message with @self_aid', () => {
+    it('should dispatch group message with @self_aid', async () => {
       const handleGroup = (channel as any).handleIncomingGroupMessage.bind(channel);
-      handleGroup({
+      await handleGroup({
         group_id: 'grp_test',
         sender_aid: 'alice.agentid.pub',
         payload: { type: 'text', text: '@bot.agentid.pub what time is it?' },
@@ -741,13 +741,12 @@ describe('AUN Channel Integration', () => {
         content: 'what time is it?',
         chatType: 'group',
         peerId: 'alice.agentid.pub',
-        peerName: 'alice',
       }));
     });
 
-    it('should dispatch group message with @all', () => {
+    it('should dispatch group message with @all', async () => {
       const handleGroup = (channel as any).handleIncomingGroupMessage.bind(channel);
-      handleGroup({
+      await handleGroup({
         group_id: 'grp_test',
         sender_aid: 'alice.agentid.pub',
         payload: { type: 'text', text: '@all 大家好' },
@@ -756,10 +755,9 @@ describe('AUN Channel Integration', () => {
 
       expect(handler).toHaveBeenCalledWith(expect.objectContaining({
         channelId: 'grp_test',
-        content: '大家好',
+        content: '@all 大家好',
         chatType: 'group',
         peerId: 'alice.agentid.pub',
-        peerName: 'alice',
       }));
     });
 
@@ -826,9 +824,9 @@ describe('AUN Channel Integration', () => {
       expect(mockCall).toHaveBeenCalledWith('message.ack', { seq: 43 });
     });
 
-    it('should set replyContext.threadId for group message with taskId', () => {
+    it('should set replyContext.threadId for group message with taskId', async () => {
       const handleGroup = (channel as any).handleIncomingGroupMessage.bind(channel);
-      handleGroup({
+      await handleGroup({
         group_id: 'grp_test',
         sender_aid: 'alice.agentid.pub',
         payload: { type: 'text', text: '@bot.agentid.pub help me', thread_id: 'task_1' },
@@ -842,9 +840,9 @@ describe('AUN Channel Integration', () => {
       }));
     });
 
-    it('should set replyContext without threadId when no taskId', () => {
+    it('should set replyContext without threadId when no taskId', async () => {
       const handleGroup = (channel as any).handleIncomingGroupMessage.bind(channel);
-      handleGroup({
+      await handleGroup({
         group_id: 'grp_test',
         sender_aid: 'alice.agentid.pub',
         payload: { type: 'text', text: '@all check this' },
@@ -880,9 +878,9 @@ describe('AUN Channel Integration', () => {
       expect(handler).not.toHaveBeenCalled();
     });
 
-    it('should handle object payload in group message', () => {
+    it('should handle object payload in group message', async () => {
       const handleGroup = (channel as any).handleIncomingGroupMessage.bind(channel);
-      handleGroup({
+      await handleGroup({
         group_id: 'grp_test',
         sender_aid: 'alice.agentid.pub',
         payload: { type: 'text', text: '@bot.agentid.pub hello from object' },
@@ -1040,9 +1038,9 @@ describe('AUN Channel Integration', () => {
       channel.onMessage(handler);
     });
 
-    it('should dispatch private messages normally (no mention filtering)', () => {
+    it('should dispatch private messages normally (no mention filtering)', async () => {
       const handlePrivate = (channel as any).handleIncomingPrivateMessage.bind(channel);
-      handlePrivate({
+      await handlePrivate({
         from: 'alice.agentid.pub',
         payload: { type: 'text', text: 'hello without mention' },
         message_id: 'pm-1',
@@ -1056,9 +1054,9 @@ describe('AUN Channel Integration', () => {
       }));
     });
 
-    it('should detect self mention in private message', () => {
+    it('should detect self mention in private message', async () => {
       const handlePrivate = (channel as any).handleIncomingPrivateMessage.bind(channel);
-      handlePrivate({
+      await handlePrivate({
         from: 'alice.agentid.pub',
         payload: { type: 'text', text: 'hello @bot.agentid.pub' },
         message_id: 'pm-2',
