@@ -1,5 +1,42 @@
 # Changelog
 
+## v2.5.0 (2026-04-28)
+
+### New Features
+
+- **DingTalk channel** — 钉钉 Stream 模式集成，支持文本/图片/文件收发，自动去重，Markdown 转纯文本
+- **QQBot channel** — QQ 频道机器人集成（pure-qqbot SDK），支持文本/图片/文件收发，自动去重
+- **WeCom channel** — 企业微信 AI Bot 集成，完整 channel plugin 支持（624 行，`evolclaw init wecom` 配置）
+- **Agent self-management (ctl)** — Agent 可通过 `evolclaw ctl <cmd>` 管理运行时：切换模型、调整推理强度、查看状态、压缩上下文、管理权限、发送文件、重启渠道。命令白名单 + 路径沙箱保护
+- **Session rewind** — `/rewind <turn>` 回退会话到指定轮次，支持文件快照恢复（dryRun 预览 + 实际回退）
+- **Admin role** — 新增 admin 角色（owner 之下），支持分级权限控制（user/admin/owner）
+- **AUN file attachments** — AUN 私聊/群聊支持文件附件收发，SHA256 校验，自动下载到项目 `.evolclaw/uploads/`
+- **AUN protocol v2** — 结构化 payload 格式 `{type, text, thread_id}` 替代扁平 text+task_id；事件化处理状态；通过 agent.md 解析 peer info（30min TTL 缓存）
+- **`/agentmd` command** — 查看、发布、管理 AUN 网络上的 agent.md（`/agentmd`、`/agentmd put`、`/agentmd set <内容>`）
+- **Message recall → interrupt** — 撤回消息现在会中断正在执行的任务（所有渠道，不仅飞书）
+- **AskUserQuestion action cards** — 问题卡片从表单模式升级为 action card（按钮模式），已解决卡片保留正文
+
+### Improvements
+
+- **Permission refinements** — `/check` 提升为 user 级（guest 看摘要，admin 看详情）；`/activity` 查看降为 admin（切换仍需 owner）；`/restart <channel>` 重连渠道（admin+），`/restart` 重启服务（owner only）
+- **SKILLS.md global placement** — 从项目级 `.evolclaw/` 迁移到全局 `{EVOLCLAW_HOME}/data/SKILLS.md`，懒加载 + semver 版本管理 + trigger 字段提供更好的 agent 上下文
+- **AUN peer info display** — `peerType` 字段独立于 `peerName`（不再是 "name (type)" 格式）；仅在 peerType 非 'unknown' 时显示到系统提示
+- **System prompt optimization** — 提取 SKILLS.md frontmatter description 生成简洁 ctl 提示；记录 systemPromptAppend 预览（前 100 字符）
+- **AUN SDK upgrades** — 升级到 aun-core 0.2.9，强化群聊回声去重 + SDK 兼容性；well-known discovery 用于网关 URL 解析
+- **AUN CLI enhancements** — 静默模式（`-s`）、文件管理（`//sendfile`、`//history`）、群组管理（`//qid`）、AID 快速切换（`//aid`）
+- **Post-interrupt error suppression** — 用户主动中断后的 SDK telemetry 噪音不再记录为错误
+- **`/rewind` improvements** — DryRun 预览 + 实际回退，改进日志和错误消息
+- **Dynamic error handling** — 运行时错误字典（`data/error-dict.json`），支持热更新和模式匹配
+
+### Bug Fixes
+
+- **AUN CLI unread count** — 切换目标时自动 mark_read；自动补全中隐藏当前目标未读数；移除底部工具栏冗余未读计数
+- **AUN CLI message dedup** — 内存级去重（500 条 LRU 缓存）防止 SDK 重复触发竞争窗口
+- **AUN tests async** — 群聊/私聊消息处理测试加 async/await（fetchPeerInfo 是异步的）
+- **Tests version control** — 从 `.gitignore` 移除 `tests/`（测试应纳入版本控制）
+
+---
+
 ## v2.4.0 (2026-04-18)
 
 ### New Features
@@ -48,177 +85,3 @@
 - **Reply quote precision** — StreamFlusher 仅在含真实文字时消费 replyToMessageId，避免纯工具活动消息占用引用
 - **InteractionRouter** — 通用交互路由器，管理卡片回调注册、超时清理、会话级取消
 - **Channel routing refactor** — session.channel 存储实例名（非渠道类型），多实例场景精确路由
-- **Config auto-recovery** — 配置文件丢失时自动从备份恢复（`evolclaw.backup.json` → timestamped → sample）
-- **AUN trace logging** — 可选数据追踪日志（`debug.aunTrace`），记录所有收发数据
-- **AUN SDK payload update** — payload 格式从字符串升级为对象（适配 SDK 0.3.0 E2EE）
-- **Process isolation** — `EVOLCLAW_HOME` 级别进程隔离，orphan cleanup 不再误杀其他实例
-- **Local timestamps** — 日志时间戳使用本地时间（替代 UTC ISO 格式）
-- **Source directory reorganization** — `src/core/message/`、`src/core/session/` 子目录结构
-
-### Bug Fixes
-
-- **Codex session persistence** — 修复 Codex 会话 ID 未正确持久化的问题
-- **Startup warnings** — 消除启动时的冗余日志和警告
-- **Error classification** — 新增 "is not valid JSON" API 错误模式（算力池切换场景）
-- **`/new` session reset** — 创建新会话时正确清理后端状态（`clearSession`）
-- **Self-heal test skip** — 测试环境跳过 self-heal 流程，避免误触 `claude -p`
-
-### Removals
-
-- **Hermes backend archived** — 移除 `hermes-runner.ts`、`hermes-session-file-adapter.ts` 和配置解析器
-
----
-
-## v2.2.0 (2026-04-09)
-
-### New Features
-
-- **Multi-agent backend** — Claude + Codex dual-agent support with adapter pattern, per-session agent routing
-- **AUN channel** — full sidecar-based AUN mesh network channel with auto-reconnect, health monitoring, and `evolclaw init aun` setup wizard
-- **Rich content rendering** — LaTeX formula (KaTeX) and Mermaid diagram rendering to PNG images
-- **`/check` dashboard** — config integrity validation, stats collector, system health at a glance
-- **`/send` command** — cross-channel file send with `[SEND_FILE:]` marker
-- **Message recall** — recall/unsend support with FIFO greedy merge
-- **Feishu image extraction** — extract images from rich-text (post) messages and pass to Agent
-- **Processing status & menu system** — visual processing indicators, interactive menu for commands
-- **Project migration** — `evolclaw migrate` command for upgrading project structures
-- **IPC status server** — Unix socket daemon status query from CLI
-
-### Improvements
-
-- **Plugin architecture** — agents and channels loaded via plugin system
-- **Event bus** — decoupled internal event routing
-- **Permission gateway** — tiered permission enforcement refactored as middleware
-- **Outbound architecture** — optimized message stream with StreamFlusher per-channel `flushDelay`
-- **Group chat FIFO queue** — debounce ceiling and command idle check for group scenarios
-- **Persistent processing state** — restart recovery for in-flight messages
-- **AUN SDK core** — multi-language reference implementation (Go/JS/Python/TS) added to repository
-
-### Bug Fixes
-
-- **`/status` output** — cleaner display, backfill peerId for legacy private sessions
-- **`/stop` interrupt** — publish interrupt event correctly on `/stop` command
-- **Feishu isEnabled** — require credentials before marking channel enabled
-- **`/model` write-back** — persist model changes to correct config source
-- **Thread message leak** — prevent thread messages from leaking to Agent SDK after restart
-- **Session agentId** — preserve agentId when creating new sessions
-- **Test compatibility** — skip rich-content-renderer tests when optional deps not installed
-
----
-
-## v2.1.1 (2026-03-30)
-
-### New Features
-
-- **`/model` effort support** — display and switch model reasoning strength (effort)
-  - Syntax: `/model` (show current), `/model <model>`, `/model <effort>`, `/model <model> <effort>`, `/model auto`
-  - Visual effort indicator: `low ◆◇◇◇`, `medium ◆◆◇◇`, `high ◆◆◆◇`, `max ◆◆◆◆`
-  - `max` effort restricted to Opus models only
-  - `auto` clears effort setting, letting SDK decide
-- **`/del` command** — unbind a session without deleting conversation files
-  - Removes session from database while preserving `.claude/` JSONL files
-  - Cannot delete the currently active session
-- **`/fork` in threads** — fork now works correctly inside Feishu threads
-
-### Improvements
-
-- **Settings write target** — `/model` writes to `~/.claude/settings.json` (user-level), matching Claude CLI behavior
-- **Runtime config sync** — model/effort synced from `~/.claude/settings.json` on every query (picks up CLI changes)
-- **Config fallback chain** — `evolclaw.json → ~/.claude/settings.json → defaults` for model and effort
-- **Thread session tags** — `/slist` shows `[话题]` tag for thread sessions
-- **Empty session hint** — `/slist` shows `(空)` for sessions with no conversation history
-
-### Bug Fixes
-
-- **flushDelay double-conversion** — config value in seconds was multiplied by 1000 twice
-- **Thread routing for `/compact`** — compact notifications now route to the correct thread
-- **Session switch protection** — block cross-context session switching (main ↔ thread)
-- **Context limit detection** — SDK throws `"Prompt is too long"` but `classifyError` didn't match it, causing auto-compact to never trigger. Added `prompt is too long` and `context limit` patterns
-- **CLI session import** — `importCliSession` now reads session title from JSONL file and always creates a new session record
-
----
-
-## v2.1.0 (2026-03-27)
-
-### New Features
-
-- **Feishu thread (话题) support** — threads create independent sessions with isolated conversation context
-  - Each thread gets its own session (inherits project from main session)
-  - Thread sessions run in parallel via `session.id` as queue key
-  - Thread-creating message carries quoted content from the original message
-  - Thread reply routing: all responses use `reply_in_thread` API
-  - Thread command blocking: `/new`, `/slist`, `/fork` etc. disabled in threads
-- **Database schema upgrade** — new fields for thread and multi-agent support
-  - `thread_id` with partial unique index for thread session isolation
-  - `agent_type` / `agent_session_id` (renamed from `claude_session_id`) for future multi-agent support
-  - `metadata` JSON field for extensible per-session data (e.g. Feishu `rootId`)
-  - Automatic migration preserves existing data
-- **Feishu MessageHandler refactor** — 9 positional parameters replaced with `MessageHandlerOptions` interface
-- **`/stop` accuracy** — now a quick command with `hasActiveStream()` check, no longer misreports "no active task"
-
-### Bug Fixes
-
-- **Thread command routing** — `/status`, `/help`, `/clear`, `/safe` responses now go to the thread, not main chat
-- **Safe mode in threads** — notifications route to thread; hint uses `/clear` instead of `/new`
-- **`/restart` in threads** — success notification replies in-thread via saved `rootId`
-- **`/stop` in threads** — uses `session.id` as queue key to match thread message routing
-- **`backupClaudeDir` EINVAL** — backup to sibling directory instead of inside `.claude` (self-copy error)
-- **Thread quote detection** — DB-backed `hasThreadSession()` replaces in-memory Set (survives restarts)
-- **Background task detection** — `isBackgroundSession()` helper consolidates 4 duplicate checks; thread sessions never flagged as background
-
-### Code Quality
-
-- Extract `isBackgroundSession()` helper in message-processor (replaces 4 duplicated blocks)
-- Extract `getOrCreateThreadSession()` private method in session-manager
-- Extract `getThreadSendOpts()` helper for consistent thread reply routing
-- Add `AgentRunner.hasActiveStream()` for stream state inspection
-- Pass `threadId` through `CommandHandler` type signature and all call sites
-- Thread command blocking centralized in `CommandHandler.handle()`
-
----
-
-**Full diff**: 31 files changed, +1973 / -411 lines
-
-## v2.0.7 (2026-03-26)
-
-### Bug Fixes
-
-- **Session turn count accuracy** — `/status` now shows only real user input turns, excluding auto-generated `tool_result` messages
-- **Windows path encoding** — `encodePath()` strips colons from drive letters to match Claude SDK convention
-
-## v2.0.6 (2026-03-26)
-
-### New Features
-
-- **Full Windows compatibility** — EvolClaw now runs natively on Windows (PowerShell / CMD / Git Bash)
-  - `getPackageRoot()` uses `import.meta.dirname` to avoid MSYS2 path translation issues
-  - CLI entry point detection uses `pathToFileURL` for cross-platform correctness
-  - `cleanEnv()` preserves `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL` (only clears nesting markers)
-  - `checkReady()` prioritizes ready-signal detection to avoid false startup failures on Windows
-  - `init` script provides user-friendly permission error messages instead of calling `sudo`
-  - `EVOLCLAW_HOME` set via `setx` on Windows (shell profile on Unix)
-  - SQLite `ExperimentalWarning` suppressed in all CLI commands and child processes
-- **WeChat CDN media download** — image, file, and video messages are now downloaded from WeChat CDN with AES-ECB decryption
-- **Feishu @mention extraction** — `@` mentions are parsed and passed through to the Agent instead of being stripped
-
-### Bug Fixes
-
-- **WeChat token validation** — skip placeholder tokens during startup validation
-- **SEND_FILE false positives** — filter out illustrative `[SEND_FILE:...]` markers in explanatory text
-- **Feishu table rendering** — markdown tables now converted to structured Feishu card format
-- **Quoted file download** — download actual file content for quoted file messages instead of showing placeholder
-- **CLI session access** — restrict admin commands to owner only, non-admin users see simplified `/status` and `/help`
-
-### Code Quality
-
-- Deduplicate `init.ts`: reuse `isWindows` and `commandExists` from `platform.ts`
-- Reuse `platform.isMainScript()` for CLI entry point detection
-- Add `platform.ts` with cross-platform process management
-
-### Breaking Changes
-
-None.
-
----
-
-**Full diff**: 18 files changed, +1001 / -174 lines

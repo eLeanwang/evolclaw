@@ -2,7 +2,7 @@
 
 > AI Agent 统一网关 —— 连接 IM、终端、Agent 网络
 
-EvolClaw 是一个轻量级 AI Agent 网关系统。它为 Claude Code / Codex 等 AI Agent 提供统一接入层，支持飞书、微信、AUN Mesh 网络和终端 TUI 四种通道。人类可以通过手机 IM 随时接力开发，其他 Agent 也可以通过 AUN 网络直接调用你的 Agent —— 不只是人机交互，也是 Agent 间协作的基础设施。
+EvolClaw 是一个轻量级 AI Agent 网关系统。它为 Claude Code / Codex 等 Coding Agent 提供统一接入层，使其作为通用基座 Agent，接入到飞书、微信、钉钉、QQ频道、企业微信等多种 IM 通道，以及 AUN 多智能体网络。人类可以通过手机 IM 随时接力开发，其他 Agent 也可以通过 AUN 网络直接调用你的 Agent —— 不只是人机交互，也是 Agent 间协作的基础设施。
 
 ## 核心特性
 
@@ -11,10 +11,11 @@ EvolClaw 是一个轻量级 AI Agent 网关系统。它为 Claude Code / Codex �
 - 🚀 **轻量化设计**：进程模式运行，CLI 命令行管理，无端口开放，无容器依赖，无 UI 界面
 - 📁 **多项目支持**：每个项目独立会话，支持动态切换
 - 👥 **双模式会话**：多用户私聊会话隔离，群聊会话共享，满足不同协作场景
-- 🌐 **多渠道接入**：Channel Adapter 模式，飞书 + 微信 + AUN Mesh 网络，扫码一键接入
+- 🌐 **多渠道接入**：Channel Adapter 模式，飞书 + 微信 + 钉钉 + QQ频道 + 企业微信 + AUN 网络
 - 🤖 **Agent 间互联**：通过 AUN 网络，你的 Agent 可被其他 Agent 发现和调用
 - 🖥️ **终端 TUI 客户端**：`evolclaw tui` 直接在终端与远程 Agent 对话，无需 IM
-- 🔐 **分层权限**：用户级/管理员级命令分离，多用户安全隔离
+- 🔐 **分层权限**：三级权限体系（user/admin/owner），多用户安全隔离
+- 🛠️ **Agent 自管理**：Agent 可通过 CLI 命令自主管理运行时（查看状态、切换模型、调整配置等）
 - 📦 **项目搬家**：`evolclaw mv` 一键迁移项目目录，保留 Claude/Codex/EvolClaw 全部会话历史
 - 💾 **会话持久化**：会话数据与 CLI 工具共享，不额外存储，服务重启不丢失
 - ⚡ **执行中插入**：任务执行中可发送新消息，自动中断当前任务并处理新请求
@@ -38,7 +39,7 @@ EvolClaw 是一个轻量级 AI Agent 网关系统。它为 Claude Code / Codex �
 
 ### 核心组件
 
-1. **消息渠道层** (`src/channels/`) - Feishu WebSocket + WeChat HTTP 长轮询 + AUN Mesh 网络
+1. **消息渠道层** (`src/channels/`) - Feishu + WeChat + DingTalk + QQBot + WeCom + AUN 网络
 2. **消息队列层** (`src/core/message/message-queue.ts`) - 会话级串行处理 + 中断支持
 3. **命令处理层** (`src/core/command-handler.ts`) - 斜杠命令处理（CommandHandler 类）
 4. **消息处理层** (`src/core/message/message-processor.ts`) - 统一事件处理引擎
@@ -110,6 +111,15 @@ evolclaw init feishu
 
 # 单独配置微信（扫码登录）
 evolclaw init wechat
+
+# 单独配置钉钉（扫码登录）
+evolclaw init dingtalk
+
+# 单独配置 QQ 频道（扫码登录）
+evolclaw init qqbot
+
+# 单独配置企业微信（手动输入 Bot ID + Secret）
+evolclaw init wecom
 
 # 单独配置 AUN（Mesh 网络通道）
 evolclaw init aun
@@ -193,6 +203,9 @@ evolclaw/
 │   ├── channels/
 │   │   ├── feishu.ts               # 飞书 WebSocket 渠道
 │   │   ├── wechat.ts               # 微信 ClawBot 渠道
+│   │   ├── dingtalk.ts             # 钉钉 Stream 渠道
+│   │   ├── qqbot.ts                # QQ 频道渠道
+│   │   ├── wecom.ts                # 企业微信 AI Bot 渠道
 │   │   └── aun.ts                  # AUN Mesh 网络渠道
 │   ├── utils/                      # 工具函数
 │   ├── types.ts                    # 类型定义
@@ -219,9 +232,10 @@ evolclaw/
 - `/name <新名称>` - 重命名当前会话
 - `/del <名称>` - 删除指定会话（仅解绑，不删除文件）
 - `/status` - 显示会话状态
+- `/check` - 系统健康检查（摘要）
 - `/help` - 显示所有命令
 
-### 管理员级命令（仅 Owner 可用）
+### 管理员级命令（Admin+ 可用）
 
 **项目管理**：
 - `/pwd` - 显示当前项目路径
@@ -238,32 +252,37 @@ evolclaw/
 **系统管理**：
 - `/clear` - 清空对话历史
 - `/compact` - 压缩会话上下文
+- `/rewind <turn>` - 回退会话到指定轮次
 - `/stop` - 中断当前任务
+- `/check` - 系统健康检查（详情）
+- `/activity [all|dm|owner|none]` - 查看/控制中间输出显示模式
+- `/restart <channel>` - 重连指定渠道
+
+### Owner 专属命令
+
 - `/send <文件路径>` - 发送文件给用户
-- `/check` - 系统健康检查面板
 - `/restart` - 重启服务（自愈机制）
 - `/repair` - 检查并修复会话
-- `/safe` - 进入安全模式
+- `/agentmd [put|set]` - 管理 AUN agent.md（仅 AUN 渠道）
 
 ## 技术栈
 
 - **运行时**：Node.js >= 22 + TypeScript（ES modules）
 - **AI SDK**：@anthropic-ai/claude-agent-sdk >= 0.2.75、@openai/codex-sdk、Gemini CLI
-- **消息渠道**：飞书（@larksuiteoapi/node-sdk）、微信（ClawBot ilink API）、AUN Mesh 网络
+- **消息渠道**：飞书（@larksuiteoapi/node-sdk）、微信（ClawBot ilink API）、钉钉（dingtalk-stream）、QQ频道（pure-qqbot）、企业微信（AI Bot API）、AUN 网络
 - **数据存储**：node:sqlite（内置模块）+ JSONL（CLI 共用）
 - **测试框架**：Vitest
 
 ## TODO
 
-- [x] Windows 系统 CLI 命令支持
-- [x] 微信插件支持图片/文件的收发
 - [x] AUN Mesh 网络通道接入
 - [x] TUI 终端客户端（`evolclaw tui`）
 - [x] 项目搬家工具（`evolclaw mv`）
-- [ ] 自动授权可配置（自动放行/自动拒绝）
-- [x] 手动授权支持（文本回复）
-- [x] 手动授权支持（飞书卡片）
-- [ ] ACP 协议支持（接入 Codex / Gemini CLI）
+- [x] 手动授权支持（文本回复 + 飞书卡片）
+- [x] 自动授权可配置（自动放行/自动拒绝）
+- [ ] AUN 群组扩展功能支持
+- [ ] 触发器支持
+- [ ] 统计/状态监控 WebHook
 
 
 ## 许可证
