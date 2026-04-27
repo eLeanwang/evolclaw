@@ -116,6 +116,9 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
     systemPromptAppend?: string,
     sessionManager?: any
   ): Promise<AsyncIterable<AgentEvent>> {
+    // Agent ctl: 注入 EVOLCLAW_SESSION_ID 供子进程使用
+    process.env.EVOLCLAW_SESSION_ID = sessionId;
+
     let agentSessionId = initialAgentSessionId || this.activeSessions.get(sessionId);
 
     const threadOptions: ThreadOptions = {

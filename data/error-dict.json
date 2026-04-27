@@ -111,9 +111,8 @@
     {
       "id": "request-aborted",
       "match": "request was aborted",
-      "action": "retry",
-      "type": "stream_error",
-      "message": "⚠️ 请求被中断，正在重试..."
+      "action": "ignore",
+      "type": "stream_error"
     }
   ]
 }

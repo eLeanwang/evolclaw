@@ -14,7 +14,7 @@
   ],
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "tsc && node -e \"const f='dist/cli.js',c=require('fs').readFileSync(f,'utf8');if(!c.startsWith('#!'))require('fs').writeFileSync(f,'#!/usr/bin/env node\\n'+c)\" && node -e \"try{require('child_process').execFileSync('chmod',['+x','dist/cli.js'])}catch{}\"",
+    "build": "tsc && node -e \"const f='dist/cli.js',c=require('fs').readFileSync(f,'utf8');if(!c.startsWith('#!'))require('fs').writeFileSync(f,'#!/usr/bin/env node\\n'+c)\" && node -e \"try{require('child_process').execFileSync('chmod',['+x','dist/cli.js'])}catch{}\" && node -e \"require('fs').cpSync('src/templates','dist/templates',{recursive:true,force:true})\"",
     "start": "node dist/index.js",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -27,7 +27,9 @@
     "@larksuiteoapi/node-sdk": "^1.59.0",
     "@openai/codex-sdk": "^0.118.0",
     "@types/form-data": "^2.2.1",
+    "@wecom/aibot-node-sdk": "^1.0.6",
     "dingtalk-stream": "^2.1.6-beta.1",
+    "fast-xml-parser": "^5.7.2",
     "form-data": "^4.0.5",
     "image-type": "^6.0.0",
     "pure-qqbot": "^2.0.0",

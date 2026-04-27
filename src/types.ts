@@ -46,6 +46,7 @@ export interface AunChannelConfig {
   flushDelay?: number;  // flush 间隔(秒)，默认 3
   pythonBin?: string;   // Python 可执行路径（仅 evolclaw tui 命令使用），默认 python3
   encryptionSeed?: string; // FileSecretStore 加密种子，默认 evolclaw-aun-production-seed-2026
+  agentMd?: { content?: string };  // 自定义 agent.md 内容
   showActivities?: 'all' | 'dm-only' | 'owner-dm-only' | 'none';  // 覆盖全局 showActivities
 }
 
@@ -87,6 +88,22 @@ export interface QQBotChannelInstanceConfig extends QQBotChannelConfig {
   name: string;
 }
 
+export interface WecomChannelConfig {
+  name?: string;
+  enabled?: boolean;
+  botId: string;
+  secret: string;
+  owner?: string;
+  admins?: string[];
+  flushDelay?: number;
+  debounce?: number;
+  showActivities?: 'all' | 'dm-only' | 'owner-dm-only' | 'none';
+}
+
+export interface WecomChannelInstanceConfig extends WecomChannelConfig {
+  name: string;
+}
+
 export interface Config {
   agents?: {
     anthropic?: {
@@ -123,6 +140,7 @@ export interface Config {
     aun?: AunChannelConfig | AunChannelInstanceConfig[];
     dingtalk?: DingtalkChannelConfig | DingtalkChannelInstanceConfig[];
     qqbot?: QQBotChannelConfig | QQBotChannelInstanceConfig[];
+    wecom?: WecomChannelConfig | WecomChannelInstanceConfig[];
   };
   projects?: {
     defaultPath: string;
@@ -279,6 +297,8 @@ export interface ChannelAdapter {
   acknowledge?(messageId: string): Promise<void>;
   sendProcessingStatus?(channelId: string, status: 'start' | 'done' | 'interrupted' | 'error' | 'timeout', sessionId: string, context?: ReplyContext): void;
   sendCustomPayload?(channelId: string, payload: string): void;
+  uploadAgentMd?(content: string): Promise<void>;
+  downloadAgentMd?(aid: string): Promise<string>;
   sendInteraction?(channelId: string, interaction: InteractionRequest, context?: ReplyContext): Promise<string | false>;
   patchInteractionCard?(messageId: string, card: object): Promise<void>;
   onInteraction?(callback: (response: InteractionResponse) => void): void;

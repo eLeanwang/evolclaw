@@ -20,6 +20,7 @@ export class MessageQueue {
   private currentSessionKey?: string;
   private currentProjectPath?: string;
   private currentAgentId?: string;
+  private activeMessageIds = new Set<string>();  // 正在执行的消息 ID
   private interruptCallback?: (sessionKey: string, agentId?: string) => Promise<void>;
   private eventBus?: EventBus;
   private recentMessageIds = new Set<string>();
@@ -145,6 +146,7 @@ export class MessageQueue {
         this.processing.delete(queueKey);
         this.currentSessionKey = undefined;
         this.currentProjectPath = undefined;
+        this.activeMessageIds.clear();
         return;
       }
 
@@ -155,6 +157,12 @@ export class MessageQueue {
       this.currentSessionKey = queueKey;
       this.currentProjectPath = merged.projectPath;
       this.currentAgentId = merged.message.agentId;
+
+      // 记录正在执行的 messageId（用于撤回中断）
+      this.activeMessageIds.clear();
+      for (const item of items) {
+        if (item.message.messageId) this.activeMessageIds.add(item.message.messageId);
+      }
 
       const resolves = items.map(i => i.resolve);
       const rejects = items.map(i => i.reject);
@@ -259,6 +267,24 @@ export class MessageQueue {
       }
     }
     return false;
+  }
+
+  /**
+   * 撤回正在执行的消息：如果 messageId 正在处理中，触发 interrupt。
+   * @returns true 如果找到并触发了中断
+   */
+  cancelActive(messageId: string): boolean {
+    if (!this.activeMessageIds.has(messageId)) return false;
+    if (!this.currentSessionKey) return false;
+
+    // 从 queueKey 提取 sessionKey
+    const sessionKey = this.currentSessionKey.split('::')[0];
+    logger.info(`[Queue] Recalled active message ${messageId}, interrupting session ${sessionKey}`);
+    this.eventBus?.publish({ type: 'message:interrupted', sessionId: sessionKey, reason: 'recalled' });
+    if (this.interruptCallback) {
+      this.interruptCallback(sessionKey, this.currentAgentId).catch(() => {});
+    }
+    return true;
   }
 
   /**

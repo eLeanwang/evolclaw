@@ -269,6 +269,7 @@ export class AgentRunner {
   private permissionGateway?: PermissionGateway;
   private sendPromptFn?: (text: string) => Promise<void>;
   private permissionContexts = new Map<string, PermissionContext>();
+  private currentEvolclawSessionId?: string;
 
   constructor(
     apiKey: string,
@@ -291,7 +292,8 @@ export class AgentRunner {
       ANTHROPIC_AUTH_TOKEN: this.apiKey,
       PATH: process.env.PATH,
       DISABLE_AUTOUPDATER: '1',
-      ...(this.baseUrl ? { ANTHROPIC_BASE_URL: this.baseUrl } : {})
+      ...(this.baseUrl ? { ANTHROPIC_BASE_URL: this.baseUrl } : {}),
+      ...(this.currentEvolclawSessionId ? { EVOLCLAW_SESSION_ID: this.currentEvolclawSessionId } : {}),
     };
   }
 
@@ -673,6 +675,9 @@ export class AgentRunner {
   }
 
   async runQuery(sessionId: string, prompt: string, projectPath: string, initialClaudeSessionId?: string, images?: ImageData[], systemPromptAppend?: string, sessionManager?: any): Promise<AsyncIterable<AgentEvent>> {
+    // 记录当前 evolclaw session ID，用于 Agent ctl 环境变量注入
+    this.currentEvolclawSessionId = sessionId;
+
     // 同步用户级配置到内存
     this.syncFromUserSettings();
 
@@ -1107,21 +1112,40 @@ export class AgentRunner {
   }
 
   async rewindFiles(agentSessionId: string, projectPath: string, userMessageId: string) {
+    logger.info(`[RewindFiles] agentSessionId=${agentSessionId} userMessageId=${userMessageId}`);
+    const stderrChunks: string[] = [];
     const tempQuery = query({
       prompt: '',
       options: {
         cwd: projectPath,
         resume: agentSessionId,
         enableFileCheckpointing: true,
-        permissionMode: 'bypassPermissions',
+        permissionMode: this.toSdkPermissionMode(),
+        stderr: (data: string) => { stderrChunks.push(data); },
       }
     });
     try {
-      return await tempQuery.rewindFiles(userMessageId);
-    } finally {
-      if ('interrupt' in tempQuery && typeof (tempQuery as any).interrupt === 'function') {
-        (tempQuery as any).interrupt();
+      for await (const _msg of tempQuery) {
+        const dryResult = await tempQuery.rewindFiles(userMessageId, { dryRun: true });
+        logger.info('[RewindFiles] dryRun result:', JSON.stringify(dryResult));
+        if (!dryResult.canRewind) return dryResult;
+        const result = await tempQuery.rewindFiles(userMessageId);
+        logger.info('[RewindFiles] rewind result:', JSON.stringify(result));
+        return {
+          ...result,
+          filesChanged: dryResult.filesChanged ?? result.filesChanged,
+          insertions: dryResult.insertions ?? result.insertions,
+          deletions: dryResult.deletions ?? result.deletions,
+        };
       }
+      throw new Error('Query stream ended before rewindFiles could be called');
+    } catch (error) {
+      if (stderrChunks.length > 0) {
+        logger.error('[RewindFiles] subprocess stderr:', stderrChunks.join(''));
+      }
+      throw error;
+    } finally {
+      tempQuery.close();
     }
   }
 }

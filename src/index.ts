@@ -11,6 +11,7 @@ import { WechatChannelPlugin } from './channels/wechat.js';
 import { AUNChannelPlugin } from './channels/aun.js';
 import { DingtalkChannelPlugin } from './channels/dingtalk.js';
 import { QQBotChannelPlugin } from './channels/qqbot.js';
+import { WecomChannelPlugin } from './channels/wecom.js';
 import { MessageProcessor } from './core/message/message-processor.js';
 import { MessageQueue } from './core/message/message-queue.js';
 import { MessageBridge } from './core/message/message-bridge.js';
@@ -148,6 +149,7 @@ async function main() {
   channelLoader.register(new AUNChannelPlugin());
   channelLoader.register(new DingtalkChannelPlugin());
   channelLoader.register(new QQBotChannelPlugin());
+  channelLoader.register(new WecomChannelPlugin());
 
   const channelInstances = await channelLoader.createAll(config);
   logger.info(`✓ Created ${channelInstances.length} channel instance(s)`);
@@ -287,9 +289,6 @@ async function main() {
         inst.adapter,
         channelType
       );
-      inst.channel.onRecall?.((messageId: string) => {
-        msgBridge.cancel(messageId);
-      });
     }
 
     if (channelType === 'wechat') {
@@ -376,6 +375,11 @@ async function main() {
         channelType
       );
     }
+
+    // 通用：撤回消息 → 中断执行中任务（所有支持 onRecall 的渠道）
+    inst.channel.onRecall?.((messageId: string) => {
+      msgBridge.cancel(messageId);
+    });
   }
 
   // ── 连接所有渠道 ──
@@ -519,7 +523,7 @@ async function main() {
   fs.writeFileSync(readySignalPath, String(Date.now()));
   logger.info(`✓ Ready signal written: ${readySignalPath}`);
 
-  // IPC server — 供 CLI 查询实时状态
+  // IPC server — 供 CLI 查询实时状态 + Agent ctl 指令执行
   const ipcServer = new IpcServer(resolvePaths().socket, (): IpcStatusResponse => {
     const channels: Record<string, ChannelStatus> = {};
     const channelsByType: Record<string, string[]> = {};
@@ -548,7 +552,7 @@ async function main() {
         avgResponseMs: snap.lastHour.avgResponseMs,
       },
     };
-  });
+  }, async (cmd, sessionId) => cmdHandler.handleCtl(cmd, sessionId));
   ipcServer.start();
 
   // 运行时配置文件监控

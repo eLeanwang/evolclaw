@@ -215,8 +215,8 @@ export class MessageBridge {
   }
 
   /**
-   * 撤回消息：先查 debounce 窗口，再查 message queue。
-   * @returns true 如果找到并取消
+   * 撤回消息：先查 debounce 窗口，再查 message queue，最后查正在执行的任务。
+   * @returns true 如果找到并取消/中断
    */
   cancel(messageId: string): boolean {
     // 阶段 1: debounce 窗口（尚未入队）
@@ -224,7 +224,9 @@ export class MessageBridge {
       if (d.cancel(messageId)) return true;
     }
     // 阶段 2: 已入队但未处理（合并后 messageId 可能是逗号分隔的多个 id）
-    return this.messageQueue.cancel(messageId);
+    if (this.messageQueue.cancel(messageId)) return true;
+    // 阶段 3: 正在执行的任务 → 触发 interrupt
+    return this.messageQueue.cancelActive(messageId);
   }
 
   /** 清理资源 */

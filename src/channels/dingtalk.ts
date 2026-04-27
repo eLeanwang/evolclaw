@@ -35,6 +35,7 @@ export class DingtalkChannel {
   private client: any = null;
   private connected = false;
   private messageHandler: DingtalkMessageHandler | null = null;
+  private recallHandler?: (messageId: string) => void;
   private webhookCache = new Map<string, string>();
   private conversationIdCache = new Map<string, string>();
   private senderStaffIdCache = new Map<string, string>();
@@ -121,6 +122,10 @@ export class DingtalkChannel {
 
   onMessage(handler: DingtalkMessageHandler): void {
     this.messageHandler = handler;
+  }
+
+  onRecall(handler: (messageId: string) => void): void {
+    this.recallHandler = handler;
   }
 
   // ── Inbound message handling ───────────────────────────────────────────────

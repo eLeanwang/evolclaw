@@ -43,6 +43,7 @@ export class QQBotChannel {
   private client: any = null;
   private connected = false;
   private messageHandler: QQBotMessageHandler | null = null;
+  private recallHandler?: (messageId: string) => void;
   private seenMessages = new Map<string, number>();
   private chatTypeCache = new Map<string, 'private' | 'group'>();
   private msgIdCache = new Map<string, string>();
@@ -129,6 +130,10 @@ export class QQBotChannel {
 
   onMessage(handler: QQBotMessageHandler): void {
     this.messageHandler = handler;
+  }
+
+  onRecall(handler: (messageId: string) => void): void {
+    this.recallHandler = handler;
   }
 
   // ── Inbound message handling ───────────────────────────────────────────────

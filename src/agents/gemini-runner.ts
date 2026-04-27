@@ -170,6 +170,7 @@ export class GeminiRunner implements AgentRunnerFull, ModelSwitcher {
     // Spawn subprocess
     const env: Record<string, string> = {
       ...process.env as Record<string, string>,
+      EVOLCLAW_SESSION_ID: sessionId,
     };
     if (this.resolved.apiKey) {
       env.GOOGLE_API_KEY = this.resolved.apiKey;

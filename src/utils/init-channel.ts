@@ -389,11 +389,12 @@ interface WechatQRCodeResponse {
 }
 
 interface WechatQRStatusResponse {
-  status: 'wait' | 'scaned' | 'confirmed' | 'expired';
+  status: 'wait' | 'scaned' | 'confirmed' | 'expired' | 'scaned_but_redirect';
   bot_token?: string;
   ilink_bot_id?: string;
   baseurl?: string;
   ilink_user_id?: string;
+  redirect_host?: string;
 }
 
 async function fetchQRCode(baseUrl: string): Promise<WechatQRCodeResponse> {
@@ -445,9 +446,10 @@ export async function runWechatQrFlow(): Promise<{ baseUrl: string; token: strin
 
   const deadline = Date.now() + LOGIN_TIMEOUT_MS;
   let scannedPrinted = false;
+  let currentPollUrl = DEFAULT_BASE_URL;
 
   while (Date.now() < deadline) {
-    const status = await pollQRStatus(DEFAULT_BASE_URL, qrResp.qrcode);
+    const status = await pollQRStatus(currentPollUrl, qrResp.qrcode);
 
     switch (status.status) {
       case 'wait':
@@ -457,6 +459,11 @@ export async function runWechatQrFlow(): Promise<{ baseUrl: string; token: strin
         if (!scannedPrinted) {
           console.log('\n👀 已扫码，请在微信中确认...');
           scannedPrinted = true;
+        }
+        break;
+      case 'scaned_but_redirect':
+        if (status.redirect_host) {
+          currentPollUrl = `https://${status.redirect_host}`;
         }
         break;
       case 'expired':
@@ -533,9 +540,10 @@ export async function cmdInitWechat(): Promise<void> {
 
   const deadline = Date.now() + LOGIN_TIMEOUT_MS;
   let scannedPrinted = false;
+  let currentPollUrl = DEFAULT_BASE_URL;
 
   while (Date.now() < deadline) {
-    const status = await pollQRStatus(DEFAULT_BASE_URL, qrResp.qrcode);
+    const status = await pollQRStatus(currentPollUrl, qrResp.qrcode);
 
     switch (status.status) {
       case 'wait':
@@ -545,6 +553,11 @@ export async function cmdInitWechat(): Promise<void> {
         if (!scannedPrinted) {
           console.log('\n\ud83d\udc40 已扫码，请在微信中确认...');
           scannedPrinted = true;
+        }
+        break;
+      case 'scaned_but_redirect':
+        if (status.redirect_host) {
+          currentPollUrl = `https://${status.redirect_host}`;
         }
         break;
       case 'expired':
@@ -769,6 +782,21 @@ export async function setupAunAid(rl: readline.Interface, _config: any): Promise
 
       const result = await client.auth.createAid({ aid });
       console.log(`  ✓ AID ${result.aid} 创建成功`);
+
+      // Collect agent.md info and publish
+      const typeInput = (await ask(rl, '  Agent 类型 human/ai [ai]: ')).trim().toLowerCase();
+      const agentType = typeInput === 'human' ? 'human' : 'ai';
+      const agentName = aid.split('.')[0];
+
+      const agentMdContent = `---\naid: "${aid}"\nname: "${agentName}"\ntype: "${agentType}"\nversion: "1.0.0"\ndescription: ""\ntags:\n  - evolclaw\n---\n`;
+      try {
+        await client.auth.uploadAgentMd(agentMdContent);
+        console.log('  ✓ agent.md 已发布');
+        fs.writeFileSync(path.join(aidDir, 'agent.md'), agentMdContent, 'utf-8');
+      } catch (e: any) {
+        console.log(`  ⚠ agent.md 发布失败（可稍后用 /agentmd put 重试）: ${String(e.message || e).slice(0, 100)}`);
+      }
+
       try { await client.close(); } catch { /* ignore */ }
     } catch (e: any) {
       const msg = e.message || String(e);
@@ -1383,6 +1411,112 @@ export async function cmdInitQQBot(): Promise<void> {
 
   console.log(`\n✅ QQ 机器人绑定成功！`);
   console.log(`  App ID: ${result.appId}`);
+  if (choice) {
+    console.log(`  实例: ${choice.name} (${choice.action === 'add' ? '新增' : '覆盖'})`);
+  }
+  console.log(`  配置已写入: ${p.config}`);
+  console.log(`\n现在可以启动服务: evolclaw restart`);
+}
+
+// ==================== WeCom (企业微信) ====================
+
+export async function cmdInitWecom(): Promise<void> {
+  const p = resolvePaths();
+
+  if (!fs.existsSync(p.config)) {
+    console.log('❌ 配置文件不存在，请先运行 evolclaw init');
+    return;
+  }
+
+  const config = JSON.parse(fs.readFileSync(p.config, 'utf-8'));
+
+  // Normalize existing instances and filter out placeholders
+  const allInstances = normalizeChannelInstances(config.channels?.wecom, 'wecom');
+  const validInstances: Array<{ name: string; originalIndex: number; [key: string]: any }> = [];
+  for (let i = 0; i < allInstances.length; i++) {
+    const inst = allInstances[i];
+    if (!inst.botId || !inst.secret) continue;
+    if (inst.botId.includes('your-') || inst.botId.includes('placeholder')) continue;
+    if (inst.secret.includes('your-') || inst.secret.includes('placeholder')) continue;
+    validInstances.push({ ...inst, originalIndex: i });
+  }
+
+  let choice: InstanceChoice | null = null;
+
+  if (validInstances.length > 0) {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    try {
+      choice = await selectInstance(rl, 'wecom', validInstances);
+      if (choice === null) return;
+    } finally {
+      rl.close();
+    }
+  }
+
+  // WeCom uses manual input only (no QR flow)
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  let result: { botId: string; secret: string };
+  try {
+    console.log('企业微信 AI Bot 配置\n');
+    console.log('请在企业微信管理后台 → AI Bot 页面获取 Bot ID 和 Secret\n');
+
+    let botId = '';
+    while (!botId) {
+      botId = (await ask(rl, '  Bot ID: ')).trim();
+      if (!botId) console.log('  ⚠ 不能为空');
+    }
+    let secret = '';
+    while (!secret) {
+      secret = (await ask(rl, '  Secret: ')).trim();
+      if (!secret) console.log('  ⚠ 不能为空');
+    }
+    result = { botId, secret };
+  } finally {
+    rl.close();
+  }
+
+  // Write config to the correct slot
+  if (!config.channels) config.channels = {};
+
+  if (choice && choice.action === 'overwrite' && Array.isArray(config.channels.wecom)) {
+    const idx = validInstances[choice.index]?.originalIndex ?? choice.index;
+    config.channels.wecom[idx].botId = result.botId;
+    config.channels.wecom[idx].secret = result.secret;
+    config.channels.wecom[idx].enabled = true;
+  } else if (choice && choice.action === 'overwrite' && !Array.isArray(config.channels.wecom)) {
+    config.channels.wecom = config.channels.wecom || {};
+    config.channels.wecom.botId = result.botId;
+    config.channels.wecom.secret = result.secret;
+    config.channels.wecom.enabled = true;
+  } else if (choice && choice.action === 'add') {
+    const newInst = {
+      name: choice.name,
+      botId: result.botId,
+      secret: result.secret,
+      enabled: true,
+    };
+    if (Array.isArray(config.channels.wecom)) {
+      config.channels.wecom.push(newInst);
+    } else if (config.channels.wecom) {
+      const oldInst = { ...config.channels.wecom, name: config.channels.wecom.name || 'wecom' };
+      config.channels.wecom = [oldInst, newInst];
+    } else {
+      config.channels.wecom = [newInst];
+    }
+  } else {
+    config.channels.wecom = {
+      botId: result.botId,
+      secret: result.secret,
+      enabled: true,
+    };
+  }
+
+  if (!config.channels.defaultChannel) config.channels.defaultChannel = 'wecom';
+
+  fs.writeFileSync(p.config, JSON.stringify(config, null, 2) + '\n');
+
+  console.log(`\n✅ 企业微信 AI Bot 配置成功！`);
+  console.log(`  Bot ID: ${result.botId}`);
   if (choice) {
     console.log(`  实例: ${choice.name} (${choice.action === 'add' ? '新增' : '覆盖'})`);
   }

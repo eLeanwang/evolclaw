@@ -20,6 +20,9 @@ export interface WechatMessageHandler {
 }
 
 const CHANNEL_VERSION = '1.0.0';
+const ILINK_APP_ID = 'bot';
+// iLink-App-ClientVersion: major<<16 | minor<<8 | patch (uint32)
+const ILINK_APP_CLIENT_VERSION = String((1 << 16) | (0 << 8) | 0); // 1.0.0 = 65536
 const DEFAULT_LONG_POLL_TIMEOUT_MS = 35_000;
 const DEFAULT_API_TIMEOUT_MS = 15_000;
 const DEFAULT_CONFIG_TIMEOUT_MS = 10_000;
@@ -162,6 +165,7 @@ function extractTextFromMessage(msg: WeixinMessage): string {
 export class WechatChannel {
   private config: WechatConfig;
   private messageHandler?: WechatMessageHandler;
+  private recallHandler?: (messageId: string) => void;
   private abortController?: AbortController;
   private connected = false;
 
@@ -191,6 +195,10 @@ export class WechatChannel {
 
   onMessage(handler: WechatMessageHandler): void {
     this.messageHandler = handler;
+  }
+
+  onRecall(handler: (messageId: string) => void): void {
+    this.recallHandler = handler;
   }
 
   /** 注册 session 过期通知回调（用于跨渠道通知用户） */
@@ -223,6 +231,13 @@ export class WechatChannel {
       // ignore
     }
 
+    // 通知 ilink 后端：bot 上线
+    try {
+      await this.notifyLifecycle('notifystart');
+    } catch (err) {
+      logger.warn('[WeChat] notifyStart failed during startup (ignored):', err);
+    }
+
     this.abortController = new AbortController();
     // 启动长轮询（不 await，后台运行）
     this.pollLoop(this.abortController.signal).catch(err => {
@@ -240,6 +255,12 @@ export class WechatChannel {
     if (this.abortController) {
       this.abortController.abort();
       this.abortController = undefined;
+    }
+    // 通知 ilink 后端：bot 下线
+    try {
+      await this.notifyLifecycle('notifystop');
+    } catch (err) {
+      logger.warn('[WeChat] notifyStop failed during shutdown (ignored):', err);
     }
     logger.info('[WeChat] Channel disconnected');
   }
@@ -734,6 +755,13 @@ export class WechatChannel {
 
   // ── ilink API Helpers ─────────────────────────────────────────────────
 
+  /** Notify ilink backend of bot lifecycle events (start/stop). */
+  private async notifyLifecycle(action: 'notifystart' | 'notifystop'): Promise<void> {
+    const body = JSON.stringify({ base_info: { channel_version: CHANNEL_VERSION } });
+    await this.apiFetch(`ilink/bot/msg/${action}`, body, DEFAULT_CONFIG_TIMEOUT_MS);
+    logger.info(`[WeChat] ${action} succeeded`);
+  }
+
   private async apiFetch(endpoint: string, body: string, timeoutMs: number, externalSignal?: AbortSignal): Promise<string> {
     const base = this.config.baseUrl.endsWith('/') ? this.config.baseUrl : `${this.config.baseUrl}/`;
     const url = new URL(endpoint, base).toString();
@@ -774,6 +802,8 @@ export class WechatChannel {
       'AuthorizationType': 'ilink_bot_token',
       'Content-Length': String(Buffer.byteLength(body, 'utf-8')),
       'X-WECHAT-UIN': wechatUin,
+      'iLink-App-Id': ILINK_APP_ID,
+      'iLink-App-ClientVersion': ILINK_APP_CLIENT_VERSION,
     };
 
     if (this.config.token?.trim()) {

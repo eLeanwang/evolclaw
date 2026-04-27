@@ -127,7 +127,7 @@ function formatIdleTime(ms: number): string {
 }
 
 // 支持的命令列表
-const commands = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/effort', '/agent', '/slist', '/session', '/rename', '/stop', '/clear', '/compact', '/repair', '/safe', '/fork', '/del', '/perm', '/send', '/check', '/rewind', '/activity'];
+const commands = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/effort', '/agent', '/slist', '/session', '/rename', '/stop', '/clear', '/compact', '/repair', '/safe', '/fork', '/del', '/perm', '/send', '/check', '/rewind', '/activity', '/agentmd'];
 
 // 命令别名映射
 const aliases: Record<string, string> = {
@@ -377,6 +377,7 @@ export class CommandHandler {
           group: '其他',
           commands: [
             { cmd: '/status', label: '显示会话状态' },
+            { cmd: '/check', label: '检查渠道健康' },
             { cmd: '/help', label: '显示帮助信息' },
           ]
         }
@@ -431,12 +432,12 @@ export class CommandHandler {
         commands: [
           { cmd: '/status', label: '显示会话状态' },
           { cmd: '/stop', label: '中断当前任务' },
+          { cmd: '/check', label: '检查渠道状态' },
+          { cmd: '/activity', args: '[all|dm|owner|none]', label: '查看/控制中间输出显示模式' },
           ...(isOwner ? [
             { cmd: '/restart', label: '重启服务' },
             { cmd: '/send', args: '[channel] <path>', label: '发送项目内文件' },
-            { cmd: '/activity', args: '[all|dm|owner|none]', label: '控制中间输出显示模式' },
           ] : []),
-          { cmd: '/check', args: '[rty <channel>]', label: '检查渠道状态或重连指定渠道' },
         ]
       });
     } else {
@@ -444,6 +445,7 @@ export class CommandHandler {
         group: '其他',
         commands: [
           { cmd: '/status', label: '显示会话状态' },
+          { cmd: '/check', label: '检查渠道健康' },
         ]
       });
     }
@@ -512,10 +514,10 @@ export class CommandHandler {
     const activeChatType = activeSession?.chatType || 'private';
 
     if (normalizedContent.startsWith('/')) {
-      const guestGroupCommands = ['/status', '/help'];
+      const guestGroupCommands = ['/status', '/help', '/check'];
       const userCommands = activeChatType === 'group' && !isAdmin
         ? guestGroupCommands
-        : ['/slist', '/new', '/session', '/rename', '/name', '/status', '/help', '/del', '/s '];
+        : ['/slist', '/new', '/session', '/rename', '/name', '/status', '/help', '/del', '/s ', '/check'];
       const isUserCommand = userCommands.some(cmd =>
         normalizedContent === cmd.trimEnd() || normalizedContent.startsWith(cmd)
       );
@@ -573,6 +575,7 @@ export class CommandHandler {
           '',
           '其他：',
           '  /status - 显示会话状态',
+          '  /check - 检查渠道健康',
           '  /help - 显示此帮助信息',
         ];
         return lines.join('\n');
@@ -588,6 +591,7 @@ export class CommandHandler {
           '  /name <新名称> - 重命名当前会话',
           '  /del <名称> - 删除指定会话（仅解绑，不删除文件）',
           '  /status - 显示会话状态',
+          '  /check - 检查渠道健康',
           '',
           '❓ 帮助：',
           '  /help - 显示此帮助信息',
@@ -626,10 +630,11 @@ export class CommandHandler {
         '🛠️ 运维：',
         '  /status - 显示会话状态',
         '  /stop - 中断当前任务',
+        '  /check - 检查渠道状态',
+        '  /activity [all|dm|owner|none] - 查看/控制中间输出显示模式',
         ...(isOwner ? [
           '  /restart - 重启服务',
           '  /send [channel] <path> - 发送项目内文件',
-          '  /activity [all|dm|owner|none] - 控制中间输出显示模式',
         ] : []),
         '',
         '❓ 帮助：',
@@ -1133,8 +1138,68 @@ export class CommandHandler {
     }
 
     // /activity 命令：控制中间输出显示模式
-    if (normalizedContent === '/activity' || normalizedContent.startsWith('/activity ')) {
+    if (normalizedContent === '/agentmd' || normalizedContent.startsWith('/agentmd ')) {
       if (!isOwner) return '❌ 无权限：此命令仅限 owner 使用';
+      const adapter = this.adapters.get(channel) as any;
+      if (!adapter?.uploadAgentMd) return '❌ 当前通道不支持 agent.md 操作';
+
+      const selfAid: string = typeof adapter._selfAid === 'function' ? adapter._selfAid() : '';
+      const arg = normalizedContent.slice(9).trim();
+
+      // put — read local ~/.aun/AIDs/{aid}/agent.md and upload
+      if (arg === 'put') {
+        if (!selfAid) return '❌ 未连接，无法确定本地 AID';
+        try {
+          const { readFileSync } = await import('node:fs');
+          const { join } = await import('node:path');
+          const { homedir } = await import('node:os');
+          const localPath = join(homedir(), '.aun', 'AIDs', selfAid, 'agent.md');
+          const content = readFileSync(localPath, 'utf-8');
+          await adapter.uploadAgentMd(content);
+          return '✅ agent.md 已发布';
+        } catch (e: any) {
+          return `❌ 发布失败: ${String(e.message || e).slice(0, 100)}`;
+        }
+      }
+
+      // set <content> — upload inline content and sync to local
+      if (arg.startsWith('set ')) {
+        const content = arg.slice(4).trim();
+        if (!content) return '用法：/agentmd set <内容>';
+        if (!selfAid) return '❌ 未连接，无法确定本地 AID';
+        try {
+          await adapter.uploadAgentMd(content);
+          const { writeFileSync, mkdirSync } = await import('node:fs');
+          const { join } = await import('node:path');
+          const { homedir } = await import('node:os');
+          const localDir = join(homedir(), '.aun', 'AIDs', selfAid);
+          mkdirSync(localDir, { recursive: true });
+          writeFileSync(join(localDir, 'agent.md'), content, 'utf-8');
+          return '✅ agent.md 已更新并发布到AUN网络';
+        } catch (e: any) {
+          return `❌ 发布失败: ${String(e.message || e).slice(0, 100)}`;
+        }
+      }
+
+      // view — /agentmd or /agentmd <aid>
+      const aidToView = arg || selfAid;
+      if (!aidToView) return '用法：/agentmd [<aid>] | put | set <内容>';
+      try {
+        const md = await adapter.downloadAgentMd(aidToView);
+        if (!md || !md.trim()) return `ℹ️ ${aidToView} 尚未设置 agent.md`;
+        return `\`\`\`\n${md.slice(0, 1500)}\n\`\`\``;
+      } catch (e: any) {
+        const msg = String(e.message || e);
+        if (msg.includes('not found') || msg.includes('404')) {
+          return `ℹ️ ${aidToView} 尚未设置 agent.md`;
+        }
+        return `❌ 获取失败: ${msg.slice(0, 100)}`;
+      }
+    }
+
+
+    if (normalizedContent === '/activity' || normalizedContent.startsWith('/activity ')) {
+      if (!isAdmin) return '❌ 无权限：此命令仅限管理员使用';
 
       const activityArg = normalizedContent.slice(9).trim();
       const modeMap: Record<string, 'all' | 'dm-only' | 'owner-dm-only' | 'none'> = {
@@ -1216,6 +1281,9 @@ export class CommandHandler {
       if (newMode === currentMode) {
         return `📋 中间输出模式已是 ${activityArg}（${label}）`;
       }
+
+      // 切换操作仅 owner
+      if (!isOwner) return '❌ 中间输出模式切换仅限 owner';
 
       setChannelShowActivities(this.config, channel, newMode);
       return `✅ 中间输出模式: ${activityArg}（${label}）`;
@@ -1461,13 +1529,13 @@ export class CommandHandler {
       return `✓ 已创建新会话${sessionName ? `: ${sessionName}` : ''}\n  之前的对话历史已保留，可通过 /s 查看`;
     }
 
-    // /check 命令：检查渠道状态 / 手动重连指定渠道
+    // /check 命令：检查渠道状态（guest 可用，详情仅 admin）/ 重连指定渠道（admin only）
     if (normalizedContent === '/check' || normalizedContent.startsWith('/check ')) {
-      if (!isAdmin) return '❌ 无权限：此命令仅限管理员使用';
       const subCmd = normalizedContent.slice('/check'.length).trim();
 
-      // /check rty <channel> — 重连指定渠道
+      // /check rty <channel> — 重连指定渠道（admin only）
       if (subCmd.startsWith('rty')) {
+        if (!isAdmin) return '❌ 无权限：渠道重连仅限管理员使用';
         const target = subCmd.slice('rty'.length).trim();
         if (!target) {
           return '❌ 请指定渠道名称，例如：/check rty feishu';
@@ -1484,7 +1552,7 @@ export class CommandHandler {
         return `🔄 ${target} 重连: ${result}`;
       }
 
-      // Default: show full system health check
+      // Default: show system health check (non-admin 仅看摘要)
       const lines: string[] = ['📡 渠道状态：'];
       // Group by channelType
       const groups = new Map<string, Array<{ name: string; status: string }>>();
@@ -1501,6 +1569,15 @@ export class CommandHandler {
         if (!groups.has(type)) groups.set(type, []);
         groups.get(type)!.push({ name, status });
       }
+
+      if (!isAdmin) {
+        // guest/user: 仅显示渠道健康摘要
+        const total = [...groups.values()].flat().length;
+        const healthy = [...groups.values()].flat().filter(i => i.status.includes('✓')).length;
+        lines.push(`  ${healthy}/${total} 渠道正常`);
+        return lines.join('\n');
+      }
+
       for (const [type, instances] of groups) {
         if (instances.length === 1) {
           lines.push(`  ${instances[0].name}: ${instances[0].status}`);
@@ -1850,6 +1927,7 @@ export class CommandHandler {
         const prefix = entry.isCurrent ? '  ✓' : '   ';
         lines.push(`${prefix} ${entry.name} (${entry.projectPath}) - ${buildStatusText(entry)}`);
       }
+      lines.push('', '提示: 使用 /p <名称> 切换项目');
       return lines.join('\n');
     }
 
@@ -2604,8 +2682,10 @@ export class CommandHandler {
           }
           results.push(`⚠️ 文件回退失败${fileResult.error ? `: ${fileResult.error}` : '（无文件快照）'}`);
         } else {
-          const count = fileResult.filesChanged?.length || 0;
-          results.push(`✅ 已恢复文件到第 ${turnNum} 轮之前的状态（恢复了 ${count} 个文件）`);
+          const detail = fileResult.filesChanged
+            ? `（恢复了 ${fileResult.filesChanged.length} 个文件）`
+            : '';
+          results.push(`✅ 已恢复文件到第 ${turnNum} 轮之前的状态${detail}`);
         }
       }
 
@@ -2675,6 +2755,62 @@ export class CommandHandler {
       }
     }
     return turns;
+  }
+
+  // ── Agent Ctl ──
+
+  private static readonly CTL_COMMANDS = [
+    '/help', '/status', '/check',
+    '/model', '/effort', '/perm',
+    '/compact', '/activity', '/send', '/restart',
+  ];
+
+  /**
+   * Agent ctl 入口：通过 IPC 接收 Agent 自主管理指令
+   * 复用现有 slash cmd 逻辑，权限继承 session 用户角色
+   */
+  async handleCtl(cmd: string, sessionId: string): Promise<{ ok: boolean; result?: string; error?: string }> {
+    // 1. 白名单检查
+    const inputCmd = cmd.split(' ')[0];
+    if (!CommandHandler.CTL_COMMANDS.includes(inputCmd)) {
+      return { ok: false, error: `不允许的指令: ${inputCmd}` };
+    }
+
+    // 2. 通过 sessionId 查 session
+    const session = await this.sessionManager.getSessionById(sessionId);
+    if (!session) {
+      return { ok: false, error: '无效的 session' };
+    }
+
+    // 3. 从 session.metadata.peerId 获取 userId（用于权限判断）
+    const userId = session.metadata?.peerId;
+
+    // 4. send 路径限制：只允许 projectPath 下的文件
+    if (cmd.startsWith('/send')) {
+      const sendArgs = cmd.slice(5).trim();
+      const parts = sendArgs.split(/\s+/);
+      const filePath = parts[parts.length - 1];
+      if (filePath) {
+        const resolved = path.resolve(session.projectPath, filePath);
+        if (!resolved.startsWith(session.projectPath)) {
+          return { ok: false, error: '路径越界：只能发送项目目录下的文件' };
+        }
+      }
+    }
+
+    // 5. 调用现有 handle()，不传 sendMessage 回调（结果直接返回）
+    try {
+      const result = await this.handle(
+        cmd,
+        session.channel,
+        session.channelId,
+        undefined,  // 不发送消息
+        userId,
+      );
+      return { ok: true, result: result ?? '(无输出)' };
+    } catch (err: any) {
+      return { ok: false, error: err.message };
+    }
   }
 
   private extractUserContent(message: unknown): string {

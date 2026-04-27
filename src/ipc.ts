@@ -24,7 +24,20 @@ export interface IpcStatusResponse {
   };
 }
 
+export interface IpcCtlRequest {
+  type: 'ctl';
+  cmd: string;       // 完整 slash cmd，如 "/model sonnet"
+  sessionId: string;  // EVOLCLAW_SESSION_ID
+}
+
+export interface IpcCtlResponse {
+  ok: boolean;
+  result?: string;
+  error?: string;
+}
+
 type StatusProvider = () => IpcStatusResponse;
+type CommandExecutor = (cmd: string, sessionId: string) => Promise<IpcCtlResponse>;
 
 export class IpcServer {
   private server: net.Server | null = null;
@@ -32,6 +45,7 @@ export class IpcServer {
   constructor(
     private socketPath: string,
     private getStatus: StatusProvider,
+    private commandExecutor?: CommandExecutor,
   ) {}
 
   start(): void {
@@ -40,7 +54,7 @@ export class IpcServer {
 
     this.server = net.createServer((conn) => {
       let buf = '';
-      conn.on('data', (data) => {
+      conn.on('data', async (data) => {
         buf += data.toString();
         // Simple newline-delimited JSON protocol
         const idx = buf.indexOf('\n');
@@ -49,7 +63,7 @@ export class IpcServer {
         buf = buf.slice(idx + 1);
         try {
           const cmd = JSON.parse(line);
-          const response = this.handleCommand(cmd);
+          const response = await this.handleCommand(cmd);
           conn.end(JSON.stringify(response) + '\n');
         } catch {
           conn.end(JSON.stringify({ error: 'invalid request' }) + '\n');
@@ -77,12 +91,18 @@ export class IpcServer {
     try { fs.unlinkSync(this.socketPath); } catch {}
   }
 
-  private handleCommand(cmd: { type: string }): unknown {
+  private async handleCommand(cmd: { type: string }): Promise<unknown> {
     switch (cmd.type) {
       case 'status':
         return this.getStatus();
       case 'ping':
         return { pong: true, pid: process.pid };
+      case 'ctl': {
+        if (!this.commandExecutor) return { ok: false, error: 'ctl not configured' };
+        const { cmd: slashCmd, sessionId } = cmd as unknown as IpcCtlRequest;
+        if (!slashCmd || !sessionId) return { ok: false, error: 'missing cmd or sessionId' };
+        return await this.commandExecutor(slashCmd, sessionId);
+      }
       default:
         return { error: `unknown command: ${cmd.type}` };
     }
@@ -93,7 +113,7 @@ export class IpcServer {
  * Query the running EvolClaw daemon via Unix socket.
  * Returns null if the service is not running or the socket is unreachable.
  */
-export function ipcQuery(socketPath: string, cmd: { type: string }, timeoutMs = 3000): Promise<IpcStatusResponse | null> {
+export function ipcQuery(socketPath: string, cmd: { type: string; [key: string]: unknown }, timeoutMs = 3000): Promise<IpcStatusResponse | null> {
   return new Promise((resolve) => {
     const conn = net.connect(socketPath);
     let buf = '';

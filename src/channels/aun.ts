@@ -57,6 +57,7 @@ export class AUNChannel {
   private client: AUNClient | null = null;
   private projectPathProvider?: (channelId: string) => Promise<string>;
   private messageHandler?: AUNMessageHandler;
+  private recallHandler?: (messageId: string) => void;
   private connected = false;
   private traceStream: fs.WriteStream | null = null;
   private traceDate: string = '';  // 当前 trace 文件对应的日期 (YYYYMMDD)
@@ -138,6 +139,7 @@ export class AUNChannel {
   private _aid?: string;
   private _chatId = '';  // aid:device_id:slot_id — 多实例回声过滤
   private seenMessages = new Map<string, number>();
+  private peerInfoCache = new Map<string, { type: 'human' | 'ai'; name?: string }>();
   private messageSeqMap = new Map<string, number>();  // messageId → seq (for ack)
   private sentCount = new Map<string, number>();  // channelId → 已发消息计数（用于判断最终回复）
 
@@ -230,6 +232,20 @@ export class AUNChannel {
     this.client.on('connection.state', (data: unknown) => {
       // trace is handled inside handleConnectionState with throttling
       this.handleConnectionState(data);
+    });
+    this.client.on('message.recalled', (data: unknown) => {
+      this.trace('IN', 'message.recalled', data);
+      if (data && typeof data === 'object') {
+        const ids = (data as any).message_ids;
+        if (Array.isArray(ids)) {
+          for (const id of ids) {
+            if (typeof id === 'string') {
+              logger.info(`[AUN] Message recalled: ${id}`);
+              this.recallHandler?.(id);
+            }
+          }
+        }
+      }
     });
 
     // Authenticate
@@ -375,7 +391,7 @@ export class AUNChannel {
     const fromAid = msg.from ?? '';
     const payload = msg.payload ?? '';
     const text = this.extractTextPayload(payload);
-    const taskId = msg.task_id;
+    const taskId = typeof payload === 'object' && payload !== null ? (payload as any).thread_id : undefined;
     const messageId = msg.message_id ?? '';
     const seq = msg.seq;
 
@@ -422,6 +438,9 @@ export class AUNChannel {
       ? String((payload as any).chat_id)
       : fromAid;
 
+    const peerInfo = await this.fetchPeerInfo(fromAid);
+    const shortAid = this.getShortAid(fromAid);
+    const displayName = peerInfo.name || shortAid;
     this.dispatchMessage({
       channelId: chatId,
       userId: fromAid,
@@ -431,6 +450,7 @@ export class AUNChannel {
       seq,
       taskId,
       mentions,
+      peerName: displayName ? `${displayName} (${peerInfo.type ?? 'unknown'})` : undefined,
     });
   }
 
@@ -439,10 +459,10 @@ export class AUNChannel {
     const msg = data as Record<string, any>;
 
     const groupId = msg.group_id ?? '';
-    const senderAid = msg.sender_aid ?? msg.from ?? '';
+    const senderAid = msg.sender_aid ?? '';
     const payload = msg.payload ?? '';
     const text = this.extractTextPayload(payload);
-    const taskId = msg.task_id;
+    const taskId = typeof payload === 'object' && payload !== null ? (payload as any).thread_id : undefined;
     const messageId = msg.message_id ?? '';
     const seq = msg.seq;
 
@@ -508,10 +528,13 @@ export class AUNChannel {
       }
     }
 
+    const peerInfo = await this.fetchPeerInfo(senderAid);
+    const shortAid = this.getShortAid(senderAid);
+    const displayName = peerInfo.name || shortAid;
     this.dispatchMessage({
       channelId: groupId,
       userId: senderAid,
-      peerName: this.getShortAid(senderAid),
+      peerName: displayName ? `${displayName} (${peerInfo.type ?? 'unknown'})` : undefined,
       text: finalText,
       chatType: 'group',
       messageId,
@@ -626,6 +649,10 @@ export class AUNChannel {
     this.messageHandler = handler;
   }
 
+  onRecall(handler: (messageId: string) => void): void {
+    this.recallHandler = handler;
+  }
+
   async sendMessage(channelId: string, text: string, context?: ReplyContext): Promise<void> {
     if (!this.connected || !this.client) {
       logger.warn('[AUN] Cannot send: not connected');
@@ -651,8 +678,9 @@ export class AUNChannel {
       }
     }
 
-    const params: Record<string, any> = { payload: { text: finalText }, encrypt: true };
-    if (context?.threadId) params.task_id = context.threadId;
+    const payload: Record<string, any> = { type: 'text', text: finalText };
+    if (context?.threadId) payload.thread_id = context.threadId;
+    const params: Record<string, any> = { payload, encrypt: true };
 
     // Multi-instance routing: channelId may be "aid:device_id:slot_id"
     const colonIdx = channelId.indexOf(':');
@@ -740,16 +768,17 @@ export class AUNChannel {
         owner_aid: this._aid || '',
         object_key: objectKey,
         filename,
-        size: stat.size,
+        size_bytes: stat.size,
         sha256,
         content_type: contentType,
       };
-      const params: Record<string, any> = {
-        payload: { text: `📎 ${filename} (${formatSize(stat.size)})`, attachments: [attachment] },
+      const filePayload: Record<string, any> = {
         type: 'file',
-        encrypt: true,
+        text: `📎 ${filename} (${formatSize(stat.size)})`,
+        attachments: [attachment],
       };
-      if (context?.threadId) params.task_id = context.threadId;
+      if (context?.threadId) filePayload.thread_id = context.threadId;
+      const params: Record<string, any> = { payload: filePayload, encrypt: true };
 
       // Multi-instance routing
       const fileColonIdx = channelId.indexOf(':');
@@ -784,24 +813,28 @@ export class AUNChannel {
     if (status === 'start') this.sentCount.delete(channelId);  // 新任务开始，重置计数
     if (!this.client || !this.connected) return;
 
-    const payload = {
-      type: 'processing',
-      status,
-      sessionId,
-      timestamp: Math.floor(Date.now() / 1000),
+    const eventMap: Record<string, string> = {
+      start: 'task.started',
+      done: 'task.completed',
+      interrupted: 'task.interrupted',
+      error: 'task.error',
+      timeout: 'task.timeout',
     };
+    const payload: Record<string, any> = {
+      type: 'event',
+      event: eventMap[status] ?? `task.${status}`,
+      data: { session_id: sessionId },
+      severity: status === 'error' || status === 'timeout' ? 'error' : 'info',
+    };
+    if (context?.threadId) payload.thread_id = context.threadId;
 
-    const params: Record<string, any> = {
-      payload,
-      encrypt: true,
-    };
-    if (context?.threadId) params.task_id = context.threadId;
+    const params: Record<string, any> = { payload, encrypt: true };
 
     // Multi-instance routing
     const statusColonIdx = channelId.indexOf(':');
     const statusTargetAid = statusColonIdx > 0 ? channelId.substring(0, statusColonIdx) : channelId;
     if (statusColonIdx > 0) {
-      (payload as any).chat_id = channelId;
+      payload.chat_id = channelId;
     }
 
     if (this.isGroupId(channelId)) {
@@ -926,6 +959,35 @@ export class AUNChannel {
       maxAttempts: AUNChannel.RECONNECT_DELAYS.length,
     };
   }
+
+  async fetchPeerInfo(aid: string): Promise<{ type: 'human' | 'ai' | null; name?: string }> {
+    const cached = this.peerInfoCache.get(aid);
+    if (cached !== undefined) return cached;
+    if (!this.client) return { type: null };
+    try {
+      const md = await this.client.auth.downloadAgentMd(aid);
+      const typeMatch = md.match(/^type:\s*["']?(\w+)["']?/m);
+      const nameMatch = md.match(/^name:\s*["']?(.+?)["']?\s*$/m);
+      const type: 'human' | 'ai' = typeMatch?.[1] === 'human' ? 'human' : 'ai';
+      const name = nameMatch?.[1]?.trim() || undefined;
+      const info = { type, name };
+      this.peerInfoCache.set(aid, info);
+      setTimeout(() => this.peerInfoCache.delete(aid), 30 * 60 * 1000);
+      return info;
+    } catch {
+      return { type: null };  // no agent.md → unknown
+    }
+  }
+
+  async uploadAgentMd(content: string): Promise<void> {
+    if (!this.client) throw new Error('not connected');
+    await this.client.auth.uploadAgentMd(content);
+  }
+
+  async downloadAgentMd(aid: string): Promise<string> {
+    if (!this.client) throw new Error('not connected');
+    return this.client.auth.downloadAgentMd(aid);
+  }
 }
 
 // Plugin implementation
@@ -968,6 +1030,10 @@ export class AUNChannelPlugin implements ChannelPlugin {
         acknowledge: (messageId: string) => { channel.acknowledge(messageId); return Promise.resolve(); },
         sendProcessingStatus: (id: string, status: 'start' | 'done', sessionId: string, context?: ReplyContext) => channel.sendProcessingStatus(id, status, sessionId, context),
         sendCustomPayload: (id: string, payload: string) => channel.sendCustomPayload(id, payload),
+        uploadAgentMd: (content: string) => channel.uploadAgentMd(content),
+        downloadAgentMd: (aid: string) => channel.downloadAgentMd(aid),
+        _selfAid: () => channel.getStatus().aid,
+        _agentMdContent: inst.agentMd?.content ?? '',
       };
 
       const policy = {

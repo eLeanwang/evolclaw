@@ -1410,8 +1410,7 @@ def error(msg):
         return
     _sys("✗", C.RED, msg)
 
-def print_recv(from_aid, text, extra=""):
-    name = _short_name(from_aid)
+def print_recv(name, text, extra=""):
     ts = datetime.now().strftime('%H:%M:%S')
     text = _replace_emoji(text)
     rendered = _render_md(text)
@@ -1426,8 +1425,7 @@ def print_recv(from_aid, text, extra=""):
         first = f"{C.DIM}{ts}\033[22m {C.GREEN}◀ {name}\033[39m  {lines[0]}{extra}"
         _p(first)
 
-def print_status(from_aid, icon, color, text):
-    name = _short_name(from_aid)
+def print_status(name, icon, color, text):
     ts = datetime.now().strftime('%H:%M:%S')
     content = f"{C.DIM}{ts}\033[22m {color}{icon} {name}\033[39m  {C.DIM}{text}\033[22m"
     _p(content)
@@ -1720,21 +1718,53 @@ class AUNCli:
         # chat_id: 实例唯一标识（aid:device_id:slot_id），用于多实例消息路由
         self.chat_id = ""  # start() 中初始化
         self._sent_msg_ids: set[str] = set()  # 最近已发消息 ID，用于回声去重
+        # peer info cache: aid → {name, type} from agent.md
+        self._peer_info_cache: Dict[str, Dict[str, str]] = {}
+        self._peer_info_pending: set[str] = set()  # 正在请求中的 AID
 
     def _update_chat_id(self):
         device_id = getattr(self.client, "_device_id", "") or ""
         self.chat_id = f"{self.my_aid}:{device_id}:{self.slot_id}"
+
+    def _peer_display_name(self, aid: str) -> str:
+        """Return display name from agent.md cache, fallback to short AID."""
+        info = self._peer_info_cache.get(aid)
+        if info and info.get("name"):
+            return info["name"]
+        return _short_name(aid)
+
+    def _resolve_peer_info_bg(self, aid: str):
+        """Fire-and-forget: download agent.md and cache name+type."""
+        if aid in self._peer_info_cache or aid in self._peer_info_pending:
+            return
+        if not self.client:
+            return
+        self._peer_info_pending.add(aid)
+        async def _fetch():
+            try:
+                md = await self.client.auth.download_agent_md(aid)
+                name_m = re.search(r'^name:\s*["\']?(.+?)["\']?\s*$', md, re.MULTILINE)
+                type_m = re.search(r'^type:\s*["\']?(\w+)["\']?', md, re.MULTILINE)
+                self._peer_info_cache[aid] = {
+                    "name": (name_m.group(1).strip() if name_m else ""),
+                    "type": (type_m.group(1) if type_m else ""),
+                }
+            except Exception:
+                self._peer_info_cache[aid] = {"name": "", "type": ""}
+            finally:
+                self._peer_info_pending.discard(aid)
+        asyncio.ensure_future(_fetch())
 
     def _inject_chat_id(self, payload):
         """向 P2P payload 注入 chat_id。返回 dict 形式的 payload。"""
         if isinstance(payload, str):
             try:
                 parsed = json.loads(payload)
-                payload = parsed if isinstance(parsed, dict) else {"text": payload}
+                payload = parsed if isinstance(parsed, dict) else {"type": "text", "text": payload}
             except (json.JSONDecodeError, TypeError):
-                payload = {"text": payload}
+                payload = {"type": "text", "text": payload}
         elif not isinstance(payload, dict):
-            payload = {"text": str(payload)}
+            payload = {"type": "text", "text": str(payload)}
         if self.chat_id:
             payload["chat_id"] = self.chat_id
         return payload
@@ -1915,6 +1945,30 @@ class AUNCli:
 
         msg_type = proc_payload.get("type")
 
+        # 新格式：type=event, event=task.*
+        if msg_type == "event":
+            event_name = proc_payload.get("event", "")
+            if not event_name.startswith("task."):
+                return False
+            data = proc_payload.get("data") or {}
+            sid = data.get("session_id", "?")
+            thread_id = proc_payload.get("thread_id")
+            conv_id = conversation_id or from_aid
+            is_current = self.target and self.target.get("id") == conv_id
+            if not is_current:
+                return True
+            if hasattr(self, '_connected_at') and (time.monotonic() - self._connected_at) < 3:
+                return True
+            status_map = {
+                "task.started": "start", "task.completed": "done",
+                "task.interrupted": "interrupted", "task.timeout": "timeout",
+                "task.error": "error",
+            }
+            status = status_map.get(event_name, "")
+            # reuse existing status handling below by falling through
+            proc_payload = {"type": "processing", "sessionId": sid, "status": status}
+            msg_type = "processing"
+
         if msg_type == "processing":
             conv_id = conversation_id or from_aid
             is_current = self.target and self.target.get("id") == conv_id
@@ -1929,11 +1983,12 @@ class AUNCli:
             if status == "start":
                 self._processing.add(sid)
                 self._proc_start[sid] = asyncio.get_event_loop().time()
+                dn = self._peer_display_name(from_aid)
                 if self.debug_mode and self._last_sent is not None:
                     delay_ms = int((asyncio.get_event_loop().time() - self._last_sent) * 1000)
-                    print_status(from_aid, "▶", C.CYAN, f"开始处理 ({delay_ms}ms)")
+                    print_status(dn, "▶", C.CYAN, f"开始处理 ({delay_ms}ms)")
                 else:
-                    print_status(from_aid, "▶", C.CYAN, "开始处理")
+                    print_status(dn, "▶", C.CYAN, "开始处理")
                 self._start_spinner(from_aid)
             elif status == "done":
                 self._stop_spinner()
@@ -1947,26 +2002,26 @@ class AUNCli:
                         elapsed_str = f"处理完成，耗时{secs}秒"
                 else:
                     elapsed_str = "处理完成"
-                print_status(from_aid, "*", C.GREEN, elapsed_str)
+                print_status(self._peer_display_name(from_aid), "*", C.GREEN, elapsed_str)
             elif status == "interrupted":
                 self._stop_spinner()
                 self._processing.discard(sid)
                 start_t = self._proc_start.pop(sid, None)
                 if self.debug_mode and start_t is not None:
                     secs = int(asyncio.get_event_loop().time() - start_t)
-                    print_status(from_aid, "!", C.YELLOW, f"已中断，耗时{secs}秒")
+                    print_status(self._peer_display_name(from_aid), "!", C.YELLOW, f"已中断，耗时{secs}秒")
                 else:
-                    print_status(from_aid, "!", C.YELLOW, "已中断")
+                    print_status(self._peer_display_name(from_aid), "!", C.YELLOW, "已中断")
             elif status == "timeout":
                 self._stop_spinner()
                 self._processing.discard(sid)
                 self._proc_start.pop(sid, None)
-                print_status(from_aid, "!", C.RED, "处理超时")
+                print_status(self._peer_display_name(from_aid), "!", C.RED, "处理超时")
             elif status == "error":
                 self._stop_spinner()
                 self._processing.discard(sid)
                 self._proc_start.pop(sid, None)
-                print_status(from_aid, "x", C.RED, "处理失败")
+                print_status(self._peer_display_name(from_aid), "x", C.RED, "处理失败")
             return True
 
         if msg_type == "menu.response":
@@ -1986,8 +2041,10 @@ class AUNCli:
         from_aid = data.get("from", "?")
         if from_aid == self.my_aid:
             return
+        # 后台拉取对端 agent.md（首次触发，后续走缓存）
+        self._resolve_peer_info_bg(from_aid)
         payload  = data.get("payload", "")
-        task_id  = data.get("task_id", "")
+        task_id  = payload.get("thread_id", "") if isinstance(payload, dict) else ""
         e2ee     = data.get("e2ee", {})
 
         # 记录到 raw log（供监控台显示）
@@ -2033,7 +2090,7 @@ class AUNCli:
             self.plaintext_recv += 1
 
         self.msg_count += 1
-        _record_target({"type": "peer", "id": from_aid, "name": _short_name(from_aid)})
+        _record_target({"type": "peer", "id": from_aid, "name": self._peer_display_name(from_aid)})
 
         is_current = self.target and self.target.get("id") == from_aid
 
@@ -2060,7 +2117,7 @@ class AUNCli:
         # debug: 收到第一条回复数据时显示延迟
         if self.debug_mode and self._last_sent is not None:
             delay_ms = int((asyncio.get_event_loop().time() - self._last_sent) * 1000)
-            print_status(from_aid, "·", C.DIM, f"准备输出 ({delay_ms}ms)")
+            print_status(self._peer_display_name(from_aid), "·", C.DIM, f"准备输出 ({delay_ms}ms)")
             self._last_sent = None  # 只显示一次
 
         # silent send 抑制回复（如 Ctrl+C 中断的 /stop 响应）
@@ -2089,7 +2146,7 @@ class AUNCli:
         extra = ""
         if task_id: extra += f"  {C.DIM}[task:{task_id}]\033[22m"
 
-        print_recv(from_aid, text, extra)
+        print_recv(self._peer_display_name(from_aid), text, extra)
 
         # 附件自动下载
         attachments = payload.get("attachments") if isinstance(payload, dict) else None
@@ -2228,7 +2285,7 @@ class AUNCli:
         members = []
         try:
             members_resp = await self.client.call("group.get_members", {"group_id": group_id})
-            raw_list = (members_resp or {}).get("members") or (members_resp or {}).get("items") or []
+            raw_list = (members_resp or {}).get("members") or []
             members = [m for m in raw_list if isinstance(m, dict)]
             if members:
                 self._members_cache[group_id] = members
@@ -2264,8 +2321,7 @@ class AUNCli:
                 await self._ensure_group_membership(target_id)
                 result = await self.client.call("group.send", {
                     "group_id": target_id,
-                    "payload": {"text": text},
-                    "type": "text",
+                    "payload": {"type": "text", "text": text},
                     "encrypt": encrypt,
                 })
             else:
@@ -2433,11 +2489,12 @@ class AUNCli:
                 "owner_aid": self.my_aid,
                 "object_key": object_key,
                 "filename": filename,
-                "size": file_size,
+                "size_bytes": file_size,
                 "sha256": sha256,
                 "content_type": content_type,
             }
             payload = {
+                "type": "file",
                 "text": f"📎 {filename} ({_format_size(file_size)})",
                 "attachments": [attachment],
             }
@@ -2446,14 +2503,12 @@ class AUNCli:
                 msg_result = await self.client.call("group.send", {
                     "group_id": target_id,
                     "payload": payload,
-                    "type": "file",
                     "encrypt": self.encrypt,
                 })
             else:
                 msg_result = await self.client.call("message.send", {
                     "to": target_id,
                     "payload": self._inject_chat_id(payload),
-                    "type": "file",
                     "encrypt": self.encrypt,
                 })
 
@@ -2505,7 +2560,7 @@ class AUNCli:
             owner_aid = att.get("owner_aid", from_aid)
             object_key = att.get("object_key", "")
             filename = att.get("filename", object_key.rsplit("/", 1)[-1] or "unknown")
-            expected_size = att.get("size", 0)
+            expected_size = att.get("size_bytes", 0)
             expected_sha = att.get("sha256", "")
             content_type = att.get("content_type", "")
 
@@ -3162,12 +3217,12 @@ class AUNCli:
             error("当前非群聊目标"); return
         group_id = self.target["id"]
         target_label = _target_label(self.target)
-        payload = {"text": text, "mentions": mention_aids}
+        payload = {"type": "text", "text": text, "mentions": mention_aids}
         try:
             t0 = asyncio.get_event_loop().time()
             result = await self.client.call("group.send", {
                 "group_id": group_id, "payload": payload,
-                "type": "text", "encrypt": self.encrypt,
+                "encrypt": self.encrypt,
             })
             elapsed = int((asyncio.get_event_loop().time() - t0) * 1000)
             _record_target(self.target)
@@ -3226,8 +3281,10 @@ class AUNCli:
         group_id = data.get("group_id", "")
         msg = data.get("message", data)  # SDK 解密后可能直接在 data 层
         sender_aid = msg.get("sender_aid", "?")
+        # 后台拉取对端 agent.md（首次触发，后续走缓存）
+        self._resolve_peer_info_bg(sender_aid)
         payload = msg.get("payload", {})
-        msg_type = msg.get("message_type", msg.get("type", "text"))
+        msg_type = msg.get("message_type", "text")
 
         # 忽略自己发的消息
         if sender_aid == self.my_aid:
@@ -3276,7 +3333,7 @@ class AUNCli:
 
         # 群名
         group_name = self._get_group_name(group_id)
-        sender_name = _short_name(sender_aid)
+        sender_name = self._peer_display_name(sender_aid)
 
         # 记录到最近目标
         _record_target({"type": "group", "id": group_id, "name": group_name})
@@ -3381,7 +3438,7 @@ class AUNCli:
         if self._raw_monitor_app is not None:
             self._raw_monitor_app.invalidate()
         group_id = data.get("group_id", "")
-        group_name = data.get("name") or data.get("group_name") or group_id
+        group_name = data.get("name") or group_id
         _p(f"{C.DIM}{ts}\033[22m {C.CYAN}· [{group_name}]\033[39m  {C.DIM}群组已创建\033[22m")
         asyncio.ensure_future(self._refresh_group_cache())
 
@@ -4657,8 +4714,8 @@ def _build_help_text(is_group_owner: bool | None = None) -> str:
         '<b>agent.md (//agentmd)</b>\n'
         '  <ansiyellow>//agentmd</ansiyellow>                查看本地 AID 的 agent.md\n'
         '  <ansiyellow>//agentmd &lt;aid&gt;</ansiyellow>          查看指定 AID 的 agent.md\n'
-        '  <ansiyellow>//agentmd put &lt;path&gt;</ansiyellow>     从文件上传 agent.md\n'
-        '  <ansiyellow>//agentmd set &lt;text&gt;</ansiyellow>     直接设置 agent.md 文本\n\n'
+        '  <ansiyellow>//agentmd put</ansiyellow>            上传本地 agent.md 到服务端\n'
+        '  <ansiyellow>//agentmd set &lt;text&gt;</ansiyellow>     设置 agent.md（远程 + 本地）\n\n'
         '<b>本地身份 (//local / //aid)</b>\n'
         '  <ansiyellow>//local &lt;name&gt;</ansiyellow>      切换本地 AID（类似 aun -l）\n'
         '  <ansiyellow>//aid list</ansiyellow>           列出本地所有 AID\n'
@@ -4882,59 +4939,58 @@ def _load_history():
         return InMemoryHistory()
 
 async def _dispatch_agentmd_command(c, arg: str):
-    # //agentmd [<aid>] [put <path> | set <text>]
-    # 解析：首个 token 若不是 put/set 则视为 aid
+    # //agentmd [<aid>]    — 查看 agent.md（不填为自身）
+    # //agentmd put        — 从本地 agent.md 上传
+    # //agentmd set <text> — 直接设置 agent.md（同步到本地）
     parts = arg.split(None, 1) if arg.strip() else []
     first = parts[0].lower() if parts else ""
     rest  = parts[1] if len(parts) > 1 else ""
 
-    if first in ("put", "set"):
-        action, action_arg = first, rest.strip()
-        target_aid = c.my_aid or ""
-    elif first:
-        # 第一个 token 是 aid，后面可能跟 put/set
-        target_aid = parts[0]
-        rest_parts = rest.split(None, 1) if rest else []
-        action = rest_parts[0].lower() if rest_parts else ""
-        action_arg = rest_parts[1].strip() if len(rest_parts) > 1 else ""
-    else:
-        target_aid = c.my_aid or ""
-        action = ""
-        action_arg = ""
+    my_aid = c.my_aid or ""
 
-    if not target_aid:
-        error("未连接，无法确定本地 AID")
-        return
-
-    if action == "put":
-        if not action_arg:
-            error("用法: //agentmd [<aid>] put <文件路径>")
-            return
+    if first == "put":
+        if not my_aid:
+            error("未连接，无法确定本地 AID"); return
+        local_path = AUN_PATH / "AIDs" / my_aid / "agent.md"
+        if not local_path.exists():
+            error(f"本地 agent.md 不存在: {local_path}"); return
         try:
-            content = Path(action_arg).read_text(encoding="utf-8")
+            content = local_path.read_text(encoding="utf-8")
             await c.client.auth.upload_agent_md(content)
             info("agent.md 上传成功")
-        except FileNotFoundError:
-            error(f"文件不存在: {action_arg}")
         except Exception as e:
             error(f"上传失败: {e}")
-    elif action == "set":
-        if not action_arg:
-            error("用法: //agentmd [<aid>] set <内容>")
+    elif first == "set":
+        text = rest.strip()
+        if not text:
+            error("用法: //agentmd set <内容>"); return
+        if not my_aid:
+            error("未连接，无法确定本地 AID"); return
+        try:
+            await c.client.auth.upload_agent_md(text)
+            local_path = AUN_PATH / "AIDs" / my_aid / "agent.md"
+            local_path.write_text(text, encoding="utf-8")
+            info("agent.md 已更新并发布到AUN网络")
+        except Exception as e:
+            error(f"上传失败: {e}")
+    else:
+        # 查看：参数视为 aid，不填则查看自身
+        target_aid = arg.strip() or (c.my_aid or "")
+        if not target_aid:
+            error("未连接，无法确定本地 AID")
             return
         try:
-            await c.client.auth.upload_agent_md(action_arg)
-            info("agent.md 上传成功")
-        except Exception as e:
-            error(f"上传失败: {e}")
-    elif not action:
-        try:
             content = await c.client.auth.download_agent_md(target_aid)
-            await _msg_dialog(title=f"agent.md — {_short_name(target_aid)}", text=content.strip(), style=_HELP_STYLE)
+            if not content or not content.strip():
+                info(f"{target_aid} 尚未设置 agent.md")
+            else:
+                await _msg_dialog(title=f"agent.md — {_short_name(target_aid)}", text=content.strip(), style=_HELP_STYLE)
         except Exception as e:
-            error(f"获取 agent.md 失败: {e}")
-    else:
-        error("用法: //agentmd [<aid>] [put <路径> | set <文本>]")
+            msg = str(e)
+            if "not found" in msg.lower() or "404" in msg:
+                info(f"{target_aid} 尚未设置 agent.md")
+            else:
+                error(f"获取 agent.md 失败: {e}")
 
 
 async def _dispatch_local_local_command(c, arg: str):
@@ -5060,6 +5116,27 @@ async def cmd_aid_create(name: str):
         info(f"本地密钥已保留，修复网络后重新执行 `aid new {name}` 可继续注册")
         return
     info(f"AID 创建成功: {result['aid']}")
+
+    # Collect agent type and publish agent.md
+    try:
+        type_input = (await _async_input("Agent 类型 human/ai [human]: ")).strip().lower()
+        agent_type = "ai" if type_input == "ai" else "human"
+        agent_name = name.split(".")[0]
+        agent_md = (
+            f'---\naid: "{name}"\nname: "{agent_name}"\n'
+            f'type: "{agent_type}"\nversion: "1.0.0"\n'
+            f'description: ""\ntags: []\n---\n'
+        )
+        await client.auth.upload_agent_md(agent_md)
+        # Save locally
+        local_path = AUN_PATH / "AIDs" / name / "agent.md"
+        local_path.write_text(agent_md, encoding="utf-8")
+        info("agent.md 已发布")
+    except (EOFError, KeyboardInterrupt):
+        pass
+    except Exception as e:
+        error(f"agent.md 发布失败（可稍后用 //agentmd put 重试）: {e}")
+
     cfg = _load_config()
     if not cfg.get("aid"):
         cfg["aid"] = name

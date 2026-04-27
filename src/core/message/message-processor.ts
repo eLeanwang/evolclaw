@@ -12,6 +12,7 @@ import { EventBus } from '../event-bus.js';
 import { summarizeToolInput } from '../permission.js';
 import type { Message, Config, Session, ChannelAdapter, ChannelOptions, ChannelPolicy, CommandHandler } from '../../types.js';
 import { getOwner } from '../../config.js';
+import { getPackageRoot } from '../../paths.js';
 import type { InteractionRouter } from '../interaction-router.js';
 
 /**
@@ -463,6 +464,10 @@ export class MessageProcessor {
         if (message.chatType === 'group' && message.peerId) {
           contextParts.push(`[群聊回复规则] 回复时必须在开头添加 @${message.peerId} 来通知对方`);
         }
+
+        // 5. Agent ctl 自管理指令提示 + SKILLS.md 生成
+        this.ensureSkillsFile(absoluteProjectPath);
+        contextParts.push(`[EvolClaw 自管理] 可通过 Bash 执行 \`evolclaw ctl <cmd>\` 管理运行时，详见 ${absoluteProjectPath}/.evolclaw/SKILLS.md`);
 
         const effectiveSystemPrompt = [options?.systemPromptAppend, ...contextParts].filter(Boolean).join('\n') || undefined;
 
@@ -1069,8 +1074,16 @@ export class MessageProcessor {
 
     } catch (error) {
       // User interrupt (AbortError) is expected, log at info level
+      const catchInterruptReason = this.interruptedSessions.get(session.id);
+      const catchIsUserInterrupt = catchInterruptReason === 'new_message' || catchInterruptReason === 'stop';
       if (error instanceof Error && error.name === 'AbortError') {
         logger.info('[MessageProcessor] Stream interrupted (AbortError)');
+      } else if (catchIsUserInterrupt) {
+        // SDK telemetry noise after user-initiated interrupt — not a real error
+        logger.debug('[MessageProcessor] Stream ended after user interrupt:', (error as Error)?.message?.split('\n')[0]);
+        completeResult.isError = false;
+        completeResult.hasReceivedText = hasReceivedText;
+        return completeResult;
       } else if (isRetryableError(error)) {
         // Retryable errors (network aborts, transient API failures) are noise at ERROR level
         logger.warn('[MessageProcessor] Stream processing error (retryable):', (error as Error)?.message?.split('\n')[0]);
@@ -1118,6 +1131,48 @@ export class MessageProcessor {
 
     // 都找不到，返回项目根目录路径
     return rootPath;
+  }
+
+  /**
+   * 确保项目目录下有最新版本的 SKILLS.md
+   * 从 src/templates/skills.md 模板复制，按版本号判断是否需要更新
+   */
+  private ensureSkillsFile(projectPath: string): void {
+    try {
+      const targetDir = path.join(projectPath, '.evolclaw');
+      const targetPath = path.join(targetDir, 'SKILLS.md');
+      const templatePath = path.join(getPackageRoot(), 'src', 'templates', 'skills.md');
+
+      // 模板不存在则跳过（构建环境可能没有 src/）
+      if (!fs.existsSync(templatePath)) {
+        // 尝试 dist/templates/skills.md
+        const distTemplatePath = path.join(getPackageRoot(), 'dist', 'templates', 'skills.md');
+        if (!fs.existsSync(distTemplatePath)) return;
+        this.copySkillsIfNeeded(distTemplatePath, targetDir, targetPath);
+        return;
+      }
+      this.copySkillsIfNeeded(templatePath, targetDir, targetPath);
+    } catch {
+      // 静默失败，不影响正常消息处理
+    }
+  }
+
+  private copySkillsIfNeeded(templatePath: string, targetDir: string, targetPath: string): void {
+    const templateContent = fs.readFileSync(templatePath, 'utf-8');
+    const versionMatch = templateContent.match(/^version:\s*(\d+)/m);
+    const templateVersion = versionMatch ? parseInt(versionMatch[1], 10) : 0;
+
+    if (fs.existsSync(targetPath)) {
+      const existing = fs.readFileSync(targetPath, 'utf-8');
+      const existingMatch = existing.match(/^version:\s*(\d+)/m);
+      const existingVersion = existingMatch ? parseInt(existingMatch[1], 10) : 0;
+      if (existingVersion >= templateVersion) return; // 已是最新
+    }
+
+    if (!fs.existsSync(targetDir)) {
+      fs.mkdirSync(targetDir, { recursive: true });
+    }
+    fs.writeFileSync(targetPath, templateContent, 'utf-8');
   }
 
   /**

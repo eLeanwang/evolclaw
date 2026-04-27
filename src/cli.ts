@@ -8,7 +8,7 @@ import { migrateProject } from './utils/migrate-project.js';
 import readline from 'readline';
 import { cmdInit } from './utils/init.js';
 import { ipcQuery } from './ipc.js';
-import { cmdInitWechat, cmdInitFeishu, cmdInitAun, cmdInitDingtalk, cmdInitQQBot, checkAunEnvironment } from './utils/init-channel.js';
+import { cmdInitWechat, cmdInitFeishu, cmdInitAun, cmdInitDingtalk, cmdInitQQBot, cmdInitWecom, checkAunEnvironment } from './utils/init-channel.js';
 import * as platform from './utils/cross-platform.js';
 import { EventBus } from './core/event-bus.js';
 
@@ -411,6 +411,7 @@ function showConfigChannels(config: any) {
     { type: 'aun', isValid: (inst: any) => !!inst.aid && inst.enabled !== false && !inst.aid.includes('your-') && !inst.aid.includes('placeholder') },
     { type: 'dingtalk', isValid: (inst: any) => !!inst.clientId && inst.enabled !== false && !inst.clientId.includes('your-') && !inst.clientId.includes('placeholder') },
     { type: 'qqbot', isValid: (inst: any) => !!inst.appId && inst.enabled !== false && !inst.appId.includes('your-') && !inst.appId.includes('placeholder') },
+    { type: 'wecom', isValid: (inst: any) => !!inst.botId && inst.enabled !== false && !inst.botId.includes('your-') && !inst.botId.includes('placeholder') },
   ];
 
   for (const { type, isValid } of channelChecks) {
@@ -1062,7 +1063,7 @@ function archiveSelfHealLog(
  * Searches across all channel types (feishu, wechat, aun) for a matching instance.
  */
 function resolveInstanceConfig(config: any, instanceName: string): { type: string; config: any } | null {
-  for (const type of ['feishu', 'wechat', 'aun', 'dingtalk', 'qqbot']) {
+  for (const type of ['feishu', 'wechat', 'aun', 'dingtalk', 'qqbot', 'wecom']) {
     const raw = config.channels?.[type];
     if (!raw) continue;
     if (Array.isArray(raw)) {
@@ -1336,6 +1337,50 @@ async function cmdTui() {
   child.on('exit', (code) => process.exit(code ?? 0));
 }
 
+// ==================== Ctl ====================
+
+async function cmdCtl(args: string[]): Promise<void> {
+  if (args.length === 0) {
+    console.error('用法: evolclaw ctl <command> [args...]');
+    console.error('示例: evolclaw ctl model sonnet');
+    console.error('      evolclaw ctl status');
+    console.error('      evolclaw ctl effort high');
+    process.exit(1);
+  }
+
+  const sessionId = process.env.EVOLCLAW_SESSION_ID;
+  if (!sessionId) {
+    console.error('错误: EVOLCLAW_SESSION_ID 未设置（仅在 evolclaw 托管环境中可用）');
+    process.exit(1);
+  }
+
+  const cmd = '/' + args.join(' ');
+  const socketPath = resolvePaths().socket;
+
+  // compact/restart 等长时操作使用更长超时
+  const longRunning = ['/compact', '/restart'];
+  const timeout = longRunning.some(c => cmd.startsWith(c)) ? 60_000 : 10_000;
+
+  const result = await ipcQuery(socketPath, {
+    type: 'ctl',
+    cmd,
+    sessionId,
+  }, timeout);
+
+  if (!result) {
+    console.error('错误: 无法连接 evolclaw 服务');
+    process.exit(1);
+  }
+
+  const ctlResult = result as any;
+  if (ctlResult.ok) {
+    console.log(ctlResult.result);
+  } else {
+    console.error(ctlResult.error || '执行失败');
+    process.exit(1);
+  }
+}
+
 // ==================== Main ====================
 
 export async function main(args: string[]) {
@@ -1353,6 +1398,8 @@ export async function main(args: string[]) {
         await cmdInitDingtalk();
       } else if (args[1] === 'qqbot') {
         await cmdInitQQBot();
+      } else if (args[1] === 'wecom') {
+        await cmdInitWecom();
       } else {
         await cmdInit();
       }
@@ -1384,8 +1431,11 @@ export async function main(args: string[]) {
     case 'tui':
       await cmdTui();
       break;
+    case 'ctl':
+      await cmdCtl(args.slice(1));
+      break;
     default:
-      console.log(`Usage: evolclaw {init|start|stop|restart|status|logs|tui|diagnose|mv}
+      console.log(`Usage: evolclaw {init|start|stop|restart|status|logs|tui|ctl|diagnose|mv}
 
 Commands:
   init          创建配置文件 (${resolvePaths().config})
@@ -1393,6 +1443,7 @@ Commands:
   init wechat   微信扫码登录并写入配置
   init dingtalk 钉钉扫码登录并写入配置
   init qqbot    QQ 机器人扫码绑定并写入配置
+  init wecom    企业微信 AI Bot 配置（手动输入 Bot ID + Secret）
   init aun      AUN (AgentUnin.Network) 配置
   start         启动服务 (默认)
   stop          停止服务
