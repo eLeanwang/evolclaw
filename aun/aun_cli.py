@@ -877,7 +877,7 @@ class AUNCompleter(Completer):
                     tid = t.get("id", "")
                     tname = t.get("name", "")
                     is_current = " ✓" if tid == current_id else ""
-                    cnt = unread.get(tid, 0)
+                    cnt = unread.get(tid, 0) if tid != current_id else 0
                     unread_tag = f" (未读{cnt}条)" if cnt > 0 else ""
                     display = f"{tname}{unread_tag}{is_current}"
                     if filter_text and not (tname.lower().startswith(filter_text) or tid.lower().startswith(filter_text)):
@@ -976,7 +976,7 @@ class AUNCompleter(Completer):
                     tid = t.get("id", "")
                     tname = t.get("name", "")
                     is_current = " ✓" if tid == current_id else ""
-                    cnt = unread.get(tid, 0)
+                    cnt = unread.get(tid, 0) if tid != current_id else 0
                     unread_tag = f" (未读{cnt}条)" if cnt > 0 else ""
                     display = f"{tname}{unread_tag}{is_current}"
                     if target_filter and not (tname.lower().startswith(target_filter) or tid.lower().startswith(target_filter)):
@@ -2173,6 +2173,7 @@ class AUNCli:
             timestamp=int(time.time() * 1000),
             is_read=1,
         )
+        self.store.mark_read(from_aid)
 
     async def _on_state(self, data):
         if not isinstance(data, dict):
@@ -2893,6 +2894,7 @@ class AUNCli:
         self._pending_menu = None
         asyncio.ensure_future(self.query_menu())
         self._show_unread(name)
+        self.store.mark_read(name)
         # slot_id 跟随 target 更新，变化时重连以更新 Gateway 路由
         await self._update_slot_for_target(name)
         return True
@@ -2911,6 +2913,7 @@ class AUNCli:
         info(f"目标: [{name}]")
         self._pending_menu = None  # 群不支持远端菜单
         self._show_unread(group_id)
+        self.store.mark_read(group_id)
         # 后台预加载群成员缓存
         asyncio.ensure_future(self._ensure_members_cache(group_id))
         # slot_id 跟随 target 更新，变化时重连以更新 Gateway 路由
@@ -3439,6 +3442,7 @@ class AUNCli:
             timestamp=int(time.time() * 1000),
             is_read=1,
         )
+        self.store.mark_read(group_id)
 
     async def _on_group_created(self, data):
         """处理群组创建事件。"""
@@ -4775,22 +4779,7 @@ async def repl(c: AUNCli):
         dbg  = "  [DEBUG]" if c.debug_mode else ""
         sdbg = "  [SDK_DBG]" if c.sdk_debug else ""
         log  = "  [LOG]" if c._log_enabled else ""
-        # 未读计数
-        unread_str = ""
-        try:
-            current_id = c.target.get("id") if c.target else None
-            counts = c.store.unread_counts()
-            parts = []
-            for cid, cnt in counts.items():
-                if cid == current_id:
-                    continue
-                label = _short_name(cid) if "." in cid else cid
-                parts.append(f"{label}:{cnt}")
-            if parts:
-                unread_str = "  [" + " | ".join(parts) + "]"
-        except Exception:
-            pass
-        return HTML(f" <b>{conn}</b>  {me}  →  {tgt}  消息: {c.msg_count}  {rej}{enc}{dbg}{sdbg}{log}{unread_str}")
+        return HTML(f" <b>{conn}</b>  {me}  →  {tgt}  消息: {c.msg_count}  {rej}{enc}{dbg}{sdbg}{log}")
 
     session = PromptSession(
         completer=AUNCompleter(cli_ref=c),
