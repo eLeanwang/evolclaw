@@ -377,16 +377,20 @@ export class MessageProcessor {
 
       // 调用 AgentRunner（含上下文过长自动 compact 重试）
 
+      // 捕获当前消息的上下文（闭包），避免后续消息处理时串台
+      const capturedChannelId = message.channelId;
+      const capturedReplyContext = this.getReplyContext(message);
+
       // 设置权限审批的消息发送回调（指向当前渠道）
       agent.setSendPrompt(async (text: string) => {
-        await adapter.sendText(message.channelId, text, this.getReplyContext(message));
+        await adapter.sendText(capturedChannelId, text, capturedReplyContext);
       });
 
       // 设置权限审批的交互上下文（支持交互卡片）
       agent.setPermissionContext?.(session.id, {
         adapter,
-        channelId: message.channelId,
-        replyContext: this.getReplyContext(message),
+        channelId: capturedChannelId,
+        replyContext: capturedReplyContext,
         interactionRouter: this.interactionRouter,
         interceptNextMessage: this.messageQueue
           ? (sessionKey, handler) => this.messageQueue!.interceptNext(sessionKey, handler)
