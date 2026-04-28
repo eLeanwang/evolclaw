@@ -10,7 +10,8 @@
   "files": [
     "dist/",
     "!dist/experimental/",
-    "data/evolclaw.sample.json"
+    "data/evolclaw.sample.json",
+    "evolclaw-install.md"
   ],
   "scripts": {
     "dev": "tsx watch src/index.ts",
