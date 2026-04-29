@@ -758,6 +758,11 @@ class AUNCompleter(Completer):
     def __init__(self, cli_ref=None):
         self.cli_ref = cli_ref  # AUNCli 实例引用，用于读取 _pending_menu
 
+    @staticmethod
+    def _meta(node: dict) -> str:
+        """有 desc 则显示，无则空。"""
+        return node.get('desc', '')
+
     def get_completions(self, document, complete_event):
         raw = document.text_before_cursor
         text = raw.lstrip()
@@ -1044,25 +1049,130 @@ class AUNCompleter(Completer):
                              display="// 本地命令", display_meta="调试 · 设置")
             return
         filter_text = text[1:]  # / 后面的内容
+        # 多级菜单补全：解析输入路径，逐级匹配 next.items
+        # 输入示例: "model" → 一级匹配, "model opus" → 二级匹配
+        parts = filter_text.split(' ') if filter_text else ['']
+        # 一级：遍历所有 group.commands
+        all_cmds = []
         for group in menu:
-            group_name = group['group']
-            for cmd in group['commands']:
-                cmd_text = cmd['cmd']
+            group_name = group.get('group', '')
+            for cmd in group.get('commands', []):
+                all_cmds.append((cmd, group_name))
+        # 尝试沿路径匹配到当前层级
+        matched_node = None
+        matched_depth = 0
+        cmd_path = ''  # 已匹配的命令拼接路径
+        if parts[0]:
+            for cmd, gname in all_cmds:
+                cmd_key = cmd.get('cmd', '') or ''
+                cmd_bare = cmd_key.lstrip('/')
+                val = cmd.get('value', '')
+                node_key = cmd_bare or val
+                if not node_key:
+                    continue
+                if node_key == parts[0]:
+                    matched_node = cmd
+                    matched_depth = 1
+                    cmd_path = cmd_key or val
+                    # 继续沿 next.items 匹配后续 parts
+                    for i in range(1, len(parts)):
+                        nxt = matched_node.get('next')
+                        if not nxt or nxt.get('type') != 'select':
+                            break
+                        items = nxt.get('items') or []
+                        if nxt.get('dynamic') and not items:
+                            # 动态子菜单：从缓存读取
+                            items = self.cli_ref._pending_sub_menu.get(cmd_path, []) if self.cli_ref else []
+                        found = False
+                        for sub in items:
+                            sub_key = (sub.get('cmd', '') or '').lstrip('/') or sub.get('value', '')
+                            if sub_key and sub_key == parts[i]:
+                                matched_node = sub
+                                matched_depth = i + 1
+                                sep = ' ' if cmd_path else ''
+                                cmd_path = cmd_path + sep + (sub.get('cmd', '') or sub.get('value', ''))
+                                found = True
+                                break
+                        if not found:
+                            break
+                    break
+        # 确定展示层级
+        exact_match = matched_node and (
+            matched_depth == len(parts) or
+            (matched_depth == len(parts) - 1 and parts[-1] == '')
+        )
+        if exact_match:
+            # 完全匹配到某节点，展示其 next（如果有）
+            nxt = matched_node.get('next')
+            if nxt:
+                prefix = '/' + ' '.join(parts[:matched_depth])
+                nxt_type = nxt.get('type', 'select')
+                if nxt_type == 'text':
+                    # text 类型：显示占位提示
+                    args_hint = matched_node.get('args', '参数')
+                    yield Completion(prefix + ' ', start_position=-len(text),
+                                     display=f"{prefix} <{args_hint}>", display_meta="输入后回车")
+                elif nxt_type == 'select':
+                    items = nxt.get('items') or []
+                    if nxt.get('dynamic') and not items:
+                        items = self.cli_ref._pending_sub_menu.get(cmd_path, []) if self.cli_ref else []
+                        if not items and self.cli_ref and cmd_path not in self.cli_ref._sub_menu_querying:
+                            asyncio.ensure_future(self.cli_ref.query_sub_menu(cmd_path))
+                    if items:
+                        for sub in items:
+                            sub_cmd = sub.get('cmd', '') or ''
+                            sub_val = sub.get('value', '')
+                            sub_key = sub_cmd.lstrip('/') or sub_val
+                            sub_args = sub.get('args', '')
+                            ct = prefix + ' ' + sub_key
+                            disp = f"{ct} <{sub_args}>" if sub_args else ct
+                            yield Completion(ct, start_position=-len(text),
+                                             display=disp, display_meta=self._meta(sub))
+            # 叶子节点（无 next）：不展示补全，Enter 会直接提交
+        elif matched_node and matched_depth < len(parts):
+            # 部分匹配：在当前层级过滤
+            nxt = matched_node.get('next')
+            if nxt and nxt.get('type') == 'select':
+                items = nxt.get('items') or []
+                if nxt.get('dynamic') and not items:
+                    items = self.cli_ref._pending_sub_menu.get(cmd_path, []) if self.cli_ref else []
+                partial = parts[matched_depth] if matched_depth < len(parts) else ''
+                prefix = '/' + ' '.join(parts[:matched_depth])
+                for sub in items:
+                    sub_cmd = sub.get('cmd', '') or ''
+                    sub_val = sub.get('value', '')
+                    sub_key = sub_cmd.lstrip('/') or sub_val
+                    if sub_key.startswith(partial):
+                        ct = prefix + ' ' + sub_key
+                        yield Completion(ct, start_position=-len(text),
+                                         display=ct.strip(), display_meta=self._meta(sub))
+        else:
+            # 一级菜单过滤
+            partial = parts[0]
+            for cmd, gname in all_cmds:
+                cmd_key = cmd.get('cmd', '') or ''
+                cmd_bare = cmd_key.lstrip('/')
+                if not cmd_bare:
+                    # 纯分组节点：展示其 next.items 作为一级
+                    nxt = cmd.get('next')
+                    if nxt and nxt.get('type') == 'select':
+                        sub_items = nxt.get('items') or []
+                        for sub in sub_items:
+                            sc = (sub.get('cmd', '') or '').lstrip('/')
+                            if sc and sc.startswith(partial):
+                                sa = sub.get('args', '')
+                                disp = f"/{sc} <{sa}>" if sa else f"/{sc}"
+                                ct = f"/{sc}"
+                                yield Completion(ct, start_position=-len(text),
+                                                 display=disp, display_meta=self._meta(sub))
+                    continue
                 args = cmd.get('args', '')
-                label = cmd['label']
-                cmd_bare = cmd_text.lstrip('/')
                 display_text = "/" + cmd_bare
-                display = f"{display_text} {args}".strip() if args else display_text
-                meta_text = f"{group_name} · {label}"
-                if cmd_bare.startswith(filter_text):
-                    ct = display_text + " " if cmd_bare == filter_text else display_text
+                display = f"{display_text} <{args}>" if args else display_text
+                if cmd_bare.startswith(partial):
+                    ct = display_text
                     yield Completion(ct, start_position=-len(text),
-                                     display=display, display_meta=meta_text)
-                elif filter_text.startswith(cmd_bare) and (
-                    len(filter_text) == len(cmd_bare) or filter_text[len(cmd_bare)] == ' '
-                ):
-                    yield Completion(text + " ", start_position=-len(text),
-                                     display=display, display_meta=meta_text)
+                                     display=display, display_meta=self._meta(cmd))
 
 # 快捷键绑定
 _kb = KeyBindings()
@@ -1163,12 +1273,33 @@ def _left_arrow(event):
             buf.cancel_completion()
             buf.set_document(Document('/', 1))
             buf.start_completion()
+        elif text.startswith('/') and ' ' in text:
+            # 远端多级菜单：返回上一级
+            parent = text.rsplit(' ', 1)[0]
+            buf.cancel_completion()
+            buf.set_document(Document(parent + ' ', len(parent) + 1))
+            buf.start_completion()
         else:
             # 一级菜单 → 退出并清空
             buf.cancel_completion()
             buf.set_document(Document(''))
         return
     buf.cursor_left()
+
+# 空格键：远端命令后按空格展开子菜单
+@_kb.add(' ')
+def _space(event):
+    buf = event.current_buffer
+    text = buf.text
+    if text.startswith('/') and not text.startswith('//') and ' ' not in text:
+        buf.insert_text(' ')
+        buf.start_completion()
+        return
+    if text.startswith('/') and not text.startswith('//') and not buf.complete_state:
+        buf.insert_text(' ')
+        buf.start_completion()
+        return
+    buf.insert_text(' ')
 
 # Backspace：删除字符后，如果剩余文本以 / 开头，重新打开补全菜单
 @_kb.add('backspace')
@@ -1680,6 +1811,8 @@ class AUNCli:
         self._menu_cooldown_until = 0   # 菜单冷却截止时间（event loop time）
         self._menu_cached_at = 0        # 缓存写入时间（event loop time）
         self._menu_ttl = 300            # 缓存有效期（秒，默认 5 分钟）
+        self._pending_sub_menu: dict = {}   # cmd → 子菜单 items
+        self._sub_menu_querying: set = set()  # 正在查询的 cmd
         self._suppress_next = False     # silent send 时抑制下一条回复
         self._seen_msg_ids = set()      # 内存级消息去重（防止 SDK 重复触发）
         self._raw_log = []              # rawdata 条目缓冲 (每条是一个 dict: {ts, data})
@@ -2027,9 +2160,15 @@ class AUNCli:
             return True
 
         if msg_type == "menu.response":
-            self._pending_menu = proc_payload.get("items", [])
-            self._menu_cached_at = asyncio.get_event_loop().time()
-            self._menu_fresh = True
+            cmd_key = proc_payload.get("cmd")
+            if cmd_key:
+                self._pending_sub_menu[cmd_key] = proc_payload.get("items", [])
+                self._sub_menu_querying.discard(cmd_key)
+                self._refresh_completion()
+            else:
+                self._pending_menu = proc_payload.get("items", [])
+                self._menu_cached_at = asyncio.get_event_loop().time()
+                self._menu_fresh = True
             return True
 
         if msg_type == "menu.query":
@@ -2194,8 +2333,8 @@ class AUNCli:
             # 重连后刷新远端菜单（仅 peer target）
             if self.target and _is_peer_target(self.target):
                 self._pending_menu = None
+                self._pending_sub_menu.clear()
                 asyncio.ensure_future(self.query_menu())
-
     async def _update_slot_for_target(self, target_id: str):
         """target 切换后更新 slot_id，若已连接且 slot 变化则重连。"""
         new_slot = target_id or ""
@@ -2836,6 +2975,35 @@ class AUNCli:
                 else:
                     info("菜单查询超时")
 
+    async def query_sub_menu(self, cmd: str):
+        """查询动态子菜单，结果写入 _pending_sub_menu[cmd]。"""
+        if not self.client or not self.connected:
+            return
+        if not self.target or not _is_peer_target(self.target):
+            return
+        if cmd in self._sub_menu_querying:
+            return
+        self._sub_menu_querying.add(cmd)
+        target_id = self.target["id"]
+        try:
+            await self.client.call("message.send", {
+                "to": target_id,
+                "payload": self._inject_chat_id({"type": "menu.query", "cmd": cmd}),
+                "encrypt": True,
+            })
+        except Exception:
+            self._sub_menu_querying.discard(cmd)
+
+    def _refresh_completion(self):
+        """子菜单响应到达后，如果用户正在等待补全，打开补全菜单。"""
+        s = self._spinner_session
+        if not s or not s.app:
+            return
+        buf = s.app.current_buffer
+        text = buf.text
+        if text.startswith('/') and not text.startswith('//') and text.endswith(' '):
+            buf.start_completion()
+
     async def ping(self):
         if not self.client:
             error("未连接"); return
@@ -2892,6 +3060,7 @@ class AUNCli:
         _save_config(cfg)
         info(f"目标: {name}")
         self._pending_menu = None
+        self._pending_sub_menu.clear()
         asyncio.ensure_future(self.query_menu())
         self._show_unread(name)
         self.store.mark_read(name)
@@ -2912,6 +3081,7 @@ class AUNCli:
         _save_config(cfg)
         info(f"目标: [{name}]")
         self._pending_menu = None  # 群不支持远端菜单
+        self._pending_sub_menu.clear()
         self._show_unread(group_id)
         self.store.mark_read(group_id)
         # 后台预加载群成员缓存
