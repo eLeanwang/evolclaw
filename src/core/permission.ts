@@ -114,6 +114,12 @@ export function summarizeToolInput(toolName: string, input: Record<string, unkno
     'Glob':  (i) => `pattern: ${i.pattern}`,
     'Agent': (i) => i.description || i.prompt?.substring(0, 80),
     'Skill': (i) => i.skill ? `${i.skill}${i.args ? ' ' + i.args : ''}` : undefined,
+    'ExitPlanMode': (i) => {
+      if (i.allowedPrompts?.length) {
+        return `计划包含 ${i.allowedPrompts.length} 项操作权限`;
+      }
+      return '计划审批';
+    },
     'TodoWrite': (i) => {
       if (Array.isArray(i.todos)) {
         return i.todos.map((t: any) => t.content || t.task || t.text).filter(Boolean).join(', ').substring(0, 80);
@@ -240,7 +246,6 @@ export class PermissionGateway {
       },
       channelId: context?.channelId || '',
       sessionId,
-      expiresAt: Date.now() + this.timeout,
     };
 
     // 尝试富交互
@@ -264,16 +269,7 @@ export class PermissionGateway {
     }
 
     return new Promise((resolve) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(requestId);
-        // 清理 router 注册（仅删除本次请求，不影响其他交互）
-        if (interactionSent && context?.interactionRouter) {
-          context.interactionRouter.cancel(requestId);
-        }
-        this.eventBus?.publish({ type: 'permission:timeout', sessionId, requestId });
-        resolve('deny');
-      }, this.timeout);
-      this.pending.set(requestId, { sessionId, toolName, resolve, timer });
+      this.pending.set(requestId, { sessionId, toolName, resolve, timer: setTimeout(() => {}, 0) });
 
       // 如果发了交互卡片，同时注册到 InteractionRouter
       if (interactionSent && context?.interactionRouter) {
