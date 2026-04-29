@@ -15,6 +15,21 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 
+export interface MenuNext {
+  type: 'select' | 'text';
+  items?: MenuItem[];
+  dynamic?: boolean;
+}
+
+export interface MenuItem {
+  cmd?: string;
+  value?: string;
+  label: string;
+  args?: string;
+  desc?: string;
+  next?: MenuNext;
+}
+
 const allEfforts = ['low', 'medium', 'high', 'max'] as const;
 type Effort = typeof allEfforts[number];
 const nonMaxEfforts = allEfforts.filter(e => e !== 'max') as readonly Effort[];
@@ -138,7 +153,7 @@ const aliases: Record<string, string> = {
 };
 
 // 命令快速路径前缀（所有命令都不进入消息队列）
-const quickCommandPrefixes = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/effort', '/agent', '/slist', '/session', '/rename', '/repair', '/fork', '/stop', '/clear', '/compact', '/safe', '/del', '/perm', '/send', '/check', '/p ', '/s ', '/name ', '/rewind', '/rw', '/rw ', '/activity'];
+const quickCommandPrefixes = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/effort', '/agent', '/slist', '/session', '/rename', '/repair', '/fork', '/stop', '/clear', '/compact', '/safe', '/del', '/perm', '/send', '/check', '/p ', '/s ', '/name', '/rewind', '/rw', '/rw ', '/activity'];
 
 export class CommandHandler {
   private adapters = new Map<string, ChannelAdapter>();
@@ -366,10 +381,10 @@ export class CommandHandler {
    * 返回结构化命令菜单（供 menu.query 使用）
    * owner 看到全部命令，admin 看到管理级命令（不含 owner-only），guest 仅看到用户级命令
    */
-  getMenuItems(role: string, chatType: string = 'private'): { group: string; commands: { cmd: string; args?: string; label: string }[] }[] {
+  getMenuItems(role: string, chatType: string = 'private'): { group: string; commands: MenuItem[] }[] {
     const isOwner = role === 'owner';
     const isAdmin = role === 'owner' || role === 'admin';
-    const items: { group: string; commands: { cmd: string; args?: string; label: string }[] }[] = [];
+    const items: { group: string; commands: MenuItem[] }[] = [];
 
     if (!isAdmin && chatType === 'group') {
       return [
@@ -388,9 +403,9 @@ export class CommandHandler {
       items.push({
         group: '项目管理',
         commands: [
-          { cmd: '/pwd', label: '显示当前项目路径' },
-          { cmd: '/p', args: '[name|path]', label: '列出或切换项目' },
-          ...(isOwner ? [{ cmd: '/bind', args: '<path>', label: '绑定新项目目录' }] : []),
+          { cmd: '/pwd', label: '显示当前项目路径', desc: '查看当前会话绑定的项目目录' },
+          { cmd: '/p', label: '列出或切换项目', desc: '切换到其他已配置的项目', next: { type: 'select', dynamic: true } },
+          ...(isOwner ? [{ cmd: '/bind', args: '<path>', label: '绑定新项目目录', desc: '将当前会话绑定到指定项目路径', next: { type: 'text' as const } }] : []),
         ]
       });
     }
@@ -398,14 +413,14 @@ export class CommandHandler {
     items.push({
       group: '会话管理',
       commands: [
-        { cmd: '/new', args: '[name]', label: '创建新会话（清空历史请用此命令）' },
-        { cmd: '/s', args: '[cli|name|index|uuid]', label: '列出或切换会话（cli 查看未导入的 CLI 会话）' },
-        { cmd: '/name', args: '<name>', label: '重命名当前会话' },
-        { cmd: '/del', args: '<name>', label: '删除指定会话' },
+        { cmd: '/new', label: '创建新会话', desc: '清空历史，开始全新对话', next: { type: 'text' as const } },
+        { cmd: '/s', label: '切换会话', desc: '切换到同项目下的其他会话', next: { type: 'select', dynamic: true } },
+        { cmd: '/name', label: '重命名当前会话', desc: '为当前会话设置一个易识别的名称', next: { type: 'text' as const } },
+        { cmd: '/del', label: '删除指定会话', desc: '永久删除一个非活跃会话', next: { type: 'select', dynamic: true } },
         ...(isAdmin ? [
-          { cmd: '/fork', args: '[name]', label: '分支当前会话' },
-          { cmd: '/rewind', args: '[N] [chat|file|all]', label: '查看历史/撤销指定轮次 (别名: /rw)' },
-          { cmd: '/compact', label: '压缩会话上下文' },
+          { cmd: '/fork', label: '分支当前会话', desc: '基于当前会话创建独立分支', next: { type: 'text' as const } },
+          { cmd: '/rewind', args: '[N] [chat|file|all]', label: '查看历史/撤销指定轮次', desc: '回退会话到指定轮次，可选择撤销文件改动' },
+          { cmd: '/compact', label: '压缩会话上下文', desc: '将长对话压缩为摘要以节省 token' },
         ] : []),
       ]
     });
@@ -414,33 +429,57 @@ export class CommandHandler {
       items.push({
         group: 'Agent 与模型',
         commands: [
-          { cmd: '/agent', args: '[name]', label: '查看或切换 Agent 后端' },
-          { cmd: '/model', args: '[model]', label: '查看或切换模型' },
-          { cmd: '/effort', args: '[level]', label: '查看或切换推理强度' },
+          { cmd: '/agent', label: '切换 Agent 后端', desc: '切换当前会话使用的 AI 后端', next: { type: 'select', dynamic: true } },
+          { cmd: '/model', label: '切换模型', desc: '切换当前 Agent 使用的模型版本', next: { type: 'select', dynamic: true } },
+          { cmd: '/effort', label: '切换推理强度', desc: '调整模型推理深度，影响响应速度与质量', next: { type: 'select', items: [
+            { value: 'low', label: 'Low' },
+            { value: 'medium', label: 'Medium' },
+            { value: 'high', label: 'High' },
+            { value: 'max', label: 'Max' },
+          ] } },
         ]
       });
 
       items.push({
         group: '权限管理',
         commands: [
-          { cmd: '/perm', args: isOwner ? '[mode|allow|always|deny]' : '[allow|always|deny]', label: '权限模式管理' },
+          { cmd: '/perm', label: '权限模式管理', desc: '控制工具调用的审批策略', next: { type: 'select', items: [
+            ...(isOwner ? [
+              { value: 'auto', label: '自动模式', desc: '根据风险等级自动决定是否审批' },
+              { value: 'bypass', label: '免审批模式', desc: '跳过所有工具审批确认' },
+              { value: 'plan', label: '计划模式', desc: '仅允许只读操作，写操作需审批' },
+              { value: 'edit', label: '编辑模式', desc: '允许文件编辑，其他操作需审批' },
+              { value: 'request', label: '请求模式', desc: '所有操作均需审批' },
+              { value: 'noask', label: '静默模式', desc: '不弹出审批，自动拒绝未授权操作' },
+            ] : []),
+            { value: 'allow', label: '允许此操作', desc: '本次允许当前待审批操作' },
+            { value: 'always', label: '始终允许', desc: '永久允许同类操作' },
+            { value: 'deny', label: '拒绝此操作', desc: '拒绝当前待审批操作' },
+          ] } },
         ]
       });
 
       items.push({
         group: '运维',
         commands: [
-          { cmd: '/status', label: '显示会话状态' },
-          { cmd: '/stop', label: '中断当前任务' },
-          { cmd: '/check', label: '检查渠道状态' },
-          { cmd: '/activity', args: '[all|dm|owner|none]', label: '查看/控制中间输出显示模式' },
+          { cmd: '/status', label: '显示会话状态', desc: '查看当前会话、项目、Agent 的详细状态' },
+          { cmd: '/stop', label: '中断当前任务', desc: '立即中断正在执行的 Agent 任务' },
+          { cmd: '/check', label: '检查渠道状态', desc: '检查各消息渠道的连接健康状态' },
+          { cmd: '/activity', args: '[all|dm|owner|none]', label: '控制中间输出显示', desc: '设置工具调用过程的可见范围', next: { type: 'select', items: [
+            { value: 'all', label: '全部显示', desc: '所有用户均可见中间输出' },
+            { value: 'dm', label: '仅私聊', desc: '仅私聊中显示中间输出' },
+            { value: 'owner', label: '仅 owner 私聊', desc: '仅 owner 的私聊中显示' },
+            { value: 'none', label: '不显示', desc: '关闭所有中间输出' },
+          ] } },
           ...(isAdmin ? [
-            { cmd: '/restart', args: '<channel>', label: '重连指定渠道' },
+            { cmd: '/restart', label: '重启/重连', desc: '重启服务或重连指定渠道', next: { type: 'select' as const, dynamic: true } },
           ] : []),
           ...(isOwner ? [
-            { cmd: '/restart', label: '重启服务' },
-            { cmd: '/send', args: '[channel] <path>', label: '发送项目内文件' },
-            { cmd: '/agentmd', args: '[put|set <内容>]', label: '管理 agent.md' },
+            { cmd: '/send', args: '[channel] <path>', label: '发送项目内文件', desc: '将项目目录内的文件发送给用户' },
+            { cmd: '/agentmd', args: '[put|set <内容>]', label: '管理 agent.md', desc: '查看或更新 AUN 网络上的 agent.md 身份文件', next: { type: 'select' as const, items: [
+              { value: 'put', label: '上传当前', desc: '将本地 agent.md 上传到 AUN 网络' },
+              { value: 'set', label: '直接设置', desc: '输入内容直接更新 agent.md', next: { type: 'text' as const } },
+            ] } },
           ] : []),
         ]
       });
@@ -448,8 +487,8 @@ export class CommandHandler {
       items.push({
         group: '其他',
         commands: [
-          { cmd: '/status', label: '显示会话状态' },
-          { cmd: '/check', label: '检查渠道健康' },
+          { cmd: '/status', label: '显示会话状态', desc: '查看当前会话的基本状态' },
+          { cmd: '/check', label: '检查渠道健康', desc: '检查消息渠道连接状态' },
         ]
       });
     }
@@ -457,16 +496,65 @@ export class CommandHandler {
     items.push({
       group: '帮助',
       commands: [
-        { cmd: '/help', label: '显示帮助信息' },
+        { cmd: '/help', label: '显示帮助信息', desc: '列出所有可用命令及说明' },
       ]
     });
 
     return items;
   }
 
-  /**
-   * 快速判断是否为命令（不进队列的命令）
-   */
+  /** 动态子菜单：根据 cmd 路径返回选项列表（供 menu.query + cmd 使用） */
+  async getSubMenuItems(cmd: string, channel: string, channelId: string, userId?: string): Promise<MenuItem[] | null> {
+    const session = await this.sessionManager.getActiveSession(channel, channelId);
+
+    if (cmd === '/s' || cmd === '/del') {
+      const sessions = await this.sessionManager.listSessions(channel, channelId);
+      const active = cmd === '/del' ? await this.sessionManager.getActiveSession(channel, channelId) : null;
+      const items: MenuItem[] = sessions
+        .filter(s => !active || s.id !== active.id)
+        .map(s => {
+          const shortId = s.agentSessionId ? s.agentSessionId.substring(0, 8) : '';
+          const time = s.updatedAt ? formatIdleTime(Date.now() - s.updatedAt) : '';
+          const parts = [shortId, time].filter(Boolean).join(' · ');
+          return {
+            value: s.name || s.id.slice(0, 8),
+            label: s.name || s.id.slice(0, 8),
+            desc: parts || undefined,
+          };
+        });
+      if (cmd === '/s') {
+        items.push({ value: 'cli', label: '查看 CLI 会话', desc: '列出未导入的 CLI 本地会话' });
+      }
+      return items;
+    }
+
+    if (cmd === '/p') {
+      const list = this.config.projects?.list || {};
+      return Object.entries(list).map(([name, path]) => ({ value: name, label: name, desc: path as string }));
+    }
+
+    if (cmd === '/agent') {
+      return [...this.agentMap.keys()].map(name => ({ value: name, label: name }));
+    }
+
+    if (cmd === '/model') {
+      const agent = this.getAgent(session?.agentId);
+      if (hasModelSwitcher(agent) && agent.listModels) {
+        const models = await agent.listModels() ?? [];
+        if (models.length > 0) return models.map((m: string) => ({ value: m, label: m }));
+      }
+      return null;
+    }
+
+    if (cmd === '/restart') {
+      const isOwner = userId ? this.sessionManager.resolveIdentity(channel, userId).role === 'owner' : false;
+      const channels = [...this.adapters.keys()].map(name => ({ value: name, label: name, desc: '重连此渠道' }));
+      if (isOwner) channels.unshift({ value: '', label: '重启服务', desc: '重启整个 EvolClaw 服务进程' });
+      return channels;
+    }
+
+    return null;
+  }
   isCommand(content: string): boolean {
     return content === '/p' || content === '/s' || quickCommandPrefixes.some(cmd => content.startsWith(cmd));
   }
@@ -2051,6 +2139,7 @@ export class CommandHandler {
     }
 
     // /bind 命令：持久化项目到配置（不切换）（owner only）
+    if (normalizedContent === '/bind') return '用法: /bind <路径>';
     if (normalizedContent.startsWith('/bind ')) {
       if (!isOwner) return '❌ 无权限：此命令仅限 owner 使用';
       const projectPath = normalizedContent.slice(6).trim();
@@ -2416,6 +2505,9 @@ export class CommandHandler {
     }
 
     // /rename 或 /name 命令：重命名当前会话
+    if (normalizedContent === '/rename' || normalizedContent === '/name') {
+      return '用法: /name <新名称> 或 /rename <新名称>';
+    }
     if (normalizedContent.startsWith('/rename ')) {
       const newName = normalizedContent.slice(8).trim();
 
