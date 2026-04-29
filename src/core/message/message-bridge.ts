@@ -167,13 +167,25 @@ export class MessageBridge {
 
     if (parsed.type === 'menu.query') {
       const identity = this.sessionManager.resolveIdentity(channel, msg.peerId);
-      const items = this.cmdHandler.getMenuItems(identity.role, msg.chatType || 'private');
-      const response = JSON.stringify({ type: 'menu.response', items });
 
-      if (adapter?.sendCustomPayload) {
-        adapter.sendCustomPayload(msg.channelId, response);
+      if (parsed.cmd) {
+        // 动态子菜单查询
+        const items = await this.cmdHandler.getSubMenuItems(parsed.cmd, channel, msg.channelId, msg.peerId);
+        const response = JSON.stringify({ type: 'menu.response', cmd: parsed.cmd, items: items ?? [] });
+        if (adapter?.sendCustomPayload) {
+          adapter.sendCustomPayload(msg.channelId, response);
+        } else {
+          await sendReply(msg.channelId, response);
+        }
       } else {
-        await sendReply(msg.channelId, response);
+        // 全量菜单
+        const items = this.cmdHandler.getMenuItems(identity.role, msg.chatType || 'private');
+        const response = JSON.stringify({ type: 'menu.response', items });
+        if (adapter?.sendCustomPayload) {
+          adapter.sendCustomPayload(msg.channelId, response);
+        } else {
+          await sendReply(msg.channelId, response);
+        }
       }
       return true;
     }
