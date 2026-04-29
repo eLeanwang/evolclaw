@@ -494,15 +494,7 @@ export class AgentRunner {
 
       // 等待用户交互
       const answer = await new Promise<string | string[] | null>((resolve) => {
-        const timer = setTimeout(() => {
-          permCtx?.interactionRouter?.cancel(requestId);
-          permCtx?.cancelIntercept?.(sessionId);
-          logger.info(`[AgentRunner] AskUserQuestion timeout for ${requestId}`);
-          resolve(null);
-        }, 5 * 60 * 1000);
-
         permCtx?.interactionRouter?.register(requestId, sessionId, (action: string, values?: Record<string, any>) => {
-          clearTimeout(timer);
           if (action === 'cancel') {
             resolve(null);
           } else if (action === '_custom_input' && permCtx.interceptNextMessage) {
@@ -526,7 +518,7 @@ export class AgentRunner {
       });
 
       if (answer === null) {
-        // 超时或取消，自动选第一项
+        // 取消，自动选第一项
         const firstLabel = q.options[0]?.label || '';
         answers[q.question] = q.multiSelect ? [firstLabel] : firstLabel;
       } else {
@@ -560,6 +552,62 @@ export class AgentRunner {
     }
     const updatedInput = { ...input, answers };
     return { behavior: 'allow' as const, updatedInput, decisionClassification: 'user_temporary' as const };
+  }
+
+  /**
+   * 处理 ExitPlanMode 工具调用：plan mode 审批，等待用户批准后才继续执行
+   */
+  private async handleExitPlanMode(
+    sessionId: string,
+    input: Record<string, unknown>,
+    options: { signal: AbortSignal; [key: string]: any }
+  ): Promise<any> {
+    const permCtx = this.permissionContexts.get(sessionId);
+    const sendPrompt = this.sendPromptFn;
+
+    // 无交互上下文，直接 allow（防御性兜底）
+    if (!permCtx?.adapter?.sendInteraction || !permCtx?.channelId || !sendPrompt) {
+      return { behavior: 'allow' as const, updatedInput: input, decisionClassification: 'user_temporary' as const };
+    }
+
+    const requestId = `plan-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const interaction: InteractionRequest = {
+      type: 'interaction',
+      id: requestId,
+      kind: {
+        kind: 'action',
+        title: '📋 计划审批',
+        body: 'AI 已完成规划，等待审批。\n请查看以上计划内容后决定。',
+        buttons: [
+          { key: 'approve', label: '✅ 批准执行', style: 'primary' },
+          { key: 'reject', label: '❌ 拒绝', style: 'danger' },
+        ],
+      },
+      channelId: permCtx.channelId,
+      sessionId,
+    };
+
+    let cardSent = false;
+    try {
+      const result = await permCtx.adapter.sendInteraction(permCtx.channelId, interaction, permCtx.replyContext);
+      cardSent = !!result;
+    } catch (err) {
+      logger.warn('[AgentRunner] ExitPlanMode card send failed:', err);
+    }
+
+    if (!cardSent) {
+      await sendPrompt('📋 计划审批\nAI 已完成规划，等待审批。\n回复 /plan approve 批准执行 | /plan reject 拒绝');
+    }
+
+    return new Promise((resolve) => {
+      permCtx?.interactionRouter?.register(requestId, sessionId, (action: string) => {
+        if (action === 'approve') {
+          resolve({ behavior: 'allow' as const, updatedInput: input, decisionClassification: 'user_temporary' as const });
+        } else {
+          resolve({ behavior: 'deny' as const, message: '用户拒绝了计划', decisionClassification: 'user_reject' as const });
+        }
+      });
+    });
   }
 
   /**
@@ -798,6 +846,11 @@ export class AgentRunner {
       // 这不是权限审批，而是收集用户答案，需要构造表单卡片
       if (toolName === 'AskUserQuestion') {
         return await this.handleAskUserQuestion(sessionId, input, options);
+      }
+
+      // 特殊处理：ExitPlanMode 工具（plan mode 审批）
+      if (toolName === 'ExitPlanMode') {
+        return await this.handleExitPlanMode(sessionId, input, options);
       }
 
       // bypass 模式：一律 allow
