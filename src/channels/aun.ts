@@ -37,7 +37,7 @@ export interface AUNConfig {
   flushDelay?: number;
   encryptionSeed?: string;
   aunTrace?: boolean;     // 启用数据追踪日志
-  ownerId?: string;       // Owner AID，用于发送欢迎消息
+  owner?: string;         // Owner AID，用于发送欢迎消息
 }
 
 export interface AUNMessageHandler {
@@ -324,9 +324,9 @@ export class AUNChannel {
 
   private async sendWelcomeMessage(): Promise<void> {
     try {
-      const ownerId = this.config.ownerId;
-      if (!ownerId) {
-        logger.info('[AUN] No ownerId configured, skipping welcome message');
+      const owner = this.config.owner;
+      if (!owner) {
+        logger.info('[AUN] No owner configured, skipping welcome message');
         return;
       }
 
@@ -348,8 +348,8 @@ export class AUNChannel {
 
 现在，请先使用 \`/bind\` 命令绑定您的项目目录，然后就可以开始工作了！`;
 
-      await this.sendMessage(ownerId, welcomeText);
-      logger.info(`[AUN] Welcome message sent to owner: ${ownerId}`);
+      await this.sendMessage(owner, welcomeText);
+      logger.info(`[AUN] Welcome message sent to owner: ${owner}`);
     } catch (e) {
       logger.warn(`[AUN] Failed to send welcome message: ${e}`);
     }

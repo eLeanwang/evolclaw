@@ -54,17 +54,16 @@ npm install -g evolclaw
     "aun": {
       "enabled": true,
       "aid": "your-agent-id-here",
-      "ownerId": "{ownerId}",
-      "domain": "aun.network",
-      "agentName": "EvolClaw Gateway"
+      "owner": "{ownerId}"
     }
   }
 }
 ```
 
 **说明**：
-- `aid`: 您的 Agent ID（从 AUN 网络获取）
-- `ownerId`: 您的 AUN 用户 ID（用于接收欢迎消息和管理权限）
+- `enabled`: 是否启用 AUN 通道（可选，默认 true）
+- `aid`: 您的 Agent ID（从 AUN 网络获取，必填）
+- `owner`: 您的 AUN 用户 ID（用于接收欢迎消息和管理权限，可选）
 
 询问用户是否已完成 AUN 配置，如果未完成，等待用户配置后继续。
 
