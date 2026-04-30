@@ -1,6 +1,6 @@
-请引导我完成 EvolClaw 的安装和配置。EvolClaw 是一个轻量级 AI Agent 网关，连接 Claude/Codex 到飞书、微信等 IM 通道。
+请引导我完成 EvolClaw 的安装和配置（AUN 通道专用版）。EvolClaw 是一个轻量级 AI Agent 网关，通过 AUN 网络连接多个 Agent。
 
-**重要提示**：安装完成后，首次在 IM 渠道（飞书/微信）中与 EvolClaw 交互的用户将自动成为 owner，拥有完整管理权限。
+**重要提示**：本安装流程专为 AUN 通道设计，会自动完成初始化并引导创建 AUN 通道配置。
 
 按以下步骤执行：
 
@@ -30,25 +30,44 @@ npm config set prefix ~/.npm-global && export PATH=~/.npm-global/bin:$PATH
 npm install -g evolclaw
 ```
 
-## 第 4 步：初始化配置
+## 第 4 步：自动初始化配置
 
-运行 `evolclaw init`。
+**自动执行**：运行 `evolclaw init`
 
 提示用户：EvolClaw 自动继承 Claude Code CLI 的 API Key，无需重复配置。
 
-## 第 5 步：配置消息渠道
+## 第 5 步：配置 AUN 通道
 
-使用 AskUserQuestion（multiSelect: true）询问需要配置哪些渠道：
-- 飞书：运行 `evolclaw init feishu`（扫码登录）
-- 微信：运行 `evolclaw init wechat`（扫码登录）
-- 暂不配置：跳过
+**重要**：告知用户需要创建 AUN 通道的 Agent ID (aid)。
+
+提示用户：
+1. 访问 AUN 网络管理界面创建新的 Agent
+2. 获取分配的 `aid`（Agent ID）
+3. 将 `aid` 配置到 `~/.evolclaw/data/evolclaw.json` 的 `channels.aun.aid` 字段
+
+示例配置：
+```json
+{
+  "channels": {
+    "aun": {
+      "enabled": true,
+      "aid": "your-agent-id-here",
+      "domain": "aun.network",
+      "agentName": "EvolClaw Gateway"
+    }
+  }
+}
+```
+
+询问用户是否已完成 AUN aid 配置，如果未完成，等待用户配置后继续。
 
 ## 第 6 步：启动并验证
 
 运行 `evolclaw start`，再运行 `evolclaw status` 确认状态为 Running。
 
 安装完成后告知用户：
-- 在飞书/微信中发消息验证连接
+- AUN 通道已启动，其他 Agent 可通过 AUN 网络发现并调用此 Agent
 - 发送 `/help` 查看所有命令
 - 发送 `/bind <项目路径>` 绑定项目目录
 - 常用命令：`evolclaw stop/restart/logs`
+- AUN 通道配置文件：`~/.evolclaw/data/evolclaw.json`
