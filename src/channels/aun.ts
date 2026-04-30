@@ -37,6 +37,7 @@ export interface AUNConfig {
   flushDelay?: number;
   encryptionSeed?: string;
   aunTrace?: boolean;     // 启用数据追踪日志
+  ownerId?: string;       // Owner AID，用于发送欢迎消息
 }
 
 export interface AUNMessageHandler {
@@ -311,10 +312,46 @@ export class AUNChannel {
       }
 
       logger.info(`[AUN] Connected as ${this._aid}`);
+
+      // Send welcome message to owner after first connection
+      await this.sendWelcomeMessage();
     } catch (e) {
       logger.error(`[AUN] Connection failed: ${e}`);
       this.scheduleReconnect();
       return;
+    }
+  }
+
+  private async sendWelcomeMessage(): Promise<void> {
+    try {
+      const ownerId = this.config.ownerId;
+      if (!ownerId) {
+        logger.info('[AUN] No ownerId configured, skipping welcome message');
+        return;
+      }
+
+      const welcomeText = `🎉 欢迎使用 EvolClaw！
+
+我是您的 AI Agent 网关，已成功连接到 AUN 网络。
+
+📋 **日常使用方法**：
+
+1. **绑定项目**：发送 \`/bind <项目路径>\` 绑定工作目录
+2. **查看帮助**：发送 \`/help\` 查看所有可用命令
+3. **切换项目**：发送 \`/project <项目名>\` 切换到其他项目
+4. **查看状态**：发送 \`/status\` 查看当前会话状态
+
+💡 **提示**：
+- 直接发送消息即可与 Claude/Codex 对话
+- 支持多项目会话管理，每个项目独立会话
+- 所有命令以 \`/\` 开头
+
+现在，请先使用 \`/bind\` 命令绑定您的项目目录，然后就可以开始工作了！`;
+
+      await this.sendMessage(ownerId, welcomeText);
+      logger.info(`[AUN] Welcome message sent to owner: ${ownerId}`);
+    } catch (e) {
+      logger.warn(`[AUN] Failed to send welcome message: ${e}`);
     }
   }
 
