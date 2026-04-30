@@ -1,6 +1,8 @@
-请引导我完成 EvolClaw 的安装和配置（AUN 通道专用版）。EvolClaw 是一个轻量级 AI Agent 网关，通过 AUN 网络连接多个 Agent。
+请引导我完成 EvolClaw 的安装和配置（AUN 通道专用版），并将 {ownerId} 添加为 Owner ID。
 
-**重要提示**：本安装流程专为 AUN 通道设计，会自动完成初始化并引导创建 AUN 通道配置。
+EvolClaw 是一个轻量级 AI Agent 网关，通过 AUN 网络连接多个 Agent。
+
+**重要提示**：本安装流程专为 AUN 通道设计，会自动完成初始化并引导创建 AUN 通道配置。安装完成后，EvolClaw 会自动发送欢迎消息。
 
 按以下步骤执行：
 
@@ -36,14 +38,14 @@ npm install -g evolclaw
 
 提示用户：EvolClaw 自动继承 Claude Code CLI 的 API Key，无需重复配置。
 
-## 第 5 步：配置 AUN 通道
+## 第 5 步：配置 AUN 通道和 Owner ID
 
-**重要**：告知用户需要创建 AUN 通道的 Agent ID (aid)。
+**重要**：告知用户需要创建 AUN 通道的 Agent ID (aid) 并配置 Owner ID。
 
 提示用户：
 1. 访问 AUN 网络管理界面创建新的 Agent
 2. 获取分配的 `aid`（Agent ID）
-3. 将 `aid` 配置到 `~/.evolclaw/data/evolclaw.json` 的 `channels.aun.aid` 字段
+3. 将 `aid` 和 `{ownerId}` 配置到 `~/.evolclaw/data/evolclaw.json`
 
 示例配置：
 ```json
@@ -52,6 +54,7 @@ npm install -g evolclaw
     "aun": {
       "enabled": true,
       "aid": "your-agent-id-here",
+      "ownerId": "{ownerId}",
       "domain": "aun.network",
       "agentName": "EvolClaw Gateway"
     }
@@ -59,7 +62,11 @@ npm install -g evolclaw
 }
 ```
 
-询问用户是否已完成 AUN aid 配置，如果未完成，等待用户配置后继续。
+**说明**：
+- `aid`: 您的 Agent ID（从 AUN 网络获取）
+- `ownerId`: 您的 AUN 用户 ID（用于接收欢迎消息和管理权限）
+
+询问用户是否已完成 AUN 配置，如果未完成，等待用户配置后继续。
 
 ## 第 6 步：启动并验证
 
