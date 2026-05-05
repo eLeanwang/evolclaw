@@ -11,65 +11,48 @@ export const isWindows = process.platform === 'win32';
 
 /**
  * Encode project path as directory name (Claude SDK convention).
- * Replace all path separators with '-'.
+ * Match Claude Code's actual path encoding:
+ * 1. Replace all path separators (/ \ :) with '-'
+ * 2. Replace all non-ASCII, non-alphanumeric chars (except '-') with '-'
  * e.g. /home/user/project -> -home-user-project
  *      C:\Users\project -> C--Users-project
+ *      D:\tx\定制绘本生成 -> D--tx-------
  */
 export function encodePath(projectPath: string): string {
-  return projectPath.replace(/[/\\:]/g, '-');
+  let encoded = projectPath.replace(/[/\\:]/g, '-');
+  encoded = encoded.split('').map(c => (c === '-' || (c.charCodeAt(0) < 128 && /[a-zA-Z0-9]/.test(c))) ? c : '-').join('');
+  return encoded;
 }
 
-/**
- * Cross-platform process liveness check.
- */
 export function isProcessRunning(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;
   } catch (e: any) {
-    // ESRCH = process not found; EPERM = exists but no permission
     return e.code === 'EPERM';
   }
 }
 
-/**
- * Cross-platform process termination.
- */
 export function killProcess(pid: number, force = false): void {
   if (isWindows && force) {
-    try {
-      execFileSync('taskkill', ['/PID', String(pid), '/F']);
-    } catch {}
+    try { execFileSync('taskkill', ['/PID', String(pid), '/F']); } catch {}
   } else {
-    try {
-      process.kill(pid, force ? 'SIGKILL' : 'SIGTERM');
-    } catch {}
+    try { process.kill(force ? 'SIGKILL' : 'SIGTERM'); } catch {}
   }
 }
 
-/**
- * Cross-platform process search by command line pattern.
- * Returns list of matching PIDs.
- */
 export function findProcesses(pattern: string): number[] {
   try {
     if (isWindows) {
-      const output = execFileSync('wmic', ['process', 'where', `CommandLine like '%${pattern}%'`, 'get', 'ProcessId'], { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
-      return output.split('\n')
-        .map(line => parseInt(line.trim(), 10))
-        .filter(pid => !isNaN(pid) && pid !== process.pid);
+      const output = execFileSync('wmic', ['process', 'where', 'CommandLine like '%' + pattern + '%'', 'get', 'ProcessId'], { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
+      return output.split('\n').map(line => parseInt(line.trim(), 10)).filter(pid => !isNaN(pid) && pid !== process.pid);
     } else {
       const output = execFileSync('pgrep', ['-f', pattern], { encoding: 'utf-8' }).trim();
       return output ? output.split('\n').map(Number).filter(pid => pid !== process.pid) : [];
     }
-  } catch {
-    return [];
-  }
+  } catch { return []; }
 }
 
-/**
- * Cross-platform process info retrieval.
- */
 export interface ProcessInfo {
   uptime?: string;
   cpu?: string;
@@ -79,91 +62,40 @@ export interface ProcessInfo {
 export function getProcessInfo(pid: number): ProcessInfo {
   try {
     if (isWindows) {
-      // Use wmic on Windows
-      const output = execFileSync('wmic', ['process', 'where', `ProcessId=${pid}`, 'get', 'WorkingSetSize,CreationDate'], { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
+      const output = execFileSync('wmic', ['process', 'where', 'ProcessId=' + pid, 'get', 'WorkingSetSize,CreationDate'], { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
       const lines = output.trim().split('\n').filter(l => l.trim());
       if (lines.length >= 2) {
         const parts = lines[1].trim().split(/\s+/);
         const memKB = parts[1] ? Math.round(parseInt(parts[1], 10) / 1024) : undefined;
-        return { memory: memKB ? `${memKB}` : undefined };
+        return { memory: memKB ? '' + memKB : undefined };
       }
     } else {
-      const etimes = execFileSync('ps', ['-p', String(pid), '-o', 'etimes='], { encoding: 'utf-8' }).trim();
+      const uptime = execFileSync('ps', ['-p', String(pid), '-o', 'etime='], { encoding: 'utf-8' }).trim();
       const cpu = execFileSync('ps', ['-p', String(pid), '-o', '%cpu='], { encoding: 'utf-8' }).trim();
       const mem = execFileSync('ps', ['-p', String(pid), '-o', 'rss='], { encoding: 'utf-8' }).trim();
-      const uptime = formatUptime(parseInt(etimes, 10));
       return { uptime, cpu, memory: mem };
     }
   } catch {}
   return {};
 }
 
-function formatUptime(totalSeconds: number): string {
-  if (isNaN(totalSeconds) || totalSeconds < 0) return 'unknown';
-  const days = Math.floor(totalSeconds / 86400);
-  const hours = Math.floor((totalSeconds % 86400) / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
-  const parts: string[] = [];
-  if (days > 0) parts.push(`${days}d`);
-  if (hours > 0) parts.push(`${hours}h`);
-  if (minutes > 0) parts.push(`${minutes}m`);
-  if (parts.length === 0) parts.push(`${seconds}s`);
-  return parts.join(' ');
-}
-
-/**
- * Read a specific environment variable from a running process.
- * Returns undefined if the process doesn't exist or the variable is not set.
- * Linux: reads /proc/<pid>/environ; Windows: not supported (returns undefined).
- */
-export function getProcessEnv(pid: number, varName: string): string | undefined {
-  if (isWindows) return undefined;
-  try {
-    const environ = fs.readFileSync(`/proc/${pid}/environ`, 'utf-8');
-    const prefix = `${varName}=`;
-    const entry = environ.split('\0').find(e => e.startsWith(prefix));
-    return entry ? entry.slice(prefix.length) : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-/**
- * Cross-platform command existence check.
- */
 export function commandExists(cmd: string): boolean {
   try {
-    if (isWindows) {
-      execFileSync('where', [cmd], { encoding: 'utf-8', stdio: 'pipe' });
-    } else {
-      execFileSync('which', [cmd], { encoding: 'utf-8', stdio: 'pipe' });
-    }
+    if (isWindows) { execFileSync('where', [cmd], { encoding: 'utf-8', stdio: 'pipe' }); }
+    else { execFileSync('which', [cmd], { encoding: 'utf-8', stdio: 'pipe' }); }
     return true;
-  } catch {
-    return false;
-  }
+  } catch { return false; }
 }
 
-/**
- * Cross-platform live log tailing (replaces tail -f).
- * Returns an abort function.
- */
 export function tailFile(filePath: string): { abort: () => void } {
   if (!isWindows) {
-    // Unix: use tail -f (more efficient)
     const child = spawn('tail', ['-f', filePath], { stdio: 'inherit' });
-    child.on('exit', (code: number | null) => process.exit(code || 0));
+    child.on('exit', (code) => process.exit(code || 0));
     return { abort: () => child.kill() };
   }
-
-  // Windows: Node.js-based implementation
-  // Output last 20 lines of existing content
   const content = fs.readFileSync(filePath, 'utf-8');
-  const lines = content.split('\n');
-  const lastLines = lines.slice(-20);
-  process.stdout.write(lastLines.join('\n'));
-
+  const lines = content.split('\n').slice(-20);
+  process.stdout.write(lines.join('\n'));
   let position = fs.statSync(filePath).size;
   const watcher = fs.watch(filePath, () => {
     const stat = fs.statSync(filePath);
@@ -176,47 +108,25 @@ export function tailFile(filePath: string): { abort: () => void } {
       position = stat.size;
     }
   });
-
   return { abort: () => watcher.close() };
 }
 
-/**
- * Resolve file path from import.meta.url (cross-platform safe).
- * Replaces unsafe `new URL('.', import.meta.url).pathname` usage.
- */
 export function dirFromImportMeta(importMetaUrl: string): string {
   return path.dirname(fileURLToPath(importMetaUrl));
 }
 
-/**
- * Check if current file is the main entry script (cross-platform safe).
- * Replaces unsafe `import.meta.url === \`file://\${process.argv[1]}\`` check.
- */
 export function isMainScript(importMetaUrl: string): boolean {
   const argv1 = process.argv[1];
   if (!argv1) return false;
-
   try {
     const selfPath = fileURLToPath(importMetaUrl);
     const argvPath = fs.realpathSync(argv1);
     return selfPath === argvPath || fs.realpathSync(selfPath) === argvPath;
-  } catch {
-    return false;
-  }
+  } catch { return false; }
 }
 
-/**
- * Register graceful shutdown signal handlers (cross-platform safe).
- */
 export function onShutdown(callback: () => void | Promise<void>): void {
   process.on('SIGINT', callback);
-  // SIGTERM is not fully supported on Windows, but Node.js can still emit it
-  // in some scenarios (e.g., process managers), so register it anyway
   process.on('SIGTERM', callback);
-
-  if (isWindows) {
-    // On Windows, also handle SIGHUP for graceful shutdown
-    // when the process is terminated via Task Manager or similar
-    process.on('SIGHUP', callback);
-  }
+  if (isWindows) { process.on('SIGHUP', callback); }
 }
