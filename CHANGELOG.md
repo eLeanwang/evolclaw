@@ -1,5 +1,34 @@
 # Changelog
 
+## v2.6.0 (2026-05-08)
+
+### New Features
+
+- **Proactive session mode** — AUN 群聊支持主动会话模式，Agent 可主动发起对话而非仅响应
+- **Menu protocol v2** — 服务端多级菜单协议，支持嵌套菜单结构和动态菜单生成
+- **ExitPlanMode approval** — Plan 模式新增审批流程，移除超时机制，改为显式确认
+- **AUN welcome message** — 首次连接 AUN 网络时自动向 Owner 发送欢迎消息并初始化 agent.md
+- **CLI --version flag** — `evolclaw --version` / `-v` / `-V` 输出版本号
+- **pathToClaudeCodeExecutable** — 支持在配置中显式指定 Claude Code CLI 路径（SDK 自动发现失败时的 escape hatch）
+
+### Improvements
+
+- **Windows IPC named pipe** — Windows 下 IPC 从 Unix socket 切换为 named pipe（`\\.\pipe\evolclaw-<hash>`），解决 EACCES 权限问题，支持多实例隔离
+- **AUN init 全链路健壮性** — CA 下载与 agent.md 写入解耦；重建 client 显式传 `root_ca_path` + `aid`；本地写入后 existsSync 校验
+- **Channel SDK 按需加载** — 重型渠道 SDK 移入 optionalDependencies，未安装时优雅跳过
+- **`/send` → `/file` 重命名** — 文件发送命令统一为 `/file`，语义更清晰
+- **AUN agent display name** — 从 owner 的 agent.md 派生显示名，而非 AID 前缀
+
+### Bug Fixes
+
+- **AUN init CA verification** — 修复首次 init 时 uploadAgentMd 报 "no trusted roots available"（SDK 需显式 root_ca_path）
+- **AUN init identity** — 修复重建 client 后 uploadAgentMd 报 "no local identity found"（需传 aid 参数）
+- **Feishu empty config** — appId/appSecret 均为空时不再输出无意义的验证警告
+- **Message recall interrupt** — 消息撤回事件正确触发 'recalled' 中断类型
+- **CLI unknown channel** — `evolclaw init <unknown>` 现在报错并列出支持的渠道，而非静默失败
+
+---
+
 ## v2.5.0 (2026-04-28)
 
 ### New Features
