@@ -15,11 +15,19 @@ export type OwnerResolver = (channel: string, userId: string) => boolean;
 /** 判定用户是否为指定渠道的 admin */
 export type AdminResolver = (channel: string, userId: string) => boolean;
 
+/**
+ * 解析新建 session 时的默认 sessionMode
+ * - 返回非 undefined：通道配置锁定 / 类型默认
+ * - 返回 undefined：使用全局兜底 'interactive'
+ */
+export type SessionModeResolver = (channel: string, chatType: string) => 'interactive' | 'proactive' | undefined;
+
 export class SessionManager {
   private db: DatabaseSync;
   private eventBus: EventBus;
   private ownerResolver?: OwnerResolver;
   private adminResolver?: AdminResolver;
+  private sessionModeResolver?: SessionModeResolver;
   private fileAdapters = new Map<string, SessionFileAdapter>();
 
   constructor(dbPath: string = resolvePaths().db, eventBus: EventBus, ownerResolver?: OwnerResolver, adminResolver?: AdminResolver) {
@@ -37,6 +45,17 @@ export class SessionManager {
 
   setAdminResolver(resolver: AdminResolver): void {
     this.adminResolver = resolver;
+  }
+
+  setSessionModeResolver(resolver: SessionModeResolver): void {
+    this.sessionModeResolver = resolver;
+  }
+
+  /** 解析默认 sessionMode：通道配置锁定 > chatType 默认 > 'interactive' */
+  private resolveDefaultSessionMode(channel: string, chatType?: string): 'interactive' | 'proactive' {
+    const ct = chatType || 'private';
+    const resolved = this.sessionModeResolver?.(channel, ct);
+    return resolved || 'interactive';
   }
 
   registerFileAdapter(adapter: SessionFileAdapter): void {
@@ -112,6 +131,16 @@ export class SessionManager {
         UPDATE sessions SET metadata = ?, updated_at = ? WHERE id = ?
       `).run(JSON.stringify(metadata), Date.now(), row.id);
     }
+  }
+
+  /** 获取当前活跃 session 的 chatType（用于新建 session 时继承） */
+  private getActiveChatType(channel: string, channelId: string): string {
+    const row = this.db.prepare(`
+      SELECT chat_type FROM sessions
+      WHERE channel = ? AND channel_id = ? AND json_extract(metadata, '$.isActive') = true AND thread_id = '' AND deleted_at IS NULL
+      ORDER BY updated_at DESC LIMIT 1
+    `).get(channel, channelId) as any;
+    return row?.chat_type || 'private';
   }
 
   private validateSessionFile(row: any): string | undefined {
@@ -519,6 +548,15 @@ export class SessionManager {
       const validSessionId = this.validateSessionFile(active);
       const session = { ...this.rowToSession(active), agentSessionId: validSessionId };
       session.identity = this.resolveIdentity(channel, userId);
+
+      // chatType 自动修正：入站 chatType 与存储值不一致时更新（修复历史 session 因错误识别留下的脏数据）
+      if (chatType && session.chatType !== chatType) {
+        logger.info(`[SessionManager] Updating chatType for session ${session.id}: ${session.chatType} -> ${chatType}`);
+        this.db.prepare(`UPDATE sessions SET chat_type = ?, updated_at = ? WHERE id = ?`)
+          .run(chatType, Date.now(), active.id);
+        session.chatType = chatType;
+      }
+
       // 补写 peerId/peerName/channelName（旧 session 可能在这些字段引入前创建）
       if (chatType === 'private' && userId) {
         const activeMeta = active.metadata ? JSON.parse(active.metadata) : {};
@@ -557,6 +595,14 @@ export class SessionManager {
       // 激活此会话
       const existingMeta = existing.metadata ? JSON.parse(existing.metadata) : {};
       existingMeta.isActive = true;
+
+      // chatType 自动修正（同 active 分支）
+      const shouldUpdateChatType = chatType !== undefined && existing.chat_type !== chatType;
+      if (shouldUpdateChatType) {
+        logger.info(`[SessionManager] Updating chatType for session ${existing.id}: ${existing.chat_type} -> ${chatType}`);
+        existing.chat_type = chatType;
+      }
+
       // 补写 peerId/peerName
       if (chatType === 'private' && userId && !existingMeta.peerId) {
         existingMeta.peerId = userId;
@@ -564,8 +610,13 @@ export class SessionManager {
       if (chatType === 'private' && metadata?.peerName && !existingMeta.peerName) {
         existingMeta.peerName = metadata.peerName;
       }
-      this.db.prepare(`UPDATE sessions SET metadata = ?, updated_at = ? WHERE id = ?`)
-        .run(JSON.stringify(existingMeta), Date.now(), existing.id);
+      if (shouldUpdateChatType) {
+        this.db.prepare(`UPDATE sessions SET metadata = ?, updated_at = ?, chat_type = ? WHERE id = ?`)
+          .run(JSON.stringify(existingMeta), Date.now(), chatType as string, existing.id);
+      } else {
+        this.db.prepare(`UPDATE sessions SET metadata = ?, updated_at = ? WHERE id = ?`)
+          .run(JSON.stringify(existingMeta), Date.now(), existing.id);
+      }
       const session = { ...this.rowToSession(existing), agentSessionId: validSessionId, metadata: existingMeta };
       session.identity = this.resolveIdentity(channel, userId);
       return session;
@@ -581,7 +632,7 @@ export class SessionManager {
       threadId: '',
       agentId: agentId || 'claude',
       chatType: chatType || 'private',
-      sessionMode: 'interactive',
+      sessionMode: this.resolveDefaultSessionMode(channel, chatType || 'private'),
       metadata: sessionMetadata,
       name: name || '默认会话',
       createdAt: Date.now(),
@@ -607,7 +658,7 @@ export class SessionManager {
     return session;
   }
 
-  async updateSession(sessionId: string, updates: Partial<Pick<Session, 'chatType' | 'name' | 'metadata'>> & { agentSessionId?: string | null }): Promise<void> {
+  async updateSession(sessionId: string, updates: Partial<Pick<Session, 'chatType' | 'name' | 'metadata' | 'sessionMode'>> & { agentSessionId?: string | null }): Promise<void> {
     const sets: string[] = [];
     const values: any[] = [];
     if (updates.chatType !== undefined) {
@@ -617,6 +668,10 @@ export class SessionManager {
     if (updates.name !== undefined) {
       sets.push('name = ?');
       values.push(updates.name);
+    }
+    if (updates.sessionMode !== undefined) {
+      sets.push('session_mode = ?');
+      values.push(updates.sessionMode);
     }
     if (updates.metadata !== undefined) {
       sets.push('metadata = ?');
@@ -661,15 +716,16 @@ export class SessionManager {
       return { ...this.rowToSession(existing), agentSessionId: validSessionId };
     }
 
-    // 继承当前活跃主会话的项目路径
+    // 继承当前活跃主会话的项目路径和 chatType
     const activeMain = this.db.prepare(`
-      SELECT project_path FROM sessions
+      SELECT project_path, chat_type FROM sessions
       WHERE channel = ? AND channel_id = ? AND json_extract(metadata, '$.isActive') = true AND thread_id = ''
     `).get(channel, channelId) as any;
 
     const projectPath = activeMain?.project_path || defaultProjectPath;
 
     // 创建新话题会话
+    const inheritedChatType = activeMain?.chat_type || 'private';
     const session: Session = {
       id: `${channel}-${channelId}-${Date.now()}`,
       channel,
@@ -677,8 +733,8 @@ export class SessionManager {
       projectPath,
       threadId,
       agentId: agentId || 'claude',
-      chatType: 'private',
-      sessionMode: 'interactive',
+      chatType: inheritedChatType,
+      sessionMode: this.resolveDefaultSessionMode(channel, inheritedChatType),
       metadata,
       name: name || '话题会话',
       createdAt: Date.now(),
@@ -700,10 +756,12 @@ export class SessionManager {
 
   async switchProject(channel: string, channelId: string, newProjectPath: string, currentAgentId?: string): Promise<Session> {
     const agentId = currentAgentId || 'claude';
-    // 1. 取消当前活跃会话
+    // 1. 继承当前 chatType（在 deactivate 之前读取）
+    const inheritedChatType = this.getActiveChatType(channel, channelId);
+    // 2. 取消当前活跃会话
     this.deactivateAllMetadata(channel, channelId);
 
-    // 2. 查找目标项目 + 当前 agent 的会话
+    // 3. 查找目标项目 + 当前 agent 的会话
     const target = this.db.prepare(`
       SELECT * FROM sessions
       WHERE channel = ? AND channel_id = ? AND project_path = ? AND agent_id = ? AND thread_id = '' AND deleted_at IS NULL
@@ -720,7 +778,7 @@ export class SessionManager {
       return { ...this.rowToSession(target), agentSessionId: validSessionId, metadata };
     }
 
-    // 3. 创建新会话
+    // 4. 创建新会话
     const session: Session = {
       id: `${channel}-${channelId}-${Date.now()}`,
       channel,
@@ -728,8 +786,8 @@ export class SessionManager {
       projectPath: newProjectPath,
       threadId: '',
       agentId,
-      chatType: 'private',
-      sessionMode: 'interactive',
+      chatType: inheritedChatType,
+      sessionMode: this.resolveDefaultSessionMode(channel, inheritedChatType),
       metadata: { isActive: true },
       name: '默认会话',
       createdAt: Date.now(),
@@ -770,10 +828,12 @@ export class SessionManager {
   }
 
   async switchAgent(channel: string, channelId: string, projectPath: string, newAgentId: string): Promise<Session> {
-    // 1. 取消当前活跃会话
+    // 1. 继承当前 chatType（在 deactivate 之前读取）
+    const inheritedChatType = this.getActiveChatType(channel, channelId);
+    // 2. 取消当前活跃会话
     this.deactivateAllMetadata(channel, channelId);
 
-    // 2. 查找目标 agent 在当前项目下的会话
+    // 3. 查找目标 agent 在当前项目下的会话
     const target = this.db.prepare(`
       SELECT * FROM sessions
       WHERE channel = ? AND channel_id = ? AND project_path = ? AND agent_id = ? AND thread_id = '' AND deleted_at IS NULL
@@ -790,7 +850,7 @@ export class SessionManager {
       return { ...this.rowToSession(target), agentSessionId: validSessionId, metadata };
     }
 
-    // 3. 创建新会话（与 switchProject 保持一致）
+    // 4. 创建新会话（与 switchProject 保持一致）
     const session: Session = {
       id: `${channel}-${channelId}-${Date.now()}`,
       channel,
@@ -798,8 +858,8 @@ export class SessionManager {
       projectPath,
       threadId: '',
       agentId: newAgentId,
-      chatType: 'private',
-      sessionMode: 'interactive',
+      chatType: inheritedChatType,
+      sessionMode: this.resolveDefaultSessionMode(channel, inheritedChatType),
       metadata: { isActive: true },
       name: '默认会话',
       createdAt: Date.now(),
@@ -952,6 +1012,8 @@ export class SessionManager {
   }
 
   async createNewSession(channel: string, channelId: string, projectPath: string, name?: string, agentId?: string): Promise<Session> {
+    // 继承当前 chatType（在 deactivate 之前读取）
+    const inheritedChatType = this.getActiveChatType(channel, channelId);
     // 取消当前活跃会话
     this.deactivateAllMetadata(channel, channelId);
 
@@ -963,8 +1025,8 @@ export class SessionManager {
       projectPath,
       threadId: '',
       agentId: agentId || 'claude',
-      chatType: 'private',
-      sessionMode: 'interactive',
+      chatType: inheritedChatType,
+      sessionMode: this.resolveDefaultSessionMode(channel, inheritedChatType),
       metadata: { isActive: true },
       name: name || '默认会话',
       createdAt: Date.now(),
@@ -1083,6 +1145,8 @@ export class SessionManager {
   }
 
   async importCliSession(channel: string, channelId: string, projectPath: string, agentSessionId: string, agentId: string = 'claude'): Promise<Session> {
+    // 继承当前 chatType（在 deactivate 之前读取）
+    const inheritedChatType = this.getActiveChatType(channel, channelId);
     // 取消当前活跃会话
     this.deactivateAllMetadata(channel, channelId);
 
@@ -1098,8 +1162,8 @@ export class SessionManager {
       projectPath,
       threadId: '',
       agentId,
-      chatType: 'private',
-      sessionMode: 'interactive',
+      chatType: inheritedChatType,
+      sessionMode: this.resolveDefaultSessionMode(channel, inheritedChatType),
       agentSessionId,
       metadata: { isActive: true },
       name,

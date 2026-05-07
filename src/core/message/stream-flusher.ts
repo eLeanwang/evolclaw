@@ -54,12 +54,13 @@ export class StreamFlusher {
     private send: (text: string, isFinal?: boolean, hasText?: boolean) => Promise<void>,
     private interval = 4000,
     fileMarkerPattern?: RegExp,
-    diagEnabled = false
+    diagEnabled = false,
+    private silent = false
   ) {
     this.fileMarkerPattern = fileMarkerPattern;
     this.diagEnabled = diagEnabled;
     this.instanceId = `F${++instanceCounter}`;
-    if (this.diagEnabled) diag(this.instanceId, 'created', { interval });
+    if (this.diagEnabled) diag(this.instanceId, 'created', { interval, silent });
   }
 
   addText(text: string) {
@@ -114,6 +115,7 @@ export class StreamFlusher {
   }
 
   private scheduleFlush() {
+    if (this.silent) return;  // proactive 模式：不调度发送
     if (this.timer) {
       if (this.diagEnabled) diag(this.instanceId, 'scheduleFlush:skip', { reason: 'timer_exists' });
       return;
@@ -157,6 +159,7 @@ export class StreamFlusher {
    * 用于 complete 事件前清空 pending activities，让最终文本留给 flush(true) 发送
    */
   async flushActivitiesOnly() {
+    if (this.silent) return;
     const hasActivities = this.queue.some(e => e.kind === 'activity');
     if (!hasActivities) return;
 
@@ -191,6 +194,13 @@ export class StreamFlusher {
   }
 
   async flush(isFinal?: boolean) {
+    if (this.silent) {
+      // 清理内部状态，避免后续误用
+      if (this.timer) { clearTimeout(this.timer); this.timer = undefined; }
+      this.queue = [];
+      this.buffer = '';
+      return;
+    }
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = undefined;

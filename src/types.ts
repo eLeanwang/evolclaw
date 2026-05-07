@@ -47,6 +47,7 @@ export interface AunChannelConfig {
   pythonBin?: string;   // Python 可执行路径（仅 evolclaw tui 命令使用），默认 python3
   encryptionSeed?: string; // FileSecretStore 加密种子，默认 evolclaw-aun-production-seed-2026
   showActivities?: 'all' | 'dm-only' | 'owner-dm-only' | 'none';  // 覆盖全局 showActivities
+  sessionMode?: 'interactive' | 'proactive';  // 锁定该实例所有 session 的模式（不设则按 chatType 默认）
 }
 
 export interface AunChannelInstanceConfig extends AunChannelConfig {
@@ -208,7 +209,7 @@ export interface Session {
   agentId: string;  // 路由维度，默认 'claude'
   threadId: string;  // 路由维度，默认 ''
   chatType: string;  // 'private' | 'group'，由 Channel 填充
-  sessionMode: string;  // 'interactive' | 'autonomous'
+  sessionMode: string;  // 'interactive' | 'proactive'（'autonomous' 预留未实现）
   projectPath: string;
   agentSessionId?: string;
   name?: string;
@@ -317,6 +318,7 @@ export interface ChannelOptions {
   supportsImages?: boolean;         // Feishu: true, AUN: false
   flushDelay?: number;              // 渠道级 flush 间隔(秒)，覆盖全局 config.flushDelay
   showActivities?: 'all' | 'dm-only' | 'owner-dm-only' | 'none';  // 覆盖全局 showActivities
+  sessionMode?: 'interactive' | 'proactive';  // 通道级 sessionMode 锁定（存在时覆盖 chatType 默认与 /chatmode 切换）
 }
 
 // 渠道策略接口

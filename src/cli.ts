@@ -1321,7 +1321,7 @@ async function cmdTui() {
   const pythonCheck = aun.pythonBin || process.env.AUN_PYTHON || 'python3';
   if (!platform.commandExists(pythonCheck)) {
     console.error(`[tui] Python 未找到 (${pythonCheck})`);
-    console.error('  → TUI 依赖 Python 和 aun-core (>=0.2.9): pip3 install -U aun-core');
+    console.error('  → TUI 依赖 Python 和 aunp (>=0.2.12): pip3 install -U aunp');
     process.exit(1);
   }
 
@@ -1330,7 +1330,7 @@ async function cmdTui() {
   if (!fs.existsSync(cliScript)) {
     console.error(`[tui] aun_cli.py 不存在: ${cliScript}`);
     console.error('  → TUI 需要 AUN CLI 工具，请确认源码目录包含 aun/aun_cli.py');
-    console.error('  → 安装: pip3 install -U aun-core && 从源码仓库获取 aun_cli.py');
+    console.error('  → 安装: pip3 install -U aunp && 从源码仓库获取 aun_cli.py');
     process.exit(1);
   }
   const child = spawn(pythonBin, [cliScript, '-a', aun.owner, '-t', aun.aid], { stdio: 'inherit' });
@@ -1345,6 +1345,8 @@ async function cmdCtl(args: string[]): Promise<void> {
     console.error('示例: evolclaw ctl model sonnet');
     console.error('      evolclaw ctl status');
     console.error('      evolclaw ctl effort high');
+    console.error('      evolclaw ctl send "<消息内容>"   # proactive 模式主动发消息');
+    console.error('      evolclaw ctl chatmode proactive  # 切换会话模式');
     process.exit(1);
   }
 
@@ -1383,6 +1385,11 @@ async function cmdCtl(args: string[]): Promise<void> {
 
 // ==================== Main ====================
 
+function getArgValue(args: string[], flag: string): string | undefined {
+  const idx = args.indexOf(flag);
+  return idx !== -1 && idx + 1 < args.length ? args[idx + 1] : undefined;
+}
+
 export async function main(args: string[]) {
   const cmd = args[0] || 'start';
 
@@ -1400,8 +1407,24 @@ export async function main(args: string[]) {
         await cmdInitQQBot();
       } else if (args[1] === 'wecom') {
         await cmdInitWecom();
+      } else if (args[1]) {
+        const supported = ['feishu', 'wechat', 'aun', 'dingtalk', 'qqbot', 'wecom'];
+        console.error(`❌ 不支持的渠道: ${args[1]}`);
+        console.error(`   支持的渠道: ${supported.join(', ')}`);
+        process.exit(1);
       } else {
-        await cmdInit();
+        const nonInteractive = args.includes('--non-interactive');
+        if (nonInteractive) {
+          await cmdInit({
+            nonInteractive: true,
+            defaultPath: getArgValue(args, '--default-path') || process.cwd(),
+            channel: getArgValue(args, '--channel') || 'aun',
+            aunAid: getArgValue(args, '--aun-aid'),
+            aunOwner: getArgValue(args, '--aun-owner'),
+          });
+        } else {
+          await cmdInit();
+        }
       }
       break;
     case 'start':

@@ -1,7 +1,7 @@
 import { ClaudeSessionFileAdapter } from './core/session/adapters/claude-session-file-adapter.js';
 import { CodexSessionFileAdapter } from './core/session/adapters/codex-session-file-adapter.js';
 import { GeminiSessionFileAdapter } from './core/session/adapters/gemini-session-file-adapter.js';
-import { loadConfig, ensureDataDirs, resolvePaths, resolveAnthropicConfig, isOwner, isAdmin, validateConfigIntegrity, validateChannelInstanceNames, getOwner } from './config.js';
+import { loadConfig, ensureDataDirs, resolvePaths, resolveAnthropicConfig, isOwner, isAdmin, validateConfigIntegrity, validateChannelInstanceNames, getOwner, getChannelSessionMode } from './config.js';
 import { SessionManager } from './core/session/session-manager.js';
 import { ClaudeAgentPlugin } from './agents/claude-runner.js';
 import { CodexAgentPlugin } from './agents/codex-runner.js';
@@ -90,6 +90,26 @@ async function main() {
     (channel, userId) => isOwner(config, channel, userId),
     (channel, userId) => isAdmin(config, channel, userId)
   );
+
+  // sessionMode 解析：通道配置锁定 > chatType 默认（AUN 群聊 → proactive，其余 → interactive）
+  sessionManager.setSessionModeResolver((channel, chatType) => {
+    const locked = getChannelSessionMode(config, channel);
+    if (locked) return locked;
+    // chatType 默认值：仅 AUN 群聊默认为 proactive，其余通道默认 interactive
+    // channel 在多实例时为 instanceName，需要识别 AUN 系
+    // 简化：通过 ChannelOptions.channelType 在 MessageProcessor 注册时已知，但 SessionManager 不持有这个映射
+    // 这里回退到按 instanceName 反查 config.channels.aun
+    if (chatType === 'group') {
+      const aun = (config.channels as any)?.aun;
+      if (Array.isArray(aun)) {
+        if (aun.some((i: any) => i.name === channel)) return 'proactive';
+      } else if (aun) {
+        const effectiveName = aun.name ?? 'aun';
+        if (effectiveName === channel) return 'proactive';
+      }
+    }
+    return undefined;
+  });
   logger.info('✓ Database initialized');
 
   // 注册会话文件适配器（Claude / Codex 各自的会话文件操作）
