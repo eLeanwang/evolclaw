@@ -446,11 +446,14 @@ function validateConfig(config: any): asserts config is Config {
   const feishuInstances = normalizeChannelInstances(config.channels?.feishu, 'feishu');
   for (const inst of feishuInstances) {
     if ((inst as any).enabled === false) continue;
+    const appId = (inst as any).appId || '';
+    const appSecret = (inst as any).appSecret || '';
+    if (!appId && !appSecret) continue;
     const label = feishuInstances.length > 1 ? ` [${inst.name}]` : '';
-    if (!(inst as any).appId || (inst as any).appId.startsWith('YOUR_')) {
+    if (!appId || appId.startsWith('YOUR_')) {
       logger.warn(`⚠ Feishu${label} appId not configured (Feishu channel will be disabled)`);
     }
-    if (!(inst as any).appSecret || (inst as any).appSecret.startsWith('YOUR_')) {
+    if (!appSecret || appSecret.startsWith('YOUR_')) {
       logger.warn(`⚠ Feishu${label} appSecret not configured (Feishu channel will be disabled)`);
     }
   }
