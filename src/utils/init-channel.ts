@@ -851,10 +851,12 @@ export async function setupAunAid(rl: readline.Interface, _config: any): Promise
 
       // 关键：SDK 默认 rootCaPath=null，只读取包内 bundled certs。
       // 必须显式传 root_ca_path 指向刚下载的 root.crt，uploadAgentMd 才能验证 server cert。
+      // 同时传 aid，否则新 client 不知道该加载哪个身份，uploadAgentMd 会报
+      // "no local identity found, call auth.createAid() first"。
       const caCertPath = path.join(aunPath, 'CA', 'root', 'root.crt');
       if (caDownloaded && fs.existsSync(caCertPath)) {
         try { await client.close(); } catch { /* ignore */ }
-        client = new AUNClient({ aun_path: aunPath, root_ca_path: caCertPath });
+        client = new AUNClient({ aun_path: aunPath, root_ca_path: caCertPath, aid });
         if (gatewayPort) {
           const domain = aid.split('.').slice(1).join('.');
           (client as any)._gatewayUrl = `wss://gateway.${domain}:${gatewayPort}/aun`;
