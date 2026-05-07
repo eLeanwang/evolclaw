@@ -774,7 +774,7 @@ export class MessageProcessor {
       // 区分超时 / 中断 / 错误
       const errType = classifyError(error);
       const interruptReason = this.interruptedSessions.get(session.id);
-      const isUserInterrupt = interruptReason === 'new_message' || interruptReason === 'stop';
+      const isUserInterrupt = interruptReason === 'new_message' || interruptReason === 'stop' || interruptReason === 'recalled';
       const procStatus = errType === ErrorType.SDK_TIMEOUT ? 'timeout' as const
         : errType === ErrorType.STREAM_ERROR ? 'interrupted' as const
         : 'error' as const;
@@ -1029,7 +1029,7 @@ export class MessageProcessor {
           // 失败且无前置错误输出：显示 errors 摘要
           // 但用户主动中断（新消息打断 或 /stop 命令）时不显示错误提示
           const interruptReason = this.interruptedSessions.get(session.id);
-          const isUserInterrupt = interruptReason === 'new_message' || interruptReason === 'stop';
+          const isUserInterrupt = interruptReason === 'new_message' || interruptReason === 'stop' || interruptReason === 'recalled';
           if (event.isError && !hasErrorResult && !shouldSuppress() && !isUserInterrupt) {
             const errorSummary = event.errors?.join('; ') || '\u4efb\u52a1\u6267\u884c\u5931\u8d25';
             // 使用 terminalReason 提供更友好的错误提示
