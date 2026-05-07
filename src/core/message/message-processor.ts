@@ -140,7 +140,7 @@ export class MessageProcessor {
   private static readonly COMMAND_PREFIXES = [
     '/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart',
     '/model', '/effort', '/agent', '/slist', '/session', '/rename', '/repair', '/fork',
-    '/stop', '/clear', '/compact', '/safe', '/del', '/perm', '/send', '/check',
+    '/stop', '/clear', '/compact', '/safe', '/del', '/perm', '/file', '/check',
     '/p ', '/s ', '/name ',
   ];
 

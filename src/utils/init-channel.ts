@@ -11,8 +11,8 @@ import readline from 'readline';
 import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
-import { createRequire } from 'module';
-import { execFile } from 'child_process';
+import { fileURLToPath } from 'url';
+import { execFile, execFileSync } from 'child_process';
 import { promisify } from 'util';
 import { resolvePaths } from '../paths.js';
 import { normalizeChannelInstances } from '../config.js';
@@ -21,9 +21,11 @@ import { isWindows } from './cross-platform.js';
 
 const execFileAsync = promisify(execFile);
 
-async function npmInstallGlobal(pkg: string): Promise<void> {
+export async function npmInstallGlobal(pkg: string): Promise<void> {
+  const npmCmd = isWindows ? 'npm.cmd' : 'npm';
+  const execOpts = { timeout: 180000, shell: isWindows };
   try {
-    await execFileAsync('npm', ['install', '-g', pkg], { timeout: 180000 });
+    await execFileAsync(npmCmd, ['install', '-g', pkg], execOpts);
   } catch (e: any) {
     if (e.stderr?.includes('EACCES') || e.message?.includes('EACCES')) {
       if (isWindows) {
@@ -639,9 +641,9 @@ export async function cmdInitWechat(): Promise<void> {
 
 // ==================== AUN ====================
 
-// 最低 @eleans/aun-core-sdk 版本要求
-const MIN_AUN_CORE_SDK = [0, 2, 9] as const;
-const AUN_CORE_SDK_PKG = '@eleans/aun-core-sdk';
+// 最低 @agentunion/aun-node 版本要求
+const MIN_AUN_CORE_SDK = [0, 2, 12] as const;
+const AUN_CORE_SDK_PKG = '@agentunion/aun-node';
 
 function compareVersion(a: string, min: readonly [number, number, number]): boolean {
   const parts = a.split('.').map(n => parseInt(n, 10));
@@ -651,29 +653,38 @@ function compareVersion(a: string, min: readonly [number, number, number]): bool
   return parts[2] >= min[2];
 }
 
-function resolveAunCoreSdkPkg(): { version: string; path: string } | null {
+export function resolveAunCoreSdkPkg(): { version: string; path: string } | null {
+  const pkgName = AUN_CORE_SDK_PKG;
+
+  // Strategy 1: walk up node_modules from this file (no require.resolve — avoids ESM exports issues)
   try {
-    const esmRequire = createRequire(import.meta.url);
-    const entry = esmRequire.resolve(AUN_CORE_SDK_PKG);
-    const pkgPath = path.join(path.dirname(entry), 'package.json');
-    if (!fs.existsSync(pkgPath)) {
-      // 向上回溯查找 package.json
-      let dir = path.dirname(entry);
-      for (let i = 0; i < 5; i++) {
-        const candidate = path.join(dir, 'package.json');
-        if (fs.existsSync(candidate)) {
-          const data = JSON.parse(fs.readFileSync(candidate, 'utf-8'));
-          if (data.name === AUN_CORE_SDK_PKG) return { version: data.version, path: candidate };
-        }
-        dir = path.dirname(dir);
+    let dir = path.dirname(fileURLToPath(import.meta.url));
+    while (true) {
+      const candidate = path.join(dir, 'node_modules', pkgName, 'package.json');
+      if (fs.existsSync(candidate)) {
+        const data = JSON.parse(fs.readFileSync(candidate, 'utf-8'));
+        if (data.name === pkgName) return { version: data.version, path: candidate };
       }
-      return null;
+      const parent = path.dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
     }
-    const data = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
-    return { version: data.version, path: pkgPath };
-  } catch {
-    return null;
-  }
+  } catch { /* fall through */ }
+
+  // Strategy 2: npm root -g fallback (globally installed SDK)
+  try {
+    const npmCmd = isWindows ? 'npm.cmd' : 'npm';
+    const globalRoot = execFileSync(npmCmd, ['root', '-g'], {
+      encoding: 'utf-8', timeout: 10000, shell: isWindows,
+    }).trim();
+    const pkgPath = path.join(globalRoot, pkgName, 'package.json');
+    if (fs.existsSync(pkgPath)) {
+      const data = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+      return { version: data.version, path: pkgPath };
+    }
+  } catch { /* not found */ }
+
+  return null;
 }
 
 export async function checkAunEnvironment(rl: readline.Interface): Promise<boolean> {
@@ -730,7 +741,7 @@ function isValidAid(name: string): boolean {
   return labels.length >= 3 && labels.every(l => /^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?$/.test(l));
 }
 
-export async function setupAunAid(rl: readline.Interface, _config: any): Promise<{ aid: string } | null> {
+export async function setupAunAid(rl: readline.Interface, _config: any): Promise<{ aid: string; owner: string } | null> {
   let aid = '';
   let gatewayPort: number | undefined;  // only used locally for AID creation, not written to config
 
@@ -772,23 +783,46 @@ export async function setupAunAid(rl: readline.Interface, _config: any): Promise
     console.log('  正在创建 AID...');
     let failed = false;
     try {
-      const { AUNClient } = await import('@eleans/aun-core-sdk');
+      const { AUNClient } = await import('@agentunion/aun-node');
       const client = new AUNClient({ aun_path: aunPath });
 
-      // Set gateway URL from AID domain + port
-      const domain = aid.split('.').slice(1).join('.');
-      const port = gatewayPort || 443;
-      (client as any)._gatewayUrl = `wss://gateway.${domain}:${port}/aun`;
+      // 如果用户指定了自定义端口，手动设置 gateway URL；否则让 SDK 自动发现
+      if (gatewayPort) {
+        const domain = aid.split('.').slice(1).join('.');
+        (client as any)._gatewayUrl = `wss://gateway.${domain}:${gatewayPort}/aun`;
+      }
 
       const result = await client.auth.createAid({ aid });
       console.log(`  ✓ AID ${result.aid} 创建成功`);
+
+      // 下载 CA 根证书（如果本地不存在），从 SDK 返回的实际网关 URL 派生
+      const caDir = path.join(aunPath, 'CA', 'root');
+      const caCertPath = path.join(caDir, 'root.crt');
+      if (!fs.existsSync(caCertPath) && result.gateway) {
+        try {
+          fs.mkdirSync(caDir, { recursive: true });
+          const gwHttp = result.gateway.replace(/^wss?:/, 'https:').replace(/\/aun$/, '');
+          const resp = await fetch(`${gwHttp}/pki/chain`, { redirect: 'follow' });
+          if (resp.ok) {
+            const body = await resp.text();
+            if (body.includes('BEGIN CERTIFICATE')) {
+              fs.writeFileSync(caCertPath, body);
+              console.log('  ✓ CA 根证书已下载');
+            } else {
+              console.warn('  ⚠ CA 根证书响应内容无效，跳过写入');
+            }
+          }
+        } catch (e) {
+          console.warn(`  ⚠ CA 根证书下载失败: ${e}，可稍后手动下载`);
+        }
+      }
 
       // Collect agent.md info and publish
       const typeInput = (await ask(rl, '  Agent 类型 human/ai [ai]: ')).trim().toLowerCase();
       const agentType = typeInput === 'human' ? 'human' : 'ai';
       const agentName = aid.split('.')[0];
 
-      const agentMdContent = `---\naid: "${aid}"\nname: "${agentName}"\ntype: "${agentType}"\nversion: "1.0.0"\ndescription: ""\ntags:\n  - evolclaw\n---\n`;
+      const agentMdContent = `---\naid: "${aid}"\nname: "${agentName}"\ntype: "${agentType}"\nversion: "1.0.0"\ndescription: ""\ntags:\n  - evolclaw\ninitialized: false\n---\n`;
       try {
         await client.auth.uploadAgentMd(agentMdContent);
         console.log('  ✓ agent.md 已发布');
@@ -813,7 +847,19 @@ export async function setupAunAid(rl: readline.Interface, _config: any): Promise
     // default: retry with new AID
   }
 
-  return { aid };
+  // Owner 必填
+  console.log('\n📋 Owner 配置');
+  console.log('  Owner 将接收欢迎消息并拥有管理权限');
+  let owner = '';
+  while (!owner) {
+    const ownerInput = (await ask(rl, '  Owner AID (必填): ')).trim();
+    if (!ownerInput) { console.log('  ⚠ Owner AID 不能为空'); continue; }
+    if (!isValidAid(ownerInput)) { console.log('  ⚠ Owner AID 格式无效'); continue; }
+    owner = ownerInput;
+    console.log(`  ✓ Owner 已设置: ${owner}`);
+  }
+
+  return { aid, owner };
 }
 
 export async function cmdInitAun(): Promise<void> {
@@ -826,16 +872,29 @@ export async function cmdInitAun(): Promise<void> {
 
   const config = JSON.parse(fs.readFileSync(p.config, 'utf-8'));
 
+  // Normalize existing instances and filter out placeholders
+  const allInstances = normalizeChannelInstances(config.channels?.aun, 'aun');
+  const validInstances: Array<{ name: string; originalIndex: number; [key: string]: any }> = [];
+  for (let i = 0; i < allInstances.length; i++) {
+    const inst = allInstances[i];
+    if (!inst.aid || inst.aid.includes('your-') || inst.aid.includes('placeholder')) continue;
+    validInstances.push({ ...inst, originalIndex: i });
+  }
+
+  let choice: InstanceChoice | null = null;
+
+  if (validInstances.length > 0) {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    try {
+      choice = await selectInstance(rl, 'aun', validInstances);
+      if (choice === null) return;
+    } finally {
+      rl.close();
+    }
+  }
+
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   try {
-    if (config.channels?.aun?.aid) {
-      const answer = (await ask(rl, '已有 AUN 配置，是否重新配置？[y/N] ')).trim().toLowerCase();
-      if (answer !== 'y' && answer !== 'yes') {
-        console.log('已取消');
-        return;
-      }
-    }
-
     if (!await checkAunEnvironment(rl)) {
       return;
     }
@@ -844,10 +903,40 @@ export async function cmdInitAun(): Promise<void> {
     if (!result) return;
 
     if (!config.channels) config.channels = {};
-    config.channels.aun = {
-      enabled: true,
-      aid: result.aid,
-    };
+
+    if (choice && choice.action === 'overwrite' && Array.isArray(config.channels.aun)) {
+      const idx = validInstances[choice.index]?.originalIndex ?? choice.index;
+      config.channels.aun[idx].aid = result.aid;
+      config.channels.aun[idx].owner = result.owner;
+      config.channels.aun[idx].enabled = true;
+    } else if (choice && choice.action === 'overwrite' && !Array.isArray(config.channels.aun)) {
+      config.channels.aun = config.channels.aun || {};
+      config.channels.aun.aid = result.aid;
+      config.channels.aun.owner = result.owner;
+      config.channels.aun.enabled = true;
+    } else if (choice && choice.action === 'add') {
+      const newInst = {
+        name: choice.name,
+        enabled: true,
+        aid: result.aid,
+        owner: result.owner,
+      };
+      if (Array.isArray(config.channels.aun)) {
+        config.channels.aun.push(newInst);
+      } else if (config.channels.aun) {
+        const oldInst = { ...config.channels.aun, name: config.channels.aun.name || 'aun' };
+        config.channels.aun = [oldInst, newInst];
+      } else {
+        config.channels.aun = [newInst];
+      }
+    } else {
+      config.channels.aun = {
+        enabled: true,
+        aid: result.aid,
+        owner: result.owner,
+      };
+    }
+
     if (!config.channels.defaultChannel) config.channels.defaultChannel = 'aun';
 
     fs.writeFileSync(p.config, JSON.stringify(config, null, 2) + '\n');

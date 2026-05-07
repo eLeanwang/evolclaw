@@ -1,7 +1,12 @@
 {
   "agents": {
     "anthropic": {
-      "model": "sonnet"
+      "apiKey": "",
+      "baseUrl": "",
+      "model": "sonnet",
+      "effort": "high",
+      "useSettingSources": true,
+      "agentProgressSummaries": true
     },
     "openai": {
       "apiKey": "your-openai-api-key",
@@ -10,7 +15,10 @@
       "effort": "medium"
     },
     "google": {
-      "model": "gemini-2.5-flash"
+      "apiKey": "",
+      "model": "gemini-2.5-flash",
+      "cliPath": "",
+      "mode": "cli"
     },
     "defaultAgent": "claude"
   },
@@ -19,17 +27,26 @@
     "feishu": {
       "enabled": true,
       "appId": "",
-      "appSecret": ""
+      "appSecret": "",
+      "owner": "",
+      "flushDelay": 10,
+      "debounce": 2,
+      "showActivities": "dm-only"
     },
     "wechat": {
       "enabled": false,
       "baseUrl": "https://ilinkai.weixin.qq.com",
-      "token": ""
+      "token": "",
+      "owner": "",
+      "flushDelay": 3,
+      "debounce": 2,
+      "showActivities": "all"
     },
     "aun": {
       "enabled": false,
       "aid": "your-agent.agentid.pub",
-      "gatewayPort": 443
+      "owner": "",
+      "showActivities": "owner-dm-only"
     }
   },
   "projects": {
@@ -37,11 +54,16 @@
     "autoCreate": true,
     "list": {}
   },
+  "flushDelay": 4,
+  "debounce": 2,
+  "showActivities": "all",
   "idleMonitor": {
     "enabled": true,
     "timeout": 120,
-    "safeModeThreshold": 3
+    "safeModeThreshold": 0
   },
-  "flushDelay": 4,
-  "showActivities": "all"
+  "debug": {
+    "flusherDiag": false,
+    "aunTrace": false
+  }
 }
