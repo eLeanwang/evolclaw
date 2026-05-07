@@ -355,11 +355,26 @@ export class AUNChannel {
         return;
       }
 
+      // Fetch owner's agent.md to derive name and validate type
+      const ownerInfo = await this.fetchPeerInfo(owner);
+      if (ownerInfo.type !== null && ownerInfo.type !== 'human') {
+        logger.warn(`[AUN] Owner ${owner} type is "${ownerInfo.type}" (not human). Consider using a human AID as owner.`);
+      }
+
+      // Name: owner agent.md name (first 12 chars) → fallback to owner AID first label (first 12 chars)
+      const ownerAidClean = owner.startsWith('@') ? owner.slice(1) : owner;
+      let ownerDisplayName: string;
+      if (ownerInfo.name) {
+        ownerDisplayName = ownerInfo.name.slice(0, 12);
+      } else {
+        ownerDisplayName = ownerAidClean.split('.')[0].slice(0, 12);
+      }
+      const agentDisplayName = `${ownerDisplayName}的Evol助手`;
+
       // Generate new agent.md with proper fields
-      const ownerShortId = owner.split('@')[0].slice(0, 8);
       const newAgentMd = `---
 aid: "${aid}"
-name: "${ownerShortId}的Evol助手"
+name: "${agentDisplayName}"
 type: "codeagent"
 version: "1.0.0"
 description: "EvolClaw AI Agent Gateway - 连接 Claude/Codex 到消息通道"
@@ -370,7 +385,7 @@ tags:
 initialized: true
 ---
 
-# ${ownerShortId}的Evol助手
+# ${agentDisplayName}
 
 EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
 `;
