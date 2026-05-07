@@ -1,4 +1,5 @@
 import { logger } from '../utils/logger.js';
+import { requireOptional } from '../utils/init-channel.js';
 import type { ChannelPlugin, ChannelInstance } from '../core/channel-loader.js';
 import type { Config, DingtalkChannelConfig } from '../types.js';
 import { normalizeChannelInstances, getChannelShowActivities } from '../config.js';
@@ -86,7 +87,7 @@ export class DingtalkChannel {
       throw new Error('DingTalk clientId/clientSecret not configured');
     }
 
-    const { DWClient, TOPIC_ROBOT } = await import('dingtalk-stream');
+    const { DWClient, TOPIC_ROBOT } = await requireOptional('dingtalk-stream');
     this.client = new DWClient({ clientId, clientSecret });
 
     this.client.registerCallbackListener(TOPIC_ROBOT, async (msg: any) => {
@@ -365,7 +366,7 @@ export class DingtalkChannel {
       }
 
       // Step 1: Upload media
-      const FormData = (await import('form-data')).default;
+      const FormData = (await requireOptional('form-data')).default;
       const form = new FormData();
       form.append('type', 'image');
       form.append('media', png, { filename: 'image.png', contentType: 'image/png' });
@@ -414,7 +415,7 @@ export class DingtalkChannel {
       }
 
       // Step 1: Upload media
-      const FormData = (await import('form-data')).default;
+      const FormData = (await requireOptional('form-data')).default;
       const form = new FormData();
       form.append('type', 'file');
       form.append('media', fs.createReadStream(filePath), { filename: path.basename(filePath) });

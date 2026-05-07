@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { logger } from '../utils/logger.js';
+import { requireOptional } from '../utils/init-channel.js';
 import type { ChannelPlugin, ChannelInstance } from '../core/channel-loader.js';
 import type { Config, WecomChannelConfig } from '../types.js';
 import { normalizeChannelInstances, getChannelShowActivities } from '../config.js';
@@ -61,7 +62,7 @@ export class WecomChannel {
       throw new Error('WeCom botId/secret not configured');
     }
 
-    const { WSClient } = await import('@wecom/aibot-node-sdk');
+    const { WSClient } = await requireOptional('@wecom/aibot-node-sdk');
     this.client = new WSClient({ botId, secret });
 
     // Message events
