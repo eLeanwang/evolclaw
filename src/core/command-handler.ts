@@ -142,7 +142,7 @@ function formatIdleTime(ms: number): string {
 }
 
 // 支持的命令列表
-const commands = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/effort', '/agent', '/slist', '/session', '/rename', '/stop', '/clear', '/compact', '/repair', '/safe', '/fork', '/del', '/perm', '/send', '/check', '/rewind', '/activity', '/agentmd'];
+const commands = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/effort', '/agent', '/slist', '/session', '/rename', '/stop', '/clear', '/compact', '/repair', '/safe', '/fork', '/del', '/perm', '/file', '/check', '/rewind', '/activity', '/agentmd'];
 
 // 命令别名映射
 const aliases: Record<string, string> = {
@@ -153,7 +153,7 @@ const aliases: Record<string, string> = {
 };
 
 // 命令快速路径前缀（所有命令都不进入消息队列）
-const quickCommandPrefixes = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/effort', '/agent', '/slist', '/session', '/rename', '/repair', '/fork', '/stop', '/clear', '/compact', '/safe', '/del', '/perm', '/send', '/check', '/p ', '/s ', '/name', '/rewind', '/rw', '/rw ', '/activity'];
+const quickCommandPrefixes = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/effort', '/agent', '/slist', '/session', '/rename', '/repair', '/fork', '/stop', '/clear', '/compact', '/safe', '/del', '/perm', '/file', '/check', '/p ', '/s ', '/name', '/rewind', '/rw', '/rw ', '/activity'];
 
 export class CommandHandler {
   private adapters = new Map<string, ChannelAdapter>();
@@ -405,7 +405,7 @@ export class CommandHandler {
         commands: [
           { cmd: '/pwd', label: '显示当前项目路径', desc: '查看当前会话绑定的项目目录' },
           { cmd: '/p', label: '列出或切换项目', desc: '切换到其他已配置的项目', next: { type: 'select', dynamic: true } },
-          ...(isOwner ? [{ cmd: '/bind', args: '<path>', label: '绑定新项目目录', desc: '将当前会话绑定到指定项目路径', next: { type: 'text' as const } }] : []),
+          ...(isOwner ? [{ cmd: '/bind', label: '绑定新项目目录', desc: '将当前会话绑定到指定项目路径', next: { type: 'text' as const } }] : []),
         ]
       });
     }
@@ -419,7 +419,7 @@ export class CommandHandler {
         { cmd: '/del', label: '删除指定会话', desc: '永久删除一个非活跃会话', next: { type: 'select', dynamic: true } },
         ...(isAdmin ? [
           { cmd: '/fork', label: '分支当前会话', desc: '基于当前会话创建独立分支', next: { type: 'text' as const } },
-          { cmd: '/rewind', args: '[N] [chat|file|all]', label: '查看历史/撤销指定轮次', desc: '回退会话到指定轮次，可选择撤销文件改动' },
+          { cmd: '/rewind', label: '查看历史/撤销指定轮次', desc: '回退会话到指定轮次，可选择撤销文件改动' },
           { cmd: '/compact', label: '压缩会话上下文', desc: '将长对话压缩为摘要以节省 token' },
         ] : []),
       ]
@@ -465,7 +465,7 @@ export class CommandHandler {
           { cmd: '/status', label: '显示会话状态', desc: '查看当前会话、项目、Agent 的详细状态' },
           { cmd: '/stop', label: '中断当前任务', desc: '立即中断正在执行的 Agent 任务' },
           { cmd: '/check', label: '检查渠道状态', desc: '检查各消息渠道的连接健康状态' },
-          { cmd: '/activity', args: '[all|dm|owner|none]', label: '控制中间输出显示', desc: '设置工具调用过程的可见范围', next: { type: 'select', items: [
+          { cmd: '/activity', label: '控制中间输出显示', desc: '设置工具调用过程的可见范围', next: { type: 'select', items: [
             { value: 'all', label: '全部显示', desc: '所有用户均可见中间输出' },
             { value: 'dm', label: '仅私聊', desc: '仅私聊中显示中间输出' },
             { value: 'owner', label: '仅 owner 私聊', desc: '仅 owner 的私聊中显示' },
@@ -475,8 +475,8 @@ export class CommandHandler {
             { cmd: '/restart', label: '重启/重连', desc: '重启服务或重连指定渠道', next: { type: 'select' as const, dynamic: true } },
           ] : []),
           ...(isOwner ? [
-            { cmd: '/send', args: '[channel] <path>', label: '发送项目内文件', desc: '将项目目录内的文件发送给用户' },
-            { cmd: '/agentmd', args: '[put|set <内容>]', label: '管理 agent.md', desc: '查看或更新 AUN 网络上的 agent.md 身份文件', next: { type: 'select' as const, items: [
+            { cmd: '/file', label: '发送项目内文件', desc: '将项目目录内的文件发送给用户' },
+            { cmd: '/agentmd', label: '管理 agent.md', desc: '查看或更新 AUN 网络上的 agent.md 身份文件', next: { type: 'select' as const, items: [
               { value: 'put', label: '上传当前', desc: '将本地 agent.md 上传到 AUN 网络' },
               { value: 'set', label: '直接设置', desc: '输入内容直接更新 agent.md', next: { type: 'text' as const } },
             ] } },
@@ -729,7 +729,7 @@ export class CommandHandler {
         ] : []),
         ...(isOwner ? [
           '  /restart - 重启服务',
-          '  /send [channel] <path> - 发送项目内文件',
+          '  /file [channel] <path> - 发送项目内文件',
           '  /agentmd [put|set <内容>] - 管理 agent.md',
         ] : []),
         '',
@@ -1801,14 +1801,14 @@ export class CommandHandler {
       return `当前项目: ${session.projectPath}`;
     }
 
-    // /send 命令：发送项目内文件，支持 /send path 和 /send channel path（owner only）
-    if (normalizedContent.startsWith('/send')) {
+    // /file 命令：发送项目内文件，支持 /file path 和 /file channel path（owner only）
+    if (normalizedContent.startsWith('/file')) {
       if (!isOwner) return '❌ 无权限：此命令仅限 owner 使用';
       // 飞书会将 .md 等后缀自动转为 Markdown 链接: foo.md → [foo.md](http://foo.md/)
       // 还原: 将 [text](url) 替换为 text
       const rawArg = normalizedContent.slice(5).trim().replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
       if (!rawArg) {
-        return '用法: /send <相对路径> 或 /send <渠道> <相对路径>\n示例: /send src/index.ts\n示例: /send feishu report.md';
+        return '用法: /file <相对路径> 或 /file <渠道> <相对路径>\n示例: /file src/index.ts\n示例: /file feishu report.md';
       }
 
       // 解析目标通道：第一个 token 按实例名匹配，再按 channelType 匹配
@@ -1908,7 +1908,7 @@ export class CommandHandler {
           ? `📎 文件已通过 ${targetLabel} 发送: ${filePath} (${sizeStr})`
           : `✅ 已发送: ${filePath} (${sizeStr})`;
       } catch (error: any) {
-        logger.error('[CommandHandler] /send failed:', error);
+        logger.error('[CommandHandler] /file failed:', error);
         return `❌ 文件发送失败: ${error.message || error}`;
       }
     }
@@ -2861,7 +2861,7 @@ export class CommandHandler {
   private static readonly CTL_COMMANDS = [
     '/help', '/status', '/check',
     '/model', '/effort', '/perm',
-    '/compact', '/activity', '/send', '/restart', '/agentmd',
+    '/compact', '/activity', '/file', '/restart', '/agentmd',
   ];
 
   /**
@@ -2884,8 +2884,8 @@ export class CommandHandler {
     // 3. 从 session.metadata.peerId 获取 userId（用于权限判断）
     const userId = session.metadata?.peerId;
 
-    // 4. send 路径限制：只允许 projectPath 下的文件
-    if (cmd.startsWith('/send')) {
+    // 4. file 路径限制：只允许 projectPath 下的文件
+    if (cmd.startsWith('/file')) {
       const sendArgs = cmd.slice(5).trim();
       const parts = sendArgs.split(/\s+/);
       const filePath = parts[parts.length - 1];

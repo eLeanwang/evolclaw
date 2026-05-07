@@ -385,7 +385,13 @@ async function offerRichContentRenderer(rl: readline.Interface, config: any): Pr
 
 // ==================== Main ====================
 
-export async function cmdInit() {
+export async function cmdInit(options?: {
+  nonInteractive?: boolean;
+  defaultPath?: string;
+  channel?: string;
+  aunAid?: string;
+  aunOwner?: string;
+}) {
   const p = resolvePaths();
   ensureDataDirs();
 
@@ -404,6 +410,81 @@ export async function cmdInit() {
     return;
   }
 
+  // 非交互式模式
+  if (options?.nonInteractive) {
+    const config = JSON.parse(fs.readFileSync(sampleSrc, 'utf-8'));
+    const defaultPath = options.defaultPath || path.join(os.homedir(), 'evolclaw-project');
+    if (!fs.existsSync(defaultPath)) fs.mkdirSync(defaultPath, { recursive: true });
+    config.projects.defaultPath = defaultPath;
+    config.projects.list = { [path.basename(defaultPath)]: defaultPath };
+
+    if (options.channel === 'aun' && !options.aunAid) {
+      throw new Error('--aun-aid is required for AUN channel (e.g. --aun-aid mybot.agentid.pub)');
+    }
+    if (options.channel === 'aun' && options.aunAid) {
+      // 自动安装 AUN SDK
+      const { resolveAunCoreSdkPkg, npmInstallGlobal } = await import('./init-channel.js');
+      if (!resolveAunCoreSdkPkg()) {
+        console.log('正在安装 @agentunion/aun-node...');
+        await npmInstallGlobal('@agentunion/aun-node@latest');
+      }
+
+      // 创建 AID（如果本地不存在）
+      const aunPath = path.join(os.homedir(), '.aun');
+      const aidDir = path.join(aunPath, 'AIDs', options.aunAid);
+      if (!fs.existsSync(path.join(aidDir, 'private'))) {
+        const { AUNClient } = await import('@agentunion/aun-node');
+        const client = new AUNClient({ aun_path: aunPath });
+        // 让 SDK 通过 well-known 自动发现网关
+        const result = await client.auth.createAid({ aid: options.aunAid });
+
+        // 下载 CA 根证书（如果本地不存在），从 SDK 返回的实际网关 URL 派生
+        const caDir = path.join(aunPath, 'CA', 'root');
+        const caCertPath = path.join(caDir, 'root.crt');
+        if (!fs.existsSync(caCertPath) && result.gateway) {
+          try {
+            fs.mkdirSync(caDir, { recursive: true });
+            const gwHttp = result.gateway.replace(/^wss?:/, 'https:').replace(/\/aun$/, '');
+            const resp = await fetch(`${gwHttp}/pki/chain`, { redirect: 'follow' });
+            if (resp.ok) {
+              const body = await resp.text();
+              if (body.includes('BEGIN CERTIFICATE')) {
+                fs.writeFileSync(caCertPath, body);
+                console.log('✓ CA 根证书已下载');
+              } else {
+                console.warn('⚠ CA 根证书响应内容无效，跳过写入');
+              }
+            }
+          } catch (e) {
+            console.warn(`⚠ CA 根证书下载失败: ${e}，可稍后手动下载`);
+          }
+        }
+
+        // 写入初始 agent.md（initialized: false）
+        const agentName = options.aunAid.split('.')[0];
+        const agentMd = `---\naid: "${options.aunAid}"\nname: "${agentName}"\ntype: "ai"\nversion: "1.0.0"\ndescription: ""\ntags:\n  - evolclaw\ninitialized: false\n---\n`;
+        try {
+          await client.auth.uploadAgentMd(agentMd);
+          fs.writeFileSync(path.join(aidDir, 'agent.md'), agentMd, 'utf-8');
+        } catch {}
+        try { await client.close(); } catch {}
+      }
+
+      config.channels.aun = {
+        enabled: true,
+        aid: options.aunAid,
+        ...(options.aunOwner && { owner: options.aunOwner }),
+      };
+      config.channels.defaultChannel = 'aun';
+    }
+
+    fs.writeFileSync(p.config, JSON.stringify(config, null, 2) + '\n');
+    console.log(`✓ 已创建配置文件: ${p.config}`);
+    setupEnvVar(resolveRoot());
+    return;
+  }
+
+  // 交互式模式
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 
   try {
@@ -506,6 +587,7 @@ export async function cmdInit() {
         config.channels.aun = {
           enabled: true,
           aid: result.aid,
+          owner: result.owner,
         };
         channelConfigured = true;
         config.channels.defaultChannel = 'aun';
@@ -586,7 +668,10 @@ export async function selectInstance(
   console.log(`\n发现已有 ${typeLabel} 机器人：`);
   const letters = 'abcdefghijklmnopqrstuvwxyz';
   for (let i = 0; i < instances.length; i++) {
-    console.log(`  ${letters[i]}. ${instances[i].name}`);
+    const inst = instances[i];
+    const id = inst.aid || inst.appId || inst.botId || inst.clientId || inst.token?.slice(0, 16) || '';
+    const suffix = id ? ` (${id})` : '';
+    console.log(`  ${letters[i]}. ${inst.name}${suffix}`);
   }
   const addLetter = letters[instances.length];
   console.log(`  ${addLetter}. 添加新机器人`);

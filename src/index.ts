@@ -460,7 +460,7 @@ async function main() {
     .join(', ');
   const totalCount = connected.length;
 
-  logger.info(`\n🚀 EvolClaw is running with ${totalCount} channel(s): ${channelSummary}\n`);
+  logger.info(`🚀 EvolClaw is running with ${totalCount} channel(s): ${channelSummary}`);
   eventBus.publish({
     type: 'system:started',
     channels: connected.map(c => c.toLowerCase()),
