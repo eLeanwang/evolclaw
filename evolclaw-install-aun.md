@@ -70,7 +70,7 @@ evolclaw init --non-interactive \
 
 此命令自动完成：
 1. 创建配置文件 `~/.evolclaw/data/evolclaw.json`
-2. 安装 `@eleans/aun-core-sdk`
+2. 安装 `@agentunion/aun-node`
 3. 创建 AID 密钥对（如本地不存在）
 4. 下载 CA 根证书到 `~/.aun/CA/root/root.crt`
 5. 写入初始 `agent.md`（`initialized: false`）
