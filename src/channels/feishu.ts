@@ -1,4 +1,3 @@
-import * as lark from '@larksuiteoapi/node-sdk';
 import fs from 'fs';
 import path from 'path';
 import imageType from 'image-type';
@@ -35,8 +34,8 @@ export interface ProjectPathProvider {
 }
 
 export class FeishuChannel {
-  private client: lark.Client | null = null;
-  private wsClient: lark.WSClient | null = null;
+  private client: any = null;
+  private wsClient: any = null;
   private messageHandler?: MessageHandler;
   private projectPathProvider?: ProjectPathProvider;
   private cleanupInterval?: NodeJS.Timeout;
@@ -71,6 +70,9 @@ export class FeishuChannel {
     if (this.config.appId.startsWith('YOUR_') || this.config.appSecret.startsWith('YOUR_')) {
       throw new Error('Feishu credentials not configured (placeholder values detected)');
     }
+
+    const { requireOptional } = await import('../utils/init-channel.js');
+    const lark = await requireOptional<typeof import('@larksuiteoapi/node-sdk')>('@larksuiteoapi/node-sdk');
 
     try {
       this.client = new lark.Client({

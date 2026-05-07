@@ -6,7 +6,6 @@
  * so MessageProcessor and CommandHandler can work with it transparently.
  */
 
-import { Codex, type ThreadEvent, type ThreadItem, type ThreadOptions, type ModelReasoningEffort, type ApprovalMode, type UserInput, type Input } from '@openai/codex-sdk';
 import type { Config } from '../types.js';
 import type { AgentPlugin, AgentInstance, AgentCallbacks } from '../core/agent-loader.js';
 import type { AgentEvent, AgentRunnerFull, ModelSwitcher, PermissionModeInfo } from './claude-runner.js';
@@ -15,6 +14,9 @@ import { logger } from '../utils/logger.js';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+
+type CodexSDK = typeof import('@openai/codex-sdk');
+type CodexInstance = InstanceType<(typeof import('@openai/codex-sdk'))['Codex']>;
 
 // ── MIME → 扩展名映射 ──
 const MIME_EXT: Record<string, string> = {
@@ -32,23 +34,33 @@ const CODEX_MODELS = ['gpt-5.3-codex', 'gpt-5.2-codex', 'gpt-5-codex', 'gpt-5.2'
 export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
   readonly name = 'codex';
   readonly capabilities = { clear: false, compact: false, fork: false };
-  private codex: Codex;
+  private codex: CodexInstance | null = null;
+  private codexModule: CodexSDK | null = null;
   private model: string;
-  private effort?: ModelReasoningEffort;
+  private effort?: string;
   private activeAbortControllers = new Map<string, AbortController>();
   private activeStreams = new Map<string, AsyncIterable<any>>();
   private activeSessions = new Map<string, string>(); // sessionId → threadId
   private onSessionIdUpdate?: (sessionId: string, agentSessionId: string) => void;
+  private resolvedConfig: { apiKey: string; baseUrl?: string; model: string; effort?: string };
 
   constructor(config: Config, callbacks: AgentCallbacks) {
-    const resolved = resolveOpenaiConfig(config);
-    this.codex = new Codex({
-      apiKey: resolved.apiKey,
-      baseUrl: resolved.baseUrl,
-    });
-    this.model = resolved.model;
-    if (resolved.effort) this.effort = resolved.effort as ModelReasoningEffort;
+    this.resolvedConfig = resolveOpenaiConfig(config);
+    this.model = this.resolvedConfig.model;
+    if (this.resolvedConfig.effort) this.effort = this.resolvedConfig.effort;
     this.onSessionIdUpdate = callbacks.onSessionIdUpdate;
+  }
+
+  private async ensureCodex(): Promise<{ codex: CodexInstance; mod: CodexSDK }> {
+    if (!this.codex || !this.codexModule) {
+      const { requireOptional } = await import('../utils/init-channel.js');
+      this.codexModule = await requireOptional<CodexSDK>('@openai/codex-sdk');
+      this.codex = new this.codexModule.Codex({
+        apiKey: this.resolvedConfig.apiKey,
+        baseUrl: this.resolvedConfig.baseUrl,
+      });
+    }
+    return { codex: this.codex, mod: this.codexModule };
   }
 
   // ── ModelSwitcher ──
@@ -59,16 +71,16 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
 
   // ── Effort ──
 
-  setEffort(effort: ModelReasoningEffort | undefined): void { this.effort = effort; }
+  setEffort(effort: string | undefined): void { this.effort = effort; }
   getEffort(): string | undefined { return this.effort; }
 
   // ── Permission ──
 
   private currentMode: string = 'auto';
-  private approvalPolicy: ApprovalMode = 'never';
+  private approvalPolicy: string = 'never';
 
   setMode(mode: string): void {
-    const map: Record<string, ApprovalMode> = {
+    const map: Record<string, string> = {
       'auto': 'never',
       'bypass': 'never',
       'request': 'on-request',
@@ -119,9 +131,10 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
     // Agent ctl: 注入 EVOLCLAW_SESSION_ID 供子进程使用
     process.env.EVOLCLAW_SESSION_ID = sessionId;
 
+    const { codex } = await this.ensureCodex();
     let agentSessionId = initialAgentSessionId || this.activeSessions.get(sessionId);
 
-    const threadOptions: ThreadOptions = {
+    const threadOptions: any = {
       workingDirectory: projectPath,
       model: this.model,
       skipGitRepoCheck: true,
@@ -131,19 +144,19 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
     };
 
     const thread = agentSessionId
-      ? this.codex.resumeThread(agentSessionId, threadOptions)
-      : this.codex.startThread(threadOptions);
+      ? codex.resumeThread(agentSessionId, threadOptions)
+      : codex.startThread(threadOptions);
 
     const controller = new AbortController();
     this.activeAbortControllers.set(sessionId, controller);
 
     // 构建输入：将 base64 图片写入临时文件，转换为 Codex SDK 的 local_image 格式
     const tempFiles: string[] = [];
-    let input: Input;
+    let input: any;
 
     if (images?.length) {
       const tmpDir = os.tmpdir();
-      const parts: UserInput[] = [{ type: 'text', text: prompt }];
+      const parts: any[] = [{ type: 'text', text: prompt }];
 
       for (let i = 0; i < images.length; i++) {
         const img = images[i];
@@ -236,7 +249,7 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
   // ── Event stream transformation ──
 
   private async *transformStream(
-    events: AsyncGenerator<ThreadEvent>,
+    events: AsyncGenerator<any>,
     sessionId: string,
     thread: any,
     tempFiles?: string[]
@@ -257,7 +270,7 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
     }
   }
 
-  private *mapEvent(event: ThreadEvent, sessionId: string, thread: any): Iterable<AgentEvent> {
+  private *mapEvent(event: any, sessionId: string, thread: any): Iterable<AgentEvent> {
     switch (event.type) {
       case 'thread.started': {
         const threadId = event.thread_id;
@@ -274,7 +287,7 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
         } else if (item.type === 'mcp_tool_call') {
           yield { type: 'tool_use', name: `MCP:${item.server}/${item.tool}`, input: item.arguments };
         } else if (item.type === 'file_change') {
-          const desc = item.changes.map(c => `${c.kind} ${c.path}`).join(', ');
+          const desc = item.changes.map((c: any) => `${c.kind} ${c.path}`).join(', ');
           yield { type: 'tool_use', name: 'FileChange', input: { description: desc } };
         } else if (item.type === 'web_search') {
           yield { type: 'tool_use', name: 'WebSearch', input: { query: item.query } };

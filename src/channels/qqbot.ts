@@ -1,5 +1,6 @@
 import { logger } from '../utils/logger.js';
 import { markdownToPlainText } from '../utils/format.js';
+import { requireOptional } from '../utils/init-channel.js';
 import type { ChannelPlugin, ChannelInstance } from '../core/channel-loader.js';
 import type { Config, QQBotChannelConfig } from '../types.js';
 import { normalizeChannelInstances, getChannelShowActivities } from '../config.js';
@@ -80,7 +81,7 @@ export class QQBotChannel {
       throw new Error('QQBot appId/clientSecret not configured');
     }
 
-    const { QQBotClient } = await import('pure-qqbot');
+    const { QQBotClient } = await requireOptional('pure-qqbot');
 
     this.client = new QQBotClient({
       appId,
