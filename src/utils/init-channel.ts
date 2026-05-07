@@ -52,20 +52,6 @@ export async function requireOptional<T = any>(pkg: string, autoInstall = true):
   }
 }
 
-/** Dynamic import with auto-install fallback for optional dependencies */
-export async function requireOptional<T = any>(pkg: string, autoInstall = true): Promise<T> {
-  try {
-    return await import(pkg) as T;
-  } catch (e: any) {
-    if (e.code !== 'ERR_MODULE_NOT_FOUND' && e.code !== 'MODULE_NOT_FOUND') throw e;
-    if (!autoInstall) throw new Error(`依赖 ${pkg} 未安装。请运行: npm install -g ${pkg}`);
-    const { logger } = await import('./logger.js');
-    logger.info(`正在安装可选依赖 ${pkg}...`);
-    await npmInstallGlobal(pkg);
-    return await import(pkg) as T;
-  }
-}
-
 function ask(rl: readline.Interface, question: string): Promise<string> {
   return new Promise(resolve => rl.question(question, resolve));
 }
