@@ -849,11 +849,12 @@ export async function setupAunAid(rl: readline.Interface, _config: any): Promise
       // 下载 CA 根证书（如果本地不存在），从 SDK 返回的实际网关 URL 派生
       const caDownloaded = await downloadCaRoot(aunPath, result.gateway || '', '  ');
 
-      // 关键：CA 下载后必须重建 client，让 SDK 重新加载 trusted roots。
-      // 否则 uploadAgentMd 会因为 "no trusted roots available" 而失败。
-      if (caDownloaded) {
+      // 关键：SDK 默认 rootCaPath=null，只读取包内 bundled certs。
+      // 必须显式传 root_ca_path 指向刚下载的 root.crt，uploadAgentMd 才能验证 server cert。
+      const caCertPath = path.join(aunPath, 'CA', 'root', 'root.crt');
+      if (caDownloaded && fs.existsSync(caCertPath)) {
         try { await client.close(); } catch { /* ignore */ }
-        client = new AUNClient({ aun_path: aunPath });
+        client = new AUNClient({ aun_path: aunPath, root_ca_path: caCertPath });
         if (gatewayPort) {
           const domain = aid.split('.').slice(1).join('.');
           (client as any)._gatewayUrl = `wss://gateway.${domain}:${gatewayPort}/aun`;
