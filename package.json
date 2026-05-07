@@ -1,6 +1,6 @@
 {
   "name": "evolclaw",
-  "version": "2.5.0",
+  "version": "2.5.4",
   "description": "Lightweight AI Agent gateway connecting Claude Agent SDK to messaging channels (Feishu, ACP) with multi-project session management",
   "type": "module",
   "main": "dist/index.js",
@@ -11,7 +11,9 @@
     "dist/",
     "!dist/experimental/",
     "data/evolclaw.sample.json",
-    "evolclaw-install.md"
+    "evolclaw-install-aun.md",
+    "aun/aun_cli.py",
+    "aun/pyproject.toml"
   ],
   "scripts": {
     "dev": "tsx watch src/index.ts",
@@ -24,7 +26,7 @@
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.100",
-    "@eleans/aun-core-sdk": "^0.2.9",
+    "@agentunion/aun-node": "^0.2.12",
     "@larksuiteoapi/node-sdk": "^1.59.0",
     "@openai/codex-sdk": "^0.118.0",
     "@types/form-data": "^2.2.1",

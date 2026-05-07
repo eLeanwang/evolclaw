@@ -25,7 +25,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 # ── 依赖自检 ──────────────────────────────────────────────────────────────
 _REQUIRED_PACKAGES = [
-    {"import": "aun_core", "requirement": "aun-core>=0.2.9"},
+    {"import": "aun_core", "requirement": "aunp>=0.2.12"},
     {"import": "prompt_toolkit", "requirement": "prompt-toolkit>=3.0.0"},
     {"import": "rich", "requirement": "rich>=13.0.0"},
 ]
@@ -1921,7 +1921,7 @@ class AUNCli:
         self.client.on("group.created",     self._on_group_created)
 
         from aun_core import __version__ as _sdk_ver
-        info(f"AID: {C.BOLD}{aid}{C.RESET}  {C.DIM}(aun-core {_sdk_ver}){C.RESET}")
+        info(f"AID: {C.BOLD}{aid}{C.RESET}  {C.DIM}(aunp {_sdk_ver}){C.RESET}")
 
         ks = _get_keystore()
         has_dir = (ks._aids_root / aid).is_dir()
