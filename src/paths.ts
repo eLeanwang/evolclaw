@@ -1,7 +1,10 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import crypto from 'crypto';
 import { fileURLToPath } from 'url';
+
+const isWindows = process.platform === 'win32';
 
 let _root: string | null = null;
 
@@ -35,8 +38,16 @@ export function resolvePaths() {
     lineStats: path.join(root, 'logs', 'line-stats.log'),
     readySignal: path.join(root, 'logs', 'ready.signal'),
     selfHealLog: path.join(root, 'logs', 'self-heal.md'),
-    socket: path.join(root, 'logs', 'evolclaw.sock'),
+    socket: resolveSocketPath(root),
   };
+}
+
+function resolveSocketPath(root: string): string {
+  if (isWindows) {
+    const hash = crypto.createHash('sha1').update(root).digest('hex').slice(0, 12);
+    return `\\\\.\\pipe\\evolclaw-${hash}`;
+  }
+  return path.join(root, 'logs', 'evolclaw.sock');
 }
 
 export function ensureDataDirs(): void {

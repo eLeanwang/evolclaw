@@ -2,6 +2,9 @@ import net from 'net';
 import fs from 'fs';
 import { logger } from './utils/logger.js';
 
+const isWindows = process.platform === 'win32';
+const isNamedPipe = (p: string) => isWindows && p.startsWith('\\\\.\\pipe\\');
+
 export interface ChannelStatus {
   connected: boolean;
   channelType?: string;
@@ -49,8 +52,10 @@ export class IpcServer {
   ) {}
 
   start(): void {
-    // Remove stale socket file
-    try { fs.unlinkSync(this.socketPath); } catch {}
+    // Remove stale socket file (Unix only — named pipes auto-cleanup on process exit)
+    if (!isNamedPipe(this.socketPath)) {
+      try { fs.unlinkSync(this.socketPath); } catch {}
+    }
 
     this.server = net.createServer((conn) => {
       let buf = '';
@@ -77,8 +82,10 @@ export class IpcServer {
     });
 
     this.server.listen(this.socketPath, () => {
-      // Ensure socket is readable by current user only
-      try { fs.chmodSync(this.socketPath, 0o600); } catch {}
+      // Restrict to current user (Unix only — named pipes use Windows ACLs)
+      if (!isNamedPipe(this.socketPath)) {
+        try { fs.chmodSync(this.socketPath, 0o600); } catch {}
+      }
       logger.info(`[IPC] Listening on ${this.socketPath}`);
     });
   }
@@ -88,7 +95,9 @@ export class IpcServer {
       this.server.close();
       this.server = null;
     }
-    try { fs.unlinkSync(this.socketPath); } catch {}
+    if (!isNamedPipe(this.socketPath)) {
+      try { fs.unlinkSync(this.socketPath); } catch {}
+    }
   }
 
   private async handleCommand(cmd: { type: string }): Promise<unknown> {
