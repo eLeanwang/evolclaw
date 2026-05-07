@@ -445,6 +445,7 @@ function validateConfig(config: any): asserts config is Config {
   // Feishu 配置可选，但如果配置了就要完整（支持 array / object 两种格式）
   const feishuInstances = normalizeChannelInstances(config.channels?.feishu, 'feishu');
   for (const inst of feishuInstances) {
+    if ((inst as any).enabled === false) continue;
     const label = feishuInstances.length > 1 ? ` [${inst.name}]` : '';
     if (!(inst as any).appId || (inst as any).appId.startsWith('YOUR_')) {
       logger.warn(`⚠ Feishu${label} appId not configured (Feishu channel will be disabled)`);
