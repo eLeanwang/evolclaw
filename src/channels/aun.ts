@@ -1,7 +1,8 @@
-import { AUNClient, FileSecretStore, GatewayDiscovery, type JsonObject } from '@eleans/aun-core-sdk';
+import { AUNClient, FileSecretStore, GatewayDiscovery, type JsonObject } from '@agentunion/aun-node';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
+import os from 'os';
 import { logger, localTimestamp } from '../utils/logger.js';
 import type { ChannelPlugin, ChannelInstance } from '../core/channel-loader.js';
 import type { Config, ReplyContext, AunChannelConfig } from '../types.js';
@@ -200,7 +201,7 @@ export class AUNChannel {
 
     if (!gateway) {
       logger.error('[AUN] Cannot resolve gateway URL from AID');
-      return;
+      throw new Error('Cannot resolve gateway URL from AID');
     }
 
     logger.info(`[AUN] Initializing: aid=${aidName}, gateway=${gateway}, aun_path=${aunPath}`);
@@ -282,7 +283,7 @@ export class AUNChannel {
       if (!accessToken) {
         logger.error(`[AUN] No accessToken fallback available, scheduling retry`);
         this.scheduleReconnect();
-        return;
+        throw new Error('Authentication failed and no accessToken fallback available');
       }
       logger.warn(`[AUN] Using accessToken fallback`);
     }
@@ -318,7 +319,7 @@ export class AUNChannel {
     } catch (e) {
       logger.error(`[AUN] Connection failed: ${e}`);
       this.scheduleReconnect();
-      return;
+      throw e;
     }
   }
 
@@ -330,6 +331,63 @@ export class AUNChannel {
         return;
       }
 
+      // Check agent.md initialized field
+      const aid = this.config.aid;
+      const aidName = aid.startsWith('@') ? aid.slice(1) : aid;
+      const agentMdPath = path.join(os.homedir(), '.aun', 'AIDs', aidName, 'agent.md');
+
+      if (!fs.existsSync(agentMdPath)) {
+        logger.warn('[AUN] agent.md not found, skipping welcome message');
+        return;
+      }
+
+      const agentMdContent = fs.readFileSync(agentMdPath, 'utf-8');
+      const match = agentMdContent.match(/^---\n([\s\S]*?)\n---/);
+      if (!match) {
+        logger.warn('[AUN] agent.md frontmatter not found');
+        return;
+      }
+
+      const frontmatter = match[1];
+      const initializedMatch = frontmatter.match(/^initialized:\s*(true|false)/m);
+      if (!initializedMatch || initializedMatch[1] === 'true') {
+        logger.info('[AUN] Agent already initialized, skipping welcome message');
+        return;
+      }
+
+      // Generate new agent.md with proper fields
+      const ownerShortId = owner.split('@')[0].slice(0, 8);
+      const newAgentMd = `---
+aid: "${aid}"
+name: "${ownerShortId}的Evol助手"
+type: "codeagent"
+version: "1.0.0"
+description: "EvolClaw AI Agent Gateway - 连接 Claude/Codex 到消息通道"
+tags:
+  - evolclaw
+  - ai-agent
+  - gateway
+initialized: true
+---
+
+# ${ownerShortId}的Evol助手
+
+EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
+`;
+
+      // Write locally
+      fs.writeFileSync(agentMdPath, newAgentMd, 'utf-8');
+      logger.info('[AUN] Updated agent.md with initialized=true');
+
+      // Publish to AUN network via auth.uploadAgentMd
+      try {
+        await (this.client as any).auth.uploadAgentMd(newAgentMd);
+        logger.info('[AUN] Published agent.md to AUN network');
+      } catch (e) {
+        logger.warn(`[AUN] Failed to publish agent.md: ${e}`);
+      }
+
+      // Send welcome message
       const welcomeText = `🎉 欢迎使用 EvolClaw！
 
 我是您的 AI Agent 网关，已成功连接到 AUN 网络。
@@ -340,6 +398,8 @@ export class AUNChannel {
 2. **查看帮助**：发送 \`/help\` 查看所有可用命令
 3. **切换项目**：发送 \`/project <项目名>\` 切换到其他项目
 4. **查看状态**：发送 \`/status\` 查看当前会话状态
+5. **查看 Agent 信息**：发送 \`/agentmd\` 查看 agent.md 内容
+6. **会话管理**：发送 \`/session\` 查看和切换会话
 
 💡 **提示**：
 - 直接发送消息即可与 Claude/Codex 对话
@@ -1061,6 +1121,7 @@ export class AUNChannelPlugin implements ChannelPlugin {
         accessToken: inst.accessToken,
         flushDelay: inst.flushDelay,
         encryptionSeed: inst.encryptionSeed,
+        owner: inst.owner,
         aunTrace: config.debug?.aunTrace,
       });
 
@@ -1103,6 +1164,7 @@ export class AUNChannelPlugin implements ChannelPlugin {
       const options = {
         flushDelay: inst.flushDelay ?? 3,
         fileMarkerPattern: /\[SEND_FILE:(?:(\w+):)?([^\]]+)\]/g,
+        sessionMode: inst.sessionMode,
       };
 
       result.push({

@@ -328,6 +328,7 @@ export class MessageProcessor {
       const imageInfo = message.images && message.images.length > 0 ? ` [${message.images.length} image(s)]` : '';
       const modeInfo = isBackground ? ' [\u540e\u53f0]' : '';
       logger.info(`[${message.channel}] ${message.channelId}: ${message.content}${imageInfo}${modeInfo}`);
+      logger.info(`[MessageProcessor] session=${session.id} chatType=${session.chatType} sessionMode=${session.sessionMode} agentId=${session.agentId} msgChatType=${message.chatType ?? 'n/a'}`);
 
       // 记录开始处理
       this.eventBus.publish({ type: 'message:processing', sessionId: session.id });
@@ -345,6 +346,7 @@ export class MessageProcessor {
       // 创建 StreamFlusher，传入文件标记模式用于自动过滤
       // 使用动态判断，确保切换项目后不会继续输出
       let firstReply = true;
+      const isProactive = session.sessionMode === 'proactive';
       const flusher = new StreamFlusher(
         async (text, isFinal, hasText) => {
           const isCurrentlyBackground = await this.isBackgroundSession(session, message.channel, message.channelId);
@@ -369,7 +371,8 @@ export class MessageProcessor {
         },
         (options?.flushDelay ?? this.config.flushDelay ?? 3) * 1000,
         options?.fileMarkerPattern,
-        this.config.debug?.flusherDiag
+        this.config.debug?.flusherDiag,
+        isProactive
       );
 
       // 保存当前 flusher，用于 compact 事件
@@ -440,23 +443,29 @@ export class MessageProcessor {
 
         // 只读模式提示
         if (session.metadata?.permissionMode === 'readonly') {
-          contextParts.push('[只读模式] 禁止修改项目文件。如需生成文件供用户下载，请写入 .evolclaw/tmp/ 目录后使用 [SEND_FILE:] 发送');
+          const sendHint = isProactive
+            ? '使用 evolclaw ctl file 发送'
+            : '使用 [SEND_FILE:] 发送';
+          contextParts.push(`[只读模式] 禁止修改项目文件。如需生成文件供用户下载，请写入 .evolclaw/tmp/ 目录后${sendHint}`);
         }
 
         // 2. 文件发送能力（按 channelType 去重，提示词只展示第一级通道名）
-        const fileChannelTypes = new Set<string>();
-        const currentCanSend = !!channelInfo.adapter.sendFile;
-        for (const [, info] of this.channels) {
-          if (info.adapter.sendFile) {
-            fileChannelTypes.add(info.options?.channelType || info.adapter.channelName);
+        // proactive 模式：不推送 [SEND_FILE:] 提示，统一通过 evolclaw ctl file 显式发送（与 ctl send 契约一致）
+        if (!isProactive) {
+          const fileChannelTypes = new Set<string>();
+          const currentCanSend = !!channelInfo.adapter.sendFile;
+          for (const [, info] of this.channels) {
+            if (info.adapter.sendFile) {
+              fileChannelTypes.add(info.options?.channelType || info.adapter.channelName);
+            }
           }
-        }
-        const crossChannelTypes = [...fileChannelTypes].filter(t => t !== currentChannelType);
-        if (currentCanSend || crossChannelTypes.length > 0) {
-          const hints: string[] = [];
-          if (currentCanSend) hints.push(`[SEND_FILE:路径] 发送文件到当前通道`);
-          if (crossChannelTypes.length > 0) hints.push(`[SEND_FILE:${crossChannelTypes[0]}:路径] 发送文件到指定通道（可用: ${crossChannelTypes.join('/')}）`);
-          contextParts.push(hints.join('，'));
+          const crossChannelTypes = [...fileChannelTypes].filter(t => t !== currentChannelType);
+          if (currentCanSend || crossChannelTypes.length > 0) {
+            const hints: string[] = [];
+            if (currentCanSend) hints.push(`[SEND_FILE:路径] 发送文件到当前通道`);
+            if (crossChannelTypes.length > 0) hints.push(`[SEND_FILE:${crossChannelTypes[0]}:路径] 发送文件到指定通道（可用: ${crossChannelTypes.join('/')}）`);
+            contextParts.push(hints.join('，'));
+          }
         }
 
         // 3. 当前通道能力
@@ -481,6 +490,16 @@ export class MessageProcessor {
         const skillsHint = this.getSkillsHint();
         if (skillsHint) {
           contextParts.push(`[EvolClaw 自管理] ${skillsHint}`);
+        }
+
+        // 6. Proactive 模式提示词：agent 的输出不会自动发送，必须主动调用 ctl send/file
+        if (isProactive) {
+          contextParts.push(
+            '[Proactive 模式] 本次对话中你的流式输出不会自动发送给用户，必须通过以下命令主动发送：\n' +
+            '- 发送文本：evolclaw ctl send "<消息内容>"\n' +
+            '- 发送文件：evolclaw ctl file <路径>\n' +
+            '可多次调用。如不调用，用户将看不到任何回复。'
+          );
         }
 
         const effectiveSystemPrompt = [options?.systemPromptAppend, ...contextParts].filter(Boolean).join('\n') || undefined;
@@ -567,11 +586,13 @@ export class MessageProcessor {
       // 处理文件标记 - 支持 [SEND_FILE:path] 和 [SEND_FILE:channel:path]
       // 注意：始终扫描全部文本（含中间轮），因为文件标记可能出现在任意轮次
       // suppressed 模式下 flusher 只有最后一轮文本，需要用 streamResult.fullText（SDK 全文）兜底
-      const FILE_MARKER_RE = /\[SEND_FILE:(?:(\w+):)?([^\]]+)\]/g;
-      const markerPattern = options?.fileMarkerPattern ?? FILE_MARKER_RE;
-      const flusherText = flusher.getFinalText();
-      const fullText = flusherText.length >= (streamResult.fullText?.length || 0) ? flusherText : streamResult.fullText;
-      const fileMatches = [...fullText.matchAll(markerPattern)];
+      // proactive 模式：agent 主动调用 ctl file 发送文件，跳过标记处理
+      if (!isProactive) {
+        const FILE_MARKER_RE = /\[SEND_FILE:(?:(\w+):)?([^\]]+)\]/g;
+        const markerPattern = options?.fileMarkerPattern ?? FILE_MARKER_RE;
+        const flusherText = flusher.getFinalText();
+        const fullText = flusherText.length >= (streamResult.fullText?.length || 0) ? flusherText : streamResult.fullText;
+        const fileMatches = [...fullText.matchAll(markerPattern)];
 
       for (const match of fileMatches) {
         // 兼容旧格式 (1组) 和新格式 (2组)
@@ -644,6 +665,7 @@ export class MessageProcessor {
           await adapter.sendText(message.channelId, `\u274c 文件发送失败: ${filePath}`, this.getReplyContext(message));
         }
       }
+      }  // end of !isProactive
 
       // 最终回复文本添加到 flusher（统一在流结束后处理，避免多 complete 事件重复发送）
       // suppressed 模式：中间流式文本未推送，使用最后一轮回复（回退到全文）

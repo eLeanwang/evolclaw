@@ -381,6 +381,25 @@ export function setChannelShowActivities(config: Config, instanceName: string, m
   }
 }
 
+/**
+ * 读取通道实例的 sessionMode 锁定配置
+ * 返回 undefined 表示未配置（由 session-manager 按 chatType 默认决定）
+ */
+export function getChannelSessionMode(config: Config, instanceName: string): 'interactive' | 'proactive' | undefined {
+  for (const type of channelTypes) {
+    const raw = (config.channels as any)?.[type];
+    if (raw === undefined) continue;
+    if (Array.isArray(raw)) {
+      const inst = raw.find((item: any) => item.name === instanceName);
+      if (inst) return inst.sessionMode;
+    } else {
+      const effectiveName = raw.name ?? type;
+      if (effectiveName === instanceName) return raw.sessionMode;
+    }
+  }
+  return undefined;
+}
+
 export function isOwner(config: Config, channelOrType: string, userId: string): boolean {
   // 按实例名精确匹配
   if (getOwner(config, channelOrType) === userId) return true;

@@ -8,7 +8,7 @@ import type { StatsCollector } from '../utils/stats-collector.js';
 import { PermissionGateway, type PermissionDecision } from './permission.js';
 import { InteractionRouter } from './interaction-router.js';
 import { MessageQueue } from './message/message-queue.js';
-import { saveConfig, resolvePaths, getPackageRoot, getOwner, getChannelShowActivities, setChannelShowActivities } from '../config.js';
+import { saveConfig, resolvePaths, getPackageRoot, getOwner, getChannelShowActivities, setChannelShowActivities, getChannelSessionMode } from '../config.js';
 import { logger } from '../utils/logger.js';
 import crypto from 'crypto';
 import path from 'path';
@@ -142,7 +142,7 @@ function formatIdleTime(ms: number): string {
 }
 
 // 支持的命令列表
-const commands = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/effort', '/agent', '/slist', '/session', '/rename', '/stop', '/clear', '/compact', '/repair', '/safe', '/fork', '/del', '/perm', '/file', '/check', '/rewind', '/activity', '/agentmd'];
+const commands = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/effort', '/agent', '/slist', '/session', '/rename', '/stop', '/clear', '/compact', '/repair', '/safe', '/fork', '/del', '/perm', '/file', '/check', '/rewind', '/activity', '/agentmd', '/chatmode'];
 
 // 命令别名映射
 const aliases: Record<string, string> = {
@@ -153,7 +153,7 @@ const aliases: Record<string, string> = {
 };
 
 // 命令快速路径前缀（所有命令都不进入消息队列）
-const quickCommandPrefixes = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/effort', '/agent', '/slist', '/session', '/rename', '/repair', '/fork', '/stop', '/clear', '/compact', '/safe', '/del', '/perm', '/file', '/check', '/p ', '/s ', '/name', '/rewind', '/rw', '/rw ', '/activity'];
+const quickCommandPrefixes = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/effort', '/agent', '/slist', '/session', '/rename', '/repair', '/fork', '/stop', '/clear', '/compact', '/safe', '/del', '/perm', '/file', '/check', '/p ', '/s ', '/name', '/rewind', '/rw', '/rw ', '/activity', '/chatmode'];
 
 export class CommandHandler {
   private adapters = new Map<string, ChannelAdapter>();
@@ -621,7 +621,7 @@ export class CommandHandler {
     }
 
     // 空闲检查：某些命令需要等待当前会话空闲
-    const requiresIdle = ['/new', '/session', '/clear', '/compact', '/safe', '/repair', '/fork', '/bind', '/project', '/agent', '/rewind'];
+    const requiresIdle = ['/new', '/session', '/clear', '/compact', '/safe', '/repair', '/fork', '/bind', '/project', '/agent', '/rewind', '/chatmode'];
     if (requiresIdle.some(cmd => normalizedContent === cmd || normalizedContent.startsWith(cmd + ' '))) {
       if (threadId) {
         // 话题中：检查话题 session 是否在处理（不创建）
@@ -1297,6 +1297,11 @@ export class CommandHandler {
     if (normalizedContent === '/activity' || normalizedContent.startsWith('/activity ')) {
       if (!isAdmin) return '❌ 无权限：此命令仅限管理员使用';
 
+      // proactive 模式下流式输出全部静默，activity 配置无意义
+      if (activeSession?.sessionMode === 'proactive') {
+        return '❌ 当前会话为 proactive 模式，不支持 activity 配置（流式输出已全部静默）';
+      }
+
       const activityArg = normalizedContent.slice(9).trim();
       const modeMap: Record<string, 'all' | 'dm-only' | 'owner-dm-only' | 'none'> = {
         all: 'all',
@@ -1383,6 +1388,36 @@ export class CommandHandler {
 
       setChannelShowActivities(this.config, channel, newMode);
       return `✅ 中间输出模式: ${activityArg}（${label}）`;
+    }
+
+    // /chatmode 命令：查看/切换 session 会话模式（interactive | proactive）
+    if (normalizedContent === '/chatmode' || normalizedContent.startsWith('/chatmode ')) {
+      if (!isAdmin) return '❌ 无权限：此命令仅限管理员使用';
+      if (!activeSession) return '❌ 当前无活跃会话';
+
+      const lockedMode = getChannelSessionMode(this.config, channel);
+      const arg = normalizedContent.slice(9).trim();
+      const currentMode = activeSession.sessionMode || 'interactive';
+
+      if (!arg) {
+        const lockHint = lockedMode ? `（由通道配置锁定为 ${lockedMode}）` : '';
+        return `📋 当前会话模式: ${currentMode}${lockHint}\n可选: interactive / proactive\n用法: /chatmode <模式>`;
+      }
+
+      if (arg !== 'interactive' && arg !== 'proactive') {
+        return `❌ 无效模式: ${arg}\n可选: interactive / proactive`;
+      }
+
+      if (lockedMode) {
+        return `❌ 会话模式由通道配置锁定为 ${lockedMode}，无法切换`;
+      }
+
+      if (arg === currentMode) {
+        return `📋 当前会话模式已是 ${arg}`;
+      }
+
+      await this.sessionManager.updateSession(activeSession.id, { sessionMode: arg });
+      return `✅ 会话模式已切换: ${arg}`;
     }
 
     // /stop 命令：中断当前任务
@@ -2861,8 +2896,22 @@ export class CommandHandler {
   private static readonly CTL_COMMANDS = [
     '/help', '/status', '/check',
     '/model', '/effort', '/perm',
-    '/compact', '/activity', '/file', '/restart', '/agentmd',
+    '/compact', '/activity', '/file', '/send', '/chatmode', '/restart', '/agentmd',
   ];
+
+  /**
+   * 从 session 恢复 ReplyContext，用于 ctl send 主动发送文本时的路由
+   * - 群聊话题：metadata.replyContext.{threadId,peerId}
+   * - 私聊：metadata.peerId
+   */
+  private buildCtlReplyContext(session: Session): ReplyContext | undefined {
+    const ctx: ReplyContext = {};
+    const meta = session.metadata;
+    if (meta?.replyContext?.threadId) ctx.threadId = meta.replyContext.threadId;
+    if (meta?.replyContext?.peerId) ctx.peerId = meta.replyContext.peerId;
+    if (!ctx.peerId && meta?.peerId) ctx.peerId = meta.peerId;
+    return Object.keys(ctx).length > 0 ? ctx : undefined;
+  }
 
   /**
    * Agent ctl 入口：通过 IPC 接收 Agent 自主管理指令
@@ -2884,7 +2933,24 @@ export class CommandHandler {
     // 3. 从 session.metadata.peerId 获取 userId（用于权限判断）
     const userId = session.metadata?.peerId;
 
-    // 4. file 路径限制：只允许 projectPath 下的文件
+    // 4. /send 文本消息：直接通过 adapter 主动发送，不走 handle()
+    if (cmd.startsWith('/send ') || cmd === '/send') {
+      const text = cmd.startsWith('/send ') ? cmd.slice(6).trim() : '';
+      if (!text) return { ok: false, error: '消息内容不能为空' };
+
+      const adapter = this.adapters.get(session.channel);
+      if (!adapter) return { ok: false, error: `adapter 未找到: ${session.channel}` };
+
+      try {
+        const replyContext = this.buildCtlReplyContext(session);
+        await adapter.sendText(session.channelId, text, replyContext);
+        return { ok: true, result: '已发送' };
+      } catch (err: any) {
+        return { ok: false, error: err.message || String(err) };
+      }
+    }
+
+    // 5. file 路径限制：只允许 projectPath 下的文件
     if (cmd.startsWith('/file')) {
       const sendArgs = cmd.slice(5).trim();
       const parts = sendArgs.split(/\s+/);
@@ -2897,7 +2963,7 @@ export class CommandHandler {
       }
     }
 
-    // 5. 调用现有 handle()，不传 sendMessage 回调（结果直接返回）
+    // 6. 调用现有 handle()，不传 sendMessage 回调（结果直接返回）
     try {
       const result = await this.handle(
         cmd,
