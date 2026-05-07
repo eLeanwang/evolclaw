@@ -270,6 +270,7 @@ export class AgentRunner {
   private sendPromptFn?: (text: string) => Promise<void>;
   private permissionContexts = new Map<string, PermissionContext>();
   private currentEvolclawSessionId?: string;
+  private claudeExecutablePath?: string;
 
   constructor(
     apiKey: string,
@@ -284,6 +285,10 @@ export class AgentRunner {
     this.baseUrl = baseUrl;
     this.config = config;
     this.onSessionIdUpdate = onSessionIdUpdate;
+    if (config) {
+      const anthropic = resolveAnthropicConfig(config);
+      this.claudeExecutablePath = anthropic.pathToClaudeCodeExecutable;
+    }
   }
 
   private getAgentEnv(): Record<string, string | undefined> {
@@ -918,6 +923,7 @@ export class AgentRunner {
       cwd: projectPath,
       model: this.model,
       ...(this.effort ? { effort: this.effort } : {}),
+      ...(this.claudeExecutablePath ? { pathToClaudeCodeExecutable: this.claudeExecutablePath } : {}),
       autoCompactWindow: 200000,
       advisorModel: 'haiku',
       canUseTool: canUseToolCallback,

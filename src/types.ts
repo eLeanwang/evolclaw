@@ -110,6 +110,7 @@ export interface Config {
       baseUrl?: string;
       model?: string;
       effort?: 'low' | 'medium' | 'high' | 'max';
+      pathToClaudeCodeExecutable?: string; // Windows 上 SDK 找不到 claude 可执行体时手动指定
       useSettingSources?: boolean;        // 使用 SDK 原生配置加载，默认 true
       agentProgressSummaries?: boolean;   // 启用 AI 生成的子任务进度摘要，默认 true
       excludeDynamicSections?: boolean;   // 从 system prompt 移除动态内容以提升跨用户 prompt cache 命中率，默认 false
