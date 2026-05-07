@@ -73,6 +73,7 @@ aun/aun-sdk-core/
 aun/examples/
 aun/presentations/
 aun/docs/
+aun/.aun/
 src/channels/aun_bridge.py
 
 # macOS 残留
