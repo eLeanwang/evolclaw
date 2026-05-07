@@ -260,7 +260,7 @@ evolclaw/
 
 ### Owner 专属命令
 
-- `/send <文件路径>` - 发送文件给用户
+- `/file <文件路径>` - 发送文件给用户
 - `/restart` - 重启服务（自愈机制）
 - `/repair` - 检查并修复会话
 - `/agentmd [put|set]` - 管理 AUN agent.md（仅 AUN 渠道）
