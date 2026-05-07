@@ -14,6 +14,7 @@ export interface AnthropicResolved {
   baseUrl?: string;
   model: string;
   effort?: 'low' | 'medium' | 'high' | 'max';
+  pathToClaudeCodeExecutable?: string;
 }
 
 function loadClaudeSettings(): { env?: Record<string, string>; model?: string; effortLevel?: 'low' | 'medium' | 'high' } {
@@ -94,7 +95,11 @@ export function resolveAnthropicConfig(config: Config): AnthropicResolved {
     || settings.effortLevel
     || undefined;
 
-  return { apiKey, baseUrl, model, effort };
+  const configExecPath = config.agents?.anthropic?.pathToClaudeCodeExecutable;
+  const isPlaceholderExec = !configExecPath || configExecPath.includes('your-') || configExecPath.includes('placeholder');
+  const pathToClaudeCodeExecutable = isPlaceholderExec ? undefined : configExecPath;
+
+  return { apiKey, baseUrl, model, effort, pathToClaudeCodeExecutable };
 }
 
 export interface OpenaiResolved {
