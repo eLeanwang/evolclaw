@@ -1307,36 +1307,6 @@ async function cmdDiagnose() {
   }
 }
 
-async function cmdTui() {
-  const config = loadConfig();
-  // Find the first AUN instance (TUI connects to one AUN instance)
-  const aunResolved = resolveInstanceConfig(config as any, 'aun');
-  const aun = aunResolved?.type === 'aun' ? aunResolved.config : null;
-  if (!aun?.owner || !aun?.aid) {
-    console.error('[tui] AUN 未配置，请先运行: evolclaw init aun');
-    process.exit(1);
-  }
-
-  // TUI requires Python + aun_core (independent of init aun which is now pure TS)
-  const pythonCheck = aun.pythonBin || process.env.AUN_PYTHON || 'python3';
-  if (!platform.commandExists(pythonCheck)) {
-    console.error(`[tui] Python 未找到 (${pythonCheck})`);
-    console.error('  → TUI 依赖 Python 和 aunp (>=0.2.12): pip3 install -U aunp');
-    process.exit(1);
-  }
-
-  const pythonBin = aun.pythonBin || process.env.AUN_PYTHON || 'python3';
-  const cliScript = path.join(getPackageRoot(), 'aun', 'aun_cli.py');
-  if (!fs.existsSync(cliScript)) {
-    console.error(`[tui] aun_cli.py 不存在: ${cliScript}`);
-    console.error('  → TUI 需要 AUN CLI 工具，请确认源码目录包含 aun/aun_cli.py');
-    console.error('  → 安装: pip3 install -U aunp && 从源码仓库获取 aun_cli.py');
-    process.exit(1);
-  }
-  const child = spawn(pythonBin, [cliScript, '-a', aun.owner, '-t', aun.aid], { stdio: 'inherit' });
-  child.on('exit', (code) => process.exit(code ?? 0));
-}
-
 // ==================== Ctl ====================
 
 async function cmdCtl(args: string[]): Promise<void> {
@@ -1407,7 +1377,7 @@ export async function main(args: string[]) {
         await cmdInitQQBot();
       } else if (args[1] === 'wecom') {
         await cmdInitWecom();
-      } else if (args[1]) {
+      } else if (args[1] && !args[1].startsWith('-')) {
         const supported = ['feishu', 'wechat', 'aun', 'dingtalk', 'qqbot', 'wecom'];
         console.error(`❌ 不支持的渠道: ${args[1]}`);
         console.error(`   支持的渠道: ${supported.join(', ')}`);
@@ -1451,14 +1421,11 @@ export async function main(args: string[]) {
     case 'diagnose':
       await cmdDiagnose();
       break;
-    case 'tui':
-      await cmdTui();
-      break;
     case 'ctl':
       await cmdCtl(args.slice(1));
       break;
     default:
-      console.log(`Usage: evolclaw {init|start|stop|restart|status|logs|tui|ctl|diagnose|mv}
+      console.log(`Usage: evolclaw {init|start|stop|restart|status|logs|ctl|diagnose|mv}
 
 Commands:
   init          创建配置文件 (${resolvePaths().config})
@@ -1476,7 +1443,6 @@ Commands:
                   --level error|warn   只显示指定级别及以上
                   --module <name>      只显示指定模块（如 feishu、AgentRunner）
                   --raw                原始输出，不着色
-  tui           启动 AUN TUI 客户端
   diagnose      诊断启动环境（配置、数据库、进程）
   mv <old> <new>  迁移项目目录（保留 Claude/Codex/EvolClaw 会话）
 
