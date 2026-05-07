@@ -701,6 +701,43 @@ export function resolveAunCoreSdkPkg(): { version: string; path: string } | null
   return null;
 }
 
+/**
+ * Download AUN CA root certificate to ~/.aun/CA/root/root.crt.
+ * Idempotent: skips if file already exists. Returns true if a cert is on disk
+ * after the call (either pre-existing or freshly downloaded).
+ *
+ * Must be called BEFORE constructing any AUNClient that needs to verify
+ * gateway-issued certificates (e.g. for uploadAgentMd) — the SDK loads trusted
+ * roots from disk at client construction time and won't pick up later writes.
+ */
+export async function downloadCaRoot(aunPath: string, gatewayUrl: string, indent = ''): Promise<boolean> {
+  const caDir = path.join(aunPath, 'CA', 'root');
+  const caCertPath = path.join(caDir, 'root.crt');
+  if (fs.existsSync(caCertPath)) return true;
+  if (!gatewayUrl) return false;
+
+  try {
+    fs.mkdirSync(caDir, { recursive: true });
+    const gwHttp = gatewayUrl.replace(/^wss?:/, 'https:').replace(/\/aun$/, '');
+    const resp = await fetch(`${gwHttp}/pki/chain`, { redirect: 'follow' });
+    if (!resp.ok) {
+      console.warn(`${indent}⚠ CA 根证书下载失败: HTTP ${resp.status}`);
+      return false;
+    }
+    const body = await resp.text();
+    if (!body.includes('BEGIN CERTIFICATE')) {
+      console.warn(`${indent}⚠ CA 根证书响应内容无效，跳过写入`);
+      return false;
+    }
+    fs.writeFileSync(caCertPath, body);
+    console.log(`${indent}✓ CA 根证书已下载`);
+    return true;
+  } catch (e) {
+    console.warn(`${indent}⚠ CA 根证书下载失败: ${e}，可稍后手动下载`);
+    return false;
+  }
+}
+
 export async function checkAunEnvironment(rl: readline.Interface): Promise<boolean> {
   console.log('\n🔍 AUN 环境检查...\n');
 
@@ -798,7 +835,7 @@ export async function setupAunAid(rl: readline.Interface, _config: any): Promise
     let failed = false;
     try {
       const { AUNClient } = await import('@agentunion/aun-node');
-      const client = new AUNClient({ aun_path: aunPath });
+      let client = new AUNClient({ aun_path: aunPath });
 
       // 如果用户指定了自定义端口，手动设置 gateway URL；否则让 SDK 自动发现
       if (gatewayPort) {
@@ -810,24 +847,16 @@ export async function setupAunAid(rl: readline.Interface, _config: any): Promise
       console.log(`  ✓ AID ${result.aid} 创建成功`);
 
       // 下载 CA 根证书（如果本地不存在），从 SDK 返回的实际网关 URL 派生
-      const caDir = path.join(aunPath, 'CA', 'root');
-      const caCertPath = path.join(caDir, 'root.crt');
-      if (!fs.existsSync(caCertPath) && result.gateway) {
-        try {
-          fs.mkdirSync(caDir, { recursive: true });
-          const gwHttp = result.gateway.replace(/^wss?:/, 'https:').replace(/\/aun$/, '');
-          const resp = await fetch(`${gwHttp}/pki/chain`, { redirect: 'follow' });
-          if (resp.ok) {
-            const body = await resp.text();
-            if (body.includes('BEGIN CERTIFICATE')) {
-              fs.writeFileSync(caCertPath, body);
-              console.log('  ✓ CA 根证书已下载');
-            } else {
-              console.warn('  ⚠ CA 根证书响应内容无效，跳过写入');
-            }
-          }
-        } catch (e) {
-          console.warn(`  ⚠ CA 根证书下载失败: ${e}，可稍后手动下载`);
+      const caDownloaded = await downloadCaRoot(aunPath, result.gateway || '', '  ');
+
+      // 关键：CA 下载后必须重建 client，让 SDK 重新加载 trusted roots。
+      // 否则 uploadAgentMd 会因为 "no trusted roots available" 而失败。
+      if (caDownloaded) {
+        try { await client.close(); } catch { /* ignore */ }
+        client = new AUNClient({ aun_path: aunPath });
+        if (gatewayPort) {
+          const domain = aid.split('.').slice(1).join('.');
+          (client as any)._gatewayUrl = `wss://gateway.${domain}:${gatewayPort}/aun`;
         }
       }
 
@@ -842,7 +871,7 @@ export async function setupAunAid(rl: readline.Interface, _config: any): Promise
         await client.auth.uploadAgentMd(agentMdContent);
         console.log('  ✓ agent.md 已发布');
       } catch (e: any) {
-        console.log(`  ⚠ agent.md 发布失败（可稍后用 /agentmd put 重试）: ${String(e.message || e).slice(0, 100)}`);
+        console.log(`  ⚠ agent.md 发布失败（首次连接将自动重试）: ${String(e.message || e).slice(0, 100)}`);
       }
       fs.writeFileSync(agentMdPath, agentMdContent, 'utf-8');
       if (!fs.existsSync(agentMdPath)) {

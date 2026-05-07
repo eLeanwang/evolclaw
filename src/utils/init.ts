@@ -423,7 +423,7 @@ export async function cmdInit(options?: {
     }
     if (options.channel === 'aun' && options.aunAid) {
       // 自动安装 AUN SDK
-      const { resolveAunCoreSdkPkg, npmInstallGlobal } = await import('./init-channel.js');
+      const { resolveAunCoreSdkPkg, npmInstallGlobal, downloadCaRoot } = await import('./init-channel.js');
       if (!resolveAunCoreSdkPkg()) {
         console.log('正在安装 @agentunion/aun-node...');
         await npmInstallGlobal('@agentunion/aun-node@latest');
@@ -434,30 +434,18 @@ export async function cmdInit(options?: {
       const aidDir = path.join(aunPath, 'AIDs', options.aunAid);
       if (!fs.existsSync(path.join(aidDir, 'private'))) {
         const { AUNClient } = await import('@agentunion/aun-node');
-        const client = new AUNClient({ aun_path: aunPath });
+        let client = new AUNClient({ aun_path: aunPath });
         // 让 SDK 通过 well-known 自动发现网关
         const result = await client.auth.createAid({ aid: options.aunAid });
 
         // 下载 CA 根证书（如果本地不存在），从 SDK 返回的实际网关 URL 派生
-        const caDir = path.join(aunPath, 'CA', 'root');
-        const caCertPath = path.join(caDir, 'root.crt');
-        if (!fs.existsSync(caCertPath) && result.gateway) {
-          try {
-            fs.mkdirSync(caDir, { recursive: true });
-            const gwHttp = result.gateway.replace(/^wss?:/, 'https:').replace(/\/aun$/, '');
-            const resp = await fetch(`${gwHttp}/pki/chain`, { redirect: 'follow' });
-            if (resp.ok) {
-              const body = await resp.text();
-              if (body.includes('BEGIN CERTIFICATE')) {
-                fs.writeFileSync(caCertPath, body);
-                console.log('✓ CA 根证书已下载');
-              } else {
-                console.warn('⚠ CA 根证书响应内容无效，跳过写入');
-              }
-            }
-          } catch (e) {
-            console.warn(`⚠ CA 根证书下载失败: ${e}，可稍后手动下载`);
-          }
+        const caDownloaded = await downloadCaRoot(aunPath, result.gateway || '');
+
+        // 关键：CA 下载后必须重建 client，让 SDK 重新加载 trusted roots。
+        // 否则 uploadAgentMd 会因为 "no trusted roots available" 而失败。
+        if (caDownloaded) {
+          try { await client.close(); } catch {}
+          client = new AUNClient({ aun_path: aunPath });
         }
 
         // 写入初始 agent.md（initialized: false）
@@ -467,7 +455,7 @@ export async function cmdInit(options?: {
         try {
           await client.auth.uploadAgentMd(agentMd);
         } catch (e) {
-          console.warn(`⚠ agent.md 网络发布失败（可稍后重试）: ${String((e as any)?.message || e).slice(0, 100)}`);
+          console.warn(`⚠ agent.md 网络发布失败（首次连接将自动重试）: ${String((e as any)?.message || e).slice(0, 100)}`);
         }
         fs.writeFileSync(agentMdPath, agentMd, 'utf-8');
         if (!fs.existsSync(agentMdPath)) {
