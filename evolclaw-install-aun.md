@@ -149,10 +149,6 @@ evolclaw restart
 evolclaw logs
 ```
 
-**Q: Windows 上 npm install 报 spawn EINVAL？**
-Node.js 24+ 的安全变更（CVE-2024-27980）导致此错误。升级到 evolclaw >= 2.5.4 即可解决。
-临时方案：先手动运行 `npm install -g @agentunion/aun-node`，再执行 init。
-
 **Q: 如何清理损坏的 AID 重新注册？**
 ```bash
 rm -rf ~/.aun/AIDs/<aid>
@@ -243,3 +239,20 @@ node -e "try{require('@anthropic-ai/claude-code-win32-x64');console.log('OK')}ca
 ```
 
 **修复**：确保系统有独立安装的 Claude Code CLI（`npm install -g @anthropic-ai/claude-code`），SDK 会优先使用 PATH 中的 `claude`。
+
+### npm install 报 spawn EINVAL
+
+**症状**：`npm install -g evolclaw` 过程中报 `spawn EINVAL`。
+
+**原因**：Node.js 24+ 的安全变更（CVE-2024-27980）与部分 npm 脚本不兼容。
+
+**修复**：
+
+```bash
+# 1. 升级到 evolclaw >= 2.5.4
+npm install -g evolclaw@latest
+
+# 2. 如仍报错，先手动安装 AUN SDK 依赖再执行 init
+npm install -g @agentunion/aun-node
+evolclaw init --non-interactive --channel aun --aun-aid <aid> --aun-owner <owner>
+```
