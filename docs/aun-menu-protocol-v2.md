@@ -245,7 +245,7 @@ CLI 收到 `menu.response` 时判断：
           }
         },
         { "cmd": "/restart", "label": "重启/重连", "desc": "重启服务或重连指定渠道", "next": { "type": "select", "dynamic": true } },
-        { "cmd": "/send", "args": "[channel] <path>", "label": "发送项目内文件", "desc": "将项目目录内的文件发送给用户" },
+        { "cmd": "/file", "args": "[channel] <path>", "label": "发送项目内文件", "desc": "将项目目录内的文件发送给用户" },
         {
           "cmd": "/agentmd", "label": "管理 agent.md", "desc": "查看或更新 AUN 网络上的 agent.md 身份文件",
           "next": {
