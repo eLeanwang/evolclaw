@@ -9,13 +9,14 @@
       "agentProgressSummaries": true
     },
     "openai": {
-      "apiKey": "your-openai-api-key",
-      "baseUrl": "https://api.openai.com/v1",
+      "apiKey": "",
+      "baseUrl": "",
       "model": "gpt-5.2-codex",
       "effort": "medium"
     },
     "google": {
       "apiKey": "",
+      "baseUrl": "",
       "model": "gemini-2.5-flash",
       "cliPath": "",
       "mode": "cli"
@@ -23,29 +24,25 @@
     "defaultAgent": "claude"
   },
   "channels": {
-    "defaultChannel": "feishu",
+    "defaultChannel": "aun",
     "feishu": {
-      "enabled": true,
+      "enabled": false,
       "appId": "",
       "appSecret": "",
-      "owner": "",
-      "flushDelay": 10,
-      "debounce": 2,
-      "showActivities": "dm-only"
+      "owner": ""
     },
     "wechat": {
       "enabled": false,
       "baseUrl": "https://ilinkai.weixin.qq.com",
       "token": "",
-      "owner": "",
-      "flushDelay": 3,
-      "debounce": 2,
-      "showActivities": "all"
+      "owner": ""
     },
     "aun": {
       "enabled": false,
-      "aid": "your-agent.agentid.pub",
+      "aid": "",
       "owner": "",
+      "flushDelay": 4,
+      "debounce": 2,
       "showActivities": "owner-dm-only"
     }
   },
@@ -59,11 +56,6 @@
   "showActivities": "all",
   "idleMonitor": {
     "enabled": true,
-    "timeout": 120,
-    "safeModeThreshold": 0
-  },
-  "debug": {
-    "flusherDiag": false,
-    "aunTrace": false
+    "timeout": 120
   }
 }
