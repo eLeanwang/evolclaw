@@ -463,10 +463,17 @@ export async function cmdInit(options?: {
         // 写入初始 agent.md（initialized: false）
         const agentName = options.aunAid.split('.')[0];
         const agentMd = `---\naid: "${options.aunAid}"\nname: "${agentName}"\ntype: "ai"\nversion: "1.0.0"\ndescription: ""\ntags:\n  - evolclaw\ninitialized: false\n---\n`;
+        const agentMdPath = path.join(aidDir, 'agent.md');
         try {
           await client.auth.uploadAgentMd(agentMd);
-          fs.writeFileSync(path.join(aidDir, 'agent.md'), agentMd, 'utf-8');
-        } catch {}
+        } catch (e) {
+          console.warn(`⚠ agent.md 网络发布失败（可稍后重试）: ${String((e as any)?.message || e).slice(0, 100)}`);
+        }
+        fs.writeFileSync(agentMdPath, agentMd, 'utf-8');
+        if (!fs.existsSync(agentMdPath)) {
+          try { await client.close(); } catch {}
+          throw new Error(`agent.md 写入校验失败: ${agentMdPath}`);
+        }
         try { await client.close(); } catch {}
       }
 
