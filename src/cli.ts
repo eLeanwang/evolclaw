@@ -1363,6 +1363,12 @@ function getArgValue(args: string[], flag: string): string | undefined {
 export async function main(args: string[]) {
   const cmd = args[0] || 'start';
 
+  if (cmd === '--version' || cmd === '-v' || cmd === '-V') {
+    const pkg = JSON.parse(fs.readFileSync(path.join(getPackageRoot(), 'package.json'), 'utf-8'));
+    console.log(pkg.version);
+    return;
+  }
+
   switch (cmd) {
     case 'init':
       if (args[1] === 'wechat') {
