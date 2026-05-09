@@ -37,7 +37,8 @@ export type MessageEvent =
   | { type: 'message:text'; sessionId: string; text: string; isFinal: boolean }
   | { type: 'message:completed'; sessionId: string; channel: string; channelName?: string; channelId: string; finalText?: string; durationMs?: number; terminalReason?: string; timestamp?: number }
   | { type: 'message:error'; sessionId: string; error: string; errorType: string; terminalReason?: string }
-  | { type: 'message:interrupted'; sessionId: string; reason?: string };
+  | { type: 'message:interrupted'; sessionId: string; reason?: string }
+  | { type: 'message:new-inbound'; sessionId: string; channel: string; channelId: string; messageId: string; timestamp?: number };
 
 // ── 工具事件 ──
 export type ToolEvent =

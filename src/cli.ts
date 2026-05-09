@@ -11,6 +11,7 @@ import { ipcQuery } from './ipc.js';
 import { cmdInitWechat, cmdInitFeishu, cmdInitAun, cmdInitDingtalk, cmdInitQQBot, cmdInitWecom, checkAunEnvironment } from './utils/init-channel.js';
 import * as platform from './utils/cross-platform.js';
 import { EventBus } from './core/event-bus.js';
+import { tryUpgrade, type UpgradeResult } from './utils/upgrade.js';
 
 // Suppress Node.js ExperimentalWarning (e.g. SQLite) from cluttering CLI output
 process.removeAllListeners('warning');
@@ -387,6 +388,27 @@ async function cmdStop() {
 async function cmdRestart() {
   console.log('🔄 Restarting EvolClaw...');
   const p = resolvePaths();
+
+  // 版本检查与自动升级
+  console.log('📦 Checking for updates...');
+  const upgrade = await tryUpgrade();
+  switch (upgrade.status) {
+    case 'upgraded':
+      console.log(`✅ Upgraded: ${upgrade.from} → ${upgrade.to}`);
+      break;
+    case 'no-update':
+      console.log(`✓ Already up to date (${upgrade.from})`);
+      break;
+    case 'skipped':
+      console.log(upgrade.error
+        ? '⏭ Skipped upgrade (network unavailable)'
+        : '⏭ Skipped upgrade check (dev mode)');
+      break;
+    case 'failed':
+      console.log(`⚠ Upgrade failed (${upgrade.from} → ${upgrade.to}), continuing with current version`);
+      break;
+  }
+
   await stopAndWait(p.pid);
   setTimeout(() => cmdStart(), 1000);
 }
@@ -764,6 +786,28 @@ async function cmdRestartMonitor() {
     });
 
     await sleep(3000);
+  }
+
+  // 版本检查与自动升级
+  log('Checking for updates...');
+  const upgrade = await tryUpgrade();
+  switch (upgrade.status) {
+    case 'upgraded':
+      log(`✅ Upgraded: ${upgrade.from} → ${upgrade.to}`);
+      await notifyChannel(p, pendingInfo, `📦 已升级 ${upgrade.from} → ${upgrade.to}`, log);
+      break;
+    case 'no-update':
+      log(`Already up to date (${upgrade.from})`);
+      break;
+    case 'skipped':
+      log(upgrade.error
+        ? 'Skipped upgrade (network unavailable)'
+        : 'Skipped upgrade check (dev mode)');
+      break;
+    case 'failed':
+      log(`⚠ Upgrade failed (${upgrade.from} → ${upgrade.to}): ${upgrade.error}`);
+      await notifyChannel(p, pendingInfo, `⚠️ 升级失败，使用当前版本继续`, log);
+      break;
   }
 
   // 启动并检测 ready signal
@@ -1311,13 +1355,43 @@ async function cmdDiagnose() {
 
 async function cmdCtl(args: string[]): Promise<void> {
   if (args.length === 0) {
-    console.error('用法: evolclaw ctl <command> [args...]');
-    console.error('示例: evolclaw ctl model sonnet');
-    console.error('      evolclaw ctl status');
-    console.error('      evolclaw ctl effort high');
-    console.error('      evolclaw ctl send "<消息内容>"   # proactive 模式主动发消息');
-    console.error('      evolclaw ctl chatmode proactive  # 切换会话模式');
+    console.error(`用法: evolclaw ctl <command> [args...]
+
+查询:
+  status                    查看会话状态
+  check                     检查渠道健康状态
+  help                      显示帮助
+
+配置:
+  model [model-id]          查看/切换模型（如 opus, sonnet, haiku）
+  effort [low|medium|high]  查看/切换推理强度
+  compact                   压缩当前会话上下文
+  chatmode [mode]           查看/切换会话模式
+  activity [all|dm|owner|none]  查看/控制中间输出显示模式
+  perm [mode]               查看/切换权限模式
+
+项目:
+  bind <path>               注册项目目录（不切换当前会话）
+
+消息:
+  send <消息内容>           主动发送文本消息（proactive 模式）
+  file [channel] <path>     发送项目内文件
+
+运维:
+  agentmd [put|set <内容>]  查看/管理 agent.md（仅 AUN 通道）
+  restart [channel]         重启服务或重连指定渠道
+
+示例:
+  evolclaw ctl model sonnet
+  evolclaw ctl effort high
+  evolclaw ctl compact
+  evolclaw ctl chatmode proactive`);
     process.exit(1);
+  }
+
+  // help 不需要连接服务，直接复用无参数时的帮助输出
+  if (args[0] === 'help') {
+    return cmdCtl([]);
   }
 
   const sessionId = process.env.EVOLCLAW_SESSION_ID;
@@ -1371,7 +1445,31 @@ export async function main(args: string[]) {
 
   switch (cmd) {
     case 'init':
-      if (args[1] === 'wechat') {
+      if (args[1] === 'help') {
+        console.log(`用法: evolclaw init [渠道] [选项]
+
+交互式初始化:
+  evolclaw init               创建基础配置文件（交互式）
+  evolclaw init feishu        飞书扫码登录并写入配置
+  evolclaw init wechat        微信扫码登录并写入配置
+  evolclaw init dingtalk      钉钉扫码登录并写入配置
+  evolclaw init qqbot         QQ 机器人扫码绑定并写入配置
+  evolclaw init wecom         企业微信 AI Bot 配置（手动输入）
+  evolclaw init aun           AUN 交互式配置（AID 创建 + Owner 绑定）
+
+非交互式初始化:
+  evolclaw init --non-interactive [选项]
+
+  选项:
+    --default-path <path>     项目目录（默认: 当前目录）
+    --channel <name>          渠道类型（默认: aun）
+    --aun-aid <aid>           AUN Agent ID（必填，如 mybot.agentid.pub）
+    --aun-owner <aid>         Owner AID（可选，如 alice.agentid.pub）
+
+  示例:
+    evolclaw init --non-interactive --aun-aid mybot.agentid.pub --aun-owner alice.agentid.pub
+    evolclaw init --non-interactive --default-path /home/user/project --aun-aid bot.agentid.pub`);
+      } else if (args[1] === 'wechat') {
         await cmdInitWechat();
       } else if (args[1] === 'feishu') {
         await cmdInitFeishu();
@@ -1449,6 +1547,8 @@ Commands:
                   --level error|warn   只显示指定级别及以上
                   --module <name>      只显示指定模块（如 feishu、AgentRunner）
                   --raw                原始输出，不着色
+  ctl           运行时自管理（模型切换、推理强度、压缩上下文等）
+                  evolclaw ctl help 查看完整命令列表
   diagnose      诊断启动环境（配置、数据库、进程）
   mv <old> <new>  迁移项目目录（保留 Claude/Codex/EvolClaw 会话）
 

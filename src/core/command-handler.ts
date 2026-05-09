@@ -142,7 +142,7 @@ function formatIdleTime(ms: number): string {
 }
 
 // 支持的命令列表
-const commands = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/effort', '/agent', '/slist', '/session', '/rename', '/stop', '/clear', '/compact', '/repair', '/safe', '/fork', '/del', '/perm', '/file', '/check', '/rewind', '/activity', '/agentmd', '/chatmode'];
+const commands = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/effort', '/agent', '/slist', '/session', '/rename', '/stop', '/clear', '/compact', '/repair', '/safe', '/fork', '/del', '/perm', '/file', '/check', '/rewind', '/activity', '/aid', '/agentmd', '/chatmode'];
 
 // 命令别名映射
 const aliases: Record<string, string> = {
@@ -165,6 +165,7 @@ export class CommandHandler {
   private permissionGateway?: PermissionGateway;
   private interactionRouter?: InteractionRouter;
   private statsCollector?: StatsCollector;
+  private hotLoadChannel?: (inst: any) => Promise<void>;
   private agentMap: Map<string, AgentRunnerFull>;
   private defaultAgentId: string;
 
@@ -323,6 +324,10 @@ export class CommandHandler {
     this.messageQueue = messageQueue;
   }
 
+  setHotLoadChannel(fn: (inst: any) => Promise<void>): void {
+    this.hotLoadChannel = fn;
+  }
+
   setPermissionGateway(gateway: PermissionGateway): void {
     this.permissionGateway = gateway;
   }
@@ -476,6 +481,10 @@ export class CommandHandler {
           ] : []),
           ...(isOwner ? [
             { cmd: '/file', label: '发送项目内文件', desc: '将项目目录内的文件发送给用户' },
+            { cmd: '/aid', label: 'AID 管理', desc: '创建新 AID 并上线新 Agent 实例', next: { type: 'select' as const, items: [
+              { value: 'list', label: '列表', desc: '列出所有 AUN 实例及连接状态' },
+              { value: 'new', label: '创建', desc: '创建新 AID 并热加载上线', next: { type: 'text' as const } },
+            ] } },
             { cmd: '/agentmd', label: '管理 agent.md', desc: '查看或更新 AUN 网络上的 agent.md 身份文件', next: { type: 'select' as const, items: [
               { value: 'put', label: '上传当前', desc: '将本地 agent.md 上传到 AUN 网络' },
               { value: 'set', label: '直接设置', desc: '输入内容直接更新 agent.md', next: { type: 'text' as const } },
@@ -730,6 +739,7 @@ export class CommandHandler {
         ...(isOwner ? [
           '  /restart - 重启服务',
           '  /file [channel] <path> - 发送项目内文件',
+          '  /aid [list|new <aid>] - AID 管理',
           '  /agentmd [put|set <内容>] - 管理 agent.md',
         ] : []),
         '',
@@ -1231,6 +1241,101 @@ export class CommandHandler {
       }
 
       return `✓ 推理强度: ${newEffort}`;
+    }
+
+    // /aid 命令：AID 管理（list / new）
+    if (normalizedContent === '/aid' || normalizedContent === '/aid list' || normalizedContent.startsWith('/aid ')) {
+      if (!isOwner) return '❌ 无权限：此命令仅限 owner 使用';
+
+      const adapter = this.adapters.get(channel) as any;
+      const channelType = this.channelTypeMap.get(channel);
+      if (channelType !== 'aun') return '❌ 此命令仅在 AUN 通道中可用';
+
+      const arg = normalizedContent.slice(4).trim();
+
+      // /aid 或 /aid list — 列出所有 AUN 实例
+      if (!arg || arg === 'list') {
+        const { normalizeChannelInstances } = await import('../config.js');
+        const instances = normalizeChannelInstances(this.config.channels?.aun, 'aun');
+        if (instances.length === 0) return '暂无 AUN 实例';
+
+        const lines = ['AUN 实例:'];
+        for (const inst of instances) {
+          if (inst.enabled === false || !(inst as any).aid) continue;
+          const channelObj = this.channelObjects.get(inst.name);
+          const status = channelObj?.getStatus?.();
+          const connected = status?.connected ?? false;
+          const icon = connected ? '✓' : '✗';
+          const state = connected ? '已连接' : '未连接';
+          lines.push(`  ${icon} ${inst.name}  ${(inst as any).aid}  ${state}`);
+        }
+        return lines.join('\n');
+      }
+
+      // /aid new <aid> — 创建新 AID 并热加载
+      if (arg.startsWith('new ')) {
+        const rawName = arg.slice(4).trim();
+        if (!rawName) return '用法: /aid new <aid>\n例: /aid new reviewer';
+
+        if (!this.hotLoadChannel) return '❌ 热加载未就绪';
+
+        // Derive full AID: if no dots, append domain from current AID
+        const selfAid: string = typeof adapter._selfAid === 'function' ? adapter._selfAid() : '';
+        let fullAid = rawName;
+        if (!rawName.includes('.')) {
+          const domain = selfAid.split('.').slice(1).join('.');
+          if (!domain) return '❌ 无法推导 AID 域（当前实例未连接）';
+          fullAid = `${rawName}.${domain}`;
+        }
+
+        // Validate AID format
+        const { isValidAid } = await import('../utils/init-channel.js');
+        if (!isValidAid(fullAid)) return `❌ 无效 AID 格式: ${fullAid}`;
+
+        // Check instance name conflict
+        const instName = rawName.includes('.') ? rawName.split('.')[0] : rawName;
+        const { normalizeChannelInstances } = await import('../config.js');
+        const existing = normalizeChannelInstances(this.config.channels?.aun, 'aun');
+        if (existing.some(e => e.name === instName)) {
+          return `❌ 实例名 "${instName}" 已存在`;
+        }
+        if (existing.some(e => (e as any).aid === fullAid)) {
+          return `❌ AID ${fullAid} 已在配置中`;
+        }
+
+        // Create AID (reuse init-channel.ts silent logic)
+        try {
+          const { createAidSilent, appendAunInstance } = await import('../utils/init-channel.js');
+          const createResult = await createAidSilent({ aid: fullAid, owner: selfAid });
+
+          // Resolve owner from current AUN instance config
+          const owner = this.config.channels?.aun
+            ? (Array.isArray(this.config.channels.aun)
+              ? this.config.channels.aun.find((a: any) => a.aid === selfAid)?.owner
+              : (this.config.channels.aun as any).owner)
+            : undefined;
+
+          // Hot-load: build and register new channel instance BEFORE writing config
+          const { AUNChannelPlugin } = await import('../channels/aun.js');
+          const plugin = new AUNChannelPlugin();
+          const tempConfig = JSON.parse(JSON.stringify(this.config));
+          tempConfig.channels.aun = [{ name: instName, enabled: true, aid: fullAid, owner }];
+          const newInstances = await plugin.createChannels(tempConfig);
+          if (newInstances.length === 0) return '❌ 通道实例创建失败';
+
+          await this.hotLoadChannel(newInstances[0]);
+
+          // Write config only after successful hot-load
+          appendAunInstance(this.config, { name: instName, aid: fullAid, owner });
+
+          const verb = createResult.alreadyExisted ? '已存在，现已上线' : '已创建并上线';
+          return `✓ ${fullAid} ${verb}\n  实例名: ${instName}\n  可在 AUN 中搜索该 AID 开始对话`;
+        } catch (e: any) {
+          return `❌ 创建失败: ${String(e.message || e).slice(0, 200)}`;
+        }
+      }
+
+      return '用法: /aid [list|new <aid>]';
     }
 
     // /activity 命令：控制中间输出显示模式
@@ -2896,7 +3001,7 @@ export class CommandHandler {
   private static readonly CTL_COMMANDS = [
     '/help', '/status', '/check',
     '/model', '/effort', '/perm',
-    '/compact', '/activity', '/file', '/send', '/chatmode', '/restart', '/agentmd',
+    '/compact', '/activity', '/file', '/send', '/chatmode', '/restart', '/agentmd', '/bind', '/aid',
   ];
 
   /**

@@ -239,7 +239,7 @@ export function saveConfig(config: Config, configPath: string = resolvePaths().c
 
 // ── Channel instance normalization ──
 
-export const channelTypes = ['feishu', 'wechat', 'aun', 'dingtalk', 'qqbot'] as const;
+export const channelTypes = ['feishu', 'wechat', 'aun', 'dingtalk', 'qqbot', 'wecom'] as const;
 
 /**
  * Normalize a channel config value (single object, array, or undefined) into an array

@@ -655,9 +655,9 @@ export async function cmdInitWechat(): Promise<void> {
 
 // ==================== AUN ====================
 
-// 最低 @agentunion/aun-node 版本要求
-const MIN_AUN_CORE_SDK = [0, 2, 12] as const;
-const AUN_CORE_SDK_PKG = '@agentunion/aun-node';
+// 最低 @agentunion/fastaun 版本要求
+const MIN_AUN_CORE_SDK = [0, 2, 14] as const;
+const AUN_CORE_SDK_PKG = '@agentunion/fastaun';
 
 function compareVersion(a: string, min: readonly [number, number, number]): boolean {
   const parts = a.split('.').map(n => parseInt(n, 10));
@@ -787,9 +787,90 @@ export async function checkAunEnvironment(rl: readline.Interface): Promise<boole
   return true;
 }
 
-function isValidAid(name: string): boolean {
+export function isValidAid(name: string): boolean {
   const labels = name.split('.');
   return labels.length >= 3 && labels.every(l => /^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?$/.test(l));
+}
+
+/**
+ * Non-interactive AID creation + agent.md publish.
+ * Reuses the same logic as `evolclaw init --non-interactive --channel aun`.
+ *
+ * Returns the created AID string, or throws on failure.
+ */
+export async function createAidSilent(opts: {
+  aid: string;
+  owner?: string;
+}): Promise<{ aid: string; alreadyExisted: boolean }> {
+  const aunPath = path.join(os.homedir(), '.aun');
+  const aidDir = path.join(aunPath, 'AIDs', opts.aid);
+
+  // Skip creation if AID already exists locally
+  if (fs.existsSync(aidDir) && fs.existsSync(path.join(aidDir, 'private'))) {
+    return { aid: opts.aid, alreadyExisted: true };
+  }
+
+  const { AUNClient } = await import('@agentunion/fastaun');
+  let client = new AUNClient({ aun_path: aunPath });
+
+  const result = await client.auth.createAid({ aid: opts.aid });
+
+  // Download CA root cert (if not already present)
+  const caDownloaded = await downloadCaRoot(aunPath, result.gateway || '');
+
+  // Rebuild client with CA cert + AID identity for uploadAgentMd
+  const caCertPath = path.join(aunPath, 'CA', 'root', 'root.crt');
+  if (caDownloaded && fs.existsSync(caCertPath)) {
+    try { await client.close(); } catch { /* ignore */ }
+    client = new AUNClient({ aun_path: aunPath, root_ca_path: caCertPath, aid: opts.aid });
+  }
+
+  // Write initial agent.md (initialized: false, name = aid first label)
+  const agentName = opts.aid.split('.')[0];
+  const agentMdContent = `---\naid: "${opts.aid}"\nname: "${agentName}"\ntype: "ai"\nversion: "1.0.0"\ndescription: ""\ntags:\n  - evolclaw\ninitialized: false\n---\n`;
+  const agentMdPath = path.join(aidDir, 'agent.md');
+
+  try {
+    await client.auth.uploadAgentMd(agentMdContent);
+  } catch (e: any) {
+    // Non-fatal: first connection will auto-retry
+  }
+  fs.writeFileSync(agentMdPath, agentMdContent, 'utf-8');
+
+  try { await client.close(); } catch { /* ignore */ }
+
+  if (!fs.existsSync(agentMdPath)) {
+    throw new Error(`agent.md write verification failed: ${agentMdPath}`);
+  }
+
+  return { aid: opts.aid, alreadyExisted: false };
+}
+
+/**
+ * Append a new AUN instance to the config's channels.aun array and save.
+ * Handles upgrade from single-object to array format.
+ */
+export function appendAunInstance(config: any, inst: { name: string; aid: string; owner?: string; enabled?: boolean }): void {
+  if (!config.channels) config.channels = {};
+
+  const newInst = {
+    name: inst.name,
+    enabled: inst.enabled ?? true,
+    aid: inst.aid,
+    ...(inst.owner && { owner: inst.owner }),
+  };
+
+  if (Array.isArray(config.channels.aun)) {
+    config.channels.aun.push(newInst);
+  } else if (config.channels.aun) {
+    const oldInst = { ...config.channels.aun, name: config.channels.aun.name || 'aun' };
+    config.channels.aun = [oldInst, newInst];
+  } else {
+    config.channels.aun = [newInst];
+  }
+
+  const p = resolvePaths();
+  fs.writeFileSync(p.config, JSON.stringify(config, null, 2) + '\n');
 }
 
 export async function setupAunAid(rl: readline.Interface, _config: any): Promise<{ aid: string; owner: string } | null> {
@@ -834,7 +915,7 @@ export async function setupAunAid(rl: readline.Interface, _config: any): Promise
     console.log('  正在创建 AID...');
     let failed = false;
     try {
-      const { AUNClient } = await import('@agentunion/aun-node');
+      const { AUNClient } = await import('@agentunion/fastaun');
       let client = new AUNClient({ aun_path: aunPath });
 
       // 如果用户指定了自定义端口，手动设置 gateway URL；否则让 SDK 自动发现

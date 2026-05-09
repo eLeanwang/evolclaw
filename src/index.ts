@@ -21,7 +21,7 @@ import { EventBus } from './core/event-bus.js';
 import { StatsCollector } from './utils/stats-collector.js';
 import { PermissionGateway } from './core/permission.js';
 import { InteractionRouter } from './core/interaction-router.js';
-import { ChannelLoader } from './core/channel-loader.js';
+import { ChannelLoader, type ChannelInstance } from './core/channel-loader.js';
 import { AgentLoader } from './core/agent-loader.js';
 import { IpcServer, IpcStatusResponse, ChannelStatus } from './ipc.js';
 import { ChannelAdapter, Message } from './types.js';
@@ -248,9 +248,14 @@ async function main() {
     accumulateErrors: () => true,
   };
 
-  // 注册渠道插件的 adapter 和 policy
-  for (const inst of channelInstances) {
-    // 设置项目路径提供器（如果需要）
+  // ── MessageBridge：Channel ↔ Core 消息桥梁 ──
+
+  const msgBridge = new MessageBridge(config, sessionManager, processor, messageQueue, cmdHandler, eventBus);
+
+  // ── Channel instance registration (shared by startup and hot-load) ──
+
+  function registerChannelInstance(inst: ChannelInstance): void {
+    // 1. 项目路径提供器
     if (inst.onProjectPathRequest && inst.channel.onProjectPathRequest) {
       inst.channel.onProjectPathRequest(async (channelId: string) => {
         const session = await sessionManager.getOrCreateSession(
@@ -264,7 +269,7 @@ async function main() {
       });
     }
 
-    // 注册 adapter、policy 和 options（注入 channelType）
+    // 2. 注册 adapter、policy 和 options（注入 channelType）
     const opts = inst.channelType
       ? { ...inst.options, channelType: inst.channelType }
       : inst.options;
@@ -275,22 +280,14 @@ async function main() {
       cmdHandler.registerPolicy(inst.adapter.channelName, inst.policy);
     }
 
-    // 注册交互回调：渠道收到用户操作后路由到 InteractionRouter
+    // 3. 交互回调
     if (inst.adapter.onInteraction) {
       inst.adapter.onInteraction((response) => {
         interactionRouter.handle(response);
       });
     }
-  }
 
-  // ── MessageBridge：Channel ↔ Core 消息桥梁 ──
-
-  const msgBridge = new MessageBridge(config, sessionManager, processor, messageQueue, cmdHandler, eventBus);
-
-  // ── 渠道消息注册 ──
-
-  // 连接插件系统的渠道
-  for (const inst of channelInstances) {
+    // 4. MessageBridge 注册（按 channelType 分发）
     const channelType = inst.channelType || inst.adapter.channelName;
 
     if (channelType === 'feishu') {
@@ -312,7 +309,6 @@ async function main() {
     }
 
     if (channelType === 'wechat') {
-      // 注入 EventBus（用于 channel:health 事件）
       if (inst.channel.setEventBus) {
         inst.channel.setEventBus(eventBus);
       }
@@ -354,6 +350,20 @@ async function main() {
         inst.adapter,
         channelType
       );
+
+      // AUN 重连失败通知
+      if (inst.channel.setOnChannelDown) {
+        inst.channel.setOnChannelDown(() => {
+          eventBus.publish({
+            type: 'channel:health',
+            channel: channelType,
+            channelName: inst.adapter.channelName,
+            status: 'auth_error',
+            message: `⚠️ AUN 渠道 ${inst.adapter.channelName} 断连，自动重试已用尽。\n使用 /check rty aun 手动重连`,
+            timestamp: Date.now(),
+          });
+        });
+      }
     }
 
     if (channelType === 'dingtalk') {
@@ -396,11 +406,48 @@ async function main() {
       );
     }
 
-    // 通用：撤回消息 → 中断执行中任务（所有支持 onRecall 的渠道）
+    if (channelType === 'wecom') {
+      msgBridge.register(inst.adapter.channelName,
+        (handler) => inst.channel.onMessage(async (event: any) => {
+          handler({
+            channel: channelType,
+            channelId: event.channelId,
+            content: event.content,
+            chatType: event.chatType || 'private',
+            peerId: event.peerId || '',
+            peerName: event.peerName,
+            messageId: event.messageId,
+          });
+        }),
+        (channelId, text) => inst.channel.sendMessage(channelId, text),
+        inst.adapter,
+        channelType
+      );
+    }
+
+    // 5. 撤回消息 → 中断执行中任务
     inst.channel.onRecall?.((messageId: string) => {
       msgBridge.cancel(messageId);
     });
   }
+
+  // ── 注册所有渠道实例 ──
+  for (const inst of channelInstances) {
+    registerChannelInstance(inst);
+  }
+
+  // ── 设置热加载回调 ──
+  cmdHandler.setHotLoadChannel(async (inst: ChannelInstance) => {
+    registerChannelInstance(inst);
+    channelInstances.push(inst);
+    await inst.connect();
+    eventBus.publish({
+      type: 'channel:connected',
+      channel: (inst.channelType || inst.adapter.channelName).toLowerCase(),
+      channelName: inst.adapter.channelName,
+      timestamp: Date.now(),
+    });
+  });
 
   // ── 连接所有渠道 ──
   const connected = await channelLoader.connectAll(channelInstances);
@@ -415,7 +462,6 @@ async function main() {
   }
 
   for (const name of connected) {
-    // 查找对应实例以获取 channelType
     const inst = channelInstances.find(i => i.adapter.channelName === name);
     const type = inst?.channelType || name;
     eventBus.publish({
@@ -424,23 +470,6 @@ async function main() {
       channelName: name,
       timestamp: Date.now()
     });
-  }
-
-  // AUN 重连失败通知：通过 channel:health 事件
-  for (const inst of channelInstances) {
-    const channelType = inst.channelType || inst.adapter.channelName;
-    if (channelType === 'aun' && inst.channel.setOnChannelDown) {
-      inst.channel.setOnChannelDown(() => {
-        eventBus.publish({
-          type: 'channel:health',
-          channel: channelType,
-          channelName: inst.adapter.channelName,
-          status: 'auth_error',
-          message: `⚠️ AUN 渠道 ${inst.adapter.channelName} 断连，自动重试已用尽。\n使用 /check rty aun 手动重连`,
-          timestamp: Date.now(),
-        });
-      });
-    }
   }
 
   // 统一 channel:health 跨通道通知（仅 auth_error）

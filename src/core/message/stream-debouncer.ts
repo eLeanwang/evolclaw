@@ -127,13 +127,21 @@ export class StreamDebouncer {
     }
 
     const last = entries[entries.length - 1];
+    // 合并后保留最新一条的 messageId（用于 thought 锚定与中断追踪）
+    let latestMessageId: string | undefined;
+    for (let i = entries.length - 1; i >= 0; i--) {
+      if (entries[i].messageId) {
+        latestMessageId = entries[i].messageId;
+        break;
+      }
+    }
     const merged: Message = {
       ...last.rest,
       content: contents.join('\n'),
       images: allImages.length > 0 ? allImages : undefined,
       mentions: allMentions.length > 0 ? allMentions : undefined,
       replyContext: last.replyContext,
-      messageId: entries.length > 1 ? undefined : last.messageId,
+      messageId: latestMessageId,
     };
 
     const resolves = entries.map(e => e.resolve);

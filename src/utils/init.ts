@@ -425,15 +425,15 @@ export async function cmdInit(options?: {
       // 自动安装 AUN SDK
       const { resolveAunCoreSdkPkg, npmInstallGlobal, downloadCaRoot } = await import('./init-channel.js');
       if (!resolveAunCoreSdkPkg()) {
-        console.log('正在安装 @agentunion/aun-node...');
-        await npmInstallGlobal('@agentunion/aun-node@latest');
+        console.log('正在安装 @agentunion/fastaun...');
+        await npmInstallGlobal('@agentunion/fastaun@latest');
       }
 
       // 创建 AID（如果本地不存在）
       const aunPath = path.join(os.homedir(), '.aun');
       const aidDir = path.join(aunPath, 'AIDs', options.aunAid);
       if (!fs.existsSync(path.join(aidDir, 'private'))) {
-        const { AUNClient } = await import('@agentunion/aun-node');
+        const { AUNClient } = await import('@agentunion/fastaun');
         let client = new AUNClient({ aun_path: aunPath });
         // 让 SDK 通过 well-known 自动发现网关
         const result = await client.auth.createAid({ aid: options.aunAid });

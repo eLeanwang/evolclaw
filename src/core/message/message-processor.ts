@@ -3,6 +3,7 @@ import fs from 'fs';
 import { type AgentRunnerFull, hasCompact, type AgentEvent } from '../../agents/claude-runner.js';
 import { SessionManager } from '../session/session-manager.js';
 import { StreamFlusher } from './stream-flusher.js';
+import { ThoughtEmitter } from './thought-emitter.js';
 import { MessageCache } from './message-cache.js';
 import type { MessageQueue } from './message-queue.js';
 import { StreamIdleMonitor } from './stream-idle-monitor.js';
@@ -305,6 +306,9 @@ export class MessageProcessor {
     const agent = this.getAgent(session.agentId);
     const streamKey = session.id;
 
+    // ThoughtEmitter new-inbound 订阅句柄（在 try/catch 外声明，确保 catch 可访问）
+    let thoughtNewInboundHandler: ((event: any) => void) | null = null;
+
     try {
       const isBackground = await this.isBackgroundSession(session, message.channel, message.channelId);
 
@@ -377,6 +381,24 @@ export class MessageProcessor {
 
       // 保存当前 flusher，用于 compact 事件
       this.currentFlusher = flusher;
+
+      // Proactive 模式可观测：创建 ThoughtEmitter，将静默的流式事件转发为 thought
+      let thoughtEmitter: ThoughtEmitter | null = null;
+      if (isProactive && adapter.putThought && message.messageId) {
+        thoughtEmitter = new ThoughtEmitter(adapter, message.channelId, message.messageId);
+        // 订阅 new-inbound 事件：新消息到达时切换锚定 messageId
+        thoughtNewInboundHandler = (ev: any) => {
+          if (
+            ev.type === 'message:new-inbound' &&
+            ev.sessionId === session.id &&
+            ev.channelId === message.channelId &&
+            ev.messageId
+          ) {
+            thoughtEmitter?.updateReplyTo(ev.messageId);
+          }
+        };
+        this.eventBus.subscribe('message:new-inbound', thoughtNewInboundHandler);
+      }
 
       // 调用 AgentRunner（含上下文过长自动 compact 重试）
 
@@ -526,7 +548,8 @@ export class MessageProcessor {
               session,
               flusher,
               resetTimer,
-              shouldSuppress
+              shouldSuppress,
+              thoughtEmitter
             );
             break; // 成功，跳出重试循环
           } catch (retryError) {
@@ -573,7 +596,8 @@ export class MessageProcessor {
               session,
               flusher,
               resetTimer,
-              shouldSuppress
+              shouldSuppress,
+              thoughtEmitter
             );
           } else {
             throw new Error('CONTEXT_COMPACT_FAILED');
@@ -684,6 +708,11 @@ export class MessageProcessor {
       // Flush 剩余内容（文件标记已在 flush 时自动移除）
       await flusher.flush(true);
 
+      // 清理 ThoughtEmitter 的事件订阅
+      if (thoughtNewInboundHandler) {
+        this.eventBus.unsubscribe('message:new-inbound', thoughtNewInboundHandler);
+      }
+
       // 清理 activeStreams（正常完成）
       agent.cleanupStream(streamKey);
 
@@ -769,6 +798,10 @@ export class MessageProcessor {
       // 清理流和处理中状态（异常时也要清除）
       agent.cleanupStream(streamKey);
       try { this.sessionManager.clearProcessing(session.id); } catch {}
+      // 清理 ThoughtEmitter 的事件订阅
+      if (thoughtNewInboundHandler) {
+        try { this.eventBus.unsubscribe('message:new-inbound', thoughtNewInboundHandler); } catch {}
+      }
       // 注意：不在此处清除 interruptedSessions，由下一条消息的 prompt 包装逻辑消费
 
       // 区分超时 / 中断 / 错误
@@ -883,7 +916,8 @@ export class MessageProcessor {
     session: Session,
     flusher: StreamFlusher,
     resetTimer: (eventType?: string, toolName?: string) => void,
-    shouldSuppress: () => boolean
+    shouldSuppress: () => boolean,
+    thoughtEmitter?: ThoughtEmitter | null
   ): Promise<{ isError: boolean; subtype?: string; errors?: string[]; terminalReason?: string; lastReplyText: string; fullText: string; hasReceivedText: boolean }> {
     let hasReceivedText = false;
     let hasErrorResult = false;  // 是否已有 tool_result/error 事件输出过错误
@@ -900,6 +934,11 @@ export class MessageProcessor {
 
       // 记录所有事件类型
       logger.info(`[MessageProcessor] Event: type=${event.type}`);
+
+      // Proactive 可观测：将事件实时透传为 thought（fire-and-forget）
+      if (thoughtEmitter) {
+        thoughtEmitter.emit(event).catch(() => {});
+      }
 
       // session_id 已在 AgentRunner.transformStream 中处理，此处仅记录
       if (event.type === 'session_id') {

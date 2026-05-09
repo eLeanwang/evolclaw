@@ -203,7 +203,7 @@ export class MessageQueue {
    * 合并多条同 peerId 消息：
    * - content: \n 连接
    * - images / mentions: 扁平合并
-   * - messageId: 置空（合并后不代表某一条具体消息）
+   * - messageId: 取最新一条的 messageId（用于 thought 锚定与中断追踪）
    * - replyContext / peerName / 其余字段: 取最后一条
    */
   private mergeItems(items: QueuedMessage[]): QueuedMessage {
@@ -219,12 +219,20 @@ export class MessageQueue {
     }
 
     const last = items[items.length - 1];
+    // 保留最新一条的 messageId（若最后一条无 ID 则回退到前面已有的 ID）
+    let latestMessageId: string | undefined;
+    for (let i = items.length - 1; i >= 0; i--) {
+      if (items[i].message.messageId) {
+        latestMessageId = items[i].message.messageId;
+        break;
+      }
+    }
     const merged: Message = {
       ...last.message,
       content: contents.join('\n'),
       images: allImages.length > 0 ? allImages : undefined,
       mentions: allMentions.length > 0 ? allMentions : undefined,
-      messageId: undefined,
+      messageId: latestMessageId,
     };
 
     return {

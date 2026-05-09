@@ -306,6 +306,10 @@ export interface ChannelAdapter {
   patchInteractionCard?(messageId: string, card: object): Promise<void>;
   onInteraction?(callback: (response: InteractionResponse) => void): void;
   onChatDissolved?(callback: (channelId: string) => void): void;
+  // 发送 thought（Proactive 模式可观测）
+  // channelId: 群聊时为 groupId，私聊时为对方 AID
+  // adapter 内部按 chatType 分发到 group.thought.put 或 message.thought.put
+  putThought?(channelId: string, replyToMessageId: string, payload: object): Promise<void>;
   connect?(): Promise<void>;
   disconnect?(): Promise<void>;
 }

@@ -1,4 +1,4 @@
-import { AUNClient, FileSecretStore, GatewayDiscovery, type JsonObject } from '@agentunion/aun-node';
+import { AUNClient, FileSecretStore, GatewayDiscovery, type JsonObject } from '@agentunion/fastaun';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
@@ -361,7 +361,8 @@ export class AUNChannel {
         logger.warn(`[AUN] Owner ${owner} type is "${ownerInfo.type}" (not human). Consider using a human AID as owner.`);
       }
 
-      // Name: owner agent.md name (first 12 chars) → fallback to owner AID first label (first 12 chars)
+      // Name: prefer existing agent.md name if user has customized it,
+      // otherwise generate "{ownerName}的Evol助手 ({aidLabel})" for disambiguation
       const ownerAidClean = owner.startsWith('@') ? owner.slice(1) : owner;
       let ownerDisplayName: string;
       if (ownerInfo.name) {
@@ -369,7 +370,19 @@ export class AUNChannel {
       } else {
         ownerDisplayName = ownerAidClean.split('.')[0].slice(0, 12);
       }
-      const agentDisplayName = `${ownerDisplayName}的Evol助手`;
+
+      // Check if init wrote a meaningful name (vs just the aid first label default)
+      const currentNameMatch = frontmatter.match(/^name:\s*"?([^"\n]+)/m);
+      const currentName = currentNameMatch?.[1]?.trim();
+      const aidLabel = aidName.split('.')[0];
+
+      let agentDisplayName: string;
+      if (currentName && currentName !== aidLabel) {
+        // User or previous init set a custom name — keep it
+        agentDisplayName = currentName;
+      } else {
+        agentDisplayName = `${ownerDisplayName}的Evol助手 (${aidLabel})`;
+      }
 
       // Generate new agent.md with proper fields
       const newAgentMd = `---
@@ -821,6 +834,41 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     }
   }
 
+  /**
+   * 发送 thought 内容（Proactive 模式可观测）
+   * 群聊：调用 group.thought.put
+   * 单聊：调用 message.thought.put（协议命名推断，实际以服务端为准）
+   */
+  async sendThought(channelId: string, replyToMessageId: string, payload: object): Promise<void> {
+    if (!this.connected || !this.client) return;
+    if (!replyToMessageId) return;
+
+    // Multi-instance routing
+    const colonIdx = channelId.indexOf(':');
+    const targetId = colonIdx > 0 ? channelId.substring(0, colonIdx) : channelId;
+
+    const params: Record<string, any> = {
+      reply_to: { message_id: replyToMessageId },
+      payload,
+      encrypt: true,
+    };
+
+    try {
+      if (this.isGroupId(channelId)) {
+        params.group_id = targetId;
+        this.trace('OUT', 'group.thought.put', params);
+        await this.client.call('group.thought.put', params);
+      } else {
+        params.to = targetId;
+        this.trace('OUT', 'message.thought.put', params);
+        await this.client.call('message.thought.put', params);
+      }
+    } catch (e) {
+      this.trace('OUT', 'thought.put.error', { channelId, error: String(e) });
+      logger.debug(`[AUN] thought.put failed to ${channelId}: ${e}`);
+    }
+  }
+
   async sendFile(channelId: string, filePath: string, context?: ReplyContext): Promise<void> {
     if (!this.connected || !this.client) {
       logger.warn('[AUN] Cannot sendFile: not connected');
@@ -1149,6 +1197,8 @@ export class AUNChannelPlugin implements ChannelPlugin {
         sendCustomPayload: (id: string, payload: string) => channel.sendCustomPayload(id, payload),
         uploadAgentMd: (content: string) => channel.uploadAgentMd(content),
         downloadAgentMd: (aid: string) => channel.downloadAgentMd(aid),
+        putThought: (id: string, replyToMessageId: string, payload: object) =>
+          channel.sendThought(id, replyToMessageId, payload),
         _selfAid: () => channel.getStatus().aid,
       };
 

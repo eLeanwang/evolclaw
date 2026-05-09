@@ -1,6 +1,6 @@
 ---
 name: evolclaw-ctl
-version: 1.0.0
+version: 1.1.0
 description: EvolClaw 运行时自管理指令，仅在 evolclaw 托管环境中可用
 trigger: 用户询问或需要切换模型、调整推理强度、查看运行状态、压缩上下文、检查通道健康、管理权限模式、发送文件、重启服务、重连渠道时
 ---
@@ -35,6 +35,8 @@ trigger: 用户询问或需要切换模型、调整推理强度、查看运行�
 - `evolclaw ctl agentmd` — 查看当前 agent.md
 - `evolclaw ctl agentmd put` — 发布本地 agent.md
 - `evolclaw ctl agentmd set <内容>` — 直接设置 agent.md 内容
+- `evolclaw ctl aid` — 列出所有 AUN 实例及连接状态
+- `evolclaw ctl aid new <aid>` — 创建新 AID 并热加载（仅 AUN 通道）
 
 ## 使用示例
 

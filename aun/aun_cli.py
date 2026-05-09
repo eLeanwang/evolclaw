@@ -2330,8 +2330,8 @@ class AUNCli:
             self._connected_at = time.monotonic()
             if self._initial_connect_done and not getattr(self, '_slot_reconnecting', False):
                 info("重新连接成功")
-            # 重连后刷新远端菜单（仅 peer target）
-            if self.target and _is_peer_target(self.target):
+            # 重连后刷新远端菜单（仅 peer target，静默模式跳过）
+            if self.target and _is_peer_target(self.target) and not _silent:
                 self._pending_menu = None
                 self._pending_sub_menu.clear()
                 asyncio.ensure_future(self.query_menu())
@@ -5425,7 +5425,7 @@ options:
   -l, --local AID       本地 AID（默认从 config.json 读取）
   -t, --target AID      目标 AID 或 group_id
   -s, --send MSG        发送单条消息后退出
-  -T, --timeout SEC     发送模式等待回复超时（默认 120s）
+  -T, --timeout SEC     发送模式等待回复超时（默认 120s；0 表示发送后立即退出，不等待回复）
   -L, --log N           打印最后 N 行日志并持续跟随
 
 commands:
@@ -5440,7 +5440,8 @@ examples:
   aun -l my.agentid.pub -t bot.agentid.pub             指定本地和目标 AID 启动
   aun -L 50                                            查看最后 50 行日志并持续跟随
   aun                                                  使用上次的本地 AID 和目标直接启动
-  aun -s "你好"                                        发送单条消息后退出""")
+  aun -s "你好"                                        发送单条消息后退出
+  aun -s "你好" -T 0                                   发送后立即退出，不等待回复""")
     parser._action_groups = []  # 隐藏自动生成的 options/positional 区块
     sub = parser.add_subparsers(dest="subcmd")
     sub.required = False
@@ -5465,7 +5466,7 @@ examples:
     parser.add_argument("--local", "-l", help="本地 AID（默认从 config.json 读取）")
     parser.add_argument("--target", "-t", help="目标 AID 或 group_id")
     parser.add_argument("--send", "-s", help="发送单条消息后退出")
-    parser.add_argument("--timeout", "-T", type=int, default=120, metavar="SEC", help="发送模式等待回复的超时时间（默认 120s）")
+    parser.add_argument("--timeout", "-T", type=int, default=120, metavar="SEC", help="发送模式等待回复的超时时间（默认 120s；0 表示发送后立即退出，不等待回复）")
     parser.add_argument("--log", "-L", type=int, metavar="N", help="打印最后 N 行日志并持续跟随")
 
     args, _ = parser.parse_known_args()
@@ -5563,6 +5564,9 @@ examples:
                     await c.send(args.send, encrypt=c.encrypt)
             else:
                 await c.send(args.send)
+            if args.timeout == 0:
+                # -T 0: 发送完毕后不等待回复直接退出
+                return
             try:
                 await asyncio.wait_for(c._send_reply_event.wait(), timeout=args.timeout)
             except asyncio.TimeoutError:

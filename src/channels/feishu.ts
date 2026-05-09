@@ -566,11 +566,12 @@ export class FeishuChannel {
 
     try {
       // 检测是否为图片，是则走 sendImage（内联预览）而非文件卡片
-      const header = Buffer.alloc(12);
+      // 读取足够字节供 file-type 解析（ZIP-based 格式如 PPTX 需要更多字节）
+      const header = Buffer.alloc(4100);
       const fd = fs.openSync(filePath, 'r');
-      fs.readSync(fd, header, 0, 12, 0);
+      const bytesRead = fs.readSync(fd, header, 0, 4100, 0);
       fs.closeSync(fd);
-      const imgType = await imageType(header);
+      const imgType = await imageType(header.subarray(0, bytesRead)).catch(() => undefined);
       if (imgType) {
         logger.info(`[Feishu] Detected image (${imgType.mime}), sending as inline image:`, filePath);
         const buf = fs.readFileSync(filePath);
