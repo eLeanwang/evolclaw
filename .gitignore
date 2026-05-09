@@ -69,6 +69,8 @@ hermes/
 
 # AUN 辅助目录 / 示例 / 演示 / 外部 SDK
 aun-cli/
+# aun/ 已拆分为独立仓库，不在本仓库跟踪
+/aun/
 aun/aun-sdk-core/
 aun/examples/
 aun/presentations/
