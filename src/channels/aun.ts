@@ -610,11 +610,16 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       return;
     }
 
+    // dispatch_mode from server tells agent how to work in this group
+    const dispatchMode: string = msg.dispatch_mode ?? (payload as any)?.dispatch_mode ?? 'mention';
+
     const mentionedSelf = this._aid
       ? (this.hasExplicitMention(text, this._aid) || payloadMentions.includes(this._aid))
       : false;
     const mentionedAll = this.hasExplicitMention(text, 'all') || payloadMentions.includes('all');
-    if (!mentionedSelf && !mentionedAll) {
+
+    // In mention mode, only respond when explicitly mentioned; in broadcast mode, respond to all
+    if (dispatchMode === 'mention' && !mentionedSelf && !mentionedAll) {
       this.acknowledgeImmediately(messageId, seq);
       return;
     }
@@ -633,7 +638,9 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       return;
     }
 
-    const mentions: string[] = mentionedAll ? ['all'] : (this._aid ? [this._aid] : []);
+    const mentions: string[] = mentionedAll
+      ? ['all']
+      : mentionedSelf && this._aid ? [this._aid] : [];
 
     // Process attachments
     let finalText = strippedText;
@@ -837,18 +844,21 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
   /**
    * 发送 thought 内容（Proactive 模式可观测）
    * 群聊：调用 group.thought.put
-   * 单聊：调用 message.thought.put（协议命名推断，实际以服务端为准）
+   * 单聊：调用 message.thought.put
+   *
+   * selector 使用 context: { type: 'task', id: taskId }
+   * 存储键：group_id/peer_aid + sender_aid + context.type + context.id
    */
-  async sendThought(channelId: string, replyToMessageId: string, payload: object): Promise<void> {
+  async sendThought(channelId: string, taskId: string, payload: object): Promise<void> {
     if (!this.connected || !this.client) return;
-    if (!replyToMessageId) return;
+    if (!taskId) return;
 
     // Multi-instance routing
     const colonIdx = channelId.indexOf(':');
     const targetId = colonIdx > 0 ? channelId.substring(0, colonIdx) : channelId;
 
     const params: Record<string, any> = {
-      reply_to: { message_id: replyToMessageId },
+      context: { type: 'task', id: taskId },
       payload,
       encrypt: true,
     };
@@ -973,7 +983,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     this.messageSeqMap.delete(messageId);
   }
 
-  sendProcessingStatus(channelId: string, status: 'start' | 'done' | 'interrupted' | 'error' | 'timeout', sessionId: string, context?: ReplyContext): void {
+  sendProcessingStatus(channelId: string, status: 'start' | 'done' | 'interrupted' | 'error' | 'timeout', sessionId: string, taskId: string, context?: ReplyContext): void {
     if (status === 'start') this.sentCount.delete(channelId);  // 新任务开始，重置计数
     if (!this.client || !this.connected) return;
 
@@ -987,7 +997,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     const payload: Record<string, any> = {
       type: 'event',
       event: eventMap[status] ?? `task.${status}`,
-      data: { session_id: sessionId },
+      data: { task_id: taskId, session_id: sessionId },
       severity: status === 'error' || status === 'timeout' ? 'error' : 'info',
     };
     if (context?.threadId) payload.thread_id = context.threadId;
@@ -1193,12 +1203,12 @@ export class AUNChannelPlugin implements ChannelPlugin {
         sendText: (id: string, text: string, context?: ReplyContext) => channel.sendMessage(id, text, context),
         sendFile: (id: string, filePath: string, context?: ReplyContext) => channel.sendFile(id, filePath, context),
         acknowledge: (messageId: string) => { channel.acknowledge(messageId); return Promise.resolve(); },
-        sendProcessingStatus: (id: string, status: 'start' | 'done', sessionId: string, context?: ReplyContext) => channel.sendProcessingStatus(id, status, sessionId, context),
+        sendProcessingStatus: (id: string, status: 'start' | 'done' | 'interrupted' | 'error' | 'timeout', sessionId: string, taskId: string, context?: ReplyContext) => channel.sendProcessingStatus(id, status, sessionId, taskId, context),
         sendCustomPayload: (id: string, payload: string) => channel.sendCustomPayload(id, payload),
         uploadAgentMd: (content: string) => channel.uploadAgentMd(content),
         downloadAgentMd: (aid: string) => channel.downloadAgentMd(aid),
-        putThought: (id: string, replyToMessageId: string, payload: object) =>
-          channel.sendThought(id, replyToMessageId, payload),
+        putThought: (id: string, taskId: string, payload: object) =>
+          channel.sendThought(id, taskId, payload),
         _selfAid: () => channel.getStatus().aid,
       };
 

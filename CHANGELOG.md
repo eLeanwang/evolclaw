@@ -1,5 +1,22 @@
 # Changelog
 
+## v2.6.1 (2026-05-11)
+
+### Improvements
+
+- **Thought 协议对齐 task_id** — `ChannelAdapter.putThought` / `sendProcessingStatus` 由 `replyToMessageId` 改为 `taskId`，对齐服务端 selector 协议（`context: {type: 'task', id}`）；同一次任务处理的所有 thought / 状态事件共享一个 `task-{10hex}`，replies/history 查询更精确
+- **AUN dispatch_mode 分派** — 群聊接收服务端下发的 `dispatch_mode`：`mention` 模式仅在 @ 时响应，`broadcast` 模式响应全部消息；@mentions 字段也精简为只在 mention 命中时回填
+- **SKILLS.md 实时刷新** — `data/SKILLS.md` 提示不再在进程内缓存，每次从磁盘读取；用户编辑 SKILLS.md 后立即生效，无需重启
+- **AUN SDK 升级** — `@agentunion/fastaun` 0.2.14 → 0.2.15
+- **event-bus 精简** — 移除 `message:new-inbound` 事件（task_id 取代了动态切换 replyTo 的需求）
+
+### Bug Fixes
+
+- **Thought 重复摘要** — proactive 模式下，流式 text 已推送过 thought 时，complete.result 不再重复发送最终 summary
+- **Tool 结果空值** — `ToolResult` 返回内容为空时只输出 `✅ toolName`，不再拼接空字符串
+
+---
+
 ## v2.6.0 (2026-05-08)
 
 ### New Features

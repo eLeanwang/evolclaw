@@ -298,7 +298,7 @@ export interface ChannelAdapter {
   sendFile?(channelId: string, filePath: string, context?: ReplyContext): Promise<void>;
   sendImage?(channelId: string, png: Buffer, context?: ReplyContext): Promise<void>;
   acknowledge?(messageId: string): Promise<void>;
-  sendProcessingStatus?(channelId: string, status: 'start' | 'done' | 'interrupted' | 'error' | 'timeout', sessionId: string, context?: ReplyContext): void;
+  sendProcessingStatus?(channelId: string, status: 'start' | 'done' | 'interrupted' | 'error' | 'timeout', sessionId: string, taskId: string, context?: ReplyContext): void;
   sendCustomPayload?(channelId: string, payload: string): void;
   uploadAgentMd?(content: string): Promise<void>;
   downloadAgentMd?(aid: string): Promise<string>;
@@ -309,7 +309,13 @@ export interface ChannelAdapter {
   // 发送 thought（Proactive 模式可观测）
   // channelId: 群聊时为 groupId，私聊时为对方 AID
   // adapter 内部按 chatType 分发到 group.thought.put 或 message.thought.put
-  putThought?(channelId: string, replyToMessageId: string, payload: object): Promise<void>;
+  /**
+   * 发送 thought 内容
+   * channelId 在群聊时为 groupId，私聊时为对方 AID
+   * taskId 是任务唯一标识，同一次任务处理的所有 thought 共享同一 task_id
+   * adapter 内部按 chatType 分发到 group.thought.put 或 message.thought.put
+   */
+  putThought?(channelId: string, taskId: string, payload: object): Promise<void>;
   connect?(): Promise<void>;
   disconnect?(): Promise<void>;
 }

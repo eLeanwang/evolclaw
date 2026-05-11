@@ -16,31 +16,45 @@ interface ThoughtPayload {
  * 设计特点：
  * - 不做聚合/batching，逐事件调用 adapter.putThought()
  * - 不感知 group vs P2P，通道差异由 adapter 内部处理
- * - replyToMessageId 支持动态更新（新消息到达时切换锚点）
+ * - taskId 映射为 context: { type: 'task', id: taskId }（协议 selector）
  * - fire-and-forget：调用方不 await emit()，错误被内部捕获
  */
 export class ThoughtEmitter {
   private adapter: ChannelAdapter;
   private channelId: string;
-  private replyToMessageId: string;
+  private taskId: string;
+  private hasEmittedText = false;
 
-  constructor(adapter: ChannelAdapter, channelId: string, replyToMessageId: string) {
+  constructor(adapter: ChannelAdapter, channelId: string, taskId: string) {
+    if (!taskId) {
+      throw new Error('[ThoughtEmitter] taskId is required at construction');
+    }
     this.adapter = adapter;
     this.channelId = channelId;
-    this.replyToMessageId = replyToMessageId;
-  }
-
-  updateReplyTo(messageId: string): void {
-    this.replyToMessageId = messageId;
+    this.taskId = taskId;
   }
 
   async emit(event: AgentEvent): Promise<void> {
+    // 对齐 interactive 的 dedup：流式 text 已推过时，complete.result 不再重复发 summary
+    if (
+      event.type === 'complete' &&
+      !event.isError &&
+      event.result &&
+      this.hasEmittedText
+    ) {
+      return;
+    }
+
     const payload = this.mapEventToPayload(event);
     if (!payload) return;
     if (!this.adapter.putThought) return;
 
+    if (payload.stage === 'thinking') {
+      this.hasEmittedText = true;
+    }
+
     try {
-      await this.adapter.putThought(this.channelId, this.replyToMessageId, payload);
+      await this.adapter.putThought(this.channelId, this.taskId, payload);
     } catch (err) {
       logger.debug(`[ThoughtEmitter] putThought failed: ${(err as Error).message}`);
     }
@@ -71,12 +85,15 @@ export class ThoughtEmitter {
             metadata: { tool: event.name, ok: false },
           };
         }
-        return {
-          type: 'thought',
-          text: `✅ ${event.name}: ${this.truncate(this.stringifyResult(event.result), 200)}`,
-          stage: 'tool',
-          metadata: { tool: event.name, ok: true },
-        };
+        {
+          const resultText = this.truncate(this.stringifyResult(event.result), 200);
+          return {
+            type: 'thought',
+            text: resultText ? `✅ ${event.name}: ${resultText}` : `✅ ${event.name}`,
+            stage: 'tool',
+            metadata: { tool: event.name, ok: true },
+          };
+        }
 
       case 'compact':
         return {

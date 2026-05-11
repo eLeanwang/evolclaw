@@ -1,8 +1,8 @@
 ---
 name: evolclaw-ctl
 version: 1.1.0
-description: EvolClaw 运行时自管理指令，仅在 evolclaw 托管环境中可用
-trigger: 用户询问或需要切换模型、调整推理强度、查看运行状态、压缩上下文、检查通道健康、管理权限模式、发送文件、重启服务、重连渠道时
+description: 仅在 evolclaw 运行时可用
+trigger: 用户询问或需要切换模型、调整推理强度、查看运行状态、压缩上下文、检查通道健康、管理权限模式、重启服务、重连渠道等
 ---
 
 # EvolClaw Ctl

@@ -1,5 +1,6 @@
 import path from 'path';
 import fs from 'fs';
+import crypto from 'crypto';
 import { type AgentRunnerFull, hasCompact, type AgentEvent } from '../../agents/claude-runner.js';
 import { SessionManager } from '../session/session-manager.js';
 import { StreamFlusher } from './stream-flusher.js';
@@ -30,7 +31,6 @@ export class MessageProcessor {
   private interruptedSessions = new Map<string, string>();  // sessionId → reason ('new_message' | 'stop' | ...)
   private interactionRouter?: InteractionRouter;
   private messageQueue?: MessageQueue;
-  private skillsHintDesc: string | null | undefined = undefined; // undefined=未加载, null=无模板, string=缓存描述
   private skillsEnsured = false; // 全局 SKILLS.md 是否已确保
 
   /** 按 agentId 获取 agent，回退到默认 */
@@ -306,8 +306,8 @@ export class MessageProcessor {
     const agent = this.getAgent(session.agentId);
     const streamKey = session.id;
 
-    // ThoughtEmitter new-inbound 订阅句柄（在 try/catch 外声明，确保 catch 可访问）
-    let thoughtNewInboundHandler: ((event: any) => void) | null = null;
+    // 为本次任务处理生成唯一 task_id（客户端生成，格式 task-{10hex}）
+    const taskId = `task-${crypto.randomUUID().replace(/-/g, '').slice(0, 10)}`;
 
     try {
       const isBackground = await this.isBackgroundSession(session, message.channel, message.channelId);
@@ -336,7 +336,7 @@ export class MessageProcessor {
 
       // 记录开始处理
       this.eventBus.publish({ type: 'message:processing', sessionId: session.id });
-      adapter.sendProcessingStatus?.(message.channelId, 'start', session.id, this.getReplyContext(message));
+      adapter.sendProcessingStatus?.(message.channelId, 'start', session.id, taskId, this.getReplyContext(message));
 
       logger.message({
         msgId: messageId,
@@ -383,21 +383,14 @@ export class MessageProcessor {
       this.currentFlusher = flusher;
 
       // Proactive 模式可观测：创建 ThoughtEmitter，将静默的流式事件转发为 thought
+      // selector: context = { type: 'task', id: taskId }
       let thoughtEmitter: ThoughtEmitter | null = null;
-      if (isProactive && adapter.putThought && message.messageId) {
-        thoughtEmitter = new ThoughtEmitter(adapter, message.channelId, message.messageId);
-        // 订阅 new-inbound 事件：新消息到达时切换锚定 messageId
-        thoughtNewInboundHandler = (ev: any) => {
-          if (
-            ev.type === 'message:new-inbound' &&
-            ev.sessionId === session.id &&
-            ev.channelId === message.channelId &&
-            ev.messageId
-          ) {
-            thoughtEmitter?.updateReplyTo(ev.messageId);
-          }
-        };
-        this.eventBus.subscribe('message:new-inbound', thoughtNewInboundHandler);
+      if (isProactive && adapter.putThought) {
+        thoughtEmitter = new ThoughtEmitter(
+          adapter,
+          message.channelId,
+          taskId
+        );
       }
 
       // 调用 AgentRunner（含上下文过长自动 compact 重试）
@@ -505,14 +498,16 @@ export class MessageProcessor {
         }
 
         // 5. Agent ctl 自管理指令提示 + SKILLS.md 生成
-        if (!this.skillsEnsured) {
-          this.ensureSkillsFile();
-          this.skillsEnsured = true;
-        }
-        const skillsHint = this.getSkillsHint();
-        if (skillsHint) {
-          contextParts.push(`[EvolClaw 自管理] ${skillsHint}`);
-        }
+        // 暂时注释：排查 proactive 模式下 agent 未调用 Bash 工具的问题，
+        // 怀疑此段与 [Proactive 模式] 语义重合稀释了后者的权重
+        // if (!this.skillsEnsured) {
+        //   this.ensureSkillsFile();
+        //   this.skillsEnsured = true;
+        // }
+        // const skillsHint = this.getSkillsHint();
+        // if (skillsHint) {
+        //   contextParts.push(`[EvolClaw 自管理] ${skillsHint}`);
+        // }
 
         // 6. Proactive 模式提示词：agent 的输出不会自动发送，必须主动调用 ctl send/file
         if (isProactive) {
@@ -708,11 +703,6 @@ export class MessageProcessor {
       // Flush 剩余内容（文件标记已在 flush 时自动移除）
       await flusher.flush(true);
 
-      // 清理 ThoughtEmitter 的事件订阅
-      if (thoughtNewInboundHandler) {
-        this.eventBus.unsubscribe('message:new-inbound', thoughtNewInboundHandler);
-      }
-
       // 清理 activeStreams（正常完成）
       agent.cleanupStream(streamKey);
 
@@ -726,7 +716,7 @@ export class MessageProcessor {
         const errorSummary = streamResult.errors?.join('; ') || '任务执行失败';
         const rawSubtype = streamResult.subtype || 'agent_error';
         const errorType = prefixErrorType(ERROR_PREFIX.AGENT, rawSubtype);
-        adapter.sendProcessingStatus?.(message.channelId, 'error', session.id, this.getReplyContext(message));
+        adapter.sendProcessingStatus?.(message.channelId, 'error', session.id, taskId, this.getReplyContext(message));
 
         this.eventBus.publish({
           type: 'message:error',
@@ -756,7 +746,7 @@ export class MessageProcessor {
         });
       } else {
         // 真正的成功
-        adapter.sendProcessingStatus?.(message.channelId, interruptReason ? 'interrupted' : 'done', session.id, this.getReplyContext(message));
+        adapter.sendProcessingStatus?.(message.channelId, interruptReason ? 'interrupted' : 'done', session.id, taskId, this.getReplyContext(message));
         await this.sessionManager.recordSuccess(session.id);
 
         this.eventBus.publish({
@@ -798,10 +788,6 @@ export class MessageProcessor {
       // 清理流和处理中状态（异常时也要清除）
       agent.cleanupStream(streamKey);
       try { this.sessionManager.clearProcessing(session.id); } catch {}
-      // 清理 ThoughtEmitter 的事件订阅
-      if (thoughtNewInboundHandler) {
-        try { this.eventBus.unsubscribe('message:new-inbound', thoughtNewInboundHandler); } catch {}
-      }
       // 注意：不在此处清除 interruptedSessions，由下一条消息的 prompt 包装逻辑消费
 
       // 区分超时 / 中断 / 错误
@@ -814,7 +800,7 @@ export class MessageProcessor {
 
       // 用户主动中断（新消息打断 或 /stop 命令）时静默，不发送中断/错误提示
       if (!isUserInterrupt) {
-        try { adapter.sendProcessingStatus?.(message.channelId, procStatus, session.id, this.getReplyContext(message)); } catch {}
+        try { adapter.sendProcessingStatus?.(message.channelId, procStatus, session.id, taskId, this.getReplyContext(message)); } catch {}
       }
 
       // 用户主动中断时降级日志；其余仍按 error 记录
@@ -1262,43 +1248,29 @@ export class MessageProcessor {
   }
 
   /**
-   * 从模板 frontmatter 缓存提示（懒加载，整个进程只读一次模板文件）
+   * 从 data/SKILLS.md 读取 frontmatter 并生成提示。
+   * 不缓存：每次读取保证用户编辑立即生效。
+   * 调用前应确保 ensureSkillsFile() 已执行过（首次落盘）。
    */
   private getSkillsHint(): string | null {
-    if (this.skillsHintDesc === undefined) {
-      this.skillsHintDesc = this.loadSkillsHint();
-    }
-    return this.skillsHintDesc;
-  }
-
-  /**
-   * 从包模板源读取 frontmatter 并生成提示（仅执行一次）
-   */
-  private loadSkillsHint(): string | null {
     try {
-      const candidates = [
-        path.join(getPackageRoot(), 'src', 'templates', 'skills.md'),
-        path.join(getPackageRoot(), 'dist', 'templates', 'skills.md'),
+      const skillsPath = path.join(resolveRoot(), 'data', 'SKILLS.md');
+      if (!fs.existsSync(skillsPath)) return null;
+
+      const content = fs.readFileSync(skillsPath, 'utf-8');
+      const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---/);
+      if (!frontmatterMatch) return null;
+
+      const fm = frontmatterMatch[1];
+      const desc = fm.match(/^description:\s*(.+)$/m)?.[1]?.trim() || 'EvolClaw 运行时管理指令';
+      const trigger = fm.match(/^trigger:\s*(.+)$/m)?.[1]?.trim() || '';
+
+      const parts = [
+        `可通过 Bash 指令管理运行时，${desc}。`,
+        trigger ? `触发时机：${trigger}。` : '',
+        `完整文档见 ${skillsPath}`,
       ];
-      for (const templatePath of candidates) {
-        if (!fs.existsSync(templatePath)) continue;
-        const content = fs.readFileSync(templatePath, 'utf-8');
-        const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---/);
-        if (!frontmatterMatch) continue;
-
-        const fm = frontmatterMatch[1];
-        const desc = fm.match(/^description:\s*(.+)$/m)?.[1]?.trim() || 'EvolClaw 运行时管理指令';
-        const trigger = fm.match(/^trigger:\s*(.+)$/m)?.[1]?.trim() || '';
-
-        const skillsPath = path.join(resolveRoot(), 'data', 'SKILLS.md');
-        const parts = [
-          `可通过 Bash 执行 \`evolclaw ctl <cmd>\` 管理运行时：${desc}`,
-          trigger ? `触发时机：${trigger}` : '',
-          `完整文档见 ${skillsPath}`,
-        ];
-        return parts.filter(Boolean).join('\n');
-      }
-      return null;
+      return parts.filter(Boolean).join('');
     } catch {
       return null;
     }

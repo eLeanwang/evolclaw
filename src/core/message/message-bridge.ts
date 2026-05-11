@@ -130,18 +130,6 @@ export class MessageBridge {
         //    FIFO 模式（群聊）    → 跳过 debouncer，独立入队，出队时贪心合并
         if (fullMessage.messageId) adapter?.acknowledge?.(fullMessage.messageId).catch(() => {});
 
-        // 发布 new-inbound 事件，让处理中的 ThoughtEmitter 能及时切换 replyTo
-        if (fullMessage.messageId) {
-          this.eventBus.publish({
-            type: 'message:new-inbound',
-            sessionId: session.id,
-            channel: channelName,
-            channelId: msg.channelId,
-            messageId: fullMessage.messageId,
-            timestamp: fullMessage.timestamp,
-          });
-        }
-
         const isInterrupt = chatType !== 'group';
         const doEnqueue = async (m: Message) => {
           return this.messageQueue.enqueue(session.id, m, session.projectPath, {

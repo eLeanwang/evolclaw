@@ -87,3 +87,7 @@ CLAUDE.md
 DEPLOYMENT.md
 docs/
 src/experimental/
+
+# 用户个人 onboarding 报告（含使用统计，不入库）
+ONBOARDING.md
+.codex
