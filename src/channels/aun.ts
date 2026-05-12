@@ -86,9 +86,16 @@ export class AUNChannel {
     this.traceStream = fs.createWriteStream(logPath, { flags: 'a' });
   }
 
-  /** 判断 channelId 是否为群组 ID（g-xxx.agentid.pub 或 grp_ 前缀） */
+  /** 判断 channelId 是否为群组 ID
+   *  - 新格式：group.{issuer}/{group_no|group_name}
+   *  - 数字群号：{group_no}.{issuer}（如 11117.agentid.pub）
+   *  - 兼容旧格式：grp_xxx、g-xxx.agentid.pub
+   */
   private isGroupId(id: string): boolean {
-    return id.startsWith('grp_') || (id.startsWith('g-') && id.includes('.'));
+    return (id.startsWith('group.') && id.includes('/'))
+      || /^\d+\./.test(id)
+      || id.startsWith('grp_')
+      || (id.startsWith('g-') && id.includes('.'));
   }
 
   private getShortAid(aid?: string): string | undefined {
@@ -140,6 +147,7 @@ export class AUNChannel {
     if (messageId) this.messageSeqMap.delete(messageId);
   }
   private _aid?: string;
+  private _selfName?: string;  // 本地 agent.md 中的 name，首次 connect 时读取
   private _chatId = '';  // aid:device_id:slot_id — 多实例回声过滤
   private seenMessages = new Map<string, number>();
   private peerInfoCache = new Map<string, { type: 'human' | 'ai'; name?: string }>();
@@ -297,6 +305,7 @@ export class AUNChannel {
       this._aid = this.client.aid ?? undefined;
       const deviceId = (this.client as any)._device_id ?? '';
       this._chatId = this._aid ? `${this._aid}:${deviceId}:` : '';
+      this._selfName = this.loadSelfName(aidName);
       this.connected = true;
       this.reconnectAttempt = 0;
 
@@ -436,7 +445,22 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
 
 现在，请先使用 \`/bind\` 命令绑定您的项目目录，然后就可以开始工作了！`;
 
-      await this.sendMessage(owner, welcomeText);
+      // First contact with Owner races against Owner's async cert fetch from
+      // gateway PKI; a 3s pause lets the cert propagate. persist_required asks
+      // the gateway to durably store the message so Owner can recover it via
+      // pull if the initial E2EE push still arrives before the cert resolves.
+      await new Promise(resolve => setTimeout(resolve, 3000));
+
+      if (!this.client) {
+        logger.warn('[AUN] Client disconnected before welcome message could be sent');
+        return;
+      }
+      await this.client.call('message.send', {
+        to: owner,
+        payload: { type: 'text', text: welcomeText },
+        encrypt: true,
+        persist_required: true,
+      });
       logger.info(`[AUN] Welcome message sent to owner: ${owner}`);
     } catch (e) {
       logger.warn(`[AUN] Failed to send welcome message: ${e}`);
@@ -816,7 +840,8 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
 
     const payload: Record<string, any> = { type: 'text', text: finalText };
     if (context?.threadId) payload.thread_id = context.threadId;
-    const params: Record<string, any> = { payload, encrypt: true };
+    const isGroup = this.isGroupId(channelId);
+    const params: Record<string, any> = { payload, encrypt: !isGroup };
 
     // Multi-instance routing: channelId may be "aid:device_id:slot_id"
     const colonIdx = channelId.indexOf(':');
@@ -826,7 +851,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     }
 
     try {
-      if (this.isGroupId(channelId)) {
+      if (isGroup) {
         params.group_id = channelId;
         this.trace('OUT', 'group.send', params);
         await this.client.call('group.send', params);
@@ -874,8 +899,14 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
         await this.client.call('message.thought.put', params);
       }
     } catch (e) {
-      this.trace('OUT', 'thought.put.error', { channelId, error: String(e) });
-      logger.debug(`[AUN] thought.put failed to ${channelId}: ${e}`);
+      const err = e as any;
+      this.trace('OUT', 'thought.put.error', {
+        channelId,
+        errorName: err?.name,
+        errorCode: err?.code,
+        errorMessage: err?.message,
+      });
+      logger.debug(`[AUN] thought.put failed to ${channelId}: ${err?.name}(${err?.code})=${err?.message}`);
     }
   }
 
@@ -952,7 +983,8 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
         attachments: [attachment],
       };
       if (context?.threadId) filePayload.thread_id = context.threadId;
-      const params: Record<string, any> = { payload: filePayload, encrypt: true };
+      const isGroup = this.isGroupId(channelId);
+      const params: Record<string, any> = { payload: filePayload, encrypt: !isGroup };
 
       // Multi-instance routing
       const fileColonIdx = channelId.indexOf(':');
@@ -961,7 +993,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
         params.payload.chat_id = channelId;
       }
 
-      if (this.isGroupId(channelId)) {
+      if (isGroup) {
         params.group_id = channelId;
         this.trace('OUT', 'group.send.file', params);
         await this.client.call('group.send', params);
@@ -1002,7 +1034,8 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     };
     if (context?.threadId) payload.thread_id = context.threadId;
 
-    const params: Record<string, any> = { payload, encrypt: true };
+    const isGroup = this.isGroupId(channelId);
+    const params: Record<string, any> = { payload, encrypt: !isGroup };
 
     // Multi-instance routing
     const statusColonIdx = channelId.indexOf(':');
@@ -1011,7 +1044,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       payload.chat_id = channelId;
     }
 
-    if (this.isGroupId(channelId)) {
+    if (isGroup) {
       params.group_id = channelId;
       this.trace('OUT', 'group.send.status', params);
       this.client.call('group.send', params).catch(e => {
@@ -1134,6 +1167,26 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     };
   }
 
+  /** 读取本地 agent.md 中的 name（用于身份上下文展示） */
+  private loadSelfName(aid: string): string | undefined {
+    try {
+      const aidName = aid.startsWith('@') ? aid.slice(1) : aid;
+      const agentMdPath = path.join(os.homedir(), '.aun', 'AIDs', aidName, 'agent.md');
+      if (!fs.existsSync(agentMdPath)) return undefined;
+      const content = fs.readFileSync(agentMdPath, 'utf-8');
+      const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
+      if (!fmMatch) return undefined;
+      const nameMatch = fmMatch[1].match(/^name:\s*["']?(.+?)["']?\s*$/m);
+      return nameMatch?.[1]?.trim() || undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  getSelfName(): string | undefined {
+    return this._selfName;
+  }
+
   async fetchPeerInfo(aid: string): Promise<{ type: 'human' | 'ai' | null; name?: string }> {
     const cached = this.peerInfoCache.get(aid);
     if (cached !== undefined) return cached;
@@ -1210,6 +1263,7 @@ export class AUNChannelPlugin implements ChannelPlugin {
         putThought: (id: string, taskId: string, payload: object) =>
           channel.sendThought(id, taskId, payload),
         _selfAid: () => channel.getStatus().aid,
+        _selfName: () => channel.getSelfName(),
       };
 
       const policy = {

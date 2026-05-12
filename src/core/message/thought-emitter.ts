@@ -67,7 +67,7 @@ export class ThoughtEmitter {
         return { type: 'thought', text: event.text, stage: 'thinking' };
 
       case 'tool_use': {
-        const desc = this.summarizeInput(event.input);
+        const desc = this.summarizeInput(event.input, event.name);
         return {
           type: 'thought',
           text: desc ? `🔧 ${event.name}: ${desc}` : `🔧 ${event.name}`,
@@ -133,8 +133,15 @@ export class ThoughtEmitter {
     }
   }
 
-  private summarizeInput(input: any): string {
+  private summarizeInput(input: any, toolName?: string): string {
     if (!input || typeof input !== 'object') return '';
+    // Bash + ctl send/file: 显示完整命令内容（含发送的消息正文）
+    if (toolName === 'Bash' && typeof input.command === 'string') {
+      const cmd = input.command;
+      if (cmd.includes('evolclaw ctl send') || cmd.includes('evolclaw ctl file')) {
+        return cmd;
+      }
+    }
     return (
       input.description ||
       input.file_path ||

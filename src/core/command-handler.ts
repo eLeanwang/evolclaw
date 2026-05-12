@@ -615,10 +615,10 @@ export class CommandHandler {
     const activeChatType = activeSession?.chatType || 'private';
 
     if (normalizedContent.startsWith('/')) {
-      const guestGroupCommands = ['/status', '/help', '/check'];
+      const guestGroupCommands = ['/status', '/help', '/check', '/chatmode'];
       const userCommands = activeChatType === 'group' && !isAdmin
         ? guestGroupCommands
-        : ['/slist', '/new', '/session', '/rename', '/name', '/status', '/help', '/del', '/s ', '/check'];
+        : ['/slist', '/new', '/session', '/rename', '/name', '/status', '/help', '/del', '/s ', '/check', '/chatmode'];
       const isUserCommand = userCommands.some(cmd =>
         normalizedContent === cmd.trimEnd() || normalizedContent.startsWith(cmd)
       );
@@ -1496,8 +1496,9 @@ export class CommandHandler {
     }
 
     // /chatmode 命令：查看/切换 session 会话模式（interactive | proactive）
+    // - 查看：所有人可用
+    // - 设置：单聊任何角色可设置；群聊仅管理员可设置
     if (normalizedContent === '/chatmode' || normalizedContent.startsWith('/chatmode ')) {
-      if (!isAdmin) return '❌ 无权限：此命令仅限管理员使用';
       if (!activeSession) return '❌ 当前无活跃会话';
 
       const lockedMode = getChannelSessionMode(this.config, channel);
@@ -1511,6 +1512,10 @@ export class CommandHandler {
 
       if (arg !== 'interactive' && arg !== 'proactive') {
         return `❌ 无效模式: ${arg}\n可选: interactive / proactive`;
+      }
+
+      if (activeChatType === 'group' && !isAdmin) {
+        return '❌ 无权限：群聊中切换会话模式仅限管理员使用';
       }
 
       if (lockedMode) {
@@ -1687,6 +1692,9 @@ export class CommandHandler {
       }
 
       const lines: string[] = [];
+      const sessionMode = session.sessionMode || 'interactive';
+      const lockedMode = getChannelSessionMode(this.config, channel);
+      const chatModeLine = `会话模式: ${sessionMode}${lockedMode ? '（通道锁定）' : ''}`;
       if (isAdmin) {
         lines.push(
           `📊 ${isThread ? '话题' : '会话'}状态：`,
@@ -1694,6 +1702,7 @@ export class CommandHandler {
           `会话ID: ${session.id}`,
           `项目路径: ${session.projectPath}`,
           `会话状态: ${sessionStatus}`,
+          chatModeLine,
           `会话轮数: ${sessionTurns}`,
         );
         if (health.consecutiveErrors > 0) {
@@ -1710,6 +1719,7 @@ export class CommandHandler {
           `📊 ${isThread ? '话题' : '会话'}状态：`,
           `渠道: ${channel} / 项目: ${projectName} / ${session.agentId}会话`,
           `状态: ${sessionStatus}`,
+          chatModeLine,
           `会话轮数: ${sessionTurns}`,
           `最后活跃: ${timeStr}`
         );

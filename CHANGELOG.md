@@ -1,5 +1,19 @@
 # Changelog
 
+## v2.6.2 (2026-05-11)
+
+### Improvements
+
+- **AUN 群组 ID 新格式** — 支持 `group.{issuer}/{group_no}` 和纯数字群号格式，兼容旧 `grp_`/`g-` 前缀
+- **AUN 群消息明文传输** — 群聊消息禁用 E2EE（`encrypt: false`），对齐协议规范
+- **AUN welcome 消息持久化** — 首次欢迎消息使用 `persist_required: true` + 3s PKI 延迟，确保 Owner 证书就绪后可靠送达
+- **`/chatmode` 权限下放** — 查看模式对所有人开放；群聊设置仍限管理员，单聊任何角色可设置
+- **`/status` 显示会话模式** — 输出当前 interactive/proactive 状态及通道锁定标记
+- **系统提示 self/peer identity** — 注入 Agent 自身名称+AID 和对端名称+ID，增强上下文感知
+- **Thought ctl 命令可观测** — `evolclaw ctl send/file` 在 thought 中显示完整命令内容
+
+---
+
 ## v2.6.1 (2026-05-11)
 
 ### Improvements

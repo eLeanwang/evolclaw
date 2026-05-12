@@ -444,13 +444,27 @@ export class MessageProcessor {
         const peerLabel = session.identity?.role || 'unknown';
         const peerName = message.peerName || session.metadata?.peerName;
         const peerType = message.peerType;
+        const peerId = message.peerId;
+        const adapterAny = channelInfo.adapter as unknown as {
+          _selfAid?: () => string | undefined;
+          _selfName?: () => string | undefined;
+        };
+        const selfAid = typeof adapterAny._selfAid === 'function' ? adapterAny._selfAid() : undefined;
+        const selfName = typeof adapterAny._selfName === 'function' ? adapterAny._selfName() : undefined;
+        const formatIdentity = (name?: string, id?: string): string | undefined => {
+          if (name && id) return `${name} (${id})`;
+          return name || id || undefined;
+        };
+        const selfIdentity = formatIdentity(selfName, selfAid);
+        const peerIdentity = formatIdentity(peerName, peerId);
         const envParts = [
           `会话通道: ${currentChannelType}`,
           `当前项目: ${path.basename(absoluteProjectPath)}`,
         ];
         if (session.name) envParts.push(`会话名称: ${session.name}`);
+        if (selfIdentity) envParts.push(`当前名称: ${selfIdentity}`);
         envParts.push(`对端身份: ${peerLabel}`);
-        if (peerName) envParts.push(`对端名称: ${peerName}`);
+        if (peerIdentity) envParts.push(`对端名称: ${peerIdentity}`);
         if (peerType && peerType !== 'unknown') envParts.push(`对端类型: ${peerType}`);
         if (session.chatType) envParts.push(`聊天类型: ${session.chatType}`);
         if (session.agentId && session.agentId !== 'claude') envParts.push(`当前Agent: ${session.agentId}`);
