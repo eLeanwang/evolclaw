@@ -157,7 +157,8 @@ export function tailFile(filePath: string): { abort: () => void } {
     return { abort: () => child.kill() };
   }
 
-  // Windows: Node.js-based implementation
+  // Windows: Node.js-based implementation using stat polling
+  // (fs.watch / ReadDirectoryChangesW is unreliable for cross-process appends)
   // Output last 20 lines of existing content
   const content = fs.readFileSync(filePath, 'utf-8');
   const lines = content.split('\n');
@@ -165,19 +166,24 @@ export function tailFile(filePath: string): { abort: () => void } {
   process.stdout.write(lastLines.join('\n'));
 
   let position = fs.statSync(filePath).size;
-  const watcher = fs.watch(filePath, () => {
-    const stat = fs.statSync(filePath);
-    if (stat.size > position) {
-      const fd = fs.openSync(filePath, 'r');
-      const buffer = Buffer.alloc(stat.size - position);
-      fs.readSync(fd, buffer, 0, buffer.length, position);
-      fs.closeSync(fd);
-      process.stdout.write(buffer.toString('utf-8'));
-      position = stat.size;
+  const listener = () => {
+    try {
+      const stat = fs.statSync(filePath);
+      if (stat.size > position) {
+        const fd = fs.openSync(filePath, 'r');
+        const buffer = Buffer.alloc(stat.size - position);
+        fs.readSync(fd, buffer, 0, buffer.length, position);
+        fs.closeSync(fd);
+        process.stdout.write(buffer.toString('utf-8'));
+        position = stat.size;
+      }
+    } catch {
+      // File may be briefly unavailable during rotation — ignore and retry next tick
     }
-  });
+  };
+  fs.watchFile(filePath, { interval: 500, persistent: true }, listener);
 
-  return { abort: () => watcher.close() };
+  return { abort: () => fs.unwatchFile(filePath, listener) };
 }
 
 /**

@@ -18,10 +18,10 @@
 
 ## proactive
 
-[Proactive 模式] 本次对话中你的流式输出不会自动发送给用户，必须通过以下命令主动发送：
-- 发送文本：evolclaw ctl send "<消息内容>"
-- 发送文件：evolclaw ctl file <路径>
-可多次调用。如不调用，用户将看不到任何回复。
+[Proactive 模式] 你的所有文本输出都会被静默丢弃，用户永远看不到。唯一能让用户收到消息的方式：
+调用 Bash 工具执行命令 ：evolclaw ctl send "<消息内容>"
+发送文件： evolclaw ctl file <路径>
+可多次调用发送多条消息 ，如果不想回复停止调用即可。
 
 
 ---

@@ -439,9 +439,8 @@ export class MessageProcessor {
           : undefined,
       });
 
-      // 设置 per-session 权限模式（动态默认值：owner → bypass，admin → auto，guest → auto）
-      const role = session.identity?.role;
-      const defaultPermMode = role === 'owner' ? 'bypass' : 'auto';
+      // 设置 per-session 权限模式（默认 bypass，所有角色统一）
+      const defaultPermMode = 'bypass';
       agent.setMode(session.metadata?.permissionMode ?? defaultPermMode);
 
       // 标记会话为处理中（实时持久化，重启后可恢复）

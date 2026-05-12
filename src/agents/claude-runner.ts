@@ -258,7 +258,7 @@ export class AgentRunner {
   private apiKey: string;
   private model: string;
   private effort?: 'low' | 'medium' | 'high' | 'max';
-  private permissionMode: string = 'auto';
+  private permissionMode: string = 'bypass';
   private baseUrl?: string;
   private config?: Config;
   private activeSessions: Map<string, string> = new Map();
