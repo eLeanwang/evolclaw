@@ -13,6 +13,7 @@ import { getErrorMessage, classifyError, ErrorType, ERROR_PREFIX, isInfraError, 
 import { EventBus } from '../event-bus.js';
 import { summarizeToolInput } from '../permission.js';
 import type { Message, Config, Session, ChannelAdapter, ChannelOptions, ChannelPolicy, CommandHandler, ReplyContext } from '../../types.js';
+import { DEFAULT_PERMISSION_MODE } from '../../types.js';
 import { getOwner } from '../../config.js';
 import { getPackageRoot, resolveRoot } from '../../paths.js';
 import { renderPromptSection } from '../../prompts/templates.js';
@@ -440,8 +441,7 @@ export class MessageProcessor {
       });
 
       // 设置 per-session 权限模式（默认 bypass，所有角色统一）
-      const defaultPermMode = 'bypass';
-      agent.setMode(session.metadata?.permissionMode ?? defaultPermMode);
+      agent.setMode(session.metadata?.permissionMode ?? DEFAULT_PERMISSION_MODE);
 
       // 标记会话为处理中（实时持久化，重启后可恢复）
       this.sessionManager.markProcessing(session.id);

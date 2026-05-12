@@ -1,6 +1,7 @@
 import { query, forkSession as sdkForkSession, getSessionMessages as sdkGetSessionMessages } from '@anthropic-ai/claude-agent-sdk';
 import { ensureDir, resolveAnthropicConfig } from '../config.js';
 import type { Config, ChannelAdapter, ReplyContext, InteractionRequest, Message } from '../types.js';
+import { DEFAULT_PERMISSION_MODE } from '../types.js';
 import type { PermissionGateway, PermissionDecision } from '../core/permission.js';
 import path from 'path';
 import fs from 'fs';
@@ -258,7 +259,7 @@ export class AgentRunner {
   private apiKey: string;
   private model: string;
   private effort?: 'low' | 'medium' | 'high' | 'max';
-  private permissionMode: string = 'bypass';
+  private permissionMode: string = DEFAULT_PERMISSION_MODE;
   private baseUrl?: string;
   private config?: Config;
   private activeSessions: Map<string, string> = new Map();

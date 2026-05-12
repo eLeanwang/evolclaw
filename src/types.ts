@@ -190,6 +190,9 @@ export interface SessionMetadata {
   resumeAt?: string;  // /rewind chat 标记的回退点（assistant message uuid）
 }
 
+/** Default permission mode applied to new sessions. Change here to affect all roles. */
+export const DEFAULT_PERMISSION_MODE = 'bypass';
+
 export interface ReplyContext {
   sessionId?: string;
   threadId?: string;

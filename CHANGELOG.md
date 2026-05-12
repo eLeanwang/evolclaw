@@ -1,5 +1,13 @@
 # Changelog
 
+## v2.7.1 (2026-05-13)
+
+### Bug Fixes
+
+- **默认权限模式统一为 bypass** — 所有角色（owner/admin/guest）新建会话时默认使用 bypass 模式，避免 SDK AI 分类器拦截 `evolclaw ctl send` 等命令
+- **Windows 实时日志修复** — `evolclaw logs` 在 Windows 上改用 `fs.watchFile` 轮询替代 `fs.watch`，解决跨进程 append 场景下日志不滚屏的问题
+- **Feishu 回复上下文修复** — `replyContext` 仅在话题消息中设置，避免普通消息误带 thread 回复上下文
+
 ## v2.7.0 (2026-05-13)
 
 ### Breaking Changes

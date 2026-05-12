@@ -169,6 +169,10 @@ export function tailFile(filePath: string): { abort: () => void } {
   const listener = () => {
     try {
       const stat = fs.statSync(filePath);
+      if (stat.size < position) {
+        // File was truncated (log rotation) — reset and re-read from start
+        position = 0;
+      }
       if (stat.size > position) {
         const fd = fs.openSync(filePath, 'r');
         const buffer = Buffer.alloc(stat.size - position);

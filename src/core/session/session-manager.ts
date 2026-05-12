@@ -1,5 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
-import { Session, SessionIdentity } from '../../types.js';
+import { Session, SessionIdentity, DEFAULT_PERMISSION_MODE } from '../../types.js';
 import { ensureDir } from '../../config.js';
 import { resolvePaths } from '../../paths.js';
 import { logger } from '../../utils/logger.js';
@@ -553,7 +553,7 @@ export class SessionManager {
       session.identity = this.resolveIdentity(channel, userId);
       // 新话题会话补写默认权限模式
       if (session.metadata && !session.metadata.permissionMode) {
-        session.metadata.permissionMode = 'bypass';
+        session.metadata.permissionMode = DEFAULT_PERMISSION_MODE;
         this.db.prepare(`UPDATE sessions SET metadata = ?, updated_at = ? WHERE id = ?`)
           .run(JSON.stringify(session.metadata), Date.now(), session.id);
       }
@@ -663,7 +663,7 @@ export class SessionManager {
     session.identity = this.resolveIdentity(channel, userId);
     // 写入默认权限模式（统一 bypass，只在首次创建时设置）
     if (!sessionMetadata.permissionMode) {
-      sessionMetadata.permissionMode = 'bypass';
+      sessionMetadata.permissionMode = DEFAULT_PERMISSION_MODE;
     }
 
     this.insertSession(session);
