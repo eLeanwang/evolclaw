@@ -3,7 +3,7 @@ import path from 'path';
 import { spawn, execFileSync, execFile } from 'child_process';
 import { promisify } from 'util';
 import { resolveRoot, resolvePaths, ensureDataDirs, getPackageRoot } from './paths.js';
-import { loadConfig, validateConfigIntegrity, resolveAnthropicConfig } from './config.js';
+import { loadConfig, validateConfigIntegrity, resolveAnthropicConfig, normalizeChannelInstances, channelTypes } from './config.js';
 import { migrateProject } from './utils/migrate-project.js';
 import readline from 'readline';
 import { cmdInit } from './utils/init.js';
@@ -500,28 +500,23 @@ async function cmdStatus() {
         try {
           const config = loadConfig(p.config);
           const configChannelNames = new Set<string>();
-          const channels = (config.channels as any) || {};
-          for (const [type, raw] of Object.entries(channels)) {
-            if (type === 'defaultChannel') continue;
-            const instances = Array.isArray(raw) ? raw : [raw];
+          for (const type of channelTypes) {
+            const raw = (config.channels as any)?.[type];
+            const instances = normalizeChannelInstances(raw, type);
             for (const inst of instances) {
-              if (!inst || typeof inst !== 'object') continue;
-              const name = (inst as any).name ?? type;
-              configChannelNames.add(name);
+              configChannelNames.add(inst.name);
             }
           }
 
-          const dbChannels = db.prepare(`
-            SELECT DISTINCT channel FROM sessions WHERE deleted_at IS NULL
-          `).all() as Array<{ channel: string }>;
+          const channelCounts = db.prepare(`
+            SELECT channel, COUNT(*) as c FROM sessions
+            WHERE deleted_at IS NULL
+            GROUP BY channel
+          `).all() as Array<{ channel: string; c: number }>;
 
-          for (const row of dbChannels) {
+          for (const row of channelCounts) {
             if (!configChannelNames.has(row.channel)) {
-              const count = db.prepare(`
-                SELECT COUNT(*) as c FROM sessions
-                WHERE channel = ? AND deleted_at IS NULL
-              `).get(row.channel) as { c: number };
-              orphanCount += count.c;
+              orphanCount += row.c;
             }
           }
         } catch {}
