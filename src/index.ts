@@ -1,7 +1,7 @@
 import { ClaudeSessionFileAdapter } from './core/session/adapters/claude-session-file-adapter.js';
 import { CodexSessionFileAdapter } from './core/session/adapters/codex-session-file-adapter.js';
 import { GeminiSessionFileAdapter } from './core/session/adapters/gemini-session-file-adapter.js';
-import { loadConfig, ensureDataDirs, resolvePaths, resolveAnthropicConfig, isOwner, isAdmin, validateConfigIntegrity, validateChannelInstanceNames, getOwner, getChannelSessionMode } from './config.js';
+import { loadConfig, ensureDataDirs, resolvePaths, resolveAnthropicConfig, isOwner, isAdmin, validateConfigIntegrity, validateChannelInstanceNames, getOwner, getDefaultSessionMode } from './config.js';
 import { SessionManager } from './core/session/session-manager.js';
 import { ClaudeAgentPlugin } from './agents/claude-runner.js';
 import { CodexAgentPlugin } from './agents/codex-runner.js';
@@ -25,7 +25,7 @@ import { ChannelLoader, type ChannelInstance } from './core/channel-loader.js';
 import { AgentLoader } from './core/agent-loader.js';
 import { IpcServer, IpcStatusResponse, ChannelStatus } from './ipc.js';
 import { ChannelAdapter, Message } from './types.js';
-import { logger } from './utils/logger.js';
+import { logger, setLogLevel } from './utils/logger.js';
 import { detectDuplicates } from './utils/channel-fingerprint.js';
 import { loadPromptTemplates } from './prompts/templates.js';
 import path from 'path';
@@ -61,6 +61,11 @@ async function main() {
 
   // 加载配置
   const config = loadConfig();
+
+  // 应用配置中的日志级别（优先于环境变量）
+  if (config.debug?.logLevel) {
+    setLogLevel(config.debug.logLevel);
+  }
 
   const paths = resolvePaths();
 
@@ -107,24 +112,9 @@ async function main() {
     (channel, userId) => isAdmin(config, channel, userId)
   );
 
-  // sessionMode 解析：通道配置锁定 > chatType 默认（AUN 群聊 → proactive，其余 → interactive）
-  sessionManager.setSessionModeResolver((channel, chatType) => {
-    const locked = getChannelSessionMode(config, channel);
-    if (locked) return locked;
-    // chatType 默认值：仅 AUN 群聊默认为 proactive，其余通道默认 interactive
-    // channel 在多实例时为 instanceName，需要识别 AUN 系
-    // 简化：通过 ChannelOptions.channelType 在 MessageProcessor 注册时已知，但 SessionManager 不持有这个映射
-    // 这里回退到按 instanceName 反查 config.channels.aun
-    if (chatType === 'group') {
-      const aun = (config.channels as any)?.aun;
-      if (Array.isArray(aun)) {
-        if (aun.some((i: any) => i.name === channel)) return 'proactive';
-      } else if (aun) {
-        const effectiveName = aun.name ?? 'aun';
-        if (effectiveName === channel) return 'proactive';
-      }
-    }
-    return undefined;
+  // sessionMode 解析：全局 chatmode 配置 > 默认 'interactive'
+  sessionManager.setSessionModeResolver((_channel, chatType) => {
+    return getDefaultSessionMode(config, chatType);
   });
   logger.info('✓ Database initialized');
 

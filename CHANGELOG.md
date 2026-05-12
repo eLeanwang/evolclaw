@@ -5,6 +5,31 @@
 ### Breaking Changes
 
 - **Config key rename** — `evolclaw.json` 的 `agents.anthropic` / `agents.openai` / `agents.google` 重命名为 `agents.claude` / `agents.codex` / `agents.gemini`，与 runner name 对齐。启动时 `loadConfig` 自动迁移旧 key 并回写 evolclaw.json，用户无需手动修改；同时 warn 日志提示迁移已发生。
+- **Channel-level sessionMode 移除** — 通道实例配置中的 `sessionMode` 字段废弃，改由全局 `config.chatmode.{private,group}` 统一控制（不设时默认 `interactive`）。原先 AUN 群聊"默认 proactive"的硬编码逻辑也一并移除，需要的用户显式设置 `chatmode.group = "proactive"`。
+
+### New Features
+
+- **`chatmode` 全局配置** — `config.chatmode.private` / `config.chatmode.group` 分别控制单聊/群聊的默认会话模式，替代通道级 `sessionMode` 锁定
+- **`debug.logLevel` 配置项** — 日志级别优先级：`config.debug.logLevel → LOG_LEVEL 环境变量 → 'INFO'`，无需重启即可通过 reload config 调整
+- **orphan session 统计** — `evolclaw status` 显示通道已下线但会话仍残留的条数（按通道分组），帮助识别配置变更后的陈旧数据
+- **通道指纹去重检测** — 启动时检测 Feishu/QQBot/WeCom 等通道的 `appId` 是否跨实例重复配置，冲突时输出 warn 日志（跨通道类型不算冲突）
+- **`projects.autoCreate` 生效于 `/bind`** — 配置开启时，`/bind <path>` 遇到不存在的目录自动创建
+
+### Improvements
+
+- **`evolclaw ctl send/file` 全权限放行** — Claude Runner 在任何权限模式（含 readonly/noask/auto）下都不拦截这两个命令，proactive 模式 agent 可靠发送消息的前提
+- **默认权限模式收敛** — guest/admin 统一为 `auto`（原 guest 为 `noask`），owner 仍为 `bypass`；`/perm` 无参查询和 MessageProcessor 初始化同步
+- **AUN RPC 统一 trace** — 新增 `callAndTrace` 包装所有 `client.call`，成对记录 `OUT`/`OUT.ok`/`OUT.error`；auth.authenticate、client.connect、client.close、storage.create_download_ticket 全部走统一链路
+- **AUN 日志分级** — `message.received` / `group.message_created` 等高频 DIAG 日志从 info 降为 debug；新增 `P2P dispatched` / `Group dispatched` / `Group missed` 等结构化关键路径日志
+- **单 agent/channel 推断** — `validateConfigIntegrity` 在只有一个 agent 或 channel 时不再要求显式 `defaultAgent`/`defaultChannel`
+- **SDK fallback 消息兜底** — 识别 Claude SDK 本地拦截的 "Unknown skill: xxx" 等预处理消息，proactive 模式下主动发送给用户，避免无反馈
+- **命令快速路径补全** — `/rewind`、`/rw`、`/activity`、`/chatmode`、`/aid`、`/agentmd` 加入 quick command prefix 白名单，确保不进入消息队列
+- **`/perm` 切换后自动刷新** — 切换权限模式成功后重新发交互卡片（自动 invalidate 旧卡片），UI 状态实时一致
+
+### Bug Fixes
+
+- **config validation 误报** — 多 agent 场景下的 `defaultAgent` 校验逻辑修正，避免对仅有一个 agent 的最简配置误报
+- **通道指纹重复告警守卫** — 仅在 `duplicates.length > 0` 时输出 warn，避免日志噪音
 
 ---
 

@@ -46,8 +46,6 @@ export interface AunChannelConfig {
   flushDelay?: number;  // flush 间隔(秒)，默认 3
   pythonBin?: string;   // Python 可执行路径（仅 evolclaw tui 命令使用），默认 python3
   encryptionSeed?: string; // FileSecretStore 加密种子，默认 evolclaw-aun-production-seed-2026
-  showActivities?: 'all' | 'dm-only' | 'owner-dm-only' | 'none';  // 覆盖全局 showActivities
-  sessionMode?: 'interactive' | 'proactive';  // 锁定该实例所有 session 的模式（不设则按 chatType 默认）
 }
 
 export interface AunChannelInstanceConfig extends AunChannelConfig {
@@ -145,13 +143,14 @@ export interface Config {
   };
   projects?: {
     defaultPath: string;
-    autoCreate: boolean;
+    autoCreate?: boolean;
     list?: Record<string, string>;
   };
   enableRichContent?: boolean;  // 启用富内容渲染（LaTeX/Mermaid），默认 false
   flushDelay?: number;  // 消息批量发送间隔(秒)，默认 4
   debounce?: number;    // 入站消息去抖间隔(秒)，默认 2，设 0 关闭
   debug?: {
+    logLevel?: 'DEBUG' | 'INFO' | 'WARN' | 'ERROR';  // 日志级别，优先于 LOG_LEVEL 环境变量
     flusherDiag?: boolean;  // 启用 StreamFlusher 诊断日志 (flusher-diag.log)
     aunTrace?: boolean;     // 启用 AUN 通道数据追踪日志 (aun-trace.log)，记录所有收发数据
     aunSdkLog?: boolean;    // 启用 AUN SDK 内部日志 (~/.aun/logs/ts-sdk-YYYYMMDD.log)
@@ -162,6 +161,10 @@ export interface Config {
     timeout?: number;               // 无输出超时(秒)，默认 120
   };
   showActivities?: 'all' | 'dm-only' | 'owner-dm-only' | 'none';  // 中间输出显示范围（工具活动+流式文本），默认 'all'
+  chatmode?: {
+    private?: 'interactive' | 'proactive';   // 单聊默认模式，默认 'interactive'
+    group?: 'interactive' | 'proactive';     // 群聊默认模式，默认 'proactive'
+  };
 }
 
 /** 错误字典规则 — 按数组顺序匹配，首条命中即决定行为 */
@@ -329,7 +332,6 @@ export interface ChannelOptions {
   supportsImages?: boolean;         // Feishu: true, AUN: false
   flushDelay?: number;              // 渠道级 flush 间隔(秒)，覆盖全局 config.flushDelay
   showActivities?: 'all' | 'dm-only' | 'owner-dm-only' | 'none';  // 覆盖全局 showActivities
-  sessionMode?: 'interactive' | 'proactive';  // 通道级 sessionMode 锁定（存在时覆盖 chatType 默认与 /chatmode 切换）
 }
 
 // 渠道策略接口

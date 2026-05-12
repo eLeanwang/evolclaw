@@ -3,8 +3,8 @@ import path from 'path';
 import { resolvePaths } from '../paths.js';
 
 const LOG_DIR = resolvePaths().logs;
-const LOG_LEVEL = process.env.LOG_LEVEL || 'INFO';
-const LEVELS = { DEBUG: 0, INFO: 1, WARN: 2, ERROR: 3 };
+let currentLevel = process.env.LOG_LEVEL || 'INFO';
+const LEVELS: Record<string, number> = { DEBUG: 0, INFO: 1, WARN: 2, ERROR: 3 };
 
 const config = {
   messageLog: process.env.MESSAGE_LOG === 'true',
@@ -22,7 +22,7 @@ const streams = {
 };
 
 function shouldLog(level: string): boolean {
-  return LEVELS[level as keyof typeof LEVELS] >= LEVELS[LOG_LEVEL as keyof typeof LEVELS];
+  return (LEVELS[level] ?? 1) >= (LEVELS[currentLevel] ?? 1);
 }
 
 function write(stream: fs.WriteStream | null, data: any) {
@@ -41,8 +41,22 @@ function log(level: string, ...args: any[]) {
   if (!shouldLog(level)) return;
   const timestamp = localTimestamp();
   const msg = `[${timestamp}] [${level}] ${args.join(' ')}`;
-  // 只写文件，不输出到 console（避免重定向时重复）
   write(streams.main, msg);
+}
+
+/**
+ * 设置日志级别（config 加载后调用，覆盖环境变量默认值）
+ * 优先级：config.debug.logLevel → LOG_LEVEL 环境变量 → 'INFO'
+ */
+export function setLogLevel(level: string): void {
+  const upper = level.toUpperCase();
+  if (upper in LEVELS) {
+    currentLevel = upper;
+  }
+}
+
+export function getLogLevel(): string {
+  return currentLevel;
 }
 
 export const logger = {

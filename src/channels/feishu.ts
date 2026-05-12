@@ -101,6 +101,8 @@ export class FeishuChannel {
           if (msg.thread_id) {
             logger.info('[Feishu] Thread message, thread_id:', msg.thread_id, 'root_id:', msg.root_id);
           }
+          // [DEBUG] 临时：记录所有消息的 root_id/thread_id，用于排查图片回复带引用问题
+          logger.info('[Feishu][DEBUG] msg_type:', msg.message_type, 'root_id:', msg.root_id ?? '(empty)', 'thread_id:', msg.thread_id ?? '(empty)', 'parent_id:', msg.parent_id ?? '(empty)');
 
           // 提取 @ 提及列表（排除机器人自身）
           const mentions = (msg.mentions || []).map((m: any) => ({

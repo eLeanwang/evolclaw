@@ -864,6 +864,15 @@ export class AgentRunner {
         return { behavior: 'allow' as const, updatedInput: input, decisionClassification: 'user_permanent' as const };
       }
 
+      // evolclaw ctl send/file 白名单：proactive 模式下 agent 必须通过这些命令发送消息，
+      // 任何权限模式下都不应拦截，否则 agent 无法回复用户
+      if (toolName === 'Bash') {
+        const cmd = (input.command as string) || '';
+        if (/^\s*evolclaw\s+ctl\s+(send|file)\b/.test(cmd)) {
+          return { behavior: 'allow' as const, updatedInput: input, decisionClassification: 'user_permanent' as const };
+        }
+      }
+
       // readonly 模式：二次拦截（belt-and-suspenders）
       if (this.permissionMode === 'readonly') {
         const roResult = checkReadonly(toolName, input, projectPath);

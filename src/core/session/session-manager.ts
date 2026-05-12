@@ -375,7 +375,7 @@ export class SessionManager {
       }
     }
 
-    // Migration: readonly 模式已暂时禁用，历史会话统一转为 noask
+    // Migration: readonly 模式已禁用，历史会话统一转为 auto
     if (hasMetadata && tableInfo.length > 0) {
       const rows = this.db.prepare(
         `SELECT id, metadata FROM sessions WHERE metadata IS NOT NULL AND metadata != ''`
@@ -384,8 +384,8 @@ export class SessionManager {
       for (const row of rows) {
         try {
           const meta = JSON.parse(row.metadata);
-          if (meta.permissionMode === 'readonly') {
-            meta.permissionMode = 'noask';
+          if (meta.permissionMode === 'readonly' || meta.permissionMode === 'noask') {
+            meta.permissionMode = 'auto';
             this.db.prepare('UPDATE sessions SET metadata = ? WHERE id = ?')
               .run(JSON.stringify(meta), row.id);
             migratedPerm++;
@@ -393,7 +393,7 @@ export class SessionManager {
         } catch { /* skip malformed JSON */ }
       }
       if (migratedPerm > 0) {
-        logger.info(`✓ Migrated ${migratedPerm} session(s): permissionMode readonly → noask`);
+        logger.info(`✓ Migrated ${migratedPerm} session(s): permissionMode → auto`);
       }
     }
 
@@ -553,7 +553,7 @@ export class SessionManager {
       session.identity = this.resolveIdentity(channel, userId);
       // 新话题会话补写默认权限模式
       if (session.metadata && !session.metadata.permissionMode) {
-        session.metadata.permissionMode = session.identity?.role === 'owner' ? 'bypass' : session.identity?.role === 'admin' ? 'auto' : 'noask';
+        session.metadata.permissionMode = session.identity?.role === 'owner' ? 'bypass' : 'auto';
         this.db.prepare(`UPDATE sessions SET metadata = ?, updated_at = ? WHERE id = ?`)
           .run(JSON.stringify(session.metadata), Date.now(), session.id);
       }
@@ -663,7 +663,7 @@ export class SessionManager {
     session.identity = this.resolveIdentity(channel, userId);
     // 写入默认权限模式（基于角色，只在首次创建时设置）
     if (!sessionMetadata.permissionMode) {
-      sessionMetadata.permissionMode = session.identity?.role === 'owner' ? 'bypass' : session.identity?.role === 'admin' ? 'auto' : 'noask';
+      sessionMetadata.permissionMode = session.identity?.role === 'owner' ? 'bypass' : 'auto';
     }
 
     this.insertSession(session);
@@ -778,6 +778,7 @@ export class SessionManager {
 
   async switchProject(channel: string, channelId: string, newProjectPath: string, currentAgentId?: string): Promise<Session> {
     const agentId = currentAgentId || 'claude';
+    logger.info(`[SessionManager] switchProject: channel=${channel} channelId=${channelId} newPath=${newProjectPath} agent=${agentId}`);
     // 1. 继承当前 chatType（在 deactivate 之前读取）
     const inheritedChatType = this.getActiveChatType(channel, channelId);
     // 2. 取消当前活跃会话

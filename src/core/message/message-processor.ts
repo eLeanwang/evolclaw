@@ -143,7 +143,8 @@ export class MessageProcessor {
     '/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart',
     '/model', '/effort', '/agent', '/slist', '/session', '/rename', '/repair', '/fork',
     '/stop', '/clear', '/compact', '/safe', '/del', '/perm', '/file', '/check',
-    '/p ', '/s ', '/name ',
+    '/p ', '/s ', '/name ', '/rewind', '/rw', '/rw ', '/activity', '/chatmode',
+    '/aid', '/agentmd',
   ];
 
   /** 判断消息内容是否为已知命令 */
@@ -218,6 +219,7 @@ export class MessageProcessor {
                 logger.debug(`[MessageProcessor] Failed to send kill diagnostic message:`, e);
               });
             }
+            logger.info(`[MessageProcessor] agent.interrupt invoked (idle-kill) stream=${streamKey}`);
             agent.interrupt(streamKey).catch(e => {
               logger.debug(`[MessageProcessor] Interrupt failed (may already be cleaned up):`, e);
             });
@@ -437,13 +439,14 @@ export class MessageProcessor {
           : undefined,
       });
 
-      // 设置 per-session 权限模式（动态默认值：owner → bypass，admin → auto，guest → noask）
+      // 设置 per-session 权限模式（动态默认值：owner → bypass，admin → auto，guest → auto）
       const role = session.identity?.role;
-      const defaultPermMode = role === 'owner' ? 'bypass' : role === 'admin' ? 'auto' : 'noask';
+      const defaultPermMode = role === 'owner' ? 'bypass' : 'auto';
       agent.setMode(session.metadata?.permissionMode ?? defaultPermMode);
 
       // 标记会话为处理中（实时持久化，重启后可恢复）
       this.sessionManager.markProcessing(session.id);
+      logger.info(`[MessageProcessor] session ${session.id} marked as processing task=${taskId}`);
 
       // 检查是否因新消息自动中断 — 包装 prompt 让 Agent 知道上下文
       const prevInterruptReason = this.interruptedSessions.get(session.id);
@@ -533,6 +536,7 @@ export class MessageProcessor {
         for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
           let streamRegistered = false;
           try {
+            logger.info(`[MessageProcessor] agent.runQuery start: agent=${agent.name} session=${session.id} task=${taskId} attempt=${attempt}/${MAX_RETRIES} agentSessionId=${session.agentSessionId ?? 'none'}`);
             const stream = await agent.runQuery(
               session.id,
               effectivePrompt,
@@ -699,8 +703,24 @@ export class MessageProcessor {
       // 非 suppressed 且有流式文本：已经逐步推送过了，不重复添加
       //   但如果 flusher 既未发送过内容也没有 pending 内容（如 text 事件全为空），仍需兜底
       const finalReplyText = streamResult.lastReplyText || streamResult.fullText;
+
+      // 识别 Claude SDK 本地预处理兜底（如 "Unknown skill: xxx"）：
+      // 特征：无流式 text + complete.result 匹配已知模式
+      // 这类输出不是 agent 的回复意图，而是 SDK 本地拦截到的"未知斜杠命令"提示。
+      // Proactive 模式下 flusher silent，需要兜底发出以告知用户，否则用户完全无反馈。
+      const isSdkFallbackMessage = !!finalReplyText
+        && !streamResult.hasReceivedText
+        && /^Unknown skill:\s+\S+/i.test(finalReplyText.trim());
+
       if (finalReplyText) {
-        if (shouldSuppress()) {
+        if (isProactive && isSdkFallbackMessage) {
+          // Proactive 模式 + SDK 本地兜底：直接 sendText 绕过 silent flusher
+          const isCurrentlyBackground = await this.isBackgroundSession(session, message.channel, message.channelId);
+          if (!isCurrentlyBackground) {
+            await adapter.sendText(message.channelId, finalReplyText, capturedReplyContext);
+            logger.info(`[MessageProcessor] proactive SDK fallback replied task=${taskId} text="${finalReplyText.slice(0, 60)}"`);
+          }
+        } else if (shouldSuppress()) {
           flusher.addText(finalReplyText);
         } else if (!streamResult.hasReceivedText || (!flusher.hasSentContent() && !flusher.hasContent())) {
           flusher.addText(finalReplyText);
@@ -712,9 +732,11 @@ export class MessageProcessor {
 
       // 清理 activeStreams（正常完成）
       agent.cleanupStream(streamKey);
+      logger.info(`[MessageProcessor] agent.cleanupStream ok: session=${session.id} task=${taskId}`);
 
       // 清除处理中状态
       this.sessionManager.clearProcessing(session.id);
+      logger.info(`[MessageProcessor] session ${session.id} processing cleared task=${taskId}`);
       // 注意：不在此处清除 interruptedSessions，由下一条消息的 prompt 包装逻辑消费
       const interruptReason = this.interruptedSessions.get(session.id);
 
@@ -794,7 +816,11 @@ export class MessageProcessor {
     } catch (error) {
       // 清理流和处理中状态（异常时也要清除）
       agent.cleanupStream(streamKey);
-      try { this.sessionManager.clearProcessing(session.id); } catch {}
+      logger.info(`[MessageProcessor] agent.cleanupStream ok (on error): session=${session.id} task=${taskId}`);
+      try {
+        this.sessionManager.clearProcessing(session.id);
+        logger.info(`[MessageProcessor] session ${session.id} processing cleared (on error) task=${taskId}`);
+      } catch {}
       // 注意：不在此处清除 interruptedSessions，由下一条消息的 prompt 包装逻辑消费
 
       // 区分超时 / 中断 / 错误
@@ -940,7 +966,8 @@ export class MessageProcessor {
       const toolName = event.type === 'tool_use' ? event.name : undefined;
       resetTimer(event.type, toolName);
 
-      // 记录所有事件类型（text / tool_use 附带摘要，便于排查）
+      // 记录事件类型：高价值事件（text/tool_use/tool_result/complete/error/compact/task_progress）INFO，
+      // 框架事件（session_id/state_changed/status）DEBUG
       let eventDetail = '';
       if (event.type === 'text' && event.text) {
         const preview = event.text.replace(/\s+/g, ' ').slice(0, 80);
@@ -955,8 +982,15 @@ export class MessageProcessor {
           || (typeof input?.query === 'string' ? input.query.slice(0, 80) : '')
           || '';
         eventDetail = ` tool=${event.name}${desc ? ` desc="${desc}"` : ''}`;
+      } else if (event.type === 'tool_result') {
+        eventDetail = ` tool=${event.name} ok=${!event.isError}`;
       }
-      logger.info(`[MessageProcessor] Event: type=${event.type}${eventDetail}`);
+      const frameworkEvents = new Set(['session_id', 'state_changed', 'status']);
+      if (frameworkEvents.has(event.type)) {
+        logger.debug(`[MessageProcessor] Event: type=${event.type}${eventDetail}`);
+      } else {
+        logger.info(`[MessageProcessor] Event: type=${event.type}${eventDetail}`);
+      }
 
       // Proactive 可观测：将事件实时透传为 thought（fire-and-forget）
       if (thoughtEmitter) {
@@ -965,20 +999,20 @@ export class MessageProcessor {
 
       // session_id 已在 AgentRunner.transformStream 中处理，此处仅记录
       if (event.type === 'session_id') {
-        logger.info(`[MessageProcessor] Session ID updated: ${event.sessionId} for session: ${session.id}`);
+        logger.debug(`[MessageProcessor] Session ID updated: ${event.sessionId} for session: ${session.id}`);
         continue;
       }
 
       // session 状态变更（idle/running/requires_action）
       if (event.type === 'state_changed') {
-        logger.info(`[MessageProcessor] Session state: ${event.state} for session: ${session.id}`);
+        logger.debug(`[MessageProcessor] Session state: ${event.state} for session: ${session.id}`);
         this.eventBus.publish({ type: 'agent:state-changed', sessionId: session.id, state: event.state });
         continue;
       }
 
       // agent 状态通知（仅事件，不直出给用户）
       if (event.type === 'status') {
-        logger.info(`[MessageProcessor] Agent status: ${event.subtype}: ${event.message}`);
+        logger.debug(`[MessageProcessor] Agent status: ${event.subtype}: ${event.message}`);
         this.eventBus.publish({
           type: 'agent:status',
           sessionId: session.id,
@@ -1043,8 +1077,6 @@ export class MessageProcessor {
 
         // 工具结果
         if (event.type === 'tool_result') {
-          logger.debug(`[MessageProcessor] tool_result: name=${event.name}, is_error=${event.isError}`);
-
           this.eventBus.publish({
             type: 'tool:result',
             sessionId: session.id,

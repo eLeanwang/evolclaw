@@ -415,22 +415,14 @@ export function setChannelShowActivities(config: Config, instanceName: string, m
 }
 
 /**
- * 读取通道实例的 sessionMode 锁定配置
- * 返回 undefined 表示未配置（由 session-manager 按 chatType 默认决定）
+ * 读取全局 chatmode 配置的默认 sessionMode
+ * 按 chatType 返回对应模式，未配置时返回 undefined（由 session-manager 回退到 'interactive'）
  */
-export function getChannelSessionMode(config: Config, instanceName: string): 'interactive' | 'proactive' | undefined {
-  for (const type of channelTypes) {
-    const raw = (config.channels as any)?.[type];
-    if (raw === undefined) continue;
-    if (Array.isArray(raw)) {
-      const inst = raw.find((item: any) => item.name === instanceName);
-      if (inst) return inst.sessionMode;
-    } else {
-      const effectiveName = raw.name ?? type;
-      if (effectiveName === instanceName) return raw.sessionMode;
-    }
-  }
-  return undefined;
+export function getDefaultSessionMode(config: Config, chatType: string): 'interactive' | 'proactive' | undefined {
+  const cm = config.chatmode;
+  if (!cm) return undefined;
+  if (chatType === 'group') return cm.group;
+  return cm.private;
 }
 
 export function isOwner(config: Config, channelOrType: string, userId: string): boolean {
@@ -550,20 +542,27 @@ export function ensureDir(dirPath: string): void {
 export function validateConfigIntegrity(config: any): { valid: boolean; reasons: string[] } {
   const reasons: string[] = [];
 
-  // agents
+  // agents — 单 agent 时自动推断，无需显式 defaultAgent
   const defaultAgent = config.agents?.defaultAgent;
   if (!defaultAgent) {
-    reasons.push('Missing agents.defaultAgent');
+    const agentKeys = Object.keys(config.agents || {}).filter(k => k !== 'defaultAgent');
+    const configuredAgents = agentKeys.filter(k => (config.agents as any)?.[k]);
+    if (configuredAgents.length === 0 && agentKeys.length !== 1) {
+      reasons.push('Missing agents.defaultAgent (multiple or no agents configured)');
+    }
   } else {
     if (!config.agents?.[defaultAgent]) {
       reasons.push(`agents.defaultAgent='${defaultAgent}' but agents.${defaultAgent} does not exist`);
     }
   }
 
-  // channels
+  // channels — 单通道时自动推断，无需显式 defaultChannel
   const defaultChannel = config.channels?.defaultChannel;
   if (!defaultChannel) {
-    reasons.push('Missing channels.defaultChannel');
+    const channelKeys = channelTypes.filter(t => config.channels?.[t]);
+    if (channelKeys.length === 0) {
+      reasons.push('Missing channels.defaultChannel (no channels configured)');
+    }
   } else {
     if (!config.channels?.[defaultChannel]) {
       reasons.push(`channels.defaultChannel='${defaultChannel}' but channels.${defaultChannel} does not exist`);

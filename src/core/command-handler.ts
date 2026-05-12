@@ -8,7 +8,7 @@ import type { StatsCollector } from '../utils/stats-collector.js';
 import { PermissionGateway, type PermissionDecision } from './permission.js';
 import { InteractionRouter } from './interaction-router.js';
 import { MessageQueue } from './message/message-queue.js';
-import { saveConfig, resolvePaths, getPackageRoot, getOwner, getChannelShowActivities, setChannelShowActivities, getChannelSessionMode } from '../config.js';
+import { saveConfig, resolvePaths, getPackageRoot, getOwner, getChannelShowActivities, setChannelShowActivities, getDefaultSessionMode } from '../config.js';
 import { logger } from '../utils/logger.js';
 import crypto from 'crypto';
 import path from 'path';
@@ -153,7 +153,7 @@ const aliases: Record<string, string> = {
 };
 
 // 命令快速路径前缀（所有命令都不进入消息队列）
-const quickCommandPrefixes = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/effort', '/agent', '/slist', '/session', '/rename', '/repair', '/fork', '/stop', '/clear', '/compact', '/safe', '/del', '/perm', '/file', '/check', '/p ', '/s ', '/name', '/rewind', '/rw', '/rw ', '/activity', '/chatmode'];
+const quickCommandPrefixes = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/effort', '/agent', '/slist', '/session', '/rename', '/repair', '/fork', '/stop', '/clear', '/compact', '/safe', '/del', '/perm', '/file', '/check', '/p ', '/s ', '/name', '/rewind', '/rw', '/rw ', '/activity', '/chatmode', '/aid', '/agentmd'];
 
 export class CommandHandler {
   private adapters = new Map<string, ChannelAdapter>();
@@ -192,9 +192,13 @@ export class CommandHandler {
     }
   }
 
-  /** 项目列表快捷访问 */
+  /** 项目列表快捷访问（list 缺失时用 defaultPath 作为唯一项目） */
   private get projects(): Record<string, string> {
-    return this.config.projects?.list || {};
+    const list = this.config.projects?.list;
+    if (list && Object.keys(list).length > 0) return list;
+    const dp = this.config.projects?.defaultPath;
+    if (dp) return { [path.basename(dp)]: dp };
+    return {};
   }
 
   /** 根据项目路径查找配置中的项目名称 */
@@ -619,6 +623,7 @@ export class CommandHandler {
     if (normalizedContent !== content) {
       logger.debug(`[CommandHandler] normalized: "${content}" -> "${normalizedContent}"`);
     }
+    logger.info(`[CommandHandler] handle: channel=${channel} channelId=${channelId} cmd="${normalizedContent.split(' ')[0]}" user=${userId ?? 'n/a'} role=${identity?.role ?? 'n/a'}`);
 
     // 话题内禁用部分命令
     if (threadId) {
@@ -801,7 +806,7 @@ export class CommandHandler {
         if (!hasPermissionController(permAgent)) {
           return '❌ 权限控制不可用';
         }
-        const defaultPermMode = identity.role === 'owner' ? 'bypass' : identity.role === 'admin' ? 'auto' : 'noask';
+        const defaultPermMode = identity.role === 'owner' ? 'bypass' : 'auto';
         const currentMode = permSession.metadata?.permissionMode ?? defaultPermMode;
         const modes = permAgent.listModes();
 
@@ -837,6 +842,9 @@ export class CommandHandler {
                 if (result) {
                   const adapter = this.adapters.get(channel);
                   adapter?.sendText(channelId, result, replyCtx);
+                } else {
+                  // 切换成功后重新发新卡片（会自动 invalidate 旧卡片）
+                  await this.handle('/perm', channel, channelId, undefined, userId, threadId);
                 }
               }
             },
@@ -1568,17 +1576,15 @@ export class CommandHandler {
     if (normalizedContent === '/chatmode' || normalizedContent.startsWith('/chatmode ')) {
       if (!activeSession) return '❌ 当前无活跃会话';
 
-      const lockedMode = getChannelSessionMode(this.config, channel);
       const arg = normalizedContent.slice(9).trim();
       const currentMode = activeSession.sessionMode || 'interactive';
 
       if (!arg) {
-        const lockHint = lockedMode ? `（由通道配置锁定为 ${lockedMode}）` : '';
         const canSwitch = activeChatType !== 'group' || isAdmin;
-        if (canSwitch && !lockedMode) {
-          return `📋 当前会话模式: ${currentMode}${lockHint}\n可选: interactive / proactive\n用法: /chatmode <模式>`;
+        if (canSwitch) {
+          return `📋 当前会话模式: ${currentMode}\n可选: interactive / proactive\n用法: /chatmode <模式>`;
         }
-        return `📋 当前会话模式: ${currentMode}${lockHint}`;
+        return `📋 当前会话模式: ${currentMode}`;
       }
 
       if (arg !== 'interactive' && arg !== 'proactive') {
@@ -1587,10 +1593,6 @@ export class CommandHandler {
 
       if (activeChatType === 'group' && !isAdmin) {
         return '❌ 无权限：群聊中切换会话模式仅限管理员使用';
-      }
-
-      if (lockedMode) {
-        return `❌ 会话模式由通道配置锁定为 ${lockedMode}，无法切换`;
       }
 
       if (arg === currentMode) {
@@ -1777,8 +1779,7 @@ export class CommandHandler {
 
       const lines: string[] = [];
       const sessionMode = session.sessionMode || 'interactive';
-      const lockedMode = getChannelSessionMode(this.config, channel);
-      const chatModeLine = `会话模式: ${sessionMode}${lockedMode ? '（通道锁定）' : ''}`;
+      const chatModeLine = `会话模式: ${sessionMode}`;
       if (isAdmin) {
         lines.push(
           `📊 ${isThread ? '话题' : '会话'}状态：`,
@@ -2385,7 +2386,11 @@ export class CommandHandler {
         return '❌ 项目路径必须是绝对路径';
       }
       if (!fs.existsSync(projectPath)) {
-        return `❌ 路径不存在: ${projectPath}`;
+        if (this.config.projects?.autoCreate) {
+          fs.mkdirSync(projectPath, { recursive: true });
+        } else {
+          return `❌ 路径不存在: ${projectPath}`;
+        }
       }
 
       // 生成项目名称（使用目录名）
