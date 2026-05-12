@@ -5,7 +5,7 @@ import type { Config } from '../../src/types.js';
 function mockPlugin(name: string, callCounter: { count: number }): ChannelPlugin {
   return {
     name,
-    isEnabled: () => true,
+    isEnabled: vi.fn().mockReturnValue(true),
     async createChannel(): Promise<ChannelInstance> {
       callCounter.count++;
       return {
@@ -23,7 +23,8 @@ describe('ChannelLoader idempotency', () => {
   it('createAll can be called multiple times without side effects', async () => {
     const loader = new ChannelLoader();
     const counter = { count: 0 };
-    loader.register(mockPlugin('feishu', counter));
+    const plugin = mockPlugin('feishu', counter);
+    loader.register(plugin);
 
     const config: Config = { channels: { feishu: {} } } as any;
 
@@ -35,6 +36,8 @@ describe('ChannelLoader idempotency', () => {
     expect(counter.count).toBe(2);
     // Each call produces independent instances
     expect(result1[0]).not.toBe(result2[0]);
+    // isEnabled should be invoked with the config on each call
+    expect(plugin.isEnabled).toHaveBeenCalledWith(config);
   });
 
   it('createAll with different configs produces independent results', async () => {
@@ -52,16 +55,43 @@ describe('ChannelLoader idempotency', () => {
     expect(result2.map(i => i.adapter.channelName)).toContain('aun');
   });
 
-  it('registered plugins persist across createAll calls', async () => {
+  it('createAll idempotent for multi-instance plugins (createChannels)', async () => {
     const loader = new ChannelLoader();
-    loader.register(mockPlugin('feishu', { count: 0 }));
+    const counter = { count: 0 };
+    const plugin: ChannelPlugin = {
+      name: 'feishu',
+      isEnabled: () => true,
+      createChannel: vi.fn() as any, // required by interface but unused when createChannels exists
+      async createChannels(): Promise<ChannelInstance[]> {
+        counter.count++;
+        return [
+          {
+            channelType: 'feishu',
+            adapter: { channelName: 'feishu-1', sendText: vi.fn() } as any,
+            channel: {},
+            connect: vi.fn(),
+            disconnect: vi.fn(),
+          },
+          {
+            channelType: 'feishu',
+            adapter: { channelName: 'feishu-2', sendText: vi.fn() } as any,
+            channel: {},
+            connect: vi.fn(),
+            disconnect: vi.fn(),
+          },
+        ];
+      },
+    };
+    loader.register(plugin);
 
-    const config: Config = { channels: { feishu: {} } } as any;
-    await loader.createAll(config);
+    const config: Config = { channels: { feishu: [{ name: 'feishu-1' }, { name: 'feishu-2' }] } } as any;
+    const result1 = await loader.createAll(config);
+    const result2 = await loader.createAll(config);
 
-    // Plugin is still registered — second call finds it
-    const result = await loader.createAll(config);
-    expect(result).toHaveLength(1);
+    expect(result1).toHaveLength(2);
+    expect(result2).toHaveLength(2);
+    expect(counter.count).toBe(2); // createChannels called once per createAll
+    expect(result1[0]).not.toBe(result2[0]);
   });
 
   it('isEnabled=false skips plugin in all calls consistently', async () => {
