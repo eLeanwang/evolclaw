@@ -4,7 +4,7 @@
 
 ### Breaking Changes
 
-- **Config key rename** — `evolclaw.json` 的 `agents.anthropic` / `agents.openai` / `agents.google` 重命名为 `agents.claude` / `agents.codex` / `agents.gemini`，与 runner name 对齐。用户需手动迁移配置。
+- **Config key rename** — `evolclaw.json` 的 `agents.anthropic` / `agents.openai` / `agents.google` 重命名为 `agents.claude` / `agents.codex` / `agents.gemini`，与 runner name 对齐。启动时 `loadConfig` 自动迁移旧 key 并回写 evolclaw.json，用户无需手动修改；同时 warn 日志提示迁移已发生。
 
 ---
 

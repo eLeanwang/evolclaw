@@ -229,8 +229,41 @@ export function loadConfig(configPath: string = resolvePaths().config): Config {
   const content = fs.readFileSync(configPath, 'utf-8');
   const config = JSON.parse(content);
 
+  if (migrateAgentsKeys(config)) {
+    fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf-8');
+    logger.warn(`Config migrated: agents.{anthropic,openai,google} → {claude,codex,gemini} in ${configPath}`);
+  }
+
   validateConfig(config);
   return config;
+}
+
+/**
+ * Rename legacy agent config keys to runner names.
+ * Returns true if any rename happened.
+ */
+function migrateAgentsKeys(config: any): boolean {
+  const agents = config?.agents;
+  if (!agents || typeof agents !== 'object') return false;
+
+  const renames: Array<[string, string]> = [
+    ['anthropic', 'claude'],
+    ['openai', 'codex'],
+    ['google', 'gemini'],
+  ];
+
+  let changed = false;
+  for (const [oldKey, newKey] of renames) {
+    if (agents[oldKey] === undefined) continue;
+    if (agents[newKey] === undefined) {
+      agents[newKey] = agents[oldKey];
+    } else {
+      logger.warn(`Config has both agents.${oldKey} and agents.${newKey}; keeping new key, dropping legacy one`);
+    }
+    delete agents[oldKey];
+    changed = true;
+  }
+  return changed;
 }
 
 export function saveConfig(config: Config, configPath: string = resolvePaths().config): void {
