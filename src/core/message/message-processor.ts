@@ -12,7 +12,7 @@ import { logger } from '../../utils/logger.js';
 import { getErrorMessage, classifyError, ErrorType, ERROR_PREFIX, isInfraError, prefixErrorType, isRetryableError } from '../../utils/error-utils.js';
 import { EventBus } from '../event-bus.js';
 import { summarizeToolInput } from '../permission.js';
-import type { Message, Config, Session, ChannelAdapter, ChannelOptions, ChannelPolicy, CommandHandler } from '../../types.js';
+import type { Message, Config, Session, ChannelAdapter, ChannelOptions, ChannelPolicy, CommandHandler, ReplyContext } from '../../types.js';
 import { getOwner } from '../../config.js';
 import { getPackageRoot, resolveRoot } from '../../paths.js';
 import type { InteractionRouter } from '../interaction-router.js';
@@ -308,6 +308,19 @@ export class MessageProcessor {
 
     // 为本次任务处理生成唯一 task_id（客户端生成，格式 task-{10hex}）
     const taskId = `task-${crypto.randomUUID().replace(/-/g, '').slice(0, 10)}`;
+    const chatmode = session.sessionMode ?? 'interactive';
+
+    // 构建带 taskId/chatmode 的 ReplyContext（本次任务所有出站消息共用）
+    const taskReplyContext = (): ReplyContext => {
+      const base = this.getReplyContext(message);
+      return {
+        ...(base ?? {}),
+        metadata: { ...(base?.metadata ?? {}), taskId, chatmode },
+      };
+    };
+
+    // Proactive 模式可观测：ThoughtEmitter 声明在 try 外，catch 块也能透传错误为 thought
+    let thoughtEmitter: ThoughtEmitter | null = null;
 
     try {
       const isBackground = await this.isBackgroundSession(session, message.channel, message.channelId);
@@ -356,7 +369,7 @@ export class MessageProcessor {
           const isCurrentlyBackground = await this.isBackgroundSession(session, message.channel, message.channelId);
 
           if (!isCurrentlyBackground) {
-            const opts: { title?: string; replyToMessageId?: string; mentionUserIds?: string[]; replyInThread?: boolean } = {};
+            const opts: ReplyContext = {};
             if (isFinal) opts.title = '\u2713 \u6700\u7ec8\u56de\u590d:';
             // replyContext 跟着任务走：优先用当前 message 的，兜底用 session 的（话题会话创建时写入）
             const replyCtx = this.getReplyContext(message);
@@ -369,7 +382,8 @@ export class MessageProcessor {
                 firstReply = false;
               }
             }
-            await adapter.sendText(message.channelId, text, Object.keys(opts).length ? opts : undefined);
+            opts.metadata = { ...(opts.metadata ?? {}), taskId, chatmode };
+            await adapter.sendText(message.channelId, text, opts);
           }
           // 后台任务：静默，不发送输出
         },
@@ -384,12 +398,12 @@ export class MessageProcessor {
 
       // Proactive 模式可观测：创建 ThoughtEmitter，将静默的流式事件转发为 thought
       // selector: context = { type: 'task', id: taskId }
-      let thoughtEmitter: ThoughtEmitter | null = null;
       if (isProactive && adapter.putThought) {
         thoughtEmitter = new ThoughtEmitter(
           adapter,
           message.channelId,
-          taskId
+          taskId,
+          chatmode
         );
       }
 
@@ -397,7 +411,7 @@ export class MessageProcessor {
 
       // 捕获当前消息的上下文（闭包），避免后续消息处理时串台
       const capturedChannelId = message.channelId;
-      const capturedReplyContext = this.getReplyContext(message);
+      const capturedReplyContext = taskReplyContext();
 
       // 设置权限审批的消息发送回调（指向当前渠道）
       agent.setSendPrompt(async (text: string) => {
@@ -652,24 +666,24 @@ export class MessageProcessor {
 
         // 跨通道仅限 owner
         if (isCrossChannel && session.identity?.role !== 'owner') {
-          await adapter.sendText(message.channelId, `\u274c 跨通道发送仅限管理员`, this.getReplyContext(message));
+          await adapter.sendText(message.channelId, `\u274c 跨通道发送仅限管理员`, taskReplyContext());
           continue;
         }
 
         const resolvedPath = this.resolveFilePath(filePath, absoluteProjectPath);
         if (!fs.existsSync(resolvedPath)) {
           logger.warn(`[${adapter.channelName}] File not found: ${resolvedPath}`);
-          await adapter.sendText(message.channelId, `\u26a0\ufe0f 文件未找到: ${filePath}`, this.getReplyContext(message));
+          await adapter.sendText(message.channelId, `\u26a0\ufe0f 文件未找到: ${filePath}`, taskReplyContext());
           continue;
         }
 
         // 找目标 adapter
         if (!targetInfo) {
-          await adapter.sendText(message.channelId, `\u274c 通道 ${targetLabel} 未启用或不存在`, this.getReplyContext(message));
+          await adapter.sendText(message.channelId, `\u274c 通道 ${targetLabel} 未启用或不存在`, taskReplyContext());
           continue;
         }
         if (!targetInfo.adapter.sendFile) {
-          await adapter.sendText(message.channelId, `\u274c 通道 ${targetLabel} 不支持文件发送`, this.getReplyContext(message));
+          await adapter.sendText(message.channelId, `\u274c 通道 ${targetLabel} 不支持文件发送`, taskReplyContext());
           continue;
         }
 
@@ -681,21 +695,21 @@ export class MessageProcessor {
           const ownerPeerId = getOwner(this.config, targetAdapterName);
           targetChannelId = ownerPeerId ? (this.sessionManager.getOwnerChatId(targetChannelType, ownerPeerId) ?? '') : '';
           if (!targetChannelId) {
-            await adapter.sendText(message.channelId, `\u274c 未找到 ${targetLabel} 的私聊会话，请先在该通道发送一条消息`, this.getReplyContext(message));
+            await adapter.sendText(message.channelId, `\u274c 未找到 ${targetLabel} 的私聊会话，请先在该通道发送一条消息`, taskReplyContext());
             continue;
           }
         }
 
         logger.info(`[${adapter.channelName}] Sending file via ${targetInfo.adapter.channelName}: ${resolvedPath}`);
         try {
-          await targetInfo.adapter.sendFile(targetChannelId, resolvedPath, this.getReplyContext(message));
+          await targetInfo.adapter.sendFile(targetChannelId, resolvedPath, taskReplyContext());
           this.eventBus.publish({ type: 'agent:file-sent', sessionId: session.id, filePath: resolvedPath, channel: targetInfo.adapter.channelName });
           if (isCrossChannel) {
-            await adapter.sendText(message.channelId, `\ud83d\udcce 文件已通过 ${targetLabel} 发送`, this.getReplyContext(message));
+            await adapter.sendText(message.channelId, `\ud83d\udcce 文件已通过 ${targetLabel} 发送`, taskReplyContext());
           }
         } catch (error) {
           logger.error(`[${adapter.channelName}] Failed to send file: ${resolvedPath}`, error);
-          await adapter.sendText(message.channelId, `\u274c 文件发送失败: ${filePath}`, this.getReplyContext(message));
+          await adapter.sendText(message.channelId, `\u274c 文件发送失败: ${filePath}`, taskReplyContext());
         }
       }
       }  // end of !isProactive
@@ -788,7 +802,7 @@ export class MessageProcessor {
       if (isFinallyBackground) {
         const projectName = path.basename(session.projectPath);
         const count = this.messageCache.getCount(session.id);
-        await adapter.sendText(message.channelId, `[\u540e\u53f0-${projectName}] \u2713 任务完成 (${count}条消息已缓存)`);
+        await adapter.sendText(message.channelId, `[\u540e\u53f0-${projectName}] \u2713 任务完成 (${count}条消息已缓存)`, taskReplyContext());
       }
 
       // 记录发送响应
@@ -859,9 +873,9 @@ export class MessageProcessor {
       } else {
         const userMessage = getErrorMessage(error, undefined);
         // 获取 session 用于话题回复（如果 resolveSession 已执行）
-        let sendOpts: { replyToMessageId?: string; replyInThread?: boolean } | undefined;
+        let sendOpts: ReplyContext | undefined;
         try {
-          const session = await this.sessionManager.getOrCreateSession(
+          await this.sessionManager.getOrCreateSession(
             message.channel,
             message.channelId,
             this.config.projects?.defaultPath || process.cwd(),
@@ -869,7 +883,22 @@ export class MessageProcessor {
           );
           sendOpts = this.getReplyContext(message);
         } catch {}
+        // 注入 taskId / chatmode（与任务主流程保持一致）
+        sendOpts = {
+          ...(sendOpts ?? {}),
+          metadata: { ...(sendOpts?.metadata ?? {}), taskId, chatmode },
+        };
         await adapter.sendText(message.channelId, userMessage, sendOpts);
+
+        // Proactive 可观测：catch 块的基础设施错误也透传为 thought，保证按 task_id 聚合完整
+        if (thoughtEmitter) {
+          const thoughtErrorType: 'context_too_long' | 'auth' | 'network' | 'unknown' =
+            errType === ErrorType.CONTEXT_TOO_LONG ? 'context_too_long' :
+            errType === ErrorType.AUTH_ERROR ? 'auth' :
+            (errType === ErrorType.SDK_TIMEOUT || errType === ErrorType.STREAM_ERROR) ? 'network' :
+            'unknown';
+          thoughtEmitter.emit({ type: 'error', error: userMessage, errorType: thoughtErrorType }).catch(() => {});
+        }
       }
     }
   }

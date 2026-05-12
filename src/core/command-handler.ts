@@ -285,18 +285,38 @@ export class CommandHandler {
     interaction: InteractionRequest;
     replyCtx?: ReplyContext;
     callback: (action: string, values?: Record<string, unknown>, operatorId?: string) => void | Promise<void>;
+    /** 当前用户对该命令是否有写权限；false → 只发文本、不发交互卡片。默认 true（兼容旧调用） */
+    canWrite?: boolean;
   }): Promise<boolean> {
     if (!this.interactionRouter) return false;
+    // 无写权限 → 走文本降级（由调用点 fall through 输出只读信息）
+    if (opts.canWrite === false) return false;
+    // 有写权限但此刻忙碌 → 也走文本降级（避免诱导用户在忙碌状态下触发带参写操作）
+    if (this.isSessionBusy(opts.sessionId)) return false;
     await this.invalidateOldCards(opts.channel, opts.sessionId);
     const messageId = await this.trySendInteraction(opts.channel, opts.channelId, opts.interaction, opts.replyCtx);
     if (!messageId) return false;
     const wrappedCallback: typeof opts.callback = async (action, values, operatorId) => {
+      // 点击回调时二次校验：若会话此刻忙碌，忽略本次点击（防止已弹卡片被用于带参切换）
+      if (this.isSessionBusy(opts.sessionId)) {
+        const adapter = this.adapters.get(opts.channel);
+        adapter?.sendText(opts.channelId, '⚠️ 当前正在处理消息，请稍后再试\n使用 /stop 中断当前任务后重试', opts.replyCtx);
+        return;
+      }
       await opts.callback(action, values, operatorId);
       // 已完成交互的卡片：保留原始内容，仅禁用按钮（不标记为"已过期"）
       // "已过期"仅用于被新卡片替代的旧卡片（invalidateOldCards）
     };
     this.interactionRouter.register(opts.requestId, opts.sessionId, wrappedCallback, { timeoutMs: 120_000, messageId });
     return true;
+  }
+
+  /** 判断指定 session 是否有活跃流（用于 idle 守卫和卡片降级） */
+  private isSessionBusy(sessionId: string): boolean {
+    for (const agent of this.agentMap.values()) {
+      if (agent.hasActiveStream(sessionId)) return true;
+    }
+    return false;
   }
 
   /** 获取活跃会话，无会话时返回统一错误提示 */
@@ -615,10 +635,18 @@ export class CommandHandler {
     const activeChatType = activeSession?.chatType || 'private';
 
     if (normalizedContent.startsWith('/')) {
-      const guestGroupCommands = ['/status', '/help', '/check', '/chatmode'];
+      // guest 在群聊和私聊中均可访问的只读命令：纯查询形态（带参写操作由各 handler 内部守卫拦截）
+      const guestGroupCommands = [
+        '/status', '/help', '/check', '/chatmode',
+        '/model', '/effort', '/agent', '/perm', '/activity', '/safe',
+      ];
       const userCommands = activeChatType === 'group' && !isAdmin
         ? guestGroupCommands
-        : ['/slist', '/new', '/session', '/rename', '/name', '/status', '/help', '/del', '/s ', '/check', '/chatmode'];
+        : [
+            ...guestGroupCommands,
+            // 私聊 guest 额外可用：会话自管理 + 私聊专属的 /rewind 历史查看
+            '/slist', '/new', '/session', '/rename', '/name', '/del', '/s ', '/rewind',
+          ];
       const isUserCommand = userCommands.some(cmd =>
         normalizedContent === cmd.trimEnd() || normalizedContent.startsWith(cmd)
       );
@@ -630,8 +658,17 @@ export class CommandHandler {
     }
 
     // 空闲检查：某些命令需要等待当前会话空闲
-    const requiresIdle = ['/new', '/session', '/clear', '/compact', '/safe', '/repair', '/fork', '/bind', '/project', '/agent', '/rewind', '/chatmode'];
-    if (requiresIdle.some(cmd => normalizedContent === cmd || normalizedContent.startsWith(cmd + ' '))) {
+    // 原则：仅对"写/破坏性"形态拦截，纯读/用法提示的无参形态始终放行
+    // - 始终需要 idle（无参即写）：/new /clear /compact /repair /fork
+    // - 仅带参时需要 idle（无参是列表/用法）：/session /bind /project /agent /rewind
+    // - /chatmode：在 handler 内部自行做写操作的 idle 检查
+    // - /safe：已禁用 no-op，不再要求 idle
+    const idleAlways = ['/new', '/clear', '/compact', '/repair', '/fork'];
+    const idleWhenArg = ['/session', '/bind', '/project', '/agent', '/rewind'];
+    const needsIdle =
+      idleAlways.some(cmd => normalizedContent === cmd || normalizedContent.startsWith(cmd + ' ')) ||
+      idleWhenArg.some(cmd => normalizedContent.startsWith(cmd + ' '));
+    if (needsIdle) {
       if (threadId) {
         // 话题中：检查话题 session 是否在处理（不创建）
         const threadSession = await this.sessionManager.getThreadSession(channel, channelId, threadId);
@@ -792,6 +829,7 @@ export class CommandHandler {
           const replyCtx = this.getReplyContext(permSession);
           const cardSent = await this.sendInteractionCard({
             channel, channelId, sessionId: permSession.id, requestId, interaction, replyCtx,
+            canWrite: isOwner,
             callback: async (action, _values, operatorId) => {
               if (action !== currentMode) {
                 if (userId && operatorId && operatorId !== userId) return;
@@ -812,7 +850,10 @@ export class CommandHandler {
           const suffix = m.available ? '' : ' ⚠️ 不可用';
           return `  ${prefix} ${m.key} (${m.nameZh}) - ${m.description}${suffix}`;
         }).join('\n');
-        return `🔐 当前权限模式: ${currentMode}\n\n${modeList}\n\n用法:\n  /perm <模式>              切换权限模式\n  /perm allow|always|deny   审批权限请求`;
+        if (isOwner) {
+          return `🔐 当前权限模式: ${currentMode}\n\n${modeList}\n\n用法:\n  /perm <模式>              切换权限模式\n  /perm allow|always|deny   审批权限请求`;
+        }
+        return `🔐 当前权限模式: ${currentMode}`;
       }
 
       const parts = args.split(/\s+/);
@@ -874,9 +915,11 @@ export class CommandHandler {
 
     // /agent 命令：查看或切换 Agent 后端
     if (normalizedContent === '/agent' || normalizedContent.startsWith('/agent ')) {
-      // 群聊中 owner only，私聊中 admin+
-      if (activeChatType === 'group' ? !isOwner : !isAdmin) return '❌ 无权限：此命令仅限管理员使用';
       const args = normalizedContent.slice(6).trim();
+      // 切换（带参）需权限：群聊 owner only，私聊 admin+；无参查询对所有人放开
+      if (args && (activeChatType === 'group' ? !isOwner : !isAdmin)) {
+        return '❌ 无权限：此命令仅限管理员使用';
+      }
       const available = [...this.agentMap.keys()];
 
       if (!args) {
@@ -904,6 +947,7 @@ export class CommandHandler {
           const replyCtx = activeSession ? this.getReplyContext(activeSession) : undefined;
           const cardSent = await this.sendInteractionCard({
             channel, channelId, sessionId: activeSession?.id || requestId, requestId, interaction, replyCtx,
+            canWrite: activeChatType === 'group' ? isOwner : isAdmin,
             callback: async (action, _values, operatorId) => {
               if (action !== currentAgent) {
                 if (userId && operatorId && operatorId !== userId) return;
@@ -920,7 +964,11 @@ export class CommandHandler {
 
         // 降级：文本
         const list = available.map(a => `${a === currentAgent ? ' ✓' : '  '} ${a}`).join('\n');
-        return `当前 Agent: ${currentAgent}\n\n可用:\n${list}\n\n用法: /agent <name>`;
+        const canSwitchAgent = activeChatType === 'group' ? isOwner : isAdmin;
+        if (canSwitchAgent) {
+          return `当前 Agent: ${currentAgent}\n\n可用:\n${list}\n\n用法: /agent <name>`;
+        }
+        return `当前 Agent: ${currentAgent}`;
       }
 
       if (!this.agentMap.has(args)) {
@@ -987,6 +1035,7 @@ export class CommandHandler {
           const replyCtx = this.getReplyContext(modelSession);
           const cardSent = await this.sendInteractionCard({
             channel, channelId, sessionId: modelSession.id, requestId, interaction, replyCtx,
+            canWrite: isAdmin,
             callback: async (action, _values, operatorId) => {
               if (action !== currentModel) {
                 if (userId && operatorId && operatorId !== userId) return;
@@ -1006,8 +1055,14 @@ export class CommandHandler {
         const effortHint = efforts.length > 0
           ? `\n推理强度: ${currentEffort === 'auto' ? 'auto (SDK默认)' : currentEffort}  (使用 /effort 调整)`
           : '';
-        return `当前模型: ${currentModel}${effortHint}\n\n可用模型：\n${modelList}\n\n${formatModelUsage(modelAgent, currentModel)}`;
+        if (isAdmin) {
+          return `当前模型: ${currentModel}${effortHint}\n\n可用模型：\n${modelList}\n\n${formatModelUsage(modelAgent, currentModel)}`;
+        }
+        return `当前模型: ${currentModel}${effortHint}`;
       }
+
+      // 带参（切换/调整）需 admin+；无参查询已在上方返回
+      if (!isAdmin) return '❌ 无权限：切换模型仅限管理员使用';
 
       const parts = args.split(/\s+/);
       let newModel: string | undefined;
@@ -1167,6 +1222,7 @@ export class CommandHandler {
           const replyCtx = this.getReplyContext(effortSession);
           const cardSent = await this.sendInteractionCard({
             channel, channelId, sessionId: effortSession.id, requestId, interaction, replyCtx,
+            canWrite: isAdmin,
             callback: async (action, _values, operatorId) => {
               if (action !== currentEffort) {
                 if (userId && operatorId && operatorId !== userId) return;
@@ -1185,8 +1241,14 @@ export class CommandHandler {
         const effortDisplay = currentEffort === 'auto' ? 'auto (SDK默认)' : currentEffort;
         const allItems = [...efforts, 'auto'];
         const effortList = allItems.map(e => `  ${e === currentEffort ? '✓' : ' '} ${e}${e === 'auto' ? ' (SDK默认)' : ''}`).join('\n');
-        return `⚡ 推理强度: ${effortDisplay}\n\n可选:\n${effortList}\n\n用法: /effort <level>`;
+        if (isAdmin) {
+          return `⚡ 推理强度: ${effortDisplay}\n\n可选:\n${effortList}\n\n用法: /effort <level>`;
+        }
+        return `⚡ 推理强度: ${effortDisplay}`;
       }
+
+      // 带参（切换）需 admin+；无参查询已在上方返回
+      if (!isAdmin) return '❌ 无权限：切换推理强度仅限管理员使用';
 
       // /effort auto：恢复 SDK 默认
       if (args === 'auto') {
@@ -1400,14 +1462,15 @@ export class CommandHandler {
 
 
     if (normalizedContent === '/activity' || normalizedContent.startsWith('/activity ')) {
-      if (!isAdmin) return '❌ 无权限：此命令仅限管理员使用';
+      const activityArg = normalizedContent.slice(9).trim();
+      // 带参（写操作）需 admin+；无参查询对所有人开放（owner 门在具体切换点还有一道）
+      if (activityArg && !isAdmin) return '❌ 无权限：此命令仅限管理员使用';
 
       // proactive 模式下流式输出全部静默，activity 配置无意义
       if (activeSession?.sessionMode === 'proactive') {
         return '❌ 当前会话为 proactive 模式，不支持 activity 配置（流式输出已全部静默）';
       }
 
-      const activityArg = normalizedContent.slice(9).trim();
       const modeMap: Record<string, 'all' | 'dm-only' | 'owner-dm-only' | 'none'> = {
         all: 'all',
         dm: 'dm-only',
@@ -1454,6 +1517,7 @@ export class CommandHandler {
           const replyCtx = activeSession ? this.getReplyContext(activeSession) : undefined;
           const cardSent = await this.sendInteractionCard({
             channel, channelId, sessionId: activeSession?.id || requestId, requestId, interaction, replyCtx,
+            canWrite: isOwner,
             callback: async (action, _values, operatorId) => {
               const newMode = modeMap[action];
               if (newMode && newMode !== currentMode) {
@@ -1474,7 +1538,10 @@ export class CommandHandler {
           const prefix = m.configVal === currentMode ? '✓' : ' ';
           return `  ${prefix} ${m.key} (${m.label})`;
         }).join('\n');
-        return `📋 中间输出模式: ${currentMode}\n\n${modeList}\n\n用法:\n  /activity <模式>    切换中间输出显示模式`;
+        if (isOwner) {
+          return `📋 中间输出模式: ${currentMode}\n\n${modeList}\n\n用法:\n  /activity <模式>    切换中间输出显示模式`;
+        }
+        return `📋 中间输出模式: ${currentMode}`;
       }
 
       const newMode = modeMap[activityArg];
@@ -1507,7 +1574,11 @@ export class CommandHandler {
 
       if (!arg) {
         const lockHint = lockedMode ? `（由通道配置锁定为 ${lockedMode}）` : '';
-        return `📋 当前会话模式: ${currentMode}${lockHint}\n可选: interactive / proactive\n用法: /chatmode <模式>`;
+        const canSwitch = activeChatType !== 'group' || isAdmin;
+        if (canSwitch && !lockedMode) {
+          return `📋 当前会话模式: ${currentMode}${lockHint}\n可选: interactive / proactive\n用法: /chatmode <模式>`;
+        }
+        return `📋 当前会话模式: ${currentMode}${lockHint}`;
       }
 
       if (arg !== 'interactive' && arg !== 'proactive') {
@@ -1524,6 +1595,19 @@ export class CommandHandler {
 
       if (arg === currentMode) {
         return `📋 当前会话模式已是 ${arg}`;
+      }
+
+      // 仅在真正需要切换时才要求会话空闲
+      if (threadId) {
+        const threadSession = await this.sessionManager.getThreadSession(channel, channelId, threadId);
+        if (threadSession) {
+          const threadAgent = this.getAgent(threadSession.agentId);
+          if (threadAgent.hasActiveStream(threadSession.id)) {
+            return '⚠️ 当前正在处理消息，请稍后再试\n使用 /stop 中断当前任务后重试';
+          }
+        }
+      } else if (agent.hasActiveStream(activeSession.id)) {
+        return '⚠️ 当前正在处理消息，请稍后再试\n使用 /stop 中断当前任务后重试';
       }
 
       await this.sessionManager.updateSession(activeSession.id, { sessionMode: arg });
@@ -2151,6 +2235,7 @@ export class CommandHandler {
         const replyCtx = activeSession ? this.getReplyContext(activeSession) : undefined;
         const cardSent = await this.sendInteractionCard({
           channel, channelId, sessionId: activeSession?.id || requestId, requestId, interaction, replyCtx,
+          canWrite: isAdmin,
           callback: async (action, _values, operatorId) => {
             if (userId && operatorId && operatorId !== userId) return;
             const selectedEntry = entries.find(e => e.name === action);
@@ -2802,6 +2887,9 @@ export class CommandHandler {
         return await this.handleRewindList(session, rewindAgent);
       }
 
+      // 带参（执行回退，会删除文件/改对话）需 admin+
+      if (!isAdmin) return '❌ 无权限：回退操作仅限管理员使用';
+
       const parts = args.split(/\s+/);
       const turnNum = parseInt(parts[0], 10);
       if (isNaN(turnNum) || turnNum < 1) {
@@ -3009,10 +3097,14 @@ export class CommandHandler {
   // ── Agent Ctl ──
 
   private static readonly CTL_COMMANDS = [
-    '/help', '/status', '/check',
-    '/model', '/effort', '/perm',
+    '/help', '/status', '/check', '/pwd',
+    '/model', '/effort', '/perm', '/agent',
     '/compact', '/activity', '/file', '/send', '/chatmode', '/restart', '/agentmd', '/bind', '/aid',
+    '/rename', '/name',
   ];
+
+  /** ctl 中仅允许查询形态的指令；写形态（带参）一律拒绝 */
+  private static readonly CTL_READONLY = new Set(['/agent']);
 
   /**
    * 从 session 恢复 ReplyContext，用于 ctl send 主动发送文本时的路由
@@ -3037,6 +3129,11 @@ export class CommandHandler {
     const inputCmd = cmd.split(' ')[0];
     if (!CommandHandler.CTL_COMMANDS.includes(inputCmd)) {
       return { ok: false, error: `不允许的指令: ${inputCmd}` };
+    }
+
+    // 1.1 只读守卫：带参形态（写操作）在 ctl 中禁止
+    if (CommandHandler.CTL_READONLY.has(inputCmd) && cmd.trimEnd().length > inputCmd.length) {
+      return { ok: false, error: `${inputCmd} 在 ctl 中仅支持查询形态，不支持带参切换` };
     }
 
     // 2. 通过 sessionId 查 session

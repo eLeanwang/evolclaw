@@ -154,6 +154,7 @@ export interface Config {
   debug?: {
     flusherDiag?: boolean;  // 启用 StreamFlusher 诊断日志 (flusher-diag.log)
     aunTrace?: boolean;     // 启用 AUN 通道数据追踪日志 (aun-trace.log)，记录所有收发数据
+    aunSdkLog?: boolean;    // 启用 AUN SDK 内部日志 (~/.aun/logs/ts-sdk-YYYYMMDD.log)
   };
   idleMonitor?: {
     enabled?: boolean;              // 是否启用空闲监控，默认 true

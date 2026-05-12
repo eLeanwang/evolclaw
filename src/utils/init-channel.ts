@@ -810,7 +810,7 @@ export async function createAidSilent(opts: {
     return { aid: opts.aid, alreadyExisted: true };
   }
 
-  const { AUNClient } = await import('@agentunion/fastaun');
+  const { AUNClient, GatewayDiscovery } = await import('@agentunion/fastaun');
   let client = new AUNClient({ aun_path: aunPath });
 
   const result = await client.auth.createAid({ aid: opts.aid });
@@ -823,6 +823,18 @@ export async function createAidSilent(opts: {
   if (caDownloaded && fs.existsSync(caCertPath)) {
     try { await client.close(); } catch { /* ignore */ }
     client = new AUNClient({ aun_path: aunPath, root_ca_path: caCertPath, aid: opts.aid });
+  }
+
+  // Set gateway URL for uploadAgentMd
+  let gatewayUrl = result.gateway || '';
+  if (!gatewayUrl) {
+    try {
+      const discovery = new GatewayDiscovery({});
+      gatewayUrl = await discovery.discover(`https://${opts.aid}/.well-known/aun-gateway`);
+    } catch { /* fall through */ }
+  }
+  if (gatewayUrl) {
+    (client as any)._gatewayUrl = gatewayUrl;
   }
 
   // Write initial agent.md (initialized: false, name = aid first label)
@@ -875,7 +887,6 @@ export function appendAunInstance(config: any, inst: { name: string; aid: string
 
 export async function setupAunAid(rl: readline.Interface, _config: any): Promise<{ aid: string; owner: string } | null> {
   let aid = '';
-  let gatewayPort: number | undefined;  // only used locally for AID creation, not written to config
 
   // Outer loop: allows retrying with a different AID
   while (true) {
@@ -888,13 +899,6 @@ export async function setupAunAid(rl: readline.Interface, _config: any): Promise
         console.log('  ⚠ 无效 AID 格式（需要合法域名，至少三级，如 alice.agentid.pub）');
         aid = '';
       }
-    }
-
-    const portStr = (await ask(rl, '  Gateway 端口 [留空使用默认 443]: ')).trim();
-    gatewayPort = portStr ? parseInt(portStr, 10) : undefined;
-    if (gatewayPort !== undefined && (isNaN(gatewayPort) || gatewayPort < 1 || gatewayPort > 65535)) {
-      console.log('  ⚠ 端口号无效，使用默认 443');
-      gatewayPort = undefined;
     }
 
     // Check if AID exists locally
@@ -915,14 +919,8 @@ export async function setupAunAid(rl: readline.Interface, _config: any): Promise
     console.log('  正在创建 AID...');
     let failed = false;
     try {
-      const { AUNClient } = await import('@agentunion/fastaun');
+      const { AUNClient, GatewayDiscovery } = await import('@agentunion/fastaun');
       let client = new AUNClient({ aun_path: aunPath });
-
-      // 如果用户指定了自定义端口，手动设置 gateway URL；否则让 SDK 自动发现
-      if (gatewayPort) {
-        const domain = aid.split('.').slice(1).join('.');
-        (client as any)._gatewayUrl = `wss://gateway.${domain}:${gatewayPort}/aun`;
-      }
 
       const result = await client.auth.createAid({ aid });
       console.log(`  ✓ AID ${result.aid} 创建成功`);
@@ -930,18 +928,23 @@ export async function setupAunAid(rl: readline.Interface, _config: any): Promise
       // 下载 CA 根证书（如果本地不存在），从 SDK 返回的实际网关 URL 派生
       const caDownloaded = await downloadCaRoot(aunPath, result.gateway || '', '  ');
 
-      // 关键：SDK 默认 rootCaPath=null，只读取包内 bundled certs。
-      // 必须显式传 root_ca_path 指向刚下载的 root.crt，uploadAgentMd 才能验证 server cert。
-      // 同时传 aid，否则新 client 不知道该加载哪个身份，uploadAgentMd 会报
-      // "no local identity found, call auth.createAid() first"。
+      // 重建 client：传 root_ca_path 以验证 server cert，传 aid 以加载身份
       const caCertPath = path.join(aunPath, 'CA', 'root', 'root.crt');
       if (caDownloaded && fs.existsSync(caCertPath)) {
         try { await client.close(); } catch { /* ignore */ }
         client = new AUNClient({ aun_path: aunPath, root_ca_path: caCertPath, aid });
-        if (gatewayPort) {
-          const domain = aid.split('.').slice(1).join('.');
-          (client as any)._gatewayUrl = `wss://gateway.${domain}:${gatewayPort}/aun`;
-        }
+      }
+
+      // 设置 gateway URL（从 createAid 返回值或 well-known 自动发现）
+      let gatewayUrl = result.gateway || '';
+      if (!gatewayUrl) {
+        try {
+          const discovery = new GatewayDiscovery({});
+          gatewayUrl = await discovery.discover(`https://${aid}/.well-known/aun-gateway`);
+        } catch { /* fall through */ }
+      }
+      if (gatewayUrl) {
+        (client as any)._gatewayUrl = gatewayUrl;
       }
 
       // Collect agent.md info and publish

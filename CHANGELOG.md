@@ -1,5 +1,25 @@
 # Changelog
 
+## v2.6.3 (2026-05-11)
+
+### New Features
+
+- **AUN E2EE 自适应降级** — 发送消息时自动探测对端加密能力：首次尝试 E2EE，遇 `E2EEError` 自动降级明文重发并缓存结果（10min TTL），后续直接走明文通道
+- **命令权限读写分离** — `/model`、`/agent`、`/effort`、`/perm`、`/activity` 等命令无参查询对所有人开放，带参切换仍需管理员权限；guest 在群聊/私聊中可查看运行状态
+- **出站 payload 统一 task_id/chatmode** — 所有出站消息（text/file/thought/status）统一携带 `task_id` 和 `chatmode` 字段，便于客户端关联同一任务的全部消息
+
+### Improvements
+
+- **AUN SDK 日志开关** — 新增 `aunSdkLog` 配置项，控制 SDK 内部日志写入（默认开启）
+- **AUN undecryptable 事件监听** — 监听 `message.undecryptable` / `group.message_undecryptable` 事件并记录告警
+- **AUN init gateway 自动发现** — `createAidSilent` 和 `setupAunAid` 使用 `GatewayDiscovery` well-known 自动解析网关 URL，移除手动端口输入
+- **交互卡片 idle 守卫** — 会话忙碌时不发送交互卡片（降级为文本），已弹卡片被点击时二次校验忙碌状态
+- **idle 检查精细化** — 仅对写/破坏性命令要求 idle，纯读无参形态始终放行
+- **AUN selfName 暴露** — adapter 新增 `_selfName()` 方法，系统提示可展示 Agent 自身名称
+- **AUN send 结果校验** — `message.send` / `group.send` 返回值缺少 `message_id` 时记录告警
+
+---
+
 ## v2.6.2 (2026-05-11)
 
 ### Improvements

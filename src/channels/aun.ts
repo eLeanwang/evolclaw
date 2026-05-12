@@ -1,4 +1,4 @@
-import { AUNClient, FileSecretStore, GatewayDiscovery, type JsonObject } from '@agentunion/fastaun';
+import { AUNClient, FileSecretStore, GatewayDiscovery, E2EEError, type JsonObject } from '@agentunion/fastaun';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
@@ -38,6 +38,7 @@ export interface AUNConfig {
   flushDelay?: number;
   encryptionSeed?: string;
   aunTrace?: boolean;     // 启用数据追踪日志
+  aunSdkLog?: boolean;    // 启用 AUN SDK 内部日志（写入 ~/.aun/logs/ts-sdk-YYYYMMDD.log）
   owner?: string;         // Owner AID，用于发送欢迎消息
 }
 
@@ -146,6 +147,16 @@ export class AUNChannel {
     }
     if (messageId) this.messageSeqMap.delete(messageId);
   }
+
+  private shouldEncrypt(peerId: string): boolean {
+    const cached = this.peerE2ee.get(peerId);
+    if (!cached) return true;
+    if (Date.now() - cached.ts > AUNChannel.E2EE_PROBE_TTL) {
+      this.peerE2ee.delete(peerId);
+      return true;
+    }
+    return cached.ok;
+  }
   private _aid?: string;
   private _selfName?: string;  // 本地 agent.md 中的 name，首次 connect 时读取
   private _chatId = '';  // aid:device_id:slot_id — 多实例回声过滤
@@ -153,6 +164,9 @@ export class AUNChannel {
   private peerInfoCache = new Map<string, { type: 'human' | 'ai'; name?: string }>();
   private messageSeqMap = new Map<string, number>();  // messageId → seq (for ack)
   private sentCount = new Map<string, number>();  // channelId → 已发消息计数（用于判断最终回复）
+  private peerE2ee = new Map<string, { ok: boolean; ts: number }>();
+  private static readonly E2EE_PROBE_TTL = 10 * 60 * 1000; // 10min
+  private plaintextRecv = 0;
 
   // Reconnect state (TS-layer fallback, on top of SDK auto_reconnect)
   private intentionalDisconnect = false;
@@ -189,7 +203,7 @@ export class AUNChannel {
     }
     this.connected = false;
 
-    const aunPath = this.config.keystorePath || `${process.env.HOME || '~'}/.aun`;
+    const aunPath = this.config.keystorePath || path.join(os.homedir(), '.aun');
     const aidName = this.config.aid;
     const encryptionSeed = this.config.encryptionSeed || process.env.AUN_ENCRYPTION_SEED || undefined;
 
@@ -216,12 +230,12 @@ export class AUNChannel {
 
     // Create client with FileSecretStore (AES-256-GCM)
     // 不传 encryption_seed 时，SDK 自动从 {aun_path}/.seed 文件派生密钥（与 aun_cli.py 对齐）
-    const rootCaPath = `${aunPath}/CA/root/root.crt`;
+    const rootCaPath = path.join(aunPath, 'CA', 'root', 'root.crt');
     this.client = new AUNClient({
       aun_path: aunPath,
       root_ca_path: rootCaPath,
       ...(encryptionSeed && { encryption_seed: encryptionSeed }),
-    });
+    }, this.config.aunSdkLog ?? true);
     // Set gateway URL (internal property, same as Python SDK)
     (this.client as any)._gatewayUrl = gateway;
 
@@ -257,6 +271,16 @@ export class AUNChannel {
           }
         }
       }
+    });
+    this.client.on('message.undecryptable', (data: unknown) => {
+      this.trace('IN', 'message.undecryptable', data);
+      const d = data as Record<string, any>;
+      logger.warn(`[AUN] Message undecryptable: from=${d.from} mid=${d.message_id} err=${d._decrypt_error}`);
+    });
+    this.client.on('group.message_undecryptable', (data: unknown) => {
+      this.trace('IN', 'group.message_undecryptable', data);
+      const d = data as Record<string, any>;
+      logger.warn(`[AUN] Group message undecryptable: group=${d.group_id} from=${d.from} mid=${d.message_id} err=${d._decrypt_error}`);
     });
 
     // Authenticate
@@ -553,6 +577,16 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       return;
     }
 
+    // E2EE 能力探测：收到加密消息则标记对端支持，明文则计数审计
+    const msgEncrypted = !!(msg.e2ee);
+    if (fromAid) {
+      if (msgEncrypted) {
+        this.peerE2ee.set(fromAid, { ok: true, ts: Date.now() });
+      } else {
+        this.plaintextRecv++;
+      }
+    }
+
     // Detect @mentions
     const mentions: string[] = [];
     if (this._aid && text.includes(`@${this._aid}`)) {
@@ -632,6 +666,16 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     if (this._aid && senderAid === this._aid) {
       this.acknowledgeImmediately(messageId, seq);
       return;
+    }
+
+    // E2EE 能力探测：收到加密群消息则标记发送者支持
+    const msgEncrypted = !!(msg.e2ee);
+    if (senderAid) {
+      if (msgEncrypted) {
+        this.peerE2ee.set(senderAid, { ok: true, ts: Date.now() });
+      } else {
+        this.plaintextRecv++;
+      }
     }
 
     // dispatch_mode from server tells agent how to work in this group
@@ -840,29 +884,64 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
 
     const payload: Record<string, any> = { type: 'text', text: finalText };
     if (context?.threadId) payload.thread_id = context.threadId;
+    if (context?.metadata?.taskId) payload.task_id = context.metadata.taskId;
+    if (context?.metadata?.chatmode) payload.chatmode = context.metadata.chatmode;
     const isGroup = this.isGroupId(channelId);
-    const params: Record<string, any> = { payload, encrypt: !isGroup };
 
     // Multi-instance routing: channelId may be "aid:device_id:slot_id"
     const colonIdx = channelId.indexOf(':');
     const targetAid = colonIdx > 0 ? channelId.substring(0, colonIdx) : channelId;
     if (colonIdx > 0) {
-      params.payload.chat_id = channelId;
+      payload.chat_id = channelId;
     }
+
+    const encryptTarget = isGroup ? channelId : targetAid;
+    const encrypt = this.shouldEncrypt(encryptTarget);
+    const params: Record<string, any> = { payload, encrypt };
 
     try {
       if (isGroup) {
         params.group_id = channelId;
         this.trace('OUT', 'group.send', params);
-        await this.client.call('group.send', params);
+        const result = await this.client.call('group.send', params);
+        if (!result || !(result as any).message_id) {
+          logger.warn(`[AUN] group.send returned no message_id: ${JSON.stringify(result)}`);
+        }
       } else {
         params.to = targetAid;
         this.trace('OUT', 'message.send', params);
-        await this.client.call('message.send', params);
+        const result = await this.client.call('message.send', params);
+        if (!result || !(result as any).message_id) {
+          logger.warn(`[AUN] message.send returned no message_id: ${JSON.stringify(result)}`);
+        }
       }
     } catch (e) {
-      this.trace('OUT', 'send.error', { channelId, error: String(e) });
-      logger.error(`[AUN] Send failed to ${channelId}: ${e}`);
+      if (encrypt && e instanceof E2EEError) {
+        this.peerE2ee.set(encryptTarget, { ok: false, ts: Date.now() });
+        logger.warn(`[AUN] E2EE send failed to ${channelId}, retrying plaintext: ${e}`);
+        params.encrypt = false;
+        try {
+          if (isGroup) {
+            this.trace('OUT', 'group.send.fallback', params);
+            const result = await this.client.call('group.send', params);
+            if (!result || !(result as any).message_id) {
+              logger.warn(`[AUN] group.send fallback returned no message_id: ${JSON.stringify(result)}`);
+            }
+          } else {
+            this.trace('OUT', 'message.send.fallback', params);
+            const result = await this.client.call('message.send', params);
+            if (!result || !(result as any).message_id) {
+              logger.warn(`[AUN] message.send fallback returned no message_id: ${JSON.stringify(result)}`);
+            }
+          }
+        } catch (e2) {
+          this.trace('OUT', 'send.fallback.error', { channelId, error: String(e2) });
+          logger.error(`[AUN] Plaintext fallback also failed to ${channelId}: ${e2}`);
+        }
+      } else {
+        this.trace('OUT', 'send.error', { channelId, error: String(e) });
+        logger.error(`[AUN] Send failed to ${channelId}: ${e}`);
+      }
     }
   }
 
@@ -983,24 +1062,58 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
         attachments: [attachment],
       };
       if (context?.threadId) filePayload.thread_id = context.threadId;
+      if (context?.metadata?.taskId) filePayload.task_id = context.metadata.taskId;
+      if (context?.metadata?.chatmode) filePayload.chatmode = context.metadata.chatmode;
       const isGroup = this.isGroupId(channelId);
-      const params: Record<string, any> = { payload: filePayload, encrypt: !isGroup };
 
       // Multi-instance routing
       const fileColonIdx = channelId.indexOf(':');
       const fileTargetAid = fileColonIdx > 0 ? channelId.substring(0, fileColonIdx) : channelId;
       if (fileColonIdx > 0) {
-        params.payload.chat_id = channelId;
+        filePayload.chat_id = channelId;
       }
 
-      if (isGroup) {
-        params.group_id = channelId;
-        this.trace('OUT', 'group.send.file', params);
-        await this.client.call('group.send', params);
-      } else {
-        params.to = fileTargetAid;
-        this.trace('OUT', 'message.send.file', params);
-        await this.client.call('message.send', params);
+      const encryptTarget = isGroup ? channelId : fileTargetAid;
+      const encrypt = this.shouldEncrypt(encryptTarget);
+      const params: Record<string, any> = { payload: filePayload, encrypt };
+
+      try {
+        if (isGroup) {
+          params.group_id = channelId;
+          this.trace('OUT', 'group.send.file', params);
+          const result = await this.client.call('group.send', params);
+          if (!result || !(result as any).message_id) {
+            logger.warn(`[AUN] group.send.file returned no message_id: ${JSON.stringify(result)}`);
+          }
+        } else {
+          params.to = fileTargetAid;
+          this.trace('OUT', 'message.send.file', params);
+          const result = await this.client.call('message.send', params);
+          if (!result || !(result as any).message_id) {
+            logger.warn(`[AUN] message.send.file returned no message_id: ${JSON.stringify(result)}`);
+          }
+        }
+      } catch (sendErr) {
+        if (encrypt && sendErr instanceof E2EEError) {
+          this.peerE2ee.set(encryptTarget, { ok: false, ts: Date.now() });
+          logger.warn(`[AUN] E2EE sendFile failed to ${channelId}, retrying plaintext: ${sendErr}`);
+          params.encrypt = false;
+          if (isGroup) {
+            this.trace('OUT', 'group.send.file.fallback', params);
+            const result = await this.client.call('group.send', params);
+            if (!result || !(result as any).message_id) {
+              logger.warn(`[AUN] group.send.file fallback returned no message_id: ${JSON.stringify(result)}`);
+            }
+          } else {
+            this.trace('OUT', 'message.send.file.fallback', params);
+            const result = await this.client.call('message.send', params);
+            if (!result || !(result as any).message_id) {
+              logger.warn(`[AUN] message.send.file fallback returned no message_id: ${JSON.stringify(result)}`);
+            }
+          }
+        } else {
+          throw sendErr;
+        }
       }
       logger.info(`[AUN] File sent: ${filename} (${formatSize(stat.size)}) → ${channelId}`);
     } catch (e) {
@@ -1035,7 +1148,6 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     if (context?.threadId) payload.thread_id = context.threadId;
 
     const isGroup = this.isGroupId(channelId);
-    const params: Record<string, any> = { payload, encrypt: !isGroup };
 
     // Multi-instance routing
     const statusColonIdx = channelId.indexOf(':');
@@ -1044,18 +1156,33 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       payload.chat_id = channelId;
     }
 
+    const encryptTarget = isGroup ? channelId : statusTargetAid;
+    const encrypt = this.shouldEncrypt(encryptTarget);
+    const params: Record<string, any> = { payload, encrypt };
+
+    const sendWithFallback = (method: string) => {
+      this.client!.call(method, params).catch(e => {
+        if (encrypt && e instanceof E2EEError) {
+          this.peerE2ee.set(encryptTarget, { ok: false, ts: Date.now() });
+          logger.warn(`[AUN] E2EE status send failed to ${channelId}, retrying plaintext`);
+          params.encrypt = false;
+          this.client!.call(method, params).catch(e2 => {
+            logger.debug(`[AUN] Processing status fallback failed: ${e2}`);
+          });
+        } else {
+          logger.debug(`[AUN] Processing status failed: ${e}`);
+        }
+      });
+    };
+
     if (isGroup) {
       params.group_id = channelId;
       this.trace('OUT', 'group.send.status', params);
-      this.client.call('group.send', params).catch(e => {
-        logger.debug(`[AUN] Processing status failed: ${e}`);
-      });
+      sendWithFallback('group.send');
     } else {
       params.to = statusTargetAid;
       this.trace('OUT', 'message.send.status', params);
-      this.client.call('message.send', params).catch(e => {
-        logger.debug(`[AUN] Processing status failed: ${e}`);
-      });
+      sendWithFallback('message.send');
     }
   }
 
@@ -1158,12 +1285,13 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
   }
 
   /** Get current connection status */
-  getStatus(): { connected: boolean; aid?: string; reconnectAttempt: number; maxAttempts: number } {
+  getStatus(): { connected: boolean; aid?: string; reconnectAttempt: number; maxAttempts: number; plaintextRecv: number } {
     return {
       connected: this.connected,
       aid: this._aid,
       reconnectAttempt: this.reconnectAttempt,
       maxAttempts: AUNChannel.RECONNECT_DELAYS.length,
+      plaintextRecv: this.plaintextRecv,
     };
   }
 
@@ -1249,6 +1377,7 @@ export class AUNChannelPlugin implements ChannelPlugin {
         encryptionSeed: inst.encryptionSeed,
         owner: inst.owner,
         aunTrace: config.debug?.aunTrace,
+        aunSdkLog: config.debug?.aunSdkLog,
       });
 
       const adapter = {

@@ -8,6 +8,8 @@ interface ThoughtPayload {
   stage: string;
   format?: string;
   metadata?: Record<string, any>;
+  task_id?: string;
+  chatmode?: string;
 }
 
 /**
@@ -17,21 +19,24 @@ interface ThoughtPayload {
  * - 不做聚合/batching，逐事件调用 adapter.putThought()
  * - 不感知 group vs P2P，通道差异由 adapter 内部处理
  * - taskId 映射为 context: { type: 'task', id: taskId }（协议 selector）
+ *   同时写入 payload.task_id / payload.chatmode，与 message.send/group.send 保持一致
  * - fire-and-forget：调用方不 await emit()，错误被内部捕获
  */
 export class ThoughtEmitter {
   private adapter: ChannelAdapter;
   private channelId: string;
   private taskId: string;
+  private chatmode: string;
   private hasEmittedText = false;
 
-  constructor(adapter: ChannelAdapter, channelId: string, taskId: string) {
+  constructor(adapter: ChannelAdapter, channelId: string, taskId: string, chatmode: string = 'proactive') {
     if (!taskId) {
       throw new Error('[ThoughtEmitter] taskId is required at construction');
     }
     this.adapter = adapter;
     this.channelId = channelId;
     this.taskId = taskId;
+    this.chatmode = chatmode;
   }
 
   async emit(event: AgentEvent): Promise<void> {
@@ -52,6 +57,10 @@ export class ThoughtEmitter {
     if (payload.stage === 'thinking') {
       this.hasEmittedText = true;
     }
+
+    // payload 也带上 task_id / chatmode（与 message.send/group.send 对齐）
+    payload.task_id = this.taskId;
+    payload.chatmode = this.chatmode;
 
     try {
       await this.adapter.putThought(this.channelId, this.taskId, payload);
