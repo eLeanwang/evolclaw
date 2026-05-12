@@ -495,6 +495,37 @@ async function cmdStatus() {
           LIMIT 5
         `).all() as Array<{ id: string; project_path: string; name: string | null; channel: string; chat_type: string; thread_id: string; agent_session_id: string | null; agent_id: string | null; metadata: string | null; updated_at: number }>;
 
+        // Detect orphan sessions (channel no longer in config)
+        let orphanCount = 0;
+        try {
+          const config = loadConfig(p.config);
+          const configChannelNames = new Set<string>();
+          const channels = (config.channels as any) || {};
+          for (const [type, raw] of Object.entries(channels)) {
+            if (type === 'defaultChannel') continue;
+            const instances = Array.isArray(raw) ? raw : [raw];
+            for (const inst of instances) {
+              if (!inst || typeof inst !== 'object') continue;
+              const name = (inst as any).name ?? type;
+              configChannelNames.add(name);
+            }
+          }
+
+          const dbChannels = db.prepare(`
+            SELECT DISTINCT channel FROM sessions WHERE deleted_at IS NULL
+          `).all() as Array<{ channel: string }>;
+
+          for (const row of dbChannels) {
+            if (!configChannelNames.has(row.channel)) {
+              const count = db.prepare(`
+                SELECT COUNT(*) as c FROM sessions
+                WHERE channel = ? AND deleted_at IS NULL
+              `).get(row.channel) as { c: number };
+              orphanCount += count.c;
+            }
+          }
+        } catch {}
+
         db.close();
 
         if (recentSessions.length > 0) {
@@ -512,6 +543,11 @@ async function cmdStatus() {
             const agentType = s.agent_id || 'claude';
             console.log(`  ${dot} [${agentType}] ${projectName} / ${sessionName} (${sessionType}, ${chatType})${agentId} - ${timeAgo}`);
           }
+        }
+
+        if (orphanCount > 0) {
+          console.log('');
+          console.log(`⚠ Orphan sessions: ${orphanCount}`);
         }
       } catch {}
     }
