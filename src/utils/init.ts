@@ -521,7 +521,7 @@ export async function cmdInit(options?: {
     const config = JSON.parse(fs.readFileSync(sampleSrc, 'utf-8'));
     config.projects.defaultPath = defaultPath;
     config.projects.list = { [path.basename(defaultPath)]: defaultPath };
-    config.agents.anthropic.model = model;
+    config.agents.claude.model = model;
 
     let channelConfigured = false;
     while (!channelConfigured) {

@@ -384,13 +384,13 @@ export class AgentRunner {
       const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
 
       // evolclaw.json 显式配置优先，不被 settings.json 覆盖
-      const configModel = this.config?.agents?.anthropic?.model;
+      const configModel = this.config?.agents?.claude?.model;
       if (!configModel && settings.model && settings.model !== this.model) {
         logger.info(`[AgentRunner] Synced model from ~/.claude/settings.json: ${settings.model}`);
         this.model = settings.model;
       }
 
-      const configEffort = this.config?.agents?.anthropic?.effort;
+      const configEffort = this.config?.agents?.claude?.effort;
       if (!configEffort) {
         const newEffort = settings.effortLevel || undefined;
         if (newEffort !== this.effort) {
@@ -913,9 +913,9 @@ export class AgentRunner {
       };
     };
 
-    const useSettingSources = this.config?.agents?.anthropic?.useSettingSources !== false;
-    const enableSummaries = this.config?.agents?.anthropic?.agentProgressSummaries !== false;
-    const excludeDynamic = this.config?.agents?.anthropic?.excludeDynamicSections === true;
+    const useSettingSources = this.config?.agents?.claude?.useSettingSources !== false;
+    const enableSummaries = this.config?.agents?.claude?.agentProgressSummaries !== false;
+    const excludeDynamic = this.config?.agents?.claude?.excludeDynamicSections === true;
 
     // 公共 options（新旧模式共用）
     const sdkPermissionMode = this.toSdkPermissionMode();

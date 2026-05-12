@@ -1,5 +1,13 @@
 # Changelog
 
+## v2.7.0 (2026-05-13)
+
+### Breaking Changes
+
+- **Config key rename** — `evolclaw.json` 的 `agents.anthropic` / `agents.openai` / `agents.google` 重命名为 `agents.claude` / `agents.codex` / `agents.gemini`，与 runner name 对齐。用户需手动迁移配置。
+
+---
+
 ## v2.6.4 (2026-05-11)
 
 ### New Features

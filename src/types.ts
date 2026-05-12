@@ -106,7 +106,7 @@ export interface WecomChannelInstanceConfig extends WecomChannelConfig {
 
 export interface Config {
   agents?: {
-    anthropic?: {
+    claude?: {
       apiKey?: string;
       baseUrl?: string;
       model?: string;
@@ -116,14 +116,14 @@ export interface Config {
       agentProgressSummaries?: boolean;   // 启用 AI 生成的子任务进度摘要，默认 true
       excludeDynamicSections?: boolean;   // 从 system prompt 移除动态内容以提升跨用户 prompt cache 命中率，默认 false
     };
-    openai?: {
+    codex?: {
       apiKey?: string;
       baseUrl?: string;
       model?: string;     // 默认 'gpt-5.2-codex'
       effort?: string;    // 推理强度: low / medium / high / max
       reasoning?: string; // 别名（兼容旧配置）
     };
-    google?: {
+    gemini?: {
       apiKey?: string;       // GEMINI_API_KEY（可选，CLI 有 OAuth）
       model?: string;        // 默认 'gemini-2.5-flash'
       cliPath?: string;      // gemini CLI 路径（可选，默认 PATH 查找）

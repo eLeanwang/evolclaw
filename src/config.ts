@@ -64,7 +64,7 @@ export function resolveAnthropicConfig(config: Config): AnthropicResolved {
   const settings = loadClaudeSettings();
 
   // 过滤占位符，视为未配置
-  const configApiKey = config.agents?.anthropic?.apiKey;
+  const configApiKey = config.agents?.claude?.apiKey;
   const isPlaceholderKey = !configApiKey ||
     configApiKey.includes('your-') ||
     configApiKey.includes('placeholder');
@@ -75,27 +75,27 @@ export function resolveAnthropicConfig(config: Config): AnthropicResolved {
 
   if (!apiKey) {
     throw new Error(
-      'No API key found. Set one of: agents.anthropic.apiKey, env ANTHROPIC_AUTH_TOKEN, or ~/.claude/settings.json env.ANTHROPIC_AUTH_TOKEN'
+      'No API key found. Set one of: agents.claude.apiKey, env ANTHROPIC_AUTH_TOKEN, or ~/.claude/settings.json env.ANTHROPIC_AUTH_TOKEN'
     );
   }
 
   // baseUrl 也过滤占位符
-  const configBaseUrl = config.agents?.anthropic?.baseUrl;
+  const configBaseUrl = config.agents?.claude?.baseUrl;
   const isPlaceholderUrl = configBaseUrl?.includes('api.anthropic.com');
 
   const baseUrl = (isPlaceholderUrl ? null : configBaseUrl)
     || process.env.ANTHROPIC_BASE_URL
     || settings.env?.ANTHROPIC_BASE_URL;
 
-  const model = config.agents?.anthropic?.model
+  const model = config.agents?.claude?.model
     || settings.model
     || 'sonnet';
 
-  const effort = config.agents?.anthropic?.effort
+  const effort = config.agents?.claude?.effort
     || settings.effortLevel
     || undefined;
 
-  const configExecPath = config.agents?.anthropic?.pathToClaudeCodeExecutable;
+  const configExecPath = config.agents?.claude?.pathToClaudeCodeExecutable;
   const isPlaceholderExec = !configExecPath || configExecPath.includes('your-') || configExecPath.includes('placeholder');
   const pathToClaudeCodeExecutable = isPlaceholderExec ? undefined : configExecPath;
 
@@ -113,7 +113,7 @@ export function resolveOpenaiConfig(config: Config): OpenaiResolved {
   const codexSettings = loadCodexSettings();
 
   // 过滤占位符，视为未配置
-  const configApiKey = config.agents?.openai?.apiKey;
+  const configApiKey = config.agents?.codex?.apiKey;
   const isPlaceholderKey = !configApiKey ||
     configApiKey.includes('your-') ||
     configApiKey.includes('placeholder');
@@ -124,12 +124,12 @@ export function resolveOpenaiConfig(config: Config): OpenaiResolved {
 
   if (!apiKey) {
     throw new Error(
-      'No OpenAI API key found. Set one of: agents.openai.apiKey, env OPENAI_API_KEY, or ~/.codex/auth.json'
+      'No OpenAI API key found. Set one of: agents.codex.apiKey, env OPENAI_API_KEY, or ~/.codex/auth.json'
     );
   }
 
   // baseUrl 也过滤占位符（与 anthropic 保持一致：只检查默认域名）
-  const configBaseUrl = config.agents?.openai?.baseUrl;
+  const configBaseUrl = config.agents?.codex?.baseUrl;
   const isPlaceholderUrl = configBaseUrl?.includes('api.openai.com');
 
   const baseUrl = (isPlaceholderUrl ? null : configBaseUrl)
@@ -137,11 +137,11 @@ export function resolveOpenaiConfig(config: Config): OpenaiResolved {
     || codexSettings.baseUrl
     || undefined;
 
-  const model = config.agents?.openai?.model
+  const model = config.agents?.codex?.model
     || codexSettings.model
     || 'gpt-5.2-codex';
 
-  const effort = config.agents?.openai?.effort || config.agents?.openai?.reasoning || undefined;
+  const effort = config.agents?.codex?.effort || config.agents?.codex?.reasoning || undefined;
 
   return { apiKey, baseUrl, model, effort };
 }
@@ -159,7 +159,7 @@ export interface GoogleResolved {
 }
 
 export function resolveGoogleConfig(config: Config): GoogleResolved {
-  const googleCfg = config.agents?.google;
+  const googleCfg = config.agents?.gemini;
 
   // CLI path: config → which gemini
   let cliPath = googleCfg?.cliPath || '';
@@ -510,8 +510,8 @@ export function ensureDir(dirPath: string): void {
   }
 }
 
-// agents.defaultAgent → config key 映射
-const agentKeyMap: Record<string, string> = { claude: 'anthropic', codex: 'openai', gemini: 'google' };
+// agents.defaultAgent → config key 映射（现在直接对应，保留映射以兼容将来别名扩展）
+const agentKeyMap: Record<string, string> = { claude: 'claude', codex: 'codex', gemini: 'gemini' };
 
 /**
  * 配置结构完整性校验（不校验凭据有效性）。

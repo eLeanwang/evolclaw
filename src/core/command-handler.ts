@@ -1127,11 +1127,11 @@ export class CommandHandler {
       // evolclaw.json 配了 → 写 evolclaw.json
       // evolclaw.json 没配 → 写 agent 全局配置
       if (isCodexAgent) {
-        const configuredInEvolclaw = !!(this.config.agents?.openai?.model || this.config.agents?.openai?.reasoning);
+        const configuredInEvolclaw = !!(this.config.agents?.codex?.model || this.config.agents?.codex?.reasoning);
         if (configuredInEvolclaw) {
-          if (!this.config.agents!.openai) this.config.agents!.openai = {};
-          if (newModel) this.config.agents!.openai.model = newModel;
-          if (newEffort) this.config.agents!.openai.reasoning = newEffort;
+          if (!this.config.agents!.codex) this.config.agents!.codex = {};
+          if (newModel) this.config.agents!.codex.model = newModel;
+          if (newEffort) this.config.agents!.codex.reasoning = newEffort;
           try {
             saveConfig(this.config);
           } catch (error: any) {
@@ -1139,9 +1139,9 @@ export class CommandHandler {
           }
         } else {
           // Codex 全局配置（~/.codex/config.toml）目前不支持写入，回退到 evolclaw.json
-          if (!this.config.agents!.openai) this.config.agents!.openai = {};
-          if (newModel) this.config.agents!.openai.model = newModel;
-          if (newEffort) this.config.agents!.openai.reasoning = newEffort;
+          if (!this.config.agents!.codex) this.config.agents!.codex = {};
+          if (newModel) this.config.agents!.codex.model = newModel;
+          if (newEffort) this.config.agents!.codex.reasoning = newEffort;
           try {
             saveConfig(this.config);
           } catch (error: any) {
@@ -1149,11 +1149,11 @@ export class CommandHandler {
           }
         }
       } else {
-        const configuredInEvolclaw = !!(this.config.agents?.anthropic?.model || this.config.agents?.anthropic?.effort);
+        const configuredInEvolclaw = !!(this.config.agents?.claude?.model || this.config.agents?.claude?.effort);
         if (configuredInEvolclaw) {
-          if (!this.config.agents!.anthropic) this.config.agents!.anthropic = {};
-          if (newModel) this.config.agents!.anthropic.model = newModel;
-          if (newEffort) this.config.agents!.anthropic.effort = newEffort as any;
+          if (!this.config.agents!.claude) this.config.agents!.claude = {};
+          if (newModel) this.config.agents!.claude.model = newModel;
+          if (newEffort) this.config.agents!.claude.effort = newEffort as any;
           try {
             saveConfig(this.config);
           } catch (error: any) {
@@ -1256,14 +1256,14 @@ export class CommandHandler {
 
         const isCodex = effortAgent.name === 'codex';
         if (isCodex) {
-          if (this.config.agents?.openai?.reasoning) {
-            delete this.config.agents.openai.reasoning;
+          if (this.config.agents?.codex?.reasoning) {
+            delete this.config.agents.codex.reasoning;
             try { saveConfig(this.config); } catch {}
           }
         } else {
-          const configuredInEvolclaw = !!this.config.agents?.anthropic?.effort;
+          const configuredInEvolclaw = !!this.config.agents?.claude?.effort;
           if (configuredInEvolclaw) {
-            delete (this.config.agents!.anthropic as any).effort;
+            delete (this.config.agents!.claude as any).effort;
             try { saveConfig(this.config); } catch {}
           } else {
             writeUserSettings({ effortLevel: null });
@@ -1288,14 +1288,14 @@ export class CommandHandler {
       if (!this.config.agents) this.config.agents = {};
       const isCodex = effortAgent.name === 'codex';
       if (isCodex) {
-        if (!this.config.agents.openai) this.config.agents.openai = {};
-        this.config.agents.openai.reasoning = newEffort;
+        if (!this.config.agents.codex) this.config.agents.codex = {};
+        this.config.agents.codex.reasoning = newEffort;
         try { saveConfig(this.config); } catch {}
       } else {
-        const configuredInEvolclaw = !!(this.config.agents?.anthropic?.model || this.config.agents?.anthropic?.effort);
+        const configuredInEvolclaw = !!(this.config.agents?.claude?.model || this.config.agents?.claude?.effort);
         if (configuredInEvolclaw) {
-          if (!this.config.agents.anthropic) this.config.agents.anthropic = {};
-          this.config.agents.anthropic.effort = newEffort as any;
+          if (!this.config.agents.claude) this.config.agents.claude = {};
+          this.config.agents.claude.effort = newEffort as any;
           try { saveConfig(this.config); } catch {}
         } else {
           writeUserSettings({ effortLevel: newEffort });

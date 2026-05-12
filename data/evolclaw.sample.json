@@ -1,6 +1,6 @@
 {
   "agents": {
-    "anthropic": {
+    "claude": {
       "apiKey": "",
       "baseUrl": "",
       "model": "sonnet",
@@ -8,13 +8,13 @@
       "useSettingSources": true,
       "agentProgressSummaries": true
     },
-    "openai": {
+    "codex": {
       "apiKey": "",
       "baseUrl": "",
       "model": "gpt-5.2-codex",
       "effort": "medium"
     },
-    "google": {
+    "gemini": {
       "apiKey": "",
       "baseUrl": "",
       "model": "gemini-2.5-flash",
