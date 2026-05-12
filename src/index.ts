@@ -26,6 +26,7 @@ import { AgentLoader } from './core/agent-loader.js';
 import { IpcServer, IpcStatusResponse, ChannelStatus } from './ipc.js';
 import { ChannelAdapter, Message } from './types.js';
 import { logger } from './utils/logger.js';
+import { detectDuplicates } from './utils/channel-fingerprint.js';
 import { loadPromptTemplates } from './prompts/templates.js';
 import path from 'path';
 import fs from 'fs';
@@ -77,6 +78,15 @@ async function main() {
 
   // Channel instance name uniqueness check
   validateChannelInstanceNames(config);
+
+  // Detect duplicate channel credentials
+  const duplicates = detectDuplicates(config);
+  for (const d of duplicates) {
+    logger.warn(
+      `⚠ Duplicate channel credential: ${d.fingerprint} is used by instances [${d.instances.join(', ')}]. ` +
+      `Only the first instance will be active.`
+    );
+  }
 
   if (anthropic.baseUrl) {
     logger.info(`✓ Using custom API base URL: ${anthropic.baseUrl}`);
