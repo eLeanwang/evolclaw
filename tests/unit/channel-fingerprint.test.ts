@@ -80,4 +80,15 @@ describe('detectDuplicates', () => {
     };
     expect(detectDuplicates(config as any)).toEqual([]);
   });
+
+  it('does not report duplicate when same appId appears in different channel types', () => {
+    const config = {
+      channels: {
+        feishu: [{ name: 'f1', appId: 'X', appSecret: 's' }],
+        qqbot: [{ name: 'q1', appId: 'X', clientSecret: 's' }],
+      },
+    };
+    // feishu:X and qqbot:X are different fingerprints, not duplicates
+    expect(detectDuplicates(config as any)).toEqual([]);
+  });
 });

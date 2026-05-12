@@ -81,11 +81,13 @@ async function main() {
 
   // Detect duplicate channel credentials
   const duplicates = detectDuplicates(config);
-  for (const d of duplicates) {
-    logger.warn(
-      `⚠ Duplicate channel credential: ${d.fingerprint} is used by instances [${d.instances.join(', ')}]. ` +
-      `Only the first instance will be active.`
-    );
+  if (duplicates.length > 0) {
+    for (const d of duplicates) {
+      logger.warn(
+        `⚠ Duplicate channel credential: ${d.fingerprint} is used by instances [${d.instances.join(', ')}]. ` +
+        `Only the first instance will be active.`
+      );
+    }
   }
 
   if (anthropic.baseUrl) {
