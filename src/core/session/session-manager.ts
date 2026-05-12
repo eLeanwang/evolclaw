@@ -375,6 +375,28 @@ export class SessionManager {
       }
     }
 
+    // Migration: readonly 模式已暂时禁用，历史会话统一转为 noask
+    if (hasMetadata && tableInfo.length > 0) {
+      const rows = this.db.prepare(
+        `SELECT id, metadata FROM sessions WHERE metadata IS NOT NULL AND metadata != ''`
+      ).all() as { id: string; metadata: string }[];
+      let migratedPerm = 0;
+      for (const row of rows) {
+        try {
+          const meta = JSON.parse(row.metadata);
+          if (meta.permissionMode === 'readonly') {
+            meta.permissionMode = 'noask';
+            this.db.prepare('UPDATE sessions SET metadata = ? WHERE id = ?')
+              .run(JSON.stringify(meta), row.id);
+            migratedPerm++;
+          }
+        } catch { /* skip malformed JSON */ }
+      }
+      if (migratedPerm > 0) {
+        logger.info(`✓ Migrated ${migratedPerm} session(s): permissionMode readonly → noask`);
+      }
+    }
+
     // 创建新表（首次初始化）
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS sessions (
@@ -531,7 +553,7 @@ export class SessionManager {
       session.identity = this.resolveIdentity(channel, userId);
       // 新话题会话补写默认权限模式
       if (session.metadata && !session.metadata.permissionMode) {
-        session.metadata.permissionMode = session.identity?.role === 'owner' ? 'bypass' : 'readonly';
+        session.metadata.permissionMode = session.identity?.role === 'owner' ? 'bypass' : session.identity?.role === 'admin' ? 'auto' : 'noask';
         this.db.prepare(`UPDATE sessions SET metadata = ?, updated_at = ? WHERE id = ?`)
           .run(JSON.stringify(session.metadata), Date.now(), session.id);
       }
@@ -641,7 +663,7 @@ export class SessionManager {
     session.identity = this.resolveIdentity(channel, userId);
     // 写入默认权限模式（基于角色，只在首次创建时设置）
     if (!sessionMetadata.permissionMode) {
-      sessionMetadata.permissionMode = session.identity?.role === 'owner' ? 'bypass' : 'readonly';
+      sessionMetadata.permissionMode = session.identity?.role === 'owner' ? 'bypass' : session.identity?.role === 'admin' ? 'auto' : 'noask';
     }
 
     this.insertSession(session);

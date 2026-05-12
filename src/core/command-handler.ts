@@ -801,7 +801,7 @@ export class CommandHandler {
         if (!hasPermissionController(permAgent)) {
           return '❌ 权限控制不可用';
         }
-        const defaultPermMode = identity.role === 'owner' ? 'bypass' : 'readonly';
+        const defaultPermMode = identity.role === 'owner' ? 'bypass' : identity.role === 'admin' ? 'auto' : 'noask';
         const currentMode = permSession.metadata?.permissionMode ?? defaultPermMode;
         const modes = permAgent.listModes();
 

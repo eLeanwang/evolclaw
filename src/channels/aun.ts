@@ -968,14 +968,17 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     };
 
     try {
+      const stage = (payload as any)?.stage ?? 'unknown';
       if (this.isGroupId(channelId)) {
         params.group_id = targetId;
         this.trace('OUT', 'group.thought.put', params);
         await this.client.call('group.thought.put', params);
+        logger.debug(`[AUN] thought.put ok group=${targetId} task=${taskId} stage=${stage}`);
       } else {
         params.to = targetId;
         this.trace('OUT', 'message.thought.put', params);
         await this.client.call('message.thought.put', params);
+        logger.debug(`[AUN] thought.put ok p2p=${targetId} task=${taskId} stage=${stage}`);
       }
     } catch (e) {
       const err = e as any;
@@ -1184,6 +1187,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       this.trace('OUT', 'message.send.status', params);
       sendWithFallback('message.send');
     }
+    logger.info(`[AUN] task.${status} task=${taskId} session=${sessionId} target=${channelId}`);
   }
 
   sendCustomPayload(channelId: string, payload: string): void {

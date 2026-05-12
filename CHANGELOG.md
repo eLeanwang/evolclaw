@@ -1,5 +1,20 @@
 # Changelog
 
+## v2.6.4 (2026-05-11)
+
+### New Features
+
+- **Prompt 模板化** — 系统提示从硬编码迁移到模板文件（`src/templates/prompts.md`），支持用户级覆盖（`{EVOLCLAW_HOME}/data/prompts.md`）；`runtime`/`group`/`proactive` 三段分别控制，支持 `{{var}}` 变量和 `{{?cond}}…{{/}}` 条件段
+- **Gemini noask 模式** — 映射到 `--approval-mode=default`，Gemini CLI 现支持静默模式
+
+### Improvements
+
+- **Readonly 模式暂时禁用** — 所有 Agent 后端（Claude/Codex/Gemini）下线 `readonly` 权限模式，与 proactive 模式系统提示词语义冲突；READONLY_WRITE_PATTERNS 未覆盖 `evolclaw ctl send/file`，契约不稳固
+- **默认权限模式调整** — 新逻辑：`owner → bypass / admin → auto / guest → noask`（历史会话 `readonly` 自动迁移至 `noask`）
+- **日志可观测性增强** — MessageProcessor 事件日志附带 text/tool 摘要；AUN `thought.put` 成功/失败、`task.status` 发送均有结构化日志；ThoughtEmitter 创建时记录 channel/task/chatmode
+
+---
+
 ## v2.6.3 (2026-05-11)
 
 ### New Features

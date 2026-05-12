@@ -15,6 +15,7 @@ import { summarizeToolInput } from '../permission.js';
 import type { Message, Config, Session, ChannelAdapter, ChannelOptions, ChannelPolicy, CommandHandler, ReplyContext } from '../../types.js';
 import { getOwner } from '../../config.js';
 import { getPackageRoot, resolveRoot } from '../../paths.js';
+import { renderPromptSection } from '../../prompts/templates.js';
 import type { InteractionRouter } from '../interaction-router.js';
 
 /**
@@ -345,7 +346,7 @@ export class MessageProcessor {
       const imageInfo = message.images && message.images.length > 0 ? ` [${message.images.length} image(s)]` : '';
       const modeInfo = isBackground ? ' [\u540e\u53f0]' : '';
       logger.info(`[${message.channel}] ${message.channelId}: ${message.content}${imageInfo}${modeInfo}`);
-      logger.info(`[MessageProcessor] session=${session.id} chatType=${session.chatType} sessionMode=${session.sessionMode} agentId=${session.agentId} msgChatType=${message.chatType ?? 'n/a'}`);
+      logger.info(`[MessageProcessor] session=${session.id} task=${taskId} chatType=${session.chatType} sessionMode=${session.sessionMode} agentId=${session.agentId} msgChatType=${message.chatType ?? 'n/a'}`);
 
       // 记录开始处理
       this.eventBus.publish({ type: 'message:processing', sessionId: session.id });
@@ -396,6 +397,10 @@ export class MessageProcessor {
       // 保存当前 flusher，用于 compact 事件
       this.currentFlusher = flusher;
 
+      if (isProactive) {
+        logger.info(`[MessageProcessor] proactive mode: flusher silent, outputs via thought.put task=${taskId}`);
+      }
+
       // Proactive 模式可观测：创建 ThoughtEmitter，将静默的流式事件转发为 thought
       // selector: context = { type: 'task', id: taskId }
       if (isProactive && adapter.putThought) {
@@ -432,9 +437,9 @@ export class MessageProcessor {
           : undefined,
       });
 
-      // 设置 per-session 权限模式（动态默认值：owner → bypass，admin → auto，guest → readonly）
+      // 设置 per-session 权限模式（动态默认值：owner → bypass，admin → auto，guest → noask）
       const role = session.identity?.role;
-      const defaultPermMode = role === 'owner' ? 'bypass' : role === 'admin' ? 'auto' : 'readonly';
+      const defaultPermMode = role === 'owner' ? 'bypass' : role === 'admin' ? 'auto' : 'noask';
       agent.setMode(session.metadata?.permissionMode ?? defaultPermMode);
 
       // 标记会话为处理中（实时持久化，重启后可恢复）
@@ -454,8 +459,7 @@ export class MessageProcessor {
         const contextParts: string[] = [];
         const currentChannelType = options?.channelType || message.channel;
 
-        // 1. 当前环境信息
-        const peerLabel = session.identity?.role || 'unknown';
+        // 1. 构建模板变量并渲染 runtime 段
         const peerName = message.peerName || session.metadata?.peerName;
         const peerType = message.peerType;
         const peerId = message.peerId;
@@ -471,80 +475,55 @@ export class MessageProcessor {
         };
         const selfIdentity = formatIdentity(selfName, selfAid);
         const peerIdentity = formatIdentity(peerName, peerId);
-        const envParts = [
-          `会话通道: ${currentChannelType}`,
-          `当前项目: ${path.basename(absoluteProjectPath)}`,
-        ];
-        if (session.name) envParts.push(`会话名称: ${session.name}`);
-        if (selfIdentity) envParts.push(`当前名称: ${selfIdentity}`);
-        envParts.push(`对端身份: ${peerLabel}`);
-        if (peerIdentity) envParts.push(`对端名称: ${peerIdentity}`);
-        if (peerType && peerType !== 'unknown') envParts.push(`对端类型: ${peerType}`);
-        if (session.chatType) envParts.push(`聊天类型: ${session.chatType}`);
-        if (session.agentId && session.agentId !== 'claude') envParts.push(`当前Agent: ${session.agentId}`);
-        contextParts.push(`[当前环境] ${envParts.join(' | ')}`);
 
-        // 只读模式提示
-        if (session.metadata?.permissionMode === 'readonly') {
-          const sendHint = isProactive
-            ? '使用 evolclaw ctl file 发送'
-            : '使用 [SEND_FILE:] 发送';
-          contextParts.push(`[只读模式] 禁止修改项目文件。如需生成文件供用户下载，请写入 .evolclaw/tmp/ 目录后${sendHint}`);
-        }
-
-        // 2. 文件发送能力（按 channelType 去重，提示词只展示第一级通道名）
-        // proactive 模式：不推送 [SEND_FILE:] 提示，统一通过 evolclaw ctl file 显式发送（与 ctl send 契约一致）
+        // 文件发送能力（按 channelType 去重）
+        let crossChannelTypes: string[] = [];
+        let currentCanSend = false;
         if (!isProactive) {
           const fileChannelTypes = new Set<string>();
-          const currentCanSend = !!channelInfo.adapter.sendFile;
+          currentCanSend = !!channelInfo.adapter.sendFile;
           for (const [, info] of this.channels) {
             if (info.adapter.sendFile) {
               fileChannelTypes.add(info.options?.channelType || info.adapter.channelName);
             }
           }
-          const crossChannelTypes = [...fileChannelTypes].filter(t => t !== currentChannelType);
-          if (currentCanSend || crossChannelTypes.length > 0) {
-            const hints: string[] = [];
-            if (currentCanSend) hints.push(`[SEND_FILE:路径] 发送文件到当前通道`);
-            if (crossChannelTypes.length > 0) hints.push(`[SEND_FILE:${crossChannelTypes[0]}:路径] 发送文件到指定通道（可用: ${crossChannelTypes.join('/')}）`);
-            contextParts.push(hints.join('，'));
-          }
+          crossChannelTypes = [...fileChannelTypes].filter(t => t !== currentChannelType);
         }
 
-        // 3. 当前通道能力
+        // 通道能力
         const capParts: string[] = [];
         if (options?.supportsImages) capParts.push('图片输入');
         if (channelInfo.adapter.sendImage) capParts.push('图片输出');
         if (channelInfo.adapter.sendFile) capParts.push('文件发送');
-        if (capParts.length > 0) {
-          contextParts.push(`[通道能力] ${capParts.join('、')}`);
-        }
 
-        // 4. 群聊 @ 规则：告知 agent 应该 @ 谁，由 agent 自行在回复中添加
+        contextParts.push(renderPromptSection('runtime', {
+          channel: currentChannelType,
+          project: path.basename(absoluteProjectPath),
+          sessionName: session.name || '',
+          selfIdentity: selfIdentity || '',
+          peerRole: session.identity?.role || 'unknown',
+          peerIdentity: peerIdentity || '',
+          peerType: peerType && peerType !== 'unknown' ? peerType : '',
+          chatType: session.chatType || '',
+          agent: session.agentId && session.agentId !== 'claude' ? session.agentId : '',
+          readonly: session.metadata?.permissionMode === 'readonly',
+          readonlySendHint: isProactive ? '使用 evolclaw ctl file 发送' : '使用 [SEND_FILE:] 发送',
+          fileSendCurrent: !isProactive && currentCanSend,
+          fileSendCross: !isProactive && crossChannelTypes.length > 0,
+          crossPrimary: crossChannelTypes[0] || '',
+          crossTypes: crossChannelTypes.join('/'),
+          capability: capParts.length > 0,
+          capabilities: capParts.join('、'),
+        }));
+
+        // 2. 群聊 @ 规则
         if (message.chatType === 'group' && message.peerId) {
-          contextParts.push(`[群聊回复规则] 回复时必须在开头添加 @${message.peerId} 来通知对方`);
+          contextParts.push(renderPromptSection('group', { peerId: message.peerId }));
         }
 
-        // 5. Agent ctl 自管理指令提示 + SKILLS.md 生成
-        // 暂时注释：排查 proactive 模式下 agent 未调用 Bash 工具的问题，
-        // 怀疑此段与 [Proactive 模式] 语义重合稀释了后者的权重
-        // if (!this.skillsEnsured) {
-        //   this.ensureSkillsFile();
-        //   this.skillsEnsured = true;
-        // }
-        // const skillsHint = this.getSkillsHint();
-        // if (skillsHint) {
-        //   contextParts.push(`[EvolClaw 自管理] ${skillsHint}`);
-        // }
-
-        // 6. Proactive 模式提示词：agent 的输出不会自动发送，必须主动调用 ctl send/file
+        // 3. Proactive 模式提示词
         if (isProactive) {
-          contextParts.push(
-            '[Proactive 模式] 本次对话中你的流式输出不会自动发送给用户，必须通过以下命令主动发送：\n' +
-            '- 发送文本：evolclaw ctl send "<消息内容>"\n' +
-            '- 发送文件：evolclaw ctl file <路径>\n' +
-            '可多次调用。如不调用，用户将看不到任何回复。'
-          );
+          contextParts.push(renderPromptSection('proactive', {}));
         }
 
         const effectiveSystemPrompt = [options?.systemPromptAppend, ...contextParts].filter(Boolean).join('\n') || undefined;
@@ -961,8 +940,23 @@ export class MessageProcessor {
       const toolName = event.type === 'tool_use' ? event.name : undefined;
       resetTimer(event.type, toolName);
 
-      // 记录所有事件类型
-      logger.info(`[MessageProcessor] Event: type=${event.type}`);
+      // 记录所有事件类型（text / tool_use 附带摘要，便于排查）
+      let eventDetail = '';
+      if (event.type === 'text' && event.text) {
+        const preview = event.text.replace(/\s+/g, ' ').slice(0, 80);
+        eventDetail = ` text="${preview}${event.text.length > 80 ? '…' : ''}"`;
+      } else if (event.type === 'tool_use') {
+        const input = (event as any).input;
+        const desc = input?.description
+          || input?.file_path
+          || input?.pattern
+          || (typeof input?.command === 'string' ? input.command.slice(0, 80) : '')
+          || (typeof input?.prompt === 'string' ? input.prompt.slice(0, 80) : '')
+          || (typeof input?.query === 'string' ? input.query.slice(0, 80) : '')
+          || '';
+        eventDetail = ` tool=${event.name}${desc ? ` desc="${desc}"` : ''}`;
+      }
+      logger.info(`[MessageProcessor] Event: type=${event.type}${eventDetail}`);
 
       // Proactive 可观测：将事件实时透传为 thought（fire-and-forget）
       if (thoughtEmitter) {

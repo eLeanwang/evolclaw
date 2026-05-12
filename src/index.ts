@@ -26,6 +26,7 @@ import { AgentLoader } from './core/agent-loader.js';
 import { IpcServer, IpcStatusResponse, ChannelStatus } from './ipc.js';
 import { ChannelAdapter, Message } from './types.js';
 import { logger } from './utils/logger.js';
+import { loadPromptTemplates } from './prompts/templates.js';
 import path from 'path';
 import fs from 'fs';
 
@@ -53,6 +54,9 @@ async function main() {
 
   // 确保数据目录存在
   ensureDataDirs();
+
+  // 加载提示词模板
+  loadPromptTemplates();
 
   // 加载配置
   const config = loadConfig();

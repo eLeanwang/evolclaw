@@ -333,6 +333,8 @@ export class AgentRunner {
   }
 
   listModes(): PermissionModeInfo[] {
+    // readonly 模式暂时禁用：与 proactive 模式系统提示词存在语义冲突，
+    // 且 READONLY_WRITE_PATTERNS 未覆盖 evolclaw ctl send/file，契约不稳固
     return [
       { key: 'auto', nameZh: '自动', description: 'AI 分类器自动判断', available: true },
       { key: 'bypass', nameZh: '放行', description: '全部自动放行', available: true },
@@ -340,7 +342,6 @@ export class AgentRunner {
       { key: 'edit', nameZh: '编辑', description: '自动接受编辑，其他询问', available: true },
       { key: 'plan', nameZh: '规划', description: '只规划不执行', available: true },
       { key: 'noask', nameZh: '静默', description: '未批准则拒绝', available: true },
-      { key: 'readonly', nameZh: '只读', description: '禁止修改项目文件，可在临时目录生成文件', available: true },
     ];
   }
 

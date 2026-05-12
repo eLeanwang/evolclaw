@@ -37,6 +37,7 @@ export class ThoughtEmitter {
     this.channelId = channelId;
     this.taskId = taskId;
     this.chatmode = chatmode;
+    logger.info(`[ThoughtEmitter] created channel=${channelId} task=${taskId} chatmode=${chatmode}`);
   }
 
   async emit(event: AgentEvent): Promise<void> {
