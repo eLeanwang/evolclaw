@@ -152,7 +152,7 @@ evolclaw init aun
 }
 ```
 
-**API 继承机制**：`agents.anthropic` 整个 section 可省略，系统自动按以下优先级继承：
+**API 继承机制**：`agents.claude` 整个 section 可省略，系统自动按以下优先级继承：
 - `apiKey`：配置文件 → `ANTHROPIC_AUTH_TOKEN` 环境变量 → `~/.claude/settings.json`
 - `baseUrl`：配置文件 → `ANTHROPIC_BASE_URL` 环境变量 → `~/.claude/settings.json`
 - `model`：配置文件 → `~/.claude/settings.json` → 默认 `sonnet`

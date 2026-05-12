@@ -16,7 +16,6 @@
     },
     "gemini": {
       "apiKey": "",
-      "baseUrl": "",
       "model": "gemini-2.5-flash",
       "cliPath": "",
       "mode": "cli"

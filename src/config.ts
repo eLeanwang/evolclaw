@@ -510,9 +510,6 @@ export function ensureDir(dirPath: string): void {
   }
 }
 
-// agents.defaultAgent → config key 映射（现在直接对应，保留映射以兼容将来别名扩展）
-const agentKeyMap: Record<string, string> = { claude: 'claude', codex: 'codex', gemini: 'gemini' };
-
 /**
  * 配置结构完整性校验（不校验凭据有效性）。
  * 要求 agents/channels/projects 三段同时具备必要的锚点字段。
@@ -525,9 +522,8 @@ export function validateConfigIntegrity(config: any): { valid: boolean; reasons:
   if (!defaultAgent) {
     reasons.push('Missing agents.defaultAgent');
   } else {
-    const key = agentKeyMap[defaultAgent] || defaultAgent;
-    if (!config.agents?.[key]) {
-      reasons.push(`agents.defaultAgent='${defaultAgent}' but agents.${key} does not exist`);
+    if (!config.agents?.[defaultAgent]) {
+      reasons.push(`agents.defaultAgent='${defaultAgent}' but agents.${defaultAgent} does not exist`);
     }
   }
 
