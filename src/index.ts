@@ -302,7 +302,9 @@ async function main() {
           await handler({
             channel: channelType, channelId: chatId, content, images, chatType,
             peerId: peerId || '', peerName, messageId, mentions, threadId,
-            replyContext: rootId ? { replyToMessageId: rootId, replyInThread: !!threadId } : undefined,
+            // 只在话题场景（threadId 有值）才设置 replyContext；
+            // 纯引用回复（rootId 有值但无 threadId）不设置，避免所有回复都带引用头
+            replyContext: threadId ? { replyToMessageId: rootId, replyInThread: true } : undefined,
           });
         }),
         (channelId, text, replyContext) => inst.channel.sendMessage(channelId, text, {
