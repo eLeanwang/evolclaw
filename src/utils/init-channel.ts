@@ -818,11 +818,14 @@ export async function createAidSilent(opts: {
   // Download CA root cert (if not already present)
   const caDownloaded = await downloadCaRoot(aunPath, result.gateway || '');
 
-  // Rebuild client with CA cert + AID identity for uploadAgentMd
+  // Rebuild client with CA cert for uploadAgentMd
   const caCertPath = path.join(aunPath, 'CA', 'root', 'root.crt');
   if (caDownloaded && fs.existsSync(caCertPath)) {
     try { await client.close(); } catch { /* ignore */ }
-    client = new AUNClient({ aun_path: aunPath, root_ca_path: caCertPath, aid: opts.aid });
+    client = new AUNClient({ aun_path: aunPath, root_ca_path: caCertPath });
+    // AUNClient 构造函数不会将 aid 传递给内部 AuthFlow，
+    // 必须显式调用 createAid 让 SDK 加载正确的身份（已存在时直接返回）
+    await client.auth.createAid({ aid: opts.aid });
   }
 
   // Set gateway URL for uploadAgentMd
@@ -928,11 +931,12 @@ export async function setupAunAid(rl: readline.Interface, _config: any): Promise
       // 下载 CA 根证书（如果本地不存在），从 SDK 返回的实际网关 URL 派生
       const caDownloaded = await downloadCaRoot(aunPath, result.gateway || '', '  ');
 
-      // 重建 client：传 root_ca_path 以验证 server cert，传 aid 以加载身份
+      // 重建 client：传 root_ca_path 以验证 server cert
       const caCertPath = path.join(aunPath, 'CA', 'root', 'root.crt');
       if (caDownloaded && fs.existsSync(caCertPath)) {
         try { await client.close(); } catch { /* ignore */ }
-        client = new AUNClient({ aun_path: aunPath, root_ca_path: caCertPath, aid });
+        client = new AUNClient({ aun_path: aunPath, root_ca_path: caCertPath });
+        await client.auth.createAid({ aid });
       }
 
       // 设置 gateway URL（从 createAid 返回值或 well-known 自动发现）

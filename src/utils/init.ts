@@ -448,7 +448,10 @@ export async function cmdInit(options?: {
         const caCertPath = path.join(aunPath, 'CA', 'root', 'root.crt');
         if (caDownloaded && fs.existsSync(caCertPath)) {
           try { await client.close(); } catch {}
-          client = new AUNClient({ aun_path: aunPath, root_ca_path: caCertPath, aid: options.aunAid });
+          client = new AUNClient({ aun_path: aunPath, root_ca_path: caCertPath });
+          // AUNClient 构造函数不会将 aid 传递给内部 AuthFlow，
+          // 必须显式调用 createAid 让 SDK 加载正确的身份（已存在时直接返回）
+          await client.auth.createAid({ aid: options.aunAid });
         }
 
         // 写入初始 agent.md（initialized: false）
