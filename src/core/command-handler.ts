@@ -142,7 +142,7 @@ function formatIdleTime(ms: number): string {
 }
 
 // 支持的命令列表
-const commands = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/effort', '/agent', '/slist', '/session', '/rename', '/stop', '/clear', '/compact', '/repair', '/safe', '/fork', '/del', '/perm', '/file', '/check', '/rewind', '/activity', '/aid', '/agentmd', '/chatmode'];
+const commands = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/effort', '/agent', '/slist', '/session', '/rename', '/stop', '/clear', '/compact', '/repair', '/safe', '/fork', '/del', '/perm', '/file', '/check', '/rewind', '/activity', '/aid', '/agentmd', '/chatmode', '/ask'];
 
 // 命令别名映射
 const aliases: Record<string, string> = {
@@ -153,7 +153,7 @@ const aliases: Record<string, string> = {
 };
 
 // 命令快速路径前缀（所有命令都不进入消息队列）
-const quickCommandPrefixes = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/effort', '/agent', '/slist', '/session', '/rename', '/repair', '/fork', '/stop', '/clear', '/compact', '/safe', '/del', '/perm', '/file', '/check', '/p ', '/s ', '/name', '/rewind', '/rw', '/rw ', '/activity', '/chatmode', '/aid', '/agentmd'];
+const quickCommandPrefixes = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/effort', '/agent', '/slist', '/session', '/rename', '/repair', '/fork', '/stop', '/clear', '/compact', '/safe', '/del', '/perm', '/file', '/check', '/p ', '/s ', '/name', '/rewind', '/rw', '/rw ', '/activity', '/chatmode', '/aid', '/agentmd', '/ask'];
 
 export class CommandHandler {
   private adapters = new Map<string, ChannelAdapter>();
@@ -466,6 +466,10 @@ export class CommandHandler {
             { value: 'high', label: 'High' },
             { value: 'max', label: 'Max' },
           ] } },
+          { cmd: '/chatmode', label: '切换会话模式', desc: '控制 Agent 主动性（被动响应或主动推进）', next: { type: 'select', items: [
+            { value: 'interactive', label: '交互模式', desc: '仅在收到消息时响应' },
+            { value: 'proactive', label: '主动模式', desc: 'Agent 可主动推进任务' },
+          ] } },
         ]
       });
 
@@ -588,6 +592,59 @@ export class CommandHandler {
 
     return null;
   }
+
+  /** 菜单 exec 模式：查询状态或执行命令，返回结构化数据 */
+  async execMenu(
+    cmd: string, mode: 'query' | 'update',
+    channel: string, channelId: string, userId?: string
+  ): Promise<{ data: Record<string, any> } | { error: string }> {
+    const session = await this.sessionManager.getActiveSession(channel, channelId);
+    if (!session) return { error: '当前无活跃会话' };
+
+    const trimmed = cmd.trim();
+    const cmdBase = trimmed.split(' ')[0];
+    if (!cmdBase) return { error: '缺少命令' };
+    const arg = trimmed.slice(cmdBase.length).trim();
+
+    if (cmdBase === '/perm') {
+      const currentMode = session.metadata?.permissionMode ?? DEFAULT_PERMISSION_MODE;
+      if (mode === 'query') {
+        return { data: { mode: currentMode } };
+      }
+      // update
+      if (!arg) return { error: '缺少目标模式' };
+      const identity = this.sessionManager.resolveIdentity(channel, userId);
+      if (identity.role !== 'owner') return { error: '无权限' };
+      const permAgent = this.getAgent(session.agentId);
+      const validModes = hasPermissionController(permAgent)
+        ? permAgent.listModes().filter(m => m.available).map(m => m.key)
+        : ['auto', 'bypass', 'plan', 'edit', 'request', 'noask'];
+      if (!validModes.includes(arg)) return { error: `无效模式: ${arg}` };
+      const metadata = { ...(session.metadata || {}), permissionMode: arg };
+      await this.sessionManager.updateSession(session.id, { metadata });
+      return { data: { mode: arg } };
+    }
+
+    if (cmdBase === '/chatmode') {
+      const currentMode = session.sessionMode || 'interactive';
+      if (mode === 'query') {
+        return { data: { mode: currentMode } };
+      }
+      // update
+      if (!arg) return { error: '缺少目标模式' };
+      if (arg !== 'interactive' && arg !== 'proactive') return { error: `无效模式: ${arg}` };
+      const identity = this.sessionManager.resolveIdentity(channel, userId);
+      const chatType = session.chatType || 'private';
+      if (chatType === 'group' && identity.role !== 'owner' && identity.role !== 'admin') {
+        return { error: '无权限：群聊中仅管理员可切换' };
+      }
+      await this.sessionManager.updateSession(session.id, { sessionMode: arg });
+      return { data: { mode: arg } };
+    }
+
+    return { error: `不支持 exec 模式: ${cmdBase}` };
+  }
+
   isCommand(content: string): boolean {
     return content === '/p' || content === '/s' || quickCommandPrefixes.some(cmd => content.startsWith(cmd));
   }
@@ -918,6 +975,31 @@ export class CommandHandler {
       // 双参数不再支持，提示正确用法
       const allModeKeys = hasPermissionController(permAgent) ? permAgent.listModes().map(m => m.key).join('|') : 'auto|bypass|request|edit|plan|noask';
       return `❌ 未知参数: ${args}\n用法: /perm <${allModeKeys}> 或 /perm allow|always|deny`;
+    }
+
+    // /ask 命令：回答 AskUserQuestion / ExitPlanMode 的交互式问题
+    if (normalizedContent.startsWith('/ask')) {
+      const args = normalizedContent.slice(4).trim();
+      if (!args) {
+        // 无参数：列出当前 pending 的交互请求
+        const askResult = await this.ensureSession(channel, channelId, threadId);
+        if ('error' in askResult) return askResult.error;
+        const pendingIds = this.interactionRouter?.getPending(askResult.session.id) || [];
+        if (pendingIds.length === 0) return '当前没有待回答的问题';
+        return `当前有 ${pendingIds.length} 个待回答问题，请回复 /ask <选项>`;
+      }
+
+      const askResult = await this.ensureSession(channel, channelId, threadId);
+      if ('error' in askResult) return askResult.error;
+      const { session: askSession } = askResult;
+
+      const pendingIds = this.interactionRouter?.getPending(askSession.id) || [];
+      if (pendingIds.length === 0) return '❌ 当前没有待回答的问题';
+
+      // 路由到最早的 pending interaction
+      const targetId = pendingIds[0];
+      this.interactionRouter!.handle({ type: 'interaction.response', id: targetId, action: args, operatorId: userId });
+      return `✓ 已回答`;
     }
 
     // /agent 命令：查看或切换 Agent 后端
@@ -3114,6 +3196,7 @@ export class CommandHandler {
    * 从 session 恢复 ReplyContext，用于 ctl send 主动发送文本时的路由
    * - 群聊话题：metadata.replyContext.{threadId,peerId}
    * - 私聊：metadata.peerId
+   * - taskId/chatmode：从 processing_state 和 sessionMode 注入
    */
   private buildCtlReplyContext(session: Session): ReplyContext | undefined {
     const ctx: ReplyContext = {};
@@ -3121,6 +3204,17 @@ export class CommandHandler {
     if (meta?.replyContext?.threadId) ctx.threadId = meta.replyContext.threadId;
     if (meta?.replyContext?.peerId) ctx.peerId = meta.replyContext.peerId;
     if (!ctx.peerId && meta?.peerId) ctx.peerId = meta.peerId;
+
+    const taskId = this.sessionManager.getActiveTaskId(session.id);
+    const chatmode = session.sessionMode || 'interactive';
+    const encrypted = this.sessionManager.getSessionEncrypt(session.id);
+    if (taskId || chatmode !== 'interactive' || encrypted != null) {
+      ctx.metadata = {};
+      if (taskId) ctx.metadata.taskId = taskId;
+      if (chatmode !== 'interactive') ctx.metadata.chatmode = chatmode;
+      if (encrypted != null) ctx.metadata.encrypted = encrypted;
+    }
+
     return Object.keys(ctx).length > 0 ? ctx : undefined;
   }
 

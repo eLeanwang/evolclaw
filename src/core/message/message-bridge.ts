@@ -166,9 +166,17 @@ export class MessageBridge {
     if (!parsed || typeof parsed !== 'object' || !parsed.type) return false;
 
     if (parsed.type === 'menu.query') {
-      const identity = this.sessionManager.resolveIdentity(channel, msg.peerId);
-
-      if (parsed.cmd) {
+      if (parsed.cmd && (parsed.mode === 'query' || parsed.mode === 'update')) {
+        // exec 模式：查询状态或执行命令
+        const result = await this.cmdHandler.execMenu(parsed.cmd, parsed.mode, channel, msg.channelId, msg.peerId);
+        const base = { type: 'menu.response', cmd: parsed.cmd };
+        const response = JSON.stringify('error' in result ? { ...base, error: result.error } : { ...base, data: result.data });
+        if (adapter?.sendCustomPayload) {
+          adapter.sendCustomPayload(msg.channelId, response);
+        } else {
+          await sendReply(msg.channelId, response);
+        }
+      } else if (parsed.cmd) {
         // 动态子菜单查询
         const items = await this.cmdHandler.getSubMenuItems(parsed.cmd, channel, msg.channelId, msg.peerId);
         const response = JSON.stringify({ type: 'menu.response', cmd: parsed.cmd, items: items ?? [] });
@@ -179,6 +187,7 @@ export class MessageBridge {
         }
       } else {
         // 全量菜单
+        const identity = this.sessionManager.resolveIdentity(channel, msg.peerId);
         const items = this.cmdHandler.getMenuItems(identity.role, msg.chatType || 'private');
         const response = JSON.stringify({ type: 'menu.response', items });
         if (adapter?.sendCustomPayload) {

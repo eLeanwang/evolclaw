@@ -348,7 +348,8 @@ export class MessageProcessor {
 
       const imageInfo = message.images && message.images.length > 0 ? ` [${message.images.length} image(s)]` : '';
       const modeInfo = isBackground ? ' [\u540e\u53f0]' : '';
-      logger.info(`[${message.channel}] ${message.channelId}: ${message.content}${imageInfo}${modeInfo}`);
+      const e2eeInfo = message.replyContext?.metadata?.encrypted != null ? ` encrypt=${message.replyContext.metadata.encrypted}` : '';
+      logger.info(`[${message.channel}] ${message.channelId}: ${message.content}${imageInfo}${modeInfo}${e2eeInfo}`);
       logger.info(`[MessageProcessor] session=${session.id} task=${taskId} chatType=${session.chatType} sessionMode=${session.sessionMode} agentId=${session.agentId} msgChatType=${message.chatType ?? 'n/a'}`);
 
       // 记录开始处理
@@ -411,7 +412,8 @@ export class MessageProcessor {
           adapter,
           message.channelId,
           taskId,
-          chatmode
+          chatmode,
+          this.getReplyContext(message)
         );
       }
 
@@ -444,7 +446,10 @@ export class MessageProcessor {
       agent.setMode(session.metadata?.permissionMode ?? DEFAULT_PERMISSION_MODE);
 
       // 标记会话为处理中（实时持久化，重启后可恢复）
-      this.sessionManager.markProcessing(session.id);
+      this.sessionManager.markProcessing(session.id, taskId);
+      if (message.replyContext?.metadata?.encrypted != null) {
+        this.sessionManager.setSessionEncrypt(session.id, !!(message.replyContext.metadata.encrypted));
+      }
       logger.info(`[MessageProcessor] session ${session.id} marked as processing task=${taskId}`);
 
       // 检查是否因新消息自动中断 — 包装 prompt 让 Agent 知道上下文

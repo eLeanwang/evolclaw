@@ -29,6 +29,7 @@ export class SessionManager {
   private adminResolver?: AdminResolver;
   private sessionModeResolver?: SessionModeResolver;
   private fileAdapters = new Map<string, SessionFileAdapter>();
+  private sessionEncryptState = new Map<string, boolean>();
 
   constructor(dbPath: string = resolvePaths().db, eventBus: EventBus, ownerResolver?: OwnerResolver, adminResolver?: AdminResolver) {
     ensureDir(path.dirname(dbPath));
@@ -496,11 +497,21 @@ export class SessionManager {
 
   /**
    * 标记会话为处理中（实时写 DB，crash 也能恢复）
+   * processing_state 格式: "timestamp:taskId"
    */
-  markProcessing(sessionId: string): void {
+  markProcessing(sessionId: string, taskId?: string): void {
     const now = Date.now();
+    const state = taskId ? `${now}:${taskId}` : String(now);
     this.db.prepare(`UPDATE sessions SET processing_state = ?, updated_at = ? WHERE id = ?`)
-      .run(String(now), now, sessionId);
+      .run(state, now, sessionId);
+  }
+
+  /** 从 processing_state 解析当前活跃 taskId */
+  getActiveTaskId(sessionId: string): string | undefined {
+    const row = this.db.prepare(`SELECT processing_state FROM sessions WHERE id = ?`).get(sessionId) as any;
+    if (!row?.processing_state) return undefined;
+    const colonIdx = row.processing_state.indexOf(':');
+    return colonIdx > 0 ? row.processing_state.slice(colonIdx + 1) : undefined;
   }
 
   /**
@@ -509,6 +520,15 @@ export class SessionManager {
   clearProcessing(sessionId: string): void {
     this.db.prepare(`UPDATE sessions SET processing_state = NULL, updated_at = ? WHERE id = ?`)
       .run(Date.now(), sessionId);
+    this.sessionEncryptState.delete(sessionId);
+  }
+
+  setSessionEncrypt(sessionId: string, encrypted: boolean): void {
+    this.sessionEncryptState.set(sessionId, encrypted);
+  }
+
+  getSessionEncrypt(sessionId: string): boolean | undefined {
+    return this.sessionEncryptState.get(sessionId);
   }
 
   /**
@@ -524,7 +544,8 @@ export class SessionManager {
     const now = Date.now();
     const result: Session[] = [];
     for (const row of rows) {
-      const ts = parseInt(row.processing_state, 10);
+      const colonIdx = row.processing_state.indexOf(':');
+      const ts = parseInt(colonIdx > 0 ? row.processing_state.slice(0, colonIdx) : row.processing_state, 10);
       if (!isNaN(ts) && (now - ts) < maxAgeMs) {
         result.push(this.rowToSession(row));
       } else {

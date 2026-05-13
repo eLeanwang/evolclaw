@@ -159,8 +159,8 @@ export class AUNChannel {
       .trim();
   }
 
-  private buildGroupReplyContext(taskId: string | undefined, senderAid: string): ReplyContext {
-    const replyContext: ReplyContext = {};
+  private buildGroupReplyContext(taskId: string | undefined, senderAid: string, encrypted: boolean): ReplyContext {
+    const replyContext: ReplyContext = { metadata: { encrypted } };
     if (taskId) replyContext.threadId = taskId;
     replyContext.peerId = senderAid;
     return replyContext;
@@ -617,15 +617,9 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       return;
     }
 
-    // E2EE 能力探测：收到加密消息则标记对端支持，明文则计数审计
+    // 记录入站消息加密状态，透传到出站 ReplyContext
     const msgEncrypted = !!(msg.e2ee);
-    if (fromAid) {
-      if (msgEncrypted) {
-        this.peerE2ee.set(fromAid, { ok: true, ts: Date.now() });
-      } else {
-        this.plaintextRecv++;
-      }
-    }
+    if (!msgEncrypted) this.plaintextRecv++;
 
     // Detect @mentions
     const mentions: string[] = [];
@@ -665,7 +659,9 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     const peerInfo = await this.fetchPeerInfo(fromAid);
     const shortAid = this.getShortAid(fromAid);
     const displayName = peerInfo.name || shortAid;
-    logger.info(`[AUN] P2P dispatched: from=${shortAid}(${displayName}) mid=${messageId} text=${finalText.slice(0, 60)}`);
+    logger.info(`[AUN] P2P dispatched: from=${shortAid}(${displayName}) mid=${messageId} encrypt=${msgEncrypted} text=${finalText.slice(0, 60)}`);
+    const replyContext: ReplyContext = { metadata: { encrypted: msgEncrypted } };
+    if (taskId) replyContext.threadId = taskId;
     this.dispatchMessage({
       channelId: chatId,
       userId: fromAid,
@@ -677,6 +673,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       mentions,
       peerName: displayName || undefined,
       peerType: peerInfo.type || 'unknown',
+      replyContext,
     });
   }
 
@@ -711,15 +708,9 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       return;
     }
 
-    // E2EE 能力探测：收到加密群消息则标记发送者支持
+    // 记录入站消息加密状态，透传到出站 ReplyContext
     const msgEncrypted = !!(msg.e2ee);
-    if (senderAid) {
-      if (msgEncrypted) {
-        this.peerE2ee.set(senderAid, { ok: true, ts: Date.now() });
-      } else {
-        this.plaintextRecv++;
-      }
-    }
+    if (!msgEncrypted) this.plaintextRecv++;
 
     // dispatch_mode from server tells agent how to work in this group
     const dispatchMode: string = msg.dispatch_mode ?? (payload as any)?.dispatch_mode ?? 'mention';
@@ -790,7 +781,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       seq,
       taskId,
       mentions,
-      replyContext: this.buildGroupReplyContext(taskId, senderAid),
+      replyContext: this.buildGroupReplyContext(taskId, senderAid, msgEncrypted),
     });
   }
 
@@ -946,7 +937,9 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     }
 
     const encryptTarget = isGroup ? channelId : targetAid;
-    const encrypt = this.shouldEncrypt(encryptTarget);
+    const encrypt = context?.metadata?.encrypted != null
+      ? !!(context.metadata.encrypted)
+      : this.shouldEncrypt(encryptTarget);
     const params: Record<string, any> = { payload, encrypt };
 
     try {
@@ -954,9 +947,14 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
         params.group_id = channelId;
         const result = await this.callAndTrace<any>('group.send', params);
         if (!result || !result.message_id) {
-          logger.warn(`[AUN] group.send returned no message_id: ${JSON.stringify(result)}`);
+          const dispatchStatus = result?.message_dispatch?.status;
+          if (dispatchStatus === 'debounced' || dispatchStatus === 'dispatched') {
+            logger.info(`[AUN] group.send ok (${dispatchStatus}): group=${channelId} encrypt=${encrypt} text=${finalText.slice(0, 60)}`);
+          } else {
+            logger.warn(`[AUN] group.send returned no message_id: ${JSON.stringify(result)}`);
+          }
         } else {
-          logger.info(`[AUN] group.send ok: group=${channelId} mid=${result.message_id} text=${finalText.slice(0, 60)}`);
+          logger.info(`[AUN] group.send ok: group=${channelId} mid=${result.message_id} encrypt=${encrypt} text=${finalText.slice(0, 60)}`);
         }
       } else {
         params.to = targetAid;
@@ -964,7 +962,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
         if (!result || !result.message_id) {
           logger.warn(`[AUN] message.send returned no message_id: ${JSON.stringify(result)}`);
         } else {
-          logger.info(`[AUN] message.send ok: to=${targetAid} mid=${result.message_id} text=${finalText.slice(0, 60)}`);
+          logger.info(`[AUN] message.send ok: to=${targetAid} mid=${result.message_id} encrypt=${encrypt} text=${finalText.slice(0, 60)}`);
         }
       }
     } catch (e) {
@@ -1007,7 +1005,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
    * selector 使用 context: { type: 'task', id: taskId }
    * 存储键：group_id/peer_aid + sender_aid + context.type + context.id
    */
-  async sendThought(channelId: string, taskId: string, payload: object): Promise<void> {
+  async sendThought(channelId: string, taskId: string, payload: object, _context?: ReplyContext): Promise<void> {
     if (!this.connected || !this.client) return;
     if (!taskId) return;
 
@@ -1015,6 +1013,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     const colonIdx = channelId.indexOf(':');
     const targetId = colonIdx > 0 ? channelId.substring(0, colonIdx) : channelId;
 
+    // thought.put 协议要求 encrypt=true（gateway 拒绝明文 thought）
     const params: Record<string, any> = {
       context: { type: 'task', id: taskId },
       payload,
@@ -1026,11 +1025,11 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       if (this.isGroupId(channelId)) {
         params.group_id = targetId;
         await this.callAndTrace('group.thought.put', params);
-        logger.info(`[AUN] thought.put ok group=${targetId} task=${taskId} stage=${stage}`);
+        logger.info(`[AUN] thought.put ok group=${targetId} task=${taskId} stage=${stage} encrypt=true`);
       } else {
         params.to = targetId;
         await this.callAndTrace('message.thought.put', params);
-        logger.info(`[AUN] thought.put ok p2p=${targetId} task=${taskId} stage=${stage}`);
+        logger.info(`[AUN] thought.put ok p2p=${targetId} task=${taskId} stage=${stage} encrypt=true`);
       }
     } catch (e) {
       const err = e as any;
@@ -1125,7 +1124,9 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       }
 
       const encryptTarget = isGroup ? channelId : fileTargetAid;
-      const encrypt = this.shouldEncrypt(encryptTarget);
+      const encrypt = context?.metadata?.encrypted != null
+        ? !!(context.metadata.encrypted)
+        : this.shouldEncrypt(encryptTarget);
       const params: Record<string, any> = { payload: filePayload, encrypt };
 
       try {
@@ -1216,7 +1217,9 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     }
 
     const encryptTarget = isGroup ? channelId : statusTargetAid;
-    const encrypt = this.shouldEncrypt(encryptTarget);
+    const encrypt = context?.metadata?.encrypted != null
+      ? !!(context.metadata.encrypted)
+      : this.shouldEncrypt(encryptTarget);
     const params: Record<string, any> = { payload, encrypt };
 
     const sendWithFallback = (method: string) => {
@@ -1243,7 +1246,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       this.trace('OUT', 'message.send.status', params);
       sendWithFallback('message.send');
     }
-    logger.info(`[AUN] task.${status} task=${taskId} session=${sessionId} target=${channelId}`);
+    logger.info(`[AUN] task.${status} task=${taskId} session=${sessionId} encrypt=${encrypt} target=${channelId}`);
   }
 
   sendCustomPayload(channelId: string, payload: string): void {
@@ -1463,8 +1466,8 @@ export class AUNChannelPlugin implements ChannelPlugin {
         sendCustomPayload: (id: string, payload: string) => channel.sendCustomPayload(id, payload),
         uploadAgentMd: (content: string) => channel.uploadAgentMd(content),
         downloadAgentMd: (aid: string) => channel.downloadAgentMd(aid),
-        putThought: (id: string, taskId: string, payload: object) =>
-          channel.sendThought(id, taskId, payload),
+        putThought: (id: string, taskId: string, payload: object, context?: ReplyContext) =>
+          channel.sendThought(id, taskId, payload, context),
         _selfAid: () => channel.getStatus().aid,
         _selfName: () => channel.getSelfName(),
       };

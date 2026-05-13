@@ -1,5 +1,5 @@
 import type { AgentEvent } from '../../agents/claude-runner.js';
-import type { ChannelAdapter } from '../../types.js';
+import type { ChannelAdapter, ReplyContext } from '../../types.js';
 import { logger } from '../../utils/logger.js';
 
 interface ThoughtPayload {
@@ -27,9 +27,10 @@ export class ThoughtEmitter {
   private channelId: string;
   private taskId: string;
   private chatmode: string;
+  private replyContext?: ReplyContext;
   private hasEmittedText = false;
 
-  constructor(adapter: ChannelAdapter, channelId: string, taskId: string, chatmode: string = 'proactive') {
+  constructor(adapter: ChannelAdapter, channelId: string, taskId: string, chatmode: string = 'proactive', replyContext?: ReplyContext) {
     if (!taskId) {
       throw new Error('[ThoughtEmitter] taskId is required at construction');
     }
@@ -37,6 +38,7 @@ export class ThoughtEmitter {
     this.channelId = channelId;
     this.taskId = taskId;
     this.chatmode = chatmode;
+    this.replyContext = replyContext;
     logger.info(`[ThoughtEmitter] created channel=${channelId} task=${taskId} chatmode=${chatmode}`);
   }
 
@@ -64,7 +66,7 @@ export class ThoughtEmitter {
     payload.chatmode = this.chatmode;
 
     try {
-      await this.adapter.putThought(this.channelId, this.taskId, payload);
+      await this.adapter.putThought(this.channelId, this.taskId, payload, this.replyContext);
     } catch (err) {
       logger.debug(`[ThoughtEmitter] putThought failed: ${(err as Error).message}`);
     }

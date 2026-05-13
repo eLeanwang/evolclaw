@@ -427,7 +427,7 @@ export class AgentRunner {
     // 没有交互上下文（无渠道适配器），回退到纯文本
     const permCtx = this.permissionContexts.get(sessionId);
     if (!permCtx?.adapter?.sendInteraction || !permCtx?.channelId) {
-      return this.handleAskUserQuestionFallback(input, questions);
+      return this.handleAskUserQuestionFallback(sessionId, input, questions);
     }
 
     const answers: Record<string, string | string[]> = {};
@@ -541,25 +541,51 @@ export class AgentRunner {
   }
 
   /**
-   * AskUserQuestion 纯文本 fallback：发送文本格式的问题，直接 allow
+   * AskUserQuestion 纯文本 fallback：发送选项列表，等待用户通过 /ask 命令选择
+   * 注册到 interactionRouter，用户回复 /ask 1 或 /ask 自定义内容
    */
   private async handleAskUserQuestionFallback(
+    sessionId: string,
     input: Record<string, unknown>,
     questions: Array<{ question: string; options: Array<{ label: string; description?: string }>; multiSelect?: boolean }>
   ): Promise<any> {
-    // 自动选择每个问题的第一个选项
+    const permCtx = this.permissionContexts.get(sessionId);
+    const sendPrompt = permCtx?.adapter && permCtx?.channelId
+      ? async (text: string) => permCtx.adapter!.sendText(permCtx.channelId!, text, permCtx.replyContext)
+      : this.sendPromptFn;
+
     const answers: Record<string, string> = {};
+
     if (questions?.length) {
-      const lines = questions.map(q => {
-        const firstLabel = q.options[0]?.label || '';
-        answers[q.question] = firstLabel;
+      for (const q of questions) {
         const optText = q.options.map((o, i) => `  ${i + 1}. ${o.label}${o.description ? ` — ${o.description}` : ''}`).join('\n');
-        return `${q.question}\n${optText}\n  → 自动选择：${firstLabel}`;
-      });
-      if (this.sendPromptFn) {
-        await this.sendPromptFn(`💬 以下问题已自动选择第一项：\n\n${lines.join('\n\n')}`);
+        const prompt = `💬 ${q.question}\n${optText}\n\n回复 /ask <数字> 选择，或 /ask <自定义内容>`;
+
+        if (sendPrompt && permCtx?.interactionRouter) {
+          await sendPrompt(prompt);
+          const requestId = `ask-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+          const answer = await new Promise<string>((resolve) => {
+            permCtx.interactionRouter!.register(requestId, sessionId, (action: string) => {
+              const num = parseInt(action.trim(), 10);
+              if (num >= 1 && num <= q.options.length) {
+                resolve(q.options[num - 1].label);
+              } else {
+                resolve(action.trim());
+              }
+            }, { timeoutMs: 120_000, onTimeout: () => resolve(q.options[0]?.label || '') });
+          });
+          answers[q.question] = answer;
+        } else {
+          // 无交互能力，自动选第一项
+          const firstLabel = q.options[0]?.label || '';
+          answers[q.question] = firstLabel;
+          if (sendPrompt) {
+            await sendPrompt(`${prompt}\n  → 自动选择：${firstLabel}`);
+          }
+        }
       }
     }
+
     const updatedInput = { ...input, answers };
     return { behavior: 'allow' as const, updatedInput, decisionClassification: 'user_temporary' as const };
   }
@@ -573,54 +599,74 @@ export class AgentRunner {
     options: { signal: AbortSignal; [key: string]: any }
   ): Promise<any> {
     const permCtx = this.permissionContexts.get(sessionId);
-    // 从 permCtx 构造 per-session 的发送函数，避免全局 sendPromptFn 被其他 channel 实例覆盖
     const sendPrompt = permCtx?.adapter && permCtx?.channelId
       ? async (text: string) => permCtx.adapter!.sendText(permCtx.channelId!, text, permCtx.replyContext)
       : this.sendPromptFn;
 
-    // 无交互上下文，直接 allow（防御性兜底）
-    if (!permCtx?.adapter?.sendInteraction || !permCtx?.channelId || !sendPrompt) {
+    // 无任何交互能力，直接 allow
+    if (!permCtx?.channelId || !sendPrompt) {
       return { behavior: 'allow' as const, updatedInput: input, decisionClassification: 'user_temporary' as const };
     }
 
-    const requestId = `plan-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const interaction: InteractionRequest = {
-      type: 'interaction',
-      id: requestId,
-      kind: {
-        kind: 'action',
-        title: '📋 计划审批',
-        body: 'AI 已完成规划，等待审批。\n请查看以上计划内容后决定。',
-        buttons: [
-          { key: 'approve', label: '✅ 批准执行', style: 'primary' },
-          { key: 'reject', label: '❌ 拒绝', style: 'danger' },
-        ],
-      },
-      channelId: permCtx.channelId,
-      sessionId,
-    };
-
+    // 尝试发送交互卡片
     let cardSent = false;
-    try {
-      const result = await permCtx.adapter.sendInteraction(permCtx.channelId, interaction, permCtx.replyContext);
-      cardSent = !!result;
-    } catch (err) {
-      logger.warn('[AgentRunner] ExitPlanMode card send failed:', err);
+    if (permCtx.adapter?.sendInteraction) {
+      const requestId = `plan-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const interaction: InteractionRequest = {
+        type: 'interaction',
+        id: requestId,
+        kind: {
+          kind: 'action',
+          title: '📋 计划审批',
+          body: 'AI 已完成规划，等待审批。\n请查看以上计划内容后决定。',
+          buttons: [
+            { key: 'approve', label: '✅ 批准执行', style: 'primary' },
+            { key: 'reject', label: '❌ 拒绝', style: 'danger' },
+          ],
+        },
+        channelId: permCtx.channelId,
+        sessionId,
+      };
+
+      try {
+        const result = await permCtx.adapter.sendInteraction(permCtx.channelId, interaction, permCtx.replyContext);
+        cardSent = !!result;
+      } catch (err) {
+        logger.warn('[AgentRunner] ExitPlanMode card send failed:', err);
+      }
+
+      if (cardSent) {
+        return new Promise((resolve) => {
+          permCtx.interactionRouter?.register(requestId, sessionId, (action: string) => {
+            if (action === 'approve') {
+              resolve({ behavior: 'allow' as const, updatedInput: input, decisionClassification: 'user_temporary' as const });
+            } else {
+              resolve({ behavior: 'deny' as const, message: '用户拒绝了计划', decisionClassification: 'user_reject' as const });
+            }
+          });
+        });
+      }
     }
 
-    if (!cardSent) {
-      await sendPrompt('📋 计划审批\nAI 已完成规划，等待审批。\n回复 /plan approve 批准执行 | /plan reject 拒绝');
-    }
-
-    return new Promise((resolve) => {
-      permCtx?.interactionRouter?.register(requestId, sessionId, (action: string) => {
-        if (action === 'approve') {
-          resolve({ behavior: 'allow' as const, updatedInput: input, decisionClassification: 'user_temporary' as const });
-        } else {
-          resolve({ behavior: 'deny' as const, message: '用户拒绝了计划', decisionClassification: 'user_reject' as const });
-        }
+    // 文本 fallback：注册到 interactionRouter，等待用户 /ask 回复
+    if (permCtx.interactionRouter) {
+      await sendPrompt('📋 计划审批\nAI 已完成规划，等待审批。\n\n  1. 批准执行\n  2. 拒绝\n\n回复 /ask 1 批准，/ask 2 拒绝：');
+      const requestId = `plan-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      return new Promise((resolve) => {
+        permCtx.interactionRouter!.register(requestId, sessionId, (action: string) => {
+          const trimmed = action.trim();
+          if (trimmed === '2' || trimmed.toLowerCase() === 'reject' || trimmed === '拒绝') {
+            resolve({ behavior: 'deny' as const, message: '用户拒绝了计划', decisionClassification: 'user_reject' as const });
+          } else {
+            resolve({ behavior: 'allow' as const, updatedInput: input, decisionClassification: 'user_temporary' as const });
+          }
+        }, { timeoutMs: 300_000, onTimeout: () => resolve({ behavior: 'allow' as const, updatedInput: input, decisionClassification: 'user_temporary' as const }) });
       });
-    });
+    }
+
+    // 无交互能力，发提示后直接 allow
+    await sendPrompt('📋 计划审批\nAI 已完成规划，自动批准执行。');
+    return { behavior: 'allow' as const, updatedInput: input, decisionClassification: 'user_temporary' as const };
   }
 
   /**
