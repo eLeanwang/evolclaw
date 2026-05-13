@@ -1,4 +1,4 @@
-import { Config, ChannelAdapter, Session, ChannelPolicy, InteractionRequest, ReplyContext, ActionInteraction } from '../types.js';
+import { Config, ChannelAdapter, Session, ChannelPolicy, InteractionRequest, ReplyContext, ActionInteraction, DEFAULT_PERMISSION_MODE } from '../types.js';
 import { SessionManager } from './session/session-manager.js';
 import { type AgentRunnerFull, hasModelSwitcher, hasPermissionController } from '../agents/claude-runner.js';
 import { MessageCache } from './message/message-cache.js';
@@ -643,7 +643,7 @@ export class CommandHandler {
       // guest 在群聊和私聊中均可访问的只读命令：纯查询形态（带参写操作由各 handler 内部守卫拦截）
       const guestGroupCommands = [
         '/status', '/help', '/check', '/chatmode',
-        '/model', '/effort', '/agent', '/perm', '/activity', '/safe',
+        '/model', '/effort', '/agent', '/perm', '/activity', '/safe', '/stop',
       ];
       const userCommands = activeChatType === 'group' && !isAdmin
         ? guestGroupCommands
@@ -806,8 +806,7 @@ export class CommandHandler {
         if (!hasPermissionController(permAgent)) {
           return '❌ 权限控制不可用';
         }
-        const defaultPermMode = identity.role === 'owner' ? 'bypass' : 'auto';
-        const currentMode = permSession.metadata?.permissionMode ?? defaultPermMode;
+        const currentMode = permSession.metadata?.permissionMode ?? DEFAULT_PERMISSION_MODE;
         const modes = permAgent.listModes();
 
         // 尝试发送交互卡片
