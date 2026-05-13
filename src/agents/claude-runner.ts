@@ -432,8 +432,11 @@ export class AgentRunner {
 
     const answers: Record<string, string | string[]> = {};
 
-    // 闭包捕获当前 sendPromptFn，避免异步等待期间被其他会话覆盖
-    const sendPrompt = this.sendPromptFn;
+    // 从 permCtx 构造 per-session 的发送函数，避免全局 sendPromptFn 被其他 channel 实例覆盖
+    // 注意：sendPromptFn 是全局单例，多 channel 并发时会被覆盖，导致提示发到错误 channel
+    const sendPrompt = permCtx.adapter && permCtx.channelId
+      ? async (text: string) => permCtx.adapter!.sendText(permCtx.channelId!, text, permCtx.replyContext)
+      : this.sendPromptFn;
 
     // 逐个 question 发送卡片并等待用户选择
     for (let i = 0; i < questions.length; i++) {
@@ -570,7 +573,10 @@ export class AgentRunner {
     options: { signal: AbortSignal; [key: string]: any }
   ): Promise<any> {
     const permCtx = this.permissionContexts.get(sessionId);
-    const sendPrompt = this.sendPromptFn;
+    // 从 permCtx 构造 per-session 的发送函数，避免全局 sendPromptFn 被其他 channel 实例覆盖
+    const sendPrompt = permCtx?.adapter && permCtx?.channelId
+      ? async (text: string) => permCtx.adapter!.sendText(permCtx.channelId!, text, permCtx.replyContext)
+      : this.sendPromptFn;
 
     // 无交互上下文，直接 allow（防御性兜底）
     if (!permCtx?.adapter?.sendInteraction || !permCtx?.channelId || !sendPrompt) {
