@@ -36,6 +36,7 @@ projects/
 # 测试文件
 test-*.js
 test-*.ts
+tests/
 
 # 编辑器
 .vscode/
