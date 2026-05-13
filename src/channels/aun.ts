@@ -159,6 +159,23 @@ export class AUNChannel {
       .trim();
   }
 
+  private extractMentionAids(mentions: unknown[]): string[] {
+    const aids: string[] = [];
+    for (const m of mentions) {
+      if (typeof m === 'string') aids.push(m);
+      else if (m && typeof m === 'object' && typeof (m as any).aid === 'string') aids.push((m as any).aid);
+    }
+    return aids;
+  }
+
+  private hasMentionAll(mentions: unknown[]): boolean {
+    for (const m of mentions) {
+      if (m === 'all') return true;
+      if (m && typeof m === 'object' && (m as any).scope === 'all') return true;
+    }
+    return false;
+  }
+
   private buildGroupReplyContext(taskId: string | undefined, senderAid: string, encrypted: boolean): ReplyContext {
     const replyContext: ReplyContext = { metadata: { encrypted } };
     if (taskId) replyContext.threadId = taskId;
@@ -194,6 +211,12 @@ export class AUNChannel {
   private peerE2ee = new Map<string, { ok: boolean; ts: number }>();
   private static readonly E2EE_PROBE_TTL = 10 * 60 * 1000; // 10min
   private plaintextRecv = 0;
+  private sessionModeResolver?: (channelId: string) => Promise<string | undefined>;
+
+  private static readonly PROACTIVE_ALLOW_TYPES = new Set([
+    'text', 'quote', 'image', 'video', 'voice', 'file', 'json',
+    'merge', 'link', 'location', 'personal_card',
+  ]);
 
   // Reconnect state (TS-layer fallback, on top of SDK auto_reconnect)
   private intentionalDisconnect = false;
@@ -708,6 +731,36 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       return;
     }
 
+    // ── proactive 模式入站白名单 ──
+    if (this.sessionModeResolver) {
+      const sessionMode = await this.sessionModeResolver(groupId).catch(() => undefined);
+      if (sessionMode === 'proactive') {
+        const payloadObj = (payload && typeof payload === 'object') ? payload as Record<string, any> : null;
+        const payloadType: string = payloadObj?.type ?? '';
+
+        if (!AUNChannel.PROACTIVE_ALLOW_TYPES.has(payloadType)) {
+          this.acknowledgeImmediately(messageId, seq);
+          logger.debug(`[AUN] Group dropped (proactive deny): type=${payloadType} group=${groupId} sender=${senderAid} mid=${messageId}`);
+          return;
+        }
+
+        const rawText: string = typeof payloadObj?.text === 'string' ? payloadObj.text : '';
+        const rawMentions: unknown[] = Array.isArray(payloadObj?.mentions) ? payloadObj.mentions : [];
+
+        const mentionAids = this.extractMentionAids(rawMentions);
+        const mentionsSelf = !!this._aid && (
+          this.hasExplicitMention(rawText, this._aid) || mentionAids.includes(this._aid)
+        );
+        const mentionsAll = this.hasExplicitMention(rawText, 'all') || this.hasMentionAll(rawMentions);
+
+        if (!mentionsSelf && !mentionsAll) {
+          this.acknowledgeImmediately(messageId, seq);
+          logger.debug(`[AUN] Group dropped (proactive whitelist): type=${payloadType} group=${groupId} sender=${senderAid} mid=${messageId}`);
+          return;
+        }
+      }
+    }
+
     // 记录入站消息加密状态，透传到出站 ReplyContext
     const msgEncrypted = !!(msg.e2ee);
     if (!msgEncrypted) this.plaintextRecv++;
@@ -894,6 +947,10 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     this.messageHandler = handler;
   }
 
+  setSessionModeResolver(resolver: (channelId: string) => Promise<string | undefined>): void {
+    this.sessionModeResolver = resolver;
+  }
+
   onRecall(handler: (messageId: string) => void): void {
     this.recallHandler = handler;
   }
@@ -1005,7 +1062,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
    * selector 使用 context: { type: 'task', id: taskId }
    * 存储键：group_id/peer_aid + sender_aid + context.type + context.id
    */
-  async sendThought(channelId: string, taskId: string, payload: object, _context?: ReplyContext): Promise<void> {
+  async sendThought(channelId: string, taskId: string, payload: object, context?: ReplyContext): Promise<void> {
     if (!this.connected || !this.client) return;
     if (!taskId) return;
 
@@ -1013,11 +1070,13 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     const colonIdx = channelId.indexOf(':');
     const targetId = colonIdx > 0 ? channelId.substring(0, colonIdx) : channelId;
 
-    // thought.put 协议要求 encrypt=true（gateway 拒绝明文 thought）
+    const encrypt = context?.metadata?.encrypted != null
+      ? !!(context.metadata.encrypted)
+      : this.shouldEncrypt(targetId);
     const params: Record<string, any> = {
       context: { type: 'task', id: taskId },
       payload,
-      encrypt: true,
+      encrypt,
     };
 
     try {
@@ -1025,11 +1084,11 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       if (this.isGroupId(channelId)) {
         params.group_id = targetId;
         await this.callAndTrace('group.thought.put', params);
-        logger.info(`[AUN] thought.put ok group=${targetId} task=${taskId} stage=${stage} encrypt=true`);
+        logger.info(`[AUN] thought.put ok group=${targetId} task=${taskId} stage=${stage} encrypt=${encrypt}`);
       } else {
         params.to = targetId;
         await this.callAndTrace('message.thought.put', params);
-        logger.info(`[AUN] thought.put ok p2p=${targetId} task=${taskId} stage=${stage} encrypt=true`);
+        logger.info(`[AUN] thought.put ok p2p=${targetId} task=${taskId} stage=${stage} encrypt=${encrypt}`);
       }
     } catch (e) {
       const err = e as any;

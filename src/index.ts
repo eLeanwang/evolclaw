@@ -372,6 +372,15 @@ async function main() {
           });
         });
       }
+
+      // proactive 模式入站白名单：注入 sessionMode 查询器
+      if (typeof inst.channel.setSessionModeResolver === 'function') {
+        const chName = inst.adapter.channelName;
+        inst.channel.setSessionModeResolver(async (channelId: string) => {
+          const session = await sessionManager.getActiveSession(chName, channelId);
+          return session?.sessionMode;
+        });
+      }
     }
 
     if (channelType === 'dingtalk') {
