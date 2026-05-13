@@ -1,5 +1,21 @@
 # Changelog
 
+## v2.8.0 (2026-05-13)
+
+### New Features
+
+- **交互式 `/ask` 命令** — AskUserQuestion / ExitPlanMode 不再自动选第一个选项，注册到 `interactionRouter` 等待用户通过 `/ask` 回复；proactive 模式下系统提示明确禁用这两个工具
+- **AUN 群聊 proactive 入站白名单** — proactive 模式下，仅放行规范 payload 类型（text/quote/image/video/voice/file/json/merge/link/location/personal_card），且必须显式 @ 自己或 @ all；其它消息直接 ack 丢弃，避免无差别介入群聊
+- **E2EE 加密状态透传** — 入站 E2EE 加密状态通过 `ReplyContext.metadata.encrypted` 透传到出站发送，AUN 通道逐消息镜像加密态（包括 `thought.put`，不再硬编码 `encrypt=true`）
+- **`execMenu()` 结构化菜单执行** — 为 `/perm`、`/chatmode` 等命令提供结构化查询 / 更新接口，便于 Agent 程序化改配置
+
+### Improvements
+
+- **`processing_state` 持久化 taskId** — Session 级保存当前处理任务的 `taskId`，`evolclaw ctl send` 可从上下文自动恢复
+- **fastaun 依赖升级** — `@agentunion/fastaun` 从 0.2.15 升至 0.2.17
+
+---
+
 ## v2.7.3 (2026-05-13)
 
 ### Bug Fixes
