@@ -1,5 +1,11 @@
 # Changelog
 
+## v2.7.3 (2026-05-13)
+
+### Bug Fixes
+
+- **多 channel 并发时 AskUserQuestion 路由修复** — `sendPromptFn` 是全局单例，多 channel 同时活跃时会被覆盖导致提示发到错误 channel；现改为从 `permCtx.adapter/channelId` 构造 per-session 发送函数，确保交互卡片始终路由到正确 channel
+
 ## v2.7.2 (2026-05-13)
 
 ### Bug Fixes
