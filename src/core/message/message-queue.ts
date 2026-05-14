@@ -118,7 +118,12 @@ export class MessageQueue {
         if (options?.interruptible !== false) {
           // 单聊：保留中断行为
           logger.debug(`[Queue] ${queueKey} is processing, triggering interrupt`);
-          this.eventBus?.publish({ type: 'message:interrupted', sessionId: sessionKey, reason: 'new_message' });
+          this.eventBus?.publish({
+            type: 'message:interrupted',
+            sessionId: sessionKey,
+            reason: 'new_message',
+            agentName: this.processingAgent.get(queueKey),
+          });
           if (this.interruptCallback) {
             this.interruptCallback(sessionKey, this.currentAgentId).catch(() => {});
           }
@@ -311,7 +316,12 @@ export class MessageQueue {
     // 从 queueKey 提取 sessionKey
     const sessionKey = this.currentSessionKey.split('::')[0];
     logger.info(`[Queue] Recalled active message ${messageId}, interrupting session ${sessionKey}`);
-    this.eventBus?.publish({ type: 'message:interrupted', sessionId: sessionKey, reason: 'recalled' });
+    this.eventBus?.publish({
+      type: 'message:interrupted',
+      sessionId: sessionKey,
+      reason: 'recalled',
+      agentName: this.processingAgent.get(this.currentSessionKey),
+    });
     if (this.interruptCallback) {
       this.interruptCallback(sessionKey, this.currentAgentId).catch(() => {});
     }

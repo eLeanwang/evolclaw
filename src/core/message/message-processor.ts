@@ -1132,6 +1132,7 @@ export class MessageProcessor {
             toolName: event.name,
             isError: event.isError,
             content: event.result,
+            agentName: agentNameForStats,
             timestamp: Date.now()
           });
 
