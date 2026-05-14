@@ -1668,8 +1668,20 @@ async function cmdAgentNew(suggestedName: string): Promise<void> {
 
     console.log(`\nCreating agent: ${name}\n`);
 
-    const projectPath = (await ask('Project path: ')).trim();
-    if (!projectPath || !path.isAbsolute(projectPath)) {
+    // Suggest project path: sibling of evolclaw.json's defaultPath, named after agent
+    let suggestedProjectPath = '';
+    try {
+      const cfg = loadConfig(p.config);
+      const defaultProjectsRoot = cfg.projects?.defaultPath
+        ? path.dirname(cfg.projects.defaultPath)
+        : path.join(os.homedir(), 'evolclaw-projects');
+      suggestedProjectPath = path.join(defaultProjectsRoot, name);
+    } catch {
+      suggestedProjectPath = path.join(os.homedir(), 'evolclaw-projects', name);
+    }
+    const projectInput = (await ask(`Project path [${suggestedProjectPath}]: `)).trim();
+    const projectPath = projectInput || suggestedProjectPath;
+    if (!path.isAbsolute(projectPath)) {
       console.error('Project path must be an absolute path.');
       process.exit(1);
     }
