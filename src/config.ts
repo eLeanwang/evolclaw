@@ -473,15 +473,43 @@ export function getDefaultSessionMode(config: Config, chatType: string): 'intera
 }
 
 export function isOwner(config: Config, channelOrType: string, userId: string): boolean {
-  // 按实例名精确匹配
+  // 按实例名精确匹配（evolclaw.json）
   if (getOwner(config, channelOrType) === userId) return true;
-  // 按 channelType 匹配：检查该类型下所有实例
+  // 按 channelType 匹配：检查该类型下所有实例（evolclaw.json）
   for (const type of channelTypes) {
     if (type !== channelOrType) continue;
     const raw = (config.channels as any)?.[type];
     const instances = normalizeChannelInstances(raw, type);
     for (const inst of instances) {
       if ((inst as any).owner === userId) return true;
+    }
+  }
+  // 检查 agent.json 中的 owner（agent-owned channels）
+  return isOwnerInAgents(channelOrType, userId);
+}
+
+function isOwnerInAgents(channelOrType: string, userId: string): boolean {
+  const agentsDir = resolvePaths().agentsDir;
+  if (!fs.existsSync(agentsDir)) return false;
+  for (const file of fs.readdirSync(agentsDir)) {
+    if (!file.endsWith('.json')) continue;
+    let raw: any;
+    try { raw = JSON.parse(fs.readFileSync(path.join(agentsDir, file), 'utf-8')); }
+    catch { continue; }
+    const channels = raw?.channels;
+    if (!channels || typeof channels !== 'object') continue;
+    for (const type of channelTypes) {
+      const block = channels[type];
+      if (block === undefined) continue;
+      const instances = Array.isArray(block) ? block : [block];
+      for (const inst of instances) {
+        if (!inst || typeof inst !== 'object') continue;
+        const instName = (inst as any).name ?? type;
+        // Match by instance name OR by channel type
+        if ((instName === channelOrType || type === channelOrType) && (inst as any).owner === userId) {
+          return true;
+        }
+      }
     }
   }
   return false;
@@ -506,6 +534,33 @@ export function isAdmin(config: Config, channelOrType: string, userId: string): 
     for (const inst of instances) {
       const admins: string[] = (inst as any).admins || [];
       if (admins.includes(userId)) return true;
+    }
+  }
+  // 检查 agent.json 中的 admins
+  return isAdminInAgents(channelOrType, userId);
+}
+
+function isAdminInAgents(channelOrType: string, userId: string): boolean {
+  const agentsDir = resolvePaths().agentsDir;
+  if (!fs.existsSync(agentsDir)) return false;
+  for (const file of fs.readdirSync(agentsDir)) {
+    if (!file.endsWith('.json')) continue;
+    let raw: any;
+    try { raw = JSON.parse(fs.readFileSync(path.join(agentsDir, file), 'utf-8')); }
+    catch { continue; }
+    const channels = raw?.channels;
+    if (!channels || typeof channels !== 'object') continue;
+    for (const type of channelTypes) {
+      const block = channels[type];
+      if (block === undefined) continue;
+      const instances = Array.isArray(block) ? block : [block];
+      for (const inst of instances) {
+        if (!inst || typeof inst !== 'object') continue;
+        const instName = (inst as any).name ?? type;
+        if (instName !== channelOrType && type !== channelOrType) continue;
+        const admins: string[] = (inst as any).admins || [];
+        if (admins.includes(userId)) return true;
+      }
     }
   }
   return false;
