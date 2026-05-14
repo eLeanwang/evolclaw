@@ -266,6 +266,29 @@ export class EvolAgent {
   }
 
   /**
+   * Get the agent's project list (defaults to a single entry derived from
+   * projects.defaultPath when projects.list is empty/absent).
+   */
+  getProjects(): Record<string, string> {
+    const list = (this.config.projects as any)?.list;
+    if (list && Object.keys(list).length > 0) return { ...list };
+    const dp = this.config.projects?.defaultPath;
+    if (dp) return { [path.basename(dp)]: dp };
+    return {};
+  }
+
+  /**
+   * Add (or update) a named project in this agent's projects.list and persist.
+   * Throws for DefaultAgent (caller should write to evolclaw.json instead).
+   */
+  addProject(name: string, projectPath: string): void {
+    if (!this.config.projects) (this.config.projects as any) = { defaultPath: projectPath, list: {} };
+    if (!(this.config.projects as any).list) (this.config.projects as any).list = {};
+    (this.config.projects as any).list[name] = projectPath;
+    this.persist();
+  }
+
+  /**
    * Set this agent's baseagent.effort and persist to agent.json.
    * For codex, the field is named `reasoning` (alias). Refuses for DefaultAgent.
    */

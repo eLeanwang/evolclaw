@@ -213,6 +213,48 @@ export class CommandHandler {
   }
 
   /**
+   * 返回当前通道有效的 projects.list（agent-owned 用 agent.json 的；否则全局 evolclaw.json 的）。
+   * 都没配 list 时回退到 defaultPath 单项目。
+   */
+  private getEffectiveProjects(channel: string): Record<string, string> {
+    const owning = this.getOwningAgent(channel);
+    if (owning) {
+      return (owning as any).getProjects?.() ?? {};
+    }
+    return this.projects;
+  }
+
+  /**
+   * 添加项目到当前通道范围（agent-owned 写 agent.json；default 写 evolclaw.json）。
+   */
+  private async addProjectInScope(channel: string, name: string, projectPath: string): Promise<string | undefined> {
+    const owning = this.getOwningAgent(channel);
+    if (owning) {
+      try {
+        (owning as any).addProject?.(name, projectPath);
+      } catch (e: any) {
+        return `⚠️ 写入 agent.json 失败: ${e?.message || e}`;
+      }
+      return undefined;
+    }
+    if (!this.config.projects) {
+      this.config.projects = { defaultPath: process.cwd(), autoCreate: false, list: {} };
+    }
+    if (!this.config.projects.list) {
+      this.config.projects.list = {};
+    }
+    this.config.projects.list[name] = projectPath;
+    try {
+      const { saveConfig } = await import('../config.js');
+      saveConfig(this.config);
+    } catch (e: any) {
+      return `⚠️ 写入 evolclaw.json 失败: ${e?.message || e}`;
+    }
+    // Refresh in-memory list cache (this.projects getter reads from this.config)
+    return undefined;
+  }
+
+  /**
    * 持久化 baseagent.model：agent-owned 写到 agent.json；否则写 evolclaw.json 或 ~/.claude/settings.json。
    * 返回错误信息或 undefined。
    */
@@ -2546,30 +2588,19 @@ export class CommandHandler {
       // 生成项目名称（使用目录名）
       const projectName = path.basename(projectPath);
 
-      // 检查是否已存在
-      if (this.projects[projectName]) {
-        const existingPath = this.projects[projectName];
-        if (existingPath === projectPath) {
+      // 检查在当前 scope 内是否已存在
+      const scopeProjects = this.getEffectiveProjects(channel);
+      const existing = scopeProjects[projectName];
+      if (existing) {
+        if (existing === projectPath) {
           return `项目 "${projectName}" 已存在\n  路径: ${projectPath}\n\n使用 /p ${projectName} 切换到该项目`;
         }
-        return `❌ 项目名称 "${projectName}" 已被占用\n  现有路径: ${existingPath}\n  新路径: ${projectPath}\n\n请重命名目录或手动编辑配置文件`;
+        return `❌ 项目名称 "${projectName}" 已被占用\n  现有路径: ${existing}\n  新路径: ${projectPath}\n\n请重命名目录或手动编辑配置文件`;
       }
 
-      // 添加到配置
-      if (!this.config.projects) {
-        this.config.projects = { defaultPath: process.cwd(), autoCreate: false, list: {} };
-      }
-      if (!this.config.projects.list) {
-        this.config.projects.list = {};
-      }
-      this.config.projects.list[projectName] = projectPath;
-
-      // 保存配置
-      const { saveConfig } = await import('../config.js');
-      saveConfig(this.config);
-
-      // 更新内存中的项目列表
-      this.projects[projectName] = projectPath;
+      // 写入：agent-owned channel → agent.json；default → evolclaw.json
+      const err = await this.addProjectInScope(channel, projectName, projectPath);
+      if (err) return err;
 
       return `✓ 已添加项目: ${projectName}\n  路径: ${projectPath}\n\n使用 /p ${projectName} 切换到该项目`;
     }

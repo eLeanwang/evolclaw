@@ -416,6 +416,8 @@ export interface EvolAgentHandle {
   setShowActivities(channelName: string, mode: 'all' | 'dm-only' | 'owner-dm-only' | 'none'): void;
   setBaseagentModel(value: string | undefined): void;
   setBaseagentEffort(value: string | undefined): void;
+  getProjects(): Record<string, string>;
+  addProject(name: string, projectPath: string): void;
   channelInstanceNames(): string[];
 }
 
