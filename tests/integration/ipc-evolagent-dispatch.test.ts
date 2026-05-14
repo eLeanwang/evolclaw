@@ -115,7 +115,7 @@ describe('IpcServer evolagent.* dispatch (e2e)', () => {
     expect(response.agent).toBeDefined();
     expect(response.agent.name).toBe('review');
     expect(response.agent.baseagent).toBe('claude');
-    expect(response.agent.channels).toContain('review-fs');
+    expect(response.agent.channels).toContain('review-feishu-review-fs');
   });
 
   it('evolagent.show returns error for nonexistent agent', async () => {

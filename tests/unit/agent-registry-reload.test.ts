@@ -84,8 +84,8 @@ describe('AgentRegistry.reload', () => {
     await reg.reload('bot', hooks);
 
     // Channel should have been drained, disconnected, and re-started
-    expect(hooks.drainChannel).toHaveBeenCalledWith('bot-fs');
-    expect(hooks.disconnectChannel).toHaveBeenCalledWith('bot-fs');
+    expect(hooks.drainChannel).toHaveBeenCalledWith('bot-feishu-bot-fs');
+    expect(hooks.disconnectChannel).toHaveBeenCalledWith('bot-feishu-bot-fs');
     expect(hooks.startChannel).toHaveBeenCalled();
   });
 
@@ -142,8 +142,8 @@ describe('AgentRegistry.reload', () => {
 
     await reg.reload('bot', hooks);
 
-    expect(hooks.drainChannel).toHaveBeenCalledWith('aun');
-    expect(hooks.disconnectChannel).toHaveBeenCalledWith('aun');
+    expect(hooks.drainChannel).toHaveBeenCalledWith('bot-aun');
+    expect(hooks.disconnectChannel).toHaveBeenCalledWith('bot-aun');
   });
 
   it('starts new channels', async () => {
@@ -172,7 +172,7 @@ describe('AgentRegistry.reload', () => {
 
     expect(hooks.startChannel).toHaveBeenCalled();
     const agent = reg.get('bot')!;
-    expect(agent.channelInstanceNames()).toContain('aun');
+    expect(agent.channelInstanceNames()).toContain('bot-aun');
   });
 
   it('rejects reload with fingerprint conflict', async () => {
@@ -202,7 +202,7 @@ describe('AgentRegistry.reload', () => {
 
     await expect(reg.reload('bot', hooks)).rejects.toThrow(/conflict/i);
     // Original agent should be unchanged
-    expect(reg.get('bot')!.channelInstanceNames()).toContain('bot-fs');
+    expect(reg.get('bot')!.channelInstanceNames()).toContain('bot-feishu-bot-fs');
   });
 
   it('rejects reload of nonexistent agent', async () => {
@@ -243,7 +243,7 @@ describe('AgentRegistry.reload', () => {
 
     // Sanity: original agent has only feishu, status not error
     const before = reg.get('bot')!;
-    expect(before.channelInstanceNames()).toEqual(['a-fs']);
+    expect(before.channelInstanceNames()).toEqual(['bot-feishu-a-fs']);
 
     // Modify config: add channel aun
     writeAgent('bot', {
@@ -267,7 +267,7 @@ describe('AgentRegistry.reload', () => {
 
     // Verify: registry kept oldAgent — still has only feishu, not aun
     const after = reg.get('bot')!;
-    expect(after.channelInstanceNames()).toEqual(['a-fs']);
+    expect(after.channelInstanceNames()).toEqual(['bot-feishu-a-fs']);
     // oldAgent is marked error after rollback
     expect(after.status).toBe('error');
     expect(after.error).toMatch(/SDK timeout/);
@@ -307,7 +307,7 @@ describe('AgentRegistry.reload', () => {
       disconnectChannel: vi.fn().mockResolvedValue(undefined),
       startChannel: vi.fn().mockImplementation(async (_agent, ch: string) => {
         startCalls.push(ch);
-        if (ch === 'wechat') throw new Error('wechat start failed');
+        if (ch === 'bot-wechat') throw new Error('wechat start failed');
         // re-start of aun during rollback succeeds
       }),
     };
@@ -315,7 +315,7 @@ describe('AgentRegistry.reload', () => {
     await expect(reg.reload('bot', failingHooks)).rejects.toThrow(/wechat start failed/);
 
     // Rollback re-started 'aun' (the removed channel)
-    expect(startCalls).toContain('wechat');
-    expect(startCalls).toContain('aun');
+    expect(startCalls).toContain('bot-wechat');
+    expect(startCalls).toContain('bot-aun');
   });
 });

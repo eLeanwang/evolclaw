@@ -41,7 +41,7 @@ describe('CLI agent list (cold mode)', () => {
     const review = list.find(i => i.name === 'review');
     expect(review).toBeDefined();
     expect(review!.baseagent).toBe('claude');
-    expect(review!.channels).toContain('review-fs');
+    expect(review!.channels).toContain('review-feishu-review-fs');
   });
 
   it('shows disabled agents', () => {

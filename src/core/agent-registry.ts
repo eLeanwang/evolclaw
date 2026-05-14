@@ -279,8 +279,8 @@ export class AgentRegistry {
     const credentialsChanged: string[] = [];
     const trulyKept: string[] = [];
     for (const ch of kept) {
-      const oldCh = getChannelInstanceConfig(oldAgent.config, ch);
-      const newCh = getChannelInstanceConfig(newAgent.config, ch);
+      const oldCh = getChannelInstanceConfig(oldAgent, ch);
+      const newCh = getChannelInstanceConfig(newAgent, ch);
       if (oldCh && newCh && channelConfigChanged(oldCh.config, newCh.config)) {
         credentialsChanged.push(ch);
       } else {
@@ -431,15 +431,19 @@ export class AgentRegistry {
 /**
  * Locate the raw config of a channel instance by name within an agent config.
  * Returns `{ type, config }` or null if not found.
+ *
+ * Matches against the effective channel name (with agent prefix for EvolAgents),
+ * mirroring `EvolAgent.findChannelInstance`. Only used by `reload()` to detect
+ * kept-channel credential changes.
  */
-function getChannelInstanceConfig(agentConfig: any, channelName: string): { type: string; config: any } | null {
-  for (const [type, raw] of Object.entries(agentConfig?.channels || {})) {
+function getChannelInstanceConfig(agent: EvolAgent, channelName: string): { type: string; config: any } | null {
+  for (const [type, raw] of Object.entries(agent.config?.channels || {})) {
     if (type === 'defaultChannel') continue;
     const instances = Array.isArray(raw) ? raw : [raw];
     for (const inst of instances) {
       if (!inst || typeof inst !== 'object') continue;
-      const name = (inst as any).name ?? type;
-      if (name === channelName) return { type, config: inst };
+      const effName = agent.effectiveChannelName(type, (inst as any).name);
+      if (effName === channelName) return { type, config: inst };
     }
   }
   return null;

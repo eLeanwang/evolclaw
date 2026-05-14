@@ -74,7 +74,7 @@ describe('IPC evolagent handlers (via AgentRegistry)', () => {
     const bot = list.find(i => i.name === 'bot');
     expect(bot).toBeDefined();
     expect(bot!.baseagent).toBe('claude');
-    expect(bot!.channels).toContain('bot-fs');
+    expect(bot!.channels).toContain('bot-feishu-bot-fs');
     expect(bot!.projectPath).toBe('/tmp/bot');
   });
 });

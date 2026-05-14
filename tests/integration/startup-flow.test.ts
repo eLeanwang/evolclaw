@@ -97,12 +97,24 @@ describe('Startup flow integration', () => {
     // Default channels
     const defaultInstances = await channelLoader.createAll(globalCfg);
 
-    // Per-agent channels
+    // Per-agent channels — mirror production index.ts: rewrite channel
+    // instance names with agent prefix before passing to plugin.
     const agentInstances: ChannelInstance[] = [];
     for (const agent of registry.runnableAgents()) {
+      const rewrittenChannels: Record<string, any> = {};
+      for (const [type, raw] of Object.entries(agent.config.channels || {})) {
+        if (type === 'defaultChannel') { rewrittenChannels[type] = raw; continue; }
+        const instances = Array.isArray(raw) ? raw : [raw];
+        const rewritten = instances.map((inst: any) => {
+          if (!inst || typeof inst !== 'object') return inst;
+          const effName = agent.effectiveChannelName(type, inst.name);
+          return { ...inst, name: effName };
+        });
+        rewrittenChannels[type] = Array.isArray(raw) ? rewritten : rewritten[0];
+      }
       const agentConfig = {
         agents: agent.config.agents,
-        channels: agent.config.channels,
+        channels: rewrittenChannels,
         projects: agent.config.projects,
       } as any;
       try {
@@ -151,14 +163,14 @@ describe('Startup flow integration', () => {
       channels: { feishu: [{ name: 'bot-fs', appId: 'b', appSecret: 's' }] },
       projects: { defaultPath: '/tmp' },
     });
-    const plugin = makeMockPlugin('feishu', [{ name: 'default-fs' }, { name: 'bot-fs' }]);
+    const plugin = makeMockPlugin('feishu', [{ name: 'default-fs' }, { name: 'bot-feishu-bot-fs' }]);
     const cfg = globalConfig([{ name: 'default-fs', appId: 'd', appSecret: 's' }]);
 
     const { registry } = await runStartup(cfg, plugin);
 
     const bot = registry.get('bot')!;
     expect(bot.status).toBe('running');
-    expect(bot.channels.has('bot-fs')).toBe(true);
+    expect(bot.channels.has('bot-feishu-bot-fs')).toBe(true);
   });
 
   it('agent.json with failing channel: agent stays stopped', async () => {
@@ -171,7 +183,7 @@ describe('Startup flow integration', () => {
     });
     const plugin = makeMockPlugin('feishu', [
       { name: 'default-fs' },
-      { name: 'bot-fs', shouldConnect: false }, // simulated connect failure
+      { name: 'bot-feishu-bot-fs', shouldConnect: false }, // simulated connect failure
     ]);
     const cfg = globalConfig([{ name: 'default-fs', appId: 'd', appSecret: 's' }]);
 
@@ -238,18 +250,18 @@ describe('Startup flow integration', () => {
     });
     const plugin = makeMockPlugin('feishu', [
       { name: 'default-fs' },
-      { name: 'alice-fs' },
-      { name: 'bob-fs' },
+      { name: 'alice-feishu-alice-fs' },
+      { name: 'bob-feishu-bob-fs' },
     ]);
     const cfg = globalConfig([{ name: 'default-fs', appId: 'd', appSecret: 's' }]);
 
     const { registry, channelInstances } = await runStartup(cfg, plugin);
 
     expect(channelInstances).toHaveLength(3);
-    expect(registry.get('alice')!.channels.has('alice-fs')).toBe(true);
-    expect(registry.get('alice')!.channels.has('bob-fs')).toBe(false);
-    expect(registry.get('bob')!.channels.has('bob-fs')).toBe(true);
-    expect(registry.get('bob')!.channels.has('alice-fs')).toBe(false);
+    expect(registry.get('alice')!.channels.has('alice-feishu-alice-fs')).toBe(true);
+    expect(registry.get('alice')!.channels.has('bob-feishu-bob-fs')).toBe(false);
+    expect(registry.get('bob')!.channels.has('bob-feishu-bob-fs')).toBe(true);
+    expect(registry.get('bob')!.channels.has('alice-feishu-alice-fs')).toBe(false);
   });
 
   it('agent createAll fails internally: failing agent stays stopped, healthy agent runs', async () => {
@@ -279,7 +291,7 @@ describe('Startup flow integration', () => {
       async createChannel(config: any) {
         const block = config.channels.feishu;
         const inst = Array.isArray(block) ? block[0] : block;
-        if (inst.name === 'crashy-fs') throw new Error('boom');
+        if (inst.name === 'crashy-feishu-crashy-fs') throw new Error('boom');
         return {
           channelType: 'feishu',
           adapter: { channelName: inst.name, sendText: vi.fn() } as any,
@@ -293,7 +305,7 @@ describe('Startup flow integration', () => {
         const instances = Array.isArray(block) ? block : [block];
         return Promise.all(
           instances.map(async (inst: any) => {
-            if (inst.name === 'crashy-fs') throw new Error('boom');
+            if (inst.name === 'crashy-feishu-crashy-fs') throw new Error('boom');
             return {
               channelType: 'feishu',
               adapter: { channelName: inst.name, sendText: vi.fn() } as any,
@@ -314,11 +326,11 @@ describe('Startup flow integration', () => {
     expect(registry.get('crashy')!.channels.size).toBe(0);
     // healthy proceeds normally
     expect(registry.get('healthy')!.status).toBe('running');
-    expect(registry.get('healthy')!.channels.has('healthy-fs')).toBe(true);
+    expect(registry.get('healthy')!.channels.has('healthy-feishu-healthy-fs')).toBe(true);
     // default + healthy created (crashy did not)
     expect(channelInstances.map(i => i.adapter.channelName).sort()).toEqual([
       'default-fs',
-      'healthy-fs',
+      'healthy-feishu-healthy-fs',
     ]);
   });
 });

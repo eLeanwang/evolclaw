@@ -23,7 +23,7 @@ describe('EvolAgent', () => {
 
   it('getContext returns correct defaults for agent-owned channel', () => {
     const agent = new EvolAgent('/path/review-bot.json', baseConfig);
-    const ctx = agent.getContext('feishu-review', 'private');
+    const ctx = agent.getContext('review-bot-feishu-feishu-review', 'private');
     expect(ctx.name).toBe('review-bot');
     expect(ctx.isOwned).toBe(true);
     expect(ctx.baseagent).toBe('claude');
@@ -36,14 +36,14 @@ describe('EvolAgent', () => {
   it('resolves chatmode by chatType from agent config', () => {
     const config = { ...baseConfig, chatmode: { private: 'proactive' as const, group: 'interactive' as const } };
     const agent = new EvolAgent('/path/review.json', config);
-    expect(agent.getContext('feishu-review', 'private').chatMode).toBe('proactive');
-    expect(agent.getContext('feishu-review', 'group').chatMode).toBe('interactive');
+    expect(agent.getContext('review-bot-feishu-feishu-review', 'private').chatMode).toBe('proactive');
+    expect(agent.getContext('review-bot-feishu-feishu-review', 'group').chatMode).toBe('interactive');
   });
 
   it('falls back to global chatmode when agent chatmode absent', () => {
     const agent = new EvolAgent('/path/review.json', baseConfig);
     const globalChatmode = { private: 'interactive' as const, group: 'proactive' as const };
-    expect(agent.getContext('feishu-review', 'group', globalChatmode).chatMode).toBe('proactive');
+    expect(agent.getContext('review-bot-feishu-feishu-review', 'group', globalChatmode).chatMode).toBe('proactive');
   });
 
   it('DefaultAgent flag exposed via isDefault', () => {
@@ -59,7 +59,7 @@ describe('EvolAgent', () => {
 
   it('lists channel instance names', () => {
     const agent = new EvolAgent('/path', baseConfig);
-    expect(agent.channelInstanceNames()).toEqual(['feishu-review']);
+    expect(agent.channelInstanceNames()).toEqual(['review-bot-feishu-feishu-review']);
   });
 
   it('handles object-form channel with default name', () => {
@@ -68,7 +68,7 @@ describe('EvolAgent', () => {
       channels: { aun: { aid: 'review.agentid.pub', owner: 'owner.agentid.pub' } },
     };
     const agent = new EvolAgent('/path', config);
-    expect(agent.channelInstanceNames()).toEqual(['aun']);
+    expect(agent.channelInstanceNames()).toEqual(['review-bot-aun']);
   });
 
   it('handles multiple channel types', () => {
@@ -80,7 +80,7 @@ describe('EvolAgent', () => {
       },
     };
     const agent = new EvolAgent('/path', config);
-    expect(agent.channelInstanceNames().sort()).toEqual(['aun', 'fs-1', 'fs-2']);
+    expect(agent.channelInstanceNames().sort()).toEqual(['review-bot-aun', 'review-bot-feishu-fs-1', 'review-bot-feishu-fs-2']);
   });
 });
 
@@ -97,7 +97,7 @@ describe('EvolAgent owner/admin/showActivities', () => {
 
   it('findChannelInstance matches by explicit name', () => {
     const agent = new EvolAgent('/p', baseConfig);
-    expect(agent.findChannelInstance('fs')).toBeTruthy();
+    expect(agent.findChannelInstance('review-bot-feishu-fs')).toBeTruthy();
     expect(agent.findChannelInstance('nope')).toBeNull();
   });
 
@@ -106,32 +106,32 @@ describe('EvolAgent owner/admin/showActivities', () => {
       ...baseConfig,
       channels: { aun: { aid: 'x.agentid.pub', owner: 'u1' } },
     });
-    expect(agent.findChannelInstance('aun')).toBeTruthy();
+    expect(agent.findChannelInstance('review-bot-aun')).toBeTruthy();
   });
 
   it('getOwner returns the owner of the channel', () => {
     const agent = new EvolAgent('/p', baseConfig);
-    expect(agent.getOwner('fs')).toBe('user1');
+    expect(agent.getOwner('review-bot-feishu-fs')).toBe('user1');
     expect(agent.getOwner('nope')).toBeUndefined();
   });
 
   it('isOwner returns true for matching owner', () => {
     const agent = new EvolAgent('/p', baseConfig);
-    expect(agent.isOwner('fs', 'user1')).toBe(true);
-    expect(agent.isOwner('fs', 'user2')).toBe(false);
+    expect(agent.isOwner('review-bot-feishu-fs', 'user1')).toBe(true);
+    expect(agent.isOwner('review-bot-feishu-fs', 'user2')).toBe(false);
     expect(agent.isOwner('nope', 'user1')).toBe(false);
   });
 
   it('isAdmin includes owner and listed admins', () => {
     const agent = new EvolAgent('/p', baseConfig);
-    expect(agent.isAdmin('fs', 'user1')).toBe(true);  // owner is admin
-    expect(agent.isAdmin('fs', 'user2')).toBe(true);  // listed admin
-    expect(agent.isAdmin('fs', 'user3')).toBe(false); // unrelated
+    expect(agent.isAdmin('review-bot-feishu-fs', 'user1')).toBe(true);  // owner is admin
+    expect(agent.isAdmin('review-bot-feishu-fs', 'user2')).toBe(true);  // listed admin
+    expect(agent.isAdmin('review-bot-feishu-fs', 'user3')).toBe(false); // unrelated
   });
 
   it('getShowActivities defaults to "all"', () => {
     const agent = new EvolAgent('/p', baseConfig);
-    expect(agent.getShowActivities('fs')).toBe('all');
+    expect(agent.getShowActivities('review-bot-feishu-fs')).toBe('all');
   });
 
   it('getShowActivities reads instance value when set', () => {
@@ -139,7 +139,7 @@ describe('EvolAgent owner/admin/showActivities', () => {
       ...baseConfig,
       channels: { feishu: [{ name: 'fs', appId: 'a', appSecret: 's', showActivities: 'dm-only' }] },
     });
-    expect(agent.getShowActivities('fs')).toBe('dm-only');
+    expect(agent.getShowActivities('review-bot-feishu-fs')).toBe('dm-only');
   });
 
   it('setOwner persists to configPath', () => {
@@ -148,7 +148,7 @@ describe('EvolAgent owner/admin/showActivities', () => {
     const cfg = JSON.parse(JSON.stringify(baseConfig));
     fs.writeFileSync(file, JSON.stringify(cfg, null, 2));
     const agent = new EvolAgent(file, cfg);
-    agent.setOwner('fs', 'newOwner');
+    agent.setOwner('review-bot-feishu-fs', 'newOwner');
     const written = JSON.parse(fs.readFileSync(file, 'utf-8'));
     expect(written.channels.feishu[0].owner).toBe('newOwner');
     fs.rmSync(tmp, { recursive: true, force: true });
@@ -160,7 +160,7 @@ describe('EvolAgent owner/admin/showActivities', () => {
     const cfg = JSON.parse(JSON.stringify(baseConfig));
     fs.writeFileSync(file, JSON.stringify(cfg, null, 2));
     const agent = new EvolAgent(file, cfg);
-    agent.setShowActivities('fs', 'none');
+    agent.setShowActivities('review-bot-feishu-fs', 'none');
     const written = JSON.parse(fs.readFileSync(file, 'utf-8'));
     expect(written.channels.feishu[0].showActivities).toBe('none');
     fs.rmSync(tmp, { recursive: true, force: true });

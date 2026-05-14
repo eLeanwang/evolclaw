@@ -94,7 +94,7 @@ describe('setOwner routing', () => {
           setOwner: (ch, uid) => setOwner(config, ch, uid, configPath),
         });
         reg.loadAll(config);
-        reg.setChannelOwner('review-fs', 'user-123');
+        reg.setChannelOwner('review-feishu-review-fs', 'user-123');
 
         // Verify agent.json was updated
         const agent = JSON.parse(fs.readFileSync(agentPath, 'utf-8'));
@@ -221,7 +221,7 @@ describe('setOwner routing', () => {
           setOwner: (ch, uid) => setOwner(config, ch, uid, configPath),
         });
         reg.loadAll(config);
-        reg.setChannelOwner('review-fs', 'user-nl');
+        reg.setChannelOwner('review-feishu-review-fs', 'user-nl');
 
         const written = fs.readFileSync(agentPath, 'utf-8');
         expect(written.endsWith('\n')).toBe(true);
