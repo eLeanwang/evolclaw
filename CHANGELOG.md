@@ -1,5 +1,29 @@
 # Changelog
 
+## v2.9.0 (2026-05-14)
+
+### New Features
+
+- **EvolAgent Mode** — 一等 agent 实体：一个 JSON 文件自包含 channels + baseagent + project + chatmode。多 agent 并发运行，各自独占 channel 资源
+  - `evolclaw agent` CLI：list / show / new / reload
+  - Channel fingerprint 冲突检测（启动时 + 热重载时）
+  - 完整热重载：drain → disconnect → reconnect → route-update + rollback on failure
+  - 凭证变更检测：kept channel 配置变化自动重连
+  - Owner 自动绑定写回 agent.json
+  - 命令拦截：agent-owned channel 上 /project /bind /plist /agent-switch 禁用
+  - DefaultAgent 兜底处理 evolclaw.json channels
+  - AgentRegistryHandle 类型接口（IPC/MessageProcessor/CommandHandler 类型安全）
+  - Real drain via MessageQueue.isChannelProcessing（30s timeout + 100ms poll）
+
+### Improvements
+
+- **Channel Fingerprint** — `{type}:{primaryKey}` 统一格式，启动时检测 evolclaw.json 内重复凭证
+- **ChannelLoader 幂性** — 验证 createAll 可安全多次调用（evolagent multi-source 基础）
+- **Orphan session 检测** — `evolclaw status` 显示孤儿 session 总数
+- **baseagent key 统一** — config.agents.{anthropic,openai,google} → {claude,codex,gemini}，启动时自动迁移
+
+---
+
 ## v2.8.0 (2026-05-13)
 
 ### New Features
