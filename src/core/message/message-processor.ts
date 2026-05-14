@@ -87,6 +87,20 @@ export class MessageProcessor {
     this.messageQueue = queue;
   }
 
+  private agentRegistry?: any;
+
+  setAgentRegistry(registry: any): void {
+    this.agentRegistry = registry;
+  }
+
+  private getAgentContext(channelName: string, chatType: string): any | null {
+    if (!this.agentRegistry) return null;
+    const agent = this.agentRegistry.resolveByChannel(channelName);
+    if (!agent) return null;
+    const globalCm = (this.config as any).chatmode;
+    return agent.getContext(channelName, chatType, globalCm);
+  }
+
   /**
    * 注册渠道适配器
    */
@@ -175,6 +189,12 @@ export class MessageProcessor {
     const streamKey = session.id;
     const chatType = message.chatType || 'private';
     const identityRole = session.identity?.role || 'anonymous';
+
+    // Resolve agent context from registry (Phase 2 foundation)
+    const agentContext = this.getAgentContext(channelKey, chatType);
+    if (agentContext) {
+      logger.debug(`[MessageProcessor] Agent context resolved: ${agentContext.name} (${agentContext.baseagent})`);
+    }
 
     // 按 session.agentId 选择 agent 后端
     const agent = this.getAgent(session.agentId);

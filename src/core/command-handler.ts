@@ -167,6 +167,7 @@ export class CommandHandler {
   private statsCollector?: StatsCollector;
   private agentMap: Map<string, AgentRunnerFull>;
   private defaultAgentId: string;
+  private agentRegistry?: { resolveByChannel(channel: string): { name: string; projectPath: string; baseagent: string; isDefault?: boolean } | undefined };
 
   /** 按 agentId 获取 agent，回退到默认 */
   private getAgent(agentId?: string): AgentRunnerFull {
@@ -189,6 +190,19 @@ export class CommandHandler {
       this.agentMap = new Map([[agentRunnerOrMap.name, agentRunnerOrMap]]);
       this.defaultAgentId = agentRunnerOrMap.name;
     }
+  }
+
+  /** 注入 AgentRegistry，用于判断通道是否被 EvolAgent 管理 */
+  setAgentRegistry(registry: { resolveByChannel(channel: string): { name: string; projectPath: string; baseagent: string; isDefault?: boolean } | undefined }): void {
+    this.agentRegistry = registry;
+  }
+
+  /** 返回管理当前通道的 EvolAgent（非 default），无则返回 null */
+  private getOwningAgent(channel: string): { name: string; projectPath: string; baseagent: string } | null {
+    if (!this.agentRegistry) return null;
+    const agent = this.agentRegistry.resolveByChannel(channel);
+    if (!agent || agent.isDefault) return null;
+    return agent;
   }
 
   /** 项目列表快捷访问（list 缺失时用 defaultPath 作为唯一项目） */
@@ -683,6 +697,21 @@ export class CommandHandler {
       const isBlocked = threadBlocked.some(c => normalizedContent === c || normalizedContent.startsWith(c + ' '));
       if (isBlocked) {
         return '⚠️ 话题中不支持此命令';
+      }
+    }
+
+    // Agent-owned 通道：禁止项目切换和 agent 切换
+    const owningAgent = this.getOwningAgent(channel);
+    if (owningAgent) {
+      const isProjectCmd = normalizedContent === '/project' || normalizedContent.startsWith('/project ') ||
+        normalizedContent === '/bind' || normalizedContent.startsWith('/bind ') ||
+        normalizedContent === '/plist' ||
+        normalizedContent === '/p' || normalizedContent.startsWith('/p ');
+      if (isProjectCmd) {
+        return `❌ 当前通道由 agent [${owningAgent.name}] 管理，项目已锁定为 ${owningAgent.projectPath}`;
+      }
+      if (normalizedContent.startsWith('/agent ')) {
+        return `❌ 当前通道由 agent [${owningAgent.name}] 管理，baseagent 已锁定为 ${owningAgent.baseagent}`;
       }
     }
 
