@@ -1477,14 +1477,15 @@ async function cmdAgent(args: string[]): Promise<void> {
 
   if (sub === 'new') {
     const name = args[1];
-    if (!name) {
-      console.error('Usage: evolclaw agent new <name> [--non-interactive ...]');
-      process.exit(1);
-    }
     const nonInteractive = args.includes('--non-interactive');
     if (nonInteractive) {
+      if (!name) {
+        console.error('Usage: evolclaw agent new <name> --non-interactive ...');
+        process.exit(1);
+      }
       await cmdAgentNewNonInteractive(name, args.slice(2));
     } else {
+      // Interactive mode: name from CLI is suggested default; user can override at prompt
       await cmdAgentNew(name);
     }
     return;
@@ -1634,19 +1635,37 @@ async function cmdAgentShow(name: string): Promise<void> {
   if (agent.configPath) console.log(`  Config:     ${agent.configPath}`);
 }
 
-async function cmdAgentNew(name: string): Promise<void> {
+async function cmdAgentNew(suggestedName: string): Promise<void> {
   const p = resolvePaths();
-  const agentPath = path.join(p.agentsDir, `${name}.json`);
-
-  if (fs.existsSync(agentPath)) {
-    console.error(`Agent "${name}" already exists: ${agentPath}`);
-    process.exit(1);
-  }
 
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   const ask = (q: string): Promise<string> => new Promise(r => rl.question(q, r));
 
+  let name: string;
   try {
+    // Derive a clean default: strip dots (AID-like) → first label
+    const defaultName = suggestedName ? suggestedName.split('.')[0] : '';
+    const prompt = defaultName
+      ? `Agent name [${defaultName}]: `
+      : 'Agent name: ';
+    const input = (await ask(prompt)).trim();
+    name = input || defaultName;
+    if (!name) {
+      console.error('Agent name is required.');
+      process.exit(1);
+    }
+    // Disallow dots/slashes/spaces in agent name (used as filename + channel-name prefix)
+    if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
+      console.error(`Invalid agent name "${name}": only letters/digits/_/- allowed`);
+      process.exit(1);
+    }
+
+    const agentPath = path.join(p.agentsDir, `${name}.json`);
+    if (fs.existsSync(agentPath)) {
+      console.error(`Agent "${name}" already exists: ${agentPath}`);
+      process.exit(1);
+    }
+
     console.log(`\nCreating agent: ${name}\n`);
 
     const projectPath = (await ask('Project path: ')).trim();
@@ -1681,7 +1700,19 @@ async function cmdAgentNew(name: string): Promise<void> {
     const effort = (await ask('Effort (low/medium/high/max) [high]: ')).trim() || 'high';
 
     const chatmodeChoices = ['interactive', 'proactive'];
-    const chatmodePrivate = (await ask(`ChatMode private (${chatmodeChoices.join('/')}) [interactive]: `)).trim() || 'interactive';
+    console.log('\nChat mode determines how the agent responds:');
+    console.log('  interactive — replies to every message; agent output sent automatically');
+    console.log('  proactive   — silent by default; agent decides when/whether to send via ctl send');
+    const chatmodePrivate = (await ask(`Private (1-on-1) chat mode (${chatmodeChoices.join('/')}) [interactive]: `)).trim() || 'interactive';
+    if (!chatmodeChoices.includes(chatmodePrivate)) {
+      console.error(`Invalid chat mode: ${chatmodePrivate}`);
+      process.exit(1);
+    }
+    const chatmodeGroup = (await ask(`Group chat mode (${chatmodeChoices.join('/')}) [proactive]: `)).trim() || 'proactive';
+    if (!chatmodeChoices.includes(chatmodeGroup)) {
+      console.error(`Invalid chat mode: ${chatmodeGroup}`);
+      process.exit(1);
+    }
 
     // Channels (loop to allow multiple)
     const channelsConfig: Record<string, any[]> = {};
@@ -1746,7 +1777,7 @@ async function cmdAgentNew(name: string): Promise<void> {
       agents: { [baseagent]: { ...(model && { model }), effort } },
       channels: finalChannels,
       projects: { defaultPath: projectPath.trim() },
-      chatmode: { private: chatmodePrivate, group: 'proactive' },
+      chatmode: { private: chatmodePrivate, group: chatmodeGroup },
     };
 
     fs.mkdirSync(p.agentsDir, { recursive: true });
