@@ -1,158 +1,254 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { CommandHandler } from '../../src/core/command-handler.js';
+import { EventBus } from '../../src/core/event-bus.js';
+import type { Config, ChannelAdapter, EvolAgentHandle, EvolAgentRegistryHandle } from '../../src/types.js';
 
 /**
- * Pattern-only tests for /check + /restart agent-ownership scoping.
- *
- * Mirrors the runtime logic in CommandHandler so we can verify the filter
- * predicates and scope-resolution branches without a fully constructed
- * CommandHandler instance (which has heavy dependencies).
+ * These tests invoke the real CommandHandler.handle() to verify that /check
+ * and /restart correctly scope to the owning agent and block cross-agent
+ * operations. The previous version reimplemented the filter logic in the test
+ * file itself, so it would have passed even if production code drifted.
  */
 
-interface FakeAgent {
-  name: string;
-  isDefault: boolean;
-  channelInstanceNames(): string[];
-}
-
-function resolveAllowedChannels(owningAgent: FakeAgent | null): Set<string> | null {
-  return owningAgent ? new Set(owningAgent.channelInstanceNames()) : null;
-}
-
-function filterChannels(
-  adapters: string[],
-  allowed: Set<string> | null
-): string[] {
-  return adapters.filter(name => !allowed || allowed.has(name));
-}
-
-function resolveRestartScope(
-  type: string,
-  adapters: string[],
-  channelTypeMap: Map<string, string>,
-  owningAgent: FakeAgent | null,
-  resolveByChannel: (name: string) => FakeAgent | null
-): string[] {
-  const scoped: string[] = [];
-  if (owningAgent) {
-    for (const name of owningAgent.channelInstanceNames()) {
-      if (channelTypeMap.get(name) === type) scoped.push(name);
-    }
-  } else {
-    for (const name of adapters) {
-      if (channelTypeMap.get(name) !== type) continue;
-      const owner = resolveByChannel(name);
-      if (owner && !owner.isDefault) continue;
-      scoped.push(name);
-    }
-  }
-  return scoped;
-}
-
-describe('/check filters by owning agent', () => {
-  const adapters = ['aun', 'feishu', 'review-bot-aun', 'support-bot-feishu'];
-  const reviewBot: FakeAgent = {
-    name: 'review-bot',
-    isDefault: false,
-    channelInstanceNames: () => ['review-bot-aun'],
+function makeSession(overrides: Partial<any> = {}): any {
+  return {
+    id: 'test-session', channel: 'main', channelId: 'chat1',
+    projectPath: '/tmp/test', threadId: '', agentId: 'claude',
+    chatType: 'private', sessionMode: 'interactive',
+    agentSessionId: 'claude-s1', metadata: {},
+    createdAt: Date.now(), updatedAt: Date.now(),
+    identity: { role: 'owner', mode: 'interactive' },
+    ...overrides,
   };
+}
 
-  it('agent-owned channel only sees its own channels', () => {
-    const allowed = resolveAllowedChannels(reviewBot);
-    const visible = filterChannels(adapters, allowed);
-    expect(visible).toEqual(['review-bot-aun']);
-    expect(visible).not.toContain('aun');
-    expect(visible).not.toContain('feishu');
-    expect(visible).not.toContain('support-bot-feishu');
+function makeMockSessionManager(role: 'owner' | 'admin' | 'guest' = 'owner') {
+  const session = makeSession({ identity: { role, mode: 'interactive' } });
+  return {
+    getOrCreateSession: vi.fn().mockResolvedValue(session),
+    getActiveSession: vi.fn().mockResolvedValue(session),
+    resolveIdentity: vi.fn().mockReturnValue({ role, mode: 'interactive' }),
+    recordSuccess: vi.fn(),
+    recordError: vi.fn().mockResolvedValue(0),
+    getHealthStatus: vi.fn().mockResolvedValue({ consecutiveErrors: 0, safeMode: false }),
+    setSafeMode: vi.fn(),
+    switchProject: vi.fn(),
+    createNewSession: vi.fn(),
+    listSessions: vi.fn().mockResolvedValue([]),
+    switchSession: vi.fn(),
+    renameSession: vi.fn(),
+    deleteSession: vi.fn(),
+    updateClaudeSessionId: vi.fn(),
+    updateSession: vi.fn().mockResolvedValue(undefined),
+    checkSessionFileExists: vi.fn().mockReturnValue(true),
+  } as any;
+}
+
+function makeMockAgentRunner() {
+  return {
+    runQuery: vi.fn(),
+    interrupt: vi.fn(),
+    updateSessionId: vi.fn(),
+    closeSession: vi.fn(),
+    compactSession: vi.fn(),
+    getModel: vi.fn().mockReturnValue('sonnet'),
+    getEffort: vi.fn().mockReturnValue('medium'),
+    setModel: vi.fn(),
+    setEffort: vi.fn(),
+    listModels: vi.fn().mockReturnValue(['sonnet', 'opus', 'haiku']),
+    name: 'claude',
+    setMode: vi.fn(),
+    getMode: vi.fn().mockReturnValue('default'),
+    listModes: vi.fn().mockReturnValue([{ key: 'default', nameZh: '标准', description: '标准', available: true }]),
+    compact: vi.fn().mockResolvedValue(true),
+    hasActiveStream: vi.fn().mockReturnValue(false),
+  } as any;
+}
+
+function makeMockConfig(): Config {
+  return {
+    agents: { defaultAgent: 'claude', claude: {} },
+    channels: { aun: [{ name: 'main', enabled: true, aid: 'main.agentid.pub' }] },
+    projects: { defaultPath: '/tmp/test', list: { test: '/tmp/test' } },
+  } as any;
+}
+
+function makeMockMessageCache() {
+  return {
+    getCount: vi.fn().mockReturnValue(0),
+    addEvent: vi.fn(),
+    getEvents: vi.fn().mockReturnValue([]),
+    clearEvents: vi.fn(),
+    hasMessages: vi.fn().mockReturnValue(false),
+  } as any;
+}
+
+function makeMockMessageQueue() {
+  return {
+    getQueueLength: vi.fn().mockReturnValue(0),
+    getQueueLengthByAgent: vi.fn().mockReturnValue(0),
+    getProcessingCountByAgent: vi.fn().mockReturnValue(0),
+    isProcessing: vi.fn().mockReturnValue(false),
+    acquireLock: vi.fn().mockReturnValue(() => {}),
+    enqueue: vi.fn(),
+    interrupt: vi.fn(),
+  } as any;
+}
+
+function makeAdapter(channelName: string): ChannelAdapter {
+  return { channelName, sendText: vi.fn().mockResolvedValue(undefined) } as any;
+}
+
+function makeMockEvolAgent(name: string, opts: {
+  isDefault?: boolean;
+  channels?: string[];
+  projectPath?: string;
+  baseagent?: string;
+}): EvolAgentHandle {
+  return {
+    name,
+    isDefault: opts.isDefault ?? false,
+    baseagent: opts.baseagent ?? 'claude',
+    projectPath: opts.projectPath ?? '/home/agent',
+    getContext: vi.fn(),
+    getOwner: vi.fn(),
+    isOwner: vi.fn().mockReturnValue(true),
+    isAdmin: vi.fn().mockReturnValue(true),
+    setOwner: vi.fn(),
+    getShowActivities: vi.fn().mockReturnValue('all'),
+    setShowActivities: vi.fn(),
+    setBaseagentModel: vi.fn(),
+    setBaseagentEffort: vi.fn(),
+    getProjects: vi.fn().mockReturnValue({}),
+    addProject: vi.fn(),
+    channelInstanceNames: vi.fn().mockReturnValue(opts.channels ?? []),
+  } as any;
+}
+
+function makeMockRegistry(channelToAgent: Record<string, EvolAgentHandle>): EvolAgentRegistryHandle {
+  return {
+    resolveByChannel: vi.fn((ch: string) => channelToAgent[ch] ?? null),
+    get: vi.fn(),
+    list: vi.fn().mockReturnValue([]),
+    isOwner: vi.fn((_ch, _uid, fb) => fb(_ch, _uid)),
+    isAdmin: vi.fn((_ch, _uid, fb) => fb(_ch, _uid)),
+    getOwner: vi.fn(),
+    setChannelOwner: vi.fn(),
+    getShowActivities: vi.fn(),
+    setShowActivities: vi.fn(),
+  } as any;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// /check scoping
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('/check scoping — real handler', () => {
+  let cmdHandler: CommandHandler;
+
+  beforeEach(() => {
+    const sessionManager = makeMockSessionManager('owner');
+    const eventBus = new EventBus();
+    cmdHandler = new CommandHandler(
+      sessionManager,
+      makeMockAgentRunner(),
+      makeMockConfig(),
+      makeMockMessageCache(),
+      eventBus,
+    );
+
+    cmdHandler.setMessageQueue(makeMockMessageQueue());
+
+    // Register two adapters: one owned by an EvolAgent, one default
+    cmdHandler.registerAdapter(makeAdapter('review-aun'));
+    cmdHandler.registerChannel('review-aun', {}, 'aun');
+    cmdHandler.registerAdapter(makeAdapter('default-aun'));
+    cmdHandler.registerChannel('default-aun', {}, 'aun');
+
+    const reviewAgent = makeMockEvolAgent('review', {
+      channels: ['review-aun'],
+      projectPath: '/home/review',
+    });
+    cmdHandler.setAgentRegistry(makeMockRegistry({ 'review-aun': reviewAgent }));
   });
 
-  it('default channel context sees all channels', () => {
-    const allowed = resolveAllowedChannels(null);
-    const visible = filterChannels(adapters, allowed);
-    expect(visible).toEqual(adapters);
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it('agent-owned channel /check only lists its own channels', async () => {
+    const result = await cmdHandler.handle('/check', 'review-aun', 'chat1', undefined, 'user1');
+    expect(result).toContain('review-aun');
+    expect(result).not.toContain('default-aun');
   });
 
-  it('agent with multiple channels sees all of its own', () => {
-    const multi: FakeAgent = {
-      name: 'multi-bot',
-      isDefault: false,
-      channelInstanceNames: () => ['multi-bot-aun', 'multi-bot-feishu'],
-    };
-    const ownedAdapters = [...adapters, 'multi-bot-aun', 'multi-bot-feishu'];
-    const visible = filterChannels(ownedAdapters, resolveAllowedChannels(multi));
-    expect(visible.sort()).toEqual(['multi-bot-aun', 'multi-bot-feishu']);
+  it('default channel /check only lists default channels, not agent-owned', async () => {
+    const result = await cmdHandler.handle('/check', 'default-aun', 'chat1', undefined, 'user1');
+    expect(result).toContain('default-aun');
+    // review-aun is owned by an EvolAgent — default /check must NOT show it
+    expect(result).not.toContain('review-aun');
+  });
+
+  it('agent-owned channel /check shows agent name in header', async () => {
+    const result = await cmdHandler.handle('/check', 'review-aun', 'chat1', undefined, 'user1');
+    expect(result).toContain('review');
   });
 });
 
-describe('/restart <type> scope resolution', () => {
-  const reviewBot: FakeAgent = {
-    name: 'review-bot',
-    isDefault: false,
-    channelInstanceNames: () => ['review-bot-aun', 'review-bot-feishu'],
-  };
-  const supportBot: FakeAgent = {
-    name: 'support-bot',
-    isDefault: false,
-    channelInstanceNames: () => ['support-bot-aun'],
-  };
-  const defaultAgent: FakeAgent = {
-    name: 'default',
-    isDefault: true,
-    channelInstanceNames: () => ['aun', 'feishu'],
-  };
+// ─────────────────────────────────────────────────────────────────────────────
+// /restart blocking on EvolAgent channels
+// ─────────────────────────────────────────────────────────────────────────────
 
-  const adapters = ['aun', 'feishu', 'review-bot-aun', 'review-bot-feishu', 'support-bot-aun'];
-  const channelTypeMap = new Map<string, string>([
-    ['aun', 'aun'],
-    ['feishu', 'feishu'],
-    ['review-bot-aun', 'aun'],
-    ['review-bot-feishu', 'feishu'],
-    ['support-bot-aun', 'aun'],
-  ]);
+describe('/restart blocking on EvolAgent channels — real handler', () => {
+  let cmdHandler: CommandHandler;
 
-  const ownerMap = new Map<string, FakeAgent>([
-    ['aun', defaultAgent],
-    ['feishu', defaultAgent],
-    ['review-bot-aun', reviewBot],
-    ['review-bot-feishu', reviewBot],
-    ['support-bot-aun', supportBot],
-  ]);
-  const resolveByChannel = (name: string) => ownerMap.get(name) ?? null;
-
-  it('EvolAgent reconnects only its own channels of given type', () => {
-    const scope = resolveRestartScope('aun', adapters, channelTypeMap, reviewBot, resolveByChannel);
-    expect(scope).toEqual(['review-bot-aun']);
-    expect(scope).not.toContain('aun');
-    expect(scope).not.toContain('support-bot-aun');
-  });
-
-  it('EvolAgent feishu type only matches its own feishu', () => {
-    const scope = resolveRestartScope('feishu', adapters, channelTypeMap, reviewBot, resolveByChannel);
-    expect(scope).toEqual(['review-bot-feishu']);
-  });
-
-  it('Default context excludes agent-owned channels', () => {
-    const scope = resolveRestartScope('aun', adapters, channelTypeMap, null, resolveByChannel);
-    expect(scope).toEqual(['aun']);
-    expect(scope).not.toContain('review-bot-aun');
-    expect(scope).not.toContain('support-bot-aun');
-  });
-
-  it('returns empty when type does not match any in scope', () => {
-    const scope = resolveRestartScope('wechat', adapters, channelTypeMap, reviewBot, resolveByChannel);
-    expect(scope).toEqual([]);
-  });
-
-  it('default context with unowned channels still works', () => {
-    const map = new Map<string, FakeAgent>([
-      ['aun', defaultAgent],
-    ]);
-    const scope = resolveRestartScope(
-      'aun',
-      ['aun'],
-      new Map([['aun', 'aun']]),
-      null,
-      (n) => map.get(n) ?? null
+  beforeEach(() => {
+    const sessionManager = makeMockSessionManager('owner');
+    const eventBus = new EventBus();
+    cmdHandler = new CommandHandler(
+      sessionManager,
+      makeMockAgentRunner(),
+      makeMockConfig(),
+      makeMockMessageCache(),
+      eventBus,
     );
-    expect(scope).toEqual(['aun']);
+
+    cmdHandler.setMessageQueue(makeMockMessageQueue());
+
+    cmdHandler.registerAdapter(makeAdapter('review-aun'));
+    cmdHandler.registerChannel('review-aun', {}, 'aun');
+    cmdHandler.registerAdapter(makeAdapter('default-aun'));
+    cmdHandler.registerChannel('default-aun', {}, 'aun');
+
+    const reviewAgent = makeMockEvolAgent('review', {
+      channels: ['review-aun'],
+      projectPath: '/home/review',
+    });
+    cmdHandler.setAgentRegistry(makeMockRegistry({ 'review-aun': reviewAgent }));
+  });
+
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it('/restart (no-arg) on agent-owned channel returns service-restart-blocked message', async () => {
+    const result = await cmdHandler.handle('/restart', 'review-aun', 'chat1', undefined, 'user1');
+    expect(result).toContain('DefaultAgent');
+    expect(result).not.toBeNull();
+  });
+
+  it('/restart aun on agent-owned channel returns channel-reconnect-blocked message', async () => {
+    const result = await cmdHandler.handle('/restart aun', 'review-aun', 'chat1', undefined, 'user1');
+    expect(result).toContain('DefaultAgent');
+    expect(result).not.toBeNull();
+  });
+
+  it('/restart (no-arg) on default channel does NOT return the EvolAgent block message', async () => {
+    // On default channel /restart proceeds normally (may fail for other reasons in test env,
+    // but must NOT return the EvolAgent isolation error)
+    const result = await cmdHandler.handle('/restart', 'default-aun', 'chat1', undefined, 'user1');
+    expect(result).not.toContain('DefaultAgent 通道发起');
+  });
+
+  it('/restart aun on default channel does NOT return the EvolAgent block message', async () => {
+    const result = await cmdHandler.handle('/restart aun', 'default-aun', 'chat1', undefined, 'user1');
+    expect(result).not.toContain('DefaultAgent 通道发起');
+    expect(result).not.toContain('DefaultAgent 通道发起（服务级操作）');
   });
 });
