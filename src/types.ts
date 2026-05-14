@@ -358,3 +358,38 @@ export type CommandHandler = (
   userId?: string,
   threadId?: string
 ) => Promise<string | null | undefined>;
+
+// ── EvolAgent ──
+
+export interface EvolAgentConfig {
+  name: string;
+  enabled?: boolean;
+  agents: Record<string, any>;
+  channels: Record<string, any>;
+  projects: { defaultPath: string };
+  chatmode?: { private?: 'interactive' | 'proactive'; group?: 'interactive' | 'proactive' };
+}
+
+export interface AgentContext {
+  name: string;
+  isOwned: boolean;
+  baseagent: string;
+  model?: string;
+  effort?: string;
+  chatMode: 'interactive' | 'proactive';
+  projectPath: string;
+}
+
+export type AgentStatus = 'running' | 'stopped' | 'disabled' | 'error';
+
+export interface AgentInfo {
+  name: string;
+  status: AgentStatus;
+  channels: string[];
+  projectPath: string;
+  baseagent: string;
+  lastActivity?: number;
+  activeSessions?: number;
+  error?: string;
+  isDefault?: boolean;
+}
