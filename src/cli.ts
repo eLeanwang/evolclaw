@@ -643,21 +643,6 @@ async function cmdStatus() {
       // IPC query for agents failed — skip section
     }
   }
-
-  console.log('');
-  console.log('📁 Log Files:');
-  const mainLog = path.join(p.logs, 'evolclaw.log');
-  if (fs.existsSync(mainLog)) {
-    const stat = fs.statSync(mainLog);
-    const sizeMB = (stat.size / 1024 / 1024).toFixed(1);
-    console.log(`  Main log: ${mainLog} (${sizeMB} MB)`);
-    console.log('');
-    console.log('📝 Recent activity (last 30 lines):');
-    const content = fs.readFileSync(mainLog, 'utf-8').trim().split('\n');
-    console.log(content.slice(-30).map(l => `  ${l}`).join('\n'));
-  } else {
-    console.log('  (no log file yet)');
-  }
 }
 
 // Log line pattern: [timestamp] [LEVEL] [Module?] message
