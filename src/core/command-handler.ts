@@ -1945,18 +1945,28 @@ export class CommandHandler {
     if (normalizedContent === '/check' || normalizedContent.startsWith('/check ')) {
       const subCmd = normalizedContent.slice('/check'.length).trim();
 
-      // 限定可见渠道：agent-owned 通道仅显示该 agent 名下的渠道；默认通道展示全局
+      // 限定可见渠道：agent-owned 通道仅显示该 agent 名下的渠道；
+      // default 通道也仅显示 default 的渠道（不再展示 evolagents 的渠道）
       const checkOwningAgent = this.getOwningAgent(channel);
-      const allowedChannels: Set<string> | null = checkOwningAgent
-        ? new Set(checkOwningAgent.channelInstanceNames())
-        : null;
+      let allowedChannels: Set<string>;
+      if (checkOwningAgent) {
+        allowedChannels = new Set(checkOwningAgent.channelInstanceNames());
+      } else {
+        // default 范围：所有 channel 中，不属于任何 evolagent 的
+        const defaultNames: string[] = [];
+        for (const [name] of this.adapters) {
+          const owner = this.agentRegistry?.resolveByChannel(name);
+          if (!owner || owner.isDefault) defaultNames.push(name);
+        }
+        allowedChannels = new Set(defaultNames);
+      }
 
       // Default: show system health check (non-admin 仅看摘要)
       const lines: string[] = ['📡 渠道状态：'];
       // Group by channelType
       const groups = new Map<string, Array<{ name: string; status: string }>>();
       for (const [name] of this.adapters) {
-        if (allowedChannels && !allowedChannels.has(name)) continue;
+        if (!allowedChannels.has(name)) continue;
         const type = this.channelTypeMap.get(name) || name;
         const ch = this.channelObjects.get(name);
         let status: string;
