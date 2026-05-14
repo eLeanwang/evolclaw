@@ -5,7 +5,7 @@ import type { MessageProcessor } from './message-processor.js';
 import type { MessageQueue } from './message-queue.js';
 import type { CommandHandler as CmdHandler } from '../command-handler.js';
 import type { EventBus } from '../event-bus.js';
-import type { Config, Message, InboundMessage, ChannelAdapter, ReplyContext } from '../../types.js';
+import type { Config, Message, InboundMessage, ChannelAdapter, ReplyContext, AgentRegistryHandle } from '../../types.js';
 
 /**
  * MessageBridge — Channel 与 Core 之间的消息桥梁
@@ -17,6 +17,7 @@ import type { Config, Message, InboundMessage, ChannelAdapter, ReplyContext } fr
 export class MessageBridge {
   private debouncers = new Map<string, StreamDebouncer>();
   private defaultDebounce: number;
+  private agentRegistry?: AgentRegistryHandle;
 
   constructor(
     private config: Config,
@@ -27,6 +28,11 @@ export class MessageBridge {
     private eventBus: EventBus,
   ) {
     this.defaultDebounce = config.debounce ?? 2;
+  }
+
+  /** Inject AgentRegistry so owner lookups/writes route to agent.json for agent-owned channels. */
+  setAgentRegistry(registry: AgentRegistryHandle): void {
+    this.agentRegistry = registry;
   }
 
   private getDebouncer(channelName: string, channelType?: string): StreamDebouncer {
@@ -204,12 +210,18 @@ export class MessageBridge {
 
   /** 首次交互自动绑定 owner */
   private async autoBindOwner(channel: string, userId: string): Promise<void> {
+    // Registry-first: route owner queries/writes to the agent that owns this channel.
+    // Falls back to evolclaw.json for default-agent channels.
     const { getOwner, setOwner } = await import('../../config.js');
-    const currentOwner = getOwner(this.config, channel);
+    const currentOwner = this.agentRegistry?.getOwner?.(channel) ?? getOwner(this.config, channel);
     // currentOwner === undefined means either no owner set, or instance not found
     // In both cases, try to set — setOwner is a no-op for unknown instances
     if (currentOwner === undefined) {
-      setOwner(this.config, channel, userId);
+      if (this.agentRegistry?.setChannelOwner) {
+        this.agentRegistry.setChannelOwner(channel, userId);
+      } else {
+        setOwner(this.config, channel, userId);
+      }
       logger.info(`[Owner] Auto-bound ${channel} owner: ${userId}`);
       this.eventBus.publish({ type: 'channel:owner-bound', channel, userId });
     }

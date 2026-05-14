@@ -3,6 +3,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { writeOwnerToChannelInstance, setOwner, loadConfig } from '../../src/config.js';
+import { AgentRegistry } from '../../src/core/agent-registry.js';
 import { _resetRoot } from '../../src/paths.js';
 import { logger } from '../../src/utils/logger.js';
 
@@ -67,7 +68,7 @@ describe('setOwner routing', () => {
   });
 
   describe('setOwner integration', () => {
-    it('writes to agent.json when channel belongs to an agent', () => {
+    it('writes to agent.json when routed via AgentRegistry.setChannelOwner', () => {
       // Write evolclaw.json with a default channel
       fs.writeFileSync(configPath, JSON.stringify({
         agents: { defaultAgent: 'claude', claude: {} },
@@ -89,7 +90,11 @@ describe('setOwner routing', () => {
       _resetRoot();
       try {
         const config = loadConfig(configPath);
-        setOwner(config, 'review-fs', 'user-123', configPath);
+        const reg = new AgentRegistry(agentsDir, {
+          setOwner: (ch, uid) => setOwner(config, ch, uid, configPath),
+        });
+        reg.loadAll(config);
+        reg.setChannelOwner('review-fs', 'user-123');
 
         // Verify agent.json was updated
         const agent = JSON.parse(fs.readFileSync(agentPath, 'utf-8'));
@@ -175,9 +180,9 @@ describe('setOwner routing', () => {
         // (channelTypes includes feishu/wechat/aun/dingtalk/qqbot/wecom — pick a non-type)
         expect(() => setOwner(config, 'no-such-channel', 'user-x', configPath)).not.toThrow();
 
-        // Warn was logged
+        // Warn was logged (message string covers post-refactor wording)
         const matched = warnSpy.mock.calls.some(call =>
-          String(call[0] ?? '').includes('not found in any agent.json or evolclaw.json')
+          String(call[0] ?? '').includes('not found in evolclaw.json')
         );
         expect(matched).toBe(true);
 
@@ -212,7 +217,11 @@ describe('setOwner routing', () => {
       _resetRoot();
       try {
         const config = loadConfig(configPath);
-        setOwner(config, 'review-fs', 'user-nl', configPath);
+        const reg = new AgentRegistry(agentsDir, {
+          setOwner: (ch, uid) => setOwner(config, ch, uid, configPath),
+        });
+        reg.loadAll(config);
+        reg.setChannelOwner('review-fs', 'user-nl');
 
         const written = fs.readFileSync(agentPath, 'utf-8');
         expect(written.endsWith('\n')).toBe(true);

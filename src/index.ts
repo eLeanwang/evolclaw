@@ -1,7 +1,7 @@
 import { ClaudeSessionFileAdapter } from './core/session/adapters/claude-session-file-adapter.js';
 import { CodexSessionFileAdapter } from './core/session/adapters/codex-session-file-adapter.js';
 import { GeminiSessionFileAdapter } from './core/session/adapters/gemini-session-file-adapter.js';
-import { loadConfig, ensureDataDirs, resolvePaths, resolveAnthropicConfig, isOwner, isAdmin, validateConfigIntegrity, validateChannelInstanceNames, getOwner, getDefaultSessionMode } from './config.js';
+import { loadConfig, ensureDataDirs, resolvePaths, resolveAnthropicConfig, isOwner, isAdmin, validateConfigIntegrity, validateChannelInstanceNames, getOwner, getDefaultSessionMode, setOwner as setOwnerInGlobalConfig, setChannelShowActivities as setShowActivitiesInGlobalConfig } from './config.js';
 import { SessionManager } from './core/session/session-manager.js';
 import { ClaudeAgentPlugin } from './agents/claude-runner.js';
 import { CodexAgentPlugin } from './agents/codex-runner.js';
@@ -102,7 +102,14 @@ async function main() {
   }
 
   // EvolAgent Registry
-  const agentRegistry = new AgentRegistry(paths.agentsDir);
+  const agentRegistry = new AgentRegistry(paths.agentsDir, {
+    setOwner: (channelName, userId) => {
+      setOwnerInGlobalConfig(config, channelName, userId);
+    },
+    setShowActivities: (channelName, mode) => {
+      setShowActivitiesInGlobalConfig(config, channelName, mode);
+    },
+  });
   agentRegistry.loadAll(config);
   const agentInfos = agentRegistry.list();
   const evolagentCount = agentInfos.filter(i => !i.isDefault).length;
@@ -131,9 +138,11 @@ async function main() {
   const statsCollector = new StatsCollector(eventBus);
 
   // 初始化数据库（带 ownerResolver）
+  // Registry-first: agent-owned channels resolve via EvolAgent.isOwner/isAdmin,
+  // default-agent channels fall back to global config (evolclaw.json).
   const sessionManager = new SessionManager(undefined, eventBus,
-    (channel, userId) => isOwner(config, channel, userId),
-    (channel, userId) => isAdmin(config, channel, userId)
+    (channel, userId) => agentRegistry.isOwner(channel, userId, (ch, uid) => isOwner(config, ch, uid)),
+    (channel, userId) => agentRegistry.isAdmin(channel, userId, (ch, uid) => isAdmin(config, ch, uid))
   );
 
   // sessionMode 解析：全局 chatmode 配置 > 默认 'interactive'
@@ -309,6 +318,7 @@ async function main() {
   // ── MessageBridge：Channel ↔ Core 消息桥梁 ──
 
   const msgBridge = new MessageBridge(config, sessionManager, processor, messageQueue, cmdHandler, eventBus);
+  msgBridge.setAgentRegistry(agentRegistry);
 
   // ── Channel instance registration (shared by startup and hot-load) ──
 
@@ -554,7 +564,7 @@ async function main() {
       const otherType = other.channelType || other.adapter.channelName;
       if (otherType === sourceChannelType) continue;  // 跳过同类型通道
       if (notified.has(otherType)) continue;  // 同类型已通知过
-      const ownerId = getOwner(config, other.adapter.channelName);
+      const ownerId = agentRegistry.getOwner(other.adapter.channelName) ?? getOwner(config, other.adapter.channelName);
       if (!ownerId) continue;
       notified.add(otherType);
       other.adapter.sendText(ownerId, msg).catch(err => {

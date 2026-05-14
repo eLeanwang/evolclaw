@@ -12,12 +12,31 @@ export interface ReloadHooks {
   startChannel(agent: EvolAgent, channelName: string): Promise<void>;
 }
 
+/**
+ * Plug-in for writing back to the global config (evolclaw.json) when
+ * AgentRegistry is asked to mutate a channel that belongs to the
+ * DefaultAgent. Named EvolAgents persist directly to their own agent.json
+ * via `EvolAgent.setOwner` / `EvolAgent.setShowActivities`.
+ */
+export interface GlobalConfigWriter {
+  setOwner(channelName: string, userId: string): void;
+  setShowActivities?(channelName: string, mode: 'all' | 'dm-only' | 'owner-dm-only' | 'none'): void;
+}
+
 export class AgentRegistry {
   private agents: Map<string, EvolAgent> = new Map();
   private defaultAgent: EvolAgent | null = null;
   private channelIndex: Map<string, string> = new Map();
+  private globalWriter?: GlobalConfigWriter;
 
-  constructor(private agentsDir: string) {}
+  constructor(private agentsDir: string, globalWriter?: GlobalConfigWriter) {
+    this.globalWriter = globalWriter;
+  }
+
+  /** Late-binding setter for tests / index.ts wiring order. */
+  setGlobalWriter(writer: GlobalConfigWriter): void {
+    this.globalWriter = writer;
+  }
 
   loadAll(globalConfig: Config): void {
     this.agents.clear();
@@ -130,6 +149,82 @@ export class AgentRegistry {
     if (!agentName) return null;
     if (agentName === '[default]') return this.defaultAgent;
     return this.agents.get(agentName) || null;
+  }
+
+  /**
+   * Check ownership of a channel via the agent that owns it.
+   * - For named EvolAgent: reads agent.config (memory; reflects agent.json).
+   * - For DefaultAgent or unknown channel: invokes `globalFallback`, which
+   *   should consult the global config (evolclaw.json) via `config.ts:isOwner`.
+   */
+  isOwner(channelName: string, userId: string, globalFallback: (ch: string, uid: string) => boolean): boolean {
+    const agent = this.resolveByChannel(channelName);
+    if (agent && !agent.isDefault) return agent.isOwner(channelName, userId);
+    return globalFallback(channelName, userId);
+  }
+
+  /** Same routing logic as `isOwner`, applied to admin checks. */
+  isAdmin(channelName: string, userId: string, globalFallback: (ch: string, uid: string) => boolean): boolean {
+    const agent = this.resolveByChannel(channelName);
+    if (agent && !agent.isDefault) return agent.isAdmin(channelName, userId);
+    return globalFallback(channelName, userId);
+  }
+
+  /** Lookup current owner — agent first, then DefaultAgent (which mirrors evolclaw.json). */
+  getOwner(channelName: string): string | undefined {
+    const agent = this.resolveByChannel(channelName);
+    if (!agent) return undefined;
+    return agent.getOwner(channelName);
+  }
+
+  /**
+   * Persist owner. Routes to agent.json for named agents, or to evolclaw.json
+   * via the configured `globalWriter` for DefaultAgent. No-ops with a warning
+   * when the channel is unknown or no global writer is wired.
+   */
+  setChannelOwner(channelName: string, userId: string): void {
+    const agent = this.resolveByChannel(channelName);
+    if (!agent) {
+      logger.warn(`[AgentRegistry] setChannelOwner: channel "${channelName}" not found`);
+      return;
+    }
+    if (agent.isDefault) {
+      if (!this.globalWriter) {
+        logger.warn(`[AgentRegistry] setChannelOwner: no globalWriter wired for default channel "${channelName}"`);
+        return;
+      }
+      this.globalWriter.setOwner(channelName, userId);
+    } else {
+      agent.setOwner(channelName, userId);
+    }
+  }
+
+  /**
+   * Read showActivities mode. Falls back to `'all'` when the channel is
+   * unknown — matches the prior behavior of `config.ts:getChannelShowActivities`.
+   */
+  getShowActivities(channelName: string): 'all' | 'dm-only' | 'owner-dm-only' | 'none' {
+    const agent = this.resolveByChannel(channelName);
+    if (!agent) return 'all';
+    return agent.getShowActivities(channelName);
+  }
+
+  /** Persist showActivities. Routes to agent.json or evolclaw.json. */
+  setShowActivities(channelName: string, mode: 'all' | 'dm-only' | 'owner-dm-only' | 'none'): void {
+    const agent = this.resolveByChannel(channelName);
+    if (!agent) {
+      logger.warn(`[AgentRegistry] setShowActivities: channel "${channelName}" not found`);
+      return;
+    }
+    if (agent.isDefault) {
+      if (!this.globalWriter?.setShowActivities) {
+        logger.warn(`[AgentRegistry] setShowActivities: no globalWriter wired for default channel "${channelName}"`);
+        return;
+      }
+      this.globalWriter.setShowActivities(channelName, mode);
+    } else {
+      agent.setShowActivities(channelName, mode);
+    }
   }
 
   get(name: string): EvolAgent | null {

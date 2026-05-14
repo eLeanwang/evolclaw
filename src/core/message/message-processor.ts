@@ -710,7 +710,7 @@ export class MessageProcessor {
         if (isCrossChannel) {
           const targetAdapterName = targetInfo.adapter.channelName;
           const targetChannelType = targetInfo.options?.channelType || targetAdapterName;
-          const ownerPeerId = getOwner(this.config, targetAdapterName);
+          const ownerPeerId = this.agentRegistry?.getOwner?.(targetAdapterName) ?? getOwner(this.config, targetAdapterName);
           targetChannelId = ownerPeerId ? (this.sessionManager.getOwnerChatId(targetChannelType, ownerPeerId) ?? '') : '';
           if (!targetChannelId) {
             await adapter.sendText(message.channelId, `\u274c 未找到 ${targetLabel} 的私聊会话，请先在该通道发送一条消息`, taskReplyContext());

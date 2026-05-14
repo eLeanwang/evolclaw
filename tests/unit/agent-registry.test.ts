@@ -161,4 +161,108 @@ describe('AgentRegistry', () => {
     expect(runnable.map(a => a.name)).toContain('active');
     expect(runnable.map(a => a.name)).not.toContain('off');
   });
+
+  describe('isOwner / isAdmin / setChannelOwner routing', () => {
+    function configWithOwner(): Config {
+      return {
+        agents: { defaultAgent: 'claude', claude: {} },
+        channels: {
+          feishu: [{ name: 'default-fs', appId: 'default-id', appSecret: 's', owner: 'def-owner', admins: ['def-admin'] }],
+        },
+        projects: { defaultPath: '/home/user/default' },
+      } as any;
+    }
+
+    it('isOwner routes to agent for agent-owned channel', () => {
+      writeAgent('review', {
+        ...baseConfig('review', 'app-review'),
+        channels: { feishu: [{ name: 'review-fs', appId: 'app-review', appSecret: 's', owner: 'agent-owner' }] },
+      });
+      const reg = new AgentRegistry(agentsDir);
+      reg.loadAll(configWithOwner());
+
+      const fallback = () => false;  // agent-owned channel must NOT hit fallback
+      expect(reg.isOwner('review-fs', 'agent-owner', fallback)).toBe(true);
+      expect(reg.isOwner('review-fs', 'def-owner', fallback)).toBe(false);
+    });
+
+    it('isOwner falls back for default channel', () => {
+      const reg = new AgentRegistry(agentsDir);
+      reg.loadAll(configWithOwner());
+      const cfg = configWithOwner();
+      const fallback = (ch: string, uid: string) => {
+        const inst = (cfg.channels as any).feishu.find((i: any) => i.name === ch);
+        return inst?.owner === uid;
+      };
+      expect(reg.isOwner('default-fs', 'def-owner', fallback)).toBe(true);
+      expect(reg.isOwner('default-fs', 'agent-owner', fallback)).toBe(false);
+    });
+
+    it('isAdmin includes owner for agent-owned', () => {
+      writeAgent('rb', {
+        ...baseConfig('rb', 'rb-app'),
+        channels: { feishu: [{ name: 'rb-fs', appId: 'rb-app', appSecret: 's', owner: 'o', admins: ['adm'] }] },
+      });
+      const reg = new AgentRegistry(agentsDir);
+      reg.loadAll(configWithOwner());
+      const fallback = () => false;
+      expect(reg.isAdmin('rb-fs', 'o', fallback)).toBe(true);
+      expect(reg.isAdmin('rb-fs', 'adm', fallback)).toBe(true);
+      expect(reg.isAdmin('rb-fs', 'other', fallback)).toBe(false);
+    });
+
+    it('setChannelOwner persists to agent.json for named agent', () => {
+      writeAgent('rb', {
+        ...baseConfig('rb', 'rb-app'),
+        channels: { feishu: [{ name: 'rb-fs', appId: 'rb-app', appSecret: 's' }] },
+      });
+      const reg = new AgentRegistry(agentsDir);
+      reg.loadAll(configWithOwner());
+
+      reg.setChannelOwner('rb-fs', 'new-owner');
+
+      const written = JSON.parse(fs.readFileSync(path.join(agentsDir, 'rb.json'), 'utf-8'));
+      expect(written.channels.feishu[0].owner).toBe('new-owner');
+    });
+
+    it('setChannelOwner routes to globalWriter for default channel', () => {
+      const calls: Array<[string, string]> = [];
+      const reg = new AgentRegistry(agentsDir, {
+        setOwner: (ch, uid) => calls.push([ch, uid]),
+      });
+      reg.loadAll(configWithOwner());
+
+      reg.setChannelOwner('default-fs', 'global-owner');
+
+      expect(calls).toEqual([['default-fs', 'global-owner']]);
+    });
+
+    it('setShowActivities persists to agent.json', () => {
+      writeAgent('rb', {
+        ...baseConfig('rb', 'rb-app'),
+        channels: { feishu: [{ name: 'rb-fs', appId: 'rb-app', appSecret: 's' }] },
+      });
+      const reg = new AgentRegistry(agentsDir);
+      reg.loadAll(configWithOwner());
+
+      reg.setShowActivities('rb-fs', 'none');
+
+      const written = JSON.parse(fs.readFileSync(path.join(agentsDir, 'rb.json'), 'utf-8'));
+      expect(written.channels.feishu[0].showActivities).toBe('none');
+    });
+
+    it('getOwner returns agent owner for named-agent channel', () => {
+      writeAgent('rb', {
+        ...baseConfig('rb', 'rb-app'),
+        channels: { feishu: [{ name: 'rb-fs', appId: 'rb-app', appSecret: 's', owner: 'rb-owner' }] },
+      });
+      const reg = new AgentRegistry(agentsDir);
+      reg.loadAll(configWithOwner());
+
+      expect(reg.getOwner('rb-fs')).toBe('rb-owner');
+      // Default channel is mirrored in DefaultAgent's config so getOwner works there too
+      expect(reg.getOwner('default-fs')).toBe('def-owner');
+      expect(reg.getOwner('nope')).toBeUndefined();
+    });
+  });
 });

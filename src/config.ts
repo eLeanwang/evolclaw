@@ -367,55 +367,25 @@ export function writeOwnerToChannelInstance(root: any, instanceName: string, use
 }
 
 export function setOwner(config: Config, instanceName: string, userId: string, configPath: string = resolvePaths().config): void {
-  const p = resolvePaths();
-  const agentsDir = p.agentsDir;
-
-  // 1. Try agent.json files first
-  if (fs.existsSync(agentsDir)) {
-    try {
-      for (const file of fs.readdirSync(agentsDir)) {
-        if (!file.endsWith('.json')) continue;
-        const agentFile = path.join(agentsDir, file);
-        let raw: any;
-        try {
-          raw = JSON.parse(fs.readFileSync(agentFile, 'utf-8'));
-        } catch {
-          // Parse error — skip silently (likely malformed user edit)
-          continue;
-        }
-        if (writeOwnerToChannelInstance(raw, instanceName, userId)) {
-          try {
-            // M1: trailing newline; M2: log fs errors instead of swallowing
-            fs.writeFileSync(agentFile, JSON.stringify(raw, null, 2) + '\n', 'utf-8');
-          } catch (e) {
-            logger.error(`[setOwner] Failed to write ${agentFile}: ${e}`);
-            throw e;
-          }
-          return;
-        }
-      }
-    } catch (e) {
-      logger.error(`[setOwner] Failed to scan ${agentsDir}: ${e}`);
-    }
-  }
-
-  // 2. Fallback: write to evolclaw.json
   if (!config.channels) config.channels = {};
 
+  // 1. Try writing to evolclaw.json (default-agent channels)
   if (writeOwnerToChannelInstance(config, instanceName, userId)) {
     saveConfig(config, configPath);
     return;
   }
 
-  // 3. Last resort: if instanceName matches a channel type with no config, create it
+  // 2. Last resort: if instanceName matches a channel type with no config, create it
   if (channelTypes.includes(instanceName as any)) {
     (config.channels as any)[instanceName] = { owner: userId };
     saveConfig(config, configPath);
     return;
   }
 
-  // 4. I4: No match anywhere — warn (don't silently lose owner)
-  logger.warn(`[setOwner] Channel instance "${instanceName}" not found in any agent.json or evolclaw.json. Owner ${userId} not persisted.`);
+  // 3. I4: No match — warn (don't silently lose owner). Callers managing
+  // agent-owned channels should route through EvolAgent.setOwner before
+  // falling back to this global setter.
+  logger.warn(`[setOwner] Channel instance "${instanceName}" not found in evolclaw.json. Owner ${userId} not persisted.`);
 }
 
 type ShowActivitiesMode = 'all' | 'dm-only' | 'owner-dm-only' | 'none';
@@ -484,34 +454,6 @@ export function isOwner(config: Config, channelOrType: string, userId: string): 
       if ((inst as any).owner === userId) return true;
     }
   }
-  // 检查 agent.json 中的 owner（agent-owned channels）
-  return isOwnerInAgents(channelOrType, userId);
-}
-
-function isOwnerInAgents(channelOrType: string, userId: string): boolean {
-  const agentsDir = resolvePaths().agentsDir;
-  if (!fs.existsSync(agentsDir)) return false;
-  for (const file of fs.readdirSync(agentsDir)) {
-    if (!file.endsWith('.json')) continue;
-    let raw: any;
-    try { raw = JSON.parse(fs.readFileSync(path.join(agentsDir, file), 'utf-8')); }
-    catch { continue; }
-    const channels = raw?.channels;
-    if (!channels || typeof channels !== 'object') continue;
-    for (const type of channelTypes) {
-      const block = channels[type];
-      if (block === undefined) continue;
-      const instances = Array.isArray(block) ? block : [block];
-      for (const inst of instances) {
-        if (!inst || typeof inst !== 'object') continue;
-        const instName = (inst as any).name ?? type;
-        // Match by instance name OR by channel type
-        if ((instName === channelOrType || type === channelOrType) && (inst as any).owner === userId) {
-          return true;
-        }
-      }
-    }
-  }
   return false;
 }
 
@@ -534,33 +476,6 @@ export function isAdmin(config: Config, channelOrType: string, userId: string): 
     for (const inst of instances) {
       const admins: string[] = (inst as any).admins || [];
       if (admins.includes(userId)) return true;
-    }
-  }
-  // 检查 agent.json 中的 admins
-  return isAdminInAgents(channelOrType, userId);
-}
-
-function isAdminInAgents(channelOrType: string, userId: string): boolean {
-  const agentsDir = resolvePaths().agentsDir;
-  if (!fs.existsSync(agentsDir)) return false;
-  for (const file of fs.readdirSync(agentsDir)) {
-    if (!file.endsWith('.json')) continue;
-    let raw: any;
-    try { raw = JSON.parse(fs.readFileSync(path.join(agentsDir, file), 'utf-8')); }
-    catch { continue; }
-    const channels = raw?.channels;
-    if (!channels || typeof channels !== 'object') continue;
-    for (const type of channelTypes) {
-      const block = channels[type];
-      if (block === undefined) continue;
-      const instances = Array.isArray(block) ? block : [block];
-      for (const inst of instances) {
-        if (!inst || typeof inst !== 'object') continue;
-        const instName = (inst as any).name ?? type;
-        if (instName !== channelOrType && type !== channelOrType) continue;
-        const admins: string[] = (inst as any).admins || [];
-        if (admins.includes(userId)) return true;
-      }
     }
   }
   return false;

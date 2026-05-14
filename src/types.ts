@@ -408,6 +408,12 @@ export interface EvolAgentHandle {
   readonly projectPath: string;
   lastActivity?: number;
   getContext(channelName: string, chatType: string, globalChatmode?: { private?: 'interactive' | 'proactive'; group?: 'interactive' | 'proactive' }): AgentContext;
+  getOwner(channelName: string): string | undefined;
+  isOwner(channelName: string, userId: string): boolean;
+  isAdmin(channelName: string, userId: string): boolean;
+  setOwner(channelName: string, userId: string): void;
+  getShowActivities(channelName: string): 'all' | 'dm-only' | 'owner-dm-only' | 'none';
+  setShowActivities(channelName: string, mode: 'all' | 'dm-only' | 'owner-dm-only' | 'none'): void;
 }
 
 /**
@@ -420,4 +426,10 @@ export interface AgentRegistryHandle {
   get(name: string): EvolAgentHandle | null;
   list(): AgentInfo[];
   reload?(name: string, hooks: unknown): Promise<void>;
+  isOwner?(channelName: string, userId: string, globalFallback: (ch: string, uid: string) => boolean): boolean;
+  isAdmin?(channelName: string, userId: string, globalFallback: (ch: string, uid: string) => boolean): boolean;
+  getOwner?(channelName: string): string | undefined;
+  setChannelOwner?(channelName: string, userId: string): void;
+  getShowActivities?(channelName: string): 'all' | 'dm-only' | 'owner-dm-only' | 'none';
+  setShowActivities?(channelName: string, mode: 'all' | 'dm-only' | 'owner-dm-only' | 'none'): void;
 }

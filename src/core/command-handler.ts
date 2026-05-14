@@ -1545,7 +1545,7 @@ export class CommandHandler {
         none: 'none',
       };
 
-      const currentMode = getChannelShowActivities(this.config, channel);
+      const currentMode = this.agentRegistry?.getShowActivities?.(channel) ?? getChannelShowActivities(this.config, channel);
 
       // 模式描述列表（用于 body 和文本降级）
       const modeDescriptions: { key: string; configVal: string; label: string }[] = [
@@ -1625,7 +1625,11 @@ export class CommandHandler {
       // 切换操作仅 owner
       if (!isOwner) return '❌ 中间输出模式切换仅限 owner';
 
-      setChannelShowActivities(this.config, channel, newMode);
+      if (this.agentRegistry?.setShowActivities) {
+        this.agentRegistry.setShowActivities(channel, newMode);
+      } else {
+        setChannelShowActivities(this.config, channel, newMode);
+      }
       return `✅ 中间输出模式: ${activityArg}（${label}）`;
     }
 
@@ -2184,7 +2188,7 @@ export class CommandHandler {
       // 找目标 channelId
       let targetChannelId = channelId;
       if (isCrossChannel) {
-        const ownerPeerId = getOwner(this.config, targetChannel);
+        const ownerPeerId = this.agentRegistry?.getOwner?.(targetChannel) ?? getOwner(this.config, targetChannel);
         targetChannelId = ownerPeerId ? (this.sessionManager.getOwnerChatId(targetChannel, ownerPeerId) ?? '') : '';
         if (!targetChannelId) {
           return `❌ 未找到 ${targetLabel} 的私聊会话，请先在该通道发送一条消息`;
