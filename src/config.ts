@@ -296,6 +296,45 @@ export function normalizeChannelInstances<T extends { name?: string }>(
 }
 
 /**
+ * Parse a defaultChannel reference. Supports:
+ *   "feishu"           → { type: "feishu" }
+ *   "feishu/feilun"    → { type: "feishu", instance: "feilun" }
+ */
+export function parseDefaultChannelRef(ref: string): { type: string; instance?: string } {
+  const slash = ref.indexOf('/');
+  if (slash < 0) return { type: ref };
+  return { type: ref.slice(0, slash), instance: ref.slice(slash + 1) };
+}
+
+/**
+ * Validate a defaultChannel reference against a channels config block.
+ * Returns an error message string if invalid, or null if OK.
+ *   - type must be in channelTypes
+ *   - type must have at least one instance configured
+ *   - if instance specified, must match an existing instance.name
+ *   - if instance omitted, type must have exactly 1 instance (else ambiguous)
+ */
+export function validateDefaultChannelRef(ref: string, channelsBlock: any): string | null {
+  const { type, instance } = parseDefaultChannelRef(ref);
+  if (!channelTypes.includes(type as any)) {
+    return `channels.defaultChannel='${ref}' references unknown channel type '${type}'`;
+  }
+  const instances = normalizeChannelInstances(channelsBlock?.[type], type);
+  if (instances.length === 0) {
+    return `channels.defaultChannel='${ref}' but channels.${type} has no instances`;
+  }
+  if (instance) {
+    if (!instances.some(i => i.name === instance)) {
+      return `channels.defaultChannel='${ref}' but channels.${type} has no instance named '${instance}'`;
+    }
+  } else if (instances.length > 1) {
+    const names = instances.map(i => i.name).join(', ');
+    return `channels.defaultChannel='${ref}' is ambiguous: channels.${type} has ${instances.length} instances (${names}); use 'type/instanceName' form`;
+  }
+  return null;
+}
+
+/**
  * Validate that all channel instance names are unique across all channel types.
  * Throws if duplicate names are found.
  */
@@ -573,16 +612,31 @@ export function validateConfigIntegrity(config: any): { valid: boolean; reasons:
     }
   }
 
-  // channels — 单通道时自动推断，无需显式 defaultChannel
-  const defaultChannel = config.channels?.defaultChannel;
-  if (!defaultChannel) {
-    const channelKeys = channelTypes.filter(t => config.channels?.[t]);
-    if (channelKeys.length === 0) {
-      reasons.push('Missing channels.defaultChannel (no channels configured)');
+  // channels — 单实例自动推断，多实例必填 defaultChannel
+  // 支持两种形式：
+  //   "feishu"           → type 级，要求该 type 下只有 1 个实例
+  //   "feishu/feilun"    → type/instanceName，精确指向实例
+  const totalInstances = channelTypes.reduce((acc, t) => {
+    return acc + normalizeChannelInstances((config.channels as any)?.[t], t).length;
+  }, 0);
+
+  if (totalInstances === 0) {
+    reasons.push('Missing channels: no channel instances configured');
+  } else if (totalInstances === 1) {
+    // 单实例：defaultChannel 可省略（自动推断）
+    const dc = config.channels?.defaultChannel;
+    if (dc) {
+      const err = validateDefaultChannelRef(dc, config.channels as any);
+      if (err) reasons.push(err);
     }
   } else {
-    if (!config.channels?.[defaultChannel]) {
-      reasons.push(`channels.defaultChannel='${defaultChannel}' but channels.${defaultChannel} does not exist`);
+    // 多实例：defaultChannel 必填
+    const dc = config.channels?.defaultChannel;
+    if (!dc) {
+      reasons.push('Missing channels.defaultChannel (multiple channel instances configured; must specify "type" or "type/instanceName")');
+    } else {
+      const err = validateDefaultChannelRef(dc, config.channels as any);
+      if (err) reasons.push(err);
     }
   }
 

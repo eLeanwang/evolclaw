@@ -414,15 +414,17 @@ export interface EvolAgentHandle {
   setOwner(channelName: string, userId: string): void;
   getShowActivities(channelName: string): 'all' | 'dm-only' | 'owner-dm-only' | 'none';
   setShowActivities(channelName: string, mode: 'all' | 'dm-only' | 'owner-dm-only' | 'none'): void;
+  setBaseagentModel(value: string | undefined): void;
+  setBaseagentEffort(value: string | undefined): void;
   channelInstanceNames(): string[];
 }
 
 /**
- * Structural handle for AgentRegistry — captures the surface needed by IpcServer,
- * MessageProcessor, and CommandHandler without importing the AgentRegistry class
- * (avoids circular imports). The actual AgentRegistry class satisfies this shape.
+ * Structural handle for EvolAgentRegistry — captures the surface needed by IpcServer,
+ * MessageProcessor, and CommandHandler without importing the EvolAgentRegistry class
+ * (avoids circular imports). The actual EvolAgentRegistry class satisfies this shape.
  */
-export interface AgentRegistryHandle {
+export interface EvolAgentRegistryHandle {
   resolveByChannel(channelName: string): EvolAgentHandle | null;
   get(name: string): EvolAgentHandle | null;
   list(): AgentInfo[];

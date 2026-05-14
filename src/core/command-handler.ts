@@ -212,6 +212,102 @@ export class CommandHandler {
     return this.config.projects?.defaultPath || process.cwd();
   }
 
+  /**
+   * 持久化 baseagent.model：agent-owned 写到 agent.json；否则写 evolclaw.json 或 ~/.claude/settings.json。
+   * 返回错误信息或 undefined。
+   */
+  private persistBaseagentModel(channel: string, baseagentName: string, newModel: string | undefined): string | undefined {
+    const owning = this.getOwningAgent(channel);
+    if (owning) {
+      try {
+        owning.setBaseagentModel(newModel);
+      } catch (e: any) {
+        return `⚠️ 写入 agent.json 失败: ${e?.message || e}`;
+      }
+      return undefined;
+    }
+    // DefaultAgent / 无 owning agent：保留原"就近原则"
+    if (!this.config.agents) this.config.agents = {};
+    const isCodex = baseagentName === 'codex';
+    if (isCodex) {
+      if (!this.config.agents.codex) this.config.agents.codex = {};
+      if (newModel) this.config.agents.codex.model = newModel;
+      try { saveConfig(this.config); } catch (e: any) {
+        return `⚠️ 写入 evolclaw.json 失败: ${e.message}`;
+      }
+      return undefined;
+    }
+    const configuredInEvolclaw = !!(this.config.agents?.claude?.model || this.config.agents?.claude?.effort);
+    if (configuredInEvolclaw) {
+      if (!this.config.agents.claude) this.config.agents.claude = {};
+      if (newModel) this.config.agents.claude.model = newModel;
+      try { saveConfig(this.config); } catch (e: any) {
+        return `⚠️ 写入 evolclaw.json 失败: ${e.message}`;
+      }
+      return undefined;
+    }
+    // Fallback: ~/.claude/settings.json
+    const updates: { model?: string; effortLevel?: string } = {};
+    if (newModel) updates.model = newModel;
+    const writeResult = writeUserSettings(updates);
+    if (!writeResult.success) {
+      return `⚠️ 写入用户配置失败: ${writeResult.error}`;
+    }
+    return undefined;
+  }
+
+  /**
+   * 持久化 baseagent.effort：agent-owned 写到 agent.json；否则就近原则。
+   */
+  private persistBaseagentEffort(channel: string, baseagentName: string, newEffort: string | undefined): string | undefined {
+    const owning = this.getOwningAgent(channel);
+    if (owning) {
+      try {
+        owning.setBaseagentEffort(newEffort);
+      } catch (e: any) {
+        return `⚠️ 写入 agent.json 失败: ${e?.message || e}`;
+      }
+      return undefined;
+    }
+    if (!this.config.agents) this.config.agents = {};
+    const isCodex = baseagentName === 'codex';
+    if (isCodex) {
+      if (newEffort === undefined) {
+        if (this.config.agents.codex?.reasoning) {
+          delete this.config.agents.codex.reasoning;
+          try { saveConfig(this.config); } catch {}
+        }
+      } else {
+        if (!this.config.agents.codex) this.config.agents.codex = {};
+        this.config.agents.codex.reasoning = newEffort;
+        try { saveConfig(this.config); } catch (e: any) {
+          return `⚠️ 写入 evolclaw.json 失败: ${e.message}`;
+        }
+      }
+      return undefined;
+    }
+    const configuredInEvolclaw = !!(this.config.agents?.claude?.model || this.config.agents?.claude?.effort);
+    if (configuredInEvolclaw) {
+      if (newEffort === undefined) {
+        delete (this.config.agents!.claude as any).effort;
+        try { saveConfig(this.config); } catch {}
+      } else {
+        if (!this.config.agents.claude) this.config.agents.claude = {};
+        (this.config.agents.claude as any).effort = newEffort;
+        try { saveConfig(this.config); } catch (e: any) {
+          return `⚠️ 写入 evolclaw.json 失败: ${e.message}`;
+        }
+      }
+      return undefined;
+    }
+    const updates: { effortLevel?: string | null } = { effortLevel: newEffort ?? null };
+    const writeResult = writeUserSettings(updates);
+    if (!writeResult.success) {
+      return `⚠️ 写入用户配置失败: ${writeResult.error}`;
+    }
+    return undefined;
+  }
+
   /** 项目列表快捷访问（list 缺失时用 defaultPath 作为唯一项目） */
   private get projects(): Record<string, string> {
     const list = this.config.projects?.list;
@@ -1249,51 +1345,14 @@ export class CommandHandler {
         changes.push(`推理强度: ${newEffort}`);
       }
 
-      // 持久化：写回来源（就近原则）
-      // evolclaw.json 配了 → 写 evolclaw.json
-      // evolclaw.json 没配 → 写 agent 全局配置
-      if (isCodexAgent) {
-        const configuredInEvolclaw = !!(this.config.agents?.codex?.model || this.config.agents?.codex?.reasoning);
-        if (configuredInEvolclaw) {
-          if (!this.config.agents!.codex) this.config.agents!.codex = {};
-          if (newModel) this.config.agents!.codex.model = newModel;
-          if (newEffort) this.config.agents!.codex.reasoning = newEffort;
-          try {
-            saveConfig(this.config);
-          } catch (error: any) {
-            return `⚠️ 写入 evolclaw.json 失败: ${error.message}\n已更新运行时配置，但未持久化`;
-          }
-        } else {
-          // Codex 全局配置（~/.codex/config.toml）目前不支持写入，回退到 evolclaw.json
-          if (!this.config.agents!.codex) this.config.agents!.codex = {};
-          if (newModel) this.config.agents!.codex.model = newModel;
-          if (newEffort) this.config.agents!.codex.reasoning = newEffort;
-          try {
-            saveConfig(this.config);
-          } catch (error: any) {
-            return `⚠️ 写入 evolclaw.json 失败: ${error.message}\n已更新运行时配置，但未持久化`;
-          }
-        }
-      } else {
-        const configuredInEvolclaw = !!(this.config.agents?.claude?.model || this.config.agents?.claude?.effort);
-        if (configuredInEvolclaw) {
-          if (!this.config.agents!.claude) this.config.agents!.claude = {};
-          if (newModel) this.config.agents!.claude.model = newModel;
-          if (newEffort) this.config.agents!.claude.effort = newEffort as any;
-          try {
-            saveConfig(this.config);
-          } catch (error: any) {
-            return `⚠️ 写入 evolclaw.json 失败: ${error.message}\n已更新运行时配置，但未持久化`;
-          }
-        } else {
-          const updates: { model?: string; effortLevel?: string } = {};
-          if (newModel) updates.model = newModel;
-          if (newEffort) updates.effortLevel = newEffort;
-          const writeResult = writeUserSettings(updates);
-          if (!writeResult.success) {
-            return `⚠️ 写入用户配置失败: ${writeResult.error}\n已更新运行时配置，但未持久化到 ~/.claude/settings.json`;
-          }
-        }
+      // 持久化：agent-owned channel 写到 agent.json；default 走原"就近原则"
+      if (newModel) {
+        const err = this.persistBaseagentModel(channel, modelAgent.name, newModel);
+        if (err) return `${err}\n已更新运行时配置，但未持久化`;
+      }
+      if (newEffort) {
+        const err = this.persistBaseagentEffort(channel, modelAgent.name, newEffort);
+        if (err) return `${err}\n已更新运行时配置，但未持久化`;
       }
 
       return `✓ 已切换\n  ${changes.join('\n  ')}`;
@@ -1379,23 +1438,8 @@ export class CommandHandler {
       // /effort auto：恢复 SDK 默认
       if (args === 'auto') {
         effortAgent.setEffort?.(undefined);
-
-        const isCodex = effortAgent.name === 'codex';
-        if (isCodex) {
-          if (this.config.agents?.codex?.reasoning) {
-            delete this.config.agents.codex.reasoning;
-            try { saveConfig(this.config); } catch {}
-          }
-        } else {
-          const configuredInEvolclaw = !!this.config.agents?.claude?.effort;
-          if (configuredInEvolclaw) {
-            delete (this.config.agents!.claude as any).effort;
-            try { saveConfig(this.config); } catch {}
-          } else {
-            writeUserSettings({ effortLevel: null });
-          }
-        }
-
+        const err = this.persistBaseagentEffort(channel, effortAgent.name, undefined);
+        if (err) return `${err}\n已更新运行时配置，但未持久化`;
         return '✓ 推理强度已恢复为 auto (SDK默认)';
       }
 
@@ -1410,23 +1454,8 @@ export class CommandHandler {
       const newEffort = args as Effort;
       effortAgent.setEffort?.(newEffort);
 
-      // 持久化
-      if (!this.config.agents) this.config.agents = {};
-      const isCodex = effortAgent.name === 'codex';
-      if (isCodex) {
-        if (!this.config.agents.codex) this.config.agents.codex = {};
-        this.config.agents.codex.reasoning = newEffort;
-        try { saveConfig(this.config); } catch {}
-      } else {
-        const configuredInEvolclaw = !!(this.config.agents?.claude?.model || this.config.agents?.claude?.effort);
-        if (configuredInEvolclaw) {
-          if (!this.config.agents.claude) this.config.agents.claude = {};
-          this.config.agents.claude.effort = newEffort as any;
-          try { saveConfig(this.config); } catch {}
-        } else {
-          writeUserSettings({ effortLevel: newEffort });
-        }
-      }
+      const err = this.persistBaseagentEffort(channel, effortAgent.name, newEffort);
+      if (err) return `${err}\n已更新运行时配置，但未持久化`;
 
       return `✓ 推理强度: ${newEffort}`;
     }
