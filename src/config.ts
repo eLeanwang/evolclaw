@@ -337,9 +337,13 @@ export function getOwner(config: Config, channelOrType: string): string | undefi
   return undefined;
 }
 
-export function setOwner(config: Config, instanceName: string, userId: string, configPath: string = resolvePaths().config): void {
-  if (!config.channels) config.channels = {};
-  const channels = config.channels as any;
+/**
+ * Find a channel instance by name in a config-like object and set its owner.
+ * Returns true if the instance was found and updated.
+ */
+export function writeOwnerToChannelInstance(root: any, instanceName: string, userId: string): boolean {
+  const channels = root?.channels;
+  if (!channels || typeof channels !== 'object') return false;
 
   for (const type of channelTypes) {
     const raw = channels[type];
@@ -349,23 +353,51 @@ export function setOwner(config: Config, instanceName: string, userId: string, c
       const inst = raw.find((item: any) => item.name === instanceName);
       if (inst) {
         inst.owner = userId;
-        saveConfig(config, configPath);
-        return;
+        return true;
       }
     } else {
-      // Single-object form: match if name matches (or defaults to type name)
       const effectiveName = raw.name ?? type;
       if (effectiveName === instanceName) {
         raw.owner = userId;
-        saveConfig(config, configPath);
-        return;
+        return true;
       }
     }
   }
+  return false;
+}
 
-  // Fallback: if instanceName matches a channel type with no config, create it
+export function setOwner(config: Config, instanceName: string, userId: string, configPath: string = resolvePaths().config): void {
+  const p = resolvePaths();
+  const agentsDir = p.agentsDir;
+
+  // 1. Try agent.json files first
+  if (fs.existsSync(agentsDir)) {
+    try {
+      for (const file of fs.readdirSync(agentsDir)) {
+        if (!file.endsWith('.json')) continue;
+        const agentFile = path.join(agentsDir, file);
+        try {
+          const raw = JSON.parse(fs.readFileSync(agentFile, 'utf-8'));
+          if (writeOwnerToChannelInstance(raw, instanceName, userId)) {
+            fs.writeFileSync(agentFile, JSON.stringify(raw, null, 2), 'utf-8');
+            return;
+          }
+        } catch { /* skip malformed files */ }
+      }
+    } catch { /* agentsDir not readable */ }
+  }
+
+  // 2. Fallback: write to evolclaw.json
+  if (!config.channels) config.channels = {};
+
+  if (writeOwnerToChannelInstance(config, instanceName, userId)) {
+    saveConfig(config, configPath);
+    return;
+  }
+
+  // 3. Last resort: if instanceName matches a channel type with no config, create it
   if (channelTypes.includes(instanceName as any)) {
-    channels[instanceName] = { owner: userId };
+    (config.channels as any)[instanceName] = { owner: userId };
     saveConfig(config, configPath);
     return;
   }
