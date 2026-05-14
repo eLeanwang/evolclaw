@@ -6,6 +6,12 @@ import { extractFingerprint } from '../utils/channel-fingerprint.js';
 import { logger } from '../utils/logger.js';
 import type { Config, AgentInfo, EvolAgentConfig } from '../types.js';
 
+export interface ReloadHooks {
+  drainChannel(channelName: string): Promise<void>;
+  disconnectChannel(channelName: string): Promise<void>;
+  startChannel(agent: EvolAgent, channelName: string): Promise<void>;
+}
+
 export class AgentRegistry {
   private agents: Map<string, EvolAgent> = new Map();
   private defaultAgent: EvolAgent | null = null;
@@ -144,6 +150,119 @@ export class AgentRegistry {
 
   runnableAgents(): EvolAgent[] {
     return [...this.agents.values()].filter(a => a.status === 'stopped');
+  }
+
+  async reload(name: string, hooks: ReloadHooks): Promise<void> {
+    const oldAgent = this.agents.get(name);
+    if (!oldAgent) throw new Error(`Agent "${name}" not found`);
+    if (!oldAgent.configPath) throw new Error(`Cannot reload DefaultAgent`);
+
+    // 1. Re-read config from disk
+    const raw = JSON.parse(fs.readFileSync(oldAgent.configPath, 'utf-8'));
+    const validation = validateEvolAgentConfig(raw);
+    if (!validation.valid) {
+      throw new Error(`Invalid config after edit: ${validation.errors.join('; ')}`);
+    }
+
+    const newAgent = new EvolAgent(oldAgent.configPath, raw);
+
+    // 2. Fingerprint conflict check (against all others except self)
+    const conflict = this.checkConflictForReload(newAgent, name);
+    if (conflict) {
+      throw new Error(`Channel conflict: ${conflict}`);
+    }
+
+    // 3. Compute channel diff
+    const oldChannels = new Set(oldAgent.channelInstanceNames());
+    const newChannels = new Set(newAgent.channelInstanceNames());
+    const toRemove = [...oldChannels].filter(c => !newChannels.has(c));
+    const toAdd = [...newChannels].filter(c => !oldChannels.has(c));
+    const kept = [...oldChannels].filter(c => newChannels.has(c));
+
+    // 4. Drain channels being removed
+    for (const ch of toRemove) {
+      await hooks.drainChannel(ch);
+    }
+
+    // 5. Disconnect removed channels
+    for (const ch of toRemove) {
+      await hooks.disconnectChannel(ch);
+    }
+
+    // 6. Start new channels
+    for (const ch of toAdd) {
+      await hooks.startChannel(newAgent, ch);
+    }
+
+    // 7. Transfer kept channel adapters from old to new
+    for (const ch of kept) {
+      const adapter = oldAgent.channels.get(ch);
+      if (adapter) newAgent.channels.set(ch, adapter);
+    }
+
+    // 8. Preserve runtime state
+    newAgent.activeSessions = oldAgent.activeSessions;
+    newAgent.lastActivity = oldAgent.lastActivity;
+    newAgent.status = 'running';
+
+    // 9. Swap in registry
+    this.agents.set(name, newAgent);
+
+    // 10. Rebuild channel index
+    this.channelIndex.clear();
+    this.buildChannelIndex();
+  }
+
+  private checkConflictForReload(newAgent: EvolAgent, excludeName: string): string | null {
+    const newFingerprints = new Map<string, string>(); // fp → instanceName
+
+    for (const [type, raw] of Object.entries(newAgent.config.channels || {})) {
+      if (type === 'defaultChannel') continue;
+      const instances = Array.isArray(raw) ? raw : [raw];
+      for (const inst of instances) {
+        if (!inst || typeof inst !== 'object') continue;
+        const fp = extractFingerprint(type, inst as any);
+        if (!fp) continue;
+        const instName = (inst as any).name ?? type;
+        newFingerprints.set(fp, instName);
+      }
+    }
+
+    // Check against all other agents (excluding self)
+    for (const [agentName, agent] of this.agents) {
+      if (agentName === excludeName) continue;
+      if (agent.status === 'error' || agent.status === 'disabled') continue;
+      for (const [type, raw] of Object.entries(agent.config.channels || {})) {
+        if (type === 'defaultChannel') continue;
+        const instances = Array.isArray(raw) ? raw : [raw];
+        for (const inst of instances) {
+          if (!inst || typeof inst !== 'object') continue;
+          const fp = extractFingerprint(type, inst as any);
+          if (!fp) continue;
+          if (newFingerprints.has(fp)) {
+            return `${fp} conflicts with agent "${agentName}"`;
+          }
+        }
+      }
+    }
+
+    // Check against DefaultAgent
+    if (this.defaultAgent) {
+      for (const [type, raw] of Object.entries(this.defaultAgent.config.channels || {})) {
+        if (type === 'defaultChannel') continue;
+        const instances = Array.isArray(raw) ? raw : [raw];
+        for (const inst of instances) {
+          if (!inst || typeof inst !== 'object') continue;
+          const fp = extractFingerprint(type, inst as any);
+          if (!fp) continue;
+          if (newFingerprints.has(fp)) {
+            return `${fp} conflicts with DefaultAgent`;
+          }
+        }
+      }
+    }
+
+    return null;
   }
 
   private toInfo(agent: EvolAgent): AgentInfo {
