@@ -142,7 +142,7 @@ function formatIdleTime(ms: number): string {
 }
 
 // 支持的命令列表
-const commands = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/effort', '/agent', '/slist', '/session', '/rename', '/stop', '/clear', '/compact', '/repair', '/safe', '/fork', '/del', '/perm', '/file', '/check', '/rewind', '/activity', '/aid', '/agentmd', '/chatmode', '/ask'];
+const commands = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/evolhelp', '/status', '/restart', '/model', '/effort', '/agent', '/slist', '/session', '/rename', '/stop', '/clear', '/compact', '/repair', '/safe', '/fork', '/del', '/perm', '/file', '/check', '/rewind', '/activity', '/aid', '/agentmd', '/chatmode', '/ask', '/resume'];
 
 // 命令别名映射
 const aliases: Record<string, string> = {
@@ -153,7 +153,7 @@ const aliases: Record<string, string> = {
 };
 
 // 命令快速路径前缀（所有命令都不进入消息队列）
-const quickCommandPrefixes = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/effort', '/agent', '/slist', '/session', '/rename', '/repair', '/fork', '/stop', '/clear', '/compact', '/safe', '/del', '/perm', '/file', '/check', '/p ', '/s ', '/name', '/rewind', '/rw', '/rw ', '/activity', '/chatmode', '/aid', '/agentmd', '/ask'];
+const quickCommandPrefixes = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/evolhelp', '/status', '/restart', '/model', '/effort', '/agent', '/slist', '/session', '/rename', '/repair', '/fork', '/stop', '/clear', '/compact', '/safe', '/del', '/perm', '/file', '/check', '/p ', '/s ', '/name', '/rewind', '/rw', '/rw ', '/activity', '/chatmode', '/aid', '/agentmd', '/ask', '/resume'];
 
 export class CommandHandler {
   private adapters = new Map<string, ChannelAdapter>();
@@ -848,7 +848,73 @@ export class CommandHandler {
       return lines.join('\n');
     }
 
-    // /perm 命令：权限模式切换 + 权限审批（快速路径，不进入消息队列）
+    // /evolhelp 命令：返回 JSON 格式的命令列表（供程序解析）
+    if (normalizedContent === '/evolhelp') {
+      type CmdEntry = { command: string; aliases?: string[]; args?: string; description: string; category: string; roles: string[] };
+      const cmds: CmdEntry[] = [];
+
+      // 项目管理
+      cmds.push({ command: '/pwd', description: '显示当前项目路径', category: '项目管理', roles: ['admin', 'owner'] });
+      cmds.push({ command: '/p', aliases: ['/project', '/plist'], args: '[name|path]', description: '列出或切换项目', category: '项目管理', roles: ['admin', 'owner'] });
+      if (isOwner) {
+        cmds.push({ command: '/bind', args: '<path>', description: '绑定新项目目录', category: '项目管理', roles: ['owner'] });
+      }
+
+      // 会话管理
+      cmds.push({ command: '/new', args: '[名称]', description: '创建新会话（清空历史请用此命令，可选命名）', category: '会话管理', roles: ['guest', 'admin', 'owner'] });
+      cmds.push({ command: '/s', aliases: ['/session', '/slist'], args: '[cli|名称|序号|uuid]', description: '列出或切换会话', category: '会话管理', roles: ['guest', 'admin', 'owner'] });
+      cmds.push({ command: '/name', aliases: ['/rename'], args: '<新名称>', description: '重命名当前会话', category: '会话管理', roles: ['guest', 'admin', 'owner'] });
+      cmds.push({ command: '/del', args: '<名称>', description: '删除指定会话（仅解绑，不删除文件）', category: '会话管理', roles: ['guest', 'admin', 'owner'] });
+      if (isAdmin) {
+        cmds.push({ command: '/fork', args: '[名称]', description: '分支当前会话（从当前对话点创建分支）', category: '会话管理', roles: ['admin', 'owner'] });
+        cmds.push({ command: '/rewind', aliases: ['/rw'], args: '[N] [chat|file|all]', description: '查看历史/撤销指定轮次', category: '会话管理', roles: ['admin', 'owner'] });
+        cmds.push({ command: '/compact', description: '压缩会话上下文（减少 token 用量）', category: '会话管理', roles: ['admin', 'owner'] });
+      }
+
+      // Agent 与模型
+      if (isAdmin) {
+        cmds.push({ command: '/agent', args: '[name]', description: '查看或切换 Agent 后端', category: 'Agent 与模型', roles: ['admin', 'owner'] });
+        cmds.push({ command: '/model', args: '[model]', description: '查看或切换模型', category: 'Agent 与模型', roles: ['admin', 'owner'] });
+        cmds.push({ command: '/effort', args: '[level]', description: '查看或切换推理强度', category: 'Agent 与模型', roles: ['admin', 'owner'] });
+      }
+
+      // 权限管理
+      if (isAdmin) {
+        cmds.push({ command: '/perm', args: isOwner ? '<auto|bypass|request|edit|plan|noask>' : undefined, description: '查看当前权限模式', category: '权限管理', roles: ['admin', 'owner'] });
+        cmds.push({ command: '/perm', args: 'allow|always|deny', description: '审批权限请求', category: '权限管理', roles: ['admin', 'owner'] });
+      }
+
+      // 运维
+      cmds.push({ command: '/status', description: '显示会话状态', category: '运维', roles: ['guest', 'admin', 'owner'] });
+      cmds.push({ command: '/stop', description: '中断当前任务', category: '运维', roles: ['admin', 'owner'] });
+      cmds.push({ command: '/check', description: '检查渠道状态', category: '运维', roles: ['guest', 'admin', 'owner'] });
+      if (isAdmin) {
+        cmds.push({ command: '/activity', args: '[all|dm|owner|none]', description: '查看/控制中间输出显示模式', category: '运维', roles: ['admin', 'owner'] });
+        cmds.push({ command: '/restart', args: '<channel>', description: '重连指定渠道', category: '运维', roles: ['admin', 'owner'] });
+      }
+      if (isOwner) {
+        cmds.push({ command: '/restart', description: '重启服务', category: '运维', roles: ['owner'] });
+        cmds.push({ command: '/file', args: '[channel] <path>', description: '发送项目内文件', category: '运维', roles: ['owner'] });
+        cmds.push({ command: '/aid', args: '[list|new <aid>]', description: 'AID 管理', category: '运维', roles: ['owner'] });
+        cmds.push({ command: '/agentmd', args: '[put|set <内容>]', description: '管理 agent.md', category: '运维', roles: ['owner'] });
+      }
+
+      // 会话模式
+      if (isAdmin) {
+        cmds.push({ command: '/chatmode', args: '[interactive|proactive]', description: '查看/切换会话模式（被动响应或主动推进）', category: '会话管理', roles: ['admin', 'owner'] });
+      }
+
+      // 交互
+      cmds.push({ command: '/ask', args: '<选项>', description: '回答 Agent 的交互式问题', category: '运维', roles: ['guest', 'admin', 'owner'] });
+      cmds.push({ command: '/resume', description: '查看当前项目的 Claude 会话记录', category: '会话管理', roles: ['guest', 'admin', 'owner'] });
+
+      // 帮助
+      cmds.push({ command: '/help', description: '显示帮助信息', category: '帮助', roles: ['guest', 'admin', 'owner'] });
+      cmds.push({ command: '/evolhelp', description: '返回 JSON 格式命令列表', category: '帮助', roles: ['guest', 'admin', 'owner'] });
+
+      const categories = [...new Set(cmds.map(c => c.category))];
+      return JSON.stringify({ commands: cmds, categories });
+    }
     if (normalizedContent.startsWith('/perm')) {
       const args = normalizedContent.slice(5).trim();
 
@@ -1000,6 +1066,112 @@ export class CommandHandler {
       const targetId = pendingIds[0];
       this.interactionRouter!.handle({ type: 'interaction.response', id: targetId, action: args, operatorId: userId });
       return `✓ 已回答`;
+    }
+
+    // /resume 命令：返回当前项目的 Claude 会话记录（JSON）
+    if (normalizedContent === '/resume' || normalizedContent.startsWith('/resume ')) {
+      const resumeResult = await this.ensureSession(channel, channelId, threadId);
+      if ('error' in resumeResult) return resumeResult.error;
+      const { session: resumeSession } = resumeResult;
+
+      try {
+        const { encodePath } = await import('../utils/cross-platform.js');
+        const homeDir = os.homedir();
+        const encodedPath = encodePath(resumeSession.projectPath);
+        const projectDir = path.join(homeDir, '.claude', 'projects', encodedPath);
+
+        if (!fs.existsSync(projectDir)) {
+          return '❌ 未找到 Claude 会话记录目录';
+        }
+
+        const jsonlFiles = fs.readdirSync(projectDir).filter(f => f.endsWith('.jsonl'));
+        if (jsonlFiles.length === 0) {
+          return '❌ 当前项目没有 Claude 会话记录';
+        }
+
+        const sessions: Array<{
+          sessionId: string;
+          lastMessageTime: string;
+          firstUserMessage: string;
+          model: string;
+          turns: number;
+          branch: string;
+        }> = [];
+
+        for (const file of jsonlFiles) {
+          const filePath = path.join(projectDir, file);
+          const sessionId = file.replace('.jsonl', '');
+          let lastTimestamp = '';
+          let firstUserMessage = '';
+          let model = '';
+          let branch = '';
+          let turns = 0;
+
+          try {
+            const content = fs.readFileSync(filePath, 'utf-8');
+            const lines = content.split('\n').filter(l => l.trim());
+
+            for (const line of lines) {
+              const event = JSON.parse(line);
+
+              // 记录最后间戳
+              if (event.timestamp && event.timestamp > lastTimestamp) {
+                lastTimestamp = event.timestamp;
+              }
+
+              // 提取 git branch
+              if (event.gitBranch && !branch) {
+                branch = event.gitBranch;
+              }
+
+              // 提取用户消息
+              if (event.type === 'user' && event.message?.role === 'user') {
+                const msgContent = event.message.content;
+                const isToolResult = Array.isArray(msgContent) && msgContent.every((c: any) => c.type === 'tool_result');
+                if (!isToolResult) {
+                  turns++;
+                  if (!firstUserMessage) {
+                    if (typeof msgContent === 'string') {
+                      firstUserMessage = msgContent.slice(0, 100);
+                    } else if (Array.isArray(msgContent)) {
+                      const textBlock = msgContent.find((c: any) => c.type === 'text');
+                      if (textBlock?.text) {
+                        firstUserMessage = textBlock.text.slice(0, 100);
+                      }
+                    }
+                  }
+                }
+              }
+
+              // 提取模型
+              if (event.type === 'assistant' && event.message?.model && !model) {
+                model = event.message.model;
+              }
+            }
+          } catch {
+            continue;
+          }
+
+          if (!lastTimestamp) continue;
+
+          sessions.push({
+            sessionId,
+            lastMessageTime: lastTimestamp,
+            firstUserMessage: firstUserMessage || '(无消息)',
+            model: model || 'unknown',
+            turns,
+            branch: branch || 'unknown',
+          });
+        }
+
+        // 按最后消息时间降序排序
+        sessions.sort((a, b) => b.lastMessageTime.localeCompare(a.lastMessageTime));
+
+        return JSON.stringify(sessions, null, 2);
+      } catch (error) {
+        logger.error('[CommandHandler] /resume failed:', error);
+        return `❌ 读取会话记录失败: ${error instanceof Error ? error.message : '未知错误'}`;
+      }
     }
 
     // /agent 命令：查看或切换 Agent 后端
@@ -2229,118 +2401,46 @@ export class CommandHandler {
       }
     }
 
-    // /plist 命令：列出所有项目
+    // /plist 命令：列出 Claude Code 项目目录（结构化 JSON 返回）
     if (normalizedContent === '/plist') {
-      if (!policy.canListProjects(session?.chatType || 'private', identity.role)) {
-        if (!session) {
-          return `❌ 当前群聊未绑定项目
-
-请使用 /bind <项目路径> 绑定项目`;
-        }
-
-        const projectName = this.getProjectName(session.projectPath);
-
-        const isProcessing = !!session.processingState;
-        const status = isProcessing ? '[处理中]' : '[空闲]';
-
-        return `当前群聊绑定的项目：
-  ${projectName} (${session.projectPath}) - ${status}
-
-提示：群聊不支持切换项目`;
+      const claudeProjectsDir = path.join(os.homedir(), '.claude', 'projects');
+      if (!fs.existsSync(claudeProjectsDir)) {
+        return JSON.stringify({ projects: [], error: 'Claude Code projects directory not found' });
       }
 
-      // 收集项目信息并按最近活跃排序（唯一来源：evolclaw.json projects.list）
-      const entries: { name: string; projectPath: string; projectSession: any; isCurrent: boolean; updatedAt: number }[] = [];
+      const entries: { dirName: string; path: string | null; sessions: number; hasMemory: boolean }[] = [];
+      try {
+        const dirs = fs.readdirSync(claudeProjectsDir, { withFileTypes: true })
+          .filter(d => d.isDirectory())
+          .map(d => d.name);
 
-      for (const [name, projectPath] of Object.entries(this.projects)) {
-        // 跳过不存在的路径
-        if (!fs.existsSync(projectPath)) continue;
-        const isCurrent = session ? path.resolve(session.projectPath) === path.resolve(projectPath) : false;
-        const projectSession = await this.sessionManager.getSessionByProjectPath(channel, channelId, projectPath);
-        entries.push({
-          name, projectPath, projectSession, isCurrent,
-          updatedAt: projectSession?.updatedAt ?? 0,
-        });
-      }
-
-      // 当前活跃项目置顶，其余按 updatedAt 降序
-      entries.sort((a, b) => {
-        if (a.isCurrent !== b.isCurrent) return a.isCurrent ? -1 : 1;
-        return b.updatedAt - a.updatedAt;
-      });
-
-      // 构建项目状态文本的辅助函数
-      const buildStatusText = (entry: typeof entries[0]) => {
-        const { projectSession, isCurrent } = entry;
-        if (!projectSession) return '无会话';
-        const parts: string[] = [];
-        if (isCurrent) { parts.push('活跃'); } else { parts.push(formatIdleTime(Date.now() - projectSession.updatedAt)); }
-        const isProcessing = !!projectSession.processingState;
-        if (isProcessing) {
-          const qLen = this.messageQueue.getQueueLength(projectSession.id);
-          parts.push(qLen > 0 ? `[处理中，队列${qLen}条]` : '[处理中]');
-        }
-        const unread = this.messageCache.getCount(projectSession.id);
-        if (unread > 0) { parts.push(`[${unread}条新消息]`); }
-        else if (!isProcessing && !isCurrent) { parts.push('[空闲]'); }
-        return parts.join(' ');
-      };
-
-      // 尝试发送 ActionInteraction 卡片（每个项目一个按钮，一键切换）
-      if (this.interactionRouter && entries.length > 0) {
-        const requestId = `plist-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
-        const buttons: ActionInteraction['buttons'] = entries.map(e => ({
-          key: e.name,
-          label: e.isCurrent ? `✓ ${e.name}` : e.name,
-          style: e.isCurrent ? 'primary' as const : 'default' as const,
-        }));
-
-        const bodyLines = entries.map(e => {
-          const status = buildStatusText(e);
-          const prefix = e.isCurrent ? '✓' : '•';
-          return `${prefix} **${e.name}** (${e.projectPath})  ${status}`;
-        });
-
-        const interaction: InteractionRequest = {
-          type: 'interaction',
-          id: requestId,
-          channelId,
-          sessionId: activeSession?.id || requestId,
-          kind: {
-            kind: 'action',
-            title: '📂 项目列表',
-            body: bodyLines.join('\n'),
-            buttons,
-          },
-        };
-
-        const replyCtx = activeSession ? this.getReplyContext(activeSession) : undefined;
-        const cardSent = await this.sendInteractionCard({
-          channel, channelId, sessionId: activeSession?.id || requestId, requestId, interaction, replyCtx,
-          canWrite: isAdmin,
-          callback: async (action, _values, operatorId) => {
-            if (userId && operatorId && operatorId !== userId) return;
-            const selectedEntry = entries.find(e => e.name === action);
-            if (selectedEntry && !selectedEntry.isCurrent) {
-              const result = await this.handle(`/project ${action}`, channel, channelId, undefined, userId, threadId);
-              if (result) {
-                const adapter = this.adapters.get(channel);
-                adapter?.sendText(channelId, result, replyCtx);
+        for (const dirName of dirs) {
+          const dirPath = path.join(claudeProjectsDir, dirName);
+          let sessions = 0;
+          let hasMemory = false;
+          let projectPath: string | null = null;
+          try {
+            const files = fs.readdirSync(dirPath);
+            const jsonlFiles = files.filter(f => f.endsWith('.jsonl'));
+            sessions = jsonlFiles.length;
+            hasMemory = files.includes('memory') && fs.statSync(path.join(dirPath, 'memory')).isDirectory();
+            // 从第一个 jsonl 文件中提取 cwd 作为真实路径
+            if (jsonlFiles.length > 0) {
+              const firstJsonl = path.join(dirPath, jsonlFiles[0]);
+              const content = fs.readFileSync(firstJsonl, 'utf-8');
+              const cwdMatch = content.match(/"cwd":"([^"]+)"/);
+              if (cwdMatch) {
+                projectPath = cwdMatch[1].replace(/\\\\/g, '\\');
               }
             }
-          },
-        });
-        if (cardSent) return null;
+          } catch {}
+          entries.push({ dirName, path: projectPath, sessions, hasMemory });
+        }
+      } catch (e: any) {
+        return JSON.stringify({ projects: [], error: e?.message ?? 'Failed to read projects directory' });
       }
 
-      // 降级：文本列表
-      const lines = ['可用项目:'];
-      for (const entry of entries) {
-        const prefix = entry.isCurrent ? '  ✓' : '   ';
-        lines.push(`${prefix} ${entry.name} (${entry.projectPath}) - ${buildStatusText(entry)}`);
-      }
-      lines.push('', '提示: 使用 /p <名称> 切换项目');
-      return lines.join('\n');
+      return JSON.stringify({ projects: entries });
     }
 
     // /project（无参数）：直接复用 /plist 逻辑（含卡片交互）
@@ -2372,7 +2472,7 @@ export class CommandHandler {
       let projectPath: string;
       let projectName: string;
 
-      if (arg.includes('/')) {
+      if (arg.includes('/') || arg.includes('\\')) {
         if (!path.isAbsolute(arg)) {
           return '❌ 项目路径必须是绝对路径';
         }

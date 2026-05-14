@@ -64,7 +64,7 @@ export class AUNChannel {
   private recallHandler?: (messageId: string) => void;
   private connected = false;
   private traceStream: fs.WriteStream | null = null;
-  private traceDate: string = '';  // 当前 trace 文件对应的日期 (YYYYMMDD)
+  private traceHourTag: string = '';  // 当前 trace 文件对应的小时标识 (YYYYMMDD-HH)
 
   private trace(dir: 'IN' | 'OUT', event: string, data: unknown): void {
     if (!this.config.aunTrace) return;
@@ -101,17 +101,36 @@ export class AUNChannel {
     }
   }
 
+  private static readonly AUN_TRACE_RE = /^aun-\d{8}-\d{2}\.log$/;
+  private static readonly AUN_RETAIN_HOURS = 12;
+
   private rotateTraceIfNeeded(): void {
     const d = new Date();
-    const today = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
-    if (this.traceDate === today && this.traceStream) return;
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const hourTag = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}`;
+    if (this.traceHourTag === hourTag && this.traceStream) return;
     if (this.traceStream) {
       this.traceStream.end();
       this.traceStream = null;
     }
-    this.traceDate = today;
-    const logPath = path.join(resolvePaths().logs, `aun-${today}.log`);
+    this.traceHourTag = hourTag;
+    const logPath = path.join(resolvePaths().logs, `aun-${hourTag}.log`);
     this.traceStream = fs.createWriteStream(logPath, { flags: 'a' });
+    this.cleanupOldTraceLogs();
+  }
+
+  private cleanupOldTraceLogs(): void {
+    const logsDir = resolvePaths().logs;
+    const cutoff = Date.now() - AUNChannel.AUN_RETAIN_HOURS * 60 * 60 * 1000;
+    try {
+      for (const name of fs.readdirSync(logsDir)) {
+        if (!AUNChannel.AUN_TRACE_RE.test(name)) continue;
+        try {
+          const full = path.join(logsDir, name);
+          if (fs.statSync(full).mtimeMs < cutoff) fs.unlinkSync(full);
+        } catch {}
+      }
+    } catch {}
   }
 
   /** 判断 channelId 是否为群组 ID
