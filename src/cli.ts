@@ -1478,10 +1478,15 @@ async function cmdAgent(args: string[]): Promise<void> {
   if (sub === 'new') {
     const name = args[1];
     if (!name) {
-      console.error('Usage: evolclaw agent new <name>');
+      console.error('Usage: evolclaw agent new <name> [--non-interactive ...]');
       process.exit(1);
     }
-    await cmdAgentNew(name);
+    const nonInteractive = args.includes('--non-interactive');
+    if (nonInteractive) {
+      await cmdAgentNewNonInteractive(name, args.slice(2));
+    } else {
+      await cmdAgentNew(name);
+    }
     return;
   }
 
@@ -1644,10 +1649,25 @@ async function cmdAgentNew(name: string): Promise<void> {
   try {
     console.log(`\nCreating agent: ${name}\n`);
 
-    const projectPath = await ask('Project path: ');
-    if (!projectPath.trim() || !path.isAbsolute(projectPath.trim())) {
+    const projectPath = (await ask('Project path: ')).trim();
+    if (!projectPath || !path.isAbsolute(projectPath)) {
       console.error('Project path must be an absolute path.');
       process.exit(1);
+    }
+    if (!fs.existsSync(projectPath)) {
+      const create = (await ask(`Project path does not exist. Create ${projectPath}? [Y/n]: `)).trim().toLowerCase();
+      if (create === '' || create === 'y' || create === 'yes') {
+        try {
+          fs.mkdirSync(projectPath, { recursive: true });
+          console.log(`  ✓ Created ${projectPath}`);
+        } catch (e: any) {
+          console.error(`Failed to create ${projectPath}: ${e?.message || e}`);
+          process.exit(1);
+        }
+      } else {
+        console.error('Aborted: project path does not exist.');
+        process.exit(1);
+      }
     }
 
     const baseagentChoices = ['claude', 'codex', 'gemini', 'hermes'];
@@ -1734,6 +1754,171 @@ async function cmdAgentNew(name: string): Promise<void> {
     // rl may already be closed if channel collector was invoked
     try { rl.close(); } catch {}
   }
+}
+
+async function cmdAgentNewNonInteractive(name: string, args: string[]): Promise<void> {
+  const p = resolvePaths();
+  const agentPath = path.join(p.agentsDir, `${name}.json`);
+
+  if (fs.existsSync(agentPath)) {
+    console.error(`Agent "${name}" already exists: ${agentPath}`);
+    process.exit(1);
+  }
+
+  // Helper: extract --flag value from args
+  const getArg = (flag: string): string | undefined => {
+    const idx = args.indexOf(flag);
+    return idx !== -1 && idx + 1 < args.length ? args[idx + 1] : undefined;
+  };
+
+  // Required: baseagent + project
+  const baseagent = getArg('--baseagent');
+  if (!baseagent) {
+    console.error('--baseagent is required (claude|codex|gemini|hermes)');
+    process.exit(1);
+  }
+  const baseagentChoices = ['claude', 'codex', 'gemini', 'hermes'];
+  if (!baseagentChoices.includes(baseagent)) {
+    console.error(`Invalid --baseagent: ${baseagent}`);
+    process.exit(1);
+  }
+
+  const project = getArg('--project');
+  if (!project) {
+    console.error('--project is required (absolute path)');
+    process.exit(1);
+  }
+  if (!path.isAbsolute(project)) {
+    console.error(`--project must be absolute: ${project}`);
+    process.exit(1);
+  }
+  if (!fs.existsSync(project)) {
+    try {
+      fs.mkdirSync(project, { recursive: true });
+      console.log(`  ✓ Created ${project}`);
+    } catch (e: any) {
+      console.error(`Failed to create ${project}: ${e?.message || e}`);
+      process.exit(1);
+    }
+  }
+
+  // Optional: chatmode
+  const chatmodePrivate = getArg('--chatmode-private') || 'interactive';
+  const chatmodeGroup = getArg('--chatmode-group') || 'proactive';
+  const chatmodeValid = new Set(['interactive', 'proactive']);
+  if (!chatmodeValid.has(chatmodePrivate)) {
+    console.error(`Invalid --chatmode-private: ${chatmodePrivate}`);
+    process.exit(1);
+  }
+  if (!chatmodeValid.has(chatmodeGroup)) {
+    console.error(`Invalid --chatmode-group: ${chatmodeGroup}`);
+    process.exit(1);
+  }
+
+  // Channels
+  const channelsConfig: Record<string, any> = {};
+
+  // AUN
+  const aunAid = getArg('--aun-aid');
+  const aunOwner = getArg('--aun-owner');
+  if (aunAid || aunOwner) {
+    if (!aunAid || !aunOwner) {
+      console.error('--aun-aid and --aun-owner must both be provided');
+      process.exit(1);
+    }
+    const { isValidAid, aidCreate } = await import('./channels/aun-ops.js');
+    if (!isValidAid(aunAid)) {
+      console.error(`Invalid --aun-aid: ${aunAid}`);
+      process.exit(1);
+    }
+    if (!isValidAid(aunOwner)) {
+      console.error(`Invalid --aun-owner: ${aunOwner}`);
+      process.exit(1);
+    }
+    try {
+      const result = await aidCreate(aunAid);
+      try { await result.client.close(); } catch { /* ignore */ }
+      console.log(`✓ AID ${result.alreadyExisted ? 'reused' : 'created'}: ${aunAid}`);
+    } catch (e: any) {
+      console.error(`AID creation failed: ${e?.message || e}`);
+      process.exit(1);
+    }
+    channelsConfig.aun = { enabled: true, aid: aunAid, owner: aunOwner };
+  }
+
+  // Feishu
+  const feishuAppId = getArg('--feishu-app-id');
+  const feishuAppSecret = getArg('--feishu-app-secret');
+  if (feishuAppId || feishuAppSecret) {
+    if (!feishuAppId || !feishuAppSecret) {
+      console.error('--feishu-app-id and --feishu-app-secret must both be provided');
+      process.exit(1);
+    }
+    channelsConfig.feishu = [{
+      name: `feishu-${name}`,
+      enabled: true,
+      appId: feishuAppId,
+      appSecret: feishuAppSecret,
+    }];
+  }
+
+  // WeChat
+  const wechatToken = getArg('--wechat-token');
+  if (wechatToken) {
+    channelsConfig.wechat = { enabled: true, token: wechatToken };
+  }
+
+  // WeCom
+  const wecomBotId = getArg('--wecom-bot-id');
+  const wecomSecret = getArg('--wecom-secret');
+  if (wecomBotId || wecomSecret) {
+    if (!wecomBotId || !wecomSecret) {
+      console.error('--wecom-bot-id and --wecom-secret must both be provided');
+      process.exit(1);
+    }
+    channelsConfig.wecom = { enabled: true, botId: wecomBotId, secret: wecomSecret };
+  }
+
+  // DingTalk
+  const dingtalkClientId = getArg('--dingtalk-client-id');
+  const dingtalkClientSecret = getArg('--dingtalk-client-secret');
+  if (dingtalkClientId || dingtalkClientSecret) {
+    if (!dingtalkClientId || !dingtalkClientSecret) {
+      console.error('--dingtalk-client-id and --dingtalk-client-secret must both be provided');
+      process.exit(1);
+    }
+    channelsConfig.dingtalk = { enabled: true, clientId: dingtalkClientId, clientSecret: dingtalkClientSecret };
+  }
+
+  // QQBot
+  const qqbotAppId = getArg('--qqbot-app-id');
+  const qqbotClientSecret = getArg('--qqbot-client-secret');
+  if (qqbotAppId || qqbotClientSecret) {
+    if (!qqbotAppId || !qqbotClientSecret) {
+      console.error('--qqbot-app-id and --qqbot-client-secret must both be provided');
+      process.exit(1);
+    }
+    channelsConfig.qqbot = { enabled: true, appId: qqbotAppId, clientSecret: qqbotClientSecret };
+  }
+
+  if (Object.keys(channelsConfig).length === 0) {
+    console.error('At least one channel must be configured (aun / feishu / wechat / wecom / dingtalk / qqbot)');
+    process.exit(1);
+  }
+
+  const agentConfig = {
+    name,
+    enabled: true,
+    agents: { [baseagent]: {} },
+    channels: channelsConfig,
+    projects: { defaultPath: project },
+    chatmode: { private: chatmodePrivate, group: chatmodeGroup },
+  };
+
+  fs.mkdirSync(p.agentsDir, { recursive: true });
+  fs.writeFileSync(agentPath, JSON.stringify(agentConfig, null, 2));
+  console.log(`✓ Created: ${agentPath}`);
+  console.log('  Run `evolclaw restart` (or `evolclaw agent reload <name>`) to activate.');
 }
 
 // ==================== AID ====================
@@ -2025,6 +2210,19 @@ Commands:
                   agent              列出所有 agent
                   agent <name>       查看指定 agent 详情
                   agent new <name>   创建新 agent（交互式）
+                  agent new <name> --non-interactive ...  非交互创建（自动化）
+                    必填: --baseagent <claude|codex|gemini|hermes>
+                          --project <absolute path>
+                    可选 channel:
+                          --aun-aid <aid> --aun-owner <aid>
+                          --feishu-app-id xxx --feishu-app-secret yyy
+                          --wechat-token xxx
+                          --wecom-bot-id xxx --wecom-secret yyy
+                          --dingtalk-client-id xxx --dingtalk-client-secret yyy
+                          --qqbot-app-id xxx --qqbot-client-secret yyy
+                    可选行为:
+                          --chatmode-private <interactive|proactive> (默认 interactive)
+                          --chatmode-group <interactive|proactive>   (默认 proactive)
                   agent reload <n>   热重载 agent 配置
   aid             AID 身份管理
                   aid list           列出本地所有 AID
