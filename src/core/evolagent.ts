@@ -270,7 +270,7 @@ export class EvolAgent {
    * projects.defaultPath when projects.list is empty/absent).
    */
   getProjects(): Record<string, string> {
-    const list = (this.config.projects as any)?.list;
+    const list = this.config.projects?.list;
     if (list && Object.keys(list).length > 0) return { ...list };
     const dp = this.config.projects?.defaultPath;
     if (dp) return { [path.basename(dp)]: dp };
@@ -282,9 +282,9 @@ export class EvolAgent {
    * Throws for DefaultAgent (caller should write to evolclaw.json instead).
    */
   addProject(name: string, projectPath: string): void {
-    if (!this.config.projects) (this.config.projects as any) = { defaultPath: projectPath, list: {} };
-    if (!(this.config.projects as any).list) (this.config.projects as any).list = {};
-    (this.config.projects as any).list[name] = projectPath;
+    if (!this.config.projects) this.config.projects = { defaultPath: projectPath, list: {} };
+    if (!this.config.projects.list) this.config.projects.list = {};
+    this.config.projects.list[name] = projectPath;
     this.persist();
   }
 

@@ -366,9 +366,12 @@ export interface EvolAgentConfig {
   enabled?: boolean;
   agents: Record<string, any>;
   channels: Record<string, any>;
-  projects: { defaultPath: string };
+  projects: { defaultPath: string; list?: Record<string, string>; autoCreate?: boolean };
   chatmode?: { private?: 'interactive' | 'proactive'; group?: 'interactive' | 'proactive' };
 }
+
+/** Reserved agent name used for DefaultAgent (no agent.json file). */
+export const DEFAULT_AGENT_NAME = '[default]';
 
 export interface AgentContext {
   name: string;
@@ -431,10 +434,10 @@ export interface EvolAgentRegistryHandle {
   get(name: string): EvolAgentHandle | null;
   list(): AgentInfo[];
   reload?(name: string, hooks: unknown): Promise<void>;
-  isOwner?(channelName: string, userId: string, globalFallback: (ch: string, uid: string) => boolean): boolean;
-  isAdmin?(channelName: string, userId: string, globalFallback: (ch: string, uid: string) => boolean): boolean;
-  getOwner?(channelName: string): string | undefined;
-  setChannelOwner?(channelName: string, userId: string): void;
-  getShowActivities?(channelName: string): 'all' | 'dm-only' | 'owner-dm-only' | 'none';
-  setShowActivities?(channelName: string, mode: 'all' | 'dm-only' | 'owner-dm-only' | 'none'): void;
+  isOwner(channelName: string, userId: string, globalFallback: (ch: string, uid: string) => boolean): boolean;
+  isAdmin(channelName: string, userId: string, globalFallback: (ch: string, uid: string) => boolean): boolean;
+  getOwner(channelName: string): string | undefined;
+  setChannelOwner(channelName: string, userId: string): void;
+  getShowActivities(channelName: string): 'all' | 'dm-only' | 'owner-dm-only' | 'none';
+  setShowActivities(channelName: string, mode: 'all' | 'dm-only' | 'owner-dm-only' | 'none'): void;
 }

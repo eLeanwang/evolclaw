@@ -219,7 +219,7 @@ export class CommandHandler {
   private getEffectiveProjects(channel: string): Record<string, string> {
     const owning = this.getOwningAgent(channel);
     if (owning) {
-      return (owning as any).getProjects?.() ?? {};
+      return owning.getProjects();
     }
     return this.projects;
   }
@@ -231,7 +231,7 @@ export class CommandHandler {
     const owning = this.getOwningAgent(channel);
     if (owning) {
       try {
-        (owning as any).addProject?.(name, projectPath);
+        owning.addProject(name, projectPath);
       } catch (e: any) {
         return `⚠️ 写入 agent.json 失败: ${e?.message || e}`;
       }
@@ -720,7 +720,9 @@ export class CommandHandler {
     }
 
     if (cmd === '/p') {
-      const list = this.config.projects?.list || {};
+      // Use agent-scoped project list: agent-owned channels see their agent.json's
+      // projects.list; default channel sees evolclaw.json's projects.list
+      const list = this.getEffectiveProjects(channel);
       return Object.entries(list).map(([name, path]) => ({ value: name, label: name, desc: path as string }));
     }
 
@@ -738,8 +740,11 @@ export class CommandHandler {
     }
 
     if (cmd === '/restart') {
+      // /restart 是服务级操作（重连/重启进程），仅限 default 通道。
+      // EvolAgent 通道返回空菜单（用户在 agent-owned 通道上无可选项）
+      if (this.getOwningAgent(channel)) return [];
       const isOwner = userId ? this.sessionManager.resolveIdentity(channel, userId).role === 'owner' : false;
-      // /restart <type> 是服务级操作：列出所有 channel type
+      // 列出所有 channel type
       const visibleTypes = new Set<string>();
       for (const [name] of this.adapters) {
         const t = this.channelTypeMap.get(name);
@@ -2114,7 +2119,11 @@ export class CommandHandler {
       const restartArg = normalizedContent.slice('/restart'.length).trim();
 
       // /restart <type> — 重连指定类型的所有渠道（admin only，evolclaw 服务级操作）
+      // 服务级操作仅可从 default 通道发起，避免 evolagent owner/admin 越权
       if (restartArg) {
+        if (this.getOwningAgent(channel)) {
+          return '❌ 渠道重连只能从 DefaultAgent 通道发起（服务级操作）';
+        }
         if (!isAdmin) return '❌ 无权限：渠道重连仅限管理员使用';
         const type = restartArg;
 
@@ -2149,7 +2158,11 @@ export class CommandHandler {
         return `🔄 重连 ${type}:\n  ${results.join('\n  ')}`;
       }
 
-      // /restart（无参数）— 重启整个服务（owner only）
+      // /restart（无参数）— 重启整个服务（owner only，且仅可从 default 通道触发）
+      // 防止 evolagent 通道的 owner 越权杀整个 evolclaw 进程（影响所有租户）
+      if (this.getOwningAgent(channel)) {
+        return '❌ 服务重启只能从 DefaultAgent 通道发起。EvolAgent 通道仅可执行 /restart <type> 重连特定类型渠道';
+      }
       if (!isOwner) return '❌ 无权限：服务重启仅限 owner 使用';
       const allSessions = await this.sessionManager.listSessions(channel, channelId);
       const sessionsWithMessages = allSessions
