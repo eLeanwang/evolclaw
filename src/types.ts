@@ -414,6 +414,7 @@ export interface EvolAgentHandle {
   setOwner(channelName: string, userId: string): void;
   getShowActivities(channelName: string): 'all' | 'dm-only' | 'owner-dm-only' | 'none';
   setShowActivities(channelName: string, mode: 'all' | 'dm-only' | 'owner-dm-only' | 'none'): void;
+  channelInstanceNames(): string[];
 }
 
 /**
