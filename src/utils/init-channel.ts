@@ -1754,3 +1754,92 @@ export async function cmdInitWecom(): Promise<void> {
   console.log(`  配置已写入: ${p.config}`);
   console.log(`\n现在可以启动服务: evolclaw restart`);
 }
+
+// ==================== Unified Credential Collector Dispatcher ====================
+
+/**
+ * Returns the credential collector function for a given channel type.
+ * Used by `evolclaw agent new` to collect credentials without writing to evolclaw.json.
+ *
+ * Each collector is an async function that runs the interactive flow and returns
+ * the credential object (same shape as a channel instance in evolclaw.json),
+ * or null if the user cancels.
+ */
+export type ChannelCredentialCollector = () => Promise<Record<string, any> | null>;
+
+export function getChannelCredentialCollector(type: string): ChannelCredentialCollector | null {
+  switch (type) {
+    case 'feishu':
+      return async () => {
+        const result = await runFeishuQrFlow();
+        if (!result) return null;
+        return { appId: result.appId, appSecret: result.appSecret, enabled: true };
+      };
+    case 'wechat':
+      return async () => {
+        const result = await runWechatQrFlow();
+        if (!result) return null;
+        return { baseUrl: result.baseUrl, token: result.token, enabled: true };
+      };
+    case 'aun':
+      return async () => {
+        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+        const ask = (q: string): Promise<string> => new Promise(r => rl.question(q, r));
+        try {
+          const aid = await ask('AID name (e.g., review): ');
+          if (!aid.trim()) return null;
+          const owner = await ask('Owner AID (e.g., molian.agentid.pub): ');
+
+          // Derive full AID if no dots
+          let fullAid = aid.trim();
+          if (!fullAid.includes('.')) {
+            fullAid = `${fullAid}.agentid.pub`;
+          }
+
+          if (!isValidAid(fullAid)) {
+            console.error(`Invalid AID: ${fullAid}`);
+            return null;
+          }
+
+          // Create AID keypair
+          const createResult = await createAidSilent({ aid: fullAid, owner: owner.trim() || undefined });
+          console.log(`  ✓ AID created: ${fullAid} (${createResult.alreadyExisted ? 'already existed' : 'new'})`);
+
+          return { aid: fullAid, owner: owner.trim() || undefined, enabled: true };
+        } finally {
+          rl.close();
+        }
+      };
+    case 'dingtalk':
+      return async () => {
+        const result = await runDingtalkQrFlowSimple();
+        if (!result) return null;
+        return { clientId: result.clientId, clientSecret: result.clientSecret, enabled: true };
+      };
+    case 'qqbot':
+      return async () => {
+        const result = await runQQBotBindFlowSimple();
+        if (!result) return null;
+        return { appId: result.appId, clientSecret: result.clientSecret, enabled: true };
+      };
+    case 'wecom':
+      return async () => {
+        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+        const ask = (q: string): Promise<string> => new Promise(r => rl.question(q, r));
+        try {
+          console.log('企业微信 AI Bot 配置\n');
+          console.log('请在企业微信管理后台 → AI Bot 页面获取 Bot ID 和 Secret\n');
+
+          const botId = (await ask('  Bot ID: ')).trim();
+          if (!botId) return null;
+          const secret = (await ask('  Secret: ')).trim();
+          if (!secret) return null;
+          return { botId, secret, enabled: true };
+        } finally {
+          rl.close();
+        }
+      };
+    default:
+      return null;
+  }
+}
