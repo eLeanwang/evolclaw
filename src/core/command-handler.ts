@@ -601,24 +601,13 @@ export class CommandHandler {
 
     if (cmd === '/restart') {
       const isOwner = userId ? this.sessionManager.resolveIdentity(channel, userId).role === 'owner' : false;
-      // /restart <type> 现在以类型为单位重连，按 owner 范围过滤可见类型
-      const owningAgent = this.getOwningAgent(channel);
+      // /restart <type> 是服务级操作：列出所有 channel type
       const visibleTypes = new Set<string>();
-      if (owningAgent) {
-        for (const name of owningAgent.channelInstanceNames()) {
-          const t = this.channelTypeMap.get(name);
-          if (t) visibleTypes.add(t);
-        }
-      } else {
-        for (const [name] of this.adapters) {
-          const t = this.channelTypeMap.get(name);
-          if (!t) continue;
-          const owner = this.agentRegistry?.resolveByChannel(name);
-          if (owner && !owner.isDefault) continue;
-          visibleTypes.add(t);
-        }
+      for (const [name] of this.adapters) {
+        const t = this.channelTypeMap.get(name);
+        if (t) visibleTypes.add(t);
       }
-      const channels = [...visibleTypes].map(type => ({ value: type, label: type, desc: '重连此类型渠道' }));
+      const channels = [...visibleTypes].map(type => ({ value: type, label: type, desc: '重连此类型所有渠道实例' }));
       if (isOwner) channels.unshift({ value: '', label: '重启服务', desc: '重启整个 EvolClaw 服务进程' });
       return channels;
     }
@@ -881,7 +870,7 @@ export class CommandHandler {
         '  /check - 检查渠道状态',
         '  /activity [all|dm|owner|none] - 查看/控制中间输出显示模式',
         ...(isAdmin ? [
-          '  /restart <type> - 重连指定类型渠道（按 owner 范围过滤）',
+          '  /restart <type> - 重连该类型所有渠道实例（服务级，admin+）',
         ] : []),
         ...(isOwner ? [
           '  /restart - 重启服务',
@@ -2035,33 +2024,19 @@ export class CommandHandler {
     if (normalizedContent === '/restart' || normalizedContent.startsWith('/restart ')) {
       const restartArg = normalizedContent.slice('/restart'.length).trim();
 
-      // /restart <type> — 重连指定类型的渠道（admin only），按 owner 范围过滤
+      // /restart <type> — 重连指定类型的所有渠道（admin only，evolclaw 服务级操作）
       if (restartArg) {
         if (!isAdmin) return '❌ 无权限：渠道重连仅限管理员使用';
         const type = restartArg;
 
-        const restartOwningAgent = this.getOwningAgent(channel);
+        // /restart 是服务级操作：重连该 type 下的所有实例（不分 agent）
         const scopedNames: string[] = [];
-        if (restartOwningAgent) {
-          // EvolAgent：仅其自有渠道
-          for (const name of restartOwningAgent.channelInstanceNames()) {
-            const t = this.channelTypeMap.get(name);
-            if (t === type) scopedNames.push(name);
-          }
-        } else {
-          // Default 通道：仅未被任何 EvolAgent 拥有的同类型渠道
-          for (const [name] of this.adapters) {
-            const t = this.channelTypeMap.get(name);
-            if (t !== type) continue;
-            const owner = this.agentRegistry?.resolveByChannel(name);
-            if (owner && !owner.isDefault) continue;
-            scopedNames.push(name);
-          }
+        for (const [name] of this.adapters) {
+          if (this.channelTypeMap.get(name) === type) scopedNames.push(name);
         }
 
         if (scopedNames.length === 0) {
-          const scope = restartOwningAgent ? `agent [${restartOwningAgent.name}]` : 'default';
-          return `❌ ${scope} 下没有类型为 "${type}" 的渠道`;
+          return `❌ 没有类型为 "${type}" 的渠道`;
         }
 
         const results: string[] = [];
