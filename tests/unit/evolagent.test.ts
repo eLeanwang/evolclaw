@@ -190,3 +190,187 @@ describe('EvolAgent owner/admin/showActivities', () => {
     fs.rmSync(tmp, { recursive: true, force: true });
   });
 });
+
+describe('EvolAgent setBaseagentModel / setBaseagentEffort', () => {
+  function makeTmpAgent(initialConfig: any) {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'evolagent-baseagent-'));
+    const file = path.join(tmp, `${initialConfig.name}.json`);
+    const cfg = JSON.parse(JSON.stringify(initialConfig));
+    fs.writeFileSync(file, JSON.stringify(cfg, null, 2));
+    const agent = new EvolAgent(file, cfg);
+    return { tmp, file, agent };
+  }
+
+  const claudeConfig = {
+    name: 'claude-bot',
+    enabled: true,
+    agents: { claude: { model: 'sonnet', effort: 'medium' } },
+    channels: { feishu: [{ name: 'fs', appId: 'a', appSecret: 'b' }] },
+    projects: { defaultPath: '/home/user/p' },
+  };
+
+  const codexConfig = {
+    name: 'codex-bot',
+    enabled: true,
+    agents: { codex: { model: 'gpt-5', reasoning: 'high' } },
+    channels: { feishu: [{ name: 'fs', appId: 'a', appSecret: 'b' }] },
+    projects: { defaultPath: '/home/user/p' },
+  };
+
+  it('setBaseagentModel writes config.agents[baseagent].model and persists', () => {
+    const { tmp, file, agent } = makeTmpAgent(claudeConfig);
+    agent.setBaseagentModel('opus');
+    const onDisk = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    expect(onDisk.agents.claude.model).toBe('opus');
+    expect(agent.model).toBe('opus');
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it('setBaseagentModel(undefined) deletes the model field and persists', () => {
+    const { tmp, file, agent } = makeTmpAgent(claudeConfig);
+    agent.setBaseagentModel(undefined);
+    const onDisk = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    expect(onDisk.agents.claude.model).toBeUndefined();
+    expect('model' in onDisk.agents.claude).toBe(false);
+    expect(agent.model).toBeUndefined();
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it('setBaseagentModel on DefaultAgent throws (no configPath)', () => {
+    const agent = new EvolAgent(null, claudeConfig, { isDefault: true });
+    expect(() => agent.setBaseagentModel('opus')).toThrow(/DefaultAgent/);
+  });
+
+  it('setBaseagentEffort on claude writes effort field', () => {
+    const { tmp, file, agent } = makeTmpAgent(claudeConfig);
+    agent.setBaseagentEffort('high');
+    const onDisk = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    expect(onDisk.agents.claude.effort).toBe('high');
+    expect(agent.effort).toBe('high');
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it('setBaseagentEffort on codex writes reasoning field (alias)', () => {
+    const { tmp, file, agent } = makeTmpAgent(codexConfig);
+    agent.setBaseagentEffort('low');
+    const onDisk = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    expect(onDisk.agents.codex.reasoning).toBe('low');
+    // codex stores under 'reasoning', not 'effort'
+    expect(onDisk.agents.codex.effort).toBeUndefined();
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it('setBaseagentEffort(undefined) on claude deletes effort field', () => {
+    const { tmp, file, agent } = makeTmpAgent(claudeConfig);
+    agent.setBaseagentEffort(undefined);
+    const onDisk = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    expect('effort' in onDisk.agents.claude).toBe(false);
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it('setBaseagentEffort(undefined) on codex deletes reasoning field', () => {
+    const { tmp, file, agent } = makeTmpAgent(codexConfig);
+    agent.setBaseagentEffort(undefined);
+    const onDisk = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    expect('reasoning' in onDisk.agents.codex).toBe(false);
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+});
+
+describe('EvolAgent getProjects / addProject', () => {
+  function makeTmpAgent(initialConfig: any) {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'evolagent-projects-'));
+    const file = path.join(tmp, `${initialConfig.name}.json`);
+    const cfg = JSON.parse(JSON.stringify(initialConfig));
+    fs.writeFileSync(file, JSON.stringify(cfg, null, 2));
+    const agent = new EvolAgent(file, cfg);
+    return { tmp, file, agent };
+  }
+
+  const baseConfig = {
+    name: 'pbot',
+    enabled: true,
+    agents: { claude: {} },
+    channels: { feishu: [{ name: 'fs', appId: 'a', appSecret: 'b' }] },
+    projects: { defaultPath: '/home/user/review' },
+  };
+
+  it('getProjects returns projects.list when populated', () => {
+    const cfg = { ...baseConfig, projects: { defaultPath: '/home/user/review', list: { alpha: '/home/u/a', beta: '/home/u/b' } } };
+    const agent = new EvolAgent('/p/pbot.json', cfg);
+    expect(agent.getProjects()).toEqual({ alpha: '/home/u/a', beta: '/home/u/b' });
+  });
+
+  it('getProjects falls back to single entry from defaultPath when list absent', () => {
+    const agent = new EvolAgent('/p/pbot.json', baseConfig);
+    // basename('/home/user/review') === 'review'
+    expect(agent.getProjects()).toEqual({ review: '/home/user/review' });
+  });
+
+  it('getProjects falls back to single entry from defaultPath when list empty', () => {
+    const cfg = { ...baseConfig, projects: { defaultPath: '/home/user/review', list: {} } };
+    const agent = new EvolAgent('/p/pbot.json', cfg);
+    expect(agent.getProjects()).toEqual({ review: '/home/user/review' });
+  });
+
+  it('addProject adds entry to projects.list and persists', () => {
+    const { tmp, file, agent } = makeTmpAgent({
+      ...baseConfig,
+      projects: { defaultPath: '/home/user/review', list: { alpha: '/home/u/a' } },
+    });
+    agent.addProject('beta', '/home/u/b');
+    const onDisk = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    expect(onDisk.projects.list).toEqual({ alpha: '/home/u/a', beta: '/home/u/b' });
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it('addProject initializes projects.list when absent', () => {
+    const { tmp, file, agent } = makeTmpAgent(baseConfig);
+    agent.addProject('first', '/home/u/first');
+    const onDisk = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    expect(onDisk.projects.list).toEqual({ first: '/home/u/first' });
+    expect(onDisk.projects.defaultPath).toBe('/home/user/review'); // unchanged
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it('addProject overwrites existing entry with same name', () => {
+    const { tmp, file, agent } = makeTmpAgent({
+      ...baseConfig,
+      projects: { defaultPath: '/home/user/review', list: { alpha: '/home/u/old' } },
+    });
+    agent.addProject('alpha', '/home/u/new');
+    const onDisk = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    expect(onDisk.projects.list.alpha).toBe('/home/u/new');
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+});
+
+describe('EvolAgent effectiveChannelName', () => {
+  const baseConfig = {
+    name: 'review-bot',
+    enabled: true,
+    agents: { claude: {} },
+    channels: { feishu: [{ name: 'fs', appId: 'a', appSecret: 'b' }] },
+    projects: { defaultPath: '/home/user/p' },
+  };
+
+  it('DefaultAgent without rawName returns type', () => {
+    const agent = new EvolAgent(null, baseConfig, { isDefault: true });
+    expect(agent.effectiveChannelName('feishu', undefined)).toBe('feishu');
+  });
+
+  it('DefaultAgent with rawName returns rawName', () => {
+    const agent = new EvolAgent(null, baseConfig, { isDefault: true });
+    expect(agent.effectiveChannelName('feishu', 'feilun')).toBe('feilun');
+  });
+
+  it('EvolAgent without rawName returns ${name}-${type}', () => {
+    const agent = new EvolAgent('/p', baseConfig);
+    expect(agent.effectiveChannelName('aun', undefined)).toBe('review-bot-aun');
+  });
+
+  it('EvolAgent with rawName returns ${name}-${type}-${rawName}', () => {
+    const agent = new EvolAgent('/p', baseConfig);
+    expect(agent.effectiveChannelName('feishu', 'fs')).toBe('review-bot-feishu-fs');
+  });
+});
