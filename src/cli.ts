@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import os from 'os';
 import { spawn, execFileSync, execFile } from 'child_process';
 import { promisify } from 'util';
 import { resolveRoot, resolvePaths, ensureDataDirs, getPackageRoot } from './paths.js';
@@ -1458,6 +1459,205 @@ async function cmdCtl(args: string[]): Promise<void> {
   }
 }
 
+// ==================== Agent ====================
+
+async function cmdAgent(args: string[]): Promise<void> {
+  const sub = args[0];
+
+  if (!sub) {
+    await cmdAgentList();
+    return;
+  }
+
+  if (sub === 'new') {
+    const name = args[1];
+    if (!name) {
+      console.error('Usage: evolclaw agent new <name>');
+      process.exit(1);
+    }
+    await cmdAgentNew(name);
+    return;
+  }
+
+  if (sub === 'reload') {
+    const name = args[1];
+    if (!name) {
+      console.error('Usage: evolclaw agent reload <name>');
+      process.exit(1);
+    }
+    // Phase 1 stub: no IPC yet
+    console.error('⚠ evolclaw 未运行或 IPC 未就绪，请使用 evolclaw restart 重新加载所有 agent');
+    process.exit(1);
+  }
+
+  // `evolclaw agent <name>` — show detail
+  await cmdAgentShow(sub);
+}
+
+async function cmdAgentList(): Promise<void> {
+  const p = resolvePaths();
+
+  const { AgentRegistry } = await import('./core/agent-registry.js');
+  const { loadConfig } = await import('./config.js');
+
+  let config: any;
+  try {
+    config = loadConfig(p.config);
+  } catch {
+    config = { agents: {}, channels: {}, projects: { defaultPath: process.cwd() } };
+  }
+
+  const registry = new AgentRegistry(p.agentsDir);
+  registry.loadAll(config);
+  const list = registry.list();
+
+  if (list.length === 0) {
+    console.log('No agents configured.');
+    return;
+  }
+
+  // Table output
+  console.log('NAME'.padEnd(14) + 'STATUS'.padEnd(10) + 'CHANNELS'.padEnd(24) + 'PROJECT'.padEnd(22) + 'BASEAGENT');
+  for (const info of list) {
+    const name = info.isDefault ? '[default]' : info.name;
+    const status = info.status;
+    const channels = info.channels.length > 0 ? info.channels.join(', ').slice(0, 22) : '—';
+    const project = info.projectPath ? path.basename(info.projectPath) : '—';
+    const baseagent = info.baseagent || '—';
+    console.log(
+      name.padEnd(14) +
+      status.padEnd(10) +
+      channels.padEnd(24) +
+      project.padEnd(22) +
+      baseagent
+    );
+  }
+}
+
+async function cmdAgentShow(name: string): Promise<void> {
+  const p = resolvePaths();
+
+  const { AgentRegistry } = await import('./core/agent-registry.js');
+  const { loadConfig } = await import('./config.js');
+
+  let config: any;
+  try {
+    config = loadConfig(p.config);
+  } catch {
+    config = { agents: {}, channels: {}, projects: { defaultPath: process.cwd() } };
+  }
+
+  const registry = new AgentRegistry(p.agentsDir);
+  registry.loadAll(config);
+
+  const agent = registry.get(name);
+  if (!agent) {
+    console.error(`Agent "${name}" not found.`);
+    const allList = registry.list().filter(i => !i.isDefault);
+    if (allList.length > 0) {
+      console.log(`Available: ${allList.map(i => i.name).join(', ')}`);
+    }
+    process.exit(1);
+  }
+
+  console.log(`${agent.name} (${agent.status})\n`);
+  console.log(`  Baseagent:  ${agent.baseagent}`);
+  if (agent.model) console.log(`  Model:      ${agent.model}`);
+  if (agent.effort) console.log(`  Effort:     ${agent.effort}`);
+  console.log(`  Project:    ${agent.projectPath}`);
+  console.log(`  Channels:   ${agent.channelInstanceNames().join(', ') || '—'}`);
+  if (agent.error) console.log(`  Error:      ${agent.error}`);
+  if (agent.configPath) console.log(`  Config:     ${agent.configPath}`);
+}
+
+async function cmdAgentNew(name: string): Promise<void> {
+  const p = resolvePaths();
+  const agentPath = path.join(p.agentsDir, `${name}.json`);
+
+  if (fs.existsSync(agentPath)) {
+    console.error(`Agent "${name}" already exists: ${agentPath}`);
+    process.exit(1);
+  }
+
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  const ask = (q: string): Promise<string> => new Promise(r => rl.question(q, r));
+
+  try {
+    console.log(`\nCreating agent: ${name}\n`);
+
+    const projectPath = await ask('Project path: ');
+    if (!projectPath.trim() || !path.isAbsolute(projectPath.trim())) {
+      console.error('Project path must be an absolute path.');
+      process.exit(1);
+    }
+
+    const baseagentChoices = ['claude', 'codex', 'gemini', 'hermes'];
+    const baseagent = (await ask(`Baseagent (${baseagentChoices.join('/')}) [claude]: `)).trim() || 'claude';
+    if (!baseagentChoices.includes(baseagent)) {
+      console.error(`Invalid baseagent: ${baseagent}`);
+      process.exit(1);
+    }
+
+    const model = (await ask('Model (leave empty for default): ')).trim() || undefined;
+    const effort = (await ask('Effort (low/medium/high/max) [high]: ')).trim() || 'high';
+
+    const chatmodeChoices = ['interactive', 'proactive'];
+    const chatmodePrivate = (await ask(`ChatMode private (${chatmodeChoices.join('/')}) [interactive]: `)).trim() || 'interactive';
+
+    // Channels
+    const channelsConfig: Record<string, any[]> = {};
+    const { getChannelCredentialCollector } = await import('./utils/init-channel.js');
+
+    const addChannel = (await ask('\nAdd channel? (y/n) [n]: ')).trim().toLowerCase();
+    if (addChannel === 'y') {
+      const channelType = (await ask('Channel type (feishu/aun/wechat/wecom/dingtalk/qqbot): ')).trim();
+      const collector = getChannelCredentialCollector(channelType);
+      if (!collector) {
+        console.error(`Unknown channel type: ${channelType}`);
+      } else {
+        // Close our rl before collector opens its own
+        rl.close();
+
+        const creds = await collector();
+        if (creds) {
+          // Reopen rl for instance name
+          const rl2 = readline.createInterface({ input: process.stdin, output: process.stdout });
+          const instName = await new Promise<string>(r => rl2.question(`  Channel instance name [${name}]: `, r));
+          rl2.close();
+
+          creds.name = instName.trim() || name;
+          channelsConfig[channelType] = [creds];
+        } else {
+          console.log('  Channel setup cancelled.');
+        }
+      }
+    }
+
+    // Simplify channels: if only one instance per type, unwrap from array
+    const finalChannels: Record<string, any> = {};
+    for (const [type, instances] of Object.entries(channelsConfig)) {
+      finalChannels[type] = instances.length === 1 ? instances[0] : instances;
+    }
+
+    const agentConfig = {
+      name,
+      enabled: true,
+      agents: { [baseagent]: { ...(model && { model }), effort } },
+      channels: finalChannels,
+      projects: { defaultPath: projectPath.trim() },
+      chatmode: { private: chatmodePrivate, group: 'proactive' },
+    };
+
+    fs.mkdirSync(p.agentsDir, { recursive: true });
+    fs.writeFileSync(agentPath, JSON.stringify(agentConfig, null, 2));
+    console.log(`\n✓ Created: ${agentPath}`);
+    console.log('  Run `evolclaw restart` to activate.');
+  } finally {
+    // rl may already be closed if channel collector was invoked
+    try { rl.close(); } catch {}
+  }
+}
+
 // ==================== Main ====================
 
 function getArgValue(args: string[], flag: string): string | undefined {
@@ -1522,7 +1722,7 @@ export async function main(args: string[]) {
         if (nonInteractive) {
           await cmdInit({
             nonInteractive: true,
-            defaultPath: getArgValue(args, '--default-path') || process.cwd(),
+            defaultPath: getArgValue(args, '--default-path') || path.join(os.homedir(), 'projects', 'default'),
             channel: getArgValue(args, '--channel') || 'aun',
             aunAid: getArgValue(args, '--aun-aid'),
             aunOwner: getArgValue(args, '--aun-owner'),
@@ -1559,6 +1759,9 @@ export async function main(args: string[]) {
     case 'ctl':
       await cmdCtl(args.slice(1));
       break;
+    case 'agent':
+      await cmdAgent(args.slice(1));
+      break;
     default:
       console.log(`Usage: evolclaw {init|start|stop|restart|status|logs|ctl|diagnose|mv}
 
@@ -1580,6 +1783,11 @@ Commands:
                   --raw                原始输出，不着色
   ctl           运行时自管理（模型切换、推理强度、压缩上下文等）
                   evolclaw ctl help 查看完整命令列表
+  agent         管理 EvolAgent
+                  agent              列出所有 agent
+                  agent <name>       查看指定 agent 详情
+                  agent new <name>   创建新 agent（交互式）
+                  agent reload <n>   热重载 agent 配置
   diagnose      诊断启动环境（配置、数据库、进程）
   mv <old> <new>  迁移项目目录（保留 Claude/Codex/EvolClaw 会话）
 

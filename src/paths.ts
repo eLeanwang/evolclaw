@@ -35,6 +35,7 @@ export function resolvePaths() {
     pid: path.join(root, 'logs', 'evolclaw.pid'),
     dataDir: path.join(root, 'data'),
     logs: path.join(root, 'logs'),
+    agentsDir: path.join(root, 'agents'),
     lineStats: path.join(root, 'logs', 'line-stats.log'),
     readySignal: path.join(root, 'logs', 'ready.signal'),
     selfHealLog: path.join(root, 'logs', 'self-heal.md'),
@@ -54,6 +55,7 @@ export function ensureDataDirs(): void {
   const p = resolvePaths();
   fs.mkdirSync(p.dataDir, { recursive: true });
   fs.mkdirSync(p.logs, { recursive: true });
+  fs.mkdirSync(p.agentsDir, { recursive: true });
 }
 
 export function getPackageRoot(): string {
