@@ -261,6 +261,16 @@ export class AgentRegistry {
 
     const newAgent = new EvolAgent(oldAgent.configPath, raw);
 
+    // Warn if projectPath changed — existing sessions retain old path (by design,
+    // to avoid breaking SDK conversation history at .claude/<encoded-path>/...)
+    if (oldAgent.projectPath !== newAgent.projectPath) {
+      logger.warn(
+        `[AgentRegistry] Agent "${name}" projectPath changed: ${oldAgent.projectPath} → ${newAgent.projectPath}. ` +
+        `Existing sessions retain the old path; only new sessions will use the new path. ` +
+        `To migrate, manually UPDATE sessions SET project_path=? WHERE id=? (warning: SDK conversation history may be lost).`
+      );
+    }
+
     // 2. Fingerprint conflict check (against all others except self)
     const conflict = this.checkConflictForReload(newAgent, name);
     if (conflict) {
