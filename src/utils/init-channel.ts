@@ -1589,44 +1589,11 @@ export function getChannelCredentialCollector(type: string): ChannelCredentialCo
     case 'aun':
       return async () => {
         const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-        const ask = (q: string): Promise<string> => new Promise(r => rl.question(q, r));
         try {
-          // Check AUN SDK is installed first
-          const envOk = await checkAunEnvironment(rl);
-          if (!envOk) return null;
-
-          const aid = await ask('AID name (e.g., review): ');
-          if (!aid.trim()) return null;
-          const owner = await ask('Owner AID (e.g., molian.agentid.pub): ');
-
-          // Derive full AID if no dots
-          let fullAid = aid.trim();
-          if (!fullAid.includes('.')) {
-            fullAid = `${fullAid}.agentid.pub`;
-          }
-
-          if (!isValidAid(fullAid)) {
-            console.error(`Invalid AID: ${fullAid}`);
-            return null;
-          }
-
-          try {
-            // Create AID + initial agent.md via atomic ops
-            const createResult = await aidCreate(fullAid);
-            if (!createResult.alreadyExisted) {
-              const content = buildInitialAgentMd({ aid: fullAid });
-              try {
-                await agentmdPut(content, { aid: fullAid, client: createResult.client });
-              } catch { /* non-fatal: first connect will retry */ }
-            }
-            try { await createResult.client.close(); } catch { /* ignore */ }
-            console.log(`  ✓ AID created: ${fullAid} (${createResult.alreadyExisted ? 'already existed' : 'new'})`);
-
-            return { aid: fullAid, owner: owner.trim() || undefined, enabled: true };
-          } catch (e: any) {
-            console.error(`  ✗ AID creation failed: ${e?.message || e}`);
-            return null;
-          }
+          if (!await checkAunEnvironment(rl)) return null;
+          const result = await setupAunAid(rl, {});
+          if (!result) return null;
+          return { aid: result.aid, owner: result.owner, enabled: true };
         } finally {
           rl.close();
         }
