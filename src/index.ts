@@ -679,6 +679,7 @@ async function main() {
     channelLoader,
     channelInstances,
     registerChannelInstance,
+    messageQueue,
   });
 
   // Make reload hooks accessible to IPC handler & ctl handler (both run in this process)

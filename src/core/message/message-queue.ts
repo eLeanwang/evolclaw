@@ -264,6 +264,21 @@ export class MessageQueue {
     return false;
   }
 
+  /**
+   * 检查指定 channel 下是否有任何 session 在处理。
+   * queueKey 格式为 `${sessionKey}::${projectPath}`，其中 sessionKey
+   * 形如 `${channelName}-${channelId}-${ts}`，因此匹配 `${channelName}-` 前缀。
+   */
+  isChannelProcessing(channelName: string): boolean {
+    const prefix = `${channelName}-`;
+    for (const key of this.processing.keys()) {
+      if (key.startsWith(prefix) || key.startsWith(`${channelName}::`)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   cancel(messageId: string): boolean {
     for (const queue of this.queues.values()) {
       const idx = queue.findIndex(q => q.message.messageId === messageId);

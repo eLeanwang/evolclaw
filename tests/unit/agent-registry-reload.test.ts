@@ -60,6 +60,64 @@ describe('AgentRegistry.reload', () => {
     expect(hooks.startChannel).not.toHaveBeenCalled();
   });
 
+  it('detects kept channel with credential change and reconnects', async () => {
+    writeAgent('bot', {
+      name: 'bot',
+      enabled: true,
+      agents: { claude: {} },
+      channels: { feishu: [{ name: 'bot-fs', appId: 'a', appSecret: 'old-secret' }] },
+      projects: { defaultPath: '/tmp' },
+    });
+
+    const reg = new AgentRegistry(agentsDir);
+    reg.loadAll(globalConfig());
+
+    // Change appSecret only — kept channel name, but credentials rotated
+    writeAgent('bot', {
+      name: 'bot',
+      enabled: true,
+      agents: { claude: {} },
+      channels: { feishu: [{ name: 'bot-fs', appId: 'a', appSecret: 'NEW-secret' }] },
+      projects: { defaultPath: '/tmp' },
+    });
+
+    await reg.reload('bot', hooks);
+
+    // Channel should have been drained, disconnected, and re-started
+    expect(hooks.drainChannel).toHaveBeenCalledWith('bot-fs');
+    expect(hooks.disconnectChannel).toHaveBeenCalledWith('bot-fs');
+    expect(hooks.startChannel).toHaveBeenCalled();
+  });
+
+  it('keeps adapter when channel block unchanged (only model changed)', async () => {
+    writeAgent('bot', {
+      name: 'bot',
+      enabled: true,
+      agents: { claude: { model: 'sonnet' } },
+      channels: { feishu: [{ name: 'bot-fs', appId: 'a', appSecret: 's' }] },
+      projects: { defaultPath: '/tmp' },
+    });
+
+    const reg = new AgentRegistry(agentsDir);
+    reg.loadAll(globalConfig());
+
+    // Change only model — channel block byte-identical
+    writeAgent('bot', {
+      name: 'bot',
+      enabled: true,
+      agents: { claude: { model: 'opus' } },
+      channels: { feishu: [{ name: 'bot-fs', appId: 'a', appSecret: 's' }] },
+      projects: { defaultPath: '/tmp' },
+    });
+
+    await reg.reload('bot', hooks);
+
+    // No channel work — adapter transferred as-is
+    expect(hooks.drainChannel).not.toHaveBeenCalled();
+    expect(hooks.disconnectChannel).not.toHaveBeenCalled();
+    expect(hooks.startChannel).not.toHaveBeenCalled();
+  });
+
   it('drains and disconnects removed channels', async () => {
     writeAgent('bot', {
       name: 'bot',

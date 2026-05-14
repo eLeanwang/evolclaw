@@ -42,6 +42,65 @@ describe('buildReloadHooks (e2e)', () => {
     });
   });
 
+  describe('drainChannel real implementation (with messageQueue)', () => {
+    it('waits for messageQueue to clear', async () => {
+      let processingCount = 3;
+      const mockQueue = {
+        isChannelProcessing: vi.fn(() => processingCount > 0),
+      };
+
+      const hooks = buildReloadHooks({
+        channelLoader, channelInstances, registerChannelInstance,
+        messageQueue: mockQueue,
+        drainDelayMs: 0,
+      });
+
+      // Drain in background; decrement count over time
+      const drainPromise = hooks.drainChannel('test-fs');
+      setTimeout(() => { processingCount = 0; }, 200);
+
+      await drainPromise;
+      expect(mockQueue.isChannelProcessing).toHaveBeenCalled();
+      expect(mockQueue.isChannelProcessing).toHaveBeenCalledWith('test-fs');
+    });
+
+    it('respects drainTimeoutMs when channel never clears', async () => {
+      const mockQueue = {
+        isChannelProcessing: vi.fn(() => true), // always processing
+      };
+
+      const hooks = buildReloadHooks({
+        channelLoader, channelInstances, registerChannelInstance,
+        messageQueue: mockQueue,
+        drainTimeoutMs: 200,
+      });
+
+      const start = Date.now();
+      await hooks.drainChannel('stuck-fs');
+      const elapsed = Date.now() - start;
+      expect(elapsed).toBeGreaterThanOrEqual(180);
+      expect(elapsed).toBeLessThan(400);
+    });
+
+    it('returns immediately when channel is already empty', async () => {
+      const mockQueue = {
+        isChannelProcessing: vi.fn(() => false),
+      };
+
+      const hooks = buildReloadHooks({
+        channelLoader, channelInstances, registerChannelInstance,
+        messageQueue: mockQueue,
+        drainTimeoutMs: 5000,
+      });
+
+      const start = Date.now();
+      await hooks.drainChannel('idle-fs');
+      const elapsed = Date.now() - start;
+      expect(elapsed).toBeLessThan(50);
+      expect(mockQueue.isChannelProcessing).toHaveBeenCalledTimes(1);
+    });
+  });
+
   describe('disconnectChannel', () => {
     it('calls disconnect and removes from channelInstances', async () => {
       const inst = makeMockInstance('feishu-review');

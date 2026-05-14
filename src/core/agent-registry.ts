@@ -179,6 +179,22 @@ export class AgentRegistry {
     const toAdd = [...newChannels].filter(c => !oldChannels.has(c));
     const kept = [...oldChannels].filter(c => newChannels.has(c));
 
+    // I6: detect kept-channel credential changes — treat as remove+add so
+    // the channel reconnects with new credentials (e.g. appSecret rotated).
+    const credentialsChanged: string[] = [];
+    const trulyKept: string[] = [];
+    for (const ch of kept) {
+      const oldCh = getChannelInstanceConfig(oldAgent.config, ch);
+      const newCh = getChannelInstanceConfig(newAgent.config, ch);
+      if (oldCh && newCh && channelConfigChanged(oldCh.config, newCh.config)) {
+        credentialsChanged.push(ch);
+      } else {
+        trulyKept.push(ch);
+      }
+    }
+    toRemove.push(...credentialsChanged);
+    toAdd.push(...credentialsChanged);
+
     // Track what was removed/added so we can roll back on failure
     const removedSuccessfully: string[] = [];
     const addedSuccessfully: string[] = [];
@@ -201,8 +217,8 @@ export class AgentRegistry {
         addedSuccessfully.push(ch);
       }
 
-      // 7. Transfer kept channel adapters from old to new
-      for (const ch of kept) {
+      // 7. Transfer kept channel adapters from old to new (only truly unchanged ones)
+      for (const ch of trulyKept) {
         const adapter = oldAgent.channels.get(ch);
         if (adapter) newAgent.channels.set(ch, adapter);
       }
@@ -307,4 +323,30 @@ export class AgentRegistry {
       isDefault: agent.isDefault,
     };
   }
+}
+
+/**
+ * Locate the raw config of a channel instance by name within an agent config.
+ * Returns `{ type, config }` or null if not found.
+ */
+function getChannelInstanceConfig(agentConfig: any, channelName: string): { type: string; config: any } | null {
+  for (const [type, raw] of Object.entries(agentConfig?.channels || {})) {
+    if (type === 'defaultChannel') continue;
+    const instances = Array.isArray(raw) ? raw : [raw];
+    for (const inst of instances) {
+      if (!inst || typeof inst !== 'object') continue;
+      const name = (inst as any).name ?? type;
+      if (name === channelName) return { type, config: inst };
+    }
+  }
+  return null;
+}
+
+/**
+ * Compare two channel-instance configs by serialized JSON. Channel configs
+ * are plain JSON-shaped objects (no functions/Buffers), so this is a sound
+ * structural compare for "did anything in this channel block change".
+ */
+function channelConfigChanged(oldConfig: any, newConfig: any): boolean {
+  return JSON.stringify(oldConfig) !== JSON.stringify(newConfig);
 }

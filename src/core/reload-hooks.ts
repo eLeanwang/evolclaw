@@ -16,18 +16,41 @@ export interface ReloadHooksDeps {
   channelInstances: ChannelInstance[];
   /** Called for newly-created instances to wire them into the message pipeline. */
   registerChannelInstance: (inst: ChannelInstance) => void;
-  /** Drain delay in ms (default 500). Tests can override to 0. */
+  /**
+   * Optional: real drain via MessageQueue. If provided, drainChannel polls
+   * `isChannelProcessing(channelName)` until empty (or timeout). If absent,
+   * falls back to a fixed `drainDelayMs` sleep.
+   */
+  messageQueue?: { isChannelProcessing(channelName: string): boolean };
+  /** Drain delay in ms when messageQueue is absent (default 500). Tests can override to 0. */
   drainDelayMs?: number;
+  /** Max wait for real drain in ms (default 30000). */
+  drainTimeoutMs?: number;
 }
 
 export function buildReloadHooks(deps: ReloadHooksDeps): ReloadHooks {
-  const { channelLoader, channelInstances, registerChannelInstance } = deps;
+  const { channelLoader, channelInstances, registerChannelInstance, messageQueue } = deps;
   const drainDelayMs = deps.drainDelayMs ?? 500;
+  const drainTimeoutMs = deps.drainTimeoutMs ?? 30000;
 
   return {
     async drainChannel(channelName: string): Promise<void> {
       logger.info(`[Reload] Draining channel: ${channelName}`);
-      if (drainDelayMs > 0) await new Promise(r => setTimeout(r, drainDelayMs));
+      if (messageQueue) {
+        // Real drain: poll until empty or timeout
+        const pollMs = 100;
+        const start = Date.now();
+        while (messageQueue.isChannelProcessing(channelName)) {
+          if (Date.now() - start > drainTimeoutMs) {
+            logger.warn(`[Reload] Drain timeout (${drainTimeoutMs}ms) for channel: ${channelName}, proceeding anyway`);
+            return;
+          }
+          await new Promise(r => setTimeout(r, pollMs));
+        }
+        logger.info(`[Reload] Drain complete: ${channelName}`);
+      } else if (drainDelayMs > 0) {
+        await new Promise(r => setTimeout(r, drainDelayMs));
+      }
     },
 
     async disconnectChannel(channelName: string): Promise<void> {
