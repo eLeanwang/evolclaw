@@ -23,6 +23,7 @@ import { PermissionGateway } from './core/permission.js';
 import { InteractionRouter } from './core/interaction-router.js';
 import { ChannelLoader, type ChannelInstance } from './core/channel-loader.js';
 import { AgentLoader } from './core/agent-loader.js';
+import { AgentRegistry } from './core/agent-registry.js';
 import { IpcServer, IpcStatusResponse, ChannelStatus } from './ipc.js';
 import { ChannelAdapter, Message } from './types.js';
 import { logger, setLogLevel } from './utils/logger.js';
@@ -98,6 +99,28 @@ async function main() {
   if (anthropic.baseUrl) {
     logger.info(`✓ Using custom API base URL: ${anthropic.baseUrl}`);
   }
+
+  // EvolAgent Registry
+  const agentRegistry = new AgentRegistry(paths.agentsDir);
+  agentRegistry.loadAll(config);
+  const agentInfos = agentRegistry.list();
+  const evolagentCount = agentInfos.filter(i => !i.isDefault).length;
+  if (evolagentCount > 0) {
+    logger.info(`✓ Loaded ${evolagentCount} evolagent(s)`);
+    for (const info of agentInfos) {
+      if (info.isDefault) continue;
+      if (info.status === 'error') {
+        logger.error(`  ✗ [${info.name}] ${info.error}`);
+      } else if (info.status === 'disabled') {
+        logger.info(`  ○ [${info.name}] disabled`);
+      } else {
+        logger.info(`  ● [${info.name}] ${info.baseagent} @ ${path.basename(info.projectPath)}`);
+      }
+    }
+  }
+
+  // Store for IPC access (T10 will wire this)
+  (globalThis as any).__evolclaw_agentRegistry = agentRegistry;
 
   // 创建事件总线
   const eventBus = new EventBus();
@@ -177,8 +200,28 @@ async function main() {
   channelLoader.register(new QQBotChannelPlugin());
   channelLoader.register(new WecomChannelPlugin());
 
-  const channelInstances = await channelLoader.createAll(config);
-  logger.info(`✓ Created ${channelInstances.length} channel instance(s)`);
+  // Create channel instances: default (from evolclaw.json) + each evolagent
+  const defaultInstances = await channelLoader.createAll(config);
+
+  const evolagentInstances: ChannelInstance[] = [];
+  for (const agent of agentRegistry.runnableAgents()) {
+    const agentConfig = {
+      agents: agent.config.agents,
+      channels: agent.config.channels,
+      projects: agent.config.projects,
+    } as any;
+    try {
+      const instances = await channelLoader.createAll(agentConfig);
+      evolagentInstances.push(...instances);
+    } catch (e) {
+      logger.error(`[EvolAgent] Failed to create channels for ${agent.name}: ${e}`);
+      agent.status = 'error';
+      agent.error = `Channel creation failed: ${e}`;
+    }
+  }
+
+  const channelInstances = [...defaultInstances, ...evolagentInstances];
+  logger.info(`✓ Created ${channelInstances.length} channel instance(s)${evolagentInstances.length > 0 ? ` (${defaultInstances.length} default + ${evolagentInstances.length} agent)` : ''}`);
 
   // 启动迁移：将 sessions.channel 从 channelType 回填为实例名
   sessionManager.migrateChannelToInstanceName();
@@ -212,6 +255,14 @@ async function main() {
 
   // 回填 processor 和 messageQueue 的引用
   cmdHandler.setProcessor(processor);
+
+  // Inject AgentRegistry (methods added by T6/T7)
+  if ((processor as any).setAgentRegistry) {
+    (processor as any).setAgentRegistry(agentRegistry);
+  }
+  if ((cmdHandler as any).setAgentRegistry) {
+    (cmdHandler as any).setAgentRegistry(agentRegistry);
+  }
 
   // 设置交互路由器
   processor.setInteractionRouter(interactionRouter);
@@ -455,6 +506,15 @@ async function main() {
 
   // ── 连接所有渠道 ──
   const connected = await channelLoader.connectAll(channelInstances);
+
+  // Bind connected adapters to their owning agents
+  for (const inst of channelInstances) {
+    const agent = agentRegistry.resolveByChannel(inst.adapter.channelName);
+    if (agent && agent.status !== 'error') {
+      agent.channels.set(inst.adapter.channelName, inst.adapter);
+      if (agent.status === 'stopped') agent.status = 'running';
+    }
+  }
 
   // 预填充 Feishu 已知 thread_id（重启后避免误判话题创建）
   for (const inst of channelInstances) {
