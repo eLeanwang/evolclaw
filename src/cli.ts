@@ -1723,10 +1723,13 @@ async function cmdAgentNew(name: string): Promise<void> {
       }
 
       const nameRl = readline.createInterface({ input: process.stdin, output: process.stdout });
-      const instName = await new Promise<string>(r => nameRl.question(`  Channel instance name [${name}]: `, r));
+      const defaultEffName = `${name}-${channelType}`;
+      const instName = await new Promise<string>(r => nameRl.question(`  Channel instance name (leave empty for ${defaultEffName}): `, r));
       nameRl.close();
 
-      creds.name = instName.trim() || name;
+      const trimmedName = instName.trim();
+      if (trimmedName) creds.name = trimmedName;
+      // else: omit name; effective channel name will be ${agent.name}-${type} via EvolAgent.effectiveChannelName
       if (!channelsConfig[channelType]) channelsConfig[channelType] = [];
       channelsConfig[channelType].push(creds);
     }
