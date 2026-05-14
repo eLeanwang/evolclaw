@@ -169,4 +169,95 @@ describe('AgentRegistry.reload', () => {
 
     await expect(reg.reload('bot', hooks)).rejects.toThrow(/invalid/i);
   });
+
+  it('rolls back when startChannel fails', async () => {
+    // Setup: agent with channel A
+    writeAgent('bot', {
+      name: 'bot',
+      enabled: true,
+      agents: { claude: {} },
+      channels: { feishu: [{ name: 'a-fs', appId: 'a', appSecret: 's' }] },
+      projects: { defaultPath: '/tmp' },
+    });
+
+    const reg = new AgentRegistry(agentsDir);
+    reg.loadAll(globalConfig());
+
+    // Sanity: original agent has only feishu, status not error
+    const before = reg.get('bot')!;
+    expect(before.channelInstanceNames()).toEqual(['a-fs']);
+
+    // Modify config: add channel aun
+    writeAgent('bot', {
+      name: 'bot',
+      enabled: true,
+      agents: { claude: {} },
+      channels: {
+        feishu: [{ name: 'a-fs', appId: 'a', appSecret: 's' }],
+        aun: { aid: 'new.agentid.pub' },
+      },
+      projects: { defaultPath: '/tmp' },
+    });
+
+    const failingHooks: ReloadHooks = {
+      drainChannel: vi.fn().mockResolvedValue(undefined),
+      disconnectChannel: vi.fn().mockResolvedValue(undefined),
+      startChannel: vi.fn().mockRejectedValue(new Error('SDK timeout')),
+    };
+
+    await expect(reg.reload('bot', failingHooks)).rejects.toThrow(/SDK timeout/);
+
+    // Verify: registry kept oldAgent — still has only feishu, not aun
+    const after = reg.get('bot')!;
+    expect(after.channelInstanceNames()).toEqual(['a-fs']);
+    // oldAgent is marked error after rollback
+    expect(after.status).toBe('error');
+    expect(after.error).toMatch(/SDK timeout/);
+  });
+
+  it('rolls back removed channels by re-starting them when add fails', async () => {
+    // Setup: agent has channels A and B
+    writeAgent('bot', {
+      name: 'bot',
+      enabled: true,
+      agents: { claude: {} },
+      channels: {
+        feishu: [{ name: 'a-fs', appId: 'a', appSecret: 's' }],
+        aun: { aid: 'old.agentid.pub' },
+      },
+      projects: { defaultPath: '/tmp' },
+    });
+
+    const reg = new AgentRegistry(agentsDir);
+    reg.loadAll(globalConfig());
+
+    // Modify: drop aun, add wechat (so aun gets removed, wechat startup will fail)
+    writeAgent('bot', {
+      name: 'bot',
+      enabled: true,
+      agents: { claude: {} },
+      channels: {
+        feishu: [{ name: 'a-fs', appId: 'a', appSecret: 's' }],
+        wechat: { token: 'tok-new' },
+      },
+      projects: { defaultPath: '/tmp' },
+    });
+
+    const startCalls: string[] = [];
+    const failingHooks: ReloadHooks = {
+      drainChannel: vi.fn().mockResolvedValue(undefined),
+      disconnectChannel: vi.fn().mockResolvedValue(undefined),
+      startChannel: vi.fn().mockImplementation(async (_agent, ch: string) => {
+        startCalls.push(ch);
+        if (ch === 'wechat') throw new Error('wechat start failed');
+        // re-start of aun during rollback succeeds
+      }),
+    };
+
+    await expect(reg.reload('bot', failingHooks)).rejects.toThrow(/wechat start failed/);
+
+    // Rollback re-started 'aun' (the removed channel)
+    expect(startCalls).toContain('wechat');
+    expect(startCalls).toContain('aun');
+  });
 });

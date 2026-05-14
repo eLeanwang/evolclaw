@@ -1,9 +1,10 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { writeOwnerToChannelInstance, setOwner, loadConfig } from '../../src/config.js';
 import { _resetRoot } from '../../src/paths.js';
+import { logger } from '../../src/utils/logger.js';
 
 describe('setOwner routing', () => {
   let tmpDir: string;
@@ -147,6 +148,74 @@ describe('setOwner routing', () => {
 
         const cfg = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
         expect(cfg.channels.feishu[0].owner).toBe('user-789');
+      } finally {
+        if (origHome !== undefined) process.env.EVOLCLAW_HOME = origHome;
+        else delete process.env.EVOLCLAW_HOME;
+        _resetRoot();
+      }
+    });
+
+    it('warns when channel instance not found anywhere (I4)', () => {
+      // evolclaw.json has feishu 'default-fs' but we'll request a non-existent name
+      fs.writeFileSync(configPath, JSON.stringify({
+        agents: { defaultAgent: 'claude', claude: {} },
+        channels: { feishu: [{ name: 'default-fs', appId: 'd', appSecret: 's' }] },
+        projects: { defaultPath: tmpDir },
+      }));
+      // Snapshot of file before — should remain unchanged
+      const before = fs.readFileSync(configPath, 'utf-8');
+
+      const origHome = process.env.EVOLCLAW_HOME;
+      process.env.EVOLCLAW_HOME = tmpDir;
+      _resetRoot();
+      const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+      try {
+        const config = loadConfig(configPath);
+        // Use name that does NOT exist anywhere and is NOT a valid channelType
+        // (channelTypes includes feishu/wechat/aun/dingtalk/qqbot/wecom — pick a non-type)
+        expect(() => setOwner(config, 'no-such-channel', 'user-x', configPath)).not.toThrow();
+
+        // Warn was logged
+        const matched = warnSpy.mock.calls.some(call =>
+          String(call[0] ?? '').includes('not found in any agent.json or evolclaw.json')
+        );
+        expect(matched).toBe(true);
+
+        // File contents unchanged (no silent write)
+        const after = fs.readFileSync(configPath, 'utf-8');
+        expect(after).toBe(before);
+      } finally {
+        warnSpy.mockRestore();
+        if (origHome !== undefined) process.env.EVOLCLAW_HOME = origHome;
+        else delete process.env.EVOLCLAW_HOME;
+        _resetRoot();
+      }
+    });
+
+    it('writes agent.json with trailing newline (M1)', () => {
+      fs.writeFileSync(configPath, JSON.stringify({
+        agents: { defaultAgent: 'claude', claude: {} },
+        channels: { feishu: [{ name: 'default-fs', appId: 'd', appSecret: 's' }] },
+        projects: { defaultPath: tmpDir },
+      }));
+
+      const agentPath = path.join(agentsDir, 'review.json');
+      fs.writeFileSync(agentPath, JSON.stringify({
+        name: 'review',
+        agents: { claude: {} },
+        channels: { feishu: [{ name: 'review-fs', appId: 'r', appSecret: 's' }] },
+        projects: { defaultPath: tmpDir },
+      }));
+
+      const origHome = process.env.EVOLCLAW_HOME;
+      process.env.EVOLCLAW_HOME = tmpDir;
+      _resetRoot();
+      try {
+        const config = loadConfig(configPath);
+        setOwner(config, 'review-fs', 'user-nl', configPath);
+
+        const written = fs.readFileSync(agentPath, 'utf-8');
+        expect(written.endsWith('\n')).toBe(true);
       } finally {
         if (origHome !== undefined) process.env.EVOLCLAW_HOME = origHome;
         else delete process.env.EVOLCLAW_HOME;

@@ -376,15 +376,27 @@ export function setOwner(config: Config, instanceName: string, userId: string, c
       for (const file of fs.readdirSync(agentsDir)) {
         if (!file.endsWith('.json')) continue;
         const agentFile = path.join(agentsDir, file);
+        let raw: any;
         try {
-          const raw = JSON.parse(fs.readFileSync(agentFile, 'utf-8'));
-          if (writeOwnerToChannelInstance(raw, instanceName, userId)) {
-            fs.writeFileSync(agentFile, JSON.stringify(raw, null, 2), 'utf-8');
-            return;
+          raw = JSON.parse(fs.readFileSync(agentFile, 'utf-8'));
+        } catch {
+          // Parse error — skip silently (likely malformed user edit)
+          continue;
+        }
+        if (writeOwnerToChannelInstance(raw, instanceName, userId)) {
+          try {
+            // M1: trailing newline; M2: log fs errors instead of swallowing
+            fs.writeFileSync(agentFile, JSON.stringify(raw, null, 2) + '\n', 'utf-8');
+          } catch (e) {
+            logger.error(`[setOwner] Failed to write ${agentFile}: ${e}`);
+            throw e;
           }
-        } catch { /* skip malformed files */ }
+          return;
+        }
       }
-    } catch { /* agentsDir not readable */ }
+    } catch (e) {
+      logger.error(`[setOwner] Failed to scan ${agentsDir}: ${e}`);
+    }
   }
 
   // 2. Fallback: write to evolclaw.json
@@ -401,6 +413,9 @@ export function setOwner(config: Config, instanceName: string, userId: string, c
     saveConfig(config, configPath);
     return;
   }
+
+  // 4. I4: No match anywhere — warn (don't silently lose owner)
+  logger.warn(`[setOwner] Channel instance "${instanceName}" not found in any agent.json or evolclaw.json. Owner ${userId} not persisted.`);
 }
 
 type ShowActivitiesMode = 'all' | 'dm-only' | 'owner-dm-only' | 'none';

@@ -129,6 +129,8 @@ export class IpcServer {
         const agent = this.agentRegistry.get(name);
         if (!agent) return { ok: false, error: `Agent "${name}" not found` };
         const info = this.agentRegistry.list().find((i: any) => i.name === name);
+        // I7: null-guard list().find() result
+        if (!info) return { ok: false, error: `Agent "${name}" found but info missing (race?)` };
         return { ok: true, agent: info };
       }
       case 'evolagent.reload': {

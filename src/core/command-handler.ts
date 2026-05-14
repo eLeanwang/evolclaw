@@ -3244,6 +3244,14 @@ export class CommandHandler {
       if (arg.startsWith('reload ') || arg === 'reload') {
         const name = arg === 'reload' ? '' : arg.slice('reload '.length).trim();
         if (!name) return { ok: false, error: '用法: evolclaw ctl evolagent reload <name>' };
+        // I8: reload is a structural op, require admin or owner
+        if (!userId) {
+          return { ok: false, error: '权限不足：evolagent reload 仅 owner/admin 可用' };
+        }
+        const identity = this.sessionManager.resolveIdentity(session.channel, userId);
+        if (identity.role !== 'owner' && identity.role !== 'admin') {
+          return { ok: false, error: '权限不足：evolagent reload 仅 owner/admin 可用' };
+        }
         if (!this.agentRegistry) return { ok: false, error: 'AgentRegistry not available' };
         const a = this.agentRegistry.get ? this.agentRegistry.get(name) : null;
         if (!a) return { ok: false, error: `Agent "${name}" not found` };

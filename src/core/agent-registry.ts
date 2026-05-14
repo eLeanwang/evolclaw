@@ -179,38 +179,65 @@ export class AgentRegistry {
     const toAdd = [...newChannels].filter(c => !oldChannels.has(c));
     const kept = [...oldChannels].filter(c => newChannels.has(c));
 
-    // 4. Drain channels being removed
-    for (const ch of toRemove) {
-      await hooks.drainChannel(ch);
+    // Track what was removed/added so we can roll back on failure
+    const removedSuccessfully: string[] = [];
+    const addedSuccessfully: string[] = [];
+
+    try {
+      // 4. Drain channels being removed
+      for (const ch of toRemove) {
+        await hooks.drainChannel(ch);
+      }
+
+      // 5. Disconnect removed channels
+      for (const ch of toRemove) {
+        await hooks.disconnectChannel(ch);
+        removedSuccessfully.push(ch);
+      }
+
+      // 6. Start new channels
+      for (const ch of toAdd) {
+        await hooks.startChannel(newAgent, ch);
+        addedSuccessfully.push(ch);
+      }
+
+      // 7. Transfer kept channel adapters from old to new
+      for (const ch of kept) {
+        const adapter = oldAgent.channels.get(ch);
+        if (adapter) newAgent.channels.set(ch, adapter);
+      }
+
+      // 8. Preserve runtime state
+      // I5: only set 'running' when oldAgent was running; preserve error/disabled
+      newAgent.activeSessions = oldAgent.activeSessions;
+      newAgent.lastActivity = oldAgent.lastActivity;
+      if (oldAgent.status === 'error' || oldAgent.status === 'disabled') {
+        newAgent.status = oldAgent.status;
+        newAgent.error = oldAgent.error;
+      } else {
+        newAgent.status = 'running';
+      }
+
+      // 9. Swap in registry
+      this.agents.set(name, newAgent);
+
+      // 10. Rebuild channel index
+      this.channelIndex.clear();
+      this.buildChannelIndex();
+    } catch (err) {
+      // C1: Rollback — restore original channels, keep oldAgent in registry
+      logger.error(`[Reload] Failed: ${err}. Attempting rollback for "${name}".`);
+      for (const ch of addedSuccessfully) {
+        try { await hooks.disconnectChannel(ch); } catch (_) { /* best effort */ }
+      }
+      for (const ch of removedSuccessfully) {
+        try { await hooks.startChannel(oldAgent, ch); } catch (_) { /* best effort */ }
+      }
+      // Don't swap registry — oldAgent stays in place
+      oldAgent.status = 'error';
+      oldAgent.error = `Reload failed (rollback attempted): ${err instanceof Error ? err.message : String(err)}`;
+      throw err;
     }
-
-    // 5. Disconnect removed channels
-    for (const ch of toRemove) {
-      await hooks.disconnectChannel(ch);
-    }
-
-    // 6. Start new channels
-    for (const ch of toAdd) {
-      await hooks.startChannel(newAgent, ch);
-    }
-
-    // 7. Transfer kept channel adapters from old to new
-    for (const ch of kept) {
-      const adapter = oldAgent.channels.get(ch);
-      if (adapter) newAgent.channels.set(ch, adapter);
-    }
-
-    // 8. Preserve runtime state
-    newAgent.activeSessions = oldAgent.activeSessions;
-    newAgent.lastActivity = oldAgent.lastActivity;
-    newAgent.status = 'running';
-
-    // 9. Swap in registry
-    this.agents.set(name, newAgent);
-
-    // 10. Rebuild channel index
-    this.channelIndex.clear();
-    this.buildChannelIndex();
   }
 
   private checkConflictForReload(newAgent: EvolAgent, excludeName: string): string | null {

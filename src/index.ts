@@ -120,7 +120,7 @@ async function main() {
   }
 
   // Store for IPC access (T10 will wire this)
-  (globalThis as any).__evolclaw_agentRegistry = agentRegistry;
+  // M4: removed dead globalThis.__evolclaw_agentRegistry assignment
 
   // 创建事件总线
   const eventBus = new EventBus();
@@ -508,11 +508,14 @@ async function main() {
   const connected = await channelLoader.connectAll(channelInstances);
 
   // Bind connected adapters to their owning agents
+  // I1: only mark 'running' if a channel actually connected for that agent
+  const connectedSet = new Set(connected);
   for (const inst of channelInstances) {
     const agent = agentRegistry.resolveByChannel(inst.adapter.channelName);
-    if (agent && agent.status !== 'error') {
-      agent.channels.set(inst.adapter.channelName, inst.adapter);
-      if (agent.status === 'stopped') agent.status = 'running';
+    if (!agent || agent.status === 'error') continue;
+    agent.channels.set(inst.adapter.channelName, inst.adapter);
+    if (agent.status === 'stopped' && connectedSet.has(inst.adapter.channelName)) {
+      agent.status = 'running';
     }
   }
 
@@ -666,12 +669,9 @@ async function main() {
       },
     };
   }, async (cmd, sessionId) => cmdHandler.handleCtl(cmd, sessionId));
-  ipcServer.start();
 
-  // Wire AgentRegistry into IPC for evolagent.* handlers
-  if (typeof (ipcServer as any).setAgentRegistry === 'function') {
-    (ipcServer as any).setAgentRegistry(agentRegistry);
-  }
+  // M3: direct call (not cast) — wire AgentRegistry into IPC for evolagent.* handlers
+  ipcServer.setAgentRegistry(agentRegistry);
 
   // ── Reload hooks: enable agentRegistry.reload() to drain/disconnect/restart channels ──
   const reloadHooks: ReloadHooks = {
@@ -744,6 +744,9 @@ async function main() {
 
   // Make reload hooks accessible to IPC handler & ctl handler (both run in this process)
   (globalThis as any).__evolclaw_reloadHooks = reloadHooks;
+
+  // I3: start IPC server LAST, after all hook setup, to eliminate race window
+  ipcServer.start();
 
   // 运行时配置文件监控
   const configPath = resolvePaths().config;
