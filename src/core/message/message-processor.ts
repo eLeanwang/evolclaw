@@ -12,11 +12,11 @@ import { logger } from '../../utils/logger.js';
 import { getErrorMessage, classifyError, ErrorType, ERROR_PREFIX, isInfraError, prefixErrorType, isRetryableError } from '../../utils/error-utils.js';
 import { EventBus } from '../event-bus.js';
 import { summarizeToolInput } from '../permission.js';
-import type { Message, Config, Session, ChannelAdapter, ChannelOptions, ChannelPolicy, CommandHandler, ReplyContext, AgentContext, AgentRegistryHandle } from '../../types.js';
+import type { Message, Config, Session, ChannelAdapter, ChannelOptions, ChannelPolicy, CommandHandler, ReplyContext, AgentContext, EvolAgentRegistryHandle } from '../../types.js';
 import { DEFAULT_PERMISSION_MODE } from '../../types.js';
 import { getOwner } from '../../config.js';
 import { getPackageRoot, resolveRoot } from '../../paths.js';
-import { renderPromptSection } from '../../prompts/templates.js';
+import { renderPromptSection } from '../../agents/templates.js';
 import type { InteractionRouter } from '../interaction-router.js';
 
 /**
@@ -87,9 +87,9 @@ export class MessageProcessor {
     this.messageQueue = queue;
   }
 
-  private agentRegistry?: AgentRegistryHandle;
+  private agentRegistry?: EvolAgentRegistryHandle;
 
-  setAgentRegistry(registry: AgentRegistryHandle): void {
+  setAgentRegistry(registry: EvolAgentRegistryHandle): void {
     this.agentRegistry = registry;
   }
 
@@ -312,6 +312,8 @@ export class MessageProcessor {
     const messageId = `${message.channel}_${message.channelId}_${message.timestamp || Date.now()}`;
     const channelKey = session.metadata?.channelName || message.channel;
     const channelInfo = this.resolveChannelInfo(channelKey);
+    // Per-method agent name for stats bucketing (agent.name or '[default]')
+    const agentNameForStats = this.agentRegistry?.resolveByChannel(channelKey)?.name ?? '[default]';
 
     if (!channelInfo) {
       logger.error(`[MessageProcessor] Unknown channel: ${channelKey}`);
@@ -363,6 +365,7 @@ export class MessageProcessor {
         channel: message.channel,
         channelId: message.channelId,
         content: message.content,
+        agentName: agentNameForStats,
         timestamp: Date.now()
       });
 
@@ -793,6 +796,7 @@ export class MessageProcessor {
           sessionId: session.id,
           error: errorSummary,
           errorType,
+          agentName: agentNameForStats,
           terminalReason: streamResult.terminalReason
         });
 
@@ -827,6 +831,7 @@ export class MessageProcessor {
           terminalReason: streamResult.terminalReason,
           finalText: streamResult.lastReplyText || undefined,
           durationMs: Date.now() - startTime,
+          agentName: agentNameForStats,
           timestamp: Date.now()
         });
 
@@ -891,7 +896,8 @@ export class MessageProcessor {
         type: 'message:error',
         sessionId: session.id,
         error: errorMsg,
-        errorType
+        errorType,
+        agentName: agentNameForStats,
       });
 
       // 记录处理失败
@@ -994,6 +1000,8 @@ export class MessageProcessor {
     shouldSuppress: () => boolean,
     thoughtEmitter?: ThoughtEmitter | null
   ): Promise<{ isError: boolean; subtype?: string; errors?: string[]; terminalReason?: string; lastReplyText: string; fullText: string; hasReceivedText: boolean }> {
+    // Per-session agent name for stats bucketing
+    const agentNameForStats = this.agentRegistry?.resolveByChannel(session.metadata?.channelName || session.channel)?.name ?? '[default]';
     let hasReceivedText = false;
     let hasErrorResult = false;  // 是否已有 tool_result/error 事件输出过错误
     let completeResult: { isError: boolean; subtype?: string; errors?: string[]; terminalReason?: string; lastReplyText: string; fullText: string; hasReceivedText: boolean } = { isError: false, lastReplyText: '', fullText: '', hasReceivedText: false };
@@ -1221,6 +1229,7 @@ export class MessageProcessor {
           channelId: session.channelId,
           finalText: lastReplyText || event.result || undefined,
           durationMs: event.durationMs,
+          agentName: agentNameForStats,
           timestamp: Date.now()
         });
       } else if (event.isError === true) {
@@ -1238,7 +1247,8 @@ export class MessageProcessor {
           type: 'message:error',
           sessionId: session.id,
           error: event.errors?.join('; ') || '\u672a\u77e5\u9519\u8bef',
-          errorType: bgErrorType
+          errorType: bgErrorType,
+          agentName: agentNameForStats,
         });
       }
     }

@@ -1,4 +1,4 @@
-import { Config, ChannelAdapter, Session, ChannelPolicy, InteractionRequest, ReplyContext, ActionInteraction, DEFAULT_PERMISSION_MODE, type AgentRegistryHandle, type EvolAgentHandle } from '../types.js';
+import { Config, ChannelAdapter, Session, ChannelPolicy, InteractionRequest, ReplyContext, ActionInteraction, DEFAULT_PERMISSION_MODE, type EvolAgentRegistryHandle, type EvolAgentHandle } from '../types.js';
 import { SessionManager } from './session/session-manager.js';
 import { type AgentRunnerFull, hasModelSwitcher, hasPermissionController } from '../agents/claude-runner.js';
 import { MessageCache } from './message/message-cache.js';
@@ -167,7 +167,7 @@ export class CommandHandler {
   private statsCollector?: StatsCollector;
   private agentMap: Map<string, AgentRunnerFull>;
   private defaultAgentId: string;
-  private agentRegistry?: AgentRegistryHandle;
+  private agentRegistry?: EvolAgentRegistryHandle;
 
   /** 按 agentId 获取 agent，回退到默认 */
   private getAgent(agentId?: string): AgentRunnerFull {
@@ -192,8 +192,8 @@ export class CommandHandler {
     }
   }
 
-  /** 注入 AgentRegistry，用于判断通道是否被 EvolAgent 管理 */
-  setAgentRegistry(registry: AgentRegistryHandle): void {
+  /** 注入 EvolAgentRegistry，用于判断通道是否被 EvolAgent 管理 */
+  setAgentRegistry(registry: EvolAgentRegistryHandle): void {
     this.agentRegistry = registry;
   }
 
@@ -1982,21 +1982,24 @@ export class CommandHandler {
         }
       }
 
-      // 队列状态
-      lines.push('', '📬 队列状态：');
-      lines.push(`  待处理消息: ${this.messageQueue.getGlobalQueueLength()}`);
-      lines.push(`  处理中队列: ${this.messageQueue.getGlobalProcessingCount()}`);
+      // 当前 agent 名（用于 agent 维度 stats / queue 查询）
+      const currentAgentName = checkOwningAgent?.name ?? '[default]';
 
-      // 运行概况
+      // 队列状态（按当前 agent 维度）
+      lines.push('', '📬 队列状态：');
+      lines.push(`  待处理消息: ${this.messageQueue.getQueueLengthByAgent(currentAgentName)}`);
+      lines.push(`  处理中队列: ${this.messageQueue.getProcessingCountByAgent(currentAgentName)}`);
+
+      // 运行概况（全局，进程级）
       lines.push('', '🖥️ 运行概况：');
       const uptimeMs = this.statsCollector
         ? this.statsCollector.getSnapshot().uptimeMs
         : process.uptime() * 1000;
       lines.push(`  运行时间: ${this.formatUptime(uptimeMs)}`);
 
-      // 近 1 小时统计
+      // 近 1 小时统计（按当前 agent 维度）
       if (this.statsCollector) {
-        const snap = this.statsCollector.getSnapshot();
+        const snap = this.statsCollector.getSnapshot(currentAgentName);
         const h = snap.lastHour;
         lines.push('', '📊 近 1 小时统计：');
         lines.push(`  收到消息: ${h.received}`);
@@ -3286,12 +3289,12 @@ export class CommandHandler {
         if (identity.role !== 'owner' && identity.role !== 'admin') {
           return { ok: false, error: '权限不足：evolagent reload 仅 owner/admin 可用' };
         }
-        if (!this.agentRegistry) return { ok: false, error: 'AgentRegistry not available' };
+        if (!this.agentRegistry) return { ok: false, error: 'EvolAgentRegistry not available' };
         const a = this.agentRegistry.get(name);
         if (!a) return { ok: false, error: `Agent "${name}" not found` };
         const hooks = (globalThis as any).__evolclaw_reloadHooks;
         if (!hooks) return { ok: false, error: 'Reload hooks not initialized' };
-        if (!this.agentRegistry.reload) return { ok: false, error: 'AgentRegistry.reload not available' };
+        if (!this.agentRegistry.reload) return { ok: false, error: 'EvolAgentRegistry.reload not available' };
         try {
           await this.agentRegistry.reload(name, hooks);
           return { ok: true, result: `Agent "${name}" reloaded` };

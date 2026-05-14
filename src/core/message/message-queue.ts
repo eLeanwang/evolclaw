@@ -8,13 +8,17 @@ type MessageHandler = (message: Message) => Promise<void>;
 interface QueuedMessage {
   message: Message;
   projectPath: string;
+  agentName: string;
   resolve: () => void;
   reject: (error: Error) => void;
 }
 
+const DEFAULT_AGENT_NAME = '[default]';
+
 export class MessageQueue {
   private queues = new Map<string, QueuedMessage[]>();
   private processing = new Set<string>();
+  private processingAgent = new Map<string, string>();  // queueKey → agentName（处理中项目的 agent）
   private externalLocks = new Map<string, Promise<void>>();
   private handler: MessageHandler;
   private currentSessionKey?: string;
@@ -83,7 +87,7 @@ export class MessageQueue {
     return `${sessionKey}::${normalized}`;
   }
 
-  async enqueue(sessionKey: string, message: Message, projectPath: string, options?: { interruptible?: boolean }): Promise<void> {
+  async enqueue(sessionKey: string, message: Message, projectPath: string, options?: { interruptible?: boolean; agentName?: string }): Promise<void> {
     // 消息去重检查
     if (!this.shouldProcess(message)) {
       return Promise.resolve();
@@ -99,14 +103,15 @@ export class MessageQueue {
     }
 
     const queueKey = this.getQueueKey(sessionKey, projectPath);
-    logger.debug(`[Queue] Enqueuing message for ${queueKey}`);
+    const agentName = options?.agentName || DEFAULT_AGENT_NAME;
+    logger.debug(`[Queue] Enqueuing message for ${queueKey} (agent=${agentName})`);
 
     return new Promise((resolve, reject) => {
       if (!this.queues.has(queueKey)) {
         this.queues.set(queueKey, []);
       }
 
-      this.queues.get(queueKey)!.push({ message, projectPath, resolve, reject });
+      this.queues.get(queueKey)!.push({ message, projectPath, agentName, resolve, reject });
 
       // 根据 interruptible 选项决定是否触发中断
       if (this.processing.has(queueKey)) {
@@ -144,6 +149,7 @@ export class MessageQueue {
       if (!queue || queue.length === 0) {
         logger.debug(`[Queue] Queue ${queueKey} is empty, stopping`);
         this.processing.delete(queueKey);
+        this.processingAgent.delete(queueKey);
         this.currentSessionKey = undefined;
         this.currentProjectPath = undefined;
         this.activeMessageIds.clear();
@@ -157,6 +163,7 @@ export class MessageQueue {
       this.currentSessionKey = queueKey;
       this.currentProjectPath = merged.projectPath;
       this.currentAgentId = merged.message.agentId;
+      this.processingAgent.set(queueKey, merged.agentName);
 
       // 记录正在执行的 messageId（用于撤回中断）
       this.activeMessageIds.clear();
@@ -238,6 +245,7 @@ export class MessageQueue {
     return {
       message: merged,
       projectPath: last.projectPath,
+      agentName: last.agentName,
       resolve: () => {},  // 由调用方管理
       reject: () => {},
     };
@@ -348,5 +356,30 @@ export class MessageQueue {
    */
   getGlobalProcessingCount(): number {
     return this.processing.size;
+  }
+
+  /**
+   * 获取指定 agent 的待处理消息数量。
+   * agent 维度按 enqueue 时传入的 agentName 计数。
+   */
+  getQueueLengthByAgent(agentName: string): number {
+    let total = 0;
+    for (const queue of this.queues.values()) {
+      for (const item of queue) {
+        if ((item.agentName || DEFAULT_AGENT_NAME) === agentName) total++;
+      }
+    }
+    return total;
+  }
+
+  /**
+   * 获取指定 agent 的处理中队列数量。
+   */
+  getProcessingCountByAgent(agentName: string): number {
+    let total = 0;
+    for (const a of this.processingAgent.values()) {
+      if ((a || DEFAULT_AGENT_NAME) === agentName) total++;
+    }
+    return total;
   }
 }

@@ -5,7 +5,7 @@ import type { MessageProcessor } from './message-processor.js';
 import type { MessageQueue } from './message-queue.js';
 import type { CommandHandler as CmdHandler } from '../command-handler.js';
 import type { EventBus } from '../event-bus.js';
-import type { Config, Message, InboundMessage, ChannelAdapter, ReplyContext, AgentRegistryHandle } from '../../types.js';
+import type { Config, Message, InboundMessage, ChannelAdapter, ReplyContext, EvolAgentRegistryHandle } from '../../types.js';
 
 /**
  * MessageBridge — Channel 与 Core 之间的消息桥梁
@@ -17,7 +17,7 @@ import type { Config, Message, InboundMessage, ChannelAdapter, ReplyContext, Age
 export class MessageBridge {
   private debouncers = new Map<string, StreamDebouncer>();
   private defaultDebounce: number;
-  private agentRegistry?: AgentRegistryHandle;
+  private agentRegistry?: EvolAgentRegistryHandle;
 
   constructor(
     private config: Config,
@@ -30,8 +30,8 @@ export class MessageBridge {
     this.defaultDebounce = config.debounce ?? 2;
   }
 
-  /** Inject AgentRegistry so owner lookups/writes route to agent.json for agent-owned channels. */
-  setAgentRegistry(registry: AgentRegistryHandle): void {
+  /** Inject EvolAgentRegistry so owner lookups/writes route to agent.json for agent-owned channels. */
+  setAgentRegistry(registry: EvolAgentRegistryHandle): void {
     this.agentRegistry = registry;
   }
 
@@ -144,9 +144,11 @@ export class MessageBridge {
         if (fullMessage.messageId) adapter?.acknowledge?.(fullMessage.messageId).catch(() => {});
 
         const isInterrupt = chatType !== 'group';
+        const enqueueAgentName = (owningAgent && !owningAgent.isDefault) ? owningAgent.name : '[default]';
         const doEnqueue = async (m: Message) => {
           return this.messageQueue.enqueue(session.id, m, session.projectPath, {
             interruptible: isInterrupt,
+            agentName: enqueueAgentName,
           });
         };
 
