@@ -44,12 +44,18 @@ type CommandExecutor = (cmd: string, sessionId: string) => Promise<IpcCtlRespons
 
 export class IpcServer {
   private server: net.Server | null = null;
+  private agentRegistry?: any;
 
   constructor(
     private socketPath: string,
     private getStatus: StatusProvider,
     private commandExecutor?: CommandExecutor,
   ) {}
+
+  /** Inject AgentRegistry for evolagent.* IPC handlers */
+  setAgentRegistry(registry: any): void {
+    this.agentRegistry = registry;
+  }
 
   start(): void {
     // Remove stale socket file (Unix only — named pipes auto-cleanup on process exit)
@@ -100,7 +106,7 @@ export class IpcServer {
     }
   }
 
-  private async handleCommand(cmd: { type: string }): Promise<unknown> {
+  private async handleCommand(cmd: { type: string; [key: string]: any }): Promise<unknown> {
     switch (cmd.type) {
       case 'status':
         return this.getStatus();
@@ -111,6 +117,32 @@ export class IpcServer {
         const { cmd: slashCmd, sessionId } = cmd as unknown as IpcCtlRequest;
         if (!slashCmd || !sessionId) return { ok: false, error: 'missing cmd or sessionId' };
         return await this.commandExecutor(slashCmd, sessionId);
+      }
+      case 'evolagent.list': {
+        if (!this.agentRegistry) return { ok: false, error: 'AgentRegistry not available' };
+        return { ok: true, agents: this.agentRegistry.list() };
+      }
+      case 'evolagent.show': {
+        if (!this.agentRegistry) return { ok: false, error: 'AgentRegistry not available' };
+        const name = cmd.name;
+        if (!name || typeof name !== 'string') return { ok: false, error: 'missing name' };
+        const agent = this.agentRegistry.get(name);
+        if (!agent) return { ok: false, error: `Agent "${name}" not found` };
+        const info = this.agentRegistry.list().find((i: any) => i.name === name);
+        return { ok: true, agent: info };
+      }
+      case 'evolagent.reload': {
+        if (!this.agentRegistry) return { ok: false, error: 'AgentRegistry not available' };
+        const name = cmd.name;
+        if (!name || typeof name !== 'string') return { ok: false, error: 'missing name' };
+        try {
+          const a = this.agentRegistry.get(name);
+          if (!a) return { ok: false, error: `Agent "${name}" not found` };
+          // Stub for now — T11 will implement the actual reload logic
+          return { ok: true, result: `Agent "${name}" reload requested (pending T11 implementation)` };
+        } catch (e: any) {
+          return { ok: false, error: e?.message || String(e) };
+        }
       }
       default:
         return { error: `unknown command: ${cmd.type}` };

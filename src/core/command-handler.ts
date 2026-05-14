@@ -167,7 +167,11 @@ export class CommandHandler {
   private statsCollector?: StatsCollector;
   private agentMap: Map<string, AgentRunnerFull>;
   private defaultAgentId: string;
-  private agentRegistry?: { resolveByChannel(channel: string): { name: string; projectPath: string; baseagent: string; isDefault?: boolean } | undefined };
+  private agentRegistry?: {
+    resolveByChannel(channel: string): { name: string; projectPath: string; baseagent: string; isDefault?: boolean } | undefined;
+    get?(name: string): any;
+    list?(): any[];
+  };
 
   /** 按 agentId 获取 agent，回退到默认 */
   private getAgent(agentId?: string): AgentRunnerFull {
@@ -193,7 +197,11 @@ export class CommandHandler {
   }
 
   /** 注入 AgentRegistry，用于判断通道是否被 EvolAgent 管理 */
-  setAgentRegistry(registry: { resolveByChannel(channel: string): { name: string; projectPath: string; baseagent: string; isDefault?: boolean } | undefined }): void {
+  setAgentRegistry(registry: {
+    resolveByChannel(channel: string): { name: string; projectPath: string; baseagent: string; isDefault?: boolean } | undefined;
+    get?(name: string): any;
+    list?(): any[];
+  }): void {
     this.agentRegistry = registry;
   }
 
@@ -3164,7 +3172,7 @@ export class CommandHandler {
     '/help', '/status', '/check', '/pwd',
     '/model', '/effort', '/perm', '/agent',
     '/compact', '/activity', '/file', '/send', '/chatmode', '/restart', '/agentmd', '/bind', '/aid',
-    '/rename', '/name',
+    '/rename', '/name', '/evolagent',
   ];
 
   /** ctl 中仅允许查询形态的指令；写形态（带参）一律拒绝 */
@@ -3220,6 +3228,28 @@ export class CommandHandler {
 
     // 3. 从 session.metadata.peerId 获取 userId（用于权限判断）
     const userId = session.metadata?.peerId;
+
+    // 3.1 /evolagent: EvolAgent 管理（show identity / reload）
+    if (cmd === '/evolagent' || cmd.startsWith('/evolagent ')) {
+      const arg = cmd.slice('/evolagent'.length).trim();
+      if (!arg) {
+        const owning = this.getOwningAgent(session.channel);
+        if (owning) {
+          return { ok: true, result: `当前 EvolAgent: ${owning.name} (${owning.baseagent})` };
+        }
+        return { ok: true, result: '当前为 DefaultAgent 模式' };
+      }
+      if (arg.startsWith('reload ') || arg === 'reload') {
+        const name = arg === 'reload' ? '' : arg.slice('reload '.length).trim();
+        if (!name) return { ok: false, error: '用法: evolclaw ctl evolagent reload <name>' };
+        if (!this.agentRegistry) return { ok: false, error: 'AgentRegistry not available' };
+        const a = this.agentRegistry.get ? this.agentRegistry.get(name) : null;
+        if (!a) return { ok: false, error: `Agent "${name}" not found` };
+        // T11 will implement actual reload
+        return { ok: true, result: `Agent "${name}" reload triggered` };
+      }
+      return { ok: false, error: '用法: evolclaw ctl evolagent [reload <name>]' };
+    }
 
     // 4. /send 文本消息：直接通过 adapter 主动发送，不走 handle()
     if (cmd.startsWith('/send ') || cmd === '/send') {
