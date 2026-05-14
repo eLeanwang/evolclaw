@@ -1643,13 +1643,11 @@ async function cmdAgentNew(suggestedName: string): Promise<void> {
 
   let name: string;
   try {
-    // Derive a clean default: strip dots (AID-like) → first label
-    const defaultName = suggestedName ? suggestedName.split('.')[0] : '';
-    const prompt = defaultName
-      ? `Agent name [${defaultName}]: `
+    const prompt = suggestedName
+      ? `Agent name [${suggestedName}]: `
       : 'Agent name: ';
     const input = (await ask(prompt)).trim();
-    name = input || defaultName;
+    name = input || suggestedName;
     if (!name) {
       console.error('Agent name is required.');
       process.exit(1);
