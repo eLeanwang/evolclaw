@@ -5,7 +5,7 @@ export interface ValidationResult {
   errors: string[];
 }
 
-const VALID_BASEAGENTS = new Set(['claude', 'codex', 'gemini']);
+const VALID_BASEAGENTS = new Set(['claude', 'codex', 'gemini', 'hermes']);
 const VALID_CHANNEL_TYPES = new Set(['feishu', 'aun', 'wechat', 'wecom', 'dingtalk', 'qqbot']);
 const VALID_CHATMODES = new Set(['interactive', 'proactive']);
 
@@ -33,7 +33,7 @@ export function validateEvolAgentConfig(raw: any): ValidationResult {
       errors.push(`agents contains unknown baseagent keys: ${unknownKeys.join(', ')}`);
     }
     if (keys.length === 0) {
-      errors.push('agents must contain exactly one of: claude | codex | gemini');
+      errors.push('agents must contain exactly one of: claude | codex | gemini | hermes');
     } else if (keys.length > 1) {
       errors.push(`agents must contain exactly one baseagent (single baseagent only), got: ${keys.join(', ')}`);
     }

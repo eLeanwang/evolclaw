@@ -59,4 +59,36 @@ describe('CLI agent list (cold mode)', () => {
     const off = reg.list().find(i => i.name === 'off');
     expect(off?.status).toBe('disabled');
   });
+
+  it('lastActivity is undefined in cold mode', () => {
+    writeAgent('cold', {
+      name: 'cold',
+      agents: { claude: {} },
+      channels: { feishu: [{ name: 'cold-fs', appId: 'x', appSecret: 'y' }] },
+      projects: { defaultPath: '/tmp' },
+    });
+
+    const reg = new AgentRegistry(agentsDir);
+    reg.loadAll({ agents: { defaultAgent: 'claude', claude: {} }, channels: {}, projects: { defaultPath: '/tmp' } } as any);
+
+    const cold = reg.list().find(i => i.name === 'cold');
+    expect(cold).toBeDefined();
+    expect(cold!.lastActivity).toBeUndefined();
+  });
+
+  it('shows hermes agent as valid', () => {
+    writeAgent('h', {
+      name: 'h',
+      agents: { hermes: {} },
+      channels: { feishu: { appId: 'x', appSecret: 'y' } },
+      projects: { defaultPath: '/tmp' },
+    });
+
+    const reg = new AgentRegistry(agentsDir);
+    reg.loadAll({ agents: { defaultAgent: 'claude', claude: {} }, channels: {}, projects: { defaultPath: '/tmp' } } as any);
+
+    const h = reg.list().find(i => i.name === 'h');
+    expect(h?.status).toBe('stopped'); // not error
+    expect(h?.baseagent).toBe('hermes');
+  });
 });

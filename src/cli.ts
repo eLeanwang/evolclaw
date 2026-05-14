@@ -1517,19 +1517,21 @@ async function cmdAgentList(): Promise<void> {
   }
 
   // Table output
-  console.log('NAME'.padEnd(14) + 'STATUS'.padEnd(10) + 'CHANNELS'.padEnd(24) + 'PROJECT'.padEnd(22) + 'BASEAGENT');
+  console.log('NAME'.padEnd(14) + 'STATUS'.padEnd(10) + 'CHANNELS'.padEnd(24) + 'PROJECT'.padEnd(22) + 'BASEAGENT'.padEnd(11) + 'LAST ACTIVE');
   for (const info of list) {
     const name = info.isDefault ? '[default]' : info.name;
     const status = info.status;
     const channels = info.channels.length > 0 ? info.channels.join(', ').slice(0, 22) : '—';
     const project = info.projectPath ? path.basename(info.projectPath) : '—';
     const baseagent = info.baseagent || '—';
+    const lastActive = info.lastActivity ? formatTimeAgo(Date.now() - info.lastActivity) : '—';
     console.log(
       name.padEnd(14) +
       status.padEnd(10) +
       channels.padEnd(24) +
       project.padEnd(22) +
-      baseagent
+      baseagent.padEnd(11) +
+      lastActive
     );
   }
 }
@@ -1604,33 +1606,52 @@ async function cmdAgentNew(name: string): Promise<void> {
     const chatmodeChoices = ['interactive', 'proactive'];
     const chatmodePrivate = (await ask(`ChatMode private (${chatmodeChoices.join('/')}) [interactive]: `)).trim() || 'interactive';
 
-    // Channels
+    // Channels (loop to allow multiple)
     const channelsConfig: Record<string, any[]> = {};
     const { getChannelCredentialCollector } = await import('./utils/init-channel.js');
 
-    const addChannel = (await ask('\nAdd channel? (y/n) [n]: ')).trim().toLowerCase();
-    if (addChannel === 'y') {
-      const channelType = (await ask('Channel type (feishu/aun/wechat/wecom/dingtalk/qqbot): ')).trim();
+    // Close outer rl before channel loop (collectors create their own readline)
+    rl.close();
+
+    while (true) {
+      const loopRl = readline.createInterface({ input: process.stdin, output: process.stdout });
+      const loopAsk = (q: string): Promise<string> => new Promise(r => loopRl.question(q, r));
+
+      const addChannel = (await loopAsk('\nAdd channel? (y/n) [n]: ')).trim().toLowerCase();
+      if (addChannel !== 'y') {
+        loopRl.close();
+        break;
+      }
+
+      const channelType = (await loopAsk('Channel type (feishu/aun/wechat/wecom/dingtalk/qqbot): ')).trim();
       const collector = getChannelCredentialCollector(channelType);
       if (!collector) {
         console.error(`Unknown channel type: ${channelType}`);
-      } else {
-        // Close our rl before collector opens its own
-        rl.close();
-
-        const creds = await collector();
-        if (creds) {
-          // Reopen rl for instance name
-          const rl2 = readline.createInterface({ input: process.stdin, output: process.stdout });
-          const instName = await new Promise<string>(r => rl2.question(`  Channel instance name [${name}]: `, r));
-          rl2.close();
-
-          creds.name = instName.trim() || name;
-          channelsConfig[channelType] = [creds];
-        } else {
-          console.log('  Channel setup cancelled.');
-        }
+        loopRl.close();
+        continue;
       }
+
+      // Close loop rl before collector opens its own
+      loopRl.close();
+
+      let creds: any = null;
+      try {
+        creds = await collector();
+      } catch (e: any) {
+        console.error(`  Channel setup failed: ${e?.message || e}`);
+      }
+      if (!creds) {
+        console.log('  Channel setup cancelled.');
+        continue;
+      }
+
+      const nameRl = readline.createInterface({ input: process.stdin, output: process.stdout });
+      const instName = await new Promise<string>(r => nameRl.question(`  Channel instance name [${name}]: `, r));
+      nameRl.close();
+
+      creds.name = instName.trim() || name;
+      if (!channelsConfig[channelType]) channelsConfig[channelType] = [];
+      channelsConfig[channelType].push(creds);
     }
 
     // Simplify channels: if only one instance per type, unwrap from array

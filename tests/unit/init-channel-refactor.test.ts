@@ -1,40 +1,25 @@
 import { describe, it, expect } from 'vitest';
-import { getChannelCredentialCollector } from '../../src/utils/init-channel.js';
+import { getChannelCredentialCollector, type ChannelCredentialCollector } from '../../src/utils/init-channel.js';
 
 describe('getChannelCredentialCollector', () => {
-  it('returns collector function for feishu', () => {
-    const collector = getChannelCredentialCollector('feishu');
-    expect(collector).toBeDefined();
-    expect(typeof collector).toBe('function');
+  const knownTypes = ['feishu', 'aun', 'wechat', 'wecom', 'dingtalk', 'qqbot'];
+
+  for (const type of knownTypes) {
+    it(`returns a function for known channel type: ${type}`, () => {
+      const collector = getChannelCredentialCollector(type);
+      expect(collector).toBeTypeOf('function');
+    });
+  }
+
+  it('returns null for unknown channel type', () => {
+    expect(getChannelCredentialCollector('unknown')).toBeNull();
+    expect(getChannelCredentialCollector('')).toBeNull();
   });
 
-  it('returns collector function for aun', () => {
-    const collector = getChannelCredentialCollector('aun');
-    expect(collector).toBeDefined();
-  });
-
-  it('returns collector function for wechat', () => {
-    const collector = getChannelCredentialCollector('wechat');
-    expect(collector).toBeDefined();
-  });
-
-  it('returns collector function for dingtalk', () => {
-    const collector = getChannelCredentialCollector('dingtalk');
-    expect(collector).toBeDefined();
-  });
-
-  it('returns collector function for qqbot', () => {
-    const collector = getChannelCredentialCollector('qqbot');
-    expect(collector).toBeDefined();
-  });
-
-  it('returns collector function for wecom', () => {
-    const collector = getChannelCredentialCollector('wecom');
-    expect(collector).toBeDefined();
-  });
-
-  it('returns null for unknown type', () => {
-    const collector = getChannelCredentialCollector('unknown');
-    expect(collector).toBeNull();
+  it('all collectors share the same arity (no args, returns Promise)', () => {
+    for (const type of knownTypes) {
+      const collector = getChannelCredentialCollector(type)!;
+      expect(collector.length).toBe(0); // no required args
+    }
   });
 });

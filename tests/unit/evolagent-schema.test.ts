@@ -78,4 +78,14 @@ describe('validateEvolAgentConfig', () => {
     });
     expect(result.valid).toBe(false);
   });
+
+  it('accepts hermes baseagent', () => {
+    const result = validateEvolAgentConfig({
+      name: 'h',
+      agents: { hermes: { model: 'mixtral' } },
+      channels: { feishu: { appId: 'x', appSecret: 'y' } },
+      projects: { defaultPath: '/x' },
+    });
+    expect(result.valid).toBe(true);
+  });
 });
