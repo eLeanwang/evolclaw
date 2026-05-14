@@ -1,0 +1,23 @@
+{
+  "name": "evolagent",
+  "enabled": true,
+  "agents": {
+    "claude": {
+      "effort": "high"
+    }
+  },
+  "channels": {
+    "aun": {
+      "aid": "evolagent.agentid.pub",
+      "owner": "elean.agentid.pub",
+      "enabled": true
+    }
+  },
+  "projects": {
+    "defaultPath": "/home/evolclaw/projects/evolagent"
+  },
+  "chatmode": {
+    "private": "interactive",
+    "group": "proactive"
+  }
+}

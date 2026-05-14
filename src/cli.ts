@@ -71,11 +71,10 @@ function countLines(pkgRoot: string, logDir: string) {
   const srcDir = path.join(pkgRoot, 'src');
   const statsFile = path.join(logDir, 'line-stats.log');
 
-  const countDir = (dir: string, exclude?: string): number => {
+  const countDir = (dir: string): number => {
     if (!fs.existsSync(dir)) return 0;
     let total = 0;
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-      if (exclude && entry.name === exclude) continue;
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) {
         total += countDir(full);
@@ -95,12 +94,14 @@ function countLines(pkgRoot: string, logDir: string) {
 
   const core = countDir(path.join(srcDir, 'core'));
   const agents = countDir(path.join(srcDir, 'agents'));
-  const channels = countDir(path.join(srcDir, 'channels'), 'experimental');
+  const channels = countDir(path.join(srcDir, 'channels'));
   const utils = countDir(path.join(srcDir, 'utils'));
   const entry = countFile(path.join(srcDir, 'index.ts'))
     + countFile(path.join(srcDir, 'config.ts'))
     + countFile(path.join(srcDir, 'types.ts'))
-    + countFile(path.join(srcDir, 'cli.ts'));
+    + countFile(path.join(srcDir, 'cli.ts'))
+    + countFile(path.join(srcDir, 'ipc.ts'))
+    + countFile(path.join(srcDir, 'paths.ts'));
   const total = core + agents + channels + utils + entry;
 
   console.log('==================================================');
@@ -1533,7 +1534,7 @@ async function cmdAgentList(): Promise<void> {
   }
 
   // Cold mode: read from disk
-  const { AgentRegistry } = await import('./core/agent-registry.js');
+  const { EvolAgentRegistry } = await import('./core/evolagent-registry.js');
   const { loadConfig } = await import('./config.js');
 
   let config: any;
@@ -1543,7 +1544,7 @@ async function cmdAgentList(): Promise<void> {
     config = { agents: {}, channels: {}, projects: { defaultPath: process.cwd() } };
   }
 
-  const registry = new AgentRegistry(p.agentsDir);
+  const registry = new EvolAgentRegistry(p.agentsDir);
   registry.loadAll(config);
   printAgentTable(registry.list());
 }
@@ -1602,7 +1603,7 @@ async function cmdAgentShow(name: string): Promise<void> {
   }
 
   // Cold mode
-  const { AgentRegistry } = await import('./core/agent-registry.js');
+  const { EvolAgentRegistry } = await import('./core/evolagent-registry.js');
   const { loadConfig } = await import('./config.js');
 
   let config: any;
@@ -1612,7 +1613,7 @@ async function cmdAgentShow(name: string): Promise<void> {
     config = { agents: {}, channels: {}, projects: { defaultPath: process.cwd() } };
   }
 
-  const registry = new AgentRegistry(p.agentsDir);
+  const registry = new EvolAgentRegistry(p.agentsDir);
   registry.loadAll(config);
 
   const agent = registry.get(name);

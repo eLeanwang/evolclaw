@@ -1,10 +1,72 @@
 import fs from 'fs';
 import path from 'path';
-import { EvolAgent } from './evolagent.js';
-import { validateEvolAgentConfig } from './evolagent-schema.js';
-import { extractFingerprint } from '../utils/channel-fingerprint.js';
+import { EvolAgent, validateEvolAgentConfig } from './evolagent.js';
 import { logger } from '../utils/logger.js';
 import type { Config, AgentInfo, EvolAgentConfig } from '../types.js';
+
+// ── Channel Fingerprint ────────────────────────────────────────────────────
+// 为每个 channel 实例提取一个全局唯一标识，用于冲突检测和路由索引。
+// 格式：{type}:{primaryKey}
+
+const PRIMARY_KEY_MAP: Record<string, string> = {
+  feishu: 'appId',
+  aun: 'aid',
+  wechat: 'token',
+  wecom: 'botId',
+  dingtalk: 'clientId',
+  qqbot: 'appId',
+};
+
+export function extractFingerprint(
+  channelType: string,
+  instance: Record<string, any>
+): string | null {
+  const keyField = PRIMARY_KEY_MAP[channelType];
+  if (!keyField) return null;
+  const value = instance[keyField];
+  if (!value || typeof value !== 'string') return null;
+  return `${channelType}:${value}`;
+}
+
+export interface DuplicateReport {
+  fingerprint: string;
+  channelType: string;
+  instances: string[]; // instance names
+}
+
+export function detectDuplicates(config: Config): DuplicateReport[] {
+  const seen = new Map<string, { channelType: string; instances: string[] }>();
+
+  const channels = (config.channels as any) || {};
+  for (const [type, raw] of Object.entries(channels)) {
+    if (type === 'defaultChannel') continue;
+    const instances = Array.isArray(raw) ? raw : [raw];
+    for (const inst of instances) {
+      if (!inst || typeof inst !== 'object') continue;
+      const fingerprint = extractFingerprint(type, inst as any);
+      if (!fingerprint) continue;
+      const instName = (inst as any).name ?? type;
+      const entry = seen.get(fingerprint);
+      if (entry) {
+        entry.instances.push(instName);
+      } else {
+        seen.set(fingerprint, { channelType: type, instances: [instName] });
+      }
+    }
+  }
+
+  const duplicates: DuplicateReport[] = [];
+  for (const [fingerprint, entry] of seen) {
+    if (entry.instances.length > 1) {
+      duplicates.push({
+        fingerprint,
+        channelType: entry.channelType,
+        instances: entry.instances,
+      });
+    }
+  }
+  return duplicates;
+}
 
 export interface ReloadHooks {
   drainChannel(channelName: string): Promise<void>;
@@ -14,7 +76,7 @@ export interface ReloadHooks {
 
 /**
  * Plug-in for writing back to the global config (evolclaw.json) when
- * AgentRegistry is asked to mutate a channel that belongs to the
+ * EvolAgentRegistry is asked to mutate a channel that belongs to the
  * DefaultAgent. Named EvolAgents persist directly to their own agent.json
  * via `EvolAgent.setOwner` / `EvolAgent.setShowActivities`.
  */
@@ -23,7 +85,7 @@ export interface GlobalConfigWriter {
   setShowActivities?(channelName: string, mode: 'all' | 'dm-only' | 'owner-dm-only' | 'none'): void;
 }
 
-export class AgentRegistry {
+export class EvolAgentRegistry {
   private agents: Map<string, EvolAgent> = new Map();
   private defaultAgent: EvolAgent | null = null;
   private channelIndex: Map<string, string> = new Map();
@@ -57,13 +119,13 @@ export class AgentRegistry {
           errorAgent.status = 'error';
           errorAgent.error = validation.errors.join('; ');
           this.agents.set(name, errorAgent);
-          logger.warn(`[AgentRegistry] ${file}: ${validation.errors.join('; ')}`);
+          logger.warn(`[EvolAgentRegistry] ${file}: ${validation.errors.join('; ')}`);
           continue;
         }
         const agent = new EvolAgent(fullPath, raw as EvolAgentConfig);
         this.agents.set(agent.name, agent);
       } catch (e) {
-        logger.warn(`[AgentRegistry] Failed to load ${file}: ${e}`);
+        logger.warn(`[EvolAgentRegistry] Failed to load ${file}: ${e}`);
       }
     }
 
@@ -125,7 +187,7 @@ export class AgentRegistry {
           a.error = msg;
         }
       }
-      logger.error(`[AgentRegistry] ${msg}`);
+      logger.error(`[EvolAgentRegistry] ${msg}`);
     }
   }
 
@@ -185,12 +247,12 @@ export class AgentRegistry {
   setChannelOwner(channelName: string, userId: string): void {
     const agent = this.resolveByChannel(channelName);
     if (!agent) {
-      logger.warn(`[AgentRegistry] setChannelOwner: channel "${channelName}" not found`);
+      logger.warn(`[EvolAgentRegistry] setChannelOwner: channel "${channelName}" not found`);
       return;
     }
     if (agent.isDefault) {
       if (!this.globalWriter) {
-        logger.warn(`[AgentRegistry] setChannelOwner: no globalWriter wired for default channel "${channelName}"`);
+        logger.warn(`[EvolAgentRegistry] setChannelOwner: no globalWriter wired for default channel "${channelName}"`);
         return;
       }
       this.globalWriter.setOwner(channelName, userId);
@@ -213,12 +275,12 @@ export class AgentRegistry {
   setShowActivities(channelName: string, mode: 'all' | 'dm-only' | 'owner-dm-only' | 'none'): void {
     const agent = this.resolveByChannel(channelName);
     if (!agent) {
-      logger.warn(`[AgentRegistry] setShowActivities: channel "${channelName}" not found`);
+      logger.warn(`[EvolAgentRegistry] setShowActivities: channel "${channelName}" not found`);
       return;
     }
     if (agent.isDefault) {
       if (!this.globalWriter?.setShowActivities) {
-        logger.warn(`[AgentRegistry] setShowActivities: no globalWriter wired for default channel "${channelName}"`);
+        logger.warn(`[EvolAgentRegistry] setShowActivities: no globalWriter wired for default channel "${channelName}"`);
         return;
       }
       this.globalWriter.setShowActivities(channelName, mode);
@@ -265,7 +327,7 @@ export class AgentRegistry {
     // to avoid breaking SDK conversation history at .claude/<encoded-path>/...)
     if (oldAgent.projectPath !== newAgent.projectPath) {
       logger.warn(
-        `[AgentRegistry] Agent "${name}" projectPath changed: ${oldAgent.projectPath} → ${newAgent.projectPath}. ` +
+        `[EvolAgentRegistry] Agent "${name}" projectPath changed: ${oldAgent.projectPath} → ${newAgent.projectPath}. ` +
         `Existing sessions retain the old path; only new sessions will use the new path. ` +
         `To migrate, manually UPDATE sessions SET project_path=? WHERE id=? (warning: SDK conversation history may be lost).`
       );

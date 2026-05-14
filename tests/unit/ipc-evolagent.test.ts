@@ -2,10 +2,10 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { AgentRegistry } from '../../src/core/agent-registry.js';
+import { EvolAgentRegistry } from '../../src/core/evolagent-registry.js';
 import type { Config } from '../../src/types.js';
 
-describe('IPC evolagent handlers (via AgentRegistry)', () => {
+describe('IPC evolagent handlers (via EvolAgentRegistry)', () => {
   let tmpDir: string;
   let agentsDir: string;
 
@@ -35,7 +35,7 @@ describe('IPC evolagent handlers (via AgentRegistry)', () => {
       projects: { defaultPath: '/tmp' },
     }));
 
-    const reg = new AgentRegistry(agentsDir);
+    const reg = new EvolAgentRegistry(agentsDir);
     reg.loadAll(globalConfig());
 
     const list = reg.list();
@@ -52,7 +52,7 @@ describe('IPC evolagent handlers (via AgentRegistry)', () => {
       projects: { defaultPath: '/tmp' },
     }));
 
-    const reg = new AgentRegistry(agentsDir);
+    const reg = new EvolAgentRegistry(agentsDir);
     reg.loadAll(globalConfig());
 
     expect(reg.get('bot')?.name).toBe('bot');
@@ -67,7 +67,7 @@ describe('IPC evolagent handlers (via AgentRegistry)', () => {
       projects: { defaultPath: '/tmp/bot' },
     }));
 
-    const reg = new AgentRegistry(agentsDir);
+    const reg = new EvolAgentRegistry(agentsDir);
     reg.loadAll(globalConfig());
 
     const list = reg.list();

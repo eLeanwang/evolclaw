@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { AgentRegistry } from '../../src/core/agent-registry.js';
+import { EvolAgentRegistry } from '../../src/core/evolagent-registry.js';
 import { ChannelLoader, type ChannelPlugin, type ChannelInstance } from '../../src/core/channel-loader.js';
 import type { Config } from '../../src/types.js';
 
@@ -91,7 +91,7 @@ describe('Startup flow integration', () => {
     const channelLoader = new ChannelLoader();
     channelLoader.register(plugin);
 
-    const registry = new AgentRegistry(agentsDir);
+    const registry = new EvolAgentRegistry(agentsDir);
     registry.loadAll(globalCfg);
 
     // Default channels

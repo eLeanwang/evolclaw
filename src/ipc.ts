@@ -1,7 +1,7 @@
 import net from 'net';
 import fs from 'fs';
 import { logger } from './utils/logger.js';
-import type { AgentRegistryHandle } from './types.js';
+import type { EvolAgentRegistryHandle } from './types.js';
 
 const isWindows = process.platform === 'win32';
 const isNamedPipe = (p: string) => isWindows && p.startsWith('\\\\.\\pipe\\');
@@ -45,7 +45,7 @@ type CommandExecutor = (cmd: string, sessionId: string) => Promise<IpcCtlRespons
 
 export class IpcServer {
   private server: net.Server | null = null;
-  private agentRegistry?: AgentRegistryHandle;
+  private agentRegistry?: EvolAgentRegistryHandle;
 
   constructor(
     private socketPath: string,
@@ -53,8 +53,8 @@ export class IpcServer {
     private commandExecutor?: CommandExecutor,
   ) {}
 
-  /** Inject AgentRegistry for evolagent.* IPC handlers */
-  setAgentRegistry(registry: AgentRegistryHandle): void {
+  /** Inject EvolAgentRegistry for evolagent.* IPC handlers */
+  setAgentRegistry(registry: EvolAgentRegistryHandle): void {
     this.agentRegistry = registry;
   }
 
@@ -120,11 +120,11 @@ export class IpcServer {
         return await this.commandExecutor(slashCmd, sessionId);
       }
       case 'evolagent.list': {
-        if (!this.agentRegistry) return { ok: false, error: 'AgentRegistry not available' };
+        if (!this.agentRegistry) return { ok: false, error: 'EvolAgentRegistry not available' };
         return { ok: true, agents: this.agentRegistry.list() };
       }
       case 'evolagent.show': {
-        if (!this.agentRegistry) return { ok: false, error: 'AgentRegistry not available' };
+        if (!this.agentRegistry) return { ok: false, error: 'EvolAgentRegistry not available' };
         const name = cmd.name;
         if (!name || typeof name !== 'string') return { ok: false, error: 'missing name' };
         const agent = this.agentRegistry.get(name);
@@ -135,7 +135,7 @@ export class IpcServer {
         return { ok: true, agent: info };
       }
       case 'evolagent.reload': {
-        if (!this.agentRegistry) return { ok: false, error: 'AgentRegistry not available' };
+        if (!this.agentRegistry) return { ok: false, error: 'EvolAgentRegistry not available' };
         const name = cmd.name;
         if (!name || typeof name !== 'string') return { ok: false, error: 'missing name' };
         const hooks = (globalThis as any).__evolclaw_reloadHooks;
@@ -143,7 +143,7 @@ export class IpcServer {
         try {
           const a = this.agentRegistry.get(name);
           if (!a) return { ok: false, error: `Agent "${name}" not found` };
-          if (!this.agentRegistry.reload) return { ok: false, error: 'AgentRegistry.reload not available' };
+          if (!this.agentRegistry.reload) return { ok: false, error: 'EvolAgentRegistry.reload not available' };
           await this.agentRegistry.reload(name, hooks);
           return { ok: true, result: `Agent "${name}" reloaded` };
         } catch (e: any) {

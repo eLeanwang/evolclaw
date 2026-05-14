@@ -3,7 +3,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { writeOwnerToChannelInstance, setOwner, loadConfig } from '../../src/config.js';
-import { AgentRegistry } from '../../src/core/agent-registry.js';
+import { EvolAgentRegistry } from '../../src/core/evolagent-registry.js';
 import { _resetRoot } from '../../src/paths.js';
 import { logger } from '../../src/utils/logger.js';
 
@@ -68,7 +68,7 @@ describe('setOwner routing', () => {
   });
 
   describe('setOwner integration', () => {
-    it('writes to agent.json when routed via AgentRegistry.setChannelOwner', () => {
+    it('writes to agent.json when routed via EvolAgentRegistry.setChannelOwner', () => {
       // Write evolclaw.json with a default channel
       fs.writeFileSync(configPath, JSON.stringify({
         agents: { defaultAgent: 'claude', claude: {} },
@@ -90,7 +90,7 @@ describe('setOwner routing', () => {
       _resetRoot();
       try {
         const config = loadConfig(configPath);
-        const reg = new AgentRegistry(agentsDir, {
+        const reg = new EvolAgentRegistry(agentsDir, {
           setOwner: (ch, uid) => setOwner(config, ch, uid, configPath),
         });
         reg.loadAll(config);
@@ -217,7 +217,7 @@ describe('setOwner routing', () => {
       _resetRoot();
       try {
         const config = loadConfig(configPath);
-        const reg = new AgentRegistry(agentsDir, {
+        const reg = new EvolAgentRegistry(agentsDir, {
           setOwner: (ch, uid) => setOwner(config, ch, uid, configPath),
         });
         reg.loadAll(config);

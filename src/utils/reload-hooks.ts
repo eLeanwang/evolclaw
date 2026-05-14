@@ -2,13 +2,13 @@
  * Reload Hooks
  *
  * Extracted from index.ts main() for testability. Builds the ReloadHooks
- * implementation used by AgentRegistry.reload() to drain/disconnect/start
+ * implementation used by EvolAgentRegistry.reload() to drain/disconnect/start
  * channels during a hot reload.
  */
 
-import type { ReloadHooks } from './agent-registry.js';
-import type { ChannelLoader, ChannelInstance } from './channel-loader.js';
-import { logger } from '../utils/logger.js';
+import type { ReloadHooks } from '../core/evolagent-registry.js';
+import type { ChannelLoader, ChannelInstance } from '../core/channel-loader.js';
+import { logger } from './logger.js';
 
 export interface ReloadHooksDeps {
   channelLoader: ChannelLoader;

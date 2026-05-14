@@ -15,7 +15,7 @@ import { resolvePaths } from '../paths.js';
 
 // ==================== Constants ====================
 
-export const MIN_AUN_CORE_SDK = [0, 2, 14] as const;
+export const MIN_AUN_CORE_SDK = [0, 2, 17] as const;
 export const AUN_CORE_SDK_PKG = '@agentunion/fastaun';
 
 // ==================== Types ====================

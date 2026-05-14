@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { AgentRegistry } from '../../src/core/agent-registry.js';
+import { EvolAgentRegistry } from '../../src/core/evolagent-registry.js';
 
 describe('CLI agent list (cold mode)', () => {
   let tmpDir: string;
@@ -30,7 +30,7 @@ describe('CLI agent list (cold mode)', () => {
       projects: { defaultPath: '/home/user/review' },
     });
 
-    const reg = new AgentRegistry(agentsDir);
+    const reg = new EvolAgentRegistry(agentsDir);
     reg.loadAll({
       agents: { defaultAgent: 'claude', claude: {} },
       channels: {},
@@ -53,7 +53,7 @@ describe('CLI agent list (cold mode)', () => {
       projects: { defaultPath: '/tmp' },
     });
 
-    const reg = new AgentRegistry(agentsDir);
+    const reg = new EvolAgentRegistry(agentsDir);
     reg.loadAll({ agents: { defaultAgent: 'claude', claude: {} }, channels: {}, projects: { defaultPath: '/tmp' } } as any);
 
     const off = reg.list().find(i => i.name === 'off');
@@ -68,7 +68,7 @@ describe('CLI agent list (cold mode)', () => {
       projects: { defaultPath: '/tmp' },
     });
 
-    const reg = new AgentRegistry(agentsDir);
+    const reg = new EvolAgentRegistry(agentsDir);
     reg.loadAll({ agents: { defaultAgent: 'claude', claude: {} }, channels: {}, projects: { defaultPath: '/tmp' } } as any);
 
     const cold = reg.list().find(i => i.name === 'cold');
@@ -84,7 +84,7 @@ describe('CLI agent list (cold mode)', () => {
       projects: { defaultPath: '/tmp' },
     });
 
-    const reg = new AgentRegistry(agentsDir);
+    const reg = new EvolAgentRegistry(agentsDir);
     reg.loadAll({ agents: { defaultAgent: 'claude', claude: {} }, channels: {}, projects: { defaultPath: '/tmp' } } as any);
 
     const h = reg.list().find(i => i.name === 'h');

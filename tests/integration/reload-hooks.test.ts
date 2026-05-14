@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { buildReloadHooks } from '../../src/core/reload-hooks.js';
+import { buildReloadHooks } from '../../src/utils/reload-hooks.js';
 import type { ChannelInstance } from '../../src/core/channel-loader.js';
 
 describe('buildReloadHooks (e2e)', () => {

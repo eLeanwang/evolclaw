@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { AgentRegistry } from '../../src/core/agent-registry.js';
+import { EvolAgentRegistry } from '../../src/core/evolagent-registry.js';
 import { IpcServer } from '../../src/ipc.js';
 import type { Config } from '../../src/types.js';
 
@@ -49,7 +49,7 @@ describe('IpcServer evolagent.* dispatch (e2e)', () => {
     } as any;
   }
 
-  function buildRegistry(): AgentRegistry {
+  function buildRegistry(): EvolAgentRegistry {
     writeAgent('review', {
       name: 'review',
       enabled: true,
@@ -57,12 +57,12 @@ describe('IpcServer evolagent.* dispatch (e2e)', () => {
       channels: { feishu: [{ name: 'review-fs', appId: 'a', appSecret: 'b' }] },
       projects: { defaultPath: '/tmp' },
     });
-    const reg = new AgentRegistry(agentsDir);
+    const reg = new EvolAgentRegistry(agentsDir);
     reg.loadAll(globalConfig());
     return reg;
   }
 
-  function buildIpcServer(reg: AgentRegistry | null): IpcServer {
+  function buildIpcServer(reg: EvolAgentRegistry | null): IpcServer {
     // getStatus stub — never called by evolagent.* dispatch.
     const getStatus = (): any => ({
       pid: process.pid,

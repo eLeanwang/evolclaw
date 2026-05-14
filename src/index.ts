@@ -23,13 +23,13 @@ import { PermissionGateway } from './core/permission.js';
 import { InteractionRouter } from './core/interaction-router.js';
 import { ChannelLoader, type ChannelInstance } from './core/channel-loader.js';
 import { AgentLoader } from './core/agent-loader.js';
-import { AgentRegistry, type ReloadHooks } from './core/agent-registry.js';
-import { buildReloadHooks } from './core/reload-hooks.js';
+import { EvolAgentRegistry, type ReloadHooks } from './core/evolagent-registry.js';
+import { buildReloadHooks } from './utils/reload-hooks.js';
 import { IpcServer, IpcStatusResponse, ChannelStatus } from './ipc.js';
 import { ChannelAdapter, Message } from './types.js';
 import { logger, setLogLevel } from './utils/logger.js';
-import { detectDuplicates } from './utils/channel-fingerprint.js';
-import { loadPromptTemplates } from './prompts/templates.js';
+import { detectDuplicates } from './core/evolagent-registry.js';
+import { loadPromptTemplates } from './agents/templates.js';
 import path from 'path';
 import fs from 'fs';
 
@@ -102,7 +102,7 @@ async function main() {
   }
 
   // EvolAgent Registry
-  const agentRegistry = new AgentRegistry(paths.agentsDir, {
+  const agentRegistry = new EvolAgentRegistry(paths.agentsDir, {
     setOwner: (channelName, userId) => {
       setOwnerInGlobalConfig(config, channelName, userId);
     },
@@ -284,7 +284,7 @@ async function main() {
   // 回填 processor 和 messageQueue 的引用
   cmdHandler.setProcessor(processor);
 
-  // Inject AgentRegistry (methods added by T6/T7)
+  // Inject EvolAgentRegistry (methods added by T6/T7)
   if ((processor as any).setAgentRegistry) {
     (processor as any).setAgentRegistry(agentRegistry);
   }
@@ -704,7 +704,7 @@ async function main() {
     };
   }, async (cmd, sessionId) => cmdHandler.handleCtl(cmd, sessionId));
 
-  // M3: direct call (not cast) — wire AgentRegistry into IPC for evolagent.* handlers
+  // M3: direct call (not cast) — wire EvolAgentRegistry into IPC for evolagent.* handlers
   ipcServer.setAgentRegistry(agentRegistry);
 
   // ── Reload hooks: enable agentRegistry.reload() to drain/disconnect/restart channels ──
