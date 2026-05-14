@@ -344,9 +344,14 @@ async function main() {
     // 1. 项目路径提供器
     if (inst.onProjectPathRequest && inst.channel.onProjectPathRequest) {
       inst.channel.onProjectPathRequest(async (channelId: string) => {
+        // Effective default path: agent's projectPath if agent-owned, else global
+        const owningAgent = agentRegistry.resolveByChannel(inst.adapter.channelName);
+        const effectiveDefault = (owningAgent && !owningAgent.isDefault)
+          ? owningAgent.projectPath
+          : (config.projects?.defaultPath || process.cwd());
         const session = await sessionManager.getOrCreateSession(
           inst.adapter.channelName, channelId,
-          config.projects?.defaultPath || process.cwd(),
+          effectiveDefault,
           undefined, undefined, undefined, undefined
         );
         return path.isAbsolute(session.projectPath)

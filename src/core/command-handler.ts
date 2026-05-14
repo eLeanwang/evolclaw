@@ -205,6 +205,13 @@ export class CommandHandler {
     return agent;
   }
 
+  /** 返回当前通道的有效项目路径：agent-owned 用 agent.projectPath；否则用全局 defaultPath。*/
+  private getEffectiveDefaultPath(channel: string): string {
+    const owning = this.getOwningAgent(channel);
+    if (owning) return owning.projectPath;
+    return this.config.projects?.defaultPath || process.cwd();
+  }
+
   /** 项目列表快捷访问（list 缺失时用 defaultPath 作为唯一项目） */
   private get projects(): Record<string, string> {
     const list = this.config.projects?.list;
@@ -1775,7 +1782,7 @@ export class CommandHandler {
     // 尝试获取活跃会话（话题时直接查找话题 session）
     let session: Session | undefined;
     if (threadId) {
-      session = await this.sessionManager.getOrCreateSession(channel, channelId, this.config.projects?.defaultPath || process.cwd(), threadId);
+      session = await this.sessionManager.getOrCreateSession(channel, channelId, this.getEffectiveDefaultPath(channel), threadId);
     } else {
       session = await this.sessionManager.getActiveSession(channel, channelId);
     }
@@ -1792,7 +1799,7 @@ export class CommandHandler {
       session = await this.sessionManager.getOrCreateSession(
         channel,
         channelId,
-        this.config.projects?.defaultPath || process.cwd()
+        this.getEffectiveDefaultPath(channel)
       );
     }
 
@@ -1893,7 +1900,7 @@ export class CommandHandler {
         }
       }
 
-      const projectPath = session?.projectPath || this.config.projects?.defaultPath || process.cwd();
+      const projectPath = session?.projectPath || this.getEffectiveDefaultPath(channel);
 
       const newSession = await this.sessionManager.createNewSession(
         channel,
@@ -2034,7 +2041,7 @@ export class CommandHandler {
       const executeRestart = async () => {
         let replyContext: ReplyContext | undefined;
         if (threadId) {
-          const threadSession = await this.sessionManager.getOrCreateSession(channel, channelId, this.config.projects?.defaultPath || process.cwd(), threadId);
+          const threadSession = await this.sessionManager.getOrCreateSession(channel, channelId, this.getEffectiveDefaultPath(channel), threadId);
           replyContext = this.getReplyContext(threadSession);
         }
         const restartInfo: Record<string, any> = {

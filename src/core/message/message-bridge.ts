@@ -105,9 +105,16 @@ export class MessageBridge {
           metadata.peerId = msg.peerId;
           if (msg.peerName) metadata.peerName = msg.peerName;
         }
+        // Resolve effective project path: agent's projectPath when channel is agent-owned,
+        // otherwise fall back to global config.projects.defaultPath
+        const owningAgent = this.agentRegistry?.resolveByChannel(channelName);
+        const effectiveProjectPath = (owningAgent && !owningAgent.isDefault)
+          ? owningAgent.projectPath
+          : (this.config.projects?.defaultPath || process.cwd());
+
         const session = await this.sessionManager.getOrCreateSession(
           channelName, msg.channelId,
-          this.config.projects?.defaultPath || process.cwd(),
+          effectiveProjectPath,
           msg.threadId, Object.keys(metadata).length ? metadata : undefined, undefined, msg.peerId, chatType
         );
 
