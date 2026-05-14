@@ -772,6 +772,12 @@ export class MessageProcessor {
       // 清除处理中状态
       this.sessionManager.clearProcessing(session.id);
       logger.info(`[MessageProcessor] session ${session.id} processing cleared task=${taskId}`);
+
+      // 更新 EvolAgent.lastActivity
+      if (this.agentRegistry) {
+        const owningAgent = this.agentRegistry.resolveByChannel(channelKey);
+        if (owningAgent) owningAgent.lastActivity = Date.now();
+      }
       // 注意：不在此处清除 interruptedSessions，由下一条消息的 prompt 包装逻辑消费
       const interruptReason = this.interruptedSessions.get(session.id);
 

@@ -406,6 +406,7 @@ export interface EvolAgentHandle {
   readonly isDefault: boolean;
   readonly baseagent: string;
   readonly projectPath: string;
+  lastActivity?: number;
   getContext(channelName: string, chatType: string, globalChatmode?: { private?: 'interactive' | 'proactive'; group?: 'interactive' | 'proactive' }): AgentContext;
 }
 
