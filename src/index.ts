@@ -453,19 +453,6 @@ async function main() {
     registerChannelInstance(inst);
   }
 
-  // ── 设置热加载回调 ──
-  cmdHandler.setHotLoadChannel(async (inst: ChannelInstance) => {
-    registerChannelInstance(inst);
-    channelInstances.push(inst);
-    await inst.connect();
-    eventBus.publish({
-      type: 'channel:connected',
-      channel: (inst.channelType || inst.adapter.channelName).toLowerCase(),
-      channelName: inst.adapter.channelName,
-      timestamp: Date.now(),
-    });
-  });
-
   // ── 连接所有渠道 ──
   const connected = await channelLoader.connectAll(channelInstances);
 

@@ -46,23 +46,64 @@ export PATH=~/.npm-global/bin:$PATH
 npm install -g evolclaw
 ```
 
-### 步骤 3：准备配置信息
+### 步骤 3：检查是否已在运行
+
+npm 安装完成后，先检查是否有正在运行的 evolclaw 进程。升级或重装场景下，旧进程仍在使用旧版本代码，必须停止后才能让新版本生效。
+
+```bash
+evolclaw status
+```
+
+判断逻辑：
+
+- 输出包含 `running` / `PID` / `已启动` 等表明服务在运行 → **询问用户**是否停止：
+
+  > 检测到 evolclaw 正在运行（PID: xxx）。继续安装需要停止当前服务以应用新版本，是否停止？(y/N)
+
+  用户确认后执行：
+
+  ```bash
+  evolclaw stop
+  ```
+
+  用户拒绝则中止安装流程，提醒其手动 `evolclaw stop` 后重新发起。
+
+- 输出表明未运行（`not running` / `stopped` / 无 PID）→ 直接进入下一步。
+
+### 步骤 4：准备配置信息
 
 | 参数 | 说明 | 示例 |
 |------|------|------|
 | `--aun-aid` | **必填**，Agent 自身的 AID，作为 bot 在 AUN 网络上的独立身份 | `mybot.agentid.pub` |
 | `--aun-owner` | **必填**，Owner 的 AID，用于接收欢迎消息和管理权限 | `alice.agentid.pub` |
-| `--default-path` | 默认项目路径（可选，默认当前目录） | `/home/user/myproject` |
+| `--default-path` | 默认项目路径（bot 会话未显式 `/bind` 时使用的工作目录） | `/home/user/myproject` |
 
 **注意**：`--aun-aid` 和 `--aun-owner` 必须是不同的 AID。Agent 需要独立身份，不能与 Owner 相同。
 
 如果用户在触发安装时已提供 Owner AID（例如消息中包含"将 xxx 添加为 Owner ID"），直接使用该值，否则询问用户。Agent AID 必须单独询问用户，不能默认使用 Owner AID。
 
-### 步骤 4：非交互式初始化
+**默认项目路径必须询问用户，提供三个选项：**
+
+1. **推荐默认**：`~/projects/default`（EvolClaw 约定的默认工作区；若不存在会自动创建）
+2. **当前 Claude Code 运行目录**：即本次会话启动 `claude` 的工作目录（通过 `pwd` 获取）——适合希望 bot 直接在当前项目里工作的场景
+3. **自定义路径**：用户指定绝对路径（须是已存在的目录，或接受后自动创建）
+
+示例提问：
+
+> 请选择默认项目目录（bot 未显式 `/bind` 时使用的工作目录）：
+> 1) `~/projects/default`（推荐，EvolClaw 默认工作区）
+> 2) 当前目录：`<pwd 输出>`
+> 3) 自定义路径（请提供绝对路径）
+
+用户未选择时，默认取选项 1。选项 3 需校验路径是绝对路径；目录不存在则 `mkdir -p` 创建。
+
+### 步骤 5：非交互式初始化
+
+将用户选择的目录作为 `--default-path` 传入：
 
 ```bash
 evolclaw init --non-interactive \
-  --default-path "$PWD" \
+  --default-path <用户选择的绝对路径> \
   --channel aun \
   --aun-aid <AID> \
   --aun-owner <Owner AID>
@@ -76,7 +117,7 @@ evolclaw init --non-interactive \
 5. 写入初始 `agent.md`（`initialized: false`）
 6. 写入配置（含 owner 字段）
 
-### 步骤 5：启动前验证
+### 步骤 6：启动前验证
 
 读取配置文件确认关键字段：
 
@@ -92,13 +133,13 @@ cat ~/.evolclaw/data/evolclaw.json
 
 如发现缺失或异常，向用户说明并提供修复方案。
 
-### 步骤 6：启动服务
+### 步骤 7：启动服务
 
 ```bash
 evolclaw start
 ```
 
-### 步骤 7：验证运行状态
+### 步骤 8：验证运行状态
 
 ```bash
 evolclaw status

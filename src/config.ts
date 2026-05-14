@@ -213,7 +213,7 @@ export function loadConfig(configPath: string = resolvePaths().config): Config {
           logger.warn(`Config file missing, creating from sample: ${samplePath}`);
           const sample = JSON.parse(fs.readFileSync(samplePath, 'utf-8'));
           // Set a usable defaultPath
-          const defaultProjectDir = path.join(os.homedir(), 'evolclaw-project');
+          const defaultProjectDir = path.join(os.homedir(), 'projects', 'default');
           sample.projects.defaultPath = defaultProjectDir;
           if (!fs.existsSync(defaultProjectDir)) {
             fs.mkdirSync(defaultProjectDir, { recursive: true });

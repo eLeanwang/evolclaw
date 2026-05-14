@@ -350,11 +350,16 @@ export class MessageProcessor {
       const modeInfo = isBackground ? ' [\u540e\u53f0]' : '';
       const e2eeInfo = message.replyContext?.metadata?.encrypted != null ? ` encrypt=${message.replyContext.metadata.encrypted}` : '';
       logger.info(`[${message.channel}] ${message.channelId}: ${message.content}${imageInfo}${modeInfo}${e2eeInfo}`);
-      logger.info(`[MessageProcessor] session=${session.id} task=${taskId} chatType=${session.chatType} sessionMode=${session.sessionMode} agentId=${session.agentId} msgChatType=${message.chatType ?? 'n/a'}`);
+      // 构建 peer 标识（优先 peerName，退化到 peerId / channelId）
+      const peerName = session.metadata?.peerName ?? message.peerName;
+      const peerId = session.metadata?.peerId ?? message.peerId ?? message.channelId;
+      const peerShort = peerId ? peerId.split('.')[0].split(':')[0] : '?';
+      const peerLabel = peerName && peerName !== peerShort ? `${peerShort}(${peerName})` : peerShort;
+      logger.info(`[MessageProcessor] session=${session.id} task=${taskId} peer=${peerLabel} chatType=${session.chatType} sessionMode=${session.sessionMode} agentId=${session.agentId} msgChatType=${message.chatType ?? 'n/a'}`);
 
       // 记录开始处理
       this.eventBus.publish({ type: 'message:processing', sessionId: session.id });
-      adapter.sendProcessingStatus?.(message.channelId, 'start', session.id, taskId, this.getReplyContext(message));
+      adapter.sendProcessingStatus?.(message.channelId, 'start', session.id, taskId, taskReplyContext());
 
       logger.message({
         msgId: messageId,
@@ -631,8 +636,14 @@ export class MessageProcessor {
       for (const match of fileMatches) {
         // 兼容旧格式 (1组) 和新格式 (2组)
         const hasChannelGroup = match.length >= 3;
-        const targetSpec = hasChannelGroup ? (match[1] ?? undefined) : undefined;
-        const filePath = (hasChannelGroup ? match[2] : match[1]).trim();
+        let targetSpec = hasChannelGroup ? (match[1] ?? undefined) : undefined;
+        let filePath = (hasChannelGroup ? match[2] : match[1]).trim();
+
+        // 白名单校验：targetSpec 必须是已注册通道，否则视为路径的一部分（如 Windows 盘符 C:）
+        if (targetSpec && !this.channels.has(targetSpec) && !this.channelTypeMap.has(targetSpec)) {
+          filePath = `${targetSpec}:${filePath}`;
+          targetSpec = undefined;
+        }
 
         if (this.isPlaceholderPath(filePath)) {
           logger.info(`[${adapter.channelName}] Skipped placeholder file marker: [SEND_FILE:${filePath}]`);
@@ -749,7 +760,7 @@ export class MessageProcessor {
         const errorSummary = streamResult.errors?.join('; ') || '任务执行失败';
         const rawSubtype = streamResult.subtype || 'agent_error';
         const errorType = prefixErrorType(ERROR_PREFIX.AGENT, rawSubtype);
-        adapter.sendProcessingStatus?.(message.channelId, 'error', session.id, taskId, this.getReplyContext(message));
+        adapter.sendProcessingStatus?.(message.channelId, 'error', session.id, taskId, taskReplyContext());
 
         this.eventBus.publish({
           type: 'message:error',
@@ -779,7 +790,7 @@ export class MessageProcessor {
         });
       } else {
         // 真正的成功
-        adapter.sendProcessingStatus?.(message.channelId, interruptReason ? 'interrupted' : 'done', session.id, taskId, this.getReplyContext(message));
+        adapter.sendProcessingStatus?.(message.channelId, interruptReason ? 'interrupted' : 'done', session.id, taskId, taskReplyContext());
         await this.sessionManager.recordSuccess(session.id);
 
         this.eventBus.publish({
@@ -837,7 +848,7 @@ export class MessageProcessor {
 
       // 用户主动中断（新消息打断 或 /stop 命令）时静默，不发送中断/错误提示
       if (!isUserInterrupt) {
-        try { adapter.sendProcessingStatus?.(message.channelId, procStatus, session.id, taskId, this.getReplyContext(message)); } catch {}
+        try { adapter.sendProcessingStatus?.(message.channelId, procStatus, session.id, taskId, taskReplyContext()); } catch {}
       }
 
       // 用户主动中断时降级日志；其余仍按 error 记录

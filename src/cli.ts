@@ -1679,6 +1679,160 @@ async function cmdAgentNew(name: string): Promise<void> {
   }
 }
 
+// ==================== AID ====================
+
+async function cmdAid(args: string[]): Promise<void> {
+  const sub = args[0] || 'list';
+
+  if (sub === 'help') {
+    console.log(`用法: evolclaw aid <command>
+
+Commands:
+  list              列出本地所有 AID
+  new <aid>         创建新 AID 身份
+
+示例:
+  evolclaw aid list
+  evolclaw aid new reviewer.agentid.pub`);
+    return;
+  }
+
+  const { aidList, aidCreate, agentmdPut, buildInitialAgentMd, isValidAid } = await import('./channels/aun-ops.js');
+
+  if (sub === 'list') {
+    const aids = aidList();
+    if (aids.length === 0) {
+      console.log('本地无 AID');
+      return;
+    }
+    console.log('本地 AID:');
+    for (const a of aids) {
+      const icons = [
+        a.hasPrivateKey ? '🔑' : '  ',
+        a.hasAgentMd ? '📄' : '  ',
+      ].join('');
+      console.log(`  ${icons} ${a.aid}`);
+    }
+    console.log('\n🔑=私钥  📄=agent.md');
+    return;
+  }
+
+  if (sub === 'new') {
+    const aid = args[1];
+    if (!aid) {
+      console.error('用法: evolclaw aid new <完整AID>\n例: evolclaw aid new reviewer.agentid.pub');
+      process.exit(1);
+    }
+    if (!isValidAid(aid)) {
+      console.error(`❌ 无效 AID 格式: ${aid}`);
+      process.exit(1);
+    }
+
+    const result = await aidCreate(aid);
+
+    if (!result.alreadyExisted) {
+      const content = buildInitialAgentMd({ aid });
+      try {
+        await agentmdPut(content, { aid, client: result.client });
+        console.log('✓ agent.md 已发布');
+      } catch (e: any) {
+        console.warn(`⚠ agent.md 发布失败（首次连接将自动重试）: ${String(e.message || e).slice(0, 100)}`);
+      }
+    }
+    try { await result.client.close(); } catch {}
+
+    const verb = result.alreadyExisted ? '已存在' : '已创建';
+    console.log(`✓ ${aid} ${verb}`);
+    console.log('  如需上线 AUN 通道，运行 evolclaw init aun');
+    return;
+  }
+
+  console.error(`未知子命令: ${sub}\n用法: evolclaw aid [list|new <aid>]`);
+  process.exit(1);
+}
+
+// ==================== AgentMd ====================
+
+async function cmdAgentmd(args: string[]): Promise<void> {
+  if (args.length === 0 || args[0] === 'help') {
+    console.log(`用法: evolclaw agentmd <command> <aid>
+
+Commands:
+  <aid>                 查看指定 AID 的 agent.md
+  put <aid>             上传本地 agent.md 到 AUN 网络
+  set <aid> <内容>      设置并上传 agent.md
+
+示例:
+  evolclaw agentmd mybot.agentid.pub
+  evolclaw agentmd put mybot.agentid.pub
+  evolclaw agentmd set mybot.agentid.pub "---\\naid: mybot.agentid.pub\\n---"`);
+    return;
+  }
+
+  const { agentmdGet, agentmdPut, isValidAid } = await import('./channels/aun-ops.js');
+
+  if (args[0] === 'put') {
+    const aid = args[1];
+    if (!aid) {
+      console.error('用法: evolclaw agentmd put <aid>');
+      process.exit(1);
+    }
+    if (!isValidAid(aid)) {
+      console.error(`❌ 无效 AID 格式: ${aid}`);
+      process.exit(1);
+    }
+    // Read local file directly (put = push local → network)
+    const localPath = path.join(os.homedir(), '.aun', 'AIDs', aid, 'agent.md');
+    if (!fs.existsSync(localPath)) {
+      console.error(`❌ 本地无 agent.md: ${aid}`);
+      process.exit(1);
+    }
+    const content = fs.readFileSync(localPath, 'utf-8');
+    await agentmdPut(content, { aid });
+    console.log('✓ agent.md 已发布');
+    return;
+  }
+
+  if (args[0] === 'set') {
+    const aid = args[1];
+    const content = args.slice(2).join(' ');
+    if (!aid || !content) {
+      console.error('用法: evolclaw agentmd set <aid> <内容>');
+      process.exit(1);
+    }
+    if (!isValidAid(aid)) {
+      console.error(`❌ 无效 AID 格式: ${aid}`);
+      process.exit(1);
+    }
+    await agentmdPut(content, { aid });
+    console.log('✓ agent.md 已更新并发布');
+    return;
+  }
+
+  // Default: view
+  const aid = args[0];
+  if (!isValidAid(aid)) {
+    console.error(`❌ 无效 AID 格式: ${aid}`);
+    process.exit(1);
+  }
+  try {
+    const md = await agentmdGet(aid);
+    if (!md || !md.trim()) {
+      console.log(`ℹ️ ${aid} 尚未设置 agent.md`);
+    } else {
+      console.log(md);
+    }
+  } catch (e: any) {
+    const msg = String(e.message || e);
+    if (msg.includes('not found') || msg.includes('404')) {
+      console.log(`ℹ️ ${aid} 尚未设置 agent.md`);
+    } else {
+      console.error(`❌ 获取失败: ${msg.slice(0, 100)}`);
+      process.exit(1);
+    }
+  }
+}
+
 // ==================== Main ====================
 
 function getArgValue(args: string[], flag: string): string | undefined {
@@ -1783,6 +1937,12 @@ export async function main(args: string[]) {
     case 'agent':
       await cmdAgent(args.slice(1));
       break;
+    case 'aid':
+      await cmdAid(args.slice(1));
+      break;
+    case 'agentmd':
+      await cmdAgentmd(args.slice(1));
+      break;
     default:
       console.log(`Usage: evolclaw {init|start|stop|restart|status|logs|ctl|diagnose|mv}
 
@@ -1809,6 +1969,13 @@ Commands:
                   agent <name>       查看指定 agent 详情
                   agent new <name>   创建新 agent（交互式）
                   agent reload <n>   热重载 agent 配置
+  aid             AID 身份管理
+                  aid list           列出本地所有 AID
+                  aid new <aid>      创建新 AID 身份
+  agentmd         agent.md 管理
+                  agentmd <aid>      查看 agent.md
+                  agentmd put <aid>  上传本地 agent.md
+                  agentmd set <aid> <内容>  设置并上传
   diagnose      诊断启动环境（配置、数据库、进程）
   mv <old> <new>  迁移项目目录（保留 Claude/Codex/EvolClaw 会话）
 

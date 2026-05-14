@@ -70,8 +70,35 @@ export class AUNChannel {
     if (!this.config.aunTrace) return;
     this.rotateTraceIfNeeded();
     if (!this.traceStream) return;
-    const line = JSON.stringify({ ts: localTimestamp(), dir, event, data });
+
+    // 自动从 data 推断顶层字段（self_aid / peer_aid / group_id / task_id / chatmode），
+    // 便于 jq 过滤：`jq 'select(.task_id == "task-xxx")'`
+    const d = (data && typeof data === 'object') ? data as any : {};
+    const payload = d.payload ?? {};
+    const topContext: Record<string, any> = {
+      self_aid: this._aid ?? this.config.aid,
+    };
+    // peer / group 识别
+    const peerAid = d.to ?? d.from ?? d.sender_aid ?? payload.to;
+    if (peerAid) topContext.peer_aid = peerAid;
+    const groupId = d.group_id ?? payload.group_id;
+    if (groupId) topContext.group_id = groupId;
+    // task_id / chatmode（message.send / thought.put / status 都可能有）
+    const taskId = payload.task_id ?? d.context?.id ?? d.data?.task_id;
+    if (taskId) topContext.task_id = taskId;
+    const chatmode = payload.chatmode;
+    if (chatmode) topContext.chatmode = chatmode;
+
+    const line = JSON.stringify({ ts: localTimestamp(), dir, event, ...topContext, data });
     this.traceStream.write(line + '\n');
+  }
+
+  /** 日志前缀（含 self aid 简称，多实例可识别） */
+  private logPrefix(): string {
+    const aid = this._aid ?? this.config.aid;
+    if (!aid) return '[AUN]';
+    const short = aid.split('.')[0] || aid;
+    return `[AUN ${short}]`;
   }
 
   /**
@@ -96,7 +123,7 @@ export class AUNChannel {
         code: e?.code,
         name: e?.name,
       });
-      logger.warn(`[AUN] rpc ${method} failed: ${e?.name ?? ''}(${e?.code ?? ''}) ${e?.message ?? e}`);
+      logger.warn(`${this.logPrefix()} rpc ${method} failed: ${e?.name ?? ''}(${e?.code ?? ''}) ${e?.message ?? e}`);
       throw e;
     }
   }
@@ -131,6 +158,18 @@ export class AUNChannel {
     const trimmed = aid.trim();
     if (!trimmed) return undefined;
     return trimmed.split('.')[0] || trimmed;
+  }
+
+  /** 同步获取对端显示名（仅从缓存，不触发网络请求）。用于日志中补充对端标识。
+   *  返回 `shortAid(displayName)` 或 `shortAid`，若 aid 为空返回 '?'
+   */
+  private peerLabel(aid?: string): string {
+    if (!aid) return '?';
+    const bareAid = aid.includes(':') ? aid.substring(0, aid.indexOf(':')) : aid;
+    const short = this.getShortAid(bareAid) ?? bareAid;
+    const cached = this.peerInfoCache.get(bareAid);
+    const name = cached?.name;
+    return name && name !== short ? `${short}(${name})` : short;
   }
 
   private extractTextPayload(payload: unknown): string {
@@ -176,6 +215,18 @@ export class AUNChannel {
     return false;
   }
 
+  /** 从正文提取 @aid（AID 格式：至少三段域名），用于出站填充 payload.mentions */
+  private static readonly MENTION_AID_RE = /@([a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?){2,})/g;
+  private extractMentionAidsFromText(text: string): string[] {
+    const out: string[] = [];
+    const seen = new Set<string>();
+    for (const m of text.matchAll(AUNChannel.MENTION_AID_RE)) {
+      const aid = m[1];
+      if (!seen.has(aid)) { seen.add(aid); out.push(aid); }
+    }
+    return out;
+  }
+
   private buildGroupReplyContext(taskId: string | undefined, senderAid: string, encrypted: boolean): ReplyContext {
     const replyContext: ReplyContext = { metadata: { encrypted } };
     if (taskId) replyContext.threadId = taskId;
@@ -186,7 +237,7 @@ export class AUNChannel {
   private acknowledgeImmediately(messageId: string | undefined, seq?: number): void {
     if (seq != null && this.client) {
       this.client.call('message.ack', { seq }).catch(e => {
-        logger.debug(`[AUN] Immediate ack failed: ${e}`);
+        logger.debug(`${this.logPrefix()} Immediate ack failed: ${e}`);
       });
     }
     if (messageId) this.messageSeqMap.delete(messageId);
@@ -235,7 +286,7 @@ export class AUNChannel {
   constructor(private config: AUNConfig) {
     if (config.aunTrace) {
       this.rotateTraceIfNeeded();
-      logger.info(`[AUN] Trace logging enabled (daily rotation): ${resolvePaths().logs}/aun-YYYYMMDD.log`);
+      logger.info(`${this.logPrefix()} Trace logging enabled (daily rotation): ${resolvePaths().logs}/aun-YYYYMMDD.log`);
     }
   }
 
@@ -271,18 +322,18 @@ export class AUNChannel {
       try {
         const discovery = new GatewayDiscovery({});
         gateway = await discovery.discover(wellKnownUrl);
-        logger.info(`[AUN] Gateway discovered: ${gateway}`);
+        logger.info(`${this.logPrefix()} Gateway discovered: ${gateway}`);
       } catch (e) {
-        logger.warn(`[AUN] Well-known discovery failed (${e}), no fallback available`);
+        logger.warn(`${this.logPrefix()} Well-known discovery failed (${e}), no fallback available`);
       }
     }
 
     if (!gateway) {
-      logger.error('[AUN] Cannot resolve gateway URL from AID');
+      logger.error(`${this.logPrefix()} Cannot resolve gateway URL from AID`);
       throw new Error('Cannot resolve gateway URL from AID');
     }
 
-    logger.info(`[AUN] Initializing: aid=${aidName}, gateway=${gateway}, aun_path=${aunPath}`);
+    logger.info(`${this.logPrefix()} Initializing: aid=${aidName}, gateway=${gateway}, aun_path=${aunPath}`);
 
     // Create client with FileSecretStore (AES-256-GCM)
     // 不传 encryption_seed 时，SDK 自动从 {aun_path}/.seed 文件派生密钥（与 aun_cli.py 对齐）
@@ -300,14 +351,14 @@ export class AUNChannel {
       this.trace('IN', 'message.received', data);
       const kind = (data && typeof data === 'object') ? (data as any).kind ?? '' : '';
       const keys = (data && typeof data === 'object') ? Object.keys(data as any).join(',') : typeof data;
-      logger.debug(`[AUN][DIAG] message.received: kind=${kind} keys=${keys}`);
+      logger.debug(`${this.logPrefix()}[DIAG] message.received: kind=${kind} keys=${keys}`);
       this.handleIncomingPrivateMessage(data);
     });
     this.client.on('group.message_created', (data: unknown) => {
       this.trace('IN', 'group.message_created', data);
       const gid = (data && typeof data === 'object') ? (data as any).group_id ?? '' : '';
       const sender = (data && typeof data === 'object') ? (data as any).sender_aid ?? '' : '';
-      logger.debug(`[AUN][DIAG] group.message_created: group_id=${gid} sender=${sender}`);
+      logger.debug(`${this.logPrefix()}[DIAG] group.message_created: group_id=${gid} sender=${sender}`);
       this.handleIncomingGroupMessage(data);
     });
     this.client.on('connection.state', (data: unknown) => {
@@ -321,7 +372,7 @@ export class AUNChannel {
         if (Array.isArray(ids)) {
           for (const id of ids) {
             if (typeof id === 'string') {
-              logger.info(`[AUN] Message recalled: ${id}`);
+              logger.info(`${this.logPrefix()} Message recalled: ${id}`);
               this.recallHandler?.(id);
             }
           }
@@ -331,12 +382,12 @@ export class AUNChannel {
     this.client.on('message.undecryptable', (data: unknown) => {
       this.trace('IN', 'message.undecryptable', data);
       const d = data as Record<string, any>;
-      logger.warn(`[AUN] Message undecryptable: from=${d.from} mid=${d.message_id} err=${d._decrypt_error}`);
+      logger.warn(`${this.logPrefix()} Message undecryptable: from=${d.from} mid=${d.message_id} err=${d._decrypt_error}`);
     });
     this.client.on('group.message_undecryptable', (data: unknown) => {
       this.trace('IN', 'group.message_undecryptable', data);
       const d = data as Record<string, any>;
-      logger.warn(`[AUN] Group message undecryptable: group=${d.group_id} from=${d.from} mid=${d.message_id} err=${d._decrypt_error}`);
+      logger.warn(`${this.logPrefix()} Group message undecryptable: group=${d.group_id} from=${d.from} mid=${d.message_id} err=${d._decrypt_error}`);
     });
 
     // Authenticate
@@ -354,7 +405,7 @@ export class AUNChannel {
 
     let accessToken: string;
     try {
-      logger.info(`[AUN] Authenticating as ${aidName}...`);
+      logger.info(`${this.logPrefix()} Authenticating as ${aidName}...`);
       this.trace('OUT', 'auth.authenticate', { aid: aidName });
       const auth = await this.client.auth.authenticate(aidName ? { aid: aidName } : undefined);
       this.trace('OUT', 'auth.authenticate.ok', { aid: auth.aid, gateway: auth.gateway, hasToken: !!auth.access_token });
@@ -362,21 +413,21 @@ export class AUNChannel {
       accessToken = auth.access_token as string;
       const resolvedGateway = (auth.gateway as string) || gateway;
       (this.client as any)._gatewayUrl = resolvedGateway;
-      logger.info(`[AUN] Authenticated as ${auth.aid ?? '?'}, gateway=${resolvedGateway}`);
+      logger.info(`${this.logPrefix()} Authenticated as ${auth.aid ?? '?'}, gateway=${resolvedGateway}`);
     } catch (e: any) {
       const errMsg = e.message || String(e);
       const errName = e.constructor?.name || 'Error';
       this.trace('OUT', 'auth.authenticate.error', { error: errMsg, name: errName });
-      logger.error(`[AUN] Authentication failed (${errName}): ${errMsg}`);
-      if (e.stack) logger.debug(`[AUN] Auth stack: ${e.stack}`);
+      logger.error(`${this.logPrefix()} Authentication failed (${errName}): ${errMsg}`);
+      if (e.stack) logger.debug(`${this.logPrefix()} Auth stack: ${e.stack}`);
       // Fallback: try direct token from env/config (legacy)
       accessToken = this.config.accessToken || process.env.AUN_ACCESS_TOKEN || '';
       if (!accessToken) {
-        logger.error(`[AUN] No accessToken fallback available, scheduling retry`);
+        logger.error(`${this.logPrefix()} No accessToken fallback available, scheduling retry`);
         this.scheduleReconnect();
         throw new Error('Authentication failed and no accessToken fallback available');
       }
-      logger.warn(`[AUN] Using accessToken fallback`);
+      logger.warn(`${this.logPrefix()} Using accessToken fallback`);
     }
 
     // Connect (SDK auto_reconnect handles transient failures)
@@ -402,17 +453,17 @@ export class AUNChannel {
         const cert = clientAny._keystore?.loadCert?.(aidName);
         if (cert) {
           clientAny._identity.cert = cert;
-          logger.info('[AUN] Backfilled identity.cert from keystore for e2ee fingerprint');
+          logger.info(`${this.logPrefix()} Backfilled identity.cert from keystore for e2ee fingerprint`);
         }
       }
 
-      logger.info(`[AUN] Connected as ${this._aid}`);
+      logger.info(`${this.logPrefix()} Connected as ${this._aid}`);
 
       // Send welcome message to owner after first connection
       await this.sendWelcomeMessage();
     } catch (e) {
       this.trace('OUT', 'client.connect.error', { error: String(e) });
-      logger.error(`[AUN] Connection failed: ${e}`);
+      logger.error(`${this.logPrefix()} Connection failed: ${e}`);
       this.scheduleReconnect();
       throw e;
     }
@@ -422,7 +473,7 @@ export class AUNChannel {
     try {
       const owner = this.config.owner;
       if (!owner) {
-        logger.info('[AUN] No owner configured, skipping welcome message');
+        logger.info(`${this.logPrefix()} No owner configured, skipping welcome message`);
         return;
       }
 
@@ -432,28 +483,28 @@ export class AUNChannel {
       const agentMdPath = path.join(os.homedir(), '.aun', 'AIDs', aidName, 'agent.md');
 
       if (!fs.existsSync(agentMdPath)) {
-        logger.warn('[AUN] agent.md not found, skipping welcome message');
+        logger.warn(`${this.logPrefix()} agent.md not found, skipping welcome message`);
         return;
       }
 
       const agentMdContent = fs.readFileSync(agentMdPath, 'utf-8');
       const match = agentMdContent.match(/^---\n([\s\S]*?)\n---/);
       if (!match) {
-        logger.warn('[AUN] agent.md frontmatter not found');
+        logger.warn(`${this.logPrefix()} agent.md frontmatter not found`);
         return;
       }
 
       const frontmatter = match[1];
       const initializedMatch = frontmatter.match(/^initialized:\s*(true|false)/m);
       if (!initializedMatch || initializedMatch[1] === 'true') {
-        logger.info('[AUN] Agent already initialized, skipping welcome message');
+        logger.info(`${this.logPrefix()} Agent already initialized, skipping welcome message`);
         return;
       }
 
       // Fetch owner's agent.md to derive name and validate type
       const ownerInfo = await this.fetchPeerInfo(owner);
       if (ownerInfo.type !== null && ownerInfo.type !== 'human') {
-        logger.warn(`[AUN] Owner ${owner} type is "${ownerInfo.type}" (not human). Consider using a human AID as owner.`);
+        logger.warn(`${this.logPrefix()} Owner ${owner} type is "${ownerInfo.type}" (not human). Consider using a human AID as owner.`);
       }
 
       // Name: prefer existing agent.md name if user has customized it,
@@ -500,14 +551,14 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
 
       // Write locally
       fs.writeFileSync(agentMdPath, newAgentMd, 'utf-8');
-      logger.info('[AUN] Updated agent.md with initialized=true');
+      logger.info(`${this.logPrefix()} Updated agent.md with initialized=true`);
 
       // Publish to AUN network via auth.uploadAgentMd
       try {
         await (this.client as any).auth.uploadAgentMd(newAgentMd);
-        logger.info('[AUN] Published agent.md to AUN network');
+        logger.info(`${this.logPrefix()} Published agent.md to AUN network`);
       } catch (e) {
-        logger.warn(`[AUN] Failed to publish agent.md: ${e}`);
+        logger.warn(`${this.logPrefix()} Failed to publish agent.md: ${e}`);
       }
 
       // Send welcome message
@@ -538,7 +589,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       await new Promise(resolve => setTimeout(resolve, 3000));
 
       if (!this.client) {
-        logger.warn('[AUN] Client disconnected before welcome message could be sent');
+        logger.warn(`${this.logPrefix()} Client disconnected before welcome message could be sent`);
         return;
       }
       await this.callAndTrace('message.send', {
@@ -547,9 +598,9 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
         encrypt: true,
         persist_required: true,
       });
-      logger.info(`[AUN] Welcome message sent to owner: ${owner}`);
+      logger.info(`${this.logPrefix()} Welcome message sent to owner: ${owner}`);
     } catch (e) {
-      logger.warn(`[AUN] Failed to send welcome message: ${e}`);
+      logger.warn(`${this.logPrefix()} Failed to send welcome message: ${e}`);
     }
   }
 
@@ -564,7 +615,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     const filename = att.filename || objectKey.split('/').pop() || 'unknown';
 
     if (!objectKey) {
-      logger.warn('[AUN] Attachment missing object_key, skipping');
+      logger.warn(`${this.logPrefix()} Attachment missing object_key, skipping`);
       return null;
     }
 
@@ -576,11 +627,11 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       });
       downloadUrl = (ticket.download_url as string) || '';
       if (!downloadUrl) {
-        logger.warn(`[AUN] No download_url for attachment: ${filename}`);
+        logger.warn(`${this.logPrefix()} No download_url for attachment: ${filename}`);
         return null;
       }
     } catch (e) {
-      logger.warn(`[AUN] create_download_ticket failed for ${filename}: ${e}`);
+      logger.warn(`${this.logPrefix()} create_download_ticket failed for ${filename}: ${e}`);
       return null;
     }
 
@@ -588,12 +639,12 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     try {
       const res = await fetch(downloadUrl);
       if (!res.ok) {
-        logger.warn(`[AUN] Download failed for ${filename}: HTTP ${res.status}`);
+        logger.warn(`${this.logPrefix()} Download failed for ${filename}: HTTP ${res.status}`);
         return null;
       }
       buffer = Buffer.from(await res.arrayBuffer());
     } catch (e) {
-      logger.warn(`[AUN] Download error for ${filename}: ${e}`);
+      logger.warn(`${this.logPrefix()} Download error for ${filename}: ${e}`);
       return null;
     }
 
@@ -601,7 +652,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       const { createHash } = await import('node:crypto');
       const actual = createHash('sha256').update(buffer).digest('hex');
       if (actual !== att.sha256) {
-        logger.warn(`[AUN] SHA256 mismatch for ${filename}: expected ${att.sha256.slice(0, 8)}… got ${actual.slice(0, 8)}…`);
+        logger.warn(`${this.logPrefix()} SHA256 mismatch for ${filename}: expected ${att.sha256.slice(0, 8)}… got ${actual.slice(0, 8)}…`);
         return null;
       }
     }
@@ -612,10 +663,10 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
 
     try {
       const result = saveToUploads(buffer, filename, projectPath);
-      logger.info(`[AUN] Saved attachment: ${result.filePath} (${result.size} bytes)`);
+      logger.info(`${this.logPrefix()} Saved attachment: ${result.filePath} (${result.size} bytes)`);
       return result.filePath;
     } catch (e) {
-      logger.warn(`[AUN] saveToUploads failed for ${filename}: ${e}`);
+      logger.warn(`${this.logPrefix()} saveToUploads failed for ${filename}: ${e}`);
       return null;
     }
   }
@@ -636,7 +687,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     const msgChatId = typeof payload === 'object' && payload !== null && (payload as any).chat_id;
     if (this._aid && fromAid === this._aid && (!msgChatId || !this._chatId || msgChatId !== this._chatId)) {
       this.acknowledgeImmediately(messageId, seq);
-      logger.debug(`[AUN] P2P dropped: echo from self (from=${fromAid} mid=${messageId})`);
+      logger.debug(`${this.logPrefix()} P2P dropped: echo from self (from=${fromAid} mid=${messageId})`);
       return;
     }
 
@@ -682,7 +733,12 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     const peerInfo = await this.fetchPeerInfo(fromAid);
     const shortAid = this.getShortAid(fromAid);
     const displayName = peerInfo.name || shortAid;
-    logger.info(`[AUN] P2P dispatched: from=${shortAid}(${displayName}) mid=${messageId} encrypt=${msgEncrypted} text=${finalText.slice(0, 60)}`);
+
+    // 详细 dispatch 决策日志：记录消息为何被路由到 agent
+    const p2pPayloadType = (payload && typeof payload === 'object') ? (payload as any).type ?? '' : '';
+    logger.info(`${this.logPrefix()} P2P dispatch decision: mid=${messageId} from=${shortAid}(${displayName}) peerType=${peerInfo.type || 'unknown'} payloadType=${p2pPayloadType} chatId=${chatId} encrypt=${msgEncrypted} textPreview=${JSON.stringify(text.slice(0, 80))}`);
+
+    logger.info(`${this.logPrefix()} P2P dispatched: from=${shortAid}(${displayName}) mid=${messageId} encrypt=${msgEncrypted} text=${finalText.slice(0, 60)}`);
     const replyContext: ReplyContext = { metadata: { encrypted: msgEncrypted } };
     if (taskId) replyContext.threadId = taskId;
     this.dispatchMessage({
@@ -717,17 +773,17 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       ? (payload as any).mentions.filter((m: unknown) => typeof m === 'string')
       : [];
 
-    logger.debug(`[AUN][DIAG-GRP] full_msg=${JSON.stringify(msg).substring(0, 500)}`);
+    logger.debug(`${this.logPrefix()}[DIAG-GRP] full_msg=${JSON.stringify(msg).substring(0, 500)}`);
 
     if (!groupId || !senderAid) {
       this.acknowledgeImmediately(messageId, seq);
-      logger.debug(`[AUN] Group dropped: missing groupId or senderAid (mid=${messageId})`);
+      logger.debug(`${this.logPrefix()} Group dropped: missing groupId or senderAid (mid=${messageId})`);
       return;
     }
 
     if (this._aid && senderAid === this._aid) {
       this.acknowledgeImmediately(messageId, seq);
-      logger.debug(`[AUN] Group dropped: own message (group=${groupId} mid=${messageId})`);
+      logger.debug(`${this.logPrefix()} Group dropped: own message (group=${groupId} mid=${messageId})`);
       return;
     }
 
@@ -740,7 +796,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
 
         if (!AUNChannel.PROACTIVE_ALLOW_TYPES.has(payloadType)) {
           this.acknowledgeImmediately(messageId, seq);
-          logger.debug(`[AUN] Group dropped (proactive deny): type=${payloadType} group=${groupId} sender=${senderAid} mid=${messageId}`);
+          logger.info(`${this.logPrefix()} Group dropped (proactive deny): type=${payloadType} group=${groupId} sender=${senderAid} mid=${messageId}`);
           return;
         }
 
@@ -751,11 +807,12 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
         const mentionsSelf = !!this._aid && (
           this.hasExplicitMention(rawText, this._aid) || mentionAids.includes(this._aid)
         );
-        const mentionsAll = this.hasExplicitMention(rawText, 'all') || this.hasMentionAll(rawMentions);
+        // @all 仅认结构化 mentions（payload.mentions），不扫描正文 — 避免引述性 "@all" 误判
+        const mentionsAll = this.hasMentionAll(rawMentions);
 
         if (!mentionsSelf && !mentionsAll) {
           this.acknowledgeImmediately(messageId, seq);
-          logger.debug(`[AUN] Group dropped (proactive whitelist): type=${payloadType} group=${groupId} sender=${senderAid} mid=${messageId}`);
+          logger.info(`${this.logPrefix()} Group dropped (proactive whitelist): type=${payloadType} group=${groupId} sender=${senderAid} mid=${messageId} textPreview=${JSON.stringify(rawText.slice(0, 80))}`);
           return;
         }
       }
@@ -771,12 +828,13 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     const mentionedSelf = this._aid
       ? (this.hasExplicitMention(text, this._aid) || payloadMentions.includes(this._aid))
       : false;
-    const mentionedAll = this.hasExplicitMention(text, 'all') || payloadMentions.includes('all');
+    // @all 仅认结构化 mentions（payload.mentions），不扫描正文 — 避免引述性 "@all" 误判
+    const mentionedAll = payloadMentions.includes('all');
 
     // In mention mode, only respond when explicitly mentioned; in broadcast mode, respond to all
     if (dispatchMode === 'mention' && !mentionedSelf && !mentionedAll) {
       this.acknowledgeImmediately(messageId, seq);
-      logger.debug(`[AUN] Group missed: unmentioned in mention-mode (group=${groupId} sender=${senderAid} mid=${messageId})`);
+      logger.info(`${this.logPrefix()} Group dropped: unmentioned in mention-mode (group=${groupId} sender=${senderAid} mid=${messageId} textPreview=${JSON.stringify(text.slice(0, 80))})`);
       return;
     }
 
@@ -791,7 +849,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     // Allow through if there's text OR attachments; both-empty messages are silently dropped
     if (!strippedText && !hasAttachments) {
       this.acknowledgeImmediately(messageId, seq);
-      logger.debug(`[AUN] Group dropped: empty text and no attachments (group=${groupId} sender=${senderAid} mid=${messageId})`);
+      logger.debug(`${this.logPrefix()} Group dropped: empty text and no attachments (group=${groupId} sender=${senderAid} mid=${messageId})`);
       return;
     }
 
@@ -822,7 +880,21 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     const peerInfo = await this.fetchPeerInfo(senderAid);
     const shortAid = this.getShortAid(senderAid);
     const displayName = peerInfo.name || shortAid;
-    logger.info(`[AUN] Group dispatched: group=${groupId} sender=${shortAid}(${displayName}) mode=${dispatchMode} mid=${messageId} text=${finalText.slice(0, 60)}`);
+
+    // 详细 dispatch 决策日志：记录消息为何被路由到 agent
+    const payloadType = (payload && typeof payload === 'object') ? (payload as any).type ?? '' : '';
+    const textMentionSelf = this._aid ? this.hasExplicitMention(text, this._aid) : false;
+    const textMentionAll = this.hasExplicitMention(text, 'all');
+    const structMentionSelf = this._aid ? payloadMentions.includes(this._aid) : false;
+    const structMentionAll = payloadMentions.includes('all');
+    const reason = mentionedAll
+      ? 'mention.all(struct)'
+      : mentionedSelf
+        ? (structMentionSelf ? 'mention.self(struct)' : 'mention.self(text)')
+        : `${dispatchMode}.no-mention`;
+    logger.info(`${this.logPrefix()} Group dispatch decision: mid=${messageId} group=${groupId} sender=${shortAid}(${displayName}) peerType=${peerInfo.type || 'unknown'} payloadType=${payloadType} dispatchMode=${dispatchMode} reason=${reason} structMentions=${JSON.stringify(payloadMentions)} textMentionSelf=${textMentionSelf} textMentionAll=${textMentionAll} structMentionSelf=${structMentionSelf} structMentionAll=${structMentionAll} encrypt=${msgEncrypted} textPreview=${JSON.stringify(text.slice(0, 80))}`);
+
+    logger.info(`${this.logPrefix()} Group dispatched: group=${groupId} sender=${shortAid}(${displayName}) mode=${dispatchMode} mid=${messageId} text=${finalText.slice(0, 60)}`);
     this.dispatchMessage({
       channelId: groupId,
       userId: senderAid,
@@ -879,7 +951,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       mentions: mentionObjects,
       replyContext,
     }).catch(err => {
-      logger.error('[AUN] Message handler error:', err);
+      logger.error(`${this.logPrefix()} Message handler error:`, err);
     });
   }
 
@@ -893,12 +965,13 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       this.lastReconnectLogTime = 0;
       this.lastReconnectLogAttempt = 0;
       this.trace('IN', 'connection.state', data);
-      logger.info('[AUN] Connected');
+      logger.info(`${this.logPrefix()} Connected`);
     } else if (state === 'disconnected') {
       this.connected = false;
       this.trace('IN', 'connection.state', data);
-      logger.warn(`[AUN] Disconnected: ${(data as Record<string, any>).error ?? 'unknown'}`);
+      logger.warn(`${this.logPrefix()} Disconnected: ${(data as Record<string, any>).error ?? 'unknown'}`);
     } else if (state === 'reconnecting') {
+      this.connected = false;
       const attempt = (data as Record<string, any>).attempt ?? 0;
       const now = Date.now();
 
@@ -909,7 +982,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       if (isFirst || isStep || isInterval) {
         const suppressed = attempt - this.lastReconnectLogAttempt - 1;
         const suffix = suppressed > 0 ? `, ${suppressed} suppressed since last log` : '';
-        logger.info(`[AUN] SDK reconnecting (attempt ${attempt}${suffix})`);
+        logger.info(`${this.logPrefix()} SDK reconnecting (attempt ${attempt}${suffix})`);
         this.lastReconnectLogTime = now;
         this.lastReconnectLogAttempt = attempt;
         this.trace('IN', 'connection.state', data);
@@ -917,7 +990,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
 
       // Detect runaway SDK reconnect loop: force disconnect and use TS-layer backoff
       if (attempt >= AUNChannel.SDK_RECONNECT_GIVEUP && !this.intentionalDisconnect) {
-        logger.warn(`[AUN] SDK reconnect stuck at attempt ${attempt}, forcing TS-layer reconnect with backoff`);
+        logger.warn(`${this.logPrefix()} SDK reconnect stuck at attempt ${attempt}, forcing TS-layer reconnect with backoff`);
         this.connected = false;
         if (this.client) {
           this.trace('OUT', 'client.close', { reason: 'sdk_reconnect_stuck' });
@@ -930,7 +1003,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       this.connected = false;
       this.trace('IN', 'connection.state', data);
       const reason = (data as Record<string, any>).reason ?? '';
-      logger.error(`[AUN] Terminal failure: ${(data as Record<string, any>).error ?? 'unknown'}${reason ? ` (${reason})` : ''}`);
+      logger.error(`${this.logPrefix()} Terminal failure: ${(data as Record<string, any>).error ?? 'unknown'}${reason ? ` (${reason})` : ''}`);
       if (!this.intentionalDisconnect) {
         this.scheduleReconnect();
       }
@@ -957,12 +1030,12 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
 
   async sendMessage(channelId: string, text: string, context?: ReplyContext): Promise<void> {
     if (!this.connected || !this.client) {
-      logger.warn('[AUN] Cannot send: not connected');
+      logger.warn(`${this.logPrefix()} Cannot send: not connected`);
       return;
     }
 
     if (!text?.trim()) {
-      logger.warn('[AUN] Attempted to send empty message, skipping');
+      logger.warn(`${this.logPrefix()} Attempted to send empty message, skipping`);
       return;
     }
 
@@ -981,6 +1054,11 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     }
 
     const payload: Record<string, any> = { type: 'text', text: finalText };
+    // 出站群消息：从正文提取 @aid 填入结构化 mentions（与 aun CLI 对齐，方便对端按 mentions 过滤）
+    if (this.isGroupId(channelId)) {
+      const extracted = this.extractMentionAidsFromText(finalText);
+      if (extracted.length > 0) payload.mentions = extracted;
+    }
     if (context?.threadId) payload.thread_id = context.threadId;
     if (context?.metadata?.taskId) payload.task_id = context.metadata.taskId;
     if (context?.metadata?.chatmode) payload.chatmode = context.metadata.chatmode;
@@ -1006,26 +1084,26 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
         if (!result || !result.message_id) {
           const dispatchStatus = result?.message_dispatch?.status;
           if (dispatchStatus === 'debounced' || dispatchStatus === 'dispatched') {
-            logger.info(`[AUN] group.send ok (${dispatchStatus}): group=${channelId} encrypt=${encrypt} text=${finalText.slice(0, 60)}`);
+            logger.info(`${this.logPrefix()} group.send ok (${dispatchStatus}): group=${channelId} encrypt=${encrypt} text=${finalText.slice(0, 60)}`);
           } else {
-            logger.warn(`[AUN] group.send returned no message_id: ${JSON.stringify(result)}`);
+            logger.warn(`${this.logPrefix()} group.send returned no message_id: ${JSON.stringify(result)}`);
           }
         } else {
-          logger.info(`[AUN] group.send ok: group=${channelId} mid=${result.message_id} encrypt=${encrypt} text=${finalText.slice(0, 60)}`);
+          logger.info(`${this.logPrefix()} group.send ok: group=${channelId} mid=${result.message_id} encrypt=${encrypt} text=${finalText.slice(0, 60)}`);
         }
       } else {
         params.to = targetAid;
         const result = await this.callAndTrace<any>('message.send', params);
         if (!result || !result.message_id) {
-          logger.warn(`[AUN] message.send returned no message_id: ${JSON.stringify(result)}`);
+          logger.warn(`${this.logPrefix()} message.send returned no message_id: ${JSON.stringify(result)}`);
         } else {
-          logger.info(`[AUN] message.send ok: to=${targetAid} mid=${result.message_id} encrypt=${encrypt} text=${finalText.slice(0, 60)}`);
+          logger.info(`${this.logPrefix()} message.send ok: to=${this.peerLabel(targetAid)} mid=${result.message_id} encrypt=${encrypt} text=${finalText.slice(0, 60)}`);
         }
       }
     } catch (e) {
       if (encrypt && e instanceof E2EEError) {
         this.peerE2ee.set(encryptTarget, { ok: false, ts: Date.now() });
-        logger.warn(`[AUN] E2EE send failed to ${channelId}, retrying plaintext: ${e}`);
+        logger.warn(`${this.logPrefix()} E2EE send failed to ${channelId}, retrying plaintext: ${e}`);
         params.encrypt = false;
         try {
           if (isGroup) {
@@ -1033,23 +1111,23 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
             const result = await this.client.call('group.send', params);
             this.trace('OUT', 'group.send.fallback.ok', { message_id: (result as any)?.message_id });
             if (!result || !(result as any).message_id) {
-              logger.warn(`[AUN] group.send fallback returned no message_id: ${JSON.stringify(result)}`);
+              logger.warn(`${this.logPrefix()} group.send fallback returned no message_id: ${JSON.stringify(result)}`);
             }
           } else {
             this.trace('OUT', 'message.send.fallback', params);
             const result = await this.client.call('message.send', params);
             this.trace('OUT', 'message.send.fallback.ok', { message_id: (result as any)?.message_id });
             if (!result || !(result as any).message_id) {
-              logger.warn(`[AUN] message.send fallback returned no message_id: ${JSON.stringify(result)}`);
+              logger.warn(`${this.logPrefix()} message.send fallback returned no message_id: ${JSON.stringify(result)}`);
             }
           }
         } catch (e2) {
           this.trace('OUT', 'send.fallback.error', { channelId, error: String(e2) });
-          logger.error(`[AUN] Plaintext fallback also failed to ${channelId}: ${e2}`);
+          logger.error(`${this.logPrefix()} Plaintext fallback also failed to ${channelId}: ${e2}`);
         }
       } else {
         this.trace('OUT', 'send.error', { channelId, error: String(e) });
-        logger.error(`[AUN] Send failed to ${channelId}: ${e}`);
+        logger.error(`${this.logPrefix()} Send failed to ${channelId}: ${e}`);
       }
     }
   }
@@ -1084,36 +1162,36 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       if (this.isGroupId(channelId)) {
         params.group_id = targetId;
         await this.callAndTrace('group.thought.put', params);
-        logger.info(`[AUN] thought.put ok group=${targetId} task=${taskId} stage=${stage} encrypt=${encrypt}`);
+        logger.info(`${this.logPrefix()} thought.put ok group=${targetId} task=${taskId} stage=${stage} encrypt=${encrypt}`);
       } else {
         params.to = targetId;
         await this.callAndTrace('message.thought.put', params);
-        logger.info(`[AUN] thought.put ok p2p=${targetId} task=${taskId} stage=${stage} encrypt=${encrypt}`);
+        logger.info(`${this.logPrefix()} thought.put ok p2p=${this.peerLabel(targetId)} task=${taskId} stage=${stage} encrypt=${encrypt}`);
       }
     } catch (e) {
       const err = e as any;
-      logger.debug(`[AUN] thought.put failed to ${channelId}: ${err?.name}(${err?.code})=${err?.message}`);
+      logger.debug(`${this.logPrefix()} thought.put failed to ${channelId}: ${err?.name}(${err?.code})=${err?.message}`);
     }
   }
 
   async sendFile(channelId: string, filePath: string, context?: ReplyContext): Promise<void> {
     if (!this.connected || !this.client) {
-      logger.warn('[AUN] Cannot sendFile: not connected');
+      logger.warn(`${this.logPrefix()} Cannot sendFile: not connected`);
       return;
     }
 
     const absPath = path.resolve(filePath);
     if (!fs.existsSync(absPath)) {
-      logger.warn(`[AUN] sendFile: file not found: ${absPath}`);
+      logger.warn(`${this.logPrefix()} sendFile: file not found: ${absPath}`);
       return;
     }
     const stat = fs.statSync(absPath);
     if (stat.size === 0) {
-      logger.warn('[AUN] sendFile: file is empty');
+      logger.warn(`${this.logPrefix()} sendFile: file is empty`);
       return;
     }
     if (stat.size > 10 * 1024 * 1024) {
-      logger.warn(`[AUN] sendFile: file too large (${formatSize(stat.size)}, max 10 MB)`);
+      logger.warn(`${this.logPrefix()} sendFile: file too large (${formatSize(stat.size)}, max 10 MB)`);
       return;
     }
 
@@ -1195,7 +1273,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
           const result = await this.client.call('group.send', params);
           this.trace('OUT', 'group.send.file.ok', { message_id: (result as any)?.message_id });
           if (!result || !(result as any).message_id) {
-            logger.warn(`[AUN] group.send.file returned no message_id: ${JSON.stringify(result)}`);
+            logger.warn(`${this.logPrefix()} group.send.file returned no message_id: ${JSON.stringify(result)}`);
           }
         } else {
           params.to = fileTargetAid;
@@ -1203,7 +1281,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
           const result = await this.client.call('message.send', params);
           this.trace('OUT', 'message.send.file.ok', { message_id: (result as any)?.message_id });
           if (!result || !(result as any).message_id) {
-            logger.warn(`[AUN] message.send.file returned no message_id: ${JSON.stringify(result)}`);
+            logger.warn(`${this.logPrefix()} message.send.file returned no message_id: ${JSON.stringify(result)}`);
           }
         }
       } catch (sendErr) {
@@ -1213,31 +1291,31 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
         });
         if (encrypt && sendErr instanceof E2EEError) {
           this.peerE2ee.set(encryptTarget, { ok: false, ts: Date.now() });
-          logger.warn(`[AUN] E2EE sendFile failed to ${channelId}, retrying plaintext: ${sendErr}`);
+          logger.warn(`${this.logPrefix()} E2EE sendFile failed to ${channelId}, retrying plaintext: ${sendErr}`);
           params.encrypt = false;
           if (isGroup) {
             this.trace('OUT', 'group.send.file.fallback', params);
             const result = await this.client.call('group.send', params);
             this.trace('OUT', 'group.send.file.fallback.ok', { message_id: (result as any)?.message_id });
             if (!result || !(result as any).message_id) {
-              logger.warn(`[AUN] group.send.file fallback returned no message_id: ${JSON.stringify(result)}`);
+              logger.warn(`${this.logPrefix()} group.send.file fallback returned no message_id: ${JSON.stringify(result)}`);
             }
           } else {
             this.trace('OUT', 'message.send.file.fallback', params);
             const result = await this.client.call('message.send', params);
             this.trace('OUT', 'message.send.file.fallback.ok', { message_id: (result as any)?.message_id });
             if (!result || !(result as any).message_id) {
-              logger.warn(`[AUN] message.send.file fallback returned no message_id: ${JSON.stringify(result)}`);
+              logger.warn(`${this.logPrefix()} message.send.file fallback returned no message_id: ${JSON.stringify(result)}`);
             }
           }
         } else {
           throw sendErr;
         }
       }
-      logger.info(`[AUN] File sent: ${filename} (${formatSize(stat.size)}) → ${channelId}`);
+      logger.info(`${this.logPrefix()} File sent: ${filename} (${formatSize(stat.size)}) → ${channelId}`);
     } catch (e) {
       this.trace('OUT', 'sendFile.error', { channelId, filePath, error: String(e) });
-      logger.error(`[AUN] sendFile failed for ${channelId}: ${e}`);
+      logger.error(`${this.logPrefix()} sendFile failed for ${channelId}: ${e}`);
     }
   }
 
@@ -1285,13 +1363,13 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       this.client!.call(method, params).catch(e => {
         if (encrypt && e instanceof E2EEError) {
           this.peerE2ee.set(encryptTarget, { ok: false, ts: Date.now() });
-          logger.warn(`[AUN] E2EE status send failed to ${channelId}, retrying plaintext`);
+          logger.warn(`${this.logPrefix()} E2EE status send failed to ${channelId}, retrying plaintext`);
           params.encrypt = false;
           this.client!.call(method, params).catch(e2 => {
-            logger.debug(`[AUN] Processing status fallback failed: ${e2}`);
+            logger.debug(`${this.logPrefix()} Processing status fallback failed: ${e2}`);
           });
         } else {
-          logger.debug(`[AUN] Processing status failed: ${e}`);
+          logger.debug(`${this.logPrefix()} Processing status failed: ${e}`);
         }
       });
     };
@@ -1305,7 +1383,10 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       this.trace('OUT', 'message.send.status', params);
       sendWithFallback('message.send');
     }
-    logger.info(`[AUN] task.${status} task=${taskId} session=${sessionId} encrypt=${encrypt} target=${channelId}`);
+    // 群聊显示 group id 简称，P2P 显示 peer label；从 context.metadata 读取 chatmode
+    const targetLabel = this.isGroupId(channelId) ? channelId : this.peerLabel(channelId);
+    const chatmode = context?.metadata?.chatmode ?? '?';
+    logger.info(`${this.logPrefix()} task.${status} task=${taskId} session=${sessionId} chatmode=${chatmode} encrypt=${encrypt} target=${targetLabel}`);
   }
 
   sendCustomPayload(channelId: string, payload: string): void {
@@ -1335,7 +1416,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       this.trace('OUT', 'message.send.custom.ok', { message_id: result?.message_id });
     }).catch(e => {
       this.trace('OUT', 'message.send.custom.error', { error: String(e) });
-      logger.warn(`[AUN] Custom payload failed: ${e}`);
+      logger.warn(`${this.logPrefix()} Custom payload failed: ${e}`);
     });
   }
 
@@ -1356,12 +1437,12 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       this.client = null;
     }
     this.connected = false;
-    logger.info('[AUN] Disconnected');
+    logger.info(`${this.logPrefix()} Disconnected`);
     if (this.traceStream) {
       this.traceStream.end();
       this.traceStream = null;
     }
-    logger.info('[AUN] Disconnected');
+    logger.info(`${this.logPrefix()} Disconnected`);
   }
 
   // ── TS-layer reconnect (fallback when SDK auto_reconnect exhausted) ──
@@ -1372,26 +1453,26 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
 
     const delays = AUNChannel.RECONNECT_DELAYS;
     if (this.reconnectAttempt >= delays.length) {
-      logger.error(`[AUN] All ${delays.length} reconnect attempts exhausted, giving up`);
+      logger.error(`${this.logPrefix()} All ${delays.length} reconnect attempts exhausted, giving up`);
       this.onChannelDown?.();
       return;
     }
 
     const delay = delays[this.reconnectAttempt];
     this.reconnectAttempt++;
-    logger.info(`[AUN] Scheduling reconnect #${this.reconnectAttempt}/${delays.length} in ${delay}s`);
+    logger.info(`${this.logPrefix()} Scheduling reconnect #${this.reconnectAttempt}/${delays.length} in ${delay}s`);
 
     this.reconnectTimer = setTimeout(async () => {
       this.reconnectTimer = null;
       try {
-        logger.info(`[AUN] Reconnect #${this.reconnectAttempt} starting...`);
+        logger.info(`${this.logPrefix()} Reconnect #${this.reconnectAttempt} starting...`);
         this.trace('OUT', 'reconnect.start', { attempt: this.reconnectAttempt });
         await this.initClient();
         this.trace('OUT', 'reconnect.ok', { attempt: this.reconnectAttempt });
-        logger.info(`[AUN] Reconnect #${this.reconnectAttempt} succeeded`);
+        logger.info(`${this.logPrefix()} Reconnect #${this.reconnectAttempt} succeeded`);
       } catch (err) {
         this.trace('OUT', 'reconnect.error', { attempt: this.reconnectAttempt, error: String(err) });
-        logger.error(`[AUN] Reconnect #${this.reconnectAttempt} failed:`, err);
+        logger.error(`${this.logPrefix()} Reconnect #${this.reconnectAttempt} failed:`, err);
         this.scheduleReconnect();
       }
     }, delay * 1000);
@@ -1465,7 +1546,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       setTimeout(() => this.peerInfoCache.delete(aid), 30 * 60 * 1000);
       return info;
     } catch (e) {
-      logger.debug(`[AUN] fetchPeerInfo failed for ${aid}: ${e}`);
+      logger.debug(`${this.logPrefix()} fetchPeerInfo failed for ${aid}: ${e}`);
       return { type: null };  // no agent.md → unknown
     }
   }
