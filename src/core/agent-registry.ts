@@ -310,13 +310,21 @@ export class AgentRegistry {
 
   private toInfo(agent: EvolAgent): AgentInfo {
     let baseagent = 'claude';
-    try { baseagent = agent.baseagent; } catch { /* invalid config */ }
+    let model: string | undefined;
+    let effort: string | undefined;
+    try {
+      baseagent = agent.baseagent;
+      model = agent.model;
+      effort = agent.effort;
+    } catch { /* invalid config */ }
     return {
       name: agent.name,
       status: agent.status,
       channels: agent.channelInstanceNames(),
       projectPath: agent.config.projects?.defaultPath ?? '',
       baseagent,
+      model,
+      effort,
       lastActivity: agent.lastActivity,
       activeSessions: agent.activeSessions,
       error: agent.error,

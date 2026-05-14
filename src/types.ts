@@ -388,6 +388,8 @@ export interface AgentInfo {
   channels: string[];
   projectPath: string;
   baseagent: string;
+  model?: string;
+  effort?: string;
   lastActivity?: number;
   activeSessions?: number;
   error?: string;

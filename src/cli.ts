@@ -623,6 +623,27 @@ async function cmdStatus() {
     }
   }
 
+  // EvolAgent summary (via IPC, only when running)
+  if (pid) {
+    try {
+      const agentResult = await ipcQuery(p.socket, { type: 'evolagent.list' }) as any;
+      if (agentResult?.ok && agentResult.agents?.length > 0) {
+        const agents = agentResult.agents.filter((a: any) => !a.isDefault);
+        if (agents.length > 0) {
+          console.log('');
+          console.log('🤖 EvolAgents:');
+          for (const a of agents) {
+            const statusIcon = a.status === 'running' ? '●' : a.status === 'error' ? '✗' : a.status === 'disabled' ? '○' : '◌';
+            const channels = a.channels?.join(', ') || '—';
+            console.log(`  ${statusIcon} ${a.name.padEnd(14)} ${a.status.padEnd(10)} ${channels}`);
+          }
+        }
+      }
+    } catch {
+      // IPC query for agents failed — skip section
+    }
+  }
+
   console.log('');
   console.log('📁 Log Files:');
   const mainLog = path.join(p.logs, 'evolclaw.log');
@@ -1485,9 +1506,21 @@ async function cmdAgent(args: string[]): Promise<void> {
       console.error('Usage: evolclaw agent reload <name>');
       process.exit(1);
     }
-    // Phase 1 stub: no IPC yet
-    console.error('⚠ evolclaw 未运行或 IPC 未就绪，请使用 evolclaw restart 重新加载所有 agent');
-    process.exit(1);
+    const p = resolvePaths();
+    try {
+      const result = await ipcQuery(p.socket, { type: 'evolagent.reload', name }) as any;
+      if (result && result.ok) {
+        console.log(`✓ Agent "${name}" reloaded`);
+      } else {
+        console.error(`✗ Reload failed: ${result?.error || 'unknown error'}`);
+        process.exit(1);
+      }
+    } catch {
+      console.error('⚠ evolclaw 未运行，请先 evolclaw start 后再 reload');
+      console.log('  或直接 evolclaw restart 重新加载所有 agent');
+      process.exit(1);
+    }
+    return;
   }
 
   // `evolclaw agent <name>` — show detail
@@ -1497,6 +1530,18 @@ async function cmdAgent(args: string[]): Promise<void> {
 async function cmdAgentList(): Promise<void> {
   const p = resolvePaths();
 
+  // Try IPC first (running process has real status)
+  try {
+    const result = await ipcQuery(p.socket, { type: 'evolagent.list' }) as any;
+    if (result && result.ok && result.agents) {
+      printAgentTable(result.agents);
+      return;
+    }
+  } catch {
+    // IPC unavailable — fall through to cold mode
+  }
+
+  // Cold mode: read from disk
   const { AgentRegistry } = await import('./core/agent-registry.js');
   const { loadConfig } = await import('./config.js');
 
@@ -1509,22 +1554,28 @@ async function cmdAgentList(): Promise<void> {
 
   const registry = new AgentRegistry(p.agentsDir);
   registry.loadAll(config);
-  const list = registry.list();
+  printAgentTable(registry.list());
+}
 
+function printAgentTable(list: any[]): void {
   if (list.length === 0) {
     console.log('No agents configured.');
     return;
   }
 
-  // Table output
-  console.log('NAME'.padEnd(14) + 'STATUS'.padEnd(10) + 'CHANNELS'.padEnd(24) + 'PROJECT'.padEnd(22) + 'BASEAGENT'.padEnd(11) + 'LAST ACTIVE');
+  console.log(
+    'NAME'.padEnd(14) + 'STATUS'.padEnd(10) + 'CHANNELS'.padEnd(24) +
+    'PROJECT'.padEnd(22) + 'BASEAGENT'.padEnd(11) + 'LAST ACTIVE'
+  );
   for (const info of list) {
     const name = info.isDefault ? '[default]' : info.name;
-    const status = info.status;
-    const channels = info.channels.length > 0 ? info.channels.join(', ').slice(0, 22) : '—';
+    const status = info.status || 'stopped';
+    const channels = info.channels?.length > 0 ? info.channels.join(', ').slice(0, 22) : '—';
     const project = info.projectPath ? path.basename(info.projectPath) : '—';
     const baseagent = info.baseagent || '—';
-    const lastActive = info.lastActivity ? formatTimeAgo(Date.now() - info.lastActivity) : '—';
+    const lastActive = info.lastActivity
+      ? formatTimeAgo(Date.now() - info.lastActivity)
+      : '—';
     console.log(
       name.padEnd(14) +
       status.padEnd(10) +
@@ -1539,6 +1590,27 @@ async function cmdAgentList(): Promise<void> {
 async function cmdAgentShow(name: string): Promise<void> {
   const p = resolvePaths();
 
+  // Try IPC first
+  try {
+    const result = await ipcQuery(p.socket, { type: 'evolagent.show', name }) as any;
+    if (result && result.ok && result.agent) {
+      const info = result.agent;
+      console.log(`${info.name} (${info.status})\n`);
+      console.log(`  Baseagent:  ${info.baseagent}`);
+      if (info.model) console.log(`  Model:      ${info.model}`);
+      if (info.effort) console.log(`  Effort:     ${info.effort}`);
+      console.log(`  Project:    ${info.projectPath}`);
+      console.log(`  Channels:   ${info.channels?.join(', ') || '—'}`);
+      if (info.activeSessions) console.log(`  Sessions:   ${info.activeSessions} active`);
+      if (info.lastActivity) console.log(`  Last active: ${formatTimeAgo(Date.now() - info.lastActivity)}`);
+      if (info.error) console.log(`  Error:      ${info.error}`);
+      return;
+    }
+  } catch {
+    // IPC unavailable — fall through to cold mode
+  }
+
+  // Cold mode
   const { AgentRegistry } = await import('./core/agent-registry.js');
   const { loadConfig } = await import('./config.js');
 
