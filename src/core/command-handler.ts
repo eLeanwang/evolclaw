@@ -171,6 +171,7 @@ export class CommandHandler {
     resolveByChannel(channel: string): { name: string; projectPath: string; baseagent: string; isDefault?: boolean } | undefined;
     get?(name: string): any;
     list?(): any[];
+    reload?(name: string, hooks: any): Promise<void>;
   };
 
   /** 按 agentId 获取 agent，回退到默认 */
@@ -201,6 +202,7 @@ export class CommandHandler {
     resolveByChannel(channel: string): { name: string; projectPath: string; baseagent: string; isDefault?: boolean } | undefined;
     get?(name: string): any;
     list?(): any[];
+    reload?(name: string, hooks: any): Promise<void>;
   }): void {
     this.agentRegistry = registry;
   }
@@ -3245,8 +3247,15 @@ export class CommandHandler {
         if (!this.agentRegistry) return { ok: false, error: 'AgentRegistry not available' };
         const a = this.agentRegistry.get ? this.agentRegistry.get(name) : null;
         if (!a) return { ok: false, error: `Agent "${name}" not found` };
-        // T11 will implement actual reload
-        return { ok: true, result: `Agent "${name}" reload triggered` };
+        const hooks = (globalThis as any).__evolclaw_reloadHooks;
+        if (!hooks) return { ok: false, error: 'Reload hooks not initialized' };
+        if (!this.agentRegistry.reload) return { ok: false, error: 'AgentRegistry.reload not available' };
+        try {
+          await this.agentRegistry.reload(name, hooks);
+          return { ok: true, result: `Agent "${name}" reloaded` };
+        } catch (e: any) {
+          return { ok: false, error: `Reload failed: ${e?.message || e}` };
+        }
       }
       return { ok: false, error: '用法: evolclaw ctl evolagent [reload <name>]' };
     }

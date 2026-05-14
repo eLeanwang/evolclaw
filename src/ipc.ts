@@ -135,11 +135,13 @@ export class IpcServer {
         if (!this.agentRegistry) return { ok: false, error: 'AgentRegistry not available' };
         const name = cmd.name;
         if (!name || typeof name !== 'string') return { ok: false, error: 'missing name' };
+        const hooks = (globalThis as any).__evolclaw_reloadHooks;
+        if (!hooks) return { ok: false, error: 'Reload hooks not initialized' };
         try {
           const a = this.agentRegistry.get(name);
           if (!a) return { ok: false, error: `Agent "${name}" not found` };
-          // Stub for now — T11 will implement the actual reload logic
-          return { ok: true, result: `Agent "${name}" reload requested (pending T11 implementation)` };
+          await this.agentRegistry.reload(name, hooks);
+          return { ok: true, result: `Agent "${name}" reloaded` };
         } catch (e: any) {
           return { ok: false, error: e?.message || String(e) };
         }

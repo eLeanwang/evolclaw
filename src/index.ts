@@ -23,7 +23,7 @@ import { PermissionGateway } from './core/permission.js';
 import { InteractionRouter } from './core/interaction-router.js';
 import { ChannelLoader, type ChannelInstance } from './core/channel-loader.js';
 import { AgentLoader } from './core/agent-loader.js';
-import { AgentRegistry } from './core/agent-registry.js';
+import { AgentRegistry, type ReloadHooks } from './core/agent-registry.js';
 import { IpcServer, IpcStatusResponse, ChannelStatus } from './ipc.js';
 import { ChannelAdapter, Message } from './types.js';
 import { logger, setLogLevel } from './utils/logger.js';
@@ -667,6 +667,83 @@ async function main() {
     };
   }, async (cmd, sessionId) => cmdHandler.handleCtl(cmd, sessionId));
   ipcServer.start();
+
+  // Wire AgentRegistry into IPC for evolagent.* handlers
+  if (typeof (ipcServer as any).setAgentRegistry === 'function') {
+    (ipcServer as any).setAgentRegistry(agentRegistry);
+  }
+
+  // ── Reload hooks: enable agentRegistry.reload() to drain/disconnect/restart channels ──
+  const reloadHooks: ReloadHooks = {
+    async drainChannel(channelName: string): Promise<void> {
+      // Wait for any in-flight messages on this channel to complete
+      // For Phase 2 MVP: brief delay; messageQueue tracking is per-session
+      logger.info(`[Reload] Draining channel: ${channelName}`);
+      await new Promise(r => setTimeout(r, 500));
+    },
+
+    async disconnectChannel(channelName: string): Promise<void> {
+      const inst = channelInstances.find(i => i.adapter.channelName === channelName);
+      if (!inst) {
+        logger.warn(`[Reload] Channel ${channelName} not found, skipping disconnect`);
+        return;
+      }
+      try {
+        await inst.disconnect();
+        const idx = channelInstances.indexOf(inst);
+        if (idx >= 0) channelInstances.splice(idx, 1);
+        logger.info(`[Reload] Disconnected channel: ${channelName}`);
+      } catch (e) {
+        logger.error(`[Reload] Failed to disconnect ${channelName}: ${e}`);
+      }
+    },
+
+    async startChannel(agent: any, channelName: string): Promise<void> {
+      // Locate channelType for the named channel inside agent.config.channels
+      const channels = agent.config.channels;
+      let channelType: string | null = null;
+      for (const [type, raw] of Object.entries(channels)) {
+        const instances = Array.isArray(raw) ? raw : [raw];
+        for (const inst of instances) {
+          const name = (inst as any).name ?? type;
+          if (name === channelName) {
+            channelType = type;
+            break;
+          }
+        }
+        if (channelType) break;
+      }
+      if (!channelType) {
+        logger.error(`[Reload] Channel ${channelName} not found in agent ${agent.name} config`);
+        return;
+      }
+
+      // Construct a partial config for createAll
+      const partialConfig: any = {
+        agents: agent.config.agents,
+        channels: { [channelType]: channels[channelType] },
+        projects: agent.config.projects,
+      };
+
+      try {
+        const newInstances = await channelLoader.createAll(partialConfig);
+        const newInst = newInstances.find(i => i.adapter.channelName === channelName);
+        if (!newInst) {
+          logger.error(`[Reload] Failed to create instance ${channelName}`);
+          return;
+        }
+        registerChannelInstance(newInst);
+        await newInst.connect();
+        channelInstances.push(newInst);
+        logger.info(`[Reload] Started channel: ${channelName}`);
+      } catch (e) {
+        logger.error(`[Reload] Failed to start ${channelName}: ${e}`);
+      }
+    },
+  };
+
+  // Make reload hooks accessible to IPC handler & ctl handler (both run in this process)
+  (globalThis as any).__evolclaw_reloadHooks = reloadHooks;
 
   // 运行时配置文件监控
   const configPath = resolvePaths().config;
