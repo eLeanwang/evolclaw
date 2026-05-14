@@ -2861,12 +2861,12 @@ export class CommandHandler {
         }
       }
 
-      if (!targetSession && sessionName.length === 8) {
+      if (!targetSession && sessionName.length >= 8) {
         targetSession = await this.sessionManager.getSessionByUuidPrefix(channel, channelId, sessionName);
       }
 
       const canImport = policy.canImportCliSession(session?.chatType || 'private', identity.role);
-      if (!targetSession && sessionName.length === 8 && canImport) {
+      if (!targetSession && sessionName.length >= 8 && canImport) {
         const projectPaths = Object.values(this.projects);
 
         if (session) {
@@ -2993,7 +2993,7 @@ export class CommandHandler {
         }
       }
 
-      if (!targetSession && sessionName.length === 8) {
+      if (!targetSession && sessionName.length >= 8) {
         targetSession = await this.sessionManager.getSessionByUuidPrefix(channel, channelId, sessionName);
       }
 
