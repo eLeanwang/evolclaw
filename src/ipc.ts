@@ -1,6 +1,7 @@
 import net from 'net';
 import fs from 'fs';
 import { logger } from './utils/logger.js';
+import type { AgentRegistryHandle } from './types.js';
 
 const isWindows = process.platform === 'win32';
 const isNamedPipe = (p: string) => isWindows && p.startsWith('\\\\.\\pipe\\');
@@ -44,7 +45,7 @@ type CommandExecutor = (cmd: string, sessionId: string) => Promise<IpcCtlRespons
 
 export class IpcServer {
   private server: net.Server | null = null;
-  private agentRegistry?: any;
+  private agentRegistry?: AgentRegistryHandle;
 
   constructor(
     private socketPath: string,
@@ -53,7 +54,7 @@ export class IpcServer {
   ) {}
 
   /** Inject AgentRegistry for evolagent.* IPC handlers */
-  setAgentRegistry(registry: any): void {
+  setAgentRegistry(registry: AgentRegistryHandle): void {
     this.agentRegistry = registry;
   }
 
@@ -128,7 +129,7 @@ export class IpcServer {
         if (!name || typeof name !== 'string') return { ok: false, error: 'missing name' };
         const agent = this.agentRegistry.get(name);
         if (!agent) return { ok: false, error: `Agent "${name}" not found` };
-        const info = this.agentRegistry.list().find((i: any) => i.name === name);
+        const info = this.agentRegistry.list().find((i) => i.name === name);
         // I7: null-guard list().find() result
         if (!info) return { ok: false, error: `Agent "${name}" found but info missing (race?)` };
         return { ok: true, agent: info };
@@ -142,6 +143,7 @@ export class IpcServer {
         try {
           const a = this.agentRegistry.get(name);
           if (!a) return { ok: false, error: `Agent "${name}" not found` };
+          if (!this.agentRegistry.reload) return { ok: false, error: 'AgentRegistry.reload not available' };
           await this.agentRegistry.reload(name, hooks);
           return { ok: true, result: `Agent "${name}" reloaded` };
         } catch (e: any) {

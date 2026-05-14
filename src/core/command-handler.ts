@@ -1,4 +1,4 @@
-import { Config, ChannelAdapter, Session, ChannelPolicy, InteractionRequest, ReplyContext, ActionInteraction, DEFAULT_PERMISSION_MODE } from '../types.js';
+import { Config, ChannelAdapter, Session, ChannelPolicy, InteractionRequest, ReplyContext, ActionInteraction, DEFAULT_PERMISSION_MODE, type AgentRegistryHandle, type EvolAgentHandle } from '../types.js';
 import { SessionManager } from './session/session-manager.js';
 import { type AgentRunnerFull, hasModelSwitcher, hasPermissionController } from '../agents/claude-runner.js';
 import { MessageCache } from './message/message-cache.js';
@@ -167,12 +167,7 @@ export class CommandHandler {
   private statsCollector?: StatsCollector;
   private agentMap: Map<string, AgentRunnerFull>;
   private defaultAgentId: string;
-  private agentRegistry?: {
-    resolveByChannel(channel: string): { name: string; projectPath: string; baseagent: string; isDefault?: boolean } | undefined;
-    get?(name: string): any;
-    list?(): any[];
-    reload?(name: string, hooks: any): Promise<void>;
-  };
+  private agentRegistry?: AgentRegistryHandle;
 
   /** 按 agentId 获取 agent，回退到默认 */
   private getAgent(agentId?: string): AgentRunnerFull {
@@ -198,17 +193,12 @@ export class CommandHandler {
   }
 
   /** 注入 AgentRegistry，用于判断通道是否被 EvolAgent 管理 */
-  setAgentRegistry(registry: {
-    resolveByChannel(channel: string): { name: string; projectPath: string; baseagent: string; isDefault?: boolean } | undefined;
-    get?(name: string): any;
-    list?(): any[];
-    reload?(name: string, hooks: any): Promise<void>;
-  }): void {
+  setAgentRegistry(registry: AgentRegistryHandle): void {
     this.agentRegistry = registry;
   }
 
   /** 返回管理当前通道的 EvolAgent（非 default），无则返回 null */
-  private getOwningAgent(channel: string): { name: string; projectPath: string; baseagent: string } | null {
+  private getOwningAgent(channel: string): EvolAgentHandle | null {
     if (!this.agentRegistry) return null;
     const agent = this.agentRegistry.resolveByChannel(channel);
     if (!agent || agent.isDefault) return null;
@@ -3253,7 +3243,7 @@ export class CommandHandler {
           return { ok: false, error: '权限不足：evolagent reload 仅 owner/admin 可用' };
         }
         if (!this.agentRegistry) return { ok: false, error: 'AgentRegistry not available' };
-        const a = this.agentRegistry.get ? this.agentRegistry.get(name) : null;
+        const a = this.agentRegistry.get(name);
         if (!a) return { ok: false, error: `Agent "${name}" not found` };
         const hooks = (globalThis as any).__evolclaw_reloadHooks;
         if (!hooks) return { ok: false, error: 'Reload hooks not initialized' };

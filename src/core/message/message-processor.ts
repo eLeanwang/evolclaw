@@ -12,7 +12,7 @@ import { logger } from '../../utils/logger.js';
 import { getErrorMessage, classifyError, ErrorType, ERROR_PREFIX, isInfraError, prefixErrorType, isRetryableError } from '../../utils/error-utils.js';
 import { EventBus } from '../event-bus.js';
 import { summarizeToolInput } from '../permission.js';
-import type { Message, Config, Session, ChannelAdapter, ChannelOptions, ChannelPolicy, CommandHandler, ReplyContext } from '../../types.js';
+import type { Message, Config, Session, ChannelAdapter, ChannelOptions, ChannelPolicy, CommandHandler, ReplyContext, AgentContext, AgentRegistryHandle } from '../../types.js';
 import { DEFAULT_PERMISSION_MODE } from '../../types.js';
 import { getOwner } from '../../config.js';
 import { getPackageRoot, resolveRoot } from '../../paths.js';
@@ -87,17 +87,17 @@ export class MessageProcessor {
     this.messageQueue = queue;
   }
 
-  private agentRegistry?: any;
+  private agentRegistry?: AgentRegistryHandle;
 
-  setAgentRegistry(registry: any): void {
+  setAgentRegistry(registry: AgentRegistryHandle): void {
     this.agentRegistry = registry;
   }
 
-  private getAgentContext(channelName: string, chatType: string): any | null {
+  private getAgentContext(channelName: string, chatType: string): AgentContext | null {
     if (!this.agentRegistry) return null;
     const agent = this.agentRegistry.resolveByChannel(channelName);
     if (!agent) return null;
-    const globalCm = (this.config as any).chatmode;
+    const globalCm = this.config.chatmode;
     return agent.getContext(channelName, chatType, globalCm);
   }
 

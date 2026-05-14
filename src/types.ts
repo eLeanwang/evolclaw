@@ -393,3 +393,28 @@ export interface AgentInfo {
   error?: string;
   isDefault?: boolean;
 }
+
+/**
+ * Structural handle for EvolAgent — captures the surface needed by IpcServer,
+ * MessageProcessor, and CommandHandler without importing the EvolAgent class
+ * (avoids circular imports). The actual EvolAgent class satisfies this shape.
+ */
+export interface EvolAgentHandle {
+  readonly name: string;
+  readonly isDefault: boolean;
+  readonly baseagent: string;
+  readonly projectPath: string;
+  getContext(channelName: string, chatType: string, globalChatmode?: { private?: 'interactive' | 'proactive'; group?: 'interactive' | 'proactive' }): AgentContext;
+}
+
+/**
+ * Structural handle for AgentRegistry — captures the surface needed by IpcServer,
+ * MessageProcessor, and CommandHandler without importing the AgentRegistry class
+ * (avoids circular imports). The actual AgentRegistry class satisfies this shape.
+ */
+export interface AgentRegistryHandle {
+  resolveByChannel(channelName: string): EvolAgentHandle | null;
+  get(name: string): EvolAgentHandle | null;
+  list(): AgentInfo[];
+  reload?(name: string, hooks: unknown): Promise<void>;
+}
