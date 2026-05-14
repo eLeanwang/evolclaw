@@ -215,9 +215,27 @@ async function main() {
 
   const evolagentInstances: ChannelInstance[] = [];
   for (const agent of agentRegistry.runnableAgents()) {
+    // Rewrite channel instance names with agent prefix to avoid collisions
+    // with DefaultAgent and other EvolAgents.
+    // Rule (EvolAgent only):
+    //   - explicit name → `${agent.name}-${type}-${name}`
+    //   - omitted name  → `${agent.name}-${type}`
+    const rewrittenChannels: Record<string, any> = {};
+    for (const [type, raw] of Object.entries(agent.config.channels || {})) {
+      if (type === 'defaultChannel') { rewrittenChannels[type] = raw; continue; }
+      const instances = Array.isArray(raw) ? raw : [raw];
+      const rewritten = instances.map((inst: any) => {
+        if (!inst || typeof inst !== 'object') return inst;
+        const effName = agent.effectiveChannelName(type, inst.name);
+        return { ...inst, name: effName };
+      });
+      // Preserve original shape (array vs single object)
+      rewrittenChannels[type] = Array.isArray(raw) ? rewritten : rewritten[0];
+    }
+
     const agentConfig = {
       agents: agent.config.agents,
-      channels: agent.config.channels,
+      channels: rewrittenChannels,
       projects: agent.config.projects,
     } as any;
     try {

@@ -46,13 +46,29 @@ export class EvolAgent {
     return this.config.projects.defaultPath;
   }
 
+  /**
+   * Compute the effective channel-instance name (used as registry key, session.channel, etc).
+   *
+   * - DefaultAgent: rawName ?? type  (preserves backward-compat with evolclaw.json)
+   * - EvolAgent:
+   *   - rawName present → `${agent.name}-${type}-${rawName}`
+   *   - rawName absent  → `${agent.name}-${type}`
+   *
+   * The agent-name prefix avoids collisions with DefaultAgent channels, e.g.
+   * test-bot's aun → "test-bot-aun" instead of "aun".
+   */
+  effectiveChannelName(type: string, rawName: string | undefined): string {
+    if (this.isDefault) return rawName ?? type;
+    return rawName ? `${this.name}-${type}-${rawName}` : `${this.name}-${type}`;
+  }
+
   channelInstanceNames(): string[] {
     const names: string[] = [];
     for (const [type, raw] of Object.entries(this.config.channels || {})) {
       const instances = Array.isArray(raw) ? raw : [raw];
       for (const inst of instances) {
         if (!inst || typeof inst !== 'object') continue;
-        names.push((inst as any).name ?? type);
+        names.push(this.effectiveChannelName(type, (inst as any).name));
       }
     }
     return names;
@@ -60,8 +76,7 @@ export class EvolAgent {
 
   /**
    * Locate a channel-instance config block within this agent's config by
-   * matching either the explicit `name` field or the channel-type key (when
-   * the instance has no explicit name and is not in array form).
+   * matching the effective channel name (with agent prefix for EvolAgents).
    * Returns the raw mutable instance object, or `null` if not found.
    */
   findChannelInstance(channelName: string): any | null {
@@ -71,8 +86,8 @@ export class EvolAgent {
       const instances = Array.isArray(raw) ? raw : [raw];
       for (const inst of instances) {
         if (!inst || typeof inst !== 'object') continue;
-        const instName = (inst as any).name ?? type;
-        if (instName === channelName) return inst;
+        const effName = this.effectiveChannelName(type, (inst as any).name);
+        if (effName === channelName) return inst;
       }
     }
     return null;
