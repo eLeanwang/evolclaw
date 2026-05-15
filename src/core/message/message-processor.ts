@@ -35,10 +35,23 @@ export class MessageProcessor {
   private messageQueue?: MessageQueue;
   private skillsEnsured = false; // 全局 SKILLS.md 是否已确保
 
-  /** 按 agentId 获取 agent，回退到默认 */
-  getAgent(agentId?: string): AgentRunnerFull {
-    if (agentId && this.agentMap.has(agentId)) return this.agentMap.get(agentId)!;
-    return this.agentMap.get(this.defaultAgentId) || this.agentMap.values().next().value!;
+  /**
+   * Get the runner for a given (channel, baseagent) pair.
+   *
+   * - `channel` is used to look up the owning EvolAgent (via registry).
+   * - `baseagent` (e.g. 'claude') comes from `session.agentId`.
+   *
+   * Falls back to `defaultAgentId` (a composite key, e.g. `[default]::claude`)
+   * when no match is found.
+   */
+  getAgent(channel?: string, baseagent?: string): AgentRunnerFull {
+    if (channel && baseagent) {
+      const evolName = this.agentRegistry?.resolveByChannel(channel)?.name || '[default]';
+      const key = `${evolName}::${baseagent}`;
+      if (this.agentMap.has(key)) return this.agentMap.get(key)!;
+    }
+    if (this.agentMap.has(this.defaultAgentId)) return this.agentMap.get(this.defaultAgentId)!;
+    return this.agentMap.values().next().value!;
   }
 
   /** 获取可用 agent 列表 */
@@ -64,11 +77,11 @@ export class MessageProcessor {
   ) {
     if (agentRunnerOrMap instanceof Map) {
       this.agentMap = agentRunnerOrMap;
-      this.defaultAgentId = defaultAgentId || 'claude';
+      this.defaultAgentId = defaultAgentId || '[default]::claude';
     } else {
-      // 向后兼容：单个 agentRunner
-      this.agentMap = new Map([[agentRunnerOrMap.name, agentRunnerOrMap]]);
-      this.defaultAgentId = agentRunnerOrMap.name;
+      // Backward-compat single-runner path.
+      this.agentMap = new Map([[`[default]::${agentRunnerOrMap.name}`, agentRunnerOrMap]]);
+      this.defaultAgentId = `[default]::${agentRunnerOrMap.name}`;
     }
 
     // 监听中断事件，标记被中断的 session
@@ -197,7 +210,7 @@ export class MessageProcessor {
     }
 
     // 按 session.agentId 选择 agent 后端
-    const agent = this.getAgent(session.agentId);
+    const agent = this.getAgent(channelKey, session.agentId);
 
     const monitorEnabled = this.config.idleMonitor?.enabled !== false;
     const showIdleMonitor = policy.showIdleMonitor(chatType, identityRole);
@@ -329,7 +342,7 @@ export class MessageProcessor {
     }
 
     const { adapter, options } = channelInfo;
-    const agent = this.getAgent(session.agentId);
+    const agent = this.getAgent(channelKey, session.agentId);
     const streamKey = session.id;
 
     // 为本次任务处理生成唯一 task_id（客户端生成，格式 task-{10hex}）

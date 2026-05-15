@@ -477,16 +477,26 @@ export class GeminiRunner implements AgentRunnerFull, ModelSwitcher {
 export class GeminiAgentPlugin implements AgentPlugin {
   readonly name = 'gemini';
 
-  isEnabled(config: Config): boolean {
+  isEnabled(globalConfig: Config, agent: import('../core/evolagent.js').EvolAgent): boolean {
+    if (!agent.config.agents?.gemini) return false;
     try {
-      const resolved = resolveGoogleConfig(config);
+      const override = agent.config.agents.gemini as any;
+      const resolved = resolveGoogleConfig(globalConfig, override);
       return !!resolved.cliPath;
     } catch {
       return false;
     }
   }
 
-  createAgent(config: Config, callbacks: AgentCallbacks): AgentInstance {
-    return { agent: new GeminiRunner(config, callbacks) };
+  createAgent(globalConfig: Config, agent: import('../core/evolagent.js').EvolAgent, callbacks: AgentCallbacks): AgentInstance | null {
+    const override = agent.config.agents?.gemini as any;
+    const merged: Config = {
+      ...globalConfig,
+      agents: {
+        ...(globalConfig.agents || {}),
+        gemini: { ...(globalConfig.agents?.gemini || {}), ...(override || {}) },
+      },
+    } as Config;
+    return { evolagentName: agent.name, baseagent: 'gemini', agent: new GeminiRunner(merged, callbacks) };
   }
 }

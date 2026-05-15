@@ -137,10 +137,20 @@ export class EvolAgentRegistry {
   private buildDefaultAgent(globalConfig: Config): EvolAgent {
     const agents: any = globalConfig.agents || {};
     const defaultName = agents.defaultAgent || 'claude';
+    // Include ALL declared baseagents (not just defaultName) so that
+    // AgentLoader creates runners for each, enabling /agent switching.
+    const baseagentBlock: Record<string, any> = {};
+    const KNOWN_BASEAGENTS = ['claude', 'codex', 'gemini', 'hermes'];
+    for (const ba of KNOWN_BASEAGENTS) {
+      if (agents[ba] !== undefined) baseagentBlock[ba] = agents[ba];
+    }
+    if (Object.keys(baseagentBlock).length === 0) {
+      baseagentBlock[defaultName] = agents[defaultName] || {};
+    }
     const cfg: EvolAgentConfig = {
       name: '[default]',
       enabled: true,
-      agents: { [defaultName]: agents[defaultName] || {} },
+      agents: baseagentBlock,
       channels: (globalConfig.channels as any) || {},
       projects: { defaultPath: globalConfig.projects?.defaultPath || process.cwd() },
       chatmode: (globalConfig as any).chatmode,

@@ -1281,22 +1281,35 @@ export class AgentRunner {
 export class ClaudeAgentPlugin implements AgentPlugin {
   readonly name = 'claude';
 
-  isEnabled(config: Config): boolean {
-    return true;
+  isEnabled(_globalConfig: Config, agent: import('../core/evolagent.js').EvolAgent): boolean {
+    // Only instantiate this baseagent for agents that declare it.
+    return !!agent.config.agents?.claude;
   }
 
-  createAgent(config: Config, callbacks: AgentCallbacks): AgentInstance {
-    const anthropic = resolveAnthropicConfig(config);
+  createAgent(globalConfig: Config, agent: import('../core/evolagent.js').EvolAgent, callbacks: AgentCallbacks): AgentInstance | null {
+    // Per-agent override: read from agent.json's agents.claude block first.
+    const override = agent.config.agents?.claude as
+      | { apiKey?: string; baseUrl?: string; model?: string; effort?: 'low' | 'medium' | 'high' | 'max'; pathToClaudeCodeExecutable?: string }
+      | undefined;
+    const anthropic = resolveAnthropicConfig(globalConfig, override);
+    // Merge per-agent claude block into config so runner reads useSettingSources etc.
+    const merged: Config = {
+      ...globalConfig,
+      agents: {
+        ...(globalConfig.agents || {}),
+        claude: { ...(globalConfig.agents?.claude || {}), ...(override || {}) },
+      },
+    } as Config;
     const agentRunner = new AgentRunner(
       anthropic.apiKey,
       anthropic.model,
       callbacks.onSessionIdUpdate,
       anthropic.baseUrl,
-      config
+      merged
     );
     if (anthropic.effort) {
       agentRunner.setEffort(anthropic.effort);
     }
-    return { agent: agentRunner };
+    return { evolagentName: agent.name, baseagent: 'claude', agent: agentRunner };
   }
 }

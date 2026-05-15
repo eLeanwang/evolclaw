@@ -142,7 +142,7 @@ function formatIdleTime(ms: number): string {
 }
 
 // 支持的命令列表
-const commands = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/effort', '/agent', '/slist', '/session', '/rename', '/stop', '/clear', '/compact', '/repair', '/safe', '/fork', '/del', '/perm', '/file', '/check', '/rewind', '/activity', '/aid', '/agentmd', '/chatmode', '/ask'];
+const commands = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/evolhelp', '/status', '/restart', '/model', '/setmodel', '/effort', '/agent', '/slist', '/session', '/rename', '/stop', '/clear', '/compact', '/repair', '/safe', '/fork', '/del', '/perm', '/file', '/check', '/rewind', '/activity', '/aid', '/agentmd', '/chatmode', '/ask', '/resume'];
 
 // 命令别名映射
 const aliases: Record<string, string> = {
@@ -153,7 +153,7 @@ const aliases: Record<string, string> = {
 };
 
 // 命令快速路径前缀（所有命令都不进入消息队列）
-const quickCommandPrefixes = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/effort', '/agent', '/slist', '/session', '/rename', '/repair', '/fork', '/stop', '/clear', '/compact', '/safe', '/del', '/perm', '/file', '/check', '/p ', '/s ', '/name', '/rewind', '/rw', '/rw ', '/activity', '/chatmode', '/aid', '/agentmd', '/ask'];
+const quickCommandPrefixes = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/evolhelp', '/status', '/restart', '/model', '/setmodel', '/effort', '/agent', '/slist', '/session', '/rename', '/repair', '/fork', '/stop', '/clear', '/compact', '/safe', '/del', '/perm', '/file', '/check', '/p ', '/s ', '/name', '/rewind', '/rw', '/rw ', '/activity', '/chatmode', '/aid', '/agentmd', '/ask', '/resume'];
 
 export class CommandHandler {
   private adapters = new Map<string, ChannelAdapter>();
@@ -169,10 +169,37 @@ export class CommandHandler {
   private defaultAgentId: string;
   private agentRegistry?: EvolAgentRegistryHandle;
 
-  /** 按 agentId 获取 agent，回退到默认 */
-  private getAgent(agentId?: string): AgentRunnerFull {
-    if (agentId && this.agentMap.has(agentId)) return this.agentMap.get(agentId)!;
-    return this.agentMap.get(this.defaultAgentId) || this.agentMap.values().next().value!;
+  /**
+   * Get the runner for a (channel, baseagent) pair.
+   *
+   * Resolves the owning EvolAgent via the registry; falls back to default key.
+   * `baseagent` typically comes from `session.agentId` (e.g. 'claude').
+   */
+  private getAgent(channel?: string, baseagent?: string): AgentRunnerFull {
+    if (channel && baseagent) {
+      const evolName = this.agentRegistry?.resolveByChannel(channel)?.name || '[default]';
+      const key = `${evolName}::${baseagent}`;
+      if (this.agentMap.has(key)) return this.agentMap.get(key)!;
+    }
+    if (this.agentMap.has(this.defaultAgentId)) return this.agentMap.get(this.defaultAgentId)!;
+    return this.agentMap.values().next().value!;
+  }
+
+  /** Return the list of baseagents available to a given channel (per-EvolAgent isolation). */
+  private getAvailableBaseagents(channel: string): string[] {
+    const evolName = this.agentRegistry?.resolveByChannel(channel)?.name || '[default]';
+    const prefix = `${evolName}::`;
+    const result: string[] = [];
+    for (const key of this.agentMap.keys()) {
+      if (key.startsWith(prefix)) result.push(key.slice(prefix.length));
+    }
+    return result;
+  }
+
+  /** Extract the baseagent component from `defaultAgentId` (e.g. `[default]::claude` → `claude`). */
+  private parseDefaultBaseagent(): string {
+    const idx = this.defaultAgentId.indexOf('::');
+    return idx >= 0 ? this.defaultAgentId.slice(idx + 2) : this.defaultAgentId;
   }
 
   constructor(
@@ -185,10 +212,11 @@ export class CommandHandler {
   ) {
     if (agentRunnerOrMap instanceof Map) {
       this.agentMap = agentRunnerOrMap;
-      this.defaultAgentId = defaultAgentId || 'claude';
+      this.defaultAgentId = defaultAgentId || '[default]::claude';
     } else {
-      this.agentMap = new Map([[agentRunnerOrMap.name, agentRunnerOrMap]]);
-      this.defaultAgentId = agentRunnerOrMap.name;
+      // Backward-compat single-runner path: treat as DefaultAgent's claude.
+      this.agentMap = new Map([[`[default]::${agentRunnerOrMap.name}`, agentRunnerOrMap]]);
+      this.defaultAgentId = `[default]::${agentRunnerOrMap.name}`;
     }
   }
 
@@ -727,11 +755,11 @@ export class CommandHandler {
     }
 
     if (cmd === '/agent') {
-      return [...this.agentMap.keys()].map(name => ({ value: name, label: name }));
+      return this.getAvailableBaseagents(channel).map(name => ({ value: name, label: name }));
     }
 
     if (cmd === '/model') {
-      const agent = this.getAgent(session?.agentId);
+      const agent = this.getAgent(channel, session?.agentId);
       if (hasModelSwitcher(agent) && agent.listModels) {
         const models = await agent.listModels() ?? [];
         if (models.length > 0) return models.map((m: string) => ({ value: m, label: m }));
@@ -780,7 +808,7 @@ export class CommandHandler {
       if (!arg) return { error: '缺少目标模式' };
       const identity = this.sessionManager.resolveIdentity(channel, userId);
       if (identity.role !== 'owner') return { error: '无权限' };
-      const permAgent = this.getAgent(session.agentId);
+      const permAgent = this.getAgent(channel, session.agentId);
       const validModes = hasPermissionController(permAgent)
         ? permAgent.listModes().filter(m => m.available).map(m => m.key)
         : ['auto', 'bypass', 'plan', 'edit', 'request', 'noask'];
@@ -831,7 +859,7 @@ export class CommandHandler {
 
     // 按当前会话选择 agent 后端
     const activeSession = await this.sessionManager.getActiveSession(channel, channelId);
-    const agent = this.getAgent(activeSession?.agentId);
+    const agent = this.getAgent(channel, activeSession?.agentId);
 
     // 规范化命令（将别名转换为完整命令）
     let normalizedContent = content;
@@ -879,8 +907,9 @@ export class CommandHandler {
     if (normalizedContent.startsWith('/')) {
       // guest 在群聊和私聊中均可访问的只读命令：纯查询形态（带参写操作由各 handler 内部守卫拦截）
       const guestGroupCommands = [
-        '/status', '/help', '/check', '/chatmode',
-        '/model', '/effort', '/agent', '/perm', '/activity', '/safe', '/stop',
+        '/status', '/help', '/evolhelp', '/check', '/chatmode',
+        '/model', '/setmodel', '/effort', '/agent', '/perm', '/activity', '/safe', '/stop',
+        '/resume',
       ];
       const userCommands = activeChatType === 'group' && !isAdmin
         ? guestGroupCommands
@@ -915,7 +944,7 @@ export class CommandHandler {
         // 话题中：检查话题 session 是否在处理（不创建）
         const threadSession = await this.sessionManager.getThreadSession(channel, channelId, threadId);
         if (threadSession) {
-          const threadAgent = this.getAgent(threadSession.agentId);
+          const threadAgent = this.getAgent(channel, threadSession.agentId);
           if (threadAgent.hasActiveStream(threadSession.id)) {
             return '⚠️ 当前正在处理消息，请稍后再试\n使用 /stop 中断当前任务后重试';
           }
@@ -1028,6 +1057,75 @@ export class CommandHandler {
       return lines.join('\n');
     }
 
+    // /evolhelp 命令：返回 JSON 格式的命令列表（供程序解析）
+    if (normalizedContent === '/evolhelp') {
+      type CmdEntry = { command: string; aliases?: string[]; args?: string; description: string; category: string; roles: string[] };
+      const cmds: CmdEntry[] = [];
+
+      // 项目管理
+      cmds.push({ command: '/pwd', description: '显示当前项目路径', category: '项目管理', roles: ['admin', 'owner'] });
+      cmds.push({ command: '/p', aliases: ['/project', '/plist'], args: '[name|path]', description: '列出或切换项目', category: '项目管理', roles: ['admin', 'owner'] });
+      if (isOwner) {
+        cmds.push({ command: '/bind', args: '<path>', description: '绑定新项目目录', category: '项目管理', roles: ['owner'] });
+      }
+
+      // 会话管理
+      cmds.push({ command: '/new', args: '[名称]', description: '创建新会话（清空历史请用此命令，可选命名）', category: '会话管理', roles: ['guest', 'admin', 'owner'] });
+      cmds.push({ command: '/s', aliases: ['/session', '/slist'], args: '[cli|名称|序号|uuid]', description: '列出或切换会话', category: '会话管理', roles: ['guest', 'admin', 'owner'] });
+      cmds.push({ command: '/name', aliases: ['/rename'], args: '<新名称>', description: '重命名当前会话', category: '会话管理', roles: ['guest', 'admin', 'owner'] });
+      cmds.push({ command: '/del', args: '<名称>', description: '删除指定会话（仅解绑，不删除文件）', category: '会话管理', roles: ['guest', 'admin', 'owner'] });
+      if (isAdmin) {
+        cmds.push({ command: '/fork', args: '[名称]', description: '分支当前会话（从当前对话点创建分支）', category: '会话管理', roles: ['admin', 'owner'] });
+        cmds.push({ command: '/rewind', aliases: ['/rw'], args: '[N] [chat|file|all]', description: '查看历史/撤销指定轮次', category: '会话管理', roles: ['admin', 'owner'] });
+        cmds.push({ command: '/compact', description: '压缩会话上下文（减少 token 用量）', category: '会话管理', roles: ['admin', 'owner'] });
+      }
+
+      // Agent 与模型
+      if (isAdmin) {
+        cmds.push({ command: '/agent', args: '[name]', description: '查看或切换 Agent 后端', category: 'Agent 与模型', roles: ['admin', 'owner'] });
+        cmds.push({ command: '/model', args: '[model]', description: '查看或切换模型', category: 'Agent 与模型', roles: ['admin', 'owner'] });
+        cmds.push({ command: '/setmodel', description: '返回 JSON 格式的模型列表（供程序解析）', category: 'Agent 与模型', roles: ['admin', 'owner'] });
+        cmds.push({ command: '/effort', args: '[level]', description: '查看或切换推理强度', category: 'Agent 与模型', roles: ['admin', 'owner'] });
+      }
+
+      // 权限管理
+      if (isAdmin) {
+        cmds.push({ command: '/perm', args: isOwner ? '<auto|bypass|request|edit|plan|noask>' : undefined, description: '查看当前权限模式', category: '权限管理', roles: ['admin', 'owner'] });
+        cmds.push({ command: '/perm', args: 'allow|always|deny', description: '审批权限请求', category: '权限管理', roles: ['admin', 'owner'] });
+      }
+
+      // 运维
+      cmds.push({ command: '/status', description: '显示会话状态', category: '运维', roles: ['guest', 'admin', 'owner'] });
+      cmds.push({ command: '/stop', description: '中断当前任务', category: '运维', roles: ['admin', 'owner'] });
+      cmds.push({ command: '/check', description: '检查渠道状态', category: '运维', roles: ['guest', 'admin', 'owner'] });
+      if (isAdmin) {
+        cmds.push({ command: '/activity', args: '[all|dm|owner|none]', description: '查看/控制中间输出显示模式', category: '运维', roles: ['admin', 'owner'] });
+        cmds.push({ command: '/restart', args: '<channel>', description: '重连指定渠道', category: '运维', roles: ['admin', 'owner'] });
+      }
+      if (isOwner) {
+        cmds.push({ command: '/restart', description: '重启服务', category: '运维', roles: ['owner'] });
+        cmds.push({ command: '/file', args: '[channel] <path>', description: '发送项目内文件', category: '运维', roles: ['owner'] });
+        cmds.push({ command: '/aid', args: '[list|new <aid>]', description: 'AID 管理', category: '运维', roles: ['owner'] });
+        cmds.push({ command: '/agentmd', args: '[put|set <内容>]', description: '管理 agent.md', category: '运维', roles: ['owner'] });
+      }
+
+      // 会话模式
+      if (isAdmin) {
+        cmds.push({ command: '/chatmode', args: '[interactive|proactive]', description: '查看/切换会话模式（被动响应或主动推进）', category: '会话管理', roles: ['admin', 'owner'] });
+      }
+
+      // 交互
+      cmds.push({ command: '/ask', args: '<选项>', description: '回答 Agent 的交互式问题', category: '运维', roles: ['guest', 'admin', 'owner'] });
+      cmds.push({ command: '/resume', description: '查看当前项目的 Claude 会话记录', category: '会话管理', roles: ['guest', 'admin', 'owner'] });
+
+      // 帮助
+      cmds.push({ command: '/help', description: '显示帮助信息', category: '帮助', roles: ['guest', 'admin', 'owner'] });
+      cmds.push({ command: '/evolhelp', description: '返回 JSON 格式命令列表', category: '帮助', roles: ['guest', 'admin', 'owner'] });
+
+      const categories = [...new Set(cmds.map(c => c.category))];
+      return JSON.stringify({ commands: cmds, categories });
+    }
+
     // /perm 命令：权限模式切换 + 权限审批（快速路径，不进入消息队列）
     if (normalizedContent.startsWith('/perm')) {
       const args = normalizedContent.slice(5).trim();
@@ -1036,7 +1134,7 @@ export class CommandHandler {
       const permResult = await this.ensureSession(channel, channelId, threadId);
       if ('error' in permResult) return permResult.error;
       const { session: permSession } = permResult;
-      const permAgent = this.getAgent(permSession.agentId);
+      const permAgent = this.getAgent(channel, permSession.agentId);
 
       // /perm（无参数）：显示当前模式和可选模式
       if (!args) {
@@ -1182,6 +1280,107 @@ export class CommandHandler {
       return `✓ 已回答`;
     }
 
+    // /resume 命令：返回当前项目的 Claude 会话记录（JSON）
+    if (normalizedContent === '/resume' || normalizedContent.startsWith('/resume ')) {
+      const resumeResult = await this.ensureSession(channel, channelId, threadId);
+      if ('error' in resumeResult) return resumeResult.error;
+      const { session: resumeSession } = resumeResult;
+
+      try {
+        const { encodePath } = await import('../utils/cross-platform.js');
+        const homeDir = os.homedir();
+        const encodedPath = encodePath(resumeSession.projectPath);
+        const projectDir = path.join(homeDir, '.claude', 'projects', encodedPath);
+
+        if (!fs.existsSync(projectDir)) {
+          return '❌ 未找到 Claude 会话记录目录';
+        }
+
+        const jsonlFiles = fs.readdirSync(projectDir).filter(f => f.endsWith('.jsonl'));
+        if (jsonlFiles.length === 0) {
+          return '❌ 当前项目没有 Claude 会话记录';
+        }
+
+        const sessions: Array<{
+          sessionId: string;
+          lastMessageTime: string;
+          firstUserMessage: string;
+          model: string;
+          turns: number;
+          branch: string;
+        }> = [];
+
+        for (const file of jsonlFiles) {
+          const filePath = path.join(projectDir, file);
+          const sessionId = file.replace('.jsonl', '');
+          let lastTimestamp = '';
+          let firstUserMessage = '';
+          let model = '';
+          let branch = '';
+          let turns = 0;
+
+          try {
+            const content = fs.readFileSync(filePath, 'utf-8');
+            const lines = content.split('\n').filter(l => l.trim());
+
+            for (const line of lines) {
+              const event = JSON.parse(line);
+
+              if (event.timestamp && event.timestamp > lastTimestamp) {
+                lastTimestamp = event.timestamp;
+              }
+
+              if (event.gitBranch && !branch) {
+                branch = event.gitBranch;
+              }
+
+              if (event.type === 'user' && event.message?.role === 'user') {
+                const msgContent = event.message.content;
+                const isToolResult = Array.isArray(msgContent) && msgContent.every((c: any) => c.type === 'tool_result');
+                if (!isToolResult) {
+                  turns++;
+                  if (!firstUserMessage) {
+                    if (typeof msgContent === 'string') {
+                      firstUserMessage = msgContent.slice(0, 100);
+                    } else if (Array.isArray(msgContent)) {
+                      const textBlock = msgContent.find((c: any) => c.type === 'text');
+                      if (textBlock?.text) {
+                        firstUserMessage = textBlock.text.slice(0, 100);
+                      }
+                    }
+                  }
+                }
+              }
+
+              if (event.type === 'assistant' && event.message?.model && !model) {
+                model = event.message.model;
+              }
+            }
+          } catch {
+            continue;
+          }
+
+          if (!lastTimestamp) continue;
+
+          sessions.push({
+            sessionId,
+            lastMessageTime: lastTimestamp,
+            firstUserMessage: firstUserMessage || '(无消息)',
+            model: model || 'unknown',
+            turns,
+            branch: branch || 'unknown',
+          });
+        }
+
+        sessions.sort((a, b) => b.lastMessageTime.localeCompare(a.lastMessageTime));
+
+        return JSON.stringify(sessions, null, 2);
+      } catch (error) {
+        logger.error('[CommandHandler] /resume failed:', error);
+        return `❌ 读取会话记录失败: ${error instanceof Error ? error.message : '未知错误'}`;
+      }
+    }
+
     // /agent 命令：查看或切换 Agent 后端
     if (normalizedContent === '/agent' || normalizedContent.startsWith('/agent ')) {
       const args = normalizedContent.slice(6).trim();
@@ -1189,10 +1388,13 @@ export class CommandHandler {
       if (args && (activeChatType === 'group' ? !isOwner : !isAdmin)) {
         return '❌ 无权限：此命令仅限管理员使用';
       }
-      const available = [...this.agentMap.keys()];
+      const available = this.getAvailableBaseagents(channel);
 
       if (!args) {
-        const currentAgent = activeSession?.agentId || this.defaultAgentId;
+        // currentAgent: 当前 session 的 baseagent，或该 channel 所属 evolagent 的 baseagent
+        const currentAgent = activeSession?.agentId
+          || this.agentRegistry?.resolveByChannel(channel)?.baseagent
+          || this.parseDefaultBaseagent();
 
         // 尝试发送交互卡片
         if (this.interactionRouter && available.length > 1) {
@@ -1240,7 +1442,7 @@ export class CommandHandler {
         return `当前 Agent: ${currentAgent}`;
       }
 
-      if (!this.agentMap.has(args)) {
+      if (!available.includes(args)) {
         return `❌ 未知 Agent: ${args}\n可用: ${available.join(', ')}`;
       }
 
@@ -1265,6 +1467,77 @@ export class CommandHandler {
       return agentSwitchResponse;
     }
 
+    // /setmodel 命令：返回 JSON 格式的模型列表（供程序解析）
+    if (normalizedContent === '/setmodel' || normalizedContent.startsWith('/setmodel ')) {
+      const setmodelResult = await this.ensureSession(channel, channelId, threadId);
+      if ('error' in setmodelResult) return setmodelResult.error;
+      const { session: setmodelSession } = setmodelResult;
+      const setmodelAgent = this.getAgent(channel, setmodelSession.agentId);
+
+      const currentModel = hasModelSwitcher(setmodelAgent) ? setmodelAgent.getModel() : setmodelAgent.name;
+      const efforts = getAvailableEfforts(setmodelAgent, currentModel);
+      const currentEffort = setmodelAgent.getEffort?.() || 'auto';
+
+      // 获取 API URL 用于请求 /models
+      let apiBaseUrl: string | undefined;
+      try {
+        const configBaseUrl = this.config.agents?.claude?.baseUrl;
+        const isPlaceholderUrl = configBaseUrl?.includes('api.anthropic.com');
+        if (configBaseUrl && !isPlaceholderUrl) {
+          apiBaseUrl = configBaseUrl;
+        } else if (process.env.ANTHROPIC_BASE_URL) {
+          apiBaseUrl = process.env.ANTHROPIC_BASE_URL;
+        } else {
+          const claudeSettingsPath = path.join(os.homedir(), '.claude', 'settings.json');
+          if (fs.existsSync(claudeSettingsPath)) {
+            const claudeSettings = JSON.parse(fs.readFileSync(claudeSettingsPath, 'utf-8'));
+            if (claudeSettings.env?.ANTHROPIC_BASE_URL) {
+              apiBaseUrl = claudeSettings.env.ANTHROPIC_BASE_URL;
+            }
+          }
+        }
+      } catch {}
+
+      // 从 API 获取模型列表（OpenAI /v1/models 风格）
+      type ModelListResponse = { object: string; data: Array<{ id: string; object: string; created: number; owned_by: string }> };
+      let modelListData: ModelListResponse | null = null;
+      if (apiBaseUrl) {
+        try {
+          const modelsUrl = apiBaseUrl.replace(/\/+$/, '') + '/v1/models';
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 5000);
+          const resp = await fetch(modelsUrl, {
+            signal: controller.signal,
+            headers: { 'Authorization': `Bearer ${this.config.agents?.claude?.apiKey || process.env.ANTHROPIC_AUTH_TOKEN || ''}` },
+          });
+          clearTimeout(timeout);
+          if (resp.ok) {
+            modelListData = await resp.json() as ModelListResponse;
+          }
+        } catch {}
+      }
+
+      // 兜底模型列表
+      if (!modelListData || !modelListData.data || modelListData.data.length === 0) {
+        const now = Math.floor(Date.now() / 1000);
+        modelListData = {
+          object: 'list',
+          data: [
+            { id: 'claude-opus-4-7', object: 'model', created: now, owned_by: 'anthropic' },
+            { id: 'claude-opus-4-6', object: 'model', created: now, owned_by: 'anthropic' },
+            { id: 'claude-sonnet-4-6', object: 'model', created: now, owned_by: 'anthropic' },
+          ],
+        };
+      }
+
+      return JSON.stringify({
+        current_model: currentModel,
+        current_effort: currentEffort,
+        available_efforts: efforts,
+        models: modelListData,
+      }, null, 2);
+    }
+
     // /model 命令：查看或切换模型/推理强度
     if (normalizedContent.startsWith('/model')) {
       const args = normalizedContent.slice(6).trim();
@@ -1273,7 +1546,7 @@ export class CommandHandler {
       const modelResult = await this.ensureSession(channel, channelId, threadId);
       if ('error' in modelResult) return modelResult.error;
       const { session: modelSession } = modelResult;
-      const modelAgent = this.getAgent(modelSession.agentId);
+      const modelAgent = this.getAgent(channel, modelSession.agentId);
 
       const models = hasModelSwitcher(modelAgent) ? modelAgent.listModels() : [];
 
@@ -1412,7 +1685,7 @@ export class CommandHandler {
       const effortResult = await this.ensureSession(channel, channelId, threadId);
       if ('error' in effortResult) return effortResult.error;
       const { session: effortSession } = effortResult;
-      const effortAgent = this.getAgent(effortSession.agentId);
+      const effortAgent = this.getAgent(channel, effortSession.agentId);
 
       const currentModel = hasModelSwitcher(effortAgent) ? effortAgent.getModel() : effortAgent.name;
       const efforts = getAvailableEfforts(effortAgent, currentModel);
@@ -1755,7 +2028,7 @@ export class CommandHandler {
       if (threadId) {
         const threadSession = await this.sessionManager.getThreadSession(channel, channelId, threadId);
         if (threadSession) {
-          const threadAgent = this.getAgent(threadSession.agentId);
+          const threadAgent = this.getAgent(channel, threadSession.agentId);
           if (threadAgent.hasActiveStream(threadSession.id)) {
             return '⚠️ 当前正在处理消息，请稍后再试\n使用 /stop 中断当前任务后重试';
           }
@@ -1773,7 +2046,7 @@ export class CommandHandler {
       const stopResult = await this.ensureSession(channel, channelId, threadId);
       if ('error' in stopResult) return '当前没有正在处理的任务';
       const { session: stopSession } = stopResult;
-      const stopAgent = this.getAgent(stopSession.agentId);
+      const stopAgent = this.getAgent(channel, stopSession.agentId);
       const sessionKey = stopSession.id;
 
       const queueLength = this.messageQueue.getQueueLength(sessionKey);
@@ -1802,7 +2075,7 @@ export class CommandHandler {
       if ('error' in result) return result.error;
       const { session } = result;
 
-      const sessionAgent = this.getAgent(session.agentId);
+      const sessionAgent = this.getAgent(channel, session.agentId);
       if (!sessionAgent.capabilities?.clear) {
         return `❌ 当前 Agent (${sessionAgent.name}) 不支持 /clear\n\n可使用 /new 创建新会话替代`;
       }
@@ -1836,7 +2109,7 @@ export class CommandHandler {
       if ('error' in result) return result.error;
       const { session } = result;
 
-      const sessionAgent = this.getAgent(session.agentId);
+      const sessionAgent = this.getAgent(channel, session.agentId);
       if (!sessionAgent.capabilities?.compact) {
         return `❌ 当前 Agent (${sessionAgent.name}) 不支持 /compact`;
       }
@@ -1898,7 +2171,7 @@ export class CommandHandler {
       }
 
       const sessionKey = this.getQueueKey(session, channel, channelId);
-      const sessionAgent = this.getAgent(session.agentId);
+      const sessionAgent = this.getAgent(channel, session.agentId);
       const isCurrentlyProcessing = this.messageQueue.isProcessing(sessionKey) || sessionAgent.hasActiveStream(sessionKey);
       const queueLength = this.messageQueue.getQueueLength(sessionKey);
 
@@ -3026,7 +3299,7 @@ export class CommandHandler {
 
       this.eventBus.publish({ type: 'session:deleted', sessionId: targetSession.id });
 
-      const targetAgent = this.getAgent(targetSession.agentId);
+      const targetAgent = this.getAgent(channel, targetSession.agentId);
       await targetAgent.closeSession(targetSession.id);
 
       return `✓ 已删除会话: ${targetSession.name || sessionName}\n会话文件已保留，可通过 CLI 访问`;
@@ -3044,7 +3317,7 @@ export class CommandHandler {
         return `❌ 当前会话尚未初始化对话，无法分支\n\n请先发送一条消息，然后再使用 /fork`;
       }
 
-      const forkAgent = this.getAgent(session.agentId);
+      const forkAgent = this.getAgent(channel, session.agentId);
       if (!forkAgent.capabilities?.fork) {
         return `❌ 当前 Agent (${forkAgent.name}) 不支持 /fork\n\n可使用 /new 创建新会话替代`;
       }
@@ -3068,7 +3341,7 @@ export class CommandHandler {
       if ('error' in result) return result.error;
       const { session } = result;
 
-      const rewindAgent = this.getAgent(session.agentId);
+      const rewindAgent = this.getAgent(channel, session.agentId);
 
       if (rewindAgent.name !== 'claude') {
         return '❌ /rewind 仅支持 Claude 后端';
@@ -3110,7 +3383,7 @@ export class CommandHandler {
     if (normalizedContent === '/repair') {
       const repairResult = await this.ensureSession(channel, channelId, threadId);
       if ('error' in repairResult) return repairResult.error;
-      const { session: repairSession } = repairResult;      const repairAgent = this.getAgent(repairSession.agentId);
+      const { session: repairSession } = repairResult;      const repairAgent = this.getAgent(channel, repairSession.agentId);
       const { checkSessionFile, backupSessionFile } = await import('./session/session-file-health.js');
 
       try {

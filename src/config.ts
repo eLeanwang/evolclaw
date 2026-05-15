@@ -60,44 +60,57 @@ function loadCodexSettings(): { apiKey?: string; baseUrl?: string; model?: strin
   return {};
 }
 
-export function resolveAnthropicConfig(config: Config): AnthropicResolved {
+/**
+ * Resolve anthropic credentials with optional override (from agent.json).
+ *
+ * Priority: override > globalConfig.agents.claude > env > ~/.claude/settings.json
+ *
+ * Override is matched against the same shape as `config.agents.claude` so
+ * EvolAgent's `agents.claude` block is wired in directly.
+ */
+export function resolveAnthropicConfig(
+  config: Config,
+  override?: { apiKey?: string; baseUrl?: string; model?: string; effort?: 'low' | 'medium' | 'high' | 'max'; pathToClaudeCodeExecutable?: string }
+): AnthropicResolved {
   const settings = loadClaudeSettings();
 
-  // 过滤占位符，视为未配置
-  const configApiKey = config.agents?.claude?.apiKey;
-  const isPlaceholderKey = !configApiKey ||
-    configApiKey.includes('your-') ||
-    configApiKey.includes('placeholder');
+  const isPlaceholder = (v?: string) => !v || v.includes('your-') || v.includes('placeholder');
 
-  const apiKey = (isPlaceholderKey ? null : configApiKey)
+  // apiKey: override → global → env → settings.json
+  const overrideApiKey = isPlaceholder(override?.apiKey) ? undefined : override?.apiKey;
+  const globalApiKey = isPlaceholder(config.agents?.claude?.apiKey) ? undefined : config.agents?.claude?.apiKey;
+  const apiKey = overrideApiKey
+    || globalApiKey
     || process.env.ANTHROPIC_AUTH_TOKEN
     || settings.env?.ANTHROPIC_AUTH_TOKEN;
 
   if (!apiKey) {
     throw new Error(
-      'No API key found. Set one of: agents.claude.apiKey, env ANTHROPIC_AUTH_TOKEN, or ~/.claude/settings.json env.ANTHROPIC_AUTH_TOKEN'
+      'No API key found. Set one of: agents.claude.apiKey (per-agent or global), env ANTHROPIC_AUTH_TOKEN, or ~/.claude/settings.json env.ANTHROPIC_AUTH_TOKEN'
     );
   }
 
-  // baseUrl 也过滤占位符
-  const configBaseUrl = config.agents?.claude?.baseUrl;
-  const isPlaceholderUrl = configBaseUrl?.includes('api.anthropic.com');
-
-  const baseUrl = (isPlaceholderUrl ? null : configBaseUrl)
+  const isPlaceholderUrl = (v?: string) => !v || v.includes('api.anthropic.com');
+  const overrideBaseUrl = isPlaceholderUrl(override?.baseUrl) ? undefined : override?.baseUrl;
+  const globalBaseUrl = isPlaceholderUrl(config.agents?.claude?.baseUrl) ? undefined : config.agents?.claude?.baseUrl;
+  const baseUrl = overrideBaseUrl
+    || globalBaseUrl
     || process.env.ANTHROPIC_BASE_URL
     || settings.env?.ANTHROPIC_BASE_URL;
 
-  const model = config.agents?.claude?.model
+  const model = override?.model
+    || config.agents?.claude?.model
     || settings.model
     || 'sonnet';
 
-  const effort = config.agents?.claude?.effort
+  const effort = override?.effort
+    || config.agents?.claude?.effort
     || settings.effortLevel
     || undefined;
 
-  const configExecPath = config.agents?.claude?.pathToClaudeCodeExecutable;
-  const isPlaceholderExec = !configExecPath || configExecPath.includes('your-') || configExecPath.includes('placeholder');
-  const pathToClaudeCodeExecutable = isPlaceholderExec ? undefined : configExecPath;
+  const pickExec = (v?: string) => (!v || v.includes('your-') || v.includes('placeholder')) ? undefined : v;
+  const pathToClaudeCodeExecutable = pickExec(override?.pathToClaudeCodeExecutable)
+    || pickExec(config.agents?.claude?.pathToClaudeCodeExecutable);
 
   return { apiKey, baseUrl, model, effort, pathToClaudeCodeExecutable };
 }
@@ -109,39 +122,45 @@ export interface OpenaiResolved {
   effort?: string;
 }
 
-export function resolveOpenaiConfig(config: Config): OpenaiResolved {
+export function resolveOpenaiConfig(
+  config: Config,
+  override?: { apiKey?: string; baseUrl?: string; model?: string; effort?: string; reasoning?: string }
+): OpenaiResolved {
   const codexSettings = loadCodexSettings();
+  const isPlaceholder = (v?: string) => !v || v.includes('your-') || v.includes('placeholder');
 
-  // 过滤占位符，视为未配置
-  const configApiKey = config.agents?.codex?.apiKey;
-  const isPlaceholderKey = !configApiKey ||
-    configApiKey.includes('your-') ||
-    configApiKey.includes('placeholder');
-
-  const apiKey = (isPlaceholderKey ? null : configApiKey)
+  const overrideApiKey = isPlaceholder(override?.apiKey) ? undefined : override?.apiKey;
+  const globalApiKey = isPlaceholder(config.agents?.codex?.apiKey) ? undefined : config.agents?.codex?.apiKey;
+  const apiKey = overrideApiKey
+    || globalApiKey
     || process.env.OPENAI_API_KEY
     || codexSettings.apiKey;
 
   if (!apiKey) {
     throw new Error(
-      'No OpenAI API key found. Set one of: agents.codex.apiKey, env OPENAI_API_KEY, or ~/.codex/auth.json'
+      'No OpenAI API key found. Set one of: agents.codex.apiKey (per-agent or global), env OPENAI_API_KEY, or ~/.codex/auth.json'
     );
   }
 
-  // baseUrl 也过滤占位符（与 anthropic 保持一致：只检查默认域名）
-  const configBaseUrl = config.agents?.codex?.baseUrl;
-  const isPlaceholderUrl = configBaseUrl?.includes('api.openai.com');
-
-  const baseUrl = (isPlaceholderUrl ? null : configBaseUrl)
+  const isPlaceholderUrl = (v?: string) => !v || v.includes('api.openai.com');
+  const overrideBaseUrl = isPlaceholderUrl(override?.baseUrl) ? undefined : override?.baseUrl;
+  const globalBaseUrl = isPlaceholderUrl(config.agents?.codex?.baseUrl) ? undefined : config.agents?.codex?.baseUrl;
+  const baseUrl = overrideBaseUrl
+    || globalBaseUrl
     || process.env.OPENAI_BASE_URL
     || codexSettings.baseUrl
     || undefined;
 
-  const model = config.agents?.codex?.model
+  const model = override?.model
+    || config.agents?.codex?.model
     || codexSettings.model
     || 'gpt-5.2-codex';
 
-  const effort = config.agents?.codex?.effort || config.agents?.codex?.reasoning || undefined;
+  const effort = override?.effort
+    || override?.reasoning
+    || config.agents?.codex?.effort
+    || config.agents?.codex?.reasoning
+    || undefined;
 
   return { apiKey, baseUrl, model, effort };
 }
@@ -158,30 +177,32 @@ export interface GoogleResolved {
   location?: string;
 }
 
-export function resolveGoogleConfig(config: Config): GoogleResolved {
+export function resolveGoogleConfig(
+  config: Config,
+  override?: { cliPath?: string; model?: string; apiKey?: string; mode?: 'cli' | 'sdk'; useVertex?: boolean; project?: string; location?: string }
+): GoogleResolved {
   const googleCfg = config.agents?.gemini;
+  const isPlaceholder = (v?: string) => !v || v.includes('your-') || v.includes('placeholder');
 
-  // CLI path: config → which gemini
-  let cliPath = googleCfg?.cliPath || '';
+  let cliPath = override?.cliPath || googleCfg?.cliPath || '';
   if (!cliPath) {
     cliPath = commandExists('gemini') ? 'gemini' : '';
   }
 
-  // Model: config → default
-  const model = googleCfg?.model || 'gemini-2.5-flash';
+  const model = override?.model || googleCfg?.model || 'gemini-2.5-flash';
 
-  // API key: config → env (optional, CLI has OAuth)
-  const configApiKey = googleCfg?.apiKey;
-  const isPlaceholder = !configApiKey || configApiKey.includes('your-') || configApiKey.includes('placeholder');
-  const apiKey = (isPlaceholder ? undefined : configApiKey)
+  const overrideApiKey = isPlaceholder(override?.apiKey) ? undefined : override?.apiKey;
+  const globalApiKey = isPlaceholder(googleCfg?.apiKey) ? undefined : googleCfg?.apiKey;
+  const apiKey = overrideApiKey
+    || globalApiKey
     || process.env.GEMINI_API_KEY
     || process.env.GOOGLE_API_KEY
     || undefined;
 
-  const mode = googleCfg?.mode || 'cli';
-  const useVertex = googleCfg?.useVertex || false;
-  const project = googleCfg?.project || process.env.GOOGLE_CLOUD_PROJECT || undefined;
-  const location = googleCfg?.location || process.env.GOOGLE_CLOUD_LOCATION || 'us-central1';
+  const mode = override?.mode || googleCfg?.mode || 'cli';
+  const useVertex = override?.useVertex ?? googleCfg?.useVertex ?? false;
+  const project = override?.project || googleCfg?.project || process.env.GOOGLE_CLOUD_PROJECT || undefined;
+  const location = override?.location || googleCfg?.location || process.env.GOOGLE_CLOUD_LOCATION || 'us-central1';
 
   return { cliPath, model, apiKey, mode, useVertex, project, location };
 }
