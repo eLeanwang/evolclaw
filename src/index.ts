@@ -156,29 +156,30 @@ async function main() {
   sessionManager.registerFileAdapter(new CodexSessionFileAdapter());
   sessionManager.registerFileAdapter(new GeminiSessionFileAdapter());
 
-  // Agent 插件系统
+  // Agent 插件系统：每个 EvolAgent × 每个 baseagent 一个独立 runner（H1/H2 修复）
   const agentLoader = new AgentLoader();
   agentLoader.register(new ClaudeAgentPlugin());
   agentLoader.register(new CodexAgentPlugin());
   agentLoader.register(new GeminiAgentPlugin());
 
-  const agentInstances = agentLoader.createAll(config, {
+  const agentInstances = agentLoader.createAll(config, agentRegistry, {
     onSessionIdUpdate: async (sessionId: string, agentSessionId: string) => {
       await sessionManager.updateAgentSessionIdBySessionId(sessionId, agentSessionId);
     },
   });
 
-  // 构建 agent map，支持按 agentId 路由（当前默认使用第一个 agent）
+  // agentMap 复合键：${evolagentName}::${baseagent}
   const agentMap = new Map<string, any>();
   for (const inst of agentInstances) {
-    agentMap.set(inst.agent.name, inst.agent);
+    agentMap.set(`${inst.evolagentName}::${inst.baseagent}`, inst.agent);
   }
   const defaultAgent = config.agents?.defaultAgent || 'claude';
-  const agentRunner = agentMap.get(defaultAgent) || agentInstances[0]?.agent;
+  const defaultAgentKey = `[default]::${defaultAgent}`;
+  const agentRunner = agentMap.get(defaultAgentKey) || agentInstances[0]?.agent;
   if (!agentRunner) {
-    throw new Error('No agent backend available. Check agents config.');
+    throw new Error('No agent backend available. Check agents config (no runners created).');
   }
-  logger.info(`✓ Agent runner ready (default: ${agentRunner.name}, available: ${[...agentMap.keys()].join(', ')})`);
+  logger.info(`✓ Runners ready (default key: ${defaultAgentKey}, total: ${agentMap.size}, keys: ${[...agentMap.keys()].join(', ')})`);
 
   // 权限审批网关
   const permissionGateway = new PermissionGateway();
@@ -255,7 +256,7 @@ async function main() {
   sessionManager.migrateChannelToInstanceName();
 
   // 创建命令处理器
-  const cmdHandler = new CommandHandler(sessionManager, agentMap, config, messageCache, eventBus, defaultAgent);
+  const cmdHandler = new CommandHandler(sessionManager, agentMap, config, messageCache, eventBus, defaultAgentKey);
   cmdHandler.setPermissionGateway(permissionGateway);
   cmdHandler.setInteractionRouter(interactionRouter);
   cmdHandler.setStatsCollector(statsCollector);
@@ -278,7 +279,7 @@ async function main() {
       };
       return cmdHandler.handle(content, channel, channelId, sendFn, userId, threadId);
     },
-    defaultAgent
+    defaultAgentKey
   );
 
   // 回填 processor 和 messageQueue 的引用
@@ -308,8 +309,11 @@ async function main() {
   });
 
   // 设置中断回调（精确中断正在处理的 agent）
-  messageQueue.setInterruptCallback(async (sessionKey, agentId) => {
-    const agent = agentMap.get(agentId || defaultAgent);
+  messageQueue.setInterruptCallback(async (sessionKey, agentId, evolagentName) => {
+    const baseagent = agentId || defaultAgent;
+    const evol = evolagentName || '[default]';
+    const agent = agentMap.get(`${evol}::${baseagent}`)
+      || agentMap.get(defaultAgentKey);
     if (agent?.hasActiveStream(sessionKey)) {
       await agent.interrupt(sessionKey);
     }
@@ -626,12 +630,16 @@ async function main() {
         sessionManager.clearProcessing(session.id);
         continue;
       }
-      const agent = agentMap.get(session.agentId) || agentMap.get(defaultAgent);
+      // 复合键：${evolagentName}::${baseagent}，从 channel 反查 evolagent
+      const owningAgent = agentRegistry.resolveByChannel(session.channel);
+      const evolName = owningAgent?.name || '[default]';
+      const baseagentName = session.agentId || defaultAgent;
+      const agent = agentMap.get(`${evolName}::${baseagentName}`) || agentMap.get(defaultAgentKey);
       if (!agent) {
         sessionManager.clearProcessing(session.id);
         continue;
       }
-      logger.info(`[Resume] Resuming session: ${session.id} (agent: ${session.agentId})`);
+      logger.info(`[Resume] Resuming session: ${session.id} (agent: ${evolName}::${baseagentName})`);
       const resumeMessage: Message = {
         channel: session.channel,
         channelId: session.channelId,

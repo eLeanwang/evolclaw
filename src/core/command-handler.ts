@@ -169,10 +169,37 @@ export class CommandHandler {
   private defaultAgentId: string;
   private agentRegistry?: EvolAgentRegistryHandle;
 
-  /** 按 agentId 获取 agent，回退到默认 */
-  private getAgent(agentId?: string): AgentRunnerFull {
-    if (agentId && this.agentMap.has(agentId)) return this.agentMap.get(agentId)!;
-    return this.agentMap.get(this.defaultAgentId) || this.agentMap.values().next().value!;
+  /**
+   * Get the runner for a (channel, baseagent) pair.
+   *
+   * Resolves the owning EvolAgent via the registry; falls back to default key.
+   * `baseagent` typically comes from `session.agentId` (e.g. 'claude').
+   */
+  private getAgent(channel?: string, baseagent?: string): AgentRunnerFull {
+    if (channel && baseagent) {
+      const evolName = this.agentRegistry?.resolveByChannel(channel)?.name || '[default]';
+      const key = `${evolName}::${baseagent}`;
+      if (this.agentMap.has(key)) return this.agentMap.get(key)!;
+    }
+    if (this.agentMap.has(this.defaultAgentId)) return this.agentMap.get(this.defaultAgentId)!;
+    return this.agentMap.values().next().value!;
+  }
+
+  /** Return the list of baseagents available to a given channel (per-EvolAgent isolation). */
+  private getAvailableBaseagents(channel: string): string[] {
+    const evolName = this.agentRegistry?.resolveByChannel(channel)?.name || '[default]';
+    const prefix = `${evolName}::`;
+    const result: string[] = [];
+    for (const key of this.agentMap.keys()) {
+      if (key.startsWith(prefix)) result.push(key.slice(prefix.length));
+    }
+    return result;
+  }
+
+  /** Extract the baseagent component from `defaultAgentId` (e.g. `[default]::claude` → `claude`). */
+  private parseDefaultBaseagent(): string {
+    const idx = this.defaultAgentId.indexOf('::');
+    return idx >= 0 ? this.defaultAgentId.slice(idx + 2) : this.defaultAgentId;
   }
 
   constructor(
@@ -185,10 +212,11 @@ export class CommandHandler {
   ) {
     if (agentRunnerOrMap instanceof Map) {
       this.agentMap = agentRunnerOrMap;
-      this.defaultAgentId = defaultAgentId || 'claude';
+      this.defaultAgentId = defaultAgentId || '[default]::claude';
     } else {
-      this.agentMap = new Map([[agentRunnerOrMap.name, agentRunnerOrMap]]);
-      this.defaultAgentId = agentRunnerOrMap.name;
+      // Backward-compat single-runner path: treat as DefaultAgent's claude.
+      this.agentMap = new Map([[`[default]::${agentRunnerOrMap.name}`, agentRunnerOrMap]]);
+      this.defaultAgentId = `[default]::${agentRunnerOrMap.name}`;
     }
   }
 
@@ -727,11 +755,11 @@ export class CommandHandler {
     }
 
     if (cmd === '/agent') {
-      return [...this.agentMap.keys()].map(name => ({ value: name, label: name }));
+      return this.getAvailableBaseagents(channel).map(name => ({ value: name, label: name }));
     }
 
     if (cmd === '/model') {
-      const agent = this.getAgent(session?.agentId);
+      const agent = this.getAgent(channel, session?.agentId);
       if (hasModelSwitcher(agent) && agent.listModels) {
         const models = await agent.listModels() ?? [];
         if (models.length > 0) return models.map((m: string) => ({ value: m, label: m }));
@@ -780,7 +808,7 @@ export class CommandHandler {
       if (!arg) return { error: '缺少目标模式' };
       const identity = this.sessionManager.resolveIdentity(channel, userId);
       if (identity.role !== 'owner') return { error: '无权限' };
-      const permAgent = this.getAgent(session.agentId);
+      const permAgent = this.getAgent(channel, session.agentId);
       const validModes = hasPermissionController(permAgent)
         ? permAgent.listModes().filter(m => m.available).map(m => m.key)
         : ['auto', 'bypass', 'plan', 'edit', 'request', 'noask'];
@@ -831,7 +859,7 @@ export class CommandHandler {
 
     // 按当前会话选择 agent 后端
     const activeSession = await this.sessionManager.getActiveSession(channel, channelId);
-    const agent = this.getAgent(activeSession?.agentId);
+    const agent = this.getAgent(channel, activeSession?.agentId);
 
     // 规范化命令（将别名转换为完整命令）
     let normalizedContent = content;
@@ -916,7 +944,7 @@ export class CommandHandler {
         // 话题中：检查话题 session 是否在处理（不创建）
         const threadSession = await this.sessionManager.getThreadSession(channel, channelId, threadId);
         if (threadSession) {
-          const threadAgent = this.getAgent(threadSession.agentId);
+          const threadAgent = this.getAgent(channel, threadSession.agentId);
           if (threadAgent.hasActiveStream(threadSession.id)) {
             return '⚠️ 当前正在处理消息，请稍后再试\n使用 /stop 中断当前任务后重试';
           }
@@ -1106,7 +1134,7 @@ export class CommandHandler {
       const permResult = await this.ensureSession(channel, channelId, threadId);
       if ('error' in permResult) return permResult.error;
       const { session: permSession } = permResult;
-      const permAgent = this.getAgent(permSession.agentId);
+      const permAgent = this.getAgent(channel, permSession.agentId);
 
       // /perm（无参数）：显示当前模式和可选模式
       if (!args) {
@@ -1360,10 +1388,13 @@ export class CommandHandler {
       if (args && (activeChatType === 'group' ? !isOwner : !isAdmin)) {
         return '❌ 无权限：此命令仅限管理员使用';
       }
-      const available = [...this.agentMap.keys()];
+      const available = this.getAvailableBaseagents(channel);
 
       if (!args) {
-        const currentAgent = activeSession?.agentId || this.defaultAgentId;
+        // currentAgent: 当前 session 的 baseagent，或该 channel 所属 evolagent 的 baseagent
+        const currentAgent = activeSession?.agentId
+          || this.agentRegistry?.resolveByChannel(channel)?.baseagent
+          || this.parseDefaultBaseagent();
 
         // 尝试发送交互卡片
         if (this.interactionRouter && available.length > 1) {
@@ -1411,7 +1442,7 @@ export class CommandHandler {
         return `当前 Agent: ${currentAgent}`;
       }
 
-      if (!this.agentMap.has(args)) {
+      if (!available.includes(args)) {
         return `❌ 未知 Agent: ${args}\n可用: ${available.join(', ')}`;
       }
 
@@ -1441,7 +1472,7 @@ export class CommandHandler {
       const setmodelResult = await this.ensureSession(channel, channelId, threadId);
       if ('error' in setmodelResult) return setmodelResult.error;
       const { session: setmodelSession } = setmodelResult;
-      const setmodelAgent = this.getAgent(setmodelSession.agentId);
+      const setmodelAgent = this.getAgent(channel, setmodelSession.agentId);
 
       const currentModel = hasModelSwitcher(setmodelAgent) ? setmodelAgent.getModel() : setmodelAgent.name;
       const efforts = getAvailableEfforts(setmodelAgent, currentModel);
@@ -1515,7 +1546,7 @@ export class CommandHandler {
       const modelResult = await this.ensureSession(channel, channelId, threadId);
       if ('error' in modelResult) return modelResult.error;
       const { session: modelSession } = modelResult;
-      const modelAgent = this.getAgent(modelSession.agentId);
+      const modelAgent = this.getAgent(channel, modelSession.agentId);
 
       const models = hasModelSwitcher(modelAgent) ? modelAgent.listModels() : [];
 
@@ -1654,7 +1685,7 @@ export class CommandHandler {
       const effortResult = await this.ensureSession(channel, channelId, threadId);
       if ('error' in effortResult) return effortResult.error;
       const { session: effortSession } = effortResult;
-      const effortAgent = this.getAgent(effortSession.agentId);
+      const effortAgent = this.getAgent(channel, effortSession.agentId);
 
       const currentModel = hasModelSwitcher(effortAgent) ? effortAgent.getModel() : effortAgent.name;
       const efforts = getAvailableEfforts(effortAgent, currentModel);
@@ -1997,7 +2028,7 @@ export class CommandHandler {
       if (threadId) {
         const threadSession = await this.sessionManager.getThreadSession(channel, channelId, threadId);
         if (threadSession) {
-          const threadAgent = this.getAgent(threadSession.agentId);
+          const threadAgent = this.getAgent(channel, threadSession.agentId);
           if (threadAgent.hasActiveStream(threadSession.id)) {
             return '⚠️ 当前正在处理消息，请稍后再试\n使用 /stop 中断当前任务后重试';
           }
@@ -2015,7 +2046,7 @@ export class CommandHandler {
       const stopResult = await this.ensureSession(channel, channelId, threadId);
       if ('error' in stopResult) return '当前没有正在处理的任务';
       const { session: stopSession } = stopResult;
-      const stopAgent = this.getAgent(stopSession.agentId);
+      const stopAgent = this.getAgent(channel, stopSession.agentId);
       const sessionKey = stopSession.id;
 
       const queueLength = this.messageQueue.getQueueLength(sessionKey);
@@ -2044,7 +2075,7 @@ export class CommandHandler {
       if ('error' in result) return result.error;
       const { session } = result;
 
-      const sessionAgent = this.getAgent(session.agentId);
+      const sessionAgent = this.getAgent(channel, session.agentId);
       if (!sessionAgent.capabilities?.clear) {
         return `❌ 当前 Agent (${sessionAgent.name}) 不支持 /clear\n\n可使用 /new 创建新会话替代`;
       }
@@ -2078,7 +2109,7 @@ export class CommandHandler {
       if ('error' in result) return result.error;
       const { session } = result;
 
-      const sessionAgent = this.getAgent(session.agentId);
+      const sessionAgent = this.getAgent(channel, session.agentId);
       if (!sessionAgent.capabilities?.compact) {
         return `❌ 当前 Agent (${sessionAgent.name}) 不支持 /compact`;
       }
@@ -2140,7 +2171,7 @@ export class CommandHandler {
       }
 
       const sessionKey = this.getQueueKey(session, channel, channelId);
-      const sessionAgent = this.getAgent(session.agentId);
+      const sessionAgent = this.getAgent(channel, session.agentId);
       const isCurrentlyProcessing = this.messageQueue.isProcessing(sessionKey) || sessionAgent.hasActiveStream(sessionKey);
       const queueLength = this.messageQueue.getQueueLength(sessionKey);
 
@@ -3268,7 +3299,7 @@ export class CommandHandler {
 
       this.eventBus.publish({ type: 'session:deleted', sessionId: targetSession.id });
 
-      const targetAgent = this.getAgent(targetSession.agentId);
+      const targetAgent = this.getAgent(channel, targetSession.agentId);
       await targetAgent.closeSession(targetSession.id);
 
       return `✓ 已删除会话: ${targetSession.name || sessionName}\n会话文件已保留，可通过 CLI 访问`;
@@ -3286,7 +3317,7 @@ export class CommandHandler {
         return `❌ 当前会话尚未初始化对话，无法分支\n\n请先发送一条消息，然后再使用 /fork`;
       }
 
-      const forkAgent = this.getAgent(session.agentId);
+      const forkAgent = this.getAgent(channel, session.agentId);
       if (!forkAgent.capabilities?.fork) {
         return `❌ 当前 Agent (${forkAgent.name}) 不支持 /fork\n\n可使用 /new 创建新会话替代`;
       }
@@ -3310,7 +3341,7 @@ export class CommandHandler {
       if ('error' in result) return result.error;
       const { session } = result;
 
-      const rewindAgent = this.getAgent(session.agentId);
+      const rewindAgent = this.getAgent(channel, session.agentId);
 
       if (rewindAgent.name !== 'claude') {
         return '❌ /rewind 仅支持 Claude 后端';
@@ -3352,7 +3383,7 @@ export class CommandHandler {
     if (normalizedContent === '/repair') {
       const repairResult = await this.ensureSession(channel, channelId, threadId);
       if ('error' in repairResult) return repairResult.error;
-      const { session: repairSession } = repairResult;      const repairAgent = this.getAgent(repairSession.agentId);
+      const { session: repairSession } = repairResult;      const repairAgent = this.getAgent(channel, repairSession.agentId);
       const { checkSessionFile, backupSessionFile } = await import('./session/session-file-health.js');
 
       try {

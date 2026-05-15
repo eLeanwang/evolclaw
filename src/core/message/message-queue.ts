@@ -25,7 +25,7 @@ export class MessageQueue {
   private currentProjectPath?: string;
   private currentAgentId?: string;
   private activeMessageIds = new Set<string>();  // 正在执行的消息 ID
-  private interruptCallback?: (sessionKey: string, agentId?: string) => Promise<void>;
+  private interruptCallback?: (sessionKey: string, agentId?: string, evolagentName?: string) => Promise<void>;
   private eventBus?: EventBus;
   private recentMessageIds = new Set<string>();
   private readonly DEDUP_WINDOW = 60_000; // 1 分钟窗口
@@ -35,7 +35,7 @@ export class MessageQueue {
     this.handler = handler;
   }
 
-  setInterruptCallback(callback: (sessionKey: string, agentId?: string) => Promise<void>): void {
+  setInterruptCallback(callback: (sessionKey: string, agentId?: string, evolagentName?: string) => Promise<void>): void {
     this.interruptCallback = callback;
   }
 
@@ -125,7 +125,7 @@ export class MessageQueue {
             agentName: this.processingAgent.get(queueKey),
           });
           if (this.interruptCallback) {
-            this.interruptCallback(sessionKey, this.currentAgentId).catch(() => {});
+            this.interruptCallback(sessionKey, this.currentAgentId, this.processingAgent.get(queueKey)).catch(() => {});
           }
         } else {
           // 群聊：FIFO，不打断
@@ -323,7 +323,7 @@ export class MessageQueue {
       agentName: this.processingAgent.get(this.currentSessionKey),
     });
     if (this.interruptCallback) {
-      this.interruptCallback(sessionKey, this.currentAgentId).catch(() => {});
+      this.interruptCallback(sessionKey, this.currentAgentId, this.processingAgent.get(this.currentSessionKey)).catch(() => {});
     }
     return true;
   }

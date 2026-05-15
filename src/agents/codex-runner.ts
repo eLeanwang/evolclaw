@@ -357,18 +357,28 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
 export class CodexAgentPlugin implements AgentPlugin {
   readonly name = 'codex';
 
-  isEnabled(config: Config): boolean {
+  isEnabled(globalConfig: Config, agent: import('../core/evolagent.js').EvolAgent): boolean {
+    if (!agent.config.agents?.codex) return false;
     try {
-      const resolved = resolveOpenaiConfig(config);
+      const override = agent.config.agents.codex as any;
+      const resolved = resolveOpenaiConfig(globalConfig, override);
       return !!resolved.apiKey;
     } catch {
       return false;
     }
   }
 
-  createAgent(config: Config, callbacks: AgentCallbacks): AgentInstance {
-    const resolved = resolveOpenaiConfig(config);
-    return { agent: new CodexRunner(config, callbacks) };
+  createAgent(globalConfig: Config, agent: import('../core/evolagent.js').EvolAgent, callbacks: AgentCallbacks): AgentInstance | null {
+    const override = agent.config.agents?.codex as any;
+    // Synthesize a per-agent config view so CodexRunner sees its own credentials.
+    const merged: Config = {
+      ...globalConfig,
+      agents: {
+        ...(globalConfig.agents || {}),
+        codex: { ...(globalConfig.agents?.codex || {}), ...(override || {}) },
+      },
+    } as Config;
+    return { evolagentName: agent.name, baseagent: 'codex', agent: new CodexRunner(merged, callbacks) };
   }
 }
 
