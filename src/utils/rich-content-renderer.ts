@@ -254,3 +254,40 @@ export async function closeBrowser(): Promise<void> {
   if (browserContext) { await browserContext.close().catch(() => {}); browserContext = null; }
   if (browserInstance) { await browserInstance.close().catch(() => {}); browserInstance = null; }
 }
+
+// ── Markdown → Plain Text ───────────────────────────────────────────────────
+// 用于不渲染 markdown 的渠道（微信、QQ）将 Agent 输出降级为纯文本。
+
+export function markdownToPlainText(text: string): string {
+  let result = text;
+  // Code blocks: strip fences, keep content
+  result = result.replace(/```[^\n]*\n?([\s\S]*?)```/g, (_, code: string) => code.trim());
+  // Images: remove entirely
+  result = result.replace(/!\[[^\]]*\]\([^)]*\)/g, '');
+  // Links: keep display text only
+  result = result.replace(/\[([^\]]+)\]\([^)]*\)/g, '$1');
+  // Tables: remove separator rows
+  result = result.replace(/^\|[\s:|-]+\|$/gm, '');
+  result = result.replace(/^\|(.+)\|$/gm, (_, inner: string) =>
+    inner.split('|').map(cell => cell.trim()).join('  ')
+  );
+  // Bold/italic
+  result = result.replace(/\*\*(.+?)\*\*/g, '$1');
+  result = result.replace(/\*(.+?)\*/g, '$1');
+  result = result.replace(/__(.+?)__/g, '$1');
+  result = result.replace(/_(.+?)_/g, '$1');
+  // Strikethrough
+  result = result.replace(/~~(.+?)~~/g, '$1');
+  // Inline code
+  result = result.replace(/`([^`]+)`/g, '$1');
+  // Headers
+  result = result.replace(/^#{1,6}\s+/gm, '');
+  // Blockquotes
+  result = result.replace(/^>\s?/gm, '');
+  // Horizontal rules
+  result = result.replace(/^[-*_]{3,}$/gm, '');
+  // List markers
+  result = result.replace(/^(\s*)[-*+]\s/gm, '$1');
+  result = result.replace(/^(\s*)\d+\.\s/gm, '$1');
+  return result.trim();
+}

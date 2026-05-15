@@ -358,3 +358,86 @@ export type CommandHandler = (
   userId?: string,
   threadId?: string
 ) => Promise<string | null | undefined>;
+
+// ── EvolAgent ──
+
+export interface EvolAgentConfig {
+  name: string;
+  enabled?: boolean;
+  agents: Record<string, any>;
+  channels: Record<string, any>;
+  projects: { defaultPath: string; list?: Record<string, string>; autoCreate?: boolean };
+  chatmode?: { private?: 'interactive' | 'proactive'; group?: 'interactive' | 'proactive' };
+}
+
+/** Reserved agent name used for DefaultAgent (no agent.json file). */
+export const DEFAULT_AGENT_NAME = '[default]';
+
+export interface AgentContext {
+  name: string;
+  isOwned: boolean;
+  baseagent: string;
+  model?: string;
+  effort?: string;
+  chatMode: 'interactive' | 'proactive';
+  projectPath: string;
+}
+
+export type AgentStatus = 'running' | 'stopped' | 'disabled' | 'error';
+
+export interface AgentInfo {
+  name: string;
+  status: AgentStatus;
+  channels: string[];
+  projectPath: string;
+  baseagent: string;
+  model?: string;
+  effort?: string;
+  lastActivity?: number;
+  activeSessions?: number;
+  error?: string;
+  isDefault?: boolean;
+}
+
+/**
+ * Structural handle for EvolAgent — captures the surface needed by IpcServer,
+ * MessageProcessor, and CommandHandler without importing the EvolAgent class
+ * (avoids circular imports). The actual EvolAgent class satisfies this shape.
+ */
+export interface EvolAgentHandle {
+  readonly name: string;
+  readonly isDefault: boolean;
+  readonly baseagent: string;
+  readonly projectPath: string;
+  lastActivity?: number;
+  getContext(channelName: string, chatType: string, globalChatmode?: { private?: 'interactive' | 'proactive'; group?: 'interactive' | 'proactive' }): AgentContext;
+  getOwner(channelName: string): string | undefined;
+  isOwner(channelName: string, userId: string): boolean;
+  isAdmin(channelName: string, userId: string): boolean;
+  setOwner(channelName: string, userId: string): void;
+  getShowActivities(channelName: string): 'all' | 'dm-only' | 'owner-dm-only' | 'none';
+  setShowActivities(channelName: string, mode: 'all' | 'dm-only' | 'owner-dm-only' | 'none'): void;
+  setBaseagentModel(value: string | undefined): void;
+  setBaseagentEffort(value: string | undefined): void;
+  getProjects(): Record<string, string>;
+  addProject(name: string, projectPath: string): void;
+  channelInstanceNames(): string[];
+}
+
+/**
+ * Structural handle for EvolAgentRegistry — captures the surface needed by IpcServer,
+ * MessageProcessor, and CommandHandler without importing the EvolAgentRegistry class
+ * (avoids circular imports). The actual EvolAgentRegistry class satisfies this shape.
+ */
+export interface EvolAgentRegistryHandle {
+  resolveByChannel(channelName: string): EvolAgentHandle | null;
+  get(name: string): EvolAgentHandle | null;
+  list(): AgentInfo[];
+  reload?(name: string, hooks: unknown): Promise<void>;
+  isOwner(channelName: string, userId: string, globalFallback: (ch: string, uid: string) => boolean): boolean;
+  isAdmin(channelName: string, userId: string, globalFallback: (ch: string, uid: string) => boolean): boolean;
+  getOwner(channelName: string): string | undefined;
+  setChannelOwner(channelName: string, userId: string): void;
+  getShowActivities(channelName: string): 'all' | 'dm-only' | 'owner-dm-only' | 'none';
+  setShowActivities(channelName: string, mode: 'all' | 'dm-only' | 'owner-dm-only' | 'none'): void;
+}

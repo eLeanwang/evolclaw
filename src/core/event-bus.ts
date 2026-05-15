@@ -32,17 +32,17 @@ export type ProjectEvent =
 
 // ── 消息事件 ──
 export type MessageEvent =
-  | { type: 'message:received'; sessionId: string; channel: string; channelName?: string; channelId: string; content: string; userId?: string; timestamp?: number }
+  | { type: 'message:received'; sessionId: string; channel: string; channelName?: string; channelId: string; content: string; userId?: string; agentName?: string; timestamp?: number }
   | { type: 'message:processing'; sessionId: string }
   | { type: 'message:text'; sessionId: string; text: string; isFinal: boolean }
-  | { type: 'message:completed'; sessionId: string; channel: string; channelName?: string; channelId: string; finalText?: string; durationMs?: number; terminalReason?: string; timestamp?: number }
-  | { type: 'message:error'; sessionId: string; error: string; errorType: string; terminalReason?: string }
-  | { type: 'message:interrupted'; sessionId: string; reason?: string };
+  | { type: 'message:completed'; sessionId: string; channel: string; channelName?: string; channelId: string; finalText?: string; durationMs?: number; terminalReason?: string; agentName?: string; timestamp?: number }
+  | { type: 'message:error'; sessionId: string; error: string; errorType: string; terminalReason?: string; agentName?: string }
+  | { type: 'message:interrupted'; sessionId: string; reason?: string; agentName?: string };
 
 // ── 工具事件 ──
 export type ToolEvent =
   | { type: 'tool:use'; sessionId: string; toolName: string; input: any; timestamp?: number }
-  | { type: 'tool:result'; sessionId: string; toolName: string; isError?: boolean; content?: string; timestamp?: number };
+  | { type: 'tool:result'; sessionId: string; toolName: string; isError?: boolean; content?: string; agentName?: string; timestamp?: number };
 
 // ── 权限事件 ──
 export type PermissionEvent =

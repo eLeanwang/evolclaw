@@ -1,0 +1,24 @@
+{
+  "name": "test-bot2",
+  "enabled": true,
+  "agents": {
+    "claude": {
+      "effort": "high"
+    }
+  },
+  "channels": {
+    "aun": {
+      "aid": "test-bot2.agentid.pub",
+      "owner": "eleans-2004.agentid.pub",
+      "enabled": true,
+      "name": "test-bot2"
+    }
+  },
+  "projects": {
+    "defaultPath": "/home/evolclaw/projects/test-bot2"
+  },
+  "chatmode": {
+    "private": "interactive",
+    "group": "proactive"
+  }
+}

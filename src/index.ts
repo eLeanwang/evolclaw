@@ -1,7 +1,7 @@
 import { ClaudeSessionFileAdapter } from './core/session/adapters/claude-session-file-adapter.js';
 import { CodexSessionFileAdapter } from './core/session/adapters/codex-session-file-adapter.js';
 import { GeminiSessionFileAdapter } from './core/session/adapters/gemini-session-file-adapter.js';
-import { loadConfig, ensureDataDirs, resolvePaths, resolveAnthropicConfig, isOwner, isAdmin, validateConfigIntegrity, validateChannelInstanceNames, getOwner, getDefaultSessionMode } from './config.js';
+import { loadConfig, ensureDataDirs, resolvePaths, resolveAnthropicConfig, isOwner, isAdmin, validateConfigIntegrity, validateChannelInstanceNames, getOwner, getDefaultSessionMode, setOwner as setOwnerInGlobalConfig, setChannelShowActivities as setShowActivitiesInGlobalConfig } from './config.js';
 import { SessionManager } from './core/session/session-manager.js';
 import { ClaudeAgentPlugin } from './agents/claude-runner.js';
 import { CodexAgentPlugin } from './agents/codex-runner.js';
@@ -23,11 +23,13 @@ import { PermissionGateway } from './core/permission.js';
 import { InteractionRouter } from './core/interaction-router.js';
 import { ChannelLoader, type ChannelInstance } from './core/channel-loader.js';
 import { AgentLoader } from './core/agent-loader.js';
+import { EvolAgentRegistry, type ReloadHooks } from './core/evolagent-registry.js';
+import { buildReloadHooks } from './utils/reload-hooks.js';
 import { IpcServer, IpcStatusResponse, ChannelStatus } from './ipc.js';
 import { ChannelAdapter, Message } from './types.js';
 import { logger, setLogLevel } from './utils/logger.js';
-import { detectDuplicates } from './utils/channel-fingerprint.js';
-import { loadPromptTemplates } from './prompts/templates.js';
+import { detectDuplicates } from './core/evolagent-registry.js';
+import { loadPromptTemplates } from './agents/templates.js';
 import path from 'path';
 import fs from 'fs';
 
@@ -99,6 +101,35 @@ async function main() {
     logger.info(`✓ Using custom API base URL: ${anthropic.baseUrl}`);
   }
 
+  // EvolAgent Registry
+  const agentRegistry = new EvolAgentRegistry(paths.agentsDir, {
+    setOwner: (channelName, userId) => {
+      setOwnerInGlobalConfig(config, channelName, userId);
+    },
+    setShowActivities: (channelName, mode) => {
+      setShowActivitiesInGlobalConfig(config, channelName, mode);
+    },
+  });
+  agentRegistry.loadAll(config);
+  const agentInfos = agentRegistry.list();
+  const evolagentCount = agentInfos.filter(i => !i.isDefault).length;
+  if (evolagentCount > 0) {
+    logger.info(`✓ Loaded ${evolagentCount} evolagent(s)`);
+    for (const info of agentInfos) {
+      if (info.isDefault) continue;
+      if (info.status === 'error') {
+        logger.error(`  ✗ [${info.name}] ${info.error}`);
+      } else if (info.status === 'disabled') {
+        logger.info(`  ○ [${info.name}] disabled`);
+      } else {
+        logger.info(`  ● [${info.name}] ${info.baseagent} @ ${path.basename(info.projectPath)}`);
+      }
+    }
+  }
+
+  // Store for IPC access (T10 will wire this)
+  // M4: removed dead globalThis.__evolclaw_agentRegistry assignment
+
   // 创建事件总线
   const eventBus = new EventBus();
   logger.info('✓ Event bus initialized');
@@ -107,9 +138,11 @@ async function main() {
   const statsCollector = new StatsCollector(eventBus);
 
   // 初始化数据库（带 ownerResolver）
+  // Registry-first: agent-owned channels resolve via EvolAgent.isOwner/isAdmin,
+  // default-agent channels fall back to global config (evolclaw.json).
   const sessionManager = new SessionManager(undefined, eventBus,
-    (channel, userId) => isOwner(config, channel, userId),
-    (channel, userId) => isAdmin(config, channel, userId)
+    (channel, userId) => agentRegistry.isOwner(channel, userId, (ch, uid) => isOwner(config, ch, uid)),
+    (channel, userId) => agentRegistry.isAdmin(channel, userId, (ch, uid) => isAdmin(config, ch, uid))
   );
 
   // sessionMode 解析：全局 chatmode 配置 > 默认 'interactive'
@@ -177,8 +210,46 @@ async function main() {
   channelLoader.register(new QQBotChannelPlugin());
   channelLoader.register(new WecomChannelPlugin());
 
-  const channelInstances = await channelLoader.createAll(config);
-  logger.info(`✓ Created ${channelInstances.length} channel instance(s)`);
+  // Create channel instances: default (from evolclaw.json) + each evolagent
+  const defaultInstances = await channelLoader.createAll(config);
+
+  const evolagentInstances: ChannelInstance[] = [];
+  for (const agent of agentRegistry.runnableAgents()) {
+    // Rewrite channel instance names with agent prefix to avoid collisions
+    // with DefaultAgent and other EvolAgents.
+    // Rule (EvolAgent only):
+    //   - explicit name → `${agent.name}-${type}-${name}`
+    //   - omitted name  → `${agent.name}-${type}`
+    const rewrittenChannels: Record<string, any> = {};
+    for (const [type, raw] of Object.entries(agent.config.channels || {})) {
+      if (type === 'defaultChannel') { rewrittenChannels[type] = raw; continue; }
+      const instances = Array.isArray(raw) ? raw : [raw];
+      const rewritten = instances.map((inst: any) => {
+        if (!inst || typeof inst !== 'object') return inst;
+        const effName = agent.effectiveChannelName(type, inst.name);
+        return { ...inst, name: effName };
+      });
+      // Preserve original shape (array vs single object)
+      rewrittenChannels[type] = Array.isArray(raw) ? rewritten : rewritten[0];
+    }
+
+    const agentConfig = {
+      agents: agent.config.agents,
+      channels: rewrittenChannels,
+      projects: agent.config.projects,
+    } as any;
+    try {
+      const instances = await channelLoader.createAll(agentConfig);
+      evolagentInstances.push(...instances);
+    } catch (e) {
+      logger.error(`[EvolAgent] Failed to create channels for ${agent.name}: ${e}`);
+      agent.status = 'error';
+      agent.error = `Channel creation failed: ${e}`;
+    }
+  }
+
+  const channelInstances = [...defaultInstances, ...evolagentInstances];
+  logger.info(`✓ Created ${channelInstances.length} channel instance(s)${evolagentInstances.length > 0 ? ` (${defaultInstances.length} default + ${evolagentInstances.length} agent)` : ''}`);
 
   // 启动迁移：将 sessions.channel 从 channelType 回填为实例名
   sessionManager.migrateChannelToInstanceName();
@@ -212,6 +283,14 @@ async function main() {
 
   // 回填 processor 和 messageQueue 的引用
   cmdHandler.setProcessor(processor);
+
+  // Inject EvolAgentRegistry (methods added by T6/T7)
+  if ((processor as any).setAgentRegistry) {
+    (processor as any).setAgentRegistry(agentRegistry);
+  }
+  if ((cmdHandler as any).setAgentRegistry) {
+    (cmdHandler as any).setAgentRegistry(agentRegistry);
+  }
 
   // 设置交互路由器
   processor.setInteractionRouter(interactionRouter);
@@ -257,6 +336,7 @@ async function main() {
   // ── MessageBridge：Channel ↔ Core 消息桥梁 ──
 
   const msgBridge = new MessageBridge(config, sessionManager, processor, messageQueue, cmdHandler, eventBus);
+  msgBridge.setAgentRegistry(agentRegistry);
 
   // ── Channel instance registration (shared by startup and hot-load) ──
 
@@ -264,9 +344,14 @@ async function main() {
     // 1. 项目路径提供器
     if (inst.onProjectPathRequest && inst.channel.onProjectPathRequest) {
       inst.channel.onProjectPathRequest(async (channelId: string) => {
+        // Effective default path: agent's projectPath if agent-owned, else global
+        const owningAgent = agentRegistry.resolveByChannel(inst.adapter.channelName);
+        const effectiveDefault = (owningAgent && !owningAgent.isDefault)
+          ? owningAgent.projectPath
+          : (config.projects?.defaultPath || process.cwd());
         const session = await sessionManager.getOrCreateSession(
           inst.adapter.channelName, channelId,
-          config.projects?.defaultPath || process.cwd(),
+          effectiveDefault,
           undefined, undefined, undefined, undefined
         );
         return path.isAbsolute(session.projectPath)
@@ -453,21 +538,20 @@ async function main() {
     registerChannelInstance(inst);
   }
 
-  // ── 设置热加载回调 ──
-  cmdHandler.setHotLoadChannel(async (inst: ChannelInstance) => {
-    registerChannelInstance(inst);
-    channelInstances.push(inst);
-    await inst.connect();
-    eventBus.publish({
-      type: 'channel:connected',
-      channel: (inst.channelType || inst.adapter.channelName).toLowerCase(),
-      channelName: inst.adapter.channelName,
-      timestamp: Date.now(),
-    });
-  });
-
   // ── 连接所有渠道 ──
   const connected = await channelLoader.connectAll(channelInstances);
+
+  // Bind connected adapters to their owning agents
+  // I1: only mark 'running' if a channel actually connected for that agent
+  const connectedSet = new Set(connected);
+  for (const inst of channelInstances) {
+    const agent = agentRegistry.resolveByChannel(inst.adapter.channelName);
+    if (!agent || agent.status === 'error') continue;
+    agent.channels.set(inst.adapter.channelName, inst.adapter);
+    if (agent.status === 'stopped' && connectedSet.has(inst.adapter.channelName)) {
+      agent.status = 'running';
+    }
+  }
 
   // 预填充 Feishu 已知 thread_id（重启后避免误判话题创建）
   for (const inst of channelInstances) {
@@ -503,7 +587,7 @@ async function main() {
       const otherType = other.channelType || other.adapter.channelName;
       if (otherType === sourceChannelType) continue;  // 跳过同类型通道
       if (notified.has(otherType)) continue;  // 同类型已通知过
-      const ownerId = getOwner(config, other.adapter.channelName);
+      const ownerId = agentRegistry.getOwner(other.adapter.channelName) ?? getOwner(config, other.adapter.channelName);
       if (!ownerId) continue;
       notified.add(otherType);
       other.adapter.sendText(ownerId, msg).catch(err => {
@@ -619,6 +703,22 @@ async function main() {
       },
     };
   }, async (cmd, sessionId) => cmdHandler.handleCtl(cmd, sessionId));
+
+  // M3: direct call (not cast) — wire EvolAgentRegistry into IPC for evolagent.* handlers
+  ipcServer.setAgentRegistry(agentRegistry);
+
+  // ── Reload hooks: enable agentRegistry.reload() to drain/disconnect/restart channels ──
+  const reloadHooks: ReloadHooks = buildReloadHooks({
+    channelLoader,
+    channelInstances,
+    registerChannelInstance,
+    messageQueue,
+  });
+
+  // Make reload hooks accessible to IPC handler & ctl handler (both run in this process)
+  (globalThis as any).__evolclaw_reloadHooks = reloadHooks;
+
+  // I3: start IPC server LAST, after all hook setup, to eliminate race window
   ipcServer.start();
 
   // 运行时配置文件监控

@@ -1,4 +1,4 @@
-import { Config, ChannelAdapter, Session, ChannelPolicy, InteractionRequest, ReplyContext, ActionInteraction, DEFAULT_PERMISSION_MODE } from '../types.js';
+import { Config, ChannelAdapter, Session, ChannelPolicy, InteractionRequest, ReplyContext, ActionInteraction, DEFAULT_PERMISSION_MODE, type EvolAgentRegistryHandle, type EvolAgentHandle } from '../types.js';
 import { SessionManager } from './session/session-manager.js';
 import { type AgentRunnerFull, hasModelSwitcher, hasPermissionController } from '../agents/claude-runner.js';
 import { MessageCache } from './message/message-cache.js';
@@ -165,9 +165,9 @@ export class CommandHandler {
   private permissionGateway?: PermissionGateway;
   private interactionRouter?: InteractionRouter;
   private statsCollector?: StatsCollector;
-  private hotLoadChannel?: (inst: any) => Promise<void>;
   private agentMap: Map<string, AgentRunnerFull>;
   private defaultAgentId: string;
+  private agentRegistry?: EvolAgentRegistryHandle;
 
   /** 按 agentId 获取 agent，回退到默认 */
   private getAgent(agentId?: string): AgentRunnerFull {
@@ -190,6 +190,164 @@ export class CommandHandler {
       this.agentMap = new Map([[agentRunnerOrMap.name, agentRunnerOrMap]]);
       this.defaultAgentId = agentRunnerOrMap.name;
     }
+  }
+
+  /** 注入 EvolAgentRegistry，用于判断通道是否被 EvolAgent 管理 */
+  setAgentRegistry(registry: EvolAgentRegistryHandle): void {
+    this.agentRegistry = registry;
+  }
+
+  /** 返回管理当前通道的 EvolAgent（非 default），无则返回 null */
+  private getOwningAgent(channel: string): EvolAgentHandle | null {
+    if (!this.agentRegistry) return null;
+    const agent = this.agentRegistry.resolveByChannel(channel);
+    if (!agent || agent.isDefault) return null;
+    return agent;
+  }
+
+  /** 返回当前通道的有效项目路径：agent-owned 用 agent.projectPath；否则用全局 defaultPath。*/
+  private getEffectiveDefaultPath(channel: string): string {
+    const owning = this.getOwningAgent(channel);
+    if (owning) return owning.projectPath;
+    return this.config.projects?.defaultPath || process.cwd();
+  }
+
+  /**
+   * 返回当前通道有效的 projects.list（agent-owned 用 agent.json 的；否则全局 evolclaw.json 的）。
+   * 都没配 list 时回退到 defaultPath 单项目。
+   */
+  private getEffectiveProjects(channel: string): Record<string, string> {
+    const owning = this.getOwningAgent(channel);
+    if (owning) {
+      return owning.getProjects();
+    }
+    return this.projects;
+  }
+
+  /**
+   * 添加项目到当前通道范围（agent-owned 写 agent.json；default 写 evolclaw.json）。
+   */
+  private async addProjectInScope(channel: string, name: string, projectPath: string): Promise<string | undefined> {
+    const owning = this.getOwningAgent(channel);
+    if (owning) {
+      try {
+        owning.addProject(name, projectPath);
+      } catch (e: any) {
+        return `⚠️ 写入 agent.json 失败: ${e?.message || e}`;
+      }
+      return undefined;
+    }
+    if (!this.config.projects) {
+      this.config.projects = { defaultPath: process.cwd(), autoCreate: false, list: {} };
+    }
+    if (!this.config.projects.list) {
+      this.config.projects.list = {};
+    }
+    this.config.projects.list[name] = projectPath;
+    try {
+      const { saveConfig } = await import('../config.js');
+      saveConfig(this.config);
+    } catch (e: any) {
+      return `⚠️ 写入 evolclaw.json 失败: ${e?.message || e}`;
+    }
+    // Refresh in-memory list cache (this.projects getter reads from this.config)
+    return undefined;
+  }
+
+  /**
+   * 持久化 baseagent.model：agent-owned 写到 agent.json；否则写 evolclaw.json 或 ~/.claude/settings.json。
+   * 返回错误信息或 undefined。
+   */
+  private persistBaseagentModel(channel: string, baseagentName: string, newModel: string | undefined): string | undefined {
+    const owning = this.getOwningAgent(channel);
+    if (owning) {
+      try {
+        owning.setBaseagentModel(newModel);
+      } catch (e: any) {
+        return `⚠️ 写入 agent.json 失败: ${e?.message || e}`;
+      }
+      return undefined;
+    }
+    // DefaultAgent / 无 owning agent：保留原"就近原则"
+    if (!this.config.agents) this.config.agents = {};
+    const isCodex = baseagentName === 'codex';
+    if (isCodex) {
+      if (!this.config.agents.codex) this.config.agents.codex = {};
+      if (newModel) this.config.agents.codex.model = newModel;
+      try { saveConfig(this.config); } catch (e: any) {
+        return `⚠️ 写入 evolclaw.json 失败: ${e.message}`;
+      }
+      return undefined;
+    }
+    const configuredInEvolclaw = !!(this.config.agents?.claude?.model || this.config.agents?.claude?.effort);
+    if (configuredInEvolclaw) {
+      if (!this.config.agents.claude) this.config.agents.claude = {};
+      if (newModel) this.config.agents.claude.model = newModel;
+      try { saveConfig(this.config); } catch (e: any) {
+        return `⚠️ 写入 evolclaw.json 失败: ${e.message}`;
+      }
+      return undefined;
+    }
+    // Fallback: ~/.claude/settings.json
+    const updates: { model?: string; effortLevel?: string } = {};
+    if (newModel) updates.model = newModel;
+    const writeResult = writeUserSettings(updates);
+    if (!writeResult.success) {
+      return `⚠️ 写入用户配置失败: ${writeResult.error}`;
+    }
+    return undefined;
+  }
+
+  /**
+   * 持久化 baseagent.effort：agent-owned 写到 agent.json；否则就近原则。
+   */
+  private persistBaseagentEffort(channel: string, baseagentName: string, newEffort: string | undefined): string | undefined {
+    const owning = this.getOwningAgent(channel);
+    if (owning) {
+      try {
+        owning.setBaseagentEffort(newEffort);
+      } catch (e: any) {
+        return `⚠️ 写入 agent.json 失败: ${e?.message || e}`;
+      }
+      return undefined;
+    }
+    if (!this.config.agents) this.config.agents = {};
+    const isCodex = baseagentName === 'codex';
+    if (isCodex) {
+      if (newEffort === undefined) {
+        if (this.config.agents.codex?.reasoning) {
+          delete this.config.agents.codex.reasoning;
+          try { saveConfig(this.config); } catch {}
+        }
+      } else {
+        if (!this.config.agents.codex) this.config.agents.codex = {};
+        this.config.agents.codex.reasoning = newEffort;
+        try { saveConfig(this.config); } catch (e: any) {
+          return `⚠️ 写入 evolclaw.json 失败: ${e.message}`;
+        }
+      }
+      return undefined;
+    }
+    const configuredInEvolclaw = !!(this.config.agents?.claude?.model || this.config.agents?.claude?.effort);
+    if (configuredInEvolclaw) {
+      if (newEffort === undefined) {
+        delete (this.config.agents!.claude as any).effort;
+        try { saveConfig(this.config); } catch {}
+      } else {
+        if (!this.config.agents.claude) this.config.agents.claude = {};
+        (this.config.agents.claude as any).effort = newEffort;
+        try { saveConfig(this.config); } catch (e: any) {
+          return `⚠️ 写入 evolclaw.json 失败: ${e.message}`;
+        }
+      }
+      return undefined;
+    }
+    const updates: { effortLevel?: string | null } = { effortLevel: newEffort ?? null };
+    const writeResult = writeUserSettings(updates);
+    if (!writeResult.success) {
+      return `⚠️ 写入用户配置失败: ${writeResult.error}`;
+    }
+    return undefined;
   }
 
   /** 项目列表快捷访问（list 缺失时用 defaultPath 作为唯一项目） */
@@ -346,10 +504,6 @@ export class CommandHandler {
 
   setMessageQueue(messageQueue: MessageQueue): void {
     this.messageQueue = messageQueue;
-  }
-
-  setHotLoadChannel(fn: (inst: any) => Promise<void>): void {
-    this.hotLoadChannel = fn;
   }
 
   setPermissionGateway(gateway: PermissionGateway): void {
@@ -509,9 +663,9 @@ export class CommandHandler {
           ] : []),
           ...(isOwner ? [
             { cmd: '/file', label: '发送项目内文件', desc: '将项目目录内的文件发送给用户' },
-            { cmd: '/aid', label: 'AID 管理', desc: '创建新 AID 并上线新 Agent 实例', next: { type: 'select' as const, items: [
-              { value: 'list', label: '列表', desc: '列出所有 AUN 实例及连接状态' },
-              { value: 'new', label: '创建', desc: '创建新 AID 并热加载上线', next: { type: 'text' as const } },
+            { cmd: '/aid', label: 'AID 身份管理', desc: '管理本地 AID 身份（创建/列表）', next: { type: 'select' as const, items: [
+              { value: 'list', label: '列表', desc: '列出本地所有 AID' },
+              { value: 'new', label: '创建', desc: '创建新 AID 身份', next: { type: 'text' as const } },
             ] } },
             { cmd: '/agentmd', label: '管理 agent.md', desc: '查看或更新 AUN 网络上的 agent.md 身份文件', next: { type: 'select' as const, items: [
               { value: 'put', label: '上传当前', desc: '将本地 agent.md 上传到 AUN 网络' },
@@ -566,7 +720,9 @@ export class CommandHandler {
     }
 
     if (cmd === '/p') {
-      const list = this.config.projects?.list || {};
+      // Use agent-scoped project list: agent-owned channels see their agent.json's
+      // projects.list; default channel sees evolclaw.json's projects.list
+      const list = this.getEffectiveProjects(channel);
       return Object.entries(list).map(([name, path]) => ({ value: name, label: name, desc: path as string }));
     }
 
@@ -584,8 +740,17 @@ export class CommandHandler {
     }
 
     if (cmd === '/restart') {
+      // /restart 是服务级操作（重连/重启进程），仅限 default 通道。
+      // EvolAgent 通道返回空菜单（用户在 agent-owned 通道上无可选项）
+      if (this.getOwningAgent(channel)) return [];
       const isOwner = userId ? this.sessionManager.resolveIdentity(channel, userId).role === 'owner' : false;
-      const channels = [...this.adapters.keys()].map(name => ({ value: name, label: name, desc: '重连此渠道' }));
+      // 列出所有 channel type
+      const visibleTypes = new Set<string>();
+      for (const [name] of this.adapters) {
+        const t = this.channelTypeMap.get(name);
+        if (t) visibleTypes.add(t);
+      }
+      const channels = [...visibleTypes].map(type => ({ value: type, label: type, desc: '重连此类型所有渠道实例' }));
       if (isOwner) channels.unshift({ value: '', label: '重启服务', desc: '重启整个 EvolClaw 服务进程' });
       return channels;
     }
@@ -688,6 +853,21 @@ export class CommandHandler {
       const isBlocked = threadBlocked.some(c => normalizedContent === c || normalizedContent.startsWith(c + ' '));
       if (isBlocked) {
         return '⚠️ 话题中不支持此命令';
+      }
+    }
+
+    // Agent-owned 通道：禁止项目切换和 agent 切换
+    const owningAgent = this.getOwningAgent(channel);
+    if (owningAgent) {
+      const isProjectCmd = normalizedContent === '/project' || normalizedContent.startsWith('/project ') ||
+        normalizedContent === '/bind' || normalizedContent.startsWith('/bind ') ||
+        normalizedContent === '/plist' ||
+        normalizedContent === '/p' || normalizedContent.startsWith('/p ');
+      if (isProjectCmd) {
+        return `❌ 当前通道由 agent [${owningAgent.name}] 管理，项目已锁定为 ${owningAgent.projectPath}`;
+      }
+      if (normalizedContent.startsWith('/agent ')) {
+        return `❌ 当前通道由 agent [${owningAgent.name}] 管理，baseagent 已锁定为 ${owningAgent.baseagent}`;
       }
     }
 
@@ -833,12 +1013,12 @@ export class CommandHandler {
         '  /check - 检查渠道状态',
         '  /activity [all|dm|owner|none] - 查看/控制中间输出显示模式',
         ...(isAdmin ? [
-          '  /restart <channel> - 重连指定渠道',
+          '  /restart <type> - 重连该类型所有渠道实例（服务级，admin+）',
         ] : []),
         ...(isOwner ? [
           '  /restart - 重启服务',
           '  /file [channel] <path> - 发送项目内文件',
-          '  /aid [list|new <aid>] - AID 管理',
+          '  /aid [list|new <aid>] - AID 身份管理',
           '  /agentmd [put|set <内容>] - 管理 agent.md',
         ] : []),
         '',
@@ -1212,51 +1392,14 @@ export class CommandHandler {
         changes.push(`推理强度: ${newEffort}`);
       }
 
-      // 持久化：写回来源（就近原则）
-      // evolclaw.json 配了 → 写 evolclaw.json
-      // evolclaw.json 没配 → 写 agent 全局配置
-      if (isCodexAgent) {
-        const configuredInEvolclaw = !!(this.config.agents?.codex?.model || this.config.agents?.codex?.reasoning);
-        if (configuredInEvolclaw) {
-          if (!this.config.agents!.codex) this.config.agents!.codex = {};
-          if (newModel) this.config.agents!.codex.model = newModel;
-          if (newEffort) this.config.agents!.codex.reasoning = newEffort;
-          try {
-            saveConfig(this.config);
-          } catch (error: any) {
-            return `⚠️ 写入 evolclaw.json 失败: ${error.message}\n已更新运行时配置，但未持久化`;
-          }
-        } else {
-          // Codex 全局配置（~/.codex/config.toml）目前不支持写入，回退到 evolclaw.json
-          if (!this.config.agents!.codex) this.config.agents!.codex = {};
-          if (newModel) this.config.agents!.codex.model = newModel;
-          if (newEffort) this.config.agents!.codex.reasoning = newEffort;
-          try {
-            saveConfig(this.config);
-          } catch (error: any) {
-            return `⚠️ 写入 evolclaw.json 失败: ${error.message}\n已更新运行时配置，但未持久化`;
-          }
-        }
-      } else {
-        const configuredInEvolclaw = !!(this.config.agents?.claude?.model || this.config.agents?.claude?.effort);
-        if (configuredInEvolclaw) {
-          if (!this.config.agents!.claude) this.config.agents!.claude = {};
-          if (newModel) this.config.agents!.claude.model = newModel;
-          if (newEffort) this.config.agents!.claude.effort = newEffort as any;
-          try {
-            saveConfig(this.config);
-          } catch (error: any) {
-            return `⚠️ 写入 evolclaw.json 失败: ${error.message}\n已更新运行时配置，但未持久化`;
-          }
-        } else {
-          const updates: { model?: string; effortLevel?: string } = {};
-          if (newModel) updates.model = newModel;
-          if (newEffort) updates.effortLevel = newEffort;
-          const writeResult = writeUserSettings(updates);
-          if (!writeResult.success) {
-            return `⚠️ 写入用户配置失败: ${writeResult.error}\n已更新运行时配置，但未持久化到 ~/.claude/settings.json`;
-          }
-        }
+      // 持久化：agent-owned channel 写到 agent.json；default 走原"就近原则"
+      if (newModel) {
+        const err = this.persistBaseagentModel(channel, modelAgent.name, newModel);
+        if (err) return `${err}\n已更新运行时配置，但未持久化`;
+      }
+      if (newEffort) {
+        const err = this.persistBaseagentEffort(channel, modelAgent.name, newEffort);
+        if (err) return `${err}\n已更新运行时配置，但未持久化`;
       }
 
       return `✓ 已切换\n  ${changes.join('\n  ')}`;
@@ -1342,23 +1485,8 @@ export class CommandHandler {
       // /effort auto：恢复 SDK 默认
       if (args === 'auto') {
         effortAgent.setEffort?.(undefined);
-
-        const isCodex = effortAgent.name === 'codex';
-        if (isCodex) {
-          if (this.config.agents?.codex?.reasoning) {
-            delete this.config.agents.codex.reasoning;
-            try { saveConfig(this.config); } catch {}
-          }
-        } else {
-          const configuredInEvolclaw = !!this.config.agents?.claude?.effort;
-          if (configuredInEvolclaw) {
-            delete (this.config.agents!.claude as any).effort;
-            try { saveConfig(this.config); } catch {}
-          } else {
-            writeUserSettings({ effortLevel: null });
-          }
-        }
-
+        const err = this.persistBaseagentEffort(channel, effortAgent.name, undefined);
+        if (err) return `${err}\n已更新运行时配置，但未持久化`;
         return '✓ 推理强度已恢复为 auto (SDK默认)';
       }
 
@@ -1373,114 +1501,57 @@ export class CommandHandler {
       const newEffort = args as Effort;
       effortAgent.setEffort?.(newEffort);
 
-      // 持久化
-      if (!this.config.agents) this.config.agents = {};
-      const isCodex = effortAgent.name === 'codex';
-      if (isCodex) {
-        if (!this.config.agents.codex) this.config.agents.codex = {};
-        this.config.agents.codex.reasoning = newEffort;
-        try { saveConfig(this.config); } catch {}
-      } else {
-        const configuredInEvolclaw = !!(this.config.agents?.claude?.model || this.config.agents?.claude?.effort);
-        if (configuredInEvolclaw) {
-          if (!this.config.agents.claude) this.config.agents.claude = {};
-          this.config.agents.claude.effort = newEffort as any;
-          try { saveConfig(this.config); } catch {}
-        } else {
-          writeUserSettings({ effortLevel: newEffort });
-        }
-      }
+      const err = this.persistBaseagentEffort(channel, effortAgent.name, newEffort);
+      if (err) return `${err}\n已更新运行时配置，但未持久化`;
 
       return `✓ 推理强度: ${newEffort}`;
     }
 
-    // /aid 命令：AID 管理（list / new）
+    // /aid 命令：AID 身份管理（list / new）
     if (normalizedContent === '/aid' || normalizedContent === '/aid list' || normalizedContent.startsWith('/aid ')) {
       if (!isOwner) return '❌ 无权限：此命令仅限 owner 使用';
 
-      const adapter = this.adapters.get(channel) as any;
-      const channelType = this.channelTypeMap.get(channel);
-      if (channelType !== 'aun') return '❌ 此命令仅在 AUN 通道中可用';
-
       const arg = normalizedContent.slice(4).trim();
+      const { aidList, aidCreate, agentmdPut, buildInitialAgentMd, isValidAid } = await import('../channels/aun-ops.js');
 
-      // /aid 或 /aid list — 列出所有 AUN 实例
+      // /aid 或 /aid list — 列出本地所有 AID
       if (!arg || arg === 'list') {
-        const { normalizeChannelInstances } = await import('../config.js');
-        const instances = normalizeChannelInstances(this.config.channels?.aun, 'aun');
-        if (instances.length === 0) return '暂无 AUN 实例';
+        const aids = aidList();
+        if (aids.length === 0) return '本地无 AID';
 
-        const lines = ['AUN 实例:'];
-        for (const inst of instances) {
-          if (inst.enabled === false || !(inst as any).aid) continue;
-          const channelObj = this.channelObjects.get(inst.name);
-          const status = channelObj?.getStatus?.();
-          const connected = status?.connected ?? false;
-          const icon = connected ? '✓' : '✗';
-          const state = connected ? '已连接' : '未连接';
-          lines.push(`  ${icon} ${inst.name}  ${(inst as any).aid}  ${state}`);
+        const lines = ['本地 AID:'];
+        for (const a of aids) {
+          const icons = [
+            a.hasPrivateKey ? '🔑' : '  ',
+            a.hasAgentMd ? '📄' : '  ',
+          ].join('');
+          lines.push(`  ${icons} ${a.aid}`);
         }
+        lines.push('\n🔑=私钥  📄=agent.md');
         return lines.join('\n');
       }
 
-      // /aid new <aid> — 创建新 AID 并热加载
+      // /aid new <aid> — 创建 AID（纯身份，不动 config）
       if (arg.startsWith('new ')) {
-        const rawName = arg.slice(4).trim();
-        if (!rawName) return '用法: /aid new <aid>\n例: /aid new reviewer';
+        const rawAid = arg.slice(4).trim();
+        if (!rawAid) return '用法: /aid new <完整AID>\n例: /aid new reviewer.agentid.pub';
 
-        if (!this.hotLoadChannel) return '❌ 热加载未就绪';
+        if (!isValidAid(rawAid)) return `❌ 无效 AID 格式: ${rawAid}`;
 
-        // Derive full AID: if no dots, append domain from current AID
-        const selfAid: string = typeof adapter._selfAid === 'function' ? adapter._selfAid() : '';
-        let fullAid = rawName;
-        if (!rawName.includes('.')) {
-          const domain = selfAid.split('.').slice(1).join('.');
-          if (!domain) return '❌ 无法推导 AID 域（当前实例未连接）';
-          fullAid = `${rawName}.${domain}`;
-        }
-
-        // Validate AID format
-        const { isValidAid } = await import('../utils/init-channel.js');
-        if (!isValidAid(fullAid)) return `❌ 无效 AID 格式: ${fullAid}`;
-
-        // Check instance name conflict
-        const instName = rawName.includes('.') ? rawName.split('.')[0] : rawName;
-        const { normalizeChannelInstances } = await import('../config.js');
-        const existing = normalizeChannelInstances(this.config.channels?.aun, 'aun');
-        if (existing.some(e => e.name === instName)) {
-          return `❌ 实例名 "${instName}" 已存在`;
-        }
-        if (existing.some(e => (e as any).aid === fullAid)) {
-          return `❌ AID ${fullAid} 已在配置中`;
-        }
-
-        // Create AID (reuse init-channel.ts silent logic)
         try {
-          const { createAidSilent, appendAunInstance } = await import('../utils/init-channel.js');
-          const createResult = await createAidSilent({ aid: fullAid, owner: selfAid });
+          const result = await aidCreate(rawAid);
 
-          // Resolve owner from current AUN instance config
-          const owner = this.config.channels?.aun
-            ? (Array.isArray(this.config.channels.aun)
-              ? this.config.channels.aun.find((a: any) => a.aid === selfAid)?.owner
-              : (this.config.channels.aun as any).owner)
-            : undefined;
+          if (!result.alreadyExisted) {
+            const content = buildInitialAgentMd({ aid: rawAid });
+            try {
+              await agentmdPut(content, { aid: rawAid, client: result.client });
+            } catch { /* non-fatal */ }
+          }
+          try { await result.client.close(); } catch { /* ignore */ }
 
-          // Hot-load: build and register new channel instance BEFORE writing config
-          const { AUNChannelPlugin } = await import('../channels/aun.js');
-          const plugin = new AUNChannelPlugin();
-          const tempConfig = JSON.parse(JSON.stringify(this.config));
-          tempConfig.channels.aun = [{ name: instName, enabled: true, aid: fullAid, owner }];
-          const newInstances = await plugin.createChannels(tempConfig);
-          if (newInstances.length === 0) return '❌ 通道实例创建失败';
-
-          await this.hotLoadChannel(newInstances[0]);
-
-          // Write config only after successful hot-load
-          appendAunInstance(this.config, { name: instName, aid: fullAid, owner });
-
-          const verb = createResult.alreadyExisted ? '已存在，现已上线' : '已创建并上线';
-          return `✓ ${fullAid} ${verb}\n  实例名: ${instName}\n  可在 AUN 中搜索该 AID 开始对话`;
+          const verb = result.alreadyExisted ? '已存在' : '已创建';
+          return `✓ ${rawAid} ${verb}
+  如需上线 AUN 通道，运行 evolclaw init aun`;
         } catch (e: any) {
           return `❌ 创建失败: ${String(e.message || e).slice(0, 200)}`;
         }
@@ -1489,7 +1560,7 @@ export class CommandHandler {
       return '用法: /aid [list|new <aid>]';
     }
 
-    // /activity 命令：控制中间输出显示模式
+    // /agentmd 命令：管理 agent.md 身份文件
     if (normalizedContent === '/agentmd' || normalizedContent.startsWith('/agentmd ')) {
       if (!isOwner) return '❌ 无权限：此命令仅限 owner 使用';
       const adapter = this.adapters.get(channel) as any;
@@ -1497,8 +1568,9 @@ export class CommandHandler {
 
       const selfAid: string = typeof adapter._selfAid === 'function' ? adapter._selfAid() : '';
       const arg = normalizedContent.slice(9).trim();
+      const { agentmdGet, agentmdPut } = await import('../channels/aun-ops.js');
 
-      // put — read local ~/.aun/AIDs/{aid}/agent.md and upload
+      // put — read local agent.md and upload to network
       if (arg === 'put') {
         if (!selfAid) return '❌ 未连接，无法确定本地 AID';
         try {
@@ -1506,27 +1578,22 @@ export class CommandHandler {
           const { join } = await import('node:path');
           const { homedir } = await import('node:os');
           const localPath = join(homedir(), '.aun', 'AIDs', selfAid, 'agent.md');
+          if (!readFileSync) return '❌ 读取失败';
           const content = readFileSync(localPath, 'utf-8');
-          await adapter.uploadAgentMd(content);
+          await agentmdPut(content, { aid: selfAid });
           return '✅ agent.md 已发布';
         } catch (e: any) {
           return `❌ 发布失败: ${String(e.message || e).slice(0, 100)}`;
         }
       }
 
-      // set <content> — upload inline content and sync to local
+      // set <content> — upload inline content
       if (arg.startsWith('set ')) {
         const content = arg.slice(4).trim();
         if (!content) return '用法：/agentmd set <内容>';
         if (!selfAid) return '❌ 未连接，无法确定本地 AID';
         try {
-          await adapter.uploadAgentMd(content);
-          const { writeFileSync, mkdirSync } = await import('node:fs');
-          const { join } = await import('node:path');
-          const { homedir } = await import('node:os');
-          const localDir = join(homedir(), '.aun', 'AIDs', selfAid);
-          mkdirSync(localDir, { recursive: true });
-          writeFileSync(join(localDir, 'agent.md'), content, 'utf-8');
+          await agentmdPut(content, { aid: selfAid });
           return '✅ agent.md 已更新并发布到AUN网络';
         } catch (e: any) {
           return `❌ 发布失败: ${String(e.message || e).slice(0, 100)}`;
@@ -1537,7 +1604,7 @@ export class CommandHandler {
       const aidToView = arg || selfAid;
       if (!aidToView) return '用法：/agentmd [<aid>] | put | set <内容>';
       try {
-        const md = await adapter.downloadAgentMd(aidToView);
+        const md = await agentmdGet(aidToView);
         if (!md || !md.trim()) return `ℹ️ ${aidToView} 尚未设置 agent.md`;
         return `\`\`\`\n${md.slice(0, 1500)}\n\`\`\``;
       } catch (e: any) {
@@ -1567,7 +1634,7 @@ export class CommandHandler {
         none: 'none',
       };
 
-      const currentMode = getChannelShowActivities(this.config, channel);
+      const currentMode = this.agentRegistry?.getShowActivities?.(channel) ?? getChannelShowActivities(this.config, channel);
 
       // 模式描述列表（用于 body 和文本降级）
       const modeDescriptions: { key: string; configVal: string; label: string }[] = [
@@ -1647,7 +1714,11 @@ export class CommandHandler {
       // 切换操作仅 owner
       if (!isOwner) return '❌ 中间输出模式切换仅限 owner';
 
-      setChannelShowActivities(this.config, channel, newMode);
+      if (this.agentRegistry?.setShowActivities) {
+        this.agentRegistry.setShowActivities(channel, newMode);
+      } else {
+        setChannelShowActivities(this.config, channel, newMode);
+      }
       return `✅ 中间输出模式: ${activityArg}（${label}）`;
     }
 
@@ -1714,7 +1785,12 @@ export class CommandHandler {
 
       await stopAgent.interrupt(sessionKey);
       // 发布中断事件，让 MessageProcessor 标记为 interrupted（而非 done）
-      this.eventBus.publish({ type: 'message:interrupted', sessionId: sessionKey, reason: 'stop' });
+      this.eventBus.publish({
+        type: 'message:interrupted',
+        sessionId: sessionKey,
+        reason: 'stop',
+        agentName: this.agentRegistry?.resolveByChannel(channel)?.name ?? '[default]',
+      });
       // 强制清除 processing_state
       this.sessionManager.clearProcessing(sessionKey);
       return '✓ 已发送中断信号，任务将尽快停止';
@@ -1793,7 +1869,7 @@ export class CommandHandler {
     // 尝试获取活跃会话（话题时直接查找话题 session）
     let session: Session | undefined;
     if (threadId) {
-      session = await this.sessionManager.getOrCreateSession(channel, channelId, this.config.projects?.defaultPath || process.cwd(), threadId);
+      session = await this.sessionManager.getOrCreateSession(channel, channelId, this.getEffectiveDefaultPath(channel), threadId);
     } else {
       session = await this.sessionManager.getActiveSession(channel, channelId);
     }
@@ -1810,7 +1886,7 @@ export class CommandHandler {
       session = await this.sessionManager.getOrCreateSession(
         channel,
         channelId,
-        this.config.projects?.defaultPath || process.cwd()
+        this.getEffectiveDefaultPath(channel)
       );
     }
 
@@ -1911,7 +1987,7 @@ export class CommandHandler {
         }
       }
 
-      const projectPath = session?.projectPath || this.config.projects?.defaultPath || process.cwd();
+      const projectPath = session?.projectPath || this.getEffectiveDefaultPath(channel);
 
       const newSession = await this.sessionManager.createNewSession(
         channel,
@@ -1945,11 +2021,28 @@ export class CommandHandler {
     if (normalizedContent === '/check' || normalizedContent.startsWith('/check ')) {
       const subCmd = normalizedContent.slice('/check'.length).trim();
 
+      // 限定可见渠道：agent-owned 通道仅显示该 agent 名下的渠道；
+      // default 通道也仅显示 default 的渠道（不再展示 evolagents 的渠道）
+      const checkOwningAgent = this.getOwningAgent(channel);
+      let allowedChannels: Set<string>;
+      if (checkOwningAgent) {
+        allowedChannels = new Set(checkOwningAgent.channelInstanceNames());
+      } else {
+        // default 范围：所有 channel 中，不属于任何 evolagent 的
+        const defaultNames: string[] = [];
+        for (const [name] of this.adapters) {
+          const owner = this.agentRegistry?.resolveByChannel(name);
+          if (!owner || owner.isDefault) defaultNames.push(name);
+        }
+        allowedChannels = new Set(defaultNames);
+      }
+
       // Default: show system health check (non-admin 仅看摘要)
       const lines: string[] = ['📡 渠道状态：'];
       // Group by channelType
       const groups = new Map<string, Array<{ name: string; status: string }>>();
       for (const [name] of this.adapters) {
+        if (!allowedChannels.has(name)) continue;
         const type = this.channelTypeMap.get(name) || name;
         const ch = this.channelObjects.get(name);
         let status: string;
@@ -1980,21 +2073,24 @@ export class CommandHandler {
         }
       }
 
-      // 队列状态
-      lines.push('', '📬 队列状态：');
-      lines.push(`  待处理消息: ${this.messageQueue.getGlobalQueueLength()}`);
-      lines.push(`  处理中队列: ${this.messageQueue.getGlobalProcessingCount()}`);
+      // 当前 agent 名（用于 agent 维度 stats / queue 查询）
+      const currentAgentName = checkOwningAgent?.name ?? '[default]';
 
-      // 运行概况
+      // 队列状态（按当前 agent 维度）
+      lines.push('', '📬 队列状态：');
+      lines.push(`  待处理消息: ${this.messageQueue.getQueueLengthByAgent(currentAgentName)}`);
+      lines.push(`  处理中队列: ${this.messageQueue.getProcessingCountByAgent(currentAgentName)}`);
+
+      // 运行概况（全局，进程级）
       lines.push('', '🖥️ 运行概况：');
       const uptimeMs = this.statsCollector
         ? this.statsCollector.getSnapshot().uptimeMs
         : process.uptime() * 1000;
       lines.push(`  运行时间: ${this.formatUptime(uptimeMs)}`);
 
-      // 近 1 小时统计
+      // 近 1 小时统计（按当前 agent 维度）
       if (this.statsCollector) {
-        const snap = this.statsCollector.getSnapshot();
+        const snap = this.statsCollector.getSnapshot(currentAgentName);
         const h = snap.lastHour;
         lines.push('', '📊 近 1 小时统计：');
         lines.push(`  收到消息: ${h.received}`);
@@ -2022,23 +2118,51 @@ export class CommandHandler {
     if (normalizedContent === '/restart' || normalizedContent.startsWith('/restart ')) {
       const restartArg = normalizedContent.slice('/restart'.length).trim();
 
-      // /restart <channel> — 重连指定渠道（admin only）
+      // /restart <type> — 重连指定类型的所有渠道（admin only，evolclaw 服务级操作）
+      // 服务级操作仅可从 default 通道发起，避免 evolagent owner/admin 越权
       if (restartArg) {
+        if (this.getOwningAgent(channel)) {
+          return '❌ 渠道重连只能从 DefaultAgent 通道发起（服务级操作）';
+        }
         if (!isAdmin) return '❌ 无权限：渠道重连仅限管理员使用';
-        const target = restartArg;
-        const ch = this.channelObjects.get(target);
-        if (!ch) {
-          const available = [...this.channelObjects.keys()].join(', ') || '无';
-          return `❌ 未找到渠道 "${target}"，可用渠道：${available}`;
+        const type = restartArg;
+
+        // /restart 是服务级操作：重连该 type 下的所有实例（不分 agent）
+        const scopedNames: string[] = [];
+        for (const [name] of this.adapters) {
+          if (this.channelTypeMap.get(name) === type) scopedNames.push(name);
         }
-        if (!ch.reconnect) {
-          return `❌ 渠道 "${target}" 不支持重连`;
+
+        if (scopedNames.length === 0) {
+          return `❌ 没有类型为 "${type}" 的渠道`;
         }
-        const result = await ch.reconnect();
-        return `🔄 ${target} 重连: ${result}`;
+
+        const results: string[] = [];
+        for (const name of scopedNames) {
+          const ch = this.channelObjects.get(name);
+          if (!ch) {
+            results.push(`${name}: 未找到渠道对象`);
+            continue;
+          }
+          if (!ch.reconnect) {
+            results.push(`${name}: 不支持重连`);
+            continue;
+          }
+          try {
+            const result = await ch.reconnect();
+            results.push(`${name}: ${result}`);
+          } catch (e: any) {
+            results.push(`${name}: 重连失败 - ${e?.message || e}`);
+          }
+        }
+        return `🔄 重连 ${type}:\n  ${results.join('\n  ')}`;
       }
 
-      // /restart（无参数）— 重启整个服务（owner only）
+      // /restart（无参数）— 重启整个服务（owner only，且仅可从 default 通道触发）
+      // 防止 evolagent 通道的 owner 越权杀整个 evolclaw 进程（影响所有租户）
+      if (this.getOwningAgent(channel)) {
+        return '❌ 服务重启只能从 DefaultAgent 通道发起。EvolAgent 通道仅可执行 /restart <type> 重连特定类型渠道';
+      }
       if (!isOwner) return '❌ 无权限：服务重启仅限 owner 使用';
       const allSessions = await this.sessionManager.listSessions(channel, channelId);
       const sessionsWithMessages = allSessions
@@ -2052,7 +2176,7 @@ export class CommandHandler {
       const executeRestart = async () => {
         let replyContext: ReplyContext | undefined;
         if (threadId) {
-          const threadSession = await this.sessionManager.getOrCreateSession(channel, channelId, this.config.projects?.defaultPath || process.cwd(), threadId);
+          const threadSession = await this.sessionManager.getOrCreateSession(channel, channelId, this.getEffectiveDefaultPath(channel), threadId);
           replyContext = this.getReplyContext(threadSession);
         }
         const restartInfo: Record<string, any> = {
@@ -2206,7 +2330,7 @@ export class CommandHandler {
       // 找目标 channelId
       let targetChannelId = channelId;
       if (isCrossChannel) {
-        const ownerPeerId = getOwner(this.config, targetChannel);
+        const ownerPeerId = this.agentRegistry?.getOwner?.(targetChannel) ?? getOwner(this.config, targetChannel);
         targetChannelId = ownerPeerId ? (this.sessionManager.getOwnerChatId(targetChannel, ownerPeerId) ?? '') : '';
         if (!targetChannelId) {
           return `❌ 未找到 ${targetLabel} 的私聊会话，请先在该通道发送一条消息`;
@@ -2477,30 +2601,19 @@ export class CommandHandler {
       // 生成项目名称（使用目录名）
       const projectName = path.basename(projectPath);
 
-      // 检查是否已存在
-      if (this.projects[projectName]) {
-        const existingPath = this.projects[projectName];
-        if (existingPath === projectPath) {
+      // 检查在当前 scope 内是否已存在
+      const scopeProjects = this.getEffectiveProjects(channel);
+      const existing = scopeProjects[projectName];
+      if (existing) {
+        if (existing === projectPath) {
           return `项目 "${projectName}" 已存在\n  路径: ${projectPath}\n\n使用 /p ${projectName} 切换到该项目`;
         }
-        return `❌ 项目名称 "${projectName}" 已被占用\n  现有路径: ${existingPath}\n  新路径: ${projectPath}\n\n请重命名目录或手动编辑配置文件`;
+        return `❌ 项目名称 "${projectName}" 已被占用\n  现有路径: ${existing}\n  新路径: ${projectPath}\n\n请重命名目录或手动编辑配置文件`;
       }
 
-      // 添加到配置
-      if (!this.config.projects) {
-        this.config.projects = { defaultPath: process.cwd(), autoCreate: false, list: {} };
-      }
-      if (!this.config.projects.list) {
-        this.config.projects.list = {};
-      }
-      this.config.projects.list[projectName] = projectPath;
-
-      // 保存配置
-      const { saveConfig } = await import('../config.js');
-      saveConfig(this.config);
-
-      // 更新内存中的项目列表
-      this.projects[projectName] = projectPath;
+      // 写入：agent-owned channel → agent.json；default → evolclaw.json
+      const err = await this.addProjectInScope(channel, projectName, projectPath);
+      if (err) return err;
 
       return `✓ 已添加项目: ${projectName}\n  路径: ${projectPath}\n\n使用 /p ${projectName} 切换到该项目`;
     }
@@ -2761,12 +2874,12 @@ export class CommandHandler {
         }
       }
 
-      if (!targetSession && sessionName.length === 8) {
+      if (!targetSession && sessionName.length >= 8) {
         targetSession = await this.sessionManager.getSessionByUuidPrefix(channel, channelId, sessionName);
       }
 
       const canImport = policy.canImportCliSession(session?.chatType || 'private', identity.role);
-      if (!targetSession && sessionName.length === 8 && canImport) {
+      if (!targetSession && sessionName.length >= 8 && canImport) {
         const projectPaths = Object.values(this.projects);
 
         if (session) {
@@ -2893,7 +3006,7 @@ export class CommandHandler {
         }
       }
 
-      if (!targetSession && sessionName.length === 8) {
+      if (!targetSession && sessionName.length >= 8) {
         targetSession = await this.sessionManager.getSessionByUuidPrefix(channel, channelId, sessionName);
       }
 
@@ -3186,7 +3299,7 @@ export class CommandHandler {
     '/help', '/status', '/check', '/pwd',
     '/model', '/effort', '/perm', '/agent',
     '/compact', '/activity', '/file', '/send', '/chatmode', '/restart', '/agentmd', '/bind', '/aid',
-    '/rename', '/name',
+    '/rename', '/name', '/evolagent',
   ];
 
   /** ctl 中仅允许查询形态的指令；写形态（带参）一律拒绝 */
@@ -3242,6 +3355,43 @@ export class CommandHandler {
 
     // 3. 从 session.metadata.peerId 获取 userId（用于权限判断）
     const userId = session.metadata?.peerId;
+
+    // 3.1 /evolagent: EvolAgent 管理（show identity / reload）
+    if (cmd === '/evolagent' || cmd.startsWith('/evolagent ')) {
+      const arg = cmd.slice('/evolagent'.length).trim();
+      if (!arg) {
+        const owning = this.getOwningAgent(session.channel);
+        if (owning) {
+          return { ok: true, result: `当前 EvolAgent: ${owning.name} (${owning.baseagent})` };
+        }
+        return { ok: true, result: '当前为 DefaultAgent 模式' };
+      }
+      if (arg.startsWith('reload ') || arg === 'reload') {
+        const name = arg === 'reload' ? '' : arg.slice('reload '.length).trim();
+        if (!name) return { ok: false, error: '用法: evolclaw ctl evolagent reload <name>' };
+        // I8: reload is a structural op, require admin or owner
+        if (!userId) {
+          return { ok: false, error: '权限不足：evolagent reload 仅 owner/admin 可用' };
+        }
+        const identity = this.sessionManager.resolveIdentity(session.channel, userId);
+        if (identity.role !== 'owner' && identity.role !== 'admin') {
+          return { ok: false, error: '权限不足：evolagent reload 仅 owner/admin 可用' };
+        }
+        if (!this.agentRegistry) return { ok: false, error: 'EvolAgentRegistry not available' };
+        const a = this.agentRegistry.get(name);
+        if (!a) return { ok: false, error: `Agent "${name}" not found` };
+        const hooks = (globalThis as any).__evolclaw_reloadHooks;
+        if (!hooks) return { ok: false, error: 'Reload hooks not initialized' };
+        if (!this.agentRegistry.reload) return { ok: false, error: 'EvolAgentRegistry.reload not available' };
+        try {
+          await this.agentRegistry.reload(name, hooks);
+          return { ok: true, result: `Agent "${name}" reloaded` };
+        } catch (e: any) {
+          return { ok: false, error: `Reload failed: ${e?.message || e}` };
+        }
+      }
+      return { ok: false, error: '用法: evolclaw ctl evolagent [reload <name>]' };
+    }
 
     // 4. /send 文本消息：直接通过 adapter 主动发送，不走 handle()
     if (cmd.startsWith('/send ') || cmd === '/send') {

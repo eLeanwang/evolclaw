@@ -11,13 +11,22 @@ import readline from 'readline';
 import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
-import { fileURLToPath } from 'url';
-import { execFile, execFileSync } from 'child_process';
+import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { resolvePaths } from '../paths.js';
 import { normalizeChannelInstances } from '../config.js';
 import { selectInstance, type InstanceChoice } from './init.js';
 import { isWindows } from './cross-platform.js';
+import {
+  AUN_CORE_SDK_PKG,
+  MIN_AUN_CORE_SDK,
+  resolveAunCoreSdkPkg,
+  isAunSdkVersionOk,
+  isValidAid,
+  aidCreate,
+  agentmdPut,
+  buildInitialAgentMd,
+} from '../channels/aun-ops.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -654,89 +663,9 @@ export async function cmdInitWechat(): Promise<void> {
 }
 
 // ==================== AUN ====================
-
-// 最低 @agentunion/fastaun 版本要求
-const MIN_AUN_CORE_SDK = [0, 2, 14] as const;
-const AUN_CORE_SDK_PKG = '@agentunion/fastaun';
-
-function compareVersion(a: string, min: readonly [number, number, number]): boolean {
-  const parts = a.split('.').map(n => parseInt(n, 10));
-  if (parts.length < 3 || parts.some(isNaN)) return false;
-  if (parts[0] !== min[0]) return parts[0] > min[0];
-  if (parts[1] !== min[1]) return parts[1] > min[1];
-  return parts[2] >= min[2];
-}
-
-export function resolveAunCoreSdkPkg(): { version: string; path: string } | null {
-  const pkgName = AUN_CORE_SDK_PKG;
-
-  // Strategy 1: walk up node_modules from this file (no require.resolve — avoids ESM exports issues)
-  try {
-    let dir = path.dirname(fileURLToPath(import.meta.url));
-    while (true) {
-      const candidate = path.join(dir, 'node_modules', pkgName, 'package.json');
-      if (fs.existsSync(candidate)) {
-        const data = JSON.parse(fs.readFileSync(candidate, 'utf-8'));
-        if (data.name === pkgName) return { version: data.version, path: candidate };
-      }
-      const parent = path.dirname(dir);
-      if (parent === dir) break;
-      dir = parent;
-    }
-  } catch { /* fall through */ }
-
-  // Strategy 2: npm root -g fallback (globally installed SDK)
-  try {
-    const npmCmd = isWindows ? 'npm.cmd' : 'npm';
-    const globalRoot = execFileSync(npmCmd, ['root', '-g'], {
-      encoding: 'utf-8', timeout: 10000, shell: isWindows,
-    }).trim();
-    const pkgPath = path.join(globalRoot, pkgName, 'package.json');
-    if (fs.existsSync(pkgPath)) {
-      const data = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
-      return { version: data.version, path: pkgPath };
-    }
-  } catch { /* not found */ }
-
-  return null;
-}
-
-/**
- * Download AUN CA root certificate to ~/.aun/CA/root/root.crt.
- * Idempotent: skips if file already exists. Returns true if a cert is on disk
- * after the call (either pre-existing or freshly downloaded).
- *
- * Must be called BEFORE constructing any AUNClient that needs to verify
- * gateway-issued certificates (e.g. for uploadAgentMd) — the SDK loads trusted
- * roots from disk at client construction time and won't pick up later writes.
- */
-export async function downloadCaRoot(aunPath: string, gatewayUrl: string, indent = ''): Promise<boolean> {
-  const caDir = path.join(aunPath, 'CA', 'root');
-  const caCertPath = path.join(caDir, 'root.crt');
-  if (fs.existsSync(caCertPath)) return true;
-  if (!gatewayUrl) return false;
-
-  try {
-    fs.mkdirSync(caDir, { recursive: true });
-    const gwHttp = gatewayUrl.replace(/^wss?:/, 'https:').replace(/\/aun$/, '');
-    const resp = await fetch(`${gwHttp}/pki/chain`, { redirect: 'follow' });
-    if (!resp.ok) {
-      console.warn(`${indent}⚠ CA 根证书下载失败: HTTP ${resp.status}`);
-      return false;
-    }
-    const body = await resp.text();
-    if (!body.includes('BEGIN CERTIFICATE')) {
-      console.warn(`${indent}⚠ CA 根证书响应内容无效，跳过写入`);
-      return false;
-    }
-    fs.writeFileSync(caCertPath, body);
-    console.log(`${indent}✓ CA 根证书已下载`);
-    return true;
-  } catch (e) {
-    console.warn(`${indent}⚠ CA 根证书下载失败: ${e}，可稍后手动下载`);
-    return false;
-  }
-}
+//
+// AUN 原子操作（aidCreate, agentmdPut, downloadCaRoot, isValidAid, ...）
+// 已迁移至 src/channels/aun-ops.ts。本节仅保留交互式 UI 编排。
 
 export async function checkAunEnvironment(rl: readline.Interface): Promise<boolean> {
   console.log('\n🔍 AUN 环境检查...\n');
@@ -763,7 +692,7 @@ export async function checkAunEnvironment(rl: readline.Interface): Promise<boole
     return true;
   }
 
-  if (compareVersion(installed.version, MIN_AUN_CORE_SDK)) {
+  if (isAunSdkVersionOk(installed.version)) {
     console.log(`  ✓ ${AUN_CORE_SDK_PKG} v${installed.version}`);
     console.log('');
     return true;
@@ -787,106 +716,9 @@ export async function checkAunEnvironment(rl: readline.Interface): Promise<boole
   return true;
 }
 
-export function isValidAid(name: string): boolean {
-  const labels = name.split('.');
-  return labels.length >= 3 && labels.every(l => /^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?$/.test(l));
-}
+// isValidAid, createAidSilent → 已迁移至 src/channels/aun-ops.ts
 
-/**
- * Non-interactive AID creation + agent.md publish.
- * Reuses the same logic as `evolclaw init --non-interactive --channel aun`.
- *
- * Returns the created AID string, or throws on failure.
- */
-export async function createAidSilent(opts: {
-  aid: string;
-  owner?: string;
-}): Promise<{ aid: string; alreadyExisted: boolean }> {
-  const aunPath = path.join(os.homedir(), '.aun');
-  const aidDir = path.join(aunPath, 'AIDs', opts.aid);
-
-  // Skip creation if AID already exists locally
-  if (fs.existsSync(aidDir) && fs.existsSync(path.join(aidDir, 'private'))) {
-    return { aid: opts.aid, alreadyExisted: true };
-  }
-
-  const { AUNClient, GatewayDiscovery } = await import('@agentunion/fastaun');
-  let client = new AUNClient({ aun_path: aunPath });
-
-  const result = await client.auth.createAid({ aid: opts.aid });
-
-  // Download CA root cert (if not already present)
-  const caDownloaded = await downloadCaRoot(aunPath, result.gateway || '');
-
-  // Rebuild client with CA cert for uploadAgentMd
-  const caCertPath = path.join(aunPath, 'CA', 'root', 'root.crt');
-  if (caDownloaded && fs.existsSync(caCertPath)) {
-    try { await client.close(); } catch { /* ignore */ }
-    client = new AUNClient({ aun_path: aunPath, root_ca_path: caCertPath });
-    // AUNClient 构造函数不会将 aid 传递给内部 AuthFlow，
-    // 必须显式调用 createAid 让 SDK 加载正确的身份（已存在时直接返回）
-    await client.auth.createAid({ aid: opts.aid });
-  }
-
-  // Set gateway URL for uploadAgentMd
-  let gatewayUrl = result.gateway || '';
-  if (!gatewayUrl) {
-    try {
-      const discovery = new GatewayDiscovery({});
-      gatewayUrl = await discovery.discover(`https://${opts.aid}/.well-known/aun-gateway`);
-    } catch { /* fall through */ }
-  }
-  if (gatewayUrl) {
-    (client as any)._gatewayUrl = gatewayUrl;
-  }
-
-  // Write initial agent.md (initialized: false, name = aid first label)
-  const agentName = opts.aid.split('.')[0];
-  const agentMdContent = `---\naid: "${opts.aid}"\nname: "${agentName}"\ntype: "ai"\nversion: "1.0.0"\ndescription: ""\ntags:\n  - evolclaw\ninitialized: false\n---\n`;
-  const agentMdPath = path.join(aidDir, 'agent.md');
-
-  try {
-    await client.auth.uploadAgentMd(agentMdContent);
-  } catch (e: any) {
-    // Non-fatal: first connection will auto-retry
-  }
-  fs.writeFileSync(agentMdPath, agentMdContent, 'utf-8');
-
-  try { await client.close(); } catch { /* ignore */ }
-
-  if (!fs.existsSync(agentMdPath)) {
-    throw new Error(`agent.md write verification failed: ${agentMdPath}`);
-  }
-
-  return { aid: opts.aid, alreadyExisted: false };
-}
-
-/**
- * Append a new AUN instance to the config's channels.aun array and save.
- * Handles upgrade from single-object to array format.
- */
-export function appendAunInstance(config: any, inst: { name: string; aid: string; owner?: string; enabled?: boolean }): void {
-  if (!config.channels) config.channels = {};
-
-  const newInst = {
-    name: inst.name,
-    enabled: inst.enabled ?? true,
-    aid: inst.aid,
-    ...(inst.owner && { owner: inst.owner }),
-  };
-
-  if (Array.isArray(config.channels.aun)) {
-    config.channels.aun.push(newInst);
-  } else if (config.channels.aun) {
-    const oldInst = { ...config.channels.aun, name: config.channels.aun.name || 'aun' };
-    config.channels.aun = [oldInst, newInst];
-  } else {
-    config.channels.aun = [newInst];
-  }
-
-  const p = resolvePaths();
-  fs.writeFileSync(p.config, JSON.stringify(config, null, 2) + '\n');
-}
+// appendAunInstance → 已迁移至 src/channels/aun-ops.ts
 
 export async function setupAunAid(rl: readline.Interface, _config: any): Promise<{ aid: string; owner: string } | null> {
   let aid = '';
@@ -918,62 +750,35 @@ export async function setupAunAid(rl: readline.Interface, _config: any): Promise
       break;
     }
 
-    // Create AID using TS SDK directly
+    // Create AID + agent.md via atomic ops
     console.log('  正在创建 AID...');
     let failed = false;
     try {
-      const { AUNClient, GatewayDiscovery } = await import('@agentunion/fastaun');
-      let client = new AUNClient({ aun_path: aunPath });
-
-      const result = await client.auth.createAid({ aid });
+      const result = await aidCreate(aid);
       console.log(`  ✓ AID ${result.aid} 创建成功`);
 
-      // 下载 CA 根证书（如果本地不存在），从 SDK 返回的实际网关 URL 派生
-      const caDownloaded = await downloadCaRoot(aunPath, result.gateway || '', '  ');
-
-      // 重建 client：传 root_ca_path 以验证 server cert
-      const caCertPath = path.join(aunPath, 'CA', 'root', 'root.crt');
-      if (caDownloaded && fs.existsSync(caCertPath)) {
-        try { await client.close(); } catch { /* ignore */ }
-        client = new AUNClient({ aun_path: aunPath, root_ca_path: caCertPath });
-        await client.auth.createAid({ aid });
-      }
-
-      // 设置 gateway URL（从 createAid 返回值或 well-known 自动发现）
-      let gatewayUrl = result.gateway || '';
-      if (!gatewayUrl) {
-        try {
-          const discovery = new GatewayDiscovery({});
-          gatewayUrl = await discovery.discover(`https://${aid}/.well-known/aun-gateway`);
-        } catch { /* fall through */ }
-      }
-      if (gatewayUrl) {
-        (client as any)._gatewayUrl = gatewayUrl;
-      }
-
-      // Collect agent.md info and publish
+      // Collect agent.md type and upload
       const typeInput = (await ask(rl, '  Agent 类型 human/ai [ai]: ')).trim().toLowerCase();
       const agentType = typeInput === 'human' ? 'human' : 'ai';
-      const agentName = aid.split('.')[0];
+      const content = buildInitialAgentMd({ aid, type: agentType });
 
-      const agentMdContent = `---\naid: "${aid}"\nname: "${agentName}"\ntype: "${agentType}"\nversion: "1.0.0"\ndescription: ""\ntags:\n  - evolclaw\ninitialized: false\n---\n`;
-      const agentMdPath = path.join(aidDir, 'agent.md');
       try {
-        await client.auth.uploadAgentMd(agentMdContent);
-        console.log('  ✓ agent.md 已发布');
+        await agentmdPut(content, { aid, client: result.client });
+        console.log('  ✓ agent.md 已发布并写入本地');
       } catch (e: any) {
         console.log(`  ⚠ agent.md 发布失败（首次连接将自动重试）: ${String(e.message || e).slice(0, 100)}`);
-      }
-      fs.writeFileSync(agentMdPath, agentMdContent, 'utf-8');
-      if (!fs.existsSync(agentMdPath)) {
-        try { await client.close(); } catch { /* ignore */ }
-        console.log(`  ✗ agent.md 本地写入校验失败: ${agentMdPath}`);
-        failed = true;
-      } else {
-        console.log('  ✓ agent.md 已写入本地');
+        // Still write local copy as fallback
+        try {
+          fs.mkdirSync(aidDir, { recursive: true });
+          fs.writeFileSync(path.join(aidDir, 'agent.md'), content, 'utf-8');
+          console.log('  ✓ agent.md 已写入本地');
+        } catch (we: any) {
+          console.log(`  ✗ agent.md 本地写入失败: ${String(we.message || we).slice(0, 100)}`);
+          failed = true;
+        }
       }
 
-      try { await client.close(); } catch { /* ignore */ }
+      try { await result.client.close(); } catch { /* ignore */ }
     } catch (e: any) {
       const msg = e.message || String(e);
       console.log(`  ✗ AID 创建失败: ${msg.slice(0, 200)}`);
@@ -1753,4 +1558,76 @@ export async function cmdInitWecom(): Promise<void> {
   }
   console.log(`  配置已写入: ${p.config}`);
   console.log(`\n现在可以启动服务: evolclaw restart`);
+}
+
+// ==================== Unified Credential Collector Dispatcher ====================
+
+/**
+ * Returns the credential collector function for a given channel type.
+ * Used by `evolclaw agent new` to collect credentials without writing to evolclaw.json.
+ *
+ * Each collector is an async function that runs the interactive flow and returns
+ * the credential object (same shape as a channel instance in evolclaw.json),
+ * or null if the user cancels.
+ */
+export type ChannelCredentialCollector = () => Promise<Record<string, any> | null>;
+
+export function getChannelCredentialCollector(type: string): ChannelCredentialCollector | null {
+  switch (type) {
+    case 'feishu':
+      return async () => {
+        const result = await runFeishuQrFlow();
+        if (!result) return null;
+        return { appId: result.appId, appSecret: result.appSecret, enabled: true };
+      };
+    case 'wechat':
+      return async () => {
+        const result = await runWechatQrFlow();
+        if (!result) return null;
+        return { baseUrl: result.baseUrl, token: result.token, enabled: true };
+      };
+    case 'aun':
+      return async () => {
+        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+        try {
+          if (!await checkAunEnvironment(rl)) return null;
+          const result = await setupAunAid(rl, {});
+          if (!result) return null;
+          return { aid: result.aid, owner: result.owner, enabled: true };
+        } finally {
+          rl.close();
+        }
+      };
+    case 'dingtalk':
+      return async () => {
+        const result = await runDingtalkQrFlowSimple();
+        if (!result) return null;
+        return { clientId: result.clientId, clientSecret: result.clientSecret, enabled: true };
+      };
+    case 'qqbot':
+      return async () => {
+        const result = await runQQBotBindFlowSimple();
+        if (!result) return null;
+        return { appId: result.appId, clientSecret: result.clientSecret, enabled: true };
+      };
+    case 'wecom':
+      return async () => {
+        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+        const ask = (q: string): Promise<string> => new Promise(r => rl.question(q, r));
+        try {
+          console.log('企业微信 AI Bot 配置\n');
+          console.log('请在企业微信管理后台 → AI Bot 页面获取 Bot ID 和 Secret\n');
+
+          const botId = (await ask('  Bot ID: ')).trim();
+          if (!botId) return null;
+          const secret = (await ask('  Secret: ')).trim();
+          if (!secret) return null;
+          return { botId, secret, enabled: true };
+        } finally {
+          rl.close();
+        }
+      };
+    default:
+      return null;
+  }
 }

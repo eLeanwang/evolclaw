@@ -213,7 +213,7 @@ export function loadConfig(configPath: string = resolvePaths().config): Config {
           logger.warn(`Config file missing, creating from sample: ${samplePath}`);
           const sample = JSON.parse(fs.readFileSync(samplePath, 'utf-8'));
           // Set a usable defaultPath
-          const defaultProjectDir = path.join(os.homedir(), 'evolclaw-project');
+          const defaultProjectDir = path.join(os.homedir(), 'projects', 'default');
           sample.projects.defaultPath = defaultProjectDir;
           if (!fs.existsSync(defaultProjectDir)) {
             fs.mkdirSync(defaultProjectDir, { recursive: true });
@@ -296,6 +296,45 @@ export function normalizeChannelInstances<T extends { name?: string }>(
 }
 
 /**
+ * Parse a defaultChannel reference. Supports:
+ *   "feishu"           → { type: "feishu" }
+ *   "feishu/feilun"    → { type: "feishu", instance: "feilun" }
+ */
+export function parseDefaultChannelRef(ref: string): { type: string; instance?: string } {
+  const slash = ref.indexOf('/');
+  if (slash < 0) return { type: ref };
+  return { type: ref.slice(0, slash), instance: ref.slice(slash + 1) };
+}
+
+/**
+ * Validate a defaultChannel reference against a channels config block.
+ * Returns an error message string if invalid, or null if OK.
+ *   - type must be in channelTypes
+ *   - type must have at least one instance configured
+ *   - if instance specified, must match an existing instance.name
+ *   - if instance omitted, type must have exactly 1 instance (else ambiguous)
+ */
+export function validateDefaultChannelRef(ref: string, channelsBlock: any): string | null {
+  const { type, instance } = parseDefaultChannelRef(ref);
+  if (!channelTypes.includes(type as any)) {
+    return `channels.defaultChannel='${ref}' references unknown channel type '${type}'`;
+  }
+  const instances = normalizeChannelInstances(channelsBlock?.[type], type);
+  if (instances.length === 0) {
+    return `channels.defaultChannel='${ref}' but channels.${type} has no instances`;
+  }
+  if (instance) {
+    if (!instances.some(i => i.name === instance)) {
+      return `channels.defaultChannel='${ref}' but channels.${type} has no instance named '${instance}'`;
+    }
+  } else if (instances.length > 1) {
+    const names = instances.map(i => i.name).join(', ');
+    return `channels.defaultChannel='${ref}' is ambiguous: channels.${type} has ${instances.length} instances (${names}); use 'type/instanceName' form`;
+  }
+  return null;
+}
+
+/**
  * Validate that all channel instance names are unique across all channel types.
  * Throws if duplicate names are found.
  */
@@ -337,9 +376,13 @@ export function getOwner(config: Config, channelOrType: string): string | undefi
   return undefined;
 }
 
-export function setOwner(config: Config, instanceName: string, userId: string, configPath: string = resolvePaths().config): void {
-  if (!config.channels) config.channels = {};
-  const channels = config.channels as any;
+/**
+ * Find a channel instance by name in a config-like object and set its owner.
+ * Returns true if the instance was found and updated.
+ */
+export function writeOwnerToChannelInstance(root: any, instanceName: string, userId: string): boolean {
+  const channels = root?.channels;
+  if (!channels || typeof channels !== 'object') return false;
 
   for (const type of channelTypes) {
     const raw = channels[type];
@@ -349,26 +392,39 @@ export function setOwner(config: Config, instanceName: string, userId: string, c
       const inst = raw.find((item: any) => item.name === instanceName);
       if (inst) {
         inst.owner = userId;
-        saveConfig(config, configPath);
-        return;
+        return true;
       }
     } else {
-      // Single-object form: match if name matches (or defaults to type name)
       const effectiveName = raw.name ?? type;
       if (effectiveName === instanceName) {
         raw.owner = userId;
-        saveConfig(config, configPath);
-        return;
+        return true;
       }
     }
   }
+  return false;
+}
 
-  // Fallback: if instanceName matches a channel type with no config, create it
-  if (channelTypes.includes(instanceName as any)) {
-    channels[instanceName] = { owner: userId };
+export function setOwner(config: Config, instanceName: string, userId: string, configPath: string = resolvePaths().config): void {
+  if (!config.channels) config.channels = {};
+
+  // 1. Try writing to evolclaw.json (default-agent channels)
+  if (writeOwnerToChannelInstance(config, instanceName, userId)) {
     saveConfig(config, configPath);
     return;
   }
+
+  // 2. Last resort: if instanceName matches a channel type with no config, create it
+  if (channelTypes.includes(instanceName as any)) {
+    (config.channels as any)[instanceName] = { owner: userId };
+    saveConfig(config, configPath);
+    return;
+  }
+
+  // 3. I4: No match — warn (don't silently lose owner). Callers managing
+  // agent-owned channels should route through EvolAgent.setOwner before
+  // falling back to this global setter.
+  logger.warn(`[setOwner] Channel instance "${instanceName}" not found in evolclaw.json. Owner ${userId} not persisted.`);
 }
 
 type ShowActivitiesMode = 'all' | 'dm-only' | 'owner-dm-only' | 'none';
@@ -426,9 +482,9 @@ export function getDefaultSessionMode(config: Config, chatType: string): 'intera
 }
 
 export function isOwner(config: Config, channelOrType: string, userId: string): boolean {
-  // 按实例名精确匹配
+  // 按实例名精确匹配（evolclaw.json）
   if (getOwner(config, channelOrType) === userId) return true;
-  // 按 channelType 匹配：检查该类型下所有实例
+  // 按 channelType 匹配：检查该类型下所有实例（evolclaw.json）
   for (const type of channelTypes) {
     if (type !== channelOrType) continue;
     const raw = (config.channels as any)?.[type];
@@ -556,16 +612,31 @@ export function validateConfigIntegrity(config: any): { valid: boolean; reasons:
     }
   }
 
-  // channels — 单通道时自动推断，无需显式 defaultChannel
-  const defaultChannel = config.channels?.defaultChannel;
-  if (!defaultChannel) {
-    const channelKeys = channelTypes.filter(t => config.channels?.[t]);
-    if (channelKeys.length === 0) {
-      reasons.push('Missing channels.defaultChannel (no channels configured)');
+  // channels — 单实例自动推断，多实例必填 defaultChannel
+  // 支持两种形式：
+  //   "feishu"           → type 级，要求该 type 下只有 1 个实例
+  //   "feishu/feilun"    → type/instanceName，精确指向实例
+  const totalInstances = channelTypes.reduce((acc, t) => {
+    return acc + normalizeChannelInstances((config.channels as any)?.[t], t).length;
+  }, 0);
+
+  if (totalInstances === 0) {
+    reasons.push('Missing channels: no channel instances configured');
+  } else if (totalInstances === 1) {
+    // 单实例：defaultChannel 可省略（自动推断）
+    const dc = config.channels?.defaultChannel;
+    if (dc) {
+      const err = validateDefaultChannelRef(dc, config.channels as any);
+      if (err) reasons.push(err);
     }
   } else {
-    if (!config.channels?.[defaultChannel]) {
-      reasons.push(`channels.defaultChannel='${defaultChannel}' but channels.${defaultChannel} does not exist`);
+    // 多实例：defaultChannel 必填
+    const dc = config.channels?.defaultChannel;
+    if (!dc) {
+      reasons.push('Missing channels.defaultChannel (multiple channel instances configured; must specify "type" or "type/instanceName")');
+    } else {
+      const err = validateDefaultChannelRef(dc, config.channels as any);
+      if (err) reasons.push(err);
     }
   }
 

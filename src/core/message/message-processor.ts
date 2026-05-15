@@ -12,11 +12,11 @@ import { logger } from '../../utils/logger.js';
 import { getErrorMessage, classifyError, ErrorType, ERROR_PREFIX, isInfraError, prefixErrorType, isRetryableError } from '../../utils/error-utils.js';
 import { EventBus } from '../event-bus.js';
 import { summarizeToolInput } from '../permission.js';
-import type { Message, Config, Session, ChannelAdapter, ChannelOptions, ChannelPolicy, CommandHandler, ReplyContext } from '../../types.js';
+import type { Message, Config, Session, ChannelAdapter, ChannelOptions, ChannelPolicy, CommandHandler, ReplyContext, AgentContext, EvolAgentRegistryHandle } from '../../types.js';
 import { DEFAULT_PERMISSION_MODE } from '../../types.js';
 import { getOwner } from '../../config.js';
 import { getPackageRoot, resolveRoot } from '../../paths.js';
-import { renderPromptSection } from '../../prompts/templates.js';
+import { renderPromptSection } from '../../agents/templates.js';
 import type { InteractionRouter } from '../interaction-router.js';
 
 /**
@@ -85,6 +85,20 @@ export class MessageProcessor {
 
   setMessageQueue(queue: MessageQueue): void {
     this.messageQueue = queue;
+  }
+
+  private agentRegistry?: EvolAgentRegistryHandle;
+
+  setAgentRegistry(registry: EvolAgentRegistryHandle): void {
+    this.agentRegistry = registry;
+  }
+
+  private getAgentContext(channelName: string, chatType: string): AgentContext | null {
+    if (!this.agentRegistry) return null;
+    const agent = this.agentRegistry.resolveByChannel(channelName);
+    if (!agent) return null;
+    const globalCm = this.config.chatmode;
+    return agent.getContext(channelName, chatType, globalCm);
   }
 
   /**
@@ -175,6 +189,12 @@ export class MessageProcessor {
     const streamKey = session.id;
     const chatType = message.chatType || 'private';
     const identityRole = session.identity?.role || 'anonymous';
+
+    // Resolve agent context from registry (Phase 2 foundation)
+    const agentContext = this.getAgentContext(channelKey, chatType);
+    if (agentContext) {
+      logger.debug(`[MessageProcessor] Agent context resolved: ${agentContext.name} (${agentContext.baseagent})`);
+    }
 
     // 按 session.agentId 选择 agent 后端
     const agent = this.getAgent(session.agentId);
@@ -292,6 +312,8 @@ export class MessageProcessor {
     const messageId = `${message.channel}_${message.channelId}_${message.timestamp || Date.now()}`;
     const channelKey = session.metadata?.channelName || message.channel;
     const channelInfo = this.resolveChannelInfo(channelKey);
+    // Per-method agent name for stats bucketing (agent.name or '[default]')
+    const agentNameForStats = this.agentRegistry?.resolveByChannel(channelKey)?.name ?? '[default]';
 
     if (!channelInfo) {
       logger.error(`[MessageProcessor] Unknown channel: ${channelKey}`);
@@ -343,6 +365,7 @@ export class MessageProcessor {
         channel: message.channel,
         channelId: message.channelId,
         content: message.content,
+        agentName: agentNameForStats,
         timestamp: Date.now()
       });
 
@@ -350,11 +373,16 @@ export class MessageProcessor {
       const modeInfo = isBackground ? ' [\u540e\u53f0]' : '';
       const e2eeInfo = message.replyContext?.metadata?.encrypted != null ? ` encrypt=${message.replyContext.metadata.encrypted}` : '';
       logger.info(`[${message.channel}] ${message.channelId}: ${message.content}${imageInfo}${modeInfo}${e2eeInfo}`);
-      logger.info(`[MessageProcessor] session=${session.id} task=${taskId} chatType=${session.chatType} sessionMode=${session.sessionMode} agentId=${session.agentId} msgChatType=${message.chatType ?? 'n/a'}`);
+      // 构建 peer 标识（优先 peerName，退化到 peerId / channelId）
+      const peerName = session.metadata?.peerName ?? message.peerName;
+      const peerId = session.metadata?.peerId ?? message.peerId ?? message.channelId;
+      const peerShort = peerId ? peerId.split('.')[0].split(':')[0] : '?';
+      const peerLabel = peerName && peerName !== peerShort ? `${peerShort}(${peerName})` : peerShort;
+      logger.info(`[MessageProcessor] session=${session.id} task=${taskId} peer=${peerLabel} chatType=${session.chatType} sessionMode=${session.sessionMode} agentId=${session.agentId} msgChatType=${message.chatType ?? 'n/a'}`);
 
       // 记录开始处理
       this.eventBus.publish({ type: 'message:processing', sessionId: session.id });
-      adapter.sendProcessingStatus?.(message.channelId, 'start', session.id, taskId, this.getReplyContext(message));
+      adapter.sendProcessingStatus?.(message.channelId, 'start', session.id, taskId, taskReplyContext());
 
       logger.message({
         msgId: messageId,
@@ -631,8 +659,14 @@ export class MessageProcessor {
       for (const match of fileMatches) {
         // 兼容旧格式 (1组) 和新格式 (2组)
         const hasChannelGroup = match.length >= 3;
-        const targetSpec = hasChannelGroup ? (match[1] ?? undefined) : undefined;
-        const filePath = (hasChannelGroup ? match[2] : match[1]).trim();
+        let targetSpec = hasChannelGroup ? (match[1] ?? undefined) : undefined;
+        let filePath = (hasChannelGroup ? match[2] : match[1]).trim();
+
+        // 白名单校验：targetSpec 必须是已注册通道，否则视为路径的一部分（如 Windows 盘符 C:）
+        if (targetSpec && !this.channels.has(targetSpec) && !this.channelTypeMap.has(targetSpec)) {
+          filePath = `${targetSpec}:${filePath}`;
+          targetSpec = undefined;
+        }
 
         if (this.isPlaceholderPath(filePath)) {
           logger.info(`[${adapter.channelName}] Skipped placeholder file marker: [SEND_FILE:${filePath}]`);
@@ -679,7 +713,7 @@ export class MessageProcessor {
         if (isCrossChannel) {
           const targetAdapterName = targetInfo.adapter.channelName;
           const targetChannelType = targetInfo.options?.channelType || targetAdapterName;
-          const ownerPeerId = getOwner(this.config, targetAdapterName);
+          const ownerPeerId = this.agentRegistry?.getOwner?.(targetAdapterName) ?? getOwner(this.config, targetAdapterName);
           targetChannelId = ownerPeerId ? (this.sessionManager.getOwnerChatId(targetChannelType, ownerPeerId) ?? '') : '';
           if (!targetChannelId) {
             await adapter.sendText(message.channelId, `\u274c 未找到 ${targetLabel} 的私聊会话，请先在该通道发送一条消息`, taskReplyContext());
@@ -741,6 +775,12 @@ export class MessageProcessor {
       // 清除处理中状态
       this.sessionManager.clearProcessing(session.id);
       logger.info(`[MessageProcessor] session ${session.id} processing cleared task=${taskId}`);
+
+      // 更新 EvolAgent.lastActivity
+      if (this.agentRegistry) {
+        const owningAgent = this.agentRegistry.resolveByChannel(channelKey);
+        if (owningAgent) owningAgent.lastActivity = Date.now();
+      }
       // 注意：不在此处清除 interruptedSessions，由下一条消息的 prompt 包装逻辑消费
       const interruptReason = this.interruptedSessions.get(session.id);
 
@@ -749,13 +789,14 @@ export class MessageProcessor {
         const errorSummary = streamResult.errors?.join('; ') || '任务执行失败';
         const rawSubtype = streamResult.subtype || 'agent_error';
         const errorType = prefixErrorType(ERROR_PREFIX.AGENT, rawSubtype);
-        adapter.sendProcessingStatus?.(message.channelId, 'error', session.id, taskId, this.getReplyContext(message));
+        adapter.sendProcessingStatus?.(message.channelId, 'error', session.id, taskId, taskReplyContext());
 
         this.eventBus.publish({
           type: 'message:error',
           sessionId: session.id,
           error: errorSummary,
           errorType,
+          agentName: agentNameForStats,
           terminalReason: streamResult.terminalReason
         });
 
@@ -779,7 +820,7 @@ export class MessageProcessor {
         });
       } else {
         // 真正的成功
-        adapter.sendProcessingStatus?.(message.channelId, interruptReason ? 'interrupted' : 'done', session.id, taskId, this.getReplyContext(message));
+        adapter.sendProcessingStatus?.(message.channelId, interruptReason ? 'interrupted' : 'done', session.id, taskId, taskReplyContext());
         await this.sessionManager.recordSuccess(session.id);
 
         this.eventBus.publish({
@@ -790,6 +831,7 @@ export class MessageProcessor {
           terminalReason: streamResult.terminalReason,
           finalText: streamResult.lastReplyText || undefined,
           durationMs: Date.now() - startTime,
+          agentName: agentNameForStats,
           timestamp: Date.now()
         });
 
@@ -837,7 +879,7 @@ export class MessageProcessor {
 
       // 用户主动中断（新消息打断 或 /stop 命令）时静默，不发送中断/错误提示
       if (!isUserInterrupt) {
-        try { adapter.sendProcessingStatus?.(message.channelId, procStatus, session.id, taskId, this.getReplyContext(message)); } catch {}
+        try { adapter.sendProcessingStatus?.(message.channelId, procStatus, session.id, taskId, taskReplyContext()); } catch {}
       }
 
       // 用户主动中断时降级日志；其余仍按 error 记录
@@ -854,7 +896,8 @@ export class MessageProcessor {
         type: 'message:error',
         sessionId: session.id,
         error: errorMsg,
-        errorType
+        errorType,
+        agentName: agentNameForStats,
       });
 
       // 记录处理失败
@@ -957,6 +1000,8 @@ export class MessageProcessor {
     shouldSuppress: () => boolean,
     thoughtEmitter?: ThoughtEmitter | null
   ): Promise<{ isError: boolean; subtype?: string; errors?: string[]; terminalReason?: string; lastReplyText: string; fullText: string; hasReceivedText: boolean }> {
+    // Per-session agent name for stats bucketing
+    const agentNameForStats = this.agentRegistry?.resolveByChannel(session.metadata?.channelName || session.channel)?.name ?? '[default]';
     let hasReceivedText = false;
     let hasErrorResult = false;  // 是否已有 tool_result/error 事件输出过错误
     let completeResult: { isError: boolean; subtype?: string; errors?: string[]; terminalReason?: string; lastReplyText: string; fullText: string; hasReceivedText: boolean } = { isError: false, lastReplyText: '', fullText: '', hasReceivedText: false };
@@ -1087,6 +1132,7 @@ export class MessageProcessor {
             toolName: event.name,
             isError: event.isError,
             content: event.result,
+            agentName: agentNameForStats,
             timestamp: Date.now()
           });
 
@@ -1184,6 +1230,7 @@ export class MessageProcessor {
           channelId: session.channelId,
           finalText: lastReplyText || event.result || undefined,
           durationMs: event.durationMs,
+          agentName: agentNameForStats,
           timestamp: Date.now()
         });
       } else if (event.isError === true) {
@@ -1201,7 +1248,8 @@ export class MessageProcessor {
           type: 'message:error',
           sessionId: session.id,
           error: event.errors?.join('; ') || '\u672a\u77e5\u9519\u8bef',
-          errorType: bgErrorType
+          errorType: bgErrorType,
+          agentName: agentNameForStats,
         });
       }
     }

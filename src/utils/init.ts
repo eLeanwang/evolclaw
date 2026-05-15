@@ -413,7 +413,7 @@ export async function cmdInit(options?: {
   // 非交互式模式
   if (options?.nonInteractive) {
     const config = JSON.parse(fs.readFileSync(sampleSrc, 'utf-8'));
-    const defaultPath = options.defaultPath || path.join(os.homedir(), 'evolclaw-project');
+    const defaultPath = options.defaultPath || path.join(os.homedir(), 'projects', 'default');
     if (!fs.existsSync(defaultPath)) fs.mkdirSync(defaultPath, { recursive: true });
     config.projects.defaultPath = defaultPath;
     config.projects.list = { [path.basename(defaultPath)]: defaultPath };
@@ -422,53 +422,29 @@ export async function cmdInit(options?: {
       throw new Error('--aun-aid is required for AUN channel (e.g. --aun-aid mybot.agentid.pub)');
     }
     if (options.channel === 'aun' && options.aunAid) {
-      // 自动安装 AUN SDK
-      const { resolveAunCoreSdkPkg, npmInstallGlobal, downloadCaRoot } = await import('./init-channel.js');
-      if (!resolveAunCoreSdkPkg()) {
-        console.log('正在安装 @agentunion/fastaun...');
-        await npmInstallGlobal('@agentunion/fastaun@latest');
-      }
+      const { ensureAunSdk, aidCreate, agentmdPut, buildInitialAgentMd } = await import('../channels/aun-ops.js');
 
-      // 创建 AID（如果本地不存在）
+      await ensureAunSdk();
+
       const aunPath = path.join(os.homedir(), '.aun');
       const aidDir = path.join(aunPath, 'AIDs', options.aunAid);
       if (!fs.existsSync(path.join(aidDir, 'private'))) {
-        const { AUNClient } = await import('@agentunion/fastaun');
-        let client = new AUNClient({ aun_path: aunPath });
-        // 让 SDK 通过 well-known 自动发现网关
-        const result = await client.auth.createAid({ aid: options.aunAid });
-
-        // 下载 CA 根证书（如果本地不存在），从 SDK 返回的实际网关 URL 派生
-        const caDownloaded = await downloadCaRoot(aunPath, result.gateway || '');
-
-        // 关键：SDK 默认 rootCaPath=null，只读取包内 bundled certs。
-        // 必须显式传 root_ca_path 指向刚下载的 root.crt，uploadAgentMd 才能验证 server cert。
-        // 同时传 aid，否则新 client 不知道该加载哪个身份，uploadAgentMd 会报
-        // "no local identity found, call auth.createAid() first"。
-        const caCertPath = path.join(aunPath, 'CA', 'root', 'root.crt');
-        if (caDownloaded && fs.existsSync(caCertPath)) {
-          try { await client.close(); } catch {}
-          client = new AUNClient({ aun_path: aunPath, root_ca_path: caCertPath });
-          // AUNClient 构造函数不会将 aid 传递给内部 AuthFlow，
-          // 必须显式调用 createAid 让 SDK 加载正确的身份（已存在时直接返回）
-          await client.auth.createAid({ aid: options.aunAid });
-        }
-
-        // 写入初始 agent.md（initialized: false）
-        const agentName = options.aunAid.split('.')[0];
-        const agentMd = `---\naid: "${options.aunAid}"\nname: "${agentName}"\ntype: "ai"\nversion: "1.0.0"\ndescription: ""\ntags:\n  - evolclaw\ninitialized: false\n---\n`;
-        const agentMdPath = path.join(aidDir, 'agent.md');
+        const result = await aidCreate(options.aunAid);
         try {
-          await client.auth.uploadAgentMd(agentMd);
-        } catch (e) {
-          console.warn(`⚠ agent.md 网络发布失败（首次连接将自动重试）: ${String((e as any)?.message || e).slice(0, 100)}`);
+          const content = buildInitialAgentMd({ aid: options.aunAid });
+          try {
+            await agentmdPut(content, { aid: options.aunAid, client: result.client });
+          } catch (e) {
+            console.warn(`⚠ agent.md 网络发布失败（首次连接将自动重试）: ${String((e as any)?.message || e).slice(0, 100)}`);
+            fs.mkdirSync(aidDir, { recursive: true });
+            fs.writeFileSync(path.join(aidDir, 'agent.md'), content, 'utf-8');
+          }
+          if (!fs.existsSync(path.join(aidDir, 'agent.md'))) {
+            throw new Error(`agent.md 写入校验失败: ${path.join(aidDir, 'agent.md')}`);
+          }
+        } finally {
+          try { await result.client.close(); } catch {}
         }
-        fs.writeFileSync(agentMdPath, agentMd, 'utf-8');
-        if (!fs.existsSync(agentMdPath)) {
-          try { await client.close(); } catch {}
-          throw new Error(`agent.md 写入校验失败: ${agentMdPath}`);
-        }
-        try { await client.close(); } catch {}
       }
 
       config.channels.aun = {
@@ -504,7 +480,7 @@ export async function cmdInit(options?: {
     console.log('📝 交互式配置\n');
 
     // 通用配置
-    const defaultSuggestion = path.join(os.homedir(), 'evolclaw-project');
+    const defaultSuggestion = path.join(os.homedir(), 'projects', 'default');
     let defaultPath = (await ask(rl, `  默认项目路径 [${defaultSuggestion}]: `)).trim();
     if (!defaultPath) defaultPath = defaultSuggestion;
     if (defaultPath.startsWith('~/')) {

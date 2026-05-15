@@ -4,7 +4,7 @@ import path from 'path';
 import { resolvePaths } from '../paths.js';
 import { logger } from '../utils/logger.js';
 import { sanitizeFileName, saveToUploads, safeFetch } from '../utils/media-cache.js';
-import { markdownToPlainText } from '../utils/format.js';
+import { markdownToPlainText } from '../utils/rich-content-renderer.js';
 import type { EventBus } from '../core/event-bus.js';
 
 // ── Config ──────────────────────────────────────────────────────────────────
