@@ -142,7 +142,7 @@ function formatIdleTime(ms: number): string {
 }
 
 // 支持的命令列表
-const commands = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/effort', '/agent', '/slist', '/session', '/rename', '/stop', '/clear', '/compact', '/repair', '/safe', '/fork', '/del', '/perm', '/file', '/check', '/rewind', '/activity', '/aid', '/agentmd', '/chatmode', '/ask'];
+const commands = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/evolhelp', '/status', '/restart', '/model', '/setmodel', '/effort', '/agent', '/slist', '/session', '/rename', '/stop', '/clear', '/compact', '/repair', '/safe', '/fork', '/del', '/perm', '/file', '/check', '/rewind', '/activity', '/aid', '/agentmd', '/chatmode', '/ask', '/resume'];
 
 // 命令别名映射
 const aliases: Record<string, string> = {
@@ -153,7 +153,7 @@ const aliases: Record<string, string> = {
 };
 
 // 命令快速路径前缀（所有命令都不进入消息队列）
-const quickCommandPrefixes = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart', '/model', '/effort', '/agent', '/slist', '/session', '/rename', '/repair', '/fork', '/stop', '/clear', '/compact', '/safe', '/del', '/perm', '/file', '/check', '/p ', '/s ', '/name', '/rewind', '/rw', '/rw ', '/activity', '/chatmode', '/aid', '/agentmd', '/ask'];
+const quickCommandPrefixes = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/evolhelp', '/status', '/restart', '/model', '/setmodel', '/effort', '/agent', '/slist', '/session', '/rename', '/repair', '/fork', '/stop', '/clear', '/compact', '/safe', '/del', '/perm', '/file', '/check', '/p ', '/s ', '/name', '/rewind', '/rw', '/rw ', '/activity', '/chatmode', '/aid', '/agentmd', '/ask', '/resume'];
 
 export class CommandHandler {
   private adapters = new Map<string, ChannelAdapter>();
@@ -879,8 +879,9 @@ export class CommandHandler {
     if (normalizedContent.startsWith('/')) {
       // guest 在群聊和私聊中均可访问的只读命令：纯查询形态（带参写操作由各 handler 内部守卫拦截）
       const guestGroupCommands = [
-        '/status', '/help', '/check', '/chatmode',
-        '/model', '/effort', '/agent', '/perm', '/activity', '/safe', '/stop',
+        '/status', '/help', '/evolhelp', '/check', '/chatmode',
+        '/model', '/setmodel', '/effort', '/agent', '/perm', '/activity', '/safe', '/stop',
+        '/resume',
       ];
       const userCommands = activeChatType === 'group' && !isAdmin
         ? guestGroupCommands
@@ -1026,6 +1027,75 @@ export class CommandHandler {
         '  /help - 显示此帮助信息',
       ];
       return lines.join('\n');
+    }
+
+    // /evolhelp 命令：返回 JSON 格式的命令列表（供程序解析）
+    if (normalizedContent === '/evolhelp') {
+      type CmdEntry = { command: string; aliases?: string[]; args?: string; description: string; category: string; roles: string[] };
+      const cmds: CmdEntry[] = [];
+
+      // 项目管理
+      cmds.push({ command: '/pwd', description: '显示当前项目路径', category: '项目管理', roles: ['admin', 'owner'] });
+      cmds.push({ command: '/p', aliases: ['/project', '/plist'], args: '[name|path]', description: '列出或切换项目', category: '项目管理', roles: ['admin', 'owner'] });
+      if (isOwner) {
+        cmds.push({ command: '/bind', args: '<path>', description: '绑定新项目目录', category: '项目管理', roles: ['owner'] });
+      }
+
+      // 会话管理
+      cmds.push({ command: '/new', args: '[名称]', description: '创建新会话（清空历史请用此命令，可选命名）', category: '会话管理', roles: ['guest', 'admin', 'owner'] });
+      cmds.push({ command: '/s', aliases: ['/session', '/slist'], args: '[cli|名称|序号|uuid]', description: '列出或切换会话', category: '会话管理', roles: ['guest', 'admin', 'owner'] });
+      cmds.push({ command: '/name', aliases: ['/rename'], args: '<新名称>', description: '重命名当前会话', category: '会话管理', roles: ['guest', 'admin', 'owner'] });
+      cmds.push({ command: '/del', args: '<名称>', description: '删除指定会话（仅解绑，不删除文件）', category: '会话管理', roles: ['guest', 'admin', 'owner'] });
+      if (isAdmin) {
+        cmds.push({ command: '/fork', args: '[名称]', description: '分支当前会话（从当前对话点创建分支）', category: '会话管理', roles: ['admin', 'owner'] });
+        cmds.push({ command: '/rewind', aliases: ['/rw'], args: '[N] [chat|file|all]', description: '查看历史/撤销指定轮次', category: '会话管理', roles: ['admin', 'owner'] });
+        cmds.push({ command: '/compact', description: '压缩会话上下文（减少 token 用量）', category: '会话管理', roles: ['admin', 'owner'] });
+      }
+
+      // Agent 与模型
+      if (isAdmin) {
+        cmds.push({ command: '/agent', args: '[name]', description: '查看或切换 Agent 后端', category: 'Agent 与模型', roles: ['admin', 'owner'] });
+        cmds.push({ command: '/model', args: '[model]', description: '查看或切换模型', category: 'Agent 与模型', roles: ['admin', 'owner'] });
+        cmds.push({ command: '/setmodel', description: '返回 JSON 格式的模型列表（供程序解析）', category: 'Agent 与模型', roles: ['admin', 'owner'] });
+        cmds.push({ command: '/effort', args: '[level]', description: '查看或切换推理强度', category: 'Agent 与模型', roles: ['admin', 'owner'] });
+      }
+
+      // 权限管理
+      if (isAdmin) {
+        cmds.push({ command: '/perm', args: isOwner ? '<auto|bypass|request|edit|plan|noask>' : undefined, description: '查看当前权限模式', category: '权限管理', roles: ['admin', 'owner'] });
+        cmds.push({ command: '/perm', args: 'allow|always|deny', description: '审批权限请求', category: '权限管理', roles: ['admin', 'owner'] });
+      }
+
+      // 运维
+      cmds.push({ command: '/status', description: '显示会话状态', category: '运维', roles: ['guest', 'admin', 'owner'] });
+      cmds.push({ command: '/stop', description: '中断当前任务', category: '运维', roles: ['admin', 'owner'] });
+      cmds.push({ command: '/check', description: '检查渠道状态', category: '运维', roles: ['guest', 'admin', 'owner'] });
+      if (isAdmin) {
+        cmds.push({ command: '/activity', args: '[all|dm|owner|none]', description: '查看/控制中间输出显示模式', category: '运维', roles: ['admin', 'owner'] });
+        cmds.push({ command: '/restart', args: '<channel>', description: '重连指定渠道', category: '运维', roles: ['admin', 'owner'] });
+      }
+      if (isOwner) {
+        cmds.push({ command: '/restart', description: '重启服务', category: '运维', roles: ['owner'] });
+        cmds.push({ command: '/file', args: '[channel] <path>', description: '发送项目内文件', category: '运维', roles: ['owner'] });
+        cmds.push({ command: '/aid', args: '[list|new <aid>]', description: 'AID 管理', category: '运维', roles: ['owner'] });
+        cmds.push({ command: '/agentmd', args: '[put|set <内容>]', description: '管理 agent.md', category: '运维', roles: ['owner'] });
+      }
+
+      // 会话模式
+      if (isAdmin) {
+        cmds.push({ command: '/chatmode', args: '[interactive|proactive]', description: '查看/切换会话模式（被动响应或主动推进）', category: '会话管理', roles: ['admin', 'owner'] });
+      }
+
+      // 交互
+      cmds.push({ command: '/ask', args: '<选项>', description: '回答 Agent 的交互式问题', category: '运维', roles: ['guest', 'admin', 'owner'] });
+      cmds.push({ command: '/resume', description: '查看当前项目的 Claude 会话记录', category: '会话管理', roles: ['guest', 'admin', 'owner'] });
+
+      // 帮助
+      cmds.push({ command: '/help', description: '显示帮助信息', category: '帮助', roles: ['guest', 'admin', 'owner'] });
+      cmds.push({ command: '/evolhelp', description: '返回 JSON 格式命令列表', category: '帮助', roles: ['guest', 'admin', 'owner'] });
+
+      const categories = [...new Set(cmds.map(c => c.category))];
+      return JSON.stringify({ commands: cmds, categories });
     }
 
     // /perm 命令：权限模式切换 + 权限审批（快速路径，不进入消息队列）
@@ -1182,6 +1252,107 @@ export class CommandHandler {
       return `✓ 已回答`;
     }
 
+    // /resume 命令：返回当前项目的 Claude 会话记录（JSON）
+    if (normalizedContent === '/resume' || normalizedContent.startsWith('/resume ')) {
+      const resumeResult = await this.ensureSession(channel, channelId, threadId);
+      if ('error' in resumeResult) return resumeResult.error;
+      const { session: resumeSession } = resumeResult;
+
+      try {
+        const { encodePath } = await import('../utils/cross-platform.js');
+        const homeDir = os.homedir();
+        const encodedPath = encodePath(resumeSession.projectPath);
+        const projectDir = path.join(homeDir, '.claude', 'projects', encodedPath);
+
+        if (!fs.existsSync(projectDir)) {
+          return '❌ 未找到 Claude 会话记录目录';
+        }
+
+        const jsonlFiles = fs.readdirSync(projectDir).filter(f => f.endsWith('.jsonl'));
+        if (jsonlFiles.length === 0) {
+          return '❌ 当前项目没有 Claude 会话记录';
+        }
+
+        const sessions: Array<{
+          sessionId: string;
+          lastMessageTime: string;
+          firstUserMessage: string;
+          model: string;
+          turns: number;
+          branch: string;
+        }> = [];
+
+        for (const file of jsonlFiles) {
+          const filePath = path.join(projectDir, file);
+          const sessionId = file.replace('.jsonl', '');
+          let lastTimestamp = '';
+          let firstUserMessage = '';
+          let model = '';
+          let branch = '';
+          let turns = 0;
+
+          try {
+            const content = fs.readFileSync(filePath, 'utf-8');
+            const lines = content.split('\n').filter(l => l.trim());
+
+            for (const line of lines) {
+              const event = JSON.parse(line);
+
+              if (event.timestamp && event.timestamp > lastTimestamp) {
+                lastTimestamp = event.timestamp;
+              }
+
+              if (event.gitBranch && !branch) {
+                branch = event.gitBranch;
+              }
+
+              if (event.type === 'user' && event.message?.role === 'user') {
+                const msgContent = event.message.content;
+                const isToolResult = Array.isArray(msgContent) && msgContent.every((c: any) => c.type === 'tool_result');
+                if (!isToolResult) {
+                  turns++;
+                  if (!firstUserMessage) {
+                    if (typeof msgContent === 'string') {
+                      firstUserMessage = msgContent.slice(0, 100);
+                    } else if (Array.isArray(msgContent)) {
+                      const textBlock = msgContent.find((c: any) => c.type === 'text');
+                      if (textBlock?.text) {
+                        firstUserMessage = textBlock.text.slice(0, 100);
+                      }
+                    }
+                  }
+                }
+              }
+
+              if (event.type === 'assistant' && event.message?.model && !model) {
+                model = event.message.model;
+              }
+            }
+          } catch {
+            continue;
+          }
+
+          if (!lastTimestamp) continue;
+
+          sessions.push({
+            sessionId,
+            lastMessageTime: lastTimestamp,
+            firstUserMessage: firstUserMessage || '(无消息)',
+            model: model || 'unknown',
+            turns,
+            branch: branch || 'unknown',
+          });
+        }
+
+        sessions.sort((a, b) => b.lastMessageTime.localeCompare(a.lastMessageTime));
+
+        return JSON.stringify(sessions, null, 2);
+      } catch (error) {
+        logger.error('[CommandHandler] /resume failed:', error);
+        return `❌ 读取会话记录失败: ${error instanceof Error ? error.message : '未知错误'}`;
+      }
+    }
+
     // /agent 命令：查看或切换 Agent 后端
     if (normalizedContent === '/agent' || normalizedContent.startsWith('/agent ')) {
       const args = normalizedContent.slice(6).trim();
@@ -1263,6 +1434,77 @@ export class CommandHandler {
       let agentSwitchResponse = `✓ 已切换 Agent: ${args}\n  项目: ${projectName}\n  会话: ${newSession.name || '(未命名)'}\n  ${hasExistingSession}`;
 
       return agentSwitchResponse;
+    }
+
+    // /setmodel 命令：返回 JSON 格式的模型列表（供程序解析）
+    if (normalizedContent === '/setmodel' || normalizedContent.startsWith('/setmodel ')) {
+      const setmodelResult = await this.ensureSession(channel, channelId, threadId);
+      if ('error' in setmodelResult) return setmodelResult.error;
+      const { session: setmodelSession } = setmodelResult;
+      const setmodelAgent = this.getAgent(setmodelSession.agentId);
+
+      const currentModel = hasModelSwitcher(setmodelAgent) ? setmodelAgent.getModel() : setmodelAgent.name;
+      const efforts = getAvailableEfforts(setmodelAgent, currentModel);
+      const currentEffort = setmodelAgent.getEffort?.() || 'auto';
+
+      // 获取 API URL 用于请求 /models
+      let apiBaseUrl: string | undefined;
+      try {
+        const configBaseUrl = this.config.agents?.claude?.baseUrl;
+        const isPlaceholderUrl = configBaseUrl?.includes('api.anthropic.com');
+        if (configBaseUrl && !isPlaceholderUrl) {
+          apiBaseUrl = configBaseUrl;
+        } else if (process.env.ANTHROPIC_BASE_URL) {
+          apiBaseUrl = process.env.ANTHROPIC_BASE_URL;
+        } else {
+          const claudeSettingsPath = path.join(os.homedir(), '.claude', 'settings.json');
+          if (fs.existsSync(claudeSettingsPath)) {
+            const claudeSettings = JSON.parse(fs.readFileSync(claudeSettingsPath, 'utf-8'));
+            if (claudeSettings.env?.ANTHROPIC_BASE_URL) {
+              apiBaseUrl = claudeSettings.env.ANTHROPIC_BASE_URL;
+            }
+          }
+        }
+      } catch {}
+
+      // 从 API 获取模型列表（OpenAI /v1/models 风格）
+      type ModelListResponse = { object: string; data: Array<{ id: string; object: string; created: number; owned_by: string }> };
+      let modelListData: ModelListResponse | null = null;
+      if (apiBaseUrl) {
+        try {
+          const modelsUrl = apiBaseUrl.replace(/\/+$/, '') + '/v1/models';
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 5000);
+          const resp = await fetch(modelsUrl, {
+            signal: controller.signal,
+            headers: { 'Authorization': `Bearer ${this.config.agents?.claude?.apiKey || process.env.ANTHROPIC_AUTH_TOKEN || ''}` },
+          });
+          clearTimeout(timeout);
+          if (resp.ok) {
+            modelListData = await resp.json() as ModelListResponse;
+          }
+        } catch {}
+      }
+
+      // 兜底模型列表
+      if (!modelListData || !modelListData.data || modelListData.data.length === 0) {
+        const now = Math.floor(Date.now() / 1000);
+        modelListData = {
+          object: 'list',
+          data: [
+            { id: 'claude-opus-4-7', object: 'model', created: now, owned_by: 'anthropic' },
+            { id: 'claude-opus-4-6', object: 'model', created: now, owned_by: 'anthropic' },
+            { id: 'claude-sonnet-4-6', object: 'model', created: now, owned_by: 'anthropic' },
+          ],
+        };
+      }
+
+      return JSON.stringify({
+        current_model: currentModel,
+        current_effort: currentEffort,
+        available_efforts: efforts,
+        models: modelListData,
+      }, null, 2);
     }
 
     // /model 命令：查看或切换模型/推理强度
