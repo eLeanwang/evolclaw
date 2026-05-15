@@ -107,6 +107,11 @@ export class AUNChannel {
    */
   private async callAndTrace<T = any>(method: string, params: Record<string, any>, opts?: { silentOk?: boolean }): Promise<T> {
     this.trace('OUT', method, params);
+    // [DIAG-STALE] 记录调用瞬间 SDK 内部 _state，证明是否在 reconnecting 中误发
+    const sdkStateBefore = (this.client as any)?._state ?? 'no-client';
+    if (sdkStateBefore !== 'connected') {
+      logger.warn(`[AUN][DIAG-STALE] callAndTrace ${method} on non-connected SDK: sdk_state=${sdkStateBefore} evolclaw_connected=${this.connected}`);
+    }
     try {
       const result = await this.client!.call(method, params);
       if (!opts?.silentOk) {
@@ -123,6 +128,9 @@ export class AUNChannel {
         code: e?.code,
         name: e?.name,
       });
+      // [DIAG-STALE] 失败时再记录一次 SDK _state，看错误类型是否为 ConnectionError
+      const sdkStateAfter = (this.client as any)?._state ?? 'no-client';
+      logger.warn(`[AUN][DIAG-STALE] callAndTrace ${method} FAILED: err_name=${e?.name ?? '?'} err_code=${e?.code ?? '?'} sdk_state_before=${sdkStateBefore} sdk_state_after=${sdkStateAfter} evolclaw_connected=${this.connected}`);
       logger.warn(`${this.logPrefix()} rpc ${method} failed: ${e?.name ?? ''}(${e?.code ?? ''}) ${e?.message ?? e}`);
       throw e;
     }
@@ -978,6 +986,12 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     if (!data || typeof data !== 'object') return;
     const state = (data as Record<string, any>).state ?? '';
 
+    // [DIAG-STALE] 记录状态切换瞬间 evolclaw 的 connected 标志和 SDK 的内部 _state，
+    // 用于证明"reconnecting 时 connected 保持 true，导致 sendMessage 误放行"的假设
+    const sdkState = (this.client as any)?._state ?? 'no-client';
+    const connectedBefore = this.connected;
+    logger.info(`[AUN][DIAG-STALE] connection.state event: state=${state} attempt=${(data as any).attempt ?? '-'} | connected_before=${connectedBefore} sdk_state=${sdkState}`);
+
     if (state === 'connected') {
       this.connected = true;
       this.reconnectAttempt = 0;
@@ -1048,6 +1062,15 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
   }
 
   async sendMessage(channelId: string, text: string, context?: ReplyContext): Promise<void> {
+    // [DIAG-STALE] 进入 sendMessage 时记录 evolclaw connected 标志和 SDK _state，
+    // 用于检测两者是否一致：若 connected=true 但 sdk_state != 'connected'，即为 stale 状态
+    const sdkStateOnEntry = (this.client as any)?._state ?? 'no-client';
+    if (this.connected !== (sdkStateOnEntry === 'connected')) {
+      logger.warn(`[AUN][DIAG-STALE] sendMessage entry MISMATCH: connected=${this.connected} sdk_state=${sdkStateOnEntry} channel=${channelId} text=${text.slice(0, 40)}`);
+    } else {
+      logger.debug(`[AUN][DIAG-STALE] sendMessage entry: connected=${this.connected} sdk_state=${sdkStateOnEntry} channel=${channelId}`);
+    }
+
     if (!this.connected || !this.client) {
       logger.warn(`${this.logPrefix()} Cannot send: not connected`);
       return;
