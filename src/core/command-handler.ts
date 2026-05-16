@@ -142,7 +142,7 @@ function formatIdleTime(ms: number): string {
 }
 
 // 支持的命令列表
-const commands = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/evolhelp', '/status', '/restart', '/model', '/setmodel', '/effort', '/agent', '/slist', '/session', '/rename', '/stop', '/clear', '/compact', '/repair', '/safe', '/fork', '/del', '/perm', '/file', '/check', '/rewind', '/activity', '/aid', '/agentmd', '/chatmode', '/ask', '/resume'];
+const commands = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/evolhelp', '/status', '/restart', '/model', '/setmodel', '/effort', '/agent', '/slist', '/session', '/rename', '/stop', '/clear', '/compact', '/repair', '/safe', '/fork', '/del', '/perm', '/file', '/check', '/rewind', '/activity', '/chatmode', '/ask', '/resume', '/aid', '/rpc', '/storage'];
 
 // 命令别名映射
 const aliases: Record<string, string> = {
@@ -153,7 +153,7 @@ const aliases: Record<string, string> = {
 };
 
 // 命令快速路径前缀（所有命令都不进入消息队列）
-const quickCommandPrefixes = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/evolhelp', '/status', '/restart', '/model', '/setmodel', '/effort', '/agent', '/slist', '/session', '/rename', '/repair', '/fork', '/stop', '/clear', '/compact', '/safe', '/del', '/perm', '/file', '/check', '/p ', '/s ', '/name', '/rewind', '/rw', '/rw ', '/activity', '/chatmode', '/aid', '/agentmd', '/ask', '/resume'];
+const quickCommandPrefixes = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/evolhelp', '/status', '/restart', '/model', '/setmodel', '/effort', '/agent', '/slist', '/session', '/rename', '/repair', '/fork', '/stop', '/clear', '/compact', '/safe', '/del', '/perm', '/file', '/check', '/p ', '/s ', '/name', '/rewind', '/rw', '/rw ', '/activity', '/chatmode', '/ask', '/resume', '/aid', '/rpc', '/storage'];
 
 export class CommandHandler {
   private adapters = new Map<string, ChannelAdapter>();
@@ -691,14 +691,6 @@ export class CommandHandler {
           ] : []),
           ...(isOwner ? [
             { cmd: '/file', label: '发送项目内文件', desc: '将项目目录内的文件发送给用户' },
-            { cmd: '/aid', label: 'AID 身份管理', desc: '管理本地 AID 身份（创建/列表）', next: { type: 'select' as const, items: [
-              { value: 'list', label: '列表', desc: '列出本地所有 AID' },
-              { value: 'new', label: '创建', desc: '创建新 AID 身份', next: { type: 'text' as const } },
-            ] } },
-            { cmd: '/agentmd', label: '管理 agent.md', desc: '查看或更新 AUN 网络上的 agent.md 身份文件', next: { type: 'select' as const, items: [
-              { value: 'put', label: '上传当前', desc: '将本地 agent.md 上传到 AUN 网络' },
-              { value: 'set', label: '直接设置', desc: '输入内容直接更新 agent.md', next: { type: 'text' as const } },
-            ] } },
           ] : []),
         ]
       });
@@ -1047,8 +1039,9 @@ export class CommandHandler {
         ...(isOwner ? [
           '  /restart - 重启服务',
           '  /file [channel] <path> - 发送项目内文件',
-          '  /aid [list|new <aid>] - AID 身份管理',
-          '  /agentmd [put|set <内容>] - 管理 agent.md',
+          '  /aid [list|show|new|delete|lookup|agentmd] - AID 身份管理',
+          '  /rpc --as <aid> --params <json> - AUN RPC 调用',
+          '  /storage [upload|download|ls|rm|quota] <aid> - 文件存储',
         ] : []),
         '',
         '❓ 帮助：',
@@ -1105,8 +1098,9 @@ export class CommandHandler {
       if (isOwner) {
         cmds.push({ command: '/restart', description: '重启服务', category: '运维', roles: ['owner'] });
         cmds.push({ command: '/file', args: '[channel] <path>', description: '发送项目内文件', category: '运维', roles: ['owner'] });
-        cmds.push({ command: '/aid', args: '[list|new <aid>]', description: 'AID 管理', category: '运维', roles: ['owner'] });
-        cmds.push({ command: '/agentmd', args: '[put|set <内容>]', description: '管理 agent.md', category: '运维', roles: ['owner'] });
+        cmds.push({ command: '/aid', args: '[list|show|new|delete|lookup|agentmd]', description: 'AID 身份管理', category: '运维', roles: ['owner'] });
+        cmds.push({ command: '/rpc', args: '--as <aid> --params <json>', description: 'AUN RPC 调用', category: '运维', roles: ['owner'] });
+        cmds.push({ command: '/storage', args: '[upload|download|ls|rm|quota] <aid>', description: '文件存储', category: '运维', roles: ['owner'] });
       }
 
       // 会话模式
@@ -1780,112 +1774,65 @@ export class CommandHandler {
       return `✓ 推理强度: ${newEffort}`;
     }
 
-    // /aid 命令：AID 身份管理（list / new）
-    if (normalizedContent === '/aid' || normalizedContent === '/aid list' || normalizedContent.startsWith('/aid ')) {
+    // /aid, /rpc, /storage — 转发到 CLI 执行
+    if (normalizedContent === '/aid' || normalizedContent.startsWith('/aid ') ||
+        normalizedContent === '/rpc' || normalizedContent.startsWith('/rpc ') ||
+        normalizedContent === '/storage' || normalizedContent.startsWith('/storage ')) {
       if (!isOwner) return '❌ 无权限：此命令仅限 owner 使用';
 
-      const arg = normalizedContent.slice(4).trim();
-      const { aidList, aidCreate, agentmdPut, buildInitialAgentMd, isValidAid } = await import('../channels/aun-ops.js');
+      // 无参数时返回用法说明
+      if (normalizedContent === '/aid') {
+        return `🆔 AID 身份管理
 
-      // /aid 或 /aid list — 列出本地所有 AID
-      if (!arg || arg === 'list') {
-        const aids = aidList();
-        if (aids.length === 0) return '本地无 AID';
+用法:
+  /aid list              列出本地所有 AID
+  /aid show <aid>        查看 AID 详情
+  /aid new <aid>         创建新 AID
+  /aid delete <aid>      删除本地 AID
+  /aid lookup <aid>      远程探测 AID
+  /aid agentmd put <aid> 签名并上传 agent.md
+  /aid agentmd get <aid> 下载并验签 agent.md`;
+      }
+      if (normalizedContent === '/rpc') {
+        return `📡 AUN RPC 调用
 
-        const lines = ['本地 AID:'];
-        for (const a of aids) {
-          const icons = [
-            a.hasPrivateKey ? '🔑' : '  ',
-            a.hasAgentMd ? '📄' : '  ',
-          ].join('');
-          lines.push(`  ${icons} ${a.aid}`);
-        }
-        lines.push('\n🔑=私钥  📄=agent.md');
-        return lines.join('\n');
+用法:
+  /rpc --as <aid> --params <json>
+
+参数格式:
+  单行 JSON    单次调用
+  多行 JSONL   逐行执行，失败即停
+
+示例:
+  /rpc --as myaid.agentid.pub --params {"method":"meta.ping","params":{}}`;
+      }
+      if (normalizedContent === '/storage') {
+        return `📦 文件存储
+
+用法:
+  /storage upload <aid> <file> <path> [--public]   上传文件
+  /storage download <aid> <url> [local-path]       下载文件
+  /storage ls <aid> [prefix]                       列文件
+  /storage rm <aid> <path>                         删文件
+  /storage quota <aid>                             查配额`;
       }
 
-      // /aid new <aid> — 创建 AID（纯身份，不动 config）
-      if (arg.startsWith('new ')) {
-        const rawAid = arg.slice(4).trim();
-        if (!rawAid) return '用法: /aid new <完整AID>\n例: /aid new reviewer.agentid.pub';
-
-        if (!isValidAid(rawAid)) return `❌ 无效 AID 格式: ${rawAid}`;
-
-        try {
-          const result = await aidCreate(rawAid);
-
-          if (!result.alreadyExisted) {
-            const content = buildInitialAgentMd({ aid: rawAid });
-            try {
-              await agentmdPut(content, { aid: rawAid, client: result.client });
-            } catch { /* non-fatal */ }
-          }
-          try { await result.client.close(); } catch { /* ignore */ }
-
-          const verb = result.alreadyExisted ? '已存在' : '已创建';
-          return `✓ ${rawAid} ${verb}
-  如需上线 AUN 通道，运行 evolclaw init aun`;
-        } catch (e: any) {
-          return `❌ 创建失败: ${String(e.message || e).slice(0, 200)}`;
-        }
-      }
-
-      return '用法: /aid [list|new <aid>]';
-    }
-
-    // /agentmd 命令：管理 agent.md 身份文件
-    if (normalizedContent === '/agentmd' || normalizedContent.startsWith('/agentmd ')) {
-      if (!isOwner) return '❌ 无权限：此命令仅限 owner 使用';
-      const adapter = this.adapters.get(channel) as any;
-      if (!adapter?.uploadAgentMd) return '❌ 当前通道不支持 agent.md 操作';
-
-      const selfAid: string = typeof adapter._selfAid === 'function' ? adapter._selfAid() : '';
-      const arg = normalizedContent.slice(9).trim();
-      const { agentmdGet, agentmdPut } = await import('../channels/aun-ops.js');
-
-      // put — read local agent.md and upload to network
-      if (arg === 'put') {
-        if (!selfAid) return '❌ 未连接，无法确定本地 AID';
-        try {
-          const { readFileSync } = await import('node:fs');
-          const { join } = await import('node:path');
-          const { homedir } = await import('node:os');
-          const localPath = join(homedir(), '.aun', 'AIDs', selfAid, 'agent.md');
-          if (!readFileSync) return '❌ 读取失败';
-          const content = readFileSync(localPath, 'utf-8');
-          await agentmdPut(content, { aid: selfAid });
-          return '✅ agent.md 已发布';
-        } catch (e: any) {
-          return `❌ 发布失败: ${String(e.message || e).slice(0, 100)}`;
-        }
-      }
-
-      // set <content> — upload inline content
-      if (arg.startsWith('set ')) {
-        const content = arg.slice(4).trim();
-        if (!content) return '用法：/agentmd set <内容>';
-        if (!selfAid) return '❌ 未连接，无法确定本地 AID';
-        try {
-          await agentmdPut(content, { aid: selfAid });
-          return '✅ agent.md 已更新并发布到AUN网络';
-        } catch (e: any) {
-          return `❌ 发布失败: ${String(e.message || e).slice(0, 100)}`;
-        }
-      }
-
-      // view — /agentmd or /agentmd <aid>
-      const aidToView = arg || selfAid;
-      if (!aidToView) return '用法：/agentmd [<aid>] | put | set <内容>';
+      const cliArgs = normalizedContent.slice(1); // strip leading /
       try {
-        const md = await agentmdGet(aidToView);
-        if (!md || !md.trim()) return `ℹ️ ${aidToView} 尚未设置 agent.md`;
-        return `\`\`\`\n${md.slice(0, 1500)}\n\`\`\``;
+        const { execFile } = await import('node:child_process');
+        const { promisify } = await import('node:util');
+        const execFileAsync = promisify(execFile);
+        const { stdout, stderr } = await execFileAsync('evolclaw', cliArgs.split(/\s+/), {
+          timeout: 30000,
+          encoding: 'utf-8',
+          env: { ...process.env, AUN_LOG_INI_DISABLE: '1' },
+        });
+        const output = (stdout || '').trim();
+        if (!output && stderr) return `⚠ ${stderr.trim().slice(0, 500)}`;
+        return output || '(无输出)';
       } catch (e: any) {
-        const msg = String(e.message || e);
-        if (msg.includes('not found') || msg.includes('404')) {
-          return `ℹ️ ${aidToView} 尚未设置 agent.md`;
-        }
-        return `❌ 获取失败: ${msg.slice(0, 100)}`;
+        const msg = e.stderr?.trim() || e.stdout?.trim() || String(e.message || e);
+        return `❌ ${msg.slice(0, 500)}`;
       }
     }
 
@@ -3571,7 +3518,7 @@ export class CommandHandler {
   private static readonly CTL_COMMANDS = [
     '/help', '/status', '/check', '/pwd',
     '/model', '/effort', '/perm', '/agent',
-    '/compact', '/activity', '/file', '/send', '/chatmode', '/restart', '/agentmd', '/bind', '/aid',
+    '/compact', '/activity', '/file', '/send', '/chatmode', '/restart', '/bind', '/aid', '/rpc', '/storage',
     '/rename', '/name', '/evolagent',
   ];
 

@@ -26,7 +26,7 @@ import {
   aidCreate,
   agentmdPut,
   buildInitialAgentMd,
-} from '../channels/aun-ops.js';
+} from '../aid/index.js';
 
 const execFileAsync = promisify(execFile);
 

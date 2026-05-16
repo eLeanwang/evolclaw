@@ -421,7 +421,7 @@ export async function cmdInit(options?: {
       throw new Error('--aun-aid is required for AUN channel (e.g. --aun-aid mybot.agentid.pub)');
     }
     if (options.channel === 'aun' && options.aunAid) {
-      const { ensureAunSdk, aidCreate, agentmdPut, buildInitialAgentMd } = await import('../channels/aun-ops.js');
+      const { ensureAunSdk, aidCreate, agentmdPut, buildInitialAgentMd } = await import('../aid/index.js');
 
       await ensureAunSdk();
 

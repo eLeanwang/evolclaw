@@ -613,6 +613,32 @@ export function ensureDir(dirPath: string): void {
 }
 
 /**
+ * Append a new AUN instance to the config's channels.aun array and save.
+ * Handles upgrade from single-object to array format.
+ */
+export function appendAunInstance(config: any, inst: { name: string; aid: string; owner?: string; enabled?: boolean }): void {
+  if (!config.channels) config.channels = {};
+
+  const newInst = {
+    name: inst.name,
+    enabled: inst.enabled ?? true,
+    aid: inst.aid,
+    ...(inst.owner && { owner: inst.owner }),
+  };
+
+  if (Array.isArray(config.channels.aun)) {
+    config.channels.aun.push(newInst);
+  } else if (config.channels.aun) {
+    const oldInst = { ...config.channels.aun, name: config.channels.aun.name || 'aun' };
+    config.channels.aun = [oldInst, newInst];
+  } else {
+    config.channels.aun = [newInst];
+  }
+
+  fs.writeFileSync(resolvePaths().config, JSON.stringify(config, null, 2) + '\n');
+}
+
+/**
  * 配置结构完整性校验（不校验凭据有效性）。
  * 要求 agents/channels/projects 三段同时具备必要的锚点字段。
  */

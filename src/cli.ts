@@ -2288,7 +2288,7 @@ async function cmdAgentNewNonInteractive(name: string, args: string[]): Promise<
       console.error('--aun-aid and --aun-owner must both be provided');
       process.exit(1);
     }
-    const { isValidAid, aidCreate } = await import('./channels/aun-ops.js');
+    const { isValidAid, aidCreate } = await import('./aid/index.js');
     if (!isValidAid(aunAid)) {
       console.error(`Invalid --aun-aid: ${aunAid}`);
       process.exit(1);
@@ -2385,26 +2385,51 @@ async function cmdAgentNewNonInteractive(name: string, args: string[]): Promise<
 
 // ==================== AID ====================
 
+function resolveAunPath(args: string[]): string | undefined {
+  const idx = args.indexOf('--aun-path');
+  if (idx !== -1 && idx + 1 < args.length) return args[idx + 1];
+  return process.env.AUN_HOME || undefined;
+}
+
 async function cmdAid(args: string[]): Promise<void> {
   const sub = args[0] || 'list';
+  const formatJson = args.includes('--format') && args[args.indexOf('--format') + 1] === 'json';
+  const aunPath = resolveAunPath(args);
 
   if (sub === 'help') {
     console.log(`用法: evolclaw aid <command>
 
 Commands:
   list              列出本地所有 AID
+  show <aid>        查看本地 AID 详情（证书有效期、私钥状态）
   new <aid>         创建新 AID 身份
+  delete <aid>      删除本地 AID（无网络注销）
+  lookup <aid>      远程探测 AID（是否存在 + 网关 + agent.md）
+  agentmd put <aid> 读本地 agent.md → 签名 → 上传
+  agentmd get <aid> 下载 agent.md → 验签 → 本地持久化
+
+Options:
+  --format json     输出 JSON 格式
 
 示例:
   evolclaw aid list
-  evolclaw aid new reviewer.agentid.pub`);
+  evolclaw aid show toleiliang2.agentid.pub
+  evolclaw aid new reviewer.agentid.pub
+  evolclaw aid delete old.agentid.pub
+  evolclaw aid lookup someone.agentid.pub
+  evolclaw aid agentmd put mybot.agentid.pub
+  evolclaw aid agentmd get someone.agentid.pub`);
     return;
   }
 
-  const { aidList, aidCreate, agentmdPut, buildInitialAgentMd, isValidAid } = await import('./channels/aun-ops.js');
+  const { aidList, aidCreate, aidShow, aidDelete, aidLookup, agentmdPut, agentmdGet, buildInitialAgentMd, isValidAid } = await import('./aid/index.js');
 
   if (sub === 'list') {
-    const aids = aidList();
+    const aids = aidList(aunPath);
+    if (formatJson) {
+      console.log(JSON.stringify(aids, null, 2));
+      return;
+    }
     if (aids.length === 0) {
       console.log('本地无 AID');
       return;
@@ -2421,6 +2446,25 @@ Commands:
     return;
   }
 
+  if (sub === 'show') {
+    const aid = args[1];
+    if (!aid) {
+      console.error('用法: evolclaw aid show <aid>');
+      process.exit(1);
+    }
+    const info = aidShow(aid, { aunPath });
+    if (formatJson) {
+      console.log(JSON.stringify(info, null, 2));
+      return;
+    }
+    console.log(`AID: ${info.aid}`);
+    console.log(`  私钥: ${info.hasPrivateKey ? '有' : '无'}`);
+    console.log(`  agent.md: ${info.hasAgentMd ? '有' : '无'}`);
+    console.log(`  证书到期: ${info.certExpiresAt ?? '无证书'}`);
+    if (info.certSubject) console.log(`  证书主体: ${info.certSubject}`);
+    return;
+  }
+
   if (sub === 'new') {
     const aid = args[1];
     if (!aid) {
@@ -2432,12 +2476,12 @@ Commands:
       process.exit(1);
     }
 
-    const result = await aidCreate(aid);
+    const result = await aidCreate(aid, { aunPath });
 
     if (!result.alreadyExisted) {
       const content = buildInitialAgentMd({ aid });
       try {
-        await agentmdPut(content, { aid, client: result.client });
+        await agentmdPut(content, { aid, client: result.client, aunPath });
         console.log('✓ agent.md 已发布');
       } catch (e: any) {
         console.warn(`⚠ agent.md 发布失败（首次连接将自动重试）: ${String(e.message || e).slice(0, 100)}`);
@@ -2451,90 +2495,354 @@ Commands:
     return;
   }
 
-  console.error(`未知子命令: ${sub}\n用法: evolclaw aid [list|new <aid>]`);
+  if (sub === 'delete') {
+    const aid = args[1];
+    if (!aid) {
+      console.error('用法: evolclaw aid delete <aid>');
+      process.exit(1);
+    }
+    const deleted = aidDelete(aid, { aunPath });
+    if (deleted) {
+      console.log(`✓ ${aid} 已删除`);
+    } else {
+      console.error(`❌ 本地不存在: ${aid}`);
+      process.exit(1);
+    }
+    return;
+  }
+
+  if (sub === 'lookup') {
+    const aid = args[1];
+    if (!aid) {
+      console.error('用法: evolclaw aid lookup <aid>');
+      process.exit(1);
+    }
+    if (!isValidAid(aid)) {
+      console.error(`❌ 无效 AID 格式: ${aid}`);
+      process.exit(1);
+    }
+    const result = await aidLookup(aid);
+    if (formatJson) {
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+    if (result.exists) {
+      console.log(`✓ ${aid} 已注册`);
+      if (result.gateway) console.log(`  网关: ${result.gateway}`);
+      if (result.content) {
+        const hasSig = result.content.includes('AUN-SIGNATURE');
+        console.log(`  签名: ${hasSig ? '有（未验证，如需验证请用 evolclaw aid agentmd get ' + aid + '）' : '无'}`);
+        console.log('');
+        console.log(result.content);
+      }
+    } else {
+      console.log(`✗ ${aid} 未注册`);
+      if (result.gateway) console.log(`  网关: ${result.gateway}`);
+      if (result.error) console.log(`  原因: ${result.error}`);
+    }
+    return;
+  }
+
+  if (sub === 'agentmd') {
+    const verb = args[1];
+    const aid = args[2];
+
+    if (verb === 'put') {
+      if (!aid) {
+        console.error('用法: evolclaw aid agentmd put <aid>');
+        process.exit(1);
+      }
+      if (!isValidAid(aid)) {
+        console.error(`❌ 无效 AID 格式: ${aid}`);
+        process.exit(1);
+      }
+      const aunBase = aunPath ?? path.join(os.homedir(), '.aun');
+      const localPath = path.join(aunBase, 'AIDs', aid, 'agent.md');
+      if (!fs.existsSync(localPath)) {
+        console.error(`❌ 本地无 agent.md: ${aid}`);
+        process.exit(1);
+      }
+      const content = fs.readFileSync(localPath, 'utf-8');
+      await agentmdPut(content, { aid, aunPath });
+      console.log('✓ agent.md 已发布');
+      return;
+    }
+
+    if (verb === 'get') {
+      if (!aid) {
+        console.error('用法: evolclaw aid agentmd get <aid>');
+        process.exit(1);
+      }
+      if (!isValidAid(aid)) {
+        console.error(`❌ 无效 AID 格式: ${aid}`);
+        process.exit(1);
+      }
+      try {
+        const result = await agentmdGet(aid, { withVerification: true, aunPath });
+        if (!result.content || !result.content.trim()) {
+          console.log(`ℹ️ ${aid} 尚未设置 agent.md`);
+          return;
+        }
+        if (formatJson) {
+          console.log(JSON.stringify(result, null, 2));
+        } else {
+          console.log(result.content);
+          const v = result.verification;
+          if (v.status === 'verified') {
+            console.error(`✓ 签名验证通过`);
+          } else if (v.status === 'invalid') {
+            console.error(`⚠ 签名验证失败: ${v.reason ?? '未知原因'}`);
+          } else {
+            console.error(`ℹ️ 未签名`);
+          }
+        }
+      } catch (e: any) {
+        const msg = String(e.message || e);
+        if (msg.includes('not found') || msg.includes('404')) {
+          console.log(`ℹ️ ${aid} 尚未设置 agent.md`);
+        } else {
+          console.error(`❌ 获取失败: ${msg.slice(0, 100)}`);
+          process.exit(1);
+        }
+      }
+      return;
+    }
+
+    console.error(`未知子命令: aid agentmd ${verb ?? ''}\n用法: evolclaw aid agentmd [put|get] <aid>`);
+    process.exit(1);
+  }
+
+  console.error(`未知子命令: ${sub}\n用法: evolclaw aid [list|show|new|delete|lookup|agentmd] <aid>`);
   process.exit(1);
 }
 
-// ==================== AgentMd ====================
+// ==================== RPC ====================
 
-async function cmdAgentmd(args: string[]): Promise<void> {
-  if (args.length === 0 || args[0] === 'help') {
-    console.log(`用法: evolclaw agentmd <command> <aid>
+async function cmdRpc(args: string[]): Promise<void> {
+  if (args[0] === 'help' || args.length === 0) {
+    console.log(`用法: evolclaw rpc --as <aid> --params <params>
 
-Commands:
-  <aid>                 查看指定 AID 的 agent.md
-  put <aid>             上传本地 agent.md 到 AUN 网络
-  set <aid> <内容>      设置并上传 agent.md
+通用 AUN RPC 调用。
+
+--params 自动判断输入形式:
+  单行 JSON (以 { 开头)     → 单次调用
+  多行 JSONL                → 逐行执行，失败即停
+  文件路径 (文件存在)        → 读取文件内容作为 JSONL
+
+每行 JSON 格式: {"method":"<namespace.method>","params":{...}}
 
 示例:
-  evolclaw agentmd mybot.agentid.pub
-  evolclaw agentmd put mybot.agentid.pub
-  evolclaw agentmd set mybot.agentid.pub "---\\naid: mybot.agentid.pub\\n---"`);
+  evolclaw rpc --as alice.agentid.pub --params '{"method":"message.send","params":{"to":"bob.agentid.pub","payload":{"type":"text","text":"hello"}}}'
+  evolclaw rpc --as alice.agentid.pub --params calls.jsonl`);
     return;
   }
 
-  const { agentmdGet, agentmdPut, isValidAid } = await import('./channels/aun-ops.js');
+  const asIdx = args.indexOf('--as');
+  const paramsIdx = args.indexOf('--params');
+  const aunPath = resolveAunPath(args);
 
-  if (args[0] === 'put') {
-    const aid = args[1];
-    if (!aid) {
-      console.error('用法: evolclaw agentmd put <aid>');
-      process.exit(1);
-    }
-    if (!isValidAid(aid)) {
-      console.error(`❌ 无效 AID 格式: ${aid}`);
-      process.exit(1);
-    }
-    // Read local file directly (put = push local → network)
-    const localPath = path.join(os.homedir(), '.aun', 'AIDs', aid, 'agent.md');
-    if (!fs.existsSync(localPath)) {
-      console.error(`❌ 本地无 agent.md: ${aid}`);
-      process.exit(1);
-    }
-    const content = fs.readFileSync(localPath, 'utf-8');
-    await agentmdPut(content, { aid });
-    console.log('✓ agent.md 已发布');
-    return;
+  if (asIdx === -1 || asIdx + 1 >= args.length) {
+    console.error('❌ 缺少 --as <aid>');
+    process.exit(1);
+  }
+  if (paramsIdx === -1 || paramsIdx + 1 >= args.length) {
+    console.error('❌ 缺少 --params <params>');
+    process.exit(1);
   }
 
-  if (args[0] === 'set') {
-    const aid = args[1];
-    const content = args.slice(2).join(' ');
-    if (!aid || !content) {
-      console.error('用法: evolclaw agentmd set <aid> <内容>');
-      process.exit(1);
-    }
-    if (!isValidAid(aid)) {
-      console.error(`❌ 无效 AID 格式: ${aid}`);
-      process.exit(1);
-    }
-    await agentmdPut(content, { aid });
-    console.log('✓ agent.md 已更新并发布');
-    return;
-  }
+  const aid = args[asIdx + 1];
+  const paramsRaw = args[paramsIdx + 1];
 
-  // Default: view
-  const aid = args[0];
+  const { isValidAid } = await import('./aid/index.js');
   if (!isValidAid(aid)) {
     console.error(`❌ 无效 AID 格式: ${aid}`);
     process.exit(1);
   }
-  try {
-    const md = await agentmdGet(aid);
-    if (!md || !md.trim()) {
-      console.log(`ℹ️ ${aid} 尚未设置 agent.md`);
-    } else {
-      console.log(md);
-    }
-  } catch (e: any) {
-    const msg = String(e.message || e);
-    if (msg.includes('not found') || msg.includes('404')) {
-      console.log(`ℹ️ ${aid} 尚未设置 agent.md`);
-    } else {
-      console.error(`❌ 获取失败: ${msg.slice(0, 100)}`);
+
+  // Determine input: file, single JSON, or multi-line JSONL
+  let lines: string[];
+  if (fs.existsSync(paramsRaw)) {
+    lines = fs.readFileSync(paramsRaw, 'utf-8').split('\n').filter(l => l.trim());
+  } else if (paramsRaw.includes('\n')) {
+    lines = paramsRaw.split('\n').filter(l => l.trim());
+  } else {
+    lines = [paramsRaw];
+  }
+
+  // Parse calls
+  const calls: Array<{ method: string; params: any }> = [];
+  for (let i = 0; i < lines.length; i++) {
+    try {
+      const parsed = JSON.parse(lines[i]);
+      if (!parsed.method) {
+        console.error(`❌ 第 ${i + 1} 行缺少 "method" 字段`);
+        process.exit(1);
+      }
+      calls.push({ method: parsed.method, params: parsed.params ?? {} });
+    } catch (e: any) {
+      console.error(`❌ 第 ${i + 1} 行 JSON 解析失败: ${e.message}`);
       process.exit(1);
     }
   }
+
+  const { rpcCall, rpcBatch } = await import('./aun-rpc/index.js');
+
+  if (calls.length === 1) {
+    const result = await rpcCall(aid, calls[0].method, calls[0].params, { aunPath });
+    console.log(JSON.stringify(result));
+  } else {
+    const results = await rpcBatch(aid, calls, { aunPath });
+    for (const r of results) {
+      console.log(JSON.stringify(r));
+    }
+  }
+}
+
+// ==================== Storage ====================
+
+async function cmdStorage(args: string[]): Promise<void> {
+  const sub = args[0];
+  const aunPath = resolveAunPath(args);
+  const formatJson = args.includes('--format') && args[args.indexOf('--format') + 1] === 'json';
+
+  if (!sub || sub === 'help') {
+    console.log(`用法: evolclaw storage <command> <aid> [options]
+
+Commands:
+  upload <aid> <local-file> <remote-path> [--public]   上传文件（默认私有）
+  download <aid> <url> [local-path]                    下载文件
+  ls <aid> [prefix]                                    列文件
+  rm <aid> <remote-path>                               删文件
+  quota <aid>                                          查配额
+
+<url> 格式: [https://]<owner-aid>/<path>
+
+示例:
+  evolclaw storage upload myaid.agentid.pub ./doc.txt notes/doc.txt
+  evolclaw storage upload myaid.agentid.pub ./pic.png images/pic.png --public
+  evolclaw storage download myaid.agentid.pub myaid.agentid.pub/notes/doc.txt ./doc.txt
+  evolclaw storage download myaid.agentid.pub bob.agentid.pub/public/file.pdf ./file.pdf
+  evolclaw storage ls myaid.agentid.pub notes/
+  evolclaw storage rm myaid.agentid.pub notes/doc.txt
+  evolclaw storage quota myaid.agentid.pub`);
+    return;
+  }
+
+  const aid = args[1];
+  if (!aid) {
+    console.error('❌ 缺少 <aid> 参数');
+    process.exit(1);
+  }
+
+  const { isValidAid } = await import('./aid/index.js');
+  if (!isValidAid(aid)) {
+    console.error(`❌ 无效 AID 格式: ${aid}`);
+    process.exit(1);
+  }
+
+  const { storageUpload, storageDownload, storageLs, storageRm, storageQuota } = await import('./storage/index.js');
+
+  if (sub === 'upload') {
+    const localFile = args[2];
+    const remotePath = args[3];
+    const isPublic = args.includes('--public');
+
+    if (!localFile || !remotePath) {
+      console.error('用法: evolclaw storage upload <aid> <local-file> <remote-path> [--public]');
+      process.exit(1);
+    }
+    if (!fs.existsSync(localFile)) {
+      console.error(`❌ 文件不存在: ${localFile}`);
+      process.exit(1);
+    }
+
+    const result = await storageUpload(aid, localFile, remotePath, { isPublic, aunPath });
+    if (!result.ok) {
+      if (formatJson) { console.log(JSON.stringify({ ok: false, error: result.error })); }
+      else { console.error(`❌ 上传失败: ${result.error}`); }
+      process.exit(1);
+    }
+    if (formatJson) {
+      console.log(JSON.stringify({ ok: true, objectKey: remotePath, isPublic, ref: `${aid}/${remotePath}` }));
+    } else {
+      console.log(`✓ 已上传: ${remotePath}${isPublic ? ' (公开)' : ''}`);
+      console.log(`  引用: ${aid}/${remotePath}`);
+      console.log(`  下载: evolclaw storage download ${aid} ${aid}/${remotePath}`);
+    }
+    return;
+  }
+
+  if (sub === 'download') {
+    const url = args[2];
+    const localPath = args[3];
+
+    if (!url) {
+      console.error('用法: evolclaw storage download <aid> <url> [local-path]');
+      process.exit(1);
+    }
+
+    const result = await storageDownload(aid, url, localPath, { aunPath });
+    if (!result.ok) {
+      if (formatJson) { console.log(JSON.stringify({ ok: false, error: result.error })); }
+      else { console.error(`❌ 下载失败: ${result.error}`); }
+      process.exit(1);
+    }
+    if (formatJson) {
+      console.log(JSON.stringify({ ok: true, localPath: result.localPath, size: result.size }));
+    } else {
+      console.log(`✓ 已下载: ${result.localPath} (${result.size} bytes)`);
+    }
+    return;
+  }
+
+  if (sub === 'ls') {
+    const prefix = args[2] || '';
+    const result = await storageLs(aid, prefix, { aunPath });
+    if (!result.ok) {
+      console.error(`❌ 列文件失败: ${JSON.stringify(result.error)}`);
+      process.exit(1);
+    }
+    const objects = result.result?.objects || result.result || [];
+    if (Array.isArray(objects) && objects.length === 0) {
+      console.log('(空)');
+    } else {
+      console.log(JSON.stringify(objects, null, 2));
+    }
+    return;
+  }
+
+  if (sub === 'rm') {
+    const remotePath = args[2];
+    if (!remotePath) {
+      console.error('用法: evolclaw storage rm <aid> <remote-path>');
+      process.exit(1);
+    }
+    const result = await storageRm(aid, remotePath, { aunPath });
+    if (!result.ok) {
+      if (formatJson) { console.log(JSON.stringify({ ok: false, error: result.error })); }
+      else { console.error(`❌ 删除失败: ${JSON.stringify(result.error)}`); }
+      process.exit(1);
+    }
+    if (formatJson) {
+      console.log(JSON.stringify({ ok: true, objectKey: remotePath }));
+    } else {
+      console.log(`✓ 已删除: ${remotePath}`);
+    }
+    return;
+  }
+
+  if (sub === 'quota') {
+    const result = await storageQuota(aid, { aunPath });
+    if (!result.ok) {
+      console.error(`❌ 查询配额失败: ${JSON.stringify(result.error)}`);
+      process.exit(1);
+    }
+    console.log(JSON.stringify(result.result, null, 2));
+    return;
+  }
+
+  console.error(`未知子命令: ${sub}\n用法: evolclaw storage [upload|download|ls|rm|quota]`);
+  process.exit(1);
 }
 
 // ==================== Main ====================
@@ -2644,12 +2952,24 @@ export async function main(args: string[]) {
     case 'agent':
       await cmdAgent(args.slice(1));
       break;
-    case 'aid':
+    case 'aid': {
+      const { suppressSdkLogs } = await import('./aid/index.js');
+      suppressSdkLogs();
       await cmdAid(args.slice(1));
       break;
-    case 'agentmd':
-      await cmdAgentmd(args.slice(1));
+    }
+    case 'rpc': {
+      const { suppressSdkLogs } = await import('./aid/index.js');
+      suppressSdkLogs();
+      await cmdRpc(args.slice(1));
       break;
+    }
+    case 'storage': {
+      const { suppressSdkLogs } = await import('./aid/index.js');
+      suppressSdkLogs();
+      await cmdStorage(args.slice(1));
+      break;
+    }
     default:
       console.log(`Usage: evolclaw {init|start|stop|restart|status|logs|watch|ctl|diagnose|mv}
 

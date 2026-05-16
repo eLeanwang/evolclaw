@@ -935,6 +935,33 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       return;
     }
 
+    // 短 echo 快速通道：连通性测试要尽量低延迟，命中后绕过所有 await（sessionModeResolver / 后续 mention 过滤）
+    {
+      const firstLineFast = text.split('\n')[0] || '';
+      if (/echo/i.test(firstLineFast) && firstLineFast.trim().length <= 10) {
+        this.acknowledgeImmediately(messageId, seq);
+        const msgEncryptedFast = !!(msg.e2ee);
+        const peerInfo = this.peerInfoCached(senderAid);
+        const shortAid = this.getShortAid(senderAid);
+        const displayName = peerInfo?.name || shortAid;
+        const createdAt = (data as any).created_at as number | undefined;
+        if (!peerInfo) this.prefetchPeerInfo(senderAid);
+        this.handleEcho({
+          channelId: groupId,
+          userId: senderAid,
+          text,
+          chatType: 'group',
+          messageId,
+          peerName: displayName,
+          peerType: peerInfo?.type || 'unknown',
+          seq,
+          replyContext: this.buildGroupReplyContext(undefined, senderAid, msgEncryptedFast),
+          createdAt,
+        });
+        return;
+      }
+    }
+
     // ── proactive 模式入站白名单 ──
     if (this.sessionModeResolver) {
       const sessionMode = await this.sessionModeResolver(groupId).catch(() => undefined);
@@ -982,29 +1009,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     // Echo 机制优先于 mention 过滤：消息第一行包含 echo 时触发
     const firstLineGroup = text.split('\n')[0] || '';
     if (/echo/i.test(firstLineGroup)) {
-      // 原始内容 ≤10 字符：直接回声,不经过 Agent
-      // 原始内容 >10 字符：追加 trace 后交给 Agent 处理
-      const originalContent = firstLineGroup.trim();
-      if (originalContent.length <= 10) {
-        this.acknowledgeImmediately(messageId, seq);
-        const peerInfo = await this.fetchPeerInfo(senderAid);
-        const shortAid = this.getShortAid(senderAid);
-        const displayName = peerInfo.name || shortAid;
-        const createdAt = (data as any).created_at as number | undefined;
-        this.handleEcho({
-          channelId: groupId,
-          userId: senderAid,
-          text,
-          chatType: 'group',
-          messageId,
-          peerName: displayName,
-          peerType: peerInfo.type || 'unknown',
-          seq,
-          replyContext: this.buildGroupReplyContext(undefined, senderAid, msgEncrypted),
-          createdAt,
-        });
-        return;
-      }
+      // 短 echo（≤10 字符）已在前面的快速通道命中并 return，这里只处理长 echo
       // >10 字符：追加 trace,存 pending echo,跳过 mention 过滤继续走 Agent 流程
       const echoTs = () => {
         const d = new Date();
@@ -2050,6 +2055,17 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       logger.debug(`${this.logPrefix()} fetchPeerInfo failed for ${aid}: ${e}`);
       return { type: null };  // no agent.md → unknown
     }
+  }
+
+  /** 同步取 peerInfo 缓存，未命中返回 undefined，不发起任何网络请求。 */
+  private peerInfoCached(aid: string): { type: 'human' | 'ai'; name?: string } | undefined {
+    return this.peerInfoCache.get(aid);
+  }
+
+  /** 后台预取 peerInfo（下次需要时缓存已就绪），任何错误吞掉。 */
+  private prefetchPeerInfo(aid: string): void {
+    if (this.peerInfoCache.has(aid)) return;
+    void this.fetchPeerInfo(aid).catch(() => {});
   }
 
   async uploadAgentMd(content: string): Promise<void> {
