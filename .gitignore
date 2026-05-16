@@ -89,6 +89,15 @@ DEPLOYMENT.md
 docs/
 src/experimental/
 
+# Agent 配置（含私有信息）
+agents/
+
+# 测试文件
+tests/
+
+# 运行时 skill 定义
+data/SKILLS.md
+
 # 用户个人 onboarding 报告（含使用统计，不入库）
 ONBOARDING.md
 .codex
