@@ -20,6 +20,7 @@ EvolClaw 是一个轻量级 AI Agent 网关系统。它为 Claude Code / Codex �
 - 💾 **会话持久化**：会话数据与 CLI 工具共享，不额外存储，服务重启不丢失
 - ⚡ **执行中插入**：任务执行中可发送新消息，自动中断当前任务并处理新请求
 - 🔕 **消息智能发送**：前台任务动态聚合批量发送，后台任务静默完成后通知
+- 🧩 **EvolAgent 多实例**：一个 JSON 文件定义一个 Agent（channels + baseagent + project + chatmode），多 Agent 并发运行，热重载，资源独占
 - 🤖 **健壮性保障**：任务超时提醒、会话异常安全模式修复、重启失败自动自愈
 
 ## 适合场景
@@ -168,6 +169,7 @@ evolclaw restart    # 重启服务
 evolclaw status     # 查看状态
 evolclaw logs       # 查看日志（tail -f）
 evolclaw tui        # 启动 AUN TUI 终端客户端
+evolclaw agent      # 管理 EvolAgent（list / show / new / reload）
 evolclaw mv <old> <new>  # 项目搬家（保留全部会话）
 evolclaw diagnose   # 诊断启动环境
 
@@ -198,6 +200,8 @@ evolclaw/
 │   │   │   ├── adapters/           # 各后端会话文件适配器
 │   │   │   └── session-manager.ts  # 会话管理（多项目支持）
 │   │   ├── command-handler.ts      # 斜杠命令处理
+│   │   ├── evolagent.ts            # EvolAgent 实体
+│   │   ├── evolagent-registry.ts   # Agent 注册表（扫描/路由/热重载）
 │   │   ├── interaction-router.ts   # 卡片交互回调路由
 │   │   └── permission.ts           # 权限网关
 │   ├── channels/
@@ -213,11 +217,8 @@ evolclaw/
 │   ├── paths.ts                    # 路径解析
 │   ├── cli.ts                      # CLI 命令（init/start/stop/tui/mv/...）
 │   └── index.ts                    # 主入口
-├── aun/
-│   ├── aun_cli.py                  # AUN TUI 客户端（Python）
-│   └── pyproject.toml              # AUN CLI 依赖声明
-└── data/
-    └── evolclaw.sample.json        # 配置模板
+├── data/
+│   └── evolclaw.sample.json        # 配置模板
 ```
 
 ## 斜杠命令
