@@ -8,6 +8,7 @@ import { promisify } from 'util';
 import { execFile } from 'child_process';
 import { resolveRoot, resolvePaths, ensureDataDirs, getPackageRoot } from '../paths.js';
 import { isWindows, commandExists } from './cross-platform.js';
+import { scanInstances } from './instance-registry.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -395,13 +396,11 @@ export async function cmdInit(options?: {
   const p = resolvePaths();
   ensureDataDirs();
 
-  if (fs.existsSync(p.pid)) {
-    const pid = parseInt(fs.readFileSync(p.pid, 'utf-8').trim(), 10);
-    try {
-      process.kill(pid, 0);
-      console.log(`❌ EvolClaw 正在运行 (PID: ${pid})，请先执行 evolclaw stop`);
-      return;
-    } catch {}
+  const aliveMains = scanInstances().mains.filter(m => m.alive);
+  if (aliveMains.length > 0) {
+    const pids = aliveMains.map(m => m.record.pid).join(', ');
+    console.log(`❌ EvolClaw 正在运行 (PID: ${pids})，请先执行 evolclaw stop`);
+    return;
   }
 
   const sampleSrc = path.join(getPackageRoot(), 'data', 'evolclaw.sample.json');

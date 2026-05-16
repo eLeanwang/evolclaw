@@ -32,16 +32,6 @@ function cleanEnv() {
   }
 }
 
-function isRunning(pidFile: string): number | null {
-  if (!fs.existsSync(pidFile)) return null;
-  const pid = parseInt(fs.readFileSync(pidFile, 'utf-8').trim(), 10);
-  if (platform.isProcessRunning(pid)) {
-    return pid;
-  }
-  fs.unlinkSync(pidFile);
-  return null;
-}
-
 function rotateLogs(logDir: string) {
   if (!fs.existsSync(logDir)) return;
   const MAX_SIZE = 10 * 1024 * 1024; // 10MB
@@ -267,7 +257,7 @@ async function cmdStart() {
   // 等待 ready signal（最多 30 秒，AUN sidecar 超时 15s + 其他通道连接）
   const startTime = Date.now();
   const checkReady = () => {
-    // ready signal 出现（优先检查，避免 Windows 上 isRunning 误判）
+    // ready signal 出现（优先检查，避免 Windows 上误判进程状态）
     if (fs.existsSync(p.readySignal)) {
       console.log(`✓ EvolClaw started successfully (PID: ${childPid})`);
       console.log(`  EVOLCLAW_HOME: ${resolveRoot()}`);
@@ -350,15 +340,6 @@ async function cmdStart() {
   setTimeout(checkReady, 1000);
 }
 
-/**
- * 停止进程并等待退出，返回 Promise
- */
-async function stopAndWait(pidFile: string): Promise<void> {
-  const pid = isRunning(pidFile);
-  if (!pid) return;
-  await stopPid(pid);
-}
-
 async function stopPid(pid: number): Promise<void> {
   console.log(`🛑 Stopping EvolClaw (PID: ${pid})...`);
   platform.killProcess(pid);
@@ -384,32 +365,22 @@ async function stopPid(pid: number): Promise<void> {
 }
 
 async function cmdStop() {
-  const p = resolvePaths();
   const status = scanInstances();
   const aliveMains = status.mains.filter(m => m.alive);
-  if (aliveMains.length > 0) {
-    // 并行 SIGTERM 所有活 main，再统一清理
-    await Promise.all(aliveMains.map(m => stopPid(m.record.pid)));
-    await sleep(500);
-    cleanupInstances();
-    if (aliveMains.length > 1) {
-      console.log(`⚠ 停止了 ${aliveMains.length} 个 main 实例: ${aliveMains.map(m => m.record.pid).join(', ')}`);
-    }
+  if (aliveMains.length === 0) {
+    console.log('⚠ EvolClaw is not running');
     return;
   }
-  // 兜底：旧 PID 文件
-  const pid = isRunning(p.pid);
-  if (pid) {
-    await stopPid(pid);
-    try { fs.unlinkSync(p.pid); } catch {}
-    return;
+  await Promise.all(aliveMains.map(m => stopPid(m.record.pid)));
+  await sleep(500);
+  cleanupInstances();
+  if (aliveMains.length > 1) {
+    console.log(`⚠ 停止了 ${aliveMains.length} 个 main 实例: ${aliveMains.map(m => m.record.pid).join(', ')}`);
   }
-  console.log('⚠ EvolClaw is not running');
 }
 
 async function cmdRestart() {
   console.log('🔄 Restarting EvolClaw...');
-  const p = resolvePaths();
 
   // 版本检查与自动升级
   console.log('📦 Checking for updates...');
@@ -441,8 +412,6 @@ async function cmdRestart() {
     await Promise.all(aliveMains.map(m => stopPid(m.record.pid)));
     await sleep(500);
     cleanupInstances();
-  } else if (isRunning(p.pid)) {
-    await stopAndWait(p.pid);
   }
 
   setTimeout(() => cmdStart(), 1000);
@@ -679,9 +648,6 @@ async function cmdStatus() {
     }
   } else {
     console.log('⚠ EvolClaw is not running');
-    if (fs.existsSync(p.pid)) {
-      console.log(`  Stale PID file found: ${p.pid}`);
-    }
   }
 
   // Session & Project statistics (从文件系统读)
@@ -1279,30 +1245,6 @@ async function cmdRestartMonitor() {
 
     await sleep(3000);
     cleanupInstances();
-  } else if (fs.existsSync(p.pid)) {
-    const oldPid = parseInt(fs.readFileSync(p.pid, 'utf-8').trim(), 10);
-    log(`Monitoring process PID (legacy): ${oldPid}`);
-
-    await new Promise<void>((resolve) => {
-      let waited = 0;
-      const interval = setInterval(() => {
-        waited++;
-        if (!platform.isProcessRunning(oldPid)) {
-          clearInterval(interval);
-          log(`Process ${oldPid} has exited`);
-          resolve();
-          return;
-        }
-        if (waited >= 30) {
-          clearInterval(interval);
-          log('ERROR: Process still running after 30s, force killing');
-          platform.killProcess(oldPid, true);
-          resolve();
-        }
-      }, 1000);
-    });
-
-    await sleep(3000);
   }
 
   // 版本检查与自动升级

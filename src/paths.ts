@@ -35,7 +35,6 @@ export function resolvePaths() {
     sessionsDir: path.join(root, 'data', 'sessions'),
     instanceDir: path.join(root, 'data', 'instance'),
     outboxDir: path.join(root, 'data', 'outbox'),
-    pid: path.join(root, 'logs', 'evolclaw.pid'),
     dataDir: path.join(root, 'data'),
     logs: path.join(root, 'logs'),
     agentsDir: path.join(root, 'agents'),
