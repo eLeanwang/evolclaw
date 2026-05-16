@@ -1,0 +1,138 @@
+import path from 'path';
+import { appendJsonl, chatDirPath } from './session-fs-store.js';
+import { logger } from '../../utils/logger.js';
+
+export interface MessageLogEntry {
+  ts: number;
+  time: string;
+  dir: 'in' | 'out';
+  from: string;
+  to: string;
+  chatType: 'private' | 'group';
+  groupId: string | null;
+  msgId: string | null;
+  msgType: 'text' | 'image' | 'file' | 'command';
+  content: string;
+  replyTo: string | null;
+  agent: string | null;
+  model: string | null;
+  permMode: string | null;
+  cmdParsed: string | null;
+  durationMs: number | null;
+}
+
+const MESSAGE_LOG_FILE = 'messages.jsonl';
+
+// 入方向去重：最近 msgId 缓存（LRU 风格，最多 200 条）
+const recentMsgIds = new Set<string>();
+const DEDUP_MAX = 200;
+
+function isDuplicate(msgId: string | null): boolean {
+  if (!msgId) return false;
+  if (recentMsgIds.has(msgId)) return true;
+  if (recentMsgIds.size >= DEDUP_MAX) {
+    const first = recentMsgIds.values().next().value!;
+    recentMsgIds.delete(first);
+  }
+  recentMsgIds.add(msgId);
+  return false;
+}
+
+function formatTimestampMs(epochMs: number): string {
+  const d = new Date(epochMs);
+  const yyyy = d.getFullYear();
+  const mo = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mi = String(d.getMinutes()).padStart(2, '0');
+  const ss = String(d.getSeconds()).padStart(2, '0');
+  const ms = String(d.getMilliseconds()).padStart(3, '0');
+  return `${yyyy}-${mo}-${dd} ${hh}:${mi}:${ss}.${ms}`;
+}
+
+export function messageLogPath(chatDir: string): string {
+  return path.join(chatDir, MESSAGE_LOG_FILE);
+}
+
+export function resolveChatDir(sessionsDir: string, channelType: string, channelId: string, selfId?: string | null): string {
+  return chatDirPath(sessionsDir, channelType, channelId, selfId);
+}
+
+export function appendMessageLog(chatDir: string, entry: MessageLogEntry): void {
+  if (entry.dir === 'in' && isDuplicate(entry.msgId)) {
+    logger.debug(`[MessageLog] Duplicate msgId skipped: ${entry.msgId}`);
+    return;
+  }
+  try {
+    appendJsonl(messageLogPath(chatDir), entry);
+  } catch (e) {
+    logger.warn(`[MessageLog] Failed to write message log: ${e}`);
+  }
+}
+
+export function buildInboundEntry(opts: {
+  from: string;
+  to: string;
+  chatType: 'private' | 'group';
+  groupId?: string | null;
+  msgId?: string | null;
+  content: string;
+  replyTo?: string | null;
+  permMode?: string | null;
+  timestamp?: number;
+}): MessageLogEntry {
+  const ts = opts.timestamp || Date.now();
+  const isCommand = opts.content.startsWith('/');
+  return {
+    ts,
+    time: formatTimestampMs(ts),
+    dir: 'in',
+    from: opts.from,
+    to: opts.to,
+    chatType: opts.chatType,
+    groupId: opts.groupId ?? null,
+    msgId: opts.msgId ?? null,
+    msgType: isCommand ? 'command' : 'text',
+    content: opts.content,
+    replyTo: opts.replyTo ?? null,
+    agent: null,
+    model: null,
+    permMode: opts.permMode ?? null,
+    cmdParsed: isCommand ? opts.content.split(/\s/)[0] : null,
+    durationMs: null,
+  };
+}
+
+export function buildOutboundEntry(opts: {
+  from: string;
+  to: string;
+  chatType: 'private' | 'group';
+  groupId?: string | null;
+  msgId?: string | null;
+  content: string;
+  replyTo?: string | null;
+  agent?: string | null;
+  model?: string | null;
+  durationMs?: number | null;
+  timestamp?: number;
+}): MessageLogEntry {
+  const ts = opts.timestamp || Date.now();
+  return {
+    ts,
+    time: formatTimestampMs(ts),
+    dir: 'out',
+    from: opts.from,
+    to: opts.to,
+    chatType: opts.chatType,
+    groupId: opts.groupId ?? null,
+    msgId: opts.msgId ?? null,
+    msgType: 'text',
+    content: opts.content,
+    replyTo: opts.replyTo ?? null,
+    agent: opts.agent ?? null,
+    model: opts.model ?? null,
+    permMode: null,
+    cmdParsed: null,
+    durationMs: opts.durationMs ?? null,
+  };
+}

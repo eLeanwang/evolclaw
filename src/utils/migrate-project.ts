@@ -98,16 +98,40 @@ export async function migrateProject(oldPath: string, newPath: string): Promise<
   fs.renameSync(oldAbs, newAbs);
   result.directoryMoved = true;
 
-  // 6. 更新 EvolClaw sessions.db
+  // 6. 更新 EvolClaw sessions（文件系统）
   const p = resolvePaths();
-  if (fs.existsSync(p.db)) {
+  if (fs.existsSync(p.sessionsDir)) {
     try {
-      const { DatabaseSync } = await import('node:sqlite');
-      const db = new DatabaseSync(p.db);
-      const r = db.prepare('UPDATE sessions SET project_path = ? WHERE project_path = ?').run(newAbs, oldAbs) as any;
-      result.evolclawDbUpdated = r.changes ?? 0;
-      db.close();
-    } catch { /* DB not accessible */ }
+      const { scanChatDirs, scanMetaFiles, readJsonFile, atomicWriteJson, appendJsonl } = await import('../core/session/session-fs-store.js');
+      type SF = import('../core/session/session-fs-store.js').SessionFile;
+
+      let updated = 0;
+      const chatDirs = scanChatDirs(p.sessionsDir);
+      for (const { dirPath } of chatDirs) {
+        // 更新 active.json
+        const activePath = path.join(dirPath, 'active.json');
+        const active = readJsonFile<SF>(activePath);
+        if (active && active.projectPath === oldAbs) {
+          active.projectPath = newAbs;
+          active.updatedAt = Date.now();
+          atomicWriteJson(activePath, active);
+          updated++;
+        }
+        // 更新各 meta jsonl 的最后一行（append 一条新快照标记 projectPath 变化）
+        for (const metaFile of scanMetaFiles(dirPath)) {
+          const metaPath = path.join(dirPath, metaFile);
+          const { readLastJsonlLine } = await import('../core/session/session-fs-store.js');
+          const meta = readLastJsonlLine<SF>(metaPath);
+          if (meta && meta.projectPath === oldAbs) {
+            meta.projectPath = newAbs;
+            meta.updatedAt = Date.now();
+            appendJsonl(metaPath, meta);
+            updated++;
+          }
+        }
+      }
+      result.evolclawDbUpdated = updated;
+    } catch { /* fs not accessible */ }
   }
 
   // 7. 更新 evolclaw.json projects.list

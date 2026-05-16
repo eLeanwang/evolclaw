@@ -3,6 +3,7 @@ import fs from 'fs';
 import crypto from 'crypto';
 import { type AgentRunnerFull, hasCompact, type AgentEvent } from '../../agents/claude-runner.js';
 import { SessionManager } from '../session/session-manager.js';
+import { appendMessageLog, buildOutboundEntry } from '../session/message-log.js';
 import { StreamFlusher } from './stream-flusher.js';
 import { ThoughtEmitter } from './thought-emitter.js';
 import { MessageCache } from './message-cache.js';
@@ -856,6 +857,23 @@ export class MessageProcessor {
           status: 'completed',
           duration: Date.now() - startTime
         });
+
+        // 写入消息记录（出方向）
+        if (streamResult.lastReplyText || streamResult.fullText) {
+          const chatDir = this.sessionManager.getChatDir(session);
+          appendMessageLog(chatDir, buildOutboundEntry({
+            from: message.selfId || session.selfId || 'self',
+            to: message.peerId || message.channelId,
+            chatType: (message.chatType || session.chatType || 'private') as 'private' | 'group',
+            groupId: session.metadata?.groupId ?? null,
+            msgId: `${messageId}_reply`,
+            content: streamResult.lastReplyText || streamResult.fullText,
+            replyTo: message.messageId ?? null,
+            agent: session.agentId || null,
+            model: agent.getModel?.() || null,
+            durationMs: Date.now() - startTime,
+          }));
+        }
       }
 
       const isFinallyBackground = await this.isBackgroundSession(session, message.channel, message.channelId);

@@ -2321,7 +2321,7 @@ export class CommandHandler {
         let status: string;
         if (ch?.getStatus) {
           const s = ch.getStatus();
-          status = s.connected ? '✓ 已连接' : s.reconnectAttempt > 0 ? `⏳ 重连中 (${s.reconnectAttempt}/${s.maxAttempts})` : '✗ 断开';
+          status = s.connected ? '✓ 已连接' : '⏳ 重连中';
         } else {
           status = '✓ 已注册';
         }

@@ -13,6 +13,7 @@ import { cmdInitWechat, cmdInitFeishu, cmdInitAun, cmdInitDingtalk, cmdInitQQBot
 import * as platform from './utils/cross-platform.js';
 import { EventBus } from './core/event-bus.js';
 import { tryUpgrade, type UpgradeResult } from './utils/upgrade.js';
+import { scanInstances, cleanupInstances, readAidLastActivity, writeRestartMonitor, removeRestartMonitor, isRestartMonitorWinner } from './utils/instance-registry.js';
 
 // Suppress Node.js ExperimentalWarning (e.g. SQLite) from cluttering CLI output
 process.removeAllListeners('warning');
@@ -204,31 +205,35 @@ async function cmdStart() {
     process.exit(1);
   }
 
-  // 检查 PID 文件
-  const pid = isRunning(p.pid);
-  if (pid) {
-    console.log(`❌ EvolClaw is already running (PID: ${pid})`);
+  // 检查 instance 目录中的进程状态
+  const status = scanInstances();
+  const aliveMains = status.mains.filter(m => m.alive);
+  if (aliveMains.length > 0) {
+    const first = aliveMains[0];
+    console.log(`❌ EvolClaw is already running (PID: ${aliveMains.map(m => m.record.pid).join(', ')})`);
+    console.log(`  启动于: ${first.record.startedAtIso}`);
+    console.log(`  启动方式: ${first.record.launchedBy}`);
+    // 报告 AID 状态
+    if (status.aidLastActivity.size > 0) {
+      console.log('  AID 状态:');
+      const now = Date.now();
+      for (const [aid, info] of status.aidLastActivity) {
+        const ago = formatTimeAgo(now - info.ts);
+        const symbol = info.event === 'disconnected' ? '✗' : '✓';
+        console.log(`    ${symbol} ${aid} — 最后活动 ${ago} (${info.event})`);
+      }
+    }
     console.log('  使用 evolclaw restart 重启，或 evolclaw stop 先停止');
     process.exit(1);
   }
 
-  // 检查是否有残留进程（PID 文件已丢失但进程还在）
-  // 只清理属于当前 EVOLCLAW_HOME 的进程，避免误杀其他实例
-  let hasOrphan = false;
-  const evolclawMain = path.join(getPackageRoot(), 'dist', 'index.js');
-  const allPids = platform.findProcesses(evolclawMain.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
-  const orphanPids = allPids.filter(pid => platform.getProcessEnv(pid, 'EVOLCLAW_HOME') === p.root);
-  if (orphanPids.length > 0) {
-    console.log(`⚠ 发现 ${orphanPids.length} 个残留进程，正在清理...`);
-    for (const p of orphanPids) {
-      platform.killProcess(p);
+  // 清理残留进程和文件
+  if (status.mains.length > 0 || status.restartMonitors.length > 0) {
+    const killed = cleanupInstances();
+    if (killed.length > 0) {
+      console.log(`⚠ 清理了 ${killed.length} 个残留进程: ${killed.join(', ')}`);
+      await sleep(2000);
     }
-    hasOrphan = true;
-  }
-
-  // 如果清理了残留进程，等待它们退出
-  if (hasOrphan) {
-    await sleep(2000);
   }
 
   console.log('🚀 Starting EvolClaw...');
@@ -249,13 +254,14 @@ async function cmdStart() {
     env: {
       ...process.env,
       EVOLCLAW_HOME: p.root,
+      EVOLCLAW_LAUNCHED_BY: 'start',
       LOG_LEVEL: process.env.LOG_LEVEL || 'INFO',
       MESSAGE_LOG: process.env.MESSAGE_LOG || 'true',
       EVENT_LOG: process.env.EVENT_LOG || 'true',
     }
   });
 
-  fs.writeFileSync(p.pid, String(child.pid));
+  const childPid = child.pid!;
   child.unref();
 
   // 等待 ready signal（最多 30 秒，AUN sidecar 超时 15s + 其他通道连接）
@@ -263,8 +269,7 @@ async function cmdStart() {
   const checkReady = () => {
     // ready signal 出现（优先检查，避免 Windows 上 isRunning 误判）
     if (fs.existsSync(p.readySignal)) {
-      const pid = isRunning(p.pid);
-      console.log(`✓ EvolClaw started successfully (PID: ${pid})`);
+      console.log(`✓ EvolClaw started successfully (PID: ${childPid})`);
       console.log(`  EVOLCLAW_HOME: ${resolveRoot()}`);
       console.log(`  Logs: ${p.logs}/`);
 
@@ -324,7 +329,7 @@ async function cmdStart() {
     }
 
     // 进程已退出且无 ready signal
-    if (!isRunning(p.pid)) {
+    if (!platform.isProcessRunning(childPid)) {
       // 给进程一点时间写 ready signal（可能刚好在写入中）
       if (Date.now() - startTime > 3000) {
         console.log('❌ Failed to start EvolClaw');
@@ -351,7 +356,10 @@ async function cmdStart() {
 async function stopAndWait(pidFile: string): Promise<void> {
   const pid = isRunning(pidFile);
   if (!pid) return;
+  await stopPid(pid);
+}
 
+async function stopPid(pid: number): Promise<void> {
   console.log(`🛑 Stopping EvolClaw (PID: ${pid})...`);
   platform.killProcess(pid);
 
@@ -361,7 +369,6 @@ async function stopAndWait(pidFile: string): Promise<void> {
       waited++;
       if (!platform.isProcessRunning(pid)) {
         clearInterval(check);
-        try { fs.unlinkSync(pidFile); } catch {}
         console.log('✓ EvolClaw stopped');
         resolve();
         return;
@@ -369,7 +376,6 @@ async function stopAndWait(pidFile: string): Promise<void> {
       if (waited >= 10) {
         clearInterval(check);
         platform.killProcess(pid, true);
-        try { fs.unlinkSync(pidFile); } catch {}
         console.log('✓ EvolClaw stopped (forced)');
         resolve();
       }
@@ -379,12 +385,26 @@ async function stopAndWait(pidFile: string): Promise<void> {
 
 async function cmdStop() {
   const p = resolvePaths();
-  const pid = isRunning(p.pid);
-  if (!pid) {
-    console.log('⚠ EvolClaw is not running');
+  const status = scanInstances();
+  const aliveMains = status.mains.filter(m => m.alive);
+  if (aliveMains.length > 0) {
+    // 并行 SIGTERM 所有活 main，再统一清理
+    await Promise.all(aliveMains.map(m => stopPid(m.record.pid)));
+    await sleep(500);
+    cleanupInstances();
+    if (aliveMains.length > 1) {
+      console.log(`⚠ 停止了 ${aliveMains.length} 个 main 实例: ${aliveMains.map(m => m.record.pid).join(', ')}`);
+    }
     return;
   }
-  await stopAndWait(p.pid);
+  // 兜底：旧 PID 文件
+  const pid = isRunning(p.pid);
+  if (pid) {
+    await stopPid(pid);
+    try { fs.unlinkSync(p.pid); } catch {}
+    return;
+  }
+  console.log('⚠ EvolClaw is not running');
 }
 
 async function cmdRestart() {
@@ -411,7 +431,20 @@ async function cmdRestart() {
       break;
   }
 
-  await stopAndWait(p.pid);
+  // 停止所有活 main 进程（可能不止一个）
+  const status = scanInstances();
+  const aliveMains = status.mains.filter(m => m.alive);
+  if (aliveMains.length > 0) {
+    if (aliveMains.length > 1) {
+      console.log(`⚠ 检测到 ${aliveMains.length} 个 main 实例，将一并停止: ${aliveMains.map(m => m.record.pid).join(', ')}`);
+    }
+    await Promise.all(aliveMains.map(m => stopPid(m.record.pid)));
+    await sleep(500);
+    cleanupInstances();
+  } else if (isRunning(p.pid)) {
+    await stopAndWait(p.pid);
+  }
+
   setTimeout(() => cmdStart(), 1000);
 }
 
@@ -424,6 +457,95 @@ function formatTimeAgo(ms: number): string {
   if (hour < 24) return `${hour}小时前`;
   const day = Math.floor(hour / 24);
   return `${day}天前`;
+}
+
+/** 双字符宽字符 padding：中文/emoji 算 2 列，其他算 1 列 */
+function visualWidth(s: string): number {
+  let w = 0;
+  for (const ch of s) {
+    const code = ch.codePointAt(0) ?? 0;
+    // CJK / Hangul / 全角符号 / Emoji 等宽字符
+    if (
+      (code >= 0x1100 && code <= 0x115F) ||
+      (code >= 0x2E80 && code <= 0x9FFF) ||
+      (code >= 0xA000 && code <= 0xA4CF) ||
+      (code >= 0xAC00 && code <= 0xD7A3) ||
+      (code >= 0xF900 && code <= 0xFAFF) ||
+      (code >= 0xFE30 && code <= 0xFE4F) ||
+      (code >= 0xFF00 && code <= 0xFF60) ||
+      (code >= 0x1F300 && code <= 0x1FAFF)
+    ) {
+      w += 2;
+    } else {
+      w += 1;
+    }
+  }
+  return w;
+}
+
+function padRight(s: string, width: number): string {
+  const pad = Math.max(0, width - visualWidth(s));
+  return s + ' '.repeat(pad);
+}
+
+const AID_STATUS_LABELS: Record<string, string> = {
+  connected: '✓ Connected',
+  reconnecting: '⏳ Reconnecting',
+  aid_blocked: '🔒 AID Blocked',
+  kicked: '✗ Kicked',
+  failed: '✗ Failed',
+  disabled: '○ Disabled',
+};
+
+function renderAunAidsTable(aids: any[]): void {
+  // Column widths（视觉宽度）
+  const COL_AGENT = 14;
+  const COL_AID = 32;
+  const COL_STATUS = 16;
+  const COL_RECONN = 8;
+  const COL_LAST = 14;
+
+  // 表头
+  console.log(
+    '  ' +
+    padRight('AGENT', COL_AGENT) +
+    padRight('AID', COL_AID) +
+    padRight('STATUS', COL_STATUS) +
+    padRight('RECONN', COL_RECONN) +
+    padRight('LAST ATTEMPT', COL_LAST) +
+    'NOTE'
+  );
+
+  for (const a of aids) {
+    const agent = (a.agentName || '?').slice(0, COL_AGENT - 1);
+    const aid = (a.aid || '?').slice(0, COL_AID - 1);
+    const statusLabel = AID_STATUS_LABELS[a.status] || a.status || '?';
+    const reconn = String(a.reconnectCount ?? 0);
+    const lastAttempt = a.lastAttemptAt
+      ? formatTimeAgo(Date.now() - a.lastAttemptAt)
+      : '—';
+
+    let note = '';
+    if (a.status === 'connected' && a.lastConnectedAt) {
+      note = `uptime ${formatTimeAgo(Date.now() - a.lastConnectedAt).replace('前', '')}`;
+    } else if (a.status === 'aid_blocked' && a.blockedBy) {
+      const home = (a.blockedBy.evolclawHome || '').replace(os.homedir(), '~');
+      const ag = a.blockedBy.agentName ? `, agent=${a.blockedBy.agentName}` : '';
+      note = `held by PID ${a.blockedBy.pid} (HOME=${home}${ag})`;
+    } else if (a.lastError) {
+      note = a.lastError;
+    }
+
+    console.log(
+      '  ' +
+      padRight(agent, COL_AGENT) +
+      padRight(aid, COL_AID) +
+      padRight(statusLabel, COL_STATUS) +
+      padRight(reconn, COL_RECONN) +
+      padRight(lastAttempt, COL_LAST) +
+      note
+    );
+  }
 }
 
 function showConfigChannels(config: any) {
@@ -464,7 +586,15 @@ function showConfigChannels(config: any) {
 
 async function cmdStatus() {
   const p = resolvePaths();
-  const pid = isRunning(p.pid);
+  const status = scanInstances();
+  const aliveMains = status.mains.filter(m => m.alive);
+  const pid = aliveMains.length > 0 ? aliveMains[0].record.pid : null;
+
+  if (aliveMains.length > 1) {
+    console.log(`⚠ 检测到 ${aliveMains.length} 个 main 实例同时运行: ${aliveMains.map(m => m.record.pid).join(', ')}`);
+    console.log('  这是异常状态，建议执行 evolclaw restart 让所有实例统一退出');
+    console.log('');
+  }
 
   if (pid) {
     console.log(`✓ EvolClaw is running (PID: ${pid})`);
@@ -482,22 +612,33 @@ async function cmdStatus() {
     } catch {}
     console.log(`  EVOLCLAW_HOME: ${resolveRoot()}`);
 
-    // Runtime statistics (only when running)
-    if (fs.existsSync(p.db)) {
+    // Runtime statistics (read from sessions filesystem)
+    if (fs.existsSync(p.sessionsDir)) {
       try {
-        const Database = await import('node:sqlite');
-        const db = new Database.DatabaseSync(p.db);
+        const { scanChatDirs, scanMetaFiles, readJsonFile, readLastJsonlLine } = await import('./core/session/session-fs-store.js');
+        type SF = import('./core/session/session-fs-store.js').SessionFile;
 
-        // Get recent active sessions (last 5)
-        const recentSessions = db.prepare(`
-          SELECT id, project_path, name, channel, chat_type, thread_id, agent_session_id, agent_id, metadata, updated_at
-          FROM sessions
-          WHERE deleted_at IS NULL
-          ORDER BY updated_at DESC
-          LIMIT 5
-        `).all() as Array<{ id: string; project_path: string; name: string | null; channel: string; chat_type: string; thread_id: string; agent_session_id: string | null; agent_id: string | null; metadata: string | null; updated_at: number }>;
+        const chatDirs = scanChatDirs(p.sessionsDir);
 
-        // Detect orphan sessions (channel no longer in config)
+        // 收集所有 session（active + 各 meta 最后一行）
+        type SessionRow = SF & { isActive: boolean };
+        const allSessions: SessionRow[] = [];
+        for (const { dirPath } of chatDirs) {
+          const active = readJsonFile<SF>(path.join(dirPath, 'active.json'));
+          if (active) allSessions.push({ ...active, isActive: true });
+          for (const metaFile of scanMetaFiles(dirPath)) {
+            const meta = readLastJsonlLine<SF>(path.join(dirPath, metaFile));
+            if (!meta) continue;
+            // 跳过同 id 的（active.json 已经是它的最新版）
+            if (active && active.id === meta.id) continue;
+            allSessions.push({ ...meta, isActive: false });
+          }
+        }
+
+        // 最近 5 个（按 updatedAt 倒排）
+        const recentSessions = [...allSessions].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 5);
+
+        // 检测 orphan：session 的 channel 实例名不在 evolclaw.json 配置内
         let orphanCount = 0;
         try {
           const config = loadConfig(p.config);
@@ -509,36 +650,24 @@ async function cmdStatus() {
               configChannelNames.add(inst.name);
             }
           }
-
-          const channelCounts = db.prepare(`
-            SELECT channel, COUNT(*) as c FROM sessions
-            WHERE deleted_at IS NULL
-            GROUP BY channel
-          `).all() as Array<{ channel: string; c: number }>;
-
-          for (const row of channelCounts) {
-            if (!configChannelNames.has(row.channel)) {
-              orphanCount += row.c;
-            }
+          for (const s of allSessions) {
+            if (!configChannelNames.has(s.channel)) orphanCount++;
           }
         } catch {}
-
-        db.close();
 
         if (recentSessions.length > 0) {
           console.log('');
           console.log('📋 Recent Active Sessions:');
           for (const s of recentSessions) {
-            const projectName = path.basename(s.project_path);
-            const sessionType = s.thread_id ? '话题会话' : '主会话';
-            const chatType = s.chat_type === 'group' ? '群聊' : '单聊';
+            const projectName = path.basename(s.projectPath);
+            const sessionType = s.threadId ? '话题会话' : '主会话';
+            const chatType = s.chatType === 'group' ? '群聊' : '单聊';
             const sessionName = s.name || '默认会话';
-            const timeAgo = formatTimeAgo(Date.now() - s.updated_at);
-            const meta = s.metadata ? JSON.parse(s.metadata) : {};
-            const dot = meta.isActive ? '•' : '○';
-            const agentId = s.agent_session_id ? ` [${s.agent_session_id}]` : '';
-            const agentType = s.agent_id || 'claude';
-            console.log(`  ${dot} [${agentType}] ${projectName} / ${sessionName} (${sessionType}, ${chatType})${agentId} - ${timeAgo}`);
+            const timeAgo = formatTimeAgo(Date.now() - s.updatedAt);
+            const dot = s.isActive ? '•' : '○';
+            const agentSidLabel = s.agentSessionId ? ` [${s.agentSessionId}]` : '';
+            const agentType = s.agentType || 'claude';
+            console.log(`  ${dot} [${agentType}] ${projectName} / ${sessionName} (${sessionType}, ${chatType})${agentSidLabel} - ${timeAgo}`);
           }
         }
 
@@ -555,22 +684,38 @@ async function cmdStatus() {
     }
   }
 
-  // Session & Project statistics (always show if DB exists)
-  if (fs.existsSync(p.db)) {
+  // Session & Project statistics (从文件系统读)
+  if (fs.existsSync(p.sessionsDir)) {
     console.log('');
     console.log('📦 Sessions & Projects:');
     try {
-      const Database = await import('node:sqlite');
-      const db = new Database.DatabaseSync(p.db);
-      const totalSessions = db.prepare('SELECT count(*) as cnt FROM sessions WHERE deleted_at IS NULL').get() as { cnt: number };
-      const activeSessions = db.prepare("SELECT count(*) as cnt FROM sessions WHERE json_extract(metadata, '$.isActive') = true AND deleted_at IS NULL").get() as { cnt: number };
-      const uniqueChats = db.prepare('SELECT count(DISTINCT channel_id) as cnt FROM sessions WHERE deleted_at IS NULL').get() as { cnt: number };
-      const projects = db.prepare('SELECT count(DISTINCT project_path) as cnt FROM sessions WHERE deleted_at IS NULL').get() as { cnt: number };
-      db.close();
+      const { scanChatDirs, scanMetaFiles, readJsonFile, readLastJsonlLine } = await import('./core/session/session-fs-store.js');
+      type SF = import('./core/session/session-fs-store.js').SessionFile;
 
-      console.log(`  Total sessions: ${totalSessions.cnt} (active: ${activeSessions.cnt})`);
-      console.log(`  Unique chats: ${uniqueChats.cnt}`);
-      console.log(`  Projects: ${projects.cnt}`);
+      const chatDirs = scanChatDirs(p.sessionsDir);
+      let totalSessions = 0;
+      let activeSessions = 0;
+      const channelIdSet = new Set<string>();
+      const projectSet = new Set<string>();
+
+      for (const { channelId, dirPath } of chatDirs) {
+        channelIdSet.add(channelId);
+        const active = readJsonFile<SF>(path.join(dirPath, 'active.json'));
+        if (active) {
+          activeSessions++;
+          projectSet.add(active.projectPath);
+        }
+        for (const metaFile of scanMetaFiles(dirPath)) {
+          const meta = readLastJsonlLine<SF>(path.join(dirPath, metaFile));
+          if (!meta) continue;
+          totalSessions++;
+          projectSet.add(meta.projectPath);
+        }
+      }
+
+      console.log(`  Total sessions: ${totalSessions} (active: ${activeSessions})`);
+      console.log(`  Unique chats: ${channelIdSet.size}`);
+      console.log(`  Projects: ${projectSet.size}`);
     } catch {}
   }
 
@@ -592,20 +737,38 @@ async function cmdStatus() {
           groups.get(type)!.push({ name, ch: ch as any });
         }
         for (const [type, instances] of groups) {
+          if (type === 'aun') {
+            // AUN channels 改为一行汇总，详情走 🔑 AUN AIDs 表格
+            console.log(`  aun: ${instances.length} instance(s) — see AUN AIDs section below`);
+            continue;
+          }
           if (instances.length === 1) {
             // Single instance: show instance name directly
             const { name, ch } = instances[0];
-            const label = ch.connected ? '✓ Connected' : ch.reconnectAttempt ? `⏳ Reconnecting (${ch.reconnectAttempt}/${ch.maxAttempts})` : '✗ Disconnected';
-            console.log(`  ${name}: ${label}`);
+            const label = ch.connected ? '✓ Connected' : '⏳ Reconnecting';
+            const aidLabel = ch.aid ? ` (${ch.aid})` : '';
+            console.log(`  ${name}${aidLabel}: ${label}`);
           } else {
-            // Multi-instance: feishu [name1 ✓, name2 ✗]
+            // Multi-instance: feishu [name1(aid) ✓, name2 ✗]
             const parts = instances.map(({ name, ch }) => {
-              const icon = ch.connected ? '✓' : ch.reconnectAttempt ? '⏳' : '✗';
-              return `${name} ${icon}`;
+              const icon = ch.connected ? '✓' : '⏳';
+              const aidPart = ch.aid ? `(${ch.aid})` : '';
+              return `${name}${aidPart} ${icon}`;
             });
             console.log(`  ${type}: [${parts.join(', ')}]`);
           }
         }
+
+        // 🔑 AUN AIDs 表格（独立区段）
+        try {
+          const aidsResp = await ipcQuery<{ ok: boolean; aids: any[] }>(p.socket, { type: 'aun-aids' });
+          if (aidsResp?.ok && aidsResp.aids?.length > 0) {
+            console.log('');
+            console.log('🔑 AUN AIDs:');
+            renderAunAidsTable(aidsResp.aids);
+          }
+        } catch { /* ignore */ }
+
         if (status.stats) {
           console.log('');
           console.log('📊 Last hour:');
@@ -764,6 +927,263 @@ function cmdLogs(args: string[]) {
   }
 }
 
+// ==================== Watch ====================
+
+const WATCH_BRACKET_TS_RE = /^\[(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?)\]/;
+const WATCH_JSON_TS_RE = /"ts"\s*:\s*"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?)"/;
+
+function parseWatchTs(s: string): number {
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(Z)?$/);
+  if (!m) return NaN;
+  const [, y, mo, d, h, mi, se, ms, z] = m;
+  const msNum = ms ? parseInt((ms + '000').slice(0, 3), 10) : 0;
+  if (z) return Date.UTC(+y, +mo - 1, +d, +h, +mi, +se, msNum);
+  return new Date(+y, +mo - 1, +d, +h, +mi, +se, msNum).getTime();
+}
+
+function extractWatchTs(line: string): number | null {
+  const m = line.match(WATCH_BRACKET_TS_RE) || line.match(WATCH_JSON_TS_RE);
+  if (!m) return null;
+  const t = parseWatchTs(m[1]);
+  return isNaN(t) ? null : t;
+}
+
+function toLocalTimeStr(epoch: number): string {
+  const d = new Date(epoch);
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  const ss = String(d.getSeconds()).padStart(2, '0');
+  const ms = String(d.getMilliseconds()).padStart(3, '0');
+  return `${hh}:${mm}:${ss}.${ms}`;
+}
+
+function stripTimestamp(line: string): string {
+  const m = line.match(WATCH_BRACKET_TS_RE);
+  if (m) return line.slice(m[0].length).trimStart();
+  return line;
+}
+
+function formatWatchContent(line: string): string {
+  // JSON line: parse and format key fields
+  if (line.startsWith('{') && line.endsWith('}')) {
+    try {
+      const obj = JSON.parse(line);
+      const dir = obj.dir || '';
+      const event = obj.event || '';
+      const aid = obj.self_aid || '';
+      const data = obj.data;
+      let dataStr = '';
+      if (data) {
+        const parts: string[] = [];
+        for (const [k, v] of Object.entries(data)) {
+          if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') {
+            parts.push(`${k}=${v}`);
+          }
+        }
+        dataStr = parts.join(' ');
+      }
+      const dirArrow = dir === 'IN' ? '<-' : dir === 'OUT' ? '->' : '  ';
+      return `${dirArrow} ${event} [${aid}] ${dataStr}`.trimEnd();
+    } catch { /* fall through */ }
+  }
+  return stripTimestamp(line);
+}
+
+const WATCH_FILE_COLORS = [
+  '\x1b[36m',  // cyan
+  '\x1b[33m',  // yellow
+  '\x1b[32m',  // green
+  '\x1b[35m',  // magenta
+  '\x1b[34m',  // blue
+  '\x1b[91m',  // bright red
+  '\x1b[92m',  // bright green
+  '\x1b[93m',  // bright yellow
+  '\x1b[94m',  // bright blue
+  '\x1b[95m',  // bright magenta
+  '\x1b[96m',  // bright cyan
+];
+
+function cmdWatch() {
+  const p = resolvePaths();
+  if (!fs.existsSync(p.logs)) {
+    console.log(`❌ Log directory not found: ${p.logs}`);
+    process.exit(1);
+  }
+
+  // 清理残留的 watch 文件（旧 watch 进程被强杀时留下的）
+  fs.mkdirSync(p.instanceDir, { recursive: true });
+  for (const file of fs.readdirSync(p.instanceDir)) {
+    if (!file.startsWith('watch-') || !file.endsWith('.json')) continue;
+    const filePath = path.join(p.instanceDir, file);
+    try {
+      const rec = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+      if (rec.pid && !platform.isProcessRunning(rec.pid)) {
+        fs.unlinkSync(filePath);
+      }
+    } catch {
+      try { fs.unlinkSync(filePath); } catch {}
+    }
+  }
+
+  // 注册 instance
+  const instanceFile = path.join(p.instanceDir, `watch-${process.pid}.json`);
+  const instanceRecord = {
+    pid: process.pid,
+    startedAt: Date.now(),
+    startedAtIso: new Date().toISOString(),
+    type: 'watch',
+  };
+  fs.writeFileSync(instanceFile, JSON.stringify(instanceRecord, null, 2));
+
+  const useColor = !!process.stdout.isTTY;
+  const RST = useColor ? '\x1b[0m' : '';
+  const DIM = useColor ? '\x1b[2m' : '';
+  const colorMap = new Map<string, string>();
+  let colorIdx = 0;
+  const getColor = (name: string): string => {
+    if (!useColor) return '';
+    let c = colorMap.get(name);
+    if (!c) { c = WATCH_FILE_COLORS[colorIdx++ % WATCH_FILE_COLORS.length]; colorMap.set(name, c); }
+    return c;
+  };
+
+  const listLogs = () => fs.readdirSync(p.logs).filter(f => f.endsWith('.log')).map(f => path.join(p.logs, f));
+  const shortName = (f: string) => path.basename(f, '.log');
+
+  // 计算最长文件名用于对齐
+  let maxNameLen = 0;
+  const updateMaxName = () => {
+    for (const file of listLogs()) {
+      const len = shortName(file).length;
+      if (len > maxNameLen) maxNameLen = len;
+    }
+  };
+  updateMaxName();
+
+  const formatLine = (file: string, ts: number, line: string): string => {
+    const timeStr = `${DIM}${toLocalTimeStr(ts)}${RST}`;
+    const name = shortName(file);
+    const c = getColor(name);
+    const paddedName = `${c}${name.padEnd(maxNameLen)}${RST}`;
+    const content = formatWatchContent(line);
+    return `${timeStr} ${paddedName} ${content}`;
+  };
+
+  console.log(`🔭 Watching ${p.logs}/*.log (ESC to stop)\n`);
+
+  // 显示当前实例信息和 AID 状态
+  const instStatus = scanInstances();
+  const aliveMainEntries = instStatus.mains.filter(m => m.alive);
+  if (aliveMainEntries.length > 0) {
+    if (aliveMainEntries.length > 1) {
+      console.log(`⚠ 检测到 ${aliveMainEntries.length} 个 main 实例: ${aliveMainEntries.map(m => m.record.pid).join(', ')}（异常）\n`);
+    }
+    const m = aliveMainEntries[0].record;
+    const uptime = formatTimeAgo(Date.now() - m.startedAt);
+    console.log(`📦 Instance: PID ${m.pid} | 启动于 ${m.startedAtIso} (${uptime}) | via ${m.launchedBy}`);
+    if (instStatus.aidLastActivity.size > 0) {
+      const now = Date.now();
+      const aidLines: string[] = [];
+      for (const [aid, info] of instStatus.aidLastActivity) {
+        const ago = formatTimeAgo(now - info.ts);
+        const symbol = info.event === 'disconnected' ? '✗' : '✓';
+        aidLines.push(`  ${symbol} ${aid} — ${info.event} ${ago}`);
+      }
+      console.log(`🔑 AIDs:\n${aidLines.join('\n')}`);
+    }
+    console.log('');
+  } else {
+    console.log('⚠ EvolClaw 主进程未运行\n');
+  }
+
+  // Backfill: 跨所有 .log 汇总最近 20 条带时间戳行；遇到无时间戳行就停止该文件向上追溯
+  const TAIL_BYTES = 256 * 1024;
+  const collected: { ts: number; file: string; line: string }[] = [];
+  for (const file of listLogs()) {
+    let stat: fs.Stats;
+    try { stat = fs.statSync(file); } catch { continue; }
+    const start = Math.max(0, stat.size - TAIL_BYTES);
+    const buf = Buffer.alloc(stat.size - start);
+    try {
+      const fd = fs.openSync(file, 'r');
+      fs.readSync(fd, buf, 0, buf.length, start);
+      fs.closeSync(fd);
+    } catch { continue; }
+    const lines = buf.toString('utf-8').split('\n');
+    if (start > 0) lines.shift();
+    if (lines.length && lines[lines.length - 1] === '') lines.pop();
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const ts = extractWatchTs(lines[i]);
+      if (ts === null) break;
+      collected.push({ ts, file, line: lines[i] });
+    }
+  }
+  collected.sort((a, b) => a.ts - b.ts);
+  for (const r of collected.slice(-20)) {
+    process.stdout.write(formatLine(r.file, r.ts, r.line) + '\n');
+  }
+
+  if (collected.length > 0) process.stdout.write('\n');
+
+  // 实时跟踪
+  const state = new Map<string, { position: number; pending: string }>();
+  for (const file of listLogs()) {
+    try { state.set(file, { position: fs.statSync(file).size, pending: '' }); } catch {}
+  }
+
+  const pumpFile = (file: string) => {
+    const s = state.get(file);
+    if (!s) return;
+    let stat: fs.Stats;
+    try { stat = fs.statSync(file); } catch { return; }
+    if (stat.size < s.position) { s.position = 0; s.pending = ''; }
+    if (stat.size === s.position) return;
+    const buf = Buffer.alloc(stat.size - s.position);
+    try {
+      const fd = fs.openSync(file, 'r');
+      fs.readSync(fd, buf, 0, buf.length, s.position);
+      fs.closeSync(fd);
+    } catch { return; }
+    s.position = stat.size;
+    const parts = (s.pending + buf.toString('utf-8')).split('\n');
+    s.pending = parts.pop() || '';
+    for (const line of parts) {
+      if (!line.trim()) continue;
+      const ts = extractWatchTs(line);
+      if (ts !== null) {
+        process.stdout.write(formatLine(file, ts, line) + '\n');
+      } else {
+        // 无时间戳行：对齐到内容列
+        const pad = 12 + 1 + maxNameLen + 1; // "HH:MM:SS.mmm" + space + name + space
+        process.stdout.write(' '.repeat(pad) + line + '\n');
+      }
+    }
+  };
+
+  const timer = setInterval(() => {
+    for (const file of listLogs()) {
+      if (!state.has(file)) state.set(file, { position: 0, pending: '' });
+    }
+    updateMaxName();
+    for (const file of state.keys()) pumpFile(file);
+  }, 200);
+
+  const cleanup = () => { clearInterval(timer); try { fs.unlinkSync(instanceFile); } catch {} if (process.stdin.isTTY) process.stdin.setRawMode(false); process.exit(0); };
+  process.on('exit', () => { try { fs.unlinkSync(instanceFile); } catch {} });
+
+  // ESC key listener
+  if (process.stdin.isTTY) {
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+    process.stdin.on('data', (key: Buffer) => {
+      if (key[0] === 0x1b && key.length === 1) cleanup();  // ESC
+      if (key[0] === 0x03) cleanup();  // Ctrl+C fallback
+    });
+  }
+
+  platform.onShutdown(cleanup);
+}
+
 /**
  * restart-monitor: 内部命令，由 /restart 命令调用
  * 支持 self-heal：启动失败时调用 claude CLI 自动修复，最多重试 3 次
@@ -784,9 +1204,35 @@ async function cmdRestartMonitor() {
     fs.appendFileSync(restartLog, line);
   };
 
-  /** 检查服务是否已经在运行（ready signal 存在 + 进程存活） */
+  // 单实例保护：pre-check + post-write 自检（同 main 进程）
+  {
+    const pre = scanInstances();
+    const aliveOthers = pre.restartMonitors.filter(m => m.alive && m.record.pid !== process.pid);
+    if (aliveOthers.length > 0) {
+      log(`Another restart-monitor already running (PID: ${aliveOthers.map(m => m.record.pid).join(', ')}), exiting`);
+      process.exit(0);
+    }
+  }
+
+  // 立即登记自己；exit 路径上自动清理 record
+  writeRestartMonitor();
+  process.on('exit', () => removeRestartMonitor());
+
+  // post-write 自检：(startedAt, pid) 选最早赢家
+  {
+    const verdict = isRestartMonitorWinner();
+    if (!verdict.winner) {
+      log(`Lost restart-monitor election to PID ${verdict.conflictingPid}, yielding`);
+      removeRestartMonitor();
+      process.exit(0);
+    }
+  }
+
+  /** 检查服务是否已经在运行（ready signal 存在 + 至少一个活 main） */
   const isServiceAlive = (): boolean => {
-    return fs.existsSync(p.readySignal) && isRunning(p.pid) !== null;
+    if (!fs.existsSync(p.readySignal)) return false;
+    const s = scanInstances();
+    return s.mains.some(m => m.alive);
   };
 
   log('Restart monitor started');
@@ -800,10 +1246,42 @@ async function cmdRestartMonitor() {
     }
   } catch {}
 
-  // 等待旧进程退出
-  if (fs.existsSync(p.pid)) {
+  // 等待所有活 main 进程退出（可能不止一个）
+  const oldStatus = scanInstances();
+  const aliveMains = oldStatus.mains.filter(m => m.alive);
+  if (aliveMains.length > 0) {
+    const oldPids = aliveMains.map(m => m.record.pid);
+    log(`Monitoring ${oldPids.length} main process(es): ${oldPids.join(', ')}`);
+
+    // 先并行 SIGTERM 通知所有活 main
+    for (const pid of oldPids) {
+      try { platform.killProcess(pid, false); } catch {}
+    }
+
+    await Promise.all(oldPids.map(oldPid => new Promise<void>((resolve) => {
+      let waited = 0;
+      const interval = setInterval(() => {
+        waited++;
+        if (!platform.isProcessRunning(oldPid)) {
+          clearInterval(interval);
+          log(`Process ${oldPid} has exited`);
+          resolve();
+          return;
+        }
+        if (waited >= 30) {
+          clearInterval(interval);
+          log(`ERROR: Process ${oldPid} still running after 30s, force killing`);
+          platform.killProcess(oldPid, true);
+          resolve();
+        }
+      }, 1000);
+    })));
+
+    await sleep(3000);
+    cleanupInstances();
+  } else if (fs.existsSync(p.pid)) {
     const oldPid = parseInt(fs.readFileSync(p.pid, 'utf-8').trim(), 10);
-    log(`Monitoring process PID: ${oldPid}`);
+    log(`Monitoring process PID (legacy): ${oldPid}`);
 
     await new Promise<void>((resolve) => {
       let waited = 0;
@@ -986,12 +1464,8 @@ async function spawnAndWaitReady(
 ): Promise<boolean> {
   // 删除旧的 ready signal
   try { fs.unlinkSync(p.readySignal); } catch {}
-  // 杀掉可能残留的进程（先读 PID 再删文件，避免数据库锁）
-  try {
-    const stalePid = parseInt(fs.readFileSync(p.pid, 'utf-8').trim(), 10);
-    if (!isNaN(stalePid)) platform.killProcess(stalePid, true);
-  } catch {}
-  try { fs.unlinkSync(p.pid); } catch {}
+  // 清理残留 instance 文件和进程
+  cleanupInstances();
 
   cleanEnv();
 
@@ -1006,16 +1480,17 @@ async function spawnAndWaitReady(
     env: {
       ...process.env,
       EVOLCLAW_HOME: p.root,
+      EVOLCLAW_LAUNCHED_BY: 'restart-monitor',
       LOG_LEVEL: process.env.LOG_LEVEL || 'INFO',
       MESSAGE_LOG: process.env.MESSAGE_LOG || 'true',
       EVENT_LOG: process.env.EVENT_LOG || 'true',
     }
   });
 
-  fs.writeFileSync(p.pid, String(child.pid));
+  const childPid = child.pid!;
   child.unref();
 
-  log(`Spawned new process PID: ${child.pid}, waiting for ready signal...`);
+  log(`Spawned new process PID: ${childPid}, waiting for ready signal...`);
 
   // 轮询等待 ready.signal 出现
   const start = Date.now();
@@ -1023,7 +1498,7 @@ async function spawnAndWaitReady(
     await sleep(500);
 
     // 进程已退出则提前失败
-    if (!isRunning(p.pid)) {
+    if (!platform.isProcessRunning(childPid)) {
       log('Process exited before ready signal');
       return false;
     }
@@ -1036,11 +1511,10 @@ async function spawnAndWaitReady(
 
   log(`Ready signal not received within ${timeout / 1000}s`);
   // 超时后杀掉进程
-  const pid = isRunning(p.pid);
-  if (pid) {
-    platform.killProcess(pid);
-    try { fs.unlinkSync(p.pid); } catch {}
+  if (platform.isProcessRunning(childPid)) {
+    platform.killProcess(childPid);
   }
+  cleanupInstances();
   return false;
 }
 
@@ -1299,7 +1773,7 @@ async function cmdMv(oldDir?: string, newDir?: string) {
     if (r.claudeHistoryUpdated) console.log('✓ Claude Code history.jsonl 已更新');
     if (r.codexUpdated > 0) console.log(`✓ Codex 数据库已更新 (${r.codexUpdated} 个会话)`);
     if (r.directoryMoved) console.log('✓ 项目目录已移动');
-    if (r.evolclawDbUpdated > 0) console.log(`✓ EvolClaw sessions.db 已更新 (${r.evolclawDbUpdated} 个会话)`);
+    if (r.evolclawDbUpdated > 0) console.log(`✓ EvolClaw 会话存储已更新 (${r.evolclawDbUpdated} 条记录)`);
     if (r.evolclawConfigUpdated) console.log('✓ evolclaw.json projects.list 已更新');
 
     console.log('\n迁移完成！');
@@ -1350,27 +1824,28 @@ async function cmdDiagnose() {
     hasError = true;
   }
 
-  // 4. 检查数据库
+  // 4. 检查 Session 文件系统存储
   try {
     const { SessionManager } = await import('./core/session/session-manager.js');
     const eventBus = new EventBus();
-    new SessionManager(p.db, eventBus);
-    console.log(`[diagnose] ✓ 数据库初始化成功: ${p.db}`);
+    new SessionManager(p.sessionsDir, eventBus);
+    console.log(`[diagnose] ✓ Session 存储初始化成功: ${p.sessionsDir}`);
   } catch (e) {
-    console.error(`[diagnose] ❌ 数据库初始化失败: ${e instanceof Error ? e.message : e}`);
+    console.error(`[diagnose] ❌ Session 存储初始化失败: ${e instanceof Error ? e.message : e}`);
     hasError = true;
   }
 
   // 5. 检查残留进程
   try {
-    const pid = isRunning(p.pid);
-    if (pid) {
-      console.log(`[diagnose] ⚠️ 已有进程运行中: PID ${pid}`);
+    const instStatus = scanInstances();
+    const aliveMains = instStatus.mains.filter(m => m.alive);
+    if (aliveMains.length > 0) {
+      console.log(`[diagnose] ⚠️ 已有进程运行中: PID ${aliveMains.map(m => m.record.pid).join(', ')}`);
     } else {
       console.log(`[diagnose] ✓ 无残留进程`);
     }
   } catch {
-    console.log(`[diagnose] ✓ 无 PID 文件`);
+    console.log(`[diagnose] ✓ 无 instance 文件`);
   }
 
   // 6. 检查关键文件
@@ -2209,6 +2684,9 @@ export async function main(args: string[]) {
     case 'logs':
       cmdLogs(args.slice(1));
       break;
+    case 'watch':
+      cmdWatch();
+      break;
     case 'restart-monitor':
       await cmdRestartMonitor();
       break;
@@ -2231,7 +2709,7 @@ export async function main(args: string[]) {
       await cmdAgentmd(args.slice(1));
       break;
     default:
-      console.log(`Usage: evolclaw {init|start|stop|restart|status|logs|ctl|diagnose|mv}
+      console.log(`Usage: evolclaw {init|start|stop|restart|status|logs|watch|ctl|diagnose|mv}
 
 Commands:
   init          创建配置文件 (${resolvePaths().config})
@@ -2249,6 +2727,7 @@ Commands:
                   --level error|warn   只显示指定级别及以上
                   --module <name>      只显示指定模块（如 feishu、AgentRunner）
                   --raw                原始输出，不着色
+  watch         监控 logs/ 下所有 .log 文件（汇总实时输出，启动时显示最近 20 条）
   ctl           运行时自管理（模型切换、推理强度、压缩上下文等）
                   evolclaw ctl help 查看完整命令列表
   agent         管理 EvolAgent

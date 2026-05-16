@@ -113,23 +113,6 @@ function formatUptime(totalSeconds: number): string {
 }
 
 /**
- * Read a specific environment variable from a running process.
- * Returns undefined if the process doesn't exist or the variable is not set.
- * Linux: reads /proc/<pid>/environ; Windows: not supported (returns undefined).
- */
-export function getProcessEnv(pid: number, varName: string): string | undefined {
-  if (isWindows) return undefined;
-  try {
-    const environ = fs.readFileSync(`/proc/${pid}/environ`, 'utf-8');
-    const prefix = `${varName}=`;
-    const entry = environ.split('\0').find(e => e.startsWith(prefix));
-    return entry ? entry.slice(prefix.length) : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-/**
  * Cross-platform command existence check.
  */
 export function commandExists(cmd: string): boolean {

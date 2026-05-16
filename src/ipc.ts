@@ -1,7 +1,7 @@
 import net from 'net';
 import fs from 'fs';
 import { logger } from './utils/logger.js';
-import type { EvolAgentRegistryHandle } from './types.js';
+import type { EvolAgentRegistryHandle, AidConnectionState } from './types.js';
 
 const isWindows = process.platform === 'win32';
 const isNamedPipe = (p: string) => isWindows && p.startsWith('\\\\.\\pipe\\');
@@ -9,8 +9,6 @@ const isNamedPipe = (p: string) => isWindows && p.startsWith('\\\\.\\pipe\\');
 export interface ChannelStatus {
   connected: boolean;
   channelType?: string;
-  reconnectAttempt?: number;
-  maxAttempts?: number;
   [key: string]: unknown;
 }
 
@@ -28,6 +26,11 @@ export interface IpcStatusResponse {
   };
 }
 
+export interface IpcAunAidsResponse {
+  ok: boolean;
+  aids: AidConnectionState[];
+}
+
 export interface IpcCtlRequest {
   type: 'ctl';
   cmd: string;       // 完整 slash cmd，如 "/model sonnet"
@@ -42,10 +45,12 @@ export interface IpcCtlResponse {
 
 type StatusProvider = () => IpcStatusResponse;
 type CommandExecutor = (cmd: string, sessionId: string) => Promise<IpcCtlResponse>;
+type AunAidProvider = () => AidConnectionState[];
 
 export class IpcServer {
   private server: net.Server | null = null;
   private agentRegistry?: EvolAgentRegistryHandle;
+  private aunAidProvider?: AunAidProvider;
 
   constructor(
     private socketPath: string,
@@ -56,6 +61,11 @@ export class IpcServer {
   /** Inject EvolAgentRegistry for evolagent.* IPC handlers */
   setAgentRegistry(registry: EvolAgentRegistryHandle): void {
     this.agentRegistry = registry;
+  }
+
+  /** Inject AUN AID state aggregator for aun-aids IPC handler */
+  setAunAidProvider(provider: AunAidProvider): void {
+    this.aunAidProvider = provider;
   }
 
   start(): void {
@@ -113,6 +123,10 @@ export class IpcServer {
         return this.getStatus();
       case 'ping':
         return { pong: true, pid: process.pid };
+      case 'aun-aids': {
+        const aids = this.aunAidProvider ? this.aunAidProvider() : [];
+        return { ok: true, aids };
+      }
       case 'ctl': {
         if (!this.commandExecutor) return { ok: false, error: 'ctl not configured' };
         const { cmd: slashCmd, sessionId } = cmd as unknown as IpcCtlRequest;
@@ -160,7 +174,7 @@ export class IpcServer {
  * Query the running EvolClaw daemon via Unix socket.
  * Returns null if the service is not running or the socket is unreachable.
  */
-export function ipcQuery(socketPath: string, cmd: { type: string; [key: string]: unknown }, timeoutMs = 3000): Promise<IpcStatusResponse | null> {
+export function ipcQuery<T = IpcStatusResponse>(socketPath: string, cmd: { type: string; [key: string]: unknown }, timeoutMs = 3000): Promise<T | null> {
   return new Promise((resolve) => {
     const conn = net.connect(socketPath);
     let buf = '';

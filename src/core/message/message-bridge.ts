@@ -1,5 +1,6 @@
 import { logger } from '../../utils/logger.js';
 import { StreamDebouncer } from './stream-debouncer.js';
+import { appendMessageLog, buildInboundEntry } from '../session/message-log.js';
 import type { SessionManager } from '../session/session-manager.js';
 import type { MessageProcessor } from './message-processor.js';
 import type { MessageQueue } from './message-queue.js';
@@ -105,6 +106,12 @@ export class MessageBridge {
           metadata.peerId = msg.peerId;
           if (msg.peerName) metadata.peerName = msg.peerName;
         }
+        if (chatType === 'group') {
+          // 群聊：peerId 是当前消息发送者；groupId 在 channel 提供时存到 metadata
+          if (msg.peerId) metadata.peerId = msg.peerId;
+          if (msg.peerName) metadata.peerName = msg.peerName;
+          if (msg.groupId) metadata.groupId = msg.groupId;
+        }
         // Resolve effective project path: agent's projectPath when channel is agent-owned,
         // otherwise fall back to global config.projects.defaultPath
         const owningAgent = this.agentRegistry?.resolveByChannel(channelName);
@@ -115,7 +122,8 @@ export class MessageBridge {
         const session = await this.sessionManager.getOrCreateSession(
           channelName, msg.channelId,
           effectiveProjectPath,
-          msg.threadId, Object.keys(metadata).length ? metadata : undefined, undefined, msg.peerId, chatType
+          msg.threadId, Object.keys(metadata).length ? metadata : undefined, undefined, msg.peerId, chatType,
+          undefined, msg.selfId, msg.channelType || effectiveChannelType
         );
 
         // 4. 消息前缀（由 policy 决定）
@@ -127,7 +135,10 @@ export class MessageBridge {
 
         // 5. 构造完整消息（channel 字段存实例名，用于 session 精确匹配）
         const fullMessage: Message = {
-          channel: channelName, channelId: msg.channelId, content,
+          channel: channelName,
+          channelType: msg.channelType || effectiveChannelType,
+          channelId: msg.channelId, content,
+          selfId: msg.selfId,
           chatType,
           images: msg.images, timestamp: Date.now(),
           peerId: msg.peerId, peerName: msg.peerName,
@@ -136,6 +147,20 @@ export class MessageBridge {
           mentions: msg.mentions, threadId: msg.threadId,
           replyContext: msg.replyContext,
         };
+
+        // 5.5 写入消息记录（入方向）
+        const chatDir = this.sessionManager.getChatDir(session);
+        appendMessageLog(chatDir, buildInboundEntry({
+          from: msg.peerId || 'unknown',
+          to: msg.selfId || 'self',
+          chatType,
+          groupId: msg.groupId ?? null,
+          msgId: msg.messageId ?? null,
+          content,
+          replyTo: msg.replyContext?.replyToMessageId ?? null,
+          permMode: session.identity?.role ?? null,
+          timestamp: fullMessage.timestamp,
+        }));
 
         // 6. ACK + debounce/enqueue
         //    ACK 在到达时立即做（每条独立 ACK），不等合并

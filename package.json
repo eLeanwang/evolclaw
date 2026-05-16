@@ -23,7 +23,7 @@
     "prepublishOnly": "npm run build && npm test"
   },
   "dependencies": {
-    "@agentunion/fastaun": "^0.2.17",
+    "@agentunion/fastaun": "^0.2.19",
     "@anthropic-ai/claude-agent-sdk": "^0.2.100",
     "image-type": "^6.0.0",
     "qrcode-terminal": "^0.12.0"

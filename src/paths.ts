@@ -32,6 +32,9 @@ export function resolvePaths() {
     config: path.join(root, 'data', 'evolclaw.json'),
     configSample: path.join(root, 'data', 'evolclaw.sample.json'),
     db: path.join(root, 'data', 'sessions.db'),
+    sessionsDir: path.join(root, 'data', 'sessions'),
+    instanceDir: path.join(root, 'data', 'instance'),
+    outboxDir: path.join(root, 'data', 'outbox'),
     pid: path.join(root, 'logs', 'evolclaw.pid'),
     dataDir: path.join(root, 'data'),
     logs: path.join(root, 'logs'),
@@ -56,6 +59,9 @@ export function ensureDataDirs(): void {
   fs.mkdirSync(p.dataDir, { recursive: true });
   fs.mkdirSync(p.logs, { recursive: true });
   fs.mkdirSync(p.agentsDir, { recursive: true });
+  fs.mkdirSync(p.sessionsDir, { recursive: true });
+  fs.mkdirSync(p.instanceDir, { recursive: true });
+  fs.mkdirSync(p.outboxDir, { recursive: true });
 }
 
 export function getPackageRoot(): string {

@@ -179,8 +179,9 @@ export interface ErrorRule {
 export interface SessionMetadata {
   isActive?: boolean;  // 由 Channel 维护，存储在 metadata 中
   replyContext?: ReplyContext;       // 仅话题会话：创建时写入，用于 threadId 路由（不做 per-message 刷新）
-  peerId?: string;                  // 私聊时存发送者 ID，用于跨通道文件投递查 channelId
-  peerName?: string;                // 私聊时存发送者名称
+  peerId?: string;                  // 私聊：对端 AID/userId；群聊：当前消息发送者 AID
+  peerName?: string;                // 对端/发送者显示名
+  groupId?: string;                 // 仅群聊：群 ID（如 AUN 的 group.issuer/grp_xxx）
   channelName?: string;             // 渠道实例名（审计/精确出站路由）
   agentSessions?: {
     codex?: string;
@@ -211,8 +212,10 @@ export interface SessionIdentity {
 
 export interface Session {
   id: string;
-  channel: string;
-  channelId: string;
+  channel: string;       // 实例名（如 'aun_main'、'aun-2'）
+  channelType?: string;  // 类型（'aun' | 'feishu' | 'wechat' | 'dingtalk' | 'qqbot' | 'wecom'）；缺失时用 channel 做 fallback
+  channelId: string;     // 路由键。AUN 私聊=peerAID；AUN 群聊=groupId；其它 channel=原 channelId
+  selfId?: string;       // 本地身份（AUN: 本地 AID；飞书: bot_open_id 等）
   agentId: string;  // 路由维度，默认 'claude'
   threadId: string;  // 路由维度，默认 ''
   chatType: string;  // 'private' | 'group'，由 Channel 填充
@@ -229,8 +232,10 @@ export interface Session {
 }
 
 export interface Message {
-  channel: string;
+  channel: string;          // 实例名
+  channelType?: string;     // 类型（aun/feishu/...）
   channelId: string;
+  selfId?: string;  // 本地身份（AUN 本地 AID / 飞书 bot_open_id 等）
   agentId?: string;  // 默认 'claude'
   threadId?: string;  // 默认 ''
   chatType?: 'private' | 'group';  // 由 Channel 层填充
@@ -247,8 +252,11 @@ export interface Message {
 
 // 入站消息（渠道 → Gateway 的统一格式）
 export interface InboundMessage {
-  channel: string;
+  channel: string;          // 实例名
+  channelType?: string;     // 类型
   channelId: string;
+  selfId?: string;  // 本地身份（AUN 本地 AID / 飞书 bot_open_id 等）
+  groupId?: string;  // 群聊：群 ID（仅 chatType==='group' 时有值）
   agentId?: string;  // 默认 'claude'
   threadId?: string;  // 默认 ''
   chatType: 'private' | 'group';  // 由 Channel 层填充
@@ -440,4 +448,32 @@ export interface EvolAgentRegistryHandle {
   setChannelOwner(channelName: string, userId: string): void;
   getShowActivities(channelName: string): 'all' | 'dm-only' | 'owner-dm-only' | 'none';
   setShowActivities(channelName: string, mode: 'all' | 'dm-only' | 'owner-dm-only' | 'none'): void;
+}
+
+// ── AUN AID Connection State ───────────────────────────────────────
+// 单个 AID 在本进程内的连接状态。一个 EvolAgent 持有一个 AUNChannel，
+// 一个 AUNChannel 对应一个 AID。多 agent 场景下每个 AID 都有自己的状态。
+export type AidStatus =
+  | 'connected'        // 已连接
+  | 'reconnecting'     // 重连中（含 SDK 自动重连 + TS 层退避）
+  | 'aid_blocked'      // 锁被别的进程持有，等待释放
+  | 'kicked'           // server kicked，处于 5min 退避
+  | 'failed'           // 启动 / auth 失败，处于 1min 退避
+  | 'disabled';        // 配置禁用 / 未启动
+
+export interface AidConnectionState {
+  aid: string;
+  agentName: string;            // EvolAgent 名（'[default]' / 'review-bot' / ...）
+  channelName: string;          // channel 实例名
+  status: AidStatus;
+  reconnectCount: number;       // 累计重连次数（含 flap）
+  flapCount: number;            // 当前未消化的 flap 计数
+  lastAttemptAt?: number;       // 最近一次连接尝试时间戳
+  lastConnectedAt?: number;     // 最近一次成功 connected 时间戳
+  lastError?: string;           // 最近一次失败简述（≤ 80 字符）
+  blockedBy?: {                 // 仅 aid_blocked 时填充
+    pid: number;
+    evolclawHome: string;
+    agentName?: string;
+  };
 }

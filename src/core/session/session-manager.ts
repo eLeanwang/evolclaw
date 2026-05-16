@@ -1,4 +1,3 @@
-import { DatabaseSync } from 'node:sqlite';
 import { Session, SessionIdentity, DEFAULT_PERMISSION_MODE } from '../../types.js';
 import { ensureDir } from '../../config.js';
 import { resolvePaths } from '../../paths.js';
@@ -6,6 +5,13 @@ import { logger } from '../../utils/logger.js';
 import { encodePath } from '../../utils/cross-platform.js';
 import { EventBus } from '../event-bus.js';
 import type { SessionFileAdapter, SessionFileInfo, CliSessionEntry, SdkSessionEntry } from './session-file-adapter.js';
+import {
+  SessionFile, HealthRecord,
+  chatDirPath, generateSessionId, formatTimestamp,
+  atomicWriteJson, appendJsonl, readJsonFile, readLastJsonlLine, readAllJsonlLines, scanChatDirs, scanMetaFiles,
+  ensureChatDir, readThreadIndex, writeThreadIndex,
+} from './session-fs-store.js';
+import { sessionToFile, fileToSession } from './session-mapper.js';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
@@ -17,13 +23,11 @@ export type AdminResolver = (channel: string, userId: string) => boolean;
 
 /**
  * 解析新建 session 时的默认 sessionMode
- * - 返回非 undefined：通道配置锁定 / 类型默认
- * - 返回 undefined：使用全局兜底 'interactive'
  */
 export type SessionModeResolver = (channel: string, chatType: string) => 'interactive' | 'proactive' | undefined;
 
 export class SessionManager {
-  private db: DatabaseSync;
+  private sessionsDir: string;
   private eventBus: EventBus;
   private ownerResolver?: OwnerResolver;
   private adminResolver?: AdminResolver;
@@ -31,13 +35,12 @@ export class SessionManager {
   private fileAdapters = new Map<string, SessionFileAdapter>();
   private sessionEncryptState = new Map<string, boolean>();
 
-  constructor(dbPath: string = resolvePaths().db, eventBus: EventBus, ownerResolver?: OwnerResolver, adminResolver?: AdminResolver) {
-    ensureDir(path.dirname(dbPath));
-    this.db = new DatabaseSync(dbPath);
+  constructor(sessionsDir: string, eventBus: EventBus, ownerResolver?: OwnerResolver, adminResolver?: AdminResolver) {
+    ensureDir(sessionsDir);
+    this.sessionsDir = sessionsDir;
     this.eventBus = eventBus;
     this.ownerResolver = ownerResolver;
     this.adminResolver = adminResolver;
-    this.initDatabase();
   }
 
   setOwnerResolver(resolver: OwnerResolver): void {
@@ -52,7 +55,6 @@ export class SessionManager {
     this.sessionModeResolver = resolver;
   }
 
-  /** 解析默认 sessionMode：通道配置锁定 > chatType 默认 > 'interactive' */
   private resolveDefaultSessionMode(channel: string, chatType?: string): 'interactive' | 'proactive' {
     const ct = chatType || 'private';
     const resolved = this.sessionModeResolver?.(channel, ct);
@@ -68,10 +70,6 @@ export class SessionManager {
     return this.fileAdapters.get(agentId);
   }
 
-  getDatabase(): DatabaseSync {
-    return this.db;
-  }
-
   private getProjectDirName(projectPath: string): string {
     return encodePath(projectPath);
   }
@@ -82,28 +80,6 @@ export class SessionManager {
     return path.join(homeDir, '.claude', 'projects', encodedPath, `${sessionId}.jsonl`);
   }
 
-  private rowToSession(row: any): Session {
-    const metadata = row.metadata ? JSON.parse(row.metadata) : undefined;
-    return {
-      id: row.id,
-      channel: row.channel,
-      channelId: row.channel_id,
-      projectPath: row.project_path,
-      threadId: row.thread_id || '',
-      agentId: row.agent_id || 'claude',
-      chatType: row.chat_type || 'private',
-      sessionMode: row.session_mode || 'interactive',
-      agentSessionId: row.agent_session_id,
-      metadata,
-      name: row.name,
-      processingState: row.processing_state || undefined,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-      deletedAt: row.deleted_at ?? undefined,
-    };
-  }
-
-  /** 根据 userId 计算身份 */
   resolveIdentity(channel: string, userId?: string): SessionIdentity {
     if (!userId) return { role: 'anonymous', mode: 'interactive' };
     if (this.ownerResolver?.(channel, userId)) return { role: 'owner', mode: 'interactive' };
@@ -111,75 +87,8 @@ export class SessionManager {
     return { role: 'guest', mode: 'interactive' };
   }
 
-  /** 更新 session 的 identity（owner 绑定后调用） */
   async updateIdentity(sessionId: string, identity: SessionIdentity): Promise<void> {
-    // identity 不持久化到 DB，仅更新内存中的返回值
-    // 调用方应直接修改持有的 session 对象
     logger.debug(`[SessionManager] updateIdentity: sessionId=${sessionId}, role=${identity.role}`);
-  }
-
-  /** 取消所有活跃会话（通过 metadata.isActive） */
-  private deactivateAllMetadata(channel: string, channelId: string): void {
-    const rows = this.db.prepare(`
-      SELECT id, metadata FROM sessions
-      WHERE channel = ? AND channel_id = ? AND json_extract(metadata, '$.isActive') = true
-    `).all(channel, channelId) as any[];
-
-    for (const row of rows) {
-      const metadata = row.metadata ? JSON.parse(row.metadata) : {};
-      metadata.isActive = false;
-      this.db.prepare(`
-        UPDATE sessions SET metadata = ?, updated_at = ? WHERE id = ?
-      `).run(JSON.stringify(metadata), Date.now(), row.id);
-    }
-  }
-
-  /** 获取当前活跃 session 的 chatType（用于新建 session 时继承） */
-  private getActiveChatType(channel: string, channelId: string): string {
-    const row = this.db.prepare(`
-      SELECT chat_type FROM sessions
-      WHERE channel = ? AND channel_id = ? AND json_extract(metadata, '$.isActive') = true AND thread_id = '' AND deleted_at IS NULL
-      ORDER BY updated_at DESC LIMIT 1
-    `).get(channel, channelId) as any;
-    return row?.chat_type || 'private';
-  }
-
-  private validateSessionFile(row: any): string | undefined {
-    const agentSessionId = row.agent_session_id;
-    if (!agentSessionId) return undefined;
-    const agentId = row.agent_id || 'claude';
-    const adapter = this.getFileAdapter(agentId);
-    if (!adapter) {
-      // 无适配器：无法验证文件，信任 DB 记录
-      return agentSessionId;
-    }
-    if (adapter.checkExists(row.project_path, agentSessionId)) {
-      return agentSessionId;
-    }
-    logger.warn(`Session file not found for ${agentId}: ${agentSessionId}, clearing session ID`);
-    this.db.prepare(`UPDATE sessions SET agent_session_id = NULL WHERE id = ?`).run(row.id);
-    return undefined;
-  }
-
-  private insertSession(session: Session): void {
-    this.db.prepare(`
-      INSERT OR IGNORE INTO sessions (id, channel, channel_id, project_path, thread_id, agent_id, chat_type, session_mode, agent_session_id, name, created_at, updated_at, metadata)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      session.id,
-      session.channel,
-      session.channelId,
-      session.projectPath,
-      session.threadId || '',
-      session.agentId || 'claude',
-      session.chatType || 'private',
-      session.sessionMode || 'interactive',
-      session.agentSessionId ?? null,
-      session.name ?? null,
-      session.createdAt,
-      session.updatedAt,
-      session.metadata ? JSON.stringify(session.metadata) : null
-    );
   }
 
   private extractUserMessageText(messageContent: any): string | null {
@@ -196,330 +105,225 @@ export class SessionManager {
     return null;
   }
 
-  private initDatabase(): void {
-    const tableInfo = this.db.prepare('PRAGMA table_info(sessions)').all() as any[];
-    const hasIsActive = tableInfo.some((col: any) => col.name === 'is_active');
-    const hasName = tableInfo.some((col: any) => col.name === 'name');
-    const hasThreadId = tableInfo.some((col: any) => col.name === 'thread_id');
-    const hasAgentType = tableInfo.some((col: any) => col.name === 'agent_type');
-    const hasAgentId = tableInfo.some((col: any) => col.name === 'agent_id');
-    const hasAgentSessionId = tableInfo.some((col: any) => col.name === 'agent_session_id');
-    const hasMetadata = tableInfo.some((col: any) => col.name === 'metadata');
-    const hasIsGroup = tableInfo.some((col: any) => col.name === 'is_group');
-    const hasChatType = tableInfo.some((col: any) => col.name === 'chat_type');
-    const hasSessionMode = tableInfo.some((col: any) => col.name === 'session_mode');
-    const hasDeletedAt = tableInfo.some((col: any) => col.name === 'deleted_at');
+  // ─── File I/O helpers ───
 
-    // 检测是否需要 schema 重构迁移（旧字段存在，新字段不存在）
-    const needsSchemaRefactor = tableInfo.length > 0 && (hasIsGroup || hasIsActive || hasAgentType) && (!hasChatType || !hasAgentId || !hasSessionMode);
-
-    // Schema 重构迁移：is_group → chat_type, agent_type → agent_id, 移除 is_active
-    if (needsSchemaRefactor) {
-      logger.info('Migrating database schema (session model refactor)...');
-      this.db.exec(`DROP TABLE IF EXISTS sessions_new`);
-      this.db.exec(`
-        CREATE TABLE sessions_new (
-          id TEXT PRIMARY KEY,
-          channel TEXT NOT NULL,
-          channel_id TEXT NOT NULL,
-          agent_id TEXT NOT NULL DEFAULT 'claude',
-          thread_id TEXT NOT NULL DEFAULT '',
-          chat_type TEXT NOT NULL DEFAULT 'private',
-          session_mode TEXT NOT NULL DEFAULT 'interactive',
-          project_path TEXT NOT NULL,
-          agent_session_id TEXT,
-          name TEXT,
-          created_at INTEGER NOT NULL,
-          updated_at INTEGER NOT NULL,
-          metadata TEXT,
-          deleted_at INTEGER
-        )
-      `);
-
-      // 迁移数据：is_group → chat_type, agent_type → agent_id
-      this.db.exec(`
-        INSERT INTO sessions_new (id, channel, channel_id, agent_id, thread_id, chat_type, session_mode, project_path, agent_session_id, name, created_at, updated_at, metadata, deleted_at)
-        SELECT
-          id,
-          channel,
-          channel_id,
-          COALESCE(agent_type, 'claude'),
-          COALESCE(thread_id, ''),
-          CASE WHEN is_group = 1 THEN 'group' ELSE 'private' END,
-          'interactive',
-          project_path,
-          agent_session_id,
-          name,
-          created_at,
-          updated_at,
-          metadata,
-          deleted_at
-        FROM sessions
-      `);
-
-      this.db.exec(`DROP TABLE sessions`);
-      this.db.exec(`ALTER TABLE sessions_new RENAME TO sessions`);
-
-      // 创建新索引
-      this.db.exec(`
-        CREATE INDEX IF NOT EXISTS idx_session_space
-          ON sessions(channel, channel_id, agent_id, thread_id)
-          WHERE deleted_at IS NULL
-      `);
-      this.db.exec(`
-        CREATE INDEX IF NOT EXISTS idx_session_active
-          ON sessions(channel, channel_id)
-          WHERE deleted_at IS NULL
-      `);
-
-      logger.info('✓ Database migration completed (session model refactored)');
+  /**
+   * 解析 chat 目录路径。
+   * 1. 先扫描所有 chat 目录，按 channelId 查找匹配项（同时 channelType==channel 或缺失时直接 channelId 匹配）
+   * 2. 找不到则按 fallback：channelType=channel（实例名），selfId=null
+   *
+   * 这样保持兼容：不知道 channelType 的 caller 仍可以用 (channel, channelId) 调用。
+   */
+  private resolveChatDir(channel: string, channelId: string): string {
+    // 优先尝试从已有目录里找
+    const dirs = scanChatDirs(this.sessionsDir);
+    for (const d of dirs) {
+      if (d.channelId !== channelId) continue;
+      // 验证 active.json 或 meta 文件里 channel（实例名）匹配
+      const active = readJsonFile<SessionFile>(path.join(d.dirPath, 'active.json'));
+      if (active && active.channel === channel) return d.dirPath;
+      // 没 active.json 时，看 channelType 是否能匹配 channel
+      if (!active && d.channelType === channel) return d.dirPath;
     }
-
-    // ── 旧 schema 迁移（仅当旧字段存在、新字段还未迁移时运行）──
-    // 这些迁移按顺序将最旧的 schema 逐步升级到包含 is_group 的中间格式，
-    // 然后由上面的 needsSchemaRefactor 迁移一步到位转为新 schema。
-    if (!needsSchemaRefactor && tableInfo.length > 0 && hasAgentType) {
-      // 检查是否有唯一约束
-      const indexes = this.db.prepare('PRAGMA index_list(sessions)').all() as any[];
-      const hasUniqueConstraint = indexes.some((idx: any) => idx.origin === 'u');
-
-      // 迁移到新表结构（添加 thread_id, agent_type, agent_session_id, metadata）
-      if (!hasThreadId) {
-        logger.info('Migrating database schema (adding thread support)...');
-        this.db.exec(`DROP TABLE IF EXISTS sessions_new`);
-        this.db.exec(`
-          CREATE TABLE sessions_new (
-            id TEXT PRIMARY KEY,
-            channel TEXT NOT NULL,
-            channel_id TEXT NOT NULL,
-            project_path TEXT NOT NULL,
-            thread_id TEXT NOT NULL DEFAULT '',
-            agent_type TEXT NOT NULL DEFAULT 'claude',
-            agent_session_id TEXT,
-            name TEXT,
-            is_active INTEGER NOT NULL DEFAULT 0,
-            created_at INTEGER NOT NULL,
-            updated_at INTEGER NOT NULL,
-            metadata TEXT
-          );
-          INSERT INTO sessions_new (id, channel, channel_id, project_path, thread_id, agent_type, agent_session_id, name, is_active, created_at, updated_at, metadata)
-            SELECT id, channel, channel_id, project_path, '', 'claude', claude_session_id, name, is_active, created_at, updated_at, NULL FROM sessions;
-          DROP TABLE sessions;
-          ALTER TABLE sessions_new RENAME TO sessions;
-        `);
-        // 话题会话唯一约束（thread_id 非空时才生效）
-        this.db.exec(`
-          CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_thread
-            ON sessions(channel, channel_id, project_path, thread_id)
-            WHERE thread_id != ''
-        `);
-        logger.info('✓ Database migration completed (thread support added)');
-      }
-
-      // Migration: add is_group column
-      if (!hasIsGroup) {
-        logger.info('Migrating database schema (adding is_group)...');
-        const addIsGroupCol = 'ALTER TABLE sessions ADD COLUMN is_group INTEGER NOT NULL DEFAULT 0';
-        this.db.exec(addIsGroupCol);
-        logger.info('✓ Database migration completed (is_group added)');
-      }
-
-      // Reset incorrect is_group values (oc_ prefix doesn't reliably indicate group chat)
-      if (hasIsGroup) {
-        this.db.exec("UPDATE sessions SET is_group = 0 WHERE channel = 'feishu'");
-      }
-
-      // Migration: add deleted_at column
-      if (!hasDeletedAt) {
-        logger.info('Migrating database schema (adding deleted_at)...');
-        this.db.exec(`ALTER TABLE sessions ADD COLUMN deleted_at INTEGER`);
-        logger.info('✓ Database migration completed (deleted_at added)');
-      }
-    }
-
-    // Migration: add processing_state column (独立于 schema 重构)
-    if (tableInfo.length > 0) {
-      const hasProcessingState = tableInfo.some((col: any) => col.name === 'processing_state');
-      if (!hasProcessingState) {
-        logger.info('Migrating database schema (adding processing_state)...');
-        this.db.exec(`ALTER TABLE sessions ADD COLUMN processing_state TEXT`);
-        logger.info('✓ Database migration completed (processing_state added)');
-      }
-    }
-
-    // Migration: normalize legacy metadata rootId → replyContext
-    if (hasMetadata && tableInfo.length > 0) {
-      const rows = this.db.prepare(
-        `SELECT id, metadata FROM sessions WHERE metadata IS NOT NULL AND metadata != ''`
-      ).all() as { id: string; metadata: string }[];
-      let migrated = 0;
-      for (const row of rows) {
-        try {
-          const meta = JSON.parse(row.metadata);
-          const rootId = meta.feishu?.rootId ?? meta.threadRootId ?? meta.replyOpts?.rootId;
-          if (!rootId && !meta.feishu && !meta.threadRootId && !meta.replyOpts) continue;
-          // Generate replyContext from rootId if missing
-          if (rootId && !meta.replyContext) {
-            meta.replyContext = { replyToMessageId: rootId, replyInThread: true };
-          }
-          // Clean up all legacy fields
-          delete meta.feishu;
-          delete meta.threadRootId;
-          delete meta.replyOpts;
-          this.db.prepare('UPDATE sessions SET metadata = ? WHERE id = ?')
-            .run(JSON.stringify(meta), row.id);
-          migrated++;
-        } catch { /* skip malformed JSON */ }
-      }
-      if (migrated > 0) {
-        logger.info(`✓ Migrated ${migrated} session(s): rootId normalized to replyContext`);
-      }
-    }
-
-    // Migration: readonly 模式已禁用，历史会话统一转为 auto
-    if (hasMetadata && tableInfo.length > 0) {
-      const rows = this.db.prepare(
-        `SELECT id, metadata FROM sessions WHERE metadata IS NOT NULL AND metadata != ''`
-      ).all() as { id: string; metadata: string }[];
-      let migratedPerm = 0;
-      for (const row of rows) {
-        try {
-          const meta = JSON.parse(row.metadata);
-          if (meta.permissionMode === 'readonly' || meta.permissionMode === 'noask') {
-            meta.permissionMode = 'auto';
-            this.db.prepare('UPDATE sessions SET metadata = ? WHERE id = ?')
-              .run(JSON.stringify(meta), row.id);
-            migratedPerm++;
-          }
-        } catch { /* skip malformed JSON */ }
-      }
-      if (migratedPerm > 0) {
-        logger.info(`✓ Migrated ${migratedPerm} session(s): permissionMode → auto`);
-      }
-    }
-
-    // 创建新表（首次初始化）
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS sessions (
-        id TEXT PRIMARY KEY,
-        channel TEXT NOT NULL,
-        channel_id TEXT NOT NULL,
-        agent_id TEXT NOT NULL DEFAULT 'claude',
-        thread_id TEXT NOT NULL DEFAULT '',
-        chat_type TEXT NOT NULL DEFAULT 'private',
-        session_mode TEXT NOT NULL DEFAULT 'interactive',
-        project_path TEXT NOT NULL,
-        agent_session_id TEXT,
-        name TEXT,
-        processing_state TEXT,
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL,
-        metadata TEXT,
-        deleted_at INTEGER
-      )
-    `);
-    // 会话空间索引（查询优化，无唯一约束）
-    this.db.exec(`
-      CREATE INDEX IF NOT EXISTS idx_session_space
-        ON sessions(channel, channel_id, agent_id, thread_id)
-        WHERE deleted_at IS NULL
-    `);
-    this.db.exec(`
-      CREATE INDEX IF NOT EXISTS idx_session_active
-        ON sessions(channel, channel_id)
-        WHERE deleted_at IS NULL
-    `);
-
-    // 创建消息去重表
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS processed_messages (
-        message_id TEXT PRIMARY KEY,
-        channel TEXT NOT NULL,
-        channel_id TEXT NOT NULL,
-        processed_at INTEGER NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS idx_processed_at ON processed_messages(processed_at);
-    `);
-
-    // 创建会话健康状态表
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS session_health (
-        session_id TEXT PRIMARY KEY,
-        consecutive_errors INTEGER NOT NULL DEFAULT 0,
-        last_error TEXT,
-        last_error_type TEXT,
-        safe_mode INTEGER NOT NULL DEFAULT 0,
-        last_success_time INTEGER NOT NULL,
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL,
-        FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
-      );
-      CREATE INDEX IF NOT EXISTS idx_session_health_safe_mode ON session_health(safe_mode);
-    `);
+    // Fallback：按 channel 当 channelType 创建（旧路径布局兼容）
+    return chatDirPath(this.sessionsDir, channel, channelId);
   }
 
   /**
-   * 启动时迁移：将 sessions.channel 从 channelType 回填为实例名（channelName）。
-   * 读取每行 metadata.channelName，若与 channel 列不同则更新。
+   * 给定明确的 channelType + selfId 时直接计算路径（不扫描）。
+   * 用于 caller 已经知道完整路由信息的场景（如 message-bridge 透传）。
    */
-  migrateChannelToInstanceName(): void {
-    const rows = this.db.prepare(
-      `SELECT id, channel, metadata FROM sessions WHERE metadata IS NOT NULL AND metadata != ''`
-    ).all() as { id: string; channel: string; metadata: string }[];
-
-    let migrated = 0;
-    for (const row of rows) {
-      try {
-        const meta = JSON.parse(row.metadata);
-        if (meta.channelName && meta.channelName !== row.channel) {
-          this.db.prepare(`UPDATE sessions SET channel = ?, updated_at = ? WHERE id = ?`)
-            .run(meta.channelName, Date.now(), row.id);
-          migrated++;
-          logger.info(`[Migration] Restored channel '${row.channel}' -> '${meta.channelName}' (session ${row.id})`);
-        }
-      } catch { /* skip invalid metadata */ }
+  private resolveChatDirExact(channel: string, channelId: string, channelType?: string, selfId?: string): string {
+    if (channelType) {
+      return chatDirPath(this.sessionsDir, channelType, channelId, selfId);
     }
-    if (migrated > 0) {
-      logger.info(`Channel instance name migration completed (${migrated} sessions updated)`);
-    }
+    return this.resolveChatDir(channel, channelId);
   }
 
-  /**
-   * 获取指定渠道所有已知的 thread_id（用于重启后预填充 seenThreads）
-   */
+  private resolveChatDirFromSession(session: Session): string {
+    const channelType = session.channelType || session.channel;
+    return chatDirPath(this.sessionsDir, channelType, session.channelId, session.selfId);
+  }
+
+  /** Public accessor: get the chat directory path for a session (for message log etc.) */
+  getChatDir(session: Session): string {
+    return this.resolveChatDirFromSession(session);
+  }
+
+  /** Like resolveChatDir but also ensures the dir + _threads + _trash exist. */
+  private ensureResolvedChatDir(channel: string, channelId: string): string {
+    const dir = this.resolveChatDir(channel, channelId);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.mkdirSync(path.join(dir, '_threads'), { recursive: true });
+    fs.mkdirSync(path.join(dir, '_trash'), { recursive: true });
+    return dir;
+  }
+
+  /** 推断给定 chat 的 channelType（优先取 active.json）。无活跃时回落到 channel 实例名。 */
+  private inferChannelType(channel: string, channelId: string): string {
+    const active = this.readActive(channel, channelId);
+    return active?.channelType || channel;
+  }
+
+  /** 从 active 推断 selfId（已有 session 的复用） */
+  private inferSelfId(channel: string, channelId: string): string | undefined {
+    const active = this.readActive(channel, channelId);
+    return active?.selfId;
+  }
+
+  private readActive(channel: string, channelId: string): Session | undefined {
+    const dir = this.resolveChatDir(channel, channelId);
+    const file = readJsonFile<SessionFile>(path.join(dir, 'active.json'));
+    if (!file) return undefined;
+    return fileToSession(file);
+  }
+
+  private writeActive(channel: string, channelId: string, session: Session): void {
+    const dir = this.ensureChatDirForSession(session);
+    const file = sessionToFile(session);
+    atomicWriteJson(path.join(dir, 'active.json'), file);
+  }
+
+  private clearActive(channel: string, channelId: string): void {
+    const dir = this.resolveChatDir(channel, channelId);
+    const activePath = path.join(dir, 'active.json');
+    try { fs.unlinkSync(activePath); } catch (e: any) { if (e.code !== 'ENOENT') throw e; }
+  }
+
+  private ensureChatDirForSession(session: Session): string {
+    const channelType = session.channelType || session.channel;
+    return ensureChatDir(this.sessionsDir, channelType, session.channelId, session.selfId);
+  }
+
+  private metaFilePath(chatDir: string, sessionId: string): string {
+    return path.join(chatDir, `${sessionId}.jsonl`);
+  }
+
+  private appendMeta(channel: string, channelId: string, session: Session): void {
+    const dir = this.ensureChatDirForSession(session);
+    const isThread = !!session.threadId;
+    const targetDir = isThread ? path.join(dir, '_threads') : dir;
+    const file = sessionToFile(session);
+    const metaPath = this.metaFilePath(targetDir, session.id);
+    appendJsonl(metaPath, file);
+  }
+
+  private readMetaLatest(metaFilePath: string): Session | undefined {
+    const file = readLastJsonlLine<SessionFile>(metaFilePath);
+    if (!file) return undefined;
+    return fileToSession(file);
+  }
+
+  private validateSessionFile(session: Session): string | undefined {
+    const agentSessionId = session.agentSessionId;
+    if (!agentSessionId) return undefined;
+    const agentId = session.agentId || 'claude';
+    const adapter = this.getFileAdapter(agentId);
+    if (!adapter) return agentSessionId;
+    if (adapter.checkExists(session.projectPath, agentSessionId)) return agentSessionId;
+    logger.warn(`Session file not found for ${agentId}: ${agentSessionId}, clearing session ID`);
+    session.agentSessionId = undefined;
+    this.appendMeta(session.channel, session.channelId, session);
+    const active = this.readActive(session.channel, session.channelId);
+    if (active && active.id === session.id) {
+      this.writeActive(session.channel, session.channelId, session);
+    }
+    return undefined;
+  }
+
+  private getActiveChatType(channel: string, channelId: string): string {
+    const active = this.readActive(channel, channelId);
+    if (active && !active.threadId) return active.chatType || 'private';
+    return 'private';
+  }
+
+  private findAllSessionsInChat(chatDir: string, includeThreads: boolean = true): Session[] {
+    const metaFiles = scanMetaFiles(chatDir);
+    const results: Session[] = [];
+    for (const metaFile of metaFiles) {
+      const session = this.readMetaLatest(path.join(chatDir, metaFile));
+      if (session) results.push(session);
+    }
+    if (includeThreads) {
+      const threadsDir = path.join(chatDir, '_threads');
+      const threadMetas = scanMetaFiles(threadsDir);
+      for (const metaFile of threadMetas) {
+        const session = this.readMetaLatest(path.join(threadsDir, metaFile));
+        if (session) results.push(session);
+      }
+    }
+    return results;
+  }
+
+  private findSessionFileById(sessionId: string): { chatDir: string; metaPath: string; isThread: boolean } | undefined {
+    const chatDirs = scanChatDirs(this.sessionsDir);
+    for (const { dirPath } of chatDirs) {
+      const mainPath = path.join(dirPath, `${sessionId}.jsonl`);
+      try { fs.statSync(mainPath); return { chatDir: dirPath, metaPath: mainPath, isThread: false }; } catch {}
+      const threadPath = path.join(dirPath, '_threads', `${sessionId}.jsonl`);
+      try { fs.statSync(threadPath); return { chatDir: dirPath, metaPath: threadPath, isThread: true }; } catch {}
+    }
+    return undefined;
+  }
+
+  // ─── Public API ───
+
   getKnownThreadIds(channel: string): string[] {
-    const rows = this.db.prepare(`
-      SELECT DISTINCT thread_id FROM sessions
-      WHERE channel = ? AND thread_id != '' AND deleted_at IS NULL
-    `).all(channel) as any[];
-    return rows.map(r => r.thread_id);
+    const chatDirs = scanChatDirs(this.sessionsDir);
+    const threadIds: string[] = [];
+    for (const { dirPath } of chatDirs) {
+      const active = readJsonFile<SessionFile>(path.join(dirPath, 'active.json'));
+      const matchInstance = active?.channel === channel;
+      // 也兼容没 active.json 时按目录顶层 channelType 匹配（fallback 路径布局）
+      if (!matchInstance) continue;
+      const index = readThreadIndex(dirPath);
+      for (const tid of Object.keys(index)) threadIds.push(tid);
+    }
+    return threadIds;
   }
 
-  /**
-   * 标记会话为处理中（实时写 DB，crash 也能恢复）
-   * processing_state 格式: "timestamp:taskId"
-   */
   markProcessing(sessionId: string, taskId?: string): void {
     const now = Date.now();
     const state = taskId ? `${now}:${taskId}` : String(now);
-    this.db.prepare(`UPDATE sessions SET processing_state = ?, updated_at = ? WHERE id = ?`)
-      .run(state, now, sessionId);
+    const chatDirs = scanChatDirs(this.sessionsDir);
+    for (const { dirPath } of chatDirs) {
+      const active = readJsonFile<SessionFile>(path.join(dirPath, 'active.json'));
+      if (active && active.id === sessionId) {
+        active.activeTask = state;
+        active.updatedAt = now;
+        active.updatedAtStr = formatTimestamp(now);
+        atomicWriteJson(path.join(dirPath, 'active.json'), active);
+        return;
+      }
+    }
   }
 
-  /** 从 processing_state 解析当前活跃 taskId */
   getActiveTaskId(sessionId: string): string | undefined {
-    const row = this.db.prepare(`SELECT processing_state FROM sessions WHERE id = ?`).get(sessionId) as any;
-    if (!row?.processing_state) return undefined;
-    const colonIdx = row.processing_state.indexOf(':');
-    return colonIdx > 0 ? row.processing_state.slice(colonIdx + 1) : undefined;
+    const chatDirs = scanChatDirs(this.sessionsDir);
+    for (const { dirPath } of chatDirs) {
+      const active = readJsonFile<SessionFile>(path.join(dirPath, 'active.json'));
+      if (active && active.id === sessionId) {
+        if (!active.activeTask) return undefined;
+        const colonIdx = active.activeTask.indexOf(':');
+        return colonIdx > 0 ? active.activeTask.slice(colonIdx + 1) : undefined;
+      }
+    }
+    return undefined;
   }
 
-  /**
-   * 清除会话处理中状态
-   */
   clearProcessing(sessionId: string): void {
-    this.db.prepare(`UPDATE sessions SET processing_state = NULL, updated_at = ? WHERE id = ?`)
-      .run(Date.now(), sessionId);
+    const now = Date.now();
+    const chatDirs = scanChatDirs(this.sessionsDir);
+    for (const { dirPath } of chatDirs) {
+      const active = readJsonFile<SessionFile>(path.join(dirPath, 'active.json'));
+      if (active && active.id === sessionId) {
+        active.activeTask = null;
+        active.updatedAt = now;
+        active.updatedAtStr = formatTimestamp(now);
+        atomicWriteJson(path.join(dirPath, 'active.json'), active);
+        break;
+      }
+    }
     this.sessionEncryptState.delete(sessionId);
   }
 
@@ -531,31 +335,28 @@ export class SessionManager {
     return this.sessionEncryptState.get(sessionId);
   }
 
-  /**
-   * 获取所有处于 processing 状态的会话（用于重启后恢复）
-   * @param maxAgeMs 最大存活时间（超过则视为超时，清除状态）默认 1 小时
-   */
   getPendingProcessingSessions(maxAgeMs: number = 60 * 60 * 1000): Session[] {
-    const rows = this.db.prepare(`
-      SELECT * FROM sessions
-      WHERE processing_state IS NOT NULL AND deleted_at IS NULL
-    `).all() as any[];
-
     const now = Date.now();
     const result: Session[] = [];
-    for (const row of rows) {
-      const colonIdx = row.processing_state.indexOf(':');
-      const ts = parseInt(colonIdx > 0 ? row.processing_state.slice(0, colonIdx) : row.processing_state, 10);
+    const chatDirs = scanChatDirs(this.sessionsDir);
+    for (const { dirPath } of chatDirs) {
+      const active = readJsonFile<SessionFile>(path.join(dirPath, 'active.json'));
+      if (!active || !active.activeTask) continue;
+      const colonIdx = active.activeTask.indexOf(':');
+      const ts = parseInt(colonIdx > 0 ? active.activeTask.slice(0, colonIdx) : active.activeTask, 10);
       if (!isNaN(ts) && (now - ts) < maxAgeMs) {
-        result.push(this.rowToSession(row));
+        result.push(fileToSession(active));
       } else {
-        // 超时：清除过期状态
-        this.db.prepare(`UPDATE sessions SET processing_state = NULL WHERE id = ?`)
-          .run(row.id);
+        active.activeTask = null;
+        active.updatedAt = now;
+        active.updatedAtStr = formatTimestamp(now);
+        atomicWriteJson(path.join(dirPath, 'active.json'), active);
       }
     }
     return result;
   }
+
+  // ─── Session lifecycle ───
 
   async getOrCreateSession(
     channel: string,
@@ -566,111 +367,104 @@ export class SessionManager {
     name?: string,
     userId?: string,
     chatType?: 'private' | 'group',
-    agentId?: string
+    agentId?: string,
+    selfId?: string,
+    channelType?: string
   ): Promise<Session> {
-    // 话题会话：独立查找/创建
     if (threadId) {
-      const session = this.getOrCreateThreadSession(channel, channelId, threadId, defaultProjectPath, metadata, name, agentId);
+      const session = this.getOrCreateThreadSession(channel, channelId, threadId, defaultProjectPath, metadata, name, agentId, selfId, channelType);
       session.identity = this.resolveIdentity(channel, userId);
-      // 新话题会话补写默认权限模式
       if (session.metadata && !session.metadata.permissionMode) {
         session.metadata.permissionMode = DEFAULT_PERMISSION_MODE;
-        this.db.prepare(`UPDATE sessions SET metadata = ?, updated_at = ? WHERE id = ?`)
-          .run(JSON.stringify(session.metadata), Date.now(), session.id);
+        this.appendMeta(channel, channelId, session);
       }
       return session;
     }
 
-    // 主会话：查找活跃会话
-    const active = this.db.prepare(`
-      SELECT * FROM sessions
-      WHERE channel = ? AND channel_id = ? AND json_extract(metadata, '$.isActive') = true AND thread_id = '' AND deleted_at IS NULL
-    `).get(channel, channelId) as any;
-
-    if (active) {
+    // 使用精确路径解析（caller 提供了 channelType 时直接定位，避免扫描回落）
+    const exactDir = this.resolveChatDirExact(channel, channelId, channelType, selfId);
+    const activeFile = readJsonFile<SessionFile>(path.join(exactDir, 'active.json'));
+    const active = activeFile ? fileToSession(activeFile) : undefined;
+    if (active && !active.threadId) {
       const validSessionId = this.validateSessionFile(active);
-      const session = { ...this.rowToSession(active), agentSessionId: validSessionId };
+      const session: Session = { ...active, agentSessionId: validSessionId };
       session.identity = this.resolveIdentity(channel, userId);
 
-      // chatType 自动修正：入站 chatType 与存储值不一致时更新（修复历史 session 因错误识别留下的脏数据）
+      let mutated = false;
       if (chatType && session.chatType !== chatType) {
         logger.info(`[SessionManager] Updating chatType for session ${session.id}: ${session.chatType} -> ${chatType}`);
-        this.db.prepare(`UPDATE sessions SET chat_type = ?, updated_at = ? WHERE id = ?`)
-          .run(chatType, Date.now(), active.id);
         session.chatType = chatType;
+        mutated = true;
       }
 
-      // 补写 peerId/peerName/channelName（旧 session 可能在这些字段引入前创建）
+      if (selfId && session.selfId !== selfId) {
+        session.selfId = selfId;
+        mutated = true;
+      }
+
       if (chatType === 'private' && userId) {
-        const activeMeta = active.metadata ? JSON.parse(active.metadata) : {};
-        let updated = false;
-        if (!activeMeta.peerId) { activeMeta.peerId = userId; updated = true; }
-        if (!activeMeta.peerName && metadata?.peerName) { activeMeta.peerName = metadata.peerName; updated = true; }
-        if (metadata?.channelName && activeMeta.channelName !== metadata.channelName) { activeMeta.channelName = metadata.channelName; updated = true; }
-        if (updated) {
-          this.db.prepare(`UPDATE sessions SET metadata = ?, updated_at = ? WHERE id = ?`)
-            .run(JSON.stringify(activeMeta), Date.now(), active.id);
-          session.metadata = activeMeta;
+        if (!session.metadata) session.metadata = {};
+        if (!session.metadata.peerId) { session.metadata.peerId = userId; mutated = true; }
+        if (!session.metadata.peerName && metadata?.peerName) { session.metadata.peerName = metadata.peerName; mutated = true; }
+        if (metadata?.channelName && session.metadata.channelName !== metadata.channelName) { session.metadata.channelName = metadata.channelName; mutated = true; }
+      }
+      if (metadata?.channelName && chatType !== 'private') {
+        if (!session.metadata) session.metadata = {};
+        if (session.metadata.channelName !== metadata.channelName) {
+          session.metadata.channelName = metadata.channelName;
+          mutated = true;
         }
       }
-      // 补写 channelName（非私聊时也需要）
-      if (metadata?.channelName && chatType !== 'private') {
-        const activeMeta = active.metadata ? JSON.parse(active.metadata) : {};
-        if (activeMeta.channelName !== metadata.channelName) {
-          activeMeta.channelName = metadata.channelName;
-          this.db.prepare(`UPDATE sessions SET metadata = ?, updated_at = ? WHERE id = ?`)
-            .run(JSON.stringify(activeMeta), Date.now(), active.id);
-          session.metadata = activeMeta;
-        }
+      if (mutated) {
+        session.updatedAt = Date.now();
+        this.appendMeta(channel, channelId, session);
+        this.writeActive(channel, channelId, session);
       }
       return session;
     }
 
-    // 查找默认项目的主会话
-    const existing = this.db.prepare(`
-      SELECT * FROM sessions
-      WHERE channel = ? AND channel_id = ? AND project_path = ? AND thread_id = '' AND deleted_at IS NULL
-      ORDER BY updated_at DESC LIMIT 1
-    `).get(channel, channelId, defaultProjectPath) as any;
+    // Find existing session for default project path
+    const chatDir = this.resolveChatDir(channel, channelId);
+    const allSessions = this.findAllSessionsInChat(chatDir, false);
+    const existing = allSessions
+      .filter(s => s.projectPath === defaultProjectPath && !s.threadId)
+      .sort((a, b) => b.updatedAt - a.updatedAt)[0];
 
     if (existing) {
       const validSessionId = this.validateSessionFile(existing);
-      // 激活此会话
-      const existingMeta = existing.metadata ? JSON.parse(existing.metadata) : {};
-      existingMeta.isActive = true;
-
-      // chatType 自动修正（同 active 分支）
-      const shouldUpdateChatType = chatType !== undefined && existing.chat_type !== chatType;
-      if (shouldUpdateChatType) {
-        logger.info(`[SessionManager] Updating chatType for session ${existing.id}: ${existing.chat_type} -> ${chatType}`);
-        existing.chat_type = chatType;
-      }
-
-      // 补写 peerId/peerName
-      if (chatType === 'private' && userId && !existingMeta.peerId) {
-        existingMeta.peerId = userId;
-      }
-      if (chatType === 'private' && metadata?.peerName && !existingMeta.peerName) {
-        existingMeta.peerName = metadata.peerName;
-      }
-      if (shouldUpdateChatType) {
-        this.db.prepare(`UPDATE sessions SET metadata = ?, updated_at = ?, chat_type = ? WHERE id = ?`)
-          .run(JSON.stringify(existingMeta), Date.now(), chatType as string, existing.id);
-      } else {
-        this.db.prepare(`UPDATE sessions SET metadata = ?, updated_at = ? WHERE id = ?`)
-          .run(JSON.stringify(existingMeta), Date.now(), existing.id);
-      }
-      const session = { ...this.rowToSession(existing), agentSessionId: validSessionId, metadata: existingMeta };
+      const session: Session = { ...existing, agentSessionId: validSessionId };
       session.identity = this.resolveIdentity(channel, userId);
+
+      if (!session.metadata) session.metadata = {};
+      if (selfId && session.selfId !== selfId) {
+        session.selfId = selfId;
+      }
+      if (chatType && session.chatType !== chatType) {
+        logger.info(`[SessionManager] Updating chatType for session ${session.id}: ${session.chatType} -> ${chatType}`);
+        session.chatType = chatType;
+      }
+      if (chatType === 'private' && userId && !session.metadata.peerId) {
+        session.metadata.peerId = userId;
+      }
+      if (chatType === 'private' && metadata?.peerName && !session.metadata.peerName) {
+        session.metadata.peerName = metadata.peerName;
+      }
+      session.updatedAt = Date.now();
+      this.appendMeta(channel, channelId, session);
+      this.writeActive(channel, channelId, session);
       return session;
     }
 
-    // 创建新主会话
-    const sessionMetadata = { ...metadata, isActive: true };
+    // Create new session
+    const sessionMetadata: any = { ...(metadata || {}) };
+    if (!sessionMetadata.permissionMode) sessionMetadata.permissionMode = DEFAULT_PERMISSION_MODE;
+
     const session: Session = {
-      id: `${channel}-${channelId}-${Date.now()}`,
+      id: generateSessionId(),
       channel,
+      channelType: channelType || channel,
       channelId,
+      selfId,
       projectPath: defaultProjectPath,
       threadId: '',
       agentId: agentId || 'claude',
@@ -679,15 +473,12 @@ export class SessionManager {
       metadata: sessionMetadata,
       name: name || '默认会话',
       createdAt: Date.now(),
-      updatedAt: Date.now()
+      updatedAt: Date.now(),
     };
     session.identity = this.resolveIdentity(channel, userId);
-    // 写入默认权限模式（统一 bypass，只在首次创建时设置）
-    if (!sessionMetadata.permissionMode) {
-      sessionMetadata.permissionMode = DEFAULT_PERMISSION_MODE;
-    }
 
-    this.insertSession(session);
+    this.appendMeta(channel, channelId, session);
+    this.writeActive(channel, channelId, session);
     this.eventBus.publish({
       type: 'session:created',
       sessionId: session.id,
@@ -696,39 +487,29 @@ export class SessionManager {
       projectPath: defaultProjectPath,
       name: session.name,
       chatType: session.chatType,
-      timestamp: Date.now()
+      timestamp: Date.now(),
     });
     return session;
   }
 
   async updateSession(sessionId: string, updates: Partial<Pick<Session, 'chatType' | 'name' | 'metadata' | 'sessionMode'>> & { agentSessionId?: string | null }): Promise<void> {
-    const sets: string[] = [];
-    const values: any[] = [];
-    if (updates.chatType !== undefined) {
-      sets.push('chat_type = ?');
-      values.push(updates.chatType);
+    const found = this.findSessionFileById(sessionId);
+    if (!found) return;
+    const current = this.readMetaLatest(found.metaPath);
+    if (!current) return;
+
+    if (updates.chatType !== undefined) current.chatType = updates.chatType;
+    if (updates.name !== undefined) current.name = updates.name;
+    if (updates.sessionMode !== undefined) current.sessionMode = updates.sessionMode;
+    if (updates.metadata !== undefined) current.metadata = updates.metadata;
+    if ('agentSessionId' in updates) current.agentSessionId = updates.agentSessionId ?? undefined;
+    current.updatedAt = Date.now();
+
+    this.appendMeta(current.channel, current.channelId, current);
+    const active = this.readActive(current.channel, current.channelId);
+    if (active && active.id === sessionId) {
+      this.writeActive(current.channel, current.channelId, current);
     }
-    if (updates.name !== undefined) {
-      sets.push('name = ?');
-      values.push(updates.name);
-    }
-    if (updates.sessionMode !== undefined) {
-      sets.push('session_mode = ?');
-      values.push(updates.sessionMode);
-    }
-    if (updates.metadata !== undefined) {
-      sets.push('metadata = ?');
-      values.push(updates.metadata ? JSON.stringify(updates.metadata) : null);
-    }
-    if ('agentSessionId' in updates) {
-      sets.push('claude_session_id = ?');
-      values.push(updates.agentSessionId ?? null);
-    }
-    if (sets.length === 0) return;
-    sets.push('updated_at = ?');
-    values.push(Date.now());
-    values.push(sessionId);
-    this.db.prepare(`UPDATE sessions SET ${sets.join(', ')} WHERE id = ?`).run(...values);
   }
 
   private getOrCreateThreadSession(
@@ -738,41 +519,39 @@ export class SessionManager {
     defaultProjectPath: string,
     metadata?: any,
     name?: string,
-    agentId?: string
+    agentId?: string,
+    selfId?: string,
+    channelType?: string
   ): Session {
-    // 查找已有话题会话
-    const existing = this.db.prepare(`
-      SELECT * FROM sessions
-      WHERE channel = ? AND channel_id = ? AND thread_id = ? AND deleted_at IS NULL
-    `).get(channel, channelId, threadId) as any;
+    const chatDir = this.ensureResolvedChatDir(channel, channelId);
+    const threadIndex = readThreadIndex(chatDir);
+    const existingMetaId = threadIndex[threadId];
 
-    if (existing) {
-      const validSessionId = this.validateSessionFile(existing);
-      // 合并 metadata（如果提供）
-      if (metadata) {
-        const existingMeta = this.rowToSession(existing).metadata;
-        const merged = existingMeta ? { ...existingMeta, ...metadata } : metadata;
-        this.db.prepare(`UPDATE sessions SET metadata = ?, updated_at = ? WHERE id = ?`)
-          .run(JSON.stringify(merged), Date.now(), existing.id);
-        return { ...this.rowToSession(existing), agentSessionId: validSessionId, metadata: merged };
+    if (existingMetaId) {
+      const metaPath = path.join(chatDir, '_threads', `${existingMetaId}.jsonl`);
+      const existing = this.readMetaLatest(metaPath);
+      if (existing) {
+        const validSessionId = this.validateSessionFile(existing);
+        if (metadata) {
+          existing.metadata = { ...(existing.metadata || {}), ...metadata };
+          existing.updatedAt = Date.now();
+          this.appendMeta(channel, channelId, existing);
+        }
+        return { ...existing, agentSessionId: validSessionId };
       }
-      return { ...this.rowToSession(existing), agentSessionId: validSessionId };
     }
 
-    // 继承当前活跃主会话的项目路径和 chatType
-    const activeMain = this.db.prepare(`
-      SELECT project_path, chat_type FROM sessions
-      WHERE channel = ? AND channel_id = ? AND json_extract(metadata, '$.isActive') = true AND thread_id = ''
-    `).get(channel, channelId) as any;
+    // Inherit project path & chatType from active main session
+    const activeMain = this.readActive(channel, channelId);
+    const projectPath = (activeMain && !activeMain.threadId ? activeMain.projectPath : undefined) || defaultProjectPath;
+    const inheritedChatType = (activeMain && !activeMain.threadId ? activeMain.chatType : undefined) || 'private';
 
-    const projectPath = activeMain?.project_path || defaultProjectPath;
-
-    // 创建新话题会话
-    const inheritedChatType = activeMain?.chat_type || 'private';
     const session: Session = {
-      id: `${channel}-${channelId}-${Date.now()}`,
+      id: generateSessionId(),
       channel,
+      channelType: channelType || channel,
       channelId,
+      selfId,
       projectPath,
       threadId,
       agentId: agentId || 'claude',
@@ -781,10 +560,13 @@ export class SessionManager {
       metadata,
       name: name || '话题会话',
       createdAt: Date.now(),
-      updatedAt: Date.now()
+      updatedAt: Date.now(),
     };
 
-    this.insertSession(session);
+    this.appendMeta(channel, channelId, session);
+    threadIndex[threadId] = session.id;
+    writeThreadIndex(chatDir, threadIndex);
+
     this.eventBus.publish({
       type: 'session:created',
       sessionId: session.id,
@@ -792,7 +574,7 @@ export class SessionManager {
       channelId,
       projectPath,
       name: session.name,
-      timestamp: Date.now()
+      timestamp: Date.now(),
     });
     return session;
   }
@@ -800,45 +582,41 @@ export class SessionManager {
   async switchProject(channel: string, channelId: string, newProjectPath: string, currentAgentId?: string): Promise<Session> {
     const agentId = currentAgentId || 'claude';
     logger.info(`[SessionManager] switchProject: channel=${channel} channelId=${channelId} newPath=${newProjectPath} agent=${agentId}`);
-    // 1. 继承当前 chatType（在 deactivate 之前读取）
     const inheritedChatType = this.getActiveChatType(channel, channelId);
-    // 2. 取消当前活跃会话
-    this.deactivateAllMetadata(channel, channelId);
 
-    // 3. 查找目标项目 + 当前 agent 的会话
-    const target = this.db.prepare(`
-      SELECT * FROM sessions
-      WHERE channel = ? AND channel_id = ? AND project_path = ? AND agent_id = ? AND thread_id = '' AND deleted_at IS NULL
-      ORDER BY updated_at DESC LIMIT 1
-    `).get(channel, channelId, newProjectPath, agentId) as any;
+    const chatDir = this.ensureResolvedChatDir(channel, channelId);
+    const allSessions = this.findAllSessionsInChat(chatDir, false);
+    const target = allSessions
+      .filter(s => s.projectPath === newProjectPath && (s.agentId || 'claude') === agentId && !s.threadId)
+      .sort((a, b) => b.updatedAt - a.updatedAt)[0];
 
     if (target) {
       const validSessionId = this.validateSessionFile(target);
-      // 激活目标会话
-      const metadata = target.metadata ? JSON.parse(target.metadata) : {};
-      metadata.isActive = true;
-      this.db.prepare(`UPDATE sessions SET metadata = ?, updated_at = ? WHERE id = ?`)
-        .run(JSON.stringify(metadata), Date.now(), target.id);
-      return { ...this.rowToSession(target), agentSessionId: validSessionId, metadata };
+      target.agentSessionId = validSessionId;
+      target.updatedAt = Date.now();
+      this.appendMeta(channel, channelId, target);
+      this.writeActive(channel, channelId, target);
+      return target;
     }
 
-    // 4. 创建新会话
     const session: Session = {
-      id: `${channel}-${channelId}-${Date.now()}`,
+      id: generateSessionId(),
       channel,
+      channelType: this.inferChannelType(channel, channelId),
       channelId,
+      selfId: this.inferSelfId(channel, channelId),
       projectPath: newProjectPath,
       threadId: '',
       agentId,
       chatType: inheritedChatType,
       sessionMode: this.resolveDefaultSessionMode(channel, inheritedChatType),
-      metadata: { isActive: true },
+      metadata: {},
       name: '默认会话',
       createdAt: Date.now(),
-      updatedAt: Date.now()
+      updatedAt: Date.now(),
     };
-
-    this.insertSession(session);
+    this.appendMeta(channel, channelId, session);
+    this.writeActive(channel, channelId, session);
     this.eventBus.publish({
       type: 'session:created',
       sessionId: session.id,
@@ -846,71 +624,70 @@ export class SessionManager {
       channelId,
       projectPath: newProjectPath,
       name: session.name,
-      timestamp: Date.now()
+      timestamp: Date.now(),
     });
-
     return session;
   }
 
   async updateAgentSessionId(channel: string, channelId: string, agentSessionId: string): Promise<void> {
-    // 只更新当前活跃会话的 Agent Session ID
-    this.db.prepare(`
-      UPDATE sessions
-      SET agent_session_id = ?, updated_at = ?
-      WHERE channel = ? AND channel_id = ? AND json_extract(metadata, '$.isActive') = true
-    `).run(agentSessionId, Date.now(), channel, channelId);
+    const active = this.readActive(channel, channelId);
+    if (!active) return;
+    active.agentSessionId = agentSessionId;
+    active.updatedAt = Date.now();
+    this.appendMeta(channel, channelId, active);
+    this.writeActive(channel, channelId, active);
   }
 
   async updateAgentSessionIdBySessionId(sessionId: string, agentSessionId: string): Promise<void> {
-    // 根据 sessionId 直接更新
     logger.info(`[SessionManager] Updating agent_session_id: sessionId=${sessionId}, agentSessionId=${agentSessionId}`);
-    this.db.prepare(`
-      UPDATE sessions
-      SET agent_session_id = ?, updated_at = ?
-      WHERE id = ?
-    `).run(agentSessionId, Date.now(), sessionId);
+    const found = this.findSessionFileById(sessionId);
+    if (!found) return;
+    const current = this.readMetaLatest(found.metaPath);
+    if (!current) return;
+    current.agentSessionId = agentSessionId;
+    current.updatedAt = Date.now();
+    this.appendMeta(current.channel, current.channelId, current);
+    const active = this.readActive(current.channel, current.channelId);
+    if (active && active.id === sessionId) {
+      this.writeActive(current.channel, current.channelId, current);
+    }
   }
 
   async switchAgent(channel: string, channelId: string, projectPath: string, newAgentId: string): Promise<Session> {
-    // 1. 继承当前 chatType（在 deactivate 之前读取）
     const inheritedChatType = this.getActiveChatType(channel, channelId);
-    // 2. 取消当前活跃会话
-    this.deactivateAllMetadata(channel, channelId);
-
-    // 3. 查找目标 agent 在当前项目下的会话
-    const target = this.db.prepare(`
-      SELECT * FROM sessions
-      WHERE channel = ? AND channel_id = ? AND project_path = ? AND agent_id = ? AND thread_id = '' AND deleted_at IS NULL
-      ORDER BY updated_at DESC LIMIT 1
-    `).get(channel, channelId, projectPath, newAgentId) as any;
+    const chatDir = this.ensureResolvedChatDir(channel, channelId);
+    const allSessions = this.findAllSessionsInChat(chatDir, false);
+    const target = allSessions
+      .filter(s => s.projectPath === projectPath && (s.agentId || 'claude') === newAgentId && !s.threadId)
+      .sort((a, b) => b.updatedAt - a.updatedAt)[0];
 
     if (target) {
       const validSessionId = this.validateSessionFile(target);
-      // 激活目标会话
-      const metadata = target.metadata ? JSON.parse(target.metadata) : {};
-      metadata.isActive = true;
-      this.db.prepare(`UPDATE sessions SET metadata = ?, updated_at = ? WHERE id = ?`)
-        .run(JSON.stringify(metadata), Date.now(), target.id);
-      return { ...this.rowToSession(target), agentSessionId: validSessionId, metadata };
+      target.agentSessionId = validSessionId;
+      target.updatedAt = Date.now();
+      this.appendMeta(channel, channelId, target);
+      this.writeActive(channel, channelId, target);
+      return target;
     }
 
-    // 4. 创建新会话（与 switchProject 保持一致）
     const session: Session = {
-      id: `${channel}-${channelId}-${Date.now()}`,
+      id: generateSessionId(),
       channel,
+      channelType: this.inferChannelType(channel, channelId),
       channelId,
+      selfId: this.inferSelfId(channel, channelId),
       projectPath,
       threadId: '',
       agentId: newAgentId,
       chatType: inheritedChatType,
       sessionMode: this.resolveDefaultSessionMode(channel, inheritedChatType),
-      metadata: { isActive: true },
+      metadata: {},
       name: '默认会话',
       createdAt: Date.now(),
-      updatedAt: Date.now()
+      updatedAt: Date.now(),
     };
-
-    this.insertSession(session);
+    this.appendMeta(channel, channelId, session);
+    this.writeActive(channel, channelId, session);
     this.eventBus.publish({
       type: 'session:created',
       sessionId: session.id,
@@ -918,166 +695,205 @@ export class SessionManager {
       channelId,
       projectPath,
       name: session.name,
-      timestamp: Date.now()
+      timestamp: Date.now(),
     });
-
     return session;
   }
 
   async clearActiveSession(channel: string, channelId: string): Promise<void> {
-    // 清除当前活跃会话的 Agent Session ID
-    this.db.prepare(`
-      UPDATE sessions
-      SET agent_session_id = NULL, updated_at = ?
-      WHERE channel = ? AND channel_id = ? AND json_extract(metadata, '$.isActive') = true
-    `).run(Date.now(), channel, channelId);
+    const active = this.readActive(channel, channelId);
+    if (!active) return;
+    active.agentSessionId = undefined;
+    active.updatedAt = Date.now();
+    this.appendMeta(channel, channelId, active);
+    this.writeActive(channel, channelId, active);
   }
 
-  /** 查找 owner 在目标通道的私聊 channelId（用于跨通道文件投递） */
   getOwnerChatId(targetChannel: string, ownerPeerId: string): string | undefined {
-    const row = this.db.prepare(`
-      SELECT channel_id FROM sessions
-      WHERE channel = ? AND chat_type = 'private'
-        AND json_extract(metadata, '$.peerId') = ?
-        AND deleted_at IS NULL
-      ORDER BY updated_at DESC LIMIT 1
-    `).get(targetChannel, ownerPeerId) as any;
-    return row?.channel_id;
+    const chatDirs = scanChatDirs(this.sessionsDir);
+    let bestMatch: { channelId: string; updatedAt: number } | undefined;
+    for (const { channelId, dirPath } of chatDirs) {
+      // Check active.json first
+      const active = readJsonFile<SessionFile>(path.join(dirPath, 'active.json'));
+      // 按 channel 实例名匹配（active.json 里有；缺失就跳过这个 chat）
+      if (!active || active.channel !== targetChannel) continue;
+      const candidates: SessionFile[] = [active];
+      // Also scan meta files
+      for (const metaFile of scanMetaFiles(dirPath)) {
+        const file = readLastJsonlLine<SessionFile>(path.join(dirPath, metaFile));
+        if (file) candidates.push(file);
+      }
+      for (const cand of candidates) {
+        if (cand.chatType !== 'private') continue;
+        if (cand.metadata?.peerId !== ownerPeerId) continue;
+        if (!bestMatch || cand.updatedAt > bestMatch.updatedAt) {
+          bestMatch = { channelId, updatedAt: cand.updatedAt };
+        }
+      }
+    }
+    return bestMatch?.channelId;
   }
 
   async getSessionById(sessionId: string): Promise<Session | undefined> {
-    const row = this.db.prepare('SELECT * FROM sessions WHERE id = ? AND deleted_at IS NULL').get(sessionId) as any;
-    if (!row) return undefined;
-    return this.rowToSession(row);
+    const found = this.findSessionFileById(sessionId);
+    if (!found) return undefined;
+    return this.readMetaLatest(found.metaPath);
   }
 
   async getActiveSession(channel: string, channelId: string): Promise<Session | undefined> {
-    const row = this.db.prepare(`
-      SELECT * FROM sessions
-      WHERE channel = ? AND channel_id = ? AND json_extract(metadata, '$.isActive') = true AND deleted_at IS NULL
-    `).get(channel, channelId) as any;
-
-    if (!row) return undefined;
-    return this.rowToSession(row);
+    return this.readActive(channel, channelId);
   }
 
-  /**
-   * 查询话题会话（不创建）
-   */
   async getThreadSession(channel: string, channelId: string, threadId: string): Promise<Session | undefined> {
-    const row = this.db.prepare(`
-      SELECT * FROM sessions
-      WHERE channel = ? AND channel_id = ? AND thread_id = ? AND deleted_at IS NULL
-    `).get(channel, channelId, threadId) as any;
-
-    if (!row) return undefined;
-    const validSessionId = this.validateSessionFile(row);
-    return { ...this.rowToSession(row), agentSessionId: validSessionId };
+    const chatDir = this.resolveChatDir(channel, channelId);
+    const threadIndex = readThreadIndex(chatDir);
+    const metaId = threadIndex[threadId];
+    if (!metaId) return undefined;
+    const metaPath = path.join(chatDir, '_threads', `${metaId}.jsonl`);
+    const session = this.readMetaLatest(metaPath);
+    if (!session) return undefined;
+    const validSessionId = this.validateSessionFile(session);
+    return { ...session, agentSessionId: validSessionId };
   }
 
   async listSessions(channel: string, channelId: string): Promise<Session[]> {
-    // 列出该聊天的所有会话
-    const rows = this.db.prepare(`
-      SELECT * FROM sessions
-      WHERE channel = ? AND channel_id = ? AND deleted_at IS NULL
-      ORDER BY updated_at DESC
-    `).all(channel, channelId) as any[];
-
-    return rows.map(row => this.rowToSession(row));
+    const chatDir = this.resolveChatDir(channel, channelId);
+    const sessions = this.findAllSessionsInChat(chatDir, true);
+    return sessions.sort((a, b) => b.updatedAt - a.updatedAt);
   }
 
   async getSessionByProjectPath(channel: string, channelId: string, projectPath: string): Promise<Session | undefined> {
-    const row = this.db.prepare(`
-      SELECT * FROM sessions
-      WHERE channel = ? AND channel_id = ? AND project_path = ? AND deleted_at IS NULL
-      ORDER BY processing_state IS NOT NULL DESC, updated_at DESC
-      LIMIT 1
-    `).get(channel, channelId, projectPath) as any;
-
-    if (!row) return undefined;
-    return this.rowToSession(row);
+    const chatDir = this.resolveChatDir(channel, channelId);
+    const sessions = this.findAllSessionsInChat(chatDir, false);
+    const matched = sessions.filter(s => s.projectPath === projectPath);
+    if (matched.length === 0) return undefined;
+    matched.sort((a, b) => {
+      const aProc = a.processingState ? 1 : 0;
+      const bProc = b.processingState ? 1 : 0;
+      if (aProc !== bProc) return bProc - aProc;
+      return b.updatedAt - a.updatedAt;
+    });
+    return matched[0];
   }
 
   async getSessionByName(channel: string, channelId: string, name: string): Promise<Session | undefined> {
-    const row = this.db.prepare(`
-      SELECT * FROM sessions
-      WHERE channel = ? AND channel_id = ? AND name = ? AND deleted_at IS NULL
-    `).get(channel, channelId, name) as any;
-
-    if (!row) return undefined;
-    return this.rowToSession(row);
+    const chatDir = this.resolveChatDir(channel, channelId);
+    const sessions = this.findAllSessionsInChat(chatDir, true);
+    return sessions.find(s => s.name === name);
   }
 
   async switchToSession(channel: string, channelId: string, targetSessionId: string): Promise<Session | null> {
-    // 验证目标会话存在
-    const target = this.db.prepare(`
-      SELECT * FROM sessions WHERE id = ? AND channel = ? AND channel_id = ? AND deleted_at IS NULL
-    `).get(targetSessionId, channel, channelId) as any;
-
+    const chatDir = this.resolveChatDir(channel, channelId);
+    const sessions = this.findAllSessionsInChat(chatDir, true);
+    const target = sessions.find(s => s.id === targetSessionId);
     if (!target) return null;
 
-    // 取消当前活跃会话
-    this.deactivateAllMetadata(channel, channelId);
-
-    // 激活目标会话
-    const metadata = target.metadata ? JSON.parse(target.metadata) : {};
-    metadata.isActive = true;
-    this.db.prepare(`UPDATE sessions SET metadata = ?, updated_at = ? WHERE id = ?`)
-      .run(JSON.stringify(metadata), Date.now(), targetSessionId);
-
-    return { ...this.rowToSession(target), metadata, updatedAt: Date.now() };
+    target.updatedAt = Date.now();
+    this.appendMeta(channel, channelId, target);
+    this.writeActive(channel, channelId, target);
+    return target;
   }
 
   updateMetadata(sessionId: string, metadata: Record<string, any>): void {
-    this.db.prepare(`UPDATE sessions SET metadata = ?, updated_at = ? WHERE id = ?`)
-      .run(JSON.stringify(metadata), Date.now(), sessionId);
+    const found = this.findSessionFileById(sessionId);
+    if (!found) return;
+    const current = this.readMetaLatest(found.metaPath);
+    if (!current) return;
+    current.metadata = metadata;
+    current.updatedAt = Date.now();
+    this.appendMeta(current.channel, current.channelId, current);
+    const active = this.readActive(current.channel, current.channelId);
+    if (active && active.id === sessionId) {
+      this.writeActive(current.channel, current.channelId, current);
+    }
   }
 
   async renameSession(sessionId: string, newName: string): Promise<boolean> {
-    const result = this.db.prepare(`
-      UPDATE sessions SET name = ?, updated_at = ? WHERE id = ?
-    `).run(newName, Date.now(), sessionId);
-
-    return result.changes > 0;
+    const found = this.findSessionFileById(sessionId);
+    if (!found) return false;
+    const current = this.readMetaLatest(found.metaPath);
+    if (!current) return false;
+    current.name = newName;
+    current.updatedAt = Date.now();
+    this.appendMeta(current.channel, current.channelId, current);
+    const active = this.readActive(current.channel, current.channelId);
+    if (active && active.id === sessionId) {
+      this.writeActive(current.channel, current.channelId, current);
+    }
+    return true;
   }
 
   async unbindSession(sessionId: string): Promise<boolean> {
-    const result = this.db.prepare(`
-      DELETE FROM sessions WHERE id = ?
-    `).run(sessionId);
-
-    return result.changes > 0;
+    const found = this.findSessionFileById(sessionId);
+    if (!found) return false;
+    const trashDir = path.join(found.chatDir, '_trash');
+    fs.mkdirSync(trashDir, { recursive: true });
+    const trashPath = path.join(trashDir, path.basename(found.metaPath));
+    try { fs.renameSync(found.metaPath, trashPath); } catch (e: any) { if (e.code !== 'ENOENT') throw e; }
+    // If thread session, remove from thread-index
+    if (found.isThread) {
+      const threadIndex = readThreadIndex(found.chatDir);
+      for (const [tid, mid] of Object.entries(threadIndex)) {
+        if (mid === sessionId) { delete threadIndex[tid]; break; }
+      }
+      writeThreadIndex(found.chatDir, threadIndex);
+    }
+    // Clear active.json if it pointed to this session
+    const activePath = path.join(found.chatDir, 'active.json');
+    const active = readJsonFile<SessionFile>(activePath);
+    if (active && active.id === sessionId) {
+      try { fs.unlinkSync(activePath); } catch (e: any) { if (e.code !== 'ENOENT') throw e; }
+    }
+    return true;
   }
 
   async softDeleteSession(channelId: string): Promise<void> {
-    this.db.prepare(`
-      UPDATE sessions SET deleted_at = ?, updated_at = ? WHERE channel_id = ? AND deleted_at IS NULL
-    `).run(Date.now(), Date.now(), channelId);
+    const chatDirs = scanChatDirs(this.sessionsDir);
+    for (const { channelId: cid, dirPath } of chatDirs) {
+      if (cid !== channelId) continue;
+      const trashDir = path.join(dirPath, '_trash');
+      fs.mkdirSync(trashDir, { recursive: true });
+      for (const metaFile of scanMetaFiles(dirPath)) {
+        const src = path.join(dirPath, metaFile);
+        const dst = path.join(trashDir, metaFile);
+        try { fs.renameSync(src, dst); } catch (e: any) { if (e.code !== 'ENOENT') throw e; }
+      }
+      const threadsDir = path.join(dirPath, '_threads');
+      for (const metaFile of scanMetaFiles(threadsDir)) {
+        const src = path.join(threadsDir, metaFile);
+        const dst = path.join(trashDir, metaFile);
+        try { fs.renameSync(src, dst); } catch (e: any) { if (e.code !== 'ENOENT') throw e; }
+      }
+      // Clear active.json
+      const activePath = path.join(dirPath, 'active.json');
+      try { fs.unlinkSync(activePath); } catch (e: any) { if (e.code !== 'ENOENT') throw e; }
+      // Clear thread index
+      try { fs.unlinkSync(path.join(threadsDir, 'thread-index.json')); } catch (e: any) { if (e.code !== 'ENOENT') throw e; }
+    }
   }
 
   async createNewSession(channel: string, channelId: string, projectPath: string, name?: string, agentId?: string): Promise<Session> {
-    // 继承当前 chatType（在 deactivate 之前读取）
     const inheritedChatType = this.getActiveChatType(channel, channelId);
-    // 取消当前活跃会话
-    this.deactivateAllMetadata(channel, channelId);
 
-    // 创建新会话
     const session: Session = {
-      id: `${channel}-${channelId}-${Date.now()}`,
+      id: generateSessionId(),
       channel,
+      channelType: this.inferChannelType(channel, channelId),
       channelId,
+      selfId: this.inferSelfId(channel, channelId),
       projectPath,
       threadId: '',
       agentId: agentId || 'claude',
       chatType: inheritedChatType,
       sessionMode: this.resolveDefaultSessionMode(channel, inheritedChatType),
-      metadata: { isActive: true },
+      metadata: {},
       name: name || '默认会话',
       createdAt: Date.now(),
-      updatedAt: Date.now()
+      updatedAt: Date.now(),
     };
 
-    this.insertSession(session);
+    this.appendMeta(channel, channelId, session);
+    this.writeActive(channel, channelId, session);
     this.eventBus.publish({
       type: 'session:created',
       sessionId: session.id,
@@ -1085,40 +901,36 @@ export class SessionManager {
       channelId,
       projectPath,
       name: session.name,
-      timestamp: Date.now()
+      timestamp: Date.now(),
     });
-
     return session;
   }
 
-  /**
-   * 基于现有会话创建分支会话
-   */
   async createForkedSession(
     sourceSession: Session,
     forkedAgentSessionId: string,
     name?: string
   ): Promise<Session> {
-    // 取消当前活跃会话
-    this.deactivateAllMetadata(sourceSession.channel, sourceSession.channelId);
-
     const session: Session = {
-      id: `${sourceSession.channel}-${sourceSession.channelId}-${Date.now()}`,
+      id: generateSessionId(),
       channel: sourceSession.channel,
+      channelType: sourceSession.channelType || sourceSession.channel,
       channelId: sourceSession.channelId,
+      selfId: sourceSession.selfId,
       projectPath: sourceSession.projectPath,
       threadId: sourceSession.threadId || '',
       agentId: sourceSession.agentId || 'claude',
       chatType: sourceSession.chatType || 'private',
       sessionMode: sourceSession.sessionMode || 'interactive',
       agentSessionId: forkedAgentSessionId,
-      metadata: { isActive: true },
+      metadata: {},
       name: name || `${sourceSession.name || '会话'}-分支`,
       createdAt: Date.now(),
-      updatedAt: Date.now()
+      updatedAt: Date.now(),
     };
 
-    this.insertSession(session);
+    this.appendMeta(sourceSession.channel, sourceSession.channelId, session);
+    this.writeActive(sourceSession.channel, sourceSession.channelId, session);
     this.eventBus.publish({
       type: 'session:created',
       sessionId: session.id,
@@ -1126,9 +938,8 @@ export class SessionManager {
       channelId: sourceSession.channelId,
       projectPath: sourceSession.projectPath,
       name: session.name,
-      timestamp: Date.now()
+      timestamp: Date.now(),
     });
-
     return session;
   }
 
@@ -1156,18 +967,12 @@ export class SessionManager {
     return adapter.readLastUserMessage(projectPath, agentSessionId);
   }
 
-  /**
-   * 获取会话文件信息（回合数 + 标题）
-   */
   getSessionFileInfo(projectPath: string, agentSessionId: string, agentId: string): SessionFileInfo {
     const adapter = this.getFileAdapter(agentId);
     if (!adapter) return { turns: 0 };
     return adapter.getFileInfo(projectPath, agentSessionId);
   }
 
-  /**
-   * 列出 SDK 侧的会话列表（用于名称同步）
-   */
   async listSdkSessions(projectPath: string, agentId: string): Promise<SdkSessionEntry[]> {
     const adapter = this.getFileAdapter(agentId);
     if (!adapter?.listSdkSessions) return [];
@@ -1175,47 +980,42 @@ export class SessionManager {
   }
 
   async getSessionByUuidPrefix(channel: string, channelId: string, uuidPrefix: string): Promise<Session | undefined> {
-    const rows = this.db.prepare(`
-      SELECT * FROM sessions
-      WHERE channel = ? AND channel_id = ? AND agent_session_id LIKE ? AND deleted_at IS NULL
-    `).all(channel, channelId, `${uuidPrefix}%`) as any[];
-
-    if (rows.length === 0) return undefined;
-    if (rows.length > 1) {
+    const chatDir = this.resolveChatDir(channel, channelId);
+    const sessions = this.findAllSessionsInChat(chatDir, true);
+    const matched = sessions.filter(s => s.agentSessionId && s.agentSessionId.startsWith(uuidPrefix));
+    if (matched.length === 0) return undefined;
+    if (matched.length > 1) {
       logger.warn(`Multiple sessions found with UUID prefix: ${uuidPrefix}`);
     }
-
-    return this.rowToSession(rows[0]);
+    return matched[0];
   }
 
   async importCliSession(channel: string, channelId: string, projectPath: string, agentSessionId: string, agentId: string = 'claude'): Promise<Session> {
-    // 继承当前 chatType（在 deactivate 之前读取）
     const inheritedChatType = this.getActiveChatType(channel, channelId);
-    // 取消当前活跃会话
-    this.deactivateAllMetadata(channel, channelId);
 
-    // 从 CLI 会话文件读取标题
     const fileInfo = this.getSessionFileInfo(projectPath, agentSessionId, agentId);
     const name = fileInfo.title || `CLI会话-${new Date().toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}`;
 
-    // 创建新会话记录
     const session: Session = {
-      id: `${channel}-${channelId}-${Date.now()}`,
+      id: generateSessionId(),
       channel,
+      channelType: this.inferChannelType(channel, channelId),
       channelId,
+      selfId: this.inferSelfId(channel, channelId),
       projectPath,
       threadId: '',
       agentId,
       chatType: inheritedChatType,
       sessionMode: this.resolveDefaultSessionMode(channel, inheritedChatType),
       agentSessionId,
-      metadata: { isActive: true },
+      metadata: {},
       name,
       createdAt: Date.now(),
-      updatedAt: Date.now()
+      updatedAt: Date.now(),
     };
 
-    this.insertSession(session);
+    this.appendMeta(channel, channelId, session);
+    this.writeActive(channel, channelId, session);
     this.eventBus.publish({
       type: 'session:created',
       sessionId: session.id,
@@ -1223,17 +1023,27 @@ export class SessionManager {
       channelId,
       projectPath,
       name,
-      timestamp: Date.now()
+      timestamp: Date.now(),
     });
-
     return session;
   }
 
-  // ==================== 健康状态管理 ====================
+  // ─── Health status ───
 
-  /**
-   * 获取会话健康状态
-   */
+  private healthFilePath(channel: string, channelId: string): string {
+    return path.join(this.ensureResolvedChatDir(channel, channelId), 'health.jsonl');
+  }
+
+  /** Find the chat dir containing a given session id */
+  private chatDirForSession(sessionId: string): { channel: string; channelId: string; dirPath: string } | undefined {
+    const found = this.findSessionFileById(sessionId);
+    if (!found) return undefined;
+    // 从 meta jsonl 最后一行读 channel 实例名 + channelId
+    const meta = readLastJsonlLine<SessionFile>(found.metaPath);
+    if (!meta) return undefined;
+    return { channel: meta.channel, channelId: meta.channelId, dirPath: found.chatDir };
+  }
+
   async getHealthStatus(sessionId: string): Promise<{
     consecutiveErrors: number;
     lastError?: string;
@@ -1241,113 +1051,97 @@ export class SessionManager {
     safeMode: boolean;
     lastSuccessTime: number;
   }> {
-    const row = this.db.prepare(`
-      SELECT * FROM session_health WHERE session_id = ?
-    `).get(sessionId) as any;
-
-    if (!row) {
-      // 首次查询，创建默认记录
-      const now = Date.now();
-      this.db.prepare(`
-        INSERT INTO session_health (session_id, consecutive_errors, safe_mode, last_success_time, created_at, updated_at)
-        VALUES (?, 0, 0, ?, ?, ?)
-      `).run(sessionId, now, now, now);
-
-      return {
-        consecutiveErrors: 0,
-        safeMode: false,
-        lastSuccessTime: now
-      };
+    const chatInfo = this.chatDirForSession(sessionId);
+    if (!chatInfo) {
+      return { consecutiveErrors: 0, safeMode: false, lastSuccessTime: Date.now() };
     }
+    const healthPath = path.join(chatInfo.dirPath, 'health.jsonl');
+    const records = readAllJsonlLines<HealthRecord>(healthPath).filter(r => r.sessionId === sessionId);
+
+    let consecutiveErrors = 0;
+    let lastError: string | undefined;
+    let lastErrorType: string | undefined;
+    let lastSuccessTime = 0;
+
+    // Walk from tail to count consecutive errors
+    for (let i = records.length - 1; i >= 0; i--) {
+      const rec = records[i];
+      if (rec.type === 'error') {
+        consecutiveErrors++;
+        if (lastError === undefined) {
+          lastError = rec.error;
+          lastErrorType = rec.errorType;
+        }
+      } else {
+        // success or reset breaks the streak
+        if (rec.type === 'success' && rec.at > lastSuccessTime) lastSuccessTime = rec.at;
+        break;
+      }
+    }
+    // Find most recent success time across all records
+    if (lastSuccessTime === 0) {
+      for (let i = records.length - 1; i >= 0; i--) {
+        if (records[i].type === 'success' && records[i].at > lastSuccessTime) {
+          lastSuccessTime = records[i].at;
+          break;
+        }
+      }
+    }
+    if (lastSuccessTime === 0) lastSuccessTime = Date.now();
 
     return {
-      consecutiveErrors: row.consecutive_errors,
-      lastError: row.last_error,
-      lastErrorType: row.last_error_type,
-      safeMode: row.safe_mode === 1,
-      lastSuccessTime: row.last_success_time
+      consecutiveErrors,
+      lastError,
+      lastErrorType,
+      safeMode: false,
+      lastSuccessTime,
     };
   }
 
-  /** 当前处于安全模式的会话数 */
-  getSafeModeSessionCount(): number {
-    const row = this.db.prepare(`SELECT COUNT(*) as count FROM session_health WHERE safe_mode = 1`).get() as any;
-    return row?.count ?? 0;
-  }
-
-  /**
-   * 记录成功响应（重置错误计数）
-   */
   async recordSuccess(sessionId: string): Promise<void> {
+    const chatInfo = this.chatDirForSession(sessionId);
+    if (!chatInfo) return;
     const now = Date.now();
-    this.db.prepare(`
-      INSERT INTO session_health (session_id, consecutive_errors, safe_mode, last_success_time, created_at, updated_at)
-      VALUES (?, 0, 0, ?, ?, ?)
-      ON CONFLICT(session_id) DO UPDATE SET
-        consecutive_errors = 0,
-        last_error = NULL,
-        last_error_type = NULL,
-        last_success_time = ?,
-        updated_at = ?
-    `).run(sessionId, now, now, now, now, now);
+    const record: HealthRecord = {
+      type: 'success',
+      sessionId,
+      at: now,
+      atStr: formatTimestamp(now),
+    };
+    appendJsonl(path.join(chatInfo.dirPath, 'health.jsonl'), record);
   }
 
-  /**
-   * 记录错误（增加计数）
-   */
   async recordError(sessionId: string, errorType: string, errorMessage: string): Promise<number> {
+    const chatInfo = this.chatDirForSession(sessionId);
+    if (!chatInfo) return 0;
     const now = Date.now();
-    const health = await this.getHealthStatus(sessionId);
-    const newCount = health.consecutiveErrors + 1;
-
-    this.db.prepare(`
-      INSERT INTO session_health (session_id, consecutive_errors, last_error, last_error_type, safe_mode, last_success_time, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(session_id) DO UPDATE SET
-        consecutive_errors = consecutive_errors + 1,
-        last_error = ?,
-        last_error_type = ?,
-        updated_at = ?
-    `).run(sessionId, newCount, errorMessage, errorType, health.safeMode ? 1 : 0, health.lastSuccessTime, now, now, errorMessage, errorType, now);
-
-    return newCount;
+    const record: HealthRecord = {
+      type: 'error',
+      sessionId,
+      errorType,
+      error: errorMessage,
+      at: now,
+      atStr: formatTimestamp(now),
+    };
+    appendJsonl(path.join(chatInfo.dirPath, 'health.jsonl'), record);
+    const status = await this.getHealthStatus(sessionId);
+    return status.consecutiveErrors;
   }
 
-  /**
-   * 设置安全模式
-   */
-  async setSafeMode(sessionId: string, enabled: boolean): Promise<void> {
-    const now = Date.now();
-    const health = await this.getHealthStatus(sessionId);
-
-    this.db.prepare(`
-      INSERT INTO session_health (session_id, consecutive_errors, safe_mode, last_success_time, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-      ON CONFLICT(session_id) DO UPDATE SET
-        safe_mode = ?,
-        updated_at = ?
-    `).run(sessionId, health.consecutiveErrors, enabled ? 1 : 0, health.lastSuccessTime, now, now, enabled ? 1 : 0, now);
-  }
-
-  /**
-   * 重置健康状态（用于修复后）
-   */
   async resetHealthStatus(sessionId: string): Promise<void> {
+    const chatInfo = this.chatDirForSession(sessionId);
+    if (!chatInfo) return;
     const now = Date.now();
-    this.db.prepare(`
-      INSERT INTO session_health (session_id, consecutive_errors, safe_mode, last_success_time, created_at, updated_at)
-      VALUES (?, 0, 0, ?, ?, ?)
-      ON CONFLICT(session_id) DO UPDATE SET
-        consecutive_errors = 0,
-        last_error = NULL,
-        last_error_type = NULL,
-        safe_mode = 0,
-        updated_at = ?
-    `).run(sessionId, now, now, now, now);
+    const record: HealthRecord = {
+      type: 'reset',
+      sessionId,
+      at: now,
+      atStr: formatTimestamp(now),
+    };
+    appendJsonl(path.join(chatInfo.dirPath, 'health.jsonl'), record);
   }
 
   close(): void {
     for (const adapter of this.fileAdapters.values()) adapter.close?.();
-    this.db.close();
   }
 }

@@ -5,10 +5,13 @@ import path from 'path';
 import os from 'os';
 import { logger, localTimestamp } from '../utils/logger.js';
 import type { ChannelPlugin, ChannelInstance } from '../core/channel-loader.js';
-import type { Config, ReplyContext, AunChannelConfig } from '../types.js';
+import type { Config, ReplyContext, AunChannelConfig, AidConnectionState, AidStatus } from '../types.js';
 import { normalizeChannelInstances, getChannelShowActivities } from '../config.js';
-import { resolvePaths } from '../paths.js';
+import { resolvePaths, getPackageRoot } from '../paths.js';
 import { saveToUploads, sanitizeFileName } from '../utils/media-cache.js';
+import { appendAidEvent } from '../utils/instance-registry.js';
+import { getProcessStartTime } from '../utils/process-introspect.js';
+import * as outbox from '../utils/outbox.js';
 
 function guessMime(filename: string): string {
   const ext = path.extname(filename).toLowerCase();
@@ -30,6 +33,46 @@ function formatSize(bytes: number): string {
   return `${(bytes / 1048576).toFixed(1)} MB`;
 }
 
+/**
+ * 构造 connect extra_info：自描述本进程身份。
+ *
+ * 用途：另一个进程踢掉本连接时，本进程会从 SDK 'gateway.disconnect' 事件的
+ * detail.new_extra_info 里看到对方的 extra_info；同时 detail.self_extra_info
+ * 是本进程当时连接时上报的内容。把双方信息打到日志便于诊断"谁踢了谁"。
+ *
+ * 字段需保持稳定（被踢方靠它分辨对方身份）。
+ */
+function buildConnectExtraInfo(opts: { aid: string; agentName?: string; channelName?: string }): Record<string, unknown> {
+  const startedAt = getProcessStartTime(process.pid) ?? Date.now();
+  return {
+    app: 'evolclaw',
+    version: getEvolclawVersion(),
+    pid: process.pid,
+    started_at: startedAt,
+    started_at_iso: new Date(startedAt).toISOString(),
+    hostname: os.hostname(),
+    platform: process.platform,
+    node_version: process.version,
+    evolclaw_home: process.env.EVOLCLAW_HOME || '',
+    launched_by: process.env.EVOLCLAW_LAUNCHED_BY || '',
+    aid: opts.aid,
+    agent_name: opts.agentName ?? '',
+    channel_name: opts.channelName ?? '',
+  };
+}
+
+let _cachedVersion: string | null = null;
+function getEvolclawVersion(): string {
+  if (_cachedVersion !== null) return _cachedVersion;
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(getPackageRoot(), 'package.json'), 'utf-8'));
+    _cachedVersion = String(pkg.version ?? '');
+  } catch {
+    _cachedVersion = '';
+  }
+  return _cachedVersion;
+}
+
 export interface AUNConfig {
   aid: string;
   keystorePath?: string;
@@ -40,12 +83,17 @@ export interface AUNConfig {
   aunTrace?: boolean;     // 启用数据追踪日志
   aunSdkLog?: boolean;    // 启用 AUN SDK 内部日志（写入 ~/.aun/logs/ts-sdk-YYYYMMDD.log）
   owner?: string;         // Owner AID，用于发送欢迎消息
+  agentName?: string;     // EvolAgent 名（用于 status 表格识别归属，默认 '[default]'）
+  channelName?: string;   // channel 实例名（用于日志/状态聚合）
 }
 
 export interface AUNMessageHandler {
   (options: {
     channelId: string;
+    channelType?: string;
     content: string;
+    selfId?: string;
+    groupId?: string;
     chatType: 'private' | 'group';
     peerId: string;
     peerName?: string;
@@ -65,6 +113,9 @@ export class AUNChannel {
   private connected = false;
   private traceStream: fs.WriteStream | null = null;
   private traceHourTag: string = '';  // 当前 trace 文件对应的小时标识 (YYYYMMDD-HH)
+  private eventBus: any = null;
+  private pendingEchoMessages = new Map<string, { text: string; channelId: string; context?: ReplyContext; receiveTs: number }>();
+  private isEchoSending = false;
 
   private trace(dir: 'IN' | 'OUT', event: string, data: unknown): void {
     if (!this.config.aunTrace) return;
@@ -296,34 +347,88 @@ export class AUNChannel {
     'merge', 'link', 'location', 'personal_card',
   ]);
 
-  // Reconnect state (TS-layer fallback, on top of SDK auto_reconnect)
+  // Reconnect state
+  // SDK 自己跑无限指数退避（1s → 5min）；TS 层只在 SDK 够不到的两类场景下接管：
+  //  1. flap：短命 connected 反复出现（SDK 不记忆跨轮 base delay，会从 1s 重新开始）
+  //  2. terminal_failed with kick reason：直接 5min 后重试，不刷屏
   private intentionalDisconnect = false;
-  private reconnectAttempt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-  private static readonly RECONNECT_DELAYS = [60, 120, 300, 600];  // seconds
+  private reconnectGeneration = 0;  // 防止并发 initClient：每次 takeoverReconnect 递增，回调中校验
   private onChannelDown?: () => void;
 
-  // SDK reconnect throttling — avoid log spam when SDK enters tight reconnect loop
+  // initClient concurrency guard: 防止多个 initClient 并发执行
+  private initInProgress = false;
+
+  // Flap detection: 连接寿命 < FLAP_WINDOW_MS 累计 FLAP_THRESHOLD 次，判定为持续被踢
+  private connectedAt = 0;
+  private flapCount = 0;
+  private static readonly FLAP_WINDOW_MS = 30_000;
+  private static readonly FLAP_THRESHOLD = 3;
+
+  // 接管后的统一退避时间（kicked / flap / terminal_failed）
+  private static readonly TAKEOVER_DELAY_MS = 5 * 60 * 1000;  // 5min
+  // 一般 terminal_failed（非 kick）的兜底退避
+  private static readonly FALLBACK_DELAY_MS = 60 * 1000;  // 1min
+
+  // SDK reconnect logging throttle（避免 attempt 自增刷屏）
   private lastReconnectLogTime = 0;
   private lastReconnectLogAttempt = 0;
-  private static readonly RECONNECT_LOG_INTERVAL = 60_000;  // log at most every 60s
-  private static readonly RECONNECT_LOG_STEP = 100;         // or every 100 attempts
-  private static readonly SDK_RECONNECT_GIVEUP = 50;        // force TS-layer fallback after this many SDK attempts
+  private static readonly RECONNECT_LOG_INTERVAL = 60_000;
+  private static readonly RECONNECT_LOG_STEP = 100;
+
+  // AID 连接状态（供 status 命令聚合展示）
+  private aidState: AidConnectionState;
 
   constructor(private config: AUNConfig) {
     if (config.aunTrace) {
       this.rotateTraceIfNeeded();
       logger.info(`${this.logPrefix()} Trace logging enabled (hourly rotation, 12h retention): ${resolvePaths().logs}/aun-YYYYMMDD-HH.log`);
     }
+    this.aidState = {
+      aid: config.aid,
+      agentName: config.agentName ?? '[default]',
+      channelName: config.channelName ?? 'aun',
+      status: 'disabled',
+      reconnectCount: 0,
+      flapCount: 0,
+    };
+  }
+
+  /** Snapshot of AID connection state for status / IPC aggregation */
+  getAidState(): AidConnectionState {
+    return { ...this.aidState, flapCount: this.flapCount };
+  }
+
+  private setAidStatus(status: AidStatus, extra?: Partial<AidConnectionState>): void {
+    this.aidState.status = status;
+    if (extra) Object.assign(this.aidState, extra);
   }
 
   async connect(): Promise<void> {
     this.intentionalDisconnect = false;
-    this.reconnectAttempt = 0;
+    this.flapCount = 0;
+    this.connectedAt = 0;
+    this.setAidStatus('reconnecting', { lastAttemptAt: Date.now() });
     await this.initClient();
+    this.startOutboxTimer();
   }
 
+
   private async initClient(): Promise<void> {
+    // 防止并发 initClient（sendMessage 触发 + timer 触发同时进入）
+    if (this.initInProgress) {
+      logger.info(`${this.logPrefix()} initClient already in progress, skipping`);
+      return;
+    }
+    this.initInProgress = true;
+    try {
+      await this._initClientInner();
+    } finally {
+      this.initInProgress = false;
+    }
+  }
+
+  private async _initClientInner(): Promise<void> {
     // Clean up existing client if any
     if (this.client) {
       this.trace('OUT', 'client.close', { reason: 'initClient' });
@@ -392,6 +497,11 @@ export class AUNChannel {
       // trace is handled inside handleConnectionState with throttling
       this.handleConnectionState(data);
     });
+    // gateway 被踢/服务端主动断开（含同槽位互踢的 self/new extra_info）
+    this.client.on('gateway.disconnect', (data: unknown) => {
+      this.trace('IN', 'gateway.disconnect', data);
+      this.handleGatewayDisconnect(data);
+    });
     this.client.on('message.recalled', (data: unknown) => {
       this.trace('IN', 'message.recalled', data);
       if (data && typeof data === 'object') {
@@ -451,6 +561,7 @@ export class AUNChannel {
       accessToken = this.config.accessToken || process.env.AUN_ACCESS_TOKEN || '';
       if (!accessToken) {
         logger.error(`${this.logPrefix()} No accessToken fallback available, scheduling retry`);
+        this.setAidStatus('failed', { lastError: `${errName}: ${errMsg}`.slice(0, 80) });
         this.scheduleReconnect();
         throw new Error('Authentication failed and no accessToken fallback available');
       }
@@ -459,10 +570,17 @@ export class AUNChannel {
 
     // Connect (SDK auto_reconnect handles transient failures)
     try {
-      this.trace('OUT', 'client.connect', { gateway: (this.client as any)._gatewayUrl });
+      const extraInfo = buildConnectExtraInfo({
+        aid: this.config.aid,
+        agentName: this.config.agentName,
+        channelName: this.config.channelName,
+      });
+      this.trace('OUT', 'client.connect', { gateway: (this.client as any)._gatewayUrl, extra_info: extraInfo });
       await this.client.connect(
-        { access_token: accessToken, gateway: (this.client as any)._gatewayUrl },
-        { auto_reconnect: true, retry: { max_attempts: 5, initial_delay: 1.0, max_delay: 30.0 } },
+        { access_token: accessToken, gateway: (this.client as any)._gatewayUrl, extra_info: extraInfo as JsonObject },
+        // max_attempts=0 = 无限重试（与 Go/Python 对齐），交由 SDK 自己跑指数退避
+        // initial_delay=1s，max_delay=300s（5min 封顶）
+        { auto_reconnect: true, retry: { max_attempts: 0, initial_delay: 1.0, max_delay: 300.0 } },
       );
       this.trace('OUT', 'client.connect.ok', { aid: this.client.aid });
       this._aid = this.client.aid ?? undefined;
@@ -470,7 +588,8 @@ export class AUNChannel {
       this._chatId = this._aid ? `${this._aid}:${deviceId}:` : '';
       this._selfName = this.loadSelfName(aidName);
       this.connected = true;
-      this.reconnectAttempt = 0;
+      this.connectedAt = Date.now();
+      this.setAidStatus('connected', { lastConnectedAt: Date.now(), lastError: undefined });
 
       // Workaround: SDK e2ee uses _identity.cert for sender_cert_fingerprint;
       // if cert is missing, it falls back to public key SPKI fingerprint which
@@ -485,12 +604,14 @@ export class AUNChannel {
       }
 
       logger.info(`${this.logPrefix()} Connected as ${this._aid}`);
+      appendAidEvent({ ts: Date.now(), iso: new Date().toISOString(), event: 'connected', aid: this.config.aid, gateway: (this.client as any)._gatewayUrl });
 
       // Send welcome message to owner after first connection
       await this.sendWelcomeMessage();
     } catch (e) {
       this.trace('OUT', 'client.connect.error', { error: String(e) });
       logger.error(`${this.logPrefix()} Connection failed: ${e}`);
+      this.setAidStatus('failed', { lastError: String(e).slice(0, 80) });
       this.scheduleReconnect();
       throw e;
     }
@@ -752,10 +873,9 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       }
     }
 
-    // Extract chat_id from payload for multi-instance routing (falls back to fromAid)
-    const chatId = (typeof payload === 'object' && payload !== null && (payload as any).chat_id)
-      ? String((payload as any).chat_id)
-      : fromAid;
+    // 私聊 channelId = 对端 AID（不再读 payload.chat_id 含 device 三段式）
+    // device_id 仅 SDK 内部多实例去重用，evolclaw session 层面跨端共享会话
+    const chatId = fromAid;
 
     const peerInfo = await this.fetchPeerInfo(fromAid);
     const shortAid = this.getShortAid(fromAid);
@@ -766,6 +886,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     logger.info(`${this.logPrefix()} P2P dispatch decision: mid=${messageId} from=${shortAid}(${displayName}) peerType=${peerInfo.type || 'unknown'} payloadType=${p2pPayloadType} chatId=${chatId} encrypt=${msgEncrypted} textPreview=${JSON.stringify(text.slice(0, 80))}`);
 
     logger.info(`${this.logPrefix()} P2P dispatched: from=${shortAid}(${displayName}) mid=${messageId} encrypt=${msgEncrypted} text=${finalText.slice(0, 60)}`);
+    appendAidEvent({ ts: Date.now(), iso: new Date().toISOString(), event: 'message_in', aid: this.config.aid, from: fromAid, msgId: messageId, kind: 'text', len: finalText.length });
     const replyContext: ReplyContext = { metadata: { encrypted: msgEncrypted } };
     if (taskId) replyContext.threadId = taskId;
     this.dispatchMessage({
@@ -858,11 +979,53 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     // @all 仅认结构化 mentions（payload.mentions），不扫描正文 — 避免引述性 "@all" 误判
     const mentionedAll = payloadMentions.includes('all');
 
-    // In mention mode, only respond when explicitly mentioned; in broadcast mode, respond to all
-    if (dispatchMode === 'mention' && !mentionedSelf && !mentionedAll) {
-      this.acknowledgeImmediately(messageId, seq);
-      logger.info(`${this.logPrefix()} Group dropped: unmentioned in mention-mode (group=${groupId} sender=${senderAid} mid=${messageId} textPreview=${JSON.stringify(text.slice(0, 80))})`);
-      return;
+    // Echo 机制优先于 mention 过滤：消息第一行包含 echo 时触发
+    const firstLineGroup = text.split('\n')[0] || '';
+    if (/echo/i.test(firstLineGroup)) {
+      // 原始内容 ≤10 字符：直接回声,不经过 Agent
+      // 原始内容 >10 字符：追加 trace 后交给 Agent 处理
+      const originalContent = firstLineGroup.trim();
+      if (originalContent.length <= 10) {
+        this.acknowledgeImmediately(messageId, seq);
+        const peerInfo = await this.fetchPeerInfo(senderAid);
+        const shortAid = this.getShortAid(senderAid);
+        const displayName = peerInfo.name || shortAid;
+        const createdAt = (data as any).created_at as number | undefined;
+        this.handleEcho({
+          channelId: groupId,
+          userId: senderAid,
+          text,
+          chatType: 'group',
+          messageId,
+          peerName: displayName,
+          peerType: peerInfo.type || 'unknown',
+          seq,
+          replyContext: this.buildGroupReplyContext(undefined, senderAid, msgEncrypted),
+          createdAt,
+        });
+        return;
+      }
+      // >10 字符：追加 trace,存 pending echo,跳过 mention 过滤继续走 Agent 流程
+      const echoTs = () => {
+        const d = new Date();
+        return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}.${String(d.getMilliseconds()).padStart(3, '0')}`;
+      };
+      let echoText = text;
+      echoText += `\n${echoTs()} [EvolClaw.receive] from=${senderAid} mid=${messageId} chat=group self=${this._aid || 'unknown'} conn_uptime=${this.connectedAt ? Math.round((Date.now() - this.connectedAt) / 1000) + 's' : 'unknown'}`;
+      this.pendingEchoMessages.set(messageId, {
+        text: echoText,
+        channelId: groupId,
+        context: this.buildGroupReplyContext(undefined, senderAid, msgEncrypted),
+        receiveTs: Date.now(),
+      });
+      // 继续走正常 Agent 流程（下面的代码会 dispatch）
+    } else {
+      // 非 echo 消息：正常 mention 过滤
+      if (dispatchMode === 'mention' && !mentionedSelf && !mentionedAll) {
+        this.acknowledgeImmediately(messageId, seq);
+        logger.info(`${this.logPrefix()} Group dropped: unmentioned in mention-mode (group=${groupId} sender=${senderAid} mid=${messageId} textPreview=${JSON.stringify(text.slice(0, 80))})`);
+        return;
+      }
     }
 
     const strippedText = this.stripSelfMentionIfOnly(text, this._aid);
@@ -922,8 +1085,10 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     logger.info(`${this.logPrefix()} Group dispatch decision: mid=${messageId} group=${groupId} sender=${shortAid}(${displayName}) peerType=${peerInfo.type || 'unknown'} payloadType=${payloadType} dispatchMode=${dispatchMode} reason=${reason} structMentions=${JSON.stringify(payloadMentions)} textMentionSelf=${textMentionSelf} textMentionAll=${textMentionAll} structMentionSelf=${structMentionSelf} structMentionAll=${structMentionAll} encrypt=${msgEncrypted} textPreview=${JSON.stringify(text.slice(0, 80))}`);
 
     logger.info(`${this.logPrefix()} Group dispatched: group=${groupId} sender=${shortAid}(${displayName}) mode=${dispatchMode} mid=${messageId} text=${finalText.slice(0, 60)}`);
+    appendAidEvent({ ts: Date.now(), iso: new Date().toISOString(), event: 'message_in', aid: this.config.aid, from: senderAid, msgId: messageId, kind: 'text', len: finalText.length, groupId });
     this.dispatchMessage({
       channelId: groupId,
+      groupId,
       userId: senderAid,
       peerName: displayName || undefined,
       peerType: peerInfo.type || 'unknown',
@@ -943,6 +1108,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     peerName?: string; peerType?: string;
     seq?: number; taskId?: string; mentions?: string[];
     replyContext?: ReplyContext;
+    groupId?: string;
   }): void {
     // Dedup
     if (event.messageId) {
@@ -953,6 +1119,30 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       if (event.seq != null) {
         this.messageSeqMap.set(event.messageId, event.seq);
       }
+    }
+
+    // Echo 机制：消息第一行包含 "echo"（不区分大小写）且原始内容 ≤10 字符时，直接回声
+    const firstLine = event.text.split('\n')[0] || '';
+    if (/echo/i.test(firstLine) && firstLine.trim().length <= 10) {
+      this.handleEcho(event);
+      return;
+    }
+
+    // 长 echo（>10 字符）：存 pending,继续交给 agent 处理
+    if (/echo/i.test(firstLine) && firstLine.trim().length > 10) {
+      const echoTs = () => {
+        const d = new Date();
+        return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}.${String(d.getMilliseconds()).padStart(3, '0')}`;
+      };
+      let echoText = event.text;
+      echoText += `\n${echoTs()} [EvolClaw.receive] from=${event.userId}${event.peerName ? `(${event.peerName})` : ''} mid=${event.messageId} chat=${event.chatType} self=${this._aid || 'unknown'} conn_uptime=${this.connectedAt ? Math.round((Date.now() - this.connectedAt) / 1000) + 's' : 'unknown'}`;
+      this.pendingEchoMessages.set(event.messageId, {
+        text: echoText,
+        channelId: event.channelId,
+        context: event.replyContext ? { metadata: event.replyContext.metadata } : undefined,
+        receiveTs: Date.now(),
+      });
+      logger.info(`${this.logPrefix()} [Echo] long echo stored: mid=${event.messageId} channelId=${event.channelId}`);
     }
 
     if (!this.messageHandler) return;
@@ -968,7 +1158,10 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
 
     this.messageHandler({
       channelId: event.channelId || '',
+      channelType: 'aun',
       content: event.text || '',
+      selfId: this._aid,
+      groupId: event.groupId,
       chatType: event.chatType,
       peerId: event.userId || event.channelId || '',
       peerName: event.peerName,
@@ -980,6 +1173,80 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     }).catch(err => {
       logger.error(`${this.logPrefix()} Message handler error:`, err);
     });
+  }
+
+  private handleEcho(event: {
+    channelId: string; userId: string; text: string;
+    chatType: 'private' | 'group'; messageId: string;
+    peerName?: string; peerType?: string;
+    seq?: number; replyContext?: ReplyContext;
+    createdAt?: number;
+  }): void {
+    const ts = () => {
+      const d = new Date();
+      return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}.${String(d.getMilliseconds()).padStart(3, '0')}`;
+    };
+
+    // 在收到的消息文本末尾追加 trace 行（只追加,不修改原文）
+    let echoText = event.text;
+    echoText += `\n${ts()} [EvolClaw.receive] from=${event.userId}${event.peerName ? `(${event.peerName})` : ''} mid=${event.messageId} chat=${event.chatType} self=${this._aid || 'unknown'} conn_uptime=${this.connectedAt ? Math.round((Date.now() - this.connectedAt) / 1000) + 's' : 'unknown'}`;
+    echoText += `\n${ts()} [EvolClaw.reply] echo回声发出 conn_uptime=${this.connectedAt ? Math.round((Date.now() - this.connectedAt) / 1000) + 's' : 'unknown'}`;
+    if (Buffer.byteLength(echoText, 'utf-8') > 4096) {
+      echoText += `\n[TRUNCATED]`;
+    }
+
+    const replyTarget = event.channelId;
+    // 不传 peerId,避免 sendMessage 在头部追加 @peer
+    const context: ReplyContext = { metadata: event.replyContext?.metadata };
+
+    const sendStart = Date.now();
+    this.isEchoSending = true;
+    this.sendMessage(replyTarget, echoText, context).then(() => {
+      this.isEchoSending = false;
+      const elapsed = Date.now() - sendStart;
+      logger.info(`${this.logPrefix()} Echo reply sent to ${replyTarget} (${elapsed}ms)`);
+    }).catch(e => {
+      this.isEchoSending = false;
+      logger.error(`${this.logPrefix()} Echo reply failed: ${e}`);
+    });
+  }
+
+  /**
+   * 处理 SDK 'gateway.disconnect' 事件 — 服务端主动断开（含同槽位互踢）。
+   *
+   * 当另一个进程用同 AID + 同 slot 抢连接时，老连接会被踢，detail 字段含：
+   *   - self_extra_info: 本进程当时 connect 上报的内容（可证明"是我自己被踢了"）
+   *   - new_extra_info:  挤掉本连接的新进程上报的内容（指出"谁踢的我"）
+   *
+   * 把这些信息打到 logger.warn，便于通过 evolclaw watch / 日志查看。
+   */
+  private handleGatewayDisconnect(data: unknown): void {
+    if (!data || typeof data !== 'object') return;
+    const d = data as Record<string, any>;
+    const code = d.code;
+    const reason = d.reason ?? '';
+    const detail = (d.detail && typeof d.detail === 'object' && !Array.isArray(d.detail)) ? d.detail : {};
+    const selfExtra = detail.self_extra_info;
+    const newExtra = detail.new_extra_info;
+
+    const fmtExtra = (e: unknown): string => {
+      if (!e || typeof e !== 'object') return '<none>';
+      const obj = e as Record<string, unknown>;
+      const parts: string[] = [];
+      const keys = ['app', 'version', 'pid', 'started_at_iso', 'hostname', 'launched_by', 'evolclaw_home', 'agent_name', 'channel_name'];
+      for (const k of keys) {
+        if (obj[k] !== undefined && obj[k] !== '') parts.push(`${k}=${String(obj[k])}`);
+      }
+      return parts.length ? parts.join(' ') : JSON.stringify(obj);
+    };
+
+    if (selfExtra || newExtra) {
+      logger.warn(`${this.logPrefix()} 🥊 Kicked by another connection (code=${code} reason=${reason})`);
+      logger.warn(`${this.logPrefix()}   ↳ me  : ${fmtExtra(selfExtra)}`);
+      logger.warn(`${this.logPrefix()}   ↳ them: ${fmtExtra(newExtra)}`);
+    } else {
+      logger.warn(`${this.logPrefix()} Server-initiated disconnect: code=${code} reason=${reason} detail=${JSON.stringify(detail)}`);
+    }
   }
 
   private handleConnectionState(data: unknown): void {
@@ -994,56 +1261,158 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
 
     if (state === 'connected') {
       this.connected = true;
-      this.reconnectAttempt = 0;
+      this.connectedAt = Date.now();
       this.lastReconnectLogTime = 0;
       this.lastReconnectLogAttempt = 0;
+      this.setAidStatus('connected', { lastConnectedAt: Date.now(), lastError: undefined });
       this.trace('IN', 'connection.state', data);
       logger.info(`${this.logPrefix()} Connected`);
-    } else if (state === 'disconnected') {
+      // 不在这里清 flapCount —— 短命连接一上来就会触发本分支，
+      // 必须等 disconnected 时根据 lifetime 决定是否清零
+      this.drainOutbox();
+    } else if (state === 'disconnected' || state === 'reconnecting') {
+      const wasConnected = this.connected;
       this.connected = false;
-      this.trace('IN', 'connection.state', data);
-      logger.warn(`${this.logPrefix()} Disconnected: ${(data as Record<string, any>).error ?? 'unknown'}`);
-    } else if (state === 'reconnecting') {
-      this.connected = false;
-      const attempt = (data as Record<string, any>).attempt ?? 0;
-      const now = Date.now();
+      this.aidState.reconnectCount++;
+      this.aidState.lastAttemptAt = Date.now();
+      this.setAidStatus('reconnecting');
 
-      // Throttled logging: first attempt, every N attempts, or every M seconds
-      const isFirst = attempt <= 1;
-      const isStep = attempt - this.lastReconnectLogAttempt >= AUNChannel.RECONNECT_LOG_STEP;
-      const isInterval = now - this.lastReconnectLogTime >= AUNChannel.RECONNECT_LOG_INTERVAL;
-      if (isFirst || isStep || isInterval) {
-        const suppressed = attempt - this.lastReconnectLogAttempt - 1;
-        const suffix = suppressed > 0 ? `, ${suppressed} suppressed since last log` : '';
-        logger.info(`${this.logPrefix()} SDK reconnecting (attempt ${attempt}${suffix})`);
-        this.lastReconnectLogTime = now;
-        this.lastReconnectLogAttempt = attempt;
-        this.trace('IN', 'connection.state', data);
+      // Flap 检测：仅在从 connected 状态过渡时统计
+      if (wasConnected && this.connectedAt > 0) {
+        const lifetime = Date.now() - this.connectedAt;
+        this.connectedAt = 0;
+        if (lifetime < AUNChannel.FLAP_WINDOW_MS) {
+          this.flapCount++;
+          logger.warn(`${this.logPrefix()} Flap #${this.flapCount}/${AUNChannel.FLAP_THRESHOLD}: connection lived ${lifetime}ms (< ${AUNChannel.FLAP_WINDOW_MS}ms)`);
+          if (this.flapCount >= AUNChannel.FLAP_THRESHOLD && !this.intentionalDisconnect) {
+            logger.error(`${this.logPrefix()} Persistent kick detected (${this.flapCount} flaps), taking over from SDK with ${AUNChannel.TAKEOVER_DELAY_MS / 1000}s backoff`);
+            this.flapCount = 0;
+            this.takeoverReconnect(AUNChannel.TAKEOVER_DELAY_MS, 'flap');
+            return;
+          }
+        } else {
+          // 连接稳定过 ≥ FLAP_WINDOW_MS，重置 flap 计数
+          if (this.flapCount > 0) {
+            logger.info(`${this.logPrefix()} Stable connection (lived ${lifetime}ms), resetting flap counter`);
+          }
+          this.flapCount = 0;
+        }
       }
 
-      // Detect runaway SDK reconnect loop: force disconnect and use TS-layer backoff
-      if (attempt >= AUNChannel.SDK_RECONNECT_GIVEUP && !this.intentionalDisconnect) {
-        logger.warn(`${this.logPrefix()} SDK reconnect stuck at attempt ${attempt}, forcing TS-layer reconnect with backoff`);
-        this.connected = false;
-        if (this.client) {
-          this.trace('OUT', 'client.close', { reason: 'sdk_reconnect_stuck' });
-          this.client.close().catch(() => {});
-          this.client = null;
+      if (state === 'disconnected') {
+        this.trace('IN', 'connection.state', data);
+        logger.warn(`${this.logPrefix()} Disconnected: ${(data as Record<string, any>).error ?? 'unknown'}`);
+      } else {
+        // reconnecting：节流日志（SDK 自己已经在跑指数退避，不刷屏）
+        const attempt = (data as Record<string, any>).attempt ?? 0;
+        const now = Date.now();
+        const isFirst = attempt <= 1;
+        const isStep = attempt - this.lastReconnectLogAttempt >= AUNChannel.RECONNECT_LOG_STEP;
+        const isInterval = now - this.lastReconnectLogTime >= AUNChannel.RECONNECT_LOG_INTERVAL;
+        if (isFirst || isStep || isInterval) {
+          const suppressed = attempt - this.lastReconnectLogAttempt - 1;
+          const suffix = suppressed > 0 ? `, ${suppressed} suppressed since last log` : '';
+          logger.info(`${this.logPrefix()} SDK reconnecting (attempt ${attempt}${suffix})`);
+          this.lastReconnectLogTime = now;
+          this.lastReconnectLogAttempt = attempt;
+          this.trace('IN', 'connection.state', data);
         }
-        this.scheduleReconnect();
       }
     } else if (state === 'terminal_failed') {
       this.connected = false;
+      this.connectedAt = 0;
       this.trace('IN', 'connection.state', data);
-      const reason = (data as Record<string, any>).reason ?? '';
-      logger.error(`${this.logPrefix()} Terminal failure: ${(data as Record<string, any>).error ?? 'unknown'}${reason ? ` (${reason})` : ''}`);
-      if (!this.intentionalDisconnect) {
-        this.scheduleReconnect();
+      const d = data as Record<string, any>;
+      const reason: string = d.reason ?? '';
+      const error = d.error ?? 'unknown';
+
+      if (this.intentionalDisconnect) return;
+
+      // 被踢类（server kicked / close code 4001-4011）→ ERROR + 5min 长退避
+      if (this.isKickReason(reason)) {
+        logger.error(`${this.logPrefix()} Kicked by server: ${reason} (${error}), backing off ${AUNChannel.TAKEOVER_DELAY_MS / 1000}s`);
+        this.setAidStatus('kicked', { lastError: `kicked: ${error}`.slice(0, 80) });
+        this.takeoverReconnect(AUNChannel.TAKEOVER_DELAY_MS, 'kicked');
+      } else {
+        // 其他 terminal failure（含 max_attempts_exhausted 兜底）→ 1min 后再试
+        logger.error(`${this.logPrefix()} Terminal failure: ${error}${reason ? ` (${reason})` : ''}, retrying in ${AUNChannel.FALLBACK_DELAY_MS / 1000}s`);
+        this.setAidStatus('failed', { lastError: `${error}`.slice(0, 80) });
+        this.takeoverReconnect(AUNChannel.FALLBACK_DELAY_MS, 'terminal');
       }
     }
   }
 
+  /** 判断 terminal_failed 的 reason 是否属于"被踢"类 */
+  private isKickReason(reason: string): boolean {
+    if (!reason) return false;
+    const r = reason.toLowerCase();
+    if (r.includes('kicked') || r.includes('kick')) return true;
+    // close code 4001/4003/4008/4009/4010/4011 都是 SDK _NO_RECONNECT_CODES
+    if (/close code 40(0[13]|0[89]|1[01])/.test(r)) return true;
+    return false;
+  }
+
+  /**
+   * TS 层接管重连：force close 当前 SDK client，安排 delayMs 后重新 initClient。
+   * 用于 flap / kicked / terminal_failed 三类场景，统一退避路径。
+   */
+  private takeoverReconnect(delayMs: number, reason: 'flap' | 'kicked' | 'terminal'): void {
+    if (this.intentionalDisconnect) return;
+
+    // 递增 generation，使任何正在进行的旧 initClient 回调失效
+    const gen = ++this.reconnectGeneration;
+
+    // 清掉已有 timer，避免叠加
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+
+    // Force close SDK client，中断它内部的重连循环
+    if (this.client) {
+      this.trace('OUT', 'client.close', { reason: `takeover_${reason}` });
+      this.client.close().catch(() => {});
+      this.client = null;
+    }
+    this.connected = false;
+
+    const delaySec = Math.round(delayMs / 1000);
+    logger.info(`${this.logPrefix()} Scheduling TS-layer reconnect (${reason}) in ${delaySec}s`);
+    this.trace('OUT', 'reconnect.scheduled', { reason, delayMs, generation: gen });
+
+    this.reconnectTimer = setTimeout(async () => {
+      this.reconnectTimer = null;
+      // 如果在等待期间又触发了新的 takeoverReconnect，本次作废
+      if (gen !== this.reconnectGeneration) {
+        logger.info(`${this.logPrefix()} TS-layer reconnect (${reason}) cancelled: generation stale (${gen} vs ${this.reconnectGeneration})`);
+        return;
+      }
+      try {
+        logger.info(`${this.logPrefix()} TS-layer reconnect (${reason}) starting...`);
+        this.trace('OUT', 'reconnect.start', { reason, generation: gen });
+        await this.initClient();
+        // initClient 完成后再次校验 generation，防止 initClient 期间被新的 takeover 取代
+        if (gen !== this.reconnectGeneration) {
+          logger.info(`${this.logPrefix()} TS-layer reconnect (${reason}) succeeded but generation stale, closing stale client`);
+          if (this.client) { this.client.close().catch(() => {}); this.client = null; }
+          this.connected = false;
+          return;
+        }
+        this.trace('OUT', 'reconnect.ok', { reason, generation: gen });
+        logger.info(`${this.logPrefix()} TS-layer reconnect (${reason}) succeeded`);
+      } catch (err) {
+        this.trace('OUT', 'reconnect.error', { reason, error: String(err), generation: gen });
+        logger.error(`${this.logPrefix()} TS-layer reconnect (${reason}) failed: ${err}`);
+        // initClient 内部已经在失败路径触发 scheduleReconnect 了，这里不重复
+      }
+    }, delayMs);
+  }
+
   // ── Public API (same interface as before) ───────────────────
+
+  setEventBus(bus: any): void {
+    this.eventBus = bus;
+  }
 
   onProjectPathRequest(provider: (channelId: string) => Promise<string>): void {
     this.projectPathProvider = provider;
@@ -1062,41 +1431,102 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
   }
 
   async sendMessage(channelId: string, text: string, context?: ReplyContext): Promise<void> {
-    // [DIAG-STALE] 进入 sendMessage 时记录 evolclaw connected 标志和 SDK _state，
-    // 用于检测两者是否一致：若 connected=true 但 sdk_state != 'connected'，即为 stale 状态
-    const sdkStateOnEntry = (this.client as any)?._state ?? 'no-client';
-    if (this.connected !== (sdkStateOnEntry === 'connected')) {
-      logger.warn(`[AUN][DIAG-STALE] sendMessage entry MISMATCH: connected=${this.connected} sdk_state=${sdkStateOnEntry} channel=${channelId} text=${text.slice(0, 40)}`);
-    } else {
-      logger.debug(`[AUN][DIAG-STALE] sendMessage entry: connected=${this.connected} sdk_state=${sdkStateOnEntry} channel=${channelId}`);
-    }
-
-    if (!this.connected || !this.client) {
-      logger.warn(`${this.logPrefix()} Cannot send: not connected`);
-      return;
-    }
-
     if (!text?.trim()) {
       logger.warn(`${this.logPrefix()} Attempted to send empty message, skipping`);
       return;
     }
 
+    // 长 echo: agent 首次回复前先发 echo trace（echo 自身发送时跳过）
+    if (!this.isEchoSending) {
+      await this.flushPendingEcho(channelId);
+    }
+
     let finalText = text;
-    // 多轮工具调用后的最终回复：仅在已有中间消息时添加前缀
     if (context?.title && (this.sentCount.get(channelId) || 0) > 0) {
       finalText = '最终回复\n' + text;
     }
     this.sentCount.set(channelId, (this.sentCount.get(channelId) || 0) + 1);
 
-    // 群聊 @ 兜底：提示词已告知 agent 要 @，但如果 agent 没写，系统自动补上
     if (this.isGroupId(channelId) && context?.peerId) {
       if (!finalText.includes(`@${context.peerId}`)) {
         finalText = `@${context.peerId} ` + finalText;
       }
     }
 
+    // Write-ahead: persist to outbox before attempting send
+    const entry = outbox.enqueue(this.config.aid, {
+      channelId,
+      type: 'text',
+      text: finalText,
+      context,
+    });
+    logger.debug(`${this.logPrefix()} Outbox enqueued: id=${entry.id} channel=${channelId} text=${finalText.slice(0, 40)}`);
+
+    if (!this.connected || !this.client) {
+      logger.warn(`${this.logPrefix()} Not connected, message queued in outbox (id=${entry.id}). Triggering reconnect.`);
+      if (!this.reconnectTimer && !this.client) {
+        this.initClient().catch(e => logger.error(`${this.logPrefix()} Reconnect from sendMessage failed: ${e}`));
+      }
+      return;
+    }
+
+    // Attempt immediate delivery
+    const ok = await this.deliverTextEntry(entry);
+    if (ok) {
+      outbox.remove(this.config.aid, entry.id);
+    }
+  }
+
+  private async flushPendingEcho(channelId: string): Promise<void> {
+    // 查找该 channelId 是否有 pending echo（长 echo 等待 agent 首次回复）
+    for (const [key, echo] of this.pendingEchoMessages) {
+      if (echo.channelId === channelId) {
+        this.pendingEchoMessages.delete(key);
+        logger.info(`${this.logPrefix()} [Echo] flushPendingEcho triggered: key=${key} channelId=${channelId} pendingCount=${this.pendingEchoMessages.size}`);
+        const ts = () => {
+          const d = new Date();
+          return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}.${String(d.getMilliseconds()).padStart(3, '0')}`;
+        };
+        const agentDuration = Date.now() - echo.receiveTs;
+        let echoText = echo.text;
+        echoText += `\n${ts()} [EvolClaw.agent] duration=${agentDuration}ms`;
+        echoText += `\n${ts()} [EvolClaw.reply] echo回声发出 conn_uptime=${this.connectedAt ? Math.round((Date.now() - this.connectedAt) / 1000) + 's' : 'unknown'}`;
+
+        if (Buffer.byteLength(echoText, 'utf-8') > 4096) {
+          echoText += `\n[TRUNCATED]`;
+        }
+
+        // 直接投递 echo trace（不经过 sendMessage 避免 @peer 前缀和递归）
+        if (this.connected && this.client) {
+          const echoEntry: outbox.OutboxEntry = {
+            id: `echo-${Date.now()}-${crypto.randomBytes(2).toString('hex')}`,
+            ts: Date.now(),
+            aid: this.config.aid,
+            channelId,
+            type: 'text',
+            text: echoText,
+            ttl: 300_000,
+          };
+          const ok = await this.deliverTextEntry(echoEntry);
+          if (!ok) {
+            outbox.enqueue(this.config.aid, { channelId, type: 'text', text: echoText });
+          }
+          logger.info(`${this.logPrefix()} [Echo] long echo trace delivered=${ok} to ${channelId} (agent ${agentDuration}ms)`);
+        } else {
+          outbox.enqueue(this.config.aid, { channelId, type: 'text', text: echoText });
+          logger.warn(`${this.logPrefix()} [Echo] not connected, echo trace queued in outbox`);
+        }
+        break;
+      }
+    }
+  }
+
+  private async deliverTextEntry(entry: outbox.OutboxEntry): Promise<boolean> {
+    const channelId = entry.channelId;
+    const finalText = entry.text!;
+    const context = entry.context;
+
     const payload: Record<string, any> = { type: 'text', text: finalText };
-    // 出站群消息：从正文提取 @aid 填入结构化 mentions（与 aun CLI 对齐，方便对端按 mentions 过滤）
     if (this.isGroupId(channelId)) {
       const extracted = this.extractMentionAidsFromText(finalText);
       if (extracted.length > 0) payload.mentions = extracted;
@@ -1105,13 +1535,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     if (context?.metadata?.taskId) payload.task_id = context.metadata.taskId;
     if (context?.metadata?.chatmode) payload.chatmode = context.metadata.chatmode;
     const isGroup = this.isGroupId(channelId);
-
-    // Multi-instance routing: channelId may be "aid:device_id:slot_id"
-    const colonIdx = channelId.indexOf(':');
-    const targetAid = colonIdx > 0 ? channelId.substring(0, colonIdx) : channelId;
-    if (colonIdx > 0) {
-      payload.chat_id = channelId;
-    }
+    const targetAid = channelId;
 
     const encryptTarget = isGroup ? channelId : targetAid;
     const encrypt = context?.metadata?.encrypted != null
@@ -1132,6 +1556,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
           }
         } else {
           logger.info(`${this.logPrefix()} group.send ok: group=${channelId} mid=${result.message_id} encrypt=${encrypt} text=${finalText.slice(0, 60)}`);
+          appendAidEvent({ ts: Date.now(), iso: new Date().toISOString(), event: 'message_out', aid: this.config.aid, to: channelId, msgId: result.message_id, kind: 'text', len: finalText.length, groupId: channelId });
         }
       } else {
         params.to = targetAid;
@@ -1140,8 +1565,10 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
           logger.warn(`${this.logPrefix()} message.send returned no message_id: ${JSON.stringify(result)}`);
         } else {
           logger.info(`${this.logPrefix()} message.send ok: to=${this.peerLabel(targetAid)} mid=${result.message_id} encrypt=${encrypt} text=${finalText.slice(0, 60)}`);
+          appendAidEvent({ ts: Date.now(), iso: new Date().toISOString(), event: 'message_out', aid: this.config.aid, to: targetAid, msgId: result.message_id, kind: 'text', len: finalText.length });
         }
       }
+      return true;
     } catch (e) {
       if (encrypt && e instanceof E2EEError) {
         this.peerE2ee.set(encryptTarget, { ok: false, ts: Date.now() });
@@ -1150,26 +1577,29 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
         try {
           if (isGroup) {
             this.trace('OUT', 'group.send.fallback', params);
-            const result = await this.client.call('group.send', params);
+            const result = await this.client!.call('group.send', params);
             this.trace('OUT', 'group.send.fallback.ok', { message_id: (result as any)?.message_id });
             if (!result || !(result as any).message_id) {
               logger.warn(`${this.logPrefix()} group.send fallback returned no message_id: ${JSON.stringify(result)}`);
             }
           } else {
             this.trace('OUT', 'message.send.fallback', params);
-            const result = await this.client.call('message.send', params);
+            const result = await this.client!.call('message.send', params);
             this.trace('OUT', 'message.send.fallback.ok', { message_id: (result as any)?.message_id });
             if (!result || !(result as any).message_id) {
               logger.warn(`${this.logPrefix()} message.send fallback returned no message_id: ${JSON.stringify(result)}`);
             }
           }
+          return true;
         } catch (e2) {
           this.trace('OUT', 'send.fallback.error', { channelId, error: String(e2) });
           logger.error(`${this.logPrefix()} Plaintext fallback also failed to ${channelId}: ${e2}`);
+          return false;
         }
       } else {
         this.trace('OUT', 'send.error', { channelId, error: String(e) });
-        logger.error(`${this.logPrefix()} Send failed to ${channelId}: ${e}`);
+        logger.error(`${this.logPrefix()} Send failed to ${channelId} (outbox id=${entry.id}): ${e}`);
+        return false;
       }
     }
   }
@@ -1186,9 +1616,8 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     if (!this.connected || !this.client) return;
     if (!taskId) return;
 
-    // Multi-instance routing
-    const colonIdx = channelId.indexOf(':');
-    const targetId = colonIdx > 0 ? channelId.substring(0, colonIdx) : channelId;
+    // 私聊 channelId = 对端 AID（不含 device_id）
+    const targetId = channelId;
 
     const encrypt = context?.metadata?.encrypted != null
       ? !!(context.metadata.encrypted)
@@ -1217,11 +1646,6 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
   }
 
   async sendFile(channelId: string, filePath: string, context?: ReplyContext): Promise<void> {
-    if (!this.connected || !this.client) {
-      logger.warn(`${this.logPrefix()} Cannot sendFile: not connected`);
-      return;
-    }
-
     const absPath = path.resolve(filePath);
     if (!fs.existsSync(absPath)) {
       logger.warn(`${this.logPrefix()} sendFile: file not found: ${absPath}`);
@@ -1237,16 +1661,48 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       return;
     }
 
+    // Write-ahead: persist to outbox
+    const entry = outbox.enqueue(this.config.aid, {
+      channelId,
+      type: 'file',
+      filePath: absPath,
+      context,
+    });
+    logger.debug(`${this.logPrefix()} Outbox enqueued file: id=${entry.id} channel=${channelId} file=${absPath}`);
+
+    if (!this.connected || !this.client) {
+      logger.warn(`${this.logPrefix()} Not connected, file send queued in outbox (id=${entry.id}). Triggering reconnect.`);
+      if (!this.reconnectTimer && !this.client) {
+        this.initClient().catch(e => logger.error(`${this.logPrefix()} Reconnect from sendFile failed: ${e}`));
+      }
+      return;
+    }
+
+    const ok = await this.deliverFileEntry(entry);
+    if (ok) {
+      outbox.remove(this.config.aid, entry.id);
+    }
+  }
+
+  private async deliverFileEntry(entry: outbox.OutboxEntry): Promise<boolean> {
+    const channelId = entry.channelId;
+    const absPath = entry.filePath!;
+    const context = entry.context;
+
+    if (!fs.existsSync(absPath)) {
+      logger.warn(`${this.logPrefix()} deliverFileEntry: file gone: ${absPath}`);
+      return true; // remove from outbox, file no longer exists
+    }
+
     const filename = path.basename(absPath);
     const fileData = fs.readFileSync(absPath);
+    const stat = fs.statSync(absPath);
     const sha256 = crypto.createHash('sha256').update(fileData).digest('hex');
     const contentType = guessMime(filename);
     const objectKey = `shared/${crypto.randomUUID()}/${filename}`;
 
     try {
-      // Upload to storage
       if (stat.size <= 64 * 1024) {
-        // Inline upload for small files (≤64KB)
         await this.callAndTrace('storage.put_object', {
           object_key: objectKey,
           content: fileData.toString('base64'),
@@ -1255,7 +1711,6 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
           overwrite: true,
         });
       } else {
-        // Ticket upload for large files
         const session = await this.callAndTrace<Record<string, unknown>>('storage.create_upload_session', {
           object_key: objectKey,
           size_bytes: stat.size,
@@ -1276,7 +1731,6 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
         });
       }
 
-      // Send message with attachment
       const attachment = {
         owner_aid: this._aid || '',
         object_key: objectKey,
@@ -1294,13 +1748,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       if (context?.metadata?.taskId) filePayload.task_id = context.metadata.taskId;
       if (context?.metadata?.chatmode) filePayload.chatmode = context.metadata.chatmode;
       const isGroup = this.isGroupId(channelId);
-
-      // Multi-instance routing
-      const fileColonIdx = channelId.indexOf(':');
-      const fileTargetAid = fileColonIdx > 0 ? channelId.substring(0, fileColonIdx) : channelId;
-      if (fileColonIdx > 0) {
-        filePayload.chat_id = channelId;
-      }
+      const fileTargetAid = channelId;
 
       const encryptTarget = isGroup ? channelId : fileTargetAid;
       const encrypt = context?.metadata?.encrypted != null
@@ -1312,7 +1760,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
         if (isGroup) {
           params.group_id = channelId;
           this.trace('OUT', 'group.send.file', params);
-          const result = await this.client.call('group.send', params);
+          const result = await this.client!.call('group.send', params);
           this.trace('OUT', 'group.send.file.ok', { message_id: (result as any)?.message_id });
           if (!result || !(result as any).message_id) {
             logger.warn(`${this.logPrefix()} group.send.file returned no message_id: ${JSON.stringify(result)}`);
@@ -1320,7 +1768,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
         } else {
           params.to = fileTargetAid;
           this.trace('OUT', 'message.send.file', params);
-          const result = await this.client.call('message.send', params);
+          const result = await this.client!.call('message.send', params);
           this.trace('OUT', 'message.send.file.ok', { message_id: (result as any)?.message_id });
           if (!result || !(result as any).message_id) {
             logger.warn(`${this.logPrefix()} message.send.file returned no message_id: ${JSON.stringify(result)}`);
@@ -1337,14 +1785,14 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
           params.encrypt = false;
           if (isGroup) {
             this.trace('OUT', 'group.send.file.fallback', params);
-            const result = await this.client.call('group.send', params);
+            const result = await this.client!.call('group.send', params);
             this.trace('OUT', 'group.send.file.fallback.ok', { message_id: (result as any)?.message_id });
             if (!result || !(result as any).message_id) {
               logger.warn(`${this.logPrefix()} group.send.file fallback returned no message_id: ${JSON.stringify(result)}`);
             }
           } else {
             this.trace('OUT', 'message.send.file.fallback', params);
-            const result = await this.client.call('message.send', params);
+            const result = await this.client!.call('message.send', params);
             this.trace('OUT', 'message.send.file.fallback.ok', { message_id: (result as any)?.message_id });
             if (!result || !(result as any).message_id) {
               logger.warn(`${this.logPrefix()} message.send.file fallback returned no message_id: ${JSON.stringify(result)}`);
@@ -1355,9 +1803,50 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
         }
       }
       logger.info(`${this.logPrefix()} File sent: ${filename} (${formatSize(stat.size)}) → ${channelId}`);
+      return true;
     } catch (e) {
-      this.trace('OUT', 'sendFile.error', { channelId, filePath, error: String(e) });
-      logger.error(`${this.logPrefix()} sendFile failed for ${channelId}: ${e}`);
+      this.trace('OUT', 'sendFile.error', { channelId, filePath: absPath, error: String(e) });
+      logger.error(`${this.logPrefix()} sendFile failed for ${channelId} (outbox id=${entry.id}): ${e}`);
+      return false;
+    }
+  }
+
+  // ── Outbox drain ───────────────────────────────────────────
+
+  private outboxTimer: ReturnType<typeof setInterval> | null = null;
+
+  private startOutboxTimer(): void {
+    if (this.outboxTimer) return;
+    this.outboxTimer = setInterval(() => {
+      if (this.connected && this.client && outbox.hasPending(this.config.aid)) {
+        this.drainOutbox();
+      }
+    }, 30_000);
+  }
+
+  stopOutboxTimer(): void {
+    if (this.outboxTimer) {
+      clearInterval(this.outboxTimer);
+      this.outboxTimer = null;
+    }
+  }
+
+  private async drainOutbox(): Promise<void> {
+    if (!this.connected || !this.client) return;
+    if (!outbox.hasPending(this.config.aid)) return;
+
+    logger.info(`${this.logPrefix()} Draining outbox...`);
+    const result = await outbox.drain(this.config.aid, async (entry) => {
+      if (entry.type === 'text') {
+        return this.deliverTextEntry(entry);
+      } else if (entry.type === 'file') {
+        return this.deliverFileEntry(entry);
+      }
+      return true; // unknown type, discard
+    });
+
+    if (result.sent > 0 || result.expired > 0) {
+      logger.info(`${this.logPrefix()} Outbox drained: sent=${result.sent} expired=${result.expired} failed=${result.failed}`);
     }
   }
 
@@ -1388,12 +1877,8 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
 
     const isGroup = this.isGroupId(channelId);
 
-    // Multi-instance routing
-    const statusColonIdx = channelId.indexOf(':');
-    const statusTargetAid = statusColonIdx > 0 ? channelId.substring(0, statusColonIdx) : channelId;
-    if (statusColonIdx > 0) {
-      payload.chat_id = channelId;
-    }
+    // 私聊 channelId = 对端 AID（不含 device_id）
+    const statusTargetAid = channelId;
 
     const encryptTarget = isGroup ? channelId : statusTargetAid;
     const encrypt = context?.metadata?.encrypted != null
@@ -1442,12 +1927,9 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
         ? parsed as JsonObject : { text: payload };
     } catch { payloadObj = { text: payload }; }
 
-    // Multi-instance routing
-    const customColonIdx = channelId.indexOf(':');
-    const customTargetAid = customColonIdx > 0 ? channelId.substring(0, customColonIdx) : channelId;
-    if (customColonIdx > 0) {
-      payloadObj.chat_id = channelId;
-    }
+    // 私聊 channelId = 对端 AID（不含 device_id）
+    const customTargetAid = channelId;
+
 
     const sendParams = {
       to: customTargetAid, payload: payloadObj,
@@ -1479,6 +1961,8 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       this.client = null;
     }
     this.connected = false;
+    appendAidEvent({ ts: Date.now(), iso: new Date().toISOString(), event: 'disconnected', aid: this.config.aid, reason: 'intentional' });
+    this.setAidStatus('disabled');
     logger.info(`${this.logPrefix()} Disconnected`);
     if (this.traceStream) {
       this.traceStream.end();
@@ -1487,37 +1971,13 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     logger.info(`${this.logPrefix()} Disconnected`);
   }
 
-  // ── TS-layer reconnect (fallback when SDK auto_reconnect exhausted) ──
+  // ── TS-layer reconnect ─────────────────────────────────────
+  // SDK 内部已经跑无限指数退避（max_attempts=0, max_delay=300s），
+  // TS 层只负责：(1) initClient 失败时安排兜底重试；(2) flap/kicked 接管路径见 takeoverReconnect。
 
   private scheduleReconnect(): void {
-    if (this.intentionalDisconnect) return;
-    if (this.reconnectTimer) return;
-
-    const delays = AUNChannel.RECONNECT_DELAYS;
-    if (this.reconnectAttempt >= delays.length) {
-      logger.error(`${this.logPrefix()} All ${delays.length} reconnect attempts exhausted, giving up`);
-      this.onChannelDown?.();
-      return;
-    }
-
-    const delay = delays[this.reconnectAttempt];
-    this.reconnectAttempt++;
-    logger.info(`${this.logPrefix()} Scheduling reconnect #${this.reconnectAttempt}/${delays.length} in ${delay}s`);
-
-    this.reconnectTimer = setTimeout(async () => {
-      this.reconnectTimer = null;
-      try {
-        logger.info(`${this.logPrefix()} Reconnect #${this.reconnectAttempt} starting...`);
-        this.trace('OUT', 'reconnect.start', { attempt: this.reconnectAttempt });
-        await this.initClient();
-        this.trace('OUT', 'reconnect.ok', { attempt: this.reconnectAttempt });
-        logger.info(`${this.logPrefix()} Reconnect #${this.reconnectAttempt} succeeded`);
-      } catch (err) {
-        this.trace('OUT', 'reconnect.error', { attempt: this.reconnectAttempt, error: String(err) });
-        logger.error(`${this.logPrefix()} Reconnect #${this.reconnectAttempt} failed:`, err);
-        this.scheduleReconnect();
-      }
-    }, delay * 1000);
+    // initClient 早期失败（auth / connect 阶段）走这里：用 fallback 延迟兜底
+    this.takeoverReconnect(AUNChannel.FALLBACK_DELAY_MS, 'terminal');
   }
 
   /** Manually trigger reconnect (e.g. from /check reconnect command) */
@@ -1527,7 +1987,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
-    this.reconnectAttempt = 0;
+    this.flapCount = 0;
     try {
       await this.initClient();
       return `重连成功 (${this._aid})`;
@@ -1537,18 +1997,17 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     }
   }
 
-  /** Set callback for when all reconnect attempts are exhausted */
+  /** Set callback for when all reconnect attempts are exhausted (deprecated: 现在无限重试，不会触发) */
   setOnChannelDown(callback: () => void): void {
     this.onChannelDown = callback;
   }
 
   /** Get current connection status */
-  getStatus(): { connected: boolean; aid?: string; reconnectAttempt: number; maxAttempts: number; plaintextRecv: number } {
+  getStatus(): { connected: boolean; aid?: string; flapCount: number; plaintextRecv: number } {
     return {
       connected: this.connected,
       aid: this._aid,
-      reconnectAttempt: this.reconnectAttempt,
-      maxAttempts: AUNChannel.RECONNECT_DELAYS.length,
+      flapCount: this.flapCount,
       plaintextRecv: this.plaintextRecv,
     };
   }
@@ -1635,6 +2094,8 @@ export class AUNChannelPlugin implements ChannelPlugin {
         flushDelay: inst.flushDelay,
         encryptionSeed: inst.encryptionSeed,
         owner: inst.owner,
+        agentName: (inst as any).agentName,
+        channelName: inst.name,
         aunTrace: config.debug?.aunTrace,
         aunSdkLog: config.debug?.aunSdkLog,
       });

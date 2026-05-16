@@ -28,6 +28,7 @@ import { buildReloadHooks } from './utils/reload-hooks.js';
 import { IpcServer, IpcStatusResponse, ChannelStatus } from './ipc.js';
 import { ChannelAdapter, Message } from './types.js';
 import { logger, setLogLevel } from './utils/logger.js';
+import { writeMain, removeAll, isMainWinner, scanInstances } from './utils/instance-registry.js';
 import { detectDuplicates } from './core/evolagent-registry.js';
 import { loadPromptTemplates } from './agents/templates.js';
 import path from 'path';
@@ -57,6 +58,36 @@ async function main() {
 
   // 确保数据目录存在
   ensureDataDirs();
+
+  // ── 单实例保护（pre-check + post-write self-check）──
+  // pre-check：发现已有活 main 直接退出，避免起任何副作用
+  {
+    const pre = scanInstances();
+    const aliveOthers = pre.mains.filter(m => m.alive && m.record.pid !== process.pid);
+    if (aliveOthers.length > 0) {
+      const pids = aliveOthers.map(m => m.record.pid).join(', ');
+      const msg = `❌ Another EvolClaw instance is already running (PID: ${pids}). Use 'evolclaw restart' to replace it.`;
+      logger.error(msg);
+      console.error(msg);
+      process.exit(1);
+    }
+  }
+
+  // 立即登记自己（让其他并发启动者能看见我）
+  const launchedBy = (process.env.EVOLCLAW_LAUNCHED_BY as any) || 'start';
+  writeMain(launchedBy);
+  logger.info(`✓ Instance record written: main-${process.pid}.json`);
+
+  // post-write 自检：写完 record 后再扫一次，发现并发对手时按 (startedAt, pid) 选赢家
+  {
+    const verdict = isMainWinner();
+    if (!verdict.winner) {
+      logger.warn(`Lost main election to PID ${verdict.conflictingPid}, yielding`);
+      console.error(`⚠ Another instance (PID ${verdict.conflictingPid}) started concurrently and won the election. Yielding.`);
+      removeAll();
+      process.exit(0);
+    }
+  }
 
   // 加载提示词模板
   loadPromptTemplates();
@@ -137,10 +168,15 @@ async function main() {
   // 统计收集器（近 1 小时滚动统计）
   const statsCollector = new StatsCollector(eventBus);
 
-  // 初始化数据库（带 ownerResolver）
+  // 启动检查：发现旧 sessions.db 提示用户手动清理（不自动迁移，不自动删除）
+  if (fs.existsSync(paths.db)) {
+    logger.warn(`⚠ 检测到旧的 sessions.db (${paths.db})，已不再使用。可手动备份后删除。`);
+  }
+
+  // 初始化 SessionManager（文件系统后端）
   // Registry-first: agent-owned channels resolve via EvolAgent.isOwner/isAdmin,
   // default-agent channels fall back to global config (evolclaw.json).
-  const sessionManager = new SessionManager(undefined, eventBus,
+  const sessionManager = new SessionManager(paths.sessionsDir, eventBus,
     (channel, userId) => agentRegistry.isOwner(channel, userId, (ch, uid) => isOwner(config, ch, uid)),
     (channel, userId) => agentRegistry.isAdmin(channel, userId, (ch, uid) => isAdmin(config, ch, uid))
   );
@@ -228,7 +264,7 @@ async function main() {
       const rewritten = instances.map((inst: any) => {
         if (!inst || typeof inst !== 'object') return inst;
         const effName = agent.effectiveChannelName(type, inst.name);
-        return { ...inst, name: effName };
+        return { ...inst, name: effName, agentName: agent.name };
       });
       // Preserve original shape (array vs single object)
       rewrittenChannels[type] = Array.isArray(raw) ? rewritten : rewritten[0];
@@ -251,9 +287,6 @@ async function main() {
 
   const channelInstances = [...defaultInstances, ...evolagentInstances];
   logger.info(`✓ Created ${channelInstances.length} channel instance(s)${evolagentInstances.length > 0 ? ` (${defaultInstances.length} default + ${evolagentInstances.length} agent)` : ''}`);
-
-  // 启动迁移：将 sessions.channel 从 channelType 回填为实例名
-  sessionManager.migrateChannelToInstanceName();
 
   // 创建命令处理器
   const cmdHandler = new CommandHandler(sessionManager, agentMap, config, messageCache, eventBus, defaultAgentKey);
@@ -389,7 +422,7 @@ async function main() {
       msgBridge.register(inst.adapter.channelName,
         (handler) => inst.channel.onMessage(async ({ channelId: chatId, content, images, peerId, peerName, messageId, mentions, threadId, rootId, chatType }: any) => {
           await handler({
-            channel: channelType, channelId: chatId, content, images, chatType,
+            channel: inst.adapter.channelName, channelType: 'feishu', channelId: chatId, content, images, chatType,
             peerId: peerId || '', peerName, messageId, mentions, threadId,
             // 只在话题场景（threadId 有值）才设置 replyContext；
             // 纯引用回复（rootId 有值但无 threadId）不设置，避免所有回复都带引用头
@@ -413,7 +446,8 @@ async function main() {
         (handler) => inst.channel.onMessage(async (channelId: string, content: string, peerId?: string,
           images?: Array<{ data: string; mimeType: string }>, chatType?: 'private' | 'group') => {
           handler({
-            channel: channelType,
+            channel: inst.adapter.channelName,
+            channelType: 'wechat',
             channelId,
             content,
             images,
@@ -428,11 +462,15 @@ async function main() {
     }
 
     if (channelType === 'aun') {
+      inst.channel.setEventBus(eventBus);
       msgBridge.register(inst.adapter.channelName,
         (handler) => inst.channel.onMessage(async (opts: any) => {
           handler({
-            channel: channelType,
+            channel: inst.adapter.channelName,
+            channelType: 'aun',
             channelId: opts.channelId,
+            selfId: opts.selfId,
+            groupId: opts.groupId,
             content: opts.content,
             chatType: opts.chatType || 'private',
             peerId: opts.peerId || '',
@@ -476,7 +514,8 @@ async function main() {
       msgBridge.register(inst.adapter.channelName,
         (handler) => inst.channel.onMessage(async (event: any) => {
           handler({
-            channel: channelType,
+            channel: inst.adapter.channelName,
+            channelType: 'dingtalk',
             channelId: event.channelId,
             content: event.content,
             images: event.images,
@@ -496,7 +535,8 @@ async function main() {
       msgBridge.register(inst.adapter.channelName,
         (handler) => inst.channel.onMessage(async (event: any) => {
           handler({
-            channel: channelType,
+            channel: inst.adapter.channelName,
+            channelType: 'qqbot',
             channelId: event.channelId,
             content: event.content,
             images: event.images,
@@ -516,7 +556,8 @@ async function main() {
       msgBridge.register(inst.adapter.channelName,
         (handler) => inst.channel.onMessage(async (event: any) => {
           handler({
-            channel: channelType,
+            channel: inst.adapter.channelName,
+            channelType: 'wecom',
             channelId: event.channelId,
             content: event.content,
             chatType: event.chatType || 'private',
@@ -715,6 +756,19 @@ async function main() {
   // M3: direct call (not cast) — wire EvolAgentRegistry into IPC for evolagent.* handlers
   ipcServer.setAgentRegistry(agentRegistry);
 
+  // 注入 AUN AID 状态聚合器：遍历所有 aun 类型 channel，调 getAidState() 收集
+  ipcServer.setAunAidProvider(() => {
+    const out: import('./types.js').AidConnectionState[] = [];
+    for (const inst of channelInstances) {
+      if (inst.channelType !== 'aun') continue;
+      const ch = inst.channel as any;
+      if (typeof ch?.getAidState === 'function') {
+        try { out.push(ch.getAidState()); } catch { /* ignore */ }
+      }
+    }
+    return out;
+  });
+
   // ── Reload hooks: enable agentRegistry.reload() to drain/disconnect/restart channels ──
   const reloadHooks: ReloadHooks = buildReloadHooks({
     channelLoader,
@@ -778,12 +832,18 @@ async function main() {
     }
 
     sessionManager.close();
+    removeAll();
     logger.info('✓ Shutdown complete');
     process.exit(0);
   };
 
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
+
+  // 兜底：进程退出前同步删除 instance 文件（防 async shutdown 未完成就被杀）
+  process.on('exit', () => {
+    removeAll();
+  });
 }
 
 main().catch((error) => {
