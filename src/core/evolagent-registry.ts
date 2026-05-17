@@ -243,6 +243,44 @@ export class EvolAgentRegistry {
     return [...this.skipped];
   }
 
+  // ── 热加载新 agent ──────────────────────────────────────────────────
+
+  /**
+   * 动态加载一个新 agent（磁盘上已有 config.json 但运行时还没加载）。
+   * 返回新创建的 EvolAgent，或 null（已存在 / 校验失败）。
+   */
+  loadNewAgent(aid: string): EvolAgent | null {
+    if (this.agents.has(aid)) {
+      logger.info(`[EvolAgentRegistry] agent ${aid} already loaded, skipping`);
+      return this.agents.get(aid)!;
+    }
+
+    const raw = loadAgent(aid);
+    if (!raw) {
+      logger.warn(`[EvolAgentRegistry] loadNewAgent: ${aid}/config.json not found`);
+      return null;
+    }
+    const errs = validateAgentConfig(raw);
+    if (errs.length > 0) {
+      logger.warn(`[EvolAgentRegistry] loadNewAgent ${aid}: ${errs.join('; ')}`);
+      return null;
+    }
+
+    const defaults = loadDefaults();
+    const merged = mergeForAgent(raw, defaults);
+    const agent = new EvolAgent(raw, merged);
+    ensureAgentDirSkeleton(aid);
+    this.agents.set(aid, agent);
+
+    // 重建 channel index
+    for (const key of agent.channelInstanceNames()) {
+      this.channelIndex.set(key, aid);
+    }
+
+    logger.info(`[EvolAgentRegistry] ✓ Hot-loaded agent: ${aid}`);
+    return agent;
+  }
+
   // ── Reload ───────────────────────────────────────────────────────────
 
   async reload(aidOrName: string, hooks: ReloadHooks): Promise<void> {

@@ -811,6 +811,87 @@ async function main() {
   // Make reload hooks accessible to IPC handler & ctl handler (both run in this process)
   (globalThis as any).__evolclaw_reloadHooks = reloadHooks;
 
+  // Hot-load handler: dynamically add a new agent at runtime
+  (globalThis as any).__evolclaw_hotLoadAgent = async (aid: string) => {
+    const agent = agentRegistry.loadNewAgent(aid);
+    if (!agent) throw new Error(`Failed to load agent ${aid}`);
+
+    // 创建 channels
+    const instances = await channelLoader.createForAgent(agent);
+    for (const inst of instances) {
+      registerChannelInstance(inst);
+      agent.channels.set(inst.adapter.channelName, inst.adapter);
+      channelInstances.push(inst);
+    }
+    agent.status = 'running';
+
+    // 连接
+    await channelLoader.connectAll(instances);
+    logger.info(`[HotLoad] ✓ Agent ${aid} online with ${instances.length} channel(s)`);
+  };
+
+  // Full resync handler: scan disk, load new agents, unload removed/disabled, reload changed
+  (globalThis as any).__evolclaw_resyncAgents = async () => {
+    const { loadAllAgents: scanAgents, loadDefaults: readDefaults, mergeForAgent: merge } = await import('./config-store.js');
+    const freshDefaults = readDefaults();
+    const { agents: diskAgents } = scanAgents();
+    const diskAidSet = new Set(diskAgents.map(a => a.aid));
+
+    const results: string[] = [];
+
+    // 1. 下线：运行时有但磁盘上没有 / disabled 的
+    for (const [aid, agent] of [...(agentRegistry as any).agents.entries()] as [string, any][]) {
+      const diskCfg = diskAgents.find(a => a.aid === aid);
+      if (!diskCfg || diskCfg.enabled === false) {
+        // 断开所有 channels
+        for (const chName of agent.channelInstanceNames()) {
+          const inst = channelInstances.find(i => i.adapter.channelName === chName);
+          if (inst) {
+            try { await inst.disconnect(); } catch {}
+            const idx = channelInstances.indexOf(inst);
+            if (idx >= 0) channelInstances.splice(idx, 1);
+          }
+        }
+        (agentRegistry as any).agents.delete(aid);
+        results.push(`- ${aid} (offline)`);
+        continue;
+      }
+    }
+
+    // 2. 新增：磁盘上有但运行时没有的
+    for (const cfg of diskAgents) {
+      if (cfg.enabled === false) continue;
+      if ((agentRegistry as any).agents.has(cfg.aid)) continue;
+      try {
+        await (globalThis as any).__evolclaw_hotLoadAgent(cfg.aid);
+        results.push(`+ ${cfg.aid} (online)`);
+      } catch (e: any) {
+        results.push(`✗ ${cfg.aid}: ${e?.message || e}`);
+      }
+    }
+
+    // 3. 已有的：重新 reload（config 可能改了）
+    const hooks = (globalThis as any).__evolclaw_reloadHooks;
+    for (const cfg of diskAgents) {
+      if (cfg.enabled === false) continue;
+      if (!(agentRegistry as any).agents.has(cfg.aid)) continue;
+      // 只有磁盘上存在且运行时也存在的才 reload
+      try {
+        await agentRegistry.reload(cfg.aid, hooks);
+        results.push(`↻ ${cfg.aid} (reloaded)`);
+      } catch (e: any) {
+        results.push(`⚠ ${cfg.aid}: ${e?.message || e}`);
+      }
+    }
+
+    // 重建 channel index
+    (agentRegistry as any).channelIndex.clear();
+    (agentRegistry as any).buildChannelIndex();
+
+    logger.info(`[Resync] Done: ${results.length} agent(s) processed`);
+    return results;
+  };
+
   // I3: start IPC server LAST, after all hook setup, to eliminate race window
   ipcServer.start();
 

@@ -1176,6 +1176,43 @@ async function cmdWatchAid(): Promise<void> {
   const pkg = JSON.parse(fs.readFileSync(path.join(getPackageRoot(), 'package.json'), 'utf-8'));
   const version = pkg.version;
 
+  // Load AID names: first from local agent.md, then refresh from network
+  const { aidList, agentmdGet } = await import('./aid/index.js');
+  const localAids = aidList();
+  const aidNameMap = new Map<string, string>();
+
+  function readLocalName(aid: string): string | undefined {
+    try {
+      const agentMdPath = path.join(os.homedir(), '.aun', 'AIDs', aid, 'agent.md');
+      if (!fs.existsSync(agentMdPath)) return undefined;
+      const content = fs.readFileSync(agentMdPath, 'utf-8');
+      const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
+      if (!fmMatch) return undefined;
+      const nameMatch = fmMatch[1].match(/^name:\s*["']?(.+?)["']?\s*$/m);
+      return nameMatch?.[1]?.trim() || undefined;
+    } catch { return undefined; }
+  }
+
+  // Phase 1: read cached local names
+  for (const a of localAids) {
+    if (!a.hasPrivateKey) continue;
+    const name = readLocalName(a.aid);
+    if (name) aidNameMap.set(a.aid, name);
+  }
+
+  // Phase 2: refresh agent.md from network (async, non-blocking)
+  const refreshNames = async () => {
+    for (const a of localAids) {
+      if (!a.hasPrivateKey) continue;
+      try {
+        await agentmdGet(a.aid);
+        const name = readLocalName(a.aid);
+        if (name) aidNameMap.set(a.aid, name);
+      } catch { /* ignore network errors */ }
+    }
+  };
+  refreshNames();
+
   // Register instance
   fs.mkdirSync(p.instanceDir, { recursive: true });
   const instanceFile = path.join(p.instanceDir, `watch-aid-${process.pid}.json`);
@@ -1253,15 +1290,21 @@ async function cmdWatchAid(): Promise<void> {
       padRight(lastSent, COL_LSENT) +
       padRight(String(stats?.uniquePeerCount ?? 0), COL_PEERS);
 
-    const namePart = stats?.selfName ? stats.selfName : (aid.agentName || '');
-    const lastMsg = stats?.lastReceivedText || stats?.lastSentText || '';
-    const msgDir = stats?.lastReceivedText
-      ? (stats?.lastSentText
-        ? ((stats.lastReceivedAt ?? 0) >= (stats.lastSentAt ?? 0) ? '↓' : '↑')
-        : '↓')
-      : (stats?.lastSentText ? '↑' : '');
-    const msgPreview = lastMsg ? `${msgDir} ${lastMsg.replace(/\n/g, ' ').slice(0, 60)}` : '';
-    const subLine = `${DIM}    ${namePart}${msgPreview ? '  ' + msgPreview : ''}${RST}`;
+    const namePart = aidNameMap.get(aid.aid) || stats?.selfName || aid.agentName || '';
+    const BLUE = useColor ? '\x1b[34m' : '';
+    let msgPreview = '';
+    if (stats?.lastReceivedAt || stats?.lastSentAt) {
+      const recvTs = stats.lastReceivedAt ?? 0;
+      const sentTs = stats.lastSentAt ?? 0;
+      if (recvTs >= sentTs && stats.lastReceivedText) {
+        msgPreview = `${GREEN}↓ ${stats.lastReceivedText.replace(/\n/g, ' ').slice(0, 60)}${RST}`;
+      } else if (stats.lastSentText) {
+        msgPreview = `${BLUE}↑ ${stats.lastSentText.replace(/\n/g, ' ').slice(0, 60)}${RST}`;
+      } else if (stats.lastReceivedText) {
+        msgPreview = `${GREEN}↓ ${stats.lastReceivedText.replace(/\n/g, ' ').slice(0, 60)}${RST}`;
+      }
+    }
+    const subLine = `${DIM}    ${namePart}${RST}${msgPreview ? '  ' + msgPreview : ''}`;
 
     return [mainLine, subLine];
   }
@@ -2143,11 +2186,27 @@ async function cmdAgent(args: string[]): Promise<void> {
 
   if (sub === 'reload') {
     const name = args[1];
-    if (!name) {
-      console.error('Usage: evolclaw agent reload <name>');
-      process.exit(1);
-    }
     const p = resolvePaths();
+    if (!name) {
+      // 无参数：全量 resync（扫磁盘，新增上线、删除下线、修改热更新）
+      try {
+        const result = await ipcQuery(p.socket, { type: 'evolagent.resync' }) as any;
+        if (result?.ok) {
+          console.log('✓ Agent resync 完成:');
+          for (const line of (result.results || [])) {
+            console.log(`  ${line}`);
+          }
+        } else {
+          console.error(`✗ Resync failed: ${result?.error || 'unknown error'}`);
+          process.exit(1);
+        }
+      } catch {
+        console.error('⚠ evolclaw 未运行，请先 evolclaw start');
+        process.exit(1);
+      }
+      return;
+    }
+    // 带参数：单 agent 热更新
     try {
       const result = await ipcQuery(p.socket, { type: 'evolagent.reload', name }) as any;
       if (result && result.ok) {
@@ -2176,26 +2235,14 @@ async function cmdAgent(args: string[]): Promise<void> {
  */
 async function cmdAgentSyncAids(): Promise<void> {
   const p = resolvePaths();
-  const { isValidAid } = await import('./aid/index.js');
+  const { aidList } = await import('./aid/index.js');
   const { ensureAgentDirSkeleton, saveAgent, loadAllAgents } = await import('./config-store.js');
   const { CONFIG_SCHEMA_VERSION } = await import('./types.js');
 
-  // 1. 找 AUN keystore 路径
+  // 1. 用 aidList() 获取所有有私钥的本地 AID
   const aunPath = process.env.AUN_HOME || path.join(os.homedir(), '.aun');
-  const aidsDir = path.join(aunPath, 'AIDs');
-  if (!fs.existsSync(aidsDir)) {
-    console.log(`⚠ AUN AIDs 目录不存在: ${aidsDir}`);
-    return;
-  }
-
-  // 2. 扫描所有有私钥的 AID
-  const localAids: string[] = [];
-  for (const entry of fs.readdirSync(aidsDir, { withFileTypes: true })) {
-    if (!entry.isDirectory()) continue;
-    if (!isValidAid(entry.name)) continue;
-    const hasPrivateKey = fs.existsSync(path.join(aidsDir, entry.name, 'private'));
-    if (hasPrivateKey) localAids.push(entry.name);
-  }
+  const allAids = aidList(aunPath);
+  const localAids = allAids.filter(a => a.hasPrivateKey).map(a => a.aid);
 
   if (localAids.length === 0) {
     console.log('⚠ 未找到任何有私钥的本地 AID');
@@ -2204,11 +2251,11 @@ async function cmdAgentSyncAids(): Promise<void> {
 
   console.log(`发现 ${localAids.length} 个本地 AID（有私钥）`);
 
-  // 3. 找已有的 agent 列表
+  // 2. 找已有的 agent 列表
   const { agents } = loadAllAgents();
   const existingAids = new Set(agents.map(a => a.aid));
 
-  // 4. 找模板 agent（按 config.json mtime 最早的）
+  // 3. 找模板 agent（按 config.json mtime 最早的）
   let templateAgent = agents[0];
   if (agents.length > 1) {
     let earliestMtime = Infinity;
@@ -2231,8 +2278,8 @@ async function cmdAgentSyncAids(): Promise<void> {
 
   console.log(`模板 agent: ${templateAgent.aid}`);
 
-  // 5. 为缺失的 AID 克隆 agent
-  let created = 0;
+  // 4. 为缺失的 AID 克隆 agent config
+  const created: string[] = [];
   for (const aid of localAids) {
     if (existingAids.has(aid)) continue;
 
@@ -2241,24 +2288,38 @@ async function cmdAgentSyncAids(): Promise<void> {
       aid,
       channels: [{ type: 'aun', name: 'main' }],
     };
-    // 确保 schema version
     newConfig.$schema_version = CONFIG_SCHEMA_VERSION;
 
     try {
       saveAgent(newConfig);
       ensureAgentDirSkeleton(aid);
       console.log(`  ✓ ${aid}`);
-      created++;
+      created.push(aid);
     } catch (e: any) {
       console.error(`  ✗ ${aid}: ${e?.message || e}`);
     }
   }
 
-  if (created === 0) {
+  if (created.length === 0) {
     console.log('所有本地 AID 都已有对应 agent，无需同步。');
-  } else {
-    console.log(`\n✓ 同步完成：新建 ${created} 个 agent`);
-    console.log('  运行 `evolclaw restart` 使新 agent 生效。');
+    return;
+  }
+
+  console.log(`\n✓ 同步完成：新建 ${created.length} 个 agent`);
+
+  // 5. 触发 resync（如果 evolclaw 正在运行）
+  try {
+    const result = await ipcQuery(p.socket, { type: 'evolagent.resync' }) as any;
+    if (result?.ok) {
+      console.log('  ✓ 已热加载到运行中的进程');
+      for (const line of (result.results || [])) {
+        console.log(`    ${line}`);
+      }
+    } else {
+      console.log(`  ⚠ 热加载失败: ${result?.error || 'unknown'}，重启后生效`);
+    }
+  } catch {
+    console.log('  evolclaw 未运行，新 agent 将在下次启动时加载。');
   }
 }
 
