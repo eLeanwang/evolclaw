@@ -632,7 +632,7 @@ async function main() {
     });
   }
 
-  // 上线通知：延迟 1-3 秒后向 owner 发送上线消息
+  // 上线通知：延迟 1-3 秒后向 owner 发送上线消息（带 name + 工作目录）
   setTimeout(() => {
     for (const name of connected) {
       const agent = agentRegistry.resolveByChannel(name);
@@ -641,7 +641,17 @@ async function main() {
       if (!ownerAid) continue;
       const adapter = agent.channels.get(name);
       if (!adapter) continue;
-      adapter.sendText(ownerAid, `✓ ${agent.aid} 已上线`).catch(() => {});
+      // 尝试从 agent.md 读取 name
+      let agentName = agent.aid;
+      try {
+        const aunPath = process.env.AUN_HOME || path.join(require('os').homedir(), '.aun');
+        const agentMdPath = path.join(aunPath, 'AIDs', agent.aid, 'agent.md');
+        const content = fs.readFileSync(agentMdPath, 'utf-8');
+        const nameMatch = content.match(/^name:\s*"?([^"\n]+)/m);
+        if (nameMatch) agentName = nameMatch[1].trim().replace(/"$/, '');
+      } catch {}
+      const projectDir = path.basename(agent.projectPath);
+      adapter.sendText(ownerAid, `✓ ${agentName} 已上线 | 工作目录: ${projectDir}`).catch(() => {});
     }
   }, 1000 + Math.random() * 2000);
 
