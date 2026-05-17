@@ -17,7 +17,7 @@ import os from 'os';
 import type { Config } from '../types.js';
 import type { AgentPlugin, AgentInstance, AgentCallbacks } from '../core/agent-loader.js';
 import type { AgentEvent, AgentRunnerFull, ModelSwitcher, PermissionModeInfo } from './claude-runner.js';
-import { resolveGoogleConfig, type GoogleResolved } from '../config.js';
+import { resolveGoogleConfig, type GoogleResolved } from '../baseagents/resolve.js';
 import { GeminiSessionFileAdapter } from '../core/session/adapters/gemini-session-file-adapter.js';
 import { logger } from '../utils/logger.js';
 
@@ -477,25 +477,23 @@ export class GeminiRunner implements AgentRunnerFull, ModelSwitcher {
 export class GeminiAgentPlugin implements AgentPlugin {
   readonly name = 'gemini';
 
-  isEnabled(globalConfig: Config, agent: import('../core/evolagent.js').EvolAgent): boolean {
-    if (!agent.config.agents?.gemini) return false;
+  isEnabled(agent: import('../core/evolagent.js').EvolAgent): boolean {
+    if (!agent.config.baseagents?.gemini) return false;
     try {
-      const override = agent.config.agents.gemini as any;
-      const resolved = resolveGoogleConfig(globalConfig, override);
+      const override = agent.config.baseagents.gemini as any;
+      const syntheticConfig = { agents: { gemini: override } } as Config;
+      const resolved = resolveGoogleConfig(syntheticConfig, override);
       return !!resolved.cliPath;
     } catch {
       return false;
     }
   }
 
-  createAgent(globalConfig: Config, agent: import('../core/evolagent.js').EvolAgent, callbacks: AgentCallbacks): AgentInstance | null {
-    const override = agent.config.agents?.gemini as any;
+  createAgent(agent: import('../core/evolagent.js').EvolAgent, callbacks: AgentCallbacks): AgentInstance | null {
+    const override = agent.config.baseagents?.gemini as any;
+    const syntheticConfig = { agents: { gemini: override } } as Config;
     const merged: Config = {
-      ...globalConfig,
-      agents: {
-        ...(globalConfig.agents || {}),
-        gemini: { ...(globalConfig.agents?.gemini || {}), ...(override || {}) },
-      },
+      agents: { gemini: { ...(override || {}) } },
     } as Config;
     return { evolagentName: agent.name, baseagent: 'gemini', agent: new GeminiRunner(merged, callbacks) };
   }

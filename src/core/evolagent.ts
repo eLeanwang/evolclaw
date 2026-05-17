@@ -1,119 +1,42 @@
-import fs from 'fs';
 import path from 'path';
 import { logger } from '../utils/logger.js';
-import { validateDefaultChannelRef } from '../config.js';
-import type { EvolAgentConfig, AgentContext, AgentStatus, ChannelAdapter } from '../types.js';
+import { saveAgent } from '../config-store.js';
+import { formatChannelKey } from './channel-key.js';
+import type {
+  AgentConfig,
+  MergedAgentConfig,
+  ChannelInstance,
+  AgentContext,
+  AgentStatus,
+  ChannelAdapter,
+  ShowActivitiesMode,
+  ChatmodeBlock,
+} from '../types.js';
 
-// ── Config Schema Validation ───────────────────────────────────────────────
+// ── 校验：迁到 config-store.validateAgentConfig ──
+// EvolAgent 假定传入的 AgentConfig 已通过 ConfigStore.validateAgentConfig，
+// 这里不再做结构校验。
 
-export interface ValidationResult {
-  valid: boolean;
-  errors: string[];
-}
+type GlobalChatmode = ChatmodeBlock;
 
-const VALID_BASEAGENTS = new Set(['claude', 'codex', 'gemini', 'hermes']);
-const VALID_CHANNEL_TYPES = new Set(['feishu', 'aun', 'wechat', 'wecom', 'dingtalk', 'qqbot']);
-const VALID_CHATMODES = new Set(['interactive', 'proactive']);
-
-export function validateEvolAgentConfig(raw: any): ValidationResult {
-  const errors: string[] = [];
-
-  if (!raw || typeof raw !== 'object') {
-    return { valid: false, errors: ['config must be an object'] };
-  }
-
-  if (typeof raw.name !== 'string' || raw.name.trim() === '') {
-    errors.push('name is required and must be a non-empty string');
-  }
-
-  if (raw.enabled !== undefined && typeof raw.enabled !== 'boolean') {
-    errors.push('enabled must be a boolean if present');
-  }
-
-  if (!raw.agents || typeof raw.agents !== 'object') {
-    errors.push('agents must be an object with exactly one baseagent block');
-  } else {
-    const keys = Object.keys(raw.agents).filter(k => VALID_BASEAGENTS.has(k));
-    const unknownKeys = Object.keys(raw.agents).filter(k => !VALID_BASEAGENTS.has(k));
-    if (unknownKeys.length > 0) {
-      errors.push(`agents contains unknown baseagent keys: ${unknownKeys.join(', ')}`);
-    }
-    if (keys.length === 0) {
-      errors.push('agents must contain exactly one of: claude | codex | gemini | hermes');
-    } else if (keys.length > 1) {
-      errors.push(`agents must contain exactly one baseagent (single baseagent only), got: ${keys.join(', ')}`);
-    }
-  }
-
-  if (!raw.channels || typeof raw.channels !== 'object') {
-    errors.push('channels is required');
-  } else {
-    const channelKeys = Object.keys(raw.channels).filter(k => k !== 'defaultChannel');
-    if (channelKeys.length === 0) {
-      errors.push('channels must contain at least one channel type');
-    }
-    for (const key of channelKeys) {
-      if (!VALID_CHANNEL_TYPES.has(key)) {
-        errors.push(`unknown channel type: ${key}`);
-      }
-    }
-    // defaultChannel reference validation (same rules as evolclaw.json)
-    let totalInstances = 0;
-    for (const key of channelKeys) {
-      const block = (raw.channels as any)[key];
-      const insts = Array.isArray(block) ? block : (block ? [block] : []);
-      totalInstances += insts.length;
-    }
-    const dc = (raw.channels as any).defaultChannel;
-    if (dc) {
-      const err = validateDefaultChannelRef(dc, raw.channels);
-      if (err) errors.push(err);
-    } else if (totalInstances > 1) {
-      errors.push('channels.defaultChannel is required when multiple channel instances are configured (use "type" or "type/instanceName")');
-    }
-  }
-
-  if (!raw.projects || typeof raw.projects !== 'object') {
-    errors.push('projects is required');
-  } else {
-    const p = raw.projects.defaultPath;
-    if (typeof p !== 'string' || p === '') {
-      errors.push('projects.defaultPath is required');
-    } else if (!path.isAbsolute(p)) {
-      errors.push(`projects.defaultPath must be absolute, got: ${p}`);
-    }
-  }
-
-  if (raw.chatmode !== undefined) {
-    if (typeof raw.chatmode !== 'object' || raw.chatmode === null) {
-      errors.push('chatmode must be an object if present');
-    } else {
-      for (const key of ['private', 'group']) {
-        const val = raw.chatmode[key];
-        if (val !== undefined && !VALID_CHATMODES.has(val)) {
-          errors.push(`chatmode.${key} must be 'interactive' or 'proactive'`);
-        }
-      }
-    }
-  }
-
-  return { valid: errors.length === 0, errors };
-}
-
-// ── EvolAgent Class ────────────────────────────────────────────────────────
-
-type GlobalChatmode = { private?: 'interactive' | 'proactive'; group?: 'interactive' | 'proactive' };
-type ShowActivitiesMode = 'all' | 'dm-only' | 'owner-dm-only' | 'none';
-
-export interface EvolAgentOptions {
-  isDefault?: boolean;
-}
-
+/**
+ * EvolAgent —— 一个 self-agent 的运行时表示。
+ *
+ * 输入：MergedAgentConfig（defaults + per-agent 合并后的 effective 形态）。
+ * 持有该 agent 的 channels Map、活跃状态、生命周期。
+ *
+ * 写入永远落到 agents/<aid>/config.json（通过 ConfigStore.saveAgent 走双 rename），
+ * 不再有 "DefaultAgent" 概念，不再有 globalWriter / configPath null 的路径。
+ */
 export class EvolAgent {
+  readonly aid: string;
+  /** 兼容字段：name = aid。channel routing / log / IPC 都用 aid 作 agent 标识。 */
   readonly name: string;
-  readonly configPath: string | null;
-  readonly config: EvolAgentConfig;
-  readonly isDefault: boolean;
+
+  /** in-memory effective config（含 defaults 合并结果）；写盘时只回写 per-agent 部分。 */
+  private merged: MergedAgentConfig;
+  /** per-agent 原始配置（写盘真相源） */
+  private rawAgent: AgentConfig;
 
   readonly channels: Map<string, ChannelAdapter> = new Map();
   activeSessions: number = 0;
@@ -121,206 +44,165 @@ export class EvolAgent {
   status: AgentStatus;
   error?: string;
 
-  constructor(configPath: string | null, config: EvolAgentConfig, opts: EvolAgentOptions = {}) {
-    this.configPath = configPath;
-    this.config = config;
-    this.name = config.name;
-    this.isDefault = opts.isDefault === true;
-    this.status = config.enabled === false ? 'disabled' : 'stopped';
+  constructor(rawAgent: AgentConfig, merged: MergedAgentConfig) {
+    if (rawAgent.aid !== merged.aid) {
+      throw new Error(`EvolAgent: rawAgent.aid (${rawAgent.aid}) != merged.aid (${merged.aid})`);
+    }
+    this.rawAgent = rawAgent;
+    this.merged = merged;
+    this.aid = rawAgent.aid;
+    this.name = rawAgent.aid;
+    this.status = rawAgent.enabled === false ? 'disabled' : 'stopped';
+  }
+
+  /** 当前 effective config（合并后的） */
+  get config(): MergedAgentConfig {
+    return this.merged;
   }
 
   get baseagent(): string {
-    const keys = Object.keys(this.config.agents);
-    return keys[0] || 'claude';
+    return this.merged.active_baseagent || 'claude';
   }
 
   get model(): string | undefined {
-    return this.config.agents[this.baseagent]?.model;
+    const ba = this.baseagent;
+    const block = this.merged.baseagents?.[ba as keyof typeof this.merged.baseagents] as any;
+    return block?.model;
   }
 
   get effort(): string | undefined {
-    return this.config.agents[this.baseagent]?.effort;
+    const ba = this.baseagent;
+    const block = this.merged.baseagents?.[ba as keyof typeof this.merged.baseagents] as any;
+    if (ba === 'codex') return block?.effort ?? block?.reasoning;
+    return block?.effort;
   }
 
   get projectPath(): string {
-    return this.config.projects.defaultPath;
+    return this.merged.projects?.defaultPath || process.cwd();
   }
 
+  // ── Channels ──────────────────────────────────────────────────────────
+
   /**
-   * Compute the effective channel-instance name (used as registry key, session.channel, etc).
-   *
-   * - DefaultAgent: rawName ?? type  (preserves backward-compat with evolclaw.json)
-   * - EvolAgent:
-   *   - rawName present → `${agent.name}-${type}-${rawName}`
-   *   - rawName absent  → `${agent.name}-${type}`
-   *
-   * The agent-name prefix avoids collisions with DefaultAgent channels, e.g.
-   * test-bot's aun → "test-bot-aun" instead of "aun".
+   * effective channel key：`<aid>#<type>#<name>`。AUN 实例一个 agent 只有一条；
+   * 其它类型靠 name 区分。
    */
-  effectiveChannelName(type: string, rawName: string | undefined): string {
-    if (this.isDefault) return rawName ?? type;
-    return rawName ? `${this.name}-${type}-${rawName}` : `${this.name}-${type}`;
+  effectiveChannelName(type: string, rawName: string): string {
+    return formatChannelKey({ aid: this.aid, type, name: rawName });
   }
 
   channelInstanceNames(): string[] {
-    const names: string[] = [];
-    for (const [type, raw] of Object.entries(this.config.channels || {})) {
-      const instances = Array.isArray(raw) ? raw : [raw];
-      for (const inst of instances) {
-        if (!inst || typeof inst !== 'object') continue;
-        names.push(this.effectiveChannelName(type, (inst as any).name));
-      }
-    }
-    return names;
+    return this.merged.channels.map(c => this.effectiveChannelName(c.type, c.name));
+  }
+
+  /** 列出所有 channel 实例（含 effective key） */
+  listChannels(): Array<{ key: string; instance: ChannelInstance }> {
+    return this.merged.channels.map(inst => ({
+      key: this.effectiveChannelName(inst.type, inst.name),
+      instance: inst,
+    }));
   }
 
   /**
-   * Locate a channel-instance config block within this agent's config by
-   * matching the effective channel name (with agent prefix for EvolAgents).
-   * Returns the raw mutable instance object, or `null` if not found.
+   * 按 effective channel key 找到 instance（只读视图）。
+   * 找不到返回 null。
    */
-  findChannelInstance(channelName: string): any | null {
-    const channels = this.config.channels || {};
-    for (const [type, raw] of Object.entries(channels)) {
-      if (type === 'defaultChannel') continue;
-      const instances = Array.isArray(raw) ? raw : [raw];
-      for (const inst of instances) {
-        if (!inst || typeof inst !== 'object') continue;
-        const effName = this.effectiveChannelName(type, (inst as any).name);
-        if (effName === channelName) return inst;
-      }
-    }
-    return null;
+  findChannelInstance(channelKey: string): ChannelInstance | null {
+    return this.merged.channels.find(c => this.effectiveChannelName(c.type, c.name) === channelKey) ?? null;
   }
 
-  /** Get owner of a specific channel instance owned by this agent. */
-  getOwner(channelName: string): string | undefined {
-    const inst = this.findChannelInstance(channelName);
-    return inst?.owner;
+  // ── Owner / Admin（per-channel-instance）─────────────────────────────
+
+  getOwner(channelKey: string): string | undefined {
+    const inst = this.findChannelInstance(channelKey);
+    return inst?.owners?.[0];
   }
 
-  /** True when `userId` is the owner of `channelName`. */
-  isOwner(channelName: string, userId: string): boolean {
-    return this.getOwner(channelName) === userId;
+  isOwner(channelKey: string, userId: string): boolean {
+    const inst = this.findChannelInstance(channelKey);
+    return inst?.owners?.includes(userId) ?? false;
   }
 
-  /**
-   * True when `userId` is admin (or owner) of `channelName`.
-   * Owner implicitly has admin rights.
-   */
-  isAdmin(channelName: string, userId: string): boolean {
-    if (this.isOwner(channelName, userId)) return true;
-    const inst = this.findChannelInstance(channelName);
-    const admins: string[] = inst?.admins || [];
-    return admins.includes(userId);
+  isAdmin(channelKey: string, userId: string): boolean {
+    if (this.isOwner(channelKey, userId)) return true;
+    const inst = this.findChannelInstance(channelKey);
+    return inst?.admins?.includes(userId) ?? false;
   }
 
-  /**
-   * Set owner for a channel instance and persist to agent.json.
-   * Throws when called on DefaultAgent (no configPath) — callers must use
-   * the global config setter for default channels.
-   */
-  setOwner(channelName: string, userId: string): void {
-    const inst = this.findChannelInstance(channelName);
+  setOwner(channelKey: string, userId: string): void {
+    const inst = this.findRawChannelInstance(channelKey);
     if (!inst) {
-      logger.warn(`[EvolAgent] setOwner: channel "${channelName}" not found in agent "${this.name}"`);
+      logger.warn(`[EvolAgent ${this.aid}] setOwner: channel "${channelKey}" not found`);
       return;
     }
-    inst.owner = userId;
+    // 顶层 owners 是单值列表（首通信者即 owner）；channel 实例 owners 也允许多值
+    if (!inst.owners) inst.owners = [];
+    if (!inst.owners.includes(userId)) inst.owners.push(userId);
     this.persist();
   }
 
-  /** Get showActivities mode for a channel instance owned by this agent. */
-  getShowActivities(channelName: string): ShowActivitiesMode {
-    const inst = this.findChannelInstance(channelName);
-    return inst?.showActivities ?? 'all';
+  // ── ShowActivities ────────────────────────────────────────────────────
+
+  getShowActivities(channelKey: string): ShowActivitiesMode {
+    const inst = this.findChannelInstance(channelKey);
+    return inst?.showActivities ?? this.merged.show_activities ?? 'all';
   }
 
-  /**
-   * Set showActivities for a channel instance and persist to agent.json.
-   * Throws when called on DefaultAgent — callers must use the global setter.
-   */
-  setShowActivities(channelName: string, mode: ShowActivitiesMode): void {
-    const inst = this.findChannelInstance(channelName);
+  setShowActivities(channelKey: string, mode: ShowActivitiesMode): void {
+    const inst = this.findRawChannelInstance(channelKey);
     if (!inst) {
-      logger.warn(`[EvolAgent] setShowActivities: channel "${channelName}" not found in agent "${this.name}"`);
+      logger.warn(`[EvolAgent ${this.aid}] setShowActivities: channel "${channelKey}" not found`);
       return;
     }
     inst.showActivities = mode;
     this.persist();
   }
 
-  /**
-   * Set this agent's baseagent.model and persist to agent.json.
-   * Refuses for DefaultAgent. Writes to config.agents[baseagent].model.
-   */
+  // ── Baseagent 字段写入 ────────────────────────────────────────────────
+
   setBaseagentModel(value: string | undefined): void {
     const ba = this.baseagent;
-    if (!this.config.agents[ba]) this.config.agents[ba] = {};
-    if (value === undefined) {
-      delete (this.config.agents[ba] as any).model;
-    } else {
-      (this.config.agents[ba] as any).model = value;
-    }
+    if (!this.rawAgent.baseagents) this.rawAgent.baseagents = {};
+    const block = ((this.rawAgent.baseagents as any)[ba] ??= {});
+    if (value === undefined) delete block.model;
+    else block.model = value;
     this.persist();
   }
 
-  /**
-   * Get the agent's project list (defaults to a single entry derived from
-   * projects.defaultPath when projects.list is empty/absent).
-   */
+  setBaseagentEffort(value: string | undefined): void {
+    const ba = this.baseagent;
+    if (!this.rawAgent.baseagents) this.rawAgent.baseagents = {};
+    const block = ((this.rawAgent.baseagents as any)[ba] ??= {});
+    const fieldName = ba === 'codex' ? 'reasoning' : 'effort';
+    if (value === undefined) delete block[fieldName];
+    else block[fieldName] = value;
+    this.persist();
+  }
+
+  // ── Projects ──────────────────────────────────────────────────────────
+
   getProjects(): Record<string, string> {
-    const list = this.config.projects?.list;
+    const list = this.merged.projects?.list;
     if (list && Object.keys(list).length > 0) return { ...list };
-    const dp = this.config.projects?.defaultPath;
+    const dp = this.merged.projects?.defaultPath;
     if (dp) return { [path.basename(dp)]: dp };
     return {};
   }
 
-  /**
-   * Add (or update) a named project in this agent's projects.list and persist.
-   * Throws for DefaultAgent (caller should write to evolclaw.json instead).
-   */
   addProject(name: string, projectPath: string): void {
-    if (!this.config.projects) this.config.projects = { defaultPath: projectPath, list: {} };
-    if (!this.config.projects.list) this.config.projects.list = {};
-    this.config.projects.list[name] = projectPath;
+    if (!this.rawAgent.projects) this.rawAgent.projects = { defaultPath: projectPath, list: {} };
+    if (!this.rawAgent.projects.list) this.rawAgent.projects.list = {};
+    this.rawAgent.projects.list[name] = projectPath;
     this.persist();
   }
 
-  /**
-   * Set this agent's baseagent.effort and persist to agent.json.
-   * For codex, the field is named `reasoning` (alias). Refuses for DefaultAgent.
-   */
-  setBaseagentEffort(value: string | undefined): void {
-    const ba = this.baseagent;
-    if (!this.config.agents[ba]) this.config.agents[ba] = {};
-    const fieldName = ba === 'codex' ? 'reasoning' : 'effort';
-    if (value === undefined) {
-      delete (this.config.agents[ba] as any)[fieldName];
-    } else {
-      (this.config.agents[ba] as any)[fieldName] = value;
-    }
-    this.persist();
-  }
+  // ── Context（喂给 message-processor / command-handler） ──────────────
 
-  /**
-   * Persist the in-memory config back to the agent.json file.
-   * Refuses for DefaultAgent: it is built from evolclaw.json and has no
-   * dedicated file — callers must route writes through the global config.
-   */
-  private persist(): void {
-    if (!this.configPath) {
-      throw new Error('Cannot persist DefaultAgent config; use global config setters');
-    }
-    fs.writeFileSync(this.configPath, JSON.stringify(this.config, null, 2) + '\n', 'utf-8');
-  }
-
-  getContext(channelName: string, chatType: string, globalChatmode?: GlobalChatmode): AgentContext {
+  getContext(_channelKey: string, chatType: string, globalChatmode?: GlobalChatmode): AgentContext {
     const chatMode = this.resolveChatMode(chatType, globalChatmode);
     return {
       name: this.name,
-      isOwned: !this.isDefault,
+      isOwned: true,
       baseagent: this.baseagent,
       model: this.model,
       effort: this.effort,
@@ -333,14 +215,38 @@ export class EvolAgent {
     chatType: string,
     globalChatmode?: GlobalChatmode
   ): 'interactive' | 'proactive' {
-    const agentCm = this.config.chatmode;
     const key = chatType === 'group' ? 'group' : 'private';
-    if (agentCm) {
-      return (agentCm[key] || 'interactive');
+    return (
+      this.merged.chatmode?.[key]
+      ?? globalChatmode?.[key]
+      ?? (key === 'group' ? 'proactive' : 'interactive')
+    );
+  }
+
+  // ── Reload 支持：替换 in-memory config 并复用 channels Map ───────────
+
+  /** 用新的 raw + merged 替换 in-memory 状态。channels 由调用方决定如何 reconcile。 */
+  swapConfig(rawAgent: AgentConfig, merged: MergedAgentConfig): void {
+    if (rawAgent.aid !== this.aid) {
+      throw new Error(`EvolAgent.swapConfig: aid mismatch (${rawAgent.aid} vs ${this.aid})`);
     }
-    if (globalChatmode) {
-      return (globalChatmode[key] || 'interactive');
-    }
-    return 'interactive';
+    this.rawAgent = rawAgent;
+    this.merged = merged;
+  }
+
+  // ── 内部辅助 ─────────────────────────────────────────────────────────
+
+  /**
+   * 找 rawAgent.channels 里的可变实例，用于写入。
+   *
+   * merged.channels 是 deep clone 时 raw 跟 merged 的 channels 引用同一份（mergeForAgent
+   * 直接 `agent.channels` 透传），所以 raw 里的实例就等于 merged 里的实例。
+   */
+  private findRawChannelInstance(channelKey: string): ChannelInstance | null {
+    return this.rawAgent.channels.find(c => this.effectiveChannelName(c.type, c.name) === channelKey) ?? null;
+  }
+
+  private persist(): void {
+    saveAgent(this.rawAgent);
   }
 }

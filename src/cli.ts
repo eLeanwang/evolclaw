@@ -4,7 +4,9 @@ import os from 'os';
 import { spawn, execFileSync, execFile } from 'child_process';
 import { promisify } from 'util';
 import { resolveRoot, resolvePaths, ensureDataDirs, getPackageRoot } from './paths.js';
-import { loadConfig, validateConfigIntegrity, resolveAnthropicConfig, normalizeChannelInstances, channelTypes } from './config.js';
+import { loadDefaults, loadAllAgents, mergeForAgent } from './config-store.js';
+import { resolveAnthropicConfig } from './baseagents/resolve.js';
+import { normalizeChannelInstances, channelTypes } from './utils/channel-helpers.js';
 import { migrateProject } from './utils/migrate-project.js';
 import readline from 'readline';
 import { cmdInit } from './utils/init.js';
@@ -172,26 +174,23 @@ async function cmdStart() {
   const p = resolvePaths();
   ensureDataDirs();
 
-  // 检查配置文件
-  if (!fs.existsSync(p.config)) {
-    console.log('❌ 配置文件不存在，请先运行 evolclaw init');
-    process.exit(1);
-  }
+  // 旧配置自动迁移（evolclaw.json → 新结构）
+  const { autoMigrateIfNeeded } = await import('./config-store.js');
+  autoMigrateIfNeeded();
 
-  // 配置完整性校验
-  try {
-    const config = loadConfig(p.config);
-    const integrity = validateConfigIntegrity(config);
-    if (!integrity.valid) {
-      console.log(`❌ 配置文件完整性校验失败:`);
-      for (const reason of integrity.reasons) {
-        console.log(`  - ${reason}`);
-      }
-      console.log(`\n配置文件: ${p.config}`);
-      process.exit(1);
+  // 检查至少有一个 self-agent
+  const { agents, skipped } = loadAllAgents();
+  if (agents.length === 0) {
+    console.log('❌ 未配置任何 self-agent。');
+    console.log('');
+    console.log('创建方式：');
+    console.log('  1. 下载 Evol App（https://evolai.cn）→ 创建 Agent → 将引导文本输入给 baseagent 执行');
+    console.log('  2. 手动创建：evolclaw agent new <your-aid>.agentid.pub');
+    console.log('');
+    if (skipped.length > 0) {
+      console.log(`跳过的目录:`);
+      for (const s of skipped) console.log(`  - ${s.dirName}: ${s.reason}`);
     }
-  } catch (e: any) {
-    console.log(`❌ 配置文件加载失败: ${e.message}`);
     process.exit(1);
   }
 
@@ -607,16 +606,15 @@ async function cmdStatus() {
         // 最近 5 个（按 updatedAt 倒排）
         const recentSessions = [...allSessions].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 5);
 
-        // 检测 orphan：session 的 channel 实例名不在 evolclaw.json 配置内
+        // 检测 orphan：session 的 channel 实例名不在任何 self-agent 配置内
         let orphanCount = 0;
         try {
-          const config = loadConfig(p.config);
+          const { agents } = loadAllAgents();
           const configChannelNames = new Set<string>();
-          for (const type of channelTypes) {
-            const raw = (config.channels as any)?.[type];
-            const instances = normalizeChannelInstances(raw, type);
-            for (const inst of instances) {
-              configChannelNames.add(inst.name);
+          for (const cfg of agents) {
+            for (const inst of cfg.channels) {
+              // effective key: <aid>#<type>#<name>
+              configChannelNames.add(`${cfg.aid}#${inst.type}#${inst.name}`);
             }
           }
           for (const s of allSessions) {
@@ -686,9 +684,9 @@ async function cmdStatus() {
   }
 
   // Channel status
-  if (fs.existsSync(p.config)) {
+  if (fs.existsSync(p.defaultsConfig)) {
     console.log('');
-    const config = JSON.parse(fs.readFileSync(p.config, 'utf-8'));
+    const config = JSON.parse(fs.readFileSync(p.defaultsConfig, 'utf-8'));
 
     if (pid) {
       // Running: query IPC for real-time status
@@ -758,7 +756,7 @@ async function cmdStatus() {
     try {
       const agentResult = await ipcQuery(p.socket, { type: 'evolagent.list' }) as any;
       if (agentResult?.ok && agentResult.agents?.length > 0) {
-        const agents = agentResult.agents.filter((a: any) => !a.isDefault);
+        const agents = agentResult.agents;
         if (agents.length > 0) {
           console.log('');
           console.log('🤖 EvolAgents:');
@@ -1491,7 +1489,7 @@ async function invokeClaude(
 - 检查是否有旧进程仍在运行：\`ps aux | grep 'node.*dist/index.js' | grep -v grep\`，旧进程可能占用端口或锁文件
 - 可以运行 \`EVOLCLAW_HOME=${p.root} node dist/cli.js diagnose\` 快速检查配置和数据库
 - 如果进程无任何输出就 exit(1)，说明是 process.exit(1) 被显式调用，搜索源码中所有 process.exit(1) 位置
-- evolclaw.json 有自动备份机制：运行时 config watch 检测到文件损坏会自动保存内存快照到 \`data/evolclaw-{timestamp}.json\`，同时 \`data/evolclaw.backup.json\` 是最近一次完整配置的备份。如果 evolclaw.json 损坏或缺失，可以从这些备份恢复
+- 配置文件使用双 rename 原子写（foo.json → foo.json_ → foo.json__），崩溃时可从 foo.json_ 恢复
 
 请执行以下步骤：
 1. 读取 ${stdoutLog} 和 ${path.join(p.logs, 'evolclaw.log')} 的最后 50 行
@@ -1561,17 +1559,16 @@ function archiveSelfHealLog(
  * Resolve a channel instance name to its type and config object.
  * Searches across all channel types (feishu, wechat, aun) for a matching instance.
  */
-function resolveInstanceConfig(config: any, instanceName: string): { type: string; config: any } | null {
-  for (const type of ['feishu', 'wechat', 'aun', 'dingtalk', 'qqbot', 'wecom']) {
-    const raw = config.channels?.[type];
-    if (!raw) continue;
-    if (Array.isArray(raw)) {
-      const inst = raw.find((i: any) => i.name === instanceName);
-      if (inst) return { type, config: inst };
-    } else {
-      const name = raw.name || type;
-      if (name === instanceName) return { type, config: raw };
-    }
+function resolveInstanceConfig(instanceName: string): { type: string; config: any } | null {
+  // 新结构：channel key 是 <aid>#<type>#<name>，解析后从对应 agent 的 channels[] 找
+  const parts = instanceName.split('#');
+  if (parts.length === 3) {
+    const [aid, type, name] = parts;
+    const { agents } = loadAllAgents();
+    const agent = agents.find(a => a.aid === aid);
+    if (!agent) return null;
+    const inst = agent.channels.find((c: any) => c.type === type && c.name === name);
+    if (inst) return { type, config: inst };
   }
   return null;
 }
@@ -1588,13 +1585,9 @@ async function notifyChannel(
 ) {
   if (!pendingInfo) return;
 
-  const configPath = path.join(p.dataDir, 'evolclaw.json');
-  if (!fs.existsSync(configPath)) return;
-  const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-
-  const resolved = resolveInstanceConfig(config, pendingInfo.channel);
+  const resolved = resolveInstanceConfig(pendingInfo.channel);
   if (!resolved) {
-    log(`Channel instance "${pendingInfo.channel}" not found in config`);
+    log(`Channel instance "${pendingInfo.channel}" not found in any agent config`);
     return;
   }
 
@@ -1716,7 +1709,7 @@ async function cmdMv(oldDir?: string, newDir?: string) {
     if (r.codexUpdated > 0) console.log(`✓ Codex 数据库已更新 (${r.codexUpdated} 个会话)`);
     if (r.directoryMoved) console.log('✓ 项目目录已移动');
     if (r.evolclawDbUpdated > 0) console.log(`✓ EvolClaw 会话存储已更新 (${r.evolclawDbUpdated} 条记录)`);
-    if (r.evolclawConfigUpdated) console.log('✓ evolclaw.json projects.list 已更新');
+    if (r.evolclawConfigUpdated) console.log('✓ agent config projects.list 已更新');
 
     console.log('\n迁移完成！');
   } catch (e) {
@@ -1742,27 +1735,42 @@ async function cmdDiagnose() {
 
   // 2. 加载并校验配置
   try {
-    const config = loadConfig();
-    console.log(`[diagnose] ✓ 配置文件加载成功: ${p.config}`);
-
-    const integrity = validateConfigIntegrity(config);
-    if (!integrity.valid) {
-      console.error(`[diagnose] ❌ 配置完整性校验失败:\n  ${integrity.reasons.join('\n  ')}`);
+    // 2. 加载 self-agents
+    const { agents, skipped } = loadAllAgents();
+    if (agents.length === 0) {
+      console.error(`[diagnose] ❌ 未配置 self-agent。请运行 \`evolclaw aid new <name>\``);
       hasError = true;
+      if (skipped.length > 0) {
+        console.error(`[diagnose] 跳过的目录:`);
+        for (const s of skipped) console.error(`  - ${s.dirName}: ${s.reason}`);
+      }
     } else {
-      console.log(`[diagnose] ✓ 配置完整性校验通过`);
+      console.log(`[diagnose] ✓ 已加载 ${agents.length} 个 self-agent`);
     }
 
-    // 3. 检查 Anthropic 配置
-    try {
-      const anthropic = resolveAnthropicConfig(config);
-      console.log(`[diagnose] ✓ Anthropic 配置解析成功 (apiKey: ${anthropic.apiKey ? '已设置' : '❌ 未设置'}, model: ${anthropic.model || 'default'})`);
-    } catch (e) {
-      console.error(`[diagnose] ❌ Anthropic 配置解析失败: ${e instanceof Error ? e.message : e}`);
-      hasError = true;
+    // 3. 检查 Anthropic 配置（用首个 self-agent 的 effective config）
+    if (agents.length > 0) {
+      try {
+        const defaults = loadDefaults();
+        const merged = mergeForAgent(agents[0], defaults);
+        const legacyConfig = {
+          agents: {
+            claude: merged.baseagents?.claude as any,
+            codex: merged.baseagents?.codex as any,
+            gemini: merged.baseagents?.gemini as any,
+          } as any,
+          channels: {} as any,
+          projects: merged.projects as any,
+        };
+        const anthropic = resolveAnthropicConfig(legacyConfig as any);
+        console.log(`[diagnose] ✓ Anthropic 配置解析成功 (apiKey: ${anthropic.apiKey ? '已设置' : '❌ 未设置'}, model: ${anthropic.model || 'default'})`);
+      } catch (e) {
+        console.error(`[diagnose] ❌ Anthropic 配置解析失败: ${e instanceof Error ? e.message : e}`);
+        hasError = true;
+      }
     }
   } catch (e) {
-    console.error(`[diagnose] ❌ 配置文件加载失败: ${e instanceof Error ? e.message : e}`);
+    console.error(`[diagnose] ❌ 配置加载失败: ${e instanceof Error ? e.message : e}`);
     hasError = true;
   }
 
@@ -1952,17 +1960,8 @@ async function cmdAgentList(): Promise<void> {
 
   // Cold mode: read from disk
   const { EvolAgentRegistry } = await import('./core/evolagent-registry.js');
-  const { loadConfig } = await import('./config.js');
-
-  let config: any;
-  try {
-    config = loadConfig(p.config);
-  } catch {
-    config = { agents: {}, channels: {}, projects: { defaultPath: process.cwd() } };
-  }
-
   const registry = new EvolAgentRegistry(p.agentsDir);
-  registry.loadAll(config);
+  registry.loadAll();
   printAgentTable(registry.list());
 }
 
@@ -1977,7 +1976,7 @@ function printAgentTable(list: any[]): void {
     'PROJECT'.padEnd(22) + 'BASEAGENT'.padEnd(11) + 'LAST ACTIVE'
   );
   for (const info of list) {
-    const name = info.isDefault ? '[default]' : info.name;
+    const name = info.name;
     const status = info.status || 'stopped';
     const channels = info.channels?.length > 0 ? info.channels.join(', ').slice(0, 22) : '—';
     const project = info.projectPath ? path.basename(info.projectPath) : '—';
@@ -2021,22 +2020,13 @@ async function cmdAgentShow(name: string): Promise<void> {
 
   // Cold mode
   const { EvolAgentRegistry } = await import('./core/evolagent-registry.js');
-  const { loadConfig } = await import('./config.js');
-
-  let config: any;
-  try {
-    config = loadConfig(p.config);
-  } catch {
-    config = { agents: {}, channels: {}, projects: { defaultPath: process.cwd() } };
-  }
-
   const registry = new EvolAgentRegistry(p.agentsDir);
-  registry.loadAll(config);
+  registry.loadAll();
 
   const agent = registry.get(name);
   if (!agent) {
     console.error(`Agent "${name}" not found.`);
-    const allList = registry.list().filter(i => !i.isDefault);
+    const allList = registry.list();
     if (allList.length > 0) {
       console.log(`Available: ${allList.map(i => i.name).join(', ')}`);
     }
@@ -2050,50 +2040,57 @@ async function cmdAgentShow(name: string): Promise<void> {
   console.log(`  Project:    ${agent.projectPath}`);
   console.log(`  Channels:   ${agent.channelInstanceNames().join(', ') || '—'}`);
   if (agent.error) console.log(`  Error:      ${agent.error}`);
-  if (agent.configPath) console.log(`  Config:     ${agent.configPath}`);
 }
 
 async function cmdAgentNew(suggestedName: string): Promise<void> {
   const p = resolvePaths();
-
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   const ask = (q: string): Promise<string> => new Promise(r => rl.question(q, r));
 
-  let name: string;
   try {
-    const prompt = suggestedName
-      ? `Agent name [${suggestedName}]: `
-      : 'Agent name: ';
-    const input = (await ask(prompt)).trim();
-    name = input || suggestedName;
-    if (!name) {
-      console.error('Agent name is required.');
+    // 1. AID（新结构下 agent 标识就是 AID）
+    const aidPrompt = suggestedName
+      ? `AID [${suggestedName}]: `
+      : 'AID (e.g. mybot.agentid.pub): ';
+    const aidInput = (await ask(aidPrompt)).trim();
+    const aid = aidInput || suggestedName;
+    if (!aid) {
+      console.error('AID is required.');
       process.exit(1);
     }
-    // Disallow dots/slashes/spaces in agent name (used as filename + channel-name prefix)
-    if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
-      console.error(`Invalid agent name "${name}": only letters/digits/_/- allowed`);
-      process.exit(1);
-    }
-
-    const agentPath = path.join(p.agentsDir, `${name}.json`);
-    if (fs.existsSync(agentPath)) {
-      console.error(`Agent "${name}" already exists: ${agentPath}`);
+    const { isValidAid, aidCreate } = await import('./aid/index.js');
+    if (!isValidAid(aid)) {
+      console.error(`Invalid AID "${aid}": must be a valid multi-level domain (e.g. mybot.agentid.pub)`);
       process.exit(1);
     }
 
-    console.log(`\nCreating agent: ${name}\n`);
+    const agentDirPath = path.join(p.agentsDir, aid);
+    if (fs.existsSync(path.join(agentDirPath, 'config.json'))) {
+      console.error(`Agent "${aid}" already exists: ${agentDirPath}/config.json`);
+      process.exit(1);
+    }
 
-    // Suggest project path: sibling of evolclaw.json's defaultPath, named after agent
+    console.log(`\nCreating agent: ${aid}\n`);
+
+    // 2. 在 AUN 网络注册 AID
+    try {
+      const result = await aidCreate(aid);
+      try { await result.client.close(); } catch {}
+      console.log(`  ✓ AID ${result.alreadyExisted ? 'reused' : 'created'}: ${aid}`);
+    } catch (e: any) {
+      console.error(`  ⚠ AID creation failed (can retry later): ${e?.message || e}`);
+    }
+
+    // 3. Project path
     let suggestedProjectPath = '';
     try {
-      const cfg = loadConfig(p.config);
-      const defaultProjectsRoot = cfg.projects?.defaultPath
-        ? path.dirname(cfg.projects.defaultPath)
+      const defaults = loadDefaults();
+      const defaultProjectsRoot = defaults?.projects?.defaultPath
+        ? path.dirname(defaults.projects.defaultPath)
         : path.join(os.homedir(), 'evolclaw-projects');
-      suggestedProjectPath = path.join(defaultProjectsRoot, name);
+      suggestedProjectPath = path.join(defaultProjectsRoot, aid.split('.')[0]);
     } catch {
-      suggestedProjectPath = path.join(os.homedir(), 'evolclaw-projects', name);
+      suggestedProjectPath = path.join(os.homedir(), 'evolclaw-projects', aid.split('.')[0]);
     }
     const projectInput = (await ask(`Project path [${suggestedProjectPath}]: `)).trim();
     const projectPath = projectInput || suggestedProjectPath;
@@ -2102,21 +2099,17 @@ async function cmdAgentNew(suggestedName: string): Promise<void> {
       process.exit(1);
     }
     if (!fs.existsSync(projectPath)) {
-      const create = (await ask(`Project path does not exist. Create ${projectPath}? [Y/n]: `)).trim().toLowerCase();
+      const create = (await ask(`Project path does not exist. Create? [Y/n]: `)).trim().toLowerCase();
       if (create === '' || create === 'y' || create === 'yes') {
-        try {
-          fs.mkdirSync(projectPath, { recursive: true });
-          console.log(`  ✓ Created ${projectPath}`);
-        } catch (e: any) {
-          console.error(`Failed to create ${projectPath}: ${e?.message || e}`);
-          process.exit(1);
-        }
+        fs.mkdirSync(projectPath, { recursive: true });
+        console.log(`  ✓ Created ${projectPath}`);
       } else {
-        console.error('Aborted: project path does not exist.');
+        console.error('Aborted.');
         process.exit(1);
       }
     }
 
+    // 4. Baseagent
     const baseagentChoices = ['claude', 'codex', 'gemini', 'hermes'];
     const baseagent = (await ask(`Baseagent (${baseagentChoices.join('/')}) [claude]: `)).trim() || 'claude';
     if (!baseagentChoices.includes(baseagent)) {
@@ -2124,110 +2117,55 @@ async function cmdAgentNew(suggestedName: string): Promise<void> {
       process.exit(1);
     }
 
-    const model = (await ask('Model (leave empty for default): ')).trim() || undefined;
-    const effort = (await ask('Effort (low/medium/high/max) [high]: ')).trim() || 'high';
+    // 5. Chatmode
+    const chatmodePrivate = (await ask('Private chat mode (interactive/proactive) [interactive]: ')).trim() || 'interactive';
+    const chatmodeGroup = (await ask('Group chat mode (interactive/proactive) [proactive]: ')).trim() || 'proactive';
 
-    const chatmodeChoices = ['interactive', 'proactive'];
-    console.log('\nChat mode determines how the agent responds:');
-    console.log('  interactive — replies to every message; agent output sent automatically');
-    console.log('  proactive   — silent by default; agent decides when/whether to send via ctl send');
-    const chatmodePrivate = (await ask(`Private (1-on-1) chat mode (${chatmodeChoices.join('/')}) [interactive]: `)).trim() || 'interactive';
-    if (!chatmodeChoices.includes(chatmodePrivate)) {
-      console.error(`Invalid chat mode: ${chatmodePrivate}`);
-      process.exit(1);
-    }
-    const chatmodeGroup = (await ask(`Group chat mode (${chatmodeChoices.join('/')}) [proactive]: `)).trim() || 'proactive';
-    if (!chatmodeChoices.includes(chatmodeGroup)) {
-      console.error(`Invalid chat mode: ${chatmodeGroup}`);
-      process.exit(1);
-    }
+    // 6. Owner
+    const owner = (await ask('Owner AID (leave empty for auto-bind on first message): ')).trim() || undefined;
 
-    // Channels (loop to allow multiple)
-    const channelsConfig: Record<string, any[]> = {};
-    const { getChannelCredentialCollector } = await import('./utils/init-channel.js');
-
-    // Close outer rl before channel loop (collectors create their own readline)
     rl.close();
 
-    while (true) {
-      const loopRl = readline.createInterface({ input: process.stdin, output: process.stdout });
-      const loopAsk = (q: string): Promise<string> => new Promise(r => loopRl.question(q, r));
-
-      const addChannel = (await loopAsk('\nAdd channel? (y/n) [n]: ')).trim().toLowerCase();
-      if (addChannel !== 'y') {
-        loopRl.close();
-        break;
-      }
-
-      const channelType = (await loopAsk('Channel type (feishu/aun/wechat/wecom/dingtalk/qqbot): ')).trim();
-      const collector = getChannelCredentialCollector(channelType);
-      if (!collector) {
-        console.error(`Unknown channel type: ${channelType}`);
-        loopRl.close();
-        continue;
-      }
-
-      // Close loop rl before collector opens its own
-      loopRl.close();
-
-      let creds: any = null;
-      try {
-        creds = await collector();
-      } catch (e: any) {
-        console.error(`  Channel setup failed: ${e?.message || e}`);
-      }
-      if (!creds) {
-        console.log('  Channel setup cancelled.');
-        continue;
-      }
-
-      const nameRl = readline.createInterface({ input: process.stdin, output: process.stdout });
-      const defaultEffName = `${name}-${channelType}`;
-      const instName = await new Promise<string>(r => nameRl.question(`  Channel instance name (leave empty for ${defaultEffName}): `, r));
-      nameRl.close();
-
-      const trimmedName = instName.trim();
-      if (trimmedName) creds.name = trimmedName;
-      // else: omit name; effective channel name will be ${agent.name}-${type} via EvolAgent.effectiveChannelName
-      if (!channelsConfig[channelType]) channelsConfig[channelType] = [];
-      channelsConfig[channelType].push(creds);
-    }
-
-    // Simplify channels: if only one instance per type, unwrap from array
-    const finalChannels: Record<string, any> = {};
-    for (const [type, instances] of Object.entries(channelsConfig)) {
-      finalChannels[type] = instances.length === 1 ? instances[0] : instances;
-    }
+    // 7. 写入新格式 AgentConfig
+    const { ensureAgentDirSkeleton, saveAgent } = await import('./config-store.js');
+    const { CONFIG_SCHEMA_VERSION } = await import('./types.js');
 
     const agentConfig = {
-      name,
+      $schema_version: CONFIG_SCHEMA_VERSION,
+      aid,
       enabled: true,
-      agents: { [baseagent]: { ...(model && { model }), effort } },
-      channels: finalChannels,
-      projects: { defaultPath: projectPath.trim() },
+      owners: owner ? [owner] : [],
+      channels: [{ type: 'aun', name: 'main' }],
+      active_baseagent: baseagent,
+      baseagents: { [baseagent]: {} },
+      projects: { defaultPath: projectPath },
       chatmode: { private: chatmodePrivate, group: chatmodeGroup },
     };
 
-    fs.mkdirSync(p.agentsDir, { recursive: true });
-    fs.writeFileSync(agentPath, JSON.stringify(agentConfig, null, 2));
-    console.log(`\n✓ Created: ${agentPath}`);
+    saveAgent(agentConfig as any);
+    ensureAgentDirSkeleton(aid);
+    console.log(`\n✓ Created: ${agentDirPath}/config.json`);
     console.log('  Run `evolclaw restart` to activate.');
   } finally {
-    // rl may already be closed if channel collector was invoked
     try { rl.close(); } catch {}
   }
 }
 
-async function cmdAgentNewNonInteractive(name: string, args: string[]): Promise<void> {
+async function cmdAgentNewNonInteractive(aid: string, args: string[]): Promise<void> {
   const p = resolvePaths();
-  const agentPath = path.join(p.agentsDir, `${name}.json`);
 
-  if (fs.existsSync(agentPath)) {
-    console.error(`Agent "${name}" already exists: ${agentPath}`);
+  const { isValidAid, aidCreate } = await import('./aid/index.js');
+  if (!isValidAid(aid)) {
+    console.error(`Invalid AID "${aid}": must be a valid multi-level domain (e.g. mybot.agentid.pub)`);
     process.exit(1);
   }
 
-  // Helper: extract --flag value from args
+  const agentDirPath = path.join(p.agentsDir, aid);
+  if (fs.existsSync(path.join(agentDirPath, 'config.json'))) {
+    console.error(`Agent "${aid}" already exists: ${agentDirPath}/config.json`);
+    process.exit(1);
+  }
+
   const getArg = (flag: string): string | undefined => {
     const idx = args.indexOf(flag);
     return idx !== -1 && idx + 1 < args.length ? args[idx + 1] : undefined;
@@ -2264,7 +2202,7 @@ async function cmdAgentNewNonInteractive(name: string, args: string[]): Promise<
     }
   }
 
-  // Optional: chatmode
+  // Optional
   const chatmodePrivate = getArg('--chatmode-private') || 'interactive';
   const chatmodeGroup = getArg('--chatmode-group') || 'proactive';
   const chatmodeValid = new Set(['interactive', 'proactive']);
@@ -2277,38 +2215,24 @@ async function cmdAgentNewNonInteractive(name: string, args: string[]): Promise<
     process.exit(1);
   }
 
-  // Channels
-  const channelsConfig: Record<string, any> = {};
-
-  // AUN
-  const aunAid = getArg('--aun-aid');
-  const aunOwner = getArg('--aun-owner');
-  if (aunAid || aunOwner) {
-    if (!aunAid || !aunOwner) {
-      console.error('--aun-aid and --aun-owner must both be provided');
-      process.exit(1);
-    }
-    const { isValidAid, aidCreate } = await import('./aid/index.js');
-    if (!isValidAid(aunAid)) {
-      console.error(`Invalid --aun-aid: ${aunAid}`);
-      process.exit(1);
-    }
-    if (!isValidAid(aunOwner)) {
-      console.error(`Invalid --aun-owner: ${aunOwner}`);
-      process.exit(1);
-    }
-    try {
-      const result = await aidCreate(aunAid);
-      try { await result.client.close(); } catch { /* ignore */ }
-      console.log(`✓ AID ${result.alreadyExisted ? 'reused' : 'created'}: ${aunAid}`);
-    } catch (e: any) {
-      console.error(`AID creation failed: ${e?.message || e}`);
-      process.exit(1);
-    }
-    channelsConfig.aun = { enabled: true, aid: aunAid, owner: aunOwner };
+  const owner = getArg('--owner');
+  if (owner && !isValidAid(owner)) {
+    console.error(`Invalid --owner: ${owner}`);
+    process.exit(1);
   }
 
-  // Feishu
+  // Register AID on AUN network
+  try {
+    const result = await aidCreate(aid);
+    try { await result.client.close(); } catch {}
+    console.log(`✓ AID ${result.alreadyExisted ? 'reused' : 'created'}: ${aid}`);
+  } catch (e: any) {
+    console.error(`  ⚠ AID creation failed (can retry later): ${e?.message || e}`);
+  }
+
+  // Build channels[] list
+  const channels: any[] = [{ type: 'aun', name: 'main' }];
+
   const feishuAppId = getArg('--feishu-app-id');
   const feishuAppSecret = getArg('--feishu-app-secret');
   if (feishuAppId || feishuAppSecret) {
@@ -2316,32 +2240,9 @@ async function cmdAgentNewNonInteractive(name: string, args: string[]): Promise<
       console.error('--feishu-app-id and --feishu-app-secret must both be provided');
       process.exit(1);
     }
-    channelsConfig.feishu = [{
-      name: `feishu-${name}`,
-      enabled: true,
-      appId: feishuAppId,
-      appSecret: feishuAppSecret,
-    }];
+    channels.push({ type: 'feishu', name: 'main', enabled: true, appId: feishuAppId, appSecret: feishuAppSecret });
   }
 
-  // WeChat
-  const wechatToken = getArg('--wechat-token');
-  if (wechatToken) {
-    channelsConfig.wechat = { enabled: true, token: wechatToken };
-  }
-
-  // WeCom
-  const wecomBotId = getArg('--wecom-bot-id');
-  const wecomSecret = getArg('--wecom-secret');
-  if (wecomBotId || wecomSecret) {
-    if (!wecomBotId || !wecomSecret) {
-      console.error('--wecom-bot-id and --wecom-secret must both be provided');
-      process.exit(1);
-    }
-    channelsConfig.wecom = { enabled: true, botId: wecomBotId, secret: wecomSecret };
-  }
-
-  // DingTalk
   const dingtalkClientId = getArg('--dingtalk-client-id');
   const dingtalkClientSecret = getArg('--dingtalk-client-secret');
   if (dingtalkClientId || dingtalkClientSecret) {
@@ -2349,38 +2250,29 @@ async function cmdAgentNewNonInteractive(name: string, args: string[]): Promise<
       console.error('--dingtalk-client-id and --dingtalk-client-secret must both be provided');
       process.exit(1);
     }
-    channelsConfig.dingtalk = { enabled: true, clientId: dingtalkClientId, clientSecret: dingtalkClientSecret };
+    channels.push({ type: 'dingtalk', name: 'main', enabled: true, clientId: dingtalkClientId, clientSecret: dingtalkClientSecret });
   }
 
-  // QQBot
-  const qqbotAppId = getArg('--qqbot-app-id');
-  const qqbotClientSecret = getArg('--qqbot-client-secret');
-  if (qqbotAppId || qqbotClientSecret) {
-    if (!qqbotAppId || !qqbotClientSecret) {
-      console.error('--qqbot-app-id and --qqbot-client-secret must both be provided');
-      process.exit(1);
-    }
-    channelsConfig.qqbot = { enabled: true, appId: qqbotAppId, clientSecret: qqbotClientSecret };
-  }
-
-  if (Object.keys(channelsConfig).length === 0) {
-    console.error('At least one channel must be configured (aun / feishu / wechat / wecom / dingtalk / qqbot)');
-    process.exit(1);
-  }
+  // Write new format
+  const { ensureAgentDirSkeleton, saveAgent } = await import('./config-store.js');
+  const { CONFIG_SCHEMA_VERSION } = await import('./types.js');
 
   const agentConfig = {
-    name,
+    $schema_version: CONFIG_SCHEMA_VERSION,
+    aid,
     enabled: true,
-    agents: { [baseagent]: {} },
-    channels: channelsConfig,
+    owners: owner ? [owner] : [],
+    channels,
+    active_baseagent: baseagent,
+    baseagents: { [baseagent]: {} },
     projects: { defaultPath: project },
     chatmode: { private: chatmodePrivate, group: chatmodeGroup },
   };
 
-  fs.mkdirSync(p.agentsDir, { recursive: true });
-  fs.writeFileSync(agentPath, JSON.stringify(agentConfig, null, 2));
-  console.log(`✓ Created: ${agentPath}`);
-  console.log('  Run `evolclaw restart` (or `evolclaw agent reload <name>`) to activate.');
+  saveAgent(agentConfig as any);
+  ensureAgentDirSkeleton(aid);
+  console.log(`✓ Created: ${agentDirPath}/config.json`);
+  console.log('  Run `evolclaw restart` to activate.');
 }
 
 // ==================== AID ====================
@@ -2974,7 +2866,7 @@ export async function main(args: string[]) {
       console.log(`Usage: evolclaw {init|start|stop|restart|status|logs|watch|ctl|diagnose|mv}
 
 Commands:
-  init          创建配置文件 (${resolvePaths().config})
+  init          初始化 evolclaw home (${resolvePaths().defaultsConfig})
   init feishu   飞书扫码登录并写入配置
   init wechat   微信扫码登录并写入配置
   init dingtalk 钉钉扫码登录并写入配置

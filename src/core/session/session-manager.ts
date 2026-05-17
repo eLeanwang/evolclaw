@@ -1,5 +1,5 @@
 import { Session, SessionIdentity, DEFAULT_PERMISSION_MODE } from '../../types.js';
-import { ensureDir } from '../../config.js';
+import { ensureDir } from '../../utils/ensure-dir.js';
 import { resolvePaths } from '../../paths.js';
 import { logger } from '../../utils/logger.js';
 import { encodePath } from '../../utils/cross-platform.js';

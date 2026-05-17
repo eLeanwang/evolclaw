@@ -78,7 +78,7 @@ export class StatsCollector {
     // 聚合统计（可按 agent 过滤）
     const filtered = agentName === undefined
       ? this.events
-      : this.events.filter(e => (e.agentName ?? '[default]') === agentName);
+      : this.events.filter(e => (e.agentName ?? '<unknown>') === agentName);
 
     let received = 0;
     let completed = 0;

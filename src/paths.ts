@@ -12,7 +12,7 @@ export function resolveRoot(): string {
   if (_root) return _root;
   if (process.env.EVOLCLAW_HOME) {
     _root = process.env.EVOLCLAW_HOME;
-  } else if (fs.existsSync(path.join(process.cwd(), 'data', 'evolclaw.json'))) {
+  } else if (fs.existsSync(path.join(process.cwd(), 'agents', 'defaults.json'))) {
     _root = process.cwd();
   } else {
     _root = path.join(os.homedir(), '.evolclaw');
@@ -29,9 +29,6 @@ export function resolvePaths() {
   const root = resolveRoot();
   return {
     root,
-    config: path.join(root, 'data', 'evolclaw.json'),
-    configSample: path.join(root, 'data', 'evolclaw.sample.json'),
-    db: path.join(root, 'data', 'sessions.db'),
     sessionsDir: path.join(root, 'data', 'sessions'),
     instanceDir: path.join(root, 'data', 'instance'),
     outboxDir: path.join(root, 'data', 'outbox'),
@@ -39,18 +36,55 @@ export function resolvePaths() {
     logs: path.join(root, 'logs'),
     agentsDir: path.join(root, 'agents'),
     lineStats: path.join(root, 'logs', 'line-stats.log'),
-    readySignal: path.join(root, 'logs', 'ready.signal'),
+    readySignal: path.join(root, 'data', 'instance', 'ready.signal'),
     selfHealLog: path.join(root, 'logs', 'self-heal.md'),
-    socket: resolveSocketPath(root),
+    socket: resolveInstanceSocketPath(root),
+
+    // ── 新结构（evolclaw-home-directory.md）────────────────
+    defaultsConfig: path.join(root, 'agents', 'defaults.json'),
+    kitsDir: path.join(root, 'kits'),
+    kitsAunDir: path.join(root, 'kits', 'aun'),
+    kitsChannelsDir: path.join(root, 'kits', 'channels'),
+    kitsEvolclawDir: path.join(root, 'kits', 'evolclaw'),
+    kitsTemplatesDir: path.join(root, 'kits', 'templates'),
+    instanceReadySignal: path.join(root, 'data', 'instance', 'ready.signal'),
+    instanceSocket: resolveInstanceSocketPath(root),
   };
 }
 
-function resolveSocketPath(root: string): string {
+// ── per-agent 路径（参数化，不进 resolvePaths() 的固定 map）──
+
+export function agentDir(aid: string): string {
+  return path.join(resolveRoot(), 'agents', aid);
+}
+export function agentConfig(aid: string): string {
+  return path.join(agentDir(aid), 'config.json');
+}
+export function agentPersonalDir(aid: string): string {
+  return path.join(agentDir(aid), 'personal');
+}
+export function agentIdentitiesDir(aid: string): string {
+  return path.join(agentDir(aid), 'identities');
+}
+export function agentVenuesDir(aid: string): string {
+  return path.join(agentDir(aid), 'venues');
+}
+export function agentSessionsDir(aid: string): string {
+  return path.join(agentDir(aid), 'sessions');
+}
+export function agentDataDir(aid: string): string {
+  return path.join(agentDir(aid), 'data');
+}
+export function agentDataCacheDir(aid: string): string {
+  return path.join(agentDataDir(aid), 'cache');
+}
+
+function resolveInstanceSocketPath(root: string): string {
   if (isWindows) {
     const hash = crypto.createHash('sha1').update(root).digest('hex').slice(0, 12);
     return `\\\\.\\pipe\\evolclaw-${hash}`;
   }
-  return path.join(root, 'logs', 'evolclaw.sock');
+  return path.join(root, 'data', 'instance', 'evolclaw.sock');
 }
 
 export function ensureDataDirs(): void {
@@ -61,6 +95,7 @@ export function ensureDataDirs(): void {
   fs.mkdirSync(p.sessionsDir, { recursive: true });
   fs.mkdirSync(p.instanceDir, { recursive: true });
   fs.mkdirSync(p.outboxDir, { recursive: true });
+  fs.mkdirSync(p.kitsDir, { recursive: true });
 }
 
 export function getPackageRoot(): string {

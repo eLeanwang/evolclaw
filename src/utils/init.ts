@@ -6,7 +6,7 @@ import { createRequire } from 'module';
 import { execFileSync } from 'child_process';
 import { promisify } from 'util';
 import { execFile } from 'child_process';
-import { resolveRoot, resolvePaths, ensureDataDirs, getPackageRoot } from '../paths.js';
+import { resolvePaths, ensureDataDirs, getPackageRoot } from '../paths.js';
 import { isWindows, commandExists } from './cross-platform.js';
 import { scanInstances } from './instance-registry.js';
 
@@ -403,218 +403,123 @@ export async function cmdInit(options?: {
     return;
   }
 
-  const sampleSrc = path.join(getPackageRoot(), 'data', 'evolclaw.sample.json');
-  if (!fs.existsSync(sampleSrc)) {
-    console.log(`❌ 找不到示例配置: ${sampleSrc}`);
+  // ── 1. 环境检查：至少有一款 baseagent CLI 可用 ──
+  const baseagents = [
+    { name: 'Claude Code', cmd: 'claude' },
+    { name: 'CodeX', cmd: 'codex' },
+    { name: 'OpenClaw', cmd: 'openclaw' },
+    { name: 'Hermes', cmd: 'hermes' },
+    { name: 'Gemini', cmd: 'gemini' },
+  ];
+
+  const available = baseagents.filter(b => commandExists(b.cmd));
+  if (available.length === 0) {
+    console.log('❌ 未检测到任何 baseagent CLI。请先安装至少一款：');
+    console.log('');
+    for (const b of baseagents) {
+      console.log(`  - ${b.name} (${b.cmd})`);
+    }
+    console.log('');
+    console.log('安装后重新运行 evolclaw init');
     return;
   }
 
-  // 非交互式模式
+  console.log('✓ 检测到可用的 baseagent:');
+  for (const b of available) {
+    console.log(`  ● ${b.name} (${b.cmd})`);
+  }
+  console.log('');
+
+  // ── 2. 创建 agents/defaults.json ──
+  const defaultsPath = path.join(p.agentsDir, 'defaults.json');
+
   if (options?.nonInteractive) {
-    const config = JSON.parse(fs.readFileSync(sampleSrc, 'utf-8'));
+    // 非交互式：直接写最小模板
     const defaultPath = options.defaultPath || path.join(os.homedir(), 'projects', 'default');
     if (!fs.existsSync(defaultPath)) fs.mkdirSync(defaultPath, { recursive: true });
-    config.projects.defaultPath = defaultPath;
-    config.projects.list = { [path.basename(defaultPath)]: defaultPath };
 
-    if (options.channel === 'aun' && !options.aunAid) {
-      throw new Error('--aun-aid is required for AUN channel (e.g. --aun-aid mybot.agentid.pub)');
-    }
-    if (options.channel === 'aun' && options.aunAid) {
-      const { ensureAunSdk, aidCreate, agentmdPut, buildInitialAgentMd } = await import('../aid/index.js');
+    const defaults = {
+      $schema_version: 1,
+      active_baseagent: available[0].cmd === 'claude' ? 'claude' : available[0].cmd,
+      baseagents: {
+        claude: { apiKey: '$ENV:ANTHROPIC_API_KEY' },
+      },
+      projects: { defaultPath },
+    };
 
-      await ensureAunSdk();
-
-      const aunPath = path.join(os.homedir(), '.aun');
-      const aidDir = path.join(aunPath, 'AIDs', options.aunAid);
-      if (!fs.existsSync(path.join(aidDir, 'private'))) {
-        const result = await aidCreate(options.aunAid);
-        try {
-          const content = buildInitialAgentMd({ aid: options.aunAid });
-          try {
-            await agentmdPut(content, { aid: options.aunAid, client: result.client });
-          } catch (e) {
-            console.warn(`⚠ agent.md 网络发布失败（首次连接将自动重试）: ${String((e as any)?.message || e).slice(0, 100)}`);
-            fs.mkdirSync(aidDir, { recursive: true });
-            fs.writeFileSync(path.join(aidDir, 'agent.md'), content, 'utf-8');
-          }
-          if (!fs.existsSync(path.join(aidDir, 'agent.md'))) {
-            throw new Error(`agent.md 写入校验失败: ${path.join(aidDir, 'agent.md')}`);
-          }
-        } finally {
-          try { await result.client.close(); } catch {}
-        }
-      }
-
-      config.channels.aun = {
-        enabled: true,
-        aid: options.aunAid,
-        ...(options.aunOwner && { owner: options.aunOwner }),
-      };
-      config.channels.defaultChannel = 'aun';
-    }
-
-    fs.writeFileSync(p.config, JSON.stringify(config, null, 2) + '\n');
-    console.log(`✓ 已创建配置文件: ${p.config}`);
-    setupEnvVar(resolveRoot());
+    fs.mkdirSync(path.dirname(defaultsPath), { recursive: true });
+    fs.writeFileSync(defaultsPath, JSON.stringify(defaults, null, 2) + '\n');
+    console.log(`✓ 已创建: ${defaultsPath}`);
+    printNextSteps(available);
     return;
   }
 
-  // 交互式模式
+  // 交互式
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-
   try {
-    if (fs.existsSync(p.config)) {
-      const answer = (await ask(rl, `配置文件已存在: ${p.config}\n  是否重新初始化？[y/N] `)).trim().toLowerCase();
+    if (fs.existsSync(defaultsPath)) {
+      const answer = (await ask(rl, `配置文件已存在: ${defaultsPath}\n  是否重新初始化？[y/N] `)).trim().toLowerCase();
       if (answer !== 'y' && answer !== 'yes') {
         console.log('  已取消');
         return;
       }
     }
 
-    if (!await checkEnvironment(rl)) {
-      return;
-    }
-
-    console.log('📝 交互式配置\n');
-
-    // 通用配置
+    // 默认项目路径
     const defaultSuggestion = path.join(os.homedir(), 'projects', 'default');
-    let defaultPath = (await ask(rl, `  默认项目路径 [${defaultSuggestion}]: `)).trim();
+    let defaultPath = (await ask(rl, `默认项目路径 [${defaultSuggestion}]: `)).trim();
     if (!defaultPath) defaultPath = defaultSuggestion;
-    if (defaultPath.startsWith('~/')) {
-      defaultPath = path.join(os.homedir(), defaultPath.slice(2));
-    } else if (defaultPath === '~') {
-      defaultPath = os.homedir();
-    }
+    if (defaultPath.startsWith('~/')) defaultPath = path.join(os.homedir(), defaultPath.slice(2));
     if (!fs.existsSync(defaultPath)) {
       fs.mkdirSync(defaultPath, { recursive: true });
-      console.log(`  ✓ 已创建目录: ${defaultPath}`);
+      console.log(`  ✓ 已创建: ${defaultPath}`);
     }
 
-    const modelInput = (await ask(rl, '  模型 [sonnet(默认)/opus/haiku]: ')).trim().toLowerCase();
-    const model = ['opus', 'haiku'].includes(modelInput) ? modelInput : 'sonnet';
+    // 选择默认 baseagent
+    const defaultBaseagent = available.find(b => b.cmd === 'claude') ? 'claude' : available[0].cmd;
+    const baInput = (await ask(rl, `默认 baseagent [${defaultBaseagent}]: `)).trim() || defaultBaseagent;
 
-    // 渠道选择（支持退回重选）
-    const config = JSON.parse(fs.readFileSync(sampleSrc, 'utf-8'));
-    config.projects.defaultPath = defaultPath;
-    config.projects.list = { [path.basename(defaultPath)]: defaultPath };
-    config.agents.claude.model = model;
+    const defaults = {
+      $schema_version: 1,
+      active_baseagent: baInput,
+      baseagents: {
+        claude: { apiKey: '$ENV:ANTHROPIC_API_KEY' },
+        ...(baInput === 'codex' && { codex: { apiKey: '$ENV:OPENAI_API_KEY' } }),
+        ...(baInput === 'gemini' && { gemini: { apiKey: '$ENV:GEMINI_API_KEY' } }),
+      },
+      projects: { defaultPath },
+    };
 
-    let channelConfigured = false;
-    while (!channelConfigured) {
-      console.log('\n选择消息渠道:');
-      console.log('  1. 飞书 (Feishu)');
-      console.log('  2. 微信 (WeChat)');
-      console.log('  3. AUN (AgentUnin.Network)');
-      console.log('  4. 钉钉 (DingTalk)');
-      console.log('  5. QQ 机器人 (QQBot)');
-      const channelChoice = (await ask(rl, '请选择 [1]: ')).trim() || '1';
+    fs.mkdirSync(path.dirname(defaultsPath), { recursive: true });
+    fs.writeFileSync(defaultsPath, JSON.stringify(defaults, null, 2) + '\n');
+    console.log(`\n✓ 已创建: ${defaultsPath}`);
 
-      if (channelChoice === '1') {
-        console.log('\n飞书配置方式:');
-        console.log('  1. 扫码自动注册（推荐）');
-        console.log('  2. 手动输入 App ID/Secret');
-        const feishuMethod = (await ask(rl, '请选择 [1]: ')).trim() || '1';
-
-        if (feishuMethod === '1') {
-          const { runFeishuQrFlow } = await import('./init-channel.js');
-          const result = await runFeishuQrFlow();
-          if (!result) {
-            console.log('已取消');
-            return;
-          }
-          config.channels.feishu.appId = result.appId;
-          config.channels.feishu.appSecret = result.appSecret;
-          config.channels.feishu.enabled = true;
-          if (result.openId) config.channels.feishu.owner = result.openId;
-        } else {
-          if (!await initFeishuManual(rl, config)) {
-            console.log('已取消');
-            return;
-          }
-        }
-        channelConfigured = true;
-        config.channels.defaultChannel = 'feishu';
-
-      } else if (channelChoice === '2') {
-        const { runWechatQrFlow } = await import('./init-channel.js');
-        const result = await runWechatQrFlow();
-        if (!result) {
-          console.log('已取消');
-          return;
-        }
-        config.channels.wechat = {
-          enabled: true,
-          baseUrl: result.baseUrl,
-          token: result.token,
-        };
-        channelConfigured = true;
-        config.channels.defaultChannel = 'wechat';
-
-      } else if (channelChoice === '3') {
-        const { checkAunEnvironment, setupAunAid } = await import('./init-channel.js');
-        const aunReady = await checkAunEnvironment(rl);
-        if (!aunReady) continue; // 退回重选渠道
-
-        const result = await setupAunAid(rl, config);
-        if (!result) continue;
-
-        config.channels.aun = {
-          enabled: true,
-          aid: result.aid,
-          owner: result.owner,
-        };
-        channelConfigured = true;
-        config.channels.defaultChannel = 'aun';
-
-      } else if (channelChoice === '4') {
-        const { runDingtalkQrFlowSimple } = await import('./init-channel.js');
-        const result = await runDingtalkQrFlowSimple();
-        if (!result) {
-          console.log('已取消');
-          return;
-        }
-        config.channels.dingtalk = {
-          enabled: true,
-          clientId: result.clientId,
-          clientSecret: result.clientSecret,
-        };
-        channelConfigured = true;
-        config.channels.defaultChannel = 'dingtalk';
-
-      } else if (channelChoice === '5') {
-        const { runQQBotBindFlowSimple } = await import('./init-channel.js');
-        const result = await runQQBotBindFlowSimple();
-        if (!result) {
-          console.log('已取消');
-          return;
-        }
-        config.channels.qqbot = {
-          enabled: true,
-          appId: result.appId,
-          clientSecret: result.clientSecret,
-        };
-        channelConfigured = true;
-        config.channels.defaultChannel = 'qqbot';
-
-      } else {
-        console.log('  无效选择，请重新输入');
-      }
-    }
-
-    // 可选：富内容渲染模块（仅 Feishu 通道需要）
-    if (config.channels?.feishu?.enabled) {
-      await offerRichContentRenderer(rl, config);
-    }
-
-    fs.writeFileSync(p.config, JSON.stringify(config, null, 2) + '\n');
-    console.log(`\n✓ 已创建配置文件: ${p.config}`);
-    setupEnvVar(resolveRoot());
-  } finally {
     rl.close();
+    printNextSteps(available);
+  } finally {
+    try { rl.close(); } catch {}
   }
 }
+
+function printNextSteps(available: Array<{ name: string; cmd: string }>): void {
+  console.log('');
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  console.log('');
+  console.log('下一步：创建你的第一个 Agent');
+  console.log('');
+  console.log('  1. 下载 Evol App（https://evolai.cn）');
+  console.log('  2. 在 App 中创建 Agent，获取引导文本');
+  console.log(`  3. 将引导文本输入给 ${available[0].name} 执行：`);
+  console.log('');
+  console.log(`     ${available[0].cmd}`);
+  console.log('');
+  console.log('  或者手动创建：');
+  console.log('');
+  console.log('     evolclaw agent new <your-aid>.agentid.pub');
+  console.log('');
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+}
+
 
 // ==================== Instance Selection (from init-common) ====================
 

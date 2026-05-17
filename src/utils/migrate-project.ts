@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { resolvePaths } from '../paths.js';
-import { loadConfig, saveConfig } from '../config.js';
+import { loadAllAgents, saveAgent } from '../config-store.js';
 
 /** 将绝对路径编码为 Claude Code 的目录名格式（/ \ . 替换为 -） */
 function encodePath(p: string): string {
@@ -134,19 +134,21 @@ export async function migrateProject(oldPath: string, newPath: string): Promise<
     } catch { /* fs not accessible */ }
   }
 
-  // 7. 更新 evolclaw.json projects.list
-  if (fs.existsSync(p.config)) {
-    try {
-      const config = loadConfig(p.config);
-      if (config.projects?.list) {
-        let changed = false;
-        for (const [k, v] of Object.entries(config.projects.list)) {
-          if (v === oldAbs) { config.projects.list[k] = newAbs; changed = true; }
-        }
-        if (changed) { saveConfig(config, p.config); result.evolclawConfigUpdated = true; }
+  // 7. 更新各 self-agent config.json 的 projects.list
+  try {
+    const { agents } = loadAllAgents();
+    for (const cfg of agents) {
+      if (!cfg.projects?.list) continue;
+      let changed = false;
+      for (const [k, v] of Object.entries(cfg.projects.list)) {
+        if (v === oldAbs) { cfg.projects.list[k] = newAbs; changed = true; }
       }
-    } catch { /* config not accessible */ }
-  }
+      if (changed) {
+        saveAgent(cfg);
+        result.evolclawConfigUpdated = true;
+      }
+    }
+  } catch { /* agents not accessible */ }
 
   return result;
 }

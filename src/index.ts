@@ -1,7 +1,11 @@
 import { ClaudeSessionFileAdapter } from './core/session/adapters/claude-session-file-adapter.js';
 import { CodexSessionFileAdapter } from './core/session/adapters/codex-session-file-adapter.js';
 import { GeminiSessionFileAdapter } from './core/session/adapters/gemini-session-file-adapter.js';
-import { loadConfig, ensureDataDirs, resolvePaths, resolveAnthropicConfig, isOwner, isAdmin, validateConfigIntegrity, validateChannelInstanceNames, getOwner, getDefaultSessionMode, setOwner as setOwnerInGlobalConfig, setChannelShowActivities as setShowActivitiesInGlobalConfig } from './config.js';
+import { ensureDataDirs, resolvePaths, agentDir } from './paths.js';
+import { resolveAnthropicConfig } from './baseagents/resolve.js';
+import { loadDefaults, loadAllAgents, mergeForAgent, ensureAgentDirSkeleton, autoMigrateIfNeeded } from './config-store.js';
+import type { Config, MergedAgentConfig, AgentConfig, DefaultsConfig } from './types.js';
+import { CONFIG_SCHEMA_VERSION } from './types.js';
 import { SessionManager } from './core/session/session-manager.js';
 import { ClaudeAgentPlugin } from './agents/claude-runner.js';
 import { CodexAgentPlugin } from './agents/codex-runner.js';
@@ -92,71 +96,100 @@ async function main() {
   // 加载提示词模板
   loadPromptTemplates();
 
-  // 加载配置
-  const config = loadConfig();
+  // 加载配置（新结构：defaults.json + per-agent config.json）
+  const defaults: DefaultsConfig = loadDefaults() ?? { $schema_version: CONFIG_SCHEMA_VERSION };
 
   // 应用配置中的日志级别（优先于环境变量）
-  if (config.debug?.logLevel) {
-    setLogLevel(config.debug.logLevel);
-  }
+  // logLevel 现在不在新结构中——若要保留，将来可加 defaults.debug.logLevel
+  // 阶段 2c 暂跳过
 
   const paths = resolvePaths();
 
-  // 配置完整性校验
-  const integrity = validateConfigIntegrity(config);
-  if (!integrity.valid) {
-    const msg = `❌ Config integrity check failed:\n  ${integrity.reasons.join('\n  ')}`;
+  // ── 自动迁移：旧 data/evolclaw.json → 新结构 ──
+  autoMigrateIfNeeded();
+
+  // ── EvolAgent Registry：加载 agents/<aid>/config.json ──
+  const agentRegistry = new EvolAgentRegistry(paths.agentsDir);
+  agentRegistry.loadAll();
+  const agentInfos = agentRegistry.list();
+
+  // 启动期硬约束：必须至少有一个 self-agent
+  if (agentInfos.length === 0) {
+    const skipped = agentRegistry.getSkipped();
+    const lines = [
+      '❌ No self-agent configured.',
+      `  Run \`evolclaw aid new <name>\` to create one.`,
+    ];
+    if (skipped.length > 0) {
+      lines.push(`  Skipped ${skipped.length} dir(s):`);
+      for (const s of skipped) lines.push(`    - ${s.dirName}: ${s.reason}`);
+    }
+    const msg = lines.join('\n');
     logger.error(msg);
-    console.error(msg);  // ensure it lands in stdout.log for self-heal diagnostics
+    console.error(msg);
     process.exit(1);
   }
 
-  const anthropic = resolveAnthropicConfig(config);
-  logger.info('✓ Config loaded (API keys hidden)');
-
-  // Channel instance name uniqueness check
-  validateChannelInstanceNames(config);
-
-  // Detect duplicate channel credentials
-  const duplicates = detectDuplicates(config);
-  if (duplicates.length > 0) {
-    for (const d of duplicates) {
-      logger.warn(
-        `⚠ Duplicate channel credential: ${d.fingerprint} is used by instances [${d.instances.join(', ')}]. ` +
-        `Only the first instance will be active.`
-      );
+  logger.info(`✓ Loaded ${agentInfos.length} self-agent(s)`);
+  for (const info of agentInfos) {
+    if (info.status === 'error') {
+      logger.error(`  ✗ ${info.name}: ${info.error}`);
+    } else if (info.status === 'disabled') {
+      logger.info(`  ○ ${info.name} (disabled)`);
+    } else {
+      logger.info(`  ● ${info.name} ${info.baseagent} @ ${path.basename(info.projectPath)}`);
     }
   }
+
+  // 跨 agent 凭证冲突
+  {
+    const dups = detectDuplicates(agentRegistry.runnableAgents());
+    for (const d of dups) {
+      const owners = d.agents.map(o => `${o.aid}(${o.channelName})`).join(', ');
+      logger.warn(`⚠ Duplicate channel credential: ${d.fingerprint} claimed by ${owners}.`);
+    }
+  }
+
+  // 选定主 agent（启动期 anthropic resolve 用，配合 IPC `evolagent.list` 显示）
+  // 主 agent 取第一个非 error 非 disabled 的 self-agent。
+  const primaryAgent = agentRegistry.runnableAgents()[0];
+  if (!primaryAgent) {
+    const msg = '❌ No runnable self-agent (all are error/disabled). Aborting.';
+    logger.error(msg);
+    console.error(msg);
+    process.exit(1);
+  }
+
+  // 用主 agent 的 effective config 构造 legacy Config 视图（AgentLoader plugins 和 resolveAnthropicConfig 仍需要）
+  // 这是一个薄 shim——mergeForAgent 已经把 defaults 合并进了每个 agent，所以这里只是字段名翻译。
+  const legacyConfig = {
+    agents: {
+      claude: primaryAgent.config.baseagents?.claude as any,
+      codex: primaryAgent.config.baseagents?.codex as any,
+      gemini: primaryAgent.config.baseagents?.gemini as any,
+      defaultAgent: primaryAgent.config.active_baseagent,
+    } as any,
+    channels: {} as any,
+    projects: primaryAgent.config.projects as any,
+    flushDelay: primaryAgent.config.flush_delay,
+    debounce: primaryAgent.config.debounce,
+    showActivities: primaryAgent.config.show_activities,
+    chatmode: primaryAgent.config.chatmode,
+    idleMonitor: (defaults as any).idleMonitor,
+    debug: (defaults as any).debug,
+  } as import('./types.js').Config;
+
+  if (legacyConfig.debug?.logLevel) {
+    setLogLevel(legacyConfig.debug.logLevel);
+  }
+
+  const anthropic = resolveAnthropicConfig(legacyConfig);
+  logger.info('✓ Config loaded (API keys hidden)');
 
   if (anthropic.baseUrl) {
     logger.info(`✓ Using custom API base URL: ${anthropic.baseUrl}`);
   }
 
-  // EvolAgent Registry
-  const agentRegistry = new EvolAgentRegistry(paths.agentsDir, {
-    setOwner: (channelName, userId) => {
-      setOwnerInGlobalConfig(config, channelName, userId);
-    },
-    setShowActivities: (channelName, mode) => {
-      setShowActivitiesInGlobalConfig(config, channelName, mode);
-    },
-  });
-  agentRegistry.loadAll(config);
-  const agentInfos = agentRegistry.list();
-  const evolagentCount = agentInfos.filter(i => !i.isDefault).length;
-  if (evolagentCount > 0) {
-    logger.info(`✓ Loaded ${evolagentCount} evolagent(s)`);
-    for (const info of agentInfos) {
-      if (info.isDefault) continue;
-      if (info.status === 'error') {
-        logger.error(`  ✗ [${info.name}] ${info.error}`);
-      } else if (info.status === 'disabled') {
-        logger.info(`  ○ [${info.name}] disabled`);
-      } else {
-        logger.info(`  ● [${info.name}] ${info.baseagent} @ ${path.basename(info.projectPath)}`);
-      }
-    }
-  }
 
   // Store for IPC access (T10 will wire this)
   // M4: removed dead globalThis.__evolclaw_agentRegistry assignment
@@ -168,22 +201,18 @@ async function main() {
   // 统计收集器（近 1 小时滚动统计）
   const statsCollector = new StatsCollector(eventBus);
 
-  // 启动检查：发现旧 sessions.db 提示用户手动清理（不自动迁移，不自动删除）
-  if (fs.existsSync(paths.db)) {
-    logger.warn(`⚠ 检测到旧的 sessions.db (${paths.db})，已不再使用。可手动备份后删除。`);
-  }
-
   // 初始化 SessionManager（文件系统后端）
-  // Registry-first: agent-owned channels resolve via EvolAgent.isOwner/isAdmin,
-  // default-agent channels fall back to global config (evolclaw.json).
   const sessionManager = new SessionManager(paths.sessionsDir, eventBus,
-    (channel, userId) => agentRegistry.isOwner(channel, userId, (ch, uid) => isOwner(config, ch, uid)),
-    (channel, userId) => agentRegistry.isAdmin(channel, userId, (ch, uid) => isAdmin(config, ch, uid))
+    (channel, userId) => agentRegistry.isOwner(channel, userId),
+    (channel, userId) => agentRegistry.isAdmin(channel, userId)
   );
 
-  // sessionMode 解析：全局 chatmode 配置 > 默认 'interactive'
-  sessionManager.setSessionModeResolver((_channel, chatType) => {
-    return getDefaultSessionMode(config, chatType);
+  // sessionMode 解析：从 channel 路由到具体 agent，按 agent.config.chatmode
+  sessionManager.setSessionModeResolver((channelKey, chatType) => {
+    const agent = agentRegistry.resolveByChannel(channelKey);
+    const cm = agent?.config.chatmode;
+    if (!cm) return undefined;
+    return chatType === 'group' ? cm.group : cm.private;
   });
   logger.info('✓ Database initialized');
 
@@ -198,24 +227,24 @@ async function main() {
   agentLoader.register(new CodexAgentPlugin());
   agentLoader.register(new GeminiAgentPlugin());
 
-  const agentInstances = agentLoader.createAll(config, agentRegistry, {
+  const agentInstances = agentLoader.createAll(agentRegistry, {
     onSessionIdUpdate: async (sessionId: string, agentSessionId: string) => {
       await sessionManager.updateAgentSessionIdBySessionId(sessionId, agentSessionId);
     },
   });
 
-  // agentMap 复合键：${evolagentName}::${baseagent}
+  // agentMap 复合键：${aid}::${baseagent}
   const agentMap = new Map<string, any>();
   for (const inst of agentInstances) {
     agentMap.set(`${inst.evolagentName}::${inst.baseagent}`, inst.agent);
   }
-  const defaultAgent = config.agents?.defaultAgent || 'claude';
-  const defaultAgentKey = `[default]::${defaultAgent}`;
-  const agentRunner = agentMap.get(defaultAgentKey) || agentInstances[0]?.agent;
+  const primaryBaseagent = primaryAgent.baseagent;
+  const primaryAgentKey = `${primaryAgent.aid}::${primaryBaseagent}`;
+  const agentRunner = agentMap.get(primaryAgentKey) || agentInstances[0]?.agent;
   if (!agentRunner) {
-    throw new Error('No agent backend available. Check agents config (no runners created).');
+    throw new Error('No agent backend available. Check baseagents config (no runners created).');
   }
-  logger.info(`✓ Runners ready (default key: ${defaultAgentKey}, total: ${agentMap.size}, keys: ${[...agentMap.keys()].join(', ')})`);
+  logger.info(`✓ Runners ready (primary key: ${primaryAgentKey}, total: ${agentMap.size}, keys: ${[...agentMap.keys()].join(', ')})`);
 
   // 权限审批网关
   const permissionGateway = new PermissionGateway();
@@ -247,58 +276,39 @@ async function main() {
   channelLoader.register(new QQBotChannelPlugin());
   channelLoader.register(new WecomChannelPlugin());
 
-  // Create channel instances: default (from evolclaw.json) + each evolagent
-  const defaultInstances = await channelLoader.createAll(config);
-
+  // Create channel instances: 每个 self-agent 各自的 channels
   const evolagentInstances: ChannelInstance[] = [];
   for (const agent of agentRegistry.runnableAgents()) {
-    // Rewrite channel instance names with agent prefix to avoid collisions
-    // with DefaultAgent and other EvolAgents.
-    // Rule (EvolAgent only):
-    //   - explicit name → `${agent.name}-${type}-${name}`
-    //   - omitted name  → `${agent.name}-${type}`
-    const rewrittenChannels: Record<string, any> = {};
-    for (const [type, raw] of Object.entries(agent.config.channels || {})) {
-      if (type === 'defaultChannel') { rewrittenChannels[type] = raw; continue; }
-      const instances = Array.isArray(raw) ? raw : [raw];
-      const rewritten = instances.map((inst: any) => {
-        if (!inst || typeof inst !== 'object') return inst;
-        const effName = agent.effectiveChannelName(type, inst.name);
-        return { ...inst, name: effName, agentName: agent.name };
-      });
-      // Preserve original shape (array vs single object)
-      rewrittenChannels[type] = Array.isArray(raw) ? rewritten : rewritten[0];
-    }
-
-    const agentConfig = {
-      agents: agent.config.agents,
-      channels: rewrittenChannels,
-      projects: agent.config.projects,
-    } as any;
     try {
-      const instances = await channelLoader.createAll(agentConfig);
+      const instances = await channelLoader.createForAgent(agent);
       evolagentInstances.push(...instances);
     } catch (e) {
-      logger.error(`[EvolAgent] Failed to create channels for ${agent.name}: ${e}`);
+      logger.error(`[Agent ${agent.aid}] Failed to create channels: ${e}`);
       agent.status = 'error';
       agent.error = `Channel creation failed: ${e}`;
     }
   }
 
-  const channelInstances = [...defaultInstances, ...evolagentInstances];
-  logger.info(`✓ Created ${channelInstances.length} channel instance(s)${evolagentInstances.length > 0 ? ` (${defaultInstances.length} default + ${evolagentInstances.length} agent)` : ''}`);
+  const channelInstances = evolagentInstances;
+  logger.info(`✓ Created ${channelInstances.length} channel instance(s)`);
 
   // 创建命令处理器
-  const cmdHandler = new CommandHandler(sessionManager, agentMap, config, messageCache, eventBus, defaultAgentKey);
+  const cmdHandler = new CommandHandler(sessionManager, agentMap, messageCache, eventBus, primaryAgentKey);
   cmdHandler.setPermissionGateway(permissionGateway);
   cmdHandler.setInteractionRouter(interactionRouter);
   cmdHandler.setStatsCollector(statsCollector);
 
   // 创建消息处理器
+  // 构造 GlobalSettings（进程级，不属于任何 agent）
+  const globalSettings: import('./types.js').GlobalSettings = {
+    idleMonitor: legacyConfig.idleMonitor,
+    debug: legacyConfig.debug,
+  };
+
   const processor = new MessageProcessor(
     agentMap,
     sessionManager,
-    config,
+    globalSettings,
     messageCache,
     eventBus,
     (content, channel, channelId, userId, threadId) => {
@@ -312,7 +322,7 @@ async function main() {
       };
       return cmdHandler.handle(content, channel, channelId, sendFn, userId, threadId);
     },
-    defaultAgentKey
+    primaryAgentKey
   );
 
   // 回填 processor 和 messageQueue 的引用
@@ -343,10 +353,10 @@ async function main() {
 
   // 设置中断回调（精确中断正在处理的 agent）
   messageQueue.setInterruptCallback(async (sessionKey, agentId, evolagentName) => {
-    const baseagent = agentId || defaultAgent;
-    const evol = evolagentName || '[default]';
+    const baseagent = agentId || primaryBaseagent;
+    const evol = evolagentName || primaryAgent.aid;
     const agent = agentMap.get(`${evol}::${baseagent}`)
-      || agentMap.get(defaultAgentKey);
+      || agentMap.get(primaryAgentKey);
     if (agent?.hasActiveStream(sessionKey)) {
       await agent.interrupt(sessionKey);
     }
@@ -372,7 +382,7 @@ async function main() {
 
   // ── MessageBridge：Channel ↔ Core 消息桥梁 ──
 
-  const msgBridge = new MessageBridge(config, sessionManager, processor, messageQueue, cmdHandler, eventBus);
+  const msgBridge = new MessageBridge(primaryAgent.projectPath, sessionManager, processor, messageQueue, cmdHandler, eventBus, primaryAgent.config.debounce);
   msgBridge.setAgentRegistry(agentRegistry);
 
   // ── Channel instance registration (shared by startup and hot-load) ──
@@ -381,11 +391,10 @@ async function main() {
     // 1. 项目路径提供器
     if (inst.onProjectPathRequest && inst.channel.onProjectPathRequest) {
       inst.channel.onProjectPathRequest(async (channelId: string) => {
-        // Effective default path: agent's projectPath if agent-owned, else global
+        // Effective default path: use the agent that owns this channel.
         const owningAgent = agentRegistry.resolveByChannel(inst.adapter.channelName);
-        const effectiveDefault = (owningAgent && !owningAgent.isDefault)
-          ? owningAgent.projectPath
-          : (config.projects?.defaultPath || process.cwd());
+        const effectiveDefault = owningAgent?.projectPath
+          ?? primaryAgent.projectPath;
         const session = await sessionManager.getOrCreateSession(
           inst.adapter.channelName, channelId,
           effectiveDefault,
@@ -583,20 +592,18 @@ async function main() {
     registerChannelInstance(inst);
   }
 
-  // ── 连接所有渠道 ──
-  const connected = await channelLoader.connectAll(channelInstances);
-
-  // Bind connected adapters to their owning agents
-  // I1: only mark 'running' if a channel actually connected for that agent
-  const connectedSet = new Set(connected);
+  // Bind adapters to their owning agents and mark running
   for (const inst of channelInstances) {
     const agent = agentRegistry.resolveByChannel(inst.adapter.channelName);
     if (!agent || agent.status === 'error') continue;
     agent.channels.set(inst.adapter.channelName, inst.adapter);
-    if (agent.status === 'stopped' && connectedSet.has(inst.adapter.channelName)) {
+    if (agent.status === 'stopped') {
       agent.status = 'running';
     }
   }
+
+  // ── 连接所有渠道（异步，AUN 等 WebSocket 渠道在后台重连）──
+  const connected = await channelLoader.connectAll(channelInstances);
 
   // 预填充 Feishu 已知 thread_id（重启后避免误判话题创建）
   for (const inst of channelInstances) {
@@ -632,7 +639,7 @@ async function main() {
       const otherType = other.channelType || other.adapter.channelName;
       if (otherType === sourceChannelType) continue;  // 跳过同类型通道
       if (notified.has(otherType)) continue;  // 同类型已通知过
-      const ownerId = agentRegistry.getOwner(other.adapter.channelName) ?? getOwner(config, other.adapter.channelName);
+      const ownerId = agentRegistry.getOwner(other.adapter.channelName);
       if (!ownerId) continue;
       notified.add(otherType);
       other.adapter.sendText(ownerId, msg).catch(err => {
@@ -671,11 +678,16 @@ async function main() {
         sessionManager.clearProcessing(session.id);
         continue;
       }
-      // 复合键：${evolagentName}::${baseagent}，从 channel 反查 evolagent
+      // 复合键：${aid}::${baseagent}，从 channel 反查 self-agent
       const owningAgent = agentRegistry.resolveByChannel(session.channel);
-      const evolName = owningAgent?.name || '[default]';
-      const baseagentName = session.agentId || defaultAgent;
-      const agent = agentMap.get(`${evolName}::${baseagentName}`) || agentMap.get(defaultAgentKey);
+      if (!owningAgent) {
+        logger.warn(`[Resume] session ${session.id}: channel "${session.channel}" not routable, skipping`);
+        sessionManager.clearProcessing(session.id);
+        continue;
+      }
+      const evolName = owningAgent.aid;
+      const baseagentName = session.agentId || primaryBaseagent;
+      const agent = agentMap.get(`${evolName}::${baseagentName}`) || agentMap.get(primaryAgentKey);
       if (!agent) {
         sessionManager.clearProcessing(session.id);
         continue;
@@ -783,32 +795,9 @@ async function main() {
   // I3: start IPC server LAST, after all hook setup, to eliminate race window
   ipcServer.start();
 
-  // 运行时配置文件监控
-  const configPath = resolvePaths().config;
-  fs.watchFile(configPath, { interval: 5000 }, (_curr, _prev) => {
-    let newConfig;
-    try {
-      newConfig = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-    } catch {
-      // JSON 解析失败 → 视为坏文件，备份内存中的好副本
-      const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-      const backupPath = path.join(resolvePaths().dataDir, `evolclaw-${ts}.json`);
-      fs.writeFileSync(backupPath, JSON.stringify(config, null, 2));
-      logger.warn(`[Config Watch] Config file is not valid JSON. In-memory snapshot saved to ${backupPath}`);
-      eventBus.publish({ type: 'config:corrupted', backupPath, reasons: ['Invalid JSON'] });
-      return;
-    }
-    const result = validateConfigIntegrity(newConfig);
-    if (!result.valid) {
-      const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-      const backupPath = path.join(resolvePaths().dataDir, `evolclaw-${ts}.json`);
-      fs.writeFileSync(backupPath, JSON.stringify(config, null, 2));
-      logger.warn(`[Config Watch] Bad config write detected. Reasons: ${result.reasons.join('; ')}. In-memory snapshot saved to ${backupPath}`);
-      eventBus.publish({ type: 'config:corrupted', backupPath, reasons: result.reasons });
-    } else {
-      logger.debug(`[Config Watch] Config file modified, passes integrity check`);
-    }
-  });
+  // 配置 reload 走 IPC `evolagent.reload` 触发，不再用 watchFile。
+  // 双 rename 原子写下 watchFile 的语义会被破坏，且新结构有 N 个 config.json 要监控；
+  // 显式触发更可控。
 
   // 优雅关闭
   let shutdownSignal = 'unknown';
@@ -817,7 +806,6 @@ async function main() {
     const pid = process.pid;
     const ppid = process.ppid;
     logger.info(`\n\nShutting down gracefully... (signal=${shutdownSignal}, pid=${pid}, ppid=${ppid})`);
-    fs.unwatchFile(configPath);
     ipcServer.stop();
     eventBus.publish({
       type: 'system:shutdown',

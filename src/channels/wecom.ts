@@ -3,7 +3,7 @@ import { logger } from '../utils/logger.js';
 import { requireOptional } from '../utils/init-channel.js';
 import type { ChannelPlugin, ChannelInstance } from '../core/channel-loader.js';
 import type { Config, WecomChannelConfig } from '../types.js';
-import { normalizeChannelInstances, getChannelShowActivities } from '../config.js';
+import { normalizeChannelInstances, getChannelShowActivities } from '../utils/channel-helpers.js';
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 

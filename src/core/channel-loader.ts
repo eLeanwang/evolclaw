@@ -8,6 +8,7 @@
 
 import type { ChannelAdapter, ChannelPolicy, ChannelOptions } from '../types.js';
 import type { Config } from '../types.js';
+import type { EvolAgent } from './evolagent.js';
 import { logger } from '../utils/logger.js';
 
 /**
@@ -73,6 +74,35 @@ export class ChannelLoader {
     }
     this.plugins.set(plugin.name, plugin);
     logger.debug(`Registered channel plugin: ${plugin.name}`);
+  }
+
+  /**
+   * 新结构入口：从 EvolAgent 的 channels[] 列表创建 channel 实例。
+   *
+   * 内部把 ChannelInstance[] 翻成各 plugin 期望的 dict 形态（`{ type: [instances...] }`），
+   * 然后调用现有 plugin.createChannels / createChannel。
+   *
+   * 当所有 channel plugin 重写为直接吃 ChannelInstance[] 后，本方法可简化。
+   */
+  async createForAgent(agent: EvolAgent): Promise<ChannelInstance[]> {
+    const rewrittenChannels: Record<string, any[]> = {};
+    for (const inst of agent.config.channels) {
+      const effName = agent.effectiveChannelName(inst.type, inst.name);
+      const rewritten: any = { ...inst, name: effName, agentName: agent.aid };
+      // AUN 实例的 aid 等同 agent 自身 aid——自动注入
+      if (inst.type === 'aun' && !rewritten.aid) {
+        rewritten.aid = agent.aid;
+      }
+      (rewrittenChannels[inst.type] ??= []).push(rewritten);
+    }
+
+    const syntheticConfig = {
+      agents: agent.config.baseagents,
+      channels: rewrittenChannels,
+      projects: agent.config.projects,
+    } as any as Config;
+
+    return this.createAll(syntheticConfig);
   }
 
   async createAll(config: Config): Promise<ChannelInstance[]> {

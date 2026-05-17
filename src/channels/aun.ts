@@ -6,7 +6,7 @@ import os from 'os';
 import { logger, localTimestamp } from '../utils/logger.js';
 import type { ChannelPlugin, ChannelInstance } from '../core/channel-loader.js';
 import type { Config, ReplyContext, AunChannelConfig, AidConnectionState, AidStatus } from '../types.js';
-import { normalizeChannelInstances, getChannelShowActivities } from '../config.js';
+import { normalizeChannelInstances, getChannelShowActivities } from '../utils/channel-helpers.js';
 import { resolvePaths, getPackageRoot } from '../paths.js';
 import { saveToUploads, sanitizeFileName } from '../utils/media-cache.js';
 import { appendAidEvent } from '../utils/instance-registry.js';
@@ -83,7 +83,7 @@ export interface AUNConfig {
   aunTrace?: boolean;     // 启用数据追踪日志
   aunSdkLog?: boolean;    // 启用 AUN SDK 内部日志（写入 ~/.aun/logs/ts-sdk-YYYYMMDD.log）
   owner?: string;         // Owner AID，用于发送欢迎消息
-  agentName?: string;     // EvolAgent 名（用于 status 表格识别归属，默认 '[default]'）
+  agentName?: string;     // self-agent 的 AID（用于 status 表格识别归属）
   channelName?: string;   // channel 实例名（用于日志/状态聚合）
 }
 
@@ -386,7 +386,7 @@ export class AUNChannel {
     }
     this.aidState = {
       aid: config.aid,
-      agentName: config.agentName ?? '[default]',
+      agentName: config.agentName ?? '<unknown>',
       channelName: config.channelName ?? 'aun',
       status: 'disabled',
       reconnectCount: 0,

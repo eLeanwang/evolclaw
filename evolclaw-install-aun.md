@@ -84,14 +84,14 @@ evolclaw status
 
 **默认项目路径必须询问用户，提供三个选项：**
 
-1. **推荐默认**：`~/projects/default`（EvolClaw 约定的默认工作区；若不存在会自动创建）
+1. **推荐默认**：`~/.evolclaw/projects/default`（EvolClaw 约定的默认工作区；若不存在会自动创建）
 2. **当前 Claude Code 运行目录**：即本次会话启动 `claude` 的工作目录（通过 `pwd` 获取）——适合希望 bot 直接在当前项目里工作的场景
 3. **自定义路径**：用户指定绝对路径（须是已存在的目录，或接受后自动创建）
 
 示例提问：
 
 > 请选择默认项目目录（bot 未显式 `/bind` 时使用的工作目录）：
-> 1) `~/projects/default`（推荐，EvolClaw 默认工作区）
+> 1) `~/.evolclaw/projects/default`（推荐，EvolClaw 默认工作区）
 > 2) 当前目录：`<pwd 输出>`
 > 3) 自定义路径（请提供绝对路径）
 
@@ -110,19 +110,19 @@ evolclaw init --non-interactive \
 ```
 
 此命令自动完成：
-1. 创建配置文件 `~/.evolclaw/data/evolclaw.json`
-2. 安装 `@agentunion/aun-node`
+1. 创建全局配置文件 `$EVOLCLAW_HOME/agents/defaults.json`（$EVOLCLAW_HOME默认路径在~/.evolclaw）
+2. 安装 `@agentunion/aun-node` 最新版本
 3. 创建 AID 密钥对（如本地不存在）
 4. 下载 CA 根证书到 `~/.aun/CA/root/root.crt`
 5. 写入初始 `agent.md`（`initialized: false`）
-6. 写入配置（含 owner 字段）
+6. 创建agent配置文件$EVOLCLAW_HOME/agents/<aid>/config.json（含 owner 字段）
 
 ### 步骤 6：启动前验证
 
 读取配置文件确认关键字段：
 
 ```bash
-cat ~/.evolclaw/data/evolclaw.json
+cat $EVOLCLAW_HOME/agents/<aid>/config.json
 ```
 
 检查：

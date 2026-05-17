@@ -3,7 +3,7 @@ import { markdownToPlainText } from '../utils/rich-content-renderer.js';
 import { requireOptional } from '../utils/init-channel.js';
 import type { ChannelPlugin, ChannelInstance } from '../core/channel-loader.js';
 import type { Config, QQBotChannelConfig } from '../types.js';
-import { normalizeChannelInstances, getChannelShowActivities } from '../config.js';
+import { normalizeChannelInstances, getChannelShowActivities } from '../utils/channel-helpers.js';
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 

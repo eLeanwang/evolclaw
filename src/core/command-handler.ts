@@ -1,4 +1,4 @@
-import { Config, ChannelAdapter, Session, ChannelPolicy, InteractionRequest, ReplyContext, ActionInteraction, DEFAULT_PERMISSION_MODE, type EvolAgentRegistryHandle, type EvolAgentHandle } from '../types.js';
+import { ChannelAdapter, Session, ChannelPolicy, InteractionRequest, ReplyContext, ActionInteraction, DEFAULT_PERMISSION_MODE, type EvolAgentRegistryHandle, type EvolAgentHandle } from '../types.js';
 import { SessionManager } from './session/session-manager.js';
 import { type AgentRunnerFull, hasModelSwitcher, hasPermissionController } from '../agents/claude-runner.js';
 import { MessageCache } from './message/message-cache.js';
@@ -8,7 +8,7 @@ import type { StatsCollector } from '../utils/stats-collector.js';
 import { PermissionGateway, type PermissionDecision } from './permission.js';
 import { InteractionRouter } from './interaction-router.js';
 import { MessageQueue } from './message/message-queue.js';
-import { saveConfig, resolvePaths, getPackageRoot, getOwner, getChannelShowActivities, setChannelShowActivities, getDefaultSessionMode } from '../config.js';
+import { resolvePaths, getPackageRoot } from '../paths.js';
 import { logger } from '../utils/logger.js';
 import crypto from 'crypto';
 import path from 'path';
@@ -177,7 +177,7 @@ export class CommandHandler {
    */
   private getAgent(channel?: string, baseagent?: string): AgentRunnerFull {
     if (channel && baseagent) {
-      const evolName = this.agentRegistry?.resolveByChannel(channel)?.name || '[default]';
+      const evolName = this.agentRegistry?.resolveByChannel(channel)?.name || '<unknown>';
       const key = `${evolName}::${baseagent}`;
       if (this.agentMap.has(key)) return this.agentMap.get(key)!;
     }
@@ -187,7 +187,7 @@ export class CommandHandler {
 
   /** Return the list of baseagents available to a given channel (per-EvolAgent isolation). */
   private getAvailableBaseagents(channel: string): string[] {
-    const evolName = this.agentRegistry?.resolveByChannel(channel)?.name || '[default]';
+    const evolName = this.agentRegistry?.resolveByChannel(channel)?.name || '<unknown>';
     const prefix = `${evolName}::`;
     const result: string[] = [];
     for (const key of this.agentMap.keys()) {
@@ -205,18 +205,17 @@ export class CommandHandler {
   constructor(
     private sessionManager: SessionManager,
     agentRunnerOrMap: AgentRunnerFull | Map<string, AgentRunnerFull>,
-    private config: Config,
     private messageCache: MessageCache,
     private eventBus: EventBus,
     defaultAgentId?: string
   ) {
     if (agentRunnerOrMap instanceof Map) {
       this.agentMap = agentRunnerOrMap;
-      this.defaultAgentId = defaultAgentId || '[default]::claude';
+      this.defaultAgentId = defaultAgentId || '<unknown>::claude';
     } else {
-      // Backward-compat single-runner path: treat as DefaultAgent's claude.
-      this.agentMap = new Map([[`[default]::${agentRunnerOrMap.name}`, agentRunnerOrMap]]);
-      this.defaultAgentId = `[default]::${agentRunnerOrMap.name}`;
+      // 测试 / 单 runner 路径：占位 agent name 用 '<unknown>'
+      this.agentMap = new Map([[`<unknown>::${agentRunnerOrMap.name}`, agentRunnerOrMap]]);
+      this.defaultAgentId = `<unknown>::${agentRunnerOrMap.name}`;
     }
   }
 
@@ -225,23 +224,21 @@ export class CommandHandler {
     this.agentRegistry = registry;
   }
 
-  /** 返回管理当前通道的 EvolAgent（非 default），无则返回 null */
+  /** 返回管理当前通道的 EvolAgent，无则返回 null */
   private getOwningAgent(channel: string): EvolAgentHandle | null {
     if (!this.agentRegistry) return null;
-    const agent = this.agentRegistry.resolveByChannel(channel);
-    if (!agent || agent.isDefault) return null;
-    return agent;
+    return this.agentRegistry.resolveByChannel(channel);
   }
 
-  /** 返回当前通道的有效项目路径：agent-owned 用 agent.projectPath；否则用全局 defaultPath。*/
+  /** 返回当前通道的有效项目路径：从 owning agent 取。*/
   private getEffectiveDefaultPath(channel: string): string {
     const owning = this.getOwningAgent(channel);
     if (owning) return owning.projectPath;
-    return this.config.projects?.defaultPath || process.cwd();
+    return process.cwd();
   }
 
   /**
-   * 返回当前通道有效的 projects.list（agent-owned 用 agent.json 的；否则全局 evolclaw.json 的）。
+   * 返回当前通道有效的 projects.list（从 owning agent 的 config 取）。
    * 都没配 list 时回退到 defaultPath 单项目。
    */
   private getEffectiveProjects(channel: string): Record<string, string> {
@@ -253,38 +250,24 @@ export class CommandHandler {
   }
 
   /**
-   * 添加项目到当前通道范围（agent-owned 写 agent.json；default 写 evolclaw.json）。
+   * 添加项目到当前通道范围（写到 owning agent 的 config.json）。
    */
   private async addProjectInScope(channel: string, name: string, projectPath: string): Promise<string | undefined> {
     const owning = this.getOwningAgent(channel);
-    if (owning) {
-      try {
-        owning.addProject(name, projectPath);
-      } catch (e: any) {
-        return `⚠️ 写入 agent.json 失败: ${e?.message || e}`;
-      }
-      return undefined;
+    if (!owning) {
+      return `⚠️ 找不到通道 "${channel}" 所属的 self-agent`;
     }
-    if (!this.config.projects) {
-      this.config.projects = { defaultPath: process.cwd(), autoCreate: false, list: {} };
-    }
-    if (!this.config.projects.list) {
-      this.config.projects.list = {};
-    }
-    this.config.projects.list[name] = projectPath;
     try {
-      const { saveConfig } = await import('../config.js');
-      saveConfig(this.config);
+      owning.addProject(name, projectPath);
     } catch (e: any) {
-      return `⚠️ 写入 evolclaw.json 失败: ${e?.message || e}`;
+      return `⚠️ 写入 agent config 失败: ${e?.message || e}`;
     }
-    // Refresh in-memory list cache (this.projects getter reads from this.config)
     return undefined;
   }
 
   /**
-   * 持久化 baseagent.model：agent-owned 写到 agent.json；否则写 evolclaw.json 或 ~/.claude/settings.json。
-   * 返回错误信息或 undefined。
+   * 持久化 baseagent.model：写到 agent config.json；找不到 owning agent 时
+   * 退到用户级 ~/.claude/settings.json（Claude 专用）。
    */
   private persistBaseagentModel(channel: string, baseagentName: string, newModel: string | undefined): string | undefined {
     const owning = this.getOwningAgent(channel);
@@ -292,31 +275,14 @@ export class CommandHandler {
       try {
         owning.setBaseagentModel(newModel);
       } catch (e: any) {
-        return `⚠️ 写入 agent.json 失败: ${e?.message || e}`;
+        return `⚠️ 写入 agent config 失败: ${e?.message || e}`;
       }
       return undefined;
     }
-    // DefaultAgent / 无 owning agent：保留原"就近原则"
-    if (!this.config.agents) this.config.agents = {};
-    const isCodex = baseagentName === 'codex';
-    if (isCodex) {
-      if (!this.config.agents.codex) this.config.agents.codex = {};
-      if (newModel) this.config.agents.codex.model = newModel;
-      try { saveConfig(this.config); } catch (e: any) {
-        return `⚠️ 写入 evolclaw.json 失败: ${e.message}`;
-      }
-      return undefined;
+    // 无 owning agent（罕见，新结构下应当不会发生）→ 仅 Claude 走用户级 fallback
+    if (baseagentName !== 'claude') {
+      return `⚠️ 找不到通道 "${channel}" 所属的 self-agent`;
     }
-    const configuredInEvolclaw = !!(this.config.agents?.claude?.model || this.config.agents?.claude?.effort);
-    if (configuredInEvolclaw) {
-      if (!this.config.agents.claude) this.config.agents.claude = {};
-      if (newModel) this.config.agents.claude.model = newModel;
-      try { saveConfig(this.config); } catch (e: any) {
-        return `⚠️ 写入 evolclaw.json 失败: ${e.message}`;
-      }
-      return undefined;
-    }
-    // Fallback: ~/.claude/settings.json
     const updates: { model?: string; effortLevel?: string } = {};
     if (newModel) updates.model = newModel;
     const writeResult = writeUserSettings(updates);
@@ -327,7 +293,7 @@ export class CommandHandler {
   }
 
   /**
-   * 持久化 baseagent.effort：agent-owned 写到 agent.json；否则就近原则。
+   * 持久化 baseagent.effort：写到 agent config.json；找不到时退到用户级 settings。
    */
   private persistBaseagentEffort(channel: string, baseagentName: string, newEffort: string | undefined): string | undefined {
     const owning = this.getOwningAgent(channel);
@@ -335,40 +301,12 @@ export class CommandHandler {
       try {
         owning.setBaseagentEffort(newEffort);
       } catch (e: any) {
-        return `⚠️ 写入 agent.json 失败: ${e?.message || e}`;
+        return `⚠️ 写入 agent config 失败: ${e?.message || e}`;
       }
       return undefined;
     }
-    if (!this.config.agents) this.config.agents = {};
-    const isCodex = baseagentName === 'codex';
-    if (isCodex) {
-      if (newEffort === undefined) {
-        if (this.config.agents.codex?.reasoning) {
-          delete this.config.agents.codex.reasoning;
-          try { saveConfig(this.config); } catch {}
-        }
-      } else {
-        if (!this.config.agents.codex) this.config.agents.codex = {};
-        this.config.agents.codex.reasoning = newEffort;
-        try { saveConfig(this.config); } catch (e: any) {
-          return `⚠️ 写入 evolclaw.json 失败: ${e.message}`;
-        }
-      }
-      return undefined;
-    }
-    const configuredInEvolclaw = !!(this.config.agents?.claude?.model || this.config.agents?.claude?.effort);
-    if (configuredInEvolclaw) {
-      if (newEffort === undefined) {
-        delete (this.config.agents!.claude as any).effort;
-        try { saveConfig(this.config); } catch {}
-      } else {
-        if (!this.config.agents.claude) this.config.agents.claude = {};
-        (this.config.agents.claude as any).effort = newEffort;
-        try { saveConfig(this.config); } catch (e: any) {
-          return `⚠️ 写入 evolclaw.json 失败: ${e.message}`;
-        }
-      }
-      return undefined;
+    if (baseagentName !== 'claude') {
+      return `⚠️ 找不到通道 "${channel}" 所属的 self-agent`;
     }
     const updates: { effortLevel?: string | null } = { effortLevel: newEffort ?? null };
     const writeResult = writeUserSettings(updates);
@@ -378,12 +316,8 @@ export class CommandHandler {
     return undefined;
   }
 
-  /** 项目列表快捷访问（list 缺失时用 defaultPath 作为唯一项目） */
+  /** 项目列表快捷访问（无 channel 上下文时的 fallback，尽量不用） */
   private get projects(): Record<string, string> {
-    const list = this.config.projects?.list;
-    if (list && Object.keys(list).length > 0) return list;
-    const dp = this.config.projects?.defaultPath;
-    if (dp) return { [path.basename(dp)]: dp };
     return {};
   }
 
@@ -741,7 +675,7 @@ export class CommandHandler {
 
     if (cmd === '/p') {
       // Use agent-scoped project list: agent-owned channels see their agent.json's
-      // projects.list; default channel sees evolclaw.json's projects.list
+      // projects.list; default channel sees agent config's projects.list
       const list = this.getEffectiveProjects(channel);
       return Object.entries(list).map(([name, path]) => ({ value: name, label: name, desc: path as string }));
     }
@@ -1475,7 +1409,7 @@ export class CommandHandler {
       // 获取 API URL 用于请求 /models
       let apiBaseUrl: string | undefined;
       try {
-        const configBaseUrl = this.config.agents?.claude?.baseUrl;
+        const configBaseUrl = this.getOwningAgent(channel)?.config?.baseagents?.claude?.baseUrl;
         const isPlaceholderUrl = configBaseUrl?.includes('api.anthropic.com');
         if (configBaseUrl && !isPlaceholderUrl) {
           apiBaseUrl = configBaseUrl;
@@ -1502,7 +1436,7 @@ export class CommandHandler {
           const timeout = setTimeout(() => controller.abort(), 5000);
           const resp = await fetch(modelsUrl, {
             signal: controller.signal,
-            headers: { 'Authorization': `Bearer ${this.config.agents?.claude?.apiKey || process.env.ANTHROPIC_AUTH_TOKEN || ''}` },
+            headers: { 'Authorization': `Bearer ${this.getOwningAgent(channel)?.config?.baseagents?.claude?.apiKey || process.env.ANTHROPIC_AUTH_TOKEN || ''}` },
           });
           clearTimeout(timeout);
           if (resp.ok) {
@@ -1638,7 +1572,7 @@ export class CommandHandler {
         newEffort = effortArg as Effort;
       }
 
-      if (!this.config.agents) this.config.agents = {};
+      // 运行时 model/effort 切换已通过 EvolAgent.setBaseagentModel/setBaseagentEffort 持久化
 
       const isCodexAgent = modelAgent.name === 'codex';
       const changes: string[] = [];
@@ -1854,7 +1788,7 @@ export class CommandHandler {
         none: 'none',
       };
 
-      const currentMode = this.agentRegistry?.getShowActivities?.(channel) ?? getChannelShowActivities(this.config, channel);
+      const currentMode = this.agentRegistry?.getShowActivities?.(channel) ?? 'all';
 
       // 模式描述列表（用于 body 和文本降级）
       const modeDescriptions: { key: string; configVal: string; label: string }[] = [
@@ -1937,7 +1871,7 @@ export class CommandHandler {
       if (this.agentRegistry?.setShowActivities) {
         this.agentRegistry.setShowActivities(channel, newMode);
       } else {
-        setChannelShowActivities(this.config, channel, newMode);
+        return `⚠️ 找不到通道 "${channel}" 所属的 self-agent，无法持久化`;
       }
       return `✅ 中间输出模式: ${activityArg}（${label}）`;
     }
@@ -2009,7 +1943,7 @@ export class CommandHandler {
         type: 'message:interrupted',
         sessionId: sessionKey,
         reason: 'stop',
-        agentName: this.agentRegistry?.resolveByChannel(channel)?.name ?? '[default]',
+        agentName: this.agentRegistry?.resolveByChannel(channel)?.name ?? '<unknown>',
       });
       // 强制清除 processing_state
       this.sessionManager.clearProcessing(sessionKey);
@@ -2248,11 +2182,11 @@ export class CommandHandler {
       if (checkOwningAgent) {
         allowedChannels = new Set(checkOwningAgent.channelInstanceNames());
       } else {
-        // default 范围：所有 channel 中，不属于任何 evolagent 的
+        // default 范围：不再有 default channel 概念，等价于"所有 channel"
         const defaultNames: string[] = [];
         for (const [name] of this.adapters) {
           const owner = this.agentRegistry?.resolveByChannel(name);
-          if (!owner || owner.isDefault) defaultNames.push(name);
+          if (!owner) defaultNames.push(name);
         }
         allowedChannels = new Set(defaultNames);
       }
@@ -2294,7 +2228,7 @@ export class CommandHandler {
       }
 
       // 当前 agent 名（用于 agent 维度 stats / queue 查询）
-      const currentAgentName = checkOwningAgent?.name ?? '[default]';
+      const currentAgentName = checkOwningAgent?.name ?? '<unknown>';
 
       // 队列状态（按当前 agent 维度）
       lines.push('', '📬 队列状态：');
@@ -2550,7 +2484,7 @@ export class CommandHandler {
       // 找目标 channelId
       let targetChannelId = channelId;
       if (isCrossChannel) {
-        const ownerPeerId = this.agentRegistry?.getOwner?.(targetChannel) ?? getOwner(this.config, targetChannel);
+        const ownerPeerId = this.agentRegistry?.getOwner?.(targetChannel);
         targetChannelId = ownerPeerId ? (this.sessionManager.getOwnerChatId(targetChannel, ownerPeerId) ?? '') : '';
         if (!targetChannelId) {
           return `❌ 未找到 ${targetLabel} 的私聊会话，请先在该通道发送一条消息`;
@@ -2593,7 +2527,7 @@ export class CommandHandler {
 提示：群聊不支持切换项目`;
       }
 
-      // 收集项目信息并按最近活跃排序（唯一来源：evolclaw.json projects.list）
+      // 收集项目信息并按最近活跃排序（唯一来源：agent config projects.list）
       const entries: { name: string; projectPath: string; projectSession: any; isCurrent: boolean; updatedAt: number }[] = [];
 
       for (const [name, projectPath] of Object.entries(this.projects)) {
@@ -2811,7 +2745,7 @@ export class CommandHandler {
         return '❌ 项目路径必须是绝对路径';
       }
       if (!fs.existsSync(projectPath)) {
-        if (this.config.projects?.autoCreate) {
+        if (this.getOwningAgent(channel)?.config?.projects?.autoCreate) {
           fs.mkdirSync(projectPath, { recursive: true });
         } else {
           return `❌ 路径不存在: ${projectPath}`;
@@ -2831,7 +2765,7 @@ export class CommandHandler {
         return `❌ 项目名称 "${projectName}" 已被占用\n  现有路径: ${existing}\n  新路径: ${projectPath}\n\n请重命名目录或手动编辑配置文件`;
       }
 
-      // 写入：agent-owned channel → agent.json；default → evolclaw.json
+      // 写入：agent-owned channel → agent.json；default → agent config
       const err = await this.addProjectInScope(channel, projectName, projectPath);
       if (err) return err;
 
@@ -3636,8 +3570,9 @@ export class CommandHandler {
       const parts = sendArgs.split(/\s+/);
       const filePath = parts[parts.length - 1];
       if (filePath) {
-        const resolved = path.resolve(session.projectPath, filePath);
-        if (!resolved.startsWith(session.projectPath)) {
+        const resolved = path.resolve(session.projectPath, filePath).replace(/\\/g, '/');
+        const projectPath = session.projectPath.replace(/\\/g, '/');
+        if (!resolved.startsWith(projectPath)) {
           return { ok: false, error: '路径越界：只能发送项目目录下的文件' };
         }
       }
