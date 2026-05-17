@@ -141,21 +141,21 @@ export class ChannelLoader {
     return instances;
   }
 
-  async connectAll(instances: ChannelInstance[]): Promise<string[]> {
-    const results = await Promise.allSettled(
-      instances.map(async (inst) => {
+  async connectAll(instances: ChannelInstance[], delayMs = 150): Promise<string[]> {
+    const connected: string[] = [];
+    const failed: any[] = [];
+
+    for (const inst of instances) {
+      try {
         await inst.connect();
-        return inst.adapter.channelName;
-      })
-    );
-
-    const connected = results
-      .filter((r) => r.status === 'fulfilled')
-      .map((r) => (r as PromiseFulfilledResult<string>).value);
-
-    const failed = results
-      .filter((r) => r.status === 'rejected')
-      .map((r) => (r as PromiseRejectedResult).reason);
+        connected.push(inst.adapter.channelName);
+      } catch (e) {
+        failed.push(e);
+      }
+      if (delayMs > 0 && inst !== instances[instances.length - 1]) {
+        await new Promise(r => setTimeout(r, delayMs));
+      }
+    }
 
     if (failed.length > 0) {
       logger.warn(`Some channels failed to connect:`, failed);

@@ -240,6 +240,7 @@ async function cmdStart() {
   const child = spawn('node', ['--no-warnings=ExperimentalWarning', appMain], {
     detached: true,
     stdio: ['ignore', out, err],
+    windowsHide: true,
     env: {
       ...process.env,
       EVOLCLAW_HOME: p.root,
@@ -1694,6 +1695,7 @@ async function spawnAndWaitReady(
   const child = spawn('node', ['--no-warnings=ExperimentalWarning', appMain], {
     detached: true,
     stdio: ['ignore', out, err],
+    windowsHide: true,
     env: {
       ...process.env,
       EVOLCLAW_HOME: p.root,
