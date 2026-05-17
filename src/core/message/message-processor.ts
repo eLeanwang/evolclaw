@@ -29,7 +29,7 @@ export class MessageProcessor {
   private currentFlusher?: StreamFlusher;
   private shouldSuppressActivities = false;
   private agentMap: Map<string, AgentRunnerFull>;
-  private defaultAgentId: string;
+  private primaryRunnerKey: string;
   private interruptedSessions = new Map<string, string>();  // sessionId → reason ('new_message' | 'stop' | ...)
   private interactionRouter?: InteractionRouter;
   private messageQueue?: MessageQueue;
@@ -41,7 +41,7 @@ export class MessageProcessor {
    * - `channel` is used to look up the owning EvolAgent (via registry).
    * - `baseagent` (e.g. 'claude') comes from `session.agentId`.
    *
-   * Falls back to `defaultAgentId` (a composite key, e.g. `[default]::claude`)
+   * Falls back to `primaryRunnerKey` (a composite key, e.g. `aid::claude`)
    * when no match is found.
    */
   getAgent(channel?: string, baseagent?: string): AgentRunnerFull {
@@ -50,7 +50,7 @@ export class MessageProcessor {
       const key = `${evolName}::${baseagent}`;
       if (this.agentMap.has(key)) return this.agentMap.get(key)!;
     }
-    if (this.agentMap.has(this.defaultAgentId)) return this.agentMap.get(this.defaultAgentId)!;
+    if (this.agentMap.has(this.primaryRunnerKey)) return this.agentMap.get(this.primaryRunnerKey)!;
     return this.agentMap.values().next().value!;
   }
 
@@ -73,15 +73,15 @@ export class MessageProcessor {
     private messageCache: MessageCache,
     private eventBus: EventBus,
     private commandHandler?: CommandHandler,
-    defaultAgentId?: string
+    primaryRunnerKey?: string
   ) {
     if (agentRunnerOrMap instanceof Map) {
       this.agentMap = agentRunnerOrMap;
-      this.defaultAgentId = defaultAgentId || '<unknown>::claude';
+      this.primaryRunnerKey = primaryRunnerKey || '<unknown>::claude';
     } else {
       // 测试 / 单 runner 路径：占位 agent name 用 '<unknown>'
       this.agentMap = new Map([[`<unknown>::${agentRunnerOrMap.name}`, agentRunnerOrMap]]);
-      this.defaultAgentId = `<unknown>::${agentRunnerOrMap.name}`;
+      this.primaryRunnerKey = `<unknown>::${agentRunnerOrMap.name}`;
     }
 
     // 监听中断事件，标记被中断的 session

@@ -1178,7 +1178,7 @@ async function cmdWatchAid(): Promise<void> {
   const version = pkg.version;
 
   // Load AID names: first from local agent.md, then refresh from network
-  const { aidList, agentmdGet } = await import('./aid/index.js');
+  const { aidList, aidLookup } = await import('./aid/index.js');
   const localAids = aidList();
   const aidNameMap = new Map<string, string>();
 
@@ -1194,6 +1194,13 @@ async function cmdWatchAid(): Promise<void> {
     } catch { return undefined; }
   }
 
+  function parseNameFromContent(content: string): string | undefined {
+    const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
+    if (!fmMatch) return undefined;
+    const nameMatch = fmMatch[1].match(/^name:\s*["']?(.+?)["']?\s*$/m);
+    return nameMatch?.[1]?.trim() || undefined;
+  }
+
   // Phase 1: read cached local names
   for (const a of localAids) {
     if (!a.hasPrivateKey) continue;
@@ -1201,30 +1208,17 @@ async function cmdWatchAid(): Promise<void> {
     if (name) aidNameMap.set(a.aid, name);
   }
 
-  // Phase 2: refresh agent.md from network (async, non-blocking, suppress output)
+  // Phase 2: refresh names from network via aidLookup (async, non-blocking)
   const refreshNames = async () => {
-    const origLog = console.log;
-    const origInfo = console.info;
-    const origWarn = console.warn;
-    const origError = console.error;
-    console.log = () => {};
-    console.info = () => {};
-    console.warn = () => {};
-    console.error = () => {};
-    try {
-      for (const a of localAids) {
-        if (!a.hasPrivateKey) continue;
-        try {
-          await agentmdGet(a.aid);
-          const name = readLocalName(a.aid);
+    for (const a of localAids) {
+      if (!a.hasPrivateKey) continue;
+      try {
+        const result = await aidLookup(a.aid);
+        if (result.exists && result.content) {
+          const name = parseNameFromContent(result.content);
           if (name) aidNameMap.set(a.aid, name);
-        } catch { /* ignore network errors */ }
-      }
-    } finally {
-      console.log = origLog;
-      console.info = origInfo;
-      console.warn = origWarn;
-      console.error = origError;
+        }
+      } catch { /* ignore network errors */ }
     }
   };
   refreshNames();
@@ -2032,7 +2026,7 @@ async function cmdDiagnose() {
       try {
         const defaults = loadDefaults();
         const merged = mergeForAgent(agents[0], defaults);
-        const legacyConfig = {
+        const syntheticConfig = {
           agents: {
             claude: merged.baseagents?.claude as any,
             codex: merged.baseagents?.codex as any,
@@ -2041,7 +2035,7 @@ async function cmdDiagnose() {
           channels: {} as any,
           projects: merged.projects as any,
         };
-        const anthropic = resolveAnthropicConfig(legacyConfig as any);
+        const anthropic = resolveAnthropicConfig(syntheticConfig as any);
         console.log(`[diagnose] ✓ Anthropic 配置解析成功 (apiKey: ${anthropic.apiKey ? '已设置' : '❌ 未设置'}, model: ${anthropic.model || 'default'})`);
       } catch (e) {
         console.error(`[diagnose] ❌ Anthropic 配置解析失败: ${e instanceof Error ? e.message : e}`);

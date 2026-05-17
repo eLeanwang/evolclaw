@@ -479,7 +479,7 @@ export type AidStatus =
 
 export interface AidConnectionState {
   aid: string;
-  agentName: string;            // EvolAgent 名（'[default]' / 'review-bot' / ...）
+  agentName: string;            // EvolAgent AID（如 'review-bot.agentid.pub'）
   channelName: string;          // channel 实例名
   status: AidStatus;
   reconnectCount: number;       // 累计重连次数（含 flap）

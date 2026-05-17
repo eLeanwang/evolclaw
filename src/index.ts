@@ -164,30 +164,20 @@ async function main() {
     process.exit(1);
   }
 
-  // 用主 agent 的 effective config 构造 legacy Config 视图（AgentLoader plugins 和 resolveAnthropicConfig 仍需要）
-  // 这是一个薄 shim——mergeForAgent 已经把 defaults 合并进了每个 agent，所以这里只是字段名翻译。
-  const legacyConfig = {
-    agents: {
-      claude: primaryAgent.config.baseagents?.claude as any,
-      codex: primaryAgent.config.baseagents?.codex as any,
-      gemini: primaryAgent.config.baseagents?.gemini as any,
-      defaultAgent: primaryAgent.config.active_baseagent,
-    } as any,
-    channels: {} as any,
-    projects: primaryAgent.config.projects as any,
-    flushDelay: primaryAgent.config.flush_delay,
-    debounce: primaryAgent.config.debounce,
-    showActivities: primaryAgent.config.show_activities,
-    chatmode: primaryAgent.config.chatmode,
+  // 进程级设置（从 defaults 取，不属于任何 agent）
+  const globalSettings: import('./types.js').GlobalSettings = {
     idleMonitor: (defaults as any).idleMonitor,
     debug: (defaults as any).debug,
-  } as import('./types.js').Config;
+  };
 
-  if (legacyConfig.debug?.logLevel) {
-    setLogLevel(legacyConfig.debug.logLevel);
+  if (globalSettings.debug?.logLevel) {
+    setLogLevel(globalSettings.debug.logLevel);
   }
 
-  const anthropic = resolveAnthropicConfig(legacyConfig);
+  // 启动期 anthropic 凭证校验（用 primaryAgent 的 baseagents.claude）
+  const anthropic = resolveAnthropicConfig({
+    agents: { claude: primaryAgent.config.baseagents?.claude as any },
+  } as any);
   logger.info('✓ Config loaded (API keys hidden)');
 
   if (anthropic.baseUrl) {
@@ -246,12 +236,12 @@ async function main() {
     agentMap.set(`${inst.evolagentName}::${inst.baseagent}`, inst.agent);
   }
   const primaryBaseagent = primaryAgent.baseagent;
-  const primaryAgentKey = `${primaryAgent.aid}::${primaryBaseagent}`;
-  const agentRunner = agentMap.get(primaryAgentKey) || agentInstances[0]?.agent;
+  const primaryRunnerKey = `${primaryAgent.aid}::${primaryBaseagent}`;
+  const agentRunner = agentMap.get(primaryRunnerKey) || agentInstances[0]?.agent;
   if (!agentRunner) {
     throw new Error('No agent backend available. Check baseagents config (no runners created).');
   }
-  logger.info(`✓ Runners ready (primary key: ${primaryAgentKey}, total: ${agentMap.size}, keys: ${[...agentMap.keys()].join(', ')})`);
+  logger.info(`✓ Runners ready (primary key: ${primaryRunnerKey}, total: ${agentMap.size}, keys: ${[...agentMap.keys()].join(', ')})`);
 
   // 权限审批网关
   const permissionGateway = new PermissionGateway();
@@ -300,18 +290,12 @@ async function main() {
   logger.info(`✓ Created ${channelInstances.length} channel instance(s)`);
 
   // 创建命令处理器
-  const cmdHandler = new CommandHandler(sessionManager, agentMap, messageCache, eventBus, primaryAgentKey);
+  const cmdHandler = new CommandHandler(sessionManager, agentMap, messageCache, eventBus, primaryRunnerKey);
   cmdHandler.setPermissionGateway(permissionGateway);
   cmdHandler.setInteractionRouter(interactionRouter);
   cmdHandler.setStatsCollector(statsCollector);
 
   // 创建消息处理器
-  // 构造 GlobalSettings（进程级，不属于任何 agent）
-  const globalSettings: import('./types.js').GlobalSettings = {
-    idleMonitor: legacyConfig.idleMonitor,
-    debug: legacyConfig.debug,
-  };
-
   const processor = new MessageProcessor(
     agentMap,
     sessionManager,
@@ -329,7 +313,7 @@ async function main() {
       };
       return cmdHandler.handle(content, channel, channelId, sendFn, userId, threadId);
     },
-    primaryAgentKey
+    primaryRunnerKey
   );
 
   // 回填 processor 和 messageQueue 的引用
@@ -363,7 +347,7 @@ async function main() {
     const baseagent = agentId || primaryBaseagent;
     const evol = evolagentName || primaryAgent.aid;
     const agent = agentMap.get(`${evol}::${baseagent}`)
-      || agentMap.get(primaryAgentKey);
+      || agentMap.get(primaryRunnerKey);
     if (agent?.hasActiveStream(sessionKey)) {
       await agent.interrupt(sessionKey);
     }
@@ -717,7 +701,7 @@ async function main() {
       }
       const evolName = owningAgent.aid;
       const baseagentName = session.agentId || primaryBaseagent;
-      const agent = agentMap.get(`${evolName}::${baseagentName}`) || agentMap.get(primaryAgentKey);
+      const agent = agentMap.get(`${evolName}::${baseagentName}`) || agentMap.get(primaryRunnerKey);
       if (!agent) {
         sessionManager.clearProcessing(session.id);
         continue;

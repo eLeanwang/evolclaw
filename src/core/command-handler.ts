@@ -166,7 +166,7 @@ export class CommandHandler {
   private interactionRouter?: InteractionRouter;
   private statsCollector?: StatsCollector;
   private agentMap: Map<string, AgentRunnerFull>;
-  private defaultAgentId: string;
+  private primaryRunnerKey: string;
   private agentRegistry?: EvolAgentRegistryHandle;
 
   /**
@@ -181,7 +181,7 @@ export class CommandHandler {
       const key = `${evolName}::${baseagent}`;
       if (this.agentMap.has(key)) return this.agentMap.get(key)!;
     }
-    if (this.agentMap.has(this.defaultAgentId)) return this.agentMap.get(this.defaultAgentId)!;
+    if (this.agentMap.has(this.primaryRunnerKey)) return this.agentMap.get(this.primaryRunnerKey)!;
     return this.agentMap.values().next().value!;
   }
 
@@ -196,10 +196,10 @@ export class CommandHandler {
     return result;
   }
 
-  /** Extract the baseagent component from `defaultAgentId` (e.g. `[default]::claude` → `claude`). */
+  /** Extract the baseagent component from `primaryRunnerKey` (e.g. `aid::claude` → `claude`). */
   private parseDefaultBaseagent(): string {
-    const idx = this.defaultAgentId.indexOf('::');
-    return idx >= 0 ? this.defaultAgentId.slice(idx + 2) : this.defaultAgentId;
+    const idx = this.primaryRunnerKey.indexOf('::');
+    return idx >= 0 ? this.primaryRunnerKey.slice(idx + 2) : this.primaryRunnerKey;
   }
 
   constructor(
@@ -207,15 +207,15 @@ export class CommandHandler {
     agentRunnerOrMap: AgentRunnerFull | Map<string, AgentRunnerFull>,
     private messageCache: MessageCache,
     private eventBus: EventBus,
-    defaultAgentId?: string
+    primaryRunnerKey?: string
   ) {
     if (agentRunnerOrMap instanceof Map) {
       this.agentMap = agentRunnerOrMap;
-      this.defaultAgentId = defaultAgentId || '<unknown>::claude';
+      this.primaryRunnerKey = primaryRunnerKey || '<unknown>::claude';
     } else {
       // 测试 / 单 runner 路径：占位 agent name 用 '<unknown>'
       this.agentMap = new Map([[`<unknown>::${agentRunnerOrMap.name}`, agentRunnerOrMap]]);
-      this.defaultAgentId = `<unknown>::${agentRunnerOrMap.name}`;
+      this.primaryRunnerKey = `<unknown>::${agentRunnerOrMap.name}`;
     }
   }
 
@@ -2148,7 +2148,7 @@ export class CommandHandler {
         channelId,
         projectPath,
         sessionName,
-        session?.agentId || this.defaultAgentId
+        session?.agentId || this.primaryRunnerKey
       );
 
       this.eventBus.publish({
@@ -2689,7 +2689,7 @@ export class CommandHandler {
   /p ${projectName} --confirm`;
       }
 
-      const currentAgentId = activeSession?.agentId || this.defaultAgentId;
+      const currentAgentId = activeSession?.agentId || this.primaryRunnerKey;
       const newSession = await this.sessionManager.switchProject(channel, channelId, projectPath, currentAgentId);
 
       this.eventBus.publish({
@@ -2704,7 +2704,7 @@ export class CommandHandler {
       const cachedEvents = this.messageCache.getEvents(newSession.id);
 
       const hasExistingSession = newSession.agentSessionId ? '（恢复已有会话）' : '（新建会话）';
-      const currentAgent = newSession.agentId || this.defaultAgentId;
+      const currentAgent = newSession.agentId || this.primaryRunnerKey;
       let response = `✓ 已切换到项目: ${projectName}\n  路径: ${projectPath}\n  Agent: ${currentAgent}\n  ${hasExistingSession}`;
 
       if (cachedEvents.length > 0 && sendMessage) {
@@ -3041,7 +3041,7 @@ export class CommandHandler {
         }
 
         for (const projectPath of projectPaths) {
-          const currentAgentId = session?.agentId || this.defaultAgentId;
+          const currentAgentId = session?.agentId || this.primaryRunnerKey;
           const cliSessions = await this.sessionManager.scanCliSessions(projectPath, currentAgentId);
           const cliSession = cliSessions.find(c => c.uuid.startsWith(sessionName));
 
