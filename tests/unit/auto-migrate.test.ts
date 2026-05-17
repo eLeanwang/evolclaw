@@ -79,9 +79,8 @@ describe('autoMigrateIfNeeded', () => {
     expect(agent!.aid).toBe('mybot.agentid.pub');
     expect(agent!.owners).toEqual(['owner.agentid.pub']);
     expect(agent!.admins).toEqual(['admin.agentid.pub']);
-    expect(agent!.channels.length).toBeGreaterThanOrEqual(1);
-    expect(agent!.channels[0].type).toBe('aun');
-    expect(agent!.channels[0].name).toBe('main');
+    // AUN 是隐式的，channels[] 里不应有 AUN entry
+    expect(agent!.channels.filter((c: any) => c.type === 'aun').length).toBe(0);
     expect(agent!.projects?.defaultPath).toBe('/tmp/proj');
     expect(agent!.chatmode?.group).toBe('proactive');
 

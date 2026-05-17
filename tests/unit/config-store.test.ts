@@ -51,7 +51,7 @@ describe('config-store', () => {
       expect(errs.some(e => /name invalid/.test(e))).toBe(true);
     });
 
-    it('rejects multiple AUN instances', () => {
+    it('tolerates AUN entries in channels[] (warns but no error)', () => {
       const c: AgentConfig = {
         $schema_version: 1,
         aid: 'alice.agentid.pub',
@@ -61,7 +61,7 @@ describe('config-store', () => {
         ],
       };
       const errs = validateAgentConfig(c);
-      expect(errs.some(e => /at most one channels.*'aun'/.test(e))).toBe(true);
+      expect(errs.length).toBe(0);
     });
 
     it('rejects duplicate name within same type', () => {

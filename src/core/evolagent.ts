@@ -92,7 +92,12 @@ export class EvolAgent {
   }
 
   channelInstanceNames(): string[] {
-    return this.merged.channels.map(c => this.effectiveChannelName(c.type, c.name));
+    // AUN channel 隐式存在（从 agent.aid 派生），不需要在 channels[] 里声明
+    const aunKey = this.effectiveChannelName('aun', 'main');
+    const others = this.merged.channels
+      .filter(c => c.type !== 'aun')
+      .map(c => this.effectiveChannelName(c.type, c.name));
+    return [aunKey, ...others];
   }
 
   /** 列出所有 channel 实例（含 effective key） */

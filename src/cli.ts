@@ -1200,15 +1200,30 @@ async function cmdWatchAid(): Promise<void> {
     if (name) aidNameMap.set(a.aid, name);
   }
 
-  // Phase 2: refresh agent.md from network (async, non-blocking)
+  // Phase 2: refresh agent.md from network (async, non-blocking, suppress output)
   const refreshNames = async () => {
-    for (const a of localAids) {
-      if (!a.hasPrivateKey) continue;
-      try {
-        await agentmdGet(a.aid);
-        const name = readLocalName(a.aid);
-        if (name) aidNameMap.set(a.aid, name);
-      } catch { /* ignore network errors */ }
+    const origLog = console.log;
+    const origInfo = console.info;
+    const origWarn = console.warn;
+    const origError = console.error;
+    console.log = () => {};
+    console.info = () => {};
+    console.warn = () => {};
+    console.error = () => {};
+    try {
+      for (const a of localAids) {
+        if (!a.hasPrivateKey) continue;
+        try {
+          await agentmdGet(a.aid);
+          const name = readLocalName(a.aid);
+          if (name) aidNameMap.set(a.aid, name);
+        } catch { /* ignore network errors */ }
+      }
+    } finally {
+      console.log = origLog;
+      console.info = origInfo;
+      console.warn = origWarn;
+      console.error = origError;
     }
   };
   refreshNames();
@@ -2286,7 +2301,7 @@ async function cmdAgentSyncAids(): Promise<void> {
     const newConfig = {
       ...JSON.parse(JSON.stringify(templateAgent)),
       aid,
-      channels: [{ type: 'aun', name: 'main' }],
+      channels: [],
     };
     newConfig.$schema_version = CONFIG_SCHEMA_VERSION;
 
@@ -2514,7 +2529,7 @@ async function cmdAgentNew(suggestedName: string): Promise<void> {
       aid,
       enabled: true,
       owners: owner ? [owner] : [],
-      channels: [{ type: 'aun', name: 'main' }],
+      channels: [],
       active_baseagent: baseagent,
       baseagents: { [baseagent]: {} },
       projects: { defaultPath: projectPath },
@@ -2609,8 +2624,8 @@ async function cmdAgentNewNonInteractive(aid: string, args: string[]): Promise<v
     console.error(`  ⚠ AID creation failed (can retry later): ${e?.message || e}`);
   }
 
-  // Build channels[] list
-  const channels: any[] = [{ type: 'aun', name: 'main' }];
+  // Build channels[] list (AUN is implicit, only extra channels go here)
+  const channels: any[] = [];
 
   const feishuAppId = getArg('--feishu-app-id');
   const feishuAppSecret = getArg('--feishu-app-secret');

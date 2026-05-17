@@ -228,19 +228,10 @@ export function autoMigrateIfNeeded(): void {
 function buildAgentConfigFromLegacy(aid: string, raw: any, globalConfig: any): AgentConfig {
   const channels: ChannelInstance[] = [];
 
-  // AUN channel
+  // AUN 是隐式的（从 aid 派生），不放进 channels[]
   const aunBlock = raw.channels?.aun;
-  if (aunBlock) {
-    channels.push({
-      type: 'aun',
-      name: 'main',
-      enabled: aunBlock.enabled !== false,
-      ...(aunBlock.encryptionSeed && { encryptionSeed: aunBlock.encryptionSeed }),
-      ...(aunBlock.gatewayUrl && { gatewayUrl: aunBlock.gatewayUrl }),
-    } as any);
-  }
 
-  // 其它 channels
+  // 其它 channels（非 AUN）
   for (const [type, block] of Object.entries(raw.channels || {})) {
     if (type === 'aun' || type === 'defaultChannel') continue;
     const instances = Array.isArray(block) ? block : [block];
@@ -284,20 +275,11 @@ function buildAgentConfigFromLegacy(aid: string, raw: any, globalConfig: any): A
 function buildAgentConfigFromGlobalChannels(aid: string, globalConfig: any): AgentConfig {
   const channels: ChannelInstance[] = [];
 
-  // AUN
+  // AUN 是隐式的（从 aid 派生），不放进 channels[]
   const aunRaw = globalConfig.channels?.aun;
   const aunInst = Array.isArray(aunRaw) ? aunRaw[0] : aunRaw;
-  if (aunInst) {
-    channels.push({
-      type: 'aun',
-      name: 'main',
-      enabled: aunInst.enabled !== false,
-      ...(aunInst.encryptionSeed && { encryptionSeed: aunInst.encryptionSeed }),
-      ...(aunInst.gatewayUrl && { gatewayUrl: aunInst.gatewayUrl }),
-    } as any);
-  }
 
-  // 其它 channels
+  // 其它 channels（非 AUN）
   for (const [type, block] of Object.entries(globalConfig.channels || {})) {
     if (type === 'aun' || type === 'defaultChannel') continue;
     const instances = Array.isArray(block) ? block : [block];
@@ -432,6 +414,12 @@ export function validateAgentConfig(cfg: AgentConfig): string[] {
       errs.push(`channels[${i}] must be an object`);
       continue;
     }
+    if (ch.type === 'aun') {
+      // AUN 是隐式的（从 agent.aid 派生），不应出现在 channels[] 里
+      // 容忍但 warn——不算 error，跳过校验
+      aunCount++;
+      continue;
+    }
     if (!SUPPORTED_CHANNEL_TYPES.has(ch.type)) {
       errs.push(`channels[${i}].type "${ch.type}" not supported`);
       continue;
@@ -447,10 +435,9 @@ export function validateAgentConfig(cfg: AgentConfig): string[] {
       set.add(ch.name);
       seenNamesByType.set(ch.type, set);
     }
-    if (ch.type === 'aun') aunCount++;
   }
-  if (aunCount > 1) {
-    errs.push(`an agent may have at most one channels[].type='aun' (got ${aunCount})`);
+  if (aunCount > 0) {
+    logger.warn(`[config] agent ${cfg.aid}: channels[] contains ${aunCount} AUN entry(s) — AUN is implicit, these will be ignored`);
   }
   return errs;
 }

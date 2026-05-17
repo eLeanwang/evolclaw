@@ -86,13 +86,22 @@ export class ChannelLoader {
    */
   async createForAgent(agent: EvolAgent): Promise<ChannelInstance[]> {
     const rewrittenChannels: Record<string, any[]> = {};
+
+    // AUN channel 从 agent.aid 隐式创建——不需要在 channels[] 里显式声明
+    const aunEffName = agent.effectiveChannelName('aun', 'main');
+    rewrittenChannels['aun'] = [{
+      type: 'aun',
+      name: aunEffName,
+      aid: agent.aid,
+      enabled: true,
+      agentName: agent.aid,
+    }];
+
+    // 其它 channels（非 AUN）从 config.channels[] 取
     for (const inst of agent.config.channels) {
+      if (inst.type === 'aun') continue; // 跳过显式声明的 AUN（已隐式处理）
       const effName = agent.effectiveChannelName(inst.type, inst.name);
       const rewritten: any = { ...inst, name: effName, agentName: agent.aid };
-      // AUN 实例的 aid 等同 agent 自身 aid——自动注入
-      if (inst.type === 'aun' && !rewritten.aid) {
-        rewritten.aid = agent.aid;
-      }
       (rewrittenChannels[inst.type] ??= []).push(rewritten);
     }
 
