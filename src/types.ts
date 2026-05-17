@@ -487,6 +487,7 @@ export interface AidConnectionState {
   lastAttemptAt?: number;       // 最近一次连接尝试时间戳
   lastConnectedAt?: number;     // 最近一次成功 connected 时间戳
   lastError?: string;           // 最近一次失败简述（≤ 80 字符）
+  gatewayUrl?: string;          // 当前连接的网关地址
   blockedBy?: {                 // 仅 aid_blocked 时填充
     pid: number;
     evolclawHome: string;
