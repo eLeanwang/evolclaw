@@ -23,6 +23,7 @@ import { MessageCache } from './core/message/message-cache.js';
 import { CommandHandler } from './core/command-handler.js';
 import { EventBus } from './core/event-bus.js';
 import { StatsCollector } from './utils/stats-collector.js';
+import { AidStatsCollector } from './utils/aid-stats-collector.js';
 import { PermissionGateway } from './core/permission.js';
 import { InteractionRouter } from './core/interaction-router.js';
 import { ChannelLoader, type ChannelInstance } from './core/channel-loader.js';
@@ -200,6 +201,9 @@ async function main() {
 
   // 统计收集器（近 1 小时滚动统计）
   const statsCollector = new StatsCollector(eventBus);
+
+  // Per-AID 消息统计收集器（累计，供 watch aid 实时展示）
+  const aidStatsCollector = new AidStatsCollector();
 
   // 初始化 SessionManager（文件系统后端）
   const sessionManager = new SessionManager(paths.sessionsDir, eventBus,
@@ -780,6 +784,18 @@ async function main() {
     }
     return out;
   });
+
+  // 注入 Per-AID 统计收集器到所有 AUN channel 实例
+  for (const inst of channelInstances) {
+    if (inst.channelType !== 'aun') continue;
+    const ch = inst.channel as any;
+    if (typeof ch?.setAidStatsCollector === 'function') {
+      ch.setAidStatsCollector(aidStatsCollector);
+    }
+  }
+
+  // 注入 Per-AID 统计 IPC provider
+  ipcServer.setAunAidStatsProvider(() => aidStatsCollector.getAllSnapshots());
 
   // ── Reload hooks: enable agentRegistry.reload() to drain/disconnect/restart channels ──
   const reloadHooks: ReloadHooks = buildReloadHooks({

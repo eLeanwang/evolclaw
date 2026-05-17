@@ -1148,10 +1148,229 @@ function cmdWatch() {
   platform.onShutdown(cleanup);
 }
 
-/**
- * restart-monitor: 内部命令，由 /restart 命令调用
- * 支持 self-heal：启动失败时调用 claude CLI 自动修复，最多重试 3 次
- */
+// ==================== Watch AID (real-time stats table) ====================
+
+function formatBytes(bytes: number): string {
+  if (bytes === 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  const val = bytes / Math.pow(1024, i);
+  return i === 0 ? `${bytes} B` : `${val.toFixed(1)} ${units[i]}`;
+}
+
+function formatTimeAgoShort(ms: number): string {
+  const sec = Math.floor(ms / 1000);
+  if (sec < 60) return `${sec}s ago`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hour = Math.floor(min / 60);
+  if (hour < 24) return `${hour}h ago`;
+  const day = Math.floor(hour / 24);
+  return `${day}d ago`;
+}
+
+async function cmdWatchAid(): Promise<void> {
+  const p = resolvePaths();
+
+  // Get version
+  const pkg = JSON.parse(fs.readFileSync(path.join(getPackageRoot(), 'package.json'), 'utf-8'));
+  const version = pkg.version;
+
+  // Register instance
+  fs.mkdirSync(p.instanceDir, { recursive: true });
+  const instanceFile = path.join(p.instanceDir, `watch-aid-${process.pid}.json`);
+  fs.writeFileSync(instanceFile, JSON.stringify({
+    pid: process.pid,
+    startedAt: Date.now(),
+    startedAtIso: new Date().toISOString(),
+    type: 'watch-aid',
+  }, null, 2));
+
+  const useColor = !!process.stdout.isTTY;
+  const RST = useColor ? '\x1b[0m' : '';
+  const DIM = useColor ? '\x1b[2m' : '';
+  const BOLD = useColor ? '\x1b[1m' : '';
+  const CYAN = useColor ? '\x1b[36m' : '';
+  const GREEN = useColor ? '\x1b[32m' : '';
+  const RED = useColor ? '\x1b[31m' : '';
+  const CLR_LINE = '\x1b[2K';
+
+  const COL_AID = 30;
+  const COL_STATUS = 16;
+  const COL_UPTIME = 10;
+  const COL_RECV = 6;
+  const COL_SENT = 6;
+  const COL_BIN = 10;
+  const COL_BOUT = 10;
+  const COL_LRECV = 12;
+  const COL_LSENT = 12;
+  const COL_PEERS = 6;
+
+  function formatDuration(ms: number): string {
+    const sec = Math.floor(ms / 1000);
+    if (sec < 60) return `${sec}s`;
+    const min = Math.floor(sec / 60);
+    if (min < 60) return `${min}m${sec % 60}s`;
+    const hour = Math.floor(min / 60);
+    if (hour < 24) return `${hour}h${min % 60}m`;
+    const day = Math.floor(hour / 24);
+    return `${day}d${hour % 24}h`;
+  }
+
+  function renderHeader(): string {
+    return '  ' +
+      padRight('AID', COL_AID) +
+      padRight('STATUS', COL_STATUS) +
+      padRight('UPTIME', COL_UPTIME) +
+      padRight('RECV', COL_RECV) +
+      padRight('SENT', COL_SENT) +
+      padRight('BYTES IN', COL_BIN) +
+      padRight('BYTES OUT', COL_BOUT) +
+      padRight('LAST RECV', COL_LRECV) +
+      padRight('LAST SENT', COL_LSENT) +
+      padRight('PEERS', COL_PEERS);
+  }
+
+  function renderRow(aid: any, stats: any): string[] {
+    const aidLabel = aid.aid.length > COL_AID - 2 ? aid.aid.slice(0, COL_AID - 4) + '..' : aid.aid;
+    const statusLabel = AID_STATUS_LABELS[aid.status] || aid.status;
+    const now = Date.now();
+    const lastRecv = stats?.lastReceivedAt ? formatTimeAgoShort(now - stats.lastReceivedAt) : '—';
+    const lastSent = stats?.lastSentAt ? formatTimeAgoShort(now - stats.lastSentAt) : '—';
+    const uptime = (aid.status === 'connected' && aid.lastConnectedAt)
+      ? formatDuration(now - aid.lastConnectedAt)
+      : '—';
+
+    const mainLine = '  ' +
+      padRight(aidLabel, COL_AID) +
+      padRight(statusLabel, COL_STATUS) +
+      padRight(uptime, COL_UPTIME) +
+      padRight(String(stats?.messagesReceived ?? 0), COL_RECV) +
+      padRight(String(stats?.messagesSent ?? 0), COL_SENT) +
+      padRight(formatBytes(stats?.bytesReceived ?? 0), COL_BIN) +
+      padRight(formatBytes(stats?.bytesSent ?? 0), COL_BOUT) +
+      padRight(lastRecv, COL_LRECV) +
+      padRight(lastSent, COL_LSENT) +
+      padRight(String(stats?.uniquePeerCount ?? 0), COL_PEERS);
+
+    const namePart = stats?.selfName ? stats.selfName : (aid.agentName || '');
+    const lastMsg = stats?.lastReceivedText || stats?.lastSentText || '';
+    const msgDir = stats?.lastReceivedText
+      ? (stats?.lastSentText
+        ? ((stats.lastReceivedAt ?? 0) >= (stats.lastSentAt ?? 0) ? '↓' : '↑')
+        : '↓')
+      : (stats?.lastSentText ? '↑' : '');
+    const msgPreview = lastMsg ? `${msgDir} ${lastMsg.replace(/\n/g, ' ').slice(0, 60)}` : '';
+    const subLine = `${DIM}    ${namePart}${msgPreview ? '  ' + msgPreview : ''}${RST}`;
+
+    return [mainLine, subLine];
+  }
+
+  let lastLineCount = 0;
+
+  async function render(): Promise<void> {
+    const lines: string[] = [];
+
+    // Query daemon — may be offline
+    const [aidsResp, statsResp, statusResp] = await Promise.all([
+      ipcQuery<{ ok: boolean; aids: any[] }>(p.socket, { type: 'aun-aids' }),
+      ipcQuery<{ ok: boolean; stats: any[] }>(p.socket, { type: 'aun-aid-stats' }),
+      ipcQuery<any>(p.socket, { type: 'status' }),
+    ]);
+
+    const daemonOnline = statusResp !== null;
+    const aids = aidsResp?.aids ?? [];
+    const stats = statsResp?.stats ?? [];
+    const statsMap = new Map<string, any>();
+    for (const s of stats) statsMap.set(s.aid, s);
+
+    const now = new Date();
+    const timeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
+
+    const statusIndicator = daemonOnline
+      ? `${GREEN}● Running${RST}`
+      : `${RED}● Offline${RST}`;
+
+    lines.push(`${BOLD}${CYAN}📊 EvolClaw AID Monitor${RST}  ${statusIndicator}  ${DIM}${timeStr} | Refresh: 1s | ESC to exit${RST}`);
+    lines.push('');
+
+    if (!daemonOnline) {
+      lines.push(`  ${RED}EvolClaw is not running.${RST} Waiting for daemon to start...`);
+      lines.push('');
+    } else if (aids.length === 0) {
+      lines.push('  No active AIDs');
+      lines.push('');
+    } else {
+      lines.push(`${DIM}${renderHeader()}${RST}`);
+      const lineWidth = COL_AID + COL_STATUS + COL_UPTIME + COL_RECV + COL_SENT + COL_BIN + COL_BOUT + COL_LRECV + COL_LSENT + COL_PEERS;
+      lines.push(`${DIM}  ${'─'.repeat(lineWidth)}${RST}`);
+      for (const aid of aids) {
+        const s = statsMap.get(aid.aid);
+        lines.push(...renderRow(aid, s));
+      }
+      lines.push('');
+    }
+
+    // Status bar
+    lines.push(`${DIM}  ${'─'.repeat(80)}${RST}`);
+
+    if (daemonOnline) {
+      const connectedCount = aids.filter((a: any) => a.status === 'connected').length;
+      const totalRecv = stats.reduce((sum: number, s: any) => sum + (s.messagesReceived ?? 0), 0);
+      const totalSent = stats.reduce((sum: number, s: any) => sum + (s.messagesSent ?? 0), 0);
+      const totalBytesIn = stats.reduce((sum: number, s: any) => sum + (s.bytesReceived ?? 0), 0);
+      const totalBytesOut = stats.reduce((sum: number, s: any) => sum + (s.bytesSent ?? 0), 0);
+
+      const gateways = [...new Set(aids.filter((a: any) => a.gatewayUrl).map((a: any) => a.gatewayUrl))];
+      const gatewayStr = gateways.length > 0 ? gateways.join(', ') : '—';
+
+      const daemonUptime = statusResp?.uptime ? formatDuration(statusResp.uptime) : '—';
+      const daemonPid = statusResp?.pid ?? '—';
+
+      lines.push(`  ${GREEN}Gateway:${RST} ${gatewayStr}`);
+      lines.push(`  ${GREEN}AIDs:${RST} ${aids.length} total, ${connectedCount} connected | ${GREEN}Messages:${RST} ↓${totalRecv} ↑${totalSent} | ${GREEN}Traffic:${RST} ↓${formatBytes(totalBytesIn)} ↑${formatBytes(totalBytesOut)}`);
+      lines.push(`  ${GREEN}Version:${RST} ${version} | ${GREEN}PID:${RST} ${daemonPid} | ${GREEN}Uptime:${RST} ${daemonUptime}`);
+    } else {
+      lines.push(`  ${GREEN}Version:${RST} ${version}`);
+    }
+
+    // Build frame buffer: cursor home, then each line with clear-to-EOL
+    let buf = '\x1b[H';
+    for (const line of lines) {
+      buf += CLR_LINE + line + '\n';
+    }
+    // Clear any leftover lines from previous frame
+    for (let i = lines.length; i < lastLineCount; i++) {
+      buf += CLR_LINE + '\n';
+    }
+    lastLineCount = lines.length;
+
+    process.stdout.write(buf);
+  }
+
+  // Initial clear screen
+  process.stdout.write('\x1b[2J\x1b[H');
+  await render();
+
+  const timer = setInterval(render, 1000);
+
+  const cleanup = () => {
+    clearInterval(timer);
+    try { fs.unlinkSync(instanceFile); } catch {}
+    process.exit(0);
+  };
+
+  // Listen for ESC key
+  if (process.stdin.isTTY) {
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+    process.stdin.on('data', (data) => {
+      if (data[0] === 0x1b || data[0] === 0x03) cleanup();
+    });
+  }
+
+  platform.onShutdown(cleanup);
+}
 async function cmdRestartMonitor() {
   const p = resolvePaths();
   const restartLog = path.join(p.logs, 'restart.log');
@@ -1896,7 +2115,7 @@ async function cmdCtl(args: string[]): Promise<void> {
 async function cmdAgent(args: string[]): Promise<void> {
   const sub = args[0];
 
-  if (!sub) {
+  if (!sub || sub === 'list') {
     await cmdAgentList();
     return;
   }
@@ -1914,6 +2133,11 @@ async function cmdAgent(args: string[]): Promise<void> {
       // Interactive mode: name from CLI is suggested default; user can override at prompt
       await cmdAgentNew(name);
     }
+    return;
+  }
+
+  if (sub === 'sync-aids') {
+    await cmdAgentSyncAids();
     return;
   }
 
@@ -1942,6 +2166,100 @@ async function cmdAgent(args: string[]): Promise<void> {
 
   // `evolclaw agent <name>` — show detail
   await cmdAgentShow(sub);
+}
+
+/**
+ * evolclaw agent sync-aids
+ *
+ * 扫描 ~/.aun/AIDs/ 下所有有私钥的 AID，对于没有对应 agent config 的 AID，
+ * 克隆第一个 agent（按 config.json 的 mtime 找最早创建的）作为模板，只替换 aid 字段。
+ */
+async function cmdAgentSyncAids(): Promise<void> {
+  const p = resolvePaths();
+  const { isValidAid } = await import('./aid/index.js');
+  const { ensureAgentDirSkeleton, saveAgent, loadAllAgents } = await import('./config-store.js');
+  const { CONFIG_SCHEMA_VERSION } = await import('./types.js');
+
+  // 1. 找 AUN keystore 路径
+  const aunPath = process.env.AUN_HOME || path.join(os.homedir(), '.aun');
+  const aidsDir = path.join(aunPath, 'AIDs');
+  if (!fs.existsSync(aidsDir)) {
+    console.log(`⚠ AUN AIDs 目录不存在: ${aidsDir}`);
+    return;
+  }
+
+  // 2. 扫描所有有私钥的 AID
+  const localAids: string[] = [];
+  for (const entry of fs.readdirSync(aidsDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    if (!isValidAid(entry.name)) continue;
+    const hasPrivateKey = fs.existsSync(path.join(aidsDir, entry.name, 'private'));
+    if (hasPrivateKey) localAids.push(entry.name);
+  }
+
+  if (localAids.length === 0) {
+    console.log('⚠ 未找到任何有私钥的本地 AID');
+    return;
+  }
+
+  console.log(`发现 ${localAids.length} 个本地 AID（有私钥）`);
+
+  // 3. 找已有的 agent 列表
+  const { agents } = loadAllAgents();
+  const existingAids = new Set(agents.map(a => a.aid));
+
+  // 4. 找模板 agent（按 config.json mtime 最早的）
+  let templateAgent = agents[0];
+  if (agents.length > 1) {
+    let earliestMtime = Infinity;
+    for (const a of agents) {
+      const configPath = path.join(p.agentsDir, a.aid, 'config.json');
+      try {
+        const stat = fs.statSync(configPath);
+        if (stat.mtimeMs < earliestMtime) {
+          earliestMtime = stat.mtimeMs;
+          templateAgent = a;
+        }
+      } catch {}
+    }
+  }
+
+  if (!templateAgent) {
+    console.log('❌ 没有可用的模板 agent。请先创建第一个 agent：evolclaw agent new <aid>');
+    return;
+  }
+
+  console.log(`模板 agent: ${templateAgent.aid}`);
+
+  // 5. 为缺失的 AID 克隆 agent
+  let created = 0;
+  for (const aid of localAids) {
+    if (existingAids.has(aid)) continue;
+
+    const newConfig = {
+      ...JSON.parse(JSON.stringify(templateAgent)),
+      aid,
+      channels: [{ type: 'aun', name: 'main' }],
+    };
+    // 确保 schema version
+    newConfig.$schema_version = CONFIG_SCHEMA_VERSION;
+
+    try {
+      saveAgent(newConfig);
+      ensureAgentDirSkeleton(aid);
+      console.log(`  ✓ ${aid}`);
+      created++;
+    } catch (e: any) {
+      console.error(`  ✗ ${aid}: ${e?.message || e}`);
+    }
+  }
+
+  if (created === 0) {
+    console.log('所有本地 AID 都已有对应 agent，无需同步。');
+  } else {
+    console.log(`\n✓ 同步完成：新建 ${created} 个 agent`);
+    console.log('  运行 `evolclaw restart` 使新 agent 生效。');
+  }
 }
 
 async function cmdAgentList(): Promise<void> {
@@ -2827,7 +3145,11 @@ export async function main(args: string[]) {
       cmdLogs(args.slice(1));
       break;
     case 'watch':
-      cmdWatch();
+      if (args[1] === 'aid') {
+        await cmdWatchAid();
+      } else {
+        cmdWatch();
+      }
       break;
     case 'restart-monitor':
       await cmdRestartMonitor();
