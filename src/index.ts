@@ -632,6 +632,19 @@ async function main() {
     });
   }
 
+  // 上线通知：延迟 1-3 秒后向 owner 发送上线消息
+  setTimeout(() => {
+    for (const name of connected) {
+      const agent = agentRegistry.resolveByChannel(name);
+      if (!agent) continue;
+      const ownerAid = agent.config.owners?.[0];
+      if (!ownerAid) continue;
+      const adapter = agent.channels.get(name);
+      if (!adapter) continue;
+      adapter.sendText(ownerAid, `✓ ${agent.aid} 已上线`).catch(() => {});
+    }
+  }, 1000 + Math.random() * 2000);
+
   // 统一 channel:health 跨通道通知（仅 auth_error）
   // 按 (channelType, ownerId) 去重，避免同类型多实例重复通知
   eventBus.subscribe('channel:health', (event) => {
