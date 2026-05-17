@@ -1,8 +1,8 @@
 # ~/.evolclaw 目录结构重构：实施记录
 
 > 基于设计文档：`docs/evolclaw-home-directory.md`
-> 实施时间：2026-05-17
-> 状态：核心架构已落地，运行时逻辑待实现
+> 实施时间：2026-05-17 ~ 2026-05-18
+> 状态：核心架构 + 运行时逻辑已落地，身份层/环境层待实现
 
 ## 一、已完成的工作
 
@@ -227,4 +227,74 @@ src/utils/init.ts
 src/utils/init-channel.ts
 src/utils/migrate-project.ts
 src/utils/stats-collector.ts
+src/ipc.ts
+```
+
+---
+
+## 五、后续补充实现（2026-05-18）
+
+### 10. AUN channel 隐式化
+
+AUN 是 agent 的存在基础——从 `agent.aid` 隐式派生，不需要在 `config.json.channels[]` 里显式声明。
+
+- `ChannelLoader.createForAgent()`：自动注入 AUN channel（aid 从 agent.aid 取）
+- `EvolAgent.channelInstanceNames()`：AUN key `<aid>#aun#main` 隐式返回
+- `validateAgentConfig()`：channels[] 里的 AUN entry 容忍但 warn（不报错）
+- CLI / 迁移代码：不再往 channels[] 塞 `{ type: 'aun' }`
+
+### 11. agent 动态热加载 + resync
+
+运行时可以不重启地添加/删除/修改 agent：
+
+- `EvolAgentRegistry.loadNewAgent(aid)`：从磁盘加载新 agent 到运行时
+- IPC `evolagent.load`：热加载单个 agent
+- IPC `evolagent.resync`：全量 resync（扫磁盘 vs 运行时，新增上线、disabled/删除下线、已有 reload）
+- `evolclaw agent reload`（无参数）：触发全量 resync
+- `evolclaw agent reload <aid>`：单 agent 热更新（已有）
+- 修改 config.json 后 `evolclaw agent reload` 即可热应用
+
+### 12. evolclaw agent sync-aids
+
+扫描 `~/.aun/AIDs/` 下所有有私钥的 AID（通过 `aidList()` 获取），为缺失 agent config 的 AID 克隆模板 agent，然后触发 resync 热加载。
+
+### 13. kits/ 安装时自动同步
+
+- `syncKitsFromPackage()`：首次启动或版本升级时从包内 `kits/` 复制到 `EVOLCLAW_HOME/kits/`
+- 用 `.kits-version` 文件跟踪已安装版本，版本一致则跳过
+- `package.json files[]` 包含 `kits/`
+
+### 14. personal/ 运行时
+
+- `EvolAgent.getPersona()`：读取 `personal/persona.md`（缓存，reload 时清除）
+- `EvolAgent.getWorkingMemory()`：读取 `personal/memory/working.md`（每次读，不缓存）
+- `MessageProcessor`：在 system prompt 组装时注入 persona（在 runtime 段之前）+ working memory（以 `[当前关注]` 标签）
+
+### 15. 上线通知
+
+agent 连接成功后延迟 1-3 秒向 owner 发送上线通消息。
+
+### 16. Windows 终端闪烁修复
+
+`spawn()` 加 `windowsHide: true`（start + restart-monitor 两处）。
+
+### 17. AID 连接间隔
+
+`connectAll` 改为顺序连接 + 150ms 间隔，避免 AUN gateway 限流。
+
+---
+
+## 六、Commit 历史
+
+```
+f6c3b47 重构：新文件（config-store / channel-key / atomic-write / tests）
+0e0afa9 重构：切换所有现有模块到新配置结构
+c8b497b feat: evolclaw agent sync-aids + 启动修复
+0104242 feat: kits/ 共享上下文资源内容填充
+f1c030c feat: kits/ 安装时自动同步机制
+5ecd5bb feat: agent 动态热加载 + resync 机制
+3c9f3ca fix: AUN channel 改为隐式
+22ad159 fix: Windows 终端闪烁 + AID 连接间隔
+7289753 feat: agent 上线后延迟 1-3 秒向 owner 发送上线通知
+9db6b67 feat: personal/ 运行时——persona.md + working memory 注入 system prompt
 ```
