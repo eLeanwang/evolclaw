@@ -1,7 +1,7 @@
 import { ClaudeSessionFileAdapter } from './core/session/adapters/claude-session-file-adapter.js';
 import { CodexSessionFileAdapter } from './core/session/adapters/codex-session-file-adapter.js';
 import { GeminiSessionFileAdapter } from './core/session/adapters/gemini-session-file-adapter.js';
-import { ensureDataDirs, resolvePaths, agentDir } from './paths.js';
+import { ensureDataDirs, resolvePaths, agentDir, syncKitsFromPackage } from './paths.js';
 import { resolveAnthropicConfig } from './baseagents/resolve.js';
 import { loadDefaults, loadAllAgents, mergeForAgent, ensureAgentDirSkeleton, autoMigrateIfNeeded } from './config-store.js';
 import type { Config, MergedAgentConfig, AgentConfig, DefaultsConfig } from './types.js';
@@ -63,6 +63,9 @@ async function main() {
 
   // 确保数据目录存在
   ensureDataDirs();
+
+  // 同步包内 kits/ 到 EVOLCLAW_HOME/kits/（首次启动或升级时）
+  syncKitsFromPackage();
 
   // ── 单实例保护（pre-check + post-write self-check）──
   // pre-check：发现已有活 main 直接退出，避免起任何副作用

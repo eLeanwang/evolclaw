@@ -98,6 +98,36 @@ export function ensureDataDirs(): void {
   fs.mkdirSync(p.kitsDir, { recursive: true });
 }
 
+/**
+ * 首次启动或升级时，把包内 kits/ 复制到 EVOLCLAW_HOME/kits/。
+ * 策略：如果目标 kits/ 为空或包版本更新，整体覆盖。
+ */
+export function syncKitsFromPackage(): void {
+  const p = resolvePaths();
+  const srcKits = path.join(getPackageRoot(), 'kits');
+  if (!fs.existsSync(srcKits)) return;
+
+  const destKits = p.kitsDir;
+  // 用 .kits-version 文件跟踪已安装的版本
+  const versionFile = path.join(destKits, '.kits-version');
+  const pkgJsonPath = path.join(getPackageRoot(), 'package.json');
+  let pkgVersion = '0.0.0';
+  try {
+    pkgVersion = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf-8')).version || '0.0.0';
+  } catch {}
+
+  let installedVersion = '';
+  try {
+    installedVersion = fs.readFileSync(versionFile, 'utf-8').trim();
+  } catch {}
+
+  if (installedVersion === pkgVersion) return;
+
+  // 递归复制（覆盖）
+  fs.cpSync(srcKits, destKits, { recursive: true, force: true });
+  fs.writeFileSync(versionFile, pkgVersion, 'utf-8');
+}
+
 export function getPackageRoot(): string {
   // import.meta.dirname is available in Node.js 21.2+ and always returns
   // the correct OS-native path, regardless of Git Bash or MSYS2 environment.
