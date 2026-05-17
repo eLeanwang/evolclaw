@@ -1181,6 +1181,7 @@ async function cmdWatchAid(): Promise<void> {
   const { aidList, aidLookup } = await import('./aid/index.js');
   const localAids = aidList();
   const aidNameMap = new Map<string, string>();
+  const refreshedAids = new Set<string>();
 
   function readLocalName(aid: string): string | undefined {
     try {
@@ -1218,6 +1219,7 @@ async function cmdWatchAid(): Promise<void> {
           const name = parseNameFromContent(result.content);
           if (name) aidNameMap.set(a.aid, name);
         }
+        refreshedAids.add(a.aid);
       } catch { /* ignore network errors */ }
     }
   };
@@ -1301,6 +1303,8 @@ async function cmdWatchAid(): Promise<void> {
       padRight(String(stats?.uniquePeerCount ?? 0), COL_PEERS);
 
     const namePart = aidNameMap.get(aid.aid) || stats?.selfName || aid.agentName || '';
+    const nameColor = refreshedAids.has(aid.aid) ? '' : DIM;
+    const nameReset = refreshedAids.has(aid.aid) ? '' : RST;
     const BLUE = useColor ? '\x1b[34m' : '';
     let msgPreview = '';
     if (stats?.lastReceivedAt || stats?.lastSentAt) {
@@ -1314,7 +1318,7 @@ async function cmdWatchAid(): Promise<void> {
         msgPreview = `${GREEN}↓ ${stats.lastReceivedText.replace(/\n/g, ' ').slice(0, 60)}${RST}`;
       }
     }
-    const subLine = `${DIM}    ${namePart}${RST}${msgPreview ? '  ' + msgPreview : ''}`;
+    const subLine = `    ${nameColor}${namePart}${nameReset}${msgPreview ? '  ' + msgPreview : ''}`;
 
     return [mainLine, subLine];
   }
