@@ -544,6 +544,15 @@ export class MessageProcessor {
         if (channelInfo.adapter.sendImage) capParts.push('图片输出');
         if (channelInfo.adapter.sendFile) capParts.push('文件发送');
 
+        // Personal layer: persona.md + working memory 注入
+        const owningAgent = this.agentRegistry?.resolveByChannel(channelKey);
+        if (owningAgent) {
+          const persona = (owningAgent as any).getPersona?.();
+          if (persona) contextParts.push(persona);
+          const working = (owningAgent as any).getWorkingMemory?.();
+          if (working) contextParts.push(`[当前关注]\n${working}`);
+        }
+
         contextParts.push(renderPromptSection('runtime', {
           channel: currentChannelType,
           project: path.basename(absoluteProjectPath),

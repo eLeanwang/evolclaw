@@ -1,7 +1,9 @@
 import path from 'path';
+import fs from 'fs';
 import { logger } from '../utils/logger.js';
 import { saveAgent } from '../config-store.js';
 import { formatChannelKey } from './channel-key.js';
+import { agentPersonalDir } from '../paths.js';
 import type {
   AgentConfig,
   MergedAgentConfig,
@@ -199,6 +201,43 @@ export class EvolAgent {
     if (!this.rawAgent.projects.list) this.rawAgent.projects.list = {};
     this.rawAgent.projects.list[name] = projectPath;
     this.persist();
+  }
+
+  // ── Personal layer ────────────────────────────────────────────────────
+
+  private _personaCache: string | null | undefined = undefined;
+
+  /**
+   * 读取 personal/persona.md 内容（缓存，首次调用时从磁盘读）。
+   * 文件不存在返回 null。
+   */
+  getPersona(): string | null {
+    if (this._personaCache !== undefined) return this._personaCache;
+    const personaPath = path.join(agentPersonalDir(this.aid), 'persona.md');
+    try {
+      this._personaCache = fs.readFileSync(personaPath, 'utf-8').trim() || null;
+    } catch {
+      this._personaCache = null;
+    }
+    return this._personaCache;
+  }
+
+  /**
+   * 读取 personal/memory/working.md 内容（不缓存，每次会话开始时读）。
+   */
+  getWorkingMemory(): string | null {
+    const workingPath = path.join(agentPersonalDir(this.aid), 'memory', 'working.md');
+    try {
+      const content = fs.readFileSync(workingPath, 'utf-8').trim();
+      return content || null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** 清除 persona 缓存（reload 后重新读取） */
+  invalidatePersonaCache(): void {
+    this._personaCache = undefined;
   }
 
   // ── Context（喂给 message-processor / command-handler） ──────────────
