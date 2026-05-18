@@ -1385,19 +1385,20 @@ async function cmdWatchAid(): Promise<void> {
     const nameColor = refreshedAids.has(aid.aid) ? '' : DIM;
     const nameReset = refreshedAids.has(aid.aid) ? '' : RST;
     const BLUE = useColor ? '\x1b[34m' : '';
+    const ORANGE = useColor ? '\x1b[38;5;208m' : '';
     let msgPreview = '';
     if (stats?.lastReceivedAt || stats?.lastSentAt) {
       const recvTs = stats.lastReceivedAt ?? 0;
       const sentTs = stats.lastSentAt ?? 0;
       if (recvTs >= sentTs && stats.lastReceivedText) {
         const fromShort = stats.lastReceivedFrom ? stats.lastReceivedFrom.split('.')[0] : '';
-        msgPreview = `${GREEN}↓ ${fromShort ? fromShort + ': ' : ''}${stats.lastReceivedText.replace(/\n/g, ' ').slice(0, 60)}${RST}`;
+        msgPreview = `${GREEN}↓ ${fromShort ? `${ORANGE}${fromShort}${RST}${GREEN}: ` : ''}${stats.lastReceivedText.replace(/\n/g, ' ').slice(0, 60)}${RST}`;
       } else if (stats.lastSentText) {
         const toShort = stats.lastSentTo ? stats.lastSentTo.split('.')[0] : '';
-        msgPreview = `${BLUE}↑ ${toShort ? toShort + ': ' : ''}${stats.lastSentText.replace(/\n/g, ' ').slice(0, 60)}${RST}`;
+        msgPreview = `${BLUE}↑ ${toShort ? `${ORANGE}${toShort}${RST}${BLUE}: ` : ''}${stats.lastSentText.replace(/\n/g, ' ').slice(0, 60)}${RST}`;
       } else if (stats.lastReceivedText) {
         const fromShort = stats.lastReceivedFrom ? stats.lastReceivedFrom.split('.')[0] : '';
-        msgPreview = `${GREEN}↓ ${fromShort ? fromShort + ': ' : ''}${stats.lastReceivedText.replace(/\n/g, ' ').slice(0, 60)}${RST}`;
+        msgPreview = `${GREEN}↓ ${fromShort ? `${ORANGE}${fromShort}${RST}${GREEN}: ` : ''}${stats.lastReceivedText.replace(/\n/g, ' ').slice(0, 60)}${RST}`;
       }
     }
     const subLine1 = `    ${nameColor}${namePart}${nameReset}${msgPreview ? '  ' + msgPreview : ''}`;
