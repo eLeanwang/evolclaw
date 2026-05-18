@@ -927,7 +927,9 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       }
     }
 
-    // ── proactive 模式入站白名单 ──
+    // ── proactive 模式 payload 类型白名单 ──
+    // 仅做类型层面的防噪（task.update / status.ping 等信号类消息不进 Agent）；
+    // mention 过滤统一交给后面的 dispatchMode 一段处理（避免双层语义）。
     if (this.sessionModeResolver) {
       const sessionMode = await this.sessionModeResolver(groupId).catch(() => undefined);
       if (sessionMode === 'proactive') {
@@ -937,22 +939,6 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
         if (!AUNChannel.PROACTIVE_ALLOW_TYPES.has(payloadType)) {
           this.acknowledgeImmediately(messageId, seq);
           logger.info(`${this.logPrefix()} Group dropped (proactive deny): type=${payloadType} group=${groupId} sender=${senderAid} mid=${messageId}`);
-          return;
-        }
-
-        const rawText: string = typeof payloadObj?.text === 'string' ? payloadObj.text : '';
-        const rawMentions: unknown[] = Array.isArray(payloadObj?.mentions) ? payloadObj.mentions : [];
-
-        const mentionAids = this.extractMentionAids(rawMentions);
-        const mentionsSelf = !!this._aid && (
-          this.hasExplicitMention(rawText, this._aid) || mentionAids.includes(this._aid)
-        );
-        // @all 仅认结构化 mentions（payload.mentions），不扫描正文 — 避免引述性 "@all" 误判
-        const mentionsAll = this.hasMentionAll(rawMentions);
-
-        if (!mentionsSelf && !mentionsAll) {
-          this.acknowledgeImmediately(messageId, seq);
-          logger.info(`${this.logPrefix()} Group dropped (proactive whitelist): type=${payloadType} group=${groupId} sender=${senderAid} mid=${messageId} textPreview=${JSON.stringify(rawText.slice(0, 80))}`);
           return;
         }
       }
