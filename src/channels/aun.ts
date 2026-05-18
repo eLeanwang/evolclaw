@@ -946,8 +946,8 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     // 短 echo 快速通道：连通性测试要尽量低延迟，命中后绕过所有 await（sessionModeResolver / 后续 mention 过滤）
     {
       const firstLineFast = text.split('\n')[0] || '';
-      const echoLineCount = text.split('\n').length;
-      if (/echo/i.test(firstLineFast) && firstLineFast.trim().length <= 10 && echoLineCount <= 2) {
+      const hasEvolClawTrace = /\[EvolClaw\.(receive|reply|agent)\]/.test(text);
+      if (/echo/i.test(firstLineFast) && firstLineFast.trim().length <= 10 && !hasEvolClawTrace) {
         this.acknowledgeImmediately(messageId, seq);
         const msgEncryptedFast = !!(msg.e2ee);
         const peerInfo = this.peerInfoCached(senderAid);
@@ -1016,10 +1016,10 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     const mentionedAll = payloadMentions.includes('all');
 
     // Echo 机制优先于 mention 过滤：消息第一行包含 echo 时触发
-    // 超过 2 行说明已被 trace 过，是回声的回声，丢弃防止链式爆炸
+    // 包含 [EvolClaw.xxx] trace 说明已被本系统处理过，是回声的回声，丢弃防止链式爆炸
     const firstLineGroup = text.split('\n')[0] || '';
-    const echoLineCountGroup = text.split('\n').length;
-    if (/echo/i.test(firstLineGroup) && echoLineCountGroup <= 2) {
+    const hasEvolClawTraceGroup = /\[EvolClaw\.(receive|reply|agent)\]/.test(text);
+    if (/echo/i.test(firstLineGroup) && !hasEvolClawTraceGroup) {
       // 短 echo（≤10 字符）已在前面的快速通道命中并 return，这里只处理长 echo
       // >10 字符：追加 trace,存 pending echo,跳过 mention 过滤继续走 Agent 流程
       const echoTs = () => {
@@ -1035,10 +1035,10 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
         receiveTs: Date.now(),
       });
       // 继续走正常 Agent 流程（下面的代码会 dispatch）
-    } else if (/echo/i.test(firstLineGroup) && echoLineCountGroup > 2) {
+    } else if (/echo/i.test(firstLineGroup) && hasEvolClawTraceGroup) {
       // 回声炸弹：已被 trace 过的 echo，直接丢弃
       this.acknowledgeImmediately(messageId, seq);
-      logger.info(`${this.logPrefix()} Group dropped: echo bomb (lines=${echoLineCountGroup} group=${groupId} sender=${senderAid} mid=${messageId})`);
+      logger.info(`${this.logPrefix()} Group dropped: echo bomb (already-traced group=${groupId} sender=${senderAid} mid=${messageId})`);
       return;
     } else {
       // 非 echo 消息：正常 mention 过滤
@@ -1144,22 +1144,22 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     }
 
     // Echo 机制：消息第一行包含 "echo"（不区分大小写）且原始内容 ≤10 字符时，直接回声
-    // 超过 2 行说明已被 trace 过，是回声的回声，丢弃防止链式爆炸
+    // 包含 [EvolClaw.xxx] trace 说明已被本系统处理过，是回声的回声，丢弃防止链式爆炸
     const firstLine = event.text.split('\n')[0] || '';
-    const echoLineCountPrivate = event.text.split('\n').length;
-    if (/echo/i.test(firstLine) && firstLine.trim().length <= 10 && echoLineCountPrivate <= 2) {
+    const hasEvolClawTracePrivate = /\[EvolClaw\.(receive|reply|agent)\]/.test(event.text);
+    if (/echo/i.test(firstLine) && firstLine.trim().length <= 10 && !hasEvolClawTracePrivate) {
       this.handleEcho(event);
       return;
     }
 
-    // 回声炸弹：超过 2 行的 echo 已被 trace 过，直接丢弃
-    if (/echo/i.test(firstLine) && echoLineCountPrivate > 2) {
-      logger.info(`${this.logPrefix()} Dropped: echo bomb (lines=${echoLineCountPrivate} mid=${event.messageId} chat=${event.chatType})`);
+    // 回声炸弹：已被本系统 trace 过的 echo，直接丢弃
+    if (/echo/i.test(firstLine) && hasEvolClawTracePrivate) {
+      logger.info(`${this.logPrefix()} Dropped: echo bomb (already-traced mid=${event.messageId} chat=${event.chatType})`);
       return;
     }
 
     // 长 echo（>10 字符）：存 pending,继续交给 agent 处理
-    if (/echo/i.test(firstLine) && firstLine.trim().length > 10 && echoLineCountPrivate <= 2) {
+    if (/echo/i.test(firstLine) && firstLine.trim().length > 10 && !hasEvolClawTracePrivate) {
       const echoTs = () => {
         const d = new Date();
         return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}.${String(d.getMilliseconds()).padStart(3, '0')}`;
