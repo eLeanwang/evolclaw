@@ -306,8 +306,8 @@ async function cmdStart() {
       console.log(`  Logs: ${p.logs}/`);
 
       // 从主日志提取渠道连接摘要
-      const mainLog = path.join(p.logs, 'evolclaw.log');
-      if (fs.existsSync(mainLog)) {
+      const mainLog = findLatestLog(p.logs, 'evolclaw');
+      if (mainLog) {
         const logLines = fs.readFileSync(mainLog, 'utf-8').split('\n');
         // 从末尾往前找最近一次启动的摘要
         let channelSummary = '';
@@ -483,8 +483,10 @@ function formatTimeAgo(ms: number): string {
 
 /** 双字符宽字符 padding：中文/emoji 算 2 列，其他算 1 列 */
 function visualWidth(s: string): number {
+  // Strip ANSI escape sequences (color codes etc.) before measuring
+  const stripped = s.replace(/\x1b\[[0-9;]*m/g, '');
   let w = 0;
-  for (const ch of s) {
+  for (const ch of stripped) {
     const code = ch.codePointAt(0) ?? 0;
     // CJK / Hangul / 全角符号 / Emoji 等宽字符
     if (
@@ -886,6 +888,19 @@ function renderLogLine(line: string, opts: { level?: string; module?: string; co
   );
 }
 
+function findLatestLog(logDir: string, baseName: string): string | null {
+  if (!fs.existsSync(logDir)) return null;
+  // Try exact name first (legacy non-rotated)
+  const exact = path.join(logDir, `${baseName}.log`);
+  if (fs.existsSync(exact)) return exact;
+  // Find latest rotated file: baseName-YYYYMMDD-HH.log
+  const files = fs.readdirSync(logDir)
+    .filter(f => f.startsWith(`${baseName}-`) && f.endsWith('.log'))
+    .sort();
+  if (files.length === 0) return null;
+  return path.join(logDir, files[files.length - 1]);
+}
+
 function cmdLogs(args: string[]) {
   const raw = args.includes('--raw');
   const noColor = args.includes('--no-color');
@@ -895,22 +910,10 @@ function cmdLogs(args: string[]) {
   const module = moduleIdx !== -1 ? args[moduleIdx + 1] : undefined;
 
   const p = resolvePaths();
-  const mainLog = path.join(p.logs, 'evolclaw.log');
-  if (!fs.existsSync(mainLog)) {
-    console.log(`❌ Log file not found: ${mainLog}`);
+  const mainLog = findLatestLog(p.logs, 'evolclaw');
+  if (!mainLog) {
+    console.log(`❌ Log file not found in: ${p.logs}`);
     process.exit(1);
-  }
-
-  if (raw) {
-    // Raw mode: plain tail -f, no rendering at all
-    if (platform.isWindows) {
-      const tail = platform.tailFile(mainLog);
-      platform.onShutdown(() => tail.abort());
-    } else {
-      const child = spawn('tail', ['-f', '-n', '50', mainLog], { stdio: 'inherit' });
-      child.on('exit', (code) => process.exit(code || 0));
-    }
-    return;
   }
 
   // Rendered mode: always filter+truncate, color depends on TTY
@@ -922,33 +925,78 @@ function cmdLogs(args: string[]) {
     if (rendered !== null) process.stdout.write(rendered + '\n');
   }
 
-  if (platform.isWindows) {
-    // Windows: read existing content + watch
-    const existing = fs.readFileSync(mainLog, 'utf-8').split('\n').slice(-50);
-    existing.forEach(processLine);
-    let size = fs.statSync(mainLog).size;
-    const watcher = fs.watch(mainLog, () => {
-      const newSize = fs.statSync(mainLog).size;
-      if (newSize <= size) return;
-      const buf = Buffer.alloc(newSize - size);
-      const fd = fs.openSync(mainLog, 'r');
-      fs.readSync(fd, buf, 0, buf.length, size);
-      fs.closeSync(fd);
-      size = newSize;
-      buf.toString().split('\n').forEach(l => l && processLine(l));
-    });
-    platform.onShutdown(() => watcher.close());
-  } else {
-    // Unix: spawn tail -f, pipe through renderer
-    const child = spawn('tail', ['-f', '-n', '50', mainLog]);
-    const rl = readline.createInterface({ input: child.stdout });
-    rl.on('line', processLine);
-    child.on('exit', (code) => process.exit(code || 0));
-    platform.onShutdown(() => { child.kill(); });
+  // Backfill last 50 lines from current file
+  const existing = fs.readFileSync(mainLog, 'utf-8').split('\n').slice(-51);
+  if (existing.length && existing[existing.length - 1] === '') existing.pop();
+  existing.forEach(processLine);
+
+  if (raw) {
+    // Raw mode: poll without rendering
+    let currentFile = mainLog;
+    let position = fs.statSync(currentFile).size;
+    let pending = '';
+    const timer = setInterval(() => {
+      const latest = findLatestLog(p.logs, 'evolclaw');
+      if (latest && latest !== currentFile) {
+        currentFile = latest;
+        position = 0;
+        pending = '';
+      }
+      let stat: fs.Stats;
+      try { stat = fs.statSync(currentFile); } catch { return; }
+      if (stat.size < position) { position = 0; pending = ''; }
+      if (stat.size === position) return;
+      const buf = Buffer.alloc(stat.size - position);
+      try {
+        const fd = fs.openSync(currentFile, 'r');
+        fs.readSync(fd, buf, 0, buf.length, position);
+        fs.closeSync(fd);
+      } catch { return; }
+      position = stat.size;
+      const parts = (pending + buf.toString('utf-8')).split('\n');
+      pending = parts.pop() || '';
+      for (const line of parts) {
+        if (line) process.stdout.write(line + '\n');
+      }
+    }, 200);
+    platform.onShutdown(() => { clearInterval(timer); process.exit(0); });
+    return;
   }
+
+  // Follow mode: poll with rendering, auto-switch on rotation
+  let currentFile = mainLog;
+  let position = fs.statSync(currentFile).size;
+  let pending = '';
+  const timer = setInterval(() => {
+    const latest = findLatestLog(p.logs, 'evolclaw');
+    if (latest && latest !== currentFile) {
+      currentFile = latest;
+      position = 0;
+      pending = '';
+    }
+    let stat: fs.Stats;
+    try { stat = fs.statSync(currentFile); } catch { return; }
+    if (stat.size < position) { position = 0; pending = ''; }
+    if (stat.size === position) return;
+    const buf = Buffer.alloc(stat.size - position);
+    try {
+      const fd = fs.openSync(currentFile, 'r');
+      fs.readSync(fd, buf, 0, buf.length, position);
+      fs.closeSync(fd);
+    } catch { return; }
+    position = stat.size;
+    const parts = (pending + buf.toString('utf-8')).split('\n');
+    pending = parts.pop() || '';
+    for (const line of parts) {
+      if (line) processLine(line);
+    }
+  }, 200);
+  platform.onShutdown(() => { clearInterval(timer); process.exit(0); });
 }
 
 // ==================== Watch ====================
+
+let watchUseColor = false;
 
 const WATCH_BRACKET_TS_RE = /^\[(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?)\]/;
 const WATCH_JSON_TS_RE = /"ts"\s*:\s*"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?)"/;
@@ -984,30 +1032,138 @@ function stripTimestamp(line: string): string {
   return line;
 }
 
+function compactAunLog(line: string, color: boolean): string {
+  if (!color) {
+    // No-color mode: just compact [LEVEL][module] [aid] → [LEVEL][module] aid:
+    return line
+      .replace(/^\[([A-Z]+)\]\[([^\]]+)\] \[([^\]]+)\] /, '[$1][$2] $3: ')
+      .replace(/^\[([A-Z]+)\] /, '[$1] ');
+  }
+
+  // Pattern 1: [LEVEL][module] [aid] msg  (AUN SDK logs in stdout)
+  const m1 = line.match(/^\[([A-Z]+)\]\[([^\]]+)\](?: \[([^\]]+)\])? (.*)/s);
+  if (m1) {
+    const [, level, mod, aid, rest] = m1;
+    const lc = LEVEL_COLORS[level] || '';
+    const mc = assignModuleColor(mod);
+    const aidPart = aid ? ` ${aid}:` : '';
+    return `${lc}[${level}]${RST_CONST}${mc}[${mod}]${RST_CONST}${aidPart} ${rest}`;
+  }
+
+  // Pattern 2: [AiBotSDK] [LEVEL] msg  (WeCom SDK logs)
+  const m2 = line.match(/^\[([^\]]+)\] \[(DEBUG|INFO|WARN|ERROR)\] (.*)/s);
+  if (m2) {
+    const [, sdk, level, rest] = m2;
+    const lc = LEVEL_COLORS[level] || '';
+    const mc = assignModuleColor(sdk);
+    return `${lc}[${level}]${RST_CONST}${mc}[${sdk}]${RST_CONST} ${rest}`;
+  }
+
+  // Pattern 3: [LEVEL] [Module] msg  or  [LEVEL] msg  (evolclaw main log after stripTimestamp)
+  const m3 = line.match(/^\[(DEBUG|INFO|WARN|ERROR)\] (?:\[([^\]]+)\] )?(.*)/s);
+  if (m3) {
+    const [, level, mod, rest] = m3;
+    const lc = LEVEL_COLORS[level] || '';
+    if (mod) {
+      const mc = assignModuleColor(mod);
+      return `${lc}[${level}]${RST_CONST} ${mc}[${mod}]${RST_CONST} ${rest}`;
+    }
+    return `${lc}[${level}]${RST_CONST} ${rest}`;
+  }
+
+  return line;
+}
+
+const RST_CONST = '\x1b[0m';
+const LEVEL_COLORS: Record<string, string> = {
+  DEBUG: '\x1b[2m',       // dim
+  INFO: '\x1b[36m',      // cyan
+  WARN: '\x1b[33m',      // yellow
+  ERROR: '\x1b[31m',     // red
+};
+const moduleColorPool = [
+  '\x1b[35m',  // magenta
+  '\x1b[34m',  // blue
+  '\x1b[32m',  // green
+  '\x1b[96m',  // bright cyan
+  '\x1b[93m',  // bright yellow
+  '\x1b[95m',  // bright magenta
+  '\x1b[94m',  // bright blue
+  '\x1b[92m',  // bright green
+];
+const moduleColorMap = new Map<string, string>();
+let moduleColorIdx = 0;
+function assignModuleColor(mod: string): string {
+  let c = moduleColorMap.get(mod);
+  if (!c) { c = moduleColorPool[moduleColorIdx++ % moduleColorPool.length]; moduleColorMap.set(mod, c); }
+  return c;
+}
+
 function formatWatchContent(line: string): string {
   // JSON line: parse and format key fields
   if (line.startsWith('{') && line.endsWith('}')) {
     try {
       const obj = JSON.parse(line);
-      const dir = obj.dir || '';
-      const event = obj.event || '';
-      const aid = obj.self_aid || '';
-      const data = obj.data;
-      let dataStr = '';
-      if (data) {
+
+      // Message log format: { ts, msgId, sessionId, dir, status, duration? }
+      if (obj.msgId && obj.status) {
+        const dirLabel = obj.dir === 'inbound' ? '[IN]' : obj.dir === 'outbound' ? '[OUT]' : '     ';
+        const peer = obj.msgId.replace(/_\d+(_reply)?$/, '').replace(/^[^_]+_/, '');
+        const dur = obj.duration != null ? ` duration=${obj.duration}ms` : '';
+        if (!watchUseColor) return `${dirLabel}[${obj.status}] ${peer}:${dur}`.trimEnd();
+        const dc = obj.dir === 'inbound' ? '\x1b[32m' : '\x1b[33m'; // green in, yellow out
+        const ec = assignModuleColor(obj.status);
+        return `${dc}${dirLabel}${RST_CONST}${ec}[${obj.status}]${RST_CONST} ${peer}:${dur}`.trimEnd();
+      }
+
+      // Event log format: { ts, type, ... }
+      if (obj.type && !obj.dir) {
         const parts: string[] = [];
-        for (const [k, v] of Object.entries(data)) {
+        for (const [k, v] of Object.entries(obj)) {
+          if (k === 'ts' || k === 'type') continue;
           if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') {
             parts.push(`${k}=${v}`);
           }
         }
-        dataStr = parts.join(' ');
+        if (!watchUseColor) return `[${obj.type}] ${parts.join(' ')}`.trimEnd();
+        const tc = assignModuleColor(obj.type.split(':')[0]);
+        return `${tc}[${obj.type}]${RST_CONST} ${parts.join(' ')}`.trimEnd();
       }
-      const dirArrow = dir === 'IN' ? '<-' : dir === 'OUT' ? '->' : '  ';
-      return `${dirArrow} ${event} [${aid}] ${dataStr}`.trimEnd();
+
+      // AUN trace log format: { ts, dir, event, self_aid, data, ... }
+      if (obj.dir && obj.event) {
+        const aid = obj.self_aid || '';
+        const data = obj.data;
+        let dataStr = '';
+        if (data) {
+          const parts: string[] = [];
+          for (const [k, v] of Object.entries(data)) {
+            if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') {
+              parts.push(`${k}=${v}`);
+            }
+          }
+          dataStr = parts.join(' ');
+        }
+        const dirLabel = obj.dir === 'IN' ? '[IN]' : obj.dir === 'OUT' ? '[OUT]' : '     ';
+        const aidPart = aid ? `${aid}: ` : '';
+        if (!watchUseColor) return `${dirLabel}[${obj.event}] ${aidPart}${dataStr}`.trimEnd();
+        const dc = obj.dir === 'IN' ? '\x1b[32m' : '\x1b[33m'; // green in, yellow out
+        const ec = assignModuleColor(obj.event.split('.')[0]);
+        return `${dc}${dirLabel}${RST_CONST}${ec}[${obj.event}]${RST_CONST} ${aidPart}${dataStr}`.trimEnd();
+      }
+
+      // Unknown JSON format — show compact key=value summary
+      const parts: string[] = [];
+      for (const [k, v] of Object.entries(obj)) {
+        if (k === 'ts') continue;
+        if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') {
+          parts.push(`${k}=${v}`);
+        }
+      }
+      return parts.join(' ');
     } catch { /* fall through */ }
   }
-  return stripTimestamp(line);
+  return compactAunLog(stripTimestamp(line), watchUseColor);
 }
 
 const WATCH_FILE_COLORS = [
@@ -1057,6 +1213,7 @@ function cmdWatch() {
   fs.writeFileSync(instanceFile, JSON.stringify(instanceRecord, null, 2));
 
   const useColor = !!process.stdout.isTTY;
+  watchUseColor = useColor;
   const RST = useColor ? '\x1b[0m' : '';
   const DIM = useColor ? '\x1b[2m' : '';
   const colorMap = new Map<string, string>();
@@ -1069,7 +1226,8 @@ function cmdWatch() {
   };
 
   const listLogs = () => fs.readdirSync(p.logs).filter(f => f.endsWith('.log')).map(f => path.join(p.logs, f));
-  const shortName = (f: string) => path.basename(f, '.log');
+  // Strip rotation suffix (e.g., "evolclaw-20260518-21" → "evolclaw")
+  const shortName = (f: string) => path.basename(f, '.log').replace(/-\d{8}-\d{2}$/, '');
 
   // 计算最长文件名用于对齐
   let maxNameLen = 0;
@@ -1859,11 +2017,11 @@ async function invokeClaude(
 - 项目目录：${projectDir}
 - EVOLCLAW_HOME：${p.root}
 - 错误日志：${stdoutLog}
-- 主日志：${path.join(p.logs, 'evolclaw.log')}（logger 输出在这里，包含 config 校验失败等关键错误）
+- 主日志：${p.logs}/evolclaw-*.log（按小时切片，读最新的那个，包含 config 校验失败等关键错误）
 - 修复记录：${selfHealLog}（${selfHealExists}）
 
 ⚠️ 重要诊断技巧：
-- stdout.log 可能是空的（进程秒退时 logger 输出不会到 stdout），一定要同时读 evolclaw.log
+- stdout.log 可能是空的（进程秒退时 logger 输出不会到 stdout），一定要同时读 evolclaw-*.log 最新文件
 - 必须实际运行进程来复现错误：\`EVOLCLAW_HOME=${p.root} node dist/index.js 2>&1\`，观察输出和退出码
 - 检查是否有旧进程仍在运行：\`ps aux | grep 'node.*dist/index.js' | grep -v grep\`，旧进程可能占用端口或锁文件
 - 可以运行 \`EVOLCLAW_HOME=${p.root} node dist/cli.js diagnose\` 快速检查配置和数据库
@@ -1871,7 +2029,7 @@ async function invokeClaude(
 - 配置文件使用双 rename 原子写（foo.json → foo.json_ → foo.json__），崩溃时可从 foo.json_ 恢复
 
 请执行以下步骤：
-1. 读取 ${stdoutLog} 和 ${path.join(p.logs, 'evolclaw.log')} 的最后 50 行
+1. 读取 ${stdoutLog} 和 ${p.logs}/evolclaw-*.log（最新文件）的最后 50 行
 2. 运行 \`EVOLCLAW_HOME=${p.root} node dist/index.js 2>&1\` 复现错误（设置 10 秒超时）
 3. 如果 ${selfHealLog} 存在，先阅读之前的修复记录，避免重复尝试已失败的方案
 4. 根据实际复现的错误修复代码

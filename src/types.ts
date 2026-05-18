@@ -583,6 +583,7 @@ export interface DebugBlock {
   flusherDiag?: boolean;
   aunTrace?: boolean;
   aunSdkLog?: boolean;
+  upmsg?: boolean;
 }
 
 export type ShowActivitiesMode = 'all' | 'dm-only' | 'owner-dm-only' | 'none';

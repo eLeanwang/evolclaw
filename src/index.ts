@@ -629,10 +629,12 @@ async function main() {
   }
 
   // 上线通知：延迟 1-3 秒后向 owner 发送上线消息（带 name + 工作目录）
+  // 需在配置中 debug.upmsg: true 手动开启
   setTimeout(() => {
     for (const name of connected) {
       const agent = agentRegistry.resolveByChannel(name);
       if (!agent) continue;
+      if (!agent.config.debug?.upmsg) continue;
       const ownerAid = agent.config.owners?.[0];
       if (!ownerAid) continue;
       const adapter = agent.channels.get(name);
