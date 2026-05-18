@@ -14,26 +14,7 @@ import { appendAidEvent } from '../utils/instance-registry.js';
 import type { AidStatsCollector } from '../utils/aid-stats-collector.js';
 import { getProcessStartTime } from '../utils/process-introspect.js';
 import * as outbox from '../utils/outbox.js';
-
-function guessMime(filename: string): string {
-  const ext = path.extname(filename).toLowerCase();
-  const map: Record<string, string> = {
-    '.txt': 'text/plain', '.md': 'text/markdown', '.json': 'application/json',
-    '.js': 'text/javascript', '.ts': 'text/typescript', '.py': 'text/x-python',
-    '.html': 'text/html', '.css': 'text/css', '.csv': 'text/csv',
-    '.pdf': 'application/pdf', '.zip': 'application/zip', '.gz': 'application/gzip',
-    '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
-    '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml',
-    '.xml': 'application/xml', '.yaml': 'application/x-yaml', '.yml': 'application/x-yaml',
-  };
-  return map[ext] || 'application/octet-stream';
-}
-
-function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / 1048576).toFixed(1)} MB`;
-}
+import { guessMime, formatSize } from '../utils/mime.js';
 
 /**
  * 构造 connect extra_info：自描述本进程身份。
@@ -867,7 +848,8 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
 
     logger.info(`${this.logPrefix()} P2P dispatched: from=${shortAid}(${displayName}) mid=${messageId} encrypt=${msgEncrypted} text=${finalText.slice(0, 60)}`);
     appendAidEvent({ ts: Date.now(), iso: new Date().toISOString(), event: 'message_in', aid: this.config.aid, from: fromAid, msgId: messageId, kind: 'text', len: finalText.length });
-    this.aidStatsCollector?.recordInbound(this.config.aid, fromAid, Buffer.byteLength(finalText, 'utf-8'), finalText);
+    const isSystemP2P = p2pPayloadType === 'event';
+    this.aidStatsCollector?.recordInbound(this.config.aid, fromAid, Buffer.byteLength(finalText, 'utf-8'), finalText, isSystemP2P);
     const replyContext: ReplyContext = { metadata: { encrypted: msgEncrypted } };
     if (taskId) replyContext.threadId = taskId;
     this.dispatchMessage({
@@ -1080,7 +1062,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
 
     logger.info(`${this.logPrefix()} Group dispatched: group=${groupId} sender=${shortAid}(${displayName}) mode=${dispatchMode} mid=${messageId} text=${finalText.slice(0, 60)}`);
     appendAidEvent({ ts: Date.now(), iso: new Date().toISOString(), event: 'message_in', aid: this.config.aid, from: senderAid, msgId: messageId, kind: 'text', len: finalText.length, groupId });
-    this.aidStatsCollector?.recordInbound(this.config.aid, senderAid, Buffer.byteLength(finalText, 'utf-8'), finalText);
+    this.aidStatsCollector?.recordInbound(this.config.aid, senderAid, Buffer.byteLength(finalText, 'utf-8'), finalText, payloadType === 'event');
     this.dispatchMessage({
       channelId: groupId,
       groupId,
@@ -1915,6 +1897,8 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       this.trace('OUT', 'message.send.status', params);
       sendWithFallback('message.send');
     }
+    // 统计为系统消息（不更新 lastSentText/lastSentAt）
+    this.aidStatsCollector?.recordOutbound(this.config.aid, channelId, JSON.stringify(payload).length, undefined, true);
     // 群聊显示 group id 简称，P2P 显示 peer label；从 context.metadata 读取 chatmode
     const targetLabel = this.isGroupId(channelId) ? channelId : this.peerLabel(channelId);
     const chatmode = context?.metadata?.chatmode ?? '?';

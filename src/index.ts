@@ -815,6 +815,10 @@ async function main() {
   }
 
   // 注入 Per-AID 统计 IPC provider
+  aidStatsCollector.setQueueStatsProvider((agentName: string) => ({
+    processing: messageQueue.getProcessingCountByAgent(agentName),
+    queued: messageQueue.getQueueLengthByAgent(agentName),
+  }));
   ipcServer.setAunAidStatsProvider(() => aidStatsCollector.getAllSnapshots());
 
   // ── Reload hooks: enable agentRegistry.reload() to drain/disconnect/restart channels ──
