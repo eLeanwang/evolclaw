@@ -102,6 +102,15 @@ export interface WecomChannelInstanceConfig extends WecomChannelConfig {
   name: string;
 }
 
+/**
+ * Config —— channel plugin / baseagent runner 兼容类型。
+ *
+ * 新结构下不再有全局 config 文件；此类型仅作为 ChannelPlugin.isEnabled/createChannels
+ * 和 baseagent resolver 的输入形态。ChannelLoader.createForAgent 内部构造 syntheticConfig
+ * 喂给 plugin，字段来自 EvolAgent.config 的翻译。
+ *
+ * 后续 channel plugin 重写为直接吃 ChannelInstance[] 后，本类型可删。
+ */
 export interface Config {
   agents?: {
     claude?: {
@@ -109,31 +118,31 @@ export interface Config {
       baseUrl?: string;
       model?: string;
       effort?: 'low' | 'medium' | 'high' | 'max';
-      pathToClaudeCodeExecutable?: string; // Windows 上 SDK 找不到 claude 可执行体时手动指定
-      useSettingSources?: boolean;        // 使用 SDK 原生配置加载，默认 true
-      agentProgressSummaries?: boolean;   // 启用 AI 生成的子任务进度摘要，默认 true
-      excludeDynamicSections?: boolean;   // 从 system prompt 移除动态内容以提升跨用户 prompt cache 命中率，默认 false
+      pathToClaudeCodeExecutable?: string;
+      useSettingSources?: boolean;
+      agentProgressSummaries?: boolean;
+      excludeDynamicSections?: boolean;
     };
     codex?: {
       apiKey?: string;
       baseUrl?: string;
-      model?: string;     // 默认 'gpt-5.2-codex'
-      effort?: string;    // 推理强度: low / medium / high / max
-      reasoning?: string; // 别名（兼容旧配置）
+      model?: string;
+      effort?: string;
+      reasoning?: string;
     };
     gemini?: {
-      apiKey?: string;       // GEMINI_API_KEY（可选，CLI 有 OAuth）
-      model?: string;        // 默认 'gemini-2.5-flash'
-      cliPath?: string;      // gemini CLI 路径（可选，默认 PATH 查找）
-      mode?: 'cli' | 'sdk';  // 运行模式，默认 'cli'
-      useVertex?: boolean;   // 是否使用 Vertex AI
-      project?: string;      // Vertex AI 项目 ID
-      location?: string;     // Vertex AI 区域，如 'us-central1'
+      apiKey?: string;
+      model?: string;
+      cliPath?: string;
+      mode?: 'cli' | 'sdk';
+      useVertex?: boolean;
+      project?: string;
+      location?: string;
     };
-    defaultAgent?: string;  // 旧字段：active baseagent name；仅 AgentLoader plugins 内部使用
+    defaultAgent?: string;
   };
   channels?: {
-    defaultChannel?: string;  // 默认渠道，完整性校验锚点
+    defaultChannel?: string;
     feishu?: FeishuChannelConfig | FeishuChannelInstanceConfig[];
     wechat?: WechatChannelConfig | WechatChannelInstanceConfig[];
     aun?: AunChannelConfig | AunChannelInstanceConfig[];
@@ -146,24 +155,24 @@ export interface Config {
     autoCreate?: boolean;
     list?: Record<string, string>;
   };
-  enableRichContent?: boolean;  // 启用富内容渲染（LaTeX/Mermaid），默认 false
-  flushDelay?: number;  // 消息批量发送间隔(秒)，默认 4
-  debounce?: number;    // 入站消息去抖间隔(秒)，默认 2，设 0 关闭
   debug?: {
-    logLevel?: 'DEBUG' | 'INFO' | 'WARN' | 'ERROR';  // 日志级别，优先于 LOG_LEVEL 环境变量
-    flusherDiag?: boolean;  // 启用 StreamFlusher 诊断日志 (flusher-diag.log)
-    aunTrace?: boolean;     // 启用 AUN 通道数据追踪日志 (aun-trace.log)，记录所有收发数据
-    aunSdkLog?: boolean;    // 启用 AUN SDK 内部日志 (~/.aun/logs/ts-sdk-YYYYMMDD.log)
+    logLevel?: 'DEBUG' | 'INFO' | 'WARN' | 'ERROR';
+    flusherDiag?: boolean;
+    aunTrace?: boolean;
+    aunSdkLog?: boolean;
   };
+  enableRichContent?: boolean;
   idleMonitor?: {
-    enabled?: boolean;              // 是否启用空闲监控，默认 true
-    safeModeThreshold?: number;     // 连续错误几次进入安全模式，默认 0（已禁用）；设为正数启用
-    timeout?: number;               // 无输出超时(秒)，默认 120
+    enabled?: boolean;
+    safeModeThreshold?: number;
+    timeout?: number;
   };
-  showActivities?: 'all' | 'dm-only' | 'owner-dm-only' | 'none';  // 中间输出显示范围（工具活动+流式文本），默认 'all'
+  showActivities?: 'all' | 'dm-only' | 'owner-dm-only' | 'none';
+  flushDelay?: number;
+  debounce?: number;
   chatmode?: {
-    private?: 'interactive' | 'proactive';   // 单聊默认模式，默认 'interactive'
-    group?: 'interactive' | 'proactive';     // 群聊默认模式，默认 'proactive'
+    private?: 'interactive' | 'proactive';
+    group?: 'interactive' | 'proactive';
   };
 }
 
