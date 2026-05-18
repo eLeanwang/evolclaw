@@ -15,7 +15,7 @@ import { cmdInitWechat, cmdInitFeishu, cmdInitAun, cmdInitDingtalk, cmdInitQQBot
 import * as platform from './utils/cross-platform.js';
 import { EventBus } from './core/event-bus.js';
 import { tryUpgrade, type UpgradeResult } from './utils/upgrade.js';
-import { scanInstances, cleanupInstances, readAidLastActivity, writeRestartMonitor, removeRestartMonitor, isRestartMonitorWinner } from './utils/instance-registry.js';
+import { scanInstances, cleanupInstances, readAidLastActivity, writeRestartMonitor, removeRestartMonitor, isRestartMonitorWinner, findOrphanProcesses, killOrphans, type OrphanProcess } from './utils/instance-registry.js';
 
 // Suppress Node.js ExperimentalWarning (e.g. SQLite) from cluttering CLI output
 process.removeAllListeners('warning');
@@ -34,30 +34,37 @@ function cleanEnv() {
   }
 }
 
-function rotateLogs(logDir: string) {
+/**
+ * 启动时归档过大的 stdout.log。其它 .log 文件由各自的 LogWriter 管理切片/清理，
+ * 不再扫描整个目录——LogWriter 模式下重复的 size 检查会和 hourly rotation 冲突。
+ */
+function rotateStdoutIfNeeded(logDir: string) {
   if (!fs.existsSync(logDir)) return;
   const MAX_SIZE = 10 * 1024 * 1024; // 10MB
   const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+  const stdoutLog = path.join(logDir, 'stdout.log');
 
-  for (const file of fs.readdirSync(logDir)) {
-    const filePath = path.join(logDir, file);
-    if (file.endsWith('.log')) {
-      // 轮转超大日志
-      const stat = fs.statSync(filePath);
-      if (stat.size > MAX_SIZE) {
-        const timestamp = new Date().toISOString().replace(/[:.]/g, '').slice(0, 15);
-        const newPath = `${filePath}.${timestamp}`;
-        fs.renameSync(filePath, newPath);
-        console.log(`  Rotated: ${file} -> ${path.basename(newPath)}`);
-      }
-    } else if (file.includes('.log.') || /^aun-\d{8}\.log$/.test(file)) {
-      // 清理 7 天前的旧日志（含按日轮转的 aun-YYYYMMDD.log）
-      const stat = fs.statSync(filePath);
-      if (stat.mtimeMs < cutoff) {
-        fs.unlinkSync(filePath);
-      }
+  // 归档当前 stdout.log（若超过 10MB）
+  try {
+    const stat = fs.statSync(stdoutLog);
+    if (stat.size > MAX_SIZE) {
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '').slice(0, 15);
+      const newPath = `${stdoutLog}.${timestamp}`;
+      fs.renameSync(stdoutLog, newPath);
+      console.log(`  Rotated: stdout.log -> ${path.basename(newPath)}`);
     }
-  }
+  } catch { /* file not exist */ }
+
+  // 清理 7 天前的 stdout.log.* 归档
+  try {
+    for (const file of fs.readdirSync(logDir)) {
+      if (!file.startsWith('stdout.log.')) continue;
+      const full = path.join(logDir, file);
+      try {
+        if (fs.statSync(full).mtimeMs < cutoff) fs.unlinkSync(full);
+      } catch {}
+    }
+  } catch {}
 }
 
 function countLines(pkgRoot: string, logDir: string) {
@@ -170,6 +177,27 @@ function showHistory(statsFile: string) {
 
 // ==================== Commands ====================
 
+/**
+ * 检测并展示跨 HOME 残留的 evolclaw 主进程。
+ *
+ * 这些孤儿不在自己 HOME 的 instance/ 登记簿内，instance-registry 的常规清理
+ * （cleanupInstances）够不到。常见来源：
+ *   - 测试套件 spawn 后未在 afterAll 杀子进程
+ *   - 旧版本 pidfile 模式遗留（升级后 record 缺失）
+ *
+ * 仅打印提示，不主动杀；调用方决定是否清理。
+ */
+function reportOrphans(orphans: OrphanProcess[]): void {
+  if (orphans.length === 0) return;
+  console.log(`⚠ 检测到 ${orphans.length} 个未登记的 evolclaw 主进程（跨 HOME 残留）:`);
+  for (const o of orphans) {
+    const home = o.evolclawHome ?? '未知';
+    console.log(`    PID ${o.pid}  EVOLCLAW_HOME=${home}`);
+  }
+  console.log('  这些进程不属于当前 HOME 的实例登记簿，自动清理不会处理它们。');
+  console.log('  使用 evolclaw restart --clear 一并清掉，或手动 kill。');
+}
+
 async function cmdStart() {
   const p = resolvePaths();
   ensureDataDirs();
@@ -225,8 +253,11 @@ async function cmdStart() {
     }
   }
 
+  // 跨 HOME 孤儿（未登记进程）只警告，不动
+  reportOrphans(findOrphanProcesses());
+
   console.log('🚀 Starting EvolClaw...');
-  rotateLogs(p.logs);
+  rotateStdoutIfNeeded(p.logs);
   cleanEnv();
 
   // 删除旧的 ready signal
@@ -379,7 +410,7 @@ async function cmdStop() {
   }
 }
 
-async function cmdRestart() {
+async function cmdRestart(opts: { clear?: boolean } = {}) {
   console.log('🔄 Restarting EvolClaw...');
 
   // 版本检查与自动升级
@@ -412,6 +443,17 @@ async function cmdRestart() {
     await Promise.all(aliveMains.map(m => stopPid(m.record.pid)));
     await sleep(500);
     cleanupInstances();
+  }
+
+  // 跨 HOME 孤儿处理：只在 --clear 时主动 kill；
+  // 否则交给后续 cmdStart() 统一警告，避免重复输出。
+  if (opts.clear) {
+    const orphans = findOrphanProcesses();
+    if (orphans.length > 0) {
+      const killed = killOrphans(orphans);
+      console.log(`☠ 已 SIGKILL ${killed.length} 个孤儿进程: ${killed.join(', ')}`);
+      await sleep(500);
+    }
   }
 
   setTimeout(() => cmdStart(), 1000);
@@ -467,8 +509,9 @@ const AID_STATUS_LABELS: Record<string, string> = {
 };
 
 function renderAunAidsTable(aids: any[]): void {
-  // Column widths（视觉宽度）
-  const COL_AGENT = 14;
+  // Column widths（视觉宽度）：AGENT 列按实际名字最长值动态扩展
+  const agentNames = aids.map(a => (a.agentName || '?').replace(/\.agentid\.pub$/, ''));
+  const COL_AGENT = Math.max(5, ...agentNames.map(n => n.length)) + 2;
   const COL_AID = 32;
   const COL_STATUS = 16;
   const COL_RECONN = 8;
@@ -485,8 +528,9 @@ function renderAunAidsTable(aids: any[]): void {
     'NOTE'
   );
 
-  for (const a of aids) {
-    const agent = (a.agentName || '?').slice(0, COL_AGENT - 1);
+  for (let i = 0; i < aids.length; i++) {
+    const a = aids[i];
+    const agent = agentNames[i];
     const aid = (a.aid || '?').slice(0, COL_AID - 1);
     const statusLabel = AID_STATUS_LABELS[a.status] || a.status || '?';
     const reconn = String(a.reconnectCount ?? 0);
@@ -693,42 +737,10 @@ async function cmdStatus() {
       // Running: query IPC for real-time status
       const status = await ipcQuery(p.socket, { type: 'status' });
       if (status) {
-        console.log('🔌 Channels (live):');
-        // Group channels by channelType
-        const groups = new Map<string, Array<{ name: string; ch: any }>>();
-        for (const [name, ch] of Object.entries(status.channels)) {
-          const type = (ch as any).channelType || name;
-          if (!groups.has(type)) groups.set(type, []);
-          groups.get(type)!.push({ name, ch: ch as any });
-        }
-        for (const [type, instances] of groups) {
-          if (type === 'aun') {
-            // AUN channels 改为一行汇总，详情走 🔑 AUN AIDs 表格
-            console.log(`  aun: ${instances.length} instance(s) — see AUN AIDs section below`);
-            continue;
-          }
-          if (instances.length === 1) {
-            // Single instance: show instance name directly
-            const { name, ch } = instances[0];
-            const label = ch.connected ? '✓ Connected' : '⏳ Reconnecting';
-            const aidLabel = ch.aid ? ` (${ch.aid})` : '';
-            console.log(`  ${name}${aidLabel}: ${label}`);
-          } else {
-            // Multi-instance: feishu [name1(aid) ✓, name2 ✗]
-            const parts = instances.map(({ name, ch }) => {
-              const icon = ch.connected ? '✓' : '⏳';
-              const aidPart = ch.aid ? `(${ch.aid})` : '';
-              return `${name}${aidPart} ${icon}`;
-            });
-            console.log(`  ${type}: [${parts.join(', ')}]`);
-          }
-        }
-
-        // 🔑 AUN AIDs 表格（独立区段）
+        // 🔑 AUN AIDs 表格（详细 AUN 实例状态）
         try {
           const aidsResp = await ipcQuery<{ ok: boolean; aids: any[] }>(p.socket, { type: 'aun-aids' });
           if (aidsResp?.ok && aidsResp.aids?.length > 0) {
-            console.log('');
             console.log('🔑 AUN AIDs:');
             renderAunAidsTable(aidsResp.aids);
           }
@@ -763,8 +775,9 @@ async function cmdStatus() {
           console.log('🤖 EvolAgents:');
           for (const a of agents) {
             const statusIcon = a.status === 'running' ? '●' : a.status === 'error' ? '✗' : a.status === 'disabled' ? '○' : '◌';
-            const channels = a.channels?.join(', ') || '—';
-            console.log(`  ${statusIcon} ${a.name.padEnd(14)} ${a.status.padEnd(10)} ${channels}`);
+            const channels = summarizeChannelFingerprints(a.channels || []);
+            const shortName = a.name.replace(/\.agentid\.pub$/, '');
+            console.log(`  ${statusIcon} ${shortName.padEnd(20)} ${a.status.padEnd(10)} ${channels}`);
           }
         }
       }
@@ -772,6 +785,38 @@ async function cmdStatus() {
       // IPC query for agents failed — skip section
     }
   }
+}
+
+/**
+ * 把 channel fingerprint 列表（`<aid>#<type>#<name>`）折叠成展示用摘要。
+ *
+ * 聚合规则：
+ *   - 按 type 分组
+ *   - 单实例：直接打 type（如 `aun`、`wechat`）
+ *   - 多实例：`type×N (name1, name2, ...)`
+ *   - 输出顺序保持首次出现的 type 顺序（aun 通常排第一，因为 channelInstanceNames 把它放头）
+ */
+function summarizeChannelFingerprints(fingerprints: string[]): string {
+  if (fingerprints.length === 0) return '—';
+  const groups = new Map<string, string[]>();
+  const order: string[] = [];
+  for (const fp of fingerprints) {
+    const parts = fp.split('#');
+    if (parts.length < 3) {
+      if (!groups.has(fp)) { groups.set(fp, []); order.push(fp); }
+      continue;
+    }
+    const type = parts[1];
+    const name = parts.slice(2).join('#');
+    if (!groups.has(type)) { groups.set(type, []); order.push(type); }
+    groups.get(type)!.push(name);
+  }
+  return order.map(type => {
+    const names = groups.get(type)!;
+    if (names.length === 0) return type;
+    if (names.length === 1) return type;
+    return `${type}×${names.length} (${names.join(', ')})`;
+  }).join(', ');
 }
 
 // Log line pattern: [timestamp] [LEVEL] [Module?] message
@@ -2479,7 +2524,7 @@ async function cmdAgentShow(name: string): Promise<void> {
   if (agent.model) console.log(`  Model:      ${agent.model}`);
   if (agent.effort) console.log(`  Effort:     ${agent.effort}`);
   console.log(`  Project:    ${agent.projectPath}`);
-  console.log(`  Channels:   ${agent.channelInstanceNames().join(', ') || '—'}`);
+  console.log(`  Channels:   ${summarizeChannelFingerprints(agent.channelInstanceNames())}`);
   if (agent.error) console.log(`  Error:      ${agent.error}`);
 }
 
@@ -3259,7 +3304,7 @@ export async function main(args: string[]) {
       await cmdStop();
       break;
     case 'restart':
-      await cmdRestart();
+      await cmdRestart({ clear: args.includes('--clear') });
       break;
     case 'status':
       await cmdStatus();
@@ -3321,6 +3366,7 @@ Commands:
   start         启动服务 (默认)
   stop          停止服务
   restart       重启服务
+                  --clear  顺带 SIGKILL 跨 HOME 残留的 evolclaw 主进程
   status        查看状态
   logs          查看日志 (tail -f, 着色渲染)
                   --level error|warn   只显示指定级别及以上

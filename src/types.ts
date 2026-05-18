@@ -577,6 +577,13 @@ export interface AunRuntimeBlock {
   gatewayUrl?: string;
 }
 
+export interface DebugBlock {
+  logLevel?: 'DEBUG' | 'INFO' | 'WARN' | 'ERROR';
+  flusherDiag?: boolean;
+  aunTrace?: boolean;
+  aunSdkLog?: boolean;
+}
+
 export type ShowActivitiesMode = 'all' | 'dm-only' | 'owner-dm-only' | 'none';
 
 // channels[].* —— per-agent，新结构里以列表形式存储。
@@ -661,6 +668,9 @@ export interface DefaultsConfig {
   debounce?: number;
   /** defaults.admins 提供全局基础（如运维 AID），与 per-agent admins 数组合并去重 */
   admins?: string[];
+  debug?: DebugBlock;
+  /** 启用富内容渲染模块（如飞书富文本卡片）。透传到 channel plugin。 */
+  enable_rich_content?: boolean;
 }
 
 /**
@@ -688,6 +698,9 @@ export interface AgentConfig {
   show_activities?: ShowActivitiesMode;
   flush_delay?: number;
   debounce?: number;
+  debug?: DebugBlock;
+  /** 启用富内容渲染模块（如飞书富文本卡片）。透传到 channel plugin。 */
+  enable_rich_content?: boolean;
 }
 
 /**

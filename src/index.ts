@@ -192,6 +192,9 @@ async function main() {
   const eventBus = new EventBus();
   logger.info('✓ Event bus initialized');
 
+  // 把所有事件录到 events.log（受 EVENT_LOG 环境变量控制）
+  eventBus.subscribeAll((event) => logger.event(event));
+
   // 统计收集器（近 1 小时滚动统计）
   const statsCollector = new StatsCollector(eventBus);
 
@@ -662,17 +665,24 @@ async function main() {
     }
   });
 
-  // 按 channelType 归组显示连接摘要
-  const connectedGroups = new Map<string, string[]>();
+  // 按 channelType 归组显示连接摘要（启动 banner 只显示类型+计数，详情看 `evolclaw status`）
+  const connectedTypeCount = new Map<string, number>();
+  const typeOrder: string[] = [];
   for (const inst of channelInstances) {
     const name = inst.adapter.channelName;
     if (!connected.includes(name)) continue;
     const type = inst.channelType || name;
-    if (!connectedGroups.has(type)) connectedGroups.set(type, []);
-    connectedGroups.get(type)!.push(name);
+    if (!connectedTypeCount.has(type)) {
+      connectedTypeCount.set(type, 0);
+      typeOrder.push(type);
+    }
+    connectedTypeCount.set(type, connectedTypeCount.get(type)! + 1);
   }
-  const channelSummary = Array.from(connectedGroups.entries())
-    .map(([type, names]) => names.length === 1 ? names[0] : `${type}[${names.join(', ')}]`)
+  const channelSummary = typeOrder
+    .map(type => {
+      const n = connectedTypeCount.get(type)!;
+      return n === 1 ? type : `${type}×${n}`;
+    })
     .join(', ');
   const totalCount = connected.length;
 

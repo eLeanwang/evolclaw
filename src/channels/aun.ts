@@ -4,6 +4,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { logger, localTimestamp } from '../utils/logger.js';
+import { LogWriter } from '../utils/log-writer.js';
 import type { ChannelPlugin, ChannelInstance } from '../core/channel-loader.js';
 import type { Config, ReplyContext, AunChannelConfig, AidConnectionState, AidStatus } from '../types.js';
 import { normalizeChannelInstances, getChannelShowActivities } from '../utils/channel-helpers.js';
@@ -112,16 +113,14 @@ export class AUNChannel {
   private messageHandler?: AUNMessageHandler;
   private recallHandler?: (messageId: string) => void;
   private connected = false;
-  private traceStream: fs.WriteStream | null = null;
-  private traceHourTag: string = '';  // 当前 trace 文件对应的小时标识 (YYYYMMDD-HH)
+  private traceWriter: LogWriter | null = null;
   private eventBus: any = null;
   private pendingEchoMessages = new Map<string, { text: string; channelId: string; context?: ReplyContext; receiveTs: number }>();
   private isEchoSending = false;
 
   private trace(dir: 'IN' | 'OUT', event: string, data: unknown): void {
     if (!this.config.aunTrace) return;
-    this.rotateTraceIfNeeded();
-    if (!this.traceStream) return;
+    if (!this.traceWriter) return;
 
     // 自动从 data 推断顶层字段（self_aid / peer_aid / group_id / task_id / chatmode），
     // 便于 jq 过滤：`jq 'select(.task_id == "task-xxx")'`
@@ -142,7 +141,7 @@ export class AUNChannel {
     if (chatmode) topContext.chatmode = chatmode;
 
     const line = JSON.stringify({ ts: localTimestamp(), dir, event, ...topContext, data });
-    this.traceStream.write(line + '\n');
+    this.traceWriter.write(line);
   }
 
   /** 日志前缀（含 self aid 简称，多实例可识别） */
@@ -188,37 +187,6 @@ export class AUNChannel {
     }
   }
 
-  private static readonly AUN_TRACE_RE = /^aun-\d{8}-\d{2}\.log$/;
-  private static readonly AUN_RETAIN_HOURS = 12;
-
-  private rotateTraceIfNeeded(): void {
-    const d = new Date();
-    const pad = (n: number) => String(n).padStart(2, '0');
-    const hourTag = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}`;
-    if (this.traceHourTag === hourTag && this.traceStream) return;
-    if (this.traceStream) {
-      this.traceStream.end();
-      this.traceStream = null;
-    }
-    this.traceHourTag = hourTag;
-    const logPath = path.join(resolvePaths().logs, `aun-${hourTag}.log`);
-    this.traceStream = fs.createWriteStream(logPath, { flags: 'a' });
-    this.cleanupOldTraceLogs();
-  }
-
-  private cleanupOldTraceLogs(): void {
-    const logsDir = resolvePaths().logs;
-    const cutoff = Date.now() - AUNChannel.AUN_RETAIN_HOURS * 60 * 60 * 1000;
-    try {
-      for (const name of fs.readdirSync(logsDir)) {
-        if (!AUNChannel.AUN_TRACE_RE.test(name)) continue;
-        try {
-          const full = path.join(logsDir, name);
-          if (fs.statSync(full).mtimeMs < cutoff) fs.unlinkSync(full);
-        } catch {}
-      }
-    } catch {}
-  }
 
   /** 判断 channelId 是否为群组 ID
    *  - 新格式：group.{issuer}/{group_no|group_name}
@@ -383,8 +351,13 @@ export class AUNChannel {
 
   constructor(private config: AUNConfig) {
     if (config.aunTrace) {
-      this.rotateTraceIfNeeded();
-      logger.info(`${this.logPrefix()} Trace logging enabled (hourly rotation, 12h retention): ${resolvePaths().logs}/aun-YYYYMMDD-HH.log`);
+      this.traceWriter = new LogWriter({
+        baseName: 'aun',
+        logDir: resolvePaths().logs,
+        rotation: 'hourly',
+        retention: { hours: 12 },
+      });
+      logger.info(`${this.logPrefix()} Trace logging enabled (hourly rotation, 12h retention): ${this.traceWriter.activePath()}`);
     }
     this.aidState = {
       aid: config.aid,
@@ -1995,10 +1968,9 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     this.connected = false;
     appendAidEvent({ ts: Date.now(), iso: new Date().toISOString(), event: 'disconnected', aid: this.config.aid, reason: 'intentional' });
     this.setAidStatus('disabled');
-    logger.info(`${this.logPrefix()} Disconnected`);
-    if (this.traceStream) {
-      this.traceStream.end();
-      this.traceStream = null;
+    if (this.traceWriter) {
+      this.traceWriter.close();
+      this.traceWriter = null;
     }
     logger.info(`${this.logPrefix()} Disconnected`);
   }

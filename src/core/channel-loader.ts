@@ -105,10 +105,18 @@ export class ChannelLoader {
       (rewrittenChannels[inst.type] ??= []).push(rewritten);
     }
 
+    // syntheticConfig 是老 Config schema（channel plugin 沿用旧接口），
+    // 新 schema 字段命名为 snake_case，这里转 camelCase 透传。
     const syntheticConfig = {
       agents: agent.config.baseagents,
       channels: rewrittenChannels,
       projects: agent.config.projects,
+      chatmode: agent.config.chatmode,
+      debug: agent.config.debug,
+      showActivities: agent.config.show_activities,
+      flushDelay: agent.config.flush_delay,
+      debounce: agent.config.debounce,
+      enableRichContent: agent.config.enable_rich_content,
     } as any as Config;
 
     return this.createAll(syntheticConfig);

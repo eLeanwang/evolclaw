@@ -467,6 +467,8 @@ export function mergeForAgent(agent: AgentConfig, defaults: DefaultsConfig | nul
     show_activities: agent.show_activities ?? d.show_activities,
     flush_delay: agent.flush_delay ?? d.flush_delay,
     debounce: agent.debounce ?? d.debounce,
+    debug: deepMergeBlocks(d.debug, agent.debug),
+    enable_rich_content: agent.enable_rich_content ?? d.enable_rich_content,
   };
   return merged;
 }
