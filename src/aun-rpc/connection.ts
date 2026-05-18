@@ -7,8 +7,15 @@ export interface ShortConnection {
   close(): Promise<void>;
 }
 
-export async function createShortConnection(aid: string, opts?: { aunPath?: string }): Promise<ShortConnection> {
+export interface ShortConnectionOpts {
+  aunPath?: string;
+  /** 应用 slot 标识。用于隔离 ack 游标，避免多应用共用 AID 时互相污染。空字符串表示默认 slot。 */
+  slotId?: string;
+}
+
+export async function createShortConnection(aid: string, opts?: ShortConnectionOpts): Promise<ShortConnection> {
   const aunPath = opts?.aunPath ?? path.join(os.homedir(), '.aun');
+  const slotId = opts?.slotId ?? '';
   const caCertPath = path.join(aunPath, 'CA', 'root', 'root.crt');
   const { AUNClient } = await import('@agentunion/fastaun');
 
@@ -23,7 +30,12 @@ export async function createShortConnection(aid: string, opts?: { aunPath?: stri
   const gateway = (client as any)._gatewayUrl ?? authResult?.gateway;
 
   await client.connect(
-    { access_token: accessToken, gateway },
+    {
+      access_token: accessToken,
+      gateway,
+      slot_id: slotId,
+      connection_kind: 'short',
+    },
     { auto_reconnect: false },
   );
 

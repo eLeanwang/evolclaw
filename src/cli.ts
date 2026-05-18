@@ -1303,17 +1303,19 @@ async function cmdWatchAid(): Promise<void> {
   const watchStartedAt = new Date();
   const watchStartStr = `${String(watchStartedAt.getHours()).padStart(2, '0')}:${String(watchStartedAt.getMinutes()).padStart(2, '0')}:${String(watchStartedAt.getSeconds()).padStart(2, '0')}`;
 
-  const COL_AID = 30;
-  const COL_STATUS = 16;
-  const COL_UPTIME = 12;
-  const COL_RECONN = 7;
-  const COL_RECV = 6;
-  const COL_SENT = 6;
-  const COL_BIN = 10;
-  const COL_BOUT = 10;
-  const COL_LRECV = 12;
-  const COL_LSENT = 12;
-  const COL_PEERS = 6;
+  const COL_AID = 28;
+  const COL_STATUS = 14;
+  const COL_UPTIME = 11;
+  const COL_STATE = 11;
+  const COL_RECONN = 6;
+  const COL_RECV = 5;
+  const COL_SENT = 5;
+  const COL_SYS = 8;
+  const COL_BIN = 9;
+  const COL_BOUT = 9;
+  const COL_LRECV = 10;
+  const COL_LSENT = 10;
+  const COL_PEERS = 5;
 
   function formatDuration(ms: number): string {
     const sec = Math.floor(ms / 1000);
@@ -1333,9 +1335,11 @@ async function cmdWatchAid(): Promise<void> {
       padRight('AID', COL_AID) +
       padRight('STATUS', COL_STATUS) +
       padRight('UPTIME', COL_UPTIME) +
+      padRight('STATE', COL_STATE) +
       padRight('RECONN', COL_RECONN) +
       padRight('RECV', COL_RECV) +
       padRight('SENT', COL_SENT) +
+      padRight('SYS R/S', COL_SYS) +
       padRight('BYTES IN', COL_BIN) +
       padRight('BYTES OUT', COL_BOUT) +
       padRight('LAST RECV', COL_LRECV) +
@@ -1353,13 +1357,24 @@ async function cmdWatchAid(): Promise<void> {
       ? formatDuration(now - aid.lastConnectedAt)
       : '—';
 
+    // State: processing / queued / idle
+    const YELLOW = useColor ? '\x1b[33m' : '';
+    let stateLabel = 'idle';
+    if (stats?.processing > 0) {
+      stateLabel = `${YELLOW}working${RST}`;
+    } else if (stats?.queued > 0) {
+      stateLabel = `${YELLOW}queued(${stats.queued})${RST}`;
+    }
+
     const mainLine = '  ' +
       padRight(aidLabel, COL_AID) +
       padRight(statusLabel, COL_STATUS) +
       padRight(uptime, COL_UPTIME) +
+      padRight(stateLabel, COL_STATE) +
       padRight(String(aid.reconnectCount ?? 0), COL_RECONN) +
       padRight(String(stats?.messagesReceived ?? 0), COL_RECV) +
       padRight(String(stats?.messagesSent ?? 0), COL_SENT) +
+      padRight(`${stats?.systemReceived ?? 0}/${stats?.systemSent ?? 0}`, COL_SYS) +
       padRight(formatBytes(stats?.bytesReceived ?? 0), COL_BIN) +
       padRight(formatBytes(stats?.bytesSent ?? 0), COL_BOUT) +
       padRight(lastRecv, COL_LRECV) +
@@ -1375,11 +1390,14 @@ async function cmdWatchAid(): Promise<void> {
       const recvTs = stats.lastReceivedAt ?? 0;
       const sentTs = stats.lastSentAt ?? 0;
       if (recvTs >= sentTs && stats.lastReceivedText) {
-        msgPreview = `${GREEN}↓ ${stats.lastReceivedText.replace(/\n/g, ' ').slice(0, 60)}${RST}`;
+        const fromShort = stats.lastReceivedFrom ? stats.lastReceivedFrom.split('.')[0] : '';
+        msgPreview = `${GREEN}↓ ${fromShort ? fromShort + ': ' : ''}${stats.lastReceivedText.replace(/\n/g, ' ').slice(0, 60)}${RST}`;
       } else if (stats.lastSentText) {
-        msgPreview = `${BLUE}↑ ${stats.lastSentText.replace(/\n/g, ' ').slice(0, 60)}${RST}`;
+        const toShort = stats.lastSentTo ? stats.lastSentTo.split('.')[0] : '';
+        msgPreview = `${BLUE}↑ ${toShort ? toShort + ': ' : ''}${stats.lastSentText.replace(/\n/g, ' ').slice(0, 60)}${RST}`;
       } else if (stats.lastReceivedText) {
-        msgPreview = `${GREEN}↓ ${stats.lastReceivedText.replace(/\n/g, ' ').slice(0, 60)}${RST}`;
+        const fromShort = stats.lastReceivedFrom ? stats.lastReceivedFrom.split('.')[0] : '';
+        msgPreview = `${GREEN}↓ ${fromShort ? fromShort + ': ' : ''}${stats.lastReceivedText.replace(/\n/g, ' ').slice(0, 60)}${RST}`;
       }
     }
     const subLine1 = `    ${nameColor}${namePart}${nameReset}${msgPreview ? '  ' + msgPreview : ''}`;
@@ -1441,7 +1459,7 @@ async function cmdWatchAid(): Promise<void> {
       lines.push('');
     } else {
       lines.push(`${DIM}${renderHeader()}${RST}`);
-      const lineWidth = COL_AID + COL_STATUS + COL_UPTIME + COL_RECONN + COL_RECV + COL_SENT + COL_BIN + COL_BOUT + COL_LRECV + COL_LSENT + COL_PEERS;
+      const lineWidth = COL_AID + COL_STATUS + COL_UPTIME + COL_STATE + COL_RECONN + COL_RECV + COL_SENT + COL_SYS + COL_BIN + COL_BOUT + COL_LRECV + COL_LSENT + COL_PEERS;
       lines.push(`${DIM}  ${'─'.repeat(lineWidth)}${RST}`);
       for (const aid of aids) {
         const s = statsMap.get(aid.aid);
@@ -2253,523 +2271,373 @@ async function cmdCtl(args: string[]): Promise<void> {
 
 // ==================== Agent ====================
 
-/**
- * 从 rootPath + AID 合成 agent 工作目录路径。
- * 规则：`<rootPath>/<aid第一段>`，重复时加 `~1`、`~2`...
- */
-function deriveAgentProjectPath(rootPath: string, aid: string): string {
-  const baseName = aid.split('.')[0];
-  let candidate = path.join(rootPath, baseName);
-  if (!fs.existsSync(candidate)) return candidate;
-  let i = 1;
-  while (fs.existsSync(`${candidate}~${i}`)) i++;
-  return `${candidate}~${i}`;
-}
-
 async function cmdAgent(args: string[]): Promise<void> {
   const sub = args[0];
+  const formatJson = args.includes('--format') && args[args.indexOf('--format') + 1] === 'json';
 
-  if (!sub || sub === 'list') {
-    await cmdAgentList();
+  if (sub === 'help') {
+    console.log(`用法: evolclaw agent <command>
+
+Commands:
+  list                    列出所有 agent
+  show <aid>              查看 agent 详情（身份 + 配置 + 连接 + 会话 + 路径）
+  new [aid]               交互式创建 agent
+  new <aid> --non-interactive ...  非交互式创建
+  sync-aids               从本地 AID 批量创建 agent
+  enable <aid>            启用 agent
+  disable <aid>           停用 agent
+  get <aid> <key>         读取单个配置字段（支持点路径）
+  set <aid> <key> <val>   修改单个配置字段（支持点路径）
+  rename <aid> <name>     修改 agent 名称（更新 agent.md 并重新上传）
+  reload [aid]            热重载配置（无参数=全量 resync）
+  delete <aid> [--purge]  删除 agent
+
+Options:
+  --format json           输出 JSON 格式
+
+示例:
+  evolclaw agent list
+  evolclaw agent show mybot.agentid.pub
+  evolclaw agent new mybot.agentid.pub
+  evolclaw agent enable mybot.agentid.pub
+  evolclaw agent get mybot.agentid.pub active_baseagent
+  evolclaw agent set mybot.agentid.pub active_baseagent codex
+  evolclaw agent rename mybot.agentid.pub "My Bot"
+  evolclaw agent delete mybot.agentid.pub --purge`);
     return;
   }
 
+  const {
+    agentList, agentShow, agentCreateInteractive, agentCreateNonInteractive,
+    agentSyncAids, agentReload, agentEnable, agentDisable,
+    agentGet, agentSet, agentDelete, agentRename,
+  } = await import('./agent/index.js');
+
+  // --- list ---
+  if (!sub || sub === 'list') {
+    const result = await agentList();
+    if (!result.ok) {
+      if (formatJson) { console.log(JSON.stringify(result)); }
+      else { console.error(`❌ ${result.error}`); }
+      process.exit(1);
+    }
+    if (formatJson) {
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+    if (result.agents.length === 0) {
+      console.log('No agents configured.');
+      return;
+    }
+    console.log(
+      'NAME'.padEnd(14) + 'STATUS'.padEnd(10) + 'CHANNELS'.padEnd(24) +
+      'PROJECT'.padEnd(22) + 'BASEAGENT'.padEnd(11) + 'LAST ACTIVE'
+    );
+    for (const info of result.agents) {
+      const name = info.name;
+      const status = info.status || 'stopped';
+      const channels = info.channels?.length > 0 ? info.channels.join(', ').slice(0, 22) : '—';
+      const project = info.projectPath ? path.basename(info.projectPath) : '—';
+      const baseagent = info.baseagent || '—';
+      const lastActive = info.lastActivity ? formatTimeAgo(Date.now() - info.lastActivity) : '—';
+      console.log(
+        name.padEnd(14) + status.padEnd(10) + channels.padEnd(24) +
+        project.padEnd(22) + baseagent.padEnd(11) + lastActive
+      );
+    }
+    return;
+  }
+
+  // --- new ---
   if (sub === 'new') {
     const name = args[1];
     const nonInteractive = args.includes('--non-interactive');
     if (nonInteractive) {
       if (!name) {
-        console.error('Usage: evolclaw agent new <name> --non-interactive ...');
+        console.error('Usage: evolclaw agent new <aid> --non-interactive ...');
         process.exit(1);
       }
-      await cmdAgentNewNonInteractive(name, args.slice(2));
+      const getArg = (flag: string): string | undefined => {
+        const idx = args.indexOf(flag);
+        return idx !== -1 && idx + 1 < args.length ? args[idx + 1] : undefined;
+      };
+      const result = await agentCreateNonInteractive({
+        aid: name,
+        baseagent: getArg('--baseagent') || '',
+        project: getArg('--project') || '',
+        chatmodePrivate: getArg('--chatmode-private'),
+        chatmodeGroup: getArg('--chatmode-group'),
+        owner: getArg('--owner'),
+        name: getArg('--name'),
+        description: getArg('--description'),
+        feishuAppId: getArg('--feishu-app-id'),
+        feishuAppSecret: getArg('--feishu-app-secret'),
+        dingtalkClientId: getArg('--dingtalk-client-id'),
+        dingtalkClientSecret: getArg('--dingtalk-client-secret'),
+      });
+      if (!result.ok) {
+        if (formatJson) { console.log(JSON.stringify(result)); }
+        else { console.error(`❌ ${result.error}`); }
+        process.exit(1);
+      }
+      if (formatJson) { console.log(JSON.stringify(result, null, 2)); }
+      else {
+        console.log(`✓ Created: ${result.configPath}`);
+        console.log(result.agentmdUploaded
+          ? '  ✓ agent.md 已发布'
+          : '  ⚠ agent.md 上传失败（可用 evolclaw aid agentmd put 重试）');
+        console.log('  Run `evolclaw restart` to activate.');
+      }
     } else {
-      // Interactive mode: name from CLI is suggested default; user can override at prompt
-      await cmdAgentNew(name);
+      const result = await agentCreateInteractive({ suggestedName: name });
+      if (!result.ok) {
+        if (formatJson) { console.log(JSON.stringify(result)); }
+        else { console.error(`❌ ${result.error}`); }
+        process.exit(1);
+      }
+      if (formatJson) { console.log(JSON.stringify(result, null, 2)); }
+      else {
+        console.log(`\n✓ Created: ${result.configPath}`);
+        console.log(result.agentmdUploaded
+          ? '  ✓ agent.md 已发布'
+          : '  ⚠ agent.md 上传失败（可用 evolclaw aid agentmd put 重试）');
+        console.log('  Run `evolclaw restart` to activate.');
+      }
     }
     return;
   }
 
+  // --- sync-aids ---
   if (sub === 'sync-aids') {
-    await cmdAgentSyncAids();
-    return;
-  }
-
-  if (sub === 'reload') {
-    const name = args[1];
-    const p = resolvePaths();
-    if (!name) {
-      // 无参数：全量 resync（扫磁盘，新增上线、删除下线、修改热更新）
-      try {
-        const result = await ipcQuery(p.socket, { type: 'evolagent.resync' }) as any;
-        if (result?.ok) {
-          console.log('✓ Agent resync 完成:');
-          for (const line of (result.results || [])) {
-            console.log(`  ${line}`);
-          }
-        } else {
-          console.error(`✗ Resync failed: ${result?.error || 'unknown error'}`);
-          process.exit(1);
-        }
-      } catch {
-        console.error('⚠ evolclaw 未运行，请先 evolclaw start');
-        process.exit(1);
-      }
-      return;
-    }
-    // 带参数：单 agent 热更新
-    try {
-      const result = await ipcQuery(p.socket, { type: 'evolagent.reload', name }) as any;
-      if (result && result.ok) {
-        console.log(`✓ Agent "${name}" reloaded`);
-      } else {
-        console.error(`✗ Reload failed: ${result?.error || 'unknown error'}`);
-        process.exit(1);
-      }
-    } catch {
-      console.error('⚠ evolclaw 未运行，请先 evolclaw start 后再 reload');
-      console.log('  或直接 evolclaw restart 重新加载所有 agent');
+    const result = await agentSyncAids();
+    if (!result.ok) {
+      if (formatJson) { console.log(JSON.stringify(result)); }
+      else { console.error(`❌ ${result.error}`); }
       process.exit(1);
     }
-    return;
-  }
-
-  // `evolclaw agent <name>` — show detail
-  await cmdAgentShow(sub);
-}
-
-/**
- * evolclaw agent sync-aids
- *
- * 扫描 ~/.aun/AIDs/ 下所有有私钥的 AID，对于没有对应 agent config 的 AID，
- * 克隆第一个 agent（按 config.json 的 mtime 找最早创建的）作为模板，只替换 aid 字段。
- */
-async function cmdAgentSyncAids(): Promise<void> {
-  const p = resolvePaths();
-  const { aidList } = await import('./aid/index.js');
-  const { ensureAgentDirSkeleton, saveAgent, loadAllAgents } = await import('./config-store.js');
-  const { CONFIG_SCHEMA_VERSION } = await import('./types.js');
-
-  // 1. 用 aidList() 获取所有有私钥的本地 AID
-  const aunPath = process.env.AUN_HOME || path.join(os.homedir(), '.aun');
-  const allAids = aidList(aunPath);
-  const localAids = allAids.filter(a => a.hasPrivateKey).map(a => a.aid);
-
-  if (localAids.length === 0) {
-    console.log('⚠ 未找到任何有私钥的本地 AID');
-    return;
-  }
-
-  console.log(`发现 ${localAids.length} 个本地 AID（有私钥）`);
-
-  // 2. 找已有的 agent 列表
-  const { agents } = loadAllAgents();
-  const existingAids = new Set(agents.map(a => a.aid));
-
-  // 3. 找模板 agent（按 config.json mtime 最早的）
-  let templateAgent = agents[0];
-  if (agents.length > 1) {
-    let earliestMtime = Infinity;
-    for (const a of agents) {
-      const configPath = path.join(p.agentsDir, a.aid, 'config.json');
-      try {
-        const stat = fs.statSync(configPath);
-        if (stat.mtimeMs < earliestMtime) {
-          earliestMtime = stat.mtimeMs;
-          templateAgent = a;
-        }
-      } catch {}
+    if (formatJson) {
+      console.log(JSON.stringify(result, null, 2));
+      return;
     }
-  }
-
-  if (!templateAgent) {
-    console.log('❌ 没有可用的模板 agent。请先创建第一个 agent：evolclaw agent new <aid>');
-    return;
-  }
-
-  console.log(`模板 agent: ${templateAgent.aid}`);
-
-  // 4. 为缺失的 AID 克隆 agent config（每个 agent 独立工作目录）
-  const defaults = loadDefaults();
-  const rootPath = defaults?.projects?.rootPath
-    || (defaults?.projects?.defaultPath && path.dirname(defaults.projects.defaultPath))
-    || path.join(os.homedir(), 'evolclaw-projects');
-
-  const created: string[] = [];
-  for (const aid of localAids) {
-    if (existingAids.has(aid)) continue;
-
-    const projectPath = deriveAgentProjectPath(rootPath, aid);
-    const newConfig = {
-      ...JSON.parse(JSON.stringify(templateAgent)),
-      aid,
-      channels: [],
-      projects: { defaultPath: projectPath },
-    };
-    newConfig.$schema_version = CONFIG_SCHEMA_VERSION;
-
-    try {
-      saveAgent(newConfig);
-      ensureAgentDirSkeleton(aid);
-      console.log(`  ✓ ${aid}`);
-      created.push(aid);
-    } catch (e: any) {
-      console.error(`  ✗ ${aid}: ${e?.message || e}`);
-    }
-  }
-
-  if (created.length === 0) {
-    console.log('所有本地 AID 都已有对应 agent，无需同步。');
-    return;
-  }
-
-  console.log(`\n✓ 同步完成：新建 ${created.length} 个 agent`);
-
-  // 5. 触发 resync（如果 evolclaw 正在运行）
-  try {
-    const result = await ipcQuery(p.socket, { type: 'evolagent.resync' }) as any;
-    if (result?.ok) {
-      console.log('  ✓ 已热加载到运行中的进程');
-      for (const line of (result.results || [])) {
-        console.log(`    ${line}`);
-      }
+    if (result.created.length === 0) {
+      console.log('所有本地 AID 都已有对应 agent，无需同步。');
     } else {
-      console.log(`  ⚠ 热加载失败: ${result?.error || 'unknown'}，重启后生效`);
+      console.log(`✓ 同步完成：新建 ${result.created.length} 个 agent（模板: ${result.template}）`);
+      for (const aid of result.created) console.log(`  ✓ ${aid}`);
+      if (result.hotReloaded) console.log('  ✓ 已热加载到运行中的进程');
+      else console.log('  evolclaw 未运行，新 agent 将在下次启动时加载。');
     }
-  } catch {
-    console.log('  evolclaw 未运行，新 agent 将在下次启动时加载。');
-  }
-}
-
-async function cmdAgentList(): Promise<void> {
-  const p = resolvePaths();
-
-  // Try IPC first (running process has real status)
-  try {
-    const result = await ipcQuery(p.socket, { type: 'evolagent.list' }) as any;
-    if (result && result.ok && result.agents) {
-      printAgentTable(result.agents);
-      return;
-    }
-  } catch {
-    // IPC unavailable — fall through to cold mode
-  }
-
-  // Cold mode: read from disk
-  const { EvolAgentRegistry } = await import('./core/evolagent-registry.js');
-  const registry = new EvolAgentRegistry(p.agentsDir);
-  registry.loadAll();
-  printAgentTable(registry.list());
-}
-
-function printAgentTable(list: any[]): void {
-  if (list.length === 0) {
-    console.log('No agents configured.');
     return;
   }
 
-  console.log(
-    'NAME'.padEnd(14) + 'STATUS'.padEnd(10) + 'CHANNELS'.padEnd(24) +
-    'PROJECT'.padEnd(22) + 'BASEAGENT'.padEnd(11) + 'LAST ACTIVE'
-  );
-  for (const info of list) {
-    const name = info.name;
-    const status = info.status || 'stopped';
-    const channels = info.channels?.length > 0 ? info.channels.join(', ').slice(0, 22) : '—';
-    const project = info.projectPath ? path.basename(info.projectPath) : '—';
-    const baseagent = info.baseagent || '—';
-    const lastActive = info.lastActivity
-      ? formatTimeAgo(Date.now() - info.lastActivity)
-      : '—';
-    console.log(
-      name.padEnd(14) +
-      status.padEnd(10) +
-      channels.padEnd(24) +
-      project.padEnd(22) +
-      baseagent.padEnd(11) +
-      lastActive
-    );
-  }
-}
-
-async function cmdAgentShow(name: string): Promise<void> {
-  const p = resolvePaths();
-
-  // Try IPC first
-  try {
-    const result = await ipcQuery(p.socket, { type: 'evolagent.show', name }) as any;
-    if (result && result.ok && result.agent) {
-      const info = result.agent;
-      console.log(`${info.name} (${info.status})\n`);
-      console.log(`  Baseagent:  ${info.baseagent}`);
-      if (info.model) console.log(`  Model:      ${info.model}`);
-      if (info.effort) console.log(`  Effort:     ${info.effort}`);
-      console.log(`  Project:    ${info.projectPath}`);
-      console.log(`  Channels:   ${info.channels?.join(', ') || '—'}`);
-      if (info.activeSessions) console.log(`  Sessions:   ${info.activeSessions} active`);
-      if (info.lastActivity) console.log(`  Last active: ${formatTimeAgo(Date.now() - info.lastActivity)}`);
-      if (info.error) console.log(`  Error:      ${info.error}`);
+  // --- reload ---
+  if (sub === 'reload') {
+    const target = args[1] && !args[1].startsWith('--') ? args[1] : undefined;
+    const result = await agentReload(target);
+    if (!result.ok) {
+      if (formatJson) { console.log(JSON.stringify(result)); }
+      else { console.error(`✗ ${result.error}`); }
+      process.exit(1);
+    }
+    if (formatJson) {
+      console.log(JSON.stringify(result, null, 2));
       return;
     }
-  } catch {
-    // IPC unavailable — fall through to cold mode
+    if (target) {
+      console.log(`✓ Agent "${target}" reloaded`);
+    } else {
+      console.log('✓ Agent resync 完成:');
+      for (const line of (result.results || [])) console.log(`  ${line}`);
+    }
+    return;
   }
 
-  // Cold mode
-  const { EvolAgentRegistry } = await import('./core/evolagent-registry.js');
-  const registry = new EvolAgentRegistry(p.agentsDir);
-  registry.loadAll();
-
-  const agent = registry.get(name);
-  if (!agent) {
-    console.error(`Agent "${name}" not found.`);
-    const allList = registry.list();
-    if (allList.length > 0) {
-      console.log(`Available: ${allList.map(i => i.name).join(', ')}`);
+  // --- enable ---
+  if (sub === 'enable') {
+    const aid = args[1];
+    if (!aid) { console.error('用法: evolclaw agent enable <aid>'); process.exit(1); }
+    const result = await agentEnable(aid);
+    if (!result.ok) {
+      if (formatJson) { console.log(JSON.stringify(result)); }
+      else { console.error(`❌ ${result.error}`); }
+      process.exit(1);
     }
+    if (formatJson) { console.log(JSON.stringify(result, null, 2)); }
+    else { console.log(`✓ ${aid} enabled${result.reloaded ? ' (hot-reloaded)' : ''}`); }
+    return;
+  }
+
+  // --- disable ---
+  if (sub === 'disable') {
+    const aid = args[1];
+    if (!aid) { console.error('用法: evolclaw agent disable <aid>'); process.exit(1); }
+    const result = await agentDisable(aid);
+    if (!result.ok) {
+      if (formatJson) { console.log(JSON.stringify(result)); }
+      else { console.error(`❌ ${result.error}`); }
+      process.exit(1);
+    }
+    if (formatJson) { console.log(JSON.stringify(result, null, 2)); }
+    else { console.log(`✓ ${aid} disabled${result.reloaded ? ' (hot-reloaded)' : ''}`); }
+    return;
+  }
+
+  // --- get ---
+  if (sub === 'get') {
+    const aid = args[1];
+    const key = args[2];
+    if (!aid || !key) { console.error('用法: evolclaw agent get <aid> <key>'); process.exit(1); }
+    const result = await agentGet(aid, key);
+    if (!result.ok) {
+      if (formatJson) { console.log(JSON.stringify(result)); }
+      else { console.error(`❌ ${result.error}`); }
+      process.exit(1);
+    }
+    if (formatJson) { console.log(JSON.stringify(result, null, 2)); }
+    else {
+      const val = result.value;
+      console.log(typeof val === 'object' ? JSON.stringify(val, null, 2) : String(val));
+    }
+    return;
+  }
+
+  // --- set ---
+  if (sub === 'set') {
+    const aid = args[1];
+    const key = args[2];
+    const val = args[3];
+    if (!aid || !key || val === undefined) { console.error('用法: evolclaw agent set <aid> <key> <value>'); process.exit(1); }
+    const result = await agentSet(aid, key, val);
+    if (!result.ok) {
+      if (formatJson) { console.log(JSON.stringify(result)); }
+      else { console.error(`❌ ${result.error}`); }
+      process.exit(1);
+    }
+    if (formatJson) { console.log(JSON.stringify(result, null, 2)); }
+    else { console.log(`✓ ${aid} ${key} = ${JSON.stringify(result.value)}${result.reloaded ? ' (hot-reloaded)' : ''}`); }
+    return;
+  }
+
+  // --- rename ---
+  if (sub === 'rename') {
+    const aid = args[1];
+    const newName = args[2];
+    if (!aid || !newName) { console.error('用法: evolclaw agent rename <aid> <name>'); process.exit(1); }
+    const result = await agentRename(aid, newName);
+    if (!result.ok) {
+      if (formatJson) { console.log(JSON.stringify(result)); }
+      else { console.error(`❌ ${result.error}`); }
+      process.exit(1);
+    }
+    if (formatJson) { console.log(JSON.stringify(result, null, 2)); }
+    else { console.log(`✓ ${aid} renamed to "${newName}"${result.uploaded ? ' (uploaded)' : ' (local only, upload failed)'}`); }
+    return;
+  }
+
+  // --- delete ---
+  if (sub === 'delete') {
+    const aid = args[1];
+    if (!aid) { console.error('用法: evolclaw agent delete <aid> [--purge]'); process.exit(1); }
+    const purge = args.includes('--purge');
+    const result = await agentDelete(aid, purge);
+    if (!result.ok) {
+      if (formatJson) { console.log(JSON.stringify(result)); }
+      else { console.error(`❌ ${result.error}`); }
+      process.exit(1);
+    }
+    if (formatJson) { console.log(JSON.stringify(result, null, 2)); }
+    else { console.log(`✓ ${aid} deleted${purge ? ' (purged)' : ''}`); }
+    return;
+  }
+
+  // --- show ---
+  if (sub === 'show') {
+    const aid = args[1];
+    if (!aid) { console.error('用法: evolclaw agent show <aid>'); process.exit(1); }
+    const result = await agentShow(aid);
+    if (!result.ok) {
+      if (formatJson) { console.log(JSON.stringify(result)); }
+      else { console.error(result.error); }
+      process.exit(1);
+    }
+    if (formatJson) {
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+    printAgentShowHuman(result);
+    return;
+  }
+
+  // --- default: `evolclaw agent <aid>` (shorthand for show) ---
+  const result = await agentShow(sub);
+  if (!result.ok) {
+    if (formatJson) { console.log(JSON.stringify(result)); }
+    else { console.error(result.error); }
     process.exit(1);
   }
-
-  console.log(`${agent.name} (${agent.status})\n`);
-  console.log(`  Baseagent:  ${agent.baseagent}`);
-  if (agent.model) console.log(`  Model:      ${agent.model}`);
-  if (agent.effort) console.log(`  Effort:     ${agent.effort}`);
-  console.log(`  Project:    ${agent.projectPath}`);
-  console.log(`  Channels:   ${summarizeChannelFingerprints(agent.channelInstanceNames())}`);
-  if (agent.error) console.log(`  Error:      ${agent.error}`);
+  if (formatJson) {
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+  printAgentShowHuman(result);
 }
 
-async function cmdAgentNew(suggestedName: string): Promise<void> {
-  const p = resolvePaths();
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  const ask = (q: string): Promise<string> => new Promise(r => rl.question(q, r));
-
-  try {
-    // 1. AID（新结构下 agent 标识就是 AID）
-    const aidPrompt = suggestedName
-      ? `AID [${suggestedName}]: `
-      : 'AID (e.g. mybot.agentid.pub): ';
-    const aidInput = (await ask(aidPrompt)).trim();
-    const aid = aidInput || suggestedName;
-    if (!aid) {
-      console.error('AID is required.');
-      process.exit(1);
-    }
-    const { isValidAid, aidCreate } = await import('./aid/index.js');
-    if (!isValidAid(aid)) {
-      console.error(`Invalid AID "${aid}": must be a valid multi-level domain (e.g. mybot.agentid.pub)`);
-      process.exit(1);
-    }
-
-    const agentDirPath = path.join(p.agentsDir, aid);
-    if (fs.existsSync(path.join(agentDirPath, 'config.json'))) {
-      console.error(`Agent "${aid}" already exists: ${agentDirPath}/config.json`);
-      process.exit(1);
-    }
-
-    console.log(`\nCreating agent: ${aid}\n`);
-
-    // 2. 在 AUN 网络注册 AID
-    try {
-      const result = await aidCreate(aid);
-      try { await result.client.close(); } catch {}
-      console.log(`  ✓ AID ${result.alreadyExisted ? 'reused' : 'created'}: ${aid}`);
-    } catch (e: any) {
-      console.error(`  ⚠ AID creation failed (can retry later): ${e?.message || e}`);
-    }
-
-    // 3. Project path
-    let suggestedProjectPath = '';
-    try {
-      const defaults = loadDefaults();
-      const rootPath = defaults?.projects?.rootPath
-        || defaults?.projects?.defaultPath && path.dirname(defaults.projects.defaultPath)
-        || path.join(os.homedir(), 'evolclaw-projects');
-      suggestedProjectPath = deriveAgentProjectPath(rootPath, aid);
-    } catch {
-      suggestedProjectPath = deriveAgentProjectPath(path.join(os.homedir(), 'evolclaw-projects'), aid);
-    }
-    const projectInput = (await ask(`Project path [${suggestedProjectPath}]: `)).trim();
-    const projectPath = projectInput || suggestedProjectPath;
-    if (!path.isAbsolute(projectPath)) {
-      console.error('Project path must be an absolute path.');
-      process.exit(1);
-    }
-    if (!fs.existsSync(projectPath)) {
-      const create = (await ask(`Project path does not exist. Create? [Y/n]: `)).trim().toLowerCase();
-      if (create === '' || create === 'y' || create === 'yes') {
-        fs.mkdirSync(projectPath, { recursive: true });
-        console.log(`  ✓ Created ${projectPath}`);
-      } else {
-        console.error('Aborted.');
-        process.exit(1);
-      }
-    }
-
-    // 4. Baseagent
-    const baseagentChoices = ['claude', 'codex', 'gemini', 'hermes'];
-    const baseagent = (await ask(`Baseagent (${baseagentChoices.join('/')}) [claude]: `)).trim() || 'claude';
-    if (!baseagentChoices.includes(baseagent)) {
-      console.error(`Invalid baseagent: ${baseagent}`);
-      process.exit(1);
-    }
-
-    // 5. Chatmode
-    const chatmodePrivate = (await ask('Private chat mode (interactive/proactive) [interactive]: ')).trim() || 'interactive';
-    const chatmodeGroup = (await ask('Group chat mode (interactive/proactive) [proactive]: ')).trim() || 'proactive';
-
-    // 6. Owner
-    const owner = (await ask('Owner AID (leave empty for auto-bind on first message): ')).trim() || undefined;
-
-    rl.close();
-
-    // 7. 写入新格式 AgentConfig
-    const { ensureAgentDirSkeleton, saveAgent } = await import('./config-store.js');
-    const { CONFIG_SCHEMA_VERSION } = await import('./types.js');
-
-    const agentConfig = {
-      $schema_version: CONFIG_SCHEMA_VERSION,
-      aid,
-      enabled: true,
-      owners: owner ? [owner] : [],
-      channels: [],
-      active_baseagent: baseagent,
-      baseagents: { [baseagent]: {} },
-      projects: { defaultPath: projectPath },
-      chatmode: { private: chatmodePrivate, group: chatmodeGroup },
-    };
-
-    saveAgent(agentConfig as any);
-    ensureAgentDirSkeleton(aid);
-    console.log(`\n✓ Created: ${agentDirPath}/config.json`);
-    console.log('  Run `evolclaw restart` to activate.');
-  } finally {
-    try { rl.close(); } catch {}
+function printAgentShowHuman(result: any): void {
+  console.log(`${result.aid} (${result.status})\n`);
+  if (result.identity.name || result.identity.description) {
+    console.log('  Identity');
+    if (result.identity.name) console.log(`    Name:         ${result.identity.name}`);
+    if (result.identity.description) console.log(`    Description:  ${result.identity.description}`);
+    console.log('');
   }
+  console.log('  Config');
+  console.log(`    Baseagent:    ${result.config.baseagent || '—'}`);
+  if (result.config.model) console.log(`    Model:        ${result.config.model}`);
+  if (result.config.effort) console.log(`    Effort:       ${result.config.effort}`);
+  if (result.config.chatmode) console.log(`    Chatmode:     private=${result.config.chatmode.private}  group=${result.config.chatmode.group}`);
+  if (result.config.owners.length) console.log(`    Owners:       ${result.config.owners.join(', ')}`);
+  console.log(`    Channels:     ${result.config.channels.length > 0 ? result.config.channels.join(', ') : '—'}`);
+  console.log('');
+  if (result.connection) {
+    const c = result.connection;
+    console.log('  Connection');
+    console.log(`    Status:       ${c.status}`);
+    console.log(`    Uptime:       ${c.uptime_ms != null ? formatDurationMs(c.uptime_ms) : '—'}`);
+    console.log(`    Reconnects:   ${c.reconnect_count}`);
+    console.log(`    Msgs recv:    ${c.messages_received}`);
+    console.log(`    Msgs sent:    ${c.messages_sent}`);
+    console.log(`    Bytes in:     ${formatBytes(c.bytes_received)}`);
+    console.log(`    Bytes out:    ${formatBytes(c.bytes_sent)}`);
+    console.log(`    Last recv:    ${c.last_received_at ? formatTimeAgo(Date.now() - new Date(c.last_received_at).getTime()) : '—'}`);
+    console.log(`    Last sent:    ${c.last_sent_at ? formatTimeAgo(Date.now() - new Date(c.last_sent_at).getTime()) : '—'}`);
+    console.log(`    Peers:        ${c.unique_peer_count}`);
+    console.log('');
+  } else {
+    console.log('  Connection      (daemon offline)');
+    console.log('');
+  }
+  console.log('  Sessions');
+  console.log(`    Active:       ${result.sessions.active}`);
+  console.log(`    Last active:  ${result.sessions.last_activity ? formatTimeAgo(Date.now() - new Date(result.sessions.last_activity).getTime()) : '—'}`);
+  console.log('');
+  console.log('  Paths');
+  console.log(`    Config:       ${result.paths.config}`);
+  console.log(`    Agent.md:     ${result.paths.agent_md}`);
+  console.log(`    Project:      ${result.paths.project || '—'}`);
+  console.log(`    Data:         ${result.paths.data}`);
 }
 
-async function cmdAgentNewNonInteractive(aid: string, args: string[]): Promise<void> {
-  const p = resolvePaths();
-
-  const { isValidAid, aidCreate } = await import('./aid/index.js');
-  if (!isValidAid(aid)) {
-    console.error(`Invalid AID "${aid}": must be a valid multi-level domain (e.g. mybot.agentid.pub)`);
-    process.exit(1);
-  }
-
-  const agentDirPath = path.join(p.agentsDir, aid);
-  if (fs.existsSync(path.join(agentDirPath, 'config.json'))) {
-    console.error(`Agent "${aid}" already exists: ${agentDirPath}/config.json`);
-    process.exit(1);
-  }
-
-  const getArg = (flag: string): string | undefined => {
-    const idx = args.indexOf(flag);
-    return idx !== -1 && idx + 1 < args.length ? args[idx + 1] : undefined;
-  };
-
-  // Required: baseagent + project
-  const baseagent = getArg('--baseagent');
-  if (!baseagent) {
-    console.error('--baseagent is required (claude|codex|gemini|hermes)');
-    process.exit(1);
-  }
-  const baseagentChoices = ['claude', 'codex', 'gemini', 'hermes'];
-  if (!baseagentChoices.includes(baseagent)) {
-    console.error(`Invalid --baseagent: ${baseagent}`);
-    process.exit(1);
-  }
-
-  const project = getArg('--project');
-  if (!project) {
-    console.error('--project is required (absolute path)');
-    process.exit(1);
-  }
-  if (!path.isAbsolute(project)) {
-    console.error(`--project must be absolute: ${project}`);
-    process.exit(1);
-  }
-  if (!fs.existsSync(project)) {
-    try {
-      fs.mkdirSync(project, { recursive: true });
-      console.log(`  ✓ Created ${project}`);
-    } catch (e: any) {
-      console.error(`Failed to create ${project}: ${e?.message || e}`);
-      process.exit(1);
-    }
-  }
-
-  // Optional
-  const chatmodePrivate = getArg('--chatmode-private') || 'interactive';
-  const chatmodeGroup = getArg('--chatmode-group') || 'proactive';
-  const chatmodeValid = new Set(['interactive', 'proactive']);
-  if (!chatmodeValid.has(chatmodePrivate)) {
-    console.error(`Invalid --chatmode-private: ${chatmodePrivate}`);
-    process.exit(1);
-  }
-  if (!chatmodeValid.has(chatmodeGroup)) {
-    console.error(`Invalid --chatmode-group: ${chatmodeGroup}`);
-    process.exit(1);
-  }
-
-  const owner = getArg('--owner');
-  if (owner && !isValidAid(owner)) {
-    console.error(`Invalid --owner: ${owner}`);
-    process.exit(1);
-  }
-
-  // Register AID on AUN network
-  try {
-    const result = await aidCreate(aid);
-    try { await result.client.close(); } catch {}
-    console.log(`✓ AID ${result.alreadyExisted ? 'reused' : 'created'}: ${aid}`);
-  } catch (e: any) {
-    console.error(`  ⚠ AID creation failed (can retry later): ${e?.message || e}`);
-  }
-
-  // Build channels[] list (AUN is implicit, only extra channels go here)
-  const channels: any[] = [];
-
-  const feishuAppId = getArg('--feishu-app-id');
-  const feishuAppSecret = getArg('--feishu-app-secret');
-  if (feishuAppId || feishuAppSecret) {
-    if (!feishuAppId || !feishuAppSecret) {
-      console.error('--feishu-app-id and --feishu-app-secret must both be provided');
-      process.exit(1);
-    }
-    channels.push({ type: 'feishu', name: 'main', enabled: true, appId: feishuAppId, appSecret: feishuAppSecret });
-  }
-
-  const dingtalkClientId = getArg('--dingtalk-client-id');
-  const dingtalkClientSecret = getArg('--dingtalk-client-secret');
-  if (dingtalkClientId || dingtalkClientSecret) {
-    if (!dingtalkClientId || !dingtalkClientSecret) {
-      console.error('--dingtalk-client-id and --dingtalk-client-secret must both be provided');
-      process.exit(1);
-    }
-    channels.push({ type: 'dingtalk', name: 'main', enabled: true, clientId: dingtalkClientId, clientSecret: dingtalkClientSecret });
-  }
-
-  // Write new format
-  const { ensureAgentDirSkeleton, saveAgent } = await import('./config-store.js');
-  const { CONFIG_SCHEMA_VERSION } = await import('./types.js');
-
-  const agentConfig = {
-    $schema_version: CONFIG_SCHEMA_VERSION,
-    aid,
-    enabled: true,
-    owners: owner ? [owner] : [],
-    channels,
-    active_baseagent: baseagent,
-    baseagents: { [baseagent]: {} },
-    projects: { defaultPath: project },
-    chatmode: { private: chatmodePrivate, group: chatmodeGroup },
-  };
-
-  saveAgent(agentConfig as any);
-  ensureAgentDirSkeleton(aid);
-  console.log(`✓ Created: ${agentDirPath}/config.json`);
-  console.log('  Run `evolclaw restart` to activate.');
+function formatDurationMs(ms: number): string {
+  const sec = Math.floor(ms / 1000);
+  if (sec < 60) return `${sec}s`;
+  const min = Math.floor(sec / 60);
+  const s = sec % 60;
+  if (min < 60) return `${min}m${String(s).padStart(2, '0')}s`;
+  const hour = Math.floor(min / 60);
+  const m = min % 60;
+  if (hour < 24) return `${hour}h${String(m).padStart(2, '0')}m${String(s).padStart(2, '0')}s`;
+  const day = Math.floor(hour / 24);
+  return `${day}d${hour % 24}h${String(m).padStart(2, '0')}m`;
 }
 
 // ==================== AID ====================
@@ -3234,11 +3102,674 @@ Commands:
   process.exit(1);
 }
 
+// ==================== Msg ====================
+
+async function cmdMsg(args: string[]): Promise<void> {
+  const sub = args[0];
+  const aunPath = resolveAunPath(args);
+  const formatJson = args.includes('--format') && args[args.indexOf('--format') + 1] === 'json';
+  const appIdx = args.indexOf('--app');
+  const appSlot = appIdx >= 0 ? args[appIdx + 1] : undefined;
+  const asDaemon = args.includes('--as-daemon');
+
+  if (!sub || sub === 'help') {
+    console.log(`用法: evolclaw msg <command> <from-aid> [args...] [options]
+
+Commands:
+  send <from> <to> <text>                              发送文本
+  send <from> <to> --file <path> [--as <type>]         发送文件（image|video|voice|file）
+  send <from> <to> --link <url> [--title T]            发送链接卡片
+  send <from> <to> --payload <json>                    发送自定义 payload
+  pull <from> [--after-seq N] [--limit N]              拉取收件箱
+  ack <from> <seq> --app <name>                        确认已读（必须传 --app）
+  recall <from> <message-id> [<message-id>...]         撤回消息
+  online <from> <target-aid> [<target-aid>...]         查询在线状态
+
+Options:
+  --app <name>          指定应用 slot（隔离 ack 游标）
+  --as-daemon           ack 时显式以 daemon 身份（高危，会污染 daemon 游标）
+  --format json         输出 JSON 格式
+  --content-type <mime> 显式覆盖 MIME（仅 --file 模式）
+  --text <说明>          附件说明文字（仅 --file 模式）
+  --transcript <text>   语音转写（仅 --as voice）
+
+示例:
+  evolclaw msg send alice.agentid.pub bob.agentid.pub "hello"
+  evolclaw msg send alice.agentid.pub bob.agentid.pub --file ./pic.png
+  evolclaw msg send alice.agentid.pub bob.agentid.pub --file ./demo.mp4 --as video
+  evolclaw msg send alice.agentid.pub bob.agentid.pub --link https://example.com --title "AUN"
+  evolclaw msg pull alice.agentid.pub --app my-bot
+  evolclaw msg ack alice.agentid.pub 42 --app my-bot
+  evolclaw msg recall alice.agentid.pub msg-uuid-1 msg-uuid-2
+  evolclaw msg online alice.agentid.pub bob.agentid.pub carol.agentid.pub`);
+    return;
+  }
+
+  const from = args[1];
+  if (!from) {
+    console.error('❌ 缺少 <from-aid> 参数');
+    process.exit(1);
+  }
+  const { isValidAid } = await import('./aid/index.js');
+  if (!isValidAid(from)) {
+    console.error(`❌ 无效 AID 格式: ${from}`);
+    process.exit(1);
+  }
+
+  const { msgSend, msgPull, msgAck, msgRecall, msgOnline } = await import('./msg/index.js');
+  const commonOpts = { aunPath, slotId: appSlot };
+
+  if (sub === 'send') {
+    const to = args[2];
+    if (!to) {
+      console.error('用法: evolclaw msg send <from> <to> <text|--file ...|--link ...|--payload ...>');
+      process.exit(1);
+    }
+    if (!isValidAid(to)) {
+      console.error(`❌ 无效目标 AID: ${to}`);
+      process.exit(1);
+    }
+
+    const fileVal = getArgValue(args, '--file');
+    const linkVal = getArgValue(args, '--link');
+    const payloadVal = getArgValue(args, '--payload');
+    let body: any;
+
+    if (fileVal) {
+      body = {
+        mode: 'file',
+        filePath: fileVal,
+        as: getArgValue(args, '--as'),
+        contentType: getArgValue(args, '--content-type'),
+        text: getArgValue(args, '--text'),
+        transcript: getArgValue(args, '--transcript'),
+      };
+    } else if (linkVal) {
+      body = {
+        mode: 'link',
+        url: linkVal,
+        title: getArgValue(args, '--title'),
+        description: getArgValue(args, '--description'),
+      };
+    } else if (payloadVal) {
+      let parsed: Record<string, unknown>;
+      try { parsed = JSON.parse(payloadVal); }
+      catch (e: any) {
+        console.error(`❌ --payload 解析失败: ${e.message}`);
+        process.exit(1);
+      }
+      body = { mode: 'payload', payload: parsed };
+    } else {
+      const text = collectPositional(args, 3).join(' ');
+      if (!text) {
+        console.error('❌ 缺少消息内容（文本或 --file/--link/--payload）');
+        process.exit(1);
+      }
+      body = { mode: 'text', text };
+    }
+
+    const result = await msgSend({ from, to, body, ...commonOpts });
+    if (!result.ok) {
+      if (formatJson) { console.log(JSON.stringify(result)); }
+      else { console.error(`❌ 发送失败: ${result.error}`); }
+      process.exit(1);
+    }
+    if (formatJson) {
+      console.log(JSON.stringify(result));
+    } else {
+      console.log(`✓ 已发送 ${result.message_id ?? ''} seq=${result.seq ?? '-'} status=${result.status ?? '-'}`);
+    }
+    return;
+  }
+
+  if (sub === 'pull') {
+    if (!appSlot) {
+      console.error('⚠ 警告: 未传 --app，将使用 daemon 共享 slot（可能与 daemon 看到同一批消息）');
+    }
+    const afterSeqStr = getArgValue(args, '--after-seq');
+    const limitStr = getArgValue(args, '--limit');
+    const afterSeq = afterSeqStr !== undefined ? Number(afterSeqStr) : undefined;
+    const limit = limitStr !== undefined ? Number(limitStr) : undefined;
+    if (afterSeq !== undefined && !Number.isFinite(afterSeq)) {
+      console.error(`❌ --after-seq 必须是数字: ${afterSeqStr}`);
+      process.exit(1);
+    }
+    if (limit !== undefined && !Number.isFinite(limit)) {
+      console.error(`❌ --limit 必须是数字: ${limitStr}`);
+      process.exit(1);
+    }
+
+    const result = await msgPull({ from, afterSeq, limit, ...commonOpts });
+    if (!result.ok) {
+      if (formatJson) { console.log(JSON.stringify(result)); }
+      else { console.error(`❌ 拉取失败: ${result.error}`); }
+      process.exit(1);
+    }
+    if (formatJson) {
+      console.log(JSON.stringify(result));
+    } else {
+      console.log(`✓ ${result.count} 条消息，latest_seq=${result.latest_seq}`);
+      for (const m of result.messages) {
+        const text = (m.payload as any)?.text ?? JSON.stringify(m.payload).slice(0, 80);
+        console.log(`  [${m.seq}] ${m.from}: ${text}`);
+      }
+      if (result.ephemeral_dropped_count && result.ephemeral_dropped_count > 0) {
+        console.log(`  (临时消息淘汰: ${result.ephemeral_dropped_count} 条)`);
+      }
+    }
+    return;
+  }
+
+  if (sub === 'ack') {
+    const seqStr = args[2];
+    if (!seqStr) {
+      console.error('用法: evolclaw msg ack <from> <seq> --app <name>');
+      process.exit(1);
+    }
+    const seq = Number(seqStr);
+    if (!Number.isFinite(seq)) {
+      console.error(`❌ seq 必须是数字: ${seqStr}`);
+      process.exit(1);
+    }
+    if (!appSlot && !asDaemon) {
+      console.error('❌ ack 必须传 --app <name>（或 --as-daemon 显式以 daemon 身份，高危）');
+      console.error('   理由: 不传 --app 会推进 daemon 共享的 ack 游标，导致 daemon 丢消息');
+      process.exit(1);
+    }
+
+    const result = await msgAck({ from, seq, ...commonOpts });
+    if (!result.ok) {
+      if (formatJson) { console.log(JSON.stringify(result)); }
+      else { console.error(`❌ ack 失败: ${result.error}`); }
+      process.exit(1);
+    }
+    if (formatJson) {
+      console.log(JSON.stringify(result));
+    } else {
+      console.log(`✓ ack_seq=${result.ack_seq}`);
+    }
+    return;
+  }
+
+  if (sub === 'recall') {
+    const messageIds = collectPositional(args, 2);
+    if (messageIds.length === 0) {
+      console.error('用法: evolclaw msg recall <from> <message-id> [<message-id>...]');
+      process.exit(1);
+    }
+
+    const result = await msgRecall({ from, messageIds, ...commonOpts });
+    if (!result.ok) {
+      if (formatJson) { console.log(JSON.stringify(result)); }
+      else { console.error(`❌ recall 失败: ${result.error}`); }
+      process.exit(1);
+    }
+    if (formatJson) {
+      console.log(JSON.stringify(result));
+    } else {
+      console.log(`✓ 受理 ${result.accepted}，撤回 ${result.recalled}`);
+      if (result.errors && result.errors.length > 0) {
+        for (const e of result.errors) {
+          console.log(`  失败 ${e.message_id}: ${e.error}`);
+        }
+      }
+    }
+    return;
+  }
+
+  if (sub === 'online') {
+    const targets = collectPositional(args, 2);
+    if (targets.length === 0) {
+      console.error('用法: evolclaw msg online <from> <target-aid> [<target-aid>...]');
+      process.exit(1);
+    }
+    for (const t of targets) {
+      if (!isValidAid(t)) {
+        console.error(`❌ 无效 AID: ${t}`);
+        process.exit(1);
+      }
+    }
+
+    const result = await msgOnline({ from, targets, ...commonOpts });
+    if (!result.ok) {
+      if (formatJson) { console.log(JSON.stringify(result)); }
+      else { console.error(`❌ 查询失败: ${result.error}`); }
+      process.exit(1);
+    }
+    if (formatJson) {
+      console.log(JSON.stringify(result));
+    } else {
+      for (const [aid, online] of Object.entries(result.online)) {
+        console.log(`  ${online ? '🟢' : '⚫'} ${aid}`);
+      }
+    }
+    return;
+  }
+
+  console.error(`未知子命令: ${sub}\n用法: evolclaw msg [send|pull|ack|recall|online]`);
+  process.exit(1);
+}
+
+// ==================== Group ====================
+
+async function cmdGroup(args: string[]): Promise<void> {
+  const sub = args[0];
+  const aunPath = resolveAunPath(args);
+  const formatJson = args.includes('--format') && args[args.indexOf('--format') + 1] === 'json';
+  const appIdx = args.indexOf('--app');
+  const appSlot = appIdx >= 0 ? args[appIdx + 1] : undefined;
+  const asDaemon = args.includes('--as-daemon');
+
+  if (!sub || sub === 'help') {
+    console.log(`用法: evolclaw group <command> <from-aid> [args...] [options]
+
+消息:
+  send <from> <group-id> <text>                        发送群文本
+  send <from> <group-id> --file <path> [--as <type>]   发送群文件
+  send <from> <group-id> --payload <json>              发送自定义 payload
+  pull <from> <group-id> [--after-seq N] [--limit N]   拉取群消息
+  ack <from> <group-id> <seq> --app <name>             确认已读（必须传 --app）
+
+群管理:
+  create <from> <name> [--visibility public|private] [--description D] [--join-mode M]  创建群
+  list <from> [--size N]                                列出我加入的群
+  info <from> <group-id>                                查看群详情
+  update <from> <group-id> [--name N] [--description D] 修改群信息
+  dissolve <from> <group-id>                            解散群
+
+成员:
+  join <from> <group-id> [--message M] [--answer A]    申请加入
+  leave <from> <group-id>                              退出群
+  invite <from> <group-id> <member-aid> [<member-aid>...]   邀请成员
+  kick <from> <group-id> <member-aid>                  踢出成员
+  members <from> <group-id> [--page N] [--size N]      列出群成员
+  online <from> <group-id>                             查看在线成员
+
+Options:
+  --app <name>          指定应用 slot（隔离 ack 游标）
+  --as-daemon           ack 时显式以 daemon 身份（高危）
+  --format json         输出 JSON 格式
+  --mention <aid>       发送时 @ 某个成员（可多次）
+  --mention-all         发送时 @ 所有人
+
+示例:
+  evolclaw group create alice.agentid.pub "Dev Team" --visibility private
+  evolclaw group send alice.agentid.pub g-dev.agentid.pub "hello team"
+  evolclaw group send alice.agentid.pub g-dev.agentid.pub "@bob 看下 PR" --mention bob.agentid.pub
+  evolclaw group send alice.agentid.pub g-dev.agentid.pub --file ./arch.png
+  evolclaw group invite alice.agentid.pub g-dev.agentid.pub bob.agentid.pub carol.agentid.pub
+  evolclaw group members alice.agentid.pub g-dev.agentid.pub`);
+    return;
+  }
+
+  const from = args[1];
+  if (!from) {
+    console.error('❌ 缺少 <from-aid> 参数');
+    process.exit(1);
+  }
+  const { isValidAid } = await import('./aid/index.js');
+  if (!isValidAid(from)) {
+    console.error(`❌ 无效 AID 格式: ${from}`);
+    process.exit(1);
+  }
+
+  const {
+    groupSend, groupPull, groupAck,
+    groupCreate, groupInfo, groupList, groupUpdate, groupDissolve,
+    groupJoin, groupLeave, groupInvite, groupKick, groupMembers, groupOnline,
+  } = await import('./msg/index.js');
+  const commonOpts = { aunPath, slotId: appSlot };
+
+  // 通用 group_id 提取（第三参数）
+  const requireGroupId = (): string => {
+    const gid = args[2];
+    if (!gid) {
+      console.error(`❌ 缺少 <group-id> 参数`);
+      process.exit(1);
+    }
+    return gid;
+  };
+
+  // 收集 --mention（可多次）
+  const collectMentions = (): Array<Record<string, unknown>> => {
+    const mentions: Array<Record<string, unknown>> = [];
+    for (let i = 0; i < args.length - 1; i++) {
+      if (args[i] === '--mention') {
+        mentions.push({ aid: args[i + 1] });
+      }
+    }
+    if (args.includes('--mention-all')) {
+      mentions.push({ scope: 'all' });
+    }
+    return mentions;
+  };
+
+  // 输出辅助
+  const outputResult = (result: any, successHuman: () => void) => {
+    if (!result.ok) {
+      if (formatJson) { console.log(JSON.stringify(result)); }
+      else { console.error(`❌ ${result.error}`); }
+      process.exit(1);
+    }
+    if (formatJson) {
+      console.log(JSON.stringify(result));
+    } else {
+      successHuman();
+    }
+  };
+
+  // ---- 消息 ----
+
+  if (sub === 'send') {
+    const groupId = requireGroupId();
+    const fileVal = getArgValue(args, '--file');
+    const payloadVal = getArgValue(args, '--payload');
+    let body: any;
+
+    if (fileVal) {
+      body = {
+        mode: 'file',
+        filePath: fileVal,
+        as: getArgValue(args, '--as'),
+        contentType: getArgValue(args, '--content-type'),
+        text: getArgValue(args, '--text'),
+        transcript: getArgValue(args, '--transcript'),
+      };
+    } else if (payloadVal) {
+      let parsed: Record<string, unknown>;
+      try { parsed = JSON.parse(payloadVal); }
+      catch (e: any) {
+        console.error(`❌ --payload 解析失败: ${e.message}`);
+        process.exit(1);
+      }
+      body = { mode: 'payload', payload: parsed };
+    } else {
+      const text = collectPositional(args, 3).join(' ');
+      if (!text) {
+        console.error('❌ 缺少消息内容（文本或 --file/--payload）');
+        process.exit(1);
+      }
+      body = { mode: 'text', text };
+    }
+
+    const mentions = collectMentions();
+    const result = await groupSend({ from, groupId, body, mentions: mentions.length ? mentions : undefined, ...commonOpts });
+    outputResult(result, () => {
+      const r = result as any;
+      console.log(`✓ 已发送 message_id=${r.message?.message_id ?? '-'} seq=${r.message?.seq ?? '-'}`);
+    });
+    return;
+  }
+
+  if (sub === 'pull') {
+    const groupId = requireGroupId();
+    if (!appSlot) {
+      console.error('⚠ 警告: 未传 --app，将使用 daemon 共享 slot');
+    }
+    const afterSeqStr = getArgValue(args, '--after-seq');
+    const limitStr = getArgValue(args, '--limit');
+    const afterSeq = afterSeqStr !== undefined ? Number(afterSeqStr) : undefined;
+    const limit = limitStr !== undefined ? Number(limitStr) : undefined;
+
+    const result = await groupPull({ from, groupId, afterSeq, limit, ...commonOpts });
+    outputResult(result, () => {
+      const r = result as any;
+      console.log(`✓ ${r.messages.length} 条消息，latest_seq=${r.latest_message_seq}${r.has_more ? '（还有更多）' : ''}`);
+      for (const m of r.messages) {
+        const text = m.payload?.text ?? JSON.stringify(m.payload).slice(0, 80);
+        console.log(`  [${m.seq}] ${m.sender_aid}: ${text}`);
+      }
+    });
+    return;
+  }
+
+  if (sub === 'ack') {
+    const groupId = requireGroupId();
+    const seqStr = args[3];
+    if (!seqStr) {
+      console.error('用法: evolclaw group ack <from> <group-id> <seq> --app <name>');
+      process.exit(1);
+    }
+    const seq = Number(seqStr);
+    if (!Number.isFinite(seq)) {
+      console.error(`❌ seq 必须是数字: ${seqStr}`);
+      process.exit(1);
+    }
+    if (!appSlot && !asDaemon) {
+      console.error('❌ group ack 必须传 --app <name>（或 --as-daemon 显式以 daemon 身份，高危）');
+      process.exit(1);
+    }
+
+    const result = await groupAck({ from, groupId, seq, ...commonOpts });
+    outputResult(result, () => {
+      const r = result as any;
+      console.log(`✓ ack_seq=${r.ack_seq}`);
+    });
+    return;
+  }
+
+  // ---- 群管理 ----
+
+  if (sub === 'create') {
+    const name = args[2];
+    if (!name) {
+      console.error('用法: evolclaw group create <from> <name> [--visibility ...] [--description ...]');
+      process.exit(1);
+    }
+    const visibility = getArgValue(args, '--visibility') as any;
+    if (visibility && visibility !== 'public' && visibility !== 'private') {
+      console.error(`❌ --visibility 必须是 public 或 private`);
+      process.exit(1);
+    }
+    const result = await groupCreate({
+      from,
+      name,
+      visibility,
+      description: getArgValue(args, '--description'),
+      joinMode: getArgValue(args, '--join-mode') as any,
+      groupId: getArgValue(args, '--group-id'),
+      ...commonOpts,
+    });
+    outputResult(result, () => {
+      const r = result as any;
+      console.log(`✓ 已创建群 ${r.group?.group_id}`);
+      console.log(`  名称: ${r.group?.name}`);
+      console.log(`  可见性: ${r.group?.visibility}`);
+    });
+    return;
+  }
+
+  if (sub === 'list') {
+    const sizeStr = getArgValue(args, '--size');
+    const size = sizeStr !== undefined ? Number(sizeStr) : undefined;
+    const result = await groupList({ from, size, ...commonOpts });
+    outputResult(result, () => {
+      const r = result as any;
+      if (r.items.length === 0) {
+        console.log('(没有加入任何群)');
+        return;
+      }
+      console.log(`共 ${r.total} 个群:`);
+      for (const g of r.items) {
+        console.log(`  ${g.group_id}  ${g.name}  (${g.member_count ?? '?'} 人)`);
+      }
+    });
+    return;
+  }
+
+  if (sub === 'info') {
+    const groupId = requireGroupId();
+    const result = await groupInfo({ from, groupId, ...commonOpts });
+    outputResult(result, () => {
+      const g = (result as any).group;
+      console.log(`Group: ${g.group_id}`);
+      console.log(`  名称:     ${g.name}`);
+      console.log(`  群主:     ${g.owner_aid}`);
+      console.log(`  可见性:   ${g.visibility ?? '-'}`);
+      console.log(`  状态:     ${g.status ?? '-'}`);
+      console.log(`  成员数:   ${g.member_count ?? '-'}`);
+      console.log(`  最新 seq: ${g.message_seq ?? '-'}`);
+      if (g.description) console.log(`  描述:     ${g.description}`);
+    });
+    return;
+  }
+
+  if (sub === 'update') {
+    const groupId = requireGroupId();
+    const name = getArgValue(args, '--name');
+    const description = getArgValue(args, '--description');
+    if (name === undefined && description === undefined) {
+      console.error('❌ 至少需要 --name 或 --description 之一');
+      process.exit(1);
+    }
+    const result = await groupUpdate({ from, groupId, name, description, ...commonOpts });
+    outputResult(result, () => {
+      const g = (result as any).group;
+      console.log(`✓ 已更新 ${g.group_id}`);
+      console.log(`  名称: ${g.name}`);
+    });
+    return;
+  }
+
+  if (sub === 'dissolve') {
+    const groupId = requireGroupId();
+    const result = await groupDissolve({ from, groupId, ...commonOpts });
+    outputResult(result, () => {
+      const r = result as any;
+      console.log(`✓ 已解散 ${r.group_id} (${r.status})`);
+    });
+    return;
+  }
+
+  // ---- 成员 ----
+
+  if (sub === 'join') {
+    const groupId = requireGroupId();
+    const result = await groupJoin({
+      from, groupId,
+      message: getArgValue(args, '--message'),
+      answer: getArgValue(args, '--answer'),
+      ...commonOpts,
+    });
+    outputResult(result, () => {
+      console.log(`✓ 已提交入群申请`);
+    });
+    return;
+  }
+
+  if (sub === 'leave') {
+    const groupId = requireGroupId();
+    const result = await groupLeave({ from, groupId, ...commonOpts });
+    outputResult(result, () => {
+      console.log(`✓ 已退出 ${groupId}`);
+    });
+    return;
+  }
+
+  if (sub === 'invite') {
+    const groupId = requireGroupId();
+    const members = collectPositional(args, 3);
+    if (members.length === 0) {
+      console.error('用法: evolclaw group invite <from> <group-id> <member-aid> [<member-aid>...]');
+      process.exit(1);
+    }
+    for (const m of members) {
+      if (!isValidAid(m)) {
+        console.error(`❌ 无效 AID: ${m}`);
+        process.exit(1);
+      }
+    }
+    const result = await groupInvite({ from, groupId, members, ...commonOpts });
+    outputResult(result, () => {
+      const r = result as any;
+      console.log(`✓ 成功 ${r.added.length}，失败 ${r.failed.length}`);
+      for (const a of r.added) console.log(`  + ${a}`);
+      for (const f of r.failed) console.log(`  ✗ ${f.aid}: ${f.error}`);
+    });
+    return;
+  }
+
+  if (sub === 'kick') {
+    const groupId = requireGroupId();
+    const memberAid = args[3];
+    if (!memberAid) {
+      console.error('用法: evolclaw group kick <from> <group-id> <member-aid>');
+      process.exit(1);
+    }
+    const result = await groupKick({ from, groupId, memberAid, ...commonOpts });
+    outputResult(result, () => {
+      console.log(`✓ 已踢出 ${memberAid}`);
+    });
+    return;
+  }
+
+  if (sub === 'members') {
+    const groupId = requireGroupId();
+    const pageStr = getArgValue(args, '--page');
+    const sizeStr = getArgValue(args, '--size');
+    const result = await groupMembers({
+      from, groupId,
+      page: pageStr !== undefined ? Number(pageStr) : undefined,
+      size: sizeStr !== undefined ? Number(sizeStr) : undefined,
+      ...commonOpts,
+    });
+    outputResult(result, () => {
+      const r = result as any;
+      console.log(`共 ${r.total} 名成员（第 ${r.page} 页）:`);
+      for (const m of r.members) {
+        console.log(`  [${m.role}] ${m.aid}`);
+      }
+    });
+    return;
+  }
+
+  if (sub === 'online') {
+    const groupId = requireGroupId();
+    const result = await groupOnline({ from, groupId, ...commonOpts });
+    outputResult(result, () => {
+      const r = result as any;
+      console.log(`在线 ${r.online_count}/${r.total}:`);
+      for (const m of r.members) {
+        console.log(`  🟢 ${m.aid}`);
+      }
+    });
+    return;
+  }
+
+  console.error(`未知子命令: ${sub}\n用法: evolclaw group [send|pull|ack|create|list|info|update|dissolve|join|leave|invite|kick|members|online]`);
+  process.exit(1);
+}
+
 // ==================== Main ====================
 
 function getArgValue(args: string[], flag: string): string | undefined {
   const idx = args.indexOf(flag);
   return idx !== -1 && idx + 1 < args.length ? args[idx + 1] : undefined;
+}
+
+/**
+ * 收集位置参数（从 startIdx 开始），跳过 flag 及其值。
+ * 已知"取值"的 flag 会消耗下一个 arg；已知"开关"的 flag 只占自身。
+ */
+function collectPositional(args: string[], startIdx: number): string[] {
+  const VALUE_FLAGS = new Set([
+    '--format', '--app', '--after-seq', '--limit', '--file', '--link',
+    '--payload', '--title', '--description', '--text', '--transcript',
+    '--as', '--content-type', '--mention', '--visibility', '--join-mode',
+    '--group-id', '--name', '--message', '--answer', '--page', '--size',
+    '--aun-path',
+  ]);
+  const out: string[] = [];
+  for (let i = startIdx; i < args.length; i++) {
+    const a = args[i];
+    if (a.startsWith('--')) {
+      if (VALUE_FLAGS.has(a)) i++; // 跳过 flag 的值
+      // else: 开关 flag，自身已被跳过
+      continue;
+    }
+    out.push(a);
+  }
+  return out;
 }
 
 export async function main(args: string[]) {
@@ -3361,6 +3892,18 @@ export async function main(args: string[]) {
       const { suppressSdkLogs } = await import('./aid/index.js');
       suppressSdkLogs();
       await cmdStorage(args.slice(1));
+      break;
+    }
+    case 'msg': {
+      const { suppressSdkLogs } = await import('./aid/index.js');
+      suppressSdkLogs();
+      await cmdMsg(args.slice(1));
+      break;
+    }
+    case 'group': {
+      const { suppressSdkLogs } = await import('./aid/index.js');
+      suppressSdkLogs();
+      await cmdGroup(args.slice(1));
       break;
     }
     default:

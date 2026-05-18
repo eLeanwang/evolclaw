@@ -1,4 +1,4 @@
-import { createShortConnection } from './connection.js';
+import { createShortConnection, type ShortConnectionOpts } from './connection.js';
 
 export interface RpcResult {
   ok: boolean;
@@ -6,7 +6,7 @@ export interface RpcResult {
   error?: { code: number; message: string; data?: any };
 }
 
-export async function rpcCall(aid: string, method: string, params: any, opts?: { aunPath?: string }): Promise<RpcResult> {
+export async function rpcCall(aid: string, method: string, params: any, opts?: ShortConnectionOpts): Promise<RpcResult> {
   const conn = await createShortConnection(aid, opts);
   try {
     const result = await conn.call(method, params);
@@ -21,7 +21,7 @@ export async function rpcCall(aid: string, method: string, params: any, opts?: {
   }
 }
 
-export async function rpcBatch(aid: string, calls: Array<{ method: string; params: any }>, opts?: { aunPath?: string }): Promise<RpcResult[]> {
+export async function rpcBatch(aid: string, calls: Array<{ method: string; params: any }>, opts?: ShortConnectionOpts): Promise<RpcResult[]> {
   const conn = await createShortConnection(aid, opts);
   const results: RpcResult[] = [];
   try {
