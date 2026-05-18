@@ -118,12 +118,15 @@ function countLines(pkgRoot: string, logDir: string) {
 
   // 追加历史记录（仅在数据变化时）
   let shouldAppend = true;
+  let prevTotal = 0;
   if (fs.existsSync(statsFile)) {
     const lines = fs.readFileSync(statsFile, 'utf-8').trim().split('\n');
     if (lines.length > 0) {
       const lastLine = lines[lines.length - 1];
-      const lastTotal = lastLine.split('\t').pop();
-      if (lastTotal === String(total)) {
+      const parts = lastLine.split('\t');
+      const lastTotalStr = parts[6] ?? parts[parts.length - 1];
+      prevTotal = parseInt(lastTotalStr, 10) || 0;
+      if (prevTotal === total) {
         shouldAppend = false;
       }
     }
@@ -132,7 +135,9 @@ function countLines(pkgRoot: string, logDir: string) {
     const _d = new Date();
     const _p = (n: number) => String(n).padStart(2, '0');
     const now = `${_d.getFullYear()}-${_p(_d.getMonth() + 1)}-${_p(_d.getDate())} ${_p(_d.getHours())}:${_p(_d.getMinutes())}:${_p(_d.getSeconds())}`;
-    fs.appendFileSync(statsFile, `${now}\t${core}\t${agents}\t${channels}\t${utils}\t${entry}\t${total}\n`);
+    const delta = total - prevTotal;
+    const deltaStr = delta >= 0 ? `+${delta}` : `${delta}`;
+    fs.appendFileSync(statsFile, `${now}\t${core}\t${agents}\t${channels}\t${utils}\t${entry}\t${total}\t${deltaStr}\n`);
   }
 
   showHistory(statsFile);
@@ -153,9 +158,11 @@ function showHistory(statsFile: string) {
   let prevTotal: number | null = null;
   for (const line of recent) {
     const parts = line.split('\t');
-    // 兼容旧格式（6列: time,core,ch,utils,entry,total）和新格式（7列: +agents）
-    let time: string, c: string, a: string, ch: string, u: string, e: string, t: string;
-    if (parts.length >= 7) {
+    // 兼容旧格式（6列: time,core,ch,utils,entry,total）和新格式（7列: +agents）及最新（8列: +delta）
+    let time: string, c: string, a: string, ch: string, u: string, e: string, t: string, d: string | undefined;
+    if (parts.length >= 8) {
+      [time, c, a, ch, u, e, t, d] = parts;
+    } else if (parts.length >= 7) {
       [time, c, a, ch, u, e, t] = parts;
     } else if (parts.length >= 6) {
       [time, c, ch, u, e, t] = parts;
@@ -164,10 +171,14 @@ function showHistory(statsFile: string) {
       continue;
     }
     const total = parseInt(t, 10);
-    let diff = '-';
-    if (prevTotal !== null) {
+    let diff: string;
+    if (d) {
+      diff = d;
+    } else if (prevTotal !== null) {
       const change = total - prevTotal;
       diff = change >= 0 ? `+${change}` : `${change}`;
+    } else {
+      diff = '-';
     }
     console.log(`${time.padEnd(20)} ${c.padStart(6)} ${a.padStart(6)} ${ch.padStart(6)} ${u.padStart(6)} ${e.padStart(6)} ${t.padStart(6)} ${diff.padStart(8)}`);
     prevTotal = total;

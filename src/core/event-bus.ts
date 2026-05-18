@@ -23,7 +23,9 @@ export type SessionEvent =
   | { type: 'session:rewind'; sessionId: string; turnNum: number; mode: string }
   | { type: 'session:imported'; sessionId: string; agentSessionId: string; projectPath: string }
   | { type: 'session:safe-mode-entered'; sessionId: string; consecutiveErrors?: number; reason?: string }
-  | { type: 'session:safe-mode-exited'; sessionId: string; method?: string };
+  | { type: 'session:safe-mode-exited'; sessionId: string; method?: string }
+  | { type: 'session:chat-mode-changed'; sessionId: string; mode: string; timestamp?: number }
+  | { type: 'session:dispatch-mode-changed'; sessionId: string; mode: string; timestamp?: number };
 
 // ── 项目事件 ──
 export type ProjectEvent =
@@ -54,7 +56,7 @@ export type PermissionEvent =
 export type AgentEvent =
   | { type: 'agent:compact-start'; sessionId: string }
   | { type: 'agent:compact-complete'; sessionId: string; preTokens: number }
-  | { type: 'agent:model-changed'; sessionId?: string; oldModel?: string; newModel?: string; model?: string; timestamp?: number }
+  | { type: 'agent:model-changed'; sessionId?: string; model?: string; timestamp?: number }
   | { type: 'agent:idle-timeout'; sessionId: string; idleSec: number }
   | { type: 'agent:file-sent'; sessionId: string; filePath: string; channel: string; channelName?: string }
   | { type: 'agent:state-changed'; sessionId: string; state: string }

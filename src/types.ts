@@ -197,6 +197,7 @@ export interface SessionMetadata {
     gemini?: string;
   };
   permissionMode?: string;  // 权限模式（per-session）: auto | bypass | request | edit | plan | noask
+  dispatchMode?: string;  // 群聊分发模式（per-session）: mention | all
   resumeAt?: string;  // /rewind chat 标记的回退点（assistant message uuid）
 }
 

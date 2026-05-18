@@ -142,7 +142,7 @@ function formatIdleTime(ms: number): string {
 }
 
 // 支持的命令列表
-const commands = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/evolhelp', '/status', '/restart', '/model', '/setmodel', '/effort', '/agent', '/slist', '/session', '/rename', '/stop', '/clear', '/compact', '/repair', '/safe', '/fork', '/del', '/perm', '/file', '/check', '/rewind', '/activity', '/chatmode', '/ask', '/resume', '/aid', '/rpc', '/storage'];
+const commands = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/evolhelp', '/status', '/restart', '/model', '/setmodel', '/effort', '/agent', '/slist', '/session', '/rename', '/stop', '/clear', '/compact', '/repair', '/safe', '/fork', '/del', '/perm', '/file', '/check', '/rewind', '/activity', '/chatmode', '/dispatch', '/ask', '/resume', '/aid', '/rpc', '/storage'];
 
 // 命令别名映射
 const aliases: Record<string, string> = {
@@ -153,7 +153,7 @@ const aliases: Record<string, string> = {
 };
 
 // 命令快速路径前缀（所有命令都不进入消息队列）
-const quickCommandPrefixes = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/evolhelp', '/status', '/restart', '/model', '/setmodel', '/effort', '/agent', '/slist', '/session', '/rename', '/repair', '/fork', '/stop', '/clear', '/compact', '/safe', '/del', '/perm', '/file', '/check', '/p ', '/s ', '/name', '/rewind', '/rw', '/rw ', '/activity', '/chatmode', '/ask', '/resume', '/aid', '/rpc', '/storage'];
+const quickCommandPrefixes = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/evolhelp', '/status', '/restart', '/model', '/setmodel', '/effort', '/agent', '/slist', '/session', '/rename', '/repair', '/fork', '/stop', '/clear', '/compact', '/safe', '/del', '/perm', '/file', '/check', '/p ', '/s ', '/name', '/rewind', '/rw', '/rw ', '/activity', '/chatmode', '/dispatch', '/ask', '/resume', '/aid', '/rpc', '/storage'];
 
 export class CommandHandler {
   private adapters = new Map<string, ChannelAdapter>();
@@ -415,8 +415,6 @@ export class CommandHandler {
     if (!this.interactionRouter) return false;
     // 无写权限 → 走文本降级（由调用点 fall through 输出只读信息）
     if (opts.canWrite === false) return false;
-    // 有写权限但此刻忙碌 → 也走文本降级（避免诱导用户在忙碌状态下触发带参写操作）
-    if (this.isSessionBusy(opts.sessionId)) return false;
     await this.invalidateOldCards(opts.channel, opts.sessionId);
     const messageId = await this.trySendInteraction(opts.channel, opts.channelId, opts.interaction, opts.replyCtx);
     if (!messageId) return false;
@@ -585,6 +583,10 @@ export class CommandHandler {
           { cmd: '/chatmode', label: '切换会话模式', desc: '控制 Agent 主动性（被动响应或主动推进）', next: { type: 'select', items: [
             { value: 'interactive', label: '交互模式', desc: '仅在收到消息时响应' },
             { value: 'proactive', label: '主动模式', desc: 'Agent 可主动推进任务' },
+          ] } },
+          { cmd: '/dispatch', label: '切换分发模式', desc: '控制群聊消息过滤（仅@提及或广播响应）', next: { type: 'select', items: [
+            { value: 'mention', label: '@ 提及', desc: '仅在被 @ 提及时响应' },
+            { value: 'all', label: '广播', desc: '响应群内所有消息' },
           ] } },
         ]
       });
@@ -758,6 +760,26 @@ export class CommandHandler {
         return { error: '无权限：群聊中仅管理员可切换' };
       }
       await this.sessionManager.updateSession(session.id, { sessionMode: arg });
+      this.eventBus.publish({ type: 'session:chat-mode-changed', sessionId: session.id, mode: arg, timestamp: Date.now() });
+      return { data: { mode: arg } };
+    }
+
+    if (cmdBase === '/dispatch') {
+      const currentMode = session.metadata?.dispatchMode || 'mention';
+      if (mode === 'query') {
+        return { data: { mode: currentMode } };
+      }
+      // update
+      if (!arg) return { error: '缺少目标模式' };
+      if (arg !== 'mention' && arg !== 'all') return { error: `无效模式: ${arg}` };
+      const identity = this.sessionManager.resolveIdentity(channel, userId);
+      const chatType = session.chatType || 'private';
+      if (chatType === 'group' && identity.role !== 'owner' && identity.role !== 'admin') {
+        return { error: '无权限：群聊中仅管理员可切换' };
+      }
+      const metadata = { ...(session.metadata || {}), dispatchMode: arg };
+      await this.sessionManager.updateSession(session.id, { metadata });
+      this.eventBus.publish({ type: 'session:dispatch-mode-changed', sessionId: session.id, mode: arg, timestamp: Date.now() });
       return { data: { mode: arg } };
     }
 
@@ -833,7 +855,7 @@ export class CommandHandler {
     if (normalizedContent.startsWith('/')) {
       // guest 在群聊和私聊中均可访问的只读命令：纯查询形态（带参写操作由各 handler 内部守卫拦截）
       const guestGroupCommands = [
-        '/status', '/help', '/evolhelp', '/check', '/chatmode',
+        '/status', '/help', '/evolhelp', '/check', '/chatmode', '/dispatch',
         '/model', '/setmodel', '/effort', '/agent', '/perm', '/activity', '/safe', '/stop',
         '/resume',
       ];
@@ -859,6 +881,7 @@ export class CommandHandler {
     // - 始终需要 idle（无参即写）：/new /clear /compact /repair /fork
     // - 仅带参时需要 idle（无参是列表/用法）：/session /bind /project /agent /rewind
     // - /chatmode：在 handler 内部自行做写操作的 idle 检查
+    // - /dispatch：在 handler 内部自行做写操作的 idle 检查
     // - /safe：已禁用 no-op，不再要求 idle
     const idleAlways = ['/new', '/clear', '/compact', '/repair', '/fork'];
     const idleWhenArg = ['/session', '/bind', '/project', '/agent', '/rewind'];
@@ -1040,6 +1063,7 @@ export class CommandHandler {
       // 会话模式
       if (isAdmin) {
         cmds.push({ command: '/chatmode', args: '[interactive|proactive]', description: '查看/切换会话模式（被动响应或主动推进）', category: '会话管理', roles: ['admin', 'owner'] });
+        cmds.push({ command: '/dispatch', args: '[mention|all]', description: '查看/切换群聊分发模式（仅@响应或广播响应）', category: '会话管理', roles: ['admin', 'owner'] });
       }
 
       // 交互
@@ -1919,7 +1943,56 @@ export class CommandHandler {
       }
 
       await this.sessionManager.updateSession(activeSession.id, { sessionMode: arg });
+      this.eventBus.publish({ type: 'session:chat-mode-changed', sessionId: activeSession.id, mode: arg, timestamp: Date.now() });
       return `✅ 会话模式已切换: ${arg}`;
+    }
+
+    // /dispatch 命令：查看/切换群聊分发模式（mention | all）
+    // - 查看：所有人可用
+    // - 设置：单聊任何角色可设置；群聊仅管理员可设置
+    if (normalizedContent === '/dispatch' || normalizedContent.startsWith('/dispatch ')) {
+      if (!activeSession) return '❌ 当前无活跃会话';
+
+      const arg = normalizedContent.slice(9).trim();
+      const currentMode = activeSession.metadata?.dispatchMode || 'mention';
+      const isPrivate = activeChatType !== 'group';
+
+      if (!arg) {
+        const lines: string[] = [];
+        lines.push(`📋 分发模式: ${currentMode}`);
+        if (isPrivate) {
+          lines.push('（私聊场景下分发模式不影响消息接收，所有消息都会处理）');
+        }
+        lines.push('');
+        lines.push('模式说明：');
+        lines.push('  • mention — 提及模式：仅当被@提及时响应群消息(含@all)');
+        lines.push('  • all     — 广播模式：群内所有消息都触发响应');
+        const canSwitch = isPrivate || isAdmin;
+        if (canSwitch) {
+          lines.push('');
+          lines.push('用法：');
+          lines.push('  /dispatch mention  — 切换到 @ 提及模式');
+          lines.push('  /dispatch all      — 切换到广播模式');
+        }
+        return lines.join('\n');
+      }
+
+      if (arg !== 'mention' && arg !== 'all') {
+        return `❌ 无效模式: ${arg}\n可选: mention / all\n用法: /dispatch <模式>`;
+      }
+
+      if (activeChatType === 'group' && !isAdmin) {
+        return '❌ 无权限：群聊中切换分发模式仅限管理员使用';
+      }
+
+      if (arg === currentMode) {
+        return `📋 当前已是 ${arg}`;
+      }
+
+      const metadata = { ...(activeSession.metadata || {}), dispatchMode: arg };
+      await this.sessionManager.updateSession(activeSession.id, { metadata });
+      this.eventBus.publish({ type: 'session:dispatch-mode-changed', sessionId: activeSession.id, mode: arg, timestamp: Date.now() });
+      return `✅ 分发模式已切换: ${currentMode} → ${arg}`;
     }
 
     // /stop 命令：中断当前任务
@@ -2092,7 +2165,9 @@ export class CommandHandler {
 
       const lines: string[] = [];
       const sessionMode = session.sessionMode || 'interactive';
+      const dispatchMode = session.metadata?.dispatchMode || 'mention';
       const chatModeLine = `会话模式: ${sessionMode}`;
+      const dispatchModeLine = session.chatType === 'group' ? `分发模式: ${dispatchMode}` : null;
       if (isAdmin) {
         lines.push(
           `📊 ${isThread ? '话题' : '会话'}状态 (Agent: ${agentName})：`,
@@ -2101,6 +2176,7 @@ export class CommandHandler {
           `项目路径: ${session.projectPath}`,
           `会话状态: ${sessionStatus}`,
           chatModeLine,
+          ...(dispatchModeLine ? [dispatchModeLine] : []),
           `会话轮数: ${sessionTurns}`,
         );
         if (health.consecutiveErrors > 0) {
@@ -2118,6 +2194,7 @@ export class CommandHandler {
           `渠道: ${channel} / 项目: ${projectName} / ${session.agentId}会话`,
           `状态: ${sessionStatus}`,
           chatModeLine,
+          ...(dispatchModeLine ? [dispatchModeLine] : []),
           `会话轮数: ${sessionTurns}`,
           `最后活跃: ${timeStr}`
         );

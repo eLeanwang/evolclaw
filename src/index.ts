@@ -511,6 +511,15 @@ async function main() {
           return session?.sessionMode;
         });
       }
+
+      // dispatch 模式本地覆盖：注入 dispatchMode 查询器
+      if (typeof inst.channel.setDispatchModeResolver === 'function') {
+        const chName = inst.adapter.channelName;
+        inst.channel.setDispatchModeResolver(async (channelId: string) => {
+          const session = await sessionManager.getActiveSession(chName, channelId);
+          return session?.metadata?.dispatchMode;
+        });
+      }
     }
 
     if (channelType === 'dingtalk') {

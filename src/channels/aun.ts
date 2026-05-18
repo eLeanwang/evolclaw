@@ -310,6 +310,7 @@ export class AUNChannel {
   private static readonly E2EE_PROBE_TTL = 10 * 60 * 1000; // 10min
   private plaintextRecv = 0;
   private sessionModeResolver?: (channelId: string) => Promise<string | undefined>;
+  private dispatchModeResolver?: (channelId: string) => Promise<string | undefined>;
 
   private static readonly PROACTIVE_ALLOW_TYPES = new Set([
     'text', 'quote', 'image', 'video', 'voice', 'file', 'json',
@@ -979,8 +980,12 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     const msgEncrypted = !!(msg.e2ee);
     if (!msgEncrypted) this.plaintextRecv++;
 
-    // dispatch_mode from server tells agent how to work in this group
-    const dispatchMode: string = msg.dispatch_mode ?? (payload as any)?.dispatch_mode ?? 'mention';
+    // dispatch_mode: 本地设置优先，fallback 到服务器参数
+    const serverDispatchMode: string = msg.dispatch_mode ?? (payload as any)?.dispatch_mode ?? 'mention';
+    const localDispatchMode = this.dispatchModeResolver
+      ? await this.dispatchModeResolver(groupId).catch(() => undefined)
+      : undefined;
+    const dispatchMode = localDispatchMode || serverDispatchMode;
 
     const mentionedSelf = this._aid
       ? (this.hasExplicitMention(text, this._aid) || payloadMentions.includes(this._aid))
@@ -1427,6 +1432,10 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
 
   setSessionModeResolver(resolver: (channelId: string) => Promise<string | undefined>): void {
     this.sessionModeResolver = resolver;
+  }
+
+  setDispatchModeResolver(resolver: (channelId: string) => Promise<string | undefined>): void {
+    this.dispatchModeResolver = resolver;
   }
 
   onRecall(handler: (messageId: string) => void): void {

@@ -2,7 +2,7 @@ import path from 'path';
 import fs from 'fs';
 import { logger } from '../utils/logger.js';
 import { saveAgent } from '../config-store.js';
-import { formatChannelKey } from './channel-key.js';
+import { formatChannelKey, tryParseChannelKey } from './channel-key.js';
 import { agentPersonalDir } from '../paths.js';
 import type {
   AgentConfig,
@@ -118,25 +118,53 @@ export class EvolAgent {
     return this.merged.channels.find(c => this.effectiveChannelName(c.type, c.name) === channelKey) ?? null;
   }
 
-  // ── Owner / Admin（per-channel-instance）─────────────────────────────
+  // ── Owner / Admin（per-channel-instance；AUN 走顶层 owners/admins）──────
+
+  /**
+   * AUN channel 是隐式的，不在 channels[] 里——其 owner/admin 存于 EvolAgent 顶层
+   * `owners`/`admins`（config 加载时由 aunBlock.owner/admins 收集而来）。
+   */
+  private isAunChannelKey(channelKey: string): boolean {
+    const parsed = tryParseChannelKey(channelKey);
+    return parsed?.type === 'aun' && parsed.aid === this.aid;
+  }
 
   getOwner(channelKey: string): string | undefined {
+    if (this.isAunChannelKey(channelKey)) {
+      return this.merged.owners?.[0];
+    }
     const inst = this.findChannelInstance(channelKey);
     return inst?.owners?.[0];
   }
 
   isOwner(channelKey: string, userId: string): boolean {
+    if (this.isAunChannelKey(channelKey)) {
+      return this.merged.owners?.includes(userId) ?? false;
+    }
     const inst = this.findChannelInstance(channelKey);
     return inst?.owners?.includes(userId) ?? false;
   }
 
   isAdmin(channelKey: string, userId: string): boolean {
     if (this.isOwner(channelKey, userId)) return true;
+    if (this.isAunChannelKey(channelKey)) {
+      return this.merged.admins?.includes(userId) ?? false;
+    }
     const inst = this.findChannelInstance(channelKey);
     return inst?.admins?.includes(userId) ?? false;
   }
 
   setOwner(channelKey: string, userId: string): void {
+    // AUN：写到 rawAgent 顶层 owners（merged 也指向同一份引用）
+    if (this.isAunChannelKey(channelKey)) {
+      if (!this.rawAgent.owners) this.rawAgent.owners = [];
+      if (!this.rawAgent.owners.includes(userId)) this.rawAgent.owners.push(userId);
+      // merged.owners 是从 rawAgent.owners 派生的拷贝；同步内存视图避免重新 merge
+      if (!this.merged.owners) this.merged.owners = [];
+      if (!this.merged.owners.includes(userId)) this.merged.owners.push(userId);
+      this.persist();
+      return;
+    }
     const inst = this.findRawChannelInstance(channelKey);
     if (!inst) {
       logger.warn(`[EvolAgent ${this.aid}] setOwner: channel "${channelKey}" not found`);
