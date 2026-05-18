@@ -1,5 +1,6 @@
 import { query, forkSession as sdkForkSession, getSessionMessages as sdkGetSessionMessages } from '@anthropic-ai/claude-agent-sdk';
-import { ensureDir, resolveAnthropicConfig } from '../config.js';
+import { ensureDir } from '../utils/ensure-dir.js';
+import { resolveAnthropicConfig } from '../baseagents/resolve.js';
 import type { Config, ChannelAdapter, ReplyContext, InteractionRequest, Message } from '../types.js';
 import { DEFAULT_PERMISSION_MODE } from '../types.js';
 import type { PermissionGateway, PermissionDecision } from '../core/permission.js';
@@ -384,7 +385,7 @@ export class AgentRunner {
 
       const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
 
-      // evolclaw.json 显式配置优先，不被 settings.json 覆盖
+      // agent config 显式配置优先，不被 settings.json 覆盖
       const configModel = this.config?.agents?.claude?.model;
       if (!configModel && settings.model && settings.model !== this.model) {
         logger.info(`[AgentRunner] Synced model from ~/.claude/settings.json: ${settings.model}`);
@@ -1281,24 +1282,18 @@ export class AgentRunner {
 export class ClaudeAgentPlugin implements AgentPlugin {
   readonly name = 'claude';
 
-  isEnabled(_globalConfig: Config, agent: import('../core/evolagent.js').EvolAgent): boolean {
-    // Only instantiate this baseagent for agents that declare it.
-    return !!agent.config.agents?.claude;
+  isEnabled(agent: import('../core/evolagent.js').EvolAgent): boolean {
+    return !!agent.config.baseagents?.claude;
   }
 
-  createAgent(globalConfig: Config, agent: import('../core/evolagent.js').EvolAgent, callbacks: AgentCallbacks): AgentInstance | null {
-    // Per-agent override: read from agent.json's agents.claude block first.
-    const override = agent.config.agents?.claude as
+  createAgent(agent: import('../core/evolagent.js').EvolAgent, callbacks: AgentCallbacks): AgentInstance | null {
+    const override = agent.config.baseagents?.claude as
       | { apiKey?: string; baseUrl?: string; model?: string; effort?: 'low' | 'medium' | 'high' | 'max'; pathToClaudeCodeExecutable?: string }
       | undefined;
-    const anthropic = resolveAnthropicConfig(globalConfig, override);
-    // Merge per-agent claude block into config so runner reads useSettingSources etc.
+    const syntheticConfig = { agents: { claude: override } } as Config;
+    const anthropic = resolveAnthropicConfig(syntheticConfig, override);
     const merged: Config = {
-      ...globalConfig,
-      agents: {
-        ...(globalConfig.agents || {}),
-        claude: { ...(globalConfig.agents?.claude || {}), ...(override || {}) },
-      },
+      agents: { claude: { ...(override || {}) } },
     } as Config;
     const agentRunner = new AgentRunner(
       anthropic.apiKey,

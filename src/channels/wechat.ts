@@ -844,7 +844,7 @@ export class WechatChannel {
 // Plugin implementation
 import type { ChannelPlugin, ChannelInstance } from '../core/channel-loader.js';
 import type { Config, WechatChannelConfig } from '../types.js';
-import { normalizeChannelInstances, getChannelShowActivities } from '../config.js';
+import { normalizeChannelInstances, getChannelShowActivities } from '../utils/channel-helpers.js';
 
 export class WechatChannelPlugin implements ChannelPlugin {
   readonly name = 'wechat';

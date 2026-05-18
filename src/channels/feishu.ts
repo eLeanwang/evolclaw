@@ -1138,7 +1138,7 @@ export function hasMarkdownSyntax(text: string): boolean {
 // Plugin implementation
 import type { ChannelPlugin, ChannelInstance } from '../core/channel-loader.js';
 import type { Config, FeishuChannelConfig } from '../types.js';
-import { normalizeChannelInstances, getChannelShowActivities } from '../config.js';
+import { normalizeChannelInstances, getChannelShowActivities } from '../utils/channel-helpers.js';
 
 export class FeishuChannelPlugin implements ChannelPlugin {
   readonly name = 'feishu';

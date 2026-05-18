@@ -9,7 +9,7 @@
 import type { Config } from '../types.js';
 import type { AgentPlugin, AgentInstance, AgentCallbacks } from '../core/agent-loader.js';
 import type { AgentEvent, AgentRunnerFull, ModelSwitcher, PermissionModeInfo } from './claude-runner.js';
-import { resolveOpenaiConfig } from '../config.js';
+import { resolveOpenaiConfig } from '../baseagents/resolve.js';
 import { logger } from '../utils/logger.js';
 import fs from 'fs';
 import path from 'path';
@@ -357,26 +357,23 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
 export class CodexAgentPlugin implements AgentPlugin {
   readonly name = 'codex';
 
-  isEnabled(globalConfig: Config, agent: import('../core/evolagent.js').EvolAgent): boolean {
-    if (!agent.config.agents?.codex) return false;
+  isEnabled(agent: import('../core/evolagent.js').EvolAgent): boolean {
+    if (!agent.config.baseagents?.codex) return false;
     try {
-      const override = agent.config.agents.codex as any;
-      const resolved = resolveOpenaiConfig(globalConfig, override);
+      const override = agent.config.baseagents.codex as any;
+      const syntheticConfig = { agents: { codex: override } } as Config;
+      const resolved = resolveOpenaiConfig(syntheticConfig, override);
       return !!resolved.apiKey;
     } catch {
       return false;
     }
   }
 
-  createAgent(globalConfig: Config, agent: import('../core/evolagent.js').EvolAgent, callbacks: AgentCallbacks): AgentInstance | null {
-    const override = agent.config.agents?.codex as any;
-    // Synthesize a per-agent config view so CodexRunner sees its own credentials.
+  createAgent(agent: import('../core/evolagent.js').EvolAgent, callbacks: AgentCallbacks): AgentInstance | null {
+    const override = agent.config.baseagents?.codex as any;
+    const syntheticConfig = { agents: { codex: override } } as Config;
     const merged: Config = {
-      ...globalConfig,
-      agents: {
-        ...(globalConfig.agents || {}),
-        codex: { ...(globalConfig.agents?.codex || {}), ...(override || {}) },
-      },
+      agents: { codex: { ...(override || {}) } },
     } as Config;
     return { evolagentName: agent.name, baseagent: 'codex', agent: new CodexRunner(merged, callbacks) };
   }

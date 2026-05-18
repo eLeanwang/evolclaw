@@ -14,7 +14,7 @@ import crypto from 'crypto';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { resolvePaths } from '../paths.js';
-import { normalizeChannelInstances } from '../config.js';
+import { normalizeChannelInstances } from './channel-helpers.js';
 import { selectInstance, type InstanceChoice } from './init.js';
 import { isWindows } from './cross-platform.js';
 import {
@@ -280,12 +280,12 @@ export async function runFeishuQrFlow(): Promise<{ appId: string; appSecret: str
 export async function cmdInitFeishu(): Promise<void> {
   const p = resolvePaths();
 
-  if (!fs.existsSync(p.config)) {
+  if (!fs.existsSync(p.defaultsConfig)) {
     console.log(`❌ 配置文件不存在，请先运行 evolclaw init`);
     return;
   }
 
-  const config = JSON.parse(fs.readFileSync(p.config, 'utf-8'));
+  const config = JSON.parse(fs.readFileSync(p.defaultsConfig, 'utf-8'));
 
   // Normalize existing instances and filter out placeholders
   const allInstances = normalizeChannelInstances(config.channels?.feishu, 'feishu');
@@ -384,7 +384,7 @@ export async function cmdInitFeishu(): Promise<void> {
 
   if (!config.channels.defaultChannel) config.channels.defaultChannel = 'feishu';
 
-  fs.writeFileSync(p.config, JSON.stringify(config, null, 2) + '\n');
+  fs.writeFileSync(p.defaultsConfig, JSON.stringify(config, null, 2) + '\n');
 
   console.log(`\n✅ 飞书连接成功！`);
   console.log(`  App ID: ${result.appId}`);
@@ -397,7 +397,7 @@ export async function cmdInitFeishu(): Promise<void> {
   if (choice) {
     console.log(`  实例: ${choice.name} (${choice.action === 'add' ? '新增' : '覆盖'})`);
   }
-  console.log(`  配置已写入: ${p.config}`);
+  console.log(`  配置已写入: ${p.defaultsConfig}`);
   console.log(`\n现在可以启动服务: evolclaw restart`);
 }
 
@@ -515,12 +515,12 @@ export async function runWechatQrFlow(): Promise<{ baseUrl: string; token: strin
 export async function cmdInitWechat(): Promise<void> {
   const p = resolvePaths();
 
-  if (!fs.existsSync(p.config)) {
+  if (!fs.existsSync(p.defaultsConfig)) {
     console.log(`❌ 配置文件不存在，请先运行 evolclaw init`);
     return;
   }
 
-  const config = JSON.parse(fs.readFileSync(p.config, 'utf-8'));
+  const config = JSON.parse(fs.readFileSync(p.defaultsConfig, 'utf-8'));
 
   // Normalize existing instances and filter out placeholders
   const allInstances = normalizeChannelInstances(config.channels?.wechat, 'wechat');
@@ -641,7 +641,7 @@ export async function cmdInitWechat(): Promise<void> {
 
         if (!config.channels.defaultChannel) config.channels.defaultChannel = 'wechat';
 
-        fs.writeFileSync(p.config, JSON.stringify(config, null, 2) + '\n');
+        fs.writeFileSync(p.defaultsConfig, JSON.stringify(config, null, 2) + '\n');
 
         console.log(`\n✅ 微信连接成功！`);
         console.log(`  Bot ID: ${status.ilink_bot_id}`);
@@ -649,7 +649,7 @@ export async function cmdInitWechat(): Promise<void> {
         if (choice) {
           console.log(`  实例: ${choice.name} (${choice.action === 'add' ? '新增' : '覆盖'})`);
         }
-        console.log(`  配置已写入: ${p.config}`);
+        console.log(`  配置已写入: ${p.defaultsConfig}`);
         console.log(`\n现在可以启动服务: evolclaw restart`);
         return;
       }
@@ -812,12 +812,12 @@ export async function setupAunAid(rl: readline.Interface, _config: any): Promise
 export async function cmdInitAun(): Promise<void> {
   const p = resolvePaths();
 
-  if (!fs.existsSync(p.config)) {
+  if (!fs.existsSync(p.defaultsConfig)) {
     console.log('❌ 配置文件不存在，请先运行 evolclaw init');
     return;
   }
 
-  const config = JSON.parse(fs.readFileSync(p.config, 'utf-8'));
+  const config = JSON.parse(fs.readFileSync(p.defaultsConfig, 'utf-8'));
 
   // Normalize existing instances and filter out placeholders
   const allInstances = normalizeChannelInstances(config.channels?.aun, 'aun');
@@ -886,7 +886,7 @@ export async function cmdInitAun(): Promise<void> {
 
     if (!config.channels.defaultChannel) config.channels.defaultChannel = 'aun';
 
-    fs.writeFileSync(p.config, JSON.stringify(config, null, 2) + '\n');
+    fs.writeFileSync(p.defaultsConfig, JSON.stringify(config, null, 2) + '\n');
     console.log('\n✓ AUN 配置已写入');
   } finally {
     rl.close();
@@ -1056,12 +1056,12 @@ export async function runDingtalkQrFlowSimple(): Promise<{ clientId: string; cli
 export async function cmdInitDingtalk(): Promise<void> {
   const p = resolvePaths();
 
-  if (!fs.existsSync(p.config)) {
+  if (!fs.existsSync(p.defaultsConfig)) {
     console.log('❌ 配置文件不存在，请先运行 evolclaw init');
     return;
   }
 
-  const config = JSON.parse(fs.readFileSync(p.config, 'utf-8'));
+  const config = JSON.parse(fs.readFileSync(p.defaultsConfig, 'utf-8'));
 
   // Normalize existing instances and filter out placeholders
   const allInstances = normalizeChannelInstances(config.channels?.dingtalk, 'dingtalk');
@@ -1161,14 +1161,14 @@ export async function cmdInitDingtalk(): Promise<void> {
 
   if (!config.channels.defaultChannel) config.channels.defaultChannel = 'dingtalk';
 
-  fs.writeFileSync(p.config, JSON.stringify(config, null, 2) + '\n');
+  fs.writeFileSync(p.defaultsConfig, JSON.stringify(config, null, 2) + '\n');
 
   console.log(`\n✅ 钉钉连接成功！`);
   console.log(`  Client ID: ${result.clientId}`);
   if (choice) {
     console.log(`  实例: ${choice.name} (${choice.action === 'add' ? '新增' : '覆盖'})`);
   }
-  console.log(`  配置已写入: ${p.config}`);
+  console.log(`  配置已写入: ${p.defaultsConfig}`);
   console.log(`\n现在可以启动服务: evolclaw restart`);
 }
 
@@ -1338,12 +1338,12 @@ export async function runQQBotBindFlowSimple(): Promise<{ appId: string; clientS
 export async function cmdInitQQBot(): Promise<void> {
   const p = resolvePaths();
 
-  if (!fs.existsSync(p.config)) {
+  if (!fs.existsSync(p.defaultsConfig)) {
     console.log('❌ 配置文件不存在，请先运行 evolclaw init');
     return;
   }
 
-  const config = JSON.parse(fs.readFileSync(p.config, 'utf-8'));
+  const config = JSON.parse(fs.readFileSync(p.defaultsConfig, 'utf-8'));
 
   // Normalize existing instances and filter out placeholders
   const allInstances = normalizeChannelInstances(config.channels?.qqbot, 'qqbot');
@@ -1443,14 +1443,14 @@ export async function cmdInitQQBot(): Promise<void> {
 
   if (!config.channels.defaultChannel) config.channels.defaultChannel = 'qqbot';
 
-  fs.writeFileSync(p.config, JSON.stringify(config, null, 2) + '\n');
+  fs.writeFileSync(p.defaultsConfig, JSON.stringify(config, null, 2) + '\n');
 
   console.log(`\n✅ QQ 机器人绑定成功！`);
   console.log(`  App ID: ${result.appId}`);
   if (choice) {
     console.log(`  实例: ${choice.name} (${choice.action === 'add' ? '新增' : '覆盖'})`);
   }
-  console.log(`  配置已写入: ${p.config}`);
+  console.log(`  配置已写入: ${p.defaultsConfig}`);
   console.log(`\n现在可以启动服务: evolclaw restart`);
 }
 
@@ -1459,12 +1459,12 @@ export async function cmdInitQQBot(): Promise<void> {
 export async function cmdInitWecom(): Promise<void> {
   const p = resolvePaths();
 
-  if (!fs.existsSync(p.config)) {
+  if (!fs.existsSync(p.defaultsConfig)) {
     console.log('❌ 配置文件不存在，请先运行 evolclaw init');
     return;
   }
 
-  const config = JSON.parse(fs.readFileSync(p.config, 'utf-8'));
+  const config = JSON.parse(fs.readFileSync(p.defaultsConfig, 'utf-8'));
 
   // Normalize existing instances and filter out placeholders
   const allInstances = normalizeChannelInstances(config.channels?.wecom, 'wecom');
@@ -1549,14 +1549,14 @@ export async function cmdInitWecom(): Promise<void> {
 
   if (!config.channels.defaultChannel) config.channels.defaultChannel = 'wecom';
 
-  fs.writeFileSync(p.config, JSON.stringify(config, null, 2) + '\n');
+  fs.writeFileSync(p.defaultsConfig, JSON.stringify(config, null, 2) + '\n');
 
   console.log(`\n✅ 企业微信 AI Bot 配置成功！`);
   console.log(`  Bot ID: ${result.botId}`);
   if (choice) {
     console.log(`  实例: ${choice.name} (${choice.action === 'add' ? '新增' : '覆盖'})`);
   }
-  console.log(`  配置已写入: ${p.config}`);
+  console.log(`  配置已写入: ${p.defaultsConfig}`);
   console.log(`\n现在可以启动服务: evolclaw restart`);
 }
 
@@ -1564,10 +1564,10 @@ export async function cmdInitWecom(): Promise<void> {
 
 /**
  * Returns the credential collector function for a given channel type.
- * Used by `evolclaw agent new` to collect credentials without writing to evolclaw.json.
+ * Used by `evolclaw agent new` to collect credentials for agent config.
  *
  * Each collector is an async function that runs the interactive flow and returns
- * the credential object (same shape as a channel instance in evolclaw.json),
+ * the credential object (same shape as a channel instance in config.json),
  * or null if the user cancels.
  */
 export type ChannelCredentialCollector = () => Promise<Record<string, any> | null>;

@@ -8,6 +8,7 @@
 
 import type { ChannelAdapter, ChannelPolicy, ChannelOptions } from '../types.js';
 import type { Config } from '../types.js';
+import type { EvolAgent } from './evolagent.js';
 import { logger } from '../utils/logger.js';
 
 /**
@@ -75,6 +76,44 @@ export class ChannelLoader {
     logger.debug(`Registered channel plugin: ${plugin.name}`);
   }
 
+  /**
+   * 新结构入口：从 EvolAgent 的 channels[] 列表创建 channel 实例。
+   *
+   * 内部把 ChannelInstance[] 翻成各 plugin 期望的 dict 形态（`{ type: [instances...] }`），
+   * 然后调用现有 plugin.createChannels / createChannel。
+   *
+   * 当所有 channel plugin 重写为直接吃 ChannelInstance[] 后，本方法可简化。
+   */
+  async createForAgent(agent: EvolAgent): Promise<ChannelInstance[]> {
+    const rewrittenChannels: Record<string, any[]> = {};
+
+    // AUN channel 从 agent.aid 隐式创建——不需要在 channels[] 里显式声明
+    const aunEffName = agent.effectiveChannelName('aun', 'main');
+    rewrittenChannels['aun'] = [{
+      type: 'aun',
+      name: aunEffName,
+      aid: agent.aid,
+      enabled: true,
+      agentName: agent.aid,
+    }];
+
+    // 其它 channels（非 AUN）从 config.channels[] 取
+    for (const inst of agent.config.channels) {
+      if (inst.type === 'aun') continue; // 跳过显式声明的 AUN（已隐式处理）
+      const effName = agent.effectiveChannelName(inst.type, inst.name);
+      const rewritten: any = { ...inst, name: effName, agentName: agent.aid };
+      (rewrittenChannels[inst.type] ??= []).push(rewritten);
+    }
+
+    const syntheticConfig = {
+      agents: agent.config.baseagents,
+      channels: rewrittenChannels,
+      projects: agent.config.projects,
+    } as any as Config;
+
+    return this.createAll(syntheticConfig);
+  }
+
   async createAll(config: Config): Promise<ChannelInstance[]> {
     const instances: ChannelInstance[] = [];
 
@@ -102,21 +141,21 @@ export class ChannelLoader {
     return instances;
   }
 
-  async connectAll(instances: ChannelInstance[]): Promise<string[]> {
-    const results = await Promise.allSettled(
-      instances.map(async (inst) => {
+  async connectAll(instances: ChannelInstance[], delayMs = 150): Promise<string[]> {
+    const connected: string[] = [];
+    const failed: any[] = [];
+
+    for (const inst of instances) {
+      try {
         await inst.connect();
-        return inst.adapter.channelName;
-      })
-    );
-
-    const connected = results
-      .filter((r) => r.status === 'fulfilled')
-      .map((r) => (r as PromiseFulfilledResult<string>).value);
-
-    const failed = results
-      .filter((r) => r.status === 'rejected')
-      .map((r) => (r as PromiseRejectedResult).reason);
+        connected.push(inst.adapter.channelName);
+      } catch (e) {
+        failed.push(e);
+      }
+      if (delayMs > 0 && inst !== instances[instances.length - 1]) {
+        await new Promise(r => setTimeout(r, delayMs));
+      }
+    }
 
     if (failed.length > 0) {
       logger.warn(`Some channels failed to connect:`, failed);

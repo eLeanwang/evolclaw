@@ -1,16 +1,30 @@
 import fs from 'fs';
 import path from 'path';
-import { EvolAgent, validateEvolAgentConfig } from './evolagent.js';
+import { EvolAgent } from './evolagent.js';
 import { logger } from '../utils/logger.js';
-import type { Config, AgentInfo, EvolAgentConfig } from '../types.js';
+import {
+  loadDefaults,
+  loadAllAgents,
+  mergeForAgent,
+  ensureAgentDirSkeleton,
+  loadAgent,
+  validateAgentConfig,
+} from '../config-store.js';
+import type {
+  AgentInfo,
+  AgentConfig,
+  MergedAgentConfig,
+  DefaultsConfig,
+  ChannelInstance,
+} from '../types.js';
 
 // ── Channel Fingerprint ────────────────────────────────────────────────────
-// 为每个 channel 实例提取一个全局唯一标识，用于冲突检测和路由索引。
+// 用于检测多 agent 之间复用同一外部凭证的冲突（appId、aid、token 等）。
 // 格式：{type}:{primaryKey}
 
 const PRIMARY_KEY_MAP: Record<string, string> = {
   feishu: 'appId',
-  aun: 'aid',
+  aun: '__aid__', // AUN 实例的"凭证"就是 agent 自身 aid
   wechat: 'token',
   wecom: 'botId',
   dingtalk: 'clientId',
@@ -19,11 +33,13 @@ const PRIMARY_KEY_MAP: Record<string, string> = {
 
 export function extractFingerprint(
   channelType: string,
-  instance: Record<string, any>
+  instance: ChannelInstance,
+  agentAid: string
 ): string | null {
   const keyField = PRIMARY_KEY_MAP[channelType];
   if (!keyField) return null;
-  const value = instance[keyField];
+  if (keyField === '__aid__') return `${channelType}:${agentAid}`;
+  const value = (instance as any)[keyField];
   if (!value || typeof value !== 'string') return null;
   return `${channelType}:${value}`;
 }
@@ -31,42 +47,36 @@ export function extractFingerprint(
 export interface DuplicateReport {
   fingerprint: string;
   channelType: string;
-  instances: string[]; // instance names
+  agents: Array<{ aid: string; channelName: string }>;
 }
 
-export function detectDuplicates(config: Config): DuplicateReport[] {
-  const seen = new Map<string, { channelType: string; instances: string[] }>();
+/**
+ * 跨 agent 检查同一外部凭证是否被多次声明（飞书 appId、AUN aid 等）。
+ */
+export function detectDuplicates(agents: EvolAgent[]): DuplicateReport[] {
+  const seen = new Map<string, DuplicateReport['agents']>();
 
-  const channels = (config.channels as any) || {};
-  for (const [type, raw] of Object.entries(channels)) {
-    if (type === 'defaultChannel') continue;
-    const instances = Array.isArray(raw) ? raw : [raw];
-    for (const inst of instances) {
-      if (!inst || typeof inst !== 'object') continue;
-      const fingerprint = extractFingerprint(type, inst as any);
-      if (!fingerprint) continue;
-      const instName = (inst as any).name ?? type;
-      const entry = seen.get(fingerprint);
-      if (entry) {
-        entry.instances.push(instName);
-      } else {
-        seen.set(fingerprint, { channelType: type, instances: [instName] });
-      }
+  for (const agent of agents) {
+    for (const inst of agent.config.channels) {
+      const fp = extractFingerprint(inst.type, inst, agent.aid);
+      if (!fp) continue;
+      const arr = seen.get(fp) ?? [];
+      arr.push({ aid: agent.aid, channelName: agent.effectiveChannelName(inst.type, inst.name) });
+      seen.set(fp, arr);
     }
   }
 
-  const duplicates: DuplicateReport[] = [];
-  for (const [fingerprint, entry] of seen) {
-    if (entry.instances.length > 1) {
-      duplicates.push({
-        fingerprint,
-        channelType: entry.channelType,
-        instances: entry.instances,
-      });
+  const out: DuplicateReport[] = [];
+  for (const [fp, arr] of seen) {
+    if (arr.length > 1) {
+      const [type] = fp.split(':');
+      out.push({ fingerprint: fp, channelType: type, agents: arr });
     }
   }
-  return duplicates;
+  return out;
 }
+
+// ── Reload hooks（unchanged 接口，hooks 调用方还没切到新结构）──
 
 export interface ReloadHooks {
   drainChannel(channelName: string): Promise<void>;
@@ -75,295 +85,233 @@ export interface ReloadHooks {
 }
 
 /**
- * Plug-in for writing back to the global config (evolclaw.json) when
- * EvolAgentRegistry is asked to mutate a channel that belongs to the
- * DefaultAgent. Named EvolAgents persist directly to their own agent.json
- * via `EvolAgent.setOwner` / `EvolAgent.setShowActivities`.
+ * 历史接口——新结构下所有写入都直接落到 agents/<aid>/config.json，不再需要
+ * globalWriter。本接口保留至阶段 2c 删除；当前实现：no-op + warning。
  */
 export interface GlobalConfigWriter {
   setOwner(channelName: string, userId: string): void;
   setShowActivities?(channelName: string, mode: 'all' | 'dm-only' | 'owner-dm-only' | 'none'): void;
 }
 
+// ── Registry ───────────────────────────────────────────────────────────────
+
 export class EvolAgentRegistry {
   private agents: Map<string, EvolAgent> = new Map();
-  private defaultAgent: EvolAgent | null = null;
+  /** channel key (`<aid>#<type>#<name>`) → agent aid */
   private channelIndex: Map<string, string> = new Map();
-  private globalWriter?: GlobalConfigWriter;
+  /** 启动期被 ConfigStore 跳过的目录（命名非法 / 缺 config.json / 校验失败等） */
+  private skipped: Array<{ dirName: string; reason: string }> = [];
 
-  constructor(private agentsDir: string, globalWriter?: GlobalConfigWriter) {
-    this.globalWriter = globalWriter;
+  /**
+   * agentsDir 参数保留作 ctor 兼容，但实际加载走 ConfigStore（基于 paths.ts）。
+   * globalWriter 已废弃——构造期接受但忽略，阶段 2c 删除。
+   */
+  constructor(private _agentsDir: string, _globalWriter?: GlobalConfigWriter) {
+    void _globalWriter;
   }
 
-  /** Late-binding setter for tests / index.ts wiring order. */
-  setGlobalWriter(writer: GlobalConfigWriter): void {
-    this.globalWriter = writer;
+  setGlobalWriter(_writer: GlobalConfigWriter): void {
+    void _writer; // no-op，废弃 API
   }
 
-  loadAll(globalConfig: Config): void {
+  /**
+   * 扫描 agents/ 目录加载所有 self-agent 配置（合并 defaults），构造 EvolAgent
+   * 实例并建立 channel 路由索引。
+   *
+   * `globalConfig` 参数保留作签名兼容，但被忽略——defaults 由 ConfigStore 自己加载。
+   */
+  loadAll(_globalConfig?: unknown): void {
+    void _globalConfig;
     this.agents.clear();
     this.channelIndex.clear();
+    this.skipped = [];
 
-    const files = fs.existsSync(this.agentsDir)
-      ? fs.readdirSync(this.agentsDir).filter(f => f.endsWith('.json'))
-      : [];
+    const defaults = loadDefaults();
+    const { agents: rawAgents, skipped } = loadAllAgents();
+    this.skipped = skipped;
 
-    for (const file of files) {
-      const fullPath = path.join(this.agentsDir, file);
+    for (const raw of rawAgents) {
       try {
-        const raw = JSON.parse(fs.readFileSync(fullPath, 'utf-8'));
-        const validation = validateEvolAgentConfig(raw);
-        if (!validation.valid) {
-          const name = raw?.name || path.basename(file, '.json');
-          const errorAgent = new EvolAgent(fullPath, { ...raw, name } as EvolAgentConfig);
-          errorAgent.status = 'error';
-          errorAgent.error = validation.errors.join('; ');
-          this.agents.set(name, errorAgent);
-          logger.warn(`[EvolAgentRegistry] ${file}: ${validation.errors.join('; ')}`);
-          continue;
-        }
-        const agent = new EvolAgent(fullPath, raw as EvolAgentConfig);
-        this.agents.set(agent.name, agent);
+        const merged = mergeForAgent(raw, defaults);
+        const agent = new EvolAgent(raw, merged);
+        ensureAgentDirSkeleton(raw.aid);
+        this.agents.set(agent.aid, agent);
       } catch (e) {
-        logger.warn(`[EvolAgentRegistry] Failed to load ${file}: ${e}`);
+        logger.warn(`[EvolAgentRegistry] failed to construct agent ${raw.aid}: ${e}`);
       }
     }
 
-    this.defaultAgent = this.buildDefaultAgent(globalConfig);
     this.detectAndFlagConflicts();
     this.buildChannelIndex();
   }
 
-  private buildDefaultAgent(globalConfig: Config): EvolAgent {
-    const agents: any = globalConfig.agents || {};
-    const defaultName = agents.defaultAgent || 'claude';
-    // Include ALL declared baseagents (not just defaultName) so that
-    // AgentLoader creates runners for each, enabling /agent switching.
-    const baseagentBlock: Record<string, any> = {};
-    const KNOWN_BASEAGENTS = ['claude', 'codex', 'gemini', 'hermes'];
-    for (const ba of KNOWN_BASEAGENTS) {
-      if (agents[ba] !== undefined) baseagentBlock[ba] = agents[ba];
-    }
-    if (Object.keys(baseagentBlock).length === 0) {
-      baseagentBlock[defaultName] = agents[defaultName] || {};
-    }
-    const cfg: EvolAgentConfig = {
-      name: '[default]',
-      enabled: true,
-      agents: baseagentBlock,
-      channels: (globalConfig.channels as any) || {},
-      projects: { defaultPath: globalConfig.projects?.defaultPath || process.cwd() },
-      chatmode: (globalConfig as any).chatmode,
-    };
-    return new EvolAgent(null, cfg, { isDefault: true });
-  }
-
   private detectAndFlagConflicts(): void {
-    const seen = new Map<string, Array<{ agent: string; instance: string }>>();
-
-    const record = (agentName: string, channelsBlock: any): void => {
-      for (const [type, raw] of Object.entries(channelsBlock || {})) {
-        if (type === 'defaultChannel') continue;
-        const instances = Array.isArray(raw) ? raw : [raw];
-        for (const inst of instances) {
-          if (!inst || typeof inst !== 'object') continue;
-          const fp = extractFingerprint(type, inst as any);
-          if (!fp) continue;
-          const instName = (inst as any).name ?? type;
-          const entry = seen.get(fp) || [];
-          entry.push({ agent: agentName, instance: instName });
-          seen.set(fp, entry);
-        }
-      }
-    };
-
-    for (const agent of this.agents.values()) {
-      if (agent.status === 'error') continue;
-      record(agent.name, agent.config.channels);
-    }
-    if (this.defaultAgent) {
-      record(this.defaultAgent.name, this.defaultAgent.config.channels);
-    }
-
-    for (const [_fp, occurrences] of seen) {
-      if (occurrences.length <= 1) continue;
-      const msg = `Channel conflict: fingerprint claimed by ${occurrences.map(o => `${o.agent}(${o.instance})`).join(', ')}`;
-      const involvedNames = [...new Set(occurrences.map(o => o.agent))];
-      for (const name of involvedNames) {
-        if (name === '[default]') continue;
-        const a = this.agents.get(name);
+    const dups = detectDuplicates([...this.agents.values()]);
+    for (const d of dups) {
+      const owners = d.agents.map(o => `${o.aid}(${o.channelName})`).join(', ');
+      const msg = `Channel conflict: ${d.fingerprint} claimed by ${owners}`;
+      logger.error(`[EvolAgentRegistry] ${msg}`);
+      // 把所有涉及的 agent 标 error；首个保留为 active 也不安全——直接全部 error
+      for (const o of d.agents) {
+        const a = this.agents.get(o.aid);
         if (a && a.status !== 'error') {
           a.status = 'error';
           a.error = msg;
         }
       }
-      logger.error(`[EvolAgentRegistry] ${msg}`);
     }
   }
 
   private buildChannelIndex(): void {
     for (const agent of this.agents.values()) {
       if (agent.status === 'error' || agent.status === 'disabled') continue;
-      for (const name of agent.channelInstanceNames()) {
-        this.channelIndex.set(name, agent.name);
-      }
-    }
-    if (this.defaultAgent) {
-      for (const name of this.defaultAgent.channelInstanceNames()) {
-        if (this.channelIndex.has(name)) continue;
-        this.channelIndex.set(name, '[default]');
+      for (const key of agent.channelInstanceNames()) {
+        const prev = this.channelIndex.get(key);
+        if (prev && prev !== agent.aid) {
+          logger.warn(`[EvolAgentRegistry] channel key "${key}" claimed by both ${prev} and ${agent.aid}`);
+        }
+        this.channelIndex.set(key, agent.aid);
       }
     }
   }
 
-  resolveByChannel(channelName: string): EvolAgent | null {
-    const agentName = this.channelIndex.get(channelName);
-    if (!agentName) return null;
-    if (agentName === '[default]') return this.defaultAgent;
-    return this.agents.get(agentName) || null;
+  // ── Lookup / Routing ─────────────────────────────────────────────────
+
+  resolveByChannel(channelKey: string): EvolAgent | null {
+    const aid = this.channelIndex.get(channelKey);
+    if (!aid) return null;
+    return this.agents.get(aid) ?? null;
   }
 
   /**
-   * Check ownership of a channel via the agent that owns it.
-   * - For named EvolAgent: reads agent.config (memory; reflects agent.json).
-   * - For DefaultAgent or unknown channel: invokes `globalFallback`, which
-   *   should consult the global config (evolclaw.json) via `config.ts:isOwner`.
+   * `globalFallback` 参数保留作签名兼容（EvolAgentRegistryHandle），新结构下不再使用。
    */
-  isOwner(channelName: string, userId: string, globalFallback: (ch: string, uid: string) => boolean): boolean {
-    const agent = this.resolveByChannel(channelName);
-    if (agent && !agent.isDefault) return agent.isOwner(channelName, userId);
-    return globalFallback(channelName, userId);
+  isOwner(channelKey: string, userId: string, _globalFallback?: (ch: string, uid: string) => boolean): boolean {
+    void _globalFallback;
+    const agent = this.resolveByChannel(channelKey);
+    return agent?.isOwner(channelKey, userId) ?? false;
   }
 
-  /** Same routing logic as `isOwner`, applied to admin checks. */
-  isAdmin(channelName: string, userId: string, globalFallback: (ch: string, uid: string) => boolean): boolean {
-    const agent = this.resolveByChannel(channelName);
-    if (agent && !agent.isDefault) return agent.isAdmin(channelName, userId);
-    return globalFallback(channelName, userId);
+  isAdmin(channelKey: string, userId: string, _globalFallback?: (ch: string, uid: string) => boolean): boolean {
+    void _globalFallback;
+    const agent = this.resolveByChannel(channelKey);
+    return agent?.isAdmin(channelKey, userId) ?? false;
   }
 
-  /** Lookup current owner — agent first, then DefaultAgent (which mirrors evolclaw.json). */
-  getOwner(channelName: string): string | undefined {
-    const agent = this.resolveByChannel(channelName);
-    if (!agent) return undefined;
-    return agent.getOwner(channelName);
+  getOwner(channelKey: string): string | undefined {
+    return this.resolveByChannel(channelKey)?.getOwner(channelKey);
   }
 
-  /**
-   * Persist owner. Routes to agent.json for named agents, or to evolclaw.json
-   * via the configured `globalWriter` for DefaultAgent. No-ops with a warning
-   * when the channel is unknown or no global writer is wired.
-   */
-  setChannelOwner(channelName: string, userId: string): void {
-    const agent = this.resolveByChannel(channelName);
+  setChannelOwner(channelKey: string, userId: string): void {
+    const agent = this.resolveByChannel(channelKey);
     if (!agent) {
-      logger.warn(`[EvolAgentRegistry] setChannelOwner: channel "${channelName}" not found`);
+      logger.warn(`[EvolAgentRegistry] setChannelOwner: channel "${channelKey}" not found`);
       return;
     }
-    if (agent.isDefault) {
-      if (!this.globalWriter) {
-        logger.warn(`[EvolAgentRegistry] setChannelOwner: no globalWriter wired for default channel "${channelName}"`);
-        return;
-      }
-      this.globalWriter.setOwner(channelName, userId);
-    } else {
-      agent.setOwner(channelName, userId);
-    }
+    agent.setOwner(channelKey, userId);
   }
 
-  /**
-   * Read showActivities mode. Falls back to `'all'` when the channel is
-   * unknown — matches the prior behavior of `config.ts:getChannelShowActivities`.
-   */
-  getShowActivities(channelName: string): 'all' | 'dm-only' | 'owner-dm-only' | 'none' {
-    const agent = this.resolveByChannel(channelName);
-    if (!agent) return 'all';
-    return agent.getShowActivities(channelName);
+  getShowActivities(channelKey: string): 'all' | 'dm-only' | 'owner-dm-only' | 'none' {
+    return this.resolveByChannel(channelKey)?.getShowActivities(channelKey) ?? 'all';
   }
 
-  /** Persist showActivities. Routes to agent.json or evolclaw.json. */
-  setShowActivities(channelName: string, mode: 'all' | 'dm-only' | 'owner-dm-only' | 'none'): void {
-    const agent = this.resolveByChannel(channelName);
+  setShowActivities(channelKey: string, mode: 'all' | 'dm-only' | 'owner-dm-only' | 'none'): void {
+    const agent = this.resolveByChannel(channelKey);
     if (!agent) {
-      logger.warn(`[EvolAgentRegistry] setShowActivities: channel "${channelName}" not found`);
+      logger.warn(`[EvolAgentRegistry] setShowActivities: channel "${channelKey}" not found`);
       return;
     }
-    if (agent.isDefault) {
-      if (!this.globalWriter?.setShowActivities) {
-        logger.warn(`[EvolAgentRegistry] setShowActivities: no globalWriter wired for default channel "${channelName}"`);
-        return;
-      }
-      this.globalWriter.setShowActivities(channelName, mode);
-    } else {
-      agent.setShowActivities(channelName, mode);
-    }
+    agent.setShowActivities(channelKey, mode);
   }
 
-  get(name: string): EvolAgent | null {
-    if (name === '[default]') return this.defaultAgent;
-    return this.agents.get(name) || null;
+  // ── Agent enumeration ────────────────────────────────────────────────
+
+  get(aidOrName: string): EvolAgent | null {
+    return this.agents.get(aidOrName) ?? null;
   }
 
   list(): AgentInfo[] {
-    const result: AgentInfo[] = [];
-    for (const agent of this.agents.values()) {
-      result.push(this.toInfo(agent));
-    }
-    if (this.defaultAgent) {
-      result.push(this.toInfo(this.defaultAgent));
-    }
-    return result;
+    return [...this.agents.values()].map(a => this.toInfo(a));
   }
 
+  /** 启动后还能跑（status === 'stopped'）的 agents——给 AgentLoader 起 runner 用。 */
   runnableAgents(): EvolAgent[] {
     return [...this.agents.values()].filter(a => a.status === 'stopped');
   }
 
-  async reload(name: string, hooks: ReloadHooks): Promise<void> {
-    const oldAgent = this.agents.get(name);
-    if (!oldAgent) throw new Error(`Agent "${name}" not found`);
-    if (!oldAgent.configPath) throw new Error(`Cannot reload DefaultAgent`);
+  getSkipped(): Array<{ dirName: string; reason: string }> {
+    return [...this.skipped];
+  }
 
-    // 1. Re-read config from disk
-    const raw = JSON.parse(fs.readFileSync(oldAgent.configPath, 'utf-8'));
-    const validation = validateEvolAgentConfig(raw);
-    if (!validation.valid) {
-      throw new Error(`Invalid config after edit: ${validation.errors.join('; ')}`);
+  // ── 热加载新 agent ──────────────────────────────────────────────────
+
+  /**
+   * 动态加载一个新 agent（磁盘上已有 config.json 但运行时还没加载）。
+   * 返回新创建的 EvolAgent，或 null（已存在 / 校验失败）。
+   */
+  loadNewAgent(aid: string): EvolAgent | null {
+    if (this.agents.has(aid)) {
+      logger.info(`[EvolAgentRegistry] agent ${aid} already loaded, skipping`);
+      return this.agents.get(aid)!;
     }
 
-    const newAgent = new EvolAgent(oldAgent.configPath, raw);
-
-    // Warn if projectPath changed — existing sessions retain old path (by design,
-    // to avoid breaking SDK conversation history at .claude/<encoded-path>/...)
-    if (oldAgent.projectPath !== newAgent.projectPath) {
-      logger.warn(
-        `[EvolAgentRegistry] Agent "${name}" projectPath changed: ${oldAgent.projectPath} → ${newAgent.projectPath}. ` +
-        `Existing sessions retain the old path; only new sessions will use the new path. ` +
-        `To migrate, manually UPDATE sessions SET project_path=? WHERE id=? (warning: SDK conversation history may be lost).`
-      );
+    const raw = loadAgent(aid);
+    if (!raw) {
+      logger.warn(`[EvolAgentRegistry] loadNewAgent: ${aid}/config.json not found`);
+      return null;
+    }
+    const errs = validateAgentConfig(raw);
+    if (errs.length > 0) {
+      logger.warn(`[EvolAgentRegistry] loadNewAgent ${aid}: ${errs.join('; ')}`);
+      return null;
     }
 
-    // 2. Fingerprint conflict check (against all others except self)
-    const conflict = this.checkConflictForReload(newAgent, name);
-    if (conflict) {
-      throw new Error(`Channel conflict: ${conflict}`);
+    const defaults = loadDefaults();
+    const merged = mergeForAgent(raw, defaults);
+    const agent = new EvolAgent(raw, merged);
+    ensureAgentDirSkeleton(aid);
+    this.agents.set(aid, agent);
+
+    // 重建 channel index
+    for (const key of agent.channelInstanceNames()) {
+      this.channelIndex.set(key, aid);
     }
 
-    // 3. Compute channel diff
+    logger.info(`[EvolAgentRegistry] ✓ Hot-loaded agent: ${aid}`);
+    return agent;
+  }
+
+  // ── Reload ───────────────────────────────────────────────────────────
+
+  async reload(aidOrName: string, hooks: ReloadHooks): Promise<void> {
+    const oldAgent = this.agents.get(aidOrName);
+    if (!oldAgent) throw new Error(`Agent "${aidOrName}" not found`);
+
+    const raw = loadAgent(oldAgent.aid);
+    if (!raw) throw new Error(`Agent ${oldAgent.aid}/config.json missing on reload`);
+    const errs = validateAgentConfig(raw);
+    if (errs.length > 0) throw new Error(`Invalid config after edit: ${errs.join('; ')}`);
+
+    const defaults = loadDefaults();
+    const merged = mergeForAgent(raw, defaults);
+
+    const conflict = this.checkConflictForReload(raw, oldAgent.aid);
+    if (conflict) throw new Error(`Channel conflict: ${conflict}`);
+
     const oldChannels = new Set(oldAgent.channelInstanceNames());
-    const newChannels = new Set(newAgent.channelInstanceNames());
+    // 计算新 channel keys（用 EvolAgent 的格式化）
+    const newChannels = new Set(raw.channels.map(c => oldAgent.effectiveChannelName(c.type, c.name)));
     const toRemove = [...oldChannels].filter(c => !newChannels.has(c));
     const toAdd = [...newChannels].filter(c => !oldChannels.has(c));
     const kept = [...oldChannels].filter(c => newChannels.has(c));
 
-    // I6: detect kept-channel credential changes — treat as remove+add so
-    // the channel reconnects with new credentials (e.g. appSecret rotated).
+    // 凭证变化的 kept channel 当 remove+add 处理（强制重建以使用新凭证）
     const credentialsChanged: string[] = [];
     const trulyKept: string[] = [];
     for (const ch of kept) {
-      const oldCh = getChannelInstanceConfig(oldAgent, ch);
-      const newCh = getChannelInstanceConfig(newAgent, ch);
-      if (oldCh && newCh && channelConfigChanged(oldCh.config, newCh.config)) {
+      const oldInst = oldAgent.findChannelInstance(ch);
+      const newInst = findInstanceByKey(raw, oldAgent, ch);
+      if (oldInst && newInst && JSON.stringify(oldInst) !== JSON.stringify(newInst)) {
         credentialsChanged.push(ch);
       } else {
         trulyKept.push(ch);
@@ -372,170 +320,79 @@ export class EvolAgentRegistry {
     toRemove.push(...credentialsChanged);
     toAdd.push(...credentialsChanged);
 
-    // Track what was removed/added so we can roll back on failure
     const removedSuccessfully: string[] = [];
     const addedSuccessfully: string[] = [];
 
     try {
-      // 4. Drain channels being removed
-      for (const ch of toRemove) {
-        await hooks.drainChannel(ch);
-      }
-
-      // 5. Disconnect removed channels
+      for (const ch of toRemove) await hooks.drainChannel(ch);
       for (const ch of toRemove) {
         await hooks.disconnectChannel(ch);
         removedSuccessfully.push(ch);
       }
 
-      // 6. Start new channels
+      // swap config 后再起新 channel —— startChannel hook 需要看到新 config
+      oldAgent.swapConfig(raw, merged);
+
       for (const ch of toAdd) {
-        await hooks.startChannel(newAgent, ch);
+        await hooks.startChannel(oldAgent, ch);
         addedSuccessfully.push(ch);
       }
 
-      // 7. Transfer kept channel adapters from old to new (only truly unchanged ones)
-      for (const ch of trulyKept) {
-        const adapter = oldAgent.channels.get(ch);
-        if (adapter) newAgent.channels.set(ch, adapter);
-      }
+      // truly kept 的 adapter 实例已经在 oldAgent.channels 里，无需迁移
 
-      // 8. Preserve runtime state
-      // I5: only set 'running' when oldAgent was running; preserve error/disabled
-      newAgent.activeSessions = oldAgent.activeSessions;
-      newAgent.lastActivity = oldAgent.lastActivity;
       if (oldAgent.status === 'error' || oldAgent.status === 'disabled') {
-        newAgent.status = oldAgent.status;
-        newAgent.error = oldAgent.error;
+        // 保持原态——swap 不改 status
       } else {
-        newAgent.status = 'running';
+        oldAgent.status = 'running';
       }
 
-      // 9. Swap in registry
-      this.agents.set(name, newAgent);
-
-      // 10. Rebuild channel index
       this.channelIndex.clear();
       this.buildChannelIndex();
     } catch (err) {
-      // C1: Rollback — restore original channels, keep oldAgent in registry
-      logger.error(`[Reload] Failed: ${err}. Attempting rollback for "${name}".`);
+      logger.error(`[Reload] Failed: ${err}. Attempting rollback for "${aidOrName}".`);
       for (const ch of addedSuccessfully) {
-        try { await hooks.disconnectChannel(ch); } catch (_) { /* best effort */ }
+        try { await hooks.disconnectChannel(ch); } catch { /* best effort */ }
       }
-      for (const ch of removedSuccessfully) {
-        try { await hooks.startChannel(oldAgent, ch); } catch (_) { /* best effort */ }
-      }
-      // Don't swap registry — oldAgent stays in place
+      // 这里没法 rollback 到旧 raw（已经被 swapConfig 覆盖）——记录错误，让 oldAgent 进 error 态
       oldAgent.status = 'error';
-      oldAgent.error = `Reload failed (rollback attempted): ${err instanceof Error ? err.message : String(err)}`;
+      oldAgent.error = `Reload failed (rollback partial): ${err instanceof Error ? err.message : String(err)}`;
       throw err;
     }
   }
 
-  private checkConflictForReload(newAgent: EvolAgent, excludeName: string): string | null {
-    const newFingerprints = new Map<string, string>(); // fp → instanceName
-
-    for (const [type, raw] of Object.entries(newAgent.config.channels || {})) {
-      if (type === 'defaultChannel') continue;
-      const instances = Array.isArray(raw) ? raw : [raw];
-      for (const inst of instances) {
-        if (!inst || typeof inst !== 'object') continue;
-        const fp = extractFingerprint(type, inst as any);
-        if (!fp) continue;
-        const instName = (inst as any).name ?? type;
-        newFingerprints.set(fp, instName);
-      }
+  private checkConflictForReload(newRaw: AgentConfig, excludeAid: string): string | null {
+    const newFps = new Set<string>();
+    for (const inst of newRaw.channels) {
+      const fp = extractFingerprint(inst.type, inst, newRaw.aid);
+      if (fp) newFps.add(fp);
     }
-
-    // Check against all other agents (excluding self)
-    for (const [agentName, agent] of this.agents) {
-      if (agentName === excludeName) continue;
+    for (const [aid, agent] of this.agents) {
+      if (aid === excludeAid) continue;
       if (agent.status === 'error' || agent.status === 'disabled') continue;
-      for (const [type, raw] of Object.entries(agent.config.channels || {})) {
-        if (type === 'defaultChannel') continue;
-        const instances = Array.isArray(raw) ? raw : [raw];
-        for (const inst of instances) {
-          if (!inst || typeof inst !== 'object') continue;
-          const fp = extractFingerprint(type, inst as any);
-          if (!fp) continue;
-          if (newFingerprints.has(fp)) {
-            return `${fp} conflicts with agent "${agentName}"`;
-          }
-        }
+      for (const inst of agent.config.channels) {
+        const fp = extractFingerprint(inst.type, inst, agent.aid);
+        if (fp && newFps.has(fp)) return `${fp} conflicts with agent "${aid}"`;
       }
     }
-
-    // Check against DefaultAgent
-    if (this.defaultAgent) {
-      for (const [type, raw] of Object.entries(this.defaultAgent.config.channels || {})) {
-        if (type === 'defaultChannel') continue;
-        const instances = Array.isArray(raw) ? raw : [raw];
-        for (const inst of instances) {
-          if (!inst || typeof inst !== 'object') continue;
-          const fp = extractFingerprint(type, inst as any);
-          if (!fp) continue;
-          if (newFingerprints.has(fp)) {
-            return `${fp} conflicts with DefaultAgent`;
-          }
-        }
-      }
-    }
-
     return null;
   }
 
   private toInfo(agent: EvolAgent): AgentInfo {
-    let baseagent = 'claude';
-    let model: string | undefined;
-    let effort: string | undefined;
-    try {
-      baseagent = agent.baseagent;
-      model = agent.model;
-      effort = agent.effort;
-    } catch { /* invalid config */ }
     return {
       name: agent.name,
       status: agent.status,
       channels: agent.channelInstanceNames(),
-      projectPath: agent.config.projects?.defaultPath ?? '',
-      baseagent,
-      model,
-      effort,
+      projectPath: agent.projectPath,
+      baseagent: agent.baseagent,
+      model: agent.model,
+      effort: agent.effort,
       lastActivity: agent.lastActivity,
       activeSessions: agent.activeSessions,
       error: agent.error,
-      isDefault: agent.isDefault,
     };
   }
 }
 
-/**
- * Locate the raw config of a channel instance by name within an agent config.
- * Returns `{ type, config }` or null if not found.
- *
- * Matches against the effective channel name (with agent prefix for EvolAgents),
- * mirroring `EvolAgent.findChannelInstance`. Only used by `reload()` to detect
- * kept-channel credential changes.
- */
-function getChannelInstanceConfig(agent: EvolAgent, channelName: string): { type: string; config: any } | null {
-  for (const [type, raw] of Object.entries(agent.config?.channels || {})) {
-    if (type === 'defaultChannel') continue;
-    const instances = Array.isArray(raw) ? raw : [raw];
-    for (const inst of instances) {
-      if (!inst || typeof inst !== 'object') continue;
-      const effName = agent.effectiveChannelName(type, (inst as any).name);
-      if (effName === channelName) return { type, config: inst };
-    }
-  }
-  return null;
-}
-
-/**
- * Compare two channel-instance configs by serialized JSON. Channel configs
- * are plain JSON-shaped objects (no functions/Buffers), so this is a sound
- * structural compare for "did anything in this channel block change".
- */
-function channelConfigChanged(oldConfig: any, newConfig: any): boolean {
-  return JSON.stringify(oldConfig) !== JSON.stringify(newConfig);
+function findInstanceByKey(raw: AgentConfig, agent: EvolAgent, channelKey: string): ChannelInstance | null {
+  return raw.channels.find(c => agent.effectiveChannelName(c.type, c.name) === channelKey) ?? null;
 }

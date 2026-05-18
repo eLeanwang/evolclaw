@@ -6,7 +6,7 @@ import type { MessageProcessor } from './message-processor.js';
 import type { MessageQueue } from './message-queue.js';
 import type { CommandHandler as CmdHandler } from '../command-handler.js';
 import type { EventBus } from '../event-bus.js';
-import type { Config, Message, InboundMessage, ChannelAdapter, ReplyContext, EvolAgentRegistryHandle } from '../../types.js';
+import type { Message, InboundMessage, ChannelAdapter, ReplyContext, EvolAgentRegistryHandle } from '../../types.js';
 
 /**
  * MessageBridge — Channel 与 Core 之间的消息桥梁
@@ -21,14 +21,15 @@ export class MessageBridge {
   private agentRegistry?: EvolAgentRegistryHandle;
 
   constructor(
-    private config: Config,
+    private defaultProjectPath: string,
     private sessionManager: SessionManager,
     private processor: MessageProcessor,
     private messageQueue: MessageQueue,
     private cmdHandler: CmdHandler,
     private eventBus: EventBus,
+    defaultDebounce?: number,
   ) {
-    this.defaultDebounce = config.debounce ?? 2;
+    this.defaultDebounce = defaultDebounce ?? 2;
   }
 
   /** Inject EvolAgentRegistry so owner lookups/writes route to agent.json for agent-owned channels. */
@@ -39,17 +40,12 @@ export class MessageBridge {
   private getDebouncer(channelName: string, channelType?: string): StreamDebouncer {
     let d = this.debouncers.get(channelName);
     if (!d) {
+      // 从 owning agent 的 channel 配置取 debounce，找不到用全局默认
       let seconds = this.defaultDebounce;
-      // 查找渠道级 debounce 配置：先用 channelType（如 'feishu'）在 config.channels 里查
-      const type = channelType || channelName;
-      const raw = (this.config.channels as any)?.[type];
-      if (raw) {
-        if (Array.isArray(raw)) {
-          const inst = raw.find((i: any) => (i.name || type) === channelName);
-          if (inst?.debounce !== undefined) seconds = inst.debounce;
-        } else if (raw.debounce !== undefined) {
-          seconds = raw.debounce;
-        }
+      const agent = this.agentRegistry?.resolveByChannel(channelName);
+      if (agent) {
+        const merged = (agent as any).config;
+        if (merged?.debounce !== undefined) seconds = merged.debounce;
       }
       d = new StreamDebouncer(seconds);
       this.debouncers.set(channelName, d);
@@ -112,12 +108,11 @@ export class MessageBridge {
           if (msg.peerName) metadata.peerName = msg.peerName;
           if (msg.groupId) metadata.groupId = msg.groupId;
         }
-        // Resolve effective project path: agent's projectPath when channel is agent-owned,
-        // otherwise fall back to global config.projects.defaultPath
+        // Resolve effective project path: 用通道所属 agent 的 projectPath；
+        // 通道找不到归属时退回到 globalConfig（一般是测试场景）
         const owningAgent = this.agentRegistry?.resolveByChannel(channelName);
-        const effectiveProjectPath = (owningAgent && !owningAgent.isDefault)
-          ? owningAgent.projectPath
-          : (this.config.projects?.defaultPath || process.cwd());
+        const effectiveProjectPath = owningAgent?.projectPath
+          ?? this.defaultProjectPath;
 
         const session = await this.sessionManager.getOrCreateSession(
           channelName, msg.channelId,
@@ -169,7 +164,7 @@ export class MessageBridge {
         if (fullMessage.messageId) adapter?.acknowledge?.(fullMessage.messageId).catch(() => {});
 
         const isInterrupt = chatType !== 'group';
-        const enqueueAgentName = (owningAgent && !owningAgent.isDefault) ? owningAgent.name : '[default]';
+        const enqueueAgentName = owningAgent?.name ?? '<unknown>';
         const doEnqueue = async (m: Message) => {
           return this.messageQueue.enqueue(session.id, m, session.projectPath, {
             interruptible: isInterrupt,
@@ -242,19 +237,15 @@ export class MessageBridge {
     return false;
   }
 
-  /** 首次交互自动绑定 owner */
+  /** 首次交互自动绑定 owner —— 通过 channel-routed self-agent 完成 */
   private async autoBindOwner(channel: string, userId: string): Promise<void> {
-    // Registry-first: route owner queries/writes to the agent that owns this channel.
-    // Falls back to evolclaw.json for default-agent channels.
-    const { getOwner, setOwner } = await import('../../config.js');
-    const currentOwner = this.agentRegistry?.getOwner?.(channel) ?? getOwner(this.config, channel);
-    // currentOwner === undefined means either no owner set, or instance not found
-    // In both cases, try to set — setOwner is a no-op for unknown instances
+    const currentOwner = this.agentRegistry?.getOwner?.(channel);
     if (currentOwner === undefined) {
       if (this.agentRegistry?.setChannelOwner) {
         this.agentRegistry.setChannelOwner(channel, userId);
       } else {
-        setOwner(this.config, channel, userId);
+        logger.warn(`[Owner] no agentRegistry; skip auto-bind for ${channel}`);
+        return;
       }
       logger.info(`[Owner] Auto-bound ${channel} owner: ${userId}`);
       this.eventBus.publish({ type: 'channel:owner-bound', channel, userId });

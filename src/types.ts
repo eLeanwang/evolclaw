@@ -102,6 +102,15 @@ export interface WecomChannelInstanceConfig extends WecomChannelConfig {
   name: string;
 }
 
+/**
+ * Config —— channel plugin / baseagent runner 兼容类型。
+ *
+ * 新结构下不再有全局 config 文件；此类型仅作为 ChannelPlugin.isEnabled/createChannels
+ * 和 baseagent resolver 的输入形态。ChannelLoader.createForAgent 内部构造 syntheticConfig
+ * 喂给 plugin，字段来自 EvolAgent.config 的翻译。
+ *
+ * 后续 channel plugin 重写为直接吃 ChannelInstance[] 后，本类型可删。
+ */
 export interface Config {
   agents?: {
     claude?: {
@@ -109,31 +118,31 @@ export interface Config {
       baseUrl?: string;
       model?: string;
       effort?: 'low' | 'medium' | 'high' | 'max';
-      pathToClaudeCodeExecutable?: string; // Windows 上 SDK 找不到 claude 可执行体时手动指定
-      useSettingSources?: boolean;        // 使用 SDK 原生配置加载，默认 true
-      agentProgressSummaries?: boolean;   // 启用 AI 生成的子任务进度摘要，默认 true
-      excludeDynamicSections?: boolean;   // 从 system prompt 移除动态内容以提升跨用户 prompt cache 命中率，默认 false
+      pathToClaudeCodeExecutable?: string;
+      useSettingSources?: boolean;
+      agentProgressSummaries?: boolean;
+      excludeDynamicSections?: boolean;
     };
     codex?: {
       apiKey?: string;
       baseUrl?: string;
-      model?: string;     // 默认 'gpt-5.2-codex'
-      effort?: string;    // 推理强度: low / medium / high / max
-      reasoning?: string; // 别名（兼容旧配置）
+      model?: string;
+      effort?: string;
+      reasoning?: string;
     };
     gemini?: {
-      apiKey?: string;       // GEMINI_API_KEY（可选，CLI 有 OAuth）
-      model?: string;        // 默认 'gemini-2.5-flash'
-      cliPath?: string;      // gemini CLI 路径（可选，默认 PATH 查找）
-      mode?: 'cli' | 'sdk';  // 运行模式，默认 'cli'
-      useVertex?: boolean;   // 是否使用 Vertex AI
-      project?: string;      // Vertex AI 项目 ID
-      location?: string;     // Vertex AI 区域，如 'us-central1'
+      apiKey?: string;
+      model?: string;
+      cliPath?: string;
+      mode?: 'cli' | 'sdk';
+      useVertex?: boolean;
+      project?: string;
+      location?: string;
     };
-    defaultAgent?: string;  // 默认 'claude'
+    defaultAgent?: string;
   };
   channels?: {
-    defaultChannel?: string;  // 默认渠道，完整性校验锚点
+    defaultChannel?: string;
     feishu?: FeishuChannelConfig | FeishuChannelInstanceConfig[];
     wechat?: WechatChannelConfig | WechatChannelInstanceConfig[];
     aun?: AunChannelConfig | AunChannelInstanceConfig[];
@@ -146,24 +155,24 @@ export interface Config {
     autoCreate?: boolean;
     list?: Record<string, string>;
   };
-  enableRichContent?: boolean;  // 启用富内容渲染（LaTeX/Mermaid），默认 false
-  flushDelay?: number;  // 消息批量发送间隔(秒)，默认 4
-  debounce?: number;    // 入站消息去抖间隔(秒)，默认 2，设 0 关闭
   debug?: {
-    logLevel?: 'DEBUG' | 'INFO' | 'WARN' | 'ERROR';  // 日志级别，优先于 LOG_LEVEL 环境变量
-    flusherDiag?: boolean;  // 启用 StreamFlusher 诊断日志 (flusher-diag.log)
-    aunTrace?: boolean;     // 启用 AUN 通道数据追踪日志 (aun-trace.log)，记录所有收发数据
-    aunSdkLog?: boolean;    // 启用 AUN SDK 内部日志 (~/.aun/logs/ts-sdk-YYYYMMDD.log)
+    logLevel?: 'DEBUG' | 'INFO' | 'WARN' | 'ERROR';
+    flusherDiag?: boolean;
+    aunTrace?: boolean;
+    aunSdkLog?: boolean;
   };
+  enableRichContent?: boolean;
   idleMonitor?: {
-    enabled?: boolean;              // 是否启用空闲监控，默认 true
-    safeModeThreshold?: number;     // 连续错误几次进入安全模式，默认 0（已禁用）；设为正数启用
-    timeout?: number;               // 无输出超时(秒)，默认 120
+    enabled?: boolean;
+    safeModeThreshold?: number;
+    timeout?: number;
   };
-  showActivities?: 'all' | 'dm-only' | 'owner-dm-only' | 'none';  // 中间输出显示范围（工具活动+流式文本），默认 'all'
+  showActivities?: 'all' | 'dm-only' | 'owner-dm-only' | 'none';
+  flushDelay?: number;
+  debounce?: number;
   chatmode?: {
-    private?: 'interactive' | 'proactive';   // 单聊默认模式，默认 'interactive'
-    group?: 'interactive' | 'proactive';     // 群聊默认模式，默认 'proactive'
+    private?: 'interactive' | 'proactive';
+    group?: 'interactive' | 'proactive';
   };
 }
 
@@ -378,8 +387,25 @@ export interface EvolAgentConfig {
   chatmode?: { private?: 'interactive' | 'proactive'; group?: 'interactive' | 'proactive' };
 }
 
-/** Reserved agent name used for DefaultAgent (no agent.json file). */
-export const DEFAULT_AGENT_NAME = '[default]';
+/** Placeholder agent name for legacy code paths that haven't been migrated. */
+export const DEFAULT_AGENT_NAME = '<unknown>';
+
+/**
+ * 进程级全局设置——不属于任何 self-agent，属于 evolclaw 进程本身。
+ * 从 defaults.json 或环境变量取，运行期不变。
+ */
+export interface GlobalSettings {
+  idleMonitor?: {
+    enabled?: boolean;
+    timeout?: number;
+  };
+  debug?: {
+    logLevel?: 'DEBUG' | 'INFO' | 'WARN' | 'ERROR';
+    flusherDiag?: boolean;
+    aunTrace?: boolean;
+    aunSdkLog?: boolean;
+  };
+}
 
 export interface AgentContext {
   name: string;
@@ -404,7 +430,6 @@ export interface AgentInfo {
   lastActivity?: number;
   activeSessions?: number;
   error?: string;
-  isDefault?: boolean;
 }
 
 /**
@@ -414,9 +439,9 @@ export interface AgentInfo {
  */
 export interface EvolAgentHandle {
   readonly name: string;
-  readonly isDefault: boolean;
   readonly baseagent: string;
   readonly projectPath: string;
+  readonly config: MergedAgentConfig;
   lastActivity?: number;
   getContext(channelName: string, chatType: string, globalChatmode?: { private?: 'interactive' | 'proactive'; group?: 'interactive' | 'proactive' }): AgentContext;
   getOwner(channelName: string): string | undefined;
@@ -442,8 +467,8 @@ export interface EvolAgentRegistryHandle {
   get(name: string): EvolAgentHandle | null;
   list(): AgentInfo[];
   reload?(name: string, hooks: unknown): Promise<void>;
-  isOwner(channelName: string, userId: string, globalFallback: (ch: string, uid: string) => boolean): boolean;
-  isAdmin(channelName: string, userId: string, globalFallback: (ch: string, uid: string) => boolean): boolean;
+  isOwner(channelName: string, userId: string): boolean;
+  isAdmin(channelName: string, userId: string): boolean;
   getOwner(channelName: string): string | undefined;
   setChannelOwner(channelName: string, userId: string): void;
   getShowActivities(channelName: string): 'all' | 'dm-only' | 'owner-dm-only' | 'none';
@@ -463,7 +488,7 @@ export type AidStatus =
 
 export interface AidConnectionState {
   aid: string;
-  agentName: string;            // EvolAgent 名（'[default]' / 'review-bot' / ...）
+  agentName: string;            // EvolAgent AID（如 'review-bot.agentid.pub'）
   channelName: string;          // channel 实例名
   status: AidStatus;
   reconnectCount: number;       // 累计重连次数（含 flap）
@@ -471,9 +496,205 @@ export interface AidConnectionState {
   lastAttemptAt?: number;       // 最近一次连接尝试时间戳
   lastConnectedAt?: number;     // 最近一次成功 connected 时间戳
   lastError?: string;           // 最近一次失败简述（≤ 80 字符）
+  gatewayUrl?: string;          // 当前连接的网关地址
   blockedBy?: {                 // 仅 aid_blocked 时填充
     pid: number;
     evolclawHome: string;
     agentName?: string;
   };
+}
+
+// ── 新结构：defaults.json + per-agent config.json（evolclaw-home-directory.md）──
+//
+// 旧 Config / EvolAgentConfig 保留至阶段 3 退场。新结构的承载是
+// DefaultsConfig（agents/defaults.json）+ AgentConfig（agents/<aid>/config.json），
+// 由 ConfigStore 加载并算 effective merged 值。
+
+export const CONFIG_SCHEMA_VERSION = 1;
+
+export interface BaseagentClaudeConfig {
+  apiKey?: string;
+  baseUrl?: string;
+  model?: string;
+  effort?: 'low' | 'medium' | 'high' | 'max';
+  pathToClaudeCodeExecutable?: string;
+  useSettingSources?: boolean;
+  agentProgressSummaries?: boolean;
+  excludeDynamicSections?: boolean;
+}
+
+export interface BaseagentCodexConfig {
+  apiKey?: string;
+  baseUrl?: string;
+  model?: string;
+  effort?: string;
+  reasoning?: string;
+}
+
+export interface BaseagentGeminiConfig {
+  apiKey?: string;
+  model?: string;
+  cliPath?: string;
+  mode?: 'cli' | 'sdk';
+  useVertex?: boolean;
+  project?: string;
+  location?: string;
+}
+
+export interface BaseagentsBlock {
+  claude?: BaseagentClaudeConfig;
+  codex?: BaseagentCodexConfig;
+  gemini?: BaseagentGeminiConfig;
+  hermes?: Record<string, any>;
+}
+
+export interface ModelsBlock {
+  default?: string;
+  allowed?: string[];
+  by_role?: {
+    owner?: string;
+    admin?: string;
+    guest?: string;
+  };
+}
+
+export interface ProjectsBlock {
+  /** 工作目录根路径——创建 agent 时自动合成 `<rootPath>/<aid第一段>` 作为 defaultPath */
+  rootPath?: string;
+  defaultPath?: string;
+  list?: Record<string, string>;
+  autoCreate?: boolean;
+}
+
+export interface ChatmodeBlock {
+  private?: 'interactive' | 'proactive';
+  group?: 'interactive' | 'proactive';
+}
+
+export interface AunRuntimeBlock {
+  keystorePath?: string;
+  encryptionSeed?: string;
+  gatewayUrl?: string;
+}
+
+export type ShowActivitiesMode = 'all' | 'dm-only' | 'owner-dm-only' | 'none';
+
+// channels[].* —— per-agent，新结构里以列表形式存储。
+// 元素必带 type + name，name 是该 agent 内 channel 类型下的本地标识（不含 '#'）。
+// AUN 类型一个 agent 只允许一个实例，name 通常约定 'main'。
+//
+// owners/admins 用该 channel 的原生 ID（飞书 user_id、钉钉 unionId 等），不要求 AID。
+
+interface ChannelInstanceCommon {
+  type: string;
+  name: string;
+  enabled?: boolean;
+  owners?: string[];
+  admins?: string[];
+  flushDelay?: number;
+  debounce?: number;
+  showActivities?: ShowActivitiesMode;
+}
+
+export interface AunChannelInstance extends ChannelInstanceCommon {
+  type: 'aun';
+  gatewayUrl?: string;
+  accessToken?: string;
+  pythonBin?: string;
+  encryptionSeed?: string;
+}
+
+export interface FeishuChannelInstance extends ChannelInstanceCommon {
+  type: 'feishu';
+  appId: string;
+  appSecret: string;
+}
+
+export interface WechatChannelInstance extends ChannelInstanceCommon {
+  type: 'wechat';
+  baseUrl?: string;
+  token?: string;
+}
+
+export interface DingtalkChannelInstance extends ChannelInstanceCommon {
+  type: 'dingtalk';
+  clientId: string;
+  clientSecret: string;
+  requireMention?: boolean;
+  freeResponseChats?: string[];
+}
+
+export interface QQBotChannelInstance extends ChannelInstanceCommon {
+  type: 'qqbot';
+  appId: string;
+  clientSecret: string;
+}
+
+export interface WecomChannelInstance extends ChannelInstanceCommon {
+  type: 'wecom';
+  botId: string;
+  secret: string;
+}
+
+export type ChannelInstance =
+  | AunChannelInstance
+  | FeishuChannelInstance
+  | WechatChannelInstance
+  | DingtalkChannelInstance
+  | QQBotChannelInstance
+  | WecomChannelInstance;
+
+/**
+ * agents/defaults.json —— per-agent 配置缺失字段的 fallback。
+ * 不持有 channels（必须 per-agent）、不持有 owners（必须 per-agent）、不持有 aid。
+ */
+export interface DefaultsConfig {
+  $schema_version: number;
+  aun?: AunRuntimeBlock;
+  active_baseagent?: string;
+  baseagents?: BaseagentsBlock;
+  models?: ModelsBlock;
+  projects?: ProjectsBlock;
+  chatmode?: ChatmodeBlock;
+  show_activities?: ShowActivitiesMode;
+  flush_delay?: number;
+  debounce?: number;
+  /** defaults.admins 提供全局基础（如运维 AID），与 per-agent admins 数组合并去重 */
+  admins?: string[];
+}
+
+/**
+ * agents/<aid>/config.json —— per-agent 配置。
+ *
+ * 顶层 owners 是 AUN 渠道（即 agent 自身）的 owner 列表，元素为 AID。
+ * 允许为空——空列表表示"待指定"，第一个通信者自动成为 owner。
+ *
+ * channels[] 是该 agent 接入的所有渠道实例（含 AUN）。AUN 实例的 type='aun'
+ * 且本 agent 只能存在一条；其它类型可有多条，靠 name 区分。
+ */
+export interface AgentConfig {
+  $schema_version: number;
+  aid: string;
+  enabled?: boolean;
+  owners?: string[];
+  admins?: string[];
+  aun?: AunRuntimeBlock;
+  channels: ChannelInstance[];
+  active_baseagent?: string;
+  baseagents?: BaseagentsBlock;
+  models?: ModelsBlock;
+  projects?: ProjectsBlock;
+  chatmode?: ChatmodeBlock;
+  show_activities?: ShowActivitiesMode;
+  flush_delay?: number;
+  debounce?: number;
+}
+
+/**
+ * MergedAgentConfig —— defaults + per-agent 合并后的 effective 形态。
+ * 字段含义与 AgentConfig 一致；运行时拿到的就是这个。
+ */
+export interface MergedAgentConfig extends AgentConfig {
+  /** 合并轨迹（debug 用），记录哪些字段来自 defaults */
+  readonly _mergedFrom?: { defaults: string[]; agent: string[] };
 }

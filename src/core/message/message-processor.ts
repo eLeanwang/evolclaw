@@ -13,9 +13,8 @@ import { logger } from '../../utils/logger.js';
 import { getErrorMessage, classifyError, ErrorType, ERROR_PREFIX, isInfraError, prefixErrorType, isRetryableError } from '../../utils/error-utils.js';
 import { EventBus } from '../event-bus.js';
 import { summarizeToolInput } from '../permission.js';
-import type { Message, Config, Session, ChannelAdapter, ChannelOptions, ChannelPolicy, CommandHandler, ReplyContext, AgentContext, EvolAgentRegistryHandle } from '../../types.js';
+import type { Message, Session, ChannelAdapter, ChannelOptions, ChannelPolicy, CommandHandler, ReplyContext, AgentContext, EvolAgentRegistryHandle, GlobalSettings } from '../../types.js';
 import { DEFAULT_PERMISSION_MODE } from '../../types.js';
-import { getOwner } from '../../config.js';
 import { getPackageRoot, resolveRoot } from '../../paths.js';
 import { renderPromptSection } from '../../agents/templates.js';
 import type { InteractionRouter } from '../interaction-router.js';
@@ -30,7 +29,7 @@ export class MessageProcessor {
   private currentFlusher?: StreamFlusher;
   private shouldSuppressActivities = false;
   private agentMap: Map<string, AgentRunnerFull>;
-  private defaultAgentId: string;
+  private primaryRunnerKey: string;
   private interruptedSessions = new Map<string, string>();  // sessionId → reason ('new_message' | 'stop' | ...)
   private interactionRouter?: InteractionRouter;
   private messageQueue?: MessageQueue;
@@ -42,16 +41,16 @@ export class MessageProcessor {
    * - `channel` is used to look up the owning EvolAgent (via registry).
    * - `baseagent` (e.g. 'claude') comes from `session.agentId`.
    *
-   * Falls back to `defaultAgentId` (a composite key, e.g. `[default]::claude`)
+   * Falls back to `primaryRunnerKey` (a composite key, e.g. `aid::claude`)
    * when no match is found.
    */
   getAgent(channel?: string, baseagent?: string): AgentRunnerFull {
     if (channel && baseagent) {
-      const evolName = this.agentRegistry?.resolveByChannel(channel)?.name || '[default]';
+      const evolName = this.agentRegistry?.resolveByChannel(channel)?.name || '<unknown>';
       const key = `${evolName}::${baseagent}`;
       if (this.agentMap.has(key)) return this.agentMap.get(key)!;
     }
-    if (this.agentMap.has(this.defaultAgentId)) return this.agentMap.get(this.defaultAgentId)!;
+    if (this.agentMap.has(this.primaryRunnerKey)) return this.agentMap.get(this.primaryRunnerKey)!;
     return this.agentMap.values().next().value!;
   }
 
@@ -70,19 +69,19 @@ export class MessageProcessor {
   constructor(
     agentRunnerOrMap: AgentRunnerFull | Map<string, AgentRunnerFull>,
     private sessionManager: SessionManager,
-    private config: Config,
+    private globalSettings: GlobalSettings,
     private messageCache: MessageCache,
     private eventBus: EventBus,
     private commandHandler?: CommandHandler,
-    defaultAgentId?: string
+    primaryRunnerKey?: string
   ) {
     if (agentRunnerOrMap instanceof Map) {
       this.agentMap = agentRunnerOrMap;
-      this.defaultAgentId = defaultAgentId || '[default]::claude';
+      this.primaryRunnerKey = primaryRunnerKey || '<unknown>::claude';
     } else {
-      // Backward-compat single-runner path.
-      this.agentMap = new Map([[`[default]::${agentRunnerOrMap.name}`, agentRunnerOrMap]]);
-      this.defaultAgentId = `[default]::${agentRunnerOrMap.name}`;
+      // 测试 / 单 runner 路径：占位 agent name 用 '<unknown>'
+      this.agentMap = new Map([[`<unknown>::${agentRunnerOrMap.name}`, agentRunnerOrMap]]);
+      this.primaryRunnerKey = `<unknown>::${agentRunnerOrMap.name}`;
     }
 
     // 监听中断事件，标记被中断的 session
@@ -111,7 +110,7 @@ export class MessageProcessor {
     if (!this.agentRegistry) return null;
     const agent = this.agentRegistry.resolveByChannel(channelName);
     if (!agent) return null;
-    const globalCm = this.config.chatmode;
+    const globalCm = this.agentRegistry?.resolveByChannel(channelName)?.config?.chatmode;
     return agent.getContext(channelName, chatType, globalCm);
   }
 
@@ -186,7 +185,7 @@ export class MessageProcessor {
    * 处理消息（主入口）
    */
   async processMessage(message: Message): Promise<void> {
-    const idleMs = (this.config.idleMonitor?.timeout ?? 120) * 1000;
+    const idleMs = (this.globalSettings.idleMonitor?.timeout ?? 120) * 1000;
 
     // 先解析会话，再优先用 session.metadata.channelName 精确定位实例级 adapter
     // message.channel 现在存实例名（channelName），可直接用于精确路由
@@ -213,7 +212,7 @@ export class MessageProcessor {
     // 按 session.agentId 选择 agent 后端
     const agent = this.getAgent(channelKey, session.agentId);
 
-    const monitorEnabled = this.config.idleMonitor?.enabled !== false;
+    const monitorEnabled = this.globalSettings.idleMonitor?.enabled !== false;
     const showIdleMonitor = policy.showIdleMonitor(chatType, identityRole);
 
     // 计算是否抑制中间输出（工具活动 + 流式文本）
@@ -326,8 +325,8 @@ export class MessageProcessor {
     const messageId = `${message.channel}_${message.channelId}_${message.timestamp || Date.now()}`;
     const channelKey = session.metadata?.channelName || message.channel;
     const channelInfo = this.resolveChannelInfo(channelKey);
-    // Per-method agent name for stats bucketing (agent.name or '[default]')
-    const agentNameForStats = this.agentRegistry?.resolveByChannel(channelKey)?.name ?? '[default]';
+    // Per-method agent name for stats bucketing (agent.name or '<unknown>')
+    const agentNameForStats = this.agentRegistry?.resolveByChannel(channelKey)?.name ?? '<unknown>';
 
     if (!channelInfo) {
       logger.error(`[MessageProcessor] Unknown channel: ${channelKey}`);
@@ -434,9 +433,9 @@ export class MessageProcessor {
           }
           // 后台任务：静默，不发送输出
         },
-        (options?.flushDelay ?? this.config.flushDelay ?? 3) * 1000,
+        (options?.flushDelay ?? this.agentRegistry?.resolveByChannel(channelKey)?.config?.flush_delay ?? 3) * 1000,
         options?.fileMarkerPattern,
-        this.config.debug?.flusherDiag,
+        this.globalSettings.debug?.flusherDiag,
         isProactive
       );
 
@@ -544,6 +543,15 @@ export class MessageProcessor {
         if (options?.supportsImages) capParts.push('图片输入');
         if (channelInfo.adapter.sendImage) capParts.push('图片输出');
         if (channelInfo.adapter.sendFile) capParts.push('文件发送');
+
+        // Personal layer: persona.md + working memory 注入
+        const owningAgent = this.agentRegistry?.resolveByChannel(channelKey);
+        if (owningAgent) {
+          const persona = (owningAgent as any).getPersona?.();
+          if (persona) contextParts.push(persona);
+          const working = (owningAgent as any).getWorkingMemory?.();
+          if (working) contextParts.push(`[当前关注]\n${working}`);
+        }
 
         contextParts.push(renderPromptSection('runtime', {
           channel: currentChannelType,
@@ -727,7 +735,7 @@ export class MessageProcessor {
         if (isCrossChannel) {
           const targetAdapterName = targetInfo.adapter.channelName;
           const targetChannelType = targetInfo.options?.channelType || targetAdapterName;
-          const ownerPeerId = this.agentRegistry?.getOwner?.(targetAdapterName) ?? getOwner(this.config, targetAdapterName);
+          const ownerPeerId = this.agentRegistry?.getOwner?.(targetAdapterName);
           targetChannelId = ownerPeerId ? (this.sessionManager.getOwnerChatId(targetChannelType, ownerPeerId) ?? '') : '';
           if (!targetChannelId) {
             await adapter.sendText(message.channelId, `\u274c 未找到 ${targetLabel} 的私聊会话，请先在该通道发送一条消息`, taskReplyContext());
@@ -961,7 +969,7 @@ export class MessageProcessor {
           await this.sessionManager.getOrCreateSession(
             message.channel,
             message.channelId,
-            this.config.projects?.defaultPath || process.cwd(),
+            this.agentRegistry?.resolveByChannel(message.channel)?.projectPath || process.cwd(),
             message.threadId
           );
           sendOpts = this.getReplyContext(message);
@@ -1001,7 +1009,7 @@ export class MessageProcessor {
     const session = await this.sessionManager.getOrCreateSession(
       message.channel,
       message.channelId,
-      this.config.projects?.defaultPath || process.cwd(),
+      this.agentRegistry?.resolveByChannel(message.channel)?.projectPath || process.cwd(),
       message.threadId,
       metadata,
       undefined,
@@ -1032,7 +1040,7 @@ export class MessageProcessor {
     thoughtEmitter?: ThoughtEmitter | null
   ): Promise<{ isError: boolean; subtype?: string; errors?: string[]; terminalReason?: string; lastReplyText: string; fullText: string; hasReceivedText: boolean }> {
     // Per-session agent name for stats bucketing
-    const agentNameForStats = this.agentRegistry?.resolveByChannel(session.metadata?.channelName || session.channel)?.name ?? '[default]';
+    const agentNameForStats = this.agentRegistry?.resolveByChannel(session.metadata?.channelName || session.channel)?.name ?? '<unknown>';
     let hasReceivedText = false;
     let hasErrorResult = false;  // 是否已有 tool_result/error 事件输出过错误
     let completeResult: { isError: boolean; subtype?: string; errors?: string[]; terminalReason?: string; lastReplyText: string; fullText: string; hasReceivedText: boolean } = { isError: false, lastReplyText: '', fullText: '', hasReceivedText: false };

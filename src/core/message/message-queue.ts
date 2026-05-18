@@ -13,7 +13,7 @@ interface QueuedMessage {
   reject: (error: Error) => void;
 }
 
-const DEFAULT_AGENT_NAME = '[default]';
+const DEFAULT_AGENT_NAME = '<unknown>';
 
 export class MessageQueue {
   private queues = new Map<string, QueuedMessage[]>();

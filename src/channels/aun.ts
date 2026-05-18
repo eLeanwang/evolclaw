@@ -6,10 +6,11 @@ import os from 'os';
 import { logger, localTimestamp } from '../utils/logger.js';
 import type { ChannelPlugin, ChannelInstance } from '../core/channel-loader.js';
 import type { Config, ReplyContext, AunChannelConfig, AidConnectionState, AidStatus } from '../types.js';
-import { normalizeChannelInstances, getChannelShowActivities } from '../config.js';
+import { normalizeChannelInstances, getChannelShowActivities } from '../utils/channel-helpers.js';
 import { resolvePaths, getPackageRoot } from '../paths.js';
 import { saveToUploads, sanitizeFileName } from '../utils/media-cache.js';
 import { appendAidEvent } from '../utils/instance-registry.js';
+import type { AidStatsCollector } from '../utils/aid-stats-collector.js';
 import { getProcessStartTime } from '../utils/process-introspect.js';
 import * as outbox from '../utils/outbox.js';
 
@@ -83,7 +84,7 @@ export interface AUNConfig {
   aunTrace?: boolean;     // 启用数据追踪日志
   aunSdkLog?: boolean;    // 启用 AUN SDK 内部日志（写入 ~/.aun/logs/ts-sdk-YYYYMMDD.log）
   owner?: string;         // Owner AID，用于发送欢迎消息
-  agentName?: string;     // EvolAgent 名（用于 status 表格识别归属，默认 '[default]'）
+  agentName?: string;     // self-agent 的 AID（用于 status 表格识别归属）
   channelName?: string;   // channel 实例名（用于日志/状态聚合）
 }
 
@@ -378,6 +379,7 @@ export class AUNChannel {
 
   // AID 连接状态（供 status 命令聚合展示）
   private aidState: AidConnectionState;
+  private aidStatsCollector?: AidStatsCollector;
 
   constructor(private config: AUNConfig) {
     if (config.aunTrace) {
@@ -386,7 +388,7 @@ export class AUNChannel {
     }
     this.aidState = {
       aid: config.aid,
-      agentName: config.agentName ?? '[default]',
+      agentName: config.agentName ?? '<unknown>',
       channelName: config.channelName ?? 'aun',
       status: 'disabled',
       reconnectCount: 0,
@@ -397,6 +399,10 @@ export class AUNChannel {
   /** Snapshot of AID connection state for status / IPC aggregation */
   getAidState(): AidConnectionState {
     return { ...this.aidState, flapCount: this.flapCount };
+  }
+
+  setAidStatsCollector(collector: AidStatsCollector): void {
+    this.aidStatsCollector = collector;
   }
 
   private setAidStatus(status: AidStatus, extra?: Partial<AidConnectionState>): void {
@@ -587,9 +593,10 @@ export class AUNChannel {
       const deviceId = (this.client as any)._device_id ?? '';
       this._chatId = this._aid ? `${this._aid}:${deviceId}:` : '';
       this._selfName = this.loadSelfName(aidName);
+      if (this._selfName && this.aidStatsCollector) this.aidStatsCollector.setSelfName(this.config.aid, this._selfName);
       this.connected = true;
       this.connectedAt = Date.now();
-      this.setAidStatus('connected', { lastConnectedAt: Date.now(), lastError: undefined });
+      this.setAidStatus('connected', { lastConnectedAt: Date.now(), lastError: undefined, gatewayUrl: (this.client as any)?._gatewayUrl });
 
       // Workaround: SDK e2ee uses _identity.cert for sender_cert_fingerprint;
       // if cert is missing, it falls back to public key SPKI fingerprint which
@@ -887,6 +894,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
 
     logger.info(`${this.logPrefix()} P2P dispatched: from=${shortAid}(${displayName}) mid=${messageId} encrypt=${msgEncrypted} text=${finalText.slice(0, 60)}`);
     appendAidEvent({ ts: Date.now(), iso: new Date().toISOString(), event: 'message_in', aid: this.config.aid, from: fromAid, msgId: messageId, kind: 'text', len: finalText.length });
+    this.aidStatsCollector?.recordInbound(this.config.aid, fromAid, Buffer.byteLength(finalText, 'utf-8'), finalText);
     const replyContext: ReplyContext = { metadata: { encrypted: msgEncrypted } };
     if (taskId) replyContext.threadId = taskId;
     this.dispatchMessage({
@@ -938,7 +946,8 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     // 短 echo 快速通道：连通性测试要尽量低延迟，命中后绕过所有 await（sessionModeResolver / 后续 mention 过滤）
     {
       const firstLineFast = text.split('\n')[0] || '';
-      if (/echo/i.test(firstLineFast) && firstLineFast.trim().length <= 10) {
+      const echoLineCount = text.split('\n').length;
+      if (/echo/i.test(firstLineFast) && firstLineFast.trim().length <= 10 && echoLineCount <= 2) {
         this.acknowledgeImmediately(messageId, seq);
         const msgEncryptedFast = !!(msg.e2ee);
         const peerInfo = this.peerInfoCached(senderAid);
@@ -1007,8 +1016,10 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     const mentionedAll = payloadMentions.includes('all');
 
     // Echo 机制优先于 mention 过滤：消息第一行包含 echo 时触发
+    // 超过 2 行说明已被 trace 过，是回声的回声，丢弃防止链式爆炸
     const firstLineGroup = text.split('\n')[0] || '';
-    if (/echo/i.test(firstLineGroup)) {
+    const echoLineCountGroup = text.split('\n').length;
+    if (/echo/i.test(firstLineGroup) && echoLineCountGroup <= 2) {
       // 短 echo（≤10 字符）已在前面的快速通道命中并 return，这里只处理长 echo
       // >10 字符：追加 trace,存 pending echo,跳过 mention 过滤继续走 Agent 流程
       const echoTs = () => {
@@ -1024,6 +1035,11 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
         receiveTs: Date.now(),
       });
       // 继续走正常 Agent 流程（下面的代码会 dispatch）
+    } else if (/echo/i.test(firstLineGroup) && echoLineCountGroup > 2) {
+      // 回声炸弹：已被 trace 过的 echo，直接丢弃
+      this.acknowledgeImmediately(messageId, seq);
+      logger.info(`${this.logPrefix()} Group dropped: echo bomb (lines=${echoLineCountGroup} group=${groupId} sender=${senderAid} mid=${messageId})`);
+      return;
     } else {
       // 非 echo 消息：正常 mention 过滤
       if (dispatchMode === 'mention' && !mentionedSelf && !mentionedAll) {
@@ -1091,6 +1107,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
 
     logger.info(`${this.logPrefix()} Group dispatched: group=${groupId} sender=${shortAid}(${displayName}) mode=${dispatchMode} mid=${messageId} text=${finalText.slice(0, 60)}`);
     appendAidEvent({ ts: Date.now(), iso: new Date().toISOString(), event: 'message_in', aid: this.config.aid, from: senderAid, msgId: messageId, kind: 'text', len: finalText.length, groupId });
+    this.aidStatsCollector?.recordInbound(this.config.aid, senderAid, Buffer.byteLength(finalText, 'utf-8'), finalText);
     this.dispatchMessage({
       channelId: groupId,
       groupId,
@@ -1127,14 +1144,22 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     }
 
     // Echo 机制：消息第一行包含 "echo"（不区分大小写）且原始内容 ≤10 字符时，直接回声
+    // 超过 2 行说明已被 trace 过，是回声的回声，丢弃防止链式爆炸
     const firstLine = event.text.split('\n')[0] || '';
-    if (/echo/i.test(firstLine) && firstLine.trim().length <= 10) {
+    const echoLineCountPrivate = event.text.split('\n').length;
+    if (/echo/i.test(firstLine) && firstLine.trim().length <= 10 && echoLineCountPrivate <= 2) {
       this.handleEcho(event);
       return;
     }
 
+    // 回声炸弹：超过 2 行的 echo 已被 trace 过，直接丢弃
+    if (/echo/i.test(firstLine) && echoLineCountPrivate > 2) {
+      logger.info(`${this.logPrefix()} Dropped: echo bomb (lines=${echoLineCountPrivate} mid=${event.messageId} chat=${event.chatType})`);
+      return;
+    }
+
     // 长 echo（>10 字符）：存 pending,继续交给 agent 处理
-    if (/echo/i.test(firstLine) && firstLine.trim().length > 10) {
+    if (/echo/i.test(firstLine) && firstLine.trim().length > 10 && echoLineCountPrivate <= 2) {
       const echoTs = () => {
         const d = new Date();
         return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}.${String(d.getMilliseconds()).padStart(3, '0')}`;
@@ -1269,7 +1294,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       this.connectedAt = Date.now();
       this.lastReconnectLogTime = 0;
       this.lastReconnectLogAttempt = 0;
-      this.setAidStatus('connected', { lastConnectedAt: Date.now(), lastError: undefined });
+      this.setAidStatus('connected', { lastConnectedAt: Date.now(), lastError: undefined, gatewayUrl: (this.client as any)?._gatewayUrl });
       this.trace('IN', 'connection.state', data);
       logger.info(`${this.logPrefix()} Connected`);
       // 不在这里清 flapCount —— 短命连接一上来就会触发本分支，
@@ -1562,6 +1587,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
         } else {
           logger.info(`${this.logPrefix()} group.send ok: group=${channelId} mid=${result.message_id} encrypt=${encrypt} text=${finalText.slice(0, 60)}`);
           appendAidEvent({ ts: Date.now(), iso: new Date().toISOString(), event: 'message_out', aid: this.config.aid, to: channelId, msgId: result.message_id, kind: 'text', len: finalText.length, groupId: channelId });
+          this.aidStatsCollector?.recordOutbound(this.config.aid, channelId, Buffer.byteLength(finalText, 'utf-8'), finalText);
         }
       } else {
         params.to = targetAid;
@@ -1571,6 +1597,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
         } else {
           logger.info(`${this.logPrefix()} message.send ok: to=${this.peerLabel(targetAid)} mid=${result.message_id} encrypt=${encrypt} text=${finalText.slice(0, 60)}`);
           appendAidEvent({ ts: Date.now(), iso: new Date().toISOString(), event: 'message_out', aid: this.config.aid, to: targetAid, msgId: result.message_id, kind: 'text', len: finalText.length });
+          this.aidStatsCollector?.recordOutbound(this.config.aid, targetAid, Buffer.byteLength(finalText, 'utf-8'), finalText);
         }
       }
       return true;
@@ -2017,12 +2044,16 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     };
   }
 
-  /** 读取本地 agent.md 中的 name（用于身份上下文展示） */
+  /** 读取本地 agent.md 中的 name（用于身份上下文展示），若本地不存在则尝试远程拉取 */
   private loadSelfName(aid: string): string | undefined {
     try {
       const aidName = aid.startsWith('@') ? aid.slice(1) : aid;
       const agentMdPath = path.join(os.homedir(), '.aun', 'AIDs', aidName, 'agent.md');
-      if (!fs.existsSync(agentMdPath)) return undefined;
+      if (!fs.existsSync(agentMdPath)) {
+        // 异步拉取，不阻塞连接流程
+        this.fetchAndCacheSelfName(aidName);
+        return undefined;
+      }
       const content = fs.readFileSync(agentMdPath, 'utf-8');
       const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
       if (!fmMatch) return undefined;
@@ -2030,6 +2061,26 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       return nameMatch?.[1]?.trim() || undefined;
     } catch {
       return undefined;
+    }
+  }
+
+  private async fetchAndCacheSelfName(aidName: string): Promise<void> {
+    try {
+      const { agentmdGet } = await import('../aid/index.js');
+      const content = await agentmdGet(aidName);
+      if (content) {
+        const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
+        if (fmMatch) {
+          const nameMatch = fmMatch[1].match(/^name:\s*["']?(.+?)["']?\s*$/m);
+          const name = nameMatch?.[1]?.trim();
+          if (name) {
+            this._selfName = name;
+            if (this.aidStatsCollector) this.aidStatsCollector.setSelfName(this.config.aid, name);
+          }
+        }
+      }
+    } catch {
+      // ignore — name will remain undefined
     }
   }
 

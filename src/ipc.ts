@@ -2,6 +2,7 @@ import net from 'net';
 import fs from 'fs';
 import { logger } from './utils/logger.js';
 import type { EvolAgentRegistryHandle, AidConnectionState } from './types.js';
+import type { AidStatsSnapshot } from './utils/aid-stats-collector.js';
 
 const isWindows = process.platform === 'win32';
 const isNamedPipe = (p: string) => isWindows && p.startsWith('\\\\.\\pipe\\');
@@ -46,11 +47,13 @@ export interface IpcCtlResponse {
 type StatusProvider = () => IpcStatusResponse;
 type CommandExecutor = (cmd: string, sessionId: string) => Promise<IpcCtlResponse>;
 type AunAidProvider = () => AidConnectionState[];
+type AunAidStatsProvider = () => AidStatsSnapshot[];
 
 export class IpcServer {
   private server: net.Server | null = null;
   private agentRegistry?: EvolAgentRegistryHandle;
   private aunAidProvider?: AunAidProvider;
+  private aunAidStatsProvider?: AunAidStatsProvider;
 
   constructor(
     private socketPath: string,
@@ -66,6 +69,11 @@ export class IpcServer {
   /** Inject AUN AID state aggregator for aun-aids IPC handler */
   setAunAidProvider(provider: AunAidProvider): void {
     this.aunAidProvider = provider;
+  }
+
+  /** Inject AUN AID stats provider for aun-aid-stats IPC handler */
+  setAunAidStatsProvider(provider: AunAidStatsProvider): void {
+    this.aunAidStatsProvider = provider;
   }
 
   start(): void {
@@ -127,6 +135,10 @@ export class IpcServer {
         const aids = this.aunAidProvider ? this.aunAidProvider() : [];
         return { ok: true, aids };
       }
+      case 'aun-aid-stats': {
+        const stats = this.aunAidStatsProvider ? this.aunAidStatsProvider() : [];
+        return { ok: true, stats };
+      }
       case 'ctl': {
         if (!this.commandExecutor) return { ok: false, error: 'ctl not configured' };
         const { cmd: slashCmd, sessionId } = cmd as unknown as IpcCtlRequest;
@@ -160,6 +172,30 @@ export class IpcServer {
           if (!this.agentRegistry.reload) return { ok: false, error: 'EvolAgentRegistry.reload not available' };
           await this.agentRegistry.reload(name, hooks);
           return { ok: true, result: `Agent "${name}" reloaded` };
+        } catch (e: any) {
+          return { ok: false, error: e?.message || String(e) };
+        }
+      }
+      case 'evolagent.load': {
+        if (!this.agentRegistry) return { ok: false, error: 'EvolAgentRegistry not available' };
+        const aid = cmd.aid;
+        if (!aid || typeof aid !== 'string') return { ok: false, error: 'missing aid' };
+        const hotLoad = (globalThis as any).__evolclaw_hotLoadAgent;
+        if (!hotLoad) return { ok: false, error: 'Hot-load handler not initialized' };
+        try {
+          await hotLoad(aid);
+          return { ok: true, result: `Agent "${aid}" loaded and online` };
+        } catch (e: any) {
+          return { ok: false, error: e?.message || String(e) };
+        }
+      }
+      case 'evolagent.resync': {
+        if (!this.agentRegistry) return { ok: false, error: 'EvolAgentRegistry not available' };
+        const resync = (globalThis as any).__evolclaw_resyncAgents;
+        if (!resync) return { ok: false, error: 'Resync handler not initialized' };
+        try {
+          const results = await resync();
+          return { ok: true, results };
         } catch (e: any) {
           return { ok: false, error: e?.message || String(e) };
         }

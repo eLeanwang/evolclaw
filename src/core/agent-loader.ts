@@ -18,7 +18,7 @@ export interface AgentCallbacks {
 
 /** Single runner instance returned by a plugin. */
 export interface AgentInstance {
-  /** EvolAgent name (e.g. 'review' or '[default]') that owns this runner. */
+  /** EvolAgent name (=AID), e.g. 'review-bot.agentid.pub'. */
   evolagentName: string;
   /** Baseagent type (e.g. 'claude', 'codex', 'gemini'). */
   baseagent: string;
@@ -28,20 +28,20 @@ export interface AgentInstance {
 
 /** Plugin interface — one plugin per baseagent type. */
 export interface AgentPlugin {
-  /** Baseagent name (e.g., 'claude'). Matches `agent.config.agents.<name>`. */
+  /** Baseagent name (e.g., 'claude'). Matches `agent.config.baseagents.<name>`. */
   readonly name: string;
 
   /**
    * Whether this plugin should produce a runner for `agent`.
    * Plugins must return false when the EvolAgent doesn't declare this baseagent.
    */
-  isEnabled(globalConfig: Config, agent: EvolAgent): boolean;
+  isEnabled(agent: EvolAgent): boolean;
 
   /**
    * Create a runner for `agent`. Returns null if creation should be skipped
    * (e.g. missing required credentials after override resolution).
    */
-  createAgent(globalConfig: Config, agent: EvolAgent, callbacks: AgentCallbacks): AgentInstance | null;
+  createAgent(agent: EvolAgent, callbacks: AgentCallbacks): AgentInstance | null;
 }
 
 /** Agent Loader — produces one runner per (EvolAgent × baseagent). */
@@ -57,27 +57,23 @@ export class AgentLoader {
   }
 
   /**
-   * Iterate over all EvolAgents (DefaultAgent + each named agent in registry)
-   * × all registered plugins. Each successful (agent, plugin) pair yields one
-   * runner instance.
+   * Iterate over all EvolAgents in the registry × all registered plugins.
+   * Each successful (agent, plugin) pair yields one runner instance.
    */
-  createAll(globalConfig: Config, registry: EvolAgentRegistry, callbacks: AgentCallbacks): AgentInstance[] {
+  createAll(registry: EvolAgentRegistry, callbacks: AgentCallbacks): AgentInstance[] {
     const instances: AgentInstance[] = [];
 
-    const allAgents: EvolAgent[] = [];
-    const def = registry.get('[default]');
-    if (def) allAgents.push(def);
-    for (const a of registry.runnableAgents()) allAgents.push(a);
+    const allAgents = registry.runnableAgents();
 
     for (const agent of allAgents) {
       for (const [pluginName, plugin] of this.plugins) {
-        if (!plugin.isEnabled(globalConfig, agent)) {
+        if (!plugin.isEnabled(agent)) {
           logger.debug(`Plugin '${pluginName}' disabled for agent '${agent.name}', skipping`);
           continue;
         }
 
         try {
-          const instance = plugin.createAgent(globalConfig, agent, callbacks);
+          const instance = plugin.createAgent(agent, callbacks);
           if (!instance) {
             logger.debug(`Plugin '${pluginName}' returned null for agent '${agent.name}', skipping`);
             continue;
