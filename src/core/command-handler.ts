@@ -2070,6 +2070,8 @@ export class CommandHandler {
       }
 
       const projectName = this.getProjectName(session.projectPath);
+      const owningAgent = this.getOwningAgent(channel);
+      const agentName = owningAgent?.name ?? 'DefaultAgent';
 
       const health = await this.sessionManager.getHealthStatus(session.id);
       const timeSinceSuccess = Date.now() - health.lastSuccessTime;
@@ -2093,7 +2095,7 @@ export class CommandHandler {
       const chatModeLine = `会话模式: ${sessionMode}`;
       if (isAdmin) {
         lines.push(
-          `📊 ${isThread ? '话题' : '会话'}状态：`,
+          `📊 ${isThread ? '话题' : '会话'}状态 (Agent: ${agentName})：`,
           `渠道: ${this.resolveChannelType(channel)} / 项目: ${projectName} / 会话: ${session.name || '(未命名)'}`,
           `会话ID: ${session.id}`,
           `项目路径: ${session.projectPath}`,
@@ -2112,7 +2114,7 @@ export class CommandHandler {
         );
       } else {
         lines.push(
-          `📊 ${isThread ? '话题' : '会话'}状态：`,
+          `📊 ${isThread ? '话题' : '会话'}状态 (Agent: ${agentName})：`,
           `渠道: ${channel} / 项目: ${projectName} / ${session.agentId}会话`,
           `状态: ${sessionStatus}`,
           chatModeLine,
@@ -2141,7 +2143,7 @@ export class CommandHandler {
         }
       }
 
-      const projectPath = session?.projectPath || this.getEffectiveDefaultPath(channel);
+      const projectPath = this.getEffectiveDefaultPath(channel);
 
       const newSession = await this.sessionManager.createNewSession(
         channel,
@@ -2168,7 +2170,7 @@ export class CommandHandler {
         await agent.closeSession(session.id);
       }
 
-      return `✓ 已创建新会话${sessionName ? `: ${sessionName}` : ''}\n  之前的对话历史已保留，可通过 /s 查看`;
+      return `✓ 已创建新会话${sessionName ? `: ${sessionName}` : ''}\n  项目: ${this.getProjectName(projectPath)}\n  之前的对话历史已保留，可通过 /s 查看`;
     }
 
     // /check 命令：检查渠道状态（guest 可用，详情仅 admin）/ 重连指定渠道（admin only）
@@ -2192,7 +2194,8 @@ export class CommandHandler {
       }
 
       // Default: show system health check (non-admin 仅看摘要)
-      const lines: string[] = ['📡 渠道状态：'];
+      const checkAgentName = checkOwningAgent?.name ?? 'DefaultAgent';
+      const lines: string[] = [`📡 渠道状态 (Agent: ${checkAgentName})：`];
       // Group by channelType
       const groups = new Map<string, Array<{ name: string; status: string }>>();
       for (const [name] of this.adapters) {
@@ -2220,10 +2223,14 @@ export class CommandHandler {
 
       for (const [type, instances] of groups) {
         if (instances.length === 1) {
-          lines.push(`  ${instances[0].name}: ${instances[0].status}`);
+          lines.push(`  ${type}: ${instances[0].status}`);
         } else {
-          const parts = instances.map(i => `${i.name} ${i.status}`);
-          lines.push(`  ${type}: [${parts.join(', ')}]`);
+          const parts = instances.map(i => {
+            const seg = i.name.split('#');
+            const instName = seg.length >= 3 ? seg.slice(2).join('#') : i.name;
+            return `${i.status.includes('✓') ? '✓' : '⏳'} ${instName}`;
+          });
+          lines.push(`  ${type}: ${parts.join(', ')}`);
         }
       }
 

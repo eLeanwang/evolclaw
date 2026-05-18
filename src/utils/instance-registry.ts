@@ -10,8 +10,9 @@
  */
 import fs from 'fs';
 import path from 'path';
+import { execFileSync } from 'child_process';
 import { resolvePaths } from '../paths.js';
-import { isProcessRunning, killProcess } from './cross-platform.js';
+import { isProcessRunning, killProcess, isWindows, findProcesses } from './cross-platform.js';
 import { getProcessStartTime, startTimeMatches } from './process-introspect.js';
 
 // ── Types ──
@@ -357,4 +358,111 @@ export function removeAll(pid?: number): void {
 
 function killPid(pid: number): void {
   killProcess(pid, true);
+}
+
+// ── Orphan detection (cross-HOME) ──
+
+export interface OrphanProcess {
+  pid: number;
+  evolclawHome: string | null;
+  cmdline: string;
+}
+
+/**
+ * 扫所有 node 进程中跑 dist/index.js 的 PID，减去当前 HOME 已登记的 main PID。
+ *
+ * 用途：检测跨 HOME 残留的 evolclaw 主进程（例如测试套件 spawn 后未清理、
+ * 旧版本 pidfile 模式遗留等），由 cmdStart/cmdRestart 在启动前提示用户。
+ *
+ * Linux 下额外读取 /proc/<pid>/environ 提取 EVOLCLAW_HOME 用于展示。
+ * Windows / macOS 取不到环境变量时 evolclawHome 为 null。
+ *
+ * 不会主动 kill——清理由调用方决定（cmdRestart --kill-orphans 才执行）。
+ */
+export function findOrphanProcesses(): OrphanProcess[] {
+  // 1. 已登记 PID（自己 HOME 下的 main + 自己进程）
+  const known = new Set<number>([process.pid]);
+  const status = scanInstances();
+  for (const m of status.mains) known.add(m.record.pid);
+  for (const m of status.restartMonitors) known.add(m.record.pid);
+
+  // 2. 系统中所有跑 dist/index.js 的 node 进程
+  const candidates = findProcesses('node.*dist/index.js');
+
+  const orphans: OrphanProcess[] = [];
+  for (const pid of candidates) {
+    if (known.has(pid)) continue;
+    if (!isProcessRunning(pid)) continue;
+
+    const cmdline = readCmdline(pid);
+    // 二次验证：确实是 evolclaw 的 dist/index.js
+    if (!/dist[\\/]index\.js/.test(cmdline)) continue;
+
+    orphans.push({
+      pid,
+      evolclawHome: readEvolclawHome(pid),
+      cmdline,
+    });
+  }
+  return orphans;
+}
+
+/**
+ * SIGKILL 所有传入的孤儿 PID。返回成功杀掉的 PID 列表（即调用后已停的）。
+ */
+export function killOrphans(orphans: OrphanProcess[]): number[] {
+  const killed: number[] = [];
+  for (const o of orphans) {
+    try {
+      killProcess(o.pid, true);
+      killed.push(o.pid);
+    } catch {}
+  }
+  return killed;
+}
+
+function readCmdline(pid: number): string {
+  if (isWindows) {
+    try {
+      const out = execFileSync(
+        'wmic',
+        ['process', 'where', `ProcessId=${pid}`, 'get', 'CommandLine', '/value'],
+        { encoding: 'utf-8', timeout: 3000, stdio: ['pipe', 'pipe', 'pipe'] },
+      );
+      const m = out.match(/CommandLine=([^\r\n]+)/);
+      return m ? m[1].trim() : '';
+    } catch {
+      return '';
+    }
+  }
+  try {
+    return fs.readFileSync(`/proc/${pid}/cmdline`, 'utf-8').replace(/\0/g, ' ').trim();
+  } catch {
+    // macOS / 权限不足
+    try {
+      return execFileSync('ps', ['-p', String(pid), '-o', 'args='], {
+        encoding: 'utf-8',
+        timeout: 3000,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      }).trim();
+    } catch {
+      return '';
+    }
+  }
+}
+
+function readEvolclawHome(pid: number): string | null {
+  // Linux: /proc/<pid>/environ
+  if (!isWindows && process.platform !== 'darwin') {
+    try {
+      const env = fs.readFileSync(`/proc/${pid}/environ`, 'utf-8');
+      for (const entry of env.split('\0')) {
+        if (entry.startsWith('EVOLCLAW_HOME=')) return entry.slice('EVOLCLAW_HOME='.length);
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }
+  return null;
 }

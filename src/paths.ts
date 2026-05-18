@@ -108,13 +108,10 @@ export function syncKitsFromPackage(): void {
   if (!fs.existsSync(srcKits)) return;
 
   const destKits = p.kitsDir;
-<<<<<<< HEAD
   // 包内自用场景：EVOLCLAW_HOME 等于包根（开发仓 / 用户家目录恰好是安装目录），
   // src === dest 会让 cpSync 抛 ERR_FS_CP_EINVAL。直接跳过同步。
   if (path.resolve(srcKits) === path.resolve(destKits)) return;
 
-=======
->>>>>>> b51e0758df68875c2e3c6a24154ad6633f1fb2cd
   // 用 .kits-version 文件跟踪已安装的版本
   const versionFile = path.join(destKits, '.kits-version');
   const pkgJsonPath = path.join(getPackageRoot(), 'package.json');

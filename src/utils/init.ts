@@ -354,8 +354,8 @@ async function offerRichContentRenderer(rl: readline.Interface, config: any): Pr
   const answer = (await ask(rl, '\n是否启用 LaTeX + Mermaid 渲染模块（约 35MB）？[y/N] ')).trim().toLowerCase();
   const enableRich = answer === 'y' || answer === 'yes';
 
-  // 记录用户选择到全局配置
-  config.enableRichContent = enableRich;
+  // 记录用户选择到全局配置（DefaultsConfig.enable_rich_content）
+  config.enable_rich_content = enableRich;
 
   if (!enableRich) {
     console.log('  ✓ 已跳过富内容渲染模块安装');
@@ -376,7 +376,7 @@ async function offerRichContentRenderer(rl: readline.Interface, config: any): Pr
     }
     console.log('  → 可稍后手动安装: npm install -g katex mermaid');
     // 安装失败时，将配置设为 false
-    config.enableRichContent = false;
+    config.enable_rich_content = false;
   }
 }
 
