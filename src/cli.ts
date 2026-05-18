@@ -1244,9 +1244,12 @@ async function cmdWatchAid(): Promise<void> {
   const RED = useColor ? '\x1b[31m' : '';
   const CLR_LINE = '\x1b[2K';
 
+  const watchStartedAt = new Date();
+  const watchStartStr = `${String(watchStartedAt.getHours()).padStart(2, '0')}:${String(watchStartedAt.getMinutes()).padStart(2, '0')}:${String(watchStartedAt.getSeconds()).padStart(2, '0')}`;
+
   const COL_AID = 30;
   const COL_STATUS = 16;
-  const COL_UPTIME = 10;
+  const COL_UPTIME = 12;
   const COL_RECV = 6;
   const COL_SENT = 6;
   const COL_BIN = 10;
@@ -1259,11 +1262,13 @@ async function cmdWatchAid(): Promise<void> {
     const sec = Math.floor(ms / 1000);
     if (sec < 60) return `${sec}s`;
     const min = Math.floor(sec / 60);
-    if (min < 60) return `${min}m${sec % 60}s`;
+    const s = sec % 60;
+    if (min < 60) return `${min}m${String(s).padStart(2, '0')}s`;
     const hour = Math.floor(min / 60);
-    if (hour < 24) return `${hour}h${min % 60}m`;
+    const m = min % 60;
+    if (hour < 24) return `${hour}h${String(m).padStart(2, '0')}m${String(s).padStart(2, '0')}s`;
     const day = Math.floor(hour / 24);
-    return `${day}d${hour % 24}h`;
+    return `${day}d${hour % 24}h${String(m).padStart(2, '0')}m`;
   }
 
   function renderHeader(): string {
@@ -1280,7 +1285,7 @@ async function cmdWatchAid(): Promise<void> {
       padRight('PEERS', COL_PEERS);
   }
 
-  function renderRow(aid: any, stats: any): string[] {
+  function renderRow(aid: any, stats: any, projectPath?: string): string[] {
     const aidLabel = aid.aid.length > COL_AID - 2 ? aid.aid.slice(0, COL_AID - 4) + '..' : aid.aid;
     const statusLabel = AID_STATUS_LABELS[aid.status] || aid.status;
     const now = Date.now();
@@ -1318,9 +1323,11 @@ async function cmdWatchAid(): Promise<void> {
         msgPreview = `${GREEN}↓ ${stats.lastReceivedText.replace(/\n/g, ' ').slice(0, 60)}${RST}`;
       }
     }
-    const subLine = `    ${nameColor}${namePart}${nameReset}${msgPreview ? '  ' + msgPreview : ''}`;
+    const subLine1 = `    ${nameColor}${namePart}${nameReset}${msgPreview ? '  ' + msgPreview : ''}`;
+    const dirLabel = projectPath || '—';
+    const subLine2 = `${DIM}    ${dirLabel}${RST}`;
 
-    return [mainLine, subLine];
+    return [mainLine, subLine1, subLine2];
   }
 
   let lastLineCount = 0;
@@ -1329,10 +1336,11 @@ async function cmdWatchAid(): Promise<void> {
     const lines: string[] = [];
 
     // Query daemon — may be offline
-    const [aidsResp, statsResp, statusResp] = await Promise.all([
+    const [aidsResp, statsResp, statusResp, agentsResp] = await Promise.all([
       ipcQuery<{ ok: boolean; aids: any[] }>(p.socket, { type: 'aun-aids' }),
       ipcQuery<{ ok: boolean; stats: any[] }>(p.socket, { type: 'aun-aid-stats' }),
       ipcQuery<any>(p.socket, { type: 'status' }),
+      ipcQuery<{ ok: boolean; agents: any[] }>(p.socket, { type: 'evolagent.list' }),
     ]);
 
     const daemonOnline = statusResp !== null;
@@ -1341,14 +1349,29 @@ async function cmdWatchAid(): Promise<void> {
     const statsMap = new Map<string, any>();
     for (const s of stats) statsMap.set(s.aid, s);
 
+    // Map agentName → projectPath
+    const agents = agentsResp?.agents ?? [];
+    const agentProjectMap = new Map<string, string>();
+    for (const a of agents) {
+      if (a.name && a.projectPath) agentProjectMap.set(a.name, a.projectPath);
+    }
+
     const now = new Date();
     const timeStr = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
+
+    // Compute daemon start time
+    let startedAtStr = '';
+    if (daemonOnline && statusResp?.uptime) {
+      const startedAt = new Date(Date.now() - statusResp.uptime);
+      startedAtStr = `${String(startedAt.getHours()).padStart(2, '0')}:${String(startedAt.getMinutes()).padStart(2, '0')}:${String(startedAt.getSeconds()).padStart(2, '0')}`;
+    }
 
     const statusIndicator = daemonOnline
       ? `${GREEN}● Running${RST}`
       : `${RED}● Offline${RST}`;
 
-    lines.push(`${BOLD}${CYAN}📊 EvolClaw AID Monitor${RST}  ${statusIndicator}  ${DIM}${timeStr} | Refresh: 1s | ESC to exit${RST}`);
+    const startInfo = startedAtStr ? ` | Started: ${startedAtStr}` : '';
+    lines.push(`${BOLD}${CYAN}📊 EvolClaw AID Monitor${RST}  ${statusIndicator}  ${DIM}${timeStr} | Watch: ${watchStartStr}${startInfo} | Refresh: 1s | ESC to exit${RST}`);
     lines.push('');
 
     if (!daemonOnline) {
@@ -1363,7 +1386,8 @@ async function cmdWatchAid(): Promise<void> {
       lines.push(`${DIM}  ${'─'.repeat(lineWidth)}${RST}`);
       for (const aid of aids) {
         const s = statsMap.get(aid.aid);
-        lines.push(...renderRow(aid, s));
+        const projPath = agentProjectMap.get(aid.agentName);
+        lines.push(...renderRow(aid, s, projPath));
       }
       lines.push('');
     }
@@ -2170,6 +2194,19 @@ async function cmdCtl(args: string[]): Promise<void> {
 
 // ==================== Agent ====================
 
+/**
+ * 从 rootPath + AID 合成 agent 工作目录路径。
+ * 规则：`<rootPath>/<aid第一段>`，重复时加 `~1`、`~2`...
+ */
+function deriveAgentProjectPath(rootPath: string, aid: string): string {
+  const baseName = aid.split('.')[0];
+  let candidate = path.join(rootPath, baseName);
+  if (!fs.existsSync(candidate)) return candidate;
+  let i = 1;
+  while (fs.existsSync(`${candidate}~${i}`)) i++;
+  return `${candidate}~${i}`;
+}
+
 async function cmdAgent(args: string[]): Promise<void> {
   const sub = args[0];
 
@@ -2293,15 +2330,22 @@ async function cmdAgentSyncAids(): Promise<void> {
 
   console.log(`模板 agent: ${templateAgent.aid}`);
 
-  // 4. 为缺失的 AID 克隆 agent config
+  // 4. 为缺失的 AID 克隆 agent config（每个 agent 独立工作目录）
+  const defaults = loadDefaults();
+  const rootPath = defaults?.projects?.rootPath
+    || (defaults?.projects?.defaultPath && path.dirname(defaults.projects.defaultPath))
+    || path.join(os.homedir(), 'evolclaw-projects');
+
   const created: string[] = [];
   for (const aid of localAids) {
     if (existingAids.has(aid)) continue;
 
+    const projectPath = deriveAgentProjectPath(rootPath, aid);
     const newConfig = {
       ...JSON.parse(JSON.stringify(templateAgent)),
       aid,
       channels: [],
+      projects: { defaultPath: projectPath },
     };
     newConfig.$schema_version = CONFIG_SCHEMA_VERSION;
 
@@ -2479,12 +2523,12 @@ async function cmdAgentNew(suggestedName: string): Promise<void> {
     let suggestedProjectPath = '';
     try {
       const defaults = loadDefaults();
-      const defaultProjectsRoot = defaults?.projects?.defaultPath
-        ? path.dirname(defaults.projects.defaultPath)
-        : path.join(os.homedir(), 'evolclaw-projects');
-      suggestedProjectPath = path.join(defaultProjectsRoot, aid.split('.')[0]);
+      const rootPath = defaults?.projects?.rootPath
+        || defaults?.projects?.defaultPath && path.dirname(defaults.projects.defaultPath)
+        || path.join(os.homedir(), 'evolclaw-projects');
+      suggestedProjectPath = deriveAgentProjectPath(rootPath, aid);
     } catch {
-      suggestedProjectPath = path.join(os.homedir(), 'evolclaw-projects', aid.split('.')[0]);
+      suggestedProjectPath = deriveAgentProjectPath(path.join(os.homedir(), 'evolclaw-projects'), aid);
     }
     const projectInput = (await ask(`Project path [${suggestedProjectPath}]: `)).trim();
     const projectPath = projectInput || suggestedProjectPath;

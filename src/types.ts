@@ -550,6 +550,8 @@ export interface ModelsBlock {
 }
 
 export interface ProjectsBlock {
+  /** 工作目录根路径——创建 agent 时自动合成 `<rootPath>/<aid第一段>` 作为 defaultPath */
+  rootPath?: string;
   defaultPath?: string;
   list?: Record<string, string>;
   autoCreate?: boolean;
