@@ -1250,6 +1250,7 @@ async function cmdWatchAid(): Promise<void> {
   const COL_AID = 30;
   const COL_STATUS = 16;
   const COL_UPTIME = 12;
+  const COL_RECONN = 7;
   const COL_RECV = 6;
   const COL_SENT = 6;
   const COL_BIN = 10;
@@ -1276,6 +1277,7 @@ async function cmdWatchAid(): Promise<void> {
       padRight('AID', COL_AID) +
       padRight('STATUS', COL_STATUS) +
       padRight('UPTIME', COL_UPTIME) +
+      padRight('RECONN', COL_RECONN) +
       padRight('RECV', COL_RECV) +
       padRight('SENT', COL_SENT) +
       padRight('BYTES IN', COL_BIN) +
@@ -1299,6 +1301,7 @@ async function cmdWatchAid(): Promise<void> {
       padRight(aidLabel, COL_AID) +
       padRight(statusLabel, COL_STATUS) +
       padRight(uptime, COL_UPTIME) +
+      padRight(String(aid.reconnectCount ?? 0), COL_RECONN) +
       padRight(String(stats?.messagesReceived ?? 0), COL_RECV) +
       padRight(String(stats?.messagesSent ?? 0), COL_SENT) +
       padRight(formatBytes(stats?.bytesReceived ?? 0), COL_BIN) +
@@ -1382,7 +1385,7 @@ async function cmdWatchAid(): Promise<void> {
       lines.push('');
     } else {
       lines.push(`${DIM}${renderHeader()}${RST}`);
-      const lineWidth = COL_AID + COL_STATUS + COL_UPTIME + COL_RECV + COL_SENT + COL_BIN + COL_BOUT + COL_LRECV + COL_LSENT + COL_PEERS;
+      const lineWidth = COL_AID + COL_STATUS + COL_UPTIME + COL_RECONN + COL_RECV + COL_SENT + COL_BIN + COL_BOUT + COL_LRECV + COL_LSENT + COL_PEERS;
       lines.push(`${DIM}  ${'─'.repeat(lineWidth)}${RST}`);
       for (const aid of aids) {
         const s = statsMap.get(aid.aid);
