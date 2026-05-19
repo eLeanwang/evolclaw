@@ -5,7 +5,6 @@ interface PendingInteraction {
   callback: (action: string, values?: Record<string, unknown>, operatorId?: string) => void | Promise<void>;
   timer?: NodeJS.Timeout;
   sessionId: string;
-  messageId?: string;
   initiatorId?: string;
   fallbackCommand?: string;
 }
@@ -17,7 +16,7 @@ export class InteractionRouter {
     id: string,
     sessionId: string,
     callback: (action: string, values?: Record<string, unknown>, operatorId?: string) => void | Promise<void>,
-    opts?: { timeoutMs?: number; onTimeout?: () => void; messageId?: string; initiatorId?: string; fallbackCommand?: string },
+    opts?: { timeoutMs?: number; onTimeout?: () => void; initiatorId?: string; fallbackCommand?: string },
   ): void {
     const existing = this.handlers.get(id);
     if (existing?.timer) clearTimeout(existing.timer);
@@ -35,7 +34,6 @@ export class InteractionRouter {
       callback,
       timer,
       sessionId,
-      messageId: opts?.messageId,
       initiatorId: opts?.initiatorId,
       fallbackCommand: opts?.fallbackCommand,
     });
@@ -84,10 +82,6 @@ export class InteractionRouter {
       if (handler.sessionId === sessionId) ids.push(id);
     }
     return ids;
-  }
-
-  getMessageId(id: string): string | undefined {
-    return this.handlers.get(id)?.messageId;
   }
 
   getInitiator(id: string): string | undefined {

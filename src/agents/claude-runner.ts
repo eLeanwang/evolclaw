@@ -645,6 +645,11 @@ export class AgentRunner {
         },
         channelId: permCtx.channelId,
         sessionId,
+        initiatorId: permCtx.userId,
+        fallback: {
+          command: 'ask',
+          buttonArgMap: { approve: '1', reject: '2' },
+        },
       };
 
       try {
@@ -657,12 +662,13 @@ export class AgentRunner {
       if (cardSent) {
         return new Promise((resolve) => {
           permCtx.interactionRouter?.register(requestId, sessionId, (action: string) => {
-            if (action === 'approve') {
-              resolve({ behavior: 'allow' as const, updatedInput: input, decisionClassification: 'user_temporary' as const });
-            } else {
+            const trimmed = action.trim();
+            if (trimmed === '2' || trimmed.toLowerCase() === 'reject' || trimmed === '拒绝' || trimmed === 'reject') {
               resolve({ behavior: 'deny' as const, message: '用户拒绝了计划', decisionClassification: 'user_reject' as const });
+            } else {
+              resolve({ behavior: 'allow' as const, updatedInput: input, decisionClassification: 'user_temporary' as const });
             }
-          });
+          }, { initiatorId: permCtx.userId, fallbackCommand: 'ask' });
         });
       }
     }

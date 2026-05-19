@@ -362,7 +362,6 @@ export interface ChannelAdapter {
   uploadAgentMd?(content: string): Promise<void>;
   downloadAgentMd?(aid: string): Promise<string>;
   sendInteraction?(channelId: string, interaction: InteractionRequest, context?: ReplyContext): Promise<string | false>;
-  patchInteractionCard?(messageId: string, card: object): Promise<void>;
   onInteraction?(callback: (response: InteractionResponse) => void): void;
   onChatDissolved?(callback: (channelId: string) => void): void;
   /**

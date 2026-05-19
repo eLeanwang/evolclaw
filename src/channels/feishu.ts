@@ -1008,18 +1008,6 @@ export class FeishuChannel {
     }
   }
 
-  async patchInteractionCard(messageId: string, card: object): Promise<void> {
-    if (!this.client) return;
-    try {
-      await (this.client.im.message as any).patch({
-        path: { message_id: messageId },
-        data: { content: JSON.stringify(card) },
-      });
-    } catch (error: any) {
-      logger.warn(`[Feishu] Failed to patch card ${messageId}:`, error?.response?.data || error?.message);
-    }
-  }
-
   private buildResolvedCard(cardTitle: string, response: InteractionResponse, cardBody?: string, btnLabel?: string): object | undefined {
     const action = response.action;
 
@@ -1396,7 +1384,6 @@ export class FeishuChannelPlugin implements ChannelPlugin {
         sendImage: (id: string, png: Buffer, context?: any) => channel.sendImage(id, png, context),
         acknowledge: (messageId: string) => { channel.addAckReaction(messageId); return Promise.resolve(); },
         sendInteraction: (id: string, interaction: InteractionRequest, context?: any) => channel.sendInteraction(id, interaction, context),
-        patchInteractionCard: (messageId: string, card: object) => channel.patchInteractionCard(messageId, card),
         onInteraction: (callback: (response: InteractionResponse) => void) => channel.onInteraction(callback),
       };
 

@@ -359,82 +359,6 @@ export class CommandHandler {
   }
 
   /**
-   * 尝试通过渠道适配器发送交互卡片。
-   * 返回 message_id 表示卡片已发送，false 表示降级为文本。
-   */
-  private async trySendInteraction(
-    channel: string,
-    channelId: string,
-    interaction: InteractionRequest,
-    replyContext?: ReplyContext,
-  ): Promise<string | false> {
-    const adapter = this.adapters.get(channel);
-    if (!adapter?.sendInteraction) return false;
-    try {
-      return await adapter.sendInteraction(channelId, interaction, replyContext);
-    } catch (e) {
-      logger.warn(`[CommandHandler] sendInteraction failed: ${e}`);
-      return false;
-    }
-  }
-
-  /** 作废某 session 下所有 pending 交互卡片（PATCH 禁用 + cancel） */
-  private async invalidateOldCards(channel: string, sessionId: string): Promise<void> {
-    if (!this.interactionRouter) return;
-    const adapter = this.adapters.get(channel);
-    const pending = this.interactionRouter.getPending(sessionId);
-    if (pending.length === 0) return;
-    const disabledCard = {
-      config: { wide_screen_mode: true },
-      header: { template: 'grey', title: { tag: 'plain_text', content: '已过期' } },
-      elements: [{ tag: 'markdown', content: '此卡片已过期，请查看最新卡片。' }],
-    };
-    for (const id of pending) {
-      const msgId = this.interactionRouter.getMessageId(id);
-      if (msgId && adapter?.patchInteractionCard) {
-        adapter.patchInteractionCard(msgId, disabledCard).catch(() => {});
-      }
-      this.interactionRouter.cancel(id);
-    }
-  }
-
-  /**
-   * 发送交互卡片并注册回调。作废旧卡片 → 发送新卡片 → 注册到 interactionRouter。
-   * 返回 true 表示卡片已发送（调用方应 return null），false 表示降级到文本。
-   */
-  private async sendInteractionCard(opts: {
-    channel: string;
-    channelId: string;
-    sessionId: string;
-    requestId: string;
-    interaction: InteractionRequest;
-    replyCtx?: ReplyContext;
-    callback: (action: string, values?: Record<string, unknown>, operatorId?: string) => void | Promise<void>;
-    /** 当前用户对该命令是否有写权限；false → 只发文本、不发交互卡片。默认 true（兼容旧调用） */
-    canWrite?: boolean;
-  }): Promise<boolean> {
-    if (!this.interactionRouter) return false;
-    // 无写权限 → 走文本降级（由调用点 fall through 输出只读信息）
-    if (opts.canWrite === false) return false;
-    await this.invalidateOldCards(opts.channel, opts.sessionId);
-    const messageId = await this.trySendInteraction(opts.channel, opts.channelId, opts.interaction, opts.replyCtx);
-    if (!messageId) return false;
-    const wrappedCallback: typeof opts.callback = async (action, values, operatorId) => {
-      // 点击回调时二次校验：若会话此刻忙碌，忽略本次点击（防止已弹卡片被用于带参切换）
-      if (this.isSessionBusy(opts.sessionId)) {
-        const adapter = this.adapters.get(opts.channel);
-        adapter?.sendText(opts.channelId, '⚠️ 当前正在处理消息，请稍后再试\n使用 /stop 中断当前任务后重试', opts.replyCtx);
-        return;
-      }
-      await opts.callback(action, values, operatorId);
-      // 已完成交互的卡片：保留原始内容，仅禁用按钮（不标记为"已过期"）
-      // "已过期"仅用于被新卡片替代的旧卡片（invalidateOldCards）
-    };
-    this.interactionRouter.register(opts.requestId, opts.sessionId, wrappedCallback, { timeoutMs: 120_000, messageId });
-    return true;
-  }
-
-  /**
    * 发送 CommandCard 卡片。卡片成功返回 null（调用方直接 return），失败返回降级文本。
    * CommandCard 不进 InteractionRouter，按钮点击由 channel 直接构造伪命令入站消息。
    */
@@ -867,6 +791,9 @@ export class CommandHandler {
     '/p': '/plist',
     '/session': '/slist',
     '/s': '/slist',
+    '/activity': '/activity',
+    '/chatmode': '/chatmode',
+    '/dispatch': '/dispatch',
   };
 
   async handle(
@@ -1874,44 +1801,33 @@ export class CommandHandler {
       ];
 
       if (!activityArg) {
-        if (this.interactionRouter) {
-          const requestId = `activity-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+        // 尝试发送 CommandCard 卡片
+        {
           const interaction: InteractionRequest = {
             type: 'interaction',
-            id: requestId,
+            id: `activity-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`,
             channelId,
             sessionId: activeSession?.id || '',
+            initiatorId: userId,
             kind: {
-              kind: 'action',
+              kind: 'command-card',
               title: '📋 中间输出模式',
               body: modeDescriptions.map(m =>
                 `${m.configVal === currentMode ? '✓' : '•'} **${m.key}** (${m.label})`
               ).join('\n'),
               buttons: modeDescriptions.map(m => ({
-                key: m.key,
                 label: m.configVal === currentMode ? `✓ ${m.key}` : m.key,
+                command: `/activity ${m.key}`,
                 style: (m.configVal === currentMode ? 'primary' : 'default') as 'primary' | 'default',
+                disabled: m.configVal === currentMode,
               })),
             },
           };
 
           const replyCtx = activeSession ? this.getReplyContext(activeSession) : undefined;
-          const cardSent = await this.sendInteractionCard({
-            channel, channelId, sessionId: activeSession?.id || '', requestId, interaction, replyCtx,
-            canWrite: isOwner,
-            callback: async (action, _values, operatorId) => {
-              if (userId && operatorId && operatorId !== userId) return;
-              const result = await this.handle(`/activity ${action}`, channel, channelId, undefined, userId, threadId);
-              if (result) {
-                const adapter = this.adapters.get(channel);
-                const text = typeof result === 'string' ? result : (result && 'text' in result ? result.text : '');
-                adapter?.sendText(channelId, text, replyCtx);
-              } else {
-                await this.handle('/activity', channel, channelId, undefined, userId, threadId);
-              }
-            },
-          });
-          if (cardSent) return null;
+          const cardResult = await this.sendCommandCard({ channel, channelId, interaction, replyCtx, canWrite: isOwner });
+          if (cardResult === null) return null;
+          // 卡片降级：fall through 到下方文本输出
         }
 
         // 降级：文本
@@ -1961,50 +1877,35 @@ export class CommandHandler {
       const canSwitch = chatmodeChatType !== 'group' || isAdmin;
 
       if (!arg) {
-        // 尝试发送交互卡片
-        if (canSwitch && this.interactionRouter) {
-          const requestId = `chatmode-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+        // 尝试发送 CommandCard 卡片
+        if (canSwitch) {
           const modes = [
             { key: 'interactive', name: '交互模式', desc: '被动响应：收到消息时才回复，回复直接显示' },
             { key: 'proactive', name: '主动模式', desc: '主动推进：流式输出静默，由 Agent 自调 ctl send 发声' },
           ];
           const interaction: InteractionRequest = {
             type: 'interaction',
-            id: requestId,
+            id: `chatmode-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`,
             channelId,
             sessionId: chatmodeSession.id,
+            initiatorId: userId,
             kind: {
-              kind: 'action',
+              kind: 'command-card',
               title: '🔄 会话模式',
               body: modes.map(m => `${m.key === currentMode ? '✓' : '•'} **${m.key}** (${m.name}) - ${m.desc}`).join('\n'),
               buttons: modes.map(m => ({
-                key: m.key,
                 label: m.key === currentMode ? `✓ ${m.key}` : m.key,
-                style: m.key === currentMode ? 'primary' : 'default',
+                command: `/chatmode ${m.key}`,
+                style: (m.key === currentMode ? 'primary' : 'default') as 'primary' | 'default',
+                disabled: m.key === currentMode,
               })),
             },
           };
 
           const replyCtx = this.getReplyContext(chatmodeSession);
-          const cardSent = await this.sendInteractionCard({
-            channel, channelId, sessionId: chatmodeSession.id, requestId, interaction, replyCtx,
-            canWrite: isAdmin,
-            callback: async (action, _values, operatorId) => {
-              if (action !== currentMode) {
-                if (userId && operatorId && operatorId !== userId) return;
-                const result = await this.handle(`/chatmode ${action}`, channel, channelId, undefined, userId, threadId);
-                if (result) {
-                  const adapter = this.adapters.get(channel);
-                  const text = typeof result === 'string' ? result : (result && 'text' in result ? result.text : '');
-                  adapter?.sendText(channelId, text, replyCtx);
-                } else {
-                  // 切换成功后重新发新卡片（会自动 invalidate 旧卡片）
-                  await this.handle('/chatmode', channel, channelId, undefined, userId, threadId);
-                }
-              }
-            },
-          });
-          if (cardSent) return null;
+          const cardResult = await this.sendCommandCard({ channel, channelId, interaction, replyCtx, canWrite: isAdmin });
+          if (cardResult === null) return null;
+          // 卡片降级：fall through 到下方文本输出
         }
 
         // 降级：文本
@@ -2068,50 +1969,35 @@ export class CommandHandler {
       const currentMode = dispatchSession.metadata?.dispatchMode || 'mention';
 
       if (!arg) {
-        // 尝试发送交互卡片
-        if (isAdmin && this.interactionRouter) {
-          const requestId = `dispatch-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+        // 尝试发送 CommandCard 卡片
+        if (isAdmin) {
           const modes = [
             { key: 'mention', name: '提及模式', desc: '仅当被 @ 提及（含 @all）时响应群消息' },
             { key: 'all', name: '广播模式', desc: '群内所有消息都触发响应' },
           ];
           const interaction: InteractionRequest = {
             type: 'interaction',
-            id: requestId,
+            id: `dispatch-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`,
             channelId,
             sessionId: dispatchSession.id,
+            initiatorId: userId,
             kind: {
-              kind: 'action',
+              kind: 'command-card',
               title: '📡 分发模式',
               body: modes.map(m => `${m.key === currentMode ? '✓' : '•'} **${m.key}** (${m.name}) - ${m.desc}`).join('\n'),
               buttons: modes.map(m => ({
-                key: m.key,
                 label: m.key === currentMode ? `✓ ${m.key}` : m.key,
-                style: m.key === currentMode ? 'primary' : 'default',
+                command: `/dispatch ${m.key}`,
+                style: (m.key === currentMode ? 'primary' : 'default') as 'primary' | 'default',
+                disabled: m.key === currentMode,
               })),
             },
           };
 
           const replyCtx = this.getReplyContext(dispatchSession);
-          const cardSent = await this.sendInteractionCard({
-            channel, channelId, sessionId: dispatchSession.id, requestId, interaction, replyCtx,
-            canWrite: isAdmin,
-            callback: async (action, _values, operatorId) => {
-              if (action !== currentMode) {
-                if (userId && operatorId && operatorId !== userId) return;
-                const result = await this.handle(`/dispatch ${action}`, channel, channelId, undefined, userId, threadId);
-                if (result) {
-                  const adapter = this.adapters.get(channel);
-                  const text = typeof result === 'string' ? result : (result && 'text' in result ? result.text : '');
-                  adapter?.sendText(channelId, text, replyCtx);
-                } else {
-                  // 切换成功后重新发新卡片（会自动 invalidate 旧卡片）
-                  await this.handle('/dispatch', channel, channelId, undefined, userId, threadId);
-                }
-              }
-            },
-          });
-          if (cardSent) return null;
+          const cardResult = await this.sendCommandCard({ channel, channelId, interaction, replyCtx, canWrite: isAdmin });
+          if (cardResult === null) return null;
+          // 卡片降级：fall through 到下方文本输出
         }
 
         // 降级：文本
