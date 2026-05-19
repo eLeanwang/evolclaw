@@ -5,6 +5,7 @@ import { sanitizeFileName, saveToUploads, validateImage } from '../utils/media-c
 import { logger } from '../utils/logger.js';
 import { hasRichContent, renderAllRichContent, checkDependencies } from '../utils/rich-content-renderer.js';
 import type { InteractionRequest, InteractionResponse, ActionInteraction } from '../types.js';
+import { defaultSend } from '../core/message/default-send.js';
 
 export interface FeishuConfig {
   appId: string;
@@ -1171,6 +1172,8 @@ export class FeishuChannelPlugin implements ChannelPlugin {
 
       const adapter = {
         channelName: inst.name,
+        capabilities: { file: true, image: true, interaction: true, markdown: true, thought: false, status: true },
+        send: (envelope: any, payload: any) => defaultSend(adapter, envelope, payload),
         sendText: (id: string, text: string, context?: any) => channel.sendMessage(id, text, context),
         sendFile: (id: string, filePath: string, context?: any) => channel.sendFile(id, filePath, context),
         sendImage: (id: string, png: Buffer, context?: any) => channel.sendImage(id, png, context),

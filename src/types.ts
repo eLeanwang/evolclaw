@@ -319,6 +319,14 @@ export interface InteractionResponse {
 // 渠道适配器接口
 export interface ChannelAdapter {
   readonly channelName: string;
+  /** 渠道能力声明（Phase 3 新增）。缺省时按"全无"对待，调用方应做降级处理。 */
+  readonly capabilities?: ChannelCapabilities;
+  /**
+   * 统一出站入口（Phase 3 新增）。按 OutboundPayload.kind 分发。
+   * 缺省时调用方应回退到旧 sendText / sendFile / sendImage / sendProcessingStatus / putThought / sendInteraction / sendCustomPayload。
+   */
+  send?(envelope: OutboundEnvelope, payload: OutboundPayload): Promise<void>;
+
   sendText(channelId: string, text: string, context?: ReplyContext): Promise<void>;
   sendFile?(channelId: string, filePath: string, context?: ReplyContext): Promise<void>;
   sendImage?(channelId: string, png: Buffer, context?: ReplyContext): Promise<void>;
@@ -331,9 +339,6 @@ export interface ChannelAdapter {
   patchInteractionCard?(messageId: string, card: object): Promise<void>;
   onInteraction?(callback: (response: InteractionResponse) => void): void;
   onChatDissolved?(callback: (channelId: string) => void): void;
-  // 发送 thought（Proactive 模式可观测）
-  // channelId: 群聊时为 groupId，私聊时为对方 AID
-  // adapter 内部按 chatType 分发到 group.thought.put 或 message.thought.put
   /**
    * 发送 thought 内容
    * channelId 在群聊时为 groupId，私聊时为对方 AID
@@ -712,4 +717,47 @@ export interface AgentConfig {
 export interface MergedAgentConfig extends AgentConfig {
   /** 合并轨迹（debug 用），记录哪些字段来自 defaults */
   readonly _mergedFrom?: { defaults: string[]; agent: string[] };
+}
+
+// ── 出站协议类型（OutboundPayload / OutboundEnvelope / ChannelCapabilities） ──
+
+export type OutboundPayload =
+  | { kind: 'result.text'; text: string; isFinal: boolean; format?: 'markdown' | 'plain' }
+  | { kind: 'result.file'; filePath: string; fileName?: string; targetChannel?: string }
+  | { kind: 'result.image'; data: Buffer; mimeType?: string; alt?: string }
+  | { kind: 'result.error'; text: string; reason?: string }
+  | { kind: 'activity.tool_use'; text: string; metadata: { tool: string; callId: string; arguments?: Record<string, unknown>; input?: string } }
+  | { kind: 'activity.tool_result'; text: string; metadata: { tool: string; callId: string; ok: boolean; result?: unknown; durationMs?: number } }
+  | { kind: 'activity.thinking'; text: string }
+  | { kind: 'activity.progress'; text: string; metadata?: { state?: 'processing' | 'waiting'; progress?: number; toolUses?: number; durationMs?: number } }
+  | { kind: 'activity.notice'; text: string; severity: 'info' | 'warn'; subtype?: string }
+  | { kind: 'status.started'; metadata?: Record<string, unknown> }
+  | { kind: 'status.completed'; metadata?: { durationMs?: number } }
+  | { kind: 'status.interrupted'; metadata?: { reason: string } }
+  | { kind: 'status.error'; metadata?: { errorType?: string } }
+  | { kind: 'status.timeout'; metadata?: { idleSec?: number } }
+  | { kind: 'command.result'; text: string; format?: 'markdown' | 'plain' }
+  | { kind: 'command.error'; text: string; reason?: string }
+  | { kind: 'interaction'; interaction: InteractionRequest; fallbackText?: string }
+  | { kind: 'system.notice'; text: string; subtype: string }
+  | { kind: 'system.error'; text: string; subtype: string; recoverable?: boolean }
+  | { kind: 'custom'; channelType: string; payload: unknown };
+
+export interface OutboundEnvelope {
+  taskId: string;
+  channel: string;
+  channelId: string;
+  agentName: string;
+  chatmode: 'interactive' | 'proactive';
+  replyContext?: ReplyContext;
+  timestamp: number;
+}
+
+export interface ChannelCapabilities {
+  file: boolean;
+  image: boolean;
+  interaction: boolean;
+  markdown: boolean;
+  thought: boolean;
+  status: boolean;
 }

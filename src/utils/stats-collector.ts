@@ -37,17 +37,17 @@ export class StatsCollector {
       this.recordEvent({ type: 'received', timestamp: e.timestamp || Date.now(), agentName: e.agentName });
     });
 
-    eventBus.subscribe('message:completed', (event) => {
+    eventBus.subscribe('task:completed', (event) => {
       const e = event as { timestamp?: number; durationMs?: number; agentName?: string };
       this.recordEvent({ type: 'completed', timestamp: e.timestamp || Date.now(), durationMs: e.durationMs, agentName: e.agentName });
     });
 
-    eventBus.subscribe('message:error', (event) => {
+    eventBus.subscribe('task:error', (event) => {
       const e = event as { errorType?: string; agentName?: string };
       this.recordEvent({ type: 'error', timestamp: Date.now(), errorType: e.errorType, agentName: e.agentName });
     });
 
-    eventBus.subscribe('message:interrupted', (event) => {
+    eventBus.subscribe('task:interrupted', (event) => {
       const e = event as { agentName?: string };
       this.recordEvent({ type: 'interrupted', timestamp: Date.now(), agentName: e.agentName });
     });

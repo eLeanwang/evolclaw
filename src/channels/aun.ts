@@ -1,4 +1,5 @@
 import { AUNClient, FileSecretStore, GatewayDiscovery, E2EEError, type JsonObject } from '@agentunion/fastaun';
+import { defaultSend } from '../core/message/default-send.js';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
@@ -2120,6 +2121,8 @@ export class AUNChannelPlugin implements ChannelPlugin {
 
       const adapter = {
         channelName: inst.name,
+        capabilities: { file: true, image: true, interaction: true, markdown: true, thought: true, status: true },
+        send: (envelope: any, payload: any) => defaultSend(adapter, envelope, payload),
         sendText: (id: string, text: string, context?: ReplyContext) => channel.sendMessage(id, text, context),
         sendFile: (id: string, filePath: string, context?: ReplyContext) => channel.sendFile(id, filePath, context),
         acknowledge: (messageId: string) => { channel.acknowledge(messageId); return Promise.resolve(); },
