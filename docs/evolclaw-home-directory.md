@@ -152,9 +152,9 @@ $EVOLCLAW_HOME/
 │       │   ├── journal.jsonl                    反思日志（关键决策、自我修订）
 │       │   └── goals.md                         长期目标
 │       │
-│       ├── sessions/                          ← 会话存储（per-agent）
-│       │   └── <session-key>/
-│       │       ├── messages.jsonl                 完整消息历史
+│       ├── sessions/                          ← 会话存储（per-agent）【目标态，暂未实现】
+│       │   └── <session-key>/                     当前 sessions 仍在 data/sessions/，
+│       │       ├── messages.jsonl                 待 venue_uid 设计落地后迁入
 │       │       └── meta.json
 │       │
 │       └── data/                              ← 其它运行时数据
@@ -162,6 +162,24 @@ $EVOLCLAW_HOME/
 │           └── ...
 │
 ├── data/                                    ← 部署级：evolclaw 运行时数据（仅运行时，无业务配置）
+│   │
+│   ├── sessions/                              会话数据（当前实际位置，详见下方说明）
+│   │   ├── aun/                                 AUN 三层：channelType/selfId/channelId
+│   │   │   └── <urlEncode(selfId)>/
+│   │   │       └── <urlEncode(channelId)>/
+│   │   │           ├── active.json                当前活跃 session 快照（热路径只读这个）
+│   │   │           ├── task.lock                  运行时任务状态（JSONL，任务结束删除）
+│   │   │           ├── health.jsonl               健康状态记录（append-only）
+│   │   │           ├── meta_*.jsonl               session 元数据演化档案（每行完整快照）
+│   │   │           ├── _threads/                  话题 session（thread-index.json + meta_*.jsonl）
+│   │   │           ├── _index/                    反查索引（by-name/by-project/by-agent）
+│   │   │           └── _trash/                    软删暂存（启动时清理 30 天前文件）
+│   │   │
+│   │   ├── feishu/                              其它 channel 两层：channelType/channelId
+│   │   │   └── <urlEncode(channelId)>/
+│   │   │       └── ...（同上 active.json/meta_*.jsonl 等）
+│   │   │
+│   │   └── ...（wechat/dingtalk/qqbot/wecom）
 │   │
 │   ├── instance/                              进程实例注册 + 进程级运行时句柄
 │   │   ├── main-{pid}.json                      主进程记录
@@ -549,14 +567,35 @@ sessions/
 
 ### data/ — 部署级全局运行时
 
-新设计中，agent / channel / 模型 / 项目等业务配置全部迁移到 `agents/defaults.json` + `agents/<aid>/config.json`。`data/` 目录只保留**部署级运行时数据**——进程管理、消息队列、重启状态等。
+新设计中，agent / channel / 模型 / 项目等业务配置全部迁移到 `agents/defaults.json` + `agents/<aid>/config.json`。`data/` 目录只保留**部署级运行时数据**——进程管理、消息队列、重启状态、会话数据等。
 
 | 子目录/文件 | 用途 |
 |------|------|
+| `sessions/` | 会话数据（当前实际位置，见下方详解） |
 | `instance/` | 进程实例注册（见下） |
 | `outbox/` | 离线消息发件箱（见下） |
 | `restart-pending.json` | 重启挂起状态 |
 | `restart-confirm-*.json` | 重启确认文件 |
+
+#### data/sessions/ — 会话数据（当前态）
+
+Sessions 当前存放在 `data/sessions/` 下，按 channelType 分目录。目标态是迁入 `agents/<aid>/sessions/`（per-agent 隔离），但需等 venue_uid 设计落地后再做路径归位。当前结构详见 `docs/refactor/01-db-to-fs.md`。
+
+目录层级：
+- **AUN**：三层 `aun/<urlEncode(selfId)>/<urlEncode(channelId)>/`（AUN 有多身份，需要 selfId 层）
+- **其它 channel**：两层 `<channelType>/<urlEncode(channelId)>/`
+
+每个 chat 目录下的文件：
+
+| 文件 | 用途 |
+|------|------|
+| `active.json` | 当前活跃 session 的完整快照（热路径只读这个） |
+| `task.lock` | 运行时任务状态（JSONL，任务开始写入，结束删除） |
+| `health.jsonl` | 健康状态记录（append-only，每条消息处理完追加） |
+| `meta_*.jsonl` | session 元数据演化档案（每行一份完整快照，文件名=session id） |
+| `_threads/` | 话题 session（`thread-index.json` + `meta_*.jsonl`） |
+| `_index/` | 反查索引（by-name / by-project / by-agent） |
+| `_trash/` | 软删暂存（启动时清理 30 天前文件） |
 
 #### data/instance/ — 进程实例注册
 
@@ -683,7 +722,7 @@ IPC 命令：
 
 ### 暂不迁移（保留原位置）
 
-- **`data/sessions/`**：sessions 暂时留在 `data/sessions/<channelType>/...`，后续随 venue_uid 设计落地一起重映射。新结构图中的 `agents/<aid>/sessions/` 是目标态，当前先留空或软链。
+- **`data/sessions/`**：sessions 保留在 `data/sessions/<channelType>/...`。当前正在进行 SQLite → 文件系统的改造（详见 `docs/refactor/01-db-to-fs.md`），文件化完成后再考虑迁入 `agents/<aid>/sessions/`（需 venue_uid 设计落地）。目录结构为 AUN 三层（`aun/<selfId>/<channelId>/`）、其它 channel 两层（`<channelType>/<channelId>/`），每个 chat 目录含 `active.json` + `meta_*.jsonl` + `task.lock` + `health.jsonl` + `_threads/` + `_index/` + `_trash/`。
 
 ### 一次性迁移工具（待实现）
 
