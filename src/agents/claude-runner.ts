@@ -3,6 +3,7 @@ import { ensureDir } from '../utils/ensure-dir.js';
 import { resolveAnthropicConfig } from '../baseagents/resolve.js';
 import type { Config, ChannelAdapter, ReplyContext, InteractionRequest, Message } from '../types.js';
 import { DEFAULT_PERMISSION_MODE } from '../types.js';
+import { renderActionAsText } from '../core/interaction-fallback.js';
 import type { PermissionGateway, PermissionDecision } from '../core/permission.js';
 import path from 'path';
 import fs from 'fs';
@@ -19,6 +20,7 @@ export interface PermissionContext {
   channelId?: string;
   replyContext?: ReplyContext;
   interactionRouter?: InteractionRouter;
+  userId?: string;
   /** 一次性消息拦截：注册后下一条消息不入队不 interrupt，直接回调 */
   interceptNextMessage?: (sessionKey: string, handler: (message: Message) => void) => void;
   /** 取消消息拦截 */
@@ -559,12 +561,28 @@ export class AgentRunner {
 
     if (questions?.length) {
       for (const q of questions) {
-        const optText = q.options.map((o, i) => `  ${i + 1}. ${o.label}${o.description ? ` — ${o.description}` : ''}`).join('\n');
-        const prompt = `💬 ${q.question}\n${optText}\n\n回复 /ask <数字> 选择，或 /ask <自定义内容>`;
-
         if (sendPrompt && permCtx?.interactionRouter) {
-          await sendPrompt(prompt);
           const requestId = `ask-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+          const interaction: InteractionRequest = {
+            type: 'interaction',
+            id: requestId,
+            channelId: permCtx.channelId || '',
+            sessionId,
+            initiatorId: permCtx.userId,
+            kind: {
+              kind: 'action',
+              title: `💬 ${q.question}`,
+              body: q.options.map((o, i) => `${i + 1}. ${o.label}${o.description ? ` — ${o.description}` : ''}`).join('\n'),
+              buttons: q.options.map((o, i) => ({ key: `opt-${i}`, label: o.label })),
+            },
+            fallback: {
+              command: 'ask',
+              buttonArgMap: Object.fromEntries(q.options.map((_, i) => [`opt-${i}`, String(i + 1)])),
+              acceptFreeText: true,
+              freeTextHint: '或回复 /ask <自定义内容>',
+            },
+          };
+          await sendPrompt(renderActionAsText(interaction));
           const answer = await new Promise<string>((resolve) => {
             permCtx.interactionRouter!.register(requestId, sessionId, (action: string) => {
               const num = parseInt(action.trim(), 10);
@@ -573,15 +591,15 @@ export class AgentRunner {
               } else {
                 resolve(action.trim());
               }
-            }, { timeoutMs: 120_000, onTimeout: () => resolve(q.options[0]?.label || '') });
+            }, { timeoutMs: 120_000, onTimeout: () => resolve(q.options[0]?.label || ''), initiatorId: permCtx.userId, fallbackCommand: 'ask' });
           });
           answers[q.question] = answer;
         } else {
-          // 无交互能力，自动选第一项
           const firstLabel = q.options[0]?.label || '';
           answers[q.question] = firstLabel;
           if (sendPrompt) {
-            await sendPrompt(`${prompt}\n  → 自动选择：${firstLabel}`);
+            const optText = q.options.map((o, i) => `  ${i + 1}. ${o.label}${o.description ? ` — ${o.description}` : ''}`).join('\n');
+            await sendPrompt(`💬 ${q.question}\n${optText}\n\n  → 自动选择：${firstLabel}`);
           }
         }
       }
@@ -651,17 +669,37 @@ export class AgentRunner {
 
     // 文本 fallback：注册到 interactionRouter，等待用户 /ask 回复
     if (permCtx.interactionRouter) {
-      await sendPrompt('📋 计划审批\nAI 已完成规划，等待审批。\n\n  1. 批准执行\n  2. 拒绝\n\n回复 /ask 1 批准，/ask 2 拒绝：');
-      const requestId = `plan-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const fallbackRequestId = `plan-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const fallbackInteraction: InteractionRequest = {
+        type: 'interaction',
+        id: fallbackRequestId,
+        channelId: permCtx.channelId || '',
+        sessionId,
+        initiatorId: permCtx.userId,
+        kind: {
+          kind: 'action',
+          title: '📋 计划审批',
+          body: 'AI 已完成规划，等待审批。',
+          buttons: [
+            { key: 'approve', label: '✅ 批准执行', style: 'primary' },
+            { key: 'reject', label: '❌ 拒绝', style: 'danger' },
+          ],
+        },
+        fallback: {
+          command: 'ask',
+          buttonArgMap: { approve: '1', reject: '2' },
+        },
+      };
+      await sendPrompt(renderActionAsText(fallbackInteraction));
       return new Promise((resolve) => {
-        permCtx.interactionRouter!.register(requestId, sessionId, (action: string) => {
+        permCtx.interactionRouter!.register(fallbackRequestId, sessionId, (action: string) => {
           const trimmed = action.trim();
           if (trimmed === '2' || trimmed.toLowerCase() === 'reject' || trimmed === '拒绝') {
             resolve({ behavior: 'deny' as const, message: '用户拒绝了计划', decisionClassification: 'user_reject' as const });
           } else {
             resolve({ behavior: 'allow' as const, updatedInput: input, decisionClassification: 'user_temporary' as const });
           }
-        }, { timeoutMs: 300_000, onTimeout: () => resolve({ behavior: 'allow' as const, updatedInput: input, decisionClassification: 'user_temporary' as const }) });
+        }, { timeoutMs: 300_000, onTimeout: () => resolve({ behavior: 'allow' as const, updatedInput: input, decisionClassification: 'user_temporary' as const }), initiatorId: permCtx.userId, fallbackCommand: 'ask' });
       });
     }
 

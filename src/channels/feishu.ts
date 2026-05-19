@@ -326,10 +326,47 @@ export class FeishuChannel {
             if (!action?.value) return;
 
             const value = action.value;
+            const operatorId = data.operator?.open_id;
+
+            // ── CommandCard 分支：按钮直接触发命令 ──
+            if (value._command) {
+              if (value._initiator && operatorId && operatorId !== value._initiator) {
+                return {
+                  toast: { type: 'warning', content: '⚠️ 仅卡片发起者可操作' },
+                };
+              }
+
+              logger.info(`[Feishu] CommandCard trigger: command=${value._command}, operator=${operatorId}`);
+              if (this.messageHandler) {
+                const chatId = data.context?.open_chat_id || data.open_chat_id;
+                // Feishu chatId 前缀：oc_ = group chat，ou_ = private user open_id
+                const chatType: 'private' | 'group' = typeof chatId === 'string' && chatId.startsWith('oc_') ? 'group' : 'private';
+                await this.messageHandler({
+                  channelId: chatId,
+                  content: value._command,
+                  chatType,
+                  peerId: operatorId,
+                  messageId: `card-trigger-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                });
+              }
+
+              const cardTitle = value._card_title || '操作';
+              const btnLabel = value._btn_label || value._command;
+              return this.buildResolvedCard(cardTitle, { type: 'interaction.response', id: '', action: value._command, operatorId }, '', btnLabel);
+            }
+
+            // ── ActionInteraction 分支 ──
             const requestId = value._request_id;
             if (!requestId) {
-              logger.debug('[Feishu] Card action without _request_id, ignoring');
+              logger.debug('[Feishu] Card action without _request_id or _command, ignoring');
               return;
+            }
+
+            // initiator 校验
+            if (value._initiator && operatorId && operatorId !== value._initiator) {
+              return {
+                toast: { type: 'warning', content: '⚠️ 仅卡片发起者可操作' },
+              };
             }
 
             // Legacy field change (non-form select_static with _field_key): ignore silently
@@ -346,12 +383,13 @@ export class FeishuChannel {
               id: requestId,
               action: value._action || 'submit',
               values: { ...formValues, ...value },
-              operatorId: data.operator?.open_id,
+              operatorId,
             };
 
             // Remove internal fields from values
             delete response.values!._request_id;
             delete response.values!._action;
+            delete response.values!._initiator;
             delete response.values!._card_title;
             const cardBody = value._card_body || '';
             delete response.values!._card_body;
@@ -983,13 +1021,62 @@ export class FeishuChannel {
 export function buildInteractionCard(interaction: InteractionRequest): object | null {
   const { kind } = interaction;
 
+  if (kind.kind === 'command-card') {
+    return buildCommandCardFeishu(kind, interaction.initiatorId);
+  }
   if (kind.kind === 'action') {
-    return buildActionCard(interaction.id, kind);
+    return buildActionCard(interaction.id, kind, interaction.initiatorId);
   }
   return null;
 }
 
-export function buildActionCard(requestId: string, action: ActionInteraction): object {
+function buildCommandCardFeishu(card: import('../types.js').CommandCard, initiatorId?: string): object {
+  const elements: any[] = [];
+
+  if (card.body) {
+    elements.push({ tag: 'markdown', content: card.body });
+  }
+
+  const buttons = card.buttons.map(btn => {
+    const buttonEl: any = {
+      tag: 'button',
+      text: { tag: 'plain_text', content: btn.label },
+      type: btn.style === 'danger' ? 'danger' : btn.style === 'primary' ? 'primary' : 'default',
+      value: {
+        _command: btn.command,
+        _initiator: initiatorId,
+        _card_title: card.title,
+        _btn_label: btn.label,
+      },
+    };
+
+    if (btn.disabled) {
+      buttonEl.disabled = true;
+    }
+
+    if (btn.confirm) {
+      buttonEl.confirm = {
+        title: { tag: 'plain_text', content: btn.confirm.title },
+        text: { tag: 'plain_text', content: btn.confirm.body },
+      };
+    }
+
+    return buttonEl;
+  });
+
+  elements.push({ tag: 'action', actions: buttons });
+
+  return {
+    config: { wide_screen_mode: true },
+    header: {
+      template: 'blue',
+      title: { tag: 'plain_text', content: card.title },
+    },
+    elements,
+  };
+}
+
+export function buildActionCard(requestId: string, action: ActionInteraction, initiatorId?: string): object {
   const elements: any[] = [];
 
   // Body text
@@ -1010,6 +1097,7 @@ export function buildActionCard(requestId: string, action: ActionInteraction): o
       value: {
         _request_id: requestId,
         _action: btn.key,
+        _initiator: initiatorId,
         _card_title: action.title,
         _card_body: fullCardBody,
         _btn_label: btn.label,

@@ -6,6 +6,8 @@ interface PendingInteraction {
   timer?: NodeJS.Timeout;
   sessionId: string;
   messageId?: string;
+  initiatorId?: string;
+  fallbackCommand?: string;
 }
 
 export class InteractionRouter {
@@ -15,9 +17,8 @@ export class InteractionRouter {
     id: string,
     sessionId: string,
     callback: (action: string, values?: Record<string, unknown>, operatorId?: string) => void | Promise<void>,
-    opts?: { timeoutMs?: number; onTimeout?: () => void; messageId?: string },
+    opts?: { timeoutMs?: number; onTimeout?: () => void; messageId?: string; initiatorId?: string; fallbackCommand?: string },
   ): void {
-    // Clear any existing handler for this ID
     const existing = this.handlers.get(id);
     if (existing?.timer) clearTimeout(existing.timer);
 
@@ -30,7 +31,14 @@ export class InteractionRouter {
       }, opts.timeoutMs);
     }
 
-    this.handlers.set(id, { callback, timer, sessionId, messageId: opts?.messageId });
+    this.handlers.set(id, {
+      callback,
+      timer,
+      sessionId,
+      messageId: opts?.messageId,
+      initiatorId: opts?.initiatorId,
+      fallbackCommand: opts?.fallbackCommand,
+    });
   }
 
   handle(response: InteractionResponse): boolean {
@@ -42,7 +50,6 @@ export class InteractionRouter {
 
     try {
       const result = handler.callback(response.action, response.values, response.operatorId);
-      // Catch async callback errors to prevent unhandled rejections
       if (result && typeof (result as any).catch === 'function') {
         (result as any).catch((err: unknown) => {
           logger.error(`[InteractionRouter] Async callback error for ${response.id}:`, err);
@@ -81,5 +88,18 @@ export class InteractionRouter {
 
   getMessageId(id: string): string | undefined {
     return this.handlers.get(id)?.messageId;
+  }
+
+  getInitiator(id: string): string | undefined {
+    return this.handlers.get(id)?.initiatorId;
+  }
+
+  findPendingByCommand(sessionId: string, command: string): string | undefined {
+    for (const [id, handler] of this.handlers.entries()) {
+      if (handler.sessionId === sessionId && handler.fallbackCommand === command) {
+        return id;
+      }
+    }
+    return undefined;
   }
 }
