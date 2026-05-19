@@ -910,7 +910,7 @@ export class MessageProcessor {
       }
 
       const isFinallyBackground = await this.isBackgroundSession(session, message.channel, message.channelId);
-      if (isFinallyBackground) {
+      if (isFinallyBackground && session.sessionMode !== 'autonomous') {
         const projectName = path.basename(session.projectPath);
         const count = this.messageCache.getCount(session.id);
         await adapter.sendText(message.channelId, `[\u540e\u53f0-${projectName}] \u2713 任务完成 (${count}条消息已缓存)`, taskReplyContext());
@@ -1031,10 +1031,37 @@ export class MessageProcessor {
       ? { replyContext: message.replyContext }
       : undefined;
 
+    const projectPath = this.agentRegistry?.resolveByChannel(message.channel)?.projectPath || process.cwd();
+
+    // --session silent 触发器：新建独立 autonomous 会话，与原会话历史隔离
+    if (message.triggerMeta?.silent) {
+      // Save the current active session before creating a new one
+      const prevActive = await this.sessionManager.getActiveSession(message.channel, message.channelId);
+
+      const session = await this.sessionManager.createNewSession(
+        message.channel,
+        message.channelId,
+        projectPath,
+        `trigger-${message.triggerMeta.triggerId.slice(0, 8)}`,
+      );
+      await this.sessionManager.updateSession(session.id, { sessionMode: 'autonomous' });
+      session.sessionMode = 'autonomous';
+
+      // Restore the previous active session so the user's conversation is unaffected
+      if (prevActive) {
+        await this.sessionManager.switchToSession(message.channel, message.channelId, prevActive.id);
+      }
+
+      const absoluteProjectPath = path.isAbsolute(session.projectPath)
+        ? session.projectPath
+        : path.resolve(process.cwd(), session.projectPath);
+      return { session, absoluteProjectPath };
+    }
+
     const session = await this.sessionManager.getOrCreateSession(
       message.channel,
       message.channelId,
-      this.agentRegistry?.resolveByChannel(message.channel)?.projectPath || process.cwd(),
+      projectPath,
       message.threadId,
       metadata,
       undefined,
