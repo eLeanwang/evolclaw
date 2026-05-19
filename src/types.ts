@@ -406,7 +406,7 @@ export type CommandHandler = (
   channelId: string,
   userId?: string,
   threadId?: string
-) => Promise<string | null | undefined>;
+) => Promise<OutboundPayload | string | null | undefined>;
 
 // ── EvolAgent ──
 

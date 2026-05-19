@@ -105,18 +105,19 @@ describe('/ask command — route replies to pending interactions', () => {
 
   it('returns hint message when no pending interactions and no args', async () => {
     const result = await runCmd(env.cmdHandler, '/ask');
-    expect(result).toContain('没有待回答的问题');
+    const text = typeof result === 'string' ? result : (result as any)?.text ?? '';
+    expect(text).toContain('没有待回答的问题');
   });
 
   it('returns error when args given but no pending interactions', async () => {
     const result = await runCmd(env.cmdHandler, '/ask 1');
-    expect(result).toContain('没有待回答');
+    expect(typeof result === 'string' ? result : (result as any)?.text ?? '').toContain('没有待回答');
   });
 
   it('lists count when pending exists but no args', async () => {
     env.interactionRouter.register('req-abc', 'sess-ask-1', vi.fn(), { fallbackCommand: 'ask' });
     const result = await runCmd(env.cmdHandler, '/ask');
-    expect(result).toContain('1 个待回答问题');
+    expect(typeof result === 'string' ? result : (result as any)?.text ?? '').toContain('1 个待回答问题');
   });
 
   it('routes /ask <arg> to pending interaction callback', async () => {
@@ -124,7 +125,7 @@ describe('/ask command — route replies to pending interactions', () => {
     env.interactionRouter.register('req-num', 'sess-ask-1', cb, { fallbackCommand: 'ask' });
 
     const result = await runCmd(env.cmdHandler, '/ask 2');
-    expect(result).toBe('✓ 已回答');
+    expect(typeof result === 'string' ? result : (result as any)?.text ?? '').toBe('✓ 已回答');
     expect(cb).toHaveBeenCalledWith('2', undefined, 'owner1');
   });
 
@@ -141,7 +142,7 @@ describe('/ask command — route replies to pending interactions', () => {
     env.interactionRouter.register('req-other', 'sess-other', cb, { fallbackCommand: 'ask' });
 
     const result = await runCmd(env.cmdHandler, '/ask 1');
-    expect(result).toContain('没有待回答');
+    expect(typeof result === 'string' ? result : (result as any)?.text ?? '').toContain('没有待回答');
     expect(cb).not.toHaveBeenCalled();
   });
 

@@ -266,8 +266,13 @@ export class MessageBridge {
     logger.debug(`[MessageBridge] handleCommand: result type=${typeof cmdResult}, value=${cmdResult === null ? 'null' : cmdResult === undefined ? 'undefined' : 'string'}`);
     if (cmdResult === undefined) return false;
     if (cmdResult) {
-      try { await sendReply(cmdResult); } catch (error) {
-        logger.error(`[${channel}] Failed to send command response:`, error);
+      const text = typeof cmdResult === 'string' ? cmdResult
+        : (cmdResult && typeof cmdResult === 'object' && 'text' in cmdResult) ? cmdResult.text
+        : null;
+      if (text) {
+        try { await sendReply(text); } catch (error) {
+          logger.error(`[${channel}] Failed to send command response:`, error);
+        }
       }
     }
     return true;
