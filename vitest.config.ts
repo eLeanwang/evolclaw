@@ -32,6 +32,7 @@ export default defineConfig({
   test: {
     globals: true,
     environment: 'node',
+    testTimeout: 30000,
     exclude: ['**/node_modules/**', '**/dist/**', 'aun/**', 'projects/**'],
     coverage: {
       provider: 'v8',

@@ -190,7 +190,8 @@ export class TriggerScheduler {
     const msg = this.buildSyntheticMessage(trigger, messageId);
 
     logger.info(`[${this.aid}] Firing trigger: ${trigger.name} (${trigger.id})`);
-    this.eventBus.publish({ type: 'trigger:fired', triggerId: trigger.id, name: trigger.name, fireTime: now });
+
+    // Update stats before moving to done so history captures the updated count
     this.manager.updateFireStats(trigger.id, now);
 
     if (trigger.scheduleType === 'cron') {
@@ -203,6 +204,8 @@ export class TriggerScheduler {
       // delay/at: one-shot, move to done
       this.manager.moveToDone(trigger.id, 'fired');
     }
+
+    this.eventBus.publish({ type: 'trigger:fired', triggerId: trigger.id, name: trigger.name, fireTime: now });
 
     if (this.fireCallback) {
       this.fireCallback(msg, trigger);
@@ -223,7 +226,7 @@ export class TriggerScheduler {
       threadId: trigger.targetThreadId ?? '',
       agentId: trigger.agentId,
       chatType: 'private',
-      peerId: '__trigger__',
+      peerId: `__trigger__:${trigger.id}`,  // unique per trigger to prevent greedy merge
       content: trigger.prompt,
       messageId,
       timestamp: Date.now(),
