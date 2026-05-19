@@ -9,6 +9,7 @@ import { PermissionGateway, type PermissionDecision } from './permission.js';
 import { InteractionRouter } from './interaction-router.js';
 import { MessageQueue } from './message/message-queue.js';
 import { renderCommandCardAsText } from './interaction-fallback.js';
+import { buildEnvelope, sendInteractionPayload } from './message/message-processor.js';
 import { resolvePaths, getPackageRoot } from '../paths.js';
 import { logger } from '../utils/logger.js';
 import crypto from 'crypto';
@@ -361,6 +362,8 @@ export class CommandHandler {
   /**
    * 发送 CommandCard 卡片。卡片成功返回 null（调用方直接 return），失败返回降级文本。
    * CommandCard 不进 InteractionRouter，按钮点击由 channel 直接构造伪命令入站消息。
+   *
+   * 走统一 adapter.send(envelope, { kind: 'interaction', ... }) 入口。
    */
   private async sendCommandCard(opts: {
     channel: string;
@@ -377,12 +380,25 @@ export class CommandHandler {
     const card = opts.interaction.kind;
 
     if (opts.canWrite === false) return renderCommandCardAsText(card);
-    if (!adapter?.sendInteraction) return renderCommandCardAsText(card);
+    if (!adapter || (!adapter.send && !adapter.sendInteraction)) return renderCommandCardAsText(card);
     // session 忙碌时降级到文本，避免并发触发带参写操作
     if (this.isSessionBusy(opts.interaction.sessionId)) return renderCommandCardAsText(card);
 
     try {
-      const messageId = await adapter.sendInteraction(opts.channelId, opts.interaction, opts.replyCtx);
+      const envelope = buildEnvelope({
+        channel: opts.channel,
+        channelId: opts.channelId,
+        agentName: this.agentRegistry?.resolveByChannel(opts.channel)?.name,
+        replyContext: opts.replyCtx,
+      });
+      const fallbackText = renderCommandCardAsText(card);
+      const messageId = await sendInteractionPayload(
+        adapter,
+        envelope,
+        opts.interaction,
+        fallbackText,
+        opts.replyCtx,
+      );
       if (messageId) return null;
     } catch (e) {
       logger.warn(`[CommandHandler] sendCommandCard failed: ${e}`);

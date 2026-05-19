@@ -2113,6 +2113,14 @@ function resolveInstanceConfig(instanceName: string): { type: string; config: an
 /**
  * 通过对应渠道 API 发送通知（轻量级，不依赖 Channel 实例）
  * 支持 feishu / wechat，根据 pendingInfo.channel 路由
+ *
+ * Phase 3 例外说明（出站消息统一计划，docs/outbound-message-unification.md）：
+ * 主网关进程出站系统通知（上线 / 重启完成 / channel:error 等）已迁到
+ * `adapter.send(envelope, { kind: 'system.notice' | 'system.error', ... })` 统一入口。
+ * 但 cli.ts 在 restart-monitor 子进程里跑，不持有 EvolAgent / ChannelAdapter 实例
+ * （主网关进程已退出，新进程还没起或起不来），只能直连协议 SDK 自发。
+ * 因此 self-heal 全流程（启动失败 / 修复中 / 修复成功 / 全部失败）和升级失败通知
+ * 留在这里直发，**不属于** Phase 3 改造范围。
  */
 async function notifyChannel(
   p: ReturnType<typeof resolvePaths>,

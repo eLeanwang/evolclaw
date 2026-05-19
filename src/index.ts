@@ -16,7 +16,7 @@ import { AUNChannelPlugin } from './channels/aun.js';
 import { DingtalkChannelPlugin } from './channels/dingtalk.js';
 import { QQBotChannelPlugin } from './channels/qqbot.js';
 import { WecomChannelPlugin } from './channels/wecom.js';
-import { MessageProcessor } from './core/message/message-processor.js';
+import { MessageProcessor, buildEnvelope } from './core/message/message-processor.js';
 import { MessageQueue } from './core/message/message-queue.js';
 import { MessageBridge } from './core/message/message-bridge.js';
 import { MessageCache } from './core/message/message-cache.js';
@@ -31,13 +31,50 @@ import { AgentLoader } from './core/agent-loader.js';
 import { EvolAgentRegistry, type ReloadHooks } from './core/evolagent-registry.js';
 import { buildReloadHooks } from './utils/reload-hooks.js';
 import { IpcServer, IpcStatusResponse, ChannelStatus } from './ipc.js';
-import { ChannelAdapter, Message } from './types.js';
+import { ChannelAdapter, Message, OutboundEnvelope, OutboundPayload } from './types.js';
 import { logger, setLogLevel } from './utils/logger.js';
 import { writeMain, removeAll, isMainWinner, scanInstances } from './utils/instance-registry.js';
 import { detectDuplicates } from './core/evolagent-registry.js';
 import { loadPromptTemplates } from './agents/templates.js';
 import path from 'path';
 import fs from 'fs';
+import crypto from 'crypto';
+
+/**
+ * 通过 adapter.send 发送系统类 payload（system.notice / system.error / 等）。
+ *
+ * 网关层（本文件）的所有出站系统通知（上线 / 重启完成 / 渠道告警 / agent 启动失败等）
+ * 走这里集中调度，让渠道按 capabilities 决定呈现方式。
+ *
+ * 当 adapter 还没实现 send（旧 adapter）时，按 payload.kind 降级到 sendText。
+ *
+ * Exported for unit test coverage; runtime callers are inside main() closure.
+ */
+export async function sendSystemPayload(
+  adapter: ChannelAdapter,
+  envelope: OutboundEnvelope,
+  payload: OutboundPayload
+): Promise<void> {
+  if (adapter.send) {
+    await adapter.send(envelope, payload);
+    return;
+  }
+  // 降级路径：仅文本类 payload
+  let text: string | undefined;
+  switch (payload.kind) {
+    case 'result.text':
+    case 'command.result':
+    case 'command.error':
+    case 'system.notice':
+    case 'system.error':
+    case 'result.error':
+      text = payload.text;
+      break;
+  }
+  if (text) {
+    await adapter.sendText(envelope.channelId, text, envelope.replyContext);
+  }
+}
 
 async function main() {
   // 过滤飞书 SDK 的 info 日志
@@ -494,7 +531,18 @@ async function main() {
         if (nameMatch) agentName = nameMatch[1].trim().replace(/"$/, '');
       } catch {}
       const projectDir = path.basename(agent.projectPath);
-      adapter.sendText(ownerAid, `✓ ${agentName} 已上线 | 工作目录: ${projectDir}`).catch(() => {});
+      const text = `✓ ${agentName} 已上线 | 工作目录: ${projectDir}`;
+      const envelope = buildEnvelope({
+        taskId: `system-online-${crypto.randomBytes(5).toString('hex')}`,
+        channel: adapter.channelName,
+        channelId: ownerAid,
+        agentName,
+      });
+      sendSystemPayload(adapter, envelope, {
+        kind: 'system.notice',
+        text,
+        subtype: 'restarted',
+      }).catch(() => {});
     }
   }, 1000 + Math.random() * 2000);
 
@@ -515,7 +563,19 @@ async function main() {
       const ownerId = agentRegistry.getOwner(other.adapter.channelName);
       if (!ownerId) continue;
       notified.add(otherType);
-      other.adapter.sendText(ownerId, msg).catch(err => {
+      const owningAgent = agentRegistry.resolveByChannel(other.adapter.channelName);
+      const envelope = buildEnvelope({
+        taskId: `system-channel-down-${crypto.randomBytes(5).toString('hex')}`,
+        channel: other.adapter.channelName,
+        channelId: ownerId,
+        agentName: owningAgent?.aid || 'evolclaw',
+      });
+      sendSystemPayload(other.adapter, envelope, {
+        kind: 'system.error',
+        text: msg,
+        subtype: 'channel_down',
+        recoverable: false,
+      }).catch(err => {
         logger.error(`[ChannelHealth] Failed to notify ${other.adapter.channelName} owner:`, err);
       });
     }
@@ -600,7 +660,19 @@ async function main() {
         const replyContext = pending.rootId
           ? { replyToMessageId: pending.rootId, replyInThread: !!pending.threadId }
           : undefined;
-        await adapter.sendText(pending.channelId, '✅ 服务重启成功！', replyContext);
+        const owningAgent = agentRegistry.resolveByChannel(adapter.channelName);
+        const envelope = buildEnvelope({
+          taskId: `system-restart-${process.pid}`,
+          channel: adapter.channelName,
+          channelId: pending.channelId,
+          agentName: owningAgent?.aid || 'evolclaw',
+          replyContext,
+        });
+        await sendSystemPayload(adapter, envelope, {
+          kind: 'system.notice',
+          text: '✅ 服务重启成功！',
+          subtype: 'restarted',
+        });
         logger.info(`[Restart] Notification sent via ${pending.channel}`);
       }
       fs.unlinkSync(pendingFile);
@@ -811,9 +883,13 @@ async function main() {
   });
 }
 
-main().catch((error) => {
-  const msg = `Fatal error: ${error?.stack || error}`;
-  logger.error('Fatal error:', error);
-  console.error(msg);  // ensure it lands in stdout.log for self-heal diagnostics
-  process.exit(1);
-});
+// 仅在直接执行时启动；导入此模块（如单元测试）时不触发 main()。
+import { isMainScript } from './utils/cross-platform.js';
+if (isMainScript(import.meta.url)) {
+  main().catch((error) => {
+    const msg = `Fatal error: ${error?.stack || error}`;
+    logger.error('Fatal error:', error);
+    console.error(msg);  // ensure it lands in stdout.log for self-heal diagnostics
+    process.exit(1);
+  });
+}

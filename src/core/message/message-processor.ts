@@ -12,11 +12,44 @@ import { logger } from '../../utils/logger.js';
 import { getErrorMessage, classifyError, ErrorType, ERROR_PREFIX, isInfraError, prefixErrorType, isRetryableError } from '../../utils/error-utils.js';
 import { EventBus } from '../event-bus.js';
 import { summarizeToolInput } from '../permission.js';
-import type { Message, Session, ChannelAdapter, ChannelOptions, ChannelPolicy, CommandHandler, ReplyContext, AgentContext, EvolAgentRegistryHandle, GlobalSettings, OutboundEnvelope, OutboundPayload } from '../../types.js';
+import type { Message, Session, ChannelAdapter, ChannelOptions, ChannelPolicy, CommandHandler, ReplyContext, AgentContext, EvolAgentRegistryHandle, GlobalSettings, OutboundEnvelope, OutboundPayload, InteractionRequest, InteractionKind, ActionInteraction, CommandCard } from '../../types.js';
 import { DEFAULT_PERMISSION_MODE } from '../../types.js';
 import { getPackageRoot, resolveRoot } from '../../paths.js';
 import { renderPromptSection } from '../../agents/templates.js';
 import type { InteractionRouter } from '../interaction-router.js';
+import { renderActionAsText, renderCommandCardAsText } from '../interaction-fallback.js';
+
+/**
+ * 构造 OutboundEnvelope —— 出站三件套的信封部分。
+ *
+ * 用于所有走 adapter.send 的出站路径：
+ *  - 任务流内的 IMRenderer 投影（chatmode 由会话决定）
+ *  - 命令回显（MessageBridge.handleCommand，taskId 用合成 ID `cmd-...`）
+ *  - 网关层系统通知（src/index.ts，taskId 用 `system-...` / `restart-...` 等便于 events.log 关联）
+ *
+ * 注意：
+ *  - chatmode 缺省 `'interactive'`（系统通知 / 命令回显都属于同步交互）；
+ *  - timestamp 可由调用方注入（便于测试），缺省 `Date.now()`。
+ */
+export function buildEnvelope(opts: {
+  taskId?: string;
+  channel: string;
+  channelId: string;
+  agentName?: string;
+  chatmode?: 'interactive' | 'proactive';
+  replyContext?: ReplyContext;
+  timestamp?: number;
+}): OutboundEnvelope {
+  return {
+    taskId: opts.taskId ?? `interaction-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    channel: opts.channel,
+    channelId: opts.channelId,
+    agentName: opts.agentName ?? '<unknown>',
+    chatmode: opts.chatmode ?? 'interactive',
+    replyContext: opts.replyContext,
+    timestamp: opts.timestamp ?? Date.now(),
+  };
+}
 
 /**
  * 统一消息处理器
@@ -406,15 +439,14 @@ export class MessageProcessor {
       // 创建 IMRenderer（统一 interactive/proactive 两条路径）
       let firstReply = true;
       const isProactive = session.sessionMode === 'proactive';
-      const envelope: OutboundEnvelope = {
+      const envelope = buildEnvelope({
         taskId,
         channel: message.channel,
         channelId: message.channelId,
         agentName: agentNameForStats,
         chatmode: isProactive ? 'proactive' : 'interactive',
         replyContext: this.getReplyContext(message),
-        timestamp: Date.now(),
-      };
+      });
       const renderer = new IMRenderer({
         adapter,
         envelope,
@@ -476,6 +508,10 @@ export class MessageProcessor {
         replyContext: capturedReplyContext,
         interactionRouter: this.interactionRouter,
         userId: message.peerId || undefined,
+        channel: message.channel,
+        agentName: agentNameForStats,
+        taskId,
+        chatmode: isProactive ? 'proactive' : 'interactive',
         interceptNextMessage: this.messageQueue
           ? (sessionKey, handler) => this.messageQueue!.interceptNext(sessionKey, handler)
           : undefined,
@@ -1452,4 +1488,87 @@ export class MessageProcessor {
 
     return false;
   }
+}
+
+// ── 出站协议辅助：buildEnvelope / sendInteractionPayload ──
+// Phase 3 of outbound unification: callers (permission flow, CommandHandler
+// interaction cards, claude-runner AskUserQuestion / ExitPlanMode) should
+// produce `{ kind: 'interaction', interaction, fallbackText }` and dispatch
+// via `adapter.send(envelope, payload)` instead of calling
+// `adapter.sendInteraction(...)` directly. These helpers centralise the
+// indirection and provide a backwards-compatible fallback path for adapters
+// that do not yet implement `send`.
+
+/**
+ * Default fallback text for an InteractionRequest. Used when the caller
+ * does not supply one explicitly. Picks the appropriate renderer based on
+ * the interaction kind.
+ */
+export function defaultFallbackText(interaction: InteractionRequest): string {
+  const kind: InteractionKind = interaction.kind;
+  if (kind.kind === 'command-card') {
+    return renderCommandCardAsText(kind);
+  }
+  if (kind.kind === 'action') {
+    try {
+      return renderActionAsText(interaction);
+    } catch {
+      // ActionInteraction without fallback metadata — produce a minimal hint
+      const action = kind as ActionInteraction;
+      const lines = [action.title];
+      if (action.body) lines.push(action.body);
+      return lines.join('\n');
+    }
+  }
+  return '';
+}
+
+/**
+ * Send an interaction payload through the unified `adapter.send` entrypoint.
+ *
+ * - Builds payload `{ kind: 'interaction', interaction, fallbackText }`.
+ * - Prefers `adapter.send(envelope, payload)` when available.
+ * - Falls back to `adapter.sendInteraction(channelId, interaction, replyCtx)`
+ *   for backwards compatibility (channels that have not yet implemented
+ *   `send`).
+ *
+ * Returns the messageId-like value from `sendInteraction` when the legacy
+ * path is used, or `'sent'` when the unified path succeeds. Returns `false`
+ * on failure or when neither entrypoint is implemented.
+ */
+export async function sendInteractionPayload(
+  adapter: ChannelAdapter,
+  envelope: OutboundEnvelope,
+  interaction: InteractionRequest,
+  fallbackText?: string,
+  replyCtx?: ReplyContext,
+): Promise<string | false> {
+  const text = fallbackText ?? defaultFallbackText(interaction);
+  const payload: OutboundPayload = {
+    kind: 'interaction',
+    interaction,
+    fallbackText: text || undefined,
+  };
+
+  if (typeof adapter.send === 'function') {
+    try {
+      const enriched: OutboundEnvelope = replyCtx
+        ? { ...envelope, replyContext: replyCtx }
+        : envelope;
+      await adapter.send(enriched, payload);
+      return 'sent';
+    } catch {
+      // Fall through to legacy path if unified send blew up.
+    }
+  }
+
+  if (typeof adapter.sendInteraction === 'function') {
+    try {
+      return await adapter.sendInteraction(envelope.channelId, interaction, replyCtx ?? envelope.replyContext);
+    } catch {
+      return false;
+    }
+  }
+
+  return false;
 }

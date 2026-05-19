@@ -3,6 +3,7 @@ import type { EventBus } from './event-bus.js';
 import type { ChannelAdapter, ReplyContext, InteractionRequest } from '../types.js';
 import type { InteractionRouter } from './interaction-router.js';
 import { renderActionAsText } from './interaction-fallback.js';
+import { buildEnvelope, sendInteractionPayload } from './message/message-processor.js';
 
 // 危险命令黑名单（正则表达式）
 const DANGEROUS_PATTERNS = [
@@ -217,6 +218,10 @@ export class PermissionGateway {
       replyContext?: ReplyContext;
       interactionRouter?: InteractionRouter;
       userId?: string;
+      channel?: string;
+      agentName?: string;
+      taskId?: string;
+      chatmode?: 'interactive' | 'proactive';
     },
     summary?: string,
     reason?: string
@@ -252,16 +257,29 @@ export class PermissionGateway {
       fallback: { command: 'perm' },
     };
 
-    // 尝试富交互
+    // 尝试富交互（走统一 adapter.send 入口）
     let interactionSent = false;
-    if (context?.adapter?.sendInteraction && context.channelId) {
+    if (context?.adapter && context.channelId) {
       try {
-        const result = await context.adapter.sendInteraction(
-          context.channelId, interaction, context.replyContext
+        const envelope = buildEnvelope({
+          taskId: context.taskId,
+          channel: context.channel ?? context.adapter.channelName,
+          channelId: context.channelId,
+          agentName: context.agentName,
+          chatmode: context.chatmode,
+          replyContext: context.replyContext,
+        });
+        const fallbackText = `🔐 权限请求 - ${toolName}\n${displaySummary}${reasonLine}\n回复 /perm allow 同意 / /perm always 始终允许 / /perm deny 拒绝`;
+        const result = await sendInteractionPayload(
+          context.adapter,
+          envelope,
+          interaction,
+          fallbackText,
+          context.replyContext,
         );
         interactionSent = !!result;
       } catch (err) {
-        // sendInteraction 失败，fallback 到文本
+        // sendInteractionPayload 已内部捕获，但保险起见再 try/catch
       }
     }
 

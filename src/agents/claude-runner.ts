@@ -4,6 +4,7 @@ import { resolveAnthropicConfig } from './resolve.js';
 import type { Config, ChannelAdapter, ReplyContext, InteractionRequest, Message } from '../types.js';
 import { DEFAULT_PERMISSION_MODE } from '../types.js';
 import { renderActionAsText } from '../core/interaction-fallback.js';
+import { buildEnvelope, sendInteractionPayload } from '../core/message/message-processor.js';
 import type { PermissionGateway, PermissionDecision } from '../core/permission.js';
 import path from 'path';
 import fs from 'fs';
@@ -25,6 +26,14 @@ export interface PermissionContext {
   interceptNextMessage?: (sessionKey: string, handler: (message: Message) => void) => void;
   /** 取消消息拦截 */
   cancelIntercept?: (sessionKey: string) => void;
+  /** 渠道名称（用于构造 OutboundEnvelope） */
+  channel?: string;
+  /** EvolAgent 名称（用于构造 OutboundEnvelope） */
+  agentName?: string;
+  /** 当前任务 id（用于构造 OutboundEnvelope） */
+  taskId?: string;
+  /** 当前会话 chatmode（interactive | proactive） */
+  chatmode?: 'interactive' | 'proactive';
 }
 
 // ── SDK 消息流（Claude Agent SDK 专有格式）──
@@ -429,7 +438,11 @@ export class AgentRunner {
 
     // 没有交互上下文（无渠道适配器），回退到纯文本
     const permCtx = this.permissionContexts.get(sessionId);
-    if (!permCtx?.adapter?.sendInteraction || !permCtx?.channelId) {
+    if (!permCtx?.adapter || !permCtx?.channelId) {
+      return this.handleAskUserQuestionFallback(sessionId, input, questions);
+    }
+    const adapterHasInteractionPath = !!(permCtx.adapter.send || permCtx.adapter.sendInteraction);
+    if (!adapterHasInteractionPath) {
       return this.handleAskUserQuestionFallback(sessionId, input, questions);
     }
 
@@ -484,10 +497,22 @@ export class AgentRunner {
 
       let cardSent = false;
       try {
-        const result = await permCtx.adapter.sendInteraction(
-          permCtx.channelId,
+        const envelope = buildEnvelope({
+          taskId: permCtx.taskId,
+          channel: permCtx.channel ?? permCtx.adapter.channelName,
+          channelId: permCtx.channelId,
+          agentName: permCtx.agentName,
+          chatmode: permCtx.chatmode,
+          replyContext: permCtx.replyContext,
+        });
+        const optionLines = q.options.map((o, idx) => `  ${idx + 1}. ${o.label}${o.description ? ` — ${o.description}` : ''}`).join('\n');
+        const fallbackText = `💬 ${q.header || q.question}\n${q.header ? q.question + '\n' : ''}${optionLines}`;
+        const result = await sendInteractionPayload(
+          permCtx.adapter,
+          envelope,
           interaction,
-          permCtx.replyContext
+          fallbackText,
+          permCtx.replyContext,
         );
         cardSent = !!result;
       } catch (err) {
@@ -629,7 +654,7 @@ export class AgentRunner {
 
     // 尝试发送交互卡片
     let cardSent = false;
-    if (permCtx.adapter?.sendInteraction) {
+    if (permCtx.adapter && (permCtx.adapter.send || permCtx.adapter.sendInteraction)) {
       const requestId = `plan-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const interaction: InteractionRequest = {
         type: 'interaction',
@@ -653,7 +678,22 @@ export class AgentRunner {
       };
 
       try {
-        const result = await permCtx.adapter.sendInteraction(permCtx.channelId, interaction, permCtx.replyContext);
+        const envelope = buildEnvelope({
+          taskId: permCtx.taskId,
+          channel: permCtx.channel ?? permCtx.adapter.channelName,
+          channelId: permCtx.channelId,
+          agentName: permCtx.agentName,
+          chatmode: permCtx.chatmode,
+          replyContext: permCtx.replyContext,
+        });
+        const fallbackText = '📋 计划审批：AI 已完成规划，等待审批。\n回复 /ask 1 批准 / /ask 2 拒绝';
+        const result = await sendInteractionPayload(
+          permCtx.adapter,
+          envelope,
+          interaction,
+          fallbackText,
+          permCtx.replyContext,
+        );
         cardSent = !!result;
       } catch (err) {
         logger.warn('[AgentRunner] ExitPlanMode card send failed:', err);
