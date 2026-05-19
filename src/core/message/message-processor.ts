@@ -395,7 +395,10 @@ export class MessageProcessor {
 
       // 记录开始处理
       this.eventBus.publish({ type: 'message:processing', sessionId: session.id });
-      adapter.sendProcessingStatus?.(message.channelId, 'start', session.id, taskId, taskReplyContext());
+      // 触发器消息不发 processing status（无需通知用户）
+      if (message.source !== 'trigger') {
+        adapter.sendProcessingStatus?.(message.channelId, 'start', session.id, taskId, taskReplyContext());
+      }
 
       logger.message({
         msgId: messageId,
@@ -410,6 +413,7 @@ export class MessageProcessor {
       // 使用动态判断，确保切换项目后不会继续输出
       let firstReply = true;
       const isProactive = session.sessionMode === 'proactive';
+      const isAutonomous = session.sessionMode === 'autonomous' || message.triggerMeta?.silent === true;
       const flusher = new StreamFlusher(
         async (text, isFinal, hasText) => {
           const isCurrentlyBackground = await this.isBackgroundSession(session, message.channel, message.channelId);
@@ -436,7 +440,7 @@ export class MessageProcessor {
         (options?.flushDelay ?? this.agentRegistry?.resolveByChannel(channelKey)?.config?.flush_delay ?? 3) * 1000,
         options?.fileMarkerPattern,
         this.globalSettings.debug?.flusherDiag,
-        isProactive
+        isProactive || isAutonomous
       );
 
       // 保存当前 flusher，用于 compact 事件
@@ -581,6 +585,12 @@ export class MessageProcessor {
         // 3. Proactive 模式提示词
         if (isProactive) {
           contextParts.push(renderPromptSection('proactive', {}));
+        }
+
+        // 4. 触发器功能提示词（非触发器消息时注入，让 AI 知道可以使用触发器）
+        if (message.source !== 'trigger') {
+          const triggerSection = renderPromptSection('trigger' as any, {});
+          if (triggerSection) contextParts.push(triggerSection);
         }
 
         const effectiveSystemPrompt = [options?.systemPromptAppend, ...contextParts].filter(Boolean).join('\n') || undefined;
@@ -811,7 +821,12 @@ export class MessageProcessor {
         const errorSummary = streamResult.errors?.join('; ') || '任务执行失败';
         const rawSubtype = streamResult.subtype || 'agent_error';
         const errorType = prefixErrorType(ERROR_PREFIX.AGENT, rawSubtype);
-        adapter.sendProcessingStatus?.(message.channelId, 'error', session.id, taskId, taskReplyContext());
+        if (message.source !== 'trigger') {
+          adapter.sendProcessingStatus?.(message.channelId, 'error', session.id, taskId, taskReplyContext());
+        }
+        if (message.triggerMeta) {
+          this.eventBus.publish({ type: 'trigger:failed', triggerId: message.triggerMeta.triggerId, messageId: messageId, error: errorSummary });
+        }
 
         this.eventBus.publish({
           type: 'message:error',
@@ -842,7 +857,17 @@ export class MessageProcessor {
         });
       } else {
         // 真正的成功
-        adapter.sendProcessingStatus?.(message.channelId, interruptReason ? 'interrupted' : 'done', session.id, taskId, taskReplyContext());
+        if (message.source !== 'trigger') {
+          adapter.sendProcessingStatus?.(message.channelId, interruptReason ? 'interrupted' : 'done', session.id, taskId, taskReplyContext());
+        }
+        if (message.triggerMeta) {
+          const outcome = interruptReason ? 'interrupted' : 'completed';
+          if (outcome === 'interrupted') {
+            this.eventBus.publish({ type: 'trigger:skipped', triggerId: message.triggerMeta.triggerId, reason: 'interrupted' });
+          } else {
+            this.eventBus.publish({ type: 'trigger:completed', triggerId: message.triggerMeta.triggerId, messageId: messageId, durationMs: Date.now() - startTime });
+          }
+        }
         await this.sessionManager.recordSuccess(session.id);
 
         this.eventBus.publish({
