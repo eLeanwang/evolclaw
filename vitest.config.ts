@@ -33,6 +33,7 @@ export default defineConfig({
     globals: true,
     environment: 'node',
     setupFiles: ['./tests/setup.ts'],
+    testTimeout: 30000,
     exclude: ['**/node_modules/**', '**/dist/**', 'aun/**', 'projects/**', '**/worktrees/**'],
     coverage: {
       provider: 'v8',

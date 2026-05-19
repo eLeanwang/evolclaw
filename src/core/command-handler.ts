@@ -10,12 +10,16 @@ import { InteractionRouter } from './interaction-router.js';
 import { MessageQueue } from './message/message-queue.js';
 import { renderCommandCardAsText } from './interaction-router.js';
 import { buildEnvelope, sendInteractionPayload } from './message/message-processor.js';
-import { resolvePaths, getPackageRoot } from '../paths.js';
+import { resolvePaths, getPackageRoot, agentTriggersDir } from '../paths.js';
 import { logger } from '../utils/logger.js';
 import crypto from 'crypto';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
+import { parseTriggerSet } from './trigger/parser.js';
+import { TriggerManager } from './trigger/manager.js';
+import { TriggerScheduler, calcNextFireAt } from './trigger/scheduler.js';
+import type { Trigger } from '../types.js';
 
 export interface MenuNext {
   type: 'select' | 'text';
@@ -144,7 +148,7 @@ function formatIdleTime(ms: number): string {
 }
 
 // 支持的命令列表
-const commands = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/evolhelp', '/status', '/restart', '/model', '/setmodel', '/effort', '/agent', '/slist', '/session', '/rename', '/stop', '/clear', '/compact', '/repair', '/safe', '/fork', '/del', '/perm', '/file', '/check', '/rewind', '/activity', '/chatmode', '/dispatch', '/ask', '/resume', '/aid', '/rpc', '/storage'];
+const commands = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/evolhelp', '/status', '/restart', '/model', '/setmodel', '/effort', '/agent', '/slist', '/session', '/rename', '/stop', '/clear', '/compact', '/repair', '/safe', '/fork', '/del', '/perm', '/file', '/check', '/rewind', '/activity', '/chatmode', '/dispatch', '/ask', '/resume', '/aid', '/rpc', '/storage', '/trigger'];
 
 // 命令别名映射
 const aliases: Record<string, string> = {
@@ -155,7 +159,7 @@ const aliases: Record<string, string> = {
 };
 
 // 命令快速路径前缀（所有命令都不进入消息队列）
-const quickCommandPrefixes = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/evolhelp', '/status', '/restart', '/model', '/setmodel', '/effort', '/agent', '/slist', '/session', '/rename', '/repair', '/fork', '/stop', '/clear', '/compact', '/safe', '/del', '/perm', '/file', '/check', '/p ', '/s ', '/name', '/rewind', '/rw', '/rw ', '/activity', '/chatmode', '/dispatch', '/ask', '/resume', '/aid', '/rpc', '/storage'];
+const quickCommandPrefixes = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/evolhelp', '/status', '/restart', '/model', '/setmodel', '/effort', '/agent', '/slist', '/session', '/rename', '/repair', '/fork', '/stop', '/clear', '/compact', '/safe', '/del', '/perm', '/file', '/check', '/p ', '/s ', '/name', '/rewind', '/rw', '/rw ', '/activity', '/chatmode', '/dispatch', '/ask', '/resume', '/aid', '/rpc', '/storage', '/trigger'];
 
 export class CommandHandler {
   private adapters = new Map<string, ChannelAdapter>();
@@ -170,6 +174,8 @@ export class CommandHandler {
   private agentMap: Map<string, AgentRunnerFull>;
   private primaryRunnerKey: string;
   private agentRegistry?: EvolAgentRegistryHandle;
+  private triggerScheduler?: TriggerScheduler;
+  private triggerManager?: TriggerManager;
 
   /**
    * Get the runner for a (channel, baseagent) pair.
@@ -224,6 +230,12 @@ export class CommandHandler {
   /** 注入 EvolAgentRegistry，用于判断通道是否被 EvolAgent 管理 */
   setAgentRegistry(registry: EvolAgentRegistryHandle): void {
     this.agentRegistry = registry;
+  }
+
+  /** 注入触发器调度器（由 index.ts 在初始化后调用） */
+  setTriggerScheduler(scheduler: TriggerScheduler, manager: TriggerManager): void {
+    this.triggerScheduler = scheduler;
+    this.triggerManager = manager;
   }
 
   /** 返回管理当前通道的 EvolAgent，无则返回 null */
@@ -877,7 +889,7 @@ export class CommandHandler {
       const guestGroupCommands = [
         '/status', '/help', '/evolhelp', '/check', '/chatmode', '/dispatch',
         '/model', '/setmodel', '/effort', '/agent', '/perm', '/activity', '/safe', '/stop',
-        '/resume',
+        '/resume', '/trigger',
       ];
       const userCommands = activeChatType === 'group' && !isAdmin
         ? guestGroupCommands
@@ -3385,7 +3397,133 @@ export class CommandHandler {
       return { kind: 'command.result' as const, text: `ℹ️ 安全模式已禁用\n\n如需重置会话，请使用 /new 创建新会话。` };
     }
 
+    // /trigger 命令
+    if (normalizedContent === '/trigger' || normalizedContent.startsWith('/trigger ')) {
+      const text = this.handleTrigger(normalizedContent, channel, channelId, userId ?? '', isAdmin);
+      return { kind: 'command.result' as const, text };
+    }
+
     return null;
+  }
+
+  private handleTrigger(
+    content: string,
+    channel: string,
+    channelId: string,
+    peerId: string,
+    isAdmin: boolean,
+  ): string {
+    const scheduler = this.triggerScheduler;
+    const manager = this.triggerManager;
+
+    // Bare /trigger → list active
+    if (content === '/trigger') {
+      if (!manager) return '⚠️ 触发器功能未启用';
+      const active = manager.listActive();
+      if (active.length === 0) return '📭 当前没有活跃的触发器';
+      const lines = active.map(t => {
+        const next = new Date(t.nextFireAt).toLocaleString();
+        const fired = t.fireCount > 0 ? ` | 已触发 ${t.fireCount} 次` : '';
+        return `• **${t.name}** [${t.scheduleType}] 下次: ${next}${fired}`;
+      });
+      return `📋 活跃触发器（${active.length} 个）：\n\n${lines.join('\n')}`;
+    }
+
+    const sub = content.slice('/trigger '.length).trim();
+
+    // /trigger list → list all (active + history)
+    if (sub === 'list' || sub.startsWith('list ')) {
+      if (!manager) return '⚠️ 触发器功能未启用';
+      const { active, history } = manager.listAll();
+      const lines: string[] = [];
+      if (active.length > 0) {
+        lines.push(`**活跃 (${active.length})**`);
+        for (const t of active) {
+          const next = new Date(t.nextFireAt).toLocaleString();
+          lines.push(`• ${t.name} [${t.scheduleType}] 下次: ${next} | 触发 ${t.fireCount} 次`);
+        }
+      }
+      if (history.length > 0) {
+        lines.push(`\n**历史 (${history.length})**`);
+        for (const h of history.slice(-10)) {
+          const done = new Date((h as any).doneAt).toLocaleString();
+          lines.push(`• ${h.name} [${(h as any).doneReason}] ${done}`);
+        }
+      }
+      if (lines.length === 0) return '📭 没有触发器记录';
+      return lines.join('\n');
+    }
+
+    // /trigger cancel <name|id>
+    if (sub.startsWith('cancel ')) {
+      if (!manager || !scheduler) return '⚠️ 触发器功能未启用';
+      const nameOrId = sub.slice('cancel '.length).trim();
+      if (!nameOrId) return '❌ 用法：/trigger cancel <名称>';
+
+      // Find trigger: non-admin name lookup is scoped to (peerId, channel) to avoid info disclosure
+      let trigger: ReturnType<typeof manager.getById>;
+      if (isAdmin) {
+        trigger = manager.getByName(nameOrId) ?? manager.getById(nameOrId);
+      } else {
+        trigger = manager.getByNameScoped(nameOrId, peerId, channel);
+      }
+      if (!trigger) {
+        return isAdmin
+          ? `❌ 未找到触发器：${nameOrId}`
+          : `❌ 未找到触发器 "${nameOrId}"，或无权限取消`;
+      }
+
+      manager.moveToDone(trigger.id, 'cancelled');
+      scheduler.cancel(trigger.id);
+      this.eventBus.publish({ type: 'trigger:cancelled', triggerId: trigger.id, by: peerId });
+      return `✅ 触发器已取消：**${trigger.name}**`;
+    }
+
+    // /trigger set ...
+    if (sub.startsWith('set ')) {
+      if (!manager || !scheduler) return '⚠️ 触发器功能未启用';
+      const args = sub.slice('set '.length);
+      const result = parseTriggerSet(args);
+      if (!result.ok) return `❌ ${result.error}`;
+
+      const parsed = result.value;
+      const now = Date.now();
+      const nextFireAt = calcNextFireAt(parsed.scheduleType, parsed.scheduleValue, now);
+
+      // Auto-generate name if not provided
+      const name = parsed.name ?? `trigger-${Date.now().toString(36)}`;
+
+      const trigger: Trigger = {
+        id: crypto.randomUUID(),
+        name,
+        scheduleType: parsed.scheduleType,
+        scheduleValue: parsed.scheduleValue,
+        nextFireAt,
+        targetChannel: parsed.targetChannel ?? channel,
+        targetChannelId: parsed.targetChannelId ?? channelId,
+        targetThreadId: parsed.targetThreadId,
+        targetSessionStrategy: parsed.targetSessionStrategy,
+        agentId: parsed.agentId,
+        prompt: parsed.prompt,
+        createdByPeerId: peerId,
+        createdByChannel: channel,
+        fireCount: 0,
+        createdAt: now,
+        updatedAt: now,
+      };
+
+      try {
+        manager.register(trigger);
+        scheduler.register(trigger);
+      } catch (err: any) {
+        return `❌ 注册失败：${err.message}`;
+      }
+
+      const nextStr = new Date(nextFireAt).toLocaleString();
+      return `✅ 触发器已注册：**${name}**\n下次触发：${nextStr}`;
+    }
+
+    return `❌ 未知子命令。用法：\n/trigger — 查看活跃触发器\n/trigger list — 查看所有触发器\n/trigger set <参数> — 注册触发器\n/trigger cancel <名称> — 取消触发器`;
   }
 
   // ── /rewind helpers ──

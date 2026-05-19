@@ -258,6 +258,8 @@ export interface Message {
   messageId?: string;
   replyContext?: ReplyContext;       // Channel 预构建的回复上下文（渠道无关）
   timestamp?: number;
+  source?: 'user' | 'card-trigger' | 'trigger';
+  triggerMeta?: { triggerId: string; silent: boolean };
 }
 
 // 入站消息（渠道 → Gateway 的统一格式）
@@ -787,4 +789,29 @@ export interface ChannelCapabilities {
   markdown: boolean;
   thought: boolean;
   status: boolean;
+}
+
+// ── Trigger types ──
+
+export type TriggerScheduleType = 'delay' | 'at' | 'cron';
+export type TriggerSessionStrategy = 'latest' | 'silent';
+
+export interface Trigger {
+  id: string;
+  name: string;
+  scheduleType: TriggerScheduleType;
+  scheduleValue: string;       // delay: ms as string; at: ISO string; cron: expression
+  nextFireAt: number;          // Unix ms
+  targetChannel: string;
+  targetChannelId: string;
+  targetThreadId?: string;
+  targetSessionStrategy: TriggerSessionStrategy;
+  agentId?: string;
+  prompt: string;
+  createdByPeerId: string;
+  createdByChannel: string;
+  lastFiredAt?: number;
+  fireCount: number;
+  createdAt: number;
+  updatedAt: number;
 }

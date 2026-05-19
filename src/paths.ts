@@ -78,6 +78,9 @@ export function agentDataDir(aid: string): string {
 export function agentDataCacheDir(aid: string): string {
   return path.join(agentDataDir(aid), 'cache');
 }
+export function agentTriggersDir(aid: string): string {
+  return path.join(resolveRoot(), 'data', 'triggers', aid);
+}
 
 function resolveInstanceSocketPath(root: string): string {
   if (isWindows) {

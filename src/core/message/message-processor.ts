@@ -398,6 +398,7 @@ export class MessageProcessor {
     };
 
     const isProactive = session.sessionMode === 'proactive';
+    const isAutonomous = session.sessionMode === 'autonomous' || message.triggerMeta?.silent === true;
     const envelope = buildEnvelope({
       taskId,
       channel: message.channel,
@@ -441,7 +442,10 @@ export class MessageProcessor {
 
       // 记录开始处理
       this.eventBus.publish({ type: 'task:started', sessionId: session.id });
-      adapter.send(envelope, { kind: 'status.started' }).catch(() => {});
+      // 触发器消息不发 processing status（无需通知用户）
+      if (message.source !== 'trigger') {
+        adapter.send(envelope, { kind: 'status.started' }).catch(() => {});
+      }
 
       logger.message({
         msgId: messageId,
@@ -458,10 +462,11 @@ export class MessageProcessor {
         adapter,
         envelope,
         flushDelay: (options?.flushDelay ?? this.agentRegistry?.resolveByChannel(channelKey)?.config?.flush_delay ?? 3) * 1000,
-        suppressActivities: shouldSuppress(),
+        suppressActivities: shouldSuppress() || isAutonomous,
         fileMarkerPattern: options?.fileMarkerPattern,
         diagEnabled: this.globalSettings.debug?.flusherDiag,
         send: async (payload) => {
+          if (isAutonomous) return;  // autonomous session: never send to channel
           const isCurrentlyBackground = await this.isBackgroundSession(session, message.channel, message.channelId);
           if (isCurrentlyBackground) return;
 
@@ -620,6 +625,12 @@ export class MessageProcessor {
         // 3. Proactive 模式提示词
         if (isProactive) {
           contextParts.push(renderPromptSection('proactive', {}));
+        }
+
+        // 4. 触发器功能提示词（非触发器消息时注入，让 AI 知道可以使用触发器）
+        if (message.source !== 'trigger') {
+          const triggerSection = renderPromptSection('trigger', {});
+          if (triggerSection) contextParts.push(triggerSection);
         }
 
         effectiveSystemPrompt = [options?.systemPromptAppend, ...contextParts].filter(Boolean).join('\n') || undefined;
@@ -848,7 +859,12 @@ export class MessageProcessor {
         const errorSummary = streamResult.errors?.join('; ') || '任务执行失败';
         const rawSubtype = streamResult.subtype || 'agent_error';
         const errorType = prefixErrorType(ERROR_PREFIX.AGENT, rawSubtype);
-        adapter.send(envelope, { kind: 'status.error', metadata: { errorType: rawSubtype } }).catch(() => {});
+        if (message.source !== 'trigger') {
+          adapter.send(envelope, { kind: 'status.error', metadata: { errorType: rawSubtype } }).catch(() => {});
+        }
+        if (message.triggerMeta) {
+          this.eventBus.publish({ type: 'trigger:failed', triggerId: message.triggerMeta.triggerId, messageId: messageId, error: errorSummary });
+        }
 
         this.eventBus.publish({
           type: 'task:error',
@@ -880,10 +896,19 @@ export class MessageProcessor {
       } else {
         // 真正的成功
         const durationMs = Date.now() - startTime;
-        if (interruptReason) {
-          adapter.send(envelope, { kind: 'status.interrupted', metadata: { reason: interruptReason } }).catch(() => {});
-        } else {
-          adapter.send(envelope, { kind: 'status.completed', metadata: { durationMs } }).catch(() => {});
+        if (message.source !== 'trigger') {
+          if (interruptReason) {
+            adapter.send(envelope, { kind: 'status.interrupted', metadata: { reason: interruptReason } }).catch(() => {});
+          } else {
+            adapter.send(envelope, { kind: 'status.completed', metadata: { durationMs } }).catch(() => {});
+          }
+        }
+        if (message.triggerMeta) {
+          if (interruptReason) {
+            this.eventBus.publish({ type: 'trigger:skipped', triggerId: message.triggerMeta.triggerId, reason: 'interrupted' });
+          } else {
+            this.eventBus.publish({ type: 'trigger:completed', triggerId: message.triggerMeta.triggerId, messageId: messageId, durationMs });
+          }
         }
         await this.sessionManager.recordSuccess(session.id);
 
@@ -927,7 +952,7 @@ export class MessageProcessor {
       }
 
       const isFinallyBackground = await this.isBackgroundSession(session, message.channel, message.channelId);
-      if (isFinallyBackground) {
+      if (isFinallyBackground && session.sessionMode !== 'autonomous') {
         const projectName = path.basename(session.projectPath);
         const count = this.messageCache.getCount(session.id);
         await adapter.send(envelope, { kind: 'system.notice', text: `[\u540e\u53f0-${projectName}] \u2713 任务完成 (${count}条消息已缓存)`, subtype: 'background' });
@@ -1045,10 +1070,32 @@ export class MessageProcessor {
       ? { replyContext: message.replyContext }
       : undefined;
 
+    const projectPath = this.agentRegistry?.resolveByChannel(message.channel)?.projectPath || process.cwd();
+
+    // --session silent 触发器：新建独立 autonomous 会话，与原会话历史隔离
+    if (message.triggerMeta?.silent) {
+      const prevActive = await this.sessionManager.getActiveSession(message.channel, message.channelId);
+      const session = await this.sessionManager.createNewSession(
+        message.channel,
+        message.channelId,
+        projectPath,
+        `trigger-${message.triggerMeta.triggerId.slice(0, 8)}`,
+      );
+      await this.sessionManager.updateSession(session.id, { sessionMode: 'autonomous' });
+      session.sessionMode = 'autonomous';
+      if (prevActive) {
+        await this.sessionManager.switchToSession(message.channel, message.channelId, prevActive.id);
+      }
+      const absoluteProjectPath = path.isAbsolute(session.projectPath)
+        ? session.projectPath
+        : path.resolve(process.cwd(), session.projectPath);
+      return { session, absoluteProjectPath };
+    }
+
     const session = await this.sessionManager.getOrCreateSession(
       message.channel,
       message.channelId,
-      this.agentRegistry?.resolveByChannel(message.channel)?.projectPath || process.cwd(),
+      projectPath,
       message.threadId,
       metadata,
       undefined,

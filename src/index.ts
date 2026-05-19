@@ -36,6 +36,9 @@ import { logger, setLogLevel } from './utils/logger.js';
 import { writeMain, removeAll, isMainWinner, scanInstances } from './utils/instance-registry.js';
 import { detectDuplicates } from './core/evolagent-registry.js';
 import { loadPromptTemplates } from './agents/templates.js';
+import { TriggerManager } from './core/trigger/manager.js';
+import { TriggerScheduler } from './core/trigger/scheduler.js';
+import { agentTriggersDir } from './paths.js';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
@@ -312,6 +315,15 @@ async function main() {
   const channelInstances = evolagentInstances;
   logger.info(`✓ Created ${channelInstances.length} channel instance(s)`);
 
+  // 初始化触发器调度器（每个 EvolAgent 独立）
+  for (const agent of agentRegistry.runnableAgents()) {
+    const triggersDir = agentTriggersDir(agent.aid);
+    const triggerManager = new TriggerManager(agent.aid, triggersDir);
+    const triggerScheduler = new TriggerScheduler(agent.aid, triggerManager, eventBus);
+    agent.triggerManager = triggerManager;
+    agent.triggerScheduler = triggerScheduler;
+  }
+
   // 创建命令处理器
   const cmdHandler = new CommandHandler(sessionManager, agentMap, messageCache, eventBus, primaryRunnerKey);
   cmdHandler.setPermissionGateway(permissionGateway);
@@ -382,6 +394,38 @@ async function main() {
   // 回填 messageQueue 引用
   cmdHandler.setMessageQueue(messageQueue);
   processor.setMessageQueue(messageQueue);
+
+  // 启动触发器调度器，设置 fireCallback 投递合成消息
+  for (const agent of agentRegistry.runnableAgents()) {
+    if (!agent.triggerScheduler || !agent.triggerManager) continue;
+    const scheduler = agent.triggerScheduler;
+    const primaryProjectPath = agent.config.projects?.defaultPath ?? primaryAgent.projectPath;
+    scheduler.setFireCallback((msg, trigger) => {
+      const sessionKey = `${msg.channel}:${msg.channelId}`;
+      messageQueue.enqueue(sessionKey, msg, primaryProjectPath, { interruptible: false }).catch(err => {
+        logger.error(`[Trigger] Failed to enqueue trigger ${trigger.id}: ${err}`);
+      });
+    });
+    // Subscribe to trigger:completed/failed/skipped to update cron inflight state
+    eventBus.subscribe('trigger:completed', (ev: any) => scheduler.onTriggerComplete(ev.triggerId, 'completed'));
+    eventBus.subscribe('trigger:failed', (ev: any) => scheduler.onTriggerComplete(ev.triggerId, 'failed'));
+    eventBus.subscribe('trigger:skipped', (ev: any) => {
+      if (ev.reason === 'interrupted') scheduler.onTriggerComplete(ev.triggerId, 'interrupted');
+    });
+    // TODO: multi-agent trigger routing — currently only primary agent's scheduler is wired to cmdHandler
+    // Non-primary agent channels cannot use /trigger set until per-channel scheduler routing is implemented
+    try {
+      await scheduler.init();
+    } catch (err) {
+      logger.error(`[Trigger] Scheduler init failed for ${agent.aid}: ${err}`);
+    }
+  }
+
+  // Inject primary agent's trigger scheduler into cmdHandler
+  const primaryAgentForTrigger = agentRegistry.runnableAgents()[0];
+  if (primaryAgentForTrigger?.triggerScheduler && primaryAgentForTrigger?.triggerManager) {
+    cmdHandler.setTriggerScheduler(primaryAgentForTrigger.triggerScheduler, primaryAgentForTrigger.triggerManager);
+  }
 
   // 默认策略
   const defaultPolicy = {

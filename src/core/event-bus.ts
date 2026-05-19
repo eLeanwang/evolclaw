@@ -71,6 +71,18 @@ export type SelfHealEvent =
   | { type: 'self-heal:attempt'; attemptNumber: number; maxAttempts: number }
   | { type: 'self-heal:completed'; success: boolean; attempts: number };
 
+// ── 配置事件 ──
+export type ConfigEvent =
+  | { type: 'config:corrupted'; backupPath: string; reasons: string[] };
+
+// ── 触发器事件 ──
+export type TriggerEvent =
+  | { type: 'trigger:registered'; triggerId: string; name: string; peerId: string }
+  | { type: 'trigger:fired'; triggerId: string; name: string; fireTime: number }
+  | { type: 'trigger:completed'; triggerId: string; messageId: string; durationMs: number }
+  | { type: 'trigger:failed'; triggerId: string; messageId: string; error: string }
+  | { type: 'trigger:skipped'; triggerId: string; reason: 'overlap' | 'interrupted' }
+  | { type: 'trigger:cancelled'; triggerId: string; by: string };
 export type GatewayEvent =
   | SystemEvent
   | ChannelEvent
@@ -81,7 +93,9 @@ export type GatewayEvent =
   | ToolEvent
   | PermissionEvent
   | RunnerBusEvent
-  | SelfHealEvent;
+  | SelfHealEvent
+  | ConfigEvent
+  | TriggerEvent;
 
 export class EventBus extends EventEmitter {
   publish(event: GatewayEvent): void {
