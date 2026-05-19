@@ -589,7 +589,7 @@ export class MessageProcessor {
 
         // 4. 触发器功能提示词（非触发器消息时注入，让 AI 知道可以使用触发器）
         if (message.source !== 'trigger') {
-          const triggerSection = renderPromptSection('trigger' as any, {});
+          const triggerSection = renderPromptSection('trigger', {});
           if (triggerSection) contextParts.push(triggerSection);
         }
 

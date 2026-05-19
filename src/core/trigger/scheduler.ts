@@ -210,11 +210,9 @@ export class TriggerScheduler {
   }
 
   // Called by MessageProcessor when a trigger message completes/fails/is interrupted
-  onTriggerComplete(triggerId: string, outcome: 'completed' | 'failed' | 'interrupted'): void {
+  onTriggerComplete(triggerId: string, _outcome: 'completed' | 'failed' | 'interrupted'): void {
+    // Only clear inflight state — message-processor already published the relevant events
     this.inflightCron.delete(triggerId);
-    if (outcome === 'interrupted') {
-      this.eventBus.publish({ type: 'trigger:skipped', triggerId, reason: 'interrupted' });
-    }
   }
 
   private buildSyntheticMessage(trigger: Trigger, messageId: string): Message {

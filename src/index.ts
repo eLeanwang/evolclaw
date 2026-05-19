@@ -387,14 +387,13 @@ async function main() {
     eventBus.subscribe('trigger:skipped', (ev: any) => {
       if (ev.reason === 'interrupted') scheduler.onTriggerComplete(ev.triggerId, 'interrupted');
     });
-    // Inject trigger scheduler into cmdHandler for this agent's channels
-    for (const channelKey of agent.channelInstanceNames()) {
-      // cmdHandler is shared; we set the scheduler for the primary agent
-      // (multi-agent trigger routing is handled by channel ownership)
-    }
-    scheduler.init().catch(err => {
+    // TODO: multi-agent trigger routing — currently only primary agent's scheduler is wired to cmdHandler
+    // Non-primary agent channels cannot use /trigger set until per-channel scheduler routing is implemented
+    try {
+      await scheduler.init();
+    } catch (err) {
       logger.error(`[Trigger] Scheduler init failed for ${agent.aid}: ${err}`);
-    });
+    }
   }
 
   // Inject primary agent's trigger scheduler into cmdHandler

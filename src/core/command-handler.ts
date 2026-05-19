@@ -847,7 +847,7 @@ export class CommandHandler {
       const guestGroupCommands = [
         '/status', '/help', '/evolhelp', '/check', '/chatmode',
         '/model', '/setmodel', '/effort', '/agent', '/perm', '/activity', '/safe', '/stop',
-        '/resume',
+        '/resume', '/trigger',
       ];
       const userCommands = activeChatType === 'group' && !isAdmin
         ? guestGroupCommands
@@ -3387,17 +3387,17 @@ export class CommandHandler {
       const nameOrId = sub.slice('cancel '.length).trim();
       if (!nameOrId) return '❌ 用法：/trigger cancel <名称>';
 
-      // Find trigger first to get ID for scheduler
-      const byName = manager.getByName(nameOrId);
-      const byId = manager.getById(nameOrId);
-      const trigger = byName ?? (isAdmin ? byId : undefined);
+      // Find trigger: non-admin name lookup is scoped to (peerId, channel) to avoid info disclosure
+      let trigger: ReturnType<typeof manager.getById>;
+      if (isAdmin) {
+        trigger = manager.getByName(nameOrId) ?? manager.getById(nameOrId);
+      } else {
+        trigger = manager.getByNameScoped(nameOrId, peerId, channel);
+      }
       if (!trigger) {
         return isAdmin
           ? `❌ 未找到触发器：${nameOrId}`
           : `❌ 未找到触发器 "${nameOrId}"，或无权限取消`;
-      }
-      if (!isAdmin && (trigger.createdByPeerId !== peerId || trigger.createdByChannel !== channel)) {
-        return `❌ 无权限取消该触发器`;
       }
 
       manager.moveToDone(trigger.id, 'cancelled');

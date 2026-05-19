@@ -3,9 +3,9 @@ import path from 'path';
 import { getPackageRoot, resolveRoot } from '../paths.js';
 import { logger } from '../utils/logger.js';
 
-export type PromptSection = 'runtime' | 'group' | 'proactive';
+export type PromptSection = 'runtime' | 'group' | 'proactive' | 'trigger';
 
-const KNOWN_SECTIONS: Set<string> = new Set(['runtime', 'group', 'proactive']);
+const KNOWN_SECTIONS: Set<string> = new Set(['runtime', 'group', 'proactive', 'trigger']);
 
 const SECTION_RE = /^##\s+(\w+)\s*$/;
 

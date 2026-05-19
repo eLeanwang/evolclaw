@@ -73,6 +73,14 @@ export class TriggerManager {
     return undefined;
   }
 
+  // Scoped lookup: only returns triggers owned by (peerId, channel) — prevents info disclosure
+  getByNameScoped(name: string, peerId: string, channel: string): Trigger | undefined {
+    for (const t of this.triggers.values()) {
+      if (t.name === name && t.createdByPeerId === peerId && t.createdByChannel === channel) return t;
+    }
+    return undefined;
+  }
+
   listActive(): Trigger[] {
     return [...this.triggers.values()].sort((a, b) => a.nextFireAt - b.nextFireAt);
   }
@@ -114,39 +122,5 @@ export class TriggerManager {
     const entry: HistoryEntry = { ...t, doneAt: Date.now(), doneReason: reason };
     appendJsonl(this.historyPath, entry);
     return t;
-  }
-
-  // Returns true if cancelled, false if not found / no permission
-  cancel(
-    nameOrId: string,
-    peerId: string,
-    channel: string,
-    isAdmin: boolean,
-  ): { ok: boolean; error?: string } {
-    // Try by name first (scoped to peer), then by ID (admin only)
-    let trigger: Trigger | undefined;
-
-    // Name lookup: scoped to (peerId, channel)
-    for (const t of this.triggers.values()) {
-      if (t.name === nameOrId && t.createdByPeerId === peerId && t.createdByChannel === channel) {
-        trigger = t;
-        break;
-      }
-    }
-
-    // ID lookup: admin only
-    if (!trigger && isAdmin) {
-      trigger = this.triggers.get(nameOrId);
-    }
-
-    if (!trigger) {
-      if (isAdmin) {
-        return { ok: false, error: `未找到触发器：${nameOrId}` };
-      }
-      return { ok: false, error: `未找到触发器 "${nameOrId}"，或无权限取消` };
-    }
-
-    this.moveToDone(trigger.id, 'cancelled');
-    return { ok: true };
   }
 }
