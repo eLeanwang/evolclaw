@@ -109,6 +109,8 @@ export class ChannelLoader {
       aid: agent.aid,
       enabled: true,
       agentName: agent.aid,
+      // agent 顶层 owners[0] 透传给 AUN channel.owner（用于首次连接发欢迎消息）
+      owner: agent.config.owners?.[0],
     }];
 
     // 其它 channels（非 AUN）从 config.channels[] 取

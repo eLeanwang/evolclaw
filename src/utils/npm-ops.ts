@@ -1,7 +1,55 @@
+/**
+ * npm operations
+ *
+ * 集中管理本仓库所有 `npm install -g` / `npm view` 相关的子进程调用：
+ *  - tryUpgrade()       — evolclaw 自我升级
+ *  - requireOptional()  — 可选依赖动态加载 + 自动安装
+ *  - npmInstallGlobal() — 全局安装（含 EACCES → sudo 回退、Windows npm.cmd）
+ */
+
 import fs from 'fs';
 import path from 'path';
 import { execFile } from 'child_process';
+import { promisify } from 'util';
 import { getPackageRoot } from '../paths.js';
+import { isWindows } from './cross-platform.js';
+
+const execFileAsync = promisify(execFile);
+
+// ── npm install -g (shared) ────────────────────────────────────────────────
+
+export async function npmInstallGlobal(pkg: string): Promise<void> {
+  const npmCmd = isWindows ? 'npm.cmd' : 'npm';
+  const execOpts = { timeout: 180000, shell: isWindows };
+  try {
+    await execFileAsync(npmCmd, ['install', '-g', pkg], execOpts);
+  } catch (e: any) {
+    if (e.stderr?.includes('EACCES') || e.message?.includes('EACCES')) {
+      if (isWindows) {
+        throw new Error('权限不足。请以管理员身份运行 PowerShell 或 CMD，然后重试');
+      }
+      await execFileAsync('sudo', ['npm', 'install', '-g', pkg], { timeout: 180000 });
+    } else {
+      throw e;
+    }
+  }
+}
+
+/** Dynamic import with auto-install fallback for optional dependencies */
+export async function requireOptional<T = any>(pkg: string, autoInstall = true): Promise<T> {
+  try {
+    return await import(pkg) as T;
+  } catch (e: any) {
+    if (e.code !== 'ERR_MODULE_NOT_FOUND' && e.code !== 'MODULE_NOT_FOUND') throw e;
+    if (!autoInstall) throw new Error(`依赖 ${pkg} 未安装。请运行: npm install -g ${pkg}`);
+    const { logger } = await import('./logger.js');
+    logger.info(`正在安装可选依赖 ${pkg}...`);
+    await npmInstallGlobal(pkg);
+    return await import(pkg) as T;
+  }
+}
+
+// ── evolclaw self-upgrade ──────────────────────────────────────────────────
 
 export interface UpgradeResult {
   status: 'skipped' | 'upgraded' | 'no-update' | 'failed';
@@ -63,21 +111,6 @@ export function checkLatestVersion(): Promise<string | null> {
 }
 
 /**
- * 执行 npm install -g evolclaw@latest
- */
-function runInstall(): Promise<{ ok: boolean; error?: string }> {
-  return new Promise((resolve) => {
-    execFile('npm', ['install', '-g', 'evolclaw@latest'], { timeout: 120000 }, (err, _stdout, stderr) => {
-      if (err) {
-        resolve({ ok: false, error: stderr || err.message });
-      } else {
-        resolve({ ok: true });
-      }
-    });
-  });
-}
-
-/**
  * 完整升级流程：检查 → 比较 → 安装（失败重试一次）
  */
 export async function tryUpgrade(): Promise<UpgradeResult> {
@@ -100,16 +133,14 @@ export async function tryUpgrade(): Promise<UpgradeResult> {
   }
 
   // 有新版本，执行升级（失败重试一次）
+  let lastError: string | undefined;
   for (let attempt = 0; attempt < 2; attempt++) {
-    const result = await runInstall();
-    if (result.ok) {
+    try {
+      await npmInstallGlobal('evolclaw@latest');
       return { status: 'upgraded', from: localVer, to: remoteVer };
-    }
-    if (attempt === 1) {
-      return { status: 'failed', from: localVer, to: remoteVer, error: result.error };
+    } catch (e: any) {
+      lastError = e.stderr || e.message || String(e);
     }
   }
-
-  // unreachable
-  return { status: 'failed', from: localVer, to: remoteVer };
+  return { status: 'failed', from: localVer, to: remoteVer, error: lastError };
 }

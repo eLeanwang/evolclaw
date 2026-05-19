@@ -71,10 +71,6 @@ export type SelfHealEvent =
   | { type: 'self-heal:attempt'; attemptNumber: number; maxAttempts: number }
   | { type: 'self-heal:completed'; success: boolean; attempts: number };
 
-// ── 配置事件 ──
-export type ConfigEvent =
-  | { type: 'config:corrupted'; backupPath: string; reasons: string[] };
-
 export type GatewayEvent =
   | SystemEvent
   | ChannelEvent
@@ -85,8 +81,7 @@ export type GatewayEvent =
   | ToolEvent
   | PermissionEvent
   | RunnerBusEvent
-  | SelfHealEvent
-  | ConfigEvent;
+  | SelfHealEvent;
 
 export class EventBus extends EventEmitter {
   publish(event: GatewayEvent): void {

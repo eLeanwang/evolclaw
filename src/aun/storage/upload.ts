@@ -1,6 +1,6 @@
 import fs from 'fs';
 import crypto from 'crypto';
-import { rpcCall } from '../aun-rpc/index.js';
+import { rpcCall } from '../rpc/index.js';
 
 export interface UploadResult {
   ok: boolean;

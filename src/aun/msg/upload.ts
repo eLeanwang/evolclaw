@@ -1,8 +1,8 @@
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
-import { guessMime, formatSize } from '../utils/mime.js';
-import type { ShortConnection } from '../aun-rpc/index.js';
+import { guessMime, formatSize } from '../../utils/mime.js';
+import type { ShortConnection } from '../rpc/index.js';
 import { inferPayloadType, isValidPayloadType, type PayloadFileType } from './payload-type.js';
 
 /** 小文件阈值：≤64KB 走 storage.put_object 内联 base64；>64KB 走 create_upload_session + HTTP PUT。 */

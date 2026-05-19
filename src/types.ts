@@ -600,6 +600,7 @@ export interface ProjectsBlock {
 export interface ChatmodeBlock {
   private?: 'interactive' | 'proactive';
   group?: 'interactive' | 'proactive';
+  nothuman?: 'interactive' | 'proactive';
 }
 
 export interface AunRuntimeBlock {
@@ -718,6 +719,8 @@ export interface AgentConfig {
   $schema_version: number;
   aid: string;
   enabled?: boolean;
+  /** 首次连接 AUN 网络后置 true：触发"补全 agent.md + 发欢迎消息"的一次性流程。 */
+  initialized?: boolean;
   owners?: string[];
   admins?: string[];
   aun?: AunRuntimeBlock;
@@ -727,6 +730,7 @@ export interface AgentConfig {
   models?: ModelsBlock;
   projects?: ProjectsBlock;
   chatmode?: ChatmodeBlock;
+  dispatch?: 'mention' | 'all';
   show_activities?: ShowActivitiesMode;
   flush_delay?: number;
   debounce?: number;

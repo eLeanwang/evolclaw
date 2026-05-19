@@ -1,4 +1,4 @@
-import { rpcCall, type RpcResult } from '../aun-rpc/caller.js';
+import { rpcCall, type RpcResult } from '../rpc/caller.js';
 
 export async function storageLs(aid: string, prefix?: string, opts?: { aunPath?: string }): Promise<RpcResult> {
   return rpcCall(aid, 'storage.list_objects', { prefix: prefix || '' }, { aunPath: opts?.aunPath });

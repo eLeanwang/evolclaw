@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import { logger } from '../utils/logger.js';
-import { requireOptional } from '../utils/init-channel.js';
+import { requireOptional } from '../utils/npm-ops.js';
 import type { ChannelPlugin, ChannelInstance } from '../core/channel-loader.js';
 import type { MessageBridge } from '../core/message/message-bridge.js';
 import type { Config, WecomChannelConfig } from '../types.js';

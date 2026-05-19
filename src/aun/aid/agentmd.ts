@@ -11,7 +11,7 @@ export interface AgentmdGetResult {
 export function buildInitialAgentMd(opts: { aid: string; type?: string }): string {
   const agentName = opts.aid.split('.')[0];
   const agentType = opts.type || 'ai';
-  return `---\naid: "${opts.aid}"\nname: "${agentName}"\ntype: "${agentType}"\nversion: "1.0.0"\ndescription: ""\ntags:\n  - evolclaw\ninitialized: false\n---\n`;
+  return `---\naid: "${opts.aid}"\nname: "${agentName}"\ntype: "${agentType}"\nversion: "1.0.0"\ndescription: ""\ntags:\n  - evolclaw\n---\n`;
 }
 
 /**

@@ -1,6 +1,6 @@
 import { query, forkSession as sdkForkSession, getSessionMessages as sdkGetSessionMessages } from '@anthropic-ai/claude-agent-sdk';
 import { ensureDir } from '../utils/ensure-dir.js';
-import { resolveAnthropicConfig } from '../baseagents/resolve.js';
+import { resolveAnthropicConfig } from './resolve.js';
 import type { Config, ChannelAdapter, ReplyContext, InteractionRequest, Message } from '../types.js';
 import { DEFAULT_PERMISSION_MODE } from '../types.js';
 import { renderActionAsText } from '../core/interaction-fallback.js';

@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { rpcCall } from '../aun-rpc/index.js';
+import { rpcCall } from '../rpc/index.js';
 
 export interface DownloadResult {
   ok: boolean;

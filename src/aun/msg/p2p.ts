@@ -1,5 +1,5 @@
-import type { ShortConnectionOpts } from '../aun-rpc/index.js';
-import { createShortConnection } from '../aun-rpc/index.js';
+import type { ShortConnectionOpts } from '../rpc/index.js';
+import { createShortConnection } from '../rpc/index.js';
 import { uploadFileAndBuildPayload } from './upload.js';
 
 // ==================== Types ====================

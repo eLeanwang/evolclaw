@@ -3,7 +3,7 @@ import path from 'path';
 import os from 'os';
 import { fileURLToPath } from 'url';
 import { execFileSync } from 'child_process';
-import { isWindows } from '../utils/cross-platform.js';
+import { isWindows } from '../../utils/cross-platform.js';
 
 /**
  * Suppress SDK console logs (DEBUG/INFO/WARN) in CLI context.
@@ -76,7 +76,7 @@ export async function ensureAunSdk(): Promise<void> {
   const installed = resolveAunCoreSdkPkg();
   if (installed && isAunSdkVersionOk(installed.version)) return;
 
-  const { npmInstallGlobal } = await import('../utils/init-channel.js');
+  const { npmInstallGlobal } = await import('../../utils/npm-ops.js');
   console.log(`正在安装 ${AUN_CORE_SDK_PKG}@latest...`);
   await npmInstallGlobal(`${AUN_CORE_SDK_PKG}@latest`);
 }

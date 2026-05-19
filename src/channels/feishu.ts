@@ -78,7 +78,7 @@ export class FeishuChannel {
     // 加载持久化的已处理消息 ID，防止重启后 Feishu 重推同一条消息
     this.loadSeenMessages();
 
-    const { requireOptional } = await import('../utils/init-channel.js');
+    const { requireOptional } = await import('../utils/npm-ops.js');
     const lark = await requireOptional<typeof import('@larksuiteoapi/node-sdk')>('@larksuiteoapi/node-sdk');
 
     try {
