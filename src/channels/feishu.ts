@@ -10,6 +10,7 @@ export interface FeishuConfig {
   appId: string;
   appSecret: string;
   enableRichContent?: boolean;  // 全局开关，默认 false
+  seenMsgFile?: string;         // 跨重启消息去重文件路径（可选）
 }
 
 export interface MessageHandlerOptions {
@@ -70,6 +71,9 @@ export class FeishuChannel {
     if (this.config.appId.startsWith('YOUR_') || this.config.appSecret.startsWith('YOUR_')) {
       throw new Error('Feishu credentials not configured (placeholder values detected)');
     }
+
+    // 加载持久化的已处理消息 ID，防止重启后 Feishu 重推同一条消息
+    this.loadSeenMessages();
 
     const { requireOptional } = await import('../utils/init-channel.js');
     const lark = await requireOptional<typeof import('@larksuiteoapi/node-sdk')>('@larksuiteoapi/node-sdk');
@@ -682,7 +686,30 @@ export class FeishuChannel {
   }
 
   private markSeen(msgId: string): void {
-    this.seenMessages.set(msgId, Date.now());
+    const now = Date.now();
+    this.seenMessages.set(msgId, now);
+    // 持久化到文件，供重启后去重
+    if (this.config.seenMsgFile) {
+      try {
+        fs.appendFileSync(this.config.seenMsgFile, JSON.stringify({ id: msgId, ts: now }) + '\n');
+      } catch {}
+    }
+  }
+
+  private loadSeenMessages(): void {
+    if (!this.config.seenMsgFile) return;
+    try {
+      if (!fs.existsSync(this.config.seenMsgFile)) return;
+      const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+      const lines = fs.readFileSync(this.config.seenMsgFile, 'utf-8').split('\n').filter(Boolean);
+      for (const line of lines) {
+        try {
+          const { id, ts } = JSON.parse(line);
+          if (ts > cutoff) this.seenMessages.set(id, ts);
+        } catch {}
+      }
+      logger.info(`[Feishu] Loaded ${this.seenMessages.size} seen message ID(s) from disk`);
+    } catch {}
   }
 
   private startCleanupTask(): void {
@@ -695,6 +722,15 @@ export class FeishuChannel {
       if (cleaned > 0) logger.info(`[Feishu] Cleaned ${cleaned} old message IDs`);
       // seenThreads 无时间戳，仅限容量（话题持久存在，不按时间清理）
       if (this.seenThreads.size > 1000) this.seenThreads.clear();
+      // 重写文件，去掉过期条目
+      if (this.config.seenMsgFile && this.seenMessages.size > 0) {
+        try {
+          const lines = [...this.seenMessages.entries()]
+            .map(([id, ts]) => JSON.stringify({ id, ts }))
+            .join('\n') + '\n';
+          fs.writeFileSync(this.config.seenMsgFile, lines);
+        } catch {}
+      }
     }, 60 * 60 * 1000);
   }
 
@@ -1139,6 +1175,7 @@ export function hasMarkdownSyntax(text: string): boolean {
 import type { ChannelPlugin, ChannelInstance } from '../core/channel-loader.js';
 import type { Config, FeishuChannelConfig } from '../types.js';
 import { normalizeChannelInstances, getChannelShowActivities } from '../utils/channel-helpers.js';
+import { resolvePaths } from '../paths.js';
 
 export class FeishuChannelPlugin implements ChannelPlugin {
   readonly name = 'feishu';
@@ -1167,6 +1204,7 @@ export class FeishuChannelPlugin implements ChannelPlugin {
         appId: inst.appId,
         appSecret: inst.appSecret,
         enableRichContent: config.enableRichContent,
+        seenMsgFile: path.join(resolvePaths().dataDir, `feishu-seen-${inst.name}.jsonl`),
       });
 
       const adapter = {

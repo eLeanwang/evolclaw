@@ -441,8 +441,8 @@ export class CommandHandler {
     return false;
   }
 
-  /** 获取活跃会话，无会话时返回统一错误提示 */
-  private async ensureSession(channel: string, channelId: string, threadId?: string): Promise<{ session: Session } | { error: string }> {
+  /** 获取活跃会话，无会话时自动创建（话题除外） */
+  private async ensureSession(channel: string, channelId: string, threadId?: string, chatType?: string): Promise<{ session: Session } | { error: string }> {
     if (threadId) {
       // 话题会话：仅查询，不创建
       const session = await this.sessionManager.getThreadSession(channel, channelId, threadId);
@@ -451,9 +451,13 @@ export class CommandHandler {
       }
       return { session };
     }
-    const session = await this.sessionManager.getActiveSession(channel, channelId);
-    if (!session) {
-      return { error: '❌ 当前没有活跃会话\n使用 /new 创建新会话' };
+    const ct: 'private' | 'group' | undefined = chatType === 'group' ? 'group' : chatType === 'private' ? 'private' : undefined;
+    const session = await this.sessionManager.getActiveSession(channel, channelId)
+      ?? await this.sessionManager.getOrCreateSession(channel, channelId, this.getEffectiveDefaultPath(channel), undefined, undefined, undefined, undefined, ct);
+    // 如果 session 已存在但 chatType 跟传入的不一致，更新
+    if (ct && session.chatType !== ct) {
+      await this.sessionManager.updateSession(session.id, { chatType: ct });
+      session.chatType = ct;
     }
     return { session };
   }
@@ -696,9 +700,6 @@ export class CommandHandler {
     }
 
     if (cmd === '/restart') {
-      // /restart 是服务级操作（重连/重启进程），仅限 default 通道。
-      // EvolAgent 通道返回空菜单（用户在 agent-owned 通道上无可选项）
-      if (this.getOwningAgent(channel)) return [];
       const isOwner = userId ? this.sessionManager.resolveIdentity(channel, userId).role === 'owner' : false;
       // 列出所有 channel type
       const visibleTypes = new Set<string>();
@@ -800,6 +801,7 @@ export class CommandHandler {
     sendMessage?: (channelId: string, text: string, opts?: { replyToMessageId?: string; replyInThread?: boolean }) => Promise<void>,
     userId?: string,
     threadId?: string,
+    chatType?: string,
   ): Promise<string | null | undefined> {
     // 解析身份（按实例名）
     const identity = this.sessionManager.resolveIdentity(channel, userId);
@@ -980,6 +982,11 @@ export class CommandHandler {
         '  /model [model] - 查看或切换模型',
         '  /effort [level] - 查看或切换推理强度',
         '',
+        '💬 聊天设置：',
+        '  /activity [all|dm|owner|none] - 查看/控制中间输出显示模式',
+        '  /chatmode [interactive|proactive] - 查看/切换会话模式（被动响应或主动推进）',
+        '  /dispatch [mention|all] - 查看/切换群聊分发模式（仅@响应或广播响应，仅群聊）',
+        '',
         '🔐 权限管理：',
         '  /perm - 查看当前权限模式',
         ...(isOwner ? ['  /perm <auto|bypass|request|edit|plan|noask> - 切换权限模式'] : []),
@@ -989,15 +996,17 @@ export class CommandHandler {
         '  /status - 显示会话状态',
         '  /stop - 中断当前任务',
         '  /check - 检查渠道状态',
-        '  /activity [all|dm|owner|none] - 查看/控制中间输出显示模式',
         ...(isAdmin ? [
           '  /restart <type> - 重连该类型所有渠道实例（服务级，admin+）',
         ] : []),
         ...(isOwner ? [
           '  /restart - 重启服务',
+        ] : []),
+        ...(isOwner ? [
+          '',
+          '🧰 工具：',
           '  /file [channel] <path> - 发送项目内文件',
           '  /aid [list|show|new|delete|lookup|agentmd] - AID 身份管理',
-          '  /rpc --as <aid> --params <json> - AUN RPC 调用',
           '  /storage [upload|download|ls|rm|quota] <aid> - 文件存储',
         ] : []),
         '',
@@ -1034,7 +1043,6 @@ export class CommandHandler {
       if (isAdmin) {
         cmds.push({ command: '/agent', args: '[name]', description: '查看或切换 Agent 后端', category: 'Agent 与模型', roles: ['admin', 'owner'] });
         cmds.push({ command: '/model', args: '[model]', description: '查看或切换模型', category: 'Agent 与模型', roles: ['admin', 'owner'] });
-        cmds.push({ command: '/setmodel', description: '返回 JSON 格式的模型列表（供程序解析）', category: 'Agent 与模型', roles: ['admin', 'owner'] });
         cmds.push({ command: '/effort', args: '[level]', description: '查看或切换推理强度', category: 'Agent 与模型', roles: ['admin', 'owner'] });
       }
 
@@ -1049,30 +1057,27 @@ export class CommandHandler {
       cmds.push({ command: '/stop', description: '中断当前任务', category: '运维', roles: ['admin', 'owner'] });
       cmds.push({ command: '/check', description: '检查渠道状态', category: '运维', roles: ['guest', 'admin', 'owner'] });
       if (isAdmin) {
-        cmds.push({ command: '/activity', args: '[all|dm|owner|none]', description: '查看/控制中间输出显示模式', category: '运维', roles: ['admin', 'owner'] });
+        cmds.push({ command: '/activity', args: '[all|dm|owner|none]', description: '查看/控制中间输出显示模式', category: '聊天设置', roles: ['admin', 'owner'] });
         cmds.push({ command: '/restart', args: '<channel>', description: '重连指定渠道', category: '运维', roles: ['admin', 'owner'] });
       }
       if (isOwner) {
         cmds.push({ command: '/restart', description: '重启服务', category: '运维', roles: ['owner'] });
-        cmds.push({ command: '/file', args: '[channel] <path>', description: '发送项目内文件', category: '运维', roles: ['owner'] });
-        cmds.push({ command: '/aid', args: '[list|show|new|delete|lookup|agentmd]', description: 'AID 身份管理', category: '运维', roles: ['owner'] });
-        cmds.push({ command: '/rpc', args: '--as <aid> --params <json>', description: 'AUN RPC 调用', category: '运维', roles: ['owner'] });
-        cmds.push({ command: '/storage', args: '[upload|download|ls|rm|quota] <aid>', description: '文件存储', category: '运维', roles: ['owner'] });
+        cmds.push({ command: '/file', args: '[channel] <path>', description: '发送项目内文件', category: '工具', roles: ['owner'] });
+        cmds.push({ command: '/aid', args: '[list|show|new|delete|lookup|agentmd]', description: 'AID 身份管理', category: '工具', roles: ['owner'] });
+        cmds.push({ command: '/storage', args: '[upload|download|ls|rm|quota] <aid>', description: '文件存储', category: '工具', roles: ['owner'] });
       }
 
-      // 会话模式
+      // 聊天设置
       if (isAdmin) {
-        cmds.push({ command: '/chatmode', args: '[interactive|proactive]', description: '查看/切换会话模式（被动响应或主动推进）', category: '会话管理', roles: ['admin', 'owner'] });
-        cmds.push({ command: '/dispatch', args: '[mention|all]', description: '查看/切换群聊分发模式（仅@响应或广播响应）', category: '会话管理', roles: ['admin', 'owner'] });
+        cmds.push({ command: '/chatmode', args: '[interactive|proactive]', description: '查看/切换会话模式（被动响应或主动推进）', category: '聊天设置', roles: ['admin', 'owner'] });
+        cmds.push({ command: '/dispatch', args: '[mention|all]', description: '查看/切换群聊分发模式（仅@响应或广播响应）', category: '聊天设置', roles: ['admin', 'owner'] });
       }
 
       // 交互
       cmds.push({ command: '/ask', args: '<选项>', description: '回答 Agent 的交互式问题', category: '运维', roles: ['guest', 'admin', 'owner'] });
-      cmds.push({ command: '/resume', description: '查看当前项目的 Claude 会话记录', category: '会话管理', roles: ['guest', 'admin', 'owner'] });
 
       // 帮助
       cmds.push({ command: '/help', description: '显示帮助信息', category: '帮助', roles: ['guest', 'admin', 'owner'] });
-      cmds.push({ command: '/evolhelp', description: '返回 JSON 格式命令列表', category: '帮助', roles: ['guest', 'admin', 'owner'] });
 
       const categories = [...new Set(cmds.map(c => c.category))];
       return JSON.stringify({ commands: cmds, categories });
@@ -1083,7 +1088,7 @@ export class CommandHandler {
       const args = normalizedContent.slice(5).trim();
 
       // 先获取正确的 session 和 agent（话题可能用不同 agent）
-      const permResult = await this.ensureSession(channel, channelId, threadId);
+      const permResult = await this.ensureSession(channel, channelId, threadId, chatType);
       if ('error' in permResult) return permResult.error;
       const { session: permSession } = permResult;
       const permAgent = this.getAgent(channel, permSession.agentId);
@@ -1212,14 +1217,14 @@ export class CommandHandler {
       const args = normalizedContent.slice(4).trim();
       if (!args) {
         // 无参数：列出当前 pending 的交互请求
-        const askResult = await this.ensureSession(channel, channelId, threadId);
+        const askResult = await this.ensureSession(channel, channelId, threadId, chatType);
         if ('error' in askResult) return askResult.error;
         const pendingIds = this.interactionRouter?.getPending(askResult.session.id) || [];
         if (pendingIds.length === 0) return '当前没有待回答的问题';
         return `当前有 ${pendingIds.length} 个待回答问题，请回复 /ask <选项>`;
       }
 
-      const askResult = await this.ensureSession(channel, channelId, threadId);
+      const askResult = await this.ensureSession(channel, channelId, threadId, chatType);
       if ('error' in askResult) return askResult.error;
       const { session: askSession } = askResult;
 
@@ -1234,7 +1239,7 @@ export class CommandHandler {
 
     // /resume 命令：返回当前项目的 Claude 会话记录（JSON）
     if (normalizedContent === '/resume' || normalizedContent.startsWith('/resume ')) {
-      const resumeResult = await this.ensureSession(channel, channelId, threadId);
+      const resumeResult = await this.ensureSession(channel, channelId, threadId, chatType);
       if ('error' in resumeResult) return resumeResult.error;
       const { session: resumeSession } = resumeResult;
 
@@ -1398,7 +1403,7 @@ export class CommandHandler {
         return `❌ 未知 Agent: ${args}\n可用: ${available.join(', ')}`;
       }
 
-      const result = await this.ensureSession(channel, channelId, threadId);
+      const result = await this.ensureSession(channel, channelId, threadId, chatType);
       if ('error' in result) return result.error;
       const { session } = result;
 
@@ -1421,7 +1426,7 @@ export class CommandHandler {
 
     // /setmodel 命令：返回 JSON 格式的模型列表（供程序解析）
     if (normalizedContent === '/setmodel' || normalizedContent.startsWith('/setmodel ')) {
-      const setmodelResult = await this.ensureSession(channel, channelId, threadId);
+      const setmodelResult = await this.ensureSession(channel, channelId, threadId, chatType);
       if ('error' in setmodelResult) return setmodelResult.error;
       const { session: setmodelSession } = setmodelResult;
       const setmodelAgent = this.getAgent(channel, setmodelSession.agentId);
@@ -1495,7 +1500,7 @@ export class CommandHandler {
       const args = normalizedContent.slice(6).trim();
 
       // 获取当前会话（话题会话可能绑定不同 agent）
-      const modelResult = await this.ensureSession(channel, channelId, threadId);
+      const modelResult = await this.ensureSession(channel, channelId, threadId, chatType);
       if ('error' in modelResult) return modelResult.error;
       const { session: modelSession } = modelResult;
       const modelAgent = this.getAgent(channel, modelSession.agentId);
@@ -1634,7 +1639,7 @@ export class CommandHandler {
     if (normalizedContent.startsWith('/effort')) {
       const args = normalizedContent.slice(7).trim();
 
-      const effortResult = await this.ensureSession(channel, channelId, threadId);
+      const effortResult = await this.ensureSession(channel, channelId, threadId, chatType);
       if ('error' in effortResult) return effortResult.error;
       const { session: effortSession } = effortResult;
       const effortAgent = this.getAgent(channel, effortSession.agentId);
@@ -1904,13 +1909,62 @@ export class CommandHandler {
     // - 查看：所有人可用
     // - 设置：单聊任何角色可设置；群聊仅管理员可设置
     if (normalizedContent === '/chatmode' || normalizedContent.startsWith('/chatmode ')) {
-      if (!activeSession) return '❌ 当前无活跃会话';
+      const chatmodeResult = await this.ensureSession(channel, channelId, threadId, chatType);
+      if ('error' in chatmodeResult) return chatmodeResult.error;
+      const chatmodeSession = chatmodeResult.session;
 
       const arg = normalizedContent.slice(9).trim();
-      const currentMode = activeSession.sessionMode || 'interactive';
+      const currentMode = chatmodeSession.sessionMode || 'interactive';
+      const chatmodeChatType = chatmodeSession.chatType || activeChatType;
+      const canSwitch = chatmodeChatType !== 'group' || isAdmin;
 
       if (!arg) {
-        const canSwitch = activeChatType !== 'group' || isAdmin;
+        // 尝试发送交互卡片
+        if (canSwitch && this.interactionRouter) {
+          const requestId = `chatmode-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+          const modes = [
+            { key: 'interactive', name: '交互模式', desc: '被动响应：收到消息时才回复，回复直接显示' },
+            { key: 'proactive', name: '主动模式', desc: '主动推进：流式输出静默，由 Agent 自调 ctl send 发声' },
+          ];
+          const interaction: InteractionRequest = {
+            type: 'interaction',
+            id: requestId,
+            channelId,
+            sessionId: chatmodeSession.id,
+            kind: {
+              kind: 'action',
+              title: '🔄 会话模式',
+              body: modes.map(m => `${m.key === currentMode ? '✓' : '•'} **${m.key}** (${m.name}) - ${m.desc}`).join('\n'),
+              buttons: modes.map(m => ({
+                key: m.key,
+                label: m.key === currentMode ? `✓ ${m.key}` : m.key,
+                style: m.key === currentMode ? 'primary' : 'default',
+              })),
+            },
+          };
+
+          const replyCtx = this.getReplyContext(chatmodeSession);
+          const cardSent = await this.sendInteractionCard({
+            channel, channelId, sessionId: chatmodeSession.id, requestId, interaction, replyCtx,
+            canWrite: isAdmin,
+            callback: async (action, _values, operatorId) => {
+              if (action !== currentMode) {
+                if (userId && operatorId && operatorId !== userId) return;
+                const result = await this.handle(`/chatmode ${action}`, channel, channelId, undefined, userId, threadId);
+                if (result) {
+                  const adapter = this.adapters.get(channel);
+                  adapter?.sendText(channelId, result, replyCtx);
+                } else {
+                  // 切换成功后重新发新卡片（会自动 invalidate 旧卡片）
+                  await this.handle('/chatmode', channel, channelId, undefined, userId, threadId);
+                }
+              }
+            },
+          });
+          if (cardSent) return null;
+        }
+
+        // 降级：文本
         if (canSwitch) {
           return `📋 当前会话模式: ${currentMode}\n可选: interactive / proactive\n用法: /chatmode <模式>`;
         }
@@ -1921,7 +1975,7 @@ export class CommandHandler {
         return `❌ 无效模式: ${arg}\n可选: interactive / proactive`;
       }
 
-      if (activeChatType === 'group' && !isAdmin) {
+      if ((chatmodeSession.chatType || activeChatType) === 'group' && !isAdmin) {
         return '❌ 无权限：群聊中切换会话模式仅限管理员使用';
       }
 
@@ -1938,37 +1992,84 @@ export class CommandHandler {
             return '⚠️ 当前正在处理消息，请稍后再试\n使用 /stop 中断当前任务后重试';
           }
         }
-      } else if (agent.hasActiveStream(activeSession.id)) {
+      } else if (agent.hasActiveStream(chatmodeSession.id)) {
         return '⚠️ 当前正在处理消息，请稍后再试\n使用 /stop 中断当前任务后重试';
       }
 
-      await this.sessionManager.updateSession(activeSession.id, { sessionMode: arg });
-      this.eventBus.publish({ type: 'session:chat-mode-changed', sessionId: activeSession.id, mode: arg, timestamp: Date.now() });
+      await this.sessionManager.updateSession(chatmodeSession.id, { sessionMode: arg });
+      this.eventBus.publish({ type: 'session:chat-mode-changed', sessionId: chatmodeSession.id, mode: arg, timestamp: Date.now() });
       return `✅ 会话模式已切换: ${arg}`;
     }
 
     // /dispatch 命令：查看/切换群聊分发模式（mention | all）
-    // - 查看：所有人可用
-    // - 设置：单聊任何角色可设置；群聊仅管理员可设置
+    // 仅群聊可用；群聊中设置需管理员权限
     if (normalizedContent === '/dispatch' || normalizedContent.startsWith('/dispatch ')) {
-      if (!activeSession) return '❌ 当前无活跃会话';
+      const dispatchResult = await this.ensureSession(channel, channelId, threadId, chatType);
+      if ('error' in dispatchResult) return dispatchResult.error;
+      const dispatchSession = dispatchResult.session;
+
+      const dispatchChatType = dispatchSession.chatType || activeChatType;
+      if (dispatchChatType !== 'group') {
+        return '❌ /dispatch 仅在群聊中可用';
+      }
 
       const arg = normalizedContent.slice(9).trim();
-      const currentMode = activeSession.metadata?.dispatchMode || 'mention';
-      const isPrivate = activeChatType !== 'group';
+      const currentMode = dispatchSession.metadata?.dispatchMode || 'mention';
 
       if (!arg) {
+        // 尝试发送交互卡片
+        if (isAdmin && this.interactionRouter) {
+          const requestId = `dispatch-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+          const modes = [
+            { key: 'mention', name: '提及模式', desc: '仅当被 @ 提及（含 @all）时响应群消息' },
+            { key: 'all', name: '广播模式', desc: '群内所有消息都触发响应' },
+          ];
+          const interaction: InteractionRequest = {
+            type: 'interaction',
+            id: requestId,
+            channelId,
+            sessionId: dispatchSession.id,
+            kind: {
+              kind: 'action',
+              title: '📡 分发模式',
+              body: modes.map(m => `${m.key === currentMode ? '✓' : '•'} **${m.key}** (${m.name}) - ${m.desc}`).join('\n'),
+              buttons: modes.map(m => ({
+                key: m.key,
+                label: m.key === currentMode ? `✓ ${m.key}` : m.key,
+                style: m.key === currentMode ? 'primary' : 'default',
+              })),
+            },
+          };
+
+          const replyCtx = this.getReplyContext(dispatchSession);
+          const cardSent = await this.sendInteractionCard({
+            channel, channelId, sessionId: dispatchSession.id, requestId, interaction, replyCtx,
+            canWrite: isAdmin,
+            callback: async (action, _values, operatorId) => {
+              if (action !== currentMode) {
+                if (userId && operatorId && operatorId !== userId) return;
+                const result = await this.handle(`/dispatch ${action}`, channel, channelId, undefined, userId, threadId);
+                if (result) {
+                  const adapter = this.adapters.get(channel);
+                  adapter?.sendText(channelId, result, replyCtx);
+                } else {
+                  // 切换成功后重新发新卡片（会自动 invalidate 旧卡片）
+                  await this.handle('/dispatch', channel, channelId, undefined, userId, threadId);
+                }
+              }
+            },
+          });
+          if (cardSent) return null;
+        }
+
+        // 降级：文本
         const lines: string[] = [];
         lines.push(`📋 分发模式: ${currentMode}`);
-        if (isPrivate) {
-          lines.push('（私聊场景下分发模式不影响消息接收，所有消息都会处理）');
-        }
         lines.push('');
         lines.push('模式说明：');
         lines.push('  • mention — 提及模式：仅当被@提及时响应群消息(含@all)');
         lines.push('  • all     — 广播模式：群内所有消息都触发响应');
-        const canSwitch = isPrivate || isAdmin;
-        if (canSwitch) {
+        if (isAdmin) {
           lines.push('');
           lines.push('用法：');
           lines.push('  /dispatch mention  — 切换到 @ 提及模式');
@@ -1981,7 +2082,7 @@ export class CommandHandler {
         return `❌ 无效模式: ${arg}\n可选: mention / all\n用法: /dispatch <模式>`;
       }
 
-      if (activeChatType === 'group' && !isAdmin) {
+      if (!isAdmin) {
         return '❌ 无权限：群聊中切换分发模式仅限管理员使用';
       }
 
@@ -1989,15 +2090,15 @@ export class CommandHandler {
         return `📋 当前已是 ${arg}`;
       }
 
-      const metadata = { ...(activeSession.metadata || {}), dispatchMode: arg };
-      await this.sessionManager.updateSession(activeSession.id, { metadata });
-      this.eventBus.publish({ type: 'session:dispatch-mode-changed', sessionId: activeSession.id, mode: arg, timestamp: Date.now() });
+      const metadata = { ...(dispatchSession.metadata || {}), dispatchMode: arg };
+      await this.sessionManager.updateSession(dispatchSession.id, { metadata });
+      this.eventBus.publish({ type: 'session:dispatch-mode-changed', sessionId: dispatchSession.id, mode: arg, timestamp: Date.now() });
       return `✅ 分发模式已切换: ${currentMode} → ${arg}`;
     }
 
     // /stop 命令：中断当前任务
     if (normalizedContent === '/stop') {
-      const stopResult = await this.ensureSession(channel, channelId, threadId);
+      const stopResult = await this.ensureSession(channel, channelId, threadId, chatType);
       if ('error' in stopResult) return '当前没有正在处理的任务';
       const { session: stopSession } = stopResult;
       const stopAgent = this.getAgent(channel, stopSession.agentId);
@@ -2025,7 +2126,7 @@ export class CommandHandler {
 
     // /clear 命令：通过 SDK /clear 清空会话历史
     if (normalizedContent === '/clear') {
-      const result = await this.ensureSession(channel, channelId, threadId);
+      const result = await this.ensureSession(channel, channelId, threadId, chatType);
       if ('error' in result) return result.error;
       const { session } = result;
 
@@ -2059,7 +2160,7 @@ export class CommandHandler {
 
     // /compact 命令：手动压缩会话上下文
     if (normalizedContent === '/compact') {
-      const result = await this.ensureSession(channel, channelId, threadId);
+      const result = await this.ensureSession(channel, channelId, threadId, chatType);
       if ('error' in result) return result.error;
       const { session } = result;
 
@@ -2356,12 +2457,8 @@ export class CommandHandler {
     if (normalizedContent === '/restart' || normalizedContent.startsWith('/restart ')) {
       const restartArg = normalizedContent.slice('/restart'.length).trim();
 
-      // /restart <type> — 重连指定类型的所有渠道（admin only，evolclaw 服务级操作）
-      // 服务级操作仅可从 default 通道发起，避免 evolagent owner/admin 越权
+      // /restart <type> — 重连指定类型的所有渠道（admin only）
       if (restartArg) {
-        if (this.getOwningAgent(channel)) {
-          return '❌ 渠道重连只能从 DefaultAgent 通道发起（服务级操作）';
-        }
         if (!isAdmin) return '❌ 无权限：渠道重连仅限管理员使用';
         const type = restartArg;
 
@@ -2396,11 +2493,7 @@ export class CommandHandler {
         return `🔄 重连 ${type}:\n  ${results.join('\n  ')}`;
       }
 
-      // /restart（无参数）— 重启整个服务（owner only，且仅可从 default 通道触发）
-      // 防止 evolagent 通道的 owner 越权杀整个 evolclaw 进程（影响所有租户）
-      if (this.getOwningAgent(channel)) {
-        return '❌ 服务重启只能从 DefaultAgent 通道发起。EvolAgent 通道仅可执行 /restart <type> 重连特定类型渠道';
-      }
+      // /restart（无参数）— 重启整个服务（owner only）
       if (!isOwner) return '❌ 无权限：服务重启仅限 owner 使用';
       const allSessions = await this.sessionManager.listSessions(channel, channelId);
       const sessionsWithMessages = allSessions
@@ -2434,10 +2527,14 @@ export class CommandHandler {
 
         this.eventBus.publish({ type: 'system:restart', channel, channelId });
 
+        // 发 SIGTERM 而非直接 process.exit(0)，让 index.ts 的 shutdown() 先
+        // 正常关闭所有 channel（包括 Feishu WebSocket close frame），
+        // 避免 Feishu 服务端因连接异常断开而重推未 ack 的消息给新进程。
         setTimeout(() => {
           logger.info('[System] Restarting by user command...');
-          process.exit(0);
+          process.kill(process.pid, 'SIGTERM');
         }, 1000);
+        return true;
       };
 
       // 文本确认流程
@@ -2530,7 +2627,7 @@ export class CommandHandler {
       }
 
       // 获取 session（需要 projectPath）
-      const sendResult = await this.ensureSession(channel, channelId, threadId);
+      const sendResult = await this.ensureSession(channel, channelId, threadId, chatType);
       if ('error' in sendResult) return sendResult.error;
       const sendSession = sendResult.session;
 
@@ -3302,7 +3399,7 @@ export class CommandHandler {
 
     // /rewind 命令：查看历史 / 回退会话
     if (normalizedContent === '/rewind' || normalizedContent.startsWith('/rewind ')) {
-      const result = await this.ensureSession(channel, channelId, threadId);
+      const result = await this.ensureSession(channel, channelId, threadId, chatType);
       if ('error' in result) return result.error;
       const { session } = result;
 
@@ -3346,7 +3443,7 @@ export class CommandHandler {
 
     // /repair 命令：检查并修复会话文件
     if (normalizedContent === '/repair') {
-      const repairResult = await this.ensureSession(channel, channelId, threadId);
+      const repairResult = await this.ensureSession(channel, channelId, threadId, chatType);
       if ('error' in repairResult) return repairResult.error;
       const { session: repairSession } = repairResult;      const repairAgent = this.getAgent(channel, repairSession.agentId);
       const { checkSessionFile, backupSessionFile } = await import('./session/session-file-health.js');
@@ -3536,7 +3633,7 @@ export class CommandHandler {
   private static readonly CTL_COMMANDS = [
     '/help', '/status', '/check', '/pwd',
     '/model', '/effort', '/perm', '/agent',
-    '/compact', '/activity', '/file', '/send', '/chatmode', '/restart', '/bind', '/aid', '/rpc', '/storage',
+    '/compact', '/file', '/send', '/restart', '/bind', '/aid', '/rpc', '/storage',
     '/rename', '/name', '/evolagent',
   ];
 

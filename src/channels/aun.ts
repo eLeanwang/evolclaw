@@ -203,8 +203,22 @@ export class AUNChannel {
   private extractTextPayload(payload: unknown): string {
     if (typeof payload === 'string') return payload;
     if (payload && typeof payload === 'object') {
-      const text = (payload as Record<string, unknown>).text;
-      if (typeof text === 'string') return text;
+      const obj = payload as Record<string, unknown>;
+      const text = typeof obj.text === 'string' ? obj.text : '';
+
+      // quote 类型：拼接被引用内容
+      if (obj.type === 'quote' && obj.quote && typeof obj.quote === 'object') {
+        const q = obj.quote as Record<string, unknown>;
+        const quotedText = typeof q.text === 'string' ? q.text : '';
+        if (quotedText) {
+          const sender = typeof q.sender_display === 'string' ? q.sender_display : '';
+          const prefix = sender ? `${sender}: ` : '';
+          const quoted = quotedText.split('\n').map(line => `> ${prefix}${line}`).join('\n');
+          return text ? `${quoted}\n\n${text}` : quoted;
+        }
+      }
+
+      if (typeof obj.text === 'string') return text;
       return JSON.stringify(payload);
     }
     return '';

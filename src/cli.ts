@@ -2367,8 +2367,6 @@ async function cmdCtl(args: string[]): Promise<void> {
   model [model-id]          查看/切换模型（如 opus, sonnet, haiku）
   effort [low|medium|high]  查看/切换推理强度
   compact                   压缩当前会话上下文
-  chatmode [mode]           查看/切换会话模式
-  activity [all|dm|owner|none]  查看/控制中间输出显示模式
   perm [mode]               查看/切换权限模式
 
 项目:
@@ -2385,8 +2383,7 @@ async function cmdCtl(args: string[]): Promise<void> {
 示例:
   evolclaw ctl model sonnet
   evolclaw ctl effort high
-  evolclaw ctl compact
-  evolclaw ctl chatmode proactive`);
+  evolclaw ctl compact`);
     process.exit(1);
   }
 
