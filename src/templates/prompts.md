@@ -61,7 +61,7 @@
 
 ## 格式说明
 
-模板由多个以 `## 段名` 分隔的段组成，加载器只识别 `runtime`、`group`、`proactive` 三段，其它段（包括本说明）会被忽略，可以随意增删。
+模板由多个以 `## 段名` 分隔的段组成，加载器只识别 `runtime`、`group`、`proactive`、`trigger` 四段，其它段（包括本说明）会被忽略，可以随意增删。
 
 **占位符语法：**
 
@@ -78,6 +78,7 @@
 | `runtime` | 每次消息 | 每条用户消息都会注入 |
 | `group` | `chatType === 'group' && peerId` | 仅群聊消息注入 |
 | `proactive` | `sessionMode === 'proactive'` | 仅 proactive 会话注入 |
+| `trigger` | 非触发器来源的消息 | 让 AI 知道可以使用 /trigger 命令 |
 
 三段以换行拼接，追加到该消息的 system prompt 末尾。
 

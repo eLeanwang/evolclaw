@@ -17,6 +17,9 @@ export type ParseResult =
   | { ok: true; value: ParsedTriggerSet }
   | { ok: false; error: string };
 
+// Note: unquoted multi-word values (e.g. --prompt=hello world) are not supported.
+// The second word would be treated as an unknown token. Always quote multi-word values:
+//   --prompt "hello world"  or  --prompt='hello world'
 function parseFlags(args: string): Map<string, string | true> {
   const flags = new Map<string, string | true>();
   const re = /--(\w[\w-]*)(?:=("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S+)|(?:\s+(?!--)("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S+))?)?/g;

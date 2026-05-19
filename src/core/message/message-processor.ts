@@ -909,6 +909,10 @@ export class MessageProcessor {
           } else {
             this.eventBus.publish({ type: 'trigger:completed', triggerId: message.triggerMeta.triggerId, messageId: messageId, durationMs });
           }
+          // Clean up autonomous sessions after completion to avoid accumulating orphaned sessions
+          if (session.sessionMode === 'autonomous') {
+            this.sessionManager.unbindSession(session.id).catch(() => {});
+          }
         }
         await this.sessionManager.recordSuccess(session.id);
 

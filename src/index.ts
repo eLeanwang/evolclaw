@@ -412,8 +412,9 @@ async function main() {
     eventBus.subscribe('trigger:skipped', (ev: any) => {
       if (ev.reason === 'interrupted') scheduler.onTriggerComplete(ev.triggerId, 'interrupted');
     });
-    // TODO: multi-agent trigger routing — currently only primary agent's scheduler is wired to cmdHandler
-    // Non-primary agent channels cannot use /trigger set until per-channel scheduler routing is implemented
+    // Note: only the primary agent's scheduler is wired to cmdHandler.
+    // Non-primary agent channels will receive "⚠️ 触发器功能未启用" when using /trigger.
+    // Full per-channel scheduler routing is a future improvement.
     try {
       await scheduler.init();
     } catch (err) {

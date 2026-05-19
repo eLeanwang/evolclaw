@@ -3460,12 +3460,14 @@ export class CommandHandler {
       const nameOrId = sub.slice('cancel '.length).trim();
       if (!nameOrId) return '❌ 用法：/trigger cancel <名称>';
 
-      // Find trigger: non-admin name lookup is scoped to (peerId, channel) to avoid info disclosure
+      // Find trigger: non-admin lookup is scoped to (peerId, channel) to avoid info disclosure
+      // Non-admins can cancel by name or by their own trigger's UUID
       let trigger: ReturnType<typeof manager.getById>;
       if (isAdmin) {
         trigger = manager.getByName(nameOrId) ?? manager.getById(nameOrId);
       } else {
-        trigger = manager.getByNameScoped(nameOrId, peerId, channel);
+        trigger = manager.getByNameScoped(nameOrId, peerId, channel)
+               ?? manager.getByIdScoped(nameOrId, peerId, channel);
       }
       if (!trigger) {
         return isAdmin
@@ -3513,6 +3515,9 @@ export class CommandHandler {
       };
 
       try {
+        // Validate name uniqueness before persisting (manager.register writes to disk)
+        // scheduler.register is in-memory only and cannot fail, so order is safe here.
+        // If manager.register throws (duplicate name/ID), nothing is persisted.
         manager.register(trigger);
         scheduler.register(trigger);
       } catch (err: any) {

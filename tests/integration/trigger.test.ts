@@ -68,6 +68,14 @@ function makeFakeRunner(): any {
   };
 }
 
+/** Extract text from OutboundPayload | string | null | undefined */
+function getText(result: any): string {
+  if (result == null) return '';
+  if (typeof result === 'string') return result;
+  if (typeof result === 'object' && 'text' in result) return result.text ?? '';
+  return String(result);
+}
+
 async function setupEnv(tmpDir: string) {
   const triggersDir = path.join(tmpDir, 'triggers', 'test.agentid.pub');
   const sessionsDir = path.join(tmpDir, 'sessions');
@@ -160,8 +168,8 @@ describe('trigger integration', () => {
       '/trigger set --delay 1s --prompt "hello from trigger"',
       'feishu-main', 'oc_test', undefined, 'owner-user',
     );
-    expect(result).toContain('✅');
-    expect(result).toContain('已注册');
+    expect(getText(result)).toContain('✅');
+    expect(getText(result)).toContain('已注册');
     expect(triggerManager.listActive()).toHaveLength(1);
 
     triggerScheduler.stop();
@@ -195,8 +203,8 @@ describe('trigger integration', () => {
     );
 
     const result = await cmdHandler.handle('/trigger', 'feishu-main', 'oc_test', undefined, 'owner-user');
-    expect(result).toContain('my-task');
-    expect(result).toContain('delay');
+    expect(getText(result)).toContain('my-task');
+    expect(getText(result)).toContain('delay');
 
     triggerScheduler.stop();
   });
@@ -211,8 +219,8 @@ describe('trigger integration', () => {
     await new Promise(r => setTimeout(r, FIRE_WAIT_MS));
 
     const result = await cmdHandler.handle('/trigger list', 'feishu-main', 'oc_test', undefined, 'owner-user');
-    expect(result).toContain('fired-task');
-    expect(result).toContain('fired');  // doneReason in history
+    expect(getText(result)).toContain('fired-task');
+    expect(getText(result)).toContain('fired');  // doneReason in history
 
     triggerScheduler.stop();
   });
@@ -222,7 +230,7 @@ describe('trigger integration', () => {
     await triggerScheduler.init();
 
     const result = await cmdHandler.handle('/trigger', 'feishu-main', 'oc_test', undefined, 'owner-user');
-    expect(result).toContain('没有活跃');
+    expect(getText(result)).toContain('没有活跃');
 
     triggerScheduler.stop();
   });
@@ -242,12 +250,12 @@ describe('trigger integration', () => {
       '/trigger cancel cancel-me',
       'feishu-main', 'oc_test', undefined, 'owner-user',
     );
-    expect(result).toContain('✅');
-    expect(result).toContain('cancel-me');
+    expect(getText(result)).toContain('✅');
+    expect(getText(result)).toContain('cancel-me');
 
     // Verify removed from active
     const listResult = await cmdHandler.handle('/trigger', 'feishu-main', 'oc_test', undefined, 'owner-user');
-    expect(listResult).toContain('没有活跃');
+    expect(getText(listResult)).toContain('没有活跃');
 
     triggerScheduler.stop();
   });
@@ -267,11 +275,11 @@ describe('trigger integration', () => {
       '/trigger cancel owner-task',
       'feishu-main', 'oc_test', undefined, 'guest-user',
     );
-    expect(result).toContain('❌');
+    expect(getText(result)).toContain('❌');
 
     // Trigger still active
     const listResult = await cmdHandler.handle('/trigger', 'feishu-main', 'oc_test', undefined, 'owner-user');
-    expect(listResult).toContain('owner-task');
+    expect(getText(listResult)).toContain('owner-task');
 
     triggerScheduler.stop();
   });
@@ -291,7 +299,7 @@ describe('trigger integration', () => {
       '/trigger cancel owner-task',
       'feishu-main', 'oc_test', undefined, 'admin-user',
     );
-    expect(result).toContain('✅');
+    expect(getText(result)).toContain('✅');
 
     triggerScheduler.stop();
   });
@@ -342,8 +350,8 @@ describe('trigger integration', () => {
       '/trigger set --delay 1h',
       'feishu-main', 'oc_test', undefined, 'owner-user',
     );
-    expect(result).toContain('❌');
-    expect(result).toContain('prompt');
+    expect(getText(result)).toContain('❌');
+    expect(getText(result)).toContain('prompt');
 
     triggerScheduler.stop();
   });
@@ -356,8 +364,8 @@ describe('trigger integration', () => {
       '/trigger set --delay 1h --cron "0 9 * * *" --prompt "test"',
       'feishu-main', 'oc_test', undefined, 'owner-user',
     );
-    expect(result).toContain('❌');
-    expect(result).toContain('互斥');
+    expect(getText(result)).toContain('❌');
+    expect(getText(result)).toContain('互斥');
 
     triggerScheduler.stop();
   });
@@ -374,7 +382,7 @@ describe('trigger integration', () => {
       '/trigger set --delay 2h --name dup --prompt "second"',
       'feishu-main', 'oc_test', undefined, 'owner-user',
     );
-    expect(result).toContain('❌');
+    expect(getText(result)).toContain('❌');
 
     triggerScheduler.stop();
   });
@@ -633,10 +641,10 @@ describe('trigger integration', () => {
     await new Promise(r => setTimeout(r, FIRE_WAIT_MS));
 
     const result = await cmdHandler.handle('/trigger list', 'feishu-main', 'oc_test', undefined, 'owner-user');
-    expect(result).toContain('活跃');
-    expect(result).toContain('历史');
-    expect(result).toContain('active-one');
-    expect(result).toContain('fired-one');
+    expect(getText(result)).toContain('活跃');
+    expect(getText(result)).toContain('历史');
+    expect(getText(result)).toContain('active-one');
+    expect(getText(result)).toContain('fired-one');
 
     triggerScheduler.stop();
   });
@@ -649,9 +657,9 @@ describe('trigger integration', () => {
     await cmdHandler.handle('/trigger set --delay 2h --name t2 --prompt "b"', 'feishu-main', 'oc_test', undefined, 'owner-user');
 
     const result = await cmdHandler.handle('/trigger', 'feishu-main', 'oc_test', undefined, 'owner-user');
-    expect(result).toContain('2');
-    expect(result).toContain('t1');
-    expect(result).toContain('t2');
+    expect(getText(result)).toContain('2');
+    expect(getText(result)).toContain('t1');
+    expect(getText(result)).toContain('t2');
 
     triggerScheduler.stop();
   });
@@ -673,7 +681,7 @@ describe('trigger integration', () => {
       '/trigger cancel guest-task',
       'feishu-main', 'oc_test', undefined, 'guest-user',
     );
-    expect(result).toContain('✅');
+    expect(getText(result)).toContain('✅');
 
     triggerScheduler.stop();
   });
@@ -686,7 +694,7 @@ describe('trigger integration', () => {
       '/trigger cancel nonexistent',
       'feishu-main', 'oc_test', undefined, 'owner-user',
     );
-    expect(result).toContain('❌');
+    expect(getText(result)).toContain('❌');
 
     triggerScheduler.stop();
   });
@@ -699,8 +707,8 @@ describe('trigger integration', () => {
       '/trigger cancel',
       'feishu-main', 'oc_test', undefined, 'owner-user',
     );
-    expect(result).toContain('❌');
-    expect(result).toContain('用法');
+    expect(getText(result)).toContain('❌');
+    expect(getText(result)).toContain('用法');
 
     triggerScheduler.stop();
   });
@@ -747,7 +755,7 @@ describe('trigger integration', () => {
       `/trigger cancel ${trigger!.id}`,
       'feishu-main', 'oc_test', undefined, 'admin-user',
     );
-    expect(result).toContain('✅');
+    expect(getText(result)).toContain('✅');
 
     triggerScheduler.stop();
   });
@@ -842,8 +850,8 @@ describe('trigger integration', () => {
       `/trigger set --at ${pastTime} --prompt "past"`,
       'feishu-main', 'oc_test', undefined, 'owner-user',
     );
-    expect(result).toContain('❌');
-    expect(result).toContain('过期');
+    expect(getText(result)).toContain('❌');
+    expect(getText(result)).toContain('过期');
 
     triggerScheduler.stop();
   });
@@ -856,8 +864,8 @@ describe('trigger integration', () => {
       '/trigger set --cron "not-valid-cron" --prompt "test"',
       'feishu-main', 'oc_test', undefined, 'owner-user',
     );
-    expect(result).toContain('❌');
-    expect(result).toContain('cron');
+    expect(getText(result)).toContain('❌');
+    expect(getText(result)).toContain('cron');
 
     triggerScheduler.stop();
   });
@@ -870,8 +878,8 @@ describe('trigger integration', () => {
       '/trigger set --delay 1h --thread t1 --session latest --prompt "test"',
       'feishu-main', 'oc_test', undefined, 'owner-user',
     );
-    expect(result).toContain('❌');
-    expect(result).toContain('互斥');
+    expect(getText(result)).toContain('❌');
+    expect(getText(result)).toContain('互斥');
 
     triggerScheduler.stop();
   });
@@ -884,8 +892,8 @@ describe('trigger integration', () => {
       '/trigger set --delay 1h --channel feishu-main --prompt "test"',
       'feishu-main', 'oc_test', undefined, 'owner-user',
     );
-    expect(result).toContain('❌');
-    expect(result).toContain('同时');
+    expect(getText(result)).toContain('❌');
+    expect(getText(result)).toContain('同时');
 
     triggerScheduler.stop();
   });
@@ -898,8 +906,8 @@ describe('trigger integration', () => {
       '/trigger set --delay 1h --session new --prompt "test"',
       'feishu-main', 'oc_test', undefined, 'owner-user',
     );
-    expect(result).toContain('❌');
-    expect(result).toContain('session');
+    expect(getText(result)).toContain('❌');
+    expect(getText(result)).toContain('session');
 
     triggerScheduler.stop();
   });
@@ -912,8 +920,8 @@ describe('trigger integration', () => {
       '/trigger set --prompt "no time"',
       'feishu-main', 'oc_test', undefined, 'owner-user',
     );
-    expect(result).toContain('❌');
-    expect(result).toContain('时间');
+    expect(getText(result)).toContain('❌');
+    expect(getText(result)).toContain('时间');
 
     triggerScheduler.stop();
   });
@@ -1075,7 +1083,7 @@ describe('trigger integration', () => {
       '/trigger set --delay 1h --name guest-trigger --prompt "guest task"',
       'feishu-main', 'oc_test', undefined, 'guest-user',
     );
-    expect(result).toContain('✅');
+    expect(getText(result)).toContain('✅');
 
     const t = triggerManager.getByName('guest-trigger');
     expect(t).toBeDefined();
@@ -1099,7 +1107,7 @@ describe('trigger integration', () => {
       '/trigger set --delay 1h --prompt "test"',
       'feishu-main', 'oc_test', undefined, 'owner-user',
     );
-    expect(result).toContain('未启用');
+    expect(getText(result)).toContain('未启用');
   });
 
   it('unknown /trigger subcommand returns usage hint', async () => {
@@ -1110,8 +1118,8 @@ describe('trigger integration', () => {
       '/trigger foobar',
       'feishu-main', 'oc_test', undefined, 'owner-user',
     );
-    expect(result).toContain('❌');
-    expect(result).toContain('用法');
+    expect(getText(result)).toContain('❌');
+    expect(getText(result)).toContain('用法');
 
     triggerScheduler.stop();
   });

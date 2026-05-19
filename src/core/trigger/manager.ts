@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { atomicWriteJson, appendJsonl } from '../session/session-fs-store.js';
+import { logger } from '../../utils/logger.js';
 import type { Trigger } from '../../types.js';
 
 interface TriggersFile {
@@ -34,7 +35,8 @@ export class TriggerManager {
       const data: TriggersFile = JSON.parse(raw);
       this.triggers = new Map(Object.entries(data.triggers ?? {}));
       return [...this.triggers.values()];
-    } catch {
+    } catch (e) {
+      logger.warn(`[TriggerManager] Failed to parse ${this.triggersPath}, starting empty: ${e}`);
       this.triggers = new Map();
       return [];
     }
@@ -78,6 +80,13 @@ export class TriggerManager {
     for (const t of this.triggers.values()) {
       if (t.name === name && t.createdByPeerId === peerId && t.createdByChannel === channel) return t;
     }
+    return undefined;
+  }
+
+  // Scoped ID lookup: allows creator to cancel by UUID without revealing others' triggers
+  getByIdScoped(id: string, peerId: string, channel: string): Trigger | undefined {
+    const t = this.triggers.get(id);
+    if (t && t.createdByPeerId === peerId && t.createdByChannel === channel) return t;
     return undefined;
   }
 

@@ -73,6 +73,15 @@ class TriggerHeap {
   get size(): number { return this.heap.length; }
 }
 
+/**
+ * Calculate the next fire timestamp for a trigger.
+ *
+ * For `delay` type: `now` is the reference point — returns `now + delayMs`.
+ *   Pass `Date.now()` at registration time to get the original fire time.
+ *   Do NOT pass a stored `nextFireAt` as `now` — that would double-add the delay.
+ * For `at` type: `now` is ignored; returns the absolute ISO timestamp.
+ * For `cron` type: returns the next occurrence after `now`.
+ */
 export function calcNextFireAt(scheduleType: string, scheduleValue: string, now = Date.now()): number {
   if (scheduleType === 'delay') {
     return now + parseInt(scheduleValue);
