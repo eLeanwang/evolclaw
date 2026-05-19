@@ -475,6 +475,7 @@ export class MessageProcessor {
         channelId: capturedChannelId,
         replyContext: capturedReplyContext,
         interactionRouter: this.interactionRouter,
+        userId: message.peerId || undefined,
         interceptNextMessage: this.messageQueue
           ? (sessionKey, handler) => this.messageQueue!.interceptNext(sessionKey, handler)
           : undefined,

@@ -2,6 +2,7 @@ import path from 'path';
 import type { EventBus } from './event-bus.js';
 import type { ChannelAdapter, ReplyContext, InteractionRequest } from '../types.js';
 import type { InteractionRouter } from './interaction-router.js';
+import { renderActionAsText } from './interaction-fallback.js';
 
 // 危险命令黑名单（正则表达式）
 const DANGEROUS_PATTERNS = [
@@ -215,6 +216,7 @@ export class PermissionGateway {
       channelId?: string;
       replyContext?: ReplyContext;
       interactionRouter?: InteractionRouter;
+      userId?: string;
     },
     summary?: string,
     reason?: string
@@ -246,6 +248,8 @@ export class PermissionGateway {
       },
       channelId: context?.channelId || '',
       sessionId,
+      initiatorId: context?.userId,
+      fallback: { command: 'perm' },
     };
 
     // 尝试富交互
@@ -263,19 +267,17 @@ export class PermissionGateway {
 
     // fallback 到文本
     if (!interactionSent) {
-      await sendPrompt(
-        `🔐 权限请求\n工具：${toolName}\n操作：${displaySummary}${reasonLine}\n\n回复 /perm allow 本次允许 | always 始终允许 | deny 拒绝`
-      );
+      await sendPrompt(renderActionAsText(interaction));
     }
 
     return new Promise((resolve) => {
       this.pending.set(requestId, { sessionId, toolName, resolve, timer: setTimeout(() => {}, 0) });
 
-      // 如果发了交互卡片，同时注册到 InteractionRouter
-      if (interactionSent && context?.interactionRouter) {
+      // 注册到 InteractionRouter（卡片和文本降级都注册，统一路由）
+      if (context?.interactionRouter) {
         context.interactionRouter.register(requestId, sessionId, (action) => {
           this.resolvePermission(sessionId, requestId, action as PermissionDecision);
-        });
+        }, { initiatorId: context?.userId, fallbackCommand: 'perm' });
       }
     });
   }

@@ -8,6 +8,7 @@ import type { StatsCollector } from '../utils/stats-collector.js';
 import { PermissionGateway, type PermissionDecision } from './permission.js';
 import { InteractionRouter } from './interaction-router.js';
 import { MessageQueue } from './message/message-queue.js';
+import { renderCommandCardAsText } from './interaction-fallback.js';
 import { resolvePaths, getPackageRoot } from '../paths.js';
 import { logger } from '../utils/logger.js';
 import crypto from 'crypto';
@@ -433,6 +434,67 @@ export class CommandHandler {
     };
     this.interactionRouter.register(opts.requestId, opts.sessionId, wrappedCallback, { timeoutMs: 120_000, messageId });
     return true;
+  }
+
+  /**
+   * 发送 CommandCard 卡片。卡片成功返回 null（调用方直接 return），失败返回降级文本。
+   * CommandCard 不进 InteractionRouter，按钮点击由 channel 直接构造伪命令入站消息。
+   */
+  private async sendCommandCard(opts: {
+    channel: string;
+    channelId: string;
+    interaction: InteractionRequest;
+    replyCtx?: ReplyContext;
+    canWrite?: boolean;
+  }): Promise<string | null> {
+    const adapter = this.adapters.get(opts.channel);
+    if (opts.interaction.kind.kind !== 'command-card') {
+      logger.warn(`[CommandHandler] sendCommandCard called with non-CommandCard kind`);
+      return null;
+    }
+    const card = opts.interaction.kind;
+
+    if (opts.canWrite === false) return renderCommandCardAsText(card);
+    if (!adapter?.sendInteraction) return renderCommandCardAsText(card);
+    // session 忙碌时降级到文本，避免并发触发带参写操作
+    if (this.isSessionBusy(opts.interaction.sessionId)) return renderCommandCardAsText(card);
+
+    try {
+      const messageId = await adapter.sendInteraction(opts.channelId, opts.interaction, opts.replyCtx);
+      if (messageId) return null;
+    } catch (e) {
+      logger.warn(`[CommandHandler] sendCommandCard failed: ${e}`);
+    }
+    return renderCommandCardAsText(card);
+  }
+
+  /**
+   * 通用降级应答入口：按 (sessionId, fallbackCommand) 查找 pending interaction 并路由。
+   * 返回 { matched: true } 表示已处理，调用方直接返回 result。
+   */
+  private async handleInteractionFallback(
+    command: string,
+    args: string,
+    sessionId: string,
+    userId?: string,
+  ): Promise<{ matched: boolean; result?: string }> {
+    if (!this.interactionRouter) return { matched: false };
+
+    const pendingId = this.interactionRouter.findPendingByCommand(sessionId, command);
+    if (!pendingId) return { matched: false };
+
+    const initiatorId = this.interactionRouter.getInitiator(pendingId);
+    if (initiatorId && userId && initiatorId !== userId) {
+      return { matched: true, result: '⚠️ 仅卡片发起者可应答' };
+    }
+
+    this.interactionRouter.handle({
+      type: 'interaction.response',
+      id: pendingId,
+      action: args,
+      operatorId: userId,
+    });
+    return { matched: true, result: '✓ 已回答' };
   }
 
   /** 判断指定 session 是否有活跃流（用于 idle 守卫和卡片降级） */
@@ -1072,46 +1134,32 @@ export class CommandHandler {
         const currentMode = permSession.metadata?.permissionMode ?? DEFAULT_PERMISSION_MODE;
         const modes = permAgent.listModes();
 
-        // 尝试发送交互卡片
-        if (this.interactionRouter) {
-          const requestId = `perm-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+        // 尝试发送 CommandCard 卡片
+        {
           const availableModes = modes.filter(m => m.available);
           const interaction: InteractionRequest = {
             type: 'interaction',
-            id: requestId,
+            id: `perm-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`,
             channelId,
             sessionId: permSession.id,
+            initiatorId: userId,
             kind: {
-              kind: 'action',
+              kind: 'command-card',
               title: '🔐 权限模式',
               body: availableModes.map(m => `${m.key === currentMode ? '✓' : '•'} **${m.key}** (${m.nameZh}) - ${m.description}`).join('\n'),
               buttons: availableModes.map(m => ({
-                key: m.key,
                 label: m.key === currentMode ? `✓ ${m.key}` : m.key,
-                style: m.key === currentMode ? 'primary' : 'default',
+                command: `/perm ${m.key}`,
+                style: (m.key === currentMode ? 'primary' : 'default') as 'primary' | 'default',
+                disabled: m.key === currentMode,
               })),
             },
           };
 
           const replyCtx = this.getReplyContext(permSession);
-          const cardSent = await this.sendInteractionCard({
-            channel, channelId, sessionId: permSession.id, requestId, interaction, replyCtx,
-            canWrite: isOwner,
-            callback: async (action, _values, operatorId) => {
-              if (action !== currentMode) {
-                if (userId && operatorId && operatorId !== userId) return;
-                const result = await this.handle(`/perm ${action}`, channel, channelId, undefined, userId, threadId);
-                if (result) {
-                  const adapter = this.adapters.get(channel);
-                  adapter?.sendText(channelId, result, replyCtx);
-                } else {
-                  // 切换成功后重新发新卡片（会自动 invalidate 旧卡片）
-                  await this.handle('/perm', channel, channelId, undefined, userId, threadId);
-                }
-              }
-            },
-          });
-          if (cardSent) return null;
+          const cardResult = await this.sendCommandCard({ channel, channelId, interaction, replyCtx, canWrite: isOwner });
+          if (cardResult === null) return null;
+          return cardResult;
         }
 
         // 降级：文本
@@ -1132,8 +1180,13 @@ export class CommandHandler {
       if (parts.length === 1) {
         const arg = parts[0];
 
-        // /perm allow|always|deny：快捷审批（自动找当前 session 唯一的 pending 请求）
+        // /perm allow|always|deny：快捷审批
+        // 优先走 InteractionRouter fallback（统一降级路径）
         if (arg === 'allow' || arg === 'always' || arg === 'deny') {
+          const fb = await this.handleInteractionFallback('perm', arg, permSession.id, userId);
+          if (fb.matched) return fb.result ?? '✓ 已回答';
+
+          // fallback 不命中：走 permissionGateway 直接审批（兼容旧路径）
           if (!this.permissionGateway) {
             return '❌ 权限审批未启用';
           }
@@ -1187,7 +1240,6 @@ export class CommandHandler {
     if (normalizedContent.startsWith('/ask')) {
       const args = normalizedContent.slice(4).trim();
       if (!args) {
-        // 无参数：列出当前 pending 的交互请求
         const askResult = await this.ensureSession(channel, channelId, threadId);
         if ('error' in askResult) return askResult.error;
         const pendingIds = this.interactionRouter?.getPending(askResult.session.id) || [];
@@ -1197,15 +1249,10 @@ export class CommandHandler {
 
       const askResult = await this.ensureSession(channel, channelId, threadId);
       if ('error' in askResult) return askResult.error;
-      const { session: askSession } = askResult;
 
-      const pendingIds = this.interactionRouter?.getPending(askSession.id) || [];
-      if (pendingIds.length === 0) return '❌ 当前没有待回答的问题';
-
-      // 路由到最早的 pending interaction
-      const targetId = pendingIds[0];
-      this.interactionRouter!.handle({ type: 'interaction.response', id: targetId, action: args, operatorId: userId });
-      return `✓ 已回答`;
+      const fb = await this.handleInteractionFallback('ask', args, askResult.session.id, userId);
+      if (fb.matched) return fb.result ?? '✓ 已回答';
+      return '❌ 当前没有待回答的问题';
     }
 
     // /resume 命令：返回当前项目的 Claude 会话记录（JSON）
@@ -1324,41 +1371,30 @@ export class CommandHandler {
           || this.agentRegistry?.resolveByChannel(channel)?.baseagent
           || this.parseDefaultBaseagent();
 
-        // 尝试发送交互卡片
+        // 尝试发送 CommandCard 卡片
         if (this.interactionRouter && available.length > 1) {
-          const requestId = `agent-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
           const interaction: InteractionRequest = {
             type: 'interaction',
-            id: requestId,
+            id: `agent-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`,
             channelId,
-            sessionId: activeSession?.id || requestId,
+            sessionId: activeSession?.id || `agent-${Date.now()}`,
+            initiatorId: userId,
             kind: {
-              kind: 'action',
+              kind: 'command-card',
               title: '🔌 切换 Agent',
               buttons: available.map(a => ({
-                key: a,
                 label: a === currentAgent ? `✓ ${a}` : a,
-                style: a === currentAgent ? 'primary' : 'default',
+                command: `/agent ${a}`,
+                style: (a === currentAgent ? 'primary' : 'default') as 'primary' | 'default',
+                disabled: a === currentAgent,
               })),
             },
           };
 
           const replyCtx = activeSession ? this.getReplyContext(activeSession) : undefined;
-          const cardSent = await this.sendInteractionCard({
-            channel, channelId, sessionId: activeSession?.id || requestId, requestId, interaction, replyCtx,
-            canWrite: activeChatType === 'group' ? isOwner : isAdmin,
-            callback: async (action, _values, operatorId) => {
-              if (action !== currentAgent) {
-                if (userId && operatorId && operatorId !== userId) return;
-                const result = await this.handle(`/agent ${action}`, channel, channelId, undefined, userId, threadId);
-                if (result) {
-                  const adapter = this.adapters.get(channel);
-                  adapter?.sendText(channelId, result, replyCtx);
-                }
-              }
-            },
-          });
-          if (cardSent) return null;
+          const cardResult = await this.sendCommandCard({ channel, channelId, interaction, replyCtx, canWrite: activeChatType === 'group' ? isOwner : isAdmin });
+          if (cardResult === null) return null;
+          return cardResult;
         }
 
         // 降级：文本
@@ -1483,41 +1519,30 @@ export class CommandHandler {
         const efforts = getAvailableEfforts(modelAgent, currentModel);
         const currentEffort = modelAgent.getEffort?.() || 'auto';
 
-        // 尝试发送交互卡片
+        // 尝试发送 CommandCard 卡片
         if (this.interactionRouter && models.length > 0) {
-          const requestId = `model-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
           const interaction: InteractionRequest = {
             type: 'interaction',
-            id: requestId,
+            id: `model-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`,
             channelId,
             sessionId: modelSession.id,
+            initiatorId: userId,
             kind: {
-              kind: 'action',
+              kind: 'command-card',
               title: '🤖 切换模型',
               buttons: models.map((m: string) => ({
-                key: m,
                 label: m === currentModel ? `✓ ${m}` : m,
-                style: m === currentModel ? 'primary' : 'default',
+                command: `/model ${m}`,
+                style: (m === currentModel ? 'primary' : 'default') as 'primary' | 'default',
+                disabled: m === currentModel,
               })),
             },
           };
 
           const replyCtx = this.getReplyContext(modelSession);
-          const cardSent = await this.sendInteractionCard({
-            channel, channelId, sessionId: modelSession.id, requestId, interaction, replyCtx,
-            canWrite: isAdmin,
-            callback: async (action, _values, operatorId) => {
-              if (action !== currentModel) {
-                if (userId && operatorId && operatorId !== userId) return;
-                const result = await this.handle(`/model ${action}`, channel, channelId, undefined, userId, threadId);
-                if (result) {
-                  const adapter = this.adapters.get(channel);
-                  adapter?.sendText(channelId, result, replyCtx);
-                }
-              }
-            },
-          });
-          if (cardSent) return null;
+          const cardResult = await this.sendCommandCard({ channel, channelId, interaction, replyCtx, canWrite: isAdmin });
+          if (cardResult === null) return null;
+          return cardResult;
         }
 
         // 降级：文本
@@ -1624,50 +1649,31 @@ export class CommandHandler {
       }
 
       if (!args) {
-        // /effort（无参数）：显示当前推理强度 + 发送 Action 卡片
+        // /effort（无参数）：显示当前推理强度 + 发送 CommandCard 卡片
         if (this.interactionRouter) {
-          const requestId = `effort-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
-          const buttons: ActionInteraction['buttons'] = [
-            ...efforts.map(e => ({
-              key: e,
-              label: e === currentEffort ? `✓ ${e}` : e,
-              style: e === currentEffort ? 'primary' as const : 'default' as const,
-            })),
-            {
-              key: 'auto',
-              label: currentEffort === 'auto' ? '✓ auto' : 'auto',
-              style: currentEffort === 'auto' ? 'primary' as const : 'default' as const,
-            },
-          ];
-
+          const allItems = [...efforts, 'auto'];
           const interaction: InteractionRequest = {
             type: 'interaction',
-            id: requestId,
+            id: `effort-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`,
             channelId,
             sessionId: effortSession.id,
+            initiatorId: userId,
             kind: {
-              kind: 'action',
+              kind: 'command-card',
               title: '⚡ 推理强度',
-              buttons,
+              buttons: allItems.map(e => ({
+                label: e === currentEffort ? `✓ ${e}` : e,
+                command: `/effort ${e}`,
+                style: (e === currentEffort ? 'primary' : 'default') as 'primary' | 'default',
+                disabled: e === currentEffort,
+              })),
             },
           };
 
           const replyCtx = this.getReplyContext(effortSession);
-          const cardSent = await this.sendInteractionCard({
-            channel, channelId, sessionId: effortSession.id, requestId, interaction, replyCtx,
-            canWrite: isAdmin,
-            callback: async (action, _values, operatorId) => {
-              if (action !== currentEffort) {
-                if (userId && operatorId && operatorId !== userId) return;
-                const result = await this.handle(`/effort ${action}`, channel, channelId, undefined, userId, threadId);
-                if (result) {
-                  const adapter = this.adapters.get(channel);
-                  adapter?.sendText(channelId, result, replyCtx);
-                }
-              }
-            },
-          });
-          if (cardSent) return null;
+          const cardResult = await this.sendCommandCard({ channel, channelId, interaction, replyCtx, canWrite: isAdmin });
+          if (cardResult === null) return null;
+          return cardResult;
         }
 
         // 降级：文本
@@ -1799,48 +1805,35 @@ export class CommandHandler {
       ];
 
       if (!activityArg) {
-        // 无参数：显示当前模式 + Action 卡片
+        // 无参数：显示当前模式 + CommandCard 卡片
         if (this.interactionRouter) {
-          const requestId = `activity-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
           const body = modeDescriptions.map(m =>
             `${m.configVal === currentMode ? '✓' : '•'} **${m.key}** (${m.label})`
           ).join('\n');
-          const buttons: ActionInteraction['buttons'] = modeDescriptions.map(m => ({
-            key: m.key,
-            label: m.configVal === currentMode ? `✓ ${m.key}` : m.key,
-            style: m.configVal === currentMode ? 'primary' as const : 'default' as const,
-          }));
 
           const interaction: InteractionRequest = {
             type: 'interaction',
-            id: requestId,
+            id: `activity-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`,
             channelId,
-            sessionId: activeSession?.id || requestId,
+            sessionId: activeSession?.id || '',
+            initiatorId: userId,
             kind: {
-              kind: 'action',
+              kind: 'command-card',
               title: '📋 中间输出模式',
               body,
-              buttons,
+              buttons: modeDescriptions.map(m => ({
+                label: m.configVal === currentMode ? `✓ ${m.key}` : m.key,
+                command: `/activity ${m.key}`,
+                style: (m.configVal === currentMode ? 'primary' : 'default') as 'primary' | 'default',
+                disabled: m.configVal === currentMode,
+              })),
             },
           };
 
           const replyCtx = activeSession ? this.getReplyContext(activeSession) : undefined;
-          const cardSent = await this.sendInteractionCard({
-            channel, channelId, sessionId: activeSession?.id || requestId, requestId, interaction, replyCtx,
-            canWrite: isOwner,
-            callback: async (action, _values, operatorId) => {
-              const newMode = modeMap[action];
-              if (newMode && newMode !== currentMode) {
-                if (userId && operatorId && operatorId !== userId) return;
-                const result = await this.handle(`/activity ${action}`, channel, channelId, undefined, userId, threadId);
-                if (result) {
-                  const adapter = this.adapters.get(channel);
-                  adapter?.sendText(channelId, result, replyCtx);
-                }
-              }
-            },
-          });
-          if (cardSent) return null;
+          const cardResult = await this.sendCommandCard({ channel, channelId, interaction, replyCtx, canWrite: isOwner });
+          if (cardResult === null) return null;
+          return cardResult;
         }
 
         // 降级：文本
@@ -2564,15 +2557,8 @@ export class CommandHandler {
         return parts.join(' ');
       };
 
-      // 尝试发送 ActionInteraction 卡片（每个项目一个按钮，一键切换）
-      if (this.interactionRouter && entries.length > 0) {
-        const requestId = `plist-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
-        const buttons: ActionInteraction['buttons'] = entries.map(e => ({
-          key: e.name,
-          label: e.isCurrent ? `✓ ${e.name}` : e.name,
-          style: e.isCurrent ? 'primary' as const : 'default' as const,
-        }));
-
+      // 尝试发送 CommandCard 卡片（每个项目一个按钮，一键切换）
+      if (entries.length > 0) {
         const bodyLines = entries.map(e => {
           const status = buildStatusText(e);
           const prefix = e.isCurrent ? '✓' : '•';
@@ -2581,34 +2567,27 @@ export class CommandHandler {
 
         const interaction: InteractionRequest = {
           type: 'interaction',
-          id: requestId,
+          id: `plist-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`,
           channelId,
-          sessionId: activeSession?.id || requestId,
+          sessionId: activeSession?.id || '',
+          initiatorId: userId,
           kind: {
-            kind: 'action',
+            kind: 'command-card',
             title: '📂 项目列表',
             body: bodyLines.join('\n'),
-            buttons,
+            buttons: entries.map(e => ({
+              label: e.isCurrent ? `✓ ${e.name}` : e.name,
+              command: `/project ${e.name}`,
+              style: (e.isCurrent ? 'primary' : 'default') as 'primary' | 'default',
+              disabled: e.isCurrent,
+            })),
           },
         };
 
         const replyCtx = activeSession ? this.getReplyContext(activeSession) : undefined;
-        const cardSent = await this.sendInteractionCard({
-          channel, channelId, sessionId: activeSession?.id || requestId, requestId, interaction, replyCtx,
-          canWrite: isAdmin,
-          callback: async (action, _values, operatorId) => {
-            if (userId && operatorId && operatorId !== userId) return;
-            const selectedEntry = entries.find(e => e.name === action);
-            if (selectedEntry && !selectedEntry.isCurrent) {
-              const result = await this.handle(`/project ${action}`, channel, channelId, undefined, userId, threadId);
-              if (result) {
-                const adapter = this.adapters.get(channel);
-                adapter?.sendText(channelId, result, replyCtx);
-              }
-            }
-          },
-        });
-        if (cardSent) return null;
+        const cardResult = await this.sendCommandCard({ channel, channelId, interaction, replyCtx, canWrite: isAdmin });
+        if (cardResult === null) return null;
+        return cardResult;
       }
 
       // 降级：文本列表
@@ -2812,45 +2791,34 @@ export class CommandHandler {
           return { uuid, fullUuid: c.uuid, time, message };
         });
 
-        // 尝试发送 ActionInteraction 卡片
+        // 尝试发送 CommandCard 卡片
         if (this.interactionRouter && cliDisplayItems.length > 0) {
-          const requestId = `slist-cli-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
-          const buttons: ActionInteraction['buttons'] = cliDisplayItems.map(item => ({
-            key: item.uuid,
-            label: item.uuid,
-            style: 'default' as const,
-          }));
-
           const bodyLines = cliDisplayItems.map(item =>
             `• ${item.time}  (${item.uuid})  "${item.message}"`
           );
 
           const interaction: InteractionRequest = {
             type: 'interaction',
-            id: requestId,
+            id: `slist-cli-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`,
             channelId,
             sessionId: session.id,
+            initiatorId: userId,
             kind: {
-              kind: 'action',
+              kind: 'command-card',
               title: `📋 ${path.basename(session.projectPath)} CLI 会话 (${cliDisplayItems.length})`,
               body: bodyLines.join('\n'),
-              buttons,
+              buttons: cliDisplayItems.map(item => ({
+                label: item.uuid,
+                command: `/session ${item.uuid}`,
+                style: 'default' as 'primary' | 'default',
+              })),
             },
           };
 
           const replyCtx = this.getReplyContext(session);
-          const cardSent = await this.sendInteractionCard({
-            channel, channelId, sessionId: session.id, requestId, interaction, replyCtx,
-            callback: async (action, _values, operatorId) => {
-              if (userId && operatorId && operatorId !== userId) return;
-              const result = await this.handle(`/session ${action}`, channel, channelId, undefined, userId, threadId);
-              if (result) {
-                const adapter = this.adapters.get(channel);
-                adapter?.sendText(channelId, result, replyCtx);
-              }
-            },
-          });
-          if (cardSent) return null;
+          const cardResult = await this.sendCommandCard({ channel, channelId, interaction, replyCtx });
+          if (cardResult === null) return null;
+          return cardResult;
         }
 
         // 降级：文本列表
@@ -2912,18 +2880,8 @@ export class CommandHandler {
         displaySessions.push({ session: s, index: displayIndex, isActive, name, status, idleTime, fileMissing });
       }
 
-      // 尝试发送 ActionInteraction 卡片（每个会话一个按钮，一键切换）
+      // 尝试发送 CommandCard 卡片（每个会话一个按钮，一键切换）
       if (this.interactionRouter && displaySessions.length >= 1) {
-        const requestId = `slist-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
-        const buttons: ActionInteraction['buttons'] = displaySessions.map(ds => {
-          const shortId = ds.session.agentSessionId ? ds.session.agentSessionId.substring(0, 8) : ds.name;
-          return {
-            key: String(ds.index),
-            label: ds.isActive ? `✓ ${ds.index}. ${shortId}` : `${ds.index}. ${shortId}`,
-            style: ds.isActive ? 'primary' as const : 'default' as const,
-          };
-        });
-
         const bodyLines = displaySessions.map(ds => {
           const prefix = ds.isActive ? '✓' : '•';
           const threadTag = ds.session.threadId ? '[话题] ' : '';
@@ -2934,33 +2892,30 @@ export class CommandHandler {
 
         const interaction: InteractionRequest = {
           type: 'interaction',
-          id: requestId,
+          id: `slist-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`,
           channelId,
           sessionId: session.id,
+          initiatorId: userId,
           kind: {
-            kind: 'action',
+            kind: 'command-card',
             title: `📋 ${path.basename(session.projectPath)} 会话列表`,
             body: bodyLines.join('\n'),
-            buttons,
+            buttons: displaySessions.map(ds => {
+              const shortId = ds.session.agentSessionId ? ds.session.agentSessionId.substring(0, 8) : ds.name;
+              return {
+                label: ds.isActive ? `✓ ${ds.index}. ${shortId}` : `${ds.index}. ${shortId}`,
+                command: `/session ${ds.index}`,
+                style: (ds.isActive ? 'primary' : 'default') as 'primary' | 'default',
+                disabled: ds.isActive,
+              };
+            }),
           },
         };
 
         const replyCtx = this.getReplyContext(session);
-        const cardSent = await this.sendInteractionCard({
-          channel, channelId, sessionId: session.id, requestId, interaction, replyCtx,
-          callback: async (action, _values, operatorId) => {
-            if (userId && operatorId && operatorId !== userId) return;
-            const target = displaySessions.find(ds => String(ds.index) === action);
-            if (target && !target.isActive) {
-              const result = await this.handle(`/session ${action}`, channel, channelId, undefined, userId, threadId);
-              if (result) {
-                const adapter = this.adapters.get(channel);
-                adapter?.sendText(channelId, result, replyCtx);
-              }
-            }
-          },
-        });
-        if (cardSent) return null;
+        const cardResult = await this.sendCommandCard({ channel, channelId, interaction, replyCtx });
+        if (cardResult === null) return null;
+        return cardResult;
       }
 
       // 降级：文本列表

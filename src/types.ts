@@ -281,6 +281,22 @@ export interface InboundMessage {
 
 // ── 交互协议类型（渠道无关） ──
 
+export interface CommandCard {
+  kind: 'command-card';
+  title: string;
+  body?: string;
+  buttons: Array<{
+    label: string;
+    command: string;
+    style?: 'primary' | 'danger' | 'default';
+    disabled?: boolean;
+    confirm?: {
+      title: string;
+      body: string;
+    };
+  }>;
+}
+
 export interface ActionInteraction {
   kind: 'action';
   title: string;
@@ -296,15 +312,24 @@ export interface ActionInteraction {
   }>;
 }
 
-export type InteractionKind = ActionInteraction;
+export type InteractionKind = CommandCard | ActionInteraction;
+
+export interface InteractionFallback {
+  command: string;
+  buttonArgMap?: Record<string, string>;
+  acceptFreeText?: boolean;
+  freeTextHint?: string;
+}
 
 export interface InteractionRequest {
   type: 'interaction';
   id: string;
   channelId: string;
   sessionId: string;
+  initiatorId?: string;
   expiresAt?: number;
   kind: InteractionKind;
+  fallback?: InteractionFallback;
 }
 
 export interface InteractionResponse {
