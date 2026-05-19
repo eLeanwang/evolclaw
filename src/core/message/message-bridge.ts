@@ -88,7 +88,7 @@ export class MessageBridge {
         }
         if (await this.handleCommand(cmdContent, channelName, msg.channelId,
           (text) => sendReply(msg.channelId, text, msg.replyContext),
-          msg.peerId, msg.threadId, msg.chatType
+          msg.peerId, msg.threadId, msg.chatType, msg.source
         )) return;
 
         // 3. session 解析（使用 Channel 层填充的 chatType）
@@ -256,13 +256,13 @@ export class MessageBridge {
   private async handleCommand(
     content: string, channel: string, channelId: string,
     sendReply: (text: string) => Promise<void>,
-    userId?: string, threadId?: string, chatType?: string
+    userId?: string, threadId?: string, chatType?: string, source?: 'user' | 'card-trigger'
   ): Promise<boolean> {
     if (!this.cmdHandler.isCommand(content)) return false;
-    logger.info(`[${channel}] ${channelId}: ${content}`);
+    logger.info(`[${channel}] ${channelId}: ${content}${source === 'card-trigger' ? ' [card]' : ''}`);
     const cmdResult = await this.cmdHandler.handle(content, channel, channelId,
       (_cid, text, opts) => sendReply(text),
-      userId, threadId, chatType);
+      userId, threadId, chatType, source);
     logger.debug(`[MessageBridge] handleCommand: result type=${typeof cmdResult}, value=${cmdResult === null ? 'null' : cmdResult === undefined ? 'undefined' : 'string'}`);
     if (cmdResult === undefined) return false;
     if (cmdResult) {

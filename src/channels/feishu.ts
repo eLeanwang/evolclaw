@@ -24,6 +24,7 @@ export interface MessageHandlerOptions {
   mentions?: Array<{ userId: string; name?: string; key?: string }>;
   threadId?: string;
   rootId?: string;
+  source?: 'user' | 'card-trigger';
 }
 
 export interface MessageHandler {
@@ -394,6 +395,7 @@ export class FeishuChannel {
                   chatType,
                   peerId: operatorId,
                   messageId: `card-trigger-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                  source: 'card-trigger',
                 });
               }
 
@@ -1397,13 +1399,12 @@ export class FeishuChannelPlugin implements ChannelPlugin {
         registerBridge(bridge: MessageBridge, channelType: string) {
           bridge.register(
             adapter.channelName,
-            (handler) => channel.onMessage(async ({ channelId: chatId, content, images, peerId, peerName, messageId, mentions, threadId, rootId, chatType }: any) => {
+            (handler) => channel.onMessage(async ({ channelId: chatId, content, images, peerId, peerName, messageId, mentions, threadId, rootId, chatType, source }: any) => {
               await handler({
                 channel: adapter.channelName, channelType, channelId: chatId, content, images, chatType,
                 peerId: peerId || '', peerName, messageId, mentions, threadId,
-                // 只在话题场景（threadId 有值）才设置 replyContext；
-                // 纯引用回复（rootId 有值但无 threadId）不设置，避免所有回复都带引用头
                 replyContext: threadId ? { replyToMessageId: rootId ?? threadId, replyInThread: true } : undefined,
+                source,
               });
             }),
             (channelId, text, replyContext) => channel.sendMessage(channelId, text, {

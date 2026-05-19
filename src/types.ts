@@ -278,6 +278,7 @@ export interface InboundMessage {
   images?: Array<{ data: string; mimeType: string }>;
   mentions?: Array<{ userId: string; name?: string; key?: string }>;
   replyContext?: ReplyContext;       // Channel 预构建的回复上下文（渠道无关）
+  source?: 'user' | 'card-trigger';  // 消息来源：用户输入 or 卡片按钮触发
 }
 
 // ── 交互协议类型（渠道无关） ──

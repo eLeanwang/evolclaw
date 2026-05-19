@@ -856,6 +856,19 @@ export class CommandHandler {
   /**
    * 主命令处理入口
    */
+  // CommandCard 带参命令 → 无参版（列表卡片）的映射
+  private static readonly CARD_REFRESH_MAP: Record<string, string> = {
+    '/model': '/model',
+    '/setmodel': '/model',
+    '/effort': '/effort',
+    '/agent': '/agent',
+    '/perm': '/perm',
+    '/project': '/plist',
+    '/p': '/plist',
+    '/session': '/slist',
+    '/s': '/slist',
+  };
+
   async handle(
     content: string,
     channel: string,
@@ -864,6 +877,32 @@ export class CommandHandler {
     userId?: string,
     threadId?: string,
     chatType?: string,
+    source?: 'user' | 'card-trigger',
+  ): Promise<string | null | undefined> {
+    const result = await this._handleInternal(content, channel, channelId, sendMessage, userId, threadId, chatType, source);
+
+    // card-trigger 重发：带参命令执行成功后，自动调用无参版重发卡片
+    if (source === 'card-trigger' && result && typeof result === 'string' && result.startsWith('✓')) {
+      const cmdBase = content.split(' ')[0];
+      const refreshCmd = CommandHandler.CARD_REFRESH_MAP[cmdBase];
+      if (refreshCmd) {
+        // 递归调用无参版（不带 source，避免无限循环）
+        await this._handleInternal(refreshCmd, channel, channelId, sendMessage, userId, threadId, chatType);
+      }
+    }
+
+    return result;
+  }
+
+  private async _handleInternal(
+    content: string,
+    channel: string,
+    channelId: string,
+    sendMessage?: (channelId: string, text: string, opts?: { replyToMessageId?: string; replyInThread?: boolean }) => Promise<void>,
+    userId?: string,
+    threadId?: string,
+    chatType?: string,
+    source?: 'user' | 'card-trigger',
   ): Promise<string | null | undefined> {
     // 解析身份（按实例名）
     const identity = this.sessionManager.resolveIdentity(channel, userId);
