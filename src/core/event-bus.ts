@@ -10,7 +10,7 @@ export type SystemEvent =
 export type ChannelEvent =
   | { type: 'channel:connected'; channel: string; channelName?: string; timestamp?: number }
   | { type: 'channel:disconnected'; channel: string; channelName?: string; reason?: string }
-  | { type: 'channel:health'; channel: string; channelName?: string; status: 'auth_error'; message: string; timestamp?: number }
+  | { type: 'channel:error'; channel: string; channelName?: string; status: 'auth_error'; message: string; timestamp?: number }
   | { type: 'channel:owner-bound'; channel: string; channelName?: string; userId: string };
 
 // ── 会话事件 ──
@@ -35,11 +35,14 @@ export type ProjectEvent =
 // ── 消息事件 ──
 export type MessageEvent =
   | { type: 'message:received'; sessionId: string; channel: string; channelName?: string; channelId: string; content: string; userId?: string; agentName?: string; timestamp?: number }
-  | { type: 'message:processing'; sessionId: string }
-  | { type: 'message:text'; sessionId: string; text: string; isFinal: boolean }
-  | { type: 'message:completed'; sessionId: string; channel: string; channelName?: string; channelId: string; finalText?: string; durationMs?: number; terminalReason?: string; agentName?: string; timestamp?: number }
-  | { type: 'message:error'; sessionId: string; error: string; errorType: string; terminalReason?: string; agentName?: string }
-  | { type: 'message:interrupted'; sessionId: string; reason?: string; agentName?: string };
+  | { type: 'message:text'; sessionId: string; text: string; isFinal: boolean };
+
+// ── 任务事件（从 message:* 拆出，语义为任务生命周期） ──
+export type TaskBusEvent =
+  | { type: 'task:started'; sessionId: string }
+  | { type: 'task:completed'; sessionId: string; channel: string; channelName?: string; channelId: string; finalText?: string; durationMs?: number; terminalReason?: string; agentName?: string; timestamp?: number }
+  | { type: 'task:error'; sessionId: string; error: string; errorType: string; terminalReason?: string; agentName?: string }
+  | { type: 'task:interrupted'; sessionId: string; reason?: string; agentName?: string };
 
 // ── 工具事件 ──
 export type ToolEvent =
@@ -52,15 +55,15 @@ export type PermissionEvent =
   | { type: 'permission:resolved'; sessionId: string; requestId: string; approved: boolean }
   | { type: 'permission:timeout'; sessionId: string; requestId: string };
 
-// ── Agent 运行事件 ──
-export type AgentEvent =
-  | { type: 'agent:compact-start'; sessionId: string }
-  | { type: 'agent:compact-complete'; sessionId: string; preTokens: number }
-  | { type: 'agent:model-changed'; sessionId?: string; model?: string; timestamp?: number }
-  | { type: 'agent:idle-timeout'; sessionId: string; idleSec: number }
-  | { type: 'agent:file-sent'; sessionId: string; filePath: string; channel: string; channelName?: string }
-  | { type: 'agent:state-changed'; sessionId: string; state: string }
-  | { type: 'agent:status'; sessionId: string; subtype: string; message: string; timestamp?: number };
+// ── Runner 运行事件（AI 后端执行流） ──
+export type RunnerBusEvent =
+  | { type: 'runner:compact-start'; sessionId: string }
+  | { type: 'runner:compact-complete'; sessionId: string; preTokens: number }
+  | { type: 'runner:model-changed'; sessionId?: string; model?: string; timestamp?: number }
+  | { type: 'runner:idle-timeout'; sessionId: string; idleSec: number }
+  | { type: 'runner:file-sent'; sessionId: string; filePath: string; channel: string; channelName?: string }
+  | { type: 'runner:state-changed'; sessionId: string; state: string }
+  | { type: 'runner:status'; sessionId: string; subtype: string; message: string; timestamp?: number };
 
 // ── 自愈事件 ──
 export type SelfHealEvent =
@@ -78,9 +81,10 @@ export type GatewayEvent =
   | SessionEvent
   | ProjectEvent
   | MessageEvent
+  | TaskBusEvent
   | ToolEvent
   | PermissionEvent
-  | AgentEvent
+  | RunnerBusEvent
   | SelfHealEvent
   | ConfigEvent;
 

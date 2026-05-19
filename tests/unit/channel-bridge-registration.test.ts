@@ -277,7 +277,7 @@ describe('AUN registerHooks', () => {
       if (channel.setOnChannelDown) {
         channel.setOnChannelDown(() => {
           (ctx.eventBus as any).publish({
-            type: 'channel:health', channel: 'aun', channelName: adapter.channelName,
+            type: 'channel:error', channel: 'aun', channelName: adapter.channelName,
             status: 'auth_error',
             message: `AUN ${adapter.channelName} disconnected`,
             timestamp: Date.now(),
@@ -310,7 +310,7 @@ describe('AUN registerHooks', () => {
     cb();
 
     expect(ctx.eventBus.publish).toHaveBeenCalledWith(expect.objectContaining({
-      type: 'channel:health', channel: 'aun', channelName: 'aun-bot', status: 'auth_error',
+      type: 'channel:error', channel: 'aun', channelName: 'aun-bot', status: 'auth_error',
     }));
   });
 

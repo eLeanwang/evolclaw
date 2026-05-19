@@ -119,7 +119,7 @@ export class MessageQueue {
           // 单聊：保留中断行为
           logger.debug(`[Queue] ${queueKey} is processing, triggering interrupt`);
           this.eventBus?.publish({
-            type: 'message:interrupted',
+            type: 'task:interrupted',
             sessionId: sessionKey,
             reason: 'new_message',
             agentName: this.processingAgent.get(queueKey),
@@ -317,7 +317,7 @@ export class MessageQueue {
     const sessionKey = this.currentSessionKey.split('::')[0];
     logger.info(`[Queue] Recalled active message ${messageId}, interrupting session ${sessionKey}`);
     this.eventBus?.publish({
-      type: 'message:interrupted',
+      type: 'task:interrupted',
       sessionId: sessionKey,
       reason: 'recalled',
       agentName: this.processingAgent.get(this.currentSessionKey),

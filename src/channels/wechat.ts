@@ -6,6 +6,7 @@ import { logger } from '../utils/logger.js';
 import { sanitizeFileName, saveToUploads, safeFetch } from '../utils/media-cache.js';
 import { markdownToPlainText } from '../utils/rich-content-renderer.js';
 import type { EventBus } from '../core/event-bus.js';
+import { defaultSend } from '../core/message/default-send.js';
 
 // ── Config ──────────────────────────────────────────────────────────────────
 
@@ -483,7 +484,7 @@ export class WechatChannel {
             const authMsg = `⚠️ 微信 token 已过期，通道暂停 ${pauseMin} 分钟后自动重试。\n如需立即恢复，请运行: evolclaw init wechat`;
             if (this.eventBus) {
               this.eventBus.publish({
-                type: 'channel:health',
+                type: 'channel:error',
                 channel: 'wechat',
                 status: 'auth_error',
                 message: authMsg,
@@ -876,6 +877,8 @@ export class WechatChannelPlugin implements ChannelPlugin {
 
       const adapter = {
         channelName: inst.name,
+        capabilities: { file: false, image: false, interaction: false, markdown: false, thought: false, status: true },
+        send: (envelope: any, payload: any) => defaultSend(adapter, envelope, payload),
         sendText: (id: string, text: string) => channel.sendMessage(id, text),
         sendFile: (id: string, filePath: string) => channel.sendFile(id, filePath),
       };

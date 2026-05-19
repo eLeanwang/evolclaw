@@ -4,8 +4,7 @@ import crypto from 'crypto';
 import { type AgentRunnerFull, hasCompact, type AgentEvent } from '../../agents/claude-runner.js';
 import { SessionManager } from '../session/session-manager.js';
 import { appendMessageLog, buildOutboundEntry } from '../session/message-log.js';
-import { StreamFlusher } from './stream-flusher.js';
-import { ThoughtEmitter } from './thought-emitter.js';
+import { IMRenderer } from './im-renderer.js';
 import { MessageCache } from './message-cache.js';
 import type { MessageQueue } from './message-queue.js';
 import { StreamIdleMonitor } from './stream-idle-monitor.js';
@@ -26,7 +25,7 @@ import type { InteractionRouter } from '../interaction-router.js';
 export class MessageProcessor {
   private channels = new Map<string, { adapter: ChannelAdapter; options?: ChannelOptions; policy: ChannelPolicy }>();
   private channelTypeMap = new Map<string, string>();  // channelType → channelName（首个实例）
-  private currentFlusher?: StreamFlusher;
+  private currentRenderer?: IMRenderer;
   private shouldSuppressActivities = false;
   private agentMap: Map<string, AgentRunnerFull>;
   private primaryRunnerKey: string;
@@ -85,7 +84,7 @@ export class MessageProcessor {
     }
 
     // 监听中断事件，标记被中断的 session
-    this.eventBus.subscribe('message:interrupted', (event) => {
+    this.eventBus.subscribe('task:interrupted', (event) => {
       if ('sessionId' in event && event.sessionId) {
         this.interruptedSessions.set(event.sessionId as string, (event as any).reason || 'unknown');
       }
@@ -145,10 +144,10 @@ export class MessageProcessor {
    */
   handleCompactStart(sessionId?: string): void {
     if (sessionId) {
-      this.eventBus.publish({ type: 'agent:compact-start', sessionId });
+      this.eventBus.publish({ type: 'runner:compact-start', sessionId });
     }
-    if (this.currentFlusher && !this.shouldSuppressActivities) {
-      this.currentFlusher.addActivity('\u23f3 会话压缩中...');
+    if (this.currentRenderer && !this.shouldSuppressActivities) {
+      this.currentRenderer.addActivity('\u23f3 会话压缩中...');
     }
   }
 
@@ -243,7 +242,7 @@ export class MessageProcessor {
         while (result) {
           if (result.action === 'kill') {
             logger.warn(`[MessageProcessor] Idle monitor: kill after ${result.idleSec}s idle, stream: ${streamKey}`);
-            this.eventBus.publish({ type: 'agent:idle-timeout', sessionId: streamKey, idleSec: result.idleSec });
+            this.eventBus.publish({ type: 'runner:idle-timeout', sessionId: streamKey, idleSec: result.idleSec });
             // 后台任务也需要中断（释放资源），但不发送通知
             if (channelInfo && !isBackground) {
               const msg = showIdleMonitor
@@ -358,8 +357,6 @@ export class MessageProcessor {
       };
     };
 
-    // Proactive 模式可观测：ThoughtEmitter 声明在 try 外，catch 块也能透传错误为 thought
-    let thoughtEmitter: ThoughtEmitter | null = null;
 
     try {
       const isBackground = await this.isBackgroundSession(session, message.channel, message.channelId);
@@ -394,7 +391,7 @@ export class MessageProcessor {
       logger.info(`[MessageProcessor] session=${session.id} task=${taskId} peer=${peerLabel} chatType=${session.chatType} sessionMode=${session.sessionMode} agentId=${session.agentId} msgChatType=${message.chatType ?? 'n/a'}`);
 
       // 记录开始处理
-      this.eventBus.publish({ type: 'message:processing', sessionId: session.id });
+      this.eventBus.publish({ type: 'task:started', sessionId: session.id });
       adapter.sendProcessingStatus?.(message.channelId, 'start', session.id, taskId, taskReplyContext());
 
       logger.message({
@@ -406,23 +403,28 @@ export class MessageProcessor {
 
       const startTime = Date.now();
 
-      // 创建 StreamFlusher，传入文件标记模式用于自动过滤
-      // 使用动态判断，确保切换项目后不会继续输出
+      // 创建 IMRenderer（统一 interactive/proactive 两条路径）
       let firstReply = true;
       const isProactive = session.sessionMode === 'proactive';
-      const flusher = new StreamFlusher(
-        async (text, isFinal, hasText) => {
+      const renderer = new IMRenderer({
+        adapter,
+        channelId: message.channelId,
+        taskId,
+        chatmode: isProactive ? 'proactive' : 'interactive',
+        replyContext: this.getReplyContext(message),
+        flushDelay: (options?.flushDelay ?? this.agentRegistry?.resolveByChannel(channelKey)?.config?.flush_delay ?? 3) * 1000,
+        suppressActivities: shouldSuppress(),
+        fileMarkerPattern: options?.fileMarkerPattern,
+        diagEnabled: this.globalSettings.debug?.flusherDiag,
+        sendText: async (text, isFinal, hasText) => {
           const isCurrentlyBackground = await this.isBackgroundSession(session, message.channel, message.channelId);
-
           if (!isCurrentlyBackground) {
             const opts: ReplyContext = {};
             if (isFinal) opts.title = '\u2713 \u6700\u7ec8\u56de\u590d:';
-            // replyContext 跟着任务走：优先用当前 message 的，兜底用 session 的（话题会话创建时写入）
             const replyCtx = this.getReplyContext(message);
             if (replyCtx) {
               Object.assign(opts, replyCtx);
             } else if (firstReply && message.messageId) {
-              // 主会话：首条消息引用回复用户原消息（只在含真实文字时消费）
               if (hasText) {
                 opts.replyToMessageId = message.messageId;
                 firstReply = false;
@@ -431,31 +433,13 @@ export class MessageProcessor {
             opts.metadata = { ...(opts.metadata ?? {}), taskId, chatmode };
             await adapter.sendText(message.channelId, text, opts);
           }
-          // 后台任务：静默，不发送输出
         },
-        (options?.flushDelay ?? this.agentRegistry?.resolveByChannel(channelKey)?.config?.flush_delay ?? 3) * 1000,
-        options?.fileMarkerPattern,
-        this.globalSettings.debug?.flusherDiag,
-        isProactive
-      );
+      });
 
-      // 保存当前 flusher，用于 compact 事件
-      this.currentFlusher = flusher;
+      this.currentRenderer = renderer;
 
       if (isProactive) {
-        logger.info(`[MessageProcessor] proactive mode: flusher silent, outputs via thought.put task=${taskId}`);
-      }
-
-      // Proactive 模式可观测：创建 ThoughtEmitter，将静默的流式事件转发为 thought
-      // selector: context = { type: 'task', id: taskId }
-      if (isProactive && adapter.putThought) {
-        thoughtEmitter = new ThoughtEmitter(
-          adapter,
-          message.channelId,
-          taskId,
-          chatmode,
-          this.getReplyContext(message)
-        );
+        logger.info(`[MessageProcessor] proactive mode: outputs via thought.put task=${taskId}`);
       }
 
       // 调用 AgentRunner（含上下文过长自动 compact 重试）
@@ -607,10 +591,9 @@ export class MessageProcessor {
             streamResult = await this.processEventStream(
               stream,
               session,
-              flusher,
+              renderer,
               resetTimer,
-              shouldSuppress,
-              thoughtEmitter
+              shouldSuppress
             );
             break; // 成功，跳出重试循环
           } catch (retryError) {
@@ -620,8 +603,8 @@ export class MessageProcessor {
             if (attempt < MAX_RETRIES && isRetryableError(retryError)) {
               const delay = Math.pow(2, attempt) * 1000; // 2s, 4s
               logger.warn(`[MessageProcessor] Retryable error (attempt ${attempt}/${MAX_RETRIES}), retrying in ${delay}ms:`, retryError);
-              flusher.addActivity(`⚠️ API 暂时不可用，${delay / 1000}秒后重试 (${attempt}/${MAX_RETRIES})...`);
-              await flusher.flush();
+              renderer.addActivity(`⚠️ API 暂时不可用，${delay / 1000}秒后重试 (${attempt}/${MAX_RETRIES})...`);
+              await renderer.flush();
               await new Promise(resolve => setTimeout(resolve, delay));
               continue;
             }
@@ -631,8 +614,8 @@ export class MessageProcessor {
       } catch (error) {
         if (classifyError(error) === ErrorType.CONTEXT_TOO_LONG && session.agentSessionId && hasCompact(agent)) {
           // 尝试 compact 压缩会话
-          flusher.addActivity('\u26a0\ufe0f 上下文过长，正在压缩会话...');
-          await flusher.flush();
+          renderer.addActivity('\u26a0\ufe0f 上下文过长，正在压缩会话...');
+          await renderer.flush();
 
           const compacted = await agent.compact(
             session.id, session.agentSessionId, absoluteProjectPath
@@ -640,7 +623,7 @@ export class MessageProcessor {
 
           if (compacted) {
             // compact 成功，带 resume 重试（不重复原始消息，让 Agent 继续未完成的工作）
-            flusher.addActivity('\u2705 压缩完成，正在重试...');
+            renderer.addActivity('\u2705 压缩完成，正在重试...');
             const retryStream = await agent.runQuery(
               session.id,
               '上下文已自动压缩，请继续之前未完成的任务。',
@@ -655,10 +638,9 @@ export class MessageProcessor {
             streamResult = await this.processEventStream(
               retryStream,
               session,
-              flusher,
+              renderer,
               resetTimer,
-              shouldSuppress,
-              thoughtEmitter
+              shouldSuppress
             );
           } else {
             throw new Error('CONTEXT_COMPACT_FAILED');
@@ -670,12 +652,12 @@ export class MessageProcessor {
 
       // 处理文件标记 - 支持 [SEND_FILE:path] 和 [SEND_FILE:channel:path]
       // 注意：始终扫描全部文本（含中间轮），因为文件标记可能出现在任意轮次
-      // suppressed 模式下 flusher 只有最后一轮文本，需要用 streamResult.fullText（SDK 全文）兜底
+      // suppressed 模式下 renderer 只有最后一轮文本，需要用 streamResult.fullText（SDK 全文）兜底
       // proactive 模式：agent 主动调用 ctl file 发送文件，跳过标记处理
       if (!isProactive) {
         const FILE_MARKER_RE = /\[SEND_FILE:(?:(\w+):)?([^\]]+)\]/g;
         const markerPattern = options?.fileMarkerPattern ?? FILE_MARKER_RE;
-        const flusherText = flusher.getFinalText();
+        const flusherText = renderer.getFinalText();
         const fullText = flusherText.length >= (streamResult.fullText?.length || 0) ? flusherText : streamResult.fullText;
         const fileMatches = [...fullText.matchAll(markerPattern)];
 
@@ -747,7 +729,7 @@ export class MessageProcessor {
         logger.info(`[${adapter.channelName}] Sending file via ${targetInfo.adapter.channelName}: ${resolvedPath}`);
         try {
           await targetInfo.adapter.sendFile(targetChannelId, resolvedPath, taskReplyContext());
-          this.eventBus.publish({ type: 'agent:file-sent', sessionId: session.id, filePath: resolvedPath, channel: targetInfo.adapter.channelName });
+          this.eventBus.publish({ type: 'runner:file-sent', sessionId: session.id, filePath: resolvedPath, channel: targetInfo.adapter.channelName });
           if (isCrossChannel) {
             await adapter.sendText(message.channelId, `\ud83d\udcce 文件已通过 ${targetLabel} 发送`, taskReplyContext());
           }
@@ -758,38 +740,38 @@ export class MessageProcessor {
       }
       }  // end of !isProactive
 
-      // 最终回复文本添加到 flusher（统一在流结束后处理，避免多 complete 事件重复发送）
+      // 最终回复文本添加到 renderer（统一在流结束后处理，避免多 complete 事件重复发送）
       // suppressed 模式：中间流式文本未推送，使用最后一轮回复（回退到全文）
       // 非 suppressed 且无流式文本：同上
       // 非 suppressed 且有流式文本：已经逐步推送过了，不重复添加
-      //   但如果 flusher 既未发送过内容也没有 pending 内容（如 text 事件全为空），仍需兜底
+      //   但如果 renderer 既未发送过内容也没有 pending 内容（如 text 事件全为空），仍需兜底
       const finalReplyText = streamResult.lastReplyText || streamResult.fullText;
 
       // 识别 Claude SDK 本地预处理兜底（如 "Unknown skill: xxx"）：
       // 特征：无流式 text + complete.result 匹配已知模式
       // 这类输出不是 agent 的回复意图，而是 SDK 本地拦截到的"未知斜杠命令"提示。
-      // Proactive 模式下 flusher silent，需要兜底发出以告知用户，否则用户完全无反馈。
+      // Proactive 模式下 renderer silent，需要兜底发出以告知用户，否则用户完全无反馈。
       const isSdkFallbackMessage = !!finalReplyText
         && !streamResult.hasReceivedText
         && /^Unknown skill:\s+\S+/i.test(finalReplyText.trim());
 
       if (finalReplyText) {
         if (isProactive && isSdkFallbackMessage) {
-          // Proactive 模式 + SDK 本地兜底：直接 sendText 绕过 silent flusher
+          // Proactive 模式 + SDK 本地兜底：直接 sendText 绕过 silent renderer
           const isCurrentlyBackground = await this.isBackgroundSession(session, message.channel, message.channelId);
           if (!isCurrentlyBackground) {
             await adapter.sendText(message.channelId, finalReplyText, capturedReplyContext);
             logger.info(`[MessageProcessor] proactive SDK fallback replied task=${taskId} text="${finalReplyText.slice(0, 60)}"`);
           }
         } else if (shouldSuppress()) {
-          flusher.addText(finalReplyText);
-        } else if (!streamResult.hasReceivedText || (!flusher.hasSentContent() && !flusher.hasContent())) {
-          flusher.addText(finalReplyText);
+          renderer.addText(finalReplyText);
+        } else if (!streamResult.hasReceivedText || (!renderer.hasSentContent() && !renderer.hasContent())) {
+          renderer.addText(finalReplyText);
         }
       }
 
       // Flush 剩余内容（文件标记已在 flush 时自动移除）
-      await flusher.flush(true);
+      await renderer.flush(true);
 
       // 清理 activeStreams（正常完成）
       agent.cleanupStream(streamKey);
@@ -815,7 +797,7 @@ export class MessageProcessor {
         adapter.sendProcessingStatus?.(message.channelId, 'error', session.id, taskId, taskReplyContext());
 
         this.eventBus.publish({
-          type: 'message:error',
+          type: 'task:error',
           sessionId: session.id,
           error: errorSummary,
           errorType,
@@ -847,7 +829,7 @@ export class MessageProcessor {
         await this.sessionManager.recordSuccess(session.id);
 
         this.eventBus.publish({
-          type: 'message:completed',
+          type: 'task:completed',
           sessionId: session.id,
           channel: message.channel,
           channelId: message.channelId,
@@ -933,7 +915,7 @@ export class MessageProcessor {
       const errorType = prefixErrorType(ERROR_PREFIX.INFRA, errType);
 
       this.eventBus.publish({
-        type: 'message:error',
+        type: 'task:error',
         sessionId: session.id,
         error: errorMsg,
         errorType,
@@ -955,13 +937,13 @@ export class MessageProcessor {
 
       // 发送用户友好的错误消息（SDK_TIMEOUT 已在 kill 级别发过提示，跳过）
       // 用户主动中断（新消息打断 或 /stop 命令）时静默，不发送错误提示
-      // processEventStream 已通过 flusher 发过错误时也跳过
+      // processEventStream 已通过 renderer 发过错误时也跳过
       if (error instanceof Error && error.message === 'SDK_TIMEOUT') {
         logger.info(`[MessageProcessor] SDK_TIMEOUT error, skip sending duplicate message`);
       } else if (isUserInterrupt) {
         logger.info(`[MessageProcessor] User interrupt by new_message, skip sending error message`);
       } else if ((error as any)?._errorAlreadySent) {
-        logger.info(`[MessageProcessor] Error already sent via flusher, skip sending duplicate message`);
+        logger.info(`[MessageProcessor] Error already sent via renderer, skip sending duplicate message`);
       } else {
         const userMessage = getErrorMessage(error, undefined);
         // 获取 session 用于话题回复（如果 resolveSession 已执行）
@@ -983,14 +965,6 @@ export class MessageProcessor {
         await adapter.sendText(message.channelId, userMessage, sendOpts);
 
         // Proactive 可观测：catch 块的基础设施错误也透传为 thought，保证按 task_id 聚合完整
-        if (thoughtEmitter) {
-          const thoughtErrorType: 'context_too_long' | 'auth' | 'network' | 'unknown' =
-            errType === ErrorType.CONTEXT_TOO_LONG ? 'context_too_long' :
-            errType === ErrorType.AUTH_ERROR ? 'auth' :
-            (errType === ErrorType.SDK_TIMEOUT || errType === ErrorType.STREAM_ERROR) ? 'network' :
-            'unknown';
-          thoughtEmitter.emit({ type: 'error', error: userMessage, errorType: thoughtErrorType }).catch(() => {});
-        }
       }
     }
   }
@@ -1035,10 +1009,9 @@ export class MessageProcessor {
   private async processEventStream(
     stream: AsyncIterable<AgentEvent>,
     session: Session,
-    flusher: StreamFlusher,
+    renderer: IMRenderer,
     resetTimer: (eventType?: string, toolName?: string) => void,
-    shouldSuppress: () => boolean,
-    thoughtEmitter?: ThoughtEmitter | null
+    shouldSuppress: () => boolean
   ): Promise<{ isError: boolean; subtype?: string; errors?: string[]; terminalReason?: string; lastReplyText: string; fullText: string; hasReceivedText: boolean }> {
     // Per-session agent name for stats bucketing
     const agentNameForStats = this.agentRegistry?.resolveByChannel(session.metadata?.channelName || session.channel)?.name ?? '<unknown>';
@@ -1081,10 +1054,8 @@ export class MessageProcessor {
         logger.info(`[MessageProcessor] Event: type=${event.type}${eventDetail}`);
       }
 
-      // Proactive 可观测：将事件实时透传为 thought（fire-and-forget）
-      if (thoughtEmitter) {
-        thoughtEmitter.emit(event).catch(() => {});
-      }
+      // IMRenderer 旁路：proactive 模式逐事件投影为 thought（fire-and-forget）
+      renderer.emit(event);
 
       // session_id 已在 AgentRunner.transformStream 中处理，此处仅记录
       if (event.type === 'session_id') {
@@ -1095,7 +1066,7 @@ export class MessageProcessor {
       // session 状态变更（idle/running/requires_action）
       if (event.type === 'state_changed') {
         logger.debug(`[MessageProcessor] Session state: ${event.state} for session: ${session.id}`);
-        this.eventBus.publish({ type: 'agent:state-changed', sessionId: session.id, state: event.state });
+        this.eventBus.publish({ type: 'runner:state-changed', sessionId: session.id, state: event.state });
         continue;
       }
 
@@ -1103,7 +1074,7 @@ export class MessageProcessor {
       if (event.type === 'status') {
         logger.debug(`[MessageProcessor] Agent status: ${event.subtype}: ${event.message}`);
         this.eventBus.publish({
-          type: 'agent:status',
+          type: 'runner:status',
           sessionId: session.id,
           subtype: event.subtype,
           message: event.message,
@@ -1122,15 +1093,15 @@ export class MessageProcessor {
           lastReplyText += event.text;
           this.eventBus.publish({ type: 'message:text', sessionId: session.id, text: event.text, isFinal: false });
           if (!shouldSuppress()) {
-            flusher.addText(event.text);
+            renderer.addText(event.text);
           }
         }
 
         // compact 完成
         if (event.type === 'compact') {
-          this.eventBus.publish({ type: 'agent:compact-complete', sessionId: session.id, preTokens: event.preTokens });
+          this.eventBus.publish({ type: 'runner:compact-complete', sessionId: session.id, preTokens: event.preTokens });
           if (!shouldSuppress()) {
-            flusher.addActivity(`\ud83d\udca1 会话压缩完成，继续执行...（压缩前 tokens: ${event.preTokens}）`);
+            renderer.addActivity(`\ud83d\udca1 会话压缩完成，继续执行...（压缩前 tokens: ${event.preTokens}）`);
           }
         }
 
@@ -1141,9 +1112,9 @@ export class MessageProcessor {
           const stats = [tools > 0 ? `${tools}\u6b21\u5de5\u5177\u8c03\u7528` : '', duration].filter(Boolean).join(', ');
 
           if (event.summary && !shouldSuppress()) {
-            flusher.addActivity(`\u23f3 \u5b50\u4efb\u52a1: ${event.summary}${stats ? ` (${stats})` : ''}`);
+            renderer.addActivity(`\u23f3 \u5b50\u4efb\u52a1: ${event.summary}${stats ? ` (${stats})` : ''}`);
           } else if (stats && !shouldSuppress()) {
-            flusher.addActivity(`\u23f3 \u5b50\u4efb\u52a1\u8fdb\u884c\u4e2d: ${stats}`);
+            renderer.addActivity(`\u23f3 \u5b50\u4efb\u52a1\u8fdb\u884c\u4e2d: ${stats}`);
           }
         }
 
@@ -1160,7 +1131,7 @@ export class MessageProcessor {
           });
           if (!shouldSuppress()) {
             const desc = summarizeToolInput(event.name, event.input || {});
-            flusher.addActivity(`\ud83d\udd27 ${event.name}${desc ? ': ' + desc : ''}`);
+            renderer.addActivity(`\ud83d\udd27 ${event.name}${desc ? ': ' + desc : ''}`);
           }
         }
 
@@ -1181,7 +1152,7 @@ export class MessageProcessor {
             let errorMsg = event.error || (typeof event.result === 'string' ? event.result : JSON.stringify(event.result)) || '\u6267\u884c\u5931\u8d25';
             // 移除 XML 风格的错误标签
             errorMsg = errorMsg.replace(/<tool_use_error>(.*?)<\/tool_use_error>/gs, '$1');
-            flusher.addActivity(`\u26a0\ufe0f ${event.name || '\u5de5\u5177'}: ${errorMsg}`);
+            renderer.addActivity(`\u26a0\ufe0f ${event.name || '\u5de5\u5177'}: ${errorMsg}`);
           }
         }
 
@@ -1191,7 +1162,7 @@ export class MessageProcessor {
 
           if (!hasErrorResult && !shouldSuppress()) {
             hasErrorResult = true;
-            flusher.addActivity(`\u274c ${event.error}`);
+            renderer.addActivity(`\u274c ${event.error}`);
           }
         }
 
@@ -1220,13 +1191,13 @@ export class MessageProcessor {
             const userFriendlyMessage = event.terminalReason
               ? getErrorMessage(null, event.terminalReason)
               : `\u274c ${errorSummary}`;
-            flusher.addActivity(userFriendlyMessage);
+            renderer.addActivity(userFriendlyMessage);
           }
 
           // 中间 complete：flush 掉已有 activities（不带 isFinal），让中间结果及时显示
           // 最终文本留给流结束后的统一 flush(true)
-          if (flusher.hasContent()) {
-            await flusher.flushActivitiesOnly();
+          if (renderer.hasContent()) {
+            await renderer.flushActivitiesOnly();
           }
         }
 
@@ -1264,7 +1235,7 @@ export class MessageProcessor {
         });
         // 后台任务完成也纳入统计
         this.eventBus.publish({
-          type: 'message:completed',
+          type: 'task:completed',
           sessionId: session.id,
           channel: session.channel,
           channelId: session.channelId,
@@ -1285,7 +1256,7 @@ export class MessageProcessor {
         });
         // 后台任务失败也纳入统计
         this.eventBus.publish({
-          type: 'message:error',
+          type: 'task:error',
           sessionId: session.id,
           error: event.errors?.join('; ') || '\u672a\u77e5\u9519\u8bef',
           errorType: bgErrorType,
@@ -1313,12 +1284,12 @@ export class MessageProcessor {
         logger.error('[MessageProcessor] Stream processing error:', error);
       }
       if (error instanceof Error && error.message.includes('process exited')) {
-        flusher.addActivity('\u274c Claude Code \u8fdb\u7a0b\u5f02\u5e38\u9000\u51fa\uff0c\u8bf7\u91cd\u8bd5');
+        renderer.addActivity('\u274c Claude Code \u8fdb\u7a0b\u5f02\u5e38\u9000\u51fa\uff0c\u8bf7\u91cd\u8bd5');
       }
       // Flush any pending error activities before re-throwing,
       // and mark the error so outer catch won't send a duplicate message
-      if (hasErrorResult || flusher.hasContent()) {
-        try { await flusher.flush(true); } catch {}
+      if (hasErrorResult || renderer.hasContent()) {
+        try { await renderer.flush(true); } catch {}
         if (error instanceof Error) {
           (error as any)._errorAlreadySent = true;
         }

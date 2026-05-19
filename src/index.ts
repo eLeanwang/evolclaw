@@ -500,8 +500,8 @@ async function main() {
 
   // 统一 channel:health 跨通道通知（仅 auth_error）
   // 按 (channelType, ownerId) 去重，避免同类型多实例重复通知
-  eventBus.subscribe('channel:health', (event) => {
-    if (event.type !== 'channel:health' || event.status !== 'auth_error') return;
+  eventBus.subscribe('channel:error', (event) => {
+    if (event.type !== 'channel:error' || event.status !== 'auth_error') return;
     const sourceChannelType = event.channel;
     const sourceChannelName = (event as any).channelName || sourceChannelType;
     const msg = event.message;

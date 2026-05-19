@@ -5,6 +5,7 @@ import type { ChannelPlugin, ChannelInstance } from '../core/channel-loader.js';
 import type { MessageBridge } from '../core/message/message-bridge.js';
 import type { Config, WecomChannelConfig } from '../types.js';
 import { normalizeChannelInstances, getChannelShowActivities } from '../utils/channel-helpers.js';
+import { defaultSend } from '../core/message/default-send.js';
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -565,6 +566,8 @@ export class WecomChannelPlugin implements ChannelPlugin {
 
       const adapter = {
         channelName: inst.name,
+        capabilities: { file: true, image: true, interaction: true, markdown: true, thought: false, status: false },
+        send: (envelope: any, payload: any) => defaultSend(adapter, envelope, payload),
         sendText: (id: string, text: string) => channel.sendMessage(id, text),
         sendFile: (id: string, filePath: string) => channel.sendFile(id, filePath),
         sendImage: (id: string, png: Buffer) => channel.sendImage(id, png),
