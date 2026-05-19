@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { isValidAid } from '../aun/aid/identity.js';
+import { isValidAid } from './identity.js';
 
 /**
  * `agents/<dirName>` 是否能被当作合法的 self-agent 目录：

@@ -4,7 +4,7 @@ import { type AgentRunnerFull, hasModelSwitcher, hasPermissionController } from 
 import { MessageCache } from './message/message-cache.js';
 import { MessageProcessor } from './message/message-processor.js';
 import { EventBus } from './event-bus.js';
-import type { StatsCollector } from '../utils/stats-collector.js';
+import type { StatsCollector } from '../utils/stats.js';
 import { PermissionGateway, type PermissionDecision } from './permission.js';
 import { InteractionRouter } from './interaction-router.js';
 import { MessageQueue } from './message/message-queue.js';

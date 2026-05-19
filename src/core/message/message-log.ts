@@ -1,5 +1,5 @@
 import path from 'path';
-import { appendJsonl, chatDirPath } from './session-fs-store.js';
+import { appendJsonl, chatDirPath } from '../session/session-fs-store.js';
 import { logger } from '../../utils/logger.js';
 
 export interface MessageLogEntry {

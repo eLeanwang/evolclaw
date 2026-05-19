@@ -1,7 +1,7 @@
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
-import { guessMime, formatSize } from '../../utils/mime.js';
+import { guessMime, formatSize } from '../../utils/media-cache.js';
 import type { ShortConnection } from '../rpc/index.js';
 import { inferPayloadType, isValidPayloadType, type PayloadFileType } from './payload-type.js';
 

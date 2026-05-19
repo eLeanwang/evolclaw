@@ -7,7 +7,7 @@
  */
 
 import type { Config } from '../types.js';
-import type { AgentPlugin, AgentInstance, AgentCallbacks } from '../core/agent-loader.js';
+import type { AgentPlugin, AgentInstance, AgentCallbacks } from '../core/baseagent-loader.js';
 import type { AgentEvent, AgentRunnerFull, ModelSwitcher, PermissionModeInfo } from './claude-runner.js';
 import { resolveOpenaiConfig } from './resolve.js';
 import { logger } from '../utils/logger.js';

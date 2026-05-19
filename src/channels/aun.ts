@@ -13,11 +13,11 @@ import { normalizeChannelInstances, getChannelShowActivities } from '../utils/ch
 import { resolvePaths, getPackageRoot } from '../paths.js';
 import { saveToUploads, sanitizeFileName } from '../utils/media-cache.js';
 import { appendAidEvent } from '../utils/instance-registry.js';
-import type { AidStatsCollector } from '../aun/stats.js';
+import type { AidStatsCollector } from '../utils/stats.js';
 import { loadAgent, saveAgent } from '../config-store.js';
 import { getProcessStartTime } from '../utils/process-introspect.js';
 import * as outbox from '../aun/outbox.js';
-import { guessMime, formatSize } from '../utils/mime.js';
+import { guessMime, formatSize } from '../utils/media-cache.js';
 
 /**
  * 构造 connect extra_info：自描述本进程身份。

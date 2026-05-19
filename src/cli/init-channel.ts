@@ -12,11 +12,11 @@ import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
 import { resolvePaths } from '../paths.js';
-import { normalizeChannelInstances } from './channel-helpers.js';
+import { normalizeChannelInstances } from '../utils/channel-helpers.js';
 import { selectInstance, type InstanceChoice } from './init.js';
-import { npmInstallGlobal, requireOptional } from './npm-ops.js';
+import { npmInstallGlobal, requireOptional } from '../utils/npm-ops.js';
 import { loadAllAgents, loadAgent } from '../config-store.js';
-import { agentChannelUpsert } from '../agent/index.js';
+import { agentChannelUpsert } from './agent.js';
 import type { ChannelInstance, AgentConfig } from '../types.js';
 import {
   AUN_CORE_SDK_PKG,

@@ -7,7 +7,7 @@ import { loadDefaults, loadAllAgents, loadAgent, saveAgent, ensureAgentDirSkelet
 import { ipcQuery } from '../ipc.js';
 import { CONFIG_SCHEMA_VERSION } from '../types.js';
 import type { AgentConfig, ChannelInstance } from '../types.js';
-import { isValidChannelName } from '../core/channel-key.js';
+import { isValidChannelName } from '../core/channel-loader.js';
 import { commandExists } from '../utils/cross-platform.js';
 
 // ==================== Types ====================

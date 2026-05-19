@@ -2,8 +2,8 @@ import fs from 'fs';
 import path from 'path';
 import readline from 'readline';
 import { resolvePaths, ensureDataDirs } from '../paths.js';
-import { commandExists } from './cross-platform.js';
-import { scanInstances } from './instance-registry.js';
+import { commandExists } from '../utils/cross-platform.js';
+import { scanInstances } from '../utils/instance-registry.js';
 
 // ==================== Helpers ====================
 
@@ -139,7 +139,7 @@ export async function cmdInit(options?: {
     // ── 5. 嵌套 agent new ──
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     console.log('下一步：创建 agent\n');
-    const { agentCreateInteractive } = await import('../agent/index.js');
+    const { agentCreateInteractive } = await import('./agent.js');
     const result = await agentCreateInteractive();
     if (!result.ok) {
       console.error(`❌ ${result.error}`);

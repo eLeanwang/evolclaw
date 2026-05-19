@@ -2,7 +2,7 @@ import path from 'path';
 import fs from 'fs';
 import { logger } from '../utils/logger.js';
 import { saveAgent } from '../config-store.js';
-import { formatChannelKey, tryParseChannelKey } from './channel-key.js';
+import { formatChannelKey, tryParseChannelKey } from './channel-loader.js';
 import { agentPersonalDir } from '../paths.js';
 import type {
   AgentConfig,

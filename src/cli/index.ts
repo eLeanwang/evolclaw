@@ -3,19 +3,19 @@ import path from 'path';
 import os from 'os';
 import { spawn, execFileSync, execFile } from 'child_process';
 import { promisify } from 'util';
-import { resolveRoot, resolvePaths, ensureDataDirs, getPackageRoot } from './paths.js';
-import { loadDefaults, loadAllAgents, mergeForAgent } from './config-store.js';
-import { resolveAnthropicConfig } from './agents/resolve.js';
-import { normalizeChannelInstances, channelTypes } from './utils/channel-helpers.js';
-import { migrateProject } from './utils/migrate-project.js';
+import { resolveRoot, resolvePaths, ensureDataDirs, getPackageRoot } from '../paths.js';
+import { loadDefaults, loadAllAgents, mergeForAgent } from '../config-store.js';
+import { resolveAnthropicConfig } from '../agents/resolve.js';
+import { normalizeChannelInstances, channelTypes } from '../utils/channel-helpers.js';
+import { migrateProject } from '../config-store.js';
 import readline from 'readline';
-import { cmdInit } from './utils/init.js';
-import { ipcQuery } from './ipc.js';
-import { cmdInitWechat, cmdInitFeishu, cmdInitDingtalk, cmdInitQQBot, cmdInitWecom } from './utils/init-channel.js';
-import * as platform from './utils/cross-platform.js';
-import { EventBus } from './core/event-bus.js';
-import { tryUpgrade, type UpgradeResult } from './utils/npm-ops.js';
-import { scanInstances, cleanupInstances, readAidLastActivity, writeRestartMonitor, removeRestartMonitor, isRestartMonitorWinner, findOrphanProcesses, killOrphans, type OrphanProcess } from './utils/instance-registry.js';
+import { cmdInit } from './init.js';
+import { ipcQuery } from '../ipc.js';
+import { cmdInitWechat, cmdInitFeishu, cmdInitDingtalk, cmdInitQQBot, cmdInitWecom } from './init-channel.js';
+import * as platform from '../utils/cross-platform.js';
+import { EventBus } from '../core/event-bus.js';
+import { tryUpgrade, type UpgradeResult } from '../utils/npm-ops.js';
+import { scanInstances, cleanupInstances, readAidLastActivity, writeRestartMonitor, removeRestartMonitor, isRestartMonitorWinner, findOrphanProcesses, killOrphans, type OrphanProcess } from '../utils/instance-registry.js';
 
 // Suppress Node.js ExperimentalWarning (e.g. SQLite) from cluttering CLI output
 process.removeAllListeners('warning');
@@ -214,7 +214,7 @@ async function cmdStart() {
   ensureDataDirs();
 
   // 旧配置自动迁移（evolclaw.json → 新结构）
-  const { autoMigrateIfNeeded } = await import('./config-store.js');
+  const { autoMigrateIfNeeded } = await import('../config-store.js');
   autoMigrateIfNeeded();
 
   // 检查至少有一个 self-agent
@@ -641,8 +641,8 @@ async function cmdStatus() {
     // Runtime statistics (read from sessions filesystem)
     if (fs.existsSync(p.sessionsDir)) {
       try {
-        const { scanChatDirs, scanMetaFiles, readJsonFile, readLastJsonlLine } = await import('./core/session/session-fs-store.js');
-        type SF = import('./core/session/session-fs-store.js').SessionFile;
+        const { scanChatDirs, scanMetaFiles, readJsonFile, readLastJsonlLine } = await import('../core/session/session-fs-store.js');
+        type SF = import('../core/session/session-fs-store.js').SessionFile;
 
         const chatDirs = scanChatDirs(p.sessionsDir);
 
@@ -711,8 +711,8 @@ async function cmdStatus() {
     console.log('');
     console.log('📦 Sessions & Projects:');
     try {
-      const { scanChatDirs, scanMetaFiles, readJsonFile, readLastJsonlLine } = await import('./core/session/session-fs-store.js');
-      type SF = import('./core/session/session-fs-store.js').SessionFile;
+      const { scanChatDirs, scanMetaFiles, readJsonFile, readLastJsonlLine } = await import('../core/session/session-fs-store.js');
+      type SF = import('../core/session/session-fs-store.js').SessionFile;
 
       const chatDirs = scanChatDirs(p.sessionsDir);
       let totalSessions = 0;
@@ -1392,7 +1392,7 @@ async function cmdWatchAid(): Promise<void> {
   const version = pkg.version;
 
   // Load AID names: first from local agent.md, then refresh from network
-  const { aidList, aidLookup } = await import('./aun/aid/index.js');
+  const { aidList, aidLookup } = await import('../aun/aid/index.js');
   const localAids = aidList();
   const aidNameMap = new Map<string, string>();
   const refreshedAids = new Set<string>();
@@ -2024,7 +2024,7 @@ async function invokeClaude(
 - stdout.log 可能是空的（进程秒退时 logger 输出不会到 stdout），一定要同时读 evolclaw-*.log 最新文件
 - 必须实际运行进程来复现错误：\`EVOLCLAW_HOME=${p.root} node dist/index.js 2>&1\`，观察输出和退出码
 - 检查是否有旧进程仍在运行：\`ps aux | grep 'node.*dist/index.js' | grep -v grep\`，旧进程可能占用端口或锁文件
-- 可以运行 \`EVOLCLAW_HOME=${p.root} node dist/cli.js diagnose\` 快速检查配置和数据库
+- 可以运行 \`EVOLCLAW_HOME=${p.root} node dist/cli/index.js diagnose\` 快速检查配置和数据库
 - 如果进程无任何输出就 exit(1)，说明是 process.exit(1) 被显式调用，搜索源码中所有 process.exit(1) 位置
 - 配置文件使用双 rename 原子写（foo.json → foo.json_ → foo.json__），崩溃时可从 foo.json_ 恢复
 
@@ -2034,7 +2034,7 @@ async function invokeClaude(
 3. 如果 ${selfHealLog} 存在，先阅读之前的修复记录，避免重复尝试已失败的方案
 4. 根据实际复现的错误修复代码
 5. 执行 npm run build 确认编译通过
-6. 验证修复：启动服务确认 ready.signal 已写入，然后执行 \`EVOLCLAW_HOME=${p.root} node dist/cli.js stop\` 优雅停止（restart-monitor 会负责最终启动）
+6. 验证修复：启动服务确认 ready.signal 已写入，然后执行 \`EVOLCLAW_HOME=${p.root} node dist/cli/index.js stop\` 优雅停止（restart-monitor 会负责最终启动）
 7. 将本次修复内容追加到 ${selfHealLog}，格式：
    ## 第 ${attempt} 次修复 - {时间}
    - 错误原因：...
@@ -2321,7 +2321,7 @@ async function cmdDiagnose() {
 
   // 4. 检查 Session 文件系统存储
   try {
-    const { SessionManager } = await import('./core/session/session-manager.js');
+    const { SessionManager } = await import('../core/session/session-manager.js');
     const eventBus = new EventBus();
     new SessionManager(p.sessionsDir, eventBus);
     console.log(`[diagnose] ✓ Session 存储初始化成功: ${p.sessionsDir}`);
@@ -2475,7 +2475,7 @@ Options:
     agentList, agentShow, agentCreateInteractive, agentCreateNonInteractive,
     agentSyncAids, agentReload, agentEnable, agentDisable,
     agentGet, agentSet, agentDelete, agentRename,
-  } = await import('./agent/index.js');
+  } = await import('./agent.js');
 
   // --- list ---
   if (!sub || sub === 'list') {
@@ -2838,7 +2838,7 @@ Options:
     return;
   }
 
-  const { aidList, aidCreate, aidShow, aidDelete, aidLookup, agentmdPut, agentmdGet, buildInitialAgentMd, isValidAid } = await import('./aun/aid/index.js');
+  const { aidList, aidCreate, aidShow, aidDelete, aidLookup, agentmdPut, agentmdGet, buildInitialAgentMd, isValidAid } = await import('../aun/aid/index.js');
 
   if (sub === 'list') {
     const aids = aidList(aunPath);
@@ -3069,7 +3069,7 @@ async function cmdRpc(args: string[]): Promise<void> {
   const aid = args[asIdx + 1];
   const paramsRaw = args[paramsIdx + 1];
 
-  const { isValidAid } = await import('./aun/aid/index.js');
+  const { isValidAid } = await import('../aun/aid/index.js');
   if (!isValidAid(aid)) {
     console.error(`❌ 无效 AID 格式: ${aid}`);
     process.exit(1);
@@ -3101,7 +3101,7 @@ async function cmdRpc(args: string[]): Promise<void> {
     }
   }
 
-  const { rpcCall, rpcBatch } = await import('./aun/rpc/index.js');
+  const { rpcCall, rpcBatch } = await import('../aun/rpc/index.js');
 
   if (calls.length === 1) {
     const result = await rpcCall(aid, calls[0].method, calls[0].params, { aunPath });
@@ -3150,13 +3150,13 @@ Commands:
     process.exit(1);
   }
 
-  const { isValidAid } = await import('./aun/aid/index.js');
+  const { isValidAid } = await import('../aun/aid/index.js');
   if (!isValidAid(aid)) {
     console.error(`❌ 无效 AID 格式: ${aid}`);
     process.exit(1);
   }
 
-  const { storageUpload, storageDownload, storageLs, storageRm, storageQuota } = await import('./aun/storage/index.js');
+  const { storageUpload, storageDownload, storageLs, storageRm, storageQuota } = await import('../aun/storage/index.js');
 
   if (sub === 'upload') {
     const localFile = args[2];
@@ -3309,13 +3309,13 @@ Options:
     console.error('❌ 缺少 <from-aid> 参数');
     process.exit(1);
   }
-  const { isValidAid } = await import('./aun/aid/index.js');
+  const { isValidAid } = await import('../aun/aid/index.js');
   if (!isValidAid(from)) {
     console.error(`❌ 无效 AID 格式: ${from}`);
     process.exit(1);
   }
 
-  const { msgSend, msgPull, msgAck, msgRecall, msgOnline } = await import('./aun/msg/index.js');
+  const { msgSend, msgPull, msgAck, msgRecall, msgOnline } = await import('../aun/msg/index.js');
   const commonOpts = { aunPath, slotId: appSlot };
 
   if (sub === 'send') {
@@ -3566,7 +3566,7 @@ Options:
     console.error('❌ 缺少 <from-aid> 参数');
     process.exit(1);
   }
-  const { isValidAid } = await import('./aun/aid/index.js');
+  const { isValidAid } = await import('../aun/aid/index.js');
   if (!isValidAid(from)) {
     console.error(`❌ 无效 AID 格式: ${from}`);
     process.exit(1);
@@ -3576,7 +3576,7 @@ Options:
     groupSend, groupPull, groupAck,
     groupCreate, groupInfo, groupList, groupUpdate, groupDissolve,
     groupJoin, groupLeave, groupInvite, groupKick, groupMembers, groupOnline,
-  } = await import('./aun/msg/index.js');
+  } = await import('../aun/msg/index.js');
   const commonOpts = { aunPath, slotId: appSlot };
 
   // 通用 group_id 提取（第三参数）
@@ -4019,31 +4019,31 @@ export async function main(args: string[]) {
       await cmdAgent(args.slice(1));
       break;
     case 'aid': {
-      const { suppressSdkLogs } = await import('./aun/aid/index.js');
+      const { suppressSdkLogs } = await import('../aun/aid/index.js');
       suppressSdkLogs();
       await cmdAid(args.slice(1));
       break;
     }
     case 'rpc': {
-      const { suppressSdkLogs } = await import('./aun/aid/index.js');
+      const { suppressSdkLogs } = await import('../aun/aid/index.js');
       suppressSdkLogs();
       await cmdRpc(args.slice(1));
       break;
     }
     case 'storage': {
-      const { suppressSdkLogs } = await import('./aun/aid/index.js');
+      const { suppressSdkLogs } = await import('../aun/aid/index.js');
       suppressSdkLogs();
       await cmdStorage(args.slice(1));
       break;
     }
     case 'msg': {
-      const { suppressSdkLogs } = await import('./aun/aid/index.js');
+      const { suppressSdkLogs } = await import('../aun/aid/index.js');
       suppressSdkLogs();
       await cmdMsg(args.slice(1));
       break;
     }
     case 'group': {
-      const { suppressSdkLogs } = await import('./aun/aid/index.js');
+      const { suppressSdkLogs } = await import('../aun/aid/index.js');
       suppressSdkLogs();
       await cmdGroup(args.slice(1));
       break;
@@ -4113,7 +4113,7 @@ Environment:
   }
 }
 
-// 直接运行时自动执行（node dist/cli.js ...）
+// 直接运行时自动执行（node dist/cli/index.js ...）
 if (platform.isMainScript(import.meta.url)) {
   main(process.argv.slice(2));
 }
