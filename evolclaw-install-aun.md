@@ -10,9 +10,10 @@ EvolClaw 是一个开源的 AI Agent 网关，将 Claude/Codex 等 AI 后端连�
 
 ## 前置条件
 
-- Node.js >= 18，npm >= 8
+- Node.js >= 18，npm >= 8（使用 codex baseagent 时建议 >= 22.5 以获得完整 session 列表查询；低版本会自动降级为 rollout 文件查询）
+- 一款 baseagent CLI：`claude` / `codex` / `gemini` 任一在 PATH 中
 - 一个 AUN Agent ID（AID）——标识你的 Agent
-- 一个 Owner AID——接收欢迎消息和管理权限
+- 一个 Owner AID（可选）——接收欢迎消息和管理权限；不填则首次通信者自动绑定
 
 ---
 
@@ -23,9 +24,12 @@ EvolClaw 是一个开源的 AI Agent 网关，将 Claude/Codex 等 AI 后端连�
 ```bash
 node --version   # 需要 >= 18
 npm --version    # 需要 >= 8
+which claude || which codex || which gemini   # 至少一款 baseagent CLI
 ```
 
 版本不满足请先升级：https://nodejs.org
+
+baseagent CLI 缺失时可用 `npm install -g @anthropic-ai/claude-code` 安装 claude。
 
 ### 步骤 2：安装 EvolClaw
 
@@ -70,54 +74,94 @@ evolclaw status
 
 - 输出表明未运行（`not running` / `stopped` / 无 PID）→ 直接进入下一步。
 
-### 步骤 4：准备配置信息
+### 步骤 4：解析用户输入
 
-| 参数 | 说明 | 示例 |
-|------|------|------|
-| `--aun-aid` | **必填**，Agent 自身的 AID，作为 bot 在 AUN 网络上的独立身份 | `mybot.agentid.pub` |
-| `--aun-owner` | **必填**，Owner 的 AID，用于接收欢迎消息和管理权限 | `alice.agentid.pub` |
-| `--default-path` | 默认项目路径（bot 会话未显式 `/bind` 时使用的工作目录） | `/home/user/myproject` |
+用户在触发安装时通常用类似下面的格式提供配置信息（**Claude Code 必须按以下规则解析**）：
 
-**注意**：`--aun-aid` 和 `--aun-owner` 必须是不同的 AID。Agent 需要独立身份，不能与 Owner 相同。
+```
+安装 evolclaw（npm install -g evolclaw），读取包内的安装文档完成配置
+你要使用的AID是:aibot.agentid.pub
+你的主人AID是:elean.agentid.pub
+你的昵称是:我是小艾
+```
 
-如果用户在触发安装时已提供 Owner AID（例如消息中包含"将 xxx 添加为 Owner ID"），直接使用该值，否则询问用户。Agent AID 必须单独询问用户，不能默认使用 Owner AID。
+提取规则（每条都是"消息中有则用，无则不带 flag"）：
 
-**默认项目路径必须询问用户，提供三个选项：**
+| 用户消息模式 | 命令参数 |
+|---|---|
+| `你要使用的AID是:X` / `agent AID:X` / `bot AID is X` | 位置参数 `<aid>`（**必填**——若用户消息没提供，停下问用户） |
+| `你的主人AID是:X` / `owner AID:X` / `owner is X` | `--owner X`（可选，缺则不带 flag，首次通信者自动绑定） |
+| `你的昵称是:X` / `叫 X` / `name X` / `the bot is named X` | `--name "X"`（可选，缺则不带 flag，agent new 自动用 AID 首段） |
 
-1. **推荐默认**：`~/.evolclaw/projects/default`（EvolClaw 约定的默认工作区；若不存在会自动创建）
+**注意**：`<aid>` 和 `--owner` 必须不同的 AID（Agent 需要独立身份，不能与 Owner 相同）。
+
+`--description` **不从用户消息提取**，按步骤 5 流程生成候选让用户选择。
+
+`--project`（agent 默认工作目录）需要单独询问用户，提供三个选项：
+
+1. **推荐默认**：`~/evolclaw-projects/<aid 首段>`（EvolClaw 约定的默认工作区；若不存在会自动创建）
 2. **当前 Claude Code 运行目录**：即本次会话启动 `claude` 的工作目录（通过 `pwd` 获取）——适合希望 bot 直接在当前项目里工作的场景
 3. **自定义路径**：用户指定绝对路径（须是已存在的目录，或接受后自动创建）
 
 示例提问：
 
-> 请选择默认项目目录（bot 未显式 `/bind` 时使用的工作目录）：
-> 1) `~/.evolclaw/projects/default`（推荐，EvolClaw 默认工作区）
+> 请选择默认项目目录（agent 默认工作目录）：
+> 1) `~/evolclaw-projects/<aid 首段>`（推荐）
 > 2) 当前目录：`<pwd 输出>`
 > 3) 自定义路径（请提供绝对路径）
 
 用户未选择时，默认取选项 1。选项 3 需校验路径是绝对路径；目录不存在则 `mkdir -p` 创建。
 
-### 步骤 5：非交互式初始化
+### 步骤 5：生成 description 候选并让用户选择
 
-将用户选择的目录作为 `--default-path` 传入：
+Claude Code 基于已确定的 `<aid>` / `--name`（若已提取）和当前对话上下文，**生成 3 个不同侧重的简短中文描述**（每条 10-30 字）：
+
+- **候选 1（能力陈述）**：突出 agent 能做什么，例 `"EvolClaw 多模型 AI 助手"`
+- **候选 2（服务对象）**：突出服务谁，例 `"<owner 名称>的 AI 私人助手"`
+- **候选 3（风格化）**：拟人化或带性格的表述，例 `"可爱聪明的小艾，随叫随到"`
+
+用 `AskUserQuestion`（或交互问答）让用户选择。选项含**4 项**：候选 1 / 2 / 3 / 跳过；用户也可输入"其他"自定义。
+
+| 用户选择 | 命令参数 |
+|---|---|
+| 候选 1 / 2 / 3 | `--description "<对应候选>"` |
+| 其他（自定义文本） | `--description "<用户输入>"` |
+| 跳过 | 不带 `--description` flag |
+
+### 步骤 6：写全局 defaults.json
 
 ```bash
-evolclaw init --non-interactive \
-  --default-path <用户选择的绝对路径> \
-  --channel aun \
-  --aun-aid <AID> \
-  --aun-owner <Owner AID>
+evolclaw init --non-interactive
 ```
 
-此命令自动完成：
-1. 创建全局配置文件 `$EVOLCLAW_HOME/agents/defaults.json`（$EVOLCLAW_HOME默认路径在~/.evolclaw）
-2. 安装 `@agentunion/aun-node` 最新版本
-3. 创建 AID 密钥对（如本地不存在）
-4. 下载 CA 根证书到 `~/.aun/CA/root/root.crt`
-5. 写入初始 `agent.md`（`initialized: false`）
-6. 创建agent配置文件$EVOLCLAW_HOME/agents/<aid>/config.json（含 owner 字段）
+可选传 `--baseagent <claude|codex|gemini>` 显式指定；不传则取 PATH 中第一个可用项。
+重装场景下需要覆盖已有 `defaults.json`，加 `--force`。
 
-### 步骤 6：启动前验证
+此命令仅创建 `$EVOLCLAW_HOME/agents/defaults.json`（`$EVOLCLAW_HOME` 默认 `~/.evolclaw`），不碰 AID 与渠道。
+
+### 步骤 7：创建 agent
+
+```bash
+evolclaw agent new <aid> --non-interactive \
+  --project <用户选择的绝对路径> \
+  [--owner <Owner AID>] \
+  [--name "<昵称>"] \
+  [--description "<选定描述>"] \
+  [--baseagent <claude|codex|gemini>]
+```
+
+按步骤 4/5 的提取规则填入 flag——**省略未提取到的可选参数**，不要主动填默认值（agent new 内部会处理默认）。
+
+此命令自动完成：
+
+1. 校验 AID 格式（多级域名，如 `mybot.agentid.pub`）
+2. 创建 AID 密钥对（如本地不存在）；下载 CA 根证书到 `~/.aun/CA/root/root.crt`
+3. 创建 per-agent 配置文件 `$EVOLCLAW_HOME/agents/<aid>/config.json`（含 `initialized: false`）
+4. 生成并签名上传 `agent.md` 到 AUN 网络
+
+AUN 通道由 `agent.aid` 隐式驱动，不需要单独配 channel——`evolclaw start` 后即自动连接；首次连接成功并向 owner 发完欢迎消息后，`config.json` 中的 `initialized` 会被更新为 `true`。
+
+### 步骤 8：启动前验证
 
 读取配置文件确认关键字段：
 
@@ -126,29 +170,38 @@ cat $EVOLCLAW_HOME/agents/<aid>/config.json
 ```
 
 检查：
-- `channels.aun.aid` — 你的 AID
-- `channels.aun.owner` — Owner AID
+
+- `aid` — 你的 AID
+- `owners` — Owner AID 数组（可为空，留给自动绑定）
+- `active_baseagent` — `claude` / `codex` / `gemini`
 - `projects.defaultPath` — 项目路径（目录需存在）
-- `channels.defaultChannel` — 应为 `"aun"`
+- `channels` — 数组，初始可为空（AUN 隐式上线）
+- `initialized` — 应为 `false`（首次连接成功后由系统更新为 `true`）
 
 如发现缺失或异常，向用户说明并提供修复方案。
 
-### 步骤 7：启动服务
+### 步骤 9：启动服务
 
 ```bash
 evolclaw start
 ```
 
-### 步骤 8：验证运行状态
+### 步骤 10：验证运行状态
 
 ```bash
 evolclaw status
-tail -n 30 ~/.evolclaw/logs/evolclaw.log
+evolclaw logs   # 实时滚动日志，Ctrl+C 退出
+```
+
+或直接读最近日志（LogWriter 会切片归档，需要 `tail -F` 跨切片续接）：
+
+```bash
+tail -F ~/.evolclaw/logs/evolclaw.log
 ```
 
 日志中应出现：`[AUN] Connected as @<aid>`
 
-如未出现或有错误，读取完整日志分析原因并提供修复建议。
+如未出现或有错误，读取完整日志分析原因并提供修复建议（也可运行 `evolclaw diagnose` 快速检查配置和数据目录）。
 
 ---
 
@@ -156,9 +209,12 @@ tail -n 30 ~/.evolclaw/logs/evolclaw.log
 
 EvolClaw 首次连接 AUN 网络时自动：
 
-1. 检测 `~/.aun/AIDs/<aid>/agent.md` 中的 `initialized` 字段
-2. 若为 `false`，生成完整 agent.md 并发布到 AUN 网络
-3. 向 Owner 发送欢迎消息
+1. 检测 `$EVOLCLAW_HOME/agents/<aid>/config.json` 中的 `initialized` 字段
+2. 若为 `false`，且 `owners[0]` 已配置：
+   - 生成完整 agent.md（含基于 owner 的 display name）并发布到 AUN 网络
+   - 向 Owner 发送欢迎消息
+   - 把 `config.json` 中的 `initialized` 更新为 `true`
+3. 若 `owners[]` 为空（自动绑定模式）：跳过欢迎消息，`initialized` 维持 `false`；首次有人和该 agent 私聊时自动绑定为 owner，**自动绑定后立即补发欢迎消息**并把 `initialized` 置 `true`（订阅 `channel:owner-bound` 事件实现）
 
 无需手动触发，连接成功后自动完成。
 
@@ -179,10 +235,10 @@ EvolClaw 首次连接 AUN 网络时自动：
 ## 常见问题
 
 **Q: AID 已存在怎么办？**
-`evolclaw init --non-interactive` 会检测本地密钥，已存在则跳过创建。
+`evolclaw agent new` 会检测本地密钥，已存在则跳过创建（`alreadyExisted`）。如果 `agents/<aid>/config.json` 已存在，命令会失败；加 `--force` 可覆盖配置（AID 密钥保留；agent.md 会按当前 `--name` / `--description` 重新生成并重新上传）。
 
 **Q: 启动失败怎么办？**
-查看 `~/.evolclaw/logs/evolclaw.log` 或运行 `evolclaw diagnose`。
+运行 `evolclaw logs` 实时滚动日志，或 `evolclaw diagnose` 检查配置和数据目录。
 
 **Q: 如何重启/查看日志？**
 ```bash
@@ -192,8 +248,19 @@ evolclaw logs
 
 **Q: 如何清理损坏的 AID 重新注册？**
 ```bash
-rm -rf ~/.aun/AIDs/<aid>
-evolclaw init --non-interactive --channel aun --aun-aid <aid> --aun-owner <owner>
+evolclaw aid delete <aid>      # 删本地密钥与证书
+rm -rf $EVOLCLAW_HOME/agents/<aid>   # 删 per-agent 配置
+evolclaw agent new <aid> --non-interactive --project <abs path>
+```
+
+**Q: 想加飞书 / 微信 / 钉钉等 IM 通道？**
+agent 已建好后再单独配置（每条命令交互式从已有 agents 里选目标）：
+```bash
+evolclaw init feishu      # 飞书扫码
+evolclaw init wechat      # 微信扫码
+evolclaw init dingtalk    # 钉钉扫码
+evolclaw init qqbot       # QQ 机器人扫码
+evolclaw init wecom       # 企业微信手输 Bot ID + Secret
 ```
 
 ---
@@ -293,7 +360,8 @@ node -e "try{require('@anthropic-ai/claude-code-win32-x64');console.log('OK')}ca
 # 1. 升级到 evolclaw >= 2.5.4
 npm install -g evolclaw@latest
 
-# 2. 如仍报错，先手动安装 AUN SDK 依赖再执行 init
+# 2. 如仍报错，先手动安装 AUN SDK 依赖再执行 init / agent new
 npm install -g @agentunion/aun-node
-evolclaw init --non-interactive --channel aun --aun-aid <aid> --aun-owner <owner>
+evolclaw init --non-interactive
+evolclaw agent new <aid> --non-interactive --project <abs path>
 ```

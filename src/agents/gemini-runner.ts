@@ -15,9 +15,9 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import type { Config } from '../types.js';
-import type { AgentPlugin, AgentInstance, AgentCallbacks } from '../core/agent-loader.js';
+import type { AgentPlugin, AgentInstance, AgentCallbacks } from '../core/baseagent-loader.js';
 import type { AgentEvent, AgentRunnerFull, ModelSwitcher, PermissionModeInfo } from './claude-runner.js';
-import { resolveGoogleConfig, type GoogleResolved } from '../baseagents/resolve.js';
+import { resolveGoogleConfig, type GoogleResolved } from './resolve.js';
 import { GeminiSessionFileAdapter } from '../core/session/adapters/gemini-session-file-adapter.js';
 import { logger } from '../utils/logger.js';
 

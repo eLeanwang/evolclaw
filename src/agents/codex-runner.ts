@@ -7,9 +7,9 @@
  */
 
 import type { Config } from '../types.js';
-import type { AgentPlugin, AgentInstance, AgentCallbacks } from '../core/agent-loader.js';
+import type { AgentPlugin, AgentInstance, AgentCallbacks } from '../core/baseagent-loader.js';
 import type { AgentEvent, AgentRunnerFull, ModelSwitcher, PermissionModeInfo } from './claude-runner.js';
-import { resolveOpenaiConfig } from '../baseagents/resolve.js';
+import { resolveOpenaiConfig } from './resolve.js';
 import { logger } from '../utils/logger.js';
 import fs from 'fs';
 import path from 'path';
@@ -53,7 +53,7 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
 
   private async ensureCodex(): Promise<{ codex: CodexInstance; mod: CodexSDK }> {
     if (!this.codex || !this.codexModule) {
-      const { requireOptional } = await import('../utils/init-channel.js');
+      const { requireOptional } = await import('../utils/npm-ops.js');
       this.codexModule = await requireOptional<CodexSDK>('@openai/codex-sdk');
       this.codex = new this.codexModule.Codex({
         apiKey: this.resolvedConfig.apiKey,

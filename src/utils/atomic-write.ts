@@ -81,3 +81,9 @@ export function atomicReadJson<T = unknown>(filePath: string): T | null {
   if (text === null) return null;
   return JSON.parse(text) as T;
 }
+
+export function ensureDir(dirPath: string): void {
+  if (!fs.existsSync(dirPath)) {
+    fs.mkdirSync(dirPath, { recursive: true });
+  }
+}

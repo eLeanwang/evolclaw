@@ -1,5 +1,5 @@
 import { AUNClient, FileSecretStore, GatewayDiscovery, E2EEError, type JsonObject } from '@agentunion/fastaun';
-import { defaultSend } from '../core/message/default-send.js';
+
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
@@ -8,15 +8,16 @@ import { logger, localTimestamp } from '../utils/logger.js';
 import { LogWriter } from '../utils/log-writer.js';
 import type { ChannelPlugin, ChannelInstance, BridgeHookContext } from '../core/channel-loader.js';
 import type { MessageBridge } from '../core/message/message-bridge.js';
-import type { Config, ReplyContext, AunChannelConfig, AidConnectionState, AidStatus } from '../types.js';
+import type { Config, ReplyContext, AunChannelConfig, AidConnectionState, AidStatus, InteractionResponse, ActionInteraction, CommandCard } from '../types.js';
 import { normalizeChannelInstances, getChannelShowActivities } from '../utils/channel-helpers.js';
 import { resolvePaths, getPackageRoot } from '../paths.js';
 import { saveToUploads, sanitizeFileName } from '../utils/media-cache.js';
 import { appendAidEvent } from '../utils/instance-registry.js';
-import type { AidStatsCollector } from '../utils/aid-stats-collector.js';
+import type { AidStatsCollector } from '../utils/stats.js';
+import { loadAgent, saveAgent } from '../config-store.js';
 import { getProcessStartTime } from '../utils/process-introspect.js';
-import * as outbox from '../utils/outbox.js';
-import { guessMime, formatSize } from '../utils/mime.js';
+import * as outbox from '../aun/outbox.js';
+import { guessMime, formatSize } from '../utils/media-cache.js';
 
 /**
  * 构造 connect extra_info：自描述本进程身份。
@@ -87,6 +88,7 @@ export interface AUNMessageHandler {
     threadId?: string;
     mentions?: Array<{ userId: string; name?: string }>;
     replyContext?: ReplyContext;
+    source?: 'user' | 'card-trigger';
   }): Promise<void>;
 }
 
@@ -98,6 +100,7 @@ export class AUNChannel {
   private connected = false;
   private traceWriter: LogWriter | null = null;
   private eventBus: any = null;
+  private ownerBoundHandler: ((event: any) => void) | null = null;
   private pendingEchoMessages = new Map<string, { text: string; channelId: string; context?: ReplyContext; receiveTs: number }>();
   private isEchoSending = false;
 
@@ -202,11 +205,53 @@ export class AUNChannel {
     return name && name !== short ? `${short}(${name})` : short;
   }
 
-  private extractTextPayload(payload: unknown): string {
+  private extractTextPayload(payload: unknown, channelId?: string): string {
     if (typeof payload === 'string') return payload;
     if (payload && typeof payload === 'object') {
       const obj = payload as Record<string, unknown>;
       const text = typeof obj.text === 'string' ? obj.text : '';
+
+      // action_card_reply：卡片交互回复，触发 interactionCallback，不分发给 agent
+      if (obj.type === 'action_card_reply') {
+        const cardMsgId = typeof obj.card_message_id === 'string' ? obj.card_message_id : '';
+        const cardInfo = cardMsgId ? this.cardMessageIdMap.get(cardMsgId) : undefined;
+        if (cardInfo) {
+          const actionValue = typeof obj.action_value === 'string' ? obj.action_value : text;
+
+          if (cardInfo.isCommandCard) {
+            // CommandCard：action_value 是完整 slash 命令，构造伪入站消息
+            this.cardMessageIdMap.delete(cardMsgId);
+            if (this.messageHandler && actionValue.startsWith('/')) {
+              const chatType = channelId ? (this.isGroupId(channelId) ? 'group' : 'private') : 'private';
+              this.messageHandler({
+                channelId: channelId || '',
+                chatType,
+                content: actionValue,
+                peerId: channelId || '',
+                peerName: typeof obj.action_label === 'string' ? obj.action_label : undefined,
+                messageId: `card-trigger-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                source: 'card-trigger',
+              });
+            }
+          } else {
+            // ActionInteraction：走 interactionCallback → InteractionRouter
+            // callback 未注册时保留 map entry（TTL 清理），给 router 留重试机会
+            if (this.interactionCallback) {
+              this.cardMessageIdMap.delete(cardMsgId);
+              this.interactionCallback({
+                type: 'interaction.response',
+                id: cardInfo.requestId,
+                action: actionValue,
+                values: { text, action_label: obj.action_label, behavior: obj.behavior },
+              });
+            }
+          }
+        } else {
+          logger.debug(`${this.logPrefix()} action_card_reply dropped: cardMsgId=${cardMsgId} hasCallback=${!!this.interactionCallback}`);
+        }
+        // 始终返回空字符串，阻止消息分发给 agent
+        return '';
+      }
 
       // quote 类型：拼接被引用内容
       if (obj.type === 'quote' && obj.quote && typeof obj.quote === 'object') {
@@ -307,6 +352,9 @@ export class AUNChannel {
   private static readonly E2EE_PROBE_TTL = 10 * 60 * 1000; // 10min
   private plaintextRecv = 0;
   private sessionModeResolver?: (channelId: string) => Promise<string | undefined>;
+  interactionCallback?: (response: InteractionResponse) => void;
+  // action_card message_id → { requestId, isCommandCard }（用于关联 action_card_reply）
+  cardMessageIdMap = new Map<string, { requestId: string; isCommandCard: boolean }>();
   private dispatchModeResolver?: (channelId: string) => Promise<string | undefined>;
 
   private static readonly PROACTIVE_ALLOW_TYPES = new Set([
@@ -597,35 +645,32 @@ export class AUNChannel {
 
   private async sendWelcomeMessage(): Promise<void> {
     try {
-      const owner = this.config.owner;
-      if (!owner) {
-        logger.info(`${this.logPrefix()} No owner configured, skipping welcome message`);
-        return;
-      }
-
-      // Check agent.md initialized field
       const aid = this.config.aid;
       const aidName = aid.startsWith('@') ? aid.slice(1) : aid;
-      const agentMdPath = path.join(os.homedir(), '.aun', 'AIDs', aidName, 'agent.md');
 
-      if (!fs.existsSync(agentMdPath)) {
-        logger.warn(`${this.logPrefix()} agent.md not found, skipping welcome message`);
+      // Read initialized + owners from per-agent config.json
+      // (config.json 是 owner 的真相来源——auto-bind 后会更新这里，但 this.config 是
+      // channel 启动时的快照，不会自动同步)
+      const agentConfig = loadAgent(aidName);
+      if (!agentConfig) {
+        logger.warn(`${this.logPrefix()} agent config not found for ${aidName}, skipping welcome message`);
         return;
       }
-
-      const agentMdContent = fs.readFileSync(agentMdPath, 'utf-8');
-      const match = agentMdContent.match(/^---\n([\s\S]*?)\n---/);
-      if (!match) {
-        logger.warn(`${this.logPrefix()} agent.md frontmatter not found`);
-        return;
-      }
-
-      const frontmatter = match[1];
-      const initializedMatch = frontmatter.match(/^initialized:\s*(true|false)/m);
-      if (!initializedMatch || initializedMatch[1] === 'true') {
+      if (agentConfig.initialized === true) {
         logger.info(`${this.logPrefix()} Agent already initialized, skipping welcome message`);
         return;
       }
+
+      const owner = agentConfig.owners?.[0] ?? this.config.owner;
+      if (!owner) {
+        logger.info(`${this.logPrefix()} No owner configured, skipping welcome message (will retry after auto-bind)`);
+        return;
+      }
+
+      const agentMdPath = path.join(os.homedir(), '.aun', 'AIDs', aidName, 'agent.md');
+      const existingAgentMd = fs.existsSync(agentMdPath) ? fs.readFileSync(agentMdPath, 'utf-8') : '';
+      const existingFrontmatterMatch = existingAgentMd.match(/^---\n([\s\S]*?)\n---/);
+      const existingFrontmatter = existingFrontmatterMatch?.[1] ?? '';
 
       // Fetch owner's agent.md to derive name and validate type
       const ownerInfo = await this.fetchPeerInfo(owner);
@@ -636,27 +681,20 @@ export class AUNChannel {
       // Name: prefer existing agent.md name if user has customized it,
       // otherwise generate "{ownerName}的Evol助手 ({aidLabel})" for disambiguation
       const ownerAidClean = owner.startsWith('@') ? owner.slice(1) : owner;
-      let ownerDisplayName: string;
-      if (ownerInfo.name) {
-        ownerDisplayName = ownerInfo.name.slice(0, 12);
-      } else {
-        ownerDisplayName = ownerAidClean.split('.')[0].slice(0, 12);
-      }
+      const ownerDisplayName = (ownerInfo.name || ownerAidClean.split('.')[0]).slice(0, 12);
 
-      // Check if init wrote a meaningful name (vs just the aid first label default)
-      const currentNameMatch = frontmatter.match(/^name:\s*"?([^"\n]+)/m);
+      const currentNameMatch = existingFrontmatter.match(/^name:\s*"?([^"\n]+)/m);
       const currentName = currentNameMatch?.[1]?.trim();
       const aidLabel = aidName.split('.')[0];
 
       let agentDisplayName: string;
       if (currentName && currentName !== aidLabel) {
-        // User or previous init set a custom name — keep it
         agentDisplayName = currentName;
       } else {
         agentDisplayName = `${ownerDisplayName}的Evol助手 (${aidLabel})`;
       }
 
-      // Generate new agent.md with proper fields
+      // Generate new agent.md (no `initialized` frontmatter — that's now in config.json)
       const newAgentMd = `---
 aid: "${aid}"
 name: "${agentDisplayName}"
@@ -667,7 +705,6 @@ tags:
   - evolclaw
   - ai-agent
   - gateway
-initialized: true
 ---
 
 # ${agentDisplayName}
@@ -676,8 +713,9 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
 `;
 
       // Write locally
+      fs.mkdirSync(path.dirname(agentMdPath), { recursive: true });
       fs.writeFileSync(agentMdPath, newAgentMd, 'utf-8');
-      logger.info(`${this.logPrefix()} Updated agent.md with initialized=true`);
+      logger.info(`${this.logPrefix()} Updated agent.md for ${aidName}`);
 
       // Publish to AUN network via auth.uploadAgentMd
       try {
@@ -725,6 +763,18 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
         persist_required: true,
       });
       logger.info(`${this.logPrefix()} Welcome message sent to owner: ${owner}`);
+
+      // Mark agent as initialized in config.json (replaces old agent.md frontmatter flag)
+      try {
+        const fresh = loadAgent(aidName);
+        if (fresh) {
+          fresh.initialized = true;
+          saveAgent(fresh);
+          logger.info(`${this.logPrefix()} Marked ${aidName} as initialized in config.json`);
+        }
+      } catch (e) {
+        logger.warn(`${this.logPrefix()} Failed to update initialized flag in config.json: ${e}`);
+      }
     } catch (e) {
       logger.warn(`${this.logPrefix()} Failed to send welcome message: ${e}`);
     }
@@ -803,7 +853,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
 
     const fromAid = msg.from ?? '';
     const payload = msg.payload ?? '';
-    const text = this.extractTextPayload(payload);
+    const text = this.extractTextPayload(payload, fromAid);
     const taskId = typeof payload === 'object' && payload !== null ? (payload as any).thread_id : undefined;
     const messageId = msg.message_id ?? '';
     const seq = msg.seq;
@@ -863,6 +913,8 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     const p2pPayloadType = (payload && typeof payload === 'object') ? (payload as any).type ?? '' : '';
     logger.info(`${this.logPrefix()} P2P dispatch decision: mid=${messageId} from=${shortAid}(${displayName}) peerType=${peerInfo.type || 'unknown'} payloadType=${p2pPayloadType} chatId=${chatId} encrypt=${msgEncrypted} textPreview=${JSON.stringify(text.slice(0, 80))}`);
 
+    // action_card_reply 已在 extractTextPayload 中消费，不分发给 agent
+    if (p2pPayloadType === 'action_card_reply') return;
     logger.info(`${this.logPrefix()} P2P dispatched: from=${shortAid}(${displayName}) mid=${messageId} encrypt=${msgEncrypted} text=${finalText.slice(0, 60)}`);
     appendAidEvent({ ts: Date.now(), iso: new Date().toISOString(), event: 'message_in', aid: this.config.aid, from: fromAid, msgId: messageId, kind: 'text', len: finalText.length });
     const isSystemP2P = p2pPayloadType === 'event';
@@ -891,7 +943,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     const groupId = msg.group_id ?? '';
     const senderAid = msg.sender_aid ?? '';
     const payload = msg.payload ?? '';
-    const text = this.extractTextPayload(payload);
+    const text = this.extractTextPayload(payload, groupId);
     const taskId = typeof payload === 'object' && payload !== null ? (payload as any).thread_id : undefined;
     const messageId = msg.message_id ?? '';
     const seq = msg.seq;
@@ -1067,6 +1119,8 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
         : `${dispatchMode}.no-mention`;
     logger.info(`${this.logPrefix()} Group dispatch decision: mid=${messageId} group=${groupId} sender=${shortAid}(${displayName}) peerType=${peerInfo.type || 'unknown'} payloadType=${payloadType} dispatchMode=${dispatchMode} reason=${reason} structMentions=${JSON.stringify(payloadMentions)} textMentionSelf=${textMentionSelf} textMentionAll=${textMentionAll} structMentionSelf=${structMentionSelf} structMentionAll=${structMentionAll} encrypt=${msgEncrypted} textPreview=${JSON.stringify(text.slice(0, 80))}`);
 
+    // action_card_reply 已在 extractTextPayload 中消费，不分发给 agent
+    if (payloadType === 'action_card_reply') return;
     logger.info(`${this.logPrefix()} Group dispatched: group=${groupId} sender=${shortAid}(${displayName}) mode=${dispatchMode} mid=${messageId} text=${finalText.slice(0, 60)}`);
     appendAidEvent({ ts: Date.now(), iso: new Date().toISOString(), event: 'message_in', aid: this.config.aid, from: senderAid, msgId: messageId, kind: 'text', len: finalText.length, groupId });
     this.aidStatsCollector?.recordInbound(this.config.aid, senderAid, Buffer.byteLength(finalText, 'utf-8'), finalText, payloadType === 'event');
@@ -1403,7 +1457,28 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
   // ── Public API (same interface as before) ───────────────────
 
   setEventBus(bus: any): void {
+    // 重新订阅前先解掉旧的——避免 reload/重连后 listener 累积
+    if (this.eventBus && this.ownerBoundHandler && typeof this.eventBus.unsubscribe === 'function') {
+      this.eventBus.unsubscribe('channel:owner-bound', this.ownerBoundHandler);
+    }
+    this.ownerBoundHandler = null;
     this.eventBus = bus;
+    if (bus && typeof bus.subscribe === 'function') {
+      const handler = (event: any) => {
+        if (event.channelName !== this.config.channelName) return;
+        // sendWelcomeMessage 内部读 config.json 中最新的 owners[0]，并幂等检查 initialized
+        // 自身做 client 健康检查后再发
+        if (!this.client) {
+          logger.info(`${this.logPrefix()} owner-bound event received but client not connected; skip welcome retry`);
+          return;
+        }
+        this.sendWelcomeMessage().catch(e => {
+          logger.warn(`${this.logPrefix()} owner-bound welcome retry failed: ${e}`);
+        });
+      };
+      bus.subscribe('channel:owner-bound', handler);
+      this.ownerBoundHandler = handler;
+    }
   }
 
   onProjectPathRequest(provider: (channelId: string) => Promise<string>): void {
@@ -1627,7 +1702,8 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     };
 
     try {
-      const stage = (payload as any)?.stage ?? 'unknown';
+      const itemCount = Array.isArray((payload as any)?.items) ? (payload as any).items.length : 0;
+      const stage = (payload as any)?.stage ?? `items=${itemCount}`;
       if (this.isGroupId(channelId)) {
         params.group_id = targetId;
         await this.callAndTrace('group.thought.put', params);
@@ -1640,6 +1716,44 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     } catch (e) {
       const err = e as any;
       logger.debug(`${this.logPrefix()} thought.put failed to ${channelId}: ${err?.name}(${err?.code})=${err?.message}`);
+    }
+  }
+
+  /**
+   * 发送结构化 payload（type='thought' 等）作为消息历史持久化。
+   * 与 sendThought（thought.put）配对：thought.put 用于前端实时渲染（不入消息历史），
+   * sendStructured 用于把同一内容写入消息历史。
+   * 返回服务端分配的 message_id（失败时返回 null）。
+   */
+  async sendStructured(channelId: string, payload: Record<string, any>, context?: ReplyContext): Promise<string | null> {
+    if (!this.connected || !this.client) return null;
+    const isGroup = this.isGroupId(channelId);
+    const targetAid = channelId;
+    const encryptTarget = isGroup ? channelId : targetAid;
+    const encrypt = context?.metadata?.encrypted != null
+      ? !!(context.metadata.encrypted)
+      : this.shouldEncrypt(encryptTarget);
+
+    const finalPayload: Record<string, any> = { ...payload };
+    if (context?.threadId && !finalPayload.thread_id) finalPayload.thread_id = context.threadId;
+
+    const params: Record<string, any> = { payload: finalPayload, encrypt };
+    try {
+      if (isGroup) {
+        params.group_id = channelId;
+        const result = await this.callAndTrace<any>('group.send', params);
+        logger.info(`${this.logPrefix()} group.send (${payload.type}) ok: group=${channelId} mid=${result?.message_id} encrypt=${encrypt}`);
+        return result?.message_id ?? null;
+      } else {
+        params.to = targetAid;
+        const result = await this.callAndTrace<any>('message.send', params);
+        logger.info(`${this.logPrefix()} message.send (${payload.type}) ok: to=${this.peerLabel(targetAid)} mid=${result?.message_id} encrypt=${encrypt}`);
+        return result?.message_id ?? null;
+      }
+    } catch (e) {
+      const err = e as any;
+      logger.warn(`${this.logPrefix()} sendStructured failed (${payload.type}) to ${channelId}: ${err?.name}(${err?.code})=${err?.message}`);
+      return null;
     }
   }
 
@@ -1858,6 +1972,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     if (status === 'start') this.sentCount.delete(channelId);  // 新任务开始，重置计数
     if (!this.client || !this.connected) return;
 
+    // 旧路 payload（type='event', event='task.*'）—— 前后兼容保留，未来废弃
     const eventMap: Record<string, string> = {
       start: 'task.started',
       done: 'task.completed',
@@ -1865,55 +1980,82 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       error: 'task.error',
       timeout: 'task.timeout',
     };
-    const payload: Record<string, any> = {
+    const severity = status === 'error' || status === 'timeout' ? 'error' : 'info';
+    const eventPayload: Record<string, any> = {
       type: 'event',
       event: eventMap[status] ?? `task.${status}`,
       data: { task_id: taskId, session_id: sessionId },
-      severity: status === 'error' || status === 'timeout' ? 'error' : 'info',
+      severity,
     };
-    if (context?.threadId) payload.thread_id = context.threadId;
+    if (context?.threadId) eventPayload.thread_id = context.threadId;
+
+    // 新路 payload（type='status'）—— 结构化任务状态，下游直接读字段不用解析 event 字符串
+    const stateMap: Record<string, string> = {
+      start: 'started',
+      done: 'completed',
+      interrupted: 'interrupted',
+      error: 'error',
+      timeout: 'timeout',
+    };
+    const statusPayload: Record<string, any> = {
+      type: 'status',
+      state: stateMap[status] ?? status,
+      task_id: taskId,
+      session_id: sessionId,
+      severity,
+    };
+    if (context?.threadId) statusPayload.thread_id = context.threadId;
 
     const isGroup = this.isGroupId(channelId);
-
     // 私聊 channelId = 对端 AID（不含 device_id）
     const statusTargetAid = channelId;
-
     const encryptTarget = isGroup ? channelId : statusTargetAid;
-    const encrypt = context?.metadata?.encrypted != null
+
+    // 计算 encrypt 标志（每次调用读最新 peerE2ee 状态，
+    // 这样第二条 send 能受益于第一条触发的 peerE2ee 标记）
+    const computeEncrypt = (): boolean => context?.metadata?.encrypted != null
       ? !!(context.metadata.encrypted)
       : this.shouldEncrypt(encryptTarget);
-    const params: Record<string, any> = { payload, encrypt };
 
-    const sendWithFallback = (method: string) => {
-      this.client!.call(method, params).catch(e => {
+    const sendOne = (method: string, payload: Record<string, any>, label: string): Promise<void> => {
+      const c = this.client;
+      if (!c) {
+        logger.debug(`${this.logPrefix()} ${label} skipped: client gone`);
+        return Promise.resolve();
+      }
+      const encrypt = computeEncrypt();
+      const params: Record<string, any> = { payload, encrypt };
+      if (isGroup) params.group_id = channelId;
+      else params.to = statusTargetAid;
+      this.trace('OUT', `${method}.task_${label}`, params);
+      return c.call(method, params).catch(e => {
         if (encrypt && e instanceof E2EEError) {
           this.peerE2ee.set(encryptTarget, { ok: false, ts: Date.now() });
-          logger.warn(`${this.logPrefix()} E2EE status send failed to ${channelId}, retrying plaintext`);
-          params.encrypt = false;
-          this.client!.call(method, params).catch(e2 => {
-            logger.debug(`${this.logPrefix()} Processing status fallback failed: ${e2}`);
+          logger.warn(`${this.logPrefix()} E2EE task_${label} send failed to ${channelId}, retrying plaintext`);
+          const c2 = this.client;
+          if (!c2) return;
+          const fallbackParams = { ...params, encrypt: false };
+          return c2.call(method, fallbackParams).catch(e2 => {
+            logger.debug(`${this.logPrefix()} task_${label} fallback failed: ${e2}`);
           });
-        } else {
-          logger.debug(`${this.logPrefix()} Processing status failed: ${e}`);
         }
-      });
+        logger.debug(`${this.logPrefix()} task_${label} failed: ${e}`);
+      }) as Promise<void>;
     };
 
-    if (isGroup) {
-      params.group_id = channelId;
-      this.trace('OUT', 'group.send.status', params);
-      sendWithFallback('group.send');
-    } else {
-      params.to = statusTargetAid;
-      this.trace('OUT', 'message.send.status', params);
-      sendWithFallback('message.send');
-    }
-    // 统计为系统消息（不更新 lastSentText/lastSentAt）
-    this.aidStatsCollector?.recordOutbound(this.config.aid, channelId, JSON.stringify(payload).length, undefined, true);
+    const method = isGroup ? 'group.send' : 'message.send';
+    // 串行：等第一条完成（或失败更新 peerE2ee 标记）后再发第二条，
+    // 保证两路 payload 到达顺序（event 在前，status 在后）+ 第二条能用最新 encrypt 状态
+    sendOne(method, eventPayload, 'event')
+      .then(() => sendOne(method, statusPayload, 'status'));
+
+    // 统计为系统消息（按两条独立消息分别记账）
+    this.aidStatsCollector?.recordOutbound(this.config.aid, channelId, JSON.stringify(eventPayload).length, undefined, true);
+    this.aidStatsCollector?.recordOutbound(this.config.aid, channelId, JSON.stringify(statusPayload).length, undefined, true);
     // 群聊显示 group id 简称，P2P 显示 peer label；从 context.metadata 读取 chatmode
     const targetLabel = this.isGroupId(channelId) ? channelId : this.peerLabel(channelId);
     const chatmode = context?.metadata?.chatmode ?? '?';
-    logger.info(`${this.logPrefix()} task.${status} task=${taskId} session=${sessionId} chatmode=${chatmode} encrypt=${encrypt} target=${targetLabel}`);
+    logger.info(`${this.logPrefix()} task.${status} task=${taskId} session=${sessionId} chatmode=${chatmode} target=${targetLabel}`);
   }
 
   sendCustomPayload(channelId: string, payload: string): void {
@@ -2033,7 +2175,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
 
   private async fetchAndCacheSelfName(aidName: string): Promise<void> {
     try {
-      const { agentmdGet } = await import('../aid/index.js');
+      const { agentmdGet } = await import('../aun/aid/index.js');
       const content = await agentmdGet(aidName);
       if (content) {
         const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
@@ -2137,17 +2279,120 @@ export class AUNChannelPlugin implements ChannelPlugin {
       const adapter = {
         channelName: inst.name,
         capabilities: { file: true, image: true, interaction: true, markdown: true, thought: true, status: true },
-        send: (envelope: any, payload: any) => defaultSend(adapter, envelope, payload),
-        sendText: (id: string, text: string, context?: ReplyContext) => channel.sendMessage(id, text, context),
-        sendFile: (id: string, filePath: string, context?: ReplyContext) => channel.sendFile(id, filePath, context),
-        acknowledge: (messageId: string) => { channel.acknowledge(messageId); return Promise.resolve(); },
-        sendProcessingStatus: (id: string, status: 'start' | 'done' | 'interrupted' | 'error' | 'timeout', sessionId: string, taskId: string, context?: ReplyContext) => channel.sendProcessingStatus(id, status, sessionId, taskId, context),
-        sendCustomPayload: (id: string, payload: string) => channel.sendCustomPayload(id, payload),
-        uploadAgentMd: (content: string) => channel.uploadAgentMd(content),
-        downloadAgentMd: (aid: string) => channel.downloadAgentMd(aid),
-        putThought: (id: string, taskId: string, payload: object, context?: ReplyContext) =>
-          channel.sendThought(id, taskId, payload, context),
-        _selfAid: () => channel.getStatus().aid,
+        send: async (envelope: any, payload: any) => {
+          const ctx = envelope.replyContext;
+          const channelId = envelope.channelId;
+          switch (payload.kind) {
+            case 'result.text':
+            case 'command.result':
+            case 'command.error':
+            case 'system.notice':
+            case 'system.error':
+            case 'result.error': {
+              const sendCtx: ReplyContext = { ...(ctx ?? {}) };
+              if (payload.kind === 'result.text' && payload.isFinal) sendCtx.title = '✓ 最终回复:';
+              await channel.sendMessage(channelId, payload.text, sendCtx);
+              return;
+            }
+            case 'result.file':
+              await channel.sendFile(channelId, payload.filePath, ctx);
+              return;
+            case 'result.image': {
+              // AUN 支持 image，走 sendStructured 发 type=image payload
+              const buf = payload.data as Buffer;
+              const b64 = buf.toString('base64');
+              await channel.sendStructured(channelId, {
+                type: 'image',
+                alt: payload.alt,
+                data_base64: b64,
+                mime_type: payload.mimeType,
+              }, ctx);
+              return;
+            }
+            case 'activity.batch': {
+              const aunPayload: Record<string, any> = {
+                type: 'thought',
+                items: payload.items,
+                client_context: { task_id: envelope.taskId, chatmode: envelope.chatmode, agent_name: envelope.agentName },
+              };
+              if (ctx?.threadId) aunPayload.thread_id = ctx.threadId;
+              // 双发：thought.put（前端实时渲染） + message.send（消息历史持久化）
+              await Promise.all([
+                channel.sendThought(channelId, envelope.taskId, aunPayload, ctx),
+                channel.sendStructured(channelId, aunPayload, ctx),
+              ]);
+              return;
+            }
+            case 'status.started':
+              channel.sendProcessingStatus(channelId, 'start', envelope.taskId, envelope.taskId, ctx);
+              return;
+            case 'status.completed':
+              channel.sendProcessingStatus(channelId, 'done', envelope.taskId, envelope.taskId, ctx);
+              return;
+            case 'status.interrupted':
+              channel.sendProcessingStatus(channelId, 'interrupted', envelope.taskId, envelope.taskId, ctx);
+              return;
+            case 'status.error':
+              channel.sendProcessingStatus(channelId, 'error', envelope.taskId, envelope.taskId, ctx);
+              return;
+            case 'status.timeout':
+              channel.sendProcessingStatus(channelId, 'timeout', envelope.taskId, envelope.taskId, ctx);
+              return;
+            case 'interaction': {
+              const req = payload.interaction;
+              if (req.kind.kind === 'action') {
+                const action = req.kind;
+                const aunCard: Record<string, any> = {
+                  type: 'action_card',
+                  title: action.title,
+                  description: action.body,
+                  actions: (action as ActionInteraction).buttons.map(btn => ({
+                    label: btn.label,
+                    value: btn.key,
+                    style: btn.style ?? 'default',
+                    behavior: 'reply',
+                  })),
+                };
+                if (ctx?.threadId) aunCard.thread_id = ctx.threadId;
+                const msgId = await channel.sendStructured(channelId, aunCard, ctx);
+                if (msgId) {
+                  channel.cardMessageIdMap.set(msgId, { requestId: req.id, isCommandCard: false });
+                  setTimeout(() => channel.cardMessageIdMap.delete(msgId), 20 * 60 * 1000);
+                }
+              } else if (req.kind.kind === 'command-card') {
+                const card = req.kind;
+                const aunCard: Record<string, any> = {
+                  type: 'action_card',
+                  title: card.title,
+                  description: card.body,
+                  actions: (card as CommandCard).buttons.map(btn => ({
+                    label: btn.label,
+                    value: btn.command,
+                    style: btn.style ?? 'default',
+                    behavior: 'reply',
+                  })),
+                };
+                if (ctx?.threadId) aunCard.thread_id = ctx.threadId;
+                const msgId = await channel.sendStructured(channelId, aunCard, ctx);
+                if (msgId) {
+                  channel.cardMessageIdMap.set(msgId, { requestId: req.id, isCommandCard: true });
+                  setTimeout(() => channel.cardMessageIdMap.delete(msgId), 20 * 60 * 1000);
+                }
+              } else if (payload.fallbackText) {
+                await channel.sendMessage(channelId, payload.fallbackText, ctx);
+              }
+              return;
+            }
+            case 'custom': {
+              const text = typeof payload.payload === 'string' ? payload.payload : JSON.stringify(payload.payload);
+              channel.sendCustomPayload(channelId, text);
+              return;
+            }
+            default:
+              logger.warn(`[AUN] Unhandled payload kind: ${(payload as any).kind}`);
+          }
+        },        acknowledge: (messageId: string) => { channel.acknowledge(messageId); return Promise.resolve(); },        onInteraction: (cb: (r: InteractionResponse) => void) => { channel.interactionCallback = cb; },        uploadAgentMd: (content: string) => channel.uploadAgentMd(content),
+        downloadAgentMd: (aid: string) => channel.downloadAgentMd(aid),        _selfAid: () => channel.getStatus().aid,
         _selfName: () => channel.getSelfName(),
       };
 
@@ -2208,6 +2453,7 @@ export class AUNChannelPlugin implements ChannelPlugin {
                 mentions: opts.mentions,
                 threadId: opts.threadId,
                 replyContext: opts.replyContext,
+                source: opts.source,
               });
             }),
             (channelId, text, replyContext) => channel.sendMessage(channelId, text, replyContext),

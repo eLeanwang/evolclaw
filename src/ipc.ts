@@ -2,7 +2,7 @@ import net from 'net';
 import fs from 'fs';
 import { logger } from './utils/logger.js';
 import type { EvolAgentRegistryHandle, AidConnectionState } from './types.js';
-import type { AidStatsSnapshot } from './utils/aid-stats-collector.js';
+import type { AidStatsSnapshot } from './utils/stats.js';
 
 const isWindows = process.platform === 'win32';
 const isNamedPipe = (p: string) => isWindows && p.startsWith('\\\\.\\pipe\\');

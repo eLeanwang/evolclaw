@@ -2,7 +2,7 @@ import { ClaudeSessionFileAdapter } from './core/session/adapters/claude-session
 import { CodexSessionFileAdapter } from './core/session/adapters/codex-session-file-adapter.js';
 import { GeminiSessionFileAdapter } from './core/session/adapters/gemini-session-file-adapter.js';
 import { ensureDataDirs, resolvePaths, agentDir, syncKitsFromPackage } from './paths.js';
-import { resolveAnthropicConfig } from './baseagents/resolve.js';
+import { resolveAnthropicConfig } from './agents/resolve.js';
 import { loadDefaults, loadAllAgents, mergeForAgent, ensureAgentDirSkeleton, autoMigrateIfNeeded } from './config-store.js';
 import type { Config, MergedAgentConfig, AgentConfig, DefaultsConfig } from './types.js';
 import { CONFIG_SCHEMA_VERSION } from './types.js';
@@ -16,28 +16,48 @@ import { AUNChannelPlugin } from './channels/aun.js';
 import { DingtalkChannelPlugin } from './channels/dingtalk.js';
 import { QQBotChannelPlugin } from './channels/qqbot.js';
 import { WecomChannelPlugin } from './channels/wecom.js';
-import { MessageProcessor } from './core/message/message-processor.js';
+import { MessageProcessor, buildEnvelope } from './core/message/message-processor.js';
 import { MessageQueue } from './core/message/message-queue.js';
 import { MessageBridge } from './core/message/message-bridge.js';
 import { MessageCache } from './core/message/message-cache.js';
 import { CommandHandler } from './core/command-handler.js';
 import { EventBus } from './core/event-bus.js';
-import { StatsCollector } from './utils/stats-collector.js';
-import { AidStatsCollector } from './utils/aid-stats-collector.js';
+import { StatsCollector } from './utils/stats.js';
+import { AidStatsCollector } from './utils/stats.js';
 import { PermissionGateway } from './core/permission.js';
 import { InteractionRouter } from './core/interaction-router.js';
 import { ChannelLoader, type ChannelInstance } from './core/channel-loader.js';
-import { AgentLoader } from './core/agent-loader.js';
+import { AgentLoader } from './core/baseagent-loader.js';
 import { EvolAgentRegistry, type ReloadHooks } from './core/evolagent-registry.js';
-import { buildReloadHooks } from './utils/reload-hooks.js';
+import { buildReloadHooks } from './core/channel-loader.js';
 import { IpcServer, IpcStatusResponse, ChannelStatus } from './ipc.js';
-import { ChannelAdapter, Message } from './types.js';
+import { ChannelAdapter, Message, OutboundEnvelope, OutboundPayload } from './types.js';
 import { logger, setLogLevel } from './utils/logger.js';
 import { writeMain, removeAll, isMainWinner, scanInstances } from './utils/instance-registry.js';
 import { detectDuplicates } from './core/evolagent-registry.js';
 import { loadPromptTemplates } from './agents/templates.js';
 import path from 'path';
 import fs from 'fs';
+import os from 'os';
+import crypto from 'crypto';
+
+/**
+ * 通过 adapter.send 发送系统类 payload（system.notice / system.error / 等）。
+ *
+ * 网关层（本文件）的所有出站系统通知（上线 / 重启完成 / 渠道告警 / agent 启动失败等）
+ * 走这里集中调度，让渠道按 capabilities 决定呈现方式。
+ *
+ * 当 adapter 还没实现 send（旧 adapter）时，按 payload.kind 降级到 sendText。
+ *
+ * Exported for unit test coverage; runtime callers are inside main() closure.
+ */
+export async function sendSystemPayload(
+  adapter: ChannelAdapter,
+  envelope: OutboundEnvelope,
+  payload: OutboundPayload
+): Promise<void> {
+  await adapter.send(envelope, payload);
+}
 
 async function main() {
   // 过滤飞书 SDK 的 info 日志
@@ -309,9 +329,11 @@ async function main() {
       const sendFn = async (id: string, text: string, opts?: { replyToMessageId?: string; replyInThread?: boolean }) => {
         const adapter = cmdHandler.getAdapter(channel);
         if (!adapter) return;
-
         if (text) {
-          await adapter.sendText(id, text, opts);
+          await adapter.send(
+            buildEnvelope({ channel: adapter.channelName, channelId: id, replyContext: opts }),
+            { kind: 'system.notice', text, subtype: 'health' }
+          );
         }
       };
       return cmdHandler.handle(content, channel, channelId, sendFn, userId, threadId);
@@ -487,14 +509,25 @@ async function main() {
       // 尝试从 agent.md 读取 name
       let agentName = agent.aid;
       try {
-        const aunPath = process.env.AUN_HOME || path.join(require('os').homedir(), '.aun');
+        const aunPath = process.env.AUN_HOME || path.join(os.homedir(), '.aun');
         const agentMdPath = path.join(aunPath, 'AIDs', agent.aid, 'agent.md');
         const content = fs.readFileSync(agentMdPath, 'utf-8');
         const nameMatch = content.match(/^name:\s*"?([^"\n]+)/m);
         if (nameMatch) agentName = nameMatch[1].trim().replace(/"$/, '');
       } catch {}
       const projectDir = path.basename(agent.projectPath);
-      adapter.sendText(ownerAid, `✓ ${agentName} 已上线 | 工作目录: ${projectDir}`).catch(() => {});
+      const text = `✓ ${agentName} 已上线 | 工作目录: ${projectDir}`;
+      const envelope = buildEnvelope({
+        taskId: `system-online-${crypto.randomBytes(5).toString('hex')}`,
+        channel: adapter.channelName,
+        channelId: ownerAid,
+        agentName,
+      });
+      sendSystemPayload(adapter, envelope, {
+        kind: 'system.notice',
+        text,
+        subtype: 'restarted',
+      }).catch(() => {});
     }
   }, 1000 + Math.random() * 2000);
 
@@ -515,7 +548,19 @@ async function main() {
       const ownerId = agentRegistry.getOwner(other.adapter.channelName);
       if (!ownerId) continue;
       notified.add(otherType);
-      other.adapter.sendText(ownerId, msg).catch(err => {
+      const owningAgent = agentRegistry.resolveByChannel(other.adapter.channelName);
+      const envelope = buildEnvelope({
+        taskId: `system-channel-down-${crypto.randomBytes(5).toString('hex')}`,
+        channel: other.adapter.channelName,
+        channelId: ownerId,
+        agentName: owningAgent?.aid || 'evolclaw',
+      });
+      sendSystemPayload(other.adapter, envelope, {
+        kind: 'system.error',
+        text: msg,
+        subtype: 'channel_down',
+        recoverable: false,
+      }).catch(err => {
         logger.error(`[ChannelHealth] Failed to notify ${other.adapter.channelName} owner:`, err);
       });
     }
@@ -600,7 +645,19 @@ async function main() {
         const replyContext = pending.rootId
           ? { replyToMessageId: pending.rootId, replyInThread: !!pending.threadId }
           : undefined;
-        await adapter.sendText(pending.channelId, '✅ 服务重启成功！', replyContext);
+        const owningAgent = agentRegistry.resolveByChannel(adapter.channelName);
+        const envelope = buildEnvelope({
+          taskId: `system-restart-${process.pid}`,
+          channel: adapter.channelName,
+          channelId: pending.channelId,
+          agentName: owningAgent?.aid || 'evolclaw',
+          replyContext,
+        });
+        await sendSystemPayload(adapter, envelope, {
+          kind: 'system.notice',
+          text: '✅ 服务重启成功！',
+          subtype: 'restarted',
+        });
         logger.info(`[Restart] Notification sent via ${pending.channel}`);
       }
       fs.unlinkSync(pendingFile);
@@ -811,9 +868,13 @@ async function main() {
   });
 }
 
-main().catch((error) => {
-  const msg = `Fatal error: ${error?.stack || error}`;
-  logger.error('Fatal error:', error);
-  console.error(msg);  // ensure it lands in stdout.log for self-heal diagnostics
-  process.exit(1);
-});
+// 仅在直接执行时启动；导入此模块（如单元测试）时不触发 main()。
+import { isMainScript } from './utils/cross-platform.js';
+if (isMainScript(import.meta.url)) {
+  main().catch((error) => {
+    const msg = `Fatal error: ${error?.stack || error}`;
+    logger.error('Fatal error:', error);
+    console.error(msg);  // ensure it lands in stdout.log for self-heal diagnostics
+    process.exit(1);
+  });
+}

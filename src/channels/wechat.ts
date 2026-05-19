@@ -6,7 +6,7 @@ import { logger } from '../utils/logger.js';
 import { sanitizeFileName, saveToUploads, safeFetch } from '../utils/media-cache.js';
 import { markdownToPlainText } from '../utils/rich-content-renderer.js';
 import type { EventBus } from '../core/event-bus.js';
-import { defaultSend } from '../core/message/default-send.js';
+import { formatItemsAsText } from '../core/message/items-formatter.js';
 
 // ── Config ──────────────────────────────────────────────────────────────────
 
@@ -878,10 +878,43 @@ export class WechatChannelPlugin implements ChannelPlugin {
       const adapter = {
         channelName: inst.name,
         capabilities: { file: false, image: false, interaction: false, markdown: false, thought: false, status: true },
-        send: (envelope: any, payload: any) => defaultSend(adapter, envelope, payload),
-        sendText: (id: string, text: string) => channel.sendMessage(id, text),
-        sendFile: (id: string, filePath: string) => channel.sendFile(id, filePath),
-      };
+        send: async (envelope: any, payload: any) => {
+          const channelId = envelope.channelId;
+          switch (payload.kind) {
+            case 'result.text':
+            case 'command.result':
+            case 'command.error':
+            case 'system.notice':
+            case 'system.error':
+            case 'result.error':
+              await channel.sendMessage(channelId, payload.text);
+              return;
+            case 'result.file': {
+              const name = payload.fileName || payload.filePath;
+              await channel.sendMessage(channelId, `\ud83d\udcce \u6587\u4ef6\u5df2\u751f\u6210\uff1a${name}\n\u8def\u5f84\uff1a${payload.filePath}`);
+              return;
+            }
+            case 'result.image':
+              return;
+            case 'activity.batch': {
+              const text = formatItemsAsText(payload.items);
+              if (text) await channel.sendMessage(channelId, text);
+              return;
+            }
+            case 'interaction':
+              if (payload.fallbackText) await channel.sendMessage(channelId, payload.fallbackText);
+              return;
+            case 'status.started':
+            case 'status.completed':
+            case 'status.interrupted':
+            case 'status.error':
+            case 'status.timeout':
+            case 'custom':
+              return;
+            default:
+              logger.warn(`[WeChat] Unhandled payload kind: ${(payload as any).kind}`);
+          }
+        },      };
 
       const policy = {
         canSwitchProject: (chatType: string, identity: string) => identity === 'owner' || identity === 'admin',

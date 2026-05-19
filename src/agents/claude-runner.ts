@@ -1,9 +1,10 @@
 import { query, forkSession as sdkForkSession, getSessionMessages as sdkGetSessionMessages } from '@anthropic-ai/claude-agent-sdk';
-import { ensureDir } from '../utils/ensure-dir.js';
-import { resolveAnthropicConfig } from '../baseagents/resolve.js';
+import { ensureDir } from '../utils/atomic-write.js';
+import { resolveAnthropicConfig } from './resolve.js';
 import type { Config, ChannelAdapter, ReplyContext, InteractionRequest, Message } from '../types.js';
 import { DEFAULT_PERMISSION_MODE } from '../types.js';
-import { renderActionAsText } from '../core/interaction-fallback.js';
+import { renderActionAsText } from '../core/interaction-router.js';
+import { buildEnvelope, sendInteractionPayload } from '../core/message/message-processor.js';
 import type { PermissionGateway, PermissionDecision } from '../core/permission.js';
 import path from 'path';
 import fs from 'fs';
@@ -11,7 +12,7 @@ import os from 'os';
 import { logger } from '../utils/logger.js';
 import { checkBlacklist, checkReadonly, summarizeToolInput } from '../core/permission.js';
 import { encodePath } from '../utils/cross-platform.js';
-import type { AgentPlugin, AgentInstance, AgentCallbacks } from '../core/agent-loader.js';
+import type { AgentPlugin, AgentInstance, AgentCallbacks } from '../core/baseagent-loader.js';
 import type { InteractionRouter } from '../core/interaction-router.js';
 
 /** 权限审批的渠道交互上下文 */
@@ -25,6 +26,14 @@ export interface PermissionContext {
   interceptNextMessage?: (sessionKey: string, handler: (message: Message) => void) => void;
   /** 取消消息拦截 */
   cancelIntercept?: (sessionKey: string) => void;
+  /** 渠道名称（用于构造 OutboundEnvelope） */
+  channel?: string;
+  /** EvolAgent 名称（用于构造 OutboundEnvelope） */
+  agentName?: string;
+  /** 当前任务 id（用于构造 OutboundEnvelope） */
+  taskId?: string;
+  /** 当前会话 chatmode（interactive | proactive） */
+  chatmode?: 'interactive' | 'proactive';
 }
 
 // ── SDK 消息流（Claude Agent SDK 专有格式）──
@@ -111,8 +120,8 @@ class MessageStream {
 export type AgentEvent =
   | { type: 'text'; text: string }
   | { type: 'status'; subtype: string; message: string }
-  | { type: 'tool_use'; name: string; input: any }
-  | { type: 'tool_result'; name: string; result: any; isError?: boolean; error?: string }
+  | { type: 'tool_use'; name: string; input: any; callId?: string }
+  | { type: 'tool_result'; name: string; result: any; isError?: boolean; error?: string; callId?: string }
   | { type: 'compact'; preTokens: number }
   | { type: 'task_progress'; summary?: string; toolUses?: number; durationMs?: number }
   | { type: 'session_id'; sessionId: string }
@@ -429,7 +438,11 @@ export class AgentRunner {
 
     // 没有交互上下文（无渠道适配器），回退到纯文本
     const permCtx = this.permissionContexts.get(sessionId);
-    if (!permCtx?.adapter?.sendInteraction || !permCtx?.channelId) {
+    if (!permCtx?.adapter || !permCtx?.channelId) {
+      return this.handleAskUserQuestionFallback(sessionId, input, questions);
+    }
+    const adapterHasInteractionPath = !!permCtx.adapter.send;
+    if (!adapterHasInteractionPath) {
       return this.handleAskUserQuestionFallback(sessionId, input, questions);
     }
 
@@ -438,7 +451,7 @@ export class AgentRunner {
     // 从 permCtx 构造 per-session 的发送函数，避免全局 sendPromptFn 被其他 channel 实例覆盖
     // 注意：sendPromptFn 是全局单例，多 channel 并发时会被覆盖，导致提示发到错误 channel
     const sendPrompt = permCtx.adapter && permCtx.channelId
-      ? async (text: string) => permCtx.adapter!.sendText(permCtx.channelId!, text, permCtx.replyContext)
+      ? async (text: string) => permCtx.adapter!.send(buildEnvelope({ channel: permCtx.adapter!.channelName, channelId: permCtx.channelId!, replyContext: permCtx.replyContext }), { kind: 'result.text', text, isFinal: true })
       : this.sendPromptFn;
 
     // 逐个 question 发送卡片并等待用户选择
@@ -484,10 +497,22 @@ export class AgentRunner {
 
       let cardSent = false;
       try {
-        const result = await permCtx.adapter.sendInteraction(
-          permCtx.channelId,
+        const envelope = buildEnvelope({
+          taskId: permCtx.taskId,
+          channel: permCtx.channel ?? permCtx.adapter.channelName,
+          channelId: permCtx.channelId,
+          agentName: permCtx.agentName,
+          chatmode: permCtx.chatmode,
+          replyContext: permCtx.replyContext,
+        });
+        const optionLines = q.options.map((o, idx) => `  ${idx + 1}. ${o.label}${o.description ? ` — ${o.description}` : ''}`).join('\n');
+        const fallbackText = `💬 ${q.header || q.question}\n${q.header ? q.question + '\n' : ''}${optionLines}`;
+        const result = await sendInteractionPayload(
+          permCtx.adapter,
+          envelope,
           interaction,
-          permCtx.replyContext
+          fallbackText,
+          permCtx.replyContext,
         );
         cardSent = !!result;
       } catch (err) {
@@ -554,7 +579,7 @@ export class AgentRunner {
   ): Promise<any> {
     const permCtx = this.permissionContexts.get(sessionId);
     const sendPrompt = permCtx?.adapter && permCtx?.channelId
-      ? async (text: string) => permCtx.adapter!.sendText(permCtx.channelId!, text, permCtx.replyContext)
+      ? async (text: string) => permCtx.adapter!.send(buildEnvelope({ channel: permCtx.adapter!.channelName, channelId: permCtx.channelId!, replyContext: permCtx.replyContext }), { kind: 'result.text', text, isFinal: true })
       : this.sendPromptFn;
 
     const answers: Record<string, string> = {};
@@ -619,7 +644,7 @@ export class AgentRunner {
   ): Promise<any> {
     const permCtx = this.permissionContexts.get(sessionId);
     const sendPrompt = permCtx?.adapter && permCtx?.channelId
-      ? async (text: string) => permCtx.adapter!.sendText(permCtx.channelId!, text, permCtx.replyContext)
+      ? async (text: string) => permCtx.adapter!.send(buildEnvelope({ channel: permCtx.adapter!.channelName, channelId: permCtx.channelId!, replyContext: permCtx.replyContext }), { kind: 'result.text', text, isFinal: true })
       : this.sendPromptFn;
 
     // 无任何交互能力，直接 allow
@@ -629,7 +654,7 @@ export class AgentRunner {
 
     // 尝试发送交互卡片
     let cardSent = false;
-    if (permCtx.adapter?.sendInteraction) {
+    if (permCtx.adapter?.send) {
       const requestId = `plan-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const interaction: InteractionRequest = {
         type: 'interaction',
@@ -645,10 +670,30 @@ export class AgentRunner {
         },
         channelId: permCtx.channelId,
         sessionId,
+        initiatorId: permCtx.userId,
+        fallback: {
+          command: 'ask',
+          buttonArgMap: { approve: '1', reject: '2' },
+        },
       };
 
       try {
-        const result = await permCtx.adapter.sendInteraction(permCtx.channelId, interaction, permCtx.replyContext);
+        const envelope = buildEnvelope({
+          taskId: permCtx.taskId,
+          channel: permCtx.channel ?? permCtx.adapter.channelName,
+          channelId: permCtx.channelId,
+          agentName: permCtx.agentName,
+          chatmode: permCtx.chatmode,
+          replyContext: permCtx.replyContext,
+        });
+        const fallbackText = '📋 计划审批：AI 已完成规划，等待审批。\n回复 /ask 1 批准 / /ask 2 拒绝';
+        const result = await sendInteractionPayload(
+          permCtx.adapter,
+          envelope,
+          interaction,
+          fallbackText,
+          permCtx.replyContext,
+        );
         cardSent = !!result;
       } catch (err) {
         logger.warn('[AgentRunner] ExitPlanMode card send failed:', err);
@@ -657,12 +702,13 @@ export class AgentRunner {
       if (cardSent) {
         return new Promise((resolve) => {
           permCtx.interactionRouter?.register(requestId, sessionId, (action: string) => {
-            if (action === 'approve') {
-              resolve({ behavior: 'allow' as const, updatedInput: input, decisionClassification: 'user_temporary' as const });
-            } else {
+            const trimmed = action.trim();
+            if (trimmed === '2' || trimmed.toLowerCase() === 'reject' || trimmed === '拒绝' || trimmed === 'reject') {
               resolve({ behavior: 'deny' as const, message: '用户拒绝了计划', decisionClassification: 'user_reject' as const });
+            } else {
+              resolve({ behavior: 'allow' as const, updatedInput: input, decisionClassification: 'user_temporary' as const });
             }
-          });
+          }, { initiatorId: permCtx.userId, fallbackCommand: 'ask' });
         });
       }
     }
@@ -758,7 +804,7 @@ export class AgentRunner {
           if (content.type === 'tool_use') {
             // 记录 id → name 映射，供后续 tool_result 使用
             if (content.id) toolUseNames.set(content.id, content.name);
-            yield { type: 'tool_use', name: content.name, input: content.input };
+            yield { type: 'tool_use', name: content.name, input: content.input, callId: content.id };
           } else if (content.type === 'text' && content.text && !hasTextDelta) {
             yield { type: 'text', text: content.text };
           }
@@ -780,6 +826,7 @@ export class AgentRunner {
               result: resultContent,
               isError: block.is_error === true,
               error: block.is_error === true ? resultContent : undefined,
+              callId: block.tool_use_id,
             };
           }
         }

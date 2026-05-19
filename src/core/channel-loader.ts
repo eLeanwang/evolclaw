@@ -109,6 +109,8 @@ export class ChannelLoader {
       aid: agent.aid,
       enabled: true,
       agentName: agent.aid,
+      // agent 顶层 owners[0] 透传给 AUN channel.owner（用于首次连接发欢迎消息）
+      owner: agent.config.owners?.[0],
     }];
 
     // 其它 channels（非 AUN）从 config.channels[] 取
@@ -191,4 +193,128 @@ export class ChannelLoader {
       instances.map((inst) => inst.disconnect())
     );
   }
+}
+
+// ── Channel Key ────────────────────────────────────────────────────────────
+// 编码格式：`<aid>#<type>#<name>`
+// `#` 不在 AID 合法字符集内，天然无歧义切分。
+
+export interface ChannelKey {
+  aid: string;
+  type: string;
+  name: string;
+}
+
+const SEP = '#';
+
+export function formatChannelKey(k: ChannelKey): string {
+  return `${k.aid}${SEP}${k.type}${SEP}${k.name}`;
+}
+
+export function parseChannelKey(key: string): ChannelKey {
+  const parts = key.split(SEP);
+  if (parts.length !== 3) {
+    throw new Error(`Invalid channel key (expected 3 segments separated by '#'): ${key}`);
+  }
+  const [aid, type, name] = parts;
+  if (!aid || !type || !name) {
+    throw new Error(`Invalid channel key (empty segment): ${key}`);
+  }
+  return { aid, type, name };
+}
+
+export function tryParseChannelKey(key: string): ChannelKey | null {
+  try { return parseChannelKey(key); } catch { return null; }
+}
+
+export function isValidChannelName(name: unknown): name is string {
+  return typeof name === 'string' && name.length > 0 && !name.includes(SEP);
+}
+
+// ── Reload Hooks ───────────────────────────────────────────────────────────
+// Builds the ReloadHooks implementation used by EvolAgentRegistry.reload()
+// to drain/disconnect/start channels during a hot reload.
+
+import type { ReloadHooks } from './evolagent-registry.js';
+
+export interface ReloadHooksDeps {
+  channelLoader: ChannelLoader;
+  channelInstances: ChannelInstance[];
+  registerChannelInstance: (inst: ChannelInstance) => void;
+  messageQueue?: { isChannelProcessing(channelName: string): boolean };
+  drainDelayMs?: number;
+  drainTimeoutMs?: number;
+}
+
+export function buildReloadHooks(deps: ReloadHooksDeps): ReloadHooks {
+  const { channelLoader, channelInstances, registerChannelInstance, messageQueue } = deps;
+  const drainDelayMs = deps.drainDelayMs ?? 500;
+  const drainTimeoutMs = deps.drainTimeoutMs ?? 30000;
+
+  return {
+    async drainChannel(channelName: string): Promise<void> {
+      logger.info(`[Reload] Draining channel: ${channelName}`);
+      if (messageQueue) {
+        const pollMs = 100;
+        const start = Date.now();
+        while (messageQueue.isChannelProcessing(channelName)) {
+          if (Date.now() - start > drainTimeoutMs) {
+            logger.warn(`[Reload] Drain timeout (${drainTimeoutMs}ms) for channel: ${channelName}, proceeding anyway`);
+            return;
+          }
+          await new Promise(r => setTimeout(r, pollMs));
+        }
+        logger.info(`[Reload] Drain complete: ${channelName}`);
+      } else if (drainDelayMs > 0) {
+        await new Promise(r => setTimeout(r, drainDelayMs));
+      }
+    },
+
+    async disconnectChannel(channelName: string): Promise<void> {
+      const inst = channelInstances.find(i => i.adapter.channelName === channelName);
+      if (!inst) {
+        logger.warn(`[Reload] Channel ${channelName} not found, skipping disconnect`);
+        return;
+      }
+      try {
+        await inst.disconnect();
+        const idx = channelInstances.indexOf(inst);
+        if (idx >= 0) channelInstances.splice(idx, 1);
+        logger.info(`[Reload] Disconnected channel: ${channelName}`);
+      } catch (e) {
+        logger.error(`[Reload] Failed to disconnect ${channelName}: ${e}`);
+        throw e;
+      }
+    },
+
+    async startChannel(agent: any, channelName: string): Promise<void> {
+      const channels = agent.config.channels;
+      let channelType: string | null = null;
+      for (const [type, raw] of Object.entries(channels)) {
+        const instances = Array.isArray(raw) ? raw : [raw];
+        for (const inst of instances) {
+          const name = (inst as any).name ?? type;
+          if (name === channelName) { channelType = type; break; }
+        }
+        if (channelType) break;
+      }
+      if (!channelType) {
+        const msg = `[Reload] Channel ${channelName} not found in agent ${agent.name} config`;
+        logger.error(msg);
+        throw new Error(msg);
+      }
+      const partialConfig: any = {
+        agents: agent.config.agents,
+        channels: { [channelType]: channels[channelType] },
+        projects: agent.config.projects,
+      };
+      const newInstances = await channelLoader.createAll(partialConfig);
+      const newInst = newInstances.find(i => i.adapter.channelName === channelName);
+      if (!newInst) throw new Error(`[Reload] Failed to create instance ${channelName}`);
+      registerChannelInstance(newInst);
+      await newInst.connect();
+      channelInstances.push(newInst);
+      logger.info(`[Reload] Started channel: ${channelName}`);
+    },
+  };
 }

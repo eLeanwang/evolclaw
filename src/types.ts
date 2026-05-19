@@ -345,35 +345,23 @@ export interface InteractionResponse {
 // 渠道适配器接口
 export interface ChannelAdapter {
   readonly channelName: string;
-  /** 渠道能力声明（Phase 3 新增）。缺省时按"全无"对待，调用方应做降级处理。 */
-  readonly capabilities?: ChannelCapabilities;
-  /**
-   * 统一出站入口（Phase 3 新增）。按 OutboundPayload.kind 分发。
-   * 缺省时调用方应回退到旧 sendText / sendFile / sendImage / sendProcessingStatus / putThought / sendInteraction / sendCustomPayload。
-   */
-  send?(envelope: OutboundEnvelope, payload: OutboundPayload): Promise<void>;
+  /** 渠道能力声明 */
+  readonly capabilities: ChannelCapabilities;
+  /** 统一出站入口，按 OutboundPayload.kind 分发 */
+  send(envelope: OutboundEnvelope, payload: OutboundPayload): Promise<void>;
 
-  sendText(channelId: string, text: string, context?: ReplyContext): Promise<void>;
-  sendFile?(channelId: string, filePath: string, context?: ReplyContext): Promise<void>;
-  sendImage?(channelId: string, png: Buffer, context?: ReplyContext): Promise<void>;
+  /** 入站回调 */
   acknowledge?(messageId: string): Promise<void>;
-  sendProcessingStatus?(channelId: string, status: 'start' | 'done' | 'interrupted' | 'error' | 'timeout', sessionId: string, taskId: string, context?: ReplyContext): void;
-  sendCustomPayload?(channelId: string, payload: string): void;
-  uploadAgentMd?(content: string): Promise<void>;
-  downloadAgentMd?(aid: string): Promise<string>;
-  sendInteraction?(channelId: string, interaction: InteractionRequest, context?: ReplyContext): Promise<string | false>;
-  patchInteractionCard?(messageId: string, card: object): Promise<void>;
   onInteraction?(callback: (response: InteractionResponse) => void): void;
   onChatDissolved?(callback: (channelId: string) => void): void;
-  /**
-   * 发送 thought 内容
-   * channelId 在群聊时为 groupId，私聊时为对方 AID
-   * taskId 是任务唯一标识，同一次任务处理的所有 thought 共享同一 task_id
-   * adapter 内部按 chatType 分发到 group.thought.put 或 message.thought.put
-   */
-  putThought?(channelId: string, taskId: string, payload: object, context?: ReplyContext): Promise<void>;
+
+  /** 连接管理 */
   connect?(): Promise<void>;
   disconnect?(): Promise<void>;
+
+  /** AUN 协议私有扩展 */
+  uploadAgentMd?(content: string): Promise<void>;
+  downloadAgentMd?(aid: string): Promise<string>;
 }
 
 // 渠道配置选项
@@ -406,7 +394,7 @@ export type CommandHandler = (
   channelId: string,
   userId?: string,
   threadId?: string
-) => Promise<string | null | undefined>;
+) => Promise<OutboundPayload | string | null | undefined>;
 
 // ── EvolAgent ──
 
@@ -601,6 +589,7 @@ export interface ProjectsBlock {
 export interface ChatmodeBlock {
   private?: 'interactive' | 'proactive';
   group?: 'interactive' | 'proactive';
+  nothuman?: 'interactive' | 'proactive';
 }
 
 export interface AunRuntimeBlock {
@@ -719,6 +708,8 @@ export interface AgentConfig {
   $schema_version: number;
   aid: string;
   enabled?: boolean;
+  /** 首次连接 AUN 网络后置 true：触发"补全 agent.md + 发欢迎消息"的一次性流程。 */
+  initialized?: boolean;
   owners?: string[];
   admins?: string[];
   aun?: AunRuntimeBlock;
@@ -728,6 +719,7 @@ export interface AgentConfig {
   models?: ModelsBlock;
   projects?: ProjectsBlock;
   chatmode?: ChatmodeBlock;
+  dispatch?: 'mention' | 'all';
   show_activities?: ShowActivitiesMode;
   flush_delay?: number;
   debounce?: number;
@@ -747,16 +739,25 @@ export interface MergedAgentConfig extends AgentConfig {
 
 // ── 出站协议类型（OutboundPayload / OutboundEnvelope / ChannelCapabilities） ──
 
+/**
+ * ThoughtItem — 结构化思考单元
+ * 多个 item 在 IMRenderer 聚合窗口内打包成 activity.batch 发送
+ */
+export type ThoughtItem =
+  | { kind: 'thinking'; text: string; duration_ms?: number }
+  | { kind: 'reasoning'; text: string; duration_ms?: number }
+  | { kind: 'tool_call'; call_id: string; name: string; arguments?: Record<string, unknown>; text?: string }
+  | { kind: 'tool_result'; call_id: string; name: string; ok: boolean; result?: unknown; error?: string; duration_ms?: number; text?: string }
+  | { kind: 'progress'; text: string; state?: 'processing' | 'waiting'; tool_uses?: number; duration_ms?: number }
+  | { kind: 'notice'; text: string; severity: 'info' | 'warn'; subtype?: string }
+  | { kind: 'summary'; text: string; subtype?: string; is_error?: boolean; duration_ms?: number };
+
 export type OutboundPayload =
   | { kind: 'result.text'; text: string; isFinal: boolean; format?: 'markdown' | 'plain' }
   | { kind: 'result.file'; filePath: string; fileName?: string; targetChannel?: string }
   | { kind: 'result.image'; data: Buffer; mimeType?: string; alt?: string }
   | { kind: 'result.error'; text: string; reason?: string }
-  | { kind: 'activity.tool_use'; text: string; metadata: { tool: string; callId: string; arguments?: Record<string, unknown>; input?: string } }
-  | { kind: 'activity.tool_result'; text: string; metadata: { tool: string; callId: string; ok: boolean; result?: unknown; durationMs?: number } }
-  | { kind: 'activity.thinking'; text: string }
-  | { kind: 'activity.progress'; text: string; metadata?: { state?: 'processing' | 'waiting'; progress?: number; toolUses?: number; durationMs?: number } }
-  | { kind: 'activity.notice'; text: string; severity: 'info' | 'warn'; subtype?: string }
+  | { kind: 'activity.batch'; items: ThoughtItem[] }
   | { kind: 'status.started'; metadata?: Record<string, unknown> }
   | { kind: 'status.completed'; metadata?: { durationMs?: number } }
   | { kind: 'status.interrupted'; metadata?: { reason: string } }

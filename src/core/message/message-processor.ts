@@ -3,7 +3,7 @@ import fs from 'fs';
 import crypto from 'crypto';
 import { type AgentRunnerFull, hasCompact, type AgentEvent } from '../../agents/claude-runner.js';
 import { SessionManager } from '../session/session-manager.js';
-import { appendMessageLog, buildOutboundEntry } from '../session/message-log.js';
+import { appendMessageLog, buildOutboundEntry } from './message-log.js';
 import { IMRenderer } from './im-renderer.js';
 import { MessageCache } from './message-cache.js';
 import type { MessageQueue } from './message-queue.js';
@@ -12,11 +12,44 @@ import { logger } from '../../utils/logger.js';
 import { getErrorMessage, classifyError, ErrorType, ERROR_PREFIX, isInfraError, prefixErrorType, isRetryableError } from '../../utils/error-utils.js';
 import { EventBus } from '../event-bus.js';
 import { summarizeToolInput } from '../permission.js';
-import type { Message, Session, ChannelAdapter, ChannelOptions, ChannelPolicy, CommandHandler, ReplyContext, AgentContext, EvolAgentRegistryHandle, GlobalSettings } from '../../types.js';
+import type { Message, Session, ChannelAdapter, ChannelOptions, ChannelPolicy, CommandHandler, ReplyContext, AgentContext, EvolAgentRegistryHandle, GlobalSettings, OutboundEnvelope, OutboundPayload, InteractionRequest, InteractionKind, ActionInteraction, CommandCard } from '../../types.js';
 import { DEFAULT_PERMISSION_MODE } from '../../types.js';
 import { getPackageRoot, resolveRoot } from '../../paths.js';
 import { renderPromptSection } from '../../agents/templates.js';
 import type { InteractionRouter } from '../interaction-router.js';
+import { renderActionAsText, renderCommandCardAsText } from '../interaction-router.js';
+
+/**
+ * 构造 OutboundEnvelope —— 出站三件套的信封部分。
+ *
+ * 用于所有走 adapter.send 的出站路径：
+ *  - 任务流内的 IMRenderer 投影（chatmode 由会话决定）
+ *  - 命令回显（MessageBridge.handleCommand，taskId 用合成 ID `cmd-...`）
+ *  - 网关层系统通知（src/index.ts，taskId 用 `system-...` / `restart-...` 等便于 events.log 关联）
+ *
+ * 注意：
+ *  - chatmode 缺省 `'interactive'`（系统通知 / 命令回显都属于同步交互）；
+ *  - timestamp 可由调用方注入（便于测试），缺省 `Date.now()`。
+ */
+export function buildEnvelope(opts: {
+  taskId?: string;
+  channel: string;
+  channelId: string;
+  agentName?: string;
+  chatmode?: 'interactive' | 'proactive';
+  replyContext?: ReplyContext;
+  timestamp?: number;
+}): OutboundEnvelope {
+  return {
+    taskId: opts.taskId ?? `interaction-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    channel: opts.channel,
+    channelId: opts.channelId,
+    agentName: opts.agentName ?? '<unknown>',
+    chatmode: opts.chatmode ?? 'interactive',
+    replyContext: opts.replyContext,
+    timestamp: opts.timestamp ?? Date.now(),
+  };
+}
 
 /**
  * 统一消息处理器
@@ -147,7 +180,7 @@ export class MessageProcessor {
       this.eventBus.publish({ type: 'runner:compact-start', sessionId });
     }
     if (this.currentRenderer && !this.shouldSuppressActivities) {
-      this.currentRenderer.addActivity('\u23f3 会话压缩中...');
+      this.currentRenderer.addNotice('\u23f3 会话压缩中...', 'info', 'compact-start', true);
     }
   }
 
@@ -201,6 +234,7 @@ export class MessageProcessor {
     const streamKey = session.id;
     const chatType = message.chatType || 'private';
     const identityRole = session.identity?.role || 'anonymous';
+    const agentNameForMonitor = this.agentRegistry?.resolveByChannel(channelKey)?.name ?? '<unknown>';
 
     // Resolve agent context from registry (Phase 2 foundation)
     const agentContext = this.getAgentContext(channelKey, chatType);
@@ -231,7 +265,7 @@ export class MessageProcessor {
     // Cache background status to avoid async call inside setInterval
     const isBackground = await this.isBackgroundSession(session, message.channel, message.channelId);
 
-    const timeoutPromise = new Promise<never>((_, reject) => {
+        const timeoutPromise = new Promise<never>((_, reject) => {
       rejectFn = reject;
       if (!monitorEnabled) return;
 
@@ -248,7 +282,10 @@ export class MessageProcessor {
               const msg = showIdleMonitor
                 ? result.message
                 : `\u26a0\ufe0f 任务超时（${result.idleSec}秒无响应），已自动中断`;
-              channelInfo.adapter.sendText(message.channelId, msg, this.getReplyContext(message)).catch(e => {
+              channelInfo.adapter.send(
+                buildEnvelope({ channel: channelInfo.adapter.channelName, channelId: message.channelId, agentName: agentNameForMonitor }),
+                { kind: 'system.notice', text: msg, subtype: 'health' }
+              ).catch(e => {
                 logger.debug(`[MessageProcessor] Failed to send kill diagnostic message:`, e);
               });
             }
@@ -263,7 +300,10 @@ export class MessageProcessor {
             logger.info(`[MessageProcessor] Idle monitor: ${result.action} after ${result.idleSec}s idle, stream: ${streamKey}`);
             if (channelInfo && showIdleMonitor && !shouldSuppress()) {
               if (!isBackground) {
-                channelInfo.adapter.sendText(message.channelId, result.message, this.getReplyContext(message)).catch(e => {
+                channelInfo.adapter.send(
+                  buildEnvelope({ channel: channelInfo.adapter.channelName, channelId: message.channelId, agentName: agentNameForMonitor }),
+                  { kind: 'system.notice', text: result.message, subtype: 'health' }
+                ).catch(e => {
                   logger.debug(`[MessageProcessor] Failed to send idle monitor message:`, e);
                 });
               }
@@ -357,6 +397,15 @@ export class MessageProcessor {
       };
     };
 
+    const isProactive = session.sessionMode === 'proactive';
+    const envelope = buildEnvelope({
+      taskId,
+      channel: message.channel,
+      channelId: message.channelId,
+      agentName: agentNameForStats,
+      chatmode: isProactive ? 'proactive' : 'interactive',
+      replyContext: taskReplyContext(),
+    });
 
     try {
       const isBackground = await this.isBackgroundSession(session, message.channel, message.channelId);
@@ -392,7 +441,7 @@ export class MessageProcessor {
 
       // 记录开始处理
       this.eventBus.publish({ type: 'task:started', sessionId: session.id });
-      adapter.sendProcessingStatus?.(message.channelId, 'start', session.id, taskId, taskReplyContext());
+      adapter.send(envelope, { kind: 'status.started' }).catch(() => {});
 
       logger.message({
         msgId: messageId,
@@ -405,34 +454,34 @@ export class MessageProcessor {
 
       // 创建 IMRenderer（统一 interactive/proactive 两条路径）
       let firstReply = true;
-      const isProactive = session.sessionMode === 'proactive';
       const renderer = new IMRenderer({
         adapter,
-        channelId: message.channelId,
-        taskId,
-        chatmode: isProactive ? 'proactive' : 'interactive',
-        replyContext: this.getReplyContext(message),
+        envelope,
         flushDelay: (options?.flushDelay ?? this.agentRegistry?.resolveByChannel(channelKey)?.config?.flush_delay ?? 3) * 1000,
         suppressActivities: shouldSuppress(),
         fileMarkerPattern: options?.fileMarkerPattern,
         diagEnabled: this.globalSettings.debug?.flusherDiag,
-        sendText: async (text, isFinal, hasText) => {
+        send: async (payload) => {
           const isCurrentlyBackground = await this.isBackgroundSession(session, message.channel, message.channelId);
-          if (!isCurrentlyBackground) {
-            const opts: ReplyContext = {};
-            if (isFinal) opts.title = '\u2713 \u6700\u7ec8\u56de\u590d:';
-            const replyCtx = this.getReplyContext(message);
-            if (replyCtx) {
-              Object.assign(opts, replyCtx);
-            } else if (firstReply && message.messageId) {
-              if (hasText) {
-                opts.replyToMessageId = message.messageId;
-                firstReply = false;
-              }
+          if (isCurrentlyBackground) return;
+
+          const opts: ReplyContext = {};
+          const baseReplyCtx = this.getReplyContext(message);
+          if (baseReplyCtx) {
+            Object.assign(opts, baseReplyCtx);
+          } else if (firstReply && message.messageId) {
+            if (payload.kind === 'result.text' && payload.text) {
+              opts.replyToMessageId = message.messageId;
+              firstReply = false;
             }
-            opts.metadata = { ...(opts.metadata ?? {}), taskId, chatmode };
-            await adapter.sendText(message.channelId, text, opts);
           }
+          if (payload.kind === 'result.text' && payload.isFinal) {
+            opts.title = '\u2713 \u6700\u7ec8\u56de\u590d:';
+          }
+          opts.metadata = { ...(opts.metadata ?? {}), taskId, chatmode };
+
+          const enrichedEnvelope: OutboundEnvelope = { ...envelope, replyContext: opts };
+          await adapter.send(enrichedEnvelope, payload);
         },
       });
 
@@ -450,7 +499,7 @@ export class MessageProcessor {
 
       // 设置权限审批的消息发送回调（指向当前渠道）
       agent.setSendPrompt(async (text: string) => {
-        await adapter.sendText(capturedChannelId, text, capturedReplyContext);
+        await adapter.send({ ...envelope, replyContext: capturedReplyContext }, { kind: 'result.text', text, isFinal: true });
       });
 
       // 设置权限审批的交互上下文（支持交互卡片）
@@ -460,6 +509,10 @@ export class MessageProcessor {
         replyContext: capturedReplyContext,
         interactionRouter: this.interactionRouter,
         userId: message.peerId || undefined,
+        channel: message.channel,
+        agentName: agentNameForStats,
+        taskId,
+        chatmode: isProactive ? 'proactive' : 'interactive',
         interceptNextMessage: this.messageQueue
           ? (sessionKey, handler) => this.messageQueue!.interceptNext(sessionKey, handler)
           : undefined,
@@ -486,6 +539,7 @@ export class MessageProcessor {
         : message.content;
 
       let streamResult: { isError: boolean; subtype?: string; errors?: string[]; terminalReason?: string; lastReplyText: string; fullText: string; hasReceivedText: boolean } = { isError: false, lastReplyText: '', fullText: '', hasReceivedText: false };
+      let effectiveSystemPrompt: string | undefined;
 
       try {
         // 动态构建运行时上下文提示
@@ -514,9 +568,9 @@ export class MessageProcessor {
         let currentCanSend = false;
         if (!isProactive) {
           const fileChannelTypes = new Set<string>();
-          currentCanSend = !!channelInfo.adapter.sendFile;
+          currentCanSend = !!(channelInfo.adapter.capabilities?.file);
           for (const [, info] of this.channels) {
-            if (info.adapter.sendFile) {
+            if (info.adapter.capabilities?.file) {
               fileChannelTypes.add(info.options?.channelType || info.adapter.channelName);
             }
           }
@@ -526,8 +580,8 @@ export class MessageProcessor {
         // 通道能力
         const capParts: string[] = [];
         if (options?.supportsImages) capParts.push('图片输入');
-        if (channelInfo.adapter.sendImage) capParts.push('图片输出');
-        if (channelInfo.adapter.sendFile) capParts.push('文件发送');
+        if (channelInfo.adapter.capabilities?.image) capParts.push('图片输出');
+        if (channelInfo.adapter.capabilities?.file) capParts.push('文件发送');
 
         // Personal layer: persona.md + working memory 注入
         const owningAgent = this.agentRegistry?.resolveByChannel(channelKey);
@@ -568,7 +622,7 @@ export class MessageProcessor {
           contextParts.push(renderPromptSection('proactive', {}));
         }
 
-        const effectiveSystemPrompt = [options?.systemPromptAppend, ...contextParts].filter(Boolean).join('\n') || undefined;
+        effectiveSystemPrompt = [options?.systemPromptAppend, ...contextParts].filter(Boolean).join('\n') || undefined;
 
         // 可重试错误（403/429/5xx）指数退避重试，最多 3 次
         const MAX_RETRIES = 3;
@@ -603,7 +657,7 @@ export class MessageProcessor {
             if (attempt < MAX_RETRIES && isRetryableError(retryError)) {
               const delay = Math.pow(2, attempt) * 1000; // 2s, 4s
               logger.warn(`[MessageProcessor] Retryable error (attempt ${attempt}/${MAX_RETRIES}), retrying in ${delay}ms:`, retryError);
-              renderer.addActivity(`⚠️ API 暂时不可用，${delay / 1000}秒后重试 (${attempt}/${MAX_RETRIES})...`);
+              renderer.addNotice(`⚠️ API 暂时不可用，${delay / 1000}秒后重试 (${attempt}/${MAX_RETRIES})...`, 'warn', 'retry', true);
               await renderer.flush();
               await new Promise(resolve => setTimeout(resolve, delay));
               continue;
@@ -614,7 +668,7 @@ export class MessageProcessor {
       } catch (error) {
         if (classifyError(error) === ErrorType.CONTEXT_TOO_LONG && session.agentSessionId && hasCompact(agent)) {
           // 尝试 compact 压缩会话
-          renderer.addActivity('\u26a0\ufe0f 上下文过长，正在压缩会话...');
+          renderer.addNotice('\u26a0\ufe0f 上下文过长，正在压缩会话...', 'warn', 'compact-trigger', true);
           await renderer.flush();
 
           const compacted = await agent.compact(
@@ -623,14 +677,14 @@ export class MessageProcessor {
 
           if (compacted) {
             // compact 成功，带 resume 重试（不重复原始消息，让 Agent 继续未完成的工作）
-            renderer.addActivity('\u2705 压缩完成，正在重试...');
+            renderer.addNotice('\u2705 压缩完成，正在重试...', 'info', 'compact-retry', true);
             const retryStream = await agent.runQuery(
               session.id,
               '上下文已自动压缩，请继续之前未完成的任务。',
               absoluteProjectPath,
               session.agentSessionId,
               undefined,
-              options?.systemPromptAppend,
+              effectiveSystemPrompt,
               this.sessionManager
             );
             agent.registerStream(streamKey, retryStream);
@@ -692,24 +746,24 @@ export class MessageProcessor {
 
         // 跨通道仅限 owner
         if (isCrossChannel && session.identity?.role !== 'owner') {
-          await adapter.sendText(message.channelId, `\u274c 跨通道发送仅限管理员`, taskReplyContext());
+          await adapter.send(envelope, { kind: 'system.error', text: `\u274c 跨通道发送仅限管理员`, subtype: 'fatal' });
           continue;
         }
 
         const resolvedPath = this.resolveFilePath(filePath, absoluteProjectPath);
         if (!fs.existsSync(resolvedPath)) {
           logger.warn(`[${adapter.channelName}] File not found: ${resolvedPath}`);
-          await adapter.sendText(message.channelId, `\u26a0\ufe0f 文件未找到: ${filePath}`, taskReplyContext());
+          await adapter.send(envelope, { kind: 'system.error', text: `\u26a0\ufe0f 文件未找到: ${filePath}`, subtype: 'fatal' });
           continue;
         }
 
         // 找目标 adapter
         if (!targetInfo) {
-          await adapter.sendText(message.channelId, `\u274c 通道 ${targetLabel} 未启用或不存在`, taskReplyContext());
+          await adapter.send(envelope, { kind: 'system.error', text: `\u274c 通道 ${targetLabel} 未启用或不存在`, subtype: 'channel_down' });
           continue;
         }
-        if (!targetInfo.adapter.sendFile) {
-          await adapter.sendText(message.channelId, `\u274c 通道 ${targetLabel} 不支持文件发送`, taskReplyContext());
+        if (!targetInfo.adapter.capabilities?.file) {
+          await adapter.send(envelope, { kind: 'system.error', text: `\u274c 通道 ${targetLabel} 不支持文件发送`, subtype: 'capability' });
           continue;
         }
 
@@ -721,21 +775,21 @@ export class MessageProcessor {
           const ownerPeerId = this.agentRegistry?.getOwner?.(targetAdapterName);
           targetChannelId = ownerPeerId ? (this.sessionManager.getOwnerChatId(targetChannelType, ownerPeerId) ?? '') : '';
           if (!targetChannelId) {
-            await adapter.sendText(message.channelId, `\u274c 未找到 ${targetLabel} 的私聊会话，请先在该通道发送一条消息`, taskReplyContext());
+            await adapter.send(envelope, { kind: 'system.error', text: `\u274c 未找到 ${targetLabel} 的私聊会话，请先在该通道发送一条消息`, subtype: 'channel_down' });
             continue;
           }
         }
 
         logger.info(`[${adapter.channelName}] Sending file via ${targetInfo.adapter.channelName}: ${resolvedPath}`);
         try {
-          await targetInfo.adapter.sendFile(targetChannelId, resolvedPath, taskReplyContext());
+          await targetInfo.adapter.send(buildEnvelope({ taskId, channel: targetInfo.adapter.channelName, channelId: targetChannelId, agentName: agentNameForStats, replyContext: taskReplyContext() }), { kind: 'result.file', filePath: resolvedPath });
           this.eventBus.publish({ type: 'runner:file-sent', sessionId: session.id, filePath: resolvedPath, channel: targetInfo.adapter.channelName });
           if (isCrossChannel) {
-            await adapter.sendText(message.channelId, `\ud83d\udcce 文件已通过 ${targetLabel} 发送`, taskReplyContext());
+            await adapter.send(envelope, { kind: 'system.notice', text: `\ud83d\udcce 文件已通过 ${targetLabel} 发送`, subtype: 'health' });
           }
         } catch (error) {
           logger.error(`[${adapter.channelName}] Failed to send file: ${resolvedPath}`, error);
-          await adapter.sendText(message.channelId, `\u274c 文件发送失败: ${filePath}`, taskReplyContext());
+          await adapter.send(envelope, { kind: 'system.error', text: `\u274c 文件发送失败: ${filePath}`, subtype: 'fatal' });
         }
       }
       }  // end of !isProactive
@@ -760,7 +814,7 @@ export class MessageProcessor {
           // Proactive 模式 + SDK 本地兜底：直接 sendText 绕过 silent renderer
           const isCurrentlyBackground = await this.isBackgroundSession(session, message.channel, message.channelId);
           if (!isCurrentlyBackground) {
-            await adapter.sendText(message.channelId, finalReplyText, capturedReplyContext);
+            await adapter.send({ ...envelope, replyContext: capturedReplyContext }, { kind: 'result.text', text: finalReplyText, isFinal: true });
             logger.info(`[MessageProcessor] proactive SDK fallback replied task=${taskId} text="${finalReplyText.slice(0, 60)}"`);
           }
         } else if (shouldSuppress()) {
@@ -794,7 +848,7 @@ export class MessageProcessor {
         const errorSummary = streamResult.errors?.join('; ') || '任务执行失败';
         const rawSubtype = streamResult.subtype || 'agent_error';
         const errorType = prefixErrorType(ERROR_PREFIX.AGENT, rawSubtype);
-        adapter.sendProcessingStatus?.(message.channelId, 'error', session.id, taskId, taskReplyContext());
+        adapter.send(envelope, { kind: 'status.error', metadata: { errorType: rawSubtype } }).catch(() => {});
 
         this.eventBus.publish({
           type: 'task:error',
@@ -825,7 +879,12 @@ export class MessageProcessor {
         });
       } else {
         // 真正的成功
-        adapter.sendProcessingStatus?.(message.channelId, interruptReason ? 'interrupted' : 'done', session.id, taskId, taskReplyContext());
+        const durationMs = Date.now() - startTime;
+        if (interruptReason) {
+          adapter.send(envelope, { kind: 'status.interrupted', metadata: { reason: interruptReason } }).catch(() => {});
+        } else {
+          adapter.send(envelope, { kind: 'status.completed', metadata: { durationMs } }).catch(() => {});
+        }
         await this.sessionManager.recordSuccess(session.id);
 
         this.eventBus.publish({
@@ -871,7 +930,7 @@ export class MessageProcessor {
       if (isFinallyBackground) {
         const projectName = path.basename(session.projectPath);
         const count = this.messageCache.getCount(session.id);
-        await adapter.sendText(message.channelId, `[\u540e\u53f0-${projectName}] \u2713 任务完成 (${count}条消息已缓存)`, taskReplyContext());
+        await adapter.send(envelope, { kind: 'system.notice', text: `[\u540e\u53f0-${projectName}] \u2713 任务完成 (${count}条消息已缓存)`, subtype: 'background' });
       }
 
       // 记录发送响应
@@ -901,7 +960,12 @@ export class MessageProcessor {
 
       // 用户主动中断（新消息打断 或 /stop 命令）时静默，不发送中断/错误提示
       if (!isUserInterrupt) {
-        try { adapter.sendProcessingStatus?.(message.channelId, procStatus, session.id, taskId, taskReplyContext()); } catch {}
+        const statusPayload = procStatus === 'timeout'
+          ? { kind: 'status.timeout' as const }
+          : procStatus === 'interrupted'
+          ? { kind: 'status.interrupted' as const, metadata: { reason: 'stream_error' } }
+          : { kind: 'status.error' as const };
+        adapter.send(envelope, statusPayload).catch(() => {});
       }
 
       // 用户主动中断时降级日志；其余仍按 error 记录
@@ -962,7 +1026,7 @@ export class MessageProcessor {
           ...(sendOpts ?? {}),
           metadata: { ...(sendOpts?.metadata ?? {}), taskId, chatmode },
         };
-        await adapter.sendText(message.channelId, userMessage, sendOpts);
+        await adapter.send({ ...envelope, replyContext: sendOpts }, { kind: 'result.text', text: userMessage, isFinal: true });
 
         // Proactive 可观测：catch 块的基础设施错误也透传为 thought，保证按 task_id 聚合完整
       }
@@ -1101,7 +1165,7 @@ export class MessageProcessor {
         if (event.type === 'compact') {
           this.eventBus.publish({ type: 'runner:compact-complete', sessionId: session.id, preTokens: event.preTokens });
           if (!shouldSuppress()) {
-            renderer.addActivity(`\ud83d\udca1 会话压缩完成，继续执行...（压缩前 tokens: ${event.preTokens}）`);
+            renderer.addNotice(`\ud83d\udca1 会话压缩完成，继续执行...（压缩前 tokens: ${event.preTokens}）`, 'info', 'compact');
           }
         }
 
@@ -1112,9 +1176,9 @@ export class MessageProcessor {
           const stats = [tools > 0 ? `${tools}\u6b21\u5de5\u5177\u8c03\u7528` : '', duration].filter(Boolean).join(', ');
 
           if (event.summary && !shouldSuppress()) {
-            renderer.addActivity(`\u23f3 \u5b50\u4efb\u52a1: ${event.summary}${stats ? ` (${stats})` : ''}`);
+            renderer.addProgress(`\u5b50\u4efb\u52a1: ${event.summary}${stats ? ` (${stats})` : ''}`, { state: 'processing', toolUses: event.toolUses, durationMs: event.durationMs });
           } else if (stats && !shouldSuppress()) {
-            renderer.addActivity(`\u23f3 \u5b50\u4efb\u52a1\u8fdb\u884c\u4e2d: ${stats}`);
+            renderer.addProgress(`\u5b50\u4efb\u52a1\u8fdb\u884c\u4e2d: ${stats}`, { state: 'processing', toolUses: event.toolUses, durationMs: event.durationMs });
           }
         }
 
@@ -1131,7 +1195,7 @@ export class MessageProcessor {
           });
           if (!shouldSuppress()) {
             const desc = summarizeToolInput(event.name, event.input || {});
-            renderer.addActivity(`\ud83d\udd27 ${event.name}${desc ? ': ' + desc : ''}`);
+            renderer.addToolCall(event.name, event.input, event.callId, desc);
           }
         }
 
@@ -1152,7 +1216,9 @@ export class MessageProcessor {
             let errorMsg = event.error || (typeof event.result === 'string' ? event.result : JSON.stringify(event.result)) || '\u6267\u884c\u5931\u8d25';
             // 移除 XML 风格的错误标签
             errorMsg = errorMsg.replace(/<tool_use_error>(.*?)<\/tool_use_error>/gs, '$1');
-            renderer.addActivity(`\u26a0\ufe0f ${event.name || '\u5de5\u5177'}: ${errorMsg}`);
+            renderer.addToolResult(event.name || '\u5de5\u5177', false, undefined, errorMsg, event.callId);
+          } else if (!event.isError && !shouldSuppress()) {
+            renderer.addToolResult(event.name || '\u5de5\u5177', true, event.result, undefined, event.callId);
           }
         }
 
@@ -1162,7 +1228,7 @@ export class MessageProcessor {
 
           if (!hasErrorResult && !shouldSuppress()) {
             hasErrorResult = true;
-            renderer.addActivity(`\u274c ${event.error}`);
+            renderer.addNotice(`\u274c ${event.error}`, 'warn', 'runtime-error', true);
           }
         }
 
@@ -1191,7 +1257,7 @@ export class MessageProcessor {
             const userFriendlyMessage = event.terminalReason
               ? getErrorMessage(null, event.terminalReason)
               : `\u274c ${errorSummary}`;
-            renderer.addActivity(userFriendlyMessage);
+            renderer.addNotice(userFriendlyMessage, 'warn', 'task-error', true);
           }
 
           // 中间 complete：flush 掉已有 activities（不带 isFinal），让中间结果及时显示
@@ -1284,7 +1350,7 @@ export class MessageProcessor {
         logger.error('[MessageProcessor] Stream processing error:', error);
       }
       if (error instanceof Error && error.message.includes('process exited')) {
-        renderer.addActivity('\u274c Claude Code \u8fdb\u7a0b\u5f02\u5e38\u9000\u51fa\uff0c\u8bf7\u91cd\u8bd5');
+        renderer.addNotice('\u274c Claude Code \u8fdb\u7a0b\u5f02\u5e38\u9000\u51fa\uff0c\u8bf7\u91cd\u8bd5', 'warn', 'process-exit', true);
       }
       // Flush any pending error activities before re-throwing,
       // and mark the error so outer catch won't send a duplicate message
@@ -1430,8 +1496,71 @@ export class MessageProcessor {
     if (/^[.\s\u2026]+$/.test(filePath)) return true;
 
     // 含正则/代码特殊字符（Agent 在说明中引用了代码或正则表达式）
-    if (/[\\[\]{}*+?|^$]/.test(filePath)) return true;
+    if (/[\[\]{}*+?|^$]/.test(filePath)) return true;
 
+    return false;
+  }
+}
+
+// ── 出站协议辅助：buildEnvelope / sendInteractionPayload ──
+// Phase 3 of outbound unification: callers (permission flow, CommandHandler
+// interaction cards, claude-runner AskUserQuestion / ExitPlanMode) should
+// produce `{ kind: 'interaction', interaction, fallbackText }` and dispatch
+// via `adapter.send(envelope, payload)` instead of calling
+// `adapter.sendInteraction(...)` directly. These helpers centralise the
+// indirection and provide a backwards-compatible fallback path for adapters
+// that do not yet implement `send`.
+
+/**
+ * Default fallback text for an InteractionRequest. Used when the caller
+ * does not supply one explicitly. Picks the appropriate renderer based on
+ * the interaction kind.
+ */
+export function defaultFallbackText(interaction: InteractionRequest): string {
+  const kind: InteractionKind = interaction.kind;
+  if (kind.kind === 'command-card') {
+    return renderCommandCardAsText(kind);
+  }
+  if (kind.kind === 'action') {
+    try {
+      return renderActionAsText(interaction);
+    } catch {
+      // ActionInteraction without fallback metadata — produce a minimal hint
+      const action = kind as ActionInteraction;
+      const lines = [action.title];
+      if (action.body) lines.push(action.body);
+      return lines.join('\n');
+    }
+  }
+  return '';
+}
+
+/**
+ * Send an interaction payload through the unified `adapter.send` entrypoint.
+ *
+ * Sends an interaction via adapter.send(envelope, { kind: 'interaction', ... }).
+ * Returns 'sent' on success, false on failure.
+ */
+export async function sendInteractionPayload(
+  adapter: ChannelAdapter,
+  envelope: OutboundEnvelope,
+  interaction: InteractionRequest,
+  fallbackText?: string,
+  replyCtx?: ReplyContext,
+): Promise<string | false> {
+  const text = fallbackText ?? defaultFallbackText(interaction);
+  const payload: OutboundPayload = {
+    kind: 'interaction',
+    interaction,
+    fallbackText: text || undefined,
+  };
+  try {
+    const enriched: OutboundEnvelope = replyCtx
+      ? { ...envelope, replyContext: replyCtx }
+      : envelope;
+    await adapter.send(enriched, payload);
+    return 'sent';
+  } catch {
     return false;
   }
 }

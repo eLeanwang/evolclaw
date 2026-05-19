@@ -1,12 +1,14 @@
+import { randomBytes } from 'crypto';
 import { logger } from '../../utils/logger.js';
 import { StreamDebouncer } from './stream-debouncer.js';
-import { appendMessageLog, buildInboundEntry } from '../session/message-log.js';
+import { appendMessageLog, buildInboundEntry } from './message-log.js';
+import { buildEnvelope } from './message-processor.js';
 import type { SessionManager } from '../session/session-manager.js';
 import type { MessageProcessor } from './message-processor.js';
 import type { MessageQueue } from './message-queue.js';
 import type { CommandHandler as CmdHandler } from '../command-handler.js';
 import type { EventBus } from '../event-bus.js';
-import type { Message, InboundMessage, ChannelAdapter, ReplyContext, EvolAgentRegistryHandle } from '../../types.js';
+import type { Message, InboundMessage, ChannelAdapter, ReplyContext, EvolAgentRegistryHandle, OutboundPayload } from '../../types.js';
 
 /**
  * MessageBridge — Channel 与 Core 之间的消息桥梁
@@ -88,7 +90,8 @@ export class MessageBridge {
         }
         if (await this.handleCommand(cmdContent, channelName, msg.channelId,
           (text) => sendReply(msg.channelId, text, msg.replyContext),
-          msg.peerId, msg.threadId, msg.chatType, msg.source
+          msg.peerId, msg.threadId, msg.chatType, msg.source,
+          msg.replyContext
         )) return;
 
         // 3. session 解析（使用 Channel 层填充的 chatType）
@@ -206,35 +209,45 @@ export class MessageBridge {
         const result = await this.cmdHandler.execMenu(parsed.cmd, parsed.mode, channel, msg.channelId, msg.peerId);
         const base = { type: 'menu.response', cmd: parsed.cmd };
         const response = JSON.stringify('error' in result ? { ...base, error: result.error } : { ...base, data: result.data });
-        if (adapter?.sendCustomPayload) {
-          adapter.sendCustomPayload(msg.channelId, response);
-        } else {
-          await sendReply(msg.channelId, response);
-        }
+        await this.sendCustomResponse(adapter, channel, msg.channelId, response, sendReply);
       } else if (parsed.cmd) {
         // 动态子菜单查询
         const items = await this.cmdHandler.getSubMenuItems(parsed.cmd, channel, msg.channelId, msg.peerId);
         const response = JSON.stringify({ type: 'menu.response', cmd: parsed.cmd, items: items ?? [] });
-        if (adapter?.sendCustomPayload) {
-          adapter.sendCustomPayload(msg.channelId, response);
-        } else {
-          await sendReply(msg.channelId, response);
-        }
+        await this.sendCustomResponse(adapter, channel, msg.channelId, response, sendReply);
       } else {
         // 全量菜单
         const identity = this.sessionManager.resolveIdentity(channel, msg.peerId);
         const items = this.cmdHandler.getMenuItems(identity.role, msg.chatType || 'private');
         const response = JSON.stringify({ type: 'menu.response', items });
-        if (adapter?.sendCustomPayload) {
-          adapter.sendCustomPayload(msg.channelId, response);
-        } else {
-          await sendReply(msg.channelId, response);
-        }
+        await this.sendCustomResponse(adapter, channel, msg.channelId, response, sendReply);
       }
       return true;
     }
 
     return false;
+  }
+
+  /** menu.query 响应：优先走 adapter.send(custom)，降级 sendReply */
+  private async sendCustomResponse(
+    adapter: ChannelAdapter | undefined,
+    channel: string,
+    channelId: string,
+    response: string,
+    sendReply: (channelId: string, text: string) => Promise<void>,
+  ): Promise<void> {
+    if (adapter?.send) {
+      const agentName = this.agentRegistry?.resolveByChannel(channel)?.name ?? '<unknown>';
+      const envelope = buildEnvelope({
+        taskId: `menu-${randomBytes(4).toString('hex')}`,
+        channel,
+        channelId,
+        agentName,
+      });
+      await adapter.send(envelope, { kind: 'custom', channelType: channel, payload: response });
+    } else {
+      await sendReply(channelId, response);
+    }
   }
 
   /** 首次交互自动绑定 owner —— 通过 channel-routed self-agent 完成 */
@@ -256,17 +269,48 @@ export class MessageBridge {
   private async handleCommand(
     content: string, channel: string, channelId: string,
     sendReply: (text: string) => Promise<void>,
-    userId?: string, threadId?: string, chatType?: string, source?: 'user' | 'card-trigger'
+    userId?: string, threadId?: string, chatType?: string, source?: 'user' | 'card-trigger',
+    replyContext?: ReplyContext
   ): Promise<boolean> {
     if (!this.cmdHandler.isCommand(content)) return false;
     logger.info(`[${channel}] ${channelId}: ${content}${source === 'card-trigger' ? ' [card]' : ''}`);
     const cmdResult = await this.cmdHandler.handle(content, channel, channelId,
       (_cid, text, opts) => sendReply(text),
       userId, threadId, chatType, source);
-    logger.debug(`[MessageBridge] handleCommand: result type=${typeof cmdResult}, value=${cmdResult === null ? 'null' : cmdResult === undefined ? 'undefined' : 'string'}`);
+    logger.debug(`[MessageBridge] handleCommand: result type=${typeof cmdResult}`);
     if (cmdResult === undefined) return false;
     if (cmdResult) {
-      try { await sendReply(cmdResult); } catch (error) {
+      // 规范化为 OutboundPayload：string → command.result 包装；object → 透传
+      let payload: OutboundPayload;
+      if (typeof cmdResult === 'string') {
+        payload = { kind: 'command.result', text: cmdResult };
+      } else if (typeof cmdResult === 'object' && cmdResult !== null && 'kind' in cmdResult) {
+        payload = cmdResult as OutboundPayload;
+      } else {
+        // 不识别的返回值，按已处理但无回显处理
+        return true;
+      }
+
+      // 出站走 adapter.send 统一入口
+      const adapter = this.processor.getChannelInfo?.(channel)?.adapter;
+      const envelope = buildEnvelope({
+        taskId: `cmd-${randomBytes(5).toString('hex')}`,
+        channel,
+        channelId,
+        agentName: this.agentRegistry?.resolveByChannel(channel)?.name ?? '<unknown>',
+        chatmode: 'interactive',
+        replyContext,
+      });
+
+      try {
+        if (adapter?.send) {
+          await adapter.send(envelope, payload);
+        } else {
+          // 降级路径：渠道未实现 send 时回退到原有 sendReply（仅文本）
+          const fallbackText = ('text' in payload && typeof payload.text === 'string') ? payload.text : '';
+          if (fallbackText) await sendReply(fallbackText);
+        }
+      } catch (error) {
         logger.error(`[${channel}] Failed to send command response:`, error);
       }
     }

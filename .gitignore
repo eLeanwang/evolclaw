@@ -1,22 +1,15 @@
 # 配置文件（包含敏感信息）
 config.toml
-data/evolclaw.backup.json
 
-# 数据库
-data/*.db
-data/*.db-*
+# 运行时数据（保留 error-dict.json 作为基线资源）
+data/*
+!data/error-dict.json
+
+# kits 同步元数据（运行时生成）
+kits/.kits-version
 
 # 日志
 logs/
-data/*.log
-
-# 运行时文件
-data/restart-pending.json
-data/restart-confirm-*.json
-data/wechat-*.txt
-data/wechat-*.json
-data/evolclaw-*.json
-data/*.pid
 
 # Node.js
 node_modules/
@@ -93,8 +86,6 @@ agents/
 # 测试文件
 tests/
 
-# 运行时 skill 定义
-data/SKILLS.md
 
 # 用户个人 onboarding 报告（含使用统计，不入库）
 ONBOARDING.md

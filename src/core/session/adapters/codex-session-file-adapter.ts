@@ -3,18 +3,38 @@
  *
  * Reads Codex thread data from ~/.codex/state_*.sqlite (read-only)
  * and Codex rollout JSONL files for detailed session info.
+ *
+ * `node:sqlite` 是 Node 22.5+ 的实验性内置模块。低版本 Node 上懒加载会失败，
+ * adapter 自动降级到只读 rollout JSONL —— `checkExists/getFileInfo/readFirstMessage/
+ * readLastUserMessage` 仍可工作；`scanCliSessions/listSdkSessions` 因依赖 DB 索引
+ * 会返回空数组。
  */
 
-import { DatabaseSync } from 'node:sqlite';
+import { createRequire } from 'module';
 import type { SessionFileAdapter, SessionFileInfo, CliSessionEntry, SdkSessionEntry } from '../session-file-adapter.js';
 import { logger } from '../../../utils/logger.js';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
 
+const requireFromHere = createRequire(import.meta.url);
+
+let sqliteModule: any | null | undefined; // undefined = not tried, null = unavailable
+
+function loadSqlite(): any | null {
+  if (sqliteModule !== undefined) return sqliteModule;
+  try {
+    sqliteModule = requireFromHere('node:sqlite');
+  } catch (e: any) {
+    logger.warn(`[CodexAdapter] node:sqlite unavailable (Node < 22.5?): ${e?.message || e}. Codex session listing falls back to rollout JSONL.`);
+    sqliteModule = null;
+  }
+  return sqliteModule;
+}
+
 export class CodexSessionFileAdapter implements SessionFileAdapter {
   readonly agentId = 'codex';
-  private db: DatabaseSync | null = null;
+  private db: any | null = null;
   private dbInitialized = false;
 
   /**
@@ -39,15 +59,18 @@ export class CodexSessionFileAdapter implements SessionFileAdapter {
     }
   }
 
-  private getDb(): DatabaseSync | null {
+  private getDb(): any | null {
     if (this.dbInitialized) return this.db;
     this.dbInitialized = true;
+
+    const sqlite = loadSqlite();
+    if (!sqlite) return null;
 
     const dbPath = this.resolveStateDbPath();
     if (!dbPath) return null;
 
     try {
-      this.db = new DatabaseSync(dbPath, { readOnly: true } as any);
+      this.db = new sqlite.DatabaseSync(dbPath, { readOnly: true });
       logger.debug(`[CodexAdapter] Opened state DB: ${dbPath}`);
     } catch (error) {
       logger.warn(`[CodexAdapter] Failed to open state DB: ${dbPath}`, error);

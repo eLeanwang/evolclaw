@@ -1,11 +1,11 @@
 import { logger } from '../utils/logger.js';
 import { markdownToPlainText } from '../utils/rich-content-renderer.js';
-import { requireOptional } from '../utils/init-channel.js';
+import { requireOptional } from '../utils/npm-ops.js';
 import type { ChannelPlugin, ChannelInstance } from '../core/channel-loader.js';
 import type { MessageBridge } from '../core/message/message-bridge.js';
 import type { Config, QQBotChannelConfig } from '../types.js';
 import { normalizeChannelInstances, getChannelShowActivities } from '../utils/channel-helpers.js';
-import { defaultSend } from '../core/message/default-send.js';
+import { formatItemsAsText } from '../core/message/items-formatter.js';
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -306,11 +306,11 @@ export class QQBotChannel {
   async sendImage(chatId: string, png: Buffer): Promise<void> {
     if (!this.client) return;
 
+    const fs = await import('fs');
+    const path = await import('path');
+    const os = await import('os');
+    const tmpPath = path.join(os.tmpdir(), `evolclaw-qqbot-${Date.now()}.png`);
     try {
-      const fs = await import('fs');
-      const path = await import('path');
-      const os = await import('os');
-      const tmpPath = path.join(os.tmpdir(), `evolclaw-qqbot-${Date.now()}.png`);
       fs.writeFileSync(tmpPath, png);
 
       const chatType = this.chatTypeCache.get(chatId);
@@ -322,10 +322,10 @@ export class QQBotChannel {
       } else {
         await this.client.sendPrivateImage(chatId, `file://${tmpPath}`, msgId);
       }
-
-      try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
     } catch (error: any) {
       logger.error(`[QQBot] sendImage failed for ${chatId}:`, error?.message || error);
+    } finally {
+      try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
     }
   }
 
@@ -401,11 +401,43 @@ export class QQBotChannelPlugin implements ChannelPlugin {
       const adapter = {
         channelName: inst.name,
         capabilities: { file: true, image: true, interaction: false, markdown: true, thought: false, status: false },
-        send: (envelope: any, payload: any) => defaultSend(adapter, envelope, payload),
-        sendText: (id: string, text: string) => channel.sendMessage(id, text),
-        sendFile: (id: string, filePath: string) => channel.sendFile(id, filePath),
-        sendImage: (id: string, png: Buffer) => channel.sendImage(id, png),
-      };
+        send: async (envelope: any, payload: any) => {
+          const ctx = envelope.replyContext;
+          const channelId = envelope.channelId;
+          switch (payload.kind) {
+            case 'result.text':
+            case 'command.result':
+            case 'command.error':
+            case 'system.notice':
+            case 'system.error':
+            case 'result.error':
+              await channel.sendMessage(channelId, payload.text);
+              return;
+            case 'result.file':
+              await channel.sendFile(channelId, payload.filePath);
+              return;
+            case 'result.image':
+              await channel.sendImage(channelId, payload.data);
+              return;
+            case 'activity.batch': {
+              const text = formatItemsAsText(payload.items);
+              if (text) await channel.sendMessage(channelId, text);
+              return;
+            }
+            case 'interaction':
+              if (payload.fallbackText) await channel.sendMessage(channelId, payload.fallbackText);
+              return;
+            case 'status.started':
+            case 'status.completed':
+            case 'status.interrupted':
+            case 'status.error':
+            case 'status.timeout':
+            case 'custom':
+              return;
+            default:
+              logger.warn(`[QQBot] Unhandled payload kind: ${(payload as any).kind}`);
+          }
+        },      };
 
       const policy = {
         canSwitchProject: (_chatType: string, identity: string) => identity === 'owner' || identity === 'admin',
