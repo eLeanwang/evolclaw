@@ -4,7 +4,8 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { logger, localTimestamp } from '../utils/logger.js';
-import type { ChannelPlugin, ChannelInstance } from '../core/channel-loader.js';
+import type { ChannelPlugin, ChannelInstance, BridgeHookContext } from '../core/channel-loader.js';
+import type { MessageBridge } from '../core/message/message-bridge.js';
 import type { Config, ReplyContext, AunChannelConfig, AidConnectionState, AidStatus } from '../types.js';
 import { normalizeChannelInstances, getChannelShowActivities } from '../utils/channel-helpers.js';
 import { resolvePaths, getPackageRoot } from '../paths.js';
@@ -2221,6 +2222,54 @@ export class AUNChannelPlugin implements ChannelPlugin {
         disconnect: () => channel.disconnect(),
         onProjectPathRequest: (channelId: string) =>
           Promise.resolve(config.projects?.defaultPath || process.cwd()),
+        registerBridge(bridge: MessageBridge, channelType: string) {
+          bridge.register(
+            adapter.channelName,
+            (handler) => channel.onMessage(async (opts: any) => {
+              handler({
+                channel: adapter.channelName,
+                channelType,
+                channelId: opts.channelId,
+                selfId: opts.selfId,
+                groupId: opts.groupId,
+                content: opts.content,
+                chatType: opts.chatType || 'private',
+                peerId: opts.peerId || '',
+                peerName: opts.peerName,
+                messageId: opts.messageId,
+                mentions: opts.mentions,
+                threadId: opts.threadId,
+                replyContext: opts.replyContext,
+              });
+            }),
+            (channelId, text, replyContext) => channel.sendMessage(channelId, text, replyContext),
+            adapter,
+            channelType
+          );
+        },
+        registerHooks(ctx: BridgeHookContext) {
+          channel.setEventBus(ctx.eventBus);
+
+          if (channel.setOnChannelDown) {
+            channel.setOnChannelDown(() => {
+              ctx.eventBus.publish({
+                type: 'channel:health',
+                channel: 'aun',
+                channelName: adapter.channelName,
+                status: 'auth_error',
+                message: `⚠️ AUN 渠道 ${adapter.channelName} 断连，自动重试已用尽。\n使用 /check rty aun 手动重连`,
+                timestamp: Date.now(),
+              });
+            });
+          }
+
+          if (typeof channel.setSessionModeResolver === 'function') {
+            channel.setSessionModeResolver(async (channelId: string) => {
+              const session = await ctx.sessionManager.getActiveSession(adapter.channelName, channelId);
+              return session?.sessionMode;
+            });
+          }
+        },
       });
     }
 

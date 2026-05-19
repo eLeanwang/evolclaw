@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import { logger } from '../utils/logger.js';
 import { requireOptional } from '../utils/init-channel.js';
 import type { ChannelPlugin, ChannelInstance } from '../core/channel-loader.js';
+import type { MessageBridge } from '../core/message/message-bridge.js';
 import type { Config, WecomChannelConfig } from '../types.js';
 import { normalizeChannelInstances, getChannelShowActivities } from '../utils/channel-helpers.js';
 
@@ -609,6 +610,26 @@ export class WecomChannelPlugin implements ChannelPlugin {
         disconnect: () => channel.disconnect(),
         onProjectPathRequest: () =>
           Promise.resolve(config.projects?.defaultPath || process.cwd()),
+        registerBridge(bridge: MessageBridge, channelType: string) {
+          bridge.register(
+            adapter.channelName,
+            (handler) => channel.onMessage(async (event: any) => {
+              handler({
+                channel: adapter.channelName,
+                channelType,
+                channelId: event.channelId,
+                content: event.content,
+                chatType: event.chatType || 'private',
+                peerId: event.peerId || '',
+                peerName: event.peerName,
+                messageId: event.messageId,
+              });
+            }),
+            (channelId, text) => channel.sendMessage(channelId, text),
+            adapter,
+            channelType
+          );
+        },
       });
     }
 
