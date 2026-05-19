@@ -796,22 +796,6 @@ export class CommandHandler {
   /**
    * 主命令处理入口
    */
-  // CommandCard 带参命令 → 无参版（列表卡片）的映射
-  private static readonly CARD_REFRESH_MAP: Record<string, string> = {
-    '/model': '/model',
-    '/setmodel': '/model',
-    '/effort': '/effort',
-    '/agent': '/agent',
-    '/perm': '/perm',
-    '/project': '/plist',
-    '/p': '/plist',
-    '/session': '/slist',
-    '/s': '/slist',
-    '/activity': '/activity',
-    '/chatmode': '/chatmode',
-    '/dispatch': '/dispatch',
-  };
-
   async handle(
     content: string,
     channel: string,
@@ -823,16 +807,6 @@ export class CommandHandler {
     source?: 'user' | 'card-trigger',
   ): Promise<OutboundPayload | string | null | undefined> {
     const result = await this._handleInternal(content, channel, channelId, sendMessage, userId, threadId, chatType, source);
-
-    // card-trigger 重发：带参命令执行成功后，自动调用无参版重发卡片
-    if (source === 'card-trigger' && result && typeof result === 'object' && 'kind' in result && result.kind === 'command.result') {
-      const cmdBase = content.split(' ')[0];
-      const hasArgs = content.trim().length > cmdBase.length;
-      const refreshCmd = hasArgs ? CommandHandler.CARD_REFRESH_MAP[cmdBase] : undefined;
-      if (refreshCmd) {
-        await this._handleInternal(refreshCmd, channel, channelId, sendMessage, userId, threadId, chatType);
-      }
-    }
 
     return result;
   }
@@ -2408,23 +2382,6 @@ export class CommandHandler {
     // /restart 命令：重启服务（owner only） / 重连指定渠道（admin+）
     if (normalizedContent === '/restart' || normalizedContent.startsWith('/restart ')) {
       const restartArg = normalizedContent.slice('/restart'.length).trim();
-
-      // [RESTART-AUDIT] 记录调用来源：堆栈 + 入参，排查未授权触发
-      logger.info('[CommandHandler][RESTART-AUDIT] /restart entry',
-        JSON.stringify({
-          channel,
-          channelId,
-          userId,
-          threadId,
-          chatType,
-          isOwner,
-          isAdmin,
-          arg: restartArg || '(none)',
-          contentLength: content.length,
-          contentRaw: content,
-          contentNormalized: normalizedContent,
-          stack: new Error('restart-audit').stack?.split('\n').slice(0, 10).join(' | '),
-        }));
 
       // /restart <type> — 重连指定类型的所有渠道（admin only）
       if (restartArg) {

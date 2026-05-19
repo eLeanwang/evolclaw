@@ -338,7 +338,8 @@ export class IMRenderer {
     this.itemsQueue = [];
 
     const finalText = isFinal ? this.textBuffer : '';
-    this.textBuffer = '';
+    if (isFinal) this.textBuffer = '';
+    // 非 final flush 保留 textBuffer，供最终 result.text 使用
 
     if (this.diagEnabled) {
       diag(this.instanceId, 'flush', {

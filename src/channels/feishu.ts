@@ -50,6 +50,8 @@ export class FeishuChannel {
   private interactionCallback?: (response: InteractionResponse) => void;
   private connected = false;
   private enableRichContent: boolean;
+  // chatId → 该会话内仍 pending 的交互卡片 messageId 集合，用于作废
+  private pendingCardsByChat = new Map<string, Set<string>>();
 
   constructor(private config: FeishuConfig) {
     this.enableRichContent = config.enableRichContent ?? false;  // 默认关闭
@@ -92,40 +94,6 @@ export class FeishuChannel {
           const msg = data.message;
           logger.debug('[Feishu] Received message, message_id:', msg.message_id, 'type:', msg.message_type);
           logger.debug('[Feishu] Full data object:', JSON.stringify(data, null, 2));
-
-          // [RESTART-AUDIT] 排查未授权 /restart 来源：当文本消息正文以 /restart 开头时，落原始事件
-          if (msg.message_type === 'text') {
-            try {
-              const parsed = JSON.parse(msg.content || '{}');
-              const text = String(parsed?.text ?? '').trim();
-              if (text === '/restart' || text.startsWith('/restart ')) {
-                const anyData = data as any;
-                logger.info('[Feishu][RESTART-AUDIT] inbound /restart text message',
-                  JSON.stringify({
-                    instance: this.config.appId,
-                    schema: anyData.schema,
-                    event_id: data.event_id,
-                    create_time: data.create_time,
-                    token: data.token ? 'present' : 'absent',
-                    tenant_key: data.tenant_key,
-                    app_id: anyData.app_id,
-                    message_id: msg.message_id,
-                    parent_id: msg.parent_id,
-                    root_id: msg.root_id,
-                    thread_id: msg.thread_id,
-                    chat_id: msg.chat_id,
-                    chat_type: msg.chat_type,
-                    msg_create_time: msg.create_time,
-                    msg_update_time: msg.update_time,
-                    raw_content: msg.content,
-                    sender: data.sender,
-                    mentions: msg.mentions,
-                  }));
-              }
-            } catch {
-              // 解析失败不影响主流程
-            }
-          }
 
           if (!msg.message_id || this.isDuplicate(msg.message_id)) {
             logger.debug('[Feishu] Duplicate message ignored:', msg.message_id);
@@ -377,6 +345,8 @@ export class FeishuChannel {
 
             const value = action.value;
             const operatorId = data.operator?.open_id;
+            const chatId = data.context?.open_chat_id || data.open_chat_id;
+            const cardMessageId = data.open_message_id || data.context?.open_message_id;
 
             // ── CommandCard 分支：按钮直接触发命令 ──
             if (value._command) {
@@ -388,7 +358,6 @@ export class FeishuChannel {
 
               logger.info(`[Feishu] CommandCard trigger: command=${value._command}, operator=${operatorId}`);
               if (this.messageHandler) {
-                const chatId = data.context?.open_chat_id || data.open_chat_id;
                 // Feishu chatId 前缀：oc_ = group chat，ou_ = private user open_id
                 const chatType: 'private' | 'group' = typeof chatId === 'string' && chatId.startsWith('oc_') ? 'group' : 'private';
                 await this.messageHandler({
@@ -401,9 +370,13 @@ export class FeishuChannel {
                 });
               }
 
+              // 点击后从作废集合移除——已 resolved 的卡片不再被新卡片到来时 PATCH
+              if (chatId && cardMessageId) this.untrackPendingCard(chatId, cardMessageId);
+
               const cardTitle = value._card_title || '操作';
               const btnLabel = value._btn_label || value._command;
-              return this.buildResolvedCard(cardTitle, { type: 'interaction.response', id: '', action: value._command, operatorId }, '', btnLabel);
+              const cardBody = value._card_body || '';
+              return this.buildResolvedCard(cardTitle, { type: 'interaction.response', id: '', action: value._command, operatorId }, cardBody, btnLabel);
             }
 
             // ── ActionInteraction 分支 ──
@@ -449,6 +422,9 @@ export class FeishuChannel {
 
             logger.info(`[Feishu] Card action: requestId=${requestId}, action=${response.action}, values=${JSON.stringify(response.values)}`);
             this.interactionCallback?.(response);
+
+            // 点击后从作废集合移除——已 resolved 的卡片不再被新卡片到来时 PATCH
+            if (chatId && cardMessageId) this.untrackPendingCard(chatId, cardMessageId);
 
             // Return updated card (buttons disabled + result shown)
             const cardTitle = value._card_title || '操作';
@@ -957,6 +933,54 @@ export class FeishuChannel {
     }
   }
 
+  /** 跟踪 pending 交互卡片，等待后续作废 */
+  private trackPendingCard(chatId: string, messageId: string): void {
+    let set = this.pendingCardsByChat.get(chatId);
+    if (!set) {
+      set = new Set();
+      this.pendingCardsByChat.set(chatId, set);
+    }
+    set.add(messageId);
+  }
+
+  /** 卡片已 resolved（用户点击了按钮，飞书已用回调返回值替换卡片），从作废集合移除 */
+  private untrackPendingCard(chatId: string, messageId: string): void {
+    const set = this.pendingCardsByChat.get(chatId);
+    if (!set) return;
+    set.delete(messageId);
+    if (set.size === 0) this.pendingCardsByChat.delete(chatId);
+  }
+
+  /**
+   * 作废 chatId 下所有未被点击的旧卡片：PATCH 为"已过期"灰色卡片。
+   * 卡片需在 config 中声明 update_multi: true 才能被 PATCH。
+   */
+  private async invalidatePendingCards(chatId: string): Promise<void> {
+    const set = this.pendingCardsByChat.get(chatId);
+    if (!set || set.size === 0) return;
+    const expiredCard = {
+      config: { wide_screen_mode: true, update_multi: true },
+      header: {
+        template: 'grey',
+        title: { tag: 'plain_text', content: '已过期' },
+      },
+      elements: [{ tag: 'markdown', content: '此卡片已过期，请查看最新卡片。' }],
+    };
+    const ids = Array.from(set);
+    this.pendingCardsByChat.delete(chatId);
+    await Promise.all(ids.map(async msgId => {
+      try {
+        await this.client.im.message.patch({
+          path: { message_id: msgId },
+          data: { content: JSON.stringify(expiredCard) },
+        });
+      } catch (err: any) {
+        const detail = err?.response?.data ?? err?.message ?? err;
+        logger.debug(`[Feishu] Patch expired card failed (msgId=${msgId}): ${typeof detail === 'string' ? detail : JSON.stringify(detail)}`);
+      }
+    }));
+  }
+
   async sendInteraction(
     chatId: string,
     interaction: InteractionRequest,
@@ -966,6 +990,9 @@ export class FeishuChannel {
 
     const card = buildInteractionCard(interaction);
     if (!card) return false;
+
+    // 在新卡发送前作废旧卡（PATCH 为"已过期"），避免历史卡片仍可点击
+    await this.invalidatePendingCards(chatId);
 
     try {
       let messageId: string | undefined;
@@ -992,6 +1019,7 @@ export class FeishuChannel {
         messageId = (res as any)?.data?.message_id;
       }
       logger.info(`[Feishu] Sent interaction card: ${interaction.id}, messageId=${messageId}`);
+      if (messageId) this.trackPendingCard(chatId, messageId);
       return messageId || false;
     } catch (error: any) {
       // 飞书 SDK 错误可能在 response.data、message 或 error 本身
@@ -1019,7 +1047,6 @@ export class FeishuChannel {
     };
     const statusText = labelMap[action] || (btnLabel ? `✅ ${btnLabel}` : `✅ ${action}`);
 
-    // Build elements: original body only
     const elements: any[] = [];
     if (cardBody) {
       elements.push({ tag: 'markdown', content: cardBody });
@@ -1033,7 +1060,7 @@ export class FeishuChannel {
       card: {
         type: 'raw',
         data: {
-          config: { wide_screen_mode: true },
+          config: { wide_screen_mode: true, update_multi: true },
           header: {
             template: action === 'deny' ? 'red' : 'green',
             title: { tag: 'plain_text', content: `${cardTitle} — ${statusText}` },
@@ -1076,6 +1103,10 @@ function buildCommandCardFeishu(card: import('../types.js').CommandCard, initiat
     elements.push({ tag: 'markdown', content: card.body });
   }
 
+  // Build full card body for resolved state: original body + button labels
+  const btnLabels = card.buttons.map(btn => btn.label).join('  ·  ');
+  const fullCardBody = [card.body, btnLabels].filter(Boolean).join('\n\n');
+
   const buttons = card.buttons.map(btn => {
     const buttonEl: any = {
       tag: 'button',
@@ -1085,6 +1116,7 @@ function buildCommandCardFeishu(card: import('../types.js').CommandCard, initiat
         _command: btn.command,
         _initiator: initiatorId,
         _card_title: card.title,
+        _card_body: fullCardBody,
         _btn_label: btn.label,
       },
     };
@@ -1106,7 +1138,7 @@ function buildCommandCardFeishu(card: import('../types.js').CommandCard, initiat
   elements.push({ tag: 'action', actions: buttons });
 
   return {
-    config: { wide_screen_mode: true },
+    config: { wide_screen_mode: true, update_multi: true },
     header: {
       template: 'blue',
       title: { tag: 'plain_text', content: card.title },
@@ -1159,7 +1191,7 @@ export function buildActionCard(requestId: string, action: ActionInteraction, in
   });
 
   return {
-    config: { wide_screen_mode: true },
+    config: { wide_screen_mode: true, update_multi: true },
     header: {
       template: 'blue',
       title: { tag: 'plain_text', content: action.title },

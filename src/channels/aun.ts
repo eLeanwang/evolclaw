@@ -88,6 +88,7 @@ export interface AUNMessageHandler {
     threadId?: string;
     mentions?: Array<{ userId: string; name?: string }>;
     replyContext?: ReplyContext;
+    source?: 'user' | 'card-trigger';
   }): Promise<void>;
 }
 
@@ -204,7 +205,7 @@ export class AUNChannel {
     return name && name !== short ? `${short}(${name})` : short;
   }
 
-  private extractTextPayload(payload: unknown): string {
+  private extractTextPayload(payload: unknown, channelId?: string): string {
     if (typeof payload === 'string') return payload;
     if (payload && typeof payload === 'object') {
       const obj = payload as Record<string, unknown>;
@@ -213,18 +214,40 @@ export class AUNChannel {
       // action_card_reply：卡片交互回复，触发 interactionCallback，不分发给 agent
       if (obj.type === 'action_card_reply') {
         const cardMsgId = typeof obj.card_message_id === 'string' ? obj.card_message_id : '';
-        const requestId = cardMsgId ? this.cardMessageIdMap.get(cardMsgId) : undefined;
-        if (requestId && this.interactionCallback) {
+        const cardInfo = cardMsgId ? this.cardMessageIdMap.get(cardMsgId) : undefined;
+        if (cardInfo) {
           const actionValue = typeof obj.action_value === 'string' ? obj.action_value : text;
-          this.interactionCallback({
-            type: 'interaction.response',
-            id: requestId,
-            action: actionValue,
-            values: { text, action_label: obj.action_label, behavior: obj.behavior },
-          });
-          this.cardMessageIdMap.delete(cardMsgId);
+
+          if (cardInfo.isCommandCard) {
+            // CommandCard：action_value 是完整 slash 命令，构造伪入站消息
+            this.cardMessageIdMap.delete(cardMsgId);
+            if (this.messageHandler && actionValue.startsWith('/')) {
+              const chatType = channelId ? (this.isGroupId(channelId) ? 'group' : 'private') : 'private';
+              this.messageHandler({
+                channelId: channelId || '',
+                chatType,
+                content: actionValue,
+                peerId: channelId || '',
+                peerName: typeof obj.action_label === 'string' ? obj.action_label : undefined,
+                messageId: `card-trigger-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                source: 'card-trigger',
+              });
+            }
+          } else {
+            // ActionInteraction：走 interactionCallback → InteractionRouter
+            // callback 未注册时保留 map entry（TTL 清理），给 router 留重试机会
+            if (this.interactionCallback) {
+              this.cardMessageIdMap.delete(cardMsgId);
+              this.interactionCallback({
+                type: 'interaction.response',
+                id: cardInfo.requestId,
+                action: actionValue,
+                values: { text, action_label: obj.action_label, behavior: obj.behavior },
+              });
+            }
+          }
         } else {
-          logger.debug(`${this.logPrefix()} action_card_reply dropped: cardMsgId=${cardMsgId} requestId=${requestId ?? 'not-found'} hasCallback=${!!this.interactionCallback}`);
+          logger.debug(`${this.logPrefix()} action_card_reply dropped: cardMsgId=${cardMsgId} hasCallback=${!!this.interactionCallback}`);
         }
         // 始终返回空字符串，阻止消息分发给 agent
         return '';
@@ -330,8 +353,8 @@ export class AUNChannel {
   private plaintextRecv = 0;
   private sessionModeResolver?: (channelId: string) => Promise<string | undefined>;
   interactionCallback?: (response: InteractionResponse) => void;
-  // action_card message_id → requestId（用于关联 action_card_reply）
-  cardMessageIdMap = new Map<string, string>();
+  // action_card message_id → { requestId, isCommandCard }（用于关联 action_card_reply）
+  cardMessageIdMap = new Map<string, { requestId: string; isCommandCard: boolean }>();
   private dispatchModeResolver?: (channelId: string) => Promise<string | undefined>;
 
   private static readonly PROACTIVE_ALLOW_TYPES = new Set([
@@ -830,7 +853,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
 
     const fromAid = msg.from ?? '';
     const payload = msg.payload ?? '';
-    const text = this.extractTextPayload(payload);
+    const text = this.extractTextPayload(payload, fromAid);
     const taskId = typeof payload === 'object' && payload !== null ? (payload as any).thread_id : undefined;
     const messageId = msg.message_id ?? '';
     const seq = msg.seq;
@@ -920,7 +943,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     const groupId = msg.group_id ?? '';
     const senderAid = msg.sender_aid ?? '';
     const payload = msg.payload ?? '';
-    const text = this.extractTextPayload(payload);
+    const text = this.extractTextPayload(payload, groupId);
     const taskId = typeof payload === 'object' && payload !== null ? (payload as any).thread_id : undefined;
     const messageId = msg.message_id ?? '';
     const seq = msg.seq;
@@ -2322,7 +2345,7 @@ export class AUNChannelPlugin implements ChannelPlugin {
                 const aunCard: Record<string, any> = {
                   type: 'action_card',
                   title: action.title,
-                  text: action.body,
+                  description: action.body,
                   actions: (action as ActionInteraction).buttons.map(btn => ({
                     label: btn.label,
                     value: btn.key,
@@ -2333,7 +2356,7 @@ export class AUNChannelPlugin implements ChannelPlugin {
                 if (ctx?.threadId) aunCard.thread_id = ctx.threadId;
                 const msgId = await channel.sendStructured(channelId, aunCard, ctx);
                 if (msgId) {
-                  channel.cardMessageIdMap.set(msgId, req.id);
+                  channel.cardMessageIdMap.set(msgId, { requestId: req.id, isCommandCard: false });
                   setTimeout(() => channel.cardMessageIdMap.delete(msgId), 20 * 60 * 1000);
                 }
               } else if (req.kind.kind === 'command-card') {
@@ -2341,7 +2364,7 @@ export class AUNChannelPlugin implements ChannelPlugin {
                 const aunCard: Record<string, any> = {
                   type: 'action_card',
                   title: card.title,
-                  text: card.body,
+                  description: card.body,
                   actions: (card as CommandCard).buttons.map(btn => ({
                     label: btn.label,
                     value: btn.command,
@@ -2352,7 +2375,7 @@ export class AUNChannelPlugin implements ChannelPlugin {
                 if (ctx?.threadId) aunCard.thread_id = ctx.threadId;
                 const msgId = await channel.sendStructured(channelId, aunCard, ctx);
                 if (msgId) {
-                  channel.cardMessageIdMap.set(msgId, req.id);
+                  channel.cardMessageIdMap.set(msgId, { requestId: req.id, isCommandCard: true });
                   setTimeout(() => channel.cardMessageIdMap.delete(msgId), 20 * 60 * 1000);
                 }
               } else if (payload.fallbackText) {
@@ -2430,6 +2453,7 @@ export class AUNChannelPlugin implements ChannelPlugin {
                 mentions: opts.mentions,
                 threadId: opts.threadId,
                 replyContext: opts.replyContext,
+                source: opts.source,
               });
             }),
             (channelId, text, replyContext) => channel.sendMessage(channelId, text, replyContext),

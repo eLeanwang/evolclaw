@@ -68,7 +68,11 @@ function rotateStdoutIfNeeded(logDir: string) {
 }
 
 function countLines(pkgRoot: string, logDir: string) {
-  const srcDir = path.join(pkgRoot, 'src');
+  // 生产安装：pkgRoot/src/；开发模式：pkgRoot 是 dist/，src/ 在其兄弟目录
+  const srcCandidate = path.join(pkgRoot, 'src');
+  const srcDir = fs.existsSync(srcCandidate)
+    ? srcCandidate
+    : path.join(pkgRoot, '..', 'src');
   const statsFile = path.join(logDir, 'line-stats.log');
 
   const countDir = (dir: string): number => {
@@ -96,13 +100,14 @@ function countLines(pkgRoot: string, logDir: string) {
   const agents = countDir(path.join(srcDir, 'agents'));
   const channels = countDir(path.join(srcDir, 'channels'));
   const utils = countDir(path.join(srcDir, 'utils'));
+  const cli = countDir(path.join(srcDir, 'cli'));
+  const aun = countDir(path.join(srcDir, 'aun'));
   const entry = countFile(path.join(srcDir, 'index.ts'))
-    + countFile(path.join(srcDir, 'config.ts'))
+    + countFile(path.join(srcDir, 'config-store.ts'))
     + countFile(path.join(srcDir, 'types.ts'))
-    + countFile(path.join(srcDir, 'cli.ts'))
     + countFile(path.join(srcDir, 'ipc.ts'))
     + countFile(path.join(srcDir, 'paths.ts'));
-  const total = core + agents + channels + utils + entry;
+  const total = core + agents + channels + utils + cli + aun + entry;
 
   console.log('==================================================');
   console.log('EvolClaw 代码统计');
@@ -111,6 +116,8 @@ function countLines(pkgRoot: string, logDir: string) {
   console.log(`Agent 模块:       ${String(agents).padStart(8)} 行`);
   console.log(`渠道适配:         ${String(channels).padStart(8)} 行`);
   console.log(`工具库:           ${String(utils).padStart(8)} 行`);
+  console.log(`CLI:              ${String(cli).padStart(8)} 行`);
+  console.log(`AUN 协议:         ${String(aun).padStart(8)} 行`);
   console.log(`入口与配置:       ${String(entry).padStart(8)} 行`);
   console.log('--------------------------------------------------');
   console.log(`总计:             ${String(total).padStart(8)} 行`);
@@ -124,8 +131,10 @@ function countLines(pkgRoot: string, logDir: string) {
     if (lines.length > 0) {
       const lastLine = lines[lines.length - 1];
       const parts = lastLine.split('\t');
-      const lastTotalStr = parts[6] ?? parts[parts.length - 1];
-      prevTotal = parseInt(lastTotalStr, 10) || 0;
+      // 旧格式8列: time core agents channels utils entry total delta → total at [6]
+      // 新格式10列: time core agents channels utils cli aun entry total delta → total at [8]
+      const lastTotalStr = parts.length >= 10 ? parts[8] : parts[6];
+      prevTotal = parseInt(lastTotalStr ?? parts[parts.length - 2], 10) || 0;
       if (prevTotal === total) {
         shouldAppend = false;
       }
@@ -137,7 +146,7 @@ function countLines(pkgRoot: string, logDir: string) {
     const now = `${_d.getFullYear()}-${_p(_d.getMonth() + 1)}-${_p(_d.getDate())} ${_p(_d.getHours())}:${_p(_d.getMinutes())}:${_p(_d.getSeconds())}`;
     const delta = total - prevTotal;
     const deltaStr = delta >= 0 ? `+${delta}` : `${delta}`;
-    fs.appendFileSync(statsFile, `${now}\t${core}\t${agents}\t${channels}\t${utils}\t${entry}\t${total}\t${deltaStr}\n`);
+    fs.appendFileSync(statsFile, `${now}\t${core}\t${agents}\t${channels}\t${utils}\t${cli}\t${aun}\t${entry}\t${total}\t${deltaStr}\n`);
   }
 
   showHistory(statsFile);
@@ -152,21 +161,31 @@ function showHistory(statsFile: string) {
   console.log('\n==================================================');
   console.log('历史记录（最近 8 次）');
   console.log('==================================================');
-  console.log(`${'时间'.padEnd(20)} ${'核心'.padStart(6)} ${'Agent'.padStart(6)} ${'渠道'.padStart(6)} ${'工具'.padStart(6)} ${'入口'.padStart(6)} ${'总计'.padStart(6)} ${'变化'.padStart(8)}`);
+  console.log(`${'时间'.padEnd(20)} ${'核心'.padStart(6)} ${'Agent'.padStart(6)} ${'渠道'.padStart(6)} ${'工具'.padStart(6)} ${'CLI'.padStart(6)} ${'AUN'.padStart(6)} ${'入口'.padStart(6)} ${'总计'.padStart(6)} ${'变化'.padStart(8)}`);
   console.log('--------------------------------------------------');
 
   let prevTotal: number | null = null;
   for (const line of recent) {
     const parts = line.split('\t');
-    // 兼容旧格式（6列: time,core,ch,utils,entry,total）和新格式（7列: +agents）及最新（8列: +delta）
-    let time: string, c: string, a: string, ch: string, u: string, e: string, t: string, d: string | undefined;
-    if (parts.length >= 8) {
+    // 格式演进：
+    // 旧6列: time core channels utils entry total
+    // 旧7列: time core agents channels utils entry total
+    // 旧8列: time core agents channels utils entry total delta
+    // 新10列: time core agents channels utils cli aun entry total delta
+    let time: string, c: string, a: string, ch: string, u: string, cl: string, au: string, e: string, t: string, d: string | undefined;
+    if (parts.length >= 10) {
+      [time, c, a, ch, u, cl, au, e, t, d] = parts;
+    } else if (parts.length >= 8) {
+      // 旧8列: time core agents channels utils entry total delta
       [time, c, a, ch, u, e, t, d] = parts;
+      cl = '-'; au = '-';
     } else if (parts.length >= 7) {
+      // 旧7列: time core agents channels utils entry total
       [time, c, a, ch, u, e, t] = parts;
+      cl = '-'; au = '-';
     } else if (parts.length >= 6) {
       [time, c, ch, u, e, t] = parts;
-      a = '-';
+      a = '-'; cl = '-'; au = '-';
     } else {
       continue;
     }
@@ -180,7 +199,7 @@ function showHistory(statsFile: string) {
     } else {
       diff = '-';
     }
-    console.log(`${time.padEnd(20)} ${c.padStart(6)} ${a.padStart(6)} ${ch.padStart(6)} ${u.padStart(6)} ${e.padStart(6)} ${t.padStart(6)} ${diff.padStart(8)}`);
+    console.log(`${time.padEnd(20)} ${c.padStart(6)} ${a.padStart(6)} ${ch.padStart(6)} ${u.padStart(6)} ${cl.padStart(6)} ${au.padStart(6)} ${e.padStart(6)} ${t.padStart(6)} ${diff.padStart(8)}`);
     prevTotal = total;
   }
   console.log('==================================================');
