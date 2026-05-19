@@ -4,7 +4,7 @@ import type { ChannelPlugin, ChannelInstance } from '../core/channel-loader.js';
 import type { MessageBridge } from '../core/message/message-bridge.js';
 import type { Config, DingtalkChannelConfig } from '../types.js';
 import { normalizeChannelInstances, getChannelShowActivities } from '../utils/channel-helpers.js';
-import { defaultSend } from '../core/message/default-send.js';
+import { formatItemsAsText } from '../core/message/items-formatter.js';
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -514,7 +514,41 @@ export class DingtalkChannelPlugin implements ChannelPlugin {
       const adapter = {
         channelName: inst.name,
         capabilities: { file: true, image: true, interaction: true, markdown: true, thought: false, status: false },
-        send: (envelope: any, payload: any) => defaultSend(adapter, envelope, payload),
+        send: async (envelope: any, payload: any) => {
+          const ctx = envelope.replyContext;
+          const channelId = envelope.channelId;
+          switch (payload.kind) {
+            case 'result.text':
+            case 'command.result':
+            case 'command.error':
+            case 'system.notice':
+            case 'system.error':
+            case 'result.error':
+              await channel.sendMessage(channelId, payload.text);
+              return;
+            case 'result.file':
+              await channel.sendFile(channelId, payload.filePath);
+              return;
+            case 'result.image':
+              await channel.sendImage(channelId, payload.data);
+              return;
+            case 'activity.batch': {
+              const text = formatItemsAsText(payload.items);
+              if (text) await channel.sendMessage(channelId, text);
+              return;
+            }
+            case 'interaction':
+              if (payload.fallbackText) await channel.sendMessage(channelId, payload.fallbackText);
+              return;
+            case 'status.started':
+            case 'status.completed':
+            case 'status.interrupted':
+            case 'status.error':
+            case 'status.timeout':
+            case 'custom':
+              return;
+          }
+        },
         sendText: (id: string, text: string) => channel.sendMessage(id, text),
         sendFile: (id: string, filePath: string) => channel.sendFile(id, filePath),
         sendImage: (id: string, png: Buffer) => channel.sendImage(id, png),

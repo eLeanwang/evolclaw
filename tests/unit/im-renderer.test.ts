@@ -1,24 +1,33 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { IMRenderer } from '../../src/core/message/im-renderer.js';
-import type { ChannelAdapter } from '../../src/types.js';
+import type { ChannelAdapter, OutboundEnvelope, OutboundPayload } from '../../src/types.js';
 import type { AgentEvent } from '../../src/agents/claude-runner.js';
 
-function createAdapter(opts: { putThought?: any } = {}): ChannelAdapter {
+function makeEnvelope(over: Partial<OutboundEnvelope> = {}): OutboundEnvelope {
   return {
-    channelName: 'test',
-    sendText: vi.fn().mockResolvedValue(undefined),
-    sendFile: vi.fn().mockResolvedValue(undefined),
-    sendImage: vi.fn().mockResolvedValue(undefined),
-    putThought: opts.putThought ?? vi.fn().mockResolvedValue(undefined),
+    taskId: 't1',
+    channel: 'test',
+    channelId: 'c1',
+    agentName: 'agent',
+    chatmode: 'interactive',
+    timestamp: Date.now(),
+    ...over,
   };
 }
 
-describe('IMRenderer — interactive mode (聚合窗口)', () => {
-  let sendTextCb: any;
+function makeAdapter(): ChannelAdapter {
+  return {
+    channelName: 'test',
+    sendText: vi.fn().mockResolvedValue(undefined),
+  };
+}
+
+describe('IMRenderer — interactive mode (结构化聚合)', () => {
+  let send: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     vi.useFakeTimers();
-    sendTextCb = vi.fn().mockResolvedValue(undefined);
+    send = vi.fn().mockResolvedValue(undefined);
   });
 
   afterEach(() => {
@@ -26,383 +35,258 @@ describe('IMRenderer — interactive mode (聚合窗口)', () => {
     vi.restoreAllMocks();
   });
 
-  it('addText 聚合后 flush 调用 sendText', async () => {
-    const adapter = createAdapter();
-    const r = new IMRenderer({
-      adapter,
-      channelId: 'c1',
-      taskId: 't1',
-      chatmode: 'interactive',
-      flushDelay: 4000,
-      sendText: sendTextCb,
-    });
+  it('addText 聚合 thinking items；flush(true) 发送 result.text', async () => {
+    const r = new IMRenderer({ adapter: makeAdapter(), envelope: makeEnvelope(), send });
     r.addText('hello ');
     r.addText('world');
     await r.flush(true);
-    expect(sendTextCb).toHaveBeenCalledTimes(1);
-    expect(sendTextCb).toHaveBeenCalledWith('hello world', true, true);
+    // isFinal 时仅发 result.text，thinking-only batch 被吞掉避免重复
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledWith({ kind: 'result.text', text: 'hello world', isFinal: true });
   });
 
-  it('addActivity 聚合到 queue', async () => {
-    const r = new IMRenderer({
-      adapter: createAdapter(),
-      channelId: 'c1',
-      taskId: 't1',
-      chatmode: 'interactive',
-      sendText: sendTextCb,
-    });
-    r.addActivity('🔧 Read: ./README.md');
-    r.addActivity('✅ Read');
+  it('addToolCall + addToolResult 聚合到 activity.batch', async () => {
+    const r = new IMRenderer({ adapter: makeAdapter(), envelope: makeEnvelope(), send });
+    r.addToolCall('Read', { file_path: './README.md' }, 'call-1', 'Read: ./README.md');
+    r.addToolResult('Read', true, 'content', undefined, 'call-1');
+    await r.flush(false);
+    expect(send).toHaveBeenCalledTimes(1);
+    const [payload] = send.mock.calls[0];
+    expect(payload.kind).toBe('activity.batch');
+    expect(payload.items).toHaveLength(2);
+    expect(payload.items[0]).toMatchObject({ kind: 'tool_call', call_id: 'call-1', name: 'Read' });
+    expect(payload.items[1]).toMatchObject({ kind: 'tool_result', call_id: 'call-1', name: 'Read', ok: true });
+  });
+
+  it('flush(true) 同时发 batch（非 thinking）+ result.text', async () => {
+    const r = new IMRenderer({ adapter: makeAdapter(), envelope: makeEnvelope(), send });
+    r.addToolCall('Read', { file_path: 'a' }, 'c1', 'Read: a');
+    r.addText('reply');
     await r.flush(true);
-    expect(sendTextCb).toHaveBeenCalledTimes(1);
-    const [text, isFinal, hasText] = sendTextCb.mock.calls[0];
-    expect(text).toContain('🔧 Read: ./README.md');
-    expect(text).toContain('✅ Read');
-    expect(isFinal).toBe(true);
-    expect(hasText).toBe(false);
+    expect(send).toHaveBeenCalledTimes(2);
+    const [first] = send.mock.calls[0];
+    const [second] = send.mock.calls[1];
+    expect(first.kind).toBe('activity.batch');
+    expect(first.items).toEqual([
+      expect.objectContaining({ kind: 'tool_call', name: 'Read' }),
+    ]);
+    expect(second).toEqual({ kind: 'result.text', text: 'reply', isFinal: true });
   });
 
-  it('text + activity 按入队顺序合并', async () => {
-    const r = new IMRenderer({
-      adapter: createAdapter(),
-      channelId: 'c1',
-      taskId: 't1',
-      chatmode: 'interactive',
-      sendText: sendTextCb,
-    });
-    r.addActivity('🔧 Tool A');
-    r.addText('reply text');
-    await r.flush(true);
-    const text = sendTextCb.mock.calls[0][0];
-    // activity 在前，text 在后
-    expect(text.indexOf('🔧 Tool A')).toBeLessThan(text.indexOf('reply text'));
+  it('suppressActivities=true 丢弃 tool/notice/progress', async () => {
+    const r = new IMRenderer({ adapter: makeAdapter(), envelope: makeEnvelope(), send, suppressActivities: true });
+    r.addToolCall('Read', {}, 'c1');
+    r.addToolResult('Read', true, '', undefined, 'c1');
+    r.addNotice('hint', 'info');
+    r.addProgress('p');
+    await r.flush(false);
+    expect(send).not.toHaveBeenCalled();
   });
 
-  it('suppressActivities=true 时 addActivity 被丢弃', async () => {
-    const r = new IMRenderer({
-      adapter: createAdapter(),
-      channelId: 'c1',
-      taskId: 't1',
-      chatmode: 'interactive',
-      suppressActivities: true,
-      sendText: sendTextCb,
-    });
-    r.addActivity('🔧 Tool A');
-    await r.flush(true);
-    expect(sendTextCb).not.toHaveBeenCalled();
-  });
-
-  it('hasContent / hasSentContent 状态正确', async () => {
-    const r = new IMRenderer({
-      adapter: createAdapter(),
-      channelId: 'c1',
-      taskId: 't1',
-      chatmode: 'interactive',
-      sendText: sendTextCb,
-    });
+  it('hasSentContent / hasContent / getFinalText 状态正确', async () => {
+    const r = new IMRenderer({ adapter: makeAdapter(), envelope: makeEnvelope(), send });
+    expect(r.hasSentContent()).toBe(false);
     expect(r.hasContent()).toBe(false);
-    expect(r.hasSentContent()).toBe(false);
-    r.addText('x');
+    r.addText('hi');
     expect(r.hasContent()).toBe(true);
-    expect(r.hasSentContent()).toBe(false);
+    expect(r.getFinalText()).toBe('hi');
+    r.addToolCall('T', {}, 'c1');
+    expect(r.hasContent()).toBe(true);
     await r.flush(true);
     expect(r.hasSentContent()).toBe(true);
   });
 
-  it('getFinalText 返回累积全文', () => {
-    const r = new IMRenderer({
-      adapter: createAdapter(),
-      channelId: 'c1',
-      taskId: 't1',
-      chatmode: 'interactive',
-      sendText: sendTextCb,
-    });
-    r.addText('part 1 ');
-    r.addText('part 2');
-    expect(r.getFinalText()).toBe('part 1 part 2');
-  });
-
   it('文件标记 pattern 在 flush 时被过滤', async () => {
     const r = new IMRenderer({
-      adapter: createAdapter(),
-      channelId: 'c1',
-      taskId: 't1',
-      chatmode: 'interactive',
+      adapter: makeAdapter(),
+      envelope: makeEnvelope(),
+      send,
       fileMarkerPattern: /\[SEND_FILE:[^\]]+\]/g,
-      sendText: sendTextCb,
     });
-    r.addText('文件已创建 [SEND_FILE:./report.md] 完成');
+    r.addText('hello [SEND_FILE:/tmp/a.md] world');
     await r.flush(true);
-    const text = sendTextCb.mock.calls[0][0];
-    expect(text).not.toContain('[SEND_FILE:');
+    const [payload] = send.mock.calls[0];
+    expect(payload.kind).toBe('result.text');
+    expect(payload.text).not.toContain('[SEND_FILE:');
   });
 
-  it('flushActivitiesOnly 只清 activities 保留 text buffer', async () => {
-    const r = new IMRenderer({
-      adapter: createAdapter(),
-      channelId: 'c1',
-      taskId: 't1',
-      chatmode: 'interactive',
-      sendText: sendTextCb,
-    });
-    r.addActivity('🔧 Tool A');
-    r.addText('pending text');
+  it('flushActivitiesOnly 只清非 thinking items，保留 thinking', async () => {
+    const r = new IMRenderer({ adapter: makeAdapter(), envelope: makeEnvelope(), send });
+    r.addText('partial ');
+    r.addToolCall('T', {}, 'c1');
     await r.flushActivitiesOnly();
-    expect(sendTextCb).toHaveBeenCalledTimes(1);
-    expect(sendTextCb.mock.calls[0][0]).toContain('🔧 Tool A');
-    expect(sendTextCb.mock.calls[0][0]).not.toContain('pending text');
-    expect(r.hasContent()).toBe(true); // text 还在 buffer
-    await r.flush(true);
-    expect(sendTextCb).toHaveBeenCalledTimes(2);
-    expect(sendTextCb.mock.calls[1][0]).toContain('pending text');
+    expect(send).toHaveBeenCalledTimes(1);
+    const [payload] = send.mock.calls[0];
+    expect(payload.kind).toBe('activity.batch');
+    expect(payload.items).toHaveLength(1);
+    expect(payload.items[0].kind).toBe('tool_call');
+    // text buffer 还在
+    expect(r.getRemainingText()).toContain('partial');
   });
 
-  it('sendText 失败不抛出，继续后续发送', async () => {
-    const failOnce = vi
-      .fn()
-      .mockRejectedValueOnce(new Error('send fail'))
-      .mockResolvedValueOnce(undefined);
-    const r = new IMRenderer({
-      adapter: createAdapter(),
-      channelId: 'c1',
-      taskId: 't1',
-      chatmode: 'interactive',
-      sendText: failOnce,
+  it('send 失败不抛出，继续后续发送', async () => {
+    let callCount = 0;
+    const failing = vi.fn().mockImplementation(() => {
+      callCount++;
+      if (callCount === 1) return Promise.reject(new Error('boom'));
+      return Promise.resolve();
     });
-    r.addText('first');
+    const r = new IMRenderer({ adapter: makeAdapter(), envelope: makeEnvelope(), send: failing });
+    r.addText('a');
     await r.flush(false);
-    r.addText('second');
+    r.addText('b');
     await r.flush(true);
-    expect(failOnce).toHaveBeenCalledTimes(2);
+    expect(failing).toHaveBeenCalled();
+    // 第二次发送应当成功
+    expect(callCount).toBeGreaterThanOrEqual(2);
+  });
+
+  it('addText 多次合并到最后一个 thinking item', async () => {
+    const r = new IMRenderer({ adapter: makeAdapter(), envelope: makeEnvelope(), send });
+    r.addText('a');
+    r.addText('b');
+    r.addToolCall('T', {}, 'c1');
+    r.addText('c');
+    // 触发 flushActivitiesOnly 看 items 结构
+    await r.flush(false);
+    const items = send.mock.calls[0][0].items;
+    // thinking('ab') + tool_call + thinking('c')
+    expect(items[0]).toMatchObject({ kind: 'thinking', text: 'ab' });
+    expect(items[1].kind).toBe('tool_call');
+    expect(items[2]).toMatchObject({ kind: 'thinking', text: 'c' });
   });
 });
 
-describe('IMRenderer — proactive mode (逐事件 putThought)', () => {
+describe('IMRenderer — proactive mode (逐事件 activity.batch)', () => {
+  let send: ReturnType<typeof vi.fn>;
+
   beforeEach(() => {
-    vi.useRealTimers();
+    send = vi.fn().mockResolvedValue(undefined);
   });
 
-  it('text 事件投影为 thought(stage=thinking)', async () => {
-    const putThought = vi.fn().mockResolvedValue(undefined);
-    const adapter = createAdapter({ putThought });
-    const r = new IMRenderer({
-      adapter,
-      channelId: 'g1',
-      taskId: 'task-001',
-      chatmode: 'proactive',
-      sendText: vi.fn(),
-    });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('text 事件投影为 batch[1] with kind=thinking', async () => {
+    const r = new IMRenderer({ adapter: makeAdapter(), envelope: makeEnvelope({ chatmode: 'proactive' }), send });
     r.emit({ type: 'text', text: 'hello' } as AgentEvent);
-    await new Promise(r => setImmediate(r));
-    expect(putThought).toHaveBeenCalledTimes(1);
-    const payload = putThought.mock.calls[0][2];
-    expect(payload).toMatchObject({ type: 'thought', text: 'hello', stage: 'thinking', task_id: 'task-001', chatmode: 'proactive' });
+    await Promise.resolve();
+    expect(send).toHaveBeenCalledTimes(1);
+    const [payload] = send.mock.calls[0];
+    expect(payload.kind).toBe('activity.batch');
+    expect(payload.items).toEqual([{ kind: 'thinking', text: 'hello' }]);
   });
 
-  it('tool_use 事件投影为 thought(stage=tool) 带 metadata', async () => {
-    const putThought = vi.fn().mockResolvedValue(undefined);
-    const r = new IMRenderer({
-      adapter: createAdapter({ putThought }),
-      channelId: 'g1',
-      taskId: 't1',
-      chatmode: 'proactive',
-      sendText: vi.fn(),
+  it('tool_use 事件投影为 batch[1] with kind=tool_call', async () => {
+    const r = new IMRenderer({ adapter: makeAdapter(), envelope: makeEnvelope({ chatmode: 'proactive' }), send });
+    r.emit({ type: 'tool_use', name: 'Read', input: { file_path: './a.md' }, callId: 'call-x' } as AgentEvent);
+    await Promise.resolve();
+    const [payload] = send.mock.calls[0];
+    expect(payload.items[0]).toMatchObject({
+      kind: 'tool_call',
+      call_id: 'call-x',
+      name: 'Read',
+      arguments: { file_path: './a.md' },
     });
-    r.emit({ type: 'tool_use', name: 'Read', input: { file_path: './a.md' } } as AgentEvent);
-    await new Promise(r => setImmediate(r));
-    const payload = putThought.mock.calls[0][2];
-    expect(payload.stage).toBe('tool');
-    expect(payload.text).toContain('🔧 Read');
-    expect(payload.metadata).toEqual({ tool: 'Read', input: './a.md' });
   });
 
-  it('tool_result(ok) 投影为 thought(✅)', async () => {
-    const putThought = vi.fn().mockResolvedValue(undefined);
-    const r = new IMRenderer({
-      adapter: createAdapter({ putThought }),
-      channelId: 'g1',
-      taskId: 't1',
-      chatmode: 'proactive',
-      sendText: vi.fn(),
-    });
-    r.emit({ type: 'tool_result', name: 'Read', result: 'file content' } as AgentEvent);
-    await new Promise(r => setImmediate(r));
-    const payload = putThought.mock.calls[0][2];
-    expect(payload.text).toContain('✅ Read');
-    expect(payload.metadata).toEqual({ tool: 'Read', ok: true });
+  it('tool_result(ok) 投影为 batch[1] with kind=tool_result ok=true', async () => {
+    const r = new IMRenderer({ adapter: makeAdapter(), envelope: makeEnvelope({ chatmode: 'proactive' }), send });
+    r.emit({ type: 'tool_result', name: 'Read', result: 'content', isError: false, callId: 'call-x' } as AgentEvent);
+    await Promise.resolve();
+    const item = send.mock.calls[0][0].items[0];
+    expect(item).toMatchObject({ kind: 'tool_result', call_id: 'call-x', name: 'Read', ok: true });
   });
 
-  it('tool_result(error) 投影为 thought(⚠️)', async () => {
-    const putThought = vi.fn().mockResolvedValue(undefined);
-    const r = new IMRenderer({
-      adapter: createAdapter({ putThought }),
-      channelId: 'g1',
-      taskId: 't1',
-      chatmode: 'proactive',
-      sendText: vi.fn(),
-    });
-    r.emit({ type: 'tool_result', name: 'Read', result: null, isError: true, error: 'not found' } as AgentEvent);
-    await new Promise(r => setImmediate(r));
-    const payload = putThought.mock.calls[0][2];
-    expect(payload.text).toContain('⚠️ Read');
-    expect(payload.text).toContain('not found');
-    expect(payload.metadata).toEqual({ tool: 'Read', ok: false });
+  it('tool_result(error) 投影为 batch[1] with ok=false + error', async () => {
+    const r = new IMRenderer({ adapter: makeAdapter(), envelope: makeEnvelope({ chatmode: 'proactive' }), send });
+    r.emit({ type: 'tool_result', name: 'Read', result: '', isError: true, error: '权限被拒', callId: 'call-x' } as AgentEvent);
+    await Promise.resolve();
+    const item = send.mock.calls[0][0].items[0];
+    expect(item).toMatchObject({ kind: 'tool_result', call_id: 'call-x', name: 'Read', ok: false, error: '权限被拒' });
   });
 
   it('text 已发后 complete.result 被去重跳过', async () => {
-    const putThought = vi.fn().mockResolvedValue(undefined);
-    const r = new IMRenderer({
-      adapter: createAdapter({ putThought }),
-      channelId: 'g1',
-      taskId: 't1',
-      chatmode: 'proactive',
-      sendText: vi.fn(),
-    });
-    r.emit({ type: 'text', text: 'streamed' } as AgentEvent);
-    r.emit({ type: 'complete', result: 'streamed', isError: false } as AgentEvent);
-    await new Promise(r => setImmediate(r));
-    // 只有 text 那次（complete 因 hasEmittedThinking 被跳过）
-    expect(putThought).toHaveBeenCalledTimes(1);
-    expect(putThought.mock.calls[0][2].stage).toBe('thinking');
+    const r = new IMRenderer({ adapter: makeAdapter(), envelope: makeEnvelope({ chatmode: 'proactive' }), send });
+    r.emit({ type: 'text', text: 'final answer' } as AgentEvent);
+    r.emit({ type: 'complete', result: 'final answer', isError: false } as AgentEvent);
+    await Promise.resolve();
+    expect(send).toHaveBeenCalledTimes(1);
   });
 
-  it('未发 text 时 complete.result 投影为 thought(summary)', async () => {
-    const putThought = vi.fn().mockResolvedValue(undefined);
-    const r = new IMRenderer({
-      adapter: createAdapter({ putThought }),
-      channelId: 'g1',
-      taskId: 't1',
-      chatmode: 'proactive',
-      sendText: vi.fn(),
-    });
-    r.emit({ type: 'complete', result: 'final answer', isError: false } as AgentEvent);
-    await new Promise(r => setImmediate(r));
-    expect(putThought).toHaveBeenCalledTimes(1);
-    expect(putThought.mock.calls[0][2]).toMatchObject({ stage: 'summary', text: 'final answer' });
+  it('未发 text 时 complete.result 投影为 batch[1] with kind=summary', async () => {
+    const r = new IMRenderer({ adapter: makeAdapter(), envelope: makeEnvelope({ chatmode: 'proactive' }), send });
+    r.emit({ type: 'complete', result: 'summary text', isError: false, durationMs: 1234 } as AgentEvent);
+    await Promise.resolve();
+    const item = send.mock.calls[0][0].items[0];
+    expect(item).toMatchObject({ kind: 'summary', text: 'summary text', duration_ms: 1234 });
+  });
+
+  it('complete(isError) 投影为 summary with is_error=true', async () => {
+    const r = new IMRenderer({ adapter: makeAdapter(), envelope: makeEnvelope({ chatmode: 'proactive' }), send });
+    r.emit({ type: 'complete', isError: true, errors: ['boom'] } as AgentEvent);
+    await Promise.resolve();
+    const item = send.mock.calls[0][0].items[0];
+    expect(item).toMatchObject({ kind: 'summary', is_error: true, text: 'boom' });
+  });
+
+  it('compact 事件投影为 notice(subtype=compact)', async () => {
+    const r = new IMRenderer({ adapter: makeAdapter(), envelope: makeEnvelope({ chatmode: 'proactive' }), send });
+    r.emit({ type: 'compact', preTokens: 9999 } as AgentEvent);
+    await Promise.resolve();
+    const item = send.mock.calls[0][0].items[0];
+    expect(item.kind).toBe('notice');
+    expect(item.subtype).toBe('compact');
+  });
+
+  it('task_progress 事件投影为 progress', async () => {
+    const r = new IMRenderer({ adapter: makeAdapter(), envelope: makeEnvelope({ chatmode: 'proactive' }), send });
+    r.emit({ type: 'task_progress', summary: 'Step 1', toolUses: 3, durationMs: 5000 } as AgentEvent);
+    await Promise.resolve();
+    const item = send.mock.calls[0][0].items[0];
+    expect(item).toMatchObject({ kind: 'progress', tool_uses: 3, duration_ms: 5000 });
+  });
+
+  it('error 事件投影为 notice(severity=warn)', async () => {
+    const r = new IMRenderer({ adapter: makeAdapter(), envelope: makeEnvelope({ chatmode: 'proactive' }), send });
+    r.emit({ type: 'error', error: 'connection lost', errorType: 'network' } as AgentEvent);
+    await Promise.resolve();
+    const item = send.mock.calls[0][0].items[0];
+    expect(item).toMatchObject({ kind: 'notice', severity: 'warn', text: 'connection lost' });
   });
 
   it('session_id/state_changed/status 事件被跳过', async () => {
-    const putThought = vi.fn().mockResolvedValue(undefined);
-    const r = new IMRenderer({
-      adapter: createAdapter({ putThought }),
-      channelId: 'g1',
-      taskId: 't1',
-      chatmode: 'proactive',
-      sendText: vi.fn(),
-    });
-    r.emit({ type: 'session_id', sessionId: 'xxx' } as AgentEvent);
+    const r = new IMRenderer({ adapter: makeAdapter(), envelope: makeEnvelope({ chatmode: 'proactive' }), send });
+    r.emit({ type: 'session_id', sessionId: 's1' } as AgentEvent);
     r.emit({ type: 'state_changed', state: 'idle' } as AgentEvent);
-    r.emit({ type: 'status', subtype: 'reset', message: 'msg' } as AgentEvent);
-    await new Promise(r => setImmediate(r));
-    expect(putThought).not.toHaveBeenCalled();
+    r.emit({ type: 'status', subtype: 'reset', message: 'r' } as AgentEvent);
+    await Promise.resolve();
+    expect(send).not.toHaveBeenCalled();
   });
 
-  it('adapter 无 putThought 时静默跳过', async () => {
-    const adapter = createAdapter({ putThought: undefined });
-    delete (adapter as any).putThought;
-    const r = new IMRenderer({
-      adapter,
-      channelId: 'g1',
-      taskId: 't1',
-      chatmode: 'proactive',
-      sendText: vi.fn(),
-    });
-    // 不应抛
-    r.emit({ type: 'text', text: 'x' } as AgentEvent);
-    await new Promise(r => setImmediate(r));
-  });
-
-  it('putThought 失败不抛出（fire-and-forget）', async () => {
-    const putThought = vi.fn().mockRejectedValue(new Error('thought fail'));
-    const r = new IMRenderer({
-      adapter: createAdapter({ putThought }),
-      channelId: 'g1',
-      taskId: 't1',
-      chatmode: 'proactive',
-      sendText: vi.fn(),
-    });
-    r.emit({ type: 'text', text: 'x' } as AgentEvent);
-    // 不抛即通过
-    await new Promise(r => setImmediate(r));
-    expect(putThought).toHaveBeenCalled();
-  });
-
-  it('compact 事件投影为 thought(stage=system)', async () => {
-    const putThought = vi.fn().mockResolvedValue(undefined);
-    const r = new IMRenderer({
-      adapter: createAdapter({ putThought }),
-      channelId: 'g1',
-      taskId: 't1',
-      chatmode: 'proactive',
-      sendText: vi.fn(),
-    });
-    r.emit({ type: 'compact', preTokens: 5000 } as AgentEvent);
-    await new Promise(r => setImmediate(r));
-    const payload = putThought.mock.calls[0][2];
-    expect(payload.stage).toBe('system');
-    expect(payload.text).toContain('压缩完成');
-    expect(payload.text).toContain('5000');
-  });
-
-  it('task_progress 事件投影为 thought(stage=planning)', async () => {
-    const putThought = vi.fn().mockResolvedValue(undefined);
-    const r = new IMRenderer({
-      adapter: createAdapter({ putThought }),
-      channelId: 'g1',
-      taskId: 't1',
-      chatmode: 'proactive',
-      sendText: vi.fn(),
-    });
-    r.emit({ type: 'task_progress', summary: 'doing X', toolUses: 3, durationMs: 12000 } as AgentEvent);
-    await new Promise(r => setImmediate(r));
-    const payload = putThought.mock.calls[0][2];
-    expect(payload.stage).toBe('planning');
-    expect(payload.text).toContain('doing X');
-    expect(payload.text).toContain('3 tools');
-    expect(payload.text).toContain('12s');
-  });
-
-  it('error 事件投影为 thought(stage=error)', async () => {
-    const putThought = vi.fn().mockResolvedValue(undefined);
-    const r = new IMRenderer({
-      adapter: createAdapter({ putThought }),
-      channelId: 'g1',
-      taskId: 't1',
-      chatmode: 'proactive',
-      sendText: vi.fn(),
-    });
-    r.emit({ type: 'error', error: 'boom', errorType: 'network' } as AgentEvent);
-    await new Promise(r => setImmediate(r));
-    const payload = putThought.mock.calls[0][2];
-    expect(payload.stage).toBe('error');
-    expect(payload.text).toContain('boom');
+  it('send 失败不抛出（fire-and-forget）', async () => {
+    const failing = vi.fn().mockRejectedValue(new Error('rpc fail'));
+    const r = new IMRenderer({ adapter: makeAdapter(), envelope: makeEnvelope({ chatmode: 'proactive' }), send: failing });
+    expect(() => r.emit({ type: 'text', text: 'x' } as AgentEvent)).not.toThrow();
+    await new Promise(resolve => setTimeout(resolve, 1));
+    expect(failing).toHaveBeenCalled();
   });
 });
 
 describe('IMRenderer — 通用', () => {
-  it('emit() 在 proactive 模式触发 logger.event 旁路', async () => {
-    // 间接验证：emit 不抛即可（logger.event 在 logger.ts 里有 EVENT_LOG 环境变量控制）
-    const putThought = vi.fn().mockResolvedValue(undefined);
-    const r = new IMRenderer({
-      adapter: createAdapter({ putThought }),
-      channelId: 'g1',
-      taskId: 't1',
-      chatmode: 'proactive',
-      sendText: vi.fn(),
-    });
-    expect(() => r.emit({ type: 'text', text: 'x' } as AgentEvent)).not.toThrow();
+  it('proactive 模式 addText 是 noop', () => {
+    const send = vi.fn();
+    const r = new IMRenderer({ adapter: makeAdapter(), envelope: makeEnvelope({ chatmode: 'proactive' }), send });
+    r.addText('x');
+    expect(send).not.toHaveBeenCalled();
   });
 
-  it('stripFromBuffer 移除指定 pattern', () => {
-    const r = new IMRenderer({
-      adapter: createAdapter(),
-      channelId: 'c1',
-      taskId: 't1',
-      chatmode: 'interactive',
-      sendText: vi.fn(),
-    });
-    r.addText('keep [REMOVE:x] this');
-    r.stripFromBuffer(/\[REMOVE:[^\]]+\]/g);
-    expect(r.getRemainingText()).toBe('keep  this');
+  it('stripFromBuffer 移除 thinking item 中的指定 pattern', () => {
+    const send = vi.fn();
+    const r = new IMRenderer({ adapter: makeAdapter(), envelope: makeEnvelope(), send });
+    r.addText('hello [SEND_FILE:a]world');
+    r.stripFromBuffer(/\[SEND_FILE:[^\]]+\]/g);
+    expect(r.getRemainingText()).not.toContain('[SEND_FILE:');
   });
 });

@@ -1,5 +1,5 @@
 import { AUNClient, FileSecretStore, GatewayDiscovery, E2EEError, type JsonObject } from '@agentunion/fastaun';
-import { defaultSend } from '../core/message/default-send.js';
+
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
@@ -1627,7 +1627,8 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     };
 
     try {
-      const stage = (payload as any)?.stage ?? 'unknown';
+      const itemCount = Array.isArray((payload as any)?.items) ? (payload as any).items.length : 0;
+      const stage = (payload as any)?.stage ?? `items=${itemCount}`;
       if (this.isGroupId(channelId)) {
         params.group_id = targetId;
         await this.callAndTrace('group.thought.put', params);
@@ -1640,6 +1641,42 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     } catch (e) {
       const err = e as any;
       logger.debug(`${this.logPrefix()} thought.put failed to ${channelId}: ${err?.name}(${err?.code})=${err?.message}`);
+    }
+  }
+
+  /**
+   * 发送结构化 payload（type='thought' 等）作为消息历史持久化。
+   * 与 sendThought（thought.put）配对：thought.put 用于前端实时渲染（不入消息历史），
+   * sendStructured 用于把同一内容写入消息历史。
+   */
+  async sendStructured(channelId: string, payload: Record<string, any>, context?: ReplyContext): Promise<boolean> {
+    if (!this.connected || !this.client) return false;
+    const isGroup = this.isGroupId(channelId);
+    const targetAid = channelId;
+    const encryptTarget = isGroup ? channelId : targetAid;
+    const encrypt = context?.metadata?.encrypted != null
+      ? !!(context.metadata.encrypted)
+      : this.shouldEncrypt(encryptTarget);
+
+    const finalPayload: Record<string, any> = { ...payload };
+    if (context?.threadId && !finalPayload.thread_id) finalPayload.thread_id = context.threadId;
+
+    const params: Record<string, any> = { payload: finalPayload, encrypt };
+    try {
+      if (isGroup) {
+        params.group_id = channelId;
+        const result = await this.callAndTrace<any>('group.send', params);
+        logger.info(`${this.logPrefix()} group.send (${payload.type}) ok: group=${channelId} mid=${result?.message_id} encrypt=${encrypt}`);
+      } else {
+        params.to = targetAid;
+        const result = await this.callAndTrace<any>('message.send', params);
+        logger.info(`${this.logPrefix()} message.send (${payload.type}) ok: to=${this.peerLabel(targetAid)} mid=${result?.message_id} encrypt=${encrypt}`);
+      }
+      return true;
+    } catch (e) {
+      const err = e as any;
+      logger.warn(`${this.logPrefix()} sendStructured failed (${payload.type}) to ${channelId}: ${err?.name}(${err?.code})=${err?.message}`);
+      return false;
     }
   }
 
@@ -2137,7 +2174,75 @@ export class AUNChannelPlugin implements ChannelPlugin {
       const adapter = {
         channelName: inst.name,
         capabilities: { file: true, image: true, interaction: true, markdown: true, thought: true, status: true },
-        send: (envelope: any, payload: any) => defaultSend(adapter, envelope, payload),
+        send: async (envelope: any, payload: any) => {
+          const ctx = envelope.replyContext;
+          const channelId = envelope.channelId;
+          switch (payload.kind) {
+            case 'result.text':
+            case 'command.result':
+            case 'command.error':
+            case 'system.notice':
+            case 'system.error':
+            case 'result.error': {
+              const sendCtx: ReplyContext = { ...(ctx ?? {}) };
+              if (payload.kind === 'result.text' && payload.isFinal) sendCtx.title = '✓ 最终回复:';
+              await channel.sendMessage(channelId, payload.text, sendCtx);
+              return;
+            }
+            case 'result.file':
+              await channel.sendFile(channelId, payload.filePath, ctx);
+              return;
+            case 'result.image': {
+              // AUN 支持 image，走 sendStructured 发 type=image payload
+              const buf = payload.data as Buffer;
+              const b64 = buf.toString('base64');
+              await channel.sendStructured(channelId, {
+                type: 'image',
+                alt: payload.alt,
+                data_base64: b64,
+                mime_type: payload.mimeType,
+              }, ctx);
+              return;
+            }
+            case 'activity.batch': {
+              const aunPayload: Record<string, any> = {
+                type: 'thought',
+                items: payload.items,
+                client_context: { task_id: envelope.taskId, chatmode: envelope.chatmode, agent_name: envelope.agentName },
+              };
+              if (ctx?.threadId) aunPayload.thread_id = ctx.threadId;
+              // 双发：thought.put（前端实时渲染） + message.send（消息历史持久化）
+              await Promise.all([
+                channel.sendThought(channelId, envelope.taskId, aunPayload, ctx),
+                channel.sendStructured(channelId, aunPayload, ctx),
+              ]);
+              return;
+            }
+            case 'status.started':
+              channel.sendProcessingStatus(channelId, 'start', envelope.taskId, envelope.taskId, ctx);
+              return;
+            case 'status.completed':
+              channel.sendProcessingStatus(channelId, 'done', envelope.taskId, envelope.taskId, ctx);
+              return;
+            case 'status.interrupted':
+              channel.sendProcessingStatus(channelId, 'interrupted', envelope.taskId, envelope.taskId, ctx);
+              return;
+            case 'status.error':
+              channel.sendProcessingStatus(channelId, 'error', envelope.taskId, envelope.taskId, ctx);
+              return;
+            case 'status.timeout':
+              channel.sendProcessingStatus(channelId, 'timeout', envelope.taskId, envelope.taskId, ctx);
+              return;
+            case 'interaction':
+              if (payload.fallbackText) await channel.sendMessage(channelId, payload.fallbackText, ctx);
+              return;
+            case 'custom': {
+              const text = typeof payload.payload === 'string' ? payload.payload : JSON.stringify(payload.payload);
+              channel.sendCustomPayload(channelId, text);
+              return;
+            }
+          }
+        },
         sendText: (id: string, text: string, context?: ReplyContext) => channel.sendMessage(id, text, context),
         sendFile: (id: string, filePath: string, context?: ReplyContext) => channel.sendFile(id, filePath, context),
         acknowledge: (messageId: string) => { channel.acknowledge(messageId); return Promise.resolve(); },

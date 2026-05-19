@@ -12,7 +12,7 @@ import { logger } from '../../utils/logger.js';
 import { getErrorMessage, classifyError, ErrorType, ERROR_PREFIX, isInfraError, prefixErrorType, isRetryableError } from '../../utils/error-utils.js';
 import { EventBus } from '../event-bus.js';
 import { summarizeToolInput } from '../permission.js';
-import type { Message, Session, ChannelAdapter, ChannelOptions, ChannelPolicy, CommandHandler, ReplyContext, AgentContext, EvolAgentRegistryHandle, GlobalSettings } from '../../types.js';
+import type { Message, Session, ChannelAdapter, ChannelOptions, ChannelPolicy, CommandHandler, ReplyContext, AgentContext, EvolAgentRegistryHandle, GlobalSettings, OutboundEnvelope, OutboundPayload } from '../../types.js';
 import { DEFAULT_PERMISSION_MODE } from '../../types.js';
 import { getPackageRoot, resolveRoot } from '../../paths.js';
 import { renderPromptSection } from '../../agents/templates.js';
@@ -147,7 +147,7 @@ export class MessageProcessor {
       this.eventBus.publish({ type: 'runner:compact-start', sessionId });
     }
     if (this.currentRenderer && !this.shouldSuppressActivities) {
-      this.currentRenderer.addActivity('\u23f3 会话压缩中...');
+      this.currentRenderer.addNotice('\u23f3 会话压缩中...', 'info', 'compact-start');
     }
   }
 
@@ -406,32 +406,48 @@ export class MessageProcessor {
       // 创建 IMRenderer（统一 interactive/proactive 两条路径）
       let firstReply = true;
       const isProactive = session.sessionMode === 'proactive';
-      const renderer = new IMRenderer({
-        adapter,
-        channelId: message.channelId,
+      const envelope: OutboundEnvelope = {
         taskId,
+        channel: message.channel,
+        channelId: message.channelId,
+        agentName: agentNameForStats,
         chatmode: isProactive ? 'proactive' : 'interactive',
         replyContext: this.getReplyContext(message),
+        timestamp: Date.now(),
+      };
+      const renderer = new IMRenderer({
+        adapter,
+        envelope,
         flushDelay: (options?.flushDelay ?? this.agentRegistry?.resolveByChannel(channelKey)?.config?.flush_delay ?? 3) * 1000,
         suppressActivities: shouldSuppress(),
         fileMarkerPattern: options?.fileMarkerPattern,
         diagEnabled: this.globalSettings.debug?.flusherDiag,
-        sendText: async (text, isFinal, hasText) => {
+        send: async (payload) => {
           const isCurrentlyBackground = await this.isBackgroundSession(session, message.channel, message.channelId);
-          if (!isCurrentlyBackground) {
-            const opts: ReplyContext = {};
-            if (isFinal) opts.title = '\u2713 \u6700\u7ec8\u56de\u590d:';
-            const replyCtx = this.getReplyContext(message);
-            if (replyCtx) {
-              Object.assign(opts, replyCtx);
-            } else if (firstReply && message.messageId) {
-              if (hasText) {
-                opts.replyToMessageId = message.messageId;
-                firstReply = false;
-              }
+          if (isCurrentlyBackground) return;
+
+          const opts: ReplyContext = {};
+          const baseReplyCtx = this.getReplyContext(message);
+          if (baseReplyCtx) {
+            Object.assign(opts, baseReplyCtx);
+          } else if (firstReply && message.messageId) {
+            if (payload.kind === 'result.text' && payload.text) {
+              opts.replyToMessageId = message.messageId;
+              firstReply = false;
             }
-            opts.metadata = { ...(opts.metadata ?? {}), taskId, chatmode };
-            await adapter.sendText(message.channelId, text, opts);
+          }
+          if (payload.kind === 'result.text' && payload.isFinal) {
+            opts.title = '\u2713 \u6700\u7ec8\u56de\u590d:';
+          }
+          opts.metadata = { ...(opts.metadata ?? {}), taskId, chatmode };
+
+          const enrichedEnvelope: OutboundEnvelope = { ...envelope, replyContext: opts };
+          if (adapter.send) {
+            await adapter.send(enrichedEnvelope, payload);
+          } else {
+            if (payload.kind === 'result.text' || payload.kind === 'command.result' || payload.kind === 'command.error' || payload.kind === 'system.notice' || payload.kind === 'system.error' || payload.kind === 'result.error') {
+              await adapter.sendText(message.channelId, payload.text, opts);
+            }
           }
         },
       });
@@ -603,7 +619,7 @@ export class MessageProcessor {
             if (attempt < MAX_RETRIES && isRetryableError(retryError)) {
               const delay = Math.pow(2, attempt) * 1000; // 2s, 4s
               logger.warn(`[MessageProcessor] Retryable error (attempt ${attempt}/${MAX_RETRIES}), retrying in ${delay}ms:`, retryError);
-              renderer.addActivity(`⚠️ API 暂时不可用，${delay / 1000}秒后重试 (${attempt}/${MAX_RETRIES})...`);
+              renderer.addNotice(`⚠️ API 暂时不可用，${delay / 1000}秒后重试 (${attempt}/${MAX_RETRIES})...`, 'warn', 'retry');
               await renderer.flush();
               await new Promise(resolve => setTimeout(resolve, delay));
               continue;
@@ -614,7 +630,7 @@ export class MessageProcessor {
       } catch (error) {
         if (classifyError(error) === ErrorType.CONTEXT_TOO_LONG && session.agentSessionId && hasCompact(agent)) {
           // 尝试 compact 压缩会话
-          renderer.addActivity('\u26a0\ufe0f 上下文过长，正在压缩会话...');
+          renderer.addNotice('\u26a0\ufe0f 上下文过长，正在压缩会话...', 'warn', 'compact-trigger');
           await renderer.flush();
 
           const compacted = await agent.compact(
@@ -623,7 +639,7 @@ export class MessageProcessor {
 
           if (compacted) {
             // compact 成功，带 resume 重试（不重复原始消息，让 Agent 继续未完成的工作）
-            renderer.addActivity('\u2705 压缩完成，正在重试...');
+            renderer.addNotice('\u2705 压缩完成，正在重试...', 'info', 'compact-retry');
             const retryStream = await agent.runQuery(
               session.id,
               '上下文已自动压缩，请继续之前未完成的任务。',
@@ -1101,7 +1117,7 @@ export class MessageProcessor {
         if (event.type === 'compact') {
           this.eventBus.publish({ type: 'runner:compact-complete', sessionId: session.id, preTokens: event.preTokens });
           if (!shouldSuppress()) {
-            renderer.addActivity(`\ud83d\udca1 会话压缩完成，继续执行...（压缩前 tokens: ${event.preTokens}）`);
+            renderer.addNotice(`\ud83d\udca1 会话压缩完成，继续执行...（压缩前 tokens: ${event.preTokens}）`, 'info', 'compact');
           }
         }
 
@@ -1112,9 +1128,9 @@ export class MessageProcessor {
           const stats = [tools > 0 ? `${tools}\u6b21\u5de5\u5177\u8c03\u7528` : '', duration].filter(Boolean).join(', ');
 
           if (event.summary && !shouldSuppress()) {
-            renderer.addActivity(`\u23f3 \u5b50\u4efb\u52a1: ${event.summary}${stats ? ` (${stats})` : ''}`);
+            renderer.addProgress(`\u5b50\u4efb\u52a1: ${event.summary}${stats ? ` (${stats})` : ''}`, { state: 'processing', toolUses: event.toolUses, durationMs: event.durationMs });
           } else if (stats && !shouldSuppress()) {
-            renderer.addActivity(`\u23f3 \u5b50\u4efb\u52a1\u8fdb\u884c\u4e2d: ${stats}`);
+            renderer.addProgress(`\u5b50\u4efb\u52a1\u8fdb\u884c\u4e2d: ${stats}`, { state: 'processing', toolUses: event.toolUses, durationMs: event.durationMs });
           }
         }
 
@@ -1131,7 +1147,7 @@ export class MessageProcessor {
           });
           if (!shouldSuppress()) {
             const desc = summarizeToolInput(event.name, event.input || {});
-            renderer.addActivity(`\ud83d\udd27 ${event.name}${desc ? ': ' + desc : ''}`);
+            renderer.addToolCall(event.name, event.input, event.callId, desc);
           }
         }
 
@@ -1152,7 +1168,9 @@ export class MessageProcessor {
             let errorMsg = event.error || (typeof event.result === 'string' ? event.result : JSON.stringify(event.result)) || '\u6267\u884c\u5931\u8d25';
             // 移除 XML 风格的错误标签
             errorMsg = errorMsg.replace(/<tool_use_error>(.*?)<\/tool_use_error>/gs, '$1');
-            renderer.addActivity(`\u26a0\ufe0f ${event.name || '\u5de5\u5177'}: ${errorMsg}`);
+            renderer.addToolResult(event.name || '\u5de5\u5177', false, undefined, errorMsg, event.callId);
+          } else if (!event.isError && !shouldSuppress()) {
+            renderer.addToolResult(event.name || '\u5de5\u5177', true, event.result, undefined, event.callId);
           }
         }
 
@@ -1162,7 +1180,7 @@ export class MessageProcessor {
 
           if (!hasErrorResult && !shouldSuppress()) {
             hasErrorResult = true;
-            renderer.addActivity(`\u274c ${event.error}`);
+            renderer.addNotice(`\u274c ${event.error}`, 'warn', 'runtime-error');
           }
         }
 
@@ -1191,7 +1209,7 @@ export class MessageProcessor {
             const userFriendlyMessage = event.terminalReason
               ? getErrorMessage(null, event.terminalReason)
               : `\u274c ${errorSummary}`;
-            renderer.addActivity(userFriendlyMessage);
+            renderer.addNotice(userFriendlyMessage, 'warn', 'task-error');
           }
 
           // 中间 complete：flush 掉已有 activities（不带 isFinal），让中间结果及时显示
@@ -1284,7 +1302,7 @@ export class MessageProcessor {
         logger.error('[MessageProcessor] Stream processing error:', error);
       }
       if (error instanceof Error && error.message.includes('process exited')) {
-        renderer.addActivity('\u274c Claude Code \u8fdb\u7a0b\u5f02\u5e38\u9000\u51fa\uff0c\u8bf7\u91cd\u8bd5');
+        renderer.addNotice('\u274c Claude Code \u8fdb\u7a0b\u5f02\u5e38\u9000\u51fa\uff0c\u8bf7\u91cd\u8bd5', 'warn', 'process-exit');
       }
       // Flush any pending error activities before re-throwing,
       // and mark the error so outer catch won't send a duplicate message

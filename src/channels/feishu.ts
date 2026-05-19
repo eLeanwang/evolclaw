@@ -5,7 +5,8 @@ import { sanitizeFileName, saveToUploads, validateImage } from '../utils/media-c
 import { logger } from '../utils/logger.js';
 import { hasRichContent, renderAllRichContent, checkDependencies } from '../utils/rich-content-renderer.js';
 import type { InteractionRequest, InteractionResponse, ActionInteraction } from '../types.js';
-import { defaultSend } from '../core/message/default-send.js';
+import { formatItemsAsText } from '../core/message/items-formatter.js';
+
 
 export interface FeishuConfig {
   appId: string;
@@ -1349,7 +1350,47 @@ export class FeishuChannelPlugin implements ChannelPlugin {
       const adapter = {
         channelName: inst.name,
         capabilities: { file: true, image: true, interaction: true, markdown: true, thought: false, status: true },
-        send: (envelope: any, payload: any) => defaultSend(adapter, envelope, payload),
+        send: async (envelope: any, payload: any) => {
+          const ctx = envelope.replyContext;
+          const channelId = envelope.channelId;
+          switch (payload.kind) {
+            case 'result.text':
+            case 'command.result':
+            case 'command.error':
+            case 'system.notice':
+            case 'system.error':
+            case 'result.error': {
+              const sendCtx: any = { ...(ctx ?? {}) };
+              if (payload.kind === 'result.text' && payload.isFinal) sendCtx.title = '✓ 最终回复:';
+              await channel.sendMessage(channelId, payload.text, sendCtx);
+              return;
+            }
+            case 'result.file':
+              await channel.sendFile(channelId, payload.filePath, ctx);
+              return;
+            case 'result.image':
+              await channel.sendImage(channelId, payload.data, ctx);
+              return;
+            case 'activity.batch': {
+              const text = formatItemsAsText(payload.items);
+              if (text) await channel.sendMessage(channelId, text, ctx);
+              return;
+            }
+            case 'status.started':
+            case 'status.completed':
+            case 'status.interrupted':
+            case 'status.error':
+            case 'status.timeout':
+              // Feishu 通过 acknowledge (✓ 表情) 表达状态，由 channel 自行处理
+              return;
+            case 'interaction':
+              await channel.sendInteraction(channelId, payload.interaction, ctx);
+              return;
+            case 'custom':
+              // Feishu 不支持自定义 payload
+              return;
+          }
+        },
         sendText: (id: string, text: string, context?: any) => channel.sendMessage(id, text, context),
         sendFile: (id: string, filePath: string, context?: any) => channel.sendFile(id, filePath, context),
         sendImage: (id: string, png: Buffer, context?: any) => channel.sendImage(id, png, context),

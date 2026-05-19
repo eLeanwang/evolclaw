@@ -1,11 +1,10 @@
 import type { AgentEvent } from '../../agents/claude-runner.js';
-import type { ChannelAdapter, ReplyContext } from '../../types.js';
+import type { ChannelAdapter, OutboundEnvelope, OutboundPayload, ReplyContext, ThoughtItem } from '../../types.js';
 import { logger } from '../../utils/logger.js';
 import fs from 'fs';
 import path from 'path';
 import { resolvePaths } from '../../paths.js';
 
-// 诊断日志（沿用 stream-flusher.ts 的诊断模式，受 config.debug.flusherDiag 控制）
 let diagStream: fs.WriteStream | null = null;
 function getDiagStream(): fs.WriteStream {
   if (!diagStream) {
@@ -22,8 +21,6 @@ function diag(instanceId: string, action: string, meta: Record<string, any> = {}
 
 let instanceCounter = 0;
 
-type QueueEntry = { kind: 'activity'; text: string } | { kind: 'text' };
-
 /**
  * IMRenderer — 统一出站投影器
  *
@@ -31,21 +28,16 @@ type QueueEntry = { kind: 'activity'; text: string } | { kind: 'text' };
  * Per-task 生命周期，由 MessageProcessor 在 processMessage 入口创建、出口销毁。
  *
  * 职责：
- * 1. 接收 AgentEvent 流（来自 runner）
- * 2. 按 chatmode + showActivities 决定投影/抑制/聚合
- *    - interactive：聚合窗口 → adapter.sendText（复用 flusher 的延迟自适应算法）
- *    - proactive：逐事件 → adapter.putThought（fire-and-forget）
- * 3. 旁路 logger.event() 落盘 events.log（Phase 2 接通）
+ * 1. 接收 AgentEvent 流，按 chatmode 投影为结构化 ThoughtItem
+ * 2. interactive：聚合窗口内 items 打包为 activity.batch payload，flush 时统一 adapter.send
+ * 3. proactive：逐事件转单条 activity.batch（items 长度 1）走 adapter.send
+ * 4. 旁路 logger.event() 落盘 events.log
  *
- * Phase 2 实现：内部仍调用旧 adapter 方法（sendText / putThought / addActivity）。
- * Phase 3 切换到 adapter.send(envelope, payload) 统一入口。
+ * 降级：channel 在 send() 内部处理（thought=true → 双发；thought=false → formatItemsAsText 走 sendMessage）
  */
 export interface IMRendererOptions {
   adapter: ChannelAdapter;
-  channelId: string;
-  taskId: string;
-  chatmode: 'interactive' | 'proactive';
-  replyContext?: ReplyContext;
+  envelope: OutboundEnvelope;
   /** interactive 模式聚合窗口（毫秒） */
   flushDelay?: number;
   /** 是否抑制中间过程（activity）。true=抑制 */
@@ -54,13 +46,17 @@ export interface IMRendererOptions {
   fileMarkerPattern?: RegExp;
   /** 诊断日志开关 */
   diagEnabled?: boolean;
-  /** sendText 回调 — 由 MessageProcessor 注入（封装 replyContext / firstReply / background 检查） */
-  sendText: (text: string, isFinal: boolean, hasText: boolean) => Promise<void>;
+  /**
+   * 出站发送回调 — 由 MessageProcessor 注入。
+   * 封装了 background 检查 / firstReply 状态 / replyContext title 注入等业务逻辑。
+   * IMRenderer 只构造 payload，发送时机/上下文由调用方决定。
+   */
+  send: (payload: OutboundPayload) => Promise<void>;
 }
 
 export class IMRenderer {
-  private buffer = '';
-  private queue: QueueEntry[] = [];
+  private itemsQueue: ThoughtItem[] = [];
+  private textBuffer = '';
   private timer?: NodeJS.Timeout;
   private lastFlush = Date.now();
   private allText = '';
@@ -69,17 +65,19 @@ export class IMRenderer {
   private messageTimestamps: number[] = [];
   private instanceId: string;
   private diagEnabled: boolean;
-  /** 串行发送队列：保证消息按序到达（继承 StreamFlusher 的 sendChain 设计） */
+  /** 串行发送队列：保证消息按序到达 */
   private sendChain: Promise<void> = Promise.resolve();
   /** proactive：是否已发过 thinking 文本（用于去重 complete.result） */
   private hasEmittedThinking = false;
+  /** 自增 callId 兜底（runner 没提供时用） */
+  private syntheticCallSeq = 0;
 
   constructor(private opts: IMRendererOptions) {
     this.diagEnabled = opts.diagEnabled ?? false;
     this.instanceId = `R${++instanceCounter}`;
     if (this.diagEnabled) {
       diag(this.instanceId, 'created', {
-        chatmode: opts.chatmode,
+        chatmode: opts.envelope.chatmode,
         flushDelay: opts.flushDelay,
         suppress: opts.suppressActivities,
       });
@@ -90,38 +88,36 @@ export class IMRenderer {
 
   /** 推入 AgentEvent，按 chatmode 投影 */
   emit(event: AgentEvent): void {
-    // events.log 旁路（Phase 2 接通）— 任何 chatmode 都落盘
     try {
-      logger.event({ source: 'runner', taskId: this.opts.taskId, channelId: this.opts.channelId, event });
+      logger.event({ source: 'runner', taskId: this.opts.envelope.taskId, channelId: this.opts.envelope.channelId, event });
     } catch {
       // logger.event 失败不影响业务
     }
 
-    if (this.opts.chatmode === 'proactive') {
+    if (this.opts.envelope.chatmode === 'proactive') {
       this.emitProactive(event);
-    } else {
-      this.emitInteractive(event);
     }
+    // interactive 模式由 MessageProcessor 显式调 addText/addToolCall/... 推入 items
   }
 
   /** 强制刷新所有 pending 事件 */
   async flush(isFinal?: boolean): Promise<void> {
-    if (this.opts.chatmode === 'proactive') {
+    if (this.opts.envelope.chatmode === 'proactive') {
       // proactive 是 fire-and-forget，无 pending buffer
       return;
     }
     return this.flushInternal(isFinal);
   }
 
-  /** 仅 flush activities，保留 text buffer（用于中间 complete 事件） */
+  /** 仅 flush activities，保留 textBuffer（用于中间 complete 事件） */
   async flushActivitiesOnly(): Promise<void> {
-    if (this.opts.chatmode === 'proactive') return;
+    if (this.opts.envelope.chatmode === 'proactive') return;
     return this.flushActivitiesInternal();
   }
 
   /** 是否有 pending 内容 */
   hasContent(): boolean {
-    return this.buffer.length > 0 || this.queue.some(e => e.kind === 'activity');
+    return this.textBuffer.length > 0 || this.itemsQueue.some(it => it.kind !== 'thinking');
   }
 
   /** 是否已发送过内容（用于决定最终 flush 是否带 isFinal 标题） */
@@ -136,55 +132,111 @@ export class IMRenderer {
 
   /** 当前 buffer 中尚未 flush 的文本 */
   getRemainingText(): string {
-    return this.buffer;
+    return this.textBuffer;
   }
 
   /** 从 buffer 中移除指定 pattern（用于文件标记预处理） */
   stripFromBuffer(pattern: RegExp): void {
-    this.buffer = this.buffer.replace(pattern, '').trim();
+    this.textBuffer = this.textBuffer.replace(pattern, '').trim();
+    // itemsQueue 中的 thinking items 也同步过滤
+    for (const item of this.itemsQueue) {
+      if (item.kind === 'thinking') {
+        item.text = item.text.replace(pattern, '');
+      }
+    }
   }
 
   // ── 文本/活动注入（替代 StreamFlusher.addText/addActivity）──
 
   /** 添加文本片段（流式 text） */
   addText(text: string): void {
-    if (this.opts.chatmode === 'proactive') return; // proactive 走 emit() 路径
-    if (this.buffer.length === 0 && text.length > 0) {
-      this.queue.push({ kind: 'text' });
+    if (this.opts.envelope.chatmode === 'proactive') return;
+    if (!text) return;
+
+    // 同一窗口内连续 text delta 合并到最后一个 thinking item
+    const last = this.itemsQueue[this.itemsQueue.length - 1];
+    if (last && last.kind === 'thinking') {
+      last.text += text;
+    } else {
+      this.itemsQueue.push({ kind: 'thinking', text });
     }
-    this.buffer += text;
+
+    this.textBuffer += text;
     this.allText += text;
     this.messageTimestamps.push(Date.now());
     if (this.diagEnabled) {
       diag(this.instanceId, 'addText', {
         len: text.length,
         preview: text.substring(0, 60),
-        bufLen: this.buffer.length,
+        bufLen: this.textBuffer.length,
       });
     }
     this.scheduleFlush();
   }
 
-  /** 添加活动事件（tool_use / tool_result / error / compact 等） */
-  addActivity(desc: string): void {
-    if (this.opts.chatmode === 'proactive') return;
+  /** 添加工具调用 */
+  addToolCall(name: string, input: Record<string, unknown> | undefined, callId?: string, descText?: string): void {
+    if (this.opts.envelope.chatmode === 'proactive') return;
     if (this.opts.suppressActivities) return;
-    this.queue.push({ kind: 'activity', text: desc });
+    this.itemsQueue.push({
+      kind: 'tool_call',
+      call_id: callId || this.synthCallId(),
+      name,
+      arguments: input,
+      text: descText,
+    });
     this.messageTimestamps.push(Date.now());
-    if (this.diagEnabled) {
-      diag(this.instanceId, 'addActivity', { desc: desc.substring(0, 80), queueLen: this.queue.length });
-    }
+    if (this.diagEnabled) diag(this.instanceId, 'addToolCall', { name, callId });
     this.scheduleFlush();
   }
 
-  // ── 内部：interactive 模式（聚合窗口） ──
+  /** 添加工具结果 */
+  addToolResult(name: string, ok: boolean, result?: unknown, error?: string, callId?: string, durationMs?: number, descText?: string): void {
+    if (this.opts.envelope.chatmode === 'proactive') return;
+    if (this.opts.suppressActivities) return;
+    this.itemsQueue.push({
+      kind: 'tool_result',
+      call_id: callId || this.synthCallId(),
+      name,
+      ok,
+      result,
+      error,
+      duration_ms: durationMs,
+      text: descText,
+    });
+    this.messageTimestamps.push(Date.now());
+    if (this.diagEnabled) diag(this.instanceId, 'addToolResult', { name, ok, callId });
+    this.scheduleFlush();
+  }
 
-  private emitInteractive(event: AgentEvent): void {
-    // interactive 模式由调用方（message-processor）显式调 addText/addActivity，
-    // emit() 在 interactive 下不做事件 → 文本/活动转换。
-    // 这是为了与现有 message-processor 的复杂分支逻辑（hasErrorResult、suppress、complete handling）
-    // 保持兼容——message-processor 仍是事件分发器，IMRenderer 是聚合/投影器。
-    // Phase 3 重构时再把所有事件转换逻辑搬入 emitInteractive。
+  /** 添加进度提示 */
+  addProgress(text: string, opts: { state?: 'processing' | 'waiting'; toolUses?: number; durationMs?: number } = {}): void {
+    if (this.opts.envelope.chatmode === 'proactive') return;
+    if (this.opts.suppressActivities) return;
+    this.itemsQueue.push({
+      kind: 'progress',
+      text,
+      state: opts.state,
+      tool_uses: opts.toolUses,
+      duration_ms: opts.durationMs,
+    });
+    this.messageTimestamps.push(Date.now());
+    this.scheduleFlush();
+  }
+
+  /** 添加系统提示 / 通知 */
+  addNotice(text: string, severity: 'info' | 'warn', subtype?: string): void {
+    if (this.opts.envelope.chatmode === 'proactive') return;
+    if (this.opts.suppressActivities) return;
+    this.itemsQueue.push({ kind: 'notice', text, severity, subtype });
+    this.messageTimestamps.push(Date.now());
+    this.scheduleFlush();
+  }
+
+  // ── 内部：interactive 模式聚合窗口 ──
+
+  private synthCallId(): string {
+    return `synth-${this.opts.envelope.taskId}-${++this.syntheticCallSeq}`;
   }
 
   private scheduleFlush(): void {
@@ -228,107 +280,108 @@ export class IMRenderer {
     if (intervals.length === 0) return interval;
 
     const avgInterval = intervals.reduce((a, b) => a + b) / intervals.length;
-    let dynamicDelay = avgInterval * 3;
+    const dynamicDelay = avgInterval * 3;
     const minDelay = interval;
     const maxDelay = interval * 2.5;
     return Math.max(minDelay, Math.min(maxDelay, dynamicDelay));
   }
 
+  /** 仅 flush 非 thinking items（保留 textBuffer 用于后续 final flush） */
   private async flushActivitiesInternal(): Promise<void> {
-    const hasActivities = this.queue.some(e => e.kind === 'activity');
-    if (!hasActivities) return;
+    const nonThinking = this.itemsQueue.filter(it => it.kind !== 'thinking');
+    if (nonThinking.length === 0) return;
 
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = undefined;
     }
 
-    const activities = this.queue.filter(e => e.kind === 'activity') as { kind: 'activity'; text: string }[];
-    this.queue = this.queue.filter(e => e.kind === 'text');
+    // 移除已 flush 的 non-thinking items，保留 thinking items
+    this.itemsQueue = this.itemsQueue.filter(it => it.kind === 'thinking');
 
-    let output = activities.map(e => e.text).join('\n') + '\n\n';
+    const payload: OutboundPayload = { kind: 'activity.batch', items: nonThinking };
+    if (this.diagEnabled) diag(this.instanceId, 'flushActivitiesOnly', { itemCount: nonThinking.length });
 
-    if (output && this.opts.fileMarkerPattern) {
-      output = output.replace(this.opts.fileMarkerPattern, '').trim();
-    }
-
-    if (this.diagEnabled) {
-      diag(this.instanceId, 'flushActivitiesOnly', { outputLen: output.length });
-    }
-
-    if (output) {
-      this.sentContent = true;
-      const text = output;
-      this.sendChain = this.sendChain
-        .then(() => this.opts.sendText(text, false, false))
-        .catch(e => {
-          logger.warn('[IMRenderer] send failed:', e);
-        });
-      await this.sendChain;
-      this.lastFlush = Date.now();
-      this.flushCount++;
-    }
+    this.sentContent = true;
+    this.sendChain = this.sendChain
+      .then(() => this.opts.send(payload))
+      .catch(e => logger.warn('[IMRenderer] activity.batch send failed:', e));
+    await this.sendChain;
+    this.lastFlush = Date.now();
+    this.flushCount++;
   }
 
+  /**
+   * 完整 flush：把 itemsQueue 里所有 items 打包成 activity.batch 发送。
+   * 如果 isFinal=true，还会在 batch 之后单独发一条 result.text 作为最终回复。
+   */
   private async flushInternal(isFinal?: boolean): Promise<void> {
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = undefined;
     }
 
-    let output = '';
-    const hasText = this.buffer.length > 0;
-
-    // 按入队顺序合并：activity 直接追加，text 条目处插入 buffer 内容
-    let textInserted = false;
-    for (const entry of this.queue) {
-      if (entry.kind === 'activity') {
-        if (output && !output.endsWith('\n')) output += '\n';
-        output += entry.text + '\n';
-      } else if (!textInserted) {
-        if (output) output += output.endsWith('\n') ? '\n' : '\n\n';
-        output += this.buffer;
-        textInserted = true;
+    // 文件标记过滤
+    if (this.opts.fileMarkerPattern) {
+      this.textBuffer = this.textBuffer.replace(this.opts.fileMarkerPattern, '').trim();
+      for (const item of this.itemsQueue) {
+        if (item.kind === 'thinking') item.text = item.text.replace(this.opts.fileMarkerPattern, '');
       }
     }
-    if (!textInserted && hasText) {
-      output += this.buffer;
-    }
 
-    this.queue = [];
-    this.buffer = '';
+    // 清掉空 thinking items
+    const items = this.itemsQueue.filter(it => {
+      if (it.kind === 'thinking') return it.text.length > 0;
+      return true;
+    });
 
-    if (output && this.opts.fileMarkerPattern) {
-      output = output.replace(this.opts.fileMarkerPattern, '').trim();
-    }
+    this.itemsQueue = [];
+
+    const finalText = isFinal ? this.textBuffer : '';
+    this.textBuffer = '';
 
     if (this.diagEnabled) {
       diag(this.instanceId, 'flush', {
         isFinal,
-        outputLen: output.length,
+        itemCount: items.length,
+        finalTextLen: finalText.length,
         flushCount: this.flushCount,
         sinceLastFlush: Date.now() - this.lastFlush,
-        preview: output.substring(0, 80),
       });
     }
 
-    if (output) {
+    // 1. interactive 模式下：isFinal=true 时不发 thinking-only batch
+    //    （避免和最终 result.text 重复——最终回复已在 textBuffer 里）
+    let itemsForBatch = items;
+    if (isFinal) {
+      itemsForBatch = items.filter(it => it.kind !== 'thinking');
+    }
+
+    if (itemsForBatch.length > 0) {
+      const payload: OutboundPayload = { kind: 'activity.batch', items: itemsForBatch };
       this.sentContent = true;
-      const text = output;
-      const final = !!isFinal;
-      const ht = hasText;
       this.sendChain = this.sendChain
-        .then(() => this.opts.sendText(text, final, ht))
-        .catch(e => {
-          logger.warn('[IMRenderer] send failed:', e);
-        });
+        .then(() => this.opts.send(payload))
+        .catch(e => logger.warn('[IMRenderer] activity.batch send failed:', e));
+      await this.sendChain;
+      this.lastFlush = Date.now();
+      this.flushCount++;
+    }
+
+    // 2. isFinal=true 时单独发最终回复文本
+    if (isFinal && finalText.length > 0) {
+      const payload: OutboundPayload = { kind: 'result.text', text: finalText, isFinal: true };
+      this.sentContent = true;
+      this.sendChain = this.sendChain
+        .then(() => this.opts.send(payload))
+        .catch(e => logger.warn('[IMRenderer] result.text send failed:', e));
       await this.sendChain;
       this.lastFlush = Date.now();
       this.flushCount++;
     }
   }
 
-  // ── 内部：proactive 模式（逐事件 putThought） ──
+  // ── 内部：proactive 模式（逐事件 activity.batch[1 item]） ──
 
   private emitProactive(event: AgentEvent): void {
     // 对齐 interactive 的 dedup：流式 text 已推过时，complete.result 不再重复发 summary
@@ -341,86 +394,102 @@ export class IMRenderer {
       return;
     }
 
-    const payload = this.mapEventToPayload(event);
-    if (!payload) return;
-    if (!this.opts.adapter.putThought) return;
+    const item = this.mapEventToItem(event);
+    if (!item) return;
 
-    if (payload.stage === 'thinking') {
+    if (item.kind === 'thinking') {
       this.hasEmittedThinking = true;
+      this.allText += item.text;
     }
 
-    // payload 也带上 task_id / chatmode（与 message.send/group.send 对齐）
-    (payload as any).task_id = this.opts.taskId;
-    (payload as any).chatmode = this.opts.chatmode;
-
+    const payload: OutboundPayload = { kind: 'activity.batch', items: [item] };
     // fire-and-forget
-    this.opts.adapter
-      .putThought(this.opts.channelId, this.opts.taskId, payload, this.opts.replyContext)
-      .catch(err => {
-        logger.debug(`[IMRenderer] putThought failed: ${(err as Error).message}`);
-      });
+    this.opts.send(payload).catch(err => {
+      logger.debug(`[IMRenderer] proactive send failed: ${(err as Error).message}`);
+    });
   }
 
-  private mapEventToPayload(event: AgentEvent): ThoughtPayload | null {
+  private mapEventToItem(event: AgentEvent): ThoughtItem | null {
     switch (event.type) {
       case 'text':
         if (!event.text) return null;
-        return { type: 'thought', text: event.text, stage: 'thinking' };
+        return { kind: 'thinking', text: event.text };
 
       case 'tool_use': {
         const desc = this.summarizeInput(event.input, event.name);
         return {
-          type: 'thought',
-          text: desc ? `🔧 ${event.name}: ${desc}` : `🔧 ${event.name}`,
-          stage: 'tool',
-          metadata: { tool: event.name, input: desc },
+          kind: 'tool_call',
+          call_id: event.callId || this.synthCallId(),
+          name: event.name,
+          arguments: event.input,
+          text: desc,
         };
       }
 
       case 'tool_result':
         if (event.isError) {
           return {
-            type: 'thought',
-            text: `⚠️ ${event.name}: ${event.error || '执行失败'}`,
-            stage: 'tool',
-            metadata: { tool: event.name, ok: false },
+            kind: 'tool_result',
+            call_id: event.callId || this.synthCallId(),
+            name: event.name,
+            ok: false,
+            error: event.error || (typeof event.result === 'string' ? event.result : '执行失败'),
           };
-        }
-        {
+        } else {
           const resultText = this.truncate(this.stringifyResult(event.result), 200);
           return {
-            type: 'thought',
-            text: resultText ? `✅ ${event.name}: ${resultText}` : `✅ ${event.name}`,
-            stage: 'tool',
-            metadata: { tool: event.name, ok: true },
+            kind: 'tool_result',
+            call_id: event.callId || this.synthCallId(),
+            name: event.name,
+            ok: true,
+            result: event.result,
+            text: resultText,
           };
         }
 
       case 'compact':
         return {
-          type: 'thought',
+          kind: 'notice',
           text: `💡 会话压缩完成 (压缩前 tokens: ${event.preTokens})`,
-          stage: 'system',
+          severity: 'info',
+          subtype: 'compact',
         };
 
       case 'task_progress': {
         const stats = this.formatTaskStats(event);
         const text = event.summary
-          ? `⏳ 子任务: ${event.summary}${stats ? ` (${stats})` : ''}`
-          : `⏳ 子任务进行中${stats ? `: ${stats}` : ''}`;
-        return { type: 'thought', text, stage: 'planning' };
+          ? `子任务: ${event.summary}${stats ? ` (${stats})` : ''}`
+          : `子任务进行中${stats ? `: ${stats}` : ''}`;
+        return {
+          kind: 'progress',
+          text,
+          state: 'processing',
+          tool_uses: event.toolUses,
+          duration_ms: event.durationMs,
+        };
       }
 
       case 'error':
-        return { type: 'thought', text: `❌ ${event.error}`, stage: 'error' };
+        return { kind: 'notice', text: event.error, severity: 'warn' };
 
       case 'complete':
         if (event.isError) {
           const errText = event.errors?.join('; ') || event.result || '任务失败';
-          return { type: 'thought', text: `❌ ${errText}`, stage: 'error' };
+          return {
+            kind: 'summary',
+            text: errText,
+            is_error: true,
+            subtype: event.subtype,
+            duration_ms: event.durationMs,
+          };
         }
         if (event.result) {
-          return { type: 'thought', text: event.result, stage: 'summary' };
+          return {
+            kind: 'summary',
+            text: event.result,
+            subtype: event.subtype,
+            duration_ms: event.durationMs,
+          };
         }
         return null;
 
@@ -473,14 +542,4 @@ export class IMRenderer {
     if (event.durationMs) parts.push(`${Math.round(event.durationMs / 1000)}s`);
     return parts.join(', ');
   }
-}
-
-interface ThoughtPayload {
-  type: 'thought';
-  text: string;
-  stage: string;
-  format?: string;
-  metadata?: Record<string, any>;
-  task_id?: string;
-  chatmode?: string;
 }

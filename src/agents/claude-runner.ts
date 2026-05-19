@@ -111,8 +111,8 @@ class MessageStream {
 export type AgentEvent =
   | { type: 'text'; text: string }
   | { type: 'status'; subtype: string; message: string }
-  | { type: 'tool_use'; name: string; input: any }
-  | { type: 'tool_result'; name: string; result: any; isError?: boolean; error?: string }
+  | { type: 'tool_use'; name: string; input: any; callId?: string }
+  | { type: 'tool_result'; name: string; result: any; isError?: boolean; error?: string; callId?: string }
   | { type: 'compact'; preTokens: number }
   | { type: 'task_progress'; summary?: string; toolUses?: number; durationMs?: number }
   | { type: 'session_id'; sessionId: string }
@@ -758,7 +758,7 @@ export class AgentRunner {
           if (content.type === 'tool_use') {
             // 记录 id → name 映射，供后续 tool_result 使用
             if (content.id) toolUseNames.set(content.id, content.name);
-            yield { type: 'tool_use', name: content.name, input: content.input };
+            yield { type: 'tool_use', name: content.name, input: content.input, callId: content.id };
           } else if (content.type === 'text' && content.text && !hasTextDelta) {
             yield { type: 'text', text: content.text };
           }
@@ -780,6 +780,7 @@ export class AgentRunner {
               result: resultContent,
               isError: block.is_error === true,
               error: block.is_error === true ? resultContent : undefined,
+              callId: block.tool_use_id,
             };
           }
         }
