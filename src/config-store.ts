@@ -6,9 +6,8 @@
  *
  * 合并规则（mergeForAgent）：
  *   - 深合并：models / chatmode / aun / baseagents / projects 子字段
- *   - 数组合并去重：admins
  *   - 标量覆盖：active_baseagent / show_activities / flush_delay / debounce
- *   - per-agent only：aid / enabled / owners / channels（不进 defaults）
+ *   - per-agent only：aid / enabled / owners / admins / channels（不进 defaults）
  *
  * 写入：通过 atomic-write 双 rename，避免崩溃损坏。
  *
@@ -456,7 +455,7 @@ export function mergeForAgent(agent: AgentConfig, defaults: DefaultsConfig | nul
     aid: agent.aid,
     enabled: agent.enabled,
     owners: agent.owners,
-    admins: mergeAdmins(d.admins, agent.admins),
+    admins: agent.admins,
     aun: deepMergeBlocks<AunRuntimeBlock>(d.aun, agent.aun),
     channels: agent.channels,
     active_baseagent: agent.active_baseagent ?? d.active_baseagent,
@@ -471,11 +470,6 @@ export function mergeForAgent(agent: AgentConfig, defaults: DefaultsConfig | nul
     enable_rich_content: agent.enable_rich_content ?? d.enable_rich_content,
   };
   return merged;
-}
-
-function mergeAdmins(a?: string[], b?: string[]): string[] | undefined {
-  if (!a && !b) return undefined;
-  return Array.from(new Set([...(a ?? []), ...(b ?? [])]));
 }
 
 function deepMergeBlocks<T extends object>(base?: T, overlay?: T): T | undefined {

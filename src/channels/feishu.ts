@@ -90,11 +90,58 @@ export class FeishuChannel {
           logger.debug('[Feishu] Received message, message_id:', msg.message_id, 'type:', msg.message_type);
           logger.debug('[Feishu] Full data object:', JSON.stringify(data, null, 2));
 
+          // [RESTART-AUDIT] 排查未授权 /restart 来源：当文本消息正文以 /restart 开头时，落原始事件
+          if (msg.message_type === 'text') {
+            try {
+              const parsed = JSON.parse(msg.content || '{}');
+              const text = String(parsed?.text ?? '').trim();
+              if (text === '/restart' || text.startsWith('/restart ')) {
+                const anyData = data as any;
+                logger.info('[Feishu][RESTART-AUDIT] inbound /restart text message',
+                  JSON.stringify({
+                    instance: this.config.appId,
+                    schema: anyData.schema,
+                    event_id: data.event_id,
+                    create_time: data.create_time,
+                    token: data.token ? 'present' : 'absent',
+                    tenant_key: data.tenant_key,
+                    app_id: anyData.app_id,
+                    message_id: msg.message_id,
+                    parent_id: msg.parent_id,
+                    root_id: msg.root_id,
+                    thread_id: msg.thread_id,
+                    chat_id: msg.chat_id,
+                    chat_type: msg.chat_type,
+                    msg_create_time: msg.create_time,
+                    msg_update_time: msg.update_time,
+                    raw_content: msg.content,
+                    sender: data.sender,
+                    mentions: msg.mentions,
+                  }));
+              }
+            } catch {
+              // 解析失败不影响主流程
+            }
+          }
+
           if (!msg.message_id || this.isDuplicate(msg.message_id)) {
             logger.debug('[Feishu] Duplicate message ignored:', msg.message_id);
             return;
           }
           this.markSeen(msg.message_id);
+
+          // 丢弃飞书服务端积压超过 5 分钟才下发的消息：上游观察到 65 分钟级延迟下发的
+          // 历史消息（含 /restart 这类破坏性命令），无差别接收会导致非预期重启。
+          // create_time 是 ms 字符串。
+          {
+            const createTimeMs = Number(msg.create_time ?? 0);
+            const ageMs = Date.now() - createTimeMs;
+            const STALE_THRESHOLD_MS = 5 * 60 * 1000;
+            if (createTimeMs > 0 && ageMs > STALE_THRESHOLD_MS) {
+              logger.warn(`[Feishu] Dropping stale message: id=${msg.message_id} type=${msg.message_type} age=${Math.round(ageMs / 1000)}s create_time=${createTimeMs}`);
+              return;
+            }
+          }
 
           if (!this.messageHandler) return;
 

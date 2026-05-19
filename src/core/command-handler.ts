@@ -1834,44 +1834,52 @@ export class CommandHandler {
       ];
 
       if (!activityArg) {
-        // 无参数：显示当前模式 + CommandCard 卡片
         if (this.interactionRouter) {
-          const body = modeDescriptions.map(m =>
-            `${m.configVal === currentMode ? '✓' : '•'} **${m.key}** (${m.label})`
-          ).join('\n');
-
+          const requestId = `activity-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
           const interaction: InteractionRequest = {
             type: 'interaction',
-            id: `activity-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`,
+            id: requestId,
             channelId,
             sessionId: activeSession?.id || '',
-            initiatorId: userId,
             kind: {
-              kind: 'command-card',
+              kind: 'action',
               title: '📋 中间输出模式',
-              body,
+              body: modeDescriptions.map(m =>
+                `${m.configVal === currentMode ? '✓' : '•'} **${m.key}** (${m.label})`
+              ).join('\n'),
               buttons: modeDescriptions.map(m => ({
+                key: m.key,
                 label: m.configVal === currentMode ? `✓ ${m.key}` : m.key,
-                command: `/activity ${m.key}`,
                 style: (m.configVal === currentMode ? 'primary' : 'default') as 'primary' | 'default',
-                disabled: m.configVal === currentMode,
               })),
             },
           };
 
           const replyCtx = activeSession ? this.getReplyContext(activeSession) : undefined;
-          const cardResult = await this.sendCommandCard({ channel, channelId, interaction, replyCtx, canWrite: isOwner });
-          if (cardResult === null) return null;
-          return cardResult;
+          const cardSent = await this.sendInteractionCard({
+            channel, channelId, sessionId: activeSession?.id || '', requestId, interaction, replyCtx,
+            canWrite: isOwner,
+            callback: async (action, _values, operatorId) => {
+              if (userId && operatorId && operatorId !== userId) return;
+              const result = await this.handle(`/activity ${action}`, channel, channelId, undefined, userId, threadId);
+              if (result) {
+                const adapter = this.adapters.get(channel);
+                adapter?.sendText(channelId, result, replyCtx);
+              } else {
+                await this.handle('/activity', channel, channelId, undefined, userId, threadId);
+              }
+            },
+          });
+          if (cardSent) return null;
         }
 
         // 降级：文本
         const modeList = modeDescriptions.map(m => {
-          const prefix = m.configVal === currentMode ? '✓' : ' ';
-          return `  ${prefix} ${m.key} (${m.label})`;
+          const prefix = m.configVal === currentMode ? '✓' : '•';
+          return `  ${prefix} ${m.key} — ${m.label}`;
         }).join('\n');
         if (isOwner) {
-          return `📋 中间输出模式: ${currentMode}\n\n${modeList}\n\n用法:\n  /activity <模式>    切换中间输出显示模式`;
+          return [`📋 中间输出模式: ${currentMode}`, '', modeList, '', '用法: /activity <all|dm|owner|none>'].join('\n');
         }
         return `📋 中间输出模式: ${currentMode}`;
       }
@@ -1959,9 +1967,17 @@ export class CommandHandler {
 
         // 降级：文本
         if (canSwitch) {
-          return `📋 当前会话模式: ${currentMode}\n可选: interactive / proactive\n用法: /chatmode <模式>`;
+          return [
+            `📋 会话模式: ${currentMode}`,
+            '',
+            '模式说明：',
+            '  • interactive — 交互模式：收到消息时才回复，回复直接显示',
+            '  • proactive   — 主动模式：流式输出静默，由 Agent 自调 ctl send 发声',
+            '',
+            '用法: /chatmode <interactive|proactive>',
+          ].join('\n');
         }
-        return `📋 当前会话模式: ${currentMode}`;
+        return `📋 会话模式: ${currentMode}`;
       }
 
       if (arg !== 'interactive' && arg !== 'proactive') {
@@ -2064,9 +2080,7 @@ export class CommandHandler {
         lines.push('  • all     — 广播模式：群内所有消息都触发响应');
         if (isAdmin) {
           lines.push('');
-          lines.push('用法：');
-          lines.push('  /dispatch mention  — 切换到 @ 提及模式');
-          lines.push('  /dispatch all      — 切换到广播模式');
+          lines.push('用法: /dispatch <mention|all>');
         }
         return lines.join('\n');
       }
@@ -2449,6 +2463,23 @@ export class CommandHandler {
     // /restart 命令：重启服务（owner only） / 重连指定渠道（admin+）
     if (normalizedContent === '/restart' || normalizedContent.startsWith('/restart ')) {
       const restartArg = normalizedContent.slice('/restart'.length).trim();
+
+      // [RESTART-AUDIT] 记录调用来源：堆栈 + 入参，排查未授权触发
+      logger.info('[CommandHandler][RESTART-AUDIT] /restart entry',
+        JSON.stringify({
+          channel,
+          channelId,
+          userId,
+          threadId,
+          chatType,
+          isOwner,
+          isAdmin,
+          arg: restartArg || '(none)',
+          contentLength: content.length,
+          contentRaw: content,
+          contentNormalized: normalizedContent,
+          stack: new Error('restart-audit').stack?.split('\n').slice(0, 10).join(' | '),
+        }));
 
       // /restart <type> — 重连指定类型的所有渠道（admin only）
       if (restartArg) {
