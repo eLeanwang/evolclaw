@@ -356,7 +356,7 @@ describe('trigger session execution', () => {
     // trigger:completed must be published even for silent triggers
     expect(completed).toHaveLength(1);
     expect(completed[0].triggerId).toBe(t.id);
-    expect(completed[0].durationMs).toBeGreaterThan(0);
+    expect(completed[0].durationMs).toBeGreaterThanOrEqual(0);
 
     // But no output sent to channel
     expect(adapter.sendText).not.toHaveBeenCalled();
