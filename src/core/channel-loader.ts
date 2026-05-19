@@ -9,7 +9,15 @@
 import type { ChannelAdapter, ChannelPolicy, ChannelOptions } from '../types.js';
 import type { Config } from '../types.js';
 import type { EvolAgent } from './evolagent.js';
+import type { MessageBridge } from './message/message-bridge.js';
+import type { EventBus } from './event-bus.js';
+import type { SessionManager } from './session/session-manager.js';
 import { logger } from '../utils/logger.js';
+
+export interface BridgeHookContext {
+  eventBus: EventBus;
+  sessionManager: SessionManager;
+}
 
 /**
  * Channel instance returned by plugin
@@ -38,6 +46,12 @@ export interface ChannelInstance {
 
   /** Optional callback for project path requests */
   onProjectPathRequest?: (channelId: string) => Promise<string>;
+
+  /** Register inbound message mapping + outbound reply callback with MessageBridge. */
+  registerBridge?(bridge: MessageBridge, channelType: string): void;
+
+  /** Register lifecycle hooks (eventBus injection, channelDown, etc.). Separate from message mapping. */
+  registerHooks?(ctx: BridgeHookContext): void;
 }
 
 /**

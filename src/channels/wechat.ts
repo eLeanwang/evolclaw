@@ -842,7 +842,8 @@ export class WechatChannel {
 }
 
 // Plugin implementation
-import type { ChannelPlugin, ChannelInstance } from '../core/channel-loader.js';
+import type { ChannelPlugin, ChannelInstance, BridgeHookContext } from '../core/channel-loader.js';
+import type { MessageBridge } from '../core/message/message-bridge.js';
 import type { Config, WechatChannelConfig } from '../types.js';
 import { normalizeChannelInstances, getChannelShowActivities } from '../utils/channel-helpers.js';
 
@@ -918,6 +919,31 @@ export class WechatChannelPlugin implements ChannelPlugin {
         disconnect: () => channel.disconnect(),
         onProjectPathRequest: (channelId: string) =>
           Promise.resolve(config.projects?.defaultPath || process.cwd()),
+        registerBridge(bridge: MessageBridge, channelType: string) {
+          bridge.register(
+            adapter.channelName,
+            (handler) => channel.onMessage(async (channelId: string, content: string, peerId?: string,
+              images?: Array<{ data: string; mimeType: string }>, chatType?: 'private' | 'group') => {
+              await handler({
+                channel: adapter.channelName,
+                channelType,
+                channelId,
+                content,
+                images,
+                chatType: chatType || 'private',
+                peerId: peerId || '',
+              });
+            }),
+            (channelId, text) => channel.sendMessage(channelId, text),
+            adapter,
+            channelType
+          );
+        },
+        registerHooks(ctx: BridgeHookContext) {
+          if (channel.setEventBus) {
+            channel.setEventBus(ctx.eventBus);
+          }
+        },
       });
     }
 

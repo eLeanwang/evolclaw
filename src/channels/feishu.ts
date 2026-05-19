@@ -1308,6 +1308,7 @@ export function hasMarkdownSyntax(text: string): boolean {
 
 // Plugin implementation
 import type { ChannelPlugin, ChannelInstance } from '../core/channel-loader.js';
+import type { MessageBridge } from '../core/message/message-bridge.js';
 import type { Config, FeishuChannelConfig } from '../types.js';
 import { normalizeChannelInstances, getChannelShowActivities } from '../utils/channel-helpers.js';
 import { resolvePaths } from '../paths.js';
@@ -1393,6 +1394,26 @@ export class FeishuChannelPlugin implements ChannelPlugin {
         disconnect: () => channel.disconnect(),
         onProjectPathRequest: (channelId: string) =>
           Promise.resolve(config.projects?.defaultPath || process.cwd()),
+        registerBridge(bridge: MessageBridge, channelType: string) {
+          bridge.register(
+            adapter.channelName,
+            (handler) => channel.onMessage(async ({ channelId: chatId, content, images, peerId, peerName, messageId, mentions, threadId, rootId, chatType }: any) => {
+              await handler({
+                channel: adapter.channelName, channelType, channelId: chatId, content, images, chatType,
+                peerId: peerId || '', peerName, messageId, mentions, threadId,
+                // 只在话题场景（threadId 有值）才设置 replyContext；
+                // 纯引用回复（rootId 有值但无 threadId）不设置，避免所有回复都带引用头
+                replyContext: threadId ? { replyToMessageId: rootId ?? threadId, replyInThread: true } : undefined,
+              });
+            }),
+            (channelId, text, replyContext) => channel.sendMessage(channelId, text, {
+              replyToMessageId: replyContext?.replyToMessageId,
+              replyInThread: replyContext?.replyInThread,
+            }),
+            adapter,
+            channelType
+          );
+        },
       });
     }
 
