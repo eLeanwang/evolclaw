@@ -275,7 +275,7 @@ describe('trigger session execution', () => {
 
   // ── trigger:completed / trigger:failed 事件 ───────────────────────────────
 
-  it('trigger:completed event is published after successful execution', async () => {
+  it('trigger:completed event is published after successful execution (latest)', async () => {
     const { triggerManager, triggerScheduler, eventBus } = await setupEnv(tmpDir);
     await triggerScheduler.init();
 
@@ -338,6 +338,31 @@ describe('trigger session execution', () => {
     expect(failed[0].triggerId).toBe(t.id);
 
     errorScheduler.stop();
+  });
+
+  it('trigger:completed event is published for silent trigger (no user-visible output)', async () => {
+    const { triggerManager, triggerScheduler, eventBus, adapter } = await setupEnv(tmpDir);
+    await triggerScheduler.init();
+
+    const completed: any[] = [];
+    eventBus.subscribe('trigger:completed', (ev) => completed.push(ev));
+
+    const t = makeFastTrigger({ targetSessionStrategy: 'silent', prompt: 'silent background work' });
+    triggerManager.register(t);
+    triggerScheduler.register(t);
+
+    await new Promise(r => setTimeout(r, 1200));
+
+    // trigger:completed must be published even for silent triggers
+    expect(completed).toHaveLength(1);
+    expect(completed[0].triggerId).toBe(t.id);
+    expect(completed[0].durationMs).toBeGreaterThan(0);
+
+    // But no output sent to channel
+    expect(adapter.sendText).not.toHaveBeenCalled();
+    expect(adapter.sendProcessingStatus).not.toHaveBeenCalled();
+
+    triggerScheduler.stop();
   });
 
   // ── 触发器不打断用户消息 ──────────────────────────────────────────────────
