@@ -345,34 +345,23 @@ export interface InteractionResponse {
 // 渠道适配器接口
 export interface ChannelAdapter {
   readonly channelName: string;
-  /** 渠道能力声明（Phase 3 新增）。缺省时按"全无"对待，调用方应做降级处理。 */
-  readonly capabilities?: ChannelCapabilities;
-  /**
-   * 统一出站入口（Phase 3 新增）。按 OutboundPayload.kind 分发。
-   * 缺省时调用方应回退到旧 sendText / sendFile / sendImage / sendProcessingStatus / putThought / sendInteraction / sendCustomPayload。
-   */
-  send?(envelope: OutboundEnvelope, payload: OutboundPayload): Promise<void>;
+  /** 渠道能力声明 */
+  readonly capabilities: ChannelCapabilities;
+  /** 统一出站入口，按 OutboundPayload.kind 分发 */
+  send(envelope: OutboundEnvelope, payload: OutboundPayload): Promise<void>;
 
-  sendText(channelId: string, text: string, context?: ReplyContext): Promise<void>;
-  sendFile?(channelId: string, filePath: string, context?: ReplyContext): Promise<void>;
-  sendImage?(channelId: string, png: Buffer, context?: ReplyContext): Promise<void>;
+  /** 入站回调 */
   acknowledge?(messageId: string): Promise<void>;
-  sendProcessingStatus?(channelId: string, status: 'start' | 'done' | 'interrupted' | 'error' | 'timeout', sessionId: string, taskId: string, context?: ReplyContext): void;
-  sendCustomPayload?(channelId: string, payload: string): void;
-  uploadAgentMd?(content: string): Promise<void>;
-  downloadAgentMd?(aid: string): Promise<string>;
-  sendInteraction?(channelId: string, interaction: InteractionRequest, context?: ReplyContext): Promise<string | false>;
   onInteraction?(callback: (response: InteractionResponse) => void): void;
   onChatDissolved?(callback: (channelId: string) => void): void;
-  /**
-   * 发送 thought 内容
-   * channelId 在群聊时为 groupId，私聊时为对方 AID
-   * taskId 是任务唯一标识，同一次任务处理的所有 thought 共享同一 task_id
-   * adapter 内部按 chatType 分发到 group.thought.put 或 message.thought.put
-   */
-  putThought?(channelId: string, taskId: string, payload: object, context?: ReplyContext): Promise<void>;
+
+  /** 连接管理 */
   connect?(): Promise<void>;
   disconnect?(): Promise<void>;
+
+  /** AUN 协议私有扩展 */
+  uploadAgentMd?(content: string): Promise<void>;
+  downloadAgentMd?(aid: string): Promise<string>;
 }
 
 // 渠道配置选项

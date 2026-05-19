@@ -3,7 +3,7 @@ import fs from 'fs';
 import crypto from 'crypto';
 import { type AgentRunnerFull, hasCompact, type AgentEvent } from '../../agents/claude-runner.js';
 import { SessionManager } from '../session/session-manager.js';
-import { appendMessageLog, buildOutboundEntry } from '../session/message-log.js';
+import { appendMessageLog, buildOutboundEntry } from './message-log.js';
 import { IMRenderer } from './im-renderer.js';
 import { MessageCache } from './message-cache.js';
 import type { MessageQueue } from './message-queue.js';
@@ -17,7 +17,7 @@ import { DEFAULT_PERMISSION_MODE } from '../../types.js';
 import { getPackageRoot, resolveRoot } from '../../paths.js';
 import { renderPromptSection } from '../../agents/templates.js';
 import type { InteractionRouter } from '../interaction-router.js';
-import { renderActionAsText, renderCommandCardAsText } from '../interaction-fallback.js';
+import { renderActionAsText, renderCommandCardAsText } from '../interaction-router.js';
 
 /**
  * 构造 OutboundEnvelope —— 出站三件套的信封部分。
@@ -264,7 +264,7 @@ export class MessageProcessor {
     // Cache background status to avoid async call inside setInterval
     const isBackground = await this.isBackgroundSession(session, message.channel, message.channelId);
 
-    const timeoutPromise = new Promise<never>((_, reject) => {
+        const timeoutPromise = new Promise<never>((_, reject) => {
       rejectFn = reject;
       if (!monitorEnabled) return;
 
@@ -281,7 +281,10 @@ export class MessageProcessor {
               const msg = showIdleMonitor
                 ? result.message
                 : `\u26a0\ufe0f 任务超时（${result.idleSec}秒无响应），已自动中断`;
-              channelInfo.adapter.sendText(message.channelId, msg, this.getReplyContext(message)).catch(e => {
+              channelInfo.adapter.send(
+                buildEnvelope({ channel: channelInfo.adapter.channelName, channelId: message.channelId }),
+                { kind: 'system.notice', text: msg, subtype: 'health' }
+              ).catch(e => {
                 logger.debug(`[MessageProcessor] Failed to send kill diagnostic message:`, e);
               });
             }
@@ -296,7 +299,10 @@ export class MessageProcessor {
             logger.info(`[MessageProcessor] Idle monitor: ${result.action} after ${result.idleSec}s idle, stream: ${streamKey}`);
             if (channelInfo && showIdleMonitor && !shouldSuppress()) {
               if (!isBackground) {
-                channelInfo.adapter.sendText(message.channelId, result.message, this.getReplyContext(message)).catch(e => {
+                channelInfo.adapter.send(
+                  buildEnvelope({ channel: channelInfo.adapter.channelName, channelId: message.channelId }),
+                  { kind: 'system.notice', text: result.message, subtype: 'health' }
+                ).catch(e => {
                   logger.debug(`[MessageProcessor] Failed to send idle monitor message:`, e);
                 });
               }
@@ -390,6 +396,15 @@ export class MessageProcessor {
       };
     };
 
+    const isProactive = session.sessionMode === 'proactive';
+    const envelope = buildEnvelope({
+      taskId,
+      channel: message.channel,
+      channelId: message.channelId,
+      agentName: agentNameForStats,
+      chatmode: isProactive ? 'proactive' : 'interactive',
+      replyContext: taskReplyContext(),
+    });
 
     try {
       const isBackground = await this.isBackgroundSession(session, message.channel, message.channelId);
@@ -425,7 +440,7 @@ export class MessageProcessor {
 
       // 记录开始处理
       this.eventBus.publish({ type: 'task:started', sessionId: session.id });
-      adapter.sendProcessingStatus?.(message.channelId, 'start', session.id, taskId, taskReplyContext());
+      adapter.send(envelope, { kind: 'status.started' }).catch(() => {});
 
       logger.message({
         msgId: messageId,
@@ -438,15 +453,6 @@ export class MessageProcessor {
 
       // 创建 IMRenderer（统一 interactive/proactive 两条路径）
       let firstReply = true;
-      const isProactive = session.sessionMode === 'proactive';
-      const envelope = buildEnvelope({
-        taskId,
-        channel: message.channel,
-        channelId: message.channelId,
-        agentName: agentNameForStats,
-        chatmode: isProactive ? 'proactive' : 'interactive',
-        replyContext: this.getReplyContext(message),
-      });
       const renderer = new IMRenderer({
         adapter,
         envelope,
@@ -478,7 +484,7 @@ export class MessageProcessor {
             await adapter.send(enrichedEnvelope, payload);
           } else {
             if (payload.kind === 'result.text' || payload.kind === 'command.result' || payload.kind === 'command.error' || payload.kind === 'system.notice' || payload.kind === 'system.error' || payload.kind === 'result.error') {
-              await adapter.sendText(message.channelId, payload.text, opts);
+              await adapter.send({ ...envelope, replyContext: opts }, payload);
             }
           }
         },
@@ -498,7 +504,7 @@ export class MessageProcessor {
 
       // 设置权限审批的消息发送回调（指向当前渠道）
       agent.setSendPrompt(async (text: string) => {
-        await adapter.sendText(capturedChannelId, text, capturedReplyContext);
+        await adapter.send({ ...envelope, replyContext: capturedReplyContext }, { kind: 'result.text', text, isFinal: true });
       });
 
       // 设置权限审批的交互上下文（支持交互卡片）
@@ -566,9 +572,9 @@ export class MessageProcessor {
         let currentCanSend = false;
         if (!isProactive) {
           const fileChannelTypes = new Set<string>();
-          currentCanSend = !!channelInfo.adapter.sendFile;
+          currentCanSend = !!(channelInfo.adapter.capabilities?.file);
           for (const [, info] of this.channels) {
-            if (info.adapter.sendFile) {
+            if (info.adapter.capabilities?.file) {
               fileChannelTypes.add(info.options?.channelType || info.adapter.channelName);
             }
           }
@@ -578,8 +584,8 @@ export class MessageProcessor {
         // 通道能力
         const capParts: string[] = [];
         if (options?.supportsImages) capParts.push('图片输入');
-        if (channelInfo.adapter.sendImage) capParts.push('图片输出');
-        if (channelInfo.adapter.sendFile) capParts.push('文件发送');
+        if (channelInfo.adapter.capabilities?.image) capParts.push('图片输出');
+        if (channelInfo.adapter.capabilities?.file) capParts.push('文件发送');
 
         // Personal layer: persona.md + working memory 注入
         const owningAgent = this.agentRegistry?.resolveByChannel(channelKey);
@@ -744,24 +750,24 @@ export class MessageProcessor {
 
         // 跨通道仅限 owner
         if (isCrossChannel && session.identity?.role !== 'owner') {
-          await adapter.sendText(message.channelId, `\u274c 跨通道发送仅限管理员`, taskReplyContext());
+          await adapter.send(envelope, { kind: 'system.error', text: `\u274c 跨通道发送仅限管理员`, subtype: 'fatal' });
           continue;
         }
 
         const resolvedPath = this.resolveFilePath(filePath, absoluteProjectPath);
         if (!fs.existsSync(resolvedPath)) {
           logger.warn(`[${adapter.channelName}] File not found: ${resolvedPath}`);
-          await adapter.sendText(message.channelId, `\u26a0\ufe0f 文件未找到: ${filePath}`, taskReplyContext());
+          await adapter.send(envelope, { kind: 'system.error', text: `\u26a0\ufe0f 文件未找到: ${filePath}`, subtype: 'fatal' });
           continue;
         }
 
         // 找目标 adapter
         if (!targetInfo) {
-          await adapter.sendText(message.channelId, `\u274c 通道 ${targetLabel} 未启用或不存在`, taskReplyContext());
+          await adapter.send(envelope, { kind: 'system.error', text: `\u274c 通道 ${targetLabel} 未启用或不存在`, subtype: 'channel_down' });
           continue;
         }
-        if (!targetInfo.adapter.sendFile) {
-          await adapter.sendText(message.channelId, `\u274c 通道 ${targetLabel} 不支持文件发送`, taskReplyContext());
+        if (!targetInfo.adapter.capabilities?.file) {
+          await adapter.send(envelope, { kind: 'system.error', text: `\u274c 通道 ${targetLabel} 不支持文件发送`, subtype: 'capability' });
           continue;
         }
 
@@ -773,21 +779,21 @@ export class MessageProcessor {
           const ownerPeerId = this.agentRegistry?.getOwner?.(targetAdapterName);
           targetChannelId = ownerPeerId ? (this.sessionManager.getOwnerChatId(targetChannelType, ownerPeerId) ?? '') : '';
           if (!targetChannelId) {
-            await adapter.sendText(message.channelId, `\u274c 未找到 ${targetLabel} 的私聊会话，请先在该通道发送一条消息`, taskReplyContext());
+            await adapter.send(envelope, { kind: 'system.error', text: `\u274c 未找到 ${targetLabel} 的私聊会话，请先在该通道发送一条消息`, subtype: 'channel_down' });
             continue;
           }
         }
 
         logger.info(`[${adapter.channelName}] Sending file via ${targetInfo.adapter.channelName}: ${resolvedPath}`);
         try {
-          await targetInfo.adapter.sendFile(targetChannelId, resolvedPath, taskReplyContext());
+          await targetInfo.adapter.send(buildEnvelope({ taskId, channel: targetInfo.adapter.channelName, channelId: targetChannelId, agentName: agentNameForStats, replyContext: taskReplyContext() }), { kind: 'result.file', filePath: resolvedPath });
           this.eventBus.publish({ type: 'runner:file-sent', sessionId: session.id, filePath: resolvedPath, channel: targetInfo.adapter.channelName });
           if (isCrossChannel) {
-            await adapter.sendText(message.channelId, `\ud83d\udcce 文件已通过 ${targetLabel} 发送`, taskReplyContext());
+            await adapter.send(envelope, { kind: 'system.notice', text: `\ud83d\udcce 文件已通过 ${targetLabel} 发送`, subtype: 'health' });
           }
         } catch (error) {
           logger.error(`[${adapter.channelName}] Failed to send file: ${resolvedPath}`, error);
-          await adapter.sendText(message.channelId, `\u274c 文件发送失败: ${filePath}`, taskReplyContext());
+          await adapter.send(envelope, { kind: 'system.error', text: `\u274c 文件发送失败: ${filePath}`, subtype: 'fatal' });
         }
       }
       }  // end of !isProactive
@@ -812,7 +818,7 @@ export class MessageProcessor {
           // Proactive 模式 + SDK 本地兜底：直接 sendText 绕过 silent renderer
           const isCurrentlyBackground = await this.isBackgroundSession(session, message.channel, message.channelId);
           if (!isCurrentlyBackground) {
-            await adapter.sendText(message.channelId, finalReplyText, capturedReplyContext);
+            await adapter.send({ ...envelope, replyContext: capturedReplyContext }, { kind: 'result.text', text: finalReplyText, isFinal: true });
             logger.info(`[MessageProcessor] proactive SDK fallback replied task=${taskId} text="${finalReplyText.slice(0, 60)}"`);
           }
         } else if (shouldSuppress()) {
@@ -846,7 +852,7 @@ export class MessageProcessor {
         const errorSummary = streamResult.errors?.join('; ') || '任务执行失败';
         const rawSubtype = streamResult.subtype || 'agent_error';
         const errorType = prefixErrorType(ERROR_PREFIX.AGENT, rawSubtype);
-        adapter.sendProcessingStatus?.(message.channelId, 'error', session.id, taskId, taskReplyContext());
+        adapter.send(envelope, { kind: 'status.error', metadata: { errorType: rawSubtype } }).catch(() => {});
 
         this.eventBus.publish({
           type: 'task:error',
@@ -877,7 +883,12 @@ export class MessageProcessor {
         });
       } else {
         // 真正的成功
-        adapter.sendProcessingStatus?.(message.channelId, interruptReason ? 'interrupted' : 'done', session.id, taskId, taskReplyContext());
+        const durationMs = Date.now() - startTime;
+        if (interruptReason) {
+          adapter.send(envelope, { kind: 'status.interrupted', metadata: { reason: interruptReason } }).catch(() => {});
+        } else {
+          adapter.send(envelope, { kind: 'status.completed', metadata: { durationMs } }).catch(() => {});
+        }
         await this.sessionManager.recordSuccess(session.id);
 
         this.eventBus.publish({
@@ -923,7 +934,7 @@ export class MessageProcessor {
       if (isFinallyBackground) {
         const projectName = path.basename(session.projectPath);
         const count = this.messageCache.getCount(session.id);
-        await adapter.sendText(message.channelId, `[\u540e\u53f0-${projectName}] \u2713 任务完成 (${count}条消息已缓存)`, taskReplyContext());
+        await adapter.send(envelope, { kind: 'system.notice', text: `[\u540e\u53f0-${projectName}] \u2713 任务完成 (${count}条消息已缓存)`, subtype: 'background' });
       }
 
       // 记录发送响应
@@ -953,7 +964,12 @@ export class MessageProcessor {
 
       // 用户主动中断（新消息打断 或 /stop 命令）时静默，不发送中断/错误提示
       if (!isUserInterrupt) {
-        try { adapter.sendProcessingStatus?.(message.channelId, procStatus, session.id, taskId, taskReplyContext()); } catch {}
+        const statusPayload = procStatus === 'timeout'
+          ? { kind: 'status.timeout' as const }
+          : procStatus === 'interrupted'
+          ? { kind: 'status.interrupted' as const, metadata: { reason: 'stream_error' } }
+          : { kind: 'status.error' as const };
+        adapter.send(envelope, statusPayload).catch(() => {});
       }
 
       // 用户主动中断时降级日志；其余仍按 error 记录
@@ -1014,7 +1030,7 @@ export class MessageProcessor {
           ...(sendOpts ?? {}),
           metadata: { ...(sendOpts?.metadata ?? {}), taskId, chatmode },
         };
-        await adapter.sendText(message.channelId, userMessage, sendOpts);
+        await adapter.send({ ...envelope, replyContext: sendOpts }, { kind: 'result.text', text: userMessage, isFinal: true });
 
         // Proactive 可观测：catch 块的基础设施错误也透传为 thought，保证按 task_id 聚合完整
       }
@@ -1526,15 +1542,8 @@ export function defaultFallbackText(interaction: InteractionRequest): string {
 /**
  * Send an interaction payload through the unified `adapter.send` entrypoint.
  *
- * - Builds payload `{ kind: 'interaction', interaction, fallbackText }`.
- * - Prefers `adapter.send(envelope, payload)` when available.
- * - Falls back to `adapter.sendInteraction(channelId, interaction, replyCtx)`
- *   for backwards compatibility (channels that have not yet implemented
- *   `send`).
- *
- * Returns the messageId-like value from `sendInteraction` when the legacy
- * path is used, or `'sent'` when the unified path succeeds. Returns `false`
- * on failure or when neither entrypoint is implemented.
+ * Sends an interaction via adapter.send(envelope, { kind: 'interaction', ... }).
+ * Returns 'sent' on success, false on failure.
  */
 export async function sendInteractionPayload(
   adapter: ChannelAdapter,
@@ -1549,26 +1558,13 @@ export async function sendInteractionPayload(
     interaction,
     fallbackText: text || undefined,
   };
-
-  if (typeof adapter.send === 'function') {
-    try {
-      const enriched: OutboundEnvelope = replyCtx
-        ? { ...envelope, replyContext: replyCtx }
-        : envelope;
-      await adapter.send(enriched, payload);
-      return 'sent';
-    } catch {
-      // Fall through to legacy path if unified send blew up.
-    }
+  try {
+    const enriched: OutboundEnvelope = replyCtx
+      ? { ...envelope, replyContext: replyCtx }
+      : envelope;
+    await adapter.send(enriched, payload);
+    return 'sent';
+  } catch {
+    return false;
   }
-
-  if (typeof adapter.sendInteraction === 'function') {
-    try {
-      return await adapter.sendInteraction(envelope.channelId, interaction, replyCtx ?? envelope.replyContext);
-    } catch {
-      return false;
-    }
-  }
-
-  return false;
 }

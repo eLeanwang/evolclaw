@@ -1,7 +1,7 @@
 import { randomBytes } from 'crypto';
 import { logger } from '../../utils/logger.js';
 import { StreamDebouncer } from './stream-debouncer.js';
-import { appendMessageLog, buildInboundEntry } from '../session/message-log.js';
+import { appendMessageLog, buildInboundEntry } from './message-log.js';
 import { buildEnvelope } from './message-processor.js';
 import type { SessionManager } from '../session/session-manager.js';
 import type { MessageProcessor } from './message-processor.js';
@@ -209,35 +209,45 @@ export class MessageBridge {
         const result = await this.cmdHandler.execMenu(parsed.cmd, parsed.mode, channel, msg.channelId, msg.peerId);
         const base = { type: 'menu.response', cmd: parsed.cmd };
         const response = JSON.stringify('error' in result ? { ...base, error: result.error } : { ...base, data: result.data });
-        if (adapter?.sendCustomPayload) {
-          adapter.sendCustomPayload(msg.channelId, response);
-        } else {
-          await sendReply(msg.channelId, response);
-        }
+        await this.sendCustomResponse(adapter, channel, msg.channelId, response, sendReply);
       } else if (parsed.cmd) {
         // 动态子菜单查询
         const items = await this.cmdHandler.getSubMenuItems(parsed.cmd, channel, msg.channelId, msg.peerId);
         const response = JSON.stringify({ type: 'menu.response', cmd: parsed.cmd, items: items ?? [] });
-        if (adapter?.sendCustomPayload) {
-          adapter.sendCustomPayload(msg.channelId, response);
-        } else {
-          await sendReply(msg.channelId, response);
-        }
+        await this.sendCustomResponse(adapter, channel, msg.channelId, response, sendReply);
       } else {
         // 全量菜单
         const identity = this.sessionManager.resolveIdentity(channel, msg.peerId);
         const items = this.cmdHandler.getMenuItems(identity.role, msg.chatType || 'private');
         const response = JSON.stringify({ type: 'menu.response', items });
-        if (adapter?.sendCustomPayload) {
-          adapter.sendCustomPayload(msg.channelId, response);
-        } else {
-          await sendReply(msg.channelId, response);
-        }
+        await this.sendCustomResponse(adapter, channel, msg.channelId, response, sendReply);
       }
       return true;
     }
 
     return false;
+  }
+
+  /** menu.query 响应：优先走 adapter.send(custom)，降级 sendReply */
+  private async sendCustomResponse(
+    adapter: ChannelAdapter | undefined,
+    channel: string,
+    channelId: string,
+    response: string,
+    sendReply: (channelId: string, text: string) => Promise<void>,
+  ): Promise<void> {
+    if (adapter?.send) {
+      const agentName = this.agentRegistry?.resolveByChannel(channel)?.name ?? '<unknown>';
+      const envelope = buildEnvelope({
+        taskId: `menu-${randomBytes(4).toString('hex')}`,
+        channel,
+        channelId,
+        agentName,
+      });
+      await adapter.send(envelope, { kind: 'custom', channelType: channel, payload: response });
+    } else {
+      await sendReply(channelId, response);
+    }
   }
 
   /** 首次交互自动绑定 owner —— 通过 channel-routed self-agent 完成 */

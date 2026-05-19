@@ -121,7 +121,7 @@ describe('sendInteractionPayload', () => {
     const send = vi.fn(async (_env: OutboundEnvelope, _payload: OutboundPayload) => {});
     const adapter: ChannelAdapter = {
       channelName: 'feishu',
-      sendText: vi.fn(async () => {}),
+      capabilities: { file: true, image: true, interaction: true, markdown: true, thought: false, status: true },
       send,
     };
 
@@ -144,7 +144,7 @@ describe('sendInteractionPayload', () => {
     const send = vi.fn(async () => {});
     const adapter: ChannelAdapter = {
       channelName: 'feishu',
-      sendText: vi.fn(async () => {}),
+      capabilities: { file: true, image: true, interaction: true, markdown: true, thought: false, status: true },
       send,
     };
 
@@ -156,43 +156,40 @@ describe('sendInteractionPayload', () => {
     expect((payload as any).fallbackText).toContain('📋 三选一');
   });
 
-  it('falls back to adapter.sendInteraction when send is missing', async () => {
-    const sendInteraction = vi.fn(async () => 'msg-id-123');
-    const adapter: ChannelAdapter = {
+  it('returns false when adapter.send is missing (no fallback to sendInteraction)', async () => {
+    const adapter = {
       channelName: 'wechat',
-      sendText: vi.fn(async () => {}),
-      sendInteraction,
-    };
+      capabilities: { file: false, image: false, interaction: false, markdown: false, thought: false, status: false },
+      send: undefined as any, // simulates adapter without send
+    } as unknown as ChannelAdapter;
+    (adapter as any).send = undefined;
 
     const interaction = makeActionInteraction();
     const result = await sendInteractionPayload(adapter, envelope, interaction, 'fb');
 
-    expect(result).toBe('msg-id-123');
-    expect(sendInteraction).toHaveBeenCalledWith('chat-1', interaction, undefined);
+    expect(result).toBe(false);
   });
 
-  it('falls back to adapter.sendInteraction when send throws', async () => {
+  it('returns false when adapter.send throws (no fallback to sendInteraction)', async () => {
     const send = vi.fn(async () => { throw new Error('boom'); });
-    const sendInteraction = vi.fn(async () => 'msg-id-456');
     const adapter: ChannelAdapter = {
       channelName: 'qqbot',
-      sendText: vi.fn(async () => {}),
+      capabilities: { file: false, image: false, interaction: false, markdown: false, thought: false, status: false },
       send,
-      sendInteraction,
     };
 
     const interaction = makeActionInteraction();
     const result = await sendInteractionPayload(adapter, envelope, interaction, 'fb');
 
-    expect(result).toBe('msg-id-456');
-    expect(sendInteraction).toHaveBeenCalledTimes(1);
+    expect(result).toBe(false);
   });
 
-  it('returns false when neither send nor sendInteraction is implemented', async () => {
-    const adapter: ChannelAdapter = {
+  it('returns false when adapter.send is not a function', async () => {
+    const adapter = {
       channelName: 'plain',
-      sendText: vi.fn(async () => {}),
-    };
+      capabilities: { file: false, image: false, interaction: false, markdown: false, thought: false, status: false },
+    } as unknown as ChannelAdapter;
+
     const result = await sendInteractionPayload(adapter, envelope, makeActionInteraction(), 'fb');
     expect(result).toBe(false);
   });
@@ -201,7 +198,7 @@ describe('sendInteractionPayload', () => {
     const send = vi.fn(async () => {});
     const adapter: ChannelAdapter = {
       channelName: 'feishu',
-      sendText: vi.fn(async () => {}),
+      capabilities: { file: true, image: true, interaction: true, markdown: true, thought: false, status: true },
       send,
     };
     const replyCtx = { replyToMessageId: 'omg-42' };
@@ -217,7 +214,7 @@ describe('PermissionGateway.requestPermission integration', () => {
     const send = vi.fn(async () => {});
     const adapter: ChannelAdapter = {
       channelName: 'feishu',
-      sendText: vi.fn(async () => {}),
+      capabilities: { file: true, image: true, interaction: true, markdown: true, thought: false, status: true },
       send,
     };
     const sendPrompt = vi.fn(async () => {});
@@ -267,7 +264,7 @@ describe('PermissionGateway.requestPermission integration', () => {
     const sendPrompt = vi.fn(async () => {});
     const adapter: ChannelAdapter = {
       channelName: 'plain',
-      sendText: vi.fn(async () => {}),
+      capabilities: { file: false, image: false, interaction: false, markdown: false, thought: false, status: false },
     };
 
     const promise = gateway.requestPermission(
@@ -289,14 +286,14 @@ describe('PermissionGateway.requestPermission integration', () => {
     await promise;
   });
 
-  it('falls back to legacy adapter.sendInteraction when adapter.send absent', async () => {
+  it('uses adapter.send for permission card; falls back to sendPrompt when send absent', async () => {
     const gateway = new PermissionGateway();
     const sendPrompt = vi.fn(async () => {});
-    const sendInteraction = vi.fn(async () => 'card-msg');
+    const send = vi.fn(async () => {});
     const adapter: ChannelAdapter = {
       channelName: 'wechat',
-      sendText: vi.fn(async () => {}),
-      sendInteraction,
+      capabilities: { file: false, image: false, interaction: false, markdown: false, thought: false, status: false },
+      send,
     };
 
     const promise = gateway.requestPermission(
@@ -309,11 +306,11 @@ describe('PermissionGateway.requestPermission integration', () => {
     );
 
     await new Promise((r) => setTimeout(r, 0));
-    expect(sendInteraction).toHaveBeenCalledTimes(1);
-    const [chid, interaction, replyCtx] = sendInteraction.mock.calls[0];
-    expect(chid).toBe('u-1');
-    expect((interaction as any).kind.kind).toBe('action');
-    // sendPrompt should NOT have been called when sendInteraction succeeds
+    expect(send).toHaveBeenCalledTimes(1);
+    const [_env, payload] = send.mock.calls[0];
+    expect(payload.kind).toBe('interaction');
+    expect((payload as any).interaction.kind.kind).toBe('action');
+    // sendPrompt should NOT have been called when adapter.send succeeds
     expect(sendPrompt).not.toHaveBeenCalled();
 
     const pending = gateway.getPendingRequests('sess-z');

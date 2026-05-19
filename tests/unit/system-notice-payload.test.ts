@@ -30,6 +30,8 @@ function makeAdapterWithoutSend(): ChannelAdapter & { sendText: ReturnType<typeo
   const sendText = vi.fn().mockResolvedValue(undefined);
   return {
     channelName: 'legacy-test',
+    capabilities: { file: false, image: false, interaction: false, markdown: false, thought: false, status: false },
+    send: vi.fn().mockResolvedValue(undefined),
     sendText,
   } as any;
 }
@@ -91,12 +93,12 @@ describe('sendSystemPayload — adapter.send happy path', () => {
   });
 });
 
-describe('sendSystemPayload — fallback to sendText', () => {
-  it('uses sendText when adapter.send missing (system.notice)', async () => {
-    const adapter = makeAdapterWithoutSend();
+describe('sendSystemPayload — delegates to adapter.send', () => {
+  it('calls adapter.send with the payload as-is', async () => {
+    const adapter = makeAdapterWithSend();
     const envelope = buildEnvelope({
       taskId: 't-1',
-      channel: 'legacy-test',
+      channel: 'aun-test',
       channelId: 'owner-id',
       agentName: 'agent',
       replyContext: { replyToMessageId: 'm-9' },
@@ -106,30 +108,10 @@ describe('sendSystemPayload — fallback to sendText', () => {
       text: '✓ 上线了',
       subtype: 'restarted',
     });
-    expect(adapter.sendText).toHaveBeenCalledTimes(1);
-    expect(adapter.sendText).toHaveBeenCalledWith('owner-id', '✓ 上线了', { replyToMessageId: 'm-9' });
-  });
-
-  it('uses sendText for system.error fallback', async () => {
-    const adapter = makeAdapterWithoutSend();
-    const envelope = buildEnvelope({ taskId: 't-2', channel: 'legacy-test', channelId: 'owner-id', agentName: 'agent' });
-    await sendSystemPayload(adapter, envelope, {
-      kind: 'system.error',
-      text: 'auth failed',
-      subtype: 'channel_down',
-      recoverable: false,
-    });
-    expect(adapter.sendText).toHaveBeenCalledWith('owner-id', 'auth failed', undefined);
-  });
-
-  it('skips silently for non-text payloads (file/image) when send absent', async () => {
-    const adapter = makeAdapterWithoutSend();
-    const envelope = buildEnvelope({ taskId: 't-3', channel: 'legacy-test', channelId: 'owner-id', agentName: 'agent' });
-    await sendSystemPayload(adapter, envelope, {
-      kind: 'result.image',
-      data: Buffer.from('x'),
-    } as any);
-    expect(adapter.sendText).not.toHaveBeenCalled();
+    expect(adapter.send).toHaveBeenCalledTimes(1);
+    const [calledEnv, calledPayload] = adapter.send.mock.calls[0];
+    expect(calledEnv.taskId).toBe('t-1');
+    expect(calledPayload).toMatchObject({ kind: 'system.notice', text: '✓ 上线了', subtype: 'restarted' });
   });
 });
 

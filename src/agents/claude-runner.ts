@@ -1,9 +1,9 @@
 import { query, forkSession as sdkForkSession, getSessionMessages as sdkGetSessionMessages } from '@anthropic-ai/claude-agent-sdk';
-import { ensureDir } from '../utils/ensure-dir.js';
+import { ensureDir } from '../utils/atomic-write.js';
 import { resolveAnthropicConfig } from './resolve.js';
 import type { Config, ChannelAdapter, ReplyContext, InteractionRequest, Message } from '../types.js';
 import { DEFAULT_PERMISSION_MODE } from '../types.js';
-import { renderActionAsText } from '../core/interaction-fallback.js';
+import { renderActionAsText } from '../core/interaction-router.js';
 import { buildEnvelope, sendInteractionPayload } from '../core/message/message-processor.js';
 import type { PermissionGateway, PermissionDecision } from '../core/permission.js';
 import path from 'path';
@@ -12,7 +12,7 @@ import os from 'os';
 import { logger } from '../utils/logger.js';
 import { checkBlacklist, checkReadonly, summarizeToolInput } from '../core/permission.js';
 import { encodePath } from '../utils/cross-platform.js';
-import type { AgentPlugin, AgentInstance, AgentCallbacks } from '../core/agent-loader.js';
+import type { AgentPlugin, AgentInstance, AgentCallbacks } from '../core/baseagent-loader.js';
 import type { InteractionRouter } from '../core/interaction-router.js';
 
 /** 权限审批的渠道交互上下文 */
@@ -441,7 +441,7 @@ export class AgentRunner {
     if (!permCtx?.adapter || !permCtx?.channelId) {
       return this.handleAskUserQuestionFallback(sessionId, input, questions);
     }
-    const adapterHasInteractionPath = !!(permCtx.adapter.send || permCtx.adapter.sendInteraction);
+    const adapterHasInteractionPath = !!permCtx.adapter.send;
     if (!adapterHasInteractionPath) {
       return this.handleAskUserQuestionFallback(sessionId, input, questions);
     }
@@ -451,7 +451,7 @@ export class AgentRunner {
     // 从 permCtx 构造 per-session 的发送函数，避免全局 sendPromptFn 被其他 channel 实例覆盖
     // 注意：sendPromptFn 是全局单例，多 channel 并发时会被覆盖，导致提示发到错误 channel
     const sendPrompt = permCtx.adapter && permCtx.channelId
-      ? async (text: string) => permCtx.adapter!.sendText(permCtx.channelId!, text, permCtx.replyContext)
+      ? async (text: string) => permCtx.adapter!.send(buildEnvelope({ channel: permCtx.adapter!.channelName, channelId: permCtx.channelId!, replyContext: permCtx.replyContext }), { kind: 'result.text', text, isFinal: true })
       : this.sendPromptFn;
 
     // 逐个 question 发送卡片并等待用户选择
@@ -579,7 +579,7 @@ export class AgentRunner {
   ): Promise<any> {
     const permCtx = this.permissionContexts.get(sessionId);
     const sendPrompt = permCtx?.adapter && permCtx?.channelId
-      ? async (text: string) => permCtx.adapter!.sendText(permCtx.channelId!, text, permCtx.replyContext)
+      ? async (text: string) => permCtx.adapter!.send(buildEnvelope({ channel: permCtx.adapter!.channelName, channelId: permCtx.channelId!, replyContext: permCtx.replyContext }), { kind: 'result.text', text, isFinal: true })
       : this.sendPromptFn;
 
     const answers: Record<string, string> = {};
@@ -644,7 +644,7 @@ export class AgentRunner {
   ): Promise<any> {
     const permCtx = this.permissionContexts.get(sessionId);
     const sendPrompt = permCtx?.adapter && permCtx?.channelId
-      ? async (text: string) => permCtx.adapter!.sendText(permCtx.channelId!, text, permCtx.replyContext)
+      ? async (text: string) => permCtx.adapter!.send(buildEnvelope({ channel: permCtx.adapter!.channelName, channelId: permCtx.channelId!, replyContext: permCtx.replyContext }), { kind: 'result.text', text, isFinal: true })
       : this.sendPromptFn;
 
     // 无任何交互能力，直接 allow
@@ -654,7 +654,7 @@ export class AgentRunner {
 
     // 尝试发送交互卡片
     let cardSent = false;
-    if (permCtx.adapter && (permCtx.adapter.send || permCtx.adapter.sendInteraction)) {
+    if (permCtx.adapter?.send) {
       const requestId = `plan-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const interaction: InteractionRequest = {
         type: 'interaction',

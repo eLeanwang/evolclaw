@@ -1378,13 +1378,7 @@ export class FeishuChannelPlugin implements ChannelPlugin {
               // Feishu 不支持自定义 payload
               return;
           }
-        },
-        sendText: (id: string, text: string, context?: any) => channel.sendMessage(id, text, context),
-        sendFile: (id: string, filePath: string, context?: any) => channel.sendFile(id, filePath, context),
-        sendImage: (id: string, png: Buffer, context?: any) => channel.sendImage(id, png, context),
-        acknowledge: (messageId: string) => { channel.addAckReaction(messageId); return Promise.resolve(); },
-        sendInteraction: (id: string, interaction: InteractionRequest, context?: any) => channel.sendInteraction(id, interaction, context),
-        onInteraction: (callback: (response: InteractionResponse) => void) => channel.onInteraction(callback),
+        },        acknowledge: (messageId: string) => { channel.addAckReaction(messageId); return Promise.resolve(); },        onInteraction: (callback: (response: InteractionResponse) => void) => channel.onInteraction(callback),
       };
 
       const policy = {

@@ -8,7 +8,7 @@ import type { StatsCollector } from '../utils/stats-collector.js';
 import { PermissionGateway, type PermissionDecision } from './permission.js';
 import { InteractionRouter } from './interaction-router.js';
 import { MessageQueue } from './message/message-queue.js';
-import { renderCommandCardAsText } from './interaction-fallback.js';
+import { renderCommandCardAsText } from './interaction-router.js';
 import { buildEnvelope, sendInteractionPayload } from './message/message-processor.js';
 import { resolvePaths, getPackageRoot } from '../paths.js';
 import { logger } from '../utils/logger.js';
@@ -380,7 +380,7 @@ export class CommandHandler {
     const card = opts.interaction.kind;
 
     if (opts.canWrite === false) return renderCommandCardAsText(card);
-    if (!adapter || (!adapter.send && !adapter.sendInteraction)) return renderCommandCardAsText(card);
+    if (!adapter?.send) return renderCommandCardAsText(card);
     // session 忙碌时降级到文本，避免并发触发带参写操作
     if (this.isSessionBusy(opts.interaction.sessionId)) return renderCommandCardAsText(card);
 
@@ -2488,7 +2488,7 @@ export class CommandHandler {
         fs.writeFileSync(path.join(resolvePaths().dataDir, 'restart-pending.json'), JSON.stringify(restartInfo));
 
         const { spawn } = await import('child_process');
-        spawn('node', [path.join(getPackageRoot(), 'dist', 'cli.js'), 'restart-monitor'], {
+        spawn('node', [path.join(getPackageRoot(), 'dist', 'cli', 'index.js'), 'restart-monitor'], {
           detached: true,
           stdio: 'ignore',
           env: { ...process.env, EVOLCLAW_HOME: resolvePaths().root }
@@ -2591,7 +2591,7 @@ export class CommandHandler {
       if (!targetAdapter) {
         return { kind: 'command.error' as const, text: `❌ 通道 ${targetLabel} 未启用或不存在` };
       }
-      if (!targetAdapter.sendFile) {
+      if (!targetAdapter.capabilities?.file) {
         return { kind: 'command.error' as const, text: `❌ 通道 ${targetLabel} 不支持文件发送` };
       }
 
@@ -2644,7 +2644,7 @@ export class CommandHandler {
       // 发送文件
       try {
         const replyCtx = isCrossChannel ? undefined : this.getReplyContext(sendSession);
-        await targetAdapter.sendFile(targetChannelId, realPath, replyCtx);
+        await targetAdapter.send(buildEnvelope({ channel: targetAdapter.channelName, channelId: targetChannelId, replyContext: replyCtx }), { kind: 'result.file', filePath: realPath });
         const sizeStr = stat.size < 1024 ? `${stat.size} B`
           : stat.size < 1024 * 1024 ? `${(stat.size / 1024).toFixed(1)} KB`
           : `${(stat.size / 1024 / 1024).toFixed(1)} MB`;
@@ -3672,7 +3672,7 @@ export class CommandHandler {
 
       try {
         const replyContext = this.buildCtlReplyContext(session);
-        await adapter.sendText(session.channelId, text, replyContext);
+        await adapter.send(buildEnvelope({ channel: adapter.channelName, channelId: session.channelId, replyContext: replyContext }), { kind: 'result.text', text, isFinal: true });
         return { ok: true, result: '已发送' };
       } catch (err: any) {
         return { ok: false, error: err.message || String(err) };

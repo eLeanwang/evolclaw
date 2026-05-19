@@ -13,10 +13,10 @@ import { normalizeChannelInstances, getChannelShowActivities } from '../utils/ch
 import { resolvePaths, getPackageRoot } from '../paths.js';
 import { saveToUploads, sanitizeFileName } from '../utils/media-cache.js';
 import { appendAidEvent } from '../utils/instance-registry.js';
-import type { AidStatsCollector } from '../utils/aid-stats-collector.js';
+import type { AidStatsCollector } from '../aun/stats.js';
 import { loadAgent, saveAgent } from '../config-store.js';
 import { getProcessStartTime } from '../utils/process-introspect.js';
-import * as outbox from '../utils/outbox.js';
+import * as outbox from '../aun/outbox.js';
 import { guessMime, formatSize } from '../utils/mime.js';
 
 /**
@@ -2295,17 +2295,8 @@ export class AUNChannelPlugin implements ChannelPlugin {
               return;
             }
           }
-        },
-        sendText: (id: string, text: string, context?: ReplyContext) => channel.sendMessage(id, text, context),
-        sendFile: (id: string, filePath: string, context?: ReplyContext) => channel.sendFile(id, filePath, context),
-        acknowledge: (messageId: string) => { channel.acknowledge(messageId); return Promise.resolve(); },
-        sendProcessingStatus: (id: string, status: 'start' | 'done' | 'interrupted' | 'error' | 'timeout', sessionId: string, taskId: string, context?: ReplyContext) => channel.sendProcessingStatus(id, status, sessionId, taskId, context),
-        sendCustomPayload: (id: string, payload: string) => channel.sendCustomPayload(id, payload),
-        uploadAgentMd: (content: string) => channel.uploadAgentMd(content),
-        downloadAgentMd: (aid: string) => channel.downloadAgentMd(aid),
-        putThought: (id: string, taskId: string, payload: object, context?: ReplyContext) =>
-          channel.sendThought(id, taskId, payload, context),
-        _selfAid: () => channel.getStatus().aid,
+        },        acknowledge: (messageId: string) => { channel.acknowledge(messageId); return Promise.resolve(); },        uploadAgentMd: (content: string) => channel.uploadAgentMd(content),
+        downloadAgentMd: (aid: string) => channel.downloadAgentMd(aid),        _selfAid: () => channel.getStatus().aid,
         _selfName: () => channel.getSelfName(),
       };
 

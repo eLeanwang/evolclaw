@@ -2,7 +2,7 @@ import path from 'path';
 import type { EventBus } from './event-bus.js';
 import type { ChannelAdapter, ReplyContext, InteractionRequest } from '../types.js';
 import type { InteractionRouter } from './interaction-router.js';
-import { renderActionAsText } from './interaction-fallback.js';
+import { renderActionAsText } from './interaction-router.js';
 import { buildEnvelope, sendInteractionPayload } from './message/message-processor.js';
 
 // 危险命令黑名单（正则表达式）

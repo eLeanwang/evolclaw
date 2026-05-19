@@ -23,11 +23,11 @@ import { MessageCache } from './core/message/message-cache.js';
 import { CommandHandler } from './core/command-handler.js';
 import { EventBus } from './core/event-bus.js';
 import { StatsCollector } from './utils/stats-collector.js';
-import { AidStatsCollector } from './utils/aid-stats-collector.js';
+import { AidStatsCollector } from './aun/stats.js';
 import { PermissionGateway } from './core/permission.js';
 import { InteractionRouter } from './core/interaction-router.js';
 import { ChannelLoader, type ChannelInstance } from './core/channel-loader.js';
-import { AgentLoader } from './core/agent-loader.js';
+import { AgentLoader } from './core/baseagent-loader.js';
 import { EvolAgentRegistry, type ReloadHooks } from './core/evolagent-registry.js';
 import { buildReloadHooks } from './utils/reload-hooks.js';
 import { IpcServer, IpcStatusResponse, ChannelStatus } from './ipc.js';
@@ -55,25 +55,7 @@ export async function sendSystemPayload(
   envelope: OutboundEnvelope,
   payload: OutboundPayload
 ): Promise<void> {
-  if (adapter.send) {
-    await adapter.send(envelope, payload);
-    return;
-  }
-  // 降级路径：仅文本类 payload
-  let text: string | undefined;
-  switch (payload.kind) {
-    case 'result.text':
-    case 'command.result':
-    case 'command.error':
-    case 'system.notice':
-    case 'system.error':
-    case 'result.error':
-      text = payload.text;
-      break;
-  }
-  if (text) {
-    await adapter.sendText(envelope.channelId, text, envelope.replyContext);
-  }
+  await adapter.send(envelope, payload);
 }
 
 async function main() {
@@ -346,9 +328,11 @@ async function main() {
       const sendFn = async (id: string, text: string, opts?: { replyToMessageId?: string; replyInThread?: boolean }) => {
         const adapter = cmdHandler.getAdapter(channel);
         if (!adapter) return;
-
         if (text) {
-          await adapter.sendText(id, text, opts);
+          await adapter.send(
+            buildEnvelope({ channel: adapter.channelName, channelId: id, replyContext: opts }),
+            { kind: 'system.notice', text, subtype: 'health' }
+          );
         }
       };
       return cmdHandler.handle(content, channel, channelId, sendFn, userId, threadId);

@@ -912,10 +912,7 @@ export class WechatChannelPlugin implements ChannelPlugin {
             case 'custom':
               return;
           }
-        },
-        sendText: (id: string, text: string) => channel.sendMessage(id, text),
-        sendFile: (id: string, filePath: string) => channel.sendFile(id, filePath),
-      };
+        },      };
 
       const policy = {
         canSwitchProject: (chatType: string, identity: string) => identity === 'owner' || identity === 'admin',
