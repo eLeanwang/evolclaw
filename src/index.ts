@@ -38,6 +38,7 @@ import { detectDuplicates } from './core/evolagent-registry.js';
 import { loadPromptTemplates } from './agents/templates.js';
 import path from 'path';
 import fs from 'fs';
+import os from 'os';
 import crypto from 'crypto';
 
 /**
@@ -508,7 +509,7 @@ async function main() {
       // 尝试从 agent.md 读取 name
       let agentName = agent.aid;
       try {
-        const aunPath = process.env.AUN_HOME || path.join(require('os').homedir(), '.aun');
+        const aunPath = process.env.AUN_HOME || path.join(os.homedir(), '.aun');
         const agentMdPath = path.join(aunPath, 'AIDs', agent.aid, 'agent.md');
         const content = fs.readFileSync(agentMdPath, 'utf-8');
         const nameMatch = content.match(/^name:\s*"?([^"\n]+)/m);

@@ -224,10 +224,10 @@ export class IMRenderer {
     this.scheduleFlush();
   }
 
-  /** 添加系统提示 / 通知 */
-  addNotice(text: string, severity: 'info' | 'warn', subtype?: string): void {
+  /** 添加系统提示 / 通知。force=true 时绕过 suppressActivities（用于 compact/retry/error 等操作反馈） */
+  addNotice(text: string, severity: 'info' | 'warn', subtype?: string, force = false): void {
     if (this.opts.envelope.chatmode === 'proactive') return;
-    if (this.opts.suppressActivities) return;
+    if (this.opts.suppressActivities && !force) return;
     this.itemsQueue.push({ kind: 'notice', text, severity, subtype });
     this.messageTimestamps.push(Date.now());
     this.scheduleFlush();

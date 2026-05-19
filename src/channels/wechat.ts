@@ -911,6 +911,8 @@ export class WechatChannelPlugin implements ChannelPlugin {
             case 'status.timeout':
             case 'custom':
               return;
+            default:
+              logger.warn(`[WeChat] Unhandled payload kind: ${(payload as any).kind}`);
           }
         },      };
 

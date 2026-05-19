@@ -513,7 +513,7 @@ export class DingtalkChannelPlugin implements ChannelPlugin {
 
       const adapter = {
         channelName: inst.name,
-        capabilities: { file: true, image: true, interaction: true, markdown: true, thought: false, status: false },
+        capabilities: { file: true, image: true, interaction: false, markdown: true, thought: false, status: false },
         send: async (envelope: any, payload: any) => {
           const ctx = envelope.replyContext;
           const channelId = envelope.channelId;
@@ -547,6 +547,8 @@ export class DingtalkChannelPlugin implements ChannelPlugin {
             case 'status.timeout':
             case 'custom':
               return;
+            default:
+              logger.warn(`[DingTalk] Unhandled payload kind: ${(payload as any).kind}`);
           }
         },      };
 
@@ -594,7 +596,7 @@ export class DingtalkChannelPlugin implements ChannelPlugin {
           bridge.register(
             adapter.channelName,
             (handler) => channel.onMessage(async (event: any) => {
-              handler({
+              await handler({
                 channel: adapter.channelName,
                 channelType,
                 channelId: event.channelId,

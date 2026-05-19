@@ -306,11 +306,11 @@ export class QQBotChannel {
   async sendImage(chatId: string, png: Buffer): Promise<void> {
     if (!this.client) return;
 
+    const fs = await import('fs');
+    const path = await import('path');
+    const os = await import('os');
+    const tmpPath = path.join(os.tmpdir(), `evolclaw-qqbot-${Date.now()}.png`);
     try {
-      const fs = await import('fs');
-      const path = await import('path');
-      const os = await import('os');
-      const tmpPath = path.join(os.tmpdir(), `evolclaw-qqbot-${Date.now()}.png`);
       fs.writeFileSync(tmpPath, png);
 
       const chatType = this.chatTypeCache.get(chatId);
@@ -322,10 +322,10 @@ export class QQBotChannel {
       } else {
         await this.client.sendPrivateImage(chatId, `file://${tmpPath}`, msgId);
       }
-
-      try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
     } catch (error: any) {
       logger.error(`[QQBot] sendImage failed for ${chatId}:`, error?.message || error);
+    } finally {
+      try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
     }
   }
 
@@ -434,6 +434,8 @@ export class QQBotChannelPlugin implements ChannelPlugin {
             case 'status.timeout':
             case 'custom':
               return;
+            default:
+              logger.warn(`[QQBot] Unhandled payload kind: ${(payload as any).kind}`);
           }
         },      };
 

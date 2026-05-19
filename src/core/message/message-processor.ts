@@ -180,7 +180,7 @@ export class MessageProcessor {
       this.eventBus.publish({ type: 'runner:compact-start', sessionId });
     }
     if (this.currentRenderer && !this.shouldSuppressActivities) {
-      this.currentRenderer.addNotice('\u23f3 会话压缩中...', 'info', 'compact-start');
+      this.currentRenderer.addNotice('\u23f3 会话压缩中...', 'info', 'compact-start', true);
     }
   }
 
@@ -234,6 +234,7 @@ export class MessageProcessor {
     const streamKey = session.id;
     const chatType = message.chatType || 'private';
     const identityRole = session.identity?.role || 'anonymous';
+    const agentNameForMonitor = this.agentRegistry?.resolveByChannel(channelKey)?.name ?? '<unknown>';
 
     // Resolve agent context from registry (Phase 2 foundation)
     const agentContext = this.getAgentContext(channelKey, chatType);
@@ -282,7 +283,7 @@ export class MessageProcessor {
                 ? result.message
                 : `\u26a0\ufe0f 任务超时（${result.idleSec}秒无响应），已自动中断`;
               channelInfo.adapter.send(
-                buildEnvelope({ channel: channelInfo.adapter.channelName, channelId: message.channelId }),
+                buildEnvelope({ channel: channelInfo.adapter.channelName, channelId: message.channelId, agentName: agentNameForMonitor }),
                 { kind: 'system.notice', text: msg, subtype: 'health' }
               ).catch(e => {
                 logger.debug(`[MessageProcessor] Failed to send kill diagnostic message:`, e);
@@ -300,7 +301,7 @@ export class MessageProcessor {
             if (channelInfo && showIdleMonitor && !shouldSuppress()) {
               if (!isBackground) {
                 channelInfo.adapter.send(
-                  buildEnvelope({ channel: channelInfo.adapter.channelName, channelId: message.channelId }),
+                  buildEnvelope({ channel: channelInfo.adapter.channelName, channelId: message.channelId, agentName: agentNameForMonitor }),
                   { kind: 'system.notice', text: result.message, subtype: 'health' }
                 ).catch(e => {
                   logger.debug(`[MessageProcessor] Failed to send idle monitor message:`, e);
@@ -480,13 +481,7 @@ export class MessageProcessor {
           opts.metadata = { ...(opts.metadata ?? {}), taskId, chatmode };
 
           const enrichedEnvelope: OutboundEnvelope = { ...envelope, replyContext: opts };
-          if (adapter.send) {
-            await adapter.send(enrichedEnvelope, payload);
-          } else {
-            if (payload.kind === 'result.text' || payload.kind === 'command.result' || payload.kind === 'command.error' || payload.kind === 'system.notice' || payload.kind === 'system.error' || payload.kind === 'result.error') {
-              await adapter.send({ ...envelope, replyContext: opts }, payload);
-            }
-          }
+          await adapter.send(enrichedEnvelope, payload);
         },
       });
 
@@ -544,6 +539,7 @@ export class MessageProcessor {
         : message.content;
 
       let streamResult: { isError: boolean; subtype?: string; errors?: string[]; terminalReason?: string; lastReplyText: string; fullText: string; hasReceivedText: boolean } = { isError: false, lastReplyText: '', fullText: '', hasReceivedText: false };
+      let effectiveSystemPrompt: string | undefined;
 
       try {
         // 动态构建运行时上下文提示
@@ -626,7 +622,7 @@ export class MessageProcessor {
           contextParts.push(renderPromptSection('proactive', {}));
         }
 
-        const effectiveSystemPrompt = [options?.systemPromptAppend, ...contextParts].filter(Boolean).join('\n') || undefined;
+        effectiveSystemPrompt = [options?.systemPromptAppend, ...contextParts].filter(Boolean).join('\n') || undefined;
 
         // 可重试错误（403/429/5xx）指数退避重试，最多 3 次
         const MAX_RETRIES = 3;
@@ -661,7 +657,7 @@ export class MessageProcessor {
             if (attempt < MAX_RETRIES && isRetryableError(retryError)) {
               const delay = Math.pow(2, attempt) * 1000; // 2s, 4s
               logger.warn(`[MessageProcessor] Retryable error (attempt ${attempt}/${MAX_RETRIES}), retrying in ${delay}ms:`, retryError);
-              renderer.addNotice(`⚠️ API 暂时不可用，${delay / 1000}秒后重试 (${attempt}/${MAX_RETRIES})...`, 'warn', 'retry');
+              renderer.addNotice(`⚠️ API 暂时不可用，${delay / 1000}秒后重试 (${attempt}/${MAX_RETRIES})...`, 'warn', 'retry', true);
               await renderer.flush();
               await new Promise(resolve => setTimeout(resolve, delay));
               continue;
@@ -672,7 +668,7 @@ export class MessageProcessor {
       } catch (error) {
         if (classifyError(error) === ErrorType.CONTEXT_TOO_LONG && session.agentSessionId && hasCompact(agent)) {
           // 尝试 compact 压缩会话
-          renderer.addNotice('\u26a0\ufe0f 上下文过长，正在压缩会话...', 'warn', 'compact-trigger');
+          renderer.addNotice('\u26a0\ufe0f 上下文过长，正在压缩会话...', 'warn', 'compact-trigger', true);
           await renderer.flush();
 
           const compacted = await agent.compact(
@@ -681,14 +677,14 @@ export class MessageProcessor {
 
           if (compacted) {
             // compact 成功，带 resume 重试（不重复原始消息，让 Agent 继续未完成的工作）
-            renderer.addNotice('\u2705 压缩完成，正在重试...', 'info', 'compact-retry');
+            renderer.addNotice('\u2705 压缩完成，正在重试...', 'info', 'compact-retry', true);
             const retryStream = await agent.runQuery(
               session.id,
               '上下文已自动压缩，请继续之前未完成的任务。',
               absoluteProjectPath,
               session.agentSessionId,
               undefined,
-              options?.systemPromptAppend,
+              effectiveSystemPrompt,
               this.sessionManager
             );
             agent.registerStream(streamKey, retryStream);
@@ -1232,7 +1228,7 @@ export class MessageProcessor {
 
           if (!hasErrorResult && !shouldSuppress()) {
             hasErrorResult = true;
-            renderer.addNotice(`\u274c ${event.error}`, 'warn', 'runtime-error');
+            renderer.addNotice(`\u274c ${event.error}`, 'warn', 'runtime-error', true);
           }
         }
 
@@ -1261,7 +1257,7 @@ export class MessageProcessor {
             const userFriendlyMessage = event.terminalReason
               ? getErrorMessage(null, event.terminalReason)
               : `\u274c ${errorSummary}`;
-            renderer.addNotice(userFriendlyMessage, 'warn', 'task-error');
+            renderer.addNotice(userFriendlyMessage, 'warn', 'task-error', true);
           }
 
           // 中间 complete：flush 掉已有 activities（不带 isFinal），让中间结果及时显示
@@ -1354,7 +1350,7 @@ export class MessageProcessor {
         logger.error('[MessageProcessor] Stream processing error:', error);
       }
       if (error instanceof Error && error.message.includes('process exited')) {
-        renderer.addNotice('\u274c Claude Code \u8fdb\u7a0b\u5f02\u5e38\u9000\u51fa\uff0c\u8bf7\u91cd\u8bd5', 'warn', 'process-exit');
+        renderer.addNotice('\u274c Claude Code \u8fdb\u7a0b\u5f02\u5e38\u9000\u51fa\uff0c\u8bf7\u91cd\u8bd5', 'warn', 'process-exit', true);
       }
       // Flush any pending error activities before re-throwing,
       // and mark the error so outer catch won't send a duplicate message
@@ -1500,7 +1496,7 @@ export class MessageProcessor {
     if (/^[.\s\u2026]+$/.test(filePath)) return true;
 
     // 含正则/代码特殊字符（Agent 在说明中引用了代码或正则表达式）
-    if (/[\\[\]{}*+?|^$]/.test(filePath)) return true;
+    if (/[\[\]{}*+?|^$]/.test(filePath)) return true;
 
     return false;
   }

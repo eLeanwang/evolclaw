@@ -1377,6 +1377,8 @@ export class FeishuChannelPlugin implements ChannelPlugin {
             case 'custom':
               // Feishu 不支持自定义 payload
               return;
+            default:
+              logger.warn(`[Feishu] Unhandled payload kind: ${(payload as any).kind}`);
           }
         },        acknowledge: (messageId: string) => { channel.addAckReaction(messageId); return Promise.resolve(); },        onInteraction: (callback: (response: InteractionResponse) => void) => channel.onInteraction(callback),
       };

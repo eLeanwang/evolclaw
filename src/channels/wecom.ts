@@ -566,7 +566,7 @@ export class WecomChannelPlugin implements ChannelPlugin {
 
       const adapter = {
         channelName: inst.name,
-        capabilities: { file: true, image: true, interaction: true, markdown: true, thought: false, status: false },
+        capabilities: { file: true, image: true, interaction: false, markdown: true, thought: false, status: false },
         send: async (envelope: any, payload: any) => {
           const ctx = envelope.replyContext;
           const channelId = envelope.channelId;
@@ -600,6 +600,8 @@ export class WecomChannelPlugin implements ChannelPlugin {
             case 'status.timeout':
             case 'custom':
               return;
+            default:
+              logger.warn(`[WeCom] Unhandled payload kind: ${(payload as any).kind}`);
           }
         },      };
 
@@ -652,6 +654,7 @@ export class WecomChannelPlugin implements ChannelPlugin {
                 channelType,
                 channelId: event.channelId,
                 content: event.content,
+                images: event.images,
                 chatType: event.chatType || 'private',
                 peerId: event.peerId || '',
                 peerName: event.peerName,
