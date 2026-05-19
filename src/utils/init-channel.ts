@@ -11,12 +11,13 @@ import readline from 'readline';
 import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
-import { execFile } from 'child_process';
-import { promisify } from 'util';
 import { resolvePaths } from '../paths.js';
 import { normalizeChannelInstances } from './channel-helpers.js';
 import { selectInstance, type InstanceChoice } from './init.js';
-import { isWindows } from './cross-platform.js';
+import { npmInstallGlobal, requireOptional } from './npm-ops.js';
+import { loadAllAgents, loadAgent } from '../config-store.js';
+import { agentChannelUpsert } from '../agent/index.js';
+import type { ChannelInstance, AgentConfig } from '../types.js';
 import {
   AUN_CORE_SDK_PKG,
   MIN_AUN_CORE_SDK,
@@ -26,40 +27,7 @@ import {
   aidCreate,
   agentmdPut,
   buildInitialAgentMd,
-} from '../aid/index.js';
-
-const execFileAsync = promisify(execFile);
-
-export async function npmInstallGlobal(pkg: string): Promise<void> {
-  const npmCmd = isWindows ? 'npm.cmd' : 'npm';
-  const execOpts = { timeout: 180000, shell: isWindows };
-  try {
-    await execFileAsync(npmCmd, ['install', '-g', pkg], execOpts);
-  } catch (e: any) {
-    if (e.stderr?.includes('EACCES') || e.message?.includes('EACCES')) {
-      if (isWindows) {
-        throw new Error('权限不足。请以管理员身份运行 PowerShell 或 CMD，然后重试');
-      }
-      await execFileAsync('sudo', ['npm', 'install', '-g', pkg], { timeout: 180000 });
-    } else {
-      throw e;
-    }
-  }
-}
-
-/** Dynamic import with auto-install fallback for optional dependencies */
-export async function requireOptional<T = any>(pkg: string, autoInstall = true): Promise<T> {
-  try {
-    return await import(pkg) as T;
-  } catch (e: any) {
-    if (e.code !== 'ERR_MODULE_NOT_FOUND' && e.code !== 'MODULE_NOT_FOUND') throw e;
-    if (!autoInstall) throw new Error(`依赖 ${pkg} 未安装。请运行: npm install -g ${pkg}`);
-    const { logger } = await import('./logger.js');
-    logger.info(`正在安装可选依赖 ${pkg}...`);
-    await npmInstallGlobal(pkg);
-    return await import(pkg) as T;
-  }
-}
+} from '../aun/aid/index.js';
 
 function ask(rl: readline.Interface, question: string): Promise<string> {
   return new Promise(resolve => rl.question(question, resolve));
@@ -278,56 +246,39 @@ export async function runFeishuQrFlow(): Promise<{ appId: string; appSecret: str
 }
 
 export async function cmdInitFeishu(): Promise<void> {
-  const p = resolvePaths();
-
-  if (!fs.existsSync(p.defaultsConfig)) {
-    console.log(`❌ 配置文件不存在，请先运行 evolclaw init`);
-    return;
-  }
-
-  const config = JSON.parse(fs.readFileSync(p.defaultsConfig, 'utf-8'));
-
-  // Normalize existing instances and filter out placeholders
-  const allInstances = normalizeChannelInstances(config.channels?.feishu, 'feishu');
-  const validInstances: Array<{ name: string; originalIndex: number; [key: string]: any }> = [];
-  for (let i = 0; i < allInstances.length; i++) {
-    const inst = allInstances[i];
-    if (!inst.appId || !inst.appSecret) continue;
-    if (inst.appId.includes('your-') || inst.appId.includes('placeholder')) continue;
-    if (inst.appSecret.includes('your-') || inst.appSecret.includes('placeholder')) continue;
-    validInstances.push({ ...inst, originalIndex: i });
-  }
-
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  let aid: string | null = null;
+  let agentConfig: AgentConfig | null = null;
   let choice: InstanceChoice | null = null;
 
-  if (validInstances.length > 0) {
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    try {
-      choice = await selectInstance(rl, 'feishu', validInstances);
-      if (choice === null) return; // user cancelled
-    } finally {
-      rl.close();
+  try {
+    aid = await pickAgentForChannel(rl);
+    if (!aid) return;
+
+    agentConfig = loadAgent(aid);
+    if (!agentConfig) {
+      console.error(`❌ 无法加载 agent ${aid} 的配置`);
+      return;
     }
+    const existing = (agentConfig.channels || []).filter(c => c.type === 'feishu');
+    choice = await pickInstanceWithinAgent(rl, 'feishu', existing);
+    if (choice === null) return;
+  } finally {
+    rl.close();
   }
 
-  console.log('正在获取飞书登录二维码...\n');
+  console.log('\n正在获取飞书登录二维码...\n');
 
   let result: RegistrationResult;
   try {
     const flowResult = await runQrRegistrationFlow();
-
     if (flowResult === QUIT) {
       console.log('已退出');
       return;
     }
-
     if (flowResult === SKIP) {
-      const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-      try {
-        result = await manualInput(rl);
-      } finally {
-        rl.close();
-      }
+      const rl2 = readline.createInterface({ input: process.stdin, output: process.stdout });
+      try { result = await manualInput(rl2); } finally { rl2.close(); }
     } else {
       result = flowResult;
     }
@@ -336,69 +287,20 @@ export async function cmdInitFeishu(): Promise<void> {
     process.exit(1);
   }
 
-  // Write config to the correct slot
-  if (!config.channels) config.channels = {};
+  const channel: ChannelInstance = {
+    type: 'feishu',
+    name: choice.name,
+    enabled: true,
+    appId: result.appId,
+    appSecret: result.appSecret,
+    ...(result.openId ? { owners: [result.openId] } : {}),
+  } as ChannelInstance;
 
-  if (choice && choice.action === 'overwrite' && Array.isArray(config.channels.feishu)) {
-    // Overwrite existing instance in array — use originalIndex to find the right slot
-    const idx = validInstances[choice.index]?.originalIndex ?? choice.index;
-    config.channels.feishu[idx].appId = result.appId;
-    config.channels.feishu[idx].appSecret = result.appSecret;
-    config.channels.feishu[idx].enabled = true;
-    if (result.openId) config.channels.feishu[idx].owner = result.openId;
-  } else if (choice && choice.action === 'overwrite' && !Array.isArray(config.channels.feishu)) {
-    // Overwrite single-object
-    config.channels.feishu = config.channels.feishu || {};
-    config.channels.feishu.appId = result.appId;
-    config.channels.feishu.appSecret = result.appSecret;
-    config.channels.feishu.enabled = true;
-    if (result.openId) config.channels.feishu.owner = result.openId;
-    else delete config.channels.feishu.owner;
-  } else if (choice && choice.action === 'add') {
-    // Add new instance — upgrade to array if needed
-    const newInst = {
-      name: choice.name,
-      appId: result.appId,
-      appSecret: result.appSecret,
-      enabled: true,
-      ...(result.openId ? { owner: result.openId } : {}),
-    };
-    if (Array.isArray(config.channels.feishu)) {
-      config.channels.feishu.push(newInst);
-    } else if (config.channels.feishu) {
-      // Upgrade single object to array
-      const oldInst = { ...config.channels.feishu, name: config.channels.feishu.name || 'feishu' };
-      config.channels.feishu = [oldInst, newInst];
-    } else {
-      config.channels.feishu = [newInst];
-    }
-  } else {
-    // First instance — single object format (backward compat)
-    config.channels.feishu = config.channels.feishu || {};
-    config.channels.feishu.appId = result.appId;
-    config.channels.feishu.appSecret = result.appSecret;
-    config.channels.feishu.enabled = true;
-    if (result.openId) config.channels.feishu.owner = result.openId;
-    else delete config.channels.feishu.owner;
-  }
+  await commitChannel(aid!, channel, choice.action);
 
-  if (!config.channels.defaultChannel) config.channels.defaultChannel = 'feishu';
-
-  fs.writeFileSync(p.defaultsConfig, JSON.stringify(config, null, 2) + '\n');
-
-  console.log(`\n✅ 飞书连接成功！`);
   console.log(`  App ID: ${result.appId}`);
-  if (result.openId) {
-    console.log(`  Owner: ${result.openId}`);
-  }
-  if (result.domain !== 'unknown') {
-    console.log(`  Domain: ${result.domain}`);
-  }
-  if (choice) {
-    console.log(`  实例: ${choice.name} (${choice.action === 'add' ? '新增' : '覆盖'})`);
-  }
-  console.log(`  配置已写入: ${p.defaultsConfig}`);
-  console.log(`\n现在可以启动服务: evolclaw restart`);
+  if (result.openId) console.log(`  Owner: ${result.openId}`);
+  if (result.domain !== 'unknown') console.log(`  Domain: ${result.domain}`);
 }
 
 // ==================== WeChat ====================
@@ -513,153 +415,43 @@ export async function runWechatQrFlow(): Promise<{ baseUrl: string; token: strin
 }
 
 export async function cmdInitWechat(): Promise<void> {
-  const p = resolvePaths();
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  let aid: string | null = null;
+  let agentConfig: AgentConfig | null = null;
+  let choice: InstanceChoice | null = null;
 
-  if (!fs.existsSync(p.defaultsConfig)) {
-    console.log(`❌ 配置文件不存在，请先运行 evolclaw init`);
+  try {
+    aid = await pickAgentForChannel(rl);
+    if (!aid) return;
+
+    agentConfig = loadAgent(aid);
+    if (!agentConfig) {
+      console.error(`❌ 无法加载 agent ${aid} 的配置`);
+      return;
+    }
+    const existing = (agentConfig.channels || []).filter(c => c.type === 'wechat');
+    choice = await pickInstanceWithinAgent(rl, 'wechat', existing);
+    if (choice === null) return;
+  } finally {
+    rl.close();
+  }
+
+  console.log('\n正在获取微信登录二维码...\n');
+  const result = await runWechatQrFlow();
+  if (!result) {
+    console.log('已取消');
     return;
   }
 
-  const config = JSON.parse(fs.readFileSync(p.defaultsConfig, 'utf-8'));
+  const channel: ChannelInstance = {
+    type: 'wechat',
+    name: choice.name,
+    enabled: true,
+    baseUrl: result.baseUrl,
+    token: result.token,
+  } as ChannelInstance;
 
-  // Normalize existing instances and filter out placeholders
-  const allInstances = normalizeChannelInstances(config.channels?.wechat, 'wechat');
-  const validInstances: Array<{ name: string; originalIndex: number; [key: string]: any }> = [];
-  for (let i = 0; i < allInstances.length; i++) {
-    const inst = allInstances[i];
-    if (!inst.token) continue;
-    if (inst.token.includes('your-') || inst.token.includes('placeholder')) continue;
-    validInstances.push({ ...inst, originalIndex: i });
-  }
-
-  let choice: InstanceChoice | null = null;
-
-  if (validInstances.length > 0) {
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    try {
-      choice = await selectInstance(rl, 'wechat', validInstances);
-      if (choice === null) return; // user cancelled
-    } finally {
-      rl.close();
-    }
-  }
-
-  console.log('正在获取微信登录二维码...\n');
-
-  const qrResp = await fetchQRCode(DEFAULT_BASE_URL);
-
-  // 终端显示二维码
-  try {
-    const qrterm = await import('qrcode-terminal');
-    await new Promise<void>(resolve => {
-      qrterm.default.generate(qrResp.qrcode_img_content, { small: true }, (qr: string) => {
-        console.log(qr);
-        resolve();
-      });
-    });
-  } catch {
-    console.log(`请在浏览器中打开此链接扫码: ${qrResp.qrcode_img_content}\n`);
-  }
-
-  console.log('请用微信扫描上方二维码...\n');
-
-  const deadline = Date.now() + LOGIN_TIMEOUT_MS;
-  let scannedPrinted = false;
-  let currentPollUrl = DEFAULT_BASE_URL;
-
-  while (Date.now() < deadline) {
-    const status = await pollQRStatus(currentPollUrl, qrResp.qrcode);
-
-    switch (status.status) {
-      case 'wait':
-        process.stdout.write('.');
-        break;
-      case 'scaned':
-        if (!scannedPrinted) {
-          console.log('\n\ud83d\udc40 已扫码，请在微信中确认...');
-          scannedPrinted = true;
-        }
-        break;
-      case 'scaned_but_redirect':
-        if (status.redirect_host) {
-          currentPollUrl = `https://${status.redirect_host}`;
-        }
-        break;
-      case 'expired':
-        console.log('\n二维码已过期，请重新运行 evolclaw init wechat');
-        process.exit(1);
-        break;
-      case 'confirmed': {
-        if (!status.ilink_bot_id || !status.bot_token) {
-          console.error('\n登录失败：服务器未返回完整信息');
-          process.exit(1);
-        }
-
-        const baseUrl = status.baseurl || DEFAULT_BASE_URL;
-        const token = status.bot_token;
-
-        // Write config to the correct slot
-        if (!config.channels) config.channels = {};
-
-        if (choice && choice.action === 'overwrite' && Array.isArray(config.channels.wechat)) {
-          // Overwrite existing instance in array — use originalIndex to find the right slot
-          const idx = validInstances[choice.index]?.originalIndex ?? choice.index;
-          config.channels.wechat[idx].enabled = true;
-          config.channels.wechat[idx].baseUrl = baseUrl;
-          config.channels.wechat[idx].token = token;
-        } else if (choice && choice.action === 'overwrite' && !Array.isArray(config.channels.wechat)) {
-          // Overwrite single-object
-          config.channels.wechat = config.channels.wechat || {};
-          config.channels.wechat.enabled = true;
-          config.channels.wechat.baseUrl = baseUrl;
-          config.channels.wechat.token = token;
-        } else if (choice && choice.action === 'add') {
-          // Add new instance — upgrade to array if needed
-          const newInst = {
-            name: choice.name,
-            enabled: true,
-            baseUrl,
-            token,
-          };
-          if (Array.isArray(config.channels.wechat)) {
-            config.channels.wechat.push(newInst);
-          } else if (config.channels.wechat) {
-            // Upgrade single object to array
-            const oldInst = { ...config.channels.wechat, name: config.channels.wechat.name || 'wechat' };
-            config.channels.wechat = [oldInst, newInst];
-          } else {
-            config.channels.wechat = [newInst];
-          }
-        } else {
-          // First instance — single object format (backward compat)
-          config.channels.wechat = {
-            enabled: true,
-            baseUrl,
-            token,
-          };
-        }
-
-        if (!config.channels.defaultChannel) config.channels.defaultChannel = 'wechat';
-
-        fs.writeFileSync(p.defaultsConfig, JSON.stringify(config, null, 2) + '\n');
-
-        console.log(`\n✅ 微信连接成功！`);
-        console.log(`  Bot ID: ${status.ilink_bot_id}`);
-        console.log(`  User ID: ${status.ilink_user_id}`);
-        if (choice) {
-          console.log(`  实例: ${choice.name} (${choice.action === 'add' ? '新增' : '覆盖'})`);
-        }
-        console.log(`  配置已写入: ${p.defaultsConfig}`);
-        console.log(`\n现在可以启动服务: evolclaw restart`);
-        return;
-      }
-    }
-
-    await new Promise(r => setTimeout(r, 1000));
-  }
-
-  console.log('\n登录超时，请重新运行');
-  process.exit(1);
+  await commitChannel(aid!, channel, choice.action);
 }
 
 // ==================== AUN ====================
@@ -807,90 +599,6 @@ export async function setupAunAid(rl: readline.Interface, _config: any): Promise
   }
 
   return { aid, owner };
-}
-
-export async function cmdInitAun(): Promise<void> {
-  const p = resolvePaths();
-
-  if (!fs.existsSync(p.defaultsConfig)) {
-    console.log('❌ 配置文件不存在，请先运行 evolclaw init');
-    return;
-  }
-
-  const config = JSON.parse(fs.readFileSync(p.defaultsConfig, 'utf-8'));
-
-  // Normalize existing instances and filter out placeholders
-  const allInstances = normalizeChannelInstances(config.channels?.aun, 'aun');
-  const validInstances: Array<{ name: string; originalIndex: number; [key: string]: any }> = [];
-  for (let i = 0; i < allInstances.length; i++) {
-    const inst = allInstances[i];
-    if (!inst.aid || inst.aid.includes('your-') || inst.aid.includes('placeholder')) continue;
-    validInstances.push({ ...inst, originalIndex: i });
-  }
-
-  let choice: InstanceChoice | null = null;
-
-  if (validInstances.length > 0) {
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    try {
-      choice = await selectInstance(rl, 'aun', validInstances);
-      if (choice === null) return;
-    } finally {
-      rl.close();
-    }
-  }
-
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  try {
-    if (!await checkAunEnvironment(rl)) {
-      return;
-    }
-
-    const result = await setupAunAid(rl, config);
-    if (!result) return;
-
-    if (!config.channels) config.channels = {};
-
-    if (choice && choice.action === 'overwrite' && Array.isArray(config.channels.aun)) {
-      const idx = validInstances[choice.index]?.originalIndex ?? choice.index;
-      config.channels.aun[idx].aid = result.aid;
-      config.channels.aun[idx].owner = result.owner;
-      config.channels.aun[idx].enabled = true;
-    } else if (choice && choice.action === 'overwrite' && !Array.isArray(config.channels.aun)) {
-      config.channels.aun = config.channels.aun || {};
-      config.channels.aun.aid = result.aid;
-      config.channels.aun.owner = result.owner;
-      config.channels.aun.enabled = true;
-    } else if (choice && choice.action === 'add') {
-      const newInst = {
-        name: choice.name,
-        enabled: true,
-        aid: result.aid,
-        owner: result.owner,
-      };
-      if (Array.isArray(config.channels.aun)) {
-        config.channels.aun.push(newInst);
-      } else if (config.channels.aun) {
-        const oldInst = { ...config.channels.aun, name: config.channels.aun.name || 'aun' };
-        config.channels.aun = [oldInst, newInst];
-      } else {
-        config.channels.aun = [newInst];
-      }
-    } else {
-      config.channels.aun = {
-        enabled: true,
-        aid: result.aid,
-        owner: result.owner,
-      };
-    }
-
-    if (!config.channels.defaultChannel) config.channels.defaultChannel = 'aun';
-
-    fs.writeFileSync(p.defaultsConfig, JSON.stringify(config, null, 2) + '\n');
-    console.log('\n✓ AUN 配置已写入');
-  } finally {
-    rl.close();
-  }
 }
 
 // ==================== DingTalk ====================
@@ -1054,66 +762,53 @@ export async function runDingtalkQrFlowSimple(): Promise<{ clientId: string; cli
 }
 
 export async function cmdInitDingtalk(): Promise<void> {
-  const p = resolvePaths();
-
-  if (!fs.existsSync(p.defaultsConfig)) {
-    console.log('❌ 配置文件不存在，请先运行 evolclaw init');
-    return;
-  }
-
-  const config = JSON.parse(fs.readFileSync(p.defaultsConfig, 'utf-8'));
-
-  // Normalize existing instances and filter out placeholders
-  const allInstances = normalizeChannelInstances(config.channels?.dingtalk, 'dingtalk');
-  const validInstances: Array<{ name: string; originalIndex: number; [key: string]: any }> = [];
-  for (let i = 0; i < allInstances.length; i++) {
-    const inst = allInstances[i];
-    if (!inst.clientId || !inst.clientSecret) continue;
-    if (inst.clientId.includes('your-') || inst.clientId.includes('placeholder')) continue;
-    if (inst.clientSecret.includes('your-') || inst.clientSecret.includes('placeholder')) continue;
-    validInstances.push({ ...inst, originalIndex: i });
-  }
-
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  let aid: string | null = null;
+  let agentConfig: AgentConfig | null = null;
   let choice: InstanceChoice | null = null;
 
-  if (validInstances.length > 0) {
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    try {
-      choice = await selectInstance(rl, 'dingtalk', validInstances);
-      if (choice === null) return;
-    } finally {
-      rl.close();
+  try {
+    aid = await pickAgentForChannel(rl);
+    if (!aid) return;
+
+    agentConfig = loadAgent(aid);
+    if (!agentConfig) {
+      console.error(`❌ 无法加载 agent ${aid} 的配置`);
+      return;
     }
+    const existing = (agentConfig.channels || []).filter(c => c.type === 'dingtalk');
+    choice = await pickInstanceWithinAgent(rl, 'dingtalk', existing);
+    if (choice === null) return;
+  } finally {
+    rl.close();
   }
 
-  console.log('正在获取钉钉登录二维码...\n');
+  console.log('\n正在获取钉钉登录二维码...\n');
 
   let result: DingtalkRegistrationResult;
   try {
     const flowResult = await runDingtalkQrFlow();
-
     if (flowResult === QUIT) {
       console.log('已退出');
       return;
     }
-
     if (flowResult === SKIP) {
-      const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+      const rl2 = readline.createInterface({ input: process.stdin, output: process.stdout });
       try {
         console.log('\n手动输入模式：\n');
         let clientId = '';
         while (!clientId) {
-          clientId = (await ask(rl, '  钉钉 Client ID (AppKey): ')).trim();
+          clientId = (await ask(rl2, '  钉钉 Client ID (AppKey): ')).trim();
           if (!clientId) console.log('  ⚠ 不能为空');
         }
         let clientSecret = '';
         while (!clientSecret) {
-          clientSecret = (await ask(rl, '  钉钉 Client Secret (AppSecret): ')).trim();
+          clientSecret = (await ask(rl2, '  钉钉 Client Secret (AppSecret): ')).trim();
           if (!clientSecret) console.log('  ⚠ 不能为空');
         }
         result = { clientId, clientSecret };
       } finally {
-        rl.close();
+        rl2.close();
       }
     } else {
       result = flowResult;
@@ -1123,53 +818,16 @@ export async function cmdInitDingtalk(): Promise<void> {
     process.exit(1);
   }
 
-  // Write config to the correct slot
-  if (!config.channels) config.channels = {};
+  const channel: ChannelInstance = {
+    type: 'dingtalk',
+    name: choice.name,
+    enabled: true,
+    clientId: result.clientId,
+    clientSecret: result.clientSecret,
+  } as ChannelInstance;
 
-  if (choice && choice.action === 'overwrite' && Array.isArray(config.channels.dingtalk)) {
-    const idx = validInstances[choice.index]?.originalIndex ?? choice.index;
-    config.channels.dingtalk[idx].clientId = result.clientId;
-    config.channels.dingtalk[idx].clientSecret = result.clientSecret;
-    config.channels.dingtalk[idx].enabled = true;
-  } else if (choice && choice.action === 'overwrite' && !Array.isArray(config.channels.dingtalk)) {
-    config.channels.dingtalk = config.channels.dingtalk || {};
-    config.channels.dingtalk.clientId = result.clientId;
-    config.channels.dingtalk.clientSecret = result.clientSecret;
-    config.channels.dingtalk.enabled = true;
-  } else if (choice && choice.action === 'add') {
-    const newInst = {
-      name: choice.name,
-      clientId: result.clientId,
-      clientSecret: result.clientSecret,
-      enabled: true,
-    };
-    if (Array.isArray(config.channels.dingtalk)) {
-      config.channels.dingtalk.push(newInst);
-    } else if (config.channels.dingtalk) {
-      const oldInst = { ...config.channels.dingtalk, name: config.channels.dingtalk.name || 'dingtalk' };
-      config.channels.dingtalk = [oldInst, newInst];
-    } else {
-      config.channels.dingtalk = [newInst];
-    }
-  } else {
-    config.channels.dingtalk = {
-      clientId: result.clientId,
-      clientSecret: result.clientSecret,
-      enabled: true,
-    };
-  }
-
-  if (!config.channels.defaultChannel) config.channels.defaultChannel = 'dingtalk';
-
-  fs.writeFileSync(p.defaultsConfig, JSON.stringify(config, null, 2) + '\n');
-
-  console.log(`\n✅ 钉钉连接成功！`);
+  await commitChannel(aid!, channel, choice.action);
   console.log(`  Client ID: ${result.clientId}`);
-  if (choice) {
-    console.log(`  实例: ${choice.name} (${choice.action === 'add' ? '新增' : '覆盖'})`);
-  }
-  console.log(`  配置已写入: ${p.defaultsConfig}`);
-  console.log(`\n现在可以启动服务: evolclaw restart`);
 }
 
 // ==================== QQBot ====================
@@ -1336,66 +994,53 @@ export async function runQQBotBindFlowSimple(): Promise<{ appId: string; clientS
 }
 
 export async function cmdInitQQBot(): Promise<void> {
-  const p = resolvePaths();
-
-  if (!fs.existsSync(p.defaultsConfig)) {
-    console.log('❌ 配置文件不存在，请先运行 evolclaw init');
-    return;
-  }
-
-  const config = JSON.parse(fs.readFileSync(p.defaultsConfig, 'utf-8'));
-
-  // Normalize existing instances and filter out placeholders
-  const allInstances = normalizeChannelInstances(config.channels?.qqbot, 'qqbot');
-  const validInstances: Array<{ name: string; originalIndex: number; [key: string]: any }> = [];
-  for (let i = 0; i < allInstances.length; i++) {
-    const inst = allInstances[i];
-    if (!inst.appId || !inst.clientSecret) continue;
-    if (inst.appId.includes('your-') || inst.appId.includes('placeholder')) continue;
-    if (inst.clientSecret.includes('your-') || inst.clientSecret.includes('placeholder')) continue;
-    validInstances.push({ ...inst, originalIndex: i });
-  }
-
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  let aid: string | null = null;
+  let agentConfig: AgentConfig | null = null;
   let choice: InstanceChoice | null = null;
 
-  if (validInstances.length > 0) {
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    try {
-      choice = await selectInstance(rl, 'qqbot', validInstances);
-      if (choice === null) return;
-    } finally {
-      rl.close();
+  try {
+    aid = await pickAgentForChannel(rl);
+    if (!aid) return;
+
+    agentConfig = loadAgent(aid);
+    if (!agentConfig) {
+      console.error(`❌ 无法加载 agent ${aid} 的配置`);
+      return;
     }
+    const existing = (agentConfig.channels || []).filter(c => c.type === 'qqbot');
+    choice = await pickInstanceWithinAgent(rl, 'qqbot', existing);
+    if (choice === null) return;
+  } finally {
+    rl.close();
   }
 
-  console.log('正在创建 QQ 机器人绑定任务...\n');
+  console.log('\n正在创建 QQ 机器人绑定任务...\n');
 
   let result: QQBotBindResult;
   try {
     const flowResult = await runQQBotBindFlow();
-
     if (flowResult === QUIT) {
       console.log('已退出');
       return;
     }
-
     if (flowResult === SKIP) {
-      const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+      const rl2 = readline.createInterface({ input: process.stdin, output: process.stdout });
       try {
         console.log('\n手动输入模式：\n');
         let appId = '';
         while (!appId) {
-          appId = (await ask(rl, '  QQ 机器人 App ID: ')).trim();
+          appId = (await ask(rl2, '  QQ 机器人 App ID: ')).trim();
           if (!appId) console.log('  ⚠ 不能为空');
         }
         let clientSecret = '';
         while (!clientSecret) {
-          clientSecret = (await ask(rl, '  QQ 机器人 Client Secret: ')).trim();
+          clientSecret = (await ask(rl2, '  QQ 机器人 Client Secret: ')).trim();
           if (!clientSecret) console.log('  ⚠ 不能为空');
         }
         result = { appId, clientSecret };
       } finally {
-        rl.close();
+        rl2.close();
       }
     } else {
       result = flowResult;
@@ -1405,159 +1050,137 @@ export async function cmdInitQQBot(): Promise<void> {
     process.exit(1);
   }
 
-  // Write config to the correct slot
-  if (!config.channels) config.channels = {};
+  const channel: ChannelInstance = {
+    type: 'qqbot',
+    name: choice.name,
+    enabled: true,
+    appId: result.appId,
+    clientSecret: result.clientSecret,
+  } as ChannelInstance;
 
-  if (choice && choice.action === 'overwrite' && Array.isArray(config.channels.qqbot)) {
-    const idx = validInstances[choice.index]?.originalIndex ?? choice.index;
-    config.channels.qqbot[idx].appId = result.appId;
-    config.channels.qqbot[idx].clientSecret = result.clientSecret;
-    config.channels.qqbot[idx].enabled = true;
-  } else if (choice && choice.action === 'overwrite' && !Array.isArray(config.channels.qqbot)) {
-    config.channels.qqbot = config.channels.qqbot || {};
-    config.channels.qqbot.appId = result.appId;
-    config.channels.qqbot.clientSecret = result.clientSecret;
-    config.channels.qqbot.enabled = true;
-  } else if (choice && choice.action === 'add') {
-    const newInst = {
-      name: choice.name,
-      appId: result.appId,
-      clientSecret: result.clientSecret,
-      enabled: true,
-    };
-    if (Array.isArray(config.channels.qqbot)) {
-      config.channels.qqbot.push(newInst);
-    } else if (config.channels.qqbot) {
-      const oldInst = { ...config.channels.qqbot, name: config.channels.qqbot.name || 'qqbot' };
-      config.channels.qqbot = [oldInst, newInst];
-    } else {
-      config.channels.qqbot = [newInst];
-    }
-  } else {
-    config.channels.qqbot = {
-      appId: result.appId,
-      clientSecret: result.clientSecret,
-      enabled: true,
-    };
-  }
-
-  if (!config.channels.defaultChannel) config.channels.defaultChannel = 'qqbot';
-
-  fs.writeFileSync(p.defaultsConfig, JSON.stringify(config, null, 2) + '\n');
-
-  console.log(`\n✅ QQ 机器人绑定成功！`);
+  await commitChannel(aid!, channel, choice.action);
   console.log(`  App ID: ${result.appId}`);
-  if (choice) {
-    console.log(`  实例: ${choice.name} (${choice.action === 'add' ? '新增' : '覆盖'})`);
-  }
-  console.log(`  配置已写入: ${p.defaultsConfig}`);
-  console.log(`\n现在可以启动服务: evolclaw restart`);
 }
 
 // ==================== WeCom (企业微信) ====================
 
 export async function cmdInitWecom(): Promise<void> {
-  const p = resolvePaths();
-
-  if (!fs.existsSync(p.defaultsConfig)) {
-    console.log('❌ 配置文件不存在，请先运行 evolclaw init');
-    return;
-  }
-
-  const config = JSON.parse(fs.readFileSync(p.defaultsConfig, 'utf-8'));
-
-  // Normalize existing instances and filter out placeholders
-  const allInstances = normalizeChannelInstances(config.channels?.wecom, 'wecom');
-  const validInstances: Array<{ name: string; originalIndex: number; [key: string]: any }> = [];
-  for (let i = 0; i < allInstances.length; i++) {
-    const inst = allInstances[i];
-    if (!inst.botId || !inst.secret) continue;
-    if (inst.botId.includes('your-') || inst.botId.includes('placeholder')) continue;
-    if (inst.secret.includes('your-') || inst.secret.includes('placeholder')) continue;
-    validInstances.push({ ...inst, originalIndex: i });
-  }
-
-  let choice: InstanceChoice | null = null;
-
-  if (validInstances.length > 0) {
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    try {
-      choice = await selectInstance(rl, 'wecom', validInstances);
-      if (choice === null) return;
-    } finally {
-      rl.close();
-    }
-  }
-
-  // WeCom uses manual input only (no QR flow)
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  let result: { botId: string; secret: string };
-  try {
-    console.log('企业微信 AI Bot 配置\n');
-    console.log('请在企业微信管理后台 → AI Bot 页面获取 Bot ID 和 Secret\n');
+  let aid: string | null = null;
+  let agentConfig: AgentConfig | null = null;
+  let choice: InstanceChoice | null = null;
+  let botId = '';
+  let secret = '';
 
-    let botId = '';
+  try {
+    aid = await pickAgentForChannel(rl);
+    if (!aid) return;
+
+    agentConfig = loadAgent(aid);
+    if (!agentConfig) {
+      console.error(`❌ 无法加载 agent ${aid} 的配置`);
+      return;
+    }
+    const existing = (agentConfig.channels || []).filter(c => c.type === 'wecom');
+    choice = await pickInstanceWithinAgent(rl, 'wecom', existing);
+    if (choice === null) return;
+
+    console.log('\n企业微信 AI Bot 配置');
+    console.log('请在企业微信管理后台 → AI Bot 页面获取 Bot ID 和 Secret\n');
     while (!botId) {
       botId = (await ask(rl, '  Bot ID: ')).trim();
       if (!botId) console.log('  ⚠ 不能为空');
     }
-    let secret = '';
     while (!secret) {
       secret = (await ask(rl, '  Secret: ')).trim();
       if (!secret) console.log('  ⚠ 不能为空');
     }
-    result = { botId, secret };
   } finally {
     rl.close();
   }
 
-  // Write config to the correct slot
-  if (!config.channels) config.channels = {};
+  const channel: ChannelInstance = {
+    type: 'wecom',
+    name: choice.name,
+    enabled: true,
+    botId,
+    secret,
+  } as ChannelInstance;
 
-  if (choice && choice.action === 'overwrite' && Array.isArray(config.channels.wecom)) {
-    const idx = validInstances[choice.index]?.originalIndex ?? choice.index;
-    config.channels.wecom[idx].botId = result.botId;
-    config.channels.wecom[idx].secret = result.secret;
-    config.channels.wecom[idx].enabled = true;
-  } else if (choice && choice.action === 'overwrite' && !Array.isArray(config.channels.wecom)) {
-    config.channels.wecom = config.channels.wecom || {};
-    config.channels.wecom.botId = result.botId;
-    config.channels.wecom.secret = result.secret;
-    config.channels.wecom.enabled = true;
-  } else if (choice && choice.action === 'add') {
-    const newInst = {
-      name: choice.name,
-      botId: result.botId,
-      secret: result.secret,
-      enabled: true,
-    };
-    if (Array.isArray(config.channels.wecom)) {
-      config.channels.wecom.push(newInst);
-    } else if (config.channels.wecom) {
-      const oldInst = { ...config.channels.wecom, name: config.channels.wecom.name || 'wecom' };
-      config.channels.wecom = [oldInst, newInst];
-    } else {
-      config.channels.wecom = [newInst];
+  await commitChannel(aid!, channel, choice.action);
+  console.log(`  Bot ID: ${botId}`);
+}
+
+// ==================== Shared helpers for per-agent init <channel> ====================
+
+/**
+ * Pick the target agent for an `evolclaw init <channel>` flow.
+ *
+ * - 0 agents → print guidance and return null
+ * - ≥1 → letter menu; with 1 agent the prompt accepts Enter (defaults to 'a')
+ */
+async function pickAgentForChannel(rl: readline.Interface): Promise<string | null> {
+  const { agents } = loadAllAgents();
+  if (agents.length === 0) {
+    console.log('❌ 暂无 agent，请先创建：');
+    console.log('     evolclaw agent new <aid>.agentid.pub');
+    return null;
+  }
+
+  const letters = 'abcdefghijklmnopqrstuvwxyz';
+  console.log(`共 ${agents.length} 个 agent：`);
+  for (let i = 0; i < agents.length; i++) {
+    console.log(`  ${letters[i]}. ${agents[i].aid}`);
+  }
+
+  const valid = letters.slice(0, agents.length).split('');
+  const promptSuffix = agents.length === 1 ? ' [a]' : '';
+  let choice = '';
+  while (!valid.includes(choice)) {
+    choice = (await ask(rl, `请选择${promptSuffix}: `)).trim().toLowerCase();
+    if (agents.length === 1 && choice === '') choice = 'a';
+    if (!valid.includes(choice)) {
+      console.log(`无效选择，请输入 ${valid.join('/')}`);
     }
-  } else {
-    config.channels.wecom = {
-      botId: result.botId,
-      secret: result.secret,
-      enabled: true,
-    };
   }
+  return agents[letters.indexOf(choice)].aid;
+}
 
-  if (!config.channels.defaultChannel) config.channels.defaultChannel = 'wecom';
-
-  fs.writeFileSync(p.defaultsConfig, JSON.stringify(config, null, 2) + '\n');
-
-  console.log(`\n✅ 企业微信 AI Bot 配置成功！`);
-  console.log(`  Bot ID: ${result.botId}`);
-  if (choice) {
-    console.log(`  实例: ${choice.name} (${choice.action === 'add' ? '新增' : '覆盖'})`);
+/**
+ * Pick "add new instance" or "overwrite existing instance" within a single agent
+ * for the given channel type. Returns null if user cancels.
+ *
+ * If existing.length === 0 → returns { action:'add', name:'main' } directly.
+ */
+async function pickInstanceWithinAgent(
+  rl: readline.Interface,
+  channelType: string,
+  existing: ChannelInstance[],
+): Promise<InstanceChoice | null> {
+  if (existing.length === 0) {
+    return { action: 'add', name: 'main' };
   }
-  console.log(`  配置已写入: ${p.defaultsConfig}`);
-  console.log(`\n现在可以启动服务: evolclaw restart`);
+  const view = existing.map((c, i) => ({ ...(c as any), name: c.name, originalIndex: i }));
+  return await selectInstance(rl, channelType, view);
+}
+
+/**
+ * Persist the new/overwritten channel and trigger hot-reload.
+ */
+async function commitChannel(
+  aid: string,
+  channel: ChannelInstance,
+  mode: 'add' | 'overwrite',
+): Promise<void> {
+  const result = await agentChannelUpsert({ aid, channel, mode });
+  if (result.ok !== true) {
+    console.error(`❌ ${(result as any).error || 'channel upsert failed'}`);
+    return;
+  }
+  console.log(`\n✓ 已写入 agents/${aid}/config.json`);
+  console.log(result.reloaded
+    ? '  ✓ 已热重载'
+    : '  ⚠ 服务未运行（或热重载失败），下次 evolclaw start 时生效');
 }
 
 // ==================== Unified Credential Collector Dispatcher ====================
@@ -1585,18 +1208,6 @@ export function getChannelCredentialCollector(type: string): ChannelCredentialCo
         const result = await runWechatQrFlow();
         if (!result) return null;
         return { baseUrl: result.baseUrl, token: result.token, enabled: true };
-      };
-    case 'aun':
-      return async () => {
-        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-        try {
-          if (!await checkAunEnvironment(rl)) return null;
-          const result = await setupAunAid(rl, {});
-          if (!result) return null;
-          return { aid: result.aid, owner: result.owner, enabled: true };
-        } finally {
-          rl.close();
-        }
       };
     case 'dingtalk':
       return async () => {

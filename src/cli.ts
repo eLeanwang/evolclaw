@@ -5,16 +5,16 @@ import { spawn, execFileSync, execFile } from 'child_process';
 import { promisify } from 'util';
 import { resolveRoot, resolvePaths, ensureDataDirs, getPackageRoot } from './paths.js';
 import { loadDefaults, loadAllAgents, mergeForAgent } from './config-store.js';
-import { resolveAnthropicConfig } from './baseagents/resolve.js';
+import { resolveAnthropicConfig } from './agents/resolve.js';
 import { normalizeChannelInstances, channelTypes } from './utils/channel-helpers.js';
 import { migrateProject } from './utils/migrate-project.js';
 import readline from 'readline';
 import { cmdInit } from './utils/init.js';
 import { ipcQuery } from './ipc.js';
-import { cmdInitWechat, cmdInitFeishu, cmdInitAun, cmdInitDingtalk, cmdInitQQBot, cmdInitWecom, checkAunEnvironment } from './utils/init-channel.js';
+import { cmdInitWechat, cmdInitFeishu, cmdInitDingtalk, cmdInitQQBot, cmdInitWecom } from './utils/init-channel.js';
 import * as platform from './utils/cross-platform.js';
 import { EventBus } from './core/event-bus.js';
-import { tryUpgrade, type UpgradeResult } from './utils/upgrade.js';
+import { tryUpgrade, type UpgradeResult } from './utils/npm-ops.js';
 import { scanInstances, cleanupInstances, readAidLastActivity, writeRestartMonitor, removeRestartMonitor, isRestartMonitorWinner, findOrphanProcesses, killOrphans, type OrphanProcess } from './utils/instance-registry.js';
 
 // Suppress Node.js ExperimentalWarning (e.g. SQLite) from cluttering CLI output
@@ -1392,7 +1392,7 @@ async function cmdWatchAid(): Promise<void> {
   const version = pkg.version;
 
   // Load AID names: first from local agent.md, then refresh from network
-  const { aidList, aidLookup } = await import('./aid/index.js');
+  const { aidList, aidLookup } = await import('./aun/aid/index.js');
   const localAids = aidList();
   const aidNameMap = new Map<string, string>();
   const refreshedAids = new Set<string>();
@@ -2519,17 +2519,12 @@ Options:
       };
       const result = await agentCreateNonInteractive({
         aid: name,
-        baseagent: getArg('--baseagent') || '',
+        baseagent: getArg('--baseagent'),
         project: getArg('--project') || '',
-        chatmodePrivate: getArg('--chatmode-private'),
-        chatmodeGroup: getArg('--chatmode-group'),
         owner: getArg('--owner'),
         name: getArg('--name'),
         description: getArg('--description'),
-        feishuAppId: getArg('--feishu-app-id'),
-        feishuAppSecret: getArg('--feishu-app-secret'),
-        dingtalkClientId: getArg('--dingtalk-client-id'),
-        dingtalkClientSecret: getArg('--dingtalk-client-secret'),
+        force: args.includes('--force'),
       });
       if (!result.ok) {
         if (formatJson) { console.log(JSON.stringify(result)); }
@@ -2835,7 +2830,7 @@ Options:
     return;
   }
 
-  const { aidList, aidCreate, aidShow, aidDelete, aidLookup, agentmdPut, agentmdGet, buildInitialAgentMd, isValidAid } = await import('./aid/index.js');
+  const { aidList, aidCreate, aidShow, aidDelete, aidLookup, agentmdPut, agentmdGet, buildInitialAgentMd, isValidAid } = await import('./aun/aid/index.js');
 
   if (sub === 'list') {
     const aids = aidList(aunPath);
@@ -2904,7 +2899,7 @@ Options:
 
     const verb = result.alreadyExisted ? '已存在' : '已创建';
     console.log(`✓ ${aid} ${verb}`);
-    console.log('  如需上线 AUN 通道，运行 evolclaw init aun');
+    console.log('  如需上线 AUN 通道，运行 evolclaw agent new ' + aid);
     return;
   }
 
@@ -3066,7 +3061,7 @@ async function cmdRpc(args: string[]): Promise<void> {
   const aid = args[asIdx + 1];
   const paramsRaw = args[paramsIdx + 1];
 
-  const { isValidAid } = await import('./aid/index.js');
+  const { isValidAid } = await import('./aun/aid/index.js');
   if (!isValidAid(aid)) {
     console.error(`❌ 无效 AID 格式: ${aid}`);
     process.exit(1);
@@ -3098,7 +3093,7 @@ async function cmdRpc(args: string[]): Promise<void> {
     }
   }
 
-  const { rpcCall, rpcBatch } = await import('./aun-rpc/index.js');
+  const { rpcCall, rpcBatch } = await import('./aun/rpc/index.js');
 
   if (calls.length === 1) {
     const result = await rpcCall(aid, calls[0].method, calls[0].params, { aunPath });
@@ -3147,13 +3142,13 @@ Commands:
     process.exit(1);
   }
 
-  const { isValidAid } = await import('./aid/index.js');
+  const { isValidAid } = await import('./aun/aid/index.js');
   if (!isValidAid(aid)) {
     console.error(`❌ 无效 AID 格式: ${aid}`);
     process.exit(1);
   }
 
-  const { storageUpload, storageDownload, storageLs, storageRm, storageQuota } = await import('./storage/index.js');
+  const { storageUpload, storageDownload, storageLs, storageRm, storageQuota } = await import('./aun/storage/index.js');
 
   if (sub === 'upload') {
     const localFile = args[2];
@@ -3306,13 +3301,13 @@ Options:
     console.error('❌ 缺少 <from-aid> 参数');
     process.exit(1);
   }
-  const { isValidAid } = await import('./aid/index.js');
+  const { isValidAid } = await import('./aun/aid/index.js');
   if (!isValidAid(from)) {
     console.error(`❌ 无效 AID 格式: ${from}`);
     process.exit(1);
   }
 
-  const { msgSend, msgPull, msgAck, msgRecall, msgOnline } = await import('./msg/index.js');
+  const { msgSend, msgPull, msgAck, msgRecall, msgOnline } = await import('./aun/msg/index.js');
   const commonOpts = { aunPath, slotId: appSlot };
 
   if (sub === 'send') {
@@ -3563,7 +3558,7 @@ Options:
     console.error('❌ 缺少 <from-aid> 参数');
     process.exit(1);
   }
-  const { isValidAid } = await import('./aid/index.js');
+  const { isValidAid } = await import('./aun/aid/index.js');
   if (!isValidAid(from)) {
     console.error(`❌ 无效 AID 格式: ${from}`);
     process.exit(1);
@@ -3573,7 +3568,7 @@ Options:
     groupSend, groupPull, groupAck,
     groupCreate, groupInfo, groupList, groupUpdate, groupDissolve,
     groupJoin, groupLeave, groupInvite, groupKick, groupMembers, groupOnline,
-  } = await import('./msg/index.js');
+  } = await import('./aun/msg/index.js');
   const commonOpts = { aunPath, slotId: appSlot };
 
   // 通用 group_id 提取（第三参数）
@@ -3942,33 +3937,22 @@ export async function main(args: string[]) {
       if (args[1] === 'help') {
         console.log(`用法: evolclaw init [渠道] [选项]
 
-交互式初始化:
-  evolclaw init               创建基础配置文件（交互式）
-  evolclaw init feishu        飞书扫码登录并写入配置
-  evolclaw init wechat        微信扫码登录并写入配置
-  evolclaw init dingtalk      钉钉扫码登录并写入配置
-  evolclaw init qqbot         QQ 机器人扫码绑定并写入配置
-  evolclaw init wecom         企业微信 AI Bot 配置（手动输入）
-  evolclaw init aun           AUN 交互式配置（AID 创建 + Owner 绑定）
-
-非交互式初始化:
+仅初始化 defaults.json:
+  evolclaw init                          交互式（写完 defaults.json 后嵌套 agent new）
   evolclaw init --non-interactive [选项]
+    --baseagent <claude|codex|gemini>    默认: PATH 中第一个可用项
+    --force                              已存在 defaults.json 时覆盖
 
-  选项:
-    --default-path <path>     项目目录（默认: 当前目录）
-    --channel <name>          渠道类型（默认: aun）
-    --aun-aid <aid>           AUN Agent ID（必填，如 mybot.agentid.pub）
-    --aun-owner <aid>         Owner AID（可选，如 alice.agentid.pub）
-
-  示例:
-    evolclaw init --non-interactive --aun-aid mybot.agentid.pub --aun-owner alice.agentid.pub
-    evolclaw init --non-interactive --default-path /home/user/project --aun-aid bot.agentid.pub`);
+配置渠道（先 evolclaw agent new 创建 agent）:
+  evolclaw init feishu        飞书扫码登录
+  evolclaw init wechat        微信扫码登录
+  evolclaw init dingtalk      钉钉扫码登录
+  evolclaw init qqbot         QQ 机器人扫码绑定
+  evolclaw init wecom         企业微信 AI Bot 配置（手动输入）`);
       } else if (args[1] === 'wechat') {
         await cmdInitWechat();
       } else if (args[1] === 'feishu') {
         await cmdInitFeishu();
-      } else if (args[1] === 'aun') {
-        await cmdInitAun();
       } else if (args[1] === 'dingtalk') {
         await cmdInitDingtalk();
       } else if (args[1] === 'qqbot') {
@@ -3976,23 +3960,17 @@ export async function main(args: string[]) {
       } else if (args[1] === 'wecom') {
         await cmdInitWecom();
       } else if (args[1] && !args[1].startsWith('-')) {
-        const supported = ['feishu', 'wechat', 'aun', 'dingtalk', 'qqbot', 'wecom'];
+        const supported = ['feishu', 'wechat', 'dingtalk', 'qqbot', 'wecom'];
         console.error(`❌ 不支持的渠道: ${args[1]}`);
         console.error(`   支持的渠道: ${supported.join(', ')}`);
         process.exit(1);
       } else {
         const nonInteractive = args.includes('--non-interactive');
-        if (nonInteractive) {
-          await cmdInit({
-            nonInteractive: true,
-            defaultPath: getArgValue(args, '--default-path') || path.join(os.homedir(), 'projects', 'default'),
-            channel: getArgValue(args, '--channel') || 'aun',
-            aunAid: getArgValue(args, '--aun-aid'),
-            aunOwner: getArgValue(args, '--aun-owner'),
-          });
-        } else {
-          await cmdInit();
-        }
+        await cmdInit({
+          nonInteractive,
+          baseagent: getArgValue(args, '--baseagent'),
+          force: args.includes('--force'),
+        });
       }
       break;
     case 'start':
@@ -4033,31 +4011,31 @@ export async function main(args: string[]) {
       await cmdAgent(args.slice(1));
       break;
     case 'aid': {
-      const { suppressSdkLogs } = await import('./aid/index.js');
+      const { suppressSdkLogs } = await import('./aun/aid/index.js');
       suppressSdkLogs();
       await cmdAid(args.slice(1));
       break;
     }
     case 'rpc': {
-      const { suppressSdkLogs } = await import('./aid/index.js');
+      const { suppressSdkLogs } = await import('./aun/aid/index.js');
       suppressSdkLogs();
       await cmdRpc(args.slice(1));
       break;
     }
     case 'storage': {
-      const { suppressSdkLogs } = await import('./aid/index.js');
+      const { suppressSdkLogs } = await import('./aun/aid/index.js');
       suppressSdkLogs();
       await cmdStorage(args.slice(1));
       break;
     }
     case 'msg': {
-      const { suppressSdkLogs } = await import('./aid/index.js');
+      const { suppressSdkLogs } = await import('./aun/aid/index.js');
       suppressSdkLogs();
       await cmdMsg(args.slice(1));
       break;
     }
     case 'group': {
-      const { suppressSdkLogs } = await import('./aid/index.js');
+      const { suppressSdkLogs } = await import('./aun/aid/index.js');
       suppressSdkLogs();
       await cmdGroup(args.slice(1));
       break;
@@ -4072,7 +4050,6 @@ Commands:
   init dingtalk 钉钉扫码登录并写入配置
   init qqbot    QQ 机器人扫码绑定并写入配置
   init wecom    企业微信 AI Bot 配置（手动输入 Bot ID + Secret）
-  init aun      AUN (AgentUnin.Network) 配置
   start         启动服务 (默认)
   stop          停止服务
   restart       重启服务
@@ -4091,18 +4068,12 @@ Commands:
                   agent <name>       查看指定 agent 详情
                   agent new <name>   创建新 agent（交互式）
                   agent new <name> --non-interactive ...  非交互创建（自动化）
-                    必填: --baseagent <claude|codex|gemini|hermes>
-                          --project <absolute path>
-                    可选 channel:
-                          --aun-aid <aid> --aun-owner <aid>
-                          --feishu-app-id xxx --feishu-app-secret yyy
-                          --wechat-token xxx
-                          --wecom-bot-id xxx --wecom-secret yyy
-                          --dingtalk-client-id xxx --dingtalk-client-secret yyy
-                          --qqbot-app-id xxx --qqbot-client-secret yyy
-                    可选行为:
-                          --chatmode-private <interactive|proactive> (默认 interactive)
-                          --chatmode-group <interactive|proactive>   (默认 proactive)
+                    必填: --project <absolute path>
+                    可选: --baseagent <claude|codex|gemini>  (默认: PATH 中第一个可用)
+                          --owner <aid>
+                          --name <display-name>
+                          --description <text>
+                          --force                            (覆盖已有 config.json)
                   agent sync-aids    从本地 AID 批量同步创建 agent（以最早 agent 为模板）
                   agent reload       全量 resync（扫磁盘，新增上线、删除下线、修改热更新）
                   agent reload <n>   热重载指定 agent 配置
