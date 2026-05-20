@@ -157,11 +157,11 @@ function showHistory(statsFile: string) {
   const lines = fs.readFileSync(statsFile, 'utf-8').trim().split('\n');
   if (lines.length < 2) return;
 
-  const recent = lines.slice(-8);
+  const recent = lines.slice(-10);
   console.log('\n==================================================');
-  console.log('历史记录（最近 8 次）');
+  console.log('历史记录（最近 10 次）');
   console.log('==================================================');
-  console.log(`${'时间'.padEnd(20)} ${'核心'.padStart(6)} ${'Agent'.padStart(6)} ${'渠道'.padStart(6)} ${'工具'.padStart(6)} ${'CLI'.padStart(6)} ${'AUN'.padStart(6)} ${'入口'.padStart(6)} ${'总计'.padStart(6)} ${'变化'.padStart(8)}`);
+  console.log(`${'Time'.padEnd(19)} ${'Core'.padStart(6)} ${'Agent'.padStart(6)} ${'Chan'.padStart(6)} ${'Utils'.padStart(6)} ${'CLI'.padStart(6)} ${'AUN'.padStart(6)} ${'Entry'.padStart(6)} ${'Total'.padStart(6)} ${'Delta'.padStart(8)}`);
   console.log('--------------------------------------------------');
 
   let prevTotal: number | null = null;
@@ -199,7 +199,7 @@ function showHistory(statsFile: string) {
     } else {
       diff = '-';
     }
-    console.log(`${time.padEnd(20)} ${c.padStart(6)} ${a.padStart(6)} ${ch.padStart(6)} ${u.padStart(6)} ${cl.padStart(6)} ${au.padStart(6)} ${e.padStart(6)} ${t.padStart(6)} ${diff.padStart(8)}`);
+    console.log(`${time.padEnd(19)} ${c.padStart(6)} ${a.padStart(6)} ${ch.padStart(6)} ${u.padStart(6)} ${cl.padStart(6)} ${au.padStart(6)} ${e.padStart(6)} ${t.padStart(6)} ${diff.padStart(8)}`);
     prevTotal = total;
   }
   console.log('==================================================');
