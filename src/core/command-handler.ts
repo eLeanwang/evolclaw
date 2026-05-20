@@ -1968,8 +1968,7 @@ export class CommandHandler {
       }
 
       const arg = normalizedContent.slice(9).trim();
-      const rawDispatch = dispatchSession.metadata?.dispatchMode;
-      const currentMode = rawDispatch === 'all' ? 'broadcast' : rawDispatch;
+      const currentMode = dispatchSession.metadata?.dispatchMode;
 
       if (!arg) {
         const displayMode = currentMode ?? '未设置（跟随群设置）';
