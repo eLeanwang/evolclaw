@@ -133,6 +133,7 @@ export interface GroupSendArgs extends GroupCommonOpts {
   body: GroupSendBody;
   /** payload.mentions：[{aid: ...}] 或 {scope: "all"} */
   mentions?: Array<Record<string, unknown>>;
+  encrypt?: boolean;
 }
 
 export async function groupSend(args: GroupSendArgs): Promise<GroupSendResult | MsgError> {
@@ -161,7 +162,9 @@ export async function groupSend(args: GroupSendArgs): Promise<GroupSendResult | 
       payload.mentions = args.mentions;
     }
 
-    const result = await conn.call('group.send', { group_id: args.groupId, payload });
+    const sendParams: Record<string, unknown> = { group_id: args.groupId, payload };
+    sendParams.encrypt = args.encrypt === true;
+    const result = await conn.call('group.send', sendParams);
     return {
       ok: true,
       group_id: result?.group_id ?? args.groupId,

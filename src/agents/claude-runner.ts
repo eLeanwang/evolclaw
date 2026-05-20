@@ -1368,7 +1368,7 @@ export class ClaudeAgentPlugin implements AgentPlugin {
   readonly name = 'claude';
 
   isEnabled(agent: import('../core/evolagent.js').EvolAgent): boolean {
-    return !!agent.config.baseagents?.claude;
+    return agent.baseagent === 'claude';
   }
 
   createAgent(agent: import('../core/evolagent.js').EvolAgent, callbacks: AgentCallbacks): AgentInstance | null {

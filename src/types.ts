@@ -504,9 +504,21 @@ export type AidStatus =
   | 'connected'        // 已连接
   | 'reconnecting'     // 重连中（含 SDK 自动重连 + TS 层退避）
   | 'aid_blocked'      // 锁被别的进程持有，等待释放
-  | 'kicked'           // server kicked，处于 5min 退避
+  | 'kicked'           // server kicked，处于退避重试中
+  | 'kicked_no_retry'  // server kicked，不再重试（被挤掉 / AID 无效 / ACL 拒绝）
   | 'failed'           // 启动 / auth 失败，处于 1min 退避
   | 'disabled';        // 配置禁用 / 未启动
+
+export interface AidKickDetail {
+  code: number;
+  reason: string;
+  ts: number;
+  evictedBy?: { aid?: string; deviceId?: string; slotId?: string; app?: string; hostname?: string };
+  quotaKind?: string;
+  limit?: number;
+  selfExtra?: Record<string, unknown>;
+  newExtra?: Record<string, unknown>;
+}
 
 export interface AidConnectionState {
   aid: string;
@@ -519,6 +531,7 @@ export interface AidConnectionState {
   lastConnectedAt?: number;     // 最近一次成功 connected 时间戳
   lastError?: string;           // 最近一次失败简述（≤ 80 字符）
   gatewayUrl?: string;          // 当前连接的网关地址
+  kickDetail?: AidKickDetail;   // 被踢详情（仅 kicked / kicked_no_retry 时填充）
   blockedBy?: {                 // 仅 aid_blocked 时填充
     pid: number;
     evolclawHome: string;

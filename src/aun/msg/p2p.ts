@@ -81,6 +81,7 @@ export interface MsgSendArgs extends MsgCommonOpts {
   from: string;
   to: string;
   body: MsgSendBody;
+  encrypt?: boolean;
 }
 
 export async function msgSend(args: MsgSendArgs): Promise<MsgSendResult | MsgError> {
@@ -112,7 +113,10 @@ export async function msgSend(args: MsgSendArgs): Promise<MsgSendResult | MsgErr
       }
     }
 
-    const result = await conn.call('message.send', { to: args.to, payload });
+    const sendParams: Record<string, unknown> = { to: args.to, payload };
+    // Default: plaintext. Set encrypt: true to enable E2EE.
+    sendParams.encrypt = args.encrypt === true;
+    const result = await conn.call('message.send', sendParams);
     return {
       ok: true,
       message_id: result?.message_id,

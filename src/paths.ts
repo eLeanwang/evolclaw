@@ -49,6 +49,7 @@ export function resolvePaths() {
     kitsTemplatesDir: path.join(root, 'kits', 'templates'),
     instanceReadySignal: path.join(root, 'data', 'instance', 'ready.signal'),
     instanceSocket: resolveInstanceSocketPath(root),
+    aidLogsDir: path.join(root, 'logs', 'aids'),
   };
 }
 
@@ -94,6 +95,7 @@ export function ensureDataDirs(): void {
   const p = resolvePaths();
   fs.mkdirSync(p.dataDir, { recursive: true });
   fs.mkdirSync(p.logs, { recursive: true });
+  fs.mkdirSync(p.aidLogsDir, { recursive: true });
   fs.mkdirSync(p.agentsDir, { recursive: true });
   fs.mkdirSync(p.sessionsDir, { recursive: true });
   fs.mkdirSync(p.instanceDir, { recursive: true });

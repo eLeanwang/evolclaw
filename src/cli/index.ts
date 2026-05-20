@@ -229,6 +229,11 @@ function reportOrphans(orphans: OrphanProcess[]): void {
 }
 
 async function cmdStart() {
+  const cmdStartedAt = Date.now();
+  const pkgRoot = getPackageRoot();
+  const isNpmInstall = pkgRoot.includes('node_modules');
+  console.log(`⏱ ${new Date().toLocaleString()}  [${isNpmInstall ? 'pkg' : 'dev'}] ${pkgRoot}`);
+
   const p = resolvePaths();
   ensureDataDirs();
 
@@ -363,6 +368,7 @@ async function cmdStart() {
       if (resolveRoot() === getPackageRoot()) {
         countLines(getPackageRoot(), p.logs);
       }
+      console.log(`⏱ done in ${((Date.now() - cmdStartedAt) / 1000).toFixed(1)}s`);
       return;
     }
 
@@ -375,6 +381,7 @@ async function cmdStart() {
         const content = fs.readFileSync(stdoutLog, 'utf-8').trim().split('\n');
         console.log(content.slice(-10).map(l => `  ${l}`).join('\n'));
       }
+      console.log(`⏱ failed after ${((Date.now() - cmdStartedAt) / 1000).toFixed(1)}s`);
       process.exit(1);
       return;
     }
@@ -390,6 +397,7 @@ async function cmdStart() {
           const content = fs.readFileSync(stdoutLog, 'utf-8').trim().split('\n');
           console.log(content.slice(-10).map(l => `  ${l}`).join('\n'));
         }
+        console.log(`⏱ failed after ${((Date.now() - cmdStartedAt) / 1000).toFixed(1)}s`);
         process.exit(1);
         return;
       }
@@ -441,6 +449,11 @@ async function cmdStop() {
 }
 
 async function cmdRestart(opts: { clear?: boolean } = {}) {
+  const cmdStartedAt = Date.now();
+  const pkgRoot = getPackageRoot();
+  const isNpmInstall = pkgRoot.includes('node_modules');
+  console.log(`⏱ ${new Date().toLocaleString()}  [${isNpmInstall ? 'pkg' : 'dev'}] ${pkgRoot}`);
+
   console.log('🔄 Restarting EvolClaw...');
 
   // 版本检查与自动升级
@@ -486,7 +499,125 @@ async function cmdRestart(opts: { clear?: boolean } = {}) {
     }
   }
 
+  console.log(`⏱ restart prep done in ${((Date.now() - cmdStartedAt) / 1000).toFixed(1)}s, starting...`);
   setTimeout(() => cmdStart(), 1000);
+}
+
+async function cmdDev(args: string[]) {
+  const pkgRoot = getPackageRoot();
+  const isNpmInstall = pkgRoot.includes('node_modules');
+  const p = resolvePaths();
+  const devMarker = path.join(p.dataDir, 'dev-repo.path');
+  const sub = args[0];
+
+  if (!sub) {
+    if (!isNpmInstall) {
+      console.log(`当前: [dev] ${pkgRoot}`);
+      console.log('');
+      console.log('断开开发仓链接:');
+      console.log('  evolclaw dev off');
+    } else {
+      console.log(`当前: [pkg] ${pkgRoot}`);
+      console.log('');
+      let devPath: string | null = null;
+      try { devPath = fs.readFileSync(devMarker, 'utf-8').trim(); } catch {}
+      if (devPath && fs.existsSync(devPath)) {
+        console.log('链接到开发仓:');
+        console.log(`  evolclaw dev on`);
+        console.log(`  (已记录路径: ${devPath})`);
+      } else {
+        console.log('链接到开发仓:');
+        console.log('  evolclaw dev <开发仓路径>');
+      }
+    }
+    return;
+  }
+
+  if (sub === 'off') {
+    if (isNpmInstall) {
+      console.log('当前已是 [pkg] 模式，无需断开');
+      return;
+    }
+    console.log('🔗 断开开发仓链接...');
+    let npmPrefix: string;
+    if (process.platform === 'win32' && process.env.APPDATA) {
+      npmPrefix = path.join(process.env.APPDATA, 'npm');
+    } else {
+      npmPrefix = execFileSync('npm', ['prefix', '-g'], { encoding: 'utf-8', shell: true }).trim();
+    }
+    const linkPath = path.join(npmPrefix, 'node_modules', 'evolclaw');
+    const binPath = path.join(npmPrefix, 'evolclaw');
+    try { fs.rmSync(linkPath, { recursive: true }); } catch {}
+    try { fs.unlinkSync(binPath); } catch {}
+    try { fs.unlinkSync(binPath + '.cmd'); } catch {}
+    try { fs.unlinkSync(binPath + '.ps1'); } catch {}
+    console.log('✓ 已断开');
+    console.log(`  已删除: ${linkPath}`);
+    console.log(`  如需恢复: evolclaw dev on（需从已安装的 evolclaw 执行）`);
+    return;
+  }
+
+  if (sub === 'on') {
+    if (!isNpmInstall) {
+      console.log(`当前已是 [dev] 模式: ${pkgRoot}`);
+      return;
+    }
+    let devPath: string | null = null;
+    try { devPath = fs.readFileSync(devMarker, 'utf-8').trim(); } catch {}
+    if (!devPath || !fs.existsSync(devPath)) {
+      console.log('未记录开发仓路径');
+      console.log('');
+      console.log('用法: evolclaw dev <开发仓路径>');
+      process.exit(1);
+    }
+    console.log(`🔗 链接开发仓: ${devPath}`);
+    try {
+      execFileSync('npm', ['link'], { stdio: 'inherit', cwd: devPath, shell: true });
+      console.log(`✓ 已链接 [dev] ${devPath}`);
+    } catch (e: any) {
+      console.error('❌ npm link 失败:', e.message);
+      process.exit(1);
+    }
+    return;
+  }
+
+  // evolclaw dev <path> — 记录路径 + 建立链接
+  const devPath = path.resolve(sub);
+  const pkgJson = path.join(devPath, 'package.json');
+  if (!fs.existsSync(pkgJson)) {
+    console.error(`❌ 路径不存在或无 package.json: ${devPath}`);
+    process.exit(1);
+  }
+  let pkg: any;
+  try { pkg = JSON.parse(fs.readFileSync(pkgJson, 'utf-8')); } catch {
+    console.error(`❌ 无法解析 package.json: ${pkgJson}`);
+    process.exit(1);
+  }
+  if (pkg.name !== 'evolclaw') {
+    console.error(`❌ package.json name 不是 evolclaw（是 "${pkg.name}"）`);
+    process.exit(1);
+  }
+
+  // 已经链接到同一路径，只记录不重复 link
+  if (!isNpmInstall && path.resolve(pkgRoot) === devPath) {
+    fs.mkdirSync(p.dataDir, { recursive: true });
+    fs.writeFileSync(devMarker, devPath, 'utf-8');
+    console.log(`✓ 当前已链接到该路径，路径已记录`);
+    return;
+  }
+
+  console.log(`🔗 链接开发仓: ${devPath}`);
+  try {
+    execFileSync('npm', ['link'], { stdio: 'inherit', cwd: devPath, shell: true });
+  } catch (e: any) {
+    console.error('❌ npm link 失败:', e.message);
+    process.exit(1);
+  }
+
+  fs.mkdirSync(p.dataDir, { recursive: true });
+  fs.writeFileSync(devMarker, devPath, 'utf-8');
+  console.log(`✓ 已链接 [dev] ${devPath}`);
+  console.log(`  路径已记录，下次可用 evolclaw dev on 快速切换`);
 }
 
 function formatTimeAgo(ms: number): string {
@@ -3456,7 +3587,8 @@ Options:
       body = { mode: 'text', text };
     }
 
-    const result = await msgSend({ from, to, body, ...commonOpts });
+    const encrypt = args.includes('--encrypt');
+    const result = await msgSend({ from, to, body, encrypt, ...commonOpts });
     if (!result.ok) {
       if (formatJson) { console.log(JSON.stringify(result)); }
       else { console.error(`❌ 发送失败: ${result.error}`); }
@@ -3741,7 +3873,8 @@ Options:
     }
 
     const mentions = collectMentions();
-    const result = await groupSend({ from, groupId, body, mentions: mentions.length ? mentions : undefined, ...commonOpts });
+    const encryptGroup = args.includes('--encrypt');
+    const result = await groupSend({ from, groupId, body, mentions: mentions.length ? mentions : undefined, encrypt: encryptGroup, ...commonOpts });
     outputResult(result, () => {
       const r = result as any;
       console.log(`✓ 已发送 message_id=${r.message?.message_id ?? '-'} seq=${r.message?.seq ?? '-'}`);
@@ -4089,6 +4222,25 @@ export async function main(args: string[]) {
       if (args[1] === 'aid') {
         await cmdWatchAid();
       } else if (args[1] === 'msg') {
+        if (args[2] === '--help' || args[2] === '-h' || args[2] === 'help') {
+          console.log(`用法: evolclaw watch msg
+
+三面板交互式消息监控 TUI。
+
+面板:
+  左 (Scope)     本地 AID 列表，显示收发统计和对端数量
+  中 (Stats)     选中 AID 的对端列表（默认 All），显示 per-peer 收发数
+  右 (Messages)  消息流，带滚动条
+
+操作:
+  ↑↓             当前面板内导航
+  ←→ / Tab       切换面板
+  Enter          选中 AID / 选中对端
+  Backspace      返回上一级
+  Page Up/Down   消息滚动
+  ESC            退出`);
+          break;
+        }
         const { cmdWatchMsg } = await import('../watch-msg.js');
         await cmdWatchMsg();
       } else if (args[1] === 'log') {
@@ -4102,12 +4254,20 @@ export async function main(args: string[]) {
     case 'restart-monitor':
       await cmdRestartMonitor();
       break;
+    case 'dev':
+      await cmdDev(args.slice(1));
+      break;
     case 'mv':
       await cmdMv(args[1], args[2]);
       break;
     case 'diagnose':
       await cmdDiagnose();
       break;
+    case 'net': {
+      const { cmdNet } = await import('../net-check.js');
+      await cmdNet(args.slice(1));
+      break;
+    }
     case 'ctl':
       await cmdCtl(args.slice(1));
       break;
@@ -4144,8 +4304,15 @@ export async function main(args: string[]) {
       await cmdGroup(args.slice(1));
       break;
     }
+    case 'bench': {
+      const { suppressSdkLogs } = await import('../aun/aid/index.js');
+      suppressSdkLogs();
+      const { cmdBench } = await import('./bench.js');
+      await cmdBench(args.slice(1));
+      break;
+    }
     default:
-      console.log(`Usage: evolclaw {init|start|stop|restart|status|logs|watch|ctl|diagnose|mv}
+      console.log(`Usage: evolclaw {init|start|stop|restart|status|logs|watch|ctl|diagnose|net|mv}
 
 Commands:
   init          初始化 evolclaw home (${resolvePaths().defaultsConfig})
@@ -4163,8 +4330,10 @@ Commands:
                   --level error|warn   只显示指定级别及以上
                   --module <name>      只显示指定模块（如 feishu、AgentRunner）
                   --raw                原始输出，不着色
-  watch         监控 logs/ 下所有 .log 文件（汇总实时输出，启动时显示最近 20 条）
+  watch         监控面板选择菜单（↑↓ 选择 log/aid/msg）
+  watch log     监控 logs/ 下所有 .log 文件（汇总实时输出，启动时显示最近 20 条）
   watch aid     AID 连接状态实时监控（显示各 AID 在线/离线/重连状态）
+  watch msg     消息监控（三面板交互式 TUI：AID 列表 / 对端统计 / 消息流）
   ctl           运行时自管理（模型切换、推理强度、压缩上下文等）
                   evolclaw ctl help 查看完整命令列表
   agent         管理 EvolAgent
@@ -4189,6 +4358,9 @@ Commands:
                   aid lookup <aid>   远程探测 AID（是否存在 + 网关 + agent.md）
                   aid agentmd put <aid>  签名并上传 agent.md
                   aid agentmd get <aid>  下载并验签 agent.md
+  net           网络链路诊断
+                  net check [<aid>]  10 步链路检测（DNS→Discovery→TCP→TLS→WSS→Auth→Ping→Echo）
+                  net help           查看详细帮助
   rpc           AUN RPC 调用
                   rpc --as <aid> --params <json|jsonl|file>
   storage       文件存储
@@ -4199,6 +4371,8 @@ Commands:
                   storage quota <aid>
   diagnose      诊断启动环境（配置、数据库、进程）
   mv <old> <new>  迁移项目目录（保留 Claude/Codex/EvolClaw 会话）
+  bench         AUN 消息性能基准测试
+                  bench --aids 5 --rounds 10 --concurrency 5
 
 Environment:
   EVOLCLAW_HOME   数据目录 (默认: ~/.evolclaw)

@@ -1,7 +1,7 @@
 import os from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { execFileSync, execFile, spawn } from 'child_process';
+import { execFileSync, execFile, spawn, spawnSync } from 'child_process';
 import { promisify } from 'util';
 import fs from 'fs';
 
@@ -38,7 +38,7 @@ export function isProcessRunning(pid: number): boolean {
 export function killProcess(pid: number, force = false): void {
   if (isWindows && force) {
     try {
-      execFileSync('taskkill', ['/PID', String(pid), '/F']);
+      spawnSync('taskkill', ['/PID', String(pid), '/F'], { windowsHide: true });
     } catch {}
   } else {
     try {
@@ -54,7 +54,8 @@ export function killProcess(pid: number, force = false): void {
 export function findProcesses(pattern: string): number[] {
   try {
     if (isWindows) {
-      const output = execFileSync('wmic', ['process', 'where', `CommandLine like '%${pattern}%'`, 'get', 'ProcessId'], { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
+      const result = spawnSync('wmic', ['process', 'where', `CommandLine like '%${pattern}%'`, 'get', 'ProcessId'], { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+      const output = result.stdout || '';
       return output.split('\n')
         .map(line => parseInt(line.trim(), 10))
         .filter(pid => !isNaN(pid) && pid !== process.pid);
@@ -79,8 +80,8 @@ export interface ProcessInfo {
 export function getProcessInfo(pid: number): ProcessInfo {
   try {
     if (isWindows) {
-      // Use wmic on Windows
-      const output = execFileSync('wmic', ['process', 'where', `ProcessId=${pid}`, 'get', 'WorkingSetSize,CreationDate'], { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
+      const result = spawnSync('wmic', ['process', 'where', `ProcessId=${pid}`, 'get', 'WorkingSetSize,CreationDate'], { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+      const output = result.stdout || '';
       const lines = output.trim().split('\n').filter(l => l.trim());
       if (lines.length >= 2) {
         const parts = lines[1].trim().split(/\s+/);
@@ -115,17 +116,24 @@ function formatUptime(totalSeconds: number): string {
 /**
  * Cross-platform command existence check.
  */
+const _commandExistsCache = new Map<string, boolean>();
 export function commandExists(cmd: string): boolean {
+  const cached = _commandExistsCache.get(cmd);
+  if (cached !== undefined) return cached;
+  let exists = false;
   try {
     if (isWindows) {
-      execFileSync('where', [cmd], { encoding: 'utf-8', stdio: 'pipe' });
+      const r = spawnSync('where', [cmd], { encoding: 'utf-8', stdio: 'pipe', windowsHide: true });
+      exists = r.status === 0;
     } else {
       execFileSync('which', [cmd], { encoding: 'utf-8', stdio: 'pipe' });
+      exists = true;
     }
-    return true;
   } catch {
-    return false;
+    exists = false;
   }
+  _commandExistsCache.set(cmd, exists);
+  return exists;
 }
 
 /**

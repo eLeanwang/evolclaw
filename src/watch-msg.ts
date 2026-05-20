@@ -62,6 +62,7 @@ const CYAN = isTTY ? '\x1b[36m' : '';
 const GREEN = isTTY ? '\x1b[32m' : '';
 const BLUE = isTTY ? '\x1b[34m' : '';
 const ORANGE = isTTY ? '\x1b[38;5;208m' : '';
+const BG_SEL = isTTY ? '\x1b[48;5;236m' : '';  // dark gray background for selected row
 
 // ==================== Helpers ====================
 
@@ -108,6 +109,15 @@ function formatTimeAgo(ms: number): string {
 function formatTime(ts: number): string {
   const d = new Date(ts);
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
+function formatDateTime(ts: number): string {
+  const d = new Date(ts);
+  const mo = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  return `${mo}-${dd} ${hh}:${mm}`;
 }
 
 function shortAid(aid: string): string {
@@ -221,10 +231,12 @@ function renderScopePanel(state: WatchMsgState, width: number, height: number): 
     const a = state.localAids[i];
     const sel = isActive && i === state.scopeIndex;
     const chosen = state.selectedLocalAid === a.aid;
-    const marker = sel ? `${CYAN}${BOLD}▸ ` : (chosen ? `${CYAN}  ` : '  ');
+    const bg = sel ? BG_SEL : '';
+    const marker = sel ? `${bg}${CYAN}${BOLD}▸ ` : (chosen ? `${CYAN}  ` : '  ');
     const name = truncate(shortAid(a.aid), width - 4);
     lines.push(padRight(`${marker}${name}${RST}`, width));
-    const stats = `  ${DIM}↓${a.totalIn} ↑${a.totalOut} peers:${a.peerCount}${RST}`;
+    const statsBg = sel ? BG_SEL : '';
+    const stats = `${statsBg}  ${DIM}↓${a.totalIn} ↑${a.totalOut} peers:${a.peerCount}${RST}`;
     lines.push(padRight(stats, width));
     if (lines.length < height) lines.push(padRight('', width));
   }
@@ -249,19 +261,22 @@ function renderStatsPanel(state: WatchMsgState, width: number, height: number): 
 
   // "All" item at index 0
   const allSel = isActive && state.statsIndex === 0;
-  const allMarker = allSel ? `${CYAN}${BOLD}▸ ` : '  ';
+  const allBg = allSel ? BG_SEL : '';
+  const allMarker = allSel ? `${allBg}${CYAN}${BOLD}▸ ` : '  ';
   lines.push(padRight(`${allMarker}All (${state.peers.length} peers)${RST}`, width));
   if (lines.length < height) lines.push(padRight('', width));
 
   for (let i = 0; i < state.peers.length && lines.length < height; i++) {
     const p = state.peers[i];
     const sel = isActive && state.statsIndex === i + 1;
-    const marker = sel ? `${CYAN}${BOLD}▸ ` : '  ';
+    const bg = sel ? BG_SEL : '';
+    const marker = sel ? `${bg}${CYAN}${BOLD}▸ ` : '  ';
     const displayName = p.peerName || shortAid(p.peerId);
     const name = truncate(displayName, width - 4);
     lines.push(padRight(`${marker}${name}${RST}`, width));
+    const detailBg = sel ? BG_SEL : '';
     const ago = p.lastAt ? formatTimeAgo(now - p.lastAt) : '-';
-    const detail = `  ${DIM}↓${p.inbound} ↑${p.outbound}  ${ago}${RST}`;
+    const detail = `${detailBg}  ${DIM}↓${p.inbound} ↑${p.outbound}  ${ago}${RST}`;
     lines.push(padRight(detail, width));
     if (lines.length < height) lines.push(padRight('', width));
   }
@@ -288,10 +303,11 @@ function renderMessagesPanel(state: WatchMsgState, width: number, height: number
   const msgWidth = width - 3;
   for (let i = startIdx; i < endIdx; i++) {
     const m = msgs[i];
-    const time = formatTime(m.ts);
+    const time = formatDateTime(m.ts);
     const dir = m.dir === 'in' ? `${GREEN}↓${RST}` : `${BLUE}↑${RST}`;
-    const peer = m.dir === 'in' ? shortAid(m.from) : shortAid(m.to);
-    const header = `${DIM}${time}${RST} ${dir} ${ORANGE}${peer}${RST}`;
+    const from = shortAid(m.from);
+    const to = shortAid(m.to);
+    const header = `${DIM}${time}${RST} ${dir} ${ORANGE}${from}${RST}${DIM}→${RST}${GREEN}${to}${RST}`;
     const headerLine = padRight(header, msgWidth);
     const sbIdx = lines.length - 1;
     lines.push(`${headerLine} ${scrollbar[sbIdx] || ' '}`);
@@ -318,9 +334,9 @@ function renderFrame(state: WatchMsgState): string {
   const cols = process.stdout.columns || 120;
   const rows = (process.stdout.rows || 40) - 3;
 
-  const leftW = Math.max(24, Math.floor(cols * 0.28));
-  const midW = Math.max(28, Math.floor(cols * 0.30));
-  const rightW = Math.max(30, cols - leftW - midW - 4);
+  const leftW = Math.max(20, Math.floor(cols * 0.20));
+  const midW = Math.max(24, Math.floor(cols * 0.22));
+  const rightW = Math.max(40, cols - leftW - midW - 4);
   const bodyHeight = rows - 2;
 
   const leftLines = renderScopePanel(state, leftW, bodyHeight);

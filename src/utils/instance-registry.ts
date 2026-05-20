@@ -10,7 +10,7 @@
  */
 import fs from 'fs';
 import path from 'path';
-import { execFileSync } from 'child_process';
+import { spawnSync } from 'child_process';
 import { resolvePaths } from '../paths.js';
 import { isProcessRunning, killProcess, isWindows, findProcesses } from './cross-platform.js';
 import { getProcessStartTime, startTimeMatches } from './process-introspect.js';
@@ -36,7 +36,7 @@ export interface RestartMonitorRecord {
 export interface AidEvent {
   ts: number;
   iso: string;
-  event: 'connected' | 'disconnected' | 'message_in' | 'message_out';
+  event: 'connected' | 'disconnected' | 'kicked' | 'message_in' | 'message_out';
   aid: string;
   [key: string]: unknown;
 }
@@ -424,11 +424,12 @@ export function killOrphans(orphans: OrphanProcess[]): number[] {
 function readCmdline(pid: number): string {
   if (isWindows) {
     try {
-      const out = execFileSync(
+      const result = spawnSync(
         'wmic',
         ['process', 'where', `ProcessId=${pid}`, 'get', 'CommandLine', '/value'],
-        { encoding: 'utf-8', timeout: 3000, stdio: ['pipe', 'pipe', 'pipe'] },
+        { encoding: 'utf-8', timeout: 3000, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true },
       );
+      const out = result.stdout || '';
       const m = out.match(/CommandLine=([^\r\n]+)/);
       return m ? m[1].trim() : '';
     } catch {
@@ -438,13 +439,13 @@ function readCmdline(pid: number): string {
   try {
     return fs.readFileSync(`/proc/${pid}/cmdline`, 'utf-8').replace(/\0/g, ' ').trim();
   } catch {
-    // macOS / 权限不足
     try {
-      return execFileSync('ps', ['-p', String(pid), '-o', 'args='], {
+      const result = spawnSync('ps', ['-p', String(pid), '-o', 'args='], {
         encoding: 'utf-8',
         timeout: 3000,
         stdio: ['pipe', 'pipe', 'pipe'],
-      }).trim();
+      });
+      return result.stdout?.trim() || '';
     } catch {
       return '';
     }

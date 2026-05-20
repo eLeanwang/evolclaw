@@ -18,6 +18,7 @@ import type { Config } from '../types.js';
 import type { AgentPlugin, AgentInstance, AgentCallbacks } from '../core/baseagent-loader.js';
 import type { AgentEvent, AgentRunnerFull, ModelSwitcher, PermissionModeInfo } from './claude-runner.js';
 import { resolveGoogleConfig, type GoogleResolved } from './resolve.js';
+import { commandExists } from '../utils/cross-platform.js';
 import { GeminiSessionFileAdapter } from '../core/session/adapters/gemini-session-file-adapter.js';
 import { logger } from '../utils/logger.js';
 
@@ -478,15 +479,12 @@ export class GeminiAgentPlugin implements AgentPlugin {
   readonly name = 'gemini';
 
   isEnabled(agent: import('../core/evolagent.js').EvolAgent): boolean {
-    if (!agent.config.baseagents?.gemini) return false;
-    try {
-      const override = agent.config.baseagents.gemini as any;
-      const syntheticConfig = { agents: { gemini: override } } as Config;
-      const resolved = resolveGoogleConfig(syntheticConfig, override);
-      return !!resolved.cliPath;
-    } catch {
-      return false;
-    }
+    if (agent.baseagent !== 'gemini') return false;
+    const geminiCfg = agent.config.baseagents?.gemini as any;
+    if (!geminiCfg) return false;
+    if (geminiCfg.cliPath) return true;
+    if (geminiCfg.apiKey && !geminiCfg.apiKey.includes('your-') && !geminiCfg.apiKey.includes('placeholder')) return true;
+    return commandExists('gemini');
   }
 
   createAgent(agent: import('../core/evolagent.js').EvolAgent, callbacks: AgentCallbacks): AgentInstance | null {

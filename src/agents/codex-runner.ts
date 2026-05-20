@@ -358,6 +358,7 @@ export class CodexAgentPlugin implements AgentPlugin {
   readonly name = 'codex';
 
   isEnabled(agent: import('../core/evolagent.js').EvolAgent): boolean {
+    if (agent.baseagent !== 'codex') return false;
     if (!agent.config.baseagents?.codex) return false;
     try {
       const override = agent.config.baseagents.codex as any;

@@ -517,6 +517,11 @@ async function main() {
     }
   }
 
+  // 写入 ready 信号（核心服务已就绪，channel 连接不阻塞启动判定）
+  const readySignalPath = resolvePaths().readySignal;
+  fs.writeFileSync(readySignalPath, String(Date.now()));
+  logger.info(`✓ Ready signal written: ${readySignalPath}`);
+
   // ── 连接所有渠道（异步，AUN 等 WebSocket 渠道在后台重连）──
   const connected = await channelLoader.connectAll(channelInstances);
 
@@ -710,11 +715,6 @@ async function main() {
       logger.error('[Restart] Failed to send restart notification:', e);
     }
   }
-
-  // 写入 ready 信号，供 restart-monitor 检测启动成功
-  const readySignalPath = resolvePaths().readySignal;
-  fs.writeFileSync(readySignalPath, String(Date.now()));
-  logger.info(`✓ Ready signal written: ${readySignalPath}`);
 
   // IPC server — 供 CLI 查询实时状态 + Agent ctl 指令执行
   const ipcServer = new IpcServer(resolvePaths().socket, (): IpcStatusResponse => {

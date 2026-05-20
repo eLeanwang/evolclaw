@@ -165,24 +165,41 @@ export class ChannelLoader {
     return instances;
   }
 
-  async connectAll(instances: ChannelInstance[], delayMs = 150): Promise<string[]> {
+  async connectAll(instances: ChannelInstance[], { concurrency = 3, intervalMs = 50 } = {}): Promise<string[]> {
     const connected: string[] = [];
-    const failed: any[] = [];
+    const failed: { name: string; error: any }[] = [];
+    const inflight = new Set<Promise<void>>();
 
     for (const inst of instances) {
-      try {
-        await inst.connect();
-        connected.push(inst.adapter.channelName);
-      } catch (e) {
-        failed.push(e);
+      // 等待并发数降到 concurrency 以下
+      while (inflight.size >= concurrency) {
+        await Promise.race(inflight);
       }
-      if (delayMs > 0 && inst !== instances[instances.length - 1]) {
-        await new Promise(r => setTimeout(r, delayMs));
+
+      const task = (async () => {
+        try {
+          await inst.connect();
+          connected.push(inst.adapter.channelName);
+        } catch (e) {
+          failed.push({ name: inst.adapter.channelName, error: e });
+          logger.warn(`[connectAll] ${inst.adapter.channelName} connect failed: ${e}`);
+        }
+      })();
+
+      const tracked = task.then(() => { inflight.delete(tracked); });
+      inflight.add(tracked);
+
+      // 间隔发起，避免瞬间并发冲击网关
+      if (intervalMs > 0) {
+        await new Promise(r => setTimeout(r, intervalMs));
       }
     }
 
+    // 等待所有剩余任务完成
+    await Promise.allSettled(inflight);
+
     if (failed.length > 0) {
-      logger.warn(`Some channels failed to connect:`, failed);
+      logger.warn(`[connectAll] ${failed.length} channel(s) failed initial connect (will retry in background): ${failed.map(f => f.name).join(', ')}`);
     }
 
     return connected;

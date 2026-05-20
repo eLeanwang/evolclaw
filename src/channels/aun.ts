@@ -8,11 +8,12 @@ import { logger, localTimestamp } from '../utils/logger.js';
 import { LogWriter } from '../utils/log-writer.js';
 import type { ChannelPlugin, ChannelInstance, BridgeHookContext } from '../core/channel-loader.js';
 import type { MessageBridge } from '../core/message/message-bridge.js';
-import type { Config, ReplyContext, AunChannelConfig, AidConnectionState, AidStatus, InteractionResponse, ActionInteraction, CommandCard } from '../types.js';
+import type { Config, ReplyContext, AunChannelConfig, AidConnectionState, AidStatus, AidKickDetail, InteractionResponse, ActionInteraction, CommandCard } from '../types.js';
 import { normalizeChannelInstances, getChannelShowActivities } from '../utils/channel-helpers.js';
 import { resolvePaths, getPackageRoot } from '../paths.js';
 import { saveToUploads, sanitizeFileName } from '../utils/media-cache.js';
 import { appendAidEvent } from '../utils/instance-registry.js';
+import { appendAidLifecycle } from '../utils/aid-lifecycle-log.js';
 import type { AidStatsCollector } from '../utils/stats.js';
 import { loadAgent, saveAgent } from '../config-store.js';
 import { getProcessStartTime } from '../utils/process-introspect.js';
@@ -631,6 +632,7 @@ export class AUNChannel {
 
       logger.info(`${this.logPrefix()} Connected as ${this._aid}`);
       appendAidEvent({ ts: Date.now(), iso: new Date().toISOString(), event: 'connected', aid: this.config.aid, gateway: (this.client as any)._gatewayUrl });
+      appendAidLifecycle({ ts: Date.now(), iso: new Date().toISOString(), event: 'connected', aid: this.config.aid, gateway: (this.client as any)._gatewayUrl });
 
       // Send welcome message to owner after first connection
       await this.sendWelcomeMessage();
@@ -1050,7 +1052,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       });
       // 继续走正常 Agent 流程（下面的代码会 dispatch）
     } else if (/echo/i.test(firstLineGroup) && hasEvolClawTraceGroup) {
-      // 回声炸弹：已被 trace 过的 echo，直接丢弃
+      // 回声炸弹：已被任何 EvolClaw 节点 trace 过的 echo，直接丢弃
       this.acknowledgeImmediately(messageId, seq);
       logger.info(`${this.logPrefix()} Group dropped: echo bomb (already-traced group=${groupId} sender=${senderAid} mid=${messageId})`);
       return;
@@ -1168,7 +1170,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       return;
     }
 
-    // 回声炸弹：已被本系统 trace 过的 echo，直接丢弃
+    // 回声炸弹：已被任何 EvolClaw 节点 trace 过的 echo，直接丢弃（防止多 agent 间无限回声）
     if (/echo/i.test(firstLine) && hasEvolClawTracePrivate) {
       logger.info(`${this.logPrefix()} Dropped: echo bomb (already-traced mid=${event.messageId} chat=${event.chatType})`);
       return;
@@ -1371,16 +1373,46 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       const d = data as Record<string, any>;
       const reason: string = d.reason ?? '';
       const error = d.error ?? 'unknown';
+      const code: number = d.code ?? d.detail?.code ?? 0;
+      const detail = (d.detail && typeof d.detail === 'object') ? d.detail : {};
 
       if (this.intentionalDisconnect) return;
 
-      // 被踢类（server kicked / close code 4001-4011）→ ERROR + 5min 长退避
-      if (this.isKickReason(reason)) {
-        logger.error(`${this.logPrefix()} Kicked by server: ${reason} (${error}), backing off ${AUNChannel.TAKEOVER_DELAY_MS / 1000}s`);
-        this.setAidStatus('kicked', { lastError: `kicked: ${error}`.slice(0, 80) });
-        this.takeoverReconnect(AUNChannel.TAKEOVER_DELAY_MS, 'kicked');
+      if (this.isKickReason(reason) || code >= 4001) {
+        // @ts-ignore — methods defined below in same class
+        const kickDetail = this.buildKickDetail(code, reason, detail);
+        // @ts-ignore — methods defined below in same class
+        const action = this.classifyKickAction(code);
+
+        appendAidEvent({
+          ts: Date.now(), iso: new Date().toISOString(),
+          event: 'kicked', aid: this.config.aid,
+          code, reason, action,
+          evictedBy: kickDetail.evictedBy,
+          quotaKind: kickDetail.quotaKind,
+        });
+        appendAidLifecycle({
+          ts: Date.now(), iso: new Date().toISOString(),
+          event: 'kicked', aid: this.config.aid,
+          code, reason, action,
+          evictedBy: kickDetail.evictedBy,
+          newExtra: kickDetail.newExtra,
+          quotaKind: kickDetail.quotaKind,
+        });
+
+        if (action === 'no_retry') {
+          logger.error(`${this.logPrefix()} Kicked (code=${code}): ${reason} — will NOT retry`);
+          this.setAidStatus('kicked_no_retry', { lastError: `kicked(${code}): ${reason}`.slice(0, 80), kickDetail });
+        } else if (action === 'retry_once') {
+          logger.warn(`${this.logPrefix()} Kicked (code=${code}): ${reason} — retrying once after ${AUNChannel.FALLBACK_DELAY_MS / 1000}s`);
+          this.setAidStatus('kicked', { lastError: `kicked(${code}): ${reason}`.slice(0, 80), kickDetail });
+          this.takeoverReconnect(AUNChannel.FALLBACK_DELAY_MS, 'kicked');
+        } else {
+          logger.warn(`${this.logPrefix()} Kicked (code=${code}): ${reason} — retrying after ${AUNChannel.TAKEOVER_DELAY_MS / 1000}s`);
+          this.setAidStatus('kicked', { lastError: `kicked(${code}): ${reason}`.slice(0, 80), kickDetail });
+          this.takeoverReconnect(AUNChannel.TAKEOVER_DELAY_MS, 'kicked');
+        }
       } else {
-        // 其他 terminal failure（含 max_attempts_exhausted 兜底）→ 1min 后再试
         logger.error(`${this.logPrefix()} Terminal failure: ${error}${reason ? ` (${reason})` : ''}, retrying in ${AUNChannel.FALLBACK_DELAY_MS / 1000}s`);
         this.setAidStatus('failed', { lastError: `${error}`.slice(0, 80) });
         this.takeoverReconnect(AUNChannel.FALLBACK_DELAY_MS, 'terminal');
@@ -1393,9 +1425,58 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     if (!reason) return false;
     const r = reason.toLowerCase();
     if (r.includes('kicked') || r.includes('kick')) return true;
-    // close code 4001/4003/4008/4009/4010/4011 都是 SDK _NO_RECONNECT_CODES
-    if (/close code 40(0[13]|0[89]|1[01])/.test(r)) return true;
+    if (/close code 40\d{2}/.test(r)) return true;
     return false;
+  }
+
+  /**
+   * 根据 close code 决定重试策略：
+   * - 'no_retry': 不重试（被挤掉、AID 无效、ACL 拒绝、长连接已存在、配额超限）
+   * - 'retry_once': 重试一次（auth 失败可能 token 刚过期、nonce 无效）
+   * - 'retry_delay': 延迟重试（短连接容量超限、空闲超时）
+   */
+  private classifyKickAction(code: number): 'no_retry' | 'retry_once' | 'retry_delay' {
+    switch (code) {
+      case 4003: // AID 无效
+      case 4009: // 服务端主动踢
+      case 4011: // ACL 拒绝
+      case 4012: // 长连接已存在（自己另一个实例在线）
+      case 4015: // 被新连接挤掉
+        return 'no_retry';
+      case 4001: // auth 失败（token 可能刚过期）
+      case 4010: // nonce 无效
+        return 'retry_once';
+      case 4008: // auth 超时
+      case 4013: // 短连接容量超限
+      case 4014: // 短连接空闲超时
+        return 'retry_delay';
+      default:
+        return 'retry_delay';
+    }
+  }
+
+  private buildKickDetail(code: number, reason: string, detail: Record<string, any>): AidKickDetail {
+    const evictedByRaw = detail.evicted_by || detail.new_extra_info;
+    let evictedBy: AidKickDetail['evictedBy'];
+    if (evictedByRaw && typeof evictedByRaw === 'object') {
+      evictedBy = {
+        aid: evictedByRaw.aid,
+        deviceId: evictedByRaw.device_id,
+        slotId: evictedByRaw.slot_id,
+        app: evictedByRaw.app,
+        hostname: evictedByRaw.hostname,
+      };
+    }
+    return {
+      code,
+      reason,
+      ts: Date.now(),
+      evictedBy,
+      quotaKind: detail.quota_kind,
+      limit: detail.limit,
+      selfExtra: detail.self_extra_info,
+      newExtra: detail.new_extra_info,
+    };
   }
 
   /**
@@ -2104,6 +2185,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     }
     this.connected = false;
     appendAidEvent({ ts: Date.now(), iso: new Date().toISOString(), event: 'disconnected', aid: this.config.aid, reason: 'intentional' });
+    appendAidLifecycle({ ts: Date.now(), iso: new Date().toISOString(), event: 'disconnected', aid: this.config.aid, reason: 'intentional' });
     this.setAidStatus('disabled');
     if (this.traceWriter) {
       this.traceWriter.close();
