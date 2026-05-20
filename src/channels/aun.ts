@@ -206,7 +206,7 @@ export class AUNChannel {
     return name && name !== short ? `${short}(${name})` : short;
   }
 
-  private extractTextPayload(payload: unknown, channelId?: string): string {
+  private extractTextPayload(payload: unknown, channelId?: string, senderAid?: string): string {
     if (typeof payload === 'string') return payload;
     if (payload && typeof payload === 'object') {
       const obj = payload as Record<string, unknown>;
@@ -214,10 +214,12 @@ export class AUNChannel {
 
       // action_card_reply：卡片交互回复，触发 interactionCallback，不分发给 agent
       if (obj.type === 'action_card_reply') {
-        const cardMsgId = typeof obj.card_message_id === 'string' ? obj.card_message_id : '';
+        const cardMsgId = typeof obj.ref_message_id === 'string' ? obj.ref_message_id
+          : typeof obj.card_message_id === 'string' ? obj.card_message_id : '';
         const cardInfo = cardMsgId ? this.cardMessageIdMap.get(cardMsgId) : undefined;
         if (cardInfo) {
-          const actionValue = typeof obj.action_value === 'string' ? obj.action_value : text;
+          const actionValue = typeof obj.value === 'string' ? obj.value
+            : typeof obj.action_value === 'string' ? obj.action_value : text;
 
           if (cardInfo.isCommandCard) {
             // CommandCard：action_value 是完整 slash 命令，构造伪入站消息
@@ -228,8 +230,8 @@ export class AUNChannel {
                 channelId: channelId || '',
                 chatType,
                 content: actionValue,
-                peerId: channelId || '',
-                peerName: typeof obj.action_label === 'string' ? obj.action_label : undefined,
+                peerId: senderAid || channelId || '',
+                peerName: typeof obj.label === 'string' ? obj.label : typeof obj.action_label === 'string' ? obj.action_label : undefined,
                 messageId: `card-trigger-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
                 source: 'card-trigger',
               });
@@ -243,7 +245,7 @@ export class AUNChannel {
                 type: 'interaction.response',
                 id: cardInfo.requestId,
                 action: actionValue,
-                values: { text, action_label: obj.action_label, behavior: obj.behavior },
+                values: { text, action_label: obj.label ?? obj.action_label, behavior: obj.behavior },
               });
             }
           }
@@ -945,7 +947,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     const groupId = msg.group_id ?? '';
     const senderAid = msg.sender_aid ?? '';
     const payload = msg.payload ?? '';
-    const text = this.extractTextPayload(payload, groupId);
+    const text = this.extractTextPayload(payload, groupId, senderAid);
     const taskId = typeof payload === 'object' && payload !== null ? (payload as any).thread_id : undefined;
     const messageId = msg.message_id ?? '';
     const seq = msg.seq;
@@ -1823,8 +1825,9 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       if (isGroup) {
         params.group_id = channelId;
         const result = await this.callAndTrace<any>('group.send', params);
-        logger.info(`${this.logPrefix()} group.send (${payload.type}) ok: group=${channelId} mid=${result?.message_id} encrypt=${encrypt}`);
-        return result?.message_id ?? null;
+        const mid = result?.message?.message_id ?? result?.message_id ?? null;
+        logger.info(`${this.logPrefix()} group.send (${payload.type}) ok: group=${channelId} mid=${mid} encrypt=${encrypt}`);
+        return mid;
       } else {
         params.to = targetAid;
         const result = await this.callAndTrace<any>('message.send', params);
