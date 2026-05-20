@@ -1,5 +1,61 @@
 # Changelog
 
+## v3.0.0 (2026-05-20)
+
+> Major release: 重构存储后端、统一出站消息协议、引入触发器与交互卡片体系。
+> 旧 SQLite 时代代码归档于仓库 `evolclaw_db`（tag `v2.8.3-db-final`，commit `a7c5e19`）。
+
+### Breaking Changes
+
+- **Session 存储后端切换** — 从 SQLite 迁移到文件系统：`data/sessions/<channelType>/<encoded-id>/` 目录布局，每个 chat 含 `active.json` + `meta_*.jsonl` + `messages.jsonl` + `health.jsonl` + `_threads/`。`sessions.db` 已弃用，启动时 warn 提示用户手动删除。
+- **Config key rename**（v2.7.0 起逐步推进）— `evolclaw.json` 中 `agents.{anthropic,openai,google}` 重命名为 `agents.{claude,codex,gemini}`，启动时自动迁移并回写
+- **Channel-level sessionMode 字段废弃** — 改由 `config.chatmode.{private,group}` 全局控制
+- **AUN channel 隐式化** — 不再需要在 `channels[]` 中显式声明 AUN，从 agent.aid 自动派生
+- **`evolclaw.pid` 文件淘汰** — 替换为 `data/instance/main-<pid>.json` 实例登记机制
+
+### New Features
+
+- **触发器系统** — Agent 可自主设置延迟 / 定时 / 周期任务（`/trigger` 命令），支持 cron 表达式；触发器在独立 silent session 中执行，发布 `trigger:completed` 事件
+- **交互卡片二分体系** — `CommandCard`（按钮直接触发 slash 命令）+ `ActionInteraction`（按钮回写 InteractionRouter）；Feishu 与 AUN 统一支持，旧卡片新卡发送时自动作废为"已过期"灰色卡片
+- **EvolAgent 重构** — v2.8.3 引入的 EvolAgent 在 v3.0.0 大幅扩展：完整热重载（drain → disconnect → reconnect → route-update + rollback on failure）；per-agent runner 实例 + per-agent credentials 真正隔离；channel fingerprint 跨实例冲突检测
+- **出站消息统一协议** — 命令回显 / 系统通知 / interaction 全部走 `adapter.send` 统一入口，`OutboundPayload` 结构化
+- **/dispatch 命令** — 群聊分发模式切换：`mention`（仅@响应）/ `all`（广播响应）；proactive 模式 mention 过滤统一由 dispatchMode 决定
+- **AUN write-ahead outbox** — `data/outbox/<aid>.jsonl` 写前持久化（每 AID 上限 20 条 / TTL 5min），断网期间消息不丢，重连后 drainOutbox
+- **`evolclaw watch` 命令** — 聚合 tail 所有 `*.log`，颜色区分文件、JSON 行特殊渲染、AUN 多格式 JSON 解析（消息/事件/trace）、ESC 退出
+- **`evolclaw status` 扩展** — 新增 🔑 AUN AIDs 表格（per-AID 连接状态 via IPC）+ orphan session 总数
+- **AUN 群聊 proactive 入站白名单** — proactive 模式下仅放行规范 payload 类型，且必须显式 @ 自己或 @all
+- **AUN quote 消息支持** — quote 类型自动拼接被引用内容到正文前
+- **`/restart` 优雅关闭** — 改用 SIGTERM 让 Feishu WebSocket 正常关闭，避免服务端重推未 ack 消息
+
+### Improvements
+
+- **CommandHandler 结构化输出** — 返回 `OutboundPayload` 替代字符串，`thought` 结构化聚合替代格式化文本
+- **ChannelAdapter 接口收敛** — 删除旧出站方法，统一 `adapter.send`
+- **channel 消息桥接下沉** — 从 index.ts 下沉到插件 `registerBridge`，新增 channel 模板化
+- **src/ 目录结构整理** — `cli/` 收拢、`aun/` 工具归位、`config-store.ts` 替代 `config.ts`，小文件合并
+- **身份维度拆分** — Session/Message/InboundMessage 新增 `channelType` + `selfId` + `groupId`，channel 字段固定为实例名；`SessionMetadata.peerId` 含义统一
+- **每个 chat 消息日志** — `messages.jsonl` 用于 audit/replay
+- **Feishu 过期消息丢弃** — 超过阈值的旧消息直接丢弃
+- **`/activity /chatmode /dispatch` UI 改进** — 改用交互卡片，无参数时弹出按钮列表
+- **日志轮转** — `evolclaw-YYYYMMDD-HH.log` 按小时切片，`logs`/`watch` 命令自动检测最新文件并无缝切换
+- **统一日志管理** — 所有模块走 `utils/logger.ts`，`utils/log-writer.ts` 处理 rotation
+- **孤儿进程检测** — `evolclaw status` 检测残留 node 进程
+- **AUN reconnect 重写** — SDK 跑无限退避，TS 层只在 flap（短命连接 ≥3 次）和被踢类 terminal_failed 时接管（5min 退避）；新增 `connect.extra_info` 自描述身份
+- **fastaun 升级** — `@agentunion/fastaun` 升至 ^0.2.20
+
+### Bug Fixes
+
+- **proactive 模式 mention 过滤** — 统一交给 dispatchMode，避免无差别介入群聊
+- **多 channel 并发时 AskUserQuestion 路由修复** — `sendPromptFn` 改为 per-session 构造，避免被全局单例覆盖
+- **Windows 实时日志** — 改用 `fs.watchFile` 轮询替代 `fs.watch`，解决跨进程 append 不滚屏问题
+- **Windows 终端闪烁** — 减少不必要的 stdout flush
+- **Feishu 回复上下文** — `replyContext` 仅在话题消息中设置，避免普通消息误带 thread 回复
+- **EvolAgent runner 隔离** — per-EvolAgent runner 实例 + per-agent credentials，避免多 agent 凭证混淆
+- **AUN 加密状态透传** — `ReplyContext.metadata.encrypted` 透传到出站，逐消息镜像加密态
+- **echo 防链式爆炸** — 超过 2 行丢弃
+
+---
+
 ## v2.8.3 (2026-05-14)
 
 ### New Features

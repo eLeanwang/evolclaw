@@ -20,7 +20,9 @@ EvolClaw 是一个轻量级 AI Agent 网关系统。它为 Claude Code / Codex �
 - 💾 **会话持久化**：会话数据与 CLI 工具共享，不额外存储，服务重启不丢失
 - ⚡ **执行中插入**：任务执行中可发送新消息，自动中断当前任务并处理新请求
 - 🔕 **消息智能发送**：前台任务动态聚合批量发送，后台任务静默完成后通知
-- 🧩 **EvolAgent 多实例**：一个 JSON 文件定义一个 Agent（channels + baseagent + project + chatmode），多 Agent 并发运行，热重载，资源独占
+- 🧩 **EvolAgent 多实例**：一个 JSON 文件定义一个 Agent（channels + baseagent + project），多 Agent 并发运行，Agent 运行时隔离 + 热重载无需重启
+- 🔔 **AI 自主触发器**：Agent 可设置延迟 / 定时 / 周期任务，cron 表达式支持，独立 silent session 执行
+- 🎴 **交互卡片体系**：CommandCard（按钮直接触发 slash 命令）+ ActionInteraction（按钮回写交互），Feishu 与 AUN 统一支持
 - 🤖 **健壮性保障**：任务超时提醒、会话异常安全模式修复、重启失败自动自愈
 
 ## 适合场景
@@ -46,7 +48,7 @@ EvolClaw 是一个轻量级 AI Agent 网关系统。它为 Claude Code / Codex �
 4. **消息处理层** (`src/core/message/message-processor.ts`) - 统一事件处理引擎
 5. **会话管理层** (`src/core/session/session-manager.ts`) - 多项目会话管理
 6. **交互路由层** (`src/core/interaction-router.ts`) - 卡片交互回调注册与路由
-7. **会话存储层** - JSONL 文件（CLI 共用）+ SQLite 元数据
+7. **会话存储层** - JSONL 文件（CLI 共用）+ 文件系统（每 chat 一个目录，含 active.json / meta_*.jsonl / messages.jsonl / health.jsonl）
 
 ### 消息流转
 
@@ -78,7 +80,7 @@ MessageProcessor.processMessage()
 ### 环境要求
 
 - **操作系统**：macOS / Linux / Windows
-- **Node.js** >= 22（需要 node:sqlite 内置模块支持）
+- **Node.js** >= 18
 - **Claude Code** >= 2.1.32（`npm install -g @anthropic-ai/claude-code`）
 
 ### 1. 安装
@@ -189,16 +191,20 @@ evolclaw/
 │   │   ├── claude-runner.ts        # Claude Agent SDK 封装
 │   │   ├── codex-runner.ts         # Codex Agent 封装
 │   │   └── gemini-runner.ts        # Gemini CLI 封装
+│   ├── aun/                        # AUN 协议工具
 │   ├── core/
 │   │   ├── message/
 │   │   │   ├── message-bridge.ts   # 渠道 ↔ 核心消息桥
 │   │   │   ├── message-processor.ts # 统一消息处理引擎
 │   │   │   ├── message-queue.ts    # 消息队列（串行+中断）
 │   │   │   ├── message-cache.ts    # 消息缓存
-│   │   │   └── stream-flusher.ts   # 批量发送（3秒窗口）
+│   │   │   ├── message-log.ts      # 每 chat 的 messages.jsonl
+│   │   │   └── im-renderer.ts      # IM 渲染 + 批量发送
 │   │   ├── session/
 │   │   │   ├── adapters/           # 各后端会话文件适配器
+│   │   │   ├── session-fs-store.ts # 文件系统存储原语
 │   │   │   └── session-manager.ts  # 会话管理（多项目支持）
+│   │   ├── trigger/                # 触发器引擎
 │   │   ├── command-handler.ts      # 斜杠命令处理
 │   │   ├── evolagent.ts            # EvolAgent 实体
 │   │   ├── evolagent-registry.ts   # Agent 注册表（扫描/路由/热重载）
@@ -211,14 +217,13 @@ evolclaw/
 │   │   ├── qqbot.ts                # QQ 频道渠道
 │   │   ├── wecom.ts                # 企业微信 AI Bot 渠道
 │   │   └── aun.ts                  # AUN Mesh 网络渠道
+│   ├── cli/                        # CLI 命令
 │   ├── utils/                      # 工具函数
 │   ├── types.ts                    # 类型定义
-│   ├── config.ts                   # 配置加载
+│   ├── config-store.ts             # 配置加载
 │   ├── paths.ts                    # 路径解析
-│   ├── cli.ts                      # CLI 命令（init/start/stop/tui/mv/...）
 │   └── index.ts                    # 主入口
-├── data/
-│   └── evolclaw.sample.json        # 配置模板
+└── kits/                           # 共享上下文模板
 ```
 
 ## 斜杠命令
@@ -257,6 +262,9 @@ evolclaw/
 - `/stop` - 中断当前任务
 - `/check` - 系统健康检查（详情）
 - `/activity [all|dm|owner|none]` - 查看/控制中间输出显示模式
+- `/chatmode [interactive|proactive]` - 查看/切换会话模式
+- `/dispatch [mention|all]` - 群聊分发模式（仅 @ 响应或广播）
+- `/trigger <动作> ...` - 设置/查看 AI 自主触发器（延迟/定时/周期）
 - `/restart <channel>` - 重连指定渠道
 
 ### Owner 专属命令
@@ -271,7 +279,7 @@ evolclaw/
 - **运行时**：Node.js >= 22 + TypeScript（ES modules）
 - **AI SDK**：@anthropic-ai/claude-agent-sdk >= 0.2.75、@openai/codex-sdk、Gemini CLI
 - **消息渠道**：飞书（@larksuiteoapi/node-sdk）、微信（ClawBot ilink API）、钉钉（dingtalk-stream）、QQ频道（pure-qqbot）、企业微信（AI Bot API）、AUN 网络
-- **数据存储**：node:sqlite（内置模块）+ JSONL（CLI 共用）
+- **数据存储**：文件系统（per-chat 目录） + JSONL（CLI 共用）
 - **测试框架**：Vitest
 
 ## TODO
@@ -281,8 +289,8 @@ evolclaw/
 - [x] 项目搬家工具（`evolclaw mv`）
 - [x] 手动授权支持（文本回复 + 飞书卡片）
 - [x] 自动授权可配置（自动放行/自动拒绝）
+- [x] 触发器支持
 - [ ] AUN 群组扩展功能支持
-- [ ] 触发器支持
 - [ ] 统计/状态监控 WebHook
 
 

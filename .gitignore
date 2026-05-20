@@ -81,7 +81,7 @@ docs/
 src/experimental/
 
 # Agent 配置（含私有信息）
-agents/
+/agents/
 
 # 测试文件
 tests/

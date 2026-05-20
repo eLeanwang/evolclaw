@@ -49,8 +49,8 @@ function parseTemplate(content: string): Map<PromptSection, string> {
 }
 
 function loadBuiltinTemplate(): Map<PromptSection, string> {
-  const builtinPath = path.join(getPackageRoot(), 'dist', 'templates', 'prompts.md');
-  const srcPath = path.join(getPackageRoot(), 'src', 'templates', 'prompts.md');
+  const builtinPath = path.join(getPackageRoot(), 'dist', 'data', 'prompts.md');
+  const srcPath = path.join(getPackageRoot(), 'src', 'data', 'prompts.md');
   const filePath = fs.existsSync(builtinPath) ? builtinPath : srcPath;
   const content = fs.readFileSync(filePath, 'utf-8');
   return parseTemplate(content);
