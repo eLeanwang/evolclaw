@@ -1701,7 +1701,8 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       if (isGroup) {
         params.group_id = channelId;
         const result = await this.callAndTrace<any>('group.send', params);
-        if (!result || !result.message_id) {
+        const mid = result?.message?.message_id ?? result?.message_id ?? null;
+        if (!mid) {
           const dispatchStatus = result?.message_dispatch?.status;
           if (dispatchStatus === 'debounced' || dispatchStatus === 'dispatched') {
             logger.info(`${this.logPrefix()} group.send ok (${dispatchStatus}): group=${channelId} encrypt=${encrypt} text=${finalText.slice(0, 60)}`);
@@ -1709,8 +1710,8 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
             logger.warn(`${this.logPrefix()} group.send returned no message_id: ${JSON.stringify(result)}`);
           }
         } else {
-          logger.info(`${this.logPrefix()} group.send ok: group=${channelId} mid=${result.message_id} encrypt=${encrypt} text=${finalText.slice(0, 60)}`);
-          appendAidEvent({ ts: Date.now(), iso: new Date().toISOString(), event: 'message_out', aid: this.config.aid, to: channelId, msgId: result.message_id, kind: 'text', len: finalText.length, groupId: channelId });
+          logger.info(`${this.logPrefix()} group.send ok: group=${channelId} mid=${mid} encrypt=${encrypt} text=${finalText.slice(0, 60)}`);
+          appendAidEvent({ ts: Date.now(), iso: new Date().toISOString(), event: 'message_out', aid: this.config.aid, to: channelId, msgId: mid, kind: 'text', len: finalText.length, groupId: channelId });
           this.aidStatsCollector?.recordOutbound(this.config.aid, channelId, Buffer.byteLength(finalText, 'utf-8'), finalText);
         }
       } else {
@@ -1734,7 +1735,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
           if (isGroup) {
             this.trace('OUT', 'group.send.fallback', params);
             const result = await this.client!.call('group.send', params);
-            this.trace('OUT', 'group.send.fallback.ok', { message_id: (result as any)?.message_id });
+            this.trace('OUT', 'group.send.fallback.ok', { message_id: (result as any)?.message?.message_id ?? (result as any)?.message_id });
             if (!result || !(result as any).message_id) {
               logger.warn(`${this.logPrefix()} group.send fallback returned no message_id: ${JSON.stringify(result)}`);
             }
@@ -1957,8 +1958,9 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
           params.group_id = channelId;
           this.trace('OUT', 'group.send.file', params);
           const result = await this.client!.call('group.send', params);
-          this.trace('OUT', 'group.send.file.ok', { message_id: (result as any)?.message_id });
-          if (!result || !(result as any).message_id) {
+          const fileMid = (result as any)?.message?.message_id ?? (result as any)?.message_id;
+          this.trace('OUT', 'group.send.file.ok', { message_id: fileMid });
+          if (!fileMid) {
             logger.warn(`${this.logPrefix()} group.send.file returned no message_id: ${JSON.stringify(result)}`);
           }
         } else {
@@ -1982,8 +1984,9 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
           if (isGroup) {
             this.trace('OUT', 'group.send.file.fallback', params);
             const result = await this.client!.call('group.send', params);
-            this.trace('OUT', 'group.send.file.fallback.ok', { message_id: (result as any)?.message_id });
-            if (!result || !(result as any).message_id) {
+            const fbMid = (result as any)?.message?.message_id ?? (result as any)?.message_id;
+            this.trace('OUT', 'group.send.file.fallback.ok', { message_id: fbMid });
+            if (!fbMid) {
               logger.warn(`${this.logPrefix()} group.send.file fallback returned no message_id: ${JSON.stringify(result)}`);
             }
           } else {
@@ -2056,24 +2059,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     if (status === 'start') this.sentCount.delete(channelId);  // 新任务开始，重置计数
     if (!this.client || !this.connected) return;
 
-    // 旧路 payload（type='event', event='task.*'）—— 前后兼容保留，未来废弃
-    const eventMap: Record<string, string> = {
-      start: 'task.started',
-      done: 'task.completed',
-      interrupted: 'task.interrupted',
-      error: 'task.error',
-      timeout: 'task.timeout',
-    };
     const severity = status === 'error' || status === 'timeout' ? 'error' : 'info';
-    const eventPayload: Record<string, any> = {
-      type: 'event',
-      event: eventMap[status] ?? `task.${status}`,
-      data: { task_id: taskId, session_id: sessionId },
-      severity,
-    };
-    if (context?.threadId) eventPayload.thread_id = context.threadId;
-
-    // 新路 payload（type='status'）—— 结构化任务状态，下游直接读字段不用解析 event 字符串
     const stateMap: Record<string, string> = {
       start: 'started',
       done: 'completed',
@@ -2095,8 +2081,6 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     const statusTargetAid = channelId;
     const encryptTarget = isGroup ? channelId : statusTargetAid;
 
-    // 计算 encrypt 标志（每次调用读最新 peerE2ee 状态，
-    // 这样第二条 send 能受益于第一条触发的 peerE2ee 标记）
     const computeEncrypt = (): boolean => context?.metadata?.encrypted != null
       ? !!(context.metadata.encrypted)
       : this.shouldEncrypt(encryptTarget);
@@ -2128,13 +2112,8 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     };
 
     const method = isGroup ? 'group.send' : 'message.send';
-    // 串行：等第一条完成（或失败更新 peerE2ee 标记）后再发第二条，
-    // 保证两路 payload 到达顺序（event 在前，status 在后）+ 第二条能用最新 encrypt 状态
-    sendOne(method, eventPayload, 'event')
-      .then(() => sendOne(method, statusPayload, 'status'));
+    sendOne(method, statusPayload, 'status');
 
-    // 统计为系统消息（按两条独立消息分别记账）
-    this.aidStatsCollector?.recordOutbound(this.config.aid, channelId, JSON.stringify(eventPayload).length, undefined, true);
     this.aidStatsCollector?.recordOutbound(this.config.aid, channelId, JSON.stringify(statusPayload).length, undefined, true);
     // 群聊显示 group id 简称，P2P 显示 peer label；从 context.metadata 读取 chatmode
     const targetLabel = this.isGroupId(channelId) ? channelId : this.peerLabel(channelId);
@@ -2401,11 +2380,14 @@ export class AUNChannelPlugin implements ChannelPlugin {
                 client_context: { task_id: envelope.taskId, chatmode: envelope.chatmode, agent_name: envelope.agentName },
               };
               if (ctx?.threadId) aunPayload.thread_id = ctx.threadId;
-              // 双发：thought.put（前端实时渲染） + message.send（消息历史持久化）
-              await Promise.all([
-                channel.sendThought(channelId, envelope.taskId, aunPayload, ctx),
-                channel.sendStructured(channelId, aunPayload, ctx),
-              ]);
+              if (envelope.chatmode === 'proactive') {
+                await channel.sendThought(channelId, envelope.taskId, aunPayload, ctx);
+              } else {
+                await Promise.all([
+                  channel.sendThought(channelId, envelope.taskId, aunPayload, ctx),
+                  channel.sendStructured(channelId, aunPayload, ctx),
+                ]);
+              }
               return;
             }
             case 'status.started':
