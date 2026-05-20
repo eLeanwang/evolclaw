@@ -604,7 +604,7 @@ export class CommandHandler {
           ] } },
           { cmd: '/dispatch', label: '切换分发模式', desc: '控制群聊消息过滤（仅@提及或广播响应）', next: { type: 'select', items: [
             { value: 'mention', label: '@ 提及', desc: '仅在被 @ 提及时响应' },
-            { value: 'all', label: '广播', desc: '响应群内所有消息' },
+            { value: 'broadcast', label: '广播', desc: '响应群内所有消息' },
           ] } },
         ]
       });
@@ -780,13 +780,13 @@ export class CommandHandler {
     }
 
     if (cmdBase === '/dispatch') {
-      const currentMode = session.metadata?.dispatchMode || 'mention';
+      const currentMode = session.metadata?.dispatchMode;
       if (mode === 'query') {
-        return { data: { mode: currentMode } };
+        return { data: { mode: currentMode ?? null } };
       }
       // update
       if (!arg) return { error: '缺少目标模式' };
-      if (arg !== 'mention' && arg !== 'all') return { error: `无效模式: ${arg}` };
+      if (arg !== 'mention' && arg !== 'broadcast') return { error: `无效模式: ${arg}` };
       const identity = this.sessionManager.resolveIdentity(channel, userId);
       const chatType = session.chatType || 'private';
       if (chatType === 'group' && identity.role !== 'owner' && identity.role !== 'admin') {
@@ -1015,7 +1015,7 @@ export class CommandHandler {
         '💬 聊天设置：',
         '  /activity [all|dm|owner|none] - 查看/控制中间输出显示模式',
         '  /chatmode [interactive|proactive] - 查看/切换会话模式（被动响应或主动推进）',
-        '  /dispatch [mention|all] - 查看/切换群聊分发模式（仅@响应或广播响应，仅群聊）',
+        '  /dispatch [mention|broadcast] - 查看/切换群聊分发模式（仅@响应或广播响应，仅群聊）',
         '',
         '🔐 权限管理：',
         '  /perm - 查看当前权限模式',
@@ -1100,7 +1100,7 @@ export class CommandHandler {
       // 聊天设置
       if (isAdmin) {
         cmds.push({ command: '/chatmode', args: '[interactive|proactive]', description: '查看/切换会话模式（被动响应或主动推进）', category: '聊天设置', roles: ['admin', 'owner'] });
-        cmds.push({ command: '/dispatch', args: '[mention|all]', description: '查看/切换群聊分发模式（仅@响应或广播响应）', category: '聊天设置', roles: ['admin', 'owner'] });
+        cmds.push({ command: '/dispatch', args: '[mention|broadcast]', description: '查看/切换群聊分发模式（仅@响应或广播响应）', category: '聊天设置', roles: ['admin', 'owner'] });
       }
 
       // 交互
@@ -1955,7 +1955,7 @@ export class CommandHandler {
       return { kind: 'command.result' as const, text: `✅ 会话模式已切换: ${arg}` };
     }
 
-    // /dispatch 命令：查看/切换群聊分发模式（mention | all）
+    // /dispatch 命令：查看/切换群聊分发模式（mention | broadcast）
     // 仅群聊可用；群聊中设置需管理员权限
     if (normalizedContent === '/dispatch' || normalizedContent.startsWith('/dispatch ')) {
       const dispatchResult = await this.ensureSession(channel, channelId, threadId, chatType);
@@ -1968,14 +1968,16 @@ export class CommandHandler {
       }
 
       const arg = normalizedContent.slice(9).trim();
-      const currentMode = dispatchSession.metadata?.dispatchMode || 'mention';
+      const rawDispatch = dispatchSession.metadata?.dispatchMode;
+      const currentMode = rawDispatch === 'all' ? 'broadcast' : rawDispatch;
 
       if (!arg) {
+        const displayMode = currentMode ?? '未设置（跟随群设置）';
         // 尝试发送 CommandCard 卡片
         if (isAdmin) {
           const modes = [
             { key: 'mention', name: '提及模式', desc: '仅当被 @ 提及（含 @all）时响应群消息' },
-            { key: 'all', name: '广播模式', desc: '群内所有消息都触发响应' },
+            { key: 'broadcast', name: '广播模式', desc: '群内所有消息都触发响应' },
           ];
           const interaction: InteractionRequest = {
             type: 'interaction',
@@ -2004,20 +2006,20 @@ export class CommandHandler {
 
         // 降级：文本
         const lines: string[] = [];
-        lines.push(`📋 分发模式: ${currentMode}`);
+        lines.push(`📋 分发模式: ${displayMode}`);
         lines.push('');
         lines.push('模式说明：');
-        lines.push('  • mention — 提及模式：仅当被@提及时响应群消息(含@all)');
-        lines.push('  • all     — 广播模式：群内所有消息都触发响应');
+        lines.push('  • mention   — 提及模式：仅当被@提及时响应群消息(含@all)');
+        lines.push('  • broadcast — 广播模式：群内所有消息都触发响应');
         if (isAdmin) {
           lines.push('');
-          lines.push('用法: /dispatch <mention|all>');
+          lines.push('用法: /dispatch <mention|broadcast>');
         }
         return { kind: 'command.result' as const, text: lines.join('\n') };
       }
 
-      if (arg !== 'mention' && arg !== 'all') {
-        return { kind: 'command.error' as const, text: `❌ 无效模式: ${arg}\n可选: mention / all\n用法: /dispatch <模式>` };
+      if (arg !== 'mention' && arg !== 'broadcast') {
+        return { kind: 'command.error' as const, text: `❌ 无效模式: ${arg}\n可选: mention / broadcast\n用法: /dispatch <模式>` };
       }
 
       if (!isAdmin) {
@@ -2031,7 +2033,7 @@ export class CommandHandler {
       const metadata = { ...(dispatchSession.metadata || {}), dispatchMode: arg };
       await this.sessionManager.updateSession(dispatchSession.id, { metadata });
       this.eventBus.publish({ type: 'session:dispatch-mode-changed', sessionId: dispatchSession.id, mode: arg, timestamp: Date.now() });
-      return { kind: 'command.result' as const, text: `✅ 分发模式已切换: ${currentMode} → ${arg}` };
+      return { kind: 'command.result' as const, text: `✅ 分发模式已切换: ${currentMode ?? '未设置'} → ${arg}` };
     }
 
     // /stop 命令：中断当前任务
@@ -2204,7 +2206,7 @@ export class CommandHandler {
 
       const lines: string[] = [];
       const sessionMode = session.sessionMode || 'interactive';
-      const dispatchMode = session.metadata?.dispatchMode || 'mention';
+      const dispatchMode = session.metadata?.dispatchMode ?? '未设置（跟随群设置）';
       const chatModeLine = `会话模式: ${sessionMode}`;
       const dispatchModeLine = session.chatType === 'group' ? `分发模式: ${dispatchMode}` : null;
       if (isAdmin) {

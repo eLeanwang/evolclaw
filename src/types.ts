@@ -197,7 +197,7 @@ export interface SessionMetadata {
     gemini?: string;
   };
   permissionMode?: string;  // 权限模式（per-session）: auto | bypass | request | edit | plan | noask
-  dispatchMode?: string;  // 群聊分发模式（per-session）: mention | all
+  dispatchMode?: string;  // 群聊分发模式（per-session）: mention | broadcast
   resumeAt?: string;  // /rewind chat 标记的回退点（assistant message uuid）
 }
 
@@ -734,7 +734,7 @@ export interface AgentConfig {
   models?: ModelsBlock;
   projects?: ProjectsBlock;
   chatmode?: ChatmodeBlock;
-  dispatch?: 'mention' | 'all';
+  dispatch?: 'mention' | 'broadcast';
   show_activities?: ShowActivitiesMode;
   flush_delay?: number;
   debounce?: number;
