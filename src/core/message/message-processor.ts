@@ -1106,6 +1106,11 @@ export class MessageProcessor {
       message.peerId
     );
 
+    // 非 human 对端强制 proactive（不管单聊/群聊）；human 走原有策略
+    if (message.peerType && message.peerType !== 'human') {
+      session.sessionMode = 'proactive';
+    }
+
     // replyContext 不再写入 session.metadata（跟着 message 走，避免群聊多人覆盖）
 
     const absoluteProjectPath = path.isAbsolute(session.projectPath)
