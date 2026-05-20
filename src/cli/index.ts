@@ -1199,6 +1199,76 @@ const WATCH_FILE_COLORS = [
   '\x1b[96m',  // bright cyan
 ];
 
+async function cmdWatchMenu(): Promise<void> {
+  const items = [
+    { key: 'log', label: 'log', desc: 'real-time log tail' },
+    { key: 'aid', label: 'aid', desc: 'AID connection stats' },
+    { key: 'msg', label: 'msg', desc: 'message inspector' },
+  ];
+  let index = 0;
+  const useColor = !!process.stdout.isTTY;
+  const RST = useColor ? '\x1b[0m' : '';
+  const DIM = useColor ? '\x1b[2m' : '';
+  const BOLD = useColor ? '\x1b[1m' : '';
+  const CYAN = useColor ? '\x1b[36m' : '';
+
+  const pkgRoot = getPackageRoot();
+
+  function render() {
+    let buf = '\x1b[2J\x1b[H';
+    buf += `${BOLD}evolclaw watch${RST}  ${DIM}${pkgRoot}${RST}\n\n`;
+    for (let i = 0; i < items.length; i++) {
+      const sel = i === index;
+      const marker = sel ? `${CYAN}${BOLD}  ▸ ` : '    ';
+      const label = sel ? `${items[i].label}${RST}` : `${DIM}${items[i].label}${RST}`;
+      buf += `${marker}${label}   ${DIM}${items[i].desc}${RST}\n`;
+    }
+    buf += `\n${DIM}  ↑↓ select  Enter confirm  ESC exit${RST}\n`;
+    process.stdout.write(buf);
+  }
+
+  render();
+
+  return new Promise((resolve) => {
+    if (!process.stdin.isTTY) { resolve(); return; }
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+
+    const onData = async (data: Buffer) => {
+      if (data[0] === 0x1b && data.length === 1) { cleanup(); return; }
+      if (data[0] === 0x03) { cleanup(); return; }
+      if (data[0] === 0x1b && data[1] === 0x5b) {
+        if (data[2] === 0x41) { index = Math.max(0, index - 1); render(); }
+        if (data[2] === 0x42) { index = Math.min(items.length - 1, index + 1); render(); }
+      }
+      if (data[0] === 0x0d) {
+        process.stdin.removeListener('data', onData);
+        process.stdin.setRawMode(false);
+        process.stdin.pause();
+        process.stdout.write('\x1b[2J\x1b[H');
+        const chosen = items[index].key;
+        if (chosen === 'log') { cmdWatch(); }
+        else if (chosen === 'aid') { await cmdWatchAid(); }
+        else if (chosen === 'msg') {
+          const { cmdWatchMsg } = await import('../watch-msg.js');
+          await cmdWatchMsg();
+        }
+        resolve();
+      }
+    };
+
+    function cleanup() {
+      process.stdin.removeListener('data', onData);
+      if (process.stdin.isTTY) process.stdin.setRawMode(false);
+      process.stdin.pause();
+      process.stdout.write('\x1b[2J\x1b[H');
+      resolve();
+    }
+
+    process.stdin.on('data', onData);
+  });
+}
+
 function cmdWatch() {
   const p = resolvePaths();
   if (!fs.existsSync(p.logs)) {
@@ -4018,6 +4088,13 @@ export async function main(args: string[]) {
     case 'watch':
       if (args[1] === 'aid') {
         await cmdWatchAid();
+      } else if (args[1] === 'msg') {
+        const { cmdWatchMsg } = await import('../watch-msg.js');
+        await cmdWatchMsg();
+      } else if (args[1] === 'log') {
+        cmdWatch();
+      } else if (!args[1]) {
+        await cmdWatchMenu();
       } else {
         cmdWatch();
       }
