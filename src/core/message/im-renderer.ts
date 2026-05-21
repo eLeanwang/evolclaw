@@ -67,8 +67,8 @@ export class IMRenderer {
   private diagEnabled: boolean;
   /** 串行发送队列：保证消息按序到达 */
   private sendChain: Promise<void> = Promise.resolve();
-  /** proactive：是否已发过 thinking 文本（用于去重 complete.result） */
-  private hasEmittedThinking = false;
+  /** proactive：是否已发过 text 文本（用于去重 complete.result） */
+  private hasEmittedText = false;
   /** 自增 callId 兜底（runner 没提供时用） */
   private syntheticCallSeq = 0;
 
@@ -117,7 +117,37 @@ export class IMRenderer {
 
   /** 是否有 pending 内容 */
   hasContent(): boolean {
-    return this.textBuffer.length > 0 || this.itemsQueue.some(it => it.kind !== 'thinking');
+    return this.textBuffer.length > 0 || this.itemsQueue.some(it => it.kind !== 'text');
+  }
+
+  /** 是否有待发送的文本 */
+  hasTextPending(): boolean {
+    return this.textBuffer.length > 0;
+  }
+
+  /** flush 当前 textBuffer 作为独立的 result.text（非 final），然后清空 buffer */
+  async flushText(): Promise<void> {
+    if (this.opts.envelope.chatmode === 'proactive') return;
+    if (this.textBuffer.length === 0) return;
+
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = undefined;
+    }
+
+    const text = this.textBuffer;
+    this.textBuffer = '';
+    // 清掉 itemsQueue 中的 text items（已发出）
+    this.itemsQueue = this.itemsQueue.filter(it => it.kind !== 'text');
+
+    const payload: OutboundPayload = { kind: 'result.text', text, isFinal: false };
+    this.sentContent = true;
+    this.sendChain = this.sendChain
+      .then(() => this.opts.send(payload))
+      .catch(e => logger.warn('[IMRenderer] flushText send failed:', e));
+    await this.sendChain;
+    this.lastFlush = Date.now();
+    this.flushCount++;
   }
 
   /** 是否已发送过内容（用于决定最终 flush 是否带 isFinal 标题） */
@@ -138,9 +168,9 @@ export class IMRenderer {
   /** 从 buffer 中移除指定 pattern（用于文件标记预处理） */
   stripFromBuffer(pattern: RegExp): void {
     this.textBuffer = this.textBuffer.replace(pattern, '').trim();
-    // itemsQueue 中的 thinking items 也同步过滤
+    // itemsQueue 中的 text items 也同步过滤
     for (const item of this.itemsQueue) {
-      if (item.kind === 'thinking') {
+      if (item.kind === 'text') {
         item.text = item.text.replace(pattern, '');
       }
     }
@@ -153,12 +183,12 @@ export class IMRenderer {
     if (this.opts.envelope.chatmode === 'proactive') return;
     if (!text) return;
 
-    // 同一窗口内连续 text delta 合并到最后一个 thinking item
+    // 同一窗口内连续 text delta 合并到最后一个 text item
     const last = this.itemsQueue[this.itemsQueue.length - 1];
-    if (last && last.kind === 'thinking') {
+    if (last && last.kind === 'text') {
       last.text += text;
     } else {
-      this.itemsQueue.push({ kind: 'thinking', text });
+      this.itemsQueue.push({ kind: 'text', text });
     }
 
     this.textBuffer += text;
@@ -286,9 +316,9 @@ export class IMRenderer {
     return Math.max(minDelay, Math.min(maxDelay, dynamicDelay));
   }
 
-  /** 仅 flush 非 thinking items（thinking items 和 textBuffer 保留，等待下次完整 flush） */
+  /** 仅 flush 非 text items（text items 和 textBuffer 保留，等待下次完整 flush） */
   private async flushActivitiesInternal(): Promise<void> {
-    const nonThinking = this.itemsQueue.filter(it => it.kind !== 'thinking');
+    const nonThinking = this.itemsQueue.filter(it => it.kind !== 'text');
     if (nonThinking.length === 0) return;
 
     if (this.timer) {
@@ -296,8 +326,8 @@ export class IMRenderer {
       this.timer = undefined;
     }
 
-    // 移除已 flush 的 non-thinking items，保留 thinking items
-    this.itemsQueue = this.itemsQueue.filter(it => it.kind === 'thinking');
+    // 移除已 flush 的 non-text items，保留 text items
+    this.itemsQueue = this.itemsQueue.filter(it => it.kind === 'text');
 
     const payload: OutboundPayload = { kind: 'activity.batch', items: nonThinking };
     if (this.diagEnabled) diag(this.instanceId, 'flushActivitiesOnly', { itemCount: nonThinking.length });
@@ -325,13 +355,13 @@ export class IMRenderer {
     if (this.opts.fileMarkerPattern) {
       this.textBuffer = this.textBuffer.replace(this.opts.fileMarkerPattern, '').trim();
       for (const item of this.itemsQueue) {
-        if (item.kind === 'thinking') item.text = item.text.replace(this.opts.fileMarkerPattern, '');
+        if (item.kind === 'text') item.text = item.text.replace(this.opts.fileMarkerPattern, '');
       }
     }
 
-    // 清掉空 thinking items
+    // 清掉空 text items
     const items = this.itemsQueue.filter(it => {
-      if (it.kind === 'thinking') return it.text.length > 0;
+      if (it.kind === 'text') return it.text.length > 0;
       return true;
     });
 
@@ -350,12 +380,8 @@ export class IMRenderer {
       });
     }
 
-    // 1. interactive 模式下：isFinal=true 时不发 thinking-only batch
-    //    （避免和最终 result.text 重复——最终回复已在 textBuffer 里）
-    let itemsForBatch = items;
-    if (isFinal) {
-      itemsForBatch = items.filter(it => it.kind !== 'thinking');
-    }
+    // 1. interactive 模式下：不发 text items（由 result.text 统一发送最终文本）
+    let itemsForBatch = items.filter(it => it.kind !== 'text');
 
     if (itemsForBatch.length > 0) {
       const payload: OutboundPayload = { kind: 'activity.batch', items: itemsForBatch };
@@ -389,7 +415,7 @@ export class IMRenderer {
       event.type === 'complete' &&
       !event.isError &&
       event.result &&
-      this.hasEmittedThinking
+      this.hasEmittedText
     ) {
       return;
     }
@@ -397,8 +423,8 @@ export class IMRenderer {
     const item = this.mapEventToItem(event);
     if (!item) return;
 
-    if (item.kind === 'thinking') {
-      this.hasEmittedThinking = true;
+    if (item.kind === 'text') {
+      this.hasEmittedText = true;
       this.allText += item.text;
     }
 
@@ -413,7 +439,7 @@ export class IMRenderer {
     switch (event.type) {
       case 'text':
         if (!event.text) return null;
-        return { kind: 'thinking', text: event.text };
+        return { kind: 'text', text: event.text };
 
       case 'tool_use': {
         const desc = this.summarizeInput(event.input, event.name);

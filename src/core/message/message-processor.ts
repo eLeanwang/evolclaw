@@ -1229,7 +1229,11 @@ export class MessageProcessor {
 
         // 工具调用
         if (event.type === 'tool_use') {
-          // 工具调用意味着当前文本是中间轮，重置最后回复追踪
+          // 工具调用意味着当前 turn 结束，flush 已累积的文本作为独立消息
+          if (renderer.hasTextPending()) {
+            await renderer.flushText();
+          }
+          // 重置最后回复追踪
           lastReplyText = '';
           this.eventBus.publish({
             type: 'tool:use',

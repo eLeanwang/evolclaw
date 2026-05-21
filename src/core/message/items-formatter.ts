@@ -17,7 +17,7 @@ export function formatItemsAsText(items: ThoughtItem[]): string {
 
 function formatItem(item: ThoughtItem): string {
   switch (item.kind) {
-    case 'thinking':
+    case 'text':
       return item.text;
     case 'reasoning':
       return `💭 ${item.text}`;

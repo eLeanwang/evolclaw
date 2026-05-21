@@ -392,19 +392,9 @@ export class CommandHandler {
     }
     const card = opts.interaction.kind;
 
-    if (opts.canWrite === false) {
-      logger.debug(`[sendCommandCard] downgrade: canWrite=false channel=${opts.channel}`);
-      return renderCommandCardAsText(card);
-    }
-    if (!adapter?.send) {
-      logger.debug(`[sendCommandCard] downgrade: no adapter.send channel=${opts.channel}`);
-      return renderCommandCardAsText(card);
-    }
-    // session 忙碌时降级到文本，避免并发触发带参写操作
-    if (this.isSessionBusy(opts.interaction.sessionId)) {
-      logger.debug(`[sendCommandCard] downgrade: session busy sessionId=${opts.interaction.sessionId}`);
-      return renderCommandCardAsText(card);
-    }
+    if (opts.canWrite === false) return renderCommandCardAsText(card);
+    if (!adapter?.send) return renderCommandCardAsText(card);
+    if (this.isSessionBusy(opts.interaction.sessionId)) return renderCommandCardAsText(card);
 
     try {
       const envelope = buildEnvelope({
@@ -422,7 +412,6 @@ export class CommandHandler {
         opts.replyCtx,
       );
       if (messageId) return null;
-      logger.debug(`[sendCommandCard] downgrade: sendInteractionPayload returned ${messageId} channel=${opts.channel}`);
     } catch (e) {
       logger.warn(`[CommandHandler] sendCommandCard failed: ${e}`);
     }

@@ -759,7 +759,7 @@ export interface MergedAgentConfig extends AgentConfig {
  * 多个 item 在 IMRenderer 聚合窗口内打包成 activity.batch 发送
  */
 export type ThoughtItem =
-  | { kind: 'thinking'; text: string; duration_ms?: number }
+  | { kind: 'text'; text: string; duration_ms?: number }
   | { kind: 'reasoning'; text: string; duration_ms?: number }
   | { kind: 'tool_call'; call_id: string; name: string; arguments?: Record<string, unknown>; text?: string }
   | { kind: 'tool_result'; call_id: string; name: string; ok: boolean; result?: unknown; error?: string; duration_ms?: number; text?: string }

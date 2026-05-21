@@ -238,6 +238,8 @@ export class FeishuChannel {
               }
             }
 
+            logger.info(`[Feishu] Incoming message_type=${msg.message_type} content=${msg.content?.substring(0, 200)}`);
+
             // 处理文本消息
             if (msg.message_type === 'text') {
               const parsed = JSON.parse(msg.content);
