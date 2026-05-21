@@ -256,16 +256,78 @@ export class AUNChannel {
         return '';
       }
 
-      // quote 类型：拼接被引用内容
+      // quote 类型：拼接被引用内容（支持 text / image / file attachments）
       if (obj.type === 'quote' && obj.quote && typeof obj.quote === 'object') {
         const q = obj.quote as Record<string, unknown>;
         const quotedText = typeof q.text === 'string' ? q.text : '';
-        if (quotedText) {
-          const sender = typeof q.sender_display === 'string' ? q.sender_display : '';
-          const prefix = sender ? `${sender}: ` : '';
-          const quoted = quotedText.split('\n').map(line => `> ${prefix}${line}`).join('\n');
+        const sender = typeof q.sender_display === 'string' ? q.sender_display : '';
+        const prefix = sender ? `${sender}: ` : '';
+
+        // 构建引用内容：文本 + 附件描述
+        const quoteParts: string[] = [];
+        if (quotedText) quoteParts.push(quotedText);
+        if (Array.isArray(q.attachments)) {
+          for (const att of q.attachments as any[]) {
+            if (att && typeof att === 'object') {
+              const ct = typeof att.content_type === 'string' ? att.content_type : '';
+              const fn = typeof att.filename === 'string' ? att.filename : '';
+              if (ct.startsWith('image/')) {
+                quoteParts.push(fn ? `[图片: ${fn}]` : '[图片]');
+              } else {
+                quoteParts.push(fn ? `[文件: ${fn}]` : '[文件]');
+              }
+            }
+          }
+        }
+
+        if (quoteParts.length > 0) {
+          const quoted = quoteParts.join('\n').split('\n').map(line => `> ${prefix}${line}`).join('\n');
           return text ? `${quoted}\n\n${text}` : quoted;
         }
+      }
+
+      // merge 类型：合并转发消息，展开子消息为可读文本
+      if (obj.type === 'merge') {
+        const title = typeof obj.title === 'string' ? obj.title : '合并转发消息';
+        const parts: string[] = [`以下是转发的合并消息「${title}」：\n---`];
+        if (Array.isArray(obj.items)) {
+          for (const item of obj.items) {
+            if (item && typeof item === 'object') {
+              const sender = typeof item.sender_display === 'string' ? item.sender_display : '';
+              const itemText = typeof item.text === 'string' ? item.text : '';
+              const itemType = typeof item.type === 'string' ? item.type : '';
+
+              // 根据子消息类型构建展示
+              const lineParts: string[] = [];
+              if (itemText) lineParts.push(itemText);
+
+              // 子消息附件（image/file）
+              if (Array.isArray(item.attachments)) {
+                for (const att of item.attachments) {
+                  if (att && typeof att === 'object') {
+                    const ct = typeof att.content_type === 'string' ? att.content_type : '';
+                    const fn = typeof att.filename === 'string' ? att.filename : '';
+                    if (ct.startsWith('image/') || itemType === 'image') {
+                      lineParts.push(fn ? `[图片: ${fn}]` : '[图片]');
+                    } else if (ct.startsWith('video/') || itemType === 'video') {
+                      lineParts.push(fn ? `[视频: ${fn}]` : '[视频]');
+                    } else {
+                      lineParts.push(fn ? `[文件: ${fn}]` : '[文件]');
+                    }
+                  }
+                }
+              }
+
+              const content = lineParts.join(' ') || `[${itemType || '未知类型'}]`;
+              parts.push(sender ? `${sender}: ${content}` : content);
+            }
+          }
+        }
+        if (typeof obj.summary === 'string' && obj.summary) {
+          parts.push(`\n[摘要] ${obj.summary}`);
+        }
+        parts.push('---');
+        return parts.join('\n');
       }
 
       if (typeof obj.text === 'string') return text;

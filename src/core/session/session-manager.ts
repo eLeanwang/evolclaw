@@ -508,6 +508,10 @@ export class SessionManager {
     this.appendMeta(current.channel, current.channelId, current);
     const active = this.readActive(current.channel, current.channelId);
     if (active && active.id === sessionId) {
+      // 保留 active.json 中已有的 activeTask（markProcessing 写入的处理状态）
+      if (active.processingState && !current.processingState) {
+        current.processingState = active.processingState;
+      }
       this.writeActive(current.channel, current.channelId, current);
     }
   }
@@ -649,6 +653,9 @@ export class SessionManager {
     this.appendMeta(current.channel, current.channelId, current);
     const active = this.readActive(current.channel, current.channelId);
     if (active && active.id === sessionId) {
+      if (active.processingState && !current.processingState) {
+        current.processingState = active.processingState;
+      }
       this.writeActive(current.channel, current.channelId, current);
     }
   }

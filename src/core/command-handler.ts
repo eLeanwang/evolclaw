@@ -3714,9 +3714,8 @@ export class CommandHandler {
     const chatmode = session.sessionMode || 'interactive';
     const encrypted = this.sessionManager.getSessionEncrypt(session.id);
 
-    // 诊断日志：记录 inbound message_id 和 task_id 的对应关系
-    const inboundMsgId = meta?.messageId;
-    logger.info(`[CommandHandler] buildCtlReplyContext: sessionId=${session.id} inboundMsgId=${inboundMsgId ?? 'none'} taskId=${taskId ?? 'none'} chatmode=${chatmode} threadId=${ctx.threadId ?? 'none'}`);
+    // 诊断日志：记录 task_id 解析结果
+    logger.info(`[CommandHandler] buildCtlReplyContext: sessionId=${session.id} taskId=${taskId ?? 'none'} chatmode=${chatmode} threadId=${ctx.threadId ?? 'none'}`);
 
     if (taskId || chatmode !== 'interactive' || encrypted != null) {
       ctx.metadata = {};
@@ -3800,7 +3799,8 @@ export class CommandHandler {
 
       try {
         const replyContext = this.buildCtlReplyContext(session);
-        await adapter.send(buildEnvelope({ channel: adapter.channelName, channelId: session.channelId, replyContext: replyContext }), { kind: 'result.text', text, isFinal: true });
+        const taskId = replyContext?.metadata?.taskId;
+        await adapter.send(buildEnvelope({ taskId, channel: adapter.channelName, channelId: session.channelId, chatmode: replyContext?.metadata?.chatmode as any, replyContext }), { kind: 'result.text', text, isFinal: true });
         return { ok: true, result: '已发送' };
       } catch (err: any) {
         return { ok: false, error: err.message || String(err) };

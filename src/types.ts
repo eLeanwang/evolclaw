@@ -192,7 +192,6 @@ export interface SessionMetadata {
   peerName?: string;                // 对端/发送者显示名
   groupId?: string;                 // 仅群聊：群 ID（如 AUN 的 group.issuer/grp_xxx）
   channelName?: string;             // 渠道实例名（审计/精确出站路由）
-  messageId?: string;               // 最近一次 inbound 消息的 message_id（用于诊断日志）
   agentSessions?: {
     codex?: string;
     gemini?: string;
