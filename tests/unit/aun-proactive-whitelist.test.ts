@@ -79,11 +79,11 @@ describe('AUNChannel payload type whitelist', () => {
     expect(ch.acknowledgeImmediately).toHaveBeenCalled();
   });
 
-  it('drops menu.query type', async () => {
+  it('dispatches menu.query via fast path', async () => {
     await ch.handleIncomingGroupMessage(makeGroupMessage({
       payload: { type: 'menu.query', cmd: '/help' },
     }));
-    expect(ch.dispatchMessage).not.toHaveBeenCalled();
+    expect(ch.dispatchMessage).toHaveBeenCalledOnce();
     expect(ch.acknowledgeImmediately).toHaveBeenCalled();
   });
 

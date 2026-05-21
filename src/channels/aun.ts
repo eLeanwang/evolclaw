@@ -227,11 +227,28 @@ export class AUNChannel {
             this.cardMessageIdMap.delete(cardMsgId);
             if (this.messageHandler && actionValue.startsWith('/')) {
               const chatType = channelId ? (this.isGroupId(channelId) ? 'group' : 'private') : 'private';
+              // 卡片点击者身份：优先 payload.from / payload.sender_aid / payload.user_id，
+              // 再 fallback 到外层 senderAid，最后用 cardInfo 中记录的原始命令发起者
+              const cardClickerAid = (typeof obj.from === 'string' && obj.from)
+                || (typeof obj.sender_aid === 'string' && obj.sender_aid)
+                || (typeof obj.user_id === 'string' && obj.user_id)
+                || senderAid
+                || cardInfo.initiatorAid
+                || channelId || '';
+
+              // Initiator 校验：群聊中仅卡片发起者可操作（与飞书行为对齐）
+              if (cardInfo.initiatorAid && cardClickerAid
+                && cardClickerAid !== cardInfo.initiatorAid
+                && !this.isGroupId(cardClickerAid)) {
+                logger.info(`${this.logPrefix()} CommandCard rejected: clicker=${cardClickerAid} initiator=${cardInfo.initiatorAid} mid=${cardMsgId}`);
+                return '';
+              }
+
               this.messageHandler({
                 channelId: channelId || '',
                 chatType,
                 content: actionValue,
-                peerId: senderAid || channelId || '',
+                peerId: cardClickerAid,
                 peerName: typeof obj.label === 'string' ? obj.label : typeof obj.action_label === 'string' ? obj.action_label : undefined,
                 messageId: `card-trigger-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
                 source: 'card-trigger',
@@ -452,7 +469,7 @@ export class AUNChannel {
   private plaintextRecv = 0;
   interactionCallback?: (response: InteractionResponse) => void;
   // action_card message_id → { requestId, isCommandCard }（用于关联 action_card_reply）
-  cardMessageIdMap = new Map<string, { requestId: string; isCommandCard: boolean }>();
+  cardMessageIdMap = new Map<string, { requestId: string; isCommandCard: boolean; initiatorAid?: string }>();
   private dispatchModeResolver?: (channelId: string) => Promise<string | undefined>;
 
   private static readonly PROACTIVE_ALLOW_TYPES = new Set([
@@ -1013,6 +1030,18 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
 
     // action_card_reply 已在 extractTextPayload 中消费，不分发给 agent
     if (p2pPayloadType === 'action_card_reply') return;
+    // menu.query：自定义消息快速路径，需要原始 payload JSON 传递给 bridge
+    if (p2pPayloadType === 'menu.query') {
+      this.acknowledgeImmediately(messageId, seq);
+      this.dispatchMessage({
+        channelId: chatId, userId: fromAid,
+        text: JSON.stringify(payload),
+        chatType: 'private', messageId, seq,
+        peerName: displayName || undefined,
+        peerType: peerInfo.type || undefined,
+      });
+      return;
+    }
     // payload 类型白名单：信号类消息（status / event / thought 等）不进 Agent
     if (p2pPayloadType && !AUNChannel.PROACTIVE_ALLOW_TYPES.has(p2pPayloadType)) {
       this.acknowledgeImmediately(messageId, seq);
@@ -1099,11 +1128,27 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       }
     }
 
+    // action_card_reply 已在 extractTextPayload 中消费，不分发给 agent
+    {
+      const payloadType = (payload && typeof payload === 'object') ? (payload as any).type ?? '' : '';
+      if (payloadType === 'action_card_reply') return;
+    }
+
     // ── payload 类型白名单（所有模式生效） ──
     // 信号类消息（status / event / thought / task.update 等）不进 Agent
     {
       const payloadObj = (payload && typeof payload === 'object') ? payload as Record<string, any> : null;
       const payloadType: string = payloadObj?.type ?? '';
+      // menu.query：自定义消息快速路径
+      if (payloadType === 'menu.query') {
+        this.acknowledgeImmediately(messageId, seq);
+        this.dispatchMessage({
+          channelId: groupId, userId: senderAid,
+          text: JSON.stringify(payload),
+          chatType: 'group', messageId, seq, groupId,
+        });
+        return;
+      }
       if (payloadType && !AUNChannel.PROACTIVE_ALLOW_TYPES.has(payloadType)) {
         this.acknowledgeImmediately(messageId, seq);
         logger.info(`${this.logPrefix()} Group dropped (type deny): type=${payloadType} group=${groupId} sender=${senderAid} mid=${messageId}`);
@@ -2551,7 +2596,7 @@ export class AUNChannelPlugin implements ChannelPlugin {
                 if (ctx?.threadId) aunCard.thread_id = ctx.threadId;
                 const msgId = await channel.sendStructured(channelId, aunCard, ctx);
                 if (msgId) {
-                  channel.cardMessageIdMap.set(msgId, { requestId: req.id, isCommandCard: true });
+                  channel.cardMessageIdMap.set(msgId, { requestId: req.id, isCommandCard: true, initiatorAid: req.initiatorId });
                   setTimeout(() => channel.cardMessageIdMap.delete(msgId), 20 * 60 * 1000);
                 }
               } else if (payload.fallbackText) {

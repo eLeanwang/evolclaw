@@ -1,7 +1,7 @@
 # 出站消息统一设计方案
 
 **Status**: Implemented（全三阶段完成）
-**Date**: 2026-05-16 / Last updated: 2026-05-20
+**Date**: 2026-05-16 / Last updated: 2026-05-21
 **Scope**: 定义 EvolClaw 出站消息三件套（Event / Payload / Envelope），让 channel 层基于消息语义按需订阅和渲染
 
 ---
@@ -123,6 +123,7 @@ Event 是系统内部的领域事件，按产出方分九类。每类只列代�
 
 | Event | 关键字段 | 说明 |
 |---|---|---|
+| `task.queued` | `channel, channelId, replyContext?` | 消息入队排队（群聊 FIFO 场景，前面有任务在处理） |
 | `task.enqueued` | `taskId, position` | 入队 |
 | `task.started` | `taskId, sessionId` | 开始执行 |
 | `task.interrupted` | `taskId, reason` | 被中断 |
@@ -186,7 +187,7 @@ Event 是系统内部的领域事件，按产出方分九类。每类只列代�
 
 ## 4. OutboundPayload 完整定义
 
-OutboundPayload 是 IMRenderer 投影后交给 ChannelAdapter 的出站语义类型。13 个 kind，按用途分七组。
+OutboundPayload 是 IMRenderer 投影后交给 ChannelAdapter 的出站语义类型。14 个 kind，按用途分七组。
 
 ### 4.1 任务流·结果（Agent 最终输出）
 
@@ -221,13 +222,14 @@ type ThoughtItem =
 
 | kind | 字段 | 说明 |
 |---|---|---|
+| `status.queued` | `metadata?: {}` | 消息已入队排队（群聊 FIFO，前面有任务在处理） |
 | `status.started` | `metadata?: {}` | 任务开始 |
-| `status.completed` | `metadata?: { durationMs?: number }` | 正常完成 |
+| `status.completed` | `metadata?: { durationMs?: number, numTurns?: number, usage?: { input_tokens?, output_tokens?, cache_read_input_tokens?, cache_creation_input_tokens? } }` | 正常完成 |
 | `status.interrupted` | `metadata?: { reason: string }` | 被中断 |
 | `status.error` | `metadata?: { errorType?: string }` | 异常终止 |
 | `status.timeout` | `metadata?: { idleSec?: number }` | 超时终止 |
 
-> **AUN 双发**：AUN 渠道的 `status.*` 当前采用兼容过渡方案，串行发送两条消息：①旧路 `{ type: 'event', event: 'task.*', ... }`（前后兼容），②新路 `{ type: 'status', state, task_id, severity }`（下游直接读字段，无需解析 event 字符串）。旧路在前端全面迁移到新路后废弃。
+> **AUN 出站**：`status.*` 在 AUN 渠道发送单条 `{ type: 'status', state, task_id, session_id, severity }` 消息。metadata 字段（durationMs 等）目前不包含在 AUN payload 中。
 
 ### 4.4 命令回显
 
@@ -277,31 +279,32 @@ type ThoughtItem =
 | `runner.task_progress` | `activity.batch { items: [{ kind:'progress', text, tool_uses, duration_ms }] }` | `thought` | subtask 阶段汇报 |
 | `runner.permission_request` | `interaction` | `action_card` | Agent 申请工具权限（入站回调 action_card_reply → InteractionRouter） |
 | `runner.state_changed` | （仅 events.log） | — | Agent 状态机内部事件，不出站 |
-| `task.started` | `status.started` | `event` + `status` | 双发：旧路 event=task.started（兼容）+ 新路 type=status state=started |
-| `task.completed` | `status.completed` | `event` + `status` | 双发：event=task.completed + type=status state=completed |
-| `task.interrupted` | `status.interrupted` | `event` + `status` | 双发：event=task.interrupted + type=status state=interrupted |
-| `task.error` | `status.error` | `event` + `status` | 双发：event=task.error + type=status state=error, severity=error |
-| `task.timeout` | `status.timeout` | `event` + `status` | 双发：event=task.timeout + type=status state=timeout |
+| `task.queued` | `status.queued` | `status` | state=queued，群聊 FIFO 排队通知 |
+| `task.started` | `status.started` | `status` | state=started |
+| `task.completed` | `status.completed` | `status` | state=completed |
+| `task.interrupted` | `status.interrupted` | `status` | state=interrupted |
+| `task.error` | `status.error` | `status` | state=error, severity=error |
+| `task.timeout` | `status.timeout` | `status` | state=timeout, severity=error |
 | `ctl.send (type=text)` | `result.text (isFinal=true)` | `text` | proactive 主动发送 |
 | `ctl.send (type=file)` | `result.file` | `file` | 带 attachments |
 | `ctl.send (type=image)` | `result.image` | `image` | 带 attachments |
-| `channel.notice` | `system.notice` | `event` | severity=info |
-| `channel.notice (subtype=owner_bound)` | `system.notice (subtype=owner_bound)` | `event` | 首次交互自动绑定 owner 通知 |
-| `channel.error` | `system.error (subtype=channel_down)` | `event` | severity=error；AUN 重连失败、跨通道 auth_error 告警 |
-| `system.started` | `system.notice (subtype=restarted)` | `event` | agent 上线通知（adapter.send，走 system.notice 路径） |
-| `system.shutdown` | `system.notice (subtype=shutdown)` | `event` | severity=info |
-| `system.restart` | `system.notice (subtype=restarted)` | `event` | /restart 命令触发的重启完成 |
-| `system.notice` | `system.notice` | `event` | severity=info |
-| `system.error` | `system.error` | `event` | severity=error |
-| `self-heal.started` | `system.notice (subtype=self_heal_started)` | `event` | 自愈开始 |
-| `self-heal.attempt` | `system.notice (subtype=self_heal_attempt)` | `event` | 单次重试 |
-| `self-heal.completed (success=true)` | `system.notice (subtype=self_heal_succeeded)` | `event` | 自愈成功 |
-| `self-heal.completed (success=false)` | `system.error (subtype=self_heal_failed)` | `event` | 自愈失败，recoverable=false |
-| `config.corrupted` | `system.error (subtype=config_corrupted)` | `event` | 配置文件损坏，已备份 |
-| `evolagent.error` | `system.error (subtype=agent_error)` | `event` | fingerprint_conflict / config_invalid 等启动失败 |
+| `channel.notice` | `system.notice` | `text` | 文本发送，severity=info |
+| `channel.notice (subtype=owner_bound)` | `system.notice (subtype=owner_bound)` | `text` | 首次交互自动绑定 owner 通知 |
+| `channel.error` | `system.error (subtype=channel_down)` | `text` | 文本发送；AUN 重连失败、跨通道 auth_error 告警 |
+| `system.started` | `system.notice (subtype=restarted)` | `text` | agent 上线通知（adapter.send，走 system.notice 路径） |
+| `system.shutdown` | `system.notice (subtype=shutdown)` | `text` | 文本发送 |
+| `system.restart` | `system.notice (subtype=restarted)` | `text` | /restart 命令触发的重启完成 |
+| `system.notice` | `system.notice` | `text` | 文本发送 |
+| `system.error` | `system.error` | `text` | 文本发送 |
+| `self-heal.started` | `system.notice (subtype=self_heal_started)` | `text` | 自愈开始 |
+| `self-heal.attempt` | `system.notice (subtype=self_heal_attempt)` | `text` | 单次重试 |
+| `self-heal.completed (success=true)` | `system.notice (subtype=self_heal_succeeded)` | `text` | 自愈成功 |
+| `self-heal.completed (success=false)` | `system.error (subtype=self_heal_failed)` | `text` | 自愈失败，recoverable=false |
+| `config.corrupted` | `system.error (subtype=config_corrupted)` | `text` | 配置文件损坏，已备份 |
+| `evolagent.error` | `system.error (subtype=agent_error)` | `text` | fingerprint_conflict / config_invalid 等启动失败 |
 | `evolagent.reloaded` | `command.result` | `text` | owner 主动 reload 的命令回显（不单独发通知） |
 | `runner.idle-timeout` (warn/notify) | `activity.batch { items: [{ kind:'notice', subtype:'health' }] }` | `thought` | 任务流内告警，任务继续 |
-| `runner.idle-timeout` (kill) | `status.timeout` | `event` + `status` | event=task.timeout 双发，强制中断 |
+| `runner.idle-timeout` (kill) | `status.timeout` | `status` | state=timeout，强制中断 |
 | `runner.file-sent` | （仅 events.log） | — | SEND_FILE 副作用事件，不出站 |
 | `runner.model-changed` | `command.result` | `text` | /model 命令回显已覆盖；Event 仅 events.log |
 | `runner.status` | `activity.batch { items: [{ kind:'notice' }] }` | `thought` | reset / abort / safe 等 Agent 状态文本通知 |
@@ -352,7 +355,7 @@ interface OutboundEnvelope {
 | `result.image` | adapter.send → AUN message.send type=image（降级丢弃） | adapter.send → AUN message.send type=image |
 | `result.error` | adapter.send（必发） | adapter.send（必发） |
 | `activity.batch` | IMRenderer 聚合窗口 → adapter.send（AUN 双发 thought 通道；其他渠道文本拼接） | IMRenderer 逐事件 → adapter.send（AUN thought.put；其他渠道文本拼接） |
-| `status.*` | adapter.send（AUN 双发 event+status；非 AUN 无操作） | adapter.send（同左） |
+| `status.*` | adapter.send（AUN 单发 type=status；非 AUN 无操作） | adapter.send（同左） |
 | `command.result` | adapter.send（必发） | adapter.send（必发） |
 | `command.error` | adapter.send（必发） | adapter.send（必发） |
 | `interaction` | adapter.send（必发；降级发 fallbackText） | adapter.send（必发；降级发 fallbackText） |
@@ -404,25 +407,21 @@ task.completed     → { taskId: "t-001", durationMs: 3200 }
 
 | Event | → Payload | 行为（interactive） |
 |---|---|---|
-| `task.started` | `status.started` | AUN 双发：event=task.started + type=status state=started |
+| `task.started` | `status.started` | AUN 单发：type=status state=started |
 | `runner.thinking` | thinking item 进入 itemsQueue | 抑制（showActivities=result，isFinal flush 时只发 result.text） |
 | `runner.tool_use` | `activity.batch { items: [{ kind:'tool_call', call_id:'c1', name:'Read', arguments:{...} }] }` | 加入聚合窗口 |
 | `runner.tool_result` | `activity.batch { items: [{ kind:'tool_result', call_id:'c1', name:'Read', ok:true }] }` | 加入聚合窗口 |
 | 聚合窗口到期 | — | flush → send（AUN 双发 thought.put + message.send type=thought） |
 | `runner.text.delta` ×2 | thinking item 进入 itemsQueue | 聚合后与其他 items 一起 flush |
 | `runner.text.done` | `result.text { isFinal: true, text: "..." }` | flush → send（AUN: text），isFinal=true 单独发 message.send type=text |
-| `task.completed` | `status.completed { metadata: { durationMs: 3200 } }` | AUN 双发：event=task.completed + type=status state=completed |
+| `task.completed` | `status.completed { metadata: { durationMs: 3200 } }` | AUN 单发：type=status state=completed |
 
 ### ChannelAdapter 出站（AUN）
 
 AUN adapter 收到 `send(envelope, payload)` 后转为 AUN 协议原生消息：
 
 ```javascript
-// status.started → event + status 双发
-rpc("message.send", { to: peer, payload: {
-  type: "event", event: "task.started", severity: "info",
-  data: { task_id: "t-001" }, thread_id: "t-001"
-}})
+// status.started → 单发 type=status
 rpc("message.send", { to: peer, payload: {
   type: "status", state: "started",
   task_id: "t-001", session_id: "...", severity: "info", thread_id: "t-001"
@@ -454,11 +453,7 @@ rpc("message.send", { to: peer, payload: {
   client_context: { task_id: "t-001", chatmode: "interactive" }
 }})
 
-// status.completed → event + status 双发
-rpc("message.send", { to: peer, payload: {
-  type: "event", event: "task.completed", severity: "info",
-  data: { task_id: "t-001", duration_ms: 3200 }, thread_id: "t-001"
-}})
+// status.completed → 单发 type=status
 rpc("message.send", { to: peer, payload: {
   type: "status", state: "completed",
   task_id: "t-001", session_id: "...", severity: "info", thread_id: "t-001"
@@ -525,7 +520,7 @@ AUN 渠道的 `send(envelope, payload)` 按 payload.kind 内部分发：
 | `result.file` | `message.send` + storage.put | `file` | 带 attachments |
 | `result.image` | `message.send` | `image` | base64 编码 |
 | `activity.batch` | `thought.put` + `message.send`（双发） | `thought` | items 数组，见下方 thought payload 格式 |
-| `status.*` | `message.send`（双发） | `event` + `status` | 兼容过渡，两路并行 |
+| `status.*` | `message.send` / `group.send` | `status` | 单发 type=status，含 state/task_id/session_id/severity |
 | `interaction` | `message.send` | `action_card` | fallbackText 降级 |
 | `custom` | `message.send` | 透传 payload 字符串 | menu.query 响应等 |
 
@@ -533,7 +528,7 @@ AUN 渠道的 `send(envelope, payload)` 按 payload.kind 内部分发：
 
 | 渠道 | file | image | interaction | markdown | thought | status |
 |---|---|---|---|---|---|---|
-| AUN | ✓ | ✓ | ✓ | ✓ | ✓ | ✓（结构化事件） |
+| AUN | ✓ | ✓ | ✓ | ✓ | ✓ | ✓（type=status） |
 | Feishu | ✓ | ✓ | ✓ | ✓ | ✗ | ✓（✓ 表情） |
 | WeChat | ✗ | ✗ | ✗ | ✗ | ✗ | ✓（sendTyping） |
 | DingTalk | ✓ | ✓ | ✓ | ✓ | ✗ | ✗ |
@@ -545,6 +540,19 @@ WeChat 当前仅文本 + typing，CDN 下载已实现（入站 image/file），�
 ### AUN 序列化规则
 
 AUN 协议的 `payload` 是任意 JSON 对象，服务端只做大小和可序列化检查，不校验业务字段。
+
+**当前有效的 AUN payload.type 值**：
+
+| type | 用途 | 来源 payload.kind |
+|---|---|---|
+| `text` | 文本消息（含命令回显、系统通知、错误） | `result.text` / `command.*` / `system.*` / `result.error` |
+| `thought` | 结构化思考/工具活动 | `activity.batch` |
+| `status` | 任务状态信号 | `status.*` |
+| `file` | 文件 | `result.file` |
+| `image` | 图片 | `result.image` |
+| `action_card` | 交互卡片 | `interaction` |
+
+**已废弃的 AUN payload.type 值**：`tool_call`、`tool_result`（合并到 `thought.items[].kind`）、`event`（合并到 `status`）。详见下方 thought payload 段落的废弃说明。
 
 #### thought payload（activity.batch）
 
@@ -595,18 +603,22 @@ client.call('message.send', {
 | `notice` | `{ kind, text, severity, subtype? }` |
 | `summary` | `{ kind, text, subtype?, is_error?, duration_ms? }` |
 
-#### status 双发
+> **已废弃的 AUN payload type**：早期版本曾使用独立的 `type: 'tool_call'` 和 `type: 'tool_result'` 作为顶层 payload type 发送工具调用/结果。现已全部收敛到 `type: 'thought'` 的 `items[].kind` 字段中（`kind: 'tool_call'` / `kind: 'tool_result'`）。前端应忽略旧的顶层 `type=tool_call` / `type=tool_result` 消息，统一从 `type=thought` 的 items 数组中读取。同理，旧的 `type: 'event'`（如 `event: 'task.started'`）已废弃，状态信号统一走 `type: 'status'`。
 
-`status.*` 在 AUN 渠道串行发送两条消息（event 在前，status 在后）：
+#### status 出站
+
+`status.*` 在 AUN 渠道发送单条结构化消息：
 
 ```javascript
-// 旧路（兼容）
-{ type: 'event', event: 'task.started', severity: 'info', data: { task_id, session_id }, thread_id? }
-// 新路（结构化）
+// 单发（结构化）
 { type: 'status', state: 'started', task_id, session_id, severity: 'info', thread_id? }
 ```
 
-状态映射：`start→started`, `done→completed`, `interrupted→interrupted`, `error→error`, `timeout→timeout`
+状态映射：`start→started`, `done→completed`, `queued→queued`, `interrupted→interrupted`, `error→error`, `timeout→timeout`
+
+severity 规则：`error` / `timeout` → `'error'`，其余 → `'info'`
+
+> **触发来源**：`status.queued` 由 MessageQueue 的 `task:queued` 事件触发（群聊 FIFO 场景，消息入队但前面有任务在处理），AUN channel 通过 EventBus 订阅后直接调用 `sendProcessingStatus`，不经过 IMRenderer/envelope 路径。其余 status 由 IMRenderer 通过 `adapter.send(envelope, payload)` 正常分发。
 
 #### 通用消息（text / file / system）
 
@@ -615,7 +627,7 @@ client.call('message.send', {
   to: targetAid,
   encrypt: shouldEncrypt,
   payload: {
-    type: 'text',          // 或 'file' / 'event' 等
+    type: 'text',          // 或 'file' / 'status' 等
     text: payload.text,
     thread_id: envelope.replyContext?.threadId,
     client_context: {
@@ -664,6 +676,6 @@ IMRenderer 的 `emit()` 调用 `logger.event()` 落盘 `logs/events.log`（受 `
 |---|---|---|
 | **Phase 1：协议定义** | 新增 `OutboundPayload` / `OutboundEnvelope` / `ChannelCapabilities` / `ThoughtItem` 类型到 `src/types.ts` | ✅ 完成 |
 | **Phase 2：IMRenderer** | 新增 `src/core/message/im-renderer.ts`，替代 StreamFlusher + ThoughtEmitter；思考/工具活动结构化为 `activity.batch + ThoughtItem[]`；EventBus 事件改名（agent:* → runner:*、message:* → task:*） | ✅ 完成 |
-| **Phase 3：Adapter 收敛** | 各渠道实现统一 `send()` 签名；旧分散方法（sendText/sendFile/sendImage/sendProcessingStatus/sendCustomPayload/sendInteraction/putThought）全部删除；命令回显 / 系统通知 / interaction 卡片迁移到 `adapter.send`；AUN status 双发（type=event + type=status）；AUN thought 双发（thought.put + message.send） | ✅ 完成 |
+| **Phase 3：Adapter 收敛** | 各渠道实现统一 `send()` 签名；旧分散方法（sendText/sendFile/sendImage/sendProcessingStatus/sendCustomPayload/sendInteraction/putThought）全部删除；命令回显 / 系统通知 / interaction 卡片迁移到 `adapter.send`；AUN status 单发（type=status）；AUN thought 双发（thought.put + message.send） | ✅ 完成 |
 
 **当前状态**：全三阶段已完成。`ChannelAdapter` 接口只剩 `send` / `capabilities` + 入站回调 + 连接管理 + AUN 私有扩展。所有出站通过 `adapter.send(envelope, payload)` 统一分发，渠道按 capabilities 自行决定呈现（结构化 / 文本降级）。

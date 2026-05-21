@@ -188,6 +188,7 @@ export class EvolAgent {
 
   setShowActivities(_channelKey: string, mode: ShowActivitiesMode): void {
     this.rawAgent.show_activities = mode;
+    this.merged.show_activities = mode;
     this.persist();
   }
 
