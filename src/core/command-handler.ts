@@ -20,6 +20,7 @@ import { parseTriggerSet } from './trigger/parser.js';
 import { TriggerManager } from './trigger/manager.js';
 import { TriggerScheduler, calcNextFireAt } from './trigger/scheduler.js';
 import type { Trigger } from '../types.js';
+import { checkLatestVersion, getLocalVersion, isLinkedInstall, compareVersions } from '../utils/npm-ops.js';
 
 export interface MenuNext {
   type: 'select' | 'text';
@@ -148,7 +149,7 @@ function formatIdleTime(ms: number): string {
 }
 
 // 支持的命令列表
-const commands = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/evolhelp', '/status', '/restart', '/model', '/setmodel', '/effort', '/agent', '/slist', '/session', '/rename', '/stop', '/clear', '/compact', '/repair', '/safe', '/fork', '/del', '/perm', '/file', '/check', '/rewind', '/activity', '/chatmode', '/dispatch', '/ask', '/resume', '/aid', '/rpc', '/storage', '/trigger'];
+const commands = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/evolhelp', '/status', '/restart', '/model', '/setmodel', '/effort', '/agent', '/slist', '/session', '/rename', '/stop', '/clear', '/compact', '/repair', '/safe', '/fork', '/del', '/perm', '/file', '/check', '/rewind', '/activity', '/chatmode', '/dispatch', '/ask', '/resume', '/aid', '/rpc', '/storage', '/trigger', '/upgrade'];
 
 // 命令别名映射
 const aliases: Record<string, string> = {
@@ -159,7 +160,7 @@ const aliases: Record<string, string> = {
 };
 
 // 命令快速路径前缀（所有命令都不进入消息队列）
-const quickCommandPrefixes = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/evolhelp', '/status', '/restart', '/model', '/setmodel', '/effort', '/agent', '/slist', '/session', '/rename', '/repair', '/fork', '/stop', '/clear', '/compact', '/safe', '/del', '/perm', '/file', '/check', '/p ', '/s ', '/name', '/rewind', '/rw', '/rw ', '/activity', '/chatmode', '/dispatch', '/ask', '/resume', '/aid', '/rpc', '/storage', '/trigger'];
+const quickCommandPrefixes = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/evolhelp', '/status', '/restart', '/model', '/setmodel', '/effort', '/agent', '/slist', '/session', '/rename', '/repair', '/fork', '/stop', '/clear', '/compact', '/safe', '/del', '/perm', '/file', '/check', '/p ', '/s ', '/name', '/rewind', '/rw', '/rw ', '/activity', '/chatmode', '/dispatch', '/ask', '/resume', '/aid', '/rpc', '/storage', '/trigger', '/upgrade'];
 
 export class CommandHandler {
   private adapters = new Map<string, ChannelAdapter>();
@@ -393,7 +394,6 @@ export class CommandHandler {
 
     if (opts.canWrite === false) return renderCommandCardAsText(card);
     if (!adapter?.send) return renderCommandCardAsText(card);
-    // session 忙碌时降级到文本，避免并发触发带参写操作
     if (this.isSessionBusy(opts.interaction.sessionId)) return renderCommandCardAsText(card);
 
     try {
@@ -2501,6 +2501,28 @@ export class CommandHandler {
       return { kind: 'command.result' as const, text: '🔄 服务正在重启，请稍候...（约 5 秒后恢复）' };
     }
 
+    // /upgrade 命令：检查版本更新，提示用户手动重启
+    if (normalizedContent === '/upgrade') {
+      if (!isAdmin) return { kind: 'command.error' as const, text: '❌ 无权限：升级检查仅限管理员使用' };
+
+      if (isLinkedInstall()) {
+        return { kind: 'command.result' as const, text: '⏭ 开发模式，跳过升级检查' };
+      }
+
+      const localVer = getLocalVersion();
+      const remoteVer = await checkLatestVersion();
+
+      if (!remoteVer) {
+        return { kind: 'command.result' as const, text: `⚠️ 无法连接 npm registry（当前版本 ${localVer}）` };
+      }
+
+      if (compareVersions(localVer, remoteVer) >= 0) {
+        return { kind: 'command.result' as const, text: `✓ 已是最新版本 (${localVer})` };
+      }
+
+      return { kind: 'command.result' as const, text: `📦 发现新版本 ${localVer} → ${remoteVer}\n执行 /restart 升级` };
+    }
+
     // /pwd 命令：显示当前项目路径
     if (normalizedContent === '/pwd') {
       // session 现在总是存在（上面已自动创建）
@@ -3691,6 +3713,11 @@ export class CommandHandler {
     const taskId = this.sessionManager.getActiveTaskId(session.id);
     const chatmode = session.sessionMode || 'interactive';
     const encrypted = this.sessionManager.getSessionEncrypt(session.id);
+
+    // 诊断日志：记录 inbound message_id 和 task_id 的对应关系
+    const inboundMsgId = meta?.messageId;
+    logger.info(`[CommandHandler] buildCtlReplyContext: sessionId=${session.id} inboundMsgId=${inboundMsgId ?? 'none'} taskId=${taskId ?? 'none'} chatmode=${chatmode} threadId=${ctx.threadId ?? 'none'}`);
+
     if (taskId || chatmode !== 'interactive' || encrypted != null) {
       ctx.metadata = {};
       if (taskId) ctx.metadata.taskId = taskId;

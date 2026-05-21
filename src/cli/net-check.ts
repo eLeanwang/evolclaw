@@ -258,7 +258,7 @@ async function runCheck(aid: string, formatJson: boolean): Promise<CheckResult[]
   // ── Step 8.5: agent.md 读取验证 ──
   try {
     const start = Date.now();
-    const { agentmdGet } = await import('./aun/aid/index.js');
+    const { agentmdGet } = await import('../aun/aid/index.js');
     const result = await suppressSdkOutput(() => agentmdGet(aid, { withVerification: true }));
     const elapsed = Date.now() - start;
     if (typeof result === 'object' && result.content) {
@@ -311,7 +311,7 @@ async function runCheck(aid: string, formatJson: boolean): Promise<CheckResult[]
     const isValidAid = (a: AidEntry) => a.aid.includes('.') && a.aid !== aid;
 
     // 统计每个 AID 的总消息活跃度（遍历所有本地 AID 的 sessions）
-    const { resolvePaths } = await import('./paths.js');
+    const { resolvePaths } = await import('../paths.js');
     const p = resolvePaths();
     const sessAunDir = path.join(p.sessionsDir, 'aun');
     const encode = (s: string) => s.replace(/[/%\\:*?"<>|]/g, ch => '%' + ch.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0'));
@@ -383,7 +383,7 @@ async function runCheck(aid: string, formatJson: boolean): Promise<CheckResult[]
     const echoResults: { target: string; ok: boolean; detail: string; replyText?: string }[] = [];
 
     // 读取所有目标的 agent.md（含签名验证）获取昵称和类型
-    const { agentmdGet: agentmdGetFn } = await import('./aun/aid/index.js');
+    const { agentmdGet: agentmdGetFn } = await import('../aun/aid/index.js');
     const targetMeta = new Map<string, { name: string; type: string; sigStatus: string }>();
 
     if (!formatJson) {
@@ -560,7 +560,7 @@ function shortAid(aid: string): string {
 interface AidEntry { aid: string; hasPrivateKey: boolean; hasAgentMd: boolean; }
 
 async function getAidList(): Promise<AidEntry[]> {
-  const { aidList } = await import('./aun/aid/index.js');
+  const { aidList } = await import('../aun/aid/index.js');
   return aidList() as AidEntry[];
 }
 

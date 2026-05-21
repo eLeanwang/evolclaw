@@ -2,7 +2,7 @@ import { logger } from '../utils/logger.js';
 import { requireOptional } from '../utils/npm-ops.js';
 import type { ChannelPlugin, ChannelInstance } from '../core/channel-loader.js';
 import type { MessageBridge } from '../core/message/message-bridge.js';
-import type { Config, DingtalkChannelConfig } from '../types.js';
+import type { Config, DingtalkChannelConfig, ThoughtItem } from '../types.js';
 import { normalizeChannelInstances, getChannelShowActivities } from '../utils/channel-helpers.js';
 import { formatItemsAsText } from '../core/message/items-formatter.js';
 
@@ -533,7 +533,8 @@ export class DingtalkChannelPlugin implements ChannelPlugin {
               await channel.sendImage(channelId, payload.data);
               return;
             case 'activity.batch': {
-              const text = formatItemsAsText(payload.items);
+              const filtered = payload.items.filter((i: ThoughtItem) => !(i.kind === 'tool_result' && i.ok));
+              const text = formatItemsAsText(filtered);
               if (text) await channel.sendMessage(channelId, text);
               return;
             }

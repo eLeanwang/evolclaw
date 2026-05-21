@@ -126,7 +126,7 @@ export type AgentEvent =
   | { type: 'task_progress'; summary?: string; toolUses?: number; durationMs?: number }
   | { type: 'session_id'; sessionId: string }
   | { type: 'state_changed'; state: 'idle' | 'running' | 'requires_action' }
-  | { type: 'complete'; result?: string; subtype?: string; isError?: boolean; errors?: string[]; durationMs?: number; costUsd?: number; terminalReason?: string; sessionTitle?: string }
+  | { type: 'complete'; result?: string; subtype?: string; isError?: boolean; errors?: string[]; durationMs?: number; costUsd?: number; terminalReason?: string; sessionTitle?: string; numTurns?: number; usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } }
   | { type: 'error'; error: string; errorType: 'context_too_long' | 'auth' | 'network' | 'unknown' };
 
 export interface QueryRequest {
@@ -759,7 +759,6 @@ export class AgentRunner {
    * 所有 SDK 特有的事件类型引用封装在此方法内
    */
   private async *transformStream(sdkStream: AsyncIterable<any>, sessionId: string): AsyncGenerator<AgentEvent> {
-    let hasTextDelta = false;
     let lastSessionId: string | undefined;
     // tool_use_id → tool_name 映射，用于从 SDKUserMessage 的 tool_result 块中还原工具名
     const toolUseNames = new Map<string, string>();
@@ -770,12 +769,6 @@ export class AgentRunner {
         lastSessionId = event.session_id;
         this.updateSessionId(sessionId, event.session_id);
         yield { type: 'session_id', sessionId: event.session_id };
-      }
-
-      // text_delta → text
-      if (event.type === 'text_delta' && event.text) {
-        hasTextDelta = true;
-        yield { type: 'text', text: event.text };
       }
 
       // system: compact_boundary → compact
@@ -805,7 +798,7 @@ export class AgentRunner {
             // 记录 id → name 映射，供后续 tool_result 使用
             if (content.id) toolUseNames.set(content.id, content.name);
             yield { type: 'tool_use', name: content.name, input: content.input, callId: content.id };
-          } else if (content.type === 'text' && content.text && !hasTextDelta) {
+          } else if (content.type === 'text' && content.text) {
             yield { type: 'text', text: content.text };
           }
         }
@@ -862,7 +855,11 @@ export class AgentRunner {
           costUsd: event.total_cost_usd,
           terminalReason: event.terminal_reason,
           sessionTitle: event.session_title,
+          numTurns: event.num_turns,
+          usage: event.usage,
         };
+        // result 是 SDK 流的终结事件，不再等待后续（防止 interrupt 后流不关闭导致挂起）
+        return;
       }
     }
   }

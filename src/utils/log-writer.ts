@@ -221,7 +221,8 @@ export class LogWriter {
       if (!generalPattern.test(name)) continue;
       const full = path.join(logDir, name);
       try {
-        if (fs.statSync(full).mtimeMs < cutoff) fs.unlinkSync(full);
+        const st = fs.lstatSync(full);
+        if (st.isSymbolicLink() || st.mtimeMs < cutoff) fs.unlinkSync(full);
       } catch {}
     }
   }

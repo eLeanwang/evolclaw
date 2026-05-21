@@ -32,7 +32,7 @@ export default defineConfig({
   test: {
     globals: true,
     environment: 'node',
-    pool: 'threads',
+    pool: 'forks',
     setupFiles: ['./tests/setup.ts'],
     testTimeout: 30000,
     exclude: ['**/node_modules/**', '**/dist/**', 'aun/**', 'projects/**', '**/worktrees/**'],

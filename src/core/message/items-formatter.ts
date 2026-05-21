@@ -17,7 +17,7 @@ export function formatItemsAsText(items: ThoughtItem[]): string {
 
 function formatItem(item: ThoughtItem): string {
   switch (item.kind) {
-    case 'thinking':
+    case 'text':
       return item.text;
     case 'reasoning':
       return `💭 ${item.text}`;
@@ -30,7 +30,7 @@ function formatItem(item: ThoughtItem): string {
         const errMsg = item.error || (typeof item.result === 'string' ? item.result : '执行失败');
         return `⚠️ ${item.name}: ${errMsg}`;
       }
-      return item.text ? `✅ ${item.name}: ${item.text}` : `✅ ${item.name}`;
+      return item.text ? `✓ ${item.name}: ${item.text}` : `✓ ${item.name}`;
     }
     case 'progress':
       return `⏳ ${item.text}`;

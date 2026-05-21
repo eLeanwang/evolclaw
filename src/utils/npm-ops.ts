@@ -94,12 +94,12 @@ export function getLocalVersion(): string {
 }
 
 /**
- * 查询 npm registry 上 evolclaw 的最新版本。
+ * 查询 npm registry 上指定包的最新版本。
  * 超时 15 秒，失败返回 null。
  */
-export function checkLatestVersion(): Promise<string | null> {
+export function checkLatestVersion(pkg = 'evolclaw'): Promise<string | null> {
   return new Promise((resolve) => {
-    execFile('npm', ['view', 'evolclaw', 'version'], { timeout: 15000 }, (err, stdout) => {
+    execFile('npm', ['view', pkg, 'version'], { timeout: 15000 }, (err, stdout) => {
       if (err) {
         resolve(null);
         return;
@@ -137,6 +137,45 @@ export async function tryUpgrade(): Promise<UpgradeResult> {
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       await npmInstallGlobal('evolclaw@latest');
+      return { status: 'upgraded', from: localVer, to: remoteVer };
+    } catch (e: any) {
+      lastError = e.stderr || e.message || String(e);
+    }
+  }
+  return { status: 'failed', from: localVer, to: remoteVer, error: lastError };
+}
+
+/**
+ * AUN SDK 升级流程：检查 → 比较 → 安装
+ * 仅在 SDK 已安装时检查升级，未安装则跳过。
+ */
+export async function tryUpgradeAunSdk(
+  resolveAunCoreSdkPkg: () => { version: string; path: string } | null,
+  AUN_CORE_SDK_PKG: string,
+): Promise<UpgradeResult> {
+  if (isLinkedInstall()) {
+    return { status: 'skipped' };
+  }
+
+  const installed = resolveAunCoreSdkPkg();
+  if (!installed) {
+    return { status: 'skipped' }; // SDK not installed, skip
+  }
+
+  const localVer = installed.version;
+  const remoteVer = await checkLatestVersion(AUN_CORE_SDK_PKG);
+  if (!remoteVer) {
+    return { status: 'skipped', error: 'Failed to check remote version' };
+  }
+
+  if (compareVersions(localVer, remoteVer) >= 0) {
+    return { status: 'no-update', from: localVer };
+  }
+
+  let lastError: string | undefined;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      await npmInstallGlobal(`${AUN_CORE_SDK_PKG}@latest`);
       return { status: 'upgraded', from: localVer, to: remoteVer };
     } catch (e: any) {
       lastError = e.stderr || e.message || String(e);

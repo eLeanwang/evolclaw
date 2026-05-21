@@ -13,7 +13,7 @@ import { normalizeChannelInstances, getChannelShowActivities } from '../utils/ch
 import { resolvePaths, getPackageRoot } from '../paths.js';
 import { saveToUploads, sanitizeFileName } from '../utils/media-cache.js';
 import { appendAidEvent } from '../utils/instance-registry.js';
-import { appendAidLifecycle } from '../utils/aid-lifecycle-log.js';
+import { appendAidLifecycle } from '../aun/aid/identity.js';
 import type { AidStatsCollector } from '../utils/stats.js';
 import { loadAgent, saveAgent } from '../config-store.js';
 import { getProcessStartTime } from '../utils/process-introspect.js';
@@ -1688,6 +1688,10 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     if (context?.threadId) payload.thread_id = context.threadId;
     if (context?.metadata?.taskId) payload.task_id = context.metadata.taskId;
     if (context?.metadata?.chatmode) payload.chatmode = context.metadata.chatmode;
+
+    // 诊断日志：记录 payload 构造结果（含 task_id / thread_id / chatmode）
+    logger.info(`${this.logPrefix()} deliverTextEntry: channelId=${channelId} thread_id=${payload.thread_id ?? 'none'} task_id=${payload.task_id ?? 'none'} chatmode=${payload.chatmode ?? 'none'} textLen=${finalText.length}`);
+
     const isGroup = this.isGroupId(channelId);
     const targetAid = channelId;
 
@@ -2354,7 +2358,7 @@ export class AUNChannelPlugin implements ChannelPlugin {
             case 'system.error':
             case 'result.error': {
               const sendCtx: ReplyContext = { ...(ctx ?? {}) };
-              if (payload.kind === 'result.text' && payload.isFinal) sendCtx.title = '✓ 最终回复:';
+              if (payload.kind === 'result.text' && payload.isFinal) sendCtx.title = '✅ 最终回复:';
               await channel.sendMessage(channelId, payload.text, sendCtx);
               return;
             }

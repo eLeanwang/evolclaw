@@ -24,44 +24,11 @@
 可多次调用发送多条消息 ，如果不想回复停止调用即可。
 禁止使用 AskUserQuestion 和 ExitPlanMode 工具——proactive 模式下应由你主动用 ctl send 与用户沟通。
 
-## trigger
-
-[触发器] 你可以通过 /trigger 命令设置延迟或定时任务，系统会在指定时间重新激活你执行任务。
-
-注册触发器：
-/trigger set --delay <时长> --prompt "<任务内容>"        延迟执行，如 30m、2h、1d
-/trigger set --at <ISO时间> --prompt "<任务内容>"        指定时刻，如 2026-05-15T09:00
-/trigger set --cron <表达式> --prompt "<任务内容>"       周期执行，如 "0 9 * * *"
-
-定位参数（默认当前上下文）：
-  --channel <实例名>     目标通道实例
-  --channelid <id>       目标对话 ID
-  --thread <id>          目标 thread（与 --session 互斥，需通道支持）
-  --session latest       续接最后活跃会话（默认，用户可见输出）
-  --session silent       新建独立会话静默执行（不打扰用户，适合后台任务）
-
-其他参数：
-  --name <标识>          触发器名称（默认自动生成）
-  --agent <名称>         目标 agent（默认当前）
-
-管理：
-/trigger                 查看活跃触发器
-/trigger list            查看所有触发器（含历史）
-/trigger cancel <名称>   取消触发器
-
-使用原则：
-- 用户要求"稍后/明天/定时"做某事时使用
-- 你判断某任务需要延迟到特定时刻才合适时主动使用
-- silent 适合：清理、扫描、生成文件等后台任务
-- latest 适合：提醒用户、跟进对话、结果需要用户看到
-- 触发器不支持修改，改内容请 cancel 后重建
-
-
 ---
 
 ## 格式说明
 
-模板由多个以 `## 段名` 分隔的段组成，加载器只识别 `runtime`、`group`、`proactive`、`trigger` 四段，其它段（包括本说明）会被忽略，可以随意增删。
+模板由多个以 `## 段名` 分隔的段组成，加载器只识别 `runtime`、`group`、`proactive` 三段，其它段（包括本说明）会被忽略，可以随意增删。
 
 **占位符语法：**
 
@@ -78,8 +45,6 @@
 | `runtime` | 每次消息 | 每条用户消息都会注入 |
 | `group` | `chatType === 'group' && peerId` | 仅群聊消息注入 |
 | `proactive` | `sessionMode === 'proactive'` | 仅 proactive 会话注入 |
-| `trigger` | 非触发器来源的消息 | 让 AI 知道可以使用 /trigger 命令 |
-
 三段以换行拼接，追加到该消息的 system prompt 末尾。
 
 ---

@@ -104,7 +104,8 @@ export class MessageQueue {
 
     const queueKey = this.getQueueKey(sessionKey, projectPath);
     const agentName = options?.agentName || DEFAULT_AGENT_NAME;
-    logger.debug(`[Queue] Enqueuing message for ${queueKey} (agent=${agentName})`);
+    const isProcessing = this.processing.has(queueKey);
+    logger.info(`[Queue] enqueue: key=${queueKey} processing=${isProcessing} queueLen=${this.queues.get(queueKey)?.length ?? 0} agent=${agentName}`);
 
     return new Promise((resolve, reject) => {
       if (!this.queues.has(queueKey)) {
@@ -140,7 +141,7 @@ export class MessageQueue {
 
   private async processNext(queueKey: string): Promise<void> {
     this.processing.add(queueKey);
-    logger.debug(`[Queue] Processing queue ${queueKey}`);
+    logger.info(`[Queue] processNext: start key=${queueKey}`);
 
     while (true) {
       // 等待外部锁释放（/compact, /clear 等快速命令）
@@ -152,7 +153,7 @@ export class MessageQueue {
 
       const queue = this.queues.get(queueKey);
       if (!queue || queue.length === 0) {
-        logger.debug(`[Queue] Queue ${queueKey} is empty, stopping`);
+        logger.info(`[Queue] processNext: queue empty, releasing key=${queueKey}`);
         this.processing.delete(queueKey);
         this.processingAgent.delete(queueKey);
         this.currentSessionKey = undefined;

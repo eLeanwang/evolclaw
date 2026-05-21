@@ -1,8 +1,8 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { resolvePaths, getPackageRoot } from './paths.js';
-import { decodeDirSegment, readAllJsonlLines } from './core/session/session-fs-store.js';
+import { resolvePaths, getPackageRoot } from '../paths.js';
+import { decodeDirSegment, readAllJsonlLines } from '../core/session/session-fs-store.js';
 
 // ==================== Types ====================
 
@@ -22,6 +22,8 @@ interface MessageLogEntry {
   model: string | null;
   permMode: string | null;
   durationMs: number | null;
+  numTurns?: number | null;
+  usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } | null;
 }
 
 interface PeerInfo {

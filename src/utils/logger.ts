@@ -28,6 +28,12 @@ const eventWriter = config.eventLog
   ? new LogWriter({ baseName: 'events', logDir: LOG_DIR, rotation: 'hourly', retention: { hours: 12 } })
   : null;
 
+// 渠道入站日志：记录从渠道收到的原始消息
+const channelInWriter = new LogWriter({ baseName: 'channel-in', logDir: LOG_DIR, rotation: 'hourly', retention: { hours: 12 } });
+
+// 渠道出站日志：记录发往渠道的所有消息
+const channelOutWriter = new LogWriter({ baseName: 'channel-out', logDir: LOG_DIR, rotation: 'hourly', retention: { hours: 12 } });
+
 function shouldLog(level: string): boolean {
   return (LEVELS[level] ?? 1) >= (LEVELS[currentLevel] ?? 1);
 }
@@ -73,5 +79,13 @@ export const logger = {
   event: (data: any) => {
     if (!eventWriter) return;
     eventWriter.write(JSON.stringify({ ts: localTimestamp(), ...data }));
+  },
+
+  channelIn: (data: any) => {
+    channelInWriter.write(JSON.stringify({ ts: localTimestamp(), ...data }));
+  },
+
+  channelOut: (data: any) => {
+    channelOutWriter.write(JSON.stringify({ ts: localTimestamp(), ...data }));
   }
 };

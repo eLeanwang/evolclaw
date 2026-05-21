@@ -192,6 +192,7 @@ export interface SessionMetadata {
   peerName?: string;                // 对端/发送者显示名
   groupId?: string;                 // 仅群聊：群 ID（如 AUN 的 group.issuer/grp_xxx）
   channelName?: string;             // 渠道实例名（审计/精确出站路由）
+  messageId?: string;               // 最近一次 inbound 消息的 message_id（用于诊断日志）
   agentSessions?: {
     codex?: string;
     gemini?: string;
@@ -759,7 +760,7 @@ export interface MergedAgentConfig extends AgentConfig {
  * 多个 item 在 IMRenderer 聚合窗口内打包成 activity.batch 发送
  */
 export type ThoughtItem =
-  | { kind: 'thinking'; text: string; duration_ms?: number }
+  | { kind: 'text'; text: string; duration_ms?: number }
   | { kind: 'reasoning'; text: string; duration_ms?: number }
   | { kind: 'tool_call'; call_id: string; name: string; arguments?: Record<string, unknown>; text?: string }
   | { kind: 'tool_result'; call_id: string; name: string; ok: boolean; result?: unknown; error?: string; duration_ms?: number; text?: string }
@@ -774,7 +775,7 @@ export type OutboundPayload =
   | { kind: 'result.error'; text: string; reason?: string }
   | { kind: 'activity.batch'; items: ThoughtItem[] }
   | { kind: 'status.started'; metadata?: Record<string, unknown> }
-  | { kind: 'status.completed'; metadata?: { durationMs?: number } }
+  | { kind: 'status.completed'; metadata?: { durationMs?: number; numTurns?: number; usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } } }
   | { kind: 'status.interrupted'; metadata?: { reason: string } }
   | { kind: 'status.error'; metadata?: { errorType?: string } }
   | { kind: 'status.timeout'; metadata?: { idleSec?: number } }
