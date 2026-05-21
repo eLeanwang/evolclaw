@@ -44,6 +44,7 @@ interface SendResult {
   from: string;
   to: string;
   error?: string;
+  retries: number;
 }
 
 interface RecvRecord {
@@ -479,39 +480,57 @@ Options:
   const sendStart = Date.now();
   let lastRender = 0;
 
+  const MAX_RETRIES = 3;
+  const RETRY_DELAY_MS = 500;
+
   const sendFns = tasks.map(t => async (): Promise<SendResult> => {
-    const sendTs = Date.now();
-    const text = buildMessageText(t.seq, t.sizeClass, sendTs, sessionId);
-    const t0 = Date.now();
-    try {
-      if (cliMode) {
-        const res = await cliSend(t.from, t.to, text, benchSlot);
-        const sendMs = Date.now() - t0;
-        return {
-          seq: t.seq, sizeClass: t.sizeClass, ok: res.ok, sendMs,
-          serverTimestamp: res.timestamp, sendTimestamp: sendTs,
-          from: t.from, to: t.to, error: res.error,
-        };
+    let lastError: string | undefined;
+    let retries = 0;
+
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      if (attempt > 0) {
+        retries++;
+        await new Promise(r => setTimeout(r, RETRY_DELAY_MS * attempt));
       }
-      const res = await msgSend({
-        from: t.from, to: t.to,
-        body: { mode: 'text', text },
-        slotId: benchSlot, aunPath,
-      });
-      const sendMs = Date.now() - t0;
-      return {
-        seq: t.seq, sizeClass: t.sizeClass, ok: res.ok, sendMs,
-        serverTimestamp: res.ok ? (res as any).timestamp : undefined,
-        sendTimestamp: sendTs, from: t.from, to: t.to,
-        error: !res.ok ? (res as MsgError).error : undefined,
-      };
-    } catch (e: any) {
-      return {
-        seq: t.seq, sizeClass: t.sizeClass, ok: false,
-        sendMs: Date.now() - t0, sendTimestamp: sendTs,
-        from: t.from, to: t.to, error: e.message || String(e),
-      };
+      const sendTs = Date.now();
+      const text = buildMessageText(t.seq, t.sizeClass, sendTs, sessionId);
+      const t0 = Date.now();
+      try {
+        if (cliMode) {
+          const res = await cliSend(t.from, t.to, text, benchSlot);
+          if (res.ok) {
+            return {
+              seq: t.seq, sizeClass: t.sizeClass, ok: true, sendMs: Date.now() - t0,
+              serverTimestamp: res.timestamp, sendTimestamp: sendTs,
+              from: t.from, to: t.to, retries,
+            };
+          }
+          lastError = res.error;
+          continue;
+        }
+        const res = await msgSend({
+          from: t.from, to: t.to,
+          body: { mode: 'text', text },
+          slotId: benchSlot, aunPath,
+        });
+        if (res.ok) {
+          return {
+            seq: t.seq, sizeClass: t.sizeClass, ok: true, sendMs: Date.now() - t0,
+            serverTimestamp: (res as any).timestamp, sendTimestamp: sendTs,
+            from: t.from, to: t.to, retries,
+          };
+        }
+        lastError = (res as MsgError).error;
+      } catch (e: any) {
+        lastError = e.message || String(e);
+      }
     }
+
+    return {
+      seq: t.seq, sizeClass: t.sizeClass, ok: false,
+      sendMs: 0, sendTimestamp: Date.now(),
+      from: t.from, to: t.to, error: lastError, retries,
+    };
   });
 
   await runPool(sendFns, concurrency, (r) => {
@@ -531,7 +550,11 @@ Options:
   if (!formatJson) {
     clearLine();
     const okCount = sendResults.filter(r => r.ok).length;
-    console.log(ok(`发送完成 ${okCount}/${totalMsgs}  耗时 ${sendDuration.toFixed(2)}s  ${(okCount / sendDuration).toFixed(1)} msg/s`));
+    const totalRetries = sendResults.reduce((sum, r) => sum + r.retries, 0);
+    const retriedCount = sendResults.filter(r => r.retries > 0).length;
+    let retryInfo = '';
+    if (totalRetries > 0) retryInfo = `  ${DIM}(${retriedCount} 条重试，共 ${totalRetries} 次)${RST}`;
+    console.log(ok(`发送完成 ${okCount}/${totalMsgs}  耗时 ${sendDuration.toFixed(2)}s  ${(okCount / sendDuration).toFixed(1)} msg/s${retryInfo}`));
     console.log('');
   }
 
@@ -633,14 +656,40 @@ Options:
   }
 
   // ── Phase 6: Compute Metrics & Output ──
-  const all = computeMetrics(sendResults, received, sendDuration);
+
+  // Detect unavailable AIDs: 100% loss as receiver
+  const unavailableAids: string[] = [];
+  for (const aid of aids) {
+    const sentToAid = sendResults.filter(r => r.ok && r.to === aid);
+    const recvFromAid = received.filter(r => {
+      const sr = sendResults.find(s => s.seq === r.seq);
+      return sr && sr.to === aid;
+    });
+    if (sentToAid.length > 0 && recvFromAid.length === 0) {
+      unavailableAids.push(aid);
+    }
+  }
+
+  // Filter out unavailable AIDs from metrics
+  const effectiveResults = unavailableAids.length > 0
+    ? sendResults.filter(r => !unavailableAids.includes(r.to))
+    : sendResults;
+  const effectiveReceived = unavailableAids.length > 0
+    ? received.filter(r => {
+        const sr = sendResults.find(s => s.seq === r.seq);
+        return sr && !unavailableAids.includes(sr.to);
+      })
+    : received;
+  const effectiveSentSeqs = new Set(effectiveResults.filter(r => r.ok).map(r => r.seq));
+
+  const all = computeMetrics(effectiveResults, effectiveReceived, sendDuration);
   const bySize: Record<SizeClass, BenchMetrics> = {
-    S: filterBySize(sendResults, received, 'S', sendDuration),
-    M: filterBySize(sendResults, received, 'M', sendDuration),
-    L: filterBySize(sendResults, received, 'L', sendDuration),
+    S: filterBySize(effectiveResults, effectiveReceived, 'S', sendDuration),
+    M: filterBySize(effectiveResults, effectiveReceived, 'M', sendDuration),
+    L: filterBySize(effectiveResults, effectiveReceived, 'L', sendDuration),
   };
 
-  const missingSeqs = [...sentSeqs].filter(s => !receivedSeqs.has(s));
+  const missingSeqs = [...effectiveSentSeqs].filter(s => !receivedSeqs.has(s));
 
   if (formatJson) {
     console.log(JSON.stringify({
@@ -693,13 +742,241 @@ Options:
   console.log(`  ${pad('带宽（发送方向）', W2, 'left')} ${BOLD}${bandwidthKBps.toFixed(1)} KB/s${RST}`);
   console.log('');
 
-  // 丢失消息列表
-  if (missingSeqs.length > 0) {
-    console.log(`${YELLOW}  ⚠ 丢失 ${missingSeqs.length} 条消息${RST}`);
-    const sample = missingSeqs.slice(0, 10);
-    console.log(`    ${DIM}seq: ${sample.join(', ')}${missingSeqs.length > 10 ? ` ... +${missingSeqs.length - 10}` : ''}${RST}`);
-  } else {
-    console.log(`${GREEN}  ✓ 零丢失，所有 ${all.sent} 条消息全部送达${RST}`);
+  // ── 送达分析报告 ──
+  renderDeliveryAnalysis(sendResults, received, receivedSeqs, sentSeqs, aids, totalMsgs, unavailableAids);
+}
+
+// ==================== Delivery Analysis ====================
+
+type LossReason = 'send_fail_429' | 'send_fail_timeout' | 'send_fail_conn' | 'send_fail_other' | 'pull_not_found';
+
+interface LossRecord {
+  seq: number;
+  from: string;
+  to: string;
+  sizeClass: SizeClass;
+  sendOk: boolean;
+  pullFound: boolean;
+  reason: LossReason;
+  error?: string;
+  sendTimestamp: number;
+}
+
+function classifyLossReason(r: SendResult): LossReason {
+  if (!r.ok) {
+    const err = (r.error || '').toLowerCase();
+    if (err.includes('429') || err.includes('rate') || err.includes('throttl')) return 'send_fail_429';
+    if (err.includes('timeout') || err.includes('timed out')) return 'send_fail_timeout';
+    if (err.includes('connect') || err.includes('econnrefused') || err.includes('socket')) return 'send_fail_conn';
+    return 'send_fail_other';
+  }
+  return 'pull_not_found';
+}
+
+const REASON_LABELS: Record<LossReason, string> = {
+  send_fail_429: '网关限流 (429/rate limit)',
+  send_fail_timeout: '发送超时',
+  send_fail_conn: '连接建立失败',
+  send_fail_other: '发送失败（其它）',
+  pull_not_found: '发送成功但 pull 未收到',
+};
+
+function renderDeliveryAnalysis(
+  sendResults: SendResult[],
+  received: RecvRecord[],
+  receivedSeqs: Set<number>,
+  sentSeqs: Set<number>,
+  aids: string[],
+  totalMsgs: number,
+  unavailableAids: string[],
+): void {
+  const allSent = sendResults.length;
+  const sendOkCount = sendResults.filter(r => r.ok).length;
+  const sendFailCount = allSent - sendOkCount;
+  const pullFoundCount = received.length;
+
+  // Retry stats
+  const totalRetries = sendResults.reduce((sum, r) => sum + r.retries, 0);
+  const retriedCount = sendResults.filter(r => r.retries > 0).length;
+  const retriedAndOk = sendResults.filter(r => r.retries > 0 && r.ok).length;
+  const retriedAndFail = sendResults.filter(r => r.retries > 0 && !r.ok).length;
+
+  // Build loss records
+  const losses: LossRecord[] = [];
+
+  // Send failures
+  for (const r of sendResults.filter(r => !r.ok)) {
+    losses.push({
+      seq: r.seq, from: r.from, to: r.to, sizeClass: r.sizeClass,
+      sendOk: false, pullFound: false,
+      reason: classifyLossReason(r), error: r.error,
+      sendTimestamp: r.sendTimestamp,
+    });
+  }
+
+  // Send ok but pull not found
+  for (const r of sendResults.filter(r => r.ok && !receivedSeqs.has(r.seq))) {
+    losses.push({
+      seq: r.seq, from: r.from, to: r.to, sizeClass: r.sizeClass,
+      sendOk: true, pullFound: false,
+      reason: 'pull_not_found', sendTimestamp: r.sendTimestamp,
+    });
+  }
+
+  // Exclude unavailable AIDs from loss calculation
+  const effectiveLosses = unavailableAids.length > 0
+    ? losses.filter(l => !unavailableAids.includes(l.to))
+    : losses;
+
+  // Show unavailable AIDs separately
+  if (unavailableAids.length > 0) {
+    console.log(`${BOLD}  不可用 AID（已排除出统计）${RST}`);
+    for (const aid of unavailableAids) {
+      const sentTo = sendResults.filter(r => r.to === aid).length;
+      const sentFrom = sendResults.filter(r => r.from === aid).length;
+      const aidShort = aid.split('.')[0];
+      console.log(`    ${RED}${aidShort}${RST}  发出 ${sentFrom} 条  应收 ${sentTo} 条  pull 收到 0 条`);
+    }
+    console.log('');
+  }
+
+  if (effectiveLosses.length === 0 && sendFailCount === 0) {
+    console.log(`${GREEN}  ✓ 零丢失，所有 ${sendOkCount} 条消息全部送达${RST}`);
+    if (totalRetries > 0) {
+      console.log(`    ${DIM}重试统计: ${retriedCount} 条消息触发重试，共 ${totalRetries} 次，重试后成功 ${retriedAndOk} 条，仍失败 ${retriedAndFail} 条${RST}`);
+    }
+    console.log('');
+    return;
+  }
+
+  console.log(`${BOLD}  送达分析报告${RST}`);
+  console.log(`  ${'━'.repeat(50)}\n`);
+
+  // ── 1. 总览 ──
+  console.log(`  ${BOLD}总览${RST}`);
+  const effectiveSent = unavailableAids.length > 0 ? sendResults.filter(r => !unavailableAids.includes(r.to)).length : allSent;
+  const effectiveSendOk = unavailableAids.length > 0 ? sendResults.filter(r => r.ok && !unavailableAids.includes(r.to)).length : sendOkCount;
+  const effectivePullFound = unavailableAids.length > 0 ? received.filter(r => { const sr = sendResults.find(s => s.seq === r.seq); return sr && !unavailableAids.includes(sr.to); }).length : pullFoundCount;
+  console.log(`    总发送 ${effectiveSent}  成功 ${effectiveSendOk}  失败 ${effectiveSent - effectiveSendOk}  pull 收到 ${effectivePullFound}  未送达 ${effectiveLosses.length}`);
+  if (totalRetries > 0) {
+    console.log(`    ${DIM}重试: ${retriedCount} 条触发重试，共 ${totalRetries} 次 → 成功 ${retriedAndOk} / 仍失败 ${retriedAndFail}${RST}`);
+  }
+  console.log('');
+
+  // ── 2. 原因分类 ──
+  console.log(`  ${BOLD}原因分类${RST}`);
+  const byReason = new Map<LossReason, LossRecord[]>();
+  for (const l of effectiveLosses) {
+    const arr = byReason.get(l.reason) || [];
+    arr.push(l);
+    byReason.set(l.reason, arr);
+  }
+
+  const reasonOrder: LossReason[] = ['send_fail_429', 'send_fail_timeout', 'send_fail_conn', 'send_fail_other', 'pull_not_found'];
+  for (const reason of reasonOrder) {
+    const items = byReason.get(reason);
+    if (!items || items.length === 0) continue;
+    const pct = ((items.length / effectiveLosses.length) * 100).toFixed(1);
+    const color = reason === 'pull_not_found' ? YELLOW : RED;
+    console.log(`    ${color}${pad(String(items.length), 4)} 条${RST}  (${pad(pct + '%', 6)})  ${REASON_LABELS[reason]}`);
+  }
+  console.log('');
+
+  // ── 3. 按接收方分布 ──
+  console.log(`  ${BOLD}按接收方 AID 分布${RST}`);
+  const byReceiver = new Map<string, { total: number; lost: number }>();
+  for (const r of sendResults) {
+    if (unavailableAids.includes(r.to)) continue;
+    const entry = byReceiver.get(r.to) || { total: 0, lost: 0 };
+    entry.total++;
+    if (!r.ok || !receivedSeqs.has(r.seq)) entry.lost++;
+    byReceiver.set(r.to, entry);
+  }
+
+  let maxLossRate = 0;
+  let worstAid = '';
+  for (const [aid, stat] of byReceiver) {
+    const rate = stat.total > 0 ? stat.lost / stat.total : 0;
+    const pct = (rate * 100).toFixed(1);
+    const flag = rate > 0.4 ? ` ${RED}← 异常${RST}` : rate > 0.25 ? ` ${YELLOW}← 偏高${RST}` : '';
+    const aidShort = aid.split('.')[0];
+    console.log(`    ${pad(aidShort, 16, 'left')} ${stat.lost}/${stat.total} 丢失 (${pct}%)${flag}`);
+    if (rate > maxLossRate) { maxLossRate = rate; worstAid = aid; }
+  }
+  console.log('');
+
+  // ── 4. 时间段分析 ──
+  console.log(`  ${BOLD}时间段分析${RST}`);
+  const midSeq = Math.floor(totalMsgs / 2);
+  const effectiveFirst = sendResults.filter(r => r.seq < midSeq && !unavailableAids.includes(r.to));
+  const effectiveSecond = sendResults.filter(r => r.seq >= midSeq && !unavailableAids.includes(r.to));
+
+  const firstLost = effectiveFirst.filter(r => !r.ok || !receivedSeqs.has(r.seq)).length;
+  const secondLost = effectiveSecond.filter(r => !r.ok || !receivedSeqs.has(r.seq)).length;
+  const firstPct = effectiveFirst.length > 0 ? ((firstLost / effectiveFirst.length) * 100).toFixed(1) : '0.0';
+  const secondPct = effectiveSecond.length > 0 ? ((secondLost / effectiveSecond.length) * 100).toFixed(1) : '0.0';
+
+  const degraded = parseFloat(secondPct) > parseFloat(firstPct) * 1.5 && parseFloat(secondPct) > 5;
+  console.log(`    前半段 (seq 0-${midSeq - 1})      ${pad(String(firstLost), 3)}/${effectiveFirst.length} 丢失 (${firstPct}%)`);
+  console.log(`    后半段 (seq ${midSeq}-${totalMsgs - 1})    ${pad(String(secondLost), 3)}/${effectiveSecond.length} 丢失 (${secondPct}%)${degraded ? ` ${RED}← 劣化${RST}` : ''}`);
+  console.log('');
+
+  // ── 5. 丢失明细（前 10 条）──
+  if (effectiveLosses.length > 0) {
+    console.log(`  ${BOLD}丢失明细${RST} ${DIM}(前 10 条)${RST}`);
+    console.log(`    ${DIM}${pad('seq', 5, 'left')}${pad('from', 12, 'left')}${pad('to', 12, 'left')}${pad('size', 5, 'left')}${pad('retry', 6, 'left')}${pad('send', 5, 'left')}${pad('pull', 5, 'left')}原因${RST}`);
+    for (const l of effectiveLosses.slice(0, 10)) {
+      const fromShort = l.from.split('.')[0].slice(0, 10);
+      const toShort = l.to.split('.')[0].slice(0, 10);
+      const sendMark = l.sendOk ? `${GREEN}✓${RST}` : `${RED}✗${RST}`;
+      const pullMark = l.pullFound ? `${GREEN}✓${RST}` : `${RED}✗${RST}`;
+      const sr = sendResults.find(s => s.seq === l.seq);
+      const retryStr = sr && sr.retries > 0 ? `×${sr.retries}` : '-';
+      console.log(`    ${pad(String(l.seq), 5, 'left')}${pad(fromShort, 12, 'left')}${pad(toShort, 12, 'left')}${pad(l.sizeClass, 5, 'left')}${pad(retryStr, 6, 'left')}${sendMark}${' '.repeat(4)}${pullMark}${' '.repeat(4)}${REASON_LABELS[l.reason]}`);
+    }
+    if (effectiveLosses.length > 10) {
+      console.log(`    ${DIM}... +${effectiveLosses.length - 10} 条${RST}`);
+    }
+    console.log('');
+  }
+
+  // ── 6. 调优建议 ──
+  console.log(`  ${BOLD}调优建议${RST}`);
+  const suggestions: string[] = [];
+
+  const rate429 = byReason.get('send_fail_429')?.length ?? 0;
+  if (rate429 > 0) {
+    suggestions.push(`网关限流 ${rate429} 次，建议降低 --concurrency 或加入退避策略`);
+  }
+
+  const connFail = byReason.get('send_fail_conn')?.length ?? 0;
+  if (connFail > 0) {
+    suggestions.push(`连接失败 ${connFail} 次，检查网络稳定性或网关并发连接上限`);
+  }
+
+  const pullNotFound = effectiveLosses.filter(l => l.reason === 'pull_not_found').length;
+  if (pullNotFound > 0) {
+    suggestions.push(`${pullNotFound} 条发送成功但 pull 未收到 — 可能原因：`);
+    suggestions.push(`  • 网关消息保留窗口有限（消息过期）`);
+    suggestions.push(`  • pull limit 截断（当前 200/页，可增加 --wait 等待时间）`);
+    suggestions.push(`  • daemon 长连接消费了消息（建议测试前 evolclaw stop）`);
+  }
+
+  if (degraded) {
+    suggestions.push(`后半段丢失率明显劣化，网关可能在持续高负载下降级，建议降低 --concurrency`);
+  }
+
+  if (maxLossRate > 0.4) {
+    const worstShort = worstAid.split('.')[0];
+    suggestions.push(`${worstShort} 丢失率异常高 (${(maxLossRate * 100).toFixed(0)}%)，检查该 AID 连接稳定性`);
+  }
+
+  if (suggestions.length === 0) {
+    suggestions.push('无明显异常');
+  }
+
+  for (const s of suggestions) {
+    console.log(`    ${s.startsWith(' ') ? DIM + s + RST : '• ' + s}`);
   }
   console.log('');
 }
