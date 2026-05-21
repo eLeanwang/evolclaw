@@ -731,17 +731,22 @@ export class MessageProcessor {
       }
 
       // prompt_too_long：SDK 以 complete 事件（非异常）返回，需在此处触发 compact
-      if (streamResult.isError && streamResult.terminalReason === 'prompt_too_long' && session.agentSessionId && hasCompact(agent)) {
+      // 检测条件：terminalReason 明确为 prompt_too_long，或最后文本包含 "Prompt is too long"
+      const isPromptTooLong = streamResult.isError && session.agentSessionId && hasCompact(agent) && (
+        streamResult.terminalReason === 'prompt_too_long' ||
+        streamResult.lastReplyText.includes('Prompt is too long')
+      );
+      if (isPromptTooLong) {
         renderer.addNotice('⚠️ 上下文过长，正在压缩会话...', 'warn', 'compact-trigger', true);
         await renderer.flush();
-        const compacted = await agent.compact(session.id, session.agentSessionId, absoluteProjectPath);
+        const compacted = await agent.compact(session.id, session.agentSessionId!, absoluteProjectPath);
         if (compacted) {
           renderer.addNotice('✅ 压缩完成，正在重试...', 'info', 'compact-retry', true);
           const retryStream = await agent.runQuery(
             session.id,
             '上下文已自动压缩，请继续之前未完成的任务。',
             absoluteProjectPath,
-            session.agentSessionId,
+            session.agentSessionId!,
             undefined,
             effectiveSystemPrompt,
             this.sessionManager
@@ -1335,7 +1340,7 @@ export class MessageProcessor {
         // SDK 可能产生多个 complete 事件（如 subagent 或 auto-compact 二次查询），
         // 仅记录状态，最终 flush(true) 在流结束后统一执行
         if (event.type === 'complete') {
-          logger.debug(`[MessageProcessor] complete event: hasReceivedText=${hasReceivedText}, isError=${event.isError}, shouldSuppress=${shouldSuppress()}`);
+          logger.info(`[MessageProcessor] complete event: isError=${event.isError} terminalReason=${event.terminalReason ?? 'none'} subtype=${event.subtype ?? 'none'} hasReceivedText=${hasReceivedText}`);
 
           // 自动回填会话名称
           if (event.sessionTitle && session.name === '默认会话') {
