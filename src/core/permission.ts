@@ -109,7 +109,7 @@ export function summarizeToolInput(toolName: string, input: Record<string, unkno
 
   const extractors: Record<string, (i: any) => string | undefined> = {
     'Read':  (i) => i.file_path,
-    'Edit':  (i) => i.file_path,
+    'Edit':  (i) => formatEditSummary(i),
     'Write': (i) => i.file_path,
     'Bash':  (i) => {
       const cmd = i.command?.substring(0, 80) || '';
@@ -161,6 +161,72 @@ export function summarizeToolInput(toolName: string, input: Record<string, unkno
 }
 
 export type PermissionDecision = 'allow' | 'always' | 'deny';
+
+/** 为 Edit 工具生成 diff 风格摘要 */
+function formatEditSummary(input: any): string {
+  const filePath = input.file_path || '';
+  const oldStr = typeof input.old_string === 'string' ? input.old_string : '';
+  const newStr = typeof input.new_string === 'string' ? input.new_string : '';
+
+  if (!oldStr && !newStr) return filePath;
+
+  const MAX_DIFF_LINES = 14;
+
+  const oldLines = oldStr.split('\n');
+  const newLines = newStr.split('\n');
+
+  const diffLines: string[] = [];
+  diffLines.push('```diff');
+
+  // 找公共前缀行数
+  let prefixLen = 0;
+  while (prefixLen < oldLines.length && prefixLen < newLines.length && oldLines[prefixLen] === newLines[prefixLen]) {
+    prefixLen++;
+  }
+  // 找公共后缀行数
+  let suffixLen = 0;
+  while (
+    suffixLen < oldLines.length - prefixLen &&
+    suffixLen < newLines.length - prefixLen &&
+    oldLines[oldLines.length - 1 - suffixLen] === newLines[newLines.length - 1 - suffixLen]
+  ) {
+    suffixLen++;
+  }
+
+  const CONTEXT = 2;
+  // 上下文前缀（最多 CONTEXT 行）
+  const ctxStart = Math.max(0, prefixLen - CONTEXT);
+  for (let i = ctxStart; i < prefixLen; i++) {
+    diffLines.push(`  ${oldLines[i]}`);
+  }
+
+  // 删除行
+  const removedEnd = oldLines.length - suffixLen;
+  for (let i = prefixLen; i < removedEnd && diffLines.length < MAX_DIFF_LINES; i++) {
+    diffLines.push(`- ${oldLines[i]}`);
+  }
+
+  // 新增行
+  const addedEnd = newLines.length - suffixLen;
+  for (let i = prefixLen; i < addedEnd && diffLines.length < MAX_DIFF_LINES; i++) {
+    diffLines.push(`+ ${newLines[i]}`);
+  }
+
+  // 上下文后缀（最多 CONTEXT 行）
+  const ctxEnd = Math.min(oldLines.length, removedEnd + CONTEXT);
+  for (let i = removedEnd; i < ctxEnd && diffLines.length < MAX_DIFF_LINES + 2; i++) {
+    diffLines.push(`  ${oldLines[i]}`);
+  }
+
+  if (diffLines.length > MAX_DIFF_LINES + 2) {
+    diffLines.splice(MAX_DIFF_LINES, diffLines.length, '  ...');
+  }
+
+  diffLines.push('```');
+
+  // 文件路径单独一行，代码块紧跟其后
+  return `${filePath}\n${diffLines.join('\n')}`;
+}
 
 interface PendingPermission {
   sessionId: string;

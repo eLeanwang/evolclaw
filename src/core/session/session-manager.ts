@@ -226,6 +226,9 @@ export class SessionManager {
     this.appendMeta(session.channel, session.channelId, session);
     const active = this.readActive(session.channel, session.channelId);
     if (active && active.id === session.id) {
+      if (active.processingState && !session.processingState) {
+        session.processingState = active.processingState;
+      }
       this.writeActive(session.channel, session.channelId, session);
     }
     return undefined;
@@ -811,6 +814,9 @@ export class SessionManager {
     this.appendMeta(current.channel, current.channelId, current);
     const active = this.readActive(current.channel, current.channelId);
     if (active && active.id === sessionId) {
+      if (active.processingState && !current.processingState) {
+        current.processingState = active.processingState;
+      }
       this.writeActive(current.channel, current.channelId, current);
     }
   }
@@ -825,6 +831,9 @@ export class SessionManager {
     this.appendMeta(current.channel, current.channelId, current);
     const active = this.readActive(current.channel, current.channelId);
     if (active && active.id === sessionId) {
+      if (active.processingState && !current.processingState) {
+        current.processingState = active.processingState;
+      }
       this.writeActive(current.channel, current.channelId, current);
     }
     return true;
