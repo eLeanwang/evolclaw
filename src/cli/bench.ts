@@ -521,28 +521,67 @@ Options:
   if (!formatJson) console.log(`${DIM}  Phase 1: 准备 AIDs${RST}`);
 
   const allAids = aidList(aunPath);
-  const withKey = allAids.filter(a => a.hasPrivateKey).map(a => a.aid);
   const aids: string[] = [];
 
-  if (!formatJson) console.log(ok(`本地找到 ${withKey.length} 个有私钥的 AID，正在验证可用性...`));
+  // AID is usable if: has private key + cert not expired + key/cert public key match
+  const { aidShow } = await import('../aun/aid/identity.js');
+  const resolvedAunPath = aunPath ?? path.join(os.homedir(), '.aun');
+  const usableAids: string[] = [];
+  const skippedAids: { aid: string; reason: string }[] = [];
 
-  // Suppress SDK error logs during probe (broken AIDs are expected)
-  const origError = console.error;
-  console.error = () => {};
+  for (const a of allAids) {
+    if (!a.hasPrivateKey) continue;
+    try {
+      const info = aidShow(a.aid, { aunPath });
+      if (!info.certExpiresAt) {
+        skippedAids.push({ aid: a.aid, reason: '无证书' });
+        continue;
+      }
+      const expiry = new Date(info.certExpiresAt).getTime();
+      if (expiry <= Date.now()) {
+        skippedAids.push({ aid: a.aid, reason: '证书过期' });
+        continue;
+      }
+      // Verify key/cert public key match (same check as SDK keystore)
+      const aidDir = path.join(resolvedAunPath, 'AIDs', a.aid);
+      const keyJsonPath = path.join(aidDir, 'private', 'key.json');
+      const certPemPath = path.join(aidDir, 'public', 'cert.pem');
+      if (!fs.existsSync(keyJsonPath) || !fs.existsSync(certPemPath)) {
+        skippedAids.push({ aid: a.aid, reason: '缺少 key.json 或 cert.pem' });
+        continue;
+      }
+      const keyJson = JSON.parse(fs.readFileSync(keyJsonPath, 'utf-8'));
+      const localPubB64 = keyJson.public_key_der_b64;
+      if (localPubB64) {
+        const certPem = fs.readFileSync(certPemPath, 'utf-8');
+        const x509 = new crypto.X509Certificate(certPem);
+        const certPubDer = x509.publicKey.export({ type: 'spki', format: 'der' });
+        const localPubDer = Buffer.from(localPubB64, 'base64');
+        if (!certPubDer.equals(localPubDer)) {
+          skippedAids.push({ aid: a.aid, reason: '私钥与证书公钥不匹配' });
+          continue;
+        }
+      }
+      usableAids.push(a.aid);
+    } catch (e: any) {
+      skippedAids.push({ aid: a.aid, reason: e.message });
+    }
+  }
 
-  // Probe all AIDs with keys to find working ones
-  const probeAll = await benchAuth(withKey, concurrency, aunPath);
-  const workingAids = probeAll.filter(r => r.ok).map(r => r.aid);
+  if (!formatJson) {
+    console.log(ok(`本地找到 ${usableAids.length} 个有效 AID（私钥+证书完好+未过期）`));
+    if (skippedAids.length > 0) {
+      console.log(`    ${DIM}跳过 ${skippedAids.length} 个: ${skippedAids.slice(0, 3).map(s => `${s.aid.split('.')[0]}(${s.reason})`).join(', ')}${skippedAids.length > 3 ? ' ...' : ''}${RST}`);
+    }
+  }
 
-  console.error = origError;
-
-  if (workingAids.length >= numAids) {
-    aids.push(...workingAids.slice(0, numAids));
-    if (!formatJson) console.log(ok(`选取 ${numAids} 个可用 AID（共 ${workingAids.length} 个认证通过）`));
+  if (usableAids.length >= numAids) {
+    aids.push(...usableAids.slice(0, numAids));
+    if (!formatJson) console.log(ok(`选取 ${numAids} 个 AID`));
   } else {
-    aids.push(...workingAids);
-    const need = numAids - workingAids.length;
-    if (!formatJson) console.log(warn(`仅 ${workingAids.length} 个可用，需创建 ${need} 个新 AID`));
+    aids.push(...usableAids);
+    const need = numAids - usableAids.length;
+    if (!formatJson) console.log(warn(`仅 ${usableAids.length} 个可用，需创建 ${need} 个新 AID`));
     for (let i = 0; i < need; i++) {
       const hex = crypto.randomBytes(4).toString('hex');
       const newAid = `bench-${hex}.agentid.pub`;

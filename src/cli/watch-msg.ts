@@ -64,6 +64,7 @@ const CYAN = isTTY ? '\x1b[36m' : '';
 const GREEN = isTTY ? '\x1b[32m' : '';
 const BLUE = isTTY ? '\x1b[34m' : '';
 const ORANGE = isTTY ? '\x1b[38;5;208m' : '';
+const MAGENTA = isTTY ? '\x1b[35m' : '';
 const BG_SEL = isTTY ? '\x1b[48;5;236m' : '';  // dark gray background for selected row
 
 // ==================== Helpers ====================
@@ -98,6 +99,33 @@ function truncate(s: string, maxWidth: number): string {
   return s;
 }
 
+function wrapText(s: string, lineWidth: number, maxLines: number): string[] {
+  const result: string[] = [];
+  let remaining = s;
+  while (remaining.length > 0 && result.length < maxLines) {
+    let w = 0;
+    let cutIdx = 0;
+    for (const ch of remaining) {
+      const code = ch.charCodeAt(0);
+      const cw = (code >= 0x4e00 && code <= 0x9fff) || (code >= 0x3000 && code <= 0x30ff) ||
+                 (code >= 0xff00 && code <= 0xffef) ? 2 : 1;
+      if (w + cw > lineWidth) break;
+      w += cw;
+      cutIdx += ch.length;
+    }
+    if (cutIdx === 0) break;
+    const isLast = result.length === maxLines - 1;
+    if (isLast && cutIdx < remaining.length) {
+      result.push(truncate(remaining, lineWidth));
+    } else {
+      result.push(remaining.slice(0, cutIdx));
+    }
+    remaining = remaining.slice(cutIdx);
+  }
+  if (result.length === 0) result.push('');
+  return result;
+}
+
 function formatTimeAgo(ms: number): string {
   const sec = Math.floor(ms / 1000);
   if (sec < 60) return `${sec}s`;
@@ -106,6 +134,10 @@ function formatTimeAgo(ms: number): string {
   const hour = Math.floor(min / 60);
   if (hour < 24) return `${hour}h`;
   return `${Math.floor(hour / 24)}d`;
+}
+
+function formatNumber(n: number): string {
+  return n.toLocaleString('en-US');
 }
 
 function formatTime(ts: number): string {
@@ -303,22 +335,32 @@ function renderMessagesPanel(state: WatchMsgState, width: number, height: number
   const scrollbar = renderScrollbar(totalMsgs, visibleCount, state.messageScrollOffset, contentHeight);
 
   const msgWidth = width - 3;
+  const contentLineWidth = msgWidth - 2;
+  const maxContentLines = 3;
   for (let i = startIdx; i < endIdx; i++) {
     const m = msgs[i];
     const time = formatDateTime(m.ts);
     const dir = m.dir === 'in' ? `${GREEN}↓${RST}` : `${BLUE}↑${RST}`;
-    const from = shortAid(m.from);
-    const to = shortAid(m.to);
-    const header = `${DIM}${time}${RST} ${dir} ${ORANGE}${from}${RST}${DIM}→${RST}${GREEN}${to}${RST}`;
+    const isGroup = m.chatType === 'group';
+    const chatTag = isGroup ? `${MAGENTA}[群聊]${RST} ` : '';
+    const byteLen = Buffer.byteLength(m.content, 'utf-8');
+    const lenTag = `${DIM}${formatNumber(byteLen)}B${RST}`;
+    const fromDisplay = isGroup && m.groupId && m.dir === 'in' ? m.groupId : m.from;
+    const toDisplay = isGroup && m.groupId && m.dir === 'out' ? m.groupId : m.to;
+    const header = `${DIM}${time}${RST} ${dir}${chatTag} ${ORANGE}${fromDisplay}${RST}${DIM}→${RST}${GREEN}${toDisplay}${RST} ${lenTag}`;
     const headerLine = padRight(header, msgWidth);
     const sbIdx = lines.length - 1;
     lines.push(`${headerLine} ${scrollbar[sbIdx] || ' '}`);
 
     if (lines.length - 1 < contentHeight) {
-      const content = truncate(m.content.replace(/\n/g, ' '), msgWidth - 2);
-      const contentLine = padRight(`  ${content}`, msgWidth);
-      const sbIdx2 = lines.length - 1;
-      lines.push(`${contentLine} ${scrollbar[sbIdx2] || ' '}`);
+      const rawContent = m.content.replace(/\n/g, ' ');
+      const wrappedLines = wrapText(rawContent, contentLineWidth, maxContentLines);
+      for (const wl of wrappedLines) {
+        if (lines.length - 1 >= contentHeight) break;
+        const contentLine = padRight(`  ${wl}`, msgWidth);
+        const sbIdx2 = lines.length - 1;
+        lines.push(`${contentLine} ${scrollbar[sbIdx2] || ' '}`);
+      }
     }
   }
 

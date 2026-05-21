@@ -44,7 +44,7 @@ function resolveTarget(ba: string, dir: string): string {
     case 'cc':
       return path.join(dir, '.claude', 'rules', 'eck');
     case 'codex':
-      return path.join(dir, '.codex', 'rules', 'eck');
+      return path.join(dir, '.codex', 'instructions', 'eck');
     case 'gemini':
       return path.join(dir, '.gemini', 'rules', 'eck');
     default:
@@ -100,12 +100,12 @@ function cleanEmptyParents(dir: string): void {
 // ── 子命令 ──
 
 function showHelp(): void {
-  console.log(`Usage: evolclaw link-rules [subcommand] [baseagent] [--dir <path>]
+  console.log(`Usage: evolclaw link-rules <subcommand> [baseagent] [--dir <path>]
 
 Subcommands:
-  (none)        Connect ECK rules to a project directory (default: cwd)
-  status        Show connection state for all baseagents
+  connect       Connect ECK rules to a project directory (default: cwd)
   disconnect    Remove ECK rules connection for a baseagent
+  status        Show connection state for all baseagents
 
 Arguments:
   baseagent     Target base agent: ${KNOWN_BASEAGENTS.join(', ')} (default: cc)
@@ -113,15 +113,15 @@ Arguments:
 
 Supported baseagents:
   cc            Claude Code (.claude/rules/eck/)
-  codex         Codex (.codex/rules/eck/)
+  codex         Codex (.codex/instructions/eck/)
   gemini        Gemini CLI (.gemini/rules/eck/)
 
 Examples:
-  evolclaw link-rules                    # connect cc in cwd
-  evolclaw link-rules codex              # connect codex in cwd
-  evolclaw link-rules cc --dir /my/proj  # connect cc in specific dir
-  evolclaw link-rules disconnect cc      # disconnect cc
-  evolclaw link-rules status             # show all connections`);
+  evolclaw link-rules connect              # connect cc in cwd
+  evolclaw link-rules connect codex        # connect codex in cwd
+  evolclaw link-rules connect cc --dir /x  # connect cc in specific dir
+  evolclaw link-rules disconnect cc        # disconnect cc
+  evolclaw link-rules status               # show all connections`);
 }
 
 function showStatus(): void {
@@ -136,8 +136,9 @@ function showStatus(): void {
     console.log(`[${ba}] ${status}`);
     if (entry.current) {
       const target = resolveTarget(ba, entry.current);
-      console.log(`  path: ${entry.current}`);
-      console.log(`  link: ${target}`);
+      console.log(`  path:  ${entry.current}`);
+      console.log(`  link:  ${target}`);
+      console.log(`  rules: ${source}`);
     }
     if (entry.history.length > 0) {
       console.log(`  history:`);
@@ -250,10 +251,15 @@ export function cmdLinkRules(args: string[]): void {
     return;
   }
 
-  // default: connect
-  const ba = resolveBaseAgent(sub && !sub.startsWith('-') ? sub : undefined);
-  const dir = getArgValue(args, '--dir') || process.cwd();
-  connect(ba, dir);
+  if (sub === 'connect') {
+    const ba = resolveBaseAgent(args[1] && !args[1].startsWith('-') ? args[1] : undefined);
+    const dir = getArgValue(args, '--dir') || process.cwd();
+    connect(ba, dir);
+    return;
+  }
+
+  // no subcommand or unknown → show help
+  showHelp();
 }
 
 function resolveBaseAgent(input: string | undefined): string {
