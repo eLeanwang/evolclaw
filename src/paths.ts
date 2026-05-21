@@ -2,7 +2,6 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
-import { fileURLToPath } from 'url';
 
 const isWindows = process.platform === 'win32';
 
@@ -40,13 +39,10 @@ export function resolvePaths() {
     selfHealLog: path.join(root, 'logs', 'self-heal.md'),
     socket: resolveInstanceSocketPath(root),
 
-    // ── 新结构（evolclaw-home-directory.md）────────────────
+    // ── 新结构（evolclaw-directory-design.md）────────────────
     defaultsConfig: path.join(root, 'agents', 'defaults.json'),
-    kitsDir: path.join(root, 'kits'),
-    kitsAunDir: path.join(root, 'kits', 'aun'),
-    kitsChannelsDir: path.join(root, 'kits', 'channels'),
-    kitsEvolclawDir: path.join(root, 'kits', 'evolclaw'),
-    kitsTemplatesDir: path.join(root, 'kits', 'templates'),
+    eckDir: path.join(root, 'eck'),
+    processConfig: path.join(root, 'config.json'),
     instanceReadySignal: path.join(root, 'data', 'instance', 'ready.signal'),
     instanceSocket: resolveInstanceSocketPath(root),
     aidLogsDir: path.join(root, 'logs', 'aids'),
@@ -64,8 +60,15 @@ export function agentConfig(aid: string): string {
 export function agentPersonalDir(aid: string): string {
   return path.join(agentDir(aid), 'personal');
 }
+export function agentRelationsDir(aid: string): string {
+  return path.join(agentDir(aid), 'relations');
+}
+/** @deprecated Use agentRelationsDir instead */
 export function agentIdentitiesDir(aid: string): string {
-  return path.join(agentDir(aid), 'identities');
+  return agentRelationsDir(aid);
+}
+export function agentIndexDir(aid: string): string {
+  return path.join(agentDir(aid), 'index');
 }
 export function agentVenuesDir(aid: string): string {
   return path.join(agentDir(aid), 'venues');
@@ -100,41 +103,19 @@ export function ensureDataDirs(): void {
   fs.mkdirSync(p.sessionsDir, { recursive: true });
   fs.mkdirSync(p.instanceDir, { recursive: true });
   fs.mkdirSync(p.outboxDir, { recursive: true });
-  fs.mkdirSync(p.kitsDir, { recursive: true });
+  fs.mkdirSync(p.eckDir, { recursive: true });
 }
 
-/**
- * 首次启动或升级时，把包内 kits/ 复制到 EVOLCLAW_HOME/kits/。
- * 策略：如果目标 kits/ 为空或包版本更新，整体覆盖。
- */
-export function syncKitsFromPackage(): void {
-  const p = resolvePaths();
-  const srcKits = path.join(getPackageRoot(), 'kits');
-  if (!fs.existsSync(srcKits)) return;
+// ── kits 路径（始终从包内读取，不复制到 EVOLCLAW_HOME）──
 
-  const destKits = p.kitsDir;
-  // 包内自用场景：EVOLCLAW_HOME 等于包根（开发仓 / 用户家目录恰好是安装目录），
-  // src === dest 会让 cpSync 抛 ERR_FS_CP_EINVAL。直接跳过同步。
-  if (path.resolve(srcKits) === path.resolve(destKits)) return;
-
-  // 用 .kits-version 文件跟踪已安装的版本
-  const versionFile = path.join(destKits, '.kits-version');
-  const pkgJsonPath = path.join(getPackageRoot(), 'package.json');
-  let pkgVersion = '0.0.0';
-  try {
-    pkgVersion = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf-8')).version || '0.0.0';
-  } catch {}
-
-  let installedVersion = '';
-  try {
-    installedVersion = fs.readFileSync(versionFile, 'utf-8').trim();
-  } catch {}
-
-  if (installedVersion === pkgVersion) return;
-
-  // 递归复制（覆盖）
-  fs.cpSync(srcKits, destKits, { recursive: true, force: true });
-  fs.writeFileSync(versionFile, pkgVersion, 'utf-8');
+export function kitsRulesDir(): string {
+  return path.join(getPackageRoot(), 'kits', 'rules');
+}
+export function kitsDocsDir(): string {
+  return path.join(getPackageRoot(), 'kits', 'docs');
+}
+export function kitsTemplatesDir(): string {
+  return path.join(getPackageRoot(), 'kits', 'templates');
 }
 
 export function getPackageRoot(): string {

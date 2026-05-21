@@ -630,6 +630,24 @@ export class MessageProcessor {
           contextParts.push(renderPromptSection('proactive', {}));
         }
 
+        // 4. ECK rules 注入（如果 base agent 没有通过 symlink 自动加载）
+        {
+          const { resolveEckInjection } = await import('../../eck/detect.js');
+          const { loadRulesForInjection } = await import('../../eck/rules-loader.js');
+          const { kitsRulesDir } = await import('../../paths.js');
+          const eckResult = resolveEckInjection(
+            { baseAgent: agent.name },
+            absoluteProjectPath,
+            kitsRulesDir()
+          );
+          if (eckResult.shouldInject) {
+            const rulesContent = loadRulesForInjection();
+            if (rulesContent) {
+              contextParts.unshift(rulesContent);
+            }
+          }
+        }
+
         effectiveSystemPrompt = [options?.systemPromptAppend, ...contextParts].filter(Boolean).join('\n') || undefined;
 
         // 可重试错误（403/429/5xx）指数退避重试，最多 3 次

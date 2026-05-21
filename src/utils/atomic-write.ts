@@ -87,3 +87,14 @@ export function ensureDir(dirPath: string): void {
     fs.mkdirSync(dirPath, { recursive: true });
   }
 }
+
+/**
+ * Simple atomic write for plain-text files (ECK runtime files).
+ * Uses write-tmp-then-rename (no hot-backup needed for these files).
+ */
+export function atomicWriteText(filePath: string, content: string): void {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  const tmp = filePath + '.tmp.' + process.pid;
+  fs.writeFileSync(tmp, content, 'utf-8');
+  fs.renameSync(tmp, filePath);
+}

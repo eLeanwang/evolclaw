@@ -1,9 +1,9 @@
 import { ClaudeSessionFileAdapter } from './core/session/adapters/claude-session-file-adapter.js';
 import { CodexSessionFileAdapter } from './core/session/adapters/codex-session-file-adapter.js';
 import { GeminiSessionFileAdapter } from './core/session/adapters/gemini-session-file-adapter.js';
-import { ensureDataDirs, resolvePaths, agentDir, syncKitsFromPackage } from './paths.js';
+import { ensureDataDirs, resolvePaths, agentDir } from './paths.js';
 import { resolveAnthropicConfig } from './agents/resolve.js';
-import { loadDefaults, loadAllAgents, mergeForAgent, ensureAgentDirSkeleton, autoMigrateIfNeeded } from './config-store.js';
+import { loadDefaults, loadAllAgents, mergeForAgent, ensureAgentDirSkeleton, autoMigrateIfNeeded, migrateIdentitiesIfNeeded } from './config-store.js';
 import type { Config, MergedAgentConfig, AgentConfig, DefaultsConfig } from './types.js';
 import { CONFIG_SCHEMA_VERSION } from './types.js';
 import { SessionManager } from './core/session/session-manager.js';
@@ -36,6 +36,7 @@ import { logger, setLogLevel } from './utils/logger.js';
 import { writeMain, removeAll, isMainWinner, scanInstances } from './utils/instance-registry.js';
 import { detectDuplicates } from './core/evolagent-registry.js';
 import { loadPromptTemplates } from './agents/templates.js';
+import { initEck } from './eck/init.js';
 import { TriggerManager } from './core/trigger/manager.js';
 import { TriggerScheduler, calcNextFireAt } from './core/trigger/scheduler.js';
 import { agentTriggersDir } from './paths.js';
@@ -124,9 +125,6 @@ async function main() {
   // 确保数据目录存在
   ensureDataDirs();
 
-  // 同步包内 kits/ 到 EVOLCLAW_HOME/kits/（首次启动或升级时）
-  syncKitsFromPackage();
-
   // ── 单实例保护（pre-check + post-write self-check）──
   // pre-check：发现已有活 main 直接退出，避免起任何副作用
   {
@@ -157,6 +155,13 @@ async function main() {
     }
   }
 
+  // ── 自动迁移 ──
+  migrateIdentitiesIfNeeded();
+  autoMigrateIfNeeded();
+
+  // ── ECK 运行时初始化 ──
+  initEck();
+
   // 加载提示词模板
   loadPromptTemplates();
 
@@ -168,9 +173,6 @@ async function main() {
   // 阶段 2c 暂跳过
 
   const paths = resolvePaths();
-
-  // ── 自动迁移：旧 data/evolclaw.json → 新结构 ──
-  autoMigrateIfNeeded();
 
   // ── EvolAgent Registry：加载 agents/<aid>/config.json ──
   const agentRegistry = new EvolAgentRegistry(paths.agentsDir);

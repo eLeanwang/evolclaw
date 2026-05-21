@@ -4347,6 +4347,11 @@ export async function main(args: string[]) {
       await cmdBench(args.slice(1));
       break;
     }
+    case 'link-rules': {
+      const { cmdLinkRules } = await import('./link-rules.js');
+      cmdLinkRules(args.slice(1));
+      break;
+    }
     default:
       console.log(`Usage: evolclaw {init|start|stop|restart|status|logs|watch|ctl|diagnose|net|mv}
 

@@ -23,3 +23,8 @@
 - admin 可执行管理命令但不能改 owner
 - guest 只能使用基础对话功能
 - anonymous 按 agent 配置决定是否响应
+
+## 兜底规则
+
+- 无 token → coding 模式
+- token 残缺（有名称无身份级别）→ 保守按 anonymous 对待

@@ -76,14 +76,14 @@ aun/__MACOSX/
 # 项目文档（不公开）
 CLAUDE.md
 DEPLOYMENT.md
-docs/
+/docs/
 src/experimental/
 
 # Agent 配置（含私有信息）
 /agents/
 
 # 测试文件
-tests/
+/tests/
 
 
 # 用户个人 onboarding 报告（含使用统计，不入库）

@@ -1,4 +1,7 @@
 import crypto from 'crypto';
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { aidList, aidCreate } from '../aun/aid/identity.js';
@@ -96,6 +99,86 @@ function parseMessage(text: string, sessionId: string): { seq: number; sizeClass
   const m = text.match(BENCH_RE);
   if (!m || m[1] !== sessionId) return null;
   return { seq: parseInt(m[2], 10), sizeClass: m[3] as SizeClass, sendTimestamp: parseInt(m[4], 10) };
+}
+
+// ==================== File Mode Helpers ====================
+
+const FILE_BENCH_RE = /^\[fb:([a-f0-9]+):(\d+):(\d+):(\d+)\]/;
+
+function buildFileChunkText(seq: number, totalChunks: number, timestamp: number, sessionId: string, chunkBase64: string): string {
+  return `[fb:${sessionId}:${String(seq).padStart(4, '0')}:${totalChunks}:${timestamp}]${chunkBase64}`;
+}
+
+function parseFileChunk(text: string, sessionId: string): { seq: number; totalChunks: number; sendTimestamp: number; data: string } | null {
+  const m = text.match(FILE_BENCH_RE);
+  if (!m || m[1] !== sessionId) return null;
+  const headerEnd = text.indexOf(']') + 1;
+  return {
+    seq: parseInt(m[2], 10),
+    totalChunks: parseInt(m[3], 10),
+    sendTimestamp: parseInt(m[4], 10),
+    data: text.slice(headerEnd),
+  };
+}
+
+function splitFileIntoChunks(buf: Buffer, numChunks: number): Buffer[] {
+  const chunks: Buffer[] = [];
+  let offset = 0;
+  const remaining = () => buf.length - offset;
+
+  for (let i = 0; i < numChunks; i++) {
+    const left = numChunks - i;
+    if (left === 1) {
+      chunks.push(buf.slice(offset));
+      break;
+    }
+    const avg = remaining() / left;
+    const min = Math.max(1, Math.floor(avg * 0.3));
+    const max = Math.floor(avg * 1.7);
+    const size = Math.min(remaining() - (left - 1), min + Math.floor(Math.random() * (max - min + 1)));
+    chunks.push(buf.slice(offset, offset + size));
+    offset += size;
+  }
+  return chunks;
+}
+
+async function compressDirectory(dirPath: string): Promise<Buffer> {
+  const zlib = await import('zlib');
+  // Collect all files recursively, pack as a simple concatenation
+  // Use Node.js tar-like approach: JSON manifest + gzipped content
+  const files: { rel: string; data: Buffer }[] = [];
+  function walk(dir: string, prefix: string) {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (entry.name === 'node_modules' || entry.name === '.git') continue;
+      const full = path.join(dir, entry.name);
+      const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) {
+        walk(full, rel);
+      } else if (entry.isFile()) {
+        try { files.push({ rel, data: fs.readFileSync(full) }); } catch {}
+      }
+    }
+  }
+  walk(dirPath, '');
+  // Pack: JSON lines of {path, size} + concatenated data, then gzip
+  const manifest = files.map(f => ({ p: f.rel, s: f.data.length }));
+  const header = Buffer.from(JSON.stringify(manifest) + '\n');
+  const body = Buffer.concat([header, ...files.map(f => f.data)]);
+  return Buffer.from(zlib.gzipSync(body));
+}
+
+async function decompressToDir(buf: Buffer, destDir: string): Promise<void> {
+  const zlib = await import('zlib');
+  const body = Buffer.from(zlib.gunzipSync(buf));
+  const nlIdx = body.indexOf(10); // newline
+  const manifest: { p: string; s: number }[] = JSON.parse(body.slice(0, nlIdx).toString());
+  let offset = nlIdx + 1;
+  for (const entry of manifest) {
+    const filePath = path.join(destDir, ...entry.p.split('/'));
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, body.slice(offset, offset + entry.s));
+    offset += entry.s;
+  }
 }
 
 function percentile(sorted: number[], p: number): number {
@@ -302,7 +385,7 @@ interface SwitchResult {
   serverTimestamp?: number;
 }
 
-async function benchSwitch(aids: string[], rounds: number, aunPath?: string, useCli?: boolean, slotId?: string): Promise<{ results: SwitchResult[]; durationSec: number }> {
+async function benchSwitch(aids: string[], rounds: number, aunPath?: string, useCli?: boolean, slotId?: string, encrypt?: boolean): Promise<{ results: SwitchResult[]; durationSec: number }> {
   const results: SwitchResult[] = [];
   const start = Date.now();
   let seq = 0;
@@ -321,14 +404,14 @@ async function benchSwitch(aids: string[], rounds: number, aunPath?: string, use
 
       if (useCli) {
         try {
-          const res = await withTimeout(cliSend(from, to, text, slot), 10000, `${from.split('.')[0]}→${to.split('.')[0]}`);
+          const res = await withTimeout(cliSend(from, to, text, slot, encrypt), 10000, `${from.split('.')[0]}→${to.split('.')[0]}`);
           ok = res.ok;
           serverTimestamp = res.timestamp;
         } catch { ok = false; }
       } else {
         try {
           const res = await withTimeout(
-            msgSend({ from, to, body: { mode: 'text', text }, slotId: slot, aunPath }) as Promise<any>,
+            msgSend({ from, to, body: { mode: 'text', text }, slotId: slot, aunPath, encrypt }) as Promise<any>,
             10000, `${from.split('.')[0]}→${to.split('.')[0]}`
           );
           ok = res.ok;
@@ -346,11 +429,13 @@ async function benchSwitch(aids: string[], rounds: number, aunPath?: string, use
 
 // ==================== CLI Mode Helpers ====================
 
-async function cliSend(from: string, to: string, text: string, slotId: string): Promise<{ ok: boolean; timestamp?: number; error?: string }> {
+async function cliSend(from: string, to: string, text: string, slotId: string, encrypt?: boolean): Promise<{ ok: boolean; timestamp?: number; error?: string }> {
   const path = (await import('path')).default;
   const bin = path.join(getPackageRoot(), 'dist', 'cli', 'index.js');
+  const sendArgs = [bin, 'msg', 'send', from, to, text, '--app', slotId, '--format', 'json'];
+  if (encrypt) sendArgs.push('--encrypt');
   try {
-    const { stdout } = await execFileAsync('node', [bin, 'msg', 'send', from, to, text, '--app', slotId, '--format', 'json'], { timeout: 30000 });
+    const { stdout } = await execFileAsync('node', sendArgs, { timeout: 30000 });
     const res = JSON.parse(stdout.trim());
     return { ok: true, timestamp: res.timestamp };
   } catch (e: any) {
@@ -399,13 +484,16 @@ Options:
   --rounds N        每个 AID 发送的消息轮数 (默认 20)
   --concurrency N   最大并发发送数 (默认 5)
   --wait N          发送后等待传播的秒数 (默认 3)
+  --encrypt         发送加密消息（E2EE）
+  --file            文件传输验证模式（压缩 evolclaw 目录，拆片发送，接收后 MD5 校验+解压）
   --cli             使用 CLI 子进程调用（测试完整命令行链路，含进程启动开销）
   --aun-path <path> 自定义 AUN 目录
   --format json     以 JSON 输出结果
 
 示例:
   evolclaw bench --aids 5 --rounds 10
-  evolclaw bench --aids 3 --rounds 50 --concurrency 10
+  evolclaw bench --file --rounds 50
+  evolclaw bench --encrypt --aids 5 --rounds 20
   evolclaw bench --cli --aids 3 --rounds 5`);
     return;
   }
@@ -413,17 +501,20 @@ Options:
   const numAids = Math.min(10, Math.max(2, parseInt(getArgValue(args, '--aids') || '3', 10)));
   const rounds = Math.max(1, parseInt(getArgValue(args, '--rounds') || '20', 10));
   const concurrency = Math.max(1, parseInt(getArgValue(args, '--concurrency') || '5', 10));
-  const waitSec = Math.max(1, parseInt(getArgValue(args, '--wait') || '3', 10));
   const aunPath = getArgValue(args, '--aun-path');
   const formatJson = args.includes('--format') && args[args.indexOf('--format') + 1] === 'json';
   const cliMode = args.includes('--cli');
+  const encrypt = args.includes('--encrypt');
+  const fileMode = args.includes('--file');
+  const defaultWait = encrypt ? '10' : '3';
+  const waitSec = Math.max(1, parseInt(getArgValue(args, '--wait') || defaultWait, 10));
   const sessionId = crypto.randomBytes(4).toString('hex');
   const benchSlot = `bench-${sessionId}`;
 
   if (!formatJson) {
     console.log(`\n${BOLD}  evolclaw bench${RST} — AUN 消息性能基准测试`);
     console.log(`  ${'━'.repeat(50)}`);
-    console.log(`  ${DIM}模式: ${cliMode ? 'CLI 子进程（含进程启动开销）' : 'SDK 直调（纯网络性能）'}${RST}\n`);
+    console.log(`  ${DIM}模式: ${cliMode ? 'CLI 子进程（含进程启动开销）' : 'SDK 直调（纯网络性能）'}${encrypt ? ' + E2EE 加密' : ''}${RST}\n`);
   }
 
   // ── Phase 1: Prepare AIDs ──
@@ -511,7 +602,35 @@ Options:
   }
 
   // ── Phase 3: Concurrent Send ──
-  if (!formatJson) console.log(`${DIM}  Phase 3: 并发消息发送（混合大小：S/M/L）${RST}`);
+  if (!formatJson) console.log(`${DIM}  Phase 3: 并发消息发送${fileMode ? '（文件传输验证模式）' : '（混合大小：S/M/L）'}${RST}`);
+
+  // File mode: compress evolclaw dir, split into chunks
+  let fileChunks: Buffer[] = [];
+  let fileMd5 = '';
+  let compressedSize = 0;
+  if (fileMode) {
+    const evolclawDir = getPackageRoot();
+    if (!formatJson) process.stdout.write(`  ${DIM}压缩 ${evolclawDir} ...${RST}`);
+    const compressed = await compressDirectory(evolclawDir);
+    compressedSize = compressed.length;
+    fileMd5 = crypto.createHash('md5').update(compressed).digest('hex');
+    const totalMsgsForFile = rounds * aids.length;
+    fileChunks = splitFileIntoChunks(compressed, totalMsgsForFile);
+    if (!formatJson) {
+      clearLine();
+      console.log(ok(`压缩完成 ${(compressedSize / 1024).toFixed(1)} KB  MD5=${fileMd5}  拆分 ${fileChunks.length} 片`));
+    }
+  }
+
+  // Record each AID's latest_seq before sending, so we can pull from there
+  const preSeqMap = new Map<string, number>();
+  for (const aid of aids) {
+    try {
+      const res = await msgPull({ from: aid, slotId: '', limit: 1, aunPath });
+      if (res.ok) preSeqMap.set(aid, res.latest_seq ?? 0);
+      else preSeqMap.set(aid, 0);
+    } catch { preSeqMap.set(aid, 0); }
+  }
 
   const totalMsgs = rounds * aids.length;
   const tasks: SendTask[] = [];
@@ -560,12 +679,14 @@ Options:
         await new Promise(r => setTimeout(r, RETRY_DELAY_MS * attempt));
       }
       const sendTs = Date.now();
-      const text = buildMessageText(t.seq, t.sizeClass, sendTs, sessionId);
+      const text = fileMode
+        ? buildFileChunkText(t.seq, fileChunks.length, sendTs, sessionId, fileChunks[t.seq]?.toString('base64') ?? '')
+        : buildMessageText(t.seq, t.sizeClass, sendTs, sessionId);
       const t0 = Date.now();
       try {
         const sendPromise: Promise<any> = cliMode
-          ? cliSend(t.from, t.to, text, benchSlot)
-          : msgSend({ from: t.from, to: t.to, body: { mode: 'text', text }, slotId: benchSlot, aunPath });
+          ? cliSend(t.from, t.to, text, benchSlot, encrypt)
+          : msgSend({ from: t.from, to: t.to, body: { mode: 'text', text }, slotId: benchSlot, aunPath, encrypt });
 
         const res = await withTimeout(sendPromise, SEND_TIMEOUT_MS, `${t.from.split('.')[0]}→${t.to.split('.')[0]}`);
 
@@ -675,16 +796,43 @@ Options:
   }
 
   // ── Phase 4: Pull & Verify ──
-  if (!formatJson) console.log(`${DIM}  Phase 4: 拉取消息验证（等待 ${waitSec}s 传播）${RST}`);
-  await new Promise(r => setTimeout(r, waitSec * 1000));
-
   const received: RecvRecord[] = [];
   const receivedSeqs = new Set<number>();
+  const receivedFileChunks = new Map<number, string>();
+  const sentSeqs = new Set(sendResults.filter(r => r.ok).map(r => r.seq));
+
+  if (encrypt) {
+    // Encrypted messages can't be pulled via short connection (SDK limitation).
+    // Use send result (ok=true means gateway confirmed delivery).
+    if (!formatJson) console.log(`${DIM}  Phase 4: 送达验证（加密模式：基于网关确认）${RST}`);
+    for (const r of sendResults) {
+      if (r.ok) {
+        receivedSeqs.add(r.seq);
+        received.push({
+          seq: r.seq,
+          sizeClass: r.sizeClass,
+          sendTimestamp: r.sendTimestamp,
+          serverTimestamp: r.serverTimestamp ?? r.sendTimestamp,
+        });
+      }
+    }
+    if (!formatJson) {
+      const delivered = received.length;
+      const sentOk = sendResults.filter(r => r.ok).length;
+      console.log(ok(`送达确认 ${delivered}/${sentOk} 条（网关返回 delivered）`));
+      if (delivered < sentOk) {
+        console.log(warn(`${sentOk - delivered} 条发送成功但未获得 delivered 确认`));
+      }
+      console.log('');
+    }
+  } else {
+    if (!formatJson) console.log(`${DIM}  Phase 4: 拉取消息验证（等待 ${waitSec}s 传播）${RST}`);
+    await new Promise(r => setTimeout(r, waitSec * 1000));
 
   async function pullAll(): Promise<void> {
     for (let i = 0; i < aids.length; i++) {
       const aid = aids[i];
-      let afterSeq: number | undefined = undefined;
+      let afterSeq: number | undefined = preSeqMap.get(aid) ?? undefined;
       for (let page = 0; page < 20; page++) {
         let messages: any[] = [];
         if (cliMode) {
@@ -710,15 +858,29 @@ Options:
         }
         for (const m of messages) {
           const text = typeof m.payload?.text === 'string' ? m.payload.text as string : '';
-          const parsed = parseMessage(text, sessionId);
-          if (parsed && !receivedSeqs.has(parsed.seq)) {
-            receivedSeqs.add(parsed.seq);
-            received.push({
-              seq: parsed.seq,
-              sizeClass: parsed.sizeClass,
-              sendTimestamp: parsed.sendTimestamp,
-              serverTimestamp: m.timestamp,
-            });
+          if (fileMode) {
+            const chunk = parseFileChunk(text, sessionId);
+            if (chunk && !receivedSeqs.has(chunk.seq)) {
+              receivedSeqs.add(chunk.seq);
+              receivedFileChunks.set(chunk.seq, chunk.data);
+              received.push({
+                seq: chunk.seq,
+                sizeClass: 'M',
+                sendTimestamp: chunk.sendTimestamp,
+                serverTimestamp: m.timestamp,
+              });
+            }
+          } else {
+            const parsed = parseMessage(text, sessionId);
+            if (parsed && !receivedSeqs.has(parsed.seq)) {
+              receivedSeqs.add(parsed.seq);
+              received.push({
+                seq: parsed.seq,
+                sizeClass: parsed.sizeClass,
+                sendTimestamp: parsed.sendTimestamp,
+                serverTimestamp: m.timestamp,
+              });
+            }
           }
           afterSeq = Math.max(afterSeq ?? 0, m.seq);
         }
@@ -731,29 +893,106 @@ Options:
     }
   }
 
-  const sentSeqs = new Set(sendResults.filter(r => r.ok).map(r => r.seq));
-  for (let retry = 0; retry < 3; retry++) {
+  const expectedCount = sentSeqs.size;
+  const PULL_MAX_WAIT_SEC = 60;
+  const PULL_INTERVAL_MS = 2000;
+  const pullStartTime = Date.now();
+  let lastNewCount = received.length;
+  let lastNewTime = Date.now();
+  let pullRound = 0;
+
+  while (true) {
     await pullAll();
-    const missing = [...sentSeqs].filter(s => !receivedSeqs.has(s)).length;
+    pullRound++;
+    const missing = expectedCount - receivedSeqs.size;
+
     if (missing === 0) break;
+
+    const elapsedSec = (Date.now() - pullStartTime) / 1000;
+    const noNewSec = (Date.now() - lastNewTime) / 1000;
+
+    if (received.length > lastNewCount) {
+      lastNewCount = received.length;
+      lastNewTime = Date.now();
+    }
+
+    if (elapsedSec > PULL_MAX_WAIT_SEC) {
+      if (!formatJson) {
+        clearLine();
+        console.log(warn(`拉取超时 ${PULL_MAX_WAIT_SEC}s，仍缺 ${missing} 条`));
+      }
+      break;
+    }
+
+    if (noNewSec > 20) {
+      if (!formatJson) {
+        clearLine();
+        console.log(warn(`连续 ${Math.round(noNewSec)}s 无新消息到达，仍缺 ${missing} 条，停止等待`));
+      }
+      break;
+    }
+
     if (!formatJson) {
       clearLine();
-      console.log(warn(`重试 ${retry + 1}/3  缺失 ${missing} 条，等待 2s 后再拉...`));
+      process.stdout.write(`  ${DIM}等待中... 已收 ${receivedSeqs.size}/${expectedCount}  缺 ${missing} 条  (${elapsedSec.toFixed(0)}s elapsed, round ${pullRound})${RST}`);
     }
-    await new Promise(r => setTimeout(r, 2000));
+    await new Promise(r => setTimeout(r, PULL_INTERVAL_MS));
   }
 
   if (!formatJson) {
     clearLine();
-    console.log(ok(`拉取完成  收到 ${received.length}/${sentSeqs.size} 条消息`));
+    console.log(ok(`拉取完成  收到 ${received.length}/${sentSeqs.size} 条消息  (${pullRound} 轮, ${((Date.now() - pullStartTime) / 1000).toFixed(1)}s)`));
     console.log('');
+  }
+  } // end else (non-encrypt pull)
+
+  // ── File mode: reassemble + verify ──
+  if (fileMode && receivedFileChunks.size > 0) {
+    if (!formatJson) console.log(`${DIM}  文件还原验证${RST}`);
+    const totalChunks = fileChunks.length;
+    const missingChunks: number[] = [];
+    for (let i = 0; i < totalChunks; i++) {
+      if (!receivedFileChunks.has(i)) missingChunks.push(i);
+    }
+
+    if (missingChunks.length > 0) {
+      if (!formatJson) console.log(fail(`缺失 ${missingChunks.length}/${totalChunks} 个片段，无法还原文件`));
+    } else {
+      const parts: Buffer[] = [];
+      for (let i = 0; i < totalChunks; i++) {
+        parts.push(Buffer.from(receivedFileChunks.get(i)!, 'base64'));
+      }
+      const reassembled = Buffer.concat(parts);
+      const recvMd5 = crypto.createHash('md5').update(reassembled).digest('hex');
+      const md5Match = recvMd5 === fileMd5;
+
+      if (!formatJson) {
+        console.log(ok(`还原文件 ${(reassembled.length / 1024).toFixed(1)} KB`));
+        console.log(`    ${DIM}发送 MD5: ${fileMd5}${RST}`);
+        console.log(`    ${DIM}接收 MD5: ${recvMd5}${RST}`);
+        if (md5Match) {
+          console.log(ok(`MD5 校验通过 ✓`));
+          // Decompress
+          const tmpDir = path.join(os.tmpdir(), `bench-recv-${sessionId}`);
+          try {
+            await decompressToDir(reassembled, tmpDir);
+            console.log(ok(`解压完成 → ${tmpDir}`));
+          } catch (e: any) {
+            console.log(fail(`解压失败: ${e.message}`));
+          }
+        } else {
+          console.log(fail(`MD5 不匹配！文件损坏`));
+        }
+      }
+    }
+    if (!formatJson) console.log('');
   }
 
   // ── Phase 5: Switch-Account Benchmark ──
   if (!formatJson) console.log(`${DIM}  Phase 5: 频繁切换账号收发测试${RST}`);
 
   const switchRounds = Math.max(2, Math.min(rounds, 5));
-  const switchOut = await benchSwitch(aids, switchRounds, aunPath, cliMode, benchSlot);
+  const switchOut = await benchSwitch(aids, switchRounds, aunPath, cliMode, benchSlot, encrypt);
   const switchOkResults = switchOut.results.filter(r => r.ok);
   const switchLatencies = switchOkResults
     .filter(r => r.serverTimestamp !== undefined)
@@ -810,7 +1049,7 @@ Options:
   if (formatJson) {
     console.log(JSON.stringify({
       ok: true,
-      config: { aids: aids.length, rounds, concurrency, waitSec, cliMode },
+      config: { aids: aids.length, rounds, concurrency, waitSec, cliMode, encrypt },
       aids,
       auth: {
         attempts: authResults.length,

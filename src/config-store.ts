@@ -505,19 +505,43 @@ export function ensureAgentDirSkeleton(aid: string): void {
   const root = agentDir(aid);
   const subs = [
     'personal',
-    'identities/contacts',
-    'identities/_observed',
-    'identities/_index',
-    'identities/_observed/_index',
-    'identities/_trash',
+    'personal/memory',
+    'personal/skills',
+    'relations/contacts',
+    'relations/_observed',
+    'relations/_observed/_index',
+    'relations/_index',
+    'relations/_trash',
     'venues',
     'venues/_index',
     'venues/_trash',
     'sessions',
     'data/cache',
+    'index',
   ];
   for (const sub of subs) {
     fs.mkdirSync(path.join(root, sub), { recursive: true });
+  }
+}
+
+// ── identities → relations 迁移 ──────────────────────────────────────
+
+/**
+ * 启动时自动迁移：如果 agents/<aid>/identities/ 存在但 relations/ 不存在，
+ * 将 identities/ 重命名为 relations/。幂等。
+ */
+export function migrateIdentitiesIfNeeded(): void {
+  const agentsDir = resolvePaths().agentsDir;
+  if (!fs.existsSync(agentsDir)) return;
+
+  for (const entry of fs.readdirSync(agentsDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const oldDir = path.join(agentsDir, entry.name, 'identities');
+    const newDir = path.join(agentsDir, entry.name, 'relations');
+    if (fs.existsSync(oldDir) && !fs.existsSync(newDir)) {
+      fs.renameSync(oldDir, newDir);
+      logger.info(`[migrate] Renamed agents/${entry.name}/identities/ → relations/`);
+    }
   }
 }
 
