@@ -388,6 +388,9 @@ export class MessageProcessor {
     const taskId = `task-${crypto.randomUUID().replace(/-/g, '').slice(0, 10)}`;
     const chatmode = session.sessionMode ?? 'interactive';
 
+    // 诊断日志：记录 inbound message_id 和生成的 task_id 的对应关系
+    logger.info(`[MessageProcessor] Task created: inboundMsgId=${message.messageId ?? 'none'} taskId=${taskId} sessionId=${session.id} chatmode=${chatmode}`);
+
     // 构建带 taskId/chatmode 的 ReplyContext（本次任务所有出站消息共用）
     const taskReplyContext = (): ReplyContext => {
       const base = this.getReplyContext(message);
@@ -528,6 +531,12 @@ export class MessageProcessor {
 
       // 设置 per-session 权限模式（默认 bypass，所有角色统一）
       agent.setMode(session.metadata?.permissionMode ?? DEFAULT_PERMISSION_MODE);
+
+      // 更新 session.metadata.messageId（用于诊断日志）
+      if (message.messageId && session.metadata) {
+        session.metadata.messageId = message.messageId;
+        await this.sessionManager.updateSession(session.id, { metadata: session.metadata });
+      }
 
       // 标记会话为处理中（实时持久化，重启后可恢复）
       this.sessionManager.markProcessing(session.id, taskId);

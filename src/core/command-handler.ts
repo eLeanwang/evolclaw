@@ -3713,6 +3713,11 @@ export class CommandHandler {
     const taskId = this.sessionManager.getActiveTaskId(session.id);
     const chatmode = session.sessionMode || 'interactive';
     const encrypted = this.sessionManager.getSessionEncrypt(session.id);
+
+    // 诊断日志：记录 inbound message_id 和 task_id 的对应关系
+    const inboundMsgId = meta?.messageId;
+    logger.info(`[CommandHandler] buildCtlReplyContext: sessionId=${session.id} inboundMsgId=${inboundMsgId ?? 'none'} taskId=${taskId ?? 'none'} chatmode=${chatmode} threadId=${ctx.threadId ?? 'none'}`);
+
     if (taskId || chatmode !== 'interactive' || encrypted != null) {
       ctx.metadata = {};
       if (taskId) ctx.metadata.taskId = taskId;
