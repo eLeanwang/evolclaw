@@ -23,7 +23,10 @@ function formatItem(item: ThoughtItem): string {
       return `💭 ${item.text}`;
     case 'tool_call': {
       const desc = item.text || summarizeArgs(item.arguments);
-      return desc ? `🔧 ${item.name}: ${desc}` : `🔧 ${item.name}`;
+      if (!desc) return `🔧 ${item.name}`;
+      // 多行 desc（如 Edit diff）：标题独占一行，内容换行展示
+      if (desc.includes('\n')) return `🔧 ${item.name}\n${desc}`;
+      return `🔧 ${item.name}: ${desc}`;
     }
     case 'tool_result': {
       if (!item.ok) {
