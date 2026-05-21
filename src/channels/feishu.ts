@@ -230,6 +230,14 @@ export class FeishuChannel {
                   } else {
                     quotedText = `> 以下是引用的原消息\n> ================\n> [文件消息]\n> ================\n\n`;
                   }
+                } else if (quotedMsgType === 'merge_forward') {
+                  const { text: mergedText, images: mergedImages } = await this.extractMergeForwardContent(msg.parent_id, msg.chat_id);
+                  if (mergedText) {
+                    quotedText = `> 以下是引用的原消息\n> ================\n> [合并转发消息]\n> ================\n\n${mergedText}\n\n`;
+                    quotedImages.push(...mergedImages);
+                  } else {
+                    quotedText = `> 以下是引用的原消息\n> ================\n> [合并转发消息]\n> ================\n\n`;
+                  }
                 } else {
                   quotedText = `> 以下是引用的原消息\n> ================\n> [${quotedMsgType}消息]\n> ================\n\n`;
                 }
@@ -318,6 +326,18 @@ export class FeishuChannel {
               finalContent = quotedText + finalContent;
               const allImages = [...quotedImages, ...postImages];
               await this.messageHandler({ channelId: msg.chat_id, content: finalContent, images: allImages.length > 0 ? allImages : undefined, peerId, peerName, messageId: msg.message_id, threadId, rootId, chatType });
+            }
+            // 处理合并转发消息
+            else if (msg.message_type === 'merge_forward') {
+              const { text: mergedText, images: mergedImages } = await this.extractMergeForwardContent(msg.message_id, msg.chat_id);
+              if (mergedText) {
+                const finalContent = quotedText + mergedText;
+                const allImages = [...quotedImages, ...mergedImages];
+                await this.messageHandler({ channelId: msg.chat_id, content: finalContent, images: allImages.length > 0 ? allImages : undefined, peerId, peerName, messageId: msg.message_id, threadId, rootId, chatType });
+              } else {
+                const prompt = quotedText + '[合并转发消息解析失败]';
+                await this.messageHandler({ channelId: msg.chat_id, content: prompt, images: quotedImages.length > 0 ? quotedImages : undefined, peerId, peerName, messageId: msg.message_id, threadId, rootId, chatType });
+              }
             }
             // 处理其他类型消息
             else {
@@ -888,6 +908,94 @@ export class FeishuChannel {
         logger.error('[Feishu] Response data:', JSON.stringify(axiosError.response?.data));
       }
       return null;
+    }
+  }
+
+  /**
+   * 提取合并转发消息的子消息内容。
+   * 调用 im.message.get 获取子消息列表，逐条解析 text/image/post/file 类型。
+   */
+  private async extractMergeForwardContent(
+    messageId: string,
+    chatId: string
+  ): Promise<{ text: string; images: Array<{ data: string; mimeType: string }> }> {
+    const empty = { text: '', images: [] as Array<{ data: string; mimeType: string }> };
+    if (!this.client) return empty;
+
+    try {
+      const res = await this.client.im.message.get({
+        path: { message_id: messageId }
+      });
+
+      const items = res.data?.items;
+      if (!items || items.length === 0) {
+        logger.warn('[Feishu] merge_forward: no sub-messages found');
+        return empty;
+      }
+
+      logger.info(`[Feishu] merge_forward: ${items.length} sub-messages`);
+
+      const projectPath = this.projectPathProvider
+        ? await this.projectPathProvider(chatId)
+        : process.cwd();
+
+      const textParts: string[] = [];
+      const images: Array<{ data: string; mimeType: string }> = [];
+
+      textParts.push('以下是用户转发的合并消息：\n---');
+
+      for (const item of items) {
+        const msgType = item.msg_type;
+        const content = item.body?.content;
+        if (!content) continue;
+
+        try {
+          if (msgType === 'text') {
+            const parsed = JSON.parse(content);
+            textParts.push(parsed.text || '');
+          } else if (msgType === 'post') {
+            const parsed = JSON.parse(content);
+            let text = '';
+            const postContent = parsed.zh_cn?.content || parsed.en_us?.content || parsed.content;
+            if (postContent) {
+              for (const line of postContent) {
+                for (const elem of line) {
+                  if (elem.tag === 'img' && elem.image_key && item.message_id) {
+                    const imageData = await this.downloadAndSaveImage(elem.image_key, chatId, item.message_id, projectPath);
+                    if (imageData) images.push(imageData);
+                  } else if (elem.text) {
+                    text += elem.text;
+                  }
+                }
+                text += '\n';
+              }
+            }
+            const title = parsed.zh_cn?.title || parsed.en_us?.title || parsed.title;
+            textParts.push(title ? `${title}\n${text.trim()}` : text.trim());
+          } else if (msgType === 'image' && item.message_id) {
+            const parsed = JSON.parse(content);
+            const imageData = await this.downloadAndSaveImage(parsed.image_key, chatId, item.message_id, projectPath);
+            if (imageData) {
+              images.push(imageData);
+              textParts.push('[图片]');
+            }
+          } else if (msgType === 'file') {
+            const parsed = JSON.parse(content);
+            textParts.push(`[文件: ${parsed.file_name || 'unknown'}]`);
+          } else {
+            textParts.push(`[${msgType}]`);
+          }
+        } catch (parseErr) {
+          logger.debug('[Feishu] merge_forward: failed to parse sub-message:', parseErr);
+          textParts.push(`[${msgType}: 解析失败]`);
+        }
+      }
+
+      textParts.push('---');
+      return { text: textParts.join('\n'), images };
+    } catch (error) {
+      logger.error('[Feishu] Failed to extract merge_forward content:', error);
+      return empty;
     }
   }
 
