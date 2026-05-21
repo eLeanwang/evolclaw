@@ -3732,6 +3732,7 @@ export class CommandHandler {
    * 复用现有 slash cmd 逻辑，权限继承 session 用户角色
    */
   async handleCtl(cmd: string, sessionId: string): Promise<{ ok: boolean; result?: string; error?: string }> {
+    logger.info(`[ctl] cmd="${cmd}" sessionId=${sessionId}`);
     // 1. 白名单检查
     const inputCmd = cmd.split(' ')[0];
     if (!CommandHandler.CTL_COMMANDS.includes(inputCmd)) {
