@@ -3799,7 +3799,8 @@ export class CommandHandler {
 
       try {
         const replyContext = this.buildCtlReplyContext(session);
-        await adapter.send(buildEnvelope({ channel: adapter.channelName, channelId: session.channelId, replyContext: replyContext }), { kind: 'result.text', text, isFinal: true });
+        const taskId = replyContext?.metadata?.taskId;
+        await adapter.send(buildEnvelope({ taskId, channel: adapter.channelName, channelId: session.channelId, chatmode: replyContext?.metadata?.chatmode as any, replyContext }), { kind: 'result.text', text, isFinal: true });
         return { ok: true, result: '已发送' };
       } catch (err: any) {
         return { ok: false, error: err.message || String(err) };

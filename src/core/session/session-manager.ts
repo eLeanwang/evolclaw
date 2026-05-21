@@ -653,6 +653,9 @@ export class SessionManager {
     this.appendMeta(current.channel, current.channelId, current);
     const active = this.readActive(current.channel, current.channelId);
     if (active && active.id === sessionId) {
+      if (active.processingState && !current.processingState) {
+        current.processingState = active.processingState;
+      }
       this.writeActive(current.channel, current.channelId, current);
     }
   }
