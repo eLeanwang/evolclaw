@@ -6,7 +6,7 @@ import type { ThoughtItem } from '../../types.js';
  * 在 send() 中收到 activity.batch 后调用。
  */
 export function formatItemsAsText(items: ThoughtItem[]): string {
-  if (!items || items.length === 0) return '';
+  if (!items || items.length === 0) return ''; // early exit
   const lines: string[] = [];
   for (const item of items) {
     const line = formatItem(item);
@@ -24,8 +24,11 @@ function formatItem(item: ThoughtItem): string {
     case 'tool_call': {
       const desc = item.text || summarizeArgs(item.arguments);
       if (!desc) return `🔧 ${item.name}`;
-      // 多行 desc（如 Edit diff）：标题独占一行，内容换行展示
-      if (desc.includes('\n')) return `🔧 ${item.name}\n${desc}`;
+      // 多行 desc（如 Edit diff）：第一行跟工具名同行，代码块从新行开始
+      if (desc.includes('\n')) {
+        const nlIdx = desc.indexOf('\n');
+        return `🔧 ${item.name}  ${desc.slice(0, nlIdx)}\n${desc.slice(nlIdx + 1)}`;
+      }
       return `🔧 ${item.name}: ${desc}`;
     }
     case 'tool_result': {

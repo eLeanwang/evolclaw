@@ -730,6 +730,29 @@ export class MessageProcessor {
         }
       }
 
+      // prompt_too_long：SDK 以 complete 事件（非异常）返回，需在此处触发 compact
+      if (streamResult.isError && streamResult.terminalReason === 'prompt_too_long' && session.agentSessionId && hasCompact(agent)) {
+        renderer.addNotice('⚠️ 上下文过长，正在压缩会话...', 'warn', 'compact-trigger', true);
+        await renderer.flush();
+        const compacted = await agent.compact(session.id, session.agentSessionId, absoluteProjectPath);
+        if (compacted) {
+          renderer.addNotice('✅ 压缩完成，正在重试...', 'info', 'compact-retry', true);
+          const retryStream = await agent.runQuery(
+            session.id,
+            '上下文已自动压缩，请继续之前未完成的任务。',
+            absoluteProjectPath,
+            session.agentSessionId,
+            undefined,
+            effectiveSystemPrompt,
+            this.sessionManager
+          );
+          agent.registerStream(streamKey, retryStream);
+          streamResult = await this.processEventStream(retryStream, session, renderer, resetTimer, shouldSuppress);
+        } else {
+          throw new Error('CONTEXT_COMPACT_FAILED');
+        }
+      }
+
       // 处理文件标记 - 支持 [SEND_FILE:path] 和 [SEND_FILE:channel:path]
       // 注意：始终扫描全部文本（含中间轮），因为文件标记可能出现在任意轮次
       // suppressed 模式下 renderer 只有最后一轮文本，需要用 streamResult.fullText（SDK 全文）兜底

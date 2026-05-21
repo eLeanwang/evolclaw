@@ -774,6 +774,7 @@ export type OutboundPayload =
   | { kind: 'result.error'; text: string; reason?: string }
   | { kind: 'activity.batch'; items: ThoughtItem[] }
   | { kind: 'status.started'; metadata?: Record<string, unknown> }
+  | { kind: 'status.queued'; metadata?: Record<string, unknown> }
   | { kind: 'status.completed'; metadata?: { durationMs?: number; numTurns?: number; usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } } }
   | { kind: 'status.interrupted'; metadata?: { reason: string } }
   | { kind: 'status.error'; metadata?: { errorType?: string } }

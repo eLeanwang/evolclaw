@@ -40,6 +40,7 @@ export type MessageEvent =
 // ── 任务事件（从 message:* 拆出，语义为任务生命周期） ──
 export type TaskBusEvent =
   | { type: 'task:started'; sessionId: string }
+  | { type: 'task:queued'; channel: string; channelId: string; replyContext?: Record<string, unknown> }
   | { type: 'task:completed'; sessionId: string; channel: string; channelName?: string; channelId: string; finalText?: string; durationMs?: number; terminalReason?: string; agentName?: string; timestamp?: number }
   | { type: 'task:error'; sessionId: string; error: string; errorType: string; terminalReason?: string; agentName?: string }
   | { type: 'task:interrupted'; sessionId: string; reason?: string; agentName?: string };

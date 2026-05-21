@@ -436,14 +436,9 @@ export class AUNChannel {
     if (messageId) this.messageSeqMap.delete(messageId);
   }
 
-  private shouldEncrypt(peerId: string): boolean {
-    const cached = this.peerE2ee.get(peerId);
-    if (!cached) return true;
-    if (Date.now() - cached.ts > AUNChannel.E2EE_PROBE_TTL) {
-      this.peerE2ee.delete(peerId);
-      return true;
-    }
-    return cached.ok;
+  private shouldEncrypt(_peerId: string): boolean {
+    // Default to plaintext; only encrypt when session is explicitly marked encrypted
+    return false;
   }
   private _aid?: string;
   private _selfName?: string;  // 本地 agent.md 中的 name，首次 connect 时读取
@@ -2526,7 +2521,6 @@ export class AUNChannelPlugin implements ChannelPlugin {
                 const aunCard: Record<string, any> = {
                   type: 'action_card',
                   title: action.title,
-                  description: action.body,
                   actions: (action as ActionInteraction).buttons.map(btn => ({
                     label: btn.label,
                     value: btn.key,
@@ -2534,6 +2528,7 @@ export class AUNChannelPlugin implements ChannelPlugin {
                     behavior: 'reply',
                   })),
                 };
+                if (action.body) aunCard.description = action.body;
                 if (ctx?.threadId) aunCard.thread_id = ctx.threadId;
                 const msgId = await channel.sendStructured(channelId, aunCard, ctx);
                 if (msgId) {
@@ -2545,7 +2540,6 @@ export class AUNChannelPlugin implements ChannelPlugin {
                 const aunCard: Record<string, any> = {
                   type: 'action_card',
                   title: card.title,
-                  description: card.body,
                   actions: (card as CommandCard).buttons.map(btn => ({
                     label: btn.label,
                     value: btn.command,
@@ -2553,6 +2547,7 @@ export class AUNChannelPlugin implements ChannelPlugin {
                     behavior: 'reply',
                   })),
                 };
+                if (card.body) aunCard.description = card.body;
                 if (ctx?.threadId) aunCard.thread_id = ctx.threadId;
                 const msgId = await channel.sendStructured(channelId, aunCard, ctx);
                 if (msgId) {

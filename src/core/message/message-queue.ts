@@ -131,6 +131,12 @@ export class MessageQueue {
         } else {
           // 群聊：FIFO，不打断
           logger.debug(`[Queue] ${queueKey} is processing, message queued (FIFO)`);
+          this.eventBus?.publish({
+            type: 'task:queued',
+            channel: message.channel,
+            channelId: message.channelId,
+            replyContext: message.replyContext as Record<string, unknown> | undefined,
+          });
         }
       } else {
         logger.debug(`[Queue] Starting to process ${queueKey}`);
