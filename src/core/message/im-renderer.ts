@@ -1,6 +1,7 @@
 import type { AgentEvent } from '../../agents/claude-runner.js';
 import type { ChannelAdapter, OutboundEnvelope, OutboundPayload, ReplyContext, ThoughtItem } from '../../types.js';
 import { logger } from '../../utils/logger.js';
+import { summarizeToolInput } from '../permission.js';
 import fs from 'fs';
 import path from 'path';
 import { resolvePaths } from '../../paths.js';
@@ -442,7 +443,7 @@ export class IMRenderer {
         return { kind: 'text', text: event.text };
 
       case 'tool_use': {
-        const desc = this.summarizeInput(event.input, event.name);
+        const desc = summarizeToolInput(event.name, event.input || {});
         return {
           kind: 'tool_call',
           call_id: event.callId || this.synthCallId(),
@@ -527,25 +528,6 @@ export class IMRenderer {
       default:
         return null;
     }
-  }
-
-  private summarizeInput(input: any, toolName?: string): string {
-    if (!input || typeof input !== 'object') return '';
-    if (toolName === 'Bash' && typeof input.command === 'string') {
-      const cmd = input.command;
-      if (cmd.includes('evolclaw ctl send') || cmd.includes('evolclaw ctl file')) {
-        return cmd;
-      }
-    }
-    return (
-      input.description ||
-      input.file_path ||
-      input.pattern ||
-      (typeof input.command === 'string' ? input.command.substring(0, 80) : '') ||
-      (typeof input.prompt === 'string' ? input.prompt.substring(0, 80) : '') ||
-      (typeof input.query === 'string' ? input.query.substring(0, 80) : '') ||
-      ''
-    );
   }
 
   private stringifyResult(result: any): string {

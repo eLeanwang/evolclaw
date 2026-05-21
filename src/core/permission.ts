@@ -111,7 +111,12 @@ export function summarizeToolInput(toolName: string, input: Record<string, unkno
     'Read':  (i) => i.file_path,
     'Edit':  (i) => i.file_path,
     'Write': (i) => i.file_path,
-    'Bash':  (i) => i.command?.substring(0, 80),
+    'Bash':  (i) => {
+      const cmd = i.command?.substring(0, 80) || '';
+      const desc = i.description;
+      if (desc && cmd) return `${cmd} | ${desc}`;
+      return cmd || desc;
+    },
     'Grep':  (i) => `pattern: ${i.pattern}`,
     'Glob':  (i) => `pattern: ${i.pattern}`,
     'Agent': (i) => i.description || i.prompt?.substring(0, 80),
@@ -130,6 +135,8 @@ export function summarizeToolInput(toolName: string, input: Record<string, unkno
     },
     'TaskCreate': (i) => i.subject || i.description?.substring(0, 80),
     'TaskUpdate': (i) => i.status ? `${i.taskId} → ${i.status}` : i.taskId,
+    'TaskOutput': (i) => `${i.task_id || '?'}${i.block === false ? ' (non-blocking)' : ''}${i.timeout ? ` timeout=${i.timeout}ms` : ''}`,
+    'TaskStop': (i) => i.task_id || i.shell_id || '?',
     'NotebookEdit': (i) => i.notebook_path,
     'WebFetch': (i) => i.url,
     'WebSearch': (i) => i.query?.substring(0, 80),
