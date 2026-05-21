@@ -532,12 +532,6 @@ export class MessageProcessor {
       // 设置 per-session 权限模式（默认 bypass，所有角色统一）
       agent.setMode(session.metadata?.permissionMode ?? DEFAULT_PERMISSION_MODE);
 
-      // 更新 session.metadata.messageId（用于诊断日志）
-      if (message.messageId && session.metadata) {
-        session.metadata.messageId = message.messageId;
-        await this.sessionManager.updateSession(session.id, { metadata: session.metadata });
-      }
-
       // 标记会话为处理中（实时持久化，重启后可恢复）
       this.sessionManager.markProcessing(session.id, taskId);
       if (message.replyContext?.metadata?.encrypted != null) {
