@@ -1,4 +1,5 @@
 import path from 'path';
+import fs from 'fs';
 import type { EventBus } from './event-bus.js';
 import type { ChannelAdapter, ReplyContext, InteractionRequest } from '../types.js';
 import type { InteractionRouter } from './interaction-router.js';
@@ -109,7 +110,7 @@ export function summarizeToolInput(toolName: string, input: Record<string, unkno
 
   const extractors: Record<string, (i: any) => string | undefined> = {
     'Read':  (i) => i.file_path,
-    'Edit':  (i) => i.file_path,
+    'Edit':  (i) => formatEditSummary(i),
     'Write': (i) => i.file_path,
     'Bash':  (i) => {
       const cmd = i.command?.substring(0, 80) || '';
@@ -161,6 +162,96 @@ export function summarizeToolInput(toolName: string, input: Record<string, unkno
 }
 
 export type PermissionDecision = 'allow' | 'always' | 'deny';
+
+/** 为 Edit 工具生成 diff 风格摘要 */
+function formatEditSummary(input: any): string {
+  const filePath = input.file_path || '';
+  const oldStr = typeof input.old_string === 'string' ? input.old_string : '';
+  const newStr = typeof input.new_string === 'string' ? input.new_string : '';
+
+  if (!oldStr && !newStr) return filePath;
+
+  const MAX_DIFF_LINES = 14;
+
+  const oldLines = oldStr.split('\n');
+  const newLines = newStr.split('\n');
+
+  // 尝试从文件中定位 old_string 的起始行号
+  let startLine = 0; // 0-based; 0 means unknown
+  if (filePath && oldStr) {
+    try {
+      const content = fs.readFileSync(filePath, 'utf-8');
+      const idx = content.indexOf(oldStr);
+      if (idx >= 0) {
+        startLine = content.slice(0, idx).split('\n').length; // 1-based
+      }
+    } catch {
+      // 文件不可读，行号留空
+    }
+  }
+
+  const diffLines: string[] = [];
+
+  // 找公共前缀行数
+  let prefixLen = 0;
+  while (prefixLen < oldLines.length && prefixLen < newLines.length && oldLines[prefixLen] === newLines[prefixLen]) {
+    prefixLen++;
+  }
+  // 找公共后缀行数
+  let suffixLen = 0;
+  while (
+    suffixLen < oldLines.length - prefixLen &&
+    suffixLen < newLines.length - prefixLen &&
+    oldLines[oldLines.length - 1 - suffixLen] === newLines[newLines.length - 1 - suffixLen]
+  ) {
+    suffixLen++;
+  }
+
+  const CONTEXT = 2;
+  // 计算行号宽度（用于对齐）
+  const maxLineNo = startLine > 0 ? startLine + oldLines.length - 1 : 0;
+  const newMaxLineNo = startLine > 0 ? startLine + prefixLen + (newLines.length - suffixLen - prefixLen) - 1 : 0;
+  const padWidth = startLine > 0 ? Math.max(maxLineNo, newMaxLineNo).toString().length : 0;
+
+  // 格式化一行：行号 + 标记 + 内容
+  // 使用 Unicode 符号避免飞书 Markdown 将 "- " 解析为列表
+  const fmtLine = (lineNo: number, marker: '−' | '＋' | ' ', text: string) => {
+    if (startLine > 0) {
+      return `${lineNo.toString().padStart(padWidth)} ${marker}  ${text}`;
+    }
+    return `${marker}  ${text}`;
+  };
+
+  // 上下文前缀（最多 CONTEXT 行）
+  const ctxStart = Math.max(0, prefixLen - CONTEXT);
+  for (let i = ctxStart; i < prefixLen; i++) {
+    diffLines.push(fmtLine(startLine + i, ' ', oldLines[i]));
+  }
+
+  // 删除行
+  const removedEnd = oldLines.length - suffixLen;
+  for (let i = prefixLen; i < removedEnd && diffLines.length < MAX_DIFF_LINES; i++) {
+    diffLines.push(fmtLine(startLine + i, '−', oldLines[i]));
+  }
+
+  // 新增行（行号从 prefixLen 位置开始递增）
+  const addedEnd = newLines.length - suffixLen;
+  for (let i = prefixLen; i < addedEnd && diffLines.length < MAX_DIFF_LINES; i++) {
+    diffLines.push(fmtLine(startLine + i, '＋', newLines[i]));
+  }
+
+  // 上下文后缀（最多 CONTEXT 行）
+  const ctxEnd = Math.min(oldLines.length, removedEnd + CONTEXT);
+  for (let i = removedEnd; i < ctxEnd && diffLines.length < MAX_DIFF_LINES + 2; i++) {
+    diffLines.push(fmtLine(startLine + i, ' ', oldLines[i]));
+  }
+
+  if (diffLines.length > MAX_DIFF_LINES + 2) {
+    diffLines.splice(MAX_DIFF_LINES, diffLines.length, '  ...');
+  }
+
+  return `${filePath}\n\`\`\`\n${diffLines.join('\n')}\n\`\`\``;
+}
 
 interface PendingPermission {
   sessionId: string;

@@ -102,6 +102,7 @@ export class AUNChannel {
   private traceWriter: LogWriter | null = null;
   private eventBus: any = null;
   private ownerBoundHandler: ((event: any) => void) | null = null;
+  private queuedHandler: ((event: any) => void) | null = null;
   private pendingEchoMessages = new Map<string, { text: string; channelId: string; context?: ReplyContext; receiveTs: number }>();
   private isEchoSending = false;
 
@@ -281,7 +282,8 @@ export class AUNChannel {
         }
 
         if (quoteParts.length > 0) {
-          const quoted = quoteParts.join('\n').split('\n').map(line => `> ${prefix}${line}`).join('\n');
+          const lines = quoteParts.join('\n').split('\n');
+          const quoted = lines.map((line, i) => `> ${i === 0 ? prefix : ''}${line}`).join('\n');
           return text ? `${quoted}\n\n${text}` : quoted;
         }
       }
@@ -336,6 +338,46 @@ export class AUNChannel {
     return '';
   }
 
+  /** 收集 payload 中所有需要下载的 attachments（顶层 + merge.items + quote.quote），按 url 去重 */
+  private collectAllAttachments(payload: unknown): any[] {
+    if (!payload || typeof payload !== 'object') return [];
+    const obj = payload as Record<string, unknown>;
+    const result: any[] = [];
+    const seen = new Set<string>();
+
+    const add = (att: any) => {
+      if (!att || typeof att !== 'object') return;
+      const key = att.url || att.object_key || '';
+      if (key && seen.has(key)) return;
+      if (key) seen.add(key);
+      result.push(att);
+    };
+
+    // 顶层 attachments
+    if (Array.isArray(obj.attachments)) {
+      for (const att of obj.attachments) add(att);
+    }
+
+    // merge.items 中的子消息 attachments
+    if (obj.type === 'merge' && Array.isArray(obj.items)) {
+      for (const item of obj.items) {
+        if (item && typeof item === 'object' && Array.isArray(item.attachments)) {
+          for (const att of item.attachments) add(att);
+        }
+      }
+    }
+
+    // quote.quote 中的 attachments
+    if (obj.type === 'quote' && obj.quote && typeof obj.quote === 'object') {
+      const q = obj.quote as Record<string, unknown>;
+      if (Array.isArray(q.attachments)) {
+        for (const att of q.attachments) add(att);
+      }
+    }
+
+    return result;
+  }
+
   private hasExplicitMention(text: string, target: string): boolean {
     const escaped = target.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     return new RegExp(`(^|\\s)@${escaped}(?=$|\\s|[.,!?;:，。！？；：]|[\\u4e00-\\u9fff])`).test(text);
@@ -388,23 +430,15 @@ export class AUNChannel {
     return replyContext;
   }
 
-  private acknowledgeImmediately(messageId: string | undefined, seq?: number): void {
-    if (seq != null && this.client) {
-      this.client.call('message.ack', { seq }).catch(e => {
-        logger.debug(`${this.logPrefix()} Immediate ack failed: ${e}`);
-      });
-    }
+  private acknowledgeImmediately(messageId: string | undefined, _seq?: number): void {
+    // SDK internally manages seq tracking and ack — do not call message.ack RPC directly,
+    // as it corrupts the SDK's seqTracker state and breaks V2 e2ee message pull.
     if (messageId) this.messageSeqMap.delete(messageId);
   }
 
-  private shouldEncrypt(peerId: string): boolean {
-    const cached = this.peerE2ee.get(peerId);
-    if (!cached) return true;
-    if (Date.now() - cached.ts > AUNChannel.E2EE_PROBE_TTL) {
-      this.peerE2ee.delete(peerId);
-      return true;
-    }
-    return cached.ok;
+  private shouldEncrypt(_peerId: string): boolean {
+    // Default to plaintext; only encrypt when session is explicitly marked encrypted
+    return false;
   }
   private _aid?: string;
   private _selfName?: string;  // 本地 agent.md 中的 name，首次 connect 时读取
@@ -416,7 +450,6 @@ export class AUNChannel {
   private peerE2ee = new Map<string, { ok: boolean; ts: number }>();
   private static readonly E2EE_PROBE_TTL = 10 * 60 * 1000; // 10min
   private plaintextRecv = 0;
-  private sessionModeResolver?: (channelId: string) => Promise<string | undefined>;
   interactionCallback?: (response: InteractionResponse) => void;
   // action_card message_id → { requestId, isCommandCard }（用于关联 action_card_reply）
   cardMessageIdMap = new Map<string, { requestId: string; isCommandCard: boolean }>();
@@ -854,12 +887,13 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
   ): Promise<string | null> {
     const ownerAid = att.owner_aid || this._aid || '';
     const objectKey = att.object_key;
-    const filename = att.filename || objectKey.split('/').pop() || 'unknown';
 
     if (!objectKey) {
       logger.warn(`${this.logPrefix()} Attachment missing object_key, skipping`);
       return null;
     }
+
+    const filename = att.filename || objectKey.split('/').pop() || 'unknown';
 
     let downloadUrl: string;
     try {
@@ -943,10 +977,8 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       mentions.push(this._aid);
     }
 
-    // Process attachments
-    const rawAttachments: any[] = Array.isArray((payload as any)?.attachments)
-      ? (payload as any).attachments
-      : [];
+    // Process attachments (顶层 + 嵌套在 merge.items / quote.quote 中的)
+    const rawAttachments: any[] = this.collectAllAttachments(payload);
 
     let finalText = text;
     if (rawAttachments.length > 0 && this.client) {
@@ -981,6 +1013,12 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
 
     // action_card_reply 已在 extractTextPayload 中消费，不分发给 agent
     if (p2pPayloadType === 'action_card_reply') return;
+    // payload 类型白名单：信号类消息（status / event / thought 等）不进 Agent
+    if (p2pPayloadType && !AUNChannel.PROACTIVE_ALLOW_TYPES.has(p2pPayloadType)) {
+      this.acknowledgeImmediately(messageId, seq);
+      logger.info(`${this.logPrefix()} P2P dropped (type deny): type=${p2pPayloadType} from=${shortAid}(${displayName}) mid=${messageId}`);
+      return;
+    }
     logger.info(`${this.logPrefix()} P2P dispatched: from=${shortAid}(${displayName}) mid=${messageId} encrypt=${msgEncrypted} text=${finalText.slice(0, 60)}`);
     appendAidEvent({ ts: Date.now(), iso: new Date().toISOString(), event: 'message_in', aid: this.config.aid, from: fromAid, msgId: messageId, kind: 'text', len: finalText.length });
     const isSystemP2P = p2pPayloadType === 'event';
@@ -1033,7 +1071,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       return;
     }
 
-    // 短 echo 快速通道：连通性测试要尽量低延迟，命中后绕过所有 await（sessionModeResolver / 后续 mention 过滤）
+    // 短 echo 快速通道：连通性测试要尽量低延迟，命中后绕过所有 await（后续 mention 过滤）
     {
       const firstLineFast = text.split('\n')[0] || '';
       const hasEvolClawTrace = /\[EvolClaw\.(receive|reply|agent)\]/.test(text);
@@ -1061,20 +1099,15 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       }
     }
 
-    // ── proactive 模式 payload 类型白名单 ──
-    // 仅做类型层面的防噪（task.update / status.ping 等信号类消息不进 Agent）；
-    // mention 过滤统一交给后面的 dispatchMode 一段处理（避免双层语义）。
-    if (this.sessionModeResolver) {
-      const sessionMode = await this.sessionModeResolver(groupId).catch(() => undefined);
-      if (sessionMode === 'proactive') {
-        const payloadObj = (payload && typeof payload === 'object') ? payload as Record<string, any> : null;
-        const payloadType: string = payloadObj?.type ?? '';
-
-        if (!AUNChannel.PROACTIVE_ALLOW_TYPES.has(payloadType)) {
-          this.acknowledgeImmediately(messageId, seq);
-          logger.info(`${this.logPrefix()} Group dropped (proactive deny): type=${payloadType} group=${groupId} sender=${senderAid} mid=${messageId}`);
-          return;
-        }
+    // ── payload 类型白名单（所有模式生效） ──
+    // 信号类消息（status / event / thought / task.update 等）不进 Agent
+    {
+      const payloadObj = (payload && typeof payload === 'object') ? payload as Record<string, any> : null;
+      const payloadType: string = payloadObj?.type ?? '';
+      if (payloadType && !AUNChannel.PROACTIVE_ALLOW_TYPES.has(payloadType)) {
+        this.acknowledgeImmediately(messageId, seq);
+        logger.info(`${this.logPrefix()} Group dropped (type deny): type=${payloadType} group=${groupId} sender=${senderAid} mid=${messageId}`);
+        return;
       }
     }
 
@@ -1131,10 +1164,8 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
 
     const strippedText = this.stripSelfMentionIfOnly(text, this._aid);
 
-    // Detect attachments before the empty-text guard
-    const rawAttachments: any[] = Array.isArray((payload as any)?.attachments)
-      ? (payload as any).attachments
-      : [];
+    // Detect attachments before the empty-text guard (顶层 + 嵌套)
+    const rawAttachments: any[] = this.collectAllAttachments(payload);
     const hasAttachments = rawAttachments.length > 0;
 
     // Allow through if there's text OR attachments; both-empty messages are silently dropped
@@ -1606,7 +1637,11 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     if (this.eventBus && this.ownerBoundHandler && typeof this.eventBus.unsubscribe === 'function') {
       this.eventBus.unsubscribe('channel:owner-bound', this.ownerBoundHandler);
     }
+    if (this.eventBus && this.queuedHandler && typeof this.eventBus.unsubscribe === 'function') {
+      this.eventBus.unsubscribe('task:queued', this.queuedHandler);
+    }
     this.ownerBoundHandler = null;
+    this.queuedHandler = null;
     this.eventBus = bus;
     if (bus && typeof bus.subscribe === 'function') {
       const handler = (event: any) => {
@@ -1623,6 +1658,13 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       };
       bus.subscribe('channel:owner-bound', handler);
       this.ownerBoundHandler = handler;
+
+      const queuedHandler = (event: any) => {
+        if (event.channel !== this.config.channelName) return;
+        this.sendProcessingStatus(event.channelId, 'queued', '', '', event.replyContext);
+      };
+      bus.subscribe('task:queued', queuedHandler);
+      this.queuedHandler = queuedHandler;
     }
   }
 
@@ -1634,9 +1676,6 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     this.messageHandler = handler;
   }
 
-  setSessionModeResolver(resolver: (channelId: string) => Promise<string | undefined>): void {
-    this.sessionModeResolver = resolver;
-  }
 
   setDispatchModeResolver(resolver: (channelId: string) => Promise<string | undefined>): void {
     this.dispatchModeResolver = resolver;
@@ -2121,7 +2160,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     this.messageSeqMap.delete(messageId);
   }
 
-  sendProcessingStatus(channelId: string, status: 'start' | 'done' | 'interrupted' | 'error' | 'timeout', sessionId: string, taskId: string, context?: ReplyContext): void {
+  sendProcessingStatus(channelId: string, status: 'start' | 'done' | 'interrupted' | 'error' | 'timeout' | 'queued', sessionId: string, taskId: string, context?: ReplyContext): void {
     if (status === 'start') this.sentCount.delete(channelId);  // 新任务开始，重置计数
     if (!this.client || !this.connected) return;
 
@@ -2132,6 +2171,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       interrupted: 'interrupted',
       error: 'error',
       timeout: 'timeout',
+      queued: 'queued',
     };
     const statusPayload: Record<string, any> = {
       type: 'status',
@@ -2459,6 +2499,9 @@ export class AUNChannelPlugin implements ChannelPlugin {
             case 'status.started':
               channel.sendProcessingStatus(channelId, 'start', envelope.taskId, envelope.taskId, ctx);
               return;
+            case 'status.queued':
+              channel.sendProcessingStatus(channelId, 'queued', envelope.taskId, envelope.taskId, ctx);
+              return;
             case 'status.completed':
               channel.sendProcessingStatus(channelId, 'done', envelope.taskId, envelope.taskId, ctx);
               return;
@@ -2478,7 +2521,6 @@ export class AUNChannelPlugin implements ChannelPlugin {
                 const aunCard: Record<string, any> = {
                   type: 'action_card',
                   title: action.title,
-                  description: action.body,
                   actions: (action as ActionInteraction).buttons.map(btn => ({
                     label: btn.label,
                     value: btn.key,
@@ -2486,6 +2528,7 @@ export class AUNChannelPlugin implements ChannelPlugin {
                     behavior: 'reply',
                   })),
                 };
+                if (action.body) aunCard.description = action.body;
                 if (ctx?.threadId) aunCard.thread_id = ctx.threadId;
                 const msgId = await channel.sendStructured(channelId, aunCard, ctx);
                 if (msgId) {
@@ -2497,7 +2540,6 @@ export class AUNChannelPlugin implements ChannelPlugin {
                 const aunCard: Record<string, any> = {
                   type: 'action_card',
                   title: card.title,
-                  description: card.body,
                   actions: (card as CommandCard).buttons.map(btn => ({
                     label: btn.label,
                     value: btn.command,
@@ -2505,6 +2547,7 @@ export class AUNChannelPlugin implements ChannelPlugin {
                     behavior: 'reply',
                   })),
                 };
+                if (card.body) aunCard.description = card.body;
                 if (ctx?.threadId) aunCard.thread_id = ctx.threadId;
                 const msgId = await channel.sendStructured(channelId, aunCard, ctx);
                 if (msgId) {
@@ -2607,13 +2650,6 @@ export class AUNChannelPlugin implements ChannelPlugin {
                 message: `⚠️ AUN 渠道 ${adapter.channelName} 断连，自动重试已用尽。\n使用 /check rty aun 手动重连`,
                 timestamp: Date.now(),
               });
-            });
-          }
-
-          if (typeof channel.setSessionModeResolver === 'function') {
-            channel.setSessionModeResolver(async (channelId: string) => {
-              const session = await ctx.sessionManager.getActiveSession(adapter.channelName, channelId);
-              return session?.sessionMode;
             });
           }
 

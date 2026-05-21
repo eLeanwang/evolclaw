@@ -182,18 +182,12 @@ export class EvolAgent {
 
   // ── ShowActivities ────────────────────────────────────────────────────
 
-  getShowActivities(channelKey: string): ShowActivitiesMode {
-    const inst = this.findChannelInstance(channelKey);
-    return inst?.showActivities ?? this.merged.show_activities ?? 'all';
+  getShowActivities(_channelKey: string): ShowActivitiesMode {
+    return this.merged.show_activities ?? 'all';
   }
 
-  setShowActivities(channelKey: string, mode: ShowActivitiesMode): void {
-    const inst = this.findRawChannelInstance(channelKey);
-    if (!inst) {
-      logger.warn(`[EvolAgent ${this.aid}] setShowActivities: channel "${channelKey}" not found`);
-      return;
-    }
-    inst.showActivities = mode;
+  setShowActivities(_channelKey: string, mode: ShowActivitiesMode): void {
+    this.rawAgent.show_activities = mode;
     this.persist();
   }
 
