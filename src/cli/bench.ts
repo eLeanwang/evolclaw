@@ -111,6 +111,13 @@ function getArgValue(args: string[], flag: string): string | undefined {
 
 // ==================== Promise Pool ====================
 
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`timeout ${ms}ms: ${label}`)), ms);
+    promise.then(v => { clearTimeout(timer); resolve(v); }, e => { clearTimeout(timer); reject(e); });
+  });
+}
+
 async function runPool<T>(tasks: (() => Promise<T>)[], concurrency: number, onDone?: (result: T, idx: number) => void): Promise<T[]> {
   const results: T[] = new Array(tasks.length);
   let nextIdx = 0;
@@ -127,15 +134,33 @@ async function runPool<T>(tasks: (() => Promise<T>)[], concurrency: number, onDo
 
 // ==================== Progress Display ====================
 
-function renderProgress(done: number, total: number, rate: number, counts: Record<SizeClass, number>): string {
-  const width = 20;
-  const filled = Math.round((done / total) * width);
-  const bar = '█'.repeat(filled) + '░'.repeat(width - filled);
-  return `  Sending [${CYAN}${bar}${RST}] ${done}/${total}  (${BOLD}${rate.toFixed(1)}${RST} msg/s)  S:${counts.S} M:${counts.M} L:${counts.L}`;
-}
-
 function clearLine() {
   process.stdout.write('\r\x1b[K');
+}
+
+function moveCursorUp(n: number) {
+  if (n > 0) process.stdout.write(`\x1b[${n}A`);
+}
+
+function renderMultiLineProgress(
+  aids: string[],
+  aidStats: Map<string, { sent: number; ok: number; fail: number; timeouts: number }>,
+  total: number, done: number, rate: number,
+): void {
+  const lines: string[] = [];
+  for (const aid of aids) {
+    const s = aidStats.get(aid) || { sent: 0, ok: 0, fail: 0, timeouts: 0 };
+    const aidShort = aid.split('.')[0];
+    const barW = 12;
+    const perAidTotal = Math.ceil(total / aids.length);
+    const filled = Math.min(barW, Math.round((s.sent / Math.max(perAidTotal, 1)) * barW));
+    const bar = `${CYAN}${'█'.repeat(filled)}${'░'.repeat(barW - filled)}${RST}`;
+    const timeoutStr = s.timeouts > 0 ? ` ${YELLOW}⏳${s.timeouts}${RST}` : '';
+    const failStr = s.fail > 0 ? ` ${RED}✗${s.fail}${RST}` : '';
+    lines.push(`    ${pad(aidShort, 14, 'left')}[${bar}] ${pad(String(s.sent), 4)}/${perAidTotal}  ok=${s.ok}${failStr}${timeoutStr}`);
+  }
+  lines.push(`  ${DIM}──${RST} total ${done}/${total}  ${BOLD}${rate.toFixed(1)}${RST} msg/s`);
+  process.stdout.write(lines.join('\n') + '\n');
 }
 
 // ==================== Table Rendering ====================
@@ -231,16 +256,33 @@ interface AuthResult {
   ok: boolean;
   authMs: number;
   error?: string;
+  gateway?: string;
 }
 
 async function benchAuth(aids: string[], concurrency: number, aunPath?: string, slotId?: string): Promise<AuthResult[]> {
-  const { createShortConnection } = await import('../aun/rpc/index.js');
+  const { AUNClient } = await import('@agentunion/fastaun');
+  const path = (await import('path')).default;
+  const fs = (await import('fs')).default;
+  const os = (await import('os')).default;
+  const resolvedAunPath = aunPath ?? path.join(os.homedir(), '.aun');
+  const caCertPath = path.join(resolvedAunPath, 'CA', 'root', 'root.crt');
+
   const tasks = aids.map(aid => async (): Promise<AuthResult> => {
     const start = Date.now();
     try {
-      const conn = await createShortConnection(aid, { aunPath, slotId: slotId ?? 'bench' });
-      await conn.close();
-      return { aid, ok: true, authMs: Date.now() - start };
+      const clientOpts: any = { aun_path: resolvedAunPath, debug: false };
+      if (fs.existsSync(caCertPath)) clientOpts.root_ca_path = caCertPath;
+      const client = new AUNClient(clientOpts);
+      await client.auth.createAid({ aid });
+      const authResult = await client.auth.authenticate({ aid });
+      const accessToken = authResult?.access_token ?? (client as any)._access_token;
+      const gateway = (client as any)._gatewayUrl ?? authResult?.gateway ?? '';
+      await client.connect(
+        { access_token: accessToken, gateway, slot_id: slotId ?? '', connection_kind: 'short' },
+        { auto_reconnect: false },
+      );
+      try { await client.close(); } catch {}
+      return { aid, ok: true, authMs: Date.now() - start, gateway };
     } catch (e: any) {
       return { aid, ok: false, authMs: Date.now() - start, error: e.message };
     }
@@ -278,13 +320,20 @@ async function benchSwitch(aids: string[], rounds: number, aunPath?: string, use
       let serverTimestamp: number | undefined;
 
       if (useCli) {
-        const res = await cliSend(from, to, text, slot);
-        ok = res.ok;
-        serverTimestamp = res.timestamp;
+        try {
+          const res = await withTimeout(cliSend(from, to, text, slot), 10000, `${from.split('.')[0]}→${to.split('.')[0]}`);
+          ok = res.ok;
+          serverTimestamp = res.timestamp;
+        } catch { ok = false; }
       } else {
-        const res = await msgSend({ from, to, body: { mode: 'text', text }, slotId: slot, aunPath });
-        ok = res.ok;
-        serverTimestamp = res.ok ? (res as any).timestamp : undefined;
+        try {
+          const res = await withTimeout(
+            msgSend({ from, to, body: { mode: 'text', text }, slotId: slot, aunPath }) as Promise<any>,
+            10000, `${from.split('.')[0]}→${to.split('.')[0]}`
+          );
+          ok = res.ok;
+          serverTimestamp = res.ok ? res.timestamp : undefined;
+        } catch { ok = false; }
       }
 
       const totalMs = Date.now() - t0;
@@ -449,6 +498,12 @@ Options:
   const authP50 = percentile(authTimes, 50);
   const authP95 = percentile(authTimes, 95);
 
+  // Build AID → gateway map for error reporting
+  const gatewayMap = new Map<string, string>();
+  for (const r of authResults) {
+    if (r.gateway && !gatewayMap.has(r.aid)) gatewayMap.set(r.aid, r.gateway);
+  }
+
   if (!formatJson) {
     console.log(ok(`认证 ${authOk.length}/${authResults.length} 次成功  avg=${Math.round(authAvg)}ms  P50=${authP50}ms  P95=${authP95}ms`));
     if (authFail.length > 0) console.log(fail(`${authFail.length} 次认证失败`));
@@ -479,9 +534,21 @@ Options:
   const counts: Record<SizeClass, number> = { S: 0, M: 0, L: 0 };
   const sendStart = Date.now();
   let lastRender = 0;
+  const aidStats = new Map<string, { sent: number; ok: number; fail: number; timeouts: number }>();
+  for (const aid of aids) aidStats.set(aid, { sent: 0, ok: 0, fail: 0, timeouts: 0 });
+  let progressLinesDrawn = 0;
 
   const MAX_RETRIES = 3;
   const RETRY_DELAY_MS = 500;
+  const SEND_TIMEOUT_MS = 10000;
+  const sendErrors: string[] = [];
+  let stallCount = 0;
+  let lastProgressTime = Date.now();
+  const timeoutCountByAid = new Map<string, number>();
+
+  // Suppress SDK error logs during send phase (we track errors ourselves)
+  const origError2 = console.error;
+  console.error = () => {};
 
   const sendFns = tasks.map(t => async (): Promise<SendResult> => {
     let lastError: string | undefined;
@@ -496,33 +563,50 @@ Options:
       const text = buildMessageText(t.seq, t.sizeClass, sendTs, sessionId);
       const t0 = Date.now();
       try {
+        const sendPromise: Promise<any> = cliMode
+          ? cliSend(t.from, t.to, text, benchSlot)
+          : msgSend({ from: t.from, to: t.to, body: { mode: 'text', text }, slotId: benchSlot, aunPath });
+
+        const res = await withTimeout(sendPromise, SEND_TIMEOUT_MS, `${t.from.split('.')[0]}→${t.to.split('.')[0]}`);
+
         if (cliMode) {
-          const res = await cliSend(t.from, t.to, text, benchSlot);
-          if (res.ok) {
+          const cliRes = res as { ok: boolean; timestamp?: number; error?: string };
+          if (cliRes.ok) {
             return {
               seq: t.seq, sizeClass: t.sizeClass, ok: true, sendMs: Date.now() - t0,
-              serverTimestamp: res.timestamp, sendTimestamp: sendTs,
+              serverTimestamp: cliRes.timestamp, sendTimestamp: sendTs,
               from: t.from, to: t.to, retries,
             };
           }
-          lastError = res.error;
-          continue;
+          lastError = cliRes.error;
+        } else {
+          const sdkRes = res as any;
+          if (sdkRes.ok) {
+            return {
+              seq: t.seq, sizeClass: t.sizeClass, ok: true, sendMs: Date.now() - t0,
+              serverTimestamp: sdkRes.timestamp, sendTimestamp: sendTs,
+              from: t.from, to: t.to, retries,
+            };
+          }
+          lastError = sdkRes.error;
         }
-        const res = await msgSend({
-          from: t.from, to: t.to,
-          body: { mode: 'text', text },
-          slotId: benchSlot, aunPath,
-        });
-        if (res.ok) {
-          return {
-            seq: t.seq, sizeClass: t.sizeClass, ok: true, sendMs: Date.now() - t0,
-            serverTimestamp: (res as any).timestamp, sendTimestamp: sendTs,
-            from: t.from, to: t.to, retries,
-          };
-        }
-        lastError = (res as MsgError).error;
       } catch (e: any) {
         lastError = e.message || String(e);
+        if (lastError!.includes('timeout')) {
+          stallCount++;
+          const aidStat = aidStats.get(t.from);
+          if (aidStat) aidStat.timeouts++;
+          const aidCount = (timeoutCountByAid.get(t.from) || 0) + 1;
+          timeoutCountByAid.set(t.from, aidCount);
+          if (!formatJson) {
+            const gw = gatewayMap.get(t.from) || '?';
+            const now = new Date();
+            const ts = `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}:${String(now.getSeconds()).padStart(2,'0')}.${String(now.getMilliseconds()).padStart(3,'0')}`;
+            clearLine();
+            process.stdout.write(`  ${YELLOW}⏳ [${ts}] 连接超时: ${t.from.split('.')[0]}→${t.to.split('.')[0]} gw=${gw} (${t.from.split('.')[0]} 第${aidCount}次超时)${RST}\n`);
+            progressLinesDrawn = 0;
+          }
+        }
       }
     }
 
@@ -533,28 +617,60 @@ Options:
     };
   });
 
+  // Stall watchdog: warn when no progress for 5s
+  const stallWatchdog = !formatJson ? setInterval(() => {
+    const stallMs = Date.now() - lastProgressTime;
+    if (stallMs > 5000) {
+      clearLine();
+      process.stdout.write(`  ${YELLOW}⏳ ${(stallMs / 1000).toFixed(0)}s 无进展 — 等待连接超时中 (已完成 ${sendResults.length}/${totalMsgs}, timeout ${stallCount} 次)${RST}\n`);
+      progressLinesDrawn = 0;
+    }
+  }, 2000) : null;
+
   await runPool(sendFns, concurrency, (r) => {
     sendResults.push(r);
     counts[r.sizeClass]++;
+    const stat = aidStats.get(r.from)!;
+    stat.sent++;
+    if (r.ok) stat.ok++; else stat.fail++;
+    if (!r.ok && !formatJson) {
+      const gw = gatewayMap.get(r.from) || '?';
+      sendErrors.push(`seq=${r.seq} ${r.from.split('.')[0]}→${r.to.split('.')[0]} retry=${r.retries} gw=${gw} err=${(r.error || '').slice(0, 80)}`);
+    }
+    lastProgressTime = Date.now();
     const now = Date.now();
-    if (!formatJson && (now - lastRender > 100 || sendResults.length === totalMsgs)) {
+    if (!formatJson && (now - lastRender > 200 || sendResults.length === totalMsgs)) {
       lastRender = now;
       const elapsed = (now - sendStart) / 1000;
       const rate = sendResults.length / Math.max(elapsed, 0.001);
-      clearLine();
-      process.stdout.write(renderProgress(sendResults.length, totalMsgs, rate, counts));
+      if (progressLinesDrawn > 0) moveCursorUp(progressLinesDrawn);
+      for (let i = 0; i < progressLinesDrawn; i++) { clearLine(); process.stdout.write('\n'); }
+      if (progressLinesDrawn > 0) moveCursorUp(progressLinesDrawn);
+      renderMultiLineProgress(aids, aidStats, totalMsgs, sendResults.length, rate);
+      progressLinesDrawn = aids.length + 1;
     }
   });
 
+  if (stallWatchdog) clearInterval(stallWatchdog);
+
+  // Restore console.error after send phase
+  console.error = origError2;
+
   const sendDuration = (Date.now() - sendStart) / 1000;
   if (!formatJson) {
-    clearLine();
     const okCount = sendResults.filter(r => r.ok).length;
     const totalRetries = sendResults.reduce((sum, r) => sum + r.retries, 0);
     const retriedCount = sendResults.filter(r => r.retries > 0).length;
     let retryInfo = '';
     if (totalRetries > 0) retryInfo = `  ${DIM}(${retriedCount} 条重试，共 ${totalRetries} 次)${RST}`;
     console.log(ok(`发送完成 ${okCount}/${totalMsgs}  耗时 ${sendDuration.toFixed(2)}s  ${(okCount / sendDuration).toFixed(1)} msg/s${retryInfo}`));
+    if (sendErrors.length > 0) {
+      console.log(fail(`${sendErrors.length} 条最终失败:`));
+      for (const e of sendErrors.slice(0, 5)) {
+        console.log(`      ${DIM}${e}${RST}`);
+      }
+      if (sendErrors.length > 5) console.log(`      ${DIM}... +${sendErrors.length - 5}${RST}`);
+    }
     console.log('');
   }
 
