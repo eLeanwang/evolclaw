@@ -204,7 +204,7 @@ export class MessageProcessor {
     '/model', '/effort', '/agent', '/slist', '/session', '/rename', '/repair', '/fork',
     '/stop', '/clear', '/compact', '/safe', '/del', '/perm', '/file', '/check',
     '/p ', '/s ', '/name ', '/rewind', '/rw', '/rw ', '/activity', '/chatmode',
-    '/aid', '/agentmd',
+    '/aid', '/agentmd', '/upgrade',
   ];
 
   /** 判断消息内容是否为已知命令 */
@@ -481,7 +481,7 @@ export class MessageProcessor {
             }
           }
           if (payload.kind === 'result.text' && payload.isFinal) {
-            opts.title = '\u2713 \u6700\u7ec8\u56de\u590d:';
+            opts.title = '\u2705 \u6700\u7ec8\u56de\u590d:';
           }
           opts.metadata = { ...(opts.metadata ?? {}), taskId, chatmode };
 
@@ -543,7 +543,7 @@ export class MessageProcessor {
         ? `【新消息插入】\n\n${message.content}\n\n【请无视之前中断继续处理】`
         : message.content;
 
-      let streamResult: { isError: boolean; subtype?: string; errors?: string[]; terminalReason?: string; lastReplyText: string; fullText: string; hasReceivedText: boolean } = { isError: false, lastReplyText: '', fullText: '', hasReceivedText: false };
+      let streamResult: { isError: boolean; subtype?: string; errors?: string[]; terminalReason?: string; lastReplyText: string; fullText: string; hasReceivedText: boolean; numTurns?: number; usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } } = { isError: false, lastReplyText: '', fullText: '', hasReceivedText: false };
       let effectiveSystemPrompt: string | undefined;
 
       try {
@@ -625,12 +625,6 @@ export class MessageProcessor {
         // 3. Proactive 模式提示词
         if (isProactive) {
           contextParts.push(renderPromptSection('proactive', {}));
-        }
-
-        // 4. 触发器功能提示词（非触发器消息时注入，让 AI 知道可以使用触发器）
-        if (message.source !== 'trigger') {
-          const triggerSection = renderPromptSection('trigger', {});
-          if (triggerSection) contextParts.push(triggerSection);
         }
 
         effectiveSystemPrompt = [options?.systemPromptAppend, ...contextParts].filter(Boolean).join('\n') || undefined;
@@ -805,46 +799,36 @@ export class MessageProcessor {
       }
       }  // end of !isProactive
 
-      // 最终回复文本添加到 renderer（统一在流结束后处理，避免多 complete 事件重复发送）
-      // suppressed 模式：中间流式文本未推送，使用最后一轮回复（回退到全文）
-      // 非 suppressed 且无流式文本：同上
-      // 非 suppressed 且有流式文本：已经逐步推送过了，不重复添加
-      //   但如果 renderer 既未发送过内容也没有 pending 内容（如 text 事件全为空），仍需兜底
+      // 最终回复文本：suppressed 模式或无 text 事件时需要兜底添加
       const finalReplyText = streamResult.lastReplyText || streamResult.fullText;
 
-      // 识别 Claude SDK 本地预处理兜底（如 "Unknown skill: xxx"）：
-      // 特征：无流式 text + complete.result 匹配已知模式
-      // 这类输出不是 agent 的回复意图，而是 SDK 本地拦截到的"未知斜杠命令"提示。
-      // Proactive 模式下 renderer silent，需要兜底发出以告知用户，否则用户完全无反馈。
-      const isSdkFallbackMessage = !!finalReplyText
-        && !streamResult.hasReceivedText
-        && /^Unknown skill:\s+\S+/i.test(finalReplyText.trim());
-
       if (finalReplyText) {
-        if (isProactive && isSdkFallbackMessage) {
-          // Proactive 模式 + SDK 本地兜底：直接 sendText 绕过 silent renderer
+        if (isProactive && !streamResult.hasReceivedText && /^Unknown skill:\s+\S+/i.test(finalReplyText.trim())) {
+          // Proactive 模式 + SDK 本地兜底：直接发送绕过 silent renderer
           const isCurrentlyBackground = await this.isBackgroundSession(session, message.channel, message.channelId);
           if (!isCurrentlyBackground) {
             await adapter.send({ ...envelope, replyContext: capturedReplyContext }, { kind: 'result.text', text: finalReplyText, isFinal: true });
             logger.info(`[MessageProcessor] proactive SDK fallback replied task=${taskId} text="${finalReplyText.slice(0, 60)}"`);
           }
-        } else if (shouldSuppress()) {
-          renderer.addText(finalReplyText);
-        } else if (!streamResult.hasReceivedText || (!renderer.hasSentContent() && !renderer.hasContent())) {
+        } else if (shouldSuppress() || !streamResult.hasReceivedText) {
           renderer.addText(finalReplyText);
         }
       }
 
-      // Flush 剩余内容（文件标记已在 flush 时自动移除）
-      await renderer.flush(true);
-
-      // 清理 activeStreams（正常完成）
+      // 先清理流和处理中状态（保证即使 flush 卡住，session 也不会永久处于"处理中"）
       agent.cleanupStream(streamKey);
       logger.info(`[MessageProcessor] agent.cleanupStream ok: session=${session.id} task=${taskId}`);
-
-      // 清除处理中状态
       this.sessionManager.clearProcessing(session.id);
       logger.info(`[MessageProcessor] session ${session.id} processing cleared task=${taskId}`);
+
+      // 被用户中断（新消息打断）时跳过 flush — 新 task 已接管渠道，旧 task 的 flush 无意义且可能卡住
+      const preFlushInterrupt = this.interruptedSessions.get(session.id);
+      if (preFlushInterrupt === 'new_message' || preFlushInterrupt === 'stop' || preFlushInterrupt === 'recalled') {
+        logger.info(`[MessageProcessor] Skipping flush for interrupted task=${taskId} reason=${preFlushInterrupt}`);
+      } else {
+        // Flush 剩余内容（文件标记已在 flush 时自动移除）
+        await renderer.flush(true);
+      }
 
       // 更新 EvolAgent.lastActivity
       if (this.agentRegistry) {
@@ -900,7 +884,7 @@ export class MessageProcessor {
           if (interruptReason) {
             adapter.send(envelope, { kind: 'status.interrupted', metadata: { reason: interruptReason } }).catch(() => {});
           } else {
-            adapter.send(envelope, { kind: 'status.completed', metadata: { durationMs } }).catch(() => {});
+            adapter.send(envelope, { kind: 'status.completed', metadata: { durationMs, numTurns: streamResult.numTurns, usage: streamResult.usage } }).catch(() => {});
           }
         }
         if (message.triggerMeta) {
@@ -951,6 +935,8 @@ export class MessageProcessor {
             agent: session.agentId || null,
             model: agent.getModel?.() || null,
             durationMs: Date.now() - startTime,
+            numTurns: streamResult.numTurns,
+            usage: streamResult.usage,
           }));
         }
       }
@@ -1132,15 +1118,18 @@ export class MessageProcessor {
     renderer: IMRenderer,
     resetTimer: (eventType?: string, toolName?: string) => void,
     shouldSuppress: () => boolean
-  ): Promise<{ isError: boolean; subtype?: string; errors?: string[]; terminalReason?: string; lastReplyText: string; fullText: string; hasReceivedText: boolean }> {
+  ): Promise<{ isError: boolean; subtype?: string; errors?: string[]; terminalReason?: string; lastReplyText: string; fullText: string; hasReceivedText: boolean; numTurns?: number; usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } }> {
     // Per-session agent name for stats bucketing
     const agentNameForStats = this.agentRegistry?.resolveByChannel(session.metadata?.channelName || session.channel)?.name ?? '<unknown>';
     let hasReceivedText = false;
     let hasErrorResult = false;  // 是否已有 tool_result/error 事件输出过错误
-    let completeResult: { isError: boolean; subtype?: string; errors?: string[]; terminalReason?: string; lastReplyText: string; fullText: string; hasReceivedText: boolean } = { isError: false, lastReplyText: '', fullText: '', hasReceivedText: false };
+    let completeResult: { isError: boolean; subtype?: string; errors?: string[]; terminalReason?: string; lastReplyText: string; fullText: string; hasReceivedText: boolean; numTurns?: number; usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } } = { isError: false, lastReplyText: '', fullText: '', hasReceivedText: false };
 
     // 追踪最后一轮 assistant 回复文本（tool_use 之后的纯文本）
     let lastReplyText = '';
+
+    // callId → description 映射，用于 tool_result 回显描述
+    const toolDescByCallId = new Map<string, string>();
 
     try {
       for await (const event of stream) {
@@ -1251,6 +1240,9 @@ export class MessageProcessor {
           });
           if (!shouldSuppress()) {
             const desc = summarizeToolInput(event.name, event.input || {});
+            if (event.callId) {
+              toolDescByCallId.set(event.callId, desc);
+            }
             renderer.addToolCall(event.name, event.input, event.callId, desc);
           }
         }
@@ -1267,14 +1259,17 @@ export class MessageProcessor {
             timestamp: Date.now()
           });
 
+          // 从 tool_use 阶段缓存的描述中回溯
+          const cachedDesc = event.callId ? toolDescByCallId.get(event.callId) : undefined;
+
           if (event.isError && !shouldSuppress()) {
             hasErrorResult = true;
             let errorMsg = event.error || (typeof event.result === 'string' ? event.result : JSON.stringify(event.result)) || '\u6267\u884c\u5931\u8d25';
             // 移除 XML 风格的错误标签
             errorMsg = errorMsg.replace(/<tool_use_error>(.*?)<\/tool_use_error>/gs, '$1');
-            renderer.addToolResult(event.name || '\u5de5\u5177', false, undefined, errorMsg, event.callId);
+            renderer.addToolResult(event.name || '\u5de5\u5177', false, undefined, errorMsg, event.callId, undefined, cachedDesc);
           } else if (!event.isError && !shouldSuppress()) {
-            renderer.addToolResult(event.name || '\u5de5\u5177', true, event.result, undefined, event.callId);
+            renderer.addToolResult(event.name || '\u5de5\u5177', true, event.result, undefined, event.callId, undefined, cachedDesc);
           }
         }
 
@@ -1301,7 +1296,7 @@ export class MessageProcessor {
           }
 
           // 记录完成状态 + 最后一轮回复文本（后续 complete 覆盖前序）
-          completeResult = { isError: !!event.isError, subtype: event.subtype, errors: event.errors, terminalReason: event.terminalReason, lastReplyText, fullText: event.result || '', hasReceivedText };
+          completeResult = { isError: !!event.isError, subtype: event.subtype, errors: event.errors, terminalReason: event.terminalReason, lastReplyText, fullText: event.result || '', hasReceivedText, numTurns: event.numTurns, usage: event.usage };
 
           // 失败且无前置错误输出：显示 errors 摘要
           // 但用户主动中断（新消息打断 或 /stop 命令）时不显示错误提示
@@ -1343,7 +1338,7 @@ export class MessageProcessor {
       }
 
       // 记录完成状态
-      completeResult = { isError: !!event.isError, subtype: event.subtype, errors: event.errors, terminalReason: event.terminalReason, lastReplyText, fullText: event.result || '', hasReceivedText };
+      completeResult = { isError: !!event.isError, subtype: event.subtype, errors: event.errors, terminalReason: event.terminalReason, lastReplyText, fullText: event.result || '', hasReceivedText, numTurns: event.numTurns, usage: event.usage };
 
       if (event.subtype === 'success') {
         this.messageCache.addEvent(session.id, {
@@ -1390,9 +1385,16 @@ export class MessageProcessor {
     } catch (error) {
       // User interrupt (AbortError) is expected, log at info level
       const catchInterruptReason = this.interruptedSessions.get(session.id);
-      const catchIsUserInterrupt = catchInterruptReason === 'new_message' || catchInterruptReason === 'stop';
+      const catchIsUserInterrupt = catchInterruptReason === 'new_message' || catchInterruptReason === 'stop' || catchInterruptReason === 'recalled';
       if (error instanceof Error && error.name === 'AbortError') {
         logger.info('[MessageProcessor] Stream interrupted (AbortError)');
+        // User-initiated interrupt: skip flush — new task takes over the channel,
+        // flushing here would send a spurious "最终回复" before the new task's output
+        if (catchIsUserInterrupt) {
+          completeResult.isError = false;
+          completeResult.hasReceivedText = hasReceivedText;
+          return completeResult;
+        }
       } else if (catchIsUserInterrupt) {
         // SDK telemetry noise after user-initiated interrupt — not a real error
         logger.debug('[MessageProcessor] Stream ended after user interrupt:', (error as Error)?.message?.split('\n')[0]);

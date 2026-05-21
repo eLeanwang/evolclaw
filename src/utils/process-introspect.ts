@@ -21,9 +21,6 @@ export const START_TIME_TOLERANCE_MS = 2000;
  */
 export function getProcessStartTime(pid: number): number | null {
   try {
-    if (pid === process.pid) {
-      return Math.round(Date.now() - process.uptime() * 1000);
-    }
     if (isWindows) return getStartTimeWindows(pid);
     if (isMacOS) return getStartTimeMacOS(pid);
     return getStartTimeLinux(pid);

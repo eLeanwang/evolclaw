@@ -13,7 +13,7 @@ import { normalizeChannelInstances, getChannelShowActivities } from '../utils/ch
 import { resolvePaths, getPackageRoot } from '../paths.js';
 import { saveToUploads, sanitizeFileName } from '../utils/media-cache.js';
 import { appendAidEvent } from '../utils/instance-registry.js';
-import { appendAidLifecycle } from '../utils/aid-lifecycle-log.js';
+import { appendAidLifecycle } from '../aun/aid/identity.js';
 import type { AidStatsCollector } from '../utils/stats.js';
 import { loadAgent, saveAgent } from '../config-store.js';
 import { getProcessStartTime } from '../utils/process-introspect.js';
@@ -2354,7 +2354,7 @@ export class AUNChannelPlugin implements ChannelPlugin {
             case 'system.error':
             case 'result.error': {
               const sendCtx: ReplyContext = { ...(ctx ?? {}) };
-              if (payload.kind === 'result.text' && payload.isFinal) sendCtx.title = '✓ 最终回复:';
+              if (payload.kind === 'result.text' && payload.isFinal) sendCtx.title = '✅ 最终回复:';
               await channel.sendMessage(channelId, payload.text, sendCtx);
               return;
             }

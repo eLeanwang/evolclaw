@@ -14,7 +14,8 @@ import { ipcQuery } from '../ipc.js';
 import { cmdInitWechat, cmdInitFeishu, cmdInitDingtalk, cmdInitQQBot, cmdInitWecom } from './init-channel.js';
 import * as platform from '../utils/cross-platform.js';
 import { EventBus } from '../core/event-bus.js';
-import { tryUpgrade, type UpgradeResult } from '../utils/npm-ops.js';
+import { tryUpgrade, tryUpgradeAunSdk, type UpgradeResult } from '../utils/npm-ops.js';
+import { resolveAunCoreSdkPkg, AUN_CORE_SDK_PKG } from '../aun/aid/client.js';
 import { scanInstances, cleanupInstances, readAidLastActivity, writeRestartMonitor, removeRestartMonitor, isRestartMonitorWinner, findOrphanProcesses, killOrphans, type OrphanProcess } from '../utils/instance-registry.js';
 
 // Suppress Node.js ExperimentalWarning (e.g. SQLite) from cluttering CLI output
@@ -476,6 +477,19 @@ async function cmdRestart(opts: { clear?: boolean } = {}) {
       break;
   }
 
+  // AUN SDK 版本检查与升级
+  const aunUpgrade = await tryUpgradeAunSdk(resolveAunCoreSdkPkg, AUN_CORE_SDK_PKG);
+  switch (aunUpgrade.status) {
+    case 'upgraded':
+      console.log(`✅ AUN SDK upgraded: ${aunUpgrade.from} → ${aunUpgrade.to}`);
+      break;
+    case 'no-update':
+      break; // silent
+    case 'failed':
+      console.log(`⚠ AUN SDK upgrade failed (${aunUpgrade.from} → ${aunUpgrade.to})`);
+      break;
+  }
+
   // 停止所有活 main 进程（可能不止一个）
   const status = scanInstances();
   const aliveMains = status.mains.filter(m => m.alive);
@@ -485,16 +499,24 @@ async function cmdRestart(opts: { clear?: boolean } = {}) {
     }
     await Promise.all(aliveMains.map(m => stopPid(m.record.pid)));
     await sleep(500);
-    cleanupInstances();
   }
+  cleanupInstances();
 
-  // 跨 HOME 孤儿处理：只在 --clear 时主动 kill；
-  // 否则交给后续 cmdStart() 统一警告，避免重复输出。
-  if (opts.clear) {
+  // 孤儿处理：同 HOME 的孤儿无条件 kill（restart 必须替换旧实例）；
+  // 跨 HOME 的孤儿只在 --clear 时 kill，否则仅警告。
+  {
     const orphans = findOrphanProcesses();
-    if (orphans.length > 0) {
-      const killed = killOrphans(orphans);
-      console.log(`☠ 已 SIGKILL ${killed.length} 个孤儿进程: ${killed.join(', ')}`);
+    const currentHome = resolveRoot();
+    const sameHome = orphans.filter(o => o.evolclawHome === currentHome);
+    const otherHome = orphans.filter(o => o.evolclawHome !== currentHome);
+    if (sameHome.length > 0) {
+      const killed = killOrphans(sameHome);
+      console.log(`☠ 已 SIGKILL ${killed.length} 个同 HOME 孤儿进程: ${killed.join(', ')}`);
+      await sleep(500);
+    }
+    if (opts.clear && otherHome.length > 0) {
+      const killed = killOrphans(otherHome);
+      console.log(`☠ 已 SIGKILL ${killed.length} 个跨 HOME 孤儿进程: ${killed.join(', ')}`);
       await sleep(500);
     }
   }
@@ -1381,7 +1403,7 @@ async function cmdWatchMenu(): Promise<void> {
         if (chosen === 'log') { cmdWatch(); }
         else if (chosen === 'aid') { await cmdWatchAid(); }
         else if (chosen === 'msg') {
-          const { cmdWatchMsg } = await import('../watch-msg.js');
+          const { cmdWatchMsg } = await import('./watch-msg.js');
           await cmdWatchMsg();
         }
         resolve();
@@ -2020,6 +2042,20 @@ async function cmdRestartMonitor() {
     case 'failed':
       log(`⚠ Upgrade failed (${upgrade.from} → ${upgrade.to}): ${upgrade.error}`);
       await notifyChannel(p, pendingInfo, `⚠️ 升级失败，使用当前版本继续`, log);
+      break;
+  }
+
+  // AUN SDK 版本检查与升级
+  const aunUpgrade = await tryUpgradeAunSdk(resolveAunCoreSdkPkg, AUN_CORE_SDK_PKG);
+  switch (aunUpgrade.status) {
+    case 'upgraded':
+      log(`✅ AUN SDK upgraded: ${aunUpgrade.from} → ${aunUpgrade.to}`);
+      await notifyChannel(p, pendingInfo, `📦 AUN SDK 已升级 ${aunUpgrade.from} → ${aunUpgrade.to}`, log);
+      break;
+    case 'no-update':
+      break;
+    case 'failed':
+      log(`⚠ AUN SDK upgrade failed (${aunUpgrade.from} → ${aunUpgrade.to}): ${aunUpgrade.error}`);
       break;
   }
 
@@ -4241,7 +4277,7 @@ export async function main(args: string[]) {
   ESC            退出`);
           break;
         }
-        const { cmdWatchMsg } = await import('../watch-msg.js');
+        const { cmdWatchMsg } = await import('./watch-msg.js');
         await cmdWatchMsg();
       } else if (args[1] === 'log') {
         cmdWatch();
@@ -4264,7 +4300,7 @@ export async function main(args: string[]) {
       await cmdDiagnose();
       break;
     case 'net': {
-      const { cmdNet } = await import('../net-check.js');
+      const { cmdNet } = await import('./net-check.js');
       await cmdNet(args.slice(1));
       break;
     }

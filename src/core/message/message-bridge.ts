@@ -76,6 +76,9 @@ export class MessageBridge {
       try {
         let content = msg.content.trim();
 
+        // 渠道入站日志
+        logger.channelIn({ channel: channelName, channelId: msg.channelId, peerId: msg.peerId, peerName: msg.peerName, chatType: msg.chatType, msgId: msg.messageId, threadId: msg.threadId, content, images: msg.images?.length ?? 0, mentions: msg.mentions, replyContext: msg.replyContext });
+
         // 0. 自定义消息快速路径（menu.query 等）
         if (await this.handleCustomPayload(content, channelName, msg, sendReply, adapter)) return;
 
@@ -89,7 +92,10 @@ export class MessageBridge {
           logger.debug(`[MessageBridge] Command detected: "${cmdContent}", routing to handler`);
         }
         if (await this.handleCommand(cmdContent, channelName, msg.channelId,
-          (text) => sendReply(msg.channelId, text, msg.replyContext),
+          (text) => {
+            logger.channelOut({ channel: channelName, channelId: msg.channelId, taskId: `cmd-${msg.messageId || Date.now()}`, payload: { kind: 'command.result', text } });
+            return sendReply(msg.channelId, text, msg.replyContext);
+          },
           msg.peerId, msg.threadId, msg.chatType, msg.source,
           msg.replyContext
         )) return;

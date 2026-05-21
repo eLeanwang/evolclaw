@@ -4,7 +4,7 @@ import imageType from 'image-type';
 import { sanitizeFileName, saveToUploads, validateImage } from '../utils/media-cache.js';
 import { logger } from '../utils/logger.js';
 import { hasRichContent, renderAllRichContent, checkDependencies } from '../utils/rich-content-renderer.js';
-import type { InteractionRequest, InteractionResponse, ActionInteraction } from '../types.js';
+import type { InteractionRequest, InteractionResponse, ActionInteraction, ThoughtItem } from '../types.js';
 import { formatItemsAsText } from '../core/message/items-formatter.js';
 
 
@@ -123,8 +123,6 @@ export class FeishuChannel {
           if (msg.thread_id) {
             logger.info('[Feishu] Thread message, thread_id:', msg.thread_id, 'root_id:', msg.root_id);
           }
-          // [DEBUG] 临时：记录所有消息的 root_id/thread_id，用于排查图片回复带引用问题
-          logger.info('[Feishu][DEBUG] msg_type:', msg.message_type, 'root_id:', msg.root_id ?? '(empty)', 'thread_id:', msg.thread_id ?? '(empty)', 'parent_id:', msg.parent_id ?? '(empty)');
 
           // 提取 @ 提及列表（排除机器人自身）
           const mentions = (msg.mentions || []).map((m: any) => ({
@@ -1381,7 +1379,7 @@ export class FeishuChannelPlugin implements ChannelPlugin {
             case 'system.error':
             case 'result.error': {
               const sendCtx: any = { ...(ctx ?? {}) };
-              if (payload.kind === 'result.text' && payload.isFinal) sendCtx.title = '✓ 最终回复:';
+              if (payload.kind === 'result.text' && payload.isFinal) sendCtx.title = '✅ 最终回复:';
               await channel.sendMessage(channelId, payload.text, sendCtx);
               return;
             }
@@ -1392,8 +1390,12 @@ export class FeishuChannelPlugin implements ChannelPlugin {
               await channel.sendImage(channelId, payload.data, ctx);
               return;
             case 'activity.batch': {
-              const text = formatItemsAsText(payload.items);
-              if (text) await channel.sendMessage(channelId, text, ctx);
+              // Feishu 不发送成功的 tool_result（信息密度低，刷屏）
+              const filtered = payload.items.filter((i: ThoughtItem) => !(i.kind === 'tool_result' && i.ok));
+              const text = formatItemsAsText(filtered);
+              if (text) {
+                await channel.sendMessage(channelId, text, ctx);
+              }
               return;
             }
             case 'status.started':

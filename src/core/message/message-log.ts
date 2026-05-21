@@ -19,6 +19,8 @@ export interface MessageLogEntry {
   permMode: string | null;
   cmdParsed: string | null;
   durationMs: number | null;
+  numTurns?: number | null;
+  usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } | null;
 }
 
 const MESSAGE_LOG_FILE = 'messages.jsonl';
@@ -114,6 +116,8 @@ export function buildOutboundEntry(opts: {
   agent?: string | null;
   model?: string | null;
   durationMs?: number | null;
+  numTurns?: number | null;
+  usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } | null;
   timestamp?: number;
 }): MessageLogEntry {
   const ts = opts.timestamp || Date.now();
@@ -134,5 +138,7 @@ export function buildOutboundEntry(opts: {
     permMode: null,
     cmdParsed: null,
     durationMs: opts.durationMs ?? null,
+    numTurns: opts.numTurns ?? null,
+    usage: opts.usage ?? null,
   };
 }

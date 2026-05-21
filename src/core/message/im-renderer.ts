@@ -286,7 +286,7 @@ export class IMRenderer {
     return Math.max(minDelay, Math.min(maxDelay, dynamicDelay));
   }
 
-  /** 仅 flush 非 thinking items（保留 textBuffer 用于后续 final flush） */
+  /** 仅 flush 非 thinking items（thinking items 和 textBuffer 保留，等待下次完整 flush） */
   private async flushActivitiesInternal(): Promise<void> {
     const nonThinking = this.itemsQueue.filter(it => it.kind !== 'thinking');
     if (nonThinking.length === 0) return;
@@ -339,7 +339,6 @@ export class IMRenderer {
 
     const finalText = isFinal ? this.textBuffer : '';
     if (isFinal) this.textBuffer = '';
-    // 非 final flush 保留 textBuffer，供最终 result.text 使用
 
     if (this.diagEnabled) {
       diag(this.instanceId, 'flush', {

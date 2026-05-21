@@ -845,7 +845,7 @@ export class WechatChannel {
 // Plugin implementation
 import type { ChannelPlugin, ChannelInstance, BridgeHookContext } from '../core/channel-loader.js';
 import type { MessageBridge } from '../core/message/message-bridge.js';
-import type { Config, WechatChannelConfig } from '../types.js';
+import type { Config, WechatChannelConfig, ThoughtItem } from '../types.js';
 import { normalizeChannelInstances, getChannelShowActivities } from '../utils/channel-helpers.js';
 
 export class WechatChannelPlugin implements ChannelPlugin {
@@ -897,7 +897,9 @@ export class WechatChannelPlugin implements ChannelPlugin {
             case 'result.image':
               return;
             case 'activity.batch': {
-              const text = formatItemsAsText(payload.items);
+              // WeChat 不发送成功的 tool_result
+              const filtered = payload.items.filter((i: ThoughtItem) => !(i.kind === 'tool_result' && i.ok));
+              const text = formatItemsAsText(filtered);
               if (text) await channel.sendMessage(channelId, text);
               return;
             }
