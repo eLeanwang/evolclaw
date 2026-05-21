@@ -281,7 +281,8 @@ export class AUNChannel {
         }
 
         if (quoteParts.length > 0) {
-          const quoted = quoteParts.join('\n').split('\n').map(line => `> ${prefix}${line}`).join('\n');
+          const lines = quoteParts.join('\n').split('\n');
+          const quoted = lines.map((line, i) => `> ${i === 0 ? prefix : ''}${line}`).join('\n');
           return text ? `${quoted}\n\n${text}` : quoted;
         }
       }
@@ -334,6 +335,46 @@ export class AUNChannel {
       return JSON.stringify(payload);
     }
     return '';
+  }
+
+  /** 收集 payload 中所有需要下载的 attachments（顶层 + merge.items + quote.quote），按 url 去重 */
+  private collectAllAttachments(payload: unknown): any[] {
+    if (!payload || typeof payload !== 'object') return [];
+    const obj = payload as Record<string, unknown>;
+    const result: any[] = [];
+    const seen = new Set<string>();
+
+    const add = (att: any) => {
+      if (!att || typeof att !== 'object') return;
+      const key = att.url || att.object_key || '';
+      if (key && seen.has(key)) return;
+      if (key) seen.add(key);
+      result.push(att);
+    };
+
+    // 顶层 attachments
+    if (Array.isArray(obj.attachments)) {
+      for (const att of obj.attachments) add(att);
+    }
+
+    // merge.items 中的子消息 attachments
+    if (obj.type === 'merge' && Array.isArray(obj.items)) {
+      for (const item of obj.items) {
+        if (item && typeof item === 'object' && Array.isArray(item.attachments)) {
+          for (const att of item.attachments) add(att);
+        }
+      }
+    }
+
+    // quote.quote 中的 attachments
+    if (obj.type === 'quote' && obj.quote && typeof obj.quote === 'object') {
+      const q = obj.quote as Record<string, unknown>;
+      if (Array.isArray(q.attachments)) {
+        for (const att of q.attachments) add(att);
+      }
+    }
+
+    return result;
   }
 
   private hasExplicitMention(text: string, target: string): boolean {
@@ -854,12 +895,13 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
   ): Promise<string | null> {
     const ownerAid = att.owner_aid || this._aid || '';
     const objectKey = att.object_key;
-    const filename = att.filename || objectKey.split('/').pop() || 'unknown';
 
     if (!objectKey) {
       logger.warn(`${this.logPrefix()} Attachment missing object_key, skipping`);
       return null;
     }
+
+    const filename = att.filename || objectKey.split('/').pop() || 'unknown';
 
     let downloadUrl: string;
     try {
@@ -943,10 +985,8 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       mentions.push(this._aid);
     }
 
-    // Process attachments
-    const rawAttachments: any[] = Array.isArray((payload as any)?.attachments)
-      ? (payload as any).attachments
-      : [];
+    // Process attachments (顶层 + 嵌套在 merge.items / quote.quote 中的)
+    const rawAttachments: any[] = this.collectAllAttachments(payload);
 
     let finalText = text;
     if (rawAttachments.length > 0 && this.client) {
@@ -1131,10 +1171,8 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
 
     const strippedText = this.stripSelfMentionIfOnly(text, this._aid);
 
-    // Detect attachments before the empty-text guard
-    const rawAttachments: any[] = Array.isArray((payload as any)?.attachments)
-      ? (payload as any).attachments
-      : [];
+    // Detect attachments before the empty-text guard (顶层 + 嵌套)
+    const rawAttachments: any[] = this.collectAllAttachments(payload);
     const hasAttachments = rawAttachments.length > 0;
 
     // Allow through if there's text OR attachments; both-empty messages are silently dropped

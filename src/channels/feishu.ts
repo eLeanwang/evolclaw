@@ -941,6 +941,7 @@ export class FeishuChannel {
 
       const textParts: string[] = [];
       const images: Array<{ data: string; mimeType: string }> = [];
+      const MAX_IMAGES = 10;
 
       textParts.push('以下是用户转发的合并消息：\n---');
 
@@ -960,7 +961,7 @@ export class FeishuChannel {
             if (postContent) {
               for (const line of postContent) {
                 for (const elem of line) {
-                  if (elem.tag === 'img' && elem.image_key && item.message_id) {
+                  if (elem.tag === 'img' && elem.image_key && item.message_id && images.length < MAX_IMAGES) {
                     const imageData = await this.downloadAndSaveImage(elem.image_key, chatId, item.message_id, projectPath);
                     if (imageData) images.push(imageData);
                   } else if (elem.text) {
@@ -974,10 +975,12 @@ export class FeishuChannel {
             textParts.push(title ? `${title}\n${text.trim()}` : text.trim());
           } else if (msgType === 'image' && item.message_id) {
             const parsed = JSON.parse(content);
-            const imageData = await this.downloadAndSaveImage(parsed.image_key, chatId, item.message_id, projectPath);
-            if (imageData) {
-              images.push(imageData);
-              textParts.push('[图片]');
+            if (parsed.image_key && images.length < MAX_IMAGES) {
+              const imageData = await this.downloadAndSaveImage(parsed.image_key, chatId, item.message_id, projectPath);
+              if (imageData) {
+                images.push(imageData);
+                textParts.push('[图片]');
+              }
             }
           } else if (msgType === 'file') {
             const parsed = JSON.parse(content);
