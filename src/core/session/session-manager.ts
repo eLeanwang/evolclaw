@@ -55,7 +55,9 @@ export class SessionManager {
     this.sessionModeResolver = resolver;
   }
 
-  private resolveDefaultSessionMode(channel: string, chatType?: string): 'interactive' | 'proactive' {
+  private resolveDefaultSessionMode(channel: string, chatType?: string, peerType?: string): 'interactive' | 'proactive' {
+    // 非 human 对端（ai/bot）强制 proactive，无视 agent 的默认 chatmode 配置
+    if (peerType && peerType !== 'human' && peerType !== 'unknown') return 'proactive';
     const ct = chatType || 'private';
     const resolved = this.sessionModeResolver?.(channel, ct);
     return resolved || 'interactive';
@@ -208,10 +210,76 @@ export class SessionManager {
     appendJsonl(metaPath, file);
   }
 
+  /**
+   * 比较两个 SessionFile 是否在内容上相等（忽略 updatedAt / updatedAtStr）。
+   * 用于跳过"没真变化"的写入，避免 jsonl 写放大。
+   */
+  private sessionFilesEqual(a: ReturnType<typeof sessionToFile>, b: ReturnType<typeof sessionToFile>): boolean {
+    const stripVolatile = ({ updatedAt, updatedAtStr, ...rest }: ReturnType<typeof sessionToFile>) => rest;
+    return JSON.stringify(stripVolatile(a)) === JSON.stringify(stripVolatile(b));
+  }
+
+  /**
+   * Append meta + write active.json，但只在 session 内容（除 updatedAt 外）真正变化时才写。
+   * prev 是修改前的快照（用于 diff），next 是修改后的 session。
+   * 返回是否发生了写入。
+   */
+  private writeSessionIfChanged(channel: string, channelId: string, prev: Session | undefined, next: Session): boolean {
+    if (prev) {
+      const prevFile = sessionToFile(prev);
+      const nextFile = sessionToFile(next);
+      if (this.sessionFilesEqual(prevFile, nextFile)) return false;
+    }
+    next.updatedAt = Date.now();
+    this.appendMeta(channel, channelId, next);
+    const active = this.readActive(channel, channelId);
+    if (active && active.id === next.id) {
+      // 保留 active.json 中已有的 activeTask（markProcessing 写入的处理状态）
+      if (active.processingState && !next.processingState) {
+        next.processingState = active.processingState;
+      }
+      this.writeActive(channel, channelId, next);
+    }
+    return true;
+  }
+
   private readMetaLatest(metaFilePath: string): Session | undefined {
     const file = readLastJsonlLine<SessionFile>(metaFilePath);
     if (!file) return undefined;
     return fileToSession(file);
+  }
+
+  /**
+   * 为 by-sessionId 改方法加载"当前 session 状态"。
+   *
+   * 设计契约（docs/refactor/01-db-to-fs.md）：
+   *   active.json 是热路径权威源。.jsonl 是历史档案。
+   *
+   * 读取策略：
+   *   1. 先按 sessionId 定位 .jsonl 文件（确认 session 存在 + 拿到 channel/channelId）
+   *   2. 优先读 active.json（如果 active.id === sessionId）—— 当前状态
+   *   3. 否则 fallback 到 .jsonl 末行 —— 非活跃 session 的更新（如多 session 并存时改非 active 那个）
+   *
+   * 返回 { current, prev }：
+   *   - current 用于 caller 修改后写回
+   *   - prev 是 current 的初始快照（用于 writeSessionIfChanged 的 diff 检查）
+   */
+  private loadSessionForUpdate(sessionId: string): { current: Session; prev: Session } | undefined {
+    const found = this.findSessionFileById(sessionId);
+    if (!found) return undefined;
+
+    // 先读 .jsonl 末行拿 channel/channelId（active.json 文件路径需要这两个）
+    const fromJsonl = this.readMetaLatest(found.metaPath);
+    if (!fromJsonl) return undefined;
+
+    // 优先用 active.json 的当前状态（如果它就是这个 sessionId）
+    const active = this.readActive(fromJsonl.channel, fromJsonl.channelId);
+    const base = (active && active.id === sessionId) ? active : fromJsonl;
+
+    // 深拷贝避免 caller 改 current 时污染 prev
+    const current: Session = JSON.parse(JSON.stringify(base));
+    const prev: Session = JSON.parse(JSON.stringify(base));
+    return { current, prev };
   }
 
   private validateSessionFile(session: Session): string | undefined {
@@ -222,15 +290,9 @@ export class SessionManager {
     if (!adapter) return agentSessionId;
     if (adapter.checkExists(session.projectPath, agentSessionId)) return agentSessionId;
     logger.warn(`Session file not found for ${agentId}: ${agentSessionId}, clearing session ID`);
+    const prev: Session = JSON.parse(JSON.stringify(session));
     session.agentSessionId = undefined;
-    this.appendMeta(session.channel, session.channelId, session);
-    const active = this.readActive(session.channel, session.channelId);
-    if (active && active.id === session.id) {
-      if (active.processingState && !session.processingState) {
-        session.processingState = active.processingState;
-      }
-      this.writeActive(session.channel, session.channelId, session);
-    }
+    this.writeSessionIfChanged(session.channel, session.channelId, prev, session);
     return undefined;
   }
 
@@ -372,10 +434,11 @@ export class SessionManager {
     chatType?: 'private' | 'group',
     agentId?: string,
     selfId?: string,
-    channelType?: string
+    channelType?: string,
+    peerType?: string
   ): Promise<Session> {
     if (threadId) {
-      const session = this.getOrCreateThreadSession(channel, channelId, threadId, defaultProjectPath, metadata, name, agentId, selfId, channelType);
+      const session = this.getOrCreateThreadSession(channel, channelId, threadId, defaultProjectPath, metadata, name, agentId, selfId, channelType, peerType);
       session.identity = this.resolveIdentity(channel, userId);
       if (session.metadata && !session.metadata.permissionMode) {
         session.metadata.permissionMode = DEFAULT_PERMISSION_MODE;
@@ -435,6 +498,7 @@ export class SessionManager {
 
     if (existing) {
       const validSessionId = this.validateSessionFile(existing);
+      const prev: Session = JSON.parse(JSON.stringify({ ...existing, agentSessionId: validSessionId }));
       const session: Session = { ...existing, agentSessionId: validSessionId };
       session.identity = this.resolveIdentity(channel, userId);
 
@@ -452,9 +516,7 @@ export class SessionManager {
       if (chatType === 'private' && metadata?.peerName && !session.metadata.peerName) {
         session.metadata.peerName = metadata.peerName;
       }
-      session.updatedAt = Date.now();
-      this.appendMeta(channel, channelId, session);
-      this.writeActive(channel, channelId, session);
+      this.writeSessionIfChanged(channel, channelId, prev, session);
       return session;
     }
 
@@ -472,7 +534,7 @@ export class SessionManager {
       threadId: '',
       agentId: agentId || 'claude',
       chatType: chatType || 'private',
-      sessionMode: this.resolveDefaultSessionMode(channel, chatType || 'private'),
+      sessionMode: this.resolveDefaultSessionMode(channel, chatType || 'private', peerType),
       metadata: sessionMetadata,
       name: name || '默认会话',
       createdAt: Date.now(),
@@ -496,27 +558,17 @@ export class SessionManager {
   }
 
   async updateSession(sessionId: string, updates: Partial<Pick<Session, 'chatType' | 'name' | 'metadata' | 'sessionMode'>> & { agentSessionId?: string | null }): Promise<void> {
-    const found = this.findSessionFileById(sessionId);
-    if (!found) return;
-    const current = this.readMetaLatest(found.metaPath);
-    if (!current) return;
+    const loaded = this.loadSessionForUpdate(sessionId);
+    if (!loaded) return;
+    const { current, prev } = loaded;
 
     if (updates.chatType !== undefined) current.chatType = updates.chatType;
     if (updates.name !== undefined) current.name = updates.name;
     if (updates.sessionMode !== undefined) current.sessionMode = updates.sessionMode;
     if (updates.metadata !== undefined) current.metadata = updates.metadata;
     if ('agentSessionId' in updates) current.agentSessionId = updates.agentSessionId ?? undefined;
-    current.updatedAt = Date.now();
 
-    this.appendMeta(current.channel, current.channelId, current);
-    const active = this.readActive(current.channel, current.channelId);
-    if (active && active.id === sessionId) {
-      // 保留 active.json 中已有的 activeTask（markProcessing 写入的处理状态）
-      if (active.processingState && !current.processingState) {
-        current.processingState = active.processingState;
-      }
-      this.writeActive(current.channel, current.channelId, current);
-    }
+    this.writeSessionIfChanged(current.channel, current.channelId, prev, current);
   }
 
   private getOrCreateThreadSession(
@@ -528,7 +580,8 @@ export class SessionManager {
     name?: string,
     agentId?: string,
     selfId?: string,
-    channelType?: string
+    channelType?: string,
+    peerType?: string
   ): Session {
     const chatDir = this.ensureResolvedChatDir(channel, channelId);
     const threadIndex = readThreadIndex(chatDir);
@@ -563,7 +616,7 @@ export class SessionManager {
       threadId,
       agentId: agentId || 'claude',
       chatType: inheritedChatType,
-      sessionMode: this.resolveDefaultSessionMode(channel, inheritedChatType),
+      sessionMode: this.resolveDefaultSessionMode(channel, inheritedChatType, peerType),
       metadata,
       name: name || '话题会话',
       createdAt: Date.now(),
@@ -639,27 +692,19 @@ export class SessionManager {
   async updateAgentSessionId(channel: string, channelId: string, agentSessionId: string): Promise<void> {
     const active = this.readActive(channel, channelId);
     if (!active) return;
+    const prev: Session = JSON.parse(JSON.stringify(active));
     active.agentSessionId = agentSessionId;
-    active.updatedAt = Date.now();
-    this.appendMeta(channel, channelId, active);
-    this.writeActive(channel, channelId, active);
+    this.writeSessionIfChanged(channel, channelId, prev, active);
   }
 
   async updateAgentSessionIdBySessionId(sessionId: string, agentSessionId: string): Promise<void> {
-    logger.info(`[SessionManager] Updating agent_session_id: sessionId=${sessionId}, agentSessionId=${agentSessionId}`);
-    const found = this.findSessionFileById(sessionId);
-    if (!found) return;
-    const current = this.readMetaLatest(found.metaPath);
-    if (!current) return;
+    const loaded = this.loadSessionForUpdate(sessionId);
+    if (!loaded) return;
+    const { current, prev } = loaded;
     current.agentSessionId = agentSessionId;
-    current.updatedAt = Date.now();
-    this.appendMeta(current.channel, current.channelId, current);
-    const active = this.readActive(current.channel, current.channelId);
-    if (active && active.id === sessionId) {
-      if (active.processingState && !current.processingState) {
-        current.processingState = active.processingState;
-      }
-      this.writeActive(current.channel, current.channelId, current);
+    const wrote = this.writeSessionIfChanged(current.channel, current.channelId, prev, current);
+    if (wrote) {
+      logger.info(`[SessionManager] Updating agent_session_id: sessionId=${sessionId}, agentSessionId=${agentSessionId}`);
     }
   }
 
@@ -713,10 +758,9 @@ export class SessionManager {
   async clearActiveSession(channel: string, channelId: string): Promise<void> {
     const active = this.readActive(channel, channelId);
     if (!active) return;
+    const prev: Session = JSON.parse(JSON.stringify(active));
     active.agentSessionId = undefined;
-    active.updatedAt = Date.now();
-    this.appendMeta(channel, channelId, active);
-    this.writeActive(channel, channelId, active);
+    this.writeSessionIfChanged(channel, channelId, prev, active);
   }
 
   getOwnerChatId(targetChannel: string, ownerPeerId: string): string | undefined {
@@ -805,37 +849,19 @@ export class SessionManager {
   }
 
   updateMetadata(sessionId: string, metadata: Record<string, any>): void {
-    const found = this.findSessionFileById(sessionId);
-    if (!found) return;
-    const current = this.readMetaLatest(found.metaPath);
-    if (!current) return;
+    const loaded = this.loadSessionForUpdate(sessionId);
+    if (!loaded) return;
+    const { current, prev } = loaded;
     current.metadata = metadata;
-    current.updatedAt = Date.now();
-    this.appendMeta(current.channel, current.channelId, current);
-    const active = this.readActive(current.channel, current.channelId);
-    if (active && active.id === sessionId) {
-      if (active.processingState && !current.processingState) {
-        current.processingState = active.processingState;
-      }
-      this.writeActive(current.channel, current.channelId, current);
-    }
+    this.writeSessionIfChanged(current.channel, current.channelId, prev, current);
   }
 
   async renameSession(sessionId: string, newName: string): Promise<boolean> {
-    const found = this.findSessionFileById(sessionId);
-    if (!found) return false;
-    const current = this.readMetaLatest(found.metaPath);
-    if (!current) return false;
+    const loaded = this.loadSessionForUpdate(sessionId);
+    if (!loaded) return false;
+    const { current, prev } = loaded;
     current.name = newName;
-    current.updatedAt = Date.now();
-    this.appendMeta(current.channel, current.channelId, current);
-    const active = this.readActive(current.channel, current.channelId);
-    if (active && active.id === sessionId) {
-      if (active.processingState && !current.processingState) {
-        current.processingState = active.processingState;
-      }
-      this.writeActive(current.channel, current.channelId, current);
-    }
+    this.writeSessionIfChanged(current.channel, current.channelId, prev, current);
     return true;
   }
 

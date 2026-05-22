@@ -1154,11 +1154,18 @@ export class MessageProcessor {
       message.threadId,
       metadata,
       undefined,
-      message.peerId
+      message.peerId,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      message.peerType
     );
 
-    // 非 human 对端强制 proactive（不管单聊/群聊）；human 走原有策略
-    if (message.peerType && message.peerType !== 'human' && session.sessionMode !== 'proactive') {
+    // 兜底纠正：旧 session 创建时没传 peerType（建为 interactive），后续非 human 消息进来时升级为 proactive。
+    // 新建场景已由 getOrCreateSession 内部 resolveDefaultSessionMode 处理，这里只兜底历史会话。
+    if (message.peerType && message.peerType !== 'human' && message.peerType !== 'unknown' && session.sessionMode !== 'proactive') {
+      logger.info(`[MessageProcessor] proactive upgrade: sessionId=${session.id} ${session.sessionMode} -> proactive (peerType=${message.peerType})`);
       session.sessionMode = 'proactive';
       await this.sessionManager.updateSession(session.id, { sessionMode: 'proactive' });
     }
