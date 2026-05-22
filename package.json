@@ -5,10 +5,12 @@
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "evolclaw": "./dist/cli/index.js"
+    "evolclaw": "./dist/cli/index.js",
+    "ec": "./bin/ec.js"
   },
   "files": [
     "dist/",
+    "bin/",
     "!dist/experimental/",
     "kits/",
     "!kits/.kits-version",

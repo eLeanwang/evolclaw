@@ -44,7 +44,7 @@ function resolveTarget(ba: string, dir: string): string {
     case 'cc':
       return path.join(dir, '.claude', 'rules', 'eck');
     case 'codex':
-      return path.join(dir, '.codex', 'instructions', 'eck');
+      return path.join(dir, '.codex', 'rules', 'eck');
     case 'gemini':
       return path.join(dir, '.gemini', 'rules', 'eck');
     default:
@@ -113,7 +113,7 @@ Arguments:
 
 Supported baseagents:
   cc            Claude Code (.claude/rules/eck/)
-  codex         Codex (.codex/instructions/eck/)
+  codex         Codex (.codex/rules/eck/)
   gemini        Gemini CLI (.gemini/rules/eck/)
 
 Examples:

@@ -1805,7 +1805,33 @@ async function cmdWatchAid(): Promise<void> {
     const dirLabel = projectPath || '—';
     const subLine2 = `${DIM}    ${dirLabel}${RST}`;
 
-    return [mainLine, subLine1, subLine2];
+    const result = [mainLine, subLine1, subLine2];
+
+    if (aid.status === 'failed' || aid.status === 'kicked' || aid.status === 'kicked_no_retry') {
+      const parts: string[] = [];
+      if (aid.lastAttemptAt) {
+        const d = new Date(aid.lastAttemptAt);
+        const ts = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
+        parts.push(`last_attempt=${ts}`);
+      }
+      if (aid.kickDetail?.code) {
+        parts.push(`code=${aid.kickDetail.code}`);
+      }
+      if (aid.kickDetail?.reason) {
+        parts.push(`reason=${aid.kickDetail.reason}`);
+      }
+      if (aid.lastError) {
+        parts.push(`error=${aid.lastError}`);
+      }
+      if (aid.gatewayUrl) {
+        parts.push(`gateway=${aid.gatewayUrl}`);
+      }
+      if (parts.length > 0) {
+        result.push(`${RED}    ⚠ ${parts.join('  ')}${RST}`);
+      }
+    }
+
+    return result;
   }
 
   let lastLineCount = 0;
