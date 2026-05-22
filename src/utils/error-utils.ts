@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { resolvePaths } from '../paths.js';
+import { resolvePaths, getPackageRoot } from '../paths.js';
 import { logger } from './logger.js';
 import type { ErrorRule } from '../types.js';
 
@@ -83,7 +83,12 @@ let _lastMtime = 0;
 
 function getDictPath(): string {
   if (!_dictPath) {
-    _dictPath = path.join(resolvePaths().dataDir, 'error-dict.json');
+    const userDict = path.join(resolvePaths().dataDir, 'error-dict.json');
+    if (fs.existsSync(userDict)) {
+      _dictPath = userDict;
+    } else {
+      _dictPath = path.join(getPackageRoot(), 'data', 'error-dict.json');
+    }
   }
   return _dictPath;
 }

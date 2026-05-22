@@ -1066,7 +1066,7 @@ export class AgentRunner {
     const sdkPermissionMode = this.toSdkPermissionMode();
     logger.info(`[AgentRunner] runQuery model=${this.model} effort=${this.effort ?? 'auto'} permMode=${this.permissionMode} sdkMode=${sdkPermissionMode}`);
     if (systemPromptAppend) {
-      logger.info(`[AgentRunner] systemPromptAppend (full):\n${systemPromptAppend}`);
+      logger.info(`[AgentRunner] systemPromptAppend: ${systemPromptAppend.length} chars`);
     } else {
       logger.info(`[AgentRunner] systemPromptAppend: none`);
     }

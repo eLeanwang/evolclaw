@@ -1939,18 +1939,59 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     try {
       const itemCount = Array.isArray((payload as any)?.items) ? (payload as any).items.length : 0;
       const stage = (payload as any)?.stage ?? `items=${itemCount}`;
+      const senderAid = this._aid ?? this.config.aid;
       if (this.isGroupId(channelId)) {
         params.group_id = targetId;
-        await this.callAndTrace('group.thought.put', params);
-        logger.info(`${this.logPrefix()} thought.put ok group=${targetId} task=${taskId} stage=${stage} encrypt=${encrypt}`);
+        const putRes = await this.callAndTrace<any>('group.thought.put', params);
+        const tid = putRes?.thought_id;
+        logger.info(`${this.logPrefix()} thought.put ok group=${targetId} task=${taskId} stage=${stage} encrypt=${encrypt} tid=${tid ?? '?'}`);
+        await this.verifyThoughtRoundtrip('group.thought.get', {
+          group_id: targetId,
+          sender_aid: senderAid,
+          context: { type: 'task', id: taskId },
+        }, tid, `group=${targetId} task=${taskId}`);
       } else {
         params.to = targetId;
-        await this.callAndTrace('message.thought.put', params);
-        logger.info(`${this.logPrefix()} thought.put ok p2p=${this.peerLabel(targetId)} task=${taskId} stage=${stage} encrypt=${encrypt}`);
+        const putRes = await this.callAndTrace<any>('message.thought.put', params);
+        const tid = putRes?.thought_id;
+        logger.info(`${this.logPrefix()} thought.put ok p2p=${this.peerLabel(targetId)} task=${taskId} stage=${stage} encrypt=${encrypt} tid=${tid ?? '?'}`);
+        await this.verifyThoughtRoundtrip('message.thought.get', {
+          sender_aid: senderAid,
+          peer_aid: targetId,
+          context: { type: 'task', id: taskId },
+        }, tid, `p2p=${this.peerLabel(targetId)} task=${taskId}`);
       }
     } catch (e) {
       const err = e as any;
       logger.debug(`${this.logPrefix()} thought.put failed to ${channelId}: ${err?.name}(${err?.code})=${err?.message}`);
+    }
+  }
+
+  /**
+   * thought.put 后的回读校验：调用对应 *.thought.get，按 thought_id 在返回的 thoughts 列表中查找。
+   * 命中 → info ok；未命中或异常 → warn，但不影响主流程。
+   */
+  private async verifyThoughtRoundtrip(
+    method: 'group.thought.get' | 'message.thought.get',
+    params: Record<string, any>,
+    expectedTid: string | undefined,
+    label: string,
+  ): Promise<void> {
+    if (!this.connected || !this.client) return;
+    try {
+      const res = await this.callAndTrace<any>(method, params, { silentOk: true });
+      const thoughts: any[] = Array.isArray(res?.thoughts) ? res.thoughts : [];
+      const hit = expectedTid
+        ? thoughts.some((t) => t?.thought_id === expectedTid)
+        : thoughts.length > 0;
+      if (hit) {
+        logger.info(`${this.logPrefix()} thought.get ok ${label} tid=${expectedTid ?? '*'} count=${thoughts.length}`);
+      } else {
+        logger.warn(`${this.logPrefix()} thought.get miss ${label} tid=${expectedTid ?? '?'} found=${res?.found} count=${thoughts.length}`);
+      }
+    } catch (e) {
+      const err = e as any;
+      logger.warn(`${this.logPrefix()} thought.get failed ${label}: ${err?.name}(${err?.code})=${err?.message}`);
     }
   }
 
@@ -2272,7 +2313,9 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     // 群聊显示 group id 简称，P2P 显示 peer label；从 context.metadata 读取 chatmode
     const targetLabel = this.isGroupId(channelId) ? channelId : this.peerLabel(channelId);
     const chatmode = context?.metadata?.chatmode ?? '?';
-    logger.info(`${this.logPrefix()} task.${status} task=${taskId} session=${sessionId} chatmode=${chatmode} target=${targetLabel}`);
+    const initiator = statusPayload.initiator ?? '';
+    const refMsgId = statusPayload.ref_message_id ?? '';
+    logger.info(`${this.logPrefix()} task.${status} task=${taskId} session=${sessionId} chatmode=${chatmode} target=${targetLabel} initiator=${initiator} ref_msg=${refMsgId}`);
   }
 
   sendCustomPayload(channelId: string, payload: string): void {
