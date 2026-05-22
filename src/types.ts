@@ -427,6 +427,7 @@ export interface GlobalSettings {
     aunTrace?: boolean;
     aunSdkLog?: boolean;
   };
+  chatmode?: { private?: 'interactive' | 'proactive'; group?: 'interactive' | 'proactive' };
 }
 
 export interface AgentContext {

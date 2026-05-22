@@ -142,7 +142,8 @@ export class MessageProcessor {
     if (!this.agentRegistry) return null;
     const agent = this.agentRegistry.resolveByChannel(channelName);
     if (!agent) return null;
-    const globalCm = this.agentRegistry?.resolveByChannel(channelName)?.config?.chatmode;
+    // chatmode 解析优先级：agent.config.chatmode > globalSettings.chatmode
+    const globalCm = agent.config?.chatmode ?? this.globalSettings.chatmode;
     return agent.getContext(channelName, chatType, globalCm);
   }
 
