@@ -212,7 +212,8 @@ export function classifyError(error: any): ErrorType {
 
   // 内置兜底规则（结构性、稳定的错误模式）
   if (msg.includes('context_length_exceeded') || msg.includes('context_compact_failed')
-    || msg.includes('context limit')) {
+    || msg.includes('context limit') || msg.includes('input is too long')
+    || msg.includes('上下文过长')) {
     return ErrorType.CONTEXT_TOO_LONG;
   }
 

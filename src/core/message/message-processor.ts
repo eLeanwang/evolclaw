@@ -470,6 +470,9 @@ export class MessageProcessor {
         diagEnabled: this.globalSettings.debug?.flusherDiag,
         send: async (payload) => {
           if (isAutonomous) return;  // autonomous session: never send to channel
+          // proactive 模式：activity.batch 是 thought 协议内容，不走 channel 发送
+          // （channel 不支持 thought 时应静默丢弃，而非降级为普通消息）
+          if (isProactive && payload.kind === 'activity.batch') return;
           const isCurrentlyBackground = await this.isBackgroundSession(session, message.channel, message.channelId);
           if (isCurrentlyBackground) return;
 
@@ -731,10 +734,14 @@ export class MessageProcessor {
       }
 
       // prompt_too_long：SDK 以 complete 事件（非异常）返回，需在此处触发 compact
-      // 检测条件：terminalReason 明确为 prompt_too_long，或最后文本包含 "Prompt is too long"
+      // 检测条件：terminalReason 明确为 prompt_too_long，或文本/errors 包含相关错误文本
+      const contextTooLongPattern = /prompt is too long|input is too long|上下文过长/i;
+      const errorsText = streamResult.errors?.join(' ') || '';
       const isPromptTooLong = streamResult.isError && session.agentSessionId && hasCompact(agent) && (
         streamResult.terminalReason === 'prompt_too_long' ||
-        streamResult.lastReplyText.includes('Prompt is too long')
+        contextTooLongPattern.test(streamResult.lastReplyText) ||
+        contextTooLongPattern.test(errorsText) ||
+        contextTooLongPattern.test(streamResult.fullText)
       );
       if (isPromptTooLong) {
         renderer.addNotice('⚠️ 上下文过长，正在压缩会话...', 'warn', 'compact-trigger', true);
@@ -756,6 +763,14 @@ export class MessageProcessor {
         } else {
           throw new Error('CONTEXT_COMPACT_FAILED');
         }
+      } else if (streamResult.isError && !isPromptTooLong && (
+        streamResult.terminalReason === 'prompt_too_long' ||
+        contextTooLongPattern.test(streamResult.lastReplyText) ||
+        contextTooLongPattern.test(errorsText) ||
+        contextTooLongPattern.test(streamResult.fullText)
+      )) {
+        // 上下文过长但无法 auto-compact（无 session ID 或 agent 不支持），显示友好提示
+        renderer.addNotice('⚠️ 上下文过长，请精简提问或使用 /compact 压缩上下文', 'warn', 'context-too-long', true);
       }
 
       // 处理文件标记 - 支持 [SEND_FILE:path] 和 [SEND_FILE:channel:path]
@@ -1330,7 +1345,12 @@ export class MessageProcessor {
         if (event.type === 'error') {
           logger.warn(`[MessageProcessor] error event: ${event.errorType}: ${event.error}`);
 
-          if (!hasErrorResult && !shouldSuppress()) {
+          // 记录错误文本到 lastReplyText，供后续 isPromptTooLong 检测
+          lastReplyText += event.error || '';
+
+          // 上下文过长的错误不在此处输出 notice，留给外层 isPromptTooLong 触发 auto-compact
+          const isContextError = /prompt is too long|input is too long|上下文过长/i.test(event.error || '');
+          if (!isContextError && !hasErrorResult && !shouldSuppress()) {
             hasErrorResult = true;
             renderer.addNotice(`\u274c ${event.error}`, 'warn', 'runtime-error', true);
           }
@@ -1353,9 +1373,13 @@ export class MessageProcessor {
 
           // 失败且无前置错误输出：显示 errors 摘要
           // 但用户主动中断（新消息打断 或 /stop 命令）时不显示错误提示
+          // 上下文过长的错误留给外层 isPromptTooLong 触发 auto-compact，不在此处输出
           const interruptReason = this.interruptedSessions.get(session.id);
           const isUserInterrupt = interruptReason === 'new_message' || interruptReason === 'stop' || interruptReason === 'recalled';
-          if (event.isError && !hasErrorResult && !shouldSuppress() && !isUserInterrupt) {
+          const isContextTooLong = event.terminalReason === 'prompt_too_long'
+            || /prompt is too long|input is too long|上下文过长/i.test(event.errors?.join(' ') || '')
+            || /prompt is too long|input is too long|上下文过长/i.test(lastReplyText);
+          if (event.isError && !hasErrorResult && !shouldSuppress() && !isUserInterrupt && !isContextTooLong) {
             const errorSummary = event.errors?.join('; ') || '\u4efb\u52a1\u6267\u884c\u5931\u8d25';
             // 使用 terminalReason 提供更友好的错误提示
             const userFriendlyMessage = event.terminalReason

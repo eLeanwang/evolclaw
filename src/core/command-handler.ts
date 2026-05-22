@@ -3691,7 +3691,8 @@ export class CommandHandler {
     '/help', '/status', '/check', '/pwd',
     '/model', '/effort', '/perm', '/agent',
     '/compact', '/file', '/send', '/restart', '/bind', '/aid', '/rpc', '/storage',
-    '/rename', '/name', '/evolagent',
+    '/rename', '/name', '/evolagent', '/trigger',
+    '/chatmode', '/dispatch', '/activity',
   ];
 
   /** ctl 中仅允许查询形态的指令；写形态（带参）一律拒绝 */
