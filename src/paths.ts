@@ -41,8 +41,8 @@ export function resolvePaths() {
 
     // ── 新结构（evolclaw-directory-design.md）────────────────
     defaultsConfig: path.join(root, 'agents', 'defaults.json'),
-    eckDir: path.join(root, 'eck'),
     processConfig: path.join(root, 'config.json'),
+    eckDir: path.join(root, 'eck'),
     instanceReadySignal: path.join(root, 'data', 'instance', 'ready.signal'),
     instanceSocket: resolveInstanceSocketPath(root),
     aidLogsDir: path.join(root, 'logs', 'aids'),
@@ -104,10 +104,14 @@ export function ensureDataDirs(): void {
   fs.mkdirSync(p.instanceDir, { recursive: true });
   fs.mkdirSync(p.outboxDir, { recursive: true });
   fs.mkdirSync(p.eckDir, { recursive: true });
+  fs.mkdirSync(eckDebugDir(), { recursive: true });
 }
 
 // ── kits 路径（始终从包内读取，不复制到 EVOLCLAW_HOME）──
 
+export function kitsDir(): string {
+  return path.join(getPackageRoot(), 'kits');
+}
 export function kitsRulesDir(): string {
   return path.join(getPackageRoot(), 'kits', 'rules');
 }
@@ -116,6 +120,12 @@ export function kitsDocsDir(): string {
 }
 export function kitsTemplatesDir(): string {
   return path.join(getPackageRoot(), 'kits', 'templates');
+}
+
+// ── 调试输出 ──
+
+export function eckDebugDir(): string {
+  return path.join(resolveRoot(), 'data', 'eck-debug');
 }
 
 export function getPackageRoot(): string {

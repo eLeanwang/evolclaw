@@ -1,0 +1,95 @@
+{
+  "$schema_version": 1,
+  "sections": [
+    {
+      "id": "rules",
+      "type": "directory",
+      "path": "$PACKAGE_ROOT/kits/rules",
+      "order": 10,
+      "needsInjection": false,
+      "when": "always",
+      "description": "ECK 核心规则（自动载入）"
+    },
+    {
+      "id": "identity-layer",
+      "type": "file",
+      "file": "$PACKAGE_ROOT/kits/templates/system-fragments/identity.md",
+      "order": 20,
+      "needsInjection": true,
+      "when": {
+        "var": "scene",
+        "neq": "coding"
+      },
+      "description": "身份层：我是谁"
+    },
+    {
+      "id": "relation-layer",
+      "type": "file",
+      "file": "$PACKAGE_ROOT/kits/templates/system-fragments/relation.md",
+      "order": 30,
+      "needsInjection": true,
+      "when": {
+        "var": "scene",
+        "in": ["private", "group"]
+      },
+      "description": "关系层：跟我聊天的是谁"
+    },
+    {
+      "id": "peer-profile",
+      "type": "file",
+      "file": "$EVOLCLAW_HOME/agents/{{selfAid}}/relations/{{peerKey}}/profile.md",
+      "order": 35,
+      "needsInjection": false,
+      "when": {
+        "var": "peerKey",
+        "neq": null
+      },
+      "description": "当前对端的关系档案"
+    },
+    {
+      "id": "venue-layer",
+      "type": "file",
+      "file": "$PACKAGE_ROOT/kits/templates/system-fragments/venue.md",
+      "order": 40,
+      "needsInjection": true,
+      "when": {
+        "var": "chatType",
+        "neq": null
+      },
+      "description": "环境层：我在什么场景下"
+    },
+    {
+      "id": "channel-layer",
+      "type": "file",
+      "file": "$PACKAGE_ROOT/kits/templates/system-fragments/channel.md",
+      "order": 50,
+      "needsInjection": true,
+      "when": {
+        "var": "channel",
+        "neq": null
+      },
+      "description": "渠道层：我通过什么通信"
+    },
+    {
+      "id": "runtime",
+      "type": "file",
+      "file": "$PACKAGE_ROOT/kits/templates/system-fragments/runtime.md",
+      "order": 60,
+      "needsInjection": true,
+      "when": "always",
+      "description": "运行时参数"
+    },
+    {
+      "id": "baseagent",
+      "type": "file",
+      "file": "$PACKAGE_ROOT/kits/templates/system-fragments/baseagent.md",
+      "order": 70,
+      "needsInjection": true,
+      "when": {
+        "var": "baseAgent",
+        "neq": null
+      },
+      "description": "Base Agent 特定配置"
+    }
+  ]
+}

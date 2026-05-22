@@ -15,7 +15,8 @@ import { summarizeToolInput } from '../permission.js';
 import type { Message, Session, ChannelAdapter, ChannelOptions, ChannelPolicy, CommandHandler, ReplyContext, AgentContext, EvolAgentRegistryHandle, GlobalSettings, OutboundEnvelope, OutboundPayload, InteractionRequest, InteractionKind, ActionInteraction, CommandCard } from '../../types.js';
 import { DEFAULT_PERMISSION_MODE } from '../../types.js';
 import { getPackageRoot, resolveRoot } from '../../paths.js';
-import { renderPromptSection } from '../../agents/templates.js';
+import { renderKitSections, type KitRenderContext } from '../../agents/kit-renderer.js';
+import { normalizeBaseagent } from '../../agents/baseagent-normalize.js';
 import type { InteractionRouter } from '../interaction-router.js';
 import { renderActionAsText, renderCommandCardAsText } from '../interaction-router.js';
 
@@ -557,35 +558,19 @@ export class MessageProcessor {
         const contextParts: string[] = [];
         const currentChannelType = options?.channelType || message.channel;
 
-        // 1. 构建模板变量并渲染 runtime 段
-        const peerName = message.peerName || session.metadata?.peerName;
-        const peerType = message.peerType;
-        const peerId = message.peerId;
+        // 提取 self 信息
         const adapterAny = channelInfo.adapter as unknown as {
           _selfAid?: () => string | undefined;
           _selfName?: () => string | undefined;
         };
         const selfAid = typeof adapterAny._selfAid === 'function' ? adapterAny._selfAid() : undefined;
         const selfName = typeof adapterAny._selfName === 'function' ? adapterAny._selfName() : undefined;
-        const formatIdentity = (name?: string, id?: string): string | undefined => {
-          if (name && id) return `${name} (${id})`;
-          return name || id || undefined;
-        };
-        const selfIdentity = formatIdentity(selfName, selfAid);
-        const peerIdentity = formatIdentity(peerName, peerId);
+        const peerName = message.peerName || session.metadata?.peerName;
 
-        // 文件发送能力（按 channelType 去重）
-        let crossChannelTypes: string[] = [];
+        // 文件发送能力
         let currentCanSend = false;
         if (!isProactive) {
-          const fileChannelTypes = new Set<string>();
           currentCanSend = !!(channelInfo.adapter.capabilities?.file);
-          for (const [, info] of this.channels) {
-            if (info.adapter.capabilities?.file) {
-              fileChannelTypes.add(info.options?.channelType || info.adapter.channelName);
-            }
-          }
-          crossChannelTypes = [...fileChannelTypes].filter(t => t !== currentChannelType);
         }
 
         // 通道能力
@@ -594,62 +579,54 @@ export class MessageProcessor {
         if (channelInfo.adapter.capabilities?.image) capParts.push('图片输出');
         if (channelInfo.adapter.capabilities?.file) capParts.push('文件发送');
 
-        // Personal layer: persona.md + working memory 注入
+        // Personal layer
         const owningAgent = this.agentRegistry?.resolveByChannel(channelKey);
-        if (owningAgent) {
-          const persona = (owningAgent as any).getPersona?.();
-          if (persona) contextParts.push(persona);
-          const working = (owningAgent as any).getWorkingMemory?.();
-          if (working) contextParts.push(`[当前关注]\n${working}`);
-        }
+        const persona = (owningAgent as any)?.getPersona?.() || undefined;
+        const working = (owningAgent as any)?.getWorkingMemory?.() || undefined;
+        if (persona) contextParts.push(persona);
+        if (working) contextParts.push(`[当前关注]\n${working}`);
 
-        contextParts.push(renderPromptSection('runtime', {
-          channel: currentChannelType,
-          project: path.basename(absoluteProjectPath),
-          sessionName: session.name || '',
-          selfIdentity: selfIdentity || '',
-          peerRole: session.identity?.role || 'unknown',
-          peerIdentity: peerIdentity || '',
-          peerType: peerType && peerType !== 'unknown' ? peerType : '',
-          chatType: session.chatType || '',
-          agent: session.agentId && session.agentId !== 'claude' ? session.agentId : '',
-          readonly: session.metadata?.permissionMode === 'readonly',
-          readonlySendHint: isProactive ? '使用 evolclaw ctl file 发送' : '使用 [SEND_FILE:] 发送',
-          fileSendCurrent: !isProactive && currentCanSend,
-          fileSendCross: !isProactive && crossChannelTypes.length > 0,
-          crossPrimary: crossChannelTypes[0] || '',
-          crossTypes: crossChannelTypes.join('/'),
-          capability: capParts.length > 0,
-          capabilities: capParts.join('、'),
-        }));
+        // 计算 peerKey: <channel>#<urlEncode(peerId)>
+        const peerIdRaw = message.peerId;
+        const peerKey = (currentChannelType && peerIdRaw)
+          ? `${currentChannelType}#${encodeURIComponent(peerIdRaw)}`
+          : undefined;
 
-        // 2. 群聊 @ 规则
-        if (message.chatType === 'group' && message.peerId) {
-          contextParts.push(renderPromptSection('group', { peerId: message.peerId }));
-        }
+        const normalizedBaseagent = normalizeBaseagent(agent.name);
 
-        // 3. Proactive 模式提示词
-        if (isProactive) {
-          contextParts.push(renderPromptSection('proactive', {}));
-        }
+        // Kit renderer: 组装上下文
+        const kitCtx: KitRenderContext = {
+          vars: {
+            EVOLCLAW_HOME: resolveRoot(),
+            PACKAGE_ROOT: getPackageRoot(),
+            CURRENT_PROJECT: absoluteProjectPath,
+            selfAid: selfAid || undefined,
+            selfName: selfName || undefined,
+            hasPersona: !!persona,
+            hasWorkingMemory: !!working,
+            peerId: peerIdRaw || undefined,
+            peerKey,
+            peerName: peerName || undefined,
+            peerRole: session.identity?.role || 'unknown',
+            groupId: session.metadata?.groupId || undefined,
+            scene: session.chatType ? (session.chatType === 'group' ? 'group' : 'private') : 'coding',
+            chatType: session.chatType || null,
+            channel: currentChannelType || null,
+            venueUid: undefined,
+            project: path.basename(absoluteProjectPath),
+            sessionName: session.name || undefined,
+            sessionMode: isProactive ? 'proactive' : 'interactive',
+            readonly: session.metadata?.permissionMode === 'readonly',
+            canSendFile: !isProactive && currentCanSend,
+            capabilities: capParts.length > 0 ? capParts.join('、') : undefined,
+            baseAgent: normalizedBaseagent.canonical,
+            baseAgentName: normalizedBaseagent.displayName,
+          },
+          sessionId: session.id,
+        };
 
-        // 4. ECK rules 注入（如果 base agent 没有通过 symlink 自动加载）
-        {
-          const { resolveEckInjection } = await import('../../eck/detect.js');
-          const { loadRulesForInjection } = await import('../../eck/rules-loader.js');
-          const { kitsRulesDir } = await import('../../paths.js');
-          const eckResult = resolveEckInjection(
-            { baseAgent: agent.name },
-            absoluteProjectPath,
-            kitsRulesDir()
-          );
-          if (eckResult.shouldInject) {
-            const rulesContent = loadRulesForInjection();
-            if (rulesContent) {
-              contextParts.unshift(rulesContent);
-            }
-          }
-        }
+        const kitContext = renderKitSections(kitCtx);
+        if (kitContext) contextParts.push(kitContext);
 
         effectiveSystemPrompt = [options?.systemPromptAppend, ...contextParts].filter(Boolean).join('\n') || undefined;
 

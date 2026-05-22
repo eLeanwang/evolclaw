@@ -100,6 +100,33 @@ export function saveDefaults(value: DefaultsConfig): void {
   atomicWriteJson(resolvePaths().defaultsConfig, value);
 }
 
+// ── 进程配置（{root}/config.json，evolclaw 实例级，与 agent 无关）──────
+
+export interface ProcessConfig {
+  $schema_version?: number;
+  log?: {
+    level?: string;
+    retention_hours?: number;
+    message_log?: boolean;
+    event_log?: boolean;
+  };
+  aun?: {
+    gateway?: string;
+    keystorePath?: string;
+    encryptionSeed?: string;
+  };
+}
+
+export function loadProcessConfig(): ProcessConfig {
+  const raw = atomicReadJson<ProcessConfig>(resolvePaths().processConfig);
+  if (raw === null) return {};
+  return expandEnvRefs(raw);
+}
+
+export function saveProcessConfig(value: ProcessConfig): void {
+  atomicWriteJson(resolvePaths().processConfig, value);
+}
+
 // ── 自动迁移 ───────────────────────────────────────────────────────────
 
 /**

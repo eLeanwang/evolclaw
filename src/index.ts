@@ -35,7 +35,7 @@ import { ChannelAdapter, Message, OutboundEnvelope, OutboundPayload } from './ty
 import { logger, setLogLevel } from './utils/logger.js';
 import { writeMain, removeAll, isMainWinner, scanInstances } from './utils/instance-registry.js';
 import { detectDuplicates } from './core/evolagent-registry.js';
-import { loadPromptTemplates } from './agents/templates.js';
+import { loadKitManifest, cleanEckDebug, invalidateKitCache } from './agents/kit-renderer.js';
 import { initEck } from './eck/init.js';
 import { TriggerManager } from './core/trigger/manager.js';
 import { TriggerScheduler, calcNextFireAt } from './core/trigger/scheduler.js';
@@ -162,8 +162,9 @@ async function main() {
   // ── ECK 运行时初始化 ──
   initEck();
 
-  // 加载提示词模板
-  loadPromptTemplates();
+  // 加载 ECK manifest + 清理旧调试文件
+  cleanEckDebug();
+  loadKitManifest();
 
   // 加载配置（新结构：defaults.json + per-agent config.json）
   const defaults: DefaultsConfig = loadDefaults() ?? { $schema_version: CONFIG_SCHEMA_VERSION };
@@ -952,7 +953,8 @@ async function main() {
       }
     }
 
-    // 重建 channel index
+    // 重建 channel index + 清除 kit 缓存
+    invalidateKitCache();
     (agentRegistry as any).channelIndex.clear();
     (agentRegistry as any).buildChannelIndex();
 

@@ -18,7 +18,7 @@
   ],
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "tsc && node -e \"const f='dist/cli/index.js',c=require('fs').readFileSync(f,'utf8');if(!c.startsWith('#!'))require('fs').writeFileSync(f,'#!/usr/bin/env node\\n'+c)\" && node -e \"try{require('child_process').execFileSync('chmod',['+x','dist/cli/index.js'])}catch{}\" && node -e \"require('fs').mkdirSync('dist/data',{recursive:true});require('fs').copyFileSync('src/data/prompts.md','dist/data/prompts.md')\"",
+    "build": "tsc && node -e \"const f='dist/cli/index.js',c=require('fs').readFileSync(f,'utf8');if(!c.startsWith('#!'))require('fs').writeFileSync(f,'#!/usr/bin/env node\\n'+c)\" && node -e \"try{require('child_process').execFileSync('chmod',['+x','dist/cli/index.js'])}catch{}\"",
     "start": "node dist/index.js",
     "test": "flock --nonblock /tmp/evolclaw-test.lock vitest run || { echo '\\n[ERROR] Another vitest instance is already running. Wait or kill it first.' >&2; exit 1; }",
     "test:watch": "vitest",
