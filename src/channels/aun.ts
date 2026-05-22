@@ -440,10 +440,11 @@ export class AUNChannel {
     return out;
   }
 
-  private buildGroupReplyContext(taskId: string | undefined, senderAid: string, encrypted: boolean): ReplyContext {
+  private buildGroupReplyContext(taskId: string | undefined, senderAid: string, encrypted: boolean, messageId?: string): ReplyContext {
     const replyContext: ReplyContext = { metadata: { encrypted } };
     if (taskId) replyContext.threadId = taskId;
     replyContext.peerId = senderAid;
+    if (messageId) replyContext.replyToMessageId = messageId;
     return replyContext;
   }
 
@@ -1121,7 +1122,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
           peerName: displayName,
           peerType: peerInfo?.type || 'unknown',
           seq,
-          replyContext: this.buildGroupReplyContext(undefined, senderAid, msgEncryptedFast),
+          replyContext: this.buildGroupReplyContext(undefined, senderAid, msgEncryptedFast, messageId),
           createdAt,
         });
         return;
@@ -1189,7 +1190,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       this.pendingEchoMessages.set(messageId, {
         text: echoText,
         channelId: groupId,
-        context: this.buildGroupReplyContext(undefined, senderAid, msgEncrypted),
+        context: this.buildGroupReplyContext(undefined, senderAid, msgEncrypted, messageId),
         receiveTs: Date.now(),
       });
       // 继续走正常 Agent 流程（下面的代码会 dispatch）
@@ -1278,7 +1279,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       seq,
       taskId,
       mentions,
-      replyContext: this.buildGroupReplyContext(taskId, senderAid, msgEncrypted),
+      replyContext: this.buildGroupReplyContext(taskId, senderAid, msgEncrypted, messageId),
     });
   }
 
@@ -2226,6 +2227,8 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       severity,
     };
     if (context?.threadId) statusPayload.thread_id = context.threadId;
+    if (context?.peerId) statusPayload.initiator = context.peerId;
+    if (context?.replyToMessageId) statusPayload.ref_message_id = context.replyToMessageId;
 
     const isGroup = this.isGroupId(channelId);
     // 私聊 channelId = 对端 AID（不含 device_id）
