@@ -470,9 +470,9 @@ export class MessageProcessor {
         diagEnabled: this.globalSettings.debug?.flusherDiag,
         send: async (payload) => {
           if (isAutonomous) return;  // autonomous session: never send to channel
-          // proactive 模式：activity.batch 是 thought 协议内容，不走 channel 发送
-          // （channel 不支持 thought 时应静默丢弃，而非降级为普通消息）
-          if (isProactive && payload.kind === 'activity.batch') return;
+          // proactive 模式：activity.batch 是 thought 协议内容，只发给支持 thought 的 channel
+          // （不支持 thought 的 channel 静默丢弃，避免降级为普通消息）
+          if (isProactive && payload.kind === 'activity.batch' && !adapter.capabilities?.thought) return;
           const isCurrentlyBackground = await this.isBackgroundSession(session, message.channel, message.channelId);
           if (isCurrentlyBackground) return;
 
@@ -1157,8 +1157,9 @@ export class MessageProcessor {
     );
 
     // 非 human 对端强制 proactive（不管单聊/群聊）；human 走原有策略
-    if (message.peerType && message.peerType !== 'human') {
+    if (message.peerType && message.peerType !== 'human' && session.sessionMode !== 'proactive') {
       session.sessionMode = 'proactive';
+      await this.sessionManager.updateSession(session.id, { sessionMode: 'proactive' });
     }
 
     // replyContext 不再写入 session.metadata（跟着 message 走，避免群聊多人覆盖）
