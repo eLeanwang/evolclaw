@@ -181,7 +181,7 @@ export class IMRenderer {
 
   /** 添加文本片段（流式 text） */
   addText(text: string, outputTokens?: number): void {
-    this.emitProgress(outputTokens);
+    this.emitProgress('text', outputTokens);
     if (this.opts.envelope.chatmode === 'proactive') return;
     if (!text) return;
 
@@ -208,7 +208,7 @@ export class IMRenderer {
 
   /** 添加工具调用 */
   addToolCall(name: string, input: Record<string, unknown> | undefined, callId?: string, descText?: string): void {
-    this.emitProgress();
+    this.emitProgress('tool_call');
     if (this.opts.envelope.chatmode === 'proactive') return;
     if (this.opts.suppressActivities) return;
     this.itemsQueue.push({
@@ -225,7 +225,7 @@ export class IMRenderer {
 
   /** 添加工具结果 */
   addToolResult(name: string, ok: boolean, result?: unknown, error?: string, callId?: string, durationMs?: number, descText?: string): void {
-    this.emitProgress();
+    this.emitProgress('tool_result');
     if (this.opts.envelope.chatmode === 'proactive') return;
     if (this.opts.suppressActivities) return;
     this.itemsQueue.push({
@@ -413,9 +413,8 @@ export class IMRenderer {
 
   // ── 内部：status.progress 发送 ──
 
-  private emitProgress(outputTokens?: number): void {
-    const metadata: { outputTokens?: number } | undefined = outputTokens != null ? { outputTokens } : undefined;
-    const payload: OutboundPayload = { kind: 'status.progress', ...(metadata && { metadata }) };
+  private emitProgress(activityType: 'text' | 'tool_call' | 'tool_result', outputTokens?: number): void {
+    const payload: OutboundPayload = { kind: 'status.progress', metadata: { activityType, ...(outputTokens != null && { outputTokens }) } };
     this.opts.send(payload).catch(() => {});
   }
 
@@ -441,7 +440,8 @@ export class IMRenderer {
     }
 
     const outputTokens: number | undefined = (event as any).outputTokens;
-    this.emitProgress(outputTokens);
+    const activityType = item.kind === 'text' ? 'text' : item.kind === 'tool_call' ? 'tool_call' : 'tool_result';
+    this.emitProgress(activityType as 'text' | 'tool_call' | 'tool_result', outputTokens);
     const payload: OutboundPayload = { kind: 'activity.batch', items: [item] };
     // fire-and-forget
     this.opts.send(payload).catch(err => {
