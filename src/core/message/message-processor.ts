@@ -1245,7 +1245,7 @@ export class MessageProcessor {
           lastReplyText += event.text;
           this.eventBus.publish({ type: 'message:text', sessionId: session.id, text: event.text, isFinal: false });
           if (!shouldSuppress()) {
-            renderer.addText(event.text, (event as any).outputTokens);
+            renderer.addText(event.text, (event as any).outputTokens, (event as any).turn);
           }
         }
 
@@ -1290,7 +1290,7 @@ export class MessageProcessor {
             if (event.callId) {
               toolDescByCallId.set(event.callId, desc);
             }
-            renderer.addToolCall(event.name, event.input, event.callId, desc);
+            renderer.addToolCall(event.name, event.input, event.callId, desc, (event as any).turn);
           }
         }
 

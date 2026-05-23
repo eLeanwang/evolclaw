@@ -180,8 +180,8 @@ export class IMRenderer {
   // ── 文本/活动注入（替代 StreamFlusher.addText/addActivity）──
 
   /** 添加文本片段（流式 text） */
-  addText(text: string, outputTokens?: number): void {
-    this.emitProgress('text', outputTokens);
+  addText(text: string, outputTokens?: number, turn?: number): void {
+    this.emitProgress('text', outputTokens, turn);
     if (this.opts.envelope.chatmode === 'proactive') return;
     if (!text) return;
 
@@ -207,8 +207,8 @@ export class IMRenderer {
   }
 
   /** 添加工具调用 */
-  addToolCall(name: string, input: Record<string, unknown> | undefined, callId?: string, descText?: string): void {
-    this.emitProgress('tool_call');
+  addToolCall(name: string, input: Record<string, unknown> | undefined, callId?: string, descText?: string, turn?: number): void {
+    this.emitProgress('tool_call', undefined, turn);
     if (this.opts.envelope.chatmode === 'proactive') return;
     if (this.opts.suppressActivities) return;
     this.itemsQueue.push({
@@ -413,8 +413,8 @@ export class IMRenderer {
 
   // ── 内部：status.progress 发送 ──
 
-  private emitProgress(activityType: 'text' | 'tool_call' | 'tool_result', outputTokens?: number): void {
-    const payload: OutboundPayload = { kind: 'status.progress', metadata: { activityType, ...(outputTokens != null && { outputTokens }) } };
+  private emitProgress(activityType: 'text' | 'tool_call' | 'tool_result', outputTokens?: number, turn?: number): void {
+    const payload: OutboundPayload = { kind: 'status.progress', metadata: { activityType, ...(turn != null && { turn }), ...(outputTokens != null && { outputTokens }) } };
     this.opts.send(payload).catch(() => {});
   }
 
@@ -440,8 +440,9 @@ export class IMRenderer {
     }
 
     const outputTokens: number | undefined = (event as any).outputTokens;
+    const turn: number | undefined = (event as any).turn;
     const activityType = item.kind === 'text' ? 'text' : item.kind === 'tool_call' ? 'tool_call' : 'tool_result';
-    this.emitProgress(activityType as 'text' | 'tool_call' | 'tool_result', outputTokens);
+    this.emitProgress(activityType as 'text' | 'tool_call' | 'tool_result', outputTokens, turn);
     const payload: OutboundPayload = { kind: 'activity.batch', items: [item] };
     // fire-and-forget
     this.opts.send(payload).catch(err => {

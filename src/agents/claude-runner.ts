@@ -118,9 +118,9 @@ class MessageStream {
 
 // ── 标准事件流（Gateway 消费的统一事件类型）──
 export type AgentEvent =
-  | { type: 'text'; text: string; outputTokens?: number }
+  | { type: 'text'; text: string; outputTokens?: number; turn?: number }
   | { type: 'status'; subtype: string; message: string }
-  | { type: 'tool_use'; name: string; input: any; callId?: string }
+  | { type: 'tool_use'; name: string; input: any; callId?: string; turn?: number }
   | { type: 'tool_result'; name: string; result: any; isError?: boolean; error?: string; callId?: string }
   | { type: 'compact'; preTokens: number }
   | { type: 'task_progress'; summary?: string; toolUses?: number; durationMs?: number }
@@ -781,6 +781,7 @@ export class AgentRunner {
     let lastSessionId: string | undefined;
     // tool_use_id → tool_name 映射，用于从 SDKUserMessage 的 tool_result 块中还原工具名
     const toolUseNames = new Map<string, string>();
+    let turnCount = 0;
 
     for await (const event of sdkStream) {
       // 提取 session_id（任意 SDK 事件都可能携带）
@@ -813,13 +814,13 @@ export class AgentRunner {
       // assistant: 提取 tool_use 和文本（仅无 text_delta 时提取文本）
       if (event.type === 'assistant' && event.message?.content) {
         const outputTokens = event.message.usage?.output_tokens;
+        turnCount++;
         for (const content of event.message.content) {
           if (content.type === 'tool_use') {
-            // 记录 id → name 映射，供后续 tool_result 使用
             if (content.id) toolUseNames.set(content.id, content.name);
-            yield { type: 'tool_use', name: content.name, input: content.input, callId: content.id };
+            yield { type: 'tool_use', name: content.name, input: content.input, callId: content.id, turn: turnCount };
           } else if (content.type === 'text' && content.text) {
-            yield { type: 'text', text: content.text, outputTokens };
+            yield { type: 'text', text: content.text, outputTokens, turn: turnCount };
           }
         }
       }
