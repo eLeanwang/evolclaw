@@ -166,7 +166,7 @@ export class TriggerScheduler {
     const top = this.heap.peek();
     if (!top) return;
     const delay = Math.max(0, top.nextFireAt - Date.now());
-    this.timer = setTimeout(() => this.onFire(), delay);
+    this.timer = setTimeout(() => this.onFire(), delay).unref();
   }
 
   private onFire(): void {
