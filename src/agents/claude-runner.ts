@@ -819,7 +819,7 @@ export class AgentRunner {
             if (content.id) toolUseNames.set(content.id, content.name);
             yield { type: 'tool_use', name: content.name, input: content.input, callId: content.id, turn: turnCount };
           } else if (content.type === 'text' && content.text) {
-            yield { type: 'text', text: content.text, turn: turnCount };
+            yield { type: 'text', text: content.text, outputTokens: content.text.length, turn: turnCount };
           }
         }
       }
