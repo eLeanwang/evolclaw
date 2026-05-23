@@ -655,6 +655,25 @@ export class AgentRunner {
     // 尝试发送交互卡片
     let cardSent = false;
     if (permCtx.adapter?.send) {
+      // 发送计划内容：找 plans 目录中最新修改的 .md 文件
+      if (sendPrompt) {
+        try {
+          const plansDir = path.join(process.env.HOME || '/root', '.claude', 'plans');
+          const files = fs.readdirSync(plansDir)
+            .filter((f: string) => f.endsWith('.md'))
+            .map((f: string) => ({ name: f, mtime: fs.statSync(path.join(plansDir, f)).mtimeMs }))
+            .sort((a: { mtime: number }, b: { mtime: number }) => b.mtime - a.mtime);
+          if (files.length > 0) {
+            const planContent = fs.readFileSync(path.join(plansDir, files[0].name), 'utf-8');
+            if (planContent.trim()) {
+              await sendPrompt(`📋 **计划内容**\n\n${planContent}`);
+            }
+          }
+        } catch {
+          // 读取失败不影响后续审批流程
+        }
+      }
+
       const requestId = `plan-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const interaction: InteractionRequest = {
         type: 'interaction',

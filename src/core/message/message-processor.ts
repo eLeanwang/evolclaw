@@ -665,7 +665,7 @@ export class MessageProcessor {
             if (attempt < MAX_RETRIES && isRetryableError(retryError)) {
               const delay = Math.pow(2, attempt) * 1000; // 2s, 4s
               logger.warn(`[MessageProcessor] Retryable error (attempt ${attempt}/${MAX_RETRIES}), retrying in ${delay}ms:`, retryError);
-              renderer.addNotice(`⚠️ API 暂时不可用，${delay / 1000}秒后重试 (${attempt}/${MAX_RETRIES})...`, 'warn', 'retry', true);
+              renderer.addNotice(`API 暂时不可用，${delay / 1000}秒后重试 (${attempt}/${MAX_RETRIES})...`, 'warn', 'retry', true);
               await renderer.flush();
               await new Promise(resolve => setTimeout(resolve, delay));
               continue;
@@ -676,7 +676,7 @@ export class MessageProcessor {
       } catch (error) {
         if (classifyError(error) === ErrorType.CONTEXT_TOO_LONG && session.agentSessionId && hasCompact(agent)) {
           // 尝试 compact 压缩会话
-          renderer.addNotice('\u26a0\ufe0f 上下文过长，正在压缩会话...', 'warn', 'compact-trigger', true);
+          renderer.addNotice('上下文过长，正在压缩会话...', 'warn', 'compact-trigger', true);
           await renderer.flush();
 
           const compacted = await agent.compact(
@@ -685,7 +685,7 @@ export class MessageProcessor {
 
           if (compacted) {
             // compact 成功，带 resume 重试（不重复原始消息，让 Agent 继续未完成的工作）
-            renderer.addNotice('\u2705 压缩完成，正在重试...', 'info', 'compact-retry', true);
+            renderer.addNotice('✅ 压缩完成，正在重试...', 'info', 'compact-retry', true);
             const retryStream = await agent.runQuery(
               session.id,
               '上下文已自动压缩，请继续之前未完成的任务。',
@@ -723,7 +723,7 @@ export class MessageProcessor {
         contextTooLongPattern.test(streamResult.fullText)
       );
       if (isPromptTooLong) {
-        renderer.addNotice('⚠️ 上下文过长，正在压缩会话...', 'warn', 'compact-trigger', true);
+        renderer.addNotice('上下文过长，正在压缩会话...', 'warn', 'compact-trigger', true);
         await renderer.flush();
         const compacted = await agent.compact(session.id, session.agentSessionId!, absoluteProjectPath);
         if (compacted) {
@@ -749,7 +749,7 @@ export class MessageProcessor {
         contextTooLongPattern.test(streamResult.fullText)
       )) {
         // 上下文过长但无法 auto-compact（无 session ID 或 agent 不支持），显示友好提示
-        renderer.addNotice('⚠️ 上下文过长，请精简提问或使用 /compact 压缩上下文', 'warn', 'context-too-long', true);
+        renderer.addNotice('上下文过长，请精简提问或使用 /compact 压缩上下文', 'warn', 'context-too-long', true);
       }
 
       // 处理文件标记 - 支持 [SEND_FILE:path] 和 [SEND_FILE:channel:path]
@@ -1331,7 +1331,7 @@ export class MessageProcessor {
           const isContextError = /prompt is too long|input is too long|上下文过长/i.test(event.error || '');
           if (!isContextError && !hasErrorResult && !shouldSuppress()) {
             hasErrorResult = true;
-            renderer.addNotice(`\u274c ${event.error}`, 'warn', 'runtime-error', true);
+            renderer.addNotice(`${event.error}`, 'warn', 'runtime-error', true);
           }
         }
 
@@ -1382,11 +1382,11 @@ export class MessageProcessor {
             || /prompt is too long|input is too long|上下文过长/i.test(event.errors?.join(' ') || '')
             || /prompt is too long|input is too long|上下文过长/i.test(lastReplyText);
           if (event.isError && !hasErrorResult && !shouldSuppress() && !isUserInterrupt && !isContextTooLong) {
-            const errorSummary = event.errors?.join('; ') || '\u4efb\u52a1\u6267\u884c\u5931\u8d25';
-            // 使用 terminalReason 提供更友好的错误提示
+            const errorSummary = event.errors?.join('; ') || '任务执行失败';
+            // 使用 terminalReason 提供更友好的错误提示（不带 emoji，由 formatter 统一加）
             const userFriendlyMessage = event.terminalReason
-              ? getErrorMessage(null, event.terminalReason)
-              : `\u274c ${errorSummary}`;
+              ? getErrorMessage(null, event.terminalReason, false)
+              : errorSummary;
             renderer.addNotice(userFriendlyMessage, 'warn', 'task-error', true);
           }
 
@@ -1488,7 +1488,7 @@ export class MessageProcessor {
         logger.error('[MessageProcessor] Stream processing error:', error);
       }
       if (error instanceof Error && error.message.includes('process exited')) {
-        renderer.addNotice('\u274c Claude Code \u8fdb\u7a0b\u5f02\u5e38\u9000\u51fa\uff0c\u8bf7\u91cd\u8bd5', 'warn', 'process-exit', true);
+        renderer.addNotice('Claude Code 进程异常退出，请重试', 'warn', 'process-exit', true);
       }
       // Flush any pending error activities before re-throwing,
       // and mark the error so outer catch won't send a duplicate message

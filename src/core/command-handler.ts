@@ -55,19 +55,8 @@ function getAvailableEfforts(agent: AgentRunnerFull, model: string): readonly Ef
 }
 
 
-function formatModelUsage(agent: AgentRunnerFull, model: string): string {
-  const efforts = getAvailableEfforts(agent, model);
-  const lines = [
-    '用法:',
-    '  /model <模型>            切换模型',
-  ];
-
-  if (efforts.length > 0) {
-    lines.push('  /model <模型> <强度>     切换模型+推理强度');
-    lines.push('  /effort [level]          查看或切换推理强度');
-  }
-
-  return lines.join('\n');
+function formatModelUsage(_agent: AgentRunnerFull, _model: string): string {
+  return '用法: /model <模型>';
 }
 
 /**
@@ -394,7 +383,6 @@ export class CommandHandler {
 
     if (opts.canWrite === false) return renderCommandCardAsText(card);
     if (!adapter?.send) return renderCommandCardAsText(card);
-    if (this.isSessionBusy(opts.interaction.sessionId)) return renderCommandCardAsText(card);
 
     try {
       const envelope = buildEnvelope({
@@ -445,14 +433,6 @@ export class CommandHandler {
       operatorId: userId,
     });
     return { matched: true, result: '✓ 已回答' };
-  }
-
-  /** 判断指定 session 是否有活跃流（用于 idle 守卫和卡片降级） */
-  private isSessionBusy(sessionId: string): boolean {
-    for (const agent of this.agentMap.values()) {
-      if (agent.hasActiveStream(sessionId)) return true;
-    }
-    return false;
   }
 
   /** 获取活跃会话，无会话时自动创建（话题除外） */
@@ -1166,9 +1146,9 @@ export class CommandHandler {
           return `  ${prefix} ${m.key} (${m.nameZh}) - ${m.description}${suffix}`;
         }).join('\n');
         if (isOwner) {
-          return { kind: 'command.result' as const, text: `🔐 当前权限模式: ${currentMode}\n\n${modeList}\n\n用法:\n  /perm <模式>              切换权限模式\n  /perm allow|always|deny   审批权限请求` };
+          return { kind: 'command.result' as const, text: `权限模式: ${currentMode}\n\n${modeList}\n\n用法: /perm <模式> 或 allow|always|deny` };
         }
-        return { kind: 'command.result' as const, text: `🔐 当前权限模式: ${currentMode}` };
+          return { kind: 'command.result' as const, text: `当前权限模式: ${currentMode}` };
       }
 
       const parts = args.split(/\s+/);
@@ -1398,7 +1378,7 @@ export class CommandHandler {
         const list = available.map(a => `${a === currentAgent ? ' ✓' : '  '} ${a}`).join('\n');
         const canSwitchAgent = activeChatType === 'group' ? isOwner : isAdmin;
         if (canSwitchAgent) {
-          return { kind: 'command.result' as const, text: `当前 Agent: ${currentAgent}\n\n可用:\n${list}\n\n用法: /agent <name>` };
+          return { kind: 'command.result' as const, text: `当前 Agent: ${currentAgent}\n\n可用:\n${list}\n用法: /agent <name>` };
         }
         return { kind: 'command.result' as const, text: `当前 Agent: ${currentAgent}` };
       }
@@ -1548,7 +1528,7 @@ export class CommandHandler {
           ? `\n推理强度: ${currentEffort === 'auto' ? 'auto (SDK默认)' : currentEffort}  (使用 /effort 调整)`
           : '';
         if (isAdmin) {
-          return { kind: 'command.result' as const, text: `当前模型: ${currentModel}${effortHint}\n\n可用模型：\n${modelList}\n\n${formatModelUsage(modelAgent, currentModel)}` };
+          return { kind: 'command.result' as const, text: `当前模型: ${currentModel}${effortHint}\n\n可用模型：\n${modelList}\n\n用法: /model <模型>` };
         }
         return { kind: 'command.result' as const, text: `当前模型: ${currentModel}${effortHint}` };
       }
@@ -1676,12 +1656,11 @@ export class CommandHandler {
 
         // 降级：文本
         const effortDisplay = currentEffort === 'auto' ? 'auto (SDK默认)' : currentEffort;
-        const allItems = [...efforts, 'auto'];
-        const effortList = allItems.map(e => `  ${e === currentEffort ? '✓' : ' '} ${e}${e === 'auto' ? ' (SDK默认)' : ''}`).join('\n');
+        const effortOptions = [...efforts, 'auto'].join(' / ');
         if (isAdmin) {
-          return { kind: 'command.result' as const, text: `⚡ 推理强度: ${effortDisplay}\n\n可选:\n${effortList}\n\n用法: /effort <level>` };
+          return { kind: 'command.result' as const, text: `推理强度: ${effortDisplay}  可选: ${effortOptions}  用法: /effort <level>` };
         }
-        return { kind: 'command.result' as const, text: `⚡ 推理强度: ${effortDisplay}` };
+        return { kind: 'command.result' as const, text: `推理强度: ${effortDisplay}` };
       }
 
       // 带参（切换）需 admin+；无参查询已在上方返回
@@ -1720,9 +1699,7 @@ export class CommandHandler {
 
       // 无参数时返回用法说明
       if (normalizedContent === '/aid') {
-        return { kind: 'command.result' as const, text: `🆔 AID 身份管理
-
-用法:
+        return { kind: 'command.result' as const, text: `用法:
   /aid list              列出本地所有 AID
   /aid show <aid>        查看 AID 详情
   /aid new <aid>         创建新 AID
@@ -1732,27 +1709,16 @@ export class CommandHandler {
   /aid agentmd get <aid> 下载并验签 agent.md` };
       }
       if (normalizedContent === '/rpc') {
-        return { kind: 'command.result' as const, text: `📡 AUN RPC 调用
-
-用法:
-  /rpc --as <aid> --params <json>
-
-参数格式:
-  单行 JSON    单次调用
-  多行 JSONL   逐行执行，失败即停
-
-示例:
-  /rpc --as myaid.agentid.pub --params {"method":"meta.ping","params":{}}` };
+        return { kind: 'command.result' as const, text: `用法: /rpc --as <aid> --params <json>
+示例: /rpc --as myaid.agentid.pub --params {"method":"meta.ping","params":{}}` };
       }
       if (normalizedContent === '/storage') {
-        return { kind: 'command.result' as const, text: `📦 文件存储
-
-用法:
-  /storage upload <aid> <file> <path> [--public]   上传文件
-  /storage download <aid> <url> [local-path]       下载文件
-  /storage ls <aid> [prefix]                       列文件
-  /storage rm <aid> <path>                         删文件
-  /storage quota <aid>                             查配额` };
+        return { kind: 'command.result' as const, text: `用法:
+  /storage upload <aid> <file> <path> [--public]
+  /storage download <aid> <url> [local-path]
+  /storage ls <aid> [prefix]
+  /storage rm <aid> <path>
+  /storage quota <aid>` };
       }
 
       const cliArgs = normalizedContent.slice(1); // strip leading /
@@ -1838,9 +1804,9 @@ export class CommandHandler {
           return `  ${prefix} ${m.key} — ${m.label}`;
         }).join('\n');
         if (isOwner) {
-          return { kind: 'command.result' as const, text: [`📋 中间输出模式: ${currentMode}`, '', modeList, '', '用法: /activity <all|dm|owner|none>'].join('\n') };
+          return { kind: 'command.result' as const, text: `中间输出: ${currentMode}  用法: /activity <all|dm|owner|none>` };
         }
-        return { kind: 'command.result' as const, text: `📋 中间输出模式: ${currentMode}` };
+        return { kind: 'command.result' as const, text: `中间输出: ${currentMode}` };
       }
 
       const newMode = modeMap[activityArg];
@@ -1912,17 +1878,9 @@ export class CommandHandler {
 
         // 降级：文本
         if (canSwitch) {
-          return { kind: 'command.result' as const, text: [
-                        `📋 会话模式: ${currentMode}`,
-                        '',
-                        '模式说明：',
-                        '  • interactive — 交互模式：收到消息时才回复，回复直接显示',
-                        '  • proactive   — 主动模式：流式输出静默，由 Agent 自调 ctl send 发声',
-                        '',
-                        '用法: /chatmode <interactive|proactive>',
-                      ].join('\n') };
+          return { kind: 'command.result' as const, text: `会话模式: ${currentMode}  用法: /chatmode <interactive|proactive>` };
         }
-        return { kind: 'command.result' as const, text: `📋 会话模式: ${currentMode}` };
+        return { kind: 'command.result' as const, text: `会话模式: ${currentMode}` };
       }
 
       if (arg !== 'interactive' && arg !== 'proactive') {
@@ -2004,17 +1962,10 @@ export class CommandHandler {
         }
 
         // 降级：文本
-        const lines: string[] = [];
-        lines.push(`📋 分发模式: ${displayMode}`);
-        lines.push('');
-        lines.push('模式说明：');
-        lines.push('  • mention   — 提及模式：仅当被@提及时响应群消息(含@all)');
-        lines.push('  • broadcast — 广播模式：群内所有消息都触发响应');
         if (isAdmin) {
-          lines.push('');
-          lines.push('用法: /dispatch <mention|broadcast>');
+          return { kind: 'command.result' as const, text: `分发模式: ${displayMode}  用法: /dispatch <mention|broadcast>` };
         }
-        return { kind: 'command.result' as const, text: lines.join('\n') };
+        return { kind: 'command.result' as const, text: `分发模式: ${displayMode}` };
       }
 
       if (arg !== 'mention' && arg !== 'broadcast') {
@@ -2026,7 +1977,7 @@ export class CommandHandler {
       }
 
       if (arg === currentMode) {
-        return { kind: 'command.result' as const, text: `📋 当前已是 ${arg}` };
+        return { kind: 'command.result' as const, text: `当前已是 ${arg}` };
       }
 
       const metadata = { ...(dispatchSession.metadata || {}), dispatchMode: arg };
