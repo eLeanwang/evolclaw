@@ -2330,7 +2330,8 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     const chatmode = context?.metadata?.chatmode ?? '?';
     const initiator = statusPayload.initiator ?? '';
     const refMsgId = statusPayload.ref_message_id ?? '';
-    logger.info(`${this.logPrefix()} task.${status} task=${taskId} session=${sessionId} chatmode=${chatmode} target=${targetLabel} initiator=${initiator} ref_msg=${refMsgId}`);
+    const metaStr = statusPayload.metadata ? ` meta=${JSON.stringify(statusPayload.metadata)}` : '';
+    logger.info(`${this.logPrefix()} task.${status} task=${taskId} session=${sessionId} chatmode=${chatmode} target=${targetLabel} initiator=${initiator} ref_msg=${refMsgId}${metaStr}`);
   }
 
   sendCustomPayload(channelId: string, payload: string): void {
