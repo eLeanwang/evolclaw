@@ -263,7 +263,7 @@ evolclaw/
 - `/check` - 系统健康检查（详情）
 - `/activity [all|dm|owner|none]` - 查看/控制中间输出显示模式
 - `/chatmode [interactive|proactive]` - 查看/切换会话模式
-- `/dispatch [mention|all]` - 群聊分发模式（仅 @ 响应或广播）
+- `/dispatch [mention|broadcast]` - 群聊分发模式（仅 @ 响应或广播）
 - `/trigger <动作> ...` - 设置/查看 AI 自主触发器（延迟/定时/周期）
 - `/restart <channel>` - 重连指定渠道
 
