@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { resolvePaths, getPackageRoot } from '../paths.js';
+import { resolvePaths } from '../paths.js';
 import { logger } from './logger.js';
 import type { ErrorRule } from '../types.js';
 
@@ -87,7 +87,8 @@ function getDictPath(): string {
     if (fs.existsSync(userDict)) {
       _dictPath = userDict;
     } else {
-      _dictPath = path.join(getPackageRoot(), 'data', 'error-dict.json');
+      // Bundled default: src/utils/ → src/data/ (dev) or dist/utils/ → dist/data/ (prod)
+      _dictPath = path.resolve(import.meta.dirname, '..', 'data', 'error-dict.json');
     }
   }
   return _dictPath;

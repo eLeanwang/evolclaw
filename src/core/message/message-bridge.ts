@@ -127,7 +127,8 @@ export class MessageBridge {
           channelName, msg.channelId,
           effectiveProjectPath,
           msg.threadId, Object.keys(metadata).length ? metadata : undefined, undefined, msg.peerId, chatType,
-          undefined, msg.selfId, msg.channelType || effectiveChannelType
+          undefined, msg.selfId, msg.channelType || effectiveChannelType,
+          msg.peerType
         );
 
         // 4. 消息前缀（由 policy 决定）

@@ -54,7 +54,7 @@ export type ToolEvent =
 export type PermissionEvent =
   | { type: 'permission:requested'; sessionId: string; requestId: string; toolName: string; input: string }
   | { type: 'permission:resolved'; sessionId: string; requestId: string; approved: boolean }
-  | { type: 'permission:timeout'; sessionId: string; requestId: string };
+  | { type: 'permission:timeout'; sessionId: string; requestId: string; toolName?: string };
 
 // ── Runner 运行事件（AI 后端执行流） ──
 export type RunnerBusEvent =

@@ -387,7 +387,14 @@ export class PermissionGateway {
     }
 
     return new Promise((resolve) => {
-      this.pending.set(requestId, { sessionId, toolName, resolve, timer: setTimeout(() => {}, 0) });
+      const timer = setTimeout(() => {
+        const pending = this.pending.get(requestId);
+        if (!pending) return;
+        this.pending.delete(requestId);
+        this.eventBus?.publish({ type: 'permission:timeout', sessionId, requestId, toolName });
+        pending.resolve('deny');
+      }, this.timeout);
+      this.pending.set(requestId, { sessionId, toolName, resolve, timer });
 
       // 注册到 InteractionRouter（卡片和文本降级都注册，统一路由）
       if (context?.interactionRouter) {
