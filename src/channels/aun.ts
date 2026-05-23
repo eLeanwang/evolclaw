@@ -2260,7 +2260,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     this.messageSeqMap.delete(messageId);
   }
 
-  sendProcessingStatus(channelId: string, status: 'start' | 'done' | 'interrupted' | 'error' | 'timeout' | 'queued', sessionId: string, taskId: string, context?: ReplyContext): void {
+  sendProcessingStatus(channelId: string, status: 'start' | 'done' | 'interrupted' | 'error' | 'timeout' | 'queued' | 'progress', sessionId: string, taskId: string, context?: ReplyContext, extraMeta?: Record<string, unknown>): void {
     if (status === 'start') this.sentCount.delete(channelId);  // 新任务开始，重置计数
     if (!this.client || !this.connected) return;
 
@@ -2272,6 +2272,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       error: 'error',
       timeout: 'timeout',
       queued: 'queued',
+      progress: 'progress',
     };
     const statusPayload: Record<string, any> = {
       type: 'status',
@@ -2279,6 +2280,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       task_id: taskId,
       session_id: sessionId,
       severity,
+      ...(extraMeta && Object.keys(extraMeta).length > 0 && { metadata: extraMeta }),
     };
     if (context?.threadId) statusPayload.thread_id = context.threadId;
     if (context?.peerId) statusPayload.initiator = context.peerId;
@@ -2600,6 +2602,9 @@ export class AUNChannelPlugin implements ChannelPlugin {
               }
               return;
             }
+            case 'status.progress':
+              channel.sendProcessingStatus(channelId, 'progress', envelope.taskId, envelope.taskId, ctx, payload.metadata);
+              return;
             case 'status.started':
               channel.sendProcessingStatus(channelId, 'start', envelope.taskId, envelope.taskId, ctx);
               return;

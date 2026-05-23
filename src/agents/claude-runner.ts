@@ -118,7 +118,7 @@ class MessageStream {
 
 // ── 标准事件流（Gateway 消费的统一事件类型）──
 export type AgentEvent =
-  | { type: 'text'; text: string }
+  | { type: 'text'; text: string; outputTokens?: number }
   | { type: 'status'; subtype: string; message: string }
   | { type: 'tool_use'; name: string; input: any; callId?: string }
   | { type: 'tool_result'; name: string; result: any; isError?: boolean; error?: string; callId?: string }
@@ -812,13 +812,14 @@ export class AgentRunner {
 
       // assistant: 提取 tool_use 和文本（仅无 text_delta 时提取文本）
       if (event.type === 'assistant' && event.message?.content) {
+        const outputTokens = event.message.usage?.output_tokens;
         for (const content of event.message.content) {
           if (content.type === 'tool_use') {
             // 记录 id → name 映射，供后续 tool_result 使用
             if (content.id) toolUseNames.set(content.id, content.name);
             yield { type: 'tool_use', name: content.name, input: content.input, callId: content.id };
           } else if (content.type === 'text' && content.text) {
-            yield { type: 'text', text: content.text };
+            yield { type: 'text', text: content.text, outputTokens };
           }
         }
       }

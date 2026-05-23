@@ -180,7 +180,8 @@ export class IMRenderer {
   // ── 文本/活动注入（替代 StreamFlusher.addText/addActivity）──
 
   /** 添加文本片段（流式 text） */
-  addText(text: string): void {
+  addText(text: string, outputTokens?: number): void {
+    this.emitProgress(outputTokens);
     if (this.opts.envelope.chatmode === 'proactive') return;
     if (!text) return;
 
@@ -207,6 +208,7 @@ export class IMRenderer {
 
   /** 添加工具调用 */
   addToolCall(name: string, input: Record<string, unknown> | undefined, callId?: string, descText?: string): void {
+    this.emitProgress();
     if (this.opts.envelope.chatmode === 'proactive') return;
     if (this.opts.suppressActivities) return;
     this.itemsQueue.push({
@@ -223,6 +225,7 @@ export class IMRenderer {
 
   /** 添加工具结果 */
   addToolResult(name: string, ok: boolean, result?: unknown, error?: string, callId?: string, durationMs?: number, descText?: string): void {
+    this.emitProgress();
     if (this.opts.envelope.chatmode === 'proactive') return;
     if (this.opts.suppressActivities) return;
     this.itemsQueue.push({
@@ -408,6 +411,14 @@ export class IMRenderer {
     }
   }
 
+  // ── 内部：status.progress 发送 ──
+
+  private emitProgress(outputTokens?: number): void {
+    const metadata: { outputTokens?: number } | undefined = outputTokens != null ? { outputTokens } : undefined;
+    const payload: OutboundPayload = { kind: 'status.progress', ...(metadata && { metadata }) };
+    this.opts.send(payload).catch(() => {});
+  }
+
   // ── 内部：proactive 模式（逐事件 activity.batch[1 item]） ──
 
   private emitProactive(event: AgentEvent): void {
@@ -429,6 +440,8 @@ export class IMRenderer {
       this.allText += item.text;
     }
 
+    const outputTokens: number | undefined = (event as any).outputTokens;
+    this.emitProgress(outputTokens);
     const payload: OutboundPayload = { kind: 'activity.batch', items: [item] };
     // fire-and-forget
     this.opts.send(payload).catch(err => {
