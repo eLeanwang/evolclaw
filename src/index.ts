@@ -45,6 +45,7 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import crypto from 'crypto';
+import { fileURLToPath } from 'url';
 
 /** 出站 payload 摘要（用于 channel-out.log） */
 function summarizeOutboundPayload(payload: any): Record<string, any> {
@@ -100,6 +101,34 @@ export async function sendSystemPayload(
   await adapter.send(envelope, payload);
 }
 
+function readEvolclawVersion(): string {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(getPackageRoot(), 'package.json'), 'utf-8'));
+    return pkg.version || 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
+function readFastaunVersion(): string {
+  try {
+    const url = (import.meta as any).resolve?.('@agentunion/fastaun');
+    if (!url) return 'unknown';
+    let dir = path.dirname(fileURLToPath(url));
+    while (dir !== path.dirname(dir)) {
+      const pkgPath = path.join(dir, 'package.json');
+      if (fs.existsSync(pkgPath)) {
+        const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+        if (pkg.name === '@agentunion/fastaun') return pkg.version || 'unknown';
+      }
+      dir = path.dirname(dir);
+    }
+    return 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
 async function main() {
   // 启动信息：目录类型 + 版本号 + 代码最新时间戳
   {
@@ -152,7 +181,7 @@ async function main() {
     originalInfo(...args);
   };
 
-  logger.info('EvolClaw starting...');
+  logger.info(`EvolClaw v${readEvolclawVersion()} starting... (fastaun v${readFastaunVersion()})`);
 
   // 确保数据目录存在
   ensureDataDirs();

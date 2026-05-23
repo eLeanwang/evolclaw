@@ -348,33 +348,28 @@ function renderStatsPanel(state: WatchMsgState, width: number, height: number): 
 
 function renderMessagesPanel(state: WatchMsgState, width: number, height: number): string[] {
   const lines: string[] = [];
-  const title = `${DIM}─ Messages ─${RST}`;
+  const lastTs = state.messages.length > 0 ? state.messages[state.messages.length - 1].ts : 0;
+  const lastTimeStr = lastTs ? formatDateTime(lastTs) : '--';
+  const title = `${DIM}─ Messages (${state.messages.length}, last: ${lastTimeStr}) ─${RST}`;
   lines.push(padRight(title, width));
 
   const contentHeight = height - 1;
   const msgs = state.messages;
   const totalMsgs = msgs.length;
-  // 每条消息占 2-4 行,用 2 行估算可见消息数
-  const visibleMsgCount = Math.floor(contentHeight / 2);
-  // 正序显示：最新消息在底部
-  const endIdx = Math.max(0, totalMsgs - state.messageScrollOffset);
-  const startIdx = Math.max(0, endIdx - visibleMsgCount);
-  const scrollbar = renderScrollbar(totalMsgs, visibleMsgCount, state.messageScrollOffset, contentHeight);
 
   const msgWidth = width - 3;
   const contentLineWidth = msgWidth - 2;
   const maxContentLines = 3;
-  for (let i = startIdx; i < endIdx; i++) {
-    const m = msgs[i];
+
+  // 先构造每条消息的渲染行，从最末尾的可见消息往回收集，直到填满 contentHeight
+  function renderOneMsg(m: MessageLogEntry): string[] {
     const time = formatDateTime(m.ts);
     const dir = m.dir === 'in' ? `${GREEN}↓${RST}` : `${BLUE}↑${RST}`;
     const isGroup = m.chatType === 'group';
     const chatTag = isGroup ? `${MAGENTA}[群聊]${RST}` : '';
-    // 前缀标记与 watch-aid 一致: [密文|自主]
     const encLabel = m.encrypt ? '密文' : '明文';
     const modeLabel = m.chatmode === 'proactive' ? '自主' : '响应';
     const metaTags = (m.encrypt != null || m.chatmode) ? `${MAGENTA}[${encLabel}|${modeLabel}]${RST}` : '';
-    // 消息类型标记: [daemon|send] [cli|send] [daemon|thought]
     let typeTag = '';
     if (m.dir === 'out') {
       const source = (m as any).source === 'cli' ? 'cli' : 'daemon';
@@ -386,20 +381,40 @@ function renderMessagesPanel(state: WatchMsgState, width: number, height: number
     const fromDisplay = isGroup && m.groupId && m.dir === 'in' ? m.groupId : m.from.split('.')[0];
     const toDisplay = isGroup && m.groupId && m.dir === 'out' ? m.groupId : m.to.split('.')[0];
     const header = `${DIM}${time}${RST} ${dir}${chatTag}${metaTags}${typeTag} ${ORANGE}${fromDisplay}${RST}${DIM}→${RST}${GREEN}${toDisplay}${RST} ${lenTag}`;
-    const headerLine = padRight(header, msgWidth);
-    const sbIdx = lines.length - 1;
-    lines.push(`${headerLine} ${scrollbar[sbIdx] || ' '}`);
-
-    if (lines.length - 1 < contentHeight) {
-      const rawContent = m.content.replace(/\n/g, ' ');
-      const wrappedLines = wrapText(rawContent, contentLineWidth, maxContentLines);
-      for (const wl of wrappedLines) {
-        if (lines.length - 1 >= contentHeight) break;
-        const contentLine = padRight(`  ${wl}`, msgWidth);
-        const sbIdx2 = lines.length - 1;
-        lines.push(`${contentLine} ${scrollbar[sbIdx2] || ' '}`);
-      }
+    const out: string[] = [padRight(header, msgWidth)];
+    const rawContent = m.content.replace(/\n/g, ' ');
+    const wrappedLines = wrapText(rawContent, contentLineWidth, maxContentLines);
+    for (const wl of wrappedLines) {
+      out.push(padRight(`  ${wl}`, msgWidth));
     }
+    return out;
+  }
+
+  // 从 endIdx-1 开始倒序，往回累积，直到行数填满 contentHeight
+  const endIdx = Math.max(0, totalMsgs - state.messageScrollOffset);
+  const collected: string[][] = []; // 每条消息的行数组
+  let totalLines = 0;
+  let firstShownIdx = endIdx; // 首条可见消息的下标
+  for (let i = endIdx - 1; i >= 0; i--) {
+    const rendered = renderOneMsg(msgs[i]);
+    if (totalLines + rendered.length > contentHeight && collected.length > 0) break;
+    collected.unshift(rendered);
+    totalLines += rendered.length;
+    firstShownIdx = i;
+    if (totalLines >= contentHeight) break;
+  }
+
+  const visibleMsgCount = endIdx - firstShownIdx;
+  const scrollbar = renderScrollbar(totalMsgs, visibleMsgCount, state.messageScrollOffset, contentHeight);
+
+  // 正序输出（旧→新）
+  for (const rendered of collected) {
+    for (const line of rendered) {
+      if (lines.length - 1 >= contentHeight) break;
+      const sbIdx = lines.length - 1;
+      lines.push(`${line} ${scrollbar[sbIdx] || ' '}`);
+    }
+    if (lines.length - 1 >= contentHeight) break;
   }
 
   while (lines.length < height) {
@@ -527,9 +542,7 @@ export async function cmdWatchMsg(): Promise<void> {
       state.messages = loadAllMessages(aunDir, state.selectedLocalAid);
     }
     // 有新消息时自动滚到底部
-    if (state.messages.length > prevCount && state.messageScrollOffset === 0) {
-      // 已在底部,保持
-    } else if (state.messages.length > prevCount) {
+    if (state.messages.length > prevCount) {
       state.messageScrollOffset = 0;
     }
     // Also refresh scope stats for the selected AID
