@@ -13,6 +13,8 @@ import { normalizeChannelInstances, getChannelShowActivities } from '../utils/ch
 import { resolvePaths, getPackageRoot } from '../paths.js';
 import { saveToUploads, sanitizeFileName } from '../utils/media-cache.js';
 import { appendAidEvent } from '../utils/instance-registry.js';
+import { appendMessageLog, buildOutboundEntry } from '../core/message/message-log.js';
+import { chatDirPath } from '../core/session/session-fs-store.js';
 import { appendAidLifecycle } from '../aun/aid/identity.js';
 import type { AidStatsCollector } from '../utils/stats.js';
 import { loadAgent, saveAgent } from '../config-store.js';
@@ -1743,9 +1745,6 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     }
 
     let finalText = text;
-    if (context?.title && (this.sentCount.get(channelId) || 0) > 0) {
-      finalText = '最终回复\n' + text;
-    }
     this.sentCount.set(channelId, (this.sentCount.get(channelId) || 0) + 1);
 
     if (this.isGroupId(channelId) && context?.peerId) {
@@ -1863,7 +1862,8 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
         } else {
           logger.info(`${this.logPrefix()} group.send ok: group=${channelId} mid=${mid} encrypt=${encrypt} text=${finalText.slice(0, 60)}`);
           appendAidEvent({ ts: Date.now(), iso: new Date().toISOString(), event: 'message_out', aid: this.config.aid, to: channelId, msgId: mid, kind: 'text', len: finalText.length, groupId: channelId });
-          this.aidStatsCollector?.recordOutbound(this.config.aid, channelId, Buffer.byteLength(finalText, 'utf-8'), finalText);
+          this.aidStatsCollector?.recordOutbound(this.config.aid, channelId, Buffer.byteLength(finalText, 'utf-8'), finalText, false, encrypt, context?.metadata?.chatmode as string | undefined);
+          this.appendOutboundJsonl(channelId, finalText, mid, encrypt, context, true);
         }
       } else {
         params.to = targetAid;
@@ -1873,7 +1873,8 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
         } else {
           logger.info(`${this.logPrefix()} message.send ok: to=${this.peerLabel(targetAid)} mid=${result.message_id} encrypt=${encrypt} text=${finalText.slice(0, 60)}`);
           appendAidEvent({ ts: Date.now(), iso: new Date().toISOString(), event: 'message_out', aid: this.config.aid, to: targetAid, msgId: result.message_id, kind: 'text', len: finalText.length });
-          this.aidStatsCollector?.recordOutbound(this.config.aid, targetAid, Buffer.byteLength(finalText, 'utf-8'), finalText);
+          this.aidStatsCollector?.recordOutbound(this.config.aid, targetAid, Buffer.byteLength(finalText, 'utf-8'), finalText, false, encrypt, context?.metadata?.chatmode as string | undefined);
+          this.appendOutboundJsonl(targetAid, finalText, result.message_id, encrypt, context, false);
         }
       }
       return true;
@@ -1912,6 +1913,33 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     }
   }
 
+  /** 出站消息写入 messages.jsonl（message.send/group.send/thought.put 成功后调用） */
+  private appendOutboundJsonl(channelId: string, text: string, msgId: string, encrypt: boolean, context?: ReplyContext, isGroup?: boolean, msgType: 'text' | 'thought' = 'text'): void {
+    try {
+      const sessionsDir = resolvePaths().sessionsDir;
+      const selfId = this.config.aid;
+      const chatDir = chatDirPath(sessionsDir, 'aun', channelId, selfId);
+      const chatmode = context?.metadata?.chatmode as string | undefined;
+      appendMessageLog(chatDir, buildOutboundEntry({
+        from: selfId,
+        to: channelId,
+        chatType: isGroup ? 'group' : 'private',
+        groupId: isGroup ? channelId : null,
+        msgId,
+        content: text,
+        replyTo: null,
+        agent: null,
+        model: null,
+        durationMs: null,
+        encrypt,
+        chatmode,
+        msgType,
+      }));
+    } catch (e) {
+      logger.debug(`${this.logPrefix()} appendOutboundJsonl failed: ${e}`);
+    }
+  }
+
   /**
    * 发送 thought 内容（Proactive 模式可观测）
    * 群聊：调用 group.thought.put
@@ -1939,16 +1967,27 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     try {
       const itemCount = Array.isArray((payload as any)?.items) ? (payload as any).items.length : 0;
       const stage = (payload as any)?.stage ?? `items=${itemCount}`;
+      // 提取 thought 文本（取最后一项的 text 或 content 字段）
+      const items = (payload as any)?.items;
+      let thoughtText: string | undefined;
+      if (Array.isArray(items) && items.length > 0) {
+        const lastItem = items[items.length - 1];
+        thoughtText = lastItem?.text || lastItem?.content || (typeof lastItem === 'string' ? lastItem : undefined);
+      }
       if (this.isGroupId(channelId)) {
         params.group_id = targetId;
         const putRes = await this.callAndTrace<any>('group.thought.put', params);
         const tid = putRes?.thought_id;
         logger.info(`${this.logPrefix()} thought.put ok group=${targetId} task=${taskId} stage=${stage} encrypt=${encrypt} tid=${tid ?? '?'}`);
+        this.eventBus?.publish?.({ type: 'message:thought-put', agentName: this.config.aid, channelId, taskId, text: thoughtText });
+        // thought jsonl 写入已改为按 LLM 调用次数统计（在 complete 事件处写入），此处不再写
       } else {
         params.to = targetId;
         const putRes = await this.callAndTrace<any>('message.thought.put', params);
         const tid = putRes?.thought_id;
         logger.info(`${this.logPrefix()} thought.put ok p2p=${this.peerLabel(targetId)} task=${taskId} stage=${stage} encrypt=${encrypt} tid=${tid ?? '?'}`);
+        this.eventBus?.publish?.({ type: 'message:thought-put', agentName: this.config.aid, channelId, taskId, text: thoughtText });
+        // thought jsonl 写入已改为按 LLM 调用次数统计（在 complete 事件处写入），此处不再写
       }
     } catch (e) {
       const err = e as any;

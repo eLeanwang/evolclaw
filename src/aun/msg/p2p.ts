@@ -1,6 +1,9 @@
 import type { ShortConnectionOpts } from '../rpc/index.js';
 import { createShortConnection } from '../rpc/index.js';
 import { uploadFileAndBuildPayload } from './upload.js';
+import { appendMessageLog, buildOutboundEntry } from '../../core/message/message-log.js';
+import { chatDirPath } from '../../core/session/session-fs-store.js';
+import { resolvePaths } from '../../paths.js';
 
 // ==================== Types ====================
 
@@ -117,6 +120,30 @@ export async function msgSend(args: MsgSendArgs): Promise<MsgSendResult | MsgErr
     // Default: plaintext. Set encrypt: true to enable E2EE.
     sendParams.encrypt = args.encrypt === true;
     const result = await conn.call('message.send', sendParams);
+
+    // 写出方向 jsonl（与 daemon 一致格式，标记 source=cli）
+    if (result?.message_id) {
+      try {
+        const sessionsDir = resolvePaths().sessionsDir;
+        const chatDir = chatDirPath(sessionsDir, 'aun', args.to, args.from);
+        const textContent = args.body.mode === 'text' ? args.body.text
+          : args.body.mode === 'link' ? `[link] ${args.body.url}`
+          : args.body.mode === 'file' ? `[file] ${args.body.filePath}`
+          : `[payload]`;
+        appendMessageLog(chatDir, buildOutboundEntry({
+          from: args.from,
+          to: args.to,
+          chatType: 'private',
+          msgId: result.message_id,
+          content: textContent,
+          encrypt: args.encrypt === true,
+          chatmode: 'interactive',
+          msgType: 'text',
+          source: 'cli',
+        }));
+      } catch {}
+    }
+
     return {
       ok: true,
       message_id: result?.message_id,

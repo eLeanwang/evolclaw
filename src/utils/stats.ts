@@ -1,3 +1,5 @@
+import fs from 'fs';
+import path from 'path';
 import { EventBus, GatewayEvent } from '../core/event-bus.js';
 
 interface EventRecord {
@@ -150,9 +152,26 @@ export interface AidStatsSnapshot {
   lastReceivedFrom: string | null;
   lastSentText: string | null;
   lastSentTo: string | null;
+  lastSentEncrypt: boolean | null;
+  lastSentChatmode: string | null;
   uniquePeerCount: number;
   processing: number;
   queued: number;
+  lastTaskEnd?: {
+    ts: number;
+    status: 'completed' | 'error';
+    errorType?: string;
+    sentDuringTask: boolean;       // 期间是否有 message.send
+    thoughtDuringTask: boolean;    // 期间是否有 thought.put
+    lastThoughtText?: string;      // 最后一次 thought 的文本（fallback 显示）
+    replyCount: number;            // message.send 次数
+    thoughtPutCount: number;       // thought.put 次数
+    toolUseCount: number;          // 工具调用次数
+    numTurns: number;              // 大模型调用次数
+    finalText?: string;
+    chatmode?: string;
+    encrypt?: boolean;
+  };
 }
 
 interface AidStatsEntry {
@@ -170,7 +189,19 @@ interface AidStatsEntry {
   lastReceivedFrom: string | null;
   lastSentText: string | null;
   lastSentTo: string | null;
+  lastSentEncrypt: boolean | null;
+  lastSentChatmode: string | null;
   uniquePeers: Set<string>;
+  currentTaskStartAt: number | null;
+  currentTaskReplyCount: number;       // message.send 次数
+  currentTaskThoughtPutCount: number;  // thought.put 次数
+  currentTaskToolUseCount: number;     // 工具调用次数
+  currentTaskNumTurns: number;         // 大模型调用次数
+  currentTaskLastThoughtText: string | null;  // 最后一次 thought 文本（用于 fallback 显示）
+  currentTaskSessionId: string | null;
+  currentTaskChatmode: string | null;
+  currentTaskEncrypt: boolean | null;
+  lastTaskEnd: AidStatsSnapshot['lastTaskEnd'];
 }
 
 export type QueueStatsProvider = (agentName: string) => { processing: number; queued: number };
@@ -178,6 +209,58 @@ export type QueueStatsProvider = (agentName: string) => { processing: number; qu
 export class AidStatsCollector {
   private entries = new Map<string, AidStatsEntry>();
   private queueStatsProvider?: QueueStatsProvider;
+  /** sessionId → 当前正在跑该 session 的 agent，task:started 写入，task:completed/error 清除 */
+  private sessionToAgent = new Map<string, string>();
+
+  constructor(eventBus?: EventBus) {
+    if (!eventBus) return;
+    eventBus.subscribe('task:started', (event) => {
+      const e = event as { agentName?: string; sessionId?: string; encrypt?: boolean; chatmode?: string };
+      if (e.agentName) this.onTaskStart(e.agentName, e.encrypt, e.chatmode);
+      if (e.agentName && e.sessionId) this.sessionToAgent.set(e.sessionId, e.agentName);
+    });
+    eventBus.subscribe('task:completed', (event) => {
+      const e = event as { agentName?: string; sessionId?: string; finalText?: string; numTurns?: number };
+      if (e.agentName) this.onTaskEnd(e.agentName, 'completed', undefined, e.finalText, e.numTurns);
+      if (e.sessionId) this.sessionToAgent.delete(e.sessionId);
+    });
+    eventBus.subscribe('task:error', (event) => {
+      const e = event as { agentName?: string; sessionId?: string; errorType?: string };
+      if (e.agentName) this.onTaskEnd(e.agentName, 'error', e.errorType);
+      if (e.sessionId) this.sessionToAgent.delete(e.sessionId);
+    });
+    // thought.put 次数 + 最后一次 thought 文本
+    // 注意：thought.put 是 fire-and-forget async，可能在 task:completed 之后才到达，
+    // 所以同时累加到 currentTask（task 进行中）或 lastTaskEnd（task 已结束但 thought 属于它）
+    eventBus.subscribe('message:thought-put', (event) => {
+      const e = event as { agentName?: string; text?: string };
+      if (!e.agentName) return;
+      const entry = this.entries.get(e.agentName);
+      if (!entry) return;
+      if (entry.currentTaskStartAt != null) {
+        // task 进行中
+        entry.currentTaskThoughtPutCount++;
+        if (e.text) entry.currentTaskLastThoughtText = e.text;
+      } else if (entry.lastTaskEnd) {
+        // task 已结束，回填到最近一次 task
+        entry.lastTaskEnd.thoughtPutCount++;
+        entry.lastTaskEnd.thoughtDuringTask = true;
+        if (e.text) {
+          const t = e.text.length > 100 ? e.text.slice(0, 100) + '…' : e.text;
+          entry.lastTaskEnd.lastThoughtText = t;
+        }
+      }
+    });
+    // 工具调用次数（tool:use 事件）
+    eventBus.subscribe('tool:use', (event) => {
+      const e = event as { sessionId?: string };
+      if (!e.sessionId) return;
+      const agent = this.sessionToAgent.get(e.sessionId);
+      if (!agent) return;
+      const entry = this.entries.get(agent);
+      if (entry && entry.currentTaskStartAt != null) entry.currentTaskToolUseCount++;
+    });
+  }
 
   setQueueStatsProvider(provider: QueueStatsProvider): void {
     this.queueStatsProvider = provider;
@@ -201,11 +284,138 @@ export class AidStatsCollector {
         lastReceivedFrom: null,
         lastSentText: null,
         lastSentTo: null,
+        lastSentEncrypt: null,
+        lastSentChatmode: null,
         uniquePeers: new Set(),
+        currentTaskStartAt: null,
+        currentTaskReplyCount: 0,
+        currentTaskThoughtPutCount: 0,
+        currentTaskToolUseCount: 0,
+        currentTaskNumTurns: 0,
+        currentTaskLastThoughtText: null,
+        currentTaskSessionId: null,
+        currentTaskChatmode: null,
+        currentTaskEncrypt: null,
+        lastTaskEnd: undefined,
       };
       this.entries.set(aid, entry);
     }
     return entry;
+  }
+
+  private sessionsDir?: string;
+
+  setSessionsDir(dir: string): void {
+    this.sessionsDir = dir;
+  }
+
+  private onTaskStart(aid: string, encrypt?: boolean, chatmode?: string): void {
+    const entry = this.getOrCreate(aid);
+    entry.currentTaskStartAt = Date.now();
+    entry.currentTaskReplyCount = 0;
+    entry.currentTaskThoughtPutCount = 0;
+    entry.currentTaskToolUseCount = 0;
+    entry.currentTaskNumTurns = 0;
+    entry.currentTaskLastThoughtText = null;
+    entry.currentTaskChatmode = chatmode ?? null;
+    entry.currentTaskEncrypt = encrypt ?? null;
+  }
+
+  private onTaskEnd(aid: string, status: 'completed' | 'error', errorType?: string, finalText?: string, numTurns?: number): void {
+    const entry = this.getOrCreate(aid);
+    const startedAt = entry.currentTaskStartAt;
+    const taskEndTs = Date.now();
+
+    // 先用内存计数写入初始值（立即可用）
+    const buildTaskEnd = (msgCount: number, thoughtCount: number, lastThought?: string) => ({
+      ts: taskEndTs,
+      status,
+      errorType,
+      sentDuringTask: msgCount > 0,
+      thoughtDuringTask: thoughtCount > 0,
+      lastThoughtText: lastThought,
+      replyCount: msgCount,
+      thoughtPutCount: thoughtCount,
+      toolUseCount: entry.currentTaskToolUseCount,
+      numTurns: numTurns ?? entry.currentTaskNumTurns,
+      finalText: finalText ? (finalText.length > 100 ? finalText.slice(0, 100) + '…' : finalText) : undefined,
+      chatmode: entry.currentTaskChatmode ?? undefined,
+      encrypt: entry.currentTaskEncrypt ?? undefined,
+    });
+
+    entry.lastTaskEnd = buildTaskEnd(
+      entry.currentTaskReplyCount,
+      entry.currentTaskThoughtPutCount,
+      entry.currentTaskLastThoughtText ?? undefined,
+    );
+
+    // 500ms 后从 jsonl 重新统计（覆盖 thought.put 异步延迟问题）
+    if (this.sessionsDir && startedAt != null) {
+      const sessionsDir = this.sessionsDir;
+      const toolUseCount = entry.currentTaskToolUseCount;
+      const resolvedNumTurns = numTurns ?? entry.currentTaskNumTurns;
+      const chatmode = entry.currentTaskChatmode;
+      const encrypt = entry.currentTaskEncrypt;
+      setTimeout(() => {
+        try {
+          const { chatDirPath } = require('../core/session/session-fs-store.js');
+          // 找该 aid 下所有 peer 的 messages.jsonl，统计 ts >= startedAt 的出站条目
+          const aidDir = path.join(sessionsDir, 'aun', aid.replace(/[/%\\:*?"<>|]/g, ch => '%' + ch.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0')));
+          if (!fs.existsSync(aidDir)) return;
+          let msgCount = 0, thoughtCount = 0;
+          let lastThoughtText: string | undefined;
+          let lastMsgText: string | undefined;
+          for (const peerDir of fs.readdirSync(aidDir, { withFileTypes: true })) {
+            if (!peerDir.isDirectory() || peerDir.name.startsWith('_')) continue;
+            const msgFile = path.join(aidDir, peerDir.name, 'messages.jsonl');
+            if (!fs.existsSync(msgFile)) continue;
+            const lines = fs.readFileSync(msgFile, 'utf-8').split('\n').filter(Boolean);
+            for (const line of lines) {
+              try {
+                const rec = JSON.parse(line);
+                if (rec.dir !== 'out' || rec.ts < startedAt || rec.ts > taskEndTs + 2000) continue;
+                if (rec.msgType === 'thought') {
+                  thoughtCount++;
+                  if (rec.content) lastThoughtText = rec.content.length > 100 ? rec.content.slice(0, 100) + '…' : rec.content;
+                } else if (rec.msgType === 'text') {
+                  msgCount++;
+                  if (rec.content) lastMsgText = rec.content.length > 100 ? rec.content.slice(0, 100) + '…' : rec.content;
+                }
+              } catch {}
+            }
+          }
+          const currentEntry = this.entries.get(aid);
+          if (currentEntry?.lastTaskEnd?.ts === taskEndTs) {
+            currentEntry.lastTaskEnd = {
+              ts: taskEndTs,
+              status,
+              errorType,
+              sentDuringTask: msgCount > 0,
+              thoughtDuringTask: thoughtCount > 0,
+              lastThoughtText: lastThoughtText,
+              replyCount: msgCount,
+              thoughtPutCount: thoughtCount,
+              toolUseCount,
+              numTurns: resolvedNumTurns,
+              finalText: finalText ? (finalText.length > 100 ? finalText.slice(0, 100) + '…' : finalText) : undefined,
+              chatmode: chatmode ?? undefined,
+              encrypt: encrypt ?? undefined,
+            };
+            // 更新 lastSentText 为最后一条 msg（如果有）
+            if (lastMsgText && msgCount > 0) {
+              currentEntry.lastSentText = lastMsgText;
+            }
+          }
+        } catch {}
+      }, 500);
+    }
+
+    entry.currentTaskStartAt = null;
+    entry.currentTaskReplyCount = 0;
+    entry.currentTaskThoughtPutCount = 0;
+    entry.currentTaskToolUseCount = 0;
+    entry.currentTaskNumTurns = 0;
+    entry.currentTaskLastThoughtText = null;
   }
 
   setSelfName(aid: string, name: string): void {
@@ -227,7 +437,7 @@ export class AidStatsCollector {
     entry.uniquePeers.add(fromPeer);
   }
 
-  recordOutbound(aid: string, toPeer: string, byteLength: number, text?: string, isSystem: boolean = false): void {
+  recordOutbound(aid: string, toPeer: string, byteLength: number, text?: string, isSystem: boolean = false, encrypt?: boolean, chatmode?: string): void {
     const entry = this.getOrCreate(aid);
     if (isSystem) {
       entry.systemSent++;
@@ -236,6 +446,14 @@ export class AidStatsCollector {
       entry.lastSentAt = Date.now();
       entry.lastSentTo = toPeer;
       if (text) entry.lastSentText = text.length > 100 ? text.slice(0, 100) + '…' : text;
+      if (encrypt != null) entry.lastSentEncrypt = encrypt;
+      if (chatmode) entry.lastSentChatmode = chatmode;
+      // 累计当前 task 的回复数
+      if (entry.currentTaskStartAt != null) {
+        entry.currentTaskReplyCount++;
+        if (chatmode) entry.currentTaskChatmode = chatmode;
+        if (encrypt != null) entry.currentTaskEncrypt = encrypt;
+      }
     }
     entry.bytesSent += byteLength;
     entry.uniquePeers.add(toPeer);
@@ -262,9 +480,12 @@ export class AidStatsCollector {
         lastReceivedFrom: entry.lastReceivedFrom,
         lastSentText: entry.lastSentText,
         lastSentTo: entry.lastSentTo,
+        lastSentEncrypt: entry.lastSentEncrypt,
+        lastSentChatmode: entry.lastSentChatmode,
         uniquePeerCount: entry.uniquePeers.size,
         processing: queueStats.processing,
         queued: queueStats.queued,
+        lastTaskEnd: entry.lastTaskEnd,
       });
     }
     return out;

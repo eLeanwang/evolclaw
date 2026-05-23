@@ -35,13 +35,15 @@ export type ProjectEvent =
 // ── 消息事件 ──
 export type MessageEvent =
   | { type: 'message:received'; sessionId: string; channel: string; channelName?: string; channelId: string; content: string; userId?: string; agentName?: string; timestamp?: number }
-  | { type: 'message:text'; sessionId: string; text: string; isFinal: boolean };
+  | { type: 'message:text'; sessionId: string; text: string; isFinal: boolean }
+  | { type: 'message:thought-put'; agentName: string; channelId: string; taskId?: string; text?: string }
+  | { type: 'message:sent-out'; agentName: string; channelId: string; taskId?: string };
 
 // ── 任务事件（从 message:* 拆出，语义为任务生命周期） ──
 export type TaskBusEvent =
-  | { type: 'task:started'; sessionId: string }
+  | { type: 'task:started'; sessionId: string; agentName?: string; encrypt?: boolean; chatmode?: string }
   | { type: 'task:queued'; channel: string; channelId: string; replyContext?: Record<string, unknown> }
-  | { type: 'task:completed'; sessionId: string; channel: string; channelName?: string; channelId: string; finalText?: string; durationMs?: number; terminalReason?: string; agentName?: string; timestamp?: number }
+  | { type: 'task:completed'; sessionId: string; channel: string; channelName?: string; channelId: string; finalText?: string; durationMs?: number; terminalReason?: string; agentName?: string; numTurns?: number; timestamp?: number }
   | { type: 'task:error'; sessionId: string; error: string; errorType: string; terminalReason?: string; agentName?: string }
   | { type: 'task:interrupted'; sessionId: string; reason?: string; agentName?: string };
 

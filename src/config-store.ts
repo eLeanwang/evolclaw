@@ -97,7 +97,51 @@ export function loadDefaults(): DefaultsConfig | null {
 }
 
 export function saveDefaults(value: DefaultsConfig): void {
+  backupDefaults(resolvePaths().defaultsConfig);
   atomicWriteJson(resolvePaths().defaultsConfig, value);
+}
+
+/**
+ * 备份 defaults.json 为 defaults_YYYYMMDDhhmmss.json。文件不存在时为 no-op。
+ * 同秒重复调用会被覆盖（同一秒内的内容相同，可接受）。
+ */
+function backupDefaults(filePath: string): void {
+  if (!fs.existsSync(filePath)) return;
+  const now = new Date();
+  const ts = now.getFullYear().toString()
+    + String(now.getMonth() + 1).padStart(2, '0')
+    + String(now.getDate()).padStart(2, '0')
+    + String(now.getHours()).padStart(2, '0')
+    + String(now.getMinutes()).padStart(2, '0')
+    + String(now.getSeconds()).padStart(2, '0');
+  const backupPath = path.join(path.dirname(filePath), `defaults_${ts}.json`);
+  try {
+    fs.copyFileSync(filePath, backupPath);
+  } catch (e) {
+    logger.warn(`[config] backup failed: ${backupPath}: ${e}`);
+  }
+}
+
+/**
+ * 安全写入 defaults.json：备份现有文件 → 深合并 patch → 原子写入。
+ *
+ * 与 saveDefaults() 不同，本函数保留现有字段，仅覆盖 patch 中显式指定的字段。
+ * 适用场景：evolclaw init 仅修改 active_baseagent/baseagents 时，不应丢失 chatmode/projects 等其它字段。
+ */
+export function saveDefaultsSafe(patch: Partial<DefaultsConfig>): void {
+  const p = resolvePaths().defaultsConfig;
+  let existing: DefaultsConfig | null = null;
+  try {
+    existing = atomicReadJson<DefaultsConfig>(p);
+  } catch (e) {
+    logger.warn(`[config] existing defaults.json unparsable, will be backed up and replaced: ${e}`);
+  }
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  backupDefaults(p);
+  const merged = existing
+    ? deepMergeObject(existing, patch)
+    : { $schema_version: CONFIG_SCHEMA_VERSION, ...patch };
+  atomicWriteJson(p, merged);
 }
 
 // ── 进程配置（{root}/config.json，evolclaw 实例级，与 agent 无关）──────

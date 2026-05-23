@@ -446,7 +446,8 @@ export class MessageProcessor {
       logger.info(`[MessageProcessor] session=${session.id} task=${taskId} peer=${peerLabel} chatType=${session.chatType} sessionMode=${session.sessionMode} agentId=${session.agentId} msgChatType=${message.chatType ?? 'n/a'}`);
 
       // 记录开始处理
-      this.eventBus.publish({ type: 'task:started', sessionId: session.id });
+      const taskEncrypt = message.replyContext?.metadata?.encrypted != null ? !!(message.replyContext.metadata.encrypted) : undefined;
+      this.eventBus.publish({ type: 'task:started', sessionId: session.id, agentName: agentNameForStats, encrypt: taskEncrypt, chatmode: session.sessionMode || 'interactive' });
       // 触发器消息不发 processing status（无需通知用户）
       if (message.source !== 'trigger') {
         adapter.send(envelope, { kind: 'status.started' }).catch(() => {});
@@ -951,6 +952,7 @@ export class MessageProcessor {
           finalText: streamResult.lastReplyText || undefined,
           durationMs: Date.now() - startTime,
           agentName: agentNameForStats,
+          numTurns: streamResult.numTurns,
           timestamp: Date.now()
         });
 
@@ -963,24 +965,8 @@ export class MessageProcessor {
           duration: Date.now() - startTime
         });
 
-        // 写入消息记录（出方向）
-        if (streamResult.lastReplyText || streamResult.fullText) {
-          const chatDir = this.sessionManager.getChatDir(session);
-          appendMessageLog(chatDir, buildOutboundEntry({
-            from: message.selfId || session.selfId || 'self',
-            to: message.peerId || message.channelId,
-            chatType: (message.chatType || session.chatType || 'private') as 'private' | 'group',
-            groupId: session.metadata?.groupId ?? null,
-            msgId: `${messageId}_reply`,
-            content: streamResult.lastReplyText || streamResult.fullText,
-            replyTo: message.messageId ?? null,
-            agent: session.agentId || null,
-            model: agent.getModel?.() || null,
-            durationMs: Date.now() - startTime,
-            numTurns: streamResult.numTurns,
-            usage: streamResult.usage,
-          }));
-        }
+        // 写入消息记录（出方向）已下沉到 aun.ts:deliverTextEntry，
+        // 所有 message.send 成功后统一写入 messages.jsonl，此处不再重复写入。
       }
 
       const isFinallyBackground = await this.isBackgroundSession(session, message.channel, message.channelId);
@@ -1357,6 +1343,29 @@ export class MessageProcessor {
           // 记录完成状态 + 最后一轮回复文本（后续 complete 覆盖前序）
           completeResult = { isError: !!event.isError, subtype: event.subtype, errors: event.errors, terminalReason: event.terminalReason, lastReplyText, fullText: event.result || '', hasReceivedText, numTurns: event.numTurns, usage: event.usage };
 
+          // proactive 模式：每轮 LLM 调用完成后写一条 thought 到 messages.jsonl
+          // 这样 thought 数 = LLM 调用轮数，而不是 chunk 数
+          if (session.sessionMode === 'proactive' && lastReplyText) {
+            try {
+              const chatDir = this.sessionManager.getChatDir(session);
+              const sessionEncrypt = this.sessionManager.getSessionEncrypt(session.id);
+              appendMessageLog(chatDir, buildOutboundEntry({
+                from: session.selfId || 'self',
+                to: session.metadata?.peerId ?? session.channelId,
+                chatType: (session.chatType ?? 'private') as 'private' | 'group',
+                groupId: session.metadata?.groupId ?? null,
+                msgId: `thought-${session.id}-${Date.now()}`,
+                content: lastReplyText,
+                agent: session.agentId || null,
+                model: null,
+                durationMs: null,
+                encrypt: sessionEncrypt ?? undefined,
+                chatmode: 'proactive',
+                msgType: 'thought',
+              }));
+            } catch {}
+          }
+
           // 失败且无前置错误输出：显示 errors 摘要
           // 但用户主动中断（新消息打断 或 /stop 命令）时不显示错误提示
           // 上下文过长的错误留给外层 isPromptTooLong 触发 auto-compact，不在此处输出
@@ -1422,6 +1431,7 @@ export class MessageProcessor {
           finalText: lastReplyText || event.result || undefined,
           durationMs: event.durationMs,
           agentName: agentNameForStats,
+          numTurns: event.numTurns,
           timestamp: Date.now()
         });
       } else if (event.isError === true) {

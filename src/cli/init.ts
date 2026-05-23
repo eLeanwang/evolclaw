@@ -1,9 +1,9 @@
 import fs from 'fs';
-import path from 'path';
 import readline from 'readline';
 import { resolvePaths, ensureDataDirs } from '../paths.js';
 import { commandExists } from '../utils/cross-platform.js';
 import { scanInstances } from '../utils/instance-registry.js';
+import { saveDefaultsSafe } from '../config-store.js';
 
 // ==================== Helpers ====================
 
@@ -37,9 +37,8 @@ function buildDefaults(chosen: Baseagent) {
   };
 }
 
-function writeDefaults(defaultsPath: string, chosen: Baseagent): void {
-  fs.mkdirSync(path.dirname(defaultsPath), { recursive: true });
-  fs.writeFileSync(defaultsPath, JSON.stringify(buildDefaults(chosen), null, 2) + '\n');
+function writeDefaults(_defaultsPath: string, chosen: Baseagent): void {
+  saveDefaultsSafe(buildDefaults(chosen));
 }
 
 // ==================== Main ====================

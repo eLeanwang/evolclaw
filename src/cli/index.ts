@@ -229,11 +229,49 @@ function reportOrphans(orphans: OrphanProcess[]): void {
   console.log('  使用 evolclaw restart --clear 一并清掉，或手动 kill。');
 }
 
-async function cmdStart() {
-  const cmdStartedAt = Date.now();
+function formatLocalTime(ms: number): string {
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:${String(d.getSeconds()).padStart(2,'0')}`;
+}
+
+function printStartupInfo(): void {
   const pkgRoot = getPackageRoot();
   const isNpmInstall = pkgRoot.includes('node_modules');
-  console.log(`⏱ ${new Date().toLocaleString()}  [${isNpmInstall ? 'pkg' : 'dev'}] ${pkgRoot}`);
+  const cliRunsSource = !import.meta.url.includes('/dist/');
+  const daemonEntry = path.join(pkgRoot, 'dist', 'index.js');
+  const daemonRunsDist = fs.existsSync(daemonEntry);
+
+  const scanDir = path.join(pkgRoot, daemonRunsDist ? 'dist' : 'src');
+  let latestMtime = 0;
+  const scanRecursive = (dir: string) => {
+    try {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        if (entry.name === 'node_modules') continue;
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) { scanRecursive(full); continue; }
+        if (entry.name.endsWith('.js') || entry.name.endsWith('.ts')) {
+          const mt = fs.statSync(full).mtimeMs;
+          if (mt > latestMtime) latestMtime = mt;
+        }
+      }
+    } catch {}
+  };
+  scanRecursive(scanDir);
+
+  let version = '?';
+  try { version = JSON.parse(fs.readFileSync(path.join(pkgRoot, 'package.json'), 'utf-8')).version; } catch {}
+
+  console.log(`  EvolClaw v${version}`);
+  console.log(`  包路径:     ${pkgRoot}`);
+  console.log(`  安装类型:   ${isNpmInstall ? 'npm全局安装' : '开发仓(link)'}`);
+  console.log(`  CLI执行:    ${cliRunsSource ? '源码(tsx)' : '编译产物(dist)'}`);
+  console.log(`  Daemon执行: ${daemonRunsDist ? '编译产物(dist)' : '未知'}`);
+  console.log(`  代码时间:   ${latestMtime ? formatLocalTime(latestMtime) : '?'}`);
+}
+
+async function cmdStart() {
+  const cmdStartedAt = Date.now();
+  printStartupInfo();
 
   const p = resolvePaths();
   ensureDataDirs();
@@ -264,7 +302,7 @@ async function cmdStart() {
   if (aliveMains.length > 0) {
     const first = aliveMains[0];
     console.log(`❌ EvolClaw is already running (PID: ${aliveMains.map(m => m.record.pid).join(', ')})`);
-    console.log(`  启动于: ${first.record.startedAtIso}`);
+    console.log(`  启动于: ${new Date(first.record.startedAtIso).toLocaleString()}`);
     console.log(`  启动方式: ${first.record.launchedBy}`);
     // 报告 AID 状态
     if (status.aidLastActivity.size > 0) {
@@ -451,9 +489,7 @@ async function cmdStop() {
 
 async function cmdRestart(opts: { clear?: boolean } = {}) {
   const cmdStartedAt = Date.now();
-  const pkgRoot = getPackageRoot();
-  const isNpmInstall = pkgRoot.includes('node_modules');
-  console.log(`⏱ ${new Date().toLocaleString()}  [${isNpmInstall ? 'pkg' : 'dev'}] ${pkgRoot}`);
+  printStartupInfo();
 
   console.log('🔄 Restarting EvolClaw...');
 
@@ -1501,7 +1537,7 @@ function cmdWatch() {
     }
     const m = aliveMainEntries[0].record;
     const uptime = formatTimeAgo(Date.now() - m.startedAt);
-    console.log(`📦 Instance: PID ${m.pid} | 启动于 ${m.startedAtIso} (${uptime}) | via ${m.launchedBy}`);
+    console.log(`📦 Instance: PID ${m.pid} | 启动于 ${new Date(m.startedAtIso).toLocaleString()} (${uptime}) | via ${m.launchedBy}`);
     if (instStatus.aidLastActivity.size > 0) {
       const now = Date.now();
       const aidLines: string[] = [];
@@ -1717,6 +1753,12 @@ async function cmdWatchAid(): Promise<void> {
   const COL_LSENT = 10;
   const COL_PEERS = 5;
 
+  // 表头跟随系统语言
+  const isChinese = (process.env.LANG || process.env.LC_ALL || process.env.LANGUAGE || Intl.DateTimeFormat().resolvedOptions().locale || '').toLowerCase().includes('zh');
+  const HEADERS = isChinese
+    ? { aid: 'AID', status: '状态', uptime: '运行', state: '工作', reconn: '重连', recv: '收', sent: '发', sys: '系统', bin: '入流量', bout: '出流量', lrecv: '最后收', lsent: '最后发', peers: '对端' }
+    : { aid: 'AID', status: 'STATUS', uptime: 'UPTIME', state: 'STATE', reconn: 'RECONN', recv: 'RECV', sent: 'SENT', sys: 'SYS R/S', bin: 'BYTES IN', bout: 'BYTES OUT', lrecv: 'LAST RECV', lsent: 'LAST SENT', peers: 'PEERS' };
+
   function formatDuration(ms: number): string {
     const sec = Math.floor(ms / 1000);
     if (sec < 60) return `${sec}s`;
@@ -1732,19 +1774,19 @@ async function cmdWatchAid(): Promise<void> {
 
   function renderHeader(): string {
     return '  ' +
-      padRight('AID', COL_AID) +
-      padRight('STATUS', COL_STATUS) +
-      padRight('UPTIME', COL_UPTIME) +
-      padRight('STATE', COL_STATE) +
-      padRight('RECONN', COL_RECONN) +
-      padRight('RECV', COL_RECV) +
-      padRight('SENT', COL_SENT) +
-      padRight('SYS R/S', COL_SYS) +
-      padRight('BYTES IN', COL_BIN) +
-      padRight('BYTES OUT', COL_BOUT) +
-      padRight('LAST RECV', COL_LRECV) +
-      padRight('LAST SENT', COL_LSENT) +
-      padRight('PEERS', COL_PEERS);
+      padRight(HEADERS.aid, COL_AID) +
+      padRight(HEADERS.status, COL_STATUS) +
+      padRight(HEADERS.uptime, COL_UPTIME) +
+      padRight(HEADERS.state, COL_STATE) +
+      padRight(HEADERS.reconn, COL_RECONN) +
+      padRight(HEADERS.recv, COL_RECV) +
+      padRight(HEADERS.sent, COL_SENT) +
+      padRight(HEADERS.sys, COL_SYS) +
+      padRight(HEADERS.bin, COL_BIN) +
+      padRight(HEADERS.bout, COL_BOUT) +
+      padRight(HEADERS.lrecv, COL_LRECV) +
+      padRight(HEADERS.lsent, COL_LSENT) +
+      padRight(HEADERS.peers, COL_PEERS);
   }
 
   function renderRow(aid: any, stats: any, projectPath?: string): string[] {
@@ -1786,6 +1828,15 @@ async function cmdWatchAid(): Promise<void> {
     const nameReset = refreshedAids.has(aid.aid) ? '' : RST;
     const BLUE = useColor ? '\x1b[34m' : '';
     const ORANGE = useColor ? '\x1b[38;5;208m' : '';
+    const MAGENTA = useColor ? '\x1b[35m' : '';
+
+    // 标记生成：[明文/密文|自主/响应]（紫色=工具渲染标记）
+    const mkTags = (encrypt?: boolean | null, chatmode?: string | null) => {
+      const enc = encrypt ? '密文' : '明文';
+      const mode = chatmode === 'proactive' ? '自主' : '响应';
+      return `${MAGENTA}[${enc}|${mode}]${RST}`;
+    };
+
     let msgPreview = '';
     if (stats?.lastReceivedAt || stats?.lastSentAt) {
       const recvTs = stats.lastReceivedAt ?? 0;
@@ -1795,10 +1846,47 @@ async function cmdWatchAid(): Promise<void> {
         msgPreview = `${GREEN}↓ ${fromShort ? `${ORANGE}${fromShort}${RST}${GREEN}: ` : ''}${stats.lastReceivedText.replace(/\n/g, ' ').slice(0, 60)}${RST}`;
       } else if (stats.lastSentText) {
         const toShort = stats.lastSentTo ? stats.lastSentTo.split('.')[0] : '';
-        msgPreview = `${BLUE}↑ ${toShort ? `${ORANGE}${toShort}${RST}${BLUE}: ` : ''}${stats.lastSentText.replace(/\n/g, ' ').slice(0, 60)}${RST}`;
+        const tags = mkTags(stats.lastSentEncrypt, stats.lastSentChatmode);
+        // task 进行中时也显示计数（processing > 0 说明还在跑）
+        const isWorking = (stats.processing ?? 0) > 0;
+        const taskEnd = stats?.lastTaskEnd;
+        const counts = isWorking && taskEnd
+          ? `${MAGENTA}[大模型${taskEnd.numTurns}|调用${taskEnd.toolUseCount}|thought${taskEnd.thoughtPutCount}|msg${taskEnd.replyCount}]${RST}`
+          : '';
+        msgPreview = `${BLUE}↑${tags}${counts} ${toShort ? `${ORANGE}${toShort}${RST}${BLUE}: ` : ''}${stats.lastSentText.replace(/\n/g, ' ').slice(0, 60)}${RST}`;
       } else if (stats.lastReceivedText) {
         const fromShort = stats.lastReceivedFrom ? stats.lastReceivedFrom.split('.')[0] : '';
         msgPreview = `${GREEN}↓ ${fromShort ? `${ORANGE}${fromShort}${RST}${GREEN}: ` : ''}${stats.lastReceivedText.replace(/\n/g, ' ').slice(0, 60)}${RST}`;
+      }
+    }
+    // 任务结束状态覆盖：仅当 taskEnd 比最后收发都新时才覆盖
+    const taskEnd = stats?.lastTaskEnd;
+    if (taskEnd && taskEnd.ts >= (stats?.lastSentAt ?? 0) && taskEnd.ts >= (stats?.lastReceivedAt ?? 0)) {
+      const tags = mkTags(taskEnd.encrypt, taskEnd.chatmode);
+      // 计数标记: [大模型N|调用N|thoughtN(streamN)|msgN]
+      const thoughtLabel = taskEnd.thoughtPutCount > 0
+        ? `thought${taskEnd.numTurns}(stream${taskEnd.thoughtPutCount})`
+        : `thought${taskEnd.numTurns}`;
+      const counts = `${MAGENTA}[大模型${taskEnd.numTurns}|调用${taskEnd.toolUseCount}|${thoughtLabel}|msg${taskEnd.replyCount}]${RST}`;
+      if (taskEnd.status === 'error') {
+        msgPreview = `${RED}${tags}${counts} 错误: ${taskEnd.errorType ?? '未知错误'}${RST}`;
+      } else if (taskEnd.sentDuringTask) {
+        // 有 message.send：蓝色加粗 + 内容
+        const toShort = stats?.lastSentTo ? stats.lastSentTo.split('.')[0] : '';
+        const textPreview = stats?.lastSentText ? stats.lastSentText.replace(/\n/g, ' ').slice(0, 60) : '';
+        msgPreview = `${BOLD}${BLUE}↑${tags}${counts} ${toShort ? `${ORANGE}${toShort}${RST}${BOLD}${BLUE}: ` : ''}${textPreview}${RST}`;
+      } else if (taskEnd.thoughtDuringTask) {
+        // 只有 thought：普通蓝色 + thought 内容
+        const textPreview = taskEnd.lastThoughtText
+          ? taskEnd.lastThoughtText.replace(/\n/g, ' ').slice(0, 60)
+          : (taskEnd.finalText ? taskEnd.finalText.replace(/\n/g, ' ').slice(0, 60) : '');
+        msgPreview = `${BLUE}↑${tags}${counts} ${textPreview}${RST}`;
+      } else {
+        // 既没 send 也没 thought
+        const textPreview = taskEnd.finalText
+          ? taskEnd.finalText.replace(/\n/g, ' ').slice(0, 60)
+          : '(无输出)';
+        msgPreview = `${ORANGE}${tags}${counts} ${textPreview}${RST}`;
       }
     }
     const subLine1 = `    ${nameColor}${namePart}${nameReset}${msgPreview ? '  ' + msgPreview : ''}`;
@@ -2721,7 +2809,7 @@ async function cmdAgent(args: string[]): Promise<void> {
   const sub = args[0];
   const formatJson = args.includes('--format') && args[args.indexOf('--format') + 1] === 'json';
 
-  if (sub === 'help') {
+  if (!sub || sub === 'help' || sub === '--help' || sub === '-h') {
     console.log(`用法: evolclaw agent <command>
 
 Commands:
@@ -2760,7 +2848,7 @@ Options:
   } = await import('./agent.js');
 
   // --- list ---
-  if (!sub || sub === 'list') {
+  if (sub === 'list') {
     const result = await agentList();
     if (!result.ok) {
       if (formatJson) { console.log(JSON.stringify(result)); }
@@ -3090,11 +3178,11 @@ function resolveAunPath(args: string[]): string | undefined {
 }
 
 async function cmdAid(args: string[]): Promise<void> {
-  const sub = args[0] || 'list';
+  const sub = args[0];
   const formatJson = args.includes('--format') && args[args.indexOf('--format') + 1] === 'json';
   const aunPath = resolveAunPath(args);
 
-  if (sub === 'help') {
+  if (!sub || sub === 'help' || sub === '--help' || sub === '-h') {
     console.log(`用法: evolclaw aid <command>
 
 Commands:

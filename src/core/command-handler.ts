@@ -3793,7 +3793,10 @@ export class CommandHandler {
 
     // 4. /send 文本消息：直接通过 adapter 主动发送，不走 handle()
     if (cmd.startsWith('/send ') || cmd === '/send') {
-      const text = cmd.startsWith('/send ') ? cmd.slice(6).trim() : '';
+      // 解析 --encrypt 标志和消息文本
+      const raw = cmd.startsWith('/send ') ? cmd.slice(6).trim() : '';
+      const forceEncrypt = raw.startsWith('--encrypt ');
+      const text = forceEncrypt ? raw.slice(10).trim() : raw;
       if (!text) return { ok: false, error: '消息内容不能为空' };
 
       const adapter = this.adapters.get(session.channel);
@@ -3803,8 +3806,13 @@ export class CommandHandler {
         const replyContext = this.buildCtlReplyContext(session);
         const taskId = replyContext?.metadata?.taskId;
         const chatmode = (replyContext?.metadata?.chatmode as 'interactive' | 'proactive' | undefined) ?? 'interactive';
-        await adapter.send(buildEnvelope({ taskId, channel: adapter.channelName, channelId: session.channelId, chatmode, replyContext }), { kind: 'result.text', text, isFinal: true });
-        return { ok: true, result: '已发送' };
+        // --encrypt 覆盖 session 加密状态
+        const enrichedReplyContext = forceEncrypt
+          ? { ...(replyContext ?? {}), metadata: { ...(replyContext?.metadata ?? {}), encrypted: true } }
+          : replyContext;
+        await adapter.send(buildEnvelope({ taskId, channel: adapter.channelName, channelId: session.channelId, chatmode, replyContext: enrichedReplyContext }), { kind: 'result.text', text, isFinal: true });
+        // 出方向 jsonl 写入已下沉到 aun.ts:deliverTextEntry，message.send 成功后统一写入。
+        return { ok: true, result: 'ok' };
       } catch (err: any) {
         return { ok: false, error: err.message || String(err) };
       }

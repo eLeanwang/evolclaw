@@ -1,7 +1,7 @@
 import { ClaudeSessionFileAdapter } from './core/session/adapters/claude-session-file-adapter.js';
 import { CodexSessionFileAdapter } from './core/session/adapters/codex-session-file-adapter.js';
 import { GeminiSessionFileAdapter } from './core/session/adapters/gemini-session-file-adapter.js';
-import { ensureDataDirs, resolvePaths, agentDir } from './paths.js';
+import { ensureDataDirs, resolvePaths, agentDir, getPackageRoot } from './paths.js';
 import { resolveAnthropicConfig } from './agents/resolve.js';
 import { loadDefaults, loadAllAgents, mergeForAgent, ensureAgentDirSkeleton, autoMigrateIfNeeded, migrateIdentitiesIfNeeded } from './config-store.js';
 import type { Config, MergedAgentConfig, AgentConfig, DefaultsConfig } from './types.js';
@@ -101,6 +101,38 @@ export async function sendSystemPayload(
 }
 
 async function main() {
+  // 启动信息：目录类型 + 版本号 + 代码最新时间戳
+  {
+    const pkgRoot = getPackageRoot();
+    const runDir = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Z]:)/, '$1'));
+    const isDist = runDir.includes(path.join(pkgRoot, 'dist'));
+    const isLinked = fs.existsSync(path.join(pkgRoot, '.git'));
+    const dirType = isDist ? (isLinked ? '开发仓/dist' : '安装路径/dist') : '源码(tsx)';
+    const scanDir = isDist ? path.join(pkgRoot, 'dist') : path.join(pkgRoot, 'src');
+    let latestMtime = 0;
+    const scanRecursive = (dir: string) => {
+      try {
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+          if (entry.name === 'node_modules') continue;
+          const full = path.join(dir, entry.name);
+          if (entry.isDirectory()) { scanRecursive(full); continue; }
+          if (entry.name.endsWith('.js') || entry.name.endsWith('.ts')) {
+            const mt = fs.statSync(full).mtimeMs;
+            if (mt > latestMtime) latestMtime = mt;
+          }
+        }
+      } catch {}
+    };
+    scanRecursive(scanDir);
+    let version = '?';
+    try { version = JSON.parse(fs.readFileSync(path.join(pkgRoot, 'package.json'), 'utf-8')).version; } catch {}
+    const fmtTime = (ms: number) => { const d = new Date(ms); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:${String(d.getSeconds()).padStart(2,'0')}`; };
+    console.error(`[EvolClaw] EvolClaw v${version}`);
+    console.error(`[EvolClaw] 执行类型: ${dirType}`);
+    console.error(`[EvolClaw] 包路径:   ${pkgRoot}`);
+    console.error(`[EvolClaw] 代码时间: ${latestMtime ? fmtTime(latestMtime) : '?'}`);
+  }
+
   // 过滤飞书 SDK 的 info 日志
   const originalLog = console.log;
   const originalInfo = console.info;
@@ -262,7 +294,8 @@ async function main() {
   const statsCollector = new StatsCollector(eventBus);
 
   // Per-AID 消息统计收集器（累计，供 watch aid 实时展示）
-  const aidStatsCollector = new AidStatsCollector();
+  const aidStatsCollector = new AidStatsCollector(eventBus);
+  aidStatsCollector.setSessionsDir(paths.sessionsDir);
 
   // 初始化 SessionManager（文件系统后端）
   const sessionManager = new SessionManager(paths.sessionsDir, eventBus,

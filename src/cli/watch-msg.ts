@@ -24,6 +24,9 @@ interface MessageLogEntry {
   durationMs: number | null;
   numTurns?: number | null;
   usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } | null;
+  encrypt?: boolean;
+  chatmode?: string;
+  source?: 'daemon' | 'cli';
 }
 
 interface PeerInfo {
@@ -134,6 +137,28 @@ function formatTimeAgo(ms: number): string {
   const hour = Math.floor(min / 60);
   if (hour < 24) return `${hour}h`;
   return `${Math.floor(hour / 24)}d`;
+}
+
+function getCodeTime(pkgRoot: string): string {
+  let latestMtime = 0;
+  const scanDir = fs.existsSync(path.join(pkgRoot, 'dist')) ? path.join(pkgRoot, 'dist') : path.join(pkgRoot, 'src');
+  const scanRecursive = (dir: string) => {
+    try {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        if (entry.name === 'node_modules') continue;
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) { scanRecursive(full); continue; }
+        if (entry.name.endsWith('.js') || entry.name.endsWith('.ts')) {
+          const mt = fs.statSync(full).mtimeMs;
+          if (mt > latestMtime) latestMtime = mt;
+        }
+      }
+    } catch {}
+  };
+  scanRecursive(scanDir);
+  if (!latestMtime) return '?';
+  const d = new Date(latestMtime);
+  return `${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
 }
 
 function formatNumber(n: number): string {
@@ -329,10 +354,12 @@ function renderMessagesPanel(state: WatchMsgState, width: number, height: number
   const contentHeight = height - 1;
   const msgs = state.messages;
   const totalMsgs = msgs.length;
-  const visibleCount = contentHeight;
-  const startIdx = Math.max(0, totalMsgs - visibleCount - state.messageScrollOffset);
-  const endIdx = Math.min(totalMsgs, startIdx + visibleCount);
-  const scrollbar = renderScrollbar(totalMsgs, visibleCount, state.messageScrollOffset, contentHeight);
+  // 每条消息占 2-4 行,用 2 行估算可见消息数
+  const visibleMsgCount = Math.floor(contentHeight / 2);
+  // 正序显示：最新消息在底部
+  const endIdx = Math.max(0, totalMsgs - state.messageScrollOffset);
+  const startIdx = Math.max(0, endIdx - visibleMsgCount);
+  const scrollbar = renderScrollbar(totalMsgs, visibleMsgCount, state.messageScrollOffset, contentHeight);
 
   const msgWidth = width - 3;
   const contentLineWidth = msgWidth - 2;
@@ -342,12 +369,23 @@ function renderMessagesPanel(state: WatchMsgState, width: number, height: number
     const time = formatDateTime(m.ts);
     const dir = m.dir === 'in' ? `${GREEN}↓${RST}` : `${BLUE}↑${RST}`;
     const isGroup = m.chatType === 'group';
-    const chatTag = isGroup ? `${MAGENTA}[群聊]${RST} ` : '';
+    const chatTag = isGroup ? `${MAGENTA}[群聊]${RST}` : '';
+    // 前缀标记与 watch-aid 一致: [密文|自主]
+    const encLabel = m.encrypt ? '密文' : '明文';
+    const modeLabel = m.chatmode === 'proactive' ? '自主' : '响应';
+    const metaTags = (m.encrypt != null || m.chatmode) ? `${MAGENTA}[${encLabel}|${modeLabel}]${RST}` : '';
+    // 消息类型标记: [daemon|send] [cli|send] [daemon|thought]
+    let typeTag = '';
+    if (m.dir === 'out') {
+      const source = (m as any).source === 'cli' ? 'cli' : 'daemon';
+      const method = m.msgType === 'thought' ? 'thought' : 'send';
+      typeTag = `${DIM}[${source}|${method}]${RST}`;
+    }
     const byteLen = Buffer.byteLength(m.content, 'utf-8');
     const lenTag = `${DIM}${formatNumber(byteLen)}B${RST}`;
-    const fromDisplay = isGroup && m.groupId && m.dir === 'in' ? m.groupId : m.from;
-    const toDisplay = isGroup && m.groupId && m.dir === 'out' ? m.groupId : m.to;
-    const header = `${DIM}${time}${RST} ${dir}${chatTag} ${ORANGE}${fromDisplay}${RST}${DIM}→${RST}${GREEN}${toDisplay}${RST} ${lenTag}`;
+    const fromDisplay = isGroup && m.groupId && m.dir === 'in' ? m.groupId : m.from.split('.')[0];
+    const toDisplay = isGroup && m.groupId && m.dir === 'out' ? m.groupId : m.to.split('.')[0];
+    const header = `${DIM}${time}${RST} ${dir}${chatTag}${metaTags}${typeTag} ${ORANGE}${fromDisplay}${RST}${DIM}→${RST}${GREEN}${toDisplay}${RST} ${lenTag}`;
     const headerLine = padRight(header, msgWidth);
     const sbIdx = lines.length - 1;
     lines.push(`${headerLine} ${scrollbar[sbIdx] || ' '}`);
@@ -376,12 +414,13 @@ function renderMessagesPanel(state: WatchMsgState, width: number, height: number
 
 function renderFrame(state: WatchMsgState): string {
   const cols = process.stdout.columns || 120;
-  const rows = (process.stdout.rows || 40) - 3;
+  const rows = (process.stdout.rows || 40);
+
+  const bodyHeight = rows - 4;
 
   const leftW = Math.max(20, Math.floor(cols * 0.20));
   const midW = Math.max(24, Math.floor(cols * 0.22));
   const rightW = Math.max(40, cols - leftW - midW - 4);
-  const bodyHeight = rows - 2;
 
   const leftLines = renderScopePanel(state, leftW, bodyHeight);
   const midLines = renderStatsPanel(state, midW, bodyHeight);
@@ -389,6 +428,7 @@ function renderFrame(state: WatchMsgState): string {
 
   const sep = `${DIM}│${RST}`;
   let buf = '\x1b[H';
+
   const topBorder = `${DIM}┌${'─'.repeat(leftW)}┬${'─'.repeat(midW)}┬${'─'.repeat(rightW + 1)}┐${RST}`;
   buf += `\x1b[2K${topBorder}\n`;
 
@@ -402,11 +442,11 @@ function renderFrame(state: WatchMsgState): string {
   const bottomBorder = `${DIM}├${'─'.repeat(leftW)}┴${'─'.repeat(midW)}┴${'─'.repeat(rightW + 1)}┤${RST}`;
   buf += `\x1b[2K${bottomBorder}\n`;
 
-  const pkgRoot = getPackageRoot();
-  const helpLine = `${DIM}│ Tab: panel  ↑↓: nav  Enter: select  Backspace: back  ESC: exit  ${pkgRoot}${RST}`;
+  const helpText = `Tab: panel  ↑↓: nav  Enter: select  Backspace: back  ESC: exit`;
+  const helpLine = `${DIM}│ ${helpText.slice(0, cols - 4)} ${RST}`;
   buf += `\x1b[2K${helpLine}\n`;
   const closeBorder = `${DIM}└${'─'.repeat(cols - 2)}┘${RST}`;
-  buf += `\x1b[2K${closeBorder}\n`;
+  buf += `\x1b[2K${closeBorder}`;
 
   return buf;
 }
@@ -479,11 +519,18 @@ export async function cmdWatchMsg(): Promise<void> {
   function refreshData() {
     if (!state.selectedLocalAid) return;
     state.peers = loadPeerInfos(aunDir, state.selectedLocalAid);
+    const prevCount = state.messages.length;
     if (state.selectedPeer) {
       state.messages = readMessages(aunDir, state.selectedLocalAid, state.selectedPeer);
       if (state.messages.length > 1000) state.messages = state.messages.slice(-1000);
     } else {
       state.messages = loadAllMessages(aunDir, state.selectedLocalAid);
+    }
+    // 有新消息时自动滚到底部
+    if (state.messages.length > prevCount && state.messageScrollOffset === 0) {
+      // 已在底部,保持
+    } else if (state.messages.length > prevCount) {
+      state.messageScrollOffset = 0;
     }
     // Also refresh scope stats for the selected AID
     const idx = state.localAids.findIndex(a => a.aid === state.selectedLocalAid);
@@ -498,6 +545,7 @@ export async function cmdWatchMsg(): Promise<void> {
 
   function cleanup() {
     if (watcher) { watcher.close(); watcher = null; }
+    clearInterval(pollTimer);
     if (process.stdin.isTTY) try { process.stdin.setRawMode(false); } catch {}
     process.stdin.pause();
     process.stdout.write('\x1b[?25h\x1b[2J\x1b[H');
@@ -619,6 +667,21 @@ export async function cmdWatchMsg(): Promise<void> {
   loadScope();
   process.stdout.write('\x1b[?25l\x1b[2J\x1b[H');
   render();
+
+  // 定时轮询：5 秒检查一次，有变化才刷新
+  let lastMsgCount = state.messages.length;
+  let lastMsgTs = state.messages.length > 0 ? state.messages[state.messages.length - 1].ts : 0;
+  const pollTimer = setInterval(() => {
+    if (!state.selectedLocalAid) return;
+    refreshData();
+    const newCount = state.messages.length;
+    const newTs = newCount > 0 ? state.messages[newCount - 1].ts : 0;
+    if (newCount !== lastMsgCount || newTs !== lastMsgTs) {
+      lastMsgCount = newCount;
+      lastMsgTs = newTs;
+      render();
+    }
+  }, 5000);
 
   if (process.stdin.isTTY) {
     process.stdin.setRawMode(true);

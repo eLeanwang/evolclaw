@@ -11,7 +11,7 @@ export interface MessageLogEntry {
   chatType: 'private' | 'group';
   groupId: string | null;
   msgId: string | null;
-  msgType: 'text' | 'image' | 'file' | 'command';
+  msgType: 'text' | 'image' | 'file' | 'command' | 'thought';
   content: string;
   replyTo: string | null;
   agent: string | null;
@@ -21,6 +21,9 @@ export interface MessageLogEntry {
   durationMs: number | null;
   numTurns?: number | null;
   usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } | null;
+  encrypt?: boolean;
+  chatmode?: string;
+  source?: 'daemon' | 'cli';
 }
 
 const MESSAGE_LOG_FILE = 'messages.jsonl';
@@ -82,6 +85,8 @@ export function buildInboundEntry(opts: {
   replyTo?: string | null;
   permMode?: string | null;
   timestamp?: number;
+  encrypt?: boolean;
+  chatmode?: string;
 }): MessageLogEntry {
   const ts = opts.timestamp || Date.now();
   const isCommand = opts.content.startsWith('/');
@@ -102,6 +107,8 @@ export function buildInboundEntry(opts: {
     permMode: opts.permMode ?? null,
     cmdParsed: isCommand ? opts.content.split(/\s/)[0] : null,
     durationMs: null,
+    encrypt: opts.encrypt,
+    chatmode: opts.chatmode,
   };
 }
 
@@ -119,6 +126,10 @@ export function buildOutboundEntry(opts: {
   numTurns?: number | null;
   usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } | null;
   timestamp?: number;
+  encrypt?: boolean;
+  chatmode?: string;
+  msgType?: 'text' | 'thought';
+  source?: 'daemon' | 'cli';
 }): MessageLogEntry {
   const ts = opts.timestamp || Date.now();
   return {
@@ -130,7 +141,7 @@ export function buildOutboundEntry(opts: {
     chatType: opts.chatType,
     groupId: opts.groupId ?? null,
     msgId: opts.msgId ?? null,
-    msgType: 'text',
+    msgType: opts.msgType ?? 'text',
     content: opts.content,
     replyTo: opts.replyTo ?? null,
     agent: opts.agent ?? null,
@@ -140,5 +151,8 @@ export function buildOutboundEntry(opts: {
     durationMs: opts.durationMs ?? null,
     numTurns: opts.numTurns ?? null,
     usage: opts.usage ?? null,
+    encrypt: opts.encrypt,
+    chatmode: opts.chatmode,
+    source: opts.source ?? 'daemon',
   };
 }
