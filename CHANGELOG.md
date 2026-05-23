@@ -1,5 +1,40 @@
 # Changelog
 
+## v3.1.0 (2026-05-23)
+
+### New Features
+
+- **ECK 上下文系统重构** — 引入 `kit-renderer.ts` 替代旧 `templates.ts`，系统 prompt 按片段动态组装（baseagent/channel/identity/relation/runtime/venue）；新增 `eck_manifest.json` 声明 kit 结构，支持参数动态注入
+- **`/upgrade` 命令** — 一键升级 evolclaw 到 npm latest，AUN SDK 同步自动升级
+- **Feishu merge_forward 消息支持** — 合并转发消息类型解析，自动展开为多条消息内容
+- **AUN quote 附件支持** — quote 消息携带附件时正确解析并传递给 Agent
+- **CTL 白名单扩展** — `/trigger`、`/chatmode`、`/dispatch`、`/activity` 加入 `ctl` 可调用命令列表
+- **agent.md description 保留** — AID 重初始化时保留用户自定义 description，不再覆盖为默认值
+- **启动版本信息** — `evolclaw start` 成功后显示 evolclaw 版本号和 fastaun 版本号
+
+### Improvements
+
+- **`ec` 命令** — 新增 `bin/ec.js` 快捷入口，`link-rules` 命令调优
+- **`evolclaw watch-msg`** — 优化消息监控命令，支持更多过滤选项
+- **`evolclaw bench`** — 性能测试命令完善
+- **`agent/aid --help`** — 支持 `--help`、`-h` 标志，不再只识别 `help` 子命令
+- **task_id 诊断日志** — 新增 task_id 追踪日志，便于消息关联排查
+- **activity 工具摘要统一** — Bash desc 与工具摘要显示格式统一
+
+### Bug Fixes
+
+- **proactive chatMode 持久化** — AI peer 的 proactive chatMode 跨会话正确持久化，session 写入去重
+- **permission timeout 修复** — 权限超时处理 + agent context 全局 chatmode fallback
+- **error-utils 字典路径修复** — bundled dict fallback 路径修正
+- **AUN CommandCard 群聊点击身份丢失** — 群聊卡片点击时 initiator 身份正确传递
+- **AUN group.send message_id 提取** — 所有路径完整提取 message_id
+- **context-too-long 检测增强** — 新增文本 fallback 触发 compact，避免漏检
+- **session activeTask 保留** — updateSession 写入时不再丢失 activeTask 状态
+- **permission diff 渲染** — 使用 Unicode diff 标记和真实行号，Feishu 渲染正确
+- **activity 多行工具描述** — 标题单独一行渲染，不再与内容混排
+
+---
+
 ## v3.0.0 (2026-05-20)
 
 > Major release: 重构存储后端、统一出站消息协议、引入触发器与交互卡片体系。

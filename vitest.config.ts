@@ -35,6 +35,7 @@ export default defineConfig({
     pool: 'forks',
     setupFiles: ['./tests/setup.ts'],
     testTimeout: 30000,
+    teardownTimeout: 5000,
     exclude: ['**/node_modules/**', '**/dist/**', 'aun/**', 'projects/**', '**/worktrees/**'],
     coverage: {
       provider: 'v8',

@@ -19,6 +19,8 @@ EvolClaw 是一个开源的 AI Agent 网关，将 Claude/Codex 等 AI 后端连�
 
 ## 安装步骤
 
+> **⚠️ 给执行安装的 AI Agent**：本文档中所有破坏性命令（`evolclaw stop` / `evolclaw restart` / `rm -rf` / `evolclaw aid delete` 等）**必须先 `AskUserQuestion` 等用户明确回复后才能执行**，不要因为已经发出确认提示就默认 yes 自动跑。用户在打字的几秒内决定 "等等先别停"，比事后回滚要省事得多。
+
 ### 步骤 1：检查环境
 
 ```bash
@@ -169,21 +171,31 @@ AUN 通道由 `agent.aid` 隐式驱动，不需要单独配 channel——`evolcl
 cat $EVOLCLAW_HOME/agents/<aid>/config.json
 ```
 
-检查：
+检查关键字段：
 
 - `aid` — 你的 AID
 - `owners` — Owner AID 数组（可为空，留给自动绑定）
 - `active_baseagent` — `claude` / `codex` / `gemini`
 - `projects.defaultPath` — 项目路径（目录需存在）
-- `channels` — 数组，初始可为空（AUN 隐式上线）
+- `channels` — 数组，初始为空（AUN 隐式上线，无需在此配置）
 - `initialized` — 应为 `false`（首次连接成功后由系统更新为 `true`）
+
+> 注：config.json 还包含 `$schema_version`、`enabled`、`baseagents`、`chatmode`、`dispatch` 等字段，由 `agent new` 自动填入，无需手动检查。
 
 如发现缺失或异常，向用户说明并提供修复方案。
 
 ### 步骤 9：启动服务
 
+首次安装（服务未运行）：
+
 ```bash
 evolclaw start
+```
+
+若服务已在运行（升级/重装场景，步骤 3 已停止旧进程）：
+
+```bash
+evolclaw restart
 ```
 
 ### 步骤 10：验证运行状态

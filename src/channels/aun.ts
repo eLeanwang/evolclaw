@@ -803,7 +803,7 @@ export class AUNChannel {
       const ownerDisplayName = (ownerInfo.name || ownerAidClean.split('.')[0]).slice(0, 12);
 
       const currentNameMatch = existingFrontmatter.match(/^name:\s*"?([^"\n]+)/m);
-      const currentName = currentNameMatch?.[1]?.trim();
+      const currentName = currentNameMatch?.[1]?.trim().replace(/"$/, '');
       const aidLabel = aidName.split('.')[0];
 
       let agentDisplayName: string;
@@ -813,13 +813,20 @@ export class AUNChannel {
         agentDisplayName = `${ownerDisplayName}的Evol助手 (${aidLabel})`;
       }
 
+      // Preserve user-provided description (from `agent new --description`), fallback to default
+      const currentDescMatch = existingFrontmatter.match(/^description:\s*"?([^"\n]*)/m);
+      const currentDesc = currentDescMatch?.[1]?.trim().replace(/"$/, '');
+      const agentDescription = currentDesc
+        ? currentDesc
+        : 'EvolClaw AI Agent Gateway - 连接 Claude/Codex 到消息通道';
+
       // Generate new agent.md (no `initialized` frontmatter — that's now in config.json)
       const newAgentMd = `---
 aid: "${aid}"
 name: "${agentDisplayName}"
 type: "codeagent"
 version: "1.0.0"
-description: "EvolClaw AI Agent Gateway - 连接 Claude/Codex 到消息通道"
+description: "${agentDescription}"
 tags:
   - evolclaw
   - ai-agent
