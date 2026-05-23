@@ -685,7 +685,7 @@ export class MessageProcessor {
 
           if (compacted) {
             // compact 成功，带 resume 重试（不重复原始消息，让 Agent 继续未完成的工作）
-            renderer.addNotice('✅ 压缩完成，正在重试...', 'info', 'compact-retry', true);
+            renderer.addNotice('✅ 压缩完成，继续处理...', 'info', 'compact-retry', true);
             const retryStream = await agent.runQuery(
               session.id,
               '上下文已自动压缩，请继续之前未完成的任务。',
@@ -727,7 +727,7 @@ export class MessageProcessor {
         await renderer.flush();
         const compacted = await agent.compact(session.id, session.agentSessionId!, absoluteProjectPath);
         if (compacted) {
-          renderer.addNotice('✅ 压缩完成，正在重试...', 'info', 'compact-retry', true);
+          renderer.addNotice('✅ 压缩完成，继续处理...', 'info', 'compact-retry', true);
           const retryStream = await agent.runQuery(
             session.id,
             '上下文已自动压缩，请继续之前未完成的任务。',

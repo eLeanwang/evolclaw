@@ -271,7 +271,7 @@ export class FeishuChannel {
               const imageData = await this.downloadAndSaveImage(imageKey, msg.chat_id, msg.message_id, projectPath);
               if (imageData) {
                 const allImages = [...quotedImages, imageData];
-                const prompt = quotedText + '用户发送了一张图片，请分析这张图片的内容。';
+                const prompt = quotedText + '用户发送了一张图片，请结合上下文理解用户意图并回应。';
                 await this.messageHandler({ channelId: msg.chat_id, content: prompt, images: allImages, peerId, peerName, messageId: msg.message_id, threadId, rootId, chatType });
               } else {
                 const prompt = quotedText + '[图片下载失败] 应用可能缺少 im:message 或 im:message:readonly 权限';

@@ -813,14 +813,13 @@ export class AgentRunner {
 
       // assistant: 提取 tool_use 和文本（仅无 text_delta 时提取文本）
       if (event.type === 'assistant' && event.message?.content) {
-        const outputTokens = event.message.usage?.output_tokens;
         turnCount++;
         for (const content of event.message.content) {
           if (content.type === 'tool_use') {
             if (content.id) toolUseNames.set(content.id, content.name);
             yield { type: 'tool_use', name: content.name, input: content.input, callId: content.id, turn: turnCount };
           } else if (content.type === 'text' && content.text) {
-            yield { type: 'text', text: content.text, outputTokens, turn: turnCount };
+            yield { type: 'text', text: content.text, turn: turnCount };
           }
         }
       }
