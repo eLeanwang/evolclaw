@@ -326,7 +326,13 @@ async function cmdStart() {
   const checkReady = () => {
     // ready signal 出现（优先检查，避免 Windows 上误判进程状态）
     if (fs.existsSync(p.readySignal)) {
-      console.log(`✓ EvolClaw started successfully (PID: ${childPid})`);
+      const pkg = JSON.parse(fs.readFileSync(path.join(getPackageRoot(), 'package.json'), 'utf-8'));
+      let aunVer = 'unknown';
+      try {
+        const aunPkg = JSON.parse(fs.readFileSync(path.join(getPackageRoot(), 'node_modules', '@agentunion', 'fastaun', 'package.json'), 'utf-8'));
+        aunVer = aunPkg.version;
+      } catch { /* ignore */ }
+      console.log(`✓ EvolClaw v${pkg.version} started successfully (PID: ${childPid})  fastaun v${aunVer}`);
       console.log(`  EVOLCLAW_HOME: ${resolveRoot()}`);
       console.log(`  Logs: ${p.logs}/`);
 
@@ -2721,7 +2727,7 @@ async function cmdAgent(args: string[]): Promise<void> {
   const sub = args[0];
   const formatJson = args.includes('--format') && args[args.indexOf('--format') + 1] === 'json';
 
-  if (sub === 'help') {
+  if (sub === 'help' || sub === '--help' || sub === '-h' || args.includes('--help') || args.includes('-h')) {
     console.log(`用法: evolclaw agent <command>
 
 Commands:
@@ -3094,7 +3100,7 @@ async function cmdAid(args: string[]): Promise<void> {
   const formatJson = args.includes('--format') && args[args.indexOf('--format') + 1] === 'json';
   const aunPath = resolveAunPath(args);
 
-  if (sub === 'help') {
+  if (sub === 'help' || sub === '--help' || sub === '-h' || args.includes('--help') || args.includes('-h')) {
     console.log(`用法: evolclaw aid <command>
 
 Commands:
