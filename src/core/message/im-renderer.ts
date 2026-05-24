@@ -207,8 +207,8 @@ export class IMRenderer {
   }
 
   /** 添加工具调用 */
-  addToolCall(name: string, input: Record<string, unknown> | undefined, callId?: string, descText?: string, turn?: number): void {
-    this.emitProgress('tool_call', undefined, turn);
+  addToolCall(name: string, input: Record<string, unknown> | undefined, callId?: string, descText?: string, turn?: number, outputTokens?: number): void {
+    this.emitProgress('tool_call', outputTokens, turn);
     if (this.opts.envelope.chatmode === 'proactive') return;
     if (this.opts.suppressActivities) return;
     this.itemsQueue.push({

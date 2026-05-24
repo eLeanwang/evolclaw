@@ -120,7 +120,7 @@ class MessageStream {
 export type AgentEvent =
   | { type: 'text'; text: string; outputTokens?: number; turn?: number }
   | { type: 'status'; subtype: string; message: string }
-  | { type: 'tool_use'; name: string; input: any; callId?: string; turn?: number }
+  | { type: 'tool_use'; name: string; input: any; callId?: string; turn?: number; outputTokens?: number }
   | { type: 'tool_result'; name: string; result: any; isError?: boolean; error?: string; callId?: string }
   | { type: 'compact'; preTokens: number }
   | { type: 'task_progress'; summary?: string; toolUses?: number; durationMs?: number }
@@ -782,6 +782,7 @@ export class AgentRunner {
     // tool_use_id → tool_name 映射，用于从 SDKUserMessage 的 tool_result 块中还原工具名
     const toolUseNames = new Map<string, string>();
     let turnCount = 0;
+    const seenMessageIds = new Set<string>();
 
     for await (const event of sdkStream) {
       // 提取 session_id（任意 SDK 事件都可能携带）
@@ -813,13 +814,27 @@ export class AgentRunner {
 
       // assistant: 提取 tool_use 和文本（仅无 text_delta 时提取文本）
       if (event.type === 'assistant' && event.message?.content) {
-        turnCount++;
+        const msgId = event.message.id;
+        if (!msgId || !seenMessageIds.has(msgId)) {
+          if (msgId) seenMessageIds.add(msgId);
+          turnCount++;
+        }
+        // 统计本轮 base agent 全部输出字符数（text + tool_use input）
+        let turnOutputChars = 0;
+        for (const content of event.message.content) {
+          if (content.type === 'tool_use') {
+            const inputStr = typeof content.input === 'string' ? content.input : JSON.stringify(content.input || '');
+            turnOutputChars += inputStr.length;
+          } else if (content.type === 'text' && content.text) {
+            turnOutputChars += content.text.length;
+          }
+        }
         for (const content of event.message.content) {
           if (content.type === 'tool_use') {
             if (content.id) toolUseNames.set(content.id, content.name);
-            yield { type: 'tool_use', name: content.name, input: content.input, callId: content.id, turn: turnCount };
+            yield { type: 'tool_use', name: content.name, input: content.input, callId: content.id, turn: turnCount, outputTokens: turnOutputChars };
           } else if (content.type === 'text' && content.text) {
-            yield { type: 'text', text: content.text, outputTokens: content.text.length, turn: turnCount };
+            yield { type: 'text', text: content.text, outputTokens: turnOutputChars, turn: turnCount };
           }
         }
       }

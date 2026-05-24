@@ -1290,7 +1290,7 @@ export class MessageProcessor {
             if (event.callId) {
               toolDescByCallId.set(event.callId, desc);
             }
-            renderer.addToolCall(event.name, event.input, event.callId, desc, (event as any).turn);
+            renderer.addToolCall(event.name, event.input, event.callId, desc, (event as any).turn, (event as any).outputTokens);
           }
         }
 
