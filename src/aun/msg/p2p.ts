@@ -86,6 +86,7 @@ export interface MsgSendArgs extends MsgCommonOpts {
   to: string;
   body: MsgSendBody;
   encrypt?: boolean;
+  thread?: string;  // 话题 ID（用于多话题路由）
 }
 
 export async function msgSend(args: MsgSendArgs): Promise<MsgSendResult | MsgError> {
@@ -131,12 +132,20 @@ export async function msgSend(args: MsgSendArgs): Promise<MsgSendResult | MsgErr
     // 4. 写入 payload.chatmode
     payload.chatmode = chatmode;
 
+    // 5. 写入 payload.thread_id（如果指定）
+    if (args.thread) {
+      payload.thread_id = args.thread;
+    }
+
     const sendParams: Record<string, unknown> = { to: args.to, payload };
     // Default: plaintext. Set encrypt: true to enable E2EE.
     sendParams.encrypt = args.encrypt === true;
     const result = await conn.call('message.send', sendParams);
 
-    // 5. 写出方向 jsonl（与 daemon 一致格式，标记 source=cli）
+    // 5. 写出方向 jsonl（与 daemon 一致格式，标记 source）
+    // source 标记：
+    // - 'cli': 用户手动调用 ec msg send
+    // - 'msg': agent 在会话中调用 ec msg send
     if (result?.message_id) {
       try {
         const sessionsDir = resolvePaths().sessionsDir;
@@ -145,6 +154,13 @@ export async function msgSend(args: MsgSendArgs): Promise<MsgSendResult | MsgErr
           : args.body.mode === 'link' ? `[link] ${args.body.url}`
           : args.body.mode === 'file' ? `[file] ${args.body.filePath}`
           : `[payload]`;
+
+        // 判断是 agent 调用还是用户手动调用
+        // 优先通过 --thread 参数判断（有 thread → msg，无 → cli）
+        // 兜底通过环境变量判断（向后兼容）
+        const isInSession = !!process.env.EVOLCLAW_SESSION_ID;
+        const source = args.thread ? 'msg' : (isInSession ? 'msg' : 'cli');
+
         appendMessageLog(chatDir, buildOutboundEntry({
           from: args.from,
           to: args.to,
@@ -154,7 +170,7 @@ export async function msgSend(args: MsgSendArgs): Promise<MsgSendResult | MsgErr
           encrypt: args.encrypt === true,
           chatmode,  // 使用解析出的 chatmode
           msgType: 'text',
-          source: 'cli',
+          source,
         }));
       } catch {}
     }

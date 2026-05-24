@@ -3,7 +3,7 @@ import path from 'path';
 import os from 'os';
 import { spawn, execFileSync, execFile } from 'child_process';
 import { promisify } from 'util';
-import { resolveRoot, resolvePaths, ensureDataDirs, getPackageRoot } from '../paths.js';
+import { resolveRoot, resolvePaths, ensureDataDirs, getPackageRoot, agentMdPath } from '../paths.js';
 import { loadDefaults, loadAllAgents, mergeForAgent } from '../config-store.js';
 import { resolveAnthropicConfig } from '../agents/resolve.js';
 import { normalizeChannelInstances, channelTypes } from '../utils/channel-helpers.js';
@@ -885,8 +885,8 @@ async function cmdStatus() {
           const configChannelNames = new Set<string>();
           for (const cfg of agents) {
             for (const inst of cfg.channels) {
-              // effective key: <aid>#<type>#<name>
-              configChannelNames.add(`${cfg.aid}#${inst.type}#${inst.name}`);
+              // effective key: <type>#<urlEncode(selfPeerId)>#<name>
+              configChannelNames.add(`${inst.type}#${encodeURIComponent(cfg.aid)}#${inst.name}`);
             }
           }
           for (const s of allSessions) {
@@ -1015,7 +1015,7 @@ async function cmdStatus() {
 }
 
 /**
- * 把 channel fingerprint 列表（`<aid>#<type>#<name>`）折叠成展示用摘要。
+ * 把 channel fingerprint 列表（`<type>#<selfPeerId>#<name>`）折叠成展示用摘要。
  *
  * 聚合规则：
  *   - 按 type 分组
@@ -1033,8 +1033,8 @@ function summarizeChannelFingerprints(fingerprints: string[]): string {
       if (!groups.has(fp)) { groups.set(fp, []); order.push(fp); }
       continue;
     }
-    const type = parts[1];
-    const name = parts.slice(2).join('#');
+    const type = parts[0];
+    const name = parts[2];
     if (!groups.has(type)) { groups.set(type, []); order.push(type); }
     groups.get(type)!.push(name);
   }
@@ -1683,9 +1683,9 @@ async function cmdWatchAid(): Promise<void> {
 
   function readLocalName(aid: string): string | undefined {
     try {
-      const agentMdPath = path.join(os.homedir(), '.aun', 'AIDs', aid, 'agent.md');
-      if (!fs.existsSync(agentMdPath)) return undefined;
-      const content = fs.readFileSync(agentMdPath, 'utf-8');
+      const mdPath = agentMdPath(aid);
+      if (!fs.existsSync(mdPath)) return undefined;
+      const content = fs.readFileSync(mdPath, 'utf-8');
       const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
       if (!fmMatch) return undefined;
       const nameMatch = fmMatch[1].match(/^name:\s*["']?(.+?)["']?\s*$/m);
@@ -2473,12 +2473,14 @@ function archiveSelfHealLog(
  * Searches across all channel types (feishu, wechat, aun) for a matching instance.
  */
 function resolveInstanceConfig(instanceName: string): { type: string; config: any } | null {
-  // 新结构：channel key 是 <aid>#<type>#<name>，解析后从对应 agent 的 channels[] 找
+  // 新结构：channel key 是 <type>#<selfPeerId>#<name>，解析后从对应 agent 的 channels[] 找
   const parts = instanceName.split('#');
   if (parts.length === 3) {
-    const [aid, type, name] = parts;
+    const [type, encodedSelfPeerId, name] = parts;
+    const selfPeerId = decodeURIComponent(encodedSelfPeerId);
     const { agents } = loadAllAgents();
-    const agent = agents.find(a => a.aid === aid);
+    // AUN channel 的 selfPeerId 就是 agent.aid
+    const agent = agents.find(a => a.aid === selfPeerId);
     if (!agent) return null;
     const inst = agent.channels.find((c: any) => c.type === type && c.name === name);
     if (inst) return { type, config: inst };
@@ -3378,8 +3380,7 @@ Options:
         console.error(`❌ 无效 AID 格式: ${aid}`);
         process.exit(1);
       }
-      const aunBase = aunPath ?? path.join(os.homedir(), '.aun');
-      const localPath = path.join(aunBase, 'AIDs', aid, 'agent.md');
+      const localPath = agentMdPath(aid);
       if (!fs.existsSync(localPath)) {
         console.error(`❌ 本地无 agent.md: ${aid}`);
         process.exit(1);
@@ -3694,12 +3695,15 @@ Options:
   --app <name>          指定应用 slot（隔离 ack 游标）
   --as-daemon           ack 时显式以 daemon 身份（高危，会污染 daemon 游标）
   --format json         输出 JSON 格式
+  --encrypt             启用端到端加密
+  --thread <id>         指定话题 ID（用于多话题路由）
   --content-type <mime> 显式覆盖 MIME（仅 --file 模式）
   --text <说明>          附件说明文字（仅 --file 模式）
   --transcript <text>   语音转写（仅 --as voice）
 
 示例:
   evolclaw msg send alice.agentid.pub bob.agentid.pub "hello"
+  evolclaw msg send alice.agentid.pub bob.agentid.pub "讨论项目A" --thread "project-A"
   evolclaw msg send alice.agentid.pub bob.agentid.pub --file ./pic.png
   evolclaw msg send alice.agentid.pub bob.agentid.pub --file ./demo.mp4 --as video
   evolclaw msg send alice.agentid.pub bob.agentid.pub --link https://example.com --title "AUN"
@@ -3774,7 +3778,8 @@ Options:
     }
 
     const encrypt = args.includes('--encrypt');
-    const result = await msgSend({ from, to, body, encrypt, ...commonOpts });
+    const thread = getArgValue(args, '--thread');
+    const result = await msgSend({ from, to, body, encrypt, thread, ...commonOpts });
     if (!result.ok) {
       if (formatJson) { console.log(JSON.stringify(result)); }
       else { console.error(`❌ 发送失败: ${result.error}`); }
