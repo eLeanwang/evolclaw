@@ -1842,9 +1842,13 @@ export class CommandHandler {
       const arg = normalizedContent.slice(9).trim();
       const currentMode = chatmodeSession.sessionMode || 'interactive';
       const chatmodeChatType = chatmodeSession.chatType || activeChatType;
-      const canSwitch = chatmodeChatType !== 'group' || isAdmin;
+      const isGroup = chatmodeChatType === 'group';
+      const canSwitch = !isGroup;
 
       if (!arg) {
+        if (isGroup) {
+          return { kind: 'command.result' as const, text: `📋 会话模式: proactive（群聊强制）` };
+        }
         // 尝试发送 CommandCard 卡片
         if (canSwitch) {
           const modes = [
@@ -1887,8 +1891,9 @@ export class CommandHandler {
         return { kind: 'command.error' as const, text: `❌ 无效模式: ${arg}\n可选: interactive / proactive` };
       }
 
-      if ((chatmodeSession.chatType || activeChatType) === 'group' && !isAdmin) {
-        return { kind: 'command.error' as const, text: '❌ 无权限：群聊中切换会话模式仅限管理员使用' };
+      // 群聊强制 proactive，不可切换
+      if ((chatmodeSession.chatType || activeChatType) === 'group') {
+        return { kind: 'command.error' as const, text: '❌ 群聊强制 proactive 模式，不可切换' };
       }
 
       if (arg === currentMode) {

@@ -10,7 +10,7 @@ import type { ChannelPlugin, ChannelInstance, BridgeHookContext } from '../core/
 import type { MessageBridge } from '../core/message/message-bridge.js';
 import type { Config, ReplyContext, AunChannelConfig, AidConnectionState, AidStatus, AidKickDetail, InteractionResponse, ActionInteraction, CommandCard } from '../types.js';
 import { normalizeChannelInstances, getChannelShowActivities } from '../utils/channel-helpers.js';
-import { resolvePaths, getPackageRoot } from '../paths.js';
+import { resolvePaths, getPackageRoot, agentDir as agentDirPath } from '../paths.js';
 import { saveToUploads, sanitizeFileName } from '../utils/media-cache.js';
 import { appendAidEvent } from '../utils/instance-registry.js';
 import { appendMessageLog, buildOutboundEntry } from '../core/message/message-log.js';
@@ -108,6 +108,7 @@ export class AUNChannel {
   private queuedHandler: ((event: any) => void) | null = null;
   private pendingEchoMessages = new Map<string, { text: string; channelId: string; context?: ReplyContext; receiveTs: number }>();
   private isEchoSending = false;
+  private agentDir: string;
 
   private trace(dir: 'IN' | 'OUT', event: string, data: unknown): void {
     if (!this.config.aunTrace) return;
@@ -515,6 +516,7 @@ export class AUNChannel {
   private aidStatsCollector?: AidStatsCollector;
 
   constructor(private config: AUNConfig) {
+    this.agentDir = agentDirPath(config.aid);
     if (config.aunTrace) {
       this.traceWriter = new LogWriter({
         baseName: 'aun',
