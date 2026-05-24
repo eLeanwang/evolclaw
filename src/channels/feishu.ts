@@ -1523,6 +1523,7 @@ export class FeishuChannelPlugin implements ChannelPlugin {
             case 'status.interrupted':
             case 'status.error':
             case 'status.timeout':
+            case 'status.progress':
               // Feishu 通过 acknowledge (✓ 表情) 表达状态，由 channel 自行处理
               return;
             case 'interaction':
