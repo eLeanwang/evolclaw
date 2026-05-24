@@ -1,98 +1,98 @@
-# Proactive-to-Interactive Mode Switch Hint Design
+# Proactive 到 Interactive 模式切换提示设计
 
-## 1. Overview
+## 1. 概述
 
-### 1.1 Problem
+### 1.1 问题
 
-When a session switches from proactive mode to interactive mode, the agent may continue using the proactive communication pattern (calling `evolclaw ctl send`) instead of directly outputting text. This causes confusion and failed message delivery.
+当会话从 proactive 模式切换到 interactive 模式时，agent 可能继续使用 proactive 通信模式（调用 `evolclaw ctl send`）而不是直接输出文本。这会导致混淆和消息发送失败。
 
-### 1.2 Solution
+### 1.2 解决方案
 
-Automatically inject a hint message when the agent enters interactive mode after previously using proactive mode markers. The hint informs the agent: "本轮会话已切换为 interactive 模式，无需调用工具发送消息" (This session has switched to interactive mode, no need to call tools to send messages).
+当 agent 进入 interactive 模式且之前使用过 proactive 模式标志位时，自动注入提示消息："本轮会话已切换为 interactive 模式，无需调用工具发送消息"。
 
-### 1.3 Scope
+### 1.3 适用范围
 
-- **Applies to**: All channels supporting both proactive and interactive modes (primarily AUN)
-- **Does not apply to**: Sessions that have never used proactive mode
-- **Trigger condition**: Agent used proactive markers (`[PROACTIVE:REPLY_CONFIRMED_SENT]` or `[PROACTIVE:REPLY_CONFIRMED_NONE]`) in the last proactive session
+- **适用于**：所有支持 proactive 和 interactive 模式的通道（主要是 AUN）
+- **不适用于**：从未使用过 proactive 模式的会话
+- **触发条件**：Agent 在上一次 proactive 会话中使用了标志位（`[PROACTIVE:REPLY_CONFIRMED_SENT]` 或 `[PROACTIVE:REPLY_CONFIRMED_NONE]`）
 
 ---
 
-## 2. Design
+## 2. 设计
 
-### 2.1 Core Mechanism
+### 2.1 核心机制
 
-The design uses a metadata flag to track whether the agent used proactive markers in the previous session:
+设计使用 metadata 标记来跟踪 agent 是否在上一次会话中使用了 proactive 标志位：
 
 ```
-Proactive Mode (complete event)
-  → Detect markers in lastReplyText
-  → Set session.metadata.lastProactiveFlag = true
-  → Persist to filesystem
+Proactive 模式（complete 事件）
+  → 检测 lastReplyText 中的标志位
+  → 设置 session.metadata.lastProactiveFlag = true
+  → 持久化到文件系统
 
-Interactive Mode (new message arrives)
-  → Check session.metadata.lastProactiveFlag
-  → If true: prepend hint to message.content
-  → Clear flag immediately
-  → Persist updated metadata
+Interactive 模式（新消息到达）
+  → 检查 session.metadata.lastProactiveFlag
+  → 如果为 true：在 message.content 前插入提示
+  → 立即清除标记
+  → 持久化更新后的 metadata
 ```
 
-### 2.2 Marker Detection
+### 2.2 标志位检测
 
-The system detects two markers defined in the proactive mode design:
+系统检测 proactive 模式设计中定义的两个标志位：
 
-| Marker | Meaning |
-|--------|---------|
-| `[PROACTIVE:REPLY_CONFIRMED_SENT]` | Agent called tool to send message |
-| `[PROACTIVE:REPLY_CONFIRMED_NONE]` | Agent confirmed no reply needed |
+| 标志位 | 含义 |
+|--------|------|
+| `[PROACTIVE:REPLY_CONFIRMED_SENT]` | Agent 调用工具发送了消息 |
+| `[PROACTIVE:REPLY_CONFIRMED_NONE]` | Agent 确认无需回复 |
 
-Detection logic:
+检测逻辑：
 ```typescript
 const hasProactiveMarker = /\[PROACTIVE:REPLY_CONFIRMED_(SENT|NONE)\]/.test(lastReplyText);
 ```
 
-### 2.3 Flag Lifecycle
+### 2.3 标记生命周期
 
-**Set flag** (in proactive mode):
-- Location: `message-processor.ts`, `complete` event handler
-- Condition: `session.sessionMode === 'proactive'` AND marker detected in `lastReplyText`
-- Action: `session.metadata.lastProactiveFlag = true` + `updateSession()`
+**设置标记**（proactive 模式）：
+- 位置：`message-processor.ts`，`complete` 事件处理器
+- 条件：`session.sessionMode === 'proactive'` 且在 `lastReplyText` 中检测到标志位
+- 操作：`session.metadata.lastProactiveFlag = true` + `updateSession()`
 
-**Check and clear flag** (in interactive mode):
-- Location: `message-processor.ts`, `_processMessageInternal` method start
-- Condition: `session.sessionMode === 'interactive'` AND `session.metadata?.lastProactiveFlag === true`
-- Action: Prepend hint to `message.content`, delete flag, `updateSession()`
+**检查并清除标记**（interactive 模式）：
+- 位置：`message-processor.ts`，`_processMessageInternal` 方法开始处
+- 条件：`session.sessionMode === 'interactive'` 且 `session.metadata?.lastProactiveFlag === true`
+- 操作：在 `message.content` 前插入提示，删除标记，`updateSession()`
 
-### 2.4 Hint Message
+### 2.4 提示消息
 
-**Chinese** (default):
+**中文**（默认）：
 ```
 本轮会话已切换为 interactive 模式，无需调用工具发送消息。
 
-[original message content]
+[原始消息内容]
 ```
 
-**Rationale**:
-- Clear and direct instruction
-- Positioned before user message to ensure agent reads it first
-- Single blank line separator for readability
+**设计理由**：
+- 清晰直接的指令
+- 位于用户消息之前，确保 agent 首先读到
+- 单行空行分隔，提高可读性
 
 ---
 
-## 3. Implementation Details
+## 3. 实现细节
 
-### 3.1 Flag Setting (Proactive Mode)
+### 3.1 标记设置（Proactive 模式）
 
-**File**: `src/core/message/message-processor.ts`
+**文件**：`src/core/message/message-processor.ts`
 
-**Location**: Inside `processEventStream()`, within the `complete` event handler (around line 1341-1374)
+**位置**：在 `processEventStream()` 内部，`complete` 事件处理器中（约 1341-1374 行）
 
-**Logic**:
+**逻辑**：
 ```typescript
 if (event.type === 'complete') {
-  // ... existing logic ...
+  // ... 现有逻辑 ...
   
-  // Set flag if proactive markers detected
+  // 检测到 proactive 标志位时设置标记
   if (session.sessionMode === 'proactive' && lastReplyText) {
     const hasProactiveMarker = /\[PROACTIVE:REPLY_CONFIRMED_(SENT|NONE)\]/.test(lastReplyText);
     if (hasProactiveMarker) {
@@ -103,310 +103,310 @@ if (event.type === 'complete') {
     }
   }
   
-  // ... existing logic ...
+  // ... 现有逻辑 ...
 }
 ```
 
-### 3.2 Flag Check and Hint Injection (Interactive Mode)
+### 3.2 标记检查与提示注入（Interactive 模式）
 
-**File**: `src/core/message/message-processor.ts`
+**文件**：`src/core/message/message-processor.ts`
 
-**Location**: At the start of `_processMessageInternal()`, after session resolution (around line 1150)
+**位置**：在 `_processMessageInternal()` 开始处，会话解析之后（约 1150 行）
 
-**Logic**:
+**逻辑**：
 ```typescript
 private async _processMessageInternal(
   message: Message,
   channelKey: string,
   projectPath?: string
 ): Promise<void> {
-  // ... existing session resolution logic ...
+  // ... 现有会话解析逻辑 ...
   
-  // Inject hint if switching from proactive to interactive
+  // 从 proactive 切换到 interactive 时注入提示
   if (session.sessionMode === 'interactive' && session.metadata?.lastProactiveFlag) {
     const hint = '本轮会话已切换为 interactive 模式，无需调用工具发送消息。\n\n';
     message.content = hint + message.content;
     
-    // Clear flag to avoid repeated hints
+    // 清除标记以避免重复提示
     delete session.metadata.lastProactiveFlag;
     await this.sessionManager.updateSession(session.id, { metadata: session.metadata });
     logger.info(`[MessageProcessor] Injected interactive mode hint for session ${session.id}`);
   }
   
-  // ... rest of method ...
+  // ... 方法其余部分 ...
 }
 ```
 
-### 3.3 Metadata Persistence
+### 3.3 Metadata 持久化
 
-The `session.metadata` object is already persisted through:
+`session.metadata` 对象已通过以下机制持久化：
 - `SessionManager.updateSession()` → `writeSessionIfChanged()` → `appendMeta()` + `writeActive()`
-- Storage: `{sessionsDir}/{channelType}/{channelId}/active.json` and `{sessionId}.jsonl`
+- 存储位置：`{sessionsDir}/{channelType}/{channelId}/active.json` 和 `{sessionId}.jsonl`
 
-No additional persistence logic needed.
-
----
-
-## 4. Edge Cases
-
-### 4.1 Multiple Messages in Proactive Mode
-
-**Scenario**: Agent sends multiple messages in proactive mode before switching to interactive.
-
-**Behavior**: Flag is set on the first `complete` event with markers. Subsequent `complete` events may overwrite the flag (idempotent). Hint appears only once when switching to interactive.
-
-**Verdict**: Acceptable. The hint appears at the right time (first interactive message).
-
-### 4.2 Manual Mode Switch Without Messages
-
-**Scenario**: User runs `/chatmode interactive` while in proactive mode, but no messages were sent in proactive mode (no markers).
-
-**Behavior**: No flag is set, no hint is injected.
-
-**Verdict**: Acceptable. If the agent never used proactive markers, it doesn't need the hint.
-
-### 4.3 Session Restart
-
-**Scenario**: EvolClaw restarts while `lastProactiveFlag` is set.
-
-**Behavior**: Flag persists in `active.json` and `.jsonl`. Hint will appear on next interactive message after restart.
-
-**Verdict**: Correct behavior. The flag should survive restarts.
-
-### 4.4 Autonomous Mode
-
-**Scenario**: Session is in autonomous mode (triggered tasks).
-
-**Behavior**: Autonomous sessions don't receive user messages, so the hint injection code path is never reached.
-
-**Verdict**: No impact. Autonomous mode is unaffected.
+无需额外的持久化逻辑。
 
 ---
 
-## 5. Testing Strategy
+## 4. 边界情况
 
-### 5.1 Unit Tests
+### 4.1 Proactive 模式下的多条消息
 
-**Test cases**:
-1. Flag is set when proactive markers detected in `complete` event
-2. Flag is NOT set when no markers present
-3. Hint is injected when flag is set and mode is interactive
-4. Flag is cleared after hint injection
-5. Hint is NOT injected when flag is absent
-6. Hint is NOT injected in proactive or autonomous mode
+**场景**：Agent 在切换到 interactive 之前在 proactive 模式下发送多条消息。
 
-**Mock dependencies**:
+**行为**：标记在第一个带标志位的 `complete` 事件时设置。后续 `complete` 事件可能覆盖标记（幂等）。提示仅在切换到 interactive 时出现一次。
+
+**结论**：可接受。提示在正确的时机出现（第一条 interactive 消息）。
+
+### 4.2 无消息的手动模式切换
+
+**场景**：用户在 proactive 模式下运行 `/chatmode interactive`，但在 proactive 模式下没有发送消息（无标志位）。
+
+**行为**：未设置标记，不注入提示。
+
+**结论**：可接受。如果 agent 从未使用过 proactive 标志位，则不需要提示。
+
+### 4.3 会话重启
+
+**场景**：EvolClaw 在 `lastProactiveFlag` 设置时重启。
+
+**行为**：标记在 `active.json` 和 `.jsonl` 中持久化。重启后下一条 interactive 消息时会出现提示。
+
+**结论**：正确行为。标记应该在重启后保留。
+
+### 4.4 Autonomous 模式
+
+**场景**：会话处于 autonomous 模式（触发任务）。
+
+**行为**：Autonomous 会话不接收用户消息，因此永远不会到达提示注入代码路径。
+
+**结论**：无影响。Autonomous 模式不受影响。
+
+---
+
+## 5. 测试策略
+
+### 5.1 单元测试
+
+**测试用例**：
+1. 在 `complete` 事件中检测到 proactive 标志位时设置标记
+2. 无标志位时不设置标记
+3. 标记设置且模式为 interactive 时注入提示
+4. 提示注入后清除标记
+5. 标记不存在时不注入提示
+6. proactive 或 autonomous 模式下不注入提示
+
+**Mock 依赖**：
 - `SessionManager.updateSession()`
-- `session.metadata` object
+- `session.metadata` 对象
 
-### 5.2 Integration Tests
+### 5.2 集成测试
 
-**Test scenarios**:
-1. **Proactive → Interactive switch**:
-   - Send message in proactive mode with `[PROACTIVE:REPLY_CONFIRMED_SENT]`
-   - Switch to interactive mode
-   - Send new message
-   - Verify hint appears in agent input
+**测试场景**：
+1. **Proactive → Interactive 切换**：
+   - 在 proactive 模式下发送带 `[PROACTIVE:REPLY_CONFIRMED_SENT]` 的消息
+   - 切换到 interactive 模式
+   - 发送新消息
+   - 验证提示出现在 agent 输入中
 
-2. **No markers in proactive**:
-   - Send message in proactive mode without markers
-   - Switch to interactive mode
-   - Send new message
-   - Verify no hint appears
+2. **Proactive 中无标志位**：
+   - 在 proactive 模式下发送不带标志位的消息
+   - 切换到 interactive 模式
+   - 发送新消息
+   - 验证无提示出现
 
-3. **Multiple proactive messages**:
-   - Send 3 messages in proactive mode with markers
-   - Switch to interactive mode
-   - Send message → verify hint appears
-   - Send another message → verify hint does NOT appear (flag cleared)
+3. **多条 proactive 消息**：
+   - 在 proactive 模式下发送 3 条带标志位的消息
+   - 切换到 interactive 模式
+   - 发送消息 → 验证提示出现
+   - 再发送一条消息 → 验证提示不出现（标记已清除）
 
-4. **Restart persistence**:
-   - Set flag in proactive mode
-   - Restart EvolClaw
-   - Send message in interactive mode
-   - Verify hint appears
-
----
-
-## 6. Performance Impact
-
-### 6.1 Proactive Mode
-
-**Added operations per `complete` event**:
-- Regex test on `lastReplyText` (O(n) where n = text length)
-- Conditional metadata update (only when markers present)
-
-**Impact**: Negligible. Regex is fast, and metadata updates are already part of the session lifecycle.
-
-### 6.2 Interactive Mode
-
-**Added operations per message**:
-- Check `session.metadata?.lastProactiveFlag` (O(1))
-- Conditional string prepend + metadata update (only when flag is set)
-
-**Impact**: Negligible. Flag check is constant time, and hint injection happens at most once per mode switch.
+4. **重启持久化**：
+   - 在 proactive 模式下设置标记
+   - 重启 EvolClaw
+   - 在 interactive 模式下发送消息
+   - 验证提示出现
 
 ---
 
-## 7. Alternatives Considered
+## 6. 性能影响
 
-### 7.1 Check messages.jsonl Every Time
+### 6.1 Proactive 模式
 
-**Approach**: On every interactive message, read the last outbound message from `messages.jsonl` and check for markers.
+**每个 `complete` 事件新增操作**：
+- 对 `lastReplyText` 进行正则测试（O(n)，n = 文本长度）
+- 条件性 metadata 更新（仅在存在标志位时）
 
-**Pros**: No metadata dependency, always detects markers.
+**影响**：可忽略。正则表达式很快，metadata 更新已是会话生命周期的一部分。
 
-**Cons**: 
-- File I/O on every message (performance hit)
-- Requires additional logic to prevent repeated hints
-- More complex implementation
+### 6.2 Interactive 模式
 
-**Verdict**: Rejected. Metadata flag approach is simpler and faster.
+**每条消息新增操作**：
+- 检查 `session.metadata?.lastProactiveFlag`（O(1)）
+- 条件性字符串前置 + metadata 更新（仅在标记设置时）
 
-### 7.2 Hybrid Approach
-
-**Approach**: Set flag in `complete` event AND check `messages.jsonl` when `/chatmode` command is used.
-
-**Pros**: Covers both automatic and manual mode switches.
-
-**Cons**: 
-- More complex (two code paths)
-- `/chatmode` command needs file I/O
-- Marginal benefit (manual switch without prior messages is rare)
-
-**Verdict**: Rejected. Added complexity not justified by edge case coverage.
+**影响**：可忽略。标记检查是常数时间，提示注入每次模式切换最多发生一次。
 
 ---
 
-## 8. Future Enhancements
+## 7. 考虑的替代方案
 
-### 8.1 Localization
+### 7.1 每次检查 messages.jsonl
 
-Currently the hint is hardcoded in Chinese. Future work could:
-- Detect user language from session metadata
-- Provide English/Chinese variants
-- Use i18n framework if available
+**方法**：每条 interactive 消息时，从 `messages.jsonl` 读取最后一条出站消息并检查标志位。
 
-### 8.2 Configurable Hint
+**优点**：无 metadata 依赖，始终检测标志位。
 
-Allow users to customize the hint message via `evolclaw.json`:
+**缺点**：
+- 每条消息都有文件 I/O（性能损失）
+- 需要额外逻辑防止重复提示
+- 实现更复杂
+
+**结论**：拒绝。Metadata 标记方法更简单更快。
+
+### 7.2 混合方案
+
+**方法**：在 `complete` 事件中设置标记，并在使用 `/chatmode` 命令时检查 `messages.jsonl`。
+
+**优点**：覆盖自动和手动模式切换。
+
+**缺点**：
+- 更复杂（两条代码路径）
+- `/chatmode` 命令需要文件 I/O
+- 边际收益（无先前消息的手动切换很少见）
+
+**结论**：拒绝。增加的复杂性不能证明边界情况覆盖的合理性。
+
+---
+
+## 8. 未来增强
+
+### 8.1 本地化
+
+当前提示硬编码为中文。未来工作可以：
+- 从会话 metadata 检测用户语言
+- 提供英文/中文变体
+- 使用 i18n 框架（如果可用）
+
+### 8.2 可配置提示
+
+允许用户通过 `evolclaw.json` 自定义提示消息：
 ```json
 {
   "hints": {
-    "proactiveToInteractive": "Custom hint message here"
+    "proactiveToInteractive": "自定义提示消息"
   }
 }
 ```
 
-### 8.3 Hint Suppression
+### 8.3 提示抑制
 
-Add a session-level flag to disable hints for advanced users:
+为高级用户添加会话级标志以禁用提示：
 ```typescript
 session.metadata.suppressModeHints = true;
 ```
 
 ---
 
-## 9. Files Modified
+## 9. 修改的文件
 
-| File | Changes |
-|------|---------|
-| `src/core/message/message-processor.ts` | Add flag setting in `complete` handler, add hint injection in `_processMessageInternal` |
-| `src/types.ts` | Document `Session.metadata.lastProactiveFlag` field (optional, for clarity) |
-
----
-
-## 10. Rollout Plan
-
-### 10.1 Development
-
-1. Implement flag setting logic in `complete` handler
-2. Implement hint injection logic in `_processMessageInternal`
-3. Add unit tests for both code paths
-4. Manual testing with AUN channel
-
-### 10.2 Testing
-
-1. Run unit tests: `npm test`
-2. Integration test: proactive → interactive switch with markers
-3. Integration test: proactive → interactive switch without markers
-4. Integration test: restart persistence
-5. Regression test: ensure existing proactive/interactive behavior unchanged
-
-### 10.3 Deployment
-
-1. Merge to main branch
-2. Build: `npm run build`
-3. Deploy to production
-4. Monitor logs for `Injected interactive mode hint` messages
-5. Collect user feedback
+| 文件 | 变更 |
+|------|------|
+| `src/core/message/message-processor.ts` | 在 `complete` 处理器中添加标记设置，在 `_processMessageInternal` 中添加提示注入 |
+| `src/types.ts` | 记录 `Session.metadata.lastProactiveFlag` 字段（可选，为了清晰） |
 
 ---
 
-## 11. Success Metrics
+## 10. 发布计划
 
-### 11.1 Functional Metrics
+### 10.1 开发
 
-- Flag is set correctly when markers detected (log analysis)
-- Hint appears exactly once per mode switch (log analysis)
-- No repeated hints (log analysis)
-- No performance degradation (response time monitoring)
+1. 在 `complete` 处理器中实现标记设置逻辑
+2. 在 `_processMessageInternal` 中实现提示注入逻辑
+3. 为两条代码路径添加单元测试
+4. 使用 AUN 通道进行手动测试
 
-### 11.2 User Experience Metrics
+### 10.2 测试
 
-- Reduced agent confusion when switching modes (qualitative feedback)
-- Fewer failed `ctl send` attempts in interactive mode (error log analysis)
+1. 运行单元测试：`npm test`
+2. 集成测试：proactive → interactive 切换（带标志位）
+3. 集成测试：proactive → interactive 切换（无标志位）
+4. 集成测试：重启持久化
+5. 回归测试：确保现有 proactive/interactive 行为不变
 
----
+### 10.3 部署
 
-## 12. Risks and Mitigations
-
-| Risk | Impact | Mitigation |
-|------|--------|------------|
-| Metadata not persisted correctly | Hint doesn't appear after restart | Test restart persistence thoroughly |
-| Regex false positives | Hint appears when not needed | Use specific marker format with `PROACTIVE:` prefix |
-| Hint pollutes conversation | User sees technical message | Keep hint concise and clear; consider suppression flag in future |
-| Performance impact | Slower message processing | Profile regex and metadata operations; optimize if needed |
-
----
-
-## 13. Documentation Updates
-
-### 13.1 User Documentation
-
-Update `docs/multi-session-design.md` or equivalent to document:
-- Automatic hint injection when switching from proactive to interactive
-- Hint message content and purpose
-- How to interpret the hint (for users debugging agent behavior)
-
-### 13.2 Developer Documentation
-
-Update `docs/architecture.md` or equivalent to document:
-- `session.metadata.lastProactiveFlag` field
-- Flag lifecycle (set/check/clear)
-- Integration points in `message-processor.ts`
+1. 合并到 main 分支
+2. 构建：`npm run build`
+3. 部署到生产环境
+4. 监控日志中的 `Injected interactive mode hint` 消息
+5. 收集用户反馈
 
 ---
 
-## 14. Appendix
+## 11. 成功指标
 
-### 14.1 Related Documents
+### 11.1 功能指标
 
-- `proactive-mode-design.md` - Original proactive mode design (section 11: Agent-to-Agent reply validation)
-- `docs/multi-session-design.md` - Session management architecture
-- `docs/architecture.md` - Overall system architecture
+- 检测到标志位时正确设置标记（日志分析）
+- 提示在每次模式切换时恰好出现一次（日志分析）
+- 无重复提示（日志分析）
+- 无性能下降（响应时间监控）
 
-### 14.2 Glossary
+### 11.2 用户体验指标
 
-- **Proactive mode**: Agent must explicitly call `evolclaw ctl send` to send messages
-- **Interactive mode**: Agent's text output is automatically sent to the user
-- **Marker**: Special string (`[PROACTIVE:REPLY_CONFIRMED_*]`) indicating agent's send intent
-- **Flag**: Boolean metadata field tracking whether markers were used in previous session
-- **Hint**: Injected message informing agent of mode switch
+- 减少模式切换时的 agent 混淆（定性反馈）
+- 减少 interactive 模式下失败的 `ctl send` 尝试（错误日志分析）
 
 ---
 
-**Document Version**: 1.0  
-**Last Updated**: 2026-05-24  
-**Author**: Claude (via brainstorming skill)  
-**Status**: Draft - Awaiting Review
+## 12. 风险与缓解
+
+| 风险 | 影响 | 缓解措施 |
+|------|------|----------|
+| Metadata 未正确持久化 | 重启后提示不出现 | 彻底测试重启持久化 |
+| 正则表达式误报 | 不需要时出现提示 | 使用带 `PROACTIVE:` 前缀的特定标志位格式 |
+| 提示污染对话 | 用户看到技术消息 | 保持提示简洁清晰；未来考虑抑制标志 |
+| 性能影响 | 消息处理变慢 | 分析正则和 metadata 操作；如需要则优化 |
+
+---
+
+## 13. 文档更新
+
+### 13.1 用户文档
+
+更新 `docs/multi-session-design.md` 或等效文档以记录：
+- 从 proactive 切换到 interactive 时的自动提示注入
+- 提示消息内容和目的
+- 如何解释提示（用于调试 agent 行为的用户）
+
+### 13.2 开发者文档
+
+更新 `docs/architecture.md` 或等效文档以记录：
+- `session.metadata.lastProactiveFlag` 字段
+- 标记生命周期（设置/检查/清除）
+- `message-processor.ts` 中的集成点
+
+---
+
+## 14. 附录
+
+### 14.1 相关文档
+
+- `proactive-mode-design.md` - 原始 proactive 模式设计（第 11 节：Agent 到 Agent 回复验证）
+- `docs/multi-session-design.md` - 会话管理架构
+- `docs/architecture.md` - 整体系统架构
+
+### 14.2 术语表
+
+- **Proactive 模式**：Agent 必须显式调用 `evolclaw ctl send` 发送消息
+- **Interactive 模式**：Agent 的文本输出自动发送给用户
+- **标志位**：特殊字符串（`[PROACTIVE:REPLY_CONFIRMED_*]`）指示 agent 的发送意图
+- **标记**：布尔 metadata 字段，跟踪上一次会话中是否使用了标志位
+- **提示**：注入的消息，通知 agent 模式切换
+
+---
+
+**文档版本**：1.0  
+**最后更新**：2026-05-24  
+**作者**：Claude（通过 brainstorming skill）  
+**状态**：草稿 - 等待审查
