@@ -49,6 +49,20 @@ export function resolvePaths() {
   };
 }
 
+// ── AID 路径（agent.md 存放在 $EVOLCLAW_HOME/AIDs/<aid>/）──
+
+export function aidsDir(): string {
+  return path.join(resolveRoot(), 'AIDs');
+}
+
+export function aidLocalDir(aid: string): string {
+  return path.join(resolveRoot(), 'AIDs', aid);
+}
+
+export function agentMdPath(aid: string): string {
+  return path.join(resolveRoot(), 'AIDs', aid, 'agent.md');
+}
+
 // ── per-agent 路径（参数化，不进 resolvePaths() 的固定 map）──
 
 export function agentDir(aid: string): string {
@@ -105,6 +119,30 @@ export function ensureDataDirs(): void {
   fs.mkdirSync(p.outboxDir, { recursive: true });
   fs.mkdirSync(p.eckDir, { recursive: true });
   fs.mkdirSync(eckDebugDir(), { recursive: true });
+  fs.mkdirSync(aidsDir(), { recursive: true });
+  migrateAgentMdFromAun();
+}
+
+/**
+ * One-time migration: copy agent.md from ~/.aun/AIDs/<aid>/ to $EVOLCLAW_HOME/AIDs/<aid>/
+ * if the new location doesn't have it yet.
+ */
+function migrateAgentMdFromAun(): void {
+  const aunAidsDir = path.join(os.homedir(), '.aun', 'AIDs');
+  const ecAids = aidsDir();
+  if (!fs.existsSync(aunAidsDir) || aunAidsDir === ecAids) return;
+
+  try {
+    for (const entry of fs.readdirSync(aunAidsDir, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const oldMd = path.join(aunAidsDir, entry.name, 'agent.md');
+      const newMd = path.join(ecAids, entry.name, 'agent.md');
+      if (fs.existsSync(oldMd) && !fs.existsSync(newMd)) {
+        fs.mkdirSync(path.join(ecAids, entry.name), { recursive: true });
+        fs.copyFileSync(oldMd, newMd);
+      }
+    }
+  } catch { /* best-effort migration */ }
 }
 
 // ── kits 路径（始终从包内读取，不复制到 EVOLCLAW_HOME）──

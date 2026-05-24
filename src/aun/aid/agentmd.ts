@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { getAunClient } from './client.js';
+import { agentMdPath, aidLocalDir } from '../../paths.js';
 
 export interface AgentmdGetResult {
   content: string;
@@ -107,7 +108,7 @@ export async function agentmdGet(aid: string, opts?: { client?: any; aunPath?: s
 export async function agentmdGet(aid: string, opts: { client?: any; aunPath?: string; withVerification: true }): Promise<AgentmdGetResult>;
 export async function agentmdGet(aid: string, opts?: { client?: any; aunPath?: string; withVerification?: boolean }): Promise<string | AgentmdGetResult> {
   const aunPath = opts?.aunPath ?? path.join(os.homedir(), '.aun');
-  const localPath = path.join(aunPath, 'AIDs', aid, 'agent.md');
+  const localPath = agentMdPath(aid);
 
   // === Path A: local agent.md exists ===
   if (fs.existsSync(localPath)) {
@@ -151,7 +152,7 @@ export async function agentmdGet(aid: string, opts?: { client?: any; aunPath?: s
 
     if (!opts?.withVerification) {
       // Persist without verification
-      const aidDir = path.join(aunPath, 'AIDs', aid);
+      const aidDir = aidLocalDir(aid);
       fs.mkdirSync(aidDir, { recursive: true });
       fs.writeFileSync(path.join(aidDir, 'agent.md'), raw, 'utf-8');
       return raw;
@@ -161,7 +162,7 @@ export async function agentmdGet(aid: string, opts?: { client?: any; aunPath?: s
     const verification = await verifyContent(raw, aid, certPem, client);
 
     // Persist to local
-    const aidDir = path.join(aunPath, 'AIDs', aid);
+    const aidDir = aidLocalDir(aid);
     fs.mkdirSync(aidDir, { recursive: true });
     fs.writeFileSync(path.join(aidDir, 'agent.md'), raw, 'utf-8');
 
@@ -189,9 +190,9 @@ export async function agentmdPut(content: string, opts: { aid: string; client?: 
 
     await client.auth.uploadAgentMd(signed);
 
-    const aidDir = path.join(aunPath, 'AIDs', opts.aid);
-    fs.mkdirSync(aidDir, { recursive: true });
-    fs.writeFileSync(path.join(aidDir, 'agent.md'), signed, 'utf-8');
+    const dir = aidLocalDir(opts.aid);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'agent.md'), signed, 'utf-8');
   } finally {
     if (ownClient) try { await client.close(); } catch { /* ignore */ }
   }

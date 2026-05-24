@@ -3,7 +3,7 @@ import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
 import { getAunClient, downloadCaRoot } from './client.js';
-import { resolvePaths } from '../../paths.js';
+import { resolvePaths, aidsDir as evolclawAidsDir, agentMdPath } from '../../paths.js';
 import type { AidInfo, AidShowResult, AidLookupResult, AidCreateResult } from './types.js';
 
 // ==================== Validation ====================
@@ -16,17 +16,37 @@ export function isValidAid(name: string): boolean {
 // ==================== AID Operations ====================
 
 export function aidList(aunPath?: string): AidInfo[] {
-  const aidsDir = path.join(aunPath ?? path.join(os.homedir(), '.aun'), 'AIDs');
-  if (!fs.existsSync(aidsDir)) return [];
+  const aunAidsDir = path.join(aunPath ?? path.join(os.homedir(), '.aun'), 'AIDs');
+  const ecAidsDir = evolclawAidsDir();
 
-  const entries = fs.readdirSync(aidsDir, { withFileTypes: true });
-  return entries
-    .filter(e => e.isDirectory())
-    .map(e => ({
-      aid: e.name,
-      hasPrivateKey: fs.existsSync(path.join(aidsDir, e.name, 'private')),
-      hasAgentMd: fs.existsSync(path.join(aidsDir, e.name, 'agent.md')),
-    }));
+  const seen = new Map<string, AidInfo>();
+
+  // Scan ~/.aun/AIDs (private keys live here)
+  if (fs.existsSync(aunAidsDir)) {
+    for (const e of fs.readdirSync(aunAidsDir, { withFileTypes: true })) {
+      if (!e.isDirectory()) continue;
+      seen.set(e.name, {
+        aid: e.name,
+        hasPrivateKey: fs.existsSync(path.join(aunAidsDir, e.name, 'private')),
+        hasAgentMd: fs.existsSync(agentMdPath(e.name)),
+      });
+    }
+  }
+
+  // Scan $EVOLCLAW_HOME/AIDs (agent.md lives here)
+  if (fs.existsSync(ecAidsDir) && ecAidsDir !== aunAidsDir) {
+    for (const e of fs.readdirSync(ecAidsDir, { withFileTypes: true })) {
+      if (!e.isDirectory()) continue;
+      if (seen.has(e.name)) continue;
+      seen.set(e.name, {
+        aid: e.name,
+        hasPrivateKey: fs.existsSync(path.join(aunAidsDir, e.name, 'private')),
+        hasAgentMd: fs.existsSync(agentMdPath(e.name)),
+      });
+    }
+  }
+
+  return [...seen.values()];
 }
 
 export async function aidCreate(aid: string, opts?: { aunPath?: string }): Promise<AidCreateResult> {
@@ -79,7 +99,7 @@ export function aidShow(aid: string, opts?: { aunPath?: string }): AidShowResult
   const aidDir = path.join(aunPath, 'AIDs', aid);
 
   const hasPrivateKey = fs.existsSync(path.join(aidDir, 'private'));
-  const hasAgentMd = fs.existsSync(path.join(aidDir, 'agent.md'));
+  const hasAgentMd = fs.existsSync(agentMdPath(aid));
 
   let certExpiresAt: string | null = null;
   let certSubject: string | null = null;
