@@ -150,6 +150,8 @@ export interface AidStatsSnapshot {
   lastSentAt: number | null;
   lastReceivedText: string | null;
   lastReceivedFrom: string | null;
+  lastReceivedEncrypt: boolean | null;
+  lastReceivedChatmode: string | null;
   lastSentText: string | null;
   lastSentTo: string | null;
   lastSentEncrypt: boolean | null;
@@ -187,6 +189,8 @@ interface AidStatsEntry {
   lastSentAt: number | null;
   lastReceivedText: string | null;
   lastReceivedFrom: string | null;
+  lastReceivedEncrypt: boolean | null;
+  lastReceivedChatmode: string | null;
   lastSentText: string | null;
   lastSentTo: string | null;
   lastSentEncrypt: boolean | null;
@@ -282,6 +286,8 @@ export class AidStatsCollector {
         lastSentAt: null,
         lastReceivedText: null,
         lastReceivedFrom: null,
+        lastReceivedEncrypt: null,
+        lastReceivedChatmode: null,
         lastSentText: null,
         lastSentTo: null,
         lastSentEncrypt: null,
@@ -423,7 +429,7 @@ export class AidStatsCollector {
     entry.selfName = name;
   }
 
-  recordInbound(aid: string, fromPeer: string, byteLength: number, text?: string, isSystem: boolean = false): void {
+  recordInbound(aid: string, fromPeer: string, byteLength: number, text?: string, isSystem: boolean = false, encrypt?: boolean, chatmode?: string): void {
     const entry = this.getOrCreate(aid);
     if (isSystem) {
       entry.systemReceived++;
@@ -432,6 +438,8 @@ export class AidStatsCollector {
       entry.lastReceivedAt = Date.now();
       entry.lastReceivedFrom = fromPeer;
       if (text) entry.lastReceivedText = text.length > 100 ? text.slice(0, 100) + '…' : text;
+      if (encrypt != null) entry.lastReceivedEncrypt = encrypt;
+      if (chatmode) entry.lastReceivedChatmode = chatmode;
     }
     entry.bytesReceived += byteLength;
     entry.uniquePeers.add(fromPeer);
@@ -478,6 +486,8 @@ export class AidStatsCollector {
         lastSentAt: entry.lastSentAt,
         lastReceivedText: entry.lastReceivedText,
         lastReceivedFrom: entry.lastReceivedFrom,
+        lastReceivedEncrypt: entry.lastReceivedEncrypt,
+        lastReceivedChatmode: entry.lastReceivedChatmode,
         lastSentText: entry.lastSentText,
         lastSentTo: entry.lastSentTo,
         lastSentEncrypt: entry.lastSentEncrypt,

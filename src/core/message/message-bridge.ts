@@ -156,6 +156,7 @@ export class MessageBridge {
         // 5.5 写入消息记录（入方向）
         const chatDir = this.sessionManager.getChatDir(session);
         const inboundEncrypt = msg.replyContext?.metadata?.encrypted != null ? !!(msg.replyContext.metadata.encrypted) : undefined;
+        const inboundChatmode = msg.replyContext?.metadata?.chatmode as string | undefined;
         appendMessageLog(chatDir, buildInboundEntry({
           from: msg.peerId || 'unknown',
           to: msg.selfId || 'self',
@@ -167,6 +168,7 @@ export class MessageBridge {
           permMode: session.identity?.role ?? null,
           timestamp: fullMessage.timestamp,
           encrypt: inboundEncrypt,
+          chatmode: inboundChatmode,
         }));
 
         // 6. ACK + debounce/enqueue

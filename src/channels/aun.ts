@@ -442,8 +442,8 @@ export class AUNChannel {
     return out;
   }
 
-  private buildGroupReplyContext(taskId: string | undefined, senderAid: string, encrypted: boolean, messageId?: string): ReplyContext {
-    const replyContext: ReplyContext = { metadata: { encrypted } };
+  private buildGroupReplyContext(taskId: string | undefined, senderAid: string, encrypted: boolean, messageId?: string, chatmode?: string): ReplyContext {
+    const replyContext: ReplyContext = { metadata: { encrypted, chatmode } };
     if (taskId) replyContext.threadId = taskId;
     replyContext.peerId = senderAid;
     if (messageId) replyContext.replyToMessageId = messageId;
@@ -1058,11 +1058,12 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       logger.info(`${this.logPrefix()} P2P dropped (type deny): type=${p2pPayloadType} from=${shortAid}(${displayName}) mid=${messageId}`);
       return;
     }
-    logger.info(`${this.logPrefix()} P2P dispatched: from=${shortAid}(${displayName}) mid=${messageId} encrypt=${msgEncrypted} text=${finalText.slice(0, 60)}`);
+    const msgChatmode = (payload && typeof payload === 'object') ? (payload as any).chatmode : undefined;
+    logger.info(`${this.logPrefix()} P2P dispatched: from=${shortAid}(${displayName}) mid=${messageId} encrypt=${msgEncrypted} chatmode=${msgChatmode ?? 'none'} text=${finalText.slice(0, 60)}`);
     appendAidEvent({ ts: Date.now(), iso: new Date().toISOString(), event: 'message_in', aid: this.config.aid, from: fromAid, msgId: messageId, kind: 'text', len: finalText.length });
     const isSystemP2P = p2pPayloadType === 'event';
-    this.aidStatsCollector?.recordInbound(this.config.aid, fromAid, Buffer.byteLength(finalText, 'utf-8'), finalText, isSystemP2P);
-    const replyContext: ReplyContext = { metadata: { encrypted: msgEncrypted } };
+    this.aidStatsCollector?.recordInbound(this.config.aid, fromAid, Buffer.byteLength(finalText, 'utf-8'), finalText, isSystemP2P, msgEncrypted, msgChatmode);
+    const replyContext: ReplyContext = { metadata: { encrypted: msgEncrypted, chatmode: msgChatmode } };
     if (taskId) replyContext.threadId = taskId;
     this.dispatchMessage({
       channelId: chatId,
@@ -1117,6 +1118,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       if (/echo/i.test(firstLineFast) && firstLineFast.trim().length <= 10 && !hasEvolClawTrace) {
         this.acknowledgeImmediately(messageId, seq);
         const msgEncryptedFast = !!(msg.e2ee);
+        const msgChatmodeFast = (payload && typeof payload === 'object') ? (payload as any).chatmode : undefined;
         const peerInfo = this.peerInfoCached(senderAid);
         const shortAid = this.getShortAid(senderAid);
         const displayName = peerInfo?.name || shortAid;
@@ -1131,7 +1133,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
           peerName: displayName,
           peerType: peerInfo?.type || 'unknown',
           seq,
-          replyContext: this.buildGroupReplyContext(undefined, senderAid, msgEncryptedFast, messageId),
+          replyContext: this.buildGroupReplyContext(undefined, senderAid, msgEncryptedFast, messageId, msgChatmodeFast),
           createdAt,
         });
         return;
@@ -1196,10 +1198,11 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       };
       let echoText = text;
       echoText += `\n${echoTs()} [EvolClaw.receive] from=${senderAid} mid=${messageId} chat=group self=${this._aid || 'unknown'} conn_uptime=${this.connectedAt ? Math.round((Date.now() - this.connectedAt) / 1000) + 's' : 'unknown'}`;
+      const msgChatmodeEcho = (payload && typeof payload === 'object') ? (payload as any).chatmode : undefined;
       this.pendingEchoMessages.set(messageId, {
         text: echoText,
         channelId: groupId,
-        context: this.buildGroupReplyContext(undefined, senderAid, msgEncrypted, messageId),
+        context: this.buildGroupReplyContext(undefined, senderAid, msgEncrypted, messageId, msgChatmodeEcho),
         receiveTs: Date.now(),
       });
       // 继续走正常 Agent 流程（下面的代码会 dispatch）
@@ -1273,9 +1276,10 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
 
     // action_card_reply 已在 extractTextPayload 中消费，不分发给 agent
     if (payloadType === 'action_card_reply') return;
-    logger.info(`${this.logPrefix()} Group dispatched: group=${groupId} sender=${shortAid}(${displayName}) mode=${dispatchMode} mid=${messageId} text=${finalText.slice(0, 60)}`);
+    const msgChatmode = (payload && typeof payload === 'object') ? (payload as any).chatmode : undefined;
+    logger.info(`${this.logPrefix()} Group dispatched: group=${groupId} sender=${shortAid}(${displayName}) mode=${dispatchMode} mid=${messageId} chatmode=${msgChatmode ?? 'none'} text=${finalText.slice(0, 60)}`);
     appendAidEvent({ ts: Date.now(), iso: new Date().toISOString(), event: 'message_in', aid: this.config.aid, from: senderAid, msgId: messageId, kind: 'text', len: finalText.length, groupId });
-    this.aidStatsCollector?.recordInbound(this.config.aid, senderAid, Buffer.byteLength(finalText, 'utf-8'), finalText, payloadType === 'event');
+    this.aidStatsCollector?.recordInbound(this.config.aid, senderAid, Buffer.byteLength(finalText, 'utf-8'), finalText, payloadType === 'event', msgEncrypted, msgChatmode);
     this.dispatchMessage({
       channelId: groupId,
       groupId,
@@ -1288,7 +1292,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       seq,
       taskId,
       mentions,
-      replyContext: this.buildGroupReplyContext(taskId, senderAid, msgEncrypted, messageId),
+      replyContext: this.buildGroupReplyContext(taskId, senderAid, msgEncrypted, messageId, msgChatmode),
     });
   }
 
