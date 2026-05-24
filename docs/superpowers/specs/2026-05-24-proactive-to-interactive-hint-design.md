@@ -111,7 +111,9 @@ if (event.type === 'complete') {
 
 **文件**：`src/core/message/message-processor.ts`
 
-**位置**：在 `_processMessageInternal()` 开始处，会话解析之后（约 1150 行）
+**位置**：在 `_processMessageInternal()` 中，**兜底纠正逻辑之后**（约 1142 行）
+
+**关键要求**：必须在兜底纠正逻辑之后执行，确保 `sessionMode` 已经稳定。
 
 **逻辑**：
 ```typescript
@@ -122,7 +124,22 @@ private async _processMessageInternal(
 ): Promise<void> {
   // ... 现有会话解析逻辑 ...
   
-  // 从 proactive 切换到 interactive 时注入提示
+  // 兜底纠正1：群聊强制 proactive
+  if (message.chatType === 'group' && session.sessionMode !== 'proactive') {
+    logger.info(`[MessageProcessor] group proactive upgrade: sessionId=${session.id} ${session.sessionMode} -> proactive`);
+    session.sessionMode = 'proactive';
+    await this.sessionManager.updateSession(session.id, { sessionMode: 'proactive' });
+  }
+  
+  // 兜底纠正2：非 human peerType 升级为 proactive
+  if (message.peerType && message.peerType !== 'human' && message.peerType !== 'unknown' && session.sessionMode !== 'proactive') {
+    logger.info(`[MessageProcessor] proactive upgrade: sessionId=${session.id} ${session.sessionMode} -> proactive (peerType=${message.peerType})`);
+    session.sessionMode = 'proactive';
+    await this.sessionManager.updateSession(session.id, { sessionMode: 'proactive' });
+  }
+  
+  // 【新增】从 proactive 切换到 interactive 时注入提示
+  // 注意：必须在兜底纠正之后，确保 sessionMode 已稳定
   if (session.sessionMode === 'interactive' && session.metadata?.lastProactiveFlag) {
     const hint = '本轮会话已切换为 interactive 模式，无需调用工具发送消息。\n\n';
     message.content = hint + message.content;
@@ -137,6 +154,11 @@ private async _processMessageInternal(
 }
 ```
 
+**为什么在兜底纠正之后**：
+1. 兜底纠正是强制性的（群聊必须 proactive，AI 对端必须 proactive）
+2. 如果兜底纠正把模式改回 proactive，说明这个会话本来就不应该是 interactive
+3. 提示注入应该基于最终确定的 sessionMode，避免无效注入
+
 ### 3.3 Metadata 持久化
 
 `session.metadata` 对象已通过以下机制持久化：
@@ -144,6 +166,22 @@ private async _processMessageInternal(
 - 存储位置：`{sessionsDir}/{channelType}/{channelId}/active.json` 和 `{sessionId}.jsonl`
 
 无需额外的持久化逻辑。
+
+### 3.4 消息内容修改的影响范围
+
+提示注入通过直接修改 `message.content` 实现，影响范围分析：
+
+| 影响点 | 是否受影响 | 说明 |
+|--------|-----------|------|
+| 消息日志（messages.jsonl） | ✅ 是 | 记录修改后的内容（包含提示），这是期望行为 |
+| 命令检测 | ❌ 否 | 命令在 MessageBridge 中已拦截，不会到达此处 |
+| Agent 输入 | ✅ 是 | Agent 看到的是修改后的内容（包含提示），这是核心功能 |
+| 后续消息处理 | ❌ 否 | 提示注入在消息处理早期，不影响后续逻辑 |
+
+**关键保证**：
+- 提示注入在兜底纠正之后、Agent 调用之前
+- 修改仅影响当前消息，不影响 session 状态（除了清除标记）
+- 提示只出现一次（标记清除后不再注入）
 
 ---
 
@@ -181,6 +219,36 @@ private async _processMessageInternal(
 
 **结论**：无影响。Autonomous 模式不受影响。
 
+### 4.5 与 Agent-to-Agent 纠错重试的交互
+
+**背景**：Agent-to-Agent 纠错重试机制（见第 14 节）也检测相同的标志位。
+
+**交互分析**：
+
+| 功能 | 激活条件 | 执行时机 | 操作 |
+|------|---------|---------|------|
+| 纠错重试 | proactive + AI 对端 | complete 事件后 | 检测标志位 → 验证发送 → 可能重试 |
+| 模式切换提示 | interactive 模式 | 新消息到达时 | 检测标记 → 注入提示 → 清除标记 |
+
+**互不干扰的保证**：
+1. **模式互斥**：纠错重试在 proactive 模式，提示注入在 interactive 模式
+2. **时机不同**：纠错重试在 complete 事件，提示注入在新消息到达
+3. **标记独立**：纠错重试检测 `lastReplyText`，提示注入检测 `metadata.lastProactiveFlag`
+
+**执行顺序**（Proactive → Interactive 切换）：
+```
+Proactive 会话：
+  1. Agent 输出（带标志位）
+  2. complete 事件 → 纠错重试检测（如果是 AI 对端）
+  3. complete 事件 → 设置 lastProactiveFlag
+
+切换到 Interactive：
+  4. 用户切换模式（/chatmode interactive）
+  5. 新消息到达 → 检测 lastProactiveFlag → 注入提示 → 清除标记
+```
+
+**结论**：两个功能可以安全共存，标志位检测逻辑可以共享。
+
 ---
 
 ## 5. 测试策略
@@ -202,29 +270,95 @@ private async _processMessageInternal(
 ### 5.2 集成测试
 
 **测试场景**：
-1. **Proactive → Interactive 切换**：
-   - 在 proactive 模式下发送带 `[PROACTIVE:REPLY_CONFIRMED_SENT]` 的消息
-   - 切换到 interactive 模式
-   - 发送新消息
-   - 验证提示出现在 agent 输入中
 
-2. **Proactive 中无标志位**：
-   - 在 proactive 模式下发送不带标志位的消息
-   - 切换到 interactive 模式
-   - 发送新消息
-   - 验证无提示出现
+#### 场景 1：Proactive → Interactive 切换（带标志位）
 
-3. **多条 proactive 消息**：
-   - 在 proactive 模式下发送 3 条带标志位的消息
-   - 切换到 interactive 模式
-   - 发送消息 → 验证提示出现
-   - 再发送一条消息 → 验证提示不出现（标记已清除）
+**前置条件**：
+- AUN 通道已连接
+- Session 初始为 proactive 模式
 
-4. **重启持久化**：
-   - 在 proactive 模式下设置标记
-   - 重启 EvolClaw
-   - 在 interactive 模式下发送消息
-   - 验证提示出现
+**步骤**：
+1. 在 proactive 模式下发送消息："你好"
+2. Agent 回复包含 `[PROACTIVE:REPLY_CONFIRMED_SENT]`
+3. 执行命令：`/chatmode interactive`
+4. 发送新消息："继续"
+5. 检查 agent 收到的输入
+
+**预期结果**：
+- Agent 收到的输入为："本轮会话已切换为 interactive 模式，无需调用工具发送消息。\n\n继续"
+- 日志包含：`Injected interactive mode hint for session ...`
+
+#### 场景 2：Proactive 中无标志位
+
+**前置条件**：
+- AUN 通道已连接
+- Session 初始为 proactive 模式
+
+**步骤**：
+1. 在 proactive 模式下发送消息："你好"
+2. Agent 回复**不包含**标志位（或包含 `[PROACTIVE:REPLY_CONFIRMED_NONE]`）
+3. 执行命令：`/chatmode interactive`
+4. 发送新消息："继续"
+5. 检查 agent 收到的输入
+
+**预期结果**：
+- Agent 收到的输入为："继续"（无提示）
+- 日志**不包含**：`Injected interactive mode hint`
+
+#### 场景 3：多条 proactive 消息
+
+**前置条件**：
+- AUN 通道已连接
+- Session 初始为 proactive 模式
+
+**步骤**：
+1. 发送消息 1："第一条" → Agent 回复（带标志位）
+2. 发送消息 2："第二条" → Agent 回复（带标志位）
+3. 发送消息 3："第三条" → Agent 回复（带标志位）
+4. 执行命令：`/chatmode interactive`
+5. 发送消息 4："第四条" → 检查输入（应有提示）
+6. 发送消息 5："第五条" → 检查输入（应无提示）
+
+**预期结果**：
+- 消息 4：包含提示
+- 消息 5：不包含提示（标记已清除）
+
+#### 场景 4：重启持久化
+
+**前置条件**：
+- AUN 通道已连接
+- Session 初始为 proactive 模式
+
+**步骤**：
+1. 在 proactive 模式下发送消息："你好" → Agent 回复（带标志位）
+2. 验证 `active.json` 中 `metadata.lastProactiveFlag === true`
+3. 执行：`evolclaw restart`
+4. 等待重启完成
+5. 执行命令：`/chatmode interactive`
+6. 发送新消息："继续"
+7. 检查 agent 收到的输入
+
+**预期结果**：
+- 重启后标记仍然存在
+- Agent 收到的输入包含提示
+- 日志包含：`Injected interactive mode hint`
+
+#### 场景 5：兜底纠正优先级
+
+**前置条件**：
+- AUN 通道已连接
+- Session 初始为 proactive 模式（群聊）
+
+**步骤**：
+1. 在 proactive 模式下发送消息（群聊）→ Agent 回复（带标志位）
+2. 手动修改 session 为 interactive（模拟配置错误）
+3. 发送新消息（群聊）
+4. 检查 sessionMode 和是否注入提示
+
+**预期结果**：
+- 兜底纠正将 sessionMode 改回 proactive
+- **不注入提示**（因为最终 sessionMode 是 proactive）
+- 日志包含：`group proactive upgrade`
 
 ---
 
