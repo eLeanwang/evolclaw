@@ -647,7 +647,14 @@ export class FeishuChannel {
         const truncated = content.slice(0, 28000) + '\n\n⚠️ 消息过长，已截断';
         return this.sendMessage(chatId, truncated, options);
       }
-      logger.error('[Feishu] Failed to send message:', error);
+      const respData = error?.response?.data;
+      const code = respData?.code;
+      logger.error('[Feishu] Failed to send message:', respData ? JSON.stringify(respData) : error?.message ?? error);
+      // post 格式相关错误（400/230001）：降级为纯文本重试
+      if (!options?.forceText && (error?.response?.status === 400 || code === 230001)) {
+        logger.warn('[Feishu] Retrying as plain text (forceText)');
+        return this.sendMessage(chatId, content, { ...options, forceText: true });
+      }
       throw error;
     }
   }
