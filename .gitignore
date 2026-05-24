@@ -90,3 +90,6 @@ src/experimental/
 ONBOARDING.md
 .codex
 .esdata/eck/
+.esdata/
+chatmode-code-audit.md
+chatmode-implementation-report.md

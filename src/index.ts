@@ -333,11 +333,15 @@ async function main() {
   );
 
   // sessionMode 解析：从 channel 路由到具体 agent，按 agent.config.chatmode
-  sessionManager.setSessionModeResolver((channelKey, chatType) => {
+  sessionManager.setSessionModeResolver((channelKey, chatType, peerType) => {
     const agent = agentRegistry.resolveByChannel(channelKey);
     const cm = agent?.config.chatmode;
     if (!cm) return undefined;
-    return chatType === 'group' ? cm.group : cm.private;
+
+    // 优先级：群聊 > nothuman > private
+    if (chatType === 'group') return cm.group;
+    if (peerType && peerType !== 'human' && peerType !== 'unknown') return cm.nothuman;
+    return cm.private;
   });
   logger.info('✓ Database initialized');
 

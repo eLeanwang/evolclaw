@@ -21,6 +21,7 @@ import { loadAgent, saveAgent } from '../config-store.js';
 import { getProcessStartTime } from '../utils/process-introspect.js';
 import * as outbox from '../aun/outbox.js';
 import { guessMime, formatSize } from '../utils/media-cache.js';
+import { PeerIdentityCache } from '../core/relation/peer-identity.js';
 
 /**
  * 构造 connect extra_info：自描述本进程身份。
@@ -1030,13 +1031,14 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     // device_id 仅 SDK 内部多实例去重用，evolclaw session 层面跨端共享会话
     const chatId = fromAid;
 
-    const peerInfo = await this.fetchPeerInfo(fromAid);
+    // 解析对端身份（30天缓存）
+    const peerIdentity = await PeerIdentityCache.resolve('aun', fromAid, this.agentDir, this.client, false);
     const shortAid = this.getShortAid(fromAid);
-    const displayName = peerInfo.name || shortAid;
+    const displayName = peerIdentity.name || shortAid;
 
     // 详细 dispatch 决策日志：记录消息为何被路由到 agent
     const p2pPayloadType = (payload && typeof payload === 'object') ? (payload as any).type ?? '' : '';
-    logger.info(`${this.logPrefix()} P2P dispatch decision: mid=${messageId} from=${shortAid}(${displayName}) peerType=${peerInfo.type || 'unknown'} payloadType=${p2pPayloadType} chatId=${chatId} encrypt=${msgEncrypted} textPreview=${JSON.stringify(text.slice(0, 80))}`);
+    logger.info(`${this.logPrefix()} P2P dispatch decision: mid=${messageId} from=${shortAid}(${displayName}) peerType=${peerIdentity.type} payloadType=${p2pPayloadType} chatId=${chatId} encrypt=${msgEncrypted} textPreview=${JSON.stringify(text.slice(0, 80))}`);
 
     // action_card_reply 已在 extractTextPayload 中消费，不分发给 agent
     if (p2pPayloadType === 'action_card_reply') return;
@@ -1048,7 +1050,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
         text: JSON.stringify(payload),
         chatType: 'private', messageId, seq,
         peerName: displayName || undefined,
-        peerType: peerInfo.type || undefined,
+        peerType: peerIdentity.type,
       });
       return;
     }
@@ -1075,7 +1077,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       taskId,
       mentions,
       peerName: displayName || undefined,
-      peerType: peerInfo.type || 'unknown',
+      peerType: peerIdentity.type,
       replyContext,
     });
   }
@@ -1257,9 +1259,9 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       }
     }
 
-    const peerInfo = await this.fetchPeerInfo(senderAid);
+    const peerIdentity = await PeerIdentityCache.resolve('aun', senderAid, this.agentDir, this.client, false);
     const shortAid = this.getShortAid(senderAid);
-    const displayName = peerInfo.name || shortAid;
+    const displayName = peerIdentity.name || shortAid;
 
     // 详细 dispatch 决策日志：记录消息为何被路由到 agent
     const payloadType = (payload && typeof payload === 'object') ? (payload as any).type ?? '' : '';
@@ -1272,7 +1274,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       : mentionedSelf
         ? (structMentionSelf ? 'mention.self(struct)' : 'mention.self(text)')
         : `${dispatchMode}.no-mention`;
-    logger.info(`${this.logPrefix()} Group dispatch decision: mid=${messageId} group=${groupId} sender=${shortAid}(${displayName}) peerType=${peerInfo.type || 'unknown'} payloadType=${payloadType} dispatchMode=${dispatchMode} reason=${reason} structMentions=${JSON.stringify(payloadMentions)} textMentionSelf=${textMentionSelf} textMentionAll=${textMentionAll} structMentionSelf=${structMentionSelf} structMentionAll=${structMentionAll} encrypt=${msgEncrypted} textPreview=${JSON.stringify(text.slice(0, 80))}`);
+    logger.info(`${this.logPrefix()} Group dispatch decision: mid=${messageId} group=${groupId} sender=${shortAid}(${displayName}) peerType=${peerIdentity.type} payloadType=${payloadType} dispatchMode=${dispatchMode} reason=${reason} structMentions=${JSON.stringify(payloadMentions)} textMentionSelf=${textMentionSelf} textMentionAll=${textMentionAll} structMentionSelf=${structMentionSelf} structMentionAll=${structMentionAll} encrypt=${msgEncrypted} textPreview=${JSON.stringify(text.slice(0, 80))}`);
 
     // action_card_reply 已在 extractTextPayload 中消费，不分发给 agent
     if (payloadType === 'action_card_reply') return;
@@ -1285,7 +1287,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       groupId,
       userId: senderAid,
       peerName: displayName || undefined,
-      peerType: peerInfo.type || 'unknown',
+      peerType: peerIdentity.type,
       text: finalText,
       chatType: 'group',
       messageId,

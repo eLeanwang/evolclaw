@@ -24,7 +24,7 @@ export type AdminResolver = (channel: string, userId: string) => boolean;
 /**
  * 解析新建 session 时的默认 sessionMode
  */
-export type SessionModeResolver = (channel: string, chatType: string) => 'interactive' | 'proactive' | undefined;
+export type SessionModeResolver = (channel: string, chatType: string, peerType?: string) => 'interactive' | 'proactive' | undefined;
 
 export class SessionManager {
   private sessionsDir: string;
@@ -56,10 +56,16 @@ export class SessionManager {
   }
 
   private resolveDefaultSessionMode(channel: string, chatType?: string, peerType?: string): 'interactive' | 'proactive' {
-    // 非 human 对端（ai/bot）强制 proactive，无视 agent 的默认 chatmode 配置
-    if (peerType && peerType !== 'human' && peerType !== 'unknown') return 'proactive';
     const ct = chatType || 'private';
-    const resolved = this.sessionModeResolver?.(channel, ct);
+
+    // 来源2：群聊强制 proactive
+    if (ct === 'group') return 'proactive';
+
+    // 来源3：非 human 对端（ai/bot）强制 proactive，无视 agent 的默认 chatmode 配置
+    if (peerType && peerType !== 'human' && peerType !== 'unknown') return 'proactive';
+
+    // 来源1：agent 配置默认值
+    const resolved = this.sessionModeResolver?.(channel, ct, peerType);
     return resolved || 'interactive';
   }
 

@@ -1,3 +1,4 @@
+import path from 'path';
 import type { ShortConnectionOpts } from '../rpc/index.js';
 import { createShortConnection } from '../rpc/index.js';
 import { uploadFileAndBuildPayload } from './upload.js';
@@ -90,6 +91,17 @@ export interface MsgSendArgs extends MsgCommonOpts {
 export async function msgSend(args: MsgSendArgs): Promise<MsgSendResult | MsgError> {
   const conn = await createShortConnection(args.from, { aunPath: args.aunPath, slotId: args.slotId });
   try {
+    // 1. 解析对端身份（30天缓存）
+    const { agentsDir } = resolvePaths();
+    const selfAgentDir = path.join(agentsDir, args.from);
+    const { PeerIdentityCache } = await import('../../core/relation/peer-identity.js');
+    const peerIdentity = await PeerIdentityCache.resolve('aun', args.to, selfAgentDir, conn, false);
+
+    // 2. 决定 chatmode（遵循来源1-3）
+    // 私聊：非 human 对端 → proactive，human 对端 → interactive
+    const chatmode = peerIdentity.isAgent ? 'proactive' : 'interactive';
+
+    // 3. 构建 payload
     let payload: Record<string, unknown>;
 
     switch (args.body.mode) {
@@ -116,12 +128,15 @@ export async function msgSend(args: MsgSendArgs): Promise<MsgSendResult | MsgErr
       }
     }
 
+    // 4. 写入 payload.chatmode
+    payload.chatmode = chatmode;
+
     const sendParams: Record<string, unknown> = { to: args.to, payload };
     // Default: plaintext. Set encrypt: true to enable E2EE.
     sendParams.encrypt = args.encrypt === true;
     const result = await conn.call('message.send', sendParams);
 
-    // 写出方向 jsonl（与 daemon 一致格式，标记 source=cli）
+    // 5. 写出方向 jsonl（与 daemon 一致格式，标记 source=cli）
     if (result?.message_id) {
       try {
         const sessionsDir = resolvePaths().sessionsDir;
@@ -137,7 +152,7 @@ export async function msgSend(args: MsgSendArgs): Promise<MsgSendResult | MsgErr
           msgId: result.message_id,
           content: textContent,
           encrypt: args.encrypt === true,
-          chatmode: 'interactive',
+          chatmode,  // 使用解析出的 chatmode
           msgType: 'text',
           source: 'cli',
         }));
