@@ -2854,7 +2854,7 @@ Options:
   } = await import('./agent.js');
 
   // --- list ---
-  if (sub === 'list') {
+  if (!sub || sub === 'list') {
     const result = await agentList();
     if (!result.ok) {
       if (formatJson) { console.log(JSON.stringify(result)); }
@@ -3214,7 +3214,7 @@ function resolveAunPath(args: string[]): string | undefined {
 }
 
 async function cmdAid(args: string[]): Promise<void> {
-  const sub = args[0];
+  const sub = args[0] || 'list';
   const formatJson = args.includes('--format') && args[args.indexOf('--format') + 1] === 'json';
   const aunPath = resolveAunPath(args);
 
