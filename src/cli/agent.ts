@@ -922,7 +922,7 @@ export async function agentChannelUpsert(opts: {
   return {
     ok: true,
     aid: opts.aid,
-    channelKey: `${opts.aid}#${opts.channel.type}#${opts.channel.name}`,
+    channelKey: `${opts.channel.type}#${encodeURIComponent(opts.aid)}#${opts.channel.name}`,
     reloaded,
   };
 }

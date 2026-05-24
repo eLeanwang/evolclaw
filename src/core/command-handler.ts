@@ -3807,9 +3807,10 @@ export class CommandHandler {
         const taskId = replyContext?.metadata?.taskId;
         const chatmode = (replyContext?.metadata?.chatmode as 'interactive' | 'proactive' | undefined) ?? 'interactive';
         // --encrypt 覆盖 session 加密状态
+        // 添加 source: 'ctl' 标记（用于区分 ec ctl send）
         const enrichedReplyContext = forceEncrypt
-          ? { ...(replyContext ?? {}), metadata: { ...(replyContext?.metadata ?? {}), encrypted: true } }
-          : replyContext;
+          ? { ...(replyContext ?? {}), metadata: { ...(replyContext?.metadata ?? {}), encrypted: true, source: 'ctl' } }
+          : { ...(replyContext ?? {}), metadata: { ...(replyContext?.metadata ?? {}), source: 'ctl' } };
         await adapter.send(buildEnvelope({ taskId, channel: adapter.channelName, channelId: session.channelId, chatmode, replyContext: enrichedReplyContext }), { kind: 'result.text', text, isFinal: true });
         // 出方向 jsonl 写入已下沉到 aun.ts:deliverTextEntry，message.send 成功后统一写入。
         return { ok: true, result: 'ok' };

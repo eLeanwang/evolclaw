@@ -877,6 +877,7 @@ export class WechatChannelPlugin implements ChannelPlugin {
 
       const adapter = {
         channelName: inst.name,
+        channelKey: inst.name,
         capabilities: { file: false, image: false, interaction: false, markdown: false, thought: false, status: true },
         send: async (envelope: any, payload: any) => {
           const channelId = envelope.channelId;

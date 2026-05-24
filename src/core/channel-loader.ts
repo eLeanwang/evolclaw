@@ -213,19 +213,19 @@ export class ChannelLoader {
 }
 
 // ── Channel Key ────────────────────────────────────────────────────────────
-// 编码格式：`<aid>#<type>#<name>`
+// 编码格式：`<type>#<urlEncode(selfPeerId)>#<name>`
 // `#` 不在 AID 合法字符集内，天然无歧义切分。
 
 export interface ChannelKey {
-  aid: string;
   type: string;
+  selfPeerId: string;
   name: string;
 }
 
 const SEP = '#';
 
 export function formatChannelKey(k: ChannelKey): string {
-  return `${k.aid}${SEP}${k.type}${SEP}${k.name}`;
+  return `${k.type}${SEP}${encodeURIComponent(k.selfPeerId)}${SEP}${k.name}`;
 }
 
 export function parseChannelKey(key: string): ChannelKey {
@@ -233,11 +233,11 @@ export function parseChannelKey(key: string): ChannelKey {
   if (parts.length !== 3) {
     throw new Error(`Invalid channel key (expected 3 segments separated by '#'): ${key}`);
   }
-  const [aid, type, name] = parts;
-  if (!aid || !type || !name) {
+  const [type, encodedSelfPeerId, name] = parts;
+  if (!type || !encodedSelfPeerId || !name) {
     throw new Error(`Invalid channel key (empty segment): ${key}`);
   }
-  return { aid, type, name };
+  return { type, selfPeerId: decodeURIComponent(encodedSelfPeerId), name };
 }
 
 export function tryParseChannelKey(key: string): ChannelKey | null {

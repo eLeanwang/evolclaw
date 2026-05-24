@@ -1,7 +1,7 @@
 import { ClaudeSessionFileAdapter } from './core/session/adapters/claude-session-file-adapter.js';
 import { CodexSessionFileAdapter } from './core/session/adapters/codex-session-file-adapter.js';
 import { GeminiSessionFileAdapter } from './core/session/adapters/gemini-session-file-adapter.js';
-import { ensureDataDirs, resolvePaths, agentDir, getPackageRoot } from './paths.js';
+import { ensureDataDirs, resolvePaths, agentDir, getPackageRoot, agentMdPath } from './paths.js';
 import { resolveAnthropicConfig } from './agents/resolve.js';
 import { loadDefaults, loadAllAgents, mergeForAgent, ensureAgentDirSkeleton, autoMigrateIfNeeded, migrateIdentitiesIfNeeded } from './config-store.js';
 import type { Config, MergedAgentConfig, AgentConfig, DefaultsConfig } from './types.js';
@@ -609,11 +609,11 @@ async function main() {
     if (inst.onProjectPathRequest && inst.channel.onProjectPathRequest) {
       inst.channel.onProjectPathRequest(async (channelId: string) => {
         // Effective default path: use the agent that owns this channel.
-        const owningAgent = agentRegistry.resolveByChannel(inst.adapter.channelName);
+        const owningAgent = agentRegistry.resolveByChannel(inst.adapter.channelKey);
         const effectiveDefault = owningAgent?.projectPath
           ?? primaryAgent.projectPath;
         const session = await sessionManager.getOrCreateSession(
-          inst.adapter.channelName, channelId,
+          inst.adapter.channelKey, channelId,
           effectiveDefault,
           undefined, undefined, undefined, undefined
         );
@@ -665,9 +665,9 @@ async function main() {
 
   // Bind adapters to their owning agents and mark running
   for (const inst of channelInstances) {
-    const agent = agentRegistry.resolveByChannel(inst.adapter.channelName);
+    const agent = agentRegistry.resolveByChannel(inst.adapter.channelKey);
     if (!agent || agent.status === 'error') continue;
-    agent.channels.set(inst.adapter.channelName, inst.adapter);
+    agent.channels.set(inst.adapter.channelKey, inst.adapter);
     if (agent.status === 'stopped') {
       agent.status = 'running';
     }
@@ -685,7 +685,7 @@ async function main() {
   for (const inst of channelInstances) {
     const channelType = inst.channelType || inst.adapter.channelName;
     if (channelType === 'feishu' && 'preloadThreads' in inst.channel) {
-      const threadIds = sessionManager.getKnownThreadIds(inst.adapter.channelName);
+      const threadIds = sessionManager.getKnownThreadIds(inst.adapter.channelKey);
       (inst.channel as any).preloadThreads(threadIds);
     }
   }
@@ -715,9 +715,8 @@ async function main() {
       // 尝试从 agent.md 读取 name
       let agentName = agent.aid;
       try {
-        const aunPath = process.env.AUN_HOME || path.join(os.homedir(), '.aun');
-        const agentMdPath = path.join(aunPath, 'AIDs', agent.aid, 'agent.md');
-        const content = fs.readFileSync(agentMdPath, 'utf-8');
+        const mdPath = agentMdPath(agent.aid);
+        const content = fs.readFileSync(mdPath, 'utf-8');
         const nameMatch = content.match(/^name:\s*"?([^"\n]+)/m);
         if (nameMatch) agentName = nameMatch[1].trim().replace(/"$/, '');
       } catch {}
@@ -751,13 +750,13 @@ async function main() {
       const otherType = other.channelType || other.adapter.channelName;
       if (otherType === sourceChannelType) continue;  // 跳过同类型通道
       if (notified.has(otherType)) continue;  // 同类型已通知过
-      const ownerId = agentRegistry.getOwner(other.adapter.channelName);
+      const ownerId = agentRegistry.getOwner(other.adapter.channelKey);
       if (!ownerId) continue;
       notified.add(otherType);
-      const owningAgent = agentRegistry.resolveByChannel(other.adapter.channelName);
+      const owningAgent = agentRegistry.resolveByChannel(other.adapter.channelKey);
       const envelope = buildEnvelope({
         taskId: `system-channel-down-${crypto.randomBytes(5).toString('hex')}`,
-        channel: other.adapter.channelName,
+        channel: other.adapter.channelKey,
         channelId: ownerId,
         agentName: owningAgent?.aid || 'evolclaw',
       });
@@ -851,10 +850,10 @@ async function main() {
         const replyContext = pending.rootId
           ? { replyToMessageId: pending.rootId, replyInThread: !!pending.threadId }
           : undefined;
-        const owningAgent = agentRegistry.resolveByChannel(adapter.channelName);
+        const owningAgent = agentRegistry.resolveByChannel(adapter.channelKey);
         const envelope = buildEnvelope({
           taskId: `system-restart-${process.pid}`,
-          channel: adapter.channelName,
+          channel: adapter.channelKey,
           channelId: pending.channelId,
           agentName: owningAgent?.aid || 'evolclaw',
           replyContext,
@@ -955,7 +954,7 @@ async function main() {
     const instances = await channelLoader.createForAgent(agent);
     for (const inst of instances) {
       registerChannelInstance(inst);
-      agent.channels.set(inst.adapter.channelName, inst.adapter);
+      agent.channels.set(inst.adapter.channelKey, inst.adapter);
       channelInstances.push(inst);
     }
     agent.status = 'running';
