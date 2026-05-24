@@ -6,6 +6,23 @@ import fs from 'fs';
 import path from 'path';
 import { resolvePaths } from '../../paths.js';
 
+/**
+ * 检测是否为上下文过长错误
+ * 统一的检测逻辑，覆盖所有已知的错误文本模式
+ */
+function isContextTooLongError(text: string): boolean {
+  if (!text) return false;
+  const lower = text.toLowerCase();
+  return (
+    lower.includes('prompt is too long') ||
+    lower.includes('input is too long') ||
+    lower.includes('context too long') ||
+    lower.includes('context limit') ||
+    lower.includes('context_length_exceeded') ||
+    text.includes('上下文过长')
+  );
+}
+
 let diagStream: fs.WriteStream | null = null;
 function getDiagStream(): fs.WriteStream {
   if (!diagStream) {
@@ -510,10 +527,20 @@ export class IMRenderer {
         };
       }
 
-      case 'error':
+      case 'error': {
+        // 上下文过长错误不输出（留给外层 auto-compact 处理）
+        if (isContextTooLongError(event.error || '')) return null;
         return { kind: 'notice', text: event.error, severity: 'warn' };
+      }
 
-      case 'complete':
+      case 'complete': {
+        // 上下文过长错误不输出（留给外层 auto-compact 处理）
+        const hasContextError = event.terminalReason === 'prompt_too_long'
+          || isContextTooLongError(event.errors?.join(' ') || '')
+          || isContextTooLongError(event.result || '');
+        if (event.isError && hasContextError) {
+          return null;
+        }
         if (event.isError) {
           const errText = event.errors?.join('; ') || event.result || '任务失败';
           return {
@@ -533,6 +560,7 @@ export class IMRenderer {
           };
         }
         return null;
+      }
 
       case 'session_id':
       case 'state_changed':
