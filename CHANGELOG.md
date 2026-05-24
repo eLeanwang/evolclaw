@@ -1,5 +1,27 @@
 # Changelog
 
+## v3.1.1 (2026-05-24)
+
+### New Features
+
+- **status.progress 事件系统** — 新增实时进度事件，包含 activityType 和 outputTokens 元数据，支持工具调用进度追踪
+- **/trigger update 命令** — 支持修改已有触发器配置
+
+### Improvements
+
+- **CLI 工具优化** — watch session/msg/aid 命令增强，agent list 表头国际化和动态列宽对齐
+- **chatmode 机制增强** — 群聊强制 proactive 模式，PeerIdentityCache 初始化时创建 agentDir
+- **消息流程梳理** — 优化消息监控和 AID 追踪，完善 task_id 诊断日志
+
+### Bug Fixes
+
+- **渠道 status.progress 处理** — 修复 Feishu、DingTalk、QQBot、WeCom、WeChat 五个渠道缺失 status.progress 事件处理
+- **Feishu post 格式降级** — post 格式发送失败时自动降级为纯文本重试
+- **im-renderer 错误抑制** — 抑制 context-too-long 错误输出
+- **AUN agent 间消息 chatmode** — 修复 agent 间消息 chatmode 显示错误
+- **turn counting 去重** — 修复 turn 计数重复，正确传递 outputTokens 到 tool_call progress
+- **plan mode 显示优化** — 修复计划内容显示 + notice emoji 去重 + 命令输出精简
+
 ## v3.1.0 (2026-05-23)
 
 ### New Features
