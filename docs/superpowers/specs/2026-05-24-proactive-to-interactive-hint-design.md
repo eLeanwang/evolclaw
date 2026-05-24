@@ -388,25 +388,91 @@ session.metadata.suppressModeHints = true;
 
 ---
 
-## 14. 附录
+## 14. 背景：Agent-to-Agent 回复校验机制
 
-### 14.1 相关文档
+本节内容来自 `proactive-mode-design.md` 第 11 节，说明标志位的原始设计背景和用途。
+
+### 14.1 背景
+
+Proactive 模式下 Agent 与 Agent 对话时，LLM 容易用普通文本输出而非调用 `evolclaw ctl send`，导致消息实际未发出。
+
+### 14.2 适用范围
+
+仅在以下条件**同时满足**时激活，其他场景零侵入：
+- `chatmode === 'proactive'`
+- `peerType === 'ai' | 'assistant'`
+
+Interactive 模式不适用（Agent 输出直接呈现给用户，注入标志位会污染对话内容）。
+
+### 14.3 标志位定义
+
+通过系统提示词要求 Agent 在回复中包含以下两个标志位之一（无位置限制）：
+
+| 标志位 | 含义 |
+|--------|------|
+| `[PROACTIVE:REPLY_CONFIRMED_SENT]` | 本轮已调用工具发送消息 |
+| `[PROACTIVE:REPLY_CONFIRMED_NONE]` | 本轮确认无需回复 |
+
+`PROACTIVE:` 前缀为项目专属，极低误命中概率。
+
+### 14.4 Channel 后置校验逻辑
+
+`complete` 事件触发后执行：
+
+```
+有 [PROACTIVE:REPLY_CONFIRMED_NONE] → 正常结束
+有 [PROACTIVE:REPLY_CONFIRMED_SENT] → 验证本轮是否有成功的 ctl send tool_result
+    ├─ 有 → 正常结束
+    └─ 无 → 触发纠错重试（最多 2 次）
+无标志位
+    ├─ 本轮有成功 ctl send tool_result → 视为正常（Agent 发了但忘写标志位）
+    └─ 本轮无 ctl send → 记录警告日志，不重试（保守处理，避免误触发）
+```
+
+### 14.5 纠错重试
+
+- 最大重试次数：**2 次**，超出后记录日志放弃
+- 重试注入 prompt：`"上一轮消息未实际发出，请重新调用工具发送"`（注入为新的 user message）
+- 重试轮次的输出**不转发给对端**，仅用于 Channel 内部纠错
+
+### 14.6 风险控制
+
+| 风险 | 控制措施 |
+|------|----------|
+| 重复发送 | 只有"有 `REPLY_CONFIRMED_SENT` 但无成功 tool_result"才重试，条件严格 |
+| 无限循环 | 最大 2 次硬限制 |
+| 上下文污染 | 仅 Proactive + AI 对端时激活；Interactive 模式完全不触发 |
+| 误命中标志位 | `PROACTIVE:` 专属前缀双重保护 |
+
+### 14.7 与本设计的关系
+
+本设计（Proactive-to-Interactive 模式切换提示）复用了相同的标志位机制：
+- **标志位检测**：在 `complete` 事件中检测 `[PROACTIVE:REPLY_CONFIRMED_*]`
+- **用途不同**：原设计用于纠错重试，本设计用于模式切换提示
+- **互不干扰**：两个功能可以共存，标志位检测逻辑可以共享
+
+---
+
+## 15. 附录
+
+### 15.1 相关文档
 
 - `proactive-mode-design.md` - 原始 proactive 模式设计（第 11 节：Agent 到 Agent 回复验证）
 - `docs/multi-session-design.md` - 会话管理架构
 - `docs/architecture.md` - 整体系统架构
 
-### 14.2 术语表
+### 15.2 术语表
 
 - **Proactive 模式**：Agent 必须显式调用 `evolclaw ctl send` 发送消息
 - **Interactive 模式**：Agent 的文本输出自动发送给用户
 - **标志位**：特殊字符串（`[PROACTIVE:REPLY_CONFIRMED_*]`）指示 agent 的发送意图
 - **标记**：布尔 metadata 字段，跟踪上一次会话中是否使用了标志位
 - **提示**：注入的消息，通知 agent 模式切换
+- **纠错重试**：Agent-to-Agent 对话中，检测到标志位但未实际发送时的自动重试机制
 
 ---
 
-**文档版本**：1.0  
+**文档版本**：1.1  
 **最后更新**：2026-05-24  
 **作者**：Claude（通过 brainstorming skill）  
 **状态**：草稿 - 等待审查
