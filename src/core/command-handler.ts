@@ -16,7 +16,7 @@ import crypto from 'crypto';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
-import { parseTriggerSet } from './trigger/parser.js';
+import { parseTriggerSet, parseTriggerUpdate } from './trigger/parser.js';
 import { TriggerManager } from './trigger/manager.js';
 import { TriggerScheduler, calcNextFireAt } from './trigger/scheduler.js';
 import type { Trigger } from '../types.js';
@@ -3455,6 +3455,47 @@ export class CommandHandler {
       return `✅ 触发器已取消：**${trigger.name}**`;
     }
 
+    // /trigger update <name|id> [--参数...]
+    if (sub.startsWith('update ')) {
+      if (!manager || !scheduler) return '⚠️ 触发器功能未启用';
+      const args = sub.slice('update '.length);
+      const result = parseTriggerUpdate(args);
+      if (!result.ok) return `❌ ${result.error}`;
+
+      const { nameOrId, value: patch } = result;
+
+      // Find trigger: non-admin lookup is scoped
+      let trigger: ReturnType<typeof manager.getById>;
+      if (isAdmin) {
+        trigger = manager.getByName(nameOrId) ?? manager.getById(nameOrId);
+      } else {
+        trigger = manager.getByNameScoped(nameOrId, peerId, channel)
+               ?? manager.getByIdScoped(nameOrId, peerId, channel);
+      }
+      if (!trigger) {
+        return isAdmin
+          ? `❌ 未找到触发器：${nameOrId}`
+          : `❌ 未找到触发器 "${nameOrId}"，或无权限修改`;
+      }
+
+      // If schedule changed, recalculate nextFireAt
+      if (patch.scheduleType && patch.scheduleValue) {
+        const now = Date.now();
+        patch.nextFireAt = calcNextFireAt(patch.scheduleType, patch.scheduleValue, now);
+      }
+
+      let updated: Trigger;
+      try {
+        updated = manager.update(trigger.id, patch);
+        scheduler.update(updated);
+      } catch (err: any) {
+        return `❌ 更新失败：${err.message}`;
+      }
+
+      const nextStr = new Date(updated.nextFireAt).toLocaleString();
+      return `✅ 触发器已更新：**${updated.name}**\n下次触发：${nextStr}`;
+    }
+
     // /trigger set ...
     if (sub.startsWith('set ')) {
       if (!manager || !scheduler) return '⚠️ 触发器功能未启用';
@@ -3502,7 +3543,7 @@ export class CommandHandler {
       return `✅ 触发器已注册：**${name}**\n下次触发：${nextStr}`;
     }
 
-    return `❌ 未知子命令。用法：\n/trigger — 查看活跃触发器\n/trigger list — 查看所有触发器\n/trigger set <参数> — 注册触发器\n/trigger cancel <名称> — 取消触发器`;
+    return `❌ 未知子命令。用法：\n/trigger — 查看活跃触发器\n/trigger list — 查看所有触发器\n/trigger set <参数> — 注册触发器\n/trigger update <名称|ID> <参数> — 修改触发器\n/trigger cancel <名称> — 取消触发器`;
   }
 
   // ── /rewind helpers ──

@@ -32,8 +32,20 @@
 ```
 /trigger              查看活跃触发器
 /trigger list         查看所有触发器（含历史）
+/trigger update <名称|ID> <参数>   修改触发器
 /trigger cancel <名称|ID>   取消触发器
 ```
+
+### 修改触发器
+
+```
+/trigger update <名称|ID> [--delay <时长>] [--at <ISO时间>] [--cron <表达式>]
+                          [--prompt "<任务内容>"] [--name <新名称>]
+                          [--session latest|silent] [--agent <名称>]
+                          [--channel <实例名> --channelid <id>]
+```
+
+至少指定一个修改参数。未指定的字段保持不变。
 
 ## 会话策略
 
@@ -52,12 +64,15 @@
 /trigger set --delay 30m --prompt "检查构建状态并汇报"
 /trigger set --at 2026-05-16T09:00 --prompt "生成日报" --session silent
 /trigger set --cron "0 */6 * * *" --prompt "检查服务健康" --session silent --name health-check
-/trigger cancel health-check
+/trigger update health-check --cron "0 */4 * * *"
+/trigger update health-check --prompt "检查服务健康并清理过期日志" --name health-check-v2
+/trigger cancel health-check-v2
 ```
 
 ## 注意事项
 
-- 触发器不支持修改，需 cancel 后重建
 - `--thread` 与 `--session` 互斥
 - `--channel` 与 `--channelid` 必须同时指定或同时省略
 - delay/at 类型触发一次后自动归档；cron 类型持续触发直到 cancel
+- 修改触发器时，未指定的字段保持不变
+- 修改 cron 触发器的时间表达式会立即重新计算下次触发时间
