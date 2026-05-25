@@ -15,7 +15,9 @@
     "kits/",
     "!kits/.kits-version",
     "*.md",
-    "!CLAUDE.md"
+    "!CLAUDE.md",
+    "!DEPLOYMENT.md",
+    "!ONBOARDING.md"
   ],
   "scripts": {
     "dev": "tsx watch src/index.ts",
