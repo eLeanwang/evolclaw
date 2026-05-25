@@ -106,6 +106,22 @@ export class TriggerManager {
     return { active, history };
   }
 
+  update(id: string, patch: Partial<Pick<Trigger, 'name' | 'scheduleType' | 'scheduleValue' | 'nextFireAt' | 'targetChannel' | 'targetChannelId' | 'targetThreadId' | 'targetSessionStrategy' | 'agentId' | 'prompt'>>): Trigger {
+    const t = this.triggers.get(id);
+    if (!t) throw new Error(`触发器不存在：${id}`);
+    // Check name uniqueness if name is being changed
+    if (patch.name && patch.name !== t.name) {
+      for (const other of this.triggers.values()) {
+        if (other.id !== id && other.name === patch.name) {
+          throw new Error(`触发器名称已存在：${patch.name}`);
+        }
+      }
+    }
+    Object.assign(t, patch, { updatedAt: Date.now() });
+    this.save();
+    return t;
+  }
+
   updateFireStats(id: string, firedAt: number): void {
     const t = this.triggers.get(id);
     if (!t) return;

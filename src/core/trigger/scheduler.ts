@@ -150,6 +150,13 @@ export class TriggerScheduler {
     this.resetTimer();
   }
 
+  update(trigger: Trigger): void {
+    this.heap.remove(trigger.id);
+    this.heap.push(trigger);
+    this.resetTimer();
+    this.eventBus.publish({ type: 'trigger:updated', triggerId: trigger.id, name: trigger.name, peerId: trigger.createdByPeerId });
+  }
+
   stop(): void {
     if (this.timer) {
       clearTimeout(this.timer);

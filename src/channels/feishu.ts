@@ -271,7 +271,7 @@ export class FeishuChannel {
               const imageData = await this.downloadAndSaveImage(imageKey, msg.chat_id, msg.message_id, projectPath);
               if (imageData) {
                 const allImages = [...quotedImages, imageData];
-                const prompt = quotedText + '用户发送了一张图片，请分析这张图片的内容。';
+                const prompt = quotedText + '用户发送了一张图片，请结合上下文理解用户意图并回应。';
                 await this.messageHandler({ channelId: msg.chat_id, content: prompt, images: allImages, peerId, peerName, messageId: msg.message_id, threadId, rootId, chatType });
               } else {
                 const prompt = quotedText + '[图片下载失败] 应用可能缺少 im:message 或 im:message:readonly 权限';
@@ -647,7 +647,14 @@ export class FeishuChannel {
         const truncated = content.slice(0, 28000) + '\n\n⚠️ 消息过长，已截断';
         return this.sendMessage(chatId, truncated, options);
       }
-      logger.error('[Feishu] Failed to send message:', error);
+      const respData = error?.response?.data;
+      const code = respData?.code;
+      logger.error('[Feishu] Failed to send message:', respData ? JSON.stringify(respData) : error?.message ?? error);
+      // post 格式相关错误（400/230001）：降级为纯文本重试
+      if (!options?.forceText && (error?.response?.status === 400 || code === 230001)) {
+        logger.warn('[Feishu] Retrying as plain text (forceText)');
+        return this.sendMessage(chatId, content, { ...options, forceText: true });
+      }
       throw error;
     }
   }
@@ -1517,6 +1524,7 @@ export class FeishuChannelPlugin implements ChannelPlugin {
             case 'status.interrupted':
             case 'status.error':
             case 'status.timeout':
+            case 'status.progress':
               // Feishu 通过 acknowledge (✓ 表情) 表达状态，由 channel 自行处理
               return;
             case 'interaction':

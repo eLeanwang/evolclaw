@@ -10,7 +10,7 @@ import type { ChannelPlugin, ChannelInstance, BridgeHookContext } from '../core/
 import type { MessageBridge } from '../core/message/message-bridge.js';
 import type { Config, ReplyContext, AunChannelConfig, AidConnectionState, AidStatus, AidKickDetail, InteractionResponse, ActionInteraction, CommandCard } from '../types.js';
 import { normalizeChannelInstances, getChannelShowActivities } from '../utils/channel-helpers.js';
-import { resolvePaths, getPackageRoot, agentMdPath as agentMdPathFn } from '../paths.js';
+import { resolvePaths, getPackageRoot, agentMdPath as agentMdPathFn, agentDir as agentDirPath } from '../paths.js';
 import { saveToUploads, sanitizeFileName } from '../utils/media-cache.js';
 import { appendAidEvent } from '../utils/instance-registry.js';
 import { appendMessageLog, buildOutboundEntry } from '../core/message/message-log.js';
@@ -108,6 +108,7 @@ export class AUNChannel {
   private queuedHandler: ((event: any) => void) | null = null;
   private pendingEchoMessages = new Map<string, { text: string; channelId: string; context?: ReplyContext; receiveTs: number }>();
   private isEchoSending = false;
+  private agentDir: string;
 
   private trace(dir: 'IN' | 'OUT', event: string, data: unknown): void {
     if (!this.config.aunTrace) return;
@@ -515,6 +516,7 @@ export class AUNChannel {
   private aidStatsCollector?: AidStatsCollector;
 
   constructor(private config: AUNConfig) {
+    this.agentDir = agentDirPath(config.aid);
     if (config.aunTrace) {
       this.traceWriter = new LogWriter({
         baseName: 'aun',
@@ -2280,7 +2282,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     this.messageSeqMap.delete(messageId);
   }
 
-  sendProcessingStatus(channelId: string, status: 'start' | 'done' | 'interrupted' | 'error' | 'timeout' | 'queued', sessionId: string, taskId: string, context?: ReplyContext): void {
+  sendProcessingStatus(channelId: string, status: 'start' | 'done' | 'interrupted' | 'error' | 'timeout' | 'queued' | 'progress', sessionId: string, taskId: string, context?: ReplyContext, extraMeta?: Record<string, unknown>): void {
     if (status === 'start') this.sentCount.delete(channelId);  // 新任务开始，重置计数
     if (!this.client || !this.connected) return;
 
@@ -2292,6 +2294,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       error: 'error',
       timeout: 'timeout',
       queued: 'queued',
+      progress: 'progress',
     };
     const statusPayload: Record<string, any> = {
       type: 'status',
@@ -2299,6 +2302,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       task_id: taskId,
       session_id: sessionId,
       severity,
+      ...(extraMeta && Object.keys(extraMeta).length > 0 && { metadata: extraMeta }),
     };
     if (context?.threadId) statusPayload.thread_id = context.threadId;
     if (context?.peerId) statusPayload.initiator = context.peerId;
@@ -2348,7 +2352,8 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     const chatmode = context?.metadata?.chatmode ?? '?';
     const initiator = statusPayload.initiator ?? '';
     const refMsgId = statusPayload.ref_message_id ?? '';
-    logger.info(`${this.logPrefix()} task.${status} task=${taskId} session=${sessionId} chatmode=${chatmode} target=${targetLabel} initiator=${initiator} ref_msg=${refMsgId}`);
+    const metaStr = statusPayload.metadata ? ` meta=${JSON.stringify(statusPayload.metadata)}` : '';
+    logger.info(`${this.logPrefix()} task.${status} task=${taskId} session=${sessionId} chatmode=${chatmode} target=${targetLabel} initiator=${initiator} ref_msg=${refMsgId}${metaStr}`);
   }
 
   sendCustomPayload(channelId: string, payload: string): void {
@@ -2621,6 +2626,9 @@ export class AUNChannelPlugin implements ChannelPlugin {
               }
               return;
             }
+            case 'status.progress':
+              channel.sendProcessingStatus(channelId, 'progress', envelope.taskId, envelope.taskId, ctx, payload.metadata);
+              return;
             case 'status.started':
               channel.sendProcessingStatus(channelId, 'start', envelope.taskId, envelope.taskId, ctx);
               return;

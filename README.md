@@ -277,7 +277,7 @@ evolclaw/
 ## 技术栈
 
 - **运行时**：Node.js >= 22 + TypeScript（ES modules）
-- **AI SDK**：@anthropic-ai/claude-agent-sdk >= 0.2.75、@openai/codex-sdk、Gemini CLI
+- **AI SDK**：@anthropic-ai/claude-agent-sdk >= 0.2.100、@openai/codex-sdk、Gemini CLI
 - **消息渠道**：飞书（@larksuiteoapi/node-sdk）、微信（ClawBot ilink API）、钉钉（dingtalk-stream）、QQ频道（pure-qqbot）、企业微信（AI Bot API）、AUN 网络
 - **数据存储**：文件系统（per-chat 目录） + JSONL（CLI 共用）
 - **测试框架**：Vitest

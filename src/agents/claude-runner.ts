@@ -118,9 +118,9 @@ class MessageStream {
 
 // ── 标准事件流（Gateway 消费的统一事件类型）──
 export type AgentEvent =
-  | { type: 'text'; text: string }
+  | { type: 'text'; text: string; outputTokens?: number; turn?: number }
   | { type: 'status'; subtype: string; message: string }
-  | { type: 'tool_use'; name: string; input: any; callId?: string }
+  | { type: 'tool_use'; name: string; input: any; callId?: string; turn?: number; outputTokens?: number }
   | { type: 'tool_result'; name: string; result: any; isError?: boolean; error?: string; callId?: string }
   | { type: 'compact'; preTokens: number }
   | { type: 'task_progress'; summary?: string; toolUses?: number; durationMs?: number }
@@ -655,6 +655,25 @@ export class AgentRunner {
     // 尝试发送交互卡片
     let cardSent = false;
     if (permCtx.adapter?.send) {
+      // 发送计划内容：找 plans 目录中最新修改的 .md 文件
+      if (sendPrompt) {
+        try {
+          const plansDir = path.join(process.env.HOME || '/root', '.claude', 'plans');
+          const files = fs.readdirSync(plansDir)
+            .filter((f: string) => f.endsWith('.md'))
+            .map((f: string) => ({ name: f, mtime: fs.statSync(path.join(plansDir, f)).mtimeMs }))
+            .sort((a: { mtime: number }, b: { mtime: number }) => b.mtime - a.mtime);
+          if (files.length > 0) {
+            const planContent = fs.readFileSync(path.join(plansDir, files[0].name), 'utf-8');
+            if (planContent.trim()) {
+              await sendPrompt(`📋 **计划内容**\n\n${planContent}`);
+            }
+          }
+        } catch {
+          // 读取失败不影响后续审批流程
+        }
+      }
+
       const requestId = `plan-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const interaction: InteractionRequest = {
         type: 'interaction',
@@ -762,6 +781,8 @@ export class AgentRunner {
     let lastSessionId: string | undefined;
     // tool_use_id → tool_name 映射，用于从 SDKUserMessage 的 tool_result 块中还原工具名
     const toolUseNames = new Map<string, string>();
+    let turnCount = 0;
+    const seenMessageIds = new Set<string>();
 
     for await (const event of sdkStream) {
       // 提取 session_id（任意 SDK 事件都可能携带）
@@ -793,13 +814,27 @@ export class AgentRunner {
 
       // assistant: 提取 tool_use 和文本（仅无 text_delta 时提取文本）
       if (event.type === 'assistant' && event.message?.content) {
+        const msgId = event.message.id;
+        if (!msgId || !seenMessageIds.has(msgId)) {
+          if (msgId) seenMessageIds.add(msgId);
+          turnCount++;
+        }
+        // 统计本轮 base agent 全部输出字符数（text + tool_use input）
+        let turnOutputChars = 0;
         for (const content of event.message.content) {
           if (content.type === 'tool_use') {
-            // 记录 id → name 映射，供后续 tool_result 使用
-            if (content.id) toolUseNames.set(content.id, content.name);
-            yield { type: 'tool_use', name: content.name, input: content.input, callId: content.id };
+            const inputStr = typeof content.input === 'string' ? content.input : JSON.stringify(content.input || '');
+            turnOutputChars += inputStr.length;
           } else if (content.type === 'text' && content.text) {
-            yield { type: 'text', text: content.text };
+            turnOutputChars += content.text.length;
+          }
+        }
+        for (const content of event.message.content) {
+          if (content.type === 'tool_use') {
+            if (content.id) toolUseNames.set(content.id, content.name);
+            yield { type: 'tool_use', name: content.name, input: content.input, callId: content.id, turn: turnCount, outputTokens: turnOutputChars };
+          } else if (content.type === 'text' && content.text) {
+            yield { type: 'text', text: content.text, outputTokens: turnOutputChars, turn: turnCount };
           }
         }
       }

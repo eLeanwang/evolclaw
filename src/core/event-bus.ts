@@ -85,6 +85,7 @@ export type TriggerEvent =
   | { type: 'trigger:completed'; triggerId: string; messageId: string; durationMs: number }
   | { type: 'trigger:failed'; triggerId: string; messageId: string; error: string }
   | { type: 'trigger:skipped'; triggerId: string; reason: 'overlap' | 'interrupted' }
+  | { type: 'trigger:updated'; triggerId: string; name: string; peerId: string }
   | { type: 'trigger:cancelled'; triggerId: string; by: string };
 export type GatewayEvent =
   | SystemEvent

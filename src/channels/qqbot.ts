@@ -434,6 +434,7 @@ export class QQBotChannelPlugin implements ChannelPlugin {
             case 'status.interrupted':
             case 'status.error':
             case 'status.timeout':
+            case 'status.progress':
             case 'custom':
               return;
             default:

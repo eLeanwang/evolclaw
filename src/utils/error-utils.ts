@@ -266,27 +266,29 @@ export function isRetryableError(error: any): boolean {
   return false;
 }
 
-export function getErrorMessage(error: any, terminalReason?: string): string {
+export function getErrorMessage(error: any, terminalReason?: string, includeEmoji = true): string {
   // terminalReason 提供更精确的错误提示（SDK 0.2.100+）
   if (terminalReason) {
+    const prefix = includeEmoji ? '❌ ' : '';
+    const warnPrefix = includeEmoji ? '⚠️ ' : '';
     switch (terminalReason) {
       case 'max_turns':
-        return '❌ 任务达到最大轮次限制，请简化需求或分步执行';
+        return `${prefix}任务达到最大轮次限制，请简化需求或分步执行`;
       case 'prompt_too_long':
-        return '⚠️ 输入过长，请精简提问或使用 /compact 压缩上下文';
+        return `${warnPrefix}输入过长，请精简提问或使用 /compact 压缩上下文`;
       case 'rapid_refill_breaker':
-        return '⚠️ API 限流中，请稍后重试';
+        return `${warnPrefix}API 限流中，请稍后重试`;
       case 'context_compact_failed':
-        return '⚠️ 上下文过长，自动压缩失败，请手动输入 /compact 重试';
+        return `${warnPrefix}上下文过长，自动压缩失败，请手动输入 /compact 重试`;
       case 'model_error':
-        return '❌ 模型服务异常，请稍后重试';
+        return `${prefix}模型服务异常，请稍后重试`;
       case 'tool_error':
-        return '❌ 工具执行失败，请检查操作或重试';
+        return `${prefix}工具执行失败，请检查操作或重试`;
       case 'permission_denied':
-        return '❌ 权限被拒绝，操作已取消';
+        return `${prefix}权限被拒绝，操作已取消`;
       case 'aborted_streaming':
       case 'aborted_tools':
-        return '❌ 任务已中断';
+        return `${prefix}任务已中断`;
     }
   }
 
@@ -298,16 +300,18 @@ export function getErrorMessage(error: any, terminalReason?: string): string {
   if (rule?.message) return rule.message;
 
   // 内置兜底规则（结构性错误）
+  const warnPrefix = includeEmoji ? '⚠️ ' : '';
+  const errPrefix = includeEmoji ? '❌ ' : '';
   if (msg.includes('CONTEXT_COMPACT_FAILED') || msg.includes('context_length_exceeded')
     || msg.includes('Context limit')) {
-    return '⚠️ 上下文过长，自动压缩失败，请手动输入 /compact 重试';
+    return `${warnPrefix}上下文过长，自动压缩失败，请手动输入 /compact 重试`;
   }
   if (msg.includes('401') || msg.includes('authentication_error')) {
-    return '❌ API Key 无效，请检查密钥配置。使用 /status 查看当前配置';
+    return `${errPrefix}API Key 无效，请检查密钥配置。使用 /status 查看当前配置`;
   }
   if (msg.includes('timeout')) {
-    return '⚠️ 请求超时，请重试';
+    return `${warnPrefix}请求超时，请重试`;
   }
 
-  return '❌ 处理消息时出错，请稍后重试';
+  return `${errPrefix}处理消息时出错，请稍后重试`;
 }
