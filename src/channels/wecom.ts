@@ -566,6 +566,7 @@ export class WecomChannelPlugin implements ChannelPlugin {
 
       const adapter = {
         channelName: inst.name,
+        channelKey: inst.name,
         capabilities: { file: true, image: true, interaction: false, markdown: true, thought: false, status: false },
         send: async (envelope: any, payload: any) => {
           const ctx = envelope.replyContext;

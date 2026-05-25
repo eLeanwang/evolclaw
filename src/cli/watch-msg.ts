@@ -26,7 +26,7 @@ interface MessageLogEntry {
   usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } | null;
   encrypt?: boolean;
   chatmode?: string;
-  source?: 'daemon' | 'cli';
+  source?: 'daemon' | 'cli' | 'msg' | 'ctl';
 }
 
 interface PeerInfo {
@@ -372,7 +372,9 @@ function renderMessagesPanel(state: WatchMsgState, width: number, height: number
     const metaTags = (m.encrypt != null || m.chatmode) ? `${MAGENTA}[${encLabel}|${modeLabel}]${RST}` : '';
     let typeTag = '';
     if (m.dir === 'out') {
-      const source = (m as any).source === 'cli' ? 'cli' : 'daemon';
+      const rawSource = (m as any).source as string | undefined;
+      // 4 种来源: daemon | ctl | msg | cli
+      const source = (rawSource === 'ctl' || rawSource === 'msg' || rawSource === 'cli') ? rawSource : 'daemon';
       const method = m.msgType === 'thought' ? 'thought' : 'send';
       typeTag = `${DIM}[${source}|${method}]${RST}`;
     }

@@ -10,7 +10,7 @@ import type { ChannelPlugin, ChannelInstance, BridgeHookContext } from '../core/
 import type { MessageBridge } from '../core/message/message-bridge.js';
 import type { Config, ReplyContext, AunChannelConfig, AidConnectionState, AidStatus, AidKickDetail, InteractionResponse, ActionInteraction, CommandCard } from '../types.js';
 import { normalizeChannelInstances, getChannelShowActivities } from '../utils/channel-helpers.js';
-import { resolvePaths, getPackageRoot, agentDir as agentDirPath } from '../paths.js';
+import { resolvePaths, getPackageRoot, agentMdPath as agentMdPathFn, agentDir as agentDirPath } from '../paths.js';
 import { saveToUploads, sanitizeFileName } from '../utils/media-cache.js';
 import { appendAidEvent } from '../utils/instance-registry.js';
 import { appendMessageLog, buildOutboundEntry } from '../core/message/message-log.js';
@@ -444,9 +444,9 @@ export class AUNChannel {
     return out;
   }
 
-  private buildGroupReplyContext(taskId: string | undefined, senderAid: string, encrypted: boolean, messageId?: string, chatmode?: string): ReplyContext {
+  private buildGroupReplyContext(threadId: string | undefined, senderAid: string, encrypted: boolean, messageId?: string, chatmode?: string): ReplyContext {
     const replyContext: ReplyContext = { metadata: { encrypted, chatmode } };
-    if (taskId) replyContext.threadId = taskId;
+    if (threadId) replyContext.threadId = threadId;
     replyContext.peerId = senderAid;
     if (messageId) replyContext.replyToMessageId = messageId;
     return replyContext;
@@ -789,8 +789,8 @@ export class AUNChannel {
         return;
       }
 
-      const agentMdPath = path.join(os.homedir(), '.aun', 'AIDs', aidName, 'agent.md');
-      const existingAgentMd = fs.existsSync(agentMdPath) ? fs.readFileSync(agentMdPath, 'utf-8') : '';
+      const agentMdLocalPath = agentMdPathFn(aidName);
+      const existingAgentMd = fs.existsSync(agentMdLocalPath) ? fs.readFileSync(agentMdLocalPath, 'utf-8') : '';
       const existingFrontmatterMatch = existingAgentMd.match(/^---\n([\s\S]*?)\n---/);
       const existingFrontmatter = existingFrontmatterMatch?.[1] ?? '';
 
@@ -842,8 +842,8 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
 `;
 
       // Write locally
-      fs.mkdirSync(path.dirname(agentMdPath), { recursive: true });
-      fs.writeFileSync(agentMdPath, newAgentMd, 'utf-8');
+      fs.mkdirSync(path.dirname(agentMdLocalPath), { recursive: true });
+      fs.writeFileSync(agentMdLocalPath, newAgentMd, 'utf-8');
       logger.info(`${this.logPrefix()} Updated agent.md for ${aidName}`);
 
       // Publish to AUN network via auth.uploadAgentMd
@@ -984,7 +984,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     const fromAid = msg.from ?? '';
     const payload = msg.payload ?? '';
     const text = this.extractTextPayload(payload, fromAid);
-    const taskId = typeof payload === 'object' && payload !== null ? (payload as any).thread_id : undefined;
+    const threadId = typeof payload === 'object' && payload !== null ? (payload as any).thread_id : undefined;
     const messageId = msg.message_id ?? '';
     const seq = msg.seq;
 
@@ -1034,7 +1034,8 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     const chatId = fromAid;
 
     // 解析对端身份（30天缓存）
-    const peerIdentity = await PeerIdentityCache.resolve('aun', fromAid, this.agentDir, this.client, false);
+    const selfAgentDir = path.join(resolvePaths().agentsDir, this.config.aid);
+    const peerIdentity = await PeerIdentityCache.resolve('aun', fromAid, selfAgentDir, this.client, false);
     const shortAid = this.getShortAid(fromAid);
     const displayName = peerIdentity.name || shortAid;
 
@@ -1068,7 +1069,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     const isSystemP2P = p2pPayloadType === 'event';
     this.aidStatsCollector?.recordInbound(this.config.aid, fromAid, Buffer.byteLength(finalText, 'utf-8'), finalText, isSystemP2P, msgEncrypted, msgChatmode);
     const replyContext: ReplyContext = { metadata: { encrypted: msgEncrypted, chatmode: msgChatmode } };
-    if (taskId) replyContext.threadId = taskId;
+    if (threadId) replyContext.threadId = threadId;
     this.dispatchMessage({
       channelId: chatId,
       userId: fromAid,
@@ -1076,7 +1077,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       chatType: 'private',
       messageId,
       seq,
-      taskId,
+      threadId,
       mentions,
       peerName: displayName || undefined,
       peerType: peerIdentity.type,
@@ -1092,7 +1093,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     const senderAid = msg.sender_aid ?? '';
     const payload = msg.payload ?? '';
     const text = this.extractTextPayload(payload, groupId, senderAid);
-    const taskId = typeof payload === 'object' && payload !== null ? (payload as any).thread_id : undefined;
+    const threadId = typeof payload === 'object' && payload !== null ? (payload as any).thread_id : undefined;
     const messageId = msg.message_id ?? '';
     const seq = msg.seq;
 
@@ -1261,7 +1262,8 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       }
     }
 
-    const peerIdentity = await PeerIdentityCache.resolve('aun', senderAid, this.agentDir, this.client, false);
+    const selfAgentDir = path.join(resolvePaths().agentsDir, this.config.aid);
+    const peerIdentity = await PeerIdentityCache.resolve('aun', senderAid, selfAgentDir, this.client, false);
     const shortAid = this.getShortAid(senderAid);
     const displayName = peerIdentity.name || shortAid;
 
@@ -1294,9 +1296,9 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       chatType: 'group',
       messageId,
       seq,
-      taskId,
+      threadId,
       mentions,
-      replyContext: this.buildGroupReplyContext(taskId, senderAid, msgEncrypted, messageId, msgChatmode),
+      replyContext: this.buildGroupReplyContext(threadId, senderAid, msgEncrypted, messageId, msgChatmode),
     });
   }
 
@@ -1304,7 +1306,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     channelId: string; userId: string; text: string;
     chatType: 'private' | 'group'; messageId: string;
     peerName?: string; peerType?: string;
-    seq?: number; taskId?: string; mentions?: string[];
+    seq?: number; threadId?: string; mentions?: string[];
     replyContext?: ReplyContext;
     groupId?: string;
   }): void {
@@ -1358,8 +1360,8 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     // Use caller-supplied replyContext (group path builds mentionUserIds);
     // fall back to simple threadId-only context for private messages
     let replyContext: ReplyContext | undefined = event.replyContext;
-    if (!replyContext && event.taskId) {
-      replyContext = { threadId: event.taskId };
+    if (!replyContext && event.threadId) {
+      replyContext = { threadId: event.threadId };
     }
 
     this.messageHandler({
@@ -1373,7 +1375,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       peerName: event.peerName,
       peerType: event.peerType,
       messageId: event.messageId,
-      threadId: event.taskId,
+      threadId: event.threadId,
       mentions: mentionObjects,
       replyContext,
     }).catch(err => {
@@ -1841,6 +1843,9 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     const finalText = entry.text!;
     const context = entry.context;
 
+    // 从 context.metadata.source 读取 source，默认为 'daemon'
+    const source = (context?.metadata?.source as 'daemon' | 'cli' | 'msg' | 'ctl' | undefined) ?? 'daemon';
+
     const payload: Record<string, any> = { type: 'text', text: finalText };
     if (this.isGroupId(channelId)) {
       const extracted = this.extractMentionAidsFromText(finalText);
@@ -1851,7 +1856,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     if (context?.metadata?.chatmode) payload.chatmode = context.metadata.chatmode;
 
     // 诊断日志：记录 payload 构造结果（含 task_id / thread_id / chatmode）
-    logger.info(`${this.logPrefix()} deliverTextEntry: channelId=${channelId} thread_id=${payload.thread_id ?? 'none'} task_id=${payload.task_id ?? 'none'} chatmode=${payload.chatmode ?? 'none'} textLen=${finalText.length}`);
+    logger.info(`${this.logPrefix()} deliverTextEntry: channelId=${channelId} thread_id=${payload.thread_id ?? 'none'} task_id=${payload.task_id ?? 'none'} chatmode=${payload.chatmode ?? 'none'} source=${source} textLen=${finalText.length}`);
 
     const isGroup = this.isGroupId(channelId);
     const targetAid = channelId;
@@ -1878,7 +1883,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
           logger.info(`${this.logPrefix()} group.send ok: group=${channelId} mid=${mid} encrypt=${encrypt} text=${finalText.slice(0, 60)}`);
           appendAidEvent({ ts: Date.now(), iso: new Date().toISOString(), event: 'message_out', aid: this.config.aid, to: channelId, msgId: mid, kind: 'text', len: finalText.length, groupId: channelId });
           this.aidStatsCollector?.recordOutbound(this.config.aid, channelId, Buffer.byteLength(finalText, 'utf-8'), finalText, false, encrypt, context?.metadata?.chatmode as string | undefined);
-          this.appendOutboundJsonl(channelId, finalText, mid, encrypt, context, true);
+          this.appendOutboundJsonl(channelId, finalText, mid, encrypt, context, true, 'text', source);
         }
       } else {
         params.to = targetAid;
@@ -1889,7 +1894,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
           logger.info(`${this.logPrefix()} message.send ok: to=${this.peerLabel(targetAid)} mid=${result.message_id} encrypt=${encrypt} text=${finalText.slice(0, 60)}`);
           appendAidEvent({ ts: Date.now(), iso: new Date().toISOString(), event: 'message_out', aid: this.config.aid, to: targetAid, msgId: result.message_id, kind: 'text', len: finalText.length });
           this.aidStatsCollector?.recordOutbound(this.config.aid, targetAid, Buffer.byteLength(finalText, 'utf-8'), finalText, false, encrypt, context?.metadata?.chatmode as string | undefined);
-          this.appendOutboundJsonl(targetAid, finalText, result.message_id, encrypt, context, false);
+          this.appendOutboundJsonl(targetAid, finalText, result.message_id, encrypt, context, false, 'text', source);
         }
       }
       return true;
@@ -1929,7 +1934,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
   }
 
   /** 出站消息写入 messages.jsonl（message.send/group.send/thought.put 成功后调用） */
-  private appendOutboundJsonl(channelId: string, text: string, msgId: string, encrypt: boolean, context?: ReplyContext, isGroup?: boolean, msgType: 'text' | 'thought' = 'text'): void {
+  private appendOutboundJsonl(channelId: string, text: string, msgId: string, encrypt: boolean, context?: ReplyContext, isGroup?: boolean, msgType: 'text' | 'thought' = 'text', source: 'daemon' | 'cli' | 'msg' | 'ctl' = 'daemon'): void {
     try {
       const sessionsDir = resolvePaths().sessionsDir;
       const selfId = this.config.aid;
@@ -1949,6 +1954,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
         encrypt,
         chatmode,
         msgType,
+        source,
       }));
     } catch (e) {
       logger.debug(`${this.logPrefix()} appendOutboundJsonl failed: ${e}`);
@@ -1982,12 +1988,21 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     try {
       const itemCount = Array.isArray((payload as any)?.items) ? (payload as any).items.length : 0;
       const stage = (payload as any)?.stage ?? `items=${itemCount}`;
-      // 提取 thought 文本（取最后一项的 text 或 content 字段）
+      // 提取 thought 文本（只对 kind=text 的 item 写 jsonl，过滤 tool_use/tool_result 等结构化项）
       const items = (payload as any)?.items;
       let thoughtText: string | undefined;
       if (Array.isArray(items) && items.length > 0) {
         const lastItem = items[items.length - 1];
-        thoughtText = lastItem?.text || lastItem?.content || (typeof lastItem === 'string' ? lastItem : undefined);
+        // 优先 text 字段（kind=text 的 item），否则 content
+        if (lastItem?.kind === 'text' && lastItem.text) {
+          thoughtText = lastItem.text;
+        } else if (lastItem?.text) {
+          thoughtText = lastItem.text;
+        } else if (lastItem?.content) {
+          thoughtText = lastItem.content;
+        } else if (typeof lastItem === 'string') {
+          thoughtText = lastItem;
+        }
       }
       if (this.isGroupId(channelId)) {
         params.group_id = targetId;
@@ -1995,14 +2010,19 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
         const tid = putRes?.thought_id;
         logger.info(`${this.logPrefix()} thought.put ok group=${targetId} task=${taskId} stage=${stage} encrypt=${encrypt} tid=${tid ?? '?'}`);
         this.eventBus?.publish?.({ type: 'message:thought-put', agentName: this.config.aid, channelId, taskId, text: thoughtText });
-        // thought jsonl 写入已改为按 LLM 调用次数统计（在 complete 事件处写入），此处不再写
+        // 文本类 thought 写入 jsonl（只对有 text 的 item，过滤 tool 等结构化项）
+        if (thoughtText) {
+          this.appendOutboundJsonl(channelId, thoughtText, tid ?? `thought-${Date.now()}`, encrypt, context, true, 'thought', 'daemon');
+        }
       } else {
         params.to = targetId;
         const putRes = await this.callAndTrace<any>('message.thought.put', params);
         const tid = putRes?.thought_id;
         logger.info(`${this.logPrefix()} thought.put ok p2p=${this.peerLabel(targetId)} task=${taskId} stage=${stage} encrypt=${encrypt} tid=${tid ?? '?'}`);
         this.eventBus?.publish?.({ type: 'message:thought-put', agentName: this.config.aid, channelId, taskId, text: thoughtText });
-        // thought jsonl 写入已改为按 LLM 调用次数统计（在 complete 事件处写入），此处不再写
+        if (thoughtText) {
+          this.appendOutboundJsonl(channelId, thoughtText, tid ?? `thought-${Date.now()}`, encrypt, context, false, 'thought', 'daemon');
+        }
       }
     } catch (e) {
       const err = e as any;
@@ -2436,13 +2456,13 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
   private loadSelfName(aid: string): string | undefined {
     try {
       const aidName = aid.startsWith('@') ? aid.slice(1) : aid;
-      const agentMdPath = path.join(os.homedir(), '.aun', 'AIDs', aidName, 'agent.md');
-      if (!fs.existsSync(agentMdPath)) {
+      const mdPath = agentMdPathFn(aidName);
+      if (!fs.existsSync(mdPath)) {
         // 异步拉取，不阻塞连接流程
         this.fetchAndCacheSelfName(aidName);
         return undefined;
       }
-      const content = fs.readFileSync(agentMdPath, 'utf-8');
+      const content = fs.readFileSync(mdPath, 'utf-8');
       const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
       if (!fmMatch) return undefined;
       const nameMatch = fmMatch[1].match(/^name:\s*["']?(.+?)["']?\s*$/m);
@@ -2557,6 +2577,7 @@ export class AUNChannelPlugin implements ChannelPlugin {
 
       const adapter = {
         channelName: inst.name,
+        channelKey: inst.name,  // channelName 实际上就是 channelKey
         capabilities: { file: true, image: true, interaction: true, markdown: true, thought: true, status: true },
         send: async (envelope: any, payload: any) => {
           const ctx = envelope.replyContext;

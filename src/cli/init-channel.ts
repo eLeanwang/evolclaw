@@ -11,7 +11,7 @@ import readline from 'readline';
 import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
-import { resolvePaths } from '../paths.js';
+import { resolvePaths, aidLocalDir } from '../paths.js';
 import { normalizeChannelInstances } from '../utils/channel-helpers.js';
 import { selectInstance, type InstanceChoice } from './init.js';
 import { npmInstallGlobal, requireOptional } from '../utils/npm-ops.js';
@@ -561,8 +561,9 @@ export async function setupAunAid(rl: readline.Interface, _config: any): Promise
         console.log(`  ⚠ agent.md 发布失败（首次连接将自动重试）: ${String(e.message || e).slice(0, 100)}`);
         // Still write local copy as fallback
         try {
-          fs.mkdirSync(aidDir, { recursive: true });
-          fs.writeFileSync(path.join(aidDir, 'agent.md'), content, 'utf-8');
+          const localDir = aidLocalDir(aid);
+          fs.mkdirSync(localDir, { recursive: true });
+          fs.writeFileSync(path.join(localDir, 'agent.md'), content, 'utf-8');
           console.log('  ✓ agent.md 已写入本地');
         } catch (we: any) {
           console.log(`  ✗ agent.md 本地写入失败: ${String(we.message || we).slice(0, 100)}`);

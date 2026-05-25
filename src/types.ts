@@ -347,6 +347,7 @@ export interface InteractionResponse {
 // 渠道适配器接口
 export interface ChannelAdapter {
   readonly channelName: string;
+  readonly channelKey: string;  // 完整的 channel key: <type>#<selfPeerId>#<name>
   /** 渠道能力声明 */
   readonly capabilities: ChannelCapabilities;
   /** 统一出站入口，按 OutboundPayload.kind 分发 */

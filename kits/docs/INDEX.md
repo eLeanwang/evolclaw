@@ -50,3 +50,9 @@
 | 路径注册表模板 | `eck_templates/path-registry.template.md` | 路径实例模板 |
 | 索引模板 | `eck_templates/INDEX.template.md` | agent 级索引模板 |
 | 指南模板 | `eck_templates/GUIDE.template.md` | agent 级查阅指南模板 |
+
+## Base Agent
+
+| 文档 | 路径 | 说明 |
+|------|------|------|
+| Claude Code 日志 | `baseagent/cc-logs.md` | CC 会话日志查阅（找完整对话/工具调用/注入） |

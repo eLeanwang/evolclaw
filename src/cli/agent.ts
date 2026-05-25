@@ -382,16 +382,24 @@ export async function agentCreateInteractive(opts: AgentCreateInteractiveOpts = 
   const ask = (q: string): Promise<string> => new Promise(r => rl.question(q, r));
 
   try {
+    const { isValidAid, aidCreate } = await import('../aun/aid/index.js');
+
     const aidPrompt = opts.suggestedName
       ? `AID [${opts.suggestedName}]: `
       : 'AID (e.g. mybot.agentid.pub): ';
-    const aidInput = (await ask(aidPrompt)).trim();
-    const aid = aidInput || opts.suggestedName;
-    if (!aid) return { ok: false, error: 'AID is required.' };
-
-    const { isValidAid, aidCreate } = await import('../aun/aid/index.js');
-    if (!isValidAid(aid)) {
-      return { ok: false, error: `Invalid AID "${aid}": must be a valid multi-level domain (e.g. mybot.agentid.pub)` };
+    let aid = '';
+    while (!aid) {
+      const aidInput = (await ask(aidPrompt)).trim();
+      const candidate = aidInput || opts.suggestedName;
+      if (!candidate) {
+        console.log('  ⚠ AID is required.');
+        continue;
+      }
+      if (!isValidAid(candidate)) {
+        console.log(`  ⚠ Invalid AID "${candidate}": must be a valid multi-level domain (e.g. mybot.agentid.pub)`);
+        continue;
+      }
+      aid = candidate;
     }
 
     const agentDirPath = path.join(p.agentsDir, aid);
@@ -469,7 +477,17 @@ export async function agentCreateInteractive(opts: AgentCreateInteractiveOpts = 
     }
 
     // Owner
-    const owner = (await ask('Owner AID (leave empty for auto-bind on first message): ')).trim() || undefined;
+    let owner: string | undefined;
+    while (true) {
+      const ownerInput = (await ask('Owner AID (leave empty for auto-bind on first message): ')).trim();
+      if (!ownerInput) { owner = undefined; break; }
+      if (!isValidAid(ownerInput)) {
+        console.log(`  ⚠ Invalid Owner AID "${ownerInput}": must be a valid multi-level domain (e.g. alice.agentid.pub)`);
+        continue;
+      }
+      owner = ownerInput;
+      break;
+    }
 
     // Name + description for agent.md
     const defaultName = aid.split('.')[0];
@@ -903,7 +921,11 @@ export async function agentSet(aid: string, key: string, rawValue: string): Prom
 
   const value = parseJsonValue(rawValue);
   setNestedValue(config, key, value);
-  saveAgent(config);
+  try {
+    saveAgent(config);
+  } catch (e: any) {
+    return { ok: false, error: e?.message || String(e) };
+  }
 
   // Try hot-reload
   let reloaded = false;
@@ -990,7 +1012,7 @@ export async function agentChannelUpsert(opts: {
   return {
     ok: true,
     aid: opts.aid,
-    channelKey: `${opts.aid}#${opts.channel.type}#${opts.channel.name}`,
+    channelKey: `${opts.channel.type}#${encodeURIComponent(opts.aid)}#${opts.channel.name}`,
     reloaded,
   };
 }

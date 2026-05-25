@@ -3,6 +3,8 @@ import { logger } from '../../utils/logger.js';
 import { StreamDebouncer } from './stream-debouncer.js';
 import { appendMessageLog, buildInboundEntry } from './message-log.js';
 import { buildEnvelope } from './message-processor.js';
+import { chatDirPath } from '../session/session-fs-store.js';
+import { resolvePaths } from '../../paths.js';
 import type { SessionManager } from '../session/session-manager.js';
 import type { MessageProcessor } from './message-processor.js';
 import type { MessageQueue } from './message-queue.js';
@@ -88,8 +90,30 @@ export class MessageBridge {
         // 2. 命令快速路径（去除引用前缀后检查，兼容话题中引用上文的情况）
         const contentForCmd = content.replace(/^(>[^\n]*\n)+\n?/, '').trim();
         const cmdContent = contentForCmd || content;
-        if (this.cmdHandler.isCommand(cmdContent)) {
+        const isCmd = this.cmdHandler.isCommand(cmdContent);
+        if (isCmd) {
           logger.debug(`[MessageBridge] Command detected: "${cmdContent}", routing to handler`);
+          // 命令也要记录入方向 jsonl（不创建 session，直接用 chatDirPath 计算路径）
+          try {
+            const chatDir = chatDirPath(resolvePaths().sessionsDir, msg.channelType || effectiveChannelType, msg.channelId, msg.selfId);
+            const inboundEncrypt = msg.replyContext?.metadata?.encrypted != null ? !!(msg.replyContext.metadata.encrypted) : undefined;
+            const inboundChatmode = msg.replyContext?.metadata?.chatmode as string | undefined;
+            appendMessageLog(chatDir, buildInboundEntry({
+              from: msg.peerId || 'unknown',
+              to: msg.selfId || 'self',
+              chatType: msg.chatType || 'private',
+              groupId: msg.groupId ?? null,
+              msgId: msg.messageId ?? null,
+              content,
+              replyTo: msg.replyContext?.replyToMessageId ?? null,
+              permMode: null,
+              timestamp: Date.now(),
+              encrypt: inboundEncrypt,
+              chatmode: inboundChatmode,
+            }));
+          } catch (e) {
+            logger.debug(`[MessageBridge] Failed to log inbound command: ${e}`);
+          }
         }
         if (await this.handleCommand(cmdContent, channelName, msg.channelId,
           (text) => {

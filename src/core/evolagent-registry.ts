@@ -97,7 +97,7 @@ export interface GlobalConfigWriter {
 
 export class EvolAgentRegistry {
   private agents: Map<string, EvolAgent> = new Map();
-  /** channel key (`<aid>#<type>#<name>`) → agent aid */
+  /** channel key (`<type>#<selfPeerId>#<name>`) → agent aid */
   private channelIndex: Map<string, string> = new Map();
   /** 启动期被 ConfigStore 跳过的目录（命名非法 / 缺 config.json / 校验失败等） */
   private skipped: Array<{ dirName: string; reason: string }> = [];

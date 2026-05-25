@@ -409,6 +409,23 @@ export function loadAgent(aid: string): AgentConfig | null {
 }
 
 export function saveAgent(value: AgentConfig): void {
+  if (!isValidAid(value.aid)) {
+    throw new Error(`[config] saveAgent: invalid aid "${value.aid}" (must be a valid multi-level domain like mybot.agentid.pub)`);
+  }
+  if (value.owners) {
+    for (const o of value.owners) {
+      if (!isValidAid(o)) {
+        throw new Error(`[config] saveAgent: invalid owner AID "${o}" in ${value.aid} (must be a valid multi-level domain like alice.agentid.pub)`);
+      }
+    }
+  }
+  if (value.admins) {
+    for (const a of value.admins) {
+      if (!isValidAid(a)) {
+        throw new Error(`[config] saveAgent: invalid admin AID "${a}" in ${value.aid} (must be a valid multi-level domain like alice.agentid.pub)`);
+      }
+    }
+  }
   atomicWriteJson(agentConfigPath(value.aid), value);
 }
 

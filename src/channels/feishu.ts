@@ -1486,6 +1486,7 @@ export class FeishuChannelPlugin implements ChannelPlugin {
 
       const adapter = {
         channelName: inst.name,
+        channelKey: inst.name,
         capabilities: { file: true, image: true, interaction: true, markdown: true, thought: false, status: true },
         send: async (envelope: any, payload: any) => {
           const ctx = envelope.replyContext;
