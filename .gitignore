@@ -91,5 +91,6 @@ ONBOARDING.md
 .codex
 .esdata/eck/
 .esdata/
+/eck/
 chatmode-code-audit.md
 chatmode-implementation-report.md

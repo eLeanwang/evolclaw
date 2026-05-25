@@ -2,10 +2,21 @@
 
 ## v3.1.2 (2026-05-25)
 
+### Improvements
+
+- **`evolclaw status` 输出版本号** — status 显示 evolclaw 版本、fastaun 版本、PID
+- **EvolAgent 热重载增强** — `loadNewAgent` 增加 channel fingerprint 冲突检测；支持 disabled↔enabled 状态转换的热重载
+- **`evolclaw init` / `agent new` 体验** — 单 baseagent 自动选中跳过交互；agent.md 上传失败自动重试 3 次；defaults 已存在选 N 时不再强退；无 agent 时自动衔接 `agent new` 复用 readline；SDK 日志静默
+
 ### Bug Fixes
 
-- **trigger 路由修复** — `/trigger` 命令现在从消息所属 agent 获取 scheduler/manager，而非固定使用 `runnableAgents()[0]`。修复了通过 A agent 渠道创建的 trigger 被存到 B agent 目录的问题
-- **npm 包文件缺失** — `package.json` files 字段改为 `*.md`（排除 CLAUDE.md），确保 CTL.md、TRIGGER.md、SKILLS.md 等文档随包发布
+- **session 路径尾斜杠致 sessionId 丢失** — agent 配置 `projects.defaultPath` 带尾斜杠时，每条消息触发 `Invalid session file` 重置 sessionId，多轮对话失效；`encodePath` 编码前剥离尾随分隔符，`loadAgent` 自动 normalize 路径
+- **EvolAgent reload 误断 AUN 连接** — reload 计算 newChannels 时未包含隐式 AUN，导致每次 reload 都把 AUN channel 归入 toRemove 断开
+- **trigger 路由修复** — `/trigger` 命令现在从消息所属 agent 获取 scheduler/manager（而非固定 `runnableAgents()[0]`）。修复了通过 A agent 渠道创建的 trigger 被存到 B agent 目录的问题
+- **飞书卡片回调 chatType 误判** — 卡片回调不再用 `oc_` 前缀盲推 chatType，由 session 继承；`card-trigger` 来源 chatType 置空避免覆盖
+- **AUN interactive 模式重复发送** — interactive 模式不再重复 `thought.put`，只写入消息历史
+- **npm 包文件缺失** — `package.json` files 字段改为 `*.md`（排除 CLAUDE.md），确保 CTL.md/TRIGGER.md/SKILLS.md 随包发布
+- **测试稳定性** — wechat-media AES-ECB 错误密钥测试间歇性失败修复
 
 ## v3.1.1 (2026-05-24)
 
