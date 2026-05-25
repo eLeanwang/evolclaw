@@ -3392,8 +3392,10 @@ export class CommandHandler {
     peerId: string,
     isAdmin: boolean,
   ): string {
-    const scheduler = this.triggerScheduler;
-    const manager = this.triggerManager;
+    // Resolve trigger manager/scheduler from the owning agent of this channel
+    const owningAgent = this.getOwningAgent(channel);
+    const scheduler = (owningAgent?.triggerScheduler ?? this.triggerScheduler) as TriggerScheduler | undefined;
+    const manager = (owningAgent?.triggerManager ?? this.triggerManager) as TriggerManager | undefined;
 
     // Bare /trigger → list active
     if (content === '/trigger') {

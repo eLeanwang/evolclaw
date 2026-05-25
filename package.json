@@ -14,7 +14,8 @@
     "!dist/experimental/",
     "kits/",
     "!kits/.kits-version",
-    "evolclaw-install-aun.md"
+    "*.md",
+    "!CLAUDE.md"
   ],
   "scripts": {
     "dev": "tsx watch src/index.ts",

@@ -465,6 +465,8 @@ export interface EvolAgentHandle {
   readonly baseagent: string;
   readonly projectPath: string;
   readonly config: MergedAgentConfig;
+  readonly triggerManager?: unknown;
+  readonly triggerScheduler?: unknown;
   lastActivity?: number;
   getContext(channelName: string, chatType: string, globalChatmode?: { private?: 'interactive' | 'proactive'; group?: 'interactive' | 'proactive' }): AgentContext;
   getOwner(channelName: string): string | undefined;

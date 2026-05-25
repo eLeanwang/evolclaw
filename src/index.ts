@@ -528,7 +528,7 @@ async function main() {
     }
   }
 
-  // Inject primary agent's trigger scheduler into cmdHandler
+  // Inject primary agent's trigger scheduler as fallback (used when owning agent has no scheduler)
   const primaryAgentForTrigger = agentRegistry.runnableAgents()[0];
   if (primaryAgentForTrigger?.triggerScheduler && primaryAgentForTrigger?.triggerManager) {
     cmdHandler.setTriggerScheduler(primaryAgentForTrigger.triggerScheduler, primaryAgentForTrigger.triggerManager);
