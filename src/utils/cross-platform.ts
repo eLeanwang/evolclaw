@@ -16,7 +16,8 @@ export const isWindows = process.platform === 'win32';
  *      C:\Users\project -> C--Users-project
  */
 export function encodePath(projectPath: string): string {
-  return projectPath.replace(/[/\\:]/g, '-');
+  const normalized = projectPath.replace(/[/\\]+$/, '');
+  return normalized.replace(/[/\\:]/g, '-');
 }
 
 /**

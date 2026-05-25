@@ -334,8 +334,10 @@ export class EvolAgentRegistry {
     if (conflict) throw new Error(`Channel conflict: ${conflict}`);
 
     const oldChannels = new Set(oldAgent.channelInstanceNames());
-    // 计算新 channel keys（用 EvolAgent 的格式化）
-    const newChannels = new Set(raw.channels.map(c => oldAgent.effectiveChannelName(c.type, c.name)));
+    // 计算新 channel keys：隐式 AUN + 显式非 AUN channels（与 channelInstanceNames 逻辑一致）
+    const aunKey = oldAgent.effectiveChannelName('aun', 'main');
+    const otherKeys = raw.channels.filter(c => c.type !== 'aun').map(c => oldAgent.effectiveChannelName(c.type, c.name));
+    const newChannels = new Set([aunKey, ...otherKeys]);
     const toRemove = [...oldChannels].filter(c => !newChannels.has(c));
     const toAdd = [...newChannels].filter(c => !oldChannels.has(c));
     const kept = [...oldChannels].filter(c => newChannels.has(c));

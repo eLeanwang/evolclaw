@@ -401,7 +401,11 @@ export function loadAgent(aid: string): AgentConfig | null {
   if (raw.aid !== aid) {
     throw new Error(`[config] ${p}: aid field "${raw.aid}" != directory name "${aid}"`);
   }
-  return expandEnvRefs(raw);
+  const cfg = expandEnvRefs(raw);
+  if (cfg.projects?.defaultPath) {
+    cfg.projects.defaultPath = cfg.projects.defaultPath.replace(/[/\\]+$/, '');
+  }
+  return cfg;
 }
 
 export function saveAgent(value: AgentConfig): void {
