@@ -234,7 +234,7 @@ function formatLocalTime(ms: number): string {
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:${String(d.getSeconds()).padStart(2,'0')}`;
 }
 
-function printStartupInfo(): void {
+function printStartupInfo(opts: { pid?: number; running?: boolean } = {}): void {
   const pkgRoot = getPackageRoot();
   const isNpmInstall = pkgRoot.includes('node_modules');
   const cliRunsSource = !import.meta.url.includes('/dist/');
@@ -261,7 +261,15 @@ function printStartupInfo(): void {
   let version = '?';
   try { version = JSON.parse(fs.readFileSync(path.join(pkgRoot, 'package.json'), 'utf-8')).version; } catch {}
 
-  console.log(`  EvolClaw v${version}`);
+  let aunVer: string | null = null;
+  try {
+    aunVer = JSON.parse(fs.readFileSync(path.join(pkgRoot, 'node_modules', '@agentunion', 'fastaun', 'package.json'), 'utf-8')).version;
+  } catch {}
+
+  const pidPart = opts.pid ? ` (PID: ${opts.pid})` : '';
+  const aunPart = aunVer ? `  fastaun v${aunVer}` : '';
+  const prefix = opts.running ? '✓ EvolClaw is running , v' : '  EvolClaw v';
+  console.log(`${prefix}${version}${pidPart}${aunPart}`);
   console.log(`  包路径:     ${pkgRoot}`);
   console.log(`  安装类型:   ${isNpmInstall ? 'npm全局安装' : '开发仓(link)'}`);
   console.log(`  CLI执行:    ${cliRunsSource ? '源码(tsx)' : '编译产物(dist)'}`);
@@ -837,7 +845,7 @@ async function cmdStatus() {
   }
 
   if (pid) {
-    console.log(`✓ EvolClaw is running (PID: ${pid})`);
+    printStartupInfo({ pid, running: true });
     console.log('');
     console.log('📊 Process Info:');
     try {
