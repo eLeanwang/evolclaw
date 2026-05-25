@@ -1,5 +1,18 @@
 # Changelog
 
+## v3.1.2 (2026-05-25)
+
+### Bug Fixes
+
+- **trigger 路由修复** — `/trigger` 命令现在从消息所属 agent 获取 scheduler/manager，而非固定使用 `runnableAgents()[0]`。修复了通过 A agent 渠道创建的 trigger 被存到 B agent 目录的问题
+- **npm 包文件缺失** — `package.json` files 字段改为 `*.md`（排除 CLAUDE.md），确保 CTL.md、TRIGGER.md、SKILLS.md 等文档随包发布
+
+### Docs
+
+- **设计文档状态更新** — 触发器功能设计、Proactive Mode 设计、AUN Processing 状态通知方案标记为 Implemented
+- **Proactive→Interactive 切换提示** — 新增设计文档和实现计划
+- **Agent-to-Agent 回复校验** — 新增实现计划文档
+
 ## v3.1.1 (2026-05-24)
 
 ### New Features
