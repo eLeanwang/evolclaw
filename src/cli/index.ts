@@ -2951,7 +2951,11 @@ Options:
         console.log(result.agentmdUploaded
           ? '  ✓ agent.md 已发布'
           : '  ⚠ agent.md 上传失败（可用 evolclaw aid agentmd put 重试）');
-        console.log('  Run `evolclaw restart` to activate.');
+        console.log(result.hotLoaded
+          ? '  ✓ 已热重载，agent 已上线'
+          : result.hotLoadError
+            ? `  ✗ 热重载失败：${result.hotLoadError}`
+            : '  ⚠ 服务未运行，下次 evolclaw start 时生效');
       }
     } else {
       const result = await agentCreateInteractive({ suggestedName: name });
@@ -2966,7 +2970,11 @@ Options:
         console.log(result.agentmdUploaded
           ? '  ✓ agent.md 已发布'
           : '  ⚠ agent.md 上传失败（可用 evolclaw aid agentmd put 重试）');
-        console.log('  Run `evolclaw restart` to activate.');
+        console.log(result.hotLoaded
+          ? '  ✓ 已热重载，agent 已上线'
+          : result.hotLoadError
+            ? `  ✗ 热重载失败：${result.hotLoadError}`
+            : '  ⚠ 服务未运行，下次 evolclaw start 时生效');
       }
     }
     return;
@@ -4366,12 +4374,20 @@ export async function main(args: string[]) {
   evolclaw init qqbot         QQ 机器人扫码绑定
   evolclaw init wecom         企业微信 AI Bot 配置（手动输入）`);
       } else if (args[1] === 'wechat') {
+        const { suppressSdkLogs } = await import('../aun/aid/index.js');
+        suppressSdkLogs();
         await cmdInitWechat();
       } else if (args[1] === 'feishu') {
+        const { suppressSdkLogs } = await import('../aun/aid/index.js');
+        suppressSdkLogs();
         await cmdInitFeishu();
       } else if (args[1] === 'dingtalk') {
+        const { suppressSdkLogs } = await import('../aun/aid/index.js');
+        suppressSdkLogs();
         await cmdInitDingtalk();
       } else if (args[1] === 'qqbot') {
+        const { suppressSdkLogs } = await import('../aun/aid/index.js');
+        suppressSdkLogs();
         await cmdInitQQBot();
       } else if (args[1] === 'wecom') {
         await cmdInitWecom();
@@ -4381,6 +4397,8 @@ export async function main(args: string[]) {
         console.error(`   支持的渠道: ${supported.join(', ')}`);
         process.exit(1);
       } else {
+        const { suppressSdkLogs } = await import('../aun/aid/index.js');
+        suppressSdkLogs();
         const nonInteractive = args.includes('--non-interactive');
         await cmdInit({
           nonInteractive,
@@ -4457,9 +4475,12 @@ export async function main(args: string[]) {
     case 'ctl':
       await cmdCtl(args.slice(1));
       break;
-    case 'agent':
+    case 'agent': {
+      const { suppressSdkLogs } = await import('../aun/aid/index.js');
+      suppressSdkLogs();
       await cmdAgent(args.slice(1));
       break;
+    }
     case 'aid': {
       const { suppressSdkLogs } = await import('../aun/aid/index.js');
       suppressSdkLogs();

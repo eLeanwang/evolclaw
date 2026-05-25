@@ -15,12 +15,11 @@ export function suppressSdkLogs(): void {
   const _origLog = console.log;
   const _origInfo = console.info;
   const _origWarn = console.warn;
-  const _origError = console.error;
-  const SDK_LOG_RE = /^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+\]\[(?:DEBUG|INFO|WARN)\]/;
-  const SDK_ERROR_RE = /^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+\]\[ERROR\]/;
-  console.log = (...args: any[]) => { if (typeof args[0] === 'string') { if (SDK_LOG_RE.test(args[0])) return; if (SDK_ERROR_RE.test(args[0])) { _origError(...args); return; } } _origLog(...args); };
+  const SDK_LOG_RE = /^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+\]\[(?:DEBUG|INFO|WARN|ERROR)\]/;
+  console.log = (...args: any[]) => { if (typeof args[0] === 'string' && SDK_LOG_RE.test(args[0])) return; _origLog(...args); };
   console.info = (...args: any[]) => { if (typeof args[0] === 'string' && SDK_LOG_RE.test(args[0])) return; _origInfo(...args); };
   console.warn = (...args: any[]) => { if (typeof args[0] === 'string' && SDK_LOG_RE.test(args[0])) return; _origWarn(...args); };
+  console.error = (...args: any[]) => { if (typeof args[0] === 'string' && SDK_LOG_RE.test(args[0])) return; process.stderr.write(args.map(String).join(' ') + '\n'); };
 }
 
 // ==================== Constants ====================

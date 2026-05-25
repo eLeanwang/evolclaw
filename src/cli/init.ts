@@ -3,7 +3,7 @@ import readline from 'readline';
 import { resolvePaths, ensureDataDirs } from '../paths.js';
 import { commandExists } from '../utils/cross-platform.js';
 import { scanInstances } from '../utils/instance-registry.js';
-import { saveDefaultsSafe } from '../config-store.js';
+import { saveDefaultsSafe, loadAllAgents } from '../config-store.js';
 
 // ==================== Helpers ====================
 
@@ -100,21 +100,24 @@ export async function cmdInit(options?: {
     writeDefaults(defaultsPath, chosen);
     console.log(`✓ 已${exists ? '覆盖' : '创建'}: ${defaultsPath}`);
     console.log(`  active_baseagent: ${chosen}`);
+
+    const { agents } = loadAllAgents();
+    if (agents.length === 0) {
+      console.log('\n提示：尚无 agent，运行以下命令创建：');
+      console.log('  evolclaw agent new <aid>.agentid.pub');
+    }
     return;
   }
 
   // ── 4. 交互式分支 ──
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  try {
-    if (exists) {
-      const ans = (await ask(rl, `配置文件已存在: ${defaultsPath}\n  是否覆盖？[y/N] `)).trim().toLowerCase();
-      if (ans !== 'y' && ans !== 'yes') {
-        console.log('  已取消');
-        return;
-      }
-    }
 
+  async function askBaseagent(): Promise<Baseagent> {
     const defaultBa = pickDefault(available);
+    if (available.length === 1) {
+      console.log(`  baseagent: ${defaultBa}`);
+      return defaultBa;
+    }
     let chosen: Baseagent | null = null;
     while (chosen === null) {
       const input = (await ask(rl, `默认 baseagent (${available.join('/')}) [${defaultBa}]: `)).trim() || defaultBa;
@@ -128,20 +131,37 @@ export async function cmdInit(options?: {
       }
       chosen = input as Baseagent;
     }
+    return chosen;
+  }
 
-    writeDefaults(defaultsPath, chosen);
-    console.log(`\n✓ 已${exists ? '覆盖' : '创建'}: ${defaultsPath}`);
-    console.log(`  active_baseagent: ${chosen}\n`);
+  try {
+    if (exists) {
+      const ans = (await ask(rl, `配置文件已存在: ${defaultsPath}\n  是否覆盖？[y/N] `)).trim().toLowerCase();
+      if (ans === 'y' || ans === 'yes') {
+        const chosen = await askBaseagent();
+        writeDefaults(defaultsPath, chosen);
+        console.log(`\n✓ 已覆盖: ${defaultsPath}`);
+        console.log(`  active_baseagent: ${chosen}\n`);
+      } else {
+        console.log('  已跳过（保留现有配置）\n');
+      }
+    } else {
+      const chosen = await askBaseagent();
+      writeDefaults(defaultsPath, chosen);
+      console.log(`\n✓ 已创建: ${defaultsPath}`);
+      console.log(`  active_baseagent: ${chosen}\n`);
+    }
 
-    rl.close();
-
-    // ── 5. 嵌套 agent new ──
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log('下一步：创建 agent\n');
-    const { agentCreateInteractive } = await import('./agent.js');
-    const result = await agentCreateInteractive();
-    if (!result.ok) {
-      console.error(`❌ ${result.error}`);
+    // ── 5. 无 agent 时自动进入 agent new ──
+    const { agents } = loadAllAgents();
+    if (agents.length === 0) {
+      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      console.log('下一步：创建 agent\n');
+      const { agentCreateInteractive } = await import('./agent.js');
+      const result = await agentCreateInteractive({ rl });
+      if (!result.ok) {
+        console.error(`❌ ${result.error}`);
+      }
     }
   } finally {
     try { rl.close(); } catch { /* ignore */ }

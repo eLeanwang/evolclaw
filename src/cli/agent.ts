@@ -68,6 +68,8 @@ export interface AgentCreateResult {
   configPath: string;
   aidCreated: boolean;
   agentmdUploaded?: boolean;
+  hotLoaded?: boolean;
+  hotLoadError?: string;
 }
 
 export interface AgentSyncResult {
@@ -367,11 +369,13 @@ export interface AgentCreateInteractiveOpts {
   suggestedName?: string;
   stdin?: NodeJS.ReadableStream;
   stdout?: NodeJS.WritableStream;
+  rl?: readline.Interface;
 }
 
 export async function agentCreateInteractive(opts: AgentCreateInteractiveOpts = {}): Promise<AgentResult<AgentCreateResult>> {
   const p = resolvePaths();
-  const rl = readline.createInterface({
+  const ownRl = !opts.rl;
+  const rl = opts.rl ?? readline.createInterface({
     input: opts.stdin || process.stdin,
     output: opts.stdout || process.stdout,
   });
@@ -443,18 +447,25 @@ export async function agentCreateInteractive(opts: AgentCreateInteractiveOpts = 
       return { ok: false, error: `No baseagent CLI detected on PATH. Install one of: ${BASEAGENT_CANDIDATES.join('/')}` };
     }
     const defaultBa = pickDefaultBaseagent(available)!;
-    let baseagent: Baseagent | null = null;
-    while (baseagent === null) {
-      const input = (await ask(`Baseagent (${available.join('/')}) [${defaultBa}]: `)).trim() || defaultBa;
-      if (!BASEAGENT_CANDIDATES.includes(input as Baseagent)) {
-        console.log(`  Invalid choice. Options: ${BASEAGENT_CANDIDATES.join('/')}`);
-        continue;
+    let baseagent: Baseagent;
+    if (available.length === 1) {
+      console.log(`  Baseagent: ${defaultBa}`);
+      baseagent = defaultBa;
+    } else {
+      let chosen: Baseagent | null = null;
+      while (chosen === null) {
+        const input = (await ask(`Baseagent (${available.join('/')}) [${defaultBa}]: `)).trim() || defaultBa;
+        if (!BASEAGENT_CANDIDATES.includes(input as Baseagent)) {
+          console.log(`  Invalid choice. Options: ${BASEAGENT_CANDIDATES.join('/')}`);
+          continue;
+        }
+        if (!available.includes(input as Baseagent)) {
+          console.log(`  ${input} not detected on PATH. Available: ${available.join('/')}`);
+          continue;
+        }
+        chosen = input as Baseagent;
       }
-      if (!available.includes(input as Baseagent)) {
-        console.log(`  ${input} not detected on PATH. Available: ${available.join('/')}`);
-        continue;
-      }
-      baseagent = input as Baseagent;
+      baseagent = chosen;
     }
 
     // Owner
@@ -465,7 +476,7 @@ export async function agentCreateInteractive(opts: AgentCreateInteractiveOpts = 
     const agentName = (await ask(`Display name [${defaultName}]: `)).trim() || defaultName;
     const agentDescription = (await ask('Description (optional): ')).trim() || '';
 
-    rl.close();
+    if (ownRl) rl.close();
 
     const agentConfig: AgentConfig = {
       $schema_version: CONFIG_SCHEMA_VERSION,
@@ -497,16 +508,45 @@ export async function agentCreateInteractive(opts: AgentCreateInteractiveOpts = 
       const agentMdPath = path.join(aunPath, 'AIDs', aid, 'agent.md');
       fs.mkdirSync(path.dirname(agentMdPath), { recursive: true });
       fs.writeFileSync(agentMdPath, content, 'utf-8');
-      try {
-        await agentmdPut(content, { aid, aunPath });
-        agentmdUploaded = true;
-      } catch (e: any) {
-        console.warn(`  ⚠ agent.md upload failed: ${e?.message || e}`);
+
+      // Upload with retry (3 attempts, 2s delay between retries)
+      const MAX_ATTEMPTS = 3;
+      const RETRY_DELAY_MS = 2000;
+      let lastError: any;
+      for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+        try {
+          if (attempt > 1) {
+            process.stdout.write(`  ↻ agent.md 上传重试 (${attempt}/${MAX_ATTEMPTS})...\n`);
+            await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
+          }
+          await agentmdPut(content, { aid, aunPath });
+          agentmdUploaded = true;
+          break;
+        } catch (e: any) {
+          lastError = e;
+        }
+      }
+      if (!agentmdUploaded) {
+        console.warn(`  ⚠ agent.md upload failed: ${lastError?.message || lastError}`);
         console.warn(`  → Retry later with: evolclaw aid agentmd put ${aid}`);
       }
+      // Yield to allow the SDK WebSocket to fully close before IPC
+      await new Promise(r => setTimeout(r, 0));
     } catch (e: any) {
       console.warn(`  ⚠ agent.md generation failed: ${e?.message || e}`);
     }
+
+    // Attempt hot-load via IPC (if daemon is running)
+    let hotLoaded = false;
+    let hotLoadError: string | undefined;
+    try {
+      const ipcResult = await ipcQuery(p.socket, { type: 'evolagent.load', aid }) as any;
+      if (ipcResult?.ok) {
+        hotLoaded = true;
+      } else if (ipcResult) {
+        hotLoadError = ipcResult.error;
+      }
+    } catch { /* daemon not running */ }
 
     return {
       ok: true,
@@ -514,9 +554,11 @@ export async function agentCreateInteractive(opts: AgentCreateInteractiveOpts = 
       configPath: toPosix(path.join(agentDirPath, 'config.json'))!,
       aidCreated,
       agentmdUploaded,
+      hotLoaded,
+      hotLoadError,
     };
   } finally {
-    try { rl.close(); } catch { /* ignore */ }
+    if (ownRl) { try { rl.close(); } catch { /* ignore */ } }
   }
 }
 
@@ -630,16 +672,40 @@ export async function agentCreateNonInteractive(opts: AgentCreateNonInteractiveO
     const agentMdPath = path.join(aunPath, 'AIDs', opts.aid, 'agent.md');
     fs.mkdirSync(path.dirname(agentMdPath), { recursive: true });
     fs.writeFileSync(agentMdPath, content, 'utf-8');
-    try {
-      await agentmdPut(content, { aid: opts.aid, aunPath });
-      agentmdUploaded = true;
-    } catch (e: any) {
-      console.warn(`⚠ agent.md upload failed: ${e?.message || e}`);
+
+    const MAX_ATTEMPTS = 3;
+    const RETRY_DELAY_MS = 2000;
+    let lastError: any;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      try {
+        if (attempt > 1) await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
+        await agentmdPut(content, { aid: opts.aid, aunPath });
+        agentmdUploaded = true;
+        break;
+      } catch (e: any) {
+        lastError = e;
+      }
+    }
+    if (!agentmdUploaded) {
+      console.warn(`⚠ agent.md upload failed: ${lastError?.message || lastError}`);
       console.warn(`  Retry later with: evolclaw aid agentmd put ${opts.aid}`);
     }
+    await new Promise(r => setTimeout(r, 0));
   } catch (e: any) {
     console.warn(`⚠ agent.md generation failed: ${e?.message || e}`);
   }
+
+  // Attempt hot-load via IPC (if daemon is running)
+  let hotLoaded = false;
+  let hotLoadError: string | undefined;
+  try {
+    const ipcResult = await ipcQuery(p.socket, { type: 'evolagent.load', aid: opts.aid }) as any;
+    if (ipcResult?.ok) {
+      hotLoaded = true;
+    } else if (ipcResult) {
+      hotLoadError = ipcResult.error;
+    }
+  } catch { /* daemon not running */ }
 
   return {
     ok: true,
@@ -647,6 +713,8 @@ export async function agentCreateNonInteractive(opts: AgentCreateNonInteractiveO
     configPath: toPosix(path.join(agentDirPath, 'config.json'))!,
     aidCreated,
     agentmdUploaded,
+    hotLoaded,
+    hotLoadError,
   };
 }
 
