@@ -1,6 +1,6 @@
 import type { ShortConnectionOpts } from '../rpc/index.js';
 import { createShortConnection } from '../rpc/index.js';
-import { uploadFileAndBuildPayload } from './upload.js';
+import { uploadFileAndBuildPayload, type UploadProgress } from './upload.js';
 import type { MsgError } from './p2p.js';
 
 // ==================== Types ====================
@@ -134,6 +134,8 @@ export interface GroupSendArgs extends GroupCommonOpts {
   /** payload.mentions：[{aid: ...}] 或 {scope: "all"} */
   mentions?: Array<Record<string, unknown>>;
   encrypt?: boolean;
+  /** 文件上传进度回调（仅 body.mode==='file' 时触发）。 */
+  onUploadProgress?: (info: UploadProgress) => void;
 }
 
 export async function groupSend(args: GroupSendArgs): Promise<GroupSendResult | MsgError> {
@@ -153,6 +155,7 @@ export async function groupSend(args: GroupSendArgs): Promise<GroupSendResult | 
           contentType: args.body.contentType,
           text: args.body.text,
           transcript: args.body.transcript,
+          onProgress: args.onUploadProgress,
         });
         payload = built.payload;
         break;

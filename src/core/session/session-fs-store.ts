@@ -175,6 +175,25 @@ export function scanChatDirs(sessionsDir: string): {
   for (const typeEntry of typeEntries) {
     if (!typeEntry.isDirectory()) continue;
     const channelType = typeEntry.name;
+    // 包含 '#' 的目录是旧 channelKey 格式（如 'aun#dddd.agentid.pub#main'），
+    // 按通用 channel 布局扫描（sessionsDir/{channelKey}/{encodedChannelId}/），保持兼容
+    if (channelType.includes('#')) {
+      const typeDir = path.join(sessionsDir, channelType);
+      let chatEntries: fs.Dirent[];
+      try {
+        chatEntries = fs.readdirSync(typeDir, { withFileTypes: true });
+      } catch { continue; }
+      for (const chatEntry of chatEntries) {
+        if (!chatEntry.isDirectory()) continue;
+        results.push({
+          channelType,
+          selfId: null,
+          channelId: decodeSegment(chatEntry.name),
+          dirPath: path.join(typeDir, chatEntry.name),
+        });
+      }
+      continue;
+    }
     const typeDir = path.join(sessionsDir, channelType);
 
     if (channelType === 'aun') {

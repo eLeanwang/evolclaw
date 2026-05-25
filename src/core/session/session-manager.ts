@@ -589,7 +589,10 @@ export class SessionManager {
     channelType?: string,
     peerType?: string
   ): Session {
-    const chatDir = this.ensureResolvedChatDir(channel, channelId);
+    // 优先使用精确路径（channelType + selfId），避免 fallback 到错误目录
+    const chatDir = (channelType && selfId)
+      ? (() => { const d = chatDirPath(this.sessionsDir, channelType, channelId, selfId); fs.mkdirSync(d, { recursive: true }); fs.mkdirSync(path.join(d, '_threads'), { recursive: true }); return d; })()
+      : this.ensureResolvedChatDir(channelType || channel, channelId);
     const threadIndex = readThreadIndex(chatDir);
     const existingMetaId = threadIndex[threadId];
 

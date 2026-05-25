@@ -3779,7 +3779,26 @@ Options:
 
     const encrypt = args.includes('--encrypt');
     const thread = getArgValue(args, '--thread');
-    const result = await msgSend({ from, to, body, encrypt, thread, ...commonOpts });
+
+    // 文件上传进度展示（非 JSON 输出时）。仅在大文件降级到 HTTP PUT 阶段会逐块更新。
+    let lastPctShown = -1;
+    const onUploadProgress = formatJson ? undefined : (info: { phase: string; bytes: number; total: number }) => {
+      if (info.phase === 'inline') return; // 内联阶段不分块，跳过
+      if (info.phase === 'http-put') {
+        const pct = info.total > 0 ? Math.floor((info.bytes / info.total) * 100) : 0;
+        if (pct === lastPctShown && info.bytes < info.total) return;
+        lastPctShown = pct;
+        const mb = (n: number) => (n / 1024 / 1024).toFixed(2);
+        const eol = info.bytes >= info.total ? '\n' : '\r';
+        process.stderr.write(`  ⏫ uploading: ${pct}% (${mb(info.bytes)}/${mb(info.total)} MB)${eol}`);
+      } else if (info.phase === 'session-create') {
+        process.stderr.write('  ⏫ requesting upload session...\n');
+      } else if (info.phase === 'session-complete') {
+        process.stderr.write('  ⏫ finalizing upload...\n');
+      }
+    };
+
+    const result = await msgSend({ from, to, body, encrypt, thread, onUploadProgress, ...commonOpts });
     if (!result.ok) {
       if (formatJson) { console.log(JSON.stringify(result)); }
       else { console.error(`❌ 发送失败: ${result.error}`); }

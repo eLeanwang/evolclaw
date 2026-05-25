@@ -1,7 +1,7 @@
 import path from 'path';
 import type { ShortConnectionOpts } from '../rpc/index.js';
 import { createShortConnection } from '../rpc/index.js';
-import { uploadFileAndBuildPayload } from './upload.js';
+import { uploadFileAndBuildPayload, type UploadProgress } from './upload.js';
 import { appendMessageLog, buildOutboundEntry } from '../../core/message/message-log.js';
 import { chatDirPath } from '../../core/session/session-fs-store.js';
 import { resolvePaths } from '../../paths.js';
@@ -87,6 +87,8 @@ export interface MsgSendArgs extends MsgCommonOpts {
   body: MsgSendBody;
   encrypt?: boolean;
   thread?: string;  // 话题 ID（用于多话题路由）
+  /** 文件上传进度回调（仅 body.mode==='file' 时触发）。 */
+  onUploadProgress?: (info: UploadProgress) => void;
 }
 
 export async function msgSend(args: MsgSendArgs): Promise<MsgSendResult | MsgError> {
@@ -123,6 +125,7 @@ export async function msgSend(args: MsgSendArgs): Promise<MsgSendResult | MsgErr
           contentType: args.body.contentType,
           text: args.body.text,
           transcript: args.body.transcript,
+          onProgress: args.onUploadProgress,
         });
         payload = built.payload;
         break;

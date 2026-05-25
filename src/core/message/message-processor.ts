@@ -1350,28 +1350,8 @@ export class MessageProcessor {
           // 记录完成状态 + 最后一轮回复文本（后续 complete 覆盖前序）
           completeResult = { isError: !!event.isError, subtype: event.subtype, errors: event.errors, terminalReason: event.terminalReason, lastReplyText, fullText: event.result || '', hasReceivedText, numTurns: event.numTurns, usage: event.usage };
 
-          // proactive 模式：每轮 LLM 调用完成后写一条 thought 到 messages.jsonl
-          // 这样 thought 数 = LLM 调用轮数，而不是 chunk 数
-          if (session.sessionMode === 'proactive' && lastReplyText) {
-            try {
-              const chatDir = this.sessionManager.getChatDir(session);
-              const sessionEncrypt = this.sessionManager.getSessionEncrypt(session.id);
-              appendMessageLog(chatDir, buildOutboundEntry({
-                from: session.selfId || 'self',
-                to: session.metadata?.peerId ?? session.channelId,
-                chatType: (session.chatType ?? 'private') as 'private' | 'group',
-                groupId: session.metadata?.groupId ?? null,
-                msgId: `thought-${session.id}-${Date.now()}`,
-                content: lastReplyText,
-                agent: session.agentId || null,
-                model: null,
-                durationMs: null,
-                encrypt: sessionEncrypt ?? undefined,
-                chatmode: 'proactive',
-                msgType: 'thought',
-              }));
-            } catch {}
-          }
+          // thought jsonl 写入已下沉到 aun.ts:sendThought 成功后，
+          // 由那里按 LLM 输出的每个 text item 单独写一条，此处不再写。
 
           // 失败且无前置错误输出：显示 errors 摘要
           // 但用户主动中断（新消息打断 或 /stop 命令）时不显示错误提示

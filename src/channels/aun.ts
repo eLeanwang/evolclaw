@@ -1986,12 +1986,21 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     try {
       const itemCount = Array.isArray((payload as any)?.items) ? (payload as any).items.length : 0;
       const stage = (payload as any)?.stage ?? `items=${itemCount}`;
-      // 提取 thought 文本（取最后一项的 text 或 content 字段）
+      // 提取 thought 文本（只对 kind=text 的 item 写 jsonl，过滤 tool_use/tool_result 等结构化项）
       const items = (payload as any)?.items;
       let thoughtText: string | undefined;
       if (Array.isArray(items) && items.length > 0) {
         const lastItem = items[items.length - 1];
-        thoughtText = lastItem?.text || lastItem?.content || (typeof lastItem === 'string' ? lastItem : undefined);
+        // 优先 text 字段（kind=text 的 item），否则 content
+        if (lastItem?.kind === 'text' && lastItem.text) {
+          thoughtText = lastItem.text;
+        } else if (lastItem?.text) {
+          thoughtText = lastItem.text;
+        } else if (lastItem?.content) {
+          thoughtText = lastItem.content;
+        } else if (typeof lastItem === 'string') {
+          thoughtText = lastItem;
+        }
       }
       if (this.isGroupId(channelId)) {
         params.group_id = targetId;
@@ -1999,14 +2008,19 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
         const tid = putRes?.thought_id;
         logger.info(`${this.logPrefix()} thought.put ok group=${targetId} task=${taskId} stage=${stage} encrypt=${encrypt} tid=${tid ?? '?'}`);
         this.eventBus?.publish?.({ type: 'message:thought-put', agentName: this.config.aid, channelId, taskId, text: thoughtText });
-        // thought jsonl 写入已改为按 LLM 调用次数统计（在 complete 事件处写入），此处不再写
+        // 文本类 thought 写入 jsonl（只对有 text 的 item，过滤 tool 等结构化项）
+        if (thoughtText) {
+          this.appendOutboundJsonl(channelId, thoughtText, tid ?? `thought-${Date.now()}`, encrypt, context, true, 'thought', 'daemon');
+        }
       } else {
         params.to = targetId;
         const putRes = await this.callAndTrace<any>('message.thought.put', params);
         const tid = putRes?.thought_id;
         logger.info(`${this.logPrefix()} thought.put ok p2p=${this.peerLabel(targetId)} task=${taskId} stage=${stage} encrypt=${encrypt} tid=${tid ?? '?'}`);
         this.eventBus?.publish?.({ type: 'message:thought-put', agentName: this.config.aid, channelId, taskId, text: thoughtText });
-        // thought jsonl 写入已改为按 LLM 调用次数统计（在 complete 事件处写入），此处不再写
+        if (thoughtText) {
+          this.appendOutboundJsonl(channelId, thoughtText, tid ?? `thought-${Date.now()}`, encrypt, context, false, 'thought', 'daemon');
+        }
       }
     } catch (e) {
       const err = e as any;
