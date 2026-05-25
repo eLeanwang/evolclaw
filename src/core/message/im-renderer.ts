@@ -250,10 +250,10 @@ export class IMRenderer {
       call_id: callId || this.synthCallId(),
       name,
       ok,
-      result,
-      error,
-      duration_ms: durationMs,
-      text: descText,
+      ...(result !== undefined && { result }),
+      ...(error !== undefined && { error }),
+      ...(durationMs !== undefined && { duration_ms: durationMs }),
+      ...(descText !== undefined && { text: descText }),
     });
     this.messageTimestamps.push(Date.now());
     if (this.diagEnabled) diag(this.instanceId, 'addToolResult', { name, ok, callId });

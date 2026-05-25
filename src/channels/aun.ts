@@ -2598,10 +2598,8 @@ export class AUNChannelPlugin implements ChannelPlugin {
               if (envelope.chatmode === 'proactive') {
                 await channel.sendThought(channelId, envelope.taskId, aunPayload, ctx);
               } else {
-                await Promise.all([
-                  channel.sendThought(channelId, envelope.taskId, aunPayload, ctx),
-                  channel.sendStructured(channelId, aunPayload, ctx),
-                ]);
+                // interactive 模式不发 thought.put，只写入消息历史
+                await channel.sendStructured(channelId, aunPayload, ctx);
               }
               return;
             }

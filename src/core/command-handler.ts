@@ -813,6 +813,10 @@ export class CommandHandler {
     chatType?: string,
     source?: 'user' | 'card-trigger',
   ): Promise<OutboundPayload | null | undefined> {
+    // 卡片回调的 chatType 不可靠（飞书 bot 单聊 chatId 也是 oc_ 前缀），
+    // 不应覆盖 session 中已有的正确值
+    if (source === 'card-trigger') chatType = undefined;
+
     // 解析身份（按实例名）
     const identity = this.sessionManager.resolveIdentity(channel, userId);
     const policy = this.getPolicy(channel);

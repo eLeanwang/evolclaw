@@ -266,6 +266,13 @@ export class EvolAgentRegistry {
       return null;
     }
 
+    // Channel fingerprint 冲突检测（防止新 agent 复用已有 agent 的凭证）
+    const conflict = this.checkConflictForReload(raw, aid);
+    if (conflict) {
+      logger.warn(`[EvolAgentRegistry] loadNewAgent ${aid}: ${conflict}`);
+      return null;
+    }
+
     const defaults = loadDefaults();
     const merged = mergeForAgent(raw, defaults);
     const agent = new EvolAgent(raw, merged);
@@ -294,6 +301,34 @@ export class EvolAgentRegistry {
 
     const defaults = loadDefaults();
     const merged = mergeForAgent(raw, defaults);
+
+    // ── disabled → enabled 转换：需要完整启动流程 ──
+    if (oldAgent.status === 'disabled' && raw.enabled !== false) {
+      oldAgent.swapConfig(raw, merged);
+      const hotLoad = (globalThis as any).__evolclaw_hotLoadAgent;
+      if (!hotLoad) throw new Error(`Cannot enable agent "${aidOrName}": hot-load handler not initialized`);
+      // 从 registry 中移除旧的 disabled 实例，hotLoad 会重新创建
+      this.agents.delete(oldAgent.aid);
+      this.channelIndex.clear();
+      this.buildChannelIndex();
+      await hotLoad(oldAgent.aid);
+      logger.info(`[Reload] Agent "${aidOrName}" transitioned from disabled → enabled (full startup)`);
+      return;
+    }
+
+    // ── enabled → disabled 转换：断开所有 channel ──
+    if (oldAgent.status !== 'disabled' && raw.enabled === false) {
+      for (const ch of oldAgent.channelInstanceNames()) {
+        try { await hooks.drainChannel(ch); } catch {}
+        try { await hooks.disconnectChannel(ch); } catch {}
+      }
+      oldAgent.swapConfig(raw, merged);
+      oldAgent.status = 'disabled';
+      this.channelIndex.clear();
+      this.buildChannelIndex();
+      logger.info(`[Reload] Agent "${aidOrName}" disabled`);
+      return;
+    }
 
     const conflict = this.checkConflictForReload(raw, oldAgent.aid);
     if (conflict) throw new Error(`Channel conflict: ${conflict}`);
@@ -340,11 +375,7 @@ export class EvolAgentRegistry {
 
       // truly kept 的 adapter 实例已经在 oldAgent.channels 里，无需迁移
 
-      if (oldAgent.status === 'error' || oldAgent.status === 'disabled') {
-        // 保持原态——swap 不改 status
-      } else {
-        oldAgent.status = 'running';
-      }
+      oldAgent.status = 'running';
 
       // 重启触发器调度器（如果已初始化）
       if (oldAgent.triggerScheduler) {

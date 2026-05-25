@@ -18,7 +18,7 @@ export interface FeishuConfig {
 export interface MessageHandlerOptions {
   channelId: string;
   content: string;
-  chatType: 'private' | 'group';
+  chatType?: 'private' | 'group';
   images?: Array<{ data: string; mimeType: string }>;
   peerId?: string;
   peerName?: string;
@@ -378,12 +378,11 @@ export class FeishuChannel {
 
               logger.info(`[Feishu] CommandCard trigger: command=${value._command}, operator=${operatorId}`);
               if (this.messageHandler) {
-                // Feishu chatId 前缀：oc_ = group chat，ou_ = private user open_id
-                const chatType: 'private' | 'group' = typeof chatId === 'string' && chatId.startsWith('oc_') ? 'group' : 'private';
+                // 卡片回调不传 chatType——oc_ 前缀不区分群聊/单聊，
+                // 由 ensureSession 从已有 session 中继承正确的 chatType
                 await this.messageHandler({
                   channelId: chatId,
                   content: value._command,
-                  chatType,
                   peerId: operatorId,
                   messageId: `card-trigger-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
                   source: 'card-trigger',
@@ -1583,7 +1582,8 @@ export class FeishuChannelPlugin implements ChannelPlugin {
             adapter.channelName,
             (handler) => channel.onMessage(async ({ channelId: chatId, content, images, peerId, peerName, messageId, mentions, threadId, rootId, chatType, source }: any) => {
               await handler({
-                channel: adapter.channelName, channelType, channelId: chatId, content, images, chatType,
+                channel: adapter.channelName, channelType, channelId: chatId, content, images,
+                chatType: chatType || 'private',
                 peerId: peerId || '', peerName, messageId, mentions, threadId,
                 replyContext: threadId ? { replyToMessageId: rootId ?? threadId, replyInThread: true } : undefined,
                 source,
