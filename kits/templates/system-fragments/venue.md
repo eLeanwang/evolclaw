@@ -1,5 +1,4 @@
-[环境层]
-聊天类型：{{chatType}}
+[venue]
 {{?venueUid}}
-环境标识：{{venueUid}}
+venue-id: {{venueUid}}
 {{/}}

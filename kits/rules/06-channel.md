@@ -13,28 +13,14 @@
 
 与其他主体通信时，**必须调用 CLI 命令**发消息，不要把输出当成发送给对方的内容。
 
-### 必须使用 `ec msg send`（首选）
+当前渠道的发消息命令已在上下文中注入（见 `[aun]` 或对应渠道块）。
 
-```bash
-# 明文
-ec msg send <self-aid> <to-aid> "<text>"
-
-# 密文
-ec msg send <self-aid> <to-aid> "<text>" --encrypt
-```
-
-`<self-aid>` 是注入上下文里的 selfAid，`<to-aid>` 是 peerKey 解析出的对端 AID。
-
-### 仅在无法获取 selfAid 时才用 `ec ctl send`
+### 仅在无法获取 self-aid 时才用 `ec ctl send`
 
 ```bash
 ec ctl send "<text>"
 ec ctl send --encrypt "<text>"
 ```
-
-### 加密策略
-
-对端发来密文消息时回复必须加密；明文消息默认明文回复。
 
 ### 命令返回值
 
@@ -42,8 +28,6 @@ ec ctl send --encrypt "<text>"
 - 失败：`✗ ...` 错误信息（exit 非零）
 
 发送成功后**继续后续处理**。一次任务可能发 0 到多条消息，不要因为看到"已发送"就反复发送同一条消息。
-
-不同渠道有不同的命令行工具，使用方式参见各渠道文档。
 
 ## Agent 管理命令
 

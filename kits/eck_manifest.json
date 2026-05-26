@@ -71,9 +71,9 @@
       "description": "渠道层：我通过什么通信"
     },
     {
-      "id": "runtime",
+      "id": "eckruntime",
       "type": "file",
-      "file": "$PACKAGE_ROOT/kits/templates/system-fragments/runtime.md",
+      "file": "$PACKAGE_ROOT/kits/templates/system-fragments/eckruntime.md",
       "order": 60,
       "needsInjection": true,
       "when": "always",

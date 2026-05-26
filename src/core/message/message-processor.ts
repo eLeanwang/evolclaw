@@ -617,7 +617,7 @@ export class MessageProcessor {
             venueUid: undefined,
             project: path.basename(absoluteProjectPath),
             sessionName: session.name || undefined,
-            sessionMode: isProactive ? 'proactive' : 'interactive',
+            chatmode: isProactive ? 'proactive' : 'interactive',
             readonly: session.metadata?.permissionMode === 'readonly',
             canSendFile: !isProactive && currentCanSend,
             capabilities: capParts.length > 0 ? capParts.join('、') : undefined,
