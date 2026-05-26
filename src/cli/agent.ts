@@ -9,6 +9,7 @@ import { CONFIG_SCHEMA_VERSION } from '../types.js';
 import type { AgentConfig, ChannelInstance } from '../types.js';
 import { isValidChannelName } from '../core/channel-loader.js';
 import { commandExists } from '../utils/cross-platform.js';
+import { isCodexSdkAvailable } from '../agents/codex-runner.js';
 
 // ==================== Types ====================
 
@@ -138,8 +139,13 @@ const BASEAGENT_ENV_KEY: Record<Baseagent, string | undefined> = {
   gemini: 'GEMINI_API_KEY',
 };
 
+function isBaseagentAvailable(baseagent: Baseagent): boolean {
+  if (baseagent === 'codex') return isCodexSdkAvailable();
+  return commandExists(baseagent);
+}
+
 function detectAvailableBaseagents(): Baseagent[] {
-  return BASEAGENT_CANDIDATES.filter(b => commandExists(b));
+  return BASEAGENT_CANDIDATES.filter(isBaseagentAvailable);
 }
 
 function pickDefaultBaseagent(available: Baseagent[]): Baseagent | null {
@@ -452,7 +458,7 @@ export async function agentCreateInteractive(opts: AgentCreateInteractiveOpts = 
     // Baseagent
     const available = detectAvailableBaseagents();
     if (available.length === 0) {
-      return { ok: false, error: `No baseagent CLI detected on PATH. Install one of: ${BASEAGENT_CANDIDATES.join('/')}` };
+      return { ok: false, error: `No usable baseagent detected. Install claude/gemini CLI or optional dependency @openai/codex-sdk.` };
     }
     const defaultBa = pickDefaultBaseagent(available)!;
     let baseagent: Baseagent;
@@ -468,7 +474,7 @@ export async function agentCreateInteractive(opts: AgentCreateInteractiveOpts = 
           continue;
         }
         if (!available.includes(input as Baseagent)) {
-          console.log(`  ${input} not detected on PATH. Available: ${available.join('/')}`);
+          console.log(`  ${input} is not available in the current environment. Available: ${available.join('/')}`);
           continue;
         }
         chosen = input as Baseagent;
@@ -609,7 +615,7 @@ export async function agentCreateNonInteractive(opts: AgentCreateNonInteractiveO
   // Baseagent
   const available = detectAvailableBaseagents();
   if (available.length === 0) {
-    return { ok: false, error: `No baseagent CLI detected on PATH. Install one of: ${BASEAGENT_CANDIDATES.join('/')}` };
+    return { ok: false, error: `No usable baseagent detected. Install claude/gemini CLI or optional dependency @openai/codex-sdk.` };
   }
   let baseagent: Baseagent;
   if (opts.baseagent) {
@@ -617,7 +623,7 @@ export async function agentCreateNonInteractive(opts: AgentCreateNonInteractiveO
       return { ok: false, error: `Invalid baseagent: ${opts.baseagent} (options: ${BASEAGENT_CANDIDATES.join('/')})` };
     }
     if (!available.includes(opts.baseagent as Baseagent)) {
-      return { ok: false, error: `${opts.baseagent} not detected on PATH (available: ${available.join('/')})` };
+      return { ok: false, error: `${opts.baseagent} is not available in the current environment (available: ${available.join('/')})` };
     }
     baseagent = opts.baseagent as Baseagent;
   } else {

@@ -10,7 +10,7 @@ import type { MessageProcessor } from './message-processor.js';
 import type { MessageQueue } from './message-queue.js';
 import type { CommandHandler as CmdHandler } from '../command-handler.js';
 import type { EventBus } from '../event-bus.js';
-import type { Message, InboundMessage, ChannelAdapter, ReplyContext, EvolAgentRegistryHandle, OutboundPayload } from '../../types.js';
+import type { Message, InboundMessage, ChannelAdapter, ReplyContext, EvolAgentRegistryHandle, OutboundPayload, MenuQueryRequest, MenuUpdateRequest, MenuResponse } from '../../types.js';
 
 /**
  * MessageBridge — Channel 与 Core 之间的消息桥梁
@@ -228,7 +228,30 @@ export class MessageBridge {
     });
   }
 
-  /** 自定义消息快速路径：拦截 menu.query 等自定义 payload，返回 true 表示已处理 */
+  // ── Menu Protocol ──
+
+  private static readonly MENU_NAME_MAP: Record<string, string> = {
+    chatmode: '/chatmode',
+    permission: '/perm',
+    dispatch: '/dispatch',
+    activity: '/activity',
+    project: '/p',
+    session: '/s',
+    agent: '/agent',
+    model: '/model',
+    effort: '/effort',
+    status: '/status',
+    aid: '/aid',
+  };
+
+  private resolveCmd(name: string, cmd?: string): string {
+    if (cmd) return cmd;
+    const mapped = MessageBridge.MENU_NAME_MAP[name];
+    if (!mapped) throw { code: 'UNKNOWN_NAME', message: `未知操作: ${name}` };
+    return mapped;
+  }
+
+  /** 自定义消息快速路径：拦截 menu.query / menu.update，返回 true 表示已处理 */
   private async handleCustomPayload(
     content: string, channel: string, msg: InboundMessage,
     sendReply: (channelId: string, text: string, replyContext?: ReplyContext) => Promise<void>,
@@ -238,29 +261,80 @@ export class MessageBridge {
     try { parsed = JSON.parse(content); } catch { return false; }
     if (!parsed || typeof parsed !== 'object' || !parsed.type) return false;
 
-    if (parsed.type === 'menu.query') {
-      if (parsed.cmd && (parsed.mode === 'query' || parsed.mode === 'update')) {
-        // exec 模式：查询状态或执行命令
-        const result = await this.cmdHandler.execMenu(parsed.cmd, parsed.mode, channel, msg.channelId, msg.peerId);
-        const base = { type: 'menu.response', cmd: parsed.cmd };
-        const response = JSON.stringify('error' in result ? { ...base, error: result.error } : { ...base, data: result.data });
-        await this.sendCustomResponse(adapter, channel, msg.channelId, response, sendReply);
-      } else if (parsed.cmd) {
-        // 动态子菜单查询
-        const items = await this.cmdHandler.getSubMenuItems(parsed.cmd, channel, msg.channelId, msg.peerId);
-        const response = JSON.stringify({ type: 'menu.response', cmd: parsed.cmd, items: items ?? [] });
-        await this.sendCustomResponse(adapter, channel, msg.channelId, response, sendReply);
-      } else {
-        // 全量菜单
-        const identity = this.sessionManager.resolveIdentity(channel, msg.peerId);
-        const items = this.cmdHandler.getMenuItems(identity.role, msg.chatType || 'private');
-        const response = JSON.stringify({ type: 'menu.response', items });
-        await this.sendCustomResponse(adapter, channel, msg.channelId, response, sendReply);
-      }
-      return true;
+    switch (parsed.type) {
+      case 'menu.query':
+        await this.handleMenuQuery(parsed, channel, msg, adapter, sendReply);
+        return true;
+      case 'menu.update':
+        await this.handleMenuUpdate(parsed, channel, msg, adapter, sendReply);
+        return true;
+      default:
+        return false;
     }
+  }
 
-    return false;
+  private async handleMenuQuery(
+    req: MenuQueryRequest, channel: string, msg: InboundMessage,
+    adapter: ChannelAdapter | undefined,
+    sendReply: (channelId: string, text: string, replyContext?: ReplyContext) => Promise<void>
+  ): Promise<void> {
+    const { id, name, cmd } = req;
+    let resolvedCmd: string | undefined;
+    try {
+      let data: any;
+
+      if (name === 'list') {
+        const identity = this.sessionManager.resolveIdentity(channel, msg.peerId);
+        data = this.cmdHandler.getMenuItems(identity.role, msg.chatType || 'private');
+      } else if (req.state) {
+        resolvedCmd = this.resolveCmd(name, cmd);
+        const result = await this.cmdHandler.execMenu(resolvedCmd, 'query', channel, msg.channelId, msg.peerId);
+        if ('error' in result) throw { code: 'EXEC_FAILED', message: result.error };
+        data = result.data;
+      } else {
+        resolvedCmd = this.resolveCmd(name, cmd);
+        data = await this.cmdHandler.getSubMenuItems(resolvedCmd, channel, msg.channelId, msg.peerId) ?? [];
+      }
+
+      await this.sendMenuResponse(adapter, channel, msg.channelId,
+        { type: 'menu.response', id, name, cmd: resolvedCmd, data }, sendReply);
+    } catch (err: any) {
+      await this.sendMenuResponse(adapter, channel, msg.channelId, {
+        type: 'menu.response', id, name, cmd: resolvedCmd ?? cmd,
+        error: { code: err?.code || 'INTERNAL', message: err?.message || String(err) }
+      }, sendReply);
+    }
+  }
+
+  private async handleMenuUpdate(
+    req: MenuUpdateRequest, channel: string, msg: InboundMessage,
+    adapter: ChannelAdapter | undefined,
+    sendReply: (channelId: string, text: string, replyContext?: ReplyContext) => Promise<void>
+  ): Promise<void> {
+    const { id, name, cmd, value } = req;
+    let resolvedCmd: string | undefined;
+    try {
+      if (!value) throw { code: 'MISSING_VALUE', message: '缺少 value 参数' };
+      resolvedCmd = this.resolveCmd(name, cmd);
+      const fullCmd = `${resolvedCmd} ${value}`;
+      const result = await this.cmdHandler.execMenu(fullCmd, 'update', channel, msg.channelId, msg.peerId);
+      if ('error' in result) throw { code: 'EXEC_FAILED', message: result.error };
+      await this.sendMenuResponse(adapter, channel, msg.channelId,
+        { type: 'menu.response', id, name, cmd: resolvedCmd, data: result.data }, sendReply);
+    } catch (err: any) {
+      await this.sendMenuResponse(adapter, channel, msg.channelId, {
+        type: 'menu.response', id, name, cmd: resolvedCmd ?? cmd,
+        error: { code: err?.code || 'INTERNAL', message: err?.message || String(err) }
+      }, sendReply);
+    }
+  }
+
+  private async sendMenuResponse(
+    adapter: ChannelAdapter | undefined, channel: string, channelId: string,
+    response: MenuResponse,
+    sendReply: (channelId: string, text: string) => Promise<void>
+  ): Promise<void> {
+    await this.sendCustomResponse(adapter, channel, channelId, JSON.stringify(response), sendReply);
   }
 
   /** menu.query 响应：优先走 adapter.send(custom)，降级 sendReply */

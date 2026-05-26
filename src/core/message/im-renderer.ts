@@ -194,6 +194,17 @@ export class IMRenderer {
     }
   }
 
+  /** 清除上下文过长错误文本（从 buffer + allText 中移除） */
+  stripContextError(pattern: RegExp): void {
+    this.textBuffer = this.textBuffer.replace(pattern, '').trim();
+    this.allText = this.allText.replace(pattern, '').trim();
+    for (const item of this.itemsQueue) {
+      if (item.kind === 'text') {
+        item.text = item.text.replace(pattern, '');
+      }
+    }
+  }
+
   // ── 文本/活动注入（替代 StreamFlusher.addText/addActivity）──
 
   /** 添加文本片段（流式 text） */

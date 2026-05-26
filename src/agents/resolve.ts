@@ -18,7 +18,7 @@ export interface AnthropicResolved {
   apiKey: string;
   baseUrl?: string;
   model: string;
-  effort?: 'low' | 'medium' | 'high' | 'max';
+  effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
   pathToClaudeCodeExecutable?: string;
 }
 
@@ -34,7 +34,7 @@ function loadClaudeSettings(): { env?: Record<string, string>; model?: string; e
 
 export function resolveAnthropicConfig(
   config: Config,
-  override?: { apiKey?: string; baseUrl?: string; model?: string; effort?: 'low' | 'medium' | 'high' | 'max'; pathToClaudeCodeExecutable?: string }
+  override?: { apiKey?: string; baseUrl?: string; model?: string; effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'; pathToClaudeCodeExecutable?: string }
 ): AnthropicResolved {
   const settings = loadClaudeSettings();
   const isPlaceholder = (v?: string) => !v || v.includes('your-') || v.includes('placeholder');

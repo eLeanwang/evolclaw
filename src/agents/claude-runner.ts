@@ -270,7 +270,7 @@ export class AgentRunner {
   readonly capabilities = { clear: true, compact: true, fork: true };
   private apiKey: string;
   private model: string;
-  private effort?: 'low' | 'medium' | 'high' | 'max';
+  private effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
   private permissionMode: string = DEFAULT_PERMISSION_MODE;
   private baseUrl?: string;
   private config?: Config;
@@ -327,7 +327,7 @@ export class AgentRunner {
     return ['opus', 'sonnet', 'haiku'];
   }
 
-  setEffort(effort: 'low' | 'medium' | 'high' | 'max' | undefined): void {
+  setEffort(effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | undefined): void {
     this.effort = effort;
   }
 
@@ -1108,7 +1108,7 @@ export class AgentRunner {
     const commonOptions = {
       cwd: projectPath,
       model: this.model,
-      ...(this.effort ? { effort: this.effort } : {}),
+      ...(this.effort ? { effort: this.effort as 'low' | 'medium' | 'high' | 'max' } : {}),
       ...(this.claudeExecutablePath ? { pathToClaudeCodeExecutable: this.claudeExecutablePath } : {}),
       autoCompactWindow: 200000,
       advisorModel: 'haiku',
@@ -1400,12 +1400,12 @@ export class ClaudeAgentPlugin implements AgentPlugin {
   readonly name = 'claude';
 
   isEnabled(agent: import('../core/evolagent.js').EvolAgent): boolean {
-    return agent.baseagent === 'claude';
+    return !!agent.config.baseagents?.claude;
   }
 
   createAgent(agent: import('../core/evolagent.js').EvolAgent, callbacks: AgentCallbacks): AgentInstance | null {
     const override = agent.config.baseagents?.claude as
-      | { apiKey?: string; baseUrl?: string; model?: string; effort?: 'low' | 'medium' | 'high' | 'max'; pathToClaudeCodeExecutable?: string }
+      | { apiKey?: string; baseUrl?: string; model?: string; effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'; pathToClaudeCodeExecutable?: string }
       | undefined;
     const syntheticConfig = { agents: { claude: override } } as Config;
     const anthropic = resolveAnthropicConfig(syntheticConfig, override);

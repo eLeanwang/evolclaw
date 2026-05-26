@@ -1,6 +1,8 @@
 import { ChannelAdapter, Session, ChannelPolicy, InteractionRequest, ReplyContext, ActionInteraction, DEFAULT_PERMISSION_MODE, type OutboundPayload, type EvolAgentRegistryHandle, type EvolAgentHandle } from '../types.js';
 import { SessionManager } from './session/session-manager.js';
 import { type AgentRunnerFull, hasModelSwitcher, hasPermissionController } from '../agents/claude-runner.js';
+import { getCodexEfforts } from '../agents/codex-runner.js';
+import { resolveAnthropicConfig, resolveOpenaiConfig } from '../agents/resolve.js';
 import { MessageCache } from './message/message-cache.js';
 import { MessageProcessor } from './message/message-processor.js';
 import { EventBus } from './event-bus.js';
@@ -34,21 +36,21 @@ export interface MenuItem {
   label: string;
   args?: string;
   desc?: string;
+  selected?: boolean;
   next?: MenuNext;
 }
 
-const allEfforts = ['low', 'medium', 'high', 'max'] as const;
+const allEfforts = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
 type Effort = typeof allEfforts[number];
-const nonMaxEfforts = allEfforts.filter(e => e !== 'max') as readonly Effort[];
+const nonMaxEfforts = allEfforts.filter(e => e !== 'max' && e !== 'xhigh') as readonly Effort[];
 
 function getAvailableEfforts(agent: AgentRunnerFull, model: string): readonly Effort[] {
   if (agent.name === 'claude') {
-    if (model.includes('opus')) return allEfforts;
-    return nonMaxEfforts;
+    return allEfforts;
   }
 
   if (agent.name === 'codex') {
-    return nonMaxEfforts;
+    return getCodexEfforts(model) as readonly Effort[];
   }
 
   return [];
@@ -57,6 +59,39 @@ function getAvailableEfforts(agent: AgentRunnerFull, model: string): readonly Ef
 
 function formatModelUsage(_agent: AgentRunnerFull, _model: string): string {
   return '用法: /model <模型>';
+}
+
+function getModelListSource(
+  owning: EvolAgentHandle | null,
+  agent: AgentRunnerFull,
+): { apiBaseUrl?: string; apiKey?: string; fallbackModels: string[]; owner: string } {
+  const codexConfig = owning?.config?.baseagents?.codex as { apiKey?: string; baseUrl?: string; model?: string; effort?: string; reasoning?: string } | undefined;
+  const claudeConfig = owning?.config?.baseagents?.claude as { apiKey?: string; baseUrl?: string; model?: string; effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max' } | undefined;
+
+  if (agent.name === 'codex') {
+    let resolved: { apiKey?: string; baseUrl?: string } = {};
+    try {
+      resolved = resolveOpenaiConfig({ agents: { codex: codexConfig } } as any, codexConfig);
+    } catch {}
+    return {
+      apiBaseUrl: resolved.baseUrl,
+      apiKey: resolved.apiKey,
+      fallbackModels: agent.listModels?.() || [],
+      owner: 'openai',
+    };
+  }
+
+  let resolved: { apiKey?: string; baseUrl?: string } = {};
+  try {
+    resolved = resolveAnthropicConfig({ agents: { claude: claudeConfig } } as any, claudeConfig);
+  } catch {}
+
+  return {
+    apiBaseUrl: resolved.baseUrl,
+    apiKey: resolved.apiKey,
+    fallbackModels: ['claude-opus-4-7', 'claude-opus-4-6', 'claude-sonnet-4-6'],
+    owner: 'anthropic',
+  };
 }
 
 /**
@@ -138,7 +173,7 @@ function formatIdleTime(ms: number): string {
 }
 
 // 支持的命令列表
-const commands = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/evolhelp', '/status', '/restart', '/model', '/setmodel', '/effort', '/agent', '/slist', '/session', '/rename', '/stop', '/clear', '/compact', '/repair', '/safe', '/fork', '/del', '/perm', '/file', '/check', '/rewind', '/activity', '/chatmode', '/dispatch', '/ask', '/resume', '/aid', '/rpc', '/storage', '/trigger', '/upgrade'];
+const commands = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/evolhelp', '/status', '/restart', '/model', '/setmodel', '/effort', '/agent', '/slist', '/session', '/rename', '/stop', '/clear', '/compact', '/repair', '/safe', '/fork', '/del', '/perm', '/file', '/check', '/rewind', '/activity', '/chatmode', '/dispatch', '/ask', '/resume', '/aid', '/rpc', '/storage', '/trigger', '/upgrade', '/evolagent'];
 
 // 命令别名映射
 const aliases: Record<string, string> = {
@@ -149,7 +184,7 @@ const aliases: Record<string, string> = {
 };
 
 // 命令快速路径前缀（所有命令都不进入消息队列）
-const quickCommandPrefixes = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/evolhelp', '/status', '/restart', '/model', '/setmodel', '/effort', '/agent', '/slist', '/session', '/rename', '/repair', '/fork', '/stop', '/clear', '/compact', '/safe', '/del', '/perm', '/file', '/check', '/p ', '/s ', '/name', '/rewind', '/rw', '/rw ', '/activity', '/chatmode', '/dispatch', '/ask', '/resume', '/aid', '/rpc', '/storage', '/trigger', '/upgrade'];
+const quickCommandPrefixes = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/evolhelp', '/status', '/restart', '/model', '/setmodel', '/effort', '/agent', '/slist', '/session', '/rename', '/repair', '/fork', '/stop', '/clear', '/compact', '/safe', '/del', '/perm', '/file', '/check', '/p ', '/s ', '/name', '/rewind', '/rw', '/rw ', '/activity', '/chatmode', '/dispatch', '/ask', '/resume', '/aid', '/rpc', '/storage', '/trigger', '/upgrade', '/evolagent'];
 
 export class CommandHandler {
   private adapters = new Map<string, ChannelAdapter>();
@@ -621,7 +656,7 @@ export class CommandHandler {
             { value: 'none', label: '不显示', desc: '关闭所有中间输出' },
           ] } },
           ...(isAdmin ? [
-            { cmd: '/restart', label: '重启/重连', desc: '重启服务或重连指定渠道', next: { type: 'select' as const, dynamic: true } },
+            { cmd: '/restart', label: '重启服务', desc: '重启整个 EvolClaw 服务进程' },
           ] : []),
           ...(isOwner ? [
             { cmd: '/file', label: '发送项目内文件', desc: '将项目目录内的文件发送给用户' },
@@ -655,6 +690,7 @@ export class CommandHandler {
     if (cmd === '/s' || cmd === '/del') {
       const sessions = await this.sessionManager.listSessions(channel, channelId);
       const active = cmd === '/del' ? await this.sessionManager.getActiveSession(channel, channelId) : null;
+      const currentSession = session; // already fetched above
       const items: MenuItem[] = sessions
         .filter(s => !active || s.id !== active.id)
         .map(s => {
@@ -665,6 +701,7 @@ export class CommandHandler {
             value: s.name || s.id.slice(0, 8),
             label: s.name || s.id.slice(0, 8),
             desc: parts || undefined,
+            selected: currentSession ? s.id === currentSession.id : false,
           };
         });
       if (cmd === '/s') {
@@ -677,33 +714,80 @@ export class CommandHandler {
       // Use agent-scoped project list: agent-owned channels see their agent.json's
       // projects.list; default channel sees agent config's projects.list
       const list = this.getEffectiveProjects(channel);
-      return Object.entries(list).map(([name, path]) => ({ value: name, label: name, desc: path as string }));
+      const currentPath = session?.projectPath;
+      return Object.entries(list).map(([name, p]) => ({ value: name, label: name, desc: p as string, selected: currentPath === p }));
     }
 
     if (cmd === '/agent') {
-      return this.getAvailableBaseagents(channel).map(name => ({ value: name, label: name }));
+      const currentAgent = session?.agentId;
+      return this.getAvailableBaseagents(channel).map(name => ({ value: name, label: name, selected: name === currentAgent }));
     }
 
     if (cmd === '/model') {
       const agent = this.getAgent(channel, session?.agentId);
       if (hasModelSwitcher(agent) && agent.listModels) {
         const models = await agent.listModels() ?? [];
-        if (models.length > 0) return models.map((m: string) => ({ value: m, label: m }));
+        const currentModel = agent.getModel();
+        if (models.length > 0) return models.map((m: string) => ({ value: m, label: m, selected: m === currentModel }));
       }
       return null;
     }
 
-    if (cmd === '/restart') {
-      const isOwner = userId ? this.sessionManager.resolveIdentity(channel, userId).role === 'owner' : false;
-      // 列出所有 channel type
-      const visibleTypes = new Set<string>();
-      for (const [name] of this.adapters) {
-        const t = this.channelTypeMap.get(name);
-        if (t) visibleTypes.add(t);
-      }
-      const channels = [...visibleTypes].map(type => ({ value: type, label: type, desc: '重连此类型所有渠道实例' }));
-      if (isOwner) channels.unshift({ value: '', label: '重启服务', desc: '重启整个 EvolClaw 服务进程' });
-      return channels;
+    // if (cmd === '/restart') {
+    //   const isOwner = userId ? this.sessionManager.resolveIdentity(channel, userId).role === 'owner' : false;
+    //   // 列出所有 channel type
+    //   const visibleTypes = new Set<string>();
+    //   for (const [name] of this.adapters) {
+    //     const t = this.channelTypeMap.get(name);
+    //     if (t) visibleTypes.add(t);
+    //   }
+    //   const channels = [...visibleTypes].map(type => ({ value: type, label: type, desc: '重连此类型所有渠道实例' }));
+    //   if (isOwner) channels.unshift({ value: '', label: '重启服务', desc: '重启整个 EvolClaw 服务进程' });
+    //   return channels;
+    // }
+
+    if (cmd === '/activity') {
+      const currentMode = this.agentRegistry?.getShowActivities?.(channel) ?? 'all';
+      return [
+        { value: 'all', label: '全部显示', selected: currentMode === 'all' },
+        { value: 'dm', label: '仅私聊显示', selected: currentMode === 'dm-only' },
+        { value: 'owner', label: '仅 owner 私聊显示', selected: currentMode === 'owner-dm-only' },
+        { value: 'none', label: '全部静默', selected: currentMode === 'none' },
+      ];
+    }
+
+    if (cmd === '/effort') {
+      const agent = this.getAgent(channel, session?.agentId);
+      const currentModel = hasModelSwitcher(agent) ? agent.getModel() : agent.name;
+      const efforts = getAvailableEfforts(agent, currentModel);
+      const currentEffort = (agent as any).getEffort?.() || 'auto';
+      const allItems = [...efforts, 'auto'] as string[];
+      return allItems.map(e => ({ value: e, label: e === 'auto' ? 'auto (SDK默认)' : e, selected: e === currentEffort }));
+    }
+
+    if (cmd === '/chatmode') {
+      const currentMode = session?.sessionMode || 'interactive';
+      return [
+        { value: 'interactive', label: '交互模式', selected: currentMode === 'interactive' },
+        { value: 'proactive', label: '主动模式', selected: currentMode === 'proactive' },
+      ];
+    }
+
+    if (cmd === '/dispatch') {
+      const currentMode = session?.metadata?.dispatchMode ?? null;
+      return [
+        { value: 'mention', label: '@提及时响应', selected: currentMode === 'mention' },
+        { value: 'broadcast', label: '所有消息响应', selected: currentMode === 'broadcast' },
+      ];
+    }
+
+    if (cmd === '/perm') {
+      const currentMode = session?.metadata?.permissionMode ?? DEFAULT_PERMISSION_MODE;
+      const permAgent = this.getAgent(channel, session?.agentId);
+      const validModes = hasPermissionController(permAgent)
+        ? permAgent.listModes().filter(m => m.available).map(m => m.key)
+        : ['auto', 'bypass', 'plan', 'edit', 'request', 'noask'];
+      return validModes.map(m => ({ value: m, label: m, selected: m === currentMode }));
     }
 
     return null;
@@ -776,6 +860,133 @@ export class CommandHandler {
       await this.sessionManager.updateSession(session.id, { metadata });
       this.eventBus.publish({ type: 'session:dispatch-mode-changed', sessionId: session.id, mode: arg, timestamp: Date.now() });
       return { data: { mode: arg } };
+    }
+
+    if (cmdBase === '/activity') {
+      const currentMode = this.agentRegistry?.getShowActivities?.(channel) ?? 'all';
+      if (mode === 'query') {
+        return { data: { mode: currentMode } };
+      }
+      // update
+      if (!arg) return { error: '缺少目标模式' };
+      const modeMap: Record<string, string> = { all: 'all', dm: 'dm-only', owner: 'owner-dm-only', none: 'none' };
+      const newMode = modeMap[arg];
+      if (!newMode) return { error: `无效模式: ${arg}，可选: all / dm / owner / none` };
+      const identity = this.sessionManager.resolveIdentity(channel, userId);
+      if (identity.role !== 'owner') return { error: '中间输出模式切换仅限 owner' };
+      if (!this.agentRegistry?.setShowActivities) return { error: '找不到通道所属 agent，无法持久化' };
+      this.agentRegistry.setShowActivities(channel, newMode as any);
+      return { data: { mode: newMode } };
+    }
+
+    if (cmdBase === '/aid') {
+      const identity = this.sessionManager.resolveIdentity(channel, userId);
+      if (identity.role !== 'owner') return { error: '无权限：此命令仅限 owner 使用' };
+
+      // query: /aid → 列出 AID；/aid show <aid> → 查看详情；/aid agentmd get <aid> → 获取 agent.md
+      // update: /aid <subcommand> → 执行子命令（如 agentmd put <aid>）
+      const subCmd = arg || (mode === 'query' ? 'list' : '');
+      if (!subCmd) return { error: '缺少子命令' };
+
+      const cliArgs = `aid ${subCmd}`.split(/\s+/);
+      try {
+        const { execFile } = await import('node:child_process');
+        const { promisify } = await import('node:util');
+        const execFileAsync = promisify(execFile);
+        const { stdout, stderr } = await execFileAsync('evolclaw', cliArgs, {
+          timeout: 30000,
+          encoding: 'utf-8',
+          env: { ...process.env, AUN_LOG_INI_DISABLE: '1' },
+        });
+        const output = (stdout || '').trim();
+        if (!output && stderr) return { data: { output: `⚠ ${stderr.trim().slice(0, 500)}` } };
+        return { data: { output: output || '(无输出)' } };
+      } catch (e: any) {
+        const msg = e.stderr?.trim() || e.stdout?.trim() || String(e.message || e);
+        return { error: msg.slice(0, 500) };
+      }
+    }
+
+    if (cmdBase === '/status') {
+      if (mode === 'update') {
+        // /status update: stop or restart
+        if (arg === 'stop') {
+          const sessionKey = this.getQueueKey(session, channel, channelId);
+          const sessionAgent = this.getAgent(channel, session.agentId);
+          const hasActive = sessionAgent.hasActiveStream(sessionKey);
+          const queueLength = this.messageQueue.getQueueLength(sessionKey);
+          if (queueLength === 0 && !hasActive) {
+            return { error: '当前没有正在处理的任务' };
+          }
+          await sessionAgent.interrupt(sessionKey);
+          this.eventBus.publish({
+            type: 'task:interrupted',
+            sessionId: sessionKey,
+            reason: 'stop',
+            agentName: this.agentRegistry?.resolveByChannel(channel)?.name ?? '<unknown>',
+          });
+          this.sessionManager.clearProcessing(sessionKey);
+          return { data: { action: 'stop', success: true } };
+        }
+        if (arg === 'restart') {
+          const identity = this.sessionManager.resolveIdentity(channel, userId);
+          if (identity.role !== 'owner') return { error: '无权限：服务重启仅限 owner 使用' };
+          const restartInfo: Record<string, any> = { channel, channelId, timestamp: Date.now() };
+          fs.writeFileSync(path.join(resolvePaths().dataDir, 'restart-pending.json'), JSON.stringify(restartInfo));
+          const { spawn } = await import('child_process');
+          spawn('node', [path.join(getPackageRoot(), 'dist', 'cli', 'index.js'), 'restart-monitor'], {
+            detached: true,
+            stdio: 'ignore',
+            env: { ...process.env, EVOLCLAW_HOME: resolvePaths().root }
+          }).unref();
+          this.eventBus.publish({ type: 'system:restart', channel, channelId });
+          setTimeout(() => { process.kill(process.pid, 'SIGTERM'); }, 500);
+          return { data: { action: 'restart', success: true } };
+        }
+        return { error: `不支持的操作: ${arg}，可选: stop / restart` };
+      }
+      const sessionKey = this.getQueueKey(session, channel, channelId);
+      const sessionAgent = this.getAgent(channel, session.agentId);
+      const isProcessing = this.messageQueue.isProcessing(sessionKey) || sessionAgent.hasActiveStream(sessionKey);
+      const queueLength = this.messageQueue.getQueueLength(sessionKey);
+
+      let processingDuration: number | undefined;
+      if (isProcessing && session.processingState) {
+        const elapsed = Date.now() - parseInt(session.processingState, 10);
+        if (!isNaN(elapsed) && elapsed > 0) processingDuration = Math.floor(elapsed / 1000);
+      }
+
+      const projectName = this.getProjectName(session.projectPath);
+      const owningAgent = this.getOwningAgent(channel);
+      const health = await this.sessionManager.getHealthStatus(session.id);
+
+      let turns = 0;
+      if (session.agentSessionId) {
+        const fileInfo = this.sessionManager.getSessionFileInfo(session.projectPath, session.agentSessionId, session.agentId);
+        turns = fileInfo.turns;
+      }
+
+      return {
+        data: {
+          agent: owningAgent?.name ?? 'DefaultAgent',
+          channel: this.resolveChannelType(channel),
+          project: projectName,
+          session: session.name || null,
+          status: isProcessing ? 'processing' : 'idle',
+          processingDuration,
+          queueLength,
+          chatmode: session.sessionMode || 'interactive',
+          dispatchMode: session.chatType === 'group' ? (session.metadata?.dispatchMode ?? null) : undefined,
+          turns,
+          baseagent: session.agentId,
+          agentSessionId: session.agentSessionId || null,
+          lastSuccess: health.lastSuccessTime,
+          consecutiveErrors: health.consecutiveErrors,
+          lastError: health.lastError ? { type: health.lastErrorType || 'unknown', message: health.lastError.substring(0, 100) } : undefined,
+          createdAt: session.createdAt,
+          updatedAt: session.updatedAt,
+        }
+      };
     }
 
     return { error: `不支持 exec 模式: ${cmdBase}` };
@@ -857,9 +1068,6 @@ export class CommandHandler {
         normalizedContent === '/p' || normalizedContent.startsWith('/p ');
       if (isProjectCmd) {
         return { kind: 'command.error' as const, text: `❌ 当前通道由 agent [${owningAgent.name}] 管理，项目已锁定为 ${owningAgent.projectPath}` };
-      }
-      if (normalizedContent.startsWith('/agent ')) {
-        return { kind: 'command.error' as const, text: `❌ 当前通道由 agent [${owningAgent.name}] 管理，baseagent 已锁定为 ${owningAgent.baseagent}` };
       }
     }
 
@@ -1011,7 +1219,7 @@ export class CommandHandler {
         '  /stop - 中断当前任务',
         '  /check - 检查渠道状态',
         ...(isAdmin ? [
-          '  /restart <type> - 重连该类型所有渠道实例（服务级，admin+）',
+          '  /restart - 重启服务（owner only）',
         ] : []),
         ...(isOwner ? [
           '  /restart - 重启服务',
@@ -1020,8 +1228,6 @@ export class CommandHandler {
           '',
           '🧰 工具：',
           '  /file [channel] <path> - 发送项目内文件',
-          '  /aid [list|show|new|delete|lookup|agentmd] - AID 身份管理',
-          '  /storage [upload|download|ls|rm|quota] <aid> - 文件存储',
         ] : []),
         '',
         '❓ 帮助：',
@@ -1072,13 +1278,10 @@ export class CommandHandler {
       cmds.push({ command: '/check', description: '检查渠道状态', category: '运维', roles: ['guest', 'admin', 'owner'] });
       if (isAdmin) {
         cmds.push({ command: '/activity', args: '[all|dm|owner|none]', description: '查看/控制中间输出显示模式', category: '聊天设置', roles: ['admin', 'owner'] });
-        cmds.push({ command: '/restart', args: '<channel>', description: '重连指定渠道', category: '运维', roles: ['admin', 'owner'] });
       }
       if (isOwner) {
         cmds.push({ command: '/restart', description: '重启服务', category: '运维', roles: ['owner'] });
         cmds.push({ command: '/file', args: '[channel] <path>', description: '发送项目内文件', category: '工具', roles: ['owner'] });
-        cmds.push({ command: '/aid', args: '[list|show|new|delete|lookup|agentmd]', description: 'AID 身份管理', category: '工具', roles: ['owner'] });
-        cmds.push({ command: '/storage', args: '[upload|download|ls|rm|quota] <aid>', description: '文件存储', category: '工具', roles: ['owner'] });
       }
 
       // 聊天设置
@@ -1423,37 +1626,19 @@ export class CommandHandler {
       const efforts = getAvailableEfforts(setmodelAgent, currentModel);
       const currentEffort = setmodelAgent.getEffort?.() || 'auto';
 
-      // 获取 API URL 用于请求 /models
-      let apiBaseUrl: string | undefined;
-      try {
-        const configBaseUrl = this.getOwningAgent(channel)?.config?.baseagents?.claude?.baseUrl;
-        const isPlaceholderUrl = configBaseUrl?.includes('api.anthropic.com');
-        if (configBaseUrl && !isPlaceholderUrl) {
-          apiBaseUrl = configBaseUrl;
-        } else if (process.env.ANTHROPIC_BASE_URL) {
-          apiBaseUrl = process.env.ANTHROPIC_BASE_URL;
-        } else {
-          const claudeSettingsPath = path.join(os.homedir(), '.claude', 'settings.json');
-          if (fs.existsSync(claudeSettingsPath)) {
-            const claudeSettings = JSON.parse(fs.readFileSync(claudeSettingsPath, 'utf-8'));
-            if (claudeSettings.env?.ANTHROPIC_BASE_URL) {
-              apiBaseUrl = claudeSettings.env.ANTHROPIC_BASE_URL;
-            }
-          }
-        }
-      } catch {}
+      const modelListSource = getModelListSource(this.getOwningAgent(channel), setmodelAgent);
 
       // 从 API 获取模型列表（OpenAI /v1/models 风格）
       type ModelListResponse = { object: string; data: Array<{ id: string; object: string; created: number; owned_by: string }> };
       let modelListData: ModelListResponse | null = null;
-      if (apiBaseUrl) {
+      if (modelListSource.apiBaseUrl) {
         try {
-          const modelsUrl = apiBaseUrl.replace(/\/+$/, '') + '/v1/models';
+          const modelsUrl = modelListSource.apiBaseUrl.replace(/\/+$/, '') + '/v1/models';
           const controller = new AbortController();
           const timeout = setTimeout(() => controller.abort(), 5000);
           const resp = await fetch(modelsUrl, {
             signal: controller.signal,
-            headers: { 'Authorization': `Bearer ${this.getOwningAgent(channel)?.config?.baseagents?.claude?.apiKey || process.env.ANTHROPIC_AUTH_TOKEN || ''}` },
+            headers: { 'Authorization': `Bearer ${modelListSource.apiKey || ''}` },
           });
           clearTimeout(timeout);
           if (resp.ok) {
@@ -1467,11 +1652,12 @@ export class CommandHandler {
         const now = Math.floor(Date.now() / 1000);
         modelListData = {
           object: 'list',
-          data: [
-            { id: 'claude-opus-4-7', object: 'model', created: now, owned_by: 'anthropic' },
-            { id: 'claude-opus-4-6', object: 'model', created: now, owned_by: 'anthropic' },
-            { id: 'claude-sonnet-4-6', object: 'model', created: now, owned_by: 'anthropic' },
-          ],
+          data: modelListSource.fallbackModels.map(id => ({
+            id,
+            object: 'model',
+            created: now,
+            owned_by: modelListSource.owner,
+          })),
         };
       }
 
@@ -1695,53 +1881,12 @@ export class CommandHandler {
       return { kind: 'command.result' as const, text: `✓ 推理强度: ${newEffort}` };
     }
 
-    // /aid, /rpc, /storage — 转发到 CLI 执行
-    if (normalizedContent === '/aid' || normalizedContent.startsWith('/aid ') ||
+    // /aid, /rpc, /storage, /evolagent — 仅限 ctl 调用，slash 输入拒绝
+    if (normalizedContent === '/evolagent' || normalizedContent.startsWith('/evolagent ') ||
+        normalizedContent === '/aid' || normalizedContent.startsWith('/aid ') ||
         normalizedContent === '/rpc' || normalizedContent.startsWith('/rpc ') ||
         normalizedContent === '/storage' || normalizedContent.startsWith('/storage ')) {
-      if (!isOwner) return { kind: 'command.error' as const, text: '❌ 无权限：此命令仅限 owner 使用' };
-
-      // 无参数时返回用法说明
-      if (normalizedContent === '/aid') {
-        return { kind: 'command.result' as const, text: `用法:
-  /aid list              列出本地所有 AID
-  /aid show <aid>        查看 AID 详情
-  /aid new <aid>         创建新 AID
-  /aid delete <aid>      删除本地 AID
-  /aid lookup <aid>      远程探测 AID
-  /aid agentmd put <aid> 签名并上传 agent.md
-  /aid agentmd get <aid> 下载并验签 agent.md` };
-      }
-      if (normalizedContent === '/rpc') {
-        return { kind: 'command.result' as const, text: `用法: /rpc --as <aid> --params <json>
-示例: /rpc --as myaid.agentid.pub --params {"method":"meta.ping","params":{}}` };
-      }
-      if (normalizedContent === '/storage') {
-        return { kind: 'command.result' as const, text: `用法:
-  /storage upload <aid> <file> <path> [--public]
-  /storage download <aid> <url> [local-path]
-  /storage ls <aid> [prefix]
-  /storage rm <aid> <path>
-  /storage quota <aid>` };
-      }
-
-      const cliArgs = normalizedContent.slice(1); // strip leading /
-      try {
-        const { execFile } = await import('node:child_process');
-        const { promisify } = await import('node:util');
-        const execFileAsync = promisify(execFile);
-        const { stdout, stderr } = await execFileAsync('evolclaw', cliArgs.split(/\s+/), {
-          timeout: 30000,
-          encoding: 'utf-8',
-          env: { ...process.env, AUN_LOG_INI_DISABLE: '1' },
-        });
-        const output = (stdout || '').trim();
-        if (!output && stderr) return { kind: 'command.result' as const, text: `⚠ ${stderr.trim().slice(0, 500)}` };
-        return { kind: 'command.result' as const, text: output || '(无输出)' };
-      } catch (e: any) {
-        const msg = e.stderr?.trim() || e.stdout?.trim() || String(e.message || e);
-        return { kind: 'command.error' as const, text: `❌ ${msg.slice(0, 500)}` };
-      }
+      return { kind: 'command.error' as const, text: '❌ 此命令仅限 ctl 调用，不支持 slash 输入' };
     }
 
 
@@ -2352,46 +2497,8 @@ export class CommandHandler {
       return { kind: 'command.result' as const, text: lines.join('\n') };
     }
 
-    // /restart 命令：重启服务（owner only） / 重连指定渠道（admin+）
-    if (normalizedContent === '/restart' || normalizedContent.startsWith('/restart ')) {
-      const restartArg = normalizedContent.slice('/restart'.length).trim();
-
-      // /restart <type> — 重连指定类型的所有渠道（admin only）
-      if (restartArg) {
-        if (!isAdmin) return { kind: 'command.error' as const, text: '❌ 无权限：渠道重连仅限管理员使用' };
-        const type = restartArg;
-
-        // /restart 是服务级操作：重连该 type 下的所有实例（不分 agent）
-        const scopedNames: string[] = [];
-        for (const [name] of this.adapters) {
-          if (this.channelTypeMap.get(name) === type) scopedNames.push(name);
-        }
-
-        if (scopedNames.length === 0) {
-          return { kind: 'command.error' as const, text: `❌ 没有类型为 "${type}" 的渠道` };
-        }
-
-        const results: string[] = [];
-        for (const name of scopedNames) {
-          const ch = this.channelObjects.get(name);
-          if (!ch) {
-            results.push(`${name}: 未找到渠道对象`);
-            continue;
-          }
-          if (!ch.reconnect) {
-            results.push(`${name}: 不支持重连`);
-            continue;
-          }
-          try {
-            const result = await ch.reconnect();
-            results.push(`${name}: ${result}`);
-          } catch (e: any) {
-            results.push(`${name}: 重连失败 - ${e?.message || e}`);
-          }
-        }
-        return { kind: 'command.result' as const, text: `🔄 重连 ${type}:\n  ${results.join('\n  ')}` };
-      }
-
+    // /restart 命令：重启服务（owner only）
+    if (normalizedContent === '/restart') {
       // /restart（无参数）— 重启整个服务（owner only）
       if (!isOwner) return { kind: 'command.error' as const, text: '❌ 无权限：服务重启仅限 owner 使用' };
       const allSessions = await this.sessionManager.listSessions(channel, channelId);
@@ -3833,6 +3940,48 @@ export class CommandHandler {
         if (!resolved.startsWith(projectPath)) {
           return { ok: false, error: '路径越界：只能发送项目目录下的文件' };
         }
+      }
+    }
+
+    // 5.1 /aid, /rpc, /storage — ctl 专属，转发到 CLI 执行
+    if (cmd === '/aid' || cmd.startsWith('/aid ') ||
+        cmd === '/rpc' || cmd.startsWith('/rpc ') ||
+        cmd === '/storage' || cmd.startsWith('/storage ')) {
+      // 权限检查：仅 owner
+      if (userId) {
+        const identity = this.sessionManager.resolveIdentity(session.channel, userId);
+        if (identity.role !== 'owner') {
+          return { ok: false, error: '无权限：此命令仅限 owner 使用' };
+        }
+      }
+
+      // 无参数时返回用法说明
+      if (cmd === '/aid') {
+        return { ok: true, result: `用法:\n  /aid list              列出本地所有 AID\n  /aid show <aid>        查看 AID 详情\n  /aid new <aid>         创建新 AID\n  /aid delete <aid>      删除本地 AID\n  /aid lookup <aid>      远程探测 AID\n  /aid agentmd put <aid> 签名并上传 agent.md\n  /aid agentmd get <aid> 下载并验签 agent.md` };
+      }
+      if (cmd === '/rpc') {
+        return { ok: true, result: `用法: /rpc --as <aid> --params <json>\n示例: /rpc --as myaid.agentid.pub --params {"method":"meta.ping","params":{}}` };
+      }
+      if (cmd === '/storage') {
+        return { ok: true, result: `用法:\n  /storage upload <aid> <file> <path> [--public]\n  /storage download <aid> <url> [local-path]\n  /storage ls <aid> [prefix]\n  /storage rm <aid> <path>\n  /storage quota <aid>` };
+      }
+
+      const cliArgs = cmd.slice(1); // strip leading /
+      try {
+        const { execFile } = await import('node:child_process');
+        const { promisify } = await import('node:util');
+        const execFileAsync = promisify(execFile);
+        const { stdout, stderr } = await execFileAsync('evolclaw', cliArgs.split(/\s+/), {
+          timeout: 30000,
+          encoding: 'utf-8',
+          env: { ...process.env, AUN_LOG_INI_DISABLE: '1' },
+        });
+        const output = (stdout || '').trim();
+        if (!output && stderr) return { ok: true, result: `⚠ ${stderr.trim().slice(0, 500)}` };
+        return { ok: true, result: output || '(无输出)' };
+      } catch (e: any) {
+        const msg = e.stderr?.trim() || e.stdout?.trim() || String(e.message || e);
+        return { ok: false, error: msg.slice(0, 500) };
       }
     }
 

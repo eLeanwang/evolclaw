@@ -4,6 +4,7 @@ import { resolvePaths, ensureDataDirs } from '../paths.js';
 import { commandExists } from '../utils/cross-platform.js';
 import { scanInstances } from '../utils/instance-registry.js';
 import { saveDefaultsSafe, loadAllAgents } from '../config-store.js';
+import { isCodexSdkAvailable } from '../agents/codex-runner.js';
 
 // ==================== Helpers ====================
 
@@ -20,8 +21,13 @@ const BASEAGENT_ENV_KEY: Record<Baseagent, string | undefined> = {
   gemini: 'GEMINI_API_KEY',
 };
 
+function isBaseagentAvailable(baseagent: Baseagent): boolean {
+  if (baseagent === 'codex') return isCodexSdkAvailable();
+  return commandExists(baseagent);
+}
+
 function detectAvailable(): Baseagent[] {
-  return BASEAGENT_CANDIDATES.filter(b => commandExists(b));
+  return BASEAGENT_CANDIDATES.filter(isBaseagentAvailable);
 }
 
 function pickDefault(available: Baseagent[]): Baseagent {
@@ -62,8 +68,10 @@ export async function cmdInit(options?: {
   // ── 2. 探测 baseagent ──
   const available = detectAvailable();
   if (available.length === 0) {
-    console.log('❌ 未检测到任何 baseagent CLI，请先安装至少一款：');
-    for (const b of BASEAGENT_CANDIDATES) console.log(`  - ${b}`);
+    console.log('❌ 未检测到可用 baseagent。请安装至少一款：');
+    console.log('  - claude CLI');
+    console.log('  - gemini CLI');
+    console.log('  - optional dependency @openai/codex-sdk');
     console.log('\n安装后重新运行 evolclaw init');
     return;
   }
@@ -89,7 +97,7 @@ export async function cmdInit(options?: {
         return;
       }
       if (!available.includes(options.baseagent as Baseagent)) {
-        console.log(`❌ ${options.baseagent} 未在 PATH 中检测到（可用: ${available.join('/')}）`);
+        console.log(`❌ ${options.baseagent} 当前环境不可用（可用: ${available.join('/')}）`);
         return;
       }
       chosen = options.baseagent as Baseagent;
@@ -126,7 +134,7 @@ export async function cmdInit(options?: {
         continue;
       }
       if (!available.includes(input as Baseagent)) {
-        console.log(`  ${input} 未在 PATH 中检测到（可用: ${available.join('/')}）`);
+        console.log(`  ${input} 当前环境不可用（可用: ${available.join('/')}）`);
         continue;
       }
       chosen = input as Baseagent;

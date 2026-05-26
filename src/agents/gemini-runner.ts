@@ -479,7 +479,6 @@ export class GeminiAgentPlugin implements AgentPlugin {
   readonly name = 'gemini';
 
   isEnabled(agent: import('../core/evolagent.js').EvolAgent): boolean {
-    if (agent.baseagent !== 'gemini') return false;
     const geminiCfg = agent.config.baseagents?.gemini as any;
     if (!geminiCfg) return false;
     if (geminiCfg.cliPath) return true;

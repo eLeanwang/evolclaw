@@ -11,6 +11,7 @@ import type { AgentPlugin, AgentInstance, AgentCallbacks } from '../core/baseage
 import type { AgentEvent, AgentRunnerFull, ModelSwitcher, PermissionModeInfo } from './claude-runner.js';
 import { resolveOpenaiConfig } from './resolve.js';
 import { logger } from '../utils/logger.js';
+import { execFileSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -26,15 +27,62 @@ const MIME_EXT: Record<string, string> = {
   'image/webp': '.webp',
 };
 
-// ── Codex 模型列表 ──
-const CODEX_MODELS = ['gpt-5.3-codex', 'gpt-5.2-codex', 'gpt-5-codex', 'gpt-5.2', 'gpt-5.4'];
+// ── Codex 模型目录（动态获取，含 effort） ──
+interface CodexModelInfo { slug: string; efforts: string[] }
+const CODEX_CATALOG_FALLBACK: CodexModelInfo[] = [
+  { slug: 'gpt-5.5', efforts: ['low', 'medium', 'high', 'xhigh'] },
+  { slug: 'gpt-5.4', efforts: ['low', 'medium', 'high', 'xhigh'] },
+  { slug: 'gpt-5.4-mini', efforts: ['low', 'medium', 'high', 'xhigh'] },
+  { slug: 'gpt-5.3-codex', efforts: ['low', 'medium', 'high', 'xhigh'] },
+  { slug: 'gpt-5.2', efforts: ['low', 'medium', 'high', 'xhigh'] },
+];
+let codexCatalogCache: CodexModelInfo[] | null = null;
+
+export function isCodexSdkAvailable(): boolean {
+  try {
+    import.meta.resolve('@openai/codex-sdk');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function fetchCodexCatalog(): CodexModelInfo[] {
+  if (codexCatalogCache) return codexCatalogCache;
+  try {
+    const output = execFileSync('codex', ['debug', 'models'], {
+      encoding: 'utf-8',
+      timeout: 5000,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    const catalog = JSON.parse(output);
+    const models = (catalog.models as any[])
+      .filter(m => m.visibility === 'list')
+      .map(m => ({
+        slug: m.slug as string,
+        efforts: ((m.supported_reasoning_levels || []) as any[]).map(l => l.effort as string),
+      }));
+    if (models.length > 0) {
+      codexCatalogCache = models;
+      return models;
+    }
+  } catch (e) {
+    logger.debug(`[CodexRunner] Failed to fetch model catalog, using fallback: ${e}`);
+  }
+  return CODEX_CATALOG_FALLBACK;
+}
+
+export function getCodexEfforts(model: string): string[] {
+  const catalog = fetchCodexCatalog();
+  const entry = catalog.find(m => m.slug === model);
+  return entry?.efforts ?? catalog[0]?.efforts ?? ['low', 'medium', 'high'];
+}
 
 // ── Codex Runner ──
 
 export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
   readonly name = 'codex';
   readonly capabilities = { clear: false, compact: false, fork: false };
-  private codex: CodexInstance | null = null;
   private codexModule: CodexSDK | null = null;
   private model: string;
   private effort?: string;
@@ -51,23 +99,27 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
     this.onSessionIdUpdate = callbacks.onSessionIdUpdate;
   }
 
-  private async ensureCodex(): Promise<{ codex: CodexInstance; mod: CodexSDK }> {
-    if (!this.codex || !this.codexModule) {
+  private async ensureCodex(sessionId: string): Promise<{ codex: CodexInstance; mod: CodexSDK }> {
+    if (!this.codexModule) {
       const { requireOptional } = await import('../utils/npm-ops.js');
       this.codexModule = await requireOptional<CodexSDK>('@openai/codex-sdk');
-      this.codex = new this.codexModule.Codex({
-        apiKey: this.resolvedConfig.apiKey,
-        baseUrl: this.resolvedConfig.baseUrl,
-      });
     }
-    return { codex: this.codex, mod: this.codexModule };
+    const codex = new this.codexModule.Codex({
+      apiKey: this.resolvedConfig.apiKey,
+      baseUrl: this.resolvedConfig.baseUrl,
+      env: {
+        ...process.env as Record<string, string>,
+        EVOLCLAW_SESSION_ID: sessionId,
+      },
+    });
+    return { codex, mod: this.codexModule };
   }
 
   // ── ModelSwitcher ──
 
   setModel(model: string): void { this.model = model; }
   getModel(): string { return this.model; }
-  listModels(): string[] { return CODEX_MODELS; }
+  listModels(): string[] { return fetchCodexCatalog().map(m => m.slug); }
 
   // ── Effort ──
 
@@ -127,11 +179,15 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
     systemPromptAppend?: string,
     sessionManager?: any
   ): Promise<AsyncIterable<AgentEvent>> {
-    // Agent ctl: 注入 EVOLCLAW_SESSION_ID 供子进程使用
-    process.env.EVOLCLAW_SESSION_ID = sessionId;
-
-    const { codex } = await this.ensureCodex();
+    const { codex } = await this.ensureCodex(sessionId);
     let agentSessionId = initialAgentSessionId || this.activeSessions.get(sessionId);
+    let fullPrompt = prompt;
+
+    // Only inject system context on the first turn; resumed Codex threads already
+    // have that context in history and repeating it will pollute the conversation.
+    if (systemPromptAppend && !agentSessionId) {
+      fullPrompt = prompt + '\n\n--- [SYSTEM_PROMPT_END] ---\n' + systemPromptAppend;
+    }
 
     const threadOptions: any = {
       workingDirectory: projectPath,
@@ -155,7 +211,7 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
 
     if (images?.length) {
       const tmpDir = os.tmpdir();
-      const parts: any[] = [{ type: 'text', text: prompt }];
+      const parts: any[] = [{ type: 'text', text: fullPrompt }];
 
       for (let i = 0; i < images.length; i++) {
         const img = images[i];
@@ -169,7 +225,7 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
       input = parts;
       logger.info(`[CodexRunner] Attached ${images.length} image(s) as local_image`);
     } else {
-      input = prompt;
+      input = fullPrompt;
     }
 
     const { events } = await thread.runStreamed(input, { signal: controller.signal });
@@ -358,8 +414,8 @@ export class CodexAgentPlugin implements AgentPlugin {
   readonly name = 'codex';
 
   isEnabled(agent: import('../core/evolagent.js').EvolAgent): boolean {
-    if (agent.baseagent !== 'codex') return false;
     if (!agent.config.baseagents?.codex) return false;
+    if (!isCodexSdkAvailable()) return false;
     try {
       const override = agent.config.baseagents.codex as any;
       const syntheticConfig = { agents: { codex: override } } as Config;
@@ -371,13 +427,13 @@ export class CodexAgentPlugin implements AgentPlugin {
   }
 
   createAgent(agent: import('../core/evolagent.js').EvolAgent, callbacks: AgentCallbacks): AgentInstance | null {
+    if (!isCodexSdkAvailable()) {
+      throw new Error('Missing optional dependency @openai/codex-sdk');
+    }
     const override = agent.config.baseagents?.codex as any;
-    const syntheticConfig = { agents: { codex: override } } as Config;
     const merged: Config = {
       agents: { codex: { ...(override || {}) } },
     } as Config;
     return { evolagentName: agent.name, baseagent: 'codex', agent: new CodexRunner(merged, callbacks) };
   }
 }
-
-

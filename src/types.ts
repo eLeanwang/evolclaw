@@ -117,7 +117,7 @@ export interface Config {
       apiKey?: string;
       baseUrl?: string;
       model?: string;
-      effort?: 'low' | 'medium' | 'high' | 'max';
+      effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
       pathToClaudeCodeExecutable?: string;
       useSettingSources?: boolean;
       agentProgressSummaries?: boolean;
@@ -555,7 +555,7 @@ export interface BaseagentClaudeConfig {
   apiKey?: string;
   baseUrl?: string;
   model?: string;
-  effort?: 'low' | 'medium' | 'high' | 'max';
+  effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
   pathToClaudeCodeExecutable?: string;
   useSettingSources?: boolean;
   agentProgressSummaries?: boolean;
@@ -833,4 +833,31 @@ export interface Trigger {
   fireCount: number;
   createdAt: number;
   updatedAt: number;
+}
+
+// ── Menu Protocol types ──
+
+export interface MenuQueryRequest {
+  type: 'menu.query';
+  id: string;
+  name: string;          // 通用操作标识（如 'list', 'chatmode', 'permission'）
+  cmd?: string;          // evolclaw 内部路由（如 '/chatmode'）
+  state?: boolean;       // true = 查询当前值，false/缺省 = 查询可选项
+}
+
+export interface MenuUpdateRequest {
+  type: 'menu.update';
+  id: string;
+  name: string;          // 通用操作标识
+  cmd?: string;          // evolclaw 内部路由
+  value: string;         // 目标值
+}
+
+export interface MenuResponse {
+  type: 'menu.response';
+  id: string;
+  name: string;          // 回显 name
+  cmd?: string;          // 回显 cmd（如有）
+  data?: any;            // 成功时的结果（与 error 互斥）
+  error?: { code: string; message: string };  // 失败时的错误（与 data 互斥）
 }

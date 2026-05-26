@@ -865,8 +865,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
 2. **查看帮助**：发送 \`/help\` 查看所有可用命令
 3. **切换项目**：发送 \`/project <项目名>\` 切换到其他项目
 4. **查看状态**：发送 \`/status\` 查看当前会话状态
-5. **查看 Agent 信息**：发送 \`/agentmd\` 查看 agent.md 内容
-6. **会话管理**：发送 \`/session\` 查看和切换会话
+5. **会话管理**：发送 \`/session\` 查看和切换会话
 
 💡 **提示**：
 - 直接发送消息即可与 Claude/Codex 对话
@@ -1045,8 +1044,8 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
 
     // action_card_reply 已在 extractTextPayload 中消费，不分发给 agent
     if (p2pPayloadType === 'action_card_reply') return;
-    // menu.query：自定义消息快速路径，需要原始 payload JSON 传递给 bridge
-    if (p2pPayloadType === 'menu.query') {
+    // menu.query/menu.update：自定义消息快速路径，需要原始 payload JSON 传递给 bridge
+    if (p2pPayloadType === 'menu.query' || p2pPayloadType === 'menu.update') {
       this.acknowledgeImmediately(messageId, seq);
       this.dispatchMessage({
         channelId: chatId, userId: fromAid,
@@ -1156,8 +1155,8 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     {
       const payloadObj = (payload && typeof payload === 'object') ? payload as Record<string, any> : null;
       const payloadType: string = payloadObj?.type ?? '';
-      // menu.query：自定义消息快速路径
-      if (payloadType === 'menu.query') {
+      // menu.query/menu.update：自定义消息快速路径
+      if (payloadType === 'menu.query' || payloadType === 'menu.update') {
         this.acknowledgeImmediately(messageId, seq);
         this.dispatchMessage({
           channelId: groupId, userId: senderAid,

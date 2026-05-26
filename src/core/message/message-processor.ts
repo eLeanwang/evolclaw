@@ -1,7 +1,7 @@
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
-import { type AgentRunnerFull, hasCompact, type AgentEvent } from '../../agents/claude-runner.js';
+import { type AgentRunnerFull, hasCompact, type AgentEvent, type Compactable } from '../../agents/claude-runner.js';
 import { SessionManager } from '../session/session-manager.js';
 import { appendMessageLog, buildOutboundEntry } from './message-log.js';
 import { IMRenderer } from './im-renderer.js';
@@ -19,6 +19,24 @@ import { renderKitSections, type KitRenderContext } from '../../agents/kit-rende
 import { normalizeBaseagent } from '../../agents/baseagent-normalize.js';
 import type { InteractionRouter } from '../interaction-router.js';
 import { renderActionAsText, renderCommandCardAsText } from '../interaction-router.js';
+
+function getContextTooLongHint(agent: AgentRunnerFull): string {
+  if (canCompactAgent(agent)) {
+    return '上下文过长，请精简提问或使用 /compact 压缩上下文';
+  }
+  return '上下文过长，请精简提问，或使用 /new 新建会话后继续';
+}
+
+function getContextCompactFailedHint(agent: AgentRunnerFull): string {
+  if (canCompactAgent(agent)) {
+    return '上下文过长，自动压缩失败，请手动输入 /compact 重试';
+  }
+  return '上下文过长，请精简提问，或使用 /new 新建会话后继续';
+}
+
+function canCompactAgent(agent: AgentRunnerFull): agent is AgentRunnerFull & Compactable {
+  return hasCompact(agent) && agent.capabilities?.compact !== false;
+}
 
 /**
  * 构造 OutboundEnvelope —— 出站三件套的信封部分。
@@ -206,7 +224,7 @@ export class MessageProcessor {
     '/model', '/effort', '/agent', '/slist', '/session', '/rename', '/repair', '/fork',
     '/stop', '/clear', '/compact', '/safe', '/del', '/perm', '/file', '/check',
     '/p ', '/s ', '/name ', '/rewind', '/rw', '/rw ', '/activity', '/chatmode',
-    '/aid', '/agentmd', '/upgrade',
+    '/aid', '/upgrade', '/evolagent',
   ];
 
   /** 判断消息内容是否为已知命令 */
@@ -653,6 +671,7 @@ export class MessageProcessor {
             streamResult = await this.processEventStream(
               stream,
               session,
+              agent,
               renderer,
               resetTimer,
               shouldSuppress
@@ -674,7 +693,7 @@ export class MessageProcessor {
           }
         }
       } catch (error) {
-        if (classifyError(error) === ErrorType.CONTEXT_TOO_LONG && session.agentSessionId && hasCompact(agent)) {
+        if (classifyError(error) === ErrorType.CONTEXT_TOO_LONG && session.agentSessionId && canCompactAgent(agent)) {
           // 尝试 compact 压缩会话
           renderer.addNotice('上下文过长，正在压缩会话...', 'warn', 'compact-trigger', true);
           await renderer.flush();
@@ -700,6 +719,7 @@ export class MessageProcessor {
             streamResult = await this.processEventStream(
               retryStream,
               session,
+              agent,
               renderer,
               resetTimer,
               shouldSuppress
@@ -716,7 +736,7 @@ export class MessageProcessor {
       // 检测条件：terminalReason 明确为 prompt_too_long，或文本/errors 包含相关错误文本
       const contextTooLongPattern = /prompt is too long|input is too long|上下文过长/i;
       const errorsText = streamResult.errors?.join(' ') || '';
-      const isPromptTooLong = streamResult.isError && session.agentSessionId && hasCompact(agent) && (
+      const isPromptTooLong = streamResult.isError && session.agentSessionId && canCompactAgent(agent) && (
         streamResult.terminalReason === 'prompt_too_long' ||
         contextTooLongPattern.test(streamResult.lastReplyText) ||
         contextTooLongPattern.test(errorsText) ||
@@ -738,7 +758,20 @@ export class MessageProcessor {
             this.sessionManager
           );
           agent.registerStream(streamKey, retryStream);
-          streamResult = await this.processEventStream(retryStream, session, renderer, resetTimer, shouldSuppress);
+          streamResult = await this.processEventStream(retryStream, session, agent, renderer, resetTimer, shouldSuppress);
+
+          // 重试后仍然 prompt_too_long：清理 renderer 中可能混入的错误文本，显示友好提示
+          const retryErrorsText = streamResult.errors?.join(' ') || '';
+          const retryStillTooLong = streamResult.isError && (
+            streamResult.terminalReason === 'prompt_too_long' ||
+            contextTooLongPattern.test(streamResult.lastReplyText) ||
+            contextTooLongPattern.test(retryErrorsText) ||
+            contextTooLongPattern.test(streamResult.fullText)
+          );
+          if (retryStillTooLong) {
+            renderer.stripContextError(contextTooLongPattern);
+            renderer.addNotice(getContextTooLongHint(agent), 'warn', 'context-too-long', true);
+          }
         } else {
           throw new Error('CONTEXT_COMPACT_FAILED');
         }
@@ -749,7 +782,7 @@ export class MessageProcessor {
         contextTooLongPattern.test(streamResult.fullText)
       )) {
         // 上下文过长但无法 auto-compact（无 session ID 或 agent 不支持），显示友好提示
-        renderer.addNotice('上下文过长，请精简提问或使用 /compact 压缩上下文', 'warn', 'context-too-long', true);
+        renderer.addNotice(getContextTooLongHint(agent), 'warn', 'context-too-long', true);
       }
 
       // 处理文件标记 - 支持 [SEND_FILE:path] 和 [SEND_FILE:channel:path]
@@ -1158,6 +1191,7 @@ export class MessageProcessor {
   private async processEventStream(
     stream: AsyncIterable<AgentEvent>,
     session: Session,
+    agent: AgentRunnerFull,
     renderer: IMRenderer,
     resetTimer: (eventType?: string, toolName?: string) => void,
     shouldSuppress: () => boolean
@@ -1364,9 +1398,13 @@ export class MessageProcessor {
           if (event.isError && !hasErrorResult && !shouldSuppress() && !isUserInterrupt && !isContextTooLong) {
             const errorSummary = event.errors?.join('; ') || '任务执行失败';
             // 使用 terminalReason 提供更友好的错误提示（不带 emoji，由 formatter 统一加）
-            const userFriendlyMessage = event.terminalReason
-              ? getErrorMessage(null, event.terminalReason, false)
-              : errorSummary;
+            const userFriendlyMessage = event.terminalReason === 'prompt_too_long'
+              ? getContextTooLongHint(agent)
+              : event.terminalReason === 'context_compact_failed'
+                ? getContextCompactFailedHint(agent)
+                : event.terminalReason
+                  ? getErrorMessage(null, event.terminalReason, false)
+                  : errorSummary;
             renderer.addNotice(userFriendlyMessage, 'warn', 'task-error', true);
           }
 
