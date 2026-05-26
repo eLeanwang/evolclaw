@@ -7,6 +7,9 @@ import os from 'os';
 
 const mockUploadAgentMd = vi.fn().mockResolvedValue(undefined);
 const mockDownloadAgentMd = vi.fn().mockResolvedValue('---\naid: "remote.agentid.pub"\n---');
+const mockPublishAgentMd = vi.fn().mockResolvedValue({ aid: 'test.aid', etag: '"abc123"' });
+const mockFetchAgentMd = vi.fn().mockResolvedValue({ content: '---\naid: "remote.agentid.pub"\n---', signature: { status: 'verified' } });
+const mockCheckAgentMd = vi.fn().mockResolvedValue({ in_sync: true, local_found: true, remote_found: true });
 const mockClose = vi.fn().mockResolvedValue(undefined);
 const mockCreateAid = vi.fn().mockImplementation(async (opts: { aid: string }) => {
   const aidDir = path.join(os.homedir(), '.aun', 'AIDs', opts.aid);
@@ -22,6 +25,9 @@ vi.mock('@agentunion/fastaun', () => ({
       uploadAgentMd: mockUploadAgentMd,
       downloadAgentMd: mockDownloadAgentMd,
     };
+    publishAgentMd = mockPublishAgentMd;
+    fetchAgentMd = mockFetchAgentMd;
+    checkAgentMd = mockCheckAgentMd;
     close = mockClose;
   },
   FileSecretStore: class {},
@@ -47,6 +53,9 @@ describe('aun-ops', () => {
     mockCreateAid.mockClear();
     mockUploadAgentMd.mockClear();
     mockDownloadAgentMd.mockClear();
+    mockPublishAgentMd.mockClear();
+    mockFetchAgentMd.mockClear();
+    mockCheckAgentMd.mockClear();
     mockClose.mockClear();
   });
 
@@ -93,7 +102,7 @@ describe('aun-ops', () => {
       const result = await agentmdGet(aid);
 
       expect(result).toBe('local-content');
-      expect(mockDownloadAgentMd).not.toHaveBeenCalled();
+      expect(mockFetchAgentMd).not.toHaveBeenCalled();
     });
 
     it('returns local file regardless of private key presence', async () => {
@@ -109,14 +118,14 @@ describe('aun-ops', () => {
       const result = await agentmdGet(aid);
 
       expect(result).toBe('stale-local');
-      expect(mockDownloadAgentMd).not.toHaveBeenCalled();
+      expect(mockFetchAgentMd).not.toHaveBeenCalled();
     });
 
     it('downloads from network when no local file exists', async () => {
       const { agentmdGet } = await import('../../src/aun/aid/index.js');
       const result = await agentmdGet('unknown.agentid.pub');
 
-      expect(mockDownloadAgentMd).toHaveBeenCalledWith('unknown.agentid.pub');
+      expect(mockFetchAgentMd).toHaveBeenCalledWith('unknown.agentid.pub');
     });
   });
 
@@ -128,14 +137,14 @@ describe('aun-ops', () => {
       const { agentmdPut } = await import('../../src/aun/aid/index.js');
       await agentmdPut(content, { aid });
 
-      expect(mockUploadAgentMd).toHaveBeenCalledWith(content);
+      expect(mockPublishAgentMd).toHaveBeenCalled();
       const localPath = path.join(tmpDir, 'AIDs', aid, 'agent.md');
       expect(fs.existsSync(localPath)).toBe(true);
       expect(fs.readFileSync(localPath, 'utf-8')).toBe(content);
     });
 
     it('does not write local file if upload fails', async () => {
-      mockUploadAgentMd.mockRejectedValueOnce(new Error('upload failed'));
+      mockPublishAgentMd.mockRejectedValueOnce(new Error('upload failed'));
       const aid = 'fail.agentid.pub';
 
       const { agentmdPut } = await import('../../src/aun/aid/index.js');

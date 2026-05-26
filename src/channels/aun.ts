@@ -10,7 +10,7 @@ import type { ChannelPlugin, ChannelInstance, BridgeHookContext } from '../core/
 import type { MessageBridge } from '../core/message/message-bridge.js';
 import type { Config, ReplyContext, AunChannelConfig, AidConnectionState, AidStatus, AidKickDetail, InteractionResponse, ActionInteraction, CommandCard } from '../types.js';
 import { normalizeChannelInstances, getChannelShowActivities } from '../utils/channel-helpers.js';
-import { resolvePaths, getPackageRoot, agentMdPath as agentMdPathFn, agentDir as agentDirPath } from '../paths.js';
+import { resolvePaths, getPackageRoot, agentMdPath as agentMdPathFn, agentDir as agentDirPath, resolveRoot } from '../paths.js';
 import { saveToUploads, sanitizeFileName } from '../utils/media-cache.js';
 import { appendAidEvent } from '../utils/instance-registry.js';
 import { appendMessageLog, buildOutboundEntry } from '../core/message/message-log.js';
@@ -94,6 +94,47 @@ export interface AUNMessageHandler {
     replyContext?: ReplyContext;
     source?: 'user' | 'card-trigger';
   }): Promise<void>;
+}
+
+function migrateAunData(targetPath: string): void {
+  const legacyPath = path.join(os.homedir(), '.aun');
+  if (legacyPath === targetPath) return;
+
+  // AIDs 迁移：逐个检查每个 AID，缺少 private 的就从 legacy 复制
+  const srcAIDs = path.join(legacyPath, 'AIDs');
+  const dstAIDs = path.join(targetPath, 'AIDs');
+  if (fs.existsSync(srcAIDs)) {
+    fs.mkdirSync(dstAIDs, { recursive: true });
+    try {
+      for (const entry of fs.readdirSync(srcAIDs, { withFileTypes: true })) {
+        if (!entry.isDirectory()) continue;
+        const aidName = entry.name;
+        const srcAidDir = path.join(srcAIDs, aidName);
+        const dstAidDir = path.join(dstAIDs, aidName);
+        const srcPrivate = path.join(srcAidDir, 'private');
+        const dstPrivate = path.join(dstAidDir, 'private');
+        // 如果目标 AID 目录不存在或缺少 private，从源复制整个 AID 目录
+        if (fs.existsSync(srcPrivate) && !fs.existsSync(dstPrivate)) {
+          fs.cpSync(srcAidDir, dstAidDir, { recursive: true });
+        }
+      }
+    } catch {}
+  }
+
+  // CA 迁移
+  const srcCA = path.join(legacyPath, 'CA');
+  const dstCA = path.join(targetPath, 'CA');
+  if (fs.existsSync(srcCA) && !fs.existsSync(dstCA)) {
+    fs.cpSync(srcCA, dstCA, { recursive: true });
+  }
+
+  for (const file of ['.seed', '.device_id'] as const) {
+    const src = path.join(legacyPath, file);
+    const dst = path.join(targetPath, file);
+    if (fs.existsSync(src) && !fs.existsSync(dst)) {
+      fs.copyFileSync(src, dst);
+    }
+  }
 }
 
 export class AUNChannel {
@@ -588,9 +629,12 @@ export class AUNChannel {
     }
     this.connected = false;
 
-    const aunPath = this.config.keystorePath || path.join(os.homedir(), '.aun');
+    const aunPath = this.config.keystorePath || resolveRoot();
     const aidName = this.config.aid;
     const encryptionSeed = this.config.encryptionSeed || process.env.AUN_ENCRYPTION_SEED || undefined;
+
+    // Migrate legacy ~/.aun data to EVOLCLAW_HOME on first run
+    migrateAunData(aunPath);
 
     // Gateway URL 解析：优先用配置的 gatewayUrl，否则通过 well-known 自动发现
     let gateway = this.config.gatewayUrl || '';
@@ -846,9 +890,9 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       fs.writeFileSync(agentMdLocalPath, newAgentMd, 'utf-8');
       logger.info(`${this.logPrefix()} Updated agent.md for ${aidName}`);
 
-      // Publish to AUN network via auth.uploadAgentMd
+      // Publish to AUN network via publishAgentMd (auto-sign)
       try {
-        await (this.client as any).auth.uploadAgentMd(newAgentMd);
+        await (this.client as any).publishAgentMd();
         logger.info(`${this.logPrefix()} Published agent.md to AUN network`);
       } catch (e) {
         logger.warn(`${this.logPrefix()} Failed to publish agent.md: ${e}`);
@@ -2501,7 +2545,9 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     if (cached !== undefined) return cached;
     if (!this.client) return { type: null };
     try {
-      const md = await this.client.auth.downloadAgentMd(aid);
+      const { agentmdSync } = await import('../aun/aid/agentmd.js');
+      const result = await agentmdSync(aid, { client: this.client });
+      const md = result.content ?? '';
       const typeMatch = md.match(/^type:\s*["']?(\w+)["']?/m);
       const nameMatch = md.match(/^name:\s*["']?(.+?)["']?\s*$/m);
       const type: 'human' | 'ai' = typeMatch?.[1] === 'human' ? 'human' : 'ai';
@@ -2512,7 +2558,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       return info;
     } catch (e) {
       logger.debug(`${this.logPrefix()} fetchPeerInfo failed for ${aid}: ${e}`);
-      return { type: null };  // no agent.md → unknown
+      return { type: null };
     }
   }
 
@@ -2529,12 +2575,18 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
 
   async uploadAgentMd(content: string): Promise<void> {
     if (!this.client) throw new Error('not connected');
-    await this.client.auth.uploadAgentMd(content);
+    const { agentMdPath } = await import('../paths.js');
+    const localPath = agentMdPath(this.config.aid);
+    fs.mkdirSync(path.dirname(localPath), { recursive: true });
+    fs.writeFileSync(localPath, content, 'utf-8');
+    await (this.client as any).publishAgentMd();
   }
 
   async downloadAgentMd(aid: string): Promise<string> {
     if (!this.client) throw new Error('not connected');
-    return this.client.auth.downloadAgentMd(aid);
+    const { agentmdSync } = await import('../aun/aid/agentmd.js');
+    const result = await agentmdSync(aid, { client: this.client });
+    return result.content ?? '';
   }
 }
 

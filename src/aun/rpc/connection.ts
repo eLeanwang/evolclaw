@@ -19,8 +19,10 @@ export async function createShortConnection(aid: string, opts?: ShortConnectionO
   const caCertPath = path.join(aunPath, 'CA', 'root', 'root.crt');
   const { AUNClient } = await import('@agentunion/fastaun');
 
+  const encryptionSeed = process.env.AUN_ENCRYPTION_SEED || undefined;
   const clientOpts: any = { aun_path: aunPath, debug: false };
   if (fs.existsSync(caCertPath)) clientOpts.root_ca_path = caCertPath;
+  if (encryptionSeed) clientOpts.encryption_seed = encryptionSeed;
 
   const client = new AUNClient(clientOpts);
   await client.auth.createAid({ aid });
