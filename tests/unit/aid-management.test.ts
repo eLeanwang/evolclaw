@@ -71,6 +71,7 @@ describe('isValidAid', () => {
 
 // Mock AUNClient at module scope (hoisted by vitest)
 const mockUploadAgentMd = vi.fn().mockResolvedValue(undefined);
+const mockPublishAgentMd = vi.fn().mockResolvedValue({ aid: 'test.aid', etag: '"abc123"' });
 const mockClose = vi.fn().mockResolvedValue(undefined);
 // createAid must create the AID directory (as the real SDK does)
 const mockCreateAid = vi.fn().mockImplementation(async (opts: { aid: string }) => {
@@ -86,6 +87,7 @@ vi.mock('@agentunion/fastaun', () => ({
       createAid: mockCreateAid,
       uploadAgentMd: mockUploadAgentMd,
     };
+    publishAgentMd = mockPublishAgentMd;
     close = mockClose;
   },
   FileSecretStore: class {},
@@ -114,6 +116,7 @@ describe('aidCreate', () => {
     // Reset mocks
     mockCreateAid.mockClear();
     mockUploadAgentMd.mockClear();
+    mockPublishAgentMd.mockClear();
     mockClose.mockClear();
 
     ({ aidCreate, agentmdPut, buildInitialAgentMd } = await import('../../src/aun/aid/index.js'));
@@ -188,7 +191,7 @@ describe('aidCreate', () => {
   });
 
   it('agentmdPut does not fail if upload errors (caller handles)', async () => {
-    mockUploadAgentMd.mockRejectedValueOnce(new Error('upload failed'));
+    mockPublishAgentMd.mockRejectedValueOnce(new Error('upload failed'));
     const aid = 'noupload.example.pub';
 
     const result = await aidCreate(aid);

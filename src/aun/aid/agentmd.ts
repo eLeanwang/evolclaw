@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { getAunClient } from './client.js';
-import { agentMdPath, aidLocalDir } from '../../paths.js';
+import { agentMdPath, aidLocalDir, resolveRoot } from '../../paths.js';
 
 export interface AgentmdGetResult {
   content: string;
@@ -87,10 +87,11 @@ async function verifyContent(content: string, aid: string, certPem: string | und
 /**
  * Create a bare AUNClient (no createAid) for read-only operations.
  */
-async function createBareClient(aunPath: string): Promise<any> {
+async function createBareClient(aunPath?: string): Promise<any> {
+  const p = aunPath ?? resolveRoot();
   const { AUNClient } = await import('@agentunion/fastaun');
-  const caCertPath = path.join(aunPath, 'CA', 'root', 'root.crt');
-  const clientOpts: any = { aun_path: aunPath, debug: false };
+  const caCertPath = path.join(p, 'CA', 'root', 'root.crt');
+  const clientOpts: any = { aun_path: p, debug: false };
   if (fs.existsSync(caCertPath)) clientOpts.root_ca_path = caCertPath;
   return new AUNClient(clientOpts);
 }
@@ -107,7 +108,7 @@ async function createBareClient(aunPath: string): Promise<any> {
 export async function agentmdGet(aid: string, opts?: { client?: any; aunPath?: string }): Promise<string>;
 export async function agentmdGet(aid: string, opts: { client?: any; aunPath?: string; withVerification: true }): Promise<AgentmdGetResult>;
 export async function agentmdGet(aid: string, opts?: { client?: any; aunPath?: string; withVerification?: boolean }): Promise<string | AgentmdGetResult> {
-  const aunPath = opts?.aunPath ?? path.join(os.homedir(), '.aun');
+  const aunPath = opts?.aunPath ?? resolveRoot();
   const localPath = agentMdPath(aid);
 
   // === Path A: local agent.md exists ===
@@ -128,7 +129,8 @@ export async function agentmdGet(aid: string, opts?: { client?: any; aunPath?: s
 
       // Fallback: local invalid → try remote
       try {
-        const remote: string = await client.auth.downloadAgentMd(aid);
+        const info = await client.fetchAgentMd(aid);
+        const remote: string = info.content;
         if (remote) {
           const remoteVerification = await verifyContent(remote, aid, certPem, client);
           if (remoteVerification.status === 'verified') {
@@ -148,23 +150,15 @@ export async function agentmdGet(aid: string, opts?: { client?: any; aunPath?: s
   const client = opts?.client ?? await createBareClient(aunPath);
   const ownClient = !opts?.client;
   try {
-    const raw: string = await client.auth.downloadAgentMd(aid);
+    const info = await client.fetchAgentMd(aid);
+    const raw: string = info.content;
 
     if (!opts?.withVerification) {
-      // Persist without verification
-      const aidDir = aidLocalDir(aid);
-      fs.mkdirSync(aidDir, { recursive: true });
-      fs.writeFileSync(path.join(aidDir, 'agent.md'), raw, 'utf-8');
       return raw;
     }
 
     const certPem = await obtainCertPem(aid, aunPath, client);
     const verification = await verifyContent(raw, aid, certPem, client);
-
-    // Persist to local
-    const aidDir = aidLocalDir(aid);
-    fs.mkdirSync(aidDir, { recursive: true });
-    fs.writeFileSync(path.join(aidDir, 'agent.md'), raw, 'utf-8');
 
     return { content: raw, verification };
   } finally {
@@ -173,26 +167,48 @@ export async function agentmdGet(aid: string, opts?: { client?: any; aunPath?: s
 }
 
 /**
- * Upload agent.md: auto-sign + upload + sync to local file.
+ * Upload agent.md: write to local file → publishAgentMd (auto-sign + upload).
  */
 export async function agentmdPut(content: string, opts: { aid: string; client?: any; aunPath?: string }): Promise<void> {
-  const aunPath = opts.aunPath ?? path.join(os.homedir(), '.aun');
+  const aunPath = opts.aunPath ?? resolveRoot();
   const client = opts.client ?? await getAunClient(opts.aid, { aunPath });
   const ownClient = !opts.client;
 
+  const dir = aidLocalDir(opts.aid);
+  const filePath = path.join(dir, 'agent.md');
+  const existed = fs.existsSync(filePath);
+
   try {
-    let signed: string;
-    try {
-      signed = await client.auth.signAgentMd(content);
-    } catch {
-      signed = content;
-    }
-
-    await client.auth.uploadAgentMd(signed);
-
-    const dir = aidLocalDir(opts.aid);
     fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(path.join(dir, 'agent.md'), signed, 'utf-8');
+    fs.writeFileSync(filePath, content, 'utf-8');
+    await client.publishAgentMd();
+  } catch (e) {
+    if (!existed) try { fs.unlinkSync(filePath); } catch { /* ignore */ }
+    throw e;
+  } finally {
+    if (ownClient) try { await client.close(); } catch { /* ignore */ }
+  }
+}
+
+/**
+ * Check if agent.md is up-to-date (30-day cache), fetch if changed.
+ * Returns changed=true + content when a new version was downloaded.
+ */
+export async function agentmdSync(
+  aid: string,
+  opts?: { client?: any }
+): Promise<{ changed: boolean; content?: string }> {
+  const client = opts?.client ?? await createBareClient();
+  const ownClient = !opts?.client;
+  try {
+    const state = await client.checkAgentMd(aid, 30);
+    if (!state.in_sync || !state.local_found) {
+      const info = await client.fetchAgentMd(aid);
+      return { changed: true, content: info.content };
+    }
+    const localPath = agentMdPath(aid);
+    const content = fs.existsSync(localPath) ? fs.readFileSync(localPath, 'utf-8') : undefined;
+    return { changed: false, content };
   } finally {
     if (ownClient) try { await client.close(); } catch { /* ignore */ }
   }
