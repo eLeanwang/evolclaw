@@ -10,6 +10,9 @@ export interface AidShowResult {
   hasAgentMd: boolean;
   certExpiresAt: string | null;
   certSubject: string | null;
+  certExpired: boolean;
+  agentMdSignature: 'verified' | 'invalid' | 'unsigned' | 'unknown';
+  agentMdSignatureReason?: string;
 }
 
 export interface AidLookupResult {

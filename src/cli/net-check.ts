@@ -7,6 +7,7 @@ import dns from 'dns/promises';
 import https from 'https';
 // @ts-ignore
 import { WebSocket } from 'ws';
+import { aunPath as defaultAunPath } from '../paths.js';
 
 const GREEN = '\x1b[32m';
 const RED = '\x1b[31m';
@@ -230,7 +231,7 @@ async function runCheck(aid: string, formatJson: boolean): Promise<CheckResult[]
   let accessToken: string | undefined;
   try {
     const start = Date.now();
-    const aunPath = process.env.AUN_HOME || path.join(os.homedir(), '.aun');
+    const aunPath = process.env.AUN_HOME || defaultAunPath();
     const { AUNClient } = await import('@agentunion/fastaun');
     const result = await suppressSdkOutput(async () => {
       const client = new AUNClient({ aun_path: aunPath, debug: false } as any);
@@ -279,7 +280,7 @@ async function runCheck(aid: string, formatJson: boolean): Promise<CheckResult[]
   // ── Step 9: RPC 调用 (meta.ping) ──
   try {
     const start = Date.now();
-    const aunPath = process.env.AUN_HOME || path.join(os.homedir(), '.aun');
+    const aunPath = process.env.AUN_HOME || defaultAunPath();
     const { AUNClient } = await import('@agentunion/fastaun');
     const sendResult = await suppressSdkOutput(async () => {
       const client = new AUNClient({ aun_path: aunPath, debug: false } as any);
@@ -302,7 +303,7 @@ async function runCheck(aid: string, formatJson: boolean): Promise<CheckResult[]
   // CLI 模拟 app 发送 echo[nc]，向多个目标测试链路
   try {
     const echoStart = Date.now();
-    const aunPath = process.env.AUN_HOME || path.join(os.homedir(), '.aun');
+    const aunPath = process.env.AUN_HOME || defaultAunPath();
     const { AUNClient } = await import('@agentunion/fastaun');
 
     // 选择 6 个测试目标，按消息数量、域、有无证书均衡选择

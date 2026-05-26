@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { aidsDir, aunPath as defaultAunPath } from '../../paths.js';
 
 export interface ShortConnection {
   call(method: string, params: any): Promise<any>;
@@ -14,7 +15,7 @@ export interface ShortConnectionOpts {
 }
 
 export async function createShortConnection(aid: string, opts?: ShortConnectionOpts): Promise<ShortConnection> {
-  const aunPath = opts?.aunPath ?? path.join(os.homedir(), '.aun');
+  const aunPath = opts?.aunPath ?? defaultAunPath();
   const slotId = opts?.slotId ?? '';
   const caCertPath = path.join(aunPath, 'CA', 'root', 'root.crt');
   const { AUNClient } = await import('@agentunion/fastaun');
@@ -25,6 +26,7 @@ export async function createShortConnection(aid: string, opts?: ShortConnectionO
   if (encryptionSeed) clientOpts.encryption_seed = encryptionSeed;
 
   const client = new AUNClient(clientOpts);
+  client.setAgentMdPath(aidsDir());
   await client.auth.createAid({ aid });
   const authResult = await client.auth.authenticate({ aid });
 

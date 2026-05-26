@@ -3291,7 +3291,7 @@ Options:
       console.error('用法: evolclaw aid show <aid>');
       process.exit(1);
     }
-    const info = aidShow(aid, { aunPath });
+    const info = await aidShow(aid, { aunPath });
     if (formatJson) {
       console.log(JSON.stringify(info, null, 2));
       return;
@@ -3299,7 +3299,14 @@ Options:
     console.log(`AID: ${info.aid}`);
     console.log(`  私钥: ${info.hasPrivateKey ? '有' : '无'}`);
     console.log(`  agent.md: ${info.hasAgentMd ? '有' : '无'}`);
-    console.log(`  证书到期: ${info.certExpiresAt ?? '无证书'}`);
+    if (info.hasAgentMd) {
+      const sigLabel = info.agentMdSignature === 'verified' ? '✓ 已验签'
+        : info.agentMdSignature === 'unsigned' ? '⚠ 未签名'
+        : info.agentMdSignature === 'invalid' ? `✗ 签名无效${info.agentMdSignatureReason ? ': ' + info.agentMdSignatureReason : ''}`
+        : '? 未知';
+      console.log(`  签名状态: ${sigLabel}`);
+    }
+    console.log(`  证书到期: ${info.certExpiresAt ?? '无证书'}${info.certExpired ? ' (已过期!)' : ''}`);
     if (info.certSubject) console.log(`  证书主体: ${info.certSubject}`);
     return;
   }

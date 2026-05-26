@@ -3,7 +3,7 @@ import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
 import { getAunClient, downloadCaRoot } from './client.js';
-import { resolvePaths, aidsDir as evolclawAidsDir, agentMdPath } from '../../paths.js';
+import { resolvePaths, aidsDir as evolclawAidsDir, agentMdPath, aunPath as defaultAunPath } from '../../paths.js';
 import type { AidInfo, AidShowResult, AidLookupResult, AidCreateResult } from './types.js';
 
 // ==================== Validation ====================
@@ -16,28 +16,14 @@ export function isValidAid(name: string): boolean {
 // ==================== AID Operations ====================
 
 export function aidList(aunPath?: string): AidInfo[] {
-  const aunAidsDir = path.join(aunPath ?? path.join(os.homedir(), '.aun'), 'AIDs');
-  const ecAidsDir = evolclawAidsDir();
+  const root = aunPath ?? defaultAunPath();
+  const aunAidsDir = path.join(root, 'AIDs');
 
   const seen = new Map<string, AidInfo>();
 
-  // Scan ~/.aun/AIDs (private keys live here)
   if (fs.existsSync(aunAidsDir)) {
     for (const e of fs.readdirSync(aunAidsDir, { withFileTypes: true })) {
       if (!e.isDirectory()) continue;
-      seen.set(e.name, {
-        aid: e.name,
-        hasPrivateKey: fs.existsSync(path.join(aunAidsDir, e.name, 'private')),
-        hasAgentMd: fs.existsSync(agentMdPath(e.name)),
-      });
-    }
-  }
-
-  // Scan $EVOLCLAW_HOME/AIDs (agent.md lives here)
-  if (fs.existsSync(ecAidsDir) && ecAidsDir !== aunAidsDir) {
-    for (const e of fs.readdirSync(ecAidsDir, { withFileTypes: true })) {
-      if (!e.isDirectory()) continue;
-      if (seen.has(e.name)) continue;
       seen.set(e.name, {
         aid: e.name,
         hasPrivateKey: fs.existsSync(path.join(aunAidsDir, e.name, 'private')),
@@ -50,7 +36,7 @@ export function aidList(aunPath?: string): AidInfo[] {
 }
 
 export async function aidCreate(aid: string, opts?: { aunPath?: string }): Promise<AidCreateResult> {
-  const aunPath = opts?.aunPath ?? path.join(os.homedir(), '.aun');
+  const aunPath = opts?.aunPath ?? defaultAunPath();
   const aidDir = path.join(aunPath, 'AIDs', aid);
 
   if (fs.existsSync(aidDir) && fs.existsSync(path.join(aidDir, 'private'))) {
@@ -60,6 +46,7 @@ export async function aidCreate(aid: string, opts?: { aunPath?: string }): Promi
 
   const { AUNClient, GatewayDiscovery } = await import('@agentunion/fastaun');
   let client = new AUNClient({ aun_path: aunPath });
+  client.setAgentMdPath(evolclawAidsDir());
 
   try {
     const result = await client.auth.createAid({ aid });
@@ -71,6 +58,7 @@ export async function aidCreate(aid: string, opts?: { aunPath?: string }): Promi
     if (caDownloaded && fs.existsSync(caCertPath)) {
       try { await client.close(); } catch { /* ignore */ }
       client = new AUNClient({ aun_path: aunPath, root_ca_path: caCertPath });
+      client.setAgentMdPath(evolclawAidsDir());
       await client.auth.createAid({ aid });
     }
 
@@ -94,8 +82,8 @@ export async function aidCreate(aid: string, opts?: { aunPath?: string }): Promi
 
 // ==================== Show ====================
 
-export function aidShow(aid: string, opts?: { aunPath?: string }): AidShowResult {
-  const aunPath = opts?.aunPath ?? path.join(os.homedir(), '.aun');
+export async function aidShow(aid: string, opts?: { aunPath?: string }): Promise<AidShowResult> {
+  const aunPath = opts?.aunPath ?? defaultAunPath();
   const aidDir = path.join(aunPath, 'AIDs', aid);
 
   const hasPrivateKey = fs.existsSync(path.join(aidDir, 'private'));
@@ -103,23 +91,60 @@ export function aidShow(aid: string, opts?: { aunPath?: string }): AidShowResult
 
   let certExpiresAt: string | null = null;
   let certSubject: string | null = null;
+  let certExpired = false;
+  let certPem: string | null = null;
   const certPath = path.join(aidDir, 'public', 'cert.pem');
   if (fs.existsSync(certPath)) {
     try {
-      const pem = fs.readFileSync(certPath, 'utf-8');
-      const x509 = new crypto.X509Certificate(pem);
+      certPem = fs.readFileSync(certPath, 'utf-8');
+      const x509 = new crypto.X509Certificate(certPem);
       certExpiresAt = x509.validTo;
       certSubject = x509.subject;
+      certExpired = new Date(x509.validTo) < new Date();
     } catch { /* ignore parse errors */ }
   }
 
-  return { aid, hasPrivateKey, hasAgentMd, certExpiresAt, certSubject };
+  let agentMdSignature: 'verified' | 'invalid' | 'unsigned' | 'unknown' = 'unknown';
+  let agentMdSignatureReason: string | undefined;
+  if (hasAgentMd) {
+    try {
+      const content = fs.readFileSync(agentMdPath(aid), 'utf-8');
+      if (!content.includes('AUN-SIGNATURE')) {
+        agentMdSignature = 'unsigned';
+      } else {
+        // 用 SDK 验签（本地证书，无需网络）
+        const { AUNClient } = await import('@agentunion/fastaun');
+        const clientOpts: any = { aun_path: aunPath, debug: false };
+        const caCertPath = path.join(aunPath, 'CA', 'root', 'root.crt');
+        if (fs.existsSync(caCertPath)) clientOpts.root_ca_path = caCertPath;
+        const client = new AUNClient(clientOpts);
+        try {
+          const result = await client.auth.verifyAgentMd(content, { aid, ...(certPem ? { certPem } : {}) });
+          if (result.status === 'verified' || result.verified) {
+            agentMdSignature = 'verified';
+          } else if (result.status === 'unsigned') {
+            agentMdSignature = 'unsigned';
+          } else {
+            agentMdSignature = 'invalid';
+            agentMdSignatureReason = result.reason;
+          }
+        } finally {
+          try { await client.close(); } catch {}
+        }
+      }
+    } catch (e: any) {
+      agentMdSignature = 'unknown';
+      agentMdSignatureReason = String(e?.message || e).slice(0, 100);
+    }
+  }
+
+  return { aid, hasPrivateKey, hasAgentMd, certExpiresAt, certSubject, certExpired, agentMdSignature, agentMdSignatureReason };
 }
 
 // ==================== Delete ====================
 
 export function aidDelete(aid: string, opts?: { aunPath?: string }): boolean {
-  const aunPath = opts?.aunPath ?? path.join(os.homedir(), '.aun');
+  const aunPath = opts?.aunPath ?? defaultAunPath();
   const aidDir = path.join(aunPath, 'AIDs', aid);
 
   if (!fs.existsSync(aidDir)) return false;

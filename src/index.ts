@@ -340,7 +340,7 @@ async function main() {
 
     // 优先级：群聊 > nothuman > private
     if (chatType === 'group') return cm.group;
-    if (peerType && peerType !== 'human' && peerType !== 'unknown') return cm.nothuman;
+    if (peerType && peerType !== 'human') return cm.nothuman;
     return cm.private;
   });
   logger.info('✓ Database initialized');

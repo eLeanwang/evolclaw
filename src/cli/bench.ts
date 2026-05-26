@@ -7,7 +7,7 @@ import { promisify } from 'util';
 import { aidList, aidCreate } from '../aun/aid/identity.js';
 import { msgSend, msgPull } from '../aun/msg/index.js';
 import type { MsgError } from '../aun/msg/p2p.js';
-import { getPackageRoot } from '../paths.js';
+import { getPackageRoot, aunPath as defaultAunPath } from '../paths.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -347,7 +347,7 @@ async function benchAuth(aids: string[], concurrency: number, aunPath?: string, 
   const path = (await import('path')).default;
   const fs = (await import('fs')).default;
   const os = (await import('os')).default;
-  const resolvedAunPath = aunPath ?? path.join(os.homedir(), '.aun');
+  const resolvedAunPath = aunPath ?? defaultAunPath();
   const caCertPath = path.join(resolvedAunPath, 'CA', 'root', 'root.crt');
 
   const tasks = aids.map(aid => async (): Promise<AuthResult> => {
@@ -525,14 +525,14 @@ Options:
 
   // AID is usable if: has private key + cert not expired + key/cert public key match
   const { aidShow } = await import('../aun/aid/identity.js');
-  const resolvedAunPath = aunPath ?? path.join(os.homedir(), '.aun');
+  const resolvedAunPath = aunPath ?? defaultAunPath();
   const usableAids: string[] = [];
   const skippedAids: { aid: string; reason: string }[] = [];
 
   for (const a of allAids) {
     if (!a.hasPrivateKey) continue;
     try {
-      const info = aidShow(a.aid, { aunPath });
+      const info = await aidShow(a.aid, { aunPath });
       if (!info.certExpiresAt) {
         skippedAids.push({ aid: a.aid, reason: '无证书' });
         continue;

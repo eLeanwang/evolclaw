@@ -24,7 +24,7 @@ export function suppressSdkLogs(): void {
 
 // ==================== Constants ====================
 
-export const MIN_AUN_CORE_SDK = [0, 2, 17] as const;
+export const MIN_AUN_CORE_SDK = [0, 3, 3] as const;
 export const AUN_CORE_SDK_PKG = '@agentunion/fastaun';
 
 // ==================== SDK & Environment ====================
@@ -118,7 +118,8 @@ export async function downloadCaRoot(aunPath: string, gatewayUrl: string, indent
 // ==================== AUNClient Factory ====================
 
 export async function getAunClient(aid: string, opts?: { aunPath?: string }): Promise<any> {
-  const aunPath = opts?.aunPath ?? path.join(os.homedir(), '.aun');
+  const { aunPath: defaultAunPath, aidsDir } = await import('../../paths.js');
+  const aunPath = opts?.aunPath ?? defaultAunPath();
   const caCertPath = path.join(aunPath, 'CA', 'root', 'root.crt');
   const { AUNClient } = await import('@agentunion/fastaun');
 
@@ -126,6 +127,7 @@ export async function getAunClient(aid: string, opts?: { aunPath?: string }): Pr
   if (fs.existsSync(caCertPath)) clientOpts.root_ca_path = caCertPath;
 
   const client = new AUNClient(clientOpts);
+  client.setAgentMdPath(aidsDir());
   await client.auth.createAid({ aid });
   return client;
 }

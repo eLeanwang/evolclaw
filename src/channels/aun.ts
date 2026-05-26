@@ -10,7 +10,7 @@ import type { ChannelPlugin, ChannelInstance, BridgeHookContext } from '../core/
 import type { MessageBridge } from '../core/message/message-bridge.js';
 import type { Config, ReplyContext, AunChannelConfig, AidConnectionState, AidStatus, AidKickDetail, InteractionResponse, ActionInteraction, CommandCard } from '../types.js';
 import { normalizeChannelInstances, getChannelShowActivities } from '../utils/channel-helpers.js';
-import { resolvePaths, getPackageRoot, agentMdPath as agentMdPathFn, agentDir as agentDirPath, resolveRoot } from '../paths.js';
+import { resolvePaths, getPackageRoot, agentMdPath as agentMdPathFn, agentDir as agentDirPath, resolveRoot, aidsDir } from '../paths.js';
 import { saveToUploads, sanitizeFileName } from '../utils/media-cache.js';
 import { appendAidEvent } from '../utils/instance-registry.js';
 import { appendMessageLog, buildOutboundEntry } from '../core/message/message-log.js';
@@ -96,46 +96,6 @@ export interface AUNMessageHandler {
   }): Promise<void>;
 }
 
-function migrateAunData(targetPath: string): void {
-  const legacyPath = path.join(os.homedir(), '.aun');
-  if (legacyPath === targetPath) return;
-
-  // AIDs 迁移：逐个检查每个 AID，缺少 private 的就从 legacy 复制
-  const srcAIDs = path.join(legacyPath, 'AIDs');
-  const dstAIDs = path.join(targetPath, 'AIDs');
-  if (fs.existsSync(srcAIDs)) {
-    fs.mkdirSync(dstAIDs, { recursive: true });
-    try {
-      for (const entry of fs.readdirSync(srcAIDs, { withFileTypes: true })) {
-        if (!entry.isDirectory()) continue;
-        const aidName = entry.name;
-        const srcAidDir = path.join(srcAIDs, aidName);
-        const dstAidDir = path.join(dstAIDs, aidName);
-        const srcPrivate = path.join(srcAidDir, 'private');
-        const dstPrivate = path.join(dstAidDir, 'private');
-        // 如果目标 AID 目录不存在或缺少 private，从源复制整个 AID 目录
-        if (fs.existsSync(srcPrivate) && !fs.existsSync(dstPrivate)) {
-          fs.cpSync(srcAidDir, dstAidDir, { recursive: true });
-        }
-      }
-    } catch {}
-  }
-
-  // CA 迁移
-  const srcCA = path.join(legacyPath, 'CA');
-  const dstCA = path.join(targetPath, 'CA');
-  if (fs.existsSync(srcCA) && !fs.existsSync(dstCA)) {
-    fs.cpSync(srcCA, dstCA, { recursive: true });
-  }
-
-  for (const file of ['.seed', '.device_id'] as const) {
-    const src = path.join(legacyPath, file);
-    const dst = path.join(targetPath, file);
-    if (fs.existsSync(src) && !fs.existsSync(dst)) {
-      fs.copyFileSync(src, dst);
-    }
-  }
-}
 
 export class AUNChannel {
   private client: AUNClient | null = null;
@@ -638,8 +598,7 @@ export class AUNChannel {
     const aidName = this.config.aid;
     const encryptionSeed = this.config.encryptionSeed || process.env.AUN_ENCRYPTION_SEED || undefined;
 
-    // Migrate legacy ~/.aun data to EVOLCLAW_HOME on first run
-    migrateAunData(aunPath);
+    // Migration from ~/.aun is handled by ensureDataDirs() at startup with a marker file.
 
     // Gateway URL 解析：优先用配置的 gatewayUrl，否则通过 well-known 自动发现
     let gateway = this.config.gatewayUrl || '';
@@ -670,6 +629,7 @@ export class AUNChannel {
       root_ca_path: rootCaPath,
       ...(encryptionSeed && { encryption_seed: encryptionSeed }),
     }, this.config.aunSdkLog ?? true);
+    this.client.setAgentMdPath(aidsDir());
     // Set gateway URL (internal property, same as Python SDK)
     (this.client as any)._gatewayUrl = gateway;
 
@@ -2549,13 +2509,10 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     if (cached !== undefined) return cached;
     if (!this.client) return { type: null };
     try {
-      const { agentmdSync } = await import('../aun/aid/agentmd.js');
-      const result = await agentmdSync(aid, { client: this.client });
-      const md = result.content ?? '';
-      const typeMatch = md.match(/^type:\s*["']?(\w+)["']?/m);
-      const nameMatch = md.match(/^name:\s*["']?(.+?)["']?\s*$/m);
-      const type: 'human' | 'ai' = typeMatch?.[1] === 'human' ? 'human' : 'ai';
-      const name = nameMatch?.[1]?.trim() || undefined;
+      const selfAgentDir = path.join(resolvePaths().agentsDir, this.config.aid);
+      const identity = await PeerIdentityCache.resolve('aun', aid, selfAgentDir, this.client, false);
+      const type: 'human' | 'ai' = identity.type === 'human' ? 'human' : 'ai';
+      const name = identity.name || undefined;
       const info = { type, name };
       this.peerInfoCache.set(aid, info);
       setTimeout(() => this.peerInfoCache.delete(aid), 30 * 60 * 1000);
