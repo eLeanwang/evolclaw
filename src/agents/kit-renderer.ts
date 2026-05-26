@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { kitsDir, eckDebugDir, resolveRoot } from '../paths.js';
+import { kitsDir, eckDebugDir, resolveRoot, getPackageRoot } from '../paths.js';
 import { logger } from '../utils/logger.js';
 
 // ── Types ──
@@ -64,13 +64,61 @@ const PARAM_DESCRIPTIONS: Record<string, string> = {
   venueUid: 'venue 唯一标识',
   project: '当前项目目录名（由 CURRENT_PROJECT 派生）',
   sessionName: '会话名称',
-  sessionMode: '会话模式',
+  chatmode: '会话模式（interactive/proactive）',
   readonly: '是否只读模式',
   canSendFile: '当前渠道是否支持发文件',
   capabilities: '渠道能力列表',
   baseAgent: '当前 base agent 规范值（claude/codex/gemini/hermes）',
   baseAgentName: '当前 base agent 显示名',
 };
+
+// ── Path shortening ──
+
+interface PathMapping {
+  prefix: string;
+  alias: string;
+}
+
+function buildPathMappings(vars: Vars): PathMapping[] {
+  const pkgRoot = getPackageRoot();
+  const evolHome = String(vars['EVOLCLAW_HOME'] || resolveRoot());
+  const selfAid = vars['selfAid'] ? String(vars['selfAid']) : '';
+  const currentProject = vars['CURRENT_PROJECT'] ? String(vars['CURRENT_PROJECT']) : '';
+
+  const mappings: PathMapping[] = [
+    { prefix: path.join(pkgRoot, 'kits', 'rules'), alias: '$KITS_RULES' },
+    { prefix: path.join(pkgRoot, 'kits', 'templates', 'system-fragments'), alias: '$KITS_FRAGMENTS' },
+    { prefix: path.join(pkgRoot, 'kits', 'templates'), alias: '$KITS_TEMPLATES' },
+    { prefix: path.join(pkgRoot, 'kits', 'docs'), alias: '$KITS_DOCS' },
+    { prefix: path.join(pkgRoot, 'kits'), alias: '$KITS' },
+    { prefix: pkgRoot, alias: '$PACKAGE_ROOT' },
+  ];
+
+  if (selfAid) {
+    mappings.push({ prefix: path.join(evolHome, 'agents', selfAid), alias: '$AGENT_DIR' });
+  }
+  mappings.push({ prefix: evolHome, alias: '$EVOLCLAW_HOME' });
+
+  if (currentProject) {
+    mappings.push({ prefix: currentProject, alias: '$CURRENT_PROJECT' });
+  }
+
+  // Sort by prefix length descending so longer (more specific) paths match first
+  mappings.sort((a, b) => b.prefix.length - a.prefix.length);
+  return mappings;
+}
+
+function shortenPath(filePath: string, mappings: PathMapping[]): string {
+  const normalized = filePath.replace(/\\/g, '/');
+  for (const { prefix, alias } of mappings) {
+    const normalizedPrefix = prefix.replace(/\\/g, '/');
+    if (normalized.startsWith(normalizedPrefix)) {
+      const rest = normalized.slice(normalizedPrefix.length);
+      return alias + rest;
+    }
+  }
+  return filePath;
+}
 
 // ── Cache ──
 
@@ -97,6 +145,8 @@ export function renderKitSections(ctx: KitRenderContext): string {
   if (!_manifestCache) loadKitManifest();
   const sections = _manifestCache!;
   const fileParts: string[] = [];
+  const fragmentParts: string[] = [];
+  const pathMappings = buildPathMappings(ctx.vars);
 
   for (const section of sections) {
     if (section.enabled === false) continue;
@@ -109,7 +159,12 @@ export function renderKitSections(ctx: KitRenderContext): string {
       const content = section.needsInjection ? renderTemplate(rawContent, ctx.vars) : rawContent;
       if (!content.trim()) continue;
       const label = section.description ? `${section.id} — ${section.description}` : section.id;
-      fileParts.push(`Contenu de ${filePath} (${label}):\n\n${content.trimEnd()}`);
+      const displayPath = shortenPath(filePath, pathMappings);
+      const part = `Contenu de ${displayPath} (${label}):\n\n${content.trimEnd()}`;
+      fileParts.push(part);
+      if (section.needsInjection) {
+        fragmentParts.push(part);
+      }
     }
   }
 
@@ -117,7 +172,8 @@ export function renderKitSections(ctx: KitRenderContext): string {
 
   const body = fileParts.join('\n\n');
   const output = `<system-reminder>\nEvolClaw Context Kit documents are shown below.\n\n${body}\n\nIMPORTANT: Use this context when it affects the current interaction.\n</system-reminder>`;
-  writeDebugFiles(ctx, output);
+  const fragmentsOutput = fragmentParts.length > 0 ? fragmentParts.join('\n\n') : '';
+  writeDebugFiles(ctx, output, fragmentsOutput);
   return output;
 }
 
@@ -282,11 +338,13 @@ function isTruthy(val: VarValue): boolean {
 // ── Template rendering ──
 
 function renderTemplate(template: string, vars: Vars): string {
-  // Pass 1: conditional sections {{?key=value}}...{{/}} and {{?key}}...{{/}}
-  let result = template.replace(/\{\{\?(\w+)(?:=([^}]*))?\}\}([\s\S]*?)\{\{\/\}\}/g, (_match, key, value, body) => {
-    if (value !== undefined) {
-      return String(vars[key]) === value ? body : '';
-    }
+  // Pass 1: conditional sections {{?key=value}}, {{?key!=value}}, {{?key}}...{{/}}
+  let result = template.replace(/\{\{\?(\w+)(!=|=)([^}]*)?\}\}([\s\S]*?)\{\{\/\}\}/g, (_match, key, op, value, body) => {
+    if (op === '!=') return String(vars[key]) !== value ? body : '';
+    return String(vars[key]) === value ? body : '';
+  });
+  // Pass 1b: truthy-only {{?key}}...{{/}}
+  result = result.replace(/\{\{\?(\w+)\}\}([\s\S]*?)\{\{\/\}\}/g, (_match, key, body) => {
     return isTruthy(vars[key]) ? body : '';
   });
 
@@ -314,7 +372,7 @@ function getSessionCache(sessionId: string): Map<string, string> {
 
 // ── Debug output ──
 
-function writeDebugFiles(ctx: KitRenderContext, output: string): void {
+function writeDebugFiles(ctx: KitRenderContext, output: string, fragmentsOutput: string): void {
   const now = new Date();
   const ts = now.toISOString().replace(/[T:.]/g, '-').slice(0, 19);
   const dir = eckDebugDir();
@@ -333,5 +391,8 @@ function writeDebugFiles(ctx: KitRenderContext, output: string): void {
 
   fs.writeFile(path.join(dir, `vars-${ts}.json`), JSON.stringify(varsData, null, 2), () => {});
   fs.writeFile(path.join(dir, `context-${ts}.md`), output, () => {});
+  if (fragmentsOutput) {
+    fs.writeFile(path.join(dir, `fragments-${ts}.md`), fragmentsOutput, () => {});
+  }
 }
 

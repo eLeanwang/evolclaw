@@ -18,6 +18,7 @@
 | `$KITS_RULES` | `$KITS/rules` | 自动载入部分（本目录） |
 | `$KITS_DOCS` | `$KITS/docs` | 按需载入文档 |
 | `$KITS_TEMPLATES` | `$KITS/templates` | prompt 模板 |
+| `$KITS_FRAGMENTS` | `$KITS_TEMPLATES/system-fragments` | ECK 动态注入 fragment 模板 |
 | `$ECK` | `$EVOLCLAW_HOME/eck` | 运行时配置 |
 | `$AGENTS_DIR` | `$EVOLCLAW_HOME/agents` | per-agent 数据根 |
 | `$AGENT_DIR` | `$AGENTS_DIR/<self-aid>` | 当前 agent 根 |
