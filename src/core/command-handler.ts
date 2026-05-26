@@ -38,6 +38,11 @@ export interface MenuItem {
   desc?: string;
   selected?: boolean;
   next?: MenuNext;
+  // 扩展字段（菜单 options 用）
+  preview?: string;          // 长描述 / 内容预览（如 session 首条消息）
+  lastActive?: number;       // Unix ms（如 session 最近活动时间）
+  agentSessionId?: string;   // 完整 runner session id
+  turns?: number;            // 会话轮次
 }
 
 const allEfforts = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
@@ -173,18 +178,18 @@ function formatIdleTime(ms: number): string {
 }
 
 // 支持的命令列表
-const commands = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/evolhelp', '/status', '/restart', '/model', '/setmodel', '/effort', '/agent', '/slist', '/session', '/rename', '/stop', '/clear', '/compact', '/repair', '/safe', '/fork', '/del', '/perm', '/file', '/check', '/rewind', '/activity', '/chatmode', '/dispatch', '/ask', '/resume', '/aid', '/rpc', '/storage', '/trigger', '/upgrade', '/evolagent'];
+const commands = ['/new', '/pwd', '/help', '/evolhelp', '/status', '/restart', '/model', '/setmodel', '/effort', '/baseagent', '/slist', '/session', '/rename', '/stop', '/clear', '/compact', '/repair', '/safe', '/fork', '/del', '/perm', '/file', '/check', '/rewind', '/activity', '/chatmode', '/dispatch', '/ask', '/resume', '/aid', '/rpc', '/storage', '/agent', '/trigger', '/upgrade'];
 
 // 命令别名映射
 const aliases: Record<string, string> = {
-  '/p': '/project',
   '/s': '/session',
   '/name': '/rename',
-  '/rw': '/rewind'
+  '/rw': '/rewind',
+  '/base': '/baseagent',
 };
 
 // 命令快速路径前缀（所有命令都不进入消息队列）
-const quickCommandPrefixes = ['/new', '/pwd', '/plist', '/project', '/bind', '/help', '/evolhelp', '/status', '/restart', '/model', '/setmodel', '/effort', '/agent', '/slist', '/session', '/rename', '/repair', '/fork', '/stop', '/clear', '/compact', '/safe', '/del', '/perm', '/file', '/check', '/p ', '/s ', '/name', '/rewind', '/rw', '/rw ', '/activity', '/chatmode', '/dispatch', '/ask', '/resume', '/aid', '/rpc', '/storage', '/trigger', '/upgrade', '/evolagent'];
+const quickCommandPrefixes = ['/new', '/pwd', '/help', '/evolhelp', '/status', '/restart', '/model', '/setmodel', '/effort', '/baseagent', '/slist', '/session', '/rename', '/repair', '/fork', '/stop', '/clear', '/compact', '/safe', '/del', '/perm', '/file', '/check', '/s ', '/name', '/rewind', '/rw', '/rw ', '/activity', '/chatmode', '/dispatch', '/ask', '/resume', '/base ', '/aid', '/rpc', '/storage', '/agent', '/trigger', '/upgrade'];
 
 export class CommandHandler {
   private adapters = new Map<string, ChannelAdapter>();
@@ -575,17 +580,6 @@ export class CommandHandler {
       ];
     }
 
-    if (isAdmin) {
-      items.push({
-        group: '项目管理',
-        commands: [
-          { cmd: '/pwd', label: '显示当前项目路径', desc: '查看当前会话绑定的项目目录' },
-          { cmd: '/p', label: '列出或切换项目', desc: '切换到其他已配置的项目', next: { type: 'select', dynamic: true } },
-          ...(isOwner ? [{ cmd: '/bind', label: '绑定新项目目录', desc: '将当前会话绑定到指定项目路径', next: { type: 'text' as const } }] : []),
-        ]
-      });
-    }
-
     items.push({
       group: '会话管理',
       commands: [
@@ -605,7 +599,7 @@ export class CommandHandler {
       items.push({
         group: 'Agent 与模型',
         commands: [
-          { cmd: '/agent', label: '切换 Agent 后端', desc: '切换当前会话使用的 AI 后端', next: { type: 'select', dynamic: true } },
+          { cmd: '/baseagent', label: '切换 Agent 后端', desc: '切换当前会话使用的 AI 后端', next: { type: 'select', dynamic: true } },
           { cmd: '/model', label: '切换模型', desc: '切换当前 Agent 使用的模型版本', next: { type: 'select', dynamic: true } },
           { cmd: '/effort', label: '切换推理强度', desc: '调整模型推理深度，影响响应速度与质量', next: { type: 'select', items: [
             { value: 'low', label: 'Low' },
@@ -687,24 +681,29 @@ export class CommandHandler {
   async getSubMenuItems(cmd: string, channel: string, channelId: string, userId?: string): Promise<MenuItem[] | null> {
     const session = await this.sessionManager.getActiveSession(channel, channelId);
 
-    if (cmd === '/s' || cmd === '/del') {
+    if (cmd === '/s' || cmd === '/session' || cmd === '/del') {
       const sessions = await this.sessionManager.listSessions(channel, channelId);
       const active = cmd === '/del' ? await this.sessionManager.getActiveSession(channel, channelId) : null;
-      const currentSession = session; // already fetched above
+      const currentSession = session;
       const items: MenuItem[] = sessions
         .filter(s => !active || s.id !== active.id)
         .map(s => {
-          const shortId = s.agentSessionId ? s.agentSessionId.substring(0, 8) : '';
-          const time = s.updatedAt ? formatIdleTime(Date.now() - s.updatedAt) : '';
-          const parts = [shortId, time].filter(Boolean).join(' · ');
-          return {
+          const item: MenuItem = {
             value: s.name || s.id.slice(0, 8),
             label: s.name || s.id.slice(0, 8),
-            desc: parts || undefined,
             selected: currentSession ? s.id === currentSession.id : false,
           };
+          if (s.agentSessionId) {
+            item.agentSessionId = s.agentSessionId;
+            const fileInfo = this.sessionManager.getSessionFileInfo(s.projectPath, s.agentSessionId, s.agentId);
+            if (fileInfo.turns) item.turns = fileInfo.turns;
+            const firstMsg = this.sessionManager.readSessionFirstMessage(s.projectPath, s.agentSessionId, s.agentId);
+            if (firstMsg) item.preview = firstMsg.length > 80 ? firstMsg.slice(0, 80) + '…' : firstMsg;
+          }
+          if (s.updatedAt) item.lastActive = s.updatedAt;
+          return item;
         });
-      if (cmd === '/s') {
+      if (cmd === '/s' || cmd === '/session') {
         items.push({ value: 'cli', label: '查看 CLI 会话', desc: '列出未导入的 CLI 本地会话' });
       }
       return items;
@@ -718,7 +717,7 @@ export class CommandHandler {
       return Object.entries(list).map(([name, p]) => ({ value: name, label: name, desc: p as string, selected: currentPath === p }));
     }
 
-    if (cmd === '/agent') {
+    if (cmd === '/baseagent') {
       const currentAgent = session?.agentId;
       return this.getAvailableBaseagents(channel).map(name => ({ value: name, label: name, selected: name === currentAgent }));
     }
@@ -766,7 +765,14 @@ export class CommandHandler {
     }
 
     if (cmd === '/chatmode') {
-      const currentMode = session?.sessionMode || 'interactive';
+      // 无活跃会话时，selected 跟随 evolagent.config.chatmode.private 默认值
+      let currentMode: string;
+      if (session?.sessionMode) {
+        currentMode = session.sessionMode;
+      } else {
+        const evolagent = this.agentRegistry?.resolveByChannel(channel);
+        currentMode = evolagent?.config?.chatmode?.private || 'interactive';
+      }
       return [
         { value: 'interactive', label: '交互模式', selected: currentMode === 'interactive' },
         { value: 'proactive', label: '主动模式', selected: currentMode === 'proactive' },
@@ -793,162 +799,53 @@ export class CommandHandler {
     return null;
   }
 
-  /** 菜单 exec 模式：查询状态或执行命令，返回结构化数据 */
-  async execMenu(
-    cmd: string, mode: 'query' | 'update',
-    channel: string, channelId: string, userId?: string
-  ): Promise<{ data: Record<string, any> } | { error: string }> {
+  // ── Menu Protocol exec ────────────────────────────────────────────────
+  //
+  // 三个入口对应 menu.query / menu.update / menu.action：
+  //   execMenuQuery  — 查询某项当前值（无会话时多数 fallback 到 evolagent config）
+  //   execMenuUpdate — 写入新值（持久化到 session 或 evolagent config）
+  //   execMenuAction — 触发动词（stop/restart/new/delete/compact/fork/switch/check/upgrade）
+  //
+  // 所有方法返回 { data } 或 { error, code? }。code 是结构化错误码（NO_ACTIVE_SESSION 等），
+  // 客户端可据此决定降级策略。message-bridge 把 code 透传到 menu.response。
+
+  private async loadMenuContext(channel: string, channelId: string) {
     const session = await this.sessionManager.getActiveSession(channel, channelId);
-    if (!session) return { error: '当前无活跃会话' };
+    const evolagent = this.agentRegistry?.resolveByChannel(channel) ?? null;
+    return { session, evolagent };
+  }
 
-    const trimmed = cmd.trim();
-    const cmdBase = trimmed.split(' ')[0];
-    if (!cmdBase) return { error: '缺少命令' };
-    const arg = trimmed.slice(cmdBase.length).trim();
+  private requireSession<T extends { id: string }>(s: T | null | undefined):
+    { error: string; code: string } | null {
+    return s ? null : { error: '当前无活跃会话', code: 'NO_ACTIVE_SESSION' };
+  }
 
-    if (cmdBase === '/perm') {
-      const currentMode = session.metadata?.permissionMode ?? DEFAULT_PERMISSION_MODE;
-      if (mode === 'query') {
-        return { data: { mode: currentMode } };
-      }
-      // update
-      if (!arg) return { error: '缺少目标模式' };
-      const identity = this.sessionManager.resolveIdentity(channel, userId);
-      if (identity.role !== 'owner') return { error: '无权限' };
-      const permAgent = this.getAgent(channel, session.agentId);
-      const validModes = hasPermissionController(permAgent)
-        ? permAgent.listModes().filter(m => m.available).map(m => m.key)
-        : ['auto', 'bypass', 'plan', 'edit', 'request', 'noask'];
-      if (!validModes.includes(arg)) return { error: `无效模式: ${arg}` };
-      const metadata = { ...(session.metadata || {}), permissionMode: arg };
-      await this.sessionManager.updateSession(session.id, { metadata });
-      return { data: { mode: arg } };
+  /** menu.query — 查询当前值。 */
+  async execMenuQuery(
+    cmd: string, channel: string, channelId: string, userId?: string
+  ): Promise<{ data: any } | { error: string; code?: string }> {
+    void userId;
+    const cmdBase = cmd.trim().split(' ')[0];
+    if (!cmdBase) return { error: '缺少命令', code: 'MISSING_CMD' };
+    const { session, evolagent } = await this.loadMenuContext(channel, channelId);
+
+    if (cmdBase === '/pwd') {
+      const sessPath = session?.projectPath;
+      const fallbackPath = evolagent?.config?.projects?.defaultPath;
+      const path = sessPath ?? fallbackPath ?? null;
+      const name = path ? this.getProjectName(path) : null;
+      return { data: { name, path } };
     }
 
-    if (cmdBase === '/chatmode') {
-      const currentMode = session.sessionMode || 'interactive';
-      if (mode === 'query') {
-        return { data: { mode: currentMode } };
-      }
-      // update
-      if (!arg) return { error: '缺少目标模式' };
-      if (arg !== 'interactive' && arg !== 'proactive') return { error: `无效模式: ${arg}` };
-      const identity = this.sessionManager.resolveIdentity(channel, userId);
-      const chatType = session.chatType || 'private';
-      if (chatType === 'group' && identity.role !== 'owner' && identity.role !== 'admin') {
-        return { error: '无权限：群聊中仅管理员可切换' };
-      }
-      await this.sessionManager.updateSession(session.id, { sessionMode: arg });
-      this.eventBus.publish({ type: 'session:chat-mode-changed', sessionId: session.id, mode: arg, timestamp: Date.now() });
-      return { data: { mode: arg } };
-    }
-
-    if (cmdBase === '/dispatch') {
-      const currentMode = session.metadata?.dispatchMode;
-      if (mode === 'query') {
-        return { data: { mode: currentMode ?? null } };
-      }
-      // update
-      if (!arg) return { error: '缺少目标模式' };
-      if (arg !== 'mention' && arg !== 'broadcast') return { error: `无效模式: ${arg}` };
-      const identity = this.sessionManager.resolveIdentity(channel, userId);
-      const chatType = session.chatType || 'private';
-      if (chatType === 'group' && identity.role !== 'owner' && identity.role !== 'admin') {
-        return { error: '无权限：群聊中仅管理员可切换' };
-      }
-      const metadata = { ...(session.metadata || {}), dispatchMode: arg };
-      await this.sessionManager.updateSession(session.id, { metadata });
-      this.eventBus.publish({ type: 'session:dispatch-mode-changed', sessionId: session.id, mode: arg, timestamp: Date.now() });
-      return { data: { mode: arg } };
-    }
-
-    if (cmdBase === '/activity') {
-      const currentMode = this.agentRegistry?.getShowActivities?.(channel) ?? 'all';
-      if (mode === 'query') {
-        return { data: { mode: currentMode } };
-      }
-      // update
-      if (!arg) return { error: '缺少目标模式' };
-      const modeMap: Record<string, string> = { all: 'all', dm: 'dm-only', owner: 'owner-dm-only', none: 'none' };
-      const newMode = modeMap[arg];
-      if (!newMode) return { error: `无效模式: ${arg}，可选: all / dm / owner / none` };
-      const identity = this.sessionManager.resolveIdentity(channel, userId);
-      if (identity.role !== 'owner') return { error: '中间输出模式切换仅限 owner' };
-      if (!this.agentRegistry?.setShowActivities) return { error: '找不到通道所属 agent，无法持久化' };
-      this.agentRegistry.setShowActivities(channel, newMode as any);
-      return { data: { mode: newMode } };
-    }
-
-    if (cmdBase === '/aid') {
-      const identity = this.sessionManager.resolveIdentity(channel, userId);
-      if (identity.role !== 'owner') return { error: '无权限：此命令仅限 owner 使用' };
-
-      // query: /aid → 列出 AID；/aid show <aid> → 查看详情；/aid agentmd get <aid> → 获取 agent.md
-      // update: /aid <subcommand> → 执行子命令（如 agentmd put <aid>）
-      const subCmd = arg || (mode === 'query' ? 'list' : '');
-      if (!subCmd) return { error: '缺少子命令' };
-
-      const cliArgs = `aid ${subCmd}`.split(/\s+/);
-      try {
-        const { execFile } = await import('node:child_process');
-        const { promisify } = await import('node:util');
-        const execFileAsync = promisify(execFile);
-        const { stdout, stderr } = await execFileAsync('evolclaw', cliArgs, {
-          timeout: 30000,
-          encoding: 'utf-8',
-          env: { ...process.env, AUN_LOG_INI_DISABLE: '1' },
-        });
-        const output = (stdout || '').trim();
-        if (!output && stderr) return { data: { output: `⚠ ${stderr.trim().slice(0, 500)}` } };
-        return { data: { output: output || '(无输出)' } };
-      } catch (e: any) {
-        const msg = e.stderr?.trim() || e.stdout?.trim() || String(e.message || e);
-        return { error: msg.slice(0, 500) };
-      }
-    }
-
-    if (cmdBase === '/status') {
-      if (mode === 'update') {
-        // /status update: stop or restart
-        if (arg === 'stop') {
-          const sessionKey = this.getQueueKey(session, channel, channelId);
-          const sessionAgent = this.getAgent(channel, session.agentId);
-          const hasActive = sessionAgent.hasActiveStream(sessionKey);
-          const queueLength = this.messageQueue.getQueueLength(sessionKey);
-          if (queueLength === 0 && !hasActive) {
-            return { error: '当前没有正在处理的任务' };
-          }
-          await sessionAgent.interrupt(sessionKey);
-          this.eventBus.publish({
-            type: 'task:interrupted',
-            sessionId: sessionKey,
-            reason: 'stop',
-            agentName: this.agentRegistry?.resolveByChannel(channel)?.name ?? '<unknown>',
-          });
-          this.sessionManager.clearProcessing(sessionKey);
-          return { data: { action: 'stop', success: true } };
-        }
-        if (arg === 'restart') {
-          const identity = this.sessionManager.resolveIdentity(channel, userId);
-          if (identity.role !== 'owner') return { error: '无权限：服务重启仅限 owner 使用' };
-          const restartInfo: Record<string, any> = { channel, channelId, timestamp: Date.now() };
-          fs.writeFileSync(path.join(resolvePaths().dataDir, 'restart-pending.json'), JSON.stringify(restartInfo));
-          const { spawn } = await import('child_process');
-          spawn('node', [path.join(getPackageRoot(), 'dist', 'cli', 'index.js'), 'restart-monitor'], {
-            detached: true,
-            stdio: 'ignore',
-            env: { ...process.env, EVOLCLAW_HOME: resolvePaths().root }
-          }).unref();
-          this.eventBus.publish({ type: 'system:restart', channel, channelId });
-          setTimeout(() => { process.kill(process.pid, 'SIGTERM'); }, 500);
-          return { data: { action: 'restart', success: true } };
-        }
-        return { error: `不支持的操作: ${arg}，可选: stop / restart` };
+    if (cmdBase === '/session' || cmdBase === '/s') {
+      if (!session) {
+        return { data: { status: 'no-session' } };
       }
       const sessionKey = this.getQueueKey(session, channel, channelId);
       const sessionAgent = this.getAgent(channel, session.agentId);
       const isProcessing = this.messageQueue.isProcessing(sessionKey) || sessionAgent.hasActiveStream(sessionKey);
       const queueLength = this.messageQueue.getQueueLength(sessionKey);
+      const health = await this.sessionManager.getHealthStatus(session.id);
 
       let processingDuration: number | undefined;
       if (isProcessing && session.processingState) {
@@ -956,40 +853,353 @@ export class CommandHandler {
         if (!isNaN(elapsed) && elapsed > 0) processingDuration = Math.floor(elapsed / 1000);
       }
 
-      const projectName = this.getProjectName(session.projectPath);
-      const owningAgent = this.getOwningAgent(channel);
-      const health = await this.sessionManager.getHealthStatus(session.id);
-
       let turns = 0;
       if (session.agentSessionId) {
         const fileInfo = this.sessionManager.getSessionFileInfo(session.projectPath, session.agentSessionId, session.agentId);
         turns = fileInfo.turns;
       }
 
-      return {
-        data: {
-          agent: owningAgent?.name ?? 'DefaultAgent',
-          channel: this.resolveChannelType(channel),
-          project: projectName,
-          session: session.name || null,
-          status: isProcessing ? 'processing' : 'idle',
-          processingDuration,
-          queueLength,
-          chatmode: session.sessionMode || 'interactive',
-          dispatchMode: session.chatType === 'group' ? (session.metadata?.dispatchMode ?? null) : undefined,
-          turns,
-          baseagent: session.agentId,
-          agentSessionId: session.agentSessionId || null,
-          lastSuccess: health.lastSuccessTime,
-          consecutiveErrors: health.consecutiveErrors,
-          lastError: health.lastError ? { type: health.lastErrorType || 'unknown', message: health.lastError.substring(0, 100) } : undefined,
-          createdAt: session.createdAt,
-          updatedAt: session.updatedAt,
-        }
+      const data: Record<string, any> = {
+        name: session.name || null,
+        agentSessionId: session.agentSessionId || null,
+        status: isProcessing ? 'processing' : 'idle',
+        createdAt: session.createdAt,
+        updatedAt: session.updatedAt,
       };
+      if (processingDuration !== undefined) data.processingDuration = processingDuration;
+      if (queueLength > 0) data.queueLength = queueLength;
+      if (turns > 0) data.turns = turns;
+      if (health.lastSuccessTime) data.lastSuccess = health.lastSuccessTime;
+      if (health.consecutiveErrors) data.consecutiveErrors = health.consecutiveErrors;
+      if (health.lastError) data.lastError = { type: health.lastErrorType || 'unknown', message: health.lastError.substring(0, 100) };
+      return { data };
     }
 
-    return { error: `不支持 exec 模式: ${cmdBase}` };
+    if (cmdBase === '/baseagent') {
+      const value = session?.agentId ?? evolagent?.config?.active_baseagent ?? null;
+      return { data: { baseagent: value } };
+    }
+
+    if (cmdBase === '/model') {
+      if (session) {
+        const agent = this.getAgent(channel, session.agentId);
+        if (hasModelSwitcher(agent)) return { data: { model: agent.getModel() ?? null } };
+      }
+      const ba = evolagent?.config?.active_baseagent;
+      const block = ba && evolagent ? (evolagent.config.baseagents as any)?.[ba] : undefined;
+      return { data: { model: block?.model ?? null } };
+    }
+
+    if (cmdBase === '/effort') {
+      if (session) {
+        const agent = this.getAgent(channel, session.agentId);
+        const e = (agent as any).getEffort?.();
+        if (e !== undefined) return { data: { effort: e } };
+      }
+      const ba = evolagent?.config?.active_baseagent;
+      const block = ba && evolagent ? (evolagent.config.baseagents as any)?.[ba] : undefined;
+      const fallbackField = ba === 'codex' ? (block?.effort ?? block?.reasoning) : block?.effort;
+      return { data: { effort: fallbackField ?? null } };
+    }
+
+    if (cmdBase === '/chatmode') {
+      const sessionMode = session?.sessionMode;
+      const fallback = evolagent?.config?.chatmode?.private;
+      return { data: { mode: sessionMode || fallback || 'interactive' } };
+    }
+
+    if (cmdBase === '/dispatch') {
+      const chatType = session?.chatType || 'private';
+      if (chatType !== 'group') {
+        return { error: 'dispatch 仅在群聊会话中有效', code: 'NOT_APPLICABLE' };
+      }
+      const sessionMode = session?.metadata?.dispatchMode;
+      const fallback = evolagent?.config?.dispatch;
+      return { data: { mode: sessionMode ?? fallback ?? null } };
+    }
+
+    if (cmdBase === '/perm') {
+      const need = this.requireSession(session);
+      if (need) return need;
+      const currentMode = session!.metadata?.permissionMode ?? DEFAULT_PERMISSION_MODE;
+      return { data: { mode: currentMode } };
+    }
+
+    if (cmdBase === '/activity') {
+      const currentMode = this.agentRegistry?.getShowActivities?.(channel) ?? 'all';
+      return { data: { mode: currentMode } };
+    }
+
+    if (cmdBase === '/system') {
+      const owningAgent = this.getOwningAgent(channel);
+      const data: Record<string, any> = {
+        agent: owningAgent?.name ?? 'DefaultAgent',
+        channel: this.resolveChannelType(channel),
+        pid: process.pid,
+        node: process.version,
+        uptime: Math.floor(process.uptime()),
+      };
+      try {
+        const pkgPath = path.join(getPackageRoot(), 'package.json');
+        const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+        if (pkg?.version) data.version = pkg.version;
+      } catch {}
+      const channels = owningAgent?.channelInstanceNames?.() ?? [];
+      if (channels.length) data.channels = channels;
+      return { data };
+    }
+
+    return { error: `不支持 query: ${cmdBase}`, code: 'NOT_SUPPORTED' };
+  }
+
+  /** menu.update — 写入新值。 */
+  async execMenuUpdate(
+    cmd: string, value: string, channel: string, channelId: string, userId?: string
+  ): Promise<{ data: any } | { error: string; code?: string }> {
+    const cmdBase = cmd.trim().split(' ')[0];
+    if (!cmdBase) return { error: '缺少命令', code: 'MISSING_CMD' };
+    const arg = value.trim();
+    if (!arg) return { error: '缺少 value 参数', code: 'MISSING_VALUE' };
+    const { session, evolagent } = await this.loadMenuContext(channel, channelId);
+    const identity = this.sessionManager.resolveIdentity(channel, userId);
+
+    if (cmdBase === '/baseagent') {
+      const valid = this.getAvailableBaseagents(channel);
+      if (valid.length && !valid.includes(arg)) {
+        return { error: `无效 baseagent: ${arg}，可选: ${valid.join(' / ')}`, code: 'INVALID_VALUE' };
+      }
+      // 当前会话切换走 slash 命令的完整逻辑（涉及 runner 状态、session.agentId 重新挂载等）
+      // 仅在 slash 命令成功后才持久化到 evolagent config，避免失败时配置已落盘
+      if (session && session.agentId !== arg) {
+        const result = await this._handleInternal(`/baseagent ${arg}`, channel, channelId, undefined, userId);
+        const payload = result as any;
+        if (payload?.kind === 'command.error') {
+          return { error: payload.text || '切换失败', code: 'EXEC_FAILED' };
+        }
+      }
+      // 持久化到 evolagent config（影响后续新会话）
+      if (evolagent) evolagent.setActiveBaseagent(arg);
+      return { data: { baseagent: arg } };
+    }
+
+    if (cmdBase === '/model') {
+      const agent = this.getAgent(channel, session?.agentId);
+      if (hasModelSwitcher(agent)) {
+        const models = (await agent.listModels?.()) ?? [];
+        if (models.length && !models.includes(arg)) {
+          return { error: `无效模型: ${arg}`, code: 'INVALID_VALUE' };
+        }
+        agent.setModel(arg);
+      }
+      if (evolagent) evolagent.setBaseagentModel(arg);
+      return { data: { model: arg } };
+    }
+
+    if (cmdBase === '/effort') {
+      const agent = this.getAgent(channel, session?.agentId);
+      const currentModel = hasModelSwitcher(agent) ? agent.getModel() : agent.name;
+      const validEfforts = getAvailableEfforts(agent, currentModel);
+      const allValid: string[] = [...validEfforts, 'auto'];
+      if (!allValid.includes(arg)) {
+        return { error: `无效推理强度: ${arg}，可选: ${allValid.join(' / ')}`, code: 'INVALID_VALUE' };
+      }
+      if (typeof (agent as any).setEffort === 'function') {
+        (agent as any).setEffort(arg === 'auto' ? undefined : arg);
+      }
+      if (evolagent) evolagent.setBaseagentEffort(arg === 'auto' ? undefined : arg);
+      return { data: { effort: arg } };
+    }
+
+    if (cmdBase === '/chatmode') {
+      if (arg !== 'interactive' && arg !== 'proactive') {
+        return { error: `无效模式: ${arg}`, code: 'INVALID_VALUE' };
+      }
+      if (session) {
+        const chatType = session.chatType || 'private';
+        if (chatType === 'group' && identity.role !== 'owner' && identity.role !== 'admin') {
+          return { error: '无权限：群聊中仅管理员可切换', code: 'NO_PERMISSION' };
+        }
+        await this.sessionManager.updateSession(session.id, { sessionMode: arg });
+        this.eventBus.publish({ type: 'session:chat-mode-changed', sessionId: session.id, mode: arg, timestamp: Date.now() });
+      } else {
+        if (evolagent) evolagent.setChatmodePrivate(arg);
+      }
+      return { data: { mode: arg } };
+    }
+
+    if (cmdBase === '/dispatch') {
+      if (arg !== 'mention' && arg !== 'broadcast') {
+        return { error: `无效模式: ${arg}`, code: 'INVALID_VALUE' };
+      }
+      const chatType = session?.chatType;
+      if (!session || chatType !== 'group') {
+        return { error: 'dispatch 仅在群聊会话中有效', code: 'NOT_APPLICABLE' };
+      }
+      if (identity.role !== 'owner' && identity.role !== 'admin') {
+        return { error: '无权限：群聊中仅管理员可切换', code: 'NO_PERMISSION' };
+      }
+      const metadata = { ...(session.metadata || {}), dispatchMode: arg };
+      await this.sessionManager.updateSession(session.id, { metadata });
+      this.eventBus.publish({ type: 'session:dispatch-mode-changed', sessionId: session.id, mode: arg, timestamp: Date.now() });
+      return { data: { mode: arg } };
+    }
+
+    if (cmdBase === '/perm') {
+      const need = this.requireSession(session);
+      if (need) return need;
+      if (identity.role !== 'owner') return { error: '无权限', code: 'NO_PERMISSION' };
+      const permAgent = this.getAgent(channel, session!.agentId);
+      const validModes = hasPermissionController(permAgent)
+        ? permAgent.listModes().filter(m => m.available).map(m => m.key)
+        : ['auto', 'bypass', 'plan', 'edit', 'request', 'noask'];
+      if (!validModes.includes(arg)) return { error: `无效模式: ${arg}`, code: 'INVALID_VALUE' };
+      const metadata = { ...(session!.metadata || {}), permissionMode: arg };
+      await this.sessionManager.updateSession(session!.id, { metadata });
+      return { data: { mode: arg } };
+    }
+
+    if (cmdBase === '/activity') {
+      const modeMap: Record<string, string> = { all: 'all', dm: 'dm-only', owner: 'owner-dm-only', none: 'none' };
+      const newMode = modeMap[arg];
+      if (!newMode) return { error: `无效模式: ${arg}，可选: all / dm / owner / none`, code: 'INVALID_VALUE' };
+      if (identity.role !== 'owner') return { error: '中间输出模式切换仅限 owner', code: 'NO_PERMISSION' };
+      if (!this.agentRegistry?.setShowActivities) return { error: '找不到通道所属 agent，无法持久化', code: 'EXEC_FAILED' };
+      this.agentRegistry.setShowActivities(channel, newMode as any);
+      return { data: { mode: newMode } };
+    }
+
+    return { error: `不支持 update: ${cmdBase}`, code: 'NOT_SUPPORTED' };
+  }
+
+  /** menu.action — 触发动词。 */
+  async execMenuAction(
+    cmd: string, action: string, args: any, channel: string, channelId: string, userId?: string
+  ): Promise<{ data: any } | { error: string; code?: string }> {
+    const cmdBase = cmd.trim().split(' ')[0];
+    if (!cmdBase) return { error: '缺少命令', code: 'MISSING_CMD' };
+    if (!action) return { error: '缺少 action', code: 'MISSING_VALUE' };
+    const { session } = await this.loadMenuContext(channel, channelId);
+    const identity = this.sessionManager.resolveIdentity(channel, userId);
+
+    // ── /session 系列 ──
+    if (cmdBase === '/session' || cmdBase === '/s') {
+      if (action === 'stop') {
+        if (!session) return { error: '当前无活跃会话', code: 'NO_ACTIVE_SESSION' };
+        const sessionKey = this.getQueueKey(session, channel, channelId);
+        const sessionAgent = this.getAgent(channel, session.agentId);
+        const hasActive = sessionAgent.hasActiveStream(sessionKey);
+        const queueLength = this.messageQueue.getQueueLength(sessionKey);
+        if (queueLength === 0 && !hasActive) {
+          return { error: '当前没有正在处理的任务', code: 'NO_ACTIVE_TASK' };
+        }
+        await sessionAgent.interrupt(sessionKey);
+        this.eventBus.publish({
+          type: 'task:interrupted',
+          sessionId: sessionKey,
+          reason: 'stop',
+          agentName: this.agentRegistry?.resolveByChannel(channel)?.name ?? '<unknown>',
+        });
+        this.sessionManager.clearProcessing(sessionKey);
+        return { data: { action: 'stop', success: true } };
+      }
+
+      if (action === 'new') {
+        const name = (args?.name ?? '').toString().trim();
+        return await this.delegateAsAction(action, name ? `/new ${name}` : '/new', channel, channelId, userId, { enrichSession: true });
+      }
+
+      if (action === 'delete') {
+        const target = (args?.target ?? '').toString().trim();
+        if (!target) return { error: '缺少 args.target', code: 'MISSING_VALUE' };
+        return await this.delegateAsAction(action, `/del ${target}`, channel, channelId, userId);
+      }
+
+      if (action === 'switch') {
+        const target = (args?.target ?? '').toString().trim();
+        if (!target) return { error: '缺少 args.target', code: 'MISSING_VALUE' };
+        return await this.delegateAsAction(action, `/s ${target}`, channel, channelId, userId, { enrichSession: true });
+      }
+
+      if (action === 'compact') {
+        const need = this.requireSession(session);
+        if (need) return need;
+        return await this.delegateAsAction(action, '/compact', channel, channelId, userId);
+      }
+
+      if (action === 'fork') {
+        const need = this.requireSession(session);
+        if (need) return need;
+        const name = (args?.name ?? '').toString().trim();
+        return await this.delegateAsAction(action, name ? `/fork ${name}` : '/fork', channel, channelId, userId, { enrichSession: true });
+      }
+
+      return { error: `不支持的 session action: ${action}`, code: 'NOT_SUPPORTED' };
+    }
+
+    // ── /system 系列 ──
+    if (cmdBase === '/system') {
+      if (action === 'restart') {
+        if (identity.role !== 'owner') return { error: '无权限：服务重启仅限 owner 使用', code: 'NO_PERMISSION' };
+        const restartInfo: Record<string, any> = { channel, channelId, timestamp: Date.now() };
+        fs.writeFileSync(path.join(resolvePaths().dataDir, 'restart-pending.json'), JSON.stringify(restartInfo));
+        const { spawn } = await import('child_process');
+        spawn('node', [path.join(getPackageRoot(), 'dist', 'cli', 'index.js'), 'restart-monitor'], {
+          detached: true,
+          stdio: 'ignore',
+          env: { ...process.env, EVOLCLAW_HOME: resolvePaths().root }
+        }).unref();
+        this.eventBus.publish({ type: 'system:restart', channel, channelId });
+        setTimeout(() => { process.kill(process.pid, 'SIGTERM'); }, 500);
+        return { data: { action: 'restart', success: true } };
+      }
+
+      if (action === 'check') {
+        return await this.delegateAsAction(action, '/check', channel, channelId, userId);
+      }
+
+      if (action === 'upgrade') {
+        if (identity.role !== 'owner') return { error: '无权限：升级仅限 owner 使用', code: 'NO_PERMISSION' };
+        return await this.delegateAsAction(action, '/upgrade', channel, channelId, userId);
+      }
+
+      return { error: `不支持的 system action: ${action}`, code: 'NOT_SUPPORTED' };
+    }
+
+    return { error: `不支持 action: ${cmdBase}`, code: 'NOT_SUPPORTED' };
+  }
+
+  /** 把 menu.action 委派给已有 slash 命令处理逻辑，把 OutboundPayload 包成结构化结果。 */
+  private async delegateAsAction(
+    action: string, slashCmd: string, channel: string, channelId: string, userId?: string,
+    opts: { enrichSession?: boolean } = {}
+  ): Promise<{ data: any } | { error: string; code?: string }> {
+    try {
+      const result = await this._handleInternal(slashCmd, channel, channelId, undefined, userId);
+      if (result == null) {
+        // null / undefined: 命令未识别或前置守卫拦截（如 idle 检查），视为失败
+        return { error: '命令未执行（可能被前置守卫拦截）', code: 'EXEC_FAILED' };
+      }
+      if (typeof result !== 'object' || !('kind' in result)) {
+        return { data: { action, success: true } };
+      }
+      const payload = result as any;
+      if (payload.kind === 'command.error') {
+        return { error: payload.text || '执行失败', code: 'EXEC_FAILED' };
+      }
+      const data: Record<string, any> = { action, success: true };
+      if (payload.text) data.message = payload.text;
+      // 对于切换/创建类动作，附加切换后的活跃 session 信息便于客户端继续操作
+      if (opts.enrichSession) {
+        const newSession = await this.sessionManager.getActiveSession(channel, channelId);
+        if (newSession) {
+          data.session = { id: newSession.id, name: newSession.name || null };
+          if (newSession.agentSessionId) data.session.agentSessionId = newSession.agentSessionId;
+        }
+      }
+      return { data };
+    } catch (e: any) {
+      return { error: e?.message || String(e), code: 'INTERNAL' };
+    }
   }
 
   isCommand(content: string): boolean {
@@ -1052,7 +1262,7 @@ export class CommandHandler {
 
     // 话题内禁用部分命令
     if (threadId) {
-      const threadBlocked = ['/new', '/slist', '/plist', '/bind', '/s', '/session', '/project', '/p', '/fork', '/del', '/agent'];
+      const threadBlocked = ['/new', '/slist', '/s', '/session', '/fork', '/del', '/baseagent'];
       const isBlocked = threadBlocked.some(c => normalizedContent === c || normalizedContent.startsWith(c + ' '));
       if (isBlocked) {
         return { kind: 'command.error' as const, text: '⚠️ 话题中不支持此命令' };
@@ -1060,17 +1270,6 @@ export class CommandHandler {
     }
 
     // Agent-owned 通道：禁止项目切换和 agent 切换
-    const owningAgent = this.getOwningAgent(channel);
-    if (owningAgent) {
-      const isProjectCmd = normalizedContent === '/project' || normalizedContent.startsWith('/project ') ||
-        normalizedContent === '/bind' || normalizedContent.startsWith('/bind ') ||
-        normalizedContent === '/plist' ||
-        normalizedContent === '/p' || normalizedContent.startsWith('/p ');
-      if (isProjectCmd) {
-        return { kind: 'command.error' as const, text: `❌ 当前通道由 agent [${owningAgent.name}] 管理，项目已锁定为 ${owningAgent.projectPath}` };
-      }
-    }
-
     // 权限检查：区分用户级命令和管理级命令
     const isOwner = identity.role === 'owner';
     const isAdmin = identity.role === 'owner' || identity.role === 'admin';
@@ -1080,7 +1279,7 @@ export class CommandHandler {
       // guest 在群聊和私聊中均可访问的只读命令：纯查询形态（带参写操作由各 handler 内部守卫拦截）
       const guestGroupCommands = [
         '/status', '/help', '/evolhelp', '/check', '/chatmode', '/dispatch',
-        '/model', '/setmodel', '/effort', '/agent', '/perm', '/activity', '/safe', '/stop',
+        '/model', '/setmodel', '/effort', '/baseagent', '/perm', '/activity', '/safe', '/stop',
         '/resume', '/trigger',
       ];
       const userCommands = activeChatType === 'group' && !isAdmin
@@ -1103,12 +1302,12 @@ export class CommandHandler {
     // 空闲检查：某些命令需要等待当前会话空闲
     // 原则：仅对"写/破坏性"形态拦截，纯读/用法提示的无参形态始终放行
     // - 始终需要 idle（无参即写）：/new /clear /compact /repair /fork
-    // - 仅带参时需要 idle（无参是列表/用法）：/session /bind /project /agent /rewind
+    // - 仅带参时需要 idle（无参是列表/用法）：/session /baseagent /rewind
     // - /chatmode：在 handler 内部自行做写操作的 idle 检查
     // - /dispatch：在 handler 内部自行做写操作的 idle 检查
     // - /safe：已禁用 no-op，不再要求 idle
     const idleAlways = ['/new', '/clear', '/compact', '/repair', '/fork'];
-    const idleWhenArg = ['/session', '/bind', '/project', '/agent', '/rewind'];
+    const idleWhenArg = ['/session', '/baseagent', '/rewind'];
     const needsIdle =
       idleAlways.some(cmd => normalizedContent === cmd || normalizedContent.startsWith(cmd + ' ')) ||
       idleWhenArg.some(cmd => normalizedContent.startsWith(cmd + ' '));
@@ -1185,10 +1384,8 @@ export class CommandHandler {
       const lines = [
         '可用命令：',
         '',
-        '📁 项目管理：',
+        '📁 项目：',
         '  /pwd - 显示当前项目路径',
-        '  /p [name|path] - 列出或切换项目',
-        ...(isOwner ? ['  /bind <path> - 绑定新项目目录'] : []),
         '',
         '🔄 会话管理：',
         '  /new [名称] - 创建新会话（清空历史请用此命令，可选命名）',
@@ -1200,7 +1397,7 @@ export class CommandHandler {
         '  /compact - 压缩会话上下文（减少 token 用量）',
         '',
         '🤖 Agent 与模型：',
-        '  /agent [name] - 查看或切换 Agent 后端',
+        '  /baseagent [name] - 查看或切换 Agent 后端（别名: /base）',
         '  /model [model] - 查看或切换模型',
         '  /effort [level] - 查看或切换推理强度',
         '',
@@ -1241,12 +1438,8 @@ export class CommandHandler {
       type CmdEntry = { command: string; aliases?: string[]; args?: string; description: string; category: string; roles: string[] };
       const cmds: CmdEntry[] = [];
 
-      // 项目管理
-      cmds.push({ command: '/pwd', description: '显示当前项目路径', category: '项目管理', roles: ['admin', 'owner'] });
-      cmds.push({ command: '/p', aliases: ['/project', '/plist'], args: '[name|path]', description: '列出或切换项目', category: '项目管理', roles: ['admin', 'owner'] });
-      if (isOwner) {
-        cmds.push({ command: '/bind', args: '<path>', description: '绑定新项目目录', category: '项目管理', roles: ['owner'] });
-      }
+      // 项目
+      cmds.push({ command: '/pwd', description: '显示当前项目路径', category: '项目', roles: ['admin', 'owner'] });
 
       // 会话管理
       cmds.push({ command: '/new', args: '[名称]', description: '创建新会话（清空历史请用此命令，可选命名）', category: '会话管理', roles: ['guest', 'admin', 'owner'] });
@@ -1261,7 +1454,7 @@ export class CommandHandler {
 
       // Agent 与模型
       if (isAdmin) {
-        cmds.push({ command: '/agent', args: '[name]', description: '查看或切换 Agent 后端', category: 'Agent 与模型', roles: ['admin', 'owner'] });
+        cmds.push({ command: '/baseagent', aliases: ['/base'], args: '[name]', description: '查看或切换 Agent 后端', category: 'Agent 与模型', roles: ['admin', 'owner'] });
         cmds.push({ command: '/model', args: '[model]', description: '查看或切换模型', category: 'Agent 与模型', roles: ['admin', 'owner'] });
         cmds.push({ command: '/effort', args: '[level]', description: '查看或切换推理强度', category: 'Agent 与模型', roles: ['admin', 'owner'] });
       }
@@ -1540,9 +1733,9 @@ export class CommandHandler {
       }
     }
 
-    // /agent 命令：查看或切换 Agent 后端
-    if (normalizedContent === '/agent' || normalizedContent.startsWith('/agent ')) {
-      const args = normalizedContent.slice(6).trim();
+    // /baseagent 命令：查看或切换 Agent 后端
+    if (normalizedContent === '/baseagent' || normalizedContent.startsWith('/baseagent ')) {
+      const args = normalizedContent.slice(10).trim();
       // 切换（带参）需权限：群聊 owner only，私聊 admin+；无参查询对所有人放开
       if (args && (activeChatType === 'group' ? !isOwner : !isAdmin)) {
         return { kind: 'command.error' as const, text: '❌ 无权限：此命令仅限管理员使用' };
@@ -1568,7 +1761,7 @@ export class CommandHandler {
               title: '🔌 切换 Agent',
               buttons: available.map(a => ({
                 label: a === currentAgent ? `✓ ${a}` : a,
-                command: `/agent ${a}`,
+                command: `/baseagent ${a}`,
                 style: (a === currentAgent ? 'primary' : 'default') as 'primary' | 'default',
                 disabled: a === currentAgent,
               })),
@@ -1585,7 +1778,7 @@ export class CommandHandler {
         const list = available.map(a => `${a === currentAgent ? ' ✓' : '  '} ${a}`).join('\n');
         const canSwitchAgent = activeChatType === 'group' ? isOwner : isAdmin;
         if (canSwitchAgent) {
-          return { kind: 'command.result' as const, text: `当前 Agent: ${currentAgent}\n\n可用:\n${list}\n用法: /agent <name>` };
+          return { kind: 'command.result' as const, text: `当前 Agent: ${currentAgent}\n\n可用:\n${list}\n用法: /baseagent <name>` };
         }
         return { kind: 'command.result' as const, text: `当前 Agent: ${currentAgent}` };
       }
@@ -1881,8 +2074,8 @@ export class CommandHandler {
       return { kind: 'command.result' as const, text: `✓ 推理强度: ${newEffort}` };
     }
 
-    // /aid, /rpc, /storage, /evolagent — 仅限 ctl 调用，slash 输入拒绝
-    if (normalizedContent === '/evolagent' || normalizedContent.startsWith('/evolagent ') ||
+    // /agent, /aid, /rpc, /storage — 仅限 ctl 调用，slash 输入拒绝
+    if (normalizedContent === '/agent' || normalizedContent.startsWith('/agent ') ||
         normalizedContent === '/aid' || normalizedContent.startsWith('/aid ') ||
         normalizedContent === '/rpc' || normalizedContent.startsWith('/rpc ') ||
         normalizedContent === '/storage' || normalizedContent.startsWith('/storage ')) {
@@ -2247,11 +2440,8 @@ export class CommandHandler {
     }
 
     // 对于需要会话的命令，如果没有会话则使用默认项目创建临时会话
-    // 这样 /pwd、/status 等命令可以在没有活跃会话时返回默认项目信息
     if (!session && (
       normalizedContent.startsWith('/new') ||
-      normalizedContent.startsWith('/bind') ||
-      normalizedContent.startsWith('/project') ||
       normalizedContent === '/pwd' ||
       normalizedContent === '/status'
     )) {
@@ -2592,11 +2782,9 @@ export class CommandHandler {
 
     // /pwd 命令：显示当前项目路径
     if (normalizedContent === '/pwd') {
-      // session 现在总是存在（上面已自动创建）
       if (!session) {
         return { kind: 'command.error' as const, text: `❌ 无法创建会话，请检查配置` };
       }
-
       const configName = this.getConfiguredProjectName(session.projectPath);
       if (configName) {
         return { kind: 'command.result' as const, text: `当前项目: ${configName}\n路径: ${session.projectPath}` };
@@ -2716,258 +2904,6 @@ export class CommandHandler {
       }
     }
 
-    // /plist 命令：列出所有项目
-    if (normalizedContent === '/plist') {
-      if (!policy.canListProjects(session?.chatType || 'private', identity.role)) {
-        if (!session) {
-          return { kind: 'command.error' as const, text: `❌ 当前群聊未绑定项目
-
-请使用 /bind <项目路径> 绑定项目` };
-        }
-
-        const projectName = this.getProjectName(session.projectPath);
-
-        const isProcessing = !!session.processingState;
-        const status = isProcessing ? '[处理中]' : '[空闲]';
-
-        return { kind: 'command.result' as const, text: `当前群聊绑定的项目：
-  ${projectName} (${session.projectPath}) - ${status}
-
-提示：群聊不支持切换项目` };
-      }
-
-      // 收集项目信息并按最近活跃排序（唯一来源：agent config projects.list）
-      const entries: { name: string; projectPath: string; projectSession: any; isCurrent: boolean; updatedAt: number }[] = [];
-
-      for (const [name, projectPath] of Object.entries(this.projects)) {
-        // 跳过不存在的路径
-        if (!fs.existsSync(projectPath)) continue;
-        const isCurrent = session ? path.resolve(session.projectPath) === path.resolve(projectPath) : false;
-        const projectSession = await this.sessionManager.getSessionByProjectPath(channel, channelId, projectPath);
-        entries.push({
-          name, projectPath, projectSession, isCurrent,
-          updatedAt: projectSession?.updatedAt ?? 0,
-        });
-      }
-
-      // 当前活跃项目置顶，其余按 updatedAt 降序
-      entries.sort((a, b) => {
-        if (a.isCurrent !== b.isCurrent) return a.isCurrent ? -1 : 1;
-        return b.updatedAt - a.updatedAt;
-      });
-
-      // 构建项目状态文本的辅助函数
-      const buildStatusText = (entry: typeof entries[0]) => {
-        const { projectSession, isCurrent } = entry;
-        if (!projectSession) return '无会话';
-        const parts: string[] = [];
-        if (isCurrent) { parts.push('活跃'); } else { parts.push(formatIdleTime(Date.now() - projectSession.updatedAt)); }
-        const isProcessing = !!projectSession.processingState;
-        if (isProcessing) {
-          const qLen = this.messageQueue.getQueueLength(projectSession.id);
-          parts.push(qLen > 0 ? `[处理中，队列${qLen}条]` : '[处理中]');
-        }
-        const unread = this.messageCache.getCount(projectSession.id);
-        if (unread > 0) { parts.push(`[${unread}条新消息]`); }
-        else if (!isProcessing && !isCurrent) { parts.push('[空闲]'); }
-        return parts.join(' ');
-      };
-
-      // 尝试发送 CommandCard 卡片（每个项目一个按钮，一键切换）
-      if (entries.length > 0) {
-        const bodyLines = entries.map(e => {
-          const status = buildStatusText(e);
-          const prefix = e.isCurrent ? '✓' : '•';
-          return `${prefix} **${e.name}** (${e.projectPath})  ${status}`;
-        });
-
-        const interaction: InteractionRequest = {
-          type: 'interaction',
-          id: `plist-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`,
-          channelId,
-          sessionId: activeSession?.id || '',
-          initiatorId: userId,
-          kind: {
-            kind: 'command-card',
-            title: '📂 项目列表',
-            body: bodyLines.join('\n'),
-            buttons: entries.map(e => ({
-              label: e.isCurrent ? `✓ ${e.name}` : e.name,
-              command: `/project ${e.name}`,
-              style: (e.isCurrent ? 'primary' : 'default') as 'primary' | 'default',
-              disabled: e.isCurrent,
-            })),
-          },
-        };
-
-        const replyCtx = activeSession ? this.getReplyContext(activeSession) : undefined;
-        const cardResult = await this.sendCommandCard({ channel, channelId, interaction, replyCtx, canWrite: isAdmin });
-        if (cardResult === null) return null;
-        return { kind: 'command.result' as const, text: cardResult };
-      }
-
-      // 降级：文本列表
-      const lines = ['可用项目:'];
-      for (const entry of entries) {
-        const prefix = entry.isCurrent ? '  ✓' : '   ';
-        lines.push(`${prefix} ${entry.name} (${entry.projectPath}) - ${buildStatusText(entry)}`);
-      }
-      lines.push('', '提示: 使用 /p <名称> 切换项目');
-      return { kind: 'command.result' as const, text: lines.join('\n') };
-    }
-
-    // /project（无参数）：直接复用 /plist 逻辑（含卡片交互）
-    if (normalizedContent === '/project') {
-      if (!policy.canSwitchProject(session?.chatType || 'private', identity.role)) {
-        // 群聊不能切换项目，交由 /plist 逻辑处理
-      }
-      const delegated = await this.handle('/plist', channel, channelId, undefined, userId, threadId);
-      return typeof delegated === 'string' ? { kind: 'command.result' as const, text: delegated } : delegated;
-    }
-
-    // /project 命令：切换项目（支持名称或路径）
-    if (normalizedContent.startsWith('/project ')) {
-      if (!policy.canSwitchProject(session?.chatType || 'private', identity.role)) {
-        return { kind: 'command.error' as const, text: `❌ 群聊不支持切换项目
-
-群聊只能绑定一个项目。如需更换项目，请联系管理员重新配置。` };
-      }
-
-      let arg = normalizedContent.slice(9).trim();
-
-      if (!arg) return { kind: 'command.result' as const, text: '用法: /p <name|path> 或 /project <name|path>' };
-
-      // 检查确认标志
-      const hasConfirm = arg.endsWith(' --confirm');
-      if (hasConfirm) {
-        arg = arg.slice(0, -10).trim();
-      }
-
-      let projectPath: string;
-      let projectName: string;
-
-      if (arg.includes('/')) {
-        if (!path.isAbsolute(arg)) {
-          return { kind: 'command.error' as const, text: '❌ 项目路径必须是绝对路径' };
-        }
-        if (!fs.existsSync(arg)) {
-          return { kind: 'command.error' as const, text: `❌ 路径不存在: ${arg}` };
-        }
-        projectPath = arg;
-        projectName = path.basename(arg);
-      } else {
-        projectPath = this.projects[arg];
-        if (!projectPath) {
-          return { kind: 'command.error' as const, text: `❌ 项目 "${arg}" 不存在\n提示: 使用 /p 查看可用项目` };
-        }
-        projectName = arg;
-      }
-
-      if (session) {
-        const normalizedSessionPath = path.resolve(session.projectPath);
-        const normalizedProjectPath = path.resolve(projectPath);
-        if (normalizedSessionPath === normalizedProjectPath) {
-          return { kind: 'command.result' as const, text: `当前已在项目: ${projectName}\n  路径: ${projectPath}` };
-        }
-      }
-
-      // 群聊切换项目需要确认
-      const isGroupChat = session?.chatType === 'group';
-      if (isGroupChat && !hasConfirm) {
-        return { kind: 'command.error' as const, text: `⚠️ 群聊切换项目风险提示：
-
-切换项目将影响所有群成员的对话上下文，可能导致：
-  • 当前项目的会话历史被切换
-  • 正在处理的任务被中断
-  • 其他成员的工作受到影响
-
-确认切换请执行：
-  /p ${projectName} --confirm` };
-      }
-
-      const currentAgentId = activeSession?.agentId || this.primaryRunnerKey;
-      const newSession = await this.sessionManager.switchProject(channel, channelId, projectPath, currentAgentId);
-
-      this.eventBus.publish({
-        type: 'project:switched',
-        sessionId: newSession.id,
-        channel,
-        channelId,
-        projectPath,
-        timestamp: Date.now()
-      });
-
-      const cachedEvents = this.messageCache.getEvents(newSession.id);
-
-      const hasExistingSession = newSession.agentSessionId ? '（恢复已有会话）' : '（新建会话）';
-      const currentAgent = newSession.agentId || this.primaryRunnerKey;
-      let response = `✓ 已切换到项目: ${projectName}\n  路径: ${projectPath}\n  Agent: ${currentAgent}\n  ${hasExistingSession}`;
-
-      if (cachedEvents.length > 0 && sendMessage) {
-        for (const event of cachedEvents) {
-          if (event.type === 'completed') {
-            response += `\n\n后台任务完成`;
-            if (event.metadata?.duration) {
-              response += ` (耗时: ${Math.round(event.metadata.duration / 1000)}s)`;
-            }
-          } else if (event.type === 'error') {
-            response += `\n\n后台任务失败: ${event.metadata?.errorType || '未知错误'}`;
-          }
-        }
-
-        await sendMessage(channelId, response);
-
-        for (const event of cachedEvents) {
-          await sendMessage(channelId, event.message);
-        }
-
-        this.messageCache.clearEvents(newSession.id);
-
-        return { kind: 'command.result' as const, text: '' };
-      }
-
-      return { kind: 'command.result' as const, text: response };
-    }
-
-    // /bind 命令：持久化项目到配置（不切换）（owner only）
-    if (normalizedContent === '/bind') return { kind: 'command.result' as const, text: '用法: /bind <路径>' };
-    if (normalizedContent.startsWith('/bind ')) {
-      if (!isOwner) return { kind: 'command.error' as const, text: '❌ 无权限：此命令仅限 owner 使用' };
-      const projectPath = normalizedContent.slice(6).trim();
-
-      if (!projectPath) return { kind: 'command.result' as const, text: '用法: /bind <路径>' };
-
-      if (!path.isAbsolute(projectPath)) {
-        return { kind: 'command.error' as const, text: '❌ 项目路径必须是绝对路径' };
-      }
-      if (!fs.existsSync(projectPath)) {
-        if (this.getOwningAgent(channel)?.config?.projects?.autoCreate) {
-          fs.mkdirSync(projectPath, { recursive: true });
-        } else {
-          return { kind: 'command.error' as const, text: `❌ 路径不存在: ${projectPath}` };
-        }
-      }
-
-      // 生成项目名称（使用目录名）
-      const projectName = path.basename(projectPath);
-
-      // 检查在当前 scope 内是否已存在
-      const scopeProjects = this.getEffectiveProjects(channel);
-      const existing = scopeProjects[projectName];
-      if (existing) {
-        if (existing === projectPath) {
-          return { kind: 'command.result' as const, text: `项目 "${projectName}" 已存在\n  路径: ${projectPath}\n\n使用 /p ${projectName} 切换到该项目` };
-        }
-        return { kind: 'command.error' as const, text: `❌ 项目名称 "${projectName}" 已被占用\n  现有路径: ${existing}\n  新路径: ${projectPath}\n\n请重命名目录或手动编辑配置文件` };
-      }
-
-      // 写入：agent-owned channel → agent.json；default → agent config
-      const err = await this.addProjectInScope(channel, projectName, projectPath);
-      if (err) return { kind: 'command.result' as const, text: err };
-
-      return { kind: 'command.result' as const, text: `✓ 已添加项目: ${projectName}\n  路径: ${projectPath}\n\n使用 /p ${projectName} 切换到该项目` };
-    }
-
     // /slist 命令：列出当前项目的会话
     // /slist      — 仅 EvolClaw 会话
     // /slist cli  — 仅 CLI 会话（未导入的）
@@ -2977,8 +2913,7 @@ export class CommandHandler {
 
 请先执行以下操作之一：
 1. 发送任意消息 - 自动创建新会话
-2. /new [名称] - 创建命名会话
-3. /p <项目> - 切换到指定项目` };
+2. /new [名称] - 创建命名会话` };
       }
 
       const showCliOnly = normalizedContent === '/slist cli';
@@ -3799,14 +3734,14 @@ export class CommandHandler {
 
   private static readonly CTL_COMMANDS = [
     '/help', '/status', '/check', '/pwd',
-    '/model', '/effort', '/perm', '/agent',
-    '/compact', '/file', '/send', '/restart', '/bind', '/aid', '/rpc', '/storage',
-    '/rename', '/name', '/evolagent', '/trigger',
+    '/model', '/effort', '/perm', '/agent', '/baseagent',
+    '/compact', '/file', '/send', '/restart', '/aid', '/rpc', '/storage',
+    '/rename', '/name', '/trigger',
     '/chatmode', '/dispatch', '/activity',
   ];
 
   /** ctl 中仅允许查询形态的指令；写形态（带参）一律拒绝 */
-  private static readonly CTL_READONLY = new Set(['/agent']);
+  private static readonly CTL_READONLY = new Set(['/baseagent']);
 
   /**
    * 从 session 恢复 ReplyContext，用于 ctl send 主动发送文本时的路由
@@ -3864,41 +3799,48 @@ export class CommandHandler {
     // 3. 从 session.metadata.peerId 获取 userId（用于权限判断）
     const userId = session.metadata?.peerId;
 
-    // 3.1 /evolagent: EvolAgent 管理（show identity / reload）
-    if (cmd === '/evolagent' || cmd.startsWith('/evolagent ')) {
-      const arg = cmd.slice('/evolagent'.length).trim();
+    // 3.1 /agent: EvolAgent 管理（转发到 CLI）
+    if (cmd === '/agent' || cmd.startsWith('/agent ')) {
+      const arg = cmd.slice('/agent'.length).trim();
+
+      // 无参数时返回用法
       if (!arg) {
-        const owning = this.getOwningAgent(session.channel);
-        if (owning) {
-          return { ok: true, result: `当前 EvolAgent: ${owning.name} (${owning.baseagent})` };
-        }
-        return { ok: true, result: '当前为 DefaultAgent 模式' };
+        return { ok: true, result: `用法:\n  /agent list              列出所有 agent\n  /agent show [name]       查看 agent 详情\n  /agent enable <name>     启用 agent\n  /agent disable <name>    停用 agent\n  /agent get <name> <key>  读取配置字段\n  /agent set <name> <key> <val>  修改配置字段\n  /agent rename <name> <newname> 修改名称\n  /agent reload [name]     热重载配置` };
       }
-      if (arg.startsWith('reload ') || arg === 'reload') {
-        const name = arg === 'reload' ? '' : arg.slice('reload '.length).trim();
-        if (!name) return { ok: false, error: '用法: evolclaw ctl evolagent reload <name>' };
-        // I8: reload is a structural op, require admin or owner
-        if (!userId) {
-          return { ok: false, error: '权限不足：evolagent reload 仅 owner/admin 可用' };
-        }
-        const identity = this.sessionManager.resolveIdentity(session.channel, userId);
-        if (identity.role !== 'owner' && identity.role !== 'admin') {
-          return { ok: false, error: '权限不足：evolagent reload 仅 owner/admin 可用' };
-        }
-        if (!this.agentRegistry) return { ok: false, error: 'EvolAgentRegistry not available' };
-        const a = this.agentRegistry.get(name);
-        if (!a) return { ok: false, error: `Agent "${name}" not found` };
-        const hooks = (globalThis as any).__evolclaw_reloadHooks;
-        if (!hooks) return { ok: false, error: 'Reload hooks not initialized' };
-        if (!this.agentRegistry.reload) return { ok: false, error: 'EvolAgentRegistry.reload not available' };
-        try {
-          await this.agentRegistry.reload(name, hooks);
-          return { ok: true, result: `Agent "${name}" reloaded` };
-        } catch (e: any) {
-          return { ok: false, error: `Reload failed: ${e?.message || e}` };
-        }
+
+      const parts = arg.split(/\s+/);
+      const subCmd = parts[0];
+
+      // ctl 禁止 new/delete（仅限 CLI 操作）
+      if (subCmd === 'new' || subCmd === 'delete') {
+        return { ok: false, error: `❌ /agent ${subCmd} 仅限 CLI 操作，请使用: evolclaw agent ${subCmd} ...` };
       }
-      return { ok: false, error: '用法: evolclaw ctl evolagent [reload <name>]' };
+
+      // 自我保护：不能 disable 自己所在的 agent
+      const selfAgent = this.getOwningAgent(session.channel);
+      const selfName = selfAgent?.name;
+      if (selfName && subCmd === 'disable' && parts[1] === selfName) {
+        return { ok: false, error: `❌ 不能 disable 自己所在的 agent: ${selfName}` };
+      }
+
+      // 转发到 CLI
+      const cliArgs = ['agent', ...parts];
+      try {
+        const { execFile } = await import('node:child_process');
+        const { promisify } = await import('node:util');
+        const execFileAsync = promisify(execFile);
+        const { stdout, stderr } = await execFileAsync('evolclaw', cliArgs, {
+          timeout: 30000,
+          encoding: 'utf-8',
+          env: { ...process.env, AUN_LOG_INI_DISABLE: '1' },
+        });
+        const output = (stdout || '').trim();
+        if (!output && stderr) return { ok: true, result: `⚠ ${stderr.trim().slice(0, 500)}` };
+        return { ok: true, result: output || '(无输出)' };
+      } catch (e: any) {
+        const msg = e.stderr?.trim() || e.stdout?.trim() || String(e.message || e);
+        return { ok: false, error: msg.slice(0, 500) };
+      }
     }
 
     // 4. /send 文本消息：直接通过 adapter 主动发送，不走 handle()
@@ -3964,6 +3906,16 @@ export class CommandHandler {
       }
       if (cmd === '/storage') {
         return { ok: true, result: `用法:\n  /storage upload <aid> <file> <path> [--public]\n  /storage download <aid> <url> [local-path]\n  /storage ls <aid> [prefix]\n  /storage rm <aid> <path>\n  /storage quota <aid>` };
+      }
+
+      // /aid 自我保护：不能删除当前 agent 所用的 AID
+      if (cmd.startsWith('/aid delete ')) {
+        const targetAid = cmd.slice('/aid delete '.length).trim();
+        const selfAgent = this.getOwningAgent(session.channel);
+        const selfAid = selfAgent?.config?.aid;
+        if (selfAid && targetAid === selfAid) {
+          return { ok: false, error: `❌ 不能删除当前 agent 所用的 AID: ${selfAid}` };
+        }
       }
 
       const cliArgs = cmd.slice(1); // strip leading /

@@ -476,8 +476,11 @@ export interface EvolAgentHandle {
   setOwner(channelName: string, userId: string): void;
   getShowActivities(channelName: string): 'all' | 'dm-only' | 'owner-dm-only' | 'none';
   setShowActivities(channelName: string, mode: 'all' | 'dm-only' | 'owner-dm-only' | 'none'): void;
+  setActiveBaseagent(value: string | undefined): void;
   setBaseagentModel(value: string | undefined): void;
   setBaseagentEffort(value: string | undefined): void;
+  setChatmodePrivate(value: 'interactive' | 'proactive' | undefined): void;
+  setDispatch(value: 'mention' | 'broadcast' | undefined): void;
   getProjects(): Record<string, string>;
   addProject(name: string, projectPath: string): void;
   channelInstanceNames(): string[];
@@ -836,28 +839,55 @@ export interface Trigger {
 }
 
 // ── Menu Protocol types ──
+//
+// 6 种消息类型：
+//   menu.list    → 拉取整个菜单树
+//   menu.query   → 查询某项当前值
+//   menu.options → 列举某项可选值
+//   menu.update  → 写入新值
+//   menu.action  → 触发动词（stop / restart / new / delete / ...）
+//   menu.response → 统一响应
+
+export interface MenuListRequest {
+  type: 'menu.list';
+  id: string;
+}
 
 export interface MenuQueryRequest {
   type: 'menu.query';
   id: string;
-  name: string;          // 通用操作标识（如 'list', 'chatmode', 'permission'）
-  cmd?: string;          // evolclaw 内部路由（如 '/chatmode'）
-  state?: boolean;       // true = 查询当前值，false/缺省 = 查询可选项
+  name: string;          // 通用操作标识（如 'pwd' / 'baseagent' / 'session'）
+  cmd?: string;          // 逃生口：直接指定内部命令
+}
+
+export interface MenuOptionsRequest {
+  type: 'menu.options';
+  id: string;
+  name: string;
+  cmd?: string;
 }
 
 export interface MenuUpdateRequest {
   type: 'menu.update';
   id: string;
-  name: string;          // 通用操作标识
-  cmd?: string;          // evolclaw 内部路由
+  name: string;
   value: string;         // 目标值
+  cmd?: string;
+}
+
+export interface MenuActionRequest {
+  type: 'menu.action';
+  id: string;
+  name: string;          // 动词所属 name（如 'session' / 'system'）
+  action: string;        // 'stop' / 'restart' / 'new' / 'delete' / ...
+  args?: Record<string, any>;
+  cmd?: string;
 }
 
 export interface MenuResponse {
   type: 'menu.response';
   id: string;
-  name: string;          // 回显 name
-  cmd?: string;          // 回显 cmd（如有）
-  data?: any;            // 成功时的结果（与 error 互斥）
-  error?: { code: string; message: string };  // 失败时的错误（与 data 互斥）
+  name?: string;         // 回显 name（menu.list 无 name）
+  data?: any;            // 成功（与 error 互斥）
+  error?: { code: string; message: string };  // 失败（与 data 互斥）
 }

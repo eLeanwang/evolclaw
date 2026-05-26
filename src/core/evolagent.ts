@@ -194,6 +194,14 @@ export class EvolAgent {
 
   // ── Baseagent 字段写入 ────────────────────────────────────────────────
 
+  /** 切换当前活跃 baseagent（写顶层 active_baseagent）。 */
+  setActiveBaseagent(value: string | undefined): void {
+    if (value === undefined) delete this.rawAgent.active_baseagent;
+    else this.rawAgent.active_baseagent = value;
+    this.merged.active_baseagent = value;
+    this.persist();
+  }
+
   setBaseagentModel(value: string | undefined): void {
     const ba = this.baseagent;
     if (!this.rawAgent.baseagents) this.rawAgent.baseagents = {};
@@ -210,6 +218,24 @@ export class EvolAgent {
     const fieldName = ba === 'codex' ? 'reasoning' : 'effort';
     if (value === undefined) delete block[fieldName];
     else block[fieldName] = value;
+    this.persist();
+  }
+
+  /** 设置私聊 chatmode（群聊/非 human 强制 proactive，无可写入项）。 */
+  setChatmodePrivate(value: 'interactive' | 'proactive' | undefined): void {
+    if (!this.rawAgent.chatmode) this.rawAgent.chatmode = {};
+    if (value === undefined) delete this.rawAgent.chatmode.private;
+    else this.rawAgent.chatmode.private = value;
+    if (!this.merged.chatmode) this.merged.chatmode = {};
+    this.merged.chatmode.private = value;
+    this.persist();
+  }
+
+  /** 设置群聊 dispatch 默认值（mention | broadcast）。 */
+  setDispatch(value: 'mention' | 'broadcast' | undefined): void {
+    if (value === undefined) delete this.rawAgent.dispatch;
+    else this.rawAgent.dispatch = value;
+    this.merged.dispatch = value;
     this.persist();
   }
 

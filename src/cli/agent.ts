@@ -742,8 +742,9 @@ export async function agentCreateNonInteractive(opts: AgentCreateNonInteractiveO
   };
 }
 
-// ==================== agentSyncAids ====================
+// ==================== agentSyncAids (deprecated) ====================
 
+/** @deprecated sync-aids 已废弃，不再从 CLI 调用 */
 export async function agentSyncAids(): Promise<AgentResult<AgentSyncResult>> {
   const p = resolvePaths();
   const { aidList } = await import('../aun/aid/index.js');

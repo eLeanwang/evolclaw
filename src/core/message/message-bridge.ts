@@ -10,7 +10,7 @@ import type { MessageProcessor } from './message-processor.js';
 import type { MessageQueue } from './message-queue.js';
 import type { CommandHandler as CmdHandler } from '../command-handler.js';
 import type { EventBus } from '../event-bus.js';
-import type { Message, InboundMessage, ChannelAdapter, ReplyContext, EvolAgentRegistryHandle, OutboundPayload, MenuQueryRequest, MenuUpdateRequest, MenuResponse } from '../../types.js';
+import type { Message, InboundMessage, ChannelAdapter, ReplyContext, EvolAgentRegistryHandle, OutboundPayload, MenuListRequest, MenuQueryRequest, MenuOptionsRequest, MenuUpdateRequest, MenuActionRequest, MenuResponse } from '../../types.js';
 
 /**
  * MessageBridge — Channel 与 Core 之间的消息桥梁
@@ -231,17 +231,16 @@ export class MessageBridge {
   // ── Menu Protocol ──
 
   private static readonly MENU_NAME_MAP: Record<string, string> = {
-    chatmode: '/chatmode',
-    permission: '/perm',
-    dispatch: '/dispatch',
-    activity: '/activity',
-    project: '/p',
-    session: '/s',
-    agent: '/agent',
+    pwd: '/pwd',
+    session: '/session',
+    baseagent: '/baseagent',
     model: '/model',
     effort: '/effort',
-    status: '/status',
-    aid: '/aid',
+    chatmode: '/chatmode',
+    dispatch: '/dispatch',
+    permission: '/perm',
+    activity: '/activity',
+    system: '/system',
   };
 
   private resolveCmd(name: string, cmd?: string): string {
@@ -251,7 +250,7 @@ export class MessageBridge {
     return mapped;
   }
 
-  /** 自定义消息快速路径：拦截 menu.query / menu.update，返回 true 表示已处理 */
+  /** 自定义消息快速路径：拦截 menu.* 协议 */
   private async handleCustomPayload(
     content: string, channel: string, msg: InboundMessage,
     sendReply: (channelId: string, text: string, replyContext?: ReplyContext) => Promise<void>,
@@ -262,14 +261,42 @@ export class MessageBridge {
     if (!parsed || typeof parsed !== 'object' || !parsed.type) return false;
 
     switch (parsed.type) {
+      case 'menu.list':
+        await this.handleMenuList(parsed, channel, msg, adapter, sendReply);
+        return true;
       case 'menu.query':
         await this.handleMenuQuery(parsed, channel, msg, adapter, sendReply);
+        return true;
+      case 'menu.options':
+        await this.handleMenuOptions(parsed, channel, msg, adapter, sendReply);
         return true;
       case 'menu.update':
         await this.handleMenuUpdate(parsed, channel, msg, adapter, sendReply);
         return true;
+      case 'menu.action':
+        await this.handleMenuAction(parsed, channel, msg, adapter, sendReply);
+        return true;
       default:
         return false;
+    }
+  }
+
+  private async handleMenuList(
+    req: MenuListRequest, channel: string, msg: InboundMessage,
+    adapter: ChannelAdapter | undefined,
+    sendReply: (channelId: string, text: string, replyContext?: ReplyContext) => Promise<void>
+  ): Promise<void> {
+    const { id } = req;
+    try {
+      const identity = this.sessionManager.resolveIdentity(channel, msg.peerId);
+      const data = this.cmdHandler.getMenuItems(identity.role, msg.chatType || 'private');
+      await this.sendMenuResponse(adapter, channel, msg.channelId,
+        { type: 'menu.response', id, data }, sendReply);
+    } catch (err: any) {
+      await this.sendMenuResponse(adapter, channel, msg.channelId, {
+        type: 'menu.response', id,
+        error: { code: err?.code || 'INTERNAL', message: err?.message || String(err) }
+      }, sendReply);
     }
   }
 
@@ -279,28 +306,34 @@ export class MessageBridge {
     sendReply: (channelId: string, text: string, replyContext?: ReplyContext) => Promise<void>
   ): Promise<void> {
     const { id, name, cmd } = req;
-    let resolvedCmd: string | undefined;
     try {
-      let data: any;
-
-      if (name === 'list') {
-        const identity = this.sessionManager.resolveIdentity(channel, msg.peerId);
-        data = this.cmdHandler.getMenuItems(identity.role, msg.chatType || 'private');
-      } else if (req.state) {
-        resolvedCmd = this.resolveCmd(name, cmd);
-        const result = await this.cmdHandler.execMenu(resolvedCmd, 'query', channel, msg.channelId, msg.peerId);
-        if ('error' in result) throw { code: 'EXEC_FAILED', message: result.error };
-        data = result.data;
-      } else {
-        resolvedCmd = this.resolveCmd(name, cmd);
-        data = await this.cmdHandler.getSubMenuItems(resolvedCmd, channel, msg.channelId, msg.peerId) ?? [];
-      }
-
+      const resolvedCmd = this.resolveCmd(name, cmd);
+      const result = await this.cmdHandler.execMenuQuery(resolvedCmd, channel, msg.channelId, msg.peerId);
+      if ('error' in result) throw { code: result.code || 'EXEC_FAILED', message: result.error };
       await this.sendMenuResponse(adapter, channel, msg.channelId,
-        { type: 'menu.response', id, name, cmd: resolvedCmd, data }, sendReply);
+        { type: 'menu.response', id, name, data: result.data }, sendReply);
     } catch (err: any) {
       await this.sendMenuResponse(adapter, channel, msg.channelId, {
-        type: 'menu.response', id, name, cmd: resolvedCmd ?? cmd,
+        type: 'menu.response', id, name,
+        error: { code: err?.code || 'INTERNAL', message: err?.message || String(err) }
+      }, sendReply);
+    }
+  }
+
+  private async handleMenuOptions(
+    req: MenuOptionsRequest, channel: string, msg: InboundMessage,
+    adapter: ChannelAdapter | undefined,
+    sendReply: (channelId: string, text: string, replyContext?: ReplyContext) => Promise<void>
+  ): Promise<void> {
+    const { id, name, cmd } = req;
+    try {
+      const resolvedCmd = this.resolveCmd(name, cmd);
+      const data = await this.cmdHandler.getSubMenuItems(resolvedCmd, channel, msg.channelId, msg.peerId) ?? [];
+      await this.sendMenuResponse(adapter, channel, msg.channelId,
+        { type: 'menu.response', id, name, data }, sendReply);
+    } catch (err: any) {
+      await this.sendMenuResponse(adapter, channel, msg.channelId, {
+        type: 'menu.response', id, name,
         error: { code: err?.code || 'INTERNAL', message: err?.message || String(err) }
       }, sendReply);
     }
@@ -312,18 +345,37 @@ export class MessageBridge {
     sendReply: (channelId: string, text: string, replyContext?: ReplyContext) => Promise<void>
   ): Promise<void> {
     const { id, name, cmd, value } = req;
-    let resolvedCmd: string | undefined;
     try {
       if (!value) throw { code: 'MISSING_VALUE', message: '缺少 value 参数' };
-      resolvedCmd = this.resolveCmd(name, cmd);
-      const fullCmd = `${resolvedCmd} ${value}`;
-      const result = await this.cmdHandler.execMenu(fullCmd, 'update', channel, msg.channelId, msg.peerId);
-      if ('error' in result) throw { code: 'EXEC_FAILED', message: result.error };
+      const resolvedCmd = this.resolveCmd(name, cmd);
+      const result = await this.cmdHandler.execMenuUpdate(resolvedCmd, value, channel, msg.channelId, msg.peerId);
+      if ('error' in result) throw { code: result.code || 'EXEC_FAILED', message: result.error };
       await this.sendMenuResponse(adapter, channel, msg.channelId,
-        { type: 'menu.response', id, name, cmd: resolvedCmd, data: result.data }, sendReply);
+        { type: 'menu.response', id, name, data: result.data }, sendReply);
     } catch (err: any) {
       await this.sendMenuResponse(adapter, channel, msg.channelId, {
-        type: 'menu.response', id, name, cmd: resolvedCmd ?? cmd,
+        type: 'menu.response', id, name,
+        error: { code: err?.code || 'INTERNAL', message: err?.message || String(err) }
+      }, sendReply);
+    }
+  }
+
+  private async handleMenuAction(
+    req: MenuActionRequest, channel: string, msg: InboundMessage,
+    adapter: ChannelAdapter | undefined,
+    sendReply: (channelId: string, text: string, replyContext?: ReplyContext) => Promise<void>
+  ): Promise<void> {
+    const { id, name, cmd, action, args } = req;
+    try {
+      if (!action) throw { code: 'MISSING_VALUE', message: '缺少 action 参数' };
+      const resolvedCmd = this.resolveCmd(name, cmd);
+      const result = await this.cmdHandler.execMenuAction(resolvedCmd, action, args, channel, msg.channelId, msg.peerId);
+      if ('error' in result) throw { code: result.code || 'EXEC_FAILED', message: result.error };
+      await this.sendMenuResponse(adapter, channel, msg.channelId,
+        { type: 'menu.response', id, name, data: result.data }, sendReply);
+    } catch (err: any) {
+      await this.sendMenuResponse(adapter, channel, msg.channelId, {
+        type: 'menu.response', id, name,
         error: { code: err?.code || 'INTERNAL', message: err?.message || String(err) }
       }, sendReply);
     }

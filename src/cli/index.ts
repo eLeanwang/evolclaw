@@ -2755,6 +2755,7 @@ async function cmdCtl(args: string[]): Promise<void> {
 查询:
   status                    查看会话状态
   check                     检查渠道健康状态
+  pwd                       显示当前项目路径
   help                      显示帮助
 
 配置:
@@ -2763,15 +2764,14 @@ async function cmdCtl(args: string[]): Promise<void> {
   compact                   压缩当前会话上下文
   perm [mode]               查看/切换权限模式
 
-项目:
-  bind <path>               注册项目目录（不切换当前会话）
-
 消息:
   send <消息内容>           主动发送文本消息（proactive 模式）
   file [channel] <path>     发送项目内文件
 
+Agent:
+  agent <subcommand>        EvolAgent 管理（list/show/new/enable/disable/reload/delete）
+
 运维:
-  agentmd [put|set <内容>]  查看/管理 agent.md（仅 AUN 通道）
   restart [channel]         重启服务或重连指定渠道
 
 示例:
@@ -2833,7 +2833,6 @@ Commands:
   show <aid>              查看 agent 详情（身份 + 配置 + 连接 + 会话 + 路径）
   new [aid]               交互式创建 agent
   new <aid> --non-interactive ...  非交互式创建
-  sync-aids               从本地 AID 批量创建 agent
   enable <aid>            启用 agent
   disable <aid>           停用 agent
   get <aid> <key>         读取单个配置字段（支持点路径）
@@ -2859,7 +2858,7 @@ Options:
 
   const {
     agentList, agentShow, agentCreateInteractive, agentCreateNonInteractive,
-    agentSyncAids, agentReload, agentEnable, agentDisable,
+    agentReload, agentEnable, agentDisable,
     agentGet, agentSet, agentDelete, agentRename,
   } = await import('./agent.js');
 
@@ -2990,28 +2989,28 @@ Options:
     return;
   }
 
-  // --- sync-aids ---
-  if (sub === 'sync-aids') {
-    const result = await agentSyncAids();
-    if (!result.ok) {
-      if (formatJson) { console.log(JSON.stringify(result)); }
-      else { console.error(`❌ ${result.error}`); }
-      process.exit(1);
-    }
-    if (formatJson) {
-      console.log(JSON.stringify(result, null, 2));
-      return;
-    }
-    if (result.created.length === 0) {
-      console.log('所有本地 AID 都已有对应 agent，无需同步。');
-    } else {
-      console.log(`✓ 同步完成：新建 ${result.created.length} 个 agent（模板: ${result.template}）`);
-      for (const aid of result.created) console.log(`  ✓ ${aid}`);
-      if (result.hotReloaded) console.log('  ✓ 已热加载到运行中的进程');
-      else console.log('  evolclaw 未运行，新 agent 将在下次启动时加载。');
-    }
-    return;
-  }
+  // --- sync-aids (deprecated, commented out) ---
+  // if (sub === 'sync-aids') {
+  //   const result = await agentSyncAids();
+  //   if (!result.ok) {
+  //     if (formatJson) { console.log(JSON.stringify(result)); }
+  //     else { console.error(`❌ ${result.error}`); }
+  //     process.exit(1);
+  //   }
+  //   if (formatJson) {
+  //     console.log(JSON.stringify(result, null, 2));
+  //     return;
+  //   }
+  //   if (result.created.length === 0) {
+  //     console.log('所有本地 AID 都已有对应 agent，无需同步。');
+  //   } else {
+  //     console.log(`✓ 同步完成：新建 ${result.created.length} 个 agent（模板: ${result.template}）`);
+  //     for (const aid of result.created) console.log(`  ✓ ${aid}`);
+  //     if (result.hotReloaded) console.log('  ✓ 已热加载到运行中的进程');
+  //     else console.log('  evolclaw 未运行，新 agent 将在下次启动时加载。');
+  //   }
+  //   return;
+  // }
 
   // --- reload ---
   if (sub === 'reload') {
@@ -4591,7 +4590,6 @@ Commands:
                           --name <display-name>
                           --description <text>
                           --force                            (覆盖已有 config.json)
-                  agent sync-aids    从本地 AID 批量同步创建 agent（以最早 agent 为模板）
                   agent reload       全量 resync（扫磁盘，新增上线、删除下线、修改热更新）
                   agent reload <n>   热重载指定 agent 配置
   aid           AID 身份管理

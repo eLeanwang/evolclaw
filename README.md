@@ -243,14 +243,11 @@ evolclaw/
 
 ### 管理员级命令（Admin+ 可用）
 
-**项目管理**：
+**项目**：
 - `/pwd` - 显示当前项目路径
-- `/plist` - 列出所有项目（显示会话空闲时间）
-- `/p <name|path>` - 切换项目（保留会话历史）
-- `/bind <path>` - 绑定新项目目录
 
 **Agent 与模型**：
-- `/agent [name]` - 查看或切换 Agent 后端（claude / codex / gemini）
+- `/baseagent [name]` - 查看或切换 Agent 后端（claude / codex / gemini）（别名 `/base`）
 - `/model [model]` - 查看或切换模型
 - `/effort [level]` - 查看或切换推理强度（low / medium / high / max / auto）
 - `/perm [mode]` - 查看或切换权限模式（auto / edit / default / readonly）
@@ -272,7 +269,6 @@ evolclaw/
 - `/file <文件路径>` - 发送文件给用户
 - `/restart` - 重启服务（自愈机制）
 - `/repair` - 检查并修复会话
-- `/agentmd [put|set]` - 管理 AUN agent.md（仅 AUN 渠道）
 
 ## 技术栈
 

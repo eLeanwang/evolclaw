@@ -482,6 +482,11 @@ export class AUNChannel {
     'merge', 'link', 'location', 'personal_card',
   ]);
 
+  /** Menu protocol 请求类型：自定义消息快速路径，绕过白名单直接分发到 bridge */
+  private static readonly MENU_REQUEST_TYPES = new Set([
+    'menu.list', 'menu.query', 'menu.options', 'menu.update', 'menu.action',
+  ]);
+
   // Reconnect state
   // SDK 自己跑无限指数退避（1s → 5min）；TS 层只在 SDK 够不到的两类场景下接管：
   //  1. flap：短命 connected 反复出现（SDK 不记忆跨轮 base delay，会从 1s 重新开始）
@@ -1044,8 +1049,8 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
 
     // action_card_reply 已在 extractTextPayload 中消费，不分发给 agent
     if (p2pPayloadType === 'action_card_reply') return;
-    // menu.query/menu.update：自定义消息快速路径，需要原始 payload JSON 传递给 bridge
-    if (p2pPayloadType === 'menu.query' || p2pPayloadType === 'menu.update') {
+    // menu.* 协议：自定义消息快速路径，需要原始 payload JSON 传递给 bridge
+    if (AUNChannel.MENU_REQUEST_TYPES.has(p2pPayloadType)) {
       this.acknowledgeImmediately(messageId, seq);
       this.dispatchMessage({
         channelId: chatId, userId: fromAid,
@@ -1155,8 +1160,8 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     {
       const payloadObj = (payload && typeof payload === 'object') ? payload as Record<string, any> : null;
       const payloadType: string = payloadObj?.type ?? '';
-      // menu.query/menu.update：自定义消息快速路径
-      if (payloadType === 'menu.query' || payloadType === 'menu.update') {
+      // menu.* 协议：自定义消息快速路径
+      if (AUNChannel.MENU_REQUEST_TYPES.has(payloadType)) {
         this.acknowledgeImmediately(messageId, seq);
         this.dispatchMessage({
           channelId: groupId, userId: senderAid,
