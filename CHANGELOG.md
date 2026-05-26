@@ -1,5 +1,26 @@
 # Changelog
 
+## v3.1.3 (2026-05-26)
+
+### New Features
+
+- **Menu 协议拆分为 5 动词** — `menu.list` / `menu.query` / `menu.options` / `menu.update` / `menu.action`，response 统一 `error.code` 透传（`NO_ACTIVE_SESSION` / `MISSING_VALUE` / ...），`name → cmd` 由 bridge 内部映射，AUN 白名单接纳全部 `menu.*` 类型
+- **xhigh effort 档位** — Claude/Codex 新增 `xhigh` 推理强度档位，Codex 通过 `codex debug models` 动态拉取模型目录与各模型支持的 effort 列表
+- **结构化 menu options 字段** — session 子菜单返回 `preview`（首条消息预览）/ `lastActive` / `agentSessionId` / `turns` 扩展字段，所有可选项菜单返回 `selected` 标记当前值
+
+### Improvements
+
+- **命令收敛** — 移除 `/plist` `/project` `/bind` `/agentmd` `/p` 别名；`/agent` 改为 EvolAgent 管理命令；baseagent 切换统一为 `/baseagent`（别名 `/base`）；`/aid` `/rpc` `/storage` `/evolagent` 改为 ctl 专属
+- **execMenu 拆分** — `command-handler` 拆出 `execMenuQuery` / `execMenuUpdate` / `execMenuAction` 三入口，无活跃会话时多项 fallback 到 evolagent config（`/pwd` / `/chatmode` / `/dispatch` 等）
+- **EvolAgent 持久化方法** — 新增 `setActiveBaseagent` / `setChatmodePrivate` / `setDispatch`，配置变更直接落盘
+- **Codex 实例每次重建** — 通过 env 注入 `EVOLCLAW_SESSION_ID`，仅首轮拼接 `systemPromptAppend`，避免 resume 时重复污染历史
+- **Agent plugin 启用判定** — `isEnabled` 改为按 `baseagents.<name>` 配置启用，Codex 额外检测 `@openai/codex-sdk` 是否可用，`init` / `agent new` CLI 同步该判定
+- **context-too-long 提示文案** — 按 agent 是否支持 compact 区分提示，retry 后仍超长时清理 renderer 中混入的错误文本（新增 `IMRenderer.stripContextError`）
+
+### Bug Fixes
+
+- **Codex resume 历史污染** — systemPromptAppend 在 resume 轮次重复拼接到 prompt 头部，导致系统提示被反复写入对话历史
+
 ## v3.1.2 (2026-05-25)
 
 ### Improvements
