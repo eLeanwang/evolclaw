@@ -208,6 +208,15 @@ export class SessionManager {
         const meta = readLastJsonlLine<SessionFile>(path.join(d.dirPath, mf));
         if (meta && meta.channel === channel) return d.dirPath;
       }
+      // 仅 thread session 场景：主目录无 active.json 也无 main meta，但 _threads/ 有内容
+      const threadsDir = path.join(d.dirPath, '_threads');
+      if (fs.existsSync(threadsDir)) {
+        const threadMetas = scanMetaFiles(threadsDir);
+        for (const mf of threadMetas) {
+          const meta = readLastJsonlLine<SessionFile>(path.join(threadsDir, mf));
+          if (meta && meta.channel === channel) return d.dirPath;
+        }
+      }
     }
     return undefined;
   }
@@ -893,7 +902,12 @@ export class SessionManager {
   }
 
   async getThreadSession(channel: string, channelId: string, threadId: string): Promise<Session | undefined> {
-    const chatDir = this.resolveChatDirSafe(channel, channelId);
+    let chatDir: string;
+    try {
+      chatDir = this.resolveChatDirSafe(channel, channelId);
+    } catch {
+      return undefined;
+    }
     const threadIndex = readThreadIndex(chatDir);
     const metaId = threadIndex[threadId];
     if (!metaId) return undefined;
@@ -905,13 +919,23 @@ export class SessionManager {
   }
 
   async listSessions(channel: string, channelId: string): Promise<Session[]> {
-    const chatDir = this.resolveChatDirSafe(channel, channelId);
+    let chatDir: string;
+    try {
+      chatDir = this.resolveChatDirSafe(channel, channelId);
+    } catch {
+      return [];
+    }
     const sessions = this.findAllSessionsInChat(chatDir, true);
     return sessions.sort((a, b) => b.updatedAt - a.updatedAt);
   }
 
   async getSessionByProjectPath(channel: string, channelId: string, projectPath: string): Promise<Session | undefined> {
-    const chatDir = this.resolveChatDirSafe(channel, channelId);
+    let chatDir: string;
+    try {
+      chatDir = this.resolveChatDirSafe(channel, channelId);
+    } catch {
+      return undefined;
+    }
     const sessions = this.findAllSessionsInChat(chatDir, false);
     const matched = sessions.filter(s => s.projectPath === projectPath);
     if (matched.length === 0) return undefined;
@@ -925,13 +949,23 @@ export class SessionManager {
   }
 
   async getSessionByName(channel: string, channelId: string, name: string): Promise<Session | undefined> {
-    const chatDir = this.resolveChatDirSafe(channel, channelId);
+    let chatDir: string;
+    try {
+      chatDir = this.resolveChatDirSafe(channel, channelId);
+    } catch {
+      return undefined;
+    }
     const sessions = this.findAllSessionsInChat(chatDir, true);
     return sessions.find(s => s.name === name);
   }
 
   async switchToSession(channel: string, channelId: string, targetSessionId: string): Promise<Session | null> {
-    const chatDir = this.resolveChatDirSafe(channel, channelId);
+    let chatDir: string;
+    try {
+      chatDir = this.resolveChatDirSafe(channel, channelId);
+    } catch {
+      return null;
+    }
     const sessions = this.findAllSessionsInChat(chatDir, true);
     const target = sessions.find(s => s.id === targetSessionId);
     if (!target) return null;
@@ -1011,12 +1045,22 @@ export class SessionManager {
   async createNewSession(channel: string, channelId: string, projectPath: string, name?: string, agentId?: string): Promise<Session> {
     const inheritedChatType = this.getActiveChatType(channel, channelId);
 
+    let inferredType: string;
+    let inferredSelfId: string | undefined;
+    try {
+      inferredType = this.inferChannelType(channel, channelId);
+      inferredSelfId = this.inferSelfId(channel, channelId);
+    } catch {
+      inferredType = channel;
+      inferredSelfId = undefined;
+    }
+
     const session: Session = {
       id: generateSessionId(),
       channel,
-      channelType: this.inferChannelType(channel, channelId),
+      channelType: inferredType,
       channelId,
-      selfId: this.inferSelfId(channel, channelId),
+      selfId: inferredSelfId,
       projectPath,
       threadId: '',
       agentId: agentId || 'claude',

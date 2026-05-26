@@ -1093,7 +1093,15 @@ export class MessageProcessor {
             message.channel,
             message.channelId,
             this.agentRegistry?.resolveByChannel(message.channel)?.projectPath || process.cwd(),
-            message.threadId
+            message.threadId,
+            undefined,
+            undefined,
+            message.peerId,
+            message.chatType,
+            undefined,
+            message.selfId,
+            message.channelType,
+            message.peerType
           );
           sendOpts = this.getReplyContext(message);
         } catch {}
@@ -1151,10 +1159,10 @@ export class MessageProcessor {
       metadata,
       undefined,
       message.peerId,
+      message.chatType,
       undefined,
-      undefined,
-      undefined,
-      undefined,
+      message.selfId,
+      message.channelType,
       message.peerType
     );
 
