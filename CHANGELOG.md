@@ -1,5 +1,22 @@
 # Changelog
 
+## v3.1.4 (2026-05-27)
+
+### New Features
+
+- **CLI help 系统重构 + ECK 注入** — 全新 help 子命令体系，ECK（EvolClaw Kit）注入机制重构，AID identity 管理命令
+- **Menu 协议五动词拆分** — menu 协议拆分为 list/query/options/update/action 五个动词，命令收敛至 baseagent/session
+
+### Improvements
+
+- **npm-ops 去 CLI 依赖** — checkLatestVersion 改用 HTTP fetch 直接查 registry API，去除对 npm CLI 的运行时依赖
+- **agent.md 适配 SDK 0.3.3** — 统一 aun_path 到 EVOLCLAW_HOME，适配最新 SDK 版本
+
+### Bug Fixes
+
+- **Session channelType 缺失修复** — 修复 channelType 缺失导致 chat dir 无法解析 + isBackgroundSession 同步化
+- **SessionManager 查询路径 NPE** — 修复缺失 channelType 时的空指针异常
+
 ## v3.1.3 (2026-05-26)
 
 ### New Features
