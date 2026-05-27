@@ -111,9 +111,10 @@ export class MessageProcessor {
   }
 
   /** 判断是否为后台会话（仅主会话参与判断，话题会话独立） */
-  private async isBackgroundSession(session: Session, channel: string, channelId: string): Promise<boolean> {
+  private isBackgroundSession(session: Session, _channel: string, _channelId: string): boolean {
     if (session.threadId) return false;
-    const active = await this.sessionManager.getActiveSession(channel, channelId);
+    // 使用 session 自身的 channelType 精确定位 active.json，避免扫描误匹配
+    const active = this.sessionManager.getActiveSessionSync(session.channel, session.channelId, session.channelType, session.selfId);
     return active ? session.id !== active.id : false;
   }
 
@@ -283,7 +284,7 @@ export class MessageProcessor {
     };
 
     // Cache background status to avoid async call inside setInterval
-    const isBackground = await this.isBackgroundSession(session, message.channel, message.channelId);
+    const isBackground = this.isBackgroundSession(session, message.channel, message.channelId);
 
         const timeoutPromise = new Promise<never>((_, reject) => {
       rejectFn = reject;
@@ -432,7 +433,7 @@ export class MessageProcessor {
     });
 
     try {
-      const isBackground = await this.isBackgroundSession(session, message.channel, message.channelId);
+      const isBackground = this.isBackgroundSession(session, message.channel, message.channelId);
 
       // 记录收到消息
       logger.message({
@@ -494,7 +495,7 @@ export class MessageProcessor {
           // proactive 模式：activity.batch 是 thought 协议内容，只发给支持 thought 的 channel
           // （不支持 thought 的 channel 静默丢弃，避免降级为普通消息）
           if (isProactive && payload.kind === 'activity.batch' && !adapter.capabilities?.thought) return;
-          const isCurrentlyBackground = await this.isBackgroundSession(session, message.channel, message.channelId);
+          const isCurrentlyBackground = this.isBackgroundSession(session, message.channel, message.channelId);
           if (isCurrentlyBackground) return;
 
           const opts: ReplyContext = {};
@@ -880,7 +881,7 @@ export class MessageProcessor {
       if (finalReplyText) {
         if (isProactive && !streamResult.hasReceivedText && /^Unknown skill:\s+\S+/i.test(finalReplyText.trim())) {
           // Proactive 模式 + SDK 本地兜底：直接发送绕过 silent renderer
-          const isCurrentlyBackground = await this.isBackgroundSession(session, message.channel, message.channelId);
+          const isCurrentlyBackground = this.isBackgroundSession(session, message.channel, message.channelId);
           if (!isCurrentlyBackground) {
             await adapter.send({ ...envelope, replyContext: capturedReplyContext }, { kind: 'result.text', text: finalReplyText, isFinal: true });
             logger.info(`[MessageProcessor] proactive SDK fallback replied task=${taskId} text="${finalReplyText.slice(0, 60)}"`);
@@ -1001,7 +1002,7 @@ export class MessageProcessor {
         // 所有 message.send 成功后统一写入 messages.jsonl，此处不再重复写入。
       }
 
-      const isFinallyBackground = await this.isBackgroundSession(session, message.channel, message.channelId);
+      const isFinallyBackground = this.isBackgroundSession(session, message.channel, message.channelId);
       if (isFinallyBackground && session.sessionMode !== 'autonomous') {
         const projectName = path.basename(session.projectPath);
         const count = this.messageCache.getCount(session.id);
@@ -1276,7 +1277,7 @@ export class MessageProcessor {
         continue;
       }
 
-      const isCurrentlyBackground = await this.isBackgroundSession(session, session.channel, session.channelId);
+      const isCurrentlyBackground = this.isBackgroundSession(session, session.channel, session.channelId);
 
       // === 前台任务：正常处理所有事件 ===
       if (!isCurrentlyBackground) {

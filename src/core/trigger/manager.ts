@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { atomicWriteJson, appendJsonl } from '../session/session-fs-store.js';
+import { formatChannelKey } from '../channel-loader.js';
 import { logger } from '../../utils/logger.js';
 import type { Trigger } from '../../types.js';
 
@@ -34,12 +35,38 @@ export class TriggerManager {
       const raw = fs.readFileSync(this.triggersPath, 'utf8');
       const data: TriggersFile = JSON.parse(raw);
       this.triggers = new Map(Object.entries(data.triggers ?? {}));
+      // Migrate old channel key format: "selfPeerId#type#name" → "type#selfPeerId#name"
+      let migrated = false;
+      for (const trigger of this.triggers.values()) {
+        const fixed = this.migrateChannelKey(trigger.targetChannel);
+        if (fixed !== trigger.targetChannel) { trigger.targetChannel = fixed; migrated = true; }
+        if (trigger.createdByChannel) {
+          const fixedBy = this.migrateChannelKey(trigger.createdByChannel);
+          if (fixedBy !== trigger.createdByChannel) { trigger.createdByChannel = fixedBy; migrated = true; }
+        }
+      }
+      if (migrated) { logger.info(`[TriggerManager] Migrated old channel key format`); this.save(); }
       return [...this.triggers.values()];
     } catch (e) {
       logger.warn(`[TriggerManager] Failed to parse ${this.triggersPath}, starting empty: ${e}`);
       this.triggers = new Map();
       return [];
     }
+  }
+
+  /**
+   * Detect and fix old format "selfPeerId#type#name" → current "type#selfPeerId#name".
+   * Old format: first segment contains '.' (AID like "evolai.agentid.pub").
+   */
+  private migrateChannelKey(key: string): string {
+    if (!key || !key.includes('#')) return key;
+    const parts = key.split('#');
+    if (parts.length !== 3) return key;
+    const [first, second, third] = parts;
+    if (first.includes('.') && !second.includes('.')) {
+      return formatChannelKey({ type: second, selfPeerId: first, name: third });
+    }
+    return key;
   }
 
   private save(): void {

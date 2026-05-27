@@ -28,6 +28,7 @@ vi.mock('@agentunion/fastaun', () => ({
     publishAgentMd = mockPublishAgentMd;
     fetchAgentMd = mockFetchAgentMd;
     checkAgentMd = mockCheckAgentMd;
+    setAgentMdPath = vi.fn();
     close = mockClose;
   },
   FileSecretStore: class {},
@@ -101,15 +102,15 @@ describe('aun-ops', () => {
       _resetRoot();
       const result = await agentmdGet(aid);
 
-      expect(result).toBe('local-content');
-      expect(mockFetchAgentMd).not.toHaveBeenCalled();
+      // SDK 0.3.3: always tries fetchAgentMd first (network-first)
+      expect(mockFetchAgentMd).toHaveBeenCalledWith(aid);
+      expect(result).toBe('---\naid: "remote.agentid.pub"\n---'); // mock returns this
     });
 
     it('returns local file regardless of private key presence', async () => {
       const aid = 'remote.agentid.pub';
       const aidDir = path.join(tmpDir, 'AIDs', aid);
       fs.mkdirSync(aidDir, { recursive: true });
-      // Has agent.md locally but NO private key
       fs.writeFileSync(path.join(aidDir, 'agent.md'), 'stale-local', 'utf-8');
 
       const { agentmdGet } = await import('../../src/aun/aid/index.js');
@@ -117,8 +118,8 @@ describe('aun-ops', () => {
       _resetRoot();
       const result = await agentmdGet(aid);
 
-      expect(result).toBe('stale-local');
-      expect(mockFetchAgentMd).not.toHaveBeenCalled();
+      // SDK 0.3.3: network-first, falls back to local only on network error
+      expect(mockFetchAgentMd).toHaveBeenCalledWith(aid);
     });
 
     it('downloads from network when no local file exists', async () => {
@@ -194,19 +195,17 @@ describe('aun-ops', () => {
     });
 
     it('lists AIDs with correct flags', async () => {
-      const aunAidsDir = path.join(tmpDir, '.aun', 'AIDs');
-      const ecAidsDir = path.join(tmpDir, 'AIDs');
-      // AID with private key (旧位置) + agent.md (新位置)
-      fs.mkdirSync(path.join(aunAidsDir, 'full.agentid.pub', 'private'), { recursive: true });
-      fs.mkdirSync(path.join(ecAidsDir, 'full.agentid.pub'), { recursive: true });
-      fs.writeFileSync(path.join(ecAidsDir, 'full.agentid.pub', 'agent.md'), 'content', 'utf-8');
+      const aidsDir = path.join(tmpDir, 'AIDs');
+      // AID with private key + agent.md
+      fs.mkdirSync(path.join(aidsDir, 'full.agentid.pub', 'private'), { recursive: true });
+      fs.writeFileSync(path.join(aidsDir, 'full.agentid.pub', 'agent.md'), 'content', 'utf-8');
 
-      // AID with only private key
-      fs.mkdirSync(path.join(aunAidsDir, 'nomd.agentid.pub', 'private'), { recursive: true });
+      // AID with only private key (no agent.md)
+      fs.mkdirSync(path.join(aidsDir, 'nomd.agentid.pub', 'private'), { recursive: true });
 
-      // AID with only agent.md (新位置，无私钥)
-      fs.mkdirSync(path.join(ecAidsDir, 'nokey.agentid.pub'), { recursive: true });
-      fs.writeFileSync(path.join(ecAidsDir, 'nokey.agentid.pub', 'agent.md'), 'content', 'utf-8');
+      // AID with only agent.md (no private key)
+      fs.mkdirSync(path.join(aidsDir, 'nokey.agentid.pub'), { recursive: true });
+      fs.writeFileSync(path.join(aidsDir, 'nokey.agentid.pub', 'agent.md'), 'content', 'utf-8');
 
       const { aidList } = await import('../../src/aun/aid/index.js');
       const result = aidList();

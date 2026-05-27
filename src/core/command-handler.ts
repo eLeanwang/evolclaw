@@ -486,8 +486,9 @@ export class CommandHandler {
       return { session };
     }
     const ct: 'private' | 'group' | undefined = chatType === 'group' ? 'group' : chatType === 'private' ? 'private' : undefined;
+    const channelType = this.resolveChannelType(channel);
     const session = await this.sessionManager.getActiveSession(channel, channelId)
-      ?? await this.sessionManager.getOrCreateSession(channel, channelId, this.getEffectiveDefaultPath(channel), undefined, undefined, undefined, undefined, ct);
+      ?? await this.sessionManager.getOrCreateSession(channel, channelId, this.getEffectiveDefaultPath(channel), undefined, undefined, undefined, undefined, ct, undefined, undefined, channelType);
     // 如果 session 已存在但 chatType 跟传入的不一致，更新
     if (ct && session.chatType !== ct) {
       await this.sessionManager.updateSession(session.id, { chatType: ct });
@@ -2434,21 +2435,19 @@ export class CommandHandler {
     // 尝试获取活跃会话（话题时直接查找话题 session）
     let session: Session | undefined;
     if (threadId) {
-      session = await this.sessionManager.getOrCreateSession(channel, channelId, this.getEffectiveDefaultPath(channel), threadId);
+      session = await this.sessionManager.getOrCreateSession(channel, channelId, this.getEffectiveDefaultPath(channel), threadId, undefined, undefined, undefined, chatType as 'private' | 'group' | undefined, undefined, undefined, this.resolveChannelType(channel));
     } else {
       session = await this.sessionManager.getActiveSession(channel, channelId);
     }
 
-    // 对于需要会话的命令，如果没有会话则使用默认项目创建临时会话
-    if (!session && (
-      normalizedContent.startsWith('/new') ||
-      normalizedContent === '/pwd' ||
-      normalizedContent === '/status'
-    )) {
+    // 如果没有会话，自动创建（所有后续命令都需要 session）
+    if (!session) {
       session = await this.sessionManager.getOrCreateSession(
         channel,
         channelId,
-        this.getEffectiveDefaultPath(channel)
+        this.getEffectiveDefaultPath(channel),
+        undefined, undefined, undefined, undefined, chatType as 'private' | 'group' | undefined,
+        undefined, undefined, this.resolveChannelType(channel)
       );
     }
 

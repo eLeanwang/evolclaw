@@ -88,6 +88,7 @@ vi.mock('@agentunion/fastaun', () => ({
       uploadAgentMd: mockUploadAgentMd,
     };
     publishAgentMd = mockPublishAgentMd;
+    setAgentMdPath = vi.fn();
     close = mockClose;
   },
   FileSecretStore: class {},
@@ -134,8 +135,7 @@ describe('aidCreate', () => {
 
   it('returns alreadyExisted=true when AID directory and private key exist', async () => {
     const aid = 'existing.example.pub';
-    const aidDir = path.join(tmpDir, '.aun', 'AIDs', aid);
-    fs.mkdirSync(aidDir, { recursive: true });
+    const aidDir = path.join(tmpDir, 'AIDs', aid);
     fs.mkdirSync(path.join(aidDir, 'private'), { recursive: true });
 
     const result = await aidCreate(aid);
@@ -148,7 +148,7 @@ describe('aidCreate', () => {
 
   it('does not treat directory without private/ as already existing', async () => {
     const aid = 'partial.example.pub';
-    const aidDir = path.join(tmpDir, '.aun', 'AIDs', aid);
+    const aidDir = path.join(tmpDir, 'AIDs', aid);
     fs.mkdirSync(aidDir, { recursive: true });
     // No 'private' subdirectory
 

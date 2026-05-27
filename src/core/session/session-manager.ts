@@ -901,6 +901,11 @@ export class SessionManager {
     return this.readActive(channel, channelId);
   }
 
+  /** 同步版 getActiveSession，支持精确路径定位（避免扫描） */
+  getActiveSessionSync(channel: string, channelId: string, channelType?: string, selfId?: string): Session | undefined {
+    return this.readActive(channel, channelId, channelType, selfId);
+  }
+
   async getThreadSession(channel: string, channelId: string, threadId: string): Promise<Session | undefined> {
     let chatDir: string;
     try {

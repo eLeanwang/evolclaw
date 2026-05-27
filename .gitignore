@@ -70,6 +70,13 @@ aun/docs/
 aun/.aun/
 src/channels/aun_bridge.py
 
+# AUN 运行时数据（私钥、证书、agent.md 缓存）
+/AIDs/
+/AgentMDs/
+/CA/
+.device_id
+.seed
+
 # macOS 残留
 __MACOSX/
 aun/__MACOSX/
