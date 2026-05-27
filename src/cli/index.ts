@@ -12,6 +12,7 @@ import readline from 'readline';
 import { cmdInit } from './init.js';
 import { ipcQuery } from '../ipc.js';
 import { cmdInitWechat, cmdInitFeishu, cmdInitDingtalk, cmdInitQQBot, cmdInitWecom } from './init-channel.js';
+import { isHelpFlag, wantsHelp } from './help.js';
 import * as platform from '../utils/cross-platform.js';
 import { EventBus } from '../core/event-bus.js';
 import { tryUpgrade, tryUpgradeAunSdk, type UpgradeResult } from '../utils/npm-ops.js';
@@ -2782,7 +2783,7 @@ Agent:
   }
 
   // help 不需要连接服务，直接复用无参数时的帮助输出
-  if (args[0] === 'help') {
+  if (isHelpFlag(args[0])) {
     return cmdCtl([]);
   }
 
@@ -2825,7 +2826,7 @@ async function cmdAgent(args: string[]): Promise<void> {
   const sub = args[0];
   const formatJson = args.includes('--format') && args[args.indexOf('--format') + 1] === 'json';
 
-  if (!sub || sub === 'help' || sub === '--help' || sub === '-h' || args.includes('--help') || args.includes('-h')) {
+  if (!sub || isHelpFlag(sub)) {
     console.log(`用法: evolclaw agent <command>
 
 Commands:
@@ -2843,6 +2844,7 @@ Commands:
 
 Options:
   --format json           输出 JSON 格式
+  --help, -h              各子命令均支持，查看详细用法
 
 示例:
   evolclaw agent list
@@ -2863,7 +2865,13 @@ Options:
   } = await import('./agent.js');
 
   // --- list ---
-  if (!sub || sub === 'list') {
+  if (sub === 'list') {
+    if (wantsHelp(args)) {
+      console.log(`用法: evolclaw agent list [--format json]
+
+列出所有 agent，显示名称、状态、渠道、项目、基座、最后活跃时间。`);
+      return;
+    }
     const result = await agentList();
     if (!result.ok) {
       if (formatJson) { console.log(JSON.stringify(result)); }
@@ -2929,6 +2937,24 @@ Options:
 
   // --- new ---
   if (sub === 'new') {
+    if (wantsHelp(args)) {
+      console.log(`用法: evolclaw agent new [aid]                    交互式创建
+     evolclaw agent new <aid> --non-interactive [选项]
+
+非交互模式选项:
+  --baseagent <claude|codex|gemini>   默认: PATH 中第一个可用
+  --project <absolute path>           必填
+  --owner <aid>
+  --name <display-name>
+  --description <text>
+  --force                             覆盖已有 config.json
+  --format json                       输出 JSON
+
+示例:
+  evolclaw agent new mybot.agentid.pub
+  evolclaw agent new mybot.agentid.pub --non-interactive --project /abs/path --baseagent claude`);
+      return;
+    }
     const name = args[1];
     const nonInteractive = args.includes('--non-interactive');
     if (nonInteractive) {
@@ -3014,6 +3040,14 @@ Options:
 
   // --- reload ---
   if (sub === 'reload') {
+    if (wantsHelp(args)) {
+      console.log(`用法: evolclaw agent reload [aid] [--format json]
+
+热重载 agent 配置。
+  无参数      全量 resync（扫磁盘，新增上线、删除下线、修改热更新）
+  <aid>       仅热重载指定 agent`);
+      return;
+    }
     const target = args[1] && !args[1].startsWith('--') ? args[1] : undefined;
     const result = await agentReload(target);
     if (!result.ok) {
@@ -3036,6 +3070,12 @@ Options:
 
   // --- enable ---
   if (sub === 'enable') {
+    if (wantsHelp(args)) {
+      console.log(`用法: evolclaw agent enable <aid> [--format json]
+
+启用 agent。若服务运行中会热重载，否则下次 evolclaw start 时生效。`);
+      return;
+    }
     const aid = args[1];
     if (!aid) { console.error('用法: evolclaw agent enable <aid>'); process.exit(1); }
     const result = await agentEnable(aid);
@@ -3051,6 +3091,12 @@ Options:
 
   // --- disable ---
   if (sub === 'disable') {
+    if (wantsHelp(args)) {
+      console.log(`用法: evolclaw agent disable <aid> [--format json]
+
+停用 agent。若服务运行中会热重载离线，否则在配置中标记为禁用。`);
+      return;
+    }
     const aid = args[1];
     if (!aid) { console.error('用法: evolclaw agent disable <aid>'); process.exit(1); }
     const result = await agentDisable(aid);
@@ -3066,6 +3112,16 @@ Options:
 
   // --- get ---
   if (sub === 'get') {
+    if (wantsHelp(args)) {
+      console.log(`用法: evolclaw agent get <aid> <key> [--format json]
+
+读取单个配置字段。key 支持点路径，如 "channels.aun.enabled"。
+
+示例:
+  evolclaw agent get mybot.agentid.pub active_baseagent
+  evolclaw agent get mybot.agentid.pub channels.aun.enabled`);
+      return;
+    }
     const aid = args[1];
     const key = args[2];
     if (!aid || !key) { console.error('用法: evolclaw agent get <aid> <key>'); process.exit(1); }
@@ -3085,6 +3141,16 @@ Options:
 
   // --- set ---
   if (sub === 'set') {
+    if (wantsHelp(args)) {
+      console.log(`用法: evolclaw agent set <aid> <key> <value> [--format json]
+
+修改单个配置字段。key 支持点路径。修改后若服务运行中会自动热重载。
+
+示例:
+  evolclaw agent set mybot.agentid.pub active_baseagent codex
+  evolclaw agent set mybot.agentid.pub channels.aun.enabled true`);
+      return;
+    }
     const aid = args[1];
     const key = args[2];
     const val = args[3];
@@ -3102,6 +3168,15 @@ Options:
 
   // --- rename ---
   if (sub === 'rename') {
+    if (wantsHelp(args)) {
+      console.log(`用法: evolclaw agent rename <aid> <name> [--format json]
+
+修改 agent 显示名称。同时更新本地 agent.md 并尝试重新上传。
+
+示例:
+  evolclaw agent rename mybot.agentid.pub "My Bot"`);
+      return;
+    }
     const aid = args[1];
     const newName = args[2];
     if (!aid || !newName) { console.error('用法: evolclaw agent rename <aid> <name>'); process.exit(1); }
@@ -3118,6 +3193,14 @@ Options:
 
   // --- delete ---
   if (sub === 'delete') {
+    if (wantsHelp(args)) {
+      console.log(`用法: evolclaw agent delete <aid> [--purge] [--format json]
+
+删除 agent 的配置。
+  --purge   同时清除该 agent 的会话、消息、日志等运行时数据
+  默认       仅删除 config.json，运行时数据保留`);
+      return;
+    }
     const aid = args[1];
     if (!aid) { console.error('用法: evolclaw agent delete <aid> [--purge]'); process.exit(1); }
     const purge = args.includes('--purge');
@@ -3134,6 +3217,12 @@ Options:
 
   // --- show ---
   if (sub === 'show') {
+    if (wantsHelp(args)) {
+      console.log(`用法: evolclaw agent show <aid> [--format json]
+
+查看 agent 详情：身份、配置、连接状态、会话路径等。`);
+      return;
+    }
     const aid = args[1];
     if (!aid) { console.error('用法: evolclaw agent show <aid>'); process.exit(1); }
     const result = await agentShow(aid);
@@ -3231,67 +3320,141 @@ function resolveAunPath(args: string[]): string | undefined {
 }
 
 async function cmdAid(args: string[]): Promise<void> {
-  const sub = args[0] || 'list';
+  const sub = args[0];
   const formatJson = args.includes('--format') && args[args.indexOf('--format') + 1] === 'json';
   const aunPath = resolveAunPath(args);
 
-  if (!sub || sub === 'help' || sub === '--help' || sub === '-h' || args.includes('--help') || args.includes('-h')) {
+  if (!sub || isHelpFlag(sub)) {
     console.log(`用法: evolclaw aid <command>
 
 Commands:
-  list              列出本地所有 AID
-  show <aid>        查看本地 AID 详情（证书有效期、私钥状态）
+  list              列出本地所有 AID（实测 sign+verify）
+  show <aid>        查看本地 AID 详情（证书、私钥、签名能力）
   new <aid>         创建新 AID 身份
-  delete <aid>      删除本地 AID（无网络注销）
+  delete <aid>      删除指定本地 AID（无网络注销）
+  delete --orphan         批量清理无私钥的外部 AID 缓存
+  delete --no-cert        批量清理无私钥也无公钥证书的孤儿目录
+  delete --unrecoverable  批量清理云端公钥已变更、本地不可恢复的 AID
+                          批量删除默认 dry-run，加 --yes 执行
   lookup <aid>      远程探测 AID（是否存在 + 网关 + agent.md）
   agentmd put <aid> 读本地 agent.md → 签名 → 上传
   agentmd get <aid> 下载 agent.md → 验签 → 本地持久化
 
 Options:
   --format json     输出 JSON 格式
+  --help, -h        各子命令均支持，查看详细用法
 
 示例:
   evolclaw aid list
   evolclaw aid show toleiliang2.agentid.pub
   evolclaw aid new reviewer.agentid.pub
+  evolclaw aid delete --help
   evolclaw aid delete old.agentid.pub
+  evolclaw aid delete --orphan
+  evolclaw aid delete --unrecoverable --yes
   evolclaw aid lookup someone.agentid.pub
   evolclaw aid agentmd put mybot.agentid.pub
   evolclaw aid agentmd get someone.agentid.pub`);
     return;
   }
 
-  const { aidList, aidCreate, aidShow, aidDelete, aidLookup, agentmdPut, agentmdGet, buildInitialAgentMd, isValidAid } = await import('../aun/aid/index.js');
+  const { aidList, aidListVerified, aidCreate, aidShow, aidDelete, aidLookup, agentmdPut, agentmdGet, buildInitialAgentMd, isValidAid } = await import('../aun/aid/index.js');
 
   if (sub === 'list') {
-    const aids = aidList(aunPath);
+    if (wantsHelp(args)) {
+      console.log(`用法: evolclaw aid list [筛选选项] [--no-verify] [--format json]
+
+列出本地 AID 并跑 sign+verify 自检。
+
+筛选选项（可组合，不指定 = 列出 mine + broken + peer-cert）:
+  --mine            仅本地可用身份（实测可签名+验签通过）
+  --broken          仅有私钥但不可用（公钥不匹配 / 证书过期 / sign 失败）
+  --peer-cert       仅对端 AID（无私钥，有公钥证书）
+  --no-cert         仅无私钥无证书的目录（默认隐藏，需用 aid delete --no-cert 清理）
+
+选项:
+  --no-verify       跳过 sign+verify 实测，仅静态扫描（更快，mine/broken 仅按静态判定近似）
+  --format json     JSON 格式输出
+
+输出图标:
+  🔑   有私钥
+  ✅   实测可签名/验签
+  ❌   不可签名（公钥不匹配 / sign 失败 / verify 失败等）
+  ⌛   证书过期
+  📜   有公钥证书
+  📄   有 agent.md
+
+示例:
+  evolclaw aid list                  列出 mine + broken + peer-cert
+  evolclaw aid list --mine           仅可用身份
+  evolclaw aid list --mine --broken  所有有私钥的 AID
+  evolclaw aid list --no-cert        仅无私钥无证书的孤儿目录
+  evolclaw aid list --no-verify      跳过实测，快速静态扫描`);
+      return;
+    }
+
+    const wantMine = args.includes('--mine');
+    const wantBroken = args.includes('--broken');
+    const wantPeerCert = args.includes('--peer-cert');
+    const wantNoCert = args.includes('--no-cert');
+    const noVerify = args.includes('--no-verify');
+
+    const anyFilter = wantMine || wantBroken || wantPeerCert || wantNoCert;
+    // 默认: mine + broken + peer-cert（隐藏 no-cert，需显式 --no-cert 才列）
+    const showMine = anyFilter ? wantMine : true;
+    const showBroken = anyFilter ? wantBroken : true;
+    const showPeerCert = anyFilter ? wantPeerCert : true;
+    const showNoCert = anyFilter ? wantNoCert : false;
+
+    const all = noVerify ? aidList(aunPath) : await aidListVerified(aunPath);
+    const aids = all.filter(a =>
+      (showMine && a.category === 'mine') ||
+      (showBroken && a.category === 'broken') ||
+      (showPeerCert && a.category === 'peer-cert') ||
+      (showNoCert && a.category === 'no-cert')
+    );
+
     if (formatJson) {
       console.log(JSON.stringify(aids, null, 2));
       return;
     }
     if (aids.length === 0) {
-      console.log('本地无 AID');
+      console.log('无匹配 AID');
       return;
     }
-    console.log('本地 AID:');
+    console.log(`本地 AID${noVerify ? '（静态扫描，未实测）' : ''}:`);
     for (const a of aids) {
-      const icons = [
-        a.hasPrivateKey ? '🔑' : '  ',
-        a.hasAgentMd ? '📄' : '  ',
-      ].join('');
-      console.log(`  ${icons} ${a.aid}`);
+      const keyIcon = a.hasPrivateKey ? '🔑' : '  ';
+      let signIcon = '  ';
+      // --no-verify 时 signVerified 始终为 null，用 canSign 作为静态近似
+      const effectiveOk = noVerify ? a.canSign : a.signVerified === true;
+      const effectiveFail = noVerify ? (a.hasPrivateKey && !a.canSign) : (a.hasPrivateKey && a.signVerified === false);
+      if (effectiveOk) signIcon = '✅';
+      else if (a.hasPrivateKey && a.certExpired) signIcon = '⌛';
+      else if (effectiveFail) signIcon = '❌';
+      const certIcon = a.hasCert ? '📜' : '  ';
+      const mdIcon = a.hasAgentMd ? '📄' : '  ';
+      const tail = !noVerify && a.signVerified === false && a.signError && !(a.keyMatchesCert === false || a.certExpired || !a.hasPrivateKey || !a.hasCert)
+        ? `  (${a.signError})` : '';
+      console.log(`  ${keyIcon} ${signIcon} ${certIcon} ${mdIcon}  ${a.aid}${tail}`);
     }
-    console.log('\n🔑=私钥  📄=agent.md');
+    console.log('\n🔑=私钥  ✅=可签名/验签  ❌=不可签名  ⌛=证书过期  📜=公钥证书  📄=agent.md');
     return;
   }
 
   if (sub === 'show') {
+    if (wantsHelp(args)) {
+      console.log(`用法: evolclaw aid show <aid> [--format json]
+
+查看本地 AID 详情：私钥/证书/agent.md 状态、签名能力实测。`);
+      return;
+    }
     const aid = args[1];
     if (!aid) {
       console.error('用法: evolclaw aid show <aid>');
       process.exit(1);
     }
-    const info = aidShow(aid, { aunPath });
+    const info = await aidShow(aid, { aunPath });
     if (formatJson) {
       console.log(JSON.stringify(info, null, 2));
       return;
@@ -3299,12 +3462,32 @@ Options:
     console.log(`AID: ${info.aid}`);
     console.log(`  私钥: ${info.hasPrivateKey ? '有' : '无'}`);
     console.log(`  agent.md: ${info.hasAgentMd ? '有' : '无'}`);
-    console.log(`  证书到期: ${info.certExpiresAt ?? '无证书'}`);
+    if (info.hasAgentMd) {
+      const sigLabel = info.agentMdSignature === 'verified' ? '✓ 已验签'
+        : info.agentMdSignature === 'unsigned' ? '⚠ 未签名'
+        : info.agentMdSignature === 'invalid' ? `✗ 签名无效${info.agentMdSignatureReason ? ': ' + info.agentMdSignatureReason : ''}`
+        : '? 未知';
+      console.log(`  签名状态: ${sigLabel}`);
+    }
+    console.log(`  证书到期: ${info.certExpiresAt ?? '无证书'}${info.certExpired ? ' (已过期!)' : ''}`);
     if (info.certSubject) console.log(`  证书主体: ${info.certSubject}`);
+    if (info.keyMatchesCert === false) console.log(`  密钥/证书: ✗ 公钥不匹配（cert.pem 与 key.json 公钥不一致）`);
+    else if (info.keyMatchesCert === true) console.log(`  密钥/证书: ✓ 公钥一致`);
+    if (info.signVerified === true) console.log(`  可签名/验签: ✓ 实测通过`);
+    else if (info.signVerified === false) console.log(`  可签名/验签: ✗ 失败${info.signError ? `（${info.signError}）` : ''}`);
+    else console.log(`  可签名/验签: ? 未知`);
     return;
   }
 
   if (sub === 'new') {
+    if (wantsHelp(args)) {
+      console.log(`用法: evolclaw aid new <完整AID>
+
+创建新 AID 身份：生成 ECDSA 密钥对、向 Issuer 申请证书、构建并上传初始 agent.md。
+
+例: evolclaw aid new reviewer.agentid.pub`);
+      return;
+    }
     const aid = args[1];
     if (!aid) {
       console.error('用法: evolclaw aid new <完整AID>\n例: evolclaw aid new reviewer.agentid.pub');
@@ -3335,22 +3518,158 @@ Options:
   }
 
   if (sub === 'delete') {
-    const aid = args[1];
-    if (!aid) {
-      console.error('用法: evolclaw aid delete <aid>');
+    if (wantsHelp(args)) {
+      console.log(`用法: evolclaw aid delete <子命令>
+
+单个删除:
+  evolclaw aid delete <aid>           删除指定 AID 的本地数据（无网络注销）
+
+批量删除（默认 dry-run，加 --yes 才真删）:
+  evolclaw aid delete --orphan        删除所有"无私钥"的本地缓存（外部 AID）
+  evolclaw aid delete --no-cert       删除所有"无私钥也无公钥证书"的目录
+                                       条件：!hasPrivateKey && !hasCert
+                                       这些目录最多只剩 agent.md 或 SQLite 残留，
+                                       对验签和加密通信都没用，删除安全。
+  evolclaw aid delete --unrecoverable 删除所有不可恢复的 AID
+                                       条件：本地 sign+verify 实测失败
+                                       且 PKI 探测确认云端公钥也不等本地 key.json
+
+选项:
+  --yes              跳过 dry-run，立即执行
+  --skip-pki         --unrecoverable 时跳过 PKI 探测，仅依据本地 sign+verify 失败判断（危险，可能误删可恢复 AID）
+  --format json      输出 JSON 格式
+
+示例:
+  evolclaw aid delete old.agentid.pub
+  evolclaw aid delete --orphan                列出会被清理的孤儿
+  evolclaw aid delete --orphan --yes          实际清理
+  evolclaw aid delete --no-cert               列出无证书孤儿目录
+  evolclaw aid delete --no-cert --yes         实际清理
+  evolclaw aid delete --unrecoverable         联网探测后列出无救 AID
+  evolclaw aid delete --unrecoverable --yes`);
+      return;
+    }
+
+    const yes = args.includes('--yes');
+    const skipPki = args.includes('--skip-pki');
+    const orphan = args.includes('--orphan');
+    const noCert = args.includes('--no-cert');
+    const unrecoverable = args.includes('--unrecoverable');
+
+    const modes = [orphan, noCert, unrecoverable].filter(Boolean).length;
+    if (modes > 1) {
+      console.error('❌ --orphan / --no-cert / --unrecoverable 互斥，不能同时使用');
       process.exit(1);
     }
-    const deleted = aidDelete(aid, { aunPath });
-    if (deleted) {
-      console.log(`✓ ${aid} 已删除`);
+
+    // 单个 aid 删除：保留原有行为
+    if (modes === 0) {
+      const aid = args[1];
+      if (!aid) {
+        console.error('用法: evolclaw aid delete <aid>\n     evolclaw aid delete --orphan | --no-cert | --unrecoverable [--yes]\n     evolclaw aid delete --help   查看完整用法');
+        process.exit(1);
+      }
+      const deleted = aidDelete(aid, { aunPath });
+      if (deleted) {
+        console.log(`✓ ${aid} 已删除`);
+      } else {
+        console.error(`❌ 本地不存在: ${aid}`);
+        process.exit(1);
+      }
+      return;
+    }
+
+    // 批量模式：先选出候选
+    const { probePkiRecoverability } = await import('../aun/aid/index.js');
+
+    const candidates: { aid: string; reason: string; pki?: string }[] = [];
+
+    if (orphan) {
+      const aids = aidList(aunPath);
+      for (const a of aids) {
+        if (!a.hasPrivateKey) candidates.push({ aid: a.aid, reason: 'no private key (external AID cache)' });
+      }
+    } else if (noCert) {
+      const aids = aidList(aunPath);
+      for (const a of aids) {
+        if (!a.hasPrivateKey && !a.hasCert) {
+          const traits = [a.hasAgentMd ? 'agent.md' : null].filter(Boolean).join(', ');
+          candidates.push({ aid: a.aid, reason: `no private key, no cert${traits ? ` (only: ${traits})` : ''}` });
+        }
+      }
     } else {
-      console.error(`❌ 本地不存在: ${aid}`);
-      process.exit(1);
+      // unrecoverable: 必须先做 sign+verify 实测
+      if (!formatJson) console.log('扫描中: 本地签名/验签实测...');
+      const aids = await aidListVerified(aunPath);
+      const localBroken = aids.filter(a => a.hasPrivateKey && a.signVerified === false);
+
+      if (skipPki) {
+        for (const a of localBroken) {
+          candidates.push({ aid: a.aid, reason: `sign+verify failed (${a.signError ?? 'unknown'}) [--skip-pki: 未联网验证]` });
+        }
+      } else {
+        if (!formatJson) console.log(`扫描中: 对 ${localBroken.length} 个本地损坏 AID 做 PKI 探测...`);
+        for (const a of localBroken) {
+          const r = await probePkiRecoverability(a.aid, { aunPath });
+          if (r.kind === 'unrecoverable') {
+            candidates.push({ aid: a.aid, reason: `local broken; PKI: ${r.reason}`, pki: 'unrecoverable' });
+          } else if (r.kind === 'no-server-record') {
+            candidates.push({ aid: a.aid, reason: `local broken; PKI: ${r.reason}`, pki: 'no-server-record' });
+          } else {
+            // recoverable / no-key / unknown 一律保守不删
+            if (!formatJson) console.log(`  · 跳过 ${a.aid}: PKI=${r.kind}${('reason' in r) ? ' — ' + r.reason : ''}`);
+          }
+        }
+      }
     }
+
+    if (formatJson) {
+      console.log(JSON.stringify({
+        mode: orphan ? 'orphan' : noCert ? 'no-cert' : 'unrecoverable',
+        dryRun: !yes,
+        skipPki: unrecoverable ? skipPki : undefined,
+        candidates,
+      }, null, 2));
+      if (yes) {
+        for (const c of candidates) aidDelete(c.aid, { aunPath });
+      }
+      return;
+    }
+
+    if (candidates.length === 0) {
+      console.log(orphan ? '✓ 无孤儿 AID' : noCert ? '✓ 无无证书孤儿目录' : '✓ 无不可恢复 AID');
+      return;
+    }
+
+    console.log(`\n${yes ? '将删除' : '候选删除（dry-run）'}：${candidates.length} 个 AID`);
+    for (const c of candidates) {
+      console.log(`  - ${c.aid}`);
+      console.log(`      ${c.reason}`);
+    }
+
+    if (!yes) {
+      console.log('\n（dry-run，未真删除。加 --yes 执行真删。）');
+      return;
+    }
+
+    let ok = 0;
+    let fail = 0;
+    for (const c of candidates) {
+      const deleted = aidDelete(c.aid, { aunPath });
+      if (deleted) { console.log(`  ✓ 删除 ${c.aid}`); ok++; }
+      else         { console.log(`  ✗ 失败 ${c.aid}（已不存在?）`); fail++; }
+    }
+    console.log(`\n完成：成功 ${ok}，失败 ${fail}`);
     return;
   }
 
   if (sub === 'lookup') {
+    if (wantsHelp(args)) {
+      console.log(`用法: evolclaw aid lookup <aid> [--format json]
+
+远程探测 AID：是否注册、所在网关、是否有 agent.md（不验签，仅获取）。`);
+      return;
+    }
     const aid = args[1];
     if (!aid) {
       console.error('用法: evolclaw aid lookup <aid>');
@@ -3385,6 +3704,14 @@ Options:
   if (sub === 'agentmd') {
     const verb = args[1];
     const aid = args[2];
+
+    if (!verb || isHelpFlag(verb) || wantsHelp(args)) {
+      console.log(`用法: evolclaw aid agentmd <put|get> <aid> [--format json]
+
+  put <aid>   读本地 agent.md → 用本地私钥签名 → 上传到 PKI
+  get <aid>   从 PKI 下载 agent.md → 验签 → 持久化到本地`);
+      return;
+    }
 
     if (verb === 'put') {
       if (!aid) {
@@ -3457,7 +3784,7 @@ Options:
 // ==================== RPC ====================
 
 async function cmdRpc(args: string[]): Promise<void> {
-  if (args[0] === 'help' || args.length === 0) {
+  if (args.length === 0 || isHelpFlag(args[0])) {
     console.log(`用法: evolclaw rpc --as <aid> --params <params>
 
 通用 AUN RPC 调用。
@@ -3543,7 +3870,7 @@ async function cmdStorage(args: string[]): Promise<void> {
   const aunPath = resolveAunPath(args);
   const formatJson = args.includes('--format') && args[args.indexOf('--format') + 1] === 'json';
 
-  if (!sub || sub === 'help') {
+  if (!sub || isHelpFlag(sub)) {
     console.log(`用法: evolclaw storage <command> <aid> [options]
 
 Commands:
@@ -3693,7 +4020,7 @@ async function cmdMsg(args: string[]): Promise<void> {
   const appSlot = appIdx >= 0 ? args[appIdx + 1] : undefined;
   const asDaemon = args.includes('--as-daemon');
 
-  if (!sub || sub === 'help') {
+  if (!sub || isHelpFlag(sub)) {
     console.log(`用法: evolclaw msg <command> <from-aid> [args...] [options]
 
 Commands:
@@ -3965,7 +4292,7 @@ async function cmdGroup(args: string[]): Promise<void> {
   const appSlot = appIdx >= 0 ? args[appIdx + 1] : undefined;
   const asDaemon = args.includes('--as-daemon');
 
-  if (!sub || sub === 'help') {
+  if (!sub || isHelpFlag(sub)) {
     console.log(`用法: evolclaw group <command> <from-aid> [args...] [options]
 
 消息:
@@ -4389,7 +4716,7 @@ export async function main(args: string[]) {
 
   switch (cmd) {
     case 'init':
-      if (args[1] === 'help') {
+      if (isHelpFlag(args[1])) {
         console.log(`用法: evolclaw init [渠道] [选项]
 
 仅初始化 defaults.json:
@@ -4457,7 +4784,7 @@ export async function main(args: string[]) {
       if (args[1] === 'aid') {
         await cmdWatchAid();
       } else if (args[1] === 'msg') {
-        if (args[2] === '--help' || args[2] === '-h' || args[2] === 'help') {
+        if (isHelpFlag(args[2])) {
           console.log(`用法: evolclaw watch msg
 
 三面板交互式消息监控 TUI。
@@ -4596,10 +4923,13 @@ Commands:
                   aid list           列出本地所有 AID
                   aid show <aid>     查看本地 AID 详情（证书有效期、私钥状态）
                   aid new <aid>      创建新 AID 身份
-                  aid delete <aid>   删除本地 AID
                   aid lookup <aid>   远程探测 AID（是否存在 + 网关 + agent.md）
                   aid agentmd put <aid>  签名并上传 agent.md
                   aid agentmd get <aid>  下载并验签 agent.md
+                  aid delete <aid>             删除指定 AID
+                  aid delete --orphan          清理无私钥的外部 AID 缓存
+                  aid delete --unrecoverable   清理云端公钥已变更、不可恢复的 AID
+                                                 默认 dry-run，加 --yes 执行
   net           网络链路诊断
                   net check [<aid>]  10 步链路检测（DNS→Discovery→TCP→TLS→WSS→Auth→Ping→Echo）
                   net help           查看详细帮助

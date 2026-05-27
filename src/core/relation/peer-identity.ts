@@ -2,11 +2,11 @@
  * PeerIdentityCache - 对端身份缓存管理
  *
  * 职责：
- * 1. 从对端的 agent.md 确定身份（human / agent）
- * 2. 缓存到关系层文件（30天时效）
+ * 1. 通过 agentmdSync 标准流程获取对端 agent.md（check → fetch if changed）
+ * 2. 仅在 agent.md 内容变化时重写 peer-identity.json
  * 3. 支持入站和出站消息的身份查询
  *
- * 信源：对端的 agent.md（通过 AUN SDK 下载并验签）
+ * 信源：对端的 agent.md（通过 AUN SDK checkAgentMd + fetchAgentMd）
  * 判定规则：type !== 'human' → agent
  * 缓存位置：$AGENT_DIR/relations/<channel>#<urlEncode(peerId)>/peer-identity.json
  */
@@ -15,6 +15,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { logger } from '../../utils/logger.js';
+import { agentMdPath } from '../../paths.js';
 
 /**
  * 对端身份信息
@@ -30,6 +31,8 @@ export interface PeerIdentity {
   name?: string;
   /** agent.md 内容的 SHA256（用于检测变化） */
   agentMdHash: string;
+  /** agent.md 内容最后变化的时间戳 */
+  agentMdUpdatedAt: number;
   /** 验签成功的时间戳 */
   verifiedAt: number;
   /** 最后检查 agent.md 的时间戳 */
@@ -85,7 +88,6 @@ export class PeerIdentityCache {
 
   /**
    * 从 agent.md 更新身份信息
-   * @param agentMd 已验签的 agent.md 内容
    */
   private static updateFromAgentMd(
     channel: string,
@@ -94,29 +96,27 @@ export class PeerIdentityCache {
     agentMd: string,
     verifiedAt: number
   ): PeerIdentity {
-    // 解析 type 和 name
     const typeMatch = agentMd.match(/^type:\s*["']?(\w+)["']?/m);
     const nameMatch = agentMd.match(/^name:\s*["']?(.+?)["']?\s*$/m);
     const type = typeMatch?.[1] || 'unknown';
     const isAgent = type !== 'human';
     const name = nameMatch?.[1]?.trim();
 
-    // 计算 hash
     const agentMdHash = 'sha256:' + crypto.createHash('sha256').update(agentMd, 'utf-8').digest('hex');
+    const now = Date.now();
 
-    // 构建身份信息
     const identity: PeerIdentity = {
       aid: peerId,
       type,
       isAgent,
       name,
       agentMdHash,
+      agentMdUpdatedAt: now,
       verifiedAt,
-      lastCheckedAt: Date.now(),
+      lastCheckedAt: now,
       source: 'agentmd',
     };
 
-    // 写入文件
     const filePath = this.getFilePath(channel, peerId, agentDir);
     try {
       fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -130,14 +130,27 @@ export class PeerIdentityCache {
   }
 
   /**
+   * 仅更新 lastCheckedAt（内容未变时的轻量操作）
+   */
+  private static touchLastChecked(channel: string, peerId: string, agentDir: string, cached: PeerIdentity): PeerIdentity {
+    const updated = { ...cached, lastCheckedAt: Date.now() };
+    const filePath = this.getFilePath(channel, peerId, agentDir);
+    try {
+      fs.writeFileSync(filePath, JSON.stringify(updated, null, 2), 'utf-8');
+    } catch { /* ignore */ }
+    return updated;
+  }
+
+  /**
    * 标记为 unknown（验签失败或无 agent.md）
    */
   private static markUnknown(channel: string, peerId: string, agentDir: string): PeerIdentity {
     const identity: PeerIdentity = {
       aid: peerId,
       type: 'unknown',
-      isAgent: true,  // 验签失败 → 当做 agent（安全策略）
+      isAgent: true,
       agentMdHash: '',
+      agentMdUpdatedAt: 0,
       verifiedAt: 0,
       lastCheckedAt: Date.now(),
       source: 'unknown',
@@ -156,12 +169,12 @@ export class PeerIdentityCache {
   }
 
   /**
-   * 完整流程：检查缓存 → 需要刷新则下载 agent.md → 更新缓存
+   * 完整流程：缓存检查 → agentmdSync（check+fetch）→ 按 changed 决定是否重写
    *
    * @param channel 渠道类型（如 'aun'）
    * @param peerId 对端 ID（AUN 是 AID）
    * @param agentDir agent 数据根目录
-   * @param aunClient AUN SDK client（需要有 fetchAgentMd 方法）
+   * @param aunClient AUN SDK client（需要有 checkAgentMd / fetchAgentMd 方法）
    * @param forceRefresh 强制刷新（忽略缓存时效）
    * @returns PeerIdentity
    */
@@ -172,7 +185,7 @@ export class PeerIdentityCache {
     aunClient: any,
     forceRefresh = false
   ): Promise<PeerIdentity> {
-    // 1. 检查缓存
+    // 1. 缓存检查
     if (!forceRefresh && !this.needsRefresh(channel, peerId, agentDir)) {
       const cached = this.get(channel, peerId, agentDir);
       if (cached) {
@@ -181,17 +194,49 @@ export class PeerIdentityCache {
       }
     }
 
-    // 2. 下载并验签 agent.md（SDK 自动验签）
+    // 2. 标准流程：checkAgentMd → fetchAgentMd（如果有变化）
     try {
-      logger.debug(`[PeerIdentityCache] Fetching agent.md: ${channel}#${peerId}`);
-      const result = await aunClient.fetchAgentMd(peerId);
-      const agentMd = result.content;
+      logger.debug(`[PeerIdentityCache] Syncing agent.md: ${channel}#${peerId}`);
+      const state = await aunClient.checkAgentMd(peerId, 30);
+      let content: string | undefined;
 
-      // 3. 更新缓存
-      return this.updateFromAgentMd(channel, peerId, agentDir, agentMd, Date.now());
+      if (state.in_sync && state.local_found) {
+        // 本地已是最新，读本地文件
+        const localPath = agentMdPath(peerId);
+        try { content = fs.readFileSync(localPath, 'utf-8'); } catch { /* ignore */ }
+      }
+
+      if (!content) {
+        // 需要下载（不同步或本地不存在）
+        const info = await aunClient.fetchAgentMd(peerId);
+        content = info.content;
+      }
+
+      // 3. 比较 hash，仅在变化时重写 peer-identity.json
+      const newHash = 'sha256:' + crypto.createHash('sha256').update(content!, 'utf-8').digest('hex');
+      const cached = this.get(channel, peerId, agentDir);
+      if (cached && cached.agentMdHash === newHash && cached.source === 'agentmd') {
+        return this.touchLastChecked(channel, peerId, agentDir, cached);
+      }
+      return this.updateFromAgentMd(channel, peerId, agentDir, content!, Date.now());
+
     } catch (err) {
-      // 验签失败或下载失败 → 标记为 unknown，当做 agent
-      logger.warn(`[PeerIdentityCache] Failed to fetch agent.md: ${channel}#${peerId} err=${err instanceof Error ? err.message : String(err)}`);
+      // 4. 网络失败，fallback 本地文件
+      const localPath = agentMdPath(peerId);
+      try {
+        if (fs.existsSync(localPath)) {
+          const localContent = fs.readFileSync(localPath, 'utf-8');
+          logger.info(`[PeerIdentityCache] Network failed, using local agent.md for ${peerId}`);
+          const localHash = 'sha256:' + crypto.createHash('sha256').update(localContent, 'utf-8').digest('hex');
+          const cached = this.get(channel, peerId, agentDir);
+          if (cached && cached.agentMdHash === localHash && cached.source === 'agentmd') {
+            return this.touchLastChecked(channel, peerId, agentDir, cached);
+          }
+          return this.updateFromAgentMd(channel, peerId, agentDir, localContent, cached?.verifiedAt ?? 0);
+        }
+      } catch { /* ignore fs errors */ }
+
+      logger.warn(`[PeerIdentityCache] Failed to resolve: ${channel}#${peerId} err=${err instanceof Error ? err.message : String(err)}`);
       return this.markUnknown(channel, peerId, agentDir);
     }
   }

@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { kitsRulesDir, resolvePaths } from '../paths.js';
 import { atomicWriteJson, atomicReadJson } from '../utils/atomic-write.js';
+import { wantsHelp } from './help.js';
 
 const isWindows = process.platform === 'win32';
 
@@ -233,7 +234,7 @@ function disconnect(ba: string): void {
 // ── 入口 ──
 
 export function cmdLinkRules(args: string[]): void {
-  if (args.includes('--help') || args.includes('-h')) {
+  if (wantsHelp(args)) {
     showHelp();
     return;
   }

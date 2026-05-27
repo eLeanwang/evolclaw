@@ -45,7 +45,7 @@ export interface AunChannelConfig {
   admins?: string[];
   flushDelay?: number;  // flush 间隔(秒)，默认 3
   pythonBin?: string;   // Python 可执行路径（仅 evolclaw tui 命令使用），默认 python3
-  encryptionSeed?: string; // FileSecretStore 加密种子，默认 evolclaw-aun-production-seed-2026
+  encryptionSeed?: string; // FileSecretStore 加密种子，留空时 SDK 自动从 {aun_path}/.seed 派生
 }
 
 export interface AunChannelInstanceConfig extends AunChannelConfig {

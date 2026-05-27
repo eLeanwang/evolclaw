@@ -51,6 +51,15 @@ export function resolvePaths() {
 
 // ── AID 路径（agent.md 存放在 $EVOLCLAW_HOME/AIDs/<aid>/）──
 
+/**
+ * AUN SDK 数据根路径（密钥/证书/AgentMDs 等）。
+ * 与 evolclaw 数据共用 $EVOLCLAW_HOME 根，避免散落到 ~/.aun。
+ * 启动时 SDK 通过 aun_path 选项指向这里；agent.md 子目录通过 setAgentMdPath(aidsDir()) 单独设置。
+ */
+export function aunPath(): string {
+  return resolveRoot();
+}
+
 export function aidsDir(): string {
   return path.join(resolveRoot(), 'AIDs');
 }
@@ -120,29 +129,87 @@ export function ensureDataDirs(): void {
   fs.mkdirSync(p.eckDir, { recursive: true });
   fs.mkdirSync(eckDebugDir(), { recursive: true });
   fs.mkdirSync(aidsDir(), { recursive: true });
-  migrateAgentMdFromAun();
+  seedConfigTemplates();
+  migrateFromAun();
+}
+
+const MIGRATION_MARKER = '.migrated-from-aun';
+
+/**
+ * 一次性迁移：把 ~/.aun 下的 SDK 数据搬到 $EVOLCLAW_HOME 下。
+ * 通过标记文件判断是否已迁移，完成后写入标记，后续版本可删除此函数。
+ */
+function migrateFromAun(): void {
+  const newRoot = resolveRoot();
+  const markerPath = path.join(newRoot, MIGRATION_MARKER);
+  if (fs.existsSync(markerPath)) return;
+
+  const oldRoot = path.join(os.homedir(), '.aun');
+  if (!fs.existsSync(oldRoot) || oldRoot === newRoot) {
+    try { fs.writeFileSync(markerPath, new Date().toISOString(), 'utf-8'); } catch {}
+    return;
+  }
+
+  const copyFileIfMissing = (src: string, dst: string) => {
+    if (!fs.existsSync(src) || fs.existsSync(dst)) return;
+    fs.mkdirSync(path.dirname(dst), { recursive: true });
+    fs.copyFileSync(src, dst);
+  };
+
+  const copyDirIfMissing = (src: string, dst: string) => {
+    if (!fs.existsSync(src)) return;
+    if (!fs.statSync(src).isDirectory()) return;
+    for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+      const s = path.join(src, entry.name);
+      const d = path.join(dst, entry.name);
+      if (entry.isDirectory()) {
+        copyDirIfMissing(s, d);
+      } else if (entry.isFile()) {
+        copyFileIfMissing(s, d);
+      }
+    }
+  };
+
+  try {
+    const oldAids = path.join(oldRoot, 'AIDs');
+    const newAids = aidsDir();
+    if (fs.existsSync(oldAids)) {
+      for (const entry of fs.readdirSync(oldAids, { withFileTypes: true })) {
+        if (!entry.isDirectory()) continue;
+        copyDirIfMissing(path.join(oldAids, entry.name), path.join(newAids, entry.name));
+      }
+    }
+    copyDirIfMissing(path.join(oldRoot, 'CA'), path.join(newRoot, 'CA'));
+    for (const f of ['.seed', '.device_id']) {
+      copyFileIfMissing(path.join(oldRoot, f), path.join(newRoot, f));
+    }
+  } catch { /* best-effort */ }
+
+  try { fs.writeFileSync(markerPath, new Date().toISOString(), 'utf-8'); } catch {}
 }
 
 /**
- * One-time migration: copy agent.md from ~/.aun/AIDs/<aid>/ to $EVOLCLAW_HOME/AIDs/<aid>/
- * if the new location doesn't have it yet.
+ * 首次运行时从 assets/ 模板拷贝 config.json 和 .env 到 $EVOLCLAW_HOME。
+ * 已存在则跳过，不覆盖用户修改。
  */
-function migrateAgentMdFromAun(): void {
-  const aunAidsDir = path.join(os.homedir(), '.aun', 'AIDs');
-  const ecAids = aidsDir();
-  if (!fs.existsSync(aunAidsDir) || aunAidsDir === ecAids) return;
+function seedConfigTemplates(): void {
+  const root = resolveRoot();
+  const assetsDir = path.join(getPackageRoot(), 'assets');
 
-  try {
-    for (const entry of fs.readdirSync(aunAidsDir, { withFileTypes: true })) {
-      if (!entry.isDirectory()) continue;
-      const oldMd = path.join(aunAidsDir, entry.name, 'agent.md');
-      const newMd = path.join(ecAids, entry.name, 'agent.md');
-      if (fs.existsSync(oldMd) && !fs.existsSync(newMd)) {
-        fs.mkdirSync(path.join(ecAids, entry.name), { recursive: true });
-        fs.copyFileSync(oldMd, newMd);
-      }
-    }
-  } catch { /* best-effort migration */ }
+  const templates: Array<{ src: string; dst: string }> = [
+    { src: 'config.json.template', dst: 'config.json' },
+    { src: '.env.template', dst: '.env' },
+  ];
+
+  for (const { src, dst } of templates) {
+    const dstPath = path.join(root, dst);
+    if (fs.existsSync(dstPath)) continue;
+    const srcPath = path.join(assetsDir, src);
+    if (!fs.existsSync(srcPath)) continue;
+    try {
+      fs.copyFileSync(srcPath, dstPath);
+    } catch { /* best-effort */ }
+  }
 }
 
 // ── kits 路径（始终从包内读取，不复制到 EVOLCLAW_HOME）──

@@ -1,5 +1,8 @@
 [channel]
-channel: {{channel}}
+channel: {{channel}} # 渠道类型：aun|feishu|wechat|dingtalk|qqbot|wecom
+{{?capabilities}}
+capabilities: {{capabilities}} # 当前渠道支持的能力
+{{/}}
 {{?peerId}}
 {{?channel=aun}}
 ec msg send {{selfAid}} {{peerId}} "<text>" [--encrypt] [--file <path> --as image|video|voice|file] [--link <url> --title "<title>"] [--payload '<json>']

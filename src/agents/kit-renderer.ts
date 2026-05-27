@@ -56,20 +56,24 @@ const PARAM_DESCRIPTIONS: Record<string, string> = {
   peerId: '对端在该渠道的原生 ID',
   peerKey: '对端跨渠道唯一标识（channel#urlEncode(peerId)）',
   peerName: '对端显示名',
-  peerRole: '对端角色',
+  peerRole: '对端角色（owner/admin/guest/anonymous）',
+  peerType: '对端类型（human/agent）',
   groupId: '群组 ID（群聊时）',
-  scene: '场景类型',
-  chatType: '聊天类型',
-  channel: '当前渠道',
-  venueUid: 'venue 唯一标识',
-  project: '当前项目目录名（由 CURRENT_PROJECT 派生）',
+  chatType: '聊天类型（private=私聊 / group=群聊 / null=本地开发）',
+  channel: '渠道类型（aun/feishu/wechat/dingtalk/qqbot/wecom）',
+  venueUid: '场所唯一标识（预留）',
+  capabilities: '当前渠道支持的能力列表',
+  project: '当前项目目录名',
+  sessionId: 'evolclaw 会话 ID',
   sessionName: '会话名称',
-  chatmode: '会话模式（interactive/proactive）',
+  sessionCreatedAt: '会话创建时间（ISO）',
+  threadId: '话题 ID（多话题路由时）',
+  chatMode: '会话模式（interactive=同步交互 / proactive=主动推送）',
   readonly: '是否只读模式',
-  canSendFile: '当前渠道是否支持发文件',
-  capabilities: '渠道能力列表',
-  baseAgent: '当前 base agent 规范值（claude/codex/gemini/hermes）',
-  baseAgentName: '当前 base agent 显示名',
+  baseAgent: 'base agent 规范值（claude/codex/gemini/hermes）',
+  baseAgentName: 'base agent 显示名',
+  baseAgentModel: 'base agent 使用的模型',
+  agentSessionId: 'base agent 会话 ID',
 };
 
 // ── Path shortening ──
@@ -337,16 +341,26 @@ function isTruthy(val: VarValue): boolean {
 
 // ── Template rendering ──
 
+function resolveConditions(template: string, vars: Vars): string {
+  // Find innermost {{?...}}...{{/}} block (no nested {{? inside) and resolve it.
+  // Repeat until no blocks remain.
+  const inner = /\{\{\?(\w+)(?:(!=|=)([^}]*))?\}\}([^]*?)\{\{\/\}\}/;
+  let result = template;
+  let prev: string;
+  do {
+    prev = result;
+    result = result.replace(inner, (_match, key, op, value, body) => {
+      if (op === '=') return String(vars[key]) === value ? body : '';
+      if (op === '!=') return String(vars[key]) !== value ? body : '';
+      return isTruthy(vars[key]) ? body : '';
+    });
+  } while (result !== prev);
+  return result;
+}
+
 function renderTemplate(template: string, vars: Vars): string {
-  // Pass 1: conditional sections {{?key=value}}, {{?key!=value}}, {{?key}}...{{/}}
-  let result = template.replace(/\{\{\?(\w+)(!=|=)([^}]*)?\}\}([\s\S]*?)\{\{\/\}\}/g, (_match, key, op, value, body) => {
-    if (op === '!=') return String(vars[key]) !== value ? body : '';
-    return String(vars[key]) === value ? body : '';
-  });
-  // Pass 1b: truthy-only {{?key}}...{{/}}
-  result = result.replace(/\{\{\?(\w+)\}\}([\s\S]*?)\{\{\/\}\}/g, (_match, key, body) => {
-    return isTruthy(vars[key]) ? body : '';
-  });
+  // Pass 1: resolve nested conditionals inside-out
+  let result = resolveConditions(template, vars);
 
   // Pass 2: variable substitution {{key}}
   result = result.replace(/\{\{(\w+)\}\}/g, (_match, key) => {

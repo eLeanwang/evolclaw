@@ -587,17 +587,11 @@ export class MessageProcessor {
         const selfName = typeof adapterAny._selfName === 'function' ? adapterAny._selfName() : undefined;
         const peerName = message.peerName || session.metadata?.peerName;
 
-        // 文件发送能力
-        let currentCanSend = false;
-        if (!isProactive) {
-          currentCanSend = !!(channelInfo.adapter.capabilities?.file);
-        }
-
         // 通道能力
         const capParts: string[] = [];
         if (options?.supportsImages) capParts.push('图片输入');
         if (channelInfo.adapter.capabilities?.image) capParts.push('图片输出');
-        if (channelInfo.adapter.capabilities?.file) capParts.push('文件发送');
+        if (!isProactive && channelInfo.adapter.capabilities?.file) capParts.push('文件发送');
 
         // Personal layer
         const owningAgent = this.agentRegistry?.resolveByChannel(channelKey);
@@ -613,6 +607,7 @@ export class MessageProcessor {
           : undefined;
 
         const normalizedBaseagent = normalizeBaseagent(agent.name);
+        const agentModel = (typeof (agent as any).getModel === 'function') ? (agent as any).getModel() as string : undefined;
 
         // Kit renderer: 组装上下文
         const kitCtx: KitRenderContext = {
@@ -628,19 +623,23 @@ export class MessageProcessor {
             peerKey,
             peerName: peerName || undefined,
             peerRole: session.identity?.role || 'unknown',
+            peerType: message.peerType || undefined,
             groupId: session.metadata?.groupId || undefined,
-            scene: session.chatType ? (session.chatType === 'group' ? 'group' : 'private') : 'coding',
             chatType: session.chatType || null,
             channel: currentChannelType || null,
             venueUid: undefined,
-            project: path.basename(absoluteProjectPath),
-            sessionName: session.name || undefined,
-            chatmode: isProactive ? 'proactive' : 'interactive',
-            readonly: session.metadata?.permissionMode === 'readonly',
-            canSendFile: !isProactive && currentCanSend,
             capabilities: capParts.length > 0 ? capParts.join('、') : undefined,
+            project: path.basename(absoluteProjectPath),
+            sessionId: session.id,
+            sessionName: session.name || undefined,
+            sessionCreatedAt: session.createdAt ? new Date(session.createdAt).toISOString() : undefined,
+            threadId: session.threadId || undefined,
+            chatMode: isProactive ? 'proactive' : 'interactive',
+            readonly: session.metadata?.permissionMode === 'readonly',
             baseAgent: normalizedBaseagent.canonical,
             baseAgentName: normalizedBaseagent.displayName,
+            baseAgentModel: agentModel || undefined,
+            agentSessionId: session.agentSessionId || undefined,
           },
           sessionId: session.id,
         };

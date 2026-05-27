@@ -16,8 +16,9 @@ import { appendAidEvent } from '../utils/instance-registry.js';
 import { appendMessageLog, buildOutboundEntry } from '../core/message/message-log.js';
 import { chatDirPath } from '../core/session/session-fs-store.js';
 import { appendAidLifecycle } from '../aun/aid/identity.js';
+import { createAunClient } from '../aun/aid/client.js';
 import type { AidStatsCollector } from '../utils/stats.js';
-import { loadAgent, saveAgent } from '../config-store.js';
+import { loadAgent, saveAgent, loadProcessConfig } from '../config-store.js';
 import { getProcessStartTime } from '../utils/process-introspect.js';
 import * as outbox from '../aun/outbox.js';
 import { guessMime, formatSize } from '../utils/media-cache.js';
@@ -96,46 +97,6 @@ export interface AUNMessageHandler {
   }): Promise<void>;
 }
 
-function migrateAunData(targetPath: string): void {
-  const legacyPath = path.join(os.homedir(), '.aun');
-  if (legacyPath === targetPath) return;
-
-  // AIDs 迁移：逐个检查每个 AID，缺少 private 的就从 legacy 复制
-  const srcAIDs = path.join(legacyPath, 'AIDs');
-  const dstAIDs = path.join(targetPath, 'AIDs');
-  if (fs.existsSync(srcAIDs)) {
-    fs.mkdirSync(dstAIDs, { recursive: true });
-    try {
-      for (const entry of fs.readdirSync(srcAIDs, { withFileTypes: true })) {
-        if (!entry.isDirectory()) continue;
-        const aidName = entry.name;
-        const srcAidDir = path.join(srcAIDs, aidName);
-        const dstAidDir = path.join(dstAIDs, aidName);
-        const srcPrivate = path.join(srcAidDir, 'private');
-        const dstPrivate = path.join(dstAidDir, 'private');
-        // 如果目标 AID 目录不存在或缺少 private，从源复制整个 AID 目录
-        if (fs.existsSync(srcPrivate) && !fs.existsSync(dstPrivate)) {
-          fs.cpSync(srcAidDir, dstAidDir, { recursive: true });
-        }
-      }
-    } catch {}
-  }
-
-  // CA 迁移
-  const srcCA = path.join(legacyPath, 'CA');
-  const dstCA = path.join(targetPath, 'CA');
-  if (fs.existsSync(srcCA) && !fs.existsSync(dstCA)) {
-    fs.cpSync(srcCA, dstCA, { recursive: true });
-  }
-
-  for (const file of ['.seed', '.device_id'] as const) {
-    const src = path.join(legacyPath, file);
-    const dst = path.join(targetPath, file);
-    if (fs.existsSync(src) && !fs.existsSync(dst)) {
-      fs.copyFileSync(src, dst);
-    }
-  }
-}
 
 export class AUNChannel {
   private client: AUNClient | null = null;
@@ -636,10 +597,11 @@ export class AUNChannel {
 
     const aunPath = this.config.keystorePath || resolveRoot();
     const aidName = this.config.aid;
-    const encryptionSeed = this.config.encryptionSeed || process.env.AUN_ENCRYPTION_SEED || undefined;
+    const encryptionSeed = loadProcessConfig().aun?.encryptionSeed
+      || process.env.AUN_ENCRYPTION_SEED
+      || 'evol';
 
-    // Migrate legacy ~/.aun data to EVOLCLAW_HOME on first run
-    migrateAunData(aunPath);
+    // Migration from ~/.aun is handled by ensureDataDirs() at startup with a marker file.
 
     // Gateway URL 解析：优先用配置的 gatewayUrl，否则通过 well-known 自动发现
     let gateway = this.config.gatewayUrl || '';
@@ -664,40 +626,40 @@ export class AUNChannel {
 
     // Create client with FileSecretStore (AES-256-GCM)
     // 不传 encryption_seed 时，SDK 自动从 {aun_path}/.seed 文件派生密钥（与 aun_cli.py 对齐）
-    const rootCaPath = path.join(aunPath, 'CA', 'root', 'root.crt');
-    this.client = new AUNClient({
-      aun_path: aunPath,
-      root_ca_path: rootCaPath,
-      ...(encryptionSeed && { encryption_seed: encryptionSeed }),
-    }, this.config.aunSdkLog ?? true);
+    const client = await createAunClient({
+      aunPath,
+      encryptionSeed,
+      aunSdkLog: this.config.aunSdkLog ?? true,
+    });
+    this.client = client;
     // Set gateway URL (internal property, same as Python SDK)
-    (this.client as any)._gatewayUrl = gateway;
+    (client as any)._gatewayUrl = gateway;
 
     // Register event handlers before connecting
-    this.client.on('message.received', (data: unknown) => {
+    client.on('message.received', (data: unknown) => {
       this.trace('IN', 'message.received', data);
       const kind = (data && typeof data === 'object') ? (data as any).kind ?? '' : '';
       const keys = (data && typeof data === 'object') ? Object.keys(data as any).join(',') : typeof data;
       logger.debug(`${this.logPrefix()}[DIAG] message.received: kind=${kind} keys=${keys}`);
       this.handleIncomingPrivateMessage(data);
     });
-    this.client.on('group.message_created', (data: unknown) => {
+    client.on('group.message_created', (data: unknown) => {
       this.trace('IN', 'group.message_created', data);
       const gid = (data && typeof data === 'object') ? (data as any).group_id ?? '' : '';
       const sender = (data && typeof data === 'object') ? (data as any).sender_aid ?? '' : '';
       logger.debug(`${this.logPrefix()}[DIAG] group.message_created: group_id=${gid} sender=${sender}`);
       this.handleIncomingGroupMessage(data);
     });
-    this.client.on('connection.state', (data: unknown) => {
+    client.on('connection.state', (data: unknown) => {
       // trace is handled inside handleConnectionState with throttling
       this.handleConnectionState(data);
     });
     // gateway 被踢/服务端主动断开（含同槽位互踢的 self/new extra_info）
-    this.client.on('gateway.disconnect', (data: unknown) => {
+    client.on('gateway.disconnect', (data: unknown) => {
       this.trace('IN', 'gateway.disconnect', data);
       this.handleGatewayDisconnect(data);
     });
-    this.client.on('message.recalled', (data: unknown) => {
+    client.on('message.recalled', (data: unknown) => {
       this.trace('IN', 'message.recalled', data);
       if (data && typeof data === 'object') {
         const ids = (data as any).message_ids;
@@ -711,12 +673,12 @@ export class AUNChannel {
         }
       }
     });
-    this.client.on('message.undecryptable', (data: unknown) => {
+    client.on('message.undecryptable', (data: unknown) => {
       this.trace('IN', 'message.undecryptable', data);
       const d = data as Record<string, any>;
       logger.warn(`${this.logPrefix()} Message undecryptable: from=${d.from} mid=${d.message_id} err=${d._decrypt_error}`);
     });
-    this.client.on('group.message_undecryptable', (data: unknown) => {
+    client.on('group.message_undecryptable', (data: unknown) => {
       this.trace('IN', 'group.message_undecryptable', data);
       const d = data as Record<string, any>;
       logger.warn(`${this.logPrefix()} Group message undecryptable: group=${d.group_id} from=${d.from} mid=${d.message_id} err=${d._decrypt_error}`);
@@ -725,7 +687,7 @@ export class AUNChannel {
     // Authenticate
     // Workaround: SDK 0.3.x _loadIdentityOrRaise doesn't set identity.aid from requested aid,
     // causing gateway "missing aid" error. Patch to backfill aid on loaded identity.
-    const authFlow = (this.client as any)._auth;
+    const authFlow = (client as any)._auth;
     if (authFlow && typeof authFlow._loadIdentityOrRaise === 'function') {
       const origLoad = authFlow._loadIdentityOrRaise.bind(authFlow);
       authFlow._loadIdentityOrRaise = (aid?: string) => {
@@ -739,12 +701,12 @@ export class AUNChannel {
     try {
       logger.info(`${this.logPrefix()} Authenticating as ${aidName}...`);
       this.trace('OUT', 'auth.authenticate', { aid: aidName });
-      const auth = await this.client.auth.authenticate(aidName ? { aid: aidName } : undefined);
+      const auth = await client.auth.authenticate(aidName ? { aid: aidName } : undefined);
       this.trace('OUT', 'auth.authenticate.ok', { aid: auth.aid, gateway: auth.gateway, hasToken: !!auth.access_token });
       this.trace('IN', 'auth.result', { aid: auth.aid, gateway: auth.gateway, hasToken: !!auth.access_token });
       accessToken = auth.access_token as string;
       const resolvedGateway = (auth.gateway as string) || gateway;
-      (this.client as any)._gatewayUrl = resolvedGateway;
+      (client as any)._gatewayUrl = resolvedGateway;
       logger.info(`${this.logPrefix()} Authenticated as ${auth.aid ?? '?'}, gateway=${resolvedGateway}`);
     } catch (e: any) {
       const errMsg = e.message || String(e);
@@ -770,14 +732,14 @@ export class AUNChannel {
         agentName: this.config.agentName,
         channelName: this.config.channelName,
       });
-      this.trace('OUT', 'client.connect', { gateway: (this.client as any)._gatewayUrl, extra_info: extraInfo });
-      await this.client.connect(
-        { access_token: accessToken, gateway: (this.client as any)._gatewayUrl, extra_info: extraInfo as JsonObject },
+      this.trace('OUT', 'client.connect', { gateway: (client as any)._gatewayUrl, extra_info: extraInfo });
+      await client.connect(
+        { access_token: accessToken, gateway: (client as any)._gatewayUrl, extra_info: extraInfo as JsonObject },
         // max_attempts=0 = 无限重试（与 Go/Python 对齐），交由 SDK 自己跑指数退避
         // initial_delay=1s，max_delay=300s（5min 封顶）
         { auto_reconnect: true, retry: { max_attempts: 0, initial_delay: 1.0, max_delay: 300.0 } },
       );
-      this.trace('OUT', 'client.connect.ok', { aid: this.client.aid });
+      this.trace('OUT', 'client.connect.ok', { aid: client.aid });
       this._aid = this.client.aid ?? undefined;
       const deviceId = (this.client as any)._device_id ?? '';
       this._chatId = this._aid ? `${this._aid}:${deviceId}:` : '';
@@ -2549,13 +2511,10 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     if (cached !== undefined) return cached;
     if (!this.client) return { type: null };
     try {
-      const { agentmdSync } = await import('../aun/aid/agentmd.js');
-      const result = await agentmdSync(aid, { client: this.client });
-      const md = result.content ?? '';
-      const typeMatch = md.match(/^type:\s*["']?(\w+)["']?/m);
-      const nameMatch = md.match(/^name:\s*["']?(.+?)["']?\s*$/m);
-      const type: 'human' | 'ai' = typeMatch?.[1] === 'human' ? 'human' : 'ai';
-      const name = nameMatch?.[1]?.trim() || undefined;
+      const selfAgentDir = path.join(resolvePaths().agentsDir, this.config.aid);
+      const identity = await PeerIdentityCache.resolve('aun', aid, selfAgentDir, this.client, false);
+      const type: 'human' | 'ai' = identity.type === 'human' ? 'human' : 'ai';
+      const name = identity.name || undefined;
       const info = { type, name };
       this.peerInfoCache.set(aid, info);
       setTimeout(() => this.peerInfoCache.delete(aid), 30 * 60 * 1000);

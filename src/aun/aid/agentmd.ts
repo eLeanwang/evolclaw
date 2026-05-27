@@ -1,7 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import os from 'os';
-import { getAunClient } from './client.js';
+import { getAunClient, createAunClient } from './client.js';
 import { agentMdPath, aidLocalDir, resolveRoot } from '../../paths.js';
 
 export interface AgentmdGetResult {
@@ -88,79 +87,47 @@ async function verifyContent(content: string, aid: string, certPem: string | und
  * Create a bare AUNClient (no createAid) for read-only operations.
  */
 async function createBareClient(aunPath?: string): Promise<any> {
-  const p = aunPath ?? resolveRoot();
-  const { AUNClient } = await import('@agentunion/fastaun');
-  const caCertPath = path.join(p, 'CA', 'root', 'root.crt');
-  const clientOpts: any = { aun_path: p, debug: false };
-  if (fs.existsSync(caCertPath)) clientOpts.root_ca_path = caCertPath;
-  return new AUNClient(clientOpts);
+  return createAunClient({ aunPath });
 }
 
 /**
  * Get agent.md content with optional verification.
  *
- * Flow:
- * 1. Local agent.md exists → verify locally (fetch cert if needed)
- *    - verified → return
- *    - invalid → fallback to remote download → verify → overwrite local if valid
- * 2. No local agent.md → download from remote → verify → persist
+ * Standard flow (SDK 0.3.3):
+ * 1. agentmdSync (check + fetch if changed) — SDK auto-saves to {agentMdPath}/{aid}/agent.md
+ * 2. If sync fails, fall back to local file
+ * 3. With verification: signature status from fetchAgentMd is the source of truth
  */
 export async function agentmdGet(aid: string, opts?: { client?: any; aunPath?: string }): Promise<string>;
 export async function agentmdGet(aid: string, opts: { client?: any; aunPath?: string; withVerification: true }): Promise<AgentmdGetResult>;
 export async function agentmdGet(aid: string, opts?: { client?: any; aunPath?: string; withVerification?: boolean }): Promise<string | AgentmdGetResult> {
   const aunPath = opts?.aunPath ?? resolveRoot();
-  const localPath = agentMdPath(aid);
-
-  // === Path A: local agent.md exists ===
-  if (fs.existsSync(localPath)) {
-    const content = fs.readFileSync(localPath, 'utf-8');
-    if (!opts?.withVerification) return content;
-
-    // Verify local content
-    const client = opts?.client ?? await createBareClient(aunPath);
-    const ownClient = !opts?.client;
-    try {
-      const certPem = await obtainCertPem(aid, aunPath, client);
-      const verification = await verifyContent(content, aid, certPem, client);
-
-      if (verification.status !== 'invalid') {
-        return { content, verification };
-      }
-
-      // Fallback: local invalid → try remote
-      try {
-        const info = await client.fetchAgentMd(aid);
-        const remote: string = info.content;
-        if (remote) {
-          const remoteVerification = await verifyContent(remote, aid, certPem, client);
-          if (remoteVerification.status === 'verified') {
-            fs.writeFileSync(localPath, remote, 'utf-8');
-            return { content: remote, verification: remoteVerification };
-          }
-        }
-      } catch { /* remote fetch failed, return local invalid result */ }
-
-      return { content, verification };
-    } finally {
-      if (ownClient) try { await client.close(); } catch { /* ignore */ }
-    }
-  }
-
-  // === Path B: no local agent.md → download from remote ===
   const client = opts?.client ?? await createBareClient(aunPath);
   const ownClient = !opts?.client;
-  try {
-    const info = await client.fetchAgentMd(aid);
-    const raw: string = info.content;
+  const localPath = agentMdPath(aid);
 
-    if (!opts?.withVerification) {
-      return raw;
+  try {
+    // Try SDK fetch (auto-saves locally + verifies signature)
+    let content: string | undefined;
+    let verification: AgentmdGetResult['verification'] | undefined;
+    try {
+      const info = await client.fetchAgentMd(aid);
+      content = info.content;
+      const sig: any = info.signature ?? {};
+      const status = sig.status === 'verified' ? 'verified' : sig.status === 'unsigned' ? 'unsigned' : 'invalid';
+      verification = { status, ...(sig.reason ? { reason: String(sig.reason) } : {}) };
+    } catch (err) {
+      // Network failed — fall back to local file (verify signature via SDK if requested)
+      if (!fs.existsSync(localPath)) throw err;
+      content = fs.readFileSync(localPath, 'utf-8');
+      if (opts?.withVerification) {
+        const certPem = await obtainCertPem(aid, aunPath, client);
+        verification = await verifyContent(content, aid, certPem, client);
+      }
     }
 
-    const certPem = await obtainCertPem(aid, aunPath, client);
-    const verification = await verifyContent(raw, aid, certPem, client);
-
-    return { content: raw, verification };
+    if (!opts?.withVerification) return content!;
+    return { content: content!, verification: verification ?? { status: 'unsigned' } };
   } finally {
     if (ownClient) try { await client.close(); } catch { /* ignore */ }
   }

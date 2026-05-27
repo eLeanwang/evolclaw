@@ -11,6 +11,7 @@
   "files": [
     "dist/",
     "bin/",
+    "assets/",
     "!dist/experimental/",
     "kits/",
     "!kits/.kits-version",
@@ -29,9 +30,10 @@
     "prepublishOnly": "npm run build && npm test"
   },
   "dependencies": {
-    "@agentunion/fastaun": "^0.3.2",
+    "@agentunion/fastaun": "^0.3.3",
     "@anthropic-ai/claude-agent-sdk": "^0.2.100",
     "cron-parser": "^5.5.0",
+    "dotenv": "^17.4.2",
     "image-type": "^6.0.0",
     "qrcode-terminal": "^0.12.0"
   },

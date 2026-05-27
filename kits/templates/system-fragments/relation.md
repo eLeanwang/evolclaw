@@ -1,11 +1,14 @@
 {{?peerKey}}
 [relation]
-peer-name: {{peerName}}
-peer-aid: {{peerId}}
-peer-role: {{peerRole}}
-peer-key: {{peerKey}}
+peerName: {{peerName}}
+peerId: {{peerId}} # 对端在当前渠道内的原生 ID
+peerRole: {{peerRole}} # owner|admin|guest|anonymous
+{{?peerType}}
+peerType: {{peerType}} # human 或 agent
+{{/}}
+peerKey: {{peerKey}} # 跨渠道唯一标识，格式 channel#urlEncode(peerId)
 {{/}}
 {{?groupId}}
 [relation]
-group-id: {{groupId}}
+groupId: {{groupId}}
 {{/}}

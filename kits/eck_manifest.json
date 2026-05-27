@@ -17,8 +17,8 @@
       "order": 20,
       "needsInjection": true,
       "when": {
-        "var": "scene",
-        "neq": "coding"
+        "var": "chatType",
+        "neq": null
       },
       "description": "身份层：我是谁"
     },
@@ -29,7 +29,7 @@
       "order": 30,
       "needsInjection": true,
       "when": {
-        "var": "scene",
+        "var": "chatType",
         "in": ["private", "group"]
       },
       "description": "关系层：跟我聊天的是谁"
@@ -56,7 +56,7 @@
         "var": "chatType",
         "neq": null
       },
-      "description": "环境层：我在什么场景下"
+      "description": "环境层：当前对话场景"
     },
     {
       "id": "channel-layer",
@@ -68,16 +68,16 @@
         "var": "channel",
         "neq": null
       },
-      "description": "渠道层：我通过什么通信"
+      "description": "渠道层：通信渠道及能力"
     },
     {
-      "id": "eckruntime",
+      "id": "session",
       "type": "file",
-      "file": "$PACKAGE_ROOT/kits/templates/system-fragments/eckruntime.md",
+      "file": "$PACKAGE_ROOT/kits/templates/system-fragments/session.md",
       "order": 60,
       "needsInjection": true,
       "when": "always",
-      "description": "运行时参数"
+      "description": "会话层：当前会话实例状态"
     },
     {
       "id": "baseagent",

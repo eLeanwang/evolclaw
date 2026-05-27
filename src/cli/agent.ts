@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import readline from 'readline';
-import { resolvePaths } from '../paths.js';
+import { resolvePaths, agentMdPath as getAgentMdPathFromPaths, aunPath as defaultAunPath } from '../paths.js';
 import { loadDefaults, loadAllAgents, loadAgent, saveAgent, ensureAgentDirSkeleton } from '../config-store.js';
 import { ipcQuery } from '../ipc.js';
 import { CONFIG_SCHEMA_VERSION } from '../types.js';
@@ -171,11 +171,10 @@ function deriveAgentProjectPath(rootPath: string, aid: string): string {
 }
 
 function readAgentMdIdentity(aid: string): { name: string | null; description: string | null } {
-  const aunPath = process.env.AUN_HOME || path.join(os.homedir(), '.aun');
-  const agentMdPath = path.join(aunPath, 'AIDs', aid, 'agent.md');
+  const agentMdFilePath = getAgentMdPathFromPaths(aid);
   try {
-    if (!fs.existsSync(agentMdPath)) return { name: null, description: null };
-    const content = fs.readFileSync(agentMdPath, 'utf-8');
+    if (!fs.existsSync(agentMdFilePath)) return { name: null, description: null };
+    const content = fs.readFileSync(agentMdFilePath, 'utf-8');
     const fmMatch = content.match(/^---\n([\s\S]*?)\n---/);
     if (!fmMatch) return { name: null, description: null };
     const fm = fmMatch[1];
@@ -189,8 +188,7 @@ function readAgentMdIdentity(aid: string): { name: string | null; description: s
 }
 
 function getAgentMdPath(aid: string): string {
-  const aunPath = process.env.AUN_HOME || path.join(os.homedir(), '.aun');
-  return path.join(aunPath, 'AIDs', aid, 'agent.md');
+  return getAgentMdPathFromPaths(aid);
 }
 
 function getNestedValue(obj: any, keyPath: string): unknown {
@@ -528,11 +526,8 @@ export async function agentCreateInteractive(opts: AgentCreateInteractiveOpts = 
       if (agentDescription) {
         content = content.replace(/^description:\s*".*?"$/m, `description: "${agentDescription}"`);
       }
-      const aunPath = process.env.AUN_HOME || path.join(os.homedir(), '.aun');
-      const agentMdPath = path.join(aunPath, 'AIDs', aid, 'agent.md');
-      fs.mkdirSync(path.dirname(agentMdPath), { recursive: true });
-      fs.writeFileSync(agentMdPath, content, 'utf-8');
-
+      const aunPath = process.env.AUN_HOME || defaultAunPath();
+      // agentmdPut 会写本地文件到 agentMdPath(aid) 并调用 publishAgentMd
       // Upload with retry (3 attempts, 2s delay between retries)
       const MAX_ATTEMPTS = 3;
       const RETRY_DELAY_MS = 2000;
@@ -692,11 +687,8 @@ export async function agentCreateNonInteractive(opts: AgentCreateNonInteractiveO
     if (agentDescription) {
       content = content.replace(/^description:\s*".*?"$/m, `description: "${agentDescription}"`);
     }
-    const aunPath = process.env.AUN_HOME || path.join(os.homedir(), '.aun');
-    const agentMdPath = path.join(aunPath, 'AIDs', opts.aid, 'agent.md');
-    fs.mkdirSync(path.dirname(agentMdPath), { recursive: true });
-    fs.writeFileSync(agentMdPath, content, 'utf-8');
-
+    const aunPath = process.env.AUN_HOME || defaultAunPath();
+    // agentmdPut 会写本地文件到 agentMdPath(aid) 并调用 publishAgentMd
     const MAX_ATTEMPTS = 3;
     const RETRY_DELAY_MS = 2000;
     let lastError: any;
@@ -749,7 +741,7 @@ export async function agentSyncAids(): Promise<AgentResult<AgentSyncResult>> {
   const p = resolvePaths();
   const { aidList } = await import('../aun/aid/index.js');
 
-  const aunPath = process.env.AUN_HOME || path.join(os.homedir(), '.aun');
+  const aunPath = process.env.AUN_HOME || defaultAunPath();
   const allAids = aidList(aunPath);
   const localAids = allAids.filter(a => a.hasPrivateKey).map(a => a.aid);
 
@@ -1058,14 +1050,14 @@ export async function agentDelete(aid: string, purge: boolean = false): Promise<
 // ==================== agentRename ====================
 
 export async function agentRename(aid: string, newName: string): Promise<AgentResult<AgentRenameResult>> {
-  const aunPath = process.env.AUN_HOME || path.join(os.homedir(), '.aun');
-  const agentMdPath = path.join(aunPath, 'AIDs', aid, 'agent.md');
+  const aunPath = process.env.AUN_HOME || defaultAunPath();
+  const agentMdFilePath = getAgentMdPathFromPaths(aid);
 
-  if (!fs.existsSync(agentMdPath)) {
+  if (!fs.existsSync(agentMdFilePath)) {
     return { ok: false, error: `agent.md not found for ${aid}. Run: evolclaw aid agentmd put ${aid}` };
   }
 
-  let content = fs.readFileSync(agentMdPath, 'utf-8');
+  let content = fs.readFileSync(agentMdFilePath, 'utf-8');
   const fmMatch = content.match(/^(---\n)([\s\S]*?)(\n---)/);
   if (!fmMatch) {
     return { ok: false, error: `agent.md has no valid frontmatter for ${aid}` };
@@ -1081,9 +1073,7 @@ export async function agentRename(aid: string, newName: string): Promise<AgentRe
   }
 
   content = fmMatch[1] + newFm + fmMatch[3] + content.slice(fmMatch[0].length);
-  fs.writeFileSync(agentMdPath, content, 'utf-8');
-
-  // Upload
+  // agentmdPut 会写本地文件并 publishAgentMd
   let uploaded = false;
   try {
     const { agentmdPut } = await import('../aun/aid/index.js');

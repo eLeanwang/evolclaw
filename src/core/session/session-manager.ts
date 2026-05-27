@@ -61,8 +61,8 @@ export class SessionManager {
     // 来源2：群聊强制 proactive
     if (ct === 'group') return 'proactive';
 
-    // 来源3：非 human 对端（ai/bot）强制 proactive，无视 agent 的默认 chatmode 配置
-    if (peerType && peerType !== 'human' && peerType !== 'unknown') return 'proactive';
+    // 来源3：非 human 对端强制 proactive，无视 agent 的默认 chatmode 配置
+    if (peerType && peerType !== 'human') return 'proactive';
 
     // 来源1：agent 配置默认值
     const resolved = this.sessionModeResolver?.(channel, ct, peerType);

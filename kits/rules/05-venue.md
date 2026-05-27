@@ -1,6 +1,6 @@
-# 环境层：我在什么场景下
+# 环境层：当前对话场景
 
-环境层决定当前会话加载哪些信息。动态注入的 `scene` 标识当前场景类型，`venueKey`（`<channel>#<urlEncode(venueId)>`）是 venue 在所有渠道中的稳定标识。
+环境层决定当前会话加载哪些信息。动态注入的 `chatType` 标识当前聊天类型（private/group/null），`venueUid` 是场所唯一标识（预留）。
 
 ## 场景判定
 

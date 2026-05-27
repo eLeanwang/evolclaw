@@ -11,7 +11,7 @@ import readline from 'readline';
 import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
-import { resolvePaths, aidLocalDir } from '../paths.js';
+import { resolvePaths, aidLocalDir, aunPath as defaultAunPath } from '../paths.js';
 import { normalizeChannelInstances } from '../utils/channel-helpers.js';
 import { selectInstance, type InstanceChoice } from './init.js';
 import { npmInstallGlobal, requireOptional } from '../utils/npm-ops.js';
@@ -529,7 +529,7 @@ export async function setupAunAid(rl: readline.Interface, _config: any): Promise
     }
 
     // Check if AID exists locally
-    const aunPath = path.join(os.homedir(), '.aun');
+    const aunPath = defaultAunPath();
     const aidDir = path.join(aunPath, 'AIDs', aid);
     if (fs.existsSync(aidDir) && fs.existsSync(path.join(aidDir, 'private'))) {
       console.log(`  ✓ AID ${aid} 已存在`);

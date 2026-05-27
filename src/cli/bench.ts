@@ -7,7 +7,9 @@ import { promisify } from 'util';
 import { aidList, aidCreate } from '../aun/aid/identity.js';
 import { msgSend, msgPull } from '../aun/msg/index.js';
 import type { MsgError } from '../aun/msg/p2p.js';
-import { getPackageRoot } from '../paths.js';
+import { getPackageRoot, aunPath as defaultAunPath } from '../paths.js';
+import { createAunClient } from '../aun/aid/client.js';
+import { isHelpFlag } from './help.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -343,19 +345,12 @@ interface AuthResult {
 }
 
 async function benchAuth(aids: string[], concurrency: number, aunPath?: string, slotId?: string): Promise<AuthResult[]> {
-  const { AUNClient } = await import('@agentunion/fastaun');
-  const path = (await import('path')).default;
-  const fs = (await import('fs')).default;
-  const os = (await import('os')).default;
-  const resolvedAunPath = aunPath ?? path.join(os.homedir(), '.aun');
-  const caCertPath = path.join(resolvedAunPath, 'CA', 'root', 'root.crt');
+  const resolvedAunPath = aunPath ?? defaultAunPath();
 
   const tasks = aids.map(aid => async (): Promise<AuthResult> => {
     const start = Date.now();
     try {
-      const clientOpts: any = { aun_path: resolvedAunPath, debug: false };
-      if (fs.existsSync(caCertPath)) clientOpts.root_ca_path = caCertPath;
-      const client = new AUNClient(clientOpts);
+      const client = await createAunClient({ aunPath: resolvedAunPath });
       await client.auth.createAid({ aid });
       const authResult = await client.auth.authenticate({ aid });
       const accessToken = authResult?.access_token ?? (client as any)._access_token;
@@ -473,7 +468,7 @@ async function cliAuth(aid: string, slotId: string): Promise<{ ok: boolean; auth
 // ==================== Main Command ====================
 
 export async function cmdBench(args: string[]): Promise<void> {
-  if (args[0] === 'help' || args[0] === '--help' || args[0] === '-h') {
+  if (isHelpFlag(args[0])) {
     console.log(`用法: evolclaw bench [options]
 
 AUN 消息系统性能基准测试。使用多个本地 AID 并发互发消息，
@@ -525,14 +520,14 @@ Options:
 
   // AID is usable if: has private key + cert not expired + key/cert public key match
   const { aidShow } = await import('../aun/aid/identity.js');
-  const resolvedAunPath = aunPath ?? path.join(os.homedir(), '.aun');
+  const resolvedAunPath = aunPath ?? defaultAunPath();
   const usableAids: string[] = [];
   const skippedAids: { aid: string; reason: string }[] = [];
 
   for (const a of allAids) {
     if (!a.hasPrivateKey) continue;
     try {
-      const info = aidShow(a.aid, { aunPath });
+      const info = await aidShow(a.aid, { aunPath });
       if (!info.certExpiresAt) {
         skippedAids.push({ aid: a.aid, reason: '无证书' });
         continue;
