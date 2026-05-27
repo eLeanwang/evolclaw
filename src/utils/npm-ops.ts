@@ -95,19 +95,24 @@ export function getLocalVersion(): string {
 
 /**
  * 查询 npm registry 上指定包的最新版本。
- * 超时 15 秒，失败返回 null。
+ * 使用 HTTP fetch 直接查 registry API，不依赖 npm CLI。
+ * 超时 10 秒，失败返回 null。
  */
-export function checkLatestVersion(pkg = 'evolclaw'): Promise<string | null> {
-  return new Promise((resolve) => {
-    execFile('npm', ['view', pkg, 'version'], { timeout: 15000 }, (err, stdout) => {
-      if (err) {
-        resolve(null);
-        return;
-      }
-      const ver = stdout.trim();
-      resolve(ver || null);
+export async function checkLatestVersion(pkg = 'evolclaw'): Promise<string | null> {
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10000);
+    const res = await fetch(`https://registry.npmjs.org/${pkg}/latest`, {
+      signal: controller.signal,
+      headers: { 'Accept': 'application/json' },
     });
-  });
+    clearTimeout(timer);
+    if (!res.ok) return null;
+    const data = await res.json() as { version?: string };
+    return data.version || null;
+  } catch {
+    return null;
+  }
 }
 
 /**
