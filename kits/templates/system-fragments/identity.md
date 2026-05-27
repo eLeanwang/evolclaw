@@ -1,11 +1,11 @@
 [identity]
 {{?selfAid}}
-self-name: {{selfName}}
-self-aid: {{selfAid}}
+selfName: {{selfName}}
+selfAid: {{selfAid}}
 {{/}}
 {{?hasPersona}}
-persona: loaded
+hasPersona: active
 {{/}}
 {{?hasWorkingMemory}}
-working-memory: loaded
+hasWorkingMemory: active
 {{/}}

@@ -8,6 +8,8 @@ import https from 'https';
 // @ts-ignore
 import { WebSocket } from 'ws';
 import { aunPath as defaultAunPath } from '../paths.js';
+import { createAunClient } from '../aun/aid/client.js';
+import { isHelpFlag } from './help.js';
 
 const GREEN = '\x1b[32m';
 const RED = '\x1b[31m';
@@ -232,9 +234,8 @@ async function runCheck(aid: string, formatJson: boolean): Promise<CheckResult[]
   try {
     const start = Date.now();
     const aunPath = process.env.AUN_HOME || defaultAunPath();
-    const { AUNClient } = await import('@agentunion/fastaun');
     const result = await suppressSdkOutput(async () => {
-      const client = new AUNClient({ aun_path: aunPath, debug: false } as any);
+      const client = await createAunClient({ aunPath });
       await client.auth.createAid({ aid });
       const authResult = await client.auth.authenticate({ aid });
       await client.close().catch(() => {});
@@ -281,9 +282,8 @@ async function runCheck(aid: string, formatJson: boolean): Promise<CheckResult[]
   try {
     const start = Date.now();
     const aunPath = process.env.AUN_HOME || defaultAunPath();
-    const { AUNClient } = await import('@agentunion/fastaun');
     const sendResult = await suppressSdkOutput(async () => {
-      const client = new AUNClient({ aun_path: aunPath, debug: false } as any);
+      const client = await createAunClient({ aunPath });
       await client.auth.createAid({ aid });
       const authResult = await client.auth.authenticate({ aid });
       const at = authResult?.access_token || (client as any)._access_token;
@@ -304,7 +304,6 @@ async function runCheck(aid: string, formatJson: boolean): Promise<CheckResult[]
   try {
     const echoStart = Date.now();
     const aunPath = process.env.AUN_HOME || defaultAunPath();
-    const { AUNClient } = await import('@agentunion/fastaun');
 
     // 选择 6 个测试目标，按消息数量、域、有无证书均衡选择
     const allAids = await getAidList();
@@ -440,7 +439,7 @@ async function runCheck(aid: string, formatJson: boolean): Promise<CheckResult[]
       const label = targetLabel(target);
       try {
         const replyText = await suppressSdkOutput(async () => {
-          const client = new AUNClient({ aun_path: aunPath, debug: false } as any);
+          const client = await createAunClient({ aunPath });
           await client.auth.createAid({ aid });
           const authResult = await client.auth.authenticate({ aid });
           const at = authResult?.access_token || (client as any)._access_token;
@@ -594,7 +593,7 @@ export async function cmdNet(args: string[]): Promise<void> {
   const sub = args[0];
   const formatJson = args.includes('--format') && args.includes('json');
 
-  if (sub === 'help' || sub === '--help' || sub === '-h') {
+  if (isHelpFlag(sub)) {
     console.log(`用法: evolclaw net check [<aid>] [--format json]
 
 检查 AUN 网络链路连通性（10 步逐层诊断）。

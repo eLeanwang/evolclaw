@@ -1,8 +1,7 @@
 import fs from 'fs';
 import path from 'path';
-import os from 'os';
-import { getAunClient } from './client.js';
-import { agentMdPath, aidLocalDir, aidsDir, resolveRoot } from '../../paths.js';
+import { getAunClient, createAunClient } from './client.js';
+import { agentMdPath, aidLocalDir, resolveRoot } from '../../paths.js';
 
 export interface AgentmdGetResult {
   content: string;
@@ -88,14 +87,7 @@ async function verifyContent(content: string, aid: string, certPem: string | und
  * Create a bare AUNClient (no createAid) for read-only operations.
  */
 async function createBareClient(aunPath?: string): Promise<any> {
-  const p = aunPath ?? resolveRoot();
-  const { AUNClient } = await import('@agentunion/fastaun');
-  const caCertPath = path.join(p, 'CA', 'root', 'root.crt');
-  const clientOpts: any = { aun_path: p, debug: false };
-  if (fs.existsSync(caCertPath)) clientOpts.root_ca_path = caCertPath;
-  const client = new AUNClient(clientOpts);
-  client.setAgentMdPath(aidsDir());
-  return client;
+  return createAunClient({ aunPath });
 }
 
 /**

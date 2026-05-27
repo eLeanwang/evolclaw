@@ -6,6 +6,7 @@ import { resolveAnthropicConfig } from './agents/resolve.js';
 import { loadDefaults, loadAllAgents, mergeForAgent, ensureAgentDirSkeleton, autoMigrateIfNeeded, migrateIdentitiesIfNeeded } from './config-store.js';
 import type { Config, MergedAgentConfig, AgentConfig, DefaultsConfig } from './types.js';
 import { CONFIG_SCHEMA_VERSION } from './types.js';
+import dotenv from 'dotenv';
 import { SessionManager } from './core/session/session-manager.js';
 import { ClaudeAgentPlugin } from './agents/claude-runner.js';
 import { CodexAgentPlugin } from './agents/codex-runner.js';
@@ -185,6 +186,9 @@ async function main() {
 
   // 确保数据目录存在
   ensureDataDirs();
+
+  // 加载 $EVOLCLAW_HOME/.env 到 process.env（不覆盖已存在的变量）
+  dotenv.config({ path: path.join(resolvePaths().root, '.env') });
 
   // ── 单实例保护（pre-check + post-write self-check）──
   // pre-check：发现已有活 main 直接退出，避免起任何副作用

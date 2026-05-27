@@ -129,6 +129,7 @@ export function ensureDataDirs(): void {
   fs.mkdirSync(p.eckDir, { recursive: true });
   fs.mkdirSync(eckDebugDir(), { recursive: true });
   fs.mkdirSync(aidsDir(), { recursive: true });
+  seedConfigTemplates();
   migrateFromAun();
 }
 
@@ -185,6 +186,30 @@ function migrateFromAun(): void {
   } catch { /* best-effort */ }
 
   try { fs.writeFileSync(markerPath, new Date().toISOString(), 'utf-8'); } catch {}
+}
+
+/**
+ * 首次运行时从 assets/ 模板拷贝 config.json 和 .env 到 $EVOLCLAW_HOME。
+ * 已存在则跳过，不覆盖用户修改。
+ */
+function seedConfigTemplates(): void {
+  const root = resolveRoot();
+  const assetsDir = path.join(getPackageRoot(), 'assets');
+
+  const templates: Array<{ src: string; dst: string }> = [
+    { src: 'config.json.template', dst: 'config.json' },
+    { src: '.env.template', dst: '.env' },
+  ];
+
+  for (const { src, dst } of templates) {
+    const dstPath = path.join(root, dst);
+    if (fs.existsSync(dstPath)) continue;
+    const srcPath = path.join(assetsDir, src);
+    if (!fs.existsSync(srcPath)) continue;
+    try {
+      fs.copyFileSync(srcPath, dstPath);
+    } catch { /* best-effort */ }
+  }
 }
 
 // ── kits 路径（始终从包内读取，不复制到 EVOLCLAW_HOME）──

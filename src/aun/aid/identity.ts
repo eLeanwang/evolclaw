@@ -2,15 +2,30 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
-import { getAunClient, downloadCaRoot } from './client.js';
+import { getAunClient, createAunClient, downloadCaRoot } from './client.js';
 import { resolvePaths, aidsDir as evolclawAidsDir, agentMdPath, aunPath as defaultAunPath } from '../../paths.js';
-import type { AidInfo, AidShowResult, AidLookupResult, AidCreateResult } from './types.js';
+import type { AidInfo, AidCategory, AidShowResult, AidLookupResult, AidCreateResult } from './types.js';
 
 // ==================== Validation ====================
 
 export function isValidAid(name: string): boolean {
   const labels = name.split('.');
   return labels.length >= 3 && labels.every(l => /^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?$/.test(l));
+}
+
+/**
+ * 根据扫描得到的状态推断 AID 分类。
+ *  - hasPrivateKey + signVerified=true            → mine
+ *  - hasPrivateKey + (signVerified=false 或未实测) → broken
+ *  - !hasPrivateKey + hasCert                     → peer-cert
+ *  - !hasPrivateKey + !hasCert                    → no-cert
+ */
+function categorizeAid(info: { hasPrivateKey: boolean; hasCert: boolean; signVerified: boolean | null; canSign: boolean }): AidCategory {
+  if (info.hasPrivateKey) {
+    if (info.signVerified === true) return 'mine';
+    return 'broken';
+  }
+  return info.hasCert ? 'peer-cert' : 'no-cert';
 }
 
 // ==================== AID Operations ====================
@@ -24,15 +39,138 @@ export function aidList(aunPath?: string): AidInfo[] {
   if (fs.existsSync(aunAidsDir)) {
     for (const e of fs.readdirSync(aunAidsDir, { withFileTypes: true })) {
       if (!e.isDirectory()) continue;
+      const aidDir = path.join(aunAidsDir, e.name);
+      const keyJsonPath = path.join(aidDir, 'private', 'key.json');
+      const hasPrivateKey = fs.existsSync(path.join(aidDir, 'private'));
+      const certPath = path.join(aidDir, 'public', 'cert.pem');
+      let hasCert = false;
+      let certExpired = false;
+      let keyMatchesCert: boolean | null = null;
+      if (fs.existsSync(certPath)) {
+        hasCert = true;
+        try {
+          const certPem = fs.readFileSync(certPath, 'utf-8');
+          const x509 = new crypto.X509Certificate(certPem);
+          certExpired = new Date(x509.validTo) < new Date();
+          if (hasPrivateKey && fs.existsSync(keyJsonPath)) {
+            try {
+              const kp = JSON.parse(fs.readFileSync(keyJsonPath, 'utf-8'));
+              const localPubB64 = typeof kp?.public_key_der_b64 === 'string' ? kp.public_key_der_b64 : '';
+              if (localPubB64) {
+                const certPubDer = x509.publicKey.export({ type: 'spki', format: 'der' });
+                const localPubDer = Buffer.from(localPubB64, 'base64');
+                keyMatchesCert = certPubDer.equals(localPubDer);
+              }
+            } catch { /* key.json 不可解析视作不匹配 */ keyMatchesCert = false; }
+          }
+        } catch {
+          // 证书无法解析视为过期 / 不可用
+          certExpired = true;
+        }
+      }
       seen.set(e.name, {
         aid: e.name,
-        hasPrivateKey: fs.existsSync(path.join(aunAidsDir, e.name, 'private')),
+        category: categorizeAid({
+          hasPrivateKey,
+          hasCert,
+          // 静态扫描没跑实测，用 canSign 作为 mine/broken 的近似判定
+          signVerified: hasPrivateKey ? (hasCert && !certExpired && keyMatchesCert === true) : null,
+          canSign: hasPrivateKey && hasCert && !certExpired && keyMatchesCert === true,
+        }),
+        hasPrivateKey,
         hasAgentMd: fs.existsSync(agentMdPath(e.name)),
+        hasCert,
+        certExpired,
+        keyMatchesCert,
+        canSign: hasPrivateKey && hasCert && !certExpired && keyMatchesCert === true,
+        signVerified: null,
       });
     }
   }
 
   return [...seen.values()];
+}
+
+// ==================== Sign Self-Test ====================
+
+/**
+ * 实跑一次本地 sign + verify，验证 AID 是否真能签名/验签。
+ * 全本地（不联网）：用 SDK 解密私钥 → ECDSA 签 payload → 用本地 cert 公钥验。
+ * 任一环节失败都视为不可签——包括私钥 passphrase 解不开、cert 被 SDK 主动 discard 等。
+ */
+export async function verifySignAbility(
+  aid: string,
+  opts?: { aunPath?: string; client?: any }
+): Promise<{ ok: boolean; reason?: string }> {
+  const aunPath = opts?.aunPath ?? defaultAunPath();
+  let ownClient: any = null;
+  try {
+    let client = opts?.client;
+    if (!client) {
+      client = await createAunClient({ aunPath });
+      ownClient = client;
+    }
+    const probe = `# probe\naid: "${aid}"\n`;
+    let signed: string;
+    try {
+      signed = await client.auth.signAgentMd(probe, { aid });
+    } catch (e: any) {
+      return { ok: false, reason: `sign failed: ${String(e?.message || e).slice(0, 120)}` };
+    }
+    const certPath = path.join(aunPath, 'AIDs', aid, 'public', 'cert.pem');
+    const certPem = fs.existsSync(certPath) ? fs.readFileSync(certPath, 'utf-8') : '';
+    if (!certPem) return { ok: false, reason: 'cert.pem missing' };
+    let result: any;
+    try {
+      result = await client.auth.verifyAgentMd(signed, { aid, certPem });
+    } catch (e: any) {
+      return { ok: false, reason: `verify threw: ${String(e?.message || e).slice(0, 120)}` };
+    }
+    const verified = result?.status === 'verified' || result?.verified === true;
+    if (verified) return { ok: true };
+    return { ok: false, reason: `verify failed: ${result?.status ?? 'unknown'}${result?.reason ? ' — ' + result.reason : ''}` };
+  } finally {
+    if (ownClient) {
+      try { await ownClient.close(); } catch { /* ignore */ }
+    }
+  }
+}
+
+/**
+ * aidList 的"实测版"：先做静态扫描，再对每个 AID 跑一次本地 sign+verify。
+ * 共用同一个 AUNClient 实例，避免重复初始化 secret-store / sqlite。
+ */
+export async function aidListVerified(aunPath?: string): Promise<AidInfo[]> {
+  const list = aidList(aunPath);
+  const root = aunPath ?? defaultAunPath();
+  const client = await createAunClient({ aunPath: root });
+  try {
+    for (const a of list) {
+      // canSign=false 的 AID 不必跑实测，结论已经明确
+      if (!a.canSign) {
+        a.signVerified = false;
+        if (!a.hasPrivateKey) a.signError = 'no private key';
+        else if (!a.hasCert) a.signError = 'no cert';
+        else if (a.certExpired) a.signError = 'cert expired';
+        else if (a.keyMatchesCert === false) a.signError = 'key/cert public-key mismatch';
+        a.category = categorizeAid({
+          hasPrivateKey: a.hasPrivateKey, hasCert: a.hasCert,
+          signVerified: a.signVerified, canSign: a.canSign,
+        });
+        continue;
+      }
+      const r = await verifySignAbility(a.aid, { aunPath: root, client });
+      a.signVerified = r.ok;
+      if (!r.ok) a.signError = r.reason;
+      a.category = categorizeAid({
+        hasPrivateKey: a.hasPrivateKey, hasCert: a.hasCert,
+        signVerified: a.signVerified, canSign: a.canSign,
+      });
+    }
+  } finally {
+    try { await client.close(); } catch { /* ignore */ }
+  }
+  return list;
 }
 
 export async function aidCreate(aid: string, opts?: { aunPath?: string }): Promise<AidCreateResult> {
@@ -44,9 +182,8 @@ export async function aidCreate(aid: string, opts?: { aunPath?: string }): Promi
     return { aid, alreadyExisted: true, gateway: '', client };
   }
 
-  const { AUNClient, GatewayDiscovery } = await import('@agentunion/fastaun');
-  let client = new AUNClient({ aun_path: aunPath });
-  client.setAgentMdPath(evolclawAidsDir());
+  const { GatewayDiscovery } = await import('@agentunion/fastaun');
+  let client = await createAunClient({ aunPath });
 
   try {
     const result = await client.auth.createAid({ aid });
@@ -57,8 +194,7 @@ export async function aidCreate(aid: string, opts?: { aunPath?: string }): Promi
     const caCertPath = path.join(aunPath, 'CA', 'root', 'root.crt');
     if (caDownloaded && fs.existsSync(caCertPath)) {
       try { await client.close(); } catch { /* ignore */ }
-      client = new AUNClient({ aun_path: aunPath, root_ca_path: caCertPath });
-      client.setAgentMdPath(evolclawAidsDir());
+      client = await createAunClient({ aunPath });
       await client.auth.createAid({ aid });
     }
 
@@ -93,6 +229,7 @@ export async function aidShow(aid: string, opts?: { aunPath?: string }): Promise
   let certSubject: string | null = null;
   let certExpired = false;
   let certPem: string | null = null;
+  let keyMatchesCert: boolean | null = null;
   const certPath = path.join(aidDir, 'public', 'cert.pem');
   if (fs.existsSync(certPath)) {
     try {
@@ -101,24 +238,47 @@ export async function aidShow(aid: string, opts?: { aunPath?: string }): Promise
       certExpiresAt = x509.validTo;
       certSubject = x509.subject;
       certExpired = new Date(x509.validTo) < new Date();
+      const keyJsonPath = path.join(aidDir, 'private', 'key.json');
+      if (hasPrivateKey && fs.existsSync(keyJsonPath)) {
+        try {
+          const kp = JSON.parse(fs.readFileSync(keyJsonPath, 'utf-8'));
+          const localPubB64 = typeof kp?.public_key_der_b64 === 'string' ? kp.public_key_der_b64 : '';
+          if (localPubB64) {
+            const certPubDer = x509.publicKey.export({ type: 'spki', format: 'der' });
+            const localPubDer = Buffer.from(localPubB64, 'base64');
+            keyMatchesCert = certPubDer.equals(localPubDer);
+          }
+        } catch { keyMatchesCert = false; }
+      }
     } catch { /* ignore parse errors */ }
   }
 
   let agentMdSignature: 'verified' | 'invalid' | 'unsigned' | 'unknown' = 'unknown';
   let agentMdSignatureReason: string | undefined;
-  if (hasAgentMd) {
-    try {
-      const content = fs.readFileSync(agentMdPath(aid), 'utf-8');
-      if (!content.includes('AUN-SIGNATURE')) {
-        agentMdSignature = 'unsigned';
-      } else {
-        // 用 SDK 验签（本地证书，无需网络）
-        const { AUNClient } = await import('@agentunion/fastaun');
-        const clientOpts: any = { aun_path: aunPath, debug: false };
-        const caCertPath = path.join(aunPath, 'CA', 'root', 'root.crt');
-        if (fs.existsSync(caCertPath)) clientOpts.root_ca_path = caCertPath;
-        const client = new AUNClient(clientOpts);
-        try {
+  let signVerified: boolean | null = null;
+  let signError: string | undefined;
+
+  // 先做一次签名自检（共享 client，避免重复起 SDK）
+  const client = await createAunClient({ aunPath });
+  try {
+    if (hasPrivateKey && certPem && !certExpired && keyMatchesCert !== false) {
+      const r = await verifySignAbility(aid, { aunPath, client });
+      signVerified = r.ok;
+      if (!r.ok) signError = r.reason;
+    } else {
+      signVerified = false;
+      if (!hasPrivateKey) signError = 'no private key';
+      else if (!certPem) signError = 'no cert';
+      else if (certExpired) signError = 'cert expired';
+      else if (keyMatchesCert === false) signError = 'key/cert public-key mismatch';
+    }
+
+    if (hasAgentMd) {
+      try {
+        const content = fs.readFileSync(agentMdPath(aid), 'utf-8');
+        if (!content.includes('AUN-SIGNATURE')) {
+          agentMdSignature = 'unsigned';
+        } else {
           const result = await client.auth.verifyAgentMd(content, { aid, ...(certPem ? { certPem } : {}) });
           if (result.status === 'verified' || result.verified) {
             agentMdSignature = 'verified';
@@ -128,17 +288,17 @@ export async function aidShow(aid: string, opts?: { aunPath?: string }): Promise
             agentMdSignature = 'invalid';
             agentMdSignatureReason = result.reason;
           }
-        } finally {
-          try { await client.close(); } catch {}
         }
+      } catch (e: any) {
+        agentMdSignature = 'unknown';
+        agentMdSignatureReason = String(e?.message || e).slice(0, 100);
       }
-    } catch (e: any) {
-      agentMdSignature = 'unknown';
-      agentMdSignatureReason = String(e?.message || e).slice(0, 100);
     }
+  } finally {
+    try { await client.close(); } catch {}
   }
 
-  return { aid, hasPrivateKey, hasAgentMd, certExpiresAt, certSubject, certExpired, agentMdSignature, agentMdSignatureReason };
+  return { aid, hasPrivateKey, hasAgentMd, certExpiresAt, certSubject, certExpired, keyMatchesCert, signVerified, signError, agentMdSignature, agentMdSignatureReason };
 }
 
 // ==================== Delete ====================
@@ -150,6 +310,98 @@ export function aidDelete(aid: string, opts?: { aunPath?: string }): boolean {
   if (!fs.existsSync(aidDir)) return false;
   fs.rmSync(aidDir, { recursive: true, force: true });
   return true;
+}
+
+// ==================== PKI Cert Probe ====================
+
+/**
+ * 从 PKI 拉云端证书，与本地 key.json 公钥比对，判断 AID 是否还能恢复。
+ *
+ * 返回:
+ *   - 'recoverable'      云端公钥 == 本地 key.json，意味着用本地私钥可继续工作（cert.pem 可重下）
+ *   - 'unrecoverable'    云端公钥 != 本地 key.json，本地私钥已被服务端弃用
+ *   - 'no-key'           本地无 key.json（外部 AID）
+ *   - 'no-server-record' 服务端未注册或拉证书失败（视为联系不上对端）
+ *   - 'unknown'          网络/证书解析等异常
+ */
+export type PkiRecoverability =
+  | { kind: 'recoverable'; serverCertPubB64: string }
+  | { kind: 'unrecoverable'; reason: string }
+  | { kind: 'no-key' }
+  | { kind: 'no-server-record'; reason: string }
+  | { kind: 'unknown'; reason: string };
+
+export async function probePkiRecoverability(
+  aid: string,
+  opts?: { aunPath?: string; timeoutMs?: number }
+): Promise<PkiRecoverability> {
+  const aunPath = opts?.aunPath ?? defaultAunPath();
+  const timeoutMs = opts?.timeoutMs ?? 8000;
+  const keyJsonPath = path.join(aunPath, 'AIDs', aid, 'private', 'key.json');
+  if (!fs.existsSync(keyJsonPath)) return { kind: 'no-key' };
+
+  let localPubB64 = '';
+  try {
+    const kp = JSON.parse(fs.readFileSync(keyJsonPath, 'utf-8'));
+    if (typeof kp?.public_key_der_b64 !== 'string' || !kp.public_key_der_b64) {
+      return { kind: 'unknown', reason: 'key.json missing public_key_der_b64' };
+    }
+    localPubB64 = kp.public_key_der_b64;
+  } catch (e: any) {
+    return { kind: 'unknown', reason: `key.json parse failed: ${String(e?.message || e).slice(0, 80)}` };
+  }
+
+  // 1. 发现网关
+  let gateway = '';
+  try {
+    const ctl = AbortSignal.timeout(timeoutMs);
+    const gwResp = await fetch(`https://${aid}/.well-known/aun-gateway`, { redirect: 'follow', signal: ctl });
+    if (gwResp.ok) {
+      const text = (await gwResp.text()).trim();
+      try {
+        const parsed = JSON.parse(text);
+        gateway = parsed?.gateways?.[0]?.url || text;
+      } catch { gateway = text; }
+    }
+  } catch (e: any) {
+    return { kind: 'no-server-record', reason: `gateway discovery failed: ${String(e?.message || e).slice(0, 80)}` };
+  }
+  if (!gateway) return { kind: 'no-server-record', reason: 'no gateway for AID' };
+
+  // 2. 拉云端 cert
+  let certPem = '';
+  try {
+    const parsed = new URL(gateway);
+    const scheme = parsed.protocol === 'wss:' ? 'https:' : 'http:';
+    const certUrl = `${scheme}//${parsed.host}/pki/cert/${encodeURIComponent(aid)}`;
+    const ctl = AbortSignal.timeout(timeoutMs);
+    const resp = await fetch(certUrl, { redirect: 'follow', signal: ctl });
+    if (!resp.ok) {
+      return { kind: 'no-server-record', reason: `pki/cert HTTP ${resp.status}` };
+    }
+    certPem = (await resp.text()).trim();
+    if (!certPem.includes('BEGIN CERTIFICATE')) {
+      return { kind: 'no-server-record', reason: 'pki/cert returned non-cert content' };
+    }
+  } catch (e: any) {
+    return { kind: 'no-server-record', reason: `pki/cert fetch failed: ${String(e?.message || e).slice(0, 80)}` };
+  }
+
+  // 3. 比对公钥
+  try {
+    const x509 = new crypto.X509Certificate(certPem);
+    const certPubDer = x509.publicKey.export({ type: 'spki', format: 'der' });
+    const localPubDer = Buffer.from(localPubB64, 'base64');
+    if (certPubDer.equals(localPubDer)) {
+      return { kind: 'recoverable', serverCertPubB64: certPubDer.toString('base64') };
+    }
+    return {
+      kind: 'unrecoverable',
+      reason: 'server has different public key registered, current local private key cannot be used',
+    };
+  } catch (e: any) {
+    return { kind: 'unknown', reason: `cert parse failed: ${String(e?.message || e).slice(0, 80)}` };
+  }
 }
 
 // ==================== Lookup ====================

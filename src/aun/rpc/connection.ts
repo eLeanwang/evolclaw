@@ -1,7 +1,6 @@
-import fs from 'fs';
-import path from 'path';
-import os from 'os';
-import { aidsDir, aunPath as defaultAunPath } from '../../paths.js';
+import { aunPath as defaultAunPath } from '../../paths.js';
+import { createAunClient } from '../aid/client.js';
+import { loadProcessConfig } from '../../config-store.js';
 
 export interface ShortConnection {
   call(method: string, params: any): Promise<any>;
@@ -17,16 +16,11 @@ export interface ShortConnectionOpts {
 export async function createShortConnection(aid: string, opts?: ShortConnectionOpts): Promise<ShortConnection> {
   const aunPath = opts?.aunPath ?? defaultAunPath();
   const slotId = opts?.slotId ?? '';
-  const caCertPath = path.join(aunPath, 'CA', 'root', 'root.crt');
-  const { AUNClient } = await import('@agentunion/fastaun');
 
-  const encryptionSeed = process.env.AUN_ENCRYPTION_SEED || undefined;
-  const clientOpts: any = { aun_path: aunPath, debug: false };
-  if (fs.existsSync(caCertPath)) clientOpts.root_ca_path = caCertPath;
-  if (encryptionSeed) clientOpts.encryption_seed = encryptionSeed;
-
-  const client = new AUNClient(clientOpts);
-  client.setAgentMdPath(aidsDir());
+  const encryptionSeed = loadProcessConfig().aun?.encryptionSeed
+    || process.env.AUN_ENCRYPTION_SEED
+    || 'evol';
+  const client = await createAunClient({ aunPath, encryptionSeed });
   await client.auth.createAid({ aid });
   const authResult = await client.auth.authenticate({ aid });
 
