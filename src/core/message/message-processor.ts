@@ -1181,6 +1181,14 @@ export class MessageProcessor {
       await this.sessionManager.updateSession(session.id, { sessionMode: 'proactive' });
     }
 
+    // Proactive→Interactive 模式切换提示：上一轮 proactive 使用了标志位，本轮已切换为 interactive
+    if (session.sessionMode === 'interactive' && session.metadata?.lastProactiveFlag) {
+      message.content = '本轮会话已切换为 interactive 模式，无需调用工具发送消息。\n\n' + message.content;
+      delete session.metadata.lastProactiveFlag;
+      await this.sessionManager.updateSession(session.id, { metadata: session.metadata });
+      logger.info(`[MessageProcessor] Injected interactive mode hint for session ${session.id}`);
+    }
+
     // replyContext 不再写入 session.metadata（跟着 message 走，避免群聊多人覆盖）
 
     const absoluteProjectPath = path.isAbsolute(session.projectPath)
@@ -1420,6 +1428,16 @@ export class MessageProcessor {
           // 最终文本留给流结束后的统一 flush(true)
           if (renderer.hasContent()) {
             await renderer.flushActivitiesOnly();
+          }
+
+          // 检测 proactive 标志位，设置 lastProactiveFlag 供模式切换提示使用
+          if (session.sessionMode === 'proactive' && lastReplyText) {
+            if (/\[PROACTIVE:REPLY_CONFIRMED_(SENT|NONE)\]/.test(lastReplyText)) {
+              session.metadata = session.metadata || {};
+              session.metadata.lastProactiveFlag = true;
+              await this.sessionManager.updateSession(session.id, { metadata: session.metadata });
+              logger.debug(`[MessageProcessor] Set lastProactiveFlag for session ${session.id}`);
+            }
           }
         }
 
