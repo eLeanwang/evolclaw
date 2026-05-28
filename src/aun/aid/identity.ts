@@ -177,13 +177,39 @@ export async function aidListVerified(aunPath?: string): Promise<AidInfo[]> {
   return list;
 }
 
-export async function aidCreate(aid: string, opts?: { aunPath?: string }): Promise<AidCreateResult> {
+export async function aidCreate(aid: string, opts?: { aunPath?: string; force?: boolean }): Promise<AidCreateResult> {
   const aunPath = opts?.aunPath ?? defaultAunPath();
   const aidDir = path.join(aunPath, 'AIDs', aid);
+  const hasPrivateKey = fs.existsSync(path.join(aidDir, 'private'));
 
-  if (fs.existsSync(aidDir) && fs.existsSync(path.join(aidDir, 'private'))) {
-    const client = await getAunClient(aid, { aunPath });
-    return { aid, alreadyExisted: true, gateway: '', client };
+  // 如果私钥已存在，先验证签名能力
+  if (hasPrivateKey) {
+    const verifyResult = await verifySignAbility(aid, { aunPath });
+
+    if (verifyResult.ok) {
+      const client = await getAunClient(aid, { aunPath });
+      return { aid, alreadyExisted: true, gateway: '', client };
+    }
+
+    // 签名验证失败
+    if (!opts?.force) {
+      const error = new Error(
+        `AID ${aid} 已存在但身份无效（${verifyResult.reason || '签名验证失败'}）。\n` +
+        `使用 --force 参数尝试恢复或重新注册。`
+      ) as any;
+      error.code = 'AID_INVALID';
+      error.reason = verifyResult.reason;
+      throw error;
+    }
+
+    // --force：先尝试 authenticate 恢复证书
+    try {
+      const client = await getAunClient(aid, { aunPath });
+      return { aid, alreadyExisted: true, gateway: '', client };
+    } catch {
+      // authenticate 也失败，删除旧数据后重新注册
+      fs.rmSync(aidDir, { recursive: true, force: true });
+    }
   }
 
   const { GatewayDiscovery } = await import('@agentunion/fastaun');
