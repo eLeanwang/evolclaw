@@ -238,7 +238,7 @@ export class TriggerScheduler {
     return {
       channel: trigger.targetChannel,
       channelId: trigger.targetChannelId,
-      selfId: this.aid,
+      selfAID: this.aid,
       threadId: trigger.targetThreadId ?? '',
       agentId: trigger.agentId,
       chatType: 'private',

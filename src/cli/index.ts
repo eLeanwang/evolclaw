@@ -894,8 +894,8 @@ async function cmdStatus() {
           const configChannelNames = new Set<string>();
           for (const cfg of agents) {
             for (const inst of cfg.channels) {
-              // effective key: <type>#<urlEncode(selfPeerId)>#<name>
-              configChannelNames.add(`${inst.type}#${encodeURIComponent(cfg.aid)}#${inst.name}`);
+              // effective key: <type>#<selfAID>#<name>
+              configChannelNames.add(`${inst.type}#${cfg.aid}#${inst.name}`);
             }
           }
           for (const s of allSessions) {
@@ -1024,7 +1024,7 @@ async function cmdStatus() {
 }
 
 /**
- * 把 channel fingerprint 列表（`<type>#<selfPeerId>#<name>`）折叠成展示用摘要。
+ * 把 channel fingerprint 列表（`<type>#<selfAID>#<name>`）折叠成展示用摘要。
  *
  * 聚合规则：
  *   - 按 type 分组
@@ -2482,14 +2482,13 @@ function archiveSelfHealLog(
  * Searches across all channel types (feishu, wechat, aun) for a matching instance.
  */
 function resolveInstanceConfig(instanceName: string): { type: string; config: any } | null {
-  // 新结构：channel key 是 <type>#<selfPeerId>#<name>，解析后从对应 agent 的 channels[] 找
+  // 新结构：channel key 是 <type>#<selfAID>#<name>，解析后从对应 agent 的 channels[] 找
   const parts = instanceName.split('#');
   if (parts.length === 3) {
-    const [type, encodedSelfPeerId, name] = parts;
-    const selfPeerId = decodeURIComponent(encodedSelfPeerId);
+    const [type, selfAID, name] = parts;
     const { agents } = loadAllAgents();
-    // AUN channel 的 selfPeerId 就是 agent.aid
-    const agent = agents.find(a => a.aid === selfPeerId);
+    // AUN channel 的 selfAID 就是 agent.aid
+    const agent = agents.find(a => a.aid === selfAID);
     if (!agent) return null;
     const inst = agent.channels.find((c: any) => c.type === type && c.name === name);
     if (inst) return { type, config: inst };

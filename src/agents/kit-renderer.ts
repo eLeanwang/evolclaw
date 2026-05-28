@@ -49,6 +49,9 @@ const PARAM_DESCRIPTIONS: Record<string, string> = {
   EVOLCLAW_HOME: '用户数据根目录',
   PACKAGE_ROOT: 'evolclaw 包根目录',
   CURRENT_PROJECT: '当前项目完整路径',
+  PERSONAL_DIR: '当前 agent 个人数据目录',
+  RELATIONS_DIR: '当前 agent 关系数据目录',
+  VENUES_DIR: '当前 agent 环境数据目录',
   selfAid: '当前 agent 的 AID',
   selfName: '当前 agent 的显示名',
   hasPersona: '是否有 persona 内容',
@@ -62,10 +65,14 @@ const PARAM_DESCRIPTIONS: Record<string, string> = {
   chatType: '聊天类型（private=私聊 / group=群聊 / null=本地开发）',
   channel: '渠道类型（aun/feishu/wechat/dingtalk/qqbot/wecom）',
   venueUid: '场所唯一标识（预留）',
+  dispatch: '群分发模式（mention=被@才响应 / broadcast=所有消息都响应）',
+  clientType: '客户端类型（desktop/web/mobile）',
+  permissionMode: '权限模式（auto/bypass/request/edit/plan/noask/readonly）',
   capabilities: '当前渠道支持的能力列表',
   project: '当前项目目录名',
   sessionId: 'evolclaw 会话 ID',
   sessionName: '会话名称',
+  sessionKey: '会话路由键（channelType#urlEncode(channelId)#urlEncode(threadId)）',
   sessionCreatedAt: '会话创建时间（ISO）',
   threadId: '话题 ID（多话题路由时）',
   chatMode: '会话模式（interactive=同步交互 / proactive=主动推送）',
@@ -99,6 +106,9 @@ function buildPathMappings(vars: Vars): PathMapping[] {
   ];
 
   if (selfAid) {
+    mappings.push({ prefix: path.join(evolHome, 'agents', selfAid, 'personal'), alias: '$PERSONAL_DIR' });
+    mappings.push({ prefix: path.join(evolHome, 'agents', selfAid, 'relations'), alias: '$RELATIONS_DIR' });
+    mappings.push({ prefix: path.join(evolHome, 'agents', selfAid, 'venues'), alias: '$VENUES_DIR' });
     mappings.push({ prefix: path.join(evolHome, 'agents', selfAid), alias: '$AGENT_DIR' });
   }
   mappings.push({ prefix: evolHome, alias: '$EVOLCLAW_HOME' });

@@ -95,12 +95,12 @@ export class MessageBridge {
           logger.debug(`[MessageBridge] Command detected: "${cmdContent}", routing to handler`);
           // 命令也要记录入方向 jsonl（不创建 session，直接用 chatDirPath 计算路径）
           try {
-            const chatDir = chatDirPath(resolvePaths().sessionsDir, msg.channelType || effectiveChannelType, msg.channelId, msg.selfId);
+            const chatDir = chatDirPath(resolvePaths().sessionsDir, msg.channelType || effectiveChannelType, msg.channelId, msg.selfAID || '');
             const inboundEncrypt = msg.replyContext?.metadata?.encrypted != null ? !!(msg.replyContext.metadata.encrypted) : undefined;
             const inboundChatmode = msg.replyContext?.metadata?.chatmode as string | undefined;
             appendMessageLog(chatDir, buildInboundEntry({
               from: msg.peerId || 'unknown',
-              to: msg.selfId || 'self',
+              to: msg.selfAID || 'self',
               chatType: msg.chatType || 'private',
               groupId: msg.groupId ?? null,
               msgId: msg.messageId ?? null,
@@ -130,7 +130,7 @@ export class MessageBridge {
         // 话题会话创建时写入 replyContext（用于 threadId 路由）；主会话不写（避免群聊覆盖）
         if (msg.threadId && msg.replyContext) metadata.replyContext = msg.replyContext;
         // 写入实例名（审计 + 精确出站路由）
-        metadata.channelName = channelName;
+        metadata.channelKey = channelName;
         if (chatType === 'private' && msg.peerId) {
           metadata.peerId = msg.peerId;
           if (msg.peerName) metadata.peerName = msg.peerName;
@@ -151,7 +151,7 @@ export class MessageBridge {
           channelName, msg.channelId,
           effectiveProjectPath,
           msg.threadId, Object.keys(metadata).length ? metadata : undefined, undefined, msg.peerId, chatType,
-          undefined, msg.selfId, msg.channelType || effectiveChannelType,
+          undefined, msg.selfAID, msg.channelType || effectiveChannelType,
           msg.peerType
         );
 
@@ -167,7 +167,7 @@ export class MessageBridge {
           channel: channelName,
           channelType: msg.channelType || effectiveChannelType,
           channelId: msg.channelId, content,
-          selfId: msg.selfId,
+          selfAID: msg.selfAID,
           chatType,
           images: msg.images, timestamp: Date.now(),
           peerId: msg.peerId, peerName: msg.peerName,
@@ -183,7 +183,7 @@ export class MessageBridge {
         const inboundChatmode = msg.replyContext?.metadata?.chatmode as string | undefined;
         appendMessageLog(chatDir, buildInboundEntry({
           from: msg.peerId || 'unknown',
-          to: msg.selfId || 'self',
+          to: msg.selfAID || 'self',
           chatType,
           groupId: msg.groupId ?? null,
           msgId: msg.messageId ?? null,

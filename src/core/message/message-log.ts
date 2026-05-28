@@ -59,8 +59,8 @@ export function messageLogPath(chatDir: string): string {
   return path.join(chatDir, MESSAGE_LOG_FILE);
 }
 
-export function resolveChatDir(sessionsDir: string, channelType: string, channelId: string, selfId?: string | null): string {
-  return chatDirPath(sessionsDir, channelType, channelId, selfId);
+export function resolveChatDir(sessionsDir: string, channelType: string, channelId: string, selfAID: string): string {
+  return chatDirPath(sessionsDir, channelType, channelId, selfAID);
 }
 
 export function appendMessageLog(chatDir: string, entry: MessageLogEntry): void {

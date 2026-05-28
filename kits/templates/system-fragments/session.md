@@ -2,11 +2,17 @@
 project: {{project}} # 项目目录名
 CURRENT_PROJECT: {{CURRENT_PROJECT}} # 项目完整路径
 sessionId: {{sessionId}} # evolclaw 会话 ID
+{{?sessionKey}}
+sessionKey: {{sessionKey}} # 会话路由键（channelType#urlEncode(channelId)#urlEncode(threadId)）
+{{/}}
 {{?sessionName}}
 sessionName: {{sessionName}}
 {{/}}
 sessionCreatedAt: {{sessionCreatedAt}}
 chatMode: {{chatMode}} # interactive=同步对话 / proactive=主动推送（输出静默）
+{{?permissionMode}}
+permissionMode: {{permissionMode}} # auto / bypass / request / edit / plan / noask / readonly
+{{/}}
 {{?threadId}}
 threadId: {{threadId}} # 同一会话内的子话题 ID（多话题路由时）
 {{/}}

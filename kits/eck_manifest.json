@@ -4,76 +4,115 @@
     {
       "id": "rules",
       "type": "directory",
-      "path": "$PACKAGE_ROOT/kits/rules",
+      "path": "$KITS_RULES",
       "order": 10,
       "needsInjection": false,
       "when": "always",
-      "description": "ECK 核心规则（自动载入）"
+      "description": "ECK 核心规则（自动加载）"
     },
     {
       "id": "identity-layer",
       "type": "file",
-      "file": "$PACKAGE_ROOT/kits/templates/system-fragments/identity.md",
+      "file": "$KITS_FRAGMENTS/identity.md",
       "order": 20,
       "needsInjection": true,
-      "when": {
-        "var": "chatType",
-        "neq": null
-      },
+      "when": { "var": "chatType", "neq": null },
       "description": "身份层：我是谁"
+    },
+    {
+      "id": "persona",
+      "type": "file",
+      "file": "$PERSONAL_DIR/persona.md",
+      "order": 21,
+      "needsInjection": false,
+      "when": { "var": "chatType", "neq": null },
+      "description": "人格档案（persona.md）"
+    },
+    {
+      "id": "working-memory",
+      "type": "file",
+      "file": "$PERSONAL_DIR/memory/working.md",
+      "order": 22,
+      "needsInjection": false,
+      "when": { "var": "chatType", "neq": null },
+      "description": "当前关注（working memory）"
     },
     {
       "id": "relation-layer",
       "type": "file",
-      "file": "$PACKAGE_ROOT/kits/templates/system-fragments/relation.md",
+      "file": "$KITS_FRAGMENTS/relation.md",
       "order": 30,
       "needsInjection": true,
-      "when": {
-        "var": "chatType",
-        "in": ["private", "group"]
-      },
+      "when": { "var": "chatType", "in": ["private", "group"] },
       "description": "关系层：跟我聊天的是谁"
     },
     {
       "id": "peer-profile",
       "type": "file",
-      "file": "$EVOLCLAW_HOME/agents/{{selfAid}}/relations/{{peerKey}}/profile.md",
+      "file": "$RELATIONS_DIR/{{peerKey}}/profile.md",
       "order": 35,
       "needsInjection": false,
-      "when": {
-        "var": "peerKey",
-        "neq": null
-      },
+      "when": { "var": "peerKey", "neq": null },
       "description": "当前对端的关系档案"
     },
     {
-      "id": "venue-layer",
+      "id": "venue-fragment",
       "type": "file",
-      "file": "$PACKAGE_ROOT/kits/templates/system-fragments/venue.md",
+      "file": "$KITS_FRAGMENTS/venue.md",
       "order": 40,
       "needsInjection": true,
-      "when": {
-        "var": "chatType",
-        "neq": null
-      },
-      "description": "环境层：当前对话场景"
+      "when": { "var": "chatType", "neq": null },
+      "description": "环境层模板（基础参数）"
+    },
+    {
+      "id": "venue-chattype",
+      "type": "file",
+      "file": "$KITS_DOCS/venues/{{chatType}}.md",
+      "order": 41,
+      "needsInjection": false,
+      "when": { "var": "chatType", "neq": null },
+      "description": "场景通用文档（private/group）"
+    },
+    {
+      "id": "venue-channel-chattype",
+      "type": "file",
+      "file": "$KITS_DOCS/venues/{{channel}}-{{chatType}}.md",
+      "order": 42,
+      "needsInjection": false,
+      "when": { "var": "chatType", "neq": null },
+      "description": "渠道+场景文档（如 feishu-group）"
+    },
+    {
+      "id": "venue-group-profile",
+      "type": "file",
+      "file": "$VENUES_DIR/{{channel}}#{{groupId}}/profile.md",
+      "order": 43,
+      "needsInjection": false,
+      "when": { "var": "groupId", "neq": null },
+      "description": "具体群环境文档"
+    },
+    {
+      "id": "venue-client",
+      "type": "file",
+      "file": "$KITS_DOCS/venues/client-{{clientType}}.md",
+      "order": 44,
+      "needsInjection": false,
+      "when": { "var": "clientType", "neq": null },
+      "description": "客户端环境文档"
     },
     {
       "id": "channel-layer",
       "type": "file",
-      "file": "$PACKAGE_ROOT/kits/templates/system-fragments/channel.md",
+      "file": "$KITS_FRAGMENTS/channel.md",
       "order": 50,
       "needsInjection": true,
-      "when": {
-        "var": "channel",
-        "neq": null
-      },
+      "when": { "var": "channel", "neq": null },
       "description": "渠道层：通信渠道及能力"
     },
     {
       "id": "session",
       "type": "file",
-      "file": "$PACKAGE_ROOT/kits/templates/system-fragments/session.md",
+      "file": "$KITS_FRAGMENTS/session.md",
       "order": 60,
       "needsInjection": true,
       "when": "always",
@@ -82,13 +121,10 @@
     {
       "id": "baseagent",
       "type": "file",
-      "file": "$PACKAGE_ROOT/kits/templates/system-fragments/baseagent.md",
+      "file": "$KITS_FRAGMENTS/baseagent.md",
       "order": 70,
       "needsInjection": true,
-      "when": {
-        "var": "baseAgent",
-        "neq": null
-      },
+      "when": { "var": "baseAgent", "neq": null },
       "description": "Base Agent 特定配置"
     }
   ]

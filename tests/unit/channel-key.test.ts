@@ -5,7 +5,7 @@ import {
 
 describe('channel-key', () => {
   it('formats and parses round-trip', () => {
-    const k = { type: 'feishu', selfPeerId: 'secretary.agentid.pub', name: 'main' };
+    const k = { type: 'feishu', selfAID: 'secretary.agentid.pub', name: 'main' };
     const s = formatChannelKey(k);
     expect(s).toBe('feishu#secretary.agentid.pub#main');
     expect(parseChannelKey(s)).toEqual(k);
@@ -38,7 +38,16 @@ describe('channel-key', () => {
   });
 
   it('AID with multiple dots survives round-trip', () => {
-    const k = { type: 'aun', selfPeerId: 'review-bot.dept.example.agentid.pub', name: 'main' };
+    const k = { type: 'aun', selfAID: 'review-bot.dept.example.agentid.pub', name: 'main' };
     expect(parseChannelKey(formatChannelKey(k))).toEqual(k);
+  });
+
+  it('tryParseChannelKey correctly parses aun#alice.aid.pub#main', () => {
+    const result = tryParseChannelKey('aun#alice.aid.pub#main');
+    expect(result).toEqual({ type: 'aun', selfAID: 'alice.aid.pub', name: 'main' });
+  });
+
+  it('throws if selfAID contains #', () => {
+    expect(() => formatChannelKey({ type: 'aun', selfAID: 'bad#aid', name: 'main' })).toThrow(/contains '#'/);
   });
 });

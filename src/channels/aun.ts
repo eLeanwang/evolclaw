@@ -83,7 +83,7 @@ export interface AUNMessageHandler {
     channelId: string;
     channelType?: string;
     content: string;
-    selfId?: string;
+    selfAID?: string;
     groupId?: string;
     chatType: 'private' | 'group';
     peerId: string;
@@ -1367,7 +1367,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       channelId: event.channelId || '',
       channelType: 'aun',
       content: event.text || '',
-      selfId: this._aid,
+      selfAID: this._aid,
       groupId: event.groupId,
       chatType: event.chatType,
       peerId: event.userId || event.channelId || '',
@@ -1936,11 +1936,11 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
   private appendOutboundJsonl(channelId: string, text: string, msgId: string, encrypt: boolean, context?: ReplyContext, isGroup?: boolean, msgType: 'text' | 'thought' = 'text', source: 'daemon' | 'cli' | 'msg' | 'ctl' = 'daemon'): void {
     try {
       const sessionsDir = resolvePaths().sessionsDir;
-      const selfId = this.config.aid;
-      const chatDir = chatDirPath(sessionsDir, 'aun', channelId, selfId);
+      const selfAID = this.config.aid;
+      const chatDir = chatDirPath(sessionsDir, 'aun', channelId, selfAID);
       const chatmode = context?.metadata?.chatmode as string | undefined;
       appendMessageLog(chatDir, buildOutboundEntry({
-        from: selfId,
+        from: selfAID,
         to: channelId,
         chatType: isGroup ? 'group' : 'private',
         groupId: isGroup ? channelId : null,
@@ -2754,7 +2754,7 @@ export class AUNChannelPlugin implements ChannelPlugin {
                 channel: adapter.channelName,
                 channelType,
                 channelId: opts.channelId,
-                selfId: opts.selfId,
+                selfAID: opts.selfAID,
                 groupId: opts.groupId,
                 content: opts.content,
                 chatType: opts.chatType || 'private',

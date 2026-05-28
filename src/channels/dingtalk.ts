@@ -603,6 +603,7 @@ export class DingtalkChannelPlugin implements ChannelPlugin {
                 channel: adapter.channelName,
                 channelType,
                 channelId: event.channelId,
+                selfAID: (inst as any).agentName,
                 content: event.content,
                 images: event.images,
                 chatType: event.chatType || 'private',

@@ -19,6 +19,7 @@ import { renderKitSections, type KitRenderContext } from '../../agents/kit-rende
 import { normalizeBaseagent } from '../../agents/baseagent-normalize.js';
 import type { InteractionRouter } from '../interaction-router.js';
 import { renderActionAsText, renderCommandCardAsText } from '../interaction-router.js';
+import { formatPeerKey } from '../relation/peer-key.js';
 
 function getContextTooLongHint(agent: AgentRunnerFull): string {
   if (canCompactAgent(agent)) {
@@ -114,7 +115,7 @@ export class MessageProcessor {
   private isBackgroundSession(session: Session, _channel: string, _channelId: string): boolean {
     if (session.threadId) return false;
     // 使用 session 自身的 channelType 精确定位 active.json，避免扫描误匹配
-    const active = this.sessionManager.getActiveSessionSync(session.channel, session.channelId, session.channelType, session.selfId);
+    const active = this.sessionManager.getActiveSessionSync(session.channel, session.channelId, session.channelType, session.selfAID);
     return active ? session.id !== active.id : false;
   }
 
@@ -240,10 +241,10 @@ export class MessageProcessor {
   async processMessage(message: Message): Promise<void> {
     const idleMs = (this.globalSettings.idleMonitor?.timeout ?? 120) * 1000;
 
-    // 先解析会话，再优先用 session.metadata.channelName 精确定位实例级 adapter
+    // 先解析会话，再优先用 session.metadata.channelKey 精确定位实例级 adapter
     // message.channel 现在存实例名（channelName），可直接用于精确路由
     const { session, absoluteProjectPath } = await this.resolveSession(message);
-    const channelKey = session.metadata?.channelName || message.channel;
+    const channelKey = session.metadata?.channelKey || message.channel;
     const channelInfo = this.resolveChannelInfo(channelKey);
 
     if (!channelInfo) {
@@ -383,7 +384,7 @@ export class MessageProcessor {
   /** 自动安全模式已禁用：仅保留错误计数，不再自动切换状态 */
   private async _processMessageInternal(message: Message, session: Session, absoluteProjectPath: string, resetTimer: (eventType?: string, toolName?: string) => void, shouldSuppress: () => boolean): Promise<void> {
     const messageId = `${message.channel}_${message.channelId}_${message.timestamp || Date.now()}`;
-    const channelKey = session.metadata?.channelName || message.channel;
+    const channelKey = session.metadata?.channelKey || message.channel;
     const channelInfo = this.resolveChannelInfo(channelKey);
     // Per-method agent name for stats bucketing (agent.name or '<unknown>')
     const agentNameForStats = this.agentRegistry?.resolveByChannel(channelKey)?.name ?? '<unknown>';
@@ -601,10 +602,10 @@ export class MessageProcessor {
         if (persona) contextParts.push(persona);
         if (working) contextParts.push(`[当前关注]\n${working}`);
 
-        // 计算 peerKey: <channel>#<urlEncode(peerId)>
+        // 计算 peerKey: <channelType>#<urlEncode(peerId)>
         const peerIdRaw = message.peerId;
         const peerKey = (currentChannelType && peerIdRaw)
-          ? `${currentChannelType}#${encodeURIComponent(peerIdRaw)}`
+          ? formatPeerKey(currentChannelType, peerIdRaw)
           : undefined;
 
         const normalizedBaseagent = normalizeBaseagent(agent.name);
@@ -616,6 +617,10 @@ export class MessageProcessor {
             EVOLCLAW_HOME: resolveRoot(),
             PACKAGE_ROOT: getPackageRoot(),
             CURRENT_PROJECT: absoluteProjectPath,
+            // 路径变量(用于 manifest 路径展开,resolvePath 用 ctx.vars 取真值)
+            PERSONAL_DIR: selfAid ? path.join(resolveRoot(), 'agents', selfAid, 'personal') : undefined,
+            RELATIONS_DIR: selfAid ? path.join(resolveRoot(), 'agents', selfAid, 'relations') : undefined,
+            VENUES_DIR: selfAid ? path.join(resolveRoot(), 'agents', selfAid, 'venues') : undefined,
             selfAid: selfAid || undefined,
             selfName: selfName || undefined,
             hasPersona: !!persona,
@@ -629,12 +634,18 @@ export class MessageProcessor {
             chatType: session.chatType || null,
             channel: currentChannelType || null,
             venueUid: undefined,
+            // 群分发模式 / 客户端类型 / 权限模式
+            dispatch: session.metadata?.dispatchMode || undefined,
+            clientType: message.clientType || undefined,
+            permissionMode: session.metadata?.permissionMode || 'auto',
             capabilities: capParts.length > 0 ? capParts.join('、') : undefined,
             project: path.basename(absoluteProjectPath),
             sessionId: session.id,
             sessionName: session.name || undefined,
             sessionCreatedAt: session.createdAt ? new Date(session.createdAt).toISOString() : undefined,
             threadId: session.threadId || undefined,
+            // Stage 3: sessionKey 持久化字段
+            sessionKey: session.sessionKey,
             chatMode: isProactive ? 'proactive' : 'interactive',
             readonly: session.metadata?.permissionMode === 'readonly',
             baseAgent: normalizedBaseagent.canonical,
@@ -1099,7 +1110,7 @@ export class MessageProcessor {
             message.peerId,
             message.chatType,
             undefined,
-            message.selfId,
+            message.selfAID,
             message.channelType,
             message.peerType
           );
@@ -1161,7 +1172,7 @@ export class MessageProcessor {
       message.peerId,
       message.chatType,
       undefined,
-      message.selfId,
+      message.selfAID,
       message.channelType,
       message.peerType
     );
@@ -1213,7 +1224,7 @@ export class MessageProcessor {
     shouldSuppress: () => boolean
   ): Promise<{ isError: boolean; subtype?: string; errors?: string[]; terminalReason?: string; lastReplyText: string; fullText: string; hasReceivedText: boolean; numTurns?: number; usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } }> {
     // Per-session agent name for stats bucketing
-    const agentNameForStats = this.agentRegistry?.resolveByChannel(session.metadata?.channelName || session.channel)?.name ?? '<unknown>';
+    const agentNameForStats = this.agentRegistry?.resolveByChannel(session.metadata?.channelKey || session.channel)?.name ?? '<unknown>';
     let hasReceivedText = false;
     let hasErrorResult = false;  // 是否已有 tool_result/error 事件输出过错误
     let completeResult: { isError: boolean; subtype?: string; errors?: string[]; terminalReason?: string; lastReplyText: string; fullText: string; hasReceivedText: boolean; numTurns?: number; usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } } = { isError: false, lastReplyText: '', fullText: '', hasReceivedText: false };

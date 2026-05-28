@@ -6,12 +6,13 @@ import { encodePath } from '../../utils/cross-platform.js';
 import { EventBus } from '../event-bus.js';
 import type { SessionFileAdapter, SessionFileInfo, CliSessionEntry, SdkSessionEntry } from './session-file-adapter.js';
 import {
-  SessionFile, HealthRecord,
+  SessionFile, HealthRecord, ThreadIndexEntry,
   chatDirPath, generateSessionId, formatTimestamp,
   atomicWriteJson, appendJsonl, readJsonFile, readLastJsonlLine, readAllJsonlLines, scanChatDirs, scanMetaFiles,
   ensureChatDir, readThreadIndex, writeThreadIndex,
 } from './session-fs-store.js';
 import { sessionToFile, fileToSession } from './session-mapper.js';
+import { formatSessionKey, DEFAULT_THREAD_ID } from './session-key.js';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
@@ -117,33 +118,23 @@ export class SessionManager {
 
   /**
    * 解析 chat 目录路径。
-   * 1. 先扫描所有 chat 目录，按 channelId 查找匹配项（同时 channelType==channel 或缺失时直接 channelId 匹配）
-   * 2. 找不到则按 fallback：channelType=channel（实例名），selfId=null
-   *
-   * 这样保持兼容：不知道 channelType 的 caller 仍可以用 (channel, channelId) 调用。
+   * 需要明确的 channelType + selfAID 才能确定路径。
    */
-  private resolveChatDir(channel: string, channelId: string, channelType?: string, selfId?: string): string {
-    // 必须有明确 channelType 才能确定路径
-    if (!channelType) {
-      throw new Error(`[SessionManager] resolveChatDir requires channelType. Got channel="${channel}" channelId="${channelId}". Caller must pass channelType (e.g. 'aun', 'feishu').`);
-    }
-    return chatDirPath(this.sessionsDir, channelType, channelId, selfId);
+  private resolveChatDir(channel: string, channelId: string, channelType: string, selfAID: string): string {
+    return chatDirPath(this.sessionsDir, channelType, channelId, selfAID);
   }
 
   /**
-   * 给定明确的 channelType + selfId 时直接计算路径（不扫描）。
+   * 给定明确的 channelType + selfAID 时直接计算路径（不扫描）。
    * 用于 caller 已经知道完整路由信息的场景（如 message-bridge 透传）。
    */
-  private resolveChatDirExact(channel: string, channelId: string, channelType?: string, selfId?: string): string {
-    if (channelType) {
-      return chatDirPath(this.sessionsDir, channelType, channelId, selfId);
-    }
-    return this.resolveChatDirSafe(channel, channelId);
+  private resolveChatDirExact(channel: string, channelId: string, channelType: string, selfAID: string): string {
+    return chatDirPath(this.sessionsDir, channelType, channelId, selfAID);
   }
 
   private resolveChatDirFromSession(session: Session): string {
     const channelType = session.channelType || session.channel;
-    return chatDirPath(this.sessionsDir, channelType, session.channelId, session.selfId);
+    return chatDirPath(this.sessionsDir, channelType, session.channelId, session.selfAID);
   }
 
   /** Public accessor: get the chat directory path for a session (for message log etc.) */
@@ -152,49 +143,17 @@ export class SessionManager {
   }
 
   /** Like resolveChatDir but also ensures the dir + _threads + _trash exist. */
-  private ensureResolvedChatDir(channel: string, channelId: string, channelType?: string, selfId?: string): string {
-    const dir = this.resolveChatDir(channel, channelId, channelType, selfId);
+  private ensureResolvedChatDir(channel: string, channelId: string, channelType: string, selfAID: string): string {
+    const dir = this.resolveChatDir(channel, channelId, channelType, selfAID);
     fs.mkdirSync(dir, { recursive: true });
     fs.mkdirSync(path.join(dir, '_threads'), { recursive: true });
     fs.mkdirSync(path.join(dir, '_trash'), { recursive: true });
     return dir;
   }
 
-  /** 推断给定 chat 的 channelType（优先取 active.json）。无活跃时回落到 channel 实例名。 */
-  private inferChannelType(channel: string, channelId: string, chatDir?: string): string {
-    if (chatDir) {
-      const active = readJsonFile<SessionFile>(path.join(chatDir, 'active.json'));
-      if (active?.channelType) return active.channelType;
-    }
-    // 扫描已有目录
-    const dirs = scanChatDirs(this.sessionsDir);
-    for (const d of dirs) {
-      if (d.channelId !== channelId) continue;
-      const active = readJsonFile<SessionFile>(path.join(d.dirPath, 'active.json'));
-      if (active && active.channel === channel && active.channelType) return active.channelType;
-    }
-    throw new Error(`[SessionManager] Cannot infer channelType for channel="${channel}" channelId="${channelId}". No existing session found.`);
-  }
-
-  /** 从 active 推断 selfId（已有 session 的复用） */
-  private inferSelfId(channel: string, channelId: string, chatDir?: string): string | undefined {
-    if (chatDir) {
-      const active = readJsonFile<SessionFile>(path.join(chatDir, 'active.json'));
-      if (active?.selfId) return active.selfId;
-    }
-    // 扫描已有目录
-    const dirs = scanChatDirs(this.sessionsDir);
-    for (const d of dirs) {
-      if (d.channelId !== channelId) continue;
-      const active = readJsonFile<SessionFile>(path.join(d.dirPath, 'active.json'));
-      if (active && active.channel === channel) return active.selfId || undefined;
-    }
-    return undefined;
-  }
-
   /**
    * 扫描已有 chat 目录，找到匹配 channel+channelId 的目录并返回其 chatDir 路径。
-   * 用于不知道 channelType/selfId 的 caller 在调用 resolveChatDir 前定位已有目录。
+   * 用于不知道 channelType/selfAID 的 caller 在调用 resolveChatDir 前定位已有目录。
    */
   private findExistingChatDir(channel: string, channelId: string): string | undefined {
     const dirs = scanChatDirs(this.sessionsDir);
@@ -222,26 +181,26 @@ export class SessionManager {
   }
 
   /**
-   * 安全版 resolveChatDir：先尝试用提供的 channelType/selfId，
+   * 安全版 resolveChatDir：先尝试用提供的 channelType/selfAID，
    * 如果没有则扫描已有目录推断。用于操作已有 session 的公共方法。
    */
-  private resolveChatDirSafe(channel: string, channelId: string, channelType?: string, selfId?: string): string {
-    if (channelType) {
-      return this.resolveChatDir(channel, channelId, channelType, selfId);
+  private resolveChatDirSafe(channel: string, channelId: string, channelType?: string, selfAID?: string): string {
+    if (channelType && selfAID) {
+      return this.resolveChatDir(channel, channelId, channelType, selfAID);
     }
     // 尝试从已有目录推断
     const existingDir = this.findExistingChatDir(channel, channelId);
     if (existingDir) return existingDir;
-    throw new Error(`[SessionManager] Cannot resolve chat dir for channel="${channel}" channelId="${channelId}". No channelType provided and no existing session found.`);
+    throw new Error(`[SessionManager] Cannot resolve chat dir for channel="${channel}" channelId="${channelId}". No channelType/selfAID provided and no existing session found.`);
   }
 
   /**
-   * 安全版 ensureResolvedChatDir：先尝试用提供的 channelType/selfId，
+   * 安全版 ensureResolvedChatDir：先尝试用提供的 channelType/selfAID，
    * 如果没有则扫描已有目录推断。确保目录存在。
    */
-  private ensureResolvedChatDirSafe(channel: string, channelId: string, channelType?: string, selfId?: string): string {
-    if (channelType) {
-      return this.ensureResolvedChatDir(channel, channelId, channelType, selfId);
+  private ensureResolvedChatDirSafe(channel: string, channelId: string, channelType?: string, selfAID?: string): string {
+    if (channelType && selfAID) {
+      return this.ensureResolvedChatDir(channel, channelId, channelType, selfAID);
     }
     // 尝试从已有目录推断
     const existingDir = this.findExistingChatDir(channel, channelId);
@@ -252,18 +211,14 @@ export class SessionManager {
       fs.mkdirSync(path.join(existingDir, '_trash'), { recursive: true });
       return existingDir;
     }
-    // 回退：推断 channelType 和 selfId
-    const inferredType = this.inferChannelType(channel, channelId);
-    const inferredSelfId = this.inferSelfId(channel, channelId);
-    return this.ensureResolvedChatDir(channel, channelId, inferredType, inferredSelfId);
+    throw new Error(`[SessionManager] Cannot resolve chat dir for channel="${channel}" channelId="${channelId}". No channelType/selfAID provided and no existing session found.`);
   }
 
-  private readActive(channel: string, channelId: string, channelType?: string, selfId?: string): Session | undefined {
+  private readActive(channel: string, channelId: string, channelType?: string, selfAID?: string): Session | undefined {
     let dir: string;
-    try {
-      dir = this.resolveChatDir(channel, channelId, channelType, selfId);
-    } catch {
-      // channelType not provided — try to find existing dir
+    if (channelType && selfAID) {
+      dir = this.resolveChatDir(channel, channelId, channelType, selfAID);
+    } else {
       const existingDir = this.findExistingChatDir(channel, channelId);
       if (!existingDir) return undefined;
       dir = existingDir;
@@ -279,11 +234,11 @@ export class SessionManager {
     atomicWriteJson(path.join(dir, 'active.json'), file);
   }
 
-  private clearActive(channel: string, channelId: string, channelType?: string, selfId?: string): void {
+  private clearActive(channel: string, channelId: string, channelType?: string, selfAID?: string): void {
     let dir: string;
-    try {
-      dir = this.resolveChatDir(channel, channelId, channelType, selfId);
-    } catch {
+    if (channelType && selfAID) {
+      dir = this.resolveChatDir(channel, channelId, channelType, selfAID);
+    } else {
       const existingDir = this.findExistingChatDir(channel, channelId);
       if (!existingDir) return;
       dir = existingDir;
@@ -294,7 +249,7 @@ export class SessionManager {
 
   private ensureChatDirForSession(session: Session): string {
     const channelType = session.channelType || session.channel;
-    return ensureChatDir(this.sessionsDir, channelType, session.channelId, session.selfId);
+    return ensureChatDir(this.sessionsDir, channelType, session.channelId, session.selfAID);
   }
 
   private metaFilePath(chatDir: string, sessionId: string): string {
@@ -533,12 +488,18 @@ export class SessionManager {
     userId?: string,
     chatType?: 'private' | 'group',
     agentId?: string,
-    selfId?: string,
+    selfAID?: string,
     channelType?: string,
     peerType?: string
   ): Promise<Session> {
+    if (!selfAID) {
+      throw new Error(`[SessionManager] getOrCreateSession requires selfAID. channel="${channel}" channelId="${channelId}"`);
+    }
+    if (!channelType) {
+      throw new Error(`[SessionManager] getOrCreateSession requires channelType. channel="${channel}" channelId="${channelId}"`);
+    }
     if (threadId) {
-      const session = this.getOrCreateThreadSession(channel, channelId, threadId, defaultProjectPath, metadata, name, agentId, selfId, channelType, peerType);
+      const session = this.getOrCreateThreadSession(channel, channelId, threadId, defaultProjectPath, metadata, name, agentId, selfAID, channelType, peerType);
       session.identity = this.resolveIdentity(channel, userId);
       if (session.metadata && !session.metadata.permissionMode) {
         session.metadata.permissionMode = DEFAULT_PERMISSION_MODE;
@@ -548,7 +509,7 @@ export class SessionManager {
     }
 
     // 使用精确路径解析（caller 提供了 channelType 时直接定位，避免扫描回落）
-    const exactDir = this.resolveChatDirExact(channel, channelId, channelType, selfId);
+    const exactDir = this.resolveChatDirExact(channel, channelId, channelType, selfAID);
     const activeFile = readJsonFile<SessionFile>(path.join(exactDir, 'active.json'));
     const active = activeFile ? fileToSession(activeFile) : undefined;
     if (active && !active.threadId) {
@@ -563,8 +524,8 @@ export class SessionManager {
         mutated = true;
       }
 
-      if (selfId && session.selfId !== selfId) {
-        session.selfId = selfId;
+      if (session.selfAID !== selfAID) {
+        session.selfAID = selfAID;
         mutated = true;
       }
 
@@ -572,12 +533,12 @@ export class SessionManager {
         if (!session.metadata) session.metadata = {};
         if (!session.metadata.peerId) { session.metadata.peerId = userId; mutated = true; }
         if (!session.metadata.peerName && metadata?.peerName) { session.metadata.peerName = metadata.peerName; mutated = true; }
-        if (metadata?.channelName && session.metadata.channelName !== metadata.channelName) { session.metadata.channelName = metadata.channelName; mutated = true; }
+        if (metadata?.channelKey && session.metadata.channelKey !== metadata.channelKey) { session.metadata.channelKey = metadata.channelKey; mutated = true; }
       }
-      if (metadata?.channelName && chatType !== 'private') {
+      if (metadata?.channelKey && chatType !== 'private') {
         if (!session.metadata) session.metadata = {};
-        if (session.metadata.channelName !== metadata.channelName) {
-          session.metadata.channelName = metadata.channelName;
+        if (session.metadata.channelKey !== metadata.channelKey) {
+          session.metadata.channelKey = metadata.channelKey;
           mutated = true;
         }
       }
@@ -590,7 +551,7 @@ export class SessionManager {
     }
 
     // Find existing session for default project path
-    const chatDir = this.resolveChatDir(channel, channelId, channelType, selfId);
+    const chatDir = this.resolveChatDir(channel, channelId, channelType, selfAID);
     const allSessions = this.findAllSessionsInChat(chatDir, false);
     const existing = allSessions
       .filter(s => s.projectPath === defaultProjectPath && !s.threadId)
@@ -603,8 +564,8 @@ export class SessionManager {
       session.identity = this.resolveIdentity(channel, userId);
 
       if (!session.metadata) session.metadata = {};
-      if (selfId && session.selfId !== selfId) {
-        session.selfId = selfId;
+      if (session.selfAID !== selfAID) {
+        session.selfAID = selfAID;
       }
       if (chatType && session.chatType !== chatType) {
         logger.info(`[SessionManager] Updating chatType for session ${session.id}: ${session.chatType} -> ${chatType}`);
@@ -627,12 +588,13 @@ export class SessionManager {
     const session: Session = {
       id: generateSessionId(),
       channel,
-      channelType: channelType || channel,
+      channelType,
       channelId,
-      selfId,
+      selfAID,
       projectPath: defaultProjectPath,
       threadId: '',
       agentId: agentId || 'claude',
+      sessionKey: formatSessionKey(channelType, channelId, DEFAULT_THREAD_ID),
       chatType: chatType || 'private',
       sessionMode: this.resolveDefaultSessionMode(channel, chatType || 'private', peerType),
       metadata: sessionMetadata,
@@ -679,19 +641,19 @@ export class SessionManager {
     metadata?: any,
     name?: string,
     agentId?: string,
-    selfId?: string,
+    selfAID?: string,
     channelType?: string,
     peerType?: string
   ): Session {
-    // 优先使用精确路径（channelType + selfId），避免 fallback 到错误目录
-    const chatDir = (channelType && selfId)
-      ? (() => { const d = chatDirPath(this.sessionsDir, channelType, channelId, selfId); fs.mkdirSync(d, { recursive: true }); fs.mkdirSync(path.join(d, '_threads'), { recursive: true }); return d; })()
-      : this.ensureResolvedChatDirSafe(channel, channelId, channelType);
+    // 使用精确路径（channelType + selfAID）
+    const chatDir = (channelType && selfAID)
+      ? (() => { const d = chatDirPath(this.sessionsDir, channelType, channelId, selfAID); fs.mkdirSync(d, { recursive: true }); fs.mkdirSync(path.join(d, '_threads'), { recursive: true }); return d; })()
+      : this.ensureResolvedChatDirSafe(channel, channelId, channelType, selfAID);
     const threadIndex = readThreadIndex(chatDir);
-    const existingMetaId = threadIndex[threadId];
+    const existingEntry = threadIndex[threadId];
 
-    if (existingMetaId) {
-      const metaPath = path.join(chatDir, '_threads', `${existingMetaId}.jsonl`);
+    if (existingEntry) {
+      const metaPath = path.join(chatDir, '_threads', `${existingEntry.sessionId}.jsonl`);
       const existing = this.readMetaLatest(metaPath);
       if (existing) {
         const validSessionId = this.validateSessionFile(existing);
@@ -705,19 +667,23 @@ export class SessionManager {
     }
 
     // Inherit project path & chatType from active main session
-    const activeMain = this.readActive(channel, channelId, channelType, selfId);
+    const activeMain = this.readActive(channel, channelId, channelType, selfAID);
     const projectPath = (activeMain && !activeMain.threadId ? activeMain.projectPath : undefined) || defaultProjectPath;
     const inheritedChatType = (activeMain && !activeMain.threadId ? activeMain.chatType : undefined) || 'private';
+
+    const effectiveChannelType = channelType || channel;
+    const sessionKey = formatSessionKey(effectiveChannelType, channelId, threadId);
 
     const session: Session = {
       id: generateSessionId(),
       channel,
-      channelType: channelType || channel,
+      channelType: effectiveChannelType,
       channelId,
-      selfId,
+      selfAID: selfAID || '',
       projectPath,
       threadId,
       agentId: agentId || 'claude',
+      sessionKey,
       chatType: inheritedChatType,
       sessionMode: this.resolveDefaultSessionMode(channel, inheritedChatType, peerType),
       metadata,
@@ -727,7 +693,11 @@ export class SessionManager {
     };
 
     this.appendMeta(channel, channelId, session);
-    threadIndex[threadId] = session.id;
+    threadIndex[threadId] = {
+      sessionId: session.id,
+      sessionKey,
+      metaFile: `${session.id}.jsonl`,
+    };
     writeThreadIndex(chatDir, threadIndex);
 
     this.eventBus.publish({
@@ -762,15 +732,21 @@ export class SessionManager {
       return target;
     }
 
+    // Derive selfAID and channelType from existing sessions in this chatDir
+    const existingAny = allSessions[0];
+    const selfAID = existingAny?.selfAID || '';
+    const channelType = existingAny?.channelType || channel;
+
     const session: Session = {
       id: generateSessionId(),
       channel,
-      channelType: this.inferChannelType(channel, channelId),
+      channelType,
       channelId,
-      selfId: this.inferSelfId(channel, channelId),
+      selfAID,
       projectPath: newProjectPath,
       threadId: '',
       agentId,
+      sessionKey: formatSessionKey(channelType, channelId, DEFAULT_THREAD_ID),
       chatType: inheritedChatType,
       sessionMode: this.resolveDefaultSessionMode(channel, inheritedChatType),
       metadata: {},
@@ -828,15 +804,21 @@ export class SessionManager {
       return target;
     }
 
+    // Derive selfAID and channelType from existing sessions in this chatDir
+    const existingAny = allSessions[0];
+    const selfAID = existingAny?.selfAID || '';
+    const channelType = existingAny?.channelType || channel;
+
     const session: Session = {
       id: generateSessionId(),
       channel,
-      channelType: this.inferChannelType(channel, channelId),
+      channelType,
       channelId,
-      selfId: this.inferSelfId(channel, channelId),
+      selfAID,
       projectPath,
       threadId: '',
       agentId: newAgentId,
+      sessionKey: formatSessionKey(channelType, channelId, DEFAULT_THREAD_ID),
       chatType: inheritedChatType,
       sessionMode: this.resolveDefaultSessionMode(channel, inheritedChatType),
       metadata: {},
@@ -902,8 +884,8 @@ export class SessionManager {
   }
 
   /** 同步版 getActiveSession，支持精确路径定位（避免扫描） */
-  getActiveSessionSync(channel: string, channelId: string, channelType?: string, selfId?: string): Session | undefined {
-    return this.readActive(channel, channelId, channelType, selfId);
+  getActiveSessionSync(channel: string, channelId: string, channelType?: string, selfAID?: string): Session | undefined {
+    return this.readActive(channel, channelId, channelType, selfAID);
   }
 
   async getThreadSession(channel: string, channelId: string, threadId: string): Promise<Session | undefined> {
@@ -914,9 +896,9 @@ export class SessionManager {
       return undefined;
     }
     const threadIndex = readThreadIndex(chatDir);
-    const metaId = threadIndex[threadId];
-    if (!metaId) return undefined;
-    const metaPath = path.join(chatDir, '_threads', `${metaId}.jsonl`);
+    const entry = threadIndex[threadId];
+    if (!entry) return undefined;
+    const metaPath = path.join(chatDir, '_threads', `${entry.sessionId}.jsonl`);
     const session = this.readMetaLatest(metaPath);
     if (!session) return undefined;
     const validSessionId = this.validateSessionFile(session);
@@ -1008,8 +990,8 @@ export class SessionManager {
     // If thread session, remove from thread-index
     if (found.isThread) {
       const threadIndex = readThreadIndex(found.chatDir);
-      for (const [tid, mid] of Object.entries(threadIndex)) {
-        if (mid === sessionId) { delete threadIndex[tid]; break; }
+      for (const [tid, entry] of Object.entries(threadIndex)) {
+        if (entry.sessionId === sessionId) { delete threadIndex[tid]; break; }
       }
       writeThreadIndex(found.chatDir, threadIndex);
     }
@@ -1050,25 +1032,28 @@ export class SessionManager {
   async createNewSession(channel: string, channelId: string, projectPath: string, name?: string, agentId?: string): Promise<Session> {
     const inheritedChatType = this.getActiveChatType(channel, channelId);
 
-    let inferredType: string;
-    let inferredSelfId: string | undefined;
-    try {
-      inferredType = this.inferChannelType(channel, channelId);
-      inferredSelfId = this.inferSelfId(channel, channelId);
-    } catch {
-      inferredType = channel;
-      inferredSelfId = undefined;
+    // Derive selfAID and channelType from existing sessions
+    const existingDir = this.findExistingChatDir(channel, channelId);
+    let channelType = channel;
+    let selfAID = '';
+    if (existingDir) {
+      const active = readJsonFile<SessionFile>(path.join(existingDir, 'active.json'));
+      if (active) {
+        channelType = active.channelType || channel;
+        selfAID = active.selfAID || '';
+      }
     }
 
     const session: Session = {
       id: generateSessionId(),
       channel,
-      channelType: inferredType,
+      channelType,
       channelId,
-      selfId: inferredSelfId,
+      selfAID,
       projectPath,
       threadId: '',
       agentId: agentId || 'claude',
+      sessionKey: formatSessionKey(channelType, channelId, DEFAULT_THREAD_ID),
       chatType: inheritedChatType,
       sessionMode: this.resolveDefaultSessionMode(channel, inheritedChatType),
       metadata: {},
@@ -1096,15 +1081,18 @@ export class SessionManager {
     forkedAgentSessionId: string,
     name?: string
   ): Promise<Session> {
+    const channelType = sourceSession.channelType || sourceSession.channel;
+    const threadId = sourceSession.threadId || '';
     const session: Session = {
       id: generateSessionId(),
       channel: sourceSession.channel,
-      channelType: sourceSession.channelType || sourceSession.channel,
+      channelType,
       channelId: sourceSession.channelId,
-      selfId: sourceSession.selfId,
+      selfAID: sourceSession.selfAID,
       projectPath: sourceSession.projectPath,
-      threadId: sourceSession.threadId || '',
+      threadId,
       agentId: sourceSession.agentId || 'claude',
+      sessionKey: formatSessionKey(channelType, sourceSession.channelId, threadId || DEFAULT_THREAD_ID),
       chatType: sourceSession.chatType || 'private',
       sessionMode: sourceSession.sessionMode || 'interactive',
       agentSessionId: forkedAgentSessionId,
@@ -1181,15 +1169,28 @@ export class SessionManager {
     const fileInfo = this.getSessionFileInfo(projectPath, agentSessionId, agentId);
     const name = fileInfo.title || `CLI会话-${new Date().toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}`;
 
+    // Derive selfAID and channelType from existing sessions
+    const existingDir = this.findExistingChatDir(channel, channelId);
+    let channelType = channel;
+    let selfAID = '';
+    if (existingDir) {
+      const active = readJsonFile<SessionFile>(path.join(existingDir, 'active.json'));
+      if (active) {
+        channelType = active.channelType || channel;
+        selfAID = active.selfAID || '';
+      }
+    }
+
     const session: Session = {
       id: generateSessionId(),
       channel,
-      channelType: this.inferChannelType(channel, channelId),
+      channelType,
       channelId,
-      selfId: this.inferSelfId(channel, channelId),
+      selfAID,
       projectPath,
       threadId: '',
       agentId,
+      sessionKey: formatSessionKey(channelType, channelId, DEFAULT_THREAD_ID),
       chatType: inheritedChatType,
       sessionMode: this.resolveDefaultSessionMode(channel, inheritedChatType),
       agentSessionId,

@@ -968,6 +968,7 @@ export class WechatChannelPlugin implements ChannelPlugin {
                 channel: adapter.channelName,
                 channelType,
                 channelId,
+                selfAID: (inst as any).agentName,
                 content,
                 images,
                 chatType: chatType || 'private',

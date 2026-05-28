@@ -90,11 +90,11 @@ export class EvolAgent {
   // ── Channels ──────────────────────────────────────────────────────────
 
   /**
-   * effective channel key：`<type>#<urlEncode(selfPeerId)>#<name>`。
-   * AUN channel 的 selfPeerId 是 agent.aid，name 固定为 'main'。
+   * effective channel key：`<type>#<selfAID>#<name>`。
+   * AUN channel 的 selfAID 是 agent.aid，name 固定为 'main'。
    */
   effectiveChannelName(type: string, rawName: string): string {
-    return formatChannelKey({ type, selfPeerId: this.aid, name: rawName });
+    return formatChannelKey({ type, selfAID: this.aid, name: rawName });
   }
 
   channelInstanceNames(): string[] {
@@ -130,7 +130,7 @@ export class EvolAgent {
    */
   private isAunChannelKey(channelKey: string): boolean {
     const parsed = tryParseChannelKey(channelKey);
-    return parsed?.type === 'aun' && parsed.selfPeerId === this.aid;
+    return parsed?.type === 'aun' && parsed.selfAID === this.aid;
   }
 
   getOwner(channelKey: string): string | undefined {
