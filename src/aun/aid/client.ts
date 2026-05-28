@@ -25,7 +25,7 @@ export function suppressSdkLogs(): void {
 
 // ==================== Constants ====================
 
-export const MIN_AUN_CORE_SDK = [0, 3, 3] as const;
+export const MIN_AUN_CORE_SDK = [0, 3, 4] as const;
 export const AUN_CORE_SDK_PKG = '@agentunion/fastaun';
 
 // ==================== SDK & Environment ====================
@@ -129,7 +129,7 @@ export interface CreateClientOpts {
 
 /**
  * 统一构造 AUNClient：自动绑 root_ca_path + setAgentMdPath(aidsDir())。
- * 不做 createAid / authenticate / connect，调用方按需续作。
+ * 不做 registerAid / authenticate / connect，调用方按需续作。
  *
  * 所有 new AUNClient 调用都应走此工厂，避免 SDK 默认把 agent.md 写到
  * {aun_path}/AgentMDs（默认目录）。
@@ -153,6 +153,6 @@ export async function createAunClient(opts: CreateClientOpts = {}): Promise<AUNC
 
 export async function getAunClient(aid: string, opts?: { aunPath?: string }): Promise<AUNClient> {
   const client = await createAunClient({ aunPath: opts?.aunPath });
-  await client.auth.createAid({ aid });
+  await client.auth.authenticate({ aid });
   return client;
 }

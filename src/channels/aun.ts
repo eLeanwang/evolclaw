@@ -685,17 +685,6 @@ export class AUNChannel {
     });
 
     // Authenticate
-    // Workaround: SDK 0.3.x _loadIdentityOrRaise doesn't set identity.aid from requested aid,
-    // causing gateway "missing aid" error. Patch to backfill aid on loaded identity.
-    const authFlow = (client as any)._auth;
-    if (authFlow && typeof authFlow._loadIdentityOrRaise === 'function') {
-      const origLoad = authFlow._loadIdentityOrRaise.bind(authFlow);
-      authFlow._loadIdentityOrRaise = (aid?: string) => {
-        const identity = origLoad(aid);
-        if (identity && !identity.aid) identity.aid = aid ?? authFlow._aid;
-        return identity;
-      };
-    }
 
     let accessToken: string;
     try {

@@ -236,7 +236,6 @@ async function runCheck(aid: string, formatJson: boolean): Promise<CheckResult[]
     const aunPath = process.env.AUN_HOME || defaultAunPath();
     const result = await suppressSdkOutput(async () => {
       const client = await createAunClient({ aunPath });
-      await client.auth.createAid({ aid });
       const authResult = await client.auth.authenticate({ aid });
       await client.close().catch(() => {});
       return authResult;
@@ -284,7 +283,6 @@ async function runCheck(aid: string, formatJson: boolean): Promise<CheckResult[]
     const aunPath = process.env.AUN_HOME || defaultAunPath();
     const sendResult = await suppressSdkOutput(async () => {
       const client = await createAunClient({ aunPath });
-      await client.auth.createAid({ aid });
       const authResult = await client.auth.authenticate({ aid });
       const at = authResult?.access_token || (client as any)._access_token;
       const gw = (client as any)._gatewayUrl || authResult?.gateway;
@@ -440,7 +438,6 @@ async function runCheck(aid: string, formatJson: boolean): Promise<CheckResult[]
       try {
         const replyText = await suppressSdkOutput(async () => {
           const client = await createAunClient({ aunPath });
-          await client.auth.createAid({ aid });
           const authResult = await client.auth.authenticate({ aid });
           const at = authResult?.access_token || (client as any)._access_token;
           const gw = (client as any)._gatewayUrl || authResult?.gateway;

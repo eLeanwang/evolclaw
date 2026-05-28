@@ -11,17 +11,21 @@ const mockPublishAgentMd = vi.fn().mockResolvedValue({ aid: 'test.aid', etag: '"
 const mockFetchAgentMd = vi.fn().mockResolvedValue({ content: '---\naid: "remote.agentid.pub"\n---', signature: { status: 'verified' } });
 const mockCheckAgentMd = vi.fn().mockResolvedValue({ in_sync: true, local_found: true, remote_found: true });
 const mockClose = vi.fn().mockResolvedValue(undefined);
-const mockCreateAid = vi.fn().mockImplementation(async (opts: { aid: string }) => {
+const mockRegisterAid = vi.fn().mockImplementation(async (opts: { aid: string }) => {
   const aidDir = path.join(os.homedir(), '.aun', 'AIDs', opts.aid);
   fs.mkdirSync(aidDir, { recursive: true });
   return { gateway: 'wss://gw.example.com/aun' };
+});
+const mockAuthenticate = vi.fn().mockImplementation(async (opts?: { aid?: string }) => {
+  return { aid: opts?.aid, access_token: 'mock-token', gateway: 'wss://gw.example.com/aun' };
 });
 
 vi.mock('@agentunion/fastaun', () => ({
   AUNClient: class MockAUNClient {
     constructor() {}
     auth = {
-      createAid: mockCreateAid,
+      registerAid: mockRegisterAid,
+      authenticate: mockAuthenticate,
       uploadAgentMd: mockUploadAgentMd,
       downloadAgentMd: mockDownloadAgentMd,
     };
@@ -51,7 +55,8 @@ describe('aun-ops', () => {
     const { _resetRoot } = await import('../../src/paths.js');
     _resetRoot();
 
-    mockCreateAid.mockClear();
+    mockRegisterAid.mockClear();
+    mockAuthenticate.mockClear();
     mockUploadAgentMd.mockClear();
     mockDownloadAgentMd.mockClear();
     mockPublishAgentMd.mockClear();
@@ -71,8 +76,8 @@ describe('aun-ops', () => {
   });
 
   describe('aidCreate — client leak prevention', () => {
-    it('closes client when createAid throws', async () => {
-      mockCreateAid.mockRejectedValueOnce(new Error('network error'));
+    it('closes client when registerAid throws', async () => {
+      mockRegisterAid.mockRejectedValueOnce(new Error('network error'));
       const { aidCreate } = await import('../../src/aun/aid/index.js');
 
       await expect(aidCreate('fail.agentid.pub')).rejects.toThrow('network error');

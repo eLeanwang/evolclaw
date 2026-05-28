@@ -107,7 +107,11 @@ export async function verifySignAbility(
   try {
     let client = opts?.client;
     if (!client) {
-      client = await createAunClient({ aunPath });
+      const { loadProcessConfig } = await import('../../config-store.js');
+      const encryptionSeed = loadProcessConfig().aun?.encryptionSeed
+        || process.env.AUN_ENCRYPTION_SEED
+        || 'evol';
+      client = await createAunClient({ aunPath, encryptionSeed });
       ownClient = client;
     }
     const probe = `# probe\naid: "${aid}"\n`;
@@ -186,7 +190,7 @@ export async function aidCreate(aid: string, opts?: { aunPath?: string }): Promi
   let client = await createAunClient({ aunPath });
 
   try {
-    const result = await client.auth.createAid({ aid });
+    const result = await client.auth.registerAid({ aid });
     const gateway = result.gateway || '';
 
     const caDownloaded = await downloadCaRoot(aunPath, gateway);
@@ -195,7 +199,7 @@ export async function aidCreate(aid: string, opts?: { aunPath?: string }): Promi
     if (caDownloaded && fs.existsSync(caCertPath)) {
       try { await client.close(); } catch { /* ignore */ }
       client = await createAunClient({ aunPath });
-      await client.auth.createAid({ aid });
+      await client.auth.authenticate({ aid });
     }
 
     let gatewayUrl = gateway;
