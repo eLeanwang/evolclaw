@@ -315,6 +315,8 @@ export interface ActionInteraction {
       body: string;
     };
   }>;
+  checkers?: Array<{ key: string; label: string; description?: string }>;
+  allowCustomInput?: boolean;
 }
 
 export type InteractionKind = CommandCard | ActionInteraction;

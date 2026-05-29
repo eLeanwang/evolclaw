@@ -121,6 +121,17 @@ export function renderActionAsText(req: InteractionRequest): string {
   const lines: string[] = [action.title];
   if (action.body) lines.push(action.body);
 
+  // checkers 多选：渲染选项列表
+  if (action.checkers?.length) {
+    lines.push('');
+    action.checkers.forEach((chk, idx) => {
+      const desc = chk.description ? ` — ${chk.description}` : '';
+      lines.push(`  ${idx + 1}. ${chk.label}${desc}`);
+    });
+    lines.push('', '回复选项编号（多选用逗号分隔），或输入自定义内容');
+    return lines.join('\n');
+  }
+
   if (!fb) {
     return lines.join('\n');
   }
@@ -132,6 +143,9 @@ export function renderActionAsText(req: InteractionRequest): string {
   }
   if (fb.acceptFreeText && fb.freeTextHint) {
     lines.push(`  ${fb.freeTextHint}`);
+  }
+  if (action.allowCustomInput) {
+    lines.push(`  或直接输入自定义内容`);
   }
   return lines.join('\n');
 }

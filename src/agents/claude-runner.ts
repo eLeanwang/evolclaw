@@ -448,52 +448,69 @@ export class AgentRunner {
 
     const answers: Record<string, string | string[]> = {};
 
-    // 从 permCtx 构造 per-session 的发送函数，避免全局 sendPromptFn 被其他 channel 实例覆盖
-    // 注意：sendPromptFn 是全局单例，多 channel 并发时会被覆盖，导致提示发到错误 channel
     const sendPrompt = permCtx.adapter && permCtx.channelId
       ? async (text: string) => permCtx.adapter!.send(buildEnvelope({ channel: permCtx.adapter!.channelName, channelId: permCtx.channelId!, replyContext: permCtx.replyContext }), { kind: 'result.text', text, isFinal: true })
       : this.sendPromptFn;
 
-    // 逐个 question 发送卡片并等待用户选择
     for (let i = 0; i < questions.length; i++) {
       const q = questions[i];
 
       const requestId = `ask-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const cardTitle = q.header ? `💬 ${q.header}` : `💬 问题 ${i + 1}/${questions.length}`;
 
-      // 统一使用 action 按钮卡片（单选 / 多选均用按钮）
-      const bodyLines = [q.question];
-      if (q.options.some(opt => opt.description)) {
-        bodyLines.push('');
-        q.options.forEach((opt, idx) => {
-          bodyLines.push(`${idx + 1}. **${opt.label}**${opt.description ? ` — ${opt.description}` : ''}`);
-        });
-      }
+      let interaction: InteractionRequest;
 
-      const interaction: InteractionRequest = {
-        type: 'interaction',
-        id: requestId,
-        kind: {
-          kind: 'action',
-          title: cardTitle,
-          body: bodyLines.join('\n'),
-          buttons: [
-            ...q.options.map(opt => ({
+      if (q.multiSelect) {
+        // 多选：使用 checkers + form 提交（JSON 2.0 CardKit 路径）
+        interaction = {
+          type: 'interaction',
+          id: requestId,
+          kind: {
+            kind: 'action',
+            title: cardTitle,
+            body: q.question,
+            checkers: q.options.map(opt => ({
+              key: opt.label,
+              label: opt.label,
+              description: opt.description,
+            })),
+            buttons: [
+              { key: 'submit', label: '✅ 确认选择', style: 'primary' as const },
+            ],
+            allowCustomInput: true,
+          },
+          channelId: permCtx.channelId,
+          sessionId,
+          expiresAt: Date.now() + 5 * 60 * 1000,
+        };
+      } else {
+        // 单选：保持按钮模式
+        const bodyLines = [q.question];
+        if (q.options.some(opt => opt.description)) {
+          bodyLines.push('');
+          q.options.forEach((opt, idx) => {
+            bodyLines.push(`${idx + 1}. **${opt.label}**${opt.description ? ` — ${opt.description}` : ''}`);
+          });
+        }
+        interaction = {
+          type: 'interaction',
+          id: requestId,
+          kind: {
+            kind: 'action',
+            title: cardTitle,
+            body: bodyLines.join('\n'),
+            buttons: q.options.map(opt => ({
               key: opt.label,
               label: opt.label,
               style: 'default' as const,
             })),
-            ...(permCtx.interceptNextMessage ? [{
-              key: '_custom_input',
-              label: '✏️ 手动输入',
-              style: 'default' as const,
-            }] : []),
-          ],
-        },
-        channelId: permCtx.channelId,
-        sessionId,
-        expiresAt: Date.now() + 5 * 60 * 1000,
-      };
+            allowCustomInput: true,
+          },
+          channelId: permCtx.channelId,
+          sessionId,
+          expiresAt: Date.now() + 5 * 60 * 1000,
+        };
+      }
 
       let cardSent = false;
       try {
@@ -520,7 +537,6 @@ export class AgentRunner {
       }
 
       if (!cardSent) {
-        // 卡片发送失败，以纯文本展示选项并自动选推荐项
         const firstLabel = q.options[0]?.label || '';
         answers[q.question] = q.multiSelect ? [firstLabel] : firstLabel;
         if (sendPrompt) {
@@ -535,28 +551,26 @@ export class AgentRunner {
         permCtx?.interactionRouter?.register(requestId, sessionId, (action: string, values?: Record<string, any>) => {
           if (action === 'cancel') {
             resolve(null);
-          } else if (action === '_custom_input' && permCtx.interceptNextMessage) {
-            // "手动输入"：发提示，拦截下一条消息
-            const sendHint = async () => {
-              if (sendPrompt) {
-                await sendPrompt('✏️ 请输入你的想法，回复后继续……');
+          } else if (action === '_custom_input') {
+            // 用户通过追加的 input 提交了自定义文本
+            const customText = values?.custom_text;
+            resolve(typeof customText === 'string' && customText.trim() ? customText.trim() : null);
+          } else if (action === 'submit' && q.multiSelect && values) {
+            // checker 多选提交：从 form_value 收集 checked 选项
+            const selected: string[] = [];
+            q.options.forEach((opt, idx) => {
+              if (values[`opt_${idx}`] === true) {
+                selected.push(opt.label);
               }
-            };
-            sendHint().catch(() => {});
-            permCtx.interceptNextMessage(sessionId, (msg) => {
-              resolve(msg.content || null);
             });
-          } else if (q.multiSelect) {
-            // multiSelect 按钮点击：包装为数组
-            resolve([action]);
+            resolve(selected.length > 0 ? selected : null);
           } else {
-            resolve(action); // action = button key = option label
+            resolve(action);
           }
         });
       });
 
       if (answer === null) {
-        // 取消，自动选第一项
         const firstLabel = q.options[0]?.label || '';
         answers[q.question] = q.multiSelect ? [firstLabel] : firstLabel;
       } else {
@@ -686,6 +700,7 @@ export class AgentRunner {
             { key: 'approve', label: '✅ 批准执行', style: 'primary' },
             { key: 'reject', label: '❌ 拒绝', style: 'danger' },
           ],
+          allowCustomInput: true,
         },
         channelId: permCtx.channelId,
         sessionId,
@@ -720,9 +735,12 @@ export class AgentRunner {
 
       if (cardSent) {
         return new Promise((resolve) => {
-          permCtx.interactionRouter?.register(requestId, sessionId, (action: string) => {
+          permCtx.interactionRouter?.register(requestId, sessionId, (action: string, values?: Record<string, any>) => {
             const trimmed = action.trim();
-            if (trimmed === '2' || trimmed.toLowerCase() === 'reject' || trimmed === '拒绝' || trimmed === 'reject') {
+            if (trimmed === '_custom_input') {
+              const feedback = typeof values?.custom_text === 'string' ? values.custom_text.trim() : '';
+              resolve({ behavior: 'deny' as const, message: feedback || '用户提交了反馈', decisionClassification: 'user_reject' as const });
+            } else if (trimmed === '2' || trimmed.toLowerCase() === 'reject' || trimmed === '拒绝') {
               resolve({ behavior: 'deny' as const, message: '用户拒绝了计划', decisionClassification: 'user_reject' as const });
             } else {
               resolve({ behavior: 'allow' as const, updatedInput: input, decisionClassification: 'user_temporary' as const });
