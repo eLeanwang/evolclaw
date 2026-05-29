@@ -41,6 +41,7 @@ export class SessionManager {
     this.eventBus = eventBus;
     this.ownerResolver = ownerResolver;
     this.adminResolver = adminResolver;
+    this.migrateChannelKeyFormat();
   }
 
   setOwnerResolver(resolver: OwnerResolver): void {
@@ -142,8 +143,10 @@ export class SessionManager {
   }
 
   private resolveChatDirFromSession(session: Session): string {
-    const channelType = session.channelType || session.channel;
-    return chatDirPath(this.sessionsDir, channelType, session.channelId, session.selfId);
+    if (!session.channelType) {
+      throw new Error(`[SessionManager] Session ${session.id} missing channelType (channel=${session.channel}). Refusing to fall back to channel name.`);
+    }
+    return chatDirPath(this.sessionsDir, session.channelType, session.channelId, session.selfId);
   }
 
   /** Public accessor: get the chat directory path for a session (for message log etc.) */
@@ -293,8 +296,10 @@ export class SessionManager {
   }
 
   private ensureChatDirForSession(session: Session): string {
-    const channelType = session.channelType || session.channel;
-    return ensureChatDir(this.sessionsDir, channelType, session.channelId, session.selfId);
+    if (!session.channelType) {
+      throw new Error(`[SessionManager] Session ${session.id} missing channelType (channel=${session.channel}). Refusing to fall back to channel name (would create stale dirs like '${session.channel}/').`);
+    }
+    return ensureChatDir(this.sessionsDir, session.channelType, session.channelId, session.selfId);
   }
 
   private metaFilePath(chatDir: string, sessionId: string): string {
@@ -813,7 +818,9 @@ export class SessionManager {
 
   async switchAgent(channel: string, channelId: string, projectPath: string, newAgentId: string): Promise<Session> {
     const inheritedChatType = this.getActiveChatType(channel, channelId);
-    const chatDir = this.ensureResolvedChatDirSafe(channel, channelId);
+    const channelType = this.inferChannelType(channel, channelId);
+    const selfId = this.inferSelfId(channel, channelId);
+    const chatDir = this.ensureResolvedChatDir(channel, channelId, channelType, selfId);
     const allSessions = this.findAllSessionsInChat(chatDir, false);
     const target = allSessions
       .filter(s => s.projectPath === projectPath && (s.agentId || 'claude') === newAgentId && !s.threadId)
@@ -1328,5 +1335,70 @@ export class SessionManager {
 
   close(): void {
     for (const adapter of this.fileAdapters.values()) adapter.close?.();
+  }
+
+  /**
+   * Migrate session channel key from old format "{selfPeerId}#{type}#{name}"
+   * to new format "{type}#{selfPeerId}#{name}".
+   * Runs once at startup, rewrites active.json and meta_*.jsonl in-place.
+   */
+  private migrateChannelKeyFormat(): void {
+    const chatDirs = scanChatDirs(this.sessionsDir);
+    let migrated = 0;
+
+    for (const { dirPath } of chatDirs) {
+      const activePath = path.join(dirPath, 'active.json');
+      const active = readJsonFile<SessionFile>(activePath);
+      if (!active?.channel) continue;
+
+      const newKey = this.convertOldChannelKey(active.channel);
+      if (!newKey) continue;
+
+      // Rewrite active.json
+      active.channel = newKey;
+      atomicWriteJson(activePath, active);
+
+      // Rewrite meta_*.jsonl files
+      const metaFiles = scanMetaFiles(dirPath);
+      for (const metaFile of metaFiles) {
+        const metaPath = path.join(dirPath, metaFile);
+        const lines = readAllJsonlLines<any>(metaPath);
+        if (!lines.length) continue;
+        let changed = false;
+        for (const line of lines) {
+          if (line.channel && this.convertOldChannelKey(line.channel)) {
+            line.channel = this.convertOldChannelKey(line.channel);
+            changed = true;
+          }
+        }
+        if (changed) {
+          const content = lines.map(l => JSON.stringify(l)).join('\n') + '\n';
+          fs.writeFileSync(metaPath, content, 'utf-8');
+        }
+      }
+      migrated++;
+    }
+
+    if (migrated > 0) {
+      logger.info(`[SessionManager] Migrated ${migrated} session(s) to new channelKey format`);
+    }
+  }
+
+  /**
+   * Detect old format "selfPeerId#type#name" and convert to "type#selfPeerId#name".
+   * Returns null if already in new format or not a valid key.
+   */
+  private convertOldChannelKey(key: string): string | null {
+    const parts = key.split('#');
+    if (parts.length !== 3) return null;
+    const [first, second, third] = parts;
+    // New format: type#selfPeerId#name — type is short (aun, feishu, wechat, etc.)
+    // Old format: selfPeerId#type#name — selfPeerId contains '.' (e.g., evolai.agentid.pub)
+    const knownTypes = ['aun', 'feishu', 'wechat', 'dingtalk', 'qqbot', 'wecom'];
+    if (knownTypes.includes(first)) return null; // already new format
+    if (knownTypes.includes(second) && first.includes('.')) {
+      return `${second}#${first}#${third}`;
+    }
+    return null;
   }
 }

@@ -502,7 +502,7 @@ export class MessageProcessor {
           const baseReplyCtx = this.getReplyContext(message);
           if (baseReplyCtx) {
             Object.assign(opts, baseReplyCtx);
-          } else if (firstReply && message.messageId) {
+          } else if (firstReply && message.messageId && message.source !== 'trigger') {
             if (payload.kind === 'result.text' && payload.text) {
               opts.replyToMessageId = message.messageId;
               firstReply = false;

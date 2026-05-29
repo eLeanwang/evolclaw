@@ -648,21 +648,22 @@ export class FeishuChannel {
       }
     } catch (error: any) {
       // 230011: 消息已被撤回，降级为普通消息重试
-      if (error.response?.data?.code === 230011 && options?.replyToMessageId) {
-        logger.warn('[Feishu] Message withdrawn (230011), retrying without reply');
+      // 99992354: message_id 不存在（合成 ID 或已过期），降级为普通消息
+      const errCode = error.response?.data?.code;
+      if ((errCode === 230011 || errCode === 99992354) && options?.replyToMessageId) {
+        logger.warn(`[Feishu] Reply target invalid (${errCode}), retrying without reply`);
         return this.sendMessage(chatId, content, { ...options, replyToMessageId: undefined });
       }
       // 230025: 消息内容超长，截断后重试
-      if (error.response?.data?.code === 230025) {
+      if (errCode === 230025) {
         logger.warn(`[Feishu] Message too long (230025, ${content.length} chars), truncating`);
         const truncated = content.slice(0, 28000) + '\n\n⚠️ 消息过长，已截断';
         return this.sendMessage(chatId, truncated, options);
       }
       const respData = error?.response?.data;
-      const code = respData?.code;
       logger.error('[Feishu] Failed to send message:', respData ? JSON.stringify(respData) : error?.message ?? error);
       // post 格式相关错误（400/230001）：降级为纯文本重试
-      if (!options?.forceText && (error?.response?.status === 400 || code === 230001)) {
+      if (!options?.forceText && (error?.response?.status === 400 || errCode === 230001)) {
         logger.warn('[Feishu] Retrying as plain text (forceText)');
         return this.sendMessage(chatId, content, { ...options, forceText: true });
       }
@@ -732,9 +733,10 @@ export class FeishuChannel {
 
       logger.info('[Feishu] File message sent successfully');
     } catch (error: any) {
-      // 230011: 消息已被撤回，降级为普通消息重试
-      if (error.response?.data?.code === 230011 && options?.replyToMessageId) {
-        logger.warn('[Feishu] Message withdrawn (230011), retrying file send without reply');
+      // 230011/99992354: reply target invalid, retry without reply
+      const errCode = error.response?.data?.code;
+      if ((errCode === 230011 || errCode === 99992354) && options?.replyToMessageId) {
+        logger.warn(`[Feishu] Reply target invalid (${errCode}), retrying file send without reply`);
         return this.sendFile(chatId, filePath);
       }
       logger.error('[Feishu] Failed to send file:', error);
@@ -778,7 +780,8 @@ export class FeishuChannel {
       }
 
       logger.debug('[Feishu] Image message sent successfully');
-    } catch (error) {
+    } catch (error: any) {
+      // 99992354: reply target invalid — image cannot easily retry, just log
       logger.error('[Feishu] Failed to send image:', error);
       throw error;
     }
