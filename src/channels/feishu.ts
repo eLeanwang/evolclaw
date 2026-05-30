@@ -455,10 +455,17 @@ export class FeishuChannel {
             delete response.values!._action;
             delete response.values!._initiator;
             delete response.values!._card_title;
-            const cardBody = value._card_body || '';
+            let cardBody = value._card_body || '';
             delete response.values!._card_body;
             const btnLabel = value._btn_label || '';
             delete response.values!._btn_label;
+            const checkersRaw = value._checkers || '';
+            delete response.values!._checkers;
+
+            // _custom_input: append user's typed text to card body
+            if (response.action === '_custom_input' && formValues.custom_text) {
+              cardBody = [cardBody, `**输入内容：** ${formValues.custom_text}`].filter(Boolean).join('\n\n');
+            }
 
             logger.info(`[Feishu] Card action: requestId=${requestId}, action=${response.action}, values=${JSON.stringify(response.values)}`);
             this.interactionCallback?.(response);
@@ -470,7 +477,7 @@ export class FeishuChannel {
             // V2 entity cards (checkers/allowCustomInput) MUST respond with schema 2.0 — error 200830 otherwise
             const cardTitle = value._card_title || '操作';
             const isV2Card = !!this.cardManager.getCardId(requestId);
-            return this.buildResolvedCard(cardTitle, response, cardBody, btnLabel, isV2Card);
+            return this.buildResolvedCard(cardTitle, response, cardBody, btnLabel, isV2Card, checkersRaw, formValues);
           } catch (err) {
             logger.error('[Feishu] Failed to handle card action:', err);
           }
@@ -1207,7 +1214,7 @@ export class FeishuChannel {
     }
   }
 
-  private buildResolvedCard(cardTitle: string, response: InteractionResponse, cardBody?: string, btnLabel?: string, isV2?: boolean): object | undefined {
+  private buildResolvedCard(cardTitle: string, response: InteractionResponse, cardBody?: string, btnLabel?: string, isV2?: boolean, checkersRaw?: string, formValues?: Record<string, any>): object | undefined {
     const action = response.action;
 
     const labelMap: Record<string, string> = {
@@ -1216,16 +1223,33 @@ export class FeishuChannel {
       'deny': '❌ 已拒绝',
       'cancel': '取消',
     };
-    const statusText = labelMap[action] || (btnLabel ? `✅ ${btnLabel}` : `✅ ${action}`);
+    const rawLabel = btnLabel || action;
+    const statusText = labelMap[action] || (/^\p{Emoji}/u.test(rawLabel) ? rawLabel : `✅ ${rawLabel}`);
 
     const headerTemplate = action === 'deny' ? 'red' : 'green';
     const headerTitle = `${cardTitle} — ${statusText}`;
+
+    // Build checkers summary if present
+    let checkersSummary = '';
+    if (checkersRaw && formValues) {
+      try {
+        const labels: string[] = JSON.parse(checkersRaw);
+        const lines = labels.map((label, idx) => {
+          const checked = !!formValues[`opt_${idx}`];
+          return `${checked ? '☑' : '☐'} ${label}`;
+        });
+        checkersSummary = lines.join('\n');
+      } catch { /* ignore */ }
+    }
 
     // V2 (schema 2.0) cards MUST respond with 2.0 structure — error 200830 otherwise
     if (isV2) {
       const bodyElements: any[] = [];
       if (cardBody) {
         bodyElements.push({ tag: 'markdown', content: cardBody });
+      }
+      if (checkersSummary) {
+        bodyElements.push({ tag: 'markdown', content: checkersSummary });
       }
       return {
         toast: { type: 'success', content: statusText },
@@ -1590,6 +1614,7 @@ export function buildActionCardV2(
         _card_title: action.title,
         _card_body: fullCardBody,
         _btn_label: btn.label,
+        ...(action.checkers?.length ? { _checkers: JSON.stringify(action.checkers.map(c => c.label)) } : {}),
       },
     });
   });
@@ -1598,7 +1623,7 @@ export function buildActionCardV2(
   if (action.allowCustomInput && opts?.showInput) {
     // 展开态：输入框 + 提交按钮内联进 form。整卡作为点击回调返回值替换，
     // 不走并发 append，因此不触发 200810「交互期间无法更新」与随后的客户端复原。
-    formElements.push(...buildCustomInputElements(requestId, initiatorId));
+    formElements.push(...buildCustomInputElements(requestId, initiatorId, action.title, fullCardBody));
   } else if (action.allowCustomInput) {
     // 初始态：「手动输入」按钮放在 form 容器**外**。
     // form 内按钮只接受 action_type=form_submit（11310），会提交并收起表单；
@@ -1640,7 +1665,7 @@ export function buildActionCardV2(
 /**
  * 构建动态追加的 input + 提交按钮元素（用于 _show_input 回调后追加）
  */
-export function buildCustomInputElements(requestId: string, initiatorId?: string): object[] {
+export function buildCustomInputElements(requestId: string, initiatorId?: string, cardTitle?: string, cardBody?: string): object[] {
   return [
     { tag: 'hr', element_id: 'hr_input' },
     {
@@ -1660,6 +1685,9 @@ export function buildCustomInputElements(requestId: string, initiatorId?: string
         _request_id: requestId,
         _action: '_custom_input',
         _initiator: initiatorId,
+        _card_title: cardTitle,
+        _card_body: cardBody,
+        _btn_label: '提交输入',
       },
     },
   ];
