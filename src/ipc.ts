@@ -48,12 +48,14 @@ type StatusProvider = () => IpcStatusResponse;
 type CommandExecutor = (cmd: string, sessionId: string) => Promise<IpcCtlResponse>;
 type AunAidProvider = () => AidConnectionState[];
 type AunAidStatsProvider = () => AidStatsSnapshot[];
+type AunAidStatsRecorder = (params: { aid: string; toPeer: string; text: string; encrypt?: boolean; chatmode?: string }) => void;
 
 export class IpcServer {
   private server: net.Server | null = null;
   private agentRegistry?: EvolAgentRegistryHandle;
   private aunAidProvider?: AunAidProvider;
   private aunAidStatsProvider?: AunAidStatsProvider;
+  private aunAidStatsRecorder?: AunAidStatsRecorder;
 
   constructor(
     private socketPath: string,
@@ -74,6 +76,11 @@ export class IpcServer {
   /** Inject AUN AID stats provider for aun-aid-stats IPC handler */
   setAunAidStatsProvider(provider: AunAidStatsProvider): void {
     this.aunAidStatsProvider = provider;
+  }
+
+  /** Inject AUN AID stats recorder for aun-aid-stats-record-outbound IPC handler */
+  setAunAidStatsRecorder(recorder: AunAidStatsRecorder): void {
+    this.aunAidStatsRecorder = recorder;
   }
 
   start(): void {
@@ -138,6 +145,21 @@ export class IpcServer {
       case 'aun-aid-stats': {
         const stats = this.aunAidStatsProvider ? this.aunAidStatsProvider() : [];
         return { ok: true, stats };
+      }
+      case 'aun-aid-stats-record-outbound': {
+        if (!this.aunAidStatsRecorder) return { ok: false, error: 'recorder not configured' };
+        try {
+          this.aunAidStatsRecorder({
+            aid: cmd.aid,
+            toPeer: cmd.toPeer,
+            text: cmd.text ?? '',
+            encrypt: cmd.encrypt,
+            chatmode: cmd.chatmode,
+          });
+          return { ok: true };
+        } catch (e: any) {
+          return { ok: false, error: String(e?.message || e) };
+        }
       }
       case 'ctl': {
         if (!this.commandExecutor) return { ok: false, error: 'ctl not configured' };

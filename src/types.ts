@@ -656,7 +656,6 @@ export interface AunChannelInstance extends ChannelInstanceCommon {
   gatewayUrl?: string;
   accessToken?: string;
   pythonBin?: string;
-  encryptionSeed?: string;
 }
 
 export interface FeishuChannelInstance extends ChannelInstanceCommon {

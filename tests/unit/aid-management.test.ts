@@ -83,6 +83,9 @@ const mockAuthenticate = vi.fn().mockImplementation(async (opts?: { aid?: string
   return { aid: opts?.aid, access_token: 'mock-token', gateway: 'wss://gw.example.com/aun' };
 });
 
+const mockSignAgentMd = vi.fn().mockResolvedValue('---signed-probe---');
+const mockVerifyAgentMd = vi.fn().mockResolvedValue({ status: 'verified' });
+
 vi.mock('@agentunion/fastaun', () => ({
   AUNClient: class MockAUNClient {
     constructor() {}
@@ -90,6 +93,8 @@ vi.mock('@agentunion/fastaun', () => ({
       registerAid: mockRegisterAid,
       authenticate: mockAuthenticate,
       uploadAgentMd: mockUploadAgentMd,
+      signAgentMd: mockSignAgentMd,
+      verifyAgentMd: mockVerifyAgentMd,
     };
     publishAgentMd = mockPublishAgentMd;
     setAgentMdPath = vi.fn();
@@ -124,6 +129,8 @@ describe('aidCreate', () => {
     mockUploadAgentMd.mockClear();
     mockPublishAgentMd.mockClear();
     mockClose.mockClear();
+    mockSignAgentMd.mockClear();
+    mockVerifyAgentMd.mockClear();
 
     ({ aidCreate, agentmdPut, buildInitialAgentMd } = await import('../../src/aun/aid/index.js'));
   });
@@ -142,6 +149,8 @@ describe('aidCreate', () => {
     const aid = 'existing.example.pub';
     const aidDir = path.join(tmpDir, 'AIDs', aid);
     fs.mkdirSync(path.join(aidDir, 'private'), { recursive: true });
+    fs.mkdirSync(path.join(aidDir, 'public'), { recursive: true });
+    fs.writeFileSync(path.join(aidDir, 'public', 'cert.pem'), 'mock-cert');
 
     const result = await aidCreate(aid);
 

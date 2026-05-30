@@ -142,7 +142,7 @@ export async function createAunClient(opts: CreateClientOpts = {}): Promise<AUNC
 
   const clientOpts: any = { aun_path: aunPath, debug: opts.debug ?? false };
   if (fs.existsSync(caCertPath)) clientOpts.root_ca_path = caCertPath;
-  if (opts.encryptionSeed) clientOpts.encryption_seed = opts.encryptionSeed;
+  if (opts.encryptionSeed != null) clientOpts.encryption_seed = opts.encryptionSeed;
 
   const client = opts.aunSdkLog !== undefined
     ? new AUNClient(clientOpts, opts.aunSdkLog)
@@ -152,7 +152,11 @@ export async function createAunClient(opts: CreateClientOpts = {}): Promise<AUNC
 }
 
 export async function getAunClient(aid: string, opts?: { aunPath?: string }): Promise<AUNClient> {
-  const client = await createAunClient({ aunPath: opts?.aunPath });
+  const { loadProcessConfig } = await import('../../config-store.js');
+  const encryptionSeed = loadProcessConfig().aun?.encryptionSeed
+    ?? process.env.AUN_ENCRYPTION_SEED
+    ?? 'evol';
+  const client = await createAunClient({ aunPath: opts?.aunPath, encryptionSeed });
   await client.auth.authenticate({ aid });
   return client;
 }

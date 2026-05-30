@@ -109,8 +109,8 @@ export async function verifySignAbility(
     if (!client) {
       const { loadProcessConfig } = await import('../../config-store.js');
       const encryptionSeed = loadProcessConfig().aun?.encryptionSeed
-        || process.env.AUN_ENCRYPTION_SEED
-        || 'evol';
+        ?? process.env.AUN_ENCRYPTION_SEED
+        ?? 'evol';
       client = await createAunClient({ aunPath, encryptionSeed });
       ownClient = client;
     }
@@ -147,7 +147,11 @@ export async function verifySignAbility(
 export async function aidListVerified(aunPath?: string): Promise<AidInfo[]> {
   const list = aidList(aunPath);
   const root = aunPath ?? defaultAunPath();
-  const client = await createAunClient({ aunPath: root });
+  const { loadProcessConfig } = await import('../../config-store.js');
+  const encryptionSeed = loadProcessConfig().aun?.encryptionSeed
+    ?? process.env.AUN_ENCRYPTION_SEED
+    ?? 'evol';
+  const client = await createAunClient({ aunPath: root, encryptionSeed });
   try {
     for (const a of list) {
       // canSign=false 的 AID 不必跑实测，结论已经明确
@@ -181,6 +185,10 @@ export async function aidCreate(aid: string, opts?: { aunPath?: string; force?: 
   const aunPath = opts?.aunPath ?? defaultAunPath();
   const aidDir = path.join(aunPath, 'AIDs', aid);
   const hasPrivateKey = fs.existsSync(path.join(aidDir, 'private'));
+  const { loadProcessConfig } = await import('../../config-store.js');
+  const encryptionSeed = loadProcessConfig().aun?.encryptionSeed
+    ?? process.env.AUN_ENCRYPTION_SEED
+    ?? 'evol';
 
   // 如果私钥已存在，先验证签名能力
   if (hasPrivateKey) {
@@ -203,17 +211,19 @@ export async function aidCreate(aid: string, opts?: { aunPath?: string; force?: 
     }
 
     // --force：先尝试 authenticate 恢复证书
+    let recoverClient: any = null;
     try {
-      const client = await getAunClient(aid, { aunPath });
-      return { aid, alreadyExisted: true, gateway: '', client };
+      recoverClient = await createAunClient({ aunPath, encryptionSeed });
+      await recoverClient.auth.authenticate({ aid });
+      return { aid, alreadyExisted: true, gateway: '', client: recoverClient };
     } catch {
-      // authenticate 也失败，删除旧数据后重新注册
+      if (recoverClient) { try { await recoverClient.close(); } catch {} }
       fs.rmSync(aidDir, { recursive: true, force: true });
     }
   }
 
   const { GatewayDiscovery } = await import('@agentunion/fastaun');
-  let client = await createAunClient({ aunPath });
+  let client = await createAunClient({ aunPath, encryptionSeed });
 
   try {
     const result = await client.auth.registerAid({ aid });
@@ -224,7 +234,7 @@ export async function aidCreate(aid: string, opts?: { aunPath?: string; force?: 
     const caCertPath = path.join(aunPath, 'CA', 'root', 'root.crt');
     if (caDownloaded && fs.existsSync(caCertPath)) {
       try { await client.close(); } catch { /* ignore */ }
-      client = await createAunClient({ aunPath });
+      client = await createAunClient({ aunPath, encryptionSeed });
       await client.auth.authenticate({ aid });
     }
 
@@ -289,7 +299,11 @@ export async function aidShow(aid: string, opts?: { aunPath?: string }): Promise
   let signError: string | undefined;
 
   // 先做一次签名自检（共享 client，避免重复起 SDK）
-  const client = await createAunClient({ aunPath });
+  const { loadProcessConfig: loadCfg } = await import('../../config-store.js');
+  const encSeed = loadCfg().aun?.encryptionSeed
+    ?? process.env.AUN_ENCRYPTION_SEED
+    ?? 'evol';
+  const client = await createAunClient({ aunPath, encryptionSeed: encSeed });
   try {
     if (hasPrivateKey && certPem && !certExpired && keyMatchesCert !== false) {
       const r = await verifySignAbility(aid, { aunPath, client });

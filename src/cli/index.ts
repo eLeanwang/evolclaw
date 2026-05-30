@@ -3421,7 +3421,7 @@ Options:
       console.log('无匹配 AID');
       return;
     }
-    console.log(`本地 AID${noVerify ? '（静态扫描，未实测）' : ''}:`);
+    console.log(`本地 AID${noVerify ? '（静态扫描，未实测）' : ''}（${aunPath ?? resolveRoot()}）:`);
     for (const a of aids) {
       const keyIcon = a.hasPrivateKey ? '🔑' : '  ';
       let signIcon = '  ';

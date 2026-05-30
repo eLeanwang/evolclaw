@@ -612,11 +612,18 @@ export class MessageProcessor {
         const agentModel = (typeof (agent as any).getModel === 'function') ? (agent as any).getModel() as string : undefined;
 
         // Kit renderer: 组装上下文
+        const pkgRoot = getPackageRoot();
         const kitCtx: KitRenderContext = {
           vars: {
             EVOLCLAW_HOME: resolveRoot(),
-            PACKAGE_ROOT: getPackageRoot(),
+            PACKAGE_ROOT: pkgRoot,
             CURRENT_PROJECT: absoluteProjectPath,
+            // ECK 派生路径（manifest 引用时需要展开）
+            KITS: path.join(pkgRoot, 'kits'),
+            KITS_RULES: path.join(pkgRoot, 'kits', 'rules'),
+            KITS_DOCS: path.join(pkgRoot, 'kits', 'docs'),
+            KITS_TEMPLATES: path.join(pkgRoot, 'kits', 'templates'),
+            KITS_FRAGMENTS: path.join(pkgRoot, 'kits', 'templates', 'system-fragments'),
             // 路径变量(用于 manifest 路径展开,resolvePath 用 ctx.vars 取真值)
             PERSONAL_DIR: selfAid ? path.join(resolveRoot(), 'agents', selfAid, 'personal') : undefined,
             RELATIONS_DIR: selfAid ? path.join(resolveRoot(), 'agents', selfAid, 'relations') : undefined,

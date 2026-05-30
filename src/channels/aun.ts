@@ -70,7 +70,6 @@ export interface AUNConfig {
   gatewayUrl?: string;    // well-known 自动发现失败时的 fallback URL
   accessToken?: string;
   flushDelay?: number;
-  encryptionSeed?: string;
   aunTrace?: boolean;     // 启用数据追踪日志
   aunSdkLog?: boolean;    // 启用 AUN SDK 内部日志（写入 ~/.aun/logs/ts-sdk-YYYYMMDD.log）
   owner?: string;         // Owner AID，用于发送欢迎消息
@@ -598,8 +597,8 @@ export class AUNChannel {
     const aunPath = this.config.keystorePath || resolveRoot();
     const aidName = this.config.aid;
     const encryptionSeed = loadProcessConfig().aun?.encryptionSeed
-      || process.env.AUN_ENCRYPTION_SEED
-      || 'evol';
+      ?? process.env.AUN_ENCRYPTION_SEED
+      ?? 'evol';
 
     // Migration from ~/.aun is handled by ensureDataDirs() at startup with a marker file.
 
@@ -2009,8 +2008,8 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
         const tid = putRes?.thought_id;
         logger.info(`${this.logPrefix()} thought.put ok group=${targetId} task=${taskId} stage=${stage} encrypt=${encrypt} tid=${tid ?? '?'}`);
         this.eventBus?.publish?.({ type: 'message:thought-put', agentName: this.config.aid, channelId, taskId, text: thoughtText });
-        // 文本类 thought 写入 jsonl（只对有 text 的 item，过滤 tool 等结构化项）
         if (thoughtText) {
+          this.aidStatsCollector?.recordOutbound(this.config.aid, channelId, Buffer.byteLength(thoughtText, 'utf-8'), thoughtText, false, encrypt, context?.metadata?.chatmode as string | undefined ?? 'proactive');
           this.appendOutboundJsonl(channelId, thoughtText, tid ?? `thought-${Date.now()}`, encrypt, context, true, 'thought', 'daemon');
         }
       } else {
@@ -2020,6 +2019,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
         logger.info(`${this.logPrefix()} thought.put ok p2p=${this.peerLabel(targetId)} task=${taskId} stage=${stage} encrypt=${encrypt} tid=${tid ?? '?'}`);
         this.eventBus?.publish?.({ type: 'message:thought-put', agentName: this.config.aid, channelId, taskId, text: thoughtText });
         if (thoughtText) {
+          this.aidStatsCollector?.recordOutbound(this.config.aid, targetId, Buffer.byteLength(thoughtText, 'utf-8'), thoughtText, false, encrypt, context?.metadata?.chatmode as string | undefined ?? 'proactive');
           this.appendOutboundJsonl(channelId, thoughtText, tid ?? `thought-${Date.now()}`, encrypt, context, false, 'thought', 'daemon');
         }
       }
@@ -2571,7 +2571,6 @@ export class AUNChannelPlugin implements ChannelPlugin {
         gatewayUrl: inst.gatewayUrl,
         accessToken: inst.accessToken,
         flushDelay: inst.flushDelay,
-        encryptionSeed: inst.encryptionSeed,
         owner: inst.owner,
         agentName: (inst as any).agentName,
         channelName: inst.name,

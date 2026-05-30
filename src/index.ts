@@ -937,6 +937,17 @@ async function main() {
     queued: messageQueue.getQueueLengthByAgent(agentName),
   }));
   ipcServer.setAunAidStatsProvider(() => aidStatsCollector.getAllSnapshots());
+  ipcServer.setAunAidStatsRecorder((params) => {
+    aidStatsCollector.recordOutbound(
+      params.aid,
+      params.toPeer,
+      Buffer.byteLength(params.text || '', 'utf-8'),
+      params.text,
+      false,
+      params.encrypt,
+      params.chatmode,
+    );
+  });
 
   // ── Reload hooks: enable agentRegistry.reload() to drain/disconnect/restart channels ──
   const reloadHooks: ReloadHooks = buildReloadHooks({
