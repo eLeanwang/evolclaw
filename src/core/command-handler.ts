@@ -66,6 +66,15 @@ function formatModelUsage(_agent: AgentRunnerFull, _model: string): string {
   return '用法: /model <模型>';
 }
 
+/**
+ * 模型展示标签：短别名 + 实际完整 ID（如 "opus (claude-opus-4-8)"）。
+ * 仅用于展示；命令值/持久化仍使用短别名。完整 ID 不可用或与短名相同时只显示短名。
+ */
+function modelDisplayLabel(agent: AgentRunnerFull, model: string): string {
+  const full = agent.resolveModelId?.(model);
+  return full && full !== model ? `${model} (${full})` : model;
+}
+
 function getModelListSource(
   owning: EvolAgentHandle | null,
   agent: AgentRunnerFull,
@@ -728,7 +737,7 @@ export class CommandHandler {
       if (hasModelSwitcher(agent) && agent.listModels) {
         const models = await agent.listModels() ?? [];
         const currentModel = agent.getModel();
-        if (models.length > 0) return models.map((m: string) => ({ value: m, label: m, selected: m === currentModel }));
+        if (models.length > 0) return models.map((m: string) => ({ value: m, label: modelDisplayLabel(agent, m), selected: m === currentModel }));
       }
       return null;
     }
@@ -1150,7 +1159,7 @@ export class CommandHandler {
           env: { ...process.env, EVOLCLAW_HOME: resolvePaths().root }
         }).unref();
         this.eventBus.publish({ type: 'system:restart', channel, channelId });
-        setTimeout(() => { process.kill(process.pid, 'SIGTERM'); }, 500);
+        setTimeout(() => { process.kill(process.pid, 'SIGTERM'); }, 1000);
         return { data: { action: 'restart', success: true } };
       }
 
@@ -1302,12 +1311,12 @@ export class CommandHandler {
 
     // 空闲检查：某些命令需要等待当前会话空闲
     // 原则：仅对"写/破坏性"形态拦截，纯读/用法提示的无参形态始终放行
-    // - 始终需要 idle（无参即写）：/new /clear /compact /repair /fork
+    // - 始终需要 idle（无参即写）：/clear /compact /repair /fork /new
     // - 仅带参时需要 idle（无参是列表/用法）：/session /baseagent /rewind
     // - /chatmode：在 handler 内部自行做写操作的 idle 检查
     // - /dispatch：在 handler 内部自行做写操作的 idle 检查
     // - /safe：已禁用 no-op，不再要求 idle
-    const idleAlways = ['/new', '/clear', '/compact', '/repair', '/fork'];
+    const idleAlways = ['/clear', '/compact', '/repair', '/fork', '/new'];
     const idleWhenArg = ['/session', '/baseagent', '/rewind'];
     const needsIdle =
       idleAlways.some(cmd => normalizedContent === cmd || normalizedContent.startsWith(cmd + ' ')) ||
@@ -1318,12 +1327,18 @@ export class CommandHandler {
         const threadSession = await this.sessionManager.getThreadSession(channel, channelId, threadId);
         if (threadSession) {
           const threadAgent = this.getAgent(channel, threadSession.agentId);
-          if (threadAgent.hasActiveStream(threadSession.id)) {
+          const isBusy = threadAgent.hasActiveStream(threadSession.id) ||
+            this.messageQueue?.isProcessing(threadSession.id);
+          if (isBusy) {
             return { kind: 'command.error' as const, text: '⚠️ 当前正在处理消息，请稍后再试\n使用 /stop 中断当前任务后重试' };
           }
         }
-      } else if (activeSession && agent.hasActiveStream(activeSession.id)) {
-        return { kind: 'command.error' as const, text: '⚠️ 当前正在处理消息，请稍后再试\n使用 /stop 中断当前任务后重试' };
+      } else if (activeSession) {
+        const isBusy = agent.hasActiveStream(activeSession.id) ||
+          this.messageQueue?.isProcessing(activeSession.id);
+        if (isBusy) {
+          return { kind: 'command.error' as const, text: '⚠️ 当前正在处理消息，请稍后再试\n使用 /stop 中断当前任务后重试' };
+        }
       }
     }
 
@@ -1891,12 +1906,15 @@ export class CommandHandler {
             kind: {
               kind: 'command-card',
               title: '🤖 切换模型',
-              buttons: models.map((m: string) => ({
-                label: m === currentModel ? `✓ ${m}` : m,
-                command: `/model ${m}`,
-                style: (m === currentModel ? 'primary' : 'default') as 'primary' | 'default',
-                disabled: m === currentModel,
-              })),
+              buttons: models.map((m: string) => {
+                const display = modelDisplayLabel(modelAgent, m);
+                return {
+                  label: m === currentModel ? `✓ ${display}` : display,
+                  command: `/model ${m}`,
+                  style: (m === currentModel ? 'primary' : 'default') as 'primary' | 'default',
+                  disabled: m === currentModel,
+                };
+              }),
             },
           };
 
@@ -1907,14 +1925,14 @@ export class CommandHandler {
         }
 
         // 降级：文本
-        const modelList = models.map((m: string) => `  ${m === currentModel ? '✓' : ' '} ${m}`).join('\n');
+        const modelList = models.map((m: string) => `  ${m === currentModel ? '✓' : ' '} ${modelDisplayLabel(modelAgent, m)}`).join('\n');
         const effortHint = efforts.length > 0
           ? `\n推理强度: ${currentEffort === 'auto' ? 'auto (SDK默认)' : currentEffort}  (使用 /effort 调整)`
           : '';
         if (isAdmin) {
-          return { kind: 'command.result' as const, text: `当前模型: ${currentModel}${effortHint}\n\n可用模型：\n${modelList}\n\n用法: /model <模型>` };
+          return { kind: 'command.result' as const, text: `当前模型: ${modelDisplayLabel(modelAgent, currentModel)}${effortHint}\n\n可用模型：\n${modelList}\n\n用法: /model <模型>` };
         }
-        return { kind: 'command.result' as const, text: `当前模型: ${currentModel}${effortHint}` };
+        return { kind: 'command.result' as const, text: `当前模型: ${modelDisplayLabel(modelAgent, currentModel)}${effortHint}` };
       }
 
       // 带参（切换/调整）需 admin+；无参查询已在上方返回
@@ -1937,7 +1955,7 @@ export class CommandHandler {
         } else if (models.includes(arg)) {
           newModel = arg;
         } else {
-          const modelList = models.map((m: string) => `  ${m === currentModel ? '✓' : ' '} ${m}`).join('\n');
+          const modelList = models.map((m: string) => `  ${m === currentModel ? '✓' : ' '} ${modelDisplayLabel(modelAgent, m)}`).join('\n');
           const effortHint = efforts.length > 0 ? `\n\n推理强度请使用 /effort 命令` : '';
           return { kind: 'command.error' as const, text: `❌ 无效参数: ${arg}\n\n可用模型：\n${modelList}${effortHint}` };
         }
@@ -2248,11 +2266,11 @@ export class CommandHandler {
         const threadSession = await this.sessionManager.getThreadSession(channel, channelId, threadId);
         if (threadSession) {
           const threadAgent = this.getAgent(channel, threadSession.agentId);
-          if (threadAgent.hasActiveStream(threadSession.id)) {
+          if (threadAgent.hasActiveStream(threadSession.id) || this.messageQueue?.isProcessing(threadSession.id)) {
             return { kind: 'command.error' as const, text: '⚠️ 当前正在处理消息，请稍后再试\n使用 /stop 中断当前任务后重试' };
           }
         }
-      } else if (agent.hasActiveStream(chatmodeSession.id)) {
+      } else if (agent.hasActiveStream(chatmodeSession.id) || this.messageQueue?.isProcessing(chatmodeSession.id)) {
         return { kind: 'command.error' as const, text: '⚠️ 当前正在处理消息，请稍后再试\n使用 /stop 中断当前任务后重试' };
       }
 
@@ -2722,6 +2740,27 @@ export class CommandHandler {
 
         this.eventBus.publish({ type: 'system:restart', channel, channelId });
 
+        // 先发送重启反馈消息，等待发送完成后再 kill 进程
+        // 避免消息还没发出去进程就退出了
+        const adapter = this.adapters.get(channel);
+        if (adapter) {
+          try {
+            const envelope = buildEnvelope({
+              taskId: `restart-${Date.now()}`,
+              channel,
+              channelId,
+              agentName: 'system',
+              chatmode: 'interactive',
+              replyContext,
+            });
+            await adapter.send(envelope, { kind: 'command.result' as const, text: '🔄 服务正在重启，请稍候...（约 5 秒后恢复）' });
+            // 等待消息发送完成后再延迟 kill
+            await new Promise(resolve => setTimeout(resolve, 500));
+          } catch (err) {
+            logger.error('[System] Failed to send restart notification:', err);
+          }
+        }
+
         // 发 SIGTERM 而非直接 process.exit(0)，让 index.ts 的 shutdown() 先
         // 正常关闭所有 channel（包括 Feishu WebSocket close frame），
         // 避免 Feishu 服务端因连接异常断开而重推未 ack 的消息给新进程。
@@ -2754,7 +2793,8 @@ export class CommandHandler {
       }
 
       await executeRestart();
-      return { kind: 'command.result' as const, text: '🔄 服务正在重启，请稍候...（约 5 秒后恢复）' };
+      // executeRestart 内部已经发送了反馈消息，这里返回 null 避免重复发送
+      return null;
     }
 
     // /upgrade 命令：检查版本更新，提示用户手动重启

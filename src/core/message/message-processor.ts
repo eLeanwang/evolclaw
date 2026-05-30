@@ -503,7 +503,7 @@ export class MessageProcessor {
           const baseReplyCtx = this.getReplyContext(message);
           if (baseReplyCtx) {
             Object.assign(opts, baseReplyCtx);
-          } else if (firstReply && message.messageId) {
+          } else if (firstReply && message.messageId && message.source !== 'trigger') {
             if (payload.kind === 'result.text' && payload.text) {
               opts.replyToMessageId = message.messageId;
               firstReply = false;
@@ -572,7 +572,7 @@ export class MessageProcessor {
         ? `【新消息插入】\n\n${message.content}\n\n【请无视之前中断继续处理】`
         : message.content;
 
-      let streamResult: { isError: boolean; subtype?: string; errors?: string[]; terminalReason?: string; lastReplyText: string; fullText: string; hasReceivedText: boolean; numTurns?: number; usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } } = { isError: false, lastReplyText: '', fullText: '', hasReceivedText: false };
+      let streamResult: { isError: boolean; subtype?: string; errors?: string[]; terminalReason?: string; lastReplyText: string; fullText: string; hasReceivedText: boolean; numTurns?: number; ttftMs?: number; usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } } = { isError: false, lastReplyText: '', fullText: '', hasReceivedText: false };
       let effectiveSystemPrompt: string | undefined;
 
       try {
@@ -721,7 +721,9 @@ export class MessageProcessor {
           );
 
           if (compacted) {
-            // compact 成功，带 resume 重试（不重复原始消息，让 Agent 继续未完成的工作）
+            // compact 成功，清除第一次流中混入的错误文本，再重试
+            const ctxErrPattern = /prompt is too long|input is too long|上下文过长/i;
+            renderer.stripContextError(ctxErrPattern);
             renderer.addNotice('✅ 压缩完成，继续处理...', 'info', 'compact-retry', true);
             const retryStream = await agent.runQuery(
               session.id,
@@ -761,6 +763,7 @@ export class MessageProcessor {
         contextTooLongPattern.test(streamResult.fullText)
       );
       if (isPromptTooLong) {
+        renderer.stripContextError(contextTooLongPattern);
         renderer.addNotice('上下文过长，正在压缩会话...', 'warn', 'compact-trigger', true);
         await renderer.flush();
         const compacted = await agent.compact(session.id, session.agentSessionId!, absoluteProjectPath);
@@ -978,7 +981,7 @@ export class MessageProcessor {
           if (interruptReason) {
             adapter.send(envelope, { kind: 'status.interrupted', metadata: { reason: interruptReason } }).catch(() => {});
           } else {
-            adapter.send(envelope, { kind: 'status.completed', metadata: { durationMs, numTurns: streamResult.numTurns, usage: streamResult.usage } }).catch(() => {});
+            adapter.send(envelope, { kind: 'status.completed', metadata: { durationMs, ttftMs: streamResult.ttftMs, numTurns: streamResult.numTurns, usage: streamResult.usage } }).catch(() => {});
           }
         }
         if (message.triggerMeta) {
@@ -1229,12 +1232,12 @@ export class MessageProcessor {
     renderer: IMRenderer,
     resetTimer: (eventType?: string, toolName?: string) => void,
     shouldSuppress: () => boolean
-  ): Promise<{ isError: boolean; subtype?: string; errors?: string[]; terminalReason?: string; lastReplyText: string; fullText: string; hasReceivedText: boolean; numTurns?: number; usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } }> {
+  ): Promise<{ isError: boolean; subtype?: string; errors?: string[]; terminalReason?: string; lastReplyText: string; fullText: string; hasReceivedText: boolean; numTurns?: number; ttftMs?: number; usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } }> {
     // Per-session agent name for stats bucketing
     const agentNameForStats = this.agentRegistry?.resolveByChannel(session.metadata?.channelKey || session.channel)?.name ?? '<unknown>';
     let hasReceivedText = false;
     let hasErrorResult = false;  // 是否已有 tool_result/error 事件输出过错误
-    let completeResult: { isError: boolean; subtype?: string; errors?: string[]; terminalReason?: string; lastReplyText: string; fullText: string; hasReceivedText: boolean; numTurns?: number; usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } } = { isError: false, lastReplyText: '', fullText: '', hasReceivedText: false };
+    let completeResult: { isError: boolean; subtype?: string; errors?: string[]; terminalReason?: string; lastReplyText: string; fullText: string; hasReceivedText: boolean; numTurns?: number; ttftMs?: number; usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } } = { isError: false, lastReplyText: '', fullText: '', hasReceivedText: false };
 
     // 追踪最后一轮 assistant 回复文本（tool_use 之后的纯文本）
     let lastReplyText = '';
@@ -1321,7 +1324,7 @@ export class MessageProcessor {
         if (event.type === 'compact') {
           this.eventBus.publish({ type: 'runner:compact-complete', sessionId: session.id, preTokens: event.preTokens });
           if (!shouldSuppress()) {
-            renderer.addNotice(`\ud83d\udca1 会话压缩完成，继续执行...（压缩前 tokens: ${event.preTokens}）`, 'info', 'compact');
+            renderer.addNotice(`\ud83d\udca1 会话压缩完成，继续执行...）`, 'info', 'compact');
           }
         }
 
@@ -1416,7 +1419,7 @@ export class MessageProcessor {
           }
 
           // 记录完成状态 + 最后一轮回复文本（后续 complete 覆盖前序）
-          completeResult = { isError: !!event.isError, subtype: event.subtype, errors: event.errors, terminalReason: event.terminalReason, lastReplyText, fullText: event.result || '', hasReceivedText, numTurns: event.numTurns, usage: event.usage };
+          completeResult = { isError: !!event.isError, subtype: event.subtype, errors: event.errors, terminalReason: event.terminalReason, lastReplyText, fullText: event.result || '', hasReceivedText, numTurns: event.numTurns, ttftMs: event.ttftMs, usage: event.usage };
 
           // thought jsonl 写入已下沉到 aun.ts:sendThought 成功后，
           // 由那里按 LLM 输出的每个 text item 单独写一条，此处不再写。
@@ -1479,7 +1482,7 @@ export class MessageProcessor {
       }
 
       // 记录完成状态
-      completeResult = { isError: !!event.isError, subtype: event.subtype, errors: event.errors, terminalReason: event.terminalReason, lastReplyText, fullText: event.result || '', hasReceivedText, numTurns: event.numTurns, usage: event.usage };
+      completeResult = { isError: !!event.isError, subtype: event.subtype, errors: event.errors, terminalReason: event.terminalReason, lastReplyText, fullText: event.result || '', hasReceivedText, numTurns: event.numTurns, ttftMs: event.ttftMs, usage: event.usage };
 
       if (event.subtype === 'success') {
         this.messageCache.addEvent(session.id, {
