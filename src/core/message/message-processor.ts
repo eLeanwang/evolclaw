@@ -85,7 +85,6 @@ export class MessageProcessor {
   private interruptedSessions = new Map<string, string>();  // sessionId → reason ('new_message' | 'stop' | ...)
   private interactionRouter?: InteractionRouter;
   private messageQueue?: MessageQueue;
-  private skillsEnsured = false; // 全局 SKILLS.md 是否已确保
 
   /**
    * Get the runner for a given (channel, baseagent) pair.
@@ -1595,87 +1594,6 @@ export class MessageProcessor {
     return rootPath;
   }
 
-  /**
-   * 确保全局数据目录下有最新版本的 SKILLS.md
-   * 目标：{EVOLCLAW_HOME}/data/SKILLS.md
-   */
-  private ensureSkillsFile(): void {
-    try {
-      const targetDir = path.join(resolveRoot(), 'data');
-      const targetPath = path.join(targetDir, 'SKILLS.md');
-      const templatePath = path.join(getPackageRoot(), 'src', 'templates', 'skills.md');
-
-      // 模板不存在则跳过（构建环境可能没有 src/）
-      if (!fs.existsSync(templatePath)) {
-        // 尝试 dist/templates/skills.md
-        const distTemplatePath = path.join(getPackageRoot(), 'dist', 'templates', 'skills.md');
-        if (!fs.existsSync(distTemplatePath)) return;
-        this.copySkillsIfNeeded(distTemplatePath, targetDir, targetPath);
-        return;
-      }
-      this.copySkillsIfNeeded(templatePath, targetDir, targetPath);
-    } catch {
-      // 静默失败，不影响正常消息处理
-    }
-  }
-
-  private copySkillsIfNeeded(templatePath: string, targetDir: string, targetPath: string): void {
-    const templateContent = fs.readFileSync(templatePath, 'utf-8');
-    const templateVersion = templateContent.match(/^version:\s*(.+)$/m)?.[1]?.trim() || '0';
-
-    if (fs.existsSync(targetPath)) {
-      const existing = fs.readFileSync(targetPath, 'utf-8');
-      const existingVersion = existing.match(/^version:\s*(.+)$/m)?.[1]?.trim() || '0';
-      if (this.compareSemver(existingVersion, templateVersion) >= 0) return; // 已是最新
-    }
-
-    if (!fs.existsSync(targetDir)) {
-      fs.mkdirSync(targetDir, { recursive: true });
-    }
-    fs.writeFileSync(targetPath, templateContent, 'utf-8');
-  }
-
-  /** 简易 semver 比较：支持 "1", "1.0", "1.0.0" 等格式，返回 -1/0/1 */
-  private compareSemver(a: string, b: string): number {
-    const pa = a.split('.').map(Number);
-    const pb = b.split('.').map(Number);
-    const len = Math.max(pa.length, pb.length);
-    for (let i = 0; i < len; i++) {
-      const na = pa[i] || 0;
-      const nb = pb[i] || 0;
-      if (na !== nb) return na > nb ? 1 : -1;
-    }
-    return 0;
-  }
-
-  /**
-   * 从 data/SKILLS.md 读取 frontmatter 并生成提示。
-   * 不缓存：每次读取保证用户编辑立即生效。
-   * 调用前应确保 ensureSkillsFile() 已执行过（首次落盘）。
-   */
-  private getSkillsHint(): string | null {
-    try {
-      const skillsPath = path.join(resolveRoot(), 'data', 'SKILLS.md');
-      if (!fs.existsSync(skillsPath)) return null;
-
-      const content = fs.readFileSync(skillsPath, 'utf-8');
-      const frontmatterMatch = content.match(/^---\n([\s\S]*?)\n---/);
-      if (!frontmatterMatch) return null;
-
-      const fm = frontmatterMatch[1];
-      const desc = fm.match(/^description:\s*(.+)$/m)?.[1]?.trim() || 'EvolClaw 运行时管理指令';
-      const trigger = fm.match(/^trigger:\s*(.+)$/m)?.[1]?.trim() || '';
-
-      const parts = [
-        `可通过 Bash 指令管理运行时，${desc}。`,
-        trigger ? `触发时机：${trigger}。` : '',
-        `完整文档见 ${skillsPath}`,
-      ];
-      return parts.filter(Boolean).join('');
-    } catch {
-      return null;
-    }
-  }
 
   /**
    * 判断文件路径是否为占位符/示例文本
