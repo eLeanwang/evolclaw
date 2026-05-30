@@ -306,13 +306,63 @@ export class SessionManager {
     return path.join(chatDir, `${sessionId}.jsonl`);
   }
 
-  private appendMeta(channel: string, channelId: string, session: Session): void {
+  /** 由 session 自身的 channelType/channelId/selfId/threadId 直接定位其 .jsonl 路径（不扫描目录）。 */
+  private metaPathForSession(session: Session): string {
     const dir = this.ensureChatDirForSession(session);
-    const isThread = !!session.threadId;
-    const targetDir = isThread ? path.join(dir, '_threads') : dir;
+    const targetDir = session.threadId ? path.join(dir, '_threads') : dir;
+    return this.metaFilePath(targetDir, session.id);
+  }
+
+  private appendMeta(channel: string, channelId: string, session: Session): void {
     const file = sessionToFile(session);
-    const metaPath = this.metaFilePath(targetDir, session.id);
-    appendJsonl(metaPath, file);
+    appendJsonl(this.metaPathForSession(session), file);
+  }
+
+  /**
+   * Session 持久化的唯一事务原语。所有 session 写操作都应经此，业务层不直接调
+   * appendMeta / writeActive。
+   *
+   * 契约：.jsonl 是权威源，active.json 是热缓存。
+   *   1. 内建 diff 去重：与该 session 的 .jsonl 末行比较（忽略 updatedAt），无变化则跳过
+   *   2. appendMeta(.jsonl) —— 始终先落历史档案（权威源）
+   *   3. 按 intent 决定 active.json 行为：
+   *      - 'set'  : 无条件让该 session 成为 active（创建/切换主会话）
+   *      - 'sync' : 仅当该 session 已是当前 active 时同步缓存（更新自身字段）
+   *      - 'none' : 不碰 active.json（thread 会话 / 后台 autonomous 会话）
+   *
+   * @param session   要持久化的 session（其 updatedAt 会被刷新）
+   * @param intent    active.json 行为意图
+   * @param opts.forceWrite  强制写入一条新记录，跳过去重。用于 markProcessing/clearProcessing
+   *                         这类"状态转换事件必须留痕"的场景。
+   * @returns 是否真的写入了 .jsonl（去重命中时返回 false）
+   */
+  private persistSession(
+    session: Session,
+    intent: 'set' | 'sync' | 'none',
+    opts?: { forceWrite?: boolean }
+  ): boolean {
+    if (!opts?.forceWrite) {
+      const lastMeta = readLastJsonlLine<SessionFile>(this.metaPathForSession(session));
+      if (lastMeta && this.sessionFilesEqual(lastMeta, sessionToFile(session))) {
+        // .jsonl 末行已与目标一致：仍可能需要把缓存对齐（'set' 语义）
+        if (intent === 'set') {
+          session.updatedAt = Date.now();
+          this.writeActive(session.channel, session.channelId, session);
+        }
+        return false;
+      }
+    }
+    session.updatedAt = Date.now();
+    this.appendMeta(session.channel, session.channelId, session);
+    if (intent === 'set') {
+      this.writeActive(session.channel, session.channelId, session);
+    } else if (intent === 'sync') {
+      const active = this.readActive(session.channel, session.channelId);
+      if (active && active.id === session.id) {
+        this.writeActive(session.channel, session.channelId, session);
+      }
+    }
+    return true;
   }
 
   /**
@@ -322,30 +372,6 @@ export class SessionManager {
   private sessionFilesEqual(a: ReturnType<typeof sessionToFile>, b: ReturnType<typeof sessionToFile>): boolean {
     const stripVolatile = ({ updatedAt, updatedAtStr, ...rest }: ReturnType<typeof sessionToFile>) => rest;
     return JSON.stringify(stripVolatile(a)) === JSON.stringify(stripVolatile(b));
-  }
-
-  /**
-   * Append meta + write active.json，但只在 session 内容（除 updatedAt 外）真正变化时才写。
-   * prev 是修改前的快照（用于 diff），next 是修改后的 session。
-   * 返回是否发生了写入。
-   */
-  private writeSessionIfChanged(channel: string, channelId: string, prev: Session | undefined, next: Session): boolean {
-    if (prev) {
-      const prevFile = sessionToFile(prev);
-      const nextFile = sessionToFile(next);
-      if (this.sessionFilesEqual(prevFile, nextFile)) return false;
-    }
-    next.updatedAt = Date.now();
-    this.appendMeta(channel, channelId, next);
-    const active = this.readActive(channel, channelId);
-    if (active && active.id === next.id) {
-      // 保留 active.json 中已有的 activeTask（markProcessing 写入的处理状态）
-      if (active.processingState && !next.processingState) {
-        next.processingState = active.processingState;
-      }
-      this.writeActive(channel, channelId, next);
-    }
-    return true;
   }
 
   private readMetaLatest(metaFilePath: string): Session | undefined {
@@ -365,11 +391,9 @@ export class SessionManager {
    *   2. 优先读 active.json（如果 active.id === sessionId）—— 当前状态
    *   3. 否则 fallback 到 .jsonl 末行 —— 非活跃 session 的更新（如多 session 并存时改非 active 那个）
    *
-   * 返回 { current, prev }：
-   *   - current 用于 caller 修改后写回
-   *   - prev 是 current 的初始快照（用于 writeSessionIfChanged 的 diff 检查）
+   * 返回 { current }：caller 修改后交给 persistSession 写回（去重由 persistSession 内建）。
    */
-  private loadSessionForUpdate(sessionId: string): { current: Session; prev: Session } | undefined {
+  private loadSessionForUpdate(sessionId: string): { current: Session } | undefined {
     const found = this.findSessionFileById(sessionId);
     if (!found) return undefined;
 
@@ -381,10 +405,8 @@ export class SessionManager {
     const active = this.readActive(fromJsonl.channel, fromJsonl.channelId);
     const base = (active && active.id === sessionId) ? active : fromJsonl;
 
-    // 深拷贝避免 caller 改 current 时污染 prev
     const current: Session = JSON.parse(JSON.stringify(base));
-    const prev: Session = JSON.parse(JSON.stringify(base));
-    return { current, prev };
+    return { current };
   }
 
   private validateSessionFile(session: Session): string | undefined {
@@ -395,9 +417,8 @@ export class SessionManager {
     if (!adapter) return agentSessionId;
     if (adapter.checkExists(session.projectPath, agentSessionId)) return agentSessionId;
     logger.warn(`Session file not found for ${agentId}: ${agentSessionId}, clearing session ID`);
-    const prev: Session = JSON.parse(JSON.stringify(session));
     session.agentSessionId = undefined;
-    this.writeSessionIfChanged(session.channel, session.channelId, prev, session);
+    this.persistSession(session, 'sync');
     return undefined;
   }
 
@@ -455,17 +476,12 @@ export class SessionManager {
   markProcessing(sessionId: string, taskId?: string): void {
     const now = Date.now();
     const state = taskId ? `${now}:${taskId}` : String(now);
-    const chatDirs = scanChatDirs(this.sessionsDir);
-    for (const { dirPath } of chatDirs) {
-      const active = readJsonFile<SessionFile>(path.join(dirPath, 'active.json'));
-      if (active && active.id === sessionId) {
-        active.activeTask = state;
-        active.updatedAt = now;
-        active.updatedAtStr = formatTimestamp(now);
-        atomicWriteJson(path.join(dirPath, 'active.json'), active);
-        return;
-      }
-    }
+    const found = this.findSessionFileById(sessionId);
+    if (!found) return;
+    const session = this.readMetaLatest(found.metaPath);
+    if (!session) return;
+    session.processingState = state;
+    this.persistSession(session, 'sync', { forceWrite: true });
   }
 
   getActiveTaskId(sessionId: string): string | undefined {
@@ -482,17 +498,14 @@ export class SessionManager {
   }
 
   clearProcessing(sessionId: string): void {
-    const now = Date.now();
-    const chatDirs = scanChatDirs(this.sessionsDir);
-    for (const { dirPath } of chatDirs) {
-      const active = readJsonFile<SessionFile>(path.join(dirPath, 'active.json'));
-      if (active && active.id === sessionId) {
-        active.activeTask = null;
-        active.updatedAt = now;
-        active.updatedAtStr = formatTimestamp(now);
-        atomicWriteJson(path.join(dirPath, 'active.json'), active);
-        break;
-      }
+    const found = this.findSessionFileById(sessionId);
+    if (!found) { this.sessionEncryptState.delete(sessionId); return; }
+    const session = this.readMetaLatest(found.metaPath);
+    if (!session) { this.sessionEncryptState.delete(sessionId); return; }
+    // 仅当 .jsonl 末行确实有 activeTask 时才写（避免写放大）
+    if (session.processingState) {
+      session.processingState = undefined;
+      this.persistSession(session, 'sync', { forceWrite: true });
     }
     this.sessionEncryptState.delete(sessionId);
   }
@@ -510,17 +523,16 @@ export class SessionManager {
     const result: Session[] = [];
     const chatDirs = scanChatDirs(this.sessionsDir);
     for (const { dirPath } of chatDirs) {
-      const active = readJsonFile<SessionFile>(path.join(dirPath, 'active.json'));
-      if (!active || !active.activeTask) continue;
-      const colonIdx = active.activeTask.indexOf(':');
-      const ts = parseInt(colonIdx > 0 ? active.activeTask.slice(0, colonIdx) : active.activeTask, 10);
-      if (!isNaN(ts) && (now - ts) < maxAgeMs) {
-        result.push(fileToSession(active));
-      } else {
-        active.activeTask = null;
-        active.updatedAt = now;
-        active.updatedAtStr = formatTimestamp(now);
-        atomicWriteJson(path.join(dirPath, 'active.json'), active);
+      for (const metaFile of scanMetaFiles(dirPath)) {
+        const session = this.readMetaLatest(path.join(dirPath, metaFile));
+        if (!session?.processingState) continue;
+        const colonIdx = session.processingState.indexOf(':');
+        const ts = parseInt(colonIdx > 0 ? session.processingState.slice(0, colonIdx) : session.processingState, 10);
+        if (!isNaN(ts) && (now - ts) < maxAgeMs) {
+          result.push(session);
+        } else {
+          this.clearProcessing(session.id);
+        }
       }
     }
     return result;
@@ -547,7 +559,7 @@ export class SessionManager {
       session.identity = this.resolveIdentity(channel, userId);
       if (session.metadata && !session.metadata.permissionMode) {
         session.metadata.permissionMode = DEFAULT_PERMISSION_MODE;
-        this.appendMeta(channel, channelId, session);
+        this.persistSession(session, 'none');
       }
       return session;
     }
@@ -587,9 +599,7 @@ export class SessionManager {
         }
       }
       if (mutated) {
-        session.updatedAt = Date.now();
-        this.appendMeta(channel, channelId, session);
-        this.writeActive(channel, channelId, session);
+        this.persistSession(session, 'sync');
       }
       return session;
     }
@@ -603,7 +613,6 @@ export class SessionManager {
 
     if (existing) {
       const validSessionId = this.validateSessionFile(existing);
-      const prev: Session = JSON.parse(JSON.stringify({ ...existing, agentSessionId: validSessionId }));
       const session: Session = { ...existing, agentSessionId: validSessionId };
       session.identity = this.resolveIdentity(channel, userId);
 
@@ -621,7 +630,7 @@ export class SessionManager {
       if (chatType === 'private' && metadata?.peerName && !session.metadata.peerName) {
         session.metadata.peerName = metadata.peerName;
       }
-      this.writeSessionIfChanged(channel, channelId, prev, session);
+      this.persistSession(session, 'sync');
       return session;
     }
 
@@ -647,8 +656,7 @@ export class SessionManager {
     };
     session.identity = this.resolveIdentity(channel, userId);
 
-    this.appendMeta(channel, channelId, session);
-    this.writeActive(channel, channelId, session);
+    this.persistSession(session, 'set');
     this.eventBus.publish({
       type: 'session:created',
       sessionId: session.id,
@@ -665,7 +673,7 @@ export class SessionManager {
   async updateSession(sessionId: string, updates: Partial<Pick<Session, 'chatType' | 'name' | 'metadata' | 'sessionMode'>> & { agentSessionId?: string | null }): Promise<void> {
     const loaded = this.loadSessionForUpdate(sessionId);
     if (!loaded) return;
-    const { current, prev } = loaded;
+    const { current } = loaded;
 
     if (updates.chatType !== undefined) current.chatType = updates.chatType;
     if (updates.name !== undefined) current.name = updates.name;
@@ -673,7 +681,7 @@ export class SessionManager {
     if (updates.metadata !== undefined) current.metadata = updates.metadata;
     if ('agentSessionId' in updates) current.agentSessionId = updates.agentSessionId ?? undefined;
 
-    this.writeSessionIfChanged(current.channel, current.channelId, prev, current);
+    this.persistSession(current, 'sync');
   }
 
   private getOrCreateThreadSession(
@@ -702,8 +710,7 @@ export class SessionManager {
         const validSessionId = this.validateSessionFile(existing);
         if (metadata) {
           existing.metadata = { ...(existing.metadata || {}), ...metadata };
-          existing.updatedAt = Date.now();
-          this.appendMeta(channel, channelId, existing);
+          this.persistSession(existing, 'none');
         }
         return { ...existing, agentSessionId: validSessionId };
       }
@@ -731,7 +738,7 @@ export class SessionManager {
       updatedAt: Date.now(),
     };
 
-    this.appendMeta(channel, channelId, session);
+    this.persistSession(session, 'none');
     threadIndex[threadId] = session.id;
     writeThreadIndex(chatDir, threadIndex);
 
@@ -761,9 +768,7 @@ export class SessionManager {
     if (target) {
       const validSessionId = this.validateSessionFile(target);
       target.agentSessionId = validSessionId;
-      target.updatedAt = Date.now();
-      this.appendMeta(channel, channelId, target);
-      this.writeActive(channel, channelId, target);
+      this.persistSession(target, 'set');
       return target;
     }
 
@@ -783,8 +788,7 @@ export class SessionManager {
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
-    this.appendMeta(channel, channelId, session);
-    this.writeActive(channel, channelId, session);
+    this.persistSession(session, 'set');
     this.eventBus.publish({
       type: 'session:created',
       sessionId: session.id,
@@ -800,17 +804,16 @@ export class SessionManager {
   async updateAgentSessionId(channel: string, channelId: string, agentSessionId: string): Promise<void> {
     const active = this.readActive(channel, channelId);
     if (!active) return;
-    const prev: Session = JSON.parse(JSON.stringify(active));
     active.agentSessionId = agentSessionId;
-    this.writeSessionIfChanged(channel, channelId, prev, active);
+    this.persistSession(active, 'sync');
   }
 
   async updateAgentSessionIdBySessionId(sessionId: string, agentSessionId: string): Promise<void> {
     const loaded = this.loadSessionForUpdate(sessionId);
     if (!loaded) return;
-    const { current, prev } = loaded;
+    const { current } = loaded;
     current.agentSessionId = agentSessionId;
-    const wrote = this.writeSessionIfChanged(current.channel, current.channelId, prev, current);
+    const wrote = this.persistSession(current, 'sync');
     if (wrote) {
       logger.info(`[SessionManager] Updating agent_session_id: sessionId=${sessionId}, agentSessionId=${agentSessionId}`);
     }
@@ -829,9 +832,7 @@ export class SessionManager {
     if (target) {
       const validSessionId = this.validateSessionFile(target);
       target.agentSessionId = validSessionId;
-      target.updatedAt = Date.now();
-      this.appendMeta(channel, channelId, target);
-      this.writeActive(channel, channelId, target);
+      this.persistSession(target, 'set');
       return target;
     }
 
@@ -851,8 +852,7 @@ export class SessionManager {
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
-    this.appendMeta(channel, channelId, session);
-    this.writeActive(channel, channelId, session);
+    this.persistSession(session, 'set');
     this.eventBus.publish({
       type: 'session:created',
       sessionId: session.id,
@@ -868,9 +868,8 @@ export class SessionManager {
   async clearActiveSession(channel: string, channelId: string): Promise<void> {
     const active = this.readActive(channel, channelId);
     if (!active) return;
-    const prev: Session = JSON.parse(JSON.stringify(active));
     active.agentSessionId = undefined;
-    this.writeSessionIfChanged(channel, channelId, prev, active);
+    this.persistSession(active, 'sync');
   }
 
   getOwnerChatId(targetChannel: string, ownerPeerId: string): string | undefined {
@@ -982,26 +981,24 @@ export class SessionManager {
     const target = sessions.find(s => s.id === targetSessionId);
     if (!target) return null;
 
-    target.updatedAt = Date.now();
-    this.appendMeta(channel, channelId, target);
-    this.writeActive(channel, channelId, target);
+    this.persistSession(target, 'set');
     return target;
   }
 
   updateMetadata(sessionId: string, metadata: Record<string, any>): void {
     const loaded = this.loadSessionForUpdate(sessionId);
     if (!loaded) return;
-    const { current, prev } = loaded;
+    const { current } = loaded;
     current.metadata = metadata;
-    this.writeSessionIfChanged(current.channel, current.channelId, prev, current);
+    this.persistSession(current, 'sync');
   }
 
   async renameSession(sessionId: string, newName: string): Promise<boolean> {
     const loaded = this.loadSessionForUpdate(sessionId);
     if (!loaded) return false;
-    const { current, prev } = loaded;
+    const { current } = loaded;
     current.name = newName;
-    this.writeSessionIfChanged(current.channel, current.channelId, prev, current);
+    this.persistSession(current, 'sync');
     return true;
   }
 
@@ -1078,14 +1075,13 @@ export class SessionManager {
       agentId: agentId || 'claude',
       chatType: inheritedChatType,
       sessionMode: this.resolveDefaultSessionMode(channel, inheritedChatType),
-      metadata: {},
+      metadata: { permissionMode: DEFAULT_PERMISSION_MODE },
       name: name || '默认会话',
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
 
-    this.appendMeta(channel, channelId, session);
-    this.writeActive(channel, channelId, session);
+    this.persistSession(session, 'set');
     this.eventBus.publish({
       type: 'session:created',
       sessionId: session.id,
@@ -1115,14 +1111,13 @@ export class SessionManager {
       chatType: sourceSession.chatType || 'private',
       sessionMode: sourceSession.sessionMode || 'interactive',
       agentSessionId: forkedAgentSessionId,
-      metadata: {},
+      metadata: { permissionMode: sourceSession.metadata?.permissionMode || DEFAULT_PERMISSION_MODE },
       name: name || `${sourceSession.name || '会话'}-分支`,
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
 
-    this.appendMeta(sourceSession.channel, sourceSession.channelId, session);
-    this.writeActive(sourceSession.channel, sourceSession.channelId, session);
+    this.persistSession(session, 'set');
     this.eventBus.publish({
       type: 'session:created',
       sessionId: session.id,
@@ -1206,8 +1201,7 @@ export class SessionManager {
       updatedAt: Date.now(),
     };
 
-    this.appendMeta(channel, channelId, session);
-    this.writeActive(channel, channelId, session);
+    this.persistSession(session, 'set');
     this.eventBus.publish({
       type: 'session:created',
       sessionId: session.id,

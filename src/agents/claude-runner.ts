@@ -36,6 +36,97 @@ export interface PermissionContext {
   chatmode?: 'interactive' | 'proactive';
 }
 
+// ── 模型别名解析 ──
+// SDK 内置的别名表可能落后于代理实际可用的最新模型，
+// 因此优先从 {baseUrl}/models 动态获取各系列最新版本，失败则回退静态表。
+// 已验证可用但尚未出现在 /models 列表中的模型 ID 会被注入候选列表，
+// 等列表更新后注入自动变为 no-op。
+
+const MODEL_FAMILIES = ['opus', 'sonnet', 'haiku'] as const;
+
+/** 已验证可用但可能尚未出现在 /models 列表中的模型 ID（注入候选） */
+const INJECTED_MODELS = ['claude-opus-4-8'];
+
+/** 静态回退表：动态获取失败时使用 */
+const STATIC_MODEL_ALIASES: Record<string, string> = {
+  'opus': 'claude-opus-4-8',
+  'sonnet': 'claude-sonnet-4-6',
+  'haiku': 'claude-haiku-4-5-20251001',
+};
+
+const MODEL_ALIAS_TTL_MS = 60 * 60 * 1000; // 1h
+interface AliasCacheEntry { aliases: Record<string, string>; fetchedAt: number; }
+const modelAliasCache = new Map<string, AliasCacheEntry>(); // key: baseUrl
+const modelAliasInFlight = new Set<string>();               // 去重并发刷新
+
+/** 从模型 ID 列表中提取各 claude 系列的最新版本（按 major.minor 取最高） */
+function deriveAliasesFromModelIds(ids: string[]): Record<string, string> {
+  // 注入已验证可用的模型（如果列表中已有则去重无影响）
+  const allIds = [...new Set([...ids, ...INJECTED_MODELS])];
+  const best: Record<string, { id: string; major: number; minor: number }> = {};
+  for (const id of allIds) {
+    const m = id.match(/^claude-(opus|sonnet|haiku)-(\d+)-(\d+)/);
+    if (!m) continue;
+    const [, family, majorStr, minorStr] = m;
+    const major = parseInt(majorStr, 10);
+    const minor = parseInt(minorStr, 10);
+    const cur = best[family];
+    if (!cur || major > cur.major || (major === cur.major && minor > cur.minor)) {
+      best[family] = { id, major, minor };
+    }
+  }
+  const aliases: Record<string, string> = {};
+  for (const [family, info] of Object.entries(best)) aliases[family] = info.id;
+  return aliases;
+}
+
+/** 异步刷新某 baseUrl 的别名缓存（失败静默，不抛出） */
+async function refreshModelAliases(baseUrl: string, apiKey?: string): Promise<void> {
+  if (modelAliasInFlight.has(baseUrl)) return;
+  modelAliasInFlight.add(baseUrl);
+  try {
+    const url = `${baseUrl.replace(/\/$/, '')}/models`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5000);
+    const resp = await fetch(url, {
+      signal: controller.signal,
+      headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+    });
+    clearTimeout(timer);
+    if (!resp.ok) return;
+    const json: any = await resp.json();
+    const ids: string[] = Array.isArray(json?.data)
+      ? json.data.map((m: any) => m?.id).filter((x: any): x is string => typeof x === 'string')
+      : [];
+    const aliases = deriveAliasesFromModelIds(ids);
+    if (Object.keys(aliases).length > 0) {
+      modelAliasCache.set(baseUrl, { aliases, fetchedAt: Date.now() });
+      logger.info(`[AgentRunner] Refreshed model aliases from ${url}: ${JSON.stringify(aliases)}`);
+    }
+  } catch {
+    // 网络/解析失败：保持静态回退，不打断查询
+  } finally {
+    modelAliasInFlight.delete(baseUrl);
+  }
+}
+
+/** 将短别名展开为完整 model ID，已是完整 ID 则原样返回 */
+function resolveModelAlias(model: string, baseUrl?: string): string {
+  // 非短别名（已经是完整 ID）直接返回
+  if (!MODEL_FAMILIES.includes(model as any)) return model;
+
+  // 优先使用动态缓存
+  if (baseUrl) {
+    const cached = modelAliasCache.get(baseUrl);
+    if (cached && (Date.now() - cached.fetchedAt < MODEL_ALIAS_TTL_MS)) {
+      return cached.aliases[model] || STATIC_MODEL_ALIASES[model] || model;
+    }
+  }
+
+  // 回退静态表
+  return STATIC_MODEL_ALIASES[model] || model;
+}
+
 // ── SDK 消息流（Claude Agent SDK 专有格式）──
 
 export interface ImageData {
@@ -122,11 +213,11 @@ export type AgentEvent =
   | { type: 'status'; subtype: string; message: string }
   | { type: 'tool_use'; name: string; input: any; callId?: string; turn?: number; outputTokens?: number }
   | { type: 'tool_result'; name: string; result: any; isError?: boolean; error?: string; callId?: string }
-  | { type: 'compact'; preTokens: number }
+  | { type: 'compact'; preTokens: number; postTokens?: number; durationMs?: number }
   | { type: 'task_progress'; summary?: string; toolUses?: number; durationMs?: number }
   | { type: 'session_id'; sessionId: string }
   | { type: 'state_changed'; state: 'idle' | 'running' | 'requires_action' }
-  | { type: 'complete'; result?: string; subtype?: string; isError?: boolean; errors?: string[]; durationMs?: number; costUsd?: number; terminalReason?: string; sessionTitle?: string; numTurns?: number; usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } }
+  | { type: 'complete'; result?: string; subtype?: string; isError?: boolean; errors?: string[]; durationMs?: number; ttftMs?: number; costUsd?: number; terminalReason?: string; sessionTitle?: string; numTurns?: number; usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } }
   | { type: 'error'; error: string; errorType: 'context_too_long' | 'auth' | 'network' | 'unknown' };
 
 export interface QueryRequest {
@@ -219,6 +310,7 @@ export interface AgentRunnerFull {
   setModel?(model: string): void;
   getModel?(): string;
   listModels?(): string[];
+  resolveModelId?(model: string): string;
   setEffort?(effort: any): void;
   getEffort?(): string | undefined;
   listModes?(): PermissionModeInfo[];
@@ -284,6 +376,9 @@ export class AgentRunner {
   private permissionContexts = new Map<string, PermissionContext>();
   private currentEvolclawSessionId?: string;
   private claudeExecutablePath?: string;
+  /** 每个 session 最近的子进程 stderr 行（环形缓冲），用于子进程崩溃时还原真正原因 */
+  private recentStderr = new Map<string, string[]>();
+  private static readonly STDERR_BUFFER_MAX = 80;
 
   constructor(
     apiKey: string,
@@ -305,11 +400,17 @@ export class AgentRunner {
   }
 
   private getAgentEnv(): Record<string, string | undefined> {
+    // SDK 0.3.x 起，CLI 在以 root 运行时会拒绝 --dangerously-skip-permissions
+    // （bypassPermissions 模式映射而来），报错 "cannot be used with root/sudo privileges"
+    // 并以 code 1 退出。IS_SANDBOX=1 是 CLI 提供的 root 守卫豁免开关。
+    // 仅在以 root 运行时注入，非 root 部署行为不变。
+    const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
     return {
       ...process.env,
       ANTHROPIC_AUTH_TOKEN: this.apiKey,
       PATH: process.env.PATH,
       DISABLE_AUTOUPDATER: '1',
+      ...(isRoot ? { IS_SANDBOX: '1' } : {}),
       ...(this.baseUrl ? { ANTHROPIC_BASE_URL: this.baseUrl } : {}),
       ...(this.currentEvolclawSessionId ? { EVOLCLAW_SESSION_ID: this.currentEvolclawSessionId } : {}),
     };
@@ -325,6 +426,11 @@ export class AgentRunner {
 
   listModels(): string[] {
     return ['opus', 'sonnet', 'haiku'];
+  }
+
+  /** 将短别名解析为当前代理实际使用的完整 model ID（仅用于展示，不改变持久化值） */
+  resolveModelId(model: string): string {
+    return resolveModelAlias(model, this.baseUrl);
   }
 
   setEffort(effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | undefined): void {
@@ -373,7 +479,7 @@ export class AgentRunner {
   private toSdkPermissionMode(): 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan' | 'dontAsk' | 'auto' {
     const map: Record<string, 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan' | 'dontAsk' | 'auto'> = {
       'auto': 'auto',         // AI 分类器自动判断
-      'bypass': 'default',    // 全部自动放行（通过 canUseTool 一律 allow，保留 hook 安全检查）
+      'bypass': 'bypassPermissions',  // 全部自动放行（SDK 跳过分类器，canUseTool 仍保留 hook 安全检查）
       'request': 'default',   // 部分自动，部分询问
       'edit': 'acceptEdits',
       'plan': 'plan',
@@ -802,7 +908,8 @@ export class AgentRunner {
     let turnCount = 0;
     const seenMessageIds = new Set<string>();
 
-    for await (const event of sdkStream) {
+    try {
+      for await (const event of sdkStream) {
       // 提取 session_id（任意 SDK 事件都可能携带）
       if (event.session_id && event.session_id !== lastSessionId) {
         lastSessionId = event.session_id;
@@ -812,7 +919,12 @@ export class AgentRunner {
 
       // system: compact_boundary → compact
       if (event.type === 'system' && event.subtype === 'compact_boundary') {
-        yield { type: 'compact', preTokens: event.compact_metadata?.pre_tokens || 0 };
+        yield {
+          type: 'compact',
+          preTokens: event.compact_metadata?.pre_tokens || 0,
+          postTokens: event.compact_metadata?.post_tokens,
+          durationMs: event.compact_metadata?.duration_ms,
+        };
       }
 
       // system: task_progress → task_progress
@@ -905,6 +1017,7 @@ export class AgentRunner {
           isError: event.is_error,
           errors: event.errors,
           durationMs: event.duration_ms,
+          ttftMs: event.ttft_ms,
           costUsd: event.total_cost_usd,
           terminalReason: event.terminal_reason,
           sessionTitle: event.session_title,
@@ -915,6 +1028,19 @@ export class AgentRunner {
         return;
       }
     }
+    } catch (err) {
+      // 子进程崩溃（如 exited with code 1）时，把缓冲的 stderr 打出来还原真实原因。
+      // SDK 包装后的错误信息不含子进程实际报错，缓冲区才是根因所在。
+      const buf = this.recentStderr.get(sessionId);
+      if (buf && buf.length > 0) {
+        logger.error(`[AgentRunner] Subprocess stream failed (session=${sessionId}). Last ${buf.length} stderr line(s):\n${buf.join('\n')}`);
+      } else {
+        logger.error(`[AgentRunner] Subprocess stream failed (session=${sessionId}) with no captured stderr.`);
+      }
+      throw err;
+    } finally {
+      this.recentStderr.delete(sessionId);
+    }
   }
 
   async runQuery(sessionId: string, prompt: string, projectPath: string, initialClaudeSessionId?: string, images?: ImageData[], systemPromptAppend?: string, sessionManager?: any): Promise<AsyncIterable<AgentEvent>> {
@@ -923,6 +1049,14 @@ export class AgentRunner {
 
     // 同步用户级配置到内存
     this.syncFromUserSettings();
+
+    // 异步刷新模型别名缓存（fire-and-forget，不阻塞查询）
+    if (this.baseUrl) {
+      const cached = modelAliasCache.get(this.baseUrl);
+      if (!cached || (Date.now() - cached.fetchedAt > MODEL_ALIAS_TTL_MS)) {
+        refreshModelAliases(this.baseUrl, this.apiKey);
+      }
+    }
 
     ensureDir(projectPath);
     ensureDir(path.join(projectPath, '.claude'));
@@ -1125,8 +1259,8 @@ export class AgentRunner {
     }
     const commonOptions = {
       cwd: projectPath,
-      model: this.model,
-      ...(this.effort ? { effort: this.effort as 'low' | 'medium' | 'high' | 'max' } : {}),
+      model: resolveModelAlias(this.model, this.baseUrl),
+      ...(this.effort ? { effort: this.effort } : {}),
       ...(this.claudeExecutablePath ? { pathToClaudeCodeExecutable: this.claudeExecutablePath } : {}),
       autoCompactWindow: 200000,
       advisorModel: 'haiku',
@@ -1141,10 +1275,18 @@ export class AgentRunner {
       },
       ...(enableSummaries ? { agentProgressSummaries: true } : {}),
       stderr: (msg: string) => {
+        const trimmed = msg.trim();
+        if (trimmed) {
+          // 环形缓冲：保留最近 N 行，供子进程崩溃时还原真实原因
+          let buf = this.recentStderr.get(sessionId);
+          if (!buf) { buf = []; this.recentStderr.set(sessionId, buf); }
+          buf.push(trimmed);
+          if (buf.length > AgentRunner.STDERR_BUFFER_MAX) buf.shift();
+        }
         if (msg.includes('[ERROR]') || msg.includes('[WARN]') || msg.includes('Stream started')) {
-          logger.info(`[Claude-stderr] ${msg.trim()}`);
+          logger.info(`[Claude-stderr] ${trimmed}`);
         } else {
-          logger.debug(`[Claude-stderr] ${msg.trim()}`);
+          logger.debug(`[Claude-stderr] ${trimmed}`);
         }
       },
       env: this.getAgentEnv()
@@ -1281,6 +1423,7 @@ export class AgentRunner {
   cleanupStream(sessionId: string): void {
     this.activeStreams.delete(sessionId);
     this.interruptFns.delete(sessionId);
+    this.recentStderr.delete(sessionId);
   }
 
   updateSessionId(sessionId: string, agentSessionId: string): void {
@@ -1296,7 +1439,7 @@ export class AgentRunner {
       prompt,
       options: {
         cwd: projectPath,
-        model: this.model,
+        model: resolveModelAlias(this.model, this.baseUrl),
         resume: agentSessionId,
         maxTurns: 1,
         permissionMode: this.toSdkPermissionMode(),
@@ -1385,6 +1528,7 @@ export class AgentRunner {
         enableFileCheckpointing: true,
         permissionMode: this.toSdkPermissionMode(),
         stderr: (data: string) => { stderrChunks.push(data); },
+        env: this.getAgentEnv(),
       }
     });
     try {

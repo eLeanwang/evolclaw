@@ -52,6 +52,7 @@ export class FeishuChannel {
   private enableRichContent: boolean;
   // chatId → 该会话内仍 pending 的交互卡片 messageId 集合，用于作废
   private pendingCardsByChat = new Map<string, Set<string>>();
+  private pendingV2Messages = new Set<string>(); // messageIds of V2 (schema 2.0) cards
   readonly cardManager = new FeishuCardManager();
 
   constructor(private config: FeishuConfig) {
@@ -419,15 +420,23 @@ export class FeishuChannel {
               return;
             }
 
-            // _show_input：动态追加 input 组件到卡片，不 resolve interaction
+            // _show_input：点击「手动输入」后，整卡替换为内联输入框的版本。
+            // 飞书规定：用户点击交互期间无法对该卡片做流式更新（append/patch），
+            // 即使 API 返回 code=0，回调结束后客户端也会复原（错误码 200810，
+            // 对应 FAQ「为什么进行卡片更新时，更新成功后立即复原?」）。
+            // 唯一可靠方式是把更新后的整卡作为本次点击回调的返回值下发。
             if (value._action === '_show_input') {
-              const elements = buildCustomInputElements(requestId, value._initiator);
-              const ok = await this.cardManager.appendElement(this.client, requestId, elements, 'action_form');
-              if (ok) {
-                return { toast: { type: 'info', content: '请在下方输入' } };
+              const meta = this.cardManager.getEntryMeta(requestId);
+              if (meta?.action) {
+                const rebuilt = buildActionCardV2(requestId, meta.action, meta.initiatorId, { showInput: true });
+                this.cardManager.markInputShown(requestId);
+                return {
+                  toast: { type: 'info', content: '请在下方输入' },
+                  card: { type: 'raw', data: rebuilt },
+                };
               }
-              // 追加失败，fallback 到正常回调流程
-              logger.warn(`[Feishu] _show_input appendElement failed for requestId=${requestId}`);
+              logger.warn(`[Feishu] _show_input: no entry meta for requestId=${requestId}`);
+              return { toast: { type: 'warning', content: '⚠️ 卡片已失效，请重新发起' } };
             }
 
             // Form submit: `action.form_value` contains all field values from form container
@@ -458,8 +467,10 @@ export class FeishuChannel {
             if (chatId && cardMessageId) this.untrackPendingCard(chatId, cardMessageId);
 
             // Return updated card (buttons disabled + result shown)
+            // V2 entity cards (checkers/allowCustomInput) MUST respond with schema 2.0 — error 200830 otherwise
             const cardTitle = value._card_title || '操作';
-            return this.buildResolvedCard(cardTitle, response, cardBody, btnLabel);
+            const isV2Card = !!this.cardManager.getCardId(requestId);
+            return this.buildResolvedCard(cardTitle, response, cardBody, btnLabel, isV2Card);
           } catch (err) {
             logger.error('[Feishu] Failed to handle card action:', err);
           }
@@ -1066,13 +1077,14 @@ export class FeishuChannel {
   }
 
   /** 跟踪 pending 交互卡片，等待后续作废 */
-  private trackPendingCard(chatId: string, messageId: string): void {
+  private trackPendingCard(chatId: string, messageId: string, isV2?: boolean): void {
     let set = this.pendingCardsByChat.get(chatId);
     if (!set) {
       set = new Set();
       this.pendingCardsByChat.set(chatId, set);
     }
     set.add(messageId);
+    if (isV2) this.pendingV2Messages.add(messageId);
   }
 
   /** 卡片已 resolved（用户点击了按钮，飞书已用回调返回值替换卡片），从作废集合移除 */
@@ -1080,6 +1092,7 @@ export class FeishuChannel {
     const set = this.pendingCardsByChat.get(chatId);
     if (!set) return;
     set.delete(messageId);
+    this.pendingV2Messages.delete(messageId);
     if (set.size === 0) this.pendingCardsByChat.delete(chatId);
   }
 
@@ -1090,7 +1103,7 @@ export class FeishuChannel {
   private async invalidatePendingCards(chatId: string): Promise<void> {
     const set = this.pendingCardsByChat.get(chatId);
     if (!set || set.size === 0) return;
-    const expiredCard = {
+    const expiredCardV1 = {
       config: { wide_screen_mode: true, update_multi: true },
       header: {
         template: 'grey',
@@ -1098,13 +1111,25 @@ export class FeishuChannel {
       },
       elements: [{ tag: 'markdown', content: '此卡片已过期，请查看最新卡片。' }],
     };
+    // V2 (schema 2.0) cards can only be updated with 2.0 content — 1.0 patch is rejected (200830)
+    const expiredCardV2 = {
+      schema: '2.0',
+      config: { update_multi: true },
+      header: {
+        template: 'grey',
+        title: { tag: 'plain_text', content: '已过期' },
+      },
+      body: { elements: [{ tag: 'markdown', content: '此卡片已过期，请查看最新卡片。' }] },
+    };
     const ids = Array.from(set);
     this.pendingCardsByChat.delete(chatId);
     await Promise.all(ids.map(async msgId => {
+      const isV2 = this.pendingV2Messages.has(msgId);
+      this.pendingV2Messages.delete(msgId);
       try {
         await this.client.im.message.patch({
           path: { message_id: msgId },
-          data: { content: JSON.stringify(expiredCard) },
+          data: { content: JSON.stringify(isV2 ? expiredCardV2 : expiredCardV1) },
         });
       } catch (err: any) {
         const detail = err?.response?.data ?? err?.message ?? err;
@@ -1126,10 +1151,11 @@ export class FeishuChannel {
       await this.invalidatePendingCards(chatId);
       const result = await this.cardManager.createAndSend(
         this.client, chatId, cardJson, interaction.id, options,
+        { action: interaction.kind, initiatorId: interaction.initiatorId },
       );
       if (result) {
         logger.info(`[Feishu] Sent V2 interaction card: ${interaction.id}, cardId=${result.cardId}, messageId=${result.messageId}`);
-        this.trackPendingCard(chatId, result.messageId);
+        this.trackPendingCard(chatId, result.messageId, true);
         return result.messageId;
       }
       return false;
@@ -1181,7 +1207,7 @@ export class FeishuChannel {
     }
   }
 
-  private buildResolvedCard(cardTitle: string, response: InteractionResponse, cardBody?: string, btnLabel?: string): object | undefined {
+  private buildResolvedCard(cardTitle: string, response: InteractionResponse, cardBody?: string, btnLabel?: string, isV2?: boolean): object | undefined {
     const action = response.action;
 
     const labelMap: Record<string, string> = {
@@ -1192,6 +1218,33 @@ export class FeishuChannel {
     };
     const statusText = labelMap[action] || (btnLabel ? `✅ ${btnLabel}` : `✅ ${action}`);
 
+    const headerTemplate = action === 'deny' ? 'red' : 'green';
+    const headerTitle = `${cardTitle} — ${statusText}`;
+
+    // V2 (schema 2.0) cards MUST respond with 2.0 structure — error 200830 otherwise
+    if (isV2) {
+      const bodyElements: any[] = [];
+      if (cardBody) {
+        bodyElements.push({ tag: 'markdown', content: cardBody });
+      }
+      return {
+        toast: { type: 'success', content: statusText },
+        card: {
+          type: 'raw',
+          data: {
+            schema: '2.0',
+            config: { update_multi: true, streaming_mode: false },
+            header: {
+              template: headerTemplate,
+              title: { tag: 'plain_text', content: headerTitle },
+            },
+            body: { elements: bodyElements },
+          },
+        },
+      };
+    }
+
+    // V1 (schema 1.0) cards
     const elements: any[] = [];
     if (cardBody) {
       elements.push({ tag: 'markdown', content: cardBody });
@@ -1207,8 +1260,8 @@ export class FeishuChannel {
         data: {
           config: { wide_screen_mode: true, update_multi: true },
           header: {
-            template: action === 'deny' ? 'red' : 'green',
-            title: { tag: 'plain_text', content: `${cardTitle} — ${statusText}` },
+            template: headerTemplate,
+            title: { tag: 'plain_text', content: headerTitle },
           },
           elements,
         },
@@ -1234,6 +1287,11 @@ interface CardEntry {
   messageId: string;
   requestId: string;
   sequence: number;
+  /** 自定义输入区是否已展开，用于「手动输入」幂等 */
+  inputShown?: boolean;
+  /** 原始 action + 发起者，供「手动输入」点击时重建带输入框的整卡作为回调返回值 */
+  action?: ActionInteraction;
+  initiatorId?: string;
 }
 
 export class FeishuCardManager {
@@ -1245,6 +1303,7 @@ export class FeishuCardManager {
     cardJson: object,
     requestId: string,
     replyOpts?: { replyToMessageId?: string; replyInThread?: boolean },
+    meta?: { action?: ActionInteraction; initiatorId?: string },
   ): Promise<{ cardId: string; messageId: string } | null> {
     try {
       const createRes = await client.cardkit.v1.card.create({
@@ -1252,7 +1311,7 @@ export class FeishuCardManager {
       });
       const cardId = (createRes as any)?.data?.card_id;
       if (!cardId) {
-        logger.error('[FeishuCardManager] card.create returned no card_id');
+        logger.error(`[FeishuCardManager] card.create returned no card_id. code=${(createRes as any)?.code} msg=${(createRes as any)?.msg} resp=${JSON.stringify(createRes)}`);
         return null;
       }
 
@@ -1281,7 +1340,7 @@ export class FeishuCardManager {
         return null;
       }
 
-      this.cards.set(requestId, { cardId, messageId, requestId, sequence: 0 });
+      this.cards.set(requestId, { cardId, messageId, requestId, sequence: 0, action: meta?.action, initiatorId: meta?.initiatorId });
       return { cardId, messageId };
     } catch (err: any) {
       logger.error('[FeishuCardManager] createAndSend failed:', err?.message || err);
@@ -1302,7 +1361,9 @@ export class FeishuCardManager {
     }
     try {
       entry.sequence++;
-      await client.cardkit.v1.card.element.create({
+      // SDK 路径是 cardkit.v1.cardElement.create（不是 card.element.create）—
+      // 后者 card.element 为 undefined，会抛 "Cannot read properties of undefined (reading 'create')"
+      const res = await client.cardkit.v1.cardElement.create({
         path: { card_id: entry.cardId },
         data: {
           type: 'append',
@@ -1311,6 +1372,13 @@ export class FeishuCardManager {
           sequence: entry.sequence,
         },
       });
+      // 飞书 node-sdk 对业务错误码（非零 code）默认不抛异常，必须显式检查
+      const code = (res as any)?.code;
+      if (code !== undefined && code !== 0) {
+        logger.error(`[FeishuCardManager] appendElement rejected (cardId=${entry.cardId}, seq=${entry.sequence}): code=${code} msg=${(res as any)?.msg} resp=${JSON.stringify(res)}`);
+        return false;
+      }
+      logger.info(`[FeishuCardManager] appendElement ok (cardId=${entry.cardId}, seq=${entry.sequence}, target=${targetElementId})`);
       return true;
     } catch (err: any) {
       logger.error(`[FeishuCardManager] appendElement failed (cardId=${entry.cardId}):`, err?.message || err);
@@ -1320,6 +1388,24 @@ export class FeishuCardManager {
 
   getCardId(requestId: string): string | undefined {
     return this.cards.get(requestId)?.cardId;
+  }
+
+  /** 自定义输入区是否已展开（幂等保护，防止重复点击「手动输入」） */
+  isInputShown(requestId: string): boolean {
+    return !!this.cards.get(requestId)?.inputShown;
+  }
+
+  /** 标记自定义输入区已展开 */
+  markInputShown(requestId: string): void {
+    const entry = this.cards.get(requestId);
+    if (entry) entry.inputShown = true;
+  }
+
+  /** 取出原始 action + 发起者，供「手动输入」点击时重建整卡 */
+  getEntryMeta(requestId: string): { action?: ActionInteraction; initiatorId?: string } | undefined {
+    const entry = this.cards.get(requestId);
+    if (!entry) return undefined;
+    return { action: entry.action, initiatorId: entry.initiatorId };
   }
 
   cleanup(requestId: string): void {
@@ -1453,9 +1539,16 @@ export function buildActionCard(requestId: string, action: ActionInteraction, in
 
 /**
  * 构建 JSON 2.0 form 卡片（用于 checkers 多选 / allowCustomInput 场景）
- * 通过 CardKit 实体 API 发送，支持动态追加组件
+ * 通过 CardKit 实体 API 发送。
+ * @param opts.showInput 为 true 时，自定义输入框 + 提交按钮直接内联进 form，并隐藏「手动输入」按钮。
+ *   用于点击「手动输入」后，作为回调返回值整卡替换（避免交互期间并发更新被飞书复原，错误码 200810）。
  */
-export function buildActionCardV2(requestId: string, action: ActionInteraction, initiatorId?: string): object {
+export function buildActionCardV2(
+  requestId: string,
+  action: ActionInteraction,
+  initiatorId?: string,
+  opts?: { showInput?: boolean },
+): object {
   const formElements: any[] = [];
 
   if (action.body) {
@@ -1479,14 +1572,17 @@ export function buildActionCardV2(requestId: string, action: ActionInteraction, 
   const btnLabels = action.buttons.map(btn => btn.label).join('  ·  ');
   const fullCardBody = [action.body, btnLabels].filter(Boolean).join('\n\n');
 
-  for (const btn of action.buttons) {
+  action.buttons.forEach((btn, idx) => {
+    // element_id/name 必须满足飞书规则：字母开头、仅字母数字下划线、≤20 字符。
+    // btn.key 可能是选项 label（中文/空格/连字符/超长），不能直接拼进 element_id，
+    // 否则触发飞书 300301。真实 key 通过 value._action 回传，路由不依赖 element_id。
     formElements.push({
       tag: 'button',
       text: { tag: 'plain_text', content: btn.label },
       type: btn.style === 'danger' ? 'danger' : btn.style === 'primary' ? 'primary' : 'default',
       action_type: 'form_submit',
-      name: `btn_${btn.key}`,
-      element_id: `btn_${btn.key}`,
+      name: `btn_${idx}`,
+      element_id: `btn_${idx}`,
       value: {
         _request_id: requestId,
         _action: btn.key,
@@ -1496,14 +1592,21 @@ export function buildActionCardV2(requestId: string, action: ActionInteraction, 
         _btn_label: btn.label,
       },
     });
-  }
+  });
 
-  if (action.allowCustomInput) {
-    formElements.push({
+  const outerElements: any[] = [];
+  if (action.allowCustomInput && opts?.showInput) {
+    // 展开态：输入框 + 提交按钮内联进 form。整卡作为点击回调返回值替换，
+    // 不走并发 append，因此不触发 200810「交互期间无法更新」与随后的客户端复原。
+    formElements.push(...buildCustomInputElements(requestId, initiatorId));
+  } else if (action.allowCustomInput) {
+    // 初始态：「手动输入」按钮放在 form 容器**外**。
+    // form 内按钮只接受 action_type=form_submit（11310），会提交并收起表单；
+    // form 外按钮不带 action_type 时为 callback 行为，仅触发 _show_input 回调。
+    outerElements.push({
       tag: 'button',
       text: { tag: 'plain_text', content: '✏️ 手动输入' },
       type: 'default',
-      name: 'btn_show_input',
       element_id: 'btn_show_input',
       value: {
         _request_id: requestId,
@@ -1518,13 +1621,18 @@ export function buildActionCardV2(requestId: string, action: ActionInteraction, 
 
   return {
     schema: '2.0',
+    config: { update_multi: true, streaming_mode: false },
     header: { title: { tag: 'plain_text', content: action.title }, template: 'blue' },
     body: {
-      elements: [{
-        tag: 'form',
-        element_id: 'action_form',
-        elements: formElements,
-      }],
+      elements: [
+        {
+          tag: 'form',
+          name: 'action_form',
+          element_id: 'action_form',
+          elements: formElements,
+        },
+        ...outerElements,
+      ],
     },
   };
 }
@@ -1766,9 +1874,11 @@ export class FeishuChannelPlugin implements ChannelPlugin {
             case 'status.progress':
               // Feishu 通过 acknowledge (✓ 表情) 表达状态，由 channel 自行处理
               return;
-            case 'interaction':
-              await channel.sendInteraction(channelId, payload.interaction, ctx);
+            case 'interaction': {
+              const sent = await channel.sendInteraction(channelId, payload.interaction, ctx);
+              if (!sent) throw new Error('sendInteraction returned false');
               return;
+            }
             case 'custom':
               // Feishu 不支持自定义 payload
               return;

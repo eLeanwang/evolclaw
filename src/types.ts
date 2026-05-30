@@ -786,7 +786,7 @@ export type OutboundPayload =
   | { kind: 'status.started'; metadata?: Record<string, unknown> }
   | { kind: 'status.progress'; metadata?: { activityType: 'text' | 'tool_call' | 'tool_result'; turn?: number; outputTokens?: number } }
   | { kind: 'status.queued'; metadata?: Record<string, unknown> }
-  | { kind: 'status.completed'; metadata?: { durationMs?: number; numTurns?: number; usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } } }
+  | { kind: 'status.completed'; metadata?: { durationMs?: number; ttftMs?: number; numTurns?: number; usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } } }
   | { kind: 'status.interrupted'; metadata?: { reason: string } }
   | { kind: 'status.error'; metadata?: { errorType?: string } }
   | { kind: 'status.timeout'; metadata?: { idleSec?: number } }

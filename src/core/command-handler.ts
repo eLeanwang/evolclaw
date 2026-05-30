@@ -66,6 +66,15 @@ function formatModelUsage(_agent: AgentRunnerFull, _model: string): string {
   return '用法: /model <模型>';
 }
 
+/**
+ * 模型展示标签：短别名 + 实际完整 ID（如 "opus (claude-opus-4-8)"）。
+ * 仅用于展示；命令值/持久化仍使用短别名。完整 ID 不可用或与短名相同时只显示短名。
+ */
+function modelDisplayLabel(agent: AgentRunnerFull, model: string): string {
+  const full = agent.resolveModelId?.(model);
+  return full && full !== model ? `${model} (${full})` : model;
+}
+
 function getModelListSource(
   owning: EvolAgentHandle | null,
   agent: AgentRunnerFull,
@@ -728,7 +737,7 @@ export class CommandHandler {
       if (hasModelSwitcher(agent) && agent.listModels) {
         const models = await agent.listModels() ?? [];
         const currentModel = agent.getModel();
-        if (models.length > 0) return models.map((m: string) => ({ value: m, label: m, selected: m === currentModel }));
+        if (models.length > 0) return models.map((m: string) => ({ value: m, label: modelDisplayLabel(agent, m), selected: m === currentModel }));
       }
       return null;
     }
@@ -1897,12 +1906,15 @@ export class CommandHandler {
             kind: {
               kind: 'command-card',
               title: '🤖 切换模型',
-              buttons: models.map((m: string) => ({
-                label: m === currentModel ? `✓ ${m}` : m,
-                command: `/model ${m}`,
-                style: (m === currentModel ? 'primary' : 'default') as 'primary' | 'default',
-                disabled: m === currentModel,
-              })),
+              buttons: models.map((m: string) => {
+                const display = modelDisplayLabel(modelAgent, m);
+                return {
+                  label: m === currentModel ? `✓ ${display}` : display,
+                  command: `/model ${m}`,
+                  style: (m === currentModel ? 'primary' : 'default') as 'primary' | 'default',
+                  disabled: m === currentModel,
+                };
+              }),
             },
           };
 
@@ -1913,14 +1925,14 @@ export class CommandHandler {
         }
 
         // 降级：文本
-        const modelList = models.map((m: string) => `  ${m === currentModel ? '✓' : ' '} ${m}`).join('\n');
+        const modelList = models.map((m: string) => `  ${m === currentModel ? '✓' : ' '} ${modelDisplayLabel(modelAgent, m)}`).join('\n');
         const effortHint = efforts.length > 0
           ? `\n推理强度: ${currentEffort === 'auto' ? 'auto (SDK默认)' : currentEffort}  (使用 /effort 调整)`
           : '';
         if (isAdmin) {
-          return { kind: 'command.result' as const, text: `当前模型: ${currentModel}${effortHint}\n\n可用模型：\n${modelList}\n\n用法: /model <模型>` };
+          return { kind: 'command.result' as const, text: `当前模型: ${modelDisplayLabel(modelAgent, currentModel)}${effortHint}\n\n可用模型：\n${modelList}\n\n用法: /model <模型>` };
         }
-        return { kind: 'command.result' as const, text: `当前模型: ${currentModel}${effortHint}` };
+        return { kind: 'command.result' as const, text: `当前模型: ${modelDisplayLabel(modelAgent, currentModel)}${effortHint}` };
       }
 
       // 带参（切换/调整）需 admin+；无参查询已在上方返回
@@ -1943,7 +1955,7 @@ export class CommandHandler {
         } else if (models.includes(arg)) {
           newModel = arg;
         } else {
-          const modelList = models.map((m: string) => `  ${m === currentModel ? '✓' : ' '} ${m}`).join('\n');
+          const modelList = models.map((m: string) => `  ${m === currentModel ? '✓' : ' '} ${modelDisplayLabel(modelAgent, m)}`).join('\n');
           const effortHint = efforts.length > 0 ? `\n\n推理强度请使用 /effort 命令` : '';
           return { kind: 'command.error' as const, text: `❌ 无效参数: ${arg}\n\n可用模型：\n${modelList}${effortHint}` };
         }
