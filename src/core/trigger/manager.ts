@@ -35,7 +35,7 @@ export class TriggerManager {
       const raw = fs.readFileSync(this.triggersPath, 'utf8');
       const data: TriggersFile = JSON.parse(raw);
       this.triggers = new Map(Object.entries(data.triggers ?? {}));
-      // Migrate old channel key format: "selfPeerId#type#name" → "type#selfPeerId#name"
+      // Migrate old channel key format: "selfAID#type#name" → "type#selfAID#name"
       let migrated = false;
       for (const trigger of this.triggers.values()) {
         const fixed = this.migrateChannelKey(trigger.targetChannel);
@@ -55,7 +55,7 @@ export class TriggerManager {
   }
 
   /**
-   * Detect and fix old format "selfPeerId#type#name" → current "type#selfPeerId#name".
+   * Detect and fix old format "selfAID#type#name" → current "type#selfAID#name".
    * Old format: first segment contains '.' (AID like "evolai.agentid.pub").
    */
   private migrateChannelKey(key: string): string {
@@ -64,7 +64,7 @@ export class TriggerManager {
     if (parts.length !== 3) return key;
     const [first, second, third] = parts;
     if (first.includes('.') && !second.includes('.')) {
-      return formatChannelKey({ type: second, selfPeerId: first, name: third });
+      return formatChannelKey({ type: second, selfAID: first, name: third });
     }
     return key;
   }

@@ -213,19 +213,22 @@ export class ChannelLoader {
 }
 
 // ── Channel Key ────────────────────────────────────────────────────────────
-// 编码格式：`<type>#<urlEncode(selfPeerId)>#<name>`
-// `#` 不在 AID 合法字符集内，天然无歧义切分。
+// 编码格式：`<type>#<selfAID>#<name>`
+// AID 不含 `#` 等特殊字符（domain-like），天然无歧义切分；不再 url-encode。
 
 export interface ChannelKey {
   type: string;
-  selfPeerId: string;
+  selfAID: string;
   name: string;
 }
 
 const SEP = '#';
 
 export function formatChannelKey(k: ChannelKey): string {
-  return `${k.type}${SEP}${encodeURIComponent(k.selfPeerId)}${SEP}${k.name}`;
+  if (k.selfAID.includes(SEP)) {
+    throw new Error(`Invalid selfAID (contains '#'): ${k.selfAID}`);
+  }
+  return `${k.type}${SEP}${k.selfAID}${SEP}${k.name}`;
 }
 
 export function parseChannelKey(key: string): ChannelKey {
@@ -233,11 +236,11 @@ export function parseChannelKey(key: string): ChannelKey {
   if (parts.length !== 3) {
     throw new Error(`Invalid channel key (expected 3 segments separated by '#'): ${key}`);
   }
-  const [type, encodedSelfPeerId, name] = parts;
-  if (!type || !encodedSelfPeerId || !name) {
+  const [type, selfAID, name] = parts;
+  if (!type || !selfAID || !name) {
     throw new Error(`Invalid channel key (empty segment): ${key}`);
   }
-  return { type, selfPeerId: decodeURIComponent(encodedSelfPeerId), name };
+  return { type, selfAID, name };
 }
 
 export function tryParseChannelKey(key: string): ChannelKey | null {

@@ -894,8 +894,8 @@ async function cmdStatus() {
           const configChannelNames = new Set<string>();
           for (const cfg of agents) {
             for (const inst of cfg.channels) {
-              // effective key: <type>#<urlEncode(selfPeerId)>#<name>
-              configChannelNames.add(`${inst.type}#${encodeURIComponent(cfg.aid)}#${inst.name}`);
+              // effective key: <type>#<selfAID>#<name>
+              configChannelNames.add(`${inst.type}#${cfg.aid}#${inst.name}`);
             }
           }
           for (const s of allSessions) {
@@ -1024,7 +1024,7 @@ async function cmdStatus() {
 }
 
 /**
- * 把 channel fingerprint 列表（`<type>#<selfPeerId>#<name>`）折叠成展示用摘要。
+ * 把 channel fingerprint 列表（`<type>#<selfAID>#<name>`）折叠成展示用摘要。
  *
  * 聚合规则：
  *   - 按 type 分组
@@ -2482,14 +2482,13 @@ function archiveSelfHealLog(
  * Searches across all channel types (feishu, wechat, aun) for a matching instance.
  */
 function resolveInstanceConfig(instanceName: string): { type: string; config: any } | null {
-  // 新结构：channel key 是 <type>#<selfPeerId>#<name>，解析后从对应 agent 的 channels[] 找
+  // 新结构：channel key 是 <type>#<selfAID>#<name>，解析后从对应 agent 的 channels[] 找
   const parts = instanceName.split('#');
   if (parts.length === 3) {
-    const [type, encodedSelfPeerId, name] = parts;
-    const selfPeerId = decodeURIComponent(encodedSelfPeerId);
+    const [type, selfAID, name] = parts;
     const { agents } = loadAllAgents();
-    // AUN channel 的 selfPeerId 就是 agent.aid
-    const agent = agents.find(a => a.aid === selfPeerId);
+    // AUN channel 的 selfAID 就是 agent.aid
+    const agent = agents.find(a => a.aid === selfAID);
     if (!agent) return null;
     const inst = agent.channels.find((c: any) => c.type === type && c.name === name);
     if (inst) return { type, config: inst };
@@ -3422,7 +3421,7 @@ Options:
       console.log('无匹配 AID');
       return;
     }
-    console.log(`本地 AID${noVerify ? '（静态扫描，未实测）' : ''}:`);
+    console.log(`本地 AID${noVerify ? '（静态扫描，未实测）' : ''}（${aunPath ?? resolveRoot()}）:`);
     for (const a of aids) {
       const keyIcon = a.hasPrivateKey ? '🔑' : '  ';
       let signIcon = '  ';
@@ -3481,16 +3480,21 @@ Options:
 
   if (sub === 'new') {
     if (wantsHelp(args)) {
-      console.log(`用法: evolclaw aid new <完整AID>
+      console.log(`用法: evolclaw aid new <完整AID> [--force]
 
 创建新 AID 身份：生成 ECDSA 密钥对、向 Issuer 申请证书、构建并上传初始 agent.md。
 
-例: evolclaw aid new reviewer.agentid.pub`);
+选项:
+  --force    强制重新注册，覆盖已存在的身份（即使签名验证失败）
+
+例: evolclaw aid new reviewer.agentid.pub
+    evolclaw aid new reviewer.agentid.pub --force`);
       return;
     }
     const aid = args[1];
+    const force = args.includes('--force');
     if (!aid) {
-      console.error('用法: evolclaw aid new <完整AID>\n例: evolclaw aid new reviewer.agentid.pub');
+      console.error('用法: evolclaw aid new <完整AID> [--force]\n例: evolclaw aid new reviewer.agentid.pub');
       process.exit(1);
     }
     if (!isValidAid(aid)) {
@@ -3498,22 +3502,35 @@ Options:
       process.exit(1);
     }
 
-    const result = await aidCreate(aid, { aunPath });
+    try {
+      const result = await aidCreate(aid, { aunPath, force });
 
-    if (!result.alreadyExisted) {
-      const content = buildInitialAgentMd({ aid });
-      try {
-        await agentmdPut(content, { aid, client: result.client, aunPath });
-        console.log('✓ agent.md 已发布');
-      } catch (e: any) {
-        console.warn(`⚠ agent.md 发布失败（首次连接将自动重试）: ${String(e.message || e).slice(0, 100)}`);
+      if (!result.alreadyExisted) {
+        const content = buildInitialAgentMd({ aid });
+        try {
+          await agentmdPut(content, { aid, client: result.client, aunPath });
+          console.log('✓ agent.md 已发布');
+        } catch (e: any) {
+          console.warn(`⚠ agent.md 发布失败（首次连接将自动重试）: ${String(e.message || e).slice(0, 100)}`);
+        }
       }
-    }
-    try { await result.client.close(); } catch {}
+      try { await result.client.close(); } catch {}
 
-    const verb = result.alreadyExisted ? '已存在' : '已创建';
-    console.log(`✓ ${aid} ${verb}`);
-    console.log('  如需上线 AUN 通道，运行 evolclaw agent new ' + aid);
+      const verb = result.alreadyExisted ? '已存在且有效' : (force ? '已重新创建' : '已创建');
+      console.log(`✓ ${aid} ${verb}`);
+      console.log('  如需上线 AUN 通道，运行 evolclaw agent new ' + aid);
+    } catch (e: any) {
+      if (e.code === 'AID_INVALID') {
+        console.error(`❌ ${e.message}`);
+        process.exit(1);
+      }
+      if (e.code === -32052 || e.constructor?.name === 'IdentityConflictError') {
+        console.error(`❌ AID ${aid} 已在服务端注册，但本地密钥无法匹配。\n` +
+          `该 AID 可能由其他设备创建，无法在本地恢复。请选择其他名称。`);
+        process.exit(1);
+      }
+      throw e;
+    }
     return;
   }
 

@@ -1934,6 +1934,7 @@ export class FeishuChannelPlugin implements ChannelPlugin {
             (handler) => channel.onMessage(async ({ channelId: chatId, content, images, peerId, peerName, messageId, mentions, threadId, rootId, chatType, source }: any) => {
               await handler({
                 channel: adapter.channelName, channelType, channelId: chatId, content, images,
+                selfAID: (inst as any).agentName,
                 chatType: chatType || 'private',
                 peerId: peerId || '', peerName, messageId, mentions, threadId,
                 replyContext: threadId ? { replyToMessageId: rootId ?? threadId, replyInThread: true } : undefined,

@@ -3,10 +3,11 @@ import path from 'path';
 
 export interface SessionFile {
   id: string;
-  channel: string;            // 实例名
+  channel: string;            // 实例名（channelName，短名，如 'main' 或 'secretary-bot'）
   channelType: string;        // 类型（aun/feishu/wechat/...）；写入时确保填充
   channelId: string;          // 路由键
-  selfId: string | null;      // 本地身份
+  sessionKey: string;         // agent 内部会话路由键 (channelType#urlEncode(channelId)#urlEncode(threadId))
+  selfAID: string;            // 本地身份（agent AID）
   agentType: string;
   threadId: string;
   chatType: string;
@@ -51,20 +52,15 @@ function decodeSegment(s: string): string {
 
 /**
  * 计算 chat 目录的完整路径。
- * - AUN：sessionsDir/aun/<urlEncode(selfId)>/<urlEncode(channelId)>/
- * - 其它：sessionsDir/<channelType>/<urlEncode(channelId)>/
+ * 统一三层：sessionsDir/<channelType>/<urlEncode(selfAID)>/<urlEncode(channelId)>/
  *
  * 注：channelType 自身不编码（限定枚举值，不含非法字符）。
  */
-export function chatDirPath(sessionsDir: string, channelType: string, channelId: string, selfId?: string | null): string {
-  if (channelType === 'aun') {
-    const self = selfId || '_unknown';
-    return path.join(sessionsDir, 'aun', encodeSegment(self), encodeSegment(channelId));
-  }
-  return path.join(sessionsDir, channelType, encodeSegment(channelId));
+export function chatDirPath(sessionsDir: string, channelType: string, channelId: string, selfAID: string): string {
+  return path.join(sessionsDir, channelType, encodeSegment(selfAID), encodeSegment(channelId));
 }
 
-/** 解码目录段（用于扫描时把目录名还原为原始 channelId/selfId） */
+/** 解码目录段（用于扫描时把目录名还原为原始 channelId/selfAID） */
 export function decodeDirSegment(seg: string): string {
   return decodeSegment(seg);
 }
@@ -153,16 +149,15 @@ export function readAllJsonlLines<T = any>(filePath: string): T[] {
 
 /**
  * 扫描所有 chat 目录。
- * 顶层是 channelType 目录；aun 下面再有一层 selfId 目录。
- * 返回每个 chat 的：channelType、selfId（仅 aun 有）、channelId、dirPath。
+ * 统一三层：channelType / selfAID / channelId。
  */
 export function scanChatDirs(sessionsDir: string): {
   channelType: string;
-  selfId: string | null;
+  selfAID: string;
   channelId: string;
   dirPath: string;
 }[] {
-  const results: { channelType: string; selfId: string | null; channelId: string; dirPath: string }[] = [];
+  const results: { channelType: string; selfAID: string; channelId: string; dirPath: string }[] = [];
 
   let typeEntries: fs.Dirent[];
   try {
@@ -175,63 +170,25 @@ export function scanChatDirs(sessionsDir: string): {
   for (const typeEntry of typeEntries) {
     if (!typeEntry.isDirectory()) continue;
     const channelType = typeEntry.name;
-    // 包含 '#' 的目录是旧 channelKey 格式（如 'aun#dddd.agentid.pub#main'），
-    // 按通用 channel 布局扫描（sessionsDir/{channelKey}/{encodedChannelId}/），保持兼容
-    if (channelType.includes('#')) {
-      const typeDir = path.join(sessionsDir, channelType);
-      let chatEntries: fs.Dirent[];
-      try {
-        chatEntries = fs.readdirSync(typeDir, { withFileTypes: true });
-      } catch { continue; }
-      for (const chatEntry of chatEntries) {
-        if (!chatEntry.isDirectory()) continue;
-        results.push({
-          channelType,
-          selfId: null,
-          channelId: decodeSegment(chatEntry.name),
-          dirPath: path.join(typeDir, chatEntry.name),
-        });
-      }
-      continue;
-    }
     const typeDir = path.join(sessionsDir, channelType);
-
-    if (channelType === 'aun') {
-      // aun 下还有一层 selfId
-      let selfEntries: fs.Dirent[];
-      try {
-        selfEntries = fs.readdirSync(typeDir, { withFileTypes: true });
-      } catch { continue; }
-      for (const selfEntry of selfEntries) {
-        if (!selfEntry.isDirectory()) continue;
-        const selfDir = path.join(typeDir, selfEntry.name);
-        let chatEntries: fs.Dirent[];
-        try {
-          chatEntries = fs.readdirSync(selfDir, { withFileTypes: true });
-        } catch { continue; }
-        for (const chatEntry of chatEntries) {
-          if (!chatEntry.isDirectory()) continue;
-          results.push({
-            channelType,
-            selfId: decodeSegment(selfEntry.name),
-            channelId: decodeSegment(chatEntry.name),
-            dirPath: path.join(selfDir, chatEntry.name),
-          });
-        }
-      }
-    } else {
-      // 通用 channel：sessionsDir/{channelType}/{encodedChannelId}/
+    let selfEntries: fs.Dirent[];
+    try {
+      selfEntries = fs.readdirSync(typeDir, { withFileTypes: true });
+    } catch { continue; }
+    for (const selfEntry of selfEntries) {
+      if (!selfEntry.isDirectory()) continue;
+      const selfDir = path.join(typeDir, selfEntry.name);
       let chatEntries: fs.Dirent[];
       try {
-        chatEntries = fs.readdirSync(typeDir, { withFileTypes: true });
+        chatEntries = fs.readdirSync(selfDir, { withFileTypes: true });
       } catch { continue; }
       for (const chatEntry of chatEntries) {
         if (!chatEntry.isDirectory()) continue;
         results.push({
           channelType,
-          selfId: null,
+          selfAID: decodeSegment(selfEntry.name),
           channelId: decodeSegment(chatEntry.name),
-          dirPath: path.join(typeDir, chatEntry.name),
+          dirPath: path.join(selfDir, chatEntry.name),
         });
       }
     }
@@ -251,19 +208,36 @@ export function scanMetaFiles(chatDir: string): string[] {
   }
 }
 
-export function ensureChatDir(sessionsDir: string, channelType: string, channelId: string, selfId?: string | null): string {
-  const dir = chatDirPath(sessionsDir, channelType, channelId, selfId);
+export function ensureChatDir(sessionsDir: string, channelType: string, channelId: string, selfAID: string): string {
+  const dir = chatDirPath(sessionsDir, channelType, channelId, selfAID);
   fs.mkdirSync(dir, { recursive: true });
   fs.mkdirSync(path.join(dir, '_threads'), { recursive: true });
   fs.mkdirSync(path.join(dir, '_trash'), { recursive: true });
   return dir;
 }
 
-export function readThreadIndex(chatDir: string): Record<string, string> {
-  return readJsonFile<Record<string, string>>(path.join(chatDir, '_threads', 'thread-index.json')) || {};
+export interface ThreadIndexEntry {
+  sessionId: string;
+  sessionKey: string;
+  metaFile: string;
 }
 
-export function writeThreadIndex(chatDir: string, index: Record<string, string>): void {
+export function readThreadIndex(chatDir: string): Record<string, ThreadIndexEntry> {
+  const raw = readJsonFile<Record<string, string | ThreadIndexEntry>>(path.join(chatDir, '_threads', 'thread-index.json')) || {};
+  // Migrate legacy format: { threadId: sessionId } → { threadId: { sessionId, sessionKey, metaFile } }
+  const result: Record<string, ThreadIndexEntry> = {};
+  for (const [tid, val] of Object.entries(raw)) {
+    if (typeof val === 'string') {
+      // Legacy: val is sessionId
+      result[tid] = { sessionId: val, sessionKey: '', metaFile: `${val}.jsonl` };
+    } else {
+      result[tid] = val;
+    }
+  }
+  return result;
+}
+
+export function writeThreadIndex(chatDir: string, index: Record<string, ThreadIndexEntry>): void {
   atomicWriteJson(path.join(chatDir, '_threads', 'thread-index.json'), index);
 }
 

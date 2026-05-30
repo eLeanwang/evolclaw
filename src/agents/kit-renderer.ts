@@ -49,6 +49,9 @@ const PARAM_DESCRIPTIONS: Record<string, string> = {
   EVOLCLAW_HOME: '用户数据根目录',
   PACKAGE_ROOT: 'evolclaw 包根目录',
   CURRENT_PROJECT: '当前项目完整路径',
+  PERSONAL_DIR: '当前 agent 个人数据目录',
+  RELATIONS_DIR: '当前 agent 关系数据目录',
+  VENUES_DIR: '当前 agent 环境数据目录',
   selfAid: '当前 agent 的 AID',
   selfName: '当前 agent 的显示名',
   hasPersona: '是否有 persona 内容',
@@ -62,10 +65,14 @@ const PARAM_DESCRIPTIONS: Record<string, string> = {
   chatType: '聊天类型（private=私聊 / group=群聊 / null=本地开发）',
   channel: '渠道类型（aun/feishu/wechat/dingtalk/qqbot/wecom）',
   venueUid: '场所唯一标识（预留）',
+  dispatch: '群分发模式（mention=被@才响应 / broadcast=所有消息都响应）',
+  clientType: '客户端类型（desktop/web/mobile）',
+  permissionMode: '权限模式（auto/bypass/request/edit/plan/noask/readonly）',
   capabilities: '当前渠道支持的能力列表',
   project: '当前项目目录名',
   sessionId: 'evolclaw 会话 ID',
   sessionName: '会话名称',
+  sessionKey: '会话路由键（channelType#urlEncode(channelId)#urlEncode(threadId)）',
   sessionCreatedAt: '会话创建时间（ISO）',
   threadId: '话题 ID（多话题路由时）',
   chatMode: '会话模式（interactive=同步交互 / proactive=主动推送）',
@@ -99,6 +106,9 @@ function buildPathMappings(vars: Vars): PathMapping[] {
   ];
 
   if (selfAid) {
+    mappings.push({ prefix: path.join(evolHome, 'agents', selfAid, 'personal'), alias: '$PERSONAL_DIR' });
+    mappings.push({ prefix: path.join(evolHome, 'agents', selfAid, 'relations'), alias: '$RELATIONS_DIR' });
+    mappings.push({ prefix: path.join(evolHome, 'agents', selfAid, 'venues'), alias: '$VENUES_DIR' });
     mappings.push({ prefix: path.join(evolHome, 'agents', selfAid), alias: '$AGENT_DIR' });
   }
   mappings.push({ prefix: evolHome, alias: '$EVOLCLAW_HOME' });
@@ -145,39 +155,105 @@ export function invalidateSessionCache(sessionId: string): void {
   _sessionPathCache.delete(sessionId);
 }
 
+interface SectionDiagnostic {
+  id: string;
+  description?: string;
+  type: 'file' | 'directory';
+  rawPath: string;
+  pattern?: string;
+  needsInjection?: boolean;
+  when?: unknown;
+  enabled: boolean;
+  whenPassed: boolean;
+  resolvedPath: string | null;
+  resolveStatus: 'ok' | 'unresolved-vars' | 'not-exist' | 'skipped-disabled' | 'skipped-when' | 'no-path';
+  unresolvedTokens?: string[];
+  fileCount: number;
+  emptyContent?: boolean;
+  used: boolean;
+  injected: boolean;
+}
+
 export function renderKitSections(ctx: KitRenderContext): string {
   if (!_manifestCache) loadKitManifest();
   const sections = _manifestCache!;
   const fileParts: string[] = [];
   const fragmentParts: string[] = [];
   const pathMappings = buildPathMappings(ctx.vars);
+  const diagnostics: SectionDiagnostic[] = [];
 
   for (const section of sections) {
-    if (section.enabled === false) continue;
-    if (!evaluateWhen(section.when, ctx.vars)) continue;
+    const rawPath = section.type === 'file' ? (section.file ?? '') : (section.path ?? '');
+    const diag: SectionDiagnostic = {
+      id: section.id,
+      description: section.description,
+      type: section.type,
+      rawPath,
+      pattern: section.pattern,
+      needsInjection: section.needsInjection,
+      when: section.when,
+      enabled: section.enabled !== false,
+      whenPassed: false,
+      resolvedPath: null,
+      resolveStatus: 'no-path',
+      fileCount: 0,
+      used: false,
+      injected: false,
+    };
+
+    if (section.enabled === false) {
+      diag.resolveStatus = 'skipped-disabled';
+      diagnostics.push(diag);
+      continue;
+    }
+    diag.whenPassed = evaluateWhen(section.when, ctx.vars);
+    if (!diag.whenPassed) {
+      diag.resolveStatus = 'skipped-when';
+      diagnostics.push(diag);
+      continue;
+    }
+
+    if (rawPath) {
+      const resolveResult = resolvePathWithDiag(rawPath, ctx);
+      diag.resolvedPath = resolveResult.resolved;
+      diag.resolveStatus = resolveResult.status;
+      if (resolveResult.unresolvedTokens.length > 0) diag.unresolvedTokens = resolveResult.unresolvedTokens;
+    }
 
     const files = loadSectionFiles(section, ctx);
-    if (files.length === 0) continue;
+    diag.fileCount = files.length;
+    if (files.length === 0) {
+      diagnostics.push(diag);
+      continue;
+    }
 
+    let anyUsed = false;
     for (const [filePath, rawContent] of files) {
       const content = section.needsInjection ? renderTemplate(rawContent, ctx.vars) : rawContent;
-      if (!content.trim()) continue;
+      if (!content.trim()) {
+        diag.emptyContent = true;
+        continue;
+      }
       const label = section.description ? `${section.id} — ${section.description}` : section.id;
       const displayPath = shortenPath(filePath, pathMappings);
       const part = `Contenu de ${displayPath} (${label}):\n\n${content.trimEnd()}`;
       fileParts.push(part);
+      anyUsed = true;
       if (section.needsInjection) {
         fragmentParts.push(part);
+        diag.injected = true;
       }
     }
+    diag.used = anyUsed;
+    diagnostics.push(diag);
   }
 
-  if (fileParts.length === 0) return '';
-
   const body = fileParts.join('\n\n');
-  const output = `<system-reminder>\nEvolClaw Context Kit documents are shown below.\n\n${body}\n\nIMPORTANT: Use this context when it affects the current interaction.\n</system-reminder>`;
+  const output = fileParts.length > 0
+    ? `<system-reminder>\nEvolClaw Context Kit documents are shown below.\n\n${body}\n\nIMPORTANT: Use this context when it affects the current interaction.\n</system-reminder>`
+    : '';
   const fragmentsOutput = fragmentParts.length > 0 ? fragmentParts.join('\n\n') : '';
-  writeDebugFiles(ctx, output, fragmentsOutput);
+  writeDebugFiles(ctx, output, fragmentsOutput, diagnostics);
   return output;
 }
 
@@ -277,19 +353,45 @@ function loadDirectorySection(dirPath: string, pattern: string | undefined, ctx:
 // ── Path resolution ──
 
 function resolvePath(rawPath: string, ctx: KitRenderContext): string | null {
-  let resolved = rawPath.replace(/\$([A-Z_]+)/g, (_, name) => {
+  const r = resolvePathWithDiag(rawPath, ctx);
+  return r.status === 'ok' ? r.resolved : null;
+}
+
+interface ResolvePathResult {
+  resolved: string | null;
+  status: SectionDiagnostic['resolveStatus'];
+  unresolvedTokens: string[];
+}
+
+function resolvePathWithDiag(rawPath: string, ctx: KitRenderContext): ResolvePathResult {
+  const unresolved: string[] = [];
+  let resolved = rawPath.replace(/\$([A-Z_]+)/g, (_m, name) => {
     const val = ctx.vars[name];
-    if (val === undefined || val === null || val === false || val === '') return '';
+    if (val === undefined || val === null || val === false || val === '') {
+      unresolved.push(`$${name}`);
+      return '';
+    }
     return String(val);
   });
-  resolved = resolved.replace(/\{\{(\w+)\}\}/g, (_, key) => {
+  resolved = resolved.replace(/\{\{(\w+)\}\}/g, (_m, key) => {
     const val = ctx.vars[key];
-    if (val === undefined || val === null || val === false || val === '') return '';
+    if (val === undefined || val === null || val === false || val === '') {
+      unresolved.push(`{{${key}}}`);
+      return '';
+    }
     return String(val);
   });
-  if (!resolved || resolved.includes('$') || resolved.includes('{{')) return null;
-  if (!fs.existsSync(resolved)) return null;
-  return resolved;
+  if (!resolved || resolved.includes('$') || resolved.includes('{{')) {
+    return { resolved: resolved || null, status: 'unresolved-vars', unresolvedTokens: unresolved };
+  }
+  if (unresolved.length > 0) {
+    // 占位符是非必需变量，但有的解析为空——视为未解析
+    return { resolved, status: 'unresolved-vars', unresolvedTokens: unresolved };
+  }
+  if (!fs.existsSync(resolved)) {
+    return { resolved, status: 'not-exist', unresolvedTokens: unresolved };
+  }
+  return { resolved, status: 'ok', unresolvedTokens: unresolved };
 }
 // CHUNK_CONTINUE_5
 
@@ -324,8 +426,15 @@ function evaluateWhen(when: 'always' | WhenCondition, vars: Vars): boolean {
   if (when === 'always') return true;
   if (when.var !== undefined) {
     const val = vars[when.var];
-    if (when.eq !== undefined) return val === when.eq;
-    if (when.neq !== undefined) return val !== when.neq;
+    if (when.eq !== undefined) {
+      // 把 undefined 视作 null 的等价物，便于 manifest 用 eq:null/neq:null 表达"未注入"
+      if (when.eq === null) return val === null || val === undefined;
+      return val === when.eq;
+    }
+    if (when.neq !== undefined) {
+      if (when.neq === null) return val !== null && val !== undefined;
+      return val !== when.neq;
+    }
     if (when.in !== undefined) return (when.in as unknown[]).includes(val);
     if (when.nin !== undefined) return !(when.nin as unknown[]).includes(val);
   }
@@ -386,7 +495,7 @@ function getSessionCache(sessionId: string): Map<string, string> {
 
 // ── Debug output ──
 
-function writeDebugFiles(ctx: KitRenderContext, output: string, fragmentsOutput: string): void {
+function writeDebugFiles(ctx: KitRenderContext, output: string, fragmentsOutput: string, diagnostics: SectionDiagnostic[]): void {
   const now = new Date();
   const ts = now.toISOString().replace(/[T:.]/g, '-').slice(0, 19);
   const dir = eckDebugDir();
@@ -404,9 +513,91 @@ function writeDebugFiles(ctx: KitRenderContext, output: string, fragmentsOutput:
   };
 
   fs.writeFile(path.join(dir, `vars-${ts}.json`), JSON.stringify(varsData, null, 2), () => {});
-  fs.writeFile(path.join(dir, `context-${ts}.md`), output, () => {});
+  if (output) fs.writeFile(path.join(dir, `context-${ts}.md`), output, () => {});
   if (fragmentsOutput) {
     fs.writeFile(path.join(dir, `fragments-${ts}.md`), fragmentsOutput, () => {});
   }
+
+  fs.writeFile(path.join(dir, `manifest-${ts}.md`), formatManifestDiagnostics(ctx, diagnostics), () => {});
+}
+
+function formatManifestDiagnostics(ctx: KitRenderContext, diagnostics: SectionDiagnostic[]): string {
+  const STATUS_ICON: Record<SectionDiagnostic['resolveStatus'], string> = {
+    'ok': 'OK',
+    'unresolved-vars': 'UNRESOLVED-VARS',
+    'not-exist': 'NOT-EXIST',
+    'skipped-disabled': 'SKIPPED(disabled)',
+    'skipped-when': 'SKIPPED(when)',
+    'no-path': 'NO-PATH',
+  };
+
+  const used = diagnostics.filter(d => d.used).length;
+  const skippedWhen = diagnostics.filter(d => d.resolveStatus === 'skipped-when').length;
+  const errors = diagnostics.filter(d => d.resolveStatus === 'unresolved-vars' || d.resolveStatus === 'not-exist').length;
+
+  const lines: string[] = [];
+  lines.push(`# ECK Manifest Diagnostics`);
+  lines.push('');
+  lines.push(`- timestamp: ${new Date().toISOString()}`);
+  lines.push(`- sessionId: ${ctx.sessionId}`);
+  lines.push(`- sections total: ${diagnostics.length}`);
+  lines.push(`- sections used: ${used}`);
+  lines.push(`- sections skipped (when=false): ${skippedWhen}`);
+  lines.push(`- sections with errors (unresolved-vars/not-exist): ${errors}`);
+  lines.push('');
+
+  if (errors > 0) {
+    lines.push(`## Errors`);
+    lines.push('');
+    for (const d of diagnostics) {
+      if (d.resolveStatus !== 'unresolved-vars' && d.resolveStatus !== 'not-exist') continue;
+      lines.push(`### ${d.id}${d.description ? ' — ' + d.description : ''}`);
+      lines.push(`- status: ${STATUS_ICON[d.resolveStatus]}`);
+      lines.push(`- type: ${d.type}`);
+      lines.push(`- raw path: \`${d.rawPath}\``);
+      lines.push(`- resolved: \`${d.resolvedPath ?? '(null)'}\``);
+      if (d.unresolvedTokens && d.unresolvedTokens.length > 0) {
+        lines.push(`- unresolved tokens: ${d.unresolvedTokens.map(t => '`' + t + '`').join(', ')}`);
+      }
+      lines.push('');
+    }
+  }
+
+  lines.push(`## All sections`);
+  lines.push('');
+  lines.push(`| order | id | status | type | raw path | resolved | files | used | injected |`);
+  lines.push(`|---|---|---|---|---|---|---|---|---|`);
+  diagnostics.forEach((d, idx) => {
+    const status = STATUS_ICON[d.resolveStatus];
+    const rawPath = d.rawPath ? '`' + d.rawPath + '`' : '—';
+    const resolvedShort = d.resolvedPath ? '`' + (d.resolvedPath.length > 60 ? '…' + d.resolvedPath.slice(-58) : d.resolvedPath) + '`' : '—';
+    lines.push(`| ${idx + 1} | ${d.id} | ${status} | ${d.type} | ${rawPath} | ${resolvedShort} | ${d.fileCount} | ${d.used ? 'Y' : '·'} | ${d.injected ? 'Y' : '·'} |`);
+  });
+  lines.push('');
+
+  // 详细列出每个 section
+  lines.push(`## Section details`);
+  lines.push('');
+  for (const d of diagnostics) {
+    lines.push(`### ${d.id}${d.description ? ' — ' + d.description : ''}`);
+    lines.push(`- status: ${STATUS_ICON[d.resolveStatus]}`);
+    lines.push(`- type: ${d.type}`);
+    if (d.rawPath) lines.push(`- raw path: \`${d.rawPath}\``);
+    if (d.pattern) lines.push(`- pattern: \`${d.pattern}\``);
+    if (d.when !== undefined) lines.push(`- when: \`${JSON.stringify(d.when)}\` → ${d.whenPassed ? 'true' : 'false'}`);
+    lines.push(`- needsInjection: ${d.needsInjection ? 'true' : 'false'}`);
+    lines.push(`- enabled: ${d.enabled}`);
+    if (d.resolvedPath) lines.push(`- resolved: \`${d.resolvedPath}\``);
+    if (d.unresolvedTokens && d.unresolvedTokens.length > 0) {
+      lines.push(`- unresolved tokens: ${d.unresolvedTokens.map(t => '`' + t + '`').join(', ')}`);
+    }
+    lines.push(`- file count: ${d.fileCount}`);
+    if (d.emptyContent) lines.push(`- note: 文件存在但渲染后内容为空`);
+    lines.push(`- used in output: ${d.used ? 'yes' : 'no'}`);
+    lines.push(`- injected as fragment: ${d.injected ? 'yes' : 'no'}`);
+    lines.push('');
+  }
+
+  return lines.join('\n');
 }
 

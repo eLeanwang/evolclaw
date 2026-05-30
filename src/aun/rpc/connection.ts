@@ -18,10 +18,9 @@ export async function createShortConnection(aid: string, opts?: ShortConnectionO
   const slotId = opts?.slotId ?? '';
 
   const encryptionSeed = loadProcessConfig().aun?.encryptionSeed
-    || process.env.AUN_ENCRYPTION_SEED
-    || 'evol';
+    ?? process.env.AUN_ENCRYPTION_SEED
+    ?? 'evol';
   const client = await createAunClient({ aunPath, encryptionSeed });
-  await client.auth.createAid({ aid });
   const authResult = await client.auth.authenticate({ aid });
 
   const accessToken = authResult?.access_token ?? (client as any)._access_token;

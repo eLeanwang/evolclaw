@@ -191,7 +191,7 @@ export interface SessionMetadata {
   peerId?: string;                  // 私聊：对端 AID/userId；群聊：当前消息发送者 AID
   peerName?: string;                // 对端/发送者显示名
   groupId?: string;                 // 仅群聊：群 ID（如 AUN 的 group.issuer/grp_xxx）
-  channelName?: string;             // 渠道实例名（审计/精确出站路由）
+  channelKey?: string;             // 完整 channelKey（<type>#<selfAID>#<name>，审计/精确出站路由）
   agentSessions?: {
     codex?: string;
     gemini?: string;
@@ -226,9 +226,10 @@ export interface Session {
   channel: string;       // 实例名（如 'aun_main'、'aun-2'）
   channelType?: string;  // 类型（'aun' | 'feishu' | 'wechat' | 'dingtalk' | 'qqbot' | 'wecom'）；缺失时用 channel 做 fallback
   channelId: string;     // 路由键。AUN 私聊=peerAID；AUN 群聊=groupId；其它 channel=原 channelId
-  selfId?: string;       // 本地身份（AUN: 本地 AID；飞书: bot_open_id 等）
+  selfAID: string;         // 本地身份（agent AID）
   agentId: string;  // 路由维度，默认 'claude'
   threadId: string;  // 路由维度，默认 ''
+  sessionKey: string;  // agent 内部会话路由键 (channelType#urlEncode(channelId)#urlEncode(threadId))
   chatType: string;  // 'private' | 'group'，由 Channel 填充
   sessionMode: string;  // 'interactive' | 'proactive'（'autonomous' 预留未实现）
   projectPath: string;
@@ -246,13 +247,15 @@ export interface Message {
   channel: string;          // 实例名
   channelType?: string;     // 类型（aun/feishu/...）
   channelId: string;
-  selfId?: string;  // 本地身份（AUN 本地 AID / 飞书 bot_open_id 等）
+  selfAID?: string;  // 本地身份（agent AID）
   agentId?: string;  // 默认 'claude'
   threadId?: string;  // 默认 ''
   chatType?: 'private' | 'group';  // 由 Channel 层填充
   peerId: string;  // 发送者 ID
   peerName?: string;  // 发送者名称
   peerType?: string;  // 对端类型 (human/ai/unknown)，由支持 agent.md 的渠道填充
+  /** 对端使用的客户端类型；来自入站消息信封，由 channel 适配层填充。当前阶段先 undefined。 */
+  clientType?: 'desktop' | 'web' | 'mobile' | string;
   content: string;
   images?: Array<{ data: string; mimeType: string }>;
   mentions?: Array<{ userId: string; name?: string; key?: string }>;
@@ -268,7 +271,7 @@ export interface InboundMessage {
   channel: string;          // 实例名
   channelType?: string;     // 类型
   channelId: string;
-  selfId?: string;  // 本地身份（AUN 本地 AID / 飞书 bot_open_id 等）
+  selfAID?: string;  // 本地身份（agent AID）
   groupId?: string;  // 群聊：群 ID（仅 chatType==='group' 时有值）
   agentId?: string;  // 默认 'claude'
   threadId?: string;  // 默认 ''
@@ -350,7 +353,7 @@ export interface InteractionResponse {
 // 渠道适配器接口
 export interface ChannelAdapter {
   readonly channelName: string;
-  readonly channelKey: string;  // 完整的 channel key: <type>#<selfPeerId>#<name>
+  readonly channelKey: string;  // 完整的 channel key: <type>#<selfAID>#<name>
   /** 渠道能力声明 */
   readonly capabilities: ChannelCapabilities;
   /** 统一出站入口，按 OutboundPayload.kind 分发 */
@@ -655,7 +658,6 @@ export interface AunChannelInstance extends ChannelInstanceCommon {
   gatewayUrl?: string;
   accessToken?: string;
   pythonBin?: string;
-  encryptionSeed?: string;
 }
 
 export interface FeishuChannelInstance extends ChannelInstanceCommon {

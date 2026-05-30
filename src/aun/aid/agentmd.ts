@@ -84,7 +84,7 @@ async function verifyContent(content: string, aid: string, certPem: string | und
 }
 
 /**
- * Create a bare AUNClient (no createAid) for read-only operations.
+ * Create a bare AUNClient (no identity load) for read-only operations.
  */
 async function createBareClient(aunPath?: string): Promise<any> {
   return createAunClient({ aunPath });

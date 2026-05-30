@@ -107,7 +107,11 @@ export async function verifySignAbility(
   try {
     let client = opts?.client;
     if (!client) {
-      client = await createAunClient({ aunPath });
+      const { loadProcessConfig } = await import('../../config-store.js');
+      const encryptionSeed = loadProcessConfig().aun?.encryptionSeed
+        ?? process.env.AUN_ENCRYPTION_SEED
+        ?? 'evol';
+      client = await createAunClient({ aunPath, encryptionSeed });
       ownClient = client;
     }
     const probe = `# probe\naid: "${aid}"\n`;
@@ -143,7 +147,11 @@ export async function verifySignAbility(
 export async function aidListVerified(aunPath?: string): Promise<AidInfo[]> {
   const list = aidList(aunPath);
   const root = aunPath ?? defaultAunPath();
-  const client = await createAunClient({ aunPath: root });
+  const { loadProcessConfig } = await import('../../config-store.js');
+  const encryptionSeed = loadProcessConfig().aun?.encryptionSeed
+    ?? process.env.AUN_ENCRYPTION_SEED
+    ?? 'evol';
+  const client = await createAunClient({ aunPath: root, encryptionSeed });
   try {
     for (const a of list) {
       // canSign=false 的 AID 不必跑实测，结论已经明确
@@ -173,20 +181,52 @@ export async function aidListVerified(aunPath?: string): Promise<AidInfo[]> {
   return list;
 }
 
-export async function aidCreate(aid: string, opts?: { aunPath?: string }): Promise<AidCreateResult> {
+export async function aidCreate(aid: string, opts?: { aunPath?: string; force?: boolean }): Promise<AidCreateResult> {
   const aunPath = opts?.aunPath ?? defaultAunPath();
   const aidDir = path.join(aunPath, 'AIDs', aid);
+  const hasPrivateKey = fs.existsSync(path.join(aidDir, 'private'));
+  const { loadProcessConfig } = await import('../../config-store.js');
+  const encryptionSeed = loadProcessConfig().aun?.encryptionSeed
+    ?? process.env.AUN_ENCRYPTION_SEED
+    ?? 'evol';
 
-  if (fs.existsSync(aidDir) && fs.existsSync(path.join(aidDir, 'private'))) {
-    const client = await getAunClient(aid, { aunPath });
-    return { aid, alreadyExisted: true, gateway: '', client };
+  // 如果私钥已存在，先验证签名能力
+  if (hasPrivateKey) {
+    const verifyResult = await verifySignAbility(aid, { aunPath });
+
+    if (verifyResult.ok) {
+      const client = await getAunClient(aid, { aunPath });
+      return { aid, alreadyExisted: true, gateway: '', client };
+    }
+
+    // 签名验证失败
+    if (!opts?.force) {
+      const error = new Error(
+        `AID ${aid} 已存在但身份无效（${verifyResult.reason || '签名验证失败'}）。\n` +
+        `使用 --force 参数尝试恢复或重新注册。`
+      ) as any;
+      error.code = 'AID_INVALID';
+      error.reason = verifyResult.reason;
+      throw error;
+    }
+
+    // --force：先尝试 authenticate 恢复证书
+    let recoverClient: any = null;
+    try {
+      recoverClient = await createAunClient({ aunPath, encryptionSeed });
+      await recoverClient.auth.authenticate({ aid });
+      return { aid, alreadyExisted: true, gateway: '', client: recoverClient };
+    } catch {
+      if (recoverClient) { try { await recoverClient.close(); } catch {} }
+      fs.rmSync(aidDir, { recursive: true, force: true });
+    }
   }
 
   const { GatewayDiscovery } = await import('@agentunion/fastaun');
-  let client = await createAunClient({ aunPath });
+  let client = await createAunClient({ aunPath, encryptionSeed });
 
   try {
-    const result = await client.auth.createAid({ aid });
+    const result = await client.auth.registerAid({ aid });
     const gateway = result.gateway || '';
 
     const caDownloaded = await downloadCaRoot(aunPath, gateway);
@@ -194,8 +234,8 @@ export async function aidCreate(aid: string, opts?: { aunPath?: string }): Promi
     const caCertPath = path.join(aunPath, 'CA', 'root', 'root.crt');
     if (caDownloaded && fs.existsSync(caCertPath)) {
       try { await client.close(); } catch { /* ignore */ }
-      client = await createAunClient({ aunPath });
-      await client.auth.createAid({ aid });
+      client = await createAunClient({ aunPath, encryptionSeed });
+      await client.auth.authenticate({ aid });
     }
 
     let gatewayUrl = gateway;
@@ -259,7 +299,11 @@ export async function aidShow(aid: string, opts?: { aunPath?: string }): Promise
   let signError: string | undefined;
 
   // 先做一次签名自检（共享 client，避免重复起 SDK）
-  const client = await createAunClient({ aunPath });
+  const { loadProcessConfig: loadCfg } = await import('../../config-store.js');
+  const encSeed = loadCfg().aun?.encryptionSeed
+    ?? process.env.AUN_ENCRYPTION_SEED
+    ?? 'evol';
+  const client = await createAunClient({ aunPath, encryptionSeed: encSeed });
   try {
     if (hasPrivateKey && certPem && !certExpired && keyMatchesCert !== false) {
       const r = await verifySignAbility(aid, { aunPath, client });

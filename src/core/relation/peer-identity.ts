@@ -16,6 +16,7 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import { logger } from '../../utils/logger.js';
 import { agentMdPath } from '../../paths.js';
+import { formatPeerKey } from './peer-key.js';
 
 /**
  * 对端身份信息
@@ -51,8 +52,8 @@ export class PeerIdentityCache {
   /**
    * 获取 peer-identity.json 文件路径
    */
-  private static getFilePath(channel: string, peerId: string, agentDir: string): string {
-    const peerKey = `${channel}#${encodeURIComponent(peerId)}`;
+  private static getFilePath(channelType: string, peerId: string, agentDir: string): string {
+    const peerKey = formatPeerKey(channelType, peerId);
     return path.join(agentDir, 'relations', peerKey, 'peer-identity.json');
   }
 
@@ -60,8 +61,8 @@ export class PeerIdentityCache {
    * 从文件读取缓存
    * @returns PeerIdentity | null（缓存不存在）
    */
-  static get(channel: string, peerId: string, agentDir: string): PeerIdentity | null {
-    const filePath = this.getFilePath(channel, peerId, agentDir);
+  static get(channelType: string, peerId: string, agentDir: string): PeerIdentity | null {
+    const filePath = this.getFilePath(channelType, peerId, agentDir);
     try {
       const content = fs.readFileSync(filePath, 'utf-8');
       return JSON.parse(content) as PeerIdentity;
@@ -76,12 +77,12 @@ export class PeerIdentityCache {
    * @returns true=需要刷新
    */
   static needsRefresh(
-    channel: string,
+    channelType: string,
     peerId: string,
     agentDir: string,
     maxAgeMs = this.CACHE_MAX_AGE_MS
   ): boolean {
-    const cached = this.get(channel, peerId, agentDir);
+    const cached = this.get(channelType, peerId, agentDir);
     if (!cached) return true;
     return Date.now() - cached.lastCheckedAt > maxAgeMs;
   }
@@ -90,7 +91,7 @@ export class PeerIdentityCache {
    * 从 agent.md 更新身份信息
    */
   private static updateFromAgentMd(
-    channel: string,
+    channelType: string,
     peerId: string,
     agentDir: string,
     agentMd: string,
@@ -117,11 +118,11 @@ export class PeerIdentityCache {
       source: 'agentmd',
     };
 
-    const filePath = this.getFilePath(channel, peerId, agentDir);
+    const filePath = this.getFilePath(channelType, peerId, agentDir);
     try {
       fs.mkdirSync(path.dirname(filePath), { recursive: true });
       fs.writeFileSync(filePath, JSON.stringify(identity, null, 2), 'utf-8');
-      logger.debug(`[PeerIdentityCache] Updated: ${channel}#${peerId} type=${type} isAgent=${isAgent}`);
+      logger.debug(`[PeerIdentityCache] Updated: ${channelType}#${peerId} type=${type} isAgent=${isAgent}`);
     } catch (err) {
       logger.warn(`[PeerIdentityCache] Failed to write cache: ${filePath} err=${err}`);
     }
@@ -132,9 +133,9 @@ export class PeerIdentityCache {
   /**
    * 仅更新 lastCheckedAt（内容未变时的轻量操作）
    */
-  private static touchLastChecked(channel: string, peerId: string, agentDir: string, cached: PeerIdentity): PeerIdentity {
+  private static touchLastChecked(channelType: string, peerId: string, agentDir: string, cached: PeerIdentity): PeerIdentity {
     const updated = { ...cached, lastCheckedAt: Date.now() };
-    const filePath = this.getFilePath(channel, peerId, agentDir);
+    const filePath = this.getFilePath(channelType, peerId, agentDir);
     try {
       fs.writeFileSync(filePath, JSON.stringify(updated, null, 2), 'utf-8');
     } catch { /* ignore */ }
@@ -144,7 +145,7 @@ export class PeerIdentityCache {
   /**
    * 标记为 unknown（验签失败或无 agent.md）
    */
-  private static markUnknown(channel: string, peerId: string, agentDir: string): PeerIdentity {
+  private static markUnknown(channelType: string, peerId: string, agentDir: string): PeerIdentity {
     const identity: PeerIdentity = {
       aid: peerId,
       type: 'unknown',
@@ -156,11 +157,11 @@ export class PeerIdentityCache {
       source: 'unknown',
     };
 
-    const filePath = this.getFilePath(channel, peerId, agentDir);
+    const filePath = this.getFilePath(channelType, peerId, agentDir);
     try {
       fs.mkdirSync(path.dirname(filePath), { recursive: true });
       fs.writeFileSync(filePath, JSON.stringify(identity, null, 2), 'utf-8');
-      logger.debug(`[PeerIdentityCache] Marked unknown: ${channel}#${peerId}`);
+      logger.debug(`[PeerIdentityCache] Marked unknown: ${channelType}#${peerId}`);
     } catch (err) {
       logger.warn(`[PeerIdentityCache] Failed to write unknown cache: ${filePath} err=${err}`);
     }
@@ -171,7 +172,7 @@ export class PeerIdentityCache {
   /**
    * 完整流程：缓存检查 → agentmdSync（check+fetch）→ 按 changed 决定是否重写
    *
-   * @param channel 渠道类型（如 'aun'）
+   * @param channelType 渠道类型（如 'aun'）
    * @param peerId 对端 ID（AUN 是 AID）
    * @param agentDir agent 数据根目录
    * @param aunClient AUN SDK client（需要有 checkAgentMd / fetchAgentMd 方法）
@@ -179,24 +180,24 @@ export class PeerIdentityCache {
    * @returns PeerIdentity
    */
   static async resolve(
-    channel: string,
+    channelType: string,
     peerId: string,
     agentDir: string,
     aunClient: any,
     forceRefresh = false
   ): Promise<PeerIdentity> {
     // 1. 缓存检查
-    if (!forceRefresh && !this.needsRefresh(channel, peerId, agentDir)) {
-      const cached = this.get(channel, peerId, agentDir);
+    if (!forceRefresh && !this.needsRefresh(channelType, peerId, agentDir)) {
+      const cached = this.get(channelType, peerId, agentDir);
       if (cached) {
-        logger.debug(`[PeerIdentityCache] Cache hit: ${channel}#${peerId} type=${cached.type} age=${Math.floor((Date.now() - cached.lastCheckedAt) / 1000 / 60 / 60 / 24)}d`);
+        logger.debug(`[PeerIdentityCache] Cache hit: ${channelType}#${peerId} type=${cached.type} age=${Math.floor((Date.now() - cached.lastCheckedAt) / 1000 / 60 / 60 / 24)}d`);
         return cached;
       }
     }
 
     // 2. 标准流程：checkAgentMd → fetchAgentMd（如果有变化）
     try {
-      logger.debug(`[PeerIdentityCache] Syncing agent.md: ${channel}#${peerId}`);
+      logger.debug(`[PeerIdentityCache] Syncing agent.md: ${channelType}#${peerId}`);
       const state = await aunClient.checkAgentMd(peerId, 30);
       let content: string | undefined;
 
@@ -214,11 +215,11 @@ export class PeerIdentityCache {
 
       // 3. 比较 hash，仅在变化时重写 peer-identity.json
       const newHash = 'sha256:' + crypto.createHash('sha256').update(content!, 'utf-8').digest('hex');
-      const cached = this.get(channel, peerId, agentDir);
+      const cached = this.get(channelType, peerId, agentDir);
       if (cached && cached.agentMdHash === newHash && cached.source === 'agentmd') {
-        return this.touchLastChecked(channel, peerId, agentDir, cached);
+        return this.touchLastChecked(channelType, peerId, agentDir, cached);
       }
-      return this.updateFromAgentMd(channel, peerId, agentDir, content!, Date.now());
+      return this.updateFromAgentMd(channelType, peerId, agentDir, content!, Date.now());
 
     } catch (err) {
       // 4. 网络失败，fallback 本地文件
@@ -228,27 +229,27 @@ export class PeerIdentityCache {
           const localContent = fs.readFileSync(localPath, 'utf-8');
           logger.info(`[PeerIdentityCache] Network failed, using local agent.md for ${peerId}`);
           const localHash = 'sha256:' + crypto.createHash('sha256').update(localContent, 'utf-8').digest('hex');
-          const cached = this.get(channel, peerId, agentDir);
+          const cached = this.get(channelType, peerId, agentDir);
           if (cached && cached.agentMdHash === localHash && cached.source === 'agentmd') {
-            return this.touchLastChecked(channel, peerId, agentDir, cached);
+            return this.touchLastChecked(channelType, peerId, agentDir, cached);
           }
-          return this.updateFromAgentMd(channel, peerId, agentDir, localContent, cached?.verifiedAt ?? 0);
+          return this.updateFromAgentMd(channelType, peerId, agentDir, localContent, cached?.verifiedAt ?? 0);
         }
       } catch { /* ignore fs errors */ }
 
-      logger.warn(`[PeerIdentityCache] Failed to resolve: ${channel}#${peerId} err=${err instanceof Error ? err.message : String(err)}`);
-      return this.markUnknown(channel, peerId, agentDir);
+      logger.warn(`[PeerIdentityCache] Failed to resolve: ${channelType}#${peerId} err=${err instanceof Error ? err.message : String(err)}`);
+      return this.markUnknown(channelType, peerId, agentDir);
     }
   }
 
   /**
    * 清除指定对端的缓存
    */
-  static clear(channel: string, peerId: string, agentDir: string): void {
-    const filePath = this.getFilePath(channel, peerId, agentDir);
+  static clear(channelType: string, peerId: string, agentDir: string): void {
+    const filePath = this.getFilePath(channelType, peerId, agentDir);
     try {
       fs.unlinkSync(filePath);
-      logger.debug(`[PeerIdentityCache] Cleared: ${channel}#${peerId}`);
+      logger.debug(`[PeerIdentityCache] Cleared: ${channelType}#${peerId}`);
     } catch {
       // 文件不存在，忽略
     }

@@ -175,6 +175,19 @@ export async function msgSend(args: MsgSendArgs): Promise<MsgSendResult | MsgErr
           msgType: 'text',
           source,
         }));
+
+        // 通知 daemon 更新 stats（如果 daemon 在运行）
+        try {
+          const { ipcQuery } = await import('../../ipc.js');
+          await ipcQuery(resolvePaths().socket, {
+            type: 'aun-aid-stats-record-outbound',
+            aid: args.from,
+            toPeer: args.to,
+            text: textContent,
+            encrypt: args.encrypt === true,
+            chatmode,
+          }, 1000);
+        } catch { /* daemon 不在或 IPC 失败都忽略 */ }
       } catch {}
     }
 

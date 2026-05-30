@@ -73,19 +73,28 @@ describe('isValidAid', () => {
 const mockUploadAgentMd = vi.fn().mockResolvedValue(undefined);
 const mockPublishAgentMd = vi.fn().mockResolvedValue({ aid: 'test.aid', etag: '"abc123"' });
 const mockClose = vi.fn().mockResolvedValue(undefined);
-// createAid must create the AID directory (as the real SDK does)
-const mockCreateAid = vi.fn().mockImplementation(async (opts: { aid: string }) => {
+// registerAid must create the AID directory (as the real SDK does)
+const mockRegisterAid = vi.fn().mockImplementation(async (opts: { aid: string }) => {
   const aidDir = path.join(os.homedir(), '.aun', 'AIDs', opts.aid);
   fs.mkdirSync(aidDir, { recursive: true });
   return { gateway: 'gw.example.com' };
 });
+const mockAuthenticate = vi.fn().mockImplementation(async (opts?: { aid?: string }) => {
+  return { aid: opts?.aid, access_token: 'mock-token', gateway: 'wss://gw.example.com/aun' };
+});
+
+const mockSignAgentMd = vi.fn().mockResolvedValue('---signed-probe---');
+const mockVerifyAgentMd = vi.fn().mockResolvedValue({ status: 'verified' });
 
 vi.mock('@agentunion/fastaun', () => ({
   AUNClient: class MockAUNClient {
     constructor() {}
     auth = {
-      createAid: mockCreateAid,
+      registerAid: mockRegisterAid,
+      authenticate: mockAuthenticate,
       uploadAgentMd: mockUploadAgentMd,
+      signAgentMd: mockSignAgentMd,
+      verifyAgentMd: mockVerifyAgentMd,
     };
     publishAgentMd = mockPublishAgentMd;
     setAgentMdPath = vi.fn();
@@ -115,10 +124,13 @@ describe('aidCreate', () => {
     _resetRoot();
 
     // Reset mocks
-    mockCreateAid.mockClear();
+    mockRegisterAid.mockClear();
+    mockAuthenticate.mockClear();
     mockUploadAgentMd.mockClear();
     mockPublishAgentMd.mockClear();
     mockClose.mockClear();
+    mockSignAgentMd.mockClear();
+    mockVerifyAgentMd.mockClear();
 
     ({ aidCreate, agentmdPut, buildInitialAgentMd } = await import('../../src/aun/aid/index.js'));
   });
@@ -137,13 +149,16 @@ describe('aidCreate', () => {
     const aid = 'existing.example.pub';
     const aidDir = path.join(tmpDir, 'AIDs', aid);
     fs.mkdirSync(path.join(aidDir, 'private'), { recursive: true });
+    fs.mkdirSync(path.join(aidDir, 'public'), { recursive: true });
+    fs.writeFileSync(path.join(aidDir, 'public', 'cert.pem'), 'mock-cert');
 
     const result = await aidCreate(aid);
 
     expect(result.aid).toBe(aid);
     expect(result.alreadyExisted).toBe(true);
-    // Should NOT call createAid on SDK
-    expect(mockCreateAid).toHaveBeenCalledTimes(1); // only getAunClient identity load
+    // Should NOT call registerAid — only authenticate (via getAunClient)
+    expect(mockRegisterAid).not.toHaveBeenCalled();
+    expect(mockAuthenticate).toHaveBeenCalledWith({ aid });
   });
 
   it('does not treat directory without private/ as already existing', async () => {
@@ -155,7 +170,7 @@ describe('aidCreate', () => {
     const result = await aidCreate(aid);
 
     expect(result.alreadyExisted).toBe(false);
-    expect(mockCreateAid).toHaveBeenCalled();
+    expect(mockRegisterAid).toHaveBeenCalled();
   });
 
   it('creates new AID and returns client', async () => {
@@ -166,7 +181,7 @@ describe('aidCreate', () => {
     expect(result.aid).toBe(aid);
     expect(result.alreadyExisted).toBe(false);
     expect(result.client).toBeDefined();
-    expect(mockCreateAid).toHaveBeenCalledWith({ aid });
+    expect(mockRegisterAid).toHaveBeenCalledWith({ aid });
   });
 
   it('aidCreate + agentmdPut writes agent.md locally', async () => {
