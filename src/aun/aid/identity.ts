@@ -189,7 +189,7 @@ export async function aidCreate(aid: string, opts?: { aunPath?: string; force?: 
       try {
         const client = await loadClient(store, aid);
         const auth = await client.authenticate();
-        return { aid, alreadyExisted: true, gateway: String(auth?.gateway ?? ''), client };
+        return { aid, alreadyExisted: true, gateway: String(auth?.gateway ?? ''), client, store };
       } catch (e) {
         store.close();
         throw e;
@@ -212,7 +212,7 @@ export async function aidCreate(aid: string, opts?: { aunPath?: string; force?: 
     try {
       const recoverClient = await loadClient(recoverStore, aid);
       const auth = await recoverClient.authenticate();
-      return { aid, alreadyExisted: true, gateway: String(auth?.gateway ?? ''), client: recoverClient };
+      return { aid, alreadyExisted: true, gateway: String(auth?.gateway ?? ''), client: recoverClient, store: recoverStore };
     } catch {
       recoverStore.close();
       fs.rmSync(aidDir, { recursive: true, force: true });
@@ -248,7 +248,7 @@ export async function aidCreate(aid: string, opts?: { aunPath?: string; force?: 
     try {
       const client = await loadClient(store2, aid);
       await client.authenticate();
-      return { aid, alreadyExisted: false, gateway: gatewayUrl, client };
+      return { aid, alreadyExisted: false, gateway: gatewayUrl, client, store: store2 };
     } catch (e) {
       store2.close();
       throw e;

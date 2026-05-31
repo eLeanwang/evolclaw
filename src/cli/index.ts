@@ -3515,6 +3515,7 @@ Options:
         }
       }
       try { await result.client.close(); } catch {}
+      try { result.store?.close(); } catch {}
 
       const verb = result.alreadyExisted ? '已存在且有效' : (force ? '已重新创建' : '已创建');
       console.log(`✓ ${aid} ${verb}`);

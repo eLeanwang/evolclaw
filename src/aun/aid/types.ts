@@ -50,5 +50,6 @@ export interface AidCreateResult {
   aid: string;
   alreadyExisted: boolean;
   gateway: string;
-  client: any; // AUNClient — dynamic import, avoid static dep
+  client: any;  // AUNClient — dynamic import, avoid static dep
+  store: any;   // AIDStore — caller must close after client.close()
 }

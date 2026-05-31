@@ -572,6 +572,7 @@ export async function setupAunAid(rl: readline.Interface, _config: any): Promise
       }
 
       try { await result.client.close(); } catch { /* ignore */ }
+      try { result.store?.close(); } catch { /* ignore */ }
     } catch (e: any) {
       const msg = e.message || String(e);
       console.log(`  ✗ AID 创建失败: ${msg.slice(0, 200)}`);
