@@ -3508,7 +3508,7 @@ Options:
       if (!result.alreadyExisted) {
         const content = buildInitialAgentMd({ aid });
         try {
-          await agentmdPut(content, { aid, client: result.client, aunPath });
+          await agentmdPut(content, { aid, aunPath });
           console.log('✓ agent.md 已发布');
         } catch (e: any) {
           console.warn(`⚠ agent.md 发布失败（首次连接将自动重试）: ${String(e.message || e).slice(0, 100)}`);
@@ -4035,7 +4035,6 @@ async function cmdMsg(args: string[]): Promise<void> {
   const formatJson = args.includes('--format') && args[args.indexOf('--format') + 1] === 'json';
   const appIdx = args.indexOf('--app');
   const appSlot = appIdx >= 0 ? args[appIdx + 1] : undefined;
-  const asDaemon = args.includes('--as-daemon');
 
   if (!sub || isHelpFlag(sub)) {
     console.log(`用法: evolclaw msg <command> <from-aid> [args...] [options]
@@ -4046,13 +4045,12 @@ Commands:
   send <from> <to> --link <url> [--title T]            发送链接卡片
   send <from> <to> --payload <json>                    发送自定义 payload
   pull <from> [--after-seq N] [--limit N]              拉取收件箱
-  ack <from> <seq> --app <name>                        确认已读（必须传 --app）
+  ack <from> <seq> [--app <name>]                      确认已读
   recall <from> <message-id> [<message-id>...]         撤回消息
   online <from> <target-aid> [<target-aid>...]         查询在线状态
 
 Options:
-  --app <name>          指定应用 slot（隔离 ack 游标）
-  --as-daemon           ack 时显式以 daemon 身份（高危，会污染 daemon 游标）
+  --app <name>          指定应用 slot（独立消费通道，不影响 daemon）
   --format json         输出 JSON 格式
   --encrypt             启用端到端加密
   --thread <id>         指定话题 ID（用于多话题路由）
@@ -4173,7 +4171,7 @@ Options:
 
   if (sub === 'pull') {
     if (!appSlot) {
-      console.error('⚠ 警告: 未传 --app，将使用 daemon 共享 slot（可能与 daemon 看到同一批消息）');
+      console.warn('⚠ 警告: 未传 --app，当前与 daemon 共享 evolclaw 消费通道。pull 会看到/影响 daemon 的消息消费；如需独立消费请用 --app <name>');
     }
     const afterSeqStr = getArgValue(args, '--after-seq');
     const limitStr = getArgValue(args, '--limit');
@@ -4212,7 +4210,7 @@ Options:
   if (sub === 'ack') {
     const seqStr = args[2];
     if (!seqStr) {
-      console.error('用法: evolclaw msg ack <from> <seq> --app <name>');
+      console.error('用法: evolclaw msg ack <from> <seq> [--app <name>]');
       process.exit(1);
     }
     const seq = Number(seqStr);
@@ -4220,10 +4218,8 @@ Options:
       console.error(`❌ seq 必须是数字: ${seqStr}`);
       process.exit(1);
     }
-    if (!appSlot && !asDaemon) {
-      console.error('❌ ack 必须传 --app <name>（或 --as-daemon 显式以 daemon 身份，高危）');
-      console.error('   理由: 不传 --app 会推进 daemon 共享的 ack 游标，导致 daemon 丢消息');
-      process.exit(1);
+    if (!appSlot) {
+      console.warn('⚠ 警告: 未传 --app，ack 将推进与 daemon 共享的 evolclaw 消费游标，可能影响 daemon 收消息；如需独立请用 --app <name>');
     }
 
     const result = await msgAck({ from, seq, ...commonOpts });
@@ -4307,7 +4303,6 @@ async function cmdGroup(args: string[]): Promise<void> {
   const formatJson = args.includes('--format') && args[args.indexOf('--format') + 1] === 'json';
   const appIdx = args.indexOf('--app');
   const appSlot = appIdx >= 0 ? args[appIdx + 1] : undefined;
-  const asDaemon = args.includes('--as-daemon');
 
   if (!sub || isHelpFlag(sub)) {
     console.log(`用法: evolclaw group <command> <from-aid> [args...] [options]
@@ -4317,7 +4312,7 @@ async function cmdGroup(args: string[]): Promise<void> {
   send <from> <group-id> --file <path> [--as <type>]   发送群文件
   send <from> <group-id> --payload <json>              发送自定义 payload
   pull <from> <group-id> [--after-seq N] [--limit N]   拉取群消息
-  ack <from> <group-id> <seq> --app <name>             确认已读（必须传 --app）
+  ack <from> <group-id> <seq> [--app <name>]           确认已读
 
 群管理:
   create <from> <name> [--visibility public|private] [--description D] [--join-mode M]  创建群
@@ -4335,8 +4330,7 @@ async function cmdGroup(args: string[]): Promise<void> {
   online <from> <group-id>                             查看在线成员
 
 Options:
-  --app <name>          指定应用 slot（隔离 ack 游标）
-  --as-daemon           ack 时显式以 daemon 身份（高危）
+  --app <name>          指定应用 slot（独立消费通道，不影响 daemon）
   --format json         输出 JSON 格式
   --mention <aid>       发送时 @ 某个成员（可多次）
   --mention-all         发送时 @ 所有人
@@ -4454,7 +4448,7 @@ Options:
   if (sub === 'pull') {
     const groupId = requireGroupId();
     if (!appSlot) {
-      console.error('⚠ 警告: 未传 --app，将使用 daemon 共享 slot');
+      console.warn('⚠ 警告: 未传 --app，当前与 daemon 共享 evolclaw 消费通道。pull 会看到/影响 daemon 的消息消费；如需独立消费请用 --app <name>');
     }
     const afterSeqStr = getArgValue(args, '--after-seq');
     const limitStr = getArgValue(args, '--limit');
@@ -4477,7 +4471,7 @@ Options:
     const groupId = requireGroupId();
     const seqStr = args[3];
     if (!seqStr) {
-      console.error('用法: evolclaw group ack <from> <group-id> <seq> --app <name>');
+      console.error('用法: evolclaw group ack <from> <group-id> <seq> [--app <name>]');
       process.exit(1);
     }
     const seq = Number(seqStr);
@@ -4485,9 +4479,8 @@ Options:
       console.error(`❌ seq 必须是数字: ${seqStr}`);
       process.exit(1);
     }
-    if (!appSlot && !asDaemon) {
-      console.error('❌ group ack 必须传 --app <name>（或 --as-daemon 显式以 daemon 身份，高危）');
-      process.exit(1);
+    if (!appSlot) {
+      console.warn('⚠ 警告: 未传 --app，ack 将推进与 daemon 共享的 evolclaw 消费游标，可能影响 daemon 收消息；如需独立请用 --app <name>');
     }
 
     const result = await groupAck({ from, groupId, seq, ...commonOpts });

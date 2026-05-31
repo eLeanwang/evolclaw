@@ -555,7 +555,7 @@ export async function setupAunAid(rl: readline.Interface, _config: any): Promise
       const content = buildInitialAgentMd({ aid, type: agentType });
 
       try {
-        await agentmdPut(content, { aid, client: result.client });
+        await agentmdPut(content, { aid });
         console.log('  ✓ agent.md 已发布并写入本地');
       } catch (e: any) {
         console.log(`  ⚠ agent.md 发布失败（首次连接将自动重试）: ${String(e.message || e).slice(0, 100)}`);

@@ -8,7 +8,7 @@ import { aidList, aidCreate } from '../aun/aid/identity.js';
 import { msgSend, msgPull } from '../aun/msg/index.js';
 import type { MsgError } from '../aun/msg/p2p.js';
 import { getPackageRoot, aunPath as defaultAunPath } from '../paths.js';
-import { createAunClient } from '../aun/aid/client.js';
+import { getAidStore, loadClient, SLOT } from '../aun/aid/store.js';
 import { isHelpFlag } from './help.js';
 
 const execFileAsync = promisify(execFile);
@@ -344,23 +344,24 @@ interface AuthResult {
   gateway?: string;
 }
 
-async function benchAuth(aids: string[], concurrency: number, aunPath?: string, slotId?: string): Promise<AuthResult[]> {
-  const resolvedAunPath = aunPath ?? defaultAunPath();
-
-  const tasks = aids.map(aid => async (): Promise<AuthResult> => {
+async function benchAuth(aids: string[], concurrency: number, aunPath?: string): Promise<AuthResult[]> {
+  const tasks = aids.map((aid, index) => async (): Promise<AuthResult> => {
     const start = Date.now();
+    const slotId = `${SLOT.bench}-${index}`;
+    let store: any = null;
+    let client: any = null;
     try {
-      const client = await createAunClient({ aunPath: resolvedAunPath });
-      const authResult = await client.auth.authenticate({ aid });
-      const accessToken = authResult?.access_token ?? (client as any)._access_token;
-      const gateway = (client as any)._gatewayUrl ?? authResult?.gateway ?? '';
-      await client.connect(
-        { access_token: accessToken, gateway, slot_id: slotId ?? '', connection_kind: 'short' },
-        { auto_reconnect: false },
-      );
+      store = await getAidStore({ slotId, aunPath });
+      client = await loadClient(store, aid);
+      await client.connect({ auto_reconnect: false });
+      const gateway = ''; // Gateway URL not exposed in 0.4.3
+      const authMs = Date.now() - start;
       try { await client.close(); } catch {}
-      return { aid, ok: true, authMs: Date.now() - start, gateway };
+      try { store.close(); } catch {}
+      return { aid, ok: true, authMs, gateway };
     } catch (e: any) {
+      if (client) try { await client.close(); } catch {}
+      if (store) try { store.close(); } catch {}
       return { aid, ok: false, authMs: Date.now() - start, error: e.message };
     }
   });
@@ -379,11 +380,10 @@ interface SwitchResult {
   serverTimestamp?: number;
 }
 
-async function benchSwitch(aids: string[], rounds: number, aunPath?: string, useCli?: boolean, slotId?: string, encrypt?: boolean): Promise<{ results: SwitchResult[]; durationSec: number }> {
+async function benchSwitch(aids: string[], rounds: number, aunPath?: string, useCli?: boolean, encrypt?: boolean): Promise<{ results: SwitchResult[]; durationSec: number }> {
   const results: SwitchResult[] = [];
   const start = Date.now();
   let seq = 0;
-  const slot = slotId ?? 'bench';
 
   for (let round = 0; round < rounds; round++) {
     for (let i = 0; i < aids.length; i++) {
@@ -397,15 +397,17 @@ async function benchSwitch(aids: string[], rounds: number, aunPath?: string, use
       let serverTimestamp: number | undefined;
 
       if (useCli) {
+        const slotId = `${SLOT.bench}-${i}`;
         try {
-          const res = await withTimeout(cliSend(from, to, text, slot, encrypt), 10000, `${from.split('.')[0]}→${to.split('.')[0]}`);
+          const res = await withTimeout(cliSend(from, to, text, slotId, encrypt), 10000, `${from.split('.')[0]}→${to.split('.')[0]}`);
           ok = res.ok;
           serverTimestamp = res.timestamp;
         } catch { ok = false; }
       } else {
+        const slotId = `${SLOT.bench}-${i}`;
         try {
           const res = await withTimeout(
-            msgSend({ from, to, body: { mode: 'text', text }, slotId: slot, aunPath, encrypt }) as Promise<any>,
+            msgSend({ from, to, body: { mode: 'text', text }, slotId, aunPath, encrypt }) as Promise<any>,
             10000, `${from.split('.')[0]}→${to.split('.')[0]}`
           );
           ok = res.ok;
@@ -503,7 +505,6 @@ Options:
   const defaultWait = encrypt ? '10' : '3';
   const waitSec = Math.max(1, parseInt(getArgValue(args, '--wait') || defaultWait, 10));
   const sessionId = crypto.randomBytes(4).toString('hex');
-  const benchSlot = `bench-${sessionId}`;
 
   if (!formatJson) {
     console.log(`\n${BOLD}  evolclaw bench${RST} — AUN 消息性能基准测试`);
@@ -607,13 +608,14 @@ Options:
 
   let authResults: AuthResult[];
   if (cliMode) {
-    const cliAuthTasks = authTasks.map(aid => async (): Promise<AuthResult> => {
-      const r = await cliAuth(aid, benchSlot);
+    const cliAuthTasks = authTasks.map((aid, index) => async (): Promise<AuthResult> => {
+      const slotId = `${SLOT.bench}-${index}`;
+      const r = await cliAuth(aid, slotId);
       return { aid, ok: r.ok, authMs: r.authMs };
     });
     authResults = await runPool(cliAuthTasks, concurrency);
   } else {
-    authResults = await benchAuth(authTasks, concurrency, aunPath, benchSlot);
+    authResults = await benchAuth(authTasks, concurrency, aunPath);
   }
   const authOk = authResults.filter(r => r.ok);
   const authFail = authResults.filter(r => !r.ok);
@@ -702,7 +704,7 @@ Options:
   const origError2 = console.error;
   console.error = () => {};
 
-  const sendFns = tasks.map(t => async (): Promise<SendResult> => {
+  const sendFns = tasks.map((t, taskIndex) => async (): Promise<SendResult> => {
     let lastError: string | undefined;
     let retries = 0;
 
@@ -716,10 +718,11 @@ Options:
         ? buildFileChunkText(t.seq, fileChunks.length, sendTs, sessionId, fileChunks[t.seq]?.toString('base64') ?? '')
         : buildMessageText(t.seq, t.sizeClass, sendTs, sessionId);
       const t0 = Date.now();
+      const slotId = `${SLOT.bench}-${taskIndex % concurrency}`;
       try {
         const sendPromise: Promise<any> = cliMode
-          ? cliSend(t.from, t.to, text, benchSlot, encrypt)
-          : msgSend({ from: t.from, to: t.to, body: { mode: 'text', text }, slotId: benchSlot, aunPath, encrypt });
+          ? cliSend(t.from, t.to, text, slotId, encrypt)
+          : msgSend({ from: t.from, to: t.to, body: { mode: 'text', text }, slotId, aunPath, encrypt });
 
         const res = await withTimeout(sendPromise, SEND_TIMEOUT_MS, `${t.from.split('.')[0]}→${t.to.split('.')[0]}`);
 
@@ -1025,7 +1028,7 @@ Options:
   if (!formatJson) console.log(`${DIM}  Phase 5: 频繁切换账号收发测试${RST}`);
 
   const switchRounds = Math.max(2, Math.min(rounds, 5));
-  const switchOut = await benchSwitch(aids, switchRounds, aunPath, cliMode, benchSlot, encrypt);
+  const switchOut = await benchSwitch(aids, switchRounds, aunPath, cliMode, encrypt);
   const switchOkResults = switchOut.results.filter(r => r.ok);
   const switchLatencies = switchOkResults
     .filter(r => r.serverTimestamp !== undefined)

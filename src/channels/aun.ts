@@ -1,4 +1,4 @@
-import { AUNClient, FileSecretStore, GatewayDiscovery, E2EEError, type JsonObject } from '@agentunion/fastaun';
+import { AUNClient, GatewayDiscovery, E2EEError, type JsonObject } from '@agentunion/fastaun';
 
 import crypto from 'crypto';
 import fs from 'fs';
@@ -16,9 +16,10 @@ import { appendAidEvent } from '../utils/instance-registry.js';
 import { appendMessageLog, buildOutboundEntry } from '../core/message/message-log.js';
 import { chatDirPath } from '../core/session/session-fs-store.js';
 import { appendAidLifecycle } from '../aun/aid/identity.js';
-import { createAunClient } from '../aun/aid/client.js';
+import { getAidStore, loadClient, SLOT } from '../aun/aid/store.js';
+import type { AIDStore } from '@agentunion/fastaun';
 import type { AidStatsCollector } from '../utils/stats.js';
-import { loadAgent, saveAgent, loadProcessConfig } from '../config-store.js';
+import { loadAgent, saveAgent } from '../config-store.js';
 import { getProcessStartTime } from '../utils/process-introspect.js';
 import * as outbox from '../aun/outbox.js';
 import { guessMime, formatSize } from '../utils/media-cache.js';
@@ -99,6 +100,9 @@ export interface AUNMessageHandler {
 
 export class AUNChannel {
   private client: AUNClient | null = null;
+  private store: AIDStore | null = null;
+  /** 实际连接的网关 URL（来自 authenticate() 返回值 / connection.state 事件），替代旧 (client as any)._gatewayUrl。 */
+  private gatewayUrl: string = '';
   private projectPathProvider?: (channelId: string) => Promise<string>;
   private messageHandler?: AUNMessageHandler;
   private recallHandler?: (messageId: string) => void;
@@ -584,13 +588,15 @@ export class AUNChannel {
       }
       this.client = null;
     }
+    if (this.store) {
+      try { this.store.close(); } catch { /* ignore */ }
+      this.store = null;
+    }
     this.connected = false;
 
     const aunPath = this.config.keystorePath || resolveRoot();
     const aidName = this.config.aid;
-    const encryptionSeed = loadProcessConfig().aun?.encryptionSeed
-      ?? process.env.AUN_ENCRYPTION_SEED
-      ?? 'evol';
+    // encryptionSeed 由 getAidStore 内部解析（config / env / 'evol'）
 
     // Migration from ~/.aun is handled by ensureDataDirs() at startup with a marker file.
 
@@ -615,16 +621,18 @@ export class AUNChannel {
 
     logger.info(`${this.logPrefix()} Initializing: aid=${aidName}, gateway=${gateway}, aun_path=${aunPath}`);
 
-    // Create client with FileSecretStore (AES-256-GCM)
-    // 不传 encryption_seed 时，SDK 自动从 {aun_path}/.seed 文件派生密钥（与 aun_cli.py 对齐）
-    const client = await createAunClient({
+    // 构造 AIDStore（slot=evolclaw daemon，与 cli/netcheck 共享 evolclaw 隔离键）
+    // encryptionSeed / rootCaPath 由 getAidStore 内部注入
+    const store = await getAidStore({
+      slotId: SLOT.daemon,
       aunPath,
-      encryptionSeed,
-      aunSdkLog: this.config.aunSdkLog ?? true,
+      debug: this.config.aunSdkLog ?? true,
     });
+    this.store = store;
+    const client = await loadClient(store, aidName);
     this.client = client;
-    // Set gateway URL (internal property, same as Python SDK)
-    (client as any)._gatewayUrl = gateway;
+    // 记录应用层发现的 gateway 作为初始值（authenticate 后会用权威值覆盖）
+    this.gatewayUrl = gateway;
 
     // Register event handlers before connecting
     client.on('message.received', (data: unknown) => {
@@ -675,34 +683,25 @@ export class AUNChannel {
       logger.warn(`${this.logPrefix()} Group message undecryptable: group=${d.group_id} from=${d.from} mid=${d.message_id} err=${d._decrypt_error}`);
     });
 
-    // Authenticate
-
-    let accessToken: string;
+    // Authenticate（拿权威 gateway 用于日志/状态；connect 内部也会复用 token）
     try {
       logger.info(`${this.logPrefix()} Authenticating as ${aidName}...`);
       this.trace('OUT', 'auth.authenticate', { aid: aidName });
-      const auth = await client.auth.authenticate(aidName ? { aid: aidName } : undefined);
-      this.trace('OUT', 'auth.authenticate.ok', { aid: auth.aid, gateway: auth.gateway, hasToken: !!auth.access_token });
-      this.trace('IN', 'auth.result', { aid: auth.aid, gateway: auth.gateway, hasToken: !!auth.access_token });
-      accessToken = auth.access_token as string;
-      const resolvedGateway = (auth.gateway as string) || gateway;
-      (client as any)._gatewayUrl = resolvedGateway;
-      logger.info(`${this.logPrefix()} Authenticated as ${auth.aid ?? '?'}, gateway=${resolvedGateway}`);
+      const auth = await client.authenticate();
+      this.trace('OUT', 'auth.authenticate.ok', { aid: client.aid, gateway: auth?.gateway, hasToken: !!auth?.access_token });
+      this.trace('IN', 'auth.result', { aid: client.aid, gateway: auth?.gateway, hasToken: !!auth?.access_token });
+      const resolvedGateway = String(auth?.gateway ?? gateway);
+      this.gatewayUrl = resolvedGateway;
+      logger.info(`${this.logPrefix()} Authenticated as ${client.aid ?? '?'}, gateway=${resolvedGateway}`);
     } catch (e: any) {
       const errMsg = e.message || String(e);
       const errName = e.constructor?.name || 'Error';
       this.trace('OUT', 'auth.authenticate.error', { error: errMsg, name: errName });
       logger.error(`${this.logPrefix()} Authentication failed (${errName}): ${errMsg}`);
       if (e.stack) logger.debug(`${this.logPrefix()} Auth stack: ${e.stack}`);
-      // Fallback: try direct token from env/config (legacy)
-      accessToken = this.config.accessToken || process.env.AUN_ACCESS_TOKEN || '';
-      if (!accessToken) {
-        logger.error(`${this.logPrefix()} No accessToken fallback available, scheduling retry`);
-        this.setAidStatus('failed', { lastError: `${errName}: ${errMsg}`.slice(0, 80) });
-        this.scheduleReconnect();
-        throw new Error('Authentication failed and no accessToken fallback available');
-      }
-      logger.warn(`${this.logPrefix()} Using accessToken fallback`);
+      this.setAidStatus('failed', { lastError: `${errName}: ${errMsg}`.slice(0, 80) });
+      this.scheduleReconnect();
+      throw new Error(`Authentication failed: ${errName}: ${errMsg}`);
     }
 
     // Connect (SDK auto_reconnect handles transient failures)
@@ -712,12 +711,19 @@ export class AUNChannel {
         agentName: this.config.agentName,
         channelName: this.config.channelName,
       });
-      this.trace('OUT', 'client.connect', { gateway: (client as any)._gatewayUrl, extra_info: extraInfo });
+      this.trace('OUT', 'client.connect', { gateway: this.gatewayUrl, extra_info: extraInfo });
       await client.connect(
-        { access_token: accessToken, gateway: (client as any)._gatewayUrl, extra_info: extraInfo as JsonObject },
-        // max_attempts=0 = 无限重试（与 Go/Python 对齐），交由 SDK 自己跑指数退避
-        // initial_delay=1s，max_delay=300s（5min 封顶）
-        { auto_reconnect: true, retry: { max_attempts: 0, initial_delay: 1.0, max_delay: 300.0 } },
+        {
+          // connection_kind 默认 long；slot 已由 AID 携带（evolclaw daemon）
+          // extra_info：互踢诊断名片（0.4.3 公开 connect 已支持透传）
+          extra_info: extraInfo as JsonObject,
+          // max_attempts=0 = 无限重试（与 Go/Python 对齐），交由 SDK 自己跑指数退避
+          // initial_delay=1s，max_delay=300s（5min 封顶）
+          auto_reconnect: true,
+          retry_max_attempts: 0,
+          retry_initial_delay: 1.0,
+          retry_max_delay: 300.0,
+        },
       );
       this.trace('OUT', 'client.connect.ok', { aid: client.aid });
       this._aid = this.client.aid ?? undefined;
@@ -727,7 +733,7 @@ export class AUNChannel {
       if (this._selfName && this.aidStatsCollector) this.aidStatsCollector.setSelfName(this.config.aid, this._selfName);
       this.connected = true;
       this.connectedAt = Date.now();
-      this.setAidStatus('connected', { lastConnectedAt: Date.now(), lastError: undefined, gatewayUrl: (this.client as any)?._gatewayUrl });
+      this.setAidStatus('connected', { lastConnectedAt: Date.now(), lastError: undefined, gatewayUrl: this.gatewayUrl });
 
       // Workaround: SDK e2ee uses _identity.cert for sender_cert_fingerprint;
       // if cert is missing, it falls back to public key SPKI fingerprint which
@@ -742,8 +748,8 @@ export class AUNChannel {
       }
 
       logger.info(`${this.logPrefix()} Connected as ${this._aid}`);
-      appendAidEvent({ ts: Date.now(), iso: new Date().toISOString(), event: 'connected', aid: this.config.aid, gateway: (this.client as any)._gatewayUrl });
-      appendAidLifecycle({ ts: Date.now(), iso: new Date().toISOString(), event: 'connected', aid: this.config.aid, gateway: (this.client as any)._gatewayUrl });
+      appendAidEvent({ ts: Date.now(), iso: new Date().toISOString(), event: 'connected', aid: this.config.aid, gateway: this.gatewayUrl });
+      appendAidLifecycle({ ts: Date.now(), iso: new Date().toISOString(), event: 'connected', aid: this.config.aid, gateway: this.gatewayUrl });
 
       // Send welcome message to owner after first connection
       await this.sendWelcomeMessage();
@@ -1456,7 +1462,10 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       this.connectedAt = Date.now();
       this.lastReconnectLogTime = 0;
       this.lastReconnectLogAttempt = 0;
-      this.setAidStatus('connected', { lastConnectedAt: Date.now(), lastError: undefined, gatewayUrl: (this.client as any)?._gatewayUrl });
+      // connection.state 事件 payload 带实际连接的 gateway，更新本地缓存
+      const evtGateway = (data as Record<string, any>).gateway;
+      if (typeof evtGateway === 'string' && evtGateway) this.gatewayUrl = evtGateway;
+      this.setAidStatus('connected', { lastConnectedAt: Date.now(), lastError: undefined, gatewayUrl: this.gatewayUrl });
       this.trace('IN', 'connection.state', data);
       logger.info(`${this.logPrefix()} Connected`);
       // 不在这里清 flapCount —— 短命连接一上来就会触发本分支，
@@ -2385,6 +2394,10 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       }
       this.client = null;
     }
+    if (this.store) {
+      try { this.store.close(); } catch { /* ignore */ }
+      this.store = null;
+    }
     this.connected = false;
     appendAidEvent({ ts: Date.now(), iso: new Date().toISOString(), event: 'disconnected', aid: this.config.aid, reason: 'intentional' });
     appendAidLifecycle({ ts: Date.now(), iso: new Date().toISOString(), event: 'disconnected', aid: this.config.aid, reason: 'intentional' });
@@ -2523,7 +2536,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
   async downloadAgentMd(aid: string): Promise<string> {
     if (!this.client) throw new Error('not connected');
     const { agentmdSync } = await import('../aun/aid/agentmd.js');
-    const result = await agentmdSync(aid, { client: this.client });
+    const result = await agentmdSync(aid, { store: this.store ?? undefined });
     return result.content ?? '';
   }
 }

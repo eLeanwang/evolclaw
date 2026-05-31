@@ -11,6 +11,6 @@ export {
   ensureAunSdk,
   isAunSdkReady,
   downloadCaRoot,
-  getAunClient,
   suppressSdkLogs,
 } from './client.js';
+export { getAidStore, loadClient, loadAid, AidLoadError, SLOT } from './store.js';

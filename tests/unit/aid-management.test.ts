@@ -69,36 +69,96 @@ describe('isValidAid', () => {
 
 // ── aidCreate ────────────────────────────────────────────────────────────────
 
-// Mock AUNClient at module scope (hoisted by vitest)
-const mockUploadAgentMd = vi.fn().mockResolvedValue(undefined);
-const mockPublishAgentMd = vi.fn().mockResolvedValue({ aid: 'test.aid', etag: '"abc123"' });
-const mockClose = vi.fn().mockResolvedValue(undefined);
-// registerAid must create the AID directory (as the real SDK does)
-const mockRegisterAid = vi.fn().mockImplementation(async (opts: { aid: string }) => {
-  const aidDir = path.join(os.homedir(), '.aun', 'AIDs', opts.aid);
-  fs.mkdirSync(aidDir, { recursive: true });
-  return { gateway: 'gw.example.com' };
-});
-const mockAuthenticate = vi.fn().mockImplementation(async (opts?: { aid?: string }) => {
-  return { aid: opts?.aid, access_token: 'mock-token', gateway: 'wss://gw.example.com/aun' };
-});
+// Mock @agentunion/fastaun (fastaun 0.4.3: AIDStore / AID / AUNClient three-actor model).
+//
+// Flow mapping:
+//   aidCreate (new)      → store.register → GatewayDiscovery.discover → store.load → new AUNClient(aid) → client.authenticate
+//   aidCreate (existing) → verifySignAbility (store.load → aid.signAgentMd → aid.verifyAgentMd) → loadClient → client.authenticate
+//   agentmdPut           → store.load → new AUNClient(aid) → client.authenticate → client.publishAgentMd → client.close
+//
+// vi.hoisted so the mocks exist before the hoisted vi.mock factory runs.
+const {
+  mockStoreRegister,
+  mockStoreLoad,
+  mockFetchAgentMd,
+  mockCheckAgentMd,
+  mockStoreClose,
+  mockSignAgentMd,
+  mockVerifyAgentMd,
+  mockAuthenticate,
+  mockPublishAgentMd,
+  mockClientConnect,
+  mockClientClose,
+} = vi.hoisted(() => ({
+  // AIDStore.register — real SDK creates the AID directory on registration.
+  mockStoreRegister: vi.fn().mockImplementation(async (aid: string) => {
+    const aidDir = path.join(os.homedir(), '.aun', 'AIDs', aid);
+    fs.mkdirSync(aidDir, { recursive: true });
+    return { ok: true, data: { registered: true } };
+  }),
+  // AID value-object methods (sync, return Result).
+  mockSignAgentMd: vi.fn().mockReturnValue({ ok: true, data: { signed: '---signed-probe---' } }),
+  mockVerifyAgentMd: vi.fn().mockReturnValue({ ok: true, data: { status: 'verified', payload: '' } }),
+  // AIDStore.load — sync, returns Result<{ aid: AID }>.
+  mockStoreLoad: vi.fn(),
+  mockFetchAgentMd: vi.fn().mockResolvedValue({
+    ok: true,
+    data: { aid: 'test.aid', content: '---\naid: "remote.agentid.pub"\n---', verification: { status: 'verified' }, cert_pem: '', etag: '"abc"', last_modified: '' },
+  }),
+  mockCheckAgentMd: vi.fn().mockResolvedValue({
+    ok: true,
+    data: { aid: 'test.aid', local_found: true, remote_found: true, local_etag: '"abc"', remote_etag: '"abc"', needs_update: false, ttl_days: 30 },
+  }),
+  mockStoreClose: vi.fn(),
+  // AUNClient methods.
+  mockAuthenticate: vi.fn().mockResolvedValue({ access_token: 'mock-token', gateway: 'wss://gw.example.com/aun' }),
+  mockPublishAgentMd: vi.fn().mockResolvedValue({ aid: 'test.aid', etag: '"abc123"' }),
+  mockClientConnect: vi.fn().mockResolvedValue(undefined),
+  mockClientClose: vi.fn().mockResolvedValue(undefined),
+}));
 
-const mockSignAgentMd = vi.fn().mockResolvedValue('---signed-probe---');
-const mockVerifyAgentMd = vi.fn().mockResolvedValue({ status: 'verified' });
+// AID value object handed back by store.load().
+const makeMockAid = (aid: string) => ({
+  aid,
+  aunPath: '',
+  certPem: 'mock-cert',
+  publicKey: 'mock-pub',
+  certNotAfter: '2099-01-01T00:00:00Z',
+  certIssuer: 'mock-issuer',
+  certFingerprint: 'mock-fp',
+  deviceId: 'mock-device',
+  slotId: 'evolclaw cli',
+  isCertValid: () => true,
+  isPrivateKeyValid: () => true,
+  signAgentMd: mockSignAgentMd,
+  verifyAgentMd: mockVerifyAgentMd,
+  sign: vi.fn().mockReturnValue({ ok: true, data: { signature: 'sig' } }),
+  verify: vi.fn().mockReturnValue({ ok: true, data: { valid: true } }),
+});
+// Default load behavior: succeed with a mock AID for the requested name.
+mockStoreLoad.mockImplementation((aid: string) => ({ ok: true, data: { aid: makeMockAid(aid) } }));
 
 vi.mock('@agentunion/fastaun', () => ({
+  AIDStore: class MockAIDStore {
+    constructor(_opts: unknown) {}
+    register = mockStoreRegister;
+    load = mockStoreLoad;
+    fetchAgentMd = mockFetchAgentMd;
+    checkAgentMd = mockCheckAgentMd;
+    close = mockStoreClose;
+  },
+  AID: class MockAID {
+    constructor(aid?: string) { Object.assign(this, makeMockAid(aid ?? '')); }
+  },
   AUNClient: class MockAUNClient {
-    constructor() {}
-    auth = {
-      registerAid: mockRegisterAid,
-      authenticate: mockAuthenticate,
-      uploadAgentMd: mockUploadAgentMd,
-      signAgentMd: mockSignAgentMd,
-      verifyAgentMd: mockVerifyAgentMd,
-    };
+    aid: unknown;
+    constructor(aid: unknown) { this.aid = aid; }
+    connect = mockClientConnect;
+    authenticate = mockAuthenticate;
     publishAgentMd = mockPublishAgentMd;
-    setAgentMdPath = vi.fn();
-    close = mockClose;
+    call = vi.fn();
+    on = vi.fn();
+    close = mockClientClose;
   },
   FileSecretStore: class {},
   GatewayDiscovery: class { discover() { return ''; } },
@@ -124,11 +184,15 @@ describe('aidCreate', () => {
     _resetRoot();
 
     // Reset mocks
-    mockRegisterAid.mockClear();
+    mockStoreRegister.mockClear();
+    mockStoreLoad.mockClear();
+    mockFetchAgentMd.mockClear();
+    mockCheckAgentMd.mockClear();
+    mockStoreClose.mockClear();
     mockAuthenticate.mockClear();
-    mockUploadAgentMd.mockClear();
     mockPublishAgentMd.mockClear();
-    mockClose.mockClear();
+    mockClientConnect.mockClear();
+    mockClientClose.mockClear();
     mockSignAgentMd.mockClear();
     mockVerifyAgentMd.mockClear();
 
@@ -156,9 +220,11 @@ describe('aidCreate', () => {
 
     expect(result.aid).toBe(aid);
     expect(result.alreadyExisted).toBe(true);
-    // Should NOT call registerAid — only authenticate (via getAunClient)
-    expect(mockRegisterAid).not.toHaveBeenCalled();
-    expect(mockAuthenticate).toHaveBeenCalledWith({ aid });
+    // Existing valid identity: verifySignAbility passes, then authenticate — never register.
+    expect(mockStoreRegister).not.toHaveBeenCalled();
+    expect(mockSignAgentMd).toHaveBeenCalled();
+    expect(mockVerifyAgentMd).toHaveBeenCalled();
+    expect(mockAuthenticate).toHaveBeenCalled();
   });
 
   it('does not treat directory without private/ as already existing', async () => {
@@ -170,7 +236,7 @@ describe('aidCreate', () => {
     const result = await aidCreate(aid);
 
     expect(result.alreadyExisted).toBe(false);
-    expect(mockRegisterAid).toHaveBeenCalled();
+    expect(mockStoreRegister).toHaveBeenCalled();
   });
 
   it('creates new AID and returns client', async () => {
@@ -181,7 +247,7 @@ describe('aidCreate', () => {
     expect(result.aid).toBe(aid);
     expect(result.alreadyExisted).toBe(false);
     expect(result.client).toBeDefined();
-    expect(mockRegisterAid).toHaveBeenCalledWith({ aid });
+    expect(mockStoreRegister).toHaveBeenCalledWith(aid);
   });
 
   it('aidCreate + agentmdPut writes agent.md locally', async () => {

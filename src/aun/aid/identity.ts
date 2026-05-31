@@ -2,7 +2,8 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
-import { getAunClient, createAunClient, downloadCaRoot } from './client.js';
+import { getAidStore, loadAid, loadClient, AidLoadError, SLOT } from './store.js';
+import { downloadCaRoot } from './client.js';
 import { resolvePaths, aidsDir as evolclawAidsDir, agentMdPath, aunPath as defaultAunPath } from '../../paths.js';
 import type { AidInfo, AidCategory, AidShowResult, AidLookupResult, AidCreateResult } from './types.js';
 
@@ -100,42 +101,38 @@ export function aidList(aunPath?: string): AidInfo[] {
  */
 export async function verifySignAbility(
   aid: string,
-  opts?: { aunPath?: string; client?: any }
+  opts?: { aunPath?: string; store?: any }
 ): Promise<{ ok: boolean; reason?: string }> {
   const aunPath = opts?.aunPath ?? defaultAunPath();
-  let ownClient: any = null;
+  let ownStore: any = null;
   try {
-    let client = opts?.client;
-    if (!client) {
-      const { loadProcessConfig } = await import('../../config-store.js');
-      const encryptionSeed = loadProcessConfig().aun?.encryptionSeed
-        ?? process.env.AUN_ENCRYPTION_SEED
-        ?? 'evol';
-      client = await createAunClient({ aunPath, encryptionSeed });
-      ownClient = client;
+    let store = opts?.store;
+    if (!store) {
+      store = await getAidStore({ slotId: SLOT.cli, aunPath });
+      ownStore = store;
+    }
+    // 加载本地 AID 值对象（含私钥），sign + verify 全本地完成
+    let aidObj: any;
+    try {
+      aidObj = loadAid(store, aid);
+    } catch (e: any) {
+      const code = e instanceof AidLoadError ? e.code : 'LOAD_FAILED';
+      return { ok: false, reason: `load failed: ${code} ${String(e?.message || e).slice(0, 100)}` };
     }
     const probe = `# probe\naid: "${aid}"\n`;
-    let signed: string;
-    try {
-      signed = await client.auth.signAgentMd(probe, { aid });
-    } catch (e: any) {
-      return { ok: false, reason: `sign failed: ${String(e?.message || e).slice(0, 120)}` };
+    const signRes = aidObj.signAgentMd(probe);
+    if (!signRes.ok) {
+      return { ok: false, reason: `sign failed: ${String(signRes.error?.message || signRes.error?.code).slice(0, 120)}` };
     }
-    const certPath = path.join(aunPath, 'AIDs', aid, 'public', 'cert.pem');
-    const certPem = fs.existsSync(certPath) ? fs.readFileSync(certPath, 'utf-8') : '';
-    if (!certPem) return { ok: false, reason: 'cert.pem missing' };
-    let result: any;
-    try {
-      result = await client.auth.verifyAgentMd(signed, { aid, certPem });
-    } catch (e: any) {
-      return { ok: false, reason: `verify threw: ${String(e?.message || e).slice(0, 120)}` };
+    const verifyRes = aidObj.verifyAgentMd(signRes.data.signed);
+    if (!verifyRes.ok) {
+      return { ok: false, reason: `verify threw: ${String(verifyRes.error?.message || verifyRes.error?.code).slice(0, 120)}` };
     }
-    const verified = result?.status === 'verified' || result?.verified === true;
-    if (verified) return { ok: true };
-    return { ok: false, reason: `verify failed: ${result?.status ?? 'unknown'}${result?.reason ? ' — ' + result.reason : ''}` };
+    if (verifyRes.data.status === 'verified') return { ok: true };
+    return { ok: false, reason: `verify failed: ${verifyRes.data.status ?? 'unknown'}${verifyRes.data.reason ? ' — ' + verifyRes.data.reason : ''}` };
   } finally {
-    if (ownClient) {
-      try { await ownClient.close(); } catch { /* ignore */ }
+    if (ownStore) {
+      try { ownStore.close(); } catch { /* ignore */ }
     }
   }
 }
@@ -147,11 +144,7 @@ export async function verifySignAbility(
 export async function aidListVerified(aunPath?: string): Promise<AidInfo[]> {
   const list = aidList(aunPath);
   const root = aunPath ?? defaultAunPath();
-  const { loadProcessConfig } = await import('../../config-store.js');
-  const encryptionSeed = loadProcessConfig().aun?.encryptionSeed
-    ?? process.env.AUN_ENCRYPTION_SEED
-    ?? 'evol';
-  const client = await createAunClient({ aunPath: root, encryptionSeed });
+  const store = await getAidStore({ slotId: SLOT.cli, aunPath: root });
   try {
     for (const a of list) {
       // canSign=false 的 AID 不必跑实测，结论已经明确
@@ -167,7 +160,7 @@ export async function aidListVerified(aunPath?: string): Promise<AidInfo[]> {
         });
         continue;
       }
-      const r = await verifySignAbility(a.aid, { aunPath: root, client });
+      const r = await verifySignAbility(a.aid, { aunPath: root, store });
       a.signVerified = r.ok;
       if (!r.ok) a.signError = r.reason;
       a.category = categorizeAid({
@@ -176,7 +169,7 @@ export async function aidListVerified(aunPath?: string): Promise<AidInfo[]> {
       });
     }
   } finally {
-    try { await client.close(); } catch { /* ignore */ }
+    try { store.close(); } catch { /* ignore */ }
   }
   return list;
 }
@@ -185,18 +178,22 @@ export async function aidCreate(aid: string, opts?: { aunPath?: string; force?: 
   const aunPath = opts?.aunPath ?? defaultAunPath();
   const aidDir = path.join(aunPath, 'AIDs', aid);
   const hasPrivateKey = fs.existsSync(path.join(aidDir, 'private'));
-  const { loadProcessConfig } = await import('../../config-store.js');
-  const encryptionSeed = loadProcessConfig().aun?.encryptionSeed
-    ?? process.env.AUN_ENCRYPTION_SEED
-    ?? 'evol';
 
   // 如果私钥已存在，先验证签名能力
   if (hasPrivateKey) {
     const verifyResult = await verifySignAbility(aid, { aunPath });
 
     if (verifyResult.ok) {
-      const client = await getAunClient(aid, { aunPath });
-      return { aid, alreadyExisted: true, gateway: '', client };
+      // 身份有效：加载并认证，返回已认证的 client
+      const store = await getAidStore({ slotId: SLOT.cli, aunPath });
+      try {
+        const client = await loadClient(store, aid);
+        const auth = await client.authenticate();
+        return { aid, alreadyExisted: true, gateway: String(auth?.gateway ?? ''), client };
+      } catch (e) {
+        store.close();
+        throw e;
+      }
     }
 
     // 签名验证失败
@@ -211,47 +208,53 @@ export async function aidCreate(aid: string, opts?: { aunPath?: string; force?: 
     }
 
     // --force：先尝试 authenticate 恢复证书
-    let recoverClient: any = null;
+    const recoverStore = await getAidStore({ slotId: SLOT.cli, aunPath });
     try {
-      recoverClient = await createAunClient({ aunPath, encryptionSeed });
-      await recoverClient.auth.authenticate({ aid });
-      return { aid, alreadyExisted: true, gateway: '', client: recoverClient };
+      const recoverClient = await loadClient(recoverStore, aid);
+      const auth = await recoverClient.authenticate();
+      return { aid, alreadyExisted: true, gateway: String(auth?.gateway ?? ''), client: recoverClient };
     } catch {
-      if (recoverClient) { try { await recoverClient.close(); } catch {} }
+      recoverStore.close();
       fs.rmSync(aidDir, { recursive: true, force: true });
     }
   }
 
-  const { GatewayDiscovery } = await import('@agentunion/fastaun');
-  let client = await createAunClient({ aunPath, encryptionSeed });
-
+  // 新注册流程：AIDStore.register → downloadCaRoot → load → authenticate
+  const store = await getAidStore({ slotId: SLOT.cli, aunPath });
   try {
-    const result = await client.auth.registerAid({ aid });
-    const gateway = result.gateway || '';
-
-    const caDownloaded = await downloadCaRoot(aunPath, gateway);
-
-    const caCertPath = path.join(aunPath, 'CA', 'root', 'root.crt');
-    if (caDownloaded && fs.existsSync(caCertPath)) {
-      try { await client.close(); } catch { /* ignore */ }
-      client = await createAunClient({ aunPath, encryptionSeed });
-      await client.auth.authenticate({ aid });
+    const regResult = await store.register(aid);
+    if (!regResult.ok) {
+      const e = new Error(regResult.error.message) as any;
+      e.code = regResult.error.code;
+      throw e;
     }
 
-    let gatewayUrl = gateway;
-    if (!gatewayUrl) {
-      try {
-        const discovery = new GatewayDiscovery({});
-        gatewayUrl = await discovery.discover(`https://${aid}/.well-known/aun-gateway`);
-      } catch { /* fall through */ }
-    }
+    // 注册成功后下载 CA 根证书（如果还没有）
+    // 从 AID well-known 发现 gateway 用于 CA 下载
+    let gatewayUrl = '';
+    try {
+      const { GatewayDiscovery } = await import('@agentunion/fastaun');
+      const discovery = new GatewayDiscovery({});
+      gatewayUrl = await discovery.discover(`https://${aid}/.well-known/aun-gateway`);
+    } catch { /* fall through */ }
+
     if (gatewayUrl) {
-      (client as any)._gatewayUrl = gatewayUrl;
+      await downloadCaRoot(aunPath, gatewayUrl);
     }
 
-    return { aid, alreadyExisted: false, gateway: gatewayUrl, client };
+    // 重建 store（CA 可能刚下载，需要 rootCaPath 生效）
+    store.close();
+    const store2 = await getAidStore({ slotId: SLOT.cli, aunPath });
+    try {
+      const client = await loadClient(store2, aid);
+      await client.authenticate();
+      return { aid, alreadyExisted: false, gateway: gatewayUrl, client };
+    } catch (e) {
+      store2.close();
+      throw e;
+    }
   } catch (e) {
-    try { await client.close(); } catch { /* ignore */ }
+    store.close();
     throw e;
   }
 }
@@ -298,15 +301,11 @@ export async function aidShow(aid: string, opts?: { aunPath?: string }): Promise
   let signVerified: boolean | null = null;
   let signError: string | undefined;
 
-  // 先做一次签名自检（共享 client，避免重复起 SDK）
-  const { loadProcessConfig: loadCfg } = await import('../../config-store.js');
-  const encSeed = loadCfg().aun?.encryptionSeed
-    ?? process.env.AUN_ENCRYPTION_SEED
-    ?? 'evol';
-  const client = await createAunClient({ aunPath, encryptionSeed: encSeed });
+  // 先做一次签名自检（共享 store，避免重复起 SDK）
+  const store = await getAidStore({ slotId: SLOT.cli, aunPath });
   try {
     if (hasPrivateKey && certPem && !certExpired && keyMatchesCert !== false) {
-      const r = await verifySignAbility(aid, { aunPath, client });
+      const r = await verifySignAbility(aid, { aunPath, store });
       signVerified = r.ok;
       if (!r.ok) signError = r.reason;
     } else {
@@ -323,14 +322,19 @@ export async function aidShow(aid: string, opts?: { aunPath?: string }): Promise
         if (!content.includes('AUN-SIGNATURE')) {
           agentMdSignature = 'unsigned';
         } else {
-          const result = await client.auth.verifyAgentMd(content, { aid, ...(certPem ? { certPem } : {}) });
-          if (result.status === 'verified' || result.verified) {
+          // 用本地 AID 值对象验签（含本地 cert 公钥）
+          const aidObj = loadAid(store, aid);
+          const result = aidObj.verifyAgentMd(content);
+          if (!result.ok) {
+            agentMdSignature = 'unknown';
+            agentMdSignatureReason = String(result.error?.message || result.error?.code).slice(0, 100);
+          } else if (result.data.status === 'verified') {
             agentMdSignature = 'verified';
-          } else if (result.status === 'unsigned') {
+          } else if (result.data.status === 'unsigned') {
             agentMdSignature = 'unsigned';
           } else {
             agentMdSignature = 'invalid';
-            agentMdSignatureReason = result.reason;
+            agentMdSignatureReason = result.data.reason;
           }
         }
       } catch (e: any) {
@@ -339,7 +343,7 @@ export async function aidShow(aid: string, opts?: { aunPath?: string }): Promise
       }
     }
   } finally {
-    try { await client.close(); } catch {}
+    try { store.close(); } catch {}
   }
 
   return { aid, hasPrivateKey, hasAgentMd, certExpiresAt, certSubject, certExpired, keyMatchesCert, signVerified, signError, agentMdSignature, agentMdSignatureReason };

@@ -1,9 +1,7 @@
 import fs from 'fs';
 import path from 'path';
-import os from 'os';
 import { fileURLToPath } from 'url';
 import { execFileSync } from 'child_process';
-import type { AUNClient } from '@agentunion/fastaun';
 import { isWindows } from '../../utils/cross-platform.js';
 
 /**
@@ -25,7 +23,7 @@ export function suppressSdkLogs(): void {
 
 // ==================== Constants ====================
 
-export const MIN_AUN_CORE_SDK = [0, 3, 4] as const;
+export const MIN_AUN_CORE_SDK = [0, 4, 3] as const;
 export const AUN_CORE_SDK_PKG = '@agentunion/fastaun';
 
 // ==================== SDK & Environment ====================
@@ -116,47 +114,3 @@ export async function downloadCaRoot(aunPath: string, gatewayUrl: string, indent
   }
 }
 
-// ==================== AUNClient Factory ====================
-
-export interface CreateClientOpts {
-  aunPath?: string;
-  /** SDK encryption seed; 留空时 SDK 自动从 {aun_path}/.seed 派生 */
-  encryptionSeed?: string;
-  debug?: boolean;
-  /** AUNClient 第二个构造参数：是否打印 SDK 内部日志 */
-  aunSdkLog?: boolean;
-}
-
-/**
- * 统一构造 AUNClient：自动绑 root_ca_path + setAgentMdPath(aidsDir())。
- * 不做 registerAid / authenticate / connect，调用方按需续作。
- *
- * 所有 new AUNClient 调用都应走此工厂，避免 SDK 默认把 agent.md 写到
- * {aun_path}/AgentMDs（默认目录）。
- */
-export async function createAunClient(opts: CreateClientOpts = {}): Promise<AUNClient> {
-  const { aunPath: defaultAunPath, aidsDir } = await import('../../paths.js');
-  const aunPath = opts.aunPath ?? defaultAunPath();
-  const caCertPath = path.join(aunPath, 'CA', 'root', 'root.crt');
-  const { AUNClient } = await import('@agentunion/fastaun');
-
-  const clientOpts: any = { aun_path: aunPath, debug: opts.debug ?? false };
-  if (fs.existsSync(caCertPath)) clientOpts.root_ca_path = caCertPath;
-  if (opts.encryptionSeed != null) clientOpts.encryption_seed = opts.encryptionSeed;
-
-  const client = opts.aunSdkLog !== undefined
-    ? new AUNClient(clientOpts, opts.aunSdkLog)
-    : new AUNClient(clientOpts);
-  client.setAgentMdPath(aidsDir());
-  return client;
-}
-
-export async function getAunClient(aid: string, opts?: { aunPath?: string }): Promise<AUNClient> {
-  const { loadProcessConfig } = await import('../../config-store.js');
-  const encryptionSeed = loadProcessConfig().aun?.encryptionSeed
-    ?? process.env.AUN_ENCRYPTION_SEED
-    ?? 'evol';
-  const client = await createAunClient({ aunPath: opts?.aunPath, encryptionSeed });
-  await client.auth.authenticate({ aid });
-  return client;
-}

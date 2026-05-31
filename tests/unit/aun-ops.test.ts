@@ -3,37 +3,92 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 
-// ── Mock @agentunion/fastaun ────────────────────────────────────────────────
+// ── Mock @agentunion/fastaun (0.4.3: AIDStore / AID / AUNClient) ─────────────
+//
+// Flow mapping:
+//   aidCreate    → store.register → GatewayDiscovery.discover → store.load → new AUNClient(aid) → client.authenticate
+//   agentmdGet   → store.fetchAgentMd
+//   agentmdPut   → store.load → new AUNClient(aid) → client.authenticate → client.publishAgentMd → client.close
+//   agentmdSync  → store.checkAgentMd → (maybe) store.fetchAgentMd
+const {
+  mockStoreRegister,
+  mockStoreLoad,
+  mockFetchAgentMd,
+  mockCheckAgentMd,
+  mockStoreClose,
+  mockSignAgentMd,
+  mockVerifyAgentMd,
+  mockAuthenticate,
+  mockPublishAgentMd,
+  mockClientConnect,
+  mockClientClose,
+} = vi.hoisted(() => ({
+  // AIDStore.register — real SDK creates the AID directory.
+  mockStoreRegister: vi.fn().mockImplementation(async (aid: string) => {
+    const aidDir = path.join(os.homedir(), '.aun', 'AIDs', aid);
+    fs.mkdirSync(aidDir, { recursive: true });
+    return { ok: true, data: { registered: true } };
+  }),
+  mockSignAgentMd: vi.fn().mockReturnValue({ ok: true, data: { signed: '---signed-probe---' } }),
+  mockVerifyAgentMd: vi.fn().mockReturnValue({ ok: true, data: { status: 'verified', payload: '' } }),
+  mockStoreLoad: vi.fn(),
+  // AIDStore.fetchAgentMd — Promise<Result<{ aid, content, verification, cert_pem, etag, last_modified }>>.
+  mockFetchAgentMd: vi.fn().mockResolvedValue({
+    ok: true,
+    data: { aid: 'remote.agentid.pub', content: '---\naid: "remote.agentid.pub"\n---', verification: { status: 'verified' }, cert_pem: '', etag: '"abc"', last_modified: '' },
+  }),
+  // AIDStore.checkAgentMd — Promise<Result<{ ..., needs_update, local_found, remote_found }>>.
+  mockCheckAgentMd: vi.fn().mockResolvedValue({
+    ok: true,
+    data: { aid: 'remote.agentid.pub', local_found: true, remote_found: true, local_etag: '"abc"', remote_etag: '"abc"', needs_update: false, ttl_days: 30 },
+  }),
+  mockStoreClose: vi.fn(),
+  mockAuthenticate: vi.fn().mockResolvedValue({ access_token: 'mock-token', gateway: 'wss://gw.example.com/aun' }),
+  mockPublishAgentMd: vi.fn().mockResolvedValue({ aid: 'test.aid', etag: '"abc123"' }),
+  mockClientConnect: vi.fn().mockResolvedValue(undefined),
+  mockClientClose: vi.fn().mockResolvedValue(undefined),
+}));
 
-const mockUploadAgentMd = vi.fn().mockResolvedValue(undefined);
-const mockDownloadAgentMd = vi.fn().mockResolvedValue('---\naid: "remote.agentid.pub"\n---');
-const mockPublishAgentMd = vi.fn().mockResolvedValue({ aid: 'test.aid', etag: '"abc123"' });
-const mockFetchAgentMd = vi.fn().mockResolvedValue({ content: '---\naid: "remote.agentid.pub"\n---', signature: { status: 'verified' } });
-const mockCheckAgentMd = vi.fn().mockResolvedValue({ in_sync: true, local_found: true, remote_found: true });
-const mockClose = vi.fn().mockResolvedValue(undefined);
-const mockRegisterAid = vi.fn().mockImplementation(async (opts: { aid: string }) => {
-  const aidDir = path.join(os.homedir(), '.aun', 'AIDs', opts.aid);
-  fs.mkdirSync(aidDir, { recursive: true });
-  return { gateway: 'wss://gw.example.com/aun' };
+const makeMockAid = (aid: string) => ({
+  aid,
+  aunPath: '',
+  certPem: 'mock-cert',
+  publicKey: 'mock-pub',
+  certNotAfter: '2099-01-01T00:00:00Z',
+  certIssuer: 'mock-issuer',
+  certFingerprint: 'mock-fp',
+  deviceId: 'mock-device',
+  slotId: 'evolclaw cli',
+  isCertValid: () => true,
+  isPrivateKeyValid: () => true,
+  signAgentMd: mockSignAgentMd,
+  verifyAgentMd: mockVerifyAgentMd,
+  sign: vi.fn().mockReturnValue({ ok: true, data: { signature: 'sig' } }),
+  verify: vi.fn().mockReturnValue({ ok: true, data: { valid: true } }),
 });
-const mockAuthenticate = vi.fn().mockImplementation(async (opts?: { aid?: string }) => {
-  return { aid: opts?.aid, access_token: 'mock-token', gateway: 'wss://gw.example.com/aun' };
-});
+mockStoreLoad.mockImplementation((aid: string) => ({ ok: true, data: { aid: makeMockAid(aid) } }));
 
 vi.mock('@agentunion/fastaun', () => ({
-  AUNClient: class MockAUNClient {
-    constructor() {}
-    auth = {
-      registerAid: mockRegisterAid,
-      authenticate: mockAuthenticate,
-      uploadAgentMd: mockUploadAgentMd,
-      downloadAgentMd: mockDownloadAgentMd,
-    };
-    publishAgentMd = mockPublishAgentMd;
+  AIDStore: class MockAIDStore {
+    constructor(_opts: unknown) {}
+    register = mockStoreRegister;
+    load = mockStoreLoad;
     fetchAgentMd = mockFetchAgentMd;
     checkAgentMd = mockCheckAgentMd;
-    setAgentMdPath = vi.fn();
-    close = mockClose;
+    close = mockStoreClose;
+  },
+  AID: class MockAID {
+    constructor(aid?: string) { Object.assign(this, makeMockAid(aid ?? '')); }
+  },
+  AUNClient: class MockAUNClient {
+    aid: unknown;
+    constructor(aid: unknown) { this.aid = aid; }
+    connect = mockClientConnect;
+    authenticate = mockAuthenticate;
+    publishAgentMd = mockPublishAgentMd;
+    call = vi.fn();
+    on = vi.fn();
+    close = mockClientClose;
   },
   FileSecretStore: class {},
   GatewayDiscovery: class { discover() { return ''; } },
@@ -55,14 +110,17 @@ describe('aun-ops', () => {
     const { _resetRoot } = await import('../../src/paths.js');
     _resetRoot();
 
-    mockRegisterAid.mockClear();
+    mockStoreRegister.mockClear();
+    mockStoreLoad.mockClear();
     mockAuthenticate.mockClear();
-    mockUploadAgentMd.mockClear();
-    mockDownloadAgentMd.mockClear();
     mockPublishAgentMd.mockClear();
     mockFetchAgentMd.mockClear();
     mockCheckAgentMd.mockClear();
-    mockClose.mockClear();
+    mockStoreClose.mockClear();
+    mockClientConnect.mockClear();
+    mockClientClose.mockClear();
+    mockSignAgentMd.mockClear();
+    mockVerifyAgentMd.mockClear();
   });
 
   afterEach(async () => {
@@ -76,12 +134,13 @@ describe('aun-ops', () => {
   });
 
   describe('aidCreate — client leak prevention', () => {
-    it('closes client when registerAid throws', async () => {
-      mockRegisterAid.mockRejectedValueOnce(new Error('network error'));
+    it('closes store when register throws', async () => {
+      mockStoreRegister.mockRejectedValueOnce(new Error('network error'));
       const { aidCreate } = await import('../../src/aun/aid/index.js');
 
       await expect(aidCreate('fail.agentid.pub')).rejects.toThrow('network error');
-      expect(mockClose).toHaveBeenCalled();
+      // register runs before the client exists, so aidCreate cleans up the store.
+      expect(mockStoreClose).toHaveBeenCalled();
     });
 
     it('returns client on success (caller responsible for closing)', async () => {

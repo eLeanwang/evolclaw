@@ -8,7 +8,7 @@ import https from 'https';
 // @ts-ignore
 import { WebSocket } from 'ws';
 import { aunPath as defaultAunPath } from '../paths.js';
-import { createAunClient } from '../aun/aid/client.js';
+import { getAidStore, loadClient, SLOT } from '../aun/aid/store.js';
 import { isHelpFlag } from './help.js';
 
 const GREEN = '\x1b[32m';
@@ -24,7 +24,7 @@ function ok(msg: string) { return `  ${GREEN}✓${RST} ${msg}`; }
 function fail(msg: string) { return `  ${RED}✗${RST} ${msg}`; }
 function skip(msg: string) { return `  ${YELLOW}○${RST} ${DIM}${msg}${RST}`; }
 function ms(n: number) { return `${DIM}${n}ms${RST}`; }
-function step(n: number, label: string) { return `${DIM}[${n}/10]${RST} ${CYAN}${label}${RST}`; }
+function step(n: number, label: string) { return `${DIM}[${n}/11]${RST} ${CYAN}${label}${RST}`; }
 
 const isZh = (process.env.LANG || process.env.LC_ALL || process.env.LANGUAGE || Intl.DateTimeFormat().resolvedOptions().locale || '').toLowerCase().startsWith('zh');
 
@@ -145,7 +145,7 @@ function suppressSdkOutput<T>(fn: () => Promise<T>): Promise<T> {
 
 // ==================== Check pipeline ====================
 
-async function runCheck(aid: string, formatJson: boolean): Promise<CheckResult[]> {
+async function runCheck(aid: string, formatJson: boolean, kickTest: boolean): Promise<CheckResult[]> {
   const results: CheckResult[] = [];
   const log = (r: CheckResult) => {
     results.push(r);
@@ -230,17 +230,22 @@ async function runCheck(aid: string, formatJson: boolean): Promise<CheckResult[]
   }
 
   // ── Step 7: AID 认证 ──
-  let accessToken: string | undefined;
+  let authResult: Record<string, unknown> | undefined;
   try {
     const start = Date.now();
     const aunPath = process.env.AUN_HOME || defaultAunPath();
-    const result = await suppressSdkOutput(async () => {
-      const client = await createAunClient({ aunPath });
-      const authResult = await client.auth.authenticate({ aid });
-      await client.close().catch(() => {});
-      return authResult;
+    authResult = await suppressSdkOutput(async () => {
+      const store = await getAidStore({ slotId: SLOT.netcheck, aunPath });
+      try {
+        const client = await loadClient(store, aid);
+        const result = await client.authenticate();
+        await client.close();
+        return result;
+      } finally {
+        store.close();
+      }
     });
-    accessToken = result?.access_token;
+    const accessToken = authResult?.access_token as string | undefined;
     const elapsed = Date.now() - start;
     if (accessToken) {
       log({ step: 'Auth', index: 7, ok: true, detail: `${aid} ${i18n.authOk} (login1→login2→token)`, ms: elapsed });
@@ -281,15 +286,16 @@ async function runCheck(aid: string, formatJson: boolean): Promise<CheckResult[]
   try {
     const start = Date.now();
     const aunPath = process.env.AUN_HOME || defaultAunPath();
-    const sendResult = await suppressSdkOutput(async () => {
-      const client = await createAunClient({ aunPath });
-      const authResult = await client.auth.authenticate({ aid });
-      const at = authResult?.access_token || (client as any)._access_token;
-      const gw = (client as any)._gatewayUrl || authResult?.gateway;
-      await client.connect({ access_token: at, gateway: gw, connection_kind: 'short' }, { auto_reconnect: false });
-      const r = await client.call('meta.ping', {});
-      await client.close().catch(() => {});
-      return r;
+    await suppressSdkOutput(async () => {
+      const store = await getAidStore({ slotId: SLOT.netcheck, aunPath });
+      try {
+        const client = await loadClient(store, aid);
+        await client.connect();
+        await client.call('meta.ping', {});
+        await client.close();
+      } finally {
+        store.close();
+      }
     });
     const elapsed = Date.now() - start;
     log({ step: 'Ping', index: 9, ok: true, detail: `meta.ping ${i18n.pingOk}`, ms: elapsed });
@@ -375,7 +381,7 @@ async function runCheck(aid: string, formatJson: boolean): Promise<CheckResult[]
     }
 
     if (!formatJson) {
-      console.log(`  ${DIM}[10/10]${RST} ${CYAN}Echo${RST}  ${DIM}${targets.length} target(s)${RST}`);
+      console.log(`  ${DIM}[10/11]${RST} ${CYAN}Echo${RST}  ${DIM}${targets.length} target(s)${RST}`);
     }
 
     const echoResults: { target: string; ok: boolean; detail: string; replyText?: string }[] = [];
@@ -385,7 +391,7 @@ async function runCheck(aid: string, formatJson: boolean): Promise<CheckResult[]
     const targetMeta = new Map<string, { name: string; type: string; sigStatus: string }>();
 
     if (!formatJson) {
-      console.log(`  ${DIM}[10/10]${RST} ${CYAN}Echo${RST}  ${DIM}reading agent.md for ${targets.length} target(s)...${RST}`);
+      console.log(`  ${DIM}[10/11]${RST} ${CYAN}Echo${RST}  ${DIM}reading agent.md for ${targets.length} target(s)...${RST}`);
     }
 
     await Promise.all(targets.map(async (t) => {
@@ -437,35 +443,37 @@ async function runCheck(aid: string, formatJson: boolean): Promise<CheckResult[]
       const label = targetLabel(target);
       try {
         const replyText = await suppressSdkOutput(async () => {
-          const client = await createAunClient({ aunPath });
-          const authResult = await client.auth.authenticate({ aid });
-          const at = authResult?.access_token || (client as any)._access_token;
-          const gw = (client as any)._gatewayUrl || authResult?.gateway;
-          await client.connect({ access_token: at, gateway: gw, slot_id: 'net-check', connection_kind: 'short' }, { auto_reconnect: false });
+          const store = await getAidStore({ slotId: SLOT.netcheck, aunPath });
+          try {
+            const client = await loadClient(store, aid);
+            await client.connect();
 
-          // 取基线 seq
-          const baseline = await client.call('message.pull', { limit: 100 });
-          const baselineSeq = (baseline as any)?.latest_seq ?? 0;
-          if (baselineSeq > 0) {
-            await client.call('message.ack', { seq: baselineSeq });
+            // 取基线 seq
+            const baseline = await client.call('message.pull', { limit: 100 });
+            const baselineSeq = (baseline as any)?.latest_seq ?? 0;
+            if (baselineSeq > 0) {
+              await client.call('message.ack', { seq: baselineSeq });
+            }
+
+            await client.call('message.send', {
+              to: target,
+              payload: { type: 'text', text: 'echo[nc]' },
+              encrypt: false,
+            });
+
+            await new Promise(r => setTimeout(r, 1500));
+
+            const pullResult = await client.call('message.pull', { after_seq: baselineSeq, limit: 10 });
+            await client.close();
+
+            const messages = (pullResult as any)?.messages || [];
+            const reply = messages.find((m: any) =>
+              m.from === target && m.payload?.text?.includes('[EvolClaw.')
+            );
+            return reply?.payload?.text || null;
+          } finally {
+            store.close();
           }
-
-          await client.call('message.send', {
-            to: target,
-            payload: { type: 'text', text: 'echo[nc]' },
-            encrypt: false,
-          });
-
-          await new Promise(r => setTimeout(r, 1500));
-
-          const pullResult = await client.call('message.pull', { after_seq: baselineSeq, limit: 10 });
-          await client.close().catch(() => {});
-
-          const messages = (pullResult as any)?.messages || [];
-          const reply = messages.find((m: any) =>
-            m.from === target && m.payload?.text?.includes('[EvolClaw.')
-          );
-          return reply?.payload?.text || null;
         });
 
         const elapsed = Date.now() - targetStart;
@@ -502,6 +510,80 @@ async function runCheck(aid: string, formatJson: boolean): Promise<CheckResult[]
     });
   } catch (e: any) {
     log({ step: 'Echo', index: 10, ok: false, detail: `echo ${i18n.failed}: ${e.message?.slice(0, 100) || String(e)}` });
+  }
+
+  // ── Step 11: 踢人测试 / extra_info 验证 ──
+  if (kickTest) {
+    try {
+      const kickStart = Date.now();
+      const aunPath = process.env.AUN_HOME || defaultAunPath();
+      const hostname = os.hostname();
+
+      const kickResult = await suppressSdkOutput(async () => {
+        const store = await getAidStore({ slotId: SLOT.netcheck, aunPath });
+        try {
+          const client = await loadClient(store, aid);
+
+          const disconnectEvents: any[] = [];
+          client.on('gateway.disconnect', (payload: any) => {
+            disconnectEvents.push(payload);
+          });
+
+          await client.connect({
+            connection_kind: 'long',
+            extra_info: {
+              app: 'evolclaw',
+              role: 'netcheck-kicktest',
+              pid: process.pid,
+              hostname,
+            },
+          });
+
+          // 等待 3 秒收集可能的 disconnect 事件
+          await new Promise(r => setTimeout(r, 3000));
+
+          await client.close();
+          return { connected: true, disconnectEvents };
+        } finally {
+          store.close();
+        }
+      });
+
+      const elapsed = Date.now() - kickStart;
+      const { connected, disconnectEvents } = kickResult;
+
+      if (connected) {
+        if (disconnectEvents.length > 0) {
+          const evt = disconnectEvents[0];
+          const selfInfo = evt.detail?.self_extra_info ? JSON.stringify(evt.detail.self_extra_info) : 'none';
+          const newInfo = evt.detail?.new_extra_info ? JSON.stringify(evt.detail.new_extra_info) : 'none';
+          log({
+            step: 'KickTest',
+            index: 11,
+            ok: true,
+            detail: `connected, received disconnect (code=${evt.code}, self=${selfInfo}, new=${newInfo})`,
+            ms: elapsed,
+          });
+          if (!formatJson) {
+            console.log(`    ${YELLOW}⚠${RST} ${DIM}This test may have disconnected the running daemon (it will auto-reconnect)${RST}`);
+          }
+        } else {
+          log({
+            step: 'KickTest',
+            index: 11,
+            ok: true,
+            detail: `connected, no disconnect event (daemon may not be running or already disconnected)`,
+            ms: elapsed,
+          });
+        }
+      } else {
+        log({ step: 'KickTest', index: 11, ok: false, detail: `failed to connect`, ms: elapsed });
+      }
+    } catch (e: any) {
+      log({ step: 'KickTest', index: 11, ok: false, detail: `kick test failed: ${e.message?.slice(0, 100) || String(e)}` });
+    }
+  } else {
+    log({ step: 'KickTest', index: 11, ok: true, detail: `skipped (use --kick-test to enable)`, skipped: true });
   }
 
   return results;
@@ -589,11 +671,12 @@ function shuffle<T>(arr: T[]): T[] {
 export async function cmdNet(args: string[]): Promise<void> {
   const sub = args[0];
   const formatJson = args.includes('--format') && args.includes('json');
+  const kickTest = args.includes('--kick-test');
 
   if (isHelpFlag(sub)) {
-    console.log(`用法: evolclaw net check [<aid>] [--format json]
+    console.log(`用法: evolclaw net check [<aid>] [--format json] [--kick-test]
 
-检查 AUN 网络链路连通性（10 步逐层诊断）。
+检查 AUN 网络链路连通性（11 步逐层诊断）。
 
 步骤:
   1.  DNS (AID)      AID 域名解析
@@ -605,13 +688,15 @@ export async function cmdNet(args: string[]): Promise<void> {
   7.  Auth           AID 认证（login1 + login2 → token）
   8.  Session        会话建立
   9.  Ping           meta.ping RPC
-  10. Message        self-to-self 消息收发
+  10. Echo           self-to-self 消息收发
+  11. KickTest       踢人测试 / extra_info 验证（可选）
 
 参数:
   <aid>    要检查的 AID（可选，默认取前 3 个本地 AID）
 
 选项:
-  --format json    JSON 格式输出`);
+  --format json    JSON 格式输出
+  --kick-test      启用踢人测试（会断开 daemon 长连接，daemon 会自动重连）`);
     return;
   }
 
@@ -644,7 +729,7 @@ export async function cmdNet(args: string[]): Promise<void> {
     if (!formatJson) {
       console.log(`\n${BOLD}── ${targetAid} ──${RST}\n`);
     }
-    const results = await runCheck(targetAid, formatJson);
+    const results = await runCheck(targetAid, formatJson, kickTest);
     allResults.push({ aid: targetAid, checks: results });
   }
 

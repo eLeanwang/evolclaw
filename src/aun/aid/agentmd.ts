@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
-import { getAunClient, createAunClient } from './client.js';
+import type { AIDStore } from '@agentunion/fastaun';
+import { getAidStore, loadAid, loadClient, SLOT } from './store.js';
 import { agentMdPath, aidLocalDir, resolveRoot } from '../../paths.js';
 
 export interface AgentmdGetResult {
@@ -14,169 +15,141 @@ export function buildInitialAgentMd(opts: { aid: string; type?: string }): strin
   return `---\naid: "${opts.aid}"\nname: "${agentName}"\ntype: "${agentType}"\nversion: "1.0.0"\ndescription: ""\ntags:\n  - evolclaw\n---\n`;
 }
 
-/**
- * Resolve the gateway URL for an AID via .well-known discovery.
- */
-async function discoverGateway(aid: string): Promise<string | undefined> {
-  try {
-    const resp = await fetch(`https://${aid}/.well-known/aun-gateway`, { redirect: 'follow' });
-    if (!resp.ok) return undefined;
-    const text = await resp.text();
-    try {
-      return JSON.parse(text.trim()).gateways?.[0]?.url ?? text.trim();
-    } catch {
-      return text.trim();
-    }
-  } catch { return undefined; }
+/** Normalize an SDK verification result to the local union type. */
+function normalizeVerification(v: { status: string; reason?: string }): AgentmdGetResult['verification'] {
+  const status = v.status === 'verified' ? 'verified' : v.status === 'unsigned' ? 'unsigned' : 'invalid';
+  return { status, ...(v.reason ? { reason: String(v.reason) } : {}) };
 }
 
 /**
- * Obtain cert PEM for an AID: local first, then network.
- * Persists fetched cert to local for future use.
+ * Verify locally-cached agent.md content offline via the AID value object.
+ * Loads the peer cert through the store (no network, no private key required).
  */
-async function obtainCertPem(aid: string, aunPath: string, client?: any): Promise<string | undefined> {
-  const localCert = path.join(aunPath, 'AIDs', aid, 'public', 'cert.pem');
-  if (fs.existsSync(localCert)) {
-    return fs.readFileSync(localCert, 'utf-8');
-  }
-
-  // Fetch from network via SDK's _fetchPeerCert (needs gateway)
-  if (client) {
-    try {
-      if (!(client as any)._gatewayUrl) {
-        (client as any)._gatewayUrl = await discoverGateway(aid);
-      }
-      if ((client as any)._gatewayUrl) {
-        const certPem = await (client as any)._fetchPeerCert.call(client, aid);
-        // Persist for future use
-        if (certPem) {
-          const certDir = path.join(aunPath, 'AIDs', aid, 'public');
-          fs.mkdirSync(certDir, { recursive: true });
-          fs.writeFileSync(localCert, certPem, 'utf-8');
-        }
-        return certPem;
-      }
-    } catch { /* fall through */ }
-  }
-
-  return undefined;
-}
-
-/**
- * Verify agent.md content using SDK.
- */
-async function verifyContent(content: string, aid: string, certPem: string | undefined, client: any): Promise<AgentmdGetResult['verification']> {
+function verifyLocal(store: AIDStore, aid: string, content: string): AgentmdGetResult['verification'] {
   if (!content.includes('AUN-SIGNATURE')) {
     return { status: 'unsigned' };
   }
-  if (!certPem) {
-    return { status: 'invalid', reason: 'certificate not available' };
-  }
   try {
-    const result = await client.auth.verifyAgentMd(content, { aid, certPem });
-    if (result.status === 'verified' || result.verified) {
-      return { status: 'verified' };
-    }
-    return { status: 'invalid', reason: result.reason };
+    const aidObj = loadAid(store, aid);
+    const r = aidObj.verifyAgentMd(content);
+    if (!r.ok) return { status: 'invalid', reason: r.error.message };
+    return normalizeVerification(r.data);
   } catch (e: any) {
-    return { status: 'invalid', reason: `verify error: ${String(e.message || e).slice(0, 100)}` };
+    // loadAid throws AidLoadError when the peer cert is missing/invalid.
+    return { status: 'invalid', reason: `certificate not available: ${String(e?.message || e).slice(0, 100)}` };
   }
-}
-
-/**
- * Create a bare AUNClient (no identity load) for read-only operations.
- */
-async function createBareClient(aunPath?: string): Promise<any> {
-  return createAunClient({ aunPath });
 }
 
 /**
  * Get agent.md content with optional verification.
  *
- * Standard flow (SDK 0.3.3):
- * 1. agentmdSync (check + fetch if changed) — SDK auto-saves to {agentMdPath}/{aid}/agent.md
- * 2. If sync fails, fall back to local file
- * 3. With verification: signature status from fetchAgentMd is the source of truth
+ * Flow (fastaun 0.4.3):
+ * 1. store.fetchAgentMd — pulls cert + agent.md and verifies the signature
+ * 2. On network failure, fall back to the local file (verify offline via loadAid)
  */
-export async function agentmdGet(aid: string, opts?: { client?: any; aunPath?: string }): Promise<string>;
-export async function agentmdGet(aid: string, opts: { client?: any; aunPath?: string; withVerification: true }): Promise<AgentmdGetResult>;
-export async function agentmdGet(aid: string, opts?: { client?: any; aunPath?: string; withVerification?: boolean }): Promise<string | AgentmdGetResult> {
+export async function agentmdGet(aid: string, opts?: { store?: AIDStore; aunPath?: string }): Promise<string>;
+export async function agentmdGet(aid: string, opts: { store?: AIDStore; aunPath?: string; withVerification: true }): Promise<AgentmdGetResult>;
+export async function agentmdGet(aid: string, opts?: { store?: AIDStore; aunPath?: string; withVerification?: boolean }): Promise<string | AgentmdGetResult> {
   const aunPath = opts?.aunPath ?? resolveRoot();
-  const client = opts?.client ?? await createBareClient(aunPath);
-  const ownClient = !opts?.client;
+  const store = opts?.store ?? await getAidStore({ slotId: SLOT.cli, aunPath });
+  const ownStore = !opts?.store;
   const localPath = agentMdPath(aid);
 
   try {
-    // Try SDK fetch (auto-saves locally + verifies signature)
-    let content: string | undefined;
+    let content: string;
     let verification: AgentmdGetResult['verification'] | undefined;
-    try {
-      const info = await client.fetchAgentMd(aid);
-      content = info.content;
-      const sig: any = info.signature ?? {};
-      const status = sig.status === 'verified' ? 'verified' : sig.status === 'unsigned' ? 'unsigned' : 'invalid';
-      verification = { status, ...(sig.reason ? { reason: String(sig.reason) } : {}) };
-    } catch (err) {
-      // Network failed — fall back to local file (verify signature via SDK if requested)
-      if (!fs.existsSync(localPath)) throw err;
+
+    const r = await store.fetchAgentMd(aid);
+    if (r.ok) {
+      content = r.data.content;
+      verification = normalizeVerification(r.data.verification);
+    } else {
+      // Network/fetch failed — fall back to local file.
+      if (!fs.existsSync(localPath)) {
+        throw new Error(`fetch agent.md failed for ${aid}: ${r.error.message}`);
+      }
       content = fs.readFileSync(localPath, 'utf-8');
       if (opts?.withVerification) {
-        const certPem = await obtainCertPem(aid, aunPath, client);
-        verification = await verifyContent(content, aid, certPem, client);
+        verification = verifyLocal(store, aid, content);
       }
     }
 
-    if (!opts?.withVerification) return content!;
-    return { content: content!, verification: verification ?? { status: 'unsigned' } };
+    if (!opts?.withVerification) return content;
+    return { content, verification: verification ?? { status: 'unsigned' } };
   } finally {
-    if (ownClient) try { await client.close(); } catch { /* ignore */ }
+    if (ownStore) try { store.close(); } catch { /* ignore */ }
   }
 }
 
 /**
- * Upload agent.md: write to local file → publishAgentMd (auto-sign + upload).
+ * Upload agent.md: authenticate → write local file → publishAgentMd (auto-sign + upload).
  */
-export async function agentmdPut(content: string, opts: { aid: string; client?: any; aunPath?: string }): Promise<void> {
+export async function agentmdPut(content: string, opts: { aid: string; store?: AIDStore; aunPath?: string }): Promise<void> {
   const aunPath = opts.aunPath ?? resolveRoot();
-  const client = opts.client ?? await getAunClient(opts.aid, { aunPath });
-  const ownClient = !opts.client;
+  const store = opts.store ?? await getAidStore({ slotId: SLOT.cli, aunPath });
+  const ownStore = !opts.store;
 
   const dir = aidLocalDir(opts.aid);
   const filePath = path.join(dir, 'agent.md');
   const existed = fs.existsSync(filePath);
 
+  // 先写本地文件（与旧行为一致：本地内容更新应在上传失败时仍保留）
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(filePath, content, 'utf-8');
+
   try {
-    fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(filePath, content, 'utf-8');
-    await client.publishAgentMd();
+    const client = await loadClient(store, opts.aid);
+    try {
+      await client.authenticate();
+      await client.publishAgentMd();
+    } finally {
+      try { await client.close(); } catch { /* ignore */ }
+    }
   } catch (e) {
+    // 上传失败：仅当文件原本不存在（本次新建）时回滚，避免留下孤儿文件；
+    // 已存在的文件保留新内容（旧语义）。
     if (!existed) try { fs.unlinkSync(filePath); } catch { /* ignore */ }
     throw e;
   } finally {
-    if (ownClient) try { await client.close(); } catch { /* ignore */ }
+    if (ownStore) try { store.close(); } catch { /* ignore */ }
   }
 }
 
 /**
- * Check if agent.md is up-to-date (30-day cache), fetch if changed.
+ * Check if agent.md is up-to-date (30-day TTL), fetch if changed.
  * Returns changed=true + content when a new version was downloaded.
+ *
+ * Note: store.checkAgentMd tracks freshness via the store's in-memory cache,
+ * so a freshly-built store reports local_found=false and will fetch.
  */
 export async function agentmdSync(
   aid: string,
-  opts?: { client?: any }
+  opts?: { store?: AIDStore; aunPath?: string }
 ): Promise<{ changed: boolean; content?: string }> {
-  const client = opts?.client ?? await createBareClient();
-  const ownClient = !opts?.client;
+  const aunPath = opts?.aunPath ?? resolveRoot();
+  const store = opts?.store ?? await getAidStore({ slotId: SLOT.cli, aunPath });
+  const ownStore = !opts?.store;
+  const localPath = agentMdPath(aid);
+
   try {
-    const state = await client.checkAgentMd(aid, 30);
-    if (!state.in_sync || !state.local_found) {
-      const info = await client.fetchAgentMd(aid);
-      return { changed: true, content: info.content };
+    const check = await store.checkAgentMd(aid, 30);
+
+    // In sync (cache fresh) — return local file content unchanged.
+    if (check.ok && !check.data.needs_update && check.data.local_found) {
+      const content = fs.existsSync(localPath) ? fs.readFileSync(localPath, 'utf-8') : undefined;
+      return { changed: false, content };
     }
-    const localPath = agentMdPath(aid);
+
+    // Needs update (or check failed) — fetch fresh content.
+    const fetched = await store.fetchAgentMd(aid);
+    if (fetched.ok) {
+      return { changed: true, content: fetched.data.content };
+    }
+
+    // Fetch failed (network) — fall back to local file if present.
     const content = fs.existsSync(localPath) ? fs.readFileSync(localPath, 'utf-8') : undefined;
     return { changed: false, content };
   } finally {
-    if (ownClient) try { await client.close(); } catch { /* ignore */ }
+    if (ownStore) try { store.close(); } catch { /* ignore */ }
   }
 }

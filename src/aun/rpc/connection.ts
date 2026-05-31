@@ -1,6 +1,4 @@
-import { aunPath as defaultAunPath } from '../../paths.js';
-import { createAunClient } from '../aid/client.js';
-import { loadProcessConfig } from '../../config-store.js';
+import { getAidStore, loadClient, SLOT } from '../aid/store.js';
 
 export interface ShortConnection {
   call(method: string, params: any): Promise<any>;
@@ -8,40 +6,31 @@ export interface ShortConnection {
 }
 
 export interface ShortConnectionOpts {
+  /** keystore 根目录，默认由 getAidStore 走 paths.aunPath()。 */
   aunPath?: string;
-  /** 应用 slot 标识。用于隔离 ack 游标，避免多应用共用 AID 时互相污染。空字符串表示默认 slot。 */
+  /**
+   * 应用 slot 标识，决定消费通道隔离键。
+   * 默认 SLOT.cli（'evolclaw cli'）—— 与 daemon 共享 evolclaw 消费通道（短连接不踢长连接）。
+   * 传具体值 = 独立通道，隔离 token / seq 游标 / 消息过滤。
+   */
   slotId?: string;
 }
 
 export async function createShortConnection(aid: string, opts?: ShortConnectionOpts): Promise<ShortConnection> {
-  const aunPath = opts?.aunPath ?? defaultAunPath();
-  const slotId = opts?.slotId ?? '';
-
-  const encryptionSeed = loadProcessConfig().aun?.encryptionSeed
-    ?? process.env.AUN_ENCRYPTION_SEED
-    ?? 'evol';
-  const client = await createAunClient({ aunPath, encryptionSeed });
-  const authResult = await client.auth.authenticate({ aid });
-
-  const accessToken = authResult?.access_token ?? (client as any)._access_token;
-  const gateway = (client as any)._gatewayUrl ?? authResult?.gateway;
-
-  await client.connect(
-    {
-      access_token: accessToken,
-      gateway,
-      slot_id: slotId,
-      connection_kind: 'short',
-    },
-    { auto_reconnect: false },
-  );
-
-  return {
-    async call(method: string, params: any): Promise<any> {
-      return client.call(method, params);
-    },
-    async close(): Promise<void> {
-      try { await client.close(); } catch { /* ignore */ }
-    },
-  };
+  const store = await getAidStore({ slotId: opts?.slotId ?? SLOT.cli, aunPath: opts?.aunPath });
+  try {
+    const client = await loadClient(store, aid);
+    await client.connect({ connection_kind: 'short', short_ttl_ms: 30000, auto_reconnect: false });
+    return {
+      async call(method: string, params: any): Promise<any> {
+        return client.call(method, params);
+      },
+      async close(): Promise<void> {
+        try { await client.close(); } finally { store.close(); }
+      },
+    };
+  } catch (e) {
+    store.close();
+    throw e;
+  }
 }
