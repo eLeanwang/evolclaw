@@ -2,7 +2,6 @@ import { ChannelAdapter, Session, ChannelPolicy, InteractionRequest, ReplyContex
 import { SessionManager } from './session/session-manager.js';
 import { type AgentRunnerFull, hasModelSwitcher, hasPermissionController } from '../agents/claude-runner.js';
 import { getCodexEfforts } from '../agents/codex-runner.js';
-import { resolveAnthropicConfig, resolveOpenaiConfig } from '../agents/resolve.js';
 import { MessageCache } from './message/message-cache.js';
 import { MessageProcessor } from './message/message-processor.js';
 import { EventBus } from './event-bus.js';
@@ -75,38 +74,6 @@ function modelDisplayLabel(agent: AgentRunnerFull, model: string): string {
   return full && full !== model ? `${model} (${full})` : model;
 }
 
-function getModelListSource(
-  owning: EvolAgentHandle | null,
-  agent: AgentRunnerFull,
-): { apiBaseUrl?: string; apiKey?: string; fallbackModels: string[]; owner: string } {
-  const codexConfig = owning?.config?.baseagents?.codex as { apiKey?: string; baseUrl?: string; model?: string; effort?: string; reasoning?: string } | undefined;
-  const claudeConfig = owning?.config?.baseagents?.claude as { apiKey?: string; baseUrl?: string; model?: string; effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max' } | undefined;
-
-  if (agent.name === 'codex') {
-    let resolved: { apiKey?: string; baseUrl?: string } = {};
-    try {
-      resolved = resolveOpenaiConfig({ agents: { codex: codexConfig } } as any, codexConfig);
-    } catch {}
-    return {
-      apiBaseUrl: resolved.baseUrl,
-      apiKey: resolved.apiKey,
-      fallbackModels: agent.listModels?.() || [],
-      owner: 'openai',
-    };
-  }
-
-  let resolved: { apiKey?: string; baseUrl?: string } = {};
-  try {
-    resolved = resolveAnthropicConfig({ agents: { claude: claudeConfig } } as any, claudeConfig);
-  } catch {}
-
-  return {
-    apiBaseUrl: resolved.baseUrl,
-    apiKey: resolved.apiKey,
-    fallbackModels: ['claude-opus-4-7', 'claude-opus-4-6', 'claude-sonnet-4-6'],
-    owner: 'anthropic',
-  };
-}
 
 /**
  * 写入用户级 ~/.claude/settings.json（与 Claude CLI 行为一致）
@@ -1835,40 +1802,12 @@ export class CommandHandler {
       const efforts = getAvailableEfforts(setmodelAgent, currentModel);
       const currentEffort = setmodelAgent.getEffort?.() || 'auto';
 
-      const modelListSource = getModelListSource(this.getOwningAgent(channel), setmodelAgent);
-
-      // 从 API 获取模型列表（OpenAI /v1/models 风格）
-      type ModelListResponse = { object: string; data: Array<{ id: string; object: string; created: number; owned_by: string }> };
-      let modelListData: ModelListResponse | null = null;
-      if (modelListSource.apiBaseUrl) {
-        try {
-          const modelsUrl = modelListSource.apiBaseUrl.replace(/\/+$/, '') + '/v1/models';
-          const controller = new AbortController();
-          const timeout = setTimeout(() => controller.abort(), 5000);
-          const resp = await fetch(modelsUrl, {
-            signal: controller.signal,
-            headers: { 'Authorization': `Bearer ${modelListSource.apiKey || ''}` },
-          });
-          clearTimeout(timeout);
-          if (resp.ok) {
-            modelListData = await resp.json() as ModelListResponse;
-          }
-        } catch {}
-      }
-
-      // 兜底模型列表
-      if (!modelListData || !modelListData.data || modelListData.data.length === 0) {
-        const now = Math.floor(Date.now() / 1000);
-        modelListData = {
-          object: 'list',
-          data: modelListSource.fallbackModels.map(id => ({
-            id,
-            object: 'model',
-            created: now,
-            owned_by: modelListSource.owner,
-          })),
-        };
-      }
+      const now = Math.floor(Date.now() / 1000);
+      const modelIds = hasModelSwitcher(setmodelAgent) ? setmodelAgent.listModels() : [];
+      const modelListData = {
+        object: 'list',
+        data: modelIds.map(id => ({ id, object: 'model', created: now, owned_by: 'anthropic' })),
+      };
 
       return { kind: 'command.result' as const, text: JSON.stringify({
                 current_model: currentModel,

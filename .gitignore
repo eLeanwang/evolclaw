@@ -1,5 +1,6 @@
 # 配置文件（包含敏感信息）
 config.toml
+config.json
 .env
 
 # 运行时数据
@@ -27,6 +28,8 @@ projects/
 # 测试文件
 test-*.js
 test-*.ts
+test-*.mjs
+test-*.cjs
 tests/
 
 # 编辑器
@@ -76,6 +79,8 @@ src/channels/aun_bridge.py
 /CA/
 .device_id
 .seed
+.seed.migrated.*
+.migrated-from-aun
 
 # macOS 残留
 __MACOSX/

@@ -45,7 +45,7 @@ export interface PermissionContext {
 const MODEL_FAMILIES = ['opus', 'sonnet', 'haiku'] as const;
 
 /** 已验证可用但可能尚未出现在 /models 列表中的模型 ID（注入候选） */
-const INJECTED_MODELS = ['claude-opus-4-8'];
+const INJECTED_MODELS: string[] = [];
 
 /** 静态回退表：动态获取失败时使用 */
 const STATIC_MODEL_ALIASES: Record<string, string> = {
@@ -427,7 +427,14 @@ export class AgentRunner {
   }
 
   listModels(): string[] {
-    return ['opus', 'sonnet', 'haiku'];
+    // 触发异步刷新（不阻塞）
+    if (this.baseUrl) refreshModelAliases(this.baseUrl, this.apiKey);
+    // 有缓存时返回完整 ID 列表，否则返回短别名
+    if (this.baseUrl) {
+      const cached = modelAliasCache.get(this.baseUrl);
+      if (cached) return Object.values(cached.aliases);
+    }
+    return Object.values(STATIC_MODEL_ALIASES);
   }
 
   /** 将短别名解析为当前代理实际使用的完整 model ID（仅用于展示，不改变持久化值） */

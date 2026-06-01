@@ -27,7 +27,7 @@ import { StatsCollector } from './utils/stats.js';
 import { AidStatsCollector } from './utils/stats.js';
 import { PermissionGateway } from './core/permission.js';
 import { InteractionRouter } from './core/interaction-router.js';
-import { ChannelLoader, type ChannelInstance } from './core/channel-loader.js';
+import { ChannelLoader, type ChannelInstance, tryParseChannelKey } from './core/channel-loader.js';
 import { AgentLoader } from './core/baseagent-loader.js';
 import { EvolAgentRegistry, type ReloadHooks } from './core/evolagent-registry.js';
 import { buildReloadHooks } from './core/channel-loader.js';
@@ -616,10 +616,12 @@ async function main() {
         const owningAgent = agentRegistry.resolveByChannel(inst.adapter.channelKey);
         const effectiveDefault = owningAgent?.projectPath
           ?? primaryAgent.projectPath;
+        const parsedKey = tryParseChannelKey(inst.adapter.channelKey);
         const session = await sessionManager.getOrCreateSession(
           inst.adapter.channelKey, channelId,
           effectiveDefault,
-          undefined, undefined, undefined, undefined
+          undefined, undefined, undefined, undefined, undefined, undefined,
+          parsedKey?.selfAID, parsedKey?.type
         );
         return path.isAbsolute(session.projectPath)
           ? session.projectPath
