@@ -252,7 +252,9 @@ export interface AgentRunnerFull {
     initialAgentSessionId?: string,
     images?: ImageData[],
     systemPromptAppend?: string,
-    sessionManager?: any
+    sessionManager?: any,
+    /** 本次调用的模型/强度覆盖（按 关系>agent>全局 解析后传入；缺省用 runner 默认） */
+    modelOverride?: { model?: string; effort?: string }
   ): Promise<AsyncIterable<AgentEvent>>;
 
   // 中断
@@ -1043,7 +1045,7 @@ export class AgentRunner {
     }
   }
 
-  async runQuery(sessionId: string, prompt: string, projectPath: string, initialClaudeSessionId?: string, images?: ImageData[], systemPromptAppend?: string, sessionManager?: any): Promise<AsyncIterable<AgentEvent>> {
+  async runQuery(sessionId: string, prompt: string, projectPath: string, initialClaudeSessionId?: string, images?: ImageData[], systemPromptAppend?: string, sessionManager?: any, modelOverride?: { model?: string; effort?: string }): Promise<AsyncIterable<AgentEvent>> {
     // 记录当前 evolclaw session ID，用于 Agent ctl 环境变量注入
     this.currentEvolclawSessionId = sessionId;
 
@@ -1251,7 +1253,11 @@ export class AgentRunner {
 
     // 公共 options（新旧模式共用）
     const sdkPermissionMode = this.toSdkPermissionMode();
-    logger.info(`[AgentRunner] runQuery model=${this.model} effort=${this.effort ?? 'auto'} permMode=${this.permissionMode} sdkMode=${sdkPermissionMode}`);
+    // 本次调用使用的模型/强度：优先 modelOverride（message-processor 按 关系>agent>全局 解析后传入），
+    // 缺省回落 agent 级 this.model。作为 per-call 入参传入，无共享状态，多对端并发互不污染。
+    const callModel = modelOverride?.model || this.model;
+    const callEffort = (modelOverride?.effort ?? this.effort) as ('low' | 'medium' | 'high' | 'xhigh' | 'max' | undefined);
+    logger.info(`[AgentRunner] runQuery model=${callModel} effort=${callEffort ?? 'auto'} permMode=${this.permissionMode} sdkMode=${sdkPermissionMode}`);
     if (systemPromptAppend) {
       logger.info(`[AgentRunner] systemPromptAppend: ${systemPromptAppend.length} chars`);
     } else {
@@ -1259,8 +1265,8 @@ export class AgentRunner {
     }
     const commonOptions = {
       cwd: projectPath,
-      model: resolveModelAlias(this.model, this.baseUrl),
-      ...(this.effort ? { effort: this.effort } : {}),
+      model: resolveModelAlias(callModel, this.baseUrl),
+      ...(callEffort ? { effort: callEffort } : {}),
       ...(this.claudeExecutablePath ? { pathToClaudeCodeExecutable: this.claudeExecutablePath } : {}),
       autoCompactWindow: 200000,
       advisorModel: 'haiku',

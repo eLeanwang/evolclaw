@@ -73,7 +73,7 @@ vi.mock('@agentunion/fastaun', () => ({
     constructor(_opts: unknown) {}
     register = mockStoreRegister;
     load = mockStoreLoad;
-    fetchAgentMd = mockFetchAgentMd;
+    downloadAgentMd = mockFetchAgentMd;
     checkAgentMd = mockCheckAgentMd;
     close = mockStoreClose;
   },
@@ -85,7 +85,7 @@ vi.mock('@agentunion/fastaun', () => ({
     constructor(aid: unknown) { this.aid = aid; }
     connect = mockClientConnect;
     authenticate = mockAuthenticate;
-    publishAgentMd = mockPublishAgentMd;
+    uploadAgentMd = mockPublishAgentMd;
     call = vi.fn();
     on = vi.fn();
     close = mockClientClose;

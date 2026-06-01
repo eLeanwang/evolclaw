@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>EvolClaw Watch</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <!-- 配对页 -->
+  <div id="pair-page" class="pair-page">
+    <div class="pair-box">
+      <h1>🔭 EvolClaw Watch</h1>
+      <p class="pair-hint">输入终端显示的 6 位配对码</p>
+      <input id="pair-input" type="text" inputmode="numeric" maxlength="6" placeholder="000000" autocomplete="off">
+      <button id="pair-btn">配对</button>
+      <div id="pair-error" class="pair-error"></div>
+    </div>
+  </div>
+
+  <!-- 主面板 -->
+  <div id="app" class="app" style="display:none">
+    <header class="topbar">
+      <span class="brand">🔭 EvolClaw Watch</span>
+      <nav class="tabs">
+        <button class="tab active" data-view="aid">AID</button>
+        <button class="tab" data-view="msg">Messages</button>
+        <button class="tab" data-view="session">Sessions</button>
+      </nav>
+      <span id="conn-status" class="conn-status">连接中…</span>
+    </header>
+
+    <main class="content">
+      <section id="view-aid" class="view active"></section>
+      <section id="view-msg" class="view">
+        <div class="msg-layout">
+          <div id="msg-aids" class="msg-col msg-aids"></div>
+          <div id="msg-peers" class="msg-col msg-peers"></div>
+          <div id="msg-stream" class="msg-col msg-stream"></div>
+        </div>
+      </section>
+      <section id="view-session" class="view">
+        <div class="sess-layout">
+          <div id="sess-list" class="sess-col sess-list"></div>
+          <div id="sess-detail" class="sess-col sess-detail"></div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

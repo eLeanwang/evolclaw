@@ -6,7 +6,7 @@ import { decodeDirSegment, readAllJsonlLines } from '../core/session/session-fs-
 
 // ==================== Types ====================
 
-interface MessageLogEntry {
+export interface MessageLogEntry {
   ts: number;
   time: string;
   dir: 'in' | 'out';
@@ -29,7 +29,7 @@ interface MessageLogEntry {
   source?: 'daemon' | 'cli' | 'msg' | 'ctl';
 }
 
-interface PeerInfo {
+export interface PeerInfo {
   peerId: string;
   peerName: string | null;
   inbound: number;
@@ -37,7 +37,7 @@ interface PeerInfo {
   lastAt: number;
 }
 
-interface AidInfo {
+export interface AidInfo {
   aid: string;
   totalIn: number;
   totalOut: number;
@@ -185,12 +185,12 @@ function shortAid(aid: string): string {
 
 // ==================== Data Layer ====================
 
-function getSessionsAunDir(): string {
+export function getSessionsAunDir(): string {
   const p = resolvePaths();
   return path.join(p.sessionsDir, 'aun');
 }
 
-function listLocalAids(aunDir: string): string[] {
+export function listLocalAids(aunDir: string): string[] {
   try {
     return fs.readdirSync(aunDir, { withFileTypes: true })
       .filter(e => e.isDirectory())
@@ -198,7 +198,7 @@ function listLocalAids(aunDir: string): string[] {
   } catch { return []; }
 }
 
-function listPeers(aunDir: string, localAid: string): string[] {
+export function listPeers(aunDir: string, localAid: string): string[] {
   const aidDir = path.join(aunDir, encodeSegment(localAid));
   try {
     return fs.readdirSync(aidDir, { withFileTypes: true })
@@ -207,7 +207,7 @@ function listPeers(aunDir: string, localAid: string): string[] {
   } catch { return []; }
 }
 
-function readMessages(aunDir: string, localAid: string, peerId: string): MessageLogEntry[] {
+export function readMessages(aunDir: string, localAid: string, peerId: string): MessageLogEntry[] {
   const msgPath = path.join(aunDir, encodeSegment(localAid), encodeSegment(peerId), 'messages.jsonl');
   return readAllJsonlLines<MessageLogEntry>(msgPath);
 }
@@ -224,7 +224,7 @@ function encodeSegment(s: string): string {
   return s.replace(/[/%\\:*?"<>|]/g, ch => '%' + ch.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0'));
 }
 
-function loadAidInfo(aunDir: string, aid: string): AidInfo {
+export function loadAidInfo(aunDir: string, aid: string): AidInfo {
   const peers = listPeers(aunDir, aid);
   let totalIn = 0, totalOut = 0;
   for (const peer of peers) {
@@ -237,7 +237,7 @@ function loadAidInfo(aunDir: string, aid: string): AidInfo {
   return { aid, totalIn, totalOut, peerCount: peers.length };
 }
 
-function loadPeerInfos(aunDir: string, localAid: string): PeerInfo[] {
+export function loadPeerInfos(aunDir: string, localAid: string): PeerInfo[] {
   const peers = listPeers(aunDir, localAid);
   const infos: PeerInfo[] = [];
   for (const peerId of peers) {
@@ -255,7 +255,7 @@ function loadPeerInfos(aunDir: string, localAid: string): PeerInfo[] {
   return infos;
 }
 
-function loadAllMessages(aunDir: string, localAid: string): MessageLogEntry[] {
+export function loadAllMessages(aunDir: string, localAid: string): MessageLogEntry[] {
   const peers = listPeers(aunDir, localAid);
   const all: MessageLogEntry[] = [];
   for (const peer of peers) {

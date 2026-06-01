@@ -3,7 +3,7 @@
 飞书群通过 chat_id 标识，支持话题（thread）回复。
 
 ## 工具
-- 群消息命令：`evolclaw group`（详见 $KITS_DOCS/evolclaw/MSG_GROUP.md）
+- 群消息命令：`ec group`（详见 $KITS_DOCS/evolclaw/group.md）
 - 取群信息 / 公告 / 成员 / 管理员
 
 ## 注意

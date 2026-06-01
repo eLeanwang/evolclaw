@@ -1408,6 +1408,7 @@ async function cmdWatchMenu(): Promise<void> {
     { key: 'log', label: 'log', desc: 'real-time log tail' },
     { key: 'aid', label: 'aid', desc: 'AID connection stats' },
     { key: 'msg', label: 'msg', desc: 'message inspector' },
+    { key: 'web', label: 'web', desc: 'browser dashboard (aid/msg/session)' },
   ];
   let index = 0;
   const useColor = !!process.stdout.isTTY;
@@ -1457,6 +1458,7 @@ async function cmdWatchMenu(): Promise<void> {
           const { cmdWatchMsg } = await import('./watch-msg.js');
           await cmdWatchMsg();
         }
+        else if (chosen === 'web') { await cmdWatchWeb(); }
         resolve();
       }
     };
@@ -2058,6 +2060,96 @@ async function cmdWatchAid(): Promise<void> {
   }
 
   platform.onShutdown(cleanup);
+}
+
+async function cmdWatchWeb(): Promise<void> {
+  const p = resolvePaths();
+  fs.mkdirSync(p.instanceDir, { recursive: true });
+
+  const useColor = !!process.stdout.isTTY;
+  const RST = useColor ? '\x1b[0m' : '';
+  const DIM = useColor ? '\x1b[2m' : '';
+  const BOLD = useColor ? '\x1b[1m' : '';
+  const CYAN = useColor ? '\x1b[36m' : '';
+  const GREEN = useColor ? '\x1b[32m' : '';
+  const YELLOW = useColor ? '\x1b[33m' : '';
+
+  const logLine = (line: string) => {
+    const t = new Date();
+    const ts = `${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}:${String(t.getSeconds()).padStart(2, '0')}`;
+    process.stdout.write(`${DIM}${ts}${RST} ${line}\n`);
+  };
+
+  // 调试日志文件：每次运行 watch web 时清空，便于建立调试闭环
+  // 查看 sessions 调试日志 → 读这个文件
+  const logFile = path.join(p.logs, 'watch-web.log');
+  try {
+    fs.mkdirSync(p.logs, { recursive: true });
+    fs.writeFileSync(logFile, `# watch-web debug log\n# started ${new Date().toISOString()} pid=${process.pid}\n`);
+  } catch { /* best effort */ }
+  const fileLog = (line: string) => {
+    const t = new Date();
+    const ts = `${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}:${String(t.getSeconds()).padStart(2, '0')}.${String(t.getMilliseconds()).padStart(3, '0')}`;
+    try { fs.appendFileSync(logFile, `${ts} ${line.replace(/\x1b\[[0-9;]*m/g, '')}\n`); } catch { /* ignore */ }
+  };
+  // 同时输出到终端和日志文件
+  const log = (line: string) => { logLine(line); fileLog(line); };
+
+  const { startWatchWebServer } = await import('./watch-web/server.js');
+  let handle;
+  try {
+    handle = await startWatchWebServer({ log });
+  } catch (e: any) {
+    console.error(`❌ 启动 Web 服务失败: ${e?.message || e}`);
+    process.exit(1);
+  }
+
+  // 注册 instance 文件
+  const instanceFile = path.join(p.instanceDir, `watch-web-${process.pid}.json`);
+  fs.writeFileSync(instanceFile, JSON.stringify({
+    pid: process.pid, startedAt: Date.now(), startedAtIso: new Date().toISOString(),
+    type: 'watch-web', port: handle.port,
+  }, null, 2));
+
+  // 列出本机访问地址
+  const os = await import('os');
+  const ifaces = os.networkInterfaces();
+  const lanIps: string[] = [];
+  for (const list of Object.values(ifaces)) {
+    for (const ni of list || []) {
+      if (ni.family === 'IPv4' && !ni.internal) lanIps.push(ni.address);
+    }
+  }
+
+  process.stdout.write(`\n${BOLD}${CYAN}🔭 EvolClaw Watch Web${RST}\n\n`);
+  process.stdout.write(`  ${BOLD}配对码:${RST}  ${GREEN}${BOLD}${handle.pairingCode}${RST}  ${DIM}(5 分钟内有效，配对后 token 缓存 24h 自动续期)${RST}\n\n`);
+  process.stdout.write(`  ${BOLD}本机:${RST}    http://localhost:${handle.port}\n`);
+  for (const ip of lanIps) {
+    process.stdout.write(`  ${BOLD}局域网:${RST}  http://${ip}:${handle.port}\n`);
+  }
+  process.stdout.write(`\n  ${DIM}绑定 0.0.0.0，远程可访问。按任意键退出。${RST}\n`);
+  process.stdout.write(`  ${DIM}调试日志: ${logFile}${RST}\n\n`);
+
+  const cleanup = () => {
+    try { fs.unlinkSync(instanceFile); } catch {}
+    handle.close().finally(() => process.exit(0));
+  };
+  process.on('exit', () => { try { fs.unlinkSync(instanceFile); } catch {} });
+  process.on('SIGINT', cleanup);
+  process.on('SIGTERM', cleanup);
+  platform.onShutdown(cleanup);
+
+  // 按任意键退出
+  if (process.stdin.isTTY) {
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+    process.stdin.on('data', (key: Buffer) => {
+      logLine(`${YELLOW}收到退出指令，关闭服务…${RST}`);
+      cleanup();
+    });
+  }
+
+  await new Promise<void>(() => {});
 }
 async function cmdRestartMonitor() {
   const p = resolvePaths();
@@ -4818,6 +4910,8 @@ export async function main(args: string[]) {
         await cmdWatchMsg();
       } else if (args[1] === 'log') {
         cmdWatch();
+      } else if (args[1] === 'web' || args[1] === 'session') {
+        await cmdWatchWeb();
       } else if (!args[1]) {
         await cmdWatchMenu();
       } else {
@@ -4880,6 +4974,11 @@ export async function main(args: string[]) {
       await cmdGroup(args.slice(1));
       break;
     }
+    case 'model': {
+      const { cmdModel } = await import('./model.js');
+      await cmdModel(args.slice(1));
+      break;
+    }
     case 'bench': {
       const { suppressSdkLogs } = await import('../aun/aid/index.js');
       suppressSdkLogs();
@@ -4930,6 +5029,14 @@ Commands:
                           --force                            (覆盖已有 config.json)
                   agent reload       全量 resync（扫磁盘，新增上线、删除下线、修改热更新）
                   agent reload <n>   热重载指定 agent 配置
+  model         模型管理（查看/切换，作用域：全局/agent/关系/会话）
+                  model list         列出可用模型，标注各作用域命中
+                  model current      显示实际生效的模型 + 来源
+                  model info <id>    查看单个模型详情（价格/上下文/模态等）
+                  model use <id>     切换模型（--self/--peer/--session 决定作用域）
+                  model effort <lv>  设置推理强度
+                  model reset        清除指定作用域设置，回落上一级
+                  model help         查看完整用法
   aid           AID 身份管理
                   aid list           列出本地所有 AID
                   aid show <aid>     查看本地 AID 详情（证书有效期、私钥状态）
