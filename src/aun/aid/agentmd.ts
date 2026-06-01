@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import type { AIDStore } from '@agentunion/fastaun';
-import { getAidStore, loadAid, loadClient, SLOT } from './store.js';
+import { getAidStore, loadAid, SLOT } from './store.js';
 import { agentMdPath, aidLocalDir, resolveRoot } from '../../paths.js';
 
 export interface AgentmdGetResult {
@@ -43,8 +43,8 @@ function verifyLocal(store: AIDStore, aid: string, content: string): AgentmdGetR
 /**
  * Get agent.md content with optional verification.
  *
- * Flow (fastaun 0.4.3):
- * 1. store.fetchAgentMd — pulls cert + agent.md and verifies the signature
+ * Flow (fastaun 0.4.6):
+ * 1. store.downloadAgentMd — pulls cert + agent.md and verifies the signature
  * 2. On network failure, fall back to the local file (verify offline via loadAid)
  */
 export async function agentmdGet(aid: string, opts?: { store?: AIDStore; aunPath?: string }): Promise<string>;
@@ -59,7 +59,7 @@ export async function agentmdGet(aid: string, opts?: { store?: AIDStore; aunPath
     let content: string;
     let verification: AgentmdGetResult['verification'] | undefined;
 
-    const r = await store.fetchAgentMd(aid);
+    const r = await store.downloadAgentMd(aid);
     if (r.ok) {
       content = r.data.content;
       verification = normalizeVerification(r.data.verification);
@@ -82,7 +82,10 @@ export async function agentmdGet(aid: string, opts?: { store?: AIDStore; aunPath
 }
 
 /**
- * Upload agent.md: authenticate → write local file → publishAgentMd (auto-sign + upload).
+ * Upload agent.md: write local file → store.uploadAgentMd (auto-auth + sign + upload).
+ *
+ * fastaun 0.4.7: uploadAgentMd moved from AUNClient to AIDStore; the store builds
+ * its own LocalTokenStore + AuthFlow internally, so no AUNClient/authenticate needed.
  */
 export async function agentmdPut(content: string, opts: { aid: string; store?: AIDStore; aunPath?: string }): Promise<void> {
   const aunPath = opts.aunPath ?? resolveRoot();
@@ -98,13 +101,8 @@ export async function agentmdPut(content: string, opts: { aid: string; store?: A
   fs.writeFileSync(filePath, content, 'utf-8');
 
   try {
-    const client = await loadClient(store, opts.aid);
-    try {
-      await client.authenticate();
-      await client.publishAgentMd();
-    } finally {
-      try { await client.close(); } catch { /* ignore */ }
-    }
+    const r = await store.uploadAgentMd(opts.aid, content);
+    if (!r.ok) throw new Error(`upload agent.md failed for ${opts.aid}: ${r.error.message}`);
   } catch (e) {
     // 上传失败：仅当文件原本不存在（本次新建）时回滚，避免留下孤儿文件；
     // 已存在的文件保留新内容（旧语义）。
@@ -141,7 +139,8 @@ export async function agentmdSync(
     }
 
     // Needs update (or check failed) — fetch fresh content.
-    const fetched = await store.fetchAgentMd(aid);
+    // SDK's downloadAgentMd persists to disk internally (AgentMdManager.saveRecord → writeContent).
+    const fetched = await store.downloadAgentMd(aid);
     if (fetched.ok) {
       return { changed: true, content: fetched.data.content };
     }

@@ -838,14 +838,10 @@ tags:
 EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
 `;
 
-      // Write locally
-      fs.mkdirSync(path.dirname(agentMdLocalPath), { recursive: true });
-      fs.writeFileSync(agentMdLocalPath, newAgentMd, 'utf-8');
-      logger.info(`${this.logPrefix()} Updated agent.md for ${aidName}`);
-
-      // Publish to AUN network via publishAgentMd (auto-sign)
+      // Write locally and publish to AUN network (auto-sign)
       try {
-        await (this.client as any).publishAgentMd();
+        const { agentmdPut } = await import('../aun/aid/agentmd.js');
+        await agentmdPut(newAgentMd, { aid: aidName, store: this.store! });
         logger.info(`${this.logPrefix()} Published agent.md to AUN network`);
       } catch (e) {
         logger.warn(`${this.logPrefix()} Failed to publish agent.md: ${e}`);
@@ -1031,7 +1027,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
 
     // 解析对端身份（30天缓存）
     const selfAgentDir = path.join(resolvePaths().agentsDir, this.config.aid);
-    const peerIdentity = await PeerIdentityCache.resolve('aun', fromAid, selfAgentDir, this.client, false);
+    const peerIdentity = await PeerIdentityCache.resolve('aun', fromAid, selfAgentDir, this.store!, false);
     const shortAid = this.getShortAid(fromAid);
     const displayName = peerIdentity.name || shortAid;
 
@@ -1259,7 +1255,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     }
 
     const selfAgentDir = path.join(resolvePaths().agentsDir, this.config.aid);
-    const peerIdentity = await PeerIdentityCache.resolve('aun', senderAid, selfAgentDir, this.client, false);
+    const peerIdentity = await PeerIdentityCache.resolve('aun', senderAid, selfAgentDir, this.store!, false);
     const shortAid = this.getShortAid(senderAid);
     const displayName = peerIdentity.name || shortAid;
 
@@ -2500,7 +2496,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     if (!this.client) return { type: null };
     try {
       const selfAgentDir = path.join(resolvePaths().agentsDir, this.config.aid);
-      const identity = await PeerIdentityCache.resolve('aun', aid, selfAgentDir, this.client, false);
+      const identity = await PeerIdentityCache.resolve('aun', aid, selfAgentDir, this.store!, false);
       const type: 'human' | 'ai' = identity.type === 'human' ? 'human' : 'ai';
       const name = identity.name || undefined;
       const info = { type, name };
@@ -2525,16 +2521,13 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
   }
 
   async uploadAgentMd(content: string): Promise<void> {
-    if (!this.client) throw new Error('not connected');
-    const { agentMdPath } = await import('../paths.js');
-    const localPath = agentMdPath(this.config.aid);
-    fs.mkdirSync(path.dirname(localPath), { recursive: true });
-    fs.writeFileSync(localPath, content, 'utf-8');
-    await (this.client as any).publishAgentMd();
+    if (!this.store) throw new Error('not connected');
+    const { agentmdPut } = await import('../aun/aid/agentmd.js');
+    await agentmdPut(content, { aid: this.config.aid, store: this.store });
   }
 
   async downloadAgentMd(aid: string): Promise<string> {
-    if (!this.client) throw new Error('not connected');
+    if (!this.store) throw new Error('not connected');
     const { agentmdSync } = await import('../aun/aid/agentmd.js');
     const result = await agentmdSync(aid, { store: this.store ?? undefined });
     return result.content ?? '';

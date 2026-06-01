@@ -22,15 +22,15 @@
   ],
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "tsc && node -e \"const f='dist/cli/index.js',c=require('fs').readFileSync(f,'utf8');if(!c.startsWith('#!'))require('fs').writeFileSync(f,'#!/usr/bin/env node\\n'+c)\" && node -e \"try{require('child_process').execFileSync('chmod',['+x','dist/cli/index.js'])}catch{}\" && node -e \"require('fs').mkdirSync('dist/data',{recursive:true});require('fs').copyFileSync('src/data/error-dict.json','dist/data/error-dict.json')\"",
+    "build": "tsc && node -e \"const f='dist/cli/index.js',c=require('fs').readFileSync(f,'utf8');if(!c.startsWith('#!'))require('fs').writeFileSync(f,'#!/usr/bin/env node\\n'+c)\" && node -e \"try{require('child_process').execFileSync('chmod',['+x','dist/cli/index.js'])}catch{}\" && node -e \"require('fs').mkdirSync('dist/data',{recursive:true});require('fs').copyFileSync('src/data/error-dict.json','dist/data/error-dict.json')\" && node -e \"require('fs').cpSync('src/cli/watch-web/static','dist/cli/watch-web/static',{recursive:true})\"",
     "start": "node dist/index.js",
-    "test": "flock --nonblock /tmp/evolclaw-test.lock vitest run || { echo '\\n[ERROR] Another vitest instance is already running. Wait or kill it first.' >&2; exit 1; }",
+    "test": "node scripts/run-tests.mjs",
     "test:watch": "vitest",
     "test:hooks": "tsx test-sdk-hooks.ts",
     "prepublishOnly": "npm run build && npm test"
   },
   "dependencies": {
-    "@agentunion/fastaun": "^0.4.5",
+    "@agentunion/fastaun": "^0.4.7",
     "@anthropic-ai/claude-agent-sdk": "^0.3.156",
     "@anthropic-ai/sdk": "^0.100.1",
     "@modelcontextprotocol/sdk": "^1.29.0",
@@ -38,6 +38,7 @@
     "dotenv": "^17.4.2",
     "image-type": "^6.0.0",
     "qrcode-terminal": "^0.12.0",
+    "ws": "^8.21.0",
     "zod": "^4.0.0"
   },
   "optionalDependencies": {
@@ -52,6 +53,7 @@
     "@types/form-data": "^2.2.1",
     "@types/node": "^25.5.0",
     "@types/qrcode-terminal": "^0.12.2",
+    "@types/ws": "^8.18.1",
     "@vitest/coverage-v8": "^4.1.0",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0",

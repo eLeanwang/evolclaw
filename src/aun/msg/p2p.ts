@@ -1,6 +1,7 @@
 import path from 'path';
 import type { ShortConnectionOpts } from '../rpc/index.js';
 import { createShortConnection } from '../rpc/index.js';
+import { getAidStore, SLOT } from '../aid/store.js';
 import { uploadFileAndBuildPayload, type UploadProgress } from './upload.js';
 import { appendMessageLog, buildOutboundEntry } from '../../core/message/message-log.js';
 import { chatDirPath } from '../../core/session/session-fs-store.js';
@@ -94,11 +95,17 @@ export interface MsgSendArgs extends MsgCommonOpts {
 export async function msgSend(args: MsgSendArgs): Promise<MsgSendResult | MsgError> {
   const conn = await createShortConnection(args.from, { aunPath: args.aunPath, slotId: args.slotId });
   try {
-    // 1. 解析对端身份（30天缓存）
+    // 1. 解析对端身份（30天缓存）。身份解析走 HTTP+PKI（store），与发消息的短连接无关。
     const { agentsDir } = resolvePaths();
     const selfAgentDir = path.join(agentsDir, args.from);
     const { PeerIdentityCache } = await import('../../core/relation/peer-identity.js');
-    const peerIdentity = await PeerIdentityCache.resolve('aun', args.to, selfAgentDir, conn, false);
+    const idStore = await getAidStore({ slotId: args.slotId ?? SLOT.cli, aunPath: args.aunPath });
+    let peerIdentity;
+    try {
+      peerIdentity = await PeerIdentityCache.resolve('aun', args.to, selfAgentDir, idStore, false);
+    } finally {
+      try { idStore.close(); } catch { /* ignore */ }
+    }
 
     // 2. 决定 chatmode（遵循来源1-3）
     // 私聊：非 human 对端 → proactive，human 对端 → interactive

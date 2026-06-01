@@ -20,6 +20,7 @@ import { normalizeBaseagent } from '../../agents/baseagent-normalize.js';
 import type { InteractionRouter } from '../interaction-router.js';
 import { renderActionAsText, renderCommandCardAsText } from '../interaction-router.js';
 import { formatPeerKey } from '../relation/peer-key.js';
+import { resolveEffectiveModel } from '../model/model-scope.js';
 
 function getContextTooLongHint(agent: AgentRunnerFull): string {
   if (canCompactAgent(agent)) {
@@ -587,6 +588,7 @@ export class MessageProcessor {
 
       let streamResult: { isError: boolean; subtype?: string; errors?: string[]; terminalReason?: string; lastReplyText: string; fullText: string; hasReceivedText: boolean; numTurns?: number; ttftMs?: number; usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } } = { isError: false, lastReplyText: '', fullText: '', hasReceivedText: false };
       let effectiveSystemPrompt: string | undefined;
+      let modelOverride: { model?: string; effort?: string } | undefined;
 
       try {
         // 动态构建运行时上下文提示
@@ -621,6 +623,16 @@ export class MessageProcessor {
           ? formatPeerKey(currentChannelType, peerIdRaw)
           : undefined;
 
+        // 按 关系级 > agent级 > 全局 解析本次调用的模型/强度，作为 per-call 入参传入 runQuery。
+        // 不缓存、不绑会话——改关系级/agent级后该范围所有会话的下条消息即时生效；
+        // 多对端并发各自独立解析、各自传参，无共享状态可被污染。
+        try {
+          const resolved = resolveEffectiveModel({ self: selfAid || undefined, peerKey });
+          if (resolved.model) modelOverride = { model: resolved.model, effort: resolved.effort };
+        } catch (e) {
+          logger.warn(`[MessageProcessor] resolveEffectiveModel failed: ${e instanceof Error ? e.message : String(e)}`);
+        }
+
         const normalizedBaseagent = normalizeBaseagent(agent.name);
         const agentModel = (typeof (agent as any).getModel === 'function') ? (agent as any).getModel() as string : undefined;
 
@@ -648,7 +660,7 @@ export class MessageProcessor {
             peerId: peerIdRaw || undefined,
             peerKey,
             peerName: peerName || undefined,
-            peerRole: session.identity?.role || 'unknown',
+            peerRole: session.identity?.role || 'anonymous',
             peerType: message.peerType || undefined,
             groupId: session.metadata?.groupId || undefined,
             chatType: session.chatType || null,
@@ -694,7 +706,8 @@ export class MessageProcessor {
               session.agentSessionId,
               message.images,
               effectiveSystemPrompt,
-              this.sessionManager
+              this.sessionManager,
+              modelOverride
             );
             agent.registerStream(streamKey, stream);
             streamRegistered = true;
@@ -745,7 +758,8 @@ export class MessageProcessor {
               session.agentSessionId,
               undefined,
               effectiveSystemPrompt,
-              this.sessionManager
+              this.sessionManager,
+              modelOverride
             );
             agent.registerStream(streamKey, retryStream);
 
@@ -789,7 +803,8 @@ export class MessageProcessor {
             session.agentSessionId!,
             undefined,
             effectiveSystemPrompt,
-            this.sessionManager
+            this.sessionManager,
+            modelOverride
           );
           agent.registerStream(streamKey, retryStream);
           streamResult = await this.processEventStream(retryStream, session, agent, renderer, resetTimer, shouldSuppress);

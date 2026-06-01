@@ -57,7 +57,7 @@ AUN 把 agent 当网络主体（具备社会人属性:身份/通信/自主），
            │                  │
      Evol 前端            EvolClaw
   (App/Web/Desktop)        Channel 适配层（AUN/飞书/微信/...）
-   或其它 AUN 客户端       关系层 / 环境层 / 个人数据层 / 上下文注入
+   或其它 AUN 客户端       身份层 / 关系层 / 环境层 /  渠道层 / 会话层
                            Base Agent（Claude Code / Codex / Gemini/...）
 
 ```
@@ -69,7 +69,7 @@ EvolClaw 是一个 Node.js 项目，通过 `npm install -g evolclaw@latest` 安�
 
 ### Evol
 
-Evol 是 AUN 原生的消息应用（App / Web / Desktop）——人和 agent 都是其中的主体。用户通过 Evol 与 agent 和其他人对话。
+Evol 是 AUN 原生的消息应用（App / Web / Desktop）——人和 agent 都是其中的主体。用户通过 Evol 与 agent以及其他人对话。
 
 ### Channel
 
@@ -102,13 +102,24 @@ ECK（EvolClaw Context Kit）是 EvolClaw 的上下文组装系统。你正在�
 
 ### 上下文组装流程
 
-evolclaw 收到消息后，按场景决定加载哪些层：
+evolclaw 收到每条消息时，由一份**声明式 manifest** 决定加载哪些上下文段——不是写死的分支。
+每个 section 带 `when` 条件，evolclaw 按当前会话构造一组运行时变量（`chatType`、`channel`、
+`selfAid`、`peerKey` 等）逐段求值，命中的才按顺序拼进 system prompt（`needsInjection` 的段还会先做模板渲染）。
 
-| 场景 | 加载的层 |
-|------|----------|
-| coding | 仅 rules（不加载身份层、关系层） |
-| private | rules + 身份层 + 关系层（对端）+ 环境层 + 渠道层 |
-| group | rules + 身份层 + 关系层（群）+ 环境层 + 渠道层 |
+按场景，命中的段大致是：
+
+| 场景 | 命中的层/段 |
+|------|------------|
+| coding（无渠道） | rules + 会话层 + baseagent（身份/关系/环境/渠道层因无 channel、无身份而落选） |
+| private（私聊） | rules + 身份层 + 关系层（对端）+ 环境层 + 渠道层 + 会话层 + baseagent |
+| group（群聊） | rules + 身份层 + 关系层（群）+ 环境层 + 渠道层 + 会话层 + baseagent |
+
+> 会话层（session fragment）是 `when:always`、baseagent 段只要注入了 base agent 信息就加载——
+> 二者与 chatType 无关，每个场景都在；所以 coding 并非"仅 rules"。
+
+manifest schema、when 条件、合并覆盖、模板渲染、运行时变量目录，以及**实际渲染结果的调试输出**
+（`$EVOLCLAW_HOME/data/eck-debug/` 下的 vars / context / fragments / manifest 四个文件）：
+详见 `$KITS_DOCS/context-assembly.md`。
 
 ## 术语
 
@@ -117,4 +128,3 @@ evolclaw 收到消息后，按场景决定加载哪些层：
 - **本端（self）**：你自己
 - **用户**：对端中的人类一方
 - **环境（Venue）**：渠道 + 场景（私聊/群聊）构成的交互空间
-

@@ -6,7 +6,7 @@
  * 2. 仅在 agent.md 内容变化时重写 peer-identity.json
  * 3. 支持入站和出站消息的身份查询
  *
- * 信源：对端的 agent.md（通过 AUN SDK checkAgentMd + fetchAgentMd）
+ * 信源：对端的 agent.md（通过 AIDStore.checkAgentMd + downloadAgentMd，由 agentmdSync 封装）
  * 判定规则：type !== 'human' → agent
  * 缓存位置：$AGENT_DIR/relations/<channel>#<urlEncode(peerId)>/peer-identity.json
  */
@@ -14,6 +14,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
+import type { AIDStore } from '@agentunion/fastaun';
 import { logger } from '../../utils/logger.js';
 import { agentMdPath } from '../../paths.js';
 import { formatPeerKey } from './peer-key.js';
@@ -97,7 +98,7 @@ export class PeerIdentityCache {
     agentMd: string,
     verifiedAt: number
   ): PeerIdentity {
-    const typeMatch = agentMd.match(/^type:\s*["']?(\w+)["']?/m);
+    const typeMatch = agentMd.match(/^type:\s*["']?([^"'\n]+?)["']?\s*$/m);
     const nameMatch = agentMd.match(/^name:\s*["']?(.+?)["']?\s*$/m);
     const type = typeMatch?.[1] || 'unknown';
     const isAgent = type !== 'human';
@@ -175,15 +176,14 @@ export class PeerIdentityCache {
    * @param channelType 渠道类型（如 'aun'）
    * @param peerId 对端 ID（AUN 是 AID）
    * @param agentDir agent 数据根目录
-   * @param aunClient AUN SDK client（需要有 checkAgentMd / fetchAgentMd 方法）
+   * @param store AIDStore 实例（由调用方提供，负责 checkAgentMd + downloadAgentMd）
    * @param forceRefresh 强制刷新（忽略缓存时效）
-   * @returns PeerIdentity
    */
   static async resolve(
     channelType: string,
     peerId: string,
     agentDir: string,
-    aunClient: any,
+    store: AIDStore,
     forceRefresh = false
   ): Promise<PeerIdentity> {
     // 1. 缓存检查
@@ -195,31 +195,24 @@ export class PeerIdentityCache {
       }
     }
 
-    // 2. 标准流程：checkAgentMd → fetchAgentMd（如果有变化）
+    // 2. 通过 agentmdSync 拉取（内部走 store.checkAgentMd → store.downloadAgentMd）
     try {
       logger.debug(`[PeerIdentityCache] Syncing agent.md: ${channelType}#${peerId}`);
-      const state = await aunClient.checkAgentMd(peerId, 30);
-      let content: string | undefined;
-
-      if (state.in_sync && state.local_found) {
-        // 本地已是最新，读本地文件
-        const localPath = agentMdPath(peerId);
-        try { content = fs.readFileSync(localPath, 'utf-8'); } catch { /* ignore */ }
-      }
+      const { agentmdSync } = await import('../../aun/aid/agentmd.js');
+      const result = await agentmdSync(peerId, { store });
+      const content = result.content;
 
       if (!content) {
-        // 需要下载（不同步或本地不存在）
-        const info = await aunClient.fetchAgentMd(peerId);
-        content = info.content;
+        throw new Error('agent.md content unavailable');
       }
 
       // 3. 比较 hash，仅在变化时重写 peer-identity.json
-      const newHash = 'sha256:' + crypto.createHash('sha256').update(content!, 'utf-8').digest('hex');
+      const newHash = 'sha256:' + crypto.createHash('sha256').update(content, 'utf-8').digest('hex');
       const cached = this.get(channelType, peerId, agentDir);
       if (cached && cached.agentMdHash === newHash && cached.source === 'agentmd') {
         return this.touchLastChecked(channelType, peerId, agentDir, cached);
       }
-      return this.updateFromAgentMd(channelType, peerId, agentDir, content!, Date.now());
+      return this.updateFromAgentMd(channelType, peerId, agentDir, content, Date.now());
 
     } catch (err) {
       // 4. 网络失败，fallback 本地文件
