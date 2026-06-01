@@ -85,6 +85,8 @@ export class MessageProcessor {
   private interruptedSessions = new Map<string, string>();  // sessionId → reason ('new_message' | 'stop' | ...)
   private interactionRouter?: InteractionRouter;
   private messageQueue?: MessageQueue;
+  /** sessionId → 活跃的空闲监控器，用于等待用户交互期间暂停/恢复计时 */
+  private activeMonitors = new Map<string, StreamIdleMonitor>();
 
   /**
    * Get the runner for a given (channel, baseagent) pair.
@@ -146,6 +148,16 @@ export class MessageProcessor {
 
   setInteractionRouter(router: InteractionRouter): void {
     this.interactionRouter = router;
+    // 等待用户交互期间暂停 idle 监控，应答/取消/超时后恢复——
+    // 避免把「正在等用户点按钮」误判为「任务卡死」而中断任务。
+    router.setWaitHooks({
+      onWaitStart: (sessionId: string) => {
+        this.activeMonitors.get(sessionId)?.pause();
+      },
+      onWaitEnd: (sessionId: string) => {
+        this.activeMonitors.get(sessionId)?.resume();
+      },
+    });
   }
 
   setMessageQueue(queue: MessageQueue): void {
@@ -291,6 +303,7 @@ export class MessageProcessor {
       if (!monitorEnabled) return;
 
       monitor = new StreamIdleMonitor(idleMs);
+      this.activeMonitors.set(streamKey, monitor);
       monitorInterval = setInterval(() => {
         // Drain all pending levels in one tick
         let result = monitor!.check();
@@ -372,6 +385,7 @@ export class MessageProcessor {
       throw error;
     } finally {
       if (monitorInterval) clearInterval(monitorInterval);
+      this.activeMonitors.delete(streamKey);
     }
   }
 

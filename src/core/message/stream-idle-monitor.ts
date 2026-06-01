@@ -31,6 +31,7 @@ export class StreamIdleMonitor {
   private state: StreamExecutionState;
   private triggeredLevels = new Set<IdleAction>();
   private idleMs: number;
+  private paused = false;
 
   constructor(idleMs: number) {
     this.idleMs = idleMs;
@@ -43,6 +44,25 @@ export class StreamIdleMonitor {
       totalToolCalls: 0,
       hasReceivedText: false,
     };
+  }
+
+  /**
+   * 暂停空闲计时（等待用户交互期间调用，如权限确认 / AskUserQuestion / PlanMode）。
+   * 暂停期间 check() 始终返回 null，等待时长不计入 idle。
+   */
+  pause(): void {
+    this.paused = true;
+  }
+
+  /**
+   * 恢复空闲计时。从恢复时刻重新起算 idle，并清空已触发级别——
+   * 用户应答后是一次全新的执行周期，不应继承等待前的 idle 状态。
+   */
+  resume(): void {
+    if (!this.paused) return;
+    this.paused = false;
+    this.state.lastEventTime = Date.now();
+    this.triggeredLevels.clear();
   }
 
   /**
@@ -71,6 +91,8 @@ export class StreamIdleMonitor {
    * 检查空闲状态，返回 null（未空闲）或分级结果
    */
   check(): IdleCheckResult | null {
+    if (this.paused) return null;
+
     const now = Date.now();
     const idleDuration = now - this.state.lastEventTime;
 

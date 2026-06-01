@@ -9,8 +9,43 @@ interface PendingInteraction {
   fallbackCommand?: string;
 }
 
+/** 等待生命周期钩子：用于在等待用户交互期间暂停/恢复 idle 监控 */
+export interface WaitHooks {
+  /** 某 session 从「无待应答交互」变为「有待应答交互」时触发 */
+  onWaitStart: (sessionId: string) => void;
+  /** 某 session 最后一个待应答交互被解决（应答/取消/超时）时触发 */
+  onWaitEnd: (sessionId: string) => void;
+}
+
 export class InteractionRouter {
   private handlers = new Map<string, PendingInteraction>();
+  /** sessionId → 该会话当前待应答的交互数量，用于触发 wait 生命周期钩子 */
+  private pendingBySession = new Map<string, number>();
+  private waitHooks?: WaitHooks;
+
+  setWaitHooks(hooks: WaitHooks): void {
+    this.waitHooks = hooks;
+  }
+
+  /** 登记一个待应答交互；session 计数 0→1 时触发 onWaitStart */
+  private incPending(sessionId: string): void {
+    const next = (this.pendingBySession.get(sessionId) ?? 0) + 1;
+    this.pendingBySession.set(sessionId, next);
+    if (next === 1) this.waitHooks?.onWaitStart(sessionId);
+  }
+
+  /** 注销一个待应答交互；session 计数 1→0 时触发 onWaitEnd */
+  private decPending(sessionId: string): void {
+    const cur = this.pendingBySession.get(sessionId) ?? 0;
+    if (cur <= 0) return;
+    const next = cur - 1;
+    if (next === 0) {
+      this.pendingBySession.delete(sessionId);
+      this.waitHooks?.onWaitEnd(sessionId);
+    } else {
+      this.pendingBySession.set(sessionId, next);
+    }
+  }
 
   register(
     id: string,
@@ -18,13 +53,16 @@ export class InteractionRouter {
     callback: (action: string, values?: Record<string, unknown>, operatorId?: string) => void | Promise<void>,
     opts?: { timeoutMs?: number; onTimeout?: () => void; initiatorId?: string; fallbackCommand?: string },
   ): void {
+    // 同 id 替换：槽位本就占用，计数不变，不触发 wait 钩子
     const existing = this.handlers.get(id);
     if (existing?.timer) clearTimeout(existing.timer);
+    const isReplacement = !!existing;
 
     let timer: NodeJS.Timeout | undefined;
     if (opts?.timeoutMs && opts.timeoutMs > 0) {
       timer = setTimeout(() => {
         this.handlers.delete(id);
+        this.decPending(sessionId);
         logger.debug(`[InteractionRouter] Timeout for interaction: ${id}`);
         opts.onTimeout?.();
       }, opts.timeoutMs);
@@ -37,6 +75,7 @@ export class InteractionRouter {
       initiatorId: opts?.initiatorId,
       fallbackCommand: opts?.fallbackCommand,
     });
+    if (!isReplacement) this.incPending(sessionId);
   }
 
   handle(response: InteractionResponse): boolean {
@@ -45,6 +84,7 @@ export class InteractionRouter {
 
     if (handler.timer) clearTimeout(handler.timer);
     this.handlers.delete(response.id);
+    this.decPending(handler.sessionId);
 
     try {
       const result = handler.callback(response.action, response.values, response.operatorId);
@@ -64,6 +104,7 @@ export class InteractionRouter {
       if (handler.sessionId === sessionId) {
         if (handler.timer) clearTimeout(handler.timer);
         this.handlers.delete(id);
+        this.decPending(handler.sessionId);
       }
     }
   }
@@ -73,6 +114,7 @@ export class InteractionRouter {
     if (handler) {
       if (handler.timer) clearTimeout(handler.timer);
       this.handlers.delete(id);
+      this.decPending(handler.sessionId);
     }
   }
 
