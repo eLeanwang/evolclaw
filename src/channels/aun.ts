@@ -2527,7 +2527,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
   }
 
   async downloadAgentMd(aid: string): Promise<string> {
-    if (!this.client) throw new Error('not connected');
+    if (!this.store) throw new Error('not connected');
     const { agentmdSync } = await import('../aun/aid/agentmd.js');
     const result = await agentmdSync(aid, { store: this.store ?? undefined });
     return result.content ?? '';

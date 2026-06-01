@@ -400,12 +400,14 @@ interface CategoryCounts {
 
 interface TranscriptDetail {
   turns: TurnEntry[];
-  totalTurns: number;     // 渲染出的轮次（去掉空内容后，可能 <消息数）
-  userMsgs: number;       // 与列表口径一致：用户输入消息数（不含 tool_result）
-  totalMsgs: number;      // 与列表口径一致：user + assistant 消息数
-  counts: CategoryCounts; // 4 类计数
+  totalTurns: number;
+  userMsgs: number;
+  totalMsgs: number;
+  counts: CategoryCounts;
   inputTokens: number;
   outputTokens: number;
+  contextTokens: number;   // 最后一轮的完整上下文大小（input+cache_read+cache_create）
+  costUsd: number;         // 累计费用（USD）
   model: string;
   gitBranch: string;
   version: string;
@@ -413,13 +415,40 @@ interface TranscriptDetail {
   cwd: string;
 }
 
+// 模型定价（USD per 1M tokens）：[input, cacheWrite(5m), cacheRead, output]
+// 来源：Anthropic 官方定价 2026-06-01
+const PRICING: Record<string, [number, number, number, number]> = {
+  'claude-opus-4-8':   [5, 6.25, 0.5, 25],
+  'claude-opus-4':     [5, 6.25, 0.5, 25],
+  'claude-sonnet-4-6': [3, 3.75, 0.3, 15],
+  'claude-sonnet-4':   [3, 3.75, 0.3, 15],
+  'claude-haiku-4-5':  [0.8, 1, 0.08, 4],
+};
+
+function pricingFor(model: string): [number, number, number, number] {
+  if (!model) return PRICING['claude-opus-4-8'];
+  for (const key of Object.keys(PRICING)) {
+    if (model.startsWith(key)) return PRICING[key];
+  }
+  if (model.includes('sonnet')) return PRICING['claude-sonnet-4-6'];
+  if (model.includes('haiku')) return PRICING['claude-haiku-4-5'];
+  return PRICING['claude-opus-4-8'];
+}
+
+function costForUsage(model: string, input: number, cacheRead: number, cacheCreate: number, output: number): number {
+  const [pi, pcw, pcr, po] = pricingFor(model);
+  return (input * pi + cacheCreate * pcw + cacheRead * pcr + output * po) / 1_000_000;
+}
+
 function readTranscriptFile(file: string): TranscriptDetail {
-  const empty: TranscriptDetail = { turns: [], totalTurns: 0, userMsgs: 0, totalMsgs: 0, counts: { userInput: 0, modelOutput: 0, toolCall: 0, toolResult: 0, msgSend: 0 }, inputTokens: 0, outputTokens: 0, model: '', gitBranch: '', version: '', title: '', cwd: '' };
+  const empty: TranscriptDetail = { turns: [], totalTurns: 0, userMsgs: 0, totalMsgs: 0, counts: { userInput: 0, modelOutput: 0, toolCall: 0, toolResult: 0, msgSend: 0 }, inputTokens: 0, outputTokens: 0, contextTokens: 0, costUsd: 0, model: '', gitBranch: '', version: '', title: '', cwd: '' };
   let raw: string;
   try { raw = fs.readFileSync(file, 'utf-8'); } catch { return empty; }
   const turns: TurnEntry[] = [];
   let inTok = 0, outTok = 0, model = '', branch = '', version = '', title = '', cwd = '';
   let userMsgs = 0, totalMsgs = 0;
+  let contextTokens = 0, costUsd = 0;
+  let lastUsageKey = '';   // CC 每条 assistant 消息写两次，按 usage 内容去重
   // 计数：用户输入 / 模型输出 / 工具调用 / 工具结果 / 发送消息
   let cUserInput = 0, cModelOutput = 0, cToolCall = 0, cToolResult = 0, cMsgSend = 0;
   for (const line of raw.split('\n')) {
@@ -463,6 +492,19 @@ function readTranscriptFile(file: string): TranscriptDetail {
     if (usage.input_tokens) inTok += usage.input_tokens;
     if (usage.output_tokens) outTok += usage.output_tokens;
     if (msg.model) model = msg.model;
+    // 上下文长度 + 费用：CC 每条 assistant 消息写两次（streaming），按 usage 内容去重
+    if (type === 'assistant' && usage.input_tokens !== undefined) {
+      const inp = usage.input_tokens || 0;
+      const cr = usage.cache_read_input_tokens || 0;
+      const cc = usage.cache_creation_input_tokens || 0;
+      const out = usage.output_tokens || 0;
+      contextTokens = inp + cr + cc;
+      const key = `${inp},${cr},${cc},${out}`;
+      if (key !== lastUsageKey) {
+        lastUsageKey = key;
+        costUsd += costForUsage(model || msg.model, inp, cr, cc, out);
+      }
+    }
     turns.push({
       role,
       type,
@@ -480,7 +522,8 @@ function readTranscriptFile(file: string): TranscriptDetail {
   return {
     turns: shown, totalTurns, userMsgs, totalMsgs,
     counts: { userInput: cUserInput, modelOutput: cModelOutput, toolCall: cToolCall, toolResult: cToolResult, msgSend: cMsgSend },
-    inputTokens: inTok, outputTokens: outTok, model, gitBranch: branch, version, title, cwd,
+    inputTokens: inTok, outputTokens: outTok, contextTokens, costUsd,
+    model, gitBranch: branch, version, title, cwd,
   };
 }
 
@@ -545,6 +588,8 @@ function buildSnapshot(params: Record<string, any>): any {
     counts: detail.counts,
     inputTokens: detail.inputTokens,
     outputTokens: detail.outputTokens,
+    contextTokens: detail.contextTokens,
+    costUsd: detail.costUsd,
     bound: !!bind,
     boundChannel: bind ? bind.channelType : null,
     boundPeer: bind ? (bind.peerName || bind.channelId) : null,

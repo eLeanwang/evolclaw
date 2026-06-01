@@ -255,7 +255,7 @@ describe('aidCreate', () => {
 
     const result = await aidCreate(aid);
     const content = buildInitialAgentMd({ aid });
-    await agentmdPut(content, { aid, client: result.client });
+    await agentmdPut(content, { aid, store: result.store });
 
     const agentMdPath = path.join(tmpDir, 'AIDs', aid, 'agent.md');
     expect(fs.existsSync(agentMdPath)).toBe(true);
@@ -277,7 +277,7 @@ describe('aidCreate', () => {
 
     const result = await aidCreate(aid);
     // agentmdPut WILL throw — caller is responsible for catching
-    await expect(agentmdPut(buildInitialAgentMd({ aid }), { aid, client: result.client }))
+    await expect(agentmdPut(buildInitialAgentMd({ aid }), { aid, store: result.store }))
       .rejects.toThrow('upload failed');
   });
 });

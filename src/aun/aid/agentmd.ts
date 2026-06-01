@@ -139,6 +139,7 @@ export async function agentmdSync(
     }
 
     // Needs update (or check failed) — fetch fresh content.
+    // SDK's downloadAgentMd persists to disk internally (AgentMdManager.saveRecord → writeContent).
     const fetched = await store.downloadAgentMd(aid);
     if (fetched.ok) {
       return { changed: true, content: fetched.data.content };

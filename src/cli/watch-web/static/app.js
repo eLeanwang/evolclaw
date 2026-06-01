@@ -449,6 +449,10 @@ function renderSessHeader(h) {
   const title = h.title || h.sessionId.slice(0, 8);
   const tok = (h.inputTokens || h.outputTokens)
     ? `<span class="sh-stat">🔢 in ${fmtNum(h.inputTokens)} / out ${fmtNum(h.outputTokens)}</span>` : '';
+  const ctx = h.contextTokens
+    ? `<span class="sh-stat" title="最后一轮喂给模型的完整上下文大小">📐 ${fmtNum(h.contextTokens)} ctx</span>` : '';
+  const cost = h.costUsd != null && h.costUsd > 0
+    ? `<span class="sh-stat" title="累计费用（按模型定价估算）">💰 $${h.costUsd < 0.01 ? h.costUsd.toFixed(4) : h.costUsd.toFixed(2)}</span>` : '';
   let bind = '';
   if (h.bound) {
     const dot = h.online ? '<span class="dot on"></span>在线' : '<span class="dot idle"></span>离线';
@@ -459,7 +463,7 @@ function renderSessHeader(h) {
     '<div class="sh-stats">' +
     `<span class="sh-stat" title="用户输入 ${h.userMsgs || 0} 条 / 共 ${h.totalMsgs || 0} 条消息">💬 ${h.userMsgs || 0}/${h.totalMsgs || 0} 条</span>` +
     (h.model ? `<span class="sh-stat">🤖 ${esc(h.model)}</span>` : '') +
-    tok +
+    tok + ctx + cost +
     (h.gitBranch ? `<span class="sh-stat">🌿 ${esc(h.gitBranch)}</span>` : '') +
     (h.version ? `<span class="sh-stat">cc ${esc(h.version)}</span>` : '') +
     bind +

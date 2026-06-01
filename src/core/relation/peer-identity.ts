@@ -98,7 +98,7 @@ export class PeerIdentityCache {
     agentMd: string,
     verifiedAt: number
   ): PeerIdentity {
-    const typeMatch = agentMd.match(/^type:\s*["']?(\w+)["']?/m);
+    const typeMatch = agentMd.match(/^type:\s*["']?([^"'\n]+?)["']?\s*$/m);
     const nameMatch = agentMd.match(/^name:\s*["']?(.+?)["']?\s*$/m);
     const type = typeMatch?.[1] || 'unknown';
     const isAgent = type !== 'human';
