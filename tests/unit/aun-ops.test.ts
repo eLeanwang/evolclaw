@@ -44,7 +44,7 @@ const {
   }),
   mockStoreClose: vi.fn(),
   mockAuthenticate: vi.fn().mockResolvedValue({ access_token: 'mock-token', gateway: 'wss://gw.example.com/aun' }),
-  mockPublishAgentMd: vi.fn().mockResolvedValue({ aid: 'test.aid', etag: '"abc123"' }),
+  mockPublishAgentMd: vi.fn().mockResolvedValue({ ok: true, data: { aid: 'test.aid', etag: '"abc123"' } }),
   mockClientConnect: vi.fn().mockResolvedValue(undefined),
   mockClientClose: vi.fn().mockResolvedValue(undefined),
 }));
@@ -75,6 +75,7 @@ vi.mock('@agentunion/fastaun', () => ({
     load = mockStoreLoad;
     downloadAgentMd = mockFetchAgentMd;
     checkAgentMd = mockCheckAgentMd;
+    uploadAgentMd = mockPublishAgentMd;
     close = mockStoreClose;
   },
   AID: class MockAID {
@@ -85,7 +86,6 @@ vi.mock('@agentunion/fastaun', () => ({
     constructor(aid: unknown) { this.aid = aid; }
     connect = mockClientConnect;
     authenticate = mockAuthenticate;
-    uploadAgentMd = mockPublishAgentMd;
     call = vi.fn();
     on = vi.fn();
     close = mockClientClose;
@@ -209,7 +209,7 @@ describe('aun-ops', () => {
     });
 
     it('does not write local file if upload fails', async () => {
-      mockPublishAgentMd.mockRejectedValueOnce(new Error('upload failed'));
+      mockPublishAgentMd.mockResolvedValueOnce({ ok: false, error: { code: 'UPLOAD_FAILED', message: 'upload failed' } });
       const aid = 'fail.agentid.pub';
 
       const { agentmdPut } = await import('../../src/aun/aid/index.js');

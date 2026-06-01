@@ -22,17 +22,28 @@ import type { WatchSource } from './types.js';
 
 interface ToolParam { k: string; v: string; }
 
+/** 当一次工具调用其实是 `ec msg send` 发消息时，解析出的对话信息 */
+interface ChatSend {
+  peer: string;     // 对端（self 之后的那个 id）
+  self: string;     // 发送者 self-aid
+  text: string;     // 真正发出去的消息正文（完整，不截断）
+}
+
 interface Block {
   kind: 'text' | 'thinking' | 'tool_use' | 'tool_result';
   text?: string;
   tool?: string;
   params?: ToolParam[];
   isError?: boolean;
+  chat?: ChatSend;   // tool_use 块若是 ec msg send，则带上
 }
+
+type TurnCategory = 'user_input' | 'model_output' | 'tool_call' | 'tool_result' | 'system';
 
 interface TurnEntry {
   role: 'user' | 'assistant' | 'system' | 'other';
   type: string;
+  category: TurnCategory;
   blocks: Block[];
   model?: string;
   inputTokens?: number;
@@ -316,6 +327,42 @@ function toolParams(name: string, input: any): ToolParam[] {
   return params;
 }
 
+/**
+ * 检测一次 Bash 调用是否在执行 `ec msg send <self> <peer> "<text>"`
+ * （也兼容 evolclaw / ec、group send 不算私聊对话）。
+ * 返回解析出的发送方/对端/正文（完整文本），否则 null。
+ */
+function detectMsgSend(name: string, input: any): ChatSend | null {
+  if (name !== 'Bash' || !input || typeof input.command !== 'string') return null;
+  const cmd: string = input.command;
+  // 必须是 msg send（私聊）；排除 group send
+  if (!/\b(ec|evolclaw)\s+msg\s+send\b/.test(cmd)) return null;
+
+  // 粗切：取 "msg send" 之后的部分，做简单 shell 分词（支持双引号/单引号）
+  const after = cmd.replace(/^[\s\S]*?\bmsg\s+send\b/, '').trim();
+  const tokens: string[] = [];
+  const re = /"((?:[^"\\]|\\.)*)"|'([^']*)'|(\S+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(after)) !== null) {
+    if (m[1] !== undefined) tokens.push(m[1].replace(/\\(["\\])/g, '$1'));
+    else if (m[2] !== undefined) tokens.push(m[2]);
+    else tokens.push(m[3]);
+  }
+  // 跳过 --flag / --opt value 形式的选项，取前两个位置参数为 self/peer，其余拼为正文
+  const positional: string[] = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i];
+    if (t.startsWith('-')) { if (!t.includes('=') && tokens[i + 1] && !tokens[i + 1].startsWith('-') && positional.length < 2) i++; continue; }
+    positional.push(t);
+  }
+  if (positional.length < 3) return null;
+  const self = positional[0];
+  const peer = positional[1];
+  const text = positional.slice(2).join(' ').trim();
+  if (!text) return null;
+  return { self, peer, text };
+}
+
 function extractBlocks(content: any): Block[] {
   if (typeof content === 'string') {
     return content.trim() ? [{ kind: 'text', text: content }] : [];
@@ -327,7 +374,10 @@ function extractBlocks(content: any): Block[] {
     if (block.type === 'text' && block.text) {
       blocks.push({ kind: 'text', text: block.text });
     } else if (block.type === 'tool_use') {
-      blocks.push({ kind: 'tool_use', tool: block.name || '?', params: toolParams(block.name, block.input) });
+      const chat = detectMsgSend(block.name, block.input);
+      const b: Block = { kind: 'tool_use', tool: block.name || '?', params: toolParams(block.name, block.input) };
+      if (chat) b.chat = chat;
+      blocks.push(b);
     } else if (block.type === 'tool_result') {
       const c = block.content;
       const txt = typeof c === 'string' ? c : Array.isArray(c) ? c.map((x: any) => x?.text || '').join('') : '';
@@ -340,9 +390,20 @@ function extractBlocks(content: any): Block[] {
   return blocks;
 }
 
+interface CategoryCounts {
+  userInput: number;
+  modelOutput: number;
+  toolCall: number;
+  toolResult: number;
+  msgSend: number;     // 通过 ec msg send 自主发送的消息数
+}
+
 interface TranscriptDetail {
   turns: TurnEntry[];
-  totalTurns: number;
+  totalTurns: number;     // 渲染出的轮次（去掉空内容后，可能 <消息数）
+  userMsgs: number;       // 与列表口径一致：用户输入消息数（不含 tool_result）
+  totalMsgs: number;      // 与列表口径一致：user + assistant 消息数
+  counts: CategoryCounts; // 4 类计数
   inputTokens: number;
   outputTokens: number;
   model: string;
@@ -353,13 +414,22 @@ interface TranscriptDetail {
 }
 
 function readTranscriptFile(file: string): TranscriptDetail {
-  const empty: TranscriptDetail = { turns: [], totalTurns: 0, inputTokens: 0, outputTokens: 0, model: '', gitBranch: '', version: '', title: '', cwd: '' };
+  const empty: TranscriptDetail = { turns: [], totalTurns: 0, userMsgs: 0, totalMsgs: 0, counts: { userInput: 0, modelOutput: 0, toolCall: 0, toolResult: 0, msgSend: 0 }, inputTokens: 0, outputTokens: 0, model: '', gitBranch: '', version: '', title: '', cwd: '' };
   let raw: string;
   try { raw = fs.readFileSync(file, 'utf-8'); } catch { return empty; }
   const turns: TurnEntry[] = [];
   let inTok = 0, outTok = 0, model = '', branch = '', version = '', title = '', cwd = '';
+  let userMsgs = 0, totalMsgs = 0;
+  // 计数：用户输入 / 模型输出 / 工具调用 / 工具结果 / 发送消息
+  let cUserInput = 0, cModelOutput = 0, cToolCall = 0, cToolResult = 0, cMsgSend = 0;
   for (const line of raw.split('\n')) {
     if (!line.trim()) continue;
+    // 消息计数与列表 extractMeta 口径一致：数 user/assistant，user 排除 tool_result
+    const isAsst = line.indexOf('"type":"assistant"') !== -1;
+    const isUser = !isAsst && line.indexOf('"type":"user"') !== -1;
+    if (isAsst) totalMsgs++;
+    else if (isUser) { totalMsgs++; if (line.indexOf('"tool_result"') === -1) userMsgs++; }
+
     let o: any;
     try { o = JSON.parse(line); } catch { continue; }
     if (!branch && o.gitBranch) branch = o.gitBranch;
@@ -374,6 +444,21 @@ function readTranscriptFile(file: string): TranscriptDetail {
       ? (o.content || o.text ? [{ kind: 'text', text: String(o.content || o.text) }] : [])
       : extractBlocks(msg.content);
     if (!blocks.length) continue;
+
+    // 归类（block 级，因为 CC 的 tool_result 在协议上是 type:user）
+    const hasText = blocks.some(b => b.kind === 'text' || b.kind === 'thinking');
+    const nToolUse = blocks.filter(b => b.kind === 'tool_use').length;
+    const nToolResult = blocks.filter(b => b.kind === 'tool_result').length;
+    let category: TurnEntry['category'];
+    if (role === 'system') category = 'system';
+    else if (role === 'user') category = hasText ? 'user_input' : 'tool_result';
+    else category = (nToolUse > 0 && !hasText) ? 'tool_call' : 'model_output';
+    if (category === 'user_input') cUserInput++;
+    else if (category === 'model_output') cModelOutput++;
+    cToolCall += nToolUse;
+    cToolResult += nToolResult;
+    cMsgSend += blocks.filter(b => b.kind === 'tool_use' && b.chat).length;
+
     const usage = msg.usage || {};
     if (usage.input_tokens) inTok += usage.input_tokens;
     if (usage.output_tokens) outTok += usage.output_tokens;
@@ -381,6 +466,7 @@ function readTranscriptFile(file: string): TranscriptDetail {
     turns.push({
       role,
       type,
+      category,
       blocks,
       model: msg.model,
       inputTokens: usage.input_tokens,
@@ -391,7 +477,11 @@ function readTranscriptFile(file: string): TranscriptDetail {
   }
   const totalTurns = turns.length;
   const shown = totalTurns > 500 ? turns.slice(-500) : turns;
-  return { turns: shown, totalTurns, inputTokens: inTok, outputTokens: outTok, model, gitBranch: branch, version, title, cwd };
+  return {
+    turns: shown, totalTurns, userMsgs, totalMsgs,
+    counts: { userInput: cUserInput, modelOutput: cModelOutput, toolCall: cToolCall, toolResult: cToolResult, msgSend: cMsgSend },
+    inputTokens: inTok, outputTokens: outTok, model, gitBranch: branch, version, title, cwd,
+  };
 }
 
 /** 解析选中的项目：params.project 是 encoded 目录名；缺省用当前 cwd 对应项目 */
@@ -450,6 +540,9 @@ function buildSnapshot(params: Record<string, any>): any {
     version: detail.version,
     cwd: detail.cwd || project.cwd,
     totalTurns: detail.totalTurns,
+    userMsgs: detail.userMsgs,
+    totalMsgs: detail.totalMsgs,
+    counts: detail.counts,
     inputTokens: detail.inputTokens,
     outputTokens: detail.outputTokens,
     bound: !!bind,

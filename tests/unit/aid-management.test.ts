@@ -112,7 +112,7 @@ const {
   mockStoreClose: vi.fn(),
   // AUNClient methods.
   mockAuthenticate: vi.fn().mockResolvedValue({ access_token: 'mock-token', gateway: 'wss://gw.example.com/aun' }),
-  mockPublishAgentMd: vi.fn().mockResolvedValue({ aid: 'test.aid', etag: '"abc123"' }),
+  mockPublishAgentMd: vi.fn().mockResolvedValue({ ok: true, data: { aid: 'test.aid', etag: '"abc123"' } }),
   mockClientConnect: vi.fn().mockResolvedValue(undefined),
   mockClientClose: vi.fn().mockResolvedValue(undefined),
 }));
@@ -145,6 +145,7 @@ vi.mock('@agentunion/fastaun', () => ({
     load = mockStoreLoad;
     downloadAgentMd = mockFetchAgentMd;
     checkAgentMd = mockCheckAgentMd;
+    uploadAgentMd = mockPublishAgentMd;
     close = mockStoreClose;
   },
   AID: class MockAID {
@@ -155,7 +156,6 @@ vi.mock('@agentunion/fastaun', () => ({
     constructor(aid: unknown) { this.aid = aid; }
     connect = mockClientConnect;
     authenticate = mockAuthenticate;
-    uploadAgentMd = mockPublishAgentMd;
     call = vi.fn();
     on = vi.fn();
     close = mockClientClose;
@@ -272,7 +272,7 @@ describe('aidCreate', () => {
   });
 
   it('agentmdPut does not fail if upload errors (caller handles)', async () => {
-    mockPublishAgentMd.mockRejectedValueOnce(new Error('upload failed'));
+    mockPublishAgentMd.mockResolvedValueOnce({ ok: false, error: { code: 'UPLOAD_FAILED', message: 'upload failed' } });
     const aid = 'noupload.example.pub';
 
     const result = await aidCreate(aid);

@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import type { AIDStore } from '@agentunion/fastaun';
-import { getAidStore, loadAid, loadClient, SLOT } from './store.js';
+import { getAidStore, loadAid, SLOT } from './store.js';
 import { agentMdPath, aidLocalDir, resolveRoot } from '../../paths.js';
 
 export interface AgentmdGetResult {
@@ -82,7 +82,10 @@ export async function agentmdGet(aid: string, opts?: { store?: AIDStore; aunPath
 }
 
 /**
- * Upload agent.md: authenticate → write local file → uploadAgentMd (auto-sign + upload).
+ * Upload agent.md: write local file → store.uploadAgentMd (auto-auth + sign + upload).
+ *
+ * fastaun 0.4.7: uploadAgentMd moved from AUNClient to AIDStore; the store builds
+ * its own LocalTokenStore + AuthFlow internally, so no AUNClient/authenticate needed.
  */
 export async function agentmdPut(content: string, opts: { aid: string; store?: AIDStore; aunPath?: string }): Promise<void> {
   const aunPath = opts.aunPath ?? resolveRoot();
@@ -98,13 +101,8 @@ export async function agentmdPut(content: string, opts: { aid: string; store?: A
   fs.writeFileSync(filePath, content, 'utf-8');
 
   try {
-    const client = await loadClient(store, opts.aid);
-    try {
-      await client.authenticate();
-      await client.uploadAgentMd();
-    } finally {
-      try { await client.close(); } catch { /* ignore */ }
-    }
+    const r = await store.uploadAgentMd(opts.aid, content);
+    if (!r.ok) throw new Error(`upload agent.md failed for ${opts.aid}: ${r.error.message}`);
   } catch (e) {
     // 上传失败：仅当文件原本不存在（本次新建）时回滚，避免留下孤儿文件；
     // 已存在的文件保留新内容（旧语义）。

@@ -114,6 +114,7 @@ setInterval(() => {
 let msgSel = { aid: null, peer: null };
 let sessSel = { sessionId: null, project: null };
 let sessSearch = '';
+let sessChatMode = false;   // false=完整视图，true=对话视图（折叠处理过程）
 
 function switchView(view) {
   currentView = view;
@@ -348,18 +349,100 @@ function renderSession(data) {
   const h = data.header || {};
   const atBottom = detail.scrollHeight - detail.scrollTop - detail.clientHeight < 60;
   let html = renderSessHeader(h);
+  // 视图切换工具条
+  html += '<div class="sess-toolbar">' +
+    `<button class="view-toggle${sessChatMode ? ' active' : ''}" id="chat-toggle">` +
+    `${sessChatMode ? '💬 对话视图' : '📜 完整视图'}</button>` +
+    `<span class="toolbar-hint">${sessChatMode ? '只看用户与 Agent 的对话，处理过程已折叠' : '显示全部消息'}</span>` +
+    '</div>';
+  html += '<div class="turn-list">' + (sessChatMode ? renderChatView(turns) : renderFullView(turns)) + '</div>';
+  detail.innerHTML = html;
+
+  const toggle = $('#chat-toggle');
+  if (toggle) toggle.onclick = () => { sessChatMode = !sessChatMode; renderSession(state.session); };
+  if (atBottom) detail.scrollTop = detail.scrollHeight;
+}
+
+// 完整视图：所有轮次按 4 类渲染
+function renderFullView(turns) {
+  let html = '';
   for (const t of turns) {
+    const cat = t.category || t.role;
+    const c = CAT_META[cat] || CAT_META.system;
     const usage = (t.inputTokens || t.outputTokens)
       ? `<span class="turn-usage">${esc(t.model || '')} · in ${t.inputTokens || 0} / out ${t.outputTokens || 0}</span>` : '';
-    const roleLabel = { user: '用户', assistant: 'Claude', system: '系统' }[t.role] || t.role;
-    html += `<div class="turn ${esc(t.role)}">` +
-      `<div class="turn-head"><span class="turn-role">${esc(roleLabel)}</span>` +
+    html += `<div class="turn cat-${cat}">` +
+      `<div class="turn-head"><span class="turn-role">${c.icon} ${c.label}</span>` +
       `<span class="turn-time">${t.ts ? fmtTime(t.ts) : ''}</span>${usage}</div>` +
       `<div class="turn-blocks">${renderBlocks(t.blocks || [])}</div></div>`;
   }
-  detail.innerHTML = html;
-  if (atBottom) detail.scrollTop = detail.scrollHeight;
+  return html;
 }
+
+// 对话视图：仿微信。只显示用户输入(左) + ec msg send 发出的消息(右)，
+// 其余连续的处理过程折叠成一个可展开的「处理过程」分隔条。
+function renderChatView(turns) {
+  // 先把 turns 摊平成「对话项」与「处理项」的线性序列
+  const items = [];  // {type:'in'|'out'|'proc', ...}
+  for (const t of turns) {
+    if (t.category === 'user_input') {
+      const text = (t.blocks || []).filter(b => b.kind === 'text').map(b => b.text).join('\n');
+      items.push({ type: 'in', text, ts: t.ts });
+      continue;
+    }
+    // 找该轮里的 ec msg send 发送块（可能多条）
+    const sends = (t.blocks || []).filter(b => b.kind === 'tool_use' && b.chat);
+    if (sends.length) {
+      for (const s of sends) items.push({ type: 'out', text: s.chat.text, peer: s.chat.peer, self: s.chat.self, ts: t.ts });
+    }
+    // 该轮里非对话的内容 → 处理过程（含思考/其他工具/结果/模型纯文本）
+    const procBlocks = (t.blocks || []).filter(b => !(b.kind === 'tool_use' && b.chat));
+    if (procBlocks.length && !(t.category === 'user_input')) {
+      items.push({ type: 'proc', cat: t.category, blocks: procBlocks, ts: t.ts });
+    }
+  }
+
+  // 合并连续的 proc 项为一组，渲染成可折叠分隔条
+  let html = '';
+  let i = 0;
+  while (i < items.length) {
+    const it = items[i];
+    if (it.type === 'in') {
+      html += `<div class="chat-row in"><div class="chat-bubble">${esc(it.text)}</div>` +
+        `<div class="chat-time">${it.ts ? fmtTime(it.ts) : ''}</div></div>`;
+      i++;
+    } else if (it.type === 'out') {
+      const peer = it.peer ? shortAid(it.peer) : '';
+      html += `<div class="chat-row out"><div class="chat-bubble">${esc(it.text)}</div>` +
+        `<div class="chat-time">${it.ts ? fmtTime(it.ts) : ''}${peer ? ' → ' + esc(peer) : ''}</div></div>`;
+      i++;
+    } else {
+      // 收集连续 proc
+      const group = [];
+      while (i < items.length && items[i].type === 'proc') { group.push(items[i]); i++; }
+      let inner = '';
+      for (const g of group) {
+        const c = CAT_META[g.cat] || CAT_META.system;
+        inner += `<div class="turn cat-${g.cat}"><div class="turn-head"><span class="turn-role">${c.icon} ${c.label}</span>` +
+          `<span class="turn-time">${g.ts ? fmtTime(g.ts) : ''}</span></div>` +
+          `<div class="turn-blocks">${renderBlocks(g.blocks)}</div></div>`;
+      }
+      html += `<details class="proc-group"><summary>⋯ ${group.length} 条处理过程（思考·工具·结果）</summary><div class="proc-body">${inner}</div></details>`;
+    }
+  }
+  if (!html) html = '<div class="empty">该会话没有用户对话消息</div>';
+  return html;
+}
+
+// 类别展示元数据
+const CAT_META = {
+  user_input:   { label: '用户输入', icon: '🟢' },
+  model_output: { label: '模型输出', icon: '🔵' },
+  tool_call:    { label: '工具调用', icon: '🟣' },
+  tool_result:  { label: '工具结果', icon: '🟠' },
+  msg_send:     { label: '发送消息', icon: '📤' },
+  system:       { label: '系统', icon: '⚪' },
+};
 
 function renderSessHeader(h) {
   if (!h || !h.sessionId) return '';
@@ -374,15 +457,33 @@ function renderSessHeader(h) {
   return '<div class="sess-header">' +
     `<div class="sh-title">${esc(title)}</div>` +
     '<div class="sh-stats">' +
-    `<span class="sh-stat">💬 ${h.totalTurns || 0} 轮</span>` +
+    `<span class="sh-stat" title="用户输入 ${h.userMsgs || 0} 条 / 共 ${h.totalMsgs || 0} 条消息">💬 ${h.userMsgs || 0}/${h.totalMsgs || 0} 条</span>` +
     (h.model ? `<span class="sh-stat">🤖 ${esc(h.model)}</span>` : '') +
     tok +
     (h.gitBranch ? `<span class="sh-stat">🌿 ${esc(h.gitBranch)}</span>` : '') +
     (h.version ? `<span class="sh-stat">cc ${esc(h.version)}</span>` : '') +
     bind +
     '</div>' +
+    renderCatBar(h.counts) +
     `<div class="sh-path" title="${esc(h.cwd || '')}">${esc(h.cwd || '')}</div>` +
     '</div>';
+}
+
+function renderCatBar(counts) {
+  if (!counts) return '';
+  const items = [
+    ['user_input', counts.userInput],
+    ['model_output', counts.modelOutput],
+    ['tool_call', counts.toolCall],
+    ['tool_result', counts.toolResult],
+    ['msg_send', counts.msgSend],
+  ];
+  let s = '<div class="sh-cats">';
+  for (const [cat, n] of items) {
+    const m = CAT_META[cat];
+    s += `<span class="cat-chip cat-${cat}"><span class="cat-swatch"></span>${m.label} ${n || 0}</span>`;
+  }
+  return s + '</div>';
 }
 
 function fmtNum(n) {
