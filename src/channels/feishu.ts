@@ -1328,6 +1328,16 @@ export function buildResolvedV2(
     bodyElements.push({ tag: 'markdown', content: lines.join('\n') });
   }
 
+  // CommandCard: 显示原有按钮列表（保留上下文）
+  if (kind.kind === 'command-card' && kind.buttons?.length) {
+    const lines = kind.buttons.map(btn => {
+      const prefix = btn.command === action ? '✓' : '•';
+      const cleanLabel = btn.label.replace(/^✓\s*/, '');
+      return `${prefix} ${cleanLabel}`;
+    });
+    bodyElements.push({ tag: 'markdown', content: lines.join('\n') });
+  }
+
   return {
     toast: { type: 'success', content: statusText },
     card: {
@@ -1603,7 +1613,7 @@ export class FeishuChannelPlugin implements ChannelPlugin {
       const adapter = {
         channelName: inst.name,
         channelKey: inst.name,
-        capabilities: { file: true, image: true, interaction: true, markdown: true, thought: false, status: true },
+        capabilities: { file: true, image: true, interaction: true, markdown: true, thought: false, status: true, thread: true },
         send: async (envelope: any, payload: any) => {
           const ctx = envelope.replyContext;
           const channelId = envelope.channelId;

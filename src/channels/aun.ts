@@ -888,6 +888,11 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       });
       logger.info(`${this.logPrefix()} Welcome message sent to owner: ${owner}`);
 
+      // Send binding credential for Evol App to persist locally
+      await this.sendBindingCredential(owner, agentDisplayName, agentConfig.active_baseagent || 'claude').catch(e =>
+        logger.warn(`${this.logPrefix()} Binding credential failed: ${e}`)
+      );
+
       // Mark agent as initialized in config.json (replaces old agent.md frontmatter flag)
       try {
         const fresh = loadAgent(aidName);
@@ -902,6 +907,17 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     } catch (e) {
       logger.warn(`${this.logPrefix()} Failed to send welcome message: ${e}`);
     }
+  }
+
+  private async sendBindingCredential(owner: string, name: string, baseagent: string): Promise<void> {
+    if (!this.client) return;
+    await this.callAndTrace('message.send', {
+      to: owner,
+      payload: { type: 'binding', aid: this.config.aid, name, owner, baseagent },
+      encrypt: true,
+      persist_required: true,
+    });
+    logger.info(`${this.logPrefix()} Binding credential sent to owner: ${owner}`);
   }
 
   // ── Event handlers ──────────────────────────────────────────
@@ -2586,7 +2602,7 @@ export class AUNChannelPlugin implements ChannelPlugin {
       const adapter = {
         channelName: inst.name,
         channelKey: inst.name,  // channelName 实际上就是 channelKey
-        capabilities: { file: true, image: true, interaction: true, markdown: true, thought: true, status: true },
+        capabilities: { file: true, image: true, interaction: true, markdown: true, thought: true, status: true, thread: true },
         send: async (envelope: any, payload: any) => {
           const ctx = envelope.replyContext;
           const channelId = envelope.channelId;
