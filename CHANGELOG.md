@@ -2,12 +2,35 @@
 
 ## v3.1.5 (2026-06-02)
 
+### New Features
+
+- **Web 监控面板（watch-web）** — 全新 `evolclaw watch` Web 面板：实时会话视图、对话视图、AID 状态、消息流，含上下文大小与费用估算；新增 `src/cli/watch-web/` server + 静态前端 + session/msg/aid 数据源
+- **CLI model 命令** — 新增 `src/cli/model.ts`：动态模型目录管理，`/models` 端点拉取（1h 缓存）+ 静态表 fallback，注入已验证但未上线 API 的模型
+- **飞书交互卡片 JSON 2.0 + 表单** — `FeishuCardManager` 管理 CardKit 实体生命周期，`buildActionCardV2()` 表单卡片，动态输入框追加（card.element.create API）
+- **proactive→interactive 模式切换提示** — 模式切换时注入提示信息
+
+### Improvements
+
+- **AUN/AID 三主体模型重构** — fastaun 0.3.3 → 0.4.7 大版本跨越：适配三主体模型与 slot 隔离键，`createAid` 拆分为 `registerAid` + `authenticate`，新增 `AIDStore`，`uploadAgentMd` 迁移至 AIDStore
+- **ECK 上下文组装体系对齐** — 四阶段改造：channelKey 第二段 `selfPeerId`→`selfAID`，sessions 目录统一三层化 `<channelType>/<selfAID>/<channelId>/`，新增 `peer-key.ts` helper，ECK manifest 诊断输出
+- **Session 持久化重构** — 统一 `persistSession(session, intent, opts)` 原语替代 `writeSessionIfChanged`/快照模式，内置去重，`markProcessing`/`clearProcessing` 不再扫描全部 chat 目录
+- **idle-check 消息队列可靠性** — 提升空闲检测与消息队列稳定性
+- **飞书卡片 schema 2.0 统一** — 交互卡片统一为 schema 2.0 inline，用户交互期间暂停 idle monitor，修复 V2 卡片回调 schema 不一致（error 200830/200810）
+- **IPC 出站统计** — 新增 `aun-aid-stats-record-outbound` IPC handler，p2p/group/thought.put 出站消息统计追踪
+- **/model 列表逻辑简化** — `listModels` 走缓存，model 显示标签同时展示完整 ID 与短别名
+- **清理冗余日志与代码** — 移除过时诊断日志和未使用的 skills 代码
+
 ### Bug Fixes
 
-- **Trigger channelType 传播** — Trigger 新增 `targetChannelType` 字段，`buildSyntheticMessage` 正确填充 `channelType`，修复触发器消息无法创建 session 的问题
-- **Session mapper 过滤 channelName** — `sessionToFile` 不再将 `channelName` 写入 metadata
+- **Trigger channelType 传播** — Trigger 新增 `targetChannelType` 字段，`buildSyntheticMessage` 正确填充 `channelType`，修复触发器消息无法创建 session
+- **session selfAID/channelType 注入** — 修复 session 创建时 selfAID 与 channelType 注入缺失
+- **/model 短别名解析** — `/model sonnet` 等短别名正确解析为完整 model ID
+- **aidCreate 成功路径泄漏 AIDStore** — 修复 AID 创建成功后 AIDStore 资源泄漏
+- **peer-identity type 解析** — 修复对端身份类型解析错误
+- **飞书卡片标题重复 emoji** — 修复 resolved card 标题与 checkers summary 中的双 emoji
+- **消息可靠性与 session 迁移** — 提升消息投递可靠性，改进 session 迁移逻辑
+- **session-mapper 过滤 channelName** — `sessionToFile` 不再将 `channelName` 写入 metadata
 - **resolveChatDirFromSession 严格校验** — 缺失 `channelType` 时抛出明确错误而非静默 fallback
-- **/model 别名解析** — `/model sonnet` 等短别名正确解析为完整 model ID
 - **test 脚本修复** — `package.json` test 脚本改为 `vitest run`
 
 ## v3.1.4 (2026-05-27)
