@@ -1692,6 +1692,7 @@ export class CommandHandler {
             const metadata = permSession.metadata || {};
             metadata.permissionMode = arg;
             await this.sessionManager.updateSession(permSession.id, { metadata });
+            if (source === 'card-trigger') return null;
             return { kind: 'command.result' as const, text: `✓ 权限模式已切换为: ${matched.key} (${matched.nameZh})\n${matched.description}` };
           }
         }
@@ -1897,6 +1898,7 @@ export class CommandHandler {
       const projectName = this.getProjectName(session.projectPath);
       let agentSwitchResponse = `✓ 已切换 Agent: ${args}\n  项目: ${projectName}\n  会话: ${newSession.name || '(未命名)'}\n  ${hasExistingSession}`;
 
+      if (source === 'card-trigger') return null;
       return { kind: 'command.result' as const, text: agentSwitchResponse };
     }
 
@@ -2064,6 +2066,7 @@ export class CommandHandler {
         if (err) return { kind: 'command.result' as const, text: `${err}\n已更新运行时配置，但未持久化` };
       }
 
+      if (source === 'card-trigger') return null;
       return { kind: 'command.result' as const, text: `✓ 已切换\n  ${changes.join('\n  ')}` };
     }
 
@@ -2146,6 +2149,7 @@ export class CommandHandler {
       const err = this.persistBaseagentEffort(channel, effortAgent.name, newEffort);
       if (err) return { kind: 'command.result' as const, text: `${err}\n已更新运行时配置，但未持久化` };
 
+      if (source === 'card-trigger') return null;
       return { kind: 'command.result' as const, text: `✓ 推理强度: ${newEffort}` };
     }
 
@@ -2245,6 +2249,7 @@ export class CommandHandler {
       } else {
         return { kind: 'command.error' as const, text: `⚠️ 找不到通道 "${channel}" 所属的 self-agent，无法持久化` };
       }
+      if (source === 'card-trigger') return null;
       return { kind: 'command.result' as const, text: `✅ 中间输出模式: ${activityArg}（${label}）` };
     }
 
@@ -2332,6 +2337,7 @@ export class CommandHandler {
 
       await this.sessionManager.updateSession(chatmodeSession.id, { sessionMode: arg });
       this.eventBus.publish({ type: 'session:chat-mode-changed', sessionId: chatmodeSession.id, mode: arg, timestamp: Date.now() });
+      if (source === 'card-trigger') return null;
       return { kind: 'command.result' as const, text: `✅ 会话模式已切换: ${arg}` };
     }
 
@@ -2405,6 +2411,7 @@ export class CommandHandler {
       const metadata = { ...(dispatchSession.metadata || {}), dispatchMode: arg };
       await this.sessionManager.updateSession(dispatchSession.id, { metadata });
       this.eventBus.publish({ type: 'session:dispatch-mode-changed', sessionId: dispatchSession.id, mode: arg, timestamp: Date.now() });
+      if (source === 'card-trigger') return null;
       return { kind: 'command.result' as const, text: `✅ 分发模式已切换: ${currentMode ?? '未设置'} → ${arg}` };
     }
 
@@ -3272,6 +3279,7 @@ export class CommandHandler {
         if (!switched) {
           return { kind: 'command.error' as const, text: `❌ 切换会话失败` };
         }
+        if (source === 'card-trigger') return null;
         return { kind: 'command.result' as const, text: `✓ 已切换到会话: ${targetSession.name || sessionName}\n  项目: ${path.basename(targetSession.projectPath)}${lastInputLine}` };
       }
 
@@ -3293,6 +3301,7 @@ export class CommandHandler {
       this.eventBus.publish({ type: 'session:switched', sessionId: targetSession.id, fromSessionId: session.id, toSessionId: targetSession.id });
 
       const continueHint = lastInput ? '\n  将继续之前的对话历史' : '\n  当前会话未有发言';
+      if (source === 'card-trigger') return null;
       return { kind: 'command.result' as const, text: `✓ 已切换到会话: ${targetSession.name || sessionName}${continueHint}${lastInputLine}` };
     }
 
