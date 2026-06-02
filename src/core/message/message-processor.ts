@@ -14,6 +14,7 @@ import { getErrorMessage, classifyError, ErrorType, ERROR_PREFIX, isInfraError, 
 import { EventBus } from '../event-bus.js';
 import { summarizeToolInput } from '../permission.js';
 import type { Message, Session, ChannelAdapter, ChannelOptions, ChannelPolicy, CommandHandler, ReplyContext, AgentContext, EvolAgentRegistryHandle, GlobalSettings, OutboundEnvelope, OutboundPayload, InteractionRequest, InteractionKind, ActionInteraction, CommandCard } from '../../types.js';
+import type { TriggerManager } from '../trigger/manager.js';
 import { DEFAULT_PERMISSION_MODE } from '../../types.js';
 import { getPackageRoot, resolveRoot } from '../../paths.js';
 import { renderKitSections, type KitRenderContext } from '../../agents/kit-renderer.js';
@@ -282,12 +283,25 @@ export class MessageProcessor {
     const { session, absoluteProjectPath } = await this.resolveSession(message);
 
     // thread(feishu) pending strategy: inject replyContext so first reply creates the thread
-    // TODO: capture returned thread_id from Feishu reply and write back to trigger.targetThreadId
     if (message.triggerMeta?.pendingThread && message.triggerMeta?.rootMessageId) {
+      const triggerId = message.triggerMeta.triggerId;
+      const channelKeyForAgent = session.metadata?.channelKey || message.channel;
+      const trigMgr = this.agentRegistry?.resolveByChannel(channelKeyForAgent)?.triggerManager as TriggerManager | undefined;
+      const onThreadCreated = trigMgr
+        ? (threadId: string) => {
+            try {
+              trigMgr.update(triggerId, { targetThreadId: threadId, pendingThread: false });
+              logger.info(`[MessageProcessor] Feishu thread created for trigger ${triggerId}: ${threadId}`);
+            } catch (e) {
+              logger.warn(`[MessageProcessor] Failed to write back thread_id for trigger ${triggerId}: ${e}`);
+            }
+          }
+        : undefined;
       message.replyContext = {
         ...(message.replyContext ?? {}),
         replyToMessageId: message.triggerMeta.rootMessageId,
         replyInThread: true,
+        ...(onThreadCreated ? { metadata: { ...(message.replyContext?.metadata ?? {}), onThreadCreated } } : {}),
       };
     }
 
