@@ -22,7 +22,7 @@ import { MessageQueue } from './core/message/message-queue.js';
 import { MessageBridge } from './core/message/message-bridge.js';
 import { MessageCache } from './core/message/message-cache.js';
 import { CommandHandler } from './core/command-handler.js';
-import { EventBus } from './core/event-bus.js';
+import { EventBus, GatewayEvent } from './core/event-bus.js';
 import { StatsCollector } from './utils/stats.js';
 import { AidStatsCollector } from './utils/stats.js';
 import { PermissionGateway } from './core/permission.js';
@@ -32,7 +32,7 @@ import { AgentLoader } from './core/baseagent-loader.js';
 import { EvolAgentRegistry, type ReloadHooks } from './core/evolagent-registry.js';
 import { buildReloadHooks } from './core/channel-loader.js';
 import { IpcServer, IpcStatusResponse, ChannelStatus } from './ipc.js';
-import { ChannelAdapter, Message, OutboundEnvelope, OutboundPayload } from './types.js';
+import { ChannelAdapter, Message, OutboundEnvelope, OutboundPayload, Trigger } from './types.js';
 import { logger, setLogLevel } from './utils/logger.js';
 import { writeMain, removeAll, isMainWinner, scanInstances } from './utils/instance-registry.js';
 import { detectDuplicates } from './core/evolagent-registry.js';
@@ -510,11 +510,49 @@ async function main() {
     if (!agent.triggerScheduler || !agent.triggerManager) continue;
     const scheduler = agent.triggerScheduler;
     const primaryProjectPath = agent.config.projects?.defaultPath ?? primaryAgent.projectPath;
+    function scheduleRetryWhenIdle(boundId: string, msg: Message, trigger: Trigger) {
+      let done = false;
+      const handler = (ev: GatewayEvent) => {
+        if ((ev as any).sessionId !== boundId || done) return;
+        done = true;
+        clearTimeout(timer);
+        eventBus.unsubscribe('task:completed', handler);
+        retry();
+      };
+      const timer = setTimeout(() => {
+        if (done) return;
+        done = true;
+        eventBus.unsubscribe('task:completed', handler);
+        retry();
+      }, 30_000);
+      eventBus.subscribe('task:completed', handler);
+
+      function retry() {
+        if (messageQueue.isProcessing(boundId)) { scheduleRetryWhenIdle(boundId, msg, trigger); return; }
+        sessionManager.getSessionById(boundId).then(bound => {
+          if (!bound) { logger.warn(`[Trigger] Bound session ${boundId} deleted, aborting`); return; }
+          messageQueue.enqueue(boundId, msg, bound.projectPath, { interruptible: false })
+            .catch(err => logger.error(`[Trigger] Retry failed ${trigger.id}: ${err}`));
+        });
+      }
+    }
+
     scheduler.setFireCallback((msg, trigger) => {
-      const sessionKey = `${msg.channel}:${msg.channelId}`;
-      messageQueue.enqueue(sessionKey, msg, primaryProjectPath, { interruptible: false }).catch(err => {
-        logger.error(`[Trigger] Failed to enqueue trigger ${trigger.id}: ${err}`);
-      });
+      if (trigger.targetSessionStrategy === 'current' && trigger.boundSessionId) {
+        const boundId = trigger.boundSessionId;
+        if (messageQueue.isProcessing(boundId)) {
+          scheduleRetryWhenIdle(boundId, msg, trigger);
+          return;
+        }
+        sessionManager.getSessionById(boundId).then(bound => {
+          if (!bound) { logger.warn(`[Trigger] Bound session ${boundId} not found`); return; }
+          messageQueue.enqueue(boundId, msg, bound.projectPath, { interruptible: false })
+            .catch(err => logger.error(`[Trigger] Enqueue failed ${trigger.id}: ${err}`));
+        });
+        return;
+      }
+      messageQueue.enqueue(`${msg.channel}:${msg.channelId}`, msg, primaryProjectPath, { interruptible: false })
+        .catch(err => logger.error(`[Trigger] Enqueue failed ${trigger.id}: ${err}`));
     });
     // Subscribe to trigger:completed/failed/skipped to update cron inflight state
     eventBus.subscribe('trigger:completed', (ev: any) => scheduler.onTriggerComplete(ev.triggerId, 'completed'));
