@@ -3089,7 +3089,7 @@ export class CommandHandler {
 
       // /slist — 仅显示 EvolClaw 会话
       const sessions = await this.sessionManager.listSessions(channel, channelId);
-      const currentProjectSessions = sessions.filter(s => s.projectPath === session.projectPath && s.agentId === session.agentId);
+      const currentProjectSessions = sessions.filter(s => s.projectPath === session.projectPath && s.agentId === session.agentId && !s.threadId?.startsWith('trigger-'));
 
       // 从 SDK 同步会话名称（发现 CLI 改名）
       try {
