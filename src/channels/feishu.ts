@@ -586,6 +586,11 @@ export class FeishuChannel {
           const newThreadId = (replyRes as any)?.data?.thread_id;
           if (newThreadId) options.onThreadCreated(newThreadId);
         }
+      } else {
+        await this.client.im.message.create({
+          params: { receive_id_type: chatId.startsWith('ou_') ? 'open_id' : chatId.startsWith('on_') ? 'union_id' : 'chat_id' },
+          data: { receive_id: chatId, msg_type: msgType, content: msgContent }
+        });
       }
 
       if (hasRichImages) {
