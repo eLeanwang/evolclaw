@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { kitsRulesDir, resolvePaths } from '../paths.js';
 import { atomicWriteJson, atomicReadJson } from '../utils/atomic-write.js';
-import { wantsHelp } from './help.js';
+import { wantsHelp, getArgValue } from './help.js';
 
 const isWindows = process.platform === 'win32';
 
@@ -271,12 +271,6 @@ function resolveBaseAgent(input: string | undefined): string {
   console.error(`❌ Unknown baseagent: ${input}`);
   console.error(`   Supported: ${KNOWN_BASEAGENTS.join(', ')}`);
   process.exit(1);
-}
-
-function getArgValue(args: string[], flag: string): string | undefined {
-  const idx = args.indexOf(flag);
-  if (idx === -1 || idx + 1 >= args.length) return undefined;
-  return args[idx + 1];
 }
 
 function pathEquals(a: string, b: string): boolean {

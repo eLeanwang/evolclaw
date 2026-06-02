@@ -9,7 +9,7 @@ import { msgSend, msgPull } from '../aun/msg/index.js';
 import type { MsgError } from '../aun/msg/p2p.js';
 import { getPackageRoot, aunPath as defaultAunPath } from '../paths.js';
 import { getAidStore, loadClient, SLOT } from '../aun/aid/store.js';
-import { isHelpFlag } from './help.js';
+import { isHelpFlag, getArgValue } from './help.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -187,11 +187,6 @@ function percentile(sorted: number[], p: number): number {
   if (sorted.length === 0) return 0;
   const idx = Math.ceil((p / 100) * sorted.length) - 1;
   return sorted[Math.max(0, idx)];
-}
-
-function getArgValue(args: string[], flag: string): string | undefined {
-  const idx = args.indexOf(flag);
-  return idx >= 0 && idx + 1 < args.length ? args[idx + 1] : undefined;
 }
 
 // ==================== Promise Pool ====================

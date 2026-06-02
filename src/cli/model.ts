@@ -11,7 +11,7 @@
  * 设计见 docs/model-command-design.md。
  */
 
-import { isHelpFlag, wantsHelp } from './help.js';
+import { isHelpFlag, wantsHelp, getArgValue } from './help.js';
 import {
   ModelScopeError, normalizePeer, determineScope, activeBaseagent,
   readScope, writeScope, clearScope, resolveEffectiveModel,
@@ -24,11 +24,6 @@ const ALL_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max', 'auto'];
 const SCOPE_LABEL: Record<ModelScope, string> = {
   global: '全局', agent: 'agent级', relation: '关系级',
 };
-
-function getArgValue(args: string[], flag: string): string | undefined {
-  const idx = args.indexOf(flag);
-  return idx !== -1 && idx + 1 < args.length ? args[idx + 1] : undefined;
-}
 
 /** 输出 JSON 并退出（success=false 时 exit 1）。 */
 function emit(formatJson: boolean, payload: any, textFn: () => string): void {

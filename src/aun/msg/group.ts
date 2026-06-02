@@ -223,11 +223,11 @@ export interface GroupAckArgs extends GroupCommonOpts {
 export async function groupAck(args: GroupAckArgs): Promise<GroupAckResult | MsgError> {
   const conn = await createShortConnection(args.from, { aunPath: args.aunPath, slotId: args.slotId });
   try {
-    const result = await conn.call('group.ack', { group_id: args.groupId, seq: args.seq });
+    const result = await conn.call('group.ack', { group_id: args.groupId, msg_seq: args.seq });
     return {
       ok: true,
       group_id: result?.group_id ?? args.groupId,
-      ack_seq: result?.ack_seq ?? args.seq,
+      ack_seq: result?.cursor ?? result?.ack_seq ?? args.seq,
       latest_message_seq: result?.latest_message_seq,
     };
   } catch (e: any) {

@@ -886,6 +886,9 @@ export interface MenuActionRequest {
   id: string;
   name: string;          // 动词所属 name（如 'session' / 'system'）
   action: string;        // 'stop' / 'restart' / 'new' / 'delete' / ...
+  // cli/exec 透传约定：args 为 { argv?: string[]; command?: string }
+  //   argv    优先，已是数组免分词（推荐，无注入面）
+  //   command 退化路径，字符串由 daemon 侧分词（尊重单/双引号，不走 shell）
   args?: Record<string, any>;
   cmd?: string;
 }

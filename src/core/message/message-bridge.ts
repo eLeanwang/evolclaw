@@ -241,6 +241,7 @@ export class MessageBridge {
     permission: '/perm',
     activity: '/activity',
     system: '/system',
+    cli: '/cli',
   };
 
   private resolveCmd(name: string, cmd?: string): string {

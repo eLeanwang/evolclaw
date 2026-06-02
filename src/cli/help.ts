@@ -22,3 +22,13 @@ export function wantsHelp(args: readonly string[]): boolean {
   for (const a of args) if (HELP_TOKENS.has(a)) return true;
   return false;
 }
+
+/**
+ * 取出 `--flag <value>` 形式的参数值。
+ * flag 不存在或其后无值时返回 undefined。
+ */
+export function getArgValue(args: readonly string[], flag: string): string | undefined {
+  const idx = args.indexOf(flag);
+  return idx !== -1 && idx + 1 < args.length ? args[idx + 1] : undefined;
+}
+

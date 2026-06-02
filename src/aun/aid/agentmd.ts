@@ -117,13 +117,17 @@ export async function agentmdPut(content: string, opts: { aid: string; store?: A
  * Check if agent.md is up-to-date (30-day TTL), fetch if changed.
  * Returns changed=true + content when a new version was downloaded.
  *
+ * verification 透传 SDK 的验签结果：
+ * - downloaded（changed=true）时为 SDK downloadAgentMd 的 verification
+ * - 命中本地缓存或网络失败 fallback 时为 undefined（调用方需自行离线验签或视为未验证）
+ *
  * Note: store.checkAgentMd tracks freshness via the store's in-memory cache,
  * so a freshly-built store reports local_found=false and will fetch.
  */
 export async function agentmdSync(
   aid: string,
   opts?: { store?: AIDStore; aunPath?: string }
-): Promise<{ changed: boolean; content?: string }> {
+): Promise<{ changed: boolean; content?: string; verification?: AgentmdGetResult['verification'] }> {
   const aunPath = opts?.aunPath ?? resolveRoot();
   const store = opts?.store ?? await getAidStore({ slotId: SLOT.cli, aunPath });
   const ownStore = !opts?.store;
@@ -142,7 +146,7 @@ export async function agentmdSync(
     // SDK's downloadAgentMd persists to disk internally (AgentMdManager.saveRecord → writeContent).
     const fetched = await store.downloadAgentMd(aid);
     if (fetched.ok) {
-      return { changed: true, content: fetched.data.content };
+      return { changed: true, content: fetched.data.content, verification: normalizeVerification(fetched.data.verification) };
     }
 
     // Fetch failed (network) — fall back to local file if present.

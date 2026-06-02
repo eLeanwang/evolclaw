@@ -12,7 +12,7 @@ import readline from 'readline';
 import { cmdInit } from './init.js';
 import { ipcQuery } from '../ipc.js';
 import { cmdInitWechat, cmdInitFeishu, cmdInitDingtalk, cmdInitQQBot, cmdInitWecom } from './init-channel.js';
-import { isHelpFlag, wantsHelp } from './help.js';
+import { isHelpFlag, wantsHelp, getArgValue } from './help.js';
 import * as platform from '../utils/cross-platform.js';
 import { EventBus } from '../core/event-bus.js';
 import { tryUpgrade, tryUpgradeAunSdk, type UpgradeResult } from '../utils/npm-ops.js';
@@ -2915,7 +2915,7 @@ Agent:
 
 async function cmdAgent(args: string[]): Promise<void> {
   const sub = args[0];
-  const formatJson = args.includes('--format') && args[args.indexOf('--format') + 1] === 'json';
+  const formatJson = getArgValue(args, '--format') === 'json';
 
   if (!sub || isHelpFlag(sub)) {
     console.log(`用法: evolclaw agent <command>
@@ -3412,7 +3412,7 @@ function resolveAunPath(args: string[]): string | undefined {
 
 async function cmdAid(args: string[]): Promise<void> {
   const sub = args[0];
-  const formatJson = args.includes('--format') && args[args.indexOf('--format') + 1] === 'json';
+  const formatJson = getArgValue(args, '--format') === 'json';
   const aunPath = resolveAunPath(args);
 
   if (!sub || isHelpFlag(sub)) {
@@ -3906,6 +3906,10 @@ async function cmdRpc(args: string[]): Promise<void> {
 
 每行 JSON 格式: {"method":"<namespace.method>","params":{...}}
 
+Options:
+  --app <name>   指定应用 slot（独立消费通道）。仅对 message.pull / group.pull
+                 等消费类方法有意义——隔离 seq 游标与消息过滤；默认与 daemon 共享通道。
+
 示例:
   evolclaw rpc --as alice.agentid.pub --params '{"method":"message.send","params":{"to":"bob.agentid.pub","payload":{"type":"text","text":"hello"}}}'
   evolclaw rpc --as alice.agentid.pub --params calls.jsonl`);
@@ -3915,6 +3919,7 @@ async function cmdRpc(args: string[]): Promise<void> {
   const asIdx = args.indexOf('--as');
   const paramsIdx = args.indexOf('--params');
   const aunPath = resolveAunPath(args);
+  const appSlot = getArgValue(args, '--app');
 
   if (asIdx === -1 || asIdx + 1 >= args.length) {
     console.error('❌ 缺少 --as <aid>');
@@ -3963,10 +3968,10 @@ async function cmdRpc(args: string[]): Promise<void> {
   const { rpcCall, rpcBatch } = await import('../aun/rpc/index.js');
 
   if (calls.length === 1) {
-    const result = await rpcCall(aid, calls[0].method, calls[0].params, { aunPath });
+    const result = await rpcCall(aid, calls[0].method, calls[0].params, { aunPath, slotId: appSlot });
     console.log(JSON.stringify(result));
   } else {
-    const results = await rpcBatch(aid, calls, { aunPath });
+    const results = await rpcBatch(aid, calls, { aunPath, slotId: appSlot });
     for (const r of results) {
       console.log(JSON.stringify(r));
     }
@@ -3978,7 +3983,7 @@ async function cmdRpc(args: string[]): Promise<void> {
 async function cmdStorage(args: string[]): Promise<void> {
   const sub = args[0];
   const aunPath = resolveAunPath(args);
-  const formatJson = args.includes('--format') && args[args.indexOf('--format') + 1] === 'json';
+  const formatJson = getArgValue(args, '--format') === 'json';
 
   if (!sub || isHelpFlag(sub)) {
     console.log(`用法: evolclaw storage <command> <aid> [options]
@@ -4125,7 +4130,7 @@ Commands:
 async function cmdMsg(args: string[]): Promise<void> {
   const sub = args[0];
   const aunPath = resolveAunPath(args);
-  const formatJson = args.includes('--format') && args[args.indexOf('--format') + 1] === 'json';
+  const formatJson = getArgValue(args, '--format') === 'json';
   const appIdx = args.indexOf('--app');
   const appSlot = appIdx >= 0 ? args[appIdx + 1] : undefined;
 
@@ -4150,6 +4155,8 @@ Options:
   --content-type <mime> 显式覆盖 MIME（仅 --file 模式）
   --text <说明>          附件说明文字（仅 --file 模式）
   --transcript <text>   语音转写（仅 --as voice）
+  --                    end-of-options：其后所有参数按正文处理
+                        （用于发送恰好等于某 flag 的文本，如 send a b -- --encrypt）
 
 示例:
   evolclaw msg send alice.agentid.pub bob.agentid.pub "hello"
@@ -4393,7 +4400,7 @@ Options:
 async function cmdGroup(args: string[]): Promise<void> {
   const sub = args[0];
   const aunPath = resolveAunPath(args);
-  const formatJson = args.includes('--format') && args[args.indexOf('--format') + 1] === 'json';
+  const formatJson = getArgValue(args, '--format') === 'json';
   const appIdx = args.indexOf('--app');
   const appSlot = appIdx >= 0 ? args[appIdx + 1] : undefined;
 
@@ -4425,8 +4432,11 @@ async function cmdGroup(args: string[]): Promise<void> {
 Options:
   --app <name>          指定应用 slot（独立消费通道，不影响 daemon）
   --format json         输出 JSON 格式
-  --mention <aid>       发送时 @ 某个成员（可多次）
+  --encrypt             启用端到端加密（仅 send）
+  --mention <aid>       发送时 @ 某个成员（可多次，或用逗号分隔多个 aid）
   --mention-all         发送时 @ 所有人
+  --                    end-of-options：其后所有参数按正文处理
+                        （用于发送恰好等于某 flag 的文本，如 send a g -- --encrypt）
 
 示例:
   evolclaw group create alice.agentid.pub "Dev Team" --visibility private
@@ -4466,12 +4476,22 @@ Options:
     return gid;
   };
 
-  // 收集 --mention（可多次）
+  // 收集 --mention（可多次；每次的值支持逗号分隔多个 aid）
   const collectMentions = (): Array<Record<string, unknown>> => {
     const mentions: Array<Record<string, unknown>> = [];
-    for (let i = 0; i < args.length - 1; i++) {
-      if (args[i] === '--mention') {
-        mentions.push({ aid: args[i + 1] });
+    for (let i = 0; i < args.length; i++) {
+      if (args[i] !== '--mention') continue;
+      const val = args[i + 1];
+      if (val === undefined || val.startsWith('--')) {
+        console.error(`❌ --mention 后面缺少 <aid>`);
+        process.exit(1);
+      }
+      for (const aid of val.split(',').map(s => s.trim()).filter(Boolean)) {
+        if (!isValidAid(aid)) {
+          console.error(`❌ --mention 的 aid 无效: ${aid}`);
+          process.exit(1);
+        }
+        mentions.push({ aid });
       }
     }
     if (args.includes('--mention-all')) {
@@ -4778,32 +4798,39 @@ Options:
 
 // ==================== Main ====================
 
-function getArgValue(args: string[], flag: string): string | undefined {
-  const idx = args.indexOf(flag);
-  return idx !== -1 && idx + 1 < args.length ? args[idx + 1] : undefined;
-}
-
 /**
- * 收集位置参数（从 startIdx 开始），跳过 flag 及其值。
- * 已知"取值"的 flag 会消耗下一个 arg；已知"开关"的 flag 只占自身。
+ * 收集位置参数（从 startIdx 开始）。
+ *
+ * flag 判定采用**精确匹配已知 flag 集合**，而非 `startsWith('--')`——
+ * 这样"正文恰好以 -- 开头"（如消息文本 `--file 坏了`）不会被误当 flag 吞掉。
+ * 仅当 token 精确等于某个已知 flag 时才按 flag 处理：
+ *   - VALUE_FLAGS：消耗自身 + 下一个 arg（flag 的值）
+ *   - BOOLEAN_FLAGS：仅消耗自身
+ * 其余以 -- 开头但不在集合中的 token，一律视为正文。
+ *
+ * 另支持 POSIX `--` end-of-options 分隔符：遇到单独的 `--` 后，
+ * 其后所有 token 无条件按正文处理（用于发送精确等于某 flag 的文本，如 `-- --encrypt`）。
  */
+const VALUE_FLAGS = new Set([
+  '--format', '--app', '--after-seq', '--limit', '--file', '--link',
+  '--payload', '--title', '--description', '--text', '--transcript',
+  '--as', '--content-type', '--mention', '--visibility', '--join-mode',
+  '--group-id', '--name', '--message', '--answer', '--page', '--size',
+  '--aun-path', '--thread',
+]);
+const BOOLEAN_FLAGS = new Set([
+  '--encrypt', '--mention-all',
+]);
 function collectPositional(args: string[], startIdx: number): string[] {
-  const VALUE_FLAGS = new Set([
-    '--format', '--app', '--after-seq', '--limit', '--file', '--link',
-    '--payload', '--title', '--description', '--text', '--transcript',
-    '--as', '--content-type', '--mention', '--visibility', '--join-mode',
-    '--group-id', '--name', '--message', '--answer', '--page', '--size',
-    '--aun-path',
-  ]);
   const out: string[] = [];
+  let endOfFlags = false;
   for (let i = startIdx; i < args.length; i++) {
     const a = args[i];
-    if (a.startsWith('--')) {
-      if (VALUE_FLAGS.has(a)) i++; // 跳过 flag 的值
-      // else: 开关 flag，自身已被跳过
-      continue;
-    }
-    out.push(a);
+    if (endOfFlags) { out.push(a); continue; }
+    if (a === '--') { endOfFlags = true; continue; }
+    if (VALUE_FLAGS.has(a)) { i++; continue; }   // 精确匹配取值 flag：跳过其值
+    if (BOOLEAN_FLAGS.has(a)) { continue; }       // 精确匹配开关 flag：仅跳过自身
+    out.push(a);                                  // 其余（含以 -- 开头的未知 token）= 正文
   }
   return out;
 }

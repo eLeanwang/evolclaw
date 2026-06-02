@@ -35,12 +35,18 @@ export interface PeerIdentity {
   agentMdHash: string;
   /** agent.md 内容最后变化的时间戳 */
   agentMdUpdatedAt: number;
-  /** 验签成功的时间戳 */
+  /** 验签成功的时间戳（仅 source==='agentmd' 时有意义，未验签为 0） */
   verifiedAt: number;
   /** 最后检查 agent.md 的时间戳 */
   lastCheckedAt: number;
-  /** agentmd=已验签，unknown=验签失败或无 agent.md */
-  source: 'agentmd' | 'unknown';
+  /**
+   * 身份来源与可信级别：
+   * - agentmd：agent.md 验签通过，身份可信
+   * - agentmd-unverified：agent.md 内容可解析但验签未通过（如对端 rekey 后用旧证书签名），
+   *   type 仍按声明解析，但不应作为已验签身份信任
+   * - unknown：无 agent.md 内容（拉取失败且本地无缓存）
+   */
+  source: 'agentmd' | 'agentmd-unverified' | 'unknown';
 }
 
 /**
@@ -90,13 +96,16 @@ export class PeerIdentityCache {
 
   /**
    * 从 agent.md 更新身份信息
+   * @param source 'agentmd'（验签通过）或 'agentmd-unverified'（内容可解析但验签未过）
+   * @param verifiedAt 验签通过时间戳；未验签传 0
    */
   private static updateFromAgentMd(
     channelType: string,
     peerId: string,
     agentDir: string,
     agentMd: string,
-    verifiedAt: number
+    verifiedAt: number,
+    source: 'agentmd' | 'agentmd-unverified' = 'agentmd'
   ): PeerIdentity {
     const typeMatch = agentMd.match(/^type:\s*["']?([^"'\n]+?)["']?\s*$/m);
     const nameMatch = agentMd.match(/^name:\s*["']?(.+?)["']?\s*$/m);
@@ -116,14 +125,14 @@ export class PeerIdentityCache {
       agentMdUpdatedAt: now,
       verifiedAt,
       lastCheckedAt: now,
-      source: 'agentmd',
+      source,
     };
 
     const filePath = this.getFilePath(channelType, peerId, agentDir);
     try {
       fs.mkdirSync(path.dirname(filePath), { recursive: true });
       fs.writeFileSync(filePath, JSON.stringify(identity, null, 2), 'utf-8');
-      logger.debug(`[PeerIdentityCache] Updated: ${channelType}#${peerId} type=${type} isAgent=${isAgent}`);
+      logger.debug(`[PeerIdentityCache] Updated: ${channelType}#${peerId} type=${type} isAgent=${isAgent} source=${source}`);
     } catch (err) {
       logger.warn(`[PeerIdentityCache] Failed to write cache: ${filePath} err=${err}`);
     }
@@ -206,27 +215,38 @@ export class PeerIdentityCache {
         throw new Error('agent.md content unavailable');
       }
 
-      // 3. 比较 hash，仅在变化时重写 peer-identity.json
+      // 验签通过 → 可信（source=agentmd）；否则 type 仍解析但标记未验证
+      const verified = result.verification?.status === 'verified';
+      const source: 'agentmd' | 'agentmd-unverified' = verified ? 'agentmd' : 'agentmd-unverified';
+      if (!verified) {
+        logger.info(`[PeerIdentityCache] agent.md unverified for ${peerId}: status=${result.verification?.status ?? 'unknown'} reason=${result.verification?.reason ?? '-'} (type 仍按声明解析)`);
+      }
+
+      // 3. 比较 hash，内容与可信级别都未变时仅 touch
       const newHash = 'sha256:' + crypto.createHash('sha256').update(content, 'utf-8').digest('hex');
       const cached = this.get(channelType, peerId, agentDir);
-      if (cached && cached.agentMdHash === newHash && cached.source === 'agentmd') {
+      if (cached && cached.agentMdHash === newHash && cached.source === source) {
         return this.touchLastChecked(channelType, peerId, agentDir, cached);
       }
-      return this.updateFromAgentMd(channelType, peerId, agentDir, content, Date.now());
+      return this.updateFromAgentMd(channelType, peerId, agentDir, content, verified ? Date.now() : 0, source);
 
     } catch (err) {
-      // 4. 网络失败，fallback 本地文件
+      // 4. agentmdSync 抛错（非网络失败——网络失败时它内部已 fallback 返回本地内容；
+      //    这里通常是无内容或解析异常）。兜底读本地文件，但无法重新验签，
+      //    故沿用缓存里已有的可信级别，绝不凭空升级为已验签。
       const localPath = agentMdPath(peerId);
       try {
         if (fs.existsSync(localPath)) {
           const localContent = fs.readFileSync(localPath, 'utf-8');
-          logger.info(`[PeerIdentityCache] Network failed, using local agent.md for ${peerId}`);
-          const localHash = 'sha256:' + crypto.createHash('sha256').update(localContent, 'utf-8').digest('hex');
           const cached = this.get(channelType, peerId, agentDir);
-          if (cached && cached.agentMdHash === localHash && cached.source === 'agentmd') {
+          logger.info(`[PeerIdentityCache] Using local agent.md for ${peerId} (cached source=${cached?.source ?? 'none'})`);
+          const localHash = 'sha256:' + crypto.createHash('sha256').update(localContent, 'utf-8').digest('hex');
+          if (cached && cached.agentMdHash === localHash && (cached.source === 'agentmd' || cached.source === 'agentmd-unverified')) {
             return this.touchLastChecked(channelType, peerId, agentDir, cached);
           }
-          return this.updateFromAgentMd(channelType, peerId, agentDir, localContent, cached?.verifiedAt ?? 0);
+          // 无匹配缓存可信级别 → 本地内容未经本次验签，标记为未验证
+          const fallbackSource = cached?.source === 'agentmd' ? 'agentmd' : 'agentmd-unverified';
+          return this.updateFromAgentMd(channelType, peerId, agentDir, localContent, cached?.verifiedAt ?? 0, fallbackSource);
         }
       } catch { /* ignore fs errors */ }
 

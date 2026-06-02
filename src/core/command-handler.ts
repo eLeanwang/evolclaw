@@ -48,6 +48,32 @@ const allEfforts = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
 type Effort = typeof allEfforts[number];
 const nonMaxEfforts = allEfforts.filter(e => e !== 'max' && e !== 'xhigh') as readonly Effort[];
 
+// ── CLI 透传（menu.action name=cli action=exec）─────────────────────────
+// 经消息通道的远程命令执行（RCE）：仅 owner、白名单内只读+配置命令、无 shell、超时+截断。
+// command → '*'(全部子命令放行) | Set(允许的子命令)。
+// 刻意排除破坏性/进程控制/数据面：restart stop start init dev mv rpc msg group net、
+//   agent set/new/delete/enable/disable/rename/reload、aid new/delete/agentmd、storage 写操作。
+const CLI_EXEC_WHITELIST: Record<string, '*' | Set<string>> = {
+  status:  '*',
+  model:   '*',
+  agent:   new Set(['list', 'show', 'get']),
+  aid:     new Set(['list', 'show', 'lookup']),
+  storage: new Set(['ls', 'quota']),
+};
+const CLI_EXEC_TIMEOUT_MS = 15_000;
+const CLI_EXEC_MAX_OUTPUT = 128 * 1024;
+
+/** 把命令行字符串分词为 argv，尊重单/双引号，不调用 shell。 */
+function tokenizeArgv(line: string): string[] {
+  const out: string[] = [];
+  const re = /"([^"]*)"|'([^']*)'|(\S+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(line)) !== null) {
+    out.push(m[1] ?? m[2] ?? m[3] ?? '');
+  }
+  return out;
+}
+
 function getAvailableEfforts(agent: AgentRunnerFull, model: string): readonly Effort[] {
   if (agent.name === 'claude') {
     return allEfforts;
@@ -1142,7 +1168,90 @@ export class CommandHandler {
       return { error: `不支持的 system action: ${action}`, code: 'NOT_SUPPORTED' };
     }
 
+    // ── /cli 透传 ──
+    if (cmdBase === '/cli') {
+      if (action !== 'exec') return { error: `不支持的 cli action: ${action}`, code: 'NOT_SUPPORTED' };
+      if (identity.role !== 'owner') return { error: '无权限：CLI 执行仅限 owner', code: 'NO_PERMISSION' };
+
+      const argv = Array.isArray(args?.argv) ? args.argv.map((x: any) => String(x))
+                 : typeof args?.command === 'string' ? tokenizeArgv(args.command)
+                 : null;
+      if (!argv || argv.length === 0) return { error: '缺少 argv 或 command', code: 'MISSING_VALUE' };
+
+      const allowed = CLI_EXEC_WHITELIST[argv[0]];
+      if (!allowed) return { error: `命令不在白名单: ${argv[0]}`, code: 'NOT_ALLOWED' };
+      if (allowed !== '*' && !allowed.has(argv[1] ?? '')) {
+        return { error: `子命令不在白名单: ${argv[0]} ${argv[1] ?? ''}`, code: 'NOT_ALLOWED' };
+      }
+      return await this.execCliPassthrough(argv);
+    }
+
     return { error: `不支持 action: ${cmdBase}`, code: 'NOT_SUPPORTED' };
+  }
+
+  /**
+   * CLI 透传执行：spawn `node dist/cli/index.js <argv>` 子进程，捕获输出回传。
+   * 不 in-process 调用（CLI handler 用 console.log + process.exit，spawn 行为与终端一致且隔离）。
+   * 调用方已完成 owner 校验与白名单过滤。
+   */
+  private async execCliPassthrough(
+    argv: string[]
+  ): Promise<{ data: any } | { error: string; code?: string }> {
+    const { spawn } = await import('child_process');
+    const cliEntry = path.join(getPackageRoot(), 'dist', 'cli', 'index.js');
+    const startedAt = Date.now();
+
+    return await new Promise((resolve) => {
+      let stdout = '';
+      let stderr = '';
+      let total = 0;
+      let truncated = false;
+      let settled = false;
+
+      const child = spawn('node', [cliEntry, ...argv], {
+        env: { ...process.env, EVOLCLAW_HOME: resolvePaths().root },
+        windowsHide: true,
+      });
+
+      const append = (buf: Buffer, sink: 'out' | 'err') => {
+        if (truncated) return;
+        const remaining = CLI_EXEC_MAX_OUTPUT - total;
+        if (remaining <= 0) { truncated = true; return; }
+        const chunk = buf.length > remaining ? buf.subarray(0, remaining) : buf;
+        total += chunk.length;
+        if (sink === 'out') stdout += chunk.toString('utf-8');
+        else stderr += chunk.toString('utf-8');
+        if (buf.length > remaining) truncated = true;
+      };
+      child.stdout?.on('data', (b: Buffer) => append(b, 'out'));
+      child.stderr?.on('data', (b: Buffer) => append(b, 'err'));
+
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        try { child.kill('SIGKILL'); } catch {}
+        logger.warn(`[CommandHandler] cli exec timeout: ${argv.join(' ')}`);
+        resolve({ error: `执行超时（${CLI_EXEC_TIMEOUT_MS / 1000}s）：${argv[0]}`, code: 'TIMEOUT' });
+      }, CLI_EXEC_TIMEOUT_MS);
+
+      child.on('error', (e: any) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve({ error: e?.message || String(e), code: 'INTERNAL' });
+      });
+
+      child.on('close', (exitCode: number | null) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve({ data: {
+          exitCode: exitCode ?? -1,
+          stdout, stderr, truncated,
+          durationMs: Date.now() - startedAt,
+        } });
+      });
+    });
   }
 
   /** 把 menu.action 委派给已有 slash 命令处理逻辑，把 OutboundPayload 包成结构化结果。 */
