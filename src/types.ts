@@ -267,7 +267,12 @@ export interface Message {
   replyContext?: ReplyContext;       // Channel 预构建的回复上下文（渠道无关）
   timestamp?: number;
   source?: 'user' | 'card-trigger' | 'trigger';
-  triggerMeta?: { triggerId: string; silent: boolean };
+  triggerMeta?: {
+    triggerId: string;
+    boundSessionId?: string;
+    pendingThread?: boolean;
+    rootMessageId?: string;
+  };
 }
 
 // 入站消息（渠道 → Gateway 的统一格式）
@@ -823,12 +828,13 @@ export interface ChannelCapabilities {
   markdown: boolean;
   thought: boolean;
   status: boolean;
+  thread: boolean;
 }
 
 // ── Trigger types ──
 
 export type TriggerScheduleType = 'delay' | 'at' | 'cron';
-export type TriggerSessionStrategy = 'latest' | 'silent';
+export type TriggerSessionStrategy = 'latest' | 'current' | 'thread';
 
 export interface Trigger {
   id: string;
@@ -849,6 +855,10 @@ export interface Trigger {
   fireCount: number;
   createdAt: number;
   updatedAt: number;
+  boundSessionId?: string;       // current：注册时绑定的 sessionId
+  threadKind?: 'aun' | 'feishu'; // thread：实现路径
+  rootMessageId?: string;        // thread(feishu)：注册时命令消息的 messageId
+  pendingThread?: boolean;       // thread(feishu)：首次触发待建话题
 }
 
 // ── Menu Protocol types ──
