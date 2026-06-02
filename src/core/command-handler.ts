@@ -1304,8 +1304,9 @@ export class CommandHandler {
     threadId?: string,
     chatType?: string,
     source?: 'user' | 'card-trigger',
+    messageId?: string,
   ): Promise<OutboundPayload | string | null | undefined> {
-    const result = await this._handleInternal(content, channel, channelId, sendMessage, userId, threadId, chatType, source);
+    const result = await this._handleInternal(content, channel, channelId, sendMessage, userId, threadId, chatType, source, messageId);
 
     return result;
   }
@@ -1319,6 +1320,7 @@ export class CommandHandler {
     threadId?: string,
     chatType?: string,
     source?: 'user' | 'card-trigger',
+    messageId?: string,
   ): Promise<OutboundPayload | null | undefined> {
     // 卡片回调的 chatType 不可靠（飞书 bot 单聊 chatId 也是 oc_ 前缀），
     // 不应覆盖 session 中已有的正确值
@@ -1914,7 +1916,7 @@ export class CommandHandler {
       const currentEffort = setmodelAgent.getEffort?.() || 'auto';
 
       const now = Math.floor(Date.now() / 1000);
-      const modelIds = hasModelSwitcher(setmodelAgent) ? setmodelAgent.listModels() : [];
+      const modelIds = hasModelSwitcher(setmodelAgent) ? await setmodelAgent.listModels() : [];
       const modelListData = {
         object: 'list',
         data: modelIds.map(id => ({ id, object: 'model', created: now, owned_by: setmodelAgent.name === 'codex' ? 'openai' : 'anthropic' })),
@@ -1938,7 +1940,7 @@ export class CommandHandler {
       const { session: modelSession } = modelResult;
       const modelAgent = this.getAgent(channel, modelSession.agentId);
 
-      const models = hasModelSwitcher(modelAgent) ? modelAgent.listModels() : [];
+      const models = hasModelSwitcher(modelAgent) ? await modelAgent.listModels() : [];
 
       if (!args) {
         const currentModel = hasModelSwitcher(modelAgent) ? modelAgent.getModel() : modelAgent.name;
@@ -3528,20 +3530,21 @@ export class CommandHandler {
 
     // /trigger 命令
     if (normalizedContent === '/trigger' || normalizedContent.startsWith('/trigger ')) {
-      const text = this.handleTrigger(normalizedContent, channel, channelId, userId ?? '', isAdmin);
+      const text = await this.handleTrigger(normalizedContent, channel, channelId, userId ?? '', isAdmin, messageId);
       return { kind: 'command.result' as const, text };
     }
 
     return null;
   }
 
-  private handleTrigger(
+  private async handleTrigger(
     content: string,
     channel: string,
     channelId: string,
     peerId: string,
     isAdmin: boolean,
-  ): string {
+    messageId?: string,
+  ): Promise<string> {
     // Resolve trigger manager/scheduler from the owning agent of this channel
     const owningAgent = this.getOwningAgent(channel);
     const scheduler = (owningAgent?.triggerScheduler ?? this.triggerScheduler) as TriggerScheduler | undefined;
@@ -3688,6 +3691,28 @@ export class CommandHandler {
       };
 
       try {
+        // Strategy-based session binding
+        if (parsed.targetSessionStrategy === 'current') {
+          const active = await this.sessionManager.getActiveSession(channel, channelId);
+          if (!active) return '❌ 当前没有活跃会话，改用 --session latest 或 thread';
+          trigger.boundSessionId = active.id;
+        } else if (parsed.targetSessionStrategy === 'thread') {
+          const targetAdapterName = parsed.targetChannel ?? channel;
+          const adapter = this.adapters.get(targetAdapterName);
+          if (!adapter?.capabilities.thread) return '❌ 目标渠道不支持 thread 会话';
+          const channelType = adapter.channelKey.split('#')[0];
+          trigger.targetChannelType = channelType;
+          if (channelType === 'aun') {
+            trigger.threadKind = 'aun';
+            trigger.targetThreadId = `trigger-${trigger.id}`;
+          } else {
+            if (!messageId) return '❌ 飞书 thread 模式需要消息 ID，请重新发送命令';
+            trigger.threadKind = 'feishu';
+            trigger.rootMessageId = messageId;
+            trigger.pendingThread = true;
+          }
+        }
+
         // Validate name uniqueness before persisting (manager.register writes to disk)
         // scheduler.register is in-memory only and cannot fail, so order is safe here.
         // If manager.register throws (duplicate name/ID), nothing is persisted.
