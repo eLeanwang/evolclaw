@@ -13,7 +13,7 @@ export function sessionToFile(session: Session): SessionFile {
     if (session.metadata.agentSessions) metadata.agentSessions = session.metadata.agentSessions;
     if (session.metadata.resumeAt) metadata.resumeAt = session.metadata.resumeAt;
     for (const [k, v] of Object.entries(session.metadata)) {
-      if (['isActive', 'channelKey', 'permissionMode', 'peerId', 'peerName', 'groupId', 'replyContext', 'agentSessions', 'resumeAt'].includes(k)) continue;
+      if (['isActive', 'channelKey', 'channelName', 'permissionMode', 'peerId', 'peerName', 'groupId', 'replyContext', 'agentSessions', 'resumeAt'].includes(k)) continue;
       if (v !== undefined) metadata[k] = v;
     }
   }

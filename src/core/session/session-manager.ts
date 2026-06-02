@@ -121,7 +121,7 @@ export class SessionManager {
    * 解析 chat 目录路径。
    * 需要明确的 channelType + selfAID 才能确定路径。
    */
-  private resolveChatDir(channel: string, channelId: string, channelType: string, selfAID: string): string {
+  private resolveChatDir(channel: string, channelId: string, channelType: string, selfAID?: string): string {
     return chatDirPath(this.sessionsDir, channelType, channelId, selfAID);
   }
 
@@ -129,13 +129,15 @@ export class SessionManager {
    * 给定明确的 channelType + selfAID 时直接计算路径（不扫描）。
    * 用于 caller 已经知道完整路由信息的场景（如 message-bridge 透传）。
    */
-  private resolveChatDirExact(channel: string, channelId: string, channelType: string, selfAID: string): string {
+  private resolveChatDirExact(channel: string, channelId: string, channelType: string, selfAID?: string): string {
     return chatDirPath(this.sessionsDir, channelType, channelId, selfAID);
   }
 
   private resolveChatDirFromSession(session: Session): string {
-    const channelType = session.channelType || session.channel;
-    return chatDirPath(this.sessionsDir, channelType, session.channelId, session.selfAID);
+    if (!session.channelType) {
+      throw new Error(`[SessionManager] missing channelType for session ${session.id}`);
+    }
+    return chatDirPath(this.sessionsDir, session.channelType, session.channelId, session.selfAID);
   }
 
   /** Public accessor: get the chat directory path for a session (for message log etc.) */
@@ -144,7 +146,7 @@ export class SessionManager {
   }
 
   /** Like resolveChatDir but also ensures the dir + _threads + _trash exist. */
-  private ensureResolvedChatDir(channel: string, channelId: string, channelType: string, selfAID: string): string {
+  private ensureResolvedChatDir(channel: string, channelId: string, channelType: string, selfAID?: string): string {
     const dir = this.resolveChatDir(channel, channelId, channelType, selfAID);
     fs.mkdirSync(dir, { recursive: true });
     fs.mkdirSync(path.join(dir, '_threads'), { recursive: true });
@@ -186,7 +188,7 @@ export class SessionManager {
    * 如果没有则扫描已有目录推断。用于操作已有 session 的公共方法。
    */
   private resolveChatDirSafe(channel: string, channelId: string, channelType?: string, selfAID?: string): string {
-    if (channelType && selfAID) {
+    if (channelType && (selfAID || channelType !== 'aun')) {
       return this.resolveChatDir(channel, channelId, channelType, selfAID);
     }
     // 尝试从已有目录推断
@@ -200,7 +202,7 @@ export class SessionManager {
    * 如果没有则扫描已有目录推断。确保目录存在。
    */
   private ensureResolvedChatDirSafe(channel: string, channelId: string, channelType?: string, selfAID?: string): string {
-    if (channelType && selfAID) {
+    if (channelType && (selfAID || channelType !== 'aun')) {
       return this.ensureResolvedChatDir(channel, channelId, channelType, selfAID);
     }
     // 尝试从已有目录推断
@@ -505,8 +507,8 @@ export class SessionManager {
     channelType?: string,
     peerType?: string
   ): Promise<Session> {
-    if (!selfAID) {
-      throw new Error(`[SessionManager] getOrCreateSession requires selfAID. channel="${channel}" channelId="${channelId}"`);
+    if (!selfAID && channelType === 'aun') {
+      throw new Error(`[SessionManager] getOrCreateSession requires selfAID for aun channel. channelId="${channelId}"`);
     }
     if (!channelType) {
       throw new Error(`[SessionManager] getOrCreateSession requires channelType. channel="${channel}" channelId="${channelId}"`);

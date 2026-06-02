@@ -7,7 +7,7 @@ export interface SessionFile {
   channelType: string;        // 类型（aun/feishu/wechat/...）；写入时确保填充
   channelId: string;          // 路由键
   sessionKey: string;         // agent 内部会话路由键 (channelType#urlEncode(channelId)#urlEncode(threadId))
-  selfAID: string;            // 本地身份（agent AID）
+  selfAID?: string;           // 本地身份（agent AID）；非 aun 渠道可为空
   agentType: string;
   threadId: string;
   chatType: string;
@@ -52,12 +52,14 @@ function decodeSegment(s: string): string {
 
 /**
  * 计算 chat 目录的完整路径。
- * 统一三层：sessionsDir/<channelType>/<urlEncode(selfAID)>/<urlEncode(channelId)>/
- *
- * 注：channelType 自身不编码（限定枚举值，不含非法字符）。
+ * - aun: sessionsDir/aun/<urlEncode(selfAID|'_unknown')>/<urlEncode(channelId)>/
+ * - 其它: sessionsDir/<channelType>/<urlEncode(channelId)>/
  */
-export function chatDirPath(sessionsDir: string, channelType: string, channelId: string, selfAID: string): string {
-  return path.join(sessionsDir, channelType, encodeSegment(selfAID), encodeSegment(channelId));
+export function chatDirPath(sessionsDir: string, channelType: string, channelId: string, selfAID?: string): string {
+  if (channelType === 'aun') {
+    return path.join(sessionsDir, channelType, encodeSegment(selfAID || '_unknown'), encodeSegment(channelId));
+  }
+  return path.join(sessionsDir, channelType, encodeSegment(channelId));
 }
 
 /** 解码目录段（用于扫描时把目录名还原为原始 channelId/selfAID） */
@@ -149,7 +151,8 @@ export function readAllJsonlLines<T = any>(filePath: string): T[] {
 
 /**
  * 扫描所有 chat 目录。
- * 统一三层：channelType / selfAID / channelId。
+ * - aun: channelType / selfAID / channelId  (3层)
+ * - 其它: channelType / channelId           (2层)
  */
 export function scanChatDirs(sessionsDir: string): {
   channelType: string;
@@ -171,24 +174,37 @@ export function scanChatDirs(sessionsDir: string): {
     if (!typeEntry.isDirectory()) continue;
     const channelType = typeEntry.name;
     const typeDir = path.join(sessionsDir, channelType);
-    let selfEntries: fs.Dirent[];
+    let level2Entries: fs.Dirent[];
     try {
-      selfEntries = fs.readdirSync(typeDir, { withFileTypes: true });
+      level2Entries = fs.readdirSync(typeDir, { withFileTypes: true });
     } catch { continue; }
-    for (const selfEntry of selfEntries) {
-      if (!selfEntry.isDirectory()) continue;
-      const selfDir = path.join(typeDir, selfEntry.name);
-      let chatEntries: fs.Dirent[];
-      try {
-        chatEntries = fs.readdirSync(selfDir, { withFileTypes: true });
-      } catch { continue; }
-      for (const chatEntry of chatEntries) {
+
+    if (channelType === 'aun') {
+      // 3-layer: aun/selfAID/channelId
+      for (const selfEntry of level2Entries) {
+        if (!selfEntry.isDirectory()) continue;
+        const selfDir = path.join(typeDir, selfEntry.name);
+        let chatEntries: fs.Dirent[];
+        try { chatEntries = fs.readdirSync(selfDir, { withFileTypes: true }); } catch { continue; }
+        for (const chatEntry of chatEntries) {
+          if (!chatEntry.isDirectory()) continue;
+          results.push({
+            channelType,
+            selfAID: decodeSegment(selfEntry.name),
+            channelId: decodeSegment(chatEntry.name),
+            dirPath: path.join(selfDir, chatEntry.name),
+          });
+        }
+      }
+    } else {
+      // 2-layer: channelType/channelId
+      for (const chatEntry of level2Entries) {
         if (!chatEntry.isDirectory()) continue;
         results.push({
           channelType,
-          selfAID: decodeSegment(selfEntry.name),
+          selfAID: '',
           channelId: decodeSegment(chatEntry.name),
-          dirPath: path.join(selfDir, chatEntry.name),
+          dirPath: path.join(typeDir, chatEntry.name),
         });
       }
     }
@@ -208,7 +224,7 @@ export function scanMetaFiles(chatDir: string): string[] {
   }
 }
 
-export function ensureChatDir(sessionsDir: string, channelType: string, channelId: string, selfAID: string): string {
+export function ensureChatDir(sessionsDir: string, channelType: string, channelId: string, selfAID?: string): string {
   const dir = chatDirPath(sessionsDir, channelType, channelId, selfAID);
   fs.mkdirSync(dir, { recursive: true });
   fs.mkdirSync(path.join(dir, '_threads'), { recursive: true });

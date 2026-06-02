@@ -226,7 +226,7 @@ export interface Session {
   channel: string;       // 实例名（如 'aun_main'、'aun-2'）
   channelType?: string;  // 类型（'aun' | 'feishu' | 'wechat' | 'dingtalk' | 'qqbot' | 'wecom'）；缺失时用 channel 做 fallback
   channelId: string;     // 路由键。AUN 私聊=peerAID；AUN 群聊=groupId；其它 channel=原 channelId
-  selfAID: string;         // 本地身份（agent AID）
+  selfAID?: string;        // 本地身份（agent AID）；非 aun 渠道可为空
   agentId: string;  // 路由维度，默认 'claude'
   threadId: string;  // 路由维度，默认 ''
   sessionKey: string;  // agent 内部会话路由键 (channelType#urlEncode(channelId)#urlEncode(threadId))
@@ -831,6 +831,7 @@ export interface Trigger {
   nextFireAt: number;          // Unix ms
   targetChannel: string;
   targetChannelId: string;
+  targetChannelType?: string;
   targetThreadId?: string;
   targetSessionStrategy: TriggerSessionStrategy;
   agentId?: string;

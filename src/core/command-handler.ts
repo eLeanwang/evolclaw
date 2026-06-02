@@ -1806,7 +1806,7 @@ export class CommandHandler {
       const modelIds = hasModelSwitcher(setmodelAgent) ? setmodelAgent.listModels() : [];
       const modelListData = {
         object: 'list',
-        data: modelIds.map(id => ({ id, object: 'model', created: now, owned_by: 'anthropic' })),
+        data: modelIds.map(id => ({ id, object: 'model', created: now, owned_by: setmodelAgent.name === 'codex' ? 'openai' : 'anthropic' })),
       };
 
       return { kind: 'command.result' as const, text: JSON.stringify({
@@ -1891,18 +1891,26 @@ export class CommandHandler {
           return typeof delegated === 'string' ? { kind: 'command.result' as const, text: delegated } : delegated;
         } else if ((allEfforts as readonly string[]).includes(arg)) {
           return { kind: 'command.error' as const, text: `⚠️ 请使用 /effort ${arg} 调整推理强度` };
-        } else if (models.includes(arg)) {
-          newModel = arg;
         } else {
-          const modelList = models.map((m: string) => `  ${m === currentModel ? '✓' : ' '} ${modelDisplayLabel(modelAgent, m)}`).join('\n');
-          const effortHint = efforts.length > 0 ? `\n\n推理强度请使用 /effort 命令` : '';
-          return { kind: 'command.error' as const, text: `❌ 无效参数: ${arg}\n\n可用模型：\n${modelList}${effortHint}` };
+          const resolvedArg = hasModelSwitcher(modelAgent) ? (modelAgent.resolveModelId?.(arg) ?? arg) : arg;
+          if (models.includes(resolvedArg)) {
+            newModel = resolvedArg;
+          } else if (models.includes(arg)) {
+            newModel = arg;
+          } else {
+            const modelList = models.map((m: string) => `  ${m === currentModel ? '✓' : ' '} ${modelDisplayLabel(modelAgent, m)}`).join('\n');
+            const effortHint = efforts.length > 0 ? `\n\n推理强度请使用 /effort 命令` : '';
+            return { kind: 'command.error' as const, text: `❌ 无效参数: ${arg}\n\n可用模型：\n${modelList}${effortHint}` };
+          }
         }
       } else {
         // 双参数：model effort
-        const [modelArg, effortArg] = parts;
+        const [modelArgRaw, effortArg] = parts;
+        const modelArg = hasModelSwitcher(modelAgent)
+          ? (models.includes(modelArgRaw) ? modelArgRaw : (modelAgent.resolveModelId?.(modelArgRaw) ?? modelArgRaw))
+          : modelArgRaw;
         if (!models.includes(modelArg)) {
-          return { kind: 'command.error' as const, text: `❌ 无效的模型ID: ${modelArg}` };
+          return { kind: 'command.error' as const, text: `❌ 无效的模型ID: ${modelArgRaw}` };
         }
         const targetEfforts = getAvailableEfforts(modelAgent, modelArg);
         if (targetEfforts.length === 0) {
@@ -3549,6 +3557,7 @@ export class CommandHandler {
         nextFireAt,
         targetChannel: parsed.targetChannel ?? channel,
         targetChannelId: parsed.targetChannelId ?? channelId,
+        targetChannelType: this.resolveChannelType(parsed.targetChannel ?? channel),
         targetThreadId: parsed.targetThreadId,
         targetSessionStrategy: parsed.targetSessionStrategy,
         agentId: parsed.agentId,

@@ -1,5 +1,15 @@
 # Changelog
 
+## v3.1.5 (2026-06-02)
+
+### Bug Fixes
+
+- **Trigger channelType 传播** — Trigger 新增 `targetChannelType` 字段，`buildSyntheticMessage` 正确填充 `channelType`，修复触发器消息无法创建 session 的问题
+- **Session mapper 过滤 channelName** — `sessionToFile` 不再将 `channelName` 写入 metadata
+- **resolveChatDirFromSession 严格校验** — 缺失 `channelType` 时抛出明确错误而非静默 fallback
+- **/model 别名解析** — `/model sonnet` 等短别名正确解析为完整 model ID
+- **test 脚本修复** — `package.json` test 脚本改为 `vitest run`
+
 ## v3.1.4 (2026-05-27)
 
 ### New Features

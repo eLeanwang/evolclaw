@@ -237,6 +237,7 @@ export class TriggerScheduler {
   private buildSyntheticMessage(trigger: Trigger, messageId: string): Message {
     return {
       channel: trigger.targetChannel,
+      channelType: trigger.targetChannelType,
       channelId: trigger.targetChannelId,
       selfAID: this.aid,
       threadId: trigger.targetThreadId ?? '',
