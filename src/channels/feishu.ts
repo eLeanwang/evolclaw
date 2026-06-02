@@ -472,7 +472,7 @@ export class FeishuChannel {
     return undefined;
   }
 
-  async sendMessage(chatId: string, content: string, options?: { title?: string; replyToMessageId?: string; forceText?: boolean; mentionUserIds?: string[]; replyInThread?: boolean }): Promise<void> {
+  async sendMessage(chatId: string, content: string, options?: { title?: string; replyToMessageId?: string; forceText?: boolean; mentionUserIds?: string[]; replyInThread?: boolean; onThreadCreated?: (threadId: string) => void }): Promise<void> {
     if (!this.client) return;
 
     if (!content || content.trim() === '') {
@@ -578,15 +578,14 @@ export class FeishuChannel {
         if (options.replyInThread) {
           replyData.reply_in_thread = true;
         }
-        await this.client.im.message.reply({
+        const replyRes = await this.client.im.message.reply({
           path: { message_id: options.replyToMessageId },
           data: replyData
         });
-      } else {
-        await this.client.im.message.create({
-          params: { receive_id_type: chatId.startsWith('ou_') ? 'open_id' : chatId.startsWith('on_') ? 'union_id' : 'chat_id' },
-          data: { receive_id: chatId, msg_type: msgType, content: msgContent }
-        });
+        if (options.replyInThread && options.onThreadCreated) {
+          const newThreadId = (replyRes as any)?.data?.thread_id;
+          if (newThreadId) options.onThreadCreated(newThreadId);
+        }
       }
 
       if (hasRichImages) {
@@ -1626,6 +1625,7 @@ export class FeishuChannelPlugin implements ChannelPlugin {
             case 'result.error': {
               const sendCtx: any = { ...(ctx ?? {}) };
               if (payload.kind === 'result.text' && payload.isFinal) sendCtx.title = '✅ 最终回复:';
+              if (ctx?.metadata?.onThreadCreated) sendCtx.onThreadCreated = ctx.metadata.onThreadCreated;
               await channel.sendMessage(channelId, payload.text, sendCtx);
               return;
             }

@@ -280,6 +280,17 @@ export class MessageProcessor {
     // 先解析会话，再优先用 session.metadata.channelKey 精确定位实例级 adapter
     // message.channel 现在存实例名（channelName），可直接用于精确路由
     const { session, absoluteProjectPath } = await this.resolveSession(message);
+
+    // thread(feishu) pending strategy: inject replyContext so first reply creates the thread
+    // TODO: capture returned thread_id from Feishu reply and write back to trigger.targetThreadId
+    if (message.triggerMeta?.pendingThread && message.triggerMeta?.rootMessageId) {
+      message.replyContext = {
+        ...(message.replyContext ?? {}),
+        replyToMessageId: message.triggerMeta.rootMessageId,
+        replyInThread: true,
+      };
+    }
+
     const channelKey = session.metadata?.channelKey || message.channel;
     const channelInfo = this.resolveChannelInfo(channelKey);
 
@@ -461,7 +472,7 @@ export class MessageProcessor {
     };
 
     const isProactive = session.sessionMode === 'proactive';
-    const isAutonomous = session.sessionMode === 'autonomous' || message.triggerMeta?.silent === true;
+    const isAutonomous = session.sessionMode === 'autonomous';
     const envelope = buildEnvelope({
       taskId,
       channel: message.channel,
@@ -829,9 +840,6 @@ export class MessageProcessor {
           );
 
           if (compacted) {
-            // compact 成功，清除第一次流中混入的错误文本，再重试
-            const ctxErrPattern = /prompt is too long|input is too long|上下文过长/i;
-            renderer.stripContextError(ctxErrPattern);
             renderer.addNotice('✅ 压缩完成，继续处理...', 'info', 'compact-retry', true);
             const retryStream = await agent.runQuery(
               session.id,
@@ -872,7 +880,6 @@ export class MessageProcessor {
         contextTooLongPattern.test(streamResult.fullText)
       );
       if (isPromptTooLong) {
-        renderer.stripContextError(contextTooLongPattern);
         renderer.addNotice('上下文过长，正在压缩会话...', 'warn', 'compact-trigger', true);
         await renderer.flush();
         const compacted = await agent.compact(session.id, session.agentSessionId!, absoluteProjectPath);
@@ -900,7 +907,6 @@ export class MessageProcessor {
             contextTooLongPattern.test(streamResult.fullText)
           );
           if (retryStillTooLong) {
-            renderer.stripContextError(contextTooLongPattern);
             renderer.addNotice(getContextTooLongHint(agent), 'warn', 'context-too-long', true);
           }
         } else {
@@ -1115,10 +1121,6 @@ export class MessageProcessor {
           } else {
             this.eventBus.publish({ type: 'trigger:completed', triggerId: message.triggerMeta.triggerId, messageId: messageId, durationMs });
           }
-          // Clean up autonomous sessions after completion to avoid accumulating orphaned sessions
-          if (session.sessionMode === 'autonomous') {
-            this.sessionManager.unbindSession(session.id).catch(() => {});
-          }
         }
         await this.sessionManager.recordSuccess(session.id);
 
@@ -1277,24 +1279,16 @@ export class MessageProcessor {
 
     const projectPath = this.agentRegistry?.resolveByChannel(message.channel)?.projectPath || process.cwd();
 
-    // --session silent 触发器：新建独立 autonomous 会话，与原会话历史隔离
-    if (message.triggerMeta?.silent) {
-      const prevActive = await this.sessionManager.getActiveSession(message.channel, message.channelId);
-      const session = await this.sessionManager.createNewSession(
-        message.channel,
-        message.channelId,
-        projectPath,
-        `trigger-${message.triggerMeta.triggerId.slice(0, 8)}`,
-      );
-      await this.sessionManager.updateSession(session.id, { sessionMode: 'autonomous' });
-      session.sessionMode = 'autonomous';
-      if (prevActive) {
-        await this.sessionManager.switchToSession(message.channel, message.channelId, prevActive.id);
+    // current strategy: resume bound session, make it active so output is not suppressed
+    if (message.triggerMeta?.boundSessionId) {
+      const bound = await this.sessionManager.getSessionById(message.triggerMeta.boundSessionId);
+      if (bound) {
+        await this.sessionManager.switchToSession(bound.channel, bound.channelId, bound.id);
+        const absoluteProjectPath = path.isAbsolute(bound.projectPath)
+          ? bound.projectPath : path.resolve(process.cwd(), bound.projectPath);
+        return { session: bound, absoluteProjectPath };
       }
-      const absoluteProjectPath = path.isAbsolute(session.projectPath)
-        ? session.projectPath
-        : path.resolve(process.cwd(), session.projectPath);
-      return { session, absoluteProjectPath };
+      logger.warn(`[MessageProcessor] Bound session ${message.triggerMeta.boundSessionId} not found, falling back to latest`);
     }
 
     const session = await this.sessionManager.getOrCreateSession(
@@ -1535,7 +1529,8 @@ export class MessageProcessor {
         // SDK 可能产生多个 complete 事件（如 subagent 或 auto-compact 二次查询），
         // 仅记录状态，最终 flush(true) 在流结束后统一执行
         if (event.type === 'complete') {
-          logger.info(`[MessageProcessor] complete event: isError=${event.isError} terminalReason=${event.terminalReason ?? 'none'} subtype=${event.subtype ?? 'none'} hasReceivedText=${hasReceivedText}`);
+          const isAbort = event.terminalReason === 'aborted_streaming' || event.terminalReason === 'aborted_tools';
+          logger.info(`[MessageProcessor] ${isAbort ? 'task interrupted' : 'complete event'}: isError=${event.isError} terminalReason=${event.terminalReason ?? 'none'} subtype=${event.subtype ?? 'none'} hasReceivedText=${hasReceivedText}`);
 
           // 自动回填会话名称
           if (event.sessionTitle && session.name === '默认会话') {
