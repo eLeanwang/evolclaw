@@ -1297,12 +1297,16 @@ export class MessageProcessor {
     if (message.triggerMeta?.boundSessionId) {
       const bound = await this.sessionManager.getSessionById(message.triggerMeta.boundSessionId);
       if (bound) {
-        await this.sessionManager.switchToSession(bound.channel, bound.channelId, bound.id);
-        const absoluteProjectPath = path.isAbsolute(bound.projectPath)
-          ? bound.projectPath : path.resolve(process.cwd(), bound.projectPath);
-        return { session: bound, absoluteProjectPath };
+        const switched = await this.sessionManager.switchToSession(bound.channel, bound.channelId, bound.id);
+        if (switched) {
+          const absoluteProjectPath = path.isAbsolute(switched.projectPath)
+            ? switched.projectPath : path.resolve(process.cwd(), switched.projectPath);
+          return { session: switched, absoluteProjectPath };
+        }
+        logger.warn(`[MessageProcessor] switchToSession failed for bound session ${bound.id}, falling back to latest`);
+      } else {
+        logger.warn(`[MessageProcessor] Bound session ${message.triggerMeta.boundSessionId} not found, falling back to latest`);
       }
-      logger.warn(`[MessageProcessor] Bound session ${message.triggerMeta.boundSessionId} not found, falling back to latest`);
     }
 
     const session = await this.sessionManager.getOrCreateSession(
