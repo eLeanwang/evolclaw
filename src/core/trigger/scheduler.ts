@@ -235,12 +235,12 @@ export class TriggerScheduler {
   }
 
   private buildSyntheticMessage(trigger: Trigger, messageId: string): Message {
-    return {
+    const base: Message = {
       channel: trigger.targetChannel,
       channelType: trigger.targetChannelType,
       channelId: trigger.targetChannelId,
       selfAID: this.aid,
-      threadId: trigger.targetThreadId ?? '',
+      threadId: '',
       agentId: trigger.agentId,
       chatType: 'private',
       peerId: `__trigger__:${trigger.id}`,  // unique per trigger to prevent greedy merge
@@ -248,10 +248,23 @@ export class TriggerScheduler {
       messageId,
       timestamp: Date.now(),
       source: 'trigger',
-      triggerMeta: {
-        triggerId: trigger.id,
-        silent: trigger.targetSessionStrategy === 'silent',
-      },
     };
+
+    if (trigger.targetSessionStrategy === 'current') {
+      base.triggerMeta = { triggerId: trigger.id, boundSessionId: trigger.boundSessionId };
+    } else if (trigger.targetSessionStrategy === 'thread') {
+      if (trigger.threadKind === 'feishu' && trigger.pendingThread) {
+        base.triggerMeta = { triggerId: trigger.id, pendingThread: true, rootMessageId: trigger.rootMessageId };
+        // threadId intentionally empty — first fire builds the thread via reply_in_thread
+      } else {
+        base.threadId = trigger.targetThreadId ?? '';
+        base.triggerMeta = { triggerId: trigger.id };
+      }
+    } else {
+      // latest
+      base.triggerMeta = { triggerId: trigger.id };
+    }
+
+    return base;
   }
 }
