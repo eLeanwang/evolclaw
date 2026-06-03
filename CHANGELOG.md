@@ -1,5 +1,32 @@
 # Changelog
 
+## v3.1.6 (2026-06-03)
+
+### New Features
+
+- **AUN 图片附件支持** — AUN 私聊/群聊附件中的图片自动检测（元数据/文件名/magic bytes 三重检测），base64 编码后直接传给 Agent，不再要求 Read 工具读取
+- **selfAID session 注入** — 从 channel key 解析 selfAID，透传至 MessageBridge → CommandHandler → `getOrCreateSession`，修复 AUN 多身份场景 session 归属错误
+- **watch-web 单实例保护** — 启动前清理旧实例（按 instance 文件 + 端口兜底），端口冲突时自动切换并提示；前端新增 token 失效自动回配对页、退出按钮、配对码过期刷新
+
+### Improvements
+
+- **init 流程优化** — `cmdInit` 一次性写入所有可用 baseagents（不只写选中的那个）；新增 projects 默认目录询问步骤；默认项目路径改为 `EVOLCLAW_HOME/projects`；取消 init 后自动进入 `agent new`，改为打印提示
+- **1M 上下文窗口** — `claude-opus-4-8` / `claude-sonnet-4-6` 自动追加 `[1m]` 后缀，`autoCompactWindow` 随之调整为 900000
+- **上下文用量追踪** — complete 事件新增 `contextUsage`（totalTokens/maxTokens/percentage），`usage` 字段重命名为 `tokenUsage`，随 `status.completed` 元数据下发
+- **模型别名缓存 TTL** — 从 1h 缩短至 5min
+- **`/cli` 远程透传** — 经消息通道远程执行 CLI，仅 owner 可用，白名单只读+配置命令，spawn 无 shell，15s 超时 + 128KB 截断
+- **proximity ECK 注入** — `same_device/same_network/same_egress_ip` 从 V2 E2EE 解密结果提取，注入 venue.md 条件块渲染
+- **fastaun 0.4.9** — 含 SPKI 双格式指纹匹配（0.4.8）和 watch-web 单实例相关修复（0.4.9）
+
+### Bug Fixes
+
+- **Feishu merge_forward 内容重复** — 直接转发时丢弃 quotedText，避免内容重复
+- **Feishu seenMsg 文件写入** — 仅在有记录被 GC 清理时才重写文件；seenMessages 清空时改为 unlink
+- **peer-identity 验签** — 新增 `agentmd-unverified` 来源；缓存命中时从 `verify_status` 恢复验签状态，修复 source 误降级
+- **process-introspect** — 改用 `/proc/stat btime`（绝对 epoch）替代 uptime 计算进程启动时间，修复长时间运行后 PID 复用误判
+- **evolagent.load IPC 超时** — AUN WebSocket 冷启动常 >3s，IPC 超时从默认值调整为 30s
+- **交互路由 markWaiting/unmarkWaiting** — 新增提前占位方法，适配异步发卡片场景的等待计数
+
 ## v3.1.5 (2026-06-02)
 
 ### New Features
