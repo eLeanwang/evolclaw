@@ -332,7 +332,8 @@ export class FeishuChannel {
             else if (msg.message_type === 'merge_forward') {
               const { text: mergedText, images: mergedImages } = await this.extractMergeForwardContent(msg.message_id, msg.chat_id);
               if (mergedText) {
-                const finalContent = quotedText + mergedText;
+                // 直接发送合并转发时，parent_id 指向自己，引用解析会把相同内容填入 quotedText 导致重复，丢弃
+                const finalContent = mergedText;
                 const allImages = [...quotedImages, ...mergedImages];
                 await this.messageHandler({ channelId: msg.chat_id, content: finalContent, images: allImages.length > 0 ? allImages : undefined, peerId, peerName, messageId: msg.message_id, threadId, rootId, chatType });
               } else {
