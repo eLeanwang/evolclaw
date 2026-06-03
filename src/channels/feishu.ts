@@ -781,13 +781,17 @@ export class FeishuChannel {
       if (cleaned > 0) logger.info(`[Feishu] Cleaned ${cleaned} old message IDs`);
       // seenThreads 无时间戳，仅限容量（话题持久存在，不按时间清理）
       if (this.seenThreads.size > 1000) this.seenThreads.clear();
-      // 重写文件，去掉过期条目
-      if (this.config.seenMsgFile && this.seenMessages.size > 0) {
+      // 重写文件，去掉过期条目（仅在有记录被清理时才写）
+      if (cleaned > 0 && this.config.seenMsgFile) {
         try {
-          const lines = [...this.seenMessages.entries()]
-            .map(([id, ts]) => JSON.stringify({ id, ts }))
-            .join('\n') + '\n';
-          fs.writeFileSync(this.config.seenMsgFile, lines);
+          if (this.seenMessages.size === 0) {
+            fs.unlinkSync(this.config.seenMsgFile);
+          } else {
+            const lines = [...this.seenMessages.entries()]
+              .map(([id, ts]) => JSON.stringify({ id, ts }))
+              .join('\n') + '\n';
+            fs.writeFileSync(this.config.seenMsgFile, lines);
+          }
         } catch {}
       }
     }, 60 * 60 * 1000);
