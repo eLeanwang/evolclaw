@@ -555,11 +555,14 @@ export async function agentCreateInteractive(opts: AgentCreateInteractiveOpts = 
       console.warn(`  ⚠ agent.md generation failed: ${e?.message || e}`);
     }
 
-    // Attempt hot-load via IPC (if daemon is running)
+    // Attempt hot-load via IPC (if daemon is running).
+    // Cold-starting a new agent (connecting AUN WebSocket) routinely takes
+    // >3s, so use a generous timeout to avoid a false "service not running"
+    // report while the daemon actually finishes bringing the agent online.
     let hotLoaded = false;
     let hotLoadError: string | undefined;
     try {
-      const ipcResult = await ipcQuery(p.socket, { type: 'evolagent.load', aid }) as any;
+      const ipcResult = await ipcQuery(p.socket, { type: 'evolagent.load', aid }, 30_000) as any;
       if (ipcResult?.ok) {
         hotLoaded = true;
       } else if (ipcResult) {
@@ -711,11 +714,14 @@ export async function agentCreateNonInteractive(opts: AgentCreateNonInteractiveO
     console.warn(`⚠ agent.md generation failed: ${e?.message || e}`);
   }
 
-  // Attempt hot-load via IPC (if daemon is running)
+  // Attempt hot-load via IPC (if daemon is running).
+  // Cold-starting a new agent (connecting AUN WebSocket) routinely takes
+  // >3s, so use a generous timeout to avoid a false "service not running"
+  // report while the daemon actually finishes bringing the agent online.
   let hotLoaded = false;
   let hotLoadError: string | undefined;
   try {
-    const ipcResult = await ipcQuery(p.socket, { type: 'evolagent.load', aid: opts.aid }) as any;
+    const ipcResult = await ipcQuery(p.socket, { type: 'evolagent.load', aid: opts.aid }, 30_000) as any;
     if (ipcResult?.ok) {
       hotLoaded = true;
     } else if (ipcResult) {
