@@ -5,6 +5,10 @@ config.json
 
 # 运行时数据
 data/*
+dns_cache.db*
+
+# aunproxy（独立仓库，嵌套工作树中）
+aunproxy/
 
 # kits 同步元数据（运行时生成）
 kits/.kits-version
