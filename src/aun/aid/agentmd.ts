@@ -136,10 +136,13 @@ export async function agentmdSync(
   try {
     const check = await store.checkAgentMd(aid, 30);
 
-    // In sync (cache fresh) — return local file content unchanged.
+    // In sync (cache fresh) — return local file content with cached verification status.
     if (check.ok && !check.data.needs_update && check.data.local_found) {
       const content = fs.existsSync(localPath) ? fs.readFileSync(localPath, 'utf-8') : undefined;
-      return { changed: false, content };
+      const verification = check.data.verify_status
+        ? normalizeVerification({ status: check.data.verify_status, reason: check.data.verify_error || undefined })
+        : undefined;
+      return { changed: false, content, verification };
     }
 
     // Needs update (or check failed) — fetch fresh content.

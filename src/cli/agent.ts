@@ -919,6 +919,14 @@ export async function agentSet(aid: string, key: string, rawValue: string): Prom
   }
 
   const value = parseJsonValue(rawValue);
+
+  // active_baseagent 白名单校验：只允许已知 baseagent，挡住把模型名（如 deepseek）误设为后端
+  if (key === 'active_baseagent') {
+    if (typeof value !== 'string' || !(BASEAGENT_CANDIDATES as readonly string[]).includes(value)) {
+      return { ok: false, error: `无效 active_baseagent: ${JSON.stringify(value)}（可选: ${BASEAGENT_CANDIDATES.join(' / ')}）` };
+    }
+  }
+
   setNestedValue(config, key, value);
   try {
     saveAgent(config);

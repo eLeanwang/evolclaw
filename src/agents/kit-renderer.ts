@@ -61,6 +61,9 @@ const PARAM_DESCRIPTIONS: Record<string, string> = {
   peerName: '对端显示名',
   peerRole: '对端角色（owner/admin/guest/anonymous）',
   peerType: '对端类型（human/agent）',
+  sameDevice: '对端与本端同一物理设备（E2EE 消息 proximity，仅加密消息有值）',
+  sameNetwork: '对端与本端在同一网络内',
+  sameEgressIp: '对端与本端共享同一出口 IP',
   groupId: '群组 ID（群聊时）',
   chatType: '聊天类型（private=私聊 / group=群聊 / null=本地开发）',
   channel: '渠道类型（aun/feishu/wechat/dingtalk/qqbot/wecom）',
@@ -74,12 +77,19 @@ const PARAM_DESCRIPTIONS: Record<string, string> = {
   sessionName: '会话名称',
   sessionKey: '会话路由键（channelType#urlEncode(channelId)#urlEncode(threadId)）',
   sessionCreatedAt: '会话创建时间（ISO）',
+  timezone: 'IANA 时区名（把 ISO 时间戳转本地时间用，如 Asia/Shanghai）',
+  tzOffset: '当前 UTC 偏移（如 +08:00）',
+  osInfo: '操作系统及版本（如 Windows 11 Pro (win32 10.0.26200)）',
   threadId: '话题 ID（多话题路由时）',
   chatMode: '会话模式（interactive=同步交互 / proactive=主动推送）',
   readonly: '是否只读模式',
+  evolclawMode: 'evolclaw 运行模式（dev=源码仓库可直接修改 | install=全局安装包只读）',
   baseAgent: 'base agent 规范值（claude/codex/gemini/hermes）',
   baseAgentName: 'base agent 显示名',
-  baseAgentModel: 'base agent 使用的模型',
+  baseAgentModel: 'base agent 引擎底座模型（evolclaw 作用域无配置时的兜底）',
+  effectiveModel: '当前实际生效模型（关系级 > agent级 > 全局 优先级解析结果）',
+  modelFallbackActive: 'evolclaw 配置的模型不可用，当前正在使用降级模型',
+  modelFallbackModel: '当前降级使用的 base agent 模型名',
   agentSessionId: 'base agent 会话 ID',
 };
 
@@ -451,9 +461,10 @@ function isTruthy(val: VarValue): boolean {
 // ── Template rendering ──
 
 function resolveConditions(template: string, vars: Vars): string {
-  // Find innermost {{?...}}...{{/}} block (no nested {{? inside) and resolve it.
-  // Repeat until no blocks remain.
-  const inner = /\{\{\?(\w+)(?:(!=|=)([^}]*))?\}\}([^]*?)\{\{\/\}\}/;
+  // 只匹配**最内层** {{?...}}...{{/}} 块：body 内不允许再出现 {{? ，
+  // 否则非贪婪 ([^]*?) 会匹配到嵌套内层的 {{/}}，导致外层提前闭合、残留多余 {{/}}。
+  // 逐字符负向前瞻 (?!\{\{\?) 排除嵌套起始，配合 do/while 由内向外逐层消解。
+  const inner = /\{\{\?(\w+)(?:(!=|=)([^}]*))?\}\}((?:(?!\{\{\?)[^])*?)\{\{\/\}\}/;
   let result = template;
   let prev: string;
   do {

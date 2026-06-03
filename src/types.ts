@@ -254,6 +254,10 @@ export interface Message {
   peerId: string;  // 发送者 ID
   peerName?: string;  // 发送者名称
   peerType?: string;  // 对端类型 (human/ai/unknown)，由支持 agent.md 的渠道填充
+  /** 对端网络邻近性（SDK 0.4.8 proximity，仅加密消息有值）*/
+  sameDevice?: boolean;   // 对端与本端同一物理设备
+  sameNetwork?: boolean;  // 对端与本端同一网络
+  sameEgressIp?: boolean; // 对端与本端同一出口 IP
   /** 对端使用的客户端类型；来自入站消息信封，由 channel 适配层填充。当前阶段先 undefined。 */
   clientType?: 'desktop' | 'web' | 'mobile' | string;
   content: string;
@@ -279,6 +283,9 @@ export interface InboundMessage {
   peerId: string;  // 发送者 ID
   peerName?: string;  // 发送者名称
   peerType?: string;  // 对端类型 (human/ai/unknown)，由支持 agent.md 的渠道填充
+  sameDevice?: boolean;
+  sameNetwork?: boolean;
+  sameEgressIp?: boolean;
   content: string;
   messageId?: string;
   images?: Array<{ data: string; mimeType: string }>;

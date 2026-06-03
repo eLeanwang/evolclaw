@@ -89,6 +89,9 @@ export interface AUNMessageHandler {
     peerId: string;
     peerName?: string;
     peerType?: string;
+    sameDevice?: boolean;
+    sameNetwork?: boolean;
+    sameEgressIp?: boolean;
     messageId?: string;
     threadId?: string;
     mentions?: Array<{ userId: string; name?: string }>;
@@ -1073,6 +1076,9 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       mentions,
       peerName: displayName || undefined,
       peerType: peerIdentity.type,
+      sameDevice: msg.same_device === true || undefined,
+      sameNetwork: msg.same_network === true || undefined,
+      sameEgressIp: msg.same_egress_ip === true || undefined,
       replyContext,
     });
   }
@@ -1284,6 +1290,9 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       userId: senderAid,
       peerName: displayName || undefined,
       peerType: peerIdentity.type,
+      sameDevice: msg.same_device === true || undefined,
+      sameNetwork: msg.same_network === true || undefined,
+      sameEgressIp: msg.same_egress_ip === true || undefined,
       text: finalText,
       chatType: 'group',
       messageId,
@@ -1298,6 +1307,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     channelId: string; userId: string; text: string;
     chatType: 'private' | 'group'; messageId: string;
     peerName?: string; peerType?: string;
+    sameDevice?: boolean; sameNetwork?: boolean; sameEgressIp?: boolean;
     seq?: number; threadId?: string; mentions?: string[];
     replyContext?: ReplyContext;
     groupId?: string;
@@ -1366,6 +1376,9 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       peerId: event.userId || event.channelId || '',
       peerName: event.peerName,
       peerType: event.peerType,
+      sameDevice: event.sameDevice,
+      sameNetwork: event.sameNetwork,
+      sameEgressIp: event.sameEgressIp,
       messageId: event.messageId,
       threadId: event.threadId,
       mentions: mentionObjects,

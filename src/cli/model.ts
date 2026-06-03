@@ -17,6 +17,8 @@ import {
   readScope, writeScope, clearScope, resolveEffectiveModel,
   type ScopeSelector, type ModelScope,
 } from '../core/model/model-scope.js';
+import { loadDefaults, loadAgent } from '../config-store.js';
+import { resolveAnthropicConfig } from '../agents/resolve.js';
 import { getCatalog, getModelInfo } from '../core/model/model-catalog.js';
 
 const ALL_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max', 'auto'];
@@ -80,6 +82,7 @@ Commands:
   use <model-id>      设置模型（作用域由 --self/--peer 决定）
   reset               清除指定作用域的设置，回落上一级
   effort <level>      设置推理强度（low|medium|high|xhigh|max|auto）
+  check               诊断网关连通性与模型可用性（分阶段输出进度）
 
 作用域（由参数决定，越具体越优先：关系 > agent > 全局）:
   (无参数)                       全局默认  → defaults.json
@@ -102,7 +105,8 @@ Options:
   evolclaw model use opus
   evolclaw model use deepseek-v4-pro --self bot.agentid.pub --peer alice.agentid.pub
   evolclaw model effort high --self bot.agentid.pub
-  evolclaw model reset --self bot.agentid.pub --peer alice.agentid.pub`;
+  evolclaw model reset --self bot.agentid.pub --peer alice.agentid.pub
+  evolclaw model check --self bot.agentid.pub`;
 
 async function dispatch(sub: string, args: string[], formatJson: boolean): Promise<void> {
   switch (sub) {
@@ -112,6 +116,7 @@ async function dispatch(sub: string, args: string[], formatJson: boolean): Promi
     case 'use':     return await cmdUse(args, formatJson);
     case 'reset':   return await cmdReset(args, formatJson);
     case 'effort':  return await cmdEffort(args, formatJson);
+    case 'check':   return await cmdCheck(args, formatJson);
     default:
       fail(formatJson, 'UNKNOWN_SUBCOMMAND', `未知子命令: ${sub}（model --help 查看用法）`);
   }
@@ -309,6 +314,233 @@ async function cmdReset(args: string[], formatJson: boolean): Promise<void> {
   }, () => {
     return `✓ 已清除 ${SCOPE_LABEL[scope]} 设置，回落上一级（该范围所有会话下条消息生效）`;
   });
+}
+
+// ── check ─────────────────────────────────────────────────────────────
+
+interface CheckStep {
+  label: string;
+  ok: boolean;
+  detail: string;
+  ms?: number;
+}
+
+/** 带超时的 fetch，返回 Response 或 null（超时/失败）。 */
+async function fetchWithTimeout(url: string, opts: RequestInit, timeoutMs: number): Promise<Response | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const resp = await fetch(url, { ...opts, signal: controller.signal });
+    clearTimeout(timer);
+    return resp;
+  } catch {
+    clearTimeout(timer);
+    return null;
+  }
+}
+
+/** 解析网关 baseUrl 和 apiKey（复用 resolveCreds 逻辑，但从 CLI 层调用）。 */
+function resolveGatewayCreds(self?: string): { baseUrl?: string; apiKey?: string } {
+  try {
+    const defaults = loadDefaults();
+    const agentCfg = self ? loadAgent(self) : null;
+    const block: any = agentCfg?.baseagents || defaults?.baseagents || {};
+    const claudeCfg = block.claude || {};
+    const r = resolveAnthropicConfig({ agents: { claude: claudeCfg } } as any, claudeCfg);
+    return { baseUrl: r.baseUrl, apiKey: r.apiKey };
+  } catch {
+    return {};
+  }
+}
+
+/** 对单个模型发一次最小探测请求，返回延迟 ms 或错误信息。
+ *  按网关风格顺序探测：Anthropic Messages API → OpenAI chat completions → 仅列表校验
+ */
+async function probeModel(baseUrl: string, apiKey: string | undefined, modelId: string, timeoutMs: number): Promise<{ ok: boolean; ms: number; error?: string; style?: string }> {
+  const base = baseUrl.replace(/\/+$/, '');
+  const authHeaders: Record<string, string> = apiKey
+    ? { 'x-api-key': apiKey, Authorization: `Bearer ${apiKey}` }
+    : {};
+
+  // 风格 1：Anthropic Messages API
+  {
+    const t0 = Date.now();
+    const resp = await fetchWithTimeout(`${base}/v1/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'anthropic-version': '2023-06-01', ...authHeaders },
+      body: JSON.stringify({ model: modelId, max_tokens: 5, messages: [{ role: 'user', content: 'ok' }] }),
+    }, timeoutMs);
+    const ms = Date.now() - t0;
+    if (resp && resp.ok) return { ok: true, ms, style: 'anthropic' };
+    if (resp && resp.status >= 400 && resp.status < 500) {
+      // 4xx 说明网关支持此风格，但模型不可用
+      let errMsg = `HTTP ${resp.status}`;
+      try { const j: any = await resp.json(); errMsg = j?.error?.message || j?.detail || j?.message || errMsg; } catch { /* ignore */ }
+      return { ok: false, ms, error: String(errMsg).slice(0, 80), style: 'anthropic' };
+    }
+    // 非 4xx（超时/连接失败/5xx）→ 继续尝试下一种风格
+  }
+
+  // 风格 2：OpenAI chat completions
+  {
+    const t0 = Date.now();
+    const resp = await fetchWithTimeout(`${base}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders },
+      body: JSON.stringify({ model: modelId, max_tokens: 5, messages: [{ role: 'user', content: 'ok' }] }),
+    }, timeoutMs);
+    const ms = Date.now() - t0;
+    if (resp && resp.ok) {
+      // 校验响应体有 choices 字段，否则可能是网关假装成功
+      try {
+        const j: any = await resp.json();
+        if (j?.choices || j?.id) return { ok: true, ms, style: 'openai' };
+      } catch { /* ignore */ }
+    }
+    if (resp && resp.status >= 400 && resp.status < 500) {
+      let errMsg = `HTTP ${resp.status}`;
+      try { const j: any = await resp.json(); errMsg = j?.error?.message || j?.detail || j?.message || errMsg; } catch { /* ignore */ }
+      return { ok: false, ms, error: String(errMsg).slice(0, 80), style: 'openai' };
+    }
+  }
+
+  // 两种风格都探测不到：无法判断可用性
+  return { ok: false, ms: 0, error: '网关不支持标准探测（无法确认可用性）', style: 'unknown' };
+}
+
+async function cmdCheck(args: string[], formatJson: boolean): Promise<void> {
+  if (wantsHelp(args)) { console.log(HELP); return; }
+  const sel = parseSelector(args, formatJson);
+  const ba = activeBaseagent(sel.self);
+  const steps: CheckStep[] = [];
+  const log = (step: CheckStep) => {
+    steps.push(step);
+    if (!formatJson) {
+      const icon = step.ok ? '✓' : '✗';
+      const ms = step.ms !== undefined ? ` (${step.ms}ms)` : '';
+      console.log(`[${icon}] ${step.label.padEnd(14)} ${step.detail}${ms}`);
+    }
+  };
+
+  const { baseUrl, apiKey } = resolveGatewayCreds(sel.self);
+
+  // ── 阶段 1：DNS + 连通性 ──────────────────────────────────────────
+  if (!formatJson) console.log('\n网关诊断\n' + '─'.repeat(50));
+
+  if (!baseUrl) {
+    log({ label: '网关地址', ok: false, detail: '未配置自定义网关（baseUrl），使用官方 Anthropic 端点' });
+  } else {
+    // DNS + TCP：用一次 HEAD 请求探测
+    const t0 = Date.now();
+    const pingResp = await fetchWithTimeout(baseUrl.replace(/\/+$/, '') + '/v1/models', {
+      method: 'GET',
+      headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+    }, 4000);
+    const pingMs = Date.now() - t0;
+    if (!pingResp) {
+      log({ label: '网关连通', ok: false, detail: `${baseUrl} 无法连接（DNS/TCP 失败）`, ms: pingMs });
+    } else {
+      log({ label: '网关连通', ok: true, detail: baseUrl, ms: pingMs });
+    }
+  }
+
+  // ── 阶段 2：认证 + 模型列表 ─────────────────────────────────────
+  if (!formatJson) console.log('');
+  const cat = await getCatalog(sel.self, ba);
+  const modelIds = cat.models.filter(m => m.owned_by !== 'alias').map(m => m.id);
+
+  if (cat.source === 'mock') {
+    log({ label: '模型列表', ok: false, detail: `无法获取远端列表，使用内置 mock（${modelIds.length} 个）` });
+  } else {
+    log({ label: '模型列表', ok: true, detail: `来源: ${cat.source}，共 ${modelIds.length} 个模型` });
+  }
+
+  // ── 阶段 3：当前配置模型 ──────────────────────────────────────────
+  if (!formatJson) console.log('');
+  const resolved = resolveEffectiveModel(sel, ba);
+  const configuredModel = resolved.model;
+
+  if (!configuredModel) {
+    log({ label: '配置模型', ok: true, detail: '未配置（将使用 base agent 默认模型）' });
+  } else {
+    log({ label: '配置模型', ok: true, detail: `${configuredModel}（来源: ${resolved.source ?? '未知'}）` });
+  }
+
+  // ── 阶段 4：模型可用性探测 ────────────────────────────────────────
+  // 仅在有自定义网关时才做 API 探测（官方端点跳过，避免消耗 token）
+  const probeResults: { id: string; displayId: string; ok: boolean; ms: number; error?: string }[] = [];
+
+  if (baseUrl) {
+    if (!formatJson) console.log('\n模型可用性探测\n' + '─'.repeat(50));
+
+    // 别名解析：从目录里找别名对应的完整 ID
+    const aliasMap = new Map<string, string>(); // alias → full id
+    for (const entry of cat.models) {
+      if (entry.owned_by === 'alias') {
+        // 找目录中与别名前缀匹配的完整 ID
+        const match = cat.models.find(m => m.owned_by !== 'alias' && m.id.includes(entry.id));
+        if (match) aliasMap.set(entry.id, match.id);
+      }
+    }
+    const resolveId = (id: string) => aliasMap.get(id) ?? id;
+
+    // 优先探测当前配置的模型（解析别名），其余为非别名 ID
+    const configResolved = configuredModel ? resolveId(configuredModel) : undefined;
+    const allProbeIds = [
+      ...(configResolved ? [{ display: configuredModel!, probe: configResolved }] : []),
+      ...modelIds
+        .filter(id => id !== configResolved)
+        .map(id => ({ display: id, probe: id })),
+    ];
+
+    // 轮次 1：配置模型 + 1 个额外（并发 2，快速验证主要路径）
+    const round1 = allProbeIds.slice(0, 2);
+    const r1 = await Promise.all(round1.map(({ display, probe }) =>
+      probeModel(baseUrl!, apiKey, probe, 5000).then(r => ({ id: display, displayId: display, ...r }))
+    ));
+    probeResults.push(...r1);
+    if (!formatJson) r1.forEach(r => log({ label: r.id.slice(0, 20), ok: r.ok, detail: r.ok ? '可用' : (r.error ?? '不可用'), ms: r.ms }));
+
+    // 轮次 2：剩余，2 个一组（避免触发限速）
+    const rest = allProbeIds.slice(2);
+    for (let i = 0; i < rest.length; i += 2) {
+      const batch = rest.slice(i, i + 2);
+      const br = await Promise.all(batch.map(({ display, probe }) =>
+        probeModel(baseUrl!, apiKey, probe, 5000).then(r => ({ id: display, displayId: display, ...r }))
+      ));
+      probeResults.push(...br);
+      if (!formatJson) br.forEach(r => log({ label: r.id.slice(0, 20), ok: r.ok, detail: r.ok ? '可用' : (r.error ?? '不可用'), ms: r.ms }));
+    }
+  } else {
+    if (!formatJson) console.log('\n（跳过模型探测：未配置自定义网关）');
+  }
+
+  // ── 汇总 ─────────────────────────────────────────────────────────
+  const availableModels = probeResults.filter(r => r.ok).map(r => r.id);
+  const configModelOk = configuredModel ? probeResults.find(r => r.id === configuredModel)?.ok : undefined;
+
+  if (!formatJson) {
+    console.log('\n' + '─'.repeat(50));
+    if (configuredModel && configModelOk === false) {
+      console.log(`⚠️  当前配置的模型 ${configuredModel} 不可用`);
+      if (availableModels.length > 0) {
+        console.log(`   可用模型：${availableModels.slice(0, 3).join('、')}${availableModels.length > 3 ? ` 等 ${availableModels.length} 个` : ''}`);
+      }
+    } else if (configuredModel && configModelOk === true) {
+      console.log(`✓  当前配置的模型 ${configuredModel} 可用`);
+    } else if (!baseUrl) {
+      console.log(`✓  使用官方 Anthropic 端点，无需探测`);
+    }
+  } else {
+    emit(formatJson, {
+      ok: true,
+      steps,
+      configuredModel: configuredModel ?? null,
+      configModelAvailable: configModelOk ?? null,
+      availableModels,
+      catalogSource: cat.source,
+    }, () => '');
+  }
 }
 
 export async function cmdModel(args: string[]): Promise<void> {

@@ -1,5 +1,6 @@
 import path from 'path';
 import fs from 'fs';
+import os from 'os';
 import crypto from 'crypto';
 import { type AgentRunnerFull, hasCompact, type AgentEvent, type Compactable } from '../../agents/claude-runner.js';
 import { SessionManager } from '../session/session-manager.js';
@@ -21,6 +22,21 @@ import type { InteractionRouter } from '../interaction-router.js';
 import { renderActionAsText, renderCommandCardAsText } from '../interaction-router.js';
 import { formatPeerKey } from '../relation/peer-key.js';
 import { resolveEffectiveModel } from '../model/model-scope.js';
+
+/** OS 信息在进程生命周期内是常量，模块加载时算一次。例: "Windows 11 Pro (win32 10.0.26200)" */
+const OS_INFO = (() => {
+  let label = '';
+  try { label = os.version(); } catch { /* 旧 Node 无 os.version */ }
+  return `${label ? label + ' ' : ''}(${os.platform()} ${os.release()})`;
+})();
+
+/** 当前 UTC 偏移，格式 +08:00 / -05:00。每条消息算（DST 安全）。 */
+function currentTzOffset(): string {
+  const off = -new Date().getTimezoneOffset(); // 分钟，东区为正
+  const sign = off >= 0 ? '+' : '-';
+  const abs = Math.abs(off);
+  return `${sign}${String(Math.floor(abs / 60)).padStart(2, '0')}:${String(abs % 60).padStart(2, '0')}`;
+}
 
 function getContextTooLongHint(agent: AgentRunnerFull): string {
   if (canCompactAgent(agent)) {
@@ -84,6 +100,14 @@ export class MessageProcessor {
   private agentMap: Map<string, AgentRunnerFull>;
   private primaryRunnerKey: string;
   private interruptedSessions = new Map<string, string>();  // sessionId → reason ('new_message' | 'stop' | ...)
+  /** sessionId → 模型降级状态（带退避探测，进程重启清零） */
+  private modelFallbackMap = new Map<string, {
+    failCount: number;
+    fallbackActive: boolean;
+    messagesSinceFallback: number;
+    nextProbeAt: number;
+    hintShown: boolean;
+  }>();
   private interactionRouter?: InteractionRouter;
   private messageQueue?: MessageQueue;
   /** sessionId → 活跃的空闲监控器，用于等待用户交互期间暂停/恢复计时 */
@@ -589,6 +613,9 @@ export class MessageProcessor {
       let streamResult: { isError: boolean; subtype?: string; errors?: string[]; terminalReason?: string; lastReplyText: string; fullText: string; hasReceivedText: boolean; numTurns?: number; ttftMs?: number; usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } } = { isError: false, lastReplyText: '', fullText: '', hasReceivedText: false };
       let effectiveSystemPrompt: string | undefined;
       let modelOverride: { model?: string; effort?: string } | undefined;
+      let usedFallback = false;
+      let skipEvolclawModel = false;
+      let agentModel: string | undefined;
 
       try {
         // 动态构建运行时上下文提示
@@ -626,15 +653,38 @@ export class MessageProcessor {
         // 按 关系级 > agent级 > 全局 解析本次调用的模型/强度，作为 per-call 入参传入 runQuery。
         // 不缓存、不绑会话——改关系级/agent级后该范围所有会话的下条消息即时生效；
         // 多对端并发各自独立解析、各自传参，无共享状态可被污染。
-        try {
-          const resolved = resolveEffectiveModel({ self: selfAid || undefined, peerKey });
-          if (resolved.model) modelOverride = { model: resolved.model, effort: resolved.effort };
-        } catch (e) {
-          logger.warn(`[MessageProcessor] resolveEffectiveModel failed: ${e instanceof Error ? e.message : String(e)}`);
+        let effectiveModel: string | undefined;
+
+        // 取降级状态，按退避策略决定是否跳过 evolclaw 作用域模型
+        const fbState = this.modelFallbackMap.get(session.id) ?? {
+          failCount: 0, fallbackActive: false,
+          messagesSinceFallback: 0, nextProbeAt: 2, hintShown: false,
+        };
+
+        // 退避期内递增消息计数，判断是否到探测点
+        if (fbState.fallbackActive) {
+          fbState.messagesSinceFallback++;
+          skipEvolclawModel = fbState.messagesSinceFallback < fbState.nextProbeAt;
+          this.modelFallbackMap.set(session.id, fbState);
+        }
+
+        // 非跳过时：尝试解析 evolclaw 作用域模型
+        let evolclawModelOverride: { model?: string; effort?: string } | undefined;
+        if (!skipEvolclawModel) {
+          try {
+            const resolved = resolveEffectiveModel({ self: selfAid || undefined, peerKey });
+            if (resolved.model) {
+              evolclawModelOverride = { model: resolved.model, effort: resolved.effort };
+              effectiveModel = resolved.model;
+            }
+          } catch (e) {
+            logger.warn(`[MessageProcessor] resolveEffectiveModel failed: ${e instanceof Error ? e.message : String(e)}`);
+          }
+          modelOverride = evolclawModelOverride;
         }
 
         const normalizedBaseagent = normalizeBaseagent(agent.name);
-        const agentModel = (typeof (agent as any).getModel === 'function') ? (agent as any).getModel() as string : undefined;
+        agentModel = (typeof (agent as any).getModel === 'function') ? (agent as any).getModel() as string : undefined;
 
         // Kit renderer: 组装上下文
         const pkgRoot = getPackageRoot();
@@ -649,6 +699,8 @@ export class MessageProcessor {
             KITS_DOCS: path.join(pkgRoot, 'kits', 'docs'),
             KITS_TEMPLATES: path.join(pkgRoot, 'kits', 'templates'),
             KITS_FRAGMENTS: path.join(pkgRoot, 'kits', 'templates', 'system-fragments'),
+            // evolclaw 运行模式：dev=源码仓库 | install=全局安装包
+            evolclawMode: fs.existsSync(path.join(pkgRoot, 'src', 'index.ts')) ? 'dev' : 'install',
             // 路径变量(用于 manifest 路径展开,resolvePath 用 ctx.vars 取真值)
             PERSONAL_DIR: selfAid ? path.join(resolveRoot(), 'agents', selfAid, 'personal') : undefined,
             RELATIONS_DIR: selfAid ? path.join(resolveRoot(), 'agents', selfAid, 'relations') : undefined,
@@ -662,6 +714,9 @@ export class MessageProcessor {
             peerName: peerName || undefined,
             peerRole: session.identity?.role || 'anonymous',
             peerType: message.peerType || undefined,
+            sameDevice: message.sameDevice || undefined,
+            sameNetwork: message.sameNetwork || undefined,
+            sameEgressIp: message.sameEgressIp || undefined,
             groupId: session.metadata?.groupId || undefined,
             chatType: session.chatType || null,
             channel: currentChannelType || null,
@@ -675,6 +730,10 @@ export class MessageProcessor {
             sessionId: session.id,
             sessionName: session.name || undefined,
             sessionCreatedAt: session.createdAt ? new Date(session.createdAt).toISOString() : undefined,
+            // 时区（把 ISO 时间戳转本地时间用）+ OS 环境
+            timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || undefined,
+            tzOffset: currentTzOffset(),
+            osInfo: OS_INFO,
             threadId: session.threadId || undefined,
             // Stage 3: sessionKey 持久化字段
             sessionKey: session.sessionKey,
@@ -683,6 +742,9 @@ export class MessageProcessor {
             baseAgent: normalizedBaseagent.canonical,
             baseAgentName: normalizedBaseagent.displayName,
             baseAgentModel: agentModel || undefined,
+            effectiveModel: effectiveModel || agentModel || undefined,
+            modelFallbackActive: (fbState.fallbackActive || skipEvolclawModel) ? true : undefined,
+            modelFallbackModel: (fbState.fallbackActive || skipEvolclawModel) ? (agentModel || undefined) : undefined,
             agentSessionId: session.agentSessionId || undefined,
           },
           sessionId: session.id,
@@ -720,10 +782,30 @@ export class MessageProcessor {
               resetTimer,
               shouldSuppress
             );
+            // 探测成功（退避期内到达探测点且用的是 evolclaw 模型）→ 清零降级状态
+            if (fbState.fallbackActive && !skipEvolclawModel && !usedFallback) {
+              this.modelFallbackMap.delete(session.id);
+              logger.info(`[MessageProcessor] Model probe succeeded, cleared fallback state for session=${session.id}`);
+            }
             break; // 成功，跳出重试循环
           } catch (retryError) {
             if (streamRegistered) {
               agent.cleanupStream(streamKey);
+            }
+            // 模型不可用：累计计数，本次切换到 baseAgentModel 立即重试，不让用户看到失败
+            if (classifyError(retryError) === ErrorType.MODEL_UNAVAILABLE && evolclawModelOverride?.model) {
+              fbState.failCount++;
+              if (fbState.failCount >= 2) {
+                fbState.fallbackActive = true;
+                fbState.messagesSinceFallback = 0;
+                fbState.nextProbeAt = Math.min(Math.pow(2, fbState.failCount - 1), 8);
+              }
+              this.modelFallbackMap.set(session.id, fbState);
+              logger.warn(`[MessageProcessor] Model unavailable: ${evolclawModelOverride.model}, failCount=${fbState.failCount}, fallbackActive=${fbState.fallbackActive}`);
+              // 切换到 baseAgentModel 重试（清除 modelOverride，让 runQuery 使用 this.model）
+              modelOverride = undefined;
+              usedFallback = true;
+              continue;
             }
             if (attempt < MAX_RETRIES && isRetryableError(retryError)) {
               const delay = Math.pow(2, attempt) * 1000; // 2s, 4s
@@ -945,6 +1027,21 @@ export class MessageProcessor {
       logger.info(`[MessageProcessor] agent.cleanupStream ok: session=${session.id} task=${taskId}`);
       this.sessionManager.clearProcessing(session.id);
       logger.info(`[MessageProcessor] session ${session.id} processing cleared task=${taskId}`);
+
+      // 降级模型回复末尾追加标记（代码层硬注入，不依赖模型输出）
+      const usingFallback = usedFallback || (skipEvolclawModel && agentModel != null);
+      if (usingFallback && agentModel) {
+        const curFbState = this.modelFallbackMap.get(session.id);
+        const showHint = curFbState && curFbState.nextProbeAt >= 8 && !curFbState.hintShown;
+        const suffix = showHint
+          ? `\n\n---\n⚠️ [降级模型: ${agentModel} | 可告诉我"帮我检查可用模型"来诊断]`
+          : `\n\n---\n⚠️ [降级模型: ${agentModel}]`;
+        renderer.addText(suffix);
+        if (showHint && curFbState) {
+          curFbState.hintShown = true;
+          this.modelFallbackMap.set(session.id, curFbState);
+        }
+      }
 
       // 被用户中断（新消息打断）时跳过 flush — 新 task 已接管渠道，旧 task 的 flush 无意义且可能卡住
       const preFlushInterrupt = this.interruptedSessions.get(session.id);
