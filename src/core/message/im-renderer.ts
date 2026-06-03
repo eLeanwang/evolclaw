@@ -183,28 +183,6 @@ export class IMRenderer {
     return this.textBuffer;
   }
 
-  /** 从 buffer 中移除指定 pattern（用于文件标记预处理） */
-  stripFromBuffer(pattern: RegExp): void {
-    this.textBuffer = this.textBuffer.replace(pattern, '').trim();
-    // itemsQueue 中的 text items 也同步过滤
-    for (const item of this.itemsQueue) {
-      if (item.kind === 'text') {
-        item.text = item.text.replace(pattern, '');
-      }
-    }
-  }
-
-  /** 清除上下文过长错误文本（从 buffer + allText 中移除） */
-  stripContextError(pattern: RegExp): void {
-    this.textBuffer = this.textBuffer.replace(pattern, '').trim();
-    this.allText = this.allText.replace(pattern, '').trim();
-    for (const item of this.itemsQueue) {
-      if (item.kind === 'text') {
-        item.text = item.text.replace(pattern, '');
-      }
-    }
-  }
-
   // ── 文本/活动注入（替代 StreamFlusher.addText/addActivity）──
 
   /** 添加文本片段（流式 text） */
@@ -381,6 +359,15 @@ export class IMRenderer {
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = undefined;
+    }
+
+    // 上下文错误短语过滤：剔除错误关键词本身，保留前后内容
+    const ctxErrPattern = /prompt is too long|input is too long|context too long|context limit|context_length_exceeded|上下文过长/gi;
+    const stripCtxErr = (s: string) => s.replace(ctxErrPattern, '').trim();
+    this.textBuffer = stripCtxErr(this.textBuffer);
+    this.allText = stripCtxErr(this.allText);
+    for (const item of this.itemsQueue) {
+      if (item.kind === 'text') item.text = stripCtxErr(item.text);
     }
 
     // 文件标记过滤
