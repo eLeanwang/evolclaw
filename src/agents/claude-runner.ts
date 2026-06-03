@@ -240,7 +240,7 @@ export type AgentEvent =
   | { type: 'task_progress'; summary?: string; toolUses?: number; durationMs?: number }
   | { type: 'session_id'; sessionId: string }
   | { type: 'state_changed'; state: 'idle' | 'running' | 'requires_action' }
-  | { type: 'complete'; result?: string; subtype?: string; isError?: boolean; errors?: string[]; durationMs?: number; ttftMs?: number; costUsd?: number; terminalReason?: string; sessionTitle?: string; numTurns?: number; usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } }
+  | { type: 'complete'; result?: string; subtype?: string; isError?: boolean; errors?: string[]; durationMs?: number; ttftMs?: number; costUsd?: number; terminalReason?: string; sessionTitle?: string; numTurns?: number; tokenUsage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number }; contextUsage?: { totalTokens: number; maxTokens: number; percentage: number; model: string; effort?: string } }
   | { type: 'error'; error: string; errorType: 'context_too_long' | 'auth' | 'network' | 'unknown' };
 
 export interface QueryRequest {
@@ -959,7 +959,7 @@ export class AgentRunner {
    * SDK 原始事件 → 标准 AgentEvent 转换
    * 所有 SDK 特有的事件类型引用封装在此方法内
    */
-  private async *transformStream(sdkStream: AsyncIterable<any>, sessionId: string): AsyncGenerator<AgentEvent> {
+  private async *transformStream(sdkStream: AsyncIterable<any>, sessionId: string, callModel?: string, callEffort?: string, sdkModel?: string): AsyncGenerator<AgentEvent> {
     let lastSessionId: string | undefined;
     // tool_use_id → tool_name 映射，用于从 SDKUserMessage 的 tool_result 块中还原工具名
     const toolUseNames = new Map<string, string>();
@@ -1068,6 +1068,20 @@ export class AgentRunner {
           ? event.result.replace(/<thinking>[\s\S]*?<\/thinking>\s*/g, '').trim()
           : event.result;
 
+        // 从 usage 三项求和得到当前上下文占用（与 claude-hud getTotalTokens 相同算法）
+        const u = event.usage;
+        const totalTokens = u
+          ? (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0)
+          : 0;
+        const maxTokens = sdkModel ? contextWindowFor(sdkModel) : 200000;
+        const contextUsage = totalTokens > 0 ? {
+          totalTokens,
+          maxTokens,
+          percentage: Math.round((totalTokens / maxTokens) * 100),
+          model: callModel ?? this.model,
+          effort: callEffort ?? this.effort,
+        } : undefined;
+
         yield {
           type: 'complete',
           result: cleanResult,
@@ -1080,7 +1094,8 @@ export class AgentRunner {
           terminalReason: event.terminal_reason,
           sessionTitle: event.session_title,
           numTurns: event.num_turns,
-          usage: event.usage,
+          tokenUsage: event.usage,
+          contextUsage,
         };
         // result 是 SDK 流的终结事件，不再等待后续（防止 interrupt 后流不关闭导致挂起）
         return;
@@ -1458,7 +1473,7 @@ export class AgentRunner {
       this.interruptFns.set(sessionId, () => (sdkStream as any).interrupt());
     }
     // 返回标准 AgentEvent 流（重试由 MessageProcessor 层负责）
-    return this.transformStream(sdkStream, sessionId);
+    return this.transformStream(sdkStream, sessionId, callModel, callEffort, sdkModel);
   }
 
   async interrupt(sessionId: string): Promise<void> {
