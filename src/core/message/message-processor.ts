@@ -259,16 +259,16 @@ export class MessageProcessor {
 
   // 命令前缀列表（与 CommandHandler.quickCommandPrefixes 保持同步）
   private static readonly COMMAND_PREFIXES = [
-    '/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart',
+    '/new', '/pwd', '/help', '/status', '/restart',
     '/model', '/effort', '/agent', '/slist', '/session', '/rename', '/repair', '/fork',
     '/stop', '/clear', '/compact', '/safe', '/del', '/perm', '/file', '/check',
-    '/p ', '/s ', '/name ', '/rewind', '/rw', '/rw ', '/activity', '/chatmode',
+    '/s ', '/name ', '/rewind', '/rw', '/rw ', '/activity', '/chatmode',
     '/aid', '/upgrade', '/evolagent',
   ];
 
   /** 判断消息内容是否为已知命令 */
   private isKnownCommand(content: string): boolean {
-    return content === '/p' || content === '/s' ||
+    return content === '/s' ||
       MessageProcessor.COMMAND_PREFIXES.some(cmd => content.startsWith(cmd));
   }
 

@@ -2662,7 +2662,6 @@ async function cmdMv(oldDir?: string, newDir?: string) {
     if (r.codexUpdated > 0) console.log(`✓ Codex 数据库已更新 (${r.codexUpdated} 个会话)`);
     if (r.directoryMoved) console.log('✓ 项目目录已移动');
     if (r.evolclawDbUpdated > 0) console.log(`✓ EvolClaw 会话存储已更新 (${r.evolclawDbUpdated} 条记录)`);
-    if (r.evolclawConfigUpdated) console.log('✓ agent config projects.list 已更新');
 
     console.log('\n迁移完成！');
   } catch (e) {

@@ -857,18 +857,16 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
 
 📋 **日常使用方法**：
 
-1. **绑定项目**：发送 \`/bind <项目路径>\` 绑定工作目录
-2. **查看帮助**：发送 \`/help\` 查看所有可用命令
-3. **切换项目**：发送 \`/project <项目名>\` 切换到其他项目
-4. **查看状态**：发送 \`/status\` 查看当前会话状态
-5. **会话管理**：发送 \`/session\` 查看和切换会话
+1. **查看帮助**：发送 \`/help\` 查看所有可用命令
+2. **查看状态**：发送 \`/status\` 查看当前会话状态
+3. **会话管理**：发送 \`/session\` 查看和切换会话
 
 💡 **提示**：
 - 直接发送消息即可与 Claude/Codex 对话
-- 支持多项目会话管理，每个项目独立会话
+- 支持多会话管理，每个会话独立上下文
 - 所有命令以 \`/\` 开头
 
-现在，请先使用 \`/bind\` 命令绑定您的项目目录，然后就可以开始工作了！`;
+现在就可以开始工作了！`;
 
       // First contact with Owner races against Owner's async cert fetch from
       // gateway PKI; a 3s pause lets the cert propagate. persist_required asks

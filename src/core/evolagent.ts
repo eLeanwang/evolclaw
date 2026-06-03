@@ -239,23 +239,6 @@ export class EvolAgent {
     this.persist();
   }
 
-  // ── Projects ──────────────────────────────────────────────────────────
-
-  getProjects(): Record<string, string> {
-    const list = this.merged.projects?.list;
-    if (list && Object.keys(list).length > 0) return { ...list };
-    const dp = this.merged.projects?.defaultPath;
-    if (dp) return { [path.basename(dp)]: dp };
-    return {};
-  }
-
-  addProject(name: string, projectPath: string): void {
-    if (!this.rawAgent.projects) this.rawAgent.projects = { defaultPath: projectPath, list: {} };
-    if (!this.rawAgent.projects.list) this.rawAgent.projects.list = {};
-    this.rawAgent.projects.list[name] = projectPath;
-    this.persist();
-  }
-
   // ── Personal layer ────────────────────────────────────────────────────
 
   private _personaCache: string | null | undefined = undefined;

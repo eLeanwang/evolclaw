@@ -283,33 +283,6 @@ export class CommandHandler {
     return process.cwd();
   }
 
-  /**
-   * 返回当前通道有效的 projects.list（从 owning agent 的 config 取）。
-   * 都没配 list 时回退到 defaultPath 单项目。
-   */
-  private getEffectiveProjects(channel: string): Record<string, string> {
-    const owning = this.getOwningAgent(channel);
-    if (owning) {
-      return owning.getProjects();
-    }
-    return this.projects;
-  }
-
-  /**
-   * 添加项目到当前通道范围（写到 owning agent 的 config.json）。
-   */
-  private async addProjectInScope(channel: string, name: string, projectPath: string): Promise<string | undefined> {
-    const owning = this.getOwningAgent(channel);
-    if (!owning) {
-      return `⚠️ 找不到通道 "${channel}" 所属的 self-agent`;
-    }
-    try {
-      owning.addProject(name, projectPath);
-    } catch (e: any) {
-      return `⚠️ 写入 agent config 失败: ${e?.message || e}`;
-    }
-    return undefined;
-  }
 
   /**
    * 持久化 baseagent.model：写到 agent config.json；找不到 owning agent 时
@@ -710,14 +683,6 @@ export class CommandHandler {
         items.push({ value: 'cli', label: '查看 CLI 会话', desc: '列出未导入的 CLI 本地会话' });
       }
       return items;
-    }
-
-    if (cmd === '/p') {
-      // Use agent-scoped project list: agent-owned channels see their agent.json's
-      // projects.list; default channel sees agent config's projects.list
-      const list = this.getEffectiveProjects(channel);
-      const currentPath = session?.projectPath;
-      return Object.entries(list).map(([name, p]) => ({ value: name, label: name, desc: p as string, selected: currentPath === p }));
     }
 
     if (cmd === '/baseagent') {
@@ -1289,7 +1254,7 @@ export class CommandHandler {
   }
 
   isCommand(content: string): boolean {
-    return content === '/p' || content === '/s' || quickCommandPrefixes.some(cmd => content.startsWith(cmd));
+    return content === '/s' || quickCommandPrefixes.some(cmd => content.startsWith(cmd));
   }
 
   /**

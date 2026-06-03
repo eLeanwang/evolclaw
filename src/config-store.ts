@@ -205,7 +205,7 @@ export function autoMigrateIfNeeded(): void {
     active_baseagent: oldConfig.agents?.defaultAgent || 'claude',
     baseagents: {} as any,
     models: oldConfig.models,
-    projects: oldConfig.projects ? { defaultPath: oldConfig.projects.defaultPath, list: oldConfig.projects.list, autoCreate: oldConfig.projects.autoCreate } : undefined,
+    projects: oldConfig.projects ? { defaultPath: oldConfig.projects.defaultPath } : undefined,
     chatmode: oldConfig.chatmode,
     show_activities: oldConfig.showActivities,
     flush_delay: oldConfig.flushDelay,
@@ -664,7 +664,6 @@ export interface MigrateResult {
   claudeHistoryUpdated: boolean;
   codexUpdated: number;
   evolclawDbUpdated: number;
-  evolclawConfigUpdated: boolean;
   directoryMoved: boolean;
 }
 
@@ -674,7 +673,6 @@ export async function migrateProject(oldPath: string, newPath: string): Promise<
     claudeHistoryUpdated: false,
     codexUpdated: 0,
     evolclawDbUpdated: 0,
-    evolclawConfigUpdated: false,
     directoryMoved: false,
   };
 
@@ -769,22 +767,6 @@ export async function migrateProject(oldPath: string, newPath: string): Promise<
       result.evolclawDbUpdated = updated;
     } catch { /* fs not accessible */ }
   }
-
-  // 7. 更新各 self-agent config.json 的 projects.list
-  try {
-    const { agents } = loadAllAgents();
-    for (const cfg of agents) {
-      if (!cfg.projects?.list) continue;
-      let changed = false;
-      for (const [k, v] of Object.entries(cfg.projects.list)) {
-        if (v === oldAbs) { cfg.projects.list[k] = newAbs; changed = true; }
-      }
-      if (changed) {
-        saveAgent(cfg);
-        result.evolclawConfigUpdated = true;
-      }
-    }
-  } catch { /* agents not accessible */ }
 
   return result;
 }
