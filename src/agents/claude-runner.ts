@@ -1458,7 +1458,7 @@ export class AgentRunner {
 
     let sdkStream;
     if (images && images.length > 0) {
-      logger.debug('[AgentRunner] Creating query with images, images:', images.length);
+      logger.info('[AgentRunner] Creating query with images:', images.length, 'first image size:', images[0]?.data?.length ?? 0);
       logger.debug('[AgentRunner] Skipping resume for image message to avoid history conflict');
       const stream = new MessageStream();
       stream.push(prompt, images);
