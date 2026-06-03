@@ -2063,93 +2063,23 @@ async function cmdWatchAid(): Promise<void> {
 }
 
 async function cmdWatchWeb(): Promise<void> {
-  const p = resolvePaths();
-  fs.mkdirSync(p.instanceDir, { recursive: true });
+  // ecweb 是独立插件包（可执行命令），按需安装。
+  // 复用 npm-ops.npmInstallGlobal（含 EACCES→sudo 回退、Windows npm.cmd、超时）。
+  const { execFileSync } = await import('child_process');
+  const home = resolvePaths().root;
 
-  const useColor = !!process.stdout.isTTY;
-  const RST = useColor ? '\x1b[0m' : '';
-  const DIM = useColor ? '\x1b[2m' : '';
-  const BOLD = useColor ? '\x1b[1m' : '';
-  const CYAN = useColor ? '\x1b[36m' : '';
-  const GREEN = useColor ? '\x1b[32m' : '';
-  const YELLOW = useColor ? '\x1b[33m' : '';
-
-  const logLine = (line: string) => {
-    const t = new Date();
-    const ts = `${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}:${String(t.getSeconds()).padStart(2, '0')}`;
-    process.stdout.write(`${DIM}${ts}${RST} ${line}\n`);
-  };
-
-  // 调试日志文件：每次运行 watch web 时清空，便于建立调试闭环
-  // 查看 sessions 调试日志 → 读这个文件
-  const logFile = path.join(p.logs, 'watch-web.log');
-  try {
-    fs.mkdirSync(p.logs, { recursive: true });
-    fs.writeFileSync(logFile, `# watch-web debug log\n# started ${new Date().toISOString()} pid=${process.pid}\n`);
-  } catch { /* best effort */ }
-  const fileLog = (line: string) => {
-    const t = new Date();
-    const ts = `${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}:${String(t.getSeconds()).padStart(2, '0')}.${String(t.getMilliseconds()).padStart(3, '0')}`;
-    try { fs.appendFileSync(logFile, `${ts} ${line.replace(/\x1b\[[0-9;]*m/g, '')}\n`); } catch { /* ignore */ }
-  };
-  // 同时输出到终端和日志文件
-  const log = (line: string) => { logLine(line); fileLog(line); };
-
-  const { startWatchWebServer } = await import('./watch-web/server.js');
-  let handle;
-  try {
-    handle = await startWatchWebServer({ log });
-  } catch (e: any) {
-    console.error(`❌ 启动 Web 服务失败: ${e?.message || e}`);
-    process.exit(1);
-  }
-
-  // 注册 instance 文件
-  const instanceFile = path.join(p.instanceDir, `watch-web-${process.pid}.json`);
-  fs.writeFileSync(instanceFile, JSON.stringify({
-    pid: process.pid, startedAt: Date.now(), startedAtIso: new Date().toISOString(),
-    type: 'watch-web', port: handle.port,
-  }, null, 2));
-
-  // 列出本机访问地址
-  const os = await import('os');
-  const ifaces = os.networkInterfaces();
-  const lanIps: string[] = [];
-  for (const list of Object.values(ifaces)) {
-    for (const ni of list || []) {
-      if (ni.family === 'IPv4' && !ni.internal) lanIps.push(ni.address);
+  if (!platform.commandExists('ecweb')) {
+    process.stdout.write('📦 ecweb 未安装，正在从 npm 安装...\n');
+    const { npmInstallGlobal } = await import('../utils/npm-ops.js');
+    try {
+      await npmInstallGlobal('ecweb');
+    } catch (e: any) {
+      process.stderr.write(`❌ 安装 ecweb 失败: ${e?.stderr || e?.message || e}\n   可手动安装: npm install -g ecweb\n`);
+      process.exit(1);
     }
   }
 
-  process.stdout.write(`\n${BOLD}${CYAN}🔭 EvolClaw Watch Web${RST}\n\n`);
-  process.stdout.write(`  ${BOLD}配对码:${RST}  ${GREEN}${BOLD}${handle.pairingCode}${RST}  ${DIM}(5 分钟内有效，配对后 token 缓存 24h 自动续期)${RST}\n\n`);
-  process.stdout.write(`  ${BOLD}本机:${RST}    http://localhost:${handle.port}\n`);
-  for (const ip of lanIps) {
-    process.stdout.write(`  ${BOLD}局域网:${RST}  http://${ip}:${handle.port}\n`);
-  }
-  process.stdout.write(`\n  ${DIM}绑定 0.0.0.0，远程可访问。按任意键退出。${RST}\n`);
-  process.stdout.write(`  ${DIM}调试日志: ${logFile}${RST}\n\n`);
-
-  const cleanup = () => {
-    try { fs.unlinkSync(instanceFile); } catch {}
-    handle.close().finally(() => process.exit(0));
-  };
-  process.on('exit', () => { try { fs.unlinkSync(instanceFile); } catch {} });
-  process.on('SIGINT', cleanup);
-  process.on('SIGTERM', cleanup);
-  platform.onShutdown(cleanup);
-
-  // 按任意键退出
-  if (process.stdin.isTTY) {
-    process.stdin.setRawMode(true);
-    process.stdin.resume();
-    process.stdin.on('data', (key: Buffer) => {
-      logLine(`${YELLOW}收到退出指令，关闭服务…${RST}`);
-      cleanup();
-    });
-  }
-
-  await new Promise<void>(() => {});
+  execFileSync('ecweb', ['--home', home], { stdio: 'inherit' });
 }
 async function cmdRestartMonitor() {
   const p = resolvePaths();
