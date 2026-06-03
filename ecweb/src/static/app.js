@@ -13,13 +13,16 @@ async function pair(code) {
   return resp.json();
 }
 
-function showPairPage() {
+function showPairPage(hint) {
+  if (ws) { try { ws.close(); } catch {} ws = null; }
   $('#pair-page').style.display = 'flex';
   $('#app').style.display = 'none';
+  if (hint) $('#pair-error').textContent = hint;
 }
 function showApp() {
   $('#pair-page').style.display = 'none';
   $('#app').style.display = 'flex';
+  $('#pair-error').textContent = '';
 }
 
 function initPairUI() {
@@ -39,7 +42,7 @@ function initPairUI() {
       } else {
         err.textContent = res.reason || '配对失败';
       }
-    } catch (e) {
+    } catch {
       err.textContent = '网络错误';
     } finally {
       btn.disabled = false;
@@ -87,8 +90,10 @@ function connect() {
   };
 
   ws.onclose = (ev) => {
-    if (ev.code === 1006 || ev.code === 4001) {
-      // 可能是 token 失效
+    if (ev.code === 4001) {
+      localStorage.removeItem(TOKEN_KEY);
+      showPairPage('token 已失效，请重新配对');
+      return;
     }
     setConnStatus('○ 重连中…', 'err');
     setTimeout(connect, reconnectDelay);
@@ -528,6 +533,10 @@ function renderBlocks(blocks) {
 function startApp() {
   initTabs();
   connect();
+  $('#logout-btn').onclick = () => {
+    localStorage.removeItem(TOKEN_KEY);
+    showPairPage('已退出配对');
+  };
 }
 
 window.addEventListener('DOMContentLoaded', () => {

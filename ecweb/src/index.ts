@@ -69,6 +69,20 @@ const fileLog = (line: string) => {
 };
 const log = (line: string) => { logLine(line); fileLog(line); };
 
+// 单实例保护：
+// 1) 按 instance 文件杀掉登记在册的旧 watch-web 进程
+const { writeWatchWeb, removeWatchWeb, cleanupWatchWebs, cleanupWatchWebByPort } = await import('./process-utils.js');
+const killedWebs = cleanupWatchWebs();
+for (const r of killedWebs) logLine(`${YELLOW}↺ 已清理旧 watch 进程 PID ${r.pid}（端口 ${r.port}）${RST}`);
+// 2) 兜底：按端口杀掉 instance 文件已丢失的孤儿进程（杀不掉的僵尸）
+const WATCH_WEB_PORT = port ?? 20030;
+const killedByPort = cleanupWatchWebByPort(WATCH_WEB_PORT);
+for (const pid of killedByPort) logLine(`${YELLOW}↺ 已强占端口 ${WATCH_WEB_PORT}：杀掉占用进程 PID ${pid}${RST}`);
+if (killedWebs.length > 0 || killedByPort.length > 0) {
+  // 给 OS 释放端口的时间
+  await new Promise(r => setTimeout(r, 400));
+}
+
 let handle;
 try {
   handle = await startWatchWebServer({ port, log });
@@ -78,11 +92,7 @@ try {
 }
 
 // 注册 instance 文件
-fs.mkdirSync(p.instanceDir, { recursive: true });
-const instanceFile = path.join(p.instanceDir, `watch-web-${process.pid}.json`);
-try {
-  fs.writeFileSync(instanceFile, JSON.stringify({ pid: process.pid, startedAt: Date.now(), startedAtIso: new Date().toISOString(), type: 'watch-web', port: handle.port }, null, 2));
-} catch {}
+writeWatchWeb(handle.port);
 
 // 列出访问地址
 const ifaces = os.networkInterfaces();
@@ -97,14 +107,17 @@ process.stdout.write(`\n${BOLD}${CYAN}🔭 EvolClaw Watch${RST}  ${DIM}(home: ${
 process.stdout.write(`  ${BOLD}配对码:${RST}  ${GREEN}${BOLD}${handle.pairingCode}${RST}  ${DIM}(5 分钟内有效，配对后 token 缓存 24h 自动续期)${RST}\n\n`);
 process.stdout.write(`  ${BOLD}本机:${RST}    http://localhost:${handle.port}\n`);
 for (const ip of lanIps) process.stdout.write(`  ${BOLD}局域网:${RST}  http://${ip}:${handle.port}\n`);
+if (handle.displaced) {
+  process.stdout.write(`\n  ${YELLOW}⚠ 端口 ${WATCH_WEB_PORT} 被非 watch 进程占用，已切换到 ${handle.port}${RST}\n`);
+}
 process.stdout.write(`\n  ${DIM}绑定 0.0.0.0，远程可访问。Ctrl-C 退出。${RST}\n`);
 process.stdout.write(`  ${DIM}调试日志: ${logFile}${RST}\n\n`);
 
 const cleanup = () => {
-  try { fs.unlinkSync(instanceFile); } catch {}
+  removeWatchWeb();
   handle.close().finally(() => process.exit(0));
 };
-process.on('exit', () => { try { fs.unlinkSync(instanceFile); } catch {} });
+process.on('exit', () => removeWatchWeb());
 process.on('SIGINT', cleanup);
 process.on('SIGTERM', cleanup);
 

@@ -134,6 +134,7 @@ coding 场景（无 channel/无身份）下，`chatType`、`channel`、`selfAid`
 | 43 | venue-group-profile | `$VENUES_DIR/{{channel}}#{{groupId}}/profile.md` | groupId≠null | ✗ |
 | 44 | venue-client | `$KITS_DOCS/venues/client-{{clientType}}.md` | clientType≠null | ✗ |
 | 50 | channel-layer | fragment | channel≠null | ✓ |
+| 55 | commands | fragment | channel≠null | ✓ |
 | 60 | session | fragment | always | ✓ |
 | 70 | baseagent | fragment | baseAgent≠null | ✓ |
 

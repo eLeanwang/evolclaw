@@ -196,7 +196,7 @@ function handleConnection(ws: WebSocket, req: http.IncomingMessage, log: (s: str
 
 // ── Port binding ──
 
-function bindPort(server: http.Server, preferred: number): Promise<number> {
+function bindPort(server: http.Server, preferred: number): Promise<{ port: number; displaced: boolean }> {
   return new Promise((resolve, reject) => {
     let attempt = 0;
     const tryBind = (port: number) => {
@@ -204,7 +204,7 @@ function bindPort(server: http.Server, preferred: number): Promise<number> {
         if (err.code === 'EADDRINUSE' && attempt < 10) { attempt++; tryBind(port + 1); }
         else reject(err);
       });
-      server.listen(port, '0.0.0.0', () => resolve(port));
+      server.listen(port, '0.0.0.0', () => resolve({ port, displaced: port !== preferred }));
     };
     tryBind(preferred);
   });
@@ -212,7 +212,7 @@ function bindPort(server: http.Server, preferred: number): Promise<number> {
 
 // ── Main export ──
 
-export interface WatchWebHandle { url: string; port: number; pairingCode: string; close(): Promise<void>; }
+export interface WatchWebHandle { url: string; port: number; displaced: boolean; pairingCode: string; close(): Promise<void>; }
 
 export async function startWatchWebServer(opts: { port?: number; log?: (s: string) => void } = {}): Promise<WatchWebHandle> {
   const log = opts.log || (() => {});
@@ -225,11 +225,23 @@ export async function startWatchWebServer(opts: { port?: number; log?: (s: strin
     log(`⚠️  evolclaw protocolVersion=${pingResp.protocolVersion}，watch 期望 >=${PROTOCOL_VERSION}，部分功能可能异常`);
   }
 
-  const pairingCode = genPairingCode();
-  const pairingExpiry = Date.now() + PAIRING_TTL_MS;
+  let pairingCode = genPairingCode();
+  let pairingExpiry = Date.now() + PAIRING_TTL_MS;
+  function freshPairing() {
+    if (Date.now() > pairingExpiry) {
+      pairingCode = genPairingCode();
+      pairingExpiry = Date.now() + PAIRING_TTL_MS;
+      log(`↺ 配对码已刷新：${pairingCode}（5 分钟有效）`);
+    }
+    return { code: pairingCode, expiresAt: pairingExpiry };
+  }
 
   const server = http.createServer((req, res) => {
-    if (req.method === 'POST' && (req.url || '').startsWith('/api/pair')) {
+    if (req.method === 'GET' && (req.url || '') === '/api/pair-code') {
+      const { code, expiresAt } = freshPairing();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ code, expiresAt }));
+    } else if (req.method === 'POST' && (req.url || '').startsWith('/api/pair')) {
       handlePair(req, res, pairingCode, pairingExpiry, log);
     } else {
       serveStatic(req, res);
@@ -240,20 +252,23 @@ export async function startWatchWebServer(opts: { port?: number; log?: (s: strin
 
   server.on('upgrade', (req, socket, head) => {
     const { query } = parseUrl(req.url || '');
-    if (!validateAndRenew(query.token || '', Date.now())) {
-      socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
-      socket.destroy();
-      log(`✗ WS 拒绝（无效 token） from ${req.socket.remoteAddress}`);
-      return;
-    }
-    wss.handleUpgrade(req, socket, head, (ws) => handleConnection(ws, req, log));
+    const authed = validateAndRenew(query.token || '', Date.now());
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      if (!authed) {
+        log(`✗ WS 拒绝（无效 token） from ${clientIp(req)}`);
+        ws.close(4001, 'invalid-token');
+        return;
+      }
+      handleConnection(ws, req, log);
+    });
   });
 
-  const port = await bindPort(server, opts.port ?? DEFAULT_PORT);
+  const { port, displaced } = await bindPort(server, opts.port ?? DEFAULT_PORT);
 
   return {
     url: `http://0.0.0.0:${port}`,
     port,
+    displaced,
     pairingCode,
     close(): Promise<void> {
       return new Promise((resolve) => {
