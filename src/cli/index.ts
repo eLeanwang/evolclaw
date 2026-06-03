@@ -289,6 +289,14 @@ async function cmdStart() {
   const { autoMigrateIfNeeded } = await import('../config-store.js');
   autoMigrateIfNeeded();
 
+  // 未初始化时自动引导
+  const defaults = loadDefaults();
+  if (!defaults || !defaults.baseagents || Object.keys(defaults.baseagents).length === 0) {
+    console.log('⚡ 未检测到初始化配置，自动启动初始化向导...\n');
+    await cmdInit();
+    return;
+  }
+
   // 检查至少有一个 self-agent
   const { agents, skipped } = loadAllAgents();
   if (agents.length === 0) {
@@ -310,7 +318,7 @@ async function cmdStart() {
   const aliveMains = status.mains.filter(m => m.alive);
   if (aliveMains.length > 0) {
     const first = aliveMains[0];
-    console.log(`❌ EvolClaw is already running (PID: ${aliveMains.map(m => m.record.pid).join(', ')})`);
+    console.log(`  EvolClaw is already running (PID: ${aliveMains.map(m => m.record.pid).join(', ')})`);
     console.log(`  启动于: ${new Date(first.record.startedAtIso).toLocaleString()}`);
     console.log(`  启动方式: ${first.record.launchedBy}`);
     // 报告 AID 状态

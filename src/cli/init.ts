@@ -1,4 +1,5 @@
 import fs from 'fs';
+import path from 'path';
 import readline from 'readline';
 import { resolvePaths, ensureDataDirs } from '../paths.js';
 import { commandExists } from '../utils/cross-platform.js';
@@ -15,12 +16,6 @@ function ask(rl: readline.Interface, question: string): Promise<string> {
 const BASEAGENT_CANDIDATES = ['claude', 'codex', 'gemini'] as const;
 type Baseagent = typeof BASEAGENT_CANDIDATES[number];
 
-const BASEAGENT_ENV_KEY: Record<Baseagent, string | undefined> = {
-  claude: 'ANTHROPIC_API_KEY',
-  codex: 'OPENAI_API_KEY',
-  gemini: 'GEMINI_API_KEY',
-};
-
 function isBaseagentAvailable(baseagent: Baseagent): boolean {
   if (baseagent === 'codex') return isCodexSdkAvailable();
   return commandExists(baseagent);
@@ -34,17 +29,19 @@ function pickDefault(available: Baseagent[]): Baseagent {
   return (available.includes('claude') ? 'claude' : available[0]) as Baseagent;
 }
 
-function buildDefaults(chosen: Baseagent) {
-  const env = BASEAGENT_ENV_KEY[chosen];
+function buildDefaults(chosen: Baseagent, available: Baseagent[], projectsDefaultPath?: string) {
+  const baseagents: Record<string, object> = {};
+  for (const b of available) baseagents[b] = {};
   return {
     $schema_version: 1,
     active_baseagent: chosen,
-    baseagents: { [chosen]: env ? { apiKey: `$ENV:${env}` } : {} },
+    baseagents,
+    ...(projectsDefaultPath ? { projects: { defaultPath: projectsDefaultPath } } : {}),
   };
 }
 
-function writeDefaults(_defaultsPath: string, chosen: Baseagent): void {
-  saveDefaultsSafe(buildDefaults(chosen));
+function writeDefaults(chosen: Baseagent, available: Baseagent[], projectsDefaultPath?: string): void {
+  saveDefaultsSafe(buildDefaults(chosen, available, projectsDefaultPath));
 }
 
 // ==================== Main ====================
@@ -105,7 +102,7 @@ export async function cmdInit(options?: {
       chosen = pickDefault(available);
     }
 
-    writeDefaults(defaultsPath, chosen);
+    writeDefaults(chosen, available);
     console.log(`✓ 已${exists ? '覆盖' : '创建'}: ${defaultsPath}`);
     console.log(`  active_baseagent: ${chosen}`);
 
@@ -142,12 +139,33 @@ export async function cmdInit(options?: {
     return chosen;
   }
 
+  async function askProjectsDefaultPath(): Promise<string | undefined> {
+    const defaultDir = path.join(p.root, 'projects', 'default');
+    const input = (await ask(rl, `项目默认目录 [${defaultDir}]: `)).trim();
+    const resolved = input || defaultDir;
+    if (!path.isAbsolute(resolved)) {
+      console.log('  ⚠ 需要绝对路径，已跳过');
+      return undefined;
+    }
+    if (!fs.existsSync(resolved)) {
+      const create = (await ask(rl, `  目录不存在，是否创建？[Y/n]: `)).trim().toLowerCase();
+      if (create === '' || create === 'y' || create === 'yes') {
+        fs.mkdirSync(resolved, { recursive: true });
+        console.log(`  ✓ 已创建 ${resolved}`);
+      } else {
+        return undefined;
+      }
+    }
+    return resolved;
+  }
+
   try {
     if (exists) {
       const ans = (await ask(rl, `配置文件已存在: ${defaultsPath}\n  是否覆盖？[y/N] `)).trim().toLowerCase();
       if (ans === 'y' || ans === 'yes') {
         const chosen = await askBaseagent();
-        writeDefaults(defaultsPath, chosen);
+        const projectsDefaultPath = await askProjectsDefaultPath();
+        writeDefaults(chosen, available, projectsDefaultPath);
         console.log(`\n✓ 已覆盖: ${defaultsPath}`);
         console.log(`  active_baseagent: ${chosen}\n`);
       } else {
@@ -155,21 +173,17 @@ export async function cmdInit(options?: {
       }
     } else {
       const chosen = await askBaseagent();
-      writeDefaults(defaultsPath, chosen);
+      const projectsDefaultPath = await askProjectsDefaultPath();
+      writeDefaults(chosen, available, projectsDefaultPath);
       console.log(`\n✓ 已创建: ${defaultsPath}`);
       console.log(`  active_baseagent: ${chosen}\n`);
     }
 
-    // ── 5. 无 agent 时自动进入 agent new ──
+    // ── 5. 提示创建 agent ──
     const { agents } = loadAllAgents();
     if (agents.length === 0) {
-      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      console.log('下一步：创建 agent\n');
-      const { agentCreateInteractive } = await import('./agent.js');
-      const result = await agentCreateInteractive({ rl });
-      if (!result.ok) {
-        console.error(`❌ ${result.error}`);
-      }
+      console.log('提示：尚无 agent，运行以下命令创建：');
+      console.log('  evolclaw agent new <aid>.agentid.pub');
     }
   } finally {
     try { rl.close(); } catch { /* ignore */ }

@@ -133,12 +133,6 @@ export type AgentResult<T> = T | AgentError;
 const BASEAGENT_CANDIDATES = ['claude', 'codex', 'gemini'] as const;
 type Baseagent = typeof BASEAGENT_CANDIDATES[number];
 
-const BASEAGENT_ENV_KEY: Record<Baseagent, string | undefined> = {
-  claude: 'ANTHROPIC_API_KEY',
-  codex: 'OPENAI_API_KEY',
-  gemini: 'GEMINI_API_KEY',
-};
-
 function isBaseagentAvailable(baseagent: Baseagent): boolean {
   if (baseagent === 'codex') return isCodexSdkAvailable();
   return commandExists(baseagent);
@@ -154,8 +148,7 @@ function pickDefaultBaseagent(available: Baseagent[]): Baseagent | null {
 }
 
 function buildBaseagentsBlock(chosen: Baseagent): Record<string, any> {
-  const env = BASEAGENT_ENV_KEY[chosen];
-  return { [chosen]: env ? { apiKey: `$ENV:${env}` } : {} };
+  return { [chosen]: {} };
 }
 
 const DEFAULT_CHATMODE = { private: 'interactive', group: 'proactive', nothuman: 'proactive' } as const;
@@ -433,10 +426,10 @@ export async function agentCreateInteractive(opts: AgentCreateInteractiveOpts = 
       const defaults = loadDefaults();
       const rootPath = defaults?.projects?.rootPath
         || (defaults?.projects?.defaultPath && path.dirname(defaults.projects.defaultPath))
-        || path.join(os.homedir(), 'evolclaw-projects');
+        || resolvePaths().root + '/projects';
       suggestedProjectPath = deriveAgentProjectPath(rootPath, aid);
     } catch {
-      suggestedProjectPath = deriveAgentProjectPath(path.join(os.homedir(), 'evolclaw-projects'), aid);
+      suggestedProjectPath = deriveAgentProjectPath(resolvePaths().root + '/projects', aid);
     }
     const projectInput = (await ask(`Project path [${suggestedProjectPath}]: `)).trim();
     const projectPath = projectInput || suggestedProjectPath;
@@ -781,7 +774,7 @@ export async function agentSyncAids(): Promise<AgentResult<AgentSyncResult>> {
   const defaults = loadDefaults();
   const rootPath = defaults?.projects?.rootPath
     || (defaults?.projects?.defaultPath && path.dirname(defaults.projects.defaultPath))
-    || path.join(os.homedir(), 'evolclaw-projects');
+    || resolvePaths().root + '/projects';
 
   const created: string[] = [];
   for (const aid of localAids) {
