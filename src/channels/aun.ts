@@ -97,6 +97,7 @@ export interface AUNMessageHandler {
     mentions?: Array<{ userId: string; name?: string }>;
     replyContext?: ReplyContext;
     source?: 'user' | 'card-trigger';
+    images?: Array<{ data: string; mimeType: string }>;
   }): Promise<void>;
 }
 
@@ -629,7 +630,7 @@ export class AUNChannel {
     const store = await getAidStore({
       slotId: SLOT.daemon,
       aunPath,
-      debug: this.config.aunSdkLog ?? true,
+      debug: this.config.aunSdkLog ?? false,
     });
     this.store = store;
     const client = await loadClient(store, aidName);
@@ -920,8 +921,41 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
 
   // ── Event handlers ──────────────────────────────────────────
 
+  /**
+   * 判断附件是否为图片，返回 MIME 类型（非图片返回空）。
+   * 多重检测：附件元数据字段 → 文件名后缀 → 文件 magic bytes。
+   */
+  private detectImageMime(att: any, filePath: string): string {
+    const extToMime: Record<string, string> = {
+      '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+      '.gif': 'image/gif', '.webp': 'image/webp',
+    };
+    // 1. 附件元数据字段（content_type / mime_type / mimeType）
+    const metaCt = (att?.content_type || att?.mime_type || att?.mimeType || '');
+    if (typeof metaCt === 'string' && metaCt.startsWith('image/')) return metaCt;
+    // 2. 文件名后缀
+    const name = (att?.filename || att?.object_key || filePath || '').toLowerCase();
+    for (const [ext, mime] of Object.entries(extToMime)) {
+      if (name.endsWith(ext)) return mime;
+    }
+    // 3. magic bytes
+    try {
+      const { openSync, readSync, closeSync } = require('node:fs') as typeof import('node:fs');
+      const fd = openSync(filePath, 'r');
+      const head = Buffer.alloc(12);
+      readSync(fd, head, 0, 12, 0);
+      closeSync(fd);
+      if (head[0] === 0x89 && head[1] === 0x50 && head[2] === 0x4e && head[3] === 0x47) return 'image/png';
+      if (head[0] === 0xff && head[1] === 0xd8 && head[2] === 0xff) return 'image/jpeg';
+      if (head[0] === 0x47 && head[1] === 0x49 && head[2] === 0x46) return 'image/gif';
+      if (head[0] === 0x52 && head[1] === 0x49 && head[2] === 0x46 && head[3] === 0x46 &&
+          head[8] === 0x57 && head[9] === 0x45 && head[10] === 0x42 && head[11] === 0x50) return 'image/webp';
+    } catch { /* not readable, skip */ }
+    return '';
+  }
+
   private async downloadAttachment(
-    att: { owner_aid?: string; object_key: string; filename?: string; sha256?: string },
+    att: { owner_aid?: string; object_key: string; filename?: string; sha256?: string; url?: string },
     channelId: string
   ): Promise<string | null> {
     const ownerAid = att.owner_aid || this._aid || '';
@@ -934,7 +968,9 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
 
     const filename = att.filename || objectKey.split('/').pop() || 'unknown';
 
-    let downloadUrl: string;
+    // 安全：始终通过受信任的 ticket 路径获取下载 URL。
+    // 不信任 att.url（来自对端消息 payload，可被构造为内网/元数据地址，SSRF）。
+    let downloadUrl = '';
     try {
       const ticket = await this.callAndTrace<Record<string, unknown>>('storage.create_download_ticket', {
         owner_aid: ownerAid,
@@ -1020,12 +1056,20 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     const rawAttachments: any[] = this.collectAllAttachments(payload);
 
     let finalText = text;
+    const inboundImages: { data: string; mimeType: string }[] = [];
     if (rawAttachments.length > 0 && this.client) {
       const fileParts: string[] = [];
       for (const att of rawAttachments) {
         const filePath = await this.downloadAttachment(att, fromAid);
         if (filePath) {
           const name = sanitizeFileName(att.filename || att.object_key?.split('/').pop() || 'file');
+          const mime = this.detectImageMime(att, filePath);
+          if (mime) {
+            try {
+              const { readFileSync } = await import('node:fs');
+              inboundImages.push({ data: readFileSync(filePath).toString('base64'), mimeType: mime });
+            } catch { /* fallback to file path */ }
+          }
           fileParts.push(`[文件: ${name} → ${filePath}]`);
         }
       }
@@ -1033,9 +1077,10 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
         const parts: string[] = [];
         if (text) parts.push(text);
         parts.push(...fileParts);
-        parts.push('请使用 Read 工具读取文件内容。');
+        if (inboundImages.length === 0) parts.push('请使用 Read 工具读取文件内容。');
         finalText = parts.join('\n\n');
       }
+      logger.info(`${this.logPrefix()} [img-debug] private attachments=${rawAttachments.length} images=${inboundImages.length}`);
     }
 
     // 私聊 channelId = 对端 AID（不再读 payload.chat_id 含 device 三段式）
@@ -1094,6 +1139,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       sameNetwork: msg.same_network === true || undefined,
       sameEgressIp: msg.same_egress_ip === true || undefined,
       replyContext,
+      images: inboundImages.length > 0 ? inboundImages : undefined,
     });
   }
 
@@ -1256,12 +1302,20 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
 
     // Process attachments
     let finalText = strippedText;
+    const inboundImages: { data: string; mimeType: string }[] = [];
     if (hasAttachments && this.client) {
       const fileParts: string[] = [];
       for (const att of rawAttachments) {
         const filePath = await this.downloadAttachment(att, groupId);
         if (filePath) {
           const name = sanitizeFileName(att.filename || att.object_key?.split('/').pop() || 'file');
+          const mime = this.detectImageMime(att, filePath);
+          if (mime) {
+            try {
+              const { readFileSync } = await import('node:fs');
+              inboundImages.push({ data: readFileSync(filePath).toString('base64'), mimeType: mime });
+            } catch { /* fallback to file path */ }
+          }
           fileParts.push(`[文件: ${name} → ${filePath}]`);
         }
       }
@@ -1269,7 +1323,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
         const parts: string[] = [];
         if (strippedText) parts.push(strippedText);
         parts.push(...fileParts);
-        parts.push('请使用 Read 工具读取文件内容。');
+        if (inboundImages.length === 0) parts.push('请使用 Read 工具读取文件内容。');
         finalText = parts.join('\n\n');
       }
     }
@@ -1314,6 +1368,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       threadId,
       mentions,
       replyContext: this.buildGroupReplyContext(threadId, senderAid, msgEncrypted, messageId, msgChatmode),
+      images: inboundImages.length > 0 ? inboundImages : undefined,
     });
   }
 
@@ -1325,6 +1380,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     seq?: number; threadId?: string; mentions?: string[];
     replyContext?: ReplyContext;
     groupId?: string;
+    images?: Array<{ data: string; mimeType: string }>;
   }): void {
     // Dedup
     if (event.messageId) {
@@ -1397,6 +1453,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       threadId: event.threadId,
       mentions: mentionObjects,
       replyContext,
+      images: event.images,
     }).catch(err => {
       logger.error(`${this.logPrefix()} Message handler error:`, err);
     });
@@ -2784,6 +2841,7 @@ export class AUNChannelPlugin implements ChannelPlugin {
                 threadId: opts.threadId,
                 replyContext: opts.replyContext,
                 source: opts.source,
+                images: opts.images,
               });
             }),
             (channelId, text, replyContext) => channel.sendMessage(channelId, text, replyContext),

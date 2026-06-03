@@ -867,8 +867,11 @@ async function main() {
         continue;
       }
       logger.info(`[Resume] Resuming session: ${session.id} (agent: ${evolName}::${baseagentName})`);
+      const parsedResumeKey = tryParseChannelKey(session.channel);
       const resumeMessage: Message = {
         channel: session.channel,
+        channelType: session.channelType || parsedResumeKey?.type,
+        selfAID: parsedResumeKey?.selfAID,
         channelId: session.channelId,
         content: '服务已重启，请继续之前未完成的任务。',
         timestamp: Date.now(),

@@ -22,6 +22,7 @@ import { TriggerManager } from './trigger/manager.js';
 import { TriggerScheduler, calcNextFireAt } from './trigger/scheduler.js';
 import type { Trigger } from '../types.js';
 import { checkLatestVersion, getLocalVersion, isLinkedInstall, compareVersions } from '../utils/npm-ops.js';
+import { tryParseChannelKey } from './channel-loader.js';
 
 export interface MenuNext {
   type: 'select' | 'text';
@@ -451,7 +452,7 @@ export class CommandHandler {
   }
 
   /** 获取活跃会话，无会话时自动创建（话题除外） */
-  private async ensureSession(channel: string, channelId: string, threadId?: string, chatType?: string): Promise<{ session: Session } | { error: string }> {
+  private async ensureSession(channel: string, channelId: string, threadId?: string, chatType?: string, selfAID?: string): Promise<{ session: Session } | { error: string }> {
     if (threadId) {
       // 话题会话：仅查询，不创建
       const session = await this.sessionManager.getThreadSession(channel, channelId, threadId);
@@ -462,8 +463,9 @@ export class CommandHandler {
     }
     const ct: 'private' | 'group' | undefined = chatType === 'group' ? 'group' : chatType === 'private' ? 'private' : undefined;
     const channelType = this.resolveChannelType(channel);
+    const sid = selfAID ?? this.resolveSelfAID(channel);
     const session = await this.sessionManager.getActiveSession(channel, channelId)
-      ?? await this.sessionManager.getOrCreateSession(channel, channelId, this.getEffectiveDefaultPath(channel), undefined, undefined, undefined, undefined, ct, undefined, undefined, channelType);
+      ?? await this.sessionManager.getOrCreateSession(channel, channelId, this.getEffectiveDefaultPath(channel), undefined, undefined, undefined, undefined, ct, undefined, sid, channelType);
     // 如果 session 已存在但 chatType 跟传入的不一致，更新
     if (ct && session.chatType !== ct) {
       await this.sessionManager.updateSession(session.id, { chatType: ct });
@@ -504,6 +506,15 @@ export class CommandHandler {
   /** 将实例名解析为渠道类型（用于 session 查询） */
   private resolveChannelType(channelName: string): string {
     return this.channelTypeMap.get(channelName) || channelName;
+  }
+
+  /**
+   * 从 channel key（<type>#<selfAID>#<name>）解析本地身份 AID。
+   * 非 evolagent 通道（裸 channelType，如 'feishu'）解析失败返回 undefined。
+   * aun 通道创建 session 时必须提供 selfAID，故所有 getOrCreateSession 调用都经此兜底。
+   */
+  private resolveSelfAID(channel: string): string | undefined {
+    return tryParseChannelKey(channel)?.selfAID;
   }
 
   registerPolicy(channelName: string, policy: ChannelPolicy): void {
@@ -1270,8 +1281,9 @@ export class CommandHandler {
     chatType?: string,
     source?: 'user' | 'card-trigger',
     messageId?: string,
+    selfAID?: string,
   ): Promise<OutboundPayload | string | null | undefined> {
-    const result = await this._handleInternal(content, channel, channelId, sendMessage, userId, threadId, chatType, source, messageId);
+    const result = await this._handleInternal(content, channel, channelId, sendMessage, userId, threadId, chatType, source, messageId, selfAID);
 
     return result;
   }
@@ -1286,6 +1298,7 @@ export class CommandHandler {
     chatType?: string,
     source?: 'user' | 'card-trigger',
     messageId?: string,
+    selfAID?: string,
   ): Promise<OutboundPayload | null | undefined> {
     // 卡片回调的 chatType 不可靠（飞书 bot 单聊 chatId 也是 oc_ 前缀），
     // 不应覆盖 session 中已有的正确值
@@ -2482,8 +2495,9 @@ export class CommandHandler {
 
     // 尝试获取活跃会话（话题时直接查找话题 session）
     let session: Session | undefined;
+    const resolvedSelfAID = selfAID ?? this.resolveSelfAID(channel);
     if (threadId) {
-      session = await this.sessionManager.getOrCreateSession(channel, channelId, this.getEffectiveDefaultPath(channel), threadId, undefined, undefined, undefined, chatType as 'private' | 'group' | undefined, undefined, undefined, this.resolveChannelType(channel));
+      session = await this.sessionManager.getOrCreateSession(channel, channelId, this.getEffectiveDefaultPath(channel), threadId, undefined, undefined, undefined, chatType as 'private' | 'group' | undefined, undefined, resolvedSelfAID, this.resolveChannelType(channel));
     } else {
       session = await this.sessionManager.getActiveSession(channel, channelId);
     }
@@ -2495,7 +2509,7 @@ export class CommandHandler {
         channelId,
         this.getEffectiveDefaultPath(channel),
         undefined, undefined, undefined, undefined, chatType as 'private' | 'group' | undefined,
-        undefined, undefined, this.resolveChannelType(channel)
+        undefined, resolvedSelfAID, this.resolveChannelType(channel)
       );
     }
 
@@ -2750,7 +2764,7 @@ export class CommandHandler {
       const executeRestart = async () => {
         let replyContext: ReplyContext | undefined;
         if (threadId) {
-          const threadSession = await this.sessionManager.getOrCreateSession(channel, channelId, this.getEffectiveDefaultPath(channel), threadId);
+          const threadSession = await this.sessionManager.getOrCreateSession(channel, channelId, this.getEffectiveDefaultPath(channel), threadId, undefined, undefined, undefined, undefined, undefined, selfAID ?? this.resolveSelfAID(channel), this.resolveChannelType(channel));
           replyContext = this.getReplyContext(threadSession);
         }
         const restartInfo: Record<string, any> = {
