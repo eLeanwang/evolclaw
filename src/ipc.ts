@@ -137,7 +137,7 @@ export class IpcServer {
       case 'status':
         return this.getStatus();
       case 'ping':
-        return { pong: true, pid: process.pid };
+        return { pong: true, pid: process.pid, protocolVersion: 1 };
       case 'aun-aids': {
         const aids = this.aunAidProvider ? this.aunAidProvider() : [];
         return { ok: true, aids };
