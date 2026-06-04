@@ -181,16 +181,17 @@ export class TriggerScheduler {
     this.timer = null;
     const now = Date.now();
 
-    // Fire all triggers that are due
-    while (this.heap.peek() && this.heap.peek()!.nextFireAt <= now + 50) {
+    // Loop guard reads a LIVE clock (not the frozen `now`): if rescheduling ever regresses
+    // and pushes an occurrence back inside the window, re-reading the clock each iteration
+    // still lets time advance past it so the loop drains and terminates.
+    while (this.heap.peek() && this.heap.peek()!.nextFireAt <= Date.now() + 50) {
       const trigger = this.heap.pop()!;
 
       if (trigger.scheduleType === 'cron' && this.inflightCron.has(trigger.id)) {
-        // Previous run still in flight — skip
+        // Previous run still in flight — skip this occurrence, reschedule the next one.
         logger.warn(`[${this.aid}] Cron trigger ${trigger.name} still running, skipping`);
         this.eventBus.publish({ type: 'trigger:skipped', triggerId: trigger.id, reason: 'overlap' });
-        // Re-schedule next cron occurrence
-        const next = calcNextFireAt('cron', trigger.scheduleValue, now);
+        const next = this.nextCronFireAt(trigger.scheduleValue, Date.now());
         this.manager.updateNextFireAt(trigger.id, next);
         this.heap.push({ ...trigger, nextFireAt: next });
         continue;
@@ -200,6 +201,21 @@ export class TriggerScheduler {
     }
 
     this.resetTimer();
+  }
+
+  /**
+   * Next cron occurrence strictly outside the firing window.
+   *
+   * cron-parser returns the next match at-or-after the reference instant. When the timer
+   * wakes a hair early — e.g. 08:59:59.999 for a `0 9 * * *` trigger — the "next" occurrence
+   * computes to 09:00:00.000, only ~1ms ahead and inside onFire's `<= now + 50` window. That
+   * occurrence gets popped and re-fired in the same pass, producing a tight loop. Recomputing
+   * from past the window forces the genuine next occurrence (e.g. tomorrow 09:00).
+   */
+  private nextCronFireAt(scheduleValue: string, ref: number): number {
+    let next = calcNextFireAt('cron', scheduleValue, ref);
+    if (next <= ref + 50) next = calcNextFireAt('cron', scheduleValue, ref + 51);
+    return next;
   }
 
   private fireTrigger(trigger: Trigger, now: number): void {
@@ -213,8 +229,8 @@ export class TriggerScheduler {
 
     if (trigger.scheduleType === 'cron') {
       this.inflightCron.add(trigger.id);
-      // Re-schedule next occurrence
-      const next = calcNextFireAt('cron', trigger.scheduleValue, now);
+      // Re-schedule next occurrence (outside the firing window — see nextCronFireAt)
+      const next = this.nextCronFireAt(trigger.scheduleValue, now);
       this.manager.updateNextFireAt(trigger.id, next);
       this.heap.push({ ...trigger, nextFireAt: next });
     } else {
