@@ -28,6 +28,12 @@ export function readCreateStatus(agentDir: string): CreateStatus | null {
   } catch { return null; }
 }
 
+/** 删除构建进度文件（agent 删除时清理）。非 purge 删除只移除 config.json，
+ *  故需显式清理本文件，避免目录残留陈旧进度。 */
+export function removeCreateStatus(agentDir: string): void {
+  try { fs.rmSync(path.join(agentDir, FILE), { force: true }); } catch { /* ignore */ }
+}
+
 /** 构建进度写入器。每次状态变更原子落盘（写临时文件 + rename）。 */
 export class CreateStatusWriter {
   private status: CreateStatus;

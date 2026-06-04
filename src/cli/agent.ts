@@ -1071,6 +1071,9 @@ export async function agentDelete(aid: string, purge: boolean = false): Promise<
     fs.rmSync(agentDir, { recursive: true, force: true });
   } else {
     fs.unlinkSync(configPath);
+    // 清理构建进度文件（非 purge 删除只移除 config.json，需显式清理 create-status.json）
+    const { removeCreateStatus } = await import('../core/message/create-status.js');
+    removeCreateStatus(agentDir);
   }
 
   // Trigger resync so daemon drops the agent

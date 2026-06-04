@@ -267,6 +267,27 @@ evolclaw/
 - `/restart` - 重启服务（自愈机制）
 - `/repair` - 检查并修复会话
 
+### ⚠️ 进程级 menu 操作鉴权迁移（v3.x Breaking）
+
+进程级 menu 操作（`/system restart/upgrade`、新增的 `/agent` agent 生命周期管理）的鉴权已从
+"channel 自动绑定 owner"迁移到 `defaults.owners` 名单。升级后**必须**在 `agents/defaults.json`
+配置 `owners`，否则这些操作一律返回 `FORBIDDEN`（daemon 启动时也会 warn 提示）。
+
+```json
+{
+  "$schema_version": 1,
+  "owners": ["eleans-2022.agentid.pub"],
+  "admins": ["elean.agentid.pub"]
+}
+```
+
+- **`owners`**：进程级管理者 AID 名单。可执行 `/system`（重启/升级）与 `/agent`
+  （create / delete / enable / disable / list / show）。
+- 关系级的 `/trigger`（set / cancel / update / list）仍走 channel 角色（owner/admin）+ scoped 鉴权，**不**受 `owners` 影响。
+- `/agent create` 为「受理即返回」：立即回 `{ accepted: true, aid }`，后台跑完整创建流程并把各
+  环节写入 `agents/<aid>/create-status.json`；客户端用 `menu.query name=agent args={aid}` 轮询
+  `createProgress.status` 直到 `ready` / `failed`。
+
 ## 技术栈
 
 - **运行时**：Node.js >= 22 + TypeScript（ES modules）

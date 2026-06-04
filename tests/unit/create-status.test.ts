@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { CreateStatusWriter, readCreateStatus, type CreatePhase } from '../../src/core/message/create-status.js';
+import { CreateStatusWriter, readCreateStatus, removeCreateStatus, type CreatePhase } from '../../src/core/message/create-status.js';
 
 let tmpDir: string;
 beforeEach(() => { tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cs-')); });
@@ -44,5 +44,15 @@ describe('CreateStatusWriter', () => {
 
   it('readCreateStatus returns null when absent', () => {
     expect(readCreateStatus(tmpDir)).toBeNull();
+  });
+
+  it('removeCreateStatus deletes the file (idempotent)', () => {
+    const w = new CreateStatusWriter(tmpDir, 'x.agentid.pub');
+    w.finishReady();
+    expect(readCreateStatus(tmpDir)).not.toBeNull();
+    removeCreateStatus(tmpDir);
+    expect(readCreateStatus(tmpDir)).toBeNull();
+    // 再次删除不抛
+    expect(() => removeCreateStatus(tmpDir)).not.toThrow();
   });
 });
