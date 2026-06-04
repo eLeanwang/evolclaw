@@ -20,7 +20,7 @@ import os from 'os';
 import { parseTriggerSet, parseTriggerUpdate } from './trigger/parser.js';
 import { TriggerManager } from './trigger/manager.js';
 import { TriggerScheduler, calcNextFireAt } from './trigger/scheduler.js';
-import type { Trigger } from '../types.js';
+import type { Trigger, DefaultsConfig } from '../types.js';
 import { checkLatestVersion, getLocalVersion, isLinkedInstall, compareVersions } from '../utils/npm-ops.js';
 import { tryParseChannelKey } from './channel-loader.js';
 
@@ -4086,4 +4086,12 @@ export class CommandHandler {
     if (!text) return '';
     return text.length > 50 ? text.substring(0, 50) + '…' : text;
   }
+}
+
+/** 进程级 menu 操作（/agent、/system）鉴权：发送方 AID 必须在 defaults.owners 中。
+ *  不依赖 session / channel owner 绑定，纯静态名单比对。 */
+export function isProcessLevelOwner(peerId: string | undefined, defaults: DefaultsConfig | null): boolean {
+  if (!peerId) return false;
+  const owners = defaults?.owners ?? [];
+  return owners.includes(peerId);
 }
