@@ -1,5 +1,11 @@
 # Changelog
 
+## v3.1.10 (2026-06-04)
+
+### Bug Fixes
+
+- **Windows `evolclaw watch web` 仍 ENOENT（续 3.1.9）** — `where` 会列出同名的全部文件，npm 全局 bin 同时生成无后缀 sh 包装脚本和 `.cmd`/`.ps1`；3.1.9 取首行恰好选中无法在 Windows 执行的 sh 包装。改为优先选 PATHEXT 可执行后缀（`.cmd`/`.exe`/`.bat`/`.com`）。另外 Node 18.20+/20+/22 起 `execFile` 拒绝直接 spawn `.cmd`/`.bat`（CVE-2024-27980），改为 `shell:true` + 引号包裹参数执行
+
 ## v3.1.9 (2026-06-04)
 
 ### Bug Fixes
