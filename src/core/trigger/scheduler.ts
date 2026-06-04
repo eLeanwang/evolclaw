@@ -1,5 +1,6 @@
 import { CronExpressionParser } from 'cron-parser';
 import { logger as baseLogger } from '../../utils/logger.js';
+import { tryParseChannelKey } from '../channel-loader.js';
 import type { Trigger, Message } from '../../types.js';
 import type { EventBus } from '../event-bus.js';
 import type { TriggerManager } from './manager.js';
@@ -237,7 +238,7 @@ export class TriggerScheduler {
   private buildSyntheticMessage(trigger: Trigger, messageId: string): Message {
     const base: Message = {
       channel: trigger.targetChannel,
-      channelType: trigger.targetChannelType,
+      channelType: tryParseChannelKey(trigger.targetChannel)?.type,
       channelId: trigger.targetChannelId,
       selfAID: this.aid,
       threadId: '',

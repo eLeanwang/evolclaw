@@ -3657,7 +3657,6 @@ export class CommandHandler {
         nextFireAt,
         targetChannel: parsed.targetChannel ?? channel,
         targetChannelId: parsed.targetChannelId ?? channelId,
-        targetChannelType: this.resolveChannelType(parsed.targetChannel ?? channel),
         targetThreadId: parsed.targetThreadId,
         targetSessionStrategy: parsed.targetSessionStrategy,
         agentId: parsed.agentId,
@@ -3680,7 +3679,6 @@ export class CommandHandler {
           const adapter = this.adapters.get(targetAdapterName);
           if (!adapter?.capabilities.thread) return '❌ 目标渠道不支持 thread 会话';
           const channelType = adapter.channelKey.split('#')[0];
-          trigger.targetChannelType = channelType;
           if (channelType === 'aun') {
             trigger.threadKind = 'aun';
             trigger.targetThreadId = `trigger-${trigger.id}`;

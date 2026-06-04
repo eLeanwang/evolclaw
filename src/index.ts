@@ -570,54 +570,6 @@ async function main() {
     }
   }
 
-  // Inject primary agent's trigger scheduler as fallback (used when owning agent has no scheduler)
-  const primaryAgentForTrigger = agentRegistry.runnableAgents()[0];
-  if (primaryAgentForTrigger?.triggerScheduler && primaryAgentForTrigger?.triggerManager) {
-    cmdHandler.setTriggerScheduler(primaryAgentForTrigger.triggerScheduler, primaryAgentForTrigger.triggerManager);
-  }
-
-  // Seed default __upgrade-check trigger (daily at random time 3:00~3:59)
-  // 用户可通过 /trigger cancel __upgrade-check 永久禁用（不会再自动重建）
-  if (!isLinkedInstall() && primaryAgentForTrigger?.triggerManager && primaryAgentForTrigger?.triggerScheduler) {
-    const mgr = primaryAgentForTrigger.triggerManager;
-    const sched = primaryAgentForTrigger.triggerScheduler;
-    const UPGRADE_TRIGGER_NAME = '__upgrade-check';
-    if (!mgr.getByName(UPGRADE_TRIGGER_NAME)) {
-      // Check history: if user cancelled it before, respect that decision
-      const { history } = mgr.listAll();
-      const wasCancelled = history.some(h => h.name === UPGRADE_TRIGGER_NAME && h.doneReason === 'cancelled');
-      if (!wasCancelled) {
-        // Random minute in 3:00~3:59 to avoid all instances hitting registry simultaneously
-        const randomMinute = Math.floor(Math.random() * 60);
-        const cronExpr = `${randomMinute} 3 * * *`;
-        // Use first channel instance as target (command doesn't need real channelId)
-        const firstChannel = channelInstances[0]?.adapter?.channelName || 'system';
-        const trigger: import('./types.js').Trigger = {
-          id: crypto.randomUUID(),
-          name: UPGRADE_TRIGGER_NAME,
-          scheduleType: 'cron',
-          scheduleValue: cronExpr,
-          nextFireAt: calcNextFireAt('cron', cronExpr),
-          targetChannel: firstChannel,
-          targetChannelId: '__system__',
-          targetSessionStrategy: 'latest',
-          prompt: '检查 evolclaw 是否有新版本可用。执行 `npm view evolclaw version` 获取最新版本，与当前版本（执行 `evolclaw --version`）对比。如果有新版本，执行 /restart 进行升级。如果已是最新版本，无需任何操作。',
-          createdByPeerId: '__system__',
-          createdByChannel: '__system__',
-          fireCount: 0,
-          createdAt: Date.now(),
-          updatedAt: Date.now(),
-        };
-        try {
-          mgr.register(trigger);
-          sched.register(trigger);
-          logger.info(`[Trigger] Seeded default trigger: ${UPGRADE_TRIGGER_NAME} (cron ${cronExpr})`);
-        } catch (e) {
-          logger.warn(`[Trigger] Failed to seed ${UPGRADE_TRIGGER_NAME}: ${e}`);
-        }
-      }
-    }
-  }
 
   // 默认策略
   const defaultPolicy = {
@@ -705,6 +657,55 @@ async function main() {
   // ── 注册所有渠道实例 ──
   for (const inst of channelInstances) {
     registerChannelInstance(inst);
+  }
+
+  // Inject primary agent's trigger scheduler after all channels are registered so
+  // channelTypeMap is fully populated when setTriggerScheduler backfills old triggers.
+  // Seed __upgrade-check here too — needs channelInstances[0].channelType to be resolved.
+  const primaryAgentForTrigger = agentRegistry.runnableAgents()[0];
+  if (primaryAgentForTrigger?.triggerScheduler && primaryAgentForTrigger?.triggerManager) {
+    cmdHandler.setTriggerScheduler(primaryAgentForTrigger.triggerScheduler, primaryAgentForTrigger.triggerManager);
+  }
+
+  // Seed default __upgrade-check trigger (daily at random time 3:00~3:59)
+  // 用户可通过 /trigger cancel __upgrade-check 永久禁用（不会再自动重建）
+  if (!isLinkedInstall() && primaryAgentForTrigger?.triggerManager && primaryAgentForTrigger?.triggerScheduler) {
+    const mgr = primaryAgentForTrigger.triggerManager;
+    const sched = primaryAgentForTrigger.triggerScheduler;
+    const UPGRADE_TRIGGER_NAME = '__upgrade-check';
+    if (!mgr.getByName(UPGRADE_TRIGGER_NAME)) {
+      const { history } = mgr.listAll();
+      const wasCancelled = history.some(h => h.name === UPGRADE_TRIGGER_NAME && h.doneReason === 'cancelled');
+      if (!wasCancelled) {
+        const randomMinute = Math.floor(Math.random() * 60);
+        const cronExpr = `${randomMinute} 3 * * *`;
+        const firstChannelInst = channelInstances[0];
+        const firstChannel = firstChannelInst?.adapter?.channelName || 'system';
+        const trigger: import('./types.js').Trigger = {
+          id: crypto.randomUUID(),
+          name: UPGRADE_TRIGGER_NAME,
+          scheduleType: 'cron',
+          scheduleValue: cronExpr,
+          nextFireAt: calcNextFireAt('cron', cronExpr),
+          targetChannel: firstChannel,
+          targetChannelId: '__system__',
+          targetSessionStrategy: 'latest',
+          prompt: '检查 evolclaw 是否有新版本可用。执行 `npm view evolclaw version` 获取最新版本，与当前版本（执行 `evolclaw --version`）对比。如果有新版本，执行 /restart 进行升级。如果已是最新版本，无需任何操作。',
+          createdByPeerId: '__system__',
+          createdByChannel: '__system__',
+          fireCount: 0,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        };
+        try {
+          mgr.register(trigger);
+          sched.register(trigger);
+          logger.info(`[Trigger] Seeded default trigger: ${UPGRADE_TRIGGER_NAME} (cron ${cronExpr})`);
+        } catch (e) {
+          logger.warn(`[Trigger] Failed to seed ${UPGRADE_TRIGGER_NAME}: ${e}`);
+        }
+      }
+    }
   }
 
   // Bind adapters to their owning agents and mark running

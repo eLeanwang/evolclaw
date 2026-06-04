@@ -861,7 +861,6 @@ export interface Trigger {
   nextFireAt: number;          // Unix ms
   targetChannel: string;
   targetChannelId: string;
-  targetChannelType?: string;
   targetThreadId?: string;
   targetSessionStrategy: TriggerSessionStrategy;
   agentId?: string;
