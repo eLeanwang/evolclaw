@@ -2761,22 +2761,22 @@ export class AUNChannelPlugin implements ChannelPlugin {
               channel.sendProcessingStatus(channelId, 'progress', envelope.taskId, envelope.taskId, ctx, payload.metadata);
               return;
             case 'status.started':
-              channel.sendProcessingStatus(channelId, 'start', envelope.taskId, envelope.taskId, ctx);
+              channel.sendProcessingStatus(channelId, 'start', envelope.taskId, envelope.taskId, ctx, payload.metadata);
               return;
             case 'status.queued':
-              channel.sendProcessingStatus(channelId, 'queued', envelope.taskId, envelope.taskId, ctx);
+              channel.sendProcessingStatus(channelId, 'queued', envelope.taskId, envelope.taskId, ctx, payload.metadata);
               return;
             case 'status.completed':
-              channel.sendProcessingStatus(channelId, 'done', envelope.taskId, envelope.taskId, ctx);
+              channel.sendProcessingStatus(channelId, 'done', envelope.taskId, envelope.taskId, ctx, payload.metadata);
               return;
             case 'status.interrupted':
-              channel.sendProcessingStatus(channelId, 'interrupted', envelope.taskId, envelope.taskId, ctx);
+              channel.sendProcessingStatus(channelId, 'interrupted', envelope.taskId, envelope.taskId, ctx, payload.metadata);
               return;
             case 'status.error':
-              channel.sendProcessingStatus(channelId, 'error', envelope.taskId, envelope.taskId, ctx);
+              channel.sendProcessingStatus(channelId, 'error', envelope.taskId, envelope.taskId, ctx, payload.metadata);
               return;
             case 'status.timeout':
-              channel.sendProcessingStatus(channelId, 'timeout', envelope.taskId, envelope.taskId, ctx);
+              channel.sendProcessingStatus(channelId, 'timeout', envelope.taskId, envelope.taskId, ctx, payload.metadata);
               return;
             case 'interaction': {
               const req = payload.interaction;
