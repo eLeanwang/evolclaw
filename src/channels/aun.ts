@@ -11,7 +11,7 @@ import type { MessageBridge } from '../core/message/message-bridge.js';
 import type { Config, ReplyContext, AunChannelConfig, AidConnectionState, AidStatus, AidKickDetail, InteractionResponse, ActionInteraction, CommandCard } from '../types.js';
 import { normalizeChannelInstances, getChannelShowActivities } from '../utils/channel-helpers.js';
 import { resolvePaths, getPackageRoot, agentMdPath as agentMdPathFn, agentDir as agentDirPath, resolveRoot } from '../paths.js';
-import { saveToUploads, sanitizeFileName } from '../utils/media-cache.js';
+import { saveToUploads, sanitizeFileName, bufferToInboundImage, type InboundImage } from '../utils/media-cache.js';
 import { appendAidEvent } from '../utils/instance-registry.js';
 import { appendMessageLog, buildOutboundEntry } from '../core/message/message-log.js';
 import { chatDirPath } from '../core/session/session-fs-store.js';
@@ -922,36 +922,57 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
   // ── Event handlers ──────────────────────────────────────────
 
   /**
-   * 判断附件是否为图片，返回 MIME 类型（非图片返回空）。
-   * 多重检测：附件元数据字段 → 文件名后缀 → 文件 magic bytes。
+   * 统一处理入站附件：下载 → 图片识别+base64 注入 → 拼接文本。
+   *
+   * - 图片：base64 注入视觉通道（不再追加 [文件: …] 文本行，避免冗余）
+   * - 非图片：拼 [文件: name → path]，并提示用 Read 工具读取
+   *
+   * @param baseText 已解析的正文（私聊 text / 群聊 strippedText）
+   * @param channelId 下载归属（私聊 fromAid / 群聊 groupId）
+   * @param preCollected 已收集的附件（群聊路径会提前 collect，避免重复）
    */
-  private detectImageMime(att: any, filePath: string): string {
-    const extToMime: Record<string, string> = {
-      '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
-      '.gif': 'image/gif', '.webp': 'image/webp',
-    };
-    // 1. 附件元数据字段（content_type / mime_type / mimeType）
-    const metaCt = (att?.content_type || att?.mime_type || att?.mimeType || '');
-    if (typeof metaCt === 'string' && metaCt.startsWith('image/')) return metaCt;
-    // 2. 文件名后缀
-    const name = (att?.filename || att?.object_key || filePath || '').toLowerCase();
-    for (const [ext, mime] of Object.entries(extToMime)) {
-      if (name.endsWith(ext)) return mime;
+  private async processAttachments(
+    payload: unknown,
+    baseText: string,
+    channelId: string,
+    preCollected?: any[],
+  ): Promise<{ finalText: string; images: InboundImage[] }> {
+    const rawAttachments = preCollected ?? this.collectAllAttachments(payload);
+    const images: InboundImage[] = [];
+    let finalText = baseText;
+    if (rawAttachments.length === 0 || !this.client) {
+      return { finalText, images };
     }
-    // 3. magic bytes
-    try {
-      const { openSync, readSync, closeSync } = require('node:fs') as typeof import('node:fs');
-      const fd = openSync(filePath, 'r');
-      const head = Buffer.alloc(12);
-      readSync(fd, head, 0, 12, 0);
-      closeSync(fd);
-      if (head[0] === 0x89 && head[1] === 0x50 && head[2] === 0x4e && head[3] === 0x47) return 'image/png';
-      if (head[0] === 0xff && head[1] === 0xd8 && head[2] === 0xff) return 'image/jpeg';
-      if (head[0] === 0x47 && head[1] === 0x49 && head[2] === 0x46) return 'image/gif';
-      if (head[0] === 0x52 && head[1] === 0x49 && head[2] === 0x46 && head[3] === 0x46 &&
-          head[8] === 0x57 && head[9] === 0x45 && head[10] === 0x42 && head[11] === 0x50) return 'image/webp';
-    } catch { /* not readable, skip */ }
-    return '';
+
+    const fileParts: string[] = [];
+    for (const att of rawAttachments) {
+      const filePath = await this.downloadAttachment(att, channelId);
+      if (!filePath) continue;
+      const name = sanitizeFileName(att.filename || att.object_key?.split('/').pop() || 'file');
+      let img: InboundImage | null = null;
+      try {
+        const { readFileSync } = await import('node:fs');
+        img = await bufferToInboundImage(readFileSync(filePath), {
+          contentType: att.content_type, mimeType: att.mime_type, filename: name,
+        });
+      } catch { /* read failed, treat as non-image file */ }
+      if (img) {
+        images.push(img);
+        // 图片已注入视觉通道，不追加 [文件: …] 文本行
+      } else {
+        fileParts.push(`[文件: ${name} → ${filePath}]`);
+      }
+    }
+
+    const parts: string[] = [];
+    if (baseText) parts.push(baseText);
+    if (fileParts.length > 0) {
+      parts.push(...fileParts);
+      parts.push('请使用 Read 工具读取文件内容。');
+    }
+    if (parts.length > 0) finalText = parts.join('\n\n');
+    logger.info(`${this.logPrefix()} [attachments] count=${rawAttachments.length} images=${images.length} files=${fileParts.length}`);
+    return { finalText, images };
   }
 
   private async downloadAttachment(
@@ -1053,35 +1074,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     }
 
     // Process attachments (顶层 + 嵌套在 merge.items / quote.quote 中的)
-    const rawAttachments: any[] = this.collectAllAttachments(payload);
-
-    let finalText = text;
-    const inboundImages: { data: string; mimeType: string }[] = [];
-    if (rawAttachments.length > 0 && this.client) {
-      const fileParts: string[] = [];
-      for (const att of rawAttachments) {
-        const filePath = await this.downloadAttachment(att, fromAid);
-        if (filePath) {
-          const name = sanitizeFileName(att.filename || att.object_key?.split('/').pop() || 'file');
-          const mime = this.detectImageMime(att, filePath);
-          if (mime) {
-            try {
-              const { readFileSync } = await import('node:fs');
-              inboundImages.push({ data: readFileSync(filePath).toString('base64'), mimeType: mime });
-            } catch { /* fallback to file path */ }
-          }
-          fileParts.push(`[文件: ${name} → ${filePath}]`);
-        }
-      }
-      if (fileParts.length > 0) {
-        const parts: string[] = [];
-        if (text) parts.push(text);
-        parts.push(...fileParts);
-        if (inboundImages.length === 0) parts.push('请使用 Read 工具读取文件内容。');
-        finalText = parts.join('\n\n');
-      }
-      logger.info(`${this.logPrefix()} [img-debug] private attachments=${rawAttachments.length} images=${inboundImages.length}`);
-    }
+    const { finalText, images: inboundImages } = await this.processAttachments(payload, text, fromAid);
 
     // 私聊 channelId = 对端 AID（不再读 payload.chat_id 含 device 三段式）
     // device_id 仅 SDK 内部多实例去重用，evolclaw session 层面跨端共享会话
@@ -1301,32 +1294,9 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       : mentionedSelf && this._aid ? [this._aid] : [];
 
     // Process attachments
-    let finalText = strippedText;
-    const inboundImages: { data: string; mimeType: string }[] = [];
-    if (hasAttachments && this.client) {
-      const fileParts: string[] = [];
-      for (const att of rawAttachments) {
-        const filePath = await this.downloadAttachment(att, groupId);
-        if (filePath) {
-          const name = sanitizeFileName(att.filename || att.object_key?.split('/').pop() || 'file');
-          const mime = this.detectImageMime(att, filePath);
-          if (mime) {
-            try {
-              const { readFileSync } = await import('node:fs');
-              inboundImages.push({ data: readFileSync(filePath).toString('base64'), mimeType: mime });
-            } catch { /* fallback to file path */ }
-          }
-          fileParts.push(`[文件: ${name} → ${filePath}]`);
-        }
-      }
-      if (fileParts.length > 0) {
-        const parts: string[] = [];
-        if (strippedText) parts.push(strippedText);
-        parts.push(...fileParts);
-        if (inboundImages.length === 0) parts.push('请使用 Read 工具读取文件内容。');
-        finalText = parts.join('\n\n');
-      }
-    }
+    const { finalText, images: inboundImages } = await this.processAttachments(
+      payload, strippedText, groupId, rawAttachments,
+    );
 
     const selfAgentDir = path.join(resolvePaths().agentsDir, this.config.aid);
     const peerIdentity = await PeerIdentityCache.resolve('aun', senderAid, selfAgentDir, this.store!, false);

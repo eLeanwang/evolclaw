@@ -3,7 +3,7 @@
  * ecweb — EvolClaw 监控面板独立程序。
  *
  * 用法:
- *   ecweb [--port 20030] [--home <EVOLCLAW_HOME>]
+ *   ecweb [--port 42705] [--home <EVOLCLAW_HOME>]
  *
  * 通过 EVOLCLAW_HOME 定位 evolclaw 数据目录，启动 HTTP+WS 服务，浏览器配对码登录。
  * 与 evolclaw daemon 通过 IPC socket（live 状态）+ 文件系统（历史数据）旁路通信。
@@ -22,7 +22,7 @@ for (let i = 0; i < argv.length; i++) {
   if (a === '--port' || a === '-p') port = Number(argv[++i]);
   else if (a === '--home' || a === '-h') home = argv[++i];
   else if (a === '--help') {
-    process.stdout.write(`ecweb — EvolClaw 监控面板\n\n用法:\n  ecweb [--port 20030] [--home <EVOLCLAW_HOME>]\n\n选项:\n  --port, -p   监听端口（默认 20030，占用则自动 +1）\n  --home       EVOLCLAW_HOME 数据目录（默认读环境变量或 ~/.evolclaw）\n`);
+    process.stdout.write(`ecweb — EvolClaw 监控面板\n\n用法:\n  ecweb [--port 42705] [--home <EVOLCLAW_HOME>]\n\n选项:\n  --port, -p   监听端口（默认 42705，占用则自动 +1）\n  --home       EVOLCLAW_HOME 数据目录（默认读环境变量或 ~/.evolclaw）\n`);
     process.exit(0);
   }
 }
@@ -75,7 +75,7 @@ const { writeWatchWeb, removeWatchWeb, cleanupWatchWebs, cleanupWatchWebByPort }
 const killedWebs = cleanupWatchWebs();
 for (const r of killedWebs) logLine(`${YELLOW}↺ 已清理旧 watch 进程 PID ${r.pid}（端口 ${r.port}）${RST}`);
 // 2) 兜底：按端口杀掉 instance 文件已丢失的孤儿进程（杀不掉的僵尸）
-const WATCH_WEB_PORT = port ?? 20030;
+const WATCH_WEB_PORT = port ?? 42705;
 const killedByPort = cleanupWatchWebByPort(WATCH_WEB_PORT);
 for (const pid of killedByPort) logLine(`${YELLOW}↺ 已强占端口 ${WATCH_WEB_PORT}：杀掉占用进程 PID ${pid}${RST}`);
 if (killedWebs.length > 0 || killedByPort.length > 0) {
@@ -113,8 +113,15 @@ if (handle.displaced) {
 process.stdout.write(`\n  ${DIM}绑定 0.0.0.0，远程可访问。Ctrl-C 退出。${RST}\n`);
 process.stdout.write(`  ${DIM}调试日志: ${logFile}${RST}\n\n`);
 
+let cleaningUp = false;
 const cleanup = () => {
+  if (cleaningUp) return;   // 幂等：raw 模式下连按 Ctrl-C/q 不应重复触发
+  cleaningUp = true;
+  logLine(`${YELLOW}退出中…${RST}`);
   removeWatchWeb();
+  // 兜底：close() 万一卡住也强制退出，避免进程挂死
+  const force = setTimeout(() => process.exit(0), 2000);
+  force.unref();
   handle.close().finally(() => process.exit(0));
 };
 process.on('exit', () => removeWatchWeb());
@@ -127,7 +134,6 @@ if (process.stdin.isTTY) {
   process.stdin.on('data', (key: Buffer) => {
     // Ctrl-C (0x03) 或 q 退出
     if (key[0] === 0x03 || key.toString() === 'q') {
-      logLine(`${YELLOW}退出中…${RST}`);
       cleanup();
     }
   });

@@ -201,6 +201,7 @@ function readTranscriptFile(file: string): any {
   let raw: string;
   try { raw = fs.readFileSync(file, 'utf-8'); } catch { return empty; }
   const turns: any[] = [];
+  const counts = { userInput: 0, modelOutput: 0, toolCall: 0, toolResult: 0, msgSend: 0 };
   let inTok = 0, outTok = 0, model = '', branch = '', version = '', title = '', cwd = '', userMsgs = 0, totalMsgs = 0, contextTokens = 0, costUsd = 0, lastUsageKey = '';
   for (const line of raw.split('\n')) {
     if (!line.trim()) continue;
@@ -227,11 +228,40 @@ function readTranscriptFile(file: string): any {
       if (u.output_tokens) outTok += u.output_tokens;
       if (o.message.model) model = o.message.model;
     }
-    // 简化：turns 仅记录必要字段（省略完整 block 解析）
-    if (o.type === 'user' || o.type === 'assistant') turns.push({ role: o.type, ts: o.timestamp ? Date.parse(o.timestamp) : 0, uuid: o.uuid });
+    if (o.type === 'user' || o.type === 'assistant') {
+      const content = o.message?.content;
+      const arr: any[] = typeof content === 'string' ? [{ type: 'text', text: content }] : (Array.isArray(content) ? content : []);
+      const blocks: any[] = [];
+      let hasToolUse = false, hasToolResult = false;
+      for (const item of arr) {
+        if (!item || typeof item !== 'object') continue;
+        if (item.type === 'text' && item.text) {
+          blocks.push({ kind: 'text', text: item.text });
+        } else if (item.type === 'thinking' && item.thinking) {
+          blocks.push({ kind: 'thinking', text: item.thinking });
+        } else if (item.type === 'tool_use') {
+          const inputStr = item.input ? JSON.stringify(item.input, null, 2) : '';
+          blocks.push({ kind: 'tool_use', name: item.name || '', input: item.input || {}, inputStr });
+          hasToolUse = true;
+        } else if (item.type === 'tool_result') {
+          const c = item.content;
+          const text = typeof c === 'string' ? c : (Array.isArray(c) ? c.filter((x: any) => x?.type === 'text').map((x: any) => x.text).join('\n') : '');
+          blocks.push({ kind: 'tool_result', text, isError: !!item.is_error });
+          hasToolResult = true;
+        }
+      }
+      let category: string;
+      if (o.type === 'user') {
+        category = hasToolResult ? 'tool_result' : 'user_input';
+      } else {
+        category = hasToolUse ? 'tool_call' : 'model_output';
+      }
+      counts[category === 'user_input' ? 'userInput' : category === 'model_output' ? 'modelOutput' : category === 'tool_call' ? 'toolCall' : 'toolResult']++;
+      turns.push({ role: o.type, ts: o.timestamp ? Date.parse(o.timestamp) : 0, uuid: o.uuid, category, blocks });
+    }
   }
   const shown = turns.length > 500 ? turns.slice(-500) : turns;
-  return { turns: shown, totalTurns: turns.length, userMsgs, totalMsgs, counts: { userInput: 0, modelOutput: 0, toolCall: 0, toolResult: 0, msgSend: 0 }, inputTokens: inTok, outputTokens: outTok, contextTokens, costUsd, model, gitBranch: branch, version, title, cwd };
+  return { turns: shown, totalTurns: turns.length, userMsgs, totalMsgs, counts, inputTokens: inTok, outputTokens: outTok, contextTokens, costUsd, model, gitBranch: branch, version, title, cwd };
 }
 
 function buildSnapshot(params: Record<string, any>): any {

@@ -28,7 +28,7 @@ const STATIC_DIR = path.join(__dirname, 'static');
 
 const TOKEN_TTL_MS = 24 * 60 * 60 * 1000;  // 24h
 const PAIRING_TTL_MS = 5 * 60 * 1000;       // 5min
-const DEFAULT_PORT = 20030;
+const DEFAULT_PORT = 42705;
 const PROTOCOL_VERSION = 1;                  // 与 evolclaw ping response 对齐的软校验版本
 
 const SOURCES: Record<ViewKind, WatchSource> = { aid: aidSource, msg: msgSource, session: sessionSource };
@@ -190,7 +190,17 @@ function handleConnection(ws: WebSocket, req: http.IncomingMessage, log: (s: str
     }
   });
 
-  ws.on('close', () => { if (unsubscribe) { unsubscribe(); unsubscribe = null; } log(`◇ WS 断开 from ${ip}`); });
+  // NAT keepalive: ping every 25s to prevent middlebox from cutting the connection
+  let alive = true;
+  const heartbeat = setInterval(() => {
+    if (ws.readyState !== ws.OPEN) { clearInterval(heartbeat); return; }
+    if (!alive) { ws.terminate(); return; }
+    alive = false;
+    ws.ping();
+  }, 25000);
+  ws.on('pong', () => { alive = true; });
+
+  ws.on('close', () => { clearInterval(heartbeat); if (unsubscribe) { unsubscribe(); unsubscribe = null; } log(`◇ WS 断开 from ${ip}`); });
   ws.on('error', () => {});
 }
 
@@ -272,9 +282,13 @@ export async function startWatchWebServer(opts: { port?: number; log?: (s: strin
     pairingCode,
     close(): Promise<void> {
       return new Promise((resolve) => {
-        for (const client of wss.clients) try { client.close(); } catch {}
+        // 强制断开所有 WS 客户端（graceful close 握手可能永不完成）
+        for (const client of wss.clients) try { client.terminate(); } catch {}
         wss.close();
+        // server.close() 仅停止接受新连接，会等待存量连接（含 HTTP keep-alive、已升级的 WS）排空，
+        // 否则回调永不触发 → 进程挂起。Node 18.2+ 用 closeAllConnections() 强制关闭。
         server.close(() => resolve());
+        try { server.closeAllConnections(); } catch {}
       });
     },
   };

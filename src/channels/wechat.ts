@@ -3,7 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { resolvePaths } from '../paths.js';
 import { logger } from '../utils/logger.js';
-import { sanitizeFileName, saveToUploads, safeFetch } from '../utils/media-cache.js';
+import { sanitizeFileName, saveToUploads, safeFetch, bufferToInboundImage } from '../utils/media-cache.js';
 import { markdownToPlainText } from '../utils/rich-content-renderer.js';
 import type { EventBus } from '../core/event-bus.js';
 import { formatItemsAsText } from '../core/message/items-formatter.js';
@@ -643,7 +643,11 @@ export class WechatChannel {
       try {
         if (item.type === MSG_ITEM_IMAGE && item.image_item?.media) {
           const buf = await downloadMedia(item.image_item.media, item.image_item.aeskey);
-          images.push({ data: buf.toString('base64'), mimeType: 'image/jpeg' });
+          // 统一图片识别：magic bytes 优先正确区分 jpeg/png/gif/webp；
+          // 检测失败时回退到 image/jpeg（微信入站图片实际均为 jpeg，保留历史行为）。
+          const img = await bufferToInboundImage(buf, { contentType: 'image/jpeg' });
+          if (img) images.push(img);
+          else logger.warn('[WeChat] Image validation failed (not a supported image)');
         } else if (item.type === MSG_ITEM_FILE && item.file_item?.media) {
           const buf = await downloadMedia(item.file_item.media);
           const fileName = sanitizeFileName(item.file_item.file_name || `file_${Date.now()}`);

@@ -2091,12 +2091,24 @@ async function cmdWatchWeb(): Promise<void> {
 
   // Node 18.20+/20+/22 起，execFile 拒绝直接 spawn .cmd/.bat（CVE-2024-27980），必须 shell:true。
   // shell 模式下含空格的路径/参数需加引号。
+  // evolclaw-web 是前台长驻服务：用户 Ctrl-C、被新实例的单实例保护 SIGKILL、或正常退出，
+  // execFileSync 都会抛错（signal 终止时 status=null）。这些都是正常生命周期，
+  // 不应让父进程 evolclaw 带堆栈崩溃。只有真正的非信号失败才提示。
   const isBatch = /\.(cmd|bat)$/i.test(exe);
-  if (isBatch) {
-    const q = (s: string) => `"${s}"`;
-    execFileSync(q(exe), ['--home', q(home)], { stdio: 'inherit', shell: true });
-  } else {
-    execFileSync(exe, ['--home', home], { stdio: 'inherit' });
+  try {
+    if (isBatch) {
+      const q = (s: string) => `"${s}"`;
+      execFileSync(q(exe), ['--home', q(home)], { stdio: 'inherit', shell: true });
+    } else {
+      execFileSync(exe, ['--home', home], { stdio: 'inherit' });
+    }
+  } catch (e: any) {
+    // 信号终止（SIGINT/SIGTERM/SIGKILL）= 用户主动退出或被新实例顶替，静默返回
+    if (e?.signal) return;
+    // 退出码非 0 但非信号：可能是启动失败，提示但不崩溃
+    if (typeof e?.status === 'number' && e.status !== 0) {
+      process.stderr.write(`⚠ evolclaw-web 退出（code ${e.status}）\n`);
+    }
   }
 }
 async function cmdRestartMonitor() {

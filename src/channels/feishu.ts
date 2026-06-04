@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import imageType from 'image-type';
-import { sanitizeFileName, saveToUploads, validateImage } from '../utils/media-cache.js';
+import { sanitizeFileName, saveToUploads, bufferToInboundImage } from '../utils/media-cache.js';
 import { logger } from '../utils/logger.js';
 import { hasRichContent, renderAllRichContent, checkDependencies } from '../utils/rich-content-renderer.js';
 import type { InteractionRequest, InteractionResponse, ActionInteraction, ThoughtItem } from '../types.js';
@@ -860,20 +860,14 @@ export class FeishuChannel {
           return null;
         }
 
-        // 统一图片验证（类型白名单 + 大小限制）
-        const result = await validateImage(buffer);
-        if (result.mime === null) {
-          logger.warn(`[Feishu] Image validation failed: ${result.reason}`);
+        // 统一图片识别 + base64 注入（magic bytes → 元数据 → 后缀）
+        const img = await bufferToInboundImage(buffer);
+        if (!img) {
+          logger.warn('[Feishu] Image validation failed (not a supported image)');
           return null;
         }
-
-        const base64Data = buffer.toString('base64');
-        logger.debug('[Feishu] Image downloaded successfully, type:', result.mime, 'size:', base64Data.length);
-
-        return {
-          data: base64Data,
-          mimeType: result.mime
-        };
+        logger.debug('[Feishu] Image downloaded successfully, type:', img.mimeType, 'size:', img.data.length);
+        return img;
       }
 
       logger.error('[Feishu] Image download failed: no valid method');
