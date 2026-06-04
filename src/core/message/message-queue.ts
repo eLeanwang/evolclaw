@@ -1,4 +1,4 @@
-import { Message } from '../../types.js';
+import { Message, SubMessage } from '../../types.js';
 import path from 'path';
 import { logger } from '../../utils/logger.js';
 import type { EventBus } from '../event-bus.js';
@@ -230,7 +230,7 @@ export class MessageQueue {
     const contents: string[] = [];
     const allImages: Array<{ data: string; mimeType: string }> = [];
     const allMentions: Array<{ userId: string; name?: string; key?: string }> = [];
-    const subMessages: Array<{ peerId?: string; peerName?: string; peerType?: string; content: string; timestamp?: number; images?: Array<{ data: string; mimeType: string }> }> = [];
+    const subMessages: SubMessage[] = [];
 
     for (const item of items) {
       const m = item.message;
@@ -243,6 +243,7 @@ export class MessageQueue {
       } else {
         subMessages.push({
           peerId: m.peerId, peerName: m.peerName, peerType: m.peerType,
+          sameDevice: m.sameDevice, sameNetwork: m.sameNetwork, sameEgressIp: m.sameEgressIp,
           content: m.content, timestamp: m.timestamp,
           images: m.images && m.images.length > 0 ? m.images : undefined,
         });

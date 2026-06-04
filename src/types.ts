@@ -251,6 +251,10 @@ export interface SubMessage {
   peerId?: string;
   peerName?: string;
   peerType?: string;
+  /** 对端网络邻近性（仅加密消息有值，逐条保留以支持群聊批量逐条渲染）*/
+  sameDevice?: boolean;
+  sameNetwork?: boolean;
+  sameEgressIp?: boolean;
   content: string;
   timestamp?: number;
   images?: Array<{ data: string; mimeType: string }>;

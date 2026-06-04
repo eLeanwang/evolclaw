@@ -67,12 +67,67 @@ manifest 是 `{ "$schema_version": 1, "sections": [...] }`。每个 section：
 
 合并后统一按 `order` 升序排序。改某段行为（如关掉某层、调顺序、换条件）优先用覆盖文件，不动基础 manifest。
 
+### 覆盖示例
+
+禁用某段：
+
+```json
+{ "sections": [ { "id": "venue-client", "enabled": false } ] }
+```
+
+改加载条件（仅 owner/admin 才载入对端档案）：
+
+```json
+{ "sections": [ { "id": "peer-profile", "when": { "var": "peerRole", "in": ["owner", "admin"] } } ] }
+```
+
+新增自定义段：
+
+```json
+{
+  "sections": [
+    {
+      "id": "my-custom-context",
+      "type": "file",
+      "file": "$AGENT_DIR/custom/my-rules.md",
+      "order": 25,
+      "needsInjection": false,
+      "when": "always",
+      "description": "我的自定义规则"
+    }
+  ]
+}
+```
+
+完全替换（忽略基础 manifest）：
+
+```json
+{ "$schema_version": 1, "mode": "replace", "sections": [ ... ] }
+```
+
 ## 路径与模板渲染
 
 ### 路径占位符（所有 section 的 file/path）
 
 - `$NAME`（大写）→ 从 vars 取真值，如 `$KITS_DOCS` → 包内文档目录。
 - `{{key}}` → 从 vars 取真值，如 `{{chatType}}` → `private`，`{{peerKey}}` → `aun#alice.aid.pub`。
+
+manifest 中常用路径变量的展开值：
+
+| 变量 | 展开为 |
+|------|--------|
+| `$PACKAGE_ROOT` | evolclaw 包根 |
+| `$EVOLCLAW_HOME` | 用户数据根（默认 `~/.evolclaw`） |
+| `$KITS` | `$PACKAGE_ROOT/kits` |
+| `$KITS_RULES` | `$KITS/rules` |
+| `$KITS_DOCS` | `$KITS/docs` |
+| `$KITS_TEMPLATES` | `$KITS/templates` |
+| `$KITS_FRAGMENTS` | `$KITS_TEMPLATES/system-fragments` |
+| `$ECK` | `$EVOLCLAW_HOME/eck` |
+| `$AGENT_DIR` | `$EVOLCLAW_HOME/agents/<selfAid>` |
+| `$PERSONAL_DIR` | `$AGENT_DIR/personal` |
+| `$RELATIONS_DIR` | `$AGENT_DIR/relations` |
+| `$VENUES_DIR` | `$AGENT_DIR/venues` |
 
 任一占位符解析为空 → 该 section 视为"未解析"，跳过（调试输出标 `unresolved-vars`）。文件不存在 → 标 `not-exist`，也跳过。这是**正常机制**：很多 section 靠"路径解析不出来"自然落选（如 coding 场景没有 `$PERSONAL_DIR`）。
 
@@ -118,6 +173,16 @@ vars 由 evolclaw 在 `message-processor.ts` 按当前会话构造。分两类�
 
 coding 场景（无 channel/无身份）下，`chatType`、`channel`、`selfAid`、`peer*` 等均为空——这正是身份/关系/环境/渠道层落选的原因。
 
+## 三种加载方式
+
+| 加载方式 | 决策者 | 驱动方式 | 例子 |
+|---------|-------|---------|------|
+| **全量加载** | manifest | `when: "always"` | rules/ 核心规则、session 参数 |
+| **按条件自动加载** | manifest | `when` 条件 + 路径存在性 | 身份层（chatType 非空时）、对端档案（peerKey 非空时） |
+| **按需加载** | agent 自主 | agent 在对话中主动 Read 文件 | 查阅 `$KITS_DOCS/` 下的详细参考文档 |
+
+前两种由 manifest 控制，第三种由 agent 根据各层文档中的"按需加载指引"自主决定。
+
 ## 默认 manifest 的段（按 order）
 
 | order | id | 类型 | 加载条件（when） | inject |
@@ -139,6 +204,27 @@ coding 场景（无 channel/无身份）下，`chatType`、`channel`、`selfAid`
 | 70 | baseagent | fragment | baseAgent≠null | ✓ |
 
 > 注意：`session`(60) 是 `always`，`baseagent`(70) 只看 `baseAgent` 是否注入——这两段**与 chatType 无关**，coding 场景也会加载。所谓"coding 仅 rules"是近似说法：精确地说 coding 场景命中的是 rules + session + baseagent（其余因 chatType/channel 为空而落选）。
+
+## 环境层文档目录结构
+
+venue-* 段从两棵目录树取文件——随包发布的通用文档（只读）和 agent 私有的具体环境文档（按需创建）：
+
+```
+$KITS_DOCS/venues/                  通用环境文档（随包发布，只读）
+├── private.md                      单聊场景通用指引
+├── group.md                        群聊场景通用指引
+├── aun-private.md                  AUN 单聊特有
+├── aun-group.md                    AUN 群聊特有
+├── feishu-private.md               飞书单聊特有
+├── feishu-group.md                 飞书群聊特有
+├── client-desktop.md               桌面端环境
+├── client-mobile.md                移动端环境
+└── ...
+
+$AGENT_DIR/venues/                  agent 私有环境文档（按需创建）
+└── <channel>#<urlEncode(groupId)>/
+    └── profile.md                  具体群的特别内容
+```
 
 ## 输出结构
 

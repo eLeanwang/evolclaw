@@ -21,10 +21,10 @@ clientType: {{clientType}} # 客户端类型：desktop / web / mobile
 groupId: {{groupId}}
 {{/}}
 {{?sameDevice}}
-sameDevice: true # 对端与你运行在同一台设备上（E2EE 消息 proximity）
+sameDevice: true # 对端与你运行在同一台设备上
 {{/}}
 {{?sameNetwork}}
-sameNetwork: true # 对端与你在同一网络内
+sameNetwork: true # 对端与你在同一网络内（同域）
 {{/}}
 {{?sameEgressIp}}
 sameEgressIp: true # 对端与你共享同一出口 IP

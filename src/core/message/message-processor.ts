@@ -760,9 +760,9 @@ export class MessageProcessor {
             peerName: peerName || undefined,
             peerRole: session.identity?.role || 'anonymous',
             peerType: message.peerType || undefined,
-            sameDevice: message.sameDevice || undefined,
-            sameNetwork: message.sameNetwork || undefined,
-            sameEgressIp: message.sameEgressIp || undefined,
+            sameDevice: message.sameDevice ?? false,
+            sameNetwork: message.sameNetwork ?? false,
+            sameEgressIp: message.sameEgressIp ?? false,
             groupId: session.metadata?.groupId || undefined,
             chatType: session.chatType || null,
             channel: currentChannelType || null,
@@ -813,8 +813,9 @@ export class MessageProcessor {
               ? message.items
               : [{
                   peerId: message.peerId, peerName: peerName || undefined,
-                  peerType: message.peerType, content: message.content,
-                  timestamp: message.timestamp,
+                  peerType: message.peerType,
+                  sameDevice: message.sameDevice, sameNetwork: message.sameNetwork, sameEgressIp: message.sameEgressIp,
+                  content: message.content, timestamp: message.timestamp,
                   images: message.images,
                 }];
             renderResult = renderMessageBody(renderItems, kitCtx.vars, session.id);

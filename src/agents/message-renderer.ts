@@ -61,6 +61,9 @@ function renderOneItem(
     peerId: item.peerId ?? sessionVars.peerId,
     peerName: item.peerName ?? sessionVars.peerName,
     peerType: item.peerType ?? sessionVars.peerType,
+    sameDevice: item.sameDevice ?? sessionVars.sameDevice,
+    sameNetwork: item.sameNetwork ?? sessionVars.sameNetwork,
+    sameEgressIp: item.sameEgressIp ?? sessionVars.sameEgressIp,
     now: formatLocalTime(
       item.timestamp ?? Date.now(),
       sessionVars.timezone ? String(sessionVars.timezone) : undefined,
