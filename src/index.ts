@@ -4,6 +4,7 @@ import { GeminiSessionFileAdapter } from './core/session/adapters/gemini-session
 import { ensureDataDirs, resolvePaths, agentDir, getPackageRoot, agentMdPath } from './paths.js';
 import { resolveAnthropicConfig } from './agents/resolve.js';
 import { loadDefaults, loadAllAgents, mergeForAgent, ensureAgentDirSkeleton, autoMigrateIfNeeded, migrateIdentitiesIfNeeded, migrateProcessConfigIfNeeded } from './config-store.js';
+import { loadEvolclawConfig } from './evolclaw-config.js';
 import type { Config, MergedAgentConfig, AgentConfig, DefaultsConfig } from './types.js';
 import { CONFIG_SCHEMA_VERSION } from './types.js';
 import dotenv from 'dotenv';
@@ -13,7 +14,7 @@ import { CodexAgentPlugin } from './agents/codex-runner.js';
 import { GeminiAgentPlugin } from './agents/gemini-runner.js';
 import { FeishuChannelPlugin } from './channels/feishu.js';
 import { WechatChannelPlugin } from './channels/wechat.js';
-import { AUNChannelPlugin } from './channels/aun.js';
+import { AUNChannel, AUNChannelPlugin } from './channels/aun.js';
 import { DingtalkChannelPlugin } from './channels/dingtalk.js';
 import { QQBotChannelPlugin } from './channels/qqbot.js';
 import { WecomChannelPlugin } from './channels/wecom.js';
@@ -770,6 +771,28 @@ async function main() {
     });
   }
 
+  // ── 控制 AID（daemon 进程身份）：pureIdentity 接入 AUN，独立于 evolagent ──
+  const evolclawCfg = loadEvolclawConfig();
+  let controlChannel: AUNChannel | undefined;
+  if (evolclawCfg.aid) {
+    controlChannel = new AUNChannel({
+      aid: evolclawCfg.aid,
+      agentName: evolclawCfg.aid,
+      channelName: 'control',
+      pureIdentity: true,
+      aunTrace: defaults.debug?.aunTrace,
+      aunSdkLog: defaults.debug?.aunSdkLog,
+    });
+    // connect() 失败不置空实例：AUNChannel 内部有无限重连（SDK auto_reconnect +
+    // scheduleReconnect），首连失败后台会自愈；保留实例供 status 显示 disconnected。
+    try {
+      await controlChannel.connect();
+      logger.info(`✓ 控制 AID 已连接: ${evolclawCfg.aid}`);
+    } catch (e: any) {
+      logger.warn(`控制 AID 首连失败（后台自动重连，不影响 daemon 主流程）: ${e?.message || e}`);
+    }
+  }
+
   // 上线通知：延迟 1-3 秒后向 owner 发送上线消息（带 name + 工作目录）
   // 需在配置中 debug.upmsg: true 手动开启
   setTimeout(() => {
@@ -1135,6 +1158,11 @@ async function main() {
     for (const inst of channelInstances) {
       const type = inst.channelType || inst.adapter.channelName;
       eventBus.publish({ type: 'channel:disconnected', channel: type, channelName: inst.adapter.channelName, reason: 'shutdown' });
+    }
+
+    // 断开控制 AID（daemon 进程身份）
+    if (controlChannel) {
+      try { await controlChannel.disconnect(); } catch { /* ignore */ }
     }
 
     sessionManager.close();
