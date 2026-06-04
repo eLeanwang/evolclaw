@@ -560,6 +560,8 @@ export function mergeForAgent(agent: AgentConfig, defaults: DefaultsConfig | nul
     debounce: agent.debounce ?? d.debounce,
     debug: deepMergeBlocks(d.debug, agent.debug),
     enable_rich_content: agent.enable_rich_content ?? d.enable_rich_content,
+    dispatch: agent.dispatch,
+    observable: agent.observable,
   };
   return merged;
 }
