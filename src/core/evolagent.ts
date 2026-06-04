@@ -1,9 +1,9 @@
 import path from 'path';
-import fs from 'fs';
 import { logger } from '../utils/logger.js';
 import { saveAgent } from '../config-store.js';
 import { formatChannelKey, tryParseChannelKey } from './channel-loader.js';
 import { agentPersonalDir } from '../paths.js';
+import { fileCache } from './cache/file-cache.js';
 import type {
   AgentConfig,
   MergedAgentConfig,
@@ -254,39 +254,36 @@ export class EvolAgent {
 
   // ── Personal layer ────────────────────────────────────────────────────
 
-  private _personaCache: string | null | undefined = undefined;
-
   /**
-   * 读取 personal/persona.md 内容（缓存，首次调用时从磁盘读）。
-   * 文件不存在返回 null。
+   * 读取 personal/persona.md 内容。走统一 fileCache（on-reload，group
+   * 'agent-files'）：人格稳定，靠 reload/重启刷新即可。文件不存在返回 null。
    */
   getPersona(): string | null {
-    if (this._personaCache !== undefined) return this._personaCache;
     const personaPath = path.join(agentPersonalDir(this.aid), 'persona.md');
-    try {
-      this._personaCache = fs.readFileSync(personaPath, 'utf-8').trim() || null;
-    } catch {
-      this._personaCache = null;
-    }
-    return this._personaCache;
+    return fileCache.get<string | null>(
+      personaPath,
+      (raw) => (raw === null ? null : (raw.trim() || null)),
+      { policy: 'on-reload', group: 'agent-files' },
+    );
   }
 
   /**
-   * 读取 personal/memory/working.md 内容（不缓存，每次会话开始时读）。
+   * 读取 personal/memory/working.md 内容。走 fileCache（mtime 门控）：
+   * agent 在对话中改写 working memory、不触发 reload，故每次读 stat 比对、
+   * 变了自动重读，既即时反映又避免无谓重读。
    */
   getWorkingMemory(): string | null {
     const workingPath = path.join(agentPersonalDir(this.aid), 'memory', 'working.md');
-    try {
-      const content = fs.readFileSync(workingPath, 'utf-8').trim();
-      return content || null;
-    } catch {
-      return null;
-    }
+    return fileCache.get<string | null>(
+      workingPath,
+      (raw) => (raw === null ? null : (raw.trim() || null)),
+      { policy: 'mtime', group: 'agent-files' },
+    );
   }
 
-  /** 清除 persona 缓存（reload 后重新读取） */
+  /** 清除 persona 缓存（reload 后重新读取）。失效本 agent 的身份层文件组。 */
   invalidatePersonaCache(): void {
-    this._personaCache = undefined;
+    fileCache.invalidateGroup('agent-files');
   }
 
   // ── Context（喂给 message-processor / command-handler） ──────────────
