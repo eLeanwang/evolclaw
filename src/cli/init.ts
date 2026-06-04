@@ -5,6 +5,8 @@ import { resolvePaths, ensureDataDirs } from '../paths.js';
 import { commandExists } from '../utils/cross-platform.js';
 import { scanInstances } from '../utils/instance-registry.js';
 import { saveDefaultsSafe, loadAllAgents, migrateProcessConfigIfNeeded } from '../config-store.js';
+import { loadEvolclawConfig, saveEvolclawConfig } from '../evolclaw-config.js';
+import { generateControlAid } from '../aun/aid/control-aid.js';
 import { isCodexSdkAvailable } from '../agents/codex-runner.js';
 
 // ==================== Helpers ====================
@@ -86,110 +88,131 @@ export async function cmdInit(options?: {
   // ── 3. 非交互式分支 ──
   if (options?.nonInteractive) {
     if (exists && !options.force) {
-      console.log(`❌ 配置已存在: ${defaultsPath}（加 --force 可覆盖）`);
-      return;
-    }
-
-    let chosen: Baseagent;
-    if (options.baseagent) {
-      if (!BASEAGENT_CANDIDATES.includes(options.baseagent as Baseagent)) {
-        console.log(`❌ 无效 baseagent: ${options.baseagent}（可选: ${BASEAGENT_CANDIDATES.join('/')}）`);
-        return;
-      }
-      if (!available.includes(options.baseagent as Baseagent)) {
-        console.log(`❌ ${options.baseagent} 当前环境不可用（可用: ${available.join('/')}）`);
-        return;
-      }
-      chosen = options.baseagent as Baseagent;
+      // 配置已存在且未 --force：不重写 defaults，但仍落到共享 tail（幂等补生成控制 AID）
+      console.log(`配置已存在: ${defaultsPath}（加 --force 可覆盖）`);
     } else {
-      chosen = pickDefault(available);
+      let chosen: Baseagent;
+      if (options.baseagent) {
+        if (!BASEAGENT_CANDIDATES.includes(options.baseagent as Baseagent)) {
+          console.log(`❌ 无效 baseagent: ${options.baseagent}（可选: ${BASEAGENT_CANDIDATES.join('/')}）`);
+          return; // 硬错误：不落 tail
+        }
+        if (!available.includes(options.baseagent as Baseagent)) {
+          console.log(`❌ ${options.baseagent} 当前环境不可用（可用: ${available.join('/')}）`);
+          return; // 硬错误：不落 tail
+        }
+        chosen = options.baseagent as Baseagent;
+      } else {
+        chosen = pickDefault(available);
+      }
+
+      writeDefaults(chosen, available);
+      console.log(`✓ 已${exists ? '覆盖' : '创建'}: ${defaultsPath}`);
+      console.log(`  active_baseagent: ${chosen}`);
+    }
+    // 落到共享 tail（不 return）
+  } else {
+    // ── 4. 交互式分支（rl 生命周期封装在内部函数，tail 不引用 rl）──
+    await runInteractive();
+  }
+
+  // ── 共享 tail（单一出口）：提示创建 agent + 生成控制 AID ──
+  await initTail();
+  return;
+
+  // ── 内部函数 ──
+
+  async function runInteractive(): Promise<void> {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+
+    async function askBaseagent(): Promise<Baseagent> {
+      const defaultBa = pickDefault(available);
+      if (available.length === 1) {
+        console.log(`  baseagent: ${defaultBa}`);
+        return defaultBa;
+      }
+      let chosen: Baseagent | null = null;
+      while (chosen === null) {
+        const input = (await ask(rl, `默认 baseagent (${available.join('/')}) [${defaultBa}]: `)).trim() || defaultBa;
+        if (!BASEAGENT_CANDIDATES.includes(input as Baseagent)) {
+          console.log(`  无效选择，可选: ${BASEAGENT_CANDIDATES.join('/')}`);
+          continue;
+        }
+        if (!available.includes(input as Baseagent)) {
+          console.log(`  ${input} 当前环境不可用（可用: ${available.join('/')}）`);
+          continue;
+        }
+        chosen = input as Baseagent;
+      }
+      return chosen;
     }
 
-    writeDefaults(chosen, available);
-    console.log(`✓ 已${exists ? '覆盖' : '创建'}: ${defaultsPath}`);
-    console.log(`  active_baseagent: ${chosen}`);
+    async function askProjectsDefaultPath(): Promise<string | undefined> {
+      const defaultDir = path.join(p.root, 'projects', 'default');
+      const input = (await ask(rl, `项目默认目录 [${defaultDir}]: `)).trim();
+      const resolved = input || defaultDir;
+      if (!path.isAbsolute(resolved)) {
+        console.log('  ⚠ 需要绝对路径，已跳过');
+        return undefined;
+      }
+      if (!fs.existsSync(resolved)) {
+        const create = (await ask(rl, `  目录不存在，是否创建？[Y/n]: `)).trim().toLowerCase();
+        if (create === '' || create === 'y' || create === 'yes') {
+          fs.mkdirSync(resolved, { recursive: true });
+          console.log(`  ✓ 已创建 ${resolved}`);
+        } else {
+          return undefined;
+        }
+      }
+      return resolved;
+    }
 
+    try {
+      if (exists) {
+        const ans = (await ask(rl, `配置文件已存在: ${defaultsPath}\n  是否覆盖？[y/N] `)).trim().toLowerCase();
+        if (ans === 'y' || ans === 'yes') {
+          const chosen = await askBaseagent();
+          const projectsDefaultPath = await askProjectsDefaultPath();
+          writeDefaults(chosen, available, projectsDefaultPath);
+          console.log(`\n✓ 已覆盖: ${defaultsPath}`);
+          console.log(`  active_baseagent: ${chosen}\n`);
+        } else {
+          console.log('  已跳过（保留现有配置）\n');
+        }
+      } else {
+        const chosen = await askBaseagent();
+        const projectsDefaultPath = await askProjectsDefaultPath();
+        writeDefaults(chosen, available, projectsDefaultPath);
+        console.log(`\n✓ 已创建: ${defaultsPath}`);
+        console.log(`  active_baseagent: ${chosen}\n`);
+      }
+    } finally {
+      try { rl.close(); } catch { /* ignore */ }
+    }
+  }
+
+  async function initTail(): Promise<void> {
+    // 提示创建 agent（两分支汇合后执行一次）
     const { agents } = loadAllAgents();
     if (agents.length === 0) {
       console.log('\n提示：尚无 agent，运行以下命令创建：');
       console.log('  evolclaw agent new <aid>.agentid.pub');
     }
-    return;
-  }
 
-  // ── 4. 交互式分支 ──
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-
-  async function askBaseagent(): Promise<Baseagent> {
-    const defaultBa = pickDefault(available);
-    if (available.length === 1) {
-      console.log(`  baseagent: ${defaultBa}`);
-      return defaultBa;
-    }
-    let chosen: Baseagent | null = null;
-    while (chosen === null) {
-      const input = (await ask(rl, `默认 baseagent (${available.join('/')}) [${defaultBa}]: `)).trim() || defaultBa;
-      if (!BASEAGENT_CANDIDATES.includes(input as Baseagent)) {
-        console.log(`  无效选择，可选: ${BASEAGENT_CANDIDATES.join('/')}`);
-        continue;
-      }
-      if (!available.includes(input as Baseagent)) {
-        console.log(`  ${input} 当前环境不可用（可用: ${available.join('/')}）`);
-        continue;
-      }
-      chosen = input as Baseagent;
-    }
-    return chosen;
-  }
-
-  async function askProjectsDefaultPath(): Promise<string | undefined> {
-    const defaultDir = path.join(p.root, 'projects', 'default');
-    const input = (await ask(rl, `项目默认目录 [${defaultDir}]: `)).trim();
-    const resolved = input || defaultDir;
-    if (!path.isAbsolute(resolved)) {
-      console.log('  ⚠ 需要绝对路径，已跳过');
-      return undefined;
-    }
-    if (!fs.existsSync(resolved)) {
-      const create = (await ask(rl, `  目录不存在，是否创建？[Y/n]: `)).trim().toLowerCase();
-      if (create === '' || create === 'y' || create === 'yes') {
-        fs.mkdirSync(resolved, { recursive: true });
-        console.log(`  ✓ 已创建 ${resolved}`);
-      } else {
-        return undefined;
-      }
-    }
-    return resolved;
-  }
-
-  try {
-    if (exists) {
-      const ans = (await ask(rl, `配置文件已存在: ${defaultsPath}\n  是否覆盖？[y/N] `)).trim().toLowerCase();
-      if (ans === 'y' || ans === 'yes') {
-        const chosen = await askBaseagent();
-        const projectsDefaultPath = await askProjectsDefaultPath();
-        writeDefaults(chosen, available, projectsDefaultPath);
-        console.log(`\n✓ 已覆盖: ${defaultsPath}`);
-        console.log(`  active_baseagent: ${chosen}\n`);
-      } else {
-        console.log('  已跳过（保留现有配置）\n');
-      }
+    // 控制 AID：daemon 进程身份。缺失则生成并写回 evolclaw.json（幂等：已存在则跳过）。
+    const evc = loadEvolclawConfig();
+    if (evc.aid) {
+      console.log(`✓ 控制 AID 已存在: ${evc.aid}`);
     } else {
-      const chosen = await askBaseagent();
-      const projectsDefaultPath = await askProjectsDefaultPath();
-      writeDefaults(chosen, available, projectsDefaultPath);
-      console.log(`\n✓ 已创建: ${defaultsPath}`);
-      console.log(`  active_baseagent: ${chosen}\n`);
+      try {
+        const { aid } = await generateControlAid();
+        saveEvolclawConfig({ ...evc, $schema_version: evc.$schema_version ?? 1, aid });
+        console.log(`✓ 已生成控制 AID: ${aid}`);
+      } catch (e: any) {
+        // 无网/Gateway 不可达时降级：不中断 init，联网后重跑 evolclaw init 补全
+        console.error(`⚠️ 控制 AID 生成失败（Gateway 不可达？联网后重跑 evolclaw init 补全）: ${e?.message || e}`);
+      }
     }
-
-    // ── 5. 提示创建 agent ──
-    const { agents } = loadAllAgents();
-    if (agents.length === 0) {
-      console.log('提示：尚无 agent，运行以下命令创建：');
-      console.log('  evolclaw agent new <aid>.agentid.pub');
-    }
-  } finally {
-    try { rl.close(); } catch { /* ignore */ }
   }
 }
 
