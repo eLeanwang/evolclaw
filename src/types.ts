@@ -819,7 +819,7 @@ export type OutboundPayload =
   | { kind: 'result.error'; text: string; reason?: string }
   | { kind: 'activity.batch'; items: ThoughtItem[] }
   | { kind: 'status.started'; metadata?: Record<string, unknown> }
-  | { kind: 'status.progress'; metadata?: { activityType: 'text' | 'tool_call' | 'tool_result'; turn?: number; outputTokens?: number } }
+  | { kind: 'status.progress'; metadata?: { activityType: 'text' | 'tool_call' | 'tool_result'; turn?: number; outputTokens?: number; toolName?: string; callId?: string; ok?: boolean; durationMs?: number } }
   | { kind: 'status.queued'; metadata?: Record<string, unknown> }
   | { kind: 'status.completed'; metadata?: { durationMs?: number; ttftMs?: number; numTurns?: number; tokenUsage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number }; contextUsage?: { totalTokens: number; maxTokens: number; percentage: number; model: string; effort?: string } } }
   | { kind: 'status.interrupted'; metadata?: { reason: string } }

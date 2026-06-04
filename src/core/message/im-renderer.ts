@@ -214,7 +214,7 @@ export class IMRenderer {
 
   /** 添加工具调用 */
   addToolCall(name: string, input: Record<string, unknown> | undefined, callId?: string, descText?: string, turn?: number, outputTokens?: number): void {
-    this.emitProgress('tool_call', outputTokens, turn);
+    this.emitProgress('tool_call', outputTokens, turn, { toolName: name, callId });
     if (this.opts.envelope.chatmode === 'proactive') return;
     if (this.opts.suppressActivities) return;
     this.itemsQueue.push({
@@ -231,7 +231,7 @@ export class IMRenderer {
 
   /** 添加工具结果 */
   addToolResult(name: string, ok: boolean, result?: unknown, error?: string, callId?: string, durationMs?: number, descText?: string): void {
-    this.emitProgress('tool_result');
+    this.emitProgress('tool_result', undefined, undefined, { toolName: name, callId, ok, durationMs });
     if (this.opts.envelope.chatmode === 'proactive') return;
     if (this.opts.suppressActivities) return;
     this.itemsQueue.push({
@@ -428,8 +428,24 @@ export class IMRenderer {
 
   // ── 内部：status.progress 发送 ──
 
-  private emitProgress(activityType: 'text' | 'tool_call' | 'tool_result', outputTokens?: number, turn?: number): void {
-    const payload: OutboundPayload = { kind: 'status.progress', metadata: { activityType, ...(turn != null && { turn }), ...(outputTokens != null && { outputTokens }) } };
+  private emitProgress(
+    activityType: 'text' | 'tool_call' | 'tool_result',
+    outputTokens?: number,
+    turn?: number,
+    extra?: { toolName?: string; callId?: string; ok?: boolean; durationMs?: number },
+  ): void {
+    const payload: OutboundPayload = {
+      kind: 'status.progress',
+      metadata: {
+        activityType,
+        ...(turn != null && { turn }),
+        ...(outputTokens != null && { outputTokens }),
+        ...(extra?.toolName != null && { toolName: extra.toolName }),
+        ...(extra?.callId != null && { callId: extra.callId }),
+        ...(extra?.ok != null && { ok: extra.ok }),
+        ...(extra?.durationMs != null && { durationMs: extra.durationMs }),
+      },
+    };
     this.opts.send(payload).catch(() => {});
   }
 
@@ -457,7 +473,12 @@ export class IMRenderer {
     const outputTokens: number | undefined = (event as any).outputTokens;
     const turn: number | undefined = (event as any).turn;
     const activityType = item.kind === 'text' ? 'text' : item.kind === 'tool_call' ? 'tool_call' : 'tool_result';
-    this.emitProgress(activityType as 'text' | 'tool_call' | 'tool_result', outputTokens, turn);
+    const extra = item.kind === 'tool_call'
+      ? { toolName: item.name, callId: item.call_id }
+      : item.kind === 'tool_result'
+        ? { toolName: item.name, callId: item.call_id, ok: item.ok, durationMs: item.duration_ms }
+        : undefined;
+    this.emitProgress(activityType as 'text' | 'tool_call' | 'tool_result', outputTokens, turn, extra);
     const payload: OutboundPayload = { kind: 'activity.batch', items: [item] };
     // fire-and-forget
     this.opts.send(payload).catch(err => {
