@@ -20,6 +20,7 @@ import path from 'path';
 import { agentRelationsDir, agentConfig as agentConfigPath, resolvePaths } from '../../paths.js';
 import { loadDefaults, saveDefaultsSafe, loadAgent, saveAgent } from '../../config-store.js';
 import { formatPeerKey, parsePeerKey } from '../relation/peer-key.js';
+import { fileCache } from '../cache/file-cache.js';
 import type { BaseagentsBlock, AgentConfig, DefaultsConfig } from '../../types.js';
 
 export type ModelScope = 'global' | 'agent' | 'relation';
@@ -69,8 +70,18 @@ const loadDefaultsCached = (() => {
   return (): DefaultsConfig | null => get(resolvePaths().defaultsConfig);
 })();
 
-// 关系级 preferences.json
-const readPrefsCached = makeMtimeCache<ModelPrefs | null>((file) => readJsonSafe(file));
+// 关系级 preferences.json —— 走统一 FileCache（mtime 门控，带外改 + 不 reload）。
+// CLI 进程的 fileCache 是独立空实例、随进程退出，等同直读最新盘值，安全。
+const readPrefsCached = (file: string): ModelPrefs | null =>
+  fileCache.get<ModelPrefs | null>(
+    file,
+    (raw) => (raw === null ? null : safeParsePrefs(raw)),
+    { policy: 'mtime', group: 'relation-prefs' },
+  );
+
+function safeParsePrefs(raw: string): ModelPrefs | null {
+  try { return JSON.parse(raw) as ModelPrefs; } catch { return null; }
+}
 
 /** 关系级扁平文件的内容结构 */
 export interface ModelPrefs {
