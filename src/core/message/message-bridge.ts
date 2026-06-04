@@ -33,7 +33,7 @@ export class MessageBridge {
     private eventBus: EventBus,
     defaultDebounce?: number,
   ) {
-    this.defaultDebounce = defaultDebounce ?? 2;
+    this.defaultDebounce = defaultDebounce ?? 0;
   }
 
   /** Inject EvolAgentRegistry so owner lookups/writes route to agent.json for agent-owned channels. */
