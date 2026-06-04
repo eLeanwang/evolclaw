@@ -1,5 +1,19 @@
 # Changelog
 
+## v3.1.11 (2026-06-04)
+
+### Improvements
+
+- **统一入站图片识别** — 新增 `bufferToInboundImage()`，AUN/飞书/微信共用 magic-bytes → 元数据 → 后缀判定链，消除各通道重复实现的 `detectImageMime`
+- **AUN 附件处理重构** — 抽出 `processAttachments()`，私聊/群聊统一处理；图片注入视觉通道不再追加冗余 `[文件: …]` 文本行
+- **入站去抖** — bridge 默认 inbound debounce 2s → 0（消息即处理）
+- **Windows npm 安装** — `npmInstallGlobal` 改用 `cmd /c`，消除 Node 22 的 `shell:true` 弃用警告
+
+### Bug Fixes
+
+- **截断图片缓冲** — `validateImage` 捕获 image-type 的 EndOfStreamError，避免短/截断 buffer 抛异常
+- **evolclaw-web 退出容错** — `evolclaw web` 容忍前台进程信号终止（SIGINT/SIGKILL）/非零退出，不再向用户打印堆栈
+
 ## v3.1.10 (2026-06-04)
 
 ### Bug Fixes
