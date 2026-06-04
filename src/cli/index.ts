@@ -2089,7 +2089,15 @@ async function cmdWatchWeb(): Promise<void> {
     process.exit(1);
   }
 
-  execFileSync(exe, ['--home', home], { stdio: 'inherit' });
+  // Node 18.20+/20+/22 起，execFile 拒绝直接 spawn .cmd/.bat（CVE-2024-27980），必须 shell:true。
+  // shell 模式下含空格的路径/参数需加引号。
+  const isBatch = /\.(cmd|bat)$/i.test(exe);
+  if (isBatch) {
+    const q = (s: string) => `"${s}"`;
+    execFileSync(q(exe), ['--home', q(home)], { stdio: 'inherit', shell: true });
+  } else {
+    execFileSync(exe, ['--home', home], { stdio: 'inherit' });
+  }
 }
 async function cmdRestartMonitor() {
   const p = resolvePaths();

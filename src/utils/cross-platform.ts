@@ -139,7 +139,9 @@ export function commandExists(cmd: string): boolean {
 
 /**
  * 解析命令的真实可执行文件绝对路径。
- * Windows: `where` 返回首个匹配（自动含 .cmd/.exe 后缀），解决 execFileSync 不补后缀的问题。
+ * Windows: `where` 会列出全部同名文件（npm 全局 bin 同时生成无后缀 sh 包装、.cmd、.ps1），
+ *   其中无后缀的那个是 Unix sh 脚本，Windows 无法直接 spawn（ENOENT）。
+ *   因此优先选 PATHEXT 可执行后缀（.cmd/.exe/.bat/.com），都没有才退回首行。
  * 失败返回 null。不缓存——刚安装的命令需要重新探测。
  */
 export function resolveCommandPath(cmd: string): string | null {
@@ -147,8 +149,11 @@ export function resolveCommandPath(cmd: string): string | null {
     if (isWindows) {
       const r = spawnSync('where', [cmd], { encoding: 'utf-8', stdio: 'pipe', windowsHide: true });
       if (r.status !== 0 || !r.stdout) return null;
-      const first = r.stdout.split(/\r?\n/).map(s => s.trim()).filter(Boolean)[0];
-      return first || null;
+      const candidates = r.stdout.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+      if (candidates.length === 0) return null;
+      const execExts = ['.cmd', '.exe', '.bat', '.com'];
+      const runnable = candidates.find(p => execExts.some(ext => p.toLowerCase().endsWith(ext)));
+      return runnable || candidates[0];
     } else {
       const out = execFileSync('which', [cmd], { encoding: 'utf-8', stdio: 'pipe' }).trim();
       return out || null;
