@@ -1,10 +1,10 @@
 {
-  "name": "ecweb",
+  "name": "evolclaw-web",
   "version": "1.0.0",
   "description": "Web-based monitoring dashboard for EvolClaw",
   "type": "module",
   "bin": {
-    "ecweb": "./dist/index.js"
+    "evolclaw-web": "./dist/index.js"
   },
   "files": [
     "dist/"

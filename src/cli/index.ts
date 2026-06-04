@@ -2064,23 +2064,23 @@ async function cmdWatchAid(): Promise<void> {
 }
 
 async function cmdWatchWeb(): Promise<void> {
-  // ecweb 是独立插件包（可执行命令），按需安装。
+  // evolclaw-web 是独立插件包（可执行命令），按需安装。
   // 复用 npm-ops.npmInstallGlobal（含 EACCES→sudo 回退、Windows npm.cmd、超时）。
   const { execFileSync } = await import('child_process');
   const home = resolvePaths().root;
 
-  if (!platform.commandExists('ecweb')) {
-    process.stdout.write('📦 ecweb 未安装，正在从 npm 安装...\n');
+  if (!platform.commandExists('evolclaw-web')) {
+    process.stdout.write('📦 evolclaw-web 未安装，正在从 npm 安装...\n');
     const { npmInstallGlobal } = await import('../utils/npm-ops.js');
     try {
-      await npmInstallGlobal('ecweb');
+      await npmInstallGlobal('evolclaw-web');
     } catch (e: any) {
-      process.stderr.write(`❌ 安装 ecweb 失败: ${e?.stderr || e?.message || e}\n   可手动安装: npm install -g ecweb\n`);
+      process.stderr.write(`❌ 安装 evolclaw-web 失败: ${e?.stderr || e?.message || e}\n   可手动安装: npm install -g evolclaw-web\n`);
       process.exit(1);
     }
   }
 
-  execFileSync('ecweb', ['--home', home], { stdio: 'inherit' });
+  execFileSync('evolclaw-web', ['--home', home], { stdio: 'inherit' });
 }
 async function cmdRestartMonitor() {
   const p = resolvePaths();
