@@ -648,6 +648,20 @@ async function main() {
       inst.registerHooks({ eventBus, sessionManager });
     }
 
+    // 4c. 观察者模式配置读取器（AUN）：从 EvolAgent 的 merged config 读 observable/owners，
+    // 不另建缓存——EvolAgent 那份在启动/重启/热重载时统一更新，是唯一真相源。
+    const channelForObserver = inst.channel as { setObserverConfigResolver?: (fn: () => { observable: boolean; owners: string[] }) => void };
+    if (typeof channelForObserver.setObserverConfigResolver === 'function') {
+      const channelKey = inst.adapter.channelKey;
+      channelForObserver.setObserverConfigResolver(() => {
+        const owningAgent = agentRegistry.resolveByChannel(channelKey);
+        return {
+          observable: owningAgent?.getObservable() ?? false,
+          owners: owningAgent?.config.owners ?? [],
+        };
+      });
+    }
+
     // 5. 撤回消息 → 中断执行中任务
     inst.channel.onRecall?.((messageId: string) => {
       msgBridge.cancel(messageId);

@@ -239,6 +239,19 @@ export class EvolAgent {
     this.persist();
   }
 
+  /** 读取观察者模式开关（默认 false）。 */
+  getObservable(): boolean {
+    return this.merged.observable === true;
+  }
+
+  /** 设置观察者模式开关：开启后入站/出站消息各转发一份给 owners[]。 */
+  setObservable(value: boolean): void {
+    if (value) this.rawAgent.observable = true;
+    else delete this.rawAgent.observable;
+    this.merged.observable = value;
+    this.persist();
+  }
+
   // ── Personal layer ────────────────────────────────────────────────────
 
   private _personaCache: string | null | undefined = undefined;
