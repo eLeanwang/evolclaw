@@ -6,6 +6,7 @@ import fs from 'fs';
 import path from 'path';
 import { kitsDir, resolveRoot, getPackageRoot } from '../paths.js';
 import { logger } from '../utils/logger.js';
+import { fileCache } from '../core/cache/file-cache.js';
 
 // ── Types ──
 
@@ -47,13 +48,13 @@ export interface RenderContext {
   sessionId: string;
 }
 
-// ── Manifest loading / cache (keyed by filename) ──
+// ── Manifest loading / cache ──
+// manifest 定义随包发布、运行期靠 reload/重启刷新 → on-reload（group 'kits'）。
+// base + eck override 合成结果以 base 文件路径为键缓存；loader 内读两个文件。
 
-const _manifestCache = new Map<string, ManifestSection[]>();
-
-/** 清空所有 manifest 缓存（manifest 结构变更后调用）。 */
+/** 清空所有 manifest 缓存（manifest 结构变更后调用，由 invalidateKitCache 串联）。 */
 export function invalidateManifestCache(): void {
-  _manifestCache.clear();
+  fileCache.invalidateGroup('kits');
 }
 
 /**
@@ -61,12 +62,16 @@ export function invalidateManifestCache(): void {
  * 覆盖文件在 $EVOLCLAW_HOME/eck/<filename>（可选）。结果按 order 升序缓存。
  */
 export function loadManifest(filename: string): ManifestSection[] {
-  const cached = _manifestCache.get(filename);
-  if (cached) return cached;
-  const sections = loadAndMergeManifest(filename);
-  _manifestCache.set(filename, sections);
-  logger.info(`[ManifestEngine] Loaded ${filename}: ${sections.length} sections`);
-  return sections;
+  const kitsPath = path.join(kitsDir(), filename);
+  return fileCache.get<ManifestSection[]>(
+    kitsPath,
+    () => {
+      const sections = loadAndMergeManifest(filename);
+      logger.info(`[ManifestEngine] Loaded ${filename}: ${sections.length} sections`);
+      return sections;
+    },
+    { policy: 'on-reload', group: 'kits' },
+  );
 }
 
 function loadAndMergeManifest(filename: string): ManifestSection[] {
@@ -233,26 +238,34 @@ export function loadSectionFiles(
 function loadFileSection(
   filePath: string, vars: Vars, sessionCache: Map<string, string>,
 ): [string, string] | null {
+  void sessionCache;  // 内容跨 session 共享，改走全局 fileCache（on-reload）
   const resolved = resolvePath(filePath, vars);
   if (!resolved) return null;
-  if (sessionCache.has(resolved)) return [resolved, sessionCache.get(resolved)!];
-  try {
-    const content = fs.readFileSync(resolved, 'utf-8');
-    sessionCache.set(resolved, content);
-    return [resolved, content];
-  } catch {
-    return null;
-  }
+  // 内容跨 session 共享：用全局 fileCache（on-reload，reload/重启时失效），
+  // 不再按 session 重复缓存同一文件内容。
+  const content = fileCache.getText(resolved, { policy: 'on-reload', group: 'kits' });
+  return content === null ? null : [resolved, content];
 }
 
 function readDirectoryFiles(dirPath: string, pattern?: string): [string, string][] {
   const glob = pattern || '*.md';
-  try {
-    const files = fs.readdirSync(dirPath).filter(f => matchGlob(f, glob)).sort();
-    return files.map(f => [f, fs.readFileSync(path.join(dirPath, f), 'utf-8')] as [string, string]);
-  } catch {
-    return [];
+  // 目录列表 + 各文件内容均走 fileCache（on-reload）。目录列表以 "<dir>|<glob>"
+  // 为键缓存文件名数组；各文件内容走 fileCache.getText 共享。
+  const names = fileCache.get<string[]>(
+    `${dirPath} ${glob}`,
+    () => {
+      try { return fs.readdirSync(dirPath).filter(f => matchGlob(f, glob)).sort(); }
+      catch { return []; }
+    },
+    { policy: 'on-reload', group: 'kits' },
+  );
+  const out: [string, string][] = [];
+  for (const f of names) {
+    const fp = path.join(dirPath, f);
+    const content = fileCache.getText(fp, { policy: 'on-reload', group: 'kits' });
+    if (content !== null) out.push([f, content]);
   }
+  return out;
 }
 
 function matchGlob(filename: string, pattern: string): boolean {
