@@ -6,28 +6,13 @@
  *   - run<Channel>QrFlow() or setupAun*() — reusable primitives for the main init wizard
  */
 
-import fs from 'fs';
 import readline from 'readline';
-import path from 'path';
-import os from 'os';
 import crypto from 'crypto';
-import { resolvePaths, aidLocalDir, aunPath as defaultAunPath } from '../paths.js';
-import { normalizeChannelInstances } from '../utils/channel-helpers.js';
 import { selectInstance, type InstanceChoice } from './init.js';
-import { npmInstallGlobal, requireOptional } from '../utils/npm-ops.js';
-import { loadAllAgents, loadAgent } from '../config-store.js';
+import { loadAllAgents, loadAgent, saveAgent } from '../config-store.js';
 import { agentChannelUpsert } from './agent.js';
 import type { ChannelInstance, AgentConfig } from '../types.js';
-import {
-  AUN_CORE_SDK_PKG,
-  MIN_AUN_CORE_SDK,
-  resolveAunCoreSdkPkg,
-  isAunSdkVersionOk,
-  isValidAid,
-  aidCreate,
-  agentmdPut,
-  buildInitialAgentMd,
-} from '../aun/aid/index.js';
+import { isValidAid } from '../aun/aid/index.js';
 
 function ask(rl: readline.Interface, question: string): Promise<string> {
   return new Promise(resolve => rl.question(question, resolve));
@@ -455,152 +440,44 @@ export async function cmdInitWechat(): Promise<void> {
 }
 
 // ==================== AUN ====================
-//
-// AUN 原子操作（aidCreate, agentmdPut, downloadCaRoot, isValidAid, ...）
-// 已迁移至 src/channels/aun-ops.ts。本节仅保留交互式 UI 编排。
 
-export async function checkAunEnvironment(rl: readline.Interface): Promise<boolean> {
-  console.log('\n🔍 AUN 环境检查...\n');
-
-  const minVer = MIN_AUN_CORE_SDK.join('.');
-  const installed = resolveAunCoreSdkPkg();
-
-  if (!installed) {
-    console.log(`  ✗ ${AUN_CORE_SDK_PKG} 未安装`);
-    const answer = (await ask(rl, `  → 是否安装 ${AUN_CORE_SDK_PKG}@latest？[Y/n] `)).trim().toLowerCase();
-    if (answer === 'n' || answer === 'no') {
-      console.log('  已取消');
-      return false;
-    }
-    console.log(`  正在安装 ${AUN_CORE_SDK_PKG}...`);
-    try {
-      await npmInstallGlobal(`${AUN_CORE_SDK_PKG}@latest`);
-      console.log(`  ✓ ${AUN_CORE_SDK_PKG} 安装完成`);
-    } catch (e: any) {
-      console.log(`  ✗ 安装失败: ${e.message?.slice(0, 200) || e}`);
-      return false;
-    }
-    console.log('');
-    return true;
-  }
-
-  if (isAunSdkVersionOk(installed.version)) {
-    console.log(`  ✓ ${AUN_CORE_SDK_PKG} v${installed.version}`);
-    console.log('');
-    return true;
-  }
-
-  console.log(`  ✗ ${AUN_CORE_SDK_PKG} v${installed.version} — 需要 >= ${minVer}`);
-  const answer = (await ask(rl, `  → 是否升级 ${AUN_CORE_SDK_PKG}？[Y/n] `)).trim().toLowerCase();
-  if (answer === 'n' || answer === 'no') {
-    console.log('  已取消');
-    return false;
-  }
-  console.log(`  正在升级 ${AUN_CORE_SDK_PKG}...`);
+export async function cmdInitAun(): Promise<void> {
+  // AUN channel 从 agent.aid 隐式派生，AID 密钥在 `agent new` 时已创建就绪——本命令不碰 aid。
+  // 与其他渠道一致，职责是配置 owner；AUN 的 owner 存于 agent 顶层 owners[]（见 evolagent.ts）。
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   try {
-    await npmInstallGlobal(`${AUN_CORE_SDK_PKG}@latest`);
-    console.log(`  ✓ ${AUN_CORE_SDK_PKG} 升级完成`);
-  } catch (e: any) {
-    console.log(`  ✗ 升级失败: ${e.message?.slice(0, 200) || e}`);
-    return false;
-  }
-  console.log('');
-  return true;
-}
+    const agentId = await pickAgentForChannel(rl);
+    if (!agentId) return;
 
-// isValidAid, createAidSilent → 已迁移至 src/channels/aun-ops.ts
+    const agentConfig = loadAgent(agentId);
+    if (!agentConfig) { console.error(`❌ 无法加载 agent ${agentId} 的配置`); return; }
 
-// appendAunInstance → 已迁移至 src/channels/aun-ops.ts
+    console.log(`\n📡 AUN 渠道配置 — agent ${agentConfig.aid}`);
+    const current = agentConfig.owners?.[0];
+    if (current) console.log(`  当前 Owner: ${current}`);
+    console.log('  Owner 将接收欢迎消息并拥有管理权限\n');
 
-export async function setupAunAid(rl: readline.Interface, _config: any): Promise<{ aid: string; owner: string } | null> {
-  let aid = '';
-
-  // Outer loop: allows retrying with a different AID
-  while (true) {
-    // Ask AID with format validation
-    aid = '';
-    while (!aid) {
-      aid = (await ask(rl, '  AUN Agent ID (例: mybot.agentid.pub): ')).trim();
-      if (!aid) { console.log('  ⚠ 不能为空'); continue; }
-      if (!isValidAid(aid)) {
-        console.log('  ⚠ 无效 AID 格式（需要合法域名，至少三级，如 alice.agentid.pub）');
-        aid = '';
+    let owner = '';
+    while (!owner) {
+      const input = (await ask(rl, `  Owner AID${current ? ` [${current}]` : ''}: `)).trim();
+      if (!input) {
+        if (current) { owner = current; break; }
+        console.log('  ⚠ Owner AID 不能为空');
+        continue;
       }
+      if (!isValidAid(input)) { console.log('  ⚠ Owner AID 格式无效（需合法多级域名，如 alice.agentid.pub）'); continue; }
+      owner = input;
     }
 
-    // Check if AID exists locally
-    const aunPath = defaultAunPath();
-    const aidDir = path.join(aunPath, 'AIDs', aid);
-    if (fs.existsSync(aidDir) && fs.existsSync(path.join(aidDir, 'private'))) {
-      console.log(`  ✓ AID ${aid} 已存在`);
-      break;
-    }
+    // 写入顶层 owners：新 owner 置首位（getOwner 取 owners[0]），保留其余去重
+    agentConfig.owners = [owner, ...(agentConfig.owners || []).filter(o => o !== owner)];
+    saveAgent(agentConfig);
 
-    const answer = (await ask(rl, `  ⚠ AID ${aid} 本地不存在，是否创建？[Y/n] `)).trim().toLowerCase();
-    if (answer === 'n' || answer === 'no') {
-      console.log('  已跳过 AID 创建（启动时可能连接失败）');
-      break;
-    }
-
-    // Create AID + agent.md via atomic ops
-    console.log('  正在创建 AID...');
-    let failed = false;
-    try {
-      const result = await aidCreate(aid);
-      console.log(`  ✓ AID ${result.aid} 创建成功`);
-
-      // Collect agent.md type and upload
-      const typeInput = (await ask(rl, '  Agent 类型 human/ai [ai]: ')).trim().toLowerCase();
-      const agentType = typeInput === 'human' ? 'human' : 'ai';
-      const content = buildInitialAgentMd({ aid, type: agentType });
-
-      try {
-        await agentmdPut(content, { aid });
-        console.log('  ✓ agent.md 已发布并写入本地');
-      } catch (e: any) {
-        console.log(`  ⚠ agent.md 发布失败（首次连接将自动重试）: ${String(e.message || e).slice(0, 100)}`);
-        // Still write local copy as fallback
-        try {
-          const localDir = aidLocalDir(aid);
-          fs.mkdirSync(localDir, { recursive: true });
-          fs.writeFileSync(path.join(localDir, 'agent.md'), content, 'utf-8');
-          console.log('  ✓ agent.md 已写入本地');
-        } catch (we: any) {
-          console.log(`  ✗ agent.md 本地写入失败: ${String(we.message || we).slice(0, 100)}`);
-          failed = true;
-        }
-      }
-
-      try { await result.client.close(); } catch { /* ignore */ }
-      try { result.store?.close(); } catch { /* ignore */ }
-    } catch (e: any) {
-      const msg = e.message || String(e);
-      console.log(`  ✗ AID 创建失败: ${msg.slice(0, 200)}`);
-      failed = true;
-    }
-
-    if (!failed) break;
-
-    // Creation failed — retry or give up
-    const retry = (await ask(rl, '  → 重新输入 (r) / 跳过 (s) / 取消 (c)？[r/s/c] ')).trim().toLowerCase();
-    if (retry === 'c') return null;
-    if (retry === 's') break;
-    // default: retry with new AID
+    console.log(`\n✅ AUN 渠道 Owner 已设置: ${owner}`);
+    console.log(`\n重启生效: evolclaw restart`);
+  } finally {
+    rl.close();
   }
-
-  // Owner 必填
-  console.log('\n📋 Owner 配置');
-  console.log('  Owner 将接收欢迎消息并拥有管理权限');
-  let owner = '';
-  while (!owner) {
-    const ownerInput = (await ask(rl, '  Owner AID (必填): ')).trim();
-    if (!ownerInput) { console.log('  ⚠ Owner AID 不能为空'); continue; }
-    if (!isValidAid(ownerInput)) { console.log('  ⚠ Owner AID 格式无效'); continue; }
-    owner = ownerInput;
-    console.log(`  ✓ Owner 已设置: ${owner}`);
-  }
-
-  return { aid, owner };
 }
 
 // ==================== DingTalk ====================

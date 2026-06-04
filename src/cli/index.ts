@@ -11,7 +11,7 @@ import { migrateProject } from '../config-store.js';
 import readline from 'readline';
 import { cmdInit } from './init.js';
 import { ipcQuery } from '../ipc.js';
-import { cmdInitWechat, cmdInitFeishu, cmdInitDingtalk, cmdInitQQBot, cmdInitWecom } from './init-channel.js';
+import { cmdInitWechat, cmdInitFeishu, cmdInitDingtalk, cmdInitQQBot, cmdInitWecom, cmdInitAun } from './init-channel.js';
 import { isHelpFlag, wantsHelp, getArgValue } from './help.js';
 import * as platform from '../utils/cross-platform.js';
 import { EventBus } from '../core/event-bus.js';
@@ -4815,11 +4815,16 @@ export async function main(args: string[]) {
     --force                              已存在 defaults.json 时覆盖
 
 配置渠道（先 evolclaw agent new 创建 agent）:
+  evolclaw init aun           AUN 渠道配置（AID 创建/绑定）
   evolclaw init feishu        飞书扫码登录
   evolclaw init wechat        微信扫码登录
   evolclaw init dingtalk      钉钉扫码登录
   evolclaw init qqbot         QQ 机器人扫码绑定
   evolclaw init wecom         企业微信 AI Bot 配置（手动输入）`);
+      } else if (args[1] === 'aun') {
+        const { suppressSdkLogs } = await import('../aun/aid/index.js');
+        suppressSdkLogs();
+        await cmdInitAun();
       } else if (args[1] === 'wechat') {
         const { suppressSdkLogs } = await import('../aun/aid/index.js');
         suppressSdkLogs();
@@ -4839,7 +4844,7 @@ export async function main(args: string[]) {
       } else if (args[1] === 'wecom') {
         await cmdInitWecom();
       } else if (args[1] && !args[1].startsWith('-')) {
-        const supported = ['feishu', 'wechat', 'dingtalk', 'qqbot', 'wecom'];
+        const supported = ['feishu', 'wechat', 'aun', 'dingtalk', 'qqbot', 'wecom'];
         console.error(`❌ 不支持的渠道: ${args[1]}`);
         console.error(`   支持的渠道: ${supported.join(', ')}`);
         process.exit(1);
