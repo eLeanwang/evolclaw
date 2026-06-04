@@ -234,6 +234,13 @@ async function main() {
   // 加载配置（新结构：defaults.json + per-agent config.json）
   const defaults: DefaultsConfig = loadDefaults() ?? { $schema_version: CONFIG_SCHEMA_VERSION };
 
+  // D1 迁移引导：进程级 menu 操作（/system /agent）改为查 defaults.owners 鉴权。
+  // owners 为空时这些操作一律 FORBIDDEN，启动时提示如何配置。
+  if (!defaults.owners || defaults.owners.length === 0) {
+    logger.warn('[startup] defaults.owners 未配置：进程级 menu 操作（/system /agent）将一律拒绝。' +
+      '如需远程管理，请在 agents/defaults.json 配置 owners: [<你的 AID>]');
+  }
+
   // 应用配置中的日志级别（优先于环境变量）
   // logLevel 现在不在新结构中——若要保留，将来可加 defaults.debug.logLevel
   // 阶段 2c 暂跳过
