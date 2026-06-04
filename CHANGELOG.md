@@ -1,5 +1,20 @@
 # Changelog
 
+## v3.1.7 (2026-06-04)
+
+### New Features
+
+- **观察者模式（observable）** — `AgentConfig.observable` 开启后，AUN 入站/出站消息各转发一份给顶层 `owners[]`（`observer.forward` 格式），便于 owner 旁路监听 agent 会话
+
+### Improvements
+
+- **Trigger channelType 运行时解析** — 移除存储的 `Trigger.targetChannelType`，`buildSyntheticMessage` 改为运行时从 channel key 解析；trigger scheduler 注入与 `__upgrade-check` 播种移到 channel 注册之后，确保 `channelTypeMap` 完整
+
+### Bug Fixes
+
+- **watch 插件改名 ecweb → evolclaw-web** — npm 拒绝 `ecweb`（与 `rrweb` 过于相似），改为独立包 `evolclaw-web` 发布；`evolclaw watch` 的安装/调用引用同步更新
+- **cron trigger 紧密循环** — 定时器提前 ~1ms 唤醒（如 `0 9 * * *` 在 08:59:59.999 触发）会使下次触发落入 `now+50` 窗口被同轮重复触发；`nextCronFireAt` 从窗口外重算，循环守卫改读实时时钟确保收敛
+
 ## v3.1.6 (2026-06-03)
 
 ### New Features
