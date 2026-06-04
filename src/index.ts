@@ -780,8 +780,8 @@ async function main() {
       agentName: evolclawCfg.aid,
       channelName: 'control',
       pureIdentity: true,
-      aunTrace: defaults.debug?.aunTrace,
-      aunSdkLog: defaults.debug?.aunSdkLog,
+      aunTrace: evolclawCfg.debug?.aunTrace ?? defaults.debug?.aunTrace,
+      aunSdkLog: evolclawCfg.debug?.aunSdkLog ?? defaults.debug?.aunSdkLog,
     });
     // connect() 失败不置空实例：AUNChannel 内部有无限重连（SDK auto_reconnect +
     // scheduleReconnect），首连失败后台会自愈；保留实例供 status 显示 disconnected。

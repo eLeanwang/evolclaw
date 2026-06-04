@@ -169,8 +169,9 @@ export function migrateProcessConfigIfNeeded(): void {
   const { loadEvolclawConfig, saveEvolclawConfig } = evolclawConfigModule;
   const evc = loadEvolclawConfig();
   // 仅当旧文件确实带 aun.encryptionSeed 字段时才搬（hasOwnProperty，保 null 语义）
-  if (raw.aun && Object.prototype.hasOwnProperty.call(raw.aun, 'encryptionSeed')) {
-    evc.aun = { ...(evc.aun ?? {}), encryptionSeed: raw.aun.encryptionSeed };
+  const didMigrateSeed = !!(raw.aun && Object.prototype.hasOwnProperty.call(raw.aun, 'encryptionSeed'));
+  if (didMigrateSeed) {
+    evc.aun = { ...(evc.aun ?? {}), encryptionSeed: raw.aun!.encryptionSeed };
   }
   evc.$schema_version = evc.$schema_version ?? 1;
   saveEvolclawConfig(evc);
@@ -179,7 +180,8 @@ export function migrateProcessConfigIfNeeded(): void {
   try {
     fs.renameSync(oldPath, oldPath + '.migrated');
   } catch { /* ignore */ }
-  logger.info('[migrate] config.json → evolclaw.json (aun.encryptionSeed 已搬运，config.json 已归档为 .migrated)');
+  const what = didMigrateSeed ? 'aun.encryptionSeed 已搬运' : 'aun.encryptionSeed 不存在（无需搬运）';
+  logger.info(`[migrate] config.json → evolclaw.json (${what}，config.json 已归档为 .migrated)`);
 }
 
 // ── 自动迁移 ───────────────────────────────────────────────────────────

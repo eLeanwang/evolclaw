@@ -47,6 +47,18 @@ describe('migrateProcessConfigIfNeeded', () => {
     expect(loadEvolclawConfig()).toEqual({});
   });
 
+  it('config.json without aun.encryptionSeed → archived, no aun block added', () => {
+    fs.writeFileSync(path.join(tmp, 'config.json'),
+      JSON.stringify({ $schema_version: 1, log: { level: 'DEBUG' } }));
+    migrateProcessConfigIfNeeded();
+    const cfg = loadEvolclawConfig();
+    // 无 seed 可搬 → 不应凭空造出 aun 块
+    expect(cfg.aun).toBeUndefined();
+    // 旧文件仍归档（幂等：下次启动跳过）
+    expect(fs.existsSync(path.join(tmp, 'config.json'))).toBe(false);
+    expect(fs.existsSync(path.join(tmp, 'config.json.migrated'))).toBe(true);
+  });
+
   it('does not clobber existing evolclaw.json fields', () => {
     fs.writeFileSync(path.join(tmp, 'evolclaw.json'),
       JSON.stringify({ $schema_version: 1, aid: 'ec12345.agentid.pub' }));

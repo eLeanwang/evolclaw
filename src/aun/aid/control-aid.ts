@@ -36,10 +36,13 @@ export async function generateControlAid(): Promise<ControlAidResult> {
         continue;
       }
       const created = await aidCreate(candidate);
-      try {
-        await created.client?.close?.();
-      } finally {
-        await created.store?.close?.();
+      // 清理 aidCreate 内部另开的 client/store——关闭失败不可丢弃已注册的 AID（否则下次 init
+      // 会把它当冲突，白白消耗一次重试）。close 异常降级为 warn。
+      try { await created.client?.close?.(); } catch (e) {
+        logger.warn(`[control-aid] client.close() 失败（非致命）: ${e}`);
+      }
+      try { await created.store?.close?.(); } catch (e) {
+        logger.warn(`[control-aid] store.close() 失败（非致命）: ${e}`);
       }
       return { aid: created.aid, gateway: created.gateway };
     }
