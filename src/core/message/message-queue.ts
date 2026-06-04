@@ -220,7 +220,8 @@ export class MessageQueue {
 
   /**
    * 合并多条同 peerId 消息：
-   * - content: \n 连接
+   * - content: \n 连接（兜底用，渲染层优先用 items）
+   * - items: 保留每条子消息（含各自 peer/timestamp），供消息渲染层逐条渲染
    * - images / mentions: 扁平合并
    * - messageId: 取最新一条的 messageId（用于 thought 锚定与中断追踪）
    * - replyContext / peerName / 其余字段: 取最后一条
@@ -229,12 +230,23 @@ export class MessageQueue {
     const contents: string[] = [];
     const allImages: Array<{ data: string; mimeType: string }> = [];
     const allMentions: Array<{ userId: string; name?: string; key?: string }> = [];
+    const subMessages: Array<{ peerId?: string; peerName?: string; peerType?: string; content: string; timestamp?: number; images?: Array<{ data: string; mimeType: string }> }> = [];
 
     for (const item of items) {
       const m = item.message;
       contents.push(m.content);
       if (m.images) allImages.push(...m.images);
       if (m.mentions) allMentions.push(...m.mentions);
+      // 逐条保留发送者、时刻、图片；若该条已自带 items（罕见），展开保留细粒度
+      if (m.items && m.items.length > 0) {
+        subMessages.push(...m.items);
+      } else {
+        subMessages.push({
+          peerId: m.peerId, peerName: m.peerName, peerType: m.peerType,
+          content: m.content, timestamp: m.timestamp,
+          images: m.images && m.images.length > 0 ? m.images : undefined,
+        });
+      }
     }
 
     const last = items[items.length - 1];
@@ -249,6 +261,7 @@ export class MessageQueue {
     const merged: Message = {
       ...last.message,
       content: contents.join('\n'),
+      items: subMessages,
       images: allImages.length > 0 ? allImages : undefined,
       mentions: allMentions.length > 0 ? allMentions : undefined,
       messageId: latestMessageId,

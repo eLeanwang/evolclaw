@@ -155,12 +155,8 @@ export class MessageBridge {
           msg.peerType
         );
 
-        // 4. 消息前缀（由 policy 决定）
-        const channelInfo = this.processor.getChannelInfo?.(channelName);
-        if (channelInfo?.policy) {
-          const prefix = channelInfo.policy.messagePrefix(chatType, msg.peerName);
-          if (prefix) content = prefix + content;
-        }
+        // 4. 群聊发送者标注由消息渲染层（message-renderer）逐条承担，不再在此硬编码前缀，
+        //    消息日志因此保存干净原文。policy.messagePrefix 暂保留（未来清理）。
 
         // 5. 构造完整消息（channel 字段存实例名，用于 session 精确匹配）
         const fullMessage: Message = {

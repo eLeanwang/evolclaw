@@ -9,6 +9,9 @@ sessionKey: {{sessionKey}} # 会话路由键（channelType#urlEncode(channelId)#
 sessionName: {{sessionName}}
 {{/}}
 sessionCreatedAt: {{sessionCreatedAt}}
+{{?localDate}}
+localDate: {{localDate}} {{weekday}} # 当前日期与星期（每条消息的精确时刻见消息正文前缀 ‹…›）
+{{/}}
 {{?timezone}}
 timezone: {{timezone}} # 时区 IANA 名：把消息/记忆里的 ISO 时间戳转成本地时间字符串时按此换算
 {{/}}

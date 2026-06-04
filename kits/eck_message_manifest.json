@@ -1,0 +1,14 @@
+{
+  "$schema_version": 1,
+  "sections": [
+    {
+      "id": "msg-item",
+      "type": "file",
+      "file": "$KITS_MESSAGE_FRAGMENTS/item.md",
+      "order": 10,
+      "needsInjection": true,
+      "when": "always",
+      "description": "单条消息渲染（逐条）"
+    }
+  ]
+}

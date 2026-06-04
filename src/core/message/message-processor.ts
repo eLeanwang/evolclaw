@@ -18,6 +18,8 @@ import type { TriggerManager } from '../trigger/manager.js';
 import { DEFAULT_PERMISSION_MODE } from '../../types.js';
 import { getPackageRoot, resolveRoot } from '../../paths.js';
 import { renderKitSections, type KitRenderContext } from '../../agents/kit-renderer.js';
+import { renderMessageBody, type RenderMessageResult } from '../../agents/message-renderer.js';
+import type { SubMessage } from '../../types.js';
 import { normalizeBaseagent } from '../../agents/baseagent-normalize.js';
 import type { InteractionRouter } from '../interaction-router.js';
 import { renderActionAsText, renderCommandCardAsText } from '../interaction-router.js';
@@ -37,6 +39,21 @@ function currentTzOffset(): string {
   const sign = off >= 0 ? '+' : '-';
   const abs = Math.abs(off);
   return `${sign}${String(Math.floor(abs / 60)).padStart(2, '0')}:${String(abs % 60).padStart(2, '0')}`;
+}
+
+/** 当前本地日期 YYYY-MM-DD（按运行环境时区）。系统提示词用，一天才变一次（缓存友好）。 */
+function currentLocalDate(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+/** 当前本地星期几（中文，如「星期四」）。 */
+function currentWeekday(): string {
+  try {
+    return new Intl.DateTimeFormat('zh-CN', { weekday: 'long' }).format(new Date());
+  } catch {
+    return ['星期日', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六'][new Date().getDay()];
+  }
 }
 
 function getContextTooLongHint(agent: AgentRunnerFull): string {
@@ -631,9 +648,12 @@ export class MessageProcessor {
       // 检查是否因新消息自动中断 — 包装 prompt 让 Agent 知道上下文
       const prevInterruptReason = this.interruptedSessions.get(session.id);
       this.interruptedSessions.delete(session.id);
-      const effectivePrompt = prevInterruptReason === 'new_message' && session.agentSessionId
-        ? `【新消息插入】\n\n${message.content}\n\n【请无视之前中断继续处理】`
-        : message.content;
+      const wasInterrupted = prevInterruptReason === 'new_message' && !!session.agentSessionId;
+      const wrapPrompt = (body: string) => wasInterrupted
+        ? `【新消息插入】\n\n${body}\n\n【请无视之前中断继续处理】`
+        : body;
+      // 先用裸文本兜底；vars 构造完成后用消息渲染层重算（见下方 effectivePrompt 重赋值）。
+      let effectivePrompt = wrapPrompt(message.content);
 
       let streamResult: { isError: boolean; subtype?: string; errors?: string[]; terminalReason?: string; lastReplyText: string; fullText: string; hasReceivedText: boolean; numTurns?: number; ttftMs?: number; tokenUsage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number }; contextUsage?: { totalTokens: number; maxTokens: number; percentage: number; model: string; effort?: string } } = { isError: false, lastReplyText: '', fullText: '', hasReceivedText: false };
       let effectiveSystemPrompt: string | undefined;
@@ -724,6 +744,7 @@ export class MessageProcessor {
             KITS_DOCS: path.join(pkgRoot, 'kits', 'docs'),
             KITS_TEMPLATES: path.join(pkgRoot, 'kits', 'templates'),
             KITS_FRAGMENTS: path.join(pkgRoot, 'kits', 'templates', 'system-fragments'),
+            KITS_MESSAGE_FRAGMENTS: path.join(pkgRoot, 'kits', 'templates', 'message-fragments'),
             // evolclaw 运行模式：dev=源码仓库 | install=全局安装包
             evolclawMode: fs.existsSync(path.join(pkgRoot, 'src', 'index.ts')) ? 'dev' : 'install',
             // 路径变量(用于 manifest 路径展开,resolvePath 用 ctx.vars 取真值)
@@ -758,6 +779,8 @@ export class MessageProcessor {
             // 时区（把 ISO 时间戳转本地时间用）+ OS 环境
             timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || undefined,
             tzOffset: currentTzOffset(),
+            localDate: currentLocalDate(),
+            weekday: currentWeekday(),
             osInfo: OS_INFO,
             threadId: session.threadId || undefined,
             // Stage 3: sessionKey 持久化字段
@@ -780,6 +803,29 @@ export class MessageProcessor {
 
         effectiveSystemPrompt = [options?.systemPromptAppend, ...contextParts].filter(Boolean).join('\n') || undefined;
 
+        // 消息渲染层：用 message manifest 逐条渲染（时间 + 群聊发送者），组装成最终正文。
+        // 单条消息构造单元素 items；批量合并的消息 message.items 已由队列填充。
+        let renderResult: RenderMessageResult | undefined;
+        const hasContent = message.content.trim() || (message.items && message.items.length > 0);
+        if (hasContent) {
+          try {
+            const renderItems: SubMessage[] = message.items && message.items.length > 0
+              ? message.items
+              : [{
+                  peerId: message.peerId, peerName: peerName || undefined,
+                  peerType: message.peerType, content: message.content,
+                  timestamp: message.timestamp,
+                  images: message.images,
+                }];
+            renderResult = renderMessageBody(renderItems, kitCtx.vars, session.id);
+            if (renderResult.body.trim()) effectivePrompt = wrapPrompt(renderResult.body);
+            else effectivePrompt = wrapPrompt(message.content);
+          } catch (e) {
+            logger.warn(`[MessageProcessor] renderMessageBody failed, using raw content: ${e instanceof Error ? e.message : String(e)}`);
+            effectivePrompt = wrapPrompt(message.content);
+          }
+        }
+
         // 可重试错误（403/429/5xx）指数退避重试，最多 3 次
         const MAX_RETRIES = 3;
         for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
@@ -791,7 +837,7 @@ export class MessageProcessor {
               effectivePrompt,
               absoluteProjectPath,
               session.agentSessionId,
-              message.images,
+              renderResult?.images.length ? renderResult.images : message.images,
               effectiveSystemPrompt,
               this.sessionManager,
               modelOverride

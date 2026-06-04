@@ -243,6 +243,19 @@ export interface Session {
   deletedAt?: number;  // 软删除时间戳（null=活跃）
 }
 
+/**
+ * 一条子消息渲染所需的最小信息。批量合并时每条保留自己的发送者与时刻，
+ * 供消息渲染层逐条渲染。
+ */
+export interface SubMessage {
+  peerId?: string;
+  peerName?: string;
+  peerType?: string;
+  content: string;
+  timestamp?: number;
+  images?: Array<{ data: string; mimeType: string }>;
+}
+
 export interface Message {
   channel: string;          // 实例名
   channelType?: string;     // 类型（aun/feishu/...）
@@ -264,6 +277,12 @@ export interface Message {
   images?: Array<{ data: string; mimeType: string }>;
   mentions?: Array<{ userId: string; name?: string; key?: string }>;
   messageId?: string;
+  /**
+   * 批量合并时保留的逐条子消息（每条带自己的发送者与时刻）。
+   * 队列贪心合并多条消息后挂在这里；消息渲染层逐条渲染再组装。
+   * 单条消息可不设（渲染层退回 content）。
+   */
+  items?: SubMessage[];
   replyContext?: ReplyContext;       // Channel 预构建的回复上下文（渠道无关）
   timestamp?: number;
   source?: 'user' | 'card-trigger' | 'trigger';
