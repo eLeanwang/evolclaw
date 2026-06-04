@@ -88,6 +88,7 @@ function canCompactAgent(agent: AgentRunnerFull): agent is AgentRunnerFull & Com
  */
 export function buildEnvelope(opts: {
   taskId?: string;
+  sessionId?: string;
   channel: string;
   channelId: string;
   agentName?: string;
@@ -97,6 +98,7 @@ export function buildEnvelope(opts: {
 }): OutboundEnvelope {
   return {
     taskId: opts.taskId ?? `interaction-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    sessionId: opts.sessionId,
     channel: opts.channel,
     channelId: opts.channelId,
     agentName: opts.agentName ?? '<unknown>',
@@ -506,6 +508,7 @@ export class MessageProcessor {
     const isAutonomous = session.sessionMode === 'autonomous';
     const envelope = buildEnvelope({
       taskId,
+      sessionId: session.id,
       channel: message.channel,
       channelId: message.channelId,
       agentName: agentNameForStats,

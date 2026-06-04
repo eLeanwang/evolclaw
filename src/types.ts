@@ -834,6 +834,8 @@ export type OutboundPayload =
 
 export interface OutboundEnvelope {
   taskId: string;
+  /** EvolClaw 会话 ID（跨任务稳定，(channel,channelId,project) 维度）。命令回显/系统通知等无会话上下文的出站可缺省。 */
+  sessionId?: string;
   channel: string;
   channelId: string;
   agentName: string;
