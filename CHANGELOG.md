@@ -1,5 +1,11 @@
 # Changelog
 
+## v3.1.9 (2026-06-04)
+
+### Bug Fixes
+
+- **Windows `evolclaw watch web` 启动失败（ENOENT）** — Windows 上全局 bin 是 `evolclaw-web.cmd`，`execFileSync('evolclaw-web')` 不补 `.cmd` 后缀导致 spawn ENOENT。新增 `resolveCommandPath()` 通过 `where`/`which` 解析可执行文件真实绝对路径（不缓存，刚安装的命令会重新探测）再执行；定位失败时给出"重开终端"提示
+
 ## v3.1.8 (2026-06-04)
 
 ### Bug Fixes
