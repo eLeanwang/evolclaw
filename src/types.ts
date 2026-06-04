@@ -780,6 +780,8 @@ export interface AgentConfig {
   debug?: DebugBlock;
   /** 启用富内容渲染模块（如飞书富文本卡片）。透传到 channel plugin。 */
   enable_rich_content?: boolean;
+  /** 观察者模式：开启后入站/出站消息各转发一份给顶层 owners[]。默认 false。 */
+  observable?: boolean;
 }
 
 /**
