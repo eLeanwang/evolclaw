@@ -1488,7 +1488,8 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
   }
 
   /**
-   * 入站转发：到达本 AID 的消息全部转发，排除 self-echo 与 from-owner。
+   * 入站转发：到达本 AID 的消息全部转发，排除 self-echo。
+   * 若消息发送方本身是 owner，则不转发给该 owner，但仍转发给其他 owner。
    * 调用点须在所有过滤逻辑之前，payload 为 SDK 解密后的明文。
    */
   private forwardInbound(from: string, seq: number | undefined, payload: unknown): void {
@@ -1496,8 +1497,10 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     const { observable, owners } = this.getObserverConfig();
     if (!observable || owners.length === 0) return;
     if (this._aid && from === this._aid) return;   // self-echo：已在出站转过
-    if (owners.includes(from)) return;             // 来自 owner：不往回镜像
-    this.emitForward('inbound', { from, to: this.config.aid, seq, payload }, owners);
+    // 排除来源 owner（不把"owner A 发来的"再转回 A），但仍转给其他 owner。
+    const recipientOwners = owners.filter(o => o !== from);
+    if (recipientOwners.length === 0) return;
+    this.emitForward('inbound', { from, to: this.config.aid, seq, payload }, recipientOwners);
   }
 
   /**
