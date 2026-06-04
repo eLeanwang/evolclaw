@@ -41,7 +41,8 @@ export function resolvePaths() {
 
     // ── 新结构（evolclaw-directory-design.md）────────────────
     defaultsConfig: path.join(root, 'agents', 'defaults.json'),
-    processConfig: path.join(root, 'config.json'),
+    processConfig: path.join(root, 'config.json'), // legacy ProcessConfig path — only for migration source
+    evolclawJson: path.join(root, 'evolclaw.json'),
     eckDir: path.join(root, 'eck'),
     instanceReadySignal: path.join(root, 'data', 'instance', 'ready.signal'),
     instanceSocket: resolveInstanceSocketPath(root),
