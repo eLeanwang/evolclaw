@@ -38,6 +38,13 @@ describe('execAgentAction create (accepted-return)', () => {
     expect((r as any).code).toBe('INVALID_ARGS');
   });
 
+  it('rejects empty peerId (cannot bind owner)', async () => {
+    const r = await execAgentAction('create',
+      { aid: 'x.agentid.pub', name: 'X', baseagent: 'claude', project: '/tmp/x' }, '');
+    expect((r as any).code).toBe('INVALID_ARGS');
+    expect((cliAgent.agentCreateNonInteractive as any).mock.calls.length).toBe(0);
+  });
+
   it('returns accepted immediately and fires create in background', async () => {
     (cliAgent.agentCreateNonInteractive as any).mockResolvedValue({ ok: true, aid: 'x.agentid.pub', configPath: '/c', aidCreated: true });
     const r = await execAgentAction('create',

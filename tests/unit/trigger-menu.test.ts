@@ -93,6 +93,37 @@ describe('menu /trigger set (action, direct call)', () => {
     expect(t.prompt).toBe('--session current --channel evil');
     expect(t.targetSessionStrategy).toBe('latest');
   });
+
+  it('rejects non-numeric delay scheduleValue (no NaN nextFireAt)', async () => {
+    const { cmdHandler, triggerManager } = await setupEnv(tmpDir);
+    const r = await cmdHandler.execMenuAction(
+      '/trigger', 'set',
+      { scheduleType: 'delay', scheduleValue: 'abc', prompt: 'p', name: 'bad-delay' },
+      'feishu-main', 'oc_test', 'owner-user',
+    ) as any;
+    expect(r.code).toBe('INVALID_ARGS');
+    expect(triggerManager.getByName('bad-delay')).toBeFalsy();
+  });
+
+  it('rejects unknown scheduleType', async () => {
+    const { cmdHandler } = await setupEnv(tmpDir);
+    const r = await cmdHandler.execMenuAction(
+      '/trigger', 'set',
+      { scheduleType: 'interval', scheduleValue: '5', prompt: 'p', name: 'bad-type' },
+      'feishu-main', 'oc_test', 'owner-user',
+    ) as any;
+    expect(r.code).toBe('INVALID_ARGS');
+  });
+
+  it('rejects invalid targetSessionStrategy', async () => {
+    const { cmdHandler } = await setupEnv(tmpDir);
+    const r = await cmdHandler.execMenuAction(
+      '/trigger', 'set',
+      { scheduleType: 'delay', scheduleValue: '60000', prompt: 'p', name: 'bad-strat', targetSessionStrategy: 'immediate' },
+      'feishu-main', 'oc_test', 'owner-user',
+    ) as any;
+    expect(r.code).toBe('INVALID_ARGS');
+  });
 });
 
 describe('menu /trigger cancel (action)', () => {

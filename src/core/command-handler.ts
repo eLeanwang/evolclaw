@@ -998,6 +998,7 @@ export class CommandHandler {
       try { patch = JSON.parse(arg); } catch { return { error: 'value 需为 JSON', code: 'INVALID_ARGS' }; }
       if (!patch?.nameOrId) return { error: '缺少 nameOrId', code: 'INVALID_ARGS' };
       const isAdmin = identity.role === 'owner' || identity.role === 'admin';
+      if (!isAdmin && !userId) return { error: '无法确认身份，请确保渠道提供发送者 ID', code: 'FORBIDDEN' };
       const trigger = isAdmin
         ? (manager.getByName(patch.nameOrId) ?? manager.getById(patch.nameOrId))
         : (manager.getByNameScoped(patch.nameOrId, userId ?? '', channel) ?? manager.getByIdScoped(patch.nameOrId, userId ?? '', channel));
@@ -1006,13 +1007,13 @@ export class CommandHandler {
       if (patch.scheduleType !== undefined) fields.scheduleType = patch.scheduleType;
       if (patch.scheduleValue !== undefined) fields.scheduleValue = String(patch.scheduleValue);
       if (patch.prompt !== undefined) fields.prompt = String(patch.prompt);
-      // 调度参数变化时重算 nextFireAt
+      // 调度参数变化时重算 nextFireAt——先校验避免 NaN 污染 scheduler heap
       if (fields.scheduleType !== undefined || fields.scheduleValue !== undefined) {
-        fields.nextFireAt = calcNextFireAt(
-          fields.scheduleType ?? trigger.scheduleType,
-          fields.scheduleValue ?? trigger.scheduleValue,
-          Date.now(),
-        );
+        const effType = fields.scheduleType ?? trigger.scheduleType;
+        const effValue = fields.scheduleValue ?? trigger.scheduleValue;
+        const schedErr = validateScheduleParams(effType, effValue);
+        if (schedErr) return { error: schedErr, code: 'INVALID_ARGS' };
+        fields.nextFireAt = calcNextFireAt(effType, effValue, Date.now());
       }
       let updated: Trigger;
       try { updated = manager.update(trigger.id, fields); }
@@ -1176,6 +1177,14 @@ export class CommandHandler {
         if (!args?.scheduleType || !args?.scheduleValue || !args?.prompt) {
           return { error: '缺少必填参数：scheduleType / scheduleValue / prompt', code: 'INVALID_ARGS' };
         }
+        // menu 路径绕过了 parseTriggerSet 的校验，必须自行校验枚举/数值，
+        // 否则非法值会传到 calcNextFireAt 产出 NaN nextFireAt，污染 scheduler heap。
+        const schedErr = validateScheduleParams(args.scheduleType, String(args.scheduleValue));
+        if (schedErr) return { error: schedErr, code: 'INVALID_ARGS' };
+        const strategy = args.targetSessionStrategy ?? 'latest';
+        if (!['latest', 'current', 'thread'].includes(strategy)) {
+          return { error: `无效 targetSessionStrategy: ${strategy}`, code: 'INVALID_ARGS' };
+        }
         const parsed: ParsedTriggerSet = {
           scheduleType: args.scheduleType,
           scheduleValue: String(args.scheduleValue),
@@ -1184,7 +1193,7 @@ export class CommandHandler {
           targetChannel: args.targetChannel,
           targetChannelId: args.targetChannelId,
           targetThreadId: args.targetThreadId,
-          targetSessionStrategy: args.targetSessionStrategy ?? 'latest',
+          targetSessionStrategy: strategy,
           agentId: args.agentId,
         };
         const r = await this.registerTriggerFromParsed(parsed, channel, channelId, userId ?? '', undefined);
@@ -1195,6 +1204,7 @@ export class CommandHandler {
       if (action === 'cancel') {
         const nameOrId = args?.nameOrId;
         if (!nameOrId) return { error: '缺少 nameOrId', code: 'INVALID_ARGS' };
+        if (!isAdmin && !userId) return { error: '无法确认身份，请确保渠道提供发送者 ID', code: 'FORBIDDEN' };
         const trigger = isAdmin
           ? (manager.getByName(nameOrId) ?? manager.getById(nameOrId))
           : (manager.getByNameScoped(nameOrId, userId ?? '', channel) ?? manager.getByIdScoped(nameOrId, userId ?? '', channel));
@@ -4248,4 +4258,25 @@ export function isProcessLevelOwner(peerId: string | undefined, defaults: Defaul
   if (!peerId) return false;
   const owners = defaults?.owners ?? [];
   return owners.includes(peerId);
+}
+
+/** 校验 menu 路径直传的 trigger 调度参数（绕过 parseTriggerSet 文本解析后必须自校验）。
+ *  返回错误字符串表示非法；返回 null 表示通过。
+ *  防止非法 scheduleType/scheduleValue 传到 calcNextFireAt 产出 NaN/throw，污染 scheduler heap。 */
+export function validateScheduleParams(scheduleType: string, scheduleValue: string): string | null {
+  if (!['delay', 'at', 'cron'].includes(scheduleType)) {
+    return `无效 scheduleType: ${scheduleType}（可选: delay / at / cron）`;
+  }
+  if (scheduleType === 'delay') {
+    const ms = Number(scheduleValue);
+    if (!Number.isFinite(ms) || ms <= 0) return `delay 的 scheduleValue 需为正整数毫秒: ${scheduleValue}`;
+  } else if (scheduleType === 'at') {
+    const ts = new Date(scheduleValue).getTime();
+    if (!Number.isFinite(ts)) return `at 的 scheduleValue 需为合法时间: ${scheduleValue}`;
+  } else {
+    // cron：交给 calcNextFireAt 内部的 CronExpressionParser 校验（会 throw，被上层 catch）
+    try { calcNextFireAt('cron', scheduleValue, Date.now()); }
+    catch { return `无效 cron 表达式: ${scheduleValue}`; }
+  }
+  return null;
 }

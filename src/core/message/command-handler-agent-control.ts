@@ -11,7 +11,7 @@ import type { DefaultsConfig } from '../../types.js';
 import { logger } from '../../utils/logger.js';
 import { resolvePaths } from '../../paths.js';
 import path from 'path';
-import { CreateStatusWriter, readCreateStatus } from './create-status.js';
+import { CreateStatusWriter, readCreateStatus, type CreatePhase } from './create-status.js';
 
 export type ExecResult = { data: any } | { error: string; code: string };
 
@@ -33,13 +33,14 @@ async function runCreateInBackground(opts: {
 }): Promise<void> {
   const agentDir = path.join(resolvePaths().agentsDir, opts.aid);
   const w = new CreateStatusWriter(agentDir, opts.aid);
+  let curPhase: CreatePhase = 'validating';   // 跟踪当前环节，供 catch 兜底时标注正确 phase
   try {
     // onPhase 把 agentCreateNonInteractive 内部环节（0-3、5）映射到进度文件
     const res = await agentCreateNonInteractive({
       aid: opts.aid, name: opts.name, baseagent: opts.baseagent,
       project: opts.project, owner: opts.owner,
       onPhase: (phase, state, detail) => {
-        if (state === 'begin') w.begin(phase as any);
+        if (state === 'begin') { curPhase = phase as CreatePhase; w.begin(phase as any); }
         else if (state === 'done') w.done(phase as any, detail);
         else if (state === 'warn') w.warn(phase as any, detail);
         else if (state === 'failed') w.finishFailed(phase as any, detail ?? 'failed');
@@ -53,6 +54,7 @@ async function runCreateInBackground(opts: {
     }
     // 环节 4：applying_config（model/chatmode，agentCreateNonInteractive 之外）
     if (opts.model || opts.chatmode) {
+      curPhase = 'applying_config';
       w.begin('applying_config');
       let warned: string | undefined;
       if (opts.model) {
@@ -70,8 +72,8 @@ async function runCreateInBackground(opts: {
     logger.info(`[agent-control] create ${opts.aid} ready`);
   } catch (e: any) {
     const msg = e?.message || String(e);
-    logger.warn(`[agent-control] create ${opts.aid} threw: ${msg}`);
-    w.finishFailed('validating', msg);   // 兜底终态
+    logger.warn(`[agent-control] create ${opts.aid} threw at ${curPhase}: ${msg}`);
+    w.finishFailed(curPhase, msg);   // 兜底终态，标注真实失败环节
   }
 }
 
@@ -86,6 +88,7 @@ export async function execAgentAction(
   const a = args ?? {};
 
   if (action === 'create') {
+    if (!peerId) return { error: '缺少发起者 AID（无法绑定 owner）', code: 'INVALID_ARGS' };
     if (!a.aid || !a.name || !a.baseagent) {
       return { error: '缺少必填参数：aid / name / baseagent', code: 'INVALID_ARGS' };
     }
@@ -93,11 +96,13 @@ export async function execAgentAction(
       return { error: 'project 缺失且无法兜底（需 defaults.projects.rootPath/defaultPath）', code: 'INVALID_ARGS' };
     }
     // D3: 受理即返回，重副作用转后台
+    // 受理即返回；后台 promise fire-and-forget。runCreateInBackground 内部有 try/catch，
+    // 但 CreateStatusWriter 构造（mkdir/写盘）在 try 之前，故再加一层兜底防未处理拒绝。
     void runCreateInBackground({
       aid: a.aid, name: a.name, baseagent: a.baseagent,
       project: a.project, owner: peerId,
       model: a.model, chatmode: a.chatmode,
-    });
+    }).catch(e => logger.error(`[agent-control] runCreateInBackground unhandled ${a.aid}: ${e?.message || e}`));
     return { data: { accepted: true, aid: a.aid } };
   }
 
