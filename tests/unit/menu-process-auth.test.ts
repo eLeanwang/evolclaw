@@ -31,3 +31,10 @@ describe('isProcessLevelOwner', () => {
   });
 });
 
+describe('system uses process-level owners auth (D1 migration)', () => {
+  it('owners list is the gate for /system', () => {
+    expect(isProcessLevelOwner('outsider.agentid.pub', { $schema_version: 1, owners: ['op.agentid.pub'] })).toBe(false);
+    expect(isProcessLevelOwner('op.agentid.pub', { $schema_version: 1, owners: ['op.agentid.pub'] })).toBe(true);
+  });
+});
+

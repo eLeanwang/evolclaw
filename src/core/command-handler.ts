@@ -933,6 +933,9 @@ export class CommandHandler {
     }
 
     if (cmdBase === '/system') {
+      if (!isProcessLevelOwner(userId, loadDefaults())) {
+        return { error: '操作需要 owner 权限', code: 'FORBIDDEN' };
+      }
       const owningAgent = this.getOwningAgent(channel);
       const data: Record<string, any> = {
         agent: owningAgent?.name ?? 'DefaultAgent',
@@ -1163,8 +1166,11 @@ export class CommandHandler {
 
     // ── /system 系列 ──
     if (cmdBase === '/system') {
+      // D1 迁移：进程级鉴权统一查 defaults.owners，替代各 action 内联的 identity.role 判断
+      if (!isProcessLevelOwner(userId, loadDefaults())) {
+        return { error: '操作需要 owner 权限', code: 'FORBIDDEN' };
+      }
       if (action === 'restart') {
-        if (identity.role !== 'owner') return { error: '无权限：服务重启仅限 owner 使用', code: 'NO_PERMISSION' };
         const restartInfo: Record<string, any> = { channel, channelId, timestamp: Date.now() };
         fs.writeFileSync(path.join(resolvePaths().dataDir, 'restart-pending.json'), JSON.stringify(restartInfo));
         const { spawn } = await import('child_process');
@@ -1183,7 +1189,6 @@ export class CommandHandler {
       }
 
       if (action === 'upgrade') {
-        if (identity.role !== 'owner') return { error: '无权限：升级仅限 owner 使用', code: 'NO_PERMISSION' };
         return await this.delegateAsAction(action, '/upgrade', channel, channelId, userId);
       }
 

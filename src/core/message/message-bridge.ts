@@ -241,6 +241,8 @@ export class MessageBridge {
     activity: '/activity',
     system: '/system',
     cli: '/cli',
+    agent: '/agent',
+    trigger: '/trigger',
   };
 
   private resolveCmd(name: string, cmd?: string): string {
