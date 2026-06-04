@@ -370,6 +370,10 @@ export class EvolAgentRegistry {
       // swap config 后再起新 channel —— startChannel hook 需要看到新 config
       oldAgent.swapConfig(raw, merged);
 
+      // 热重载也刷新身份层缓存（persona / working 等 fileCache 'agent-files' 组），
+      // 使 personal 文件改动经 reload 即时生效，不必重启。
+      oldAgent.invalidatePersonaCache();
+
       for (const ch of toAdd) {
         await hooks.startChannel(oldAgent, ch);
         addedSuccessfully.push(ch);
