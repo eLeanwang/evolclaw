@@ -3,12 +3,15 @@ import {
   agentDelete,
   agentEnable,
   agentDisable,
+  agentList,
+  agentShow,
   agentSet,
 } from '../../cli/agent.js';
+import type { DefaultsConfig } from '../../types.js';
 import { logger } from '../../utils/logger.js';
 import { resolvePaths } from '../../paths.js';
 import path from 'path';
-import { CreateStatusWriter } from './create-status.js';
+import { CreateStatusWriter, readCreateStatus } from './create-status.js';
 
 export type ExecResult = { data: any } | { error: string; code: string };
 
@@ -113,4 +116,39 @@ export async function execAgentAction(
   }
 
   return { error: `不支持的 action: ${action}`, code: 'INVALID_ARGS' };
+}
+
+/** project 兜底：显式值 > rootPath 合成 > defaultPath > undefined */
+export function resolveProjectPath(
+  explicit: string | undefined,
+  aid: string,
+  defaults: DefaultsConfig | null,
+): string | undefined {
+  if (explicit && explicit.trim()) return explicit;
+  const root = defaults?.projects?.rootPath;
+  if (root) return path.join(root, aid.split('.')[0]);
+  return defaults?.projects?.defaultPath;
+}
+
+/** name=agent 的 menu.query：查单个 agent 详情，附构建进度（D3）。 */
+export async function execAgentQuery(args: Record<string, any> | undefined): Promise<ExecResult> {
+  const aid = args?.aid;
+  if (!aid) return { error: '缺少 aid', code: 'INVALID_ARGS' };
+  const res = await agentShow(aid);
+  if (!('ok' in res) || res.ok !== true) return { error: (res as any).error, code: classifyError((res as any).error) };
+  // 叠加构建进度（create 受理后、ready 前可见；ready 后文件仍在，可反映软失败 warn）
+  const agentDir = path.join(resolvePaths().agentsDir, aid);
+  const progress = readCreateStatus(agentDir);
+  return { data: progress ? { ...res, createProgress: progress } : res };
+}
+
+/** name=agent 的 menu.options：列出 agent（enabled 默认 / all） */
+export async function execAgentOptions(args: Record<string, any> | undefined): Promise<ExecResult> {
+  const scope = args?.options === 'all' ? 'all' : 'enabled';
+  const res = await agentList();
+  if (!('ok' in res) || res.ok !== true) return { error: (res as any).error, code: classifyError((res as any).error) };
+  const agents = scope === 'all'
+    ? res.agents
+    : res.agents.filter((x: any) => x.status !== 'disabled');
+  return { data: { agents, scope } };
 }

@@ -19,7 +19,8 @@ vi.mock('../../src/core/message/create-status.js', () => ({
 }));
 
 import * as cliAgent from '../../src/cli/agent.js';
-import { execAgentAction } from '../../src/core/message/command-handler-agent-control.js';
+import { execAgentAction, execAgentQuery, execAgentOptions, resolveProjectPath } from '../../src/core/message/command-handler-agent-control.js';
+import { readCreateStatus } from '../../src/core/message/create-status.js';
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -78,5 +79,53 @@ describe('execAgentAction delete/enable/disable', () => {
   it('rejects unknown action', async () => {
     const r = await execAgentAction('frobnicate', { aid: 'x.agentid.pub' }, 'peer.agentid.pub');
     expect((r as any).code).toBe('INVALID_ARGS');
+  });
+});
+
+describe('resolveProjectPath fallback', () => {
+  it('uses explicit project when provided', () => {
+    expect(resolveProjectPath('/tmp/explicit', 'mybot.agentid.pub', { $schema_version: 1 })).toBe('/tmp/explicit');
+  });
+  it('composes from rootPath + first aid segment', () => {
+    expect(resolveProjectPath(undefined, 'mybot.agentid.pub',
+      { $schema_version: 1, projects: { rootPath: '/data/agents' } })).toBe('/data/agents/mybot');
+  });
+  it('falls back to defaultPath', () => {
+    expect(resolveProjectPath(undefined, 'mybot.agentid.pub',
+      { $schema_version: 1, projects: { defaultPath: '/data/default' } })).toBe('/data/default');
+  });
+  it('returns undefined when nothing available', () => {
+    expect(resolveProjectPath(undefined, 'mybot.agentid.pub', { $schema_version: 1 })).toBeUndefined();
+  });
+});
+
+describe('execAgentQuery / execAgentOptions', () => {
+  it('show maps NOT_FOUND', async () => {
+    (cliAgent.agentShow as any).mockResolvedValue({ ok: false, error: 'Agent "x" not found' });
+    const r = await execAgentQuery({ aid: 'x.agentid.pub' });
+    expect((r as any).code).toBe('NOT_FOUND');
+  });
+  it('attaches createProgress when status file present (D3)', async () => {
+    (cliAgent.agentShow as any).mockResolvedValue({ ok: true, aid: 'x.agentid.pub', status: 'stopped' });
+    (readCreateStatus as any).mockReturnValue({ status: 'in_progress', currentPhase: 'hot_loading', steps: [] });
+    const r = await execAgentQuery({ aid: 'x.agentid.pub' });
+    expect((r as any).data.createProgress.status).toBe('in_progress');
+    expect((r as any).data.createProgress.currentPhase).toBe('hot_loading');
+  });
+  it('omits createProgress when no status file', async () => {
+    (cliAgent.agentShow as any).mockResolvedValue({ ok: true, aid: 'x.agentid.pub', status: 'running' });
+    (readCreateStatus as any).mockReturnValue(null);
+    const r = await execAgentQuery({ aid: 'x.agentid.pub' });
+    expect((r as any).data.createProgress).toBeUndefined();
+  });
+  it('options=all returns full list', async () => {
+    (cliAgent.agentList as any).mockResolvedValue({ ok: true, agents: [{ aid: 'a', status: 'running' }, { aid: 'b', status: 'disabled' }] });
+    const r = await execAgentOptions({ options: 'all' });
+    expect((r as any).data.agents.length).toBe(2);
+  });
+  it('options=enabled filters disabled', async () => {
+    (cliAgent.agentList as any).mockResolvedValue({ ok: true, agents: [{ aid: 'a', status: 'running' }, { aid: 'b', status: 'disabled' }] });
+    const r = await execAgentOptions({ options: 'enabled' });
+    expect((r as any).data.agents.length).toBe(1);
   });
 });
