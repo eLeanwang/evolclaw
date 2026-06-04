@@ -17,12 +17,60 @@
 
 import fs from 'fs';
 import path from 'path';
-import { agentRelationsDir } from '../../paths.js';
+import { agentRelationsDir, agentConfig as agentConfigPath, resolvePaths } from '../../paths.js';
 import { loadDefaults, saveDefaultsSafe, loadAgent, saveAgent } from '../../config-store.js';
 import { formatPeerKey, parsePeerKey } from '../relation/peer-key.js';
-import type { BaseagentsBlock } from '../../types.js';
+import type { BaseagentsBlock, AgentConfig, DefaultsConfig } from '../../types.js';
 
 export type ModelScope = 'global' | 'agent' | 'relation';
+
+// ── mtime 门控缓存 ─────────────────────────────────────────────────────
+//
+// resolveEffectiveModel 每条消息按 关系>agent>全局 解析，原本每次都
+// loadAgent()/loadDefaults()/读 preferences.json —— 一条消息最多读盘 5 次。
+//
+// model-scope 被 CLI 子进程与 daemon 共用，CLI 改文件后 daemon 无失效通知，
+// 故靠 mtime 门控：每次只 statSync 比对 mtime，未变用缓存，变了才真正重读 +
+// 重解析。跨进程天然正确（文件 mtime 变即感知），改配置即时生效不变；
+// statSync 远比 read+JSON.parse 便宜。loader 仍走原 loadAgent/loadDefaults，
+// 保留 expandEnvRefs / 校验等处理。
+
+interface MtimeCacheEntry<T> { mtimeMs: number | null; value: T; }
+
+function makeMtimeCache<T>(loader: (file: string) => T) {
+  const cache = new Map<string, MtimeCacheEntry<T>>();
+  return (file: string): T => {
+    let mtimeMs: number | null;
+    try {
+      mtimeMs = fs.statSync(file).mtimeMs;
+    } catch {
+      mtimeMs = null;  // 文件不存在
+    }
+    const hit = cache.get(file);
+    if (hit && hit.mtimeMs === mtimeMs) return hit.value;
+    const value = loader(file);
+    cache.set(file, { mtimeMs, value });
+    return value;
+  };
+}
+
+// agent config.json：按文件路径 → AgentConfig（保留 loadAgent 的 env 展开/校验）
+const loadAgentCached = (() => {
+  const get = makeMtimeCache<AgentConfig | null>((file) => {
+    const aid = path.basename(path.dirname(file));
+    return loadAgent(aid);
+  });
+  return (self: string): AgentConfig | null => get(agentConfigPath(self));
+})();
+
+// defaults.json：单文件
+const loadDefaultsCached = (() => {
+  const get = makeMtimeCache<DefaultsConfig | null>(() => loadDefaults());
+  return (): DefaultsConfig | null => get(resolvePaths().defaultsConfig);
+})();
+
+// 关系级 preferences.json
+const readPrefsCached = makeMtimeCache<ModelPrefs | null>((file) => readJsonSafe(file));
 
 /** 关系级扁平文件的内容结构 */
 export interface ModelPrefs {
@@ -100,10 +148,10 @@ export function determineScope(sel: ScopeSelector): ModelScope {
 export function activeBaseagent(self?: string): string {
   try {
     if (self) {
-      const cfg = loadAgent(self);
+      const cfg = loadAgentCached(self);
       if (cfg?.active_baseagent) return cfg.active_baseagent;
     }
-    const d = loadDefaults();
+    const d = loadDefaultsCached();
     if (d?.active_baseagent) return d.active_baseagent;
   } catch { /* fall through */ }
   return 'claude';
@@ -141,17 +189,17 @@ function writeJsonAtomic(file: string, data: ModelPrefs): void {
 export function readScope(scope: ModelScope, sel: ScopeSelector, ba: string): ModelPrefs {
   switch (scope) {
     case 'global': {
-      const block = (loadDefaults()?.baseagents || {}) as BaseagentsBlock;
+      const block = (loadDefaultsCached()?.baseagents || {}) as BaseagentsBlock;
       const c = (block as any)[ba] || {};
       return { model: c.model, effort: c[effortField(ba)] };
     }
     case 'agent': {
-      const cfg = sel.self ? loadAgent(sel.self) : null;
+      const cfg = sel.self ? loadAgentCached(sel.self) : null;
       const c = ((cfg?.baseagents || {}) as any)[ba] || {};
       return { model: c.model, effort: c[effortField(ba)] };
     }
     case 'relation': {
-      const p = readJsonSafe(relationPrefsPath(sel.self!, sel.peerKey!));
+      const p = readPrefsCached(relationPrefsPath(sel.self!, sel.peerKey!));
       return { model: p?.model, effort: p?.effort };
     }
   }
