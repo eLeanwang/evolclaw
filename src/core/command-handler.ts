@@ -897,6 +897,10 @@ export class CommandHandler {
       return { data: { mode: sessionMode ?? fallback ?? null } };
     }
 
+    if (cmdBase === '/observable') {
+      return { data: { observable: evolagent?.getObservable() ?? false } };
+    }
+
     if (cmdBase === '/perm') {
       const need = this.requireSession(session);
       if (need) return need;
@@ -1045,6 +1049,14 @@ export class CommandHandler {
       if (!this.agentRegistry?.setShowActivities) return { error: '找不到通道所属 agent，无法持久化', code: 'EXEC_FAILED' };
       this.agentRegistry.setShowActivities(channel, newMode as any);
       return { data: { mode: newMode } };
+    }
+
+    if (cmdBase === '/observable') {
+      if (identity.role !== 'owner') return { error: '观察者模式仅限 owner 开关', code: 'NO_PERMISSION' };
+      if (arg !== 'true' && arg !== 'false') return { error: `无效值: ${arg}，可选: true / false`, code: 'INVALID_VALUE' };
+      if (!evolagent) return { error: '找不到通道所属 agent，无法持久化', code: 'EXEC_FAILED' };
+      evolagent.setObservable(arg === 'true');
+      return { data: { observable: arg === 'true' } };
     }
 
     return { error: `不支持 update: ${cmdBase}`, code: 'NOT_SUPPORTED' };

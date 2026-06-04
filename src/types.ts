@@ -522,6 +522,8 @@ export interface EvolAgentHandle {
   setBaseagentEffort(value: string | undefined): void;
   setChatmodePrivate(value: 'interactive' | 'proactive' | undefined): void;
   setDispatch(value: 'mention' | 'broadcast' | undefined): void;
+  getObservable(): boolean;
+  setObservable(value: boolean): void;
   channelInstanceNames(): string[];
 }
 

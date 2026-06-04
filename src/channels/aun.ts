@@ -1033,6 +1033,10 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     const messageId = msg.message_id ?? '';
     const seq = msg.seq;
 
+    // Observer forward (inbound)：在所有过滤之前转发原始明文 payload。
+    // forwardInbound 内部排除 self-echo 与 from-owner。
+    this.forwardInbound(fromAid, seq, payload);
+
     // 回声过滤：自己发出的消息会被 gateway fanout 回来，
     // 只有 from_aid == self 且 chat_id 不匹配时才丢弃（说明是其它实例发的）
     const msgChatId = typeof payload === 'object' && payload !== null && (payload as any).chat_id;
@@ -1154,6 +1158,10 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     const threadId = typeof payload === 'object' && payload !== null ? (payload as any).thread_id : undefined;
     const messageId = msg.message_id ?? '';
     const seq = msg.seq;
+
+    // Observer forward (inbound)：群聊消息在所有过滤之前转发原始明文 payload。
+    // forwardInbound 内部排除 self-echo 与 from-owner。
+    this.forwardInbound(senderAid, seq, payload);
 
     // Extract structured mentions from payload (e.g. payload.mentions: ["evolai.agentid.pub"])
     const payloadMentions: string[] = Array.isArray((payload as any)?.mentions)
@@ -1457,30 +1465,63 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     }).catch(err => {
       logger.error(`${this.logPrefix()} Message handler error:`, err);
     });
+  }
 
-    // Observer forward: inbound
-    this.forwardToOwners('inbound', {
-      from: event.userId || event.channelId || '',
-      to: this.config.aid,
-      seq: event.seq,
-      payload: { type: 'text', text: event.text },
-    });
+  // ── 观察者模式（Observer Mode） ──────────────────────────────
+  //
+  // observable=true 时，Agent 收发的每条 AUN 消息（原始信封 + 解密后明文
+  // payload）镜像一份给 owners[]。入站在所有过滤之前转发；出站在真实发送
+  // 成功后转发。外层一律明文。详见 docs/observer-mode-design.md。
+
+  // observable / owners 不在此处缓存——由 daemon 注入 resolver，从 EvolAgent 的
+  // in-memory merged config（启动/重启/热重载时统一更新的唯一缓存）读取，避免重复缓存。
+  private observerConfigResolver?: () => { observable: boolean; owners: string[] };
+
+  /** 注入观察者配置读取器（daemon 侧从 EvolAgent merged config 读）。 */
+  setObserverConfigResolver(fn: () => { observable: boolean; owners: string[] }): void {
+    this.observerConfigResolver = fn;
+  }
+
+  /** 读取 observable 开关 + owners；无 resolver（如未接入 daemon）时视为关闭。 */
+  private getObserverConfig(): { observable: boolean; owners: string[] } {
+    return this.observerConfigResolver?.() ?? { observable: false, owners: [] };
   }
 
   /**
-   * 观察者模式转发：将消息副本以 observer.forward 格式发给所有 owners。
-   * 仅在 AgentConfig.observable === true 时执行；owners 为空或无法加载配置时静默跳过。
+   * 入站转发：到达本 AID 的消息全部转发，排除 self-echo 与 from-owner。
+   * 调用点须在所有过滤逻辑之前，payload 为 SDK 解密后的明文。
    */
-  private forwardToOwners(
-    direction: 'inbound' | 'outbound',
-    original: { from: string; to: string; seq?: number; payload: Record<string, unknown> },
-  ): void {
+  private forwardInbound(from: string, seq: number | undefined, payload: unknown): void {
     if (!this.connected || !this.client) return;
-    const agentConfig = loadAgent(this.config.aid);
-    if (!agentConfig?.observable) return;
-    const owners = agentConfig.owners ?? [];
-    if (owners.length === 0) return;
+    const { observable, owners } = this.getObserverConfig();
+    if (!observable || owners.length === 0) return;
+    if (this._aid && from === this._aid) return;   // self-echo：已在出站转过
+    if (owners.includes(from)) return;             // 来自 owner：不往回镜像
+    this.emitForward('inbound', { from, to: this.config.aid, seq, payload }, owners);
+  }
 
+  /**
+   * 出站转发：Agent 经 AUN 真实发出的消息全部转发。
+   * to 为对端（私聊 AID / 群 ID），payload 为实际发送的明文 payload。
+   * 若 to 本身是 owner，排除该 owner（不把"回复 A"转发给 A 自己）。
+   */
+  private forwardOutbound(to: string, payload: unknown): void {
+    if (!this.connected || !this.client) return;
+    const { observable, owners } = this.getObserverConfig();
+    if (!observable || owners.length === 0) return;
+    // 过滤：若 to 本身是 owner，不转发给该 owner（避免"回复你"转给你自己）；
+    // 但仍转发给其他 owner。
+    const recipientOwners = owners.filter(o => o !== to);
+    if (recipientOwners.length === 0) return;
+    this.emitForward('outbound', { from: this.config.aid, to, payload }, recipientOwners);
+  }
+
+  /** 实际投递 observer.forward 给每个 owner，外层一律明文。 */
+  private emitForward(
+    direction: 'inbound' | 'outbound',
+    original: { from: string; to: string; seq?: number; payload: unknown },
+    owners: string[],
+  ): void {
     const forwardPayload = {
       type: 'observer.forward',
       direction,
@@ -1493,10 +1534,8 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
         payload: original.payload,
       },
     };
-
     for (const ownerAid of owners) {
-      const encrypt = this.shouldEncrypt(ownerAid);
-      this.callAndTrace('message.send', { to: ownerAid, payload: forwardPayload, encrypt })
+      this.callAndTrace('message.send', { to: ownerAid, payload: forwardPayload, encrypt: false })
         .catch(e => logger.debug(`${this.logPrefix()} observer.forward to ${ownerAid} failed: ${e}`));
     }
   }
@@ -1999,12 +2038,8 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
           appendAidEvent({ ts: Date.now(), iso: new Date().toISOString(), event: 'message_out', aid: this.config.aid, to: channelId, msgId: mid, kind: 'text', len: finalText.length, groupId: channelId });
           this.aidStatsCollector?.recordOutbound(this.config.aid, channelId, Buffer.byteLength(finalText, 'utf-8'), finalText, false, encrypt, context?.metadata?.chatmode as string | undefined);
           this.appendOutboundJsonl(channelId, finalText, mid, encrypt, context, true, 'text', source);
-          // Observer forward: outbound (group)
-          this.forwardToOwners('outbound', {
-            from: this.config.aid,
-            to: channelId,
-            payload: { type: 'text', text: finalText },
-          });
+          // Observer forward: outbound (group) — 转发实际发出的明文 payload
+          this.forwardOutbound(channelId, payload);
         }
       } else {
         params.to = targetAid;
@@ -2016,12 +2051,8 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
           appendAidEvent({ ts: Date.now(), iso: new Date().toISOString(), event: 'message_out', aid: this.config.aid, to: targetAid, msgId: result.message_id, kind: 'text', len: finalText.length });
           this.aidStatsCollector?.recordOutbound(this.config.aid, targetAid, Buffer.byteLength(finalText, 'utf-8'), finalText, false, encrypt, context?.metadata?.chatmode as string | undefined);
           this.appendOutboundJsonl(targetAid, finalText, result.message_id, encrypt, context, false, 'text', source);
-          // Observer forward: outbound (private)
-          this.forwardToOwners('outbound', {
-            from: this.config.aid,
-            to: targetAid,
-            payload: { type: 'text', text: finalText },
-          });
+          // Observer forward: outbound (private) — 转发实际发出的明文 payload
+          this.forwardOutbound(targetAid, payload);
         }
       }
       return true;
@@ -2038,6 +2069,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
             if (!result || !(result as any).message_id) {
               logger.warn(`${this.logPrefix()} group.send fallback returned no message_id: ${JSON.stringify(result)}`);
             }
+            this.forwardOutbound(channelId, payload);
           } else {
             this.trace('OUT', 'message.send.fallback', params);
             const result = await this.client!.call('message.send', params);
@@ -2045,6 +2077,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
             if (!result || !(result as any).message_id) {
               logger.warn(`${this.logPrefix()} message.send fallback returned no message_id: ${JSON.stringify(result)}`);
             }
+            this.forwardOutbound(targetAid, payload);
           }
           return true;
         } catch (e2) {
@@ -2137,6 +2170,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
         const tid = putRes?.thought_id;
         logger.info(`${this.logPrefix()} thought.put ok group=${targetId} task=${taskId} stage=${stage} encrypt=${encrypt} tid=${tid ?? '?'}`);
         this.eventBus?.publish?.({ type: 'message:thought-put', agentName: this.config.aid, channelId, taskId, text: thoughtText });
+        this.forwardOutbound(channelId, payload);
         if (thoughtText) {
           this.aidStatsCollector?.recordOutbound(this.config.aid, channelId, Buffer.byteLength(thoughtText, 'utf-8'), thoughtText, false, encrypt, context?.metadata?.chatmode as string | undefined ?? 'proactive');
           this.appendOutboundJsonl(channelId, thoughtText, tid ?? `thought-${Date.now()}`, encrypt, context, true, 'thought', 'daemon');
@@ -2147,6 +2181,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
         const tid = putRes?.thought_id;
         logger.info(`${this.logPrefix()} thought.put ok p2p=${this.peerLabel(targetId)} task=${taskId} stage=${stage} encrypt=${encrypt} tid=${tid ?? '?'}`);
         this.eventBus?.publish?.({ type: 'message:thought-put', agentName: this.config.aid, channelId, taskId, text: thoughtText });
+        this.forwardOutbound(channelId, payload);
         if (thoughtText) {
           this.aidStatsCollector?.recordOutbound(this.config.aid, targetId, Buffer.byteLength(thoughtText, 'utf-8'), thoughtText, false, encrypt, context?.metadata?.chatmode as string | undefined ?? 'proactive');
           this.appendOutboundJsonl(channelId, thoughtText, tid ?? `thought-${Date.now()}`, encrypt, context, false, 'thought', 'daemon');
@@ -2183,11 +2218,13 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
         const result = await this.callAndTrace<any>('group.send', params);
         const mid = result?.message?.message_id ?? result?.message_id ?? null;
         logger.info(`${this.logPrefix()} group.send (${payload.type}) ok: group=${channelId} mid=${mid} encrypt=${encrypt}`);
+        this.forwardOutbound(channelId, finalPayload);
         return mid;
       } else {
         params.to = targetAid;
         const result = await this.callAndTrace<any>('message.send', params);
         logger.info(`${this.logPrefix()} message.send (${payload.type}) ok: to=${this.peerLabel(targetAid)} mid=${result?.message_id} encrypt=${encrypt}`);
+        this.forwardOutbound(targetAid, finalPayload);
         return result?.message_id ?? null;
       }
     } catch (e) {
@@ -2357,6 +2394,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
         }
       }
       logger.info(`${this.logPrefix()} File sent: ${filename} (${formatSize(stat.size)}) → ${channelId}`);
+      this.forwardOutbound(channelId, filePayload);
       return true;
     } catch (e) {
       this.trace('OUT', 'sendFile.error', { channelId, filePath: absPath, error: String(e) });
@@ -2473,6 +2511,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
 
     const method = isGroup ? 'group.send' : 'message.send';
     sendOne(method, statusPayload, 'status');
+    this.forwardOutbound(channelId, statusPayload);
 
     this.aidStatsCollector?.recordOutbound(this.config.aid, channelId, JSON.stringify(statusPayload).length, undefined, true);
     // 群聊显示 group id 简称，P2P 显示 peer label；从 context.metadata 读取 chatmode
