@@ -22,6 +22,7 @@ import {
   agentDir,
 } from './paths.js';
 import { atomicReadJson, atomicWriteJson } from './utils/atomic-write.js';
+import * as evolclawConfigModule from './evolclaw-config.js';
 import { checkAgentDir, isValidAid } from './aun/aid/validation.js';
 import { isValidChannelName } from './core/channel-loader.js';
 import type {
@@ -144,31 +145,41 @@ export function saveDefaultsSafe(patch: Partial<DefaultsConfig>): void {
   atomicWriteJson(p, merged);
 }
 
-// ── 进程配置（{root}/config.json，evolclaw 实例级，与 agent 无关）──────
+// ── 进程配置迁移（旧 {root}/config.json ProcessConfig → evolclaw.json）──────
+//
+// ProcessConfig 类型 + loadProcessConfig/saveProcessConfig 已废弃并删除：
+// 唯一有效字段 aun.encryptionSeed 已迁入 evolclaw.json（见 migrateProcessConfigIfNeeded），
+// 读取源切到 loadEvolclawConfig（store.ts）。log / aun.gateway / aun.keystorePath 是死字段。
 
-export interface ProcessConfig {
-  $schema_version?: number;
-  log?: {
-    level?: string;
-    retention_hours?: number;
-    message_log?: boolean;
-    event_log?: boolean;
-  };
-  aun?: {
-    gateway?: string;
-    keystorePath?: string;
-    encryptionSeed?: string;
-  };
-}
+/**
+ * 一次性迁移：{root}/config.json（旧 ProcessConfig）→ {root}/evolclaw.json。
+ * - 仅搬运 aun.encryptionSeed（逐字节原样，含 null）；log / aun.gateway / aun.keystorePath 是死字段，丢弃。
+ * - 合并写入（不覆盖 evolclaw.json 已有字段如 aid）。
+ * - 完成后归档 config.json → config.json.migrated（保留备份，不直接删）。
+ *
+ * ⚠️ encryptionSeed 是 AID 私钥的加密种子，迁移前后 getAidStore 拿到的 seed 必须逐字节一致，
+ * 否则所有已注册 AID 私钥解不开。这里只搬运不改值（含 null）。
+ */
+export function migrateProcessConfigIfNeeded(): void {
+  const p = resolvePaths();
+  const oldPath = p.processConfig; // {root}/config.json
+  const raw = atomicReadJson<{ aun?: { encryptionSeed?: string | null } }>(oldPath);
+  if (raw === null) return; // 不存在 → no-op
 
-export function loadProcessConfig(): ProcessConfig {
-  const raw = atomicReadJson<ProcessConfig>(resolvePaths().processConfig);
-  if (raw === null) return {};
-  return expandEnvRefs(raw);
-}
+  const { loadEvolclawConfig, saveEvolclawConfig } = evolclawConfigModule;
+  const evc = loadEvolclawConfig();
+  // 仅当旧文件确实带 aun.encryptionSeed 字段时才搬（hasOwnProperty，保 null 语义）
+  if (raw.aun && Object.prototype.hasOwnProperty.call(raw.aun, 'encryptionSeed')) {
+    evc.aun = { ...(evc.aun ?? {}), encryptionSeed: raw.aun.encryptionSeed };
+  }
+  evc.$schema_version = evc.$schema_version ?? 1;
+  saveEvolclawConfig(evc);
 
-export function saveProcessConfig(value: ProcessConfig): void {
-  atomicWriteJson(resolvePaths().processConfig, value);
+  // 归档旧文件（不删，留备份）
+  try {
+    fs.renameSync(oldPath, oldPath + '.migrated');
+  } catch { /* ignore */ }
+  logger.info('[migrate] config.json → evolclaw.json (aun.encryptionSeed 已搬运，config.json 已归档为 .migrated)');
 }
 
 // ── 自动迁移 ───────────────────────────────────────────────────────────

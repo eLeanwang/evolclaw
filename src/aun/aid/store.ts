@@ -52,11 +52,11 @@ export interface GetAidStoreOpts {
  */
 export async function getAidStore(opts: GetAidStoreOpts): Promise<AIDStore> {
   const { aunPath: defaultAunPath } = await import('../../paths.js');
-  const { loadProcessConfig } = await import('../../config-store.js');
+  const { loadEvolclawConfig } = await import('../../evolclaw-config.js');
   const { AIDStore } = await import('@agentunion/fastaun');
 
   const aunPath = opts.aunPath ?? defaultAunPath();
-  const encryptionSeed = loadProcessConfig().aun?.encryptionSeed
+  const encryptionSeed = loadEvolclawConfig().aun?.encryptionSeed
     ?? process.env.AUN_ENCRYPTION_SEED
     ?? 'evol';
   const caCertPath = path.join(aunPath, 'CA', 'root', 'root.crt');

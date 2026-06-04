@@ -4,7 +4,7 @@ import readline from 'readline';
 import { resolvePaths, ensureDataDirs } from '../paths.js';
 import { commandExists } from '../utils/cross-platform.js';
 import { scanInstances } from '../utils/instance-registry.js';
-import { saveDefaultsSafe, loadAllAgents } from '../config-store.js';
+import { saveDefaultsSafe, loadAllAgents, migrateProcessConfigIfNeeded } from '../config-store.js';
 import { isCodexSdkAvailable } from '../agents/codex-runner.js';
 
 // ==================== Helpers ====================
@@ -53,6 +53,9 @@ export async function cmdInit(options?: {
 }): Promise<void> {
   const p = resolvePaths();
   ensureDataDirs();
+  // config.json → evolclaw.json：init 路径也可能先于 daemon 触发 AID 生成（走 getAidStore），
+  // 须在任何 getAidStore 之前迁移 encryptionSeed。
+  migrateProcessConfigIfNeeded();
 
   // ── 1. 单进程互斥 ──
   const aliveMains = scanInstances().mains.filter(m => m.alive);

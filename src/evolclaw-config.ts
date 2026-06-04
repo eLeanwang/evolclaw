@@ -12,12 +12,16 @@ export interface TunnelConfig {
   targets: TunnelTarget[];
 }
 
+export interface EvolclawAunConfig {
+  encryptionSeed?: string | null;  // null 原样保留（迁移自旧 config.json）
+}
+
 export interface EvolclawConfig {
   $schema_version?: number;
   aid?: string;
   debug?: DebugBlock;
   tunnel?: TunnelConfig;
-  // 注：`aun?: EvolclawAunConfig` 块由 Task 1.5 加入（吞并 config.json）
+  aun?: EvolclawAunConfig;   // 从旧 config.json 迁入
 }
 
 /** 读 {root}/evolclaw.json。文件不存在返回 {}，不报错。 */

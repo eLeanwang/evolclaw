@@ -3,7 +3,7 @@ import { CodexSessionFileAdapter } from './core/session/adapters/codex-session-f
 import { GeminiSessionFileAdapter } from './core/session/adapters/gemini-session-file-adapter.js';
 import { ensureDataDirs, resolvePaths, agentDir, getPackageRoot, agentMdPath } from './paths.js';
 import { resolveAnthropicConfig } from './agents/resolve.js';
-import { loadDefaults, loadAllAgents, mergeForAgent, ensureAgentDirSkeleton, autoMigrateIfNeeded, migrateIdentitiesIfNeeded } from './config-store.js';
+import { loadDefaults, loadAllAgents, mergeForAgent, ensureAgentDirSkeleton, autoMigrateIfNeeded, migrateIdentitiesIfNeeded, migrateProcessConfigIfNeeded } from './config-store.js';
 import type { Config, MergedAgentConfig, AgentConfig, DefaultsConfig } from './types.js';
 import { CONFIG_SCHEMA_VERSION } from './types.js';
 import dotenv from 'dotenv';
@@ -223,6 +223,9 @@ async function main() {
   // ── 自动迁移 ──
   migrateIdentitiesIfNeeded();
   autoMigrateIfNeeded();
+  // config.json（ProcessConfig）→ evolclaw.json：必须在任何 getAidStore（AUN 连接）之前，
+  // 否则首次读 encryptionSeed 时迁移还没发生。
+  migrateProcessConfigIfNeeded();
 
   // ── ECK 运行时初始化 ──
   initEck();
