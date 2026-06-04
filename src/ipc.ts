@@ -27,6 +27,7 @@ export interface IpcStatusResponse {
     errors: number;
     avgResponseMs: number;
   };
+  controlAid?: { aid: string; connected: boolean };
 }
 
 export interface IpcAunAidsResponse {

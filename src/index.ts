@@ -994,6 +994,9 @@ async function main() {
         errors: snap.lastHour.errors,
         avgResponseMs: snap.lastHour.avgResponseMs,
       },
+      controlAid: evolclawCfg.aid
+        ? { aid: evolclawCfg.aid, connected: controlChannel?.getAidState().status === 'connected' }
+        : undefined,
     };
   }, async (cmd, sessionId) => cmdHandler.handleCtl(cmd, sessionId));
 

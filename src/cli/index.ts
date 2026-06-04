@@ -983,6 +983,14 @@ async function cmdStatus() {
           }
         } catch { /* ignore */ }
 
+        // 控制 AID（daemon 进程身份）状态
+        if (status.controlAid) {
+          const state = status.controlAid.connected ? 'connected' : 'disconnected';
+          console.log(`control: ${status.controlAid.aid}  [${state}]`);
+        } else {
+          console.log('control: not configured');
+        }
+
         if (status.stats) {
           console.log('');
           console.log('📊 Last hour:');
