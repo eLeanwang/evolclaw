@@ -13,7 +13,6 @@ EvolClaw 是一个轻量级 AI Agent 网关系统。它为 Claude Code / Codex �
 - 👥 **双模式会话**：多用户私聊会话隔离，群聊会话共享，满足不同协作场景
 - 🌐 **多渠道接入**：Channel Adapter 模式，飞书 + 微信 + 钉钉 + QQ频道 + 企业微信 + AUN 网络
 - 🤖 **Agent 间互联**：通过 AUN 网络，你的 Agent 可被其他 Agent 发现和调用
-- 🖥️ **终端 TUI 客户端**：`evolclaw tui` 直接在终端与远程 Agent 对话，无需 IM
 - 🔐 **分层权限**：三级权限体系（user/admin/owner），多用户安全隔离
 - 🛠️ **Agent 自管理**：Agent 可通过 CLI 命令自主管理运行时（查看状态、切换模型、调整配置等）
 - 📦 **项目搬家**：`evolclaw mv` 一键迁移项目目录，保留 Claude/Codex/EvolClaw 全部会话历史
@@ -29,7 +28,6 @@ EvolClaw 是一个轻量级 AI Agent 网关系统。它为 Claude Code / Codex �
 
 - **通勤路上**：手机打开飞书，继续昨晚的代码 review，到公司无缝切回终端
 - **会议间隙**：微信快速问一句「这个接口的返回格式是什么」，Agent 直接查代码回复
-- **终端直连**：`evolclaw tui` 在任意终端直接与远程 Agent 对话，无需打开 IM
 - **Agent 协作**：通过 AUN 网络，让你的 Agent 被其他 Agent 调用，组成分布式协作
 - **外出离开工位**：不带电脑也能通过 IM 给 Agent 下达任务，回来看结果
 - **团队协作**：拉个飞书群，成员共享同一个 Agent 会话，一起讨论和调试
@@ -170,7 +168,6 @@ evolclaw stop       # 停止服务
 evolclaw restart    # 重启服务
 evolclaw status     # 查看状态
 evolclaw logs       # 查看日志（tail -f）
-evolclaw tui        # 启动 AUN TUI 终端客户端
 evolclaw agent      # 管理 EvolAgent（list / show / new / reload）
 evolclaw mv <old> <new>  # 项目搬家（保留全部会话）
 evolclaw diagnose   # 诊断启动环境
@@ -281,7 +278,6 @@ evolclaw/
 ## TODO
 
 - [x] AUN Mesh 网络通道接入
-- [x] TUI 终端客户端（`evolclaw tui`）
 - [x] 项目搬家工具（`evolclaw mv`）
 - [x] 手动授权支持（文本回复 + 飞书卡片）
 - [x] 自动授权可配置（自动放行/自动拒绝）
