@@ -1,5 +1,12 @@
 # Changelog
 
+## v3.1.8 (2026-06-04)
+
+### Bug Fixes
+
+- **npm 包瘦身** — 移除误入 npm 包的 10 个多余文件：`assets/wechat-group-qr.jpeg`（232 KB 运营素材，代码零引用）+ `dist/cli/watch-web/` 的 9 个陈旧构建产物（源码已迁出为独立 `evolclaw-web` 包，但旧 `.js` 残留在 dist）。包大小 729 KB → 493 KB（-236 KB），文件数 168 → 159
+- **build 脚本清理 dist** — `tsc` 前先 `rm -rf dist`，避免源码删除后陈旧 `.js` 残留被打包
+
 ## v3.1.7 (2026-06-04)
 
 ### New Features

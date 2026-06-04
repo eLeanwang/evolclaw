@@ -1,6 +1,6 @@
 {
   "name": "evolclaw",
-  "version": "3.1.7",
+  "version": "3.1.8",
   "description": "Lightweight AI Agent gateway connecting Claude Agent SDK to messaging channels (Feishu, ACP) with multi-project session management",
   "type": "module",
   "main": "dist/index.js",
@@ -12,6 +12,7 @@
     "dist/",
     "bin/",
     "assets/",
+    "!assets/wechat-group-qr.jpeg",
     "!dist/experimental/",
     "kits/",
     "!kits/.kits-version",
@@ -22,7 +23,7 @@
   ],
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "tsc && node -e \"const f='dist/cli/index.js',c=require('fs').readFileSync(f,'utf8');if(!c.startsWith('#!'))require('fs').writeFileSync(f,'#!/usr/bin/env node\\n'+c)\" && node -e \"try{require('child_process').execFileSync('chmod',['+x','dist/cli/index.js'])}catch{}\" && node -e \"require('fs').mkdirSync('dist/data',{recursive:true});require('fs').copyFileSync('src/data/error-dict.json','dist/data/error-dict.json')\"",
+    "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc && node -e \"const f='dist/cli/index.js',c=require('fs').readFileSync(f,'utf8');if(!c.startsWith('#!'))require('fs').writeFileSync(f,'#!/usr/bin/env node\\n'+c)\" && node -e \"try{require('child_process').execFileSync('chmod',['+x','dist/cli/index.js'])}catch{}\" && node -e \"require('fs').mkdirSync('dist/data',{recursive:true});require('fs').copyFileSync('src/data/error-dict.json','dist/data/error-dict.json')\"",
     "start": "node dist/index.js",
     "test": "vitest run",
     "test:watch": "vitest",
