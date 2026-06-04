@@ -865,6 +865,9 @@ export interface Trigger {
   nextFireAt: number;          // Unix ms
   targetChannel: string;
   targetChannelId: string;
+  /** Channel type resolved at creation time (CommandHandler has channelTypeMap);
+   *  the scheduler has no channelTypeMap, so it relies on this stored value. */
+  targetChannelType?: string;
   targetThreadId?: string;
   targetSessionStrategy: TriggerSessionStrategy;
   agentId?: string;
