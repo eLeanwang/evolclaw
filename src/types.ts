@@ -920,6 +920,7 @@ export interface MenuQueryRequest {
   id: string;
   name: string;          // 通用操作标识（如 'pwd' / 'baseagent' / 'session'）
   cmd?: string;          // 逃生口：直接指定内部命令
+  args?: Record<string, any>;
 }
 
 export interface MenuOptionsRequest {
@@ -927,6 +928,7 @@ export interface MenuOptionsRequest {
   id: string;
   name: string;
   cmd?: string;
+  args?: Record<string, any>;
 }
 
 export interface MenuUpdateRequest {

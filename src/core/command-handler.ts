@@ -23,6 +23,8 @@ import { TriggerScheduler, calcNextFireAt } from './trigger/scheduler.js';
 import type { Trigger, DefaultsConfig } from '../types.js';
 import { checkLatestVersion, getLocalVersion, isLinkedInstall, compareVersions } from '../utils/npm-ops.js';
 import { tryParseChannelKey } from './channel-loader.js';
+import { loadDefaults } from '../config-store.js';
+import { execAgentAction, execAgentQuery, execAgentOptions, resolveProjectPath } from './message/command-handler-agent-control.js';
 
 export interface MenuNext {
   type: 'select' | 'text';
@@ -665,8 +667,18 @@ export class CommandHandler {
   }
 
   /** 动态子菜单：根据 cmd 路径返回选项列表（供 menu.query + cmd 使用） */
-  async getSubMenuItems(cmd: string, channel: string, channelId: string, userId?: string): Promise<MenuItem[] | null> {
+  async getSubMenuItems(cmd: string, channel: string, channelId: string, userId?: string, args?: Record<string, any>): Promise<MenuItem[] | null> {
     const session = await this.sessionManager.getActiveSession(channel, channelId);
+
+    // ── 进程级 /agent list（owners 鉴权） ──
+    if (cmd === '/agent') {
+      if (!isProcessLevelOwner(userId, loadDefaults())) {
+        throw { code: 'FORBIDDEN', message: '操作需要 owner 权限' };
+      }
+      const res = await execAgentOptions(args);
+      if ('error' in res) throw { code: res.code, message: res.error };
+      return (res.data.agents as any[]).map(ag => ({ value: ag.aid, label: ag.name || ag.aid, desc: ag.status }));
+    }
 
     if (cmd === '/s' || cmd === '/session' || cmd === '/del') {
       const sessions = await this.sessionManager.listSessions(channel, channelId);
@@ -801,12 +813,19 @@ export class CommandHandler {
 
   /** menu.query — 查询当前值。 */
   async execMenuQuery(
-    cmd: string, channel: string, channelId: string, userId?: string
+    cmd: string, channel: string, channelId: string, userId?: string, args?: Record<string, any>
   ): Promise<{ data: any } | { error: string; code?: string }> {
-    void userId;
     const cmdBase = cmd.trim().split(' ')[0];
     if (!cmdBase) return { error: '缺少命令', code: 'MISSING_CMD' };
     const { session, evolagent } = await this.loadMenuContext(channel, channelId);
+
+    // ── 进程级 /agent（owners 鉴权） ──
+    if (cmdBase === '/agent') {
+      if (!isProcessLevelOwner(userId, loadDefaults())) {
+        return { error: '操作需要 owner 权限', code: 'FORBIDDEN' };
+      }
+      return await execAgentQuery(args);
+    }
 
     if (cmdBase === '/pwd') {
       const sessPath = session?.projectPath;
@@ -1071,6 +1090,21 @@ export class CommandHandler {
     if (!action) return { error: '缺少 action', code: 'MISSING_VALUE' };
     const { session } = await this.loadMenuContext(channel, channelId);
     const identity = this.sessionManager.resolveIdentity(channel, userId);
+
+    // ── 进程级 /agent（owners 鉴权，不依赖 session/channel） ──
+    // NOTE(D5): 本次进程级 /agent 仅按 defaults.owners 鉴权，任意 evolagent 的 AUN
+    // channel 均可作为入口。part1（daemon 控制 AID）落地后，应叠加 isControlChannel(channelId)
+    // 闸：仅控制 AID channel 上的 /agent /system 生效。见 part1 计划。
+    if (cmdBase === '/agent') {
+      if (!isProcessLevelOwner(userId, loadDefaults())) {
+        return { error: '操作需要 owner 权限', code: 'FORBIDDEN' };
+      }
+      const a = { ...(args ?? {}) };
+      if (action === 'create') {
+        a.project = resolveProjectPath(a.project, a.aid ?? '', loadDefaults());
+      }
+      return await execAgentAction(action, a, userId ?? '');
+    }
 
     // ── /session 系列 ──
     if (cmdBase === '/session' || cmdBase === '/s') {
