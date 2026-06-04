@@ -138,6 +138,27 @@ export function commandExists(cmd: string): boolean {
 }
 
 /**
+ * 解析命令的真实可执行文件绝对路径。
+ * Windows: `where` 返回首个匹配（自动含 .cmd/.exe 后缀），解决 execFileSync 不补后缀的问题。
+ * 失败返回 null。不缓存——刚安装的命令需要重新探测。
+ */
+export function resolveCommandPath(cmd: string): string | null {
+  try {
+    if (isWindows) {
+      const r = spawnSync('where', [cmd], { encoding: 'utf-8', stdio: 'pipe', windowsHide: true });
+      if (r.status !== 0 || !r.stdout) return null;
+      const first = r.stdout.split(/\r?\n/).map(s => s.trim()).filter(Boolean)[0];
+      return first || null;
+    } else {
+      const out = execFileSync('which', [cmd], { encoding: 'utf-8', stdio: 'pipe' }).trim();
+      return out || null;
+    }
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Cross-platform live log tailing (replaces tail -f).
  * Returns an abort function.
  */

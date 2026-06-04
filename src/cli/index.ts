@@ -2080,7 +2080,16 @@ async function cmdWatchWeb(): Promise<void> {
     }
   }
 
-  execFileSync('evolclaw-web', ['--home', home], { stdio: 'inherit' });
+  // 解析可执行文件的真实绝对路径：
+  //  - Windows 上 bin 是 evolclaw-web.cmd，execFileSync 不会自动补后缀
+  //  - 刚安装的命令可能不在当前进程已缓存的 PATH 里，用 where/which 重新探测
+  const exe = platform.resolveCommandPath('evolclaw-web');
+  if (!exe) {
+    process.stderr.write('❌ 已安装 evolclaw-web 但无法定位可执行文件。\n   请重新打开终端后再次运行，或手动执行: evolclaw-web --home ' + home + '\n');
+    process.exit(1);
+  }
+
+  execFileSync(exe, ['--home', home], { stdio: 'inherit' });
 }
 async function cmdRestartMonitor() {
   const p = resolvePaths();
