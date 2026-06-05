@@ -5,6 +5,7 @@ import { rpcCall } from '../rpc/index.js';
 export interface UploadResult {
   ok: boolean;
   objectKey: string;
+  publicUrl?: string;
   error?: string;
 }
 
@@ -38,11 +39,24 @@ export async function storageUpload(aid: string, localFile: string, remotePath: 
   const completeResult = await rpcCall(aid, 'storage.complete_upload', {
     object_key: remotePath,
     sha256,
+    is_private: !(opts?.isPublic),
   }, { aunPath: opts?.aunPath });
 
   if (!completeResult.ok) {
     return { ok: false, objectKey: remotePath, error: JSON.stringify(completeResult.error) };
   }
 
-  return { ok: true, objectKey: remotePath };
+  // 公开上传时获取可访问的 URL
+  let publicUrl: string | undefined;
+  if (opts?.isPublic) {
+    const ticketResult = await rpcCall(aid, 'storage.create_download_ticket', {
+      object_key: remotePath,
+      expire_in_seconds: 86400 * 30, // 30天
+    }, { aunPath: opts?.aunPath });
+    if (ticketResult.ok) {
+      publicUrl = `https://${aid}/storage/${remotePath}`;
+    }
+  }
+
+  return { ok: true, objectKey: remotePath, publicUrl };
 }
