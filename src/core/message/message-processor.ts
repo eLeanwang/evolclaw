@@ -337,6 +337,8 @@ export class MessageProcessor {
     const chatType = message.chatType || 'private';
     const identityRole = session.identity?.role || 'anonymous';
     const agentNameForMonitor = this.agentRegistry?.resolveByChannel(channelKey)?.name ?? '<unknown>';
+    // observer 插话 Phase 1：所有出站（含 idle 诊断）改道 owner，不碰对端
+    const monitorChannelId = message.replyOverride?.channelId ?? message.channelId;
 
     // Resolve agent context from registry (Phase 2 foundation)
     const agentContext = this.getAgentContext(channelKey, chatType);
@@ -386,7 +388,7 @@ export class MessageProcessor {
                 ? result.message
                 : `\u26a0\ufe0f 任务超时（${result.idleSec}秒无响应），已自动中断`;
               channelInfo.adapter.send(
-                buildEnvelope({ channel: channelInfo.adapter.channelName, channelId: message.channelId, agentName: agentNameForMonitor }),
+                buildEnvelope({ channel: channelInfo.adapter.channelName, channelId: monitorChannelId, agentName: agentNameForMonitor }),
                 { kind: 'system.notice', text: msg, subtype: 'health' }
               ).catch(e => {
                 logger.debug(`[MessageProcessor] Failed to send kill diagnostic message:`, e);
@@ -404,7 +406,7 @@ export class MessageProcessor {
             if (channelInfo && showIdleMonitor && !shouldSuppress()) {
               if (!isBackground) {
                 channelInfo.adapter.send(
-                  buildEnvelope({ channel: channelInfo.adapter.channelName, channelId: message.channelId, agentName: agentNameForMonitor }),
+                  buildEnvelope({ channel: channelInfo.adapter.channelName, channelId: monitorChannelId, agentName: agentNameForMonitor }),
                   { kind: 'system.notice', text: result.message, subtype: 'health' }
                 ).catch(e => {
                   logger.debug(`[MessageProcessor] Failed to send idle monitor message:`, e);
@@ -490,29 +492,43 @@ export class MessageProcessor {
 
     // 为本次任务处理生成唯一 task_id（客户端生成，格式 task-{10hex}）
     const taskId = `task-${crypto.randomUUID().replace(/-/g, '').slice(0, 10)}`;
-    const chatmode = session.sessionMode ?? 'interactive';
+
+    // per-turn 出站改道（observer 插话 Phase 1）：把这一轮回复目标改到 owner、强制 interactive，
+    // 不改 session.sessionMode。详见 docs/observer-insert-design.md §1.7/§1.8。
+    const override = message.replyOverride;
+    const outboundChannelId = override?.channelId ?? message.channelId;
+    const forceInteractive = override?.forceInteractive === true;
+
+    const isProactive = !forceInteractive && session.sessionMode === 'proactive';
+    const isAutonomous = !forceInteractive && session.sessionMode === 'autonomous';
+    const chatmode = isProactive ? 'proactive' : 'interactive';
 
     // 诊断日志：记录 inbound message_id 和生成的 task_id 的对应关系
-    logger.info(`[MessageProcessor] Task created: inboundMsgId=${message.messageId ?? 'none'} taskId=${taskId} sessionId=${session.id} chatmode=${chatmode}`);
+    logger.info(`[MessageProcessor] Task created: inboundMsgId=${message.messageId ?? 'none'} taskId=${taskId} sessionId=${session.id} chatmode=${chatmode}${override ? ` [inject→${outboundChannelId}]` : ''}`);
+
+    // observer 插话：出站回应虽改道发给 owner，但 watch 记录应落在被观察的 agent↔对端 会话。
+    // 透传 injectPeerChannelId（被观察对端）让 channel 出站时记录到正确会话并标 owner-inject。
+    const injectPeerChannelId = message.injectMeta?.targetChannelId;
 
     // 构建带 taskId/chatmode 的 ReplyContext（本次任务所有出站消息共用）
     const taskReplyContext = (): ReplyContext => {
       const base = this.getReplyContext(message);
       return {
         ...(base ?? {}),
-        metadata: { ...(base?.metadata ?? {}), taskId, chatmode },
+        metadata: {
+          ...(base?.metadata ?? {}), taskId, chatmode,
+          ...(injectPeerChannelId ? { injectPeerChannelId } : {}),
+        },
       };
     };
 
-    const isProactive = session.sessionMode === 'proactive';
-    const isAutonomous = session.sessionMode === 'autonomous';
     const envelope = buildEnvelope({
       taskId,
       sessionId: session.id,
       channel: message.channel,
-      channelId: message.channelId,
+      channelId: outboundChannelId,
       agentName: agentNameForStats,
-      chatmode: isProactive ? 'proactive' : 'interactive',
+      chatmode,
       replyContext: taskReplyContext(),
     });
 
@@ -595,7 +611,12 @@ export class MessageProcessor {
           if (payload.kind === 'result.text' && payload.isFinal) {
             opts.title = '\u2705 \u6700\u7ec8\u56de\u590d:';
           }
-          opts.metadata = { ...(opts.metadata ?? {}), taskId, chatmode };
+          // observer \u63d2\u8bdd\uff1a\u900f\u4f20 injectPeerChannelId\uff0c\u4f7f channel \u51fa\u7ad9\u628a\u56de\u5e94\u8bb0\u5f55\u5230\u88ab\u89c2\u5bdf\u4f1a\u8bdd\u3001
+          // \u4e0d\u5199 owner \u4f1a\u8bdd\u3001\u4e0d forward\uff08renderer \u7528\u81ea\u5efa opts\uff0c\u4e0d\u8d70 taskReplyContext\uff0c\u6545\u5728\u6b64\u8865\uff09\u3002
+          opts.metadata = {
+            ...(opts.metadata ?? {}), taskId, chatmode,
+            ...(injectPeerChannelId ? { injectPeerChannelId } : {}),
+          };
 
           const enrichedEnvelope: OutboundEnvelope = { ...envelope, replyContext: opts };
           await adapter.send(enrichedEnvelope, payload);
@@ -611,7 +632,8 @@ export class MessageProcessor {
       // 调用 AgentRunner（含上下文过长自动 compact 重试）
 
       // 捕获当前消息的上下文（闭包），避免后续消息处理时串台
-      const capturedChannelId = message.channelId;
+      // observer 插话 Phase 1：权限审批等出站也改道 owner
+      const capturedChannelId = outboundChannelId;
       const capturedReplyContext = taskReplyContext();
 
       // 设置权限审批的消息发送回调（指向当前渠道）
@@ -1323,10 +1345,13 @@ export class MessageProcessor {
           );
           sendOpts = this.getReplyContext(message);
         } catch {}
-        // 注入 taskId / chatmode（与任务主流程保持一致）
+        // 注入 taskId / chatmode（与任务主流程保持一致）+ observer 插话改道标记
         sendOpts = {
           ...(sendOpts ?? {}),
-          metadata: { ...(sendOpts?.metadata ?? {}), taskId, chatmode },
+          metadata: {
+            ...(sendOpts?.metadata ?? {}), taskId, chatmode,
+            ...(injectPeerChannelId ? { injectPeerChannelId } : {}),
+          },
         };
         await adapter.send({ ...envelope, replyContext: sendOpts }, { kind: 'result.text', text: userMessage, isFinal: true });
 

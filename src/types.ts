@@ -222,6 +222,21 @@ export interface SessionIdentity {
   mode: 'interactive' | 'autonomous';
 }
 
+/**
+ * 观察者插话元数据（Observer Insert）。
+ * owner 在旁观 agent↔对端 会话时插话，携带此元数据：
+ * - 选会话用 targetChannelId（命中 agent↔对端 的 session，共享 agentSessionId）
+ * - 回复改道用 ownerAid（Phase 1 回 owner，不碰对端）
+ * 详见 docs/observer-insert-design.md。
+ */
+export interface InjectMeta {
+  ownerAid: string;                       // 插话来源 owner：Phase 1 回复目标 + 鉴权依据
+  targetChannelId: string;                // 对端 AID 或 group_id（选中 agent↔对端会话）
+  targetChatType: 'private' | 'group';
+  targetThreadId?: string;
+  injectId?: string;                      // 前端请求 id，用于 observer.inject.ack 关联
+}
+
 export interface Session {
   id: string;
   channel: string;       // 实例名（如 'aun_main'、'aun-2'）
@@ -294,13 +309,24 @@ export interface Message {
   items?: SubMessage[];
   replyContext?: ReplyContext;       // Channel 预构建的回复上下文（渠道无关）
   timestamp?: number;
-  source?: 'user' | 'card-trigger' | 'trigger';
+  source?: 'user' | 'card-trigger' | 'trigger' | 'owner-inject' | 'peer-replay';
   triggerMeta?: {
     triggerId: string;
     boundSessionId?: string;
     pendingThread?: boolean;
     rootMessageId?: string;
   };
+  /**
+   * per-turn 出站改道（不改 session 状态）。observer 插话的 Phase 1 用它把这一轮回复
+   * 从对端改道到 owner，并强制 interactive。详见 docs/observer-insert-design.md §1.7/§1.8。
+   */
+  replyOverride?: {
+    channelId: string;
+    channelType?: string;
+    forceInteractive?: boolean;
+  };
+  /** 观察者插话元数据（source==='owner-inject' 时有值）。 */
+  injectMeta?: InjectMeta;
 }
 
 // 入站消息（渠道 → Gateway 的统一格式）
@@ -326,7 +352,8 @@ export interface InboundMessage {
   /** 本条被 @ 的全部 AID（含 self；@all 时含字面 "all"）。仅供消息信封渲染。 */
   mentionAids?: string[];
   replyContext?: ReplyContext;       // Channel 预构建的回复上下文（渠道无关）
-  source?: 'user' | 'card-trigger';  // 消息来源：用户输入 or 卡片按钮触发
+  source?: 'user' | 'card-trigger' | 'owner-inject';  // 消息来源：用户输入 / 卡片按钮触发 / 观察者插话
+  injectMeta?: InjectMeta;           // source==='owner-inject' 时有值
 }
 
 // ── 交互协议类型（渠道无关） ──

@@ -23,7 +23,7 @@ export interface MessageLogEntry {
   usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } | null;
   encrypt?: boolean;
   chatmode?: string;
-  source?: 'daemon' | 'cli' | 'msg' | 'ctl';
+  source?: 'daemon' | 'cli' | 'msg' | 'ctl' | 'owner-inject';
 }
 
 const MESSAGE_LOG_FILE = 'messages.jsonl';
@@ -87,6 +87,7 @@ export function buildInboundEntry(opts: {
   timestamp?: number;
   encrypt?: boolean;
   chatmode?: string;
+  source?: 'daemon' | 'cli' | 'msg' | 'ctl' | 'owner-inject';
 }): MessageLogEntry {
   const ts = opts.timestamp || Date.now();
   const isCommand = opts.content.startsWith('/');
@@ -109,6 +110,7 @@ export function buildInboundEntry(opts: {
     durationMs: null,
     encrypt: opts.encrypt,
     chatmode: opts.chatmode,
+    source: opts.source,
   };
 }
 
@@ -129,7 +131,7 @@ export function buildOutboundEntry(opts: {
   encrypt?: boolean;
   chatmode?: string;
   msgType?: 'text' | 'thought';
-  source?: 'daemon' | 'cli' | 'msg' | 'ctl';
+  source?: 'daemon' | 'cli' | 'msg' | 'ctl' | 'owner-inject';
 }): MessageLogEntry {
   const ts = opts.timestamp || Date.now();
   return {
