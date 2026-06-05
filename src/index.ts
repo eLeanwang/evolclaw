@@ -237,11 +237,11 @@ async function main() {
 
   // 加载配置（新结构：defaults.json + per-agent config.json）
   const defaults: DefaultsConfig = loadDefaults() ?? { $schema_version: CONFIG_SCHEMA_VERSION };
+  const evolclawCfg = loadEvolclawConfig();
 
   // 进程级 menu 操作（/system /agent）鉴权：owners 来自 evolclaw.json 顶层。
   // owners 为空时这些操作一律 FORBIDDEN，启动时提示如何配置。
-  const { owners: processOwners } = loadEvolclawConfig();
-  if (!processOwners || processOwners.length === 0) {
+  if (!evolclawCfg.owners || evolclawCfg.owners.length === 0) {
     logger.warn('[startup] evolclaw.json.owners 未配置：进程级 menu 操作（/system /agent）将一律拒绝。' +
       '如需远程管理，请在 evolclaw.json 配置 owners: [<你的 AID>]');
   }
@@ -773,7 +773,6 @@ async function main() {
   }
 
   // ── 控制 AID（daemon 进程身份）：pureIdentity 接入 AUN，独立于 evolagent ──
-  const evolclawCfg = loadEvolclawConfig();
   let controlChannel: AUNChannel | undefined;
   if (evolclawCfg.aid) {
     controlChannel = new AUNChannel({
