@@ -102,6 +102,39 @@ export class ClaudeSessionFileAdapter implements SessionFileAdapter {
     return null;
   }
 
+  // CLI 会话白名单：只有真正由人手发起的终端会话才值得导入。
+  // 其它 entrypoint（sdk-ts=EvolClaw 自身、sdk-py=security-guidance 等插件的后台 SDK 会话）
+  // 同样把 JSONL 写进项目目录，但不是用户会话，导入它们没有意义。
+  private static readonly CLI_ENTRYPOINTS = new Set(['cli', 'sdk-cli']);
+  // entrypoint 不可变，进程内缓存 filePath→entrypoint，避免重复读文件头部
+  private readonly entrypointCache = new Map<string, string | null>();
+
+  // entrypoint 字段位于首个 user 事件行（实测恒在前 4 行内，cli 会话首次出现 < 8KB）。
+  // 插件会话首行 queue-operation 可能携带巨大 diff（数百 KB），把 entrypoint 推到很后面，
+  // 因此读取上限设为 32KB：cli 会话必命中，插件会话要么命中 sdk-py、要么读不到 → 一律排除。
+  private static readonly ENTRYPOINT_SCAN_BYTES = 32 * 1024;
+
+  /** 读取会话文件的 entrypoint，结果缓存在实例内（entrypoint 不可变，无需失效）。 */
+  private readEntrypoint(filePath: string): string | null {
+    if (this.entrypointCache.has(filePath)) return this.entrypointCache.get(filePath)!;
+    let fd: number | undefined;
+    let result: string | null = null;
+    try {
+      fd = fs.openSync(filePath, 'r');
+      const buf = Buffer.allocUnsafe(ClaudeSessionFileAdapter.ENTRYPOINT_SCAN_BYTES);
+      const bytesRead = fs.readSync(fd, buf, 0, buf.length, 0);
+      const head = buf.toString('utf-8', 0, bytesRead);
+      const m = head.match(/"entrypoint":"([^"]*)"/);
+      result = m ? m[1] : null;
+    } catch {
+      // keep null
+    } finally {
+      if (fd !== undefined) fs.closeSync(fd);
+    }
+    this.entrypointCache.set(filePath, result);
+    return result;
+  }
+
   scanCliSessions(projectPath: string): CliSessionEntry[] {
     const homeDir = os.homedir();
     const encodedPath = encodePath(projectPath);
@@ -109,19 +142,27 @@ export class ClaudeSessionFileAdapter implements SessionFileAdapter {
 
     if (!fs.existsSync(sessionDir)) return [];
 
-    const files = fs.readdirSync(sessionDir)
+    const candidates = fs.readdirSync(sessionDir)
       .filter(f => f.endsWith('.jsonl'))
       .filter(f => !f.startsWith('agent-'))
       .map(f => {
         const filePath = path.join(sessionDir, f);
         const stat = fs.statSync(filePath);
-        return { uuid: f.replace('.jsonl', ''), mtime: stat.mtimeMs, size: stat.size };
+        return { uuid: f.replace('.jsonl', ''), filePath, mtime: stat.mtimeMs, size: stat.size };
       })
       .filter(f => f.size > 0)
-      .sort((a, b) => b.mtime - a.mtime)
-      .slice(0, 10);
+      .sort((a, b) => b.mtime - a.mtime);
 
-    return files.map(f => ({ uuid: f.uuid, mtime: f.mtime }));
+    // 按 mtime 降序惰性判定 entrypoint，凑够 10 个白名单会话即停，避免读取全部文件。
+    const result: CliSessionEntry[] = [];
+    for (const f of candidates) {
+      const entrypoint = this.readEntrypoint(f.filePath);
+      if (entrypoint && ClaudeSessionFileAdapter.CLI_ENTRYPOINTS.has(entrypoint)) {
+        result.push({ uuid: f.uuid, mtime: f.mtime });
+        if (result.length >= 10) break;
+      }
+    }
+    return result;
   }
 
   async listSdkSessions(projectPath: string): Promise<SdkSessionEntry[]> {
