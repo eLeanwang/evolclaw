@@ -244,7 +244,7 @@ export async function initTail(): Promise<void> {
     const rlOwners = readline.createInterface({ input: process.stdin, output: process.stdout });
     try {
       const raw = (await ask(rlOwners,
-        '\n管理者 AID（谁能远程管理本进程的 /agent /system，多个用空格分隔，直接回车跳过）: ')).trim();
+        '\n请输入 EvolClaw 管理者 AID: ')).trim();
       if (raw) {
         const { valid, invalid } = parseOwnerAids(raw, isValidAid);
         if (invalid.length > 0) console.log(`  ⚠ 跳过非法 AID: ${invalid.join(', ')}`);

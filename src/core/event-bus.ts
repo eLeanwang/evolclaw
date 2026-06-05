@@ -64,6 +64,8 @@ export type RunnerBusEvent =
   | { type: 'runner:compact-complete'; sessionId: string; preTokens: number }
   | { type: 'runner:model-changed'; sessionId?: string; model?: string; timestamp?: number }
   | { type: 'runner:idle-timeout'; sessionId: string; idleSec: number }
+  | { type: 'runner:idle-notify'; sessionId: string; idleSec: number; totalEvents: number; totalToolCalls: number; lastToolName?: string }
+  | { type: 'runner:idle-warn'; sessionId: string; idleSec: number; totalEvents: number; totalToolCalls: number; lastToolName?: string }
   | { type: 'runner:file-sent'; sessionId: string; filePath: string; channel: string; channelName?: string }
   | { type: 'runner:state-changed'; sessionId: string; state: string }
   | { type: 'runner:status'; sessionId: string; subtype: string; message: string; timestamp?: number };
