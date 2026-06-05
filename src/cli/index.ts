@@ -10,7 +10,7 @@ import { resolveAnthropicConfig } from '../agents/resolve.js';
 import { normalizeChannelInstances, channelTypes } from '../utils/channel-helpers.js';
 import { migrateProject } from '../config-store.js';
 import readline from 'readline';
-import { cmdInit, needsControlAidInit } from './init.js';
+import { cmdInit, needsControlAidInit, initTail } from './init.js';
 import { ipcQuery } from '../ipc.js';
 import { cmdInitWechat, cmdInitFeishu, cmdInitDingtalk, cmdInitQQBot, cmdInitWecom, cmdInitAun } from './init-channel.js';
 import { isHelpFlag, wantsHelp, getArgValue } from './help.js';
@@ -298,16 +298,16 @@ async function cmdStart() {
     return;
   }
 
-  // 控制 AID 门禁（与 baseagent 门禁对称）：缺 aid 且交互式 → 进 init 补全 aid + owners。
-  // 非 TTY（restart-monitor/systemd/管道）不进 init（无法交互），只提示后继续启动，daemon 侧 warn 兜底。
+  // 控制 AID 门禁：缺 aid 且交互式 → 只补全控制 AID + owners（不重走 baseagent 向导）。
+  // 非 TTY（restart-monitor/systemd/管道）不补全（无法交互），只提示后继续启动，daemon 侧 warn 兜底。
   const evolclawCfgStart = loadEvolclawConfig();
   if (needsControlAidInit(evolclawCfgStart.aid, !!process.stdin.isTTY)) {
-    console.log('⚡ 控制 AID 未配置，自动启动初始化向导...\n');
-    await cmdInit();
+    console.log('⚡ 控制 AID 未配置，自动补全...\n');
+    await initTail();
     return;
   }
   if (!evolclawCfgStart.aid) {
-    console.log('⚠ 控制 AID 未配置（非交互式启动，跳过向导）。如需进程身份/远程管理，请运行 evolclaw init');
+    console.log('⚠ 控制 AID 未配置（非交互式启动，跳过补全）。如需进程身份/远程管理，请运行 evolclaw init');
   }
 
   // 检查至少有一个 self-agent

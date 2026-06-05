@@ -140,7 +140,6 @@ export async function cmdInit(options?: {
 
   // ── 共享 tail（单一出口）：提示创建 agent + 生成控制 AID ──
   await initTail();
-  return;
 
   // ── 内部函数 ──
 
@@ -213,53 +212,53 @@ export async function cmdInit(options?: {
     }
   }
 
-  async function initTail(): Promise<void> {
-    // 提示创建 agent（两分支汇合后执行一次）
-    const { agents } = loadAllAgents();
-    if (agents.length === 0) {
-      console.log('\n提示：尚无 agent，运行以下命令创建：');
-      console.log('  evolclaw agent new <aid>.agentid.pub');
-    }
+}
 
-    // 控制 AID：daemon 进程身份。缺失则生成并写回 evolclaw.json（幂等：已存在则跳过）。
-    const evc = loadEvolclawConfig();
-    if (evc.aid) {
-      console.log(`✓ 控制 AID 已存在: ${evc.aid}`);
-    } else {
-      try {
-        const { aid } = await generateControlAid();
-        saveEvolclawConfig({ ...evc, $schema_version: evc.$schema_version ?? 1, aid });
-        console.log(`✓ 已生成控制 AID: ${aid}`);
-      } catch (e: any) {
-        // 无网/Gateway 不可达时降级：不中断 init，联网后重跑 evolclaw init 补全
-        console.error(`⚠️ 控制 AID 生成失败（Gateway 不可达？联网后重跑 evolclaw init 补全）: ${e?.message || e}`);
-      }
-    }
+/** 补全控制 AID + owners（可单独调用，不走 baseagent 向导）。 */
+export async function initTail(): Promise<void> {
+  // 提示创建 agent（两分支汇合后执行一次）
+  const { agents } = loadAllAgents();
+  if (agents.length === 0) {
+    console.log('\n提示：尚无 agent，运行以下命令创建：');
+    console.log('  evolclaw agent new <aid>.agentid.pub');
+  }
 
-    // ── 配置进程级管理者（owners）：控制谁能远程管理本 daemon（/agent /system）──
-    // 仅交互式 + owners 未配置时询问；空输入=显式跳过。纯本地，不依赖网络。
-    const evcForOwners = loadEvolclawConfig();
-    if (process.stdin.isTTY && (!evcForOwners.owners || evcForOwners.owners.length === 0)) {
-      const { isValidAid } = await import('../aun/aid/index.js');
-      const rlOwners = readline.createInterface({ input: process.stdin, output: process.stdout });
-      try {
-        const raw = (await ask(rlOwners,
-          '\n管理者 AID（谁能远程管理本进程的 /agent /system，多个用空格分隔，直接回车跳过）: ')).trim();
-        if (raw) {
-          const { valid, invalid } = parseOwnerAids(raw, isValidAid);
-          if (invalid.length > 0) console.log(`  ⚠ 跳过非法 AID: ${invalid.join(', ')}`);
-          if (valid.length > 0) {
-            saveEvolclawConfig({ ...loadEvolclawConfig(), owners: valid });
-            console.log(`  ✓ 已配置管理者: ${valid.join(', ')}`);
-          } else {
-            console.log('  未输入合法 AID，已跳过 owners 配置');
-          }
+  // 控制 AID：daemon 进程身份。缺失则生成并写回 evolclaw.json（幂等：已存在则跳过）。
+  const evc = loadEvolclawConfig();
+  if (evc.aid) {
+    console.log(`✓ 控制 AID 已存在: ${evc.aid}`);
+  } else {
+    try {
+      const { aid } = await generateControlAid();
+      saveEvolclawConfig({ ...evc, $schema_version: evc.$schema_version ?? 1, aid });
+      console.log(`✓ 已生成控制 AID: ${aid}`);
+    } catch (e: any) {
+      console.error(`⚠️ 控制 AID 生成失败（Gateway 不可达？联网后重跑 evolclaw init 补全）: ${e?.message || e}`);
+    }
+  }
+
+  // 配置进程级管理者（owners）：仅交互式 + owners 未配置时询问
+  const evcForOwners = loadEvolclawConfig();
+  if (process.stdin.isTTY && (!evcForOwners.owners || evcForOwners.owners.length === 0)) {
+    const { isValidAid } = await import('../aun/aid/index.js');
+    const rlOwners = readline.createInterface({ input: process.stdin, output: process.stdout });
+    try {
+      const raw = (await ask(rlOwners,
+        '\n管理者 AID（谁能远程管理本进程的 /agent /system，多个用空格分隔，直接回车跳过）: ')).trim();
+      if (raw) {
+        const { valid, invalid } = parseOwnerAids(raw, isValidAid);
+        if (invalid.length > 0) console.log(`  ⚠ 跳过非法 AID: ${invalid.join(', ')}`);
+        if (valid.length > 0) {
+          saveEvolclawConfig({ ...loadEvolclawConfig(), owners: valid });
+          console.log(`  ✓ 已配置管理者: ${valid.join(', ')}`);
         } else {
-          console.log('  已跳过 owners 配置（可日后编辑 evolclaw.json 或重跑 evolclaw init）');
+          console.log('  未输入合法 AID，已跳过 owners 配置');
         }
-      } finally {
-        try { rlOwners.close(); } catch { /* ignore */ }
+      } else {
+        console.log('  已跳过 owners 配置（可日后编辑 evolclaw.json 或重跑 evolclaw init）');
       }
+    } finally {
+      try { rlOwners.close(); } catch { /* ignore */ }
     }
   }
 }
