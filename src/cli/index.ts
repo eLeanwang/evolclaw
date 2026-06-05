@@ -303,6 +303,8 @@ async function cmdStart() {
   const evolclawCfgStart = loadEvolclawConfig();
   if (needsControlAidInit(evolclawCfgStart.aid, !!process.stdin.isTTY)) {
     console.log('⚡ 控制 AID 未配置，自动补全...\n');
+    const { suppressSdkLogs } = await import('../aun/aid/index.js');
+    suppressSdkLogs();
     await initTail();
     return;
   }
