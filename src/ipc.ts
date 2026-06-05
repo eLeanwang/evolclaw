@@ -3,6 +3,8 @@ import fs from 'fs';
 import { logger } from './utils/logger.js';
 import type { EvolAgentRegistryHandle, AidConnectionState } from './types.js';
 import type { AidStatsSnapshot } from './utils/stats.js';
+import { fileCache } from './core/cache/file-cache.js';
+import type { FileCacheStats } from './core/cache/file-cache.js';
 
 const isWindows = process.platform === 'win32';
 const isNamedPipe = (p: string) => isWindows && p.startsWith('\\\\.\\pipe\\');
@@ -30,6 +32,11 @@ export interface IpcStatusResponse {
 export interface IpcAunAidsResponse {
   ok: boolean;
   aids: AidConnectionState[];
+}
+
+export interface IpcCacheStatsResponse {
+  ok: boolean;
+  stats: FileCacheStats;
 }
 
 export interface IpcCtlRequest {
@@ -145,6 +152,11 @@ export class IpcServer {
       case 'aun-aid-stats': {
         const stats = this.aunAidStatsProvider ? this.aunAidStatsProvider() : [];
         return { ok: true, stats };
+      }
+      case 'cache-stats': {
+        // daemon 统一 FileCache 的只读运行统计（watch web Cache 页用）。
+        // 直接读单例，无需 provider 注入（与 manifest-engine 等 import 单例同款）。
+        return { ok: true, stats: fileCache.stats() };
       }
       case 'aun-aid-stats-record-outbound': {
         if (!this.aunAidStatsRecorder) return { ok: false, error: 'recorder not configured' };

@@ -5,10 +5,10 @@
  * - snapshot(params): 当前全量快照
  * - subscribe(params, push): 注册变更回调，返回取消订阅函数
  *
- * aid 走 IPC 轮询（无推送），msg/session 走 fs.watch 文件监听。
+ * aid/cache 走 IPC 轮询（无推送），msg/session 走 fs.watch 文件监听。
  */
 
-export type ViewKind = 'aid' | 'msg' | 'session';
+export type ViewKind = 'aid' | 'msg' | 'session' | 'cache';
 
 export interface WatchSource {
   readonly kind: ViewKind;

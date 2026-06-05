@@ -247,5 +247,40 @@ tr:hover td { background: var(--bg2); }
 }
 .blk-result.err .result-body { border-color: var(--red); }
 
-
+/* ── Cache 视图 ── */
+#view-cache { padding: 16px 18px; }
+.cache-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 10px;
+  margin-bottom: 22px;
+}
+.cache-card {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+.cc-label { color: var(--dim); font-size: 11px; letter-spacing: 0.3px; }
+.cc-value { font-size: 22px; font-weight: 600; margin: 4px 0 2px; font-variant-numeric: tabular-nums; }
+.cc-value.on { color: var(--green); }
+.cc-value.idle { color: var(--orange); }
+.cc-value.off { color: var(--red); }
+.cc-sub { color: var(--dim); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cache-h {
+  font-size: 12px; font-weight: 600; color: var(--dim);
+  text-transform: uppercase; letter-spacing: 0.5px;
+  margin: 8px 0 6px; padding-top: 6px;
+}
+#view-cache table { margin-bottom: 8px; }
+#view-cache td { font-variant-numeric: tabular-nums; }
+.tag {
+  display: inline-block; padding: 1px 7px; border-radius: 10px;
+  font-size: 10.5px; border: 1px solid var(--border); color: var(--dim);
+}
+.tag-agent { color: var(--blue); border-color: var(--blue); }
+.tag-relation { color: var(--magenta); border-color: var(--magenta); }
+.tag-kits { color: var(--green); border-color: var(--green); }
+.tag-global { color: var(--orange); border-color: var(--orange); }
+.cache-note { color: var(--dim); font-size: 11px; margin: 14px 2px 24px; line-height: 1.6; }
 

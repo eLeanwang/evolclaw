@@ -251,7 +251,7 @@ export interface SubMessage {
   peerId?: string;
   peerName?: string;
   peerType?: string;
-  /** 对端网络邻近性（仅加密消息有值，逐条保留以支持群聊批量逐条渲染）*/
+  /** 对端网络邻近性（SDK 0.4.9 起明文/密文消息均可携带，具体字段以网关下发为准；逐条保留以支持群聊批量逐条渲染）*/
   sameDevice?: boolean;
   sameNetwork?: boolean;
   sameEgressIp?: boolean;
@@ -271,7 +271,7 @@ export interface Message {
   peerId: string;  // 发送者 ID
   peerName?: string;  // 发送者名称
   peerType?: string;  // 对端类型 (human/ai/unknown)，由支持 agent.md 的渠道填充
-  /** 对端网络邻近性（SDK 0.4.8 proximity，仅加密消息有值）*/
+  /** 对端网络邻近性（SDK 0.4.9 起明文/密文消息均可携带，具体字段以网关下发为准）*/
   sameDevice?: boolean;   // 对端与本端同一物理设备
   sameNetwork?: boolean;  // 对端与本端同一网络
   sameEgressIp?: boolean; // 对端与本端同一出口 IP

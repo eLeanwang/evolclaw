@@ -734,6 +734,9 @@ export class MessageProcessor {
         const normalizedBaseagent = normalizeBaseagent(agent.name);
         agentModel = (typeof (agent as any).getModel === 'function') ? (agent as any).getModel() as string : undefined;
 
+        // [TEMP-PROX-DIAG] 四象限验证：明文/密文 × 私聊/群聊 的 proximity 抵达情况
+        logger.info(`[PROX-DIAG] chatType=${session.chatType} encrypted=${message.replyContext?.metadata?.encrypted} peerId=${message.peerId} groupId=${session.metadata?.groupId ?? '-'} sameDevice=${message.sameDevice} sameNetwork=${message.sameNetwork} sameEgressIp=${message.sameEgressIp} content=${JSON.stringify(message.content.slice(0,40))}`);
+
         // Kit renderer: 组装上下文
         const pkgRoot = getPackageRoot();
         const kitCtx: KitRenderContext = {

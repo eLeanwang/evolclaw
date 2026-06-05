@@ -100,7 +100,13 @@ export function renderKitSections(ctx: KitRenderContext): string {
 
     const files = loadSectionFiles(section, ctx.vars, sessionCache);
     diag.fileCount = files.length;
-    if (files.length === 0) { diagnostics.push(diag); continue; }
+    // 路径解析成功但读出 0 文件 → 文件/目录不存在（存在性不再单独 syscall，
+    // 由内容读取顺带得到；详见 manifest-engine.resolvePathWithDiag）。
+    if (files.length === 0) {
+      if (diag.resolveStatus === 'ok') diag.resolveStatus = 'not-exist';
+      diagnostics.push(diag);
+      continue;
+    }
 
     let anyUsed = false;
     for (const [filePath, rawContent] of files) {
@@ -154,7 +160,7 @@ const PARAM_DESCRIPTIONS: Record<string, string> = {
   peerName: '对端显示名',
   peerRole: '对端角色（owner/admin/guest/anonymous）',
   peerType: '对端类型（human/agent）',
-  sameDevice: '对端与本端同一物理设备（E2EE 消息 proximity，仅加密消息有值）',
+  sameDevice: '对端与本端同一物理设备（SDK 0.4.9 起明文/密文消息均可携带，具体字段以网关下发为准）',
   sameNetwork: '对端与本端在同一网络内',
   sameEgressIp: '对端与本端共享同一出口 IP',
   groupId: '群组 ID（群聊时）',

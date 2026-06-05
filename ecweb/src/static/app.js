@@ -58,7 +58,7 @@ let ws = null;
 let reconnectDelay = 1000;
 let currentView = 'aid';
 let pendingSub = null;        // 重连后要恢复的订阅
-const state = { aid: null, msg: null, session: null };
+const state = { aid: null, msg: null, session: null, cache: null };
 
 function setConnStatus(text, cls) {
   const el = $('#conn-status');
@@ -128,6 +128,7 @@ function switchView(view) {
   // 切换时按当前选择恢复订阅
   if (view === 'msg') subscribe('msg', { aid: msgSel.aid, peer: msgSel.peer });
   else if (view === 'session') subscribe('session', { sessionId: sessSel.sessionId, project: sessSel.project });
+  else if (view === 'cache') subscribe('cache', {});
   else subscribe('aid', {});
   if (state[view]) renderView(view);
 }
@@ -142,6 +143,7 @@ function renderView(view) {
   if (view === 'aid') renderAid(state.aid);
   else if (view === 'msg') renderMsg(state.msg);
   else if (view === 'session') renderSession(state.session);
+  else if (view === 'cache') renderCache(state.cache);
 }
 
 // ── 工具 ──
@@ -217,6 +219,127 @@ function renderAid(data) {
   }
   html += '</tbody></table>';
   el.innerHTML = html;
+}
+
+// ── Cache 视图（daemon 统一 FileCache 运行统计）──
+// fmtNum 复用文件内既有定义（千分位缩写）。
+function hitRate(c) {
+  const denom = (c.hits || 0) + (c.misses || 0);
+  return denom ? (c.hits / denom) : null;
+}
+function fmtPct(r) {
+  if (r == null) return '—';
+  return (r * 100).toFixed(1) + '%';
+}
+function rateCls(r) {
+  if (r == null) return '';
+  if (r >= 0.9) return 'on';
+  if (r >= 0.6) return 'idle';
+  return 'off';
+}
+// group 名按用途归类，给出友好标签：config:<aid> / agent-files:<aid> 提取 aid
+function groupLabel(g) {
+  if (g.startsWith('agent-files:')) return { kind: 'agent', label: shortAid(g.slice('agent-files:'.length)), sub: '身份层' };
+  if (g.startsWith('config:')) return { kind: 'agent', label: shortAid(g.slice('config:'.length)), sub: 'config' };
+  if (g === 'config') return { kind: 'global', label: 'defaults', sub: '全局' };
+  if (g === 'relation-prefs') return { kind: 'relation', label: 'relation-prefs', sub: '关系模型偏好' };
+  if (g === 'kits') return { kind: 'kits', label: 'kits', sub: 'manifest/fragment/md' };
+  return { kind: 'other', label: g, sub: '' };
+}
+
+function renderCache(data) {
+  const el = $('#view-cache');
+  if (!data) { el.innerHTML = '<div class="empty">加载中…</div>'; return; }
+  if (!data.daemonRunning) {
+    el.innerHTML = '<div class="banner">⚠ EvolClaw 主进程未运行，无缓存统计可显示</div>';
+    return;
+  }
+  if (!data.supported || !data.stats) {
+    el.innerHTML = '<div class="banner">⚠ 当前 EvolClaw 版本不支持 cache-stats（请升级 daemon）</div>';
+    return;
+  }
+  const s = data.stats;
+  const t = s.totals;
+  const occ = s.occupancy || {};
+  // 全部组占用合计
+  let totalBytes = 0;
+  for (const g in occ) totalBytes += occ[g].bytes || 0;
+
+  let html = '';
+
+  // ① 总览卡片
+  const rate = hitRate(t);
+  html += '<div class="cache-cards">';
+  html += card('命中率', fmtPct(rate), rateCls(rate), `${fmtNum(t.hits)} 命中 / ${fmtNum(t.misses)} 未命中`);
+  html += card('读取总数', fmtNum(t.gets), '', `${fmtNum(t.hits)} hit · ${fmtNum(t.misses)} miss`);
+  html += card('缓存条目', fmtNum(s.size), '', fmtBytes(totalBytes) + ' 近似内存');
+  html += card('stat 检查', fmtNum(t.statChecks), '', 'mtime 策略每读一次');
+  html += card('重读', fmtNum(t.reReads), '', '带外改后自动重读');
+  html += card('驱逐', fmtNum(t.evictions), t.evictions ? 'idle' : '', 'LRU 超限');
+  html += card('失效', fmtNum(t.invalidations), '', 'reload/单刷清除');
+  html += card('统计起始', fmtAgo(s.since) + ' 前', '', fmtTime(s.since));
+  html += '</div>';
+
+  // ② 按 group 表（每组命中率 + 占用 + 容量水位）
+  html += '<h3 class="cache-h">按缓存组</h3>';
+  html += '<table><thead><tr>' +
+    '<th>组</th><th>类型</th><th>读取</th><th>命中</th><th>未命中</th><th>命中率</th>' +
+    '<th>重读</th><th>驱逐</th><th>条目</th><th>内存</th><th>容量</th>' +
+    '</tr></thead><tbody>';
+  const groups = Object.keys(s.byGroup).sort((a, b) => (s.byGroup[b].gets || 0) - (s.byGroup[a].gets || 0));
+  for (const g of groups) {
+    const c = s.byGroup[g];
+    const o = occ[g] || { size: 0, bytes: 0, cap: null };
+    const gl = groupLabel(g);
+    const r = hitRate(c);
+    let capCell = '—';
+    if (o.cap != null) {
+      const pct = o.cap ? Math.round((o.size / o.cap) * 100) : 0;
+      const cls = pct >= 90 ? 'off' : (pct >= 70 ? 'idle' : 'on');
+      capCell = `<span class="dot ${cls}"></span>${o.size}/${o.cap}`;
+    }
+    html += '<tr>' +
+      `<td>${esc(gl.label)}${gl.sub ? ` <span style="color:var(--dim)">${esc(gl.sub)}</span>` : ''}</td>` +
+      `<td><span class="tag tag-${gl.kind}">${esc(gl.kind)}</span></td>` +
+      `<td>${fmtNum(c.gets)}</td><td>${fmtNum(c.hits)}</td><td>${fmtNum(c.misses)}</td>` +
+      `<td><span class="dot ${rateCls(r)}"></span>${fmtPct(r)}</td>` +
+      `<td>${fmtNum(c.reReads)}</td><td>${fmtNum(c.evictions)}</td>` +
+      `<td>${o.size}</td><td>${fmtBytes(o.bytes)}</td><td>${capCell}</td>` +
+      '</tr>';
+  }
+  html += '</tbody></table>';
+
+  // ③ 按 policy 表
+  html += '<h3 class="cache-h">按策略</h3>';
+  html += '<table><thead><tr>' +
+    '<th>策略</th><th>读取</th><th>命中</th><th>未命中</th><th>命中率</th><th>stat 检查</th><th>重读</th>' +
+    '</tr></thead><tbody>';
+  const POLICY_DESC = { 'on-reload': '靠 reload 刷新，平时零检查', 'manual': '显式单刷', 'mtime': '每读 statSync 门控' };
+  for (const pol of ['on-reload', 'mtime', 'manual']) {
+    const c = s.byPolicy[pol];
+    if (!c || !c.gets) continue;
+    const r = hitRate(c);
+    html += '<tr>' +
+      `<td>${esc(pol)} <span style="color:var(--dim)">${esc(POLICY_DESC[pol] || '')}</span></td>` +
+      `<td>${fmtNum(c.gets)}</td><td>${fmtNum(c.hits)}</td><td>${fmtNum(c.misses)}</td>` +
+      `<td><span class="dot ${rateCls(r)}"></span>${fmtPct(r)}</td>` +
+      `<td>${fmtNum(c.statChecks)}</td><td>${fmtNum(c.reReads)}</td>` +
+      '</tr>';
+  }
+  html += '</tbody></table>';
+
+  html += '<div class="cache-note">注：config/defaults 与关系级 preferences 的读取也已并入本统计；' +
+    '渲染后结果（按 vars）不缓存，故不在此列。</div>';
+
+  el.innerHTML = html;
+}
+
+function card(label, value, valCls, sub) {
+  return `<div class="cache-card">` +
+    `<div class="cc-label">${esc(label)}</div>` +
+    `<div class="cc-value ${valCls || ''}">${esc(value)}</div>` +
+    `<div class="cc-sub">${esc(sub || '')}</div>` +
+    `</div>`;
 }
 
 // ── Messages 视图 ──

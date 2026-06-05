@@ -25,7 +25,7 @@ import type { BaseagentsBlock, AgentConfig, DefaultsConfig } from '../../types.j
 
 export type ModelScope = 'global' | 'agent' | 'relation';
 
-// ── mtime 门控缓存 ─────────────────────────────────────────────────────
+// ── mtime 门控缓存（统一走 FileCache）─────────────────────────────────────
 //
 // resolveEffectiveModel 每条消息按 关系>agent>全局 解析，原本每次都
 // loadAgent()/loadDefaults()/读 preferences.json —— 一条消息最多读盘 5 次。
@@ -33,45 +33,35 @@ export type ModelScope = 'global' | 'agent' | 'relation';
 // model-scope 被 CLI 子进程与 daemon 共用，CLI 改文件后 daemon 无失效通知，
 // 故靠 mtime 门控：每次只 statSync 比对 mtime，未变用缓存，变了才真正重读 +
 // 重解析。跨进程天然正确（文件 mtime 变即感知），改配置即时生效不变；
-// statSync 远比 read+JSON.parse 便宜。loader 仍走原 loadAgent/loadDefaults，
-// 保留 expandEnvRefs / 校验等处理。
+// statSync 远比 read+JSON.parse 便宜。CLI 进程的 fileCache 是独立空实例、随进程
+// 退出，等同直读最新盘值，安全。
+//
+// config/defaults 与 relation-prefs 三者统一走 daemon 单例 FileCache（消除原先
+// 第二套 makeMtimeCache），读取计数一并进监控。config/defaults 的实际读盘 + 解析
+// 仍委托原 loadAgent/loadDefaults（保留 atomicRead 崩溃恢复 + expandEnvRefs/校验），
+// 故传 noopRead 让 FileCache 只做 mtime 门控、不重复读盘（loader 忽略 raw）。
 
-interface MtimeCacheEntry<T> { mtimeMs: number | null; value: T; }
+/** FileCache 的 read 钩子占位：config/defaults 的真实读盘在 loader 里（loadAgent/
+ *  loadDefaults，含崩溃恢复），此处返回 null 避免 FileCache 再读一遍。 */
+const noopRead = (): string | null => null;
 
-function makeMtimeCache<T>(loader: (file: string) => T) {
-  const cache = new Map<string, MtimeCacheEntry<T>>();
-  return (file: string): T => {
-    let mtimeMs: number | null;
-    try {
-      mtimeMs = fs.statSync(file).mtimeMs;
-    } catch {
-      mtimeMs = null;  // 文件不存在
-    }
-    const hit = cache.get(file);
-    if (hit && hit.mtimeMs === mtimeMs) return hit.value;
-    const value = loader(file);
-    cache.set(file, { mtimeMs, value });
-    return value;
-  };
-}
+// agent config.json：mtime 门控，per-agent 分组（config:<aid>）便于 per-agent 监控视图。
+const loadAgentCached = (self: string): AgentConfig | null =>
+  fileCache.get<AgentConfig | null>(
+    agentConfigPath(self),
+    () => loadAgent(self),
+    { policy: 'mtime', group: `config:${self}`, read: noopRead },
+  );
 
-// agent config.json：按文件路径 → AgentConfig（保留 loadAgent 的 env 展开/校验）
-const loadAgentCached = (() => {
-  const get = makeMtimeCache<AgentConfig | null>((file) => {
-    const aid = path.basename(path.dirname(file));
-    return loadAgent(aid);
-  });
-  return (self: string): AgentConfig | null => get(agentConfigPath(self));
-})();
-
-// defaults.json：单文件
-const loadDefaultsCached = (() => {
-  const get = makeMtimeCache<DefaultsConfig | null>(() => loadDefaults());
-  return (): DefaultsConfig | null => get(resolvePaths().defaultsConfig);
-})();
+// defaults.json：单文件，mtime 门控。
+const loadDefaultsCached = (): DefaultsConfig | null =>
+  fileCache.get<DefaultsConfig | null>(
+    resolvePaths().defaultsConfig,
+    () => loadDefaults(),
+    { policy: 'mtime', group: 'config', read: noopRead },
+  );
 
 // 关系级 preferences.json —— 走统一 FileCache（mtime 门控，带外改 + 不 reload）。
-// CLI 进程的 fileCache 是独立空实例、随进程退出，等同直读最新盘值，安全。
 const readPrefsCached = (file: string): ModelPrefs | null =>
   fileCache.get<ModelPrefs | null>(
     file,

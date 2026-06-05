@@ -201,11 +201,10 @@ export function resolvePathWithDiag(rawPath: string, vars: Vars): ResolvePathRes
   if (unresolved.length > 0) {
     return { resolved, status: 'unresolved-vars', unresolvedTokens: unresolved };
   }
-  // 路径规范化：模板里 ../ 等相对片段折叠成真实路径
+  // 路径规范化：模板里 ../ 等相对片段折叠成真实路径。
+  // 不再在此 existsSync——存在性由随后经 fileCache 的内容读取顺带得到（file
+  // section 读出 null 即不存在），避免每 section 每消息一次 syscall。
   resolved = path.normalize(resolved);
-  if (!fs.existsSync(resolved)) {
-    return { resolved, status: 'not-exist', unresolvedTokens: unresolved };
-  }
   return { resolved, status: 'ok', unresolvedTokens: unresolved };
 }
 
@@ -252,7 +251,7 @@ function readDirectoryFiles(dirPath: string, pattern?: string): [string, string]
   // 目录列表 + 各文件内容均走 fileCache（on-reload）。目录列表以 "<dir>|<glob>"
   // 为键缓存文件名数组；各文件内容走 fileCache.getText 共享。
   const names = fileCache.get<string[]>(
-    `${dirPath} ${glob}`,
+    `${dirPath} ${glob}`,
     () => {
       try { return fs.readdirSync(dirPath).filter(f => matchGlob(f, glob)).sort(); }
       catch { return []; }

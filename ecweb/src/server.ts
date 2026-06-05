@@ -22,6 +22,7 @@ import type { WatchSource, ViewKind } from './sources/types.js';
 import { aidSource } from './sources/aid.js';
 import { msgSource } from './sources/msg.js';
 import { sessionSource } from './sources/session.js';
+import { cacheSource } from './sources/cache.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const STATIC_DIR = path.join(__dirname, 'static');
@@ -31,7 +32,7 @@ const PAIRING_TTL_MS = 5 * 60 * 1000;       // 5min
 const DEFAULT_PORT = 42705;
 const PROTOCOL_VERSION = 1;                  // 与 evolclaw ping response 对齐的软校验版本
 
-const SOURCES: Record<ViewKind, WatchSource> = { aid: aidSource, msg: msgSource, session: sessionSource };
+const SOURCES: Record<ViewKind, WatchSource> = { aid: aidSource, msg: msgSource, session: sessionSource, cache: cacheSource };
 
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',

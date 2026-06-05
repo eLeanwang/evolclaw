@@ -254,16 +254,22 @@ export class EvolAgent {
 
   // ── Personal layer ────────────────────────────────────────────────────
 
+  /** 本 agent 身份层文件在 fileCache 的组名（带 aid，避免 reload 单个 agent 误失效他人）。 */
+  private agentFilesGroup(): string {
+    return `agent-files:${this.aid}`;
+  }
+
   /**
-   * 读取 personal/persona.md 内容。走统一 fileCache（on-reload，group
-   * 'agent-files'）：人格稳定，靠 reload/重启刷新即可。文件不存在返回 null。
+   * 读取 personal/persona.md 内容。走 fileCache（mtime 门控）：persona 没有任何
+   * 写入命令、由 agent 自己带外改写，与 working memory 同样改了即应生效，故每次读
+   * stat 比对、变了自动重读。文件不存在返回 null。
    */
   getPersona(): string | null {
     const personaPath = path.join(agentPersonalDir(this.aid), 'persona.md');
     return fileCache.get<string | null>(
       personaPath,
       (raw) => (raw === null ? null : (raw.trim() || null)),
-      { policy: 'on-reload', group: 'agent-files' },
+      { policy: 'mtime', group: this.agentFilesGroup() },
     );
   }
 
@@ -277,13 +283,13 @@ export class EvolAgent {
     return fileCache.get<string | null>(
       workingPath,
       (raw) => (raw === null ? null : (raw.trim() || null)),
-      { policy: 'mtime', group: 'agent-files' },
+      { policy: 'mtime', group: this.agentFilesGroup() },
     );
   }
 
-  /** 清除 persona 缓存（reload 后重新读取）。失效本 agent 的身份层文件组。 */
+  /** 清除本 agent 身份层缓存（reload 后重新读取）。只失效自己的文件组，不波及他人。 */
   invalidatePersonaCache(): void {
-    fileCache.invalidateGroup('agent-files');
+    fileCache.invalidateGroup(this.agentFilesGroup());
   }
 
   // ── Context（喂给 message-processor / command-handler） ──────────────
