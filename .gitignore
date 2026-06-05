@@ -1,6 +1,9 @@
 # 配置文件（包含敏感信息）
 config.toml
 config.json
+config.json.migrated
+evolclaw.json
+evolclaw.json_
 .env
 
 # 运行时数据
