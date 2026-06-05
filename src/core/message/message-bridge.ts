@@ -263,6 +263,8 @@ export class MessageBridge {
     activity: '/activity',
     system: '/system',
     cli: '/cli',
+    agent: '/agent',
+    trigger: '/trigger',
   };
 
   private resolveCmd(name: string, cmd?: string): string {
@@ -330,7 +332,7 @@ export class MessageBridge {
     const { id, name, cmd } = req;
     try {
       const resolvedCmd = this.resolveCmd(name, cmd);
-      const result = await this.cmdHandler.execMenuQuery(resolvedCmd, channel, msg.channelId, msg.peerId);
+      const result = await this.cmdHandler.execMenuQuery(resolvedCmd, channel, msg.channelId, msg.peerId, (req as any).args);
       if ('error' in result) throw { code: result.code || 'EXEC_FAILED', message: result.error };
       await this.sendMenuResponse(adapter, channel, msg.channelId,
         { type: 'menu.response', id, name, data: result.data }, sendReply);
@@ -350,7 +352,7 @@ export class MessageBridge {
     const { id, name, cmd } = req;
     try {
       const resolvedCmd = this.resolveCmd(name, cmd);
-      const data = await this.cmdHandler.getSubMenuItems(resolvedCmd, channel, msg.channelId, msg.peerId) ?? [];
+      const data = await this.cmdHandler.getSubMenuItems(resolvedCmd, channel, msg.channelId, msg.peerId, (req as any).args) ?? [];
       await this.sendMenuResponse(adapter, channel, msg.channelId,
         { type: 'menu.response', id, name, data }, sendReply);
     } catch (err: any) {

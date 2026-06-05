@@ -771,7 +771,7 @@ export type ChannelInstance =
 
 /**
  * agents/defaults.json —— per-agent 配置缺失字段的 fallback。
- * 不持有 channels（必须 per-agent）、不持有 owners（必须 per-agent）、不持有 aid。
+ * 不持有 channels / owners / aid（owners 已移至 evolclaw.json 顶层，进程级鉴权专用）。
  */
 export interface DefaultsConfig {
   $schema_version: number;
@@ -944,6 +944,7 @@ export interface MenuQueryRequest {
   id: string;
   name: string;          // 通用操作标识（如 'pwd' / 'baseagent' / 'session'）
   cmd?: string;          // 逃生口：直接指定内部命令
+  args?: Record<string, any>;
 }
 
 export interface MenuOptionsRequest {
@@ -951,6 +952,7 @@ export interface MenuOptionsRequest {
   id: string;
   name: string;
   cmd?: string;
+  args?: Record<string, any>;
 }
 
 export interface MenuUpdateRequest {

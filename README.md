@@ -267,6 +267,32 @@ evolclaw/
 - `/restart` - 重启服务（自愈机制）
 - `/repair` - 检查并修复会话
 
+### ⚠️ 进程级 menu 操作鉴权（v3.2 Breaking）
+
+进程级 menu 操作（`/system restart/upgrade`、`/agent` agent 生命周期管理）的鉴权已迁移到
+`evolclaw.json` 顶层 `owners` 字段（v3.2 起，不再读 `agents/defaults.json`）。
+升级后**必须**在 `evolclaw.json` 配置 `owners`，否则这些操作一律返回 `FORBIDDEN`（daemon 启动时也会 warn 提示）。
+
+```json
+{
+  "owners": ["eleans-2022.agentid.pub"]
+}
+```
+
+`evolclaw init` 交互流程会在生成控制 AID 后提示录入 owners（可跳过后手动编辑）。
+
+- **`owners`**：进程级管理者 AID 名单。可执行 `/system`（重启/升级）与 `/agent`
+  （create / delete / enable / disable / list / show）。
+- 关系级的 `/trigger`（set / cancel / update / list）仍走 channel 角色（owner/admin）+ scoped 鉴权，**不**受 `owners` 影响。
+- `/agent create` 为「受理即返回」：立即回 `{ accepted: true, aid }`，后台跑完整创建流程并把各
+  环节写入 `agents/<aid>/create-status.json`；客户端用 `menu.query name=agent args={aid}` 轮询
+  `createProgress.status` 直到 `ready` / `failed`。
+
+### 控制 AID（control AID）
+
+v3.2 新增进程级身份标识。启动时自动生成 `ec+5位数字.agentid.pub` 格式的控制 AID，以
+`pureIdentity` 模式接入 AUN 网络（跳过 evolagent onboarding）。`evolclaw status` 可查看控制 AID 连接状态。
+
 ## 技术栈
 
 - **运行时**：Node.js >= 22 + TypeScript（ES modules）

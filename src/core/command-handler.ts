@@ -18,11 +18,15 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import { parseTriggerSet, parseTriggerUpdate } from './trigger/parser.js';
+import type { ParsedTriggerSet } from './trigger/parser.js';
 import { TriggerManager } from './trigger/manager.js';
 import { TriggerScheduler, calcNextFireAt } from './trigger/scheduler.js';
 import type { Trigger } from '../types.js';
 import { checkLatestVersion, getLocalVersion, isLinkedInstall, compareVersions } from '../utils/npm-ops.js';
 import { tryParseChannelKey } from './channel-loader.js';
+import { loadDefaults } from '../config-store.js';
+import { loadEvolclawConfig } from '../evolclaw-config.js';
+import { execAgentAction, execAgentQuery, execAgentOptions, resolveProjectPath } from './message/command-handler-agent-control.js';
 
 export interface MenuNext {
   type: 'select' | 'text';
@@ -665,8 +669,37 @@ export class CommandHandler {
   }
 
   /** 动态子菜单：根据 cmd 路径返回选项列表（供 menu.query + cmd 使用） */
-  async getSubMenuItems(cmd: string, channel: string, channelId: string, userId?: string): Promise<MenuItem[] | null> {
+  async getSubMenuItems(cmd: string, channel: string, channelId: string, userId?: string, args?: Record<string, any>): Promise<MenuItem[] | null> {
     const session = await this.sessionManager.getActiveSession(channel, channelId);
+
+    // ── 进程级 /agent list（owners 鉴权） ──
+    if (cmd === '/agent') {
+      if (!isProcessLevelOwner(userId, loadEvolclawConfig().owners)) {
+        throw { code: 'FORBIDDEN', message: '操作需要 owner 权限' };
+      }
+      const res = await execAgentOptions(args);
+      if ('error' in res) throw { code: res.code, message: res.error };
+      return (res.data.agents as any[]).map(ag => ({ value: ag.aid, label: ag.name || ag.aid, desc: ag.status }));
+    }
+
+    // ── 关系级 /trigger list（每个 trigger 一个 MenuItem） ──
+    if (cmd === '/trigger') {
+      const owningAgent = this.getOwningAgent(channel);
+      const manager = (owningAgent?.triggerManager ?? this.triggerManager) as TriggerManager | undefined;
+      if (!manager) return [];
+      const scope = args?.options === 'all' ? 'all' : 'enabled';
+      const role = this.sessionManager.resolveIdentity(channel, userId).role;
+      const isAdmin = role === 'owner' || role === 'admin';
+      const all = manager.listAll();
+      const list = scope === 'all' ? all.active.concat(all.history as any[]) : manager.listActive();
+      const visible = isAdmin ? list
+        : list.filter((t: any) => t.createdByPeerId === (userId ?? '') && t.createdByChannel === channel);
+      return visible.map((t: any) => ({
+        value: t.id,
+        label: t.name,
+        desc: `${t.scheduleType}${t.nextFireAt ? ` | 下次 ${new Date(t.nextFireAt).toLocaleString()}` : ''}`,
+      }));
+    }
 
     if (cmd === '/s' || cmd === '/session' || cmd === '/del') {
       const sessions = await this.sessionManager.listSessions(channel, channelId);
@@ -801,12 +834,19 @@ export class CommandHandler {
 
   /** menu.query — 查询当前值。 */
   async execMenuQuery(
-    cmd: string, channel: string, channelId: string, userId?: string
+    cmd: string, channel: string, channelId: string, userId?: string, args?: Record<string, any>
   ): Promise<{ data: any } | { error: string; code?: string }> {
-    void userId;
     const cmdBase = cmd.trim().split(' ')[0];
     if (!cmdBase) return { error: '缺少命令', code: 'MISSING_CMD' };
     const { session, evolagent } = await this.loadMenuContext(channel, channelId);
+
+    // ── 进程级 /agent（owners 鉴权） ──
+    if (cmdBase === '/agent') {
+      if (!isProcessLevelOwner(userId, loadEvolclawConfig().owners)) {
+        return { error: '操作需要 owner 权限', code: 'FORBIDDEN' };
+      }
+      return await execAgentQuery(args);
+    }
 
     if (cmdBase === '/pwd') {
       const sessPath = session?.projectPath;
@@ -914,6 +954,9 @@ export class CommandHandler {
     }
 
     if (cmdBase === '/system') {
+      if (!isProcessLevelOwner(userId, loadEvolclawConfig().owners)) {
+        return { error: '操作需要 owner 权限', code: 'FORBIDDEN' };
+      }
       const owningAgent = this.getOwningAgent(channel);
       const data: Record<string, any> = {
         agent: owningAgent?.name ?? 'DefaultAgent',
@@ -945,6 +988,40 @@ export class CommandHandler {
     if (!arg) return { error: '缺少 value 参数', code: 'MISSING_VALUE' };
     const { session, evolagent } = await this.loadMenuContext(channel, channelId);
     const identity = this.sessionManager.resolveIdentity(channel, userId);
+
+    // ── 关系级 /trigger update（调度参数，value 为 JSON 字符串） ──
+    if (cmdBase === '/trigger') {
+      const owningAgent = this.getOwningAgent(channel);
+      const manager = (owningAgent?.triggerManager ?? this.triggerManager) as TriggerManager | undefined;
+      const scheduler = (owningAgent?.triggerScheduler ?? this.triggerScheduler) as TriggerScheduler | undefined;
+      if (!manager || !scheduler) return { error: '触发器功能未启用', code: 'NOT_SUPPORTED' };
+      let patch: any;
+      try { patch = JSON.parse(arg); } catch { return { error: 'value 需为 JSON', code: 'INVALID_ARGS' }; }
+      if (!patch?.nameOrId) return { error: '缺少 nameOrId', code: 'INVALID_ARGS' };
+      const isAdmin = identity.role === 'owner' || identity.role === 'admin';
+      if (!isAdmin && !userId) return { error: '无法确认身份，请确保渠道提供发送者 ID', code: 'FORBIDDEN' };
+      const trigger = isAdmin
+        ? (manager.getByName(patch.nameOrId) ?? manager.getById(patch.nameOrId))
+        : (manager.getByNameScoped(patch.nameOrId, userId ?? '', channel) ?? manager.getByIdScoped(patch.nameOrId, userId ?? '', channel));
+      if (!trigger) return { error: '触发器不存在或无权限', code: 'NOT_FOUND' };
+      const fields: any = {};
+      if (patch.scheduleType !== undefined) fields.scheduleType = patch.scheduleType;
+      if (patch.scheduleValue !== undefined) fields.scheduleValue = String(patch.scheduleValue);
+      if (patch.prompt !== undefined) fields.prompt = String(patch.prompt);
+      // 调度参数变化时重算 nextFireAt——先校验避免 NaN 污染 scheduler heap
+      if (fields.scheduleType !== undefined || fields.scheduleValue !== undefined) {
+        const effType = fields.scheduleType ?? trigger.scheduleType;
+        const effValue = fields.scheduleValue ?? trigger.scheduleValue;
+        const schedErr = validateScheduleParams(effType, effValue);
+        if (schedErr) return { error: schedErr, code: 'INVALID_ARGS' };
+        fields.nextFireAt = calcNextFireAt(effType, effValue, Date.now());
+      }
+      let updated: Trigger;
+      try { updated = manager.update(trigger.id, fields); }
+      catch (err: any) { return { error: `更新失败：${err?.message || err}`, code: 'INVALID_ARGS' }; }
+      scheduler.update(updated);
+      return { data: { id: updated.id, nextFireAt: updated.nextFireAt } };
+    }
 
     if (cmdBase === '/baseagent') {
       const valid = this.getAvailableBaseagents(channel);
@@ -1072,6 +1149,76 @@ export class CommandHandler {
     const { session } = await this.loadMenuContext(channel, channelId);
     const identity = this.sessionManager.resolveIdentity(channel, userId);
 
+    // ── 进程级 /agent（owners 鉴权，不依赖 session/channel） ──
+    // NOTE(D5): 本次进程级 /agent 仅按 evolclaw.json owners 鉴权，任意 evolagent 的 AUN
+    // channel 均可作为入口。part1（daemon 控制 AID）落地后，应叠加 isControlChannel(channelId)
+    // 闸：仅控制 AID channel 上的 /agent /system 生效。见 part1 计划。
+    if (cmdBase === '/agent') {
+      if (!isProcessLevelOwner(userId, loadEvolclawConfig().owners)) {
+        return { error: '操作需要 owner 权限', code: 'FORBIDDEN' };
+      }
+      const a = { ...(args ?? {}) };
+      if (action === 'create') {
+        a.project = resolveProjectPath(a.project, a.aid ?? '', loadDefaults());
+      }
+      return await execAgentAction(action, a, userId ?? '');
+    }
+
+    // ── 关系级 /trigger（不走 owners；复用 isAdmin + scoped 逻辑，D4 直调底层） ──
+    if (cmdBase === '/trigger') {
+      const role = identity.role;
+      const isAdmin = role === 'owner' || role === 'admin';
+      const owningAgent = this.getOwningAgent(channel);
+      const manager = (owningAgent?.triggerManager ?? this.triggerManager) as TriggerManager | undefined;
+      const scheduler = (owningAgent?.triggerScheduler ?? this.triggerScheduler) as TriggerScheduler | undefined;
+      if (!manager || !scheduler) return { error: '触发器功能未启用', code: 'NOT_SUPPORTED' };
+
+      if (action === 'set') {
+        // args 结构化 → 直接组装 ParsedTriggerSet（绕过 parseTriggerSet 文本解析，无注入风险）
+        if (!args?.scheduleType || !args?.scheduleValue || !args?.prompt) {
+          return { error: '缺少必填参数：scheduleType / scheduleValue / prompt', code: 'INVALID_ARGS' };
+        }
+        // menu 路径绕过了 parseTriggerSet 的校验，必须自行校验枚举/数值，
+        // 否则非法值会传到 calcNextFireAt 产出 NaN nextFireAt，污染 scheduler heap。
+        const schedErr = validateScheduleParams(args.scheduleType, String(args.scheduleValue));
+        if (schedErr) return { error: schedErr, code: 'INVALID_ARGS' };
+        const strategy = args.targetSessionStrategy ?? 'latest';
+        if (!['latest', 'current', 'thread'].includes(strategy)) {
+          return { error: `无效 targetSessionStrategy: ${strategy}`, code: 'INVALID_ARGS' };
+        }
+        const parsed: ParsedTriggerSet = {
+          scheduleType: args.scheduleType,
+          scheduleValue: String(args.scheduleValue),
+          prompt: String(args.prompt),
+          name: args.name,
+          targetChannel: args.targetChannel,
+          targetChannelId: args.targetChannelId,
+          targetThreadId: args.targetThreadId,
+          targetSessionStrategy: strategy,
+          agentId: args.agentId,
+        };
+        const r = await this.registerTriggerFromParsed(parsed, channel, channelId, userId ?? '', undefined);
+        if (!r.ok) return { error: r.error, code: /已存在|exists|重复/.test(r.error) ? 'CONFLICT' : 'INVALID_ARGS' };
+        return { data: { id: r.trigger.id, name: r.trigger.name, nextFireAt: r.trigger.nextFireAt } };
+      }
+
+      if (action === 'cancel') {
+        const nameOrId = args?.nameOrId;
+        if (!nameOrId) return { error: '缺少 nameOrId', code: 'INVALID_ARGS' };
+        if (!isAdmin && !userId) return { error: '无法确认身份，请确保渠道提供发送者 ID', code: 'FORBIDDEN' };
+        const trigger = isAdmin
+          ? (manager.getByName(nameOrId) ?? manager.getById(nameOrId))
+          : (manager.getByNameScoped(nameOrId, userId ?? '', channel) ?? manager.getByIdScoped(nameOrId, userId ?? '', channel));
+        if (!trigger) return { error: '触发器不存在或无权限', code: 'NOT_FOUND' };
+        manager.moveToDone(trigger.id, 'cancelled');
+        scheduler.cancel(trigger.id);
+        this.eventBus.publish({ type: 'trigger:cancelled', triggerId: trigger.id, by: userId ?? '' });
+        return { data: { id: trigger.id, cancelled: true } };
+      }
+
+      return { error: `不支持的 trigger action: ${action}`, code: 'INVALID_ARGS' };
+    }
+
     // ── /session 系列 ──
     if (cmdBase === '/session' || cmdBase === '/s') {
       if (action === 'stop') {
@@ -1129,8 +1276,11 @@ export class CommandHandler {
 
     // ── /system 系列 ──
     if (cmdBase === '/system') {
+      // D1 迁移：进程级鉴权统一查 evolclaw.json owners，替代各 action 内联的 identity.role 判断
+      if (!isProcessLevelOwner(userId, loadEvolclawConfig().owners)) {
+        return { error: '操作需要 owner 权限', code: 'FORBIDDEN' };
+      }
       if (action === 'restart') {
-        if (identity.role !== 'owner') return { error: '无权限：服务重启仅限 owner 使用', code: 'NO_PERMISSION' };
         const restartInfo: Record<string, any> = { channel, channelId, timestamp: Date.now() };
         fs.writeFileSync(path.join(resolvePaths().dataDir, 'restart-pending.json'), JSON.stringify(restartInfo));
         const { spawn } = await import('child_process');
@@ -1149,7 +1299,6 @@ export class CommandHandler {
       }
 
       if (action === 'upgrade') {
-        if (identity.role !== 'owner') return { error: '无权限：升级仅限 owner 使用', code: 'NO_PERMISSION' };
         return await this.delegateAsAction(action, '/upgrade', channel, channelId, userId);
       }
 
@@ -3654,70 +3803,86 @@ export class CommandHandler {
       const result = parseTriggerSet(args);
       if (!result.ok) return `❌ ${result.error}`;
 
-      const parsed = result.value;
-      const now = Date.now();
-      const nextFireAt = calcNextFireAt(parsed.scheduleType, parsed.scheduleValue, now);
-
-      // Auto-generate name if not provided
-      const name = parsed.name ?? `trigger-${Date.now().toString(36)}`;
-
-      const trigger: Trigger = {
-        id: crypto.randomUUID(),
-        name,
-        scheduleType: parsed.scheduleType,
-        scheduleValue: parsed.scheduleValue,
-        nextFireAt,
-        targetChannel: parsed.targetChannel ?? channel,
-        targetChannelId: parsed.targetChannelId ?? channelId,
-        targetChannelType: this.resolveChannelType(parsed.targetChannel ?? channel),
-        targetThreadId: parsed.targetThreadId,
-        targetSessionStrategy: parsed.targetSessionStrategy,
-        agentId: parsed.agentId,
-        prompt: parsed.prompt,
-        createdByPeerId: peerId,
-        createdByChannel: channel,
-        fireCount: 0,
-        createdAt: now,
-        updatedAt: now,
-      };
-
-      try {
-        // Strategy-based session binding
-        if (parsed.targetSessionStrategy === 'current') {
-          const active = await this.sessionManager.getActiveSession(channel, channelId);
-          if (!active) return '❌ 当前没有活跃会话，改用 --session latest 或 thread';
-          trigger.boundSessionId = active.id;
-        } else if (parsed.targetSessionStrategy === 'thread') {
-          const targetAdapterName = parsed.targetChannel ?? channel;
-          const adapter = this.adapters.get(targetAdapterName);
-          if (!adapter?.capabilities.thread) return '❌ 目标渠道不支持 thread 会话';
-          const channelType = adapter.channelKey.split('#')[0];
-          trigger.targetChannelType = channelType;
-          if (channelType === 'aun') {
-            trigger.threadKind = 'aun';
-            trigger.targetThreadId = `trigger-${trigger.id}`;
-          } else {
-            if (!messageId) return '❌ 飞书 thread 模式需要消息 ID，请重新发送命令';
-            trigger.threadKind = 'feishu';
-            trigger.rootMessageId = messageId;
-            trigger.pendingThread = true;
-          }
-        }
-
-        // Validate name uniqueness before persisting (manager.register writes to disk)
-        // scheduler.register is in-memory only and cannot fail, so order is safe here.
-        // If manager.register throws (duplicate name/ID), nothing is persisted.
-        manager.register(trigger);
-        scheduler.register(trigger);
-      } catch (err: any) {
-        return `❌ 注册失败：${err.message}`;
-      }
-
-      const nextStr = new Date(nextFireAt).toLocaleString();
-      return `✅ 触发器已注册：**${name}**\n下次触发：${nextStr}`;
+      const reg = await this.registerTriggerFromParsed(result.value, channel, channelId, peerId, messageId);
+      if (!reg.ok) return `❌ ${reg.error}`;
+      const nextStr = new Date(reg.trigger.nextFireAt).toLocaleString();
+      return `✅ 触发器已注册：**${reg.trigger.name}**\n下次触发：${nextStr}`;
     }
 
     return `❌ 未知子命令。用法：\n/trigger — 查看活跃触发器\n/trigger list — 查看所有触发器\n/trigger set <参数> — 注册触发器\n/trigger update <名称|ID> <参数> — 修改触发器\n/trigger cancel <名称> — 取消触发器`;
+  }
+
+  /** 从已解析的 trigger 参数组装 Trigger 并注册。文本路径（handleTrigger）与 menu 路径共用。
+   *  parsed 形状 = parseTriggerSet 的 result.value（ParsedTriggerSet）。
+   *  失败 return { ok:false, error }；成功 return { ok:true, trigger }。本方法不改变原文本路径行为。 */
+  private async registerTriggerFromParsed(
+    parsed: ParsedTriggerSet,
+    channel: string, channelId: string, peerId: string, messageId?: string,
+  ): Promise<{ ok: true; trigger: Trigger } | { ok: false; error: string }> {
+    const owningAgent = this.getOwningAgent(channel);
+    const scheduler = (owningAgent?.triggerScheduler ?? this.triggerScheduler) as TriggerScheduler | undefined;
+    const manager = (owningAgent?.triggerManager ?? this.triggerManager) as TriggerManager | undefined;
+    if (!manager || !scheduler) return { ok: false, error: '触发器功能未启用' };
+
+    const now = Date.now();
+    const nextFireAt = calcNextFireAt(parsed.scheduleType, parsed.scheduleValue, now);
+
+    // Auto-generate name if not provided
+    const name = parsed.name ?? `trigger-${Date.now().toString(36)}`;
+
+    const trigger: Trigger = {
+      id: crypto.randomUUID(),
+      name,
+      scheduleType: parsed.scheduleType,
+      scheduleValue: parsed.scheduleValue,
+      nextFireAt,
+      targetChannel: parsed.targetChannel ?? channel,
+      targetChannelId: parsed.targetChannelId ?? channelId,
+      targetChannelType: this.resolveChannelType(parsed.targetChannel ?? channel),
+      targetThreadId: parsed.targetThreadId,
+      targetSessionStrategy: parsed.targetSessionStrategy,
+      agentId: parsed.agentId,
+      prompt: parsed.prompt,
+      createdByPeerId: peerId,
+      createdByChannel: channel,
+      fireCount: 0,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    try {
+      // Strategy-based session binding
+      if (parsed.targetSessionStrategy === 'current') {
+        const active = await this.sessionManager.getActiveSession(channel, channelId);
+        if (!active) return { ok: false, error: '当前没有活跃会话，改用 --session latest 或 thread' };
+        trigger.boundSessionId = active.id;
+      } else if (parsed.targetSessionStrategy === 'thread') {
+        const targetAdapterName = parsed.targetChannel ?? channel;
+        const adapter = this.adapters.get(targetAdapterName);
+        if (!adapter?.capabilities.thread) return { ok: false, error: '目标渠道不支持 thread 会话' };
+        const channelType = adapter.channelKey.split('#')[0];
+        trigger.targetChannelType = channelType;
+        if (channelType === 'aun') {
+          trigger.threadKind = 'aun';
+          trigger.targetThreadId = `trigger-${trigger.id}`;
+        } else {
+          if (!messageId) return { ok: false, error: '飞书 thread 模式需要消息 ID，请重新发送命令' };
+          trigger.threadKind = 'feishu';
+          trigger.rootMessageId = messageId;
+          trigger.pendingThread = true;
+        }
+      }
+
+      // Validate name uniqueness before persisting (manager.register writes to disk)
+      // scheduler.register is in-memory only and cannot fail, so order is safe here.
+      // If manager.register throws (duplicate name/ID), nothing is persisted.
+      manager.register(trigger);
+      scheduler.register(trigger);
+    } catch (err: any) {
+      return { ok: false, error: `注册失败：${err.message}` };
+    }
+
+    return { ok: true, trigger };
   }
 
   // ── /rewind helpers ──
@@ -4086,4 +4251,32 @@ export class CommandHandler {
     if (!text) return '';
     return text.length > 50 ? text.substring(0, 50) + '…' : text;
   }
+}
+
+/** 进程级 menu 操作（/agent、/system）鉴权：发送方 AID 必须在 owners 名单中。
+ *  owners 来自 evolclaw.json 顶层（进程级控制面配置）。纯静态名单比对。 */
+export function isProcessLevelOwner(peerId: string | undefined, owners: string[] | undefined): boolean {
+  if (!peerId) return false;
+  return (owners ?? []).includes(peerId);
+}
+
+/** 校验 menu 路径直传的 trigger 调度参数（绕过 parseTriggerSet 文本解析后必须自校验）。
+ *  返回错误字符串表示非法；返回 null 表示通过。
+ *  防止非法 scheduleType/scheduleValue 传到 calcNextFireAt 产出 NaN/throw，污染 scheduler heap。 */
+export function validateScheduleParams(scheduleType: string, scheduleValue: string): string | null {
+  if (!['delay', 'at', 'cron'].includes(scheduleType)) {
+    return `无效 scheduleType: ${scheduleType}（可选: delay / at / cron）`;
+  }
+  if (scheduleType === 'delay') {
+    const ms = Number(scheduleValue);
+    if (!Number.isFinite(ms) || ms <= 0) return `delay 的 scheduleValue 需为正整数毫秒: ${scheduleValue}`;
+  } else if (scheduleType === 'at') {
+    const ts = new Date(scheduleValue).getTime();
+    if (!Number.isFinite(ts)) return `at 的 scheduleValue 需为合法时间: ${scheduleValue}`;
+  } else {
+    // cron：交给 calcNextFireAt 内部的 CronExpressionParser 校验（会 throw，被上层 catch）
+    try { calcNextFireAt('cron', scheduleValue, Date.now()); }
+    catch { return `无效 cron 表达式: ${scheduleValue}`; }
+  }
+  return null;
 }

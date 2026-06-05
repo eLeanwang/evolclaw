@@ -5,11 +5,12 @@ import { spawn, execFileSync, execFile } from 'child_process';
 import { promisify } from 'util';
 import { resolveRoot, resolvePaths, ensureDataDirs, getPackageRoot, agentMdPath } from '../paths.js';
 import { loadDefaults, loadAllAgents, mergeForAgent } from '../config-store.js';
+import { loadEvolclawConfig } from '../evolclaw-config.js';
 import { resolveAnthropicConfig } from '../agents/resolve.js';
 import { normalizeChannelInstances, channelTypes } from '../utils/channel-helpers.js';
 import { migrateProject } from '../config-store.js';
 import readline from 'readline';
-import { cmdInit } from './init.js';
+import { cmdInit, needsControlAidInit, initTail } from './init.js';
 import { ipcQuery } from '../ipc.js';
 import { cmdInitWechat, cmdInitFeishu, cmdInitDingtalk, cmdInitQQBot, cmdInitWecom, cmdInitAun } from './init-channel.js';
 import { isHelpFlag, wantsHelp, getArgValue } from './help.js';
@@ -295,6 +296,20 @@ async function cmdStart() {
     console.log('⚡ 未检测到初始化配置，自动启动初始化向导...\n');
     await cmdInit();
     return;
+  }
+
+  // 控制 AID 门禁：缺 aid 且交互式 → 只补全控制 AID + owners（不重走 baseagent 向导）。
+  // 非 TTY（restart-monitor/systemd/管道）不补全（无法交互），只提示后继续启动，daemon 侧 warn 兜底。
+  const evolclawCfgStart = loadEvolclawConfig();
+  if (needsControlAidInit(evolclawCfgStart.aid, !!process.stdin.isTTY)) {
+    console.log('⚡ 控制 AID 未配置，自动补全...\n');
+    const { suppressSdkLogs } = await import('../aun/aid/index.js');
+    suppressSdkLogs();
+    await initTail();
+    return;
+  }
+  if (!evolclawCfgStart.aid) {
+    console.log('⚠ 控制 AID 未配置（非交互式启动，跳过补全）。如需进程身份/远程管理，请运行 evolclaw init');
   }
 
   // 检查至少有一个 self-agent
@@ -982,6 +997,14 @@ async function cmdStatus() {
             renderAunAidsTable(aidsResp.aids);
           }
         } catch { /* ignore */ }
+
+        // 控制 AID（daemon 进程身份）状态
+        if (status.controlAid) {
+          const state = status.controlAid.connected ? 'connected' : 'disconnected';
+          console.log(`control: ${status.controlAid.aid}  [${state}]`);
+        } else {
+          console.log('control: not configured');
+        }
 
         if (status.stats) {
           console.log('');

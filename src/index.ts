@@ -3,7 +3,8 @@ import { CodexSessionFileAdapter } from './core/session/adapters/codex-session-f
 import { GeminiSessionFileAdapter } from './core/session/adapters/gemini-session-file-adapter.js';
 import { ensureDataDirs, resolvePaths, agentDir, getPackageRoot, agentMdPath } from './paths.js';
 import { resolveAnthropicConfig } from './agents/resolve.js';
-import { loadDefaults, loadAllAgents, mergeForAgent, ensureAgentDirSkeleton, autoMigrateIfNeeded, migrateIdentitiesIfNeeded } from './config-store.js';
+import { loadDefaults, loadAllAgents, mergeForAgent, ensureAgentDirSkeleton, autoMigrateIfNeeded, migrateIdentitiesIfNeeded, migrateProcessConfigIfNeeded } from './config-store.js';
+import { loadEvolclawConfig } from './evolclaw-config.js';
 import type { Config, MergedAgentConfig, AgentConfig, DefaultsConfig } from './types.js';
 import { CONFIG_SCHEMA_VERSION } from './types.js';
 import dotenv from 'dotenv';
@@ -13,7 +14,7 @@ import { CodexAgentPlugin } from './agents/codex-runner.js';
 import { GeminiAgentPlugin } from './agents/gemini-runner.js';
 import { FeishuChannelPlugin } from './channels/feishu.js';
 import { WechatChannelPlugin } from './channels/wechat.js';
-import { AUNChannelPlugin } from './channels/aun.js';
+import { AUNChannel, AUNChannelPlugin } from './channels/aun.js';
 import { DingtalkChannelPlugin } from './channels/dingtalk.js';
 import { QQBotChannelPlugin } from './channels/qqbot.js';
 import { WecomChannelPlugin } from './channels/wecom.js';
@@ -223,6 +224,9 @@ async function main() {
   // ── 自动迁移 ──
   migrateIdentitiesIfNeeded();
   autoMigrateIfNeeded();
+  // config.json（ProcessConfig）→ evolclaw.json：必须在任何 getAidStore（AUN 连接）之前，
+  // 否则首次读 encryptionSeed 时迁移还没发生。
+  migrateProcessConfigIfNeeded();
 
   // ── ECK 运行时初始化 ──
   initEck();
@@ -233,6 +237,14 @@ async function main() {
 
   // 加载配置（新结构：defaults.json + per-agent config.json）
   const defaults: DefaultsConfig = loadDefaults() ?? { $schema_version: CONFIG_SCHEMA_VERSION };
+  const evolclawCfg = loadEvolclawConfig();
+
+  // 进程级 menu 操作（/system /agent）鉴权：owners 来自 evolclaw.json 顶层。
+  // owners 为空时这些操作一律 FORBIDDEN，启动时提示如何配置。
+  if (!evolclawCfg.owners || evolclawCfg.owners.length === 0) {
+    logger.warn('[startup] evolclaw.json.owners 未配置：进程级 menu 操作（/system /agent）将一律拒绝。' +
+      '如需远程管理，请在 evolclaw.json 配置 owners: [<你的 AID>]');
+  }
 
   // 应用配置中的日志级别（优先于环境变量）
   // logLevel 现在不在新结构中——若要保留，将来可加 defaults.debug.logLevel
@@ -768,6 +780,27 @@ async function main() {
     });
   }
 
+  // ── 控制 AID（daemon 进程身份）：pureIdentity 接入 AUN，独立于 evolagent ──
+  let controlChannel: AUNChannel | undefined;
+  if (evolclawCfg.aid) {
+    controlChannel = new AUNChannel({
+      aid: evolclawCfg.aid,
+      agentName: evolclawCfg.aid,
+      channelName: 'control',
+      pureIdentity: true,
+      aunTrace: evolclawCfg.debug?.aunTrace ?? defaults.debug?.aunTrace,
+      aunSdkLog: evolclawCfg.debug?.aunSdkLog ?? defaults.debug?.aunSdkLog,
+    });
+    // connect() 失败不置空实例：AUNChannel 内部有无限重连（SDK auto_reconnect +
+    // scheduleReconnect），首连失败后台会自愈；保留实例供 status 显示 disconnected。
+    try {
+      await controlChannel.connect();
+      logger.info(`✓ 控制 AID 已连接: ${evolclawCfg.aid}`);
+    } catch (e: any) {
+      logger.warn(`控制 AID 首连失败（后台自动重连，不影响 daemon 主流程）: ${e?.message || e}`);
+    }
+  }
+
   // 上线通知：延迟 1-3 秒后向 owner 发送上线消息（带 name + 工作目录）
   // 需在配置中 debug.upmsg: true 手动开启
   setTimeout(() => {
@@ -969,6 +1002,9 @@ async function main() {
         errors: snap.lastHour.errors,
         avgResponseMs: snap.lastHour.avgResponseMs,
       },
+      controlAid: evolclawCfg.aid
+        ? { aid: evolclawCfg.aid, connected: controlChannel?.getAidState().status === 'connected' }
+        : undefined,
     };
   }, async (cmd, sessionId) => cmdHandler.handleCtl(cmd, sessionId));
 
@@ -1133,6 +1169,11 @@ async function main() {
     for (const inst of channelInstances) {
       const type = inst.channelType || inst.adapter.channelName;
       eventBus.publish({ type: 'channel:disconnected', channel: type, channelName: inst.adapter.channelName, reason: 'shutdown' });
+    }
+
+    // 断开控制 AID（daemon 进程身份）
+    if (controlChannel) {
+      try { await controlChannel.disconnect(); } catch { /* ignore */ }
     }
 
     sessionManager.close();

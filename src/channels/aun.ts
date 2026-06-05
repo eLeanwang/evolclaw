@@ -76,6 +76,7 @@ export interface AUNConfig {
   owner?: string;         // Owner AID，用于发送欢迎消息
   agentName?: string;     // self-agent 的 AID（用于 status 表格识别归属）
   channelName?: string;   // channel 实例名（用于日志/状态聚合）
+  pureIdentity?: boolean;  // 纯身份模式：跳过 evolagent onboarding（welcome / agent.md 上传 / 自身 agent.md 拉取 / group 监听）
 }
 
 /** AUNChannel.dispatchMessage 投递给 bridge 的统一入站载荷（含网络邻近性 proximity）。 */
@@ -696,13 +697,16 @@ export class AUNChannel {
       logger.debug(`${this.logPrefix()}[DIAG] message.received: kind=${kind} keys=${keys}`);
       this.handleIncomingPrivateMessage(data);
     });
-    client.on('group.message_created', (data: unknown) => {
-      this.trace('IN', 'group.message_created', data);
-      const gid = (data && typeof data === 'object') ? (data as any).group_id ?? '' : '';
-      const sender = (data && typeof data === 'object') ? (data as any).sender_aid ?? '' : '';
-      logger.debug(`${this.logPrefix()}[DIAG] group.message_created: group_id=${gid} sender=${sender}`);
-      this.handleIncomingGroupMessage(data);
-    });
+    // pureIdentity（控制 AID）：协议层不接群消息，不注册 group 创建监听
+    if (!this.config.pureIdentity) {
+      client.on('group.message_created', (data: unknown) => {
+        this.trace('IN', 'group.message_created', data);
+        const gid = (data && typeof data === 'object') ? (data as any).group_id ?? '' : '';
+        const sender = (data && typeof data === 'object') ? (data as any).sender_aid ?? '' : '';
+        logger.debug(`${this.logPrefix()}[DIAG] group.message_created: group_id=${gid} sender=${sender}`);
+        this.handleIncomingGroupMessage(data);
+      });
+    }
     client.on('connection.state', (data: unknown) => {
       // trace is handled inside handleConnectionState with throttling
       this.handleConnectionState(data);
@@ -731,11 +735,14 @@ export class AUNChannel {
       const d = data as Record<string, any>;
       logger.warn(`${this.logPrefix()} Message undecryptable: from=${d.from} mid=${d.message_id} err=${d._decrypt_error}`);
     });
-    client.on('group.message_undecryptable', (data: unknown) => {
-      this.trace('IN', 'group.message_undecryptable', data);
-      const d = data as Record<string, any>;
-      logger.warn(`${this.logPrefix()} Group message undecryptable: group=${d.group_id} from=${d.from} mid=${d.message_id} err=${d._decrypt_error}`);
-    });
+    // pureIdentity（控制 AID）：不注册 group 解密失败监听
+    if (!this.config.pureIdentity) {
+      client.on('group.message_undecryptable', (data: unknown) => {
+        this.trace('IN', 'group.message_undecryptable', data);
+        const d = data as Record<string, any>;
+        logger.warn(`${this.logPrefix()} Group message undecryptable: group=${d.group_id} from=${d.from} mid=${d.message_id} err=${d._decrypt_error}`);
+      });
+    }
 
     // Authenticate（拿权威 gateway 用于日志/状态；connect 内部也会复用 token）
     try {
@@ -783,7 +790,8 @@ export class AUNChannel {
       this._aid = this.client.aid ?? undefined;
       const deviceId = (this.client as any)._device_id ?? '';
       this._chatId = this._aid ? `${this._aid}:${deviceId}:` : '';
-      this._selfName = this.loadSelfName(aidName);
+      // pureIdentity（控制 AID）：无 agent.md，跳过自身 agent.md 拉取，省一次 404
+      this._selfName = this.config.pureIdentity ? undefined : this.loadSelfName(aidName);
       if (this._selfName && this.aidStatsCollector) this.aidStatsCollector.setSelfName(this.config.aid, this._selfName);
       this.connected = true;
       this.connectedAt = Date.now();
@@ -806,7 +814,10 @@ export class AUNChannel {
       appendAidLifecycle({ ts: Date.now(), iso: new Date().toISOString(), event: 'connected', aid: this.config.aid, gateway: this.gatewayUrl });
 
       // Send welcome message to owner after first connection
-      await this.sendWelcomeMessage();
+      // pureIdentity（控制 AID）：跳过 evolagent onboarding（根除 warn 噪声 + 永不 agentmdPut）
+      if (!this.config.pureIdentity) {
+        await this.sendWelcomeMessage();
+      }
     } catch (e) {
       this.trace('OUT', 'client.connect.error', { error: String(e) });
       logger.error(`${this.logPrefix()} Connection failed: ${e}`);

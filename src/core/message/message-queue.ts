@@ -77,15 +77,21 @@ export class MessageQueue {
 
   /**
    * 检查消息是否应该处理（去重）
+   *
+   * 去重 key = `${sessionKey}:${messageId}`，而非裸 messageId。
+   * MessageQueue 是进程级单例，被所有 evolagent 共享。AUN 群广播时同一条群消息
+   * 会投递给群里每个 evolagent，它们 messageId 相同但 session 不同，必须各处理一次。
+   * 裸 messageId 去重会让先入队的 agent 吞掉其他 agent 的消息。
    */
-  private shouldProcess(message: Message): boolean {
+  private shouldProcess(sessionKey: string, message: Message): boolean {
     if (!message.messageId) return true; // 无 ID 的消息不去重
-    if (this.recentMessageIds.has(message.messageId)) {
-      logger.debug(`[Queue] Duplicate message ${message.messageId}, skipping`);
+    const dedupKey = `${sessionKey}:${message.messageId}`;
+    if (this.recentMessageIds.has(dedupKey)) {
+      logger.debug(`[Queue] Duplicate message ${dedupKey}, skipping`);
       return false;
     }
-    this.recentMessageIds.add(message.messageId);
-    setTimeout(() => this.recentMessageIds.delete(message.messageId!), this.DEDUP_WINDOW);
+    this.recentMessageIds.add(dedupKey);
+    setTimeout(() => this.recentMessageIds.delete(dedupKey), this.DEDUP_WINDOW);
     return true;
   }
 
@@ -106,7 +112,7 @@ export class MessageQueue {
 
   async enqueue(sessionKey: string, message: Message, projectPath: string, options?: { interruptible?: boolean; agentName?: string }): Promise<void> {
     // 消息去重检查
-    if (!this.shouldProcess(message)) {
+    if (!this.shouldProcess(sessionKey, message)) {
       return Promise.resolve();
     }
 

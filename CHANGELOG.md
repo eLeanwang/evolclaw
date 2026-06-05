@@ -1,5 +1,29 @@
 # Changelog
 
+## v3.2.0 (2026-06-05)
+
+### New Features
+
+- **控制 AID（control AID）** — 进程级控制身份，启动时以 `pureIdentity` 模式连接 AUN（跳过 evolagent onboarding）。生成采用 `ec+5位数字` 候选 + PKI 权威查重 + fail-fast；缺失时进入 init（TTY 守卫，headless 仅告警）。`evolclaw status` 新增控制 AID 连接状态展示
+- **Menu 协议 / agent 控制面** — `/system`、`/agent` 迁移到 owners 鉴权；trigger 接入菜单协议（直连 manager/scheduler，无文本拼装）；agent 创建支持 accepted-return + 构建进度（`create-status.json` + `onPhase` 回调 + model/chatmode）；新增 agent query/options 与 project 兜底
+- **进程级 owners 配置层** — 新增 `evolclaw.json` 进程级配置，`config.json` 合并入 `evolclaw.json`（弃用 `ProcessConfig`）；process-level owners 从 `defaults.json` 迁移到 `evolclaw.json`；新增 `isProcessLevelOwner` 鉴权辅助
+- **Observer 模式重构** — AUN owner 间消息互转发；`evolclaw init aun` 简化为 owner-only 配置；`mergeForAgent` 输出补全 `dispatch`/`observable`
+
+### Improvements
+
+- **统一 FileCache** — 新增 mtime-gated 统一文件缓存，迁移 relation prefs、manifest+fragment、persona/working 读取与 model-scope 缓存；新增 Cache watch 视图监控缓存命中
+- **消息信封渲染补全** — @AID 列表与群名补全，修复 proximity 信息丢失
+- **Idle 监控解耦** — idle notify/warn 改为事件总线发布（`runner:idle-notify`/`runner:idle-warn`，携带 idleSec/事件数/工具名），与通道发送解耦；超时诊断信息下沉到事件 payload
+
+### Bug Fixes
+
+- **多 agent 群广播去重** — 消息队列改按 `sessionKey:messageId` 去重，允许同一消息广播给多个 agent
+- **AUN owner 入站转发** — owner 来源的入站消息正确转发给其它 owners
+- **单 agent reload 缓存失效** — reload 时失效 identity 层缓存
+- **CLI /slist 过滤** — 过滤掉程序化 SDK session，不在 `/slist` 显示
+- **控制 AID 查重走 GET** — 改用 `store.resolve`（GET）替代 `store.exists`（HEAD），规避部分 Gateway 对 HEAD 空响应断连导致的误判
+- **启动门控修复** — gate 直接调 `initTail` 而非完整 `cmdInit`；AID 生成失败时跳过 owners 提示；抑制控制 AID gate 路径的 SDK keystore 日志
+
 ## v3.1.11 (2026-06-04)
 
 ### Improvements

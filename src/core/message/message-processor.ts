@@ -336,21 +336,9 @@ export class MessageProcessor {
     const streamKey = session.id;
     const chatType = message.chatType || 'private';
     const identityRole = session.identity?.role || 'anonymous';
-    const agentNameForMonitor = this.agentRegistry?.resolveByChannel(channelKey)?.name ?? '<unknown>';
-    // observer 插话 Phase 1：所有出站（含 idle 诊断）改道 owner，不碰对端
-    const monitorChannelId = message.replyOverride?.channelId ?? message.channelId;
-
-    // Resolve agent context from registry (Phase 2 foundation)
-    const agentContext = this.getAgentContext(channelKey, chatType);
-    if (agentContext) {
-      logger.debug(`[MessageProcessor] Agent context resolved: ${agentContext.name} (${agentContext.baseagent})`);
-    }
-
-    // 按 session.agentId 选择 agent 后端
-    const agent = this.getAgent(channelKey, session.agentId);
-
     const monitorEnabled = this.globalSettings.idleMonitor?.enabled !== false;
-    const showIdleMonitor = policy.showIdleMonitor(chatType, identityRole);
+    // 按 session.agentId 选择 agent 后端（idle-kill 路径需要 interrupt）
+    const agent = this.getAgent(channelKey, session.agentId);
 
     // 计算是否抑制中间输出（工具活动 + 流式文本）
     const shouldSuppress = (): boolean => {
@@ -361,6 +349,7 @@ export class MessageProcessor {
     let monitor: StreamIdleMonitor | undefined;
     let monitorInterval: ReturnType<typeof setInterval> | undefined;
     let rejectFn: (err: Error) => void;
+    let lastIdleSec = 0;
 
     const resetTimer = (eventType?: string, toolName?: string) => {
       monitor?.recordEvent(eventType || 'unknown', toolName);
@@ -380,20 +369,9 @@ export class MessageProcessor {
         let result = monitor!.check();
         while (result) {
           if (result.action === 'kill') {
+            lastIdleSec = result.idleSec;
             logger.warn(`[MessageProcessor] Idle monitor: kill after ${result.idleSec}s idle, stream: ${streamKey}`);
             this.eventBus.publish({ type: 'runner:idle-timeout', sessionId: streamKey, idleSec: result.idleSec });
-            // 后台任务也需要中断（释放资源），但不发送通知
-            if (channelInfo && !isBackground) {
-              const msg = showIdleMonitor
-                ? result.message
-                : `\u26a0\ufe0f 任务超时（${result.idleSec}秒无响应），已自动中断`;
-              channelInfo.adapter.send(
-                buildEnvelope({ channel: channelInfo.adapter.channelName, channelId: monitorChannelId, agentName: agentNameForMonitor }),
-                { kind: 'system.notice', text: msg, subtype: 'health' }
-              ).catch(e => {
-                logger.debug(`[MessageProcessor] Failed to send kill diagnostic message:`, e);
-              });
-            }
             logger.info(`[MessageProcessor] agent.interrupt invoked (idle-kill) stream=${streamKey}`);
             agent.interrupt(streamKey).catch(e => {
               logger.debug(`[MessageProcessor] Interrupt failed (may already be cleaned up):`, e);
@@ -401,18 +379,16 @@ export class MessageProcessor {
             rejectFn(new Error('SDK_TIMEOUT'));
             return;
           } else {
-            // notify or warn: send diagnostic message, task continues
+            // notify or warn: publish event, task continues
             logger.info(`[MessageProcessor] Idle monitor: ${result.action} after ${result.idleSec}s idle, stream: ${streamKey}`);
-            if (channelInfo && showIdleMonitor && !shouldSuppress()) {
-              if (!isBackground) {
-                channelInfo.adapter.send(
-                  buildEnvelope({ channel: channelInfo.adapter.channelName, channelId: monitorChannelId, agentName: agentNameForMonitor }),
-                  { kind: 'system.notice', text: result.message, subtype: 'health' }
-                ).catch(e => {
-                  logger.debug(`[MessageProcessor] Failed to send idle monitor message:`, e);
-                });
-              }
-            }
+            this.eventBus.publish({
+              type: result.action === 'notify' ? 'runner:idle-notify' : 'runner:idle-warn',
+              sessionId: streamKey,
+              idleSec: result.idleSec,
+              totalEvents: result.state.totalEvents,
+              totalToolCalls: result.state.totalToolCalls,
+              lastToolName: result.state.lastToolName,
+            });
           }
           result = monitor!.check();
         }
@@ -421,7 +397,7 @@ export class MessageProcessor {
 
     try {
       await Promise.race([
-        this._processMessageInternal(message, session, absoluteProjectPath, resetTimer, shouldSuppress),
+        this._processMessageInternal(message, session, absoluteProjectPath, resetTimer, shouldSuppress, () => lastIdleSec),
         timeoutPromise
       ]);
     } catch (error: any) {
@@ -466,7 +442,7 @@ export class MessageProcessor {
   }
 
   /** 自动安全模式已禁用：仅保留错误计数，不再自动切换状态 */
-  private async _processMessageInternal(message: Message, session: Session, absoluteProjectPath: string, resetTimer: (eventType?: string, toolName?: string) => void, shouldSuppress: () => boolean): Promise<void> {
+  private async _processMessageInternal(message: Message, session: Session, absoluteProjectPath: string, resetTimer: (eventType?: string, toolName?: string) => void, shouldSuppress: () => boolean, getLastIdleSec?: () => number): Promise<void> {
     const messageId = `${message.channel}_${message.channelId}_${message.timestamp || Date.now()}`;
     const channelKey = session.metadata?.channelKey || message.channel;
     const channelInfo = this.resolveChannelInfo(channelKey);
@@ -492,43 +468,29 @@ export class MessageProcessor {
 
     // 为本次任务处理生成唯一 task_id（客户端生成，格式 task-{10hex}）
     const taskId = `task-${crypto.randomUUID().replace(/-/g, '').slice(0, 10)}`;
-
-    // per-turn 出站改道（observer 插话 Phase 1）：把这一轮回复目标改到 owner、强制 interactive，
-    // 不改 session.sessionMode。详见 docs/observer-insert-design.md §1.7/§1.8。
-    const override = message.replyOverride;
-    const outboundChannelId = override?.channelId ?? message.channelId;
-    const forceInteractive = override?.forceInteractive === true;
-
-    const isProactive = !forceInteractive && session.sessionMode === 'proactive';
-    const isAutonomous = !forceInteractive && session.sessionMode === 'autonomous';
-    const chatmode = isProactive ? 'proactive' : 'interactive';
+    const chatmode = session.sessionMode ?? 'interactive';
 
     // 诊断日志：记录 inbound message_id 和生成的 task_id 的对应关系
-    logger.info(`[MessageProcessor] Task created: inboundMsgId=${message.messageId ?? 'none'} taskId=${taskId} sessionId=${session.id} chatmode=${chatmode}${override ? ` [inject→${outboundChannelId}]` : ''}`);
-
-    // observer 插话：出站回应虽改道发给 owner，但 watch 记录应落在被观察的 agent↔对端 会话。
-    // 透传 injectPeerChannelId（被观察对端）让 channel 出站时记录到正确会话并标 owner-inject。
-    const injectPeerChannelId = message.injectMeta?.targetChannelId;
+    logger.info(`[MessageProcessor] Task created: inboundMsgId=${message.messageId ?? 'none'} taskId=${taskId} sessionId=${session.id} chatmode=${chatmode}`);
 
     // 构建带 taskId/chatmode 的 ReplyContext（本次任务所有出站消息共用）
     const taskReplyContext = (): ReplyContext => {
       const base = this.getReplyContext(message);
       return {
         ...(base ?? {}),
-        metadata: {
-          ...(base?.metadata ?? {}), taskId, chatmode,
-          ...(injectPeerChannelId ? { injectPeerChannelId } : {}),
-        },
+        metadata: { ...(base?.metadata ?? {}), taskId, chatmode },
       };
     };
 
+    const isProactive = session.sessionMode === 'proactive';
+    const isAutonomous = session.sessionMode === 'autonomous';
     const envelope = buildEnvelope({
       taskId,
       sessionId: session.id,
       channel: message.channel,
-      channelId: outboundChannelId,
+      channelId: message.channelId,
       agentName: agentNameForStats,
-      chatmode,
+      chatmode: isProactive ? 'proactive' : 'interactive',
       replyContext: taskReplyContext(),
     });
 
@@ -611,12 +573,7 @@ export class MessageProcessor {
           if (payload.kind === 'result.text' && payload.isFinal) {
             opts.title = '\u2705 \u6700\u7ec8\u56de\u590d:';
           }
-          // observer \u63d2\u8bdd\uff1a\u900f\u4f20 injectPeerChannelId\uff0c\u4f7f channel \u51fa\u7ad9\u628a\u56de\u5e94\u8bb0\u5f55\u5230\u88ab\u89c2\u5bdf\u4f1a\u8bdd\u3001
-          // \u4e0d\u5199 owner \u4f1a\u8bdd\u3001\u4e0d forward\uff08renderer \u7528\u81ea\u5efa opts\uff0c\u4e0d\u8d70 taskReplyContext\uff0c\u6545\u5728\u6b64\u8865\uff09\u3002
-          opts.metadata = {
-            ...(opts.metadata ?? {}), taskId, chatmode,
-            ...(injectPeerChannelId ? { injectPeerChannelId } : {}),
-          };
+          opts.metadata = { ...(opts.metadata ?? {}), taskId, chatmode };
 
           const enrichedEnvelope: OutboundEnvelope = { ...envelope, replyContext: opts };
           await adapter.send(enrichedEnvelope, payload);
@@ -632,8 +589,7 @@ export class MessageProcessor {
       // 调用 AgentRunner（含上下文过长自动 compact 重试）
 
       // 捕获当前消息的上下文（闭包），避免后续消息处理时串台
-      // observer 插话 Phase 1：权限审批等出站也改道 owner
-      const capturedChannelId = outboundChannelId;
+      const capturedChannelId = message.channelId;
       const capturedReplyContext = taskReplyContext();
 
       // 设置权限审批的消息发送回调（指向当前渠道）
@@ -1277,7 +1233,7 @@ export class MessageProcessor {
       // 用户主动中断（新消息打断 或 /stop 命令）时静默，不发送中断/错误提示
       if (!isUserInterrupt) {
         const statusPayload = procStatus === 'timeout'
-          ? { kind: 'status.timeout' as const }
+          ? { kind: 'status.timeout' as const, metadata: { idleSec: getLastIdleSec?.() || undefined } }
           : procStatus === 'interrupted'
           ? { kind: 'status.interrupted' as const, metadata: { reason: 'stream_error' } }
           : { kind: 'status.error' as const };
@@ -1315,17 +1271,20 @@ export class MessageProcessor {
         logger.error(`[${message.channel}] Error stack:`, error.stack);
       }
 
-      // 发送用户友好的错误消息（SDK_TIMEOUT 已在 kill 级别发过提示，跳过）
+      // 发送用户友好的错误消息
       // 用户主动中断（新消息打断 或 /stop 命令）时静默，不发送错误提示
       // processEventStream 已通过 renderer 发过错误时也跳过
-      if (error instanceof Error && error.message === 'SDK_TIMEOUT') {
-        logger.info(`[MessageProcessor] SDK_TIMEOUT error, skip sending duplicate message`);
-      } else if (isUserInterrupt) {
+      const isTimeout = error instanceof Error && error.message === 'SDK_TIMEOUT';
+      if (isUserInterrupt) {
         logger.info(`[MessageProcessor] User interrupt by new_message, skip sending error message`);
       } else if ((error as any)?._errorAlreadySent) {
         logger.info(`[MessageProcessor] Error already sent via renderer, skip sending duplicate message`);
       } else {
-        const userMessage = getErrorMessage(error, undefined);
+        // SDK_TIMEOUT：status.timeout 已发结构化状态，此处再补一条用户可见的错误文本（result.error）
+        const idleSec = getLastIdleSec?.() || 0;
+        const userMessage = isTimeout
+          ? (idleSec > 0 ? `⚠️ 任务超时（${idleSec}秒无响应），已自动中断` : '⚠️ 任务超时，已自动中断')
+          : getErrorMessage(error, undefined);
         // 获取 session 用于话题回复（如果 resolveSession 已执行）
         let sendOpts: ReplyContext | undefined;
         try {
@@ -1345,15 +1304,15 @@ export class MessageProcessor {
           );
           sendOpts = this.getReplyContext(message);
         } catch {}
-        // 注入 taskId / chatmode（与任务主流程保持一致）+ observer 插话改道标记
+        // 注入 taskId / chatmode（与任务主流程保持一致）
         sendOpts = {
           ...(sendOpts ?? {}),
-          metadata: {
-            ...(sendOpts?.metadata ?? {}), taskId, chatmode,
-            ...(injectPeerChannelId ? { injectPeerChannelId } : {}),
-          },
+          metadata: { ...(sendOpts?.metadata ?? {}), taskId, chatmode },
         };
-        await adapter.send({ ...envelope, replyContext: sendOpts }, { kind: 'result.text', text: userMessage, isFinal: true });
+        const errorPayload = isTimeout
+          ? { kind: 'result.error' as const, text: userMessage, reason: 'timeout' }
+          : { kind: 'result.text' as const, text: userMessage, isFinal: true };
+        await adapter.send({ ...envelope, replyContext: sendOpts }, errorPayload);
 
         // Proactive 可观测：catch 块的基础设施错误也透传为 thought，保证按 task_id 聚合完整
       }
