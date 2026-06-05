@@ -46,6 +46,12 @@ function writeDefaults(chosen: Baseagent, available: Baseagent[], projectsDefaul
   saveDefaultsSafe(buildDefaults(chosen, available, projectsDefaultPath));
 }
 
+/** 启动门禁判定：缺控制 AID 且处于交互式终端时，应进 init 向导补全。
+ *  非 TTY（restart-monitor/systemd/管道）即使缺 aid 也不进 init（无法交互），由 daemon 侧 warn 兜底。 */
+export function needsControlAidInit(aid: string | undefined, isTty: boolean): boolean {
+  return !aid && isTty;
+}
+
 // ==================== Main ====================
 
 export async function cmdInit(options?: {
