@@ -246,6 +246,7 @@ export class MessageQueue {
           sameDevice: m.sameDevice, sameNetwork: m.sameNetwork, sameEgressIp: m.sameEgressIp,
           content: m.content, timestamp: m.timestamp,
           images: m.images && m.images.length > 0 ? m.images : undefined,
+          mentionAids: m.mentionAids && m.mentionAids.length > 0 ? m.mentionAids : undefined,
         });
       }
     }

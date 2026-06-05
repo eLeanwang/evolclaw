@@ -64,6 +64,8 @@ function renderOneItem(
     sameDevice: item.sameDevice ?? sessionVars.sameDevice,
     sameNetwork: item.sameNetwork ?? sessionVars.sameNetwork,
     sameEgressIp: item.sameEgressIp ?? sessionVars.sameEgressIp,
+    // 模板引擎不支持数组循环：被 @ 的 AID 预先 join 成串，空则 undefined 使 {{?mentionAids}} 落空。
+    mentionAids: (item.mentionAids && item.mentionAids.length > 0) ? item.mentionAids.join(',') : undefined,
     now: formatLocalTime(
       item.timestamp ?? Date.now(),
       sessionVars.timezone ? String(sessionVars.timezone) : undefined,

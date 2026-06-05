@@ -172,7 +172,7 @@ export class MessageBridge {
           sameNetwork: msg.sameNetwork,
           sameEgressIp: msg.sameEgressIp,
           messageId: msg.messageId,
-          mentions: msg.mentions, threadId: msg.threadId,
+          mentions: msg.mentions, mentionAids: msg.mentionAids, threadId: msg.threadId,
           replyContext: msg.replyContext,
         };
 

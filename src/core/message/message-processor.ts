@@ -734,9 +734,6 @@ export class MessageProcessor {
         const normalizedBaseagent = normalizeBaseagent(agent.name);
         agentModel = (typeof (agent as any).getModel === 'function') ? (agent as any).getModel() as string : undefined;
 
-        // [TEMP-PROX-DIAG] 四象限验证：明文/密文 × 私聊/群聊 的 proximity 抵达情况
-        logger.info(`[PROX-DIAG] chatType=${session.chatType} encrypted=${message.replyContext?.metadata?.encrypted} peerId=${message.peerId} groupId=${session.metadata?.groupId ?? '-'} sameDevice=${message.sameDevice} sameNetwork=${message.sameNetwork} sameEgressIp=${message.sameEgressIp} content=${JSON.stringify(message.content.slice(0,40))}`);
-
         // Kit renderer: 组装上下文
         const pkgRoot = getPackageRoot();
         const kitCtx: KitRenderContext = {
@@ -770,6 +767,11 @@ export class MessageProcessor {
             sameNetwork: message.sameNetwork ?? false,
             sameEgressIp: message.sameEgressIp ?? false,
             groupId: session.metadata?.groupId || undefined,
+            groupName: session.metadata?.groupName || undefined,
+            // 信封展示用：有群名则「名<ID>」，否则纯 ID。规避模板引擎无 not/else 的限制。
+            groupLabel: session.metadata?.groupId
+              ? (session.metadata?.groupName ? `${session.metadata.groupName}<${session.metadata.groupId}>` : session.metadata.groupId)
+              : undefined,
             chatType: session.chatType || null,
             channel: currentChannelType || null,
             venueUid: undefined,
@@ -823,6 +825,7 @@ export class MessageProcessor {
                   sameDevice: message.sameDevice, sameNetwork: message.sameNetwork, sameEgressIp: message.sameEgressIp,
                   content: message.content, timestamp: message.timestamp,
                   images: message.images,
+                  mentionAids: message.mentionAids,
                 }];
             renderResult = renderMessageBody(renderItems, kitCtx.vars, session.id);
             if (renderResult.body.trim()) effectivePrompt = wrapPrompt(renderResult.body);
@@ -1382,6 +1385,17 @@ export class MessageProcessor {
       logger.info(`[MessageProcessor] group proactive upgrade: sessionId=${session.id} ${session.sessionMode} -> proactive`);
       session.sessionMode = 'proactive';
       await this.sessionManager.updateSession(session.id, { sessionMode: 'proactive' });
+    }
+
+    // 群名解析：群会话首次取群显示名（group.get），缓存到 metadata，供信封渲染。
+    // 渠道私有方法 getGroupName 自带进程缓存 + 容错；取不到不阻塞（groupName 保持空，模板回退 groupId）。
+    if (message.chatType === 'group' && session.metadata?.groupId && !session.metadata.groupName) {
+      const adapter = this.resolveChannelInfo(message.channel)?.adapter;
+      const groupName = await adapter?.getGroupName?.(session.metadata.groupId).catch(() => undefined);
+      if (groupName) {
+        session.metadata.groupName = groupName;
+        await this.sessionManager.updateSession(session.id, { metadata: session.metadata });
+      }
     }
 
     // 兜底纠正2：旧 session 创建时没传 peerType（建为 interactive），后续非 human 消息进来时升级为 proactive。

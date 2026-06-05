@@ -10,7 +10,7 @@ import { fileCache } from '../core/cache/file-cache.js';
 
 // ── Types ──
 
-export type VarValue = string | boolean | number | undefined | null;
+export type VarValue = string | boolean | number | undefined | null | VarValue[] | { [k: string]: VarValue };
 export type Vars = Record<string, VarValue>;
 
 export interface ManifestSection {
@@ -130,10 +130,64 @@ export function evaluateWhen(when: 'always' | WhenCondition, vars: Vars): boolea
 }
 
 export function isTruthy(val: VarValue): boolean {
+  if (Array.isArray(val)) return val.length > 0;  // 空数组视为假，使 {{?arr}} / {{#each}} 落空
   return val !== undefined && val !== null && val !== false && val !== '' && val !== 0;
 }
 
 // ── Template rendering ──
+
+/**
+ * 展开 {{#each KEY}}BODY{{/each}} 循环块（在条件/变量替换之前跑）。
+ * - vars[KEY] 为非空数组才展开；每个元素构造子作用域：
+ *     对象元素 → { ...vars, ...el }（字段可用 {{field}} 访问）
+ *     标量元素 → { ...vars, '.': el }（{{.}} 访问当前元素）
+ *   另注入 {{@index}}（0 基序号）。
+ * - body 经完整 renderTemplate 递归渲染，天然支持嵌套 each / 条件。
+ * - 非数组或空数组 → 整块渲染为空串。
+ * 用深度扫描定位**最外层** each 块（正则无法平衡嵌套），从外向内展开。
+ */
+function resolveEach(template: string, vars: Vars, stripBlankLines: boolean): string {
+  const OPEN = /\{\{#each\s+([A-Za-z_]\w*)\}\}/g;
+  let result = '';
+  let cursor = 0;
+  OPEN.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = OPEN.exec(template)) !== null) {
+    const blockStart = m.index;
+    const key = m[1];
+    const bodyStart = OPEN.lastIndex;
+    // 从 bodyStart 起按深度找配对的 {{/each}}
+    const TOKEN = /\{\{#each\s+[A-Za-z_]\w*\}\}|\{\{\/each\}\}/g;
+    TOKEN.lastIndex = bodyStart;
+    let depth = 1;
+    let bodyEnd = -1;
+    let blockEnd = -1;
+    let t: RegExpExecArray | null;
+    while ((t = TOKEN.exec(template)) !== null) {
+      if (t[0].startsWith('{{#each')) depth++;
+      else { depth--; if (depth === 0) { bodyEnd = t.index; blockEnd = TOKEN.lastIndex; break; } }
+    }
+    if (bodyEnd === -1) break;  // 无配对，剩余原样输出
+    // 输出块前的原文
+    result += template.slice(cursor, blockStart);
+    const body = template.slice(bodyStart, bodyEnd);
+    const arr = vars[key];
+    if (Array.isArray(arr)) {
+      for (let i = 0; i < arr.length; i++) {
+        const el = arr[i];
+        const scope: Vars = (el && typeof el === 'object' && !Array.isArray(el))
+          ? { ...vars, ...(el as Record<string, VarValue>), '@index': i }
+          : { ...vars, '.': el as VarValue, '@index': i };
+        result += renderTemplate(body, scope, stripBlankLines);
+      }
+    }
+    // 数组以外（含 undefined / 非数组）→ 整块跳过（不输出）
+    cursor = blockEnd;
+    OPEN.lastIndex = blockEnd;
+  }
+  result += template.slice(cursor);
+  return result;
+}
 
 function resolveConditions(template: string, vars: Vars): string {
   // 只匹配**最内层** {{?...}}...{{/}} 块（逐字符负向前瞻排除嵌套），do/while 由内向外消解。
@@ -156,10 +210,13 @@ function resolveConditions(template: string, vars: Vars): string {
  * 紧凑）；false 时保留空行（消息正文用，正文多段结构不能被压扁）。
  */
 export function renderTemplate(template: string, vars: Vars, stripBlankLines = true): string {
-  let result = resolveConditions(template, vars);
-  result = result.replace(/\{\{(\w+)\}\}/g, (_match, key) => {
+  let result = resolveEach(template, vars, stripBlankLines);
+  result = resolveConditions(result, vars);
+  // 变量替换：支持普通名、当前元素 {{.}}、循环序号 {{@index}}。
+  result = result.replace(/\{\{(\.|@index|\w+)\}\}/g, (_match, key) => {
     const val = vars[key];
-    if (!isTruthy(val)) return '';
+    if (!isTruthy(val) && val !== 0) return '';  // 0 是有效序号/值，保留
+    if (val === 0) return '0';
     return String(val);
   });
   if (stripBlankLines) return result.split('\n').filter(line => line.trim() !== '').join('\n');

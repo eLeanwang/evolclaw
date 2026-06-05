@@ -8,7 +8,7 @@ import { logger, localTimestamp } from '../utils/logger.js';
 import { LogWriter } from '../utils/log-writer.js';
 import type { ChannelPlugin, ChannelInstance, BridgeHookContext } from '../core/channel-loader.js';
 import type { MessageBridge } from '../core/message/message-bridge.js';
-import type { Config, ReplyContext, AunChannelConfig, AidConnectionState, AidStatus, AidKickDetail, InteractionResponse, ActionInteraction, CommandCard } from '../types.js';
+import type { Config, ReplyContext, AunChannelConfig, AidConnectionState, AidStatus, AidKickDetail, InteractionResponse, ActionInteraction, CommandCard, InboundMessage } from '../types.js';
 import { normalizeChannelInstances, getChannelShowActivities } from '../utils/channel-helpers.js';
 import { resolvePaths, getPackageRoot, agentMdPath as agentMdPathFn, agentDir as agentDirPath, resolveRoot } from '../paths.js';
 import { saveToUploads, sanitizeFileName, bufferToInboundImage, type InboundImage } from '../utils/media-cache.js';
@@ -78,27 +78,67 @@ export interface AUNConfig {
   channelName?: string;   // channel 实例名（用于日志/状态聚合）
 }
 
+/** AUNChannel.dispatchMessage 投递给 bridge 的统一入站载荷（含网络邻近性 proximity）。 */
+export interface AUNDispatchOptions {
+  channelId: string;
+  channelType?: string;
+  content: string;
+  selfAID?: string;
+  groupId?: string;
+  chatType: 'private' | 'group';
+  peerId: string;
+  peerName?: string;
+  peerType?: string;
+  sameDevice?: boolean;
+  sameNetwork?: boolean;
+  sameEgressIp?: boolean;
+  messageId?: string;
+  threadId?: string;
+  mentions?: Array<{ userId: string; name?: string }>;
+  mentionAids?: string[];
+  replyContext?: ReplyContext;
+  source?: 'user' | 'card-trigger';
+  images?: Array<{ data: string; mimeType: string }>;
+}
+
 export interface AUNMessageHandler {
-  (options: {
-    channelId: string;
-    channelType?: string;
-    content: string;
-    selfAID?: string;
-    groupId?: string;
-    chatType: 'private' | 'group';
-    peerId: string;
-    peerName?: string;
-    peerType?: string;
-    sameDevice?: boolean;
-    sameNetwork?: boolean;
-    sameEgressIp?: boolean;
-    messageId?: string;
-    threadId?: string;
-    mentions?: Array<{ userId: string; name?: string }>;
-    replyContext?: ReplyContext;
-    source?: 'user' | 'card-trigger';
-    images?: Array<{ data: string; mimeType: string }>;
-  }): Promise<void>;
+  (options: AUNDispatchOptions): Promise<void>;
+}
+
+/**
+ * 把 AUNChannel 投递的 opts 映射成渠道无关的 InboundMessage。
+ *
+ * registerBridge 适配回调用它替代手抄字段——历史上手抄漏掉了
+ * sameDevice/sameNetwork/sameEgressIp，proximity 在此被吞，eck-debug 永远 false。
+ * 抽成纯函数后可单测锁字段，杜绝再漏。
+ */
+export function aunOptsToInbound(
+  opts: AUNDispatchOptions,
+  channel: string,
+  channelType: string,
+): InboundMessage {
+  return {
+    channel,
+    channelType,
+    channelId: opts.channelId,
+    selfAID: opts.selfAID,
+    groupId: opts.groupId,
+    content: opts.content,
+    chatType: opts.chatType || 'private',
+    peerId: opts.peerId || '',
+    peerName: opts.peerName,
+    peerType: opts.peerType,
+    sameDevice: opts.sameDevice,
+    sameNetwork: opts.sameNetwork,
+    sameEgressIp: opts.sameEgressIp,
+    messageId: opts.messageId,
+    mentions: opts.mentions,
+    mentionAids: opts.mentionAids,
+    threadId: opts.threadId,
+    replyContext: opts.replyContext,
+    source: opts.source,
+    images: opts.images,
+  };
 }
 
 
@@ -467,6 +507,7 @@ export class AUNChannel {
   private _selfName?: string;  // 本地 agent.md 中的 name，首次 connect 时读取
   private _chatId = '';  // aid:device_id:slot_id — 多实例回声过滤
   private seenMessages = new Map<string, number>();
+  private groupNameCache = new Map<string, string>();  // groupId → 群显示名（进程内缓存，群名极少变）
   private peerInfoCache = new Map<string, { type: 'human' | 'ai'; name?: string }>();
   private messageSeqMap = new Map<string, number>();  // messageId → seq (for ack)
   private sentCount = new Map<string, number>();  // channelId → 已发消息计数（用于判断最终回复）
@@ -1330,6 +1371,13 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     logger.info(`${this.logPrefix()} Group dispatched: group=${groupId} sender=${shortAid}(${displayName}) mode=${dispatchMode} mid=${messageId} chatmode=${msgChatmode ?? 'none'} text=${finalText.slice(0, 60)}`);
     appendAidEvent({ ts: Date.now(), iso: new Date().toISOString(), event: 'message_in', aid: this.config.aid, from: senderAid, msgId: messageId, kind: 'text', len: finalText.length, groupId });
     this.aidStatsCollector?.recordInbound(this.config.aid, senderAid, Buffer.byteLength(finalText, 'utf-8'), finalText, payloadType === 'event', msgEncrypted, msgChatmode);
+    // 渲染用完整 @ 列表：结构化 payload.mentions + 正文 @aid 兜底，去重（含 self / "all"）。
+    // 与上面用于过滤/回复的精简 mentions 独立——这份不丢任何被 @ 的 AID。
+    const renderMentionAids = Array.from(new Set([
+      ...payloadMentions,
+      ...this.extractMentionAidsFromText(text),
+    ]));
+
     this.dispatchMessage({
       channelId: groupId,
       groupId,
@@ -1345,6 +1393,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       seq,
       threadId,
       mentions,
+      mentionAids: renderMentionAids.length > 0 ? renderMentionAids : undefined,
       replyContext: this.buildGroupReplyContext(threadId, senderAid, msgEncrypted, messageId, msgChatmode),
       images: inboundImages.length > 0 ? inboundImages : undefined,
     });
@@ -1356,6 +1405,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     peerName?: string; peerType?: string;
     sameDevice?: boolean; sameNetwork?: boolean; sameEgressIp?: boolean;
     seq?: number; threadId?: string; mentions?: string[];
+    mentionAids?: string[];
     replyContext?: ReplyContext;
     groupId?: string;
     images?: Array<{ data: string; mimeType: string }>;
@@ -1430,6 +1480,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       messageId: event.messageId,
       threadId: event.threadId,
       mentions: mentionObjects,
+      mentionAids: event.mentionAids,
       replyContext,
       images: event.images,
     }).catch(err => {
@@ -2682,6 +2733,29 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     const result = await agentmdSync(aid, { store: this.store ?? undefined });
     return result.content ?? '';
   }
+
+  /**
+   * 取群显示名（group.get → group.name），进程内缓存。
+   * 走长连接 callAndTrace，失败/未连接返回 undefined —— 绝不抛出阻塞消息处理。
+   */
+  async getGroupName(groupId: string): Promise<string | undefined> {
+    if (!groupId) return undefined;
+    const cached = this.groupNameCache.get(groupId);
+    if (cached !== undefined) return cached || undefined;
+    if (!this.client) return undefined;
+    try {
+      const result: any = await this.callAndTrace('group.get', { group_id: groupId });
+      const name = result?.group?.name;
+      if (typeof name === 'string' && name) {
+        this.groupNameCache.set(groupId, name);
+        return name;
+      }
+      this.groupNameCache.set(groupId, '');  // 负缓存：避免反复 RPC（空串视为无名）
+      return undefined;
+    } catch {
+      return undefined;  // 不写缓存，下次仍可重试
+    }
+  }
 }
 
 // Plugin implementation
@@ -2844,7 +2918,8 @@ export class AUNChannelPlugin implements ChannelPlugin {
               logger.warn(`[AUN] Unhandled payload kind: ${(payload as any).kind}`);
           }
         },        acknowledge: (messageId: string) => { channel.acknowledge(messageId); return Promise.resolve(); },        onInteraction: (cb: (r: InteractionResponse) => void) => { channel.interactionCallback = cb; },        uploadAgentMd: (content: string) => channel.uploadAgentMd(content),
-        downloadAgentMd: (aid: string) => channel.downloadAgentMd(aid),        _selfAid: () => channel.getStatus().aid,
+        downloadAgentMd: (aid: string) => channel.downloadAgentMd(aid),
+        getGroupName: (groupId: string) => channel.getGroupName(groupId),        _selfAid: () => channel.getStatus().aid,
         _selfName: () => channel.getSelfName(),
       };
 
@@ -2890,28 +2965,8 @@ export class AUNChannelPlugin implements ChannelPlugin {
         registerBridge(bridge: MessageBridge, channelType: string) {
           bridge.register(
             adapter.channelName,
-            (handler) => channel.onMessage(async (opts: any) => {
-              handler({
-                channel: adapter.channelName,
-                channelType,
-                channelId: opts.channelId,
-                selfAID: opts.selfAID,
-                groupId: opts.groupId,
-                content: opts.content,
-                chatType: opts.chatType || 'private',
-                peerId: opts.peerId || '',
-                peerName: opts.peerName,
-                peerType: opts.peerType,
-                sameDevice: opts.sameDevice,
-                sameNetwork: opts.sameNetwork,
-                sameEgressIp: opts.sameEgressIp,
-                messageId: opts.messageId,
-                mentions: opts.mentions,
-                threadId: opts.threadId,
-                replyContext: opts.replyContext,
-                source: opts.source,
-                images: opts.images,
-              });
+            (handler) => channel.onMessage(async (opts) => {
+              handler(aunOptsToInbound(opts, adapter.channelName, channelType));
             }),
             (channelId, text, replyContext) => channel.sendMessage(channelId, text, replyContext),
             adapter,

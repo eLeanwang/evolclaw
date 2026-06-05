@@ -191,6 +191,7 @@ export interface SessionMetadata {
   peerId?: string;                  // 私聊：对端 AID/userId；群聊：当前消息发送者 AID
   peerName?: string;                // 对端/发送者显示名
   groupId?: string;                 // 仅群聊：群 ID（如 AUN 的 group.issuer/grp_xxx）
+  groupName?: string;               // 仅群聊：群显示名（首次群会话经 group.get 取得后缓存，渲染信封用）
   channelKey?: string;             // 完整 channelKey（<type>#<selfAID>#<name>，审计/精确出站路由）
   agentSessions?: {
     codex?: string;
@@ -258,6 +259,8 @@ export interface SubMessage {
   content: string;
   timestamp?: number;
   images?: Array<{ data: string; mimeType: string }>;
+  /** 本条被 @ 的全部 AID（含 self；@all 时含字面 "all"）。仅供消息信封渲染，与过滤/回复用的 mentions 独立。 */
+  mentionAids?: string[];
 }
 
 export interface Message {
@@ -280,6 +283,8 @@ export interface Message {
   content: string;
   images?: Array<{ data: string; mimeType: string }>;
   mentions?: Array<{ userId: string; name?: string; key?: string }>;
+  /** 本条被 @ 的全部 AID（含 self；@all 时含字面 "all"）。仅供消息信封渲染。 */
+  mentionAids?: string[];
   messageId?: string;
   /**
    * 批量合并时保留的逐条子消息（每条带自己的发送者与时刻）。
@@ -318,6 +323,8 @@ export interface InboundMessage {
   messageId?: string;
   images?: Array<{ data: string; mimeType: string }>;
   mentions?: Array<{ userId: string; name?: string; key?: string }>;
+  /** 本条被 @ 的全部 AID（含 self；@all 时含字面 "all"）。仅供消息信封渲染。 */
+  mentionAids?: string[];
   replyContext?: ReplyContext;       // Channel 预构建的回复上下文（渠道无关）
   source?: 'user' | 'card-trigger';  // 消息来源：用户输入 or 卡片按钮触发
 }
@@ -406,6 +413,8 @@ export interface ChannelAdapter {
   /** AUN 协议私有扩展 */
   uploadAgentMd?(content: string): Promise<void>;
   downloadAgentMd?(aid: string): Promise<string>;
+  /** 群显示名解析（渠道私有，AUN 经 group.get；进程内缓存）。取不到返回 undefined，绝不抛出阻塞消息处理。 */
+  getGroupName?(groupId: string): Promise<string | undefined>;
 }
 
 // 渠道配置选项

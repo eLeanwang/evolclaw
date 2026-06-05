@@ -24,6 +24,7 @@ export interface MessageHandlerOptions {
   peerName?: string;
   messageId?: string;
   mentions?: Array<{ userId: string; name?: string; key?: string }>;
+  mentionAids?: string[];
   threadId?: string;
   rootId?: string;
   source?: 'user' | 'card-trigger';
@@ -257,7 +258,7 @@ export class FeishuChannel {
               // 清理残留的 mention 占位符（@_user_N 代表机器人）
               content = content.replace(/@_user_\d+/g, '').trim();
               const finalContent = quotedText + content;
-              await this.messageHandler({ channelId: msg.chat_id, content: finalContent, images: quotedImages.length > 0 ? quotedImages : undefined, peerId, peerName, messageId: msg.message_id, mentions: mentions.length > 0 ? mentions : undefined, threadId, rootId, chatType });
+              await this.messageHandler({ channelId: msg.chat_id, content: finalContent, images: quotedImages.length > 0 ? quotedImages : undefined, peerId, peerName, messageId: msg.message_id, mentions: mentions.length > 0 ? mentions : undefined, mentionAids: mentions.length > 0 ? mentions.map((m: any) => m.userId) : undefined, threadId, rootId, chatType });
             }
             // 处理图片消息
             else if (msg.message_type === 'image') {
@@ -1713,12 +1714,12 @@ export class FeishuChannelPlugin implements ChannelPlugin {
         registerBridge(bridge: MessageBridge, channelType: string) {
           bridge.register(
             adapter.channelName,
-            (handler) => channel.onMessage(async ({ channelId: chatId, content, images, peerId, peerName, messageId, mentions, threadId, rootId, chatType, source }: any) => {
+            (handler) => channel.onMessage(async ({ channelId: chatId, content, images, peerId, peerName, messageId, mentions, mentionAids, threadId, rootId, chatType, source }: any) => {
               await handler({
                 channel: adapter.channelName, channelType, channelId: chatId, content, images,
                 selfAID: (inst as any).agentName,
                 chatType: chatType || 'private',
-                peerId: peerId || '', peerName, messageId, mentions, threadId,
+                peerId: peerId || '', peerName, messageId, mentions, mentionAids, threadId,
                 replyContext: threadId ? { replyToMessageId: rootId ?? threadId, replyInThread: true } : undefined,
                 source,
               });
