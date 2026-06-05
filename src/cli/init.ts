@@ -237,9 +237,9 @@ export async function initTail(): Promise<void> {
     }
   }
 
-  // 配置进程级管理者（owners）：仅交互式 + owners 未配置时询问
+  // 配置进程级管理者（owners）：仅交互式 + aid 已配置 + owners 未配置时询问
   const evcForOwners = loadEvolclawConfig();
-  if (process.stdin.isTTY && (!evcForOwners.owners || evcForOwners.owners.length === 0)) {
+  if (process.stdin.isTTY && evcForOwners.aid && (!evcForOwners.owners || evcForOwners.owners.length === 0)) {
     const { isValidAid } = await import('../aun/aid/index.js');
     const rlOwners = readline.createInterface({ input: process.stdin, output: process.stdout });
     try {
