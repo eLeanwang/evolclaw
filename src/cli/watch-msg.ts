@@ -26,7 +26,7 @@ export interface MessageLogEntry {
   usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } | null;
   encrypt?: boolean;
   chatmode?: string;
-  source?: 'daemon' | 'cli' | 'msg' | 'ctl';
+  source?: 'daemon' | 'cli' | 'msg' | 'ctl' | 'owner-inject';
 }
 
 export interface PeerInfo {
@@ -68,6 +68,7 @@ const GREEN = isTTY ? '\x1b[32m' : '';
 const BLUE = isTTY ? '\x1b[34m' : '';
 const ORANGE = isTTY ? '\x1b[38;5;208m' : '';
 const MAGENTA = isTTY ? '\x1b[35m' : '';
+const YELLOW = isTTY ? '\x1b[33m' : '';
 const BG_SEL = isTTY ? '\x1b[48;5;236m' : '';  // dark gray background for selected row
 
 // ==================== Helpers ====================
@@ -370,8 +371,10 @@ function renderMessagesPanel(state: WatchMsgState, width: number, height: number
     const encLabel = m.encrypt ? '密文' : '明文';
     const modeLabel = m.chatmode === 'proactive' ? '自主' : '响应';
     const metaTags = (m.encrypt != null || m.chatmode) ? `${MAGENTA}[${encLabel}|${modeLabel}]${RST}` : '';
+    // observer 插话：醒目标记，与对端真实消息区分
+    const injectTag = m.source === 'owner-inject' ? `${YELLOW}[插话]${RST}` : '';
     let typeTag = '';
-    if (m.dir === 'out') {
+    if (m.dir === 'out' && m.source !== 'owner-inject') {
       const rawSource = (m as any).source as string | undefined;
       // 4 种来源: daemon | ctl | msg | cli
       const source = (rawSource === 'ctl' || rawSource === 'msg' || rawSource === 'cli') ? rawSource : 'daemon';
@@ -382,7 +385,7 @@ function renderMessagesPanel(state: WatchMsgState, width: number, height: number
     const lenTag = `${DIM}${formatNumber(byteLen)}B${RST}`;
     const fromDisplay = isGroup && m.groupId && m.dir === 'in' ? m.groupId : m.from.split('.')[0];
     const toDisplay = isGroup && m.groupId && m.dir === 'out' ? m.groupId : m.to.split('.')[0];
-    const header = `${DIM}${time}${RST} ${dir}${chatTag}${metaTags}${typeTag} ${ORANGE}${fromDisplay}${RST}${DIM}→${RST}${GREEN}${toDisplay}${RST} ${lenTag}`;
+    const header = `${DIM}${time}${RST} ${dir}${chatTag}${injectTag}${metaTags}${typeTag} ${ORANGE}${fromDisplay}${RST}${DIM}→${RST}${GREEN}${toDisplay}${RST} ${lenTag}`;
     const out: string[] = [padRight(header, msgWidth)];
     const rawContent = m.content.replace(/\n/g, ' ');
     const wrappedLines = wrapText(rawContent, contentLineWidth, maxContentLines);

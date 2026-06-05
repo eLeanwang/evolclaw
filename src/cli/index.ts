@@ -4002,10 +4002,14 @@ Commands:
       process.exit(1);
     }
     if (formatJson) {
-      console.log(JSON.stringify({ ok: true, objectKey: remotePath, isPublic, ref: `${aid}/${remotePath}` }));
+      console.log(JSON.stringify({ ok: true, objectKey: remotePath, isPublic, ref: `${aid}/${remotePath}`, publicUrl: result.publicUrl ?? null }));
     } else {
       console.log(`✓ 已上传: ${remotePath}${isPublic ? ' (公开)' : ''}`);
-      console.log(`  引用: ${aid}/${remotePath}`);
+      if (result.publicUrl) {
+        console.log(`  🔗 访问: ${result.publicUrl}`);
+      } else {
+        console.log(`  引用: ${aid}/${remotePath}`);
+      }
       console.log(`  下载: evolclaw storage download ${aid} ${aid}/${remotePath}`);
     }
     return;
