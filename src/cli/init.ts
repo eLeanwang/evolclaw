@@ -52,6 +52,22 @@ export function needsControlAidInit(aid: string | undefined, isTty: boolean): bo
   return !aid && isTty;
 }
 
+/** 解析用户输入的 owner AID 列表：按空白/逗号分隔，去空、去重、按 isValid 分流。
+ *  空输入 → valid:[]（视为跳过）。 */
+export function parseOwnerAids(raw: string, isValid: (aid: string) => boolean): { valid: string[]; invalid: string[] } {
+  const tokens = raw.split(/[\s,]+/).map(t => t.trim()).filter(Boolean);
+  const valid: string[] = [];
+  const invalid: string[] = [];
+  for (const t of tokens) {
+    if (isValid(t)) {
+      if (!valid.includes(t)) valid.push(t);
+    } else {
+      invalid.push(t);
+    }
+  }
+  return { valid, invalid };
+}
+
 // ==================== Main ====================
 
 export async function cmdInit(options?: {
@@ -217,6 +233,32 @@ export async function cmdInit(options?: {
       } catch (e: any) {
         // 无网/Gateway 不可达时降级：不中断 init，联网后重跑 evolclaw init 补全
         console.error(`⚠️ 控制 AID 生成失败（Gateway 不可达？联网后重跑 evolclaw init 补全）: ${e?.message || e}`);
+      }
+    }
+
+    // ── 配置进程级管理者（owners）：控制谁能远程管理本 daemon（/agent /system）──
+    // 仅交互式 + owners 未配置时询问；空输入=显式跳过。纯本地，不依赖网络。
+    const evcForOwners = loadEvolclawConfig();
+    if (process.stdin.isTTY && (!evcForOwners.owners || evcForOwners.owners.length === 0)) {
+      const { isValidAid } = await import('../aun/aid/index.js');
+      const rlOwners = readline.createInterface({ input: process.stdin, output: process.stdout });
+      try {
+        const raw = (await ask(rlOwners,
+          '\n管理者 AID（谁能远程管理本进程的 /agent /system，多个用空格分隔，直接回车跳过）: ')).trim();
+        if (raw) {
+          const { valid, invalid } = parseOwnerAids(raw, isValidAid);
+          if (invalid.length > 0) console.log(`  ⚠ 跳过非法 AID: ${invalid.join(', ')}`);
+          if (valid.length > 0) {
+            saveEvolclawConfig({ ...loadEvolclawConfig(), owners: valid });
+            console.log(`  ✓ 已配置管理者: ${valid.join(', ')}`);
+          } else {
+            console.log('  未输入合法 AID，已跳过 owners 配置');
+          }
+        } else {
+          console.log('  已跳过 owners 配置（可日后编辑 evolclaw.json 或重跑 evolclaw init）');
+        }
+      } finally {
+        try { rlOwners.close(); } catch { /* ignore */ }
       }
     }
   }
