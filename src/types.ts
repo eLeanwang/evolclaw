@@ -744,7 +744,7 @@ export type ChannelInstance =
 
 /**
  * agents/defaults.json —— per-agent 配置缺失字段的 fallback。
- * 不持有 channels（必须 per-agent）、不持有 owners（必须 per-agent）、不持有 aid。
+ * 不持有 channels / owners / aid（owners 已移至 evolclaw.json 顶层，进程级鉴权专用）。
  */
 export interface DefaultsConfig {
   $schema_version: number;
@@ -757,9 +757,6 @@ export interface DefaultsConfig {
   show_activities?: ShowActivitiesMode;
   flush_delay?: number;
   debounce?: number;
-  /** defaults.owners 提供全局 owner 基础（AID），与 per-agent owners 数组合并去重。
-   *  用于进程级 menu 操作（system / agent）鉴权：仅名单内 AID 可执行。 */
-  owners?: string[];
   /** defaults.admins 提供全局基础（如运维 AID），与 per-agent admins 数组合并去重 */
   admins?: string[];
   debug?: DebugBlock;

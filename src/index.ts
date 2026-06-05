@@ -238,11 +238,12 @@ async function main() {
   // 加载配置（新结构：defaults.json + per-agent config.json）
   const defaults: DefaultsConfig = loadDefaults() ?? { $schema_version: CONFIG_SCHEMA_VERSION };
 
-  // D1 迁移引导：进程级 menu 操作（/system /agent）改为查 defaults.owners 鉴权。
+  // 进程级 menu 操作（/system /agent）鉴权：owners 来自 evolclaw.json 顶层。
   // owners 为空时这些操作一律 FORBIDDEN，启动时提示如何配置。
-  if (!defaults.owners || defaults.owners.length === 0) {
-    logger.warn('[startup] defaults.owners 未配置：进程级 menu 操作（/system /agent）将一律拒绝。' +
-      '如需远程管理，请在 agents/defaults.json 配置 owners: [<你的 AID>]');
+  const { owners: processOwners } = loadEvolclawConfig();
+  if (!processOwners || processOwners.length === 0) {
+    logger.warn('[startup] evolclaw.json.owners 未配置：进程级 menu 操作（/system /agent）将一律拒绝。' +
+      '如需远程管理，请在 evolclaw.json 配置 owners: [<你的 AID>]');
   }
 
   // 应用配置中的日志级别（优先于环境变量）

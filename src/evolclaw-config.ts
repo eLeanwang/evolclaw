@@ -19,6 +19,7 @@ export interface EvolclawAunConfig {
 export interface EvolclawConfig {
   $schema_version?: number;
   aid?: string;
+  owners?: string[];          // 进程级控制面鉴权名单（AID）：谁能远程管理本 daemon（/agent /system）
   debug?: DebugBlock;
   tunnel?: TunnelConfig;
   aun?: EvolclawAunConfig;   // 从旧 config.json 迁入

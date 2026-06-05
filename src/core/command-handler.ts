@@ -25,6 +25,7 @@ import type { Trigger, DefaultsConfig } from '../types.js';
 import { checkLatestVersion, getLocalVersion, isLinkedInstall, compareVersions } from '../utils/npm-ops.js';
 import { tryParseChannelKey } from './channel-loader.js';
 import { loadDefaults } from '../config-store.js';
+import { loadEvolclawConfig } from '../evolclaw-config.js';
 import { execAgentAction, execAgentQuery, execAgentOptions, resolveProjectPath } from './message/command-handler-agent-control.js';
 
 export interface MenuNext {
@@ -673,7 +674,7 @@ export class CommandHandler {
 
     // ── 进程级 /agent list（owners 鉴权） ──
     if (cmd === '/agent') {
-      if (!isProcessLevelOwner(userId, loadDefaults())) {
+      if (!isProcessLevelOwner(userId, loadEvolclawConfig().owners)) {
         throw { code: 'FORBIDDEN', message: '操作需要 owner 权限' };
       }
       const res = await execAgentOptions(args);
@@ -841,7 +842,7 @@ export class CommandHandler {
 
     // ── 进程级 /agent（owners 鉴权） ──
     if (cmdBase === '/agent') {
-      if (!isProcessLevelOwner(userId, loadDefaults())) {
+      if (!isProcessLevelOwner(userId, loadEvolclawConfig().owners)) {
         return { error: '操作需要 owner 权限', code: 'FORBIDDEN' };
       }
       return await execAgentQuery(args);
@@ -953,7 +954,7 @@ export class CommandHandler {
     }
 
     if (cmdBase === '/system') {
-      if (!isProcessLevelOwner(userId, loadDefaults())) {
+      if (!isProcessLevelOwner(userId, loadEvolclawConfig().owners)) {
         return { error: '操作需要 owner 权限', code: 'FORBIDDEN' };
       }
       const owningAgent = this.getOwningAgent(channel);
@@ -1153,7 +1154,7 @@ export class CommandHandler {
     // channel 均可作为入口。part1（daemon 控制 AID）落地后，应叠加 isControlChannel(channelId)
     // 闸：仅控制 AID channel 上的 /agent /system 生效。见 part1 计划。
     if (cmdBase === '/agent') {
-      if (!isProcessLevelOwner(userId, loadDefaults())) {
+      if (!isProcessLevelOwner(userId, loadEvolclawConfig().owners)) {
         return { error: '操作需要 owner 权限', code: 'FORBIDDEN' };
       }
       const a = { ...(args ?? {}) };
@@ -1276,7 +1277,7 @@ export class CommandHandler {
     // ── /system 系列 ──
     if (cmdBase === '/system') {
       // D1 迁移：进程级鉴权统一查 defaults.owners，替代各 action 内联的 identity.role 判断
-      if (!isProcessLevelOwner(userId, loadDefaults())) {
+      if (!isProcessLevelOwner(userId, loadEvolclawConfig().owners)) {
         return { error: '操作需要 owner 权限', code: 'FORBIDDEN' };
       }
       if (action === 'restart') {
@@ -4252,12 +4253,11 @@ export class CommandHandler {
   }
 }
 
-/** 进程级 menu 操作（/agent、/system）鉴权：发送方 AID 必须在 defaults.owners 中。
- *  不依赖 session / channel owner 绑定，纯静态名单比对。 */
-export function isProcessLevelOwner(peerId: string | undefined, defaults: DefaultsConfig | null): boolean {
+/** 进程级 menu 操作（/agent、/system）鉴权：发送方 AID 必须在 owners 名单中。
+ *  owners 来自 evolclaw.json 顶层（进程级控制面配置）。纯静态名单比对。 */
+export function isProcessLevelOwner(peerId: string | undefined, owners: string[] | undefined): boolean {
   if (!peerId) return false;
-  const owners = defaults?.owners ?? [];
-  return owners.includes(peerId);
+  return (owners ?? []).includes(peerId);
 }
 
 /** 校验 menu 路径直传的 trigger 调度参数（绕过 parseTriggerSet 文本解析后必须自校验）。

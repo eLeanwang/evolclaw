@@ -34,4 +34,8 @@ describe('evolclaw-config', () => {
     expect(cfg.aid).toBe('ec12345.agentid.pub');
     expect(cfg.debug?.logLevel).toBe('DEBUG');
   });
+  it('round-trips owners array', () => {
+    saveEvolclawConfig({ $schema_version: 1, owners: ['op.agentid.pub', 'op2.agentid.pub'] });
+    expect(loadEvolclawConfig().owners).toEqual(['op.agentid.pub', 'op2.agentid.pub']);
+  });
 });

@@ -2,14 +2,14 @@ import { describe, it, expect, vi } from 'vitest';
 import { CommandHandler } from '../../src/core/command-handler.js';
 import { EventBus } from '../../src/core/event-bus.js';
 
-// D1：/system 进程级鉴权查 defaults.owners。默认让 user1 在 owners 名单内，
+// D1：/system 进程级鉴权查 evolclaw.json.owners。默认让 user1 在 owners 名单内，
 // 使既有正向用例继续通过；FORBIDDEN 用例按需覆写。
 const ownersMock = vi.hoisted(() => ({ value: ['user1'] as string[] }));
-vi.mock('../../src/config-store.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../../src/config-store.js')>();
+vi.mock('../../src/evolclaw-config.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/evolclaw-config.js')>();
   return {
     ...actual,
-    loadDefaults: vi.fn(() => ({ $schema_version: 1, owners: ownersMock.value })),
+    loadEvolclawConfig: vi.fn(() => ({ $schema_version: 1, owners: ownersMock.value })),
   };
 });
 
