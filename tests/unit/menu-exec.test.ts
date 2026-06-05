@@ -376,7 +376,7 @@ describe('execMenuUpdate', () => {
 
 describe('execMenuAction', () => {
   describe('/system', () => {
-    it('rejects restart for non-owner (not in defaults.owners)', async () => {
+    it('rejects restart for non-owner (not in evolclaw.json owners)', async () => {
       ownersMock.value = ['someone-else.agentid.pub'];
       const { handler } = createHandler();
       const result = await handler.execMenuAction('/system', 'restart', undefined, 'aun', 'chat1', 'user1') as any;
@@ -384,7 +384,7 @@ describe('execMenuAction', () => {
       ownersMock.value = ['user1'];
     });
 
-    it('rejects upgrade for non-owner (not in defaults.owners)', async () => {
+    it('rejects upgrade for non-owner (not in evolclaw.json owners)', async () => {
       ownersMock.value = ['someone-else.agentid.pub'];
       const { handler } = createHandler();
       const result = await handler.execMenuAction('/system', 'upgrade', undefined, 'aun', 'chat1', 'user1') as any;
@@ -392,7 +392,7 @@ describe('execMenuAction', () => {
       ownersMock.value = ['user1'];
     });
 
-    it('check works for owner in defaults.owners', async () => {
+    it('check works for owner in evolclaw.json owners', async () => {
       ownersMock.value = ['user1'];
       const { handler } = createHandler();
       const result = await handler.execMenuAction('/system', 'check', undefined, 'aun', 'chat1', 'user1') as any;

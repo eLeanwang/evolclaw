@@ -21,7 +21,7 @@ import { parseTriggerSet, parseTriggerUpdate } from './trigger/parser.js';
 import type { ParsedTriggerSet } from './trigger/parser.js';
 import { TriggerManager } from './trigger/manager.js';
 import { TriggerScheduler, calcNextFireAt } from './trigger/scheduler.js';
-import type { Trigger, DefaultsConfig } from '../types.js';
+import type { Trigger } from '../types.js';
 import { checkLatestVersion, getLocalVersion, isLinkedInstall, compareVersions } from '../utils/npm-ops.js';
 import { tryParseChannelKey } from './channel-loader.js';
 import { loadDefaults } from '../config-store.js';
@@ -1150,7 +1150,7 @@ export class CommandHandler {
     const identity = this.sessionManager.resolveIdentity(channel, userId);
 
     // ── 进程级 /agent（owners 鉴权，不依赖 session/channel） ──
-    // NOTE(D5): 本次进程级 /agent 仅按 defaults.owners 鉴权，任意 evolagent 的 AUN
+    // NOTE(D5): 本次进程级 /agent 仅按 evolclaw.json owners 鉴权，任意 evolagent 的 AUN
     // channel 均可作为入口。part1（daemon 控制 AID）落地后，应叠加 isControlChannel(channelId)
     // 闸：仅控制 AID channel 上的 /agent /system 生效。见 part1 计划。
     if (cmdBase === '/agent') {
@@ -1276,7 +1276,7 @@ export class CommandHandler {
 
     // ── /system 系列 ──
     if (cmdBase === '/system') {
-      // D1 迁移：进程级鉴权统一查 defaults.owners，替代各 action 内联的 identity.role 判断
+      // D1 迁移：进程级鉴权统一查 evolclaw.json owners，替代各 action 内联的 identity.role 判断
       if (!isProcessLevelOwner(userId, loadEvolclawConfig().owners)) {
         return { error: '操作需要 owner 权限', code: 'FORBIDDEN' };
       }
