@@ -4901,7 +4901,12 @@ export async function main(args: string[]) {
     case 'logs':
       cmdLogs(args.slice(1));
       break;
-    case 'watch':
+    case 'watch': {
+      // watch 子命令（aid/msg）会调 AUN SDK（aidLookup 刷名片、对端探测等），
+      // 与 aid/msg/group 等命令一致：进 case 先关掉 SDK 的 [aun_core] 日志，
+      // 否则 SDK debug 日志会直喷终端、糊住 watch 的 TUI 面板。
+      const { suppressSdkLogs } = await import('../aun/aid/index.js');
+      suppressSdkLogs();
       if (args[1] === 'aid') {
         await cmdWatchAid();
       } else if (args[1] === 'msg') {
@@ -4936,6 +4941,7 @@ export async function main(args: string[]) {
         cmdWatch();
       }
       break;
+    }
     case 'restart-monitor':
       await cmdRestartMonitor();
       break;
