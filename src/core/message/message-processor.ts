@@ -16,9 +16,10 @@ import { summarizeToolInput } from '../permission.js';
 import type { Message, Session, ChannelAdapter, ChannelOptions, ChannelPolicy, CommandHandler, ReplyContext, AgentContext, EvolAgentRegistryHandle, GlobalSettings, OutboundEnvelope, OutboundPayload, InteractionRequest, InteractionKind, ActionInteraction, CommandCard } from '../../types.js';
 import type { TriggerManager } from '../trigger/manager.js';
 import { DEFAULT_PERMISSION_MODE } from '../../types.js';
-import { getPackageRoot, resolveRoot } from '../../paths.js';
+import { getPackageRoot, resolveRoot, resolvePaths } from '../../paths.js';
 import { renderKitSections, type KitRenderContext } from '../../agents/kit-renderer.js';
 import { renderMessageBody, type RenderMessageResult } from '../../agents/message-renderer.js';
+import { consumeHints, hintsToSubMessages, composeHintFallback } from './pending-hints.js';
 import type { SubMessage } from '../../types.js';
 import { normalizeBaseagent } from '../../agents/baseagent-normalize.js';
 import type { InteractionRouter } from '../interaction-router.js';
@@ -222,6 +223,30 @@ export class MessageProcessor {
     // chatmode 解析优先级：agent.config.chatmode > globalSettings.chatmode
     const globalCm = agent.config?.chatmode ?? this.globalSettings.chatmode;
     return agent.getContext(channelName, chatType, globalCm);
+  }
+
+  /**
+   * 观察者插话（v0.3）：消费当前 (对端, thread) 的待用提示，转成 owner-hint SubMessage。
+   * 一次性语义：consumeHints 回放算有效集后清该 thread（其它 thread 残留则保留，否则删文件）。
+   * 仅 aun 渠道（pending-hints 落在 sessions/aun/<self>/<对端>/）。
+   */
+  private consumeOwnerHints(session: Session, message: Message): SubMessage[] {
+    const channelType = session.channelType || message.channelType || session.channel;
+    if (channelType !== 'aun') return [];
+    const selfAID = session.selfAID || message.selfAID;
+    if (!selfAID) return [];
+    // 会话定位键：私聊=对端 AID，群聊=groupId（均为 session.channelId）。
+    const peerChannelId = session.channelId;
+    if (!peerChannelId) return [];
+    try {
+      const hints = consumeHints(resolvePaths().sessionsDir, 'aun', peerChannelId, selfAID, session.threadId);
+      if (hints.length === 0) return [];
+      logger.info(`[MessageProcessor] consumed ${hints.length} owner-hint(s) for ${peerChannelId} thread=${session.threadId || 'main'}`);
+      return hintsToSubMessages(hints);
+    } catch (e) {
+      logger.warn(`[MessageProcessor] consumeOwnerHints failed: ${e instanceof Error ? e.message : String(e)}`);
+      return [];
+    }
   }
 
   /**
@@ -780,6 +805,8 @@ export class MessageProcessor {
             modelFallbackActive: (fbState.fallbackActive || skipEvolclawModel) ? true : undefined,
             modelFallbackModel: (fbState.fallbackActive || skipEvolclawModel) ? (agentModel || undefined) : undefined,
             agentSessionId: session.agentSessionId || undefined,
+            // 渲染模式：各类型当前激活的 modeName（从内存 config 读，渲染层据此选 manifest section）。
+            renderModes: this.agentRegistry?.resolveByChannel(channelKey)?.config?.render ?? undefined,
           },
           sessionId: session.id,
         };
@@ -794,23 +821,30 @@ export class MessageProcessor {
         let renderResult: RenderMessageResult | undefined;
         const hasContent = message.content.trim() || (message.items && message.items.length > 0);
         if (hasContent) {
+          const peerItems: SubMessage[] = message.items && message.items.length > 0
+            ? message.items
+            : [{
+                peerId: message.peerId, peerName: peerName || undefined,
+                peerType: message.peerType,
+                sameDevice: message.sameDevice, sameNetwork: message.sameNetwork, sameEgressIp: message.sameEgressIp,
+                content: message.content, timestamp: message.timestamp,
+                images: message.images,
+                mentionAids: message.mentionAids,
+              }];
+
+          // 观察者插话（v0.3）：消费 (对端, thread) 的待用提示，包成 owner-hint item 排在对端消息前。
+          // 一次性语义：consumeOwnerHints 读取并删除（见 pending-hints.ts）。在 try 外消费，
+          // 这样即便 renderMessageBody 抛错走 raw 兜底，也把提示原文拼进去——绝不静默丢提示。
+          const hintItems = this.consumeOwnerHints(session, message);
+          const renderItems: SubMessage[] = hintItems.length > 0 ? [...hintItems, ...peerItems] : peerItems;
+
           try {
-            const renderItems: SubMessage[] = message.items && message.items.length > 0
-              ? message.items
-              : [{
-                  peerId: message.peerId, peerName: peerName || undefined,
-                  peerType: message.peerType,
-                  sameDevice: message.sameDevice, sameNetwork: message.sameNetwork, sameEgressIp: message.sameEgressIp,
-                  content: message.content, timestamp: message.timestamp,
-                  images: message.images,
-                  mentionAids: message.mentionAids,
-                }];
             renderResult = renderMessageBody(renderItems, kitCtx.vars, session.id);
             if (renderResult.body.trim()) effectivePrompt = wrapPrompt(renderResult.body);
-            else effectivePrompt = wrapPrompt(message.content);
+            else effectivePrompt = wrapPrompt(composeHintFallback(hintItems, message.content));
           } catch (e) {
             logger.warn(`[MessageProcessor] renderMessageBody failed, using raw content: ${e instanceof Error ? e.message : String(e)}`);
-            effectivePrompt = wrapPrompt(message.content);
+            effectivePrompt = wrapPrompt(composeHintFallback(hintItems, message.content));
           }
         }
 

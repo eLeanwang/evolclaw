@@ -513,14 +513,6 @@ async function main() {
   });
   messageQueue.setEventBus(eventBus);
 
-  // observer 插话抢占撤回：撤回已漏给对端的半句（私聊；群聊待 AUN SDK 加 group.recall）
-  messageQueue.setInjectRecallHook((channelKey, channelId, chatType) => {
-    const adapter = processor.getAdapter(channelKey) as unknown as {
-      recallRecentOutbound?: (channelId: string, chatType: 'private' | 'group') => Promise<number>;
-    } | undefined;
-    adapter?.recallRecentOutbound?.(channelId, chatType).catch(() => {});
-  });
-
   // 回填 messageQueue 引用
   cmdHandler.setMessageQueue(messageQueue);
   processor.setMessageQueue(messageQueue);

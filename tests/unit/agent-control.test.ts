@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import path from 'path';
 
 vi.mock('../../src/cli/agent.js', () => ({
   agentCreateNonInteractive: vi.fn(),
@@ -95,7 +96,7 @@ describe('resolveProjectPath fallback', () => {
   });
   it('composes from rootPath + first aid segment', () => {
     expect(resolveProjectPath(undefined, 'mybot.agentid.pub',
-      { $schema_version: 1, projects: { rootPath: '/data/agents' } })).toBe('/data/agents/mybot');
+      { $schema_version: 1, projects: { rootPath: '/data/agents' } })).toBe(path.join('/data/agents', 'mybot'));
   });
   it('falls back to defaultPath', () => {
     expect(resolveProjectPath(undefined, 'mybot.agentid.pub',

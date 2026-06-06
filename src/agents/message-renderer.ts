@@ -13,7 +13,7 @@ import { eckDebugDir } from '../paths.js';
 import { logger } from '../utils/logger.js';
 import type { SubMessage } from '../types.js';
 import {
-  type Vars, loadManifest, evaluateWhen, renderTemplate, loadSectionFiles,
+  type Vars, loadManifest, evaluateWhen, renderTemplate, loadSectionFiles, defaultModeNames,
 } from './manifest-engine.js';
 
 const MESSAGE_MANIFEST_FILE = 'eck_message_manifest.json';
@@ -55,6 +55,21 @@ function renderOneItem(
   contentSentinel: string,
 ): string {
   const sections = loadManifest(MESSAGE_MANIFEST_FILE);
+
+  // 各 modeType 当前激活的 modeName：agent config.render（经 sessionVars.renderModes 透传）
+  // 覆盖 manifest 里标 isDefault 的缺省。详见 docs/observer-insert-design.md 第二部分。
+  const defaults = defaultModeNames(sections);
+  const configured = (sessionVars.renderModes && typeof sessionVars.renderModes === 'object' && !Array.isArray(sessionVars.renderModes))
+    ? sessionVars.renderModes as Record<string, unknown>
+    : {};
+  const activeMode = (type: string): string | undefined => {
+    const c = configured[type];
+    if (typeof c === 'string' && c) return c;
+    return defaults[type];
+  };
+
+  const isOwnerHint = item.kind === 'owner-hint';
+
   // item-level vars: session vars overlaid with this message's own sender/timestamp.
   const itemVars: Vars = {
     ...sessionVars,
@@ -70,6 +85,16 @@ function renderOneItem(
       item.timestamp ?? Date.now(),
       sessionVars.timezone ? String(sessionVars.timezone) : undefined,
     ),
+    // 渲染模式命中变量（manifest section 的 when 用它选中唯一模式）
+    renderMode_private: activeMode('private'),
+    renderMode_group: activeMode('group'),
+    renderMode_inject: activeMode('inject'),
+    // owner 插话提示标记 + 信封头字段
+    isOwnerHint,
+    ownerAid: isOwnerHint ? (item.ownerAid ?? undefined) : undefined,
+    injectTime: isOwnerHint
+      ? formatLocalTime(item.injectTime ?? item.timestamp ?? Date.now(), sessionVars.timezone ? String(sessionVars.timezone) : undefined)
+      : undefined,
     // content held as a per-call random sentinel, swapped back post-render.
     // Using a UUID means no real message can collide with it.
     content: contentSentinel,

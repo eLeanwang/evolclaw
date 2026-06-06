@@ -24,6 +24,12 @@ export interface ManifestSection {
   when: 'always' | WhenCondition;
   enabled?: boolean;
   description?: string;
+  // ── 消息渲染模式（类型 + 名称）。引擎本身忽略这三个字段（命中仍只靠 when）；
+  //    仅 message-renderer 用它们算「config 未配时回退到 isDefault 的模式名」。
+  //    详见 docs/observer-insert-design.md 第二部分。
+  modeType?: 'private' | 'group' | 'inject';
+  modeName?: string;
+  isDefault?: boolean;
 }
 
 export interface WhenCondition {
@@ -34,6 +40,10 @@ export interface WhenCondition {
   nin?: unknown[];
   any?: string[];
   all?: string[];
+  /** 复合 AND：全部子条件成立才命中（用于「item 类型 + 激活模式」这类多维匹配）。 */
+  and?: WhenCondition[];
+  /** 复合 OR：任一子条件成立即命中。 */
+  or?: WhenCondition[];
 }
 
 export interface RawManifest {
@@ -107,10 +117,28 @@ function loadAndMergeManifest(filename: string): ManifestSection[] {
 function sortSections(sections: ManifestSection[]): ManifestSection[] {
   return sections.slice().sort((a, b) => a.order - b.order);
 }
+
+/**
+ * 从 manifest 抽出每个 modeType 标了 isDefault 的 modeName。
+ * 供 message-renderer 在 agent config.render 未配某类型时回退。
+ * 同一 modeType 有多个 isDefault 时取 order 最小（已排序）的第一个。
+ */
+export function defaultModeNames(sections: ManifestSection[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const s of sections) {
+    if (s.modeType && s.isDefault && s.modeName && out[s.modeType] === undefined) {
+      out[s.modeType] = s.modeName;
+    }
+  }
+  return out;
+}
 // ── When condition evaluation ──
 
 export function evaluateWhen(when: 'always' | WhenCondition, vars: Vars): boolean {
   if (when === 'always') return true;
+  // 复合条件优先：and / or 递归求值。
+  if (when.and) return when.and.every(c => evaluateWhen(c, vars));
+  if (when.or) return when.or.some(c => evaluateWhen(c, vars));
   if (when.var !== undefined) {
     const val = vars[when.var];
     if (when.eq !== undefined) {

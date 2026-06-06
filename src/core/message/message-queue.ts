@@ -25,36 +25,19 @@ export class MessageQueue {
   private currentProjectPath?: string;
   private currentAgentId?: string;
   private activeMessageIds = new Set<string>();  // 正在执行的消息 ID
-  private interruptCallback?: (sessionKey: string, agentId?: string, evolagentName?: string, reason?: 'new_message' | 'inject-preempt') => Promise<void>;
+  private interruptCallback?: (sessionKey: string, agentId?: string, evolagentName?: string, reason?: 'new_message') => Promise<void>;
   private eventBus?: EventBus;
   private recentMessageIds = new Set<string>();
   private readonly DEDUP_WINDOW = 60_000; // 1 分钟窗口
   private interceptors = new Map<string, (message: Message) => void>();
-  // observer 插话：当前正在处理的消息（用于抢占时捕获对端消息）；被插话抢占而捕获的待重放对端消息
-  private currentMessage = new Map<string, Message>();          // queueKey → 处理中的 message
-  private pendingReplay = new Map<string, { message: Message; projectPath: string; agentName: string; sessionKey: string }>();
 
   constructor(handler: MessageHandler) {
     this.handler = handler;
   }
 
-  /** 是否为 observer 插话消息（owner 优先级调度依据）。 */
-  private isInject(m: Message): boolean {
-    return m.source === 'owner-inject';
-  }
-
-  setInterruptCallback(callback: (sessionKey: string, agentId?: string, evolagentName?: string, reason?: 'new_message' | 'inject-preempt') => Promise<void>): void {
+  setInterruptCallback(callback: (sessionKey: string, agentId?: string, evolagentName?: string, reason?: 'new_message') => Promise<void>): void {
     this.interruptCallback = callback;
   }
-
-  /**
-   * 注册插话抢占撤回钩子：当 owner 插话抢占了一个正在向对端输出的 turn 时调用，
-   * 撤回已漏给对端的半句。由 daemon 接到对应 channel 的 recallRecentOutbound。
-   */
-  setInjectRecallHook(hook: (channelKey: string, channelId: string, chatType: 'private' | 'group') => void): void {
-    this.injectRecallHook = hook;
-  }
-  private injectRecallHook?: (channelKey: string, channelId: string, chatType: 'private' | 'group') => void;
 
   setEventBus(eventBus: EventBus): void {
     this.eventBus = eventBus;
@@ -130,56 +113,16 @@ export class MessageQueue {
     const isProcessing = this.processing.has(queueKey);
     logger.info(`[Queue] enqueue: key=${queueKey} processing=${isProcessing} queueLen=${this.queues.get(queueKey)?.length ?? 0} agent=${agentName}`);
 
-    const inject = this.isInject(message);
-
     return new Promise((resolve, reject) => {
       if (!this.queues.has(queueKey)) {
         this.queues.set(queueKey, []);
       }
 
       const queue = this.queues.get(queueKey)!;
-      if (inject) {
-        // owner 优先级调度：插话排到所有非插话消息之前（已排队的插话仍在其后，保持 owner 内部 FIFO）。
-        let insertAt = queue.length;
-        for (let i = 0; i < queue.length; i++) {
-          if (!this.isInject(queue[i].message)) { insertAt = i; break; }
-        }
-        queue.splice(insertAt, 0, { message, projectPath, agentName, resolve, reject });
-      } else {
-        queue.push({ message, projectPath, agentName, resolve, reject });
-      }
+      queue.push({ message, projectPath, agentName, resolve, reject });
 
       if (this.processing.has(queueKey)) {
-        if (inject) {
-          // 插话抢占：无论私聊/群聊都打断在跑的对端 turn，并捕获它以便 Phase 1 后重放。
-          const inFlight = this.currentMessage.get(queueKey);
-          if (inFlight && !this.isInject(inFlight) && !this.pendingReplay.has(queueKey)) {
-            this.pendingReplay.set(queueKey, {
-              message: inFlight,
-              projectPath: this.currentProjectPath || projectPath,
-              agentName: this.processingAgent.get(queueKey) || agentName,
-              sessionKey,
-            });
-            logger.info(`[Queue] inject preempt: captured peer message for replay (key=${queueKey} mid=${inFlight.messageId ?? 'none'})`);
-            // 撤回已漏给对端的半句（私聊；群聊待 SDK）
-            if (this.injectRecallHook && inFlight.channel && inFlight.channelId) {
-              try {
-                this.injectRecallHook(inFlight.channel, inFlight.channelId, (inFlight.chatType as 'private' | 'group') || 'private');
-              } catch (e) {
-                logger.debug(`[Queue] injectRecallHook failed: ${e}`);
-              }
-            }
-          }
-          this.eventBus?.publish({
-            type: 'task:interrupted',
-            sessionId: sessionKey,
-            reason: 'new_message',
-            agentName: this.processingAgent.get(queueKey),
-          });
-          if (this.interruptCallback) {
-            this.interruptCallback(sessionKey, this.currentAgentId, this.processingAgent.get(queueKey), 'inject-preempt').catch(() => {});
-          }
-        } else if (options?.interruptible !== false) {
+        if (options?.interruptible !== false) {
           // 单聊：保留中断行为
           logger.debug(`[Queue] ${queueKey} is processing, triggering interrupt`);
           this.eventBus?.publish({
@@ -222,40 +165,22 @@ export class MessageQueue {
 
       const queue = this.queues.get(queueKey);
       if (!queue || queue.length === 0) {
-        // 队列空：若有被抢占捕获的对端消息，重放它（Phase 2），否则释放。
-        const replay = this.pendingReplay.get(queueKey);
-        if (replay) {
-          this.pendingReplay.delete(queueKey);
-          // 清掉去重记录，让原对端消息能再次入队处理（否则被 shouldProcess 当重复丢弃）
-          if (replay.message.messageId) this.recentMessageIds.delete(replay.message.messageId);
-          logger.info(`[Queue] processNext: replaying preempted peer message (key=${queueKey} mid=${replay.message.messageId ?? 'none'})`);
-          const replayMsg: Message = { ...replay.message, source: 'peer-replay' };
-          if (!this.queues.has(queueKey)) this.queues.set(queueKey, []);
-          this.queues.get(queueKey)!.push({
-            message: replayMsg, projectPath: replay.projectPath, agentName: replay.agentName,
-            resolve: () => {}, reject: () => {},
-          });
-          // 继续循环处理重放消息
-          continue;
-        }
         logger.info(`[Queue] processNext: queue empty, releasing key=${queueKey}`);
         this.processing.delete(queueKey);
         this.processingAgent.delete(queueKey);
         this.currentSessionKey = undefined;
         this.currentProjectPath = undefined;
-        this.currentMessage.delete(queueKey);
         this.activeMessageIds.clear();
         return;
       }
 
-      // FIFO 贪心合并：弹出队首连续同 peerId 的消息（插话消息单独处理，不与对端消息合并）
+      // FIFO 贪心合并：弹出队首连续同 peerId 的消息
       const items = this.dequeueGreedy(queue);
       const merged = items.length === 1 ? items[0] : this.mergeItems(items);
 
       this.currentSessionKey = queueKey;
       this.currentProjectPath = merged.projectPath;
       this.currentAgentId = merged.message.agentId;
-      this.currentMessage.set(queueKey, merged.message);
       this.processingAgent.set(queueKey, merged.agentName);
 
       // 记录正在执行的 messageId（用于撤回中断）
@@ -288,11 +213,7 @@ export class MessageQueue {
     const result = [first];
     const peerId = first.message.peerId;
 
-    // 插话消息单独成轮：不与对端消息（即便同 peerId）贪心合并，
-    // 保证 owner 插话独立处理、回复独立改道。
-    if (this.isInject(first.message)) return result;
-
-    while (queue.length > 0 && queue[0].message.peerId === peerId && !this.isInject(queue[0].message)) {
+    while (queue.length > 0 && queue[0].message.peerId === peerId) {
       result.push(queue.shift()!);
     }
 

@@ -84,18 +84,13 @@ export class MessageBridge {
         // 0. 自定义消息快速路径（menu.query 等）
         if (await this.handleCustomPayload(content, channelName, msg, sendReply, adapter)) return;
 
-        // observer 插话：msg.peerId 已是对端（用于命中 agent↔对端 会话），
-        // 不能据此 auto-bind owner，也不把 owner 的插话文本当命令解析。
-        const isInject = msg.source === 'owner-inject';
-
         // 1. owner 绑定（按实例名绑定）
-        if (!isInject && msg.peerId) await this.autoBindOwner(channelName, msg.peerId);
+        if (msg.peerId) await this.autoBindOwner(channelName, msg.peerId);
 
         // 2. 命令快速路径（去除引用前缀后检查，兼容话题中引用上文的情况）
-        // observer 插话不走命令路径：owner 的插话文本一律作为 prompt 交给 agent。
         const contentForCmd = content.replace(/^(>[^\n]*\n)+\n?/, '').trim();
         const cmdContent = contentForCmd || content;
-        const isCmd = !isInject && this.cmdHandler.isCommand(cmdContent);
+        const isCmd = this.cmdHandler.isCommand(cmdContent);
         if (isCmd) {
           logger.debug(`[MessageBridge] Command detected: "${cmdContent}", routing to handler`);
           // 命令也要记录入方向 jsonl（不创建 session，直接用 chatDirPath 计算路径）
@@ -120,12 +115,12 @@ export class MessageBridge {
             logger.debug(`[MessageBridge] Failed to log inbound command: ${e}`);
           }
         }
-        if (!isInject && await this.handleCommand(cmdContent, channelName, msg.channelId,
+        if (await this.handleCommand(cmdContent, channelName, msg.channelId,
           (text) => {
             logger.channelOut({ channel: channelName, channelId: msg.channelId, taskId: `cmd-${msg.messageId || Date.now()}`, payload: { kind: 'command.result', text } });
             return sendReply(msg.channelId, text, msg.replyContext);
           },
-          msg.peerId, msg.threadId, msg.chatType, msg.source === 'owner-inject' ? undefined : msg.source,
+          msg.peerId, msg.threadId, msg.chatType, msg.source,
           msg.replyContext, msg.messageId, msg.selfAID
         )) return;
 
@@ -180,21 +175,10 @@ export class MessageBridge {
           mentions: msg.mentions, mentionAids: msg.mentionAids, threadId: msg.threadId,
           replyContext: msg.replyContext,
           source: msg.source,
-          injectMeta: msg.injectMeta,
         };
 
-        // observer 插话：Phase 1 出站改道回 owner（不碰对端），强制 interactive。
-        // 详见 docs/observer-insert-design.md §1.2/§1.7。
-        if (isInject && msg.injectMeta) {
-          fullMessage.replyOverride = {
-            channelId: msg.injectMeta.ownerAid,
-            channelType: msg.channelType || effectiveChannelType,
-            forceInteractive: true,
-          };
-        }
-
-        // 5.5 写入消息记录（入方向）。observer 插话不写对端会话历史（保持 agent 侧对端历史干净）。
-        if (!isInject) {
+        // 5.5 写入消息记录（入方向）。
+        {
           const chatDir = this.sessionManager.getChatDir(session);
           const inboundEncrypt = msg.replyContext?.metadata?.encrypted != null ? !!(msg.replyContext.metadata.encrypted) : undefined;
           const inboundChatmode = msg.replyContext?.metadata?.chatmode as string | undefined;
@@ -228,10 +212,7 @@ export class MessageBridge {
           });
         };
 
-        if (isInject) {
-          // observer 插话：跳过 debounce，立即入队抢占（owner 优先级调度由队列处理）
-          await doEnqueue(fullMessage);
-        } else if (isInterrupt) {
+        if (isInterrupt) {
           const debouncer = this.getDebouncer(channelName, effectiveChannelType);
           if (debouncer.enabled) {
             const debounceKey = msg.peerId ? `${session.id}:${msg.peerId}` : session.id;
