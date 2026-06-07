@@ -1242,7 +1242,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
 
     // Observer forward (inbound)：群聊消息在所有过滤之前转发原始明文 payload。
     // forwardInbound 内部排除 self-echo 与 from-owner。
-    this.forwardInbound(senderAid, seq, payload);
+    this.forwardInbound(senderAid, seq, payload, groupId);
 
     // Extract structured mentions from payload (e.g. payload.mentions: ["evolai.agentid.pub"])
     const payloadMentions: string[] = Array.isArray((payload as any)?.mentions)
@@ -1565,7 +1565,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
    * 若消息发送方本身是 owner，则不转发给该 owner，但仍转发给其他 owner。
    * 调用点须在所有过滤逻辑之前，payload 为 SDK 解密后的明文。
    */
-  private forwardInbound(from: string, seq: number | undefined, payload: unknown): void {
+  private forwardInbound(from: string, seq: number | undefined, payload: unknown, groupId?: string): void {
     if (!this.connected || !this.client) return;
     const { observable, owners } = this.getObserverConfig();
     if (!observable || owners.length === 0) return;
@@ -1573,7 +1573,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     // 排除来源 owner（不把"owner A 发来的"再转回 A），但仍转给其他 owner。
     const recipientOwners = owners.filter(o => o !== from);
     if (recipientOwners.length === 0) return;
-    this.emitForward('inbound', { from, to: this.config.aid, seq, payload }, recipientOwners);
+    this.emitForward('inbound', { from, to: groupId ?? this.config.aid, seq, payload }, recipientOwners);
   }
 
   /**
