@@ -142,7 +142,14 @@ function applyContextWindow(modelId: string): string {
 
 /** 根据 SDK model 串（含 [1m] 后缀）返回合适的 autoCompactWindow 值。 */
 function contextWindowFor(sdkModel: string): number {
-  return /\[1m\]$/.test(sdkModel) ? 900000 : 200000;
+  if (/\[1m\]$/.test(sdkModel)) return 900000;
+  if (/deepseek-v4/i.test(sdkModel)) return 900000;   // deepseek-v4-pro/flash: 1M
+  if (/deepseek/i.test(sdkModel)) return 128000;
+  if (/kimi/i.test(sdkModel)) return 262000;
+  if (/glm-5$/i.test(sdkModel)) return 204800;         // glm-5 exact
+  if (/glm/i.test(sdkModel)) return 128000;
+  if (/minimax/i.test(sdkModel)) return 245760;
+  return 200000; // Claude 标准及其他
 }
 
 /** 解析别名 + 追加 1M 后缀，得到最终交给 SDK 的 model 串。 */
@@ -1070,15 +1077,19 @@ export class AgentRunner {
 
         // 从 usage 求当前上下文占用。
         // Claude：input_tokens 是净输入（不含 cache），三项求和 = 实际上下文长度。
-        // 非 Claude（DeepSeek/OpenAI 兼容）：cache_read 是服务端 KV cache 不占上下文窗口，
-        // input_tokens 本身就是完整的上下文输入量。
+        // DeepSeek：cache_miss_tokens 是实际占用上下文窗口的部分（未命中 KV cache 的 token），
+        // input_tokens 则是 cache_hit + cache_miss 的合计，不能用于窗口占比计算。
+        // OpenAI 兼容（非 Claude 非 DeepSeek）：input_tokens 即窗口占用量。
         const u = event.usage;
         const effectiveModel = callModel ?? this.model;
         const isClaudeModel = effectiveModel?.startsWith('claude');
+        const isDeepSeekModel = /deepseek/i.test(effectiveModel ?? '');
         const totalTokens = u
           ? isClaudeModel
             ? (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0)
-            : (u.input_tokens ?? 0)
+            : isDeepSeekModel
+              ? (u.cache_miss_tokens ?? u.input_tokens ?? 0)
+              : (u.input_tokens ?? 0)
           : 0;
         const maxTokens = sdkModel ? contextWindowFor(sdkModel) : 200000;
         const contextUsage = totalTokens > 0 ? {
