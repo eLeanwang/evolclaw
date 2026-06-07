@@ -101,6 +101,8 @@ export interface AUNDispatchOptions {
   replyContext?: ReplyContext;
   source?: 'user' | 'card-trigger';
   images?: Array<{ data: string; mimeType: string }>;
+  /** 群聊分发模式（mention/broadcast），透传到上下文注入。 */
+  dispatchMode?: string;
 }
 
 export interface AUNMessageHandler {
@@ -140,6 +142,7 @@ export function aunOptsToInbound(
     replyContext: opts.replyContext,
     source: opts.source,
     images: opts.images,
+    dispatchMode: opts.dispatchMode,
   };
 }
 
@@ -1438,6 +1441,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       mentions,
       mentionAids: renderMentionAids.length > 0 ? renderMentionAids : undefined,
       replyContext: this.buildGroupReplyContext(threadId, senderAid, msgEncrypted, messageId, msgChatmode),
+      dispatchMode,
       images: inboundImages.length > 0 ? inboundImages : undefined,
     });
   }
@@ -1452,6 +1456,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     replyContext?: ReplyContext;
     groupId?: string;
     source?: 'user' | 'card-trigger';
+    dispatchMode?: string;
     images?: Array<{ data: string; mimeType: string }>;
   }): void {
     // Dedup
@@ -1527,6 +1532,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       mentionAids: event.mentionAids,
       replyContext,
       source: event.source,
+      dispatchMode: event.dispatchMode,
       images: event.images,
     }).catch(err => {
       logger.error(`${this.logPrefix()} Message handler error:`, err);

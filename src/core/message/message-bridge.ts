@@ -175,6 +175,7 @@ export class MessageBridge {
           mentions: msg.mentions, mentionAids: msg.mentionAids, threadId: msg.threadId,
           replyContext: msg.replyContext,
           source: msg.source,
+          dispatchMode: msg.dispatchMode,
         };
 
         // 5.5 写入消息记录（入方向）。

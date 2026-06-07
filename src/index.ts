@@ -341,6 +341,12 @@ async function main() {
   // Per-AID 消息统计收集器（累计，供 watch aid 实时展示）
   const aidStatsCollector = new AidStatsCollector(eventBus);
   aidStatsCollector.setSessionsDir(paths.sessionsDir);
+  // 持久化网络流量到 message_events 表
+  aidStatsCollector.onMessage = (ev) => {
+    import('./core/stats/writer.js').then(({ insertMessageEvent }) => {
+      insertMessageEvent(paths.root, ev);
+    }).catch(() => {});
+  };
 
   // 初始化 SessionManager（文件系统后端）
   const sessionManager = new SessionManager(paths.sessionsDir, eventBus,

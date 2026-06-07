@@ -1068,10 +1068,17 @@ export class AgentRunner {
           ? event.result.replace(/<thinking>[\s\S]*?<\/thinking>\s*/g, '').trim()
           : event.result;
 
-        // 从 usage 三项求和得到当前上下文占用（与 claude-hud getTotalTokens 相同算法）
+        // 从 usage 求当前上下文占用。
+        // Claude：input_tokens 是净输入（不含 cache），三项求和 = 实际上下文长度。
+        // 非 Claude（DeepSeek/OpenAI 兼容）：cache_read 是服务端 KV cache 不占上下文窗口，
+        // input_tokens 本身就是完整的上下文输入量。
         const u = event.usage;
+        const effectiveModel = callModel ?? this.model;
+        const isClaudeModel = effectiveModel?.startsWith('claude');
         const totalTokens = u
-          ? (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0)
+          ? isClaudeModel
+            ? (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0)
+            : (u.input_tokens ?? 0)
           : 0;
         const maxTokens = sdkModel ? contextWindowFor(sdkModel) : 200000;
         const contextUsage = totalTokens > 0 ? {

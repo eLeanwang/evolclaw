@@ -26,6 +26,9 @@ import type { InteractionRouter } from '../interaction-router.js';
 import { renderActionAsText, renderCommandCardAsText } from '../interaction-router.js';
 import { formatPeerKey } from '../relation/peer-key.js';
 import { resolveEffectiveModel } from '../model/model-scope.js';
+import { insertUsageEvent, insertContextBreakdown } from '../stats/writer.js';
+import { normalizeUsage } from '../stats/normalizer.js';
+import { getBudgetStatus } from '../stats/budget.js';
 
 /** OS 信息在进程生命周期内是常量，模块加载时算一次。例: "Windows 11 Pro (win32 10.0.26200)" */
 const OS_INFO = (() => {
@@ -540,6 +543,18 @@ export class MessageProcessor {
         timestamp: Date.now()
       });
 
+      // ── 硬上限检查：超限直接返回提示，不调模型 ──
+      {
+        const budgetAgentAid = session.selfAID || message.selfAID || '';
+        const budgetPeerKey = formatPeerKey(message.channel, message.channelId);
+        const budgetStatus = getBudgetStatus(resolveRoot(), budgetAgentAid, budgetPeerKey);
+        if (budgetStatus.hard_blocked) {
+          logger.warn(`[MessageProcessor] Budget hard limit reached: agent=${budgetAgentAid} peer=${budgetPeerKey} pct=${budgetStatus.pct_used.toFixed(1)}%`);
+          adapter.send(envelope, { kind: 'status.completed', metadata: { durationMs: 0 } }).catch(() => {});
+          return;
+        }
+      }
+
       const imageInfo = message.images && message.images.length > 0 ? ` [${message.images.length} image(s)]` : '';
       const modeInfo = isBackground ? ' [\u540e\u53f0]' : '';
       const e2eeInfo = message.replyContext?.metadata?.encrypted != null ? ` encrypt=${message.replyContext.metadata.encrypted}` : '';
@@ -779,7 +794,8 @@ export class MessageProcessor {
             channel: currentChannelType || null,
             venueUid: undefined,
             // 群分发模式 / 客户端类型 / 权限模式
-            dispatch: session.metadata?.dispatchMode || undefined,
+            // 优先本地 session 覆盖（/dispatch 命令），fallback 到服务器 dispatch_mode
+            dispatch: session.metadata?.dispatchMode || message.dispatchMode || undefined,
             clientType: message.clientType || undefined,
             permissionMode: session.metadata?.permissionMode || 'auto',
             capabilities: capParts.length > 0 ? capParts.join('、') : undefined,
@@ -815,6 +831,35 @@ export class MessageProcessor {
         if (kitContext) contextParts.push(kitContext);
 
         effectiveSystemPrompt = [options?.systemPromptAppend, ...contextParts].filter(Boolean).join('\n') || undefined;
+
+        // ── Stats: context_breakdown 旁路采集（各段估算 token 数，字符数/4 近似） ──
+        try {
+          const estTokens = (s?: string) => s ? Math.ceil(s.length / 4) : 0;
+          const cbModel = effectiveModel || agentModel || 'unknown';
+          const cbMaxTokens = 200000; // 保守默认，后续可从 model-catalog 取
+          const systemPromptTokens = estTokens(options?.systemPromptAppend);
+          const personaTokens = estTokens(persona);
+          const workingTokens = estTokens(working);
+          const kitTokens = estTokens(kitContext);
+          const totalEst = estTokens(effectiveSystemPrompt);
+          insertContextBreakdown(resolveRoot(), {
+            ts: Date.now(),
+            agent_aid: selfAid || session.selfAID || '',
+            session_id: session.id,
+            turn_count: 0, // 按 ts 排序得轮次
+            model: cbModel,
+            max_tokens: cbMaxTokens,
+            system_prompt: systemPromptTokens + personaTokens + workingTokens,
+            system_tools: 0, // 工具 schema 不在此层，留 0（后续 runner 层补）
+            mcp_tools: 0,
+            custom_agents: 0,
+            memory_files: kitTokens, // ECK 渲染的所有段（含 memory/skills/rules）
+            skills: 0,
+            messages: 0, // messages 段在 runner 层才知道
+            free_space: Math.max(0, cbMaxTokens - totalEst),
+            total_estimated: totalEst,
+          });
+        } catch { /* non-fatal */ }
 
         // 消息渲染层：用 message manifest 逐条渲染（时间 + 群聊发送者），组装成最终正文。
         // 单条消息构造单元素 items；批量合并的消息 message.items 已由队列填充。
@@ -1190,11 +1235,96 @@ export class MessageProcessor {
       } else {
         // 真正的成功
         const durationMs = Date.now() - startTime;
+
+        // ── Stats: 写入 usage_events（在 status.completed 之前，以便带上 cost） ──
+        let statsCostUsd = 0;
+        let statsCostCny = 0;
+        let statsCacheHitRate = 0;
+        if (streamResult.tokenUsage) {
+          try {
+            const statsAgentAid = session.selfAID || message.selfAID || '';
+            const statsPeerKey = formatPeerKey(message.channel, message.channelId);
+            const statsModel = streamResult.contextUsage?.model || 'unknown';
+            const ctxPct = streamResult.contextUsage?.percentage;
+            const event = normalizeUsage(streamResult.tokenUsage as any, {
+              ts: Date.now(),
+              agent_aid: statsAgentAid,
+              peer_key: statsPeerKey,
+              peer_type: session.chatType || undefined,
+              session_id: session.id,
+              model: statsModel,
+              turns: streamResult.numTurns,
+              duration_ms: durationMs,
+              context_window_pct: ctxPct,
+            });
+            insertUsageEvent(resolveRoot(), event);
+            // 计算费用（用于合入 status.completed）
+            const { calcCost } = await import('../stats/billing.js');
+            const cost = calcCost(resolveRoot(), { ...event, ts: event.ts, model: event.model, billing_fn: event.billing_fn });
+            statsCostUsd = cost.usd ?? 0;
+            statsCostCny = cost.cny ?? 0;
+            const totalIn = event.input_tokens + event.cache_read_tokens;
+            statsCacheHitRate = totalIn > 0 ? Math.round((event.cache_read_tokens / totalIn) * 100) / 100 : 0;
+          } catch (e) {
+            logger.debug(`[MessageProcessor] Stats write failed (non-fatal): ${e}`);
+          }
+        }
+
+        // 会话累计 + model spec（用于 status.completed 统计细目）
+        let sessionStats: { input_tokens: number; output_tokens: number; cache_read_tokens: number; cache_creation_tokens: number; cost_usd: number; cost_cny: number; call_count: number } | undefined;
+        let modelSpec: { context_window: number; max_input_tokens: number; max_output_tokens: number } | undefined;
+        try {
+          const { openReadonlyDb, getDbPath } = await import('../stats/db.js');
+          const { resolveModelSpec } = await import('../stats/billing.js');
+          const statsModel = streamResult.contextUsage?.model || 'unknown';
+          modelSpec = resolveModelSpec(resolveRoot(), statsModel);
+          const rdb = openReadonlyDb(getDbPath(resolveRoot()));
+          if (rdb) {
+            try {
+              const row = rdb.prepare(
+                `SELECT COALESCE(SUM(input_tokens),0) AS input_tokens, COALESCE(SUM(output_tokens),0) AS output_tokens,
+                        COALESCE(SUM(cache_read_tokens),0) AS cache_read_tokens, COALESCE(SUM(cache_creation_tokens),0) AS cache_creation_tokens,
+                        COUNT(*) AS call_count FROM usage_events WHERE session_id = ?`
+              ).get(session.id) as any;
+              if (row) {
+                // 逐行算费用太贵，用近似：最后一轮的 cost 乘以次数不准，所以这里用累加 token 近似
+                sessionStats = {
+                  input_tokens: row.input_tokens,
+                  output_tokens: row.output_tokens,
+                  cache_read_tokens: row.cache_read_tokens,
+                  cache_creation_tokens: row.cache_creation_tokens,
+                  cost_usd: 0, cost_cny: 0,
+                  call_count: row.call_count,
+                };
+                // 快速费用估算：用会话所有行逐行算
+                const rows: any[] = rdb.prepare(`SELECT * FROM usage_events WHERE session_id = ?`).all(session.id);
+                const { calcCost: cc } = await import('../stats/billing.js');
+                for (const r of rows) {
+                  const c = cc(resolveRoot(), r);
+                  sessionStats.cost_usd += c.usd ?? 0;
+                  sessionStats.cost_cny += c.cny ?? 0;
+                }
+              }
+            } finally { rdb.close(); }
+          }
+        } catch { /* non-fatal */ }
+
         if (message.source !== 'trigger') {
           if (interruptReason) {
             adapter.send(envelope, { kind: 'status.interrupted', metadata: { reason: interruptReason } }).catch(() => {});
           } else {
-            adapter.send(envelope, { kind: 'status.completed', metadata: { durationMs, ttftMs: streamResult.ttftMs, numTurns: streamResult.numTurns, tokenUsage: streamResult.tokenUsage, contextUsage: streamResult.contextUsage } }).catch(() => {});
+            adapter.send(envelope, { kind: 'status.completed', metadata: {
+              durationMs,
+              ttftMs: streamResult.ttftMs,
+              numTurns: streamResult.numTurns,
+              tokenUsage: streamResult.tokenUsage,
+              contextUsage: streamResult.contextUsage,
+              cost_usd: statsCostUsd,
+              cost_cny: statsCostCny,
+              cache_hit_rate: statsCacheHitRate,
+              model_spec: modelSpec,
+              session_total: sessionStats,
+            } as any }).catch(() => {});
           }
         }
         if (message.triggerMeta) {
@@ -1414,6 +1544,15 @@ export class MessageProcessor {
         session.metadata.groupName = groupName;
         await this.sessionManager.updateSession(session.id, { metadata: session.metadata });
       }
+    }
+
+    // 群聊分发模式同步：aun.ts 从服务器信封解析的 dispatchMode 注入到 message，
+    // 此处写入 session.metadata，确保 ECK 上下文的 venue fragment 正确渲染 dispatch 变量。
+    // 仅当 message.dispatchMode 有值且与 session 记录不一致时更新。
+    if (message.chatType === 'group' && message.dispatchMode && session.metadata?.dispatchMode !== message.dispatchMode) {
+      logger.info(`[MessageProcessor] dispatchMode sync: sessionId=${session.id} ${session.metadata?.dispatchMode ?? 'none'} -> ${message.dispatchMode}`);
+      session.metadata = { ...(session.metadata || {}), dispatchMode: message.dispatchMode };
+      await this.sessionManager.updateSession(session.id, { metadata: session.metadata });
     }
 
     // 兜底纠正2：旧 session 创建时没传 peerType（建为 interactive），后续非 human 消息进来时升级为 proactive。

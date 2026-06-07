@@ -303,6 +303,7 @@ export interface Message {
    */
   items?: SubMessage[];
   replyContext?: ReplyContext;       // Channel 预构建的回复上下文（渠道无关）
+  dispatchMode?: string;            // 群聊分发模式，由渠道适配器从服务器信封解析后注入（mention|broadcast）
   timestamp?: number;
   source?: 'user' | 'card-trigger' | 'trigger' | 'owner-inject';
   triggerMeta?: {
@@ -336,6 +337,7 @@ export interface InboundMessage {
   /** 本条被 @ 的全部 AID（含 self；@all 时含字面 "all"）。仅供消息信封渲染。 */
   mentionAids?: string[];
   replyContext?: ReplyContext;       // Channel 预构建的回复上下文（渠道无关）
+  dispatchMode?: string;            // 群聊分发模式（mention|broadcast）
   source?: 'user' | 'card-trigger';  // 消息来源：用户输入 / 卡片按钮触发
 }
 

@@ -662,17 +662,303 @@ function startApp() {
   };
 }
 
+// ── 主题切换 ──
+function initTheme() {
+  const saved = localStorage.getItem('ecTheme') || 'light';
+  document.documentElement.setAttribute('data-theme', saved);
+  const btn = $('#theme-btn');
+  if (btn) {
+    btn.textContent = saved === 'dark' ? '☀️' : '🌙';
+    btn.onclick = () => {
+      const cur = document.documentElement.getAttribute('data-theme');
+      const next = cur === 'dark' ? 'light' : 'dark';
+      document.documentElement.setAttribute('data-theme', next);
+      localStorage.setItem('ecTheme', next);
+      btn.textContent = next === 'dark' ? '☀️' : '🌙';
+      if (_hourlyChart) { _hourlyChart.dispose(); _hourlyChart = null; }
+      if (_modelChart) { _modelChart.dispose(); _modelChart = null; }
+      loadUsageDashboard();
+    };
+  }
+}
+
+// ── Usage Dashboard ──
+let _hourlyChart = null;
+let _modelChart = null;
+
+function fmtTokens(n) {
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'k';
+  return String(n);
+}
+
+async function loadUsageDashboard() {
+  let data;
+  try {
+    const resp = await fetch('/api/stats/dashboard', {
+      headers: { Authorization: 'Bearer ' + localStorage.getItem(TOKEN_KEY) }
+    });
+    if (!resp.ok) data = null;
+    else data = await resp.json();
+  } catch { data = null; }
+
+  // 无数据时渲染默认空状态
+  const t = (data && data.today) ? data.today : { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_hit_rate: 0, call_count: 0 };
+  var cards = $('#usage-cards');
+  if (cards) {
+    cards.innerHTML =
+      '<div class="usage-card"><div class="card-value">' + fmtTokens(t.input_tokens) + '</div><div class="card-label">Input</div></div>' +
+      '<div class="usage-card"><div class="card-value">' + fmtTokens(t.output_tokens) + '</div><div class="card-label">Output</div></div>' +
+      '<div class="usage-card"><div class="card-value">' + fmtTokens(t.cache_read_tokens) + '</div><div class="card-label">Cache Read</div></div>' +
+      '<div class="usage-card"><div class="card-value">' + (t.cache_hit_rate * 100).toFixed(1) + '%</div><div class="card-label">Cache Hit</div></div>' +
+      '<div class="usage-card"><div class="card-value">' + t.call_count + '</div><div class="card-label">Calls</div></div>';
+  }
+
+  // Hourly stacked bar
+  var hourlyEl = $('#usage-hourly-chart');
+  if (hourlyEl && data.hourly && data.hourly.length) {
+    var isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+    if (!_hourlyChart) _hourlyChart = echarts.init(hourlyEl, isDark ? 'dark' : null);
+    var hours = data.hourly.map(function(h) { return (h.hour.split(' ')[1] || h.hour); });
+    _hourlyChart.setOption({
+      tooltip: { trigger: 'axis' },
+      legend: { data: ['Input', 'Output', 'Cache'], top: 0, textStyle: { fontSize: 11 } },
+      grid: { top: 30, bottom: 24, left: 50, right: 16 },
+      xAxis: { type: 'category', data: hours, axisLabel: { fontSize: 10 } },
+      yAxis: { type: 'value', axisLabel: { formatter: function(v) { return fmtTokens(v); } } },
+      series: [
+        { name: 'Input', type: 'bar', stack: 'tokens', data: data.hourly.map(function(h) { return h.input_tokens; }), itemStyle: { color: '#4f6ef7' } },
+        { name: 'Output', type: 'bar', stack: 'tokens', data: data.hourly.map(function(h) { return h.output_tokens; }), itemStyle: { color: '#38a169' } },
+        { name: 'Cache', type: 'bar', stack: 'tokens', data: data.hourly.map(function(h) { return h.cache_read_tokens; }), itemStyle: { color: '#dd6b20', opacity: 0.6 } },
+      ]
+    });
+  }
+
+  // Model pie
+  var modelEl = $('#usage-model-chart');
+  if (modelEl && data.top_models && data.top_models.length) {
+    var isDark2 = document.documentElement.getAttribute('data-theme') === 'dark';
+    if (!_modelChart) _modelChart = echarts.init(modelEl, isDark2 ? 'dark' : null);
+    _modelChart.setOption({
+      tooltip: { trigger: 'item', formatter: '{b}: {c} ({d}%)' },
+      series: [{
+        type: 'pie', radius: ['35%', '70%'], center: ['50%', '55%'],
+        label: { fontSize: 10 },
+        data: data.top_models.map(function(m) { return { name: m.model.split('/').pop(), value: m.total_tokens }; }),
+      }]
+    });
+  }
+
+  // Top peers table
+  var peersEl = $('#usage-top-peers');
+  if (peersEl && data.top_peers && data.top_peers.length) {
+    peersEl.innerHTML =
+      '<thead><tr><th>#</th><th>Peer</th><th>Tokens</th><th>Calls</th></tr></thead>' +
+      '<tbody>' + data.top_peers.map(function(p, i) {
+        return '<tr><td>' + (i + 1) + '</td><td>' + p.peer_key + '</td><td>' + fmtTokens(p.total_tokens) + '</td><td>' + p.call_count + '</td></tr>';
+      }).join('') + '</tbody>';
+  }
+
+  // Topbar today cost
+  var costEl = $('#today-cost');
+  if (costEl) {
+    var totalTokens = t.input_tokens + t.output_tokens;
+    costEl.textContent = 'Today: ' + fmtTokens(totalTokens) + ' tokens · ' + t.call_count + ' calls';
+  }
+}
+
+// ── Usage subtab switching ──
+function initUsageSubtabs() {
+  var btns = document.querySelectorAll('.usage-subtab');
+  btns.forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      btns.forEach(function(b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      var target = btn.getAttribute('data-subview');
+      document.querySelectorAll('.usage-subpanel').forEach(function(p) {
+        p.classList.remove('active');
+        p.style.display = '';
+      });
+      var panel = $('#usage-' + target);
+      if (panel) { panel.classList.add('active'); panel.style.display = ''; }
+      if (target === 'explorer') initExplorer();
+    });
+  });
+}
+
+// ── Explorer ──
+var _explorerChart = null;
+var _explorerInited = false;
+var _expSelection = { type: null, key: null }; // { type: 'agent'|'peer', key: string } or null
+
+function initExplorer() {
+  if (_explorerInited) return;
+  _explorerInited = true;
+  var btn = $('#exp-query-btn');
+  if (btn) btn.onclick = runExplorerQuery;
+  // Default date range: last 7 days
+  var now = new Date();
+  var from = new Date(now.getTime() - 7 * 86400000);
+  var fromEl = $('#exp-from');
+  var toEl = $('#exp-to');
+  if (fromEl) fromEl.value = from.toISOString().slice(0, 10);
+  if (toEl) toEl.value = now.toISOString().slice(0, 10);
+  // Load sidebar lists
+  loadExplorerSidebar();
+}
+
+async function loadExplorerSidebar() {
+  var token = localStorage.getItem(TOKEN_KEY);
+  var headers = { Authorization: 'Bearer ' + token };
+  try {
+    var [agentsResp, peersResp] = await Promise.all([
+      fetch('/api/stats/agents', { headers }),
+      fetch('/api/stats/peers', { headers }),
+    ]);
+    var agents = agentsResp.ok ? await agentsResp.json() : [];
+    var peers = peersResp.ok ? await peersResp.json() : [];
+    renderExplorerSidebar(agents, peers);
+  } catch {}
+}
+
+function renderExplorerSidebar(agents, peers) {
+  var agentList = $('#exp-agent-list');
+  var peerList = $('#exp-peer-list');
+  if (!agentList || !peerList) return;
+
+  // "All" item for agents
+  var allHtml = '<div class="exp-sidebar-item active" data-type="all" data-key="">' +
+    '<span class="item-name">全部</span></div>';
+
+  agentList.innerHTML = allHtml + agents.map(function(a) {
+    var name = a.agent_aid ? a.agent_aid.split('.')[0] : 'unknown';
+    return '<div class="exp-sidebar-item" data-type="agent" data-key="' + escHtml(a.agent_aid) + '">' +
+      '<span class="item-name" title="' + escHtml(a.agent_aid) + '">' + escHtml(name) + '</span>' +
+      '<span class="item-meta">' + fmtTokens(a.input_tokens + a.output_tokens) + '</span></div>';
+  }).join('');
+
+  peerList.innerHTML = peers.map(function(p) {
+    var name = p.peer_key || 'unknown';
+    // 简化显示：去掉 channel# 前缀中的 aun#，保留核心部分
+    var display = name.replace(/^aun#/, '').split('.')[0];
+    return '<div class="exp-sidebar-item" data-type="peer" data-key="' + escHtml(p.peer_key) + '">' +
+      '<span class="item-name" title="' + escHtml(name) + '">' + escHtml(display) + '</span>' +
+      '<span class="item-meta">' + fmtTokens((p.input_tokens || 0) + (p.output_tokens || 0)) + '</span></div>';
+  }).join('');
+
+  // Bind click events
+  var allItems = document.querySelectorAll('#exp-agent-list .exp-sidebar-item, #exp-peer-list .exp-sidebar-item');
+  allItems.forEach(function(el) {
+    el.addEventListener('click', function() {
+      // Clear active from all
+      allItems.forEach(function(x) { x.classList.remove('active'); });
+      el.classList.add('active');
+      var type = el.getAttribute('data-type');
+      var key = el.getAttribute('data-key');
+      if (type === 'all') {
+        _expSelection = { type: null, key: null };
+        $('#exp-selected-name').textContent = '全部';
+      } else {
+        _expSelection = { type: type, key: key };
+        $('#exp-selected-name').textContent = key;
+      }
+      runExplorerQuery();
+    });
+  });
+}
+
+function escHtml(s) { return (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+async function runExplorerQuery() {
+  var params = new URLSearchParams();
+  var fromEl = $('#exp-from');
+  var toEl = $('#exp-to');
+  if (fromEl && fromEl.value) params.set('from', String(new Date(fromEl.value + 'T00:00:00').getTime()));
+  if (toEl && toEl.value) params.set('to', String(new Date(toEl.value + 'T23:59:59').getTime()));
+  // Inject selection from sidebar
+  if (_expSelection.type === 'agent' && _expSelection.key) params.set('agent', _expSelection.key);
+  if (_expSelection.type === 'peer' && _expSelection.key) params.set('peer', _expSelection.key);
+  var modelEl = $('#exp-model');
+  if (modelEl && modelEl.value) params.set('model', modelEl.value);
+  var granEl = $('#exp-granularity');
+  if (granEl) params.set('granularity', granEl.value);
+
+  var data;
+  try {
+    var resp = await fetch('/api/stats/explorer?' + params.toString(), {
+      headers: { Authorization: 'Bearer ' + localStorage.getItem(TOKEN_KEY) }
+    });
+    if (!resp.ok) return;
+    data = await resp.json();
+  } catch { return; }
+
+  // Show/hide detail cards
+  var cardsEl = $('#exp-detail-cards');
+  if (data && data.length) {
+    var totIn = 0, totOut = 0, totCache = 0, totCalls = 0;
+    data.forEach(function(r) { totIn += r.input_tokens; totOut += r.output_tokens; totCache += r.cache_read_tokens; totCalls += r.call_count; });
+    if (cardsEl) {
+      cardsEl.style.display = 'flex';
+      cardsEl.innerHTML =
+        '<div class="usage-card"><div class="card-value">' + fmtTokens(totIn) + '</div><div class="card-label">Input</div></div>' +
+        '<div class="usage-card"><div class="card-value">' + fmtTokens(totOut) + '</div><div class="card-label">Output</div></div>' +
+        '<div class="usage-card"><div class="card-value">' + fmtTokens(totCache) + '</div><div class="card-label">Cache Read</div></div>' +
+        '<div class="usage-card"><div class="card-value">' + totCalls + '</div><div class="card-label">Calls</div></div>';
+    }
+  } else {
+    if (cardsEl) cardsEl.style.display = 'none';
+  }
+
+  if (!data || !data.length) {
+    var tbl = $('#usage-explorer-table');
+    if (tbl) tbl.innerHTML = '<tr><td>No data for selected range.</td></tr>';
+    var chartEl = $('#usage-explorer-chart');
+    if (chartEl && _explorerChart) { _explorerChart.dispose(); _explorerChart = null; }
+    return;
+  }
+
+  // Chart
+  var chartEl = $('#usage-explorer-chart');
+  if (chartEl) {
+    var isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+    if (_explorerChart) { _explorerChart.dispose(); _explorerChart = null; }
+    _explorerChart = echarts.init(chartEl, isDark ? 'dark' : null);
+    var periods = data.map(function(r) { return r.period; });
+    _explorerChart.setOption({
+      tooltip: { trigger: 'axis' },
+      legend: { data: ['Input', 'Output'], top: 0, textStyle: { fontSize: 11 } },
+      grid: { top: 30, bottom: 30, left: 60, right: 16 },
+      xAxis: { type: 'category', data: periods, axisLabel: { fontSize: 10, rotate: 30 } },
+      yAxis: { type: 'value', axisLabel: { formatter: function(v) { return fmtTokens(v); } } },
+      series: [
+        { name: 'Input', type: 'line', data: data.map(function(r) { return r.input_tokens; }), smooth: true, areaStyle: { opacity: 0.15 }, itemStyle: { color: '#4f6ef7' } },
+        { name: 'Output', type: 'line', data: data.map(function(r) { return r.output_tokens; }), smooth: true, areaStyle: { opacity: 0.15 }, itemStyle: { color: '#38a169' } },
+      ]
+    });
+  }
+
+  // Table
+  var tbl = $('#usage-explorer-table');
+  if (tbl) {
+    tbl.innerHTML =
+      '<thead><tr><th>Period</th><th>Input</th><th>Output</th><th>Cache↑</th><th>CacheHit</th><th>Calls</th></tr></thead>' +
+      '<tbody>' + data.map(function(r) {
+        return '<tr><td>' + r.period + '</td><td>' + fmtTokens(r.input_tokens) + '</td><td>' + fmtTokens(r.output_tokens) +
+          '</td><td>' + fmtTokens(r.cache_creation_tokens) + '</td><td>' + fmtTokens(r.cache_read_tokens) +
+          '</td><td>' + r.call_count + '</td></tr>';
+      }).join('') + '</tbody>';
+  }
+}
+
 window.addEventListener('DOMContentLoaded', () => {
+  initTheme();
   initPairUI();
   if (localStorage.getItem(TOKEN_KEY)) {
     showApp();
     startApp();
+    loadUsageDashboard();
+    initUsageSubtabs();
   } else {
     showPairPage();
   }
 });
-
-
-
-
-
