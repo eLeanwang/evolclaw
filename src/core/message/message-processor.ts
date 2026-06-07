@@ -1324,6 +1324,10 @@ export class MessageProcessor {
               cache_hit_rate: statsCacheHitRate,
               model_spec: modelSpec,
               session_total: sessionStats,
+              queue: {
+                pending: this.messageQueue?.getQueueLength(session.id) ?? 0,
+                processing: this.messageQueue?.isProcessing(session.id) ? 1 : 0,
+              },
             } as any }).catch(() => {});
           }
         }
