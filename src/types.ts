@@ -201,10 +201,16 @@ export interface SessionMetadata {
   dispatchMode?: string;  // 群聊分发模式（per-session）: mention | broadcast
   resumeAt?: string;  // /rewind chat 标记的回退点（assistant message uuid）
   lastProactiveFlag?: boolean;  // proactive 模式使用标志位后设置，interactive 切换时注入提示后清除
+  // 群聊话题追踪（responseDepth 决策信号）
+  topicRounds?: number;       // 同话题连续轮次
+  lastTopicHash?: string;     // 上条消息的话题指纹（前 20 字符 hash）
 }
 
 /** Default permission mode applied to new sessions. Change here to affect all roles. */
 export const DEFAULT_PERMISSION_MODE = 'bypass';
+
+/** 群聊响应深度（per-message 瞬时决策，不持久化） */
+export type ResponseDepth = 'lightweight' | 'standard' | 'deep';
 
 export interface ReplyContext {
   sessionId?: string;

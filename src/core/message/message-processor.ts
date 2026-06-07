@@ -13,7 +13,7 @@ import { logger } from '../../utils/logger.js';
 import { getErrorMessage, classifyError, ErrorType, ERROR_PREFIX, isInfraError, prefixErrorType, isRetryableError } from '../../utils/error-utils.js';
 import { EventBus } from '../event-bus.js';
 import { summarizeToolInput } from '../permission.js';
-import type { Message, Session, ChannelAdapter, ChannelOptions, ChannelPolicy, CommandHandler, ReplyContext, AgentContext, EvolAgentRegistryHandle, GlobalSettings, OutboundEnvelope, OutboundPayload, InteractionRequest, InteractionKind, ActionInteraction, CommandCard } from '../../types.js';
+import type { Message, Session, ChannelAdapter, ChannelOptions, ChannelPolicy, CommandHandler, ReplyContext, AgentContext, EvolAgentRegistryHandle, GlobalSettings, OutboundEnvelope, OutboundPayload, InteractionRequest, InteractionKind, ActionInteraction, CommandCard, ResponseDepth } from '../../types.js';
 import type { TriggerManager } from '../trigger/manager.js';
 import { DEFAULT_PERMISSION_MODE } from '../../types.js';
 import { getPackageRoot, resolveRoot, resolvePaths } from '../../paths.js';
@@ -329,6 +329,8 @@ export class MessageProcessor {
     // message.channel 现在存实例名（channelName），可直接用于精确路由
     const { session, absoluteProjectPath } = await this.resolveSession(message);
 
+    // 群聊响应深度决策（resolveSession 之后、_processMessageInternal 之前）
+    const responseDepth = await this.resolveResponseDepth(message, session);
     // thread(feishu) pending strategy: inject replyContext so first reply creates the thread
     if (message.triggerMeta?.pendingThread && message.triggerMeta?.rootMessageId) {
       const triggerId = message.triggerMeta.triggerId;
@@ -425,7 +427,7 @@ export class MessageProcessor {
 
     try {
       await Promise.race([
-        this._processMessageInternal(message, session, absoluteProjectPath, resetTimer, shouldSuppress, () => lastIdleSec),
+        this._processMessageInternal(message, session, absoluteProjectPath, resetTimer, shouldSuppress, () => lastIdleSec, responseDepth),
         timeoutPromise
       ]);
     } catch (error: any) {
@@ -470,7 +472,7 @@ export class MessageProcessor {
   }
 
   /** 自动安全模式已禁用：仅保留错误计数，不再自动切换状态 */
-  private async _processMessageInternal(message: Message, session: Session, absoluteProjectPath: string, resetTimer: (eventType?: string, toolName?: string) => void, shouldSuppress: () => boolean, getLastIdleSec?: () => number): Promise<void> {
+  private async _processMessageInternal(message: Message, session: Session, absoluteProjectPath: string, resetTimer: (eventType?: string, toolName?: string) => void, shouldSuppress: () => boolean, getLastIdleSec?: () => number, responseDepth?: ResponseDepth): Promise<void> {
     const messageId = `${message.channel}_${message.channelId}_${message.timestamp || Date.now()}`;
     const channelKey = session.metadata?.channelKey || message.channel;
     const channelInfo = this.resolveChannelInfo(channelKey);
@@ -499,7 +501,7 @@ export class MessageProcessor {
     const chatmode = session.sessionMode ?? 'interactive';
 
     // 诊断日志：记录 inbound message_id 和生成的 task_id 的对应关系
-    logger.info(`[MessageProcessor] Task created: inboundMsgId=${message.messageId ?? 'none'} taskId=${taskId} sessionId=${session.id} chatmode=${chatmode}`);
+    logger.info(`[MessageProcessor] Task created: inboundMsgId=${message.messageId ?? 'none'} taskId=${taskId} sessionId=${session.id} chatmode=${chatmode}${responseDepth && responseDepth !== 'standard' ? ` depth=${responseDepth}` : ''}`);
 
     // 构建带 taskId/chatmode 的 ReplyContext（本次任务所有出站消息共用）
     const taskReplyContext = (): ReplyContext => {
@@ -749,6 +751,21 @@ export class MessageProcessor {
           modelOverride = evolclawModelOverride;
         }
 
+        // ④ 群聊 responseDepth → effort 动态映射
+        // 仅当群聊且 evolclaw 作用域未显式指定 effort 时生效（显式配置优先）
+        if (message.chatType === 'group' && responseDepth && !(modelOverride?.effort)) {
+          const depthEffortMap: Record<string, string> = {
+            lightweight: 'low',
+            standard: 'medium',
+            deep: 'high',
+          };
+          const mappedEffort = depthEffortMap[responseDepth];
+          if (mappedEffort) {
+            modelOverride = { ...(modelOverride || {}), effort: mappedEffort };
+            logger.info(`[MessageProcessor] Group depth→effort: ${responseDepth} → ${mappedEffort} session=${session.id}`);
+          }
+        }
+
         const normalizedBaseagent = normalizeBaseagent(agent.name);
         agentModel = (typeof (agent as any).getModel === 'function') ? (agent as any).getModel() as string : undefined;
 
@@ -796,6 +813,7 @@ export class MessageProcessor {
             // 群分发模式 / 客户端类型 / 权限模式
             // 优先本地 session 覆盖（/dispatch 命令），fallback 到服务器 dispatch_mode
             dispatch: session.metadata?.dispatchMode || message.dispatchMode || undefined,
+            responseDepth: responseDepth || undefined,
             clientType: message.clientType || undefined,
             permissionMode: session.metadata?.permissionMode || 'auto',
             capabilities: capParts.length > 0 ? capParts.join('、') : undefined,
@@ -1582,6 +1600,66 @@ export class MessageProcessor {
       : path.resolve(process.cwd(), session.projectPath);
 
     return { session, absoluteProjectPath };
+  }
+
+  /**
+   * 群聊响应深度决策。根据 dispatch 模式、消息特征、话题轮次综合判断。
+   * 返回 per-message 的瞬时深度枚举，不持久化到 session.metadata。
+   * 同时更新 session.metadata 中的 topicRounds/lastTopicHash（话题追踪状态）。
+   */
+  private async resolveResponseDepth(message: Message, session: Session): Promise<ResponseDepth> {
+    // 仅群聊走深度决策；私聊一律 standard
+    if (message.chatType !== 'group') return 'standard';
+
+    const selfAid = session.selfAID || message.selfAID;
+    const content = message.content.trim();
+    const dispatch = session.metadata?.dispatchMode || message.dispatchMode;
+
+    // ── 话题追踪：更新 topicRounds ──
+    // 用消息前 20 字符的 hash 做粗粒度话题指纹
+    const topicSlice = content.slice(0, 20);
+    const topicHash = crypto.createHash('md5').update(topicSlice).digest('hex').slice(0, 8);
+    const prevHash = session.metadata?.lastTopicHash;
+    let topicRounds = session.metadata?.topicRounds ?? 0;
+
+    if (prevHash && prevHash === topicHash) {
+      topicRounds++;
+    } else {
+      topicRounds = 1;
+    }
+
+    // 持久化话题追踪状态
+    session.metadata = {
+      ...(session.metadata || {}),
+      topicRounds,
+      lastTopicHash: topicHash,
+    };
+    await this.sessionManager.updateSession(session.id, { metadata: session.metadata });
+
+    // ── 判断因子 ──
+    const isMentioned = !!(selfAid && message.mentionAids?.includes(selfAid));
+    const isQuestion = /[？?]\s*$/.test(content) || /^(what|how|why|when|where|who|which|请问|怎么|为什么|什么|如何|能不能|可以)/i.test(content);
+    const isShort = content.length <= 30;
+
+    // ── 决策逻辑 ──
+
+    // 被@：至少 standard；话题深入则升 deep
+    if (isMentioned) {
+      if (topicRounds >= 3) return 'deep';
+      return 'standard';
+    }
+
+    // broadcast 模式：短消息 + 非问句 → lightweight
+    if (dispatch === 'broadcast') {
+      if (isShort && !isQuestion) return 'lightweight';
+      if (topicRounds >= 3) return 'deep';
+      return 'standard';
+    }
+
+    // mention 模式下到达这里说明已通过 dispatch 过滤（被@才入队），
+    // 等同于 isMentioned === true 的分支。兜底 standard。
+    if (topicRounds >= 3) return 'deep';
+    return 'standard';
   }
 
   /**
