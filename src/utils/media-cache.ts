@@ -103,7 +103,13 @@ export async function validateImage(
 
   // 动态导入 image-type（ESM only）
   const { default: imageType } = await import('image-type');
-  const type = await imageType(buffer);
+  // image-type 对极短/截断的 buffer 会抛 EndOfStreamError，捕获后按「无法识别」处理。
+  let type: { ext: string; mime: string } | undefined;
+  try {
+    type = await imageType(buffer);
+  } catch (e) {
+    return { mime: null, reason: `Image type detection error: ${(e as Error).message}` };
+  }
   if (!type) {
     return { mime: null, reason: 'Unable to detect image type' };
   }
@@ -112,6 +118,50 @@ export async function validateImage(
   }
 
   return { mime: type.mime };
+}
+
+// ── 入站图片注入（跨通道复用） ──────────────────────────────────────────────────
+
+/** 派发给 baseagent 的入站图片条目（base64 + MIME） */
+export interface InboundImage {
+  data: string;       // base64
+  mimeType: string;
+}
+
+/**
+ * 把已下载的附件 Buffer 转成入站图片条目（供 baseagent 视觉通道）。
+ *
+ * 适用于所有「需要先下载再注入」的通道（AUN ticket 下载、未来其它 CDN 下载等）。
+ * 飞书/微信已有各自的 SDK 下载路径，可按需复用本函数统一 MIME 判定。
+ *
+ * 判定优先级：
+ *   1. magic bytes（image-type 库，最可靠，同时做大小/白名单校验）
+ *   2. 元数据 MIME 字段（att.content_type / mime_type / mimeType）
+ *   3. 文件名后缀
+ *
+ * @returns 是图片返回 InboundImage；非图片或校验失败返回 null。
+ */
+export async function bufferToInboundImage(
+  buffer: Buffer,
+  hints?: { contentType?: string; mimeType?: string; filename?: string },
+): Promise<InboundImage | null> {
+  // 1. magic bytes（含大小 + 白名单校验；validateImage 已吞掉 image-type 的异常）
+  const validated = await validateImage(buffer);
+  if (validated.mime) {
+    return { data: buffer.toString('base64'), mimeType: validated.mime };
+  }
+  // 2/3. magic bytes 未识别时，回退到元数据字段 / 文件名后缀
+  //      （仍受 image 白名单约束，避免把任意文件当图片注入）
+  const metaCt = hints?.contentType || hints?.mimeType || '';
+  const byMeta = typeof metaCt === 'string' && ALLOWED_IMAGE_MIMES.has(metaCt) ? metaCt : '';
+  const byExt = hints?.filename
+    ? (ALLOWED_IMAGE_MIMES.has(guessMime(hints.filename)) ? guessMime(hints.filename) : '')
+    : '';
+  const fallback = byMeta || byExt;
+  if (fallback && buffer.length > 0 && buffer.length <= DEFAULT_MAX_IMAGE_SIZE) {
+    return { data: buffer.toString('base64'), mimeType: fallback };
+  }
+  return null;
 }
 
 // ── 文件保存 ──────────────────────────────────────────────────────────────────

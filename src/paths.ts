@@ -41,7 +41,8 @@ export function resolvePaths() {
 
     // ── 新结构（evolclaw-directory-design.md）────────────────
     defaultsConfig: path.join(root, 'agents', 'defaults.json'),
-    processConfig: path.join(root, 'config.json'),
+    processConfig: path.join(root, 'config.json'), // legacy ProcessConfig path — only for migration source
+    evolclawJson: path.join(root, 'evolclaw.json'),
     eckDir: path.join(root, 'eck'),
     instanceReadySignal: path.join(root, 'data', 'instance', 'ready.signal'),
     instanceSocket: resolveInstanceSocketPath(root),
@@ -189,15 +190,18 @@ function migrateFromAun(): void {
 }
 
 /**
- * 首次运行时从 assets/ 模板拷贝 config.json 和 .env 到 $EVOLCLAW_HOME。
+ * 首次运行时从 assets/ 模板拷贝 .env 到 $EVOLCLAW_HOME。
  * 已存在则跳过，不覆盖用户修改。
+ *
+ * 注：config.json（旧 ProcessConfig）已废弃——不再 seed，否则会与
+ * migrateProcessConfigIfNeeded 的归档形成每次启动重建+重迁移的循环。
+ * 进程级配置统一走 evolclaw.json。
  */
 function seedConfigTemplates(): void {
   const root = resolveRoot();
   const assetsDir = path.join(getPackageRoot(), 'assets');
 
   const templates: Array<{ src: string; dst: string }> = [
-    { src: 'config.json.template', dst: 'config.json' },
     { src: '.env.template', dst: '.env' },
   ];
 

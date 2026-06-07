@@ -19,10 +19,19 @@ const execFileAsync = promisify(execFile);
 // ── npm install -g (shared) ────────────────────────────────────────────────
 
 export async function npmInstallGlobal(pkg: string): Promise<void> {
-  const npmCmd = isWindows ? 'npm.cmd' : 'npm';
-  const execOpts = { timeout: 180000, shell: isWindows };
+  let cmd: string;
+  let args: string[];
+  // Windows: run via cmd /c to avoid shell:true deprecation warning on Node 22.
+  // Unix: npm directly, no shell needed.
+  if (isWindows) {
+    cmd = 'cmd';
+    args = ['/c', 'npm', 'install', '-g', pkg];
+  } else {
+    cmd = 'npm';
+    args = ['install', '-g', pkg];
+  }
   try {
-    await execFileAsync(npmCmd, ['install', '-g', pkg], execOpts);
+    await execFileAsync(cmd, args, { timeout: 180000 });
   } catch (e: any) {
     if (e.stderr?.includes('EACCES') || e.message?.includes('EACCES')) {
       if (isWindows) {

@@ -5,13 +5,14 @@ import { spawn, execFileSync, execFile } from 'child_process';
 import { promisify } from 'util';
 import { resolveRoot, resolvePaths, ensureDataDirs, getPackageRoot, agentMdPath } from '../paths.js';
 import { loadDefaults, loadAllAgents, mergeForAgent } from '../config-store.js';
+import { loadEvolclawConfig } from '../evolclaw-config.js';
 import { resolveAnthropicConfig } from '../agents/resolve.js';
 import { normalizeChannelInstances, channelTypes } from '../utils/channel-helpers.js';
 import { migrateProject } from '../config-store.js';
 import readline from 'readline';
-import { cmdInit } from './init.js';
+import { cmdInit, needsControlAidInit, initTail } from './init.js';
 import { ipcQuery } from '../ipc.js';
-import { cmdInitWechat, cmdInitFeishu, cmdInitDingtalk, cmdInitQQBot, cmdInitWecom } from './init-channel.js';
+import { cmdInitWechat, cmdInitFeishu, cmdInitDingtalk, cmdInitQQBot, cmdInitWecom, cmdInitAun } from './init-channel.js';
 import { isHelpFlag, wantsHelp, getArgValue } from './help.js';
 import * as platform from '../utils/cross-platform.js';
 import { EventBus } from '../core/event-bus.js';
@@ -289,6 +290,28 @@ async function cmdStart() {
   const { autoMigrateIfNeeded } = await import('../config-store.js');
   autoMigrateIfNeeded();
 
+  // 未初始化时自动引导
+  const defaults = loadDefaults();
+  if (!defaults || !defaults.baseagents || Object.keys(defaults.baseagents).length === 0) {
+    console.log('⚡ 未检测到初始化配置，自动启动初始化向导...\n');
+    await cmdInit();
+    return;
+  }
+
+  // 控制 AID 门禁：缺 aid 且交互式 → 只补全控制 AID + owners（不重走 baseagent 向导）。
+  // 非 TTY（restart-monitor/systemd/管道）不补全（无法交互），只提示后继续启动，daemon 侧 warn 兜底。
+  const evolclawCfgStart = loadEvolclawConfig();
+  if (needsControlAidInit(evolclawCfgStart.aid, !!process.stdin.isTTY)) {
+    console.log('⚡ 控制 AID 未配置，自动补全...\n');
+    const { suppressSdkLogs } = await import('../aun/aid/index.js');
+    suppressSdkLogs();
+    await initTail();
+    return;
+  }
+  if (!evolclawCfgStart.aid) {
+    console.log('⚠ 控制 AID 未配置（非交互式启动，跳过补全）。如需进程身份/远程管理，请运行 evolclaw init');
+  }
+
   // 检查至少有一个 self-agent
   const { agents, skipped } = loadAllAgents();
   if (agents.length === 0) {
@@ -310,7 +333,7 @@ async function cmdStart() {
   const aliveMains = status.mains.filter(m => m.alive);
   if (aliveMains.length > 0) {
     const first = aliveMains[0];
-    console.log(`❌ EvolClaw is already running (PID: ${aliveMains.map(m => m.record.pid).join(', ')})`);
+    console.log(`  EvolClaw is already running (PID: ${aliveMains.map(m => m.record.pid).join(', ')})`);
     console.log(`  启动于: ${new Date(first.record.startedAtIso).toLocaleString()}`);
     console.log(`  启动方式: ${first.record.launchedBy}`);
     // 报告 AID 状态
@@ -373,13 +396,7 @@ async function cmdStart() {
   const checkReady = () => {
     // ready signal 出现（优先检查，避免 Windows 上误判进程状态）
     if (fs.existsSync(p.readySignal)) {
-      const pkg = JSON.parse(fs.readFileSync(path.join(getPackageRoot(), 'package.json'), 'utf-8'));
-      let aunVer = 'unknown';
-      try {
-        const aunPkg = JSON.parse(fs.readFileSync(path.join(getPackageRoot(), 'node_modules', '@agentunion', 'fastaun', 'package.json'), 'utf-8'));
-        aunVer = aunPkg.version;
-      } catch { /* ignore */ }
-      console.log(`✓ EvolClaw v${pkg.version} started successfully (PID: ${childPid})  fastaun v${aunVer}`);
+      console.log(`✓ EvolClaw started successfully (PID: ${childPid})`);
       console.log(`  EVOLCLAW_HOME: ${resolveRoot()}`);
       console.log(`  Logs: ${p.logs}/`);
 
@@ -504,7 +521,6 @@ async function cmdStop() {
 
 async function cmdRestart(opts: { clear?: boolean } = {}) {
   const cmdStartedAt = Date.now();
-  printStartupInfo();
 
   console.log('🔄 Restarting EvolClaw...');
 
@@ -981,6 +997,14 @@ async function cmdStatus() {
             renderAunAidsTable(aidsResp.aids);
           }
         } catch { /* ignore */ }
+
+        // 控制 AID（daemon 进程身份）状态
+        if (status.controlAid) {
+          const state = status.controlAid.connected ? 'connected' : 'disconnected';
+          console.log(`control: ${status.controlAid.aid}  [${state}]`);
+        } else {
+          console.log('control: not configured');
+        }
 
         if (status.stats) {
           console.log('');
@@ -2063,93 +2087,52 @@ async function cmdWatchAid(): Promise<void> {
 }
 
 async function cmdWatchWeb(): Promise<void> {
-  const p = resolvePaths();
-  fs.mkdirSync(p.instanceDir, { recursive: true });
+  // evolclaw-web 是独立插件包（可执行命令），按需安装。
+  // 复用 npm-ops.npmInstallGlobal（含 EACCES→sudo 回退、Windows npm.cmd、超时）。
+  const { execFileSync } = await import('child_process');
+  const home = resolvePaths().root;
 
-  const useColor = !!process.stdout.isTTY;
-  const RST = useColor ? '\x1b[0m' : '';
-  const DIM = useColor ? '\x1b[2m' : '';
-  const BOLD = useColor ? '\x1b[1m' : '';
-  const CYAN = useColor ? '\x1b[36m' : '';
-  const GREEN = useColor ? '\x1b[32m' : '';
-  const YELLOW = useColor ? '\x1b[33m' : '';
-
-  const logLine = (line: string) => {
-    const t = new Date();
-    const ts = `${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}:${String(t.getSeconds()).padStart(2, '0')}`;
-    process.stdout.write(`${DIM}${ts}${RST} ${line}\n`);
-  };
-
-  // 调试日志文件：每次运行 watch web 时清空，便于建立调试闭环
-  // 查看 sessions 调试日志 → 读这个文件
-  const logFile = path.join(p.logs, 'watch-web.log');
-  try {
-    fs.mkdirSync(p.logs, { recursive: true });
-    fs.writeFileSync(logFile, `# watch-web debug log\n# started ${new Date().toISOString()} pid=${process.pid}\n`);
-  } catch { /* best effort */ }
-  const fileLog = (line: string) => {
-    const t = new Date();
-    const ts = `${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}:${String(t.getSeconds()).padStart(2, '0')}.${String(t.getMilliseconds()).padStart(3, '0')}`;
-    try { fs.appendFileSync(logFile, `${ts} ${line.replace(/\x1b\[[0-9;]*m/g, '')}\n`); } catch { /* ignore */ }
-  };
-  // 同时输出到终端和日志文件
-  const log = (line: string) => { logLine(line); fileLog(line); };
-
-  const { startWatchWebServer } = await import('./watch-web/server.js');
-  let handle;
-  try {
-    handle = await startWatchWebServer({ log });
-  } catch (e: any) {
-    console.error(`❌ 启动 Web 服务失败: ${e?.message || e}`);
-    process.exit(1);
-  }
-
-  // 注册 instance 文件
-  const instanceFile = path.join(p.instanceDir, `watch-web-${process.pid}.json`);
-  fs.writeFileSync(instanceFile, JSON.stringify({
-    pid: process.pid, startedAt: Date.now(), startedAtIso: new Date().toISOString(),
-    type: 'watch-web', port: handle.port,
-  }, null, 2));
-
-  // 列出本机访问地址
-  const os = await import('os');
-  const ifaces = os.networkInterfaces();
-  const lanIps: string[] = [];
-  for (const list of Object.values(ifaces)) {
-    for (const ni of list || []) {
-      if (ni.family === 'IPv4' && !ni.internal) lanIps.push(ni.address);
+  if (!platform.commandExists('evolclaw-web')) {
+    process.stdout.write('📦 evolclaw-web 未安装，正在从 npm 安装...\n');
+    const { npmInstallGlobal } = await import('../utils/npm-ops.js');
+    try {
+      await npmInstallGlobal('evolclaw-web');
+    } catch (e: any) {
+      process.stderr.write(`❌ 安装 evolclaw-web 失败: ${e?.stderr || e?.message || e}\n   可手动安装: npm install -g evolclaw-web\n`);
+      process.exit(1);
     }
   }
 
-  process.stdout.write(`\n${BOLD}${CYAN}🔭 EvolClaw Watch Web${RST}\n\n`);
-  process.stdout.write(`  ${BOLD}配对码:${RST}  ${GREEN}${BOLD}${handle.pairingCode}${RST}  ${DIM}(5 分钟内有效，配对后 token 缓存 24h 自动续期)${RST}\n\n`);
-  process.stdout.write(`  ${BOLD}本机:${RST}    http://localhost:${handle.port}\n`);
-  for (const ip of lanIps) {
-    process.stdout.write(`  ${BOLD}局域网:${RST}  http://${ip}:${handle.port}\n`);
-  }
-  process.stdout.write(`\n  ${DIM}绑定 0.0.0.0，远程可访问。按任意键退出。${RST}\n`);
-  process.stdout.write(`  ${DIM}调试日志: ${logFile}${RST}\n\n`);
-
-  const cleanup = () => {
-    try { fs.unlinkSync(instanceFile); } catch {}
-    handle.close().finally(() => process.exit(0));
-  };
-  process.on('exit', () => { try { fs.unlinkSync(instanceFile); } catch {} });
-  process.on('SIGINT', cleanup);
-  process.on('SIGTERM', cleanup);
-  platform.onShutdown(cleanup);
-
-  // 按任意键退出
-  if (process.stdin.isTTY) {
-    process.stdin.setRawMode(true);
-    process.stdin.resume();
-    process.stdin.on('data', (key: Buffer) => {
-      logLine(`${YELLOW}收到退出指令，关闭服务…${RST}`);
-      cleanup();
-    });
+  // 解析可执行文件的真实绝对路径：
+  //  - Windows 上 bin 是 evolclaw-web.cmd，execFileSync 不会自动补后缀
+  //  - 刚安装的命令可能不在当前进程已缓存的 PATH 里，用 where/which 重新探测
+  const exe = platform.resolveCommandPath('evolclaw-web');
+  if (!exe) {
+    process.stderr.write('❌ 已安装 evolclaw-web 但无法定位可执行文件。\n   请重新打开终端后再次运行，或手动执行: evolclaw-web --home ' + home + '\n');
+    process.exit(1);
   }
 
-  await new Promise<void>(() => {});
+  // Node 18.20+/20+/22 起，execFile 拒绝直接 spawn .cmd/.bat（CVE-2024-27980），必须 shell:true。
+  // shell 模式下含空格的路径/参数需加引号。
+  // evolclaw-web 是前台长驻服务：用户 Ctrl-C、被新实例的单实例保护 SIGKILL、或正常退出，
+  // execFileSync 都会抛错（signal 终止时 status=null）。这些都是正常生命周期，
+  // 不应让父进程 evolclaw 带堆栈崩溃。只有真正的非信号失败才提示。
+  const isBatch = /\.(cmd|bat)$/i.test(exe);
+  try {
+    if (isBatch) {
+      const q = (s: string) => `"${s}"`;
+      execFileSync(q(exe), ['--home', q(home)], { stdio: 'inherit', shell: true });
+    } else {
+      execFileSync(exe, ['--home', home], { stdio: 'inherit' });
+    }
+  } catch (e: any) {
+    // 信号终止（SIGINT/SIGTERM/SIGKILL）= 用户主动退出或被新实例顶替，静默返回
+    if (e?.signal) return;
+    // 退出码非 0 但非信号：可能是启动失败，提示但不崩溃
+    if (typeof e?.status === 'number' && e.status !== 0) {
+      process.stderr.write(`⚠ evolclaw-web 退出（code ${e.status}）\n`);
+    }
+  }
 }
 async function cmdRestartMonitor() {
   const p = resolvePaths();
@@ -2732,7 +2715,6 @@ async function cmdMv(oldDir?: string, newDir?: string) {
     if (r.codexUpdated > 0) console.log(`✓ Codex 数据库已更新 (${r.codexUpdated} 个会话)`);
     if (r.directoryMoved) console.log('✓ 项目目录已移动');
     if (r.evolclawDbUpdated > 0) console.log(`✓ EvolClaw 会话存储已更新 (${r.evolclawDbUpdated} 条记录)`);
-    if (r.evolclawConfigUpdated) console.log('✓ agent config projects.list 已更新');
 
     console.log('\n迁移完成！');
   } catch (e) {
@@ -4043,10 +4025,14 @@ Commands:
       process.exit(1);
     }
     if (formatJson) {
-      console.log(JSON.stringify({ ok: true, objectKey: remotePath, isPublic, ref: `${aid}/${remotePath}` }));
+      console.log(JSON.stringify({ ok: true, objectKey: remotePath, isPublic, ref: `${aid}/${remotePath}`, publicUrl: result.publicUrl ?? null }));
     } else {
       console.log(`✓ 已上传: ${remotePath}${isPublic ? ' (公开)' : ''}`);
-      console.log(`  引用: ${aid}/${remotePath}`);
+      if (result.publicUrl) {
+        console.log(`  🔗 访问: ${result.publicUrl}`);
+      } else {
+        console.log(`  引用: ${aid}/${remotePath}`);
+      }
       console.log(`  下载: evolclaw storage download ${aid} ${aid}/${remotePath}`);
     }
     return;
@@ -4856,11 +4842,16 @@ export async function main(args: string[]) {
     --force                              已存在 defaults.json 时覆盖
 
 配置渠道（先 evolclaw agent new 创建 agent）:
+  evolclaw init aun           AUN 渠道配置（AID 创建/绑定）
   evolclaw init feishu        飞书扫码登录
   evolclaw init wechat        微信扫码登录
   evolclaw init dingtalk      钉钉扫码登录
   evolclaw init qqbot         QQ 机器人扫码绑定
   evolclaw init wecom         企业微信 AI Bot 配置（手动输入）`);
+      } else if (args[1] === 'aun') {
+        const { suppressSdkLogs } = await import('../aun/aid/index.js');
+        suppressSdkLogs();
+        await cmdInitAun();
       } else if (args[1] === 'wechat') {
         const { suppressSdkLogs } = await import('../aun/aid/index.js');
         suppressSdkLogs();
@@ -4880,7 +4871,7 @@ export async function main(args: string[]) {
       } else if (args[1] === 'wecom') {
         await cmdInitWecom();
       } else if (args[1] && !args[1].startsWith('-')) {
-        const supported = ['feishu', 'wechat', 'dingtalk', 'qqbot', 'wecom'];
+        const supported = ['feishu', 'wechat', 'aun', 'dingtalk', 'qqbot', 'wecom'];
         console.error(`❌ 不支持的渠道: ${args[1]}`);
         console.error(`   支持的渠道: ${supported.join(', ')}`);
         process.exit(1);
@@ -4910,7 +4901,12 @@ export async function main(args: string[]) {
     case 'logs':
       cmdLogs(args.slice(1));
       break;
-    case 'watch':
+    case 'watch': {
+      // watch 子命令（aid/msg）会调 AUN SDK（aidLookup 刷名片、对端探测等），
+      // 与 aid/msg/group 等命令一致：进 case 先关掉 SDK 的 [aun_core] 日志，
+      // 否则 SDK debug 日志会直喷终端、糊住 watch 的 TUI 面板。
+      const { suppressSdkLogs } = await import('../aun/aid/index.js');
+      suppressSdkLogs();
       if (args[1] === 'aid') {
         await cmdWatchAid();
       } else if (args[1] === 'msg') {
@@ -4945,6 +4941,7 @@ export async function main(args: string[]) {
         cmdWatch();
       }
       break;
+    }
     case 'restart-monitor':
       await cmdRestartMonitor();
       break;
@@ -5004,6 +5001,18 @@ export async function main(args: string[]) {
     case 'model': {
       const { cmdModel } = await import('./model.js');
       await cmdModel(args.slice(1));
+      break;
+    }
+    case 'stats': {
+      const { handleStats } = await import('./stats.js');
+      await handleStats(args.slice(1));
+      break;
+    }
+    case 'version':
+    case '-v':
+    case '--version': {
+      const { handleVersion } = await import('./version.js');
+      handleVersion(args.slice(1));
       break;
     }
     case 'bench': {

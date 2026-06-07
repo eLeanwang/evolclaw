@@ -54,8 +54,8 @@ const STATIC_MODEL_ALIASES: Record<string, string> = {
   'haiku': 'claude-haiku-4-5-20251001',
 };
 
-const MODEL_ALIAS_TTL_MS = 60 * 60 * 1000; // 1h
-interface AliasCacheEntry { aliases: Record<string, string>; fetchedAt: number; }
+const MODEL_ALIAS_TTL_MS = 5 * 60 * 1000; // 5min
+interface AliasCacheEntry { aliases: Record<string, string>; ids: string[]; fetchedAt: number; }
 const modelAliasCache = new Map<string, AliasCacheEntry>(); // key: baseUrl
 const modelAliasInFlight = new Set<string>();               // 去重并发刷新
 
@@ -99,9 +99,9 @@ async function refreshModelAliases(baseUrl: string, apiKey?: string): Promise<vo
       ? json.data.map((m: any) => m?.id).filter((x: any): x is string => typeof x === 'string')
       : [];
     const aliases = deriveAliasesFromModelIds(ids);
-    if (Object.keys(aliases).length > 0) {
-      modelAliasCache.set(baseUrl, { aliases, fetchedAt: Date.now() });
-      logger.info(`[AgentRunner] Refreshed model aliases from ${url}: ${JSON.stringify(aliases)}`);
+    if (ids.length > 0 || Object.keys(aliases).length > 0) {
+      modelAliasCache.set(baseUrl, { aliases, ids, fetchedAt: Date.now() });
+      logger.info(`[AgentRunner] Refreshed models from ${url}: ${ids.length} ids, aliases ${JSON.stringify(aliases)}`);
     }
   } catch {
     // 网络/解析失败：保持静态回退，不打断查询
@@ -125,6 +125,29 @@ function resolveModelAlias(model: string, baseUrl?: string): string {
 
   // 回退静态表
   return STATIC_MODEL_ALIASES[model] || model;
+}
+
+/** 支持 1M 上下文窗口的模型 ID 前缀（SDK 通过 `[1m]` 后缀启用）。 */
+const ONE_M_CONTEXT_PREFIXES = ['claude-opus-4-8', 'claude-sonnet-4-6'];
+
+/**
+ * 为支持 1M 上下文的模型追加 `[1m]` 后缀——仅在交给 SDK query() 时调用。
+ * 目录与校验层始终使用不带后缀的基础 ID，避免与网关 /models 返回值（无 `[1m]`）冲突。
+ */
+function applyContextWindow(modelId: string): string {
+  if (/\[1m\]$/.test(modelId)) return modelId; // 已带后缀
+  if (ONE_M_CONTEXT_PREFIXES.some(p => modelId === p)) return `${modelId}[1m]`;
+  return modelId;
+}
+
+/** 根据 SDK model 串（含 [1m] 后缀）返回合适的 autoCompactWindow 值。 */
+function contextWindowFor(sdkModel: string): number {
+  return /\[1m\]$/.test(sdkModel) ? 900000 : 200000;
+}
+
+/** 解析别名 + 追加 1M 后缀，得到最终交给 SDK 的 model 串。 */
+function resolveSdkModel(model: string, baseUrl?: string): string {
+  return applyContextWindow(resolveModelAlias(model, baseUrl));
 }
 
 // ── SDK 消息流（Claude Agent SDK 专有格式）──
@@ -217,7 +240,7 @@ export type AgentEvent =
   | { type: 'task_progress'; summary?: string; toolUses?: number; durationMs?: number }
   | { type: 'session_id'; sessionId: string }
   | { type: 'state_changed'; state: 'idle' | 'running' | 'requires_action' }
-  | { type: 'complete'; result?: string; subtype?: string; isError?: boolean; errors?: string[]; durationMs?: number; ttftMs?: number; costUsd?: number; terminalReason?: string; sessionTitle?: string; numTurns?: number; usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } }
+  | { type: 'complete'; result?: string; subtype?: string; isError?: boolean; errors?: string[]; durationMs?: number; ttftMs?: number; costUsd?: number; terminalReason?: string; sessionTitle?: string; numTurns?: number; tokenUsage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number }; contextUsage?: { totalTokens: number; maxTokens: number; percentage: number; model: string; effort?: string } }
   | { type: 'error'; error: string; errorType: 'context_too_long' | 'auth' | 'network' | 'unknown' };
 
 export interface QueryRequest {
@@ -311,7 +334,7 @@ export interface AgentRunnerFull {
   // 可选能力（通过类型守卫检测）
   setModel?(model: string): void;
   getModel?(): string;
-  listModels?(): string[];
+  listModels?(): string[] | Promise<string[]>;
   resolveModelId?(model: string): string;
   setEffort?(effort: any): void;
   getEffort?(): string | undefined;
@@ -325,7 +348,7 @@ export interface AgentRunnerFull {
 export interface ModelSwitcher {
   setModel(model: string): void;
   getModel(): string;
-  listModels(): string[];
+  listModels(): string[] | Promise<string[]>;
 }
 
 export interface Compactable {
@@ -426,14 +449,21 @@ export class AgentRunner {
     return this.model;
   }
 
-  listModels(): string[] {
-    // 触发异步刷新（不阻塞）
-    if (this.baseUrl) refreshModelAliases(this.baseUrl, this.apiKey);
-    // 有缓存时返回完整 ID 列表，否则返回短别名
+  async listModels(): Promise<string[]> {
     if (this.baseUrl) {
-      const cached = modelAliasCache.get(this.baseUrl);
-      if (cached) return Object.values(cached.aliases);
+      let cached = modelAliasCache.get(this.baseUrl);
+      const stale = !cached || (Date.now() - cached.fetchedAt > MODEL_ALIAS_TTL_MS);
+      // 缓存为空（首次打开）→ 等待刷新；缓存仅过期 → 后台刷新不阻塞
+      if (!cached) {
+        await refreshModelAliases(this.baseUrl, this.apiKey);
+        cached = modelAliasCache.get(this.baseUrl);
+      } else if (stale) {
+        refreshModelAliases(this.baseUrl, this.apiKey);
+      }
+      // 有缓存时返回网关 /models 的全量原始 ID
+      if (cached && cached.ids.length > 0) return cached.ids;
     }
+    // 无 baseUrl / 刷新超时或失败 → 回退短别名
     return Object.values(STATIC_MODEL_ALIASES);
   }
 
@@ -561,6 +591,10 @@ export class AgentRunner {
       return this.handleAskUserQuestionFallback(sessionId, input, questions);
     }
 
+    // 立即暂停 idle 监控，不等卡片发完再 register
+    permCtx.interactionRouter?.markWaiting(sessionId);
+    let waitMarked = true;
+
     const answers: Record<string, string | string[]> = {};
 
     const sendPrompt = permCtx.adapter && permCtx.channelId
@@ -661,7 +695,8 @@ export class AgentRunner {
         continue;
       }
 
-      // 等待用户交互
+      // 等待用户交互：先 register 接管计数，再 unmark 占位，消除空窗期
+      // （unmark 必须在 register 之后，否则计数短暂降为 0 触发 onWaitEnd→resume，idle 时钟被重置）
       const answer = await new Promise<string | string[] | null>((resolve) => {
         permCtx?.interactionRouter?.register(requestId, sessionId, (action: string, values?: Record<string, any>) => {
           if (action === 'cancel') {
@@ -683,6 +718,11 @@ export class AgentRunner {
             resolve(action);
           }
         });
+        // register 已接管计数（计数 +1），现在才能安全释放 markWaiting 占位（计数 -1），避免空窗
+        if (waitMarked) {
+          permCtx?.interactionRouter?.unmarkWaiting(sessionId);
+          waitMarked = false;
+        }
       });
 
       if (answer === null) {
@@ -693,6 +733,9 @@ export class AgentRunner {
       }
     }
 
+    if (waitMarked) {
+      permCtx?.interactionRouter?.unmarkWaiting(sessionId);
+    }
     const updatedInput = { ...input, answers };
     return { behavior: 'allow' as const, updatedInput, decisionClassification: 'user_temporary' as const };
   }
@@ -781,6 +824,9 @@ export class AgentRunner {
       return { behavior: 'allow' as const, updatedInput: input, decisionClassification: 'user_temporary' as const };
     }
 
+    // 立即暂停 idle 监控，不等卡片发完再 register
+    permCtx.interactionRouter?.markWaiting(sessionId);
+
     // 尝试发送交互卡片
     let cardSent = false;
     if (permCtx.adapter?.send) {
@@ -849,6 +895,7 @@ export class AgentRunner {
       }
 
       if (cardSent) {
+        permCtx.interactionRouter?.unmarkWaiting(sessionId);
         return new Promise((resolve) => {
           permCtx.interactionRouter?.register(requestId, sessionId, (action: string, values?: Record<string, any>) => {
             const trimmed = action.trim();
@@ -889,6 +936,7 @@ export class AgentRunner {
         },
       };
       await sendPrompt(renderActionAsText(fallbackInteraction));
+      permCtx.interactionRouter.unmarkWaiting(sessionId);
       return new Promise((resolve) => {
         permCtx.interactionRouter!.register(fallbackRequestId, sessionId, (action: string) => {
           const trimmed = action.trim();
@@ -902,6 +950,7 @@ export class AgentRunner {
     }
 
     // 无交互能力，发提示后直接 allow
+    (permCtx as any)?.interactionRouter?.unmarkWaiting(sessionId);
     await sendPrompt('📋 计划审批\nAI 已完成规划，自动批准执行。');
     return { behavior: 'allow' as const, updatedInput: input, decisionClassification: 'user_temporary' as const };
   }
@@ -910,7 +959,7 @@ export class AgentRunner {
    * SDK 原始事件 → 标准 AgentEvent 转换
    * 所有 SDK 特有的事件类型引用封装在此方法内
    */
-  private async *transformStream(sdkStream: AsyncIterable<any>, sessionId: string): AsyncGenerator<AgentEvent> {
+  private async *transformStream(sdkStream: AsyncIterable<any>, sessionId: string, callModel?: string, callEffort?: string, sdkModel?: string): AsyncGenerator<AgentEvent> {
     let lastSessionId: string | undefined;
     // tool_use_id → tool_name 映射，用于从 SDKUserMessage 的 tool_result 块中还原工具名
     const toolUseNames = new Map<string, string>();
@@ -1019,6 +1068,27 @@ export class AgentRunner {
           ? event.result.replace(/<thinking>[\s\S]*?<\/thinking>\s*/g, '').trim()
           : event.result;
 
+        // 从 usage 求当前上下文占用。
+        // Claude：input_tokens 是净输入（不含 cache），三项求和 = 实际上下文长度。
+        // 非 Claude（DeepSeek/OpenAI 兼容）：cache_read 是服务端 KV cache 不占上下文窗口，
+        // input_tokens 本身就是完整的上下文输入量。
+        const u = event.usage;
+        const effectiveModel = callModel ?? this.model;
+        const isClaudeModel = effectiveModel?.startsWith('claude');
+        const totalTokens = u
+          ? isClaudeModel
+            ? (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0)
+            : (u.input_tokens ?? 0)
+          : 0;
+        const maxTokens = sdkModel ? contextWindowFor(sdkModel) : 200000;
+        const contextUsage = totalTokens > 0 ? {
+          totalTokens,
+          maxTokens,
+          percentage: Math.round((totalTokens / maxTokens) * 100),
+          model: callModel ?? this.model,
+          effort: callEffort ?? this.effort,
+        } : undefined;
+
         yield {
           type: 'complete',
           result: cleanResult,
@@ -1031,7 +1101,8 @@ export class AgentRunner {
           terminalReason: event.terminal_reason,
           sessionTitle: event.session_title,
           numTurns: event.num_turns,
-          usage: event.usage,
+          tokenUsage: event.usage,
+          contextUsage,
         };
         // result 是 SDK 流的终结事件，不再等待后续（防止 interrupt 后流不关闭导致挂起）
         return;
@@ -1270,12 +1341,13 @@ export class AgentRunner {
     } else {
       logger.info(`[AgentRunner] systemPromptAppend: none`);
     }
+    const sdkModel = resolveSdkModel(callModel, this.baseUrl);
     const commonOptions = {
       cwd: projectPath,
-      model: resolveModelAlias(callModel, this.baseUrl),
+      model: sdkModel,
       ...(callEffort ? { effort: callEffort } : {}),
       ...(this.claudeExecutablePath ? { pathToClaudeCodeExecutable: this.claudeExecutablePath } : {}),
-      autoCompactWindow: 200000,
+      autoCompactWindow: contextWindowFor(sdkModel),
       advisorModel: 'haiku',
       canUseTool: canUseToolCallback,
       permissionMode: sdkPermissionMode,
@@ -1393,7 +1465,7 @@ export class AgentRunner {
 
     let sdkStream;
     if (images && images.length > 0) {
-      logger.debug('[AgentRunner] Creating query with images, images:', images.length);
+      logger.info('[AgentRunner] Creating query with images:', images.length, 'first image size:', images[0]?.data?.length ?? 0);
       logger.debug('[AgentRunner] Skipping resume for image message to avoid history conflict');
       const stream = new MessageStream();
       stream.push(prompt, images);
@@ -1408,7 +1480,7 @@ export class AgentRunner {
       this.interruptFns.set(sessionId, () => (sdkStream as any).interrupt());
     }
     // 返回标准 AgentEvent 流（重试由 MessageProcessor 层负责）
-    return this.transformStream(sdkStream, sessionId);
+    return this.transformStream(sdkStream, sessionId, callModel, callEffort, sdkModel);
   }
 
   async interrupt(sessionId: string): Promise<void> {
@@ -1452,7 +1524,7 @@ export class AgentRunner {
       prompt,
       options: {
         cwd: projectPath,
-        model: resolveModelAlias(this.model, this.baseUrl),
+        model: resolveSdkModel(this.model, this.baseUrl),
         resume: agentSessionId,
         maxTurns: 1,
         permissionMode: this.toSdkPermissionMode(),

@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import imageType from 'image-type';
-import { sanitizeFileName, saveToUploads, validateImage } from '../utils/media-cache.js';
+import { sanitizeFileName, saveToUploads, bufferToInboundImage } from '../utils/media-cache.js';
 import { logger } from '../utils/logger.js';
 import { hasRichContent, renderAllRichContent, checkDependencies } from '../utils/rich-content-renderer.js';
 import type { InteractionRequest, InteractionResponse, ActionInteraction, ThoughtItem } from '../types.js';
@@ -24,6 +24,7 @@ export interface MessageHandlerOptions {
   peerName?: string;
   messageId?: string;
   mentions?: Array<{ userId: string; name?: string; key?: string }>;
+  mentionAids?: string[];
   threadId?: string;
   rootId?: string;
   source?: 'user' | 'card-trigger';
@@ -257,7 +258,7 @@ export class FeishuChannel {
               // 清理残留的 mention 占位符（@_user_N 代表机器人）
               content = content.replace(/@_user_\d+/g, '').trim();
               const finalContent = quotedText + content;
-              await this.messageHandler({ channelId: msg.chat_id, content: finalContent, images: quotedImages.length > 0 ? quotedImages : undefined, peerId, peerName, messageId: msg.message_id, mentions: mentions.length > 0 ? mentions : undefined, threadId, rootId, chatType });
+              await this.messageHandler({ channelId: msg.chat_id, content: finalContent, images: quotedImages.length > 0 ? quotedImages : undefined, peerId, peerName, messageId: msg.message_id, mentions: mentions.length > 0 ? mentions : undefined, mentionAids: mentions.length > 0 ? mentions.map((m: any) => m.userId) : undefined, threadId, rootId, chatType });
             }
             // 处理图片消息
             else if (msg.message_type === 'image') {
@@ -332,7 +333,8 @@ export class FeishuChannel {
             else if (msg.message_type === 'merge_forward') {
               const { text: mergedText, images: mergedImages } = await this.extractMergeForwardContent(msg.message_id, msg.chat_id);
               if (mergedText) {
-                const finalContent = quotedText + mergedText;
+                // 直接发送合并转发时，parent_id 指向自己，引用解析会把相同内容填入 quotedText 导致重复，丢弃
+                const finalContent = mergedText;
                 const allImages = [...quotedImages, ...mergedImages];
                 await this.messageHandler({ channelId: msg.chat_id, content: finalContent, images: allImages.length > 0 ? allImages : undefined, peerId, peerName, messageId: msg.message_id, threadId, rootId, chatType });
               } else {
@@ -472,7 +474,7 @@ export class FeishuChannel {
     return undefined;
   }
 
-  async sendMessage(chatId: string, content: string, options?: { title?: string; replyToMessageId?: string; forceText?: boolean; mentionUserIds?: string[]; replyInThread?: boolean }): Promise<void> {
+  async sendMessage(chatId: string, content: string, options?: { title?: string; replyToMessageId?: string; forceText?: boolean; mentionUserIds?: string[]; replyInThread?: boolean; onThreadCreated?: (threadId: string) => void }): Promise<void> {
     if (!this.client) return;
 
     if (!content || content.trim() === '') {
@@ -578,10 +580,14 @@ export class FeishuChannel {
         if (options.replyInThread) {
           replyData.reply_in_thread = true;
         }
-        await this.client.im.message.reply({
+        const replyRes = await this.client.im.message.reply({
           path: { message_id: options.replyToMessageId },
           data: replyData
         });
+        if (options.replyInThread && options.onThreadCreated) {
+          const newThreadId = (replyRes as any)?.data?.thread_id;
+          if (newThreadId) options.onThreadCreated(newThreadId);
+        }
       } else {
         await this.client.im.message.create({
           params: { receive_id_type: chatId.startsWith('ou_') ? 'open_id' : chatId.startsWith('on_') ? 'union_id' : 'chat_id' },
@@ -776,13 +782,17 @@ export class FeishuChannel {
       if (cleaned > 0) logger.info(`[Feishu] Cleaned ${cleaned} old message IDs`);
       // seenThreads 无时间戳，仅限容量（话题持久存在，不按时间清理）
       if (this.seenThreads.size > 1000) this.seenThreads.clear();
-      // 重写文件，去掉过期条目
-      if (this.config.seenMsgFile && this.seenMessages.size > 0) {
+      // 重写文件，去掉过期条目（仅在有记录被清理时才写）
+      if (cleaned > 0 && this.config.seenMsgFile) {
         try {
-          const lines = [...this.seenMessages.entries()]
-            .map(([id, ts]) => JSON.stringify({ id, ts }))
-            .join('\n') + '\n';
-          fs.writeFileSync(this.config.seenMsgFile, lines);
+          if (this.seenMessages.size === 0) {
+            fs.unlinkSync(this.config.seenMsgFile);
+          } else {
+            const lines = [...this.seenMessages.entries()]
+              .map(([id, ts]) => JSON.stringify({ id, ts }))
+              .join('\n') + '\n';
+            fs.writeFileSync(this.config.seenMsgFile, lines);
+          }
         } catch {}
       }
     }, 60 * 60 * 1000);
@@ -851,20 +861,14 @@ export class FeishuChannel {
           return null;
         }
 
-        // 统一图片验证（类型白名单 + 大小限制）
-        const result = await validateImage(buffer);
-        if (result.mime === null) {
-          logger.warn(`[Feishu] Image validation failed: ${result.reason}`);
+        // 统一图片识别 + base64 注入（magic bytes → 元数据 → 后缀）
+        const img = await bufferToInboundImage(buffer);
+        if (!img) {
+          logger.warn('[Feishu] Image validation failed (not a supported image)');
           return null;
         }
-
-        const base64Data = buffer.toString('base64');
-        logger.debug('[Feishu] Image downloaded successfully, type:', result.mime, 'size:', base64Data.length);
-
-        return {
-          data: base64Data,
-          mimeType: result.mime
-        };
+        logger.debug('[Feishu] Image downloaded successfully, type:', img.mimeType, 'size:', img.data.length);
+        return img;
       }
 
       logger.error('[Feishu] Image download failed: no valid method');
@@ -1328,6 +1332,16 @@ export function buildResolvedV2(
     bodyElements.push({ tag: 'markdown', content: lines.join('\n') });
   }
 
+  // CommandCard: 显示原有按钮列表（保留上下文）
+  if (kind.kind === 'command-card' && kind.buttons?.length) {
+    const lines = kind.buttons.map(btn => {
+      const prefix = btn.command === action ? '✓' : '•';
+      const cleanLabel = btn.label.replace(/^✓\s*/, '');
+      return `${prefix} ${cleanLabel}`;
+    });
+    bodyElements.push({ tag: 'markdown', content: lines.join('\n') });
+  }
+
   return {
     toast: { type: 'success', content: statusText },
     card: {
@@ -1603,7 +1617,7 @@ export class FeishuChannelPlugin implements ChannelPlugin {
       const adapter = {
         channelName: inst.name,
         channelKey: inst.name,
-        capabilities: { file: true, image: true, interaction: true, markdown: true, thought: false, status: true },
+        capabilities: { file: true, image: true, interaction: true, markdown: true, thought: false, status: true, thread: true },
         send: async (envelope: any, payload: any) => {
           const ctx = envelope.replyContext;
           const channelId = envelope.channelId;
@@ -1616,6 +1630,7 @@ export class FeishuChannelPlugin implements ChannelPlugin {
             case 'result.error': {
               const sendCtx: any = { ...(ctx ?? {}) };
               if (payload.kind === 'result.text' && payload.isFinal) sendCtx.title = '✅ 最终回复:';
+              if (ctx?.metadata?.onThreadCreated) sendCtx.onThreadCreated = ctx.metadata.onThreadCreated;
               await channel.sendMessage(channelId, payload.text, sendCtx);
               return;
             }
@@ -1699,12 +1714,12 @@ export class FeishuChannelPlugin implements ChannelPlugin {
         registerBridge(bridge: MessageBridge, channelType: string) {
           bridge.register(
             adapter.channelName,
-            (handler) => channel.onMessage(async ({ channelId: chatId, content, images, peerId, peerName, messageId, mentions, threadId, rootId, chatType, source }: any) => {
+            (handler) => channel.onMessage(async ({ channelId: chatId, content, images, peerId, peerName, messageId, mentions, mentionAids, threadId, rootId, chatType, source }: any) => {
               await handler({
                 channel: adapter.channelName, channelType, channelId: chatId, content, images,
                 selfAID: (inst as any).agentName,
                 chatType: chatType || 'private',
-                peerId: peerId || '', peerName, messageId, mentions, threadId,
+                peerId: peerId || '', peerName, messageId, mentions, mentionAids, threadId,
                 replyContext: threadId ? { replyToMessageId: rootId ?? threadId, replyInThread: true } : undefined,
                 source,
               });

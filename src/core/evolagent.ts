@@ -1,9 +1,9 @@
 import path from 'path';
-import fs from 'fs';
 import { logger } from '../utils/logger.js';
 import { saveAgent } from '../config-store.js';
 import { formatChannelKey, tryParseChannelKey } from './channel-loader.js';
 import { agentPersonalDir } from '../paths.js';
+import { fileCache } from './cache/file-cache.js';
 import type {
   AgentConfig,
   MergedAgentConfig,
@@ -239,58 +239,57 @@ export class EvolAgent {
     this.persist();
   }
 
-  // ── Projects ──────────────────────────────────────────────────────────
-
-  getProjects(): Record<string, string> {
-    const list = this.merged.projects?.list;
-    if (list && Object.keys(list).length > 0) return { ...list };
-    const dp = this.merged.projects?.defaultPath;
-    if (dp) return { [path.basename(dp)]: dp };
-    return {};
+  /** 读取观察者模式开关（默认 false）。 */
+  getObservable(): boolean {
+    return this.merged.observable === true;
   }
 
-  addProject(name: string, projectPath: string): void {
-    if (!this.rawAgent.projects) this.rawAgent.projects = { defaultPath: projectPath, list: {} };
-    if (!this.rawAgent.projects.list) this.rawAgent.projects.list = {};
-    this.rawAgent.projects.list[name] = projectPath;
+  /** 设置观察者模式开关：开启后入站/出站消息各转发一份给 owners[]。 */
+  setObservable(value: boolean): void {
+    if (value) this.rawAgent.observable = true;
+    else delete this.rawAgent.observable;
+    this.merged.observable = value;
     this.persist();
   }
 
   // ── Personal layer ────────────────────────────────────────────────────
 
-  private _personaCache: string | null | undefined = undefined;
-
-  /**
-   * 读取 personal/persona.md 内容（缓存，首次调用时从磁盘读）。
-   * 文件不存在返回 null。
-   */
-  getPersona(): string | null {
-    if (this._personaCache !== undefined) return this._personaCache;
-    const personaPath = path.join(agentPersonalDir(this.aid), 'persona.md');
-    try {
-      this._personaCache = fs.readFileSync(personaPath, 'utf-8').trim() || null;
-    } catch {
-      this._personaCache = null;
-    }
-    return this._personaCache;
+  /** 本 agent 身份层文件在 fileCache 的组名（带 aid，避免 reload 单个 agent 误失效他人）。 */
+  private agentFilesGroup(): string {
+    return `agent-files:${this.aid}`;
   }
 
   /**
-   * 读取 personal/memory/working.md 内容（不缓存，每次会话开始时读）。
+   * 读取 personal/persona.md 内容。走 fileCache（mtime 门控）：persona 没有任何
+   * 写入命令、由 agent 自己带外改写，与 working memory 同样改了即应生效，故每次读
+   * stat 比对、变了自动重读。文件不存在返回 null。
+   */
+  getPersona(): string | null {
+    const personaPath = path.join(agentPersonalDir(this.aid), 'persona.md');
+    return fileCache.get<string | null>(
+      personaPath,
+      (raw) => (raw === null ? null : (raw.trim() || null)),
+      { policy: 'mtime', group: this.agentFilesGroup() },
+    );
+  }
+
+  /**
+   * 读取 personal/memory/working.md 内容。走 fileCache（mtime 门控）：
+   * agent 在对话中改写 working memory、不触发 reload，故每次读 stat 比对、
+   * 变了自动重读，既即时反映又避免无谓重读。
    */
   getWorkingMemory(): string | null {
     const workingPath = path.join(agentPersonalDir(this.aid), 'memory', 'working.md');
-    try {
-      const content = fs.readFileSync(workingPath, 'utf-8').trim();
-      return content || null;
-    } catch {
-      return null;
-    }
+    return fileCache.get<string | null>(
+      workingPath,
+      (raw) => (raw === null ? null : (raw.trim() || null)),
+      { policy: 'mtime', group: this.agentFilesGroup() },
+    );
   }
 
-  /** 清除 persona 缓存（reload 后重新读取） */
+  /** 清除本 agent 身份层缓存（reload 后重新读取）。只失效自己的文件组，不波及他人。 */
   invalidatePersonaCache(): void {
-    this._personaCache = undefined;
+    fileCache.invalidateGroup(this.agentFilesGroup());
   }
 
   // ── Context（喂给 message-processor / command-handler） ──────────────

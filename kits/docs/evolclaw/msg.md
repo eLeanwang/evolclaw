@@ -32,6 +32,11 @@ ec msg send <from> <to> --payload '<json>'
 
 成功输出：`✓ 已发送 <message_id> seq=<n> status=<status>`
 
+> 正文写法：含空格/换行/特殊字符时用引号包起来；纯短词可不包，但多空格会被压成一个。
+> 正文恰好以 `--` 开头：带空格的（如 `"--file 是正文"`）会被正确识别为正文；
+> 若正文**精确等于**某个 flag 名（如要发送文本 `--encrypt`），用 `--` 分隔：
+> `ec msg send <from> <to> -- --encrypt`
+
 ## 拉取消息
 
 ```bash

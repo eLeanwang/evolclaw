@@ -19,16 +19,12 @@
 
 ## EvolClaw 命令
 
+所有 `ec` 命令集的专属目录（用途/触发词/适用场景/文档）见 `evolclaw/INDEX.md`。
+运行时由 `commands` fragment 按场景注入精简能力卡。
+
 | 文档 | 路径 | 说明 |
 |------|------|------|
-| 私聊消息 | `evolclaw/msg.md` | `ec msg` 私聊收发消息 |
-| 群聊消息 | `evolclaw/group.md` | `ec group` 群聊收发与群管理 |
-| Agent 生命周期 | `evolclaw/agent.md` | `ec agent` 创建/启停/配置/热重载 |
-| AID 身份 | `evolclaw/aid.md` | `ec aid` 身份/证书/名片/探测对端 |
-| 文件存储 | `evolclaw/storage.md` | `ec storage` 上传/下载/配额 |
-| 运行时自管理 | `evolclaw/ctl.md` | `ec ctl` 切模型/推理强度/压缩/重启 |
-| 底层 RPC | `evolclaw/rpc.md` | `ec rpc` 直接调 AUN 协议方法 |
-| 自我总结 | `evolclaw/self-summary.md` | 自我总结流程指南 |
+| 命令集目录 | `evolclaw/INDEX.md` | msg/group/agent/aid/storage/ctl/rpc/model/bench 全集索引 |
 
 ## 身份
 

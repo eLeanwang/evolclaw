@@ -133,7 +133,7 @@ export class TriggerManager {
     return { active, history };
   }
 
-  update(id: string, patch: Partial<Pick<Trigger, 'name' | 'scheduleType' | 'scheduleValue' | 'nextFireAt' | 'targetChannel' | 'targetChannelId' | 'targetThreadId' | 'targetSessionStrategy' | 'agentId' | 'prompt'>>): Trigger {
+  update(id: string, patch: Partial<Pick<Trigger, 'name' | 'scheduleType' | 'scheduleValue' | 'nextFireAt' | 'targetChannel' | 'targetChannelId' | 'targetThreadId' | 'targetSessionStrategy' | 'agentId' | 'prompt' | 'pendingThread'>>): Trigger {
     const t = this.triggers.get(id);
     if (!t) throw new Error(`触发器不存在：${id}`);
     // Check name uniqueness if name is being changed

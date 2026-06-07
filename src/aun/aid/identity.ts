@@ -455,6 +455,7 @@ export async function probePkiRecoverability(
 // ==================== Lookup ====================
 
 export async function aidLookup(aid: string): Promise<AidLookupResult> {
+  // gateway：well-known 探测（保留，供 aid lookup 命令展示）
   let gateway = '';
   try {
     const gwResp = await fetch(`https://${aid}/.well-known/aun-gateway`, { redirect: 'follow' });
@@ -474,15 +475,26 @@ export async function aidLookup(aid: string): Promise<AidLookupResult> {
     }
   } catch { /* ignore */ }
 
+  const { agentmdGet } = await import('./agentmd.js');
+  const store = await getAidStore({ slotId: SLOT.cli });
   try {
-    const resp = await fetch(`https://${aid}/agent.md`, { redirect: 'follow' });
-    if (resp.ok) {
-      const content = await resp.text();
-      return { exists: true, aid, gateway, content };
+    // 权威注册判据：PKI 证书 HEAD（与 agent.md 无关）
+    const existsResult = await store.exists(aid);
+    if (!existsResult.ok) {
+      return { exists: false, aid, gateway, error: existsResult.error?.message ?? 'exists check failed' };
     }
-    return { exists: false, aid, gateway, error: `agent_md_not_found` };
-  } catch (e: any) {
-    return { exists: false, aid, gateway, error: String(e.message || e) };
+    const exists = existsResult.data.exists;
+    if (!exists) {
+      return { exists: false, aid, gateway };
+    }
+    // 已注册：尽力拉 agent.md content（无 agent.md 不影响 exists）
+    let content: string | undefined;
+    try {
+      content = await agentmdGet(aid, { store });
+    } catch { /* registered but no agent.md — content stays undefined */ }
+    return { exists, aid, gateway, content };
+  } finally {
+    store.close();
   }
 }
 

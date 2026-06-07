@@ -20,7 +20,7 @@ export async function storageDownload(aid: string, url: string, localPath?: stri
   const objectKey = cleaned.slice(slashIdx + 1);
 
   const ticketResult = await rpcCall(aid, 'storage.create_download_ticket', {
-    owner: ownerAid,
+    owner_aid: ownerAid,
     object_key: objectKey,
   }, { aunPath: opts?.aunPath });
 

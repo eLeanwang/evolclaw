@@ -27,6 +27,19 @@ export class InteractionRouter {
     this.waitHooks = hooks;
   }
 
+  /**
+   * 在 register() 之前提前标记 session 为等待状态（适用于发卡片有异步延迟的场景）。
+   * 必须与 unmarkWaiting() 配对使用，或后续 register() 会接管计数。
+   */
+  markWaiting(sessionId: string): void {
+    this.incPending(sessionId);
+  }
+
+  /** 取消 markWaiting() 的占位（后续若有 register() 接管则不需调用此方法） */
+  unmarkWaiting(sessionId: string): void {
+    this.decPending(sessionId);
+  }
+
   /** 登记一个待应答交互；session 计数 0→1 时触发 onWaitStart */
   private incPending(sessionId: string): void {
     const next = (this.pendingBySession.get(sessionId) ?? 0) + 1;

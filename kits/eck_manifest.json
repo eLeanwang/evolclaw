@@ -101,6 +101,18 @@
       "description": "客户端环境文档"
     },
     {
+      "id": "response-depth",
+      "type": "file",
+      "file": "$KITS_FRAGMENTS/response-depth.md",
+      "order": 45,
+      "needsInjection": true,
+      "when": { "and": [
+        { "var": "chatType", "eq": "group" },
+        { "var": "responseDepth", "in": ["lightweight", "deep"] }
+      ]},
+      "description": "群聊响应深度指引（lightweight/deep 时注入）"
+    },
+    {
       "id": "channel-layer",
       "type": "file",
       "file": "$KITS_FRAGMENTS/channel.md",
@@ -108,6 +120,15 @@
       "needsInjection": true,
       "when": { "var": "channel", "neq": null },
       "description": "渠道层：通信渠道及能力"
+    },
+    {
+      "id": "commands",
+      "type": "file",
+      "file": "$KITS_FRAGMENTS/commands.md",
+      "order": 55,
+      "needsInjection": true,
+      "when": { "var": "channel", "neq": null },
+      "description": "命令集能力卡：按场景列出可用命令集及文档路径"
     },
     {
       "id": "session",

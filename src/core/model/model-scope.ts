@@ -17,12 +17,61 @@
 
 import fs from 'fs';
 import path from 'path';
-import { agentRelationsDir } from '../../paths.js';
+import { agentRelationsDir, agentConfig as agentConfigPath, resolvePaths } from '../../paths.js';
 import { loadDefaults, saveDefaultsSafe, loadAgent, saveAgent } from '../../config-store.js';
 import { formatPeerKey, parsePeerKey } from '../relation/peer-key.js';
-import type { BaseagentsBlock } from '../../types.js';
+import { fileCache } from '../cache/file-cache.js';
+import type { BaseagentsBlock, AgentConfig, DefaultsConfig } from '../../types.js';
 
 export type ModelScope = 'global' | 'agent' | 'relation';
+
+// ── mtime 门控缓存（统一走 FileCache）─────────────────────────────────────
+//
+// resolveEffectiveModel 每条消息按 关系>agent>全局 解析，原本每次都
+// loadAgent()/loadDefaults()/读 preferences.json —— 一条消息最多读盘 5 次。
+//
+// model-scope 被 CLI 子进程与 daemon 共用，CLI 改文件后 daemon 无失效通知，
+// 故靠 mtime 门控：每次只 statSync 比对 mtime，未变用缓存，变了才真正重读 +
+// 重解析。跨进程天然正确（文件 mtime 变即感知），改配置即时生效不变；
+// statSync 远比 read+JSON.parse 便宜。CLI 进程的 fileCache 是独立空实例、随进程
+// 退出，等同直读最新盘值，安全。
+//
+// config/defaults 与 relation-prefs 三者统一走 daemon 单例 FileCache（消除原先
+// 第二套 makeMtimeCache），读取计数一并进监控。config/defaults 的实际读盘 + 解析
+// 仍委托原 loadAgent/loadDefaults（保留 atomicRead 崩溃恢复 + expandEnvRefs/校验），
+// 故传 noopRead 让 FileCache 只做 mtime 门控、不重复读盘（loader 忽略 raw）。
+
+/** FileCache 的 read 钩子占位：config/defaults 的真实读盘在 loader 里（loadAgent/
+ *  loadDefaults，含崩溃恢复），此处返回 null 避免 FileCache 再读一遍。 */
+const noopRead = (): string | null => null;
+
+// agent config.json：mtime 门控，per-agent 分组（config:<aid>）便于 per-agent 监控视图。
+const loadAgentCached = (self: string): AgentConfig | null =>
+  fileCache.get<AgentConfig | null>(
+    agentConfigPath(self),
+    () => loadAgent(self),
+    { policy: 'mtime', group: `config:${self}`, read: noopRead },
+  );
+
+// defaults.json：单文件，mtime 门控。
+const loadDefaultsCached = (): DefaultsConfig | null =>
+  fileCache.get<DefaultsConfig | null>(
+    resolvePaths().defaultsConfig,
+    () => loadDefaults(),
+    { policy: 'mtime', group: 'config', read: noopRead },
+  );
+
+// 关系级 preferences.json —— 走统一 FileCache（mtime 门控，带外改 + 不 reload）。
+const readPrefsCached = (file: string): ModelPrefs | null =>
+  fileCache.get<ModelPrefs | null>(
+    file,
+    (raw) => (raw === null ? null : safeParsePrefs(raw)),
+    { policy: 'mtime', group: 'relation-prefs' },
+  );
+
+function safeParsePrefs(raw: string): ModelPrefs | null {
+  try { return JSON.parse(raw) as ModelPrefs; } catch { return null; }
+}
 
 /** 关系级扁平文件的内容结构 */
 export interface ModelPrefs {
@@ -100,10 +149,10 @@ export function determineScope(sel: ScopeSelector): ModelScope {
 export function activeBaseagent(self?: string): string {
   try {
     if (self) {
-      const cfg = loadAgent(self);
+      const cfg = loadAgentCached(self);
       if (cfg?.active_baseagent) return cfg.active_baseagent;
     }
-    const d = loadDefaults();
+    const d = loadDefaultsCached();
     if (d?.active_baseagent) return d.active_baseagent;
   } catch { /* fall through */ }
   return 'claude';
@@ -141,17 +190,17 @@ function writeJsonAtomic(file: string, data: ModelPrefs): void {
 export function readScope(scope: ModelScope, sel: ScopeSelector, ba: string): ModelPrefs {
   switch (scope) {
     case 'global': {
-      const block = (loadDefaults()?.baseagents || {}) as BaseagentsBlock;
+      const block = (loadDefaultsCached()?.baseagents || {}) as BaseagentsBlock;
       const c = (block as any)[ba] || {};
       return { model: c.model, effort: c[effortField(ba)] };
     }
     case 'agent': {
-      const cfg = sel.self ? loadAgent(sel.self) : null;
+      const cfg = sel.self ? loadAgentCached(sel.self) : null;
       const c = ((cfg?.baseagents || {}) as any)[ba] || {};
       return { model: c.model, effort: c[effortField(ba)] };
     }
     case 'relation': {
-      const p = readJsonSafe(relationPrefsPath(sel.self!, sel.peerKey!));
+      const p = readPrefsCached(relationPrefsPath(sel.self!, sel.peerKey!));
       return { model: p?.model, effort: p?.effort };
     }
   }

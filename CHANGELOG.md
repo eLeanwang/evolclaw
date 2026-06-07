@@ -1,5 +1,104 @@
 # Changelog
 
+## v3.2.0 (2026-06-05)
+
+### New Features
+
+- **控制 AID（control AID）** — 进程级控制身份，启动时以 `pureIdentity` 模式连接 AUN（跳过 evolagent onboarding）。生成采用 `ec+5位数字` 候选 + PKI 权威查重 + fail-fast；缺失时进入 init（TTY 守卫，headless 仅告警）。`evolclaw status` 新增控制 AID 连接状态展示
+- **Menu 协议 / agent 控制面** — `/system`、`/agent` 迁移到 owners 鉴权；trigger 接入菜单协议（直连 manager/scheduler，无文本拼装）；agent 创建支持 accepted-return + 构建进度（`create-status.json` + `onPhase` 回调 + model/chatmode）；新增 agent query/options 与 project 兜底
+- **进程级 owners 配置层** — 新增 `evolclaw.json` 进程级配置，`config.json` 合并入 `evolclaw.json`（弃用 `ProcessConfig`）；process-level owners 从 `defaults.json` 迁移到 `evolclaw.json`；新增 `isProcessLevelOwner` 鉴权辅助
+- **Observer 模式重构** — AUN owner 间消息互转发；`evolclaw init aun` 简化为 owner-only 配置；`mergeForAgent` 输出补全 `dispatch`/`observable`
+
+### Improvements
+
+- **统一 FileCache** — 新增 mtime-gated 统一文件缓存，迁移 relation prefs、manifest+fragment、persona/working 读取与 model-scope 缓存；新增 Cache watch 视图监控缓存命中
+- **消息信封渲染补全** — @AID 列表与群名补全，修复 proximity 信息丢失
+- **Idle 监控解耦** — idle notify/warn 改为事件总线发布（`runner:idle-notify`/`runner:idle-warn`，携带 idleSec/事件数/工具名），与通道发送解耦；超时诊断信息下沉到事件 payload
+
+### Bug Fixes
+
+- **多 agent 群广播去重** — 消息队列改按 `sessionKey:messageId` 去重，允许同一消息广播给多个 agent
+- **AUN owner 入站转发** — owner 来源的入站消息正确转发给其它 owners
+- **单 agent reload 缓存失效** — reload 时失效 identity 层缓存
+- **CLI /slist 过滤** — 过滤掉程序化 SDK session，不在 `/slist` 显示
+- **控制 AID 查重走 GET** — 改用 `store.resolve`（GET）替代 `store.exists`（HEAD），规避部分 Gateway 对 HEAD 空响应断连导致的误判
+- **启动门控修复** — gate 直接调 `initTail` 而非完整 `cmdInit`；AID 生成失败时跳过 owners 提示；抑制控制 AID gate 路径的 SDK keystore 日志
+
+## v3.1.11 (2026-06-04)
+
+### Improvements
+
+- **统一入站图片识别** — 新增 `bufferToInboundImage()`，AUN/飞书/微信共用 magic-bytes → 元数据 → 后缀判定链，消除各通道重复实现的 `detectImageMime`
+- **AUN 附件处理重构** — 抽出 `processAttachments()`，私聊/群聊统一处理；图片注入视觉通道不再追加冗余 `[文件: …]` 文本行
+- **入站去抖** — bridge 默认 inbound debounce 2s → 0（消息即处理）
+- **Windows npm 安装** — `npmInstallGlobal` 改用 `cmd /c`，消除 Node 22 的 `shell:true` 弃用警告
+
+### Bug Fixes
+
+- **截断图片缓冲** — `validateImage` 捕获 image-type 的 EndOfStreamError，避免短/截断 buffer 抛异常
+- **evolclaw-web 退出容错** — `evolclaw web` 容忍前台进程信号终止（SIGINT/SIGKILL）/非零退出，不再向用户打印堆栈
+
+## v3.1.10 (2026-06-04)
+
+### Bug Fixes
+
+- **Windows `evolclaw watch web` 仍 ENOENT（续 3.1.9）** — `where` 会列出同名的全部文件，npm 全局 bin 同时生成无后缀 sh 包装脚本和 `.cmd`/`.ps1`；3.1.9 取首行恰好选中无法在 Windows 执行的 sh 包装。改为优先选 PATHEXT 可执行后缀（`.cmd`/`.exe`/`.bat`/`.com`）。另外 Node 18.20+/20+/22 起 `execFile` 拒绝直接 spawn `.cmd`/`.bat`（CVE-2024-27980），改为 `shell:true` + 引号包裹参数执行
+
+## v3.1.9 (2026-06-04)
+
+### Bug Fixes
+
+- **Windows `evolclaw watch web` 启动失败（ENOENT）** — Windows 上全局 bin 是 `evolclaw-web.cmd`，`execFileSync('evolclaw-web')` 不补 `.cmd` 后缀导致 spawn ENOENT。新增 `resolveCommandPath()` 通过 `where`/`which` 解析可执行文件真实绝对路径（不缓存，刚安装的命令会重新探测）再执行；定位失败时给出"重开终端"提示
+
+## v3.1.8 (2026-06-04)
+
+### Bug Fixes
+
+- **npm 包瘦身** — 移除误入 npm 包的 10 个多余文件：`assets/wechat-group-qr.jpeg`（232 KB 运营素材，代码零引用）+ `dist/cli/watch-web/` 的 9 个陈旧构建产物（源码已迁出为独立 `evolclaw-web` 包，但旧 `.js` 残留在 dist）。包大小 729 KB → 493 KB（-236 KB），文件数 168 → 159
+- **build 脚本清理 dist** — `tsc` 前先 `rm -rf dist`，避免源码删除后陈旧 `.js` 残留被打包
+
+## v3.1.7 (2026-06-04)
+
+### New Features
+
+- **观察者模式（observable）** — `AgentConfig.observable` 开启后，AUN 入站/出站消息各转发一份给顶层 `owners[]`（`observer.forward` 格式），便于 owner 旁路监听 agent 会话
+
+### Improvements
+
+- **Trigger channelType 运行时解析** — 移除存储的 `Trigger.targetChannelType`，`buildSyntheticMessage` 改为运行时从 channel key 解析；trigger scheduler 注入与 `__upgrade-check` 播种移到 channel 注册之后，确保 `channelTypeMap` 完整
+
+### Bug Fixes
+
+- **watch 插件改名 ecweb → evolclaw-web** — npm 拒绝 `ecweb`（与 `rrweb` 过于相似），改为独立包 `evolclaw-web` 发布；`evolclaw watch` 的安装/调用引用同步更新
+- **cron trigger 紧密循环** — 定时器提前 ~1ms 唤醒（如 `0 9 * * *` 在 08:59:59.999 触发）会使下次触发落入 `now+50` 窗口被同轮重复触发；`nextCronFireAt` 从窗口外重算，循环守卫改读实时时钟确保收敛
+
+## v3.1.6 (2026-06-03)
+
+### New Features
+
+- **AUN 图片附件支持** — AUN 私聊/群聊附件中的图片自动检测（元数据/文件名/magic bytes 三重检测），base64 编码后直接传给 Agent，不再要求 Read 工具读取
+- **selfAID session 注入** — 从 channel key 解析 selfAID，透传至 MessageBridge → CommandHandler → `getOrCreateSession`，修复 AUN 多身份场景 session 归属错误
+- **watch-web 单实例保护** — 启动前清理旧实例（按 instance 文件 + 端口兜底），端口冲突时自动切换并提示；前端新增 token 失效自动回配对页、退出按钮、配对码过期刷新
+
+### Improvements
+
+- **init 流程优化** — `cmdInit` 一次性写入所有可用 baseagents（不只写选中的那个）；新增 projects 默认目录询问步骤；默认项目路径改为 `EVOLCLAW_HOME/projects`；取消 init 后自动进入 `agent new`，改为打印提示
+- **1M 上下文窗口** — `claude-opus-4-8` / `claude-sonnet-4-6` 自动追加 `[1m]` 后缀，`autoCompactWindow` 随之调整为 900000
+- **上下文用量追踪** — complete 事件新增 `contextUsage`（totalTokens/maxTokens/percentage），`usage` 字段重命名为 `tokenUsage`，随 `status.completed` 元数据下发
+- **模型别名缓存 TTL** — 从 1h 缩短至 5min
+- **`/cli` 远程透传** — 经消息通道远程执行 CLI，仅 owner 可用，白名单只读+配置命令，spawn 无 shell，15s 超时 + 128KB 截断
+- **proximity ECK 注入** — `same_device/same_network/same_egress_ip` 从 V2 E2EE 解密结果提取，注入 venue.md 条件块渲染
+- **fastaun 0.4.9** — 含 SPKI 双格式指纹匹配（0.4.8）和 watch-web 单实例相关修复（0.4.9）
+
+### Bug Fixes
+
+- **Feishu merge_forward 内容重复** — 直接转发时丢弃 quotedText，避免内容重复
+- **Feishu seenMsg 文件写入** — 仅在有记录被 GC 清理时才重写文件；seenMessages 清空时改为 unlink
+- **peer-identity 验签** — 新增 `agentmd-unverified` 来源；缓存命中时从 `verify_status` 恢复验签状态，修复 source 误降级
+- **process-introspect** — 改用 `/proc/stat btime`（绝对 epoch）替代 uptime 计算进程启动时间，修复长时间运行后 PID 复用误判
+- **evolagent.load IPC 超时** — AUN WebSocket 冷启动常 >3s，IPC 超时从默认值调整为 30s
+- **交互路由 markWaiting/unmarkWaiting** — 新增提前占位方法，适配异步发卡片场景的等待计数
+
 ## v3.1.5 (2026-06-02)
 
 ### New Features

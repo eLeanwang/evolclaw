@@ -11,6 +11,7 @@ export enum ErrorType {
   FILE_CORRUPT = 'file_corrupt',
   STREAM_ERROR = 'stream_error',
   CONTEXT_TOO_LONG = 'context_too_long',
+  MODEL_UNAVAILABLE = 'model_unavailable',
   UNKNOWN = 'unknown'
 }
 
@@ -221,6 +222,12 @@ export function classifyError(error: any): ErrorType {
     || msg.includes('context limit') || msg.includes('input is too long')
     || msg.includes('上下文过长')) {
     return ErrorType.CONTEXT_TOO_LONG;
+  }
+
+  if (msg.includes('invalid_model') || msg.includes('model_not_found')
+    || msg.includes('no such model') || msg.includes('unknown model')
+    || /api error: 404\b/.test(msg)) {
+    return ErrorType.MODEL_UNAVAILABLE;
   }
 
   if (msg.includes('401') || msg.includes('authentication_error')) {

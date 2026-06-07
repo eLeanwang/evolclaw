@@ -1,5 +1,6 @@
 import path from 'path';
 import fs from 'fs';
+import os from 'os';
 import crypto from 'crypto';
 import { type AgentRunnerFull, hasCompact, type AgentEvent, type Compactable } from '../../agents/claude-runner.js';
 import { SessionManager } from '../session/session-manager.js';
@@ -12,15 +13,53 @@ import { logger } from '../../utils/logger.js';
 import { getErrorMessage, classifyError, ErrorType, ERROR_PREFIX, isInfraError, prefixErrorType, isRetryableError } from '../../utils/error-utils.js';
 import { EventBus } from '../event-bus.js';
 import { summarizeToolInput } from '../permission.js';
-import type { Message, Session, ChannelAdapter, ChannelOptions, ChannelPolicy, CommandHandler, ReplyContext, AgentContext, EvolAgentRegistryHandle, GlobalSettings, OutboundEnvelope, OutboundPayload, InteractionRequest, InteractionKind, ActionInteraction, CommandCard } from '../../types.js';
+import type { Message, Session, ChannelAdapter, ChannelOptions, ChannelPolicy, CommandHandler, ReplyContext, AgentContext, EvolAgentRegistryHandle, GlobalSettings, OutboundEnvelope, OutboundPayload, InteractionRequest, InteractionKind, ActionInteraction, CommandCard, ResponseDepth } from '../../types.js';
+import type { TriggerManager } from '../trigger/manager.js';
 import { DEFAULT_PERMISSION_MODE } from '../../types.js';
-import { getPackageRoot, resolveRoot } from '../../paths.js';
+import { getPackageRoot, resolveRoot, resolvePaths } from '../../paths.js';
 import { renderKitSections, type KitRenderContext } from '../../agents/kit-renderer.js';
+import { renderMessageBody, type RenderMessageResult } from '../../agents/message-renderer.js';
+import { consumeHints, hintsToSubMessages, composeHintFallback } from './pending-hints.js';
+import { resolveResponseDepth as computeResponseDepth } from './response-depth.js';
+import type { SubMessage } from '../../types.js';
 import { normalizeBaseagent } from '../../agents/baseagent-normalize.js';
 import type { InteractionRouter } from '../interaction-router.js';
 import { renderActionAsText, renderCommandCardAsText } from '../interaction-router.js';
 import { formatPeerKey } from '../relation/peer-key.js';
 import { resolveEffectiveModel } from '../model/model-scope.js';
+import { insertUsageEvent, insertContextBreakdown } from '../stats/writer.js';
+import { normalizeUsage } from '../stats/normalizer.js';
+import { getBudgetStatus } from '../stats/budget.js';
+
+/** OS 信息在进程生命周期内是常量，模块加载时算一次。例: "Windows 11 Pro (win32 10.0.26200)" */
+const OS_INFO = (() => {
+  let label = '';
+  try { label = os.version(); } catch { /* 旧 Node 无 os.version */ }
+  return `${label ? label + ' ' : ''}(${os.platform()} ${os.release()})`;
+})();
+
+/** 当前 UTC 偏移，格式 +08:00 / -05:00。每条消息算（DST 安全）。 */
+function currentTzOffset(): string {
+  const off = -new Date().getTimezoneOffset(); // 分钟，东区为正
+  const sign = off >= 0 ? '+' : '-';
+  const abs = Math.abs(off);
+  return `${sign}${String(Math.floor(abs / 60)).padStart(2, '0')}:${String(abs % 60).padStart(2, '0')}`;
+}
+
+/** 当前本地日期 YYYY-MM-DD（按运行环境时区）。系统提示词用，一天才变一次（缓存友好）。 */
+function currentLocalDate(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+/** 当前本地星期几（中文，如「星期四」）。 */
+function currentWeekday(): string {
+  try {
+    return new Intl.DateTimeFormat('zh-CN', { weekday: 'long' }).format(new Date());
+  } catch {
+    return ['星期日', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六'][new Date().getDay()];
+  }
+}
 
 function getContextTooLongHint(agent: AgentRunnerFull): string {
   if (canCompactAgent(agent)) {
@@ -54,6 +93,7 @@ function canCompactAgent(agent: AgentRunnerFull): agent is AgentRunnerFull & Com
  */
 export function buildEnvelope(opts: {
   taskId?: string;
+  sessionId?: string;
   channel: string;
   channelId: string;
   agentName?: string;
@@ -63,6 +103,7 @@ export function buildEnvelope(opts: {
 }): OutboundEnvelope {
   return {
     taskId: opts.taskId ?? `interaction-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    sessionId: opts.sessionId,
     channel: opts.channel,
     channelId: opts.channelId,
     agentName: opts.agentName ?? '<unknown>',
@@ -84,6 +125,14 @@ export class MessageProcessor {
   private agentMap: Map<string, AgentRunnerFull>;
   private primaryRunnerKey: string;
   private interruptedSessions = new Map<string, string>();  // sessionId → reason ('new_message' | 'stop' | ...)
+  /** sessionId → 模型降级状态（带退避探测，进程重启清零） */
+  private modelFallbackMap = new Map<string, {
+    failCount: number;
+    fallbackActive: boolean;
+    messagesSinceFallback: number;
+    nextProbeAt: number;
+    hintShown: boolean;
+  }>();
   private interactionRouter?: InteractionRouter;
   private messageQueue?: MessageQueue;
   /** sessionId → 活跃的空闲监控器，用于等待用户交互期间暂停/恢复计时 */
@@ -181,6 +230,30 @@ export class MessageProcessor {
   }
 
   /**
+   * 观察者插话（v0.3）：消费当前 (对端, thread) 的待用提示，转成 owner-hint SubMessage。
+   * 一次性语义：consumeHints 回放算有效集后清该 thread（其它 thread 残留则保留，否则删文件）。
+   * 仅 aun 渠道（pending-hints 落在 sessions/aun/<self>/<对端>/）。
+   */
+  private consumeOwnerHints(session: Session, message: Message): SubMessage[] {
+    const channelType = session.channelType || message.channelType || session.channel;
+    if (channelType !== 'aun') return [];
+    const selfAID = session.selfAID || message.selfAID;
+    if (!selfAID) return [];
+    // 会话定位键：私聊=对端 AID，群聊=groupId（均为 session.channelId）。
+    const peerChannelId = session.channelId;
+    if (!peerChannelId) return [];
+    try {
+      const hints = consumeHints(resolvePaths().sessionsDir, 'aun', peerChannelId, selfAID, session.threadId);
+      if (hints.length === 0) return [];
+      logger.info(`[MessageProcessor] consumed ${hints.length} owner-hint(s) for ${peerChannelId} thread=${session.threadId || 'main'}`);
+      return hintsToSubMessages(hints);
+    } catch (e) {
+      logger.warn(`[MessageProcessor] consumeOwnerHints failed: ${e instanceof Error ? e.message : String(e)}`);
+      return [];
+    }
+  }
+
+  /**
    * 注册渠道适配器
    */
   registerChannel(adapter: ChannelAdapter, policy: ChannelPolicy, options?: ChannelOptions): void {
@@ -234,16 +307,16 @@ export class MessageProcessor {
 
   // 命令前缀列表（与 CommandHandler.quickCommandPrefixes 保持同步）
   private static readonly COMMAND_PREFIXES = [
-    '/new', '/pwd', '/plist', '/project', '/bind', '/help', '/status', '/restart',
+    '/new', '/pwd', '/help', '/status', '/restart',
     '/model', '/effort', '/agent', '/slist', '/session', '/rename', '/repair', '/fork',
     '/stop', '/clear', '/compact', '/safe', '/del', '/perm', '/file', '/check',
-    '/p ', '/s ', '/name ', '/rewind', '/rw', '/rw ', '/activity', '/chatmode',
+    '/s ', '/name ', '/rewind', '/rw', '/rw ', '/activity', '/chatmode',
     '/aid', '/upgrade', '/evolagent',
   ];
 
   /** 判断消息内容是否为已知命令 */
   private isKnownCommand(content: string): boolean {
-    return content === '/p' || content === '/s' ||
+    return content === '/s' ||
       MessageProcessor.COMMAND_PREFIXES.some(cmd => content.startsWith(cmd));
   }
 
@@ -256,6 +329,32 @@ export class MessageProcessor {
     // 先解析会话，再优先用 session.metadata.channelKey 精确定位实例级 adapter
     // message.channel 现在存实例名（channelName），可直接用于精确路由
     const { session, absoluteProjectPath } = await this.resolveSession(message);
+
+    // 群聊响应深度决策（resolveSession 之后、_processMessageInternal 之前）
+    const responseDepth = await this.resolveResponseDepth(message, session);
+    // thread(feishu) pending strategy: inject replyContext so first reply creates the thread
+    if (message.triggerMeta?.pendingThread && message.triggerMeta?.rootMessageId) {
+      const triggerId = message.triggerMeta.triggerId;
+      const channelKeyForAgent = session.metadata?.channelKey || message.channel;
+      const trigMgr = this.agentRegistry?.resolveByChannel(channelKeyForAgent)?.triggerManager as TriggerManager | undefined;
+      const onThreadCreated = trigMgr
+        ? (threadId: string) => {
+            try {
+              trigMgr.update(triggerId, { targetThreadId: threadId, pendingThread: false });
+              logger.info(`[MessageProcessor] Feishu thread created for trigger ${triggerId}: ${threadId}`);
+            } catch (e) {
+              logger.warn(`[MessageProcessor] Failed to write back thread_id for trigger ${triggerId}: ${e}`);
+            }
+          }
+        : undefined;
+      message.replyContext = {
+        ...(message.replyContext ?? {}),
+        replyToMessageId: message.triggerMeta.rootMessageId,
+        replyInThread: true,
+        ...(onThreadCreated ? { metadata: { ...(message.replyContext?.metadata ?? {}), onThreadCreated } } : {}),
+      };
+    }
+
     const channelKey = session.metadata?.channelKey || message.channel;
     const channelInfo = this.resolveChannelInfo(channelKey);
 
@@ -268,19 +367,9 @@ export class MessageProcessor {
     const streamKey = session.id;
     const chatType = message.chatType || 'private';
     const identityRole = session.identity?.role || 'anonymous';
-    const agentNameForMonitor = this.agentRegistry?.resolveByChannel(channelKey)?.name ?? '<unknown>';
-
-    // Resolve agent context from registry (Phase 2 foundation)
-    const agentContext = this.getAgentContext(channelKey, chatType);
-    if (agentContext) {
-      logger.debug(`[MessageProcessor] Agent context resolved: ${agentContext.name} (${agentContext.baseagent})`);
-    }
-
-    // 按 session.agentId 选择 agent 后端
-    const agent = this.getAgent(channelKey, session.agentId);
-
     const monitorEnabled = this.globalSettings.idleMonitor?.enabled !== false;
-    const showIdleMonitor = policy.showIdleMonitor(chatType, identityRole);
+    // 按 session.agentId 选择 agent 后端（idle-kill 路径需要 interrupt）
+    const agent = this.getAgent(channelKey, session.agentId);
 
     // 计算是否抑制中间输出（工具活动 + 流式文本）
     const shouldSuppress = (): boolean => {
@@ -291,6 +380,7 @@ export class MessageProcessor {
     let monitor: StreamIdleMonitor | undefined;
     let monitorInterval: ReturnType<typeof setInterval> | undefined;
     let rejectFn: (err: Error) => void;
+    let lastIdleSec = 0;
 
     const resetTimer = (eventType?: string, toolName?: string) => {
       monitor?.recordEvent(eventType || 'unknown', toolName);
@@ -310,20 +400,9 @@ export class MessageProcessor {
         let result = monitor!.check();
         while (result) {
           if (result.action === 'kill') {
+            lastIdleSec = result.idleSec;
             logger.warn(`[MessageProcessor] Idle monitor: kill after ${result.idleSec}s idle, stream: ${streamKey}`);
             this.eventBus.publish({ type: 'runner:idle-timeout', sessionId: streamKey, idleSec: result.idleSec });
-            // 后台任务也需要中断（释放资源），但不发送通知
-            if (channelInfo && !isBackground) {
-              const msg = showIdleMonitor
-                ? result.message
-                : `\u26a0\ufe0f 任务超时（${result.idleSec}秒无响应），已自动中断`;
-              channelInfo.adapter.send(
-                buildEnvelope({ channel: channelInfo.adapter.channelName, channelId: message.channelId, agentName: agentNameForMonitor }),
-                { kind: 'system.notice', text: msg, subtype: 'health' }
-              ).catch(e => {
-                logger.debug(`[MessageProcessor] Failed to send kill diagnostic message:`, e);
-              });
-            }
             logger.info(`[MessageProcessor] agent.interrupt invoked (idle-kill) stream=${streamKey}`);
             agent.interrupt(streamKey).catch(e => {
               logger.debug(`[MessageProcessor] Interrupt failed (may already be cleaned up):`, e);
@@ -331,18 +410,16 @@ export class MessageProcessor {
             rejectFn(new Error('SDK_TIMEOUT'));
             return;
           } else {
-            // notify or warn: send diagnostic message, task continues
+            // notify or warn: publish event, task continues
             logger.info(`[MessageProcessor] Idle monitor: ${result.action} after ${result.idleSec}s idle, stream: ${streamKey}`);
-            if (channelInfo && showIdleMonitor && !shouldSuppress()) {
-              if (!isBackground) {
-                channelInfo.adapter.send(
-                  buildEnvelope({ channel: channelInfo.adapter.channelName, channelId: message.channelId, agentName: agentNameForMonitor }),
-                  { kind: 'system.notice', text: result.message, subtype: 'health' }
-                ).catch(e => {
-                  logger.debug(`[MessageProcessor] Failed to send idle monitor message:`, e);
-                });
-              }
-            }
+            this.eventBus.publish({
+              type: result.action === 'notify' ? 'runner:idle-notify' : 'runner:idle-warn',
+              sessionId: streamKey,
+              idleSec: result.idleSec,
+              totalEvents: result.state.totalEvents,
+              totalToolCalls: result.state.totalToolCalls,
+              lastToolName: result.state.lastToolName,
+            });
           }
           result = monitor!.check();
         }
@@ -351,7 +428,7 @@ export class MessageProcessor {
 
     try {
       await Promise.race([
-        this._processMessageInternal(message, session, absoluteProjectPath, resetTimer, shouldSuppress),
+        this._processMessageInternal(message, session, absoluteProjectPath, resetTimer, shouldSuppress, () => lastIdleSec, responseDepth),
         timeoutPromise
       ]);
     } catch (error: any) {
@@ -396,7 +473,7 @@ export class MessageProcessor {
   }
 
   /** 自动安全模式已禁用：仅保留错误计数，不再自动切换状态 */
-  private async _processMessageInternal(message: Message, session: Session, absoluteProjectPath: string, resetTimer: (eventType?: string, toolName?: string) => void, shouldSuppress: () => boolean): Promise<void> {
+  private async _processMessageInternal(message: Message, session: Session, absoluteProjectPath: string, resetTimer: (eventType?: string, toolName?: string) => void, shouldSuppress: () => boolean, getLastIdleSec?: () => number, responseDepth?: ResponseDepth): Promise<void> {
     const messageId = `${message.channel}_${message.channelId}_${message.timestamp || Date.now()}`;
     const channelKey = session.metadata?.channelKey || message.channel;
     const channelInfo = this.resolveChannelInfo(channelKey);
@@ -425,7 +502,7 @@ export class MessageProcessor {
     const chatmode = session.sessionMode ?? 'interactive';
 
     // 诊断日志：记录 inbound message_id 和生成的 task_id 的对应关系
-    logger.info(`[MessageProcessor] Task created: inboundMsgId=${message.messageId ?? 'none'} taskId=${taskId} sessionId=${session.id} chatmode=${chatmode}`);
+    logger.info(`[MessageProcessor] Task created: inboundMsgId=${message.messageId ?? 'none'} taskId=${taskId} sessionId=${session.id} chatmode=${chatmode}${responseDepth && responseDepth !== 'standard' ? ` depth=${responseDepth}` : ''}`);
 
     // 构建带 taskId/chatmode 的 ReplyContext（本次任务所有出站消息共用）
     const taskReplyContext = (): ReplyContext => {
@@ -437,9 +514,10 @@ export class MessageProcessor {
     };
 
     const isProactive = session.sessionMode === 'proactive';
-    const isAutonomous = session.sessionMode === 'autonomous' || message.triggerMeta?.silent === true;
+    const isAutonomous = session.sessionMode === 'autonomous';
     const envelope = buildEnvelope({
       taskId,
+      sessionId: session.id,
       channel: message.channel,
       channelId: message.channelId,
       agentName: agentNameForStats,
@@ -467,6 +545,18 @@ export class MessageProcessor {
         agentName: agentNameForStats,
         timestamp: Date.now()
       });
+
+      // ── 硬上限检查：超限直接返回提示，不调模型 ──
+      {
+        const budgetAgentAid = session.selfAID || message.selfAID || '';
+        const budgetPeerKey = formatPeerKey(message.channel, message.channelId);
+        const budgetStatus = getBudgetStatus(resolveRoot(), budgetAgentAid, budgetPeerKey);
+        if (budgetStatus.hard_blocked) {
+          logger.warn(`[MessageProcessor] Budget hard limit reached: agent=${budgetAgentAid} peer=${budgetPeerKey} pct=${budgetStatus.pct_used.toFixed(1)}%`);
+          adapter.send(envelope, { kind: 'status.completed', metadata: { durationMs: 0 } }).catch(() => {});
+          return;
+        }
+      }
 
       const imageInfo = message.images && message.images.length > 0 ? ` [${message.images.length} image(s)]` : '';
       const modeInfo = isBackground ? ' [\u540e\u53f0]' : '';
@@ -582,13 +672,19 @@ export class MessageProcessor {
       // 检查是否因新消息自动中断 — 包装 prompt 让 Agent 知道上下文
       const prevInterruptReason = this.interruptedSessions.get(session.id);
       this.interruptedSessions.delete(session.id);
-      const effectivePrompt = prevInterruptReason === 'new_message' && session.agentSessionId
-        ? `【新消息插入】\n\n${message.content}\n\n【请无视之前中断继续处理】`
-        : message.content;
+      const wasInterrupted = prevInterruptReason === 'new_message' && !!session.agentSessionId;
+      const wrapPrompt = (body: string) => wasInterrupted
+        ? `【新消息插入】\n\n${body}\n\n【请无视之前中断继续处理】`
+        : body;
+      // 先用裸文本兜底；vars 构造完成后用消息渲染层重算（见下方 effectivePrompt 重赋值）。
+      let effectivePrompt = wrapPrompt(message.content);
 
-      let streamResult: { isError: boolean; subtype?: string; errors?: string[]; terminalReason?: string; lastReplyText: string; fullText: string; hasReceivedText: boolean; numTurns?: number; ttftMs?: number; usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } } = { isError: false, lastReplyText: '', fullText: '', hasReceivedText: false };
+      let streamResult: { isError: boolean; subtype?: string; errors?: string[]; terminalReason?: string; lastReplyText: string; fullText: string; hasReceivedText: boolean; numTurns?: number; ttftMs?: number; tokenUsage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number }; contextUsage?: { totalTokens: number; maxTokens: number; percentage: number; model: string; effort?: string } } = { isError: false, lastReplyText: '', fullText: '', hasReceivedText: false };
       let effectiveSystemPrompt: string | undefined;
       let modelOverride: { model?: string; effort?: string } | undefined;
+      let usedFallback = false;
+      let skipEvolclawModel = false;
+      let agentModel: string | undefined;
 
       try {
         // 动态构建运行时上下文提示
@@ -626,15 +722,53 @@ export class MessageProcessor {
         // 按 关系级 > agent级 > 全局 解析本次调用的模型/强度，作为 per-call 入参传入 runQuery。
         // 不缓存、不绑会话——改关系级/agent级后该范围所有会话的下条消息即时生效；
         // 多对端并发各自独立解析、各自传参，无共享状态可被污染。
-        try {
-          const resolved = resolveEffectiveModel({ self: selfAid || undefined, peerKey });
-          if (resolved.model) modelOverride = { model: resolved.model, effort: resolved.effort };
-        } catch (e) {
-          logger.warn(`[MessageProcessor] resolveEffectiveModel failed: ${e instanceof Error ? e.message : String(e)}`);
+        let effectiveModel: string | undefined;
+
+        // 取降级状态，按退避策略决定是否跳过 evolclaw 作用域模型
+        const fbState = this.modelFallbackMap.get(session.id) ?? {
+          failCount: 0, fallbackActive: false,
+          messagesSinceFallback: 0, nextProbeAt: 2, hintShown: false,
+        };
+
+        // 退避期内递增消息计数，判断是否到探测点
+        if (fbState.fallbackActive) {
+          fbState.messagesSinceFallback++;
+          skipEvolclawModel = fbState.messagesSinceFallback < fbState.nextProbeAt;
+          this.modelFallbackMap.set(session.id, fbState);
+        }
+
+        // 非跳过时：尝试解析 evolclaw 作用域模型
+        let evolclawModelOverride: { model?: string; effort?: string } | undefined;
+        if (!skipEvolclawModel) {
+          try {
+            const resolved = resolveEffectiveModel({ self: selfAid || undefined, peerKey });
+            if (resolved.model) {
+              evolclawModelOverride = { model: resolved.model, effort: resolved.effort };
+              effectiveModel = resolved.model;
+            }
+          } catch (e) {
+            logger.warn(`[MessageProcessor] resolveEffectiveModel failed: ${e instanceof Error ? e.message : String(e)}`);
+          }
+          modelOverride = evolclawModelOverride;
+        }
+
+        // ④ 群聊 responseDepth → effort 动态映射
+        // 仅当群聊且 evolclaw 作用域未显式指定 effort 时生效（显式配置优先）
+        if (message.chatType === 'group' && responseDepth && !(modelOverride?.effort)) {
+          const depthEffortMap: Record<string, string> = {
+            lightweight: 'low',
+            standard: 'medium',
+            deep: 'high',
+          };
+          const mappedEffort = depthEffortMap[responseDepth];
+          if (mappedEffort) {
+            modelOverride = { ...(modelOverride || {}), effort: mappedEffort };
+            logger.info(`[MessageProcessor] Group depth→effort: ${responseDepth} → ${mappedEffort} session=${session.id}`);
+          }
         }
 
         const normalizedBaseagent = normalizeBaseagent(agent.name);
-        const agentModel = (typeof (agent as any).getModel === 'function') ? (agent as any).getModel() as string : undefined;
+        agentModel = (typeof (agent as any).getModel === 'function') ? (agent as any).getModel() as string : undefined;
 
         // Kit renderer: 组装上下文
         const pkgRoot = getPackageRoot();
@@ -649,6 +783,9 @@ export class MessageProcessor {
             KITS_DOCS: path.join(pkgRoot, 'kits', 'docs'),
             KITS_TEMPLATES: path.join(pkgRoot, 'kits', 'templates'),
             KITS_FRAGMENTS: path.join(pkgRoot, 'kits', 'templates', 'system-fragments'),
+            KITS_MESSAGE_FRAGMENTS: path.join(pkgRoot, 'kits', 'templates', 'message-fragments'),
+            // evolclaw 运行模式：dev=源码仓库 | install=全局安装包
+            evolclawMode: fs.existsSync(path.join(pkgRoot, 'src', 'index.ts')) ? 'dev' : 'install',
             // 路径变量(用于 manifest 路径展开,resolvePath 用 ctx.vars 取真值)
             PERSONAL_DIR: selfAid ? path.join(resolveRoot(), 'agents', selfAid, 'personal') : undefined,
             RELATIONS_DIR: selfAid ? path.join(resolveRoot(), 'agents', selfAid, 'relations') : undefined,
@@ -662,12 +799,22 @@ export class MessageProcessor {
             peerName: peerName || undefined,
             peerRole: session.identity?.role || 'anonymous',
             peerType: message.peerType || undefined,
+            sameDevice: message.sameDevice ?? false,
+            sameNetwork: message.sameNetwork ?? false,
+            sameEgressIp: message.sameEgressIp ?? false,
             groupId: session.metadata?.groupId || undefined,
+            groupName: session.metadata?.groupName || undefined,
+            // 信封展示用：有群名则「名<ID>」，否则纯 ID。规避模板引擎无 not/else 的限制。
+            groupLabel: session.metadata?.groupId
+              ? (session.metadata?.groupName ? `${session.metadata.groupName}<${session.metadata.groupId}>` : session.metadata.groupId)
+              : undefined,
             chatType: session.chatType || null,
             channel: currentChannelType || null,
             venueUid: undefined,
             // 群分发模式 / 客户端类型 / 权限模式
-            dispatch: session.metadata?.dispatchMode || undefined,
+            // 优先本地 session 覆盖（/dispatch 命令），fallback 到服务器 dispatch_mode
+            dispatch: session.metadata?.dispatchMode || message.dispatchMode || undefined,
+            responseDepth: responseDepth || undefined,
             clientType: message.clientType || undefined,
             permissionMode: session.metadata?.permissionMode || 'auto',
             capabilities: capParts.length > 0 ? capParts.join('、') : undefined,
@@ -675,6 +822,12 @@ export class MessageProcessor {
             sessionId: session.id,
             sessionName: session.name || undefined,
             sessionCreatedAt: session.createdAt ? new Date(session.createdAt).toISOString() : undefined,
+            // 时区（把 ISO 时间戳转本地时间用）+ OS 环境
+            timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || undefined,
+            tzOffset: currentTzOffset(),
+            localDate: currentLocalDate(),
+            weekday: currentWeekday(),
+            osInfo: OS_INFO,
             threadId: session.threadId || undefined,
             // Stage 3: sessionKey 持久化字段
             sessionKey: session.sessionKey,
@@ -683,7 +836,12 @@ export class MessageProcessor {
             baseAgent: normalizedBaseagent.canonical,
             baseAgentName: normalizedBaseagent.displayName,
             baseAgentModel: agentModel || undefined,
+            effectiveModel: effectiveModel || agentModel || undefined,
+            modelFallbackActive: (fbState.fallbackActive || skipEvolclawModel) ? true : undefined,
+            modelFallbackModel: (fbState.fallbackActive || skipEvolclawModel) ? (agentModel || undefined) : undefined,
             agentSessionId: session.agentSessionId || undefined,
+            // 渲染模式：各类型当前激活的 modeName（从内存 config 读，渲染层据此选 manifest section）。
+            renderModes: this.agentRegistry?.resolveByChannel(channelKey)?.config?.render ?? undefined,
           },
           sessionId: session.id,
         };
@@ -692,6 +850,67 @@ export class MessageProcessor {
         if (kitContext) contextParts.push(kitContext);
 
         effectiveSystemPrompt = [options?.systemPromptAppend, ...contextParts].filter(Boolean).join('\n') || undefined;
+
+        // ── Stats: context_breakdown 旁路采集（各段估算 token 数，字符数/4 近似） ──
+        try {
+          const estTokens = (s?: string) => s ? Math.ceil(s.length / 4) : 0;
+          const cbModel = effectiveModel || agentModel || 'unknown';
+          const cbMaxTokens = 200000; // 保守默认，后续可从 model-catalog 取
+          const systemPromptTokens = estTokens(options?.systemPromptAppend);
+          const personaTokens = estTokens(persona);
+          const workingTokens = estTokens(working);
+          const kitTokens = estTokens(kitContext);
+          const totalEst = estTokens(effectiveSystemPrompt);
+          insertContextBreakdown(resolveRoot(), {
+            ts: Date.now(),
+            agent_aid: selfAid || session.selfAID || '',
+            session_id: session.id,
+            turn_count: 0, // 按 ts 排序得轮次
+            model: cbModel,
+            max_tokens: cbMaxTokens,
+            system_prompt: systemPromptTokens + personaTokens + workingTokens,
+            system_tools: 0, // 工具 schema 不在此层，留 0（后续 runner 层补）
+            mcp_tools: 0,
+            custom_agents: 0,
+            memory_files: kitTokens, // ECK 渲染的所有段（含 memory/skills/rules）
+            skills: 0,
+            messages: 0, // messages 段在 runner 层才知道
+            free_space: Math.max(0, cbMaxTokens - totalEst),
+            total_estimated: totalEst,
+          });
+        } catch { /* non-fatal */ }
+
+        // 消息渲染层：用 message manifest 逐条渲染（时间 + 群聊发送者），组装成最终正文。
+        // 单条消息构造单元素 items；批量合并的消息 message.items 已由队列填充。
+        let renderResult: RenderMessageResult | undefined;
+        const hasContent = message.content.trim() || (message.items && message.items.length > 0);
+        if (hasContent) {
+          const peerItems: SubMessage[] = message.items && message.items.length > 0
+            ? message.items
+            : [{
+                peerId: message.peerId, peerName: peerName || undefined,
+                peerType: message.peerType,
+                sameDevice: message.sameDevice, sameNetwork: message.sameNetwork, sameEgressIp: message.sameEgressIp,
+                content: message.content, timestamp: message.timestamp,
+                images: message.images,
+                mentionAids: message.mentionAids,
+              }];
+
+          // 观察者插话（v0.3）：消费 (对端, thread) 的待用提示，包成 owner-hint item 排在对端消息前。
+          // 一次性语义：consumeOwnerHints 读取并删除（见 pending-hints.ts）。在 try 外消费，
+          // 这样即便 renderMessageBody 抛错走 raw 兜底，也把提示原文拼进去——绝不静默丢提示。
+          const hintItems = this.consumeOwnerHints(session, message);
+          const renderItems: SubMessage[] = hintItems.length > 0 ? [...hintItems, ...peerItems] : peerItems;
+
+          try {
+            renderResult = renderMessageBody(renderItems, kitCtx.vars, session.id);
+            if (renderResult.body.trim()) effectivePrompt = wrapPrompt(renderResult.body);
+            else effectivePrompt = wrapPrompt(composeHintFallback(hintItems, message.content));
+          } catch (e) {
+            logger.warn(`[MessageProcessor] renderMessageBody failed, using raw content: ${e instanceof Error ? e.message : String(e)}`);
+            effectivePrompt = wrapPrompt(composeHintFallback(hintItems, message.content));
+          }
+        }
 
         // 可重试错误（403/429/5xx）指数退避重试，最多 3 次
         const MAX_RETRIES = 3;
@@ -704,7 +923,7 @@ export class MessageProcessor {
               effectivePrompt,
               absoluteProjectPath,
               session.agentSessionId,
-              message.images,
+              renderResult?.images.length ? renderResult.images : message.images,
               effectiveSystemPrompt,
               this.sessionManager,
               modelOverride
@@ -720,10 +939,30 @@ export class MessageProcessor {
               resetTimer,
               shouldSuppress
             );
+            // 探测成功（退避期内到达探测点且用的是 evolclaw 模型）→ 清零降级状态
+            if (fbState.fallbackActive && !skipEvolclawModel && !usedFallback) {
+              this.modelFallbackMap.delete(session.id);
+              logger.info(`[MessageProcessor] Model probe succeeded, cleared fallback state for session=${session.id}`);
+            }
             break; // 成功，跳出重试循环
           } catch (retryError) {
             if (streamRegistered) {
               agent.cleanupStream(streamKey);
+            }
+            // 模型不可用：累计计数，本次切换到 baseAgentModel 立即重试，不让用户看到失败
+            if (classifyError(retryError) === ErrorType.MODEL_UNAVAILABLE && evolclawModelOverride?.model) {
+              fbState.failCount++;
+              if (fbState.failCount >= 2) {
+                fbState.fallbackActive = true;
+                fbState.messagesSinceFallback = 0;
+                fbState.nextProbeAt = Math.min(Math.pow(2, fbState.failCount - 1), 8);
+              }
+              this.modelFallbackMap.set(session.id, fbState);
+              logger.warn(`[MessageProcessor] Model unavailable: ${evolclawModelOverride.model}, failCount=${fbState.failCount}, fallbackActive=${fbState.fallbackActive}`);
+              // 切换到 baseAgentModel 重试（清除 modelOverride，让 runQuery 使用 this.model）
+              modelOverride = undefined;
+              usedFallback = true;
+              continue;
             }
             if (attempt < MAX_RETRIES && isRetryableError(retryError)) {
               const delay = Math.pow(2, attempt) * 1000; // 2s, 4s
@@ -747,9 +986,6 @@ export class MessageProcessor {
           );
 
           if (compacted) {
-            // compact 成功，清除第一次流中混入的错误文本，再重试
-            const ctxErrPattern = /prompt is too long|input is too long|上下文过长/i;
-            renderer.stripContextError(ctxErrPattern);
             renderer.addNotice('✅ 压缩完成，继续处理...', 'info', 'compact-retry', true);
             const retryStream = await agent.runQuery(
               session.id,
@@ -790,7 +1026,6 @@ export class MessageProcessor {
         contextTooLongPattern.test(streamResult.fullText)
       );
       if (isPromptTooLong) {
-        renderer.stripContextError(contextTooLongPattern);
         renderer.addNotice('上下文过长，正在压缩会话...', 'warn', 'compact-trigger', true);
         await renderer.flush();
         const compacted = await agent.compact(session.id, session.agentSessionId!, absoluteProjectPath);
@@ -818,7 +1053,6 @@ export class MessageProcessor {
             contextTooLongPattern.test(streamResult.fullText)
           );
           if (retryStillTooLong) {
-            renderer.stripContextError(contextTooLongPattern);
             renderer.addNotice(getContextTooLongHint(agent), 'warn', 'context-too-long', true);
           }
         } else {
@@ -946,6 +1180,21 @@ export class MessageProcessor {
       this.sessionManager.clearProcessing(session.id);
       logger.info(`[MessageProcessor] session ${session.id} processing cleared task=${taskId}`);
 
+      // 降级模型回复末尾追加标记（代码层硬注入，不依赖模型输出）
+      const usingFallback = usedFallback || (skipEvolclawModel && agentModel != null);
+      if (usingFallback && agentModel) {
+        const curFbState = this.modelFallbackMap.get(session.id);
+        const showHint = curFbState && curFbState.nextProbeAt >= 8 && !curFbState.hintShown;
+        const suffix = showHint
+          ? `\n\n---\n⚠️ [降级模型: ${agentModel} | 可告诉我"帮我检查可用模型"来诊断]`
+          : `\n\n---\n⚠️ [降级模型: ${agentModel}]`;
+        renderer.addText(suffix);
+        if (showHint && curFbState) {
+          curFbState.hintShown = true;
+          this.modelFallbackMap.set(session.id, curFbState);
+        }
+      }
+
       // 被用户中断（新消息打断）时跳过 flush — 新 task 已接管渠道，旧 task 的 flush 无意义且可能卡住
       const preFlushInterrupt = this.interruptedSessions.get(session.id);
       if (preFlushInterrupt === 'new_message' || preFlushInterrupt === 'stop' || preFlushInterrupt === 'recalled') {
@@ -1005,11 +1254,100 @@ export class MessageProcessor {
       } else {
         // 真正的成功
         const durationMs = Date.now() - startTime;
+
+        // ── Stats: 写入 usage_events（在 status.completed 之前，以便带上 cost） ──
+        let statsCostUsd = 0;
+        let statsCostCny = 0;
+        let statsCacheHitRate = 0;
+        if (streamResult.tokenUsage) {
+          try {
+            const statsAgentAid = session.selfAID || message.selfAID || '';
+            const statsPeerKey = formatPeerKey(message.channel, message.channelId);
+            const statsModel = streamResult.contextUsage?.model || 'unknown';
+            const ctxPct = streamResult.contextUsage?.percentage;
+            const event = normalizeUsage(streamResult.tokenUsage as any, {
+              ts: Date.now(),
+              agent_aid: statsAgentAid,
+              peer_key: statsPeerKey,
+              peer_type: session.chatType || undefined,
+              session_id: session.id,
+              model: statsModel,
+              turns: streamResult.numTurns,
+              duration_ms: durationMs,
+              context_window_pct: ctxPct,
+            });
+            insertUsageEvent(resolveRoot(), event);
+            // 计算费用（用于合入 status.completed）
+            const { calcCost } = await import('../stats/billing.js');
+            const cost = calcCost(resolveRoot(), { ...event, ts: event.ts, model: event.model, billing_fn: event.billing_fn });
+            statsCostUsd = cost.usd ?? 0;
+            statsCostCny = cost.cny ?? 0;
+            const totalIn = event.input_tokens + event.cache_read_tokens;
+            statsCacheHitRate = totalIn > 0 ? Math.round((event.cache_read_tokens / totalIn) * 100) / 100 : 0;
+          } catch (e) {
+            logger.debug(`[MessageProcessor] Stats write failed (non-fatal): ${e}`);
+          }
+        }
+
+        // 会话累计 + model spec（用于 status.completed 统计细目）
+        let sessionStats: { input_tokens: number; output_tokens: number; cache_read_tokens: number; cache_creation_tokens: number; cost_usd: number; cost_cny: number; call_count: number } | undefined;
+        let modelSpec: { context_window: number; max_input_tokens: number; max_output_tokens: number } | undefined;
+        try {
+          const { openReadonlyDb, getDbPath } = await import('../stats/db.js');
+          const { resolveModelSpec } = await import('../stats/billing.js');
+          const statsModel = streamResult.contextUsage?.model || 'unknown';
+          modelSpec = resolveModelSpec(resolveRoot(), statsModel);
+          const rdb = openReadonlyDb(getDbPath(resolveRoot()));
+          if (rdb) {
+            try {
+              const row = rdb.prepare(
+                `SELECT COALESCE(SUM(input_tokens),0) AS input_tokens, COALESCE(SUM(output_tokens),0) AS output_tokens,
+                        COALESCE(SUM(cache_read_tokens),0) AS cache_read_tokens, COALESCE(SUM(cache_creation_tokens),0) AS cache_creation_tokens,
+                        COUNT(*) AS call_count FROM usage_events WHERE session_id = ?`
+              ).get(session.id) as any;
+              if (row) {
+                // 逐行算费用太贵，用近似：最后一轮的 cost 乘以次数不准，所以这里用累加 token 近似
+                sessionStats = {
+                  input_tokens: row.input_tokens,
+                  output_tokens: row.output_tokens,
+                  cache_read_tokens: row.cache_read_tokens,
+                  cache_creation_tokens: row.cache_creation_tokens,
+                  cost_usd: 0, cost_cny: 0,
+                  call_count: row.call_count,
+                };
+                // 快速费用估算：用会话所有行逐行算
+                const rows: any[] = rdb.prepare(`SELECT * FROM usage_events WHERE session_id = ?`).all(session.id);
+                const { calcCost: cc } = await import('../stats/billing.js');
+                for (const r of rows) {
+                  const c = cc(resolveRoot(), r);
+                  sessionStats.cost_usd += c.usd ?? 0;
+                  sessionStats.cost_cny += c.cny ?? 0;
+                }
+              }
+            } finally { rdb.close(); }
+          }
+        } catch { /* non-fatal */ }
+
         if (message.source !== 'trigger') {
           if (interruptReason) {
             adapter.send(envelope, { kind: 'status.interrupted', metadata: { reason: interruptReason } }).catch(() => {});
           } else {
-            adapter.send(envelope, { kind: 'status.completed', metadata: { durationMs, ttftMs: streamResult.ttftMs, numTurns: streamResult.numTurns, usage: streamResult.usage } }).catch(() => {});
+            adapter.send(envelope, { kind: 'status.completed', metadata: {
+              durationMs,
+              ttftMs: streamResult.ttftMs,
+              numTurns: streamResult.numTurns,
+              tokenUsage: streamResult.tokenUsage,
+              contextUsage: streamResult.contextUsage,
+              cost_usd: statsCostUsd,
+              cost_cny: statsCostCny,
+              cache_hit_rate: statsCacheHitRate,
+              model_spec: modelSpec,
+              session_total: sessionStats,
+              queue: {
+                pending: this.messageQueue?.getQueueLength(session.id) ?? 0,
+                processing: this.messageQueue?.isProcessing(session.id) ? 1 : 0,
+              },
+            } as any }).catch(() => {});
           }
         }
         if (message.triggerMeta) {
@@ -1017,10 +1355,6 @@ export class MessageProcessor {
             this.eventBus.publish({ type: 'trigger:skipped', triggerId: message.triggerMeta.triggerId, reason: 'interrupted' });
           } else {
             this.eventBus.publish({ type: 'trigger:completed', triggerId: message.triggerMeta.triggerId, messageId: messageId, durationMs });
-          }
-          // Clean up autonomous sessions after completion to avoid accumulating orphaned sessions
-          if (session.sessionMode === 'autonomous') {
-            this.sessionManager.unbindSession(session.id).catch(() => {});
           }
         }
         await this.sessionManager.recordSuccess(session.id);
@@ -1086,7 +1420,7 @@ export class MessageProcessor {
       // 用户主动中断（新消息打断 或 /stop 命令）时静默，不发送中断/错误提示
       if (!isUserInterrupt) {
         const statusPayload = procStatus === 'timeout'
-          ? { kind: 'status.timeout' as const }
+          ? { kind: 'status.timeout' as const, metadata: { idleSec: getLastIdleSec?.() || undefined } }
           : procStatus === 'interrupted'
           ? { kind: 'status.interrupted' as const, metadata: { reason: 'stream_error' } }
           : { kind: 'status.error' as const };
@@ -1124,17 +1458,20 @@ export class MessageProcessor {
         logger.error(`[${message.channel}] Error stack:`, error.stack);
       }
 
-      // 发送用户友好的错误消息（SDK_TIMEOUT 已在 kill 级别发过提示，跳过）
+      // 发送用户友好的错误消息
       // 用户主动中断（新消息打断 或 /stop 命令）时静默，不发送错误提示
       // processEventStream 已通过 renderer 发过错误时也跳过
-      if (error instanceof Error && error.message === 'SDK_TIMEOUT') {
-        logger.info(`[MessageProcessor] SDK_TIMEOUT error, skip sending duplicate message`);
-      } else if (isUserInterrupt) {
+      const isTimeout = error instanceof Error && error.message === 'SDK_TIMEOUT';
+      if (isUserInterrupt) {
         logger.info(`[MessageProcessor] User interrupt by new_message, skip sending error message`);
       } else if ((error as any)?._errorAlreadySent) {
         logger.info(`[MessageProcessor] Error already sent via renderer, skip sending duplicate message`);
       } else {
-        const userMessage = getErrorMessage(error, undefined);
+        // SDK_TIMEOUT：status.timeout 已发结构化状态，此处再补一条用户可见的错误文本（result.error）
+        const idleSec = getLastIdleSec?.() || 0;
+        const userMessage = isTimeout
+          ? (idleSec > 0 ? `⚠️ 任务超时（${idleSec}秒无响应），已自动中断` : '⚠️ 任务超时，已自动中断')
+          : getErrorMessage(error, undefined);
         // 获取 session 用于话题回复（如果 resolveSession 已执行）
         let sendOpts: ReplyContext | undefined;
         try {
@@ -1159,7 +1496,10 @@ export class MessageProcessor {
           ...(sendOpts ?? {}),
           metadata: { ...(sendOpts?.metadata ?? {}), taskId, chatmode },
         };
-        await adapter.send({ ...envelope, replyContext: sendOpts }, { kind: 'result.text', text: userMessage, isFinal: true });
+        const errorPayload = isTimeout
+          ? { kind: 'result.error' as const, text: userMessage, reason: 'timeout' }
+          : { kind: 'result.text' as const, text: userMessage, isFinal: true };
+        await adapter.send({ ...envelope, replyContext: sendOpts }, errorPayload);
 
         // Proactive 可观测：catch 块的基础设施错误也透传为 thought，保证按 task_id 聚合完整
       }
@@ -1180,24 +1520,20 @@ export class MessageProcessor {
 
     const projectPath = this.agentRegistry?.resolveByChannel(message.channel)?.projectPath || process.cwd();
 
-    // --session silent 触发器：新建独立 autonomous 会话，与原会话历史隔离
-    if (message.triggerMeta?.silent) {
-      const prevActive = await this.sessionManager.getActiveSession(message.channel, message.channelId);
-      const session = await this.sessionManager.createNewSession(
-        message.channel,
-        message.channelId,
-        projectPath,
-        `trigger-${message.triggerMeta.triggerId.slice(0, 8)}`,
-      );
-      await this.sessionManager.updateSession(session.id, { sessionMode: 'autonomous' });
-      session.sessionMode = 'autonomous';
-      if (prevActive) {
-        await this.sessionManager.switchToSession(message.channel, message.channelId, prevActive.id);
+    // current strategy: resume bound session, make it active so output is not suppressed
+    if (message.triggerMeta?.boundSessionId) {
+      const bound = await this.sessionManager.getSessionById(message.triggerMeta.boundSessionId);
+      if (bound) {
+        const switched = await this.sessionManager.switchToSession(bound.channel, bound.channelId, bound.id);
+        if (switched) {
+          const absoluteProjectPath = path.isAbsolute(switched.projectPath)
+            ? switched.projectPath : path.resolve(process.cwd(), switched.projectPath);
+          return { session: switched, absoluteProjectPath };
+        }
+        logger.warn(`[MessageProcessor] switchToSession failed for bound session ${bound.id}, falling back to latest`);
+      } else {
+        logger.warn(`[MessageProcessor] Bound session ${message.triggerMeta.boundSessionId} not found, falling back to latest`);
       }
-      const absoluteProjectPath = path.isAbsolute(session.projectPath)
-        ? session.projectPath
-        : path.resolve(process.cwd(), session.projectPath);
-      return { session, absoluteProjectPath };
     }
 
     const session = await this.sessionManager.getOrCreateSession(
@@ -1220,6 +1556,26 @@ export class MessageProcessor {
       logger.info(`[MessageProcessor] group proactive upgrade: sessionId=${session.id} ${session.sessionMode} -> proactive`);
       session.sessionMode = 'proactive';
       await this.sessionManager.updateSession(session.id, { sessionMode: 'proactive' });
+    }
+
+    // 群名解析：群会话首次取群显示名（group.get），缓存到 metadata，供信封渲染。
+    // 渠道私有方法 getGroupName 自带进程缓存 + 容错；取不到不阻塞（groupName 保持空，模板回退 groupId）。
+    if (message.chatType === 'group' && session.metadata?.groupId && !session.metadata.groupName) {
+      const adapter = this.resolveChannelInfo(message.channel)?.adapter;
+      const groupName = await adapter?.getGroupName?.(session.metadata.groupId).catch(() => undefined);
+      if (groupName) {
+        session.metadata.groupName = groupName;
+        await this.sessionManager.updateSession(session.id, { metadata: session.metadata });
+      }
+    }
+
+    // 群聊分发模式同步：aun.ts 从服务器信封解析的 dispatchMode 注入到 message，
+    // 此处写入 session.metadata，确保 ECK 上下文的 venue fragment 正确渲染 dispatch 变量。
+    // 仅当 message.dispatchMode 有值且与 session 记录不一致时更新。
+    if (message.chatType === 'group' && message.dispatchMode && session.metadata?.dispatchMode !== message.dispatchMode) {
+      logger.info(`[MessageProcessor] dispatchMode sync: sessionId=${session.id} ${session.metadata?.dispatchMode ?? 'none'} -> ${message.dispatchMode}`);
+      session.metadata = { ...(session.metadata || {}), dispatchMode: message.dispatchMode };
+      await this.sessionManager.updateSession(session.id, { metadata: session.metadata });
     }
 
     // 兜底纠正2：旧 session 创建时没传 peerType（建为 interactive），后续非 human 消息进来时升级为 proactive。
@@ -1248,6 +1604,35 @@ export class MessageProcessor {
   }
 
   /**
+   * 群聊响应深度决策。根据 dispatch 模式、消息特征、话题轮次综合判断。
+   * 返回 per-message 的瞬时深度枚举，不持久化到 session.metadata。
+   * 同时更新 session.metadata 中的 topicRounds/lastTopicHash（话题追踪状态）。
+   */
+  private async resolveResponseDepth(message: Message, session: Session): Promise<ResponseDepth> {
+    const result = computeResponseDepth({
+      chatType: message.chatType,
+      content: message.content,
+      selfAid: session.selfAID || message.selfAID,
+      mentionAids: message.mentionAids,
+      dispatch: session.metadata?.dispatchMode || message.dispatchMode,
+      topicRounds: session.metadata?.topicRounds ?? 0,
+      lastTopicHash: session.metadata?.lastTopicHash,
+    });
+
+    // 持久化话题追踪状态（仅群聊时有意义）
+    if (message.chatType === 'group') {
+      session.metadata = {
+        ...(session.metadata || {}),
+        topicRounds: result.topicRounds,
+        lastTopicHash: result.topicHash,
+      };
+      await this.sessionManager.updateSession(session.id, { metadata: session.metadata });
+    }
+
+    return result.depth;
+  }
+
+  /**
    * 处理标准事件流（AgentEvent）
    *
    * 此方法只消费标准 AgentEvent 类型，不引用任何 SDK 特有事件。
@@ -1260,12 +1645,12 @@ export class MessageProcessor {
     renderer: IMRenderer,
     resetTimer: (eventType?: string, toolName?: string) => void,
     shouldSuppress: () => boolean
-  ): Promise<{ isError: boolean; subtype?: string; errors?: string[]; terminalReason?: string; lastReplyText: string; fullText: string; hasReceivedText: boolean; numTurns?: number; ttftMs?: number; usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } }> {
+  ): Promise<{ isError: boolean; subtype?: string; errors?: string[]; terminalReason?: string; lastReplyText: string; fullText: string; hasReceivedText: boolean; numTurns?: number; ttftMs?: number; tokenUsage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number }; contextUsage?: { totalTokens: number; maxTokens: number; percentage: number; model: string; effort?: string } }> {
     // Per-session agent name for stats bucketing
     const agentNameForStats = this.agentRegistry?.resolveByChannel(session.metadata?.channelKey || session.channel)?.name ?? '<unknown>';
     let hasReceivedText = false;
     let hasErrorResult = false;  // 是否已有 tool_result/error 事件输出过错误
-    let completeResult: { isError: boolean; subtype?: string; errors?: string[]; terminalReason?: string; lastReplyText: string; fullText: string; hasReceivedText: boolean; numTurns?: number; ttftMs?: number; usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } } = { isError: false, lastReplyText: '', fullText: '', hasReceivedText: false };
+    let completeResult: { isError: boolean; subtype?: string; errors?: string[]; terminalReason?: string; lastReplyText: string; fullText: string; hasReceivedText: boolean; numTurns?: number; ttftMs?: number; tokenUsage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number }; contextUsage?: { totalTokens: number; maxTokens: number; percentage: number; model: string; effort?: string } } = { isError: false, lastReplyText: '', fullText: '', hasReceivedText: false };
 
     // 追踪最后一轮 assistant 回复文本（tool_use 之后的纯文本）
     let lastReplyText = '';
@@ -1438,7 +1823,8 @@ export class MessageProcessor {
         // SDK 可能产生多个 complete 事件（如 subagent 或 auto-compact 二次查询），
         // 仅记录状态，最终 flush(true) 在流结束后统一执行
         if (event.type === 'complete') {
-          logger.info(`[MessageProcessor] complete event: isError=${event.isError} terminalReason=${event.terminalReason ?? 'none'} subtype=${event.subtype ?? 'none'} hasReceivedText=${hasReceivedText}`);
+          const isAbort = event.terminalReason === 'aborted_streaming' || event.terminalReason === 'aborted_tools';
+          logger.info(`[MessageProcessor] ${isAbort ? 'task interrupted' : 'complete event'}: isError=${event.isError} terminalReason=${event.terminalReason ?? 'none'} subtype=${event.subtype ?? 'none'} hasReceivedText=${hasReceivedText}`);
 
           // 自动回填会话名称
           if (event.sessionTitle && session.name === '默认会话') {
@@ -1447,7 +1833,7 @@ export class MessageProcessor {
           }
 
           // 记录完成状态 + 最后一轮回复文本（后续 complete 覆盖前序）
-          completeResult = { isError: !!event.isError, subtype: event.subtype, errors: event.errors, terminalReason: event.terminalReason, lastReplyText, fullText: event.result || '', hasReceivedText, numTurns: event.numTurns, ttftMs: event.ttftMs, usage: event.usage };
+          completeResult = { isError: !!event.isError, subtype: event.subtype, errors: event.errors, terminalReason: event.terminalReason, lastReplyText, fullText: event.result || '', hasReceivedText, numTurns: event.numTurns, ttftMs: event.ttftMs, tokenUsage: event.tokenUsage, contextUsage: event.contextUsage };
 
           // thought jsonl 写入已下沉到 aun.ts:sendThought 成功后，
           // 由那里按 LLM 输出的每个 text item 单独写一条，此处不再写。
@@ -1510,7 +1896,7 @@ export class MessageProcessor {
       }
 
       // 记录完成状态
-      completeResult = { isError: !!event.isError, subtype: event.subtype, errors: event.errors, terminalReason: event.terminalReason, lastReplyText, fullText: event.result || '', hasReceivedText, numTurns: event.numTurns, ttftMs: event.ttftMs, usage: event.usage };
+      completeResult = { isError: !!event.isError, subtype: event.subtype, errors: event.errors, terminalReason: event.terminalReason, lastReplyText, fullText: event.result || '', hasReceivedText, numTurns: event.numTurns, ttftMs: event.ttftMs, tokenUsage: event.tokenUsage, contextUsage: event.contextUsage };
 
       if (event.subtype === 'success') {
         this.messageCache.addEvent(session.id, {

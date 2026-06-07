@@ -133,12 +133,6 @@ export type AgentResult<T> = T | AgentError;
 const BASEAGENT_CANDIDATES = ['claude', 'codex', 'gemini'] as const;
 type Baseagent = typeof BASEAGENT_CANDIDATES[number];
 
-const BASEAGENT_ENV_KEY: Record<Baseagent, string | undefined> = {
-  claude: 'ANTHROPIC_API_KEY',
-  codex: 'OPENAI_API_KEY',
-  gemini: 'GEMINI_API_KEY',
-};
-
 function isBaseagentAvailable(baseagent: Baseagent): boolean {
   if (baseagent === 'codex') return isCodexSdkAvailable();
   return commandExists(baseagent);
@@ -154,8 +148,7 @@ function pickDefaultBaseagent(available: Baseagent[]): Baseagent | null {
 }
 
 function buildBaseagentsBlock(chosen: Baseagent): Record<string, any> {
-  const env = BASEAGENT_ENV_KEY[chosen];
-  return { [chosen]: env ? { apiKey: `$ENV:${env}` } : {} };
+  return { [chosen]: {} };
 }
 
 const DEFAULT_CHATMODE = { private: 'interactive', group: 'proactive', nothuman: 'proactive' } as const;
@@ -433,10 +426,10 @@ export async function agentCreateInteractive(opts: AgentCreateInteractiveOpts = 
       const defaults = loadDefaults();
       const rootPath = defaults?.projects?.rootPath
         || (defaults?.projects?.defaultPath && path.dirname(defaults.projects.defaultPath))
-        || path.join(os.homedir(), 'evolclaw-projects');
+        || resolvePaths().root + '/projects';
       suggestedProjectPath = deriveAgentProjectPath(rootPath, aid);
     } catch {
-      suggestedProjectPath = deriveAgentProjectPath(path.join(os.homedir(), 'evolclaw-projects'), aid);
+      suggestedProjectPath = deriveAgentProjectPath(resolvePaths().root + '/projects', aid);
     }
     const projectInput = (await ask(`Project path [${suggestedProjectPath}]: `)).trim();
     const projectPath = projectInput || suggestedProjectPath;
@@ -555,11 +548,14 @@ export async function agentCreateInteractive(opts: AgentCreateInteractiveOpts = 
       console.warn(`  ⚠ agent.md generation failed: ${e?.message || e}`);
     }
 
-    // Attempt hot-load via IPC (if daemon is running)
+    // Attempt hot-load via IPC (if daemon is running).
+    // Cold-starting a new agent (connecting AUN WebSocket) routinely takes
+    // >3s, so use a generous timeout to avoid a false "service not running"
+    // report while the daemon actually finishes bringing the agent online.
     let hotLoaded = false;
     let hotLoadError: string | undefined;
     try {
-      const ipcResult = await ipcQuery(p.socket, { type: 'evolagent.load', aid }) as any;
+      const ipcResult = await ipcQuery(p.socket, { type: 'evolagent.load', aid }, 30_000) as any;
       if (ipcResult?.ok) {
         hotLoaded = true;
       } else if (ipcResult) {
@@ -591,34 +587,44 @@ export interface AgentCreateNonInteractiveOpts {
   name?: string;
   description?: string;
   force?: boolean;
+  /** 环节进度回调（可选）。CLI 不传 → 零行为变化；后台 runner 传入以驱动 create-status。
+   *  state='begin' 进入环节，'done'/'warn' 结束环节，'failed' 硬失败。 */
+  onPhase?: (phase: string, state: 'begin' | 'done' | 'warn' | 'failed', detail?: string) => void;
 }
 
 export async function agentCreateNonInteractive(opts: AgentCreateNonInteractiveOpts): Promise<AgentResult<AgentCreateResult>> {
   const p = resolvePaths();
   const { isValidAid, aidCreate } = await import('../aun/aid/index.js');
 
+  opts.onPhase?.('validating', 'begin');
+  /** 校验失败：透出 failed 进度并返回原结构（控制流不变）。 */
+  const failValidating = (error: string): AgentResult<AgentCreateResult> => {
+    opts.onPhase?.('validating', 'failed', error);
+    return { ok: false, error };
+  };
+
   if (!isValidAid(opts.aid)) {
-    return { ok: false, error: `Invalid AID "${opts.aid}": must be a valid multi-level domain (e.g. mybot.agentid.pub)` };
+    return failValidating(`Invalid AID "${opts.aid}": must be a valid multi-level domain (e.g. mybot.agentid.pub)`);
   }
 
   const agentDirPath = path.join(p.agentsDir, opts.aid);
   const configExists = fs.existsSync(path.join(agentDirPath, 'config.json'));
   if (configExists && !opts.force) {
-    return { ok: false, error: `Agent "${opts.aid}" already exists: ${agentDirPath}/config.json (use --force to overwrite)` };
+    return failValidating(`Agent "${opts.aid}" already exists: ${agentDirPath}/config.json (use --force to overwrite)`);
   }
 
   // Baseagent
   const available = detectAvailableBaseagents();
   if (available.length === 0) {
-    return { ok: false, error: `No usable baseagent detected. Install claude/gemini CLI or optional dependency @openai/codex-sdk.` };
+    return failValidating(`No usable baseagent detected. Install claude/gemini CLI or optional dependency @openai/codex-sdk.`);
   }
   let baseagent: Baseagent;
   if (opts.baseagent) {
     if (!BASEAGENT_CANDIDATES.includes(opts.baseagent as Baseagent)) {
-      return { ok: false, error: `Invalid baseagent: ${opts.baseagent} (options: ${BASEAGENT_CANDIDATES.join('/')})` };
+      return failValidating(`Invalid baseagent: ${opts.baseagent} (options: ${BASEAGENT_CANDIDATES.join('/')})`);
     }
     if (!available.includes(opts.baseagent as Baseagent)) {
-      return { ok: false, error: `${opts.baseagent} is not available in the current environment (available: ${available.join('/')})` };
+      return failValidating(`${opts.baseagent} is not available in the current environment (available: ${available.join('/')})`);
     }
     baseagent = opts.baseagent as Baseagent;
   } else {
@@ -626,28 +632,33 @@ export async function agentCreateNonInteractive(opts: AgentCreateNonInteractiveO
   }
 
   if (!path.isAbsolute(opts.project)) {
-    return { ok: false, error: `--project must be absolute: ${opts.project}` };
+    return failValidating(`--project must be absolute: ${opts.project}`);
   }
   if (!fs.existsSync(opts.project)) {
     try {
       fs.mkdirSync(opts.project, { recursive: true });
     } catch (e: any) {
-      return { ok: false, error: `Failed to create ${opts.project}: ${e?.message || e}` };
+      return failValidating(`Failed to create ${opts.project}: ${e?.message || e}`);
     }
   }
 
   if (opts.owner && !isValidAid(opts.owner)) {
-    return { ok: false, error: `Invalid owner: ${opts.owner}` };
+    return failValidating(`Invalid owner: ${opts.owner}`);
   }
+  opts.onPhase?.('validating', 'done');
 
   // Register AID
+  opts.onPhase?.('registering_aid', 'begin');
   let aidCreated = false;
   try {
     const result = await aidCreate(opts.aid);
     try { await result.client.close(); } catch { /* ignore */ }
     aidCreated = !result.alreadyExisted;
+    opts.onPhase?.('registering_aid', 'done', aidCreated ? 'created' : 'existed');
   } catch (e: any) {
-    return { ok: false, error: `AID creation failed: ${e?.message || e}` };
+    const error = `AID creation failed: ${e?.message || e}`;
+    opts.onPhase?.('registering_aid', 'failed', error);
+    return { ok: false, error };
   }
 
   // Force 模式下若 agent 已存在且已 initialized，保留该状态（避免重复发欢迎）
@@ -673,10 +684,13 @@ export async function agentCreateNonInteractive(opts: AgentCreateNonInteractiveO
     dispatch: DEFAULT_DISPATCH,
   };
 
+  opts.onPhase?.('config_saved', 'begin');
   saveAgent(agentConfig);
   ensureAgentDirSkeleton(opts.aid);
+  opts.onPhase?.('config_saved', 'done');
 
   // Generate and upload agent.md
+  opts.onPhase?.('uploading_agentmd', 'begin');
   let agentmdUploaded = false;
   try {
     const { buildInitialAgentMd, agentmdPut } = await import('../aun/aid/index.js');
@@ -697,6 +711,7 @@ export async function agentCreateNonInteractive(opts: AgentCreateNonInteractiveO
         if (attempt > 1) await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
         await agentmdPut(content, { aid: opts.aid, aunPath });
         agentmdUploaded = true;
+        opts.onPhase?.('uploading_agentmd', 'done');
         break;
       } catch (e: any) {
         lastError = e;
@@ -705,23 +720,33 @@ export async function agentCreateNonInteractive(opts: AgentCreateNonInteractiveO
     if (!agentmdUploaded) {
       console.warn(`⚠ agent.md upload failed: ${lastError?.message || lastError}`);
       console.warn(`  Retry later with: evolclaw aid agentmd put ${opts.aid}`);
+      opts.onPhase?.('uploading_agentmd', 'warn', `upload failed: ${lastError?.message || lastError}`);
     }
     await new Promise(r => setTimeout(r, 0));
   } catch (e: any) {
     console.warn(`⚠ agent.md generation failed: ${e?.message || e}`);
+    opts.onPhase?.('uploading_agentmd', 'warn', `generation failed: ${e?.message || e}`);
   }
 
-  // Attempt hot-load via IPC (if daemon is running)
+  // Attempt hot-load via IPC (if daemon is running).
+  // Cold-starting a new agent (connecting AUN WebSocket) routinely takes
+  // >3s, so use a generous timeout to avoid a false "service not running"
+  // report while the daemon actually finishes bringing the agent online.
   let hotLoaded = false;
   let hotLoadError: string | undefined;
+  opts.onPhase?.('hot_loading', 'begin');
   try {
-    const ipcResult = await ipcQuery(p.socket, { type: 'evolagent.load', aid: opts.aid }) as any;
+    const ipcResult = await ipcQuery(p.socket, { type: 'evolagent.load', aid: opts.aid }, 30_000) as any;
     if (ipcResult?.ok) {
       hotLoaded = true;
+      opts.onPhase?.('hot_loading', 'done');
     } else if (ipcResult) {
       hotLoadError = ipcResult.error;
+      opts.onPhase?.('hot_loading', 'warn', hotLoadError);
+    } else {
+      opts.onPhase?.('hot_loading', 'warn', 'daemon not running');
     }
-  } catch { /* daemon not running */ }
+  } catch { opts.onPhase?.('hot_loading', 'warn', 'daemon not running'); /* daemon not running */ }
 
   return {
     ok: true,
@@ -775,7 +800,7 @@ export async function agentSyncAids(): Promise<AgentResult<AgentSyncResult>> {
   const defaults = loadDefaults();
   const rootPath = defaults?.projects?.rootPath
     || (defaults?.projects?.defaultPath && path.dirname(defaults.projects.defaultPath))
-    || path.join(os.homedir(), 'evolclaw-projects');
+    || resolvePaths().root + '/projects';
 
   const created: string[] = [];
   for (const aid of localAids) {
@@ -919,6 +944,14 @@ export async function agentSet(aid: string, key: string, rawValue: string): Prom
   }
 
   const value = parseJsonValue(rawValue);
+
+  // active_baseagent 白名单校验：只允许已知 baseagent，挡住把模型名（如 deepseek）误设为后端
+  if (key === 'active_baseagent') {
+    if (typeof value !== 'string' || !(BASEAGENT_CANDIDATES as readonly string[]).includes(value)) {
+      return { ok: false, error: `无效 active_baseagent: ${JSON.stringify(value)}（可选: ${BASEAGENT_CANDIDATES.join(' / ')}）` };
+    }
+  }
+
   setNestedValue(config, key, value);
   try {
     saveAgent(config);
@@ -1038,6 +1071,9 @@ export async function agentDelete(aid: string, purge: boolean = false): Promise<
     fs.rmSync(agentDir, { recursive: true, force: true });
   } else {
     fs.unlinkSync(configPath);
+    // 清理构建进度文件（非 purge 删除只移除 config.json，需显式清理 create-status.json）
+    const { removeCreateStatus } = await import('../core/message/create-status.js');
+    removeCreateStatus(agentDir);
   }
 
   // Trigger resync so daemon drops the agent

@@ -162,7 +162,7 @@ export function parseTriggerUpdate(args: string): UpdateParseResult {
 
   if (flags.has('session')) {
     const sv = flags.get('session') as string;
-    if (sv !== 'latest' && sv !== 'silent') return { ok: false, error: '--session 只接受 latest 或 silent' };
+    if (sv !== 'latest' && sv !== 'current' && sv !== 'thread') return { ok: false, error: '--session 只接受 latest、current 或 thread' };
     result.targetSessionStrategy = sv;
   }
 
@@ -259,8 +259,8 @@ export function parseTriggerSet(args: string): ParseResult {
   let targetSessionStrategy: TriggerSessionStrategy = 'latest';
   if (hasSession) {
     const sv = flags.get('session') as string;
-    if (sv !== 'latest' && sv !== 'silent') {
-      return { ok: false, error: '--session 只接受 latest 或 silent' };
+    if (sv !== 'latest' && sv !== 'current' && sv !== 'thread') {
+      return { ok: false, error: '--session 只接受 latest、current 或 thread' };
     }
     targetSessionStrategy = sv;
   }

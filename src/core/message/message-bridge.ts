@@ -33,7 +33,7 @@ export class MessageBridge {
     private eventBus: EventBus,
     defaultDebounce?: number,
   ) {
-    this.defaultDebounce = defaultDebounce ?? 2;
+    this.defaultDebounce = defaultDebounce ?? 0;
   }
 
   /** Inject EvolAgentRegistry so owner lookups/writes route to agent.json for agent-owned channels. */
@@ -121,7 +121,7 @@ export class MessageBridge {
             return sendReply(msg.channelId, text, msg.replyContext);
           },
           msg.peerId, msg.threadId, msg.chatType, msg.source,
-          msg.replyContext
+          msg.replyContext, msg.messageId, msg.selfAID
         )) return;
 
         // 3. session 解析（使用 Channel 层填充的 chatType）
@@ -155,12 +155,8 @@ export class MessageBridge {
           msg.peerType
         );
 
-        // 4. 消息前缀（由 policy 决定）
-        const channelInfo = this.processor.getChannelInfo?.(channelName);
-        if (channelInfo?.policy) {
-          const prefix = channelInfo.policy.messagePrefix(chatType, msg.peerName);
-          if (prefix) content = prefix + content;
-        }
+        // 4. 群聊发送者标注由消息渲染层（message-renderer）逐条承担，不再在此硬编码前缀，
+        //    消息日志因此保存干净原文。policy.messagePrefix 暂保留（未来清理）。
 
         // 5. 构造完整消息（channel 字段存实例名，用于 session 精确匹配）
         const fullMessage: Message = {
@@ -172,28 +168,35 @@ export class MessageBridge {
           images: msg.images, timestamp: Date.now(),
           peerId: msg.peerId, peerName: msg.peerName,
           peerType: msg.peerType,
+          sameDevice: msg.sameDevice,
+          sameNetwork: msg.sameNetwork,
+          sameEgressIp: msg.sameEgressIp,
           messageId: msg.messageId,
-          mentions: msg.mentions, threadId: msg.threadId,
+          mentions: msg.mentions, mentionAids: msg.mentionAids, threadId: msg.threadId,
           replyContext: msg.replyContext,
+          source: msg.source,
+          dispatchMode: msg.dispatchMode,
         };
 
-        // 5.5 写入消息记录（入方向）
-        const chatDir = this.sessionManager.getChatDir(session);
-        const inboundEncrypt = msg.replyContext?.metadata?.encrypted != null ? !!(msg.replyContext.metadata.encrypted) : undefined;
-        const inboundChatmode = msg.replyContext?.metadata?.chatmode as string | undefined;
-        appendMessageLog(chatDir, buildInboundEntry({
-          from: msg.peerId || 'unknown',
-          to: msg.selfAID || 'self',
-          chatType,
-          groupId: msg.groupId ?? null,
-          msgId: msg.messageId ?? null,
-          content,
-          replyTo: msg.replyContext?.replyToMessageId ?? null,
-          permMode: session.identity?.role ?? null,
-          timestamp: fullMessage.timestamp,
-          encrypt: inboundEncrypt,
-          chatmode: inboundChatmode,
-        }));
+        // 5.5 写入消息记录（入方向）。
+        {
+          const chatDir = this.sessionManager.getChatDir(session);
+          const inboundEncrypt = msg.replyContext?.metadata?.encrypted != null ? !!(msg.replyContext.metadata.encrypted) : undefined;
+          const inboundChatmode = msg.replyContext?.metadata?.chatmode as string | undefined;
+          appendMessageLog(chatDir, buildInboundEntry({
+            from: msg.peerId || 'unknown',
+            to: msg.selfAID || 'self',
+            chatType,
+            groupId: msg.groupId ?? null,
+            msgId: msg.messageId ?? null,
+            content,
+            replyTo: msg.replyContext?.replyToMessageId ?? null,
+            permMode: session.identity?.role ?? null,
+            timestamp: fullMessage.timestamp,
+            encrypt: inboundEncrypt,
+            chatmode: inboundChatmode,
+          }));
+        }
 
         // 6. ACK + debounce/enqueue
         //    ACK 在到达时立即做（每条独立 ACK），不等合并
@@ -242,6 +245,8 @@ export class MessageBridge {
     activity: '/activity',
     system: '/system',
     cli: '/cli',
+    agent: '/agent',
+    trigger: '/trigger',
   };
 
   private resolveCmd(name: string, cmd?: string): string {
@@ -309,7 +314,7 @@ export class MessageBridge {
     const { id, name, cmd } = req;
     try {
       const resolvedCmd = this.resolveCmd(name, cmd);
-      const result = await this.cmdHandler.execMenuQuery(resolvedCmd, channel, msg.channelId, msg.peerId);
+      const result = await this.cmdHandler.execMenuQuery(resolvedCmd, channel, msg.channelId, msg.peerId, (req as any).args);
       if ('error' in result) throw { code: result.code || 'EXEC_FAILED', message: result.error };
       await this.sendMenuResponse(adapter, channel, msg.channelId,
         { type: 'menu.response', id, name, data: result.data }, sendReply);
@@ -329,7 +334,7 @@ export class MessageBridge {
     const { id, name, cmd } = req;
     try {
       const resolvedCmd = this.resolveCmd(name, cmd);
-      const data = await this.cmdHandler.getSubMenuItems(resolvedCmd, channel, msg.channelId, msg.peerId) ?? [];
+      const data = await this.cmdHandler.getSubMenuItems(resolvedCmd, channel, msg.channelId, msg.peerId, (req as any).args) ?? [];
       await this.sendMenuResponse(adapter, channel, msg.channelId,
         { type: 'menu.response', id, name, data }, sendReply);
     } catch (err: any) {
@@ -432,13 +437,13 @@ export class MessageBridge {
     content: string, channel: string, channelId: string,
     sendReply: (text: string) => Promise<void>,
     userId?: string, threadId?: string, chatType?: string, source?: 'user' | 'card-trigger',
-    replyContext?: ReplyContext
+    replyContext?: ReplyContext, messageId?: string, selfAID?: string,
   ): Promise<boolean> {
     if (!this.cmdHandler.isCommand(content)) return false;
     logger.info(`[${channel}] ${channelId}: ${content}${source === 'card-trigger' ? ' [card]' : ''}`);
     const cmdResult = await this.cmdHandler.handle(content, channel, channelId,
       (_cid, text, opts) => sendReply(text),
-      userId, threadId, chatType, source);
+      userId, threadId, chatType, source, messageId, selfAID);
     logger.debug(`[MessageBridge] handleCommand: result type=${typeof cmdResult}`);
     if (cmdResult === undefined) return false;
     if (cmdResult) {

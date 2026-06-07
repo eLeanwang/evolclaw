@@ -191,6 +191,7 @@ export interface SessionMetadata {
   peerId?: string;                  // 私聊：对端 AID/userId；群聊：当前消息发送者 AID
   peerName?: string;                // 对端/发送者显示名
   groupId?: string;                 // 仅群聊：群 ID（如 AUN 的 group.issuer/grp_xxx）
+  groupName?: string;               // 仅群聊：群显示名（首次群会话经 group.get 取得后缓存，渲染信封用）
   channelKey?: string;             // 完整 channelKey（<type>#<selfAID>#<name>，审计/精确出站路由）
   agentSessions?: {
     codex?: string;
@@ -200,10 +201,16 @@ export interface SessionMetadata {
   dispatchMode?: string;  // 群聊分发模式（per-session）: mention | broadcast
   resumeAt?: string;  // /rewind chat 标记的回退点（assistant message uuid）
   lastProactiveFlag?: boolean;  // proactive 模式使用标志位后设置，interactive 切换时注入提示后清除
+  // 群聊话题追踪（responseDepth 决策信号）
+  topicRounds?: number;       // 同话题连续轮次
+  lastTopicHash?: string;     // 上条消息的话题指纹（前 20 字符 hash）
 }
 
 /** Default permission mode applied to new sessions. Change here to affect all roles. */
 export const DEFAULT_PERMISSION_MODE = 'bypass';
+
+/** 群聊响应深度（per-message 瞬时决策，不持久化） */
+export type ResponseDepth = 'lightweight' | 'standard' | 'deep';
 
 export interface ReplyContext {
   sessionId?: string;
@@ -243,6 +250,35 @@ export interface Session {
   deletedAt?: number;  // 软删除时间戳（null=活跃）
 }
 
+/**
+ * 一条子消息渲染所需的最小信息。批量合并时每条保留自己的发送者与时刻，
+ * 供消息渲染层逐条渲染。
+ */
+export interface SubMessage {
+  peerId?: string;
+  peerName?: string;
+  peerType?: string;
+  /** 对端网络邻近性（SDK 0.4.9 起明文/密文消息均可携带，具体字段以网关下发为准；逐条保留以支持群聊批量逐条渲染）*/
+  sameDevice?: boolean;
+  sameNetwork?: boolean;
+  sameEgressIp?: boolean;
+  content: string;
+  timestamp?: number;
+  images?: Array<{ data: string; mimeType: string }>;
+  /** 本条被 @ 的全部 AID（含 self；@all 时含字面 "all"）。仅供消息信封渲染，与过滤/回复用的 mentions 独立。 */
+  mentionAids?: string[];
+  /**
+   * 子消息类别。缺省（普通对端消息）走 private/group 渲染模式；
+   * 'owner-hint' 为观察者插话提示，走 inject 渲染模式（owner 信封头）。
+   * 详见 docs/observer-insert-design.md 第二部分。
+   */
+  kind?: 'owner-hint';
+  /** owner-hint 专用：提示发出时间（epoch ms），渲染成信封头 {{injectTime}}。 */
+  injectTime?: number;
+  /** owner-hint 专用：提示来源 owner AID。 */
+  ownerAid?: string;
+}
+
 export interface Message {
   channel: string;          // 实例名
   channelType?: string;     // 类型（aun/feishu/...）
@@ -254,16 +290,34 @@ export interface Message {
   peerId: string;  // 发送者 ID
   peerName?: string;  // 发送者名称
   peerType?: string;  // 对端类型 (human/ai/unknown)，由支持 agent.md 的渠道填充
+  /** 对端网络邻近性（SDK 0.4.9 起明文/密文消息均可携带，具体字段以网关下发为准）*/
+  sameDevice?: boolean;   // 对端与本端同一物理设备
+  sameNetwork?: boolean;  // 对端与本端同一网络
+  sameEgressIp?: boolean; // 对端与本端同一出口 IP
   /** 对端使用的客户端类型；来自入站消息信封，由 channel 适配层填充。当前阶段先 undefined。 */
   clientType?: 'desktop' | 'web' | 'mobile' | string;
   content: string;
   images?: Array<{ data: string; mimeType: string }>;
   mentions?: Array<{ userId: string; name?: string; key?: string }>;
+  /** 本条被 @ 的全部 AID（含 self；@all 时含字面 "all"）。仅供消息信封渲染。 */
+  mentionAids?: string[];
   messageId?: string;
+  /**
+   * 批量合并时保留的逐条子消息（每条带自己的发送者与时刻）。
+   * 队列贪心合并多条消息后挂在这里；消息渲染层逐条渲染再组装。
+   * 单条消息可不设（渲染层退回 content）。
+   */
+  items?: SubMessage[];
   replyContext?: ReplyContext;       // Channel 预构建的回复上下文（渠道无关）
+  dispatchMode?: string;            // 群聊分发模式，由渠道适配器从服务器信封解析后注入（mention|broadcast）
   timestamp?: number;
-  source?: 'user' | 'card-trigger' | 'trigger';
-  triggerMeta?: { triggerId: string; silent: boolean };
+  source?: 'user' | 'card-trigger' | 'trigger' | 'owner-inject';
+  triggerMeta?: {
+    triggerId: string;
+    boundSessionId?: string;
+    pendingThread?: boolean;
+    rootMessageId?: string;
+  };
 }
 
 // 入站消息（渠道 → Gateway 的统一格式）
@@ -279,12 +333,18 @@ export interface InboundMessage {
   peerId: string;  // 发送者 ID
   peerName?: string;  // 发送者名称
   peerType?: string;  // 对端类型 (human/ai/unknown)，由支持 agent.md 的渠道填充
+  sameDevice?: boolean;
+  sameNetwork?: boolean;
+  sameEgressIp?: boolean;
   content: string;
   messageId?: string;
   images?: Array<{ data: string; mimeType: string }>;
   mentions?: Array<{ userId: string; name?: string; key?: string }>;
+  /** 本条被 @ 的全部 AID（含 self；@all 时含字面 "all"）。仅供消息信封渲染。 */
+  mentionAids?: string[];
   replyContext?: ReplyContext;       // Channel 预构建的回复上下文（渠道无关）
-  source?: 'user' | 'card-trigger';  // 消息来源：用户输入 or 卡片按钮触发
+  dispatchMode?: string;            // 群聊分发模式（mention|broadcast）
+  source?: 'user' | 'card-trigger';  // 消息来源：用户输入 / 卡片按钮触发
 }
 
 // ── 交互协议类型（渠道无关） ──
@@ -371,6 +431,8 @@ export interface ChannelAdapter {
   /** AUN 协议私有扩展 */
   uploadAgentMd?(content: string): Promise<void>;
   downloadAgentMd?(aid: string): Promise<string>;
+  /** 群显示名解析（渠道私有，AUN 经 group.get；进程内缓存）。取不到返回 undefined，绝不抛出阻塞消息处理。 */
+  getGroupName?(groupId: string): Promise<string | undefined>;
 }
 
 // 渠道配置选项
@@ -487,8 +549,8 @@ export interface EvolAgentHandle {
   setBaseagentEffort(value: string | undefined): void;
   setChatmodePrivate(value: 'interactive' | 'proactive' | undefined): void;
   setDispatch(value: 'mention' | 'broadcast' | undefined): void;
-  getProjects(): Record<string, string>;
-  addProject(name: string, projectPath: string): void;
+  getObservable(): boolean;
+  setObservable(value: boolean): void;
   channelInstanceNames(): string[];
 }
 
@@ -610,8 +672,6 @@ export interface ProjectsBlock {
   /** 工作目录根路径——创建 agent 时自动合成 `<rootPath>/<aid第一段>` 作为 defaultPath */
   rootPath?: string;
   defaultPath?: string;
-  list?: Record<string, string>;
-  autoCreate?: boolean;
 }
 
 export interface ChatmodeBlock {
@@ -702,7 +762,7 @@ export type ChannelInstance =
 
 /**
  * agents/defaults.json —— per-agent 配置缺失字段的 fallback。
- * 不持有 channels（必须 per-agent）、不持有 owners（必须 per-agent）、不持有 aid。
+ * 不持有 channels / owners / aid（owners 已移至 evolclaw.json 顶层，进程级鉴权专用）。
  */
 export interface DefaultsConfig {
   $schema_version: number;
@@ -753,6 +813,14 @@ export interface AgentConfig {
   debug?: DebugBlock;
   /** 启用富内容渲染模块（如飞书富文本卡片）。透传到 channel plugin。 */
   enable_rich_content?: boolean;
+  /** 观察者模式：开启后入站/出站消息各转发一份给顶层 owners[]。默认 false。 */
+  observable?: boolean;
+  /**
+   * 消息渲染模式：各渲染类型（private/group/inject）当前激活的 modeName。
+   * 未配置的类型回退到 message manifest 里标 isDefault 的模式。
+   * 详见 docs/observer-insert-design.md 第二部分。
+   */
+  render?: { private?: string; group?: string; inject?: string };
 }
 
 /**
@@ -786,9 +854,9 @@ export type OutboundPayload =
   | { kind: 'result.error'; text: string; reason?: string }
   | { kind: 'activity.batch'; items: ThoughtItem[] }
   | { kind: 'status.started'; metadata?: Record<string, unknown> }
-  | { kind: 'status.progress'; metadata?: { activityType: 'text' | 'tool_call' | 'tool_result'; turn?: number; outputTokens?: number } }
+  | { kind: 'status.progress'; metadata?: { activityType: 'text' | 'tool_call' | 'tool_result'; turn?: number; outputTokens?: number; toolName?: string; callId?: string; ok?: boolean; durationMs?: number } }
   | { kind: 'status.queued'; metadata?: Record<string, unknown> }
-  | { kind: 'status.completed'; metadata?: { durationMs?: number; ttftMs?: number; numTurns?: number; usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } } }
+  | { kind: 'status.completed'; metadata?: { durationMs?: number; ttftMs?: number; numTurns?: number; tokenUsage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number }; contextUsage?: { totalTokens: number; maxTokens: number; percentage: number; model: string; effort?: string } } }
   | { kind: 'status.interrupted'; metadata?: { reason: string } }
   | { kind: 'status.error'; metadata?: { errorType?: string } }
   | { kind: 'status.timeout'; metadata?: { idleSec?: number } }
@@ -801,6 +869,8 @@ export type OutboundPayload =
 
 export interface OutboundEnvelope {
   taskId: string;
+  /** EvolClaw 会话 ID（跨任务稳定，(channel,channelId,project) 维度）。命令回显/系统通知等无会话上下文的出站可缺省。 */
+  sessionId?: string;
   channel: string;
   channelId: string;
   agentName: string;
@@ -816,12 +886,13 @@ export interface ChannelCapabilities {
   markdown: boolean;
   thought: boolean;
   status: boolean;
+  thread: boolean;
 }
 
 // ── Trigger types ──
 
 export type TriggerScheduleType = 'delay' | 'at' | 'cron';
-export type TriggerSessionStrategy = 'latest' | 'silent';
+export type TriggerSessionStrategy = 'latest' | 'current' | 'thread';
 
 export interface Trigger {
   id: string;
@@ -831,6 +902,8 @@ export interface Trigger {
   nextFireAt: number;          // Unix ms
   targetChannel: string;
   targetChannelId: string;
+  /** Channel type resolved at creation time (CommandHandler has channelTypeMap);
+   *  the scheduler has no channelTypeMap, so it relies on this stored value. */
   targetChannelType?: string;
   targetThreadId?: string;
   targetSessionStrategy: TriggerSessionStrategy;
@@ -842,6 +915,10 @@ export interface Trigger {
   fireCount: number;
   createdAt: number;
   updatedAt: number;
+  boundSessionId?: string;       // current：注册时绑定的 sessionId
+  threadKind?: 'aun' | 'feishu'; // thread：实现路径
+  rootMessageId?: string;        // thread(feishu)：注册时命令消息的 messageId
+  pendingThread?: boolean;       // thread(feishu)：首次触发待建话题
 }
 
 // ── Menu Protocol types ──
@@ -864,6 +941,7 @@ export interface MenuQueryRequest {
   id: string;
   name: string;          // 通用操作标识（如 'pwd' / 'baseagent' / 'session'）
   cmd?: string;          // 逃生口：直接指定内部命令
+  args?: Record<string, any>;
 }
 
 export interface MenuOptionsRequest {
@@ -871,6 +949,7 @@ export interface MenuOptionsRequest {
   id: string;
   name: string;
   cmd?: string;
+  args?: Record<string, any>;
 }
 
 export interface MenuUpdateRequest {

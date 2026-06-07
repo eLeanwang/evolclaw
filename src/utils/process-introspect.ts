@@ -52,17 +52,18 @@ function getStartTimeLinux(pid: number): number | null {
   const starttimeJiffies = parseInt(fields[19], 10);
   if (isNaN(starttimeJiffies)) return null;
 
-  let uptimeSec: number;
+  let btimeSec: number;
   try {
-    uptimeSec = parseFloat(fs.readFileSync('/proc/uptime', 'utf-8').split(' ')[0]);
+    const m = fs.readFileSync('/proc/stat', 'utf-8').match(/^btime (\d+)/m);
+    if (!m) return null;
+    btimeSec = parseInt(m[1], 10);
   } catch {
     return null;
   }
-  if (isNaN(uptimeSec)) return null;
+  if (isNaN(btimeSec)) return null;
 
   const clkTck = 100;
-  const bootTimeMs = Date.now() - uptimeSec * 1000;
-  return bootTimeMs + (starttimeJiffies / clkTck) * 1000;
+  return (btimeSec + starttimeJiffies / clkTck) * 1000;
 }
 
 // ── macOS ──

@@ -3,7 +3,8 @@ import { CodexSessionFileAdapter } from './core/session/adapters/codex-session-f
 import { GeminiSessionFileAdapter } from './core/session/adapters/gemini-session-file-adapter.js';
 import { ensureDataDirs, resolvePaths, agentDir, getPackageRoot, agentMdPath } from './paths.js';
 import { resolveAnthropicConfig } from './agents/resolve.js';
-import { loadDefaults, loadAllAgents, mergeForAgent, ensureAgentDirSkeleton, autoMigrateIfNeeded, migrateIdentitiesIfNeeded } from './config-store.js';
+import { loadDefaults, loadAllAgents, mergeForAgent, ensureAgentDirSkeleton, autoMigrateIfNeeded, migrateIdentitiesIfNeeded, migrateProcessConfigIfNeeded } from './config-store.js';
+import { loadEvolclawConfig } from './evolclaw-config.js';
 import type { Config, MergedAgentConfig, AgentConfig, DefaultsConfig } from './types.js';
 import { CONFIG_SCHEMA_VERSION } from './types.js';
 import dotenv from 'dotenv';
@@ -13,7 +14,7 @@ import { CodexAgentPlugin } from './agents/codex-runner.js';
 import { GeminiAgentPlugin } from './agents/gemini-runner.js';
 import { FeishuChannelPlugin } from './channels/feishu.js';
 import { WechatChannelPlugin } from './channels/wechat.js';
-import { AUNChannelPlugin } from './channels/aun.js';
+import { AUNChannel, AUNChannelPlugin } from './channels/aun.js';
 import { DingtalkChannelPlugin } from './channels/dingtalk.js';
 import { QQBotChannelPlugin } from './channels/qqbot.js';
 import { WecomChannelPlugin } from './channels/wecom.js';
@@ -22,7 +23,7 @@ import { MessageQueue } from './core/message/message-queue.js';
 import { MessageBridge } from './core/message/message-bridge.js';
 import { MessageCache } from './core/message/message-cache.js';
 import { CommandHandler } from './core/command-handler.js';
-import { EventBus } from './core/event-bus.js';
+import { EventBus, GatewayEvent } from './core/event-bus.js';
 import { StatsCollector } from './utils/stats.js';
 import { AidStatsCollector } from './utils/stats.js';
 import { PermissionGateway } from './core/permission.js';
@@ -32,7 +33,7 @@ import { AgentLoader } from './core/baseagent-loader.js';
 import { EvolAgentRegistry, type ReloadHooks } from './core/evolagent-registry.js';
 import { buildReloadHooks } from './core/channel-loader.js';
 import { IpcServer, IpcStatusResponse, ChannelStatus } from './ipc.js';
-import { ChannelAdapter, Message, OutboundEnvelope, OutboundPayload } from './types.js';
+import { ChannelAdapter, Message, OutboundEnvelope, OutboundPayload, Trigger } from './types.js';
 import { logger, setLogLevel } from './utils/logger.js';
 import { writeMain, removeAll, isMainWinner, scanInstances } from './utils/instance-registry.js';
 import { detectDuplicates } from './core/evolagent-registry.js';
@@ -223,6 +224,9 @@ async function main() {
   // ── 自动迁移 ──
   migrateIdentitiesIfNeeded();
   autoMigrateIfNeeded();
+  // config.json（ProcessConfig）→ evolclaw.json：必须在任何 getAidStore（AUN 连接）之前，
+  // 否则首次读 encryptionSeed 时迁移还没发生。
+  migrateProcessConfigIfNeeded();
 
   // ── ECK 运行时初始化 ──
   initEck();
@@ -233,6 +237,14 @@ async function main() {
 
   // 加载配置（新结构：defaults.json + per-agent config.json）
   const defaults: DefaultsConfig = loadDefaults() ?? { $schema_version: CONFIG_SCHEMA_VERSION };
+  const evolclawCfg = loadEvolclawConfig();
+
+  // 进程级 menu 操作（/system /agent）鉴权：owners 来自 evolclaw.json 顶层。
+  // owners 为空时这些操作一律 FORBIDDEN，启动时提示如何配置。
+  if (!evolclawCfg.owners || evolclawCfg.owners.length === 0) {
+    logger.warn('[startup] evolclaw.json.owners 未配置：进程级 menu 操作（/system /agent）将一律拒绝。' +
+      '如需远程管理，请在 evolclaw.json 配置 owners: [<你的 AID>]');
+  }
 
   // 应用配置中的日志级别（优先于环境变量）
   // logLevel 现在不在新结构中——若要保留，将来可加 defaults.debug.logLevel
@@ -329,6 +341,12 @@ async function main() {
   // Per-AID 消息统计收集器（累计，供 watch aid 实时展示）
   const aidStatsCollector = new AidStatsCollector(eventBus);
   aidStatsCollector.setSessionsDir(paths.sessionsDir);
+  // 持久化网络流量到 message_events 表
+  aidStatsCollector.onMessage = (ev) => {
+    import('./core/stats/writer.js').then(({ insertMessageEvent }) => {
+      insertMessageEvent(paths.root, ev);
+    }).catch(() => {});
+  };
 
   // 初始化 SessionManager（文件系统后端）
   const sessionManager = new SessionManager(paths.sessionsDir, eventBus,
@@ -510,11 +528,49 @@ async function main() {
     if (!agent.triggerScheduler || !agent.triggerManager) continue;
     const scheduler = agent.triggerScheduler;
     const primaryProjectPath = agent.config.projects?.defaultPath ?? primaryAgent.projectPath;
+    function scheduleRetryWhenIdle(boundId: string, msg: Message, trigger: Trigger) {
+      let done = false;
+      const handler = (ev: GatewayEvent) => {
+        if ((ev as any).sessionId !== boundId || done) return;
+        done = true;
+        clearTimeout(timer);
+        eventBus.unsubscribe('task:completed', handler);
+        retry();
+      };
+      const timer = setTimeout(() => {
+        if (done) return;
+        done = true;
+        eventBus.unsubscribe('task:completed', handler);
+        retry();
+      }, 30_000);
+      eventBus.subscribe('task:completed', handler);
+
+      function retry() {
+        if (messageQueue.isProcessing(boundId)) { scheduleRetryWhenIdle(boundId, msg, trigger); return; }
+        sessionManager.getSessionById(boundId).then(bound => {
+          if (!bound) { logger.warn(`[Trigger] Bound session ${boundId} deleted, aborting`); return; }
+          messageQueue.enqueue(boundId, msg, bound.projectPath, { interruptible: false })
+            .catch(err => logger.error(`[Trigger] Retry failed ${trigger.id}: ${err}`));
+        });
+      }
+    }
+
     scheduler.setFireCallback((msg, trigger) => {
-      const sessionKey = `${msg.channel}:${msg.channelId}`;
-      messageQueue.enqueue(sessionKey, msg, primaryProjectPath, { interruptible: false }).catch(err => {
-        logger.error(`[Trigger] Failed to enqueue trigger ${trigger.id}: ${err}`);
-      });
+      if (trigger.targetSessionStrategy === 'current' && trigger.boundSessionId) {
+        const boundId = trigger.boundSessionId;
+        if (messageQueue.isProcessing(boundId)) {
+          scheduleRetryWhenIdle(boundId, msg, trigger);
+          return;
+        }
+        sessionManager.getSessionById(boundId).then(bound => {
+          if (!bound) { logger.warn(`[Trigger] Bound session ${boundId} not found`); return; }
+          messageQueue.enqueue(boundId, msg, bound.projectPath, { interruptible: false })
+            .catch(err => logger.error(`[Trigger] Enqueue failed ${trigger.id}: ${err}`));
+        });
+        return;
+      }
+      messageQueue.enqueue(`${msg.channel}:${msg.channelId}`, msg, primaryProjectPath, { interruptible: false })
+        .catch(err => logger.error(`[Trigger] Enqueue failed ${trigger.id}: ${err}`));
     });
     // Subscribe to trigger:completed/failed/skipped to update cron inflight state
     eventBus.subscribe('trigger:completed', (ev: any) => scheduler.onTriggerComplete(ev.triggerId, 'completed'));
@@ -532,54 +588,6 @@ async function main() {
     }
   }
 
-  // Inject primary agent's trigger scheduler as fallback (used when owning agent has no scheduler)
-  const primaryAgentForTrigger = agentRegistry.runnableAgents()[0];
-  if (primaryAgentForTrigger?.triggerScheduler && primaryAgentForTrigger?.triggerManager) {
-    cmdHandler.setTriggerScheduler(primaryAgentForTrigger.triggerScheduler, primaryAgentForTrigger.triggerManager);
-  }
-
-  // Seed default __upgrade-check trigger (daily at random time 3:00~3:59)
-  // 用户可通过 /trigger cancel __upgrade-check 永久禁用（不会再自动重建）
-  if (!isLinkedInstall() && primaryAgentForTrigger?.triggerManager && primaryAgentForTrigger?.triggerScheduler) {
-    const mgr = primaryAgentForTrigger.triggerManager;
-    const sched = primaryAgentForTrigger.triggerScheduler;
-    const UPGRADE_TRIGGER_NAME = '__upgrade-check';
-    if (!mgr.getByName(UPGRADE_TRIGGER_NAME)) {
-      // Check history: if user cancelled it before, respect that decision
-      const { history } = mgr.listAll();
-      const wasCancelled = history.some(h => h.name === UPGRADE_TRIGGER_NAME && h.doneReason === 'cancelled');
-      if (!wasCancelled) {
-        // Random minute in 3:00~3:59 to avoid all instances hitting registry simultaneously
-        const randomMinute = Math.floor(Math.random() * 60);
-        const cronExpr = `${randomMinute} 3 * * *`;
-        // Use first channel instance as target (command doesn't need real channelId)
-        const firstChannel = channelInstances[0]?.adapter?.channelName || 'system';
-        const trigger: import('./types.js').Trigger = {
-          id: crypto.randomUUID(),
-          name: UPGRADE_TRIGGER_NAME,
-          scheduleType: 'cron',
-          scheduleValue: cronExpr,
-          nextFireAt: calcNextFireAt('cron', cronExpr),
-          targetChannel: firstChannel,
-          targetChannelId: '__system__',
-          targetSessionStrategy: 'silent',
-          prompt: '检查 evolclaw 是否有新版本可用。执行 `npm view evolclaw version` 获取最新版本，与当前版本（执行 `evolclaw --version`）对比。如果有新版本，执行 /restart 进行升级。如果已是最新版本，无需任何操作。',
-          createdByPeerId: '__system__',
-          createdByChannel: '__system__',
-          fireCount: 0,
-          createdAt: Date.now(),
-          updatedAt: Date.now(),
-        };
-        try {
-          mgr.register(trigger);
-          sched.register(trigger);
-          logger.info(`[Trigger] Seeded default trigger: ${UPGRADE_TRIGGER_NAME} (cron ${cronExpr})`);
-        } catch (e) {
-          logger.warn(`[Trigger] Failed to seed ${UPGRADE_TRIGGER_NAME}: ${e}`);
-        }
-      }
-    }
-  }
 
   // 默认策略
   const defaultPolicy = {
@@ -658,6 +666,20 @@ async function main() {
       inst.registerHooks({ eventBus, sessionManager });
     }
 
+    // 4c. 观察者模式配置读取器（AUN）：从 EvolAgent 的 merged config 读 observable/owners，
+    // 不另建缓存——EvolAgent 那份在启动/重启/热重载时统一更新，是唯一真相源。
+    const channelForObserver = inst.channel as { setObserverConfigResolver?: (fn: () => { observable: boolean; owners: string[] }) => void };
+    if (typeof channelForObserver.setObserverConfigResolver === 'function') {
+      const channelKey = inst.adapter.channelKey;
+      channelForObserver.setObserverConfigResolver(() => {
+        const owningAgent = agentRegistry.resolveByChannel(channelKey);
+        return {
+          observable: owningAgent?.getObservable() ?? false,
+          owners: owningAgent?.config.owners ?? [],
+        };
+      });
+    }
+
     // 5. 撤回消息 → 中断执行中任务
     inst.channel.onRecall?.((messageId: string) => {
       msgBridge.cancel(messageId);
@@ -667,6 +689,55 @@ async function main() {
   // ── 注册所有渠道实例 ──
   for (const inst of channelInstances) {
     registerChannelInstance(inst);
+  }
+
+  // Inject primary agent's trigger scheduler after all channels are registered so
+  // channelTypeMap is fully populated when setTriggerScheduler backfills old triggers.
+  // Seed __upgrade-check here too — needs channelInstances[0].channelType to be resolved.
+  const primaryAgentForTrigger = agentRegistry.runnableAgents()[0];
+  if (primaryAgentForTrigger?.triggerScheduler && primaryAgentForTrigger?.triggerManager) {
+    cmdHandler.setTriggerScheduler(primaryAgentForTrigger.triggerScheduler, primaryAgentForTrigger.triggerManager);
+  }
+
+  // Seed default __upgrade-check trigger (daily at random time 3:00~3:59)
+  // 用户可通过 /trigger cancel __upgrade-check 永久禁用（不会再自动重建）
+  if (!isLinkedInstall() && primaryAgentForTrigger?.triggerManager && primaryAgentForTrigger?.triggerScheduler) {
+    const mgr = primaryAgentForTrigger.triggerManager;
+    const sched = primaryAgentForTrigger.triggerScheduler;
+    const UPGRADE_TRIGGER_NAME = '__upgrade-check';
+    if (!mgr.getByName(UPGRADE_TRIGGER_NAME)) {
+      const { history } = mgr.listAll();
+      const wasCancelled = history.some(h => h.name === UPGRADE_TRIGGER_NAME && h.doneReason === 'cancelled');
+      if (!wasCancelled) {
+        const randomMinute = Math.floor(Math.random() * 60);
+        const cronExpr = `${randomMinute} 3 * * *`;
+        const firstChannelInst = channelInstances[0];
+        const firstChannel = firstChannelInst?.adapter?.channelName || 'system';
+        const trigger: import('./types.js').Trigger = {
+          id: crypto.randomUUID(),
+          name: UPGRADE_TRIGGER_NAME,
+          scheduleType: 'cron',
+          scheduleValue: cronExpr,
+          nextFireAt: calcNextFireAt('cron', cronExpr),
+          targetChannel: firstChannel,
+          targetChannelId: '__system__',
+          targetSessionStrategy: 'latest',
+          prompt: '检查 evolclaw 是否有新版本可用。执行 `npm view evolclaw version` 获取最新版本，与当前版本（执行 `evolclaw --version`）对比。如果有新版本，执行 /restart 进行升级。如果已是最新版本，无需任何操作。',
+          createdByPeerId: '__system__',
+          createdByChannel: '__system__',
+          fireCount: 0,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        };
+        try {
+          mgr.register(trigger);
+          sched.register(trigger);
+          logger.info(`[Trigger] Seeded default trigger: ${UPGRADE_TRIGGER_NAME} (cron ${cronExpr})`);
+        } catch (e) {
+          logger.warn(`[Trigger] Failed to seed ${UPGRADE_TRIGGER_NAME}: ${e}`);
+        }
+      }
+    }
   }
 
   // Bind adapters to their owning agents and mark running
@@ -705,6 +776,27 @@ async function main() {
       channelName: name,
       timestamp: Date.now()
     });
+  }
+
+  // ── 控制 AID（daemon 进程身份）：pureIdentity 接入 AUN，独立于 evolagent ──
+  let controlChannel: AUNChannel | undefined;
+  if (evolclawCfg.aid) {
+    controlChannel = new AUNChannel({
+      aid: evolclawCfg.aid,
+      agentName: evolclawCfg.aid,
+      channelName: 'control',
+      pureIdentity: true,
+      aunTrace: evolclawCfg.debug?.aunTrace ?? defaults.debug?.aunTrace,
+      aunSdkLog: evolclawCfg.debug?.aunSdkLog ?? defaults.debug?.aunSdkLog,
+    });
+    // connect() 失败不置空实例：AUNChannel 内部有无限重连（SDK auto_reconnect +
+    // scheduleReconnect），首连失败后台会自愈；保留实例供 status 显示 disconnected。
+    try {
+      await controlChannel.connect();
+      logger.info(`✓ 控制 AID 已连接: ${evolclawCfg.aid}`);
+    } catch (e: any) {
+      logger.warn(`控制 AID 首连失败（后台自动重连，不影响 daemon 主流程）: ${e?.message || e}`);
+    }
   }
 
   // 上线通知：延迟 1-3 秒后向 owner 发送上线消息（带 name + 工作目录）
@@ -829,8 +921,11 @@ async function main() {
         continue;
       }
       logger.info(`[Resume] Resuming session: ${session.id} (agent: ${evolName}::${baseagentName})`);
+      const parsedResumeKey = tryParseChannelKey(session.channel);
       const resumeMessage: Message = {
         channel: session.channel,
+        channelType: session.channelType || parsedResumeKey?.type,
+        selfAID: parsedResumeKey?.selfAID,
         channelId: session.channelId,
         content: '服务已重启，请继续之前未完成的任务。',
         timestamp: Date.now(),
@@ -905,6 +1000,9 @@ async function main() {
         errors: snap.lastHour.errors,
         avgResponseMs: snap.lastHour.avgResponseMs,
       },
+      controlAid: evolclawCfg.aid
+        ? { aid: evolclawCfg.aid, connected: controlChannel?.getAidState().status === 'connected' }
+        : undefined,
     };
   }, async (cmd, sessionId) => cmdHandler.handleCtl(cmd, sessionId));
 
@@ -1069,6 +1167,11 @@ async function main() {
     for (const inst of channelInstances) {
       const type = inst.channelType || inst.adapter.channelName;
       eventBus.publish({ type: 'channel:disconnected', channel: type, channelName: inst.adapter.channelName, reason: 'shutdown' });
+    }
+
+    // 断开控制 AID（daemon 进程身份）
+    if (controlChannel) {
+      try { await controlChannel.disconnect(); } catch { /* ignore */ }
     }
 
     sessionManager.close();

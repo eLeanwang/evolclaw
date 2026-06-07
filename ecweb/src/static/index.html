@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>EvolClaw Watch</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/style.css">
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+</head>
+<body>
+  <!-- 配对页 -->
+  <div id="pair-page" class="pair-page">
+    <div class="pair-box">
+      <h1>🔭 EvolClaw Watch</h1>
+      <p class="pair-hint">输入终端显示的 6 位配对码</p>
+      <input id="pair-input" type="text" inputmode="numeric" maxlength="6" placeholder="000000" autocomplete="off">
+      <button id="pair-btn">配对</button>
+      <div id="pair-error" class="pair-error"></div>
+    </div>
+  </div>
+
+  <!-- 主面板 -->
+  <div id="app" class="app" style="display:none">
+    <header class="topbar">
+      <span class="brand">🔭 EvolClaw Watch</span>
+      <nav class="tabs">
+        <button class="tab active" data-view="aid">AID</button>
+        <button class="tab" data-view="msg">Messages</button>
+        <button class="tab" data-view="session">Sessions</button>
+        <button class="tab" data-view="cache">Cache</button>
+        <button class="tab" data-view="usage">Usage</button>
+      </nav>
+      <span id="today-cost" class="today-cost"></span>
+      <span style="flex:1"></span>
+      <span class="build-ts" style="font-size:10px;color:var(--dim)" title="构建时间">2026-06-07 21:55</span>
+      <span id="conn-status" class="conn-status">连接中…</span>
+      <button id="theme-btn" class="theme-btn" title="切换主题">🌗</button>
+      <button id="logout-btn" class="logout-btn" title="退出配对">退出</button>
+    </header>
+
+    <main class="content">
+      <section id="view-aid" class="view active"></section>
+      <section id="view-msg" class="view">
+        <div class="msg-layout">
+          <div id="msg-aids" class="msg-col msg-aids"></div>
+          <div id="msg-peers" class="msg-col msg-peers"></div>
+          <div id="msg-stream" class="msg-col msg-stream"></div>
+        </div>
+      </section>
+      <section id="view-session" class="view">
+        <div class="sess-layout">
+          <div id="sess-list" class="sess-col sess-list"></div>
+          <div id="sess-detail" class="sess-col sess-detail"></div>
+        </div>
+      </section>
+      <section id="view-cache" class="view"></section>
+      <section id="view-usage" class="view">
+        <div class="usage-layout">
+          <!-- 子 Tab：Dashboard / Explorer -->
+          <div class="usage-subtabs">
+            <button class="usage-subtab active" data-subview="dashboard">Dashboard</button>
+            <button class="usage-subtab" data-subview="explorer">Explorer</button>
+          </div>
+
+          <!-- Dashboard 面板 -->
+          <div id="usage-dashboard" class="usage-subpanel active">
+            <div class="usage-cards" id="usage-cards"></div>
+            <div class="usage-chart-row">
+              <div id="usage-hourly-chart" class="usage-chart"></div>
+              <div id="usage-model-chart" class="usage-chart-sm"></div>
+            </div>
+            <div class="usage-table-section">
+              <h3>Top Peers (Today)</h3>
+              <table id="usage-top-peers" class="usage-table"></table>
+            </div>
+          </div>
+
+          <!-- Explorer 面板 -->
+          <div id="usage-explorer" class="usage-subpanel">
+            <div class="exp-layout">
+              <!-- 左侧列表 -->
+              <div class="exp-sidebar">
+                <div class="exp-sidebar-group">
+                  <div class="exp-sidebar-title">Agents</div>
+                  <div id="exp-agent-list"></div>
+                </div>
+                <div class="exp-sidebar-group">
+                  <div class="exp-sidebar-title">Peers</div>
+                  <div id="exp-peer-list"></div>
+                </div>
+              </div>
+              <!-- 右侧详情 -->
+              <div class="exp-detail">
+                <div id="exp-detail-header" class="exp-detail-header">
+                  <span id="exp-selected-name">请从左侧选择 Agent 或 Peer</span>
+                </div>
+                <div id="exp-detail-cards" class="usage-cards" style="display:none"></div>
+                <div class="explorer-filters">
+                  <label>From <input type="date" id="exp-from"></label>
+                  <label>To <input type="date" id="exp-to"></label>
+                  <label>Model <input type="text" id="exp-model" placeholder="model-id"></label>
+                  <select id="exp-granularity">
+                    <option value="hour">Hour</option>
+                    <option value="day" selected>Day</option>
+                    <option value="week">Week</option>
+                    <option value="month">Month</option>
+                  </select>
+                  <button id="exp-query-btn">Query</button>
+                </div>
+                <div id="usage-explorer-chart" class="usage-chart" style="height:260px"></div>
+                <div class="usage-table-section" style="margin-top:12px">
+                  <h3>Results</h3>
+                  <table id="usage-explorer-table" class="usage-table"></table>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

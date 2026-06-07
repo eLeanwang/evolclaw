@@ -13,7 +13,6 @@ EvolClaw 是一个轻量级 AI Agent 网关系统。它为 Claude Code / Codex �
 - 👥 **双模式会话**：多用户私聊会话隔离，群聊会话共享，满足不同协作场景
 - 🌐 **多渠道接入**：Channel Adapter 模式，飞书 + 微信 + 钉钉 + QQ频道 + 企业微信 + AUN 网络
 - 🤖 **Agent 间互联**：通过 AUN 网络，你的 Agent 可被其他 Agent 发现和调用
-- 🖥️ **终端 TUI 客户端**：`evolclaw tui` 直接在终端与远程 Agent 对话，无需 IM
 - 🔐 **分层权限**：三级权限体系（user/admin/owner），多用户安全隔离
 - 🛠️ **Agent 自管理**：Agent 可通过 CLI 命令自主管理运行时（查看状态、切换模型、调整配置等）
 - 📦 **项目搬家**：`evolclaw mv` 一键迁移项目目录，保留 Claude/Codex/EvolClaw 全部会话历史
@@ -29,7 +28,6 @@ EvolClaw 是一个轻量级 AI Agent 网关系统。它为 Claude Code / Codex �
 
 - **通勤路上**：手机打开飞书，继续昨晚的代码 review，到公司无缝切回终端
 - **会议间隙**：微信快速问一句「这个接口的返回格式是什么」，Agent 直接查代码回复
-- **终端直连**：`evolclaw tui` 在任意终端直接与远程 Agent 对话，无需打开 IM
 - **Agent 协作**：通过 AUN 网络，让你的 Agent 被其他 Agent 调用，组成分布式协作
 - **外出离开工位**：不带电脑也能通过 IM 给 Agent 下达任务，回来看结果
 - **团队协作**：拉个飞书群，成员共享同一个 Agent 会话，一起讨论和调试
@@ -170,7 +168,6 @@ evolclaw stop       # 停止服务
 evolclaw restart    # 重启服务
 evolclaw status     # 查看状态
 evolclaw logs       # 查看日志（tail -f）
-evolclaw tui        # 启动 AUN TUI 终端客户端
 evolclaw agent      # 管理 EvolAgent（list / show / new / reload）
 evolclaw mv <old> <new>  # 项目搬家（保留全部会话）
 evolclaw diagnose   # 诊断启动环境
@@ -270,6 +267,32 @@ evolclaw/
 - `/restart` - 重启服务（自愈机制）
 - `/repair` - 检查并修复会话
 
+### ⚠️ 进程级 menu 操作鉴权（v3.2 Breaking）
+
+进程级 menu 操作（`/system restart/upgrade`、`/agent` agent 生命周期管理）的鉴权已迁移到
+`evolclaw.json` 顶层 `owners` 字段（v3.2 起，不再读 `agents/defaults.json`）。
+升级后**必须**在 `evolclaw.json` 配置 `owners`，否则这些操作一律返回 `FORBIDDEN`（daemon 启动时也会 warn 提示）。
+
+```json
+{
+  "owners": ["eleans-2022.agentid.pub"]
+}
+```
+
+`evolclaw init` 交互流程会在生成控制 AID 后提示录入 owners（可跳过后手动编辑）。
+
+- **`owners`**：进程级管理者 AID 名单。可执行 `/system`（重启/升级）与 `/agent`
+  （create / delete / enable / disable / list / show）。
+- 关系级的 `/trigger`（set / cancel / update / list）仍走 channel 角色（owner/admin）+ scoped 鉴权，**不**受 `owners` 影响。
+- `/agent create` 为「受理即返回」：立即回 `{ accepted: true, aid }`，后台跑完整创建流程并把各
+  环节写入 `agents/<aid>/create-status.json`；客户端用 `menu.query name=agent args={aid}` 轮询
+  `createProgress.status` 直到 `ready` / `failed`。
+
+### 控制 AID（control AID）
+
+v3.2 新增进程级身份标识。启动时自动生成 `ec+5位数字.agentid.pub` 格式的控制 AID，以
+`pureIdentity` 模式接入 AUN 网络（跳过 evolagent onboarding）。`evolclaw status` 可查看控制 AID 连接状态。
+
 ## 技术栈
 
 - **运行时**：Node.js >= 22 + TypeScript（ES modules）
@@ -281,7 +304,6 @@ evolclaw/
 ## TODO
 
 - [x] AUN Mesh 网络通道接入
-- [x] TUI 终端客户端（`evolclaw tui`）
 - [x] 项目搬家工具（`evolclaw mv`）
 - [x] 手动授权支持（文本回复 + 飞书卡片）
 - [x] 自动授权可配置（自动放行/自动拒绝）
