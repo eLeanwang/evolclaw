@@ -180,7 +180,50 @@ export function queryAggregated(
   } else {
     sorted.sort((a, b) => a[0].localeCompare(b[0]));
   }
-  return sorted.map(([, r]) => _enrichRow(evolclawHome, r));
+
+  // ── 方案 B：按 period + model + billing_fn 分组精确计费 ──
+  // 辅助 SQL：保留 model/billing_fn 维度用于逐组调用 calcCost
+  const costSql = groupCol
+    ? `SELECT ${groupCol} AS period, model, COALESCE(billing_fn,'') AS billing_fn,
+         SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens,
+         SUM(cache_creation_tokens) AS cache_creation_tokens, SUM(cache_read_tokens) AS cache_read_tokens,
+         SUM(COALESCE(image_tokens,0)) AS image_tokens
+       FROM usage_events ${clause}
+       GROUP BY ${groupCol}, model, billing_fn`
+    : `SELECT strftime('${GRAN_FMT[granularity] || GRAN_FMT.day}', ts/1000, 'unixepoch', 'localtime') AS period,
+         model, COALESCE(billing_fn,'') AS billing_fn,
+         SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens,
+         SUM(cache_creation_tokens) AS cache_creation_tokens, SUM(cache_read_tokens) AS cache_read_tokens,
+         SUM(COALESCE(image_tokens,0)) AS image_tokens
+       FROM usage_events ${clause}
+       GROUP BY period, model, billing_fn`;
+
+  const costMap = new Map<string, { usd: number; cny: number }>();
+  for (const dbPath of _relevantDbs(evolclawHome, filter)) {
+    const db = openReadonlyDb(dbPath);
+    if (!db) continue;
+    try {
+      const rows: any[] = db.prepare(costSql).all(...params);
+      for (const r of rows) {
+        const cost = calcCost(evolclawHome, {
+          model: r.model || 'unknown',
+          billing_fn: r.billing_fn || 'per_token_v1',
+          ts: Date.now(),
+          input_tokens: r.input_tokens ?? 0,
+          output_tokens: r.output_tokens ?? 0,
+          cache_creation_tokens: r.cache_creation_tokens ?? 0,
+          cache_read_tokens: r.cache_read_tokens ?? 0,
+          image_tokens: r.image_tokens ?? 0,
+        });
+        const existing = costMap.get(r.period) ?? { usd: 0, cny: 0 };
+        existing.usd += cost.usd ?? 0;
+        existing.cny += cost.cny ?? 0;
+        costMap.set(r.period, existing);
+      }
+    } finally { db.close(); }
+  }
+
+  return sorted.map(([, r]) => _enrichRow(evolclawHome, r, costMap.get(r.period)));
 }
 
 /** 查今日概览（单行汇总）。 */
@@ -271,9 +314,7 @@ export function queryTopModels(evolclawHome: string, filter: StatsFilter, limit 
   return Array.from(map.values()).sort((a, b) => b.total_tokens - a.total_tokens).slice(0, limit);
 }
 
-function _enrichRow(evolclawHome: string, r: any): AggRow {
-  // 费用：无法在 SQL 里按 billing_fn 分组计算，此处做近似（按主模型计）
-  // 精确费用需 querySessionTurns 逐行算，此处 aggregated 只做估算
+function _enrichRow(evolclawHome: string, r: any, cost?: { usd: number; cny: number }): AggRow {
   const totalIn = (r.input_tokens ?? 0) + (r.cache_read_tokens ?? 0);
   const cacheHitRate = totalIn > 0 ? (r.cache_read_tokens ?? 0) / totalIn : 0;
   return {
@@ -288,8 +329,8 @@ function _enrichRow(evolclawHome: string, r: any): AggRow {
     total_context_tokens: r.total_context_tokens ?? 0,
     turns: r.turns ?? 0,
     call_count: r.call_count ?? 0,
-    usd: 0, // aggregated 视图不算费用（需逐行算），调用方按需用 querySessionTurns
-    cny: 0,
+    usd: cost?.usd ?? 0,
+    cny: cost?.cny ?? 0,
     cache_hit_rate: cacheHitRate,
   };
 }
