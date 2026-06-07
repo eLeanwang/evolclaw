@@ -20,6 +20,7 @@ import { getPackageRoot, resolveRoot, resolvePaths } from '../../paths.js';
 import { renderKitSections, type KitRenderContext } from '../../agents/kit-renderer.js';
 import { renderMessageBody, type RenderMessageResult } from '../../agents/message-renderer.js';
 import { consumeHints, hintsToSubMessages, composeHintFallback } from './pending-hints.js';
+import { resolveResponseDepth as computeResponseDepth } from './response-depth.js';
 import type { SubMessage } from '../../types.js';
 import { normalizeBaseagent } from '../../agents/baseagent-normalize.js';
 import type { InteractionRouter } from '../interaction-router.js';
@@ -1608,58 +1609,27 @@ export class MessageProcessor {
    * 同时更新 session.metadata 中的 topicRounds/lastTopicHash（话题追踪状态）。
    */
   private async resolveResponseDepth(message: Message, session: Session): Promise<ResponseDepth> {
-    // 仅群聊走深度决策；私聊一律 standard
-    if (message.chatType !== 'group') return 'standard';
+    const result = computeResponseDepth({
+      chatType: message.chatType,
+      content: message.content,
+      selfAid: session.selfAID || message.selfAID,
+      mentionAids: message.mentionAids,
+      dispatch: session.metadata?.dispatchMode || message.dispatchMode,
+      topicRounds: session.metadata?.topicRounds ?? 0,
+      lastTopicHash: session.metadata?.lastTopicHash,
+    });
 
-    const selfAid = session.selfAID || message.selfAID;
-    const content = message.content.trim();
-    const dispatch = session.metadata?.dispatchMode || message.dispatchMode;
-
-    // ── 话题追踪：更新 topicRounds ──
-    // 用消息前 20 字符的 hash 做粗粒度话题指纹
-    const topicSlice = content.slice(0, 20);
-    const topicHash = crypto.createHash('md5').update(topicSlice).digest('hex').slice(0, 8);
-    const prevHash = session.metadata?.lastTopicHash;
-    let topicRounds = session.metadata?.topicRounds ?? 0;
-
-    if (prevHash && prevHash === topicHash) {
-      topicRounds++;
-    } else {
-      topicRounds = 1;
+    // 持久化话题追踪状态（仅群聊时有意义）
+    if (message.chatType === 'group') {
+      session.metadata = {
+        ...(session.metadata || {}),
+        topicRounds: result.topicRounds,
+        lastTopicHash: result.topicHash,
+      };
+      await this.sessionManager.updateSession(session.id, { metadata: session.metadata });
     }
 
-    // 持久化话题追踪状态
-    session.metadata = {
-      ...(session.metadata || {}),
-      topicRounds,
-      lastTopicHash: topicHash,
-    };
-    await this.sessionManager.updateSession(session.id, { metadata: session.metadata });
-
-    // ── 判断因子 ──
-    const isMentioned = !!(selfAid && message.mentionAids?.includes(selfAid));
-    const isQuestion = /[？?]\s*$/.test(content) || /^(what|how|why|when|where|who|which|请问|怎么|为什么|什么|如何|能不能|可以)/i.test(content);
-    const isShort = content.length <= 30;
-
-    // ── 决策逻辑 ──
-
-    // 被@：至少 standard；话题深入则升 deep
-    if (isMentioned) {
-      if (topicRounds >= 3) return 'deep';
-      return 'standard';
-    }
-
-    // broadcast 模式：短消息 + 非问句 → lightweight
-    if (dispatch === 'broadcast') {
-      if (isShort && !isQuestion) return 'lightweight';
-      if (topicRounds >= 3) return 'deep';
-      return 'standard';
-    }
-
-    // mention 模式下到达这里说明已通过 dispatch 过滤（被@才入队），
-    // 等同于 isMentioned === true 的分支。兜底 standard。
-    if (topicRounds >= 3) return 'deep';
-    return 'standard';
+    return result.depth;
   }
 
   /**
