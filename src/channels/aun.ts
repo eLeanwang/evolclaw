@@ -1232,11 +1232,12 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     const msg = data as Record<string, any>;
 
     const groupId = msg.group_id ?? '';
-    const senderAid = msg.sender_aid ?? '';
+    const senderAid = msg.sender_aid || msg.from_aid || msg.from || '';
     const payload = msg.payload ?? '';
     const text = this.extractTextPayload(payload, groupId, senderAid);
     const threadId = typeof payload === 'object' && payload !== null ? (payload as any).thread_id : undefined;
     const messageId = msg.message_id ?? '';
+
     const seq = msg.seq;
 
     // Observer forward (inbound)：群聊消息在所有过滤之前转发原始明文 payload。
