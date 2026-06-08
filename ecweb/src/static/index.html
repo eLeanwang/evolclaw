@@ -59,12 +59,13 @@
         <div class="usage-layout">
           <!-- 子 Tab：Dashboard / Explorer -->
           <div class="usage-subtabs">
-            <button class="usage-subtab active" data-subview="dashboard">Dashboard</button>
+            <button class="usage-subtab active" data-subview="overview">Overview</button>
+            <button class="usage-subtab" data-subview="dashboard">Dashboard</button>
             <button class="usage-subtab" data-subview="explorer">Explorer</button>
           </div>
 
           <!-- Dashboard 面板 -->
-          <div id="usage-dashboard" class="usage-subpanel active">
+          <div id="usage-dashboard" class="usage-subpanel">
             <div class="usage-cards" id="usage-cards"></div>
             <div class="usage-chart-row">
               <div id="usage-hourly-chart" class="usage-chart"></div>
@@ -73,6 +74,15 @@
             <div class="usage-table-section">
               <h3>Top Peers (Today)</h3>
               <table id="usage-top-peers" class="usage-table"></table>
+            </div>
+          </div>
+
+          <!-- Overview 面板 -->
+          <div id="usage-overview" class="usage-subpanel active">
+            <div id="ov-cards" class="usage-cards"></div>
+            <div class="usage-table-section" style="margin-top:4px">
+              <h3>按 Agent 汇总（全时段）</h3>
+              <table id="ov-agent-table" class="usage-table"></table>
             </div>
           </div>
 

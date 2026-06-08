@@ -61,6 +61,7 @@ const nonMaxEfforts = allEfforts.filter(e => e !== 'max' && e !== 'xhigh') as re
 const CLI_EXEC_WHITELIST: Record<string, '*' | Set<string>> = {
   status:  '*',
   model:   '*',
+  stats:   '*',
   agent:   new Set(['list', 'show', 'get']),
   aid:     new Set(['list', 'show', 'lookup']),
   storage: new Set(['ls', 'quota']),

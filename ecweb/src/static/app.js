@@ -767,6 +767,73 @@ async function loadUsageDashboard() {
   }
 }
 
+// ── Usage Overview（全时段总览）──
+async function loadUsageOverview() {
+  let data;
+  try {
+    const resp = await fetch('/api/stats/overview', {
+      headers: { Authorization: 'Bearer ' + localStorage.getItem(TOKEN_KEY) }
+    });
+    data = resp.ok ? await resp.json() : null;
+  } catch { data = null; }
+
+  const ts = (data && data.token_stats && data.token_stats.all_time) ? data.token_stats.all_time
+    : { input_tokens: 0, output_tokens: 0, cache_creation_tokens: 0, cache_read_tokens: 0, call_count: 0, cost_usd: 0, cost_cny: 0 };
+  const sessionCount = (data && data.session_count) || 0;
+  const msgIn = (data && data.msg_in) || 0;
+  const msgOut = (data && data.msg_out) || 0;
+  const totalIn = ts.input_tokens + ts.cache_read_tokens;
+  const hitRate = totalIn > 0 ? (ts.cache_read_tokens / totalIn) * 100 : 0;
+
+  const cardsEl = $('#ov-cards');
+  if (cardsEl) {
+    cardsEl.innerHTML = [
+      ovCard(sessionCount, '会话数'),
+      ovCard(msgIn, '收到消息'),
+      ovCard(msgOut, '发出消息'),
+      ovCard(ts.call_count, '模型调用'),
+      ovCard(fmtTokens(ts.input_tokens), '输入 Token'),
+      ovCard(fmtTokens(ts.output_tokens), '输出 Token'),
+      ovCard(fmtTokens(ts.cache_creation_tokens), '缓存创建'),
+      ovCard(fmtTokens(ts.cache_read_tokens), '缓存命中'),
+      ovCard(hitRate.toFixed(1) + '%', '缓存命中率'),
+      ovCard(fmtCost(ts.cost_usd, ts.cost_cny), '总花费'),
+    ].join('');
+  }
+
+  const agentTbl = $('#ov-agent-table');
+  const agents = (data && data.token_stats && data.token_stats.by_agent) || [];
+  if (agentTbl) {
+    if (!agents.length) {
+      agentTbl.innerHTML = '<tbody><tr><td>暂无数据</td></tr></tbody>';
+    } else {
+      agentTbl.innerHTML =
+        '<thead><tr><th>Agent</th><th>调用</th><th>输入</th><th>输出</th><th>缓存创建</th><th>缓存命中</th><th>花费</th></tr></thead>' +
+        '<tbody>' + agents.map(function(a) {
+          var name = a.agent_aid ? a.agent_aid.split('.')[0] : '(unknown)';
+          return '<tr><td title="' + esc(a.agent_aid) + '">' + esc(name) + '</td>' +
+            '<td>' + a.call_count + '</td>' +
+            '<td>' + fmtTokens(a.input_tokens) + '</td>' +
+            '<td>' + fmtTokens(a.output_tokens) + '</td>' +
+            '<td>' + fmtTokens(a.cache_creation_tokens) + '</td>' +
+            '<td>' + fmtTokens(a.cache_read_tokens) + '</td>' +
+            '<td>' + fmtCost(a.cost_usd, a.cost_cny) + '</td></tr>';
+        }).join('') + '</tbody>';
+    }
+  }
+}
+
+function ovCard(value, label) {
+  return '<div class="usage-card"><div class="card-value">' + value + '</div><div class="card-label">' + label + '</div></div>';
+}
+
+function fmtCost(usd, cny) {
+  var parts = [];
+  if (usd > 0) parts.push('$' + (usd < 0.01 ? usd.toFixed(4) : usd.toFixed(2)));
+  if (cny > 0) parts.push('¥' + (cny < 0.01 ? cny.toFixed(4) : cny.toFixed(2)));
+  return parts.length ? parts.join(' / ') : '$0';
+}
+
 // ── Usage subtab switching ──
 function initUsageSubtabs() {
   var btns = document.querySelectorAll('.usage-subtab');
@@ -781,7 +848,9 @@ function initUsageSubtabs() {
       });
       var panel = $('#usage-' + target);
       if (panel) { panel.classList.add('active'); panel.style.display = ''; }
-      if (target === 'explorer') initExplorer();
+      if (target === 'overview') loadUsageOverview();
+      else if (target === 'dashboard') loadUsageDashboard();
+      else if (target === 'explorer') initExplorer();
     });
   });
 }
@@ -957,6 +1026,7 @@ window.addEventListener('DOMContentLoaded', () => {
     showApp();
     startApp();
     loadUsageDashboard();
+    loadUsageOverview();
     initUsageSubtabs();
   } else {
     showPairPage();

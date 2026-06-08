@@ -274,6 +274,62 @@ export function queryStatsByPeer(params: {
   } finally { db.close(); }
 }
 
+export interface OverviewStatsResult {
+  all_time: {
+    input_tokens: number;
+    output_tokens: number;
+    cache_creation_tokens: number;
+    cache_read_tokens: number;
+    call_count: number;
+    cost_usd: number;
+    cost_cny: number;
+  };
+  by_agent: Array<{
+    agent_aid: string;
+    input_tokens: number;
+    output_tokens: number;
+    cache_creation_tokens: number;
+    cache_read_tokens: number;
+    call_count: number;
+    cost_usd: number;
+    cost_cny: number;
+  }>;
+}
+
+export function queryStatsOverview(): OverviewStatsResult | null {
+  const db = openDb();
+  if (!db) return null;
+  try {
+    const allRows: any[] = db.prepare('SELECT * FROM usage_events').all();
+    let totIn = 0, totOut = 0, totCc = 0, totCr = 0, totCalls = 0, totUsd = 0, totCny = 0;
+    const byAgent = new Map<string, { input_tokens: number; output_tokens: number; cache_creation_tokens: number; cache_read_tokens: number; call_count: number; cost_usd: number; cost_cny: number }>();
+    for (const r of allRows) {
+      totIn += r.input_tokens ?? 0;
+      totOut += r.output_tokens ?? 0;
+      totCc += r.cache_creation_tokens ?? 0;
+      totCr += r.cache_read_tokens ?? 0;
+      totCalls++;
+      const { usd, cny } = _calcRowCost(r);
+      totUsd += usd; totCny += cny;
+      const aid = r.agent_aid || '';
+      let a = byAgent.get(aid);
+      if (!a) { a = { input_tokens: 0, output_tokens: 0, cache_creation_tokens: 0, cache_read_tokens: 0, call_count: 0, cost_usd: 0, cost_cny: 0 }; byAgent.set(aid, a); }
+      a.input_tokens += r.input_tokens ?? 0;
+      a.output_tokens += r.output_tokens ?? 0;
+      a.cache_creation_tokens += r.cache_creation_tokens ?? 0;
+      a.cache_read_tokens += r.cache_read_tokens ?? 0;
+      a.call_count++;
+      a.cost_usd += usd; a.cost_cny += cny;
+    }
+    return {
+      all_time: { input_tokens: totIn, output_tokens: totOut, cache_creation_tokens: totCc, cache_read_tokens: totCr, call_count: totCalls, cost_usd: totUsd, cost_cny: totCny },
+      by_agent: Array.from(byAgent.entries())
+        .map(([agent_aid, v]) => ({ agent_aid, ...v }))
+        .sort((a, b) => (b.input_tokens + b.output_tokens) - (a.input_tokens + a.output_tokens)),
+    };
+  } finally { db.close(); }
+}
+
 /** 按 agent 分组聚合（支持时间范围过滤）。 */
 export function queryStatsByAgent(params: {
   from_ts?: number; to_ts?: number; limit?: number;
