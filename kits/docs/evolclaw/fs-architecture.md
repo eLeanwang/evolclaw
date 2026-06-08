@@ -26,30 +26,23 @@ AID 同时是三样东西：**密码学身份**、**Linux 主机**、**Web 主�
 
 继承 `scp`/`rsync` 的 `host:path` 范式：`:` 左边是主机（AID），右边是该主机上的 Unix 风格绝对路径。本地路径就是不带 `:` 的普通路径。
 
-### 1.2 三种主机
+### 1.2 两种主机
 
 | 类型 | 写法 | 解析方式 | 后端 |
 |------|------|---------|------|
 | 个人 AID | `alice.agentid.pub:/docs/f.txt` | 泛域名解析 | personal storage |
-| 命名群 | `g-team.agentid.pub:/设计/x.png` | 泛域名解析（与普通 AID 无异） | group resource |
-| 数字群 | `group.agentid.pub:/12345/x.png` | 群固定域名服务器 | group resource |
+| 群 AID | `g-team.agentid.pub:/设计/x.png` | 泛域名解析（与普通 AID 无异） | group resource |
 
-### 1.3 数字群与命名群的关系
+寻址模型里**只有 AID 这一种主机**——群也是一个 AID，写法和个人 AID 完全一致，无需任何特殊语法。是个人还是群，由后端路由按 `type` 字段判定（见 1.4），对寻址透明。
 
-群分两种，但底层逻辑统一在**数字群**上：
+> **实现注记（不对外暴露）**：AUN 底层群可能以固定域名 + 群编号的形式存在（如 `group.ap:/12345/...`）。CLI 在**归一化层**把这种形式统一映射为群 AID 处理——`group.ap:/12345/<path>` 等价于该群 AID 的 `:/<path>`。**这是实现细节。归一化是双向的**：
+>
+> - **入向**：用户/agent 只用群 AID 写法输入，CLI 内部解析时若遇到底层数字群形式也接受并归一。
+> - **出向（关键）**：CLI 的**所有输出**——`ls`/`df` 结果、错误信息、`ln -l` 的链接目标——必须把底层数字群形式转换回群 AID 再显示，**绝不让 `group.ap:/12345/...` 这种形式泄漏到任何对外输出**。
+>
+> 归一化点放在 CLI 的**输出序列化前的最后一道**（结果离开路由层、进入展示前统一过一遍映射），保证「群 ID 就是一个 AID，而不是 `aid/path`」这条对外契约处处成立。使用手册（`fs.md`）和 CLI 命令行中**一律只出现群 AID 写法**，不出现「数字群」概念。
 
-- **命名群** `g-team.agentid.pub`：和普通 AID 完全一样，走泛域名解析，本身就是一个 AID。
-- **数字群** `group.agentid.pub/12345`：`group.agentid.pub` 是群专用固定域名（可换任意 AUN 网关域名），`12345` 是群编号。
-
-关键等价关系：
-
-```
-group.agentid.pub:/12345/<path>   ≡   12345.agentid.pub:/<path>
-```
-
-即「`group.ap` 这台主机下的 `/12345` 路径」等效映射到「`12345.agentid.pub` 这台独立主机的根」。两种写法指向同一份数据，CLI 内部归一化处理。
-
-### 1.4 操作者身份（--as）
+### 1.3 操作者身份（--as）
 
 `ec fs` 是一个 CLI 工具，任何外部程序都能调用，**进程本身没有「当前登录用户」的概念**。所以每条命令都必须知道「是谁在操作」——这个身份用来做密码学鉴权、权限判定、分享/授权归属。
 
@@ -67,9 +60,11 @@ ec fs cp --as alice.agentid.pub  ./f.txt  alice.agentid.pub:/private/f.txt
 
 未设置任何来源时报错退出，提示使用 `--as`。
 
-### 1.5 后端路由判定（CLI 内部）
+> **设计文档 vs 使用手册**：`--as` 的两种来源和优先级是**实现契约**，必须在本设计文档讲清。但面向 agent 的使用手册（`fs.md`）里**一律省略 `--as`**——agent 会话内 `EVOLCLAW_SELF_AID` 已由 daemon 注入，手册中的示例不写 `--as`，避免大模型纠结「这次该不该带」。仅当需要跨身份操作（罕见）时手册才提一句可显式 `--as`。
 
-确定操作者后，CLI 需要知道目标 AID 是个人还是群，以路由到对应后端。判定**不靠路径启发式**（不去猜「首段是不是数字」或试探 `group.get`），而是查目标 AID 的 **`agent.md` `type` 字段**——泛域名服务器据此字段判断主体类型并响应对应服务。
+### 1.4 后端路由判定（CLI 内部）
+
+确定操作者后，CLI 需要知道目标 AID 是个人还是群，以路由到对应后端。判定**不靠路径启发式**（不去猜首段、不试探），而是查目标 AID 的 **`agent.md` `type` 字段**——泛域名服务器据此字段判断主体类型并响应对应服务。
 
 `type` 的取值与路由：
 
@@ -78,17 +73,15 @@ ec fs cp --as alice.agentid.pub  ./f.txt  alice.agentid.pub:/private/f.txt
 | `group` | 群 | 群 resource |
 | `human` | 人类 | personal storage |
 | `agent` | AI agent | personal storage |
-| `host` | 非人非 agent 的节点（程序、嵌入式软件、evolclaw 自身等） | personal storage |
+| `node` | 非人非 agent 的 AUN 节点（程序、嵌入式软件、evolclaw 自身等） | personal storage |
 
-`host` 在文件系统语境下与个人 storage **行为完全一致**——它只是「既不是人也不是 agent」的 AUN 节点（如一段程序、嵌入式设备、evolclaw 进程本身的 AID），存储模型和个人 AID 没有区别。除 `group` 外的所有类型都走 personal storage。
+`node` 在文件系统语境下与个人 storage **行为完全一致**——它只是「既不是人也不是 agent」的 AUN 节点（如一段程序、嵌入式设备、evolclaw 进程本身的 AID），存储模型和个人 AID 没有区别。除 `group` 外的所有类型都走 personal storage。
 
 判定流程：
 
 1. 解析目标 AID，取其 `agent.md` 的 `type` 字段
-2. `type == group` → 群 resource；数字群 `group.ap:/<id>/...` 形式下，路径首段为 group_id
-3. 其余类型（`human`/`agent`/`host`） → personal storage
-
-> 数字群与命名群的等价（`group.ap:/12345/` ≡ `12345.agentid.pub:/`）只是寻址写法的归一化，与类型判定无关——两种写法解析到的都是同一个 `type==group` 的 AID。
+2. `type == group` → 群 resource
+3. 其余类型（`human`/`agent`/`node`） → personal storage
 
 ---
 
@@ -130,7 +123,13 @@ alice.agentid.pub:/
 | `/archive/` | admin + owner | 全体成员 |
 | `/public/` | 群主 + 管理员 + 群服务器接口 | 任何人（对外） |
 
-**`/share/` 是协作区，里面只放软链接，普通成员无权写。** 软链接的创建与重指向只能由群主/管理员、或群服务器（经 AUN SDK 的 `collab.*` 接口调用群服务器 RPC）来完成；普通成员对 `/share/` 只读。真实文件数据仍在各成员的 `/memberdata/<aid>/` 卷里，`/share/` 只持有指向它们的软链接 + 版本号。
+**`/share/` 是应用协作层管理的只读区。** 对普通成员只读——`ls -l` 会显示对当前操作者无写权限，任何写操作（`cp`、`mv`、`mkdir` 等）均报错并给出指引：
+
+```
+✗ /share 是协作区，请使用 ec collab 命令操作（如 ec collab submit）
+```
+
+`/share/` 内的写入完全由应用协作层（`ec collab`）定义和管理，文件层对其内部结构无假设。当前协作机制的实现细节（软链接 + 版本号台账）见第 6 节。
 
 **`/public/` 是群对外 Web 根**，写入同样限群主/管理员 + 群服务器（群服务器暴露专门接口代写），对外任何人可读。
 
@@ -250,9 +249,23 @@ ec fs ln -s alice.agentid.pub:/private/identity/agent.md \
 软链接是「指向另一个路径的小文件」，访问时自动跳转到真实文件（类比快捷方式）。它是本系统**对外暴露、稳定别名、群协作**三件事的统一底层原语。
 
 ```bash
-ec fs ln -s <真实路径> <链接路径>      # 源在前，链接在后（同 cp/mv 方向）
+ec fs ln -s <真实路径> <链接路径>      # 真实路径在前，链接路径在后（同 cp/mv 方向）
 ec fs ln -sf <真实路径> <链接路径>     # -f 覆盖已有软链（原子重指向）
 ```
+
+**参数顺序：真实文件在前，软链在后**——和 `cp src dst`、Linux `ln -s target link` 完全一致。这是最容易写反的地方，务必对照：
+
+```bash
+# ✅ 正确：真实文件在前，软链在后
+ec fs ln -s alice.agentid.pub:/private/identity/agent.md \
+            alice.agentid.pub:/public/agent.md
+
+# ❌ 错误：方向反了——会把真实文件当成链接去创建
+ec fs ln -s alice.agentid.pub:/public/agent.md \
+            alice.agentid.pub:/private/identity/agent.md
+```
+
+> 使用手册（`fs.md`）里同样要保留这组 ✅/❌ 例子并强调一次——看例子比读解释更不容易写反。
 
 三种用途，同一个机制：
 
@@ -344,6 +357,7 @@ g-team.agentid.pub:/
 | `collab.history(group, path)` | 查版本历史 | 读 c 的版本台账，返回各版本的 `{version, author, target, time}` |
 | `collab.getVersion(group, path, version)` | 读指定历史版本 | 按台账定位该版本的 b，返回其内容 |
 | `collab.diff(group, path, vA, vB)` | 比较两个版本 | 取 vA、vB 两个 b 的内容做差异比较 |
+| `collab.merge(group, path, localFile)` | 三方合并当前权威版本与本地草稿 | base=你的基线 b，ours=localFile，theirs=当前 c 指向的 b，输出合并结果（冲突用 `<<<<<<<` 标记） |
 
 `submit` 的版本检查（乐观锁）：
 - 把 `localFile` 写到提交者自己的 `memberdata/<self>/<doc>/vN.md`（**永不失败**）
@@ -406,7 +420,7 @@ ec fs chmod g-team.agentid.pub:/share/design.md --allow-roles admin
 | 命令 | Linux 语义 | ec fs 用法 |
 |------|-----------|-----------|
 | `ls` | 列目录 | `ec fs ls <AID>:<path>` |
-| `cat` | 看文件 | `ec fs cat <AID>:<path>` |
+| `cat` | 看文件 | `ec fs cat <AID>:<path>`（二进制返回元数据，见 7.1） |
 | `cp` | 复制（上传/下载/跨主机） | `ec fs cp <src> <dst>` |
 | `mv` | 移动/改名 | `ec fs mv <AID>:<old> <AID>:<new>` |
 | `rm` | 删除 | `ec fs rm <AID>:<path>` |
@@ -418,15 +432,52 @@ ec fs chmod g-team.agentid.pub:/share/design.md --allow-roles admin
 | `mount` | 挂载卷 | `ec fs mount <AID>:<path> --volume <id>` |
 | `umount` | 卸载卷 | `ec fs umount <AID>:<path>` |
 
+> `mount`/`umount` 在文件层**专指卷挂载**（把远程卷挂到 AID 主机的某个目录，见第 3 节）——操作对象是 **AID 主机自身的文件系统**，是 Linux 文件命令的正统成员，故留在 `ec fs`。把整个 AID 主机挂成本地 OS 目录/盘符（sshfs 那种）操作对象是**你的本机**，是另一回事、另一命令集 `ec drive`，见第 14 节。判据：操作对象是「AID 主机的文件系统」就留在 `ec fs`，是「本机」就归 `ec drive`。
+
+### 7.1 cat 二进制文件的行为
+
+`cat` 文本文件直接返回内容。**`cat` 二进制文件不返回原始字节流**（会污染终端、对 agent 无意义），而是返回一份元数据，其中包含**文件头部字节的编码片段**，供判断文件格式（魔数）：
+
+```
+$ ec fs cat alice.agentid.pub:/private/app.zip
+{
+  "path": "alice.agentid.pub:/private/app.zip",
+  "size": 10485760,
+  "mime": "application/zip",
+  "binary": true,
+  "head": {
+    "encoding": "base64",
+    "bytes": 64,
+    "data": "UEsDBBQAAAAIA..."
+  },
+  "modified": "2026-06-01T12:00:00Z"
+}
+```
+
+`head.data` 是文件**前 N 字节**的编码（默认 base64）。要拿完整文件用 `ec fs cp` 下载，不要用 `cat`。
+
+**头部截断长度建议值**：常见容器/可执行格式的魔数都在文件最前端，绝大多数 ≤ 8 字节即可判定（如 `PK\x03\x04`=zip、`MZ`=exe/PE、`\x7fELF`=ELF、`%PDF`=pdf、`\x89PNG`=png、`GIF8`=gif、`\xff\xd8\xff`=jpeg、`\x1f\x8b`=gzip、`ID3`/`\xff\xfb`=mp3）。少数格式魔数靠后或需更多上下文：
+
+| 场景 | 所需头部长度 |
+|------|------------|
+| 绝大多数魔数判定 | ≤ 8 字节 |
+| ISO-BMFF 系（mp4/mov/heic，`ftyp` 在偏移 4 起） | ~16 字节 |
+| TAR（魔数 `ustar` 在偏移 257） | ~265 字节 |
+| 综合保险值（覆盖上述全部 + 留余量） | **建议默认 256 字节** |
+
+取 **256 字节**做默认截断：base64 编码后约 344 字符，体积可忽略，却能覆盖几乎所有常见格式（含偏移靠后的 TAR）的魔数识别。可用 `--head-bytes <n>` 覆盖默认值。
+
 ### cp 的方向
 
 由 `:` 的有无判定：有 `:` 是远程，无 `:` 是本地。
 
 ```bash
-ec fs cp ./local.txt alice.agentid.pub:/docs/f.txt     # 上传
-ec fs cp alice.agentid.pub:/docs/f.txt ./local.txt     # 下载
-ec fs cp a.agentid.pub:/x g-team.agentid.pub:/share/x  # 跨主机
+ec fs cp ./local.txt alice.agentid.pub:/docs/f.txt          # 上传
+ec fs cp alice.agentid.pub:/docs/f.txt ./local.txt          # 下载
+ec fs cp a.agentid.pub:/x bob.agentid.pub:/refs/x           # 跨主机
 ```
+
+> 跨主机 `cp` 的目标不能是群的 `/share/`（只读区，见 2.2）——往群里放协作文件请用 `ec collab`（见第 7.5 节），或上传到自己的 `/memberdata/<你的AID>/`。
 
 ### 通用选项
 
@@ -456,10 +507,11 @@ ec fs cp a.agentid.pub:/x g-team.agentid.pub:/share/x  # 跨主机
 
 ### 8.2 文件/目录权限（chmod）
 
+`chmod` **只管权限位和可见性**，不签发凭证、不处理 AID 白名单（那些分别交给 `ec fs token` 和 `setfacl`）：
+
 ```bash
 ec fs chmod +r <AID>:<path>                   # 公开可读
 ec fs chmod o-r <AID>:<path>                  # 收回他人读权限
-ec fs chmod +r <AID>:<path> --token-protected # 需令牌可读
 ec fs chmod <AID>:<path> --allow-roles admin  # 限定角色
 ec fs chmod <AID>:<path> --visibility public|private
 ec fs chmod <AID>:<path> --tags "a,b"
@@ -467,23 +519,23 @@ ec fs chmod <AID>:<path> --tags "a,b"
 
 ### 8.3 细粒度 AID 授权（setfacl）
 
-对标 Linux ACL，给具体 AID 授权：
+对标 Linux ACL，给具体 AID 授权——**这是给特定 AID 授权的唯一方式**（`chmod` 不再有 `--allow-aids`）：
 
 ```bash
 ec fs setfacl -m aid:bob.aid.pub:r <AID>:<path>   # 给 bob 读权限
 ec fs setfacl -x aid:bob.aid.pub <AID>:<path>     # 移除 bob 的授权
+# 附带次数/期限限制
+ec fs setfacl -m aid:bob.aid.pub:r <AID>:<path> --expires 2026-12-01 --max-reads 100
 ```
 
 ### 8.4 卷级访问授权
 
-每个卷可配置允许哪些角色/AID 访问，附带次数和时间限制：
+卷的访问授权同样走 `chmod`（角色）+ `setfacl`（具体 AID），附带次数和时间限制：
 
 ```bash
-ec fs chmod <AID>:/memberdata/alice.aid.pub/ \
-  --allow-roles owner,admin \
-  --allow-aids bob.aid.pub \
-  --expires 2026-12-01 \
-  --max-reads 100
+ec fs chmod   <AID>:/memberdata/alice.aid.pub/ --allow-roles owner,admin
+ec fs setfacl -m aid:bob.aid.pub:r <AID>:/memberdata/alice.aid.pub/ \
+  --expires 2026-12-01 --max-reads 100
 ```
 
 `/memberdata/<aid>/` 默认授权全体成员可读，持有人可收窄。
@@ -494,29 +546,39 @@ ec fs chmod <AID>:/memberdata/alice.aid.pub/ \
 
 ### 9.1 分享 = 软链到 /public + 权限控制
 
-系统**不提供** `share`/`unshare` 这类新词汇。对外分享拆解成两个 Linux 原生动作：
+系统**不提供** `share`/`unshare` 这类新词汇。对外分享拆解成 Linux 原生动作：
 
 1. `ln -s` 把文件暴露到 `/public`（创建访问入口）
-2. `chmod` / `setfacl` 控制谁能访问、怎么访问
+2. `chmod` / `setfacl` 控制谁能访问
+3. 需令牌时，用 `ec fs token` 单独签发（token 是凭证，铸造它是独立动作，不混进 chmod）
 
 四种分享场景：
 
 | 场景 | 命令 |
 |------|------|
 | 公开给所有人 | `ln -s → /public/x` + `chmod +r x` |
-| token 保护 | `... + chmod +r x --token-protected` |
-| 指定 AID | `... + setfacl -m aid:bob:r x` |
-| 带次数/期限 | `... + chmod +r x --token-protected --expires ... --max-reads ...` |
+| token 保护 | `ln -s → /public/x` + `ec fs token issue x` |
+| 指定 AID | `ln -s → /public/x` + `setfacl -m aid:bob:r x` |
+| 带次数/期限 | `... + ec fs token issue x --expires ... --max-reads ...` |
 
-### 9.2 token 的产生
+### 9.2 token 的签发（独立动词）
 
-`chmod --token-protected` 设权限时，命令输出里返回生成的 token：
+token 由独立命令 `ec fs token` 铸造和吊销——**`chmod` 不再签发 token**：
+
+```bash
+ec fs token issue  <AID>:<path> [--expires 2026-12-01] [--max-reads 10]
+ec fs token revoke <AID>:<path> --token tok_abc123
+ec fs token ls     <AID>:<path>     # 列出该路径已签发的 token
+```
+
+`issue` 输出生成的 token：
 
 ```
-✓ 已开放读权限（需令牌）
+✓ 已签发访问令牌
   路径: alice.agentid.pub:/public/report.pdf
   令牌: tok_abc123
   有效期至: 2026-12-01
+  次数上限: 10
 ```
 
 token 是统一凭证，两种通道均可使用：
@@ -536,7 +598,7 @@ Authorization: Bearer tok_abc123
 这正是 AID 三位一体的体现：同一个文件，CLI 以 `<AID>:<path>` 访问，网页以 `https://<AID>/<path>` 访问，token 在两侧通用——Linux 主机身份和 Web 主机身份共用一套鉴权。
 
 - **无 token**（`chmod +r` 公开）：CLI 和 HTTP 均可直接访问，无需任何凭证
-- **有 token**：CLI 带 `--token`，HTTP 带 `Authorization: Bearer`
+- **有 token**（`ec fs token issue`）：CLI 带 `--token`，HTTP 带 `Authorization: Bearer`
 - **白名单 AID**（`setfacl`）：用自己 AID 身份访问，服务端验证，不需 token
 
 ### 9.3 撤销分享 = Linux 原生方式
@@ -545,6 +607,7 @@ Authorization: Bearer tok_abc123
 |---------|------|
 | 删访问入口 | `ec fs rm <AID>:/public/x`（删软链，不动真实文件） |
 | 收回公开读 | `ec fs chmod o-r <AID>:/public/x` |
+| 吊销令牌 | `ec fs token revoke <AID>:/public/x --token tok_xxx` |
 | 移除某人授权 | `ec fs setfacl -x aid:bob.aid.pub <AID>:/public/x` |
 
 ### 9.4 查看分享了什么 = ls 公开目录
@@ -592,17 +655,19 @@ ec fs reject  <AID>: --request-id req_xxx --note "需脱敏"
 ## 12. 分层架构
 
 ```
-应用层（SDK）   collab.create / read / submit     ← 带乐观锁的协作语义
+应用协作层（ec collab）  create / read / submit / history  ← 带乐观锁的协作语义
      │
      ▼
-命令层（ec fs） ls/cat/cp/mv/rm/mkdir/ln/chmod/df  ← Linux 文件命令，统一前端
+文件层（ec fs）          ls/cat/cp/mv/rm/mkdir/ln/chmod/df ← Linux 文件命令，统一前端
      │
      ▼
-路由层          按 AID 判定 storage / group resource
+路由层                   按 AID 判定 storage / group resource
      │
      ▼
-存储层          卷（物理隔离）+ storage / group resource RPC
+存储层                   卷（物理隔离）+ storage / group resource RPC
 ```
+
+**层边界是硬边界**：`ec fs` 是文件层，承诺「Linux 语义，零新词汇」；`ec collab` 是应用协作层，引入协作特有的新动词（版本、提交、乐观锁）——这层引入新词汇是合理的，Linux 里本就没有这些概念。
 
 ---
 
@@ -637,17 +702,43 @@ ec fs reject  <AID>: --request-id req_xxx --note "需脱敏"
 
 ---
 
-## 14. 本地挂载（mount-local）
+## 14. 本地驱动器映射（ec drive，独立命令集，非 ec fs）
 
-把 AUN 文件系统挂成本地一个文件夹/盘符，之后用任何程序（资源管理器、VSCode、`cat`）直接访问——这就是 `sshfs` 干的事。和第 3 节的卷 `mount`（远程卷挂到 AID 主机目录）不是一回事：这里是把远程主机挂到**本地操作系统**。
+> **注意**：把 AID 主机映射成本地盘符/目录这件事**不属于 `ec fs` 文件层**——它的操作对象是**你的本机 OS**，是跨越「网络主机 → 本地 OS」的映射；而 `ec fs mount` 的操作对象是 **AID 主机自身的文件系统**（远程卷挂到 AID 主机目录），两者方向相反。判据：操作对象是「AID 主机的文件系统」就留在 `ec fs`，是「本机」就归 `ec drive`。为彻底避免和 `ec fs mount` 混淆，本地映射用全新动词 `attach`/`detach`，命令集名为 `ec drive`。
 
-### 14.1 原理：用户态文件系统
+把 AUN 文件系统映射成本地一个盘符/文件夹，之后用任何程序（资源管理器、VSCode、`cat`、Finder）直接访问——这就是 `sshfs` 干的事。
+
+> `drive` 不是 POSIX 术语，是产品侧词汇，统一含义为「把 AID 当成一个本地可访问的盘」。Windows 下落到盘符，macOS/Linux 下落到挂载点目录——三平台共用同一组命令。
+
+### 14.1 命令
+
+```bash
+# 把 AID 映射成本地盘/目录
+ec drive attach <AID>:<远程路径> <本地盘符或目录>
+
+# 解除映射
+ec drive detach <本地盘符或目录>
+
+# 查看当前已映射的 drive
+ec drive list
+```
+
+实例：
+
+```bash
+ec drive attach alice.agentid.pub:/  Z:              # Windows：映射成盘符
+ec drive attach alice.agentid.pub:/  ~/aun/alice     # Linux/macOS：映射成目录
+ec drive detach Z:
+ec drive detach ~/aun/alice
+```
+
+### 14.2 原理：用户态文件系统
 
 ```
 应用程序（VSCode / 资源管理器 / cat）
    │  普通文件 I/O
    ▼
-内核 VFS ──→ FUSE/等价物 ──→ ec-fsd（用户态驱动）
+内核 VFS ──→ FUSE/等价物 ──→ ec-drived（用户态驱动）
                                 │ storage.* / group RPC
                                 ▼
                             AUN 网络
@@ -655,13 +746,7 @@ ec fs reject  <AID>: --request-id req_xxx --note "需脱敏"
 
 把对挂载点的 `open/read/write/readdir` 转发给用户态驱动，由它翻译成 `storage.*` / group resource 的 RPC——`sshfs` 怎么把文件操作翻译成 SFTP，我们就怎么翻译成 AUN RPC。
 
-```bash
-ec fs mount-local alice.agentid.pub:/  ~/aun-alice    # Linux/Mac：挂到目录
-ec fs mount-local alice.agentid.pub:/  Z:             # Windows：挂成盘符
-ec fs umount-local ~/aun-alice
-```
-
-### 14.2 三平台与权限
+### 14.3 三平台与权限
 
 | 平台 | 机制 | 成熟度 | 一次性安装 | 日常使用 |
 |------|------|--------|-----------|---------|
@@ -669,9 +754,9 @@ ec fs umount-local ~/aun-alice
 | macOS | macFUSE（kext，趋势转 FSKit） | 可用有坎 | 批准内核扩展（管理员+重启） | 普通用户 |
 | Windows | WinFsp（类 FUSE） | 成熟 | 装驱动（管理员） | 普通用户 |
 
-**关键：只有一次性安装驱动需要管理员权限，日常挂载/使用都是普通用户权限。** 和装任何驱动类软件一样，不是高危操作。macOS 是唯一有摩擦的——新版系统对 kext 管控严，安装时需到「系统设置 → 隐私与安全性」批准并可能重启（一次性）。
+**关键：只有一次性安装驱动需要管理员权限，日常 attach/detach 都是普通用户权限。** 和装任何驱动类软件一样，不是高危操作。macOS 是唯一有摩擦的——新版系统对 kext 管控严，安装时需到「系统设置 → 隐私与安全性」批准并可能重启（一次性）。
 
-### 14.3 实现路线：优先复用 rclone
+### 14.4 实现路线：优先复用 rclone
 
 不必自己写三套 FUSE 驱动。`rclone` 已把「远程后端 + 三平台挂载 + 缓存」做完（支持 70+ 后端，`rclone mount` 跨 Linux/Mac/Win）。两条路线：
 
@@ -680,13 +765,13 @@ ec fs umount-local ~/aun-alice
 | 自研 FUSE 驱动 | 大（分别适配 libfuse / macFUSE / WinFsp） | 最强 |
 | **写一个 rclone backend**（推荐先评估） | 小（挂载/缓存/三平台兼容全复用） | 够用 |
 
-给 `ec fs` 实现一个 rclone 后端插件，能省下约 80% 工作量。
+给 AUN 文件系统实现一个 rclone 后端插件，能省下约 80% 工作量。
 
-### 14.4 真正的难点：非 POSIX 语义的映射/降级
+### 14.5 真正的难点：非 POSIX 语义的映射/降级
 
-挂载本身不难，难在本系统的语义和 POSIX 对不齐：
+attach 本身不难，难在本系统的语义和 POSIX 对不齐：
 
-| 本系统特性 | 挂到本地后的问题 |
+| 本系统特性 | 映射到本地后的问题 |
 |-----------|----------------|
 | 软链接带版本号、跨主机 | POSIX symlink 无版本概念，跨主机需驱动层模拟 |
 | 协作乐观锁（submit 可失败） | 本地 `write()` 是覆盖语义，没有「提交失败」——冲突无处暴露 |
@@ -694,13 +779,13 @@ ec fs umount-local ~/aun-alice
 | 卷 grace 期只读 | 表现为整个目录突然只读 |
 | 网络延迟 | 本地 FS 假设低延迟，`ls` 大目录可能卡顿 |
 
-尤其**协作乐观锁**是应用层协议：本地编辑器只会「读-改-写覆盖」，绕过 `collab.submit` 的版本检查。挂载场景下协作目录大概率只能降级为 last-write-wins，或借 FUSE 的 `release`（关闭文件）钩子触发一次提交检查、冲突时报错。
+尤其**协作乐观锁**是应用层协议：本地编辑器只会「读-改-写覆盖」，绕过 `collab.submit` 的版本检查。attach 场景下协作目录大概率只能降级为 last-write-wins，或借 FUSE 的 `release`（关闭文件）钩子触发一次提交检查、冲突时报错。
 
-### 14.5 演进策略：只读优先
+### 14.6 演进策略：只读优先
 
-1. **第一阶段——只读挂载**：把 AUN 文件系统挂成本地只读目录，覆盖「用本地工具浏览/打开 AUN 文件」这一最高频需求，避开全部写冲突语义难题。
+1. **第一阶段——只读 attach**：把 AUN 文件系统映射成本地只读目录，覆盖「用本地工具浏览/打开 AUN 文件」这一最高频需求，避开全部写冲突语义难题。
 2. **第二阶段——个人 storage 读写**：覆盖语义清晰的个人区先开放本地写。
-3. **第三阶段——群协作目录**：暂不开放本地写，或明确降级为 last-write-wins 并告知用户；需要严格协作时仍走 `collab.*` SDK 接口。
+3. **第三阶段——群协作目录**：暂不开放本地写，或明确降级为 last-write-wins 并告知用户；需要严格协作时仍走 `ec collab` 命令集（见第 16 节）。
 4. **缓存层是刚需**：网络延迟下必须做元数据 + 内容缓存，否则 `ls`/打开体验差。
 
 ---
@@ -720,13 +805,111 @@ ec fs ln -s alice.agentid.pub:/private/identity/agent.md \
 
 # —— 对外分享（token + 期限）——
 ec fs ln -s alice.agentid.pub:/private/report.pdf alice.agentid.pub:/public/report.pdf
-ec fs chmod +r alice.agentid.pub:/public/report.pdf --token-protected --expires 2026-12-01
+ec fs token issue alice.agentid.pub:/public/report.pdf --expires 2026-12-01
 
 # —— 群文件 ——
-ec fs ls group.agentid.pub:/12345/share/
-ec fs cp ./design.png group.agentid.pub:/12345/memberdata/alice.aid.pub/design.png
+ec fs ls g-team.agentid.pub:/share/
+ec fs cp ./design.png g-team.agentid.pub:/memberdata/alice.aid.pub/design.png
 
 # —— 卷管理 ——
 ec fs mount alice.agentid.pub:/archive --volume vol_abc123
 ec fs df alice.agentid.pub:
 ```
+
+---
+
+## 16. 应用协作层：ec collab
+
+### 16.1 层定位
+
+`ec collab` 是**应用协作层**，不属于 `ec fs` 文件层。它承诺的不是「Linux 语义」，而是「多人协作语义」——版本、乐观锁、追溯历史，这些 Linux 文件系统里本就不存在，引入新动词是合理的。
+
+```
+ec collab   ← 应用协作层（本节）：版本 / 乐观锁 / 提交 / 历史
+ec fs       ← 文件层：ls/cat/cp/mv/... Linux 语义
+存储层       ← 卷 / storage / group resource RPC
+```
+
+`ec collab` 的操作对象是**共享软链**（`/share/<doc>`），它是群里多人协作同一文档的入口（原理见第 6 节）。
+
+### 16.2 命令集
+
+```bash
+ec collab create  <group-aid> <share-path> <local-file>
+ec collab read    <group-aid> <share-path>
+ec collab submit  <group-aid> <share-path> <local-file> --base-version <n>
+ec collab merge   <group-aid> <share-path> <local-file>
+ec collab history <group-aid> <share-path>
+ec collab get     <group-aid> <share-path> --version <n>
+ec collab diff    <group-aid> <share-path> --from <n> --to <m>
+```
+
+| 命令 | 作用 | 底层动作 |
+|------|------|---------|
+| `create` | 创建协作文档（首次） | 上传到自己的 memberdata → 建 /share 软链 → version=1 |
+| `read` | 读当前版本 + 版本号 | 顺软链读，返回内容、version、作者 |
+| `submit` | 提交新版本 | 写自己的 memberdata → 版本检查 → 切软链 |
+| `merge` | 三方合并当前权威版本与本地草稿 | base=你的基线、ours=本地草稿、theirs=当前权威版本，输出合并结果，冲突用 `<<<<<<<` 标记 |
+| `history` | 查版本台账 | 列所有版本：版本号/作者/时间/指向 |
+| `get` | 读指定历史版本 | 按台账定位对应文件 |
+| `diff` | 比较两个版本 | 取 vA、vB 内容做差异比较 |
+
+### 16.3 submit 乐观锁
+
+```bash
+ec collab submit g-team.agentid.pub /share/design.md ./design.md --base-version 3
+```
+
+- 先把 `local-file` 写到提交者自己的 `memberdata/<self>/<doc>/vN.md`（**永不失败**）
+- 检查 `/share/<doc>` 当前 version 是否仍等于 `--base-version`
+  - **相等** → 软链切到新文件，version+1，输出 `✓ 已提交 version=4`
+  - **不等** → 提交失败，返回冲突信息：
+
+```
+✗ 提交失败：当前版本已更新（你的基线 3，当前 4）
+  你的草稿已安全保存到 memberdata，数据不丢
+  请执行: ec collab merge g-team.agentid.pub /share/design.md ./design.md
+  合并后重新提交: ec collab submit ... --base-version 4
+```
+
+> 失败后的标准动作是 `ec collab merge`（三方合并：base=你的基线、ours=本地草稿、theirs=当前权威版本），它把合并结果写回本地文件；有冲突时用 `<<<<<<<` 标记，由 agent/人解决后再 submit。不必让 agent 自己裸拼 diff。
+
+### 16.4 典型协作流程
+
+```bash
+# 1. alice 创建协作文档
+ec collab create g-team.agentid.pub /share/spec.md ./spec.md
+
+# 2. bob 读取并编辑
+ec collab read g-team.agentid.pub /share/spec.md > ./spec-local.md
+# ... 编辑 spec-local.md ...
+
+# 3. bob 提交（基线 version=1）
+ec collab submit g-team.agentid.pub /share/spec.md ./spec-local.md --base-version 1
+
+# 4. 若 alice 已先提交（version 变为 2），bob 收到冲突提示
+#    先三方合并，再基于新基线提交
+ec collab merge  g-team.agentid.pub /share/spec.md ./spec-local.md
+# ... 若有 <<<<<<< 冲突标记，解决后 ...
+ec collab submit g-team.agentid.pub /share/spec.md ./spec-local.md --base-version 2
+
+# 5. 查历史
+ec collab history g-team.agentid.pub /share/spec.md
+
+# 6. 看旧版本
+ec collab get g-team.agentid.pub /share/spec.md --version 1
+```
+
+### 16.5 发布权（谁能 submit）
+
+`/share/<doc>` 软链的写权限 = submit 权限，用 `ec fs chmod` 控制：
+
+```bash
+# 默认：所有成员都能 submit
+ec fs chmod g-team.agentid.pub:/share/spec.md --allow-roles members
+
+# 收紧：仅 admin 能 submit（需审核场景）
+ec fs chmod g-team.agentid.pub:/share/spec.md --allow-roles admin
+```
+
+普通成员若无 submit 权限，`ec collab submit` 报错并提示联系管理员。
