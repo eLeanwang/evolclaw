@@ -322,6 +322,7 @@ tr:hover td { background: var(--bg2); }
 .usage-subpanel { display: none; flex: 1; overflow: hidden; }
 .usage-subpanel.active { display: flex; flex-direction: column; }
 #usage-dashboard { overflow-y: auto; padding: 16px; }
+#usage-overview { overflow-y: auto; padding: 16px; }
 .usage-cards {
   display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
   gap: 12px; margin-bottom: 20px;

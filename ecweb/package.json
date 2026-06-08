@@ -10,7 +10,8 @@
     "dist/"
   ],
   "scripts": {
-    "build": "tsc && chmod +x dist/index.js && cp -r src/static dist/",
+    "build": "tsc && node -e \"try{require('child_process').execFileSync('chmod',['+x','dist/index.js'])}catch{}\" && node -e \"const fs=require('fs'),path=require('path');fs.cpSync('src/static','dist/static',{recursive:true});const f='dist/static/index.html',n=new Date(),ts=n.getFullYear()+'-'+String(n.getMonth()+1).padStart(2,'0')+'-'+String(n.getDate()).padStart(2,'0')+' '+String(n.getHours()).padStart(2,'0')+':'+String(n.getMinutes()).padStart(2,'0');fs.writeFileSync(f,fs.readFileSync(f,'utf8').replace(/(\\<span class=\\\"build-ts\\\"[^>]*\\>)[^<]+(\\<\\/span\\>)/,'$1'+ts+'$2'))\"",
+    "dev": "node dev.mjs",
     "prepublishOnly": "npm run build"
   },
   "keywords": [

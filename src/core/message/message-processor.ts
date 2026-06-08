@@ -2,7 +2,7 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import crypto from 'crypto';
-import { type AgentRunnerFull, hasCompact, type AgentEvent, type Compactable } from '../../agents/claude-runner.js';
+import { type AgentRunnerFull, hasCompact, type AgentEvent, type Compactable, type AgentTokenUsage, type AgentContextUsage, type AgentLastModelCall } from '../../agents/claude-runner.js';
 import { SessionManager } from '../session/session-manager.js';
 import { appendMessageLog, buildOutboundEntry } from './message-log.js';
 import { IMRenderer } from './im-renderer.js';
@@ -30,6 +30,21 @@ import { resolveEffectiveModel } from '../model/model-scope.js';
 import { insertUsageEvent, insertContextBreakdown } from '../stats/writer.js';
 import { normalizeUsage } from '../stats/normalizer.js';
 import { getBudgetStatus } from '../stats/budget.js';
+
+type StreamRunResult = {
+  isError: boolean;
+  subtype?: string;
+  errors?: string[];
+  terminalReason?: string;
+  lastReplyText: string;
+  fullText: string;
+  hasReceivedText: boolean;
+  numTurns?: number;
+  ttftMs?: number;
+  tokenUsage?: AgentTokenUsage;
+  contextUsage?: AgentContextUsage;
+  lastModelCall?: AgentLastModelCall;
+};
 
 /** OS 信息在进程生命周期内是常量，模块加载时算一次。例: "Windows 11 Pro (win32 10.0.26200)" */
 const OS_INFO = (() => {
@@ -679,7 +694,7 @@ export class MessageProcessor {
       // 先用裸文本兜底；vars 构造完成后用消息渲染层重算（见下方 effectivePrompt 重赋值）。
       let effectivePrompt = wrapPrompt(message.content);
 
-      let streamResult: { isError: boolean; subtype?: string; errors?: string[]; terminalReason?: string; lastReplyText: string; fullText: string; hasReceivedText: boolean; numTurns?: number; ttftMs?: number; tokenUsage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number }; contextUsage?: { totalTokens: number; maxTokens: number; percentage: number; model: string; effort?: string } } = { isError: false, lastReplyText: '', fullText: '', hasReceivedText: false };
+      let streamResult: StreamRunResult = { isError: false, lastReplyText: '', fullText: '', hasReceivedText: false };
       let effectiveSystemPrompt: string | undefined;
       let modelOverride: { model?: string; effort?: string } | undefined;
       let usedFallback = false;
@@ -1338,6 +1353,7 @@ export class MessageProcessor {
               numTurns: streamResult.numTurns,
               tokenUsage: streamResult.tokenUsage,
               contextUsage: streamResult.contextUsage,
+              lastModelCall: streamResult.lastModelCall,
               cost_usd: statsCostUsd,
               cost_cny: statsCostCny,
               cache_hit_rate: statsCacheHitRate,
@@ -1645,12 +1661,12 @@ export class MessageProcessor {
     renderer: IMRenderer,
     resetTimer: (eventType?: string, toolName?: string) => void,
     shouldSuppress: () => boolean
-  ): Promise<{ isError: boolean; subtype?: string; errors?: string[]; terminalReason?: string; lastReplyText: string; fullText: string; hasReceivedText: boolean; numTurns?: number; ttftMs?: number; tokenUsage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number }; contextUsage?: { totalTokens: number; maxTokens: number; percentage: number; model: string; effort?: string } }> {
+  ): Promise<StreamRunResult> {
     // Per-session agent name for stats bucketing
     const agentNameForStats = this.agentRegistry?.resolveByChannel(session.metadata?.channelKey || session.channel)?.name ?? '<unknown>';
     let hasReceivedText = false;
     let hasErrorResult = false;  // 是否已有 tool_result/error 事件输出过错误
-    let completeResult: { isError: boolean; subtype?: string; errors?: string[]; terminalReason?: string; lastReplyText: string; fullText: string; hasReceivedText: boolean; numTurns?: number; ttftMs?: number; tokenUsage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number }; contextUsage?: { totalTokens: number; maxTokens: number; percentage: number; model: string; effort?: string } } = { isError: false, lastReplyText: '', fullText: '', hasReceivedText: false };
+    let completeResult: StreamRunResult = { isError: false, lastReplyText: '', fullText: '', hasReceivedText: false };
 
     // 追踪最后一轮 assistant 回复文本（tool_use 之后的纯文本）
     let lastReplyText = '';
@@ -1833,7 +1849,7 @@ export class MessageProcessor {
           }
 
           // 记录完成状态 + 最后一轮回复文本（后续 complete 覆盖前序）
-          completeResult = { isError: !!event.isError, subtype: event.subtype, errors: event.errors, terminalReason: event.terminalReason, lastReplyText, fullText: event.result || '', hasReceivedText, numTurns: event.numTurns, ttftMs: event.ttftMs, tokenUsage: event.tokenUsage, contextUsage: event.contextUsage };
+          completeResult = { isError: !!event.isError, subtype: event.subtype, errors: event.errors, terminalReason: event.terminalReason, lastReplyText, fullText: event.result || '', hasReceivedText, numTurns: event.numTurns, ttftMs: event.ttftMs, tokenUsage: event.tokenUsage, contextUsage: event.contextUsage, lastModelCall: event.lastModelCall };
 
           // thought jsonl 写入已下沉到 aun.ts:sendThought 成功后，
           // 由那里按 LLM 输出的每个 text item 单独写一条，此处不再写。
@@ -1896,7 +1912,7 @@ export class MessageProcessor {
       }
 
       // 记录完成状态
-      completeResult = { isError: !!event.isError, subtype: event.subtype, errors: event.errors, terminalReason: event.terminalReason, lastReplyText, fullText: event.result || '', hasReceivedText, numTurns: event.numTurns, ttftMs: event.ttftMs, tokenUsage: event.tokenUsage, contextUsage: event.contextUsage };
+      completeResult = { isError: !!event.isError, subtype: event.subtype, errors: event.errors, terminalReason: event.terminalReason, lastReplyText, fullText: event.result || '', hasReceivedText, numTurns: event.numTurns, ttftMs: event.ttftMs, tokenUsage: event.tokenUsage, contextUsage: event.contextUsage, lastModelCall: event.lastModelCall };
 
       if (event.subtype === 'success') {
         this.messageCache.addEvent(session.id, {

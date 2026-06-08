@@ -140,8 +140,13 @@ function applyContextWindow(modelId: string): string {
   return modelId;
 }
 
-/** 根据 SDK model 串（含 [1m] 后缀）返回合适的 autoCompactWindow 值。 */
-function contextWindowFor(sdkModel: string): number {
+/** 真实上下文窗口大小：1M 模型 = 1000000，否则 200000 */
+function realContextWindowFor(sdkModel: string): number {
+  return /\[1m\]$/.test(sdkModel) ? 1000000 : 200000;
+}
+
+/** autoCompact 触发阈值：1M 模型 = 900000（留 ~100k buffer），否则 200000 */
+function autoCompactWindowFor(sdkModel: string): number {
   return /\[1m\]$/.test(sdkModel) ? 900000 : 200000;
 }
 
@@ -231,6 +236,50 @@ class MessageStream {
 }
 
 // ── 标准事件流（Gateway 消费的统一事件类型）──
+export type AgentTokenUsage = {
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_read_input_tokens?: number | null;
+  cache_creation_input_tokens?: number | null;
+  iterations?: AgentTokenUsage[] | null;
+  [key: string]: unknown;
+};
+
+export type AgentContextUsage = {
+  totalTokens: number;
+  maxTokens: number;
+  percentage: number;
+  autoCompactTokens?: number;
+  model: string;
+  effort?: string;
+};
+
+export type AgentLastModelCall = {
+  messageId?: string;
+  requestId?: string;
+  model?: string;
+  tokenUsage: AgentTokenUsage;
+  contextUsage?: AgentContextUsage;
+};
+
+function numericToken(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
+}
+
+function contextTokensForUsage(usage: AgentTokenUsage | undefined, isClaudeModel: boolean): number {
+  if (!usage) return 0;
+  if (!isClaudeModel) return numericToken(usage.input_tokens);
+  return numericToken(usage.input_tokens)
+    + numericToken(usage.cache_creation_input_tokens)
+    + numericToken(usage.cache_read_input_tokens);
+}
+
+function usageForContext(usage: AgentTokenUsage | undefined): AgentTokenUsage | undefined {
+  const iterations = Array.isArray(usage?.iterations) ? usage.iterations : undefined;
+  const lastIteration = iterations?.slice().reverse().find(it => contextTokensForUsage(it, true) > 0);
+  return lastIteration ?? usage;
+}
+
 export type AgentEvent =
   | { type: 'text'; text: string; outputTokens?: number; turn?: number }
   | { type: 'status'; subtype: string; message: string }
@@ -240,7 +289,7 @@ export type AgentEvent =
   | { type: 'task_progress'; summary?: string; toolUses?: number; durationMs?: number }
   | { type: 'session_id'; sessionId: string }
   | { type: 'state_changed'; state: 'idle' | 'running' | 'requires_action' }
-  | { type: 'complete'; result?: string; subtype?: string; isError?: boolean; errors?: string[]; durationMs?: number; ttftMs?: number; costUsd?: number; terminalReason?: string; sessionTitle?: string; numTurns?: number; tokenUsage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number }; contextUsage?: { totalTokens: number; maxTokens: number; percentage: number; model: string; effort?: string } }
+  | { type: 'complete'; result?: string; subtype?: string; isError?: boolean; errors?: string[]; durationMs?: number; ttftMs?: number; costUsd?: number; terminalReason?: string; sessionTitle?: string; numTurns?: number; tokenUsage?: AgentTokenUsage; contextUsage?: AgentContextUsage; lastModelCall?: AgentLastModelCall }
   | { type: 'error'; error: string; errorType: 'context_too_long' | 'auth' | 'network' | 'unknown' };
 
 export interface QueryRequest {
@@ -965,6 +1014,7 @@ export class AgentRunner {
     const toolUseNames = new Map<string, string>();
     let turnCount = 0;
     const seenMessageIds = new Set<string>();
+    let lastModelCall: AgentLastModelCall | undefined;
 
     try {
       for await (const event of sdkStream) {
@@ -1006,6 +1056,14 @@ export class AgentRunner {
         if (!msgId || !seenMessageIds.has(msgId)) {
           if (msgId) seenMessageIds.add(msgId);
           turnCount++;
+        }
+        if (event.message.usage) {
+          lastModelCall = {
+            messageId: event.message.id,
+            requestId: event.request_id,
+            model: event.message.model,
+            tokenUsage: event.message.usage,
+          };
         }
         // 统计本轮 base agent 全部输出字符数（text + tool_use input）
         let turnOutputChars = 0;
@@ -1072,22 +1130,35 @@ export class AgentRunner {
         // Claude：input_tokens 是净输入（不含 cache），三项求和 = 实际上下文长度。
         // 非 Claude（DeepSeek/OpenAI 兼容）：cache_read 是服务端 KV cache 不占上下文窗口，
         // input_tokens 本身就是完整的上下文输入量。
-        const u = event.usage;
+        const u = event.usage as AgentTokenUsage | undefined;
         const effectiveModel = callModel ?? this.model;
         const isClaudeModel = effectiveModel?.startsWith('claude');
-        const totalTokens = u
-          ? isClaudeModel
-            ? (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0)
-            : (u.input_tokens ?? 0)
-          : 0;
-        const maxTokens = sdkModel ? contextWindowFor(sdkModel) : 200000;
+        const totalTokens = contextTokensForUsage(u, !!isClaudeModel);
+        const contextWindowTokens = sdkModel ? realContextWindowFor(sdkModel) : 200000;
+        const autoCompactTokens   = sdkModel ? autoCompactWindowFor(sdkModel) : 200000;
         const contextUsage = totalTokens > 0 ? {
           totalTokens,
-          maxTokens,
-          percentage: Math.round((totalTokens / maxTokens) * 100),
+          maxTokens: contextWindowTokens,
+          percentage: Math.round((totalTokens / contextWindowTokens) * 100),
+          autoCompactTokens,
           model: callModel ?? this.model,
           effort: callEffort ?? this.effort,
         } : undefined;
+        if (lastModelCall?.tokenUsage) {
+          const lastUsageForContext = usageForContext(lastModelCall.tokenUsage);
+          const lastTotalTokens = contextTokensForUsage(lastUsageForContext, !!isClaudeModel);
+          lastModelCall = {
+            ...lastModelCall,
+            contextUsage: lastTotalTokens > 0 ? {
+              totalTokens: lastTotalTokens,
+              maxTokens: contextWindowTokens,
+              percentage: Math.round((lastTotalTokens / contextWindowTokens) * 100),
+              autoCompactTokens,
+              model: callModel ?? this.model,
+              effort: callEffort ?? this.effort,
+            } : undefined,
+          };
+        }
 
         yield {
           type: 'complete',
@@ -1103,6 +1174,7 @@ export class AgentRunner {
           numTurns: event.num_turns,
           tokenUsage: event.usage,
           contextUsage,
+          lastModelCall,
         };
         // result 是 SDK 流的终结事件，不再等待后续（防止 interrupt 后流不关闭导致挂起）
         return;
@@ -1347,7 +1419,7 @@ export class AgentRunner {
       model: sdkModel,
       ...(callEffort ? { effort: callEffort } : {}),
       ...(this.claudeExecutablePath ? { pathToClaudeCodeExecutable: this.claudeExecutablePath } : {}),
-      autoCompactWindow: contextWindowFor(sdkModel),
+      autoCompactWindow: autoCompactWindowFor(sdkModel),
       advisorModel: 'haiku',
       canUseTool: canUseToolCallback,
       permissionMode: sdkPermissionMode,

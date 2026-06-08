@@ -23,7 +23,9 @@ import { aidSource } from './sources/aid.js';
 import { msgSource } from './sources/msg.js';
 import { sessionSource } from './sources/session.js';
 import { cacheSource } from './sources/cache.js';
-import { queryStatsForDashboard, queryStatsExplorer, queryStatsByPeer, queryStatsByAgent } from './sources/stats.js';
+import { queryStatsForDashboard, queryStatsExplorer, queryStatsByPeer, queryStatsByAgent, queryStatsOverview } from './sources/stats.js';
+import { getSessionsAunDir, listLocalAids, listPeers, readMessages } from './fs-utils.js';
+import { ccProjectsDir } from './paths.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const STATIC_DIR = path.join(__dirname, 'static');
@@ -154,6 +156,31 @@ function handleStatsApi(req: http.IncomingMessage, res: http.ServerResponse): vo
     const data = queryStatsByAgent(params);
     res.writeHead(200);
     res.end(JSON.stringify(data));
+  } else if (urlPath === '/api/stats/overview') {
+    const tokenStats = queryStatsOverview();
+    // session count: scan all CC project dirs
+    let sessionCount = 0;
+    try {
+      const base = ccProjectsDir();
+      for (const d of fs.readdirSync(base, { withFileTypes: true })) {
+        if (!d.isDirectory()) continue;
+        try { sessionCount += fs.readdirSync(path.join(base, d.name)).filter(f => f.endsWith('.jsonl')).length; } catch {}
+      }
+    } catch {}
+    // message counts: scan aun dir
+    let msgIn = 0, msgOut = 0;
+    try {
+      const aunDir = getSessionsAunDir();
+      for (const aid of listLocalAids(aunDir)) {
+        for (const peer of listPeers(aunDir, aid)) {
+          for (const m of readMessages(aunDir, aid, peer)) {
+            if (m.dir === 'in') msgIn++; else msgOut++;
+          }
+        }
+      }
+    } catch {}
+    res.writeHead(200);
+    res.end(JSON.stringify({ token_stats: tokenStats, session_count: sessionCount, msg_in: msgIn, msg_out: msgOut }));
   } else {
     res.writeHead(404);
     res.end(JSON.stringify({ error: 'not found' }));
