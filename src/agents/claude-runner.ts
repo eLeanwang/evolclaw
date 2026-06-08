@@ -142,12 +142,16 @@ function applyContextWindow(modelId: string): string {
 
 /** 真实上下文窗口大小：1M 模型 = 1000000，否则 200000 */
 function realContextWindowFor(sdkModel: string): number {
-  return /\[1m\]$/.test(sdkModel) ? 1000000 : 200000;
+  if (/\[1m\]$/.test(sdkModel)) return 1000000;
+  if (/deepseek-v4/i.test(sdkModel)) return 1000000;  // deepseek-v4 系列原生 1M 窗口（无 [1m] 后缀）
+  return 200000;
 }
 
 /** autoCompact 触发阈值：1M 模型 = 900000（留 ~100k buffer），否则 200000 */
 function autoCompactWindowFor(sdkModel: string): number {
-  return /\[1m\]$/.test(sdkModel) ? 900000 : 200000;
+  if (/\[1m\]$/.test(sdkModel)) return 900000;
+  if (/deepseek-v4/i.test(sdkModel)) return 900000;
+  return 200000;
 }
 
 /** 解析别名 + 追加 1M 后缀，得到最终交给 SDK 的 model 串。 */
