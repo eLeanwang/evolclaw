@@ -670,7 +670,7 @@ export class CommandHandler {
   }
 
   /** 动态子菜单：根据 cmd 路径返回选项列表（供 menu.query + cmd 使用） */
-  async getSubMenuItems(cmd: string, channel: string, channelId: string, userId?: string, args?: Record<string, any>): Promise<MenuItem[] | null> {
+  async getSubMenuItems(cmd: string, channel: string, channelId: string, userId?: string, args?: Record<string, any>, overrideIdentity?: import('../types.js').SessionIdentity): Promise<MenuItem[] | null> {
     const session = await this.sessionManager.getActiveSession(channel, channelId);
 
     // ── 进程级 /agent list（owners 鉴权） ──
@@ -689,7 +689,7 @@ export class CommandHandler {
       const manager = (owningAgent?.triggerManager ?? this.triggerManager) as TriggerManager | undefined;
       if (!manager) return [];
       const scope = args?.options === 'all' ? 'all' : 'enabled';
-      const role = this.sessionManager.resolveIdentity(channel, userId).role;
+      const role = (overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId)).role;
       const isAdmin = role === 'owner' || role === 'admin';
       const all = manager.listAll();
       const list = scope === 'all' ? all.active.concat(all.history as any[]) : manager.listActive();
@@ -981,14 +981,15 @@ export class CommandHandler {
 
   /** menu.update — 写入新值。 */
   async execMenuUpdate(
-    cmd: string, value: string, channel: string, channelId: string, userId?: string
+    cmd: string, value: string, channel: string, channelId: string, userId?: string,
+    overrideIdentity?: import('../types.js').SessionIdentity
   ): Promise<{ data: any } | { error: string; code?: string }> {
     const cmdBase = cmd.trim().split(' ')[0];
     if (!cmdBase) return { error: '缺少命令', code: 'MISSING_CMD' };
     const arg = value.trim();
     if (!arg) return { error: '缺少 value 参数', code: 'MISSING_VALUE' };
     const { session, evolagent } = await this.loadMenuContext(channel, channelId);
-    const identity = this.sessionManager.resolveIdentity(channel, userId);
+    const identity = overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId);
 
     // ── 关系级 /trigger update（调度参数，value 为 JSON 字符串） ──
     if (cmdBase === '/trigger') {
@@ -1142,13 +1143,14 @@ export class CommandHandler {
 
   /** menu.action — 触发动词。 */
   async execMenuAction(
-    cmd: string, action: string, args: any, channel: string, channelId: string, userId?: string
+    cmd: string, action: string, args: any, channel: string, channelId: string, userId?: string,
+    overrideIdentity?: import('../types.js').SessionIdentity
   ): Promise<{ data: any } | { error: string; code?: string }> {
     const cmdBase = cmd.trim().split(' ')[0];
     if (!cmdBase) return { error: '缺少命令', code: 'MISSING_CMD' };
     if (!action) return { error: '缺少 action', code: 'MISSING_VALUE' };
     const { session } = await this.loadMenuContext(channel, channelId);
-    const identity = this.sessionManager.resolveIdentity(channel, userId);
+    const identity = overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId);
 
     // ── 进程级 /agent（owners 鉴权，不依赖 session/channel） ──
     // NOTE(D5): 本次进程级 /agent 仅按 evolclaw.json owners 鉴权，任意 evolagent 的 AUN
@@ -1325,6 +1327,73 @@ export class CommandHandler {
     }
 
     return { error: `不支持 action: ${cmdBase}`, code: 'NOT_SUPPORTED' };
+  }
+
+  /** ECWeb 专用入口：注入 owner identity，进程级操作检查 owners 非空。不暴露 cli。 */
+  async execMenuForEcweb(payload: any): Promise<import('../types.js').MenuResponse> {
+    const id = payload?.id ?? '';
+    const name = payload?.name;
+
+    if (name === 'cli' || payload?.cmd === '/cli') {
+      return { type: 'menu.response', id, name, error: { code: 'NOT_SUPPORTED', message: 'cli 不在 ECWeb 控制范围' } };
+    }
+
+    const isProcessLevel = name === 'system' || name === 'agent';
+    const owners = loadEvolclawConfig().owners ?? [];
+    if (isProcessLevel && owners.length === 0) {
+      return { type: 'menu.response', id, name, error: { code: 'FORBIDDEN', message: '请在 evolclaw.json 配置 owners 后使用进程级操作' } };
+    }
+
+    const ECWEB_CHANNEL = '__ecweb__';
+    const ownerIdentity: import('../types.js').SessionIdentity = { role: 'owner', mode: 'interactive' };
+    // 进程级操作用 owners[0] 让 isProcessLevelOwner() 通过；其余传 undefined
+    const userId = isProcessLevel ? (owners[0] ?? '') : undefined;
+
+    const nameMap: Record<string, string> = {
+      pwd: '/pwd', session: '/session', baseagent: '/baseagent', model: '/model',
+      effort: '/effort', chatmode: '/chatmode', dispatch: '/dispatch',
+      permission: '/perm', activity: '/activity', system: '/system',
+      agent: '/agent', trigger: '/trigger',
+    };
+    const cmd = name ? (nameMap[name] ?? payload.cmd) : payload.cmd;
+
+    try {
+      switch (payload?.type) {
+        case 'menu.list':
+          return { type: 'menu.response', id, data: this.getMenuItems('owner', 'private') };
+
+        case 'menu.query': {
+          if (!cmd) return ecwebErr(id, name, 'MISSING_CMD', '缺少 name/cmd');
+          const r = await this.execMenuQuery(cmd, ECWEB_CHANNEL, ECWEB_CHANNEL, userId, payload.args);
+          return ecwebResp(id, name, r);
+        }
+
+        case 'menu.options': {
+          if (!cmd) return ecwebErr(id, name, 'MISSING_CMD', '缺少 name/cmd');
+          const data = await this.getSubMenuItems(cmd, ECWEB_CHANNEL, ECWEB_CHANNEL, userId, payload.args, ownerIdentity) ?? [];
+          return { type: 'menu.response', id, name, data };
+        }
+
+        case 'menu.update': {
+          if (!cmd) return ecwebErr(id, name, 'MISSING_CMD', '缺少 name/cmd');
+          if (!payload.value) return ecwebErr(id, name, 'MISSING_VALUE', '缺少 value');
+          const r = await this.execMenuUpdate(cmd, payload.value, ECWEB_CHANNEL, ECWEB_CHANNEL, userId, ownerIdentity);
+          return ecwebResp(id, name, r);
+        }
+
+        case 'menu.action': {
+          if (!cmd) return ecwebErr(id, name, 'MISSING_CMD', '缺少 name/cmd');
+          if (!payload.action) return ecwebErr(id, name, 'MISSING_VALUE', '缺少 action');
+          const r = await this.execMenuAction(cmd, payload.action, payload.args, ECWEB_CHANNEL, ECWEB_CHANNEL, userId, ownerIdentity);
+          return ecwebResp(id, name, r);
+        }
+
+        default:
+          return ecwebErr(id, name, 'NOT_SUPPORTED', `未知类型: ${payload?.type}`);
+      }
+    } catch (e: any) {
+      return ecwebErr(id, name, 'INTERNAL', e?.message ?? String(e));
+    }
   }
 
   /**
@@ -4241,7 +4310,24 @@ export class CommandHandler {
     } else if (Array.isArray(m?.content)) {
       text = m.content.filter((b: any) => b.type === 'text').map((b: any) => b.text).join(' ');
     }
-    text = text.trim().replace(/\s+/g, ' ');
+    text = text.trim();
+    // Strip injection wrappers before previewing (outermost first):
+    // 1. Interrupt wrapper: 【新消息插入】\n...\n【请无视之前中断继续处理】
+    text = text.replace(/^【新消息插入】\s*/, '').replace(/\s*【请无视之前中断继续处理】$/, '').trim();
+    // 2. Current format: ‹metadata›\ncontent  (message-renderer item.md)
+    if (text.startsWith('‹')) {
+      const nl = text.indexOf('\n');
+      if (nl !== -1) text = text.slice(nl + 1).trim();
+    }
+    // 3. Legacy XML format: <messages><message sender="..." time="...">content</message></messages>
+    if (text.startsWith('<messages>')) {
+      const parts: string[] = [];
+      const re = /<message(?:\s[^>]*)?>([\s\S]*?)<\/message>/g;
+      let match: RegExpExecArray | null;
+      while ((match = re.exec(text)) !== null) parts.push(match[1].trim());
+      if (parts.length > 0) text = parts.join(' ');
+    }
+    text = text.replace(/\s+/g, ' ').trim();
     if (!text) return '';
     return text.length > 50 ? text.substring(0, 50) + '…' : text;
   }
@@ -4252,6 +4338,18 @@ export class CommandHandler {
 export function isProcessLevelOwner(peerId: string | undefined, owners: string[] | undefined): boolean {
   if (!peerId) return false;
   return (owners ?? []).includes(peerId);
+}
+
+/** ECWeb menu.response 错误信封。 */
+function ecwebErr(id: string, name: string | undefined, code: string, message: string): import('../types.js').MenuResponse {
+  return { type: 'menu.response', id, ...(name ? { name } : {}), error: { code, message } };
+}
+
+/** 把 execMenu* 的 {data}|{error} 结果转成 menu.response。 */
+function ecwebResp(id: string, name: string | undefined, result: { data: any } | { error: string; code?: string }): import('../types.js').MenuResponse {
+  return 'error' in result
+    ? { type: 'menu.response', id, ...(name ? { name } : {}), error: { code: result.code ?? 'EXEC_FAILED', message: result.error } }
+    : { type: 'menu.response', id, ...(name ? { name } : {}), data: result.data };
 }
 
 /** 校验 menu 路径直传的 trigger 调度参数（绕过 parseTriggerSet 文本解析后必须自校验）。

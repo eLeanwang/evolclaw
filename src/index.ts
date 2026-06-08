@@ -1047,6 +1047,7 @@ async function main() {
 
   // M3: direct call (not cast) — wire EvolAgentRegistry into IPC for evolagent.* handlers
   ipcServer.setAgentRegistry(agentRegistry);
+  ipcServer.setMenuExecutor((payload) => cmdHandler.execMenuForEcweb(payload));
 
   // 注入 AUN AID 状态聚合器：遍历所有 aun 类型 channel，调 getAidState() 收集
   ipcServer.setAunAidProvider(() => {

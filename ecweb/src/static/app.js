@@ -58,7 +58,7 @@ let ws = null;
 let reconnectDelay = 1000;
 let currentView = 'aid';
 let pendingSub = null;        // 重连后要恢复的订阅
-const state = { aid: null, msg: null, session: null, cache: null };
+const state = { aid: null, msg: null, session: null, cache: null, control: null };
 
 function setConnStatus(text, cls) {
   const el = $('#conn-status');
@@ -83,6 +83,11 @@ function connect() {
     try { msg = JSON.parse(ev.data); } catch { return; }
     if (msg.type === 'pong') return;
     if (msg.type === 'error') { console.warn('server error:', msg.message); return; }
+    if (msg.type === 'menu.response') {
+      const pend = _menuPending[msg.requestId];
+      if (pend) { delete _menuPending[msg.requestId]; pend.resolve(msg.data); }
+      return;
+    }
     if (msg.type === 'snapshot' || msg.type === 'delta') {
       state[msg.view] = msg.data;
       if (msg.view === currentView) renderView(currentView);
@@ -110,6 +115,22 @@ function subscribe(view, params) {
   }
 }
 
+// ── Menu 写请求（update/action）：经 WS menu 消息，requestId 配对响应 ──
+const _menuPending = {};
+let _menuSeq = 0;
+function menuSend(payload) {
+  return new Promise((resolve, reject) => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) { reject(new Error('未连接')); return; }
+    const requestId = 'ecw-' + (++_menuSeq);
+    const withId = { ...payload, id: payload.id || requestId };
+    _menuPending[requestId] = { resolve, reject };
+    setTimeout(() => {
+      if (_menuPending[requestId]) { delete _menuPending[requestId]; reject(new Error('timeout')); }
+    }, 6000);
+    ws.send(JSON.stringify({ type: 'menu', requestId, payload: withId }));
+  });
+}
+
 // 心跳
 setInterval(() => {
   if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'ping' }));
@@ -129,6 +150,7 @@ function switchView(view) {
   if (view === 'msg') subscribe('msg', { aid: msgSel.aid, peer: msgSel.peer });
   else if (view === 'session') subscribe('session', { sessionId: sessSel.sessionId, project: sessSel.project });
   else if (view === 'cache') subscribe('cache', {});
+  else if (view === 'control') subscribe('control', {});
   else subscribe('aid', {});
   if (state[view]) renderView(view);
 }
@@ -144,6 +166,7 @@ function renderView(view) {
   else if (view === 'msg') renderMsg(state.msg);
   else if (view === 'session') renderSession(state.session);
   else if (view === 'cache') renderCache(state.cache);
+  else if (view === 'control') renderControl(state.control);
 }
 
 // ── 工具 ──
@@ -650,6 +673,78 @@ function renderBlocks(blocks) {
     }
   }
   return out;
+}
+
+// ── Control 视图（通用 Menu 协议客户端）──
+
+// 能力矩阵（协议 §3，cli 不暴露）
+const MENU_CAPS = {
+  pwd:        { query: true, group: 'System' },
+  system:     { query: true, actions: ['check', 'restart', 'upgrade'], group: 'System' },
+  baseagent:  { query: true, options: true, update: true, group: 'Agent 配置' },
+  model:      { query: true, options: true, update: true, group: 'Agent 配置' },
+  effort:     { query: true, options: true, update: true, group: 'Agent 配置' },
+  chatmode:   { query: true, options: true, update: true, group: 'Agent 配置' },
+  permission: { query: true, options: true, update: true, group: 'Agent 配置' },
+  activity:   { query: true, options: true, update: true, group: 'Agent 配置' },
+  dispatch:   { query: true, options: true, update: true, group: 'Agent 配置' },
+  session:    { query: true, options: true, actions: ['stop', 'new', 'delete', 'compact', 'fork', 'switch'], group: '会话' },
+  agent:      { options: true, actions: ['create', 'delete', 'enable', 'disable'], group: 'EvolAgent' },
+  trigger:    { options: true, update: true, actions: ['set', 'cancel'], group: '触发器' },
+};
+const CTRL_ORDER = ['System', 'Agent 配置', '会话', 'EvolAgent', '触发器'];
+
+let _ctrlBusy = false;  // 写操作进行中，避免轮询重渲染打断交互
+
+// 提取 menu.response 的 data/error
+function mResp(r) {
+  if (!r) return { error: { code: 'INTERNAL', message: 'no response' } };
+  if (r.error) return { error: r.error };
+  return { data: r.data };
+}
+
+function toast(text, isErr) {
+  let el = $('#ctrl-toast');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'ctrl-toast';
+    el.className = 'ctrl-toast';
+    document.body.appendChild(el);
+  }
+  el.textContent = text;
+  el.className = 'ctrl-toast show' + (isErr ? ' err' : '');
+  clearTimeout(el._t);
+  el._t = setTimeout(() => { el.className = 'ctrl-toast'; }, 2600);
+}
+
+function renderControl(data) {
+  const el = $('#view-control');
+  if (!data) { el.innerHTML = '<div class="empty">加载中…</div>'; return; }
+  if (_ctrlBusy) return;  // 交互中，跳过本次轮询渲染
+  if (!data.daemonRunning) {
+    el.innerHTML = '<div class="banner">⚠ EvolClaw 主进程未运行，Control 不可用</div>';
+    return;
+  }
+
+  // 按 group 聚合
+  const groups = {};
+  for (const name of Object.keys(MENU_CAPS)) {
+    const g = MENU_CAPS[name].group;
+    (groups[g] ||= []).push(name);
+  }
+
+  let html = '<div class="ctrl-wrap">';
+  for (const g of CTRL_ORDER) {
+    if (!groups[g]) continue;
+    html += `<section class="ctrl-section"><h2 class="ctrl-h">${esc(g)}</h2><div class="ctrl-grid">`;
+    for (const name of groups[g]) {
+      html += renderMenuCard(name, MENU_CAPS[name], data);
+    }
+    html += '</div></section>';
+  }
+  html += '</div>';
+  el.innerHTML = html;
+  bindControlEvents(el, data);
 }
 
 // ── 启动 ──

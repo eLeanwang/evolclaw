@@ -284,3 +284,34 @@ tr:hover td { background: var(--bg2); }
 .tag-global { color: var(--orange); border-color: var(--orange); }
 .cache-note { color: var(--dim); font-size: 11px; margin: 14px 2px 24px; line-height: 1.6; }
 
+/* ── Control 视图 ── */
+.ctrl-wrap { padding: 12px; overflow-y: auto; height: 100%; }
+.ctrl-section { margin-bottom: 20px; }
+.ctrl-h { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .06em; margin-bottom: 8px; }
+.ctrl-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 8px; }
+.ctrl-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; }
+.ctrl-card.ctrl-locked { opacity: .5; }
+.ctrl-card h3 { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 8px; }
+.ctrl-kv { display: grid; grid-template-columns: auto 1fr; gap: 2px 8px; }
+.kv-row { display: contents; }
+.kv-k { color: var(--dim); font-size: 11.5px; }
+.kv-v { color: var(--fg); font-size: 11.5px; word-break: break-all; }
+.ctrl-cur { color: var(--accent); font-size: 12px; margin-right: 6px; }
+.ctrl-select { font-size: 12px; background: var(--bg3); border: 1px solid var(--border); border-radius: 4px; color: var(--fg); padding: 3px 6px; max-width: 160px; }
+.ctrl-row { display: flex; align-items: center; margin: 4px 0; }
+.ctrl-msg { font-size: 12px; color: var(--dim); margin: 4px 0; }
+.ctrl-msg.muted { color: var(--border); }
+.ctrl-list { list-style: none; padding: 0; margin: 6px 0 0; }
+.ctrl-list li { display: flex; align-items: center; gap: 5px; padding: 3px 0; border-bottom: 1px solid var(--border); font-size: 12px; }
+.ctrl-list li:last-child { border-bottom: none; }
+.ctrl-list .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ctrl-tag { font-size: 11px; color: var(--dim); }
+.ctrl-btns { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
+.ctrl-btn { font-size: 11px; padding: 2px 8px; border-radius: 3px; border: 1px solid var(--border); background: var(--bg3); color: var(--fg); cursor: pointer; }
+.ctrl-btn:hover { border-color: var(--accent); color: var(--accent); }
+.ctrl-btn.danger { color: var(--red); border-color: var(--red); }
+.ctrl-btn:disabled { opacity: .4; cursor: not-allowed; }
+.ctrl-toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: var(--bg3); border: 1px solid var(--border); border-radius: 5px; padding: 6px 14px; font-size: 12px; opacity: 0; pointer-events: none; transition: opacity .2s; z-index: 99; }
+.ctrl-toast.show { opacity: 1; }
+.ctrl-toast.err { border-color: var(--red); color: var(--red); }
+

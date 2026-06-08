@@ -57,6 +57,7 @@ type CommandExecutor = (cmd: string, sessionId: string) => Promise<IpcCtlRespons
 type AunAidProvider = () => AidConnectionState[];
 type AunAidStatsProvider = () => AidStatsSnapshot[];
 type AunAidStatsRecorder = (params: { aid: string; toPeer: string; text: string; encrypt?: boolean; chatmode?: string }) => void;
+type MenuExecutor = (payload: any) => Promise<any>;
 
 export class IpcServer {
   private server: net.Server | null = null;
@@ -64,6 +65,7 @@ export class IpcServer {
   private aunAidProvider?: AunAidProvider;
   private aunAidStatsProvider?: AunAidStatsProvider;
   private aunAidStatsRecorder?: AunAidStatsRecorder;
+  private menuExecutor?: MenuExecutor;
 
   constructor(
     private socketPath: string,
@@ -74,6 +76,11 @@ export class IpcServer {
   /** Inject EvolAgentRegistry for evolagent.* IPC handlers */
   setAgentRegistry(registry: EvolAgentRegistryHandle): void {
     this.agentRegistry = registry;
+  }
+
+  /** Inject menu.* executor (ECWeb Control proxies menu requests through this) */
+  setMenuExecutor(executor: MenuExecutor): void {
+    this.menuExecutor = executor;
   }
 
   /** Inject AUN AID state aggregator for aun-aids IPC handler */
@@ -233,6 +240,15 @@ export class IpcServer {
           return { ok: true, results };
         } catch (e: any) {
           return { ok: false, error: e?.message || String(e) };
+        }
+      }
+      case 'menu.exec': {
+        if (!this.menuExecutor) return { ok: false, error: 'menu.exec not configured' };
+        try {
+          const response = await this.menuExecutor(cmd.payload);
+          return { ok: true, response };
+        } catch (e: any) {
+          return { ok: false, error: e?.message ?? String(e) };
         }
       }
       default:

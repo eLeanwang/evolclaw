@@ -23,6 +23,7 @@ import { aidSource } from './sources/aid.js';
 import { msgSource } from './sources/msg.js';
 import { sessionSource } from './sources/session.js';
 import { cacheSource } from './sources/cache.js';
+import { controlSource } from './sources/control.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const STATIC_DIR = path.join(__dirname, 'static');
@@ -32,7 +33,7 @@ const PAIRING_TTL_MS = 5 * 60 * 1000;       // 5min
 const DEFAULT_PORT = 42705;
 const PROTOCOL_VERSION = 1;                  // 与 evolclaw ping response 对齐的软校验版本
 
-const SOURCES: Record<ViewKind, WatchSource> = { aid: aidSource, msg: msgSource, session: sessionSource, cache: cacheSource };
+const SOURCES: Record<ViewKind, WatchSource> = { aid: aidSource, msg: msgSource, session: sessionSource, cache: cacheSource, control: controlSource };
 
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -188,6 +189,22 @@ function handleConnection(ws: WebSocket, req: http.IncomingMessage, log: (s: str
       if (msg.project) params.project = msg.project;
       dlog(`▸ 订阅 ${msg.view}${msg.aid ? ` aid=${String(msg.aid).split('.')[0]}` : ''}${msg.peer ? ` peer=${String(msg.peer).split('.')[0]}` : ''}${msg.sessionId ? ` session=${String(msg.sessionId).slice(0, 8)}` : ''} from ${ip}`);
       await switchSubscription(msg.view as ViewKind, params);
+      return;
+    }
+    if (msg.type === 'menu' && msg.payload) {
+      const p = resolvePaths();
+      const resp = await ipcQuery<{ ok: boolean; response?: any; error?: string }>(
+        p.socket, { type: 'menu.exec', payload: msg.payload }, 5000,
+      );
+      if (resp?.ok) {
+        send({ type: 'menu.response', requestId: msg.requestId, data: resp.response });
+      } else {
+        send({ type: 'menu.response', requestId: msg.requestId, data: {
+          type: 'menu.response', id: msg.payload?.id ?? '',
+          error: { code: 'INTERNAL', message: resp?.error ?? 'daemon unreachable' },
+        } });
+      }
+      return;
     }
   });
 
