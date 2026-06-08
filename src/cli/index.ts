@@ -19,6 +19,7 @@ import { EventBus } from '../core/event-bus.js';
 import { tryUpgrade, tryUpgradeAunSdk, type UpgradeResult } from '../utils/npm-ops.js';
 import { resolveAunCoreSdkPkg, AUN_CORE_SDK_PKG } from '../aun/aid/client.js';
 import { scanInstances, cleanupInstances, readAidLastActivity, writeRestartMonitor, removeRestartMonitor, isRestartMonitorWinner, findOrphanProcesses, killOrphans, type OrphanProcess } from '../utils/instance-registry.js';
+import { displaySessionTitle } from '../core/session/session-title.js';
 
 // Suppress Node.js ExperimentalWarning (e.g. SQLite) from cluttering CLI output
 process.removeAllListeners('warning');
@@ -310,6 +311,24 @@ async function cmdStart() {
   }
   if (!evolclawCfgStart.aid) {
     console.log('⚠ 控制 AID 未配置（非交互式启动，跳过补全）。如需进程身份/远程管理，请运行 evolclaw init');
+  } else if (process.stdin.isTTY) {
+    // 证书缺失时在 CLI 侧提示，daemon 是后台进程无终端不做交互
+    const certKey = path.join(resolvePaths().root, 'AIDs', evolclawCfgStart.aid, 'private', 'key.json');
+    if (!fs.existsSync(certKey)) {
+      console.log(`⚠ 控制 AID 证书缺失：${evolclawCfgStart.aid}`);
+      const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+      const ans = await new Promise<string>(res => rl.question('  [1] 继续启动  [2] 重新生成 AID  [3] 退出 [1/2/3]: ', res));
+      rl.close();
+      if (ans.trim() === '3') { process.exit(0); }
+      if (ans.trim() === '2') {
+        const { suppressSdkLogs } = await import('../aun/aid/index.js');
+        suppressSdkLogs();
+        const { generateControlAid } = await import('../aun/aid/control-aid.js');
+        const result = await generateControlAid();
+        saveEvolclawConfig({ ...loadEvolclawConfig(), aid: result.aid });
+        console.log(`✓ 新控制 AID: ${result.aid}`);
+      }
+    }
   }
 
   // 检查至少有一个 self-agent
@@ -928,7 +947,7 @@ async function cmdStatus() {
             const projectName = path.basename(s.projectPath);
             const sessionType = s.threadId ? '话题会话' : '主会话';
             const chatType = s.chatType === 'group' ? '群聊' : '单聊';
-            const sessionName = s.name || '默认会话';
+            const sessionName = displaySessionTitle(s.name);
             const timeAgo = formatTimeAgo(Date.now() - s.updatedAt);
             const dot = s.isActive ? '•' : '○';
             const agentSidLabel = s.agentSessionId ? ` [${s.agentSessionId}]` : '';

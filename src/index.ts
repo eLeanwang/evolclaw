@@ -819,41 +819,13 @@ async function main() {
   }
 
   // ── 控制 AID（daemon 进程身份）：pureIdentity 接入 AUN，独立于 evolagent ──
-  // 启动前检测证书是否存在，缺失时交互询问用户
+  // 证书缺失检测/生成在 CLI 侧（evolclaw start）完成。daemon 是后台进程无终端，
+  // 这里只做兜底：证书缺失时 warn 并继续（AUNChannel 内部后台重连），绝不阻塞。
   if (evolclawCfg.aid) {
     const aunPath = resolvePaths().root;
     const certKey = path.join(aunPath, 'AIDs', evolclawCfg.aid, 'private', 'key.json');
     if (!fs.existsSync(certKey)) {
-      let answer = '1';
-      if (process.stdin.isTTY) {
-        answer = await new Promise<string>(resolve => {
-          const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-          rl.question(
-            `\n⚠️  控制 AID 证书缺失：${evolclawCfg.aid}\n` +
-            `  [1] 继续启动（AUN 控制通道不可用，后台重连）\n` +
-            `  [2] 自动生成新 AID 并覆盖配置\n` +
-            `  [3] 退出\n` +
-            `请选择 [1/2/3]: `,
-            ans => { rl.close(); resolve(ans.trim()); }
-          );
-        });
-      } else {
-        logger.warn(`控制 AID 证书缺失：${evolclawCfg.aid}，非交互式启动，自动继续（后台重连）`);
-      }
-
-      if (answer === '3') {
-        logger.info('用户选择退出');
-        process.exit(0);
-      } else if (answer === '2') {
-        logger.info('正在生成新控制 AID...');
-        const { generateControlAid } = await import('./aun/aid/control-aid.js');
-        const { saveEvolclawConfig } = await import('./evolclaw-config.js');
-        const result = await generateControlAid();
-        saveEvolclawConfig({ ...evolclawCfg, aid: result.aid });
-        evolclawCfg.aid = result.aid;
-        logger.info(`✓ 新控制 AID 已生成并写入配置: ${result.aid}`);
-      }
-      // answer === '1' 或其他：继续，AUNChannel 内部会后台重连
+      logger.warn(`控制 AID 证书缺失：${evolclawCfg.aid}（AUN 控制通道后台重连；如需重建运行 evolclaw init）`);
     }
   }
 
