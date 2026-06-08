@@ -78,7 +78,9 @@ export function normalizeUsage(
     output_tokens = raw.output_tokens ?? raw.completion_tokens ?? 0;
     cache_hit_tokens = raw.cache_hit_tokens ?? 0;
     cache_miss_tokens = raw.cache_miss_tokens ?? 0;
-    input_tokens = cache_miss_tokens; // 未命中部分才算 input
+    input_tokens = cache_miss_tokens; // 未命中部分才算 input（计费口径）
+    // 实际上下文长度 = 命中 + 未命中（total KV cache input）
+    total_context_tokens = cache_hit_tokens + cache_miss_tokens;
 
   } else if (raw.promptTokenCount != null || raw.candidatesTokenCount != null) {
     // Gemini 原生
@@ -112,7 +114,7 @@ export function normalizeUsage(
   }
 
   if (total_context_tokens == null) {
-    total_context_tokens = input_tokens + cache_creation_tokens + cache_read_tokens || undefined;
+    total_context_tokens = input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens || undefined;
   }
 
   return {
