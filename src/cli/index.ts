@@ -5,7 +5,7 @@ import { spawn, execFileSync, execFile } from 'child_process';
 import { promisify } from 'util';
 import { resolveRoot, resolvePaths, ensureDataDirs, getPackageRoot, agentMdPath } from '../paths.js';
 import { loadDefaults, loadAllAgents, mergeForAgent } from '../config-store.js';
-import { loadEvolclawConfig } from '../evolclaw-config.js';
+import { loadEvolclawConfig, saveEvolclawConfig } from '../evolclaw-config.js';
 import { resolveAnthropicConfig } from '../agents/resolve.js';
 import { normalizeChannelInstances, channelTypes } from '../utils/channel-helpers.js';
 import { migrateProject } from '../config-store.js';
@@ -440,6 +440,8 @@ async function cmdStart() {
         countLines(getPackageRoot(), p.logs);
       }
       console.log(`⏱ done in ${((Date.now() - cmdStartedAt) / 1000).toFixed(1)}s`);
+      // ECWeb 自动后台启动
+      startEcwebIfEnabled(p);
       return;
     }
 
@@ -2086,54 +2088,93 @@ async function cmdWatchAid(): Promise<void> {
   platform.onShutdown(cleanup);
 }
 
-async function cmdWatchWeb(): Promise<void> {
-  // evolclaw-web 是独立插件包（可执行命令），按需安装。
-  // 复用 npm-ops.npmInstallGlobal（含 EACCES→sudo 回退、Windows npm.cmd、超时）。
-  const { execFileSync } = await import('child_process');
-  const home = resolvePaths().root;
+/** 扫描 instance/ 目录，返回存活的 ecweb 实例（ecweb-<pid>.json）。 */
+function findAliveEcweb(p: ReturnType<typeof resolvePaths>): { pid: number; port: number } | null {
+  if (!fs.existsSync(p.instanceDir)) return null;
+  for (const file of fs.readdirSync(p.instanceDir)) {
+    if (!file.startsWith('ecweb-') || !file.endsWith('.json')) continue;
+    try {
+      const rec = JSON.parse(fs.readFileSync(path.join(p.instanceDir, file), 'utf-8'));
+      if (rec.pid && platform.isProcessRunning(rec.pid)) return { pid: rec.pid, port: rec.port ?? 42705 };
+      fs.unlinkSync(path.join(p.instanceDir, file));
+    } catch {}
+  }
+  return null;
+}
 
+/** 后台 detached 启动 ecweb；若已运行则跳过。 */
+function startEcwebIfEnabled(p: ReturnType<typeof resolvePaths>): void {
+  const cfg = loadEvolclawConfig();
+  if (!cfg.ecweb?.enabled) return;
+  if (findAliveEcweb(p)) return; // 已在运行
+
+  const exe = platform.resolveCommandPath('evolclaw-web');
+  if (!exe) return; // 未安装，静默跳过
+
+  const port = cfg.ecweb.port ?? 42705;
+  const isBatch = /\.(cmd|bat)$/i.test(exe);
+  const args = ['--home', p.root, '--port', String(port)];
+  const child = isBatch
+    ? spawn(`"${exe}"`, args.map(a => `"${a}"`), { detached: true, stdio: 'ignore', shell: true, windowsHide: true })
+    : spawn(exe, args, { detached: true, stdio: 'ignore', windowsHide: true });
+
+  child.unref();
+  const pid = child.pid;
+  if (!pid) return;
+
+  fs.mkdirSync(p.instanceDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(p.instanceDir, `ecweb-${pid}.json`),
+    JSON.stringify({ pid, port, startedAt: Date.now() }, null, 2),
+  );
+  console.log(`🔭 ECWeb 已在后台启动 (PID: ${pid})  http://localhost:${port}`);
+}
+
+async function cmdWatchWeb(): Promise<void> {
+  const p = resolvePaths();
+
+  // 1. 检查安装
   if (!platform.commandExists('evolclaw-web')) {
-    process.stdout.write('📦 evolclaw-web 未安装，正在从 npm 安装...\n');
+    process.stdout.write('📦 evolclaw-web 未安装。');
+    if (!process.stdin.isTTY) {
+      process.stdout.write(' 请手动安装: npm install -g evolclaw-web\n');
+      process.exit(1);
+    }
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    const ans = await new Promise<string>(res => rl.question(' 立即安装？[Y/n] ', res));
+    rl.close();
+    if (ans.trim().toLowerCase() === 'n') { process.exit(0); }
+    process.stdout.write('\n');
     const { npmInstallGlobal } = await import('../utils/npm-ops.js');
     try {
       await npmInstallGlobal('evolclaw-web');
     } catch (e: any) {
-      process.stderr.write(`❌ 安装 evolclaw-web 失败: ${e?.stderr || e?.message || e}\n   可手动安装: npm install -g evolclaw-web\n`);
+      process.stderr.write(`❌ 安装失败: ${e?.stderr || e?.message || e}\n`);
       process.exit(1);
     }
   }
 
-  // 解析可执行文件的真实绝对路径：
-  //  - Windows 上 bin 是 evolclaw-web.cmd，execFileSync 不会自动补后缀
-  //  - 刚安装的命令可能不在当前进程已缓存的 PATH 里，用 where/which 重新探测
-  const exe = platform.resolveCommandPath('evolclaw-web');
-  if (!exe) {
-    process.stderr.write('❌ 已安装 evolclaw-web 但无法定位可执行文件。\n   请重新打开终端后再次运行，或手动执行: evolclaw-web --home ' + home + '\n');
-    process.exit(1);
+  // 2. 检查是否已运行
+  const alive = findAliveEcweb(p);
+  if (alive) {
+    console.log(`🔭 ECWeb 已在运行 (PID: ${alive.pid})  http://localhost:${alive.port}`);
+    return;
   }
 
-  // Node 18.20+/20+/22 起，execFile 拒绝直接 spawn .cmd/.bat（CVE-2024-27980），必须 shell:true。
-  // shell 模式下含空格的路径/参数需加引号。
-  // evolclaw-web 是前台长驻服务：用户 Ctrl-C、被新实例的单实例保护 SIGKILL、或正常退出，
-  // execFileSync 都会抛错（signal 终止时 status=null）。这些都是正常生命周期，
-  // 不应让父进程 evolclaw 带堆栈崩溃。只有真正的非信号失败才提示。
-  const isBatch = /\.(cmd|bat)$/i.test(exe);
-  try {
-    if (isBatch) {
-      const q = (s: string) => `"${s}"`;
-      execFileSync(q(exe), ['--home', q(home)], { stdio: 'inherit', shell: true });
-    } else {
-      execFileSync(exe, ['--home', home], { stdio: 'inherit' });
-    }
-  } catch (e: any) {
-    // 信号终止（SIGINT/SIGTERM/SIGKILL）= 用户主动退出或被新实例顶替，静默返回
-    if (e?.signal) return;
-    // 退出码非 0 但非信号：可能是启动失败，提示但不崩溃
-    if (typeof e?.status === 'number' && e.status !== 0) {
-      process.stderr.write(`⚠ evolclaw-web 退出（code ${e.status}）\n`);
-    }
+  // 3. 启动（后台）并同步配置
+  const cfg = loadEvolclawConfig();
+  const port = cfg.ecweb?.port ?? 42705;
+  if (cfg.ecweb?.enabled === undefined) {
+    // 首次手动启动时自动写入 enabled:true
+    saveEvolclawConfig({ ...cfg, ecweb: { enabled: true, port } });
+  }
+  startEcwebIfEnabled(p);
+  if (!findAliveEcweb(p)) {
+    process.stderr.write('❌ 启动失败，请检查 evolclaw-web 是否正确安装\n');
+    process.exit(1);
   }
 }
+
 async function cmdRestartMonitor() {
   const p = resolvePaths();
   const restartLog = path.join(p.logs, 'restart.log');

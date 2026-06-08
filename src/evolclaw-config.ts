@@ -23,6 +23,10 @@ export interface EvolclawConfig {
   debug?: DebugBlock;
   tunnel?: TunnelConfig;
   aun?: EvolclawAunConfig;   // 从旧 config.json 迁入
+  ecweb?: {
+    enabled?: boolean;        // true = evolclaw start 时自动后台启动 ecweb
+    port?: number;            // 监听端口，默认 42705
+  };
 }
 
 /** 读 {root}/evolclaw.json。文件不存在返回 {}，不报错。 */

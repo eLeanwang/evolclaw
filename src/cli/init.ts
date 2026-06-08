@@ -7,7 +7,7 @@ import { scanInstances } from '../utils/instance-registry.js';
 import { saveDefaultsSafe, loadAllAgents, migrateProcessConfigIfNeeded } from '../config-store.js';
 import { loadEvolclawConfig, saveEvolclawConfig } from '../evolclaw-config.js';
 import { generateControlAid } from '../aun/aid/control-aid.js';
-import { isCodexSdkAvailable } from '../agents/codex-runner.js';
+import { isCodexAppServerAvailable } from '../agents/codex-runner.js';
 
 // ==================== Helpers ====================
 
@@ -19,7 +19,7 @@ const BASEAGENT_CANDIDATES = ['claude', 'codex', 'gemini'] as const;
 type Baseagent = typeof BASEAGENT_CANDIDATES[number];
 
 function isBaseagentAvailable(baseagent: Baseagent): boolean {
-  if (baseagent === 'codex') return isCodexSdkAvailable();
+  if (baseagent === 'codex') return isCodexAppServerAvailable();
   return commandExists(baseagent);
 }
 
@@ -95,7 +95,7 @@ export async function cmdInit(options?: {
     console.log('❌ 未检测到可用 baseagent。请安装至少一款：');
     console.log('  - claude CLI');
     console.log('  - gemini CLI');
-    console.log('  - optional dependency @openai/codex-sdk');
+    console.log('  - codex CLI with app-server');
     console.log('\n安装后重新运行 evolclaw init');
     return;
   }
@@ -259,6 +259,27 @@ export async function initTail(): Promise<void> {
       }
     } finally {
       try { rlOwners.close(); } catch { /* ignore */ }
+    }
+  }
+
+  // ECWeb：交互式 + 未配置时询问是否启用
+  if (process.stdin.isTTY) {
+    const evcEcweb = loadEvolclawConfig();
+    if (evcEcweb.ecweb?.enabled === undefined) {
+      const rlEcweb = readline.createInterface({ input: process.stdin, output: process.stdout });
+      try {
+        const ans = (await ask(rlEcweb, '\n是否在 evolclaw start 时自动启动 ECWeb 控制台？[y/N] ')).trim().toLowerCase();
+        if (ans === 'y' || ans === 'yes') {
+          saveEvolclawConfig({ ...loadEvolclawConfig(), ecweb: { enabled: true } });
+          console.log('  ✓ 已启用 ECWeb（evolclaw start 将自动在后台启动）');
+          console.log('  提示：首次访问运行 ec watch web 查看配对码和 URL');
+        } else {
+          saveEvolclawConfig({ ...loadEvolclawConfig(), ecweb: { enabled: false } });
+          console.log('  已跳过（可日后运行 ec watch web 手动启动，或编辑 evolclaw.json）');
+        }
+      } finally {
+        try { rlEcweb.close(); } catch {}
+      }
     }
   }
 }
