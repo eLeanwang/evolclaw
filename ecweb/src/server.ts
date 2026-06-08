@@ -119,6 +119,13 @@ function clientIp(req: http.IncomingMessage): string {
   return req.socket.remoteAddress || '?';
 }
 
+// 仅 localhost 可访问（取配对码）：直连 socket 地址必须是回环。
+// 不信任 x-forwarded-for（代理头可伪造），只看真实 TCP 来源。
+function isLocalhost(req: http.IncomingMessage): boolean {
+  const addr = req.socket.remoteAddress || '';
+  return addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1';
+}
+
 function genPairingCode(): string {
   return String(crypto.randomInt(0, 1000000)).padStart(6, '0');
 }
@@ -266,6 +273,12 @@ export async function startWatchWebServer(opts: { port?: number; log?: (s: strin
 
   const server = http.createServer((req, res) => {
     if (req.method === 'GET' && (req.url || '') === '/api/pair-code') {
+      // 仅 localhost 可取码：远程浏览器拿不到，必须由同机的 `ec watch web` 显示给用户
+      if (!isLocalhost(req)) {
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'forbidden' }));
+        return;
+      }
       const { code, expiresAt } = freshPairing();
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ code, expiresAt }));

@@ -2147,6 +2147,36 @@ function startEcwebIfEnabled(p: ReturnType<typeof resolvePaths>): void {
     JSON.stringify({ pid, port, startedAt: Date.now() }, null, 2),
   );
   console.log(`🔭 ECWeb 已在后台启动 (PID: ${pid})  http://localhost:${port}`);
+  console.log(`   运行 ec watch web 查看配对码`);
+}
+
+/** 通过 localhost 拉取 ecweb 当前配对码（仅本机可取）。失败返回 null。 */
+async function fetchEcwebPairCode(port: number): Promise<{ code: string; expiresAt: number } | null> {
+  try {
+    const resp = await fetch(`http://127.0.0.1:${port}/api/pair-code`, {
+      signal: AbortSignal.timeout(2000),
+    });
+    if (!resp.ok) return null;
+    return await resp.json() as { code: string; expiresAt: number };
+  } catch {
+    return null;
+  }
+}
+
+/** 显示 ecweb 访问信息 + 配对码（启动后 ecweb 需要一点时间起 HTTP，故重试几次）。 */
+async function printEcwebAccess(port: number): Promise<void> {
+  console.log(`🔭 ECWeb  http://localhost:${port}`);
+  let pair: { code: string; expiresAt: number } | null = null;
+  for (let i = 0; i < 10 && !pair; i++) {
+    pair = await fetchEcwebPairCode(port);
+    if (!pair) await sleep(300);
+  }
+  if (pair) {
+    const mins = Math.max(0, Math.round((pair.expiresAt - Date.now()) / 60000));
+    console.log(`   配对码: ${pair.code}  (约 ${mins} 分钟内有效，配对后 token 缓存 24h)`);
+  } else {
+    console.log('   配对码: 暂不可用（稍后重试 ec watch web，或查看 logs/watch-web.log）');
+  }
 }
 
 async function cmdWatchWeb(): Promise<void> {
@@ -2176,7 +2206,7 @@ async function cmdWatchWeb(): Promise<void> {
   // 2. 检查是否已运行
   const alive = findAliveEcweb(p);
   if (alive) {
-    console.log(`🔭 ECWeb 已在运行 (PID: ${alive.pid})  http://localhost:${alive.port}`);
+    await printEcwebAccess(alive.port);
     return;
   }
 
@@ -2188,10 +2218,12 @@ async function cmdWatchWeb(): Promise<void> {
     saveEvolclawConfig({ ...cfg, ecweb: { enabled: true, port } });
   }
   startEcwebIfEnabled(p);
-  if (!findAliveEcweb(p)) {
+  const started = findAliveEcweb(p);
+  if (!started) {
     process.stderr.write('❌ 启动失败，请检查 evolclaw-web 是否正确安装\n');
     process.exit(1);
   }
+  await printEcwebAccess(started.port);
 }
 
 async function cmdRestartMonitor() {
