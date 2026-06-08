@@ -9,10 +9,10 @@ vi.mock('../../src/utils/cross-platform.js', () => ({
 }));
 
 vi.mock('../../src/agents/codex-runner.js', () => ({
-  isCodexSdkAvailable: vi.fn(() => true),
+  isCodexAppServerAvailable: vi.fn(() => true),
 }));
 
-describe('codex availability via SDK', () => {
+describe('codex availability via app-server', () => {
   let tmpRoot: string;
 
   beforeEach(() => {
@@ -39,7 +39,7 @@ describe('codex availability via SDK', () => {
     logSpy.mockRestore();
   });
 
-  it('agentCreateNonInteractive accepts codex when SDK is available', async () => {
+  it('agentCreateNonInteractive accepts codex when app-server is available', async () => {
     const { agentCreateNonInteractive } = await import('../../src/cli/agent.js');
     const result = await agentCreateNonInteractive({
       aid: 'mybot.agentid.pub',
@@ -50,5 +50,30 @@ describe('codex availability via SDK', () => {
     if (!result.ok) {
       expect(result.error).toMatch(/must be absolute/);
     }
+  });
+});
+
+describe('session title sanitization', () => {
+  it('strips injected system prompt markers from persisted titles', async () => {
+    const { displaySessionTitle, sanitizeSessionTitle } = await import('../../src/core/session/session-title.js');
+    const polluted = [
+      '‹2026-06-08 16:58:01 +08:00 · from:user → self:›',
+      '在吗？',
+      '',
+      '--- [SYSTEM_PROMPT_END] ---',
+      '<system-reminder>',
+      'EvolClaw Context Kit documents are shown below.',
+    ].join('\n');
+
+    expect(sanitizeSessionTitle(polluted)).toBe('在吗？');
+    expect(displaySessionTitle(polluted)).not.toContain('SYSTEM_PROMPT_END');
+    expect(displaySessionTitle('')).toBe('默认会话');
+    expect(displaySessionTitle('...')).toBe('默认会话');
+  });
+
+  it('falls back when a polluted title only contains a route prefix', async () => {
+    const { displaySessionTitle } = await import('../../src/core/session/session-title.js');
+    const title = '‹2026-06-08 16:58:01 +08:00 · from:ou_xxx → self:›';
+    expect(displaySessionTitle(title)).toBe('默认会话');
   });
 });

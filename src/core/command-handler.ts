@@ -27,6 +27,7 @@ import { tryParseChannelKey } from './channel-loader.js';
 import { loadDefaults } from '../config-store.js';
 import { loadEvolclawConfig } from '../evolclaw-config.js';
 import { execAgentAction, execAgentQuery, execAgentOptions, resolveProjectPath } from './message/command-handler-agent-control.js';
+import { displaySessionTitle } from './session/session-title.js';
 
 export interface MenuNext {
   type: 'select' | 'text';
@@ -709,9 +710,10 @@ export class CommandHandler {
       const items: MenuItem[] = sessions
         .filter(s => !active || s.id !== active.id)
         .map(s => {
+          const displayName = displaySessionTitle(s.name, s.id.slice(0, 8));
           const item: MenuItem = {
             value: s.name || s.id.slice(0, 8),
-            label: s.name || s.id.slice(0, 8),
+            label: displayName,
             selected: currentSession ? s.id === currentSession.id : false,
           };
           if (s.agentSessionId) {
@@ -2109,7 +2111,7 @@ export class CommandHandler {
       const newSession = await this.sessionManager.switchAgent(channel, channelId, session.projectPath, args);
       const hasExistingSession = newSession.agentSessionId ? '（恢复已有会话）' : '（新建会话）';
       const projectName = this.getProjectName(session.projectPath);
-      let agentSwitchResponse = `✓ 已切换 Agent: ${args}\n  项目: ${projectName}\n  会话: ${newSession.name || '(未命名)'}\n  ${hasExistingSession}`;
+      let agentSwitchResponse = `✓ 已切换 Agent: ${args}\n  项目: ${projectName}\n  会话: ${displaySessionTitle(newSession.name, '(未命名)')}\n  ${hasExistingSession}`;
 
       if (source === 'card-trigger') return null;
       return { kind: 'command.result' as const, text: agentSwitchResponse };
@@ -2772,7 +2774,7 @@ export class CommandHandler {
       if (isAdmin) {
         lines.push(
           `📊 ${isThread ? '话题' : '会话'}状态 (Agent: ${agentName})：`,
-          `渠道: ${this.resolveChannelType(channel)} / 项目: ${projectName} / 会话: ${session.name || '(未命名)'}`,
+          `渠道: ${this.resolveChannelType(channel)} / 项目: ${projectName} / 会话: ${displaySessionTitle(session.name, '(未命名)')}`,
           `会话ID: ${session.id}`,
           `项目路径: ${session.projectPath}`,
           `会话状态: ${sessionStatus}`,
@@ -2822,6 +2824,14 @@ export class CommandHandler {
       }
 
       const projectPath = this.getEffectiveDefaultPath(channel);
+
+      if (sendMessage && session) {
+        await sendMessage(
+          channelId,
+          `⏳ 正在创建新会话${sessionName ? `: ${sessionName}` : ''}...`,
+          this.getReplyContext(session)
+        );
+      }
 
       const newSession = await this.sessionManager.createNewSession(
         channel,
@@ -3304,7 +3314,7 @@ export class CommandHandler {
 
         const isActive = (s.metadata as any)?.isActive === true;
         displayIndex++;
-        const name = s.name || '(未命名)';
+        const name = displaySessionTitle(s.name, '(未命名)');
         const idleTime = formatIdleTime(Date.now() - s.updatedAt);
         const fileMissing = !!(s.agentSessionId && !this.sessionManager.checkSessionFileExists(s.projectPath, s.agentSessionId, s.agentId));
 
@@ -3446,7 +3456,7 @@ export class CommandHandler {
             const imported = await this.sessionManager.importCliSession(channel, channelId, projectPath, cliSession.uuid, currentAgentId);
             this.eventBus.publish({ type: 'session:imported', sessionId: imported.id, agentSessionId: cliSession.uuid, projectPath });
             const projectName = this.getProjectName(projectPath);
-            return { kind: 'command.result' as const, text: `✓ 已导入 CLI 会话: ${imported.name}\n  项目: ${projectName}\n  将继续之前的对话历史` };
+            return { kind: 'command.result' as const, text: `✓ 已导入 CLI 会话: ${displaySessionTitle(imported.name, '(未命名)')}\n  项目: ${projectName}\n  将继续之前的对话历史` };
           }
         }
       }
@@ -3466,11 +3476,11 @@ export class CommandHandler {
           return { kind: 'command.error' as const, text: `❌ 切换会话失败` };
         }
         if (source === 'card-trigger') return null;
-        return { kind: 'command.result' as const, text: `✓ 已切换到会话: ${targetSession.name || sessionName}\n  项目: ${path.basename(targetSession.projectPath)}${lastInputLine}` };
+        return { kind: 'command.result' as const, text: `✓ 已切换到会话: ${displaySessionTitle(targetSession.name, sessionName)}\n  项目: ${path.basename(targetSession.projectPath)}${lastInputLine}` };
       }
 
       if (targetSession.id === session.id) {
-        return { kind: 'command.result' as const, text: `当前已在会话: ${targetSession.name || sessionName}` };
+        return { kind: 'command.result' as const, text: `当前已在会话: ${displaySessionTitle(targetSession.name, sessionName)}` };
       }
 
       // 阻止从主会话切换到话题会话
@@ -3488,7 +3498,7 @@ export class CommandHandler {
 
       const continueHint = lastInput ? '\n  将继续之前的对话历史' : '\n  当前会话未有发言';
       if (source === 'card-trigger') return null;
-      return { kind: 'command.result' as const, text: `✓ 已切换到会话: ${targetSession.name || sessionName}${continueHint}${lastInputLine}` };
+      return { kind: 'command.result' as const, text: `✓ 已切换到会话: ${displaySessionTitle(targetSession.name, sessionName)}${continueHint}${lastInputLine}` };
     }
 
     // /rename 或 /name 命令：重命名当前会话
@@ -3514,7 +3524,7 @@ export class CommandHandler {
         return { kind: 'command.error' as const, text: `❌ 会话名称 "${newName}" 已存在，请使用其他名称` };
       }
 
-      const oldName = session.name || '(未命名)';
+      const oldName = displaySessionTitle(session.name, '(未命名)');
       const success = await this.sessionManager.renameSession(session.id, newName);
 
       if (success && session.agentSessionId) {
@@ -3589,7 +3599,7 @@ export class CommandHandler {
       const targetAgent = this.getAgent(channel, targetSession.agentId);
       await targetAgent.closeSession(targetSession.id);
 
-      return { kind: 'command.result' as const, text: `✓ 已删除会话: ${targetSession.name || sessionName}\n会话文件已保留，可通过 CLI 访问` };
+      return { kind: 'command.result' as const, text: `✓ 已删除会话: ${displaySessionTitle(targetSession.name, sessionName)}\n会话文件已保留，可通过 CLI 访问` };
     }
 
     // /fork 命令：分支当前会话
@@ -3626,7 +3636,7 @@ export class CommandHandler {
 
         this.eventBus.publish({ type: 'session:forked', sessionId: newSession.id, sourceSessionId: session.id, name: forkName });
 
-        return { kind: 'command.result' as const, text: `✅ 会话已分支: ${newSession.name}\n新会话已激活，可以继续对话\n\n使用 /s 查看所有会话，/s <名称> 切换回原会话` };
+        return { kind: 'command.result' as const, text: `✅ 会话已分支: ${displaySessionTitle(newSession.name, '(未命名)')}\n新会话已激活，可以继续对话\n\n使用 /s 查看所有会话，/s <名称> 切换回原会话` };
       } catch (error) {
         logger.error('[CommandHandler] Fork session failed:', error);
         return { kind: 'command.error' as const, text: `❌ 会话分支失败: ${error instanceof Error ? error.message : '未知错误'}` };

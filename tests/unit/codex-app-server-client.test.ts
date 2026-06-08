@@ -9,6 +9,47 @@ function makeClient() {
 }
 
 describe('CodexAppServerClient extended thread methods', () => {
+  it('starts and resumes threads with app-server instructions', async () => {
+    const { client, request } = makeClient();
+    request.mockResolvedValue({ thread: { id: 'thread-1' } });
+
+    await client.threadStart('/repo', { model: 'gpt-5.5', effort: 'xhigh', developerInstructions: 'dev ctx' });
+    await client.threadResume('thread-1', '/repo', { developerInstructions: 'fresh ctx' });
+
+    expect(request).toHaveBeenNthCalledWith(1, 'thread/start', expect.objectContaining({
+      cwd: '/repo',
+      model: 'gpt-5.5',
+      config: { model_reasoning_effort: 'xhigh' },
+      developerInstructions: 'dev ctx',
+    }));
+    expect(request).toHaveBeenNthCalledWith(2, 'thread/resume', expect.objectContaining({
+      threadId: 'thread-1',
+      cwd: '/repo',
+      developerInstructions: 'fresh ctx',
+    }));
+  });
+
+  it('starts turns with structured user input', async () => {
+    const { client, request } = makeClient();
+    request.mockResolvedValue({ turn: { id: 'turn-1' } });
+
+    await client.turnStart('thread-1', [{ type: 'text', text: 'hello', text_elements: [] }] as any, {
+      cwd: '/repo',
+      model: 'gpt-5.5',
+      effort: 'high',
+      approvalPolicy: 'never',
+    });
+
+    expect(request).toHaveBeenCalledWith('turn/start', {
+      threadId: 'thread-1',
+      input: [{ type: 'text', text: 'hello', text_elements: [] }],
+      cwd: '/repo',
+      model: 'gpt-5.5',
+      effort: 'high',
+      approvalPolicy: 'never',
+    });
+  });
+
   it('forks a thread and applies an optional title', async () => {
     const { client, request } = makeClient();
     request.mockResolvedValueOnce({ thread: { id: 'forked-thread' } });

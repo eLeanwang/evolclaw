@@ -678,7 +678,8 @@ export class MessageProcessor {
           _selfAid?: () => string | undefined;
           _selfName?: () => string | undefined;
         };
-        const selfAid = typeof adapterAny._selfAid === 'function' ? adapterAny._selfAid() : undefined;
+        const adapterSelfAid = typeof adapterAny._selfAid === 'function' ? adapterAny._selfAid() : undefined;
+        const selfAid = adapterSelfAid || message.selfAID || session.selfAID || undefined;
         const selfName = typeof adapterAny._selfName === 'function' ? adapterAny._selfName() : undefined;
         const peerName = message.peerName || session.metadata?.peerName;
 
@@ -700,6 +701,7 @@ export class MessageProcessor {
         const peerKey = (currentChannelType && peerIdRaw)
           ? formatPeerKey(currentChannelType, peerIdRaw)
           : undefined;
+        const normalizedBaseagent = normalizeBaseagent(agent.name);
 
         // 按 关系级 > agent级 > 全局 解析本次调用的模型/强度，作为 per-call 入参传入 runQuery。
         // 不缓存、不绑会话——改关系级/agent级后该范围所有会话的下条消息即时生效；
@@ -723,7 +725,10 @@ export class MessageProcessor {
         let evolclawModelOverride: { model?: string; effort?: string } | undefined;
         if (!skipEvolclawModel) {
           try {
-            const resolved = resolveEffectiveModel({ self: selfAid || undefined, peerKey });
+            const resolved = resolveEffectiveModel(
+              { self: selfAid || undefined, peerKey },
+              normalizedBaseagent.canonical,
+            );
             if (resolved.model) {
               evolclawModelOverride = { model: resolved.model, effort: resolved.effort };
               effectiveModel = resolved.model;
@@ -734,7 +739,6 @@ export class MessageProcessor {
           modelOverride = evolclawModelOverride;
         }
 
-        const normalizedBaseagent = normalizeBaseagent(agent.name);
         agentModel = (typeof (agent as any).getModel === 'function') ? (agent as any).getModel() as string : undefined;
 
         // Kit renderer: 组装上下文

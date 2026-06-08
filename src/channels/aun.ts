@@ -227,7 +227,8 @@ export class AUNChannel {
    *  - 数字群号：{group_no}.{issuer}（如 11117.agentid.pub）
    *  - 兼容旧格式：grp_xxx、g-xxx.agentid.pub
    */
-  private isGroupId(id: string): boolean {
+  /** 判断 channelId 是否群组 ID（public：plugin adapter 闭包需调用） */
+  isGroupId(id: string): boolean {
     return (id.startsWith('group.') && id.includes('/'))
       || /^\d+\./.test(id)
       || id.startsWith('grp_')
@@ -268,24 +269,20 @@ export class AUNChannel {
           const actionValue = typeof obj.value === 'string' ? obj.value
             : typeof obj.action_value === 'string' ? obj.action_value : text;
 
+          // 卡片点击者身份：只信认证信封（senderAid 参数，由调用方从 msg.from / msg.sender_aid 提取）。
+          // payload 自报字段（from / sender_aid / user_id）不可信，可被客户端伪造，不读取。
+          // 两类卡片共用：CommandCard → 伪入站消息的 peerId，ActionInteraction → operatorId。
+          const cardClickerAid = senderAid || channelId || '';
+
           if (cardInfo.isCommandCard) {
             // CommandCard：action_value 是完整 slash 命令，构造伪入站消息
             this.cardMessageIdMap.delete(cardMsgId);
             if (this.messageHandler && actionValue.startsWith('/')) {
               const chatType = channelId ? (this.isGroupId(channelId) ? 'group' : 'private') : 'private';
-              // 卡片点击者身份：优先 payload.from / payload.sender_aid / payload.user_id，
-              // 再 fallback 到外层 senderAid，最后用 cardInfo 中记录的原始命令发起者
-              const cardClickerAid = (typeof obj.from === 'string' && obj.from)
-                || (typeof obj.sender_aid === 'string' && obj.sender_aid)
-                || (typeof obj.user_id === 'string' && obj.user_id)
-                || senderAid
-                || cardInfo.initiatorAid
-                || channelId || '';
-
-              // Initiator 校验：群聊中仅卡片发起者可操作（与飞书行为对齐）
-              if (cardInfo.initiatorAid && cardClickerAid
-                && cardClickerAid !== cardInfo.initiatorAid
-                && !this.isGroupId(cardClickerAid)) {
+              // Initiator 校验：仅群聊需要（私聊信道一对一，点击者恒为对端 = initiator）。
+              // 身份只信认证信封提取的 cardClickerAid，非 payload 自报。
+              if (chatType === 'group' && cardInfo.initiatorAid && cardClickerAid
+                && cardClickerAid !== cardInfo.initiatorAid) {
                 logger.info(`${this.logPrefix()} CommandCard rejected: clicker=${cardClickerAid} initiator=${cardInfo.initiatorAid} mid=${cardMsgId}`);
                 return '';
               }
@@ -310,6 +307,7 @@ export class AUNChannel {
                 id: cardInfo.requestId,
                 action: actionValue,
                 values: { text, action_label: obj.label ?? obj.action_label, behavior: obj.behavior },
+                operatorId: cardClickerAid || undefined,
               });
             }
           }
@@ -1121,7 +1119,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
 
     const fromAid = msg.from ?? '';
     const payload = msg.payload ?? '';
-    const text = this.extractTextPayload(payload, fromAid);
+    const text = this.extractTextPayload(payload, fromAid, fromAid);
     const threadId = typeof payload === 'object' && payload !== null ? (payload as any).thread_id : undefined;
     const messageId = msg.message_id ?? '';
     const seq = msg.seq;
@@ -3040,10 +3038,12 @@ export class AUNChannelPlugin implements ChannelPlugin {
                   })),
                 };
                 if (action.body) aunCard.description = action.body;
+                // initiator 仅群聊有意义：私聊信道一对一，点击者恒为对端 = initiator，无需限制
+                if (req.initiatorId && channel.isGroupId(channelId)) aunCard.initiator = req.initiatorId;
                 if (ctx?.threadId) aunCard.thread_id = ctx.threadId;
                 const msgId = await channel.sendStructured(channelId, aunCard, ctx);
                 if (msgId) {
-                  channel.cardMessageIdMap.set(msgId, { requestId: req.id, isCommandCard: false });
+                  channel.cardMessageIdMap.set(msgId, { requestId: req.id, isCommandCard: false, initiatorAid: req.initiatorId });
                   setTimeout(() => channel.cardMessageIdMap.delete(msgId), 20 * 60 * 1000);
                 }
               } else if (req.kind.kind === 'command-card') {

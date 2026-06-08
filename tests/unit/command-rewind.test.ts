@@ -447,5 +447,44 @@ describe('/rewind command', () => {
       expect((rewindResult as any)?.text || '').toContain('已撤销第 1 轮');
       expect((rewindResult as any)?.text || '').toContain('下次发言将开始全新对话');
     });
+
+    it('should strip current ‹metadata› envelope and show only message body', async () => {
+      const wrapped = '‹2026-06-08 15:40:00 +08:00 · from:ou_2114acae(轮子) → self:evolai.agentid.pub›\n帮我重构这个函数';
+      const messages = [
+        { type: 'user', uuid: 'u1', session_id: 's1', message: { content: wrapped }, parent_tool_use_id: null },
+        { type: 'assistant', uuid: 'a1', session_id: 's1', message: { content: [{ type: 'text', text: 'ok' }] }, parent_tool_use_id: null },
+      ];
+      runner.getSessionMessages.mockResolvedValue(messages);
+      const result = await cmdHandler.handle('/rewind', 'feishu', 'chat1', undefined, 'owner1');
+      expect((result as any)?.text || '').toContain('#1 帮我重构这个函数');
+      expect((result as any)?.text || '').not.toContain('from:ou_2114acae');
+      expect((result as any)?.text || '').not.toContain('‹');
+    });
+
+    it('should strip legacy <messages> XML wrapper', async () => {
+      const wrapped = '<messages>\n<message sender="ou_fd9172e1" time="2026-03-09T06:35:59.620Z">重启下容器</message>\n</messages>';
+      const messages = [
+        { type: 'user', uuid: 'u1', session_id: 's1', message: { content: wrapped }, parent_tool_use_id: null },
+        { type: 'assistant', uuid: 'a1', session_id: 's1', message: { content: [{ type: 'text', text: 'ok' }] }, parent_tool_use_id: null },
+      ];
+      runner.getSessionMessages.mockResolvedValue(messages);
+      const result = await cmdHandler.handle('/rewind', 'feishu', 'chat1', undefined, 'owner1');
+      expect((result as any)?.text || '').toContain('#1 重启下容器');
+      expect((result as any)?.text || '').not.toContain('sender=');
+      expect((result as any)?.text || '').not.toContain('<message');
+    });
+
+    it('should strip interrupt wrapper 【新消息插入】', async () => {
+      const wrapped = '【新消息插入】\n\n‹2026-06-08 15:40:00 +08:00 · from:ou_abc → self:x›\n继续之前的任务\n\n【请无视之前中断继续处理】';
+      const messages = [
+        { type: 'user', uuid: 'u1', session_id: 's1', message: { content: wrapped }, parent_tool_use_id: null },
+        { type: 'assistant', uuid: 'a1', session_id: 's1', message: { content: [{ type: 'text', text: 'ok' }] }, parent_tool_use_id: null },
+      ];
+      runner.getSessionMessages.mockResolvedValue(messages);
+      const result = await cmdHandler.handle('/rewind', 'feishu', 'chat1', undefined, 'owner1');
+      expect((result as any)?.text || '').toContain('继续之前的任务');
+      expect((result as any)?.text || '').not.toContain('新消息插入');
+      expect((result as any)?.text || '').not.toContain('无视之前中断');
+    });
   });
 });

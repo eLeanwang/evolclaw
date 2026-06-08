@@ -4,6 +4,10 @@ import os from 'os';
 import path from 'path';
 import { execFileSync } from 'child_process';
 import { CodexRunner } from '../../src/agents/codex-runner.js';
+import { MessageProcessor } from '../../src/core/message/message-processor.js';
+import { EventBus } from '../../src/core/event-bus.js';
+import { resolvePaths } from '../../src/paths.js';
+import { fileCache } from '../../src/core/cache/file-cache.js';
 
 function makeRunner() {
   const runner = new CodexRunner({ agents: { codex: { apiKey: 'test-key', model: 'gpt-5.4', effort: 'high' } } } as any, { onSessionIdUpdate: vi.fn() } as any);
@@ -146,5 +150,106 @@ describe('CodexRunner app-server approval bridge', () => {
     });
 
     expect(result).toEqual({ decision: 'decline' });
+  });
+});
+
+describe('CodexRunner model scope alignment', () => {
+  beforeEach(() => {
+    fileCache.invalidateAll();
+  });
+
+  it('does not inherit global claude opus override when processing with codex', async () => {
+    const paths = resolvePaths();
+    fs.mkdirSync(path.dirname(paths.defaultsConfig), { recursive: true });
+    fs.writeFileSync(paths.defaultsConfig, JSON.stringify({
+      $schema_version: 1,
+      active_baseagent: 'claude',
+      baseagents: {
+        claude: { model: 'opus', effort: 'high' },
+        codex: {},
+      },
+    }), 'utf-8');
+
+    const runner = {
+      name: 'codex',
+      getModel: vi.fn().mockReturnValue('gpt-5.5'),
+      runQuery: vi.fn().mockResolvedValue({
+        [Symbol.asyncIterator]() {
+          let done = false;
+          return {
+            async next() {
+              if (done) return { done: true, value: undefined };
+              done = true;
+              return {
+                done: false,
+                value: { type: 'complete', isError: false, result: 'ok', subtype: 'success', durationMs: 10 },
+              };
+            },
+          };
+        },
+      }),
+      registerStream: vi.fn(),
+      cleanupStream: vi.fn(),
+      interrupt: vi.fn(),
+      updateSessionId: vi.fn(),
+      closeSession: vi.fn(),
+      setSendPrompt: vi.fn(),
+      setMode: vi.fn(),
+    };
+    const session = {
+      id: 'sess-1',
+      channel: 'feishu',
+      channelId: 'chat-1',
+      projectPath: '/tmp/test-project',
+      threadId: '',
+      agentId: 'codex',
+      chatType: 'private',
+      sessionMode: 'interactive',
+      agentSessionId: 'thread-1',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      identity: { role: 'owner', mode: 'interactive' },
+    };
+    const sessionManager = {
+      getOrCreateSession: vi.fn().mockResolvedValue(session),
+      getActiveSession: vi.fn().mockResolvedValue(session),
+      getActiveSessionSync: vi.fn().mockReturnValue(session),
+      recordSuccess: vi.fn().mockResolvedValue(undefined),
+      recordError: vi.fn().mockResolvedValue(undefined),
+      getHealthStatus: vi.fn().mockResolvedValue({ consecutiveErrors: 0, safeMode: false, lastSuccessTime: Date.now() }),
+      setSafeMode: vi.fn().mockResolvedValue(undefined),
+      markProcessing: vi.fn(),
+      clearProcessing: vi.fn(),
+    };
+    const adapter = {
+      channelName: 'feishu',
+      capabilities: { file: false, image: false, interaction: false, markdown: false, thought: false, status: false },
+      send: vi.fn().mockResolvedValue(undefined),
+      sendText: vi.fn().mockResolvedValue(undefined),
+    };
+    const policy = {
+      canSwitchProject: () => true,
+      canListProjects: () => true,
+      canCreateSession: () => true,
+      canDeleteSession: () => true,
+      canImportCliSession: () => true,
+      messagePrefix: () => '',
+      showMiddleResult: () => true,
+      showIdleMonitor: () => false,
+      accumulateErrors: () => false,
+    };
+
+    const processor = new MessageProcessor(runner as any, sessionManager as any, {}, {} as any, new EventBus());
+    processor.registerChannel(adapter as any, policy as any);
+
+    await processor.processMessage({
+      channel: 'feishu',
+      channelId: 'chat-1',
+      content: 'hello',
+      peerId: 'ou_test',
+      timestamp: Date.now(),
+    } as any);
+
+    expect(runner.runQuery.mock.calls[0][7]).toBeUndefined();
   });
 });

@@ -1,7 +1,7 @@
 /**
  * Codex Agent Runner
  *
- * Integrates OpenAI Codex SDK (@openai/codex-sdk) as an agent backend.
+ * Integrates Codex app-server as an agent backend.
  * Implements the same interface surface as AgentRunner (claude-runner.ts)
  * so MessageProcessor and CommandHandler can work with it transparently.
  */
@@ -10,16 +10,13 @@ import type { Config } from '../types.js';
 import type { AgentPlugin, AgentInstance, AgentCallbacks } from '../core/baseagent-loader.js';
 import type { AgentEvent, AgentRunnerFull, ModelSwitcher, PermissionContext, PermissionModeInfo } from './claude-runner.js';
 import type { PermissionGateway } from '../core/permission.js';
-import { CodexAppServerClient, type CodexThreadResponse, type CodexTurnItem } from './codex-app-server-client.js';
+import { CodexAppServerClient, type CodexServerNotification, type CodexThreadResponse, type CodexTurnItem } from './codex-app-server-client.js';
 import { resolveOpenaiConfig } from './resolve.js';
 import { logger } from '../utils/logger.js';
 import { execFileSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-
-type CodexSDK = typeof import('@openai/codex-sdk');
-type CodexInstance = InstanceType<(typeof import('@openai/codex-sdk'))['Codex']>;
 
 // ── MIME → 扩展名映射 ──
 const MIME_EXT: Record<string, string> = {
@@ -31,6 +28,54 @@ const MIME_EXT: Record<string, string> = {
 
 // ── Codex 模型目录（动态获取，含 effort） ──
 interface CodexModelInfo { slug: string; efforts: string[] }
+
+class AsyncEventQueue<T> implements AsyncIterable<T> {
+  private queue: T[] = [];
+  private done = false;
+  private error: Error | null = null;
+  private waiting: (() => void) | null = null;
+
+  push(item: T): void {
+    if (this.done) return;
+    this.queue.push(item);
+    this.waiting?.();
+  }
+
+  end(): void {
+    this.done = true;
+    this.waiting?.();
+  }
+
+  fail(error: Error): void {
+    this.error = error;
+    this.done = true;
+    this.waiting?.();
+  }
+
+  async *[Symbol.asyncIterator](): AsyncGenerator<T> {
+    while (true) {
+      while (this.queue.length > 0) {
+        yield this.queue.shift()!;
+      }
+      if (this.error) throw this.error;
+      if (this.done) return;
+      await new Promise<void>((resolve) => {
+        this.waiting = resolve;
+      });
+      this.waiting = null;
+    }
+  }
+}
+
+interface AppServerStreamState {
+  threadId: string;
+  turnId?: string;
+  streamedAgentMessageIds: Set<string>;
+  completedItemIds: Set<string>;
+  completedTurnIds: Set<string>;
+  tokenUsage?: any;
+}
+
 const CODEX_CATALOG_FALLBACK: CodexModelInfo[] = [
   { slug: 'gpt-5.5', efforts: ['low', 'medium', 'high', 'xhigh'] },
   { slug: 'gpt-5.4', efforts: ['low', 'medium', 'high', 'xhigh'] },
@@ -40,9 +85,13 @@ const CODEX_CATALOG_FALLBACK: CodexModelInfo[] = [
 ];
 let codexCatalogCache: CodexModelInfo[] | null = null;
 
-export function isCodexSdkAvailable(): boolean {
+export function isCodexAppServerAvailable(): boolean {
   try {
-    import.meta.resolve('@openai/codex-sdk');
+    execFileSync('codex', ['app-server', '--help'], {
+      encoding: 'utf-8',
+      timeout: 3000,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
     return true;
   } catch {
     return false;
@@ -85,7 +134,6 @@ export function getCodexEfforts(model: string): string[] {
 export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
   readonly name = 'codex';
   readonly capabilities = { clear: false, compact: true, fork: true, askUserQuestion: false, planApproval: false };
-  private codexModule: CodexSDK | null = null;
   private model: string;
   private effort?: string;
   private activeAbortControllers = new Map<string, AbortController>();
@@ -104,22 +152,6 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
     this.model = this.resolvedConfig.model;
     if (this.resolvedConfig.effort) this.effort = this.resolvedConfig.effort;
     this.onSessionIdUpdate = callbacks.onSessionIdUpdate;
-  }
-
-  private async ensureCodex(sessionId: string): Promise<{ codex: CodexInstance; mod: CodexSDK }> {
-    if (!this.codexModule) {
-      const { requireOptional } = await import('../utils/npm-ops.js');
-      this.codexModule = await requireOptional<CodexSDK>('@openai/codex-sdk');
-    }
-    const codex = new this.codexModule.Codex({
-      apiKey: this.resolvedConfig.apiKey,
-      baseUrl: this.resolvedConfig.baseUrl,
-      env: {
-        ...process.env as Record<string, string>,
-        EVOLCLAW_SESSION_ID: sessionId,
-      },
-    });
-    return { codex, mod: this.codexModule };
   }
 
   private getAppServerClient(): CodexAppServerClient {
@@ -220,61 +252,83 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
     sessionManager?: any,
     modelOverride?: { model?: string; effort?: string }
   ): Promise<AsyncIterable<AgentEvent>> {
-    const { codex } = await this.ensureCodex(sessionId);
     let agentSessionId = initialAgentSessionId || this.activeSessions.get(sessionId);
-    let fullPrompt = prompt;
     const callModel = modelOverride?.model || this.model;
     const callEffort = modelOverride?.effort ?? this.effort;
-
-    // Only inject system context on the first turn; resumed Codex threads already
-    // have that context in history and repeating it will pollute the conversation.
-    if (systemPromptAppend && !agentSessionId) {
-      fullPrompt = prompt + '\n\n--- [SYSTEM_PROMPT_END] ---\n' + systemPromptAppend;
-    }
-
-    const threadOptions: any = {
-      workingDirectory: projectPath,
+    const appServer = this.getAppServerClient();
+    const threadOptions = {
       model: callModel,
-      skipGitRepoCheck: true,
-      sandboxMode: 'danger-full-access',
+      effort: callEffort,
       approvalPolicy: this.approvalPolicy,
-      ...(callEffort ? { modelReasoningEffort: callEffort } : {}),
+      sandbox: 'danger-full-access',
+      ...(systemPromptAppend ? { developerInstructions: systemPromptAppend } : {}),
     };
 
-    const thread = agentSessionId
-      ? codex.resumeThread(agentSessionId, threadOptions)
-      : codex.startThread(threadOptions);
+    const threadResponse = agentSessionId
+      ? await appServer.threadResume(agentSessionId, projectPath, threadOptions)
+      : await appServer.threadStart(projectPath, threadOptions);
+    const threadId = threadResponse.thread?.id || agentSessionId;
+    if (!threadId) throw new Error('Codex app-server did not return a thread id');
+
+    agentSessionId = threadId;
+    this.activeSessions.set(sessionId, threadId);
+    this.onSessionIdUpdate?.(sessionId, threadId);
 
     const controller = new AbortController();
     this.activeAbortControllers.set(sessionId, controller);
 
-    // 构建输入：将 base64 图片写入临时文件，转换为 Codex SDK 的 local_image 格式
     const tempFiles: string[] = [];
-    let input: any;
-
-    if (images?.length) {
-      const tmpDir = os.tmpdir();
-      const parts: any[] = [{ type: 'text', text: fullPrompt }];
-
-      for (let i = 0; i < images.length; i++) {
-        const img = images[i];
-        const ext = MIME_EXT[img.mimeType || ''] || '.jpg';
-        const tmpPath = path.join(tmpDir, `evolclaw-img-${Date.now()}-${i}${ext}`);
-        fs.writeFileSync(tmpPath, Buffer.from(img.data, 'base64'));
-        tempFiles.push(tmpPath);
-        parts.push({ type: 'local_image', path: tmpPath });
+    const input = this.buildAppServerInput(prompt, images, tempFiles);
+    const queue = new AsyncEventQueue<CodexServerNotification>();
+    controller.signal.addEventListener('abort', () => queue.end(), { once: true });
+    const state: AppServerStreamState = {
+      threadId,
+      streamedAgentMessageIds: new Set(),
+      completedItemIds: new Set(),
+      completedTurnIds: new Set(),
+    };
+    const unsubscribe = appServer.onNotification(notification => {
+      // 仅从 turn/started 锁定权威 turnId — resume 时会有上一轮 turn 的残留通知
+      // （如 thread/tokenUsage/updated）先于新 turn 到达，不能用它们 latch turnId
+      if (notification.method === 'turn/started') {
+        const startedTurnId = this.extractTurnId(notification);
+        if (startedTurnId && !state.turnId) {
+          state.turnId = startedTurnId;
+          this.activeTurns.set(sessionId, { threadId, turnId: startedTurnId });
+        }
       }
+      if (!this.isAppServerTurnNotification(notification, state)) return;
+      queue.push(notification);
+      // 仅在已锁定 turnId 后才允许 turn/completed 结束队列，避免残留的旧 turn/completed 误关
+      if (notification.method === 'turn/completed' && state.turnId) queue.end();
+    });
 
-      input = parts;
-      logger.info(`[CodexRunner] Attached ${images.length} image(s) as local_image`);
-    } else {
-      input = fullPrompt;
+    try {
+      const turnResponse = await appServer.turnStart(threadId, input, {
+        cwd: projectPath,
+        model: callModel,
+        effort: callEffort,
+        approvalPolicy: this.approvalPolicy,
+      });
+      const turnId = turnResponse.turn?.id;
+      if (turnId && !state.turnId) {
+        state.turnId = turnId;
+        this.activeTurns.set(sessionId, { threadId, turnId });
+      }
+      const status = turnResponse.turn?.status;
+      if (status === 'completed' || status === 'failed') {
+        queue.push({ method: 'turn/completed', params: { threadId, turn: turnResponse.turn as any } });
+        queue.end();
+      }
+    } catch (error) {
+      unsubscribe();
+      this.activeAbortControllers.delete(sessionId);
+      this.activeTurns.delete(sessionId);
+      this.cleanupTempFiles(tempFiles);
+      throw error;
     }
 
-    const { events } = await thread.runStreamed(input, { signal: controller.signal });
-
-    // 包装为 AgentEvent 流
-    return this.transformStream(events, sessionId, thread, tempFiles);
+    return this.transformAppServerStream(queue, sessionId, state, unsubscribe, tempFiles);
   }
 
   // ── Interrupt ──
@@ -591,6 +645,229 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
 
   // ── Event stream transformation ──
 
+  private buildAppServerInput(
+    prompt: string,
+    images: Array<{ data: string; mimeType?: string }> | undefined,
+    tempFiles: string[]
+  ): any[] {
+    const input: any[] = [{ type: 'text', text: prompt, text_elements: [] }];
+    if (!images?.length) return input;
+
+    const tmpDir = os.tmpdir();
+    for (let i = 0; i < images.length; i++) {
+      const img = images[i];
+      const ext = MIME_EXT[img.mimeType || ''] || '.jpg';
+      const tmpPath = path.join(tmpDir, `evolclaw-img-${Date.now()}-${i}${ext}`);
+      fs.writeFileSync(tmpPath, Buffer.from(img.data, 'base64'));
+      tempFiles.push(tmpPath);
+      input.push({ type: 'localImage', path: tmpPath });
+    }
+    logger.info(`[CodexRunner] Attached ${images.length} image(s) as localImage`);
+    return input;
+  }
+
+  private cleanupTempFiles(tempFiles?: string[]): void {
+    if (!tempFiles?.length) return;
+    for (const tempFile of tempFiles) {
+      try { fs.unlinkSync(tempFile); } catch { /* ignore */ }
+    }
+  }
+
+  private extractTurnId(notification: CodexServerNotification): string | undefined {
+    const params: any = notification.params || {};
+    return typeof params.turnId === 'string' ? params.turnId :
+      typeof params.turn_id === 'string' ? params.turn_id :
+      typeof params.turn?.id === 'string' ? params.turn.id : undefined;
+  }
+
+  private isAppServerTurnNotification(notification: CodexServerNotification, state: AppServerStreamState): boolean {
+    const params: any = notification.params || {};
+    const notifThreadId = params.threadId ?? params.thread_id;
+    if (notifThreadId !== undefined && notifThreadId !== state.threadId) return false;
+    const turnId = this.extractTurnId(notification);
+    return !state.turnId || !turnId || turnId === state.turnId;
+  }
+
+  private async *transformAppServerStream(
+    notifications: AsyncIterable<CodexServerNotification>,
+    sessionId: string,
+    state: AppServerStreamState,
+    unsubscribe: () => void,
+    tempFiles?: string[]
+  ): AsyncGenerator<AgentEvent> {
+    try {
+      yield { type: 'session_id', sessionId: state.threadId };
+      for await (const notification of notifications) {
+        if (!this.activeAbortControllers.has(sessionId)) break;
+        yield* this.mapAppServerNotification(notification, sessionId, state);
+      }
+    } finally {
+      unsubscribe();
+      this.activeAbortControllers.delete(sessionId);
+      this.activeTurns.delete(sessionId);
+      this.cleanupTempFiles(tempFiles);
+    }
+  }
+
+  private *mapAppServerNotification(
+    notification: CodexServerNotification,
+    sessionId: string,
+    state: AppServerStreamState
+  ): Iterable<AgentEvent> {
+    const params: any = notification.params || {};
+    switch (notification.method) {
+      case 'turn/started': {
+        const turnId = this.extractTurnId(notification);
+        if (turnId) {
+          state.turnId = turnId;
+          this.activeTurns.set(sessionId, { threadId: state.threadId, turnId });
+        }
+        yield { type: 'state_changed', state: 'running' };
+        break;
+      }
+
+      case 'item/started': {
+        yield* this.mapAppServerItemStarted(params.item);
+        break;
+      }
+
+      case 'item/agentMessage/delta': {
+        if (typeof params.itemId === 'string') state.streamedAgentMessageIds.add(params.itemId);
+        if (typeof params.delta === 'string' && params.delta) yield { type: 'text', text: params.delta };
+        break;
+      }
+
+      case 'item/completed': {
+        const item = params.item;
+        if (item?.id) state.completedItemIds.add(item.id);
+        yield* this.mapAppServerItemCompleted(item, state);
+        break;
+      }
+
+      case 'turn/plan/updated': {
+        const plan = Array.isArray(params.plan) ? params.plan : [];
+        const completed = plan.filter((step: any) => step?.status === 'completed').length;
+        const summary = plan.length ? `计划进度：${completed}/${plan.length}` : (params.explanation || '计划已更新');
+        yield { type: 'task_progress', summary };
+        break;
+      }
+
+      case 'thread/tokenUsage/updated': {
+        state.tokenUsage = params.tokenUsage;
+        break;
+      }
+
+      case 'turn/completed': {
+        const turn = params.turn || {};
+        const turnId = turn.id || params.turnId;
+        if (turnId && state.completedTurnIds.has(turnId)) break;
+        if (turnId) state.completedTurnIds.add(turnId);
+        this.activeTurns.delete(sessionId);
+        if (turn.status === 'failed' && turn.error?.message) {
+          yield { type: 'error', error: turn.error.message, errorType: 'unknown' };
+        }
+        yield this.mapAppServerTurnComplete(turn, state);
+        break;
+      }
+
+      case 'error': {
+        yield { type: 'error', error: params.message || 'Codex app-server error', errorType: 'unknown' };
+        break;
+      }
+    }
+  }
+
+  private *mapAppServerItemStarted(item: any): Iterable<AgentEvent> {
+    if (!item) return;
+    switch (item.type) {
+      case 'commandExecution':
+        yield { type: 'tool_use', name: 'Shell', input: { command: item.command, cwd: item.cwd }, callId: item.id };
+        break;
+      case 'mcpToolCall':
+        yield { type: 'tool_use', name: `MCP:${item.server}/${item.tool}`, input: item.arguments, callId: item.id };
+        break;
+      case 'dynamicToolCall':
+        yield { type: 'tool_use', name: item.namespace ? `${item.namespace}:${item.tool}` : item.tool, input: item.arguments, callId: item.id };
+        break;
+      case 'fileChange': {
+        const desc = (item.changes || []).map((c: any) => `${c.kind || c.type || 'change'} ${c.path || ''}`.trim()).join(', ');
+        yield { type: 'tool_use', name: 'FileChange', input: { description: desc }, callId: item.id };
+        break;
+      }
+      case 'webSearch':
+        yield { type: 'tool_use', name: 'WebSearch', input: { query: item.query }, callId: item.id };
+        break;
+      case 'plan':
+        yield { type: 'task_progress', summary: item.text || '计划已更新' };
+        break;
+    }
+  }
+
+  private *mapAppServerItemCompleted(item: any, state: AppServerStreamState): Iterable<AgentEvent> {
+    if (!item) return;
+    switch (item.type) {
+      case 'agentMessage':
+        if (!state.streamedAgentMessageIds.has(item.id) && item.text) {
+          yield { type: 'text', text: item.text };
+        }
+        break;
+      case 'commandExecution':
+        yield {
+          type: 'tool_result',
+          name: 'Shell',
+          result: item.aggregatedOutput ?? '',
+          isError: item.exitCode !== null && item.exitCode !== undefined ? item.exitCode !== 0 : item.status === 'failed',
+          callId: item.id,
+        };
+        break;
+      case 'mcpToolCall':
+        yield {
+          type: 'tool_result',
+          name: `MCP:${item.server}/${item.tool}`,
+          result: item.result,
+          isError: item.status === 'failed',
+          error: item.error?.message,
+          callId: item.id,
+        };
+        break;
+      case 'dynamicToolCall':
+        yield {
+          type: 'tool_result',
+          name: item.namespace ? `${item.namespace}:${item.tool}` : item.tool,
+          result: item.contentItems,
+          isError: item.success === false || item.status === 'failed',
+          callId: item.id,
+        };
+        break;
+      case 'fileChange':
+        yield { type: 'tool_result', name: 'FileChange', result: item.changes, isError: item.status === 'failed', callId: item.id };
+        break;
+    }
+  }
+
+  private mapAppServerTurnComplete(turn: any, state: AppServerStreamState): AgentEvent {
+    const status = turn.status || 'completed';
+    const tokenUsage = state.tokenUsage?.last;
+    const terminalReason = status === 'completed'
+      ? undefined
+      : status === 'interrupted'
+        ? 'aborted_streaming'
+        : status;
+    return {
+      type: 'complete',
+      subtype: status === 'completed' ? 'success' : status,
+      isError: status === 'failed',
+      errors: turn.error?.message ? [turn.error.message] : undefined,
+      terminalReason,
+      durationMs: typeof turn.durationMs === 'number' ? turn.durationMs : undefined,
+      tokenUsage: tokenUsage ? {
+        input_tokens: tokenUsage.inputTokens,
+        output_tokens: tokenUsage.outputTokens,
+        cache_read_input_tokens: tokenUsage.cachedInputTokens,
+      } : undefined,
+    } as AgentEvent;
+  }
+
   private async *transformStream(
     events: AsyncGenerator<any>,
     sessionId: string,
@@ -723,7 +1000,7 @@ export class CodexAgentPlugin implements AgentPlugin {
 
   isEnabled(agent: import('../core/evolagent.js').EvolAgent): boolean {
     if (!agent.config.baseagents?.codex) return false;
-    if (!isCodexSdkAvailable()) return false;
+    if (!isCodexAppServerAvailable()) return false;
     try {
       const override = agent.config.baseagents.codex as any;
       const syntheticConfig = { agents: { codex: override } } as Config;
@@ -735,8 +1012,8 @@ export class CodexAgentPlugin implements AgentPlugin {
   }
 
   createAgent(agent: import('../core/evolagent.js').EvolAgent, callbacks: AgentCallbacks): AgentInstance | null {
-    if (!isCodexSdkAvailable()) {
-      throw new Error('Missing optional dependency @openai/codex-sdk');
+    if (!isCodexAppServerAvailable()) {
+      throw new Error('Missing codex CLI with app-server');
     }
     const override = agent.config.baseagents?.codex as any;
     const merged: Config = {

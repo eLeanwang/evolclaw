@@ -12,6 +12,7 @@
 
 import { createRequire } from 'module';
 import type { SessionFileAdapter, SessionFileInfo, CliSessionEntry, SdkSessionEntry } from '../session-file-adapter.js';
+import { sanitizeSessionTitle } from '../session-title.js';
 import { logger } from '../../../utils/logger.js';
 import path from 'path';
 import fs from 'fs';
@@ -20,6 +21,8 @@ import os from 'os';
 const requireFromHere = createRequire(import.meta.url);
 
 let sqliteModule: any | null | undefined; // undefined = not tried, null = unavailable
+
+export const sanitizeCodexThreadTitle = sanitizeSessionTitle;
 
 function loadSqlite(): any | null {
   if (sqliteModule !== undefined) return sqliteModule;
@@ -135,7 +138,7 @@ export class CodexSessionFileAdapter implements SessionFileAdapter {
         if (row) {
           return {
             turns: this.countTurnsFromRollout(row.rollout_path),
-            title: row.title || undefined,
+            title: sanitizeCodexThreadTitle(row.title),
           };
         }
       } catch (error) {
@@ -233,7 +236,7 @@ export class CodexSessionFileAdapter implements SessionFileAdapter {
 
       return rows.map(r => ({
         sessionId: r.id,
-        title: r.title || undefined,
+        title: sanitizeCodexThreadTitle(r.title),
       }));
     } catch (error) {
       logger.warn(`[CodexAdapter] listSdkSessions failed:`, error);
