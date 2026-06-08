@@ -9,6 +9,7 @@
 import type { Config } from '../types.js';
 import type { AgentPlugin, AgentInstance, AgentCallbacks } from '../core/baseagent-loader.js';
 import type { AgentEvent, AgentRunnerFull, ModelSwitcher, PermissionModeInfo } from './claude-runner.js';
+import { CodexAppServerClient, type CodexThreadResponse, type CodexTurnItem } from './codex-app-server-client.js';
 import { resolveOpenaiConfig } from './resolve.js';
 import { logger } from '../utils/logger.js';
 import { execFileSync } from 'child_process';
@@ -82,13 +83,14 @@ export function getCodexEfforts(model: string): string[] {
 
 export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
   readonly name = 'codex';
-  readonly capabilities = { clear: false, compact: false, fork: false };
+  readonly capabilities = { clear: false, compact: false, fork: false, askUserQuestion: false, planApproval: false };
   private codexModule: CodexSDK | null = null;
   private model: string;
   private effort?: string;
   private activeAbortControllers = new Map<string, AbortController>();
   private activeStreams = new Map<string, AsyncIterable<any>>();
   private activeSessions = new Map<string, string>(); // sessionId → threadId
+  private appServerClient: CodexAppServerClient | null = null;
   private onSessionIdUpdate?: (sessionId: string, agentSessionId: string) => void;
   private resolvedConfig: { apiKey: string; baseUrl?: string; model: string; effort?: string };
 
@@ -113,6 +115,18 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
       },
     });
     return { codex, mod: this.codexModule };
+  }
+
+  private getAppServerClient(): CodexAppServerClient {
+    if (!this.appServerClient) {
+      this.appServerClient = new CodexAppServerClient({
+        apiKey: this.resolvedConfig.apiKey,
+        baseUrl: this.resolvedConfig.baseUrl,
+        model: this.model,
+        effort: this.effort,
+      });
+    }
+    return this.appServerClient;
   }
 
   // ── ModelSwitcher ──
@@ -177,11 +191,14 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
     initialAgentSessionId?: string,
     images?: Array<{ data: string; mimeType?: string }>,
     systemPromptAppend?: string,
-    sessionManager?: any
+    sessionManager?: any,
+    modelOverride?: { model?: string; effort?: string }
   ): Promise<AsyncIterable<AgentEvent>> {
     const { codex } = await this.ensureCodex(sessionId);
     let agentSessionId = initialAgentSessionId || this.activeSessions.get(sessionId);
     let fullPrompt = prompt;
+    const callModel = modelOverride?.model || this.model;
+    const callEffort = modelOverride?.effort ?? this.effort;
 
     // Only inject system context on the first turn; resumed Codex threads already
     // have that context in history and repeating it will pollute the conversation.
@@ -191,11 +208,11 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
 
     const threadOptions: any = {
       workingDirectory: projectPath,
-      model: this.model,
+      model: callModel,
       skipGitRepoCheck: true,
       sandboxMode: 'danger-full-access',
       approvalPolicy: this.approvalPolicy,
-      ...(this.effort ? { modelReasoningEffort: this.effort } : {}),
+      ...(callEffort ? { modelReasoningEffort: callEffort } : {}),
     };
 
     const thread = agentSessionId
@@ -284,8 +301,10 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
     return search(sessionsDir);
   }
 
-  async clearSession(_sessionId: string, _agentSessionId: string, _projectPath: string): Promise<boolean> {
+  async clearSession(sessionId: string, _agentSessionId: string, _projectPath: string): Promise<boolean> {
     // Codex: 清空会话 = 下次 runQuery 不传 resumeId，自动创建新 thread
+    this.activeSessions.delete(sessionId);
+    this.onSessionIdUpdate?.(sessionId, '');
     return true;
   }
 
@@ -297,6 +316,82 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
 
   async compact(_sessionId: string, _agentSessionId: string, _projectPath: string): Promise<boolean> {
     return this.compactSession(_sessionId, _agentSessionId, _projectPath);
+  }
+
+  async getSessionMessages(agentSessionId: string, projectPath: string): Promise<Array<{
+    type: 'user' | 'assistant' | 'system';
+    uuid: string;
+    session_id: string;
+    message: unknown;
+    parent_tool_use_id: null;
+  }>> {
+    const response = await this.getAppServerClient().threadRead(agentSessionId, true);
+    return this.mapThreadToSessionMessages(response, agentSessionId);
+  }
+
+  async rollbackSessionTurns(agentSessionId: string, _projectPath: string, numTurns: number): Promise<boolean> {
+    if (numTurns < 1) return true;
+    const response = await this.getAppServerClient().threadRollback(agentSessionId, numTurns);
+    return !!response.thread;
+  }
+
+  private mapThreadToSessionMessages(response: CodexThreadResponse, fallbackThreadId: string): Array<{
+    type: 'user' | 'assistant' | 'system';
+    uuid: string;
+    session_id: string;
+    message: unknown;
+    parent_tool_use_id: null;
+  }> {
+    const thread = response.thread;
+    const threadId = thread?.id || fallbackThreadId;
+    const messages: Array<{
+      type: 'user' | 'assistant' | 'system';
+      uuid: string;
+      session_id: string;
+      message: unknown;
+      parent_tool_use_id: null;
+    }> = [];
+
+    for (const turn of thread?.turns ?? []) {
+      for (const item of this.getTurnItems(turn)) {
+        if (item.type === 'userMessage') {
+          messages.push({
+            type: 'user',
+            uuid: item.id || turn.id || (threadId + '-user-' + messages.length),
+            session_id: threadId,
+            message: { role: 'user', content: this.mapUserInputToContent(item.content) },
+            parent_tool_use_id: null,
+          });
+        } else if (item.type === 'agentMessage') {
+          messages.push({
+            type: 'assistant',
+            uuid: item.id || turn.id || (threadId + '-assistant-' + messages.length),
+            session_id: threadId,
+            message: { role: 'assistant', content: item.text || '' },
+            parent_tool_use_id: null,
+          });
+        }
+      }
+    }
+
+    return messages;
+  }
+
+  private getTurnItems(turn: any): CodexTurnItem[] {
+    const items = Array.isArray(turn?.items) ? turn.items : [];
+    const input = Array.isArray(turn?.input) ? turn.input : [];
+    const output = Array.isArray(turn?.output) ? turn.output : [];
+    return [...items, ...input, ...output] as CodexTurnItem[];
+  }
+
+  private mapUserInputToContent(content: unknown): Array<{ type: string; text?: string; path?: string; url?: string }> {
+    if (!Array.isArray(content)) return [];
+    return content.map((part: any) => {
+      if (part?.type === 'text') return { type: 'text', text: part.text || '' };
+      if (part?.type === 'localImage') return { type: 'image', path: part.path };
+      if (part?.type === 'image') return { type: 'image', url: part.url };
+      return { type: 'text', text: part?.text || part?.name || '' };
+    });
   }
 
   setCompactStartCallback(_callback: (sessionId: string) => void): void {}
@@ -346,6 +441,10 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
           yield { type: 'tool_use', name: 'FileChange', input: { description: desc } };
         } else if (item.type === 'web_search') {
           yield { type: 'tool_use', name: 'WebSearch', input: { query: item.query } };
+        } else if (item.type === 'todo_list') {
+          const completed = (item.items || []).filter((todo: any) => todo.completed).length;
+          const total = (item.items || []).length;
+          yield { type: 'task_progress', summary: total ? '计划进度：' + completed + '/' + total : '计划已更新' };
         }
         break;
       }
@@ -405,6 +504,8 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
     this.activeAbortControllers.clear();
     this.activeStreams.clear();
     this.activeSessions.clear();
+    await this.appServerClient?.close();
+    this.appServerClient = null;
   }
 }
 

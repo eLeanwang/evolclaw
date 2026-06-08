@@ -141,7 +141,7 @@ export class TriggerScheduler {
   register(trigger: Trigger): void {
     this.heap.push(trigger);
     this.resetTimer();
-    this.eventBus.publish({ type: 'trigger:registered', triggerId: trigger.id, name: trigger.name, peerId: trigger.createdByPeerId });
+    this.eventBus.publish({ type: 'trigger:registered', triggerId: trigger.id, name: trigger.name, peerId: trigger.createdByPeerId, targetChannel: trigger.targetChannel, targetChannelId: trigger.targetChannelId, scheduleType: trigger.scheduleType, scheduleValue: trigger.scheduleValue });
   }
 
   cancel(id: string): void {
@@ -154,7 +154,7 @@ export class TriggerScheduler {
     this.heap.remove(trigger.id);
     this.heap.push(trigger);
     this.resetTimer();
-    this.eventBus.publish({ type: 'trigger:updated', triggerId: trigger.id, name: trigger.name, peerId: trigger.createdByPeerId });
+    this.eventBus.publish({ type: 'trigger:updated', triggerId: trigger.id, name: trigger.name, peerId: trigger.createdByPeerId, scheduleType: trigger.scheduleType, scheduleValue: trigger.scheduleValue });
   }
 
   stop(): void {
@@ -189,7 +189,7 @@ export class TriggerScheduler {
       if (trigger.scheduleType === 'cron' && this.inflightCron.has(trigger.id)) {
         // Previous run still in flight — skip this occurrence, reschedule the next one.
         logger.warn(`[${this.aid}] Cron trigger ${trigger.name} still running, skipping`);
-        this.eventBus.publish({ type: 'trigger:skipped', triggerId: trigger.id, reason: 'overlap' });
+        this.eventBus.publish({ type: 'trigger:skipped', triggerId: trigger.id, name: trigger.name, reason: 'overlap', targetChannel: trigger.targetChannel, targetChannelId: trigger.targetChannelId });
         const next = this.nextCronFireAt(trigger.scheduleValue, Date.now());
         this.manager.updateNextFireAt(trigger.id, next);
         this.heap.push({ ...trigger, nextFireAt: next });
@@ -218,29 +218,33 @@ export class TriggerScheduler {
   }
 
   private fireTrigger(trigger: Trigger, now: number): void {
-    const messageId = `trigger:${trigger.id}:${now}`;
-    const msg = this.buildSyntheticMessage(trigger, messageId);
+    // 触发时刻以磁盘为真相源：heap 里的副本可能因外部编辑而过期。
+    // 用 id 重读磁盘最新版，读盘失败则回退到 heap 副本。
+    const fresh = this.manager.getByIdFresh(trigger.id) ?? trigger;
 
-    logger.info(`[${this.aid}] Firing trigger: ${trigger.name} (${trigger.id})`);
+    const messageId = `trigger:${fresh.id}:${now}`;
+    const msg = this.buildSyntheticMessage(fresh, messageId);
+
+    logger.info(`[${this.aid}] Firing trigger: ${fresh.name} (${fresh.id})`);
 
     // Update stats before moving to done so history captures the updated count
-    this.manager.updateFireStats(trigger.id, now);
+    this.manager.updateFireStats(fresh.id, now);
 
-    if (trigger.scheduleType === 'cron') {
-      this.inflightCron.add(trigger.id);
+    if (fresh.scheduleType === 'cron') {
+      this.inflightCron.add(fresh.id);
       // Re-schedule next occurrence (outside the firing window — see nextCronFireAt)
-      const next = this.nextCronFireAt(trigger.scheduleValue, now);
-      this.manager.updateNextFireAt(trigger.id, next);
-      this.heap.push({ ...trigger, nextFireAt: next });
+      const next = this.nextCronFireAt(fresh.scheduleValue, now);
+      this.manager.updateNextFireAt(fresh.id, next);
+      this.heap.push({ ...fresh, nextFireAt: next });
     } else {
       // delay/at: one-shot, move to done
-      this.manager.moveToDone(trigger.id, 'fired');
+      this.manager.moveToDone(fresh.id, 'fired');
     }
 
-    this.eventBus.publish({ type: 'trigger:fired', triggerId: trigger.id, name: trigger.name, fireTime: now });
+    this.eventBus.publish({ type: 'trigger:fired', triggerId: fresh.id, name: fresh.name, fireTime: now, targetChannel: fresh.targetChannel, targetChannelId: fresh.targetChannelId, scheduleType: fresh.scheduleType });
 
     if (this.fireCallback) {
-      this.fireCallback(msg, trigger);
+      this.fireCallback(msg, fresh);
     }
   }
 

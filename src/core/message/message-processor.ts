@@ -1157,7 +1157,7 @@ export class MessageProcessor {
           adapter.send(envelope, { kind: 'status.error', metadata: { errorType: rawSubtype } }).catch(() => {});
         }
         if (message.triggerMeta) {
-          this.eventBus.publish({ type: 'trigger:failed', triggerId: message.triggerMeta.triggerId, messageId: messageId, error: errorSummary });
+          this.eventBus.publish({ type: 'trigger:failed', triggerId: message.triggerMeta.triggerId, name: message.triggerMeta.triggerName ?? '', messageId: messageId, error: errorSummary, targetChannel: message.channel, targetChannelId: message.channelId, fireTime: message.triggerMeta.fireTime ?? 0, phase: 'execute' });
         }
 
         this.eventBus.publish({
@@ -1199,9 +1199,9 @@ export class MessageProcessor {
         }
         if (message.triggerMeta) {
           if (interruptReason) {
-            this.eventBus.publish({ type: 'trigger:skipped', triggerId: message.triggerMeta.triggerId, reason: 'interrupted' });
+            this.eventBus.publish({ type: 'trigger:skipped', triggerId: message.triggerMeta.triggerId, name: message.triggerMeta.triggerName ?? '', reason: 'interrupted', targetChannel: message.channel, targetChannelId: message.channelId });
           } else {
-            this.eventBus.publish({ type: 'trigger:completed', triggerId: message.triggerMeta.triggerId, messageId: messageId, durationMs });
+            this.eventBus.publish({ type: 'trigger:completed', triggerId: message.triggerMeta.triggerId, name: message.triggerMeta.triggerName ?? '', messageId: messageId, durationMs, targetChannel: message.channel, targetChannelId: message.channelId, fireTime: message.triggerMeta.fireTime ?? 0 });
           }
         }
         await this.sessionManager.recordSuccess(session.id);

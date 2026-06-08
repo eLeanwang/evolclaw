@@ -50,7 +50,7 @@ const GEMINI_MODELS = [
 
 export class GeminiRunner implements AgentRunnerFull, ModelSwitcher {
   readonly name = 'gemini';
-  readonly capabilities = { clear: true, compact: false, fork: false };
+  readonly capabilities = { clear: true, compact: false, fork: false, askUserQuestion: false, planApproval: false };
 
   private resolved: GoogleResolved;
   private model: string;

@@ -169,7 +169,6 @@ daemon 连接成功 → sendWelcomeMessage()
 | `/del <名称>` | 删除会话 | guest+ |
 | `/fork [名称]` | 分支会话 | admin+ |
 | `/rewind [N]` | 撤销轮次 | admin+ |
-| `/clear` | 清空会话 | admin+ |
 | `/compact` | 压缩上下文 | admin+ |
 | `/repair` | 修复会话 | admin+ |
 

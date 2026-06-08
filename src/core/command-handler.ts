@@ -185,7 +185,8 @@ function formatIdleTime(ms: number): string {
 }
 
 // 支持的命令列表
-const commands = ['/new', '/pwd', '/help', '/evolhelp', '/status', '/restart', '/model', '/setmodel', '/effort', '/baseagent', '/slist', '/session', '/rename', '/stop', '/clear', '/compact', '/repair', '/safe', '/fork', '/del', '/perm', '/file', '/check', '/rewind', '/activity', '/chatmode', '/dispatch', '/ask', '/resume', '/aid', '/rpc', '/storage', '/agent', '/trigger', '/upgrade'];
+const commands = ['/new', '/pwd', '/help', '/evolhelp', '/status', '/restart', '/model', '/setmodel', '/effort', '/baseagent', '/slist', '/session', '/rename', '/stop', '/compact', '/repair', '/safe', '/fork', '/del', '/perm', '/file', '/check', '/rewind', '/activity', '/chatmode', '/dispatch', '/ask', '/resume', '/aid', '/rpc', '/storage', '/agent', '/trigger', '/upgrade'];
+const deprecatedCommands = ['/clear'];
 
 // 命令别名映射
 const aliases: Record<string, string> = {
@@ -1212,7 +1213,7 @@ export class CommandHandler {
         if (!trigger) return { error: '触发器不存在或无权限', code: 'NOT_FOUND' };
         manager.moveToDone(trigger.id, 'cancelled');
         scheduler.cancel(trigger.id);
-        this.eventBus.publish({ type: 'trigger:cancelled', triggerId: trigger.id, by: userId ?? '' });
+        this.eventBus.publish({ type: 'trigger:cancelled', triggerId: trigger.id, name: trigger.name, by: userId ?? '' });
         return { data: { id: trigger.id, cancelled: true } };
       }
 
@@ -1528,12 +1529,12 @@ export class CommandHandler {
 
     // 空闲检查：某些命令需要等待当前会话空闲
     // 原则：仅对"写/破坏性"形态拦截，纯读/用法提示的无参形态始终放行
-    // - 始终需要 idle（无参即写）：/clear /compact /repair /fork /new
+    // - 始终需要 idle（无参即写）：/compact /repair /fork /new
     // - 仅带参时需要 idle（无参是列表/用法）：/session /baseagent /rewind
     // - /chatmode：在 handler 内部自行做写操作的 idle 检查
     // - /dispatch：在 handler 内部自行做写操作的 idle 检查
     // - /safe：已禁用 no-op，不再要求 idle
-    const idleAlways = ['/clear', '/compact', '/repair', '/fork', '/new'];
+    const idleAlways = ['/compact', '/repair', '/fork', '/new'];
     const idleWhenArg = ['/session', '/baseagent', '/rewind'];
     const needsIdle =
       idleAlways.some(cmd => normalizedContent === cmd || normalizedContent.startsWith(cmd + ' ')) ||
@@ -1562,7 +1563,8 @@ export class CommandHandler {
     // 检查是否以 / 开头（可能是命令）
     if (normalizedContent.startsWith('/')) {
       const inputCmd = normalizedContent.split(' ')[0];
-      const isValidCommand = commands.some(cmd => normalizedContent.startsWith(cmd));
+      const isValidCommand = commands.some(cmd => normalizedContent.startsWith(cmd)) ||
+        deprecatedCommands.some(cmd => normalizedContent === cmd || normalizedContent.startsWith(cmd + ' '));
 
       if (!isValidCommand) {
         const similar = commands.find(cmd => {
@@ -1578,7 +1580,8 @@ export class CommandHandler {
       }
     }
 
-    const isCmd = commands.some(cmd => normalizedContent.startsWith(cmd));
+    const isCmd = commands.some(cmd => normalizedContent.startsWith(cmd)) ||
+      deprecatedCommands.some(cmd => normalizedContent === cmd || normalizedContent.startsWith(cmd + ' '));
     if (!isCmd) return undefined;
 
     // /help 命令不需要会话
@@ -2584,38 +2587,10 @@ export class CommandHandler {
       return { kind: 'command.result' as const, text: '✓ 已发送中断信号，任务将尽快停止' };
     }
 
-    // /clear 命令：通过 SDK /clear 清空会话历史
+    // /clear 已移除：Claude/Codex/Gemini 对“清空当前 backend 历史”的语义不一致。
+    // 统一使用 /new 创建新会话来开始全新上下文。
     if (normalizedContent === '/clear') {
-      const result = await this.ensureSession(channel, channelId, threadId, chatType);
-      if ('error' in result) return { kind: 'command.error' as const, text: result.error };
-      const { session } = result;
-
-      const sessionAgent = this.getAgent(channel, session.agentId);
-      if (!sessionAgent.capabilities?.clear) {
-        return { kind: 'command.error' as const, text: `❌ 当前 Agent (${sessionAgent.name}) 不支持 /clear\n\n可使用 /new 创建新会话替代` };
-      }
-
-      if (!session.agentSessionId) {
-        return { kind: 'command.error' as const, text: '❌ 当前会话没有历史记录，无需清空' };
-      }
-
-      const projectPath = path.isAbsolute(session.projectPath)
-        ? session.projectPath
-        : path.resolve(process.cwd(), session.projectPath);
-
-      const releaseLock = this.messageQueue.acquireLock(session.id);
-      try {
-        const cleared = await sessionAgent.clearSession(session.id, session.agentSessionId, projectPath);
-        if (cleared) {
-          await this.sessionManager.updateAgentSessionIdBySessionId(session.id, '');
-          sessionAgent.updateSessionId(session.id, '');
-          return { kind: 'command.result' as const, text: '✅ 已清空当前会话的对话历史' };
-        } else {
-          return { kind: 'command.error' as const, text: '❌ 清空会话失败，请稍后重试' };
-        }
-      } finally {
-        releaseLock();
-      }
+      return { kind: 'command.error' as const, text: '⚠️ /clear 已移除\n\n请使用 /new [名称] 创建新会话来开始全新上下文。旧会话会保留，可通过 /s 查看或切换。' };
     }
 
     // /compact 命令：手动压缩会话上下文
@@ -3579,14 +3554,11 @@ export class CommandHandler {
 
       const rewindAgent = this.getAgent(channel, session.agentId);
 
-      if (rewindAgent.name !== 'claude') {
-        return { kind: 'command.error' as const, text: '❌ /rewind 仅支持 Claude 后端' };
-      }
       if (!session.agentSessionId) {
         return { kind: 'command.error' as const, text: '❌ 当前会话无历史记录\n\n请先发送一条消息，然后再使用 /rewind' };
       }
       if (!rewindAgent.getSessionMessages) {
-        return { kind: 'command.error' as const, text: '❌ 当前 Agent 不支持 /rewind' };
+        return { kind: 'command.error' as const, text: `❌ 当前 Agent (${rewindAgent.name}) 不支持 /rewind` };
       }
 
       const args = normalizedContent.slice('/rewind'.length).trim();
@@ -3751,7 +3723,7 @@ export class CommandHandler {
 
       manager.moveToDone(trigger.id, 'cancelled');
       scheduler.cancel(trigger.id);
-      this.eventBus.publish({ type: 'trigger:cancelled', triggerId: trigger.id, by: peerId });
+      this.eventBus.publish({ type: 'trigger:cancelled', triggerId: trigger.id, name: trigger.name, by: peerId });
       return `✅ 触发器已取消：**${trigger.name}**`;
     }
 
@@ -3948,9 +3920,17 @@ export class CommandHandler {
         }
       }
 
-      // 对话回退（延迟执行 — 下次发消息时生效）
+      // 对话回退：Codex app-server 可直接 rollback；Claude 走 resumeAt 延迟到下次消息生效。
       if (mode === 'chat' || mode === 'all') {
-        if (keepTarget) {
+        const discarded = turns.length - turnNum + 1;
+
+        if (agent.rollbackSessionTurns) {
+          const ok = await agent.rollbackSessionTurns(session.agentSessionId!, session.projectPath, discarded);
+          if (!ok) return '❌ 对话回退失败';
+          const meta = { ...(session.metadata || {}) };
+          delete meta.resumeAt;
+          await this.sessionManager.updateSession(session.id, { metadata: meta });
+        } else if (keepTarget) {
           const meta = { ...(session.metadata || {}), resumeAt: keepTarget.assistantUuid };
           await this.sessionManager.updateSession(session.id, { metadata: meta });
         } else {
@@ -3963,10 +3943,6 @@ export class CommandHandler {
           });
         }
 
-        const discarded = turns.length - turnNum + 1;
-        const keepDesc = keepTarget
-          ? `回退到第 ${turnNum - 1} 轮："${keepTarget.userContent}"`
-          : '已清空全部对话历史';
         results.push(
           `✅ 已撤销第 ${turnNum} 轮${discarded > 1 ? `及后续共 ${discarded} 轮` : ''}`,
           keepTarget ? `下次发言将从第 ${turnNum - 1} 轮继续` : '下次发言将开始全新对话'

@@ -250,7 +250,6 @@ evolclaw/
 - `/perm [mode]` - 查看或切换权限模式（auto / edit / default / readonly）
 
 **系统管理**：
-- `/clear` - 清空对话历史
 - `/compact` - 压缩会话上下文
 - `/rewind <turn>` - 回退会话到指定轮次
 - `/stop` - 中断当前任务

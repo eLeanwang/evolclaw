@@ -82,13 +82,13 @@ export type ConfigEvent =
 
 // ── 触发器事件 ──
 export type TriggerEvent =
-  | { type: 'trigger:registered'; triggerId: string; name: string; peerId: string }
-  | { type: 'trigger:fired'; triggerId: string; name: string; fireTime: number }
-  | { type: 'trigger:completed'; triggerId: string; messageId: string; durationMs: number }
-  | { type: 'trigger:failed'; triggerId: string; messageId: string; error: string }
-  | { type: 'trigger:skipped'; triggerId: string; reason: 'overlap' | 'interrupted' }
-  | { type: 'trigger:updated'; triggerId: string; name: string; peerId: string }
-  | { type: 'trigger:cancelled'; triggerId: string; by: string };
+  | { type: 'trigger:registered'; triggerId: string; name: string; peerId: string; targetChannel: string; targetChannelId: string; scheduleType: string; scheduleValue: string }
+  | { type: 'trigger:fired'; triggerId: string; name: string; fireTime: number; targetChannel: string; targetChannelId: string; scheduleType: string }
+  | { type: 'trigger:completed'; triggerId: string; name: string; messageId: string; durationMs: number; targetChannel: string; targetChannelId: string; fireTime: number }
+  | { type: 'trigger:failed'; triggerId: string; name: string; messageId: string; error: string; targetChannel: string; targetChannelId: string; fireTime: number; phase: 'enqueue' | 'execute' }
+  | { type: 'trigger:skipped'; triggerId: string; name: string; reason: 'overlap' | 'interrupted'; targetChannel: string; targetChannelId: string }
+  | { type: 'trigger:updated'; triggerId: string; name: string; peerId: string; scheduleType: string; scheduleValue: string }
+  | { type: 'trigger:cancelled'; triggerId: string; name: string; by: string };
 export type GatewayEvent =
   | SystemEvent
   | ChannelEvent

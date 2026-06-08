@@ -97,6 +97,10 @@ export class SessionManager {
     return { role: 'guest', mode: 'interactive' };
   }
 
+  private resolvePermissionMode(role: SessionIdentity['role']): string {
+    return (role === 'owner' || role === 'admin') ? 'bypass' : 'readonly';
+  }
+
   async updateIdentity(sessionId: string, identity: SessionIdentity): Promise<void> {
     logger.debug(`[SessionManager] updateIdentity: sessionId=${sessionId}, role=${identity.role}`);
   }
@@ -517,7 +521,7 @@ export class SessionManager {
       const session = this.getOrCreateThreadSession(channel, channelId, threadId, defaultProjectPath, metadata, name, agentId, selfAID, channelType, peerType);
       session.identity = this.resolveIdentity(channel, userId);
       if (session.metadata && !session.metadata.permissionMode) {
-        session.metadata.permissionMode = DEFAULT_PERMISSION_MODE;
+        session.metadata.permissionMode = this.resolvePermissionMode(session.identity.role);
         this.persistSession(session, 'none');
       }
       return session;
@@ -595,7 +599,8 @@ export class SessionManager {
 
     // Create new session
     const sessionMetadata: any = { ...(metadata || {}) };
-    if (!sessionMetadata.permissionMode) sessionMetadata.permissionMode = DEFAULT_PERMISSION_MODE;
+    const newIdentity = this.resolveIdentity(channel, userId);
+    if (!sessionMetadata.permissionMode) sessionMetadata.permissionMode = this.resolvePermissionMode(newIdentity.role);
 
     const session: Session = {
       id: generateSessionId(),
@@ -614,7 +619,7 @@ export class SessionManager {
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
-    session.identity = this.resolveIdentity(channel, userId);
+    session.identity = newIdentity;
 
     this.persistSession(session, 'set');
     this.eventBus.publish({
@@ -1037,11 +1042,14 @@ export class SessionManager {
     const existingDir = this.findExistingChatDir(channel, channelId);
     let channelType = channel;
     let selfAID = '';
+    let inheritedRole: SessionIdentity['role'] = 'guest';
     if (existingDir) {
       const active = readJsonFile<SessionFile>(path.join(existingDir, 'active.json'));
       if (active) {
         channelType = active.channelType || channel;
         selfAID = active.selfAID || '';
+        // 从现有 session 的 permissionMode 反推 role，bypass→owner，其余→guest
+        if (active.permissionMode === 'bypass') inheritedRole = 'owner';
       }
     }
 
@@ -1057,7 +1065,7 @@ export class SessionManager {
       sessionKey: formatSessionKey(channelType, channelId, DEFAULT_THREAD_ID),
       chatType: inheritedChatType,
       sessionMode: this.resolveDefaultSessionMode(channel, inheritedChatType),
-      metadata: { permissionMode: DEFAULT_PERMISSION_MODE },
+      metadata: { permissionMode: this.resolvePermissionMode(inheritedRole) },
       name: name || '默认会话',
       createdAt: Date.now(),
       updatedAt: Date.now(),

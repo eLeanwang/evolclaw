@@ -95,6 +95,30 @@ export class TriggerManager {
     return this.triggers.get(id);
   }
 
+  /**
+   * 按 id 从磁盘重读单条 trigger（不走内存缓存）。
+   * 用于触发时刻取最新数据，消除内存/磁盘漂移。
+   * 读盘失败或不存在时返回 undefined（调用方回退到内存副本）。
+   */
+  getByIdFresh(id: string): Trigger | undefined {
+    if (!fs.existsSync(this.triggersPath)) return undefined;
+    try {
+      const raw = fs.readFileSync(this.triggersPath, 'utf8');
+      const data: TriggersFile = JSON.parse(raw);
+      return data.triggers?.[id];
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * 从磁盘重新加载到内存 Map（外部编辑 triggers.json 后调用）。
+   * 等价于 load()，语义上强调"丢弃内存副本、以磁盘为准"。
+   */
+  reloadFromDisk(): Trigger[] {
+    return this.load();
+  }
+
   getByName(name: string): Trigger | undefined {
     for (const t of this.triggers.values()) {
       if (t.name === name) return t;

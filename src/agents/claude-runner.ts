@@ -305,6 +305,8 @@ export interface AgentRunnerFull {
     clear?: boolean;
     compact?: boolean;
     fork?: boolean;
+    askUserQuestion?: boolean;
+    planApproval?: boolean;
   };
 
   /** 解析 agent session 文件路径（用于健康检查），返回 null 表示无法定位 */
@@ -330,6 +332,9 @@ export interface AgentRunnerFull {
     insertions?: number;
     deletions?: number;
   }>;
+
+  /** 回退对话历史末尾若干轮。Codex app-server 可直接修改 thread；Claude 走 resumeAt metadata。 */
+  rollbackSessionTurns?(agentSessionId: string, projectPath: string, numTurns: number): Promise<boolean>;
 
   // 可选能力（通过类型守卫检测）
   setModel?(model: string): void;
@@ -384,7 +389,7 @@ export function hasCompact(agent: any): agent is Compactable {
 
 export class AgentRunner {
   readonly name: string = 'claude';
-  readonly capabilities = { clear: true, compact: true, fork: true };
+  readonly capabilities = { clear: true, compact: true, fork: true, askUserQuestion: true, planApproval: true };
   private apiKey: string;
   private model: string;
   private effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';

@@ -550,6 +550,18 @@ async function main() {
     }
 
     scheduler.setFireCallback((msg, trigger) => {
+      const onEnqueueFailed = (err: any) => {
+        const error = err instanceof Error ? err.message : String(err);
+        logger.error(`[Trigger] Enqueue failed ${trigger.id}: ${error}`);
+        eventBus.publish({
+          type: 'trigger:failed', triggerId: trigger.id, name: trigger.name,
+          messageId: msg.messageId || '', error,
+          targetChannel: trigger.targetChannel, targetChannelId: trigger.targetChannelId,
+          fireTime: msg.triggerMeta?.fireTime ?? Date.now(), phase: 'enqueue',
+        });
+        scheduler.onTriggerComplete(trigger.id, 'failed');
+      };
+
       if (trigger.targetSessionStrategy === 'current' && trigger.boundSessionId) {
         const boundId = trigger.boundSessionId;
         if (messageQueue.isProcessing(boundId)) {
@@ -559,18 +571,51 @@ async function main() {
         sessionManager.getSessionById(boundId).then(bound => {
           if (!bound) { logger.warn(`[Trigger] Bound session ${boundId} not found`); return; }
           messageQueue.enqueue(boundId, msg, bound.projectPath, { interruptible: false })
-            .catch(err => logger.error(`[Trigger] Enqueue failed ${trigger.id}: ${err}`));
+            .catch(onEnqueueFailed);
         });
         return;
       }
       messageQueue.enqueue(`${msg.channel}:${msg.channelId}`, msg, primaryProjectPath, { interruptible: false })
-        .catch(err => logger.error(`[Trigger] Enqueue failed ${trigger.id}: ${err}`));
+        .catch(onEnqueueFailed);
     });
     // Subscribe to trigger:completed/failed/skipped to update cron inflight state
     eventBus.subscribe('trigger:completed', (ev: any) => scheduler.onTriggerComplete(ev.triggerId, 'completed'));
     eventBus.subscribe('trigger:failed', (ev: any) => scheduler.onTriggerComplete(ev.triggerId, 'failed'));
     eventBus.subscribe('trigger:skipped', (ev: any) => {
       if (ev.reason === 'interrupted') scheduler.onTriggerComplete(ev.triggerId, 'interrupted');
+    });
+
+    // ── Trigger 失败/跳过通知：向 targetChannel 发送告警消息 ──
+    eventBus.subscribe('trigger:failed', (ev: any) => {
+      const adapter = processor.getAdapter(ev.targetChannel);
+      if (!adapter) return;
+      const phaseLabel = ev.phase === 'enqueue' ? '入队' : '执行';
+      const timeStr = ev.fireTime ? new Date(ev.fireTime).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) : '未知';
+      const text = `⚠️ 定时任务 [${ev.name || ev.triggerId}] 执行失败\n阶段：${phaseLabel}\n原因：${ev.error}\n触发时间：${timeStr}`;
+      const envelope: OutboundEnvelope = {
+        taskId: `trigger-notify:${ev.triggerId}`,
+        channel: ev.targetChannel,
+        channelId: ev.targetChannelId,
+        agentName: 'system',
+        chatmode: 'interactive',
+        timestamp: Date.now(),
+      };
+      adapter.send(envelope, { kind: 'result.text', text, isFinal: true, format: 'plain' }).catch(() => {});
+    });
+    eventBus.subscribe('trigger:skipped', (ev: any) => {
+      if (ev.reason !== 'overlap') return;
+      const adapter = processor.getAdapter(ev.targetChannel);
+      if (!adapter) return;
+      const text = `⚠️ 定时任务 [${ev.name || ev.triggerId}] 本次跳过（上次执行仍在进行中）`;
+      const envelope: OutboundEnvelope = {
+        taskId: `trigger-notify:${ev.triggerId}`,
+        channel: ev.targetChannel,
+        channelId: ev.targetChannelId,
+        agentName: 'system',
+        chatmode: 'interactive',
+        timestamp: Date.now(),
+      };
+      adapter.send(envelope, { kind: 'result.text', text, isFinal: true, format: 'plain' }).catch(() => {});
     });
     // Note: only the primary agent's scheduler is wired to cmdHandler.
     // Non-primary agent channels will receive "⚠️ 触发器功能未启用" when using /trigger.

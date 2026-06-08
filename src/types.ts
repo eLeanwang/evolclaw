@@ -307,6 +307,8 @@ export interface Message {
   source?: 'user' | 'card-trigger' | 'trigger' | 'owner-inject';
   triggerMeta?: {
     triggerId: string;
+    triggerName?: string;
+    fireTime?: number;
     boundSessionId?: string;
     pendingThread?: boolean;
     rootMessageId?: string;
