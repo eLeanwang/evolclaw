@@ -14,7 +14,8 @@
 | `ec msg` | 私聊收发消息 | 回复/发消息/拉取/撤回/查在线 | 有对端（peerId） | `msg.md` |
 | `ec group` | 群聊收发与群管理 | 群发/建群/邀请/踢人/退群/群成员 | 群聊（groupId） | `group.md` |
 | `ec aid` | AID 身份管理 | 身份/证书/名片/探测对端 | 任意有渠道场景 | `aid.md` |
-| `ec storage` | 文件存储 | 上传/下载/配额 | 任意有渠道场景 | `storage.md` |
+| `ec fs` | 网络文件系统（统一前端） | 上传/下载/看文件/列目录/分享/共享/挂载/配额 | 任意有渠道场景 | `fs.md`（架构全景 `fs-architecture.md`） |
+| `ec storage` | 文件存储（底层调试） | 上传/下载/配额 | 任意有渠道场景 | `storage.md` |
 | `ec agent` | EvolAgent 生命周期 | 创建/启停/热重载/改配置 | 管理员（owner/admin） | `agent.md` |
 | `ec rpc` | 底层 AUN RPC（逃生通道） | 直接调协议方法 | 高级/兜底 | `rpc.md` |
 
