@@ -3448,6 +3448,13 @@ export class CommandHandler {
       const oldName = session.name || '(未命名)';
       const success = await this.sessionManager.renameSession(session.id, newName);
 
+      if (success && session.agentSessionId) {
+        const renameAgent = this.getAgent(channel, session.agentId);
+        await renameAgent.setSessionName?.(session.agentSessionId, newName).catch(error => {
+          logger.debug('[CommandHandler] Backend session rename sync failed:', error);
+        });
+      }
+
       if (!success) {
         return { kind: 'command.error' as const, text: `❌ 重命名失败` };
       }
@@ -3536,6 +3543,17 @@ export class CommandHandler {
       try {
         const forkedSessionId = await forkAgent.forkSession!(session.agentSessionId, session.projectPath, forkName);
         const newSession = await this.sessionManager.createForkedSession(session, forkedSessionId, forkName);
+        await forkAgent.updateSessionMetadata?.(forkedSessionId, {
+          gitInfo: {
+            branch: null,
+            commitHash: null,
+            repositoryUrl: null,
+          },
+          evolclawSessionId: newSession.id,
+          sourceSessionId: session.id,
+        }).catch(error => {
+          logger.debug('[CommandHandler] Backend fork metadata sync failed:', error);
+        });
 
         this.eventBus.publish({ type: 'session:forked', sessionId: newSession.id, sourceSessionId: session.id, name: forkName });
 

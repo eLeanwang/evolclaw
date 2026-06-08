@@ -336,6 +336,10 @@ export interface AgentRunnerFull {
   /** 回退对话历史末尾若干轮。Codex app-server 可直接修改 thread；Claude 走 resumeAt metadata。 */
   rollbackSessionTurns?(agentSessionId: string, projectPath: string, numTurns: number): Promise<boolean>;
 
+  /** 同步底层会话标题/元数据（后端不支持时可忽略）。 */
+  setSessionName?(agentSessionId: string, name: string): Promise<boolean>;
+  updateSessionMetadata?(agentSessionId: string, metadata: Record<string, any>): Promise<boolean>;
+
   // 可选能力（通过类型守卫检测）
   setModel?(model: string): void;
   getModel?(): string;

@@ -8,7 +8,8 @@
 
 import type { Config } from '../types.js';
 import type { AgentPlugin, AgentInstance, AgentCallbacks } from '../core/baseagent-loader.js';
-import type { AgentEvent, AgentRunnerFull, ModelSwitcher, PermissionModeInfo } from './claude-runner.js';
+import type { AgentEvent, AgentRunnerFull, ModelSwitcher, PermissionContext, PermissionModeInfo } from './claude-runner.js';
+import type { PermissionGateway } from '../core/permission.js';
 import { CodexAppServerClient, type CodexThreadResponse, type CodexTurnItem } from './codex-app-server-client.js';
 import { resolveOpenaiConfig } from './resolve.js';
 import { logger } from '../utils/logger.js';
@@ -83,15 +84,19 @@ export function getCodexEfforts(model: string): string[] {
 
 export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
   readonly name = 'codex';
-  readonly capabilities = { clear: false, compact: false, fork: false, askUserQuestion: false, planApproval: false };
+  readonly capabilities = { clear: false, compact: true, fork: true, askUserQuestion: false, planApproval: false };
   private codexModule: CodexSDK | null = null;
   private model: string;
   private effort?: string;
   private activeAbortControllers = new Map<string, AbortController>();
   private activeStreams = new Map<string, AsyncIterable<any>>();
   private activeSessions = new Map<string, string>(); // sessionId → threadId
+  private activeTurns = new Map<string, { threadId: string; turnId: string }>();
   private appServerClient: CodexAppServerClient | null = null;
   private onSessionIdUpdate?: (sessionId: string, agentSessionId: string) => void;
+  private permissionGateway?: PermissionGateway;
+  private sendPromptFn?: (text: string) => Promise<void>;
+  private permissionContexts = new Map<string, PermissionContext>();
   private resolvedConfig: { apiKey: string; baseUrl?: string; model: string; effort?: string };
 
   constructor(config: Config, callbacks: AgentCallbacks) {
@@ -124,20 +129,40 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
         baseUrl: this.resolvedConfig.baseUrl,
         model: this.model,
         effort: this.effort,
+        onServerRequest: request => this.handleAppServerRequest(request),
       });
     }
     return this.appServerClient;
   }
 
+  private resetAppServerClient(): void {
+    const client = this.appServerClient;
+    this.appServerClient = null;
+    client?.close().catch(error => {
+      logger.debug(`[CodexRunner] Failed to close stale app-server client: ${error}`);
+    });
+  }
+
   // ── ModelSwitcher ──
 
-  setModel(model: string): void { this.model = model; }
+  setModel(model: string): void { this.model = model; this.resetAppServerClient(); }
   getModel(): string { return this.model; }
-  listModels(): string[] { return fetchCodexCatalog().map(m => m.slug); }
+  async listModels(): Promise<string[]> {
+    try {
+      const response = await this.getAppServerClient().modelList(false);
+      const ids = (response.data ?? [])
+        .map(model => model.id || model.slug || model.name || model.model)
+        .filter((id): id is string => typeof id === 'string' && id.length > 0);
+      if (ids.length > 0) return ids;
+    } catch (error) {
+      logger.debug(`[CodexRunner] app-server model/list failed, using catalog fallback: ${error}`);
+    }
+    return fetchCodexCatalog().map(m => m.slug);
+  }
 
   // ── Effort ──
 
-  setEffort(effort: string | undefined): void { this.effort = effort; }
+  setEffort(effort: string | undefined): void { this.effort = effort; this.resetAppServerClient(); }
   getEffort(): string | undefined { return this.effort; }
 
   // ── Permission ──
@@ -164,8 +189,9 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
       { key: 'noask', nameZh: '静默', description: '只执行已知安全操作', available: true },
     ];
   }
-  setSendPrompt(_fn: (text: string) => Promise<void>): void {}
-  setPermissionGateway(_gw: any): void {}
+  setSendPrompt(fn: (text: string) => Promise<void>): void { this.sendPromptFn = fn; }
+  setPermissionContext(sessionId: string, context: PermissionContext): void { this.permissionContexts.set(sessionId, context); }
+  setPermissionGateway(gw: PermissionGateway): void { this.permissionGateway = gw; }
 
   // ── Stream management (needed by MessageProcessor) ──
 
@@ -257,8 +283,15 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
     const controller = this.activeAbortControllers.get(sessionKey);
     if (controller) {
       controller.abort('User interrupt');
+      const activeTurn = this.activeTurns.get(sessionKey);
+      if (activeTurn) {
+        this.getAppServerClient().turnInterrupt(activeTurn.threadId, activeTurn.turnId).catch(error => {
+          logger.debug(`[CodexRunner] app-server turn interrupt failed: ${error}`);
+        });
+      }
       this.activeAbortControllers.delete(sessionKey);
       this.activeStreams.delete(sessionKey);
+      this.activeTurns.delete(sessionKey);
       logger.info(`[CodexRunner] Interrupted session: ${sessionKey}`);
     }
   }
@@ -278,6 +311,8 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
     this.activeSessions.delete(sessionId);
     this.activeStreams.delete(sessionId);
     this.activeAbortControllers.delete(sessionId);
+    this.activeTurns.delete(sessionId);
+    this.permissionContexts.delete(sessionId);
   }
 
   resolveSessionFile(agentSessionId: string, _projectPath: string): string | null {
@@ -308,14 +343,33 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
     return true;
   }
 
-  async compactSession(_sessionId: string, _agentSessionId: string, _projectPath: string): Promise<boolean> {
-    // Codex CLI 内部处理 compaction，外部无法触发
-    logger.info('[CodexRunner] Compact not supported, Codex handles context internally');
-    return false;
+  async compactSession(_sessionId: string, agentSessionId: string, _projectPath: string): Promise<boolean> {
+    try {
+      return await this.getAppServerClient().threadCompactStart(agentSessionId);
+    } catch (error) {
+      logger.error('[CodexRunner] Compact failed:', error);
+      return false;
+    }
   }
 
-  async compact(_sessionId: string, _agentSessionId: string, _projectPath: string): Promise<boolean> {
-    return this.compactSession(_sessionId, _agentSessionId, _projectPath);
+  async compact(sessionId: string, agentSessionId: string, projectPath: string): Promise<boolean> {
+    return this.compactSession(sessionId, agentSessionId, projectPath);
+  }
+
+  async forkSession(agentSessionId: string, projectPath: string, title?: string): Promise<string> {
+    const response = await this.getAppServerClient().threadFork(agentSessionId, projectPath, title);
+    const forkedThreadId = response.thread?.id;
+    if (!forkedThreadId) throw new Error('Codex fork did not return a thread id');
+    return forkedThreadId;
+  }
+
+  async setSessionName(agentSessionId: string, name: string): Promise<boolean> {
+    return this.getAppServerClient().threadSetName(agentSessionId, name);
+  }
+
+  async updateSessionMetadata(agentSessionId: string, metadata: Record<string, any>): Promise<boolean> {
+    const gitInfo = metadata?.gitInfo && typeof metadata.gitInfo === 'object' ? metadata.gitInfo : undefined;
+    return this.getAppServerClient().threadMetadataUpdate(agentSessionId, gitInfo);
   }
 
   async getSessionMessages(agentSessionId: string, projectPath: string): Promise<Array<{
@@ -329,10 +383,134 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
     return this.mapThreadToSessionMessages(response, agentSessionId);
   }
 
+  private async handleAppServerRequest(request: { id: string; method: string; params?: Record<string, any> }): Promise<any> {
+    const params = request.params || {};
+    const sessionKey = this.findSessionKeyByThread(params.threadId || params.conversationId);
+    const toolName = request.method.includes('fileChange') || request.method === 'applyPatchApproval' ? 'FileChange' : 'Bash';
+    const toolInput = this.buildPermissionInput(request.method, params);
+    const summary = this.summarizeAppServerRequest(request.method, params);
+    const reason = params.reason || params.decisionReason || undefined;
+    const decision = await this.resolvePermissionDecision(sessionKey, toolName, toolInput, summary, reason);
+    return this.toAppServerApprovalResponse(request.method, decision);
+  }
+
+  private findSessionKeyByThread(threadId?: string): string {
+    if (threadId) {
+      for (const [sessionKey, activeThreadId] of this.activeSessions.entries()) {
+        if (activeThreadId === threadId) return sessionKey;
+      }
+    }
+    return threadId || 'codex-app-server';
+  }
+
+  private buildPermissionInput(method: string, params: Record<string, any>): Record<string, unknown> {
+    if (method.includes('fileChange') || method === 'applyPatchApproval') {
+      return { fileChanges: params.fileChanges, grantRoot: params.grantRoot, reason: params.reason };
+    }
+    const command = Array.isArray(params.command) ? params.command.join(' ') : (params.command || '');
+    return { command, cwd: params.cwd, reason: params.reason, commandActions: params.commandActions || params.parsedCmd };
+  }
+
+  private summarizeAppServerRequest(method: string, params: Record<string, any>): string {
+    if (method.includes('fileChange') || method === 'applyPatchApproval') {
+      if (params.grantRoot) return '允许写入：' + params.grantRoot;
+      const changes = params.fileChanges && typeof params.fileChanges === 'object' ? Object.keys(params.fileChanges) : [];
+      return changes.length ? changes.join(', ') : '文件变更审批';
+    }
+    const command = Array.isArray(params.command) ? params.command.join(' ') : params.command;
+    return command || '命令执行审批';
+  }
+
+  private async resolvePermissionDecision(
+    sessionKey: string,
+    toolName: string,
+    toolInput: Record<string, unknown>,
+    summary: string,
+    reason?: string
+  ): Promise<'allow' | 'always' | 'deny'> {
+    if (this.currentMode === 'bypass' || this.currentMode === 'auto') return 'allow';
+    if (this.currentMode === 'noask') return 'deny';
+    if (!this.permissionGateway || !this.sendPromptFn) return 'allow';
+    if (this.permissionGateway.isAlwaysAllowed(toolName)) return 'always';
+    return this.permissionGateway.requestPermission(
+      sessionKey,
+      toolName,
+      toolInput,
+      this.sendPromptFn,
+      this.permissionContexts.get(sessionKey),
+      summary,
+      reason
+    );
+  }
+
+  private toAppServerApprovalResponse(method: string, decision: 'allow' | 'always' | 'deny'): Record<string, unknown> {
+    if (method === 'execCommandApproval' || method === 'applyPatchApproval') {
+      return { decision: decision === 'deny' ? 'denied' : decision === 'always' ? 'approved_for_session' : 'approved' };
+    }
+    if (method === 'item/commandExecution/requestApproval') {
+      return { decision: decision === 'deny' ? 'decline' : decision === 'always' ? 'acceptForSession' : 'accept' };
+    }
+    if (method === 'item/fileChange/requestApproval') {
+      return { decision: decision === 'deny' ? 'decline' : decision === 'always' ? 'acceptForSession' : 'accept' };
+    }
+    if (method === 'item/permissions/requestApproval') {
+      if (decision === 'deny') throw new Error('Permission request denied');
+      return { permissions: {}, scope: decision === 'always' ? 'session' : 'turn' };
+    }
+    throw new Error('Unsupported Codex app-server request: ' + method);
+  }
+
   async rollbackSessionTurns(agentSessionId: string, _projectPath: string, numTurns: number): Promise<boolean> {
     if (numTurns < 1) return true;
     const response = await this.getAppServerClient().threadRollback(agentSessionId, numTurns);
     return !!response.thread;
+  }
+
+  async rewindFiles(agentSessionId: string, projectPath: string, userMessageId: string): Promise<{
+    canRewind: boolean;
+    error?: string;
+    filesChanged?: string[];
+    insertions?: number;
+    deletions?: number;
+  }> {
+    const messages = await this.getSessionMessages(agentSessionId, projectPath);
+    const targetIndex = messages.findIndex(message => message.uuid === userMessageId);
+    if (targetIndex < 0) return { canRewind: false, error: 'target turn not found' };
+
+    const changedFiles = new Set<string>();
+    for (let i = targetIndex; i < messages.length; i++) {
+      const message = messages[i];
+      const content = Array.isArray((message.message as any)?.content) ? (message.message as any).content : [];
+      for (const part of content) {
+        if (part?.type === 'file_change' && typeof part.path === 'string') changedFiles.add(part.path);
+      }
+    }
+
+    if (changedFiles.size === 0) {
+      return { canRewind: false, error: 'no file changes recorded for target turn' };
+    }
+
+    const snapshotFiles = [...changedFiles];
+    for (const filePath of snapshotFiles) {
+      const absolutePath = path.isAbsolute(filePath) ? filePath : path.join(projectPath, filePath);
+      const content = this.readGitHeadFile(projectPath, filePath);
+      if (content === null) {
+        fs.rmSync(absolutePath, { force: true });
+      } else {
+        fs.mkdirSync(path.dirname(absolutePath), { recursive: true });
+        fs.writeFileSync(absolutePath, content);
+      }
+    }
+
+    return { canRewind: true, filesChanged: snapshotFiles };
+  }
+
+  private readGitHeadFile(projectPath: string, filePath: string): Buffer | null {
+    try {
+      return execFileSync('git', ['show', `HEAD:${filePath.replace(/\\/g, '/')}`], { cwd: projectPath, stdio: ['pipe', 'pipe', 'ignore'] });
+    } catch {
+      return null;
+    }
   }
 
   private mapThreadToSessionMessages(response: CodexThreadResponse, fallbackThreadId: string): Array<{
@@ -370,6 +548,14 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
             message: { role: 'assistant', content: item.text || '' },
             parent_tool_use_id: null,
           });
+        } else if (item.type === 'file_change') {
+          messages.push({
+            type: 'system',
+            uuid: item.id || turn.id || (threadId + '-file-' + messages.length),
+            session_id: threadId,
+            message: { role: 'system', content: this.mapFileChangeToContent(item) },
+            parent_tool_use_id: null,
+          });
         }
       }
     }
@@ -394,6 +580,13 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
     });
   }
 
+  private mapFileChangeToContent(item: CodexTurnItem): Array<{ type: string; path: string; kind?: string }> {
+    const changes = Array.isArray((item as any).changes) ? (item as any).changes : [];
+    return changes
+      .filter((change: any) => typeof change?.path === 'string')
+      .map((change: any) => ({ type: 'file_change', path: change.path, kind: change.kind }));
+  }
+
   setCompactStartCallback(_callback: (sessionId: string) => void): void {}
 
   // ── Event stream transformation ──
@@ -411,6 +604,7 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
       }
     } finally {
       this.activeAbortControllers.delete(sessionId);
+      this.activeTurns.delete(sessionId);
       // 清理临时图片文件
       if (tempFiles?.length) {
         for (const f of tempFiles) {
@@ -474,18 +668,29 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
         break;
       }
 
+      case 'turn.started': {
+        const threadId = thread?.id || this.activeSessions.get(sessionId);
+        const turnId = event.turn_id || event.turn?.id || event.id;
+        if (threadId && turnId) this.activeTurns.set(sessionId, { threadId, turnId });
+        break;
+      }
+
       case 'turn.completed': {
+        this.activeTurns.delete(sessionId);
+        const usage = event.usage || event.turn?.usage;
         yield {
           type: 'complete',
           result: undefined,
           costUsd: undefined,
           durationMs: undefined,
-        };
+          ...(usage ? { usage } : {}),
+        } as AgentEvent;
         break;
       }
 
       case 'turn.failed': {
-        yield { type: 'error', error: event.error.message, errorType: 'unknown' };
+        this.activeTurns.delete(sessionId);
+        yield { type: 'error', error: event.error?.message || event.message || 'Codex turn failed', errorType: 'unknown' };
         break;
       }
 
@@ -504,6 +709,8 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
     this.activeAbortControllers.clear();
     this.activeStreams.clear();
     this.activeSessions.clear();
+    this.activeTurns.clear();
+    this.permissionContexts.clear();
     await this.appServerClient?.close();
     this.appServerClient = null;
   }

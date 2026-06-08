@@ -11,6 +11,14 @@ interface PendingRequest {
   method: string;
 }
 
+export interface CodexServerRequest {
+  id: string;
+  method: string;
+  params?: JsonObject;
+}
+
+export type CodexServerRequestHandler = (request: CodexServerRequest) => Promise<JsonValue> | JsonValue;
+
 export interface CodexTurnItem {
   id?: string;
   type?: string;
@@ -34,6 +42,20 @@ export interface CodexThreadResponse {
     turns?: CodexTurn[];
     [key: string]: unknown;
   };
+  data?: unknown[];
+  nextCursor?: string | null;
+}
+
+export interface CodexModelListResponse {
+  data?: Array<{ id?: string; name?: string; slug?: string; model?: string; hidden?: boolean; [key: string]: unknown }>;
+  nextCursor?: string | null;
+}
+
+export interface CodexProviderCapabilitiesResponse {
+  namespaceTools?: boolean;
+  imageGeneration?: boolean;
+  webSearch?: boolean;
+  [key: string]: unknown;
 }
 
 interface CodexAppServerClientOptions {
@@ -43,6 +65,7 @@ interface CodexAppServerClientOptions {
   effort?: string;
   cwd?: string;
   env?: Record<string, string | undefined>;
+  onServerRequest?: CodexServerRequestHandler;
 }
 
 export class CodexAppServerClient {
@@ -69,6 +92,76 @@ export class CodexAppServerClient {
 
   async threadRollback(threadId: string, numTurns: number): Promise<CodexThreadResponse> {
     return this.request('thread/rollback', { threadId, numTurns }) as Promise<CodexThreadResponse>;
+  }
+
+  async threadFork(threadId: string, projectPath: string, title?: string): Promise<CodexThreadResponse> {
+    const response = await this.request('thread/fork', {
+      threadId,
+      cwd: projectPath,
+      model: this.options.model ?? null,
+      config: this.options.effort ? { model_reasoning_effort: this.options.effort } : null,
+      excludeTurns: false,
+      persistExtendedHistory: false,
+    }) as CodexThreadResponse;
+    const forkedThreadId = response.thread?.id;
+    if (title && forkedThreadId) {
+      await this.threadSetName(forkedThreadId, title).catch(error => {
+        logger.debug(`[CodexAppServer] thread/name/set failed after fork: ${error}`);
+      });
+    }
+    return response;
+  }
+
+  async threadCompactStart(threadId: string): Promise<boolean> {
+    await this.request('thread/compact/start', { threadId });
+    return true;
+  }
+
+  async threadTurnsList(threadId: string, limit?: number): Promise<CodexThreadResponse> {
+    return this.request('thread/turns/list', {
+      threadId,
+      ...(limit ? { limit } : {}),
+      sortDirection: 'asc',
+      itemsView: 'full',
+    }) as Promise<CodexThreadResponse>;
+  }
+
+  async threadTurnsItemsList(threadId: string, turnId: string, limit?: number): Promise<CodexThreadResponse> {
+    return this.request('thread/turns/items/list', {
+      threadId,
+      turnId,
+      ...(limit ? { limit } : {}),
+      sortDirection: 'asc',
+    }) as Promise<CodexThreadResponse>;
+  }
+
+  async threadSetName(threadId: string, name: string): Promise<boolean> {
+    await this.request('thread/name/set', { threadId, name });
+    return true;
+  }
+
+  async threadMetadataUpdate(threadId: string, gitInfo?: Record<string, string | null | undefined>): Promise<boolean> {
+    const params: JsonObject = { threadId };
+    if (gitInfo) {
+      params.gitInfo = Object.fromEntries(
+        Object.entries(gitInfo).filter((entry): entry is [string, string | null] => entry[1] !== undefined)
+      );
+    }
+    await this.request('thread/metadata/update', params);
+    return true;
+  }
+
+  async turnInterrupt(threadId: string, turnId: string): Promise<boolean> {
+    await this.request('turn/interrupt', { threadId, turnId });
+    return true;
+  }
+
+  async modelList(includeHidden = false): Promise<CodexModelListResponse> {
+    return this.request('model/list', { includeHidden }) as Promise<CodexModelListResponse>;
+  }
+
+  async modelProviderCapabilitiesRead(): Promise<CodexProviderCapabilitiesResponse> {
+    return this.request('modelProvider/capabilities/read', {}) as Promise<CodexProviderCapabilitiesResponse>;
   }
 
   async close(): Promise<void> {
@@ -156,6 +249,16 @@ export class CodexAppServerClient {
     });
   }
 
+  private respond(id: string, result: JsonValue): void {
+    if (!this.proc) return;
+    this.proc.stdin.write(JSON.stringify({ id, result }) + '\n');
+  }
+
+  private respondError(id: string, error: Error): void {
+    if (!this.proc) return;
+    this.proc.stdin.write(JSON.stringify({ id, error: { message: error.message } }) + '\n');
+  }
+
   private notify(method: string, params?: JsonObject | null): void {
     if (!this.proc) return;
     const payload: JsonObject = { method };
@@ -181,9 +284,15 @@ export class CodexAppServerClient {
     }
 
     if (message.id === undefined) return;
-    const pending = this.pending.get(String(message.id));
-    if (!pending) return;
-    this.pending.delete(String(message.id));
+    const messageId = String(message.id);
+    const pending = this.pending.get(messageId);
+    if (!pending) {
+      if (typeof message.method === 'string') {
+        this.handleServerRequest({ id: messageId, method: message.method, params: message.params });
+      }
+      return;
+    }
+    this.pending.delete(messageId);
 
     if (message.error) {
       const detail = typeof message.error?.message === 'string' ? message.error.message : JSON.stringify(message.error);
@@ -192,6 +301,17 @@ export class CodexAppServerClient {
       return;
     }
     pending.resolve(message.result ?? null);
+  }
+
+  private handleServerRequest(request: CodexServerRequest): void {
+    const handler = this.options.onServerRequest;
+    if (!handler) {
+      this.respondError(request.id, new Error('Unsupported Codex app-server request: ' + request.method));
+      return;
+    }
+    Promise.resolve(handler(request))
+      .then(result => this.respond(request.id, result ?? null))
+      .catch(error => this.respondError(request.id, error instanceof Error ? error : new Error(String(error))));
   }
 
   private failAll(error: Error): void {
