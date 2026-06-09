@@ -54,6 +54,9 @@ Thumbs.db
 archive/
 conversations/
 
+# 根目录待办
+/TODO.md
+
 # 打包文件
 *.tar.gz
 *.tgz
