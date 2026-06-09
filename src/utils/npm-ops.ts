@@ -9,7 +9,7 @@
 
 import fs from 'fs';
 import path from 'path';
-import { execFile } from 'child_process';
+import { execFile, execFileSync } from 'child_process';
 import { promisify } from 'util';
 import { getPackageRoot } from '../paths.js';
 import { isWindows } from './cross-platform.js';
@@ -103,6 +103,26 @@ export function getLocalVersion(): string {
 }
 
 /**
+ * 解析全局安装包的已装版本（通过 `npm root -g` 定位全局 node_modules）。
+ * 用于 evolclaw-web 这类独立全局命令包——它们不在 evolclaw 的依赖树里。
+ * 未安装或查询失败返回 null。
+ */
+export function resolveGlobalPkg(pkgName: string): { version: string; path: string } | null {
+  try {
+    const npmCmd = isWindows ? 'npm.cmd' : 'npm';
+    const globalRoot = execFileSync(npmCmd, ['root', '-g'], {
+      encoding: 'utf-8', timeout: 10000, shell: isWindows,
+    }).trim();
+    const pkgPath = path.join(globalRoot, ...pkgName.split('/'), 'package.json');
+    if (fs.existsSync(pkgPath)) {
+      const data = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+      return { version: data.version, path: pkgPath };
+    }
+  } catch { /* not found */ }
+  return null;
+}
+
+/**
  * 查询 npm registry 上指定包的最新版本。
  * 使用 HTTP fetch 直接查 registry API，不依赖 npm CLI。
  * 超时 10 秒，失败返回 null。
@@ -160,24 +180,25 @@ export async function tryUpgrade(): Promise<UpgradeResult> {
 }
 
 /**
- * AUN SDK 升级流程：检查 → 比较 → 安装
- * 仅在 SDK 已安装时检查升级，未安装则跳过。
+ * 通用全局包升级流程：检查 → 比较 → 安装（失败重试一次）。
+ * 仅在包已安装时检查升级，未安装则跳过（resolveFn 返回 null）。
+ * fastaun / evolclaw-web 等独立全局包共用此逻辑。
  */
-export async function tryUpgradeAunSdk(
-  resolveAunCoreSdkPkg: () => { version: string; path: string } | null,
-  AUN_CORE_SDK_PKG: string,
+export async function tryUpgradeGlobalPkg(
+  resolveInstalled: () => { version: string; path: string } | null,
+  pkgName: string,
 ): Promise<UpgradeResult> {
   if (isLinkedInstall()) {
     return { status: 'skipped' };
   }
 
-  const installed = resolveAunCoreSdkPkg();
+  const installed = resolveInstalled();
   if (!installed) {
-    return { status: 'skipped' }; // SDK not installed, skip
+    return { status: 'skipped' }; // not installed, skip
   }
 
   const localVer = installed.version;
-  const remoteVer = await checkLatestVersion(AUN_CORE_SDK_PKG);
+  const remoteVer = await checkLatestVersion(pkgName);
   if (!remoteVer) {
     return { status: 'skipped', error: 'Failed to check remote version' };
   }
@@ -189,11 +210,22 @@ export async function tryUpgradeAunSdk(
   let lastError: string | undefined;
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      await npmInstallGlobal(`${AUN_CORE_SDK_PKG}@latest`);
+      await npmInstallGlobal(`${pkgName}@latest`);
       return { status: 'upgraded', from: localVer, to: remoteVer };
     } catch (e: any) {
       lastError = e.stderr || e.message || String(e);
     }
   }
   return { status: 'failed', from: localVer, to: remoteVer, error: lastError };
+}
+
+/**
+ * AUN SDK 升级流程：检查 → 比较 → 安装
+ * 仅在 SDK 已安装时检查升级，未安装则跳过。
+ */
+export async function tryUpgradeAunSdk(
+  resolveAunCoreSdkPkg: () => { version: string; path: string } | null,
+  AUN_CORE_SDK_PKG: string,
+): Promise<UpgradeResult> {
+  return tryUpgradeGlobalPkg(resolveAunCoreSdkPkg, AUN_CORE_SDK_PKG);
 }

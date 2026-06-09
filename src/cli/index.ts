@@ -14,7 +14,7 @@ import { cmdInitWechat, cmdInitFeishu, cmdInitDingtalk, cmdInitQQBot, cmdInitWec
 import { isHelpFlag, wantsHelp, getArgValue } from './help.js';
 import * as platform from '../utils/cross-platform.js';
 import { EventBus } from '../core/event-bus.js';
-import { tryUpgrade, tryUpgradeAunSdk, type UpgradeResult } from '../utils/npm-ops.js';
+import { tryUpgrade, tryUpgradeAunSdk, tryUpgradeGlobalPkg, resolveGlobalPkg, type UpgradeResult } from '../utils/npm-ops.js';
 import { fetchEcwebPairCode } from '../utils/ecweb-pair.js';
 import { resolveAunCoreSdkPkg, AUN_CORE_SDK_PKG } from '../aun/aid/client.js';
 import { scanInstances, cleanupInstances, readAidLastActivity, writeRestartMonitor, removeRestartMonitor, isRestartMonitorWinner, findOrphanProcesses, killOrphans, type OrphanProcess } from '../utils/instance-registry.js';
@@ -574,6 +574,19 @@ async function cmdRestart(opts: { clear?: boolean } = {}) {
       break; // silent
     case 'failed':
       console.log(`⚠ AUN SDK upgrade failed (${aunUpgrade.from} → ${aunUpgrade.to})`);
+      break;
+  }
+
+  // evolclaw-web 版本检查与升级（已安装才检查，与 AUN SDK 同级）
+  const ecwebUpgrade = await tryUpgradeGlobalPkg(() => resolveGlobalPkg('evolclaw-web'), 'evolclaw-web');
+  switch (ecwebUpgrade.status) {
+    case 'upgraded':
+      console.log(`✅ evolclaw-web upgraded: ${ecwebUpgrade.from} → ${ecwebUpgrade.to}`);
+      break;
+    case 'no-update':
+      break; // silent
+    case 'failed':
+      console.log(`⚠ evolclaw-web upgrade failed (${ecwebUpgrade.from} → ${ecwebUpgrade.to})`);
       break;
   }
 
@@ -2198,10 +2211,22 @@ async function cmdWatchWeb(): Promise<void> {
     process.stdout.write('\n');
     const { npmInstallGlobal } = await import('../utils/npm-ops.js');
     try {
-      await npmInstallGlobal('evolclaw-web');
+      await npmInstallGlobal('evolclaw-web@latest');
     } catch (e: any) {
       process.stderr.write(`❌ 安装失败: ${e?.stderr || e?.message || e}\n`);
       process.exit(1);
+    }
+  } else {
+    // 已安装：检查并自动升级到最新版（参考 fastaun 自动升级机制）
+    const upgrade = await tryUpgradeGlobalPkg(() => resolveGlobalPkg('evolclaw-web'), 'evolclaw-web');
+    switch (upgrade.status) {
+      case 'upgraded':
+        process.stdout.write(`✅ evolclaw-web 已升级: ${upgrade.from} → ${upgrade.to}\n`);
+        break;
+      case 'failed':
+        process.stdout.write(`⚠ evolclaw-web 升级失败 (${upgrade.from} → ${upgrade.to})，继续使用当前版本\n`);
+        break;
+      // no-update / skipped: 静默
     }
   }
 
@@ -2354,6 +2379,20 @@ async function cmdRestartMonitor() {
       break;
     case 'failed':
       log(`⚠ AUN SDK upgrade failed (${aunUpgrade.from} → ${aunUpgrade.to}): ${aunUpgrade.error}`);
+      break;
+  }
+
+  // evolclaw-web 版本检查与升级（已安装才检查）
+  const ecwebUpgrade = await tryUpgradeGlobalPkg(() => resolveGlobalPkg('evolclaw-web'), 'evolclaw-web');
+  switch (ecwebUpgrade.status) {
+    case 'upgraded':
+      log(`✅ evolclaw-web upgraded: ${ecwebUpgrade.from} → ${ecwebUpgrade.to}`);
+      await notifyChannel(p, pendingInfo, `📦 evolclaw-web 已升级 ${ecwebUpgrade.from} → ${ecwebUpgrade.to}`, log);
+      break;
+    case 'no-update':
+      break;
+    case 'failed':
+      log(`⚠ evolclaw-web upgrade failed (${ecwebUpgrade.from} → ${ecwebUpgrade.to}): ${ecwebUpgrade.error}`);
       break;
   }
 
