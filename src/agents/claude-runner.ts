@@ -260,6 +260,7 @@ export type AgentContextUsage = {
 
 export type AgentLastModelCall = {
   messageId?: string;
+  uuid?: string;
   requestId?: string;
   model?: string;
   tokenUsage: AgentTokenUsage;
@@ -1029,6 +1030,27 @@ export class AgentRunner {
         yield { type: 'session_id', sessionId: event.session_id };
       }
 
+      if (event.type === 'stream_event') {
+        const streamEvent = event.event;
+        if (streamEvent?.type === 'message_start' && streamEvent.message?.usage) {
+          lastModelCall = {
+            uuid: event.uuid,
+            model: streamEvent.message.model,
+            tokenUsage: streamEvent.message.usage,
+          };
+        } else if (streamEvent?.type === 'message_delta' && streamEvent.usage) {
+          lastModelCall = {
+            ...lastModelCall,
+            uuid: lastModelCall?.uuid ?? event.uuid,
+            tokenUsage: {
+              ...(lastModelCall?.tokenUsage ?? {}),
+              ...streamEvent.usage,
+            },
+          };
+        }
+        continue;
+      }
+
       // system: compact_boundary → compact
       if (event.type === 'system' && event.subtype === 'compact_boundary') {
         yield {
@@ -1063,10 +1085,14 @@ export class AgentRunner {
         }
         if (event.message.usage) {
           lastModelCall = {
+            ...lastModelCall,
             messageId: event.message.id,
             requestId: event.request_id,
             model: event.message.model,
-            tokenUsage: event.message.usage,
+            tokenUsage: {
+              ...event.message.usage,
+              ...(lastModelCall?.tokenUsage ?? {}),
+            },
           };
         }
         // 统计本轮 base agent 全部输出字符数（text + tool_use input）
@@ -1428,6 +1454,7 @@ export class AgentRunner {
       canUseTool: canUseToolCallback,
       permissionMode: sdkPermissionMode,
       persistSession: true,
+      includePartialMessages: true,
       enableFileCheckpointing: true,
       hooks: {
         PreCompact: [{ matcher: '.*', hooks: [preCompactHook] }],
