@@ -2,7 +2,7 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import crypto from 'crypto';
-import { type AgentRunnerFull, hasCompact, type AgentEvent, type Compactable, type AgentTokenUsage, type AgentContextUsage, type AgentLastModelCall } from '../../agents/claude-runner.js';
+import { type AgentRunnerFull, hasCompact, type AgentEvent, type Compactable, type AgentTokenUsage, type AgentContextUsage, type AgentLastModelCall, type AgentModelCall } from '../../agents/claude-runner.js';
 import { SessionManager } from '../session/session-manager.js';
 import { appendMessageLog, buildOutboundEntry } from './message-log.js';
 import { IMRenderer } from './im-renderer.js';
@@ -27,7 +27,7 @@ import type { InteractionRouter } from '../interaction-router.js';
 import { renderActionAsText, renderCommandCardAsText } from '../interaction-router.js';
 import { formatPeerKey } from '../relation/peer-key.js';
 import { resolveEffectiveModel } from '../model/model-scope.js';
-import { insertUsageEvent, insertContextBreakdown } from '../stats/writer.js';
+import { insertUsageEvent, insertContextBreakdown, insertModelCalls } from '../stats/writer.js';
 import { normalizeUsage } from '../stats/normalizer.js';
 import { getBudgetStatus } from '../stats/budget.js';
 
@@ -44,6 +44,7 @@ type StreamRunResult = {
   tokenUsage?: AgentTokenUsage;
   contextUsage?: AgentContextUsage;
   lastModelCall?: AgentLastModelCall;
+  modelCalls?: AgentModelCall[];
 };
 
 /** OS 信息在进程生命周期内是常量，模块加载时算一次。例: "Windows 11 Pro (win32 10.0.26200)" */
@@ -1292,6 +1293,27 @@ export class MessageProcessor {
               context_window_pct: ctxPct,
             });
             insertUsageEvent(resolveRoot(), event);
+            // 逐次大模型调用明细落库（model_calls 表）
+            if (streamResult.modelCalls?.length) {
+              const mcRows = streamResult.modelCalls.map(mc => ({
+                ts: event.ts,
+                task_id: taskId,
+                session_id: session.id,
+                agent_session_id: session.agentSessionId ?? undefined,
+                agent_aid: statsAgentAid,
+                peer_key: statsPeerKey,
+                call_index: mc.call_index,
+                model: mc.model || statsModel,
+                request_id: mc.request_id,
+                message_id: mc.message_id,
+                input_tokens: mc.tokenUsage.input_tokens ?? 0,
+                output_tokens: mc.tokenUsage.output_tokens ?? 0,
+                cache_creation_tokens: mc.tokenUsage.cache_creation_input_tokens ?? 0,
+                cache_read_tokens: mc.tokenUsage.cache_read_input_tokens ?? 0,
+                degraded: mc.degraded ? 1 : 0,
+              } as import('../stats/writer.js').ModelCallRow));
+              insertModelCalls(resolveRoot(), mcRows);
+            }
             // 计算费用（用于合入 status.completed）
             const { calcCost } = await import('../stats/billing.js');
             const cost = calcCost(resolveRoot(), { ...event, ts: event.ts, model: event.model, billing_fn: event.billing_fn });
@@ -1849,7 +1871,7 @@ export class MessageProcessor {
           }
 
           // 记录完成状态 + 最后一轮回复文本（后续 complete 覆盖前序）
-          completeResult = { isError: !!event.isError, subtype: event.subtype, errors: event.errors, terminalReason: event.terminalReason, lastReplyText, fullText: event.result || '', hasReceivedText, numTurns: event.numTurns, ttftMs: event.ttftMs, tokenUsage: event.tokenUsage, contextUsage: event.contextUsage, lastModelCall: event.lastModelCall };
+          completeResult = { isError: !!event.isError, subtype: event.subtype, errors: event.errors, terminalReason: event.terminalReason, lastReplyText, fullText: event.result || '', hasReceivedText, numTurns: event.numTurns, ttftMs: event.ttftMs, tokenUsage: event.tokenUsage, contextUsage: event.contextUsage, lastModelCall: event.lastModelCall, modelCalls: event.modelCalls };
 
           // thought jsonl 写入已下沉到 aun.ts:sendThought 成功后，
           // 由那里按 LLM 输出的每个 text item 单独写一条，此处不再写。

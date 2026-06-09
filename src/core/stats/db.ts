@@ -134,7 +134,112 @@ function _initTables(db: any): void {
     CREATE INDEX IF NOT EXISTS idx_me_ts       ON message_events(ts);
     CREATE INDEX IF NOT EXISTS idx_me_agent_ts ON message_events(agent_aid, ts);
     CREATE INDEX IF NOT EXISTS idx_me_peer_ts  ON message_events(agent_aid, peer_key, ts);
+
+    -- 按天预聚合表：grain = 天 × agent × peer × session × model × billing_fn。
+    -- 由 writer.ts 写时增量 UPSERT 维护，rebuildDailyRollup() 全量重建纠偏。
+    -- 保留 model+billing_fn 维度以便查询时仍按 calcCost 现算成本。
+    -- 日级行很小，永留主库、不参与年度归档。
+    CREATE TABLE IF NOT EXISTS usage_daily (
+      day          TEXT NOT NULL,           -- 'YYYY-MM-DD' localtime
+      agent_aid    TEXT NOT NULL,
+      peer_key     TEXT NOT NULL,
+      peer_type    TEXT NOT NULL DEFAULT '',-- 'private' | 'group'，由 peer_key 唯一决定
+      session_id   TEXT NOT NULL DEFAULT '',
+      model        TEXT NOT NULL,
+      billing_fn   TEXT NOT NULL,
+      input_tokens          INTEGER NOT NULL DEFAULT 0,
+      output_tokens         INTEGER NOT NULL DEFAULT 0,
+      cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+      cache_read_tokens     INTEGER NOT NULL DEFAULT 0,
+      cache_hit_tokens      INTEGER NOT NULL DEFAULT 0,
+      cache_miss_tokens     INTEGER NOT NULL DEFAULT 0,
+      image_tokens          INTEGER NOT NULL DEFAULT 0,
+      total_context_tokens  INTEGER NOT NULL DEFAULT 0,
+      turns        INTEGER NOT NULL DEFAULT 0,
+      calls        INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (day, agent_aid, peer_key, session_id, model, billing_fn)
+    );
+    CREATE INDEX IF NOT EXISTS idx_ud_day     ON usage_daily(day);
+    CREATE INDEX IF NOT EXISTS idx_ud_session ON usage_daily(session_id);
+
+    -- 大模型调用明细：每次大模型调用一行（尽力而为；非 Claude 拿不到逐次时降级为单行累计）。
+    -- 关联三个 ID：task_id（一次 runQuery）、session_id（evolclaw 会话）、agent_session_id（SDK 会话）。
+    CREATE TABLE IF NOT EXISTS model_calls (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      ts            INTEGER NOT NULL,
+      task_id       TEXT    NOT NULL,
+      session_id    TEXT,
+      agent_session_id TEXT,
+      agent_aid     TEXT    NOT NULL,
+      peer_key      TEXT    NOT NULL,
+      call_index    INTEGER NOT NULL,
+      model         TEXT    NOT NULL,
+      request_id    TEXT,
+      message_id    TEXT,
+      input_tokens          INTEGER NOT NULL DEFAULT 0,
+      output_tokens         INTEGER NOT NULL DEFAULT 0,
+      cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+      cache_read_tokens     INTEGER NOT NULL DEFAULT 0,
+      degraded      INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS idx_mc_task        ON model_calls(task_id);
+    CREATE INDEX IF NOT EXISTS idx_mc_session     ON model_calls(session_id, ts);
+    CREATE INDEX IF NOT EXISTS idx_mc_agentsession ON model_calls(agent_session_id);
+    CREATE INDEX IF NOT EXISTS idx_mc_ts          ON model_calls(ts);
   `);
+
+  // 轻量迁移：旧库的 usage_daily 可能缺 peer_type 列（无 migration 机制，CREATE IF NOT EXISTS
+  // 不会补列）。检测后 ALTER 补上；补列后旧行 peer_type 为空，需跑一次 rebuildDailyRollup 回填。
+  try {
+    const cols = db.prepare(`PRAGMA table_info(usage_daily)`).all() as Array<{ name: string }>;
+    if (!cols.some(c => c.name === 'peer_type')) {
+      db.exec(`ALTER TABLE usage_daily ADD COLUMN peer_type TEXT NOT NULL DEFAULT ''`);
+    }
+  } catch (e) {
+    logger.warn(`[StatsDB] usage_daily peer_type 迁移检测失败: ${e}`);
+  }
+}
+
+/**
+ * 全量重建 usage_daily：从 usage_events 明细按天聚合重算。
+ * 用途：首次回填历史数据、每日自愈纠正写时漂移、手动 `ec stats --rebuild`。
+ * 单事务内 DELETE + INSERT...SELECT，失败回滚不破坏现有 rollup。
+ * 仅扫主库明细（往年明细已归档，但其 rollup 行已在归档前写入并永留主库）。
+ * @returns 重建后的行数，DB 不可用时返回 -1。
+ */
+export function rebuildDailyRollup(evolclawHome: string): number {
+  const db = getDb(evolclawHome);
+  if (!db) return -1;
+  try {
+    db.exec('BEGIN');
+    db.exec('DELETE FROM usage_daily');
+    db.exec(`
+      INSERT INTO usage_daily
+        (day, agent_aid, peer_key, peer_type, session_id, model, billing_fn,
+         input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+         cache_hit_tokens, cache_miss_tokens, image_tokens, total_context_tokens,
+         turns, calls)
+      SELECT
+        strftime('%Y-%m-%d', ts/1000, 'unixepoch', 'localtime') AS day,
+        agent_aid, peer_key, MAX(COALESCE(peer_type, '')),
+        COALESCE(session_id, ''), model, billing_fn,
+        SUM(input_tokens), SUM(output_tokens),
+        SUM(cache_creation_tokens), SUM(cache_read_tokens),
+        SUM(COALESCE(cache_hit_tokens, 0)), SUM(COALESCE(cache_miss_tokens, 0)),
+        SUM(COALESCE(image_tokens, 0)), SUM(COALESCE(total_context_tokens, 0)),
+        SUM(turns), COUNT(*)
+      FROM usage_events
+      GROUP BY day, agent_aid, peer_key, COALESCE(session_id, ''), model, billing_fn
+    `);
+    db.exec('COMMIT');
+    const row = db.prepare('SELECT COUNT(*) AS n FROM usage_daily').get() as { n: number };
+    logger.info(`[StatsDB] Rebuilt usage_daily: ${row.n} rows`);
+    return row.n;
+  } catch (e) {
+    try { db.exec('ROLLBACK'); } catch {}
+    logger.error(`[StatsDB] rebuildDailyRollup failed: ${e}`);
+    return -1;
+  }
 }
 
 // ── 归档 ────────────────────────────────────────────────────────────────────

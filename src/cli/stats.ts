@@ -4,7 +4,7 @@
 
 import { resolveRoot } from '../paths.js';
 import { wantsHelp, getArgValue } from './help.js';
-import { queryAggregated, queryTodaySummary, querySessionTurns, queryContextBreakdown, queryTopPeers, queryTopModels, queryMessageAggregated, type Granularity, type StatsFilter } from '../core/stats/query.js';
+import { queryAggregated, queryTodaySummary, querySessionTurns, queryContextBreakdown, queryTopPeers, queryTopModels, queryMessageAggregated, queryPeerList, querySummary, queryPeerDaily, queryTaskModelCalls, querySessionModelCalls, type Granularity, type StatsFilter } from '../core/stats/query.js';
 import { getBudgetStatus } from '../core/stats/budget.js';
 
 const HELP = `ec stats — Token 用量与费用统计
@@ -35,6 +35,13 @@ Usage: ec stats [options]
   --budget                预算状态
   --top-peers [--limit N] 对端排行
   --sql "<query>"         直接执行只读 SQL
+  --rebuild               全量重建日聚合表 usage_daily（运维兜底/排查）
+  --peers [--limit N]    私聊对端列表（带累计 token/calls/活跃日）
+  --groups [--limit N]   群聊列表（同上）
+  --summary              指定时间范围总消耗汇总（token/USD/CNY）
+  --peer-detail <id>     指定对端 AID 或 peer_key，按天返回消耗明细
+  --task-calls <taskId>   一个 task 的逐次大模型调用明细
+  --session-calls <id>    一个会话的逐次大模型调用明细
 
 输出格式:
   --format json           JSON 输出
@@ -121,6 +128,18 @@ export async function handleStats(args: string[]): Promise<void> {
 
   const isJson = flags.format === 'json';
 
+  // 全量重建日聚合表（运维兜底/排查），不依赖时间范围。
+  if (flags.rebuild) {
+    const { rebuildDailyRollup } = await import('../core/stats/db.js');
+    const startedAt = Date.now();
+    const n = rebuildDailyRollup(home);
+    const ms = Date.now() - startedAt;
+    if (n < 0) fail(isJson, 'REBUILD_FAILED', 'usage_daily 重建失败（DB 不可用或 SQL 错误）');
+    if (isJson) { console.log(JSON.stringify({ ok: true, rows: n, duration_ms: ms }, null, 2)); }
+    else { console.log(`✓ usage_daily 重建完成：${n} 行，耗时 ${ms}ms`); }
+    return;
+  }
+
   // Determine time range
   let from_ts: number | undefined;
   let to_ts: number | undefined;
@@ -164,6 +183,86 @@ export async function handleStats(args: string[]): Promise<void> {
   }
   if (flags.model && typeof flags.model === 'string') filter.model = flags.model;
   if (flags.session && typeof flags.session === 'string') filter.session_id = flags.session;
+
+  // ── 结构化查询：私聊/群聊列表、总消耗汇总、对端按天明细 ──────────────────
+  if (flags.peers || flags.groups) {
+    const peerType = flags.peers ? 'private' : 'group';
+    const limit = typeof flags.limit === 'string' ? parseInt(flags.limit) || 50 : 50;
+    const rows = queryPeerList(home, { peer_type: peerType, from_ts, to_ts, agent_aid: filter.agent_aid, limit });
+    if (isJson) { console.log(JSON.stringify(rows, null, 2)); return; }
+    console.log(`\n${BOLD}📊 ${peerType === 'private' ? '私聊' : '群聊'}列表${RESET}\n`);
+    if (!rows.length) { console.log('  (无数据)'); return; }
+    const headers = ['#', 'Peer ID', 'Tokens', 'Calls', 'Sessions', 'First', 'Last'];
+    const tableRows = rows.map((r, i) => [
+      String(i + 1), r.peer_id, fmtTokens(r.total_tokens), String(r.calls),
+      String(r.session_count), r.first_day, r.last_day,
+    ]);
+    printTable(headers, tableRows);
+    console.log();
+    return;
+  }
+
+  if (flags.summary) {
+    const result = querySummary(home, { from_ts, to_ts, agent_aid: filter.agent_aid, peer_key: filter.peer_key });
+    if (isJson) { console.log(JSON.stringify(result, null, 2)); return; }
+    console.log(`\n${BOLD}📊 用量汇总${RESET}\n`);
+    console.log(`  Input:         ${fmtTokens(result.input_tokens)}`);
+    console.log(`  Output:        ${fmtTokens(result.output_tokens)}`);
+    console.log(`  Cache read:    ${fmtTokens(result.cache_read_tokens)}`);
+    console.log(`  Cache write:   ${fmtTokens(result.cache_creation_tokens)}`);
+    console.log(`  Total tokens:  ${fmtTokens(result.total_tokens)}`);
+    console.log(`  Calls:         ${result.calls}`);
+    console.log(`  Cache hit:     ${(result.cache_hit_rate * 100).toFixed(1)}%`);
+    if (result.usd > 0) console.log(`  Cost USD:      ${GREEN}$${result.usd.toFixed(4)}${RESET}`);
+    if (result.cny > 0) console.log(`  Cost CNY:      ${GREEN}¥${result.cny.toFixed(4)}${RESET}`);
+    console.log();
+    return;
+  }
+
+  if (flags['peer-detail'] && typeof flags['peer-detail'] === 'string') {
+    const input = flags['peer-detail'];
+    // 含 # 视为完整 peer_key（精确匹配），否则视为裸 peer_id（LIKE 匹配）
+    const peerOpts = input.includes('#')
+      ? { peer_key: input, from_ts, to_ts, agent_aid: filter.agent_aid }
+      : { peer_id: input,  from_ts, to_ts, agent_aid: filter.agent_aid };
+    const rows = queryPeerDaily(home, peerOpts);
+    if (isJson) { console.log(JSON.stringify(rows, null, 2)); return; }
+    if (!rows.length) { console.log('No data for the specified peer and range.'); return; }
+    console.log(`\n${BOLD}📊 对端明细 — ${input}${RESET}\n`);
+    const headers = ['Day', 'Input', 'Output', 'Cache', 'Calls', 'HitRate', 'USD', 'CNY'];
+    const tableRows = rows.map(r => [
+      r.period, fmtTokens(r.input_tokens), fmtTokens(r.output_tokens),
+      fmtTokens(r.cache_read_tokens), String(r.call_count),
+      (r.cache_hit_rate * 100).toFixed(0) + '%',
+      r.usd > 0 ? '$' + r.usd.toFixed(4) : '—',
+      r.cny > 0 ? '¥' + r.cny.toFixed(4) : '—',
+    ]);
+    printTable(headers, tableRows);
+    console.log();
+    return;
+  }
+
+  // 逐次大模型调用明细
+  if ((flags['task-calls'] && typeof flags['task-calls'] === 'string') ||
+      (flags['session-calls'] && typeof flags['session-calls'] === 'string')) {
+    const byTask = typeof flags['task-calls'] === 'string';
+    const key = (byTask ? flags['task-calls'] : flags['session-calls']) as string;
+    const rows = byTask ? queryTaskModelCalls(home, key) : querySessionModelCalls(home, key);
+    if (isJson) { console.log(JSON.stringify(rows, null, 2)); return; }
+    if (!rows.length) { console.log('No model calls found.'); return; }
+    console.log(`\n${BOLD}📊 大模型调用明细 — ${key}${RESET}\n`);
+    const headers = ['#', 'Model', 'Input', 'Output', 'CacheR', 'CacheW', 'Task', 'Deg'];
+    const tableRows = rows.map(r => [
+      String(r.call_index),
+      r.model.split('-').slice(0, 3).join('-'),
+      fmtTokens(r.input_tokens), fmtTokens(r.output_tokens),
+      fmtTokens(r.cache_read_tokens), fmtTokens(r.cache_creation_tokens),
+      r.task_id, r.degraded ? 'Y' : '',
+    ]);
+    printTable(headers, tableRows);
+    console.log();
+    return;
+  }
 
   // Special views
   if (flags.sql && typeof flags.sql === 'string') {

@@ -267,6 +267,16 @@ export type AgentLastModelCall = {
   contextUsage?: AgentContextUsage;
 };
 
+/** 单次大模型调用的 usage 摘要，随 complete 事件批量返回。 */
+export type AgentModelCall = {
+  call_index: number;
+  model: string;
+  request_id?: string;
+  message_id?: string;
+  tokenUsage: AgentTokenUsage;
+  degraded?: boolean;  // true = 非逐次，仅含累计值
+};
+
 function numericToken(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : 0;
 }
@@ -294,7 +304,7 @@ export type AgentEvent =
   | { type: 'task_progress'; summary?: string; toolUses?: number; durationMs?: number }
   | { type: 'session_id'; sessionId: string }
   | { type: 'state_changed'; state: 'idle' | 'running' | 'requires_action' }
-  | { type: 'complete'; result?: string; subtype?: string; isError?: boolean; errors?: string[]; durationMs?: number; ttftMs?: number; costUsd?: number; terminalReason?: string; sessionTitle?: string; numTurns?: number; tokenUsage?: AgentTokenUsage; contextUsage?: AgentContextUsage; lastModelCall?: AgentLastModelCall }
+  | { type: 'complete'; result?: string; subtype?: string; isError?: boolean; errors?: string[]; durationMs?: number; ttftMs?: number; costUsd?: number; terminalReason?: string; sessionTitle?: string; numTurns?: number; tokenUsage?: AgentTokenUsage; contextUsage?: AgentContextUsage; lastModelCall?: AgentLastModelCall; modelCalls?: AgentModelCall[] }
   | { type: 'error'; error: string; errorType: 'context_too_long' | 'auth' | 'network' | 'unknown' };
 
 export interface QueryRequest {
@@ -1020,6 +1030,8 @@ export class AgentRunner {
     let turnCount = 0;
     const seenMessageIds = new Set<string>();
     let lastModelCall: AgentLastModelCall | undefined;
+    // 流式收集各次大模型调用（fallback：SDK iterations 为空时使用）
+    const collectedCalls: AgentModelCall[] = [];
 
     try {
       for await (const event of sdkStream) {
@@ -1038,6 +1050,13 @@ export class AgentRunner {
             model: streamEvent.message.model,
             tokenUsage: streamEvent.message.usage,
           };
+          // 流式收集：每个 message_start = 一次新的大模型调用
+          collectedCalls.push({
+            call_index: collectedCalls.length,
+            model: streamEvent.message.model ?? callModel ?? this.model,
+            request_id: (event as any).request_id,
+            tokenUsage: { ...streamEvent.message.usage },
+          });
         } else if (streamEvent?.type === 'message_delta' && streamEvent.usage) {
           lastModelCall = {
             ...lastModelCall,
@@ -1047,6 +1066,9 @@ export class AgentRunner {
               ...streamEvent.usage,
             },
           };
+          // 将 message_delta 的 usage 合并进当前(最后一次)收集的调用
+          const last = collectedCalls[collectedCalls.length - 1];
+          if (last) last.tokenUsage = { ...last.tokenUsage, ...streamEvent.usage };
         }
         continue;
       }
@@ -1190,6 +1212,21 @@ export class AgentRunner {
           };
         }
 
+        // 组装 modelCalls：优先 SDK iterations，fallback 流式收集，兜底降级单行。
+        const callModel_ = callModel ?? this.model;
+        let modelCalls: AgentModelCall[] | undefined;
+        const iterArr = Array.isArray(u?.iterations) && u!.iterations!.length > 0 ? u!.iterations! : null;
+        if (iterArr) {
+          modelCalls = iterArr.map((it, i) => ({
+            call_index: i, model: callModel_, tokenUsage: it,
+          }));
+        } else if (collectedCalls.length > 0) {
+          modelCalls = collectedCalls;
+        } else if (u) {
+          // 降级：无逐次数据，写一条累计行
+          modelCalls = [{ call_index: 0, model: callModel_, tokenUsage: u, degraded: true }];
+        }
+
         yield {
           type: 'complete',
           result: cleanResult,
@@ -1205,6 +1242,7 @@ export class AgentRunner {
           tokenUsage: event.usage,
           contextUsage,
           lastModelCall,
+          modelCalls,
         };
         // result 是 SDK 流的终结事件，不再等待后续（防止 interrupt 后流不关闭导致挂起）
         return;

@@ -36,6 +36,37 @@ export interface AggRow {
   cache_hit_rate: number;  // 0-1
 }
 
+/** 私聊/群聊列表项：一个对端/群的累计汇总。 */
+export interface PeerListRow {
+  peer_key: string;        // 完整 peer_key（aun#self#main#encode(peer)）
+  peer_id: string;         // 解析出的裸对端 AID / 群 ID
+  peer_type: string;       // 'private' | 'group'
+  input_tokens: number;
+  output_tokens: number;
+  cache_creation_tokens: number;
+  cache_read_tokens: number;
+  total_tokens: number;    // input+output+cache_read+cache_creation
+  calls: number;
+  session_count: number;
+  first_day: string;       // MIN(day)
+  last_day: string;        // MAX(day)
+  usd: number;
+  cny: number;
+}
+
+/** 总消耗汇总（单行）。 */
+export interface SummaryRow {
+  input_tokens: number;
+  output_tokens: number;
+  cache_creation_tokens: number;
+  cache_read_tokens: number;
+  total_tokens: number;
+  calls: number;
+  cache_hit_rate: number;  // 0-1
+  usd: number;
+  cny: number;
+}
+
 export interface TurnRow {
   ts: number;
   model: string;
@@ -108,10 +139,120 @@ function _sumRows(rows: any[]): any {
 
 /**
  * 聚合统计（按粒度分组）。
- * 支持时间维度（hour/day/week/month）和非时间维度（model/peer/agent）。
- * 跨年时合并多个 DB 的结果，再按 period 聚合。
+ * hour 粒度仍扫明细 usage_events（只查近期，本就快，且明细才有小时粒度）。
+ * 其余粒度（day/week/month/model/peer/agent）改读预聚合表 usage_daily：
+ *   工作量从"全表明细"降到"天×维度"小表。rollup 永留主库，无需跨归档库 union。
+ * 成本仍按 (model, billing_fn) 分组现算 calcCost，口径不变。
  */
 export function queryAggregated(
+  evolclawHome: string,
+  granularity: Granularity,
+  filter: StatsFilter,
+): AggRow[] {
+  if (granularity === 'hour') return _queryAggregatedEvents(evolclawHome, granularity, filter);
+  return _queryAggregatedDaily(evolclawHome, granularity, filter);
+}
+
+// rollup 时间粒度的 period 表达式（day 列是 'YYYY-MM-DD' 字符串，strftime 可直接解析）。
+const DAILY_PERIOD_EXPR: Record<string, string> = {
+  day:   'day',
+  week:  `strftime('%Y-W%W', day)`,
+  month: `substr(day,1,7)`,
+};
+
+/** 针对 usage_daily 构造 WHERE：时间过滤转成对 day 列的字符串比较，维度过滤直接相等。 */
+function _buildDailyWhere(f: StatsFilter): { clause: string; params: unknown[] } {
+  const conds: string[] = [];
+  const params: unknown[] = [];
+  // from_ts/to_ts（ms，含 to_ts 排他）转成 localtime 日期串，与 day 列同口径比较。
+  if (f.from_ts)    { conds.push(`day >= strftime('%Y-%m-%d', ?/1000, 'unixepoch', 'localtime')`); params.push(f.from_ts); }
+  if (f.to_ts)      { conds.push(`day <  strftime('%Y-%m-%d', ?/1000, 'unixepoch', 'localtime')`); params.push(f.to_ts); }
+  if (f.agent_aid)  { conds.push('agent_aid = ?'); params.push(f.agent_aid); }
+  if (f.peer_key)   { conds.push('peer_key = ?');  params.push(f.peer_key); }
+  if (f.model)      { conds.push('model = ?');     params.push(f.model); }
+  if (f.session_id) { conds.push('session_id = ?');params.push(f.session_id); }
+  if (f.billing_fn) { conds.push('billing_fn = ?');params.push(f.billing_fn); }
+  return { clause: conds.length ? 'WHERE ' + conds.join(' AND ') : '', params };
+}
+
+/** 走预聚合表 usage_daily 的聚合（day/week/month/model/peer/agent）。 */
+function _queryAggregatedDaily(
+  evolclawHome: string,
+  granularity: Granularity,
+  filter: StatsFilter,
+): AggRow[] {
+  const { clause, params } = _buildDailyWhere(filter);
+  const groupCol = GRAN_GROUP_COL[granularity];
+  const periodExpr = groupCol || DAILY_PERIOD_EXPR[granularity] || 'day';
+
+  const db = openReadonlyDb(getDbPath(evolclawHome));
+  if (!db) return [];
+  try {
+    const sql = `
+      SELECT
+        ${periodExpr} AS period,
+        SUM(input_tokens)          AS input_tokens,
+        SUM(output_tokens)         AS output_tokens,
+        SUM(cache_creation_tokens) AS cache_creation_tokens,
+        SUM(cache_read_tokens)     AS cache_read_tokens,
+        SUM(cache_hit_tokens)      AS cache_hit_tokens,
+        SUM(cache_miss_tokens)     AS cache_miss_tokens,
+        SUM(image_tokens)          AS image_tokens,
+        SUM(total_context_tokens)  AS total_context_tokens,
+        SUM(turns)                 AS turns,
+        SUM(calls)                 AS call_count
+      FROM usage_daily ${clause}
+      GROUP BY ${periodExpr}
+    `;
+    const periodMap = new Map<string, any>();
+    for (const r of db.prepare(sql).all(...params) as any[]) periodMap.set(r.period, r);
+
+    // 按 period + model + billing_fn 分组精确计费（口径与原明细路径一致）。
+    const costSql = `
+      SELECT ${periodExpr} AS period, model, COALESCE(billing_fn,'') AS billing_fn,
+        SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens,
+        SUM(cache_creation_tokens) AS cache_creation_tokens, SUM(cache_read_tokens) AS cache_read_tokens,
+        SUM(cache_hit_tokens) AS cache_hit_tokens, SUM(cache_miss_tokens) AS cache_miss_tokens,
+        SUM(image_tokens) AS image_tokens, SUM(total_context_tokens) AS total_context_tokens
+      FROM usage_daily ${clause}
+      GROUP BY ${periodExpr}, model, billing_fn
+    `;
+    const costMap = new Map<string, { usd: number; cny: number }>();
+    for (const r of db.prepare(costSql).all(...params) as any[]) {
+      const cost = calcCost(evolclawHome, {
+        model: r.model || 'unknown',
+        billing_fn: r.billing_fn || 'per_token_v1',
+        ts: Date.now(),
+        input_tokens: r.input_tokens ?? 0,
+        output_tokens: r.output_tokens ?? 0,
+        cache_creation_tokens: r.cache_creation_tokens ?? 0,
+        cache_read_tokens: r.cache_read_tokens ?? 0,
+        cache_hit_tokens: r.cache_hit_tokens ?? 0,
+        cache_miss_tokens: r.cache_miss_tokens ?? 0,
+        image_tokens: r.image_tokens ?? 0,
+        total_context_tokens: r.total_context_tokens ?? 0,
+      });
+      const e = costMap.get(r.period) ?? { usd: 0, cny: 0 };
+      e.usd += cost.usd ?? 0;
+      e.cny += cost.cny ?? 0;
+      costMap.set(r.period, e);
+    }
+
+    const sorted = Array.from(periodMap.entries());
+    if (groupCol) {
+      sorted.sort((a, b) => ((b[1].input_tokens ?? 0) + (b[1].output_tokens ?? 0)) - ((a[1].input_tokens ?? 0) + (a[1].output_tokens ?? 0)));
+    } else {
+      sorted.sort((a, b) => a[0].localeCompare(b[0]));
+    }
+    return sorted.map(([, r]) => _enrichRow(evolclawHome, r, costMap.get(r.period)));
+  } finally { db.close(); }
+}
+
+/**
+ * 走明细 usage_events 的聚合（仅 hour 粒度）。
+ * 跨年时合并多个 DB 的结果，再按 period 聚合。
+ */
+function _queryAggregatedEvents(
   evolclawHome: string,
   granularity: Granularity,
   filter: StatsFilter,
@@ -266,52 +407,309 @@ export function queryContextBreakdown(evolclawHome: string, sessionId: string): 
   return result.sort((a, b) => a.ts - b.ts);
 }
 
-/** Top-N 对端（按 output_tokens 排序）。 */
+/** Top-N 对端（按 token 总量排序）。读预聚合表 usage_daily。 */
 export function queryTopPeers(evolclawHome: string, filter: StatsFilter, limit = 10): any[] {
-  const { clause, params } = _buildWhere(filter);
+  const { clause, params } = _buildDailyWhere(filter);
   const sql = `
     SELECT peer_key, SUM(input_tokens+output_tokens) AS total_tokens,
-           COUNT(*) AS call_count
-    FROM usage_events ${clause}
+           SUM(calls) AS call_count
+    FROM usage_daily ${clause}
     GROUP BY peer_key ORDER BY total_tokens DESC LIMIT ${limit}
   `;
-  const map = new Map<string, any>();
-  for (const dbPath of _relevantDbs(evolclawHome, filter)) {
-    const db = openReadonlyDb(dbPath);
-    if (!db) continue;
-    try {
-      for (const r of db.prepare(sql).all(...params) as any[]) {
-        const e = map.get(r.peer_key);
-        if (e) { e.total_tokens += r.total_tokens; e.call_count += r.call_count; }
-        else map.set(r.peer_key, { ...r });
-      }
-    } finally { db.close(); }
-  }
-  return Array.from(map.values()).sort((a, b) => b.total_tokens - a.total_tokens).slice(0, limit);
+  const db = openReadonlyDb(getDbPath(evolclawHome));
+  if (!db) return [];
+  try {
+    return (db.prepare(sql).all(...params) as any[]).map(r => ({ ...r }));
+  } finally { db.close(); }
 }
 
-/** Top-N 模型（按 token 总量排序）。 */
+/** Top-N 模型（按 token 总量排序）。读预聚合表 usage_daily。 */
 export function queryTopModels(evolclawHome: string, filter: StatsFilter, limit = 10): any[] {
-  const { clause, params } = _buildWhere(filter);
+  const { clause, params } = _buildDailyWhere(filter);
   const sql = `
     SELECT model, SUM(input_tokens+output_tokens) AS total_tokens,
-           COUNT(*) AS call_count
-    FROM usage_events ${clause}
+           SUM(calls) AS call_count
+    FROM usage_daily ${clause}
     GROUP BY model ORDER BY total_tokens DESC LIMIT ${limit}
   `;
-  const map = new Map<string, any>();
-  for (const dbPath of _relevantDbs(evolclawHome, filter)) {
-    const db = openReadonlyDb(dbPath);
-    if (!db) continue;
-    try {
-      for (const r of db.prepare(sql).all(...params) as any[]) {
-        const e = map.get(r.model);
-        if (e) { e.total_tokens += r.total_tokens; e.call_count += r.call_count; }
-        else map.set(r.model, { ...r });
-      }
-    } finally { db.close(); }
+  const db = openReadonlyDb(getDbPath(evolclawHome));
+  if (!db) return [];
+  try {
+    return (db.prepare(sql).all(...params) as any[]).map(r => ({ ...r }));
+  } finally { db.close(); }
+}
+
+// ── 私聊/群聊列表 + 汇总 + 对端按天明细（owner 前端用）────────────────────────
+
+/** 解析 peer_key 末段为裸 peer_id（对端 AID / 群 ID）。
+ *  peer_key = aun#<selfAID>#main#<encodeURIComponent(peer)>，取第 4 段起 decode。 */
+function _parsePeerId(peerKey: string): string {
+  const parts = peerKey.split('#');
+  if (parts.length < 4) {
+    // 兼容两段式 aun#peer：取末段
+    try { return decodeURIComponent(parts[parts.length - 1] ?? ''); } catch { return parts[parts.length - 1] ?? ''; }
   }
-  return Array.from(map.values()).sort((a, b) => b.total_tokens - a.total_tokens).slice(0, limit);
+  try { return decodeURIComponent(parts.slice(3).join('#')); } catch { return parts.slice(3).join('#'); }
+}
+
+/** 对一组按 (model,billing_fn) 分组的行调用 calcCost 并累加，返回 {usd,cny}。 */
+function _accumCost(evolclawHome: string, rows: any[]): { usd: number; cny: number } {
+  let usd = 0, cny = 0;
+  for (const r of rows) {
+    const c = calcCost(evolclawHome, {
+      model: r.model || 'unknown',
+      billing_fn: r.billing_fn || 'per_token_v1',
+      ts: Date.now(),
+      input_tokens: r.input_tokens ?? 0,
+      output_tokens: r.output_tokens ?? 0,
+      cache_creation_tokens: r.cache_creation_tokens ?? 0,
+      cache_read_tokens: r.cache_read_tokens ?? 0,
+      cache_hit_tokens: r.cache_hit_tokens ?? 0,
+      cache_miss_tokens: r.cache_miss_tokens ?? 0,
+      image_tokens: r.image_tokens ?? 0,
+      total_context_tokens: r.total_context_tokens ?? 0,
+    });
+    usd += c.usd ?? 0;
+    cny += c.cny ?? 0;
+  }
+  return { usd, cny };
+}
+
+export interface PeerListOpts {
+  peer_type: 'private' | 'group';
+  from_ts?: number;
+  to_ts?: number;
+  agent_aid?: string;
+  limit?: number;
+}
+
+/** 私聊（peer_type='private'）或群聊（'group'）列表，每项带累计汇总。读 usage_daily。 */
+export function queryPeerList(evolclawHome: string, opts: PeerListOpts): PeerListRow[] {
+  const limit = opts.limit ?? 50;
+  const { clause, params } = _buildDailyWhere({
+    from_ts: opts.from_ts, to_ts: opts.to_ts, agent_aid: opts.agent_aid,
+  });
+  // peer_type 过滤拼到 WHERE 上（_buildDailyWhere 不含该字段）。
+  const peerCond = clause ? `${clause} AND peer_type = ?` : 'WHERE peer_type = ?';
+  const listParams = [...params, opts.peer_type];
+
+  const db = openReadonlyDb(getDbPath(evolclawHome));
+  if (!db) return [];
+  try {
+    const listSql = `
+      SELECT peer_key,
+        SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens,
+        SUM(cache_creation_tokens) AS cache_creation_tokens,
+        SUM(cache_read_tokens) AS cache_read_tokens,
+        SUM(input_tokens+output_tokens+cache_read_tokens+cache_creation_tokens) AS total_tokens,
+        SUM(calls) AS calls,
+        COUNT(DISTINCT session_id) AS session_count,
+        MIN(day) AS first_day, MAX(day) AS last_day,
+        MAX(peer_type) AS peer_type
+      FROM usage_daily ${peerCond}
+      GROUP BY peer_key ORDER BY total_tokens DESC LIMIT ${limit}
+    `;
+    const rows = db.prepare(listSql).all(...listParams) as any[];
+
+    // 每个 peer 的成本：按 (peer_key, model, billing_fn) 分组算 calcCost 累加。
+    const costSql = `
+      SELECT peer_key, model, COALESCE(billing_fn,'') AS billing_fn,
+        SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens,
+        SUM(cache_creation_tokens) AS cache_creation_tokens, SUM(cache_read_tokens) AS cache_read_tokens,
+        SUM(cache_hit_tokens) AS cache_hit_tokens, SUM(cache_miss_tokens) AS cache_miss_tokens,
+        SUM(image_tokens) AS image_tokens, SUM(total_context_tokens) AS total_context_tokens
+      FROM usage_daily ${peerCond}
+      GROUP BY peer_key, model, billing_fn
+    `;
+    const costByPeer = new Map<string, any[]>();
+    for (const r of db.prepare(costSql).all(...listParams) as any[]) {
+      const arr = costByPeer.get(r.peer_key) ?? [];
+      arr.push(r);
+      costByPeer.set(r.peer_key, arr);
+    }
+
+    return rows.map(r => {
+      const cost = _accumCost(evolclawHome, costByPeer.get(r.peer_key) ?? []);
+      return {
+        peer_key: r.peer_key,
+        peer_id: _parsePeerId(r.peer_key),
+        peer_type: r.peer_type ?? opts.peer_type,
+        input_tokens: r.input_tokens ?? 0,
+        output_tokens: r.output_tokens ?? 0,
+        cache_creation_tokens: r.cache_creation_tokens ?? 0,
+        cache_read_tokens: r.cache_read_tokens ?? 0,
+        total_tokens: r.total_tokens ?? 0,
+        calls: r.calls ?? 0,
+        session_count: r.session_count ?? 0,
+        first_day: r.first_day ?? '',
+        last_day: r.last_day ?? '',
+        usd: cost.usd,
+        cny: cost.cny,
+      };
+    });
+  } finally { db.close(); }
+}
+
+export interface SummaryOpts {
+  from_ts?: number;
+  to_ts?: number;
+  agent_aid?: string;
+  peer_key?: string;
+}
+
+/** 指定时间范围（可选对端）的总消耗汇总，单行。读 usage_daily。 */
+export function querySummary(evolclawHome: string, opts: SummaryOpts): SummaryRow {
+  const { clause, params } = _buildDailyWhere({
+    from_ts: opts.from_ts, to_ts: opts.to_ts, agent_aid: opts.agent_aid, peer_key: opts.peer_key,
+  });
+  const empty: SummaryRow = {
+    input_tokens: 0, output_tokens: 0, cache_creation_tokens: 0, cache_read_tokens: 0,
+    total_tokens: 0, calls: 0, cache_hit_rate: 0, usd: 0, cny: 0,
+  };
+  const db = openReadonlyDb(getDbPath(evolclawHome));
+  if (!db) return empty;
+  try {
+    const row = db.prepare(`
+      SELECT
+        SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens,
+        SUM(cache_creation_tokens) AS cache_creation_tokens,
+        SUM(cache_read_tokens) AS cache_read_tokens,
+        SUM(calls) AS calls
+      FROM usage_daily ${clause}
+    `).get(...params) as any;
+    if (!row || row.calls == null) return empty;
+
+    const costRows = db.prepare(`
+      SELECT model, COALESCE(billing_fn,'') AS billing_fn,
+        SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens,
+        SUM(cache_creation_tokens) AS cache_creation_tokens, SUM(cache_read_tokens) AS cache_read_tokens,
+        SUM(cache_hit_tokens) AS cache_hit_tokens, SUM(cache_miss_tokens) AS cache_miss_tokens,
+        SUM(image_tokens) AS image_tokens, SUM(total_context_tokens) AS total_context_tokens
+      FROM usage_daily ${clause}
+      GROUP BY model, billing_fn
+    `).all(...params) as any[];
+    const cost = _accumCost(evolclawHome, costRows);
+
+    const inTok = row.input_tokens ?? 0;
+    const cacheRead = row.cache_read_tokens ?? 0;
+    const totalIn = inTok + cacheRead;
+    return {
+      input_tokens: inTok,
+      output_tokens: row.output_tokens ?? 0,
+      cache_creation_tokens: row.cache_creation_tokens ?? 0,
+      cache_read_tokens: cacheRead,
+      total_tokens: inTok + (row.output_tokens ?? 0) + cacheRead + (row.cache_creation_tokens ?? 0),
+      calls: row.calls ?? 0,
+      cache_hit_rate: totalIn > 0 ? cacheRead / totalIn : 0,
+      usd: cost.usd,
+      cny: cost.cny,
+    };
+  } finally { db.close(); }
+}
+
+export interface PeerDailyOpts {
+  peer_key?: string;       // 完整 peer_key，精确匹配
+  peer_id?: string;        // 裸对端 AID / 群 ID，按 LIKE 'aun#%#main#<encode(id)>' 匹配
+  from_ts?: number;
+  to_ts?: number;
+  agent_aid?: string;
+}
+
+/** 指定对端（peer_key 或 peer_id），按天返回消耗明细。读 usage_daily。 */
+export function queryPeerDaily(evolclawHome: string, opts: PeerDailyOpts): AggRow[] {
+  const { clause, params } = _buildDailyWhere({
+    from_ts: opts.from_ts, to_ts: opts.to_ts, agent_aid: opts.agent_aid,
+    peer_key: opts.peer_key,
+  });
+  // peer_id：按末段 LIKE 收窄（与 peer_key 精确匹配二选一）。
+  let where = clause;
+  const qParams = [...params];
+  if (!opts.peer_key && opts.peer_id) {
+    where = where ? `${where} AND peer_key LIKE ?` : 'WHERE peer_key LIKE ?';
+    qParams.push(`aun#%#main#${encodeURIComponent(opts.peer_id)}`);
+  }
+
+  const db = openReadonlyDb(getDbPath(evolclawHome));
+  if (!db) return [];
+  try {
+    const sql = `
+      SELECT day AS period,
+        SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens,
+        SUM(cache_creation_tokens) AS cache_creation_tokens,
+        SUM(cache_read_tokens) AS cache_read_tokens,
+        SUM(cache_hit_tokens) AS cache_hit_tokens, SUM(cache_miss_tokens) AS cache_miss_tokens,
+        SUM(image_tokens) AS image_tokens, SUM(total_context_tokens) AS total_context_tokens,
+        SUM(turns) AS turns, SUM(calls) AS call_count
+      FROM usage_daily ${where}
+      GROUP BY day ORDER BY day
+    `;
+    const periodMap = new Map<string, any>();
+    for (const r of db.prepare(sql).all(...qParams) as any[]) periodMap.set(r.period, r);
+
+    const costSql = `
+      SELECT day AS period, model, COALESCE(billing_fn,'') AS billing_fn,
+        SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens,
+        SUM(cache_creation_tokens) AS cache_creation_tokens, SUM(cache_read_tokens) AS cache_read_tokens,
+        SUM(cache_hit_tokens) AS cache_hit_tokens, SUM(cache_miss_tokens) AS cache_miss_tokens,
+        SUM(image_tokens) AS image_tokens, SUM(total_context_tokens) AS total_context_tokens
+      FROM usage_daily ${where}
+      GROUP BY day, model, billing_fn
+    `;
+    const costMap = new Map<string, { usd: number; cny: number }>();
+    const byPeriod = new Map<string, any[]>();
+    for (const r of db.prepare(costSql).all(...qParams) as any[]) {
+      const arr = byPeriod.get(r.period) ?? [];
+      arr.push(r);
+      byPeriod.set(r.period, arr);
+    }
+    for (const [period, rows] of byPeriod) costMap.set(period, _accumCost(evolclawHome, rows));
+
+    return Array.from(periodMap.entries())
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([, r]) => _enrichRow(evolclawHome, r, costMap.get(r.period)));
+  } finally { db.close(); }
+}
+
+// ── 大模型调用明细查询（model_calls）────────────────────────────────────────
+
+export interface ModelCallDetailRow {
+  ts: number;
+  task_id: string;
+  session_id: string | null;
+  agent_session_id: string | null;
+  agent_aid: string;
+  peer_key: string;
+  call_index: number;
+  model: string;
+  request_id: string | null;
+  message_id: string | null;
+  input_tokens: number;
+  output_tokens: number;
+  cache_creation_tokens: number;
+  cache_read_tokens: number;
+  degraded: number;
+}
+
+/** 查一个 task 的所有大模型调用明细，按 call_index 排序。 */
+export function queryTaskModelCalls(evolclawHome: string, taskId: string): ModelCallDetailRow[] {
+  const db = openReadonlyDb(getDbPath(evolclawHome));
+  if (!db) return [];
+  try {
+    return db.prepare(
+      `SELECT * FROM model_calls WHERE task_id = ? ORDER BY call_index`
+    ).all(taskId) as ModelCallDetailRow[];
+  } finally { db.close(); }
+}
+
+/** 查一个 evolclaw session 的所有大模型调用明细，按时间 + call_index 排序。 */
+export function querySessionModelCalls(evolclawHome: string, sessionId: string): ModelCallDetailRow[] {
+  const db = openReadonlyDb(getDbPath(evolclawHome));
+  if (!db) return [];
+  try {
+    return db.prepare(
+      `SELECT * FROM model_calls WHERE session_id = ? ORDER BY ts, call_index`
+    ).all(sessionId) as ModelCallDetailRow[];
+  } finally { db.close(); }
 }
 
 function _enrichRow(evolclawHome: string, r: any, cost?: { usd: number; cny: number }): AggRow {
