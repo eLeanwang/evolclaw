@@ -2,9 +2,8 @@ import { ClaudeSessionFileAdapter } from './core/session/adapters/claude-session
 import { CodexSessionFileAdapter } from './core/session/adapters/codex-session-file-adapter.js';
 import { GeminiSessionFileAdapter } from './core/session/adapters/gemini-session-file-adapter.js';
 import { ensureDataDirs, resolvePaths, agentDir, getPackageRoot, agentMdPath } from './paths.js';
-import { resolveAnthropicConfig } from './agents/resolve.js';
-import { loadDefaults, loadAllAgents, mergeForAgent, ensureAgentDirSkeleton, autoMigrateIfNeeded, migrateIdentitiesIfNeeded, migrateProcessConfigIfNeeded } from './config-store.js';
-import { loadEvolclawConfig } from './evolclaw-config.js';
+import { resolveAnthropicConfig } from './agents/baseagent.js';
+import { loadDefaults, loadAllAgents, mergeForAgent, ensureAgentDirSkeleton, autoMigrateIfNeeded, migrateIdentitiesIfNeeded, migrateProcessConfigIfNeeded, loadEvolclawConfig } from './config-store.js';
 import type { Config, MergedAgentConfig, AgentConfig, DefaultsConfig } from './types.js';
 import { CONFIG_SCHEMA_VERSION } from './types.js';
 import dotenv from 'dotenv';
@@ -38,7 +37,7 @@ import { logger, setLogLevel } from './utils/logger.js';
 import { fetchEcwebPairCode } from './utils/ecweb-pair.js';
 import { writeMain, removeAll, isMainWinner, scanInstances } from './utils/instance-registry.js';
 import { detectDuplicates } from './core/evolagent-registry.js';
-import { loadKitManifest, cleanEckDebug, invalidateKitCache } from './agents/kit-renderer.js';
+import { loadKitManifest, cleanEckDebug, invalidateKitCache } from './eck/kit-renderer.js';
 import { initEck } from './eck/init.js';
 import { TriggerManager } from './core/trigger/manager.js';
 import { TriggerScheduler, calcNextFireAt } from './core/trigger/scheduler.js';
@@ -509,7 +508,7 @@ async function main() {
     const evol = evolagentName || primaryAgent.aid;
     const agent = agentMap.get(`${evol}::${baseagent}`)
       || agentMap.get(primaryRunnerKey);
-    if (agent?.hasActiveStream(sessionKey)) {
+    if (agent) {
       await agent.interrupt(sessionKey);
     }
   });
@@ -767,6 +766,7 @@ async function main() {
           createdByPeerId: '__system__',
           createdByChannel: '__system__',
           fireCount: 0,
+          failCount: 0,
           createdAt: Date.now(),
           updatedAt: Date.now(),
         };

@@ -3,7 +3,7 @@ import { logger } from '../utils/logger.js';
 import { saveAgent } from '../config-store.js';
 import { formatChannelKey, tryParseChannelKey } from './channel-loader.js';
 import { agentPersonalDir } from '../paths.js';
-import { fileCache } from './cache/file-cache.js';
+import { fileCache } from './daemon-file-cache.js';
 import type {
   AgentConfig,
   MergedAgentConfig,

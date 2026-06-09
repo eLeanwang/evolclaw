@@ -56,9 +56,9 @@ function initPairUI() {
 // ── WebSocket 客户端（自动重连）──
 let ws = null;
 let reconnectDelay = 1000;
-let currentView = 'aid';
+let currentView = 'agents';
 let pendingSub = null;        // 重连后要恢复的订阅
-const state = { aid: null, msg: null, session: null, cache: null, control: null };
+const state = { agents: null, msg: null, session: null, cache: null, system: null, triggers: null };
 
 function setConnStatus(text, cls) {
   const el = $('#conn-status');
@@ -89,7 +89,16 @@ function connect() {
       return;
     }
     if (msg.type === 'snapshot' || msg.type === 'delta') {
-      state[msg.view] = msg.data;
+      // system 视图保留客户端写入的 check/upgrade，防止 3s 轮询覆盖
+      if (msg.view === 'system' && state.system) {
+        state.system = {
+          ...msg.data,
+          check: state.system.check ?? msg.data.check,
+          upgrade: state.system.upgrade ?? msg.data.upgrade,
+        };
+      } else {
+        state[msg.view] = msg.data;
+      }
       if (msg.view === currentView) renderView(currentView);
     }
   };
@@ -139,6 +148,7 @@ setInterval(() => {
 // ── Tab 切换 ──
 let msgSel = { aid: null, peer: null };
 let sessSel = { sessionId: null, project: null };
+let trigSel = { agent: null };
 let sessSearch = '';
 let sessChatMode = false;   // false=完整视图，true=对话视图（折叠处理过程）
 
@@ -150,8 +160,9 @@ function switchView(view) {
   if (view === 'msg') subscribe('msg', { aid: msgSel.aid, peer: msgSel.peer });
   else if (view === 'session') subscribe('session', { sessionId: sessSel.sessionId, project: sessSel.project });
   else if (view === 'cache') subscribe('cache', {});
-  else if (view === 'control') subscribe('control', {});
-  else subscribe('aid', {});
+  else if (view === 'system') subscribe('system', {});
+  else if (view === 'triggers') subscribe('triggers', { agent: trigSel.agent });
+  else subscribe('agents', {});
   if (state[view]) renderView(view);
 }
 
@@ -162,11 +173,12 @@ function initTabs() {
 }
 
 function renderView(view) {
-  if (view === 'aid') renderAid(state.aid);
+  if (view === 'agents') renderAgents(state.agents);
   else if (view === 'msg') renderMsg(state.msg);
   else if (view === 'session') renderSession(state.session);
   else if (view === 'cache') renderCache(state.cache);
-  else if (view === 'control') renderControl(state.control);
+  else if (view === 'system') renderSystem(state.system);
+  else if (view === 'triggers') renderTriggers(state.triggers);
 }
 
 // ── 工具 ──
@@ -187,34 +199,64 @@ function fmtAgo(ts) {
   if (s < 86400) return Math.floor(s / 3600) + 'h';
   return Math.floor(s / 86400) + 'd';
 }
+// 秒数 → 可读时长（如 3d 2h / 5h 12m / 8m 3s）
+function fmtDur(sec) {
+  if (sec == null) return '—';
+  const s = Math.floor(Number(sec) || 0);
+  const d = Math.floor(s / 86400);
+  const h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sx = s % 60;
+  if (d > 0) return `${d}d ${h}h`;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${sx}s`;
+  return `${sx}s`;
+}
 function fmtTime(ts) {
   if (!ts) return '';
   const d = new Date(ts);
   const p = (n) => String(n).padStart(2, '0');
-  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+// semver 比较：-1 (a<b) / 0 / 1 (a>b)，剥离 pre-release 标签
+function compareVer(a, b) {
+  const pa = String(a).split('-')[0].split('.').map(Number);
+  const pb = String(b).split('-')[0].split('.').map(Number);
+  const len = Math.max(pa.length, pb.length);
+  for (let i = 0; i < len; i++) {
+    const na = pa[i] || 0, nb = pb[i] || 0;
+    if (na < nb) return -1;
+    if (na > nb) return 1;
+  }
+  return 0;
 }
 
-// ── AID 视图 ──
-function renderAid(data) {
-  const el = $('#view-aid');
+// ── Agents 视图（旧 AID 页升级：加操作列 + 新建入口）──
+function renderAgents(data) {
+  const el = $('#view-agents');
   if (!data) { el.innerHTML = '<div class="empty">加载中…</div>'; return; }
+  if (_agentBusy) return;  // 编辑/操作进行中，跳过轮询重渲染
   const aids = data.aids || [];
   const statsByAid = {};
   for (const s of (data.stats || [])) statsByAid[s.aid] = s;
+  // aid → agent 状态映射（来自 evolagent.list，用于操作列 启用/禁用 二选一）
+  const agentByAid = {};
+  for (const ag of (data.agents || [])) agentByAid[ag.aid] = ag;
 
-  let html = '';
+  let html = '<div class="agents-toolbar"><button class="ctrl-btn" id="agent-new-btn">+ 新建 Agent</button></div>';
   if (!data.daemonRunning) {
     html += '<div class="banner">⚠ EvolClaw 主进程未运行，仅显示最近活动记录</div>';
   }
   if (!aids.length) {
     html += '<div class="empty">暂无 AID</div>';
     el.innerHTML = html;
+    bindAgentsEvents(el);
     return;
   }
 
   html += '<table><thead><tr>' +
     '<th>状态</th><th>AID</th><th>收</th><th>发</th><th>系统</th>' +
-    '<th>入字节</th><th>出字节</th><th>peers</th><th>重连</th><th>最后活动</th><th>最近消息</th>' +
+    '<th>入字节</th><th>出字节</th><th>peers</th><th>重连</th><th>最后活动</th><th>最近消息</th><th>操作</th>' +
     '</tr></thead><tbody>';
 
   for (const a of aids) {
@@ -229,6 +271,21 @@ function renderAid(data) {
     } else if (s.lastSentText) {
       preview = '↑ ' + shortAid(s.lastSentTo) + ': ' + s.lastSentText;
     }
+    // 操作列：能归属到 EvolAgent 的才可操作；否则置灰
+    const ag = agentByAid[a.aid];
+    let ops;
+    if (ag) {
+      const toggleLabel = ag.status === 'disabled' ? '启用' : '禁用';
+      ops = `<div class="agent-ops" data-aid="${esc(a.aid)}" data-status="${esc(ag.status)}">` +
+        `<button class="ctrl-btn" data-op="edit">编辑</button>` +
+        `<button class="ctrl-btn" data-op="reload">重载</button>` +
+        `<button class="ctrl-btn" data-op="toggle">${toggleLabel}</button>` +
+        `<button class="ctrl-btn danger" data-op="delete">删除</button>` +
+        `<a class="ctrl-btn" href="https://${esc(a.aid)}/agent.md" target="_blank" rel="noopener">md↗</a>` +
+        `</div>`;
+    } else {
+      ops = '<span style="color:var(--dim)">—</span>';
+    }
     html += '<tr>' +
       `<td><span class="dot ${dotCls}"></span>${esc(status)}</td>` +
       `<td>${esc(shortAid(a.aid))}${name ? ` <span style="color:var(--dim)">(${esc(name)})</span>` : ''}</td>` +
@@ -238,10 +295,12 @@ function renderAid(data) {
       `<td>${s.uniquePeerCount ?? a.peerCount ?? 0}</td><td>${a.reconnectCount ?? 0}</td>` +
       `<td>${fmtAgo(lastTs)}</td>` +
       `<td class="preview">${esc(preview.replace(/\n/g, ' ').slice(0, 80))}</td>` +
+      `<td class="agent-ops-cell">${ops}</td>` +
       '</tr>';
   }
   html += '</tbody></table>';
   el.innerHTML = html;
+  bindAgentsEvents(el);
 }
 
 // ── Cache 视图（daemon 统一 FileCache 运行统计）──
@@ -675,26 +734,7 @@ function renderBlocks(blocks) {
   return out;
 }
 
-// ── Control 视图（通用 Menu 协议客户端）──
-
-// 能力矩阵（协议 §3，cli 不暴露）
-const MENU_CAPS = {
-  pwd:        { query: true, group: 'System' },
-  system:     { query: true, actions: ['check', 'restart', 'upgrade'], group: 'System' },
-  baseagent:  { query: true, options: true, update: true, group: 'Agent 配置' },
-  model:      { query: true, options: true, update: true, group: 'Agent 配置' },
-  effort:     { query: true, options: true, update: true, group: 'Agent 配置' },
-  chatmode:   { query: true, options: true, update: true, group: 'Agent 配置' },
-  permission: { query: true, options: true, update: true, group: 'Agent 配置' },
-  activity:   { query: true, options: true, update: true, group: 'Agent 配置' },
-  dispatch:   { query: true, options: true, update: true, group: 'Agent 配置' },
-  session:    { query: true, options: true, actions: ['stop', 'new', 'delete', 'compact', 'fork', 'switch'], group: '会话' },
-  agent:      { options: true, actions: ['create', 'delete', 'enable', 'disable'], group: 'EvolAgent' },
-  trigger:    { options: true, update: true, actions: ['set', 'cancel'], group: '触发器' },
-};
-const CTRL_ORDER = ['System', 'Agent 配置', '会话', 'EvolAgent', '触发器'];
-
-let _ctrlBusy = false;  // 写操作进行中，避免轮询重渲染打断交互
+// ── 通用 Menu 协议辅助（mResp / toast，供 Agents / System / Triggers 复用）──
 
 // 提取 menu.response 的 data/error
 function mResp(r) {
@@ -717,37 +757,327 @@ function toast(text, isErr) {
   el._t = setTimeout(() => { el.className = 'ctrl-toast'; }, 2600);
 }
 
-function renderControl(data) {
-  const el = $('#view-control');
-  if (!data) { el.innerHTML = '<div class="empty">加载中…</div>'; return; }
-  if (_ctrlBusy) return;  // 交互中，跳过本次轮询渲染
-  if (!data.daemonRunning) {
-    el.innerHTML = '<div class="banner">⚠ EvolClaw 主进程未运行，Control 不可用</div>';
-    return;
-  }
+// ── Agents 操作 ──
+let _agentBusy = false;
 
-  // 按 group 聚合
-  const groups = {};
-  for (const name of Object.keys(MENU_CAPS)) {
-    const g = MENU_CAPS[name].group;
-    (groups[g] ||= []).push(name);
-  }
-
-  let html = '<div class="ctrl-wrap">';
-  for (const g of CTRL_ORDER) {
-    if (!groups[g]) continue;
-    html += `<section class="ctrl-section"><h2 class="ctrl-h">${esc(g)}</h2><div class="ctrl-grid">`;
-    for (const name of groups[g]) {
-      html += renderMenuCard(name, MENU_CAPS[name], data);
-    }
-    html += '</div></section>';
-  }
-  html += '</div>';
-  el.innerHTML = html;
-  bindControlEvents(el, data);
+function bindAgentsEvents(el) {
+  el.querySelector('#agent-new-btn')?.addEventListener('click', agentOpNew);
+  el.querySelectorAll('.agent-ops').forEach(div => {
+    const aid = div.dataset.aid;
+    const status = div.dataset.status;
+    div.querySelectorAll('button[data-op]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const op = btn.dataset.op;
+        if (op === 'edit') agentOpEdit(aid);
+        else if (op === 'reload') agentOpReload(aid);
+        else if (op === 'toggle') agentOpToggle(aid, status);
+        else if (op === 'delete') agentOpDelete(aid);
+      });
+    });
+  });
 }
 
-// ── 启动 ──
+async function agentOpReload(aid, force = false) {
+  _agentBusy = true;
+  try {
+    const r = mResp(await menuSend({ type: 'menu.action', name: 'agent', action: 'reload', args: { aid, force } }));
+    if (r.error?.code === 'BUSY') {
+      if (confirm(r.error.message + '\n确认强制重载？')) return agentOpReload(aid, true);
+      return;
+    }
+    if (r.error) { toast(r.error.message || r.error.code, true); return; }
+    toast('✓ 已重载');
+    subscribe('agents', {});
+  } catch (e) { toast(e.message, true); }
+  finally { _agentBusy = false; }
+}
+
+async function agentOpToggle(aid, status) {
+  const action = status === 'disabled' ? 'enable' : 'disable';
+  _agentBusy = true;
+  try {
+    const r = mResp(await menuSend({ type: 'menu.action', name: 'agent', action, args: { aid } }));
+    if (r.error?.code === 'BUSY') {
+      if (confirm(r.error.message + `\n确认强制${action === 'disable' ? '禁用' : '启用'}？`)) {
+        const r2 = mResp(await menuSend({ type: 'menu.action', name: 'agent', action, args: { aid, force: true } }));
+        if (r2.error) toast(r2.error.message || r2.error.code, true);
+        else { toast(`✓ 已${action === 'disable' ? '禁用' : '启用'}`); subscribe('agents', {}); }
+      }
+      return;
+    }
+    if (r.error) { toast(r.error.message || r.error.code, true); return; }
+    toast(`✓ 已${action === 'disable' ? '禁用' : '启用'}`);
+    subscribe('agents', {});
+  } catch (e) { toast(e.message, true); }
+  finally { _agentBusy = false; }
+}
+
+async function agentOpDelete(aid) {
+  if (!confirm(`删除 Agent ${aid}？\n此操作不可恢复。`)) return;
+  const purge = confirm('同时清除 agent 数据目录？');
+  _agentBusy = true;
+  try {
+    const r = mResp(await menuSend({ type: 'menu.action', name: 'agent', action: 'delete', args: { aid, purge } }));
+    if (r.error?.code === 'BUSY') {
+      if (confirm(r.error.message + '\n确认强制删除？')) {
+        const r2 = mResp(await menuSend({ type: 'menu.action', name: 'agent', action: 'delete', args: { aid, purge, force: true } }));
+        if (r2.error) toast(r2.error.message || r2.error.code, true);
+        else { toast('✓ 已删除'); subscribe('agents', {}); }
+      }
+      return;
+    }
+    if (r.error) { toast(r.error.message || r.error.code, true); return; }
+    toast('✓ 已删除');
+    subscribe('agents', {});
+  } catch (e) { toast(e.message, true); }
+  finally { _agentBusy = false; }
+}
+
+async function agentOpNew() {
+  const aid = prompt('Agent AID（如 mybot.agentid.pub）：');
+  if (!aid) return;
+  const name = prompt('显示名：') || aid.split('.')[0];
+  const baseagent = prompt('后端（claude / codex / gemini）：', 'claude') || 'claude';
+  _agentBusy = true;
+  try {
+    const r = mResp(await menuSend({ type: 'menu.action', name: 'agent', action: 'create', args: { aid, name, baseagent } }));
+    if (r.error) { toast(r.error.message || r.error.code, true); return; }
+    toast('✓ 创建请求已受理，稍后刷新查看');
+    setTimeout(() => subscribe('agents', {}), 3000);
+  } catch (e) { toast(e.message, true); }
+  finally { _agentBusy = false; }
+}
+
+async function agentOpEdit(aid) {
+  _agentBusy = true;
+  try {
+    const [qr] = await Promise.all([
+      menuSend({ type: 'menu.query', name: 'agent', args: { aid } }),
+    ]);
+    const q = mResp(qr);
+    if (q.error) { toast(q.error.message || q.error.code, true); _agentBusy = false; return; }
+    const cfg = q.data;
+    // 简单 prompt 编辑表单
+    const projectRaw = prompt('项目路径：', cfg.config?.projects?.defaultPath || '');
+    const ownersRaw = prompt('Owners（逗号分隔 AID）：', (cfg.config?.owners || []).join(', '));
+    const patch = {};
+    if (projectRaw !== null) patch.projects = { defaultPath: projectRaw };
+    if (ownersRaw !== null) patch.owners = ownersRaw.split(',').map(s => s.trim()).filter(Boolean);
+    if (Object.keys(patch).length === 0) { _agentBusy = false; return; }
+    const r = mResp(await menuSend({ type: 'menu.action', name: 'agent', action: 'update', args: { aid, patch } }));
+    if (r.error) toast(r.error.message || r.error.code, true);
+    else toast('✓ 配置已保存，点「重载」生效');
+  } catch (e) { toast(e.message, true); }
+  finally { _agentBusy = false; }
+}
+
+// ── System 视图 ──
+function renderSystem(data) {
+  const el = $('#view-system');
+  if (!data) { el.innerHTML = '<div class="empty">加载中…</div>'; return; }
+  const sys = data.system || {};
+  const up = data.upgrade;
+  const chk = data.check;
+
+  const vcard = (label, local, upInfo) => {
+    let badge = '';
+    if (upInfo?.hasUpdate && upInfo.remote) badge = ` <span style="color:var(--accent)">⬆ ${esc(upInfo.remote)}</span>`;
+    else if (upInfo?.remote) badge = ` <span style="color:var(--dim)">✓ 最新</span>`;
+    return `<div class="cache-card"><div class="card-label">${esc(label)}</div><div class="card-val">${esc(local || '—')}${badge}</div></div>`;
+  };
+
+  let html = '<div class="sys-wrap">';
+
+  // ① 版本卡
+  html += '<div class="cache-cards" style="margin-bottom:16px">';
+  html += vcard('evolclaw', sys.version, up?.evolclaw);
+  html += vcard('FASTAUN', sys.fastaunVersion, up?.fastaun);
+  html += vcard('ECWEB', data.ecwebVersion, up?.ecweb ? {
+    remote: up.ecweb.remote,
+    hasUpdate: !!(up.ecweb.remote && data.ecwebVersion && compareVer(data.ecwebVersion, up.ecweb.remote) < 0),
+  } : null);
+  html += `<div class="cache-card"><div class="card-label">NodeJS</div><div class="card-val">${esc(sys.node || '—')}</div></div>`;
+  html += `<div class="cache-card"><div class="card-label">运行时间</div><div class="card-val">${esc(fmtDur(sys.uptime))}</div></div>`;
+  html += `<div class="cache-card"><div class="card-label">PID</div><div class="card-val">${sys.pid || '—'}</div></div>`;
+  html += '</div>';
+
+  // ② 操作区
+  const devHint = up?.devMode ? ' <span style="color:var(--dim);font-size:0.85em">⏭ 开发模式，升级需手动操作</span>' : '';
+  html += '<div class="sys-actions" style="margin-bottom:16px">' +
+    '<button class="ctrl-btn" id="sys-check-btn">🔍 健康检查</button> ' +
+    '<button class="ctrl-btn" id="sys-upgrade-btn">⬆ 检查更新</button> ' +
+    '<button class="ctrl-btn danger" id="sys-restart-btn">⟳ 重启服务</button>' +
+    devHint +
+    '</div>';
+
+  // ③ 健康快照
+  if (chk) {
+    html += '<div class="sys-health">';
+    // 渠道 + 队列
+    html += '<div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:8px">';
+    html += '<div class="cache-card" style="min-width:180px"><div class="card-label">渠道健康</div>';
+    for (const ch of (chk.channels || [])) {
+      for (const inst of (ch.instances || [])) {
+        const dot = inst.connected ? 'on' : 'idle';
+        html += `<div><span class="dot ${dot}"></span>${esc(ch.type)}${inst.name !== ch.type ? ' ' + esc(inst.name) : ''}</div>`;
+      }
+    }
+    html += '</div>';
+    html += `<div class="cache-card"><div class="card-label">队列</div><div>待处理 ${chk.queue?.pending ?? 0}</div><div>处理中 ${chk.queue?.processing ?? 0}</div></div>`;
+    html += '</div>';
+    // 近 1 小时
+    const h = chk.lastHour;
+    if (h) {
+      const errDetail = h.errors > 0 ? ` (${Object.entries(h.errorsByType || {}).map(([t, c]) => `${t}:${c}`).join(', ')})` : '';
+      html += `<div class="cache-card" style="margin-bottom:8px"><div class="card-label">近 1 小时</div>` +
+        `<div>收到 ${h.received} · 完成 ${h.completed} · 出错 ${h.errors}${errDetail}</div>` +
+        `<div>中断 ${h.interrupts}${h.completed > 0 ? ' · 平均 ' + (h.avgResponseMs / 1000).toFixed(1) + 's' : ''}</div>` +
+        `</div>`;
+    }
+    // EvolAgent 健康
+    if (chk.evolagents?.length) {
+      html += '<div class="cache-card" style="margin-bottom:8px"><div class="card-label">EvolAgent 健康</div>';
+      for (const ag of chk.evolagents) {
+        const dot = ag.status === 'running' ? 'on' : ag.status === 'disabled' ? 'idle' : 'off';
+        const tasks = ag.activeTasks > 0 ? ` · ${ag.activeTasks} 任务` : '';
+        const err = ag.error ? ` <span style="color:var(--red)">${esc(ag.error.slice(0, 60))}</span>` : '';
+        html += `<div><span class="dot ${dot}"></span>${esc(ag.name)} ${esc(ag.status)}${tasks}${err}</div>`;
+      }
+      html += '</div>';
+    }
+    // BaseAgent 健康
+    if (chk.baseagents?.length) {
+      html += '<div class="cache-card"><div class="card-label">BaseAgent 健康</div>';
+      for (const ba of chk.baseagents) {
+        const dot = ba.healthy ? (ba.activeStreams > 0 ? 'on' : 'idle') : 'off';
+        html += `<div><span class="dot ${dot}"></span>${esc(ba.name)} · 流 ${ba.activeStreams}</div>`;
+      }
+      html += '</div>';
+    }
+    html += '</div>';
+  }
+
+  html += '</div>';
+  el.innerHTML = html;
+  bindSystemEvents(el, data);
+}
+
+function bindSystemEvents(el, data) {
+  el.querySelector('#sys-check-btn')?.addEventListener('click', async () => {
+    try {
+      const r = mResp(await menuSend({ type: 'menu.action', name: 'system', action: 'check' }));
+      if (r.error) { toast(r.error.message || r.error.code, true); return; }
+      state.system = { ...(state.system || {}), check: r.data };
+      renderSystem(state.system);
+    } catch (e) { toast(e.message, true); }
+  });
+  el.querySelector('#sys-upgrade-btn')?.addEventListener('click', async () => {
+    try {
+      const r = mResp(await menuSend({ type: 'menu.action', name: 'system', action: 'upgrade' }));
+      if (r.error) { toast(r.error.message || r.error.code, true); return; }
+      state.system = { ...(state.system || {}), upgrade: r.data };
+      renderSystem(state.system);
+    } catch (e) { toast(e.message, true); }
+  });
+  el.querySelector('#sys-restart-btn')?.addEventListener('click', async () => {
+    if (!confirm('确认重启服务？当前所有连接将断开。')) return;
+    try {
+      await menuSend({ type: 'menu.action', name: 'system', action: 'restart' });
+      toast('重启中…');
+    } catch (e) { toast(e.message, true); }
+  });
+}
+
+// ── Triggers 视图 ──
+function trigStatusBadge(status) {
+  const map = {
+    active:    ['活跃', 'trig-badge-active'],
+    fired:     ['已触发', 'trig-badge-fired'],
+    cancelled: ['已取消', 'trig-badge-cancelled'],
+    expired:   ['已过期', 'trig-badge-expired'],
+  };
+  const [label, cls] = map[status] || [status, 'trig-badge-fired'];
+  return `<span class="trig-badge ${cls}">${esc(label)}</span>`;
+}
+
+function renderTriggers(data) {
+  if (!data) { $('#view-triggers').innerHTML = '<div class="empty">加载中…</div>'; return; }
+  const agents = data.agents || [];
+  const triggers = data.triggers || [];
+  const selAid = data.selectedAgent;
+
+  // 左列：agent 列表（仿 msg list-item 风格）
+  let aHtml = '<div class="col-title">Agent</div>';
+  if (!agents.length) aHtml += '<div class="empty">暂无 Agent</div>';
+  for (const ag of agents) {
+    const sel = ag.value === selAid ? ' sel' : '';
+    aHtml += `<div class="list-item${sel}" data-aid="${esc(ag.value)}">` +
+      `<div class="name">${esc(ag.label)}</div>` +
+      `<div class="sub">${esc(ag.value)}</div></div>`;
+  }
+  $('#trig-agents').innerHTML = aHtml;
+  $('#trig-agents').querySelectorAll('.list-item').forEach(item => {
+    item.onclick = () => { trigSel.agent = item.dataset.aid; subscribe('triggers', { agent: trigSel.agent }); };
+  });
+
+  // 右列：table，每字段一列
+  const el = $('#trig-table');
+  if (!selAid) { el.innerHTML = '<div class="empty" style="padding:16px">← 选择 Agent 查看触发器</div>'; return; }
+  if (!triggers.length) { el.innerHTML = '<div class="empty" style="padding:16px">该 Agent 暂无触发器</div>'; return; }
+
+  let html = '<table><thead><tr>' +
+    '<th>状态</th><th>名称</th><th>ID</th><th>类型</th><th>表达式</th>' +
+    '<th>上次触发</th><th>下次触发</th><th>触发次数</th><th>失败次数</th><th>最后结果</th><th>Session 策略</th>' +
+    '<th>目标渠道</th><th>渠道 ID</th><th>渠道类型</th>' +
+    '<th>创建者</th><th>创建渠道</th><th>创建时间</th><th>操作</th>' +
+    '</tr></thead><tbody>';
+  for (const t of triggers) {
+    const status = t.status || 'active';
+    const active = status === 'active';
+    html += `<tr class="${active ? '' : 'trig-done'}">` +
+      `<td>${trigStatusBadge(status)}</td>` +
+      `<td>${esc(t.name ?? t.label ?? '')}</td>` +
+      `<td>${esc(t.id ?? t.value ?? '')}</td>` +
+      `<td>${esc(t.scheduleType ?? '')}</td>` +
+      `<td>${t.scheduleType === 'at' && t.scheduleValue ? fmtTime(new Date(t.scheduleValue).getTime()) : esc(t.scheduleValue ?? '')}</td>` +
+      `<td>${t.lastFiredAt ? fmtTime(t.lastFiredAt) : '—'}</td>` +
+      `<td>${t.nextFireAt ? fmtTime(t.nextFireAt) : '—'}</td>` +
+      `<td>${t.fireCount ?? 0}</td>` +
+      `<td>${t.failCount ? `<span style="color:var(--red)">${t.failCount}</span>` : '0'}</td>` +
+      `<td>${t.lastResult ? esc(t.lastResult) : '—'}</td>` +
+      `<td>${esc(t.targetSessionStrategy ?? '')}</td>` +
+      `<td>${esc(t.targetChannel ?? '')}</td>` +
+      `<td>${esc(t.targetChannelId ?? '')}</td>` +
+      `<td>${esc(t.targetChannelType ?? '')}</td>` +
+      `<td>${esc(t.createdByPeerId ?? '')}</td>` +
+      `<td>${esc(t.createdByChannel ?? '')}</td>` +
+      `<td>${t.createdAt ? fmtTime(t.createdAt) : '—'}</td>` +
+      `<td>${active
+        ? `<button class="ctrl-btn danger" data-trigid="${esc(t.id ?? t.value ?? '')}" data-trigname="${esc(t.name ?? t.label ?? '')}">取消</button>`
+        : '—'}</td>` +
+      '</tr>';
+  }
+  html += '</tbody></table>';
+  el.innerHTML = html;
+
+  el.querySelectorAll('button[data-trigid]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const nameOrId = btn.dataset.trigid;
+      const label = btn.dataset.trigname;
+      if (!confirm(`取消触发器「${label}」？`)) return;
+      try {
+        const r = mResp(await menuSend({
+          type: 'menu.action', name: 'trigger', action: 'cancel',
+          args: { nameOrId }, agent: selAid,
+        }));
+        if (r.error) toast(r.error.message || r.error.code, true);
+        else { toast('✓ 已取消'); subscribe('triggers', { agent: trigSel.agent }); }
+      } catch (e) { toast(e.message, true); }
+    });
+  });
+}
+
+
 function startApp() {
   initTabs();
   connect();

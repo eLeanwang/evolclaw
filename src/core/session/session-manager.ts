@@ -518,7 +518,7 @@ export class SessionManager {
       throw new Error(`[SessionManager] getOrCreateSession requires channelType. channel="${channel}" channelId="${channelId}"`);
     }
     if (threadId) {
-      const session = this.getOrCreateThreadSession(channel, channelId, threadId, defaultProjectPath, metadata, name, agentId, selfAID, channelType, peerType);
+      const session = this.getOrCreateThreadSession(channel, channelId, threadId, defaultProjectPath, metadata, name, agentId, selfAID, channelType, peerType, chatType);
       session.identity = this.resolveIdentity(channel, userId);
       if (session.metadata && !session.metadata.permissionMode) {
         session.metadata.permissionMode = this.resolvePermissionMode(session.identity.role);
@@ -659,7 +659,8 @@ export class SessionManager {
     agentId?: string,
     selfAID?: string,
     channelType?: string,
-    peerType?: string
+    peerType?: string,
+    chatType?: 'private' | 'group'
   ): Session {
     // 使用精确路径（channelType + selfAID）
     const chatDir = (channelType && selfAID)
@@ -674,20 +675,24 @@ export class SessionManager {
       if (existing) {
         const validSessionId = this.validateSessionFile(existing);
         if (metadata) {
+          const creatorPeerId = existing.metadata?.peerId;
           existing.metadata = { ...(existing.metadata || {}), ...metadata };
+          if (creatorPeerId && existing.metadata) existing.metadata.peerId = creatorPeerId;
           this.persistSession(existing, 'none');
         }
         return { ...existing, agentSessionId: validSessionId };
       }
     }
 
-    // Inherit project path & chatType from active main session
-    const activeMain = this.readActive(channel, channelId, channelType, selfAID);
-    const projectPath = (activeMain && !activeMain.threadId ? activeMain.projectPath : undefined) || defaultProjectPath;
-    const inheritedChatType = (activeMain && !activeMain.threadId ? activeMain.chatType : undefined) || 'private';
+    const projectPath = defaultProjectPath;
+    const effectiveChatType = chatType || 'private';
 
     const effectiveChannelType = channelType || channel;
     const sessionKey = formatSessionKey(effectiveChannelType, channelId, threadId);
+
+    // 继承主会话的 agentId（话题会话从属于主会话，应沿用相同 backend）
+    const mainActive = readJsonFile<SessionFile>(path.join(chatDir, 'active.json'));
+    const inheritedAgentId = agentId || mainActive?.agentType || 'claude';
 
     const session: Session = {
       id: generateSessionId(),
@@ -697,10 +702,10 @@ export class SessionManager {
       selfAID: selfAID || '',
       projectPath,
       threadId,
-      agentId: agentId || 'claude',
+      agentId: inheritedAgentId,
       sessionKey,
-      chatType: inheritedChatType,
-      sessionMode: this.resolveDefaultSessionMode(channel, inheritedChatType, peerType),
+      chatType: effectiveChatType,
+      sessionMode: this.resolveDefaultSessionMode(channel, effectiveChatType, peerType),
       metadata,
       name: name || '话题会话',
       createdAt: Date.now(),
@@ -1050,6 +1055,7 @@ export class SessionManager {
         selfAID = active.selfAID || '';
         // 从现有 session 的 permissionMode 反推 role，bypass→owner，其余→guest
         if (active.permissionMode === 'bypass') inheritedRole = 'owner';
+        if (!agentId && active.agentType) agentId = active.agentType;
       }
     }
 

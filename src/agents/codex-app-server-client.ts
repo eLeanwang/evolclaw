@@ -4,15 +4,17 @@ import { logger } from '../utils/logger.js';
 
 type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 type JsonObject = { [key: string]: JsonValue };
+type JsonRpcId = string | number;
 
 interface PendingRequest {
   resolve: (value: JsonValue) => void;
   reject: (error: Error) => void;
   method: string;
+  params?: JsonObject | null;
 }
 
 export interface CodexServerRequest {
-  id: string;
+  id: JsonRpcId;
   method: string;
   params?: JsonObject;
 }
@@ -70,9 +72,22 @@ interface CodexAppServerClientOptions {
   baseUrl?: string;
   model?: string;
   effort?: string;
+  enableRequestUserInput?: boolean;
+  approvalsReviewer?: string;
   cwd?: string;
   env?: Record<string, string | undefined>;
   onServerRequest?: CodexServerRequestHandler;
+}
+
+interface CodexThreadOptions {
+  model?: string;
+  effort?: string;
+  approvalPolicy?: string;
+  approvalsReviewer?: string;
+  sandbox?: string;
+  config?: JsonObject | null;
+  baseInstructions?: string;
+  developerInstructions?: string;
 }
 
 export class CodexAppServerClient {
@@ -92,22 +107,16 @@ export class CodexAppServerClient {
 
   async threadStart(
     projectPath: string,
-    options?: {
-      model?: string;
-      effort?: string;
-      approvalPolicy?: string;
-      sandbox?: string;
-      baseInstructions?: string;
-      developerInstructions?: string;
-    }
+    options?: CodexThreadOptions
   ): Promise<CodexThreadResponse> {
     const effort = options?.effort ?? this.options.effort;
     return this.request('thread/start', {
       cwd: projectPath,
       model: options?.model ?? this.options.model ?? null,
       approvalPolicy: options?.approvalPolicy ?? null,
+      approvalsReviewer: options?.approvalsReviewer ?? this.options.approvalsReviewer ?? null,
       sandbox: options?.sandbox ?? null,
-      config: effort ? { model_reasoning_effort: effort } : null,
+      config: this.buildThreadConfig(effort, options?.config),
       ...(options?.baseInstructions ? { baseInstructions: options.baseInstructions } : {}),
       ...(options?.developerInstructions ? { developerInstructions: options.developerInstructions } : {}),
     }) as Promise<CodexThreadResponse>;
@@ -116,14 +125,7 @@ export class CodexAppServerClient {
   async threadResume(
     threadId: string,
     projectPath: string,
-    options?: {
-      model?: string;
-      effort?: string;
-      approvalPolicy?: string;
-      sandbox?: string;
-      baseInstructions?: string;
-      developerInstructions?: string;
-    }
+    options?: CodexThreadOptions
   ): Promise<CodexThreadResponse> {
     const effort = options?.effort ?? this.options.effort;
     return this.request('thread/resume', {
@@ -131,8 +133,9 @@ export class CodexAppServerClient {
       cwd: projectPath,
       model: options?.model ?? this.options.model ?? null,
       approvalPolicy: options?.approvalPolicy ?? null,
+      approvalsReviewer: options?.approvalsReviewer ?? this.options.approvalsReviewer ?? null,
       sandbox: options?.sandbox ?? null,
-      ...(effort ? { config: { model_reasoning_effort: effort } } : {}),
+      config: this.buildThreadConfig(effort, options?.config),
       ...(options?.baseInstructions ? { baseInstructions: options.baseInstructions } : {}),
       ...(options?.developerInstructions ? { developerInstructions: options.developerInstructions } : {}),
     }) as Promise<CodexThreadResponse>;
@@ -141,16 +144,34 @@ export class CodexAppServerClient {
   async turnStart(
     threadId: string,
     input: JsonValue[],
-    options?: { cwd?: string; model?: string; effort?: string; approvalPolicy?: string }
+    options?: { cwd?: string; model?: string; effort?: string; approvalPolicy?: string; sandbox?: string }
   ): Promise<{ turn?: Record<string, any> }> {
+    const sandboxPolicy = this.toTurnSandboxPolicy(options?.sandbox);
     return this.request('turn/start', {
       threadId,
       input,
       ...(options?.cwd ? { cwd: options.cwd } : {}),
       ...(options?.model ? { model: options.model } : {}),
       ...(options?.approvalPolicy ? { approvalPolicy: options.approvalPolicy } : {}),
+      ...(sandboxPolicy ? { sandboxPolicy } : {}),
       ...(options?.effort ? { effort: options.effort } : {}),
     }) as Promise<{ turn?: Record<string, any> }>;
+  }
+
+  private toTurnSandboxPolicy(sandbox?: string): JsonObject | undefined {
+    if (!sandbox) return undefined;
+    if (sandbox === 'danger-full-access') return { type: 'dangerFullAccess' };
+    if (sandbox === 'read-only') return { type: 'readOnly', networkAccess: true };
+    if (sandbox === 'workspace-write') {
+      return {
+        type: 'workspaceWrite',
+        writableRoots: [],
+        networkAccess: true,
+        excludeTmpdirEnvVar: false,
+        excludeSlashTmp: false,
+      };
+    }
+    return undefined;
   }
 
   async threadRead(threadId: string, includeTurns = true): Promise<CodexThreadResponse> {
@@ -161,12 +182,19 @@ export class CodexAppServerClient {
     return this.request('thread/rollback', { threadId, numTurns }) as Promise<CodexThreadResponse>;
   }
 
-  async threadFork(threadId: string, projectPath: string, title?: string): Promise<CodexThreadResponse> {
+  async threadFork(
+    threadId: string,
+    projectPath: string,
+    title?: string,
+    options?: Pick<CodexThreadOptions, 'model' | 'effort' | 'approvalsReviewer' | 'config'>
+  ): Promise<CodexThreadResponse> {
+    const effort = options?.effort ?? this.options.effort;
     const response = await this.request('thread/fork', {
       threadId,
       cwd: projectPath,
-      model: this.options.model ?? null,
-      config: this.options.effort ? { model_reasoning_effort: this.options.effort } : null,
+      model: options?.model ?? this.options.model ?? null,
+      approvalsReviewer: options?.approvalsReviewer ?? this.options.approvalsReviewer ?? null,
+      config: this.buildThreadConfig(effort, options?.config),
       excludeTurns: false,
       persistExtendedHistory: false,
     }) as CodexThreadResponse;
@@ -177,6 +205,12 @@ export class CodexAppServerClient {
       });
     }
     return response;
+  }
+
+  private buildThreadConfig(effort?: string, config?: JsonObject | null): JsonObject | null {
+    const merged: JsonObject = { ...(config ?? {}) };
+    if (effort) merged.model_reasoning_effort = effort;
+    return Object.keys(merged).length > 0 ? merged : null;
   }
 
   async threadCompactStart(threadId: string): Promise<boolean> {
@@ -266,13 +300,7 @@ export class CodexAppServerClient {
       env.OPENAI_BASE_URL = this.options.baseUrl;
     }
 
-    const args = ['app-server', '--listen', 'stdio://'];
-    if (this.options.baseUrl) {
-      args.push('--config', `openai_base_url=${JSON.stringify(this.options.baseUrl)}`);
-    }
-    if (this.options.effort) {
-      args.push('--config', `model_reasoning_effort=${JSON.stringify(this.options.effort)}`);
-    }
+    const args = this.buildProcessArgs();
 
     this.proc = spawn('codex', args, {
       cwd: this.options.cwd,
@@ -297,6 +325,20 @@ export class CodexAppServerClient {
     });
   }
 
+  private buildProcessArgs(): string[] {
+    const args = ['app-server', '--listen', 'stdio://'];
+    if (this.options.enableRequestUserInput !== false) {
+      args.push('--enable', 'default_mode_request_user_input');
+    }
+    if (this.options.baseUrl) {
+      args.push('--config', `openai_base_url=${JSON.stringify(this.options.baseUrl)}`);
+    }
+    if (this.options.effort) {
+      args.push('--config', `model_reasoning_effort=${JSON.stringify(this.options.effort)}`);
+    }
+    return args;
+  }
+
   private async request(method: string, params?: JsonObject | null): Promise<JsonValue> {
     await this.ensureReadyFor(method);
     const proc = this.proc;
@@ -307,7 +349,7 @@ export class CodexAppServerClient {
     if (params !== undefined && params !== null) payload.params = params;
 
     return new Promise<JsonValue>((resolve, reject) => {
-      this.pending.set(id, { resolve, reject, method });
+      this.pending.set(id, { resolve, reject, method, params });
       proc.stdin.write(`${JSON.stringify(payload)}\n`, error => {
         if (!error) return;
         this.pending.delete(id);
@@ -316,14 +358,20 @@ export class CodexAppServerClient {
     });
   }
 
-  private respond(id: string, result: JsonValue): void {
+  private respond(id: JsonRpcId, result: JsonValue): void {
     if (!this.proc) return;
-    this.proc.stdin.write(JSON.stringify({ id, result }) + '\n');
+    const payload = JSON.stringify({ id, result }) + '\n';
+    this.proc.stdin.write(payload, error => {
+      if (error) logger.warn(`[CodexAppServer] failed to write response id=${id}: ${error.message}`);
+    });
   }
 
-  private respondError(id: string, error: Error): void {
+  private respondError(id: JsonRpcId, error: Error): void {
     if (!this.proc) return;
-    this.proc.stdin.write(JSON.stringify({ id, error: { message: error.message } }) + '\n');
+    const payload = JSON.stringify({ id, error: { message: error.message } }) + '\n';
+    this.proc.stdin.write(payload, writeError => {
+      if (writeError) logger.warn(`[CodexAppServer] failed to write error response id=${id}: ${writeError.message}`);
+    });
   }
 
   private notify(method: string, params?: JsonObject | null): void {
@@ -350,20 +398,21 @@ export class CodexAppServerClient {
       return;
     }
 
-    if (message.id === undefined) {
-      if (typeof message.method === 'string') {
+    const rawId = message.id;
+
+    if (typeof message.method === 'string') {
+      if (rawId === undefined) {
         this.emitNotification({ method: message.method, params: message.params });
+      } else {
+        this.handleServerRequest({ id: rawId, method: message.method, params: message.params });
       }
       return;
     }
-    const messageId = String(message.id);
+
+    if (rawId === undefined) return;
+    const messageId = String(rawId);
     const pending = this.pending.get(messageId);
-    if (!pending) {
-      if (typeof message.method === 'string') {
-        this.handleServerRequest({ id: messageId, method: message.method, params: message.params });
-      }
-      return;
-    }
+    if (!pending) return;
     this.pending.delete(messageId);
 
     if (message.error) {
@@ -377,22 +426,50 @@ export class CodexAppServerClient {
 
   private handleServerRequest(request: CodexServerRequest): void {
     const handler = this.options.onServerRequest;
+    logger.info(`[CodexAppServer] server request id=${request.id} method=${request.method}`);
     if (!handler) {
+      logger.warn(`[CodexAppServer] unsupported server request id=${request.id} method=${request.method}`);
       this.respondError(request.id, new Error('Unsupported Codex app-server request: ' + request.method));
       return;
     }
     Promise.resolve(handler(request))
-      .then(result => this.respond(request.id, result ?? null))
-      .catch(error => this.respondError(request.id, error instanceof Error ? error : new Error(String(error))));
+      .then(result => {
+        logger.info(`[CodexAppServer] server response id=${request.id} method=${request.method} result=${JSON.stringify(result ?? null)}`);
+        this.respond(request.id, result ?? null);
+      })
+      .catch(error => {
+        const err = error instanceof Error ? error : new Error(String(error));
+        logger.warn(`[CodexAppServer] server request failed id=${request.id} method=${request.method}: ${err.message}`);
+        this.respondError(request.id, err);
+      });
   }
 
   private emitNotification(notification: CodexServerNotification): void {
+    this.resolveSyntheticResponses(notification);
     for (const handler of this.notificationHandlers) {
       try {
         handler(notification);
       } catch (error) {
         logger.debug(`[CodexAppServer] notification handler failed: ${error}`);
       }
+    }
+  }
+
+  private resolveSyntheticResponses(notification: CodexServerNotification): void {
+    if (notification.method !== 'thread/compacted') return;
+    const threadId = typeof notification.params?.threadId === 'string'
+      ? notification.params.threadId
+      : typeof notification.params?.thread_id === 'string'
+        ? notification.params.thread_id
+        : undefined;
+    if (!threadId) return;
+
+    for (const [id, pending] of this.pending.entries()) {
+      const pendingThreadId = typeof pending.params?.threadId === 'string' ? pending.params.threadId : undefined;
+      if (pending.method !== 'thread/compact/start' || pendingThreadId !== threadId) continue;
+      this.pending.delete(id);
+      logger.info(`[CodexAppServer] resolved pending thread/compact/start id=${id} from thread/compacted thread=${threadId}`);
+      pending.resolve({});
     }
   }
 

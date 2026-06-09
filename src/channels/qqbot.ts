@@ -1,10 +1,10 @@
 import { logger } from '../utils/logger.js';
 import { markdownToPlainText } from '../utils/rich-content-renderer.js';
 import { requireOptional } from '../utils/npm-ops.js';
-import type { ChannelPlugin, ChannelInstance } from '../core/channel-loader.js';
+import type { ChannelPlugin, ChannelInstance, ChannelBuildContext } from '../core/channel-loader.js';
+import { resolveShowActivities, showActivitiesPolicy } from '../core/channel-loader.js';
 import type { MessageBridge } from '../core/message/message-bridge.js';
-import type { Config, QQBotChannelConfig, ThoughtItem } from '../types.js';
-import { normalizeChannelInstances, getChannelShowActivities } from '../utils/channel-helpers.js';
+import type { QQBotChannelInstance as QQBotInst, ThoughtItem } from '../types.js';
 import { formatItemsAsText } from '../core/message/items-formatter.js';
 
 // ── Types ──────────────────────────────────────────────────────────────────────
@@ -372,149 +372,76 @@ function isValidCredential(value: string | undefined): boolean {
 export class QQBotChannelPlugin implements ChannelPlugin {
   readonly name = 'qqbot';
 
-  isEnabled(config: Config): boolean {
-    const raw = config.channels?.qqbot;
-    if (!raw) return false;
-    if (Array.isArray(raw)) {
-      return raw.some(inst => inst.enabled !== false && isValidCredential(inst.appId) && isValidCredential(inst.clientSecret));
-    }
-    if (raw.enabled === false) return false;
-    return isValidCredential(raw.appId) && isValidCredential(raw.clientSecret);
-  }
+  async createInstance(inst: QQBotInst, ctx: ChannelBuildContext): Promise<ChannelInstance | null> {
+    if (inst.enabled === false) return null;
+    if (!isValidCredential(inst.appId) || !isValidCredential(inst.clientSecret)) return null;
 
-  async createChannels(config: Config): Promise<ChannelInstance[]> {
-    const instances = normalizeChannelInstances<QQBotChannelConfig>(
-      config.channels?.qqbot,
-      'qqbot',
-    );
+    const channel = new QQBotChannel({
+      appId: inst.appId,
+      clientSecret: inst.clientSecret,
+    });
 
-    const result: ChannelInstance[] = [];
-    for (const inst of instances) {
-      if (inst.enabled === false) continue;
-      if (!isValidCredential(inst.appId) || !isValidCredential(inst.clientSecret)) continue;
-
-      const channel = new QQBotChannel({
-        appId: inst.appId,
-        clientSecret: inst.clientSecret,
-      });
-
-      const adapter = {
-        channelName: inst.name,
-        channelKey: inst.name,
-        capabilities: { file: true, image: true, interaction: false, markdown: true, thought: false, status: false, thread: false },
-        send: async (envelope: any, payload: any) => {
-          const ctx = envelope.replyContext;
-          const channelId = envelope.channelId;
-          switch (payload.kind) {
-            case 'result.text':
-            case 'command.result':
-            case 'command.error':
-            case 'system.notice':
-            case 'system.error':
-            case 'result.error':
-              await channel.sendMessage(channelId, payload.text);
-              return;
-            case 'result.file':
-              await channel.sendFile(channelId, payload.filePath);
-              return;
-            case 'result.image':
-              await channel.sendImage(channelId, payload.data);
-              return;
-            case 'activity.batch': {
-              const filtered = payload.items.filter((i: ThoughtItem) => !(i.kind === 'tool_result' && i.ok));
-              const text = formatItemsAsText(filtered);
-              if (text) await channel.sendMessage(channelId, text);
-              return;
-            }
-            case 'interaction':
-              if (payload.fallbackText) await channel.sendMessage(channelId, payload.fallbackText);
-              return;
-            case 'status.started':
-            case 'status.completed':
-            case 'status.interrupted':
-            case 'status.error':
-            case 'status.timeout':
-            case 'status.progress':
-            case 'custom':
-              return;
-            default:
-              logger.warn(`[QQBot] Unhandled payload kind: ${(payload as any).kind}`);
+    const mode = resolveShowActivities(inst);
+    const adapter = {
+      channelName: inst.name,
+      channelKey: inst.name,
+      capabilities: { file: true, image: true, interaction: false, markdown: true, thought: false, status: false, thread: false },
+      send: async (envelope: any, payload: any) => {
+        const channelId = envelope.channelId;
+        switch (payload.kind) {
+          case 'result.text': case 'command.result': case 'command.error':
+          case 'system.notice': case 'system.error': case 'result.error':
+            await channel.sendMessage(channelId, payload.text); return;
+          case 'result.file': await channel.sendFile(channelId, payload.filePath); return;
+          case 'result.image': await channel.sendImage(channelId, payload.data); return;
+          case 'activity.batch': {
+            const filtered = payload.items.filter((i: ThoughtItem) => !(i.kind === 'tool_result' && i.ok));
+            const text = formatItemsAsText(filtered);
+            if (text) await channel.sendMessage(channelId, text);
+            return;
           }
-        },      };
+          case 'interaction':
+            if (payload.fallbackText) await channel.sendMessage(channelId, payload.fallbackText);
+            return;
+          default: return;
+        }
+      },
+    };
 
-      const policy = {
-        canSwitchProject: (_chatType: string, identity: string) => identity === 'owner' || identity === 'admin',
-        canListProjects: (_chatType: string, identity: string) => identity === 'owner' || identity === 'admin',
-        canCreateSession: () => true,
-        canDeleteSession: () => true,
-        canImportCliSession: (_chatType: string, identity: string) => identity === 'owner' || identity === 'admin',
-        messagePrefix: (chatType: string, peerName?: string) => (chatType === 'group' && peerName) ? `[${peerName}] ` : '',
-        showMiddleResult: (chatType: string, identity: string) => {
-          const mode = getChannelShowActivities(config, inst.name);
-          if (mode === 'none') return false;
-          if (mode === 'dm-only') return chatType === 'private';
-          if (mode === 'owner-dm-only') return chatType === 'private' && identity === 'owner';
-          return true;
-        },
-        showIdleMonitor: (chatType: string, identity: string) => {
-          const mode = getChannelShowActivities(config, inst.name);
-          if (mode === 'none') return false;
-          if (mode === 'dm-only') return chatType === 'private';
-          if (mode === 'owner-dm-only') return chatType === 'private' && identity === 'owner';
-          return true;
-        },
-        accumulateErrors: () => true,
-      };
+    const policy = {
+      canSwitchProject: (_: string, identity: string) => identity === 'owner' || identity === 'admin',
+      canListProjects: (_: string, identity: string) => identity === 'owner' || identity === 'admin',
+      canCreateSession: () => true,
+      canDeleteSession: () => true,
+      canImportCliSession: (_: string, identity: string) => identity === 'owner' || identity === 'admin',
+      messagePrefix: (chatType: string, peerName?: string) => (chatType === 'group' && peerName) ? `[${peerName}] ` : '',
+      showMiddleResult: (chatType: string, identity: string) => showActivitiesPolicy(mode, chatType, identity),
+      showIdleMonitor: (chatType: string, identity: string) => showActivitiesPolicy(mode, chatType, identity),
+      accumulateErrors: () => true,
+    };
 
-      const options = {
-        fileMarkerPattern: /\[SEND_FILE:(?:(\w+):)?([^\]]+)\]/g,
-        supportsImages: true,
-        flushDelay: inst.flushDelay,
-      };
-
-      result.push({
-        channelType: 'qqbot',
-        adapter,
-        channel,
-        policy,
-        options,
-        connect: () => channel.connect(),
-        disconnect: () => channel.disconnect(),
-        onProjectPathRequest: () =>
-          Promise.resolve(config.projects?.defaultPath || process.cwd()),
-        registerBridge(bridge: MessageBridge, channelType: string) {
-          bridge.register(
-            adapter.channelName,
-            (handler) => channel.onMessage(async (event: any) => {
-              handler({
-                channel: adapter.channelName,
-                channelType,
-                channelId: event.channelId,
-                selfAID: (inst as any).agentName,
-                content: event.content,
-                images: event.images,
-                chatType: event.chatType || 'private',
-                peerId: event.peerId || '',
-                peerName: event.peerName,
-                messageId: event.messageId,
-              });
-            }),
-            (channelId, text) => channel.sendMessage(channelId, text),
-            adapter,
-            channelType
-          );
-        },
-      });
-    }
-
-    return result;
-  }
-
-  async createChannel(config: Config): Promise<ChannelInstance> {
-    const instances = await this.createChannels(config);
-    if (instances.length === 0) {
-      throw new Error('QQBot config missing or invalid');
-    }
-    return instances[0];
+    return {
+      channelType: 'qqbot', adapter, channel,
+      policy,
+      options: { fileMarkerPattern: /\[SEND_FILE:(?:(\w+):)?([^\]]+)\]/g, supportsImages: true, flushDelay: inst.flushDelay },
+      connect: () => channel.connect(),
+      disconnect: () => channel.disconnect(),
+      onProjectPathRequest: () => Promise.resolve(ctx.defaultProjectPath),
+      registerBridge(bridge: MessageBridge, channelType: string) {
+        bridge.register(
+          adapter.channelName,
+          (handler) => channel.onMessage(async (event: any) => {
+            handler({
+              channel: adapter.channelName, channelType, channelId: event.channelId,
+              selfAID: ctx.agentName, content: event.content, images: event.images,
+              chatType: event.chatType || 'private', peerId: event.peerId || '',
+              peerName: event.peerName, messageId: event.messageId,
+            });
+          }),
+          (channelId, text) => channel.sendMessage(channelId, text),
+          adapter, channelType,
+        );
+      },
+    };
   }
 }

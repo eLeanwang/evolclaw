@@ -1,10 +1,10 @@
 import crypto from 'node:crypto';
 import { logger } from '../utils/logger.js';
 import { requireOptional } from '../utils/npm-ops.js';
-import type { ChannelPlugin, ChannelInstance } from '../core/channel-loader.js';
+import type { ChannelPlugin, ChannelInstance, ChannelBuildContext } from '../core/channel-loader.js';
+import { resolveShowActivities, showActivitiesPolicy } from '../core/channel-loader.js';
 import type { MessageBridge } from '../core/message/message-bridge.js';
-import type { Config, WecomChannelConfig, ThoughtItem } from '../types.js';
-import { normalizeChannelInstances, getChannelShowActivities } from '../utils/channel-helpers.js';
+import type { WecomChannelInstance as WecomInst, ThoughtItem } from '../types.js';
 import { formatItemsAsText } from '../core/message/items-formatter.js';
 
 // ── Types ──────────────────────────────────────────────────────────────────────
@@ -538,149 +538,76 @@ function isValidCredential(value: string | undefined): boolean {
 export class WecomChannelPlugin implements ChannelPlugin {
   readonly name = 'wecom';
 
-  isEnabled(config: Config): boolean {
-    const raw = config.channels?.wecom;
-    if (!raw) return false;
-    if (Array.isArray(raw)) {
-      return raw.some(inst => inst.enabled !== false && isValidCredential(inst.botId) && isValidCredential(inst.secret));
-    }
-    if (raw.enabled === false) return false;
-    return isValidCredential(raw.botId) && isValidCredential(raw.secret);
-  }
+  async createInstance(inst: WecomInst, ctx: ChannelBuildContext): Promise<ChannelInstance | null> {
+    if (inst.enabled === false) return null;
+    if (!isValidCredential(inst.botId) || !isValidCredential(inst.secret)) return null;
 
-  async createChannels(config: Config): Promise<ChannelInstance[]> {
-    const instances = normalizeChannelInstances<WecomChannelConfig>(
-      config.channels?.wecom,
-      'wecom',
-    );
+    const channel = new WecomChannel({
+      botId: inst.botId,
+      secret: inst.secret,
+    });
 
-    const result: ChannelInstance[] = [];
-    for (const inst of instances) {
-      if (inst.enabled === false) continue;
-      if (!isValidCredential(inst.botId) || !isValidCredential(inst.secret)) continue;
-
-      const channel = new WecomChannel({
-        botId: inst.botId,
-        secret: inst.secret,
-      });
-
-      const adapter = {
-        channelName: inst.name,
-        channelKey: inst.name,
-        capabilities: { file: true, image: true, interaction: false, markdown: true, thought: false, status: false, thread: false },
-        send: async (envelope: any, payload: any) => {
-          const ctx = envelope.replyContext;
-          const channelId = envelope.channelId;
-          switch (payload.kind) {
-            case 'result.text':
-            case 'command.result':
-            case 'command.error':
-            case 'system.notice':
-            case 'system.error':
-            case 'result.error':
-              await channel.sendMessage(channelId, payload.text);
-              return;
-            case 'result.file':
-              await channel.sendFile(channelId, payload.filePath);
-              return;
-            case 'result.image':
-              await channel.sendImage(channelId, payload.data);
-              return;
-            case 'activity.batch': {
-              const filtered = payload.items.filter((i: ThoughtItem) => !(i.kind === 'tool_result' && i.ok));
-              const text = formatItemsAsText(filtered);
-              if (text) await channel.sendMessage(channelId, text);
-              return;
-            }
-            case 'interaction':
-              if (payload.fallbackText) await channel.sendMessage(channelId, payload.fallbackText);
-              return;
-            case 'status.started':
-            case 'status.completed':
-            case 'status.interrupted':
-            case 'status.error':
-            case 'status.timeout':
-            case 'status.progress':
-            case 'custom':
-              return;
-            default:
-              logger.warn(`[WeCom] Unhandled payload kind: ${(payload as any).kind}`);
+    const mode = resolveShowActivities(inst);
+    const adapter = {
+      channelName: inst.name,
+      channelKey: inst.name,
+      capabilities: { file: true, image: true, interaction: false, markdown: true, thought: false, status: false, thread: false },
+      send: async (envelope: any, payload: any) => {
+        const channelId = envelope.channelId;
+        switch (payload.kind) {
+          case 'result.text': case 'command.result': case 'command.error':
+          case 'system.notice': case 'system.error': case 'result.error':
+            await channel.sendMessage(channelId, payload.text); return;
+          case 'result.file': await channel.sendFile(channelId, payload.filePath); return;
+          case 'result.image': await channel.sendImage(channelId, payload.data); return;
+          case 'activity.batch': {
+            const filtered = payload.items.filter((i: ThoughtItem) => !(i.kind === 'tool_result' && i.ok));
+            const text = formatItemsAsText(filtered);
+            if (text) await channel.sendMessage(channelId, text);
+            return;
           }
-        },      };
+          case 'interaction':
+            if (payload.fallbackText) await channel.sendMessage(channelId, payload.fallbackText);
+            return;
+          default: return;
+        }
+      },
+    };
 
-      const policy = {
-        canSwitchProject: (_chatType: string, identity: string) => identity === 'owner' || identity === 'admin',
-        canListProjects: (_chatType: string, identity: string) => identity === 'owner' || identity === 'admin',
-        canCreateSession: () => true,
-        canDeleteSession: () => true,
-        canImportCliSession: (_chatType: string, identity: string) => identity === 'owner' || identity === 'admin',
-        messagePrefix: (chatType: string, peerName?: string) => (chatType === 'group' && peerName) ? `[${peerName}] ` : '',
-        showMiddleResult: (chatType: string, identity: string) => {
-          const mode = getChannelShowActivities(config, inst.name);
-          if (mode === 'none') return false;
-          if (mode === 'dm-only') return chatType === 'private';
-          if (mode === 'owner-dm-only') return chatType === 'private' && identity === 'owner';
-          return true;
-        },
-        showIdleMonitor: (chatType: string, identity: string) => {
-          const mode = getChannelShowActivities(config, inst.name);
-          if (mode === 'none') return false;
-          if (mode === 'dm-only') return chatType === 'private';
-          if (mode === 'owner-dm-only') return chatType === 'private' && identity === 'owner';
-          return true;
-        },
-        accumulateErrors: () => true,
-      };
+    const policy = {
+      canSwitchProject: (_: string, identity: string) => identity === 'owner' || identity === 'admin',
+      canListProjects: (_: string, identity: string) => identity === 'owner' || identity === 'admin',
+      canCreateSession: () => true,
+      canDeleteSession: () => true,
+      canImportCliSession: (_: string, identity: string) => identity === 'owner' || identity === 'admin',
+      messagePrefix: (chatType: string, peerName?: string) => (chatType === 'group' && peerName) ? `[${peerName}] ` : '',
+      showMiddleResult: (chatType: string, identity: string) => showActivitiesPolicy(mode, chatType, identity),
+      showIdleMonitor: (chatType: string, identity: string) => showActivitiesPolicy(mode, chatType, identity),
+      accumulateErrors: () => true,
+    };
 
-      const options = {
-        fileMarkerPattern: /\[SEND_FILE:(?:(\w+):)?([^\]]+)\]/g,
-        supportsImages: true,
-        flushDelay: inst.flushDelay,
-      };
-
-      result.push({
-        channelType: 'wecom',
-        adapter,
-        channel,
-        policy,
-        options,
-        connect: () => channel.connect(),
-        disconnect: () => channel.disconnect(),
-        onProjectPathRequest: () =>
-          Promise.resolve(config.projects?.defaultPath || process.cwd()),
-        registerBridge(bridge: MessageBridge, channelType: string) {
-          bridge.register(
-            adapter.channelName,
-            (handler) => channel.onMessage(async (event: any) => {
-              handler({
-                channel: adapter.channelName,
-                channelType,
-                channelId: event.channelId,
-                selfAID: (inst as any).agentName,
-                content: event.content,
-                images: event.images,
-                chatType: event.chatType || 'private',
-                peerId: event.peerId || '',
-                peerName: event.peerName,
-                messageId: event.messageId,
-              });
-            }),
-            (channelId, text) => channel.sendMessage(channelId, text),
-            adapter,
-            channelType
-          );
-        },
-      });
-    }
-
-    return result;
-  }
-
-  async createChannel(config: Config): Promise<ChannelInstance> {
-    const instances = await this.createChannels(config);
-    if (instances.length === 0) {
-      throw new Error('WeCom config missing or invalid');
-    }
-    return instances[0];
+    return {
+      channelType: 'wecom', adapter, channel,
+      policy,
+      options: { fileMarkerPattern: /\[SEND_FILE:(?:(\w+):)?([^\]]+)\]/g, supportsImages: true, flushDelay: inst.flushDelay },
+      connect: () => channel.connect(),
+      disconnect: () => channel.disconnect(),
+      onProjectPathRequest: () => Promise.resolve(ctx.defaultProjectPath),
+      registerBridge(bridge: MessageBridge, channelType: string) {
+        bridge.register(
+          adapter.channelName,
+          (handler) => channel.onMessage(async (event: any) => {
+            handler({
+              channel: adapter.channelName, channelType, channelId: event.channelId,
+              selfAID: ctx.agentName, content: event.content, images: event.images,
+              chatType: event.chatType || 'private', peerId: event.peerId || '',
+              peerName: event.peerName, messageId: event.messageId,
+            });
+          }),
+          (channelId, text) => channel.sendMessage(channelId, text),
+          adapter, channelType,
+        );
+      },
+    };
   }
 }

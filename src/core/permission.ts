@@ -257,12 +257,10 @@ interface PendingPermission {
   sessionId: string;
   toolName: string;
   resolve: (decision: PermissionDecision) => void;
-  timer: NodeJS.Timeout;
 }
 
 export class PermissionGateway {
   private pending = new Map<string, PendingPermission>();
-  private timeout = 5 * 60 * 1000;
   private eventBus?: EventBus;
 
   /** 始终允许的工具缓存：toolName → Set<pattern> */
@@ -320,6 +318,7 @@ export class PermissionGateway {
       agentName?: string;
       taskId?: string;
       chatmode?: 'interactive' | 'proactive';
+      flushPending?: () => Promise<void>;
     },
     summary?: string,
     reason?: string
@@ -357,6 +356,13 @@ export class PermissionGateway {
 
     // 尝试富交互（走统一 adapter.send 入口）
     let interactionSent = false;
+    if (context?.flushPending) {
+      try {
+        await context.flushPending();
+      } catch {
+        // flush 失败不应阻断权限请求发送
+      }
+    }
     if (context?.adapter && context.channelId) {
       try {
         const envelope = buildEnvelope({
@@ -387,14 +393,7 @@ export class PermissionGateway {
     }
 
     return new Promise((resolve) => {
-      const timer = setTimeout(() => {
-        const pending = this.pending.get(requestId);
-        if (!pending) return;
-        this.pending.delete(requestId);
-        this.eventBus?.publish({ type: 'permission:timeout', sessionId, requestId, toolName });
-        pending.resolve('deny');
-      }, this.timeout);
-      this.pending.set(requestId, { sessionId, toolName, resolve, timer });
+      this.pending.set(requestId, { sessionId, toolName, resolve });
 
       // 注册到 InteractionRouter（卡片和文本降级都注册，统一路由）
       if (context?.interactionRouter) {
@@ -408,7 +407,6 @@ export class PermissionGateway {
   resolvePermission(sessionId: string, requestId: string, decision: PermissionDecision): boolean {
     const pending = this.pending.get(requestId);
     if (!pending || pending.sessionId !== sessionId) return false;
-    clearTimeout(pending.timer);
 
     // 如果是 always，缓存该工具
     if (decision === 'always') {
@@ -425,7 +423,6 @@ export class PermissionGateway {
   cancelAll(sessionId: string): void {
     for (const [requestId, pending] of this.pending.entries()) {
       if (pending.sessionId === sessionId) {
-        clearTimeout(pending.timer);
         pending.resolve('deny');
         this.pending.delete(requestId);
       }

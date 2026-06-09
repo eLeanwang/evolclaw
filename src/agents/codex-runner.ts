@@ -6,13 +6,17 @@
  * so MessageProcessor and CommandHandler can work with it transparently.
  */
 
-import type { Config } from '../types.js';
+import type { Config, InteractionRequest } from '../types.js';
 import type { AgentPlugin, AgentInstance, AgentCallbacks } from '../core/baseagent-loader.js';
-import type { AgentEvent, AgentRunnerFull, ModelSwitcher, PermissionContext, PermissionModeInfo } from './claude-runner.js';
-import type { PermissionGateway } from '../core/permission.js';
-import { CodexAppServerClient, type CodexServerNotification, type CodexThreadResponse, type CodexTurnItem } from './codex-app-server-client.js';
-import { resolveOpenaiConfig } from './resolve.js';
+import type { AgentEvent, AgentRunnerFull, ModelSwitcher, PermissionContext, PermissionModeInfo } from './runner-types.js';
+import { checkBlacklist, checkReadonly, type PermissionGateway } from '../core/permission.js';
+import { CodexAppServerClient, type CodexServerNotification, type CodexServerRequest, type CodexThreadResponse, type CodexTurnItem } from './codex-app-server-client.js';
+import { resolveOpenaiConfig } from './baseagent.js';
 import { logger } from '../utils/logger.js';
+import { renderActionAsText } from '../core/interaction-router.js';
+import { buildEnvelope, sendInteractionPayload } from '../core/message/message-processor.js';
+import { compareVersions } from '../utils/npm-ops.js';
+import { resolveRoot } from '../paths.js';
 import { execFileSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
@@ -71,10 +75,15 @@ interface AppServerStreamState {
   threadId: string;
   turnId?: string;
   streamedAgentMessageIds: Set<string>;
+  agentMessageDeltaText: Map<string, string>;
   completedItemIds: Set<string>;
   completedTurnIds: Set<string>;
   tokenUsage?: any;
 }
+
+type CompleteAgentEvent = Extract<AgentEvent, { type: 'complete' }>;
+type NormalizedTokenUsage = NonNullable<CompleteAgentEvent['tokenUsage']>;
+type NormalizedContextUsage = NonNullable<CompleteAgentEvent['contextUsage']>;
 
 const CODEX_CATALOG_FALLBACK: CodexModelInfo[] = [
   { slug: 'gpt-5.5', efforts: ['low', 'medium', 'high', 'xhigh'] },
@@ -85,17 +94,64 @@ const CODEX_CATALOG_FALLBACK: CodexModelInfo[] = [
 ];
 let codexCatalogCache: CodexModelInfo[] | null = null;
 
-export function isCodexAppServerAvailable(): boolean {
+export const MIN_CODEX_CLI_VERSION = '0.117.0';
+
+export interface CodexAppServerAvailability {
+  available: boolean;
+  version?: string;
+  reason?: string;
+}
+
+export function parseCodexCliVersion(output: string): string | null {
+  const match = output.match(/\b(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)\b/);
+  return match?.[1] ?? null;
+}
+
+export function isCodexCliVersionSupported(version: string): boolean {
+  return compareVersions(version, MIN_CODEX_CLI_VERSION) >= 0;
+}
+
+export function getCodexCliVersion(): string | null {
+  try {
+    const output = execFileSync('codex', ['--version'], {
+      encoding: 'utf-8',
+      timeout: 3000,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    return parseCodexCliVersion(output);
+  } catch {
+    return null;
+  }
+}
+
+export function getCodexAppServerAvailability(): CodexAppServerAvailability {
+  const version = getCodexCliVersion();
+  const upgradeHint = '请升级 Codex CLI：npm install -g @openai/codex@latest';
+  if (!version) {
+    return { available: false, reason: `未检测到可用 Codex CLI。${upgradeHint}` };
+  }
+  if (!isCodexCliVersionSupported(version)) {
+    return {
+      available: false,
+      version,
+      reason: `Codex CLI ${version} 低于最低要求 ${MIN_CODEX_CLI_VERSION}。${upgradeHint}`,
+    };
+  }
+
   try {
     execFileSync('codex', ['app-server', '--help'], {
       encoding: 'utf-8',
       timeout: 3000,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
-    return true;
+    return { available: true, version };
   } catch {
-    return false;
+    return { available: false, version, reason: `Codex CLI ${version} 不支持 app-server。${upgradeHint}` };
   }
+}
+
+export function isCodexAppServerAvailable(): boolean {
+  return getCodexAppServerAvailability().available;
 }
 
 function fetchCodexCatalog(): CodexModelInfo[] {
@@ -133,7 +189,7 @@ export function getCodexEfforts(model: string): string[] {
 
 export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
   readonly name = 'codex';
-  readonly capabilities = { clear: false, compact: true, fork: true, askUserQuestion: false, planApproval: false };
+  readonly capabilities: NonNullable<AgentRunnerFull['capabilities']>;
   private model: string;
   private effort?: string;
   private activeAbortControllers = new Map<string, AbortController>();
@@ -142,13 +198,25 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
   private activeTurns = new Map<string, { threadId: string; turnId: string }>();
   private appServerClient: CodexAppServerClient | null = null;
   private onSessionIdUpdate?: (sessionId: string, agentSessionId: string) => void;
+  private onCompactStart?: (sessionId: string) => void;
   private permissionGateway?: PermissionGateway;
   private sendPromptFn?: (text: string) => Promise<void>;
   private permissionContexts = new Map<string, PermissionContext>();
-  private resolvedConfig: { apiKey: string; baseUrl?: string; model: string; effort?: string };
+  private resolvedConfig: { apiKey: string; baseUrl?: string; model: string; effort?: string; enableRequestUserInput?: boolean; approvalsReviewer?: string };
 
   constructor(config: Config, callbacks: AgentCallbacks) {
     this.resolvedConfig = resolveOpenaiConfig(config);
+    this.capabilities = {
+      clear: false,
+      compact: true,
+      fork: true,
+      // Requires Codex CLI feature flag: default_mode_request_user_input.
+      askUserQuestion: this.resolvedConfig.enableRequestUserInput === true,
+      // Codex app-server exposes plan streaming, but not Claude-style ExitPlanMode approval.
+      planApproval: false,
+      // Current file rewind is intentionally degraded: it restores touched files from Git HEAD.
+      fileRewind: 'git-head' as const,
+    };
     this.model = this.resolvedConfig.model;
     if (this.resolvedConfig.effort) this.effort = this.resolvedConfig.effort;
     this.onSessionIdUpdate = callbacks.onSessionIdUpdate;
@@ -161,6 +229,8 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
         baseUrl: this.resolvedConfig.baseUrl,
         model: this.model,
         effort: this.effort,
+        enableRequestUserInput: this.resolvedConfig.enableRequestUserInput,
+        approvalsReviewer: this.resolvedConfig.approvalsReviewer,
         onServerRequest: request => this.handleAppServerRequest(request),
       });
     }
@@ -201,22 +271,29 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
 
   private currentMode: string = 'auto';
   private approvalPolicy: string = 'never';
+  private sandboxMode: string = 'danger-full-access';
 
   setMode(mode: string): void {
     const map: Record<string, string> = {
+      // Codex app-server also supports auto_review, but EvolClaw auto currently means:
+      // run local blacklist/readonly guards, then approve app-server requests without
+      // app-server reviewer escalation. Changing this requires a semantic decision.
       'auto': 'never',
       'bypass': 'never',
+      'readonly': 'on-request',
       'request': 'on-request',
       'noask': 'untrusted',
     };
-    this.approvalPolicy = map[mode] || 'never';
     this.currentMode = mode;
+    this.approvalPolicy = map[mode] || 'never';
+    this.sandboxMode = this.toSandboxMode(mode);
   }
   getMode(): string { return this.currentMode; }
   listModes(): PermissionModeInfo[] {
     return [
       { key: 'auto', nameZh: '自动', description: '全部自动（受 sandbox 约束）', available: true },
       { key: 'bypass', nameZh: '放行', description: '全部自动（受 sandbox 约束）', available: true },
+      { key: 'readonly', nameZh: '只读', description: '允许读取和临时目录写入，拒绝项目文件修改', available: true },
       { key: 'request', nameZh: '审批', description: '需要审批时询问', available: true },
       { key: 'noask', nameZh: '静默', description: '只执行已知安全操作', available: true },
     ];
@@ -224,6 +301,11 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
   setSendPrompt(fn: (text: string) => Promise<void>): void { this.sendPromptFn = fn; }
   setPermissionContext(sessionId: string, context: PermissionContext): void { this.permissionContexts.set(sessionId, context); }
   setPermissionGateway(gw: PermissionGateway): void { this.permissionGateway = gw; }
+
+  private toSandboxMode(mode: string): string {
+    if (mode === 'request' || mode === 'readonly' || mode === 'noask') return 'read-only';
+    return 'danger-full-access';
+  }
 
   // ── Stream management (needed by MessageProcessor) ──
 
@@ -237,7 +319,7 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
   }
 
   hasActiveStream(key: string): boolean {
-    return this.activeStreams.has(key);
+    return this.activeStreams.has(key) || this.activeAbortControllers.has(key) || this.activeTurns.has(key);
   }
 
   // ── Core: runQuery ──
@@ -260,7 +342,9 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
       model: callModel,
       effort: callEffort,
       approvalPolicy: this.approvalPolicy,
-      sandbox: 'danger-full-access',
+      approvalsReviewer: this.resolvedConfig.approvalsReviewer,
+      sandbox: this.sandboxMode,
+      config: this.buildEvolclawShellEnvironmentConfig(sessionId),
       ...(systemPromptAppend ? { developerInstructions: systemPromptAppend } : {}),
     };
 
@@ -284,12 +368,16 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
     const state: AppServerStreamState = {
       threadId,
       streamedAgentMessageIds: new Set(),
+      agentMessageDeltaText: new Map(),
       completedItemIds: new Set(),
       completedTurnIds: new Set(),
     };
     const unsubscribe = appServer.onNotification(notification => {
       // 仅从 turn/started 锁定权威 turnId — resume 时会有上一轮 turn 的残留通知
       // （如 thread/tokenUsage/updated）先于新 turn 到达，不能用它们 latch turnId
+      const params: any = notification.params || {};
+      const notifThreadId = params.threadId ?? params.thread_id;
+      if (notifThreadId !== undefined && notifThreadId !== threadId) return;
       if (notification.method === 'turn/started') {
         const startedTurnId = this.extractTurnId(notification);
         if (startedTurnId && !state.turnId) {
@@ -309,6 +397,7 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
         model: callModel,
         effort: callEffort,
         approvalPolicy: this.approvalPolicy,
+        sandbox: this.sandboxMode,
       });
       const turnId = turnResponse.turn?.id;
       if (turnId && !state.turnId) {
@@ -335,19 +424,23 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
 
   async interrupt(sessionKey: string): Promise<void> {
     const controller = this.activeAbortControllers.get(sessionKey);
-    if (controller) {
-      controller.abort('User interrupt');
-      const activeTurn = this.activeTurns.get(sessionKey);
-      if (activeTurn) {
-        this.getAppServerClient().turnInterrupt(activeTurn.threadId, activeTurn.turnId).catch(error => {
-          logger.debug(`[CodexRunner] app-server turn interrupt failed: ${error}`);
-        });
-      }
+    const activeTurn = this.activeTurns.get(sessionKey);
+    const hadActiveState = !!controller || !!activeTurn || this.activeStreams.has(sessionKey);
+    const interruptTurn = activeTurn
+      ? this.getAppServerClient().turnInterrupt(activeTurn.threadId, activeTurn.turnId).catch(error => {
+        logger.debug(`[CodexRunner] app-server turn interrupt failed: ${error}`);
+      })
+      : Promise.resolve();
+
+    if (controller) controller.abort('User interrupt');
+
+    if (hadActiveState) {
       this.activeAbortControllers.delete(sessionKey);
       this.activeStreams.delete(sessionKey);
       this.activeTurns.delete(sessionKey);
       logger.info(`[CodexRunner] Interrupted session: ${sessionKey}`);
     }
+    await interruptTurn;
   }
 
   // ── Session commands ──
@@ -399,7 +492,23 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
 
   async compactSession(_sessionId: string, agentSessionId: string, _projectPath: string): Promise<boolean> {
     try {
-      return await this.getAppServerClient().threadCompactStart(agentSessionId);
+      const appServer = this.getAppServerClient();
+      this.onCompactStart?.(_sessionId);
+      try {
+        return await this.startAndWaitForCompact(appServer, agentSessionId);
+      } catch (error) {
+        if (!this.isThreadNotFoundError(error)) throw error;
+        logger.info(`[CodexRunner] Compact thread not loaded, resuming before compact: ${agentSessionId}`);
+        await appServer.threadResume(agentSessionId, _projectPath, {
+          model: this.model,
+          effort: this.effort,
+          approvalPolicy: this.approvalPolicy,
+          approvalsReviewer: this.resolvedConfig.approvalsReviewer,
+          sandbox: this.sandboxMode,
+          config: this.buildEvolclawShellEnvironmentConfig(_sessionId),
+        });
+        return await this.startAndWaitForCompact(appServer, agentSessionId);
+      }
     } catch (error) {
       logger.error('[CodexRunner] Compact failed:', error);
       return false;
@@ -408,6 +517,113 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
 
   async compact(sessionId: string, agentSessionId: string, projectPath: string): Promise<boolean> {
     return this.compactSession(sessionId, agentSessionId, projectPath);
+  }
+
+  private async startAndWaitForCompact(appServer: CodexAppServerClient, threadId: string): Promise<boolean> {
+    const completion = this.waitForThreadCompacted(appServer, threadId, Date.now());
+    try {
+      await appServer.threadCompactStart(threadId);
+      await completion.promise;
+      return true;
+    } finally {
+      completion.dispose();
+    }
+  }
+
+  private waitForThreadCompacted(appServer: CodexAppServerClient, threadId: string, startedAtMs: number): { promise: Promise<void>; dispose: () => void } {
+    let unsubscribe: (() => void) | undefined;
+    let pollTimer: NodeJS.Timeout | undefined;
+    let settled = false;
+    const settle = (resolve: () => void, source: string) => {
+      if (settled) return;
+      settled = true;
+      if (pollTimer) clearInterval(pollTimer);
+      logger.info(`[CodexRunner] Compact completed for thread: ${threadId} (${source})`);
+      unsubscribe?.();
+      resolve();
+    };
+    const promise = new Promise<void>(resolve => {
+      unsubscribe = appServer.onNotification(notification => {
+        if (notification.method !== 'thread/compacted') return;
+        const params: any = notification.params || {};
+        const notifThreadId = params.threadId ?? params.thread_id;
+        if (notifThreadId !== threadId) return;
+        settle(resolve, 'notification');
+      });
+      pollTimer = setInterval(() => {
+        if (this.hasPersistedCompactCompletion(threadId, startedAtMs)) {
+          settle(resolve, 'session-log');
+        }
+      }, 1000);
+      pollTimer.unref?.();
+    });
+    return {
+      promise,
+      dispose: () => {
+        if (pollTimer) clearInterval(pollTimer);
+        if (!settled) unsubscribe?.();
+      },
+    };
+  }
+
+  private hasPersistedCompactCompletion(threadId: string, startedAtMs: number): boolean {
+    const sessionFile = this.findCodexSessionFile(threadId);
+    if (!sessionFile) return false;
+    let text = '';
+    try {
+      text = fs.readFileSync(sessionFile, 'utf8');
+    } catch {
+      return false;
+    }
+
+    const threshold = startedAtMs - 1000;
+    for (const line of text.trimEnd().split('\n').reverse()) {
+      if (!line.trim()) continue;
+      let entry: any;
+      try {
+        entry = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      const ts = typeof entry.timestamp === 'string' ? Date.parse(entry.timestamp) : NaN;
+      if (!Number.isFinite(ts)) continue;
+      if (ts < threshold) break;
+      const payloadType = entry.payload?.type;
+      if (entry.type === 'compacted' || payloadType === 'context_compacted') return true;
+    }
+    return false;
+  }
+
+  private findCodexSessionFile(threadId: string): string | undefined {
+    const root = process.env.CODEX_HOME
+      ? path.join(process.env.CODEX_HOME, 'sessions')
+      : path.join(process.env.HOME || os.homedir(), '.codex', 'sessions');
+    const stack = [root];
+    let newest: { path: string; mtimeMs: number } | undefined;
+    while (stack.length > 0) {
+      const dir = stack.pop()!;
+      let entries: fs.Dirent[];
+      try {
+        entries = fs.readdirSync(dir, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const entry of entries) {
+        const fullPath = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          stack.push(fullPath);
+        } else if (entry.isFile() && entry.name.includes(threadId) && entry.name.endsWith('.jsonl')) {
+          let mtimeMs = 0;
+          try {
+            mtimeMs = fs.statSync(fullPath).mtimeMs;
+          } catch {
+            continue;
+          }
+          if (!newest || mtimeMs > newest.mtimeMs) newest = { path: fullPath, mtimeMs };
+        }
+      }
+    }
+    return newest?.path;
   }
 
   async forkSession(agentSessionId: string, projectPath: string, title?: string): Promise<string> {
@@ -437,15 +653,173 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
     return this.mapThreadToSessionMessages(response, agentSessionId);
   }
 
-  private async handleAppServerRequest(request: { id: string; method: string; params?: Record<string, any> }): Promise<any> {
-    const params = request.params || {};
+  private async handleAppServerRequest(request: CodexServerRequest): Promise<any> {
+    const params = (request.params || {}) as Record<string, any>;
+    if (request.method === 'item/tool/requestUserInput') {
+      return this.handleToolRequestUserInput(params);
+    }
+
     const sessionKey = this.findSessionKeyByThread(params.threadId || params.conversationId);
     const toolName = request.method.includes('fileChange') || request.method === 'applyPatchApproval' ? 'FileChange' : 'Bash';
     const toolInput = this.buildPermissionInput(request.method, params);
     const summary = this.summarizeAppServerRequest(request.method, params);
     const reason = params.reason || params.decisionReason || undefined;
-    const decision = await this.resolvePermissionDecision(sessionKey, toolName, toolInput, summary, reason);
-    return this.toAppServerApprovalResponse(request.method, decision);
+    const projectPath = this.resolvePermissionProjectPath(params);
+    logger.info(`[CodexRunner] app-server approval request id=${request.id} method=${request.method} session=${sessionKey} mode=${this.currentMode} tool=${toolName} summary=${summary}`);
+    try {
+      const decision = await this.resolvePermissionDecision(sessionKey, toolName, toolInput, summary, reason, projectPath);
+      const response = this.toAppServerApprovalResponse(request.method, decision);
+      logger.info(`[CodexRunner] app-server approval response id=${request.id} method=${request.method} decision=${decision} response=${JSON.stringify(response)}`);
+      return response;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.warn(`[CodexRunner] app-server approval failed id=${request.id} method=${request.method}: ${message}`);
+      throw error;
+    }
+  }
+
+  private async handleToolRequestUserInput(params: Record<string, any>): Promise<Record<string, unknown>> {
+    const sessionKey = this.findSessionKeyByThread(params.threadId);
+    const questions = Array.isArray(params.questions) ? params.questions : [];
+    const answers: Record<string, { answers: string[] }> = {};
+
+    for (const question of questions) {
+      const questionId = typeof question.id === 'string' ? question.id : `q-${Object.keys(answers).length + 1}`;
+      answers[questionId] = {
+        answers: await this.collectUserInputAnswer(sessionKey, question),
+      };
+    }
+
+    return { answers };
+  }
+
+  private async collectUserInputAnswer(sessionKey: string, question: Record<string, any>): Promise<string[]> {
+    const options = Array.isArray(question.options) ? question.options : [];
+    const fallback = options[0]?.label ? [String(options[0].label)] : [''];
+    const context = this.permissionContexts.get(sessionKey);
+    const canFreeText = question.isOther !== false || options.length === 0;
+    const sendPrompt = context?.adapter && context.channelId
+      ? async (text: string) => context.adapter!.send(buildEnvelope({
+        channel: context.adapter!.channelName,
+        channelId: context.channelId!,
+        replyContext: context.replyContext,
+      }), { kind: 'result.text', text, isFinal: true })
+      : this.sendPromptFn;
+
+    if (!context?.interactionRouter || !sendPrompt) {
+      if (sendPrompt) await sendPrompt(this.formatUserInputFallback(question, fallback));
+      return fallback;
+    }
+
+    const requestId = `codex-ask-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const buttonArgMap: Record<string, string> = {};
+    const buttons = options.length > 0
+      ? options.map((option: any, index: number) => {
+        const key = `opt-${index}`;
+        buttonArgMap[key] = String(index + 1);
+        return { key, label: String(option.label || `选项 ${index + 1}`), style: 'default' as const };
+      })
+      : [{ key: 'custom', label: '提交', style: 'primary' as const }];
+    const bodyLines = [String(question.question || '')];
+    if (options.some((option: any) => option.description)) {
+      bodyLines.push('', ...options.map((option: any, index: number) =>
+        `${index + 1}. ${String(option.label || `选项 ${index + 1}`)}${option.description ? ` — ${option.description}` : ''}`));
+    }
+
+    const interaction: InteractionRequest = {
+      type: 'interaction',
+      id: requestId,
+      channelId: context.channelId || '',
+      sessionId: sessionKey,
+      initiatorId: context.userId,
+      kind: {
+        kind: 'action',
+        title: String(question.header || '问题'),
+        body: bodyLines.join('\n'),
+        buttons,
+        allowCustomInput: canFreeText,
+      },
+      fallback: {
+        command: 'ask',
+        buttonArgMap,
+        acceptFreeText: canFreeText,
+        freeTextHint: canFreeText ? '或回复 /ask <自定义内容>' : undefined,
+      },
+    };
+
+    const router = context.interactionRouter;
+    router.markWaiting(sessionKey);
+    let waitMarked = true;
+    let sent = false;
+    try {
+      await context.flushPending?.();
+      if (context.adapter && context.channelId) {
+        const envelope = buildEnvelope({
+          taskId: context.taskId,
+          channel: context.channel ?? context.adapter.channelName,
+          channelId: context.channelId,
+          agentName: context.agentName,
+          chatmode: context.chatmode,
+          replyContext: context.replyContext,
+        });
+        sent = !!await sendInteractionPayload(context.adapter, envelope, interaction, undefined, context.replyContext);
+      }
+      if (!sent) {
+        await sendPrompt(renderActionAsText(interaction));
+        sent = true;
+      }
+    } catch (error) {
+      logger.warn('[CodexRunner] requestUserInput prompt send failed:', error);
+    }
+
+    if (!sent) {
+      router.unmarkWaiting(sessionKey);
+      return fallback;
+    }
+
+    return new Promise<string[]>((resolve) => {
+      router.register(requestId, sessionKey, (action: string, values?: Record<string, any>) => {
+        resolve(this.parseUserInputAction(action, values, options, fallback));
+      }, {
+        initiatorId: context.userId,
+        fallbackCommand: 'ask',
+      });
+      if (waitMarked) {
+        router.unmarkWaiting(sessionKey);
+        waitMarked = false;
+      }
+    });
+  }
+
+  private parseUserInputAction(action: string, values: Record<string, any> | undefined, options: any[], fallback: string[]): string[] {
+    if (action === '_custom_input') {
+      const customText = typeof values?.custom_text === 'string' ? values.custom_text.trim() : '';
+      return customText ? [customText] : fallback;
+    }
+    if (action.startsWith('opt-')) {
+      const index = Number.parseInt(action.slice(4), 10);
+      const label = options[index]?.label;
+      return label ? [String(label)] : fallback;
+    }
+    const selected = action.split(',').map(part => part.trim()).filter(Boolean);
+    if (selected.length > 0 && selected.every(part => /^\d+$/.test(part))) {
+      const labels = selected
+        .map(part => options[Number.parseInt(part, 10) - 1]?.label)
+        .filter((label): label is string => typeof label === 'string' && label.length > 0);
+      if (labels.length > 0) return labels;
+    }
+    return action.trim() ? [action.trim()] : fallback;
+  }
+
+  private formatUserInputFallback(question: Record<string, any>, fallback: string[]): string {
+    const options = Array.isArray(question.options) ? question.options : [];
+    const lines = [String(question.header || '问题'), String(question.question || '')].filter(Boolean);
+    if (options.length > 0) {
+      lines.push('', ...options.map((option: any, index: number) =>
+        `${index + 1}. ${String(option.label || `选项 ${index + 1}`)}${option.description ? ` — ${option.description}` : ''}`));
+    }
+    lines.push('', `自动选择：${fallback.join(', ')}`);
+    return lines.join('\n');
   }
 
   private findSessionKeyByThread(threadId?: string): string {
@@ -475,13 +849,60 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
     return command || '命令执行审批';
   }
 
+  private resolvePermissionProjectPath(params: Record<string, any>): string {
+    const candidates = [params.cwd, params.projectPath, params.grantRoot]
+      .filter((value): value is string => typeof value === 'string' && value.length > 0);
+    for (const candidate of candidates) {
+      if (path.isAbsolute(candidate)) return candidate;
+    }
+    return process.cwd();
+  }
+
+  private checkCodexReadonly(toolName: string, input: Record<string, unknown>, projectPath: string): { behavior: 'allow' } | { behavior: 'deny'; message: string } {
+    if (toolName === 'Bash') return checkReadonly(toolName, input, projectPath);
+    if (toolName !== 'FileChange') return { behavior: 'allow' };
+
+    const tmpDir = path.join(projectPath, '.evolclaw', 'tmp') + path.sep;
+    const isAllowedPath = (filePath: string): boolean => {
+      const resolved = path.resolve(projectPath, filePath) + (filePath.endsWith(path.sep) ? path.sep : '');
+      return resolved.startsWith(tmpDir) || resolved === tmpDir.slice(0, -1);
+    };
+
+    const grantRoot = input.grantRoot;
+    if (typeof grantRoot === 'string' && grantRoot && !isAllowedPath(grantRoot)) {
+      return { behavior: 'deny', message: '🔒 只读模式：禁止修改项目文件。如需生成文件请写入 .evolclaw/tmp/ 目录' };
+    }
+
+    const fileChanges = input.fileChanges;
+    const paths = fileChanges && typeof fileChanges === 'object' ? Object.keys(fileChanges as Record<string, unknown>) : [];
+    if (paths.some(filePath => !isAllowedPath(filePath))) {
+      return { behavior: 'deny', message: '🔒 只读模式：禁止修改项目文件。如需生成文件请写入 .evolclaw/tmp/ 目录' };
+    }
+
+    return { behavior: 'allow' };
+  }
+
   private async resolvePermissionDecision(
     sessionKey: string,
     toolName: string,
     toolInput: Record<string, unknown>,
     summary: string,
-    reason?: string
+    reason?: string,
+    projectPath = process.cwd()
   ): Promise<'allow' | 'always' | 'deny'> {
+    const blacklist = await checkBlacklist(toolName, toolInput);
+    if (blacklist.behavior === 'deny') return 'deny';
+
+    if (toolName === 'Bash' && this.isEvolclawCtlSendOrFile(blacklist.updatedInput)) {
+      return 'allow';
+    }
+
+    if (this.currentMode === 'readonly') {
+      const readonly = this.checkCodexReadonly(toolName, blacklist.updatedInput, projectPath);
+      if (readonly.behavior === 'deny') return 'deny';
+      return 'allow';
+    }
+
     if (this.currentMode === 'bypass' || this.currentMode === 'auto') return 'allow';
     if (this.currentMode === 'noask') return 'deny';
     if (!this.permissionGateway || !this.sendPromptFn) return 'allow';
@@ -495,6 +916,14 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
       summary,
       reason
     );
+  }
+
+  private isEvolclawCtlSendOrFile(input: Record<string, unknown>): boolean {
+    const command = typeof input.command === 'string' ? input.command.trim() : '';
+    if (!/^(?:ec|evolclaw)\s+ctl\s+(?:send|file)(?:\s|$)/.test(command)) return false;
+    // Keep the whitelist to a single CLI invocation. If text contains shell control
+    // syntax, fall back to the normal permission mode instead of silently approving.
+    return !/[;&|`]|[$][(]|\r|\n/.test(command);
   }
 
   private toAppServerApprovalResponse(method: string, decision: 'allow' | 'always' | 'deny'): Record<string, unknown> {
@@ -635,13 +1064,53 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
   }
 
   private mapFileChangeToContent(item: CodexTurnItem): Array<{ type: string; path: string; kind?: string }> {
-    const changes = Array.isArray((item as any).changes) ? (item as any).changes : [];
+    const changes = this.normalizeFileChanges((item as any).changes);
     return changes
       .filter((change: any) => typeof change?.path === 'string')
-      .map((change: any) => ({ type: 'file_change', path: change.path, kind: change.kind }));
+      .map((change: any) => {
+        const kind = this.normalizeFileChangeKind(change.kind ?? change.type);
+        return {
+          type: 'file_change',
+          path: change.path,
+          ...(kind ? { kind } : {}),
+        };
+      });
   }
 
-  setCompactStartCallback(_callback: (sessionId: string) => void): void {}
+  private normalizeFileChanges(changes: unknown): any[] {
+    if (Array.isArray(changes)) return changes;
+    if (!changes || typeof changes !== 'object') return [];
+    return Object.entries(changes as Record<string, unknown>).map(([filePath, change]) => ({
+      ...(change && typeof change === 'object' ? change : {}),
+      path: filePath,
+    }));
+  }
+
+  private describeFileChange(change: any): string {
+    const kind = this.normalizeFileChangeKind(change?.kind ?? change?.type);
+    const filePath = typeof change?.path === 'string' ? change.path : '';
+    return [kind || 'change', filePath].filter(Boolean).join(' ');
+  }
+
+  private normalizeFileChangeKind(kind: unknown): string | undefined {
+    if (typeof kind === 'string') return kind;
+    if (!kind || typeof kind !== 'object') return undefined;
+    const data = kind as Record<string, unknown>;
+    for (const key of ['type', 'kind', 'action', 'operation', 'op']) {
+      if (typeof data[key] === 'string') return data[key];
+    }
+    return undefined;
+  }
+
+  private isThreadNotFoundError(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error);
+    return /thread\/compact\/start failed: thread not found:/i.test(message)
+      || /thread not found:/i.test(message);
+  }
+
+  setCompactStartCallback(callback: (sessionId: string) => void): void {
+    this.onCompactStart = callback;
+  }
 
   // ── Event stream transformation ──
 
@@ -685,6 +1154,9 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
     const notifThreadId = params.threadId ?? params.thread_id;
     if (notifThreadId !== undefined && notifThreadId !== state.threadId) return false;
     const turnId = this.extractTurnId(notification);
+    if (!state.turnId) {
+      return notification.method === 'turn/started' || !turnId;
+    }
     return !state.turnId || !turnId || turnId === state.turnId;
   }
 
@@ -732,8 +1204,14 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
       }
 
       case 'item/agentMessage/delta': {
-        if (typeof params.itemId === 'string') state.streamedAgentMessageIds.add(params.itemId);
-        if (typeof params.delta === 'string' && params.delta) yield { type: 'text', text: params.delta };
+        const itemId = typeof params.itemId === 'string' ? params.itemId : undefined;
+        if (itemId) state.streamedAgentMessageIds.add(itemId);
+        if (itemId && typeof params.delta === 'string' && params.delta) {
+          state.agentMessageDeltaText.set(
+            itemId,
+            (state.agentMessageDeltaText.get(itemId) || '') + params.delta
+          );
+        }
         break;
       }
 
@@ -754,6 +1232,12 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
 
       case 'thread/tokenUsage/updated': {
         state.tokenUsage = params.tokenUsage;
+        break;
+      }
+
+      case 'thread/compacted': {
+        logger.info(`[CodexRunner] Compact completed for thread: ${params.threadId || state.threadId}`);
+        yield { type: 'compact', preTokens: 0 };
         break;
       }
 
@@ -790,7 +1274,7 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
         yield { type: 'tool_use', name: item.namespace ? `${item.namespace}:${item.tool}` : item.tool, input: item.arguments, callId: item.id };
         break;
       case 'fileChange': {
-        const desc = (item.changes || []).map((c: any) => `${c.kind || c.type || 'change'} ${c.path || ''}`.trim()).join(', ');
+        const desc = this.normalizeFileChanges(item.changes).map((change: any) => this.describeFileChange(change)).join(', ');
         yield { type: 'tool_use', name: 'FileChange', input: { description: desc }, callId: item.id };
         break;
       }
@@ -807,8 +1291,11 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
     if (!item) return;
     switch (item.type) {
       case 'agentMessage':
-        if (!state.streamedAgentMessageIds.has(item.id) && item.text) {
-          yield { type: 'text', text: item.text };
+        {
+          const buffered = item.id ? state.agentMessageDeltaText.get(item.id) : undefined;
+          const text = typeof item.text === 'string' && item.text ? item.text : buffered;
+          if (text) yield { type: 'text', text };
+          if (item.id) state.agentMessageDeltaText.delete(item.id);
         }
         break;
       case 'commandExecution':
@@ -845,9 +1332,39 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
     }
   }
 
+  private pickNumber(...values: unknown[]): number | undefined {
+    for (const value of values) {
+      if (typeof value === 'number' && Number.isFinite(value)) return value;
+    }
+    return undefined;
+  }
+
+  private mapCodexTokenUsage(raw: any): NormalizedTokenUsage | undefined {
+    if (!raw || typeof raw !== 'object') return undefined;
+    const usage = {
+      input_tokens: this.pickNumber(raw.inputTokens, raw.input_tokens),
+      output_tokens: this.pickNumber(raw.outputTokens, raw.output_tokens),
+      cache_read_input_tokens: this.pickNumber(raw.cachedInputTokens, raw.cache_read_input_tokens, raw.cached_input_tokens),
+      cache_creation_input_tokens: this.pickNumber(raw.cacheCreationInputTokens, raw.cache_creation_input_tokens, raw.cache_creation_tokens),
+    };
+    return Object.values(usage).some(value => value !== undefined) ? usage : undefined;
+  }
+
+  private mapCodexContextUsage(raw: any): NormalizedContextUsage | undefined {
+    if (!raw || typeof raw !== 'object') return undefined;
+    const totalTokens = this.pickNumber(raw.totalTokens, raw.total_tokens, raw.total);
+    const maxTokens = this.pickNumber(raw.maxTokens, raw.max_tokens, raw.max);
+    const model = typeof raw.model === 'string' ? raw.model : undefined;
+    if (totalTokens === undefined || maxTokens === undefined || !model) return undefined;
+    const percentage = this.pickNumber(raw.percentage) ?? Math.round((totalTokens / maxTokens) * 100);
+    const effort = typeof raw.effort === 'string' ? raw.effort : undefined;
+    return { totalTokens, maxTokens, percentage, model, effort };
+  }
+
   private mapAppServerTurnComplete(turn: any, state: AppServerStreamState): AgentEvent {
     const status = turn.status || 'completed';
-    const tokenUsage = state.tokenUsage?.last;
+    const tokenUsage = this.mapCodexTokenUsage(state.tokenUsage?.last ?? turn.tokenUsage ?? turn.usage);
+    const contextUsage = this.mapCodexContextUsage(turn.contextUsage ?? state.tokenUsage?.contextUsage ?? state.tokenUsage?.context);
     const terminalReason = status === 'completed'
       ? undefined
       : status === 'interrupted'
@@ -860,122 +1377,24 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
       errors: turn.error?.message ? [turn.error.message] : undefined,
       terminalReason,
       durationMs: typeof turn.durationMs === 'number' ? turn.durationMs : undefined,
-      tokenUsage: tokenUsage ? {
-        input_tokens: tokenUsage.inputTokens,
-        output_tokens: tokenUsage.outputTokens,
-        cache_read_input_tokens: tokenUsage.cachedInputTokens,
-      } : undefined,
+      ttftMs: this.pickNumber(turn.ttftMs, turn.ttft_ms),
+      costUsd: this.pickNumber(turn.costUsd, turn.totalCostUsd, turn.total_cost_usd),
+      sessionTitle: typeof turn.sessionTitle === 'string' ? turn.sessionTitle : typeof turn.session_title === 'string' ? turn.session_title : undefined,
+      numTurns: this.pickNumber(turn.numTurns, turn.num_turns),
+      tokenUsage,
+      contextUsage,
     } as AgentEvent;
   }
 
-  private async *transformStream(
-    events: AsyncGenerator<any>,
-    sessionId: string,
-    thread: any,
-    tempFiles?: string[]
-  ): AsyncGenerator<AgentEvent> {
-    try {
-      for await (const event of events) {
-        if (!this.activeAbortControllers.has(sessionId)) break;
-        yield* this.mapEvent(event, sessionId, thread);
-      }
-    } finally {
-      this.activeAbortControllers.delete(sessionId);
-      this.activeTurns.delete(sessionId);
-      // 清理临时图片文件
-      if (tempFiles?.length) {
-        for (const f of tempFiles) {
-          try { fs.unlinkSync(f); } catch { /* ignore */ }
-        }
-      }
-    }
-  }
-
-  private *mapEvent(event: any, sessionId: string, thread: any): Iterable<AgentEvent> {
-    switch (event.type) {
-      case 'thread.started': {
-        const threadId = event.thread_id;
-        this.activeSessions.set(sessionId, threadId);
-        this.onSessionIdUpdate?.(sessionId, threadId);
-        yield { type: 'session_id', sessionId: threadId };
-        break;
-      }
-
-      case 'item.started': {
-        const item = event.item;
-        if (item.type === 'command_execution') {
-          yield { type: 'tool_use', name: 'Shell', input: { command: item.command } };
-        } else if (item.type === 'mcp_tool_call') {
-          yield { type: 'tool_use', name: `MCP:${item.server}/${item.tool}`, input: item.arguments };
-        } else if (item.type === 'file_change') {
-          const desc = item.changes.map((c: any) => `${c.kind} ${c.path}`).join(', ');
-          yield { type: 'tool_use', name: 'FileChange', input: { description: desc } };
-        } else if (item.type === 'web_search') {
-          yield { type: 'tool_use', name: 'WebSearch', input: { query: item.query } };
-        } else if (item.type === 'todo_list') {
-          const completed = (item.items || []).filter((todo: any) => todo.completed).length;
-          const total = (item.items || []).length;
-          yield { type: 'task_progress', summary: total ? '计划进度：' + completed + '/' + total : '计划已更新' };
-        }
-        break;
-      }
-
-      case 'item.completed': {
-        const item = event.item;
-        if (item.type === 'agent_message') {
-          yield { type: 'text', text: item.text };
-        } else if (item.type === 'command_execution') {
-          yield {
-            type: 'tool_result',
-            name: 'Shell',
-            result: item.aggregated_output,
-            isError: item.exit_code !== 0,
-          };
-        } else if (item.type === 'mcp_tool_call') {
-          yield {
-            type: 'tool_result',
-            name: `MCP:${item.server}/${item.tool}`,
-            result: item.result,
-            isError: item.status === 'failed',
-            error: item.error?.message,
-          };
-        } else if (item.type === 'error') {
-          yield { type: 'error', error: item.message, errorType: 'unknown' };
-        }
-        break;
-      }
-
-      case 'turn.started': {
-        const threadId = thread?.id || this.activeSessions.get(sessionId);
-        const turnId = event.turn_id || event.turn?.id || event.id;
-        if (threadId && turnId) this.activeTurns.set(sessionId, { threadId, turnId });
-        break;
-      }
-
-      case 'turn.completed': {
-        this.activeTurns.delete(sessionId);
-        const usage = event.usage || event.turn?.usage;
-        yield {
-          type: 'complete',
-          result: undefined,
-          costUsd: undefined,
-          durationMs: undefined,
-          ...(usage ? { usage } : {}),
-        } as AgentEvent;
-        break;
-      }
-
-      case 'turn.failed': {
-        this.activeTurns.delete(sessionId);
-        yield { type: 'error', error: event.error?.message || event.message || 'Codex turn failed', errorType: 'unknown' };
-        break;
-      }
-
-      case 'error': {
-        yield { type: 'error', error: event.message, errorType: 'unknown' };
-        break;
-      }
-    }
+  private buildEvolclawShellEnvironmentConfig(sessionId: string): Record<string, any> {
+    return {
+      shell_environment_policy: {
+        set: {
+          EVOLCLAW_SESSION_ID: sessionId,
+          EVOLCLAW_HOME: resolveRoot(),
+        },
+      },
+    };
   }
 
   async dispose(): Promise<void> {
@@ -1012,8 +1431,9 @@ export class CodexAgentPlugin implements AgentPlugin {
   }
 
   createAgent(agent: import('../core/evolagent.js').EvolAgent, callbacks: AgentCallbacks): AgentInstance | null {
-    if (!isCodexAppServerAvailable()) {
-      throw new Error('Missing codex CLI with app-server');
+    const availability = getCodexAppServerAvailability();
+    if (!availability.available) {
+      throw new Error(availability.reason || 'Missing codex CLI with app-server');
     }
     const override = agent.config.baseagents?.codex as any;
     const merged: Config = {

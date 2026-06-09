@@ -126,6 +126,10 @@ export class MessageBridge {
 
         // 3. session 解析（使用 Channel 层填充的 chatType）
         const chatType = msg.chatType || 'private';
+        if (!(await this.canCreateThreadSession(channelName, msg, chatType))) {
+          await sendReply(msg.channelId, '群聊中无权限创建话题', msg.replyContext);
+          return;
+        }
         const metadata: Record<string, any> = {};
         // 话题会话创建时写入 replyContext（用于 threadId 路由）；主会话不写（避免群聊覆盖）
         if (msg.threadId && msg.replyContext) metadata.replyContext = msg.replyContext;
@@ -150,7 +154,7 @@ export class MessageBridge {
         const session = await this.sessionManager.getOrCreateSession(
           channelName, msg.channelId,
           effectiveProjectPath,
-          msg.threadId, Object.keys(metadata).length ? metadata : undefined, undefined, msg.peerId, chatType,
+          msg.threadId, Object.keys(metadata).length ? metadata : undefined, this.extractTopicName(msg), msg.peerId, chatType,
           undefined, msg.selfAID, msg.channelType || effectiveChannelType,
           msg.peerType
         );
@@ -164,6 +168,7 @@ export class MessageBridge {
           channelType: msg.channelType || effectiveChannelType,
           channelId: msg.channelId, content,
           selfAID: msg.selfAID,
+          agentId: session.agentId,
           chatType,
           images: msg.images, timestamp: Date.now(),
           peerId: msg.peerId, peerName: msg.peerName,
@@ -173,6 +178,7 @@ export class MessageBridge {
           sameEgressIp: msg.sameEgressIp,
           messageId: msg.messageId,
           mentions: msg.mentions, mentionAids: msg.mentionAids, threadId: msg.threadId,
+          topicName: this.extractTopicName(msg),
           replyContext: msg.replyContext,
           source: msg.source,
         };
@@ -235,6 +241,7 @@ export class MessageBridge {
   private static readonly MENU_NAME_MAP: Record<string, string> = {
     pwd: '/pwd',
     session: '/session',
+    topic: '/topic',
     baseagent: '/baseagent',
     model: '/model',
     effort: '/effort',
@@ -247,6 +254,23 @@ export class MessageBridge {
     agent: '/agent',
     trigger: '/trigger',
   };
+
+  private extractTopicName(msg: InboundMessage): string | undefined {
+    const raw = msg.topicName
+      ?? msg.replyContext?.title
+      ?? msg.replyContext?.metadata?.topicName
+      ?? msg.replyContext?.metadata?.title;
+    const name = typeof raw === 'string' ? raw.trim() : '';
+    return name || undefined;
+  }
+
+  private async canCreateThreadSession(channel: string, msg: InboundMessage, chatType: 'private' | 'group'): Promise<boolean> {
+    if (chatType !== 'group' || !msg.threadId) return true;
+    const existing = await this.sessionManager.getThreadSession(channel, msg.channelId, msg.threadId);
+    if (existing) return true;
+    const role = this.sessionManager.resolveIdentity(channel, msg.peerId).role;
+    return role === 'owner' || role === 'admin';
+  }
 
   private resolveCmd(name: string, cmd?: string): string {
     if (cmd) return cmd;
@@ -313,7 +337,7 @@ export class MessageBridge {
     const { id, name, cmd } = req;
     try {
       const resolvedCmd = this.resolveCmd(name, cmd);
-      const result = await this.cmdHandler.execMenuQuery(resolvedCmd, channel, msg.channelId, msg.peerId, (req as any).args);
+      const result = await this.cmdHandler.execMenuQuery(resolvedCmd, channel, msg.channelId, msg.peerId, (req as any).args, msg.chatType);
       if ('error' in result) throw { code: result.code || 'EXEC_FAILED', message: result.error };
       await this.sendMenuResponse(adapter, channel, msg.channelId,
         { type: 'menu.response', id, name, data: result.data }, sendReply);
@@ -333,7 +357,7 @@ export class MessageBridge {
     const { id, name, cmd } = req;
     try {
       const resolvedCmd = this.resolveCmd(name, cmd);
-      const data = await this.cmdHandler.getSubMenuItems(resolvedCmd, channel, msg.channelId, msg.peerId, (req as any).args) ?? [];
+      const data = await this.cmdHandler.getSubMenuItems(resolvedCmd, channel, msg.channelId, msg.peerId, (req as any).args, undefined, msg.chatType) ?? [];
       await this.sendMenuResponse(adapter, channel, msg.channelId,
         { type: 'menu.response', id, name, data }, sendReply);
     } catch (err: any) {
@@ -374,7 +398,7 @@ export class MessageBridge {
     try {
       if (!action) throw { code: 'MISSING_VALUE', message: '缺少 action 参数' };
       const resolvedCmd = this.resolveCmd(name, cmd);
-      const result = await this.cmdHandler.execMenuAction(resolvedCmd, action, args, channel, msg.channelId, msg.peerId);
+      const result = await this.cmdHandler.execMenuAction(resolvedCmd, action, args, channel, msg.channelId, msg.peerId, undefined, msg.chatType);
       if ('error' in result) throw { code: result.code || 'EXEC_FAILED', message: result.error };
       await this.sendMenuResponse(adapter, channel, msg.channelId,
         { type: 'menu.response', id, name, data: result.data }, sendReply);

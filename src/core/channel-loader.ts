@@ -6,8 +6,8 @@
  * The main service (index.ts) handles registration and message flow wiring.
  */
 
-import type { ChannelAdapter, ChannelPolicy, ChannelOptions } from '../types.js';
-import type { Config } from '../types.js';
+import type { ChannelAdapter, ChannelPolicy, ChannelOptions, DebugBlock } from '../types.js';
+import type { ChannelInstance as ChannelInstanceConfig } from '../types.js';
 import type { EvolAgent } from './evolagent.js';
 import type { MessageBridge } from './message/message-bridge.js';
 import type { EventBus } from './event-bus.js';
@@ -20,65 +20,66 @@ export interface BridgeHookContext {
 }
 
 /**
- * Channel instance returned by plugin
+ * Shared per-agent context passed to every plugin's createInstance.
+ * Per-instance config (credentials, name, showActivities…) lives on the inst arg.
+ */
+export interface ChannelBuildContext {
+  agentName: string;           // selfAID
+  defaultProjectPath: string;
+  enableRichContent?: boolean;
+  debug?: DebugBlock;
+}
+
+/**
+ * Runtime channel object returned by a plugin (adapter + lifecycle + wiring).
+ * NOTE: naming collides with the *config* ChannelInstance union in types.ts —
+ * pre-existing debt, tracked separately.
  */
 export interface ChannelInstance {
-  /** Channel type (e.g., 'feishu', 'wechat', 'aun') — used for message bridge wiring */
   channelType?: string;
-
-  /** Channel adapter for message sending */
   adapter: ChannelAdapter;
-
-  /** Actual channel object (for lifecycle management) */
   channel: any;
-
-  /** Optional permission policy */
   policy?: ChannelPolicy;
-
-  /** Optional channel options */
   options?: ChannelOptions;
-
-  /** Connect to the channel */
   connect(): Promise<void>;
-
-  /** Disconnect from the channel */
   disconnect(): Promise<void>;
-
-  /** Optional callback for project path requests */
   onProjectPathRequest?: (channelId: string) => Promise<string>;
-
-  /** Register inbound message mapping + outbound reply callback with MessageBridge. */
   registerBridge?(bridge: MessageBridge, channelType: string): void;
-
-  /** Register lifecycle hooks (eventBus injection, channelDown, etc.). Separate from message mapping. */
   registerHooks?(ctx: BridgeHookContext): void;
 }
 
 /**
- * Channel plugin interface
- *
- * Plugins implement this interface to provide channel integration.
- * They are responsible for creating channel instances only.
+ * Channel plugin interface.
+ * Build one runtime ChannelInstance from one config instance. Return null to skip.
  */
 export interface ChannelPlugin {
-  /** Channel name (e.g., 'feishu', 'wechat', 'aun') */
   readonly name: string;
-
-  /** Check if channel is enabled in config */
-  isEnabled(config: Config): boolean;
-
-  /** Create channel instance */
-  createChannel(config: Config): Promise<ChannelInstance>;
-
-  /** Optional: create multiple instances from array config */
-  createChannels?(config: Config): Promise<ChannelInstance[]>;
+  createInstance(inst: ChannelInstanceConfig, ctx: ChannelBuildContext): Promise<ChannelInstance | null>;
 }
 
-/**
- * Channel Loader
- *
- * Manages channel plugin registration and lifecycle.
- */
+// ── Shared helpers for plugins ─────────────────────────────────────────────
+
+type ShowActivitiesMode = 'all' | 'dm-only' | 'owner-dm-only' | 'none';
+
+/** Resolve showActivities for a single instance (instance overrides default). */
+export function resolveShowActivities(inst: ChannelInstanceConfig): ShowActivitiesMode {
+  return (inst as any).showActivities ?? 'all';
+}
+
+/** Standard showMiddleResult / showIdleMonitor policy function. */
+export function showActivitiesPolicy(
+  mode: ShowActivitiesMode,
+  chatType: string,
+  identity: string,
+): boolean {
+  if (mode === 'none') return false;
+  if (mode === 'dm-only') return chatType === 'private';
+  if (mode === 'owner-dm-only') return chatType === 'private' && identity === 'owner';
+  return true;
+}
+
+// ── ChannelLoader ──────────────────────────────────────────────────────────
+
 export class ChannelLoader {
   private plugins = new Map<string, ChannelPlugin>();
 
@@ -90,79 +91,69 @@ export class ChannelLoader {
     logger.debug(`Registered channel plugin: ${plugin.name}`);
   }
 
+  /** Look up a registered plugin by channel type (used by reload hooks). */
+  getPlugin(type: string): ChannelPlugin | undefined {
+    return this.plugins.get(type);
+  }
+
   /**
-   * 新结构入口：从 EvolAgent 的 channels[] 列表创建 channel 实例。
-   *
-   * 内部把 ChannelInstance[] 翻成各 plugin 期望的 dict 形态（`{ type: [instances...] }`），
-   * 然后调用现有 plugin.createChannels / createChannel。
-   *
-   * 当所有 channel plugin 重写为直接吃 ChannelInstance[] 后，本方法可简化。
+   * Create all runtime channels for an agent directly from its config.channels[].
+   * AUN is always created implicitly from agent.aid (no explicit entry required).
    */
   async createForAgent(agent: EvolAgent): Promise<ChannelInstance[]> {
-    const rewrittenChannels: Record<string, any[]> = {};
+    const ctx: ChannelBuildContext = {
+      agentName: agent.aid,
+      defaultProjectPath: agent.config.projects?.defaultPath ?? process.cwd(),
+      enableRichContent: agent.config.enable_rich_content,
+      debug: agent.config.debug,
+    };
 
-    // AUN channel 从 agent.aid 隐式创建——不需要在 channels[] 里显式声明
+    // Build the full list of config instances to create.
+    // AUN is synthesised from agent.aid; any explicit aun entry in channels[] is skipped.
     const aunEffName = agent.effectiveChannelName('aun', 'main');
-    rewrittenChannels['aun'] = [{
+    const aunInst: ChannelInstanceConfig = {
       type: 'aun',
       name: aunEffName,
       aid: agent.aid,
       enabled: true,
-      agentName: agent.aid,
-      // agent 顶层 owners[0] 透传给 AUN channel.owner（用于首次连接发欢迎消息）
       owner: agent.config.owners?.[0],
-    }];
+    } as any;
 
-    // 其它 channels（非 AUN）从 config.channels[] 取
+    const configInsts: ChannelInstanceConfig[] = [aunInst];
     for (const inst of agent.config.channels) {
-      if (inst.type === 'aun') continue; // 跳过显式声明的 AUN（已隐式处理）
+      if (inst.type === 'aun') continue;
       const effName = agent.effectiveChannelName(inst.type, inst.name);
-      const rewritten: any = { ...inst, name: effName, agentName: agent.aid };
-      (rewrittenChannels[inst.type] ??= []).push(rewritten);
+      configInsts.push({ ...inst, name: effName } as ChannelInstanceConfig);
     }
 
-    // syntheticConfig 是老 Config schema（channel plugin 沿用旧接口），
-    // 新 schema 字段命名为 snake_case，这里转 camelCase 透传。
-    const syntheticConfig = {
-      agents: agent.config.baseagents,
-      channels: rewrittenChannels,
-      projects: agent.config.projects,
-      chatmode: agent.config.chatmode,
-      debug: agent.config.debug,
-      showActivities: agent.config.show_activities,
-      flushDelay: agent.config.flush_delay,
-      debounce: agent.config.debounce,
-      enableRichContent: agent.config.enable_rich_content,
-    } as any as Config;
-
-    return this.createAll(syntheticConfig);
+    return this._buildInstances(configInsts, ctx);
   }
 
-  async createAll(config: Config): Promise<ChannelInstance[]> {
-    const instances: ChannelInstance[] = [];
-
-    for (const [name, plugin] of this.plugins) {
-      if (!plugin.isEnabled(config)) {
-        logger.info(`Channel '${name}' is disabled, skipping`);
+  /** Build runtime instances for a list of config instances + context. */
+  private async _buildInstances(
+    configInsts: ChannelInstanceConfig[],
+    ctx: ChannelBuildContext,
+  ): Promise<ChannelInstance[]> {
+    const result: ChannelInstance[] = [];
+    for (const inst of configInsts) {
+      const plugin = this.plugins.get(inst.type);
+      if (!plugin) {
+        logger.debug(`No plugin for channel type '${inst.type}', skipping`);
         continue;
       }
-
       try {
-        if (plugin.createChannels) {
-          const channelInstances = await plugin.createChannels(config);
-          instances.push(...channelInstances);
-          logger.info(`✓ Channel '${name}' created ${channelInstances.length} instance(s)`);
+        const runtime = await plugin.createInstance(inst, ctx);
+        if (runtime) {
+          result.push(runtime);
+          logger.info(`✓ Channel '${inst.name}' (${inst.type}) created`);
         } else {
-          const instance = await plugin.createChannel(config);
-          instances.push(instance);
-          logger.info(`✓ Channel '${name}' instance created`);
+          logger.info(`Channel '${inst.name}' (${inst.type}) disabled or invalid credentials, skipping`);
         }
-      } catch (error) {
-        logger.error(`✗ Failed to create channel '${name}':`, error);
+      } catch (err) {
+        logger.error(`✗ Failed to create channel '${inst.name}' (${inst.type}):`, err);
       }
     }
-
-    return instances;
+    return result;
   }
 
   async connectAll(instances: ChannelInstance[], { concurrency = 3, intervalMs = 50 } = {}): Promise<string[]> {
@@ -171,7 +162,6 @@ export class ChannelLoader {
     const inflight = new Set<Promise<void>>();
 
     for (const inst of instances) {
-      // 等待并发数降到 concurrency 以下
       while (inflight.size >= concurrency) {
         await Promise.race(inflight);
       }
@@ -189,13 +179,11 @@ export class ChannelLoader {
       const tracked = task.then(() => { inflight.delete(tracked); });
       inflight.add(tracked);
 
-      // 间隔发起，避免瞬间并发冲击网关
       if (intervalMs > 0) {
         await new Promise(r => setTimeout(r, intervalMs));
       }
     }
 
-    // 等待所有剩余任务完成
     await Promise.allSettled(inflight);
 
     if (failed.length > 0) {
@@ -206,15 +194,11 @@ export class ChannelLoader {
   }
 
   async disconnectAll(instances: ChannelInstance[]): Promise<void> {
-    await Promise.allSettled(
-      instances.map((inst) => inst.disconnect())
-    );
+    await Promise.allSettled(instances.map(inst => inst.disconnect()));
   }
 }
 
 // ── Channel Key ────────────────────────────────────────────────────────────
-// 编码格式：`<type>#<selfAID>#<name>`
-// AID 不含 `#` 等特殊字符（domain-like），天然无歧义切分；不再 url-encode。
 
 export interface ChannelKey {
   type: string;
@@ -252,8 +236,6 @@ export function isValidChannelName(name: unknown): name is string {
 }
 
 // ── Reload Hooks ───────────────────────────────────────────────────────────
-// Builds the ReloadHooks implementation used by EvolAgentRegistry.reload()
-// to drain/disconnect/start channels during a hot reload.
 
 import type { ReloadHooks } from './evolagent-registry.js';
 
@@ -308,29 +290,39 @@ export function buildReloadHooks(deps: ReloadHooksDeps): ReloadHooks {
     },
 
     async startChannel(agent: any, channelName: string): Promise<void> {
-      const channels = agent.config.channels;
-      let channelType: string | null = null;
-      for (const [type, raw] of Object.entries(channels)) {
-        const instances = Array.isArray(raw) ? raw : [raw];
-        for (const inst of instances) {
-          const name = (inst as any).name ?? type;
-          if (name === channelName) { channelType = type; break; }
-        }
-        if (channelType) break;
-      }
-      if (!channelType) {
-        const msg = `[Reload] Channel ${channelName} not found in agent ${agent.name} config`;
+      // The implicit AUN channel is synthesised from agent.aid (not in config.channels[]).
+      // Reconstruct it the same way createForAgent does before falling back to config scan.
+      const aid = agent.aid ?? agent.config?.aid;
+      const aunEffName = agent.effectiveChannelName?.('aun', 'main') ?? 'aun-main';
+      const isImplicitAun = channelName === aunEffName;
+
+      // Find config instance: implicit AUN gets a synthetic entry; others scan channels[].
+      const cfgInst: any = isImplicitAun
+        ? { type: 'aun', name: aunEffName, aid, enabled: true, owner: agent.config?.owners?.[0] }
+        : (() => {
+            const agentChannels: any[] = agent.config?.channels ?? [];
+            return agentChannels.find((i: any) => {
+              const effName = agent.effectiveChannelName?.(i.type, i.name) ?? i.name;
+              return effName === channelName;
+            }) ?? null;
+          })();
+
+      if (!cfgInst) {
+        const msg = `[Reload] Channel ${channelName} not found in agent config`;
         logger.error(msg);
         throw new Error(msg);
       }
-      const partialConfig: any = {
-        agents: agent.config.agents,
-        channels: { [channelType]: channels[channelType] },
-        projects: agent.config.projects,
+      const ctx: ChannelBuildContext = {
+        agentName: agent.aid ?? agent.config?.aid,
+        defaultProjectPath: agent.config?.projects?.defaultPath ?? process.cwd(),
+        enableRichContent: agent.config?.enable_rich_content,
+        debug: agent.config?.debug,
       };
-      const newInstances = await channelLoader.createAll(partialConfig);
-      const newInst = newInstances.find(i => i.adapter.channelName === channelName);
-      if (!newInst) throw new Error(`[Reload] Failed to create instance ${channelName}`);
+      const plugin = channelLoader.getPlugin(cfgInst.type);
+      if (!plugin) throw new Error(`[Reload] No plugin for channel type '${cfgInst.type}'`);
+      const effInst = { ...cfgInst, name: channelName };
+      const newInst = await plugin.createInstance(effInst, ctx);
+      if (!newInst) throw new Error(`[Reload] createInstance returned null for ${channelName}`);
       registerChannelInstance(newInst);
       await newInst.connect();
       channelInstances.push(newInst);

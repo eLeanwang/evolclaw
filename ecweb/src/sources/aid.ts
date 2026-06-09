@@ -77,7 +77,7 @@ async function buildSnapshot(): Promise<any> {
 }
 
 export const aidSource: WatchSource = {
-  kind: 'aid',
+  kind: 'agents',
 
   async snapshot(): Promise<any> {
     return buildSnapshot();

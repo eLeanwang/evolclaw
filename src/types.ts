@@ -103,13 +103,14 @@ export interface WecomChannelInstanceConfig extends WecomChannelConfig {
 }
 
 /**
- * Config —— channel plugin / baseagent runner 兼容类型。
+ * Config —— baseagent runner / resolver 兼容类型。
  *
- * 新结构下不再有全局 config 文件；此类型仅作为 ChannelPlugin.isEnabled/createChannels
- * 和 baseagent resolver 的输入形态。ChannelLoader.createForAgent 内部构造 syntheticConfig
- * 喂给 plugin，字段来自 EvolAgent.config 的翻译。
+ * 新结构下不再有全局 config 文件；此类型仅作为 baseagent resolver
+ * （resolveAnthropicConfig 等）和各 runner 的 syntheticConfig 输入形态，
+ * 字段来自 EvolAgent.config.baseagents 的翻译。
  *
- * 后续 channel plugin 重写为直接吃 ChannelInstance[] 后，本类型可删。
+ * 注意：channel plugin 已不再依赖本类型（改吃 ChannelInstance + ChannelBuildContext）。
+ * 残留的 channels 字段仅为历史兼容，channel 路径不再读取。
  */
 export interface Config {
   agents?: {
@@ -129,6 +130,8 @@ export interface Config {
       model?: string;
       effort?: string;
       reasoning?: string;
+      enableRequestUserInput?: boolean;
+      approvalsReviewer?: 'user' | 'auto_review' | 'guardian_subagent';
     };
     gemini?: {
       apiKey?: string;
@@ -197,7 +200,7 @@ export interface SessionMetadata {
     codex?: string;
     gemini?: string;
   };
-  permissionMode?: string;  // 权限模式（per-session）: auto | bypass | request | edit | plan | noask
+  permissionMode?: string;  // 权限模式（per-session）: auto | bypass | readonly | request | edit | plan | noask
   dispatchMode?: string;  // 群聊分发模式（per-session）: mention | broadcast
   resumeAt?: string;  // /rewind chat 标记的回退点（assistant message uuid）
   lastProactiveFlag?: boolean;  // proactive 模式使用标志位后设置，interactive 切换时注入提示后清除
@@ -280,6 +283,7 @@ export interface Message {
   selfAID?: string;  // 本地身份（agent AID）
   agentId?: string;  // 默认 'claude'
   threadId?: string;  // 默认 ''
+  topicName?: string;  // 话题会话创建时的显示名
   chatType?: 'private' | 'group';  // 由 Channel 层填充
   peerId: string;  // 发送者 ID
   peerName?: string;  // 发送者名称
@@ -324,6 +328,7 @@ export interface InboundMessage {
   groupId?: string;  // 群聊：群 ID（仅 chatType==='group' 时有值）
   agentId?: string;  // 默认 'claude'
   threadId?: string;  // 默认 ''
+  topicName?: string;  // 话题会话创建时的显示名
   chatType: 'private' | 'group';  // 由 Channel 层填充
   peerId: string;  // 发送者 ID
   peerName?: string;  // 发送者名称
@@ -507,6 +512,7 @@ export type AgentStatus = 'running' | 'stopped' | 'disabled' | 'error';
 
 export interface AgentInfo {
   name: string;
+  aid: string;
   status: AgentStatus;
   channels: string[];
   projectPath: string;
@@ -633,6 +639,8 @@ export interface BaseagentCodexConfig {
   model?: string;
   effort?: string;
   reasoning?: string;
+  enableRequestUserInput?: boolean;
+  approvalsReviewer?: 'user' | 'auto_review' | 'guardian_subagent';
 }
 
 export interface BaseagentGeminiConfig {
@@ -907,6 +915,8 @@ export interface Trigger {
   createdByChannel: string;
   lastFiredAt?: number;
   fireCount: number;
+  failCount: number;
+  lastResult?: 'completed' | 'failed' | 'interrupted';
   createdAt: number;
   updatedAt: number;
   boundSessionId?: string;       // current：注册时绑定的 sessionId

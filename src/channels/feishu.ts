@@ -1578,171 +1578,103 @@ export function hasMarkdownSyntax(text: string): boolean {
 }
 
 // Plugin implementation
-import type { ChannelPlugin, ChannelInstance } from '../core/channel-loader.js';
+import type { ChannelPlugin, ChannelInstance, ChannelBuildContext } from '../core/channel-loader.js';
+import { resolveShowActivities, showActivitiesPolicy } from '../core/channel-loader.js';
 import type { MessageBridge } from '../core/message/message-bridge.js';
-import type { Config, FeishuChannelConfig } from '../types.js';
-import { normalizeChannelInstances, getChannelShowActivities } from '../utils/channel-helpers.js';
+import type { FeishuChannelInstance as FeishuInst } from '../types.js';
 import { resolvePaths } from '../paths.js';
 
 export class FeishuChannelPlugin implements ChannelPlugin {
   readonly name = 'feishu';
 
-  isEnabled(config: Config): boolean {
-    const raw = config.channels?.feishu;
-    if (!raw) return false;
-    if (Array.isArray(raw)) {
-      return raw.some(inst => inst.enabled !== false && inst.appId && inst.appSecret);
-    }
-    if (raw.enabled === false) return false;
-    return !!(raw.appId && raw.appSecret);
-  }
+  async createInstance(inst: FeishuInst, ctx: ChannelBuildContext): Promise<ChannelInstance | null> {
+    if (inst.enabled === false || !inst.appId || !inst.appSecret) return null;
 
-  async createChannels(config: Config): Promise<ChannelInstance[]> {
-    const instances = normalizeChannelInstances<FeishuChannelConfig>(
-      config.channels?.feishu,
-      'feishu',
-    );
+    const channel = new FeishuChannel({
+      appId: inst.appId,
+      appSecret: inst.appSecret,
+      enableRichContent: ctx.enableRichContent,
+      seenMsgFile: path.join(resolvePaths().dataDir, `feishu-seen-${inst.name}.jsonl`),
+    });
 
-    const result: ChannelInstance[] = [];
-    for (const inst of instances) {
-      if (inst.enabled === false || !inst.appId || !inst.appSecret) continue;
-
-      const channel = new FeishuChannel({
-        appId: inst.appId,
-        appSecret: inst.appSecret,
-        enableRichContent: config.enableRichContent,
-        seenMsgFile: path.join(resolvePaths().dataDir, `feishu-seen-${inst.name}.jsonl`),
-      });
-
-      const adapter = {
-        channelName: inst.name,
-        channelKey: inst.name,
-        capabilities: { file: true, image: true, interaction: true, markdown: true, thought: false, status: true, thread: true },
-        send: async (envelope: any, payload: any) => {
-          const ctx = envelope.replyContext;
-          const channelId = envelope.channelId;
-          switch (payload.kind) {
-            case 'result.text':
-            case 'command.result':
-            case 'command.error':
-            case 'system.notice':
-            case 'system.error':
-            case 'result.error': {
-              const sendCtx: any = { ...(ctx ?? {}) };
-              if (payload.kind === 'result.text' && payload.isFinal) sendCtx.title = '✅ 最终回复:';
-              if (ctx?.metadata?.onThreadCreated) sendCtx.onThreadCreated = ctx.metadata.onThreadCreated;
-              await channel.sendMessage(channelId, payload.text, sendCtx);
-              return;
-            }
-            case 'result.file':
-              await channel.sendFile(channelId, payload.filePath, ctx);
-              return;
-            case 'result.image':
-              await channel.sendImage(channelId, payload.data, ctx);
-              return;
-            case 'activity.batch': {
-              // Feishu 不发送成功的 tool_result（信息密度低，刷屏）
-              const filtered = payload.items.filter((i: ThoughtItem) => !(i.kind === 'tool_result' && i.ok));
-              const text = formatItemsAsText(filtered);
-              if (text) {
-                await channel.sendMessage(channelId, text, ctx);
-              }
-              return;
-            }
-            case 'status.started':
-            case 'status.completed':
-            case 'status.interrupted':
-            case 'status.error':
-            case 'status.timeout':
-            case 'status.progress':
-              // Feishu 通过 acknowledge (✓ 表情) 表达状态，由 channel 自行处理
-              return;
-            case 'interaction': {
-              const sent = await channel.sendInteraction(channelId, payload.interaction, ctx);
-              if (!sent) throw new Error('sendInteraction returned false');
-              return;
-            }
-            case 'custom':
-              // Feishu 不支持自定义 payload
-              return;
-            default:
-              logger.warn(`[Feishu] Unhandled payload kind: ${(payload as any).kind}`);
+    const mode = resolveShowActivities(inst);
+    const adapter = {
+      channelName: inst.name,
+      channelKey: inst.name,
+      capabilities: { file: true, image: true, interaction: true, markdown: true, thought: false, status: true, thread: true },
+      send: async (envelope: any, payload: any) => {
+        const replyCtx = envelope.replyContext;
+        const channelId = envelope.channelId;
+        switch (payload.kind) {
+          case 'result.text': case 'command.result': case 'command.error':
+          case 'system.notice': case 'system.error': case 'result.error': {
+            const sendCtx: any = { ...(replyCtx ?? {}) };
+            if (payload.kind === 'result.text' && payload.isFinal) sendCtx.title = '✅ 最终回复:';
+            if (replyCtx?.metadata?.onThreadCreated) sendCtx.onThreadCreated = replyCtx.metadata.onThreadCreated;
+            await channel.sendMessage(channelId, payload.text, sendCtx);
+            return;
           }
-        },        acknowledge: (messageId: string) => { channel.addAckReaction(messageId); return Promise.resolve(); },        onInteraction: (callback: (response: InteractionResponse) => void) => channel.onInteraction(callback),
-      };
+          case 'result.file': await channel.sendFile(channelId, payload.filePath, replyCtx); return;
+          case 'result.image': await channel.sendImage(channelId, payload.data, replyCtx); return;
+          case 'activity.batch': {
+            const filtered = payload.items.filter((i: ThoughtItem) => !(i.kind === 'tool_result' && i.ok));
+            const text = formatItemsAsText(filtered);
+            if (text) await channel.sendMessage(channelId, text, replyCtx);
+            return;
+          }
+          case 'status.started': case 'status.completed': case 'status.interrupted':
+          case 'status.error': case 'status.timeout': case 'status.progress': return;
+          case 'interaction': {
+            const sent = await channel.sendInteraction(channelId, payload.interaction, replyCtx);
+            if (!sent) throw new Error('sendInteraction returned false');
+            return;
+          }
+          case 'custom': return;
+          default: logger.warn(`[Feishu] Unhandled payload kind: ${(payload as any).kind}`);
+        }
+      },
+      acknowledge: (messageId: string) => { channel.addAckReaction(messageId); return Promise.resolve(); },
+      onInteraction: (callback: (response: InteractionResponse) => void) => channel.onInteraction(callback),
+    };
 
-      const policy = {
-        canSwitchProject: (chatType: string, identity: string) => identity === 'owner' || identity === 'admin',
-        canListProjects: (chatType: string, identity: string) => identity === 'owner' || identity === 'admin',
-        canCreateSession: (chatType: string, identity: string) => true,
-        canDeleteSession: (chatType: string, identity: string) => true,
-        canImportCliSession: (chatType: string, identity: string) => identity === 'owner' || identity === 'admin',
-        messagePrefix: (chatType: string, peerName?: string) => (chatType === 'group' && peerName) ? `[${peerName}] ` : '',
-        showMiddleResult: (chatType: string, identity: string) => {
-          const mode = getChannelShowActivities(config, inst.name);
-          if (mode === 'none') return false;
-          if (mode === 'dm-only') return chatType === 'private';
-          if (mode === 'owner-dm-only') return chatType === 'private' && identity === 'owner';
-          return true;
-        },
-        showIdleMonitor: (chatType: string, identity: string) => {
-          const mode = getChannelShowActivities(config, inst.name);
-          if (mode === 'none') return false;
-          if (mode === 'dm-only') return chatType === 'private';
-          if (mode === 'owner-dm-only') return chatType === 'private' && identity === 'owner';
-          return true;
-        },
-        accumulateErrors: (chatType: string, identity: string) => true,
-      };
+    const policy = {
+      canSwitchProject: (_: string, identity: string) => identity === 'owner' || identity === 'admin',
+      canListProjects: (_: string, identity: string) => identity === 'owner' || identity === 'admin',
+      canCreateSession: () => true,
+      canDeleteSession: () => true,
+      canImportCliSession: (_: string, identity: string) => identity === 'owner' || identity === 'admin',
+      messagePrefix: (chatType: string, peerName?: string) => (chatType === 'group' && peerName) ? `[${peerName}] ` : '',
+      showMiddleResult: (chatType: string, identity: string) => showActivitiesPolicy(mode, chatType, identity),
+      showIdleMonitor: (chatType: string, identity: string) => showActivitiesPolicy(mode, chatType, identity),
+      accumulateErrors: () => true,
+    };
 
-      const options = {
-        fileMarkerPattern: /\[SEND_FILE:(?:(\w+):)?([^\]]+)\]/g,
-        supportsImages: true,
-        flushDelay: inst.flushDelay,
-      };
-
-      result.push({
-        channelType: 'feishu',
-        adapter,
-        channel,
-        policy,
-        options,
-        connect: () => channel.connect(),
-        disconnect: () => channel.disconnect(),
-        onProjectPathRequest: (channelId: string) =>
-          Promise.resolve(config.projects?.defaultPath || process.cwd()),
-        registerBridge(bridge: MessageBridge, channelType: string) {
-          bridge.register(
-            adapter.channelName,
-            (handler) => channel.onMessage(async ({ channelId: chatId, content, images, peerId, peerName, messageId, mentions, mentionAids, threadId, rootId, chatType, source }: any) => {
-              await handler({
-                channel: adapter.channelName, channelType, channelId: chatId, content, images,
-                selfAID: (inst as any).agentName,
-                chatType: chatType || 'private',
-                peerId: peerId || '', peerName, messageId, mentions, mentionAids, threadId,
-                replyContext: threadId ? { replyToMessageId: rootId ?? threadId, replyInThread: true } : undefined,
-                source,
-              });
-            }),
-            (channelId, text, replyContext) => channel.sendMessage(channelId, text, {
-              replyToMessageId: replyContext?.replyToMessageId,
-              replyInThread: replyContext?.replyInThread,
-            }),
-            adapter,
-            channelType
-          );
-        },
-      });
-    }
-
-    return result;
-  }
-
-  async createChannel(config: Config): Promise<ChannelInstance> {
-    const instances = await this.createChannels(config);
-    if (instances.length === 0) {
-      throw new Error('Feishu config missing');
-    }
-    return instances[0];
+    return {
+      channelType: 'feishu', adapter, channel,
+      policy,
+      options: { fileMarkerPattern: /\[SEND_FILE:(?:(\w+):)?([^\]]+)\]/g, supportsImages: true, flushDelay: inst.flushDelay },
+      connect: () => channel.connect(),
+      disconnect: () => channel.disconnect(),
+      onProjectPathRequest: () => Promise.resolve(ctx.defaultProjectPath),
+      registerBridge(bridge: MessageBridge, channelType: string) {
+        bridge.register(
+          adapter.channelName,
+          (handler) => channel.onMessage(async ({ channelId: chatId, content, images, peerId, peerName, messageId, mentions, mentionAids, threadId, rootId, chatType, source }: any) => {
+            await handler({
+              channel: adapter.channelName, channelType, channelId: chatId, content, images,
+              selfAID: ctx.agentName, chatType: chatType || 'private',
+              peerId: peerId || '', peerName, messageId, mentions, mentionAids, threadId,
+              replyContext: threadId ? { replyToMessageId: rootId ?? threadId, replyInThread: true } : undefined,
+              source,
+            });
+          }),
+          (channelId, text, replyContext) => channel.sendMessage(channelId, text, {
+            replyToMessageId: replyContext?.replyToMessageId,
+            replyInThread: replyContext?.replyInThread,
+          }),
+          adapter, channelType,
+        );
+      },
+    };
   }
 }

@@ -1,0 +1,197 @@
+import type { ChannelAdapter, ReplyContext, InteractionRequest, Message } from '../types.js';
+import type { InteractionRouter } from '../core/interaction-router.js';
+
+/** 权限审批的渠道交互上下文 */
+export interface PermissionContext {
+  adapter?: ChannelAdapter;
+  channelId?: string;
+  replyContext?: ReplyContext;
+  interactionRouter?: InteractionRouter;
+  userId?: string;
+  /** 一次性消息拦截：注册后下一条消息不入队不 interrupt，直接回调 */
+  interceptNextMessage?: (sessionKey: string, handler: (message: Message) => void) => void;
+  /** 取消消息拦截 */
+  cancelIntercept?: (sessionKey: string) => void;
+  /** 渠道名称（用于构造 OutboundEnvelope） */
+  channel?: string;
+  /** EvolAgent 名称（用于构造 OutboundEnvelope） */
+  agentName?: string;
+  /** 当前任务 id（用于构造 OutboundEnvelope） */
+  taskId?: string;
+  /** 当前会话 chatmode（interactive | proactive） */
+  chatmode?: 'interactive' | 'proactive';
+  /** 发送交互卡片前刷新当前 renderer 队列，避免卡片早于事件消息到达 */
+  flushPending?: () => Promise<void>;
+}
+
+export interface ImageData {
+  data: string;      // base64 encoded
+  mimeType?: string; // e.g., 'image/png'
+}
+
+// ── 标准事件流（Gateway 消费的统一事件类型）──
+export type AgentEvent =
+  | { type: 'text'; text: string; outputTokens?: number; turn?: number }
+  | { type: 'status'; subtype: string; message: string }
+  | { type: 'tool_use'; name: string; input: any; callId?: string; turn?: number; outputTokens?: number }
+  | { type: 'tool_result'; name: string; result: any; isError?: boolean; error?: string; callId?: string }
+  | { type: 'compact'; preTokens: number; postTokens?: number; durationMs?: number }
+  | { type: 'task_progress'; summary?: string; toolUses?: number; durationMs?: number }
+  | { type: 'session_id'; sessionId: string }
+  | { type: 'state_changed'; state: 'idle' | 'running' | 'requires_action' }
+  | { type: 'complete'; result?: string; subtype?: string; isError?: boolean; errors?: string[]; durationMs?: number; ttftMs?: number; costUsd?: number; terminalReason?: string; sessionTitle?: string; numTurns?: number; tokenUsage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number }; contextUsage?: { totalTokens: number; maxTokens: number; percentage: number; model: string; effort?: string } }
+  | { type: 'error'; error: string; errorType: 'context_too_long' | 'auth' | 'network' | 'unknown' };
+
+export interface QueryRequest {
+  sessionId: string;
+  prompt: string;
+  projectPath: string;
+  agentSessionId?: string;
+  images?: ImageData[];
+  systemPromptAppend?: string;
+}
+
+// ── 核心接口 ──
+export interface AgentRunnerInterface {
+  readonly name: string;
+  runQuery(request: QueryRequest): AsyncIterable<AgentEvent>;
+  interrupt(sessionKey: string): Promise<void>;
+  dispose?(): Promise<void>;
+}
+
+/**
+ * 完整 Agent 接口 — MessageProcessor 和 CommandHandler 实际使用的方法集合。
+ */
+export interface AgentRunnerFull {
+  readonly name: string;
+
+  // 核心查询
+  runQuery(
+    sessionId: string,
+    prompt: string,
+    projectPath: string,
+    initialAgentSessionId?: string,
+    images?: ImageData[],
+    systemPromptAppend?: string,
+    sessionManager?: any,
+    /** 本次调用的模型/强度覆盖（按 关系>agent>全局 解析后传入；缺省用 runner 默认） */
+    modelOverride?: { model?: string; effort?: string }
+  ): Promise<AsyncIterable<AgentEvent>>;
+
+  // 中断
+  interrupt(sessionKey: string): Promise<void>;
+
+  // 流管理（MessageProcessor 需要）
+  registerStream(key: string, stream: AsyncIterable<any>): void;
+  cleanupStream(key: string): void;
+  hasActiveStream(key: string): boolean;
+
+  // 会话管理（CommandHandler 需要）
+  updateSessionId(sessionId: string, agentSessionId: string): void;
+  closeSession(sessionId: string): Promise<void>;
+  clearSession(sessionId: string, agentSessionId: string, projectPath: string): Promise<boolean>;
+  compactSession(sessionId: string, agentSessionId: string, projectPath: string): Promise<boolean>;
+
+  // 权限回调（MessageProcessor 需要）
+  setSendPrompt(fn: (text: string) => Promise<void>): void;
+  setPermissionContext?(sessionId: string, context: PermissionContext): void;
+  setMode(mode: string): void;
+  getMode(): string;
+
+  /** Agent 支持的会话操作能力 — 缺省视为全部不支持 */
+  readonly capabilities?: {
+    clear?: boolean;
+    compact?: boolean;
+    fork?: boolean;
+    askUserQuestion?: boolean;
+    planApproval?: boolean;
+    /**
+     * File rewind semantics:
+     * - checkpoint: restores an agent/runtime checkpoint for the target turn
+     * - git-head: best-effort restore from Git HEAD, not a per-turn snapshot
+     * - unsupported/undefined: no file rewind support
+     */
+    fileRewind?: 'checkpoint' | 'git-head' | 'unsupported';
+  };
+
+  /** 解析 agent session 文件路径（用于健康检查），返回 null 表示无法定位 */
+  resolveSessionFile?(agentSessionId: string, projectPath: string): string | null;
+
+  /** 分支会话，返回新的 agentSessionId */
+  forkSession?(agentSessionId: string, projectPath: string, title?: string): Promise<string>;
+
+  /** 读取会话消息历史 */
+  getSessionMessages?(agentSessionId: string, projectPath: string): Promise<Array<{
+    type: 'user' | 'assistant' | 'system';
+    uuid: string;
+    session_id: string;
+    message: unknown;
+    parent_tool_use_id: null;
+  }>>;
+
+  /** 回退文件到指定轮次 */
+  rewindFiles?(agentSessionId: string, projectPath: string, userMessageId: string): Promise<{
+    canRewind: boolean;
+    error?: string;
+    filesChanged?: string[];
+    insertions?: number;
+    deletions?: number;
+  }>;
+
+  /** 回退对话历史末尾若干轮。Codex app-server 可直接修改 thread；Claude 走 resumeAt metadata。 */
+  rollbackSessionTurns?(agentSessionId: string, projectPath: string, numTurns: number): Promise<boolean>;
+
+  /** 同步底层会话标题/元数据（后端不支持时可忽略）。 */
+  setSessionName?(agentSessionId: string, name: string): Promise<boolean>;
+  updateSessionMetadata?(agentSessionId: string, metadata: Record<string, any>): Promise<boolean>;
+
+  // 可选能力（通过类型守卫检测）
+  setModel?(model: string): void;
+  getModel?(): string;
+  listModels?(): string[] | Promise<string[]>;
+  resolveModelId?(model: string): string;
+  setEffort?(effort: any): void;
+  getEffort?(): string | undefined;
+  listModes?(): PermissionModeInfo[];
+  compact?(sessionId: string, agentSessionId: string, projectPath: string): Promise<boolean>;
+  setPermissionGateway?(gateway: any): void;
+  setCompactStartCallback?(callback: (sessionId: string) => void): void;
+}
+
+// ── 可选能力接口 ──
+export interface ModelSwitcher {
+  setModel(model: string): void;
+  getModel(): string;
+  listModels(): string[] | Promise<string[]>;
+}
+
+export interface Compactable {
+  compact(sessionId: string, agentSessionId: string, projectPath: string): Promise<boolean>;
+}
+
+export interface PermissionController {
+  setMode(mode: string): void;
+  getMode(): string;
+  listModes(): PermissionModeInfo[];
+}
+
+export interface PermissionModeInfo {
+  key: string;
+  nameZh: string;
+  description: string;
+  available: boolean;
+  unavailableReason?: string;
+}
+
+// ── 类型守卫 ──
+export function hasModelSwitcher(agent: any): agent is ModelSwitcher {
+  return typeof agent.setModel === 'function' && typeof agent.listModels === 'function';
+}
+
+export function hasPermissionController(agent: any): agent is PermissionController {
+  return typeof agent.setMode === 'function' && typeof agent.listModes === 'function';
+}
+
+export function hasCompact(agent: any): agent is Compactable {
+  return typeof agent.compact === 'function';
+}

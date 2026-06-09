@@ -315,3 +315,32 @@ tr:hover td { background: var(--bg2); }
 .ctrl-toast.show { opacity: 1; }
 .ctrl-toast.err { border-color: var(--red); color: var(--red); }
 
+
+/* ── Agents 页 ── */
+.agents-toolbar { padding: 8px 12px; border-bottom: 1px solid var(--border); }
+.agent-ops-cell { white-space: nowrap; }
+.agent-ops { display: flex; gap: 4px; flex-wrap: nowrap; }
+.agent-ops .ctrl-btn { padding: 1px 6px; }
+
+/* ── System 页 ── */
+.sys-wrap { padding: 12px; overflow-y: auto; height: 100%; }
+.sys-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.sys-health { display: flex; flex-direction: column; gap: 8px; }
+.card-label { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 4px; }
+.card-val { font-size: 13px; color: var(--fg); }
+
+/* ── Triggers 页 ── */
+.trig-layout { display: flex; height: 100%; overflow: hidden; }
+.trig-agents-col { width: 200px; border-right: 1px solid var(--border); flex-shrink: 0; overflow-y: auto; }
+.trig-table-col { flex: 1; overflow: auto; padding: 0; }
+.trig-table-col table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.trig-table-col th { position: sticky; top: 0; background: var(--bg); padding: 6px 10px; text-align: left; border-bottom: 1px solid var(--border); color: var(--dim); font-weight: 500; white-space: nowrap; }
+.trig-table-col td { padding: 6px 10px; border-bottom: 1px solid var(--border); vertical-align: top; white-space: nowrap; }
+.trig-table-col tr:hover td { background: var(--bg2); }
+.trig-table-col .trig-prompt { max-width: 240px; overflow: hidden; text-overflow: ellipsis; }
+.trig-table-col tr.trig-done td { opacity: .55; }
+.trig-badge { display: inline-block; padding: 1px 7px; border-radius: 9px; font-size: 11px; border: 1px solid transparent; white-space: nowrap; }
+.trig-badge-active { color: var(--green, #3fb950); border-color: var(--green, #3fb950); }
+.trig-badge-fired { color: var(--dim); border-color: var(--border); }
+.trig-badge-cancelled { color: var(--red); border-color: var(--red); }
+.trig-badge-expired { color: var(--dim); border-color: var(--border); }

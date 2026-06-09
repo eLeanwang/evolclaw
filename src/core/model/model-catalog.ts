@@ -11,7 +11,7 @@
  */
 
 import { loadDefaults, loadAgent } from '../../config-store.js';
-import { resolveAnthropicConfig, resolveOpenaiConfig } from '../../agents/resolve.js';
+import { resolveAnthropicConfig, resolveOpenaiConfig } from '../../agents/baseagent.js';
 import { activeBaseagent } from './model-scope.js';
 import type { BaseagentsBlock } from '../../types.js';
 

@@ -34,7 +34,7 @@ function formatItem(item: ThoughtItem): string {
     case 'tool_result': {
       if (!item.ok) {
         const errMsg = item.error || (typeof item.result === 'string' ? item.result : '执行失败');
-        return `⚠️ ${item.name}: ${errMsg}`;
+        return `⚠️ ${item.name}: ${capLines(errMsg, 5)}`;
       }
       return item.text ? `✓ ${item.name}: ${item.text}` : `✓ ${item.name}`;
     }
@@ -47,6 +47,14 @@ function formatItem(item: ThoughtItem): string {
     default:
       return '';
   }
+}
+
+/** 把多行文本截断到最多 maxLines 行，超出部分用省略提示替代。用于工具报错输出，避免刷屏。 */
+function capLines(text: string, maxLines: number): string {
+  const lines = text.split('\n');
+  if (lines.length <= maxLines) return text;
+  const omitted = lines.length - maxLines;
+  return lines.slice(0, maxLines).join('\n') + `\n…(省略 ${omitted} 行)`;
 }
 
 function summarizeArgs(args?: Record<string, unknown>): string {

@@ -18,7 +18,7 @@ import {
   type ScopeSelector, type ModelScope,
 } from '../core/model/model-scope.js';
 import { loadDefaults, loadAgent } from '../config-store.js';
-import { resolveAnthropicConfig } from '../agents/resolve.js';
+import { resolveAnthropicConfig } from '../agents/baseagent.js';
 import { getCatalog, getModelInfo } from '../core/model/model-catalog.js';
 
 const ALL_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max', 'auto'];

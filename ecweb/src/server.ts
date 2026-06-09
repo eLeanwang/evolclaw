@@ -23,7 +23,8 @@ import { aidSource } from './sources/aid.js';
 import { msgSource } from './sources/msg.js';
 import { sessionSource } from './sources/session.js';
 import { cacheSource } from './sources/cache.js';
-import { controlSource } from './sources/control.js';
+import { systemSource } from './sources/system.js';
+import { triggersSource } from './sources/triggers.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const STATIC_DIR = path.join(__dirname, 'static');
@@ -33,7 +34,18 @@ const PAIRING_TTL_MS = 5 * 60 * 1000;       // 5min
 const DEFAULT_PORT = 42705;
 const PROTOCOL_VERSION = 1;                  // 与 evolclaw ping response 对齐的软校验版本
 
-const SOURCES: Record<ViewKind, WatchSource> = { aid: aidSource, msg: msgSource, session: sessionSource, cache: cacheSource, control: controlSource };
+const SOURCES: Record<ViewKind, WatchSource> = { agents: aidSource, msg: msgSource, session: sessionSource, cache: cacheSource, system: systemSource, triggers: triggersSource };
+
+// ECWeb 自身版本：渲染 System 页时随快照下发（不走 daemon IPC，ECWeb 就是这个进程）。
+function readEcwebVersion(): string {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf-8'));
+    return pkg?.version ?? '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
+}
+const ECWEB_VERSION = readEcwebVersion();
 
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -177,10 +189,12 @@ function handleConnection(ws: WebSocket, req: http.IncomingMessage, log: (s: str
     currentView = view;
     const source = SOURCES[view];
     if (!source) { send({ type: 'error', message: `unknown view: ${view}` }); return; }
-    try { send({ type: 'snapshot', view, data: await source.snapshot(params) }); }
+    // System 视图：把 ECWeb 自身版本合并进快照（前端版本卡用）
+    const decorate = (data: any) => (view === 'system' && data ? { ...data, ecwebVersion: ECWEB_VERSION } : data);
+    try { send({ type: 'snapshot', view, data: decorate(await source.snapshot(params)) }); }
     catch (e: any) { send({ type: 'error', message: `snapshot failed: ${e?.message || e}` }); }
     unsubscribe = source.subscribe(params, (data) => {
-      if (currentView === view) send({ type: 'delta', view, data });
+      if (currentView === view) send({ type: 'delta', view, data: decorate(data) });
     });
   };
 
@@ -194,6 +208,7 @@ function handleConnection(ws: WebSocket, req: http.IncomingMessage, log: (s: str
       if (msg.peer) params.peer = msg.peer;
       if (msg.sessionId) params.sessionId = msg.sessionId;
       if (msg.project) params.project = msg.project;
+      if (msg.agent) params.agent = msg.agent;
       dlog(`▸ 订阅 ${msg.view}${msg.aid ? ` aid=${String(msg.aid).split('.')[0]}` : ''}${msg.peer ? ` peer=${String(msg.peer).split('.')[0]}` : ''}${msg.sessionId ? ` session=${String(msg.sessionId).slice(0, 8)}` : ''} from ${ip}`);
       await switchSubscription(msg.view as ViewKind, params);
       return;

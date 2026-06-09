@@ -3,8 +3,8 @@ import fs from 'fs';
 import { logger } from './utils/logger.js';
 import type { EvolAgentRegistryHandle, AidConnectionState } from './types.js';
 import type { AidStatsSnapshot } from './utils/stats.js';
-import { fileCache } from './core/cache/file-cache.js';
-import type { FileCacheStats } from './core/cache/file-cache.js';
+import { fileCache } from './core/daemon-file-cache.js';
+import type { FileCacheStats } from './core/daemon-file-cache.js';
 
 const isWindows = process.platform === 'win32';
 const isNamedPipe = (p: string) => isWindows && p.startsWith('\\\\.\\pipe\\');
