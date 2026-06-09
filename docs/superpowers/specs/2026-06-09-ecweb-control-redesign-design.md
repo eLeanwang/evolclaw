@@ -142,19 +142,31 @@ DefaultAgent 的 AID 同样可解析。无法归属到任何 agent 的 AID 行�
 | 卡 | 字段 | 来源 |
 |---|---|---|
 | 状态 | ● 运行中 | daemonRunning（圆点复用 `.dot.on/.off`） |
-| 版本 | `version`，命中新版叠加 `⬆` 角标 | package.json + upgrade 结果 |
+| evolclaw 版本 | `version`，命中新版叠加 `⬆` 角标 | package.json + upgrade 结果 |
 | fastaun 版本 | `fastaunVersion`，命中新版叠加 `⬆` 角标 | `@agentunion/fastaun` package.json + registry 比对 |
+| ECWeb 版本 | `ecwebVersion`，命中新版叠加 `⬆` 角标 | ECWeb 自身 package.json + registry 比对 |
 | 运行时间 | `uptime` | process.uptime() |
 | PID | `pid` | process.pid |
 | Node | `node` | process.version |
 
 附：`agent`（owning agent 名）/ `channel` / `channels[]` 可作为副信息行展示。
 
-**新增 system query 字段**：
-- `fastaunVersion`：读 `node_modules/@agentunion/fastaun/package.json` 的 version（本地已装版本）。
-- fastaun 新版提示：`checkLatestVersion('@agentunion/fastaun')`（`npm-ops.ts` 已支持传包名），
-  与本地版本 `compareVersions` 比对；有新版时版本卡显示 `⬆ 0.4.12 → 0.x.y`。
-  与 evolclaw 自身的 upgrade 检查并列，由「检查更新」按钮触发。
+### 三个独立包的版本检查
+
+evolclaw 生态有三个各自独立发布、各自版本的 npm 包，System 页并列展示三张版本卡：
+
+| 包 | 包名 | 当前版本 | 安装方式 | 本地版本来源 |
+|---|---|---|---|---|
+| 主网关 | `evolclaw` | 见 package.json | `npm i -g evolclaw` | daemon 读自身 package.json |
+| AUN SDK | `@agentunion/fastaun` | 0.4.12 | 主包依赖 | daemon 读 `node_modules/@agentunion/fastaun/package.json` |
+| 监控台 | `evolclaw-web` | 1.0.1 | `npm i -g evolclaw-web`（独立全局装，daemon spawn 成独立进程） | **ECWeb 自身进程读自己的 package.json** |
+
+- **evolclaw / fastaun 的当前版本**：经 daemon `menu.query name=system` 返回（`version` / `fastaunVersion`）。
+- **ECWeb 的当前版本**：ECWeb 就是渲染 System 页的那个进程，直接读自身 package.json，
+  经 WS snapshot 带给前端（`ecwebVersion`），不必经 daemon IPC。
+- **三者的"最新版"**：`action=upgrade` 并行 `checkLatestVersion('evolclaw' / '@agentunion/fastaun' / 'evolclaw-web')`，
+  各自 `compareVersions` 比对；有新版时对应版本卡显示 `⬆ 当前 → 最新`。
+  注意 ECWeb 升级需在主机执行 `npm i -g evolclaw-web@latest` 后重启 ECWeb 进程，System 页仅提示、不代执行。
 
 ### ② 操作区（按钮，全部 owner-gated）
 
@@ -237,12 +249,16 @@ baseagents: Array<{
 ### 1b. `menu.query name=system` 增加 fastaun 版本
 
 `/system` query（`command-handler.ts:959`）返回体增 `fastaunVersion`（读 `@agentunion/fastaun` 的 package.json）。
-fastaun 新版比对走 `action=upgrade` 路径（见下）。
+ECWeb 自身版本（`ecwebVersion`）由 ECWeb 进程读自己的 package.json，经 WS snapshot 带给前端，不走此 query。
+三个包的新版比对走 `action=upgrade` 路径（见下）。
 
-### 1c. `action=upgrade` 同时检查 fastaun
+### 1c. `action=upgrade` 同时检查 fastaun 与 evolclaw-web
 
-`/upgrade`（`command-handler.ts:3059`）现仅查 evolclaw。扩展为并行查 evolclaw + `@agentunion/fastaun`（`checkLatestVersion('@agentunion/fastaun')`），
-结构化返回两者的 local/remote/hasUpdate，前端分别回写两张版本卡。
+`/upgrade`（`command-handler.ts:3059`）现仅查 evolclaw。扩展为并行查三个独立包：
+`checkLatestVersion('evolclaw')` / `checkLatestVersion('@agentunion/fastaun')` / `checkLatestVersion('evolclaw-web')`，
+结构化返回三者的 `{ local, remote, hasUpdate }`，前端分别回写三张版本卡。
+evolclaw-web 的 local 版本由 ECWeb 进程提供（前端已持有），daemon 侧只需提供 remote。
+注意：evolclaw-web 是独立全局安装的进程，升级需主机执行 `npm i -g evolclaw-web@latest` 并重启 ECWeb，System 页仅提示不代执行。
 
 ### 2. `menu.action name=agent` 增加 `reload`（带任务检查）
 
