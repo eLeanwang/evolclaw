@@ -69,8 +69,10 @@ export interface ParsedTriggerUpdate {
   nextFireAt?: number;  // Calculated by caller if schedule changed
   targetChannel?: string;
   targetChannelId?: string;
+  targetChannelType?: string;  // Recomputed by caller when targetChannel changes
   targetThreadId?: string;
   targetSessionStrategy?: TriggerSessionStrategy;
+  boundSessionId?: string;  // Rebound by caller per session strategy
   agentId?: string;
   name?: string;
   prompt?: string;
@@ -141,7 +143,11 @@ export function parseTriggerUpdate(args: string): UpdateParseResult {
     result.scheduleValue = new Date(ts).toISOString();
   } else if (hasCron) {
     const raw = flags.get('cron') as string;
-    if (!validateCronExpr(raw)) return { ok: false, error: `无效的 cron 表达式："${raw}"` };
+    if (!validateCronExpr(raw)) {
+      const truncated = /^[\d*/,-]+$/.test(raw) && /--cron\s+\S+\s+[*\d]/.test(args);
+      const hint = truncated ? '（看起来 cron 表达式被空格截断了，请用引号包裹，如 --cron \'*/15 * * * *\'）' : '（需 5 段：分 时 日 月 周，如 */15 * * * *）';
+      return { ok: false, error: `无效的 cron 表达式："${raw}" ${hint}` };
+    }
     result.scheduleType = 'cron';
     result.scheduleValue = raw;
   }
@@ -230,7 +236,10 @@ export function parseTriggerSet(args: string): ParseResult {
   } else {
     const raw = flags.get('cron') as string;
     if (!validateCronExpr(raw)) {
-      return { ok: false, error: `无效的 cron 表达式："${raw}"` };
+      // Detect likely space-truncation: raw looks like one cron segment and args contains space-separated * or digits after it
+      const truncated = /^[\d*/,-]+$/.test(raw) && /--cron\s+\S+\s+[*\d]/.test(args);
+      const hint = truncated ? '（看起来 cron 表达式被空格截断了，请用引号包裹，如 --cron \'*/15 * * * *\'）' : '（需 5 段：分 时 日 月 周，如 */15 * * * *）';
+      return { ok: false, error: `无效的 cron 表达式："${raw}" ${hint}` };
     }
     scheduleType = 'cron';
     scheduleValue = raw;

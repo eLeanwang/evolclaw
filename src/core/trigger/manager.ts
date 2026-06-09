@@ -157,7 +157,7 @@ export class TriggerManager {
     return { active, history };
   }
 
-  update(id: string, patch: Partial<Pick<Trigger, 'name' | 'scheduleType' | 'scheduleValue' | 'nextFireAt' | 'targetChannel' | 'targetChannelId' | 'targetThreadId' | 'targetSessionStrategy' | 'agentId' | 'prompt' | 'pendingThread'>>): Trigger {
+  update(id: string, patch: Partial<Pick<Trigger, 'name' | 'scheduleType' | 'scheduleValue' | 'nextFireAt' | 'targetChannel' | 'targetChannelId' | 'targetChannelType' | 'targetThreadId' | 'targetSessionStrategy' | 'boundSessionId' | 'agentId' | 'prompt' | 'pendingThread'>>): Trigger {
     const t = this.triggers.get(id);
     if (!t) throw new Error(`触发器不存在：${id}`);
     // Check name uniqueness if name is being changed
@@ -178,6 +178,15 @@ export class TriggerManager {
     if (!t) return;
     t.lastFiredAt = firedAt;
     t.fireCount += 1;
+    t.updatedAt = Date.now();
+    this.save();
+  }
+
+  updateResult(id: string, outcome: 'completed' | 'failed' | 'interrupted'): void {
+    const t = this.triggers.get(id);
+    if (!t) return;
+    t.lastResult = outcome;
+    if (outcome === 'failed') t.failCount = (t.failCount ?? 0) + 1;
     t.updatedAt = Date.now();
     this.save();
   }

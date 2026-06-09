@@ -9,7 +9,7 @@ import { CONFIG_SCHEMA_VERSION } from '../types.js';
 import type { AgentConfig, ChannelInstance } from '../types.js';
 import { isValidChannelName } from '../core/channel-loader.js';
 import { commandExists } from '../utils/cross-platform.js';
-import { isCodexAppServerAvailable } from '../agents/codex-runner.js';
+import { getCodexAppServerAvailability, isCodexAppServerAvailable } from '../agents/codex-runner.js';
 
 // ==================== Types ====================
 
@@ -624,7 +624,10 @@ export async function agentCreateNonInteractive(opts: AgentCreateNonInteractiveO
       return failValidating(`Invalid baseagent: ${opts.baseagent} (options: ${BASEAGENT_CANDIDATES.join('/')})`);
     }
     if (!available.includes(opts.baseagent as Baseagent)) {
-      return failValidating(`${opts.baseagent} is not available in the current environment (available: ${available.join('/')})`);
+      const reason = opts.baseagent === 'codex'
+        ? getCodexAppServerAvailability().reason
+        : undefined;
+      return failValidating(reason || `${opts.baseagent} is not available in the current environment (available: ${available.join('/')})`);
     }
     baseagent = opts.baseagent as Baseagent;
   } else {

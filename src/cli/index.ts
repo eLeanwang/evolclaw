@@ -4,10 +4,8 @@ import os from 'os';
 import { spawn, execFileSync, execFile } from 'child_process';
 import { promisify } from 'util';
 import { resolveRoot, resolvePaths, ensureDataDirs, getPackageRoot, agentMdPath } from '../paths.js';
-import { loadDefaults, loadAllAgents, mergeForAgent } from '../config-store.js';
-import { loadEvolclawConfig, saveEvolclawConfig } from '../evolclaw-config.js';
-import { resolveAnthropicConfig } from '../agents/resolve.js';
-import { normalizeChannelInstances, channelTypes } from '../utils/channel-helpers.js';
+import { loadDefaults, loadAllAgents, mergeForAgent, loadEvolclawConfig, saveEvolclawConfig } from '../config-store.js';
+import { resolveAnthropicConfig } from '../agents/baseagent.js';
 import { migrateProject } from '../config-store.js';
 import readline from 'readline';
 import { cmdInit, needsControlAidInit, initTail } from './init.js';
@@ -2122,11 +2120,27 @@ function findAliveEcweb(p: ReturnType<typeof resolvePaths>): { pid: number; port
   return null;
 }
 
-/** 后台 detached 启动 ecweb；若已运行则跳过。 */
+/** 若 ecweb 在运行则杀掉并清理 pid 文件，返回是否成功 kill。 */
+function stopEcwebIfRunning(p: ReturnType<typeof resolvePaths>): boolean {
+  const alive = findAliveEcweb(p);
+  if (!alive) return false;
+  try { platform.killProcess(alive.pid); } catch {}
+  // 清理 pid 文件
+  try {
+    for (const file of fs.readdirSync(p.instanceDir)) {
+      if (file.startsWith('ecweb-') && file.endsWith('.json')) {
+        fs.unlinkSync(path.join(p.instanceDir, file));
+      }
+    }
+  } catch {}
+  return true;
+}
+
+/** 后台 detached 启动 ecweb；若已运行则先停再启（确保加载最新代码）。 */
 function startEcwebIfEnabled(p: ReturnType<typeof resolvePaths>): void {
   const cfg = loadEvolclawConfig();
   if (!cfg.ecweb?.enabled) return;
-  if (findAliveEcweb(p)) return; // 已在运行
+  stopEcwebIfRunning(p);  // 先停旧进程（有则停），保证加载最新代码
 
   const exe = platform.resolveCommandPath('evolclaw-web');
   if (!exe) return; // 未安装，静默跳过
@@ -2925,13 +2939,23 @@ async function cmdCtl(args: string[]): Promise<void> {
 Agent:
   agent <subcommand>        EvolAgent 管理（list/show/new/enable/disable/reload/delete）
 
+触发器:
+  trigger                   查看活跃触发器
+  trigger list              查看所有触发器（含历史）
+  trigger set --delay <时长> --prompt <内容>          延迟触发（如 15m、2h）
+  trigger set --at <ISO时间> --prompt <内容>          定时触发（如 2026-06-10T09:00）
+  trigger set --cron '<表达式>' --prompt <内容>       周期触发（如 '*/15 * * * *'）
+  trigger cancel <名称>     取消触发器
+  trigger update <名称> ... 修改触发器参数
+
 运维:
   restart [channel]         重启服务或重连指定渠道
 
 示例:
   evolclaw ctl model sonnet
   evolclaw ctl effort high
-  evolclaw ctl compact`);
+  evolclaw ctl compact
+  evolclaw ctl "trigger set --cron '*/15 * * * *' --prompt '现在时间？'"`);
     process.exit(1);
   }
 

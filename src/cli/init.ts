@@ -4,10 +4,9 @@ import readline from 'readline';
 import { resolvePaths, ensureDataDirs } from '../paths.js';
 import { commandExists } from '../utils/cross-platform.js';
 import { scanInstances } from '../utils/instance-registry.js';
-import { saveDefaultsSafe, loadAllAgents, migrateProcessConfigIfNeeded } from '../config-store.js';
-import { loadEvolclawConfig, saveEvolclawConfig } from '../evolclaw-config.js';
+import { saveDefaultsSafe, loadAllAgents, migrateProcessConfigIfNeeded, loadEvolclawConfig, saveEvolclawConfig } from '../config-store.js';
 import { generateControlAid } from '../aun/aid/control-aid.js';
-import { isCodexAppServerAvailable } from '../agents/codex-runner.js';
+import { getCodexAppServerAvailability, isCodexAppServerAvailable } from '../agents/codex-runner.js';
 
 // ==================== Helpers ====================
 
@@ -120,7 +119,10 @@ export async function cmdInit(options?: {
           return; // 硬错误：不落 tail
         }
         if (!available.includes(options.baseagent as Baseagent)) {
-          console.log(`❌ ${options.baseagent} 当前环境不可用（可用: ${available.join('/')}）`);
+          const reason = options.baseagent === 'codex'
+            ? getCodexAppServerAvailability().reason
+            : undefined;
+          console.log(`❌ ${options.baseagent} 当前环境不可用${reason ? `：${reason}` : `（可用: ${available.join('/')}）`}`);
           return; // 硬错误：不落 tail
         }
         chosen = options.baseagent as Baseagent;

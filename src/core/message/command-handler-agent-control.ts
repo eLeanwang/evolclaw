@@ -6,11 +6,13 @@ import {
   agentList,
   agentShow,
   agentSet,
+  agentReload,
 } from '../../cli/agent.js';
 import type { DefaultsConfig } from '../../types.js';
 import { logger } from '../../utils/logger.js';
 import { resolvePaths } from '../../paths.js';
 import path from 'path';
+import { loadAgent, saveAgent } from '../../config-store.js';
 import { CreateStatusWriter, readCreateStatus, type CreatePhase } from './create-status.js';
 
 export type ExecResult = { data: any } | { error: string; code: string };
@@ -120,7 +122,52 @@ export async function execAgentAction(
     return { data: { aid: res.aid, enabled: res.enabled, reloaded: res.reloaded } };
   }
 
+  if (action === 'reload') {
+    if (!a.aid) return { error: '缺少 aid', code: 'INVALID_ARGS' };
+    const res = await agentReload(a.aid);
+    if (!('ok' in res) || res.ok !== true) return { error: (res as any).error, code: classifyError((res as any).error) };
+    return { data: { aid: a.aid, reloaded: true } };
+  }
+
+  if (action === 'update') {
+    return await execAgentUpdate(a);
+  }
+
   return { error: `不支持的 action: ${action}`, code: 'INVALID_ARGS' };
+}
+
+/** name=agent 的 menu.action=update：仅落盘 config patch，不触发 reload。
+ *  直接 loadAgent + saveAgent（不走 agentSet，避免其内部自动 evolagent.reload）——
+ *  重载由用户在 Agents 页操作列手动触发（带任务执行检查）。
+ *  AUN 渠道绑定 agent 顶层 aid，不可通过 patch 编辑：拒绝改 aid、拒绝 channels 数组里出现 aun 条目。
+ *  可写字段：baseagents / projects / owners / chatmode / channels（非 aun）。 */
+export async function execAgentUpdate(args: Record<string, any> | undefined): Promise<ExecResult> {
+  const a = args ?? {};
+  if (!a.aid) return { error: '缺少 aid', code: 'INVALID_ARGS' };
+  const p = a.patch ?? {};
+  if (p.aid !== undefined) {
+    return { error: 'aid 不可修改（AUN 身份绑定，如需换 AID 请删除后重建）', code: 'INVALID_ARGS' };
+  }
+  if (Array.isArray(p.channels) && p.channels.some((c: any) => c?.type === 'aun')) {
+    return { error: 'AUN 渠道不可通过 patch 编辑（由 agent aid 隐式管理）', code: 'INVALID_ARGS' };
+  }
+  const config = loadAgent(a.aid);
+  if (!config) return { error: `Agent "${a.aid}" not found`, code: 'NOT_FOUND' };
+
+  let touched = false;
+  if (p.baseagents !== undefined) { (config as any).baseagents = p.baseagents; touched = true; }
+  if (p.projects !== undefined)   { (config as any).projects = p.projects; touched = true; }
+  if (p.owners !== undefined)     { (config as any).owners = p.owners; touched = true; }
+  if (p.chatmode !== undefined)   { (config as any).chatmode = p.chatmode; touched = true; }
+  if (p.channels !== undefined)   { (config as any).channels = p.channels; touched = true; }
+  if (!touched) return { error: 'patch 为空，无可写字段', code: 'INVALID_ARGS' };
+
+  try {
+    saveAgent(config);
+  } catch (e: any) {
+    return { error: e?.message || String(e), code: classifyError(e?.message || String(e)) };
+  }
+  return { data: { aid: a.aid, saved: true } };
 }
 
 /** project 兜底：显式值 > rootPath 合成 > defaultPath > undefined */
