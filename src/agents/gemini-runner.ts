@@ -16,8 +16,8 @@ import path from 'path';
 import os from 'os';
 import type { Config } from '../types.js';
 import type { AgentPlugin, AgentInstance, AgentCallbacks } from '../core/baseagent-loader.js';
-import type { AgentEvent, AgentRunnerFull, ModelSwitcher, PermissionModeInfo } from './claude-runner.js';
-import { resolveGoogleConfig, type GoogleResolved } from './resolve.js';
+import type { AgentEvent, AgentRunnerFull, ModelSwitcher, PermissionModeInfo } from './runner-types.js';
+import { resolveGoogleConfig, type GoogleResolved } from './baseagent.js';
 import { commandExists } from '../utils/cross-platform.js';
 import { GeminiSessionFileAdapter } from '../core/session/adapters/gemini-session-file-adapter.js';
 import { logger } from '../utils/logger.js';
@@ -50,7 +50,7 @@ const GEMINI_MODELS = [
 
 export class GeminiRunner implements AgentRunnerFull, ModelSwitcher {
   readonly name = 'gemini';
-  readonly capabilities = { clear: true, compact: false, fork: false, askUserQuestion: false, planApproval: false };
+  readonly capabilities = { clear: true, compact: false, fork: false, askUserQuestion: false, planApproval: false, fileRewind: 'unsupported' as const };
 
   private resolved: GoogleResolved;
   private model: string;

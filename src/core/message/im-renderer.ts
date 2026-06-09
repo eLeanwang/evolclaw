@@ -1,4 +1,4 @@
-import type { AgentEvent } from '../../agents/claude-runner.js';
+import type { AgentEvent } from '../../agents/runner-types.js';
 import type { ChannelAdapter, OutboundEnvelope, OutboundPayload, ReplyContext, ThoughtItem } from '../../types.js';
 import { logger } from '../../utils/logger.js';
 import { summarizeToolInput } from '../permission.js';
@@ -361,20 +361,23 @@ export class IMRenderer {
       this.timer = undefined;
     }
 
-    // 上下文错误短语过滤：剔除错误关键词本身，保留前后内容
-    const ctxErrPattern = /prompt is too long|input is too long|context too long|context limit|context_length_exceeded|上下文过长/gi;
-    const stripCtxErr = (s: string) => s.replace(ctxErrPattern, '').trim();
-    this.textBuffer = stripCtxErr(this.textBuffer);
-    this.allText = stripCtxErr(this.allText);
-    for (const item of this.itemsQueue) {
-      if (item.kind === 'text') item.text = stripCtxErr(item.text);
-    }
-
-    // 文件标记过滤
-    if (this.opts.fileMarkerPattern) {
-      this.textBuffer = this.textBuffer.replace(this.opts.fileMarkerPattern, '').trim();
+    if (isFinal) {
+      // 上下文错误短语过滤：剔除错误关键词本身，保留前后内容。
+      // 只在最终 flush 清理，避免中间定时 flush trim 掉 Markdown 块级换行。
+      const ctxErrPattern = /prompt is too long|input is too long|context too long|context limit|context_length_exceeded|上下文过长/gi;
+      const stripCtxErr = (s: string) => s.replace(ctxErrPattern, '').trim();
+      this.textBuffer = stripCtxErr(this.textBuffer);
+      this.allText = stripCtxErr(this.allText);
       for (const item of this.itemsQueue) {
-        if (item.kind === 'text') item.text = item.text.replace(this.opts.fileMarkerPattern, '');
+        if (item.kind === 'text') item.text = stripCtxErr(item.text);
+      }
+
+      // 文件标记过滤
+      if (this.opts.fileMarkerPattern) {
+        this.textBuffer = this.textBuffer.replace(this.opts.fileMarkerPattern, '').trim();
+        for (const item of this.itemsQueue) {
+          if (item.kind === 'text') item.text = item.text.replace(this.opts.fileMarkerPattern, '');
+        }
       }
     }
 
@@ -408,6 +411,26 @@ export class IMRenderer {
       this.sendChain = this.sendChain
         .then(() => this.opts.send(payload))
         .catch(e => logger.warn('[IMRenderer] activity.batch send failed:', e));
+      await this.sendChain;
+      this.lastFlush = Date.now();
+      this.flushCount++;
+    }
+
+    // 1.5 非最终定时 flush：把已累积的文本块作为独立 result.text 发出。
+    //   每个 text 事件本身是完整语义块（runner 已合并流式 delta），工具调用前的
+    //   文本一向作为独立气泡发送（见 message-processor 的 flushText 调用）。
+    //   这里补上「文本块后面没有紧跟 tool_use」的情况——例如 readonly 拒绝写文件时
+    //   SDK 直接拒绝、不产生 tool_use 事件，文本会一直滞留 buffer，直到下一个
+    //   tool_use 才被 flushText 带出，并与其后的文本合并成一条（用户侧表现为：
+    //   第一条文本等待一分多钟后才和第二条凑成一条发出）。定时器到期即发，根除滞留。
+    if (!isFinal && this.textBuffer.length > 0) {
+      const text = this.textBuffer;
+      this.textBuffer = '';
+      const payload: OutboundPayload = { kind: 'result.text', text, isFinal: false };
+      this.sentContent = true;
+      this.sendChain = this.sendChain
+        .then(() => this.opts.send(payload))
+        .catch(e => logger.warn('[IMRenderer] timed result.text send failed:', e));
       await this.sendChain;
       this.lastFlush = Date.now();
       this.flushCount++;

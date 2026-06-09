@@ -2,7 +2,7 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import crypto from 'crypto';
-import { type AgentRunnerFull, hasCompact, type AgentEvent, type Compactable } from '../../agents/claude-runner.js';
+import { type AgentRunnerFull, hasCompact, type AgentEvent, type Compactable } from '../../agents/runner-types.js';
 import { SessionManager } from '../session/session-manager.js';
 import { appendMessageLog, buildOutboundEntry } from './message-log.js';
 import { IMRenderer } from './im-renderer.js';
@@ -17,14 +17,14 @@ import type { Message, Session, ChannelAdapter, ChannelOptions, ChannelPolicy, C
 import type { TriggerManager } from '../trigger/manager.js';
 import { DEFAULT_PERMISSION_MODE } from '../../types.js';
 import { getPackageRoot, resolveRoot, resolvePaths } from '../../paths.js';
-import { renderKitSections, type KitRenderContext } from '../../agents/kit-renderer.js';
-import { renderMessageBody, type RenderMessageResult } from '../../agents/message-renderer.js';
+import { renderKitSections, type KitRenderContext } from '../../eck/kit-renderer.js';
+import { renderMessageBody, type RenderMessageResult } from '../../eck/message-renderer.js';
 import { consumeHints, hintsToSubMessages, composeHintFallback } from './pending-hints.js';
 import type { SubMessage } from '../../types.js';
-import { normalizeBaseagent } from '../../agents/baseagent-normalize.js';
+import { normalizeBaseagent } from '../../agents/baseagent.js';
 import type { InteractionRouter } from '../interaction-router.js';
 import { renderActionAsText, renderCommandCardAsText } from '../interaction-router.js';
-import { formatPeerKey } from '../relation/peer-key.js';
+import { formatPeerKey } from '../relation/peer-identity.js';
 import { resolveEffectiveModel } from '../model/model-scope.js';
 
 /** OS 信息在进程生命周期内是常量，模块加载时算一次。例: "Windows 11 Pro (win32 10.0.26200)" */
@@ -633,6 +633,9 @@ export class MessageProcessor {
         agentName: agentNameForStats,
         taskId,
         chatmode: isProactive ? 'proactive' : 'interactive',
+        flushPending: async () => {
+          await renderer.flush(false);
+        },
         interceptNextMessage: this.messageQueue
           ? (sessionKey, handler) => this.messageQueue!.interceptNext(sessionKey, handler)
           : undefined,
@@ -1364,12 +1367,26 @@ export class MessageProcessor {
     session: Session;
     absoluteProjectPath: string;
   }> {
-    // 话题会话创建时写入 replyContext（threadId 路由）；主会话不写（避免群聊覆盖）
-    const metadata = (message.threadId && message.replyContext)
-      ? { replyContext: message.replyContext }
+    // 话题会话创建时写入创建者和 replyContext（threadId 路由）；主会话不写（避免群聊覆盖）
+    const metadata = message.threadId
+      ? {
+          ...(message.replyContext ? { replyContext: message.replyContext } : {}),
+          ...(message.peerId ? { peerId: message.peerId } : {}),
+          ...(message.peerName ? { peerName: message.peerName } : {}),
+        }
       : undefined;
 
     const projectPath = this.agentRegistry?.resolveByChannel(message.channel)?.projectPath || process.cwd();
+
+    if (message.chatType === 'group' && message.threadId && message.source !== 'trigger' && message.source !== 'owner-inject') {
+      const existing = await this.sessionManager.getThreadSession(message.channel, message.channelId, message.threadId);
+      if (!existing) {
+        const role = this.sessionManager.resolveIdentity(message.channel, message.peerId).role;
+        if (role !== 'owner' && role !== 'admin') {
+          throw new Error('群聊中无权限创建话题');
+        }
+      }
+    }
 
     // current strategy: resume bound session, make it active so output is not suppressed
     if (message.triggerMeta?.boundSessionId) {
@@ -1393,7 +1410,7 @@ export class MessageProcessor {
       projectPath,
       message.threadId,
       metadata,
-      undefined,
+      message.topicName,
       message.peerId,
       message.chatType,
       undefined,

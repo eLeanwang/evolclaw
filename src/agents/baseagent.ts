@@ -1,9 +1,13 @@
 /**
- * Baseagent credential resolvers.
+ * Baseagent identity + credential resolution.
  *
- * 输入是 Config 形态（`config.agents.<baseagent>` + override）。启动期由 index.ts
- * 从 primaryAgent.config.baseagents 构造一个 syntheticConfig 喂入；各 plugin 的
- * createAgent 也各自构造 syntheticConfig。
+ * 两部分：
+ *  1. normalizeBaseagent —— 把用户输入的各种别名（cc / claude-code / gemini cli …）
+ *     归一到 canonical 标识 + 展示名。
+ *  2. resolve*Config —— 各后端的凭证解析。输入是 Config 形态
+ *     （`config.agents.<baseagent>` + override）。启动期由 index.ts 从
+ *     primaryAgent.config.baseagents 构造一个 syntheticConfig 喂入；各 plugin 的
+ *     createAgent 也各自构造 syntheticConfig。
  */
 
 import fs from 'fs';
@@ -11,6 +15,41 @@ import path from 'path';
 import os from 'os';
 import { commandExists } from '../utils/cross-platform.js';
 import type { Config } from '../types.js';
+
+// ── baseagent 别名归一 ─────────────────────────────────────────────────
+
+export type CanonicalBaseagent = 'claude' | 'codex' | 'gemini' | 'hermes' | 'unknown';
+
+export interface NormalizedBaseagent {
+  canonical: CanonicalBaseagent;
+  displayName: string;
+}
+
+const BASEAGENT_ALIASES: Record<string, NormalizedBaseagent> = {
+  claude: { canonical: 'claude', displayName: 'Claude Code' },
+  cc: { canonical: 'claude', displayName: 'Claude Code' },
+  'claude-code': { canonical: 'claude', displayName: 'Claude Code' },
+  'claude code': { canonical: 'claude', displayName: 'Claude Code' },
+  claudecode: { canonical: 'claude', displayName: 'Claude Code' },
+
+  codex: { canonical: 'codex', displayName: 'Codex' },
+  'codex-cli': { canonical: 'codex', displayName: 'Codex' },
+  'codex cli': { canonical: 'codex', displayName: 'Codex' },
+
+  gemini: { canonical: 'gemini', displayName: 'Gemini CLI' },
+  'gemini-cli': { canonical: 'gemini', displayName: 'Gemini CLI' },
+  'gemini cli': { canonical: 'gemini', displayName: 'Gemini CLI' },
+  geminicli: { canonical: 'gemini', displayName: 'Gemini CLI' },
+
+  hermes: { canonical: 'hermes', displayName: 'Hermes' },
+};
+
+export function normalizeBaseagent(input: string | undefined | null): NormalizedBaseagent {
+  const key = String(input || '').trim().toLowerCase().replace(/_/g, '-');
+  return BASEAGENT_ALIASES[key] || { canonical: 'unknown', displayName: input ? String(input) : 'Unknown' };
+}
+
+// ── 凭证解析 ───────────────────────────────────────────────────────────
 
 // ── Anthropic (Claude) ─────────────────────────────────────────────────
 
@@ -84,6 +123,8 @@ export interface OpenaiResolved {
   baseUrl?: string;
   model: string;
   effort?: string;
+  enableRequestUserInput?: boolean;
+  approvalsReviewer?: string;
 }
 
 function loadCodexSettings(): { apiKey?: string; baseUrl?: string; model?: string } {
@@ -118,7 +159,7 @@ function loadCodexSettings(): { apiKey?: string; baseUrl?: string; model?: strin
 
 export function resolveOpenaiConfig(
   config: Config,
-  override?: { apiKey?: string; baseUrl?: string; model?: string; effort?: string; reasoning?: string }
+  override?: { apiKey?: string; baseUrl?: string; model?: string; effort?: string; reasoning?: string; enableRequestUserInput?: boolean; approvalsReviewer?: string }
 ): OpenaiResolved {
   const codexSettings = loadCodexSettings();
   const isPlaceholder = (v?: string) => !v || v.includes('your-') || v.includes('placeholder');
@@ -156,7 +197,15 @@ export function resolveOpenaiConfig(
     || config.agents?.codex?.reasoning
     || undefined;
 
-  return { apiKey, baseUrl, model, effort };
+  const enableRequestUserInput = override?.enableRequestUserInput
+    ?? config.agents?.codex?.enableRequestUserInput
+    ?? true;
+
+  const approvalsReviewer = override?.approvalsReviewer
+    ?? config.agents?.codex?.approvalsReviewer
+    ?? undefined;
+
+  return { apiKey, baseUrl, model, effort, enableRequestUserInput, approvalsReviewer };
 }
 
 // ── Google (Gemini) ────────────────────────────────────────────────────
