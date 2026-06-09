@@ -22,7 +22,7 @@ import { MessageProcessor, buildEnvelope } from './core/message/message-processo
 import { MessageQueue } from './core/message/message-queue.js';
 import { MessageBridge } from './core/message/message-bridge.js';
 import { MessageCache } from './core/message/message-cache.js';
-import { CommandHandler } from './core/command-handler.js';
+import { CommandHandler, isProcessLevelOwner } from './core/command-handler.js';
 import { EventBus, GatewayEvent } from './core/event-bus.js';
 import { StatsCollector } from './utils/stats.js';
 import { AidStatsCollector } from './utils/stats.js';
@@ -35,6 +35,7 @@ import { buildReloadHooks } from './core/channel-loader.js';
 import { IpcServer, IpcStatusResponse, ChannelStatus } from './ipc.js';
 import { ChannelAdapter, Message, OutboundEnvelope, OutboundPayload, Trigger } from './types.js';
 import { logger, setLogLevel } from './utils/logger.js';
+import { fetchEcwebPairCode } from './utils/ecweb-pair.js';
 import { writeMain, removeAll, isMainWinner, scanInstances } from './utils/instance-registry.js';
 import { detectDuplicates } from './core/evolagent-registry.js';
 import { loadKitManifest, cleanEckDebug, invalidateKitCache } from './agents/kit-renderer.js';
@@ -847,6 +848,36 @@ async function main() {
     } catch (e: any) {
       logger.warn(`控制 AID 首连失败（后台自动重连，不影响 daemon 主流程）: ${e?.message || e}`);
     }
+
+    // 控制 AID 接收 owner 指令：本轮只做 ECWeb 登录入口（/pair 取配对码）。
+    // 发送方身份由 AUN X.509 证书链验证，非 owner 完全静默。daemon 直接处理，
+    // 不转回 ecweb——仅「配对码是 ecweb 持有的状态」需经 localhost 取一次。
+    controlChannel.onMessage(async (opts) => {
+      try {
+        if (!isProcessLevelOwner(opts.peerId, evolclawCfg.owners)) {
+          logger.debug(`控制 AID 收到非 owner 消息，忽略: from=${opts.peerId}`);
+          return;
+        }
+        const text = (opts.content || '').trim();
+        if (text.toLowerCase() === '/pair') {
+          const port = evolclawCfg.ecweb?.port ?? 42705;
+          const pair = await fetchEcwebPairCode(port);
+          let reply: string;
+          if (pair) {
+            const mins = Math.max(0, Math.round((pair.expiresAt - Date.now()) / 60000));
+            reply = `ECWeb 配对码：${pair.code}（约 ${mins} 分钟内有效）\n在浏览器打开 ECWeb 后输入此码登录`;
+          } else {
+            reply = 'ECWeb 未运行或暂不可达。请在主机运行 ec watch web 启动后重试。';
+          }
+          await controlChannel!.sendMessage(opts.channelId, reply);
+          return;
+        }
+        // owner 发的其他内容：提示可用指令，避免无响应让 owner 困惑
+        await controlChannel!.sendMessage(opts.channelId, '可用指令：/pair（获取 ECWeb 登录配对码）');
+      } catch (e: any) {
+        logger.warn(`控制 AID 消息处理失败: ${e?.message || e}`);
+      }
+    });
   }
 
   // 上线通知：延迟 1-3 秒后向 owner 发送上线消息（带 name + 工作目录）

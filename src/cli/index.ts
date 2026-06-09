@@ -17,6 +17,7 @@ import { isHelpFlag, wantsHelp, getArgValue } from './help.js';
 import * as platform from '../utils/cross-platform.js';
 import { EventBus } from '../core/event-bus.js';
 import { tryUpgrade, tryUpgradeAunSdk, type UpgradeResult } from '../utils/npm-ops.js';
+import { fetchEcwebPairCode } from '../utils/ecweb-pair.js';
 import { resolveAunCoreSdkPkg, AUN_CORE_SDK_PKG } from '../aun/aid/client.js';
 import { scanInstances, cleanupInstances, readAidLastActivity, writeRestartMonitor, removeRestartMonitor, isRestartMonitorWinner, findOrphanProcesses, killOrphans, type OrphanProcess } from '../utils/instance-registry.js';
 import { displaySessionTitle } from '../core/session/session-title.js';
@@ -2148,19 +2149,6 @@ function startEcwebIfEnabled(p: ReturnType<typeof resolvePaths>): void {
   );
   console.log(`🔭 ECWeb 已在后台启动 (PID: ${pid})  http://localhost:${port}`);
   console.log(`   运行 ec watch web 查看配对码`);
-}
-
-/** 通过 localhost 拉取 ecweb 当前配对码（仅本机可取）。失败返回 null。 */
-async function fetchEcwebPairCode(port: number): Promise<{ code: string; expiresAt: number } | null> {
-  try {
-    const resp = await fetch(`http://127.0.0.1:${port}/api/pair-code`, {
-      signal: AbortSignal.timeout(2000),
-    });
-    if (!resp.ok) return null;
-    return await resp.json() as { code: string; expiresAt: number };
-  } catch {
-    return null;
-  }
 }
 
 /** 显示 ecweb 访问信息 + 配对码（启动后 ecweb 需要一点时间起 HTTP，故重试几次）。 */
