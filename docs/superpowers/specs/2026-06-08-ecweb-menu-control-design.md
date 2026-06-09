@@ -11,7 +11,7 @@
 
 ## 2. 背景
 
-- **Menu 协议**（`docs/aun-menu-protocol-dev-guide-v2.1.md`）：`menu.*` JSON 请求/响应协议，定义 5 种请求（`list`/`query`/`options`/`update`/`action`）+ 统一响应（`menu.response`）。服务端在 `src/core/message/message-bridge.ts` 拦截，委派给 `CommandHandler.execMenu{Query,Options,Update,Action}` 和 `getMenuItems`/`getSubMenuItems`。
+- **Menu 协议**（`docs/aun-menu-protocol-dev-guide-v2.2.md`）：`menu.*` JSON 请求/响应协议，定义 5 种请求（`list`/`query`/`options`/`update`/`action`）+ 统一响应（`menu.response`）。服务端在 `src/core/message/message-bridge.ts` 拦截，委派给 `CommandHandler.execMenu{Query,Options,Update,Action}` 和 `getMenuItems`/`getSubMenuItems`。
 - **ECWeb**（`ecweb/`）：独立 Node 进程，token 配对的只读浏览器面板。现有 4 个 tab（AID/Messages/Sessions/Cache），数据经 daemon 的 IPC socket（`ipcQuery`）+ `fs.watch` 获取。当前**纯只读**，无控制能力。
 - **"ucloud" 澄清**：指本机运行的 EvolClaw daemon 本身（非 UCloud 云服务，非远程 agent）。
 

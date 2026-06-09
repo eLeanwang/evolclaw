@@ -24,18 +24,19 @@
     <header class="topbar">
       <span class="brand">🔭 EvolClaw Watch</span>
       <nav class="tabs">
-        <button class="tab active" data-view="aid">AID</button>
+        <button class="tab active" data-view="agents">Agents</button>
         <button class="tab" data-view="msg">Messages</button>
         <button class="tab" data-view="session">Sessions</button>
+        <button class="tab" data-view="triggers">Triggers</button>
         <button class="tab" data-view="cache">Cache</button>
-        <button class="tab" data-view="control">Control</button>
+        <button class="tab" data-view="system">System</button>
       </nav>
       <span id="conn-status" class="conn-status">连接中…</span>
       <button id="logout-btn" class="logout-btn" title="退出配对">退出</button>
     </header>
 
     <main class="content">
-      <section id="view-aid" class="view active"></section>
+      <section id="view-agents" class="view active"></section>
       <section id="view-msg" class="view">
         <div class="msg-layout">
           <div id="msg-aids" class="msg-col msg-aids"></div>
@@ -49,8 +50,14 @@
           <div id="sess-detail" class="sess-col sess-detail"></div>
         </div>
       </section>
+      <section id="view-triggers" class="view">
+        <div class="trig-layout">
+          <div id="trig-agents" class="msg-col trig-agents-col"></div>
+          <div id="trig-table" class="trig-table-col"></div>
+        </div>
+      </section>
       <section id="view-cache" class="view"></section>
-      <section id="view-control" class="view"></section>
+      <section id="view-system" class="view"></section>
     </main>
   </div>
 
