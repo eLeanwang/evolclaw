@@ -425,6 +425,7 @@ export class EvolAgentRegistry {
   private toInfo(agent: EvolAgent): AgentInfo {
     return {
       name: agent.name,
+      aid: agent.aid,
       status: agent.status,
       channels: agent.channelInstanceNames(),
       projectPath: agent.projectPath,

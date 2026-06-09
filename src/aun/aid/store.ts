@@ -52,7 +52,7 @@ export interface GetAidStoreOpts {
  */
 export async function getAidStore(opts: GetAidStoreOpts): Promise<AIDStore> {
   const { aunPath: defaultAunPath } = await import('../../paths.js');
-  const { loadEvolclawConfig } = await import('../../evolclaw-config.js');
+  const { loadEvolclawConfig } = await import('../../config-store.js');
   const { AIDStore } = await import('@agentunion/fastaun');
 
   const aunPath = opts.aunPath ?? defaultAunPath();

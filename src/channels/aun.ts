@@ -6,10 +6,10 @@ import path from 'path';
 import os from 'os';
 import { logger, localTimestamp } from '../utils/logger.js';
 import { LogWriter } from '../utils/log-writer.js';
-import type { ChannelPlugin, ChannelInstance, BridgeHookContext } from '../core/channel-loader.js';
+import type { ChannelPlugin, ChannelInstance, ChannelBuildContext, BridgeHookContext } from '../core/channel-loader.js';
+import { resolveShowActivities, showActivitiesPolicy } from '../core/channel-loader.js';
 import type { MessageBridge } from '../core/message/message-bridge.js';
-import type { Config, ReplyContext, AunChannelConfig, AidConnectionState, AidStatus, AidKickDetail, InteractionResponse, ActionInteraction, CommandCard, InboundMessage } from '../types.js';
-import { normalizeChannelInstances, getChannelShowActivities } from '../utils/channel-helpers.js';
+import type { ReplyContext, AunChannelInstance as AunInst, AidConnectionState, AidStatus, AidKickDetail, InteractionResponse, ActionInteraction, CommandCard, InboundMessage } from '../types.js';
 import { resolvePaths, getPackageRoot, agentMdPath as agentMdPathFn, agentDir as agentDirPath, resolveRoot } from '../paths.js';
 import { saveToUploads, sanitizeFileName, bufferToInboundImage, type InboundImage } from '../utils/media-cache.js';
 import { appendAidEvent } from '../utils/instance-registry.js';
@@ -2921,253 +2921,189 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
 export class AUNChannelPlugin implements ChannelPlugin {
   readonly name = 'aun';
 
-  isEnabled(config: Config): boolean {
-    const raw = config.channels?.aun;
-    if (!raw) return false;
-    if (Array.isArray(raw)) {
-      return raw.some(inst => inst.enabled !== false && !!inst.aid);
-    }
-    return raw.enabled !== false && !!raw.aid;
-  }
+  async createInstance(inst: AunInst, ctx: ChannelBuildContext): Promise<ChannelInstance | null> {
+    // AUN aid is the agent's own AID; loader injects it as inst.aid, ctx.agentName is the source of truth.
+    const aid = (inst as any).aid ?? ctx.agentName;
+    if (inst.enabled === false || !aid) return null;
 
-  async createChannels(config: Config): Promise<ChannelInstance[]> {
-    const instances = normalizeChannelInstances<AunChannelConfig>(
-      config.channels?.aun,
-      'aun',
-    );
+    const channel = new AUNChannel({
+      aid,
+      keystorePath: (inst as any).keystorePath,
+      gatewayUrl: inst.gatewayUrl,
+      accessToken: inst.accessToken,
+      flushDelay: inst.flushDelay,
+      owner: (inst as any).owner ?? inst.owners?.[0],
+      agentName: ctx.agentName,
+      channelName: inst.name,
+      aunTrace: ctx.debug?.aunTrace,
+      aunSdkLog: ctx.debug?.aunSdkLog,
+    });
 
-    const result: ChannelInstance[] = [];
-    for (const inst of instances) {
-      if (inst.enabled === false || !inst.aid) continue;
-
-      const channel = new AUNChannel({
-        aid: inst.aid,
-        keystorePath: inst.keystorePath,
-        gatewayUrl: inst.gatewayUrl,
-        accessToken: inst.accessToken,
-        flushDelay: inst.flushDelay,
-        owner: inst.owner,
-        agentName: (inst as any).agentName,
-        channelName: inst.name,
-        aunTrace: config.debug?.aunTrace,
-        aunSdkLog: config.debug?.aunSdkLog,
-      });
-
-      const adapter = {
-        channelName: inst.name,
-        channelKey: inst.name,  // channelName 实际上就是 channelKey
-        capabilities: { file: true, image: true, interaction: true, markdown: true, thought: true, status: true, thread: true },
-        send: async (envelope: any, payload: any) => {
-          const ctx = envelope.replyContext;
-          const channelId = envelope.channelId;
-          switch (payload.kind) {
-            case 'result.text':
-            case 'command.result':
-            case 'command.error':
-            case 'system.notice':
-            case 'system.error':
-            case 'result.error': {
-              const sendCtx: ReplyContext = { ...(ctx ?? {}) };
-              if (payload.kind === 'result.text' && payload.isFinal) sendCtx.title = '✅ 最终回复:';
-              await channel.sendMessage(channelId, payload.text, sendCtx);
-              return;
+    const mode = resolveShowActivities(inst);
+    const adapter = {
+      channelName: inst.name,
+      channelKey: inst.name,  // channelName 实际上就是 channelKey
+      capabilities: { file: true, image: true, interaction: true, markdown: true, thought: true, status: true, thread: true },
+      send: async (envelope: any, payload: any) => {
+        const replyCtx = envelope.replyContext;
+        const channelId = envelope.channelId;
+        switch (payload.kind) {
+          case 'result.text': case 'command.result': case 'command.error':
+          case 'system.notice': case 'system.error': case 'result.error': {
+            const sendCtx: ReplyContext = { ...(replyCtx ?? {}) };
+            if (payload.kind === 'result.text' && payload.isFinal) sendCtx.title = '✅ 最终回复:';
+            await channel.sendMessage(channelId, payload.text, sendCtx);
+            return;
+          }
+          case 'result.file':
+            await channel.sendFile(channelId, payload.filePath, replyCtx);
+            return;
+          case 'result.image': {
+            const buf = payload.data as Buffer;
+            const b64 = buf.toString('base64');
+            await channel.sendStructured(channelId, {
+              type: 'image', alt: payload.alt, data_base64: b64, mime_type: payload.mimeType,
+            }, replyCtx);
+            return;
+          }
+          case 'activity.batch': {
+            const aunPayload: Record<string, any> = {
+              type: 'thought',
+              items: payload.items,
+              client_context: { task_id: envelope.taskId, chatmode: envelope.chatmode, agent_name: envelope.agentName },
+            };
+            if (replyCtx?.threadId) aunPayload.thread_id = replyCtx.threadId;
+            if (envelope.chatmode === 'proactive') {
+              await channel.sendThought(channelId, envelope.taskId, aunPayload, replyCtx);
+            } else {
+              await channel.sendStructured(channelId, aunPayload, replyCtx);
             }
-            case 'result.file':
-              await channel.sendFile(channelId, payload.filePath, ctx);
-              return;
-            case 'result.image': {
-              // AUN 支持 image，走 sendStructured 发 type=image payload
-              const buf = payload.data as Buffer;
-              const b64 = buf.toString('base64');
-              await channel.sendStructured(channelId, {
-                type: 'image',
-                alt: payload.alt,
-                data_base64: b64,
-                mime_type: payload.mimeType,
-              }, ctx);
-              return;
-            }
-            case 'activity.batch': {
-              const aunPayload: Record<string, any> = {
-                type: 'thought',
-                items: payload.items,
-                client_context: { task_id: envelope.taskId, chatmode: envelope.chatmode, agent_name: envelope.agentName },
+            return;
+          }
+          case 'status.progress':
+            channel.sendProcessingStatus(channelId, 'progress', envelope.sessionId ?? envelope.taskId, envelope.taskId, replyCtx, payload.metadata); return;
+          case 'status.started':
+            channel.sendProcessingStatus(channelId, 'start', envelope.sessionId ?? envelope.taskId, envelope.taskId, replyCtx, payload.metadata); return;
+          case 'status.queued':
+            channel.sendProcessingStatus(channelId, 'queued', envelope.sessionId ?? envelope.taskId, envelope.taskId, replyCtx, payload.metadata); return;
+          case 'status.completed':
+            channel.sendProcessingStatus(channelId, 'done', envelope.sessionId ?? envelope.taskId, envelope.taskId, replyCtx, payload.metadata); return;
+          case 'status.interrupted':
+            channel.sendProcessingStatus(channelId, 'interrupted', envelope.sessionId ?? envelope.taskId, envelope.taskId, replyCtx, payload.metadata); return;
+          case 'status.error':
+            channel.sendProcessingStatus(channelId, 'error', envelope.sessionId ?? envelope.taskId, envelope.taskId, replyCtx, payload.metadata); return;
+          case 'status.timeout':
+            channel.sendProcessingStatus(channelId, 'timeout', envelope.sessionId ?? envelope.taskId, envelope.taskId, replyCtx, payload.metadata); return;
+          case 'interaction': {
+            const req = payload.interaction;
+            if (req.kind.kind === 'action') {
+              const action = req.kind;
+              const aunCard: Record<string, any> = {
+                type: 'action_card',
+                title: action.title,
+                actions: (action as ActionInteraction).buttons.map(btn => ({
+                  label: btn.label, value: btn.key, style: btn.style ?? 'default', behavior: 'reply',
+                })),
               };
-              if (ctx?.threadId) aunPayload.thread_id = ctx.threadId;
-              if (envelope.chatmode === 'proactive') {
-                await channel.sendThought(channelId, envelope.taskId, aunPayload, ctx);
-              } else {
-                // interactive 模式不发 thought.put，只写入消息历史
-                await channel.sendStructured(channelId, aunPayload, ctx);
+              if (action.body) aunCard.description = action.body;
+              if (req.initiatorId && channel.isGroupId(channelId)) aunCard.initiator = req.initiatorId;
+              if (replyCtx?.threadId) aunCard.thread_id = replyCtx.threadId;
+              const msgId = await channel.sendStructured(channelId, aunCard, replyCtx);
+              if (msgId) {
+                channel.cardMessageIdMap.set(msgId, { requestId: req.id, isCommandCard: false, initiatorAid: req.initiatorId });
+                setTimeout(() => channel.cardMessageIdMap.delete(msgId), 20 * 60 * 1000);
               }
-              return;
-            }
-            case 'status.progress':
-              channel.sendProcessingStatus(channelId, 'progress', envelope.sessionId ?? envelope.taskId, envelope.taskId, ctx, payload.metadata);
-              return;
-            case 'status.started':
-              channel.sendProcessingStatus(channelId, 'start', envelope.sessionId ?? envelope.taskId, envelope.taskId, ctx, payload.metadata);
-              return;
-            case 'status.queued':
-              channel.sendProcessingStatus(channelId, 'queued', envelope.sessionId ?? envelope.taskId, envelope.taskId, ctx, payload.metadata);
-              return;
-            case 'status.completed':
-              channel.sendProcessingStatus(channelId, 'done', envelope.sessionId ?? envelope.taskId, envelope.taskId, ctx, payload.metadata);
-              return;
-            case 'status.interrupted':
-              channel.sendProcessingStatus(channelId, 'interrupted', envelope.sessionId ?? envelope.taskId, envelope.taskId, ctx, payload.metadata);
-              return;
-            case 'status.error':
-              channel.sendProcessingStatus(channelId, 'error', envelope.sessionId ?? envelope.taskId, envelope.taskId, ctx, payload.metadata);
-              return;
-            case 'status.timeout':
-              channel.sendProcessingStatus(channelId, 'timeout', envelope.sessionId ?? envelope.taskId, envelope.taskId, ctx, payload.metadata);
-              return;
-            case 'interaction': {
-              const req = payload.interaction;
-              if (req.kind.kind === 'action') {
-                const action = req.kind;
-                const aunCard: Record<string, any> = {
-                  type: 'action_card',
-                  title: action.title,
-                  actions: (action as ActionInteraction).buttons.map(btn => ({
-                    label: btn.label,
-                    value: btn.key,
-                    style: btn.style ?? 'default',
-                    behavior: 'reply',
-                  })),
-                };
-                if (action.body) aunCard.description = action.body;
-                // initiator 仅群聊有意义：私聊信道一对一，点击者恒为对端 = initiator，无需限制
-                if (req.initiatorId && channel.isGroupId(channelId)) aunCard.initiator = req.initiatorId;
-                if (ctx?.threadId) aunCard.thread_id = ctx.threadId;
-                const msgId = await channel.sendStructured(channelId, aunCard, ctx);
-                if (msgId) {
-                  channel.cardMessageIdMap.set(msgId, { requestId: req.id, isCommandCard: false, initiatorAid: req.initiatorId });
-                  setTimeout(() => channel.cardMessageIdMap.delete(msgId), 20 * 60 * 1000);
-                }
-              } else if (req.kind.kind === 'command-card') {
-                const card = req.kind;
-                const aunCard: Record<string, any> = {
-                  type: 'action_card',
-                  title: card.title,
-                  actions: (card as CommandCard).buttons.map(btn => ({
-                    label: btn.label,
-                    value: btn.command,
-                    style: btn.style ?? 'default',
-                    behavior: 'reply',
-                  })),
-                };
-                if (card.body) aunCard.description = card.body;
-                if (ctx?.threadId) aunCard.thread_id = ctx.threadId;
-                const msgId = await channel.sendStructured(channelId, aunCard, ctx);
-                if (msgId) {
-                  channel.cardMessageIdMap.set(msgId, { requestId: req.id, isCommandCard: true, initiatorAid: req.initiatorId });
-                  setTimeout(() => channel.cardMessageIdMap.delete(msgId), 20 * 60 * 1000);
-                }
-              } else if (payload.fallbackText) {
-                await channel.sendMessage(channelId, payload.fallbackText, ctx);
+            } else if (req.kind.kind === 'command-card') {
+              const card = req.kind;
+              const aunCard: Record<string, any> = {
+                type: 'action_card',
+                title: card.title,
+                actions: (card as CommandCard).buttons.map(btn => ({
+                  label: btn.label, value: btn.command, style: btn.style ?? 'default', behavior: 'reply',
+                })),
+              };
+              if (card.body) aunCard.description = card.body;
+              if (replyCtx?.threadId) aunCard.thread_id = replyCtx.threadId;
+              const msgId = await channel.sendStructured(channelId, aunCard, replyCtx);
+              if (msgId) {
+                channel.cardMessageIdMap.set(msgId, { requestId: req.id, isCommandCard: true, initiatorAid: req.initiatorId });
+                setTimeout(() => channel.cardMessageIdMap.delete(msgId), 20 * 60 * 1000);
               }
-              return;
+            } else if (payload.fallbackText) {
+              await channel.sendMessage(channelId, payload.fallbackText, replyCtx);
             }
-            case 'custom': {
-              const text = typeof payload.payload === 'string' ? payload.payload : JSON.stringify(payload.payload);
-              channel.sendCustomPayload(channelId, text);
-              return;
-            }
-            default:
-              logger.warn(`[AUN] Unhandled payload kind: ${(payload as any).kind}`);
+            return;
           }
-        },        acknowledge: (messageId: string) => { channel.acknowledge(messageId); return Promise.resolve(); },        onInteraction: (cb: (r: InteractionResponse) => void) => { channel.interactionCallback = cb; },        uploadAgentMd: (content: string) => channel.uploadAgentMd(content),
-        downloadAgentMd: (aid: string) => channel.downloadAgentMd(aid),
-        getGroupName: (groupId: string) => channel.getGroupName(groupId),        _selfAid: () => channel.getStatus().aid,
-        _selfName: () => channel.getSelfName(),
-      };
+          case 'custom': {
+            const text = typeof payload.payload === 'string' ? payload.payload : JSON.stringify(payload.payload);
+            channel.sendCustomPayload(channelId, text);
+            return;
+          }
+          default:
+            logger.warn(`[AUN] Unhandled payload kind: ${(payload as any).kind}`);
+        }
+      },
+      acknowledge: (messageId: string) => { channel.acknowledge(messageId); return Promise.resolve(); },
+      onInteraction: (cb: (r: InteractionResponse) => void) => { channel.interactionCallback = cb; },
+      uploadAgentMd: (content: string) => channel.uploadAgentMd(content),
+      downloadAgentMd: (aid: string) => channel.downloadAgentMd(aid),
+      getGroupName: (groupId: string) => channel.getGroupName(groupId),
+      _selfAid: () => channel.getStatus().aid,
+      _selfName: () => channel.getSelfName(),
+    };
 
-      const policy = {
-        canSwitchProject: (chatType: string, identity: string) => identity === 'owner' || identity === 'admin',
-        canListProjects: (chatType: string, identity: string) => identity === 'owner' || identity === 'admin',
-        canCreateSession: (chatType: string, identity: string) => true,
-        canDeleteSession: (chatType: string, identity: string) => true,
-        canImportCliSession: (chatType: string, identity: string) => identity === 'owner' || identity === 'admin',
-        messagePrefix: (chatType: string, peerName?: string) => (chatType === 'group' && peerName) ? `[${peerName}] ` : '',
-        showMiddleResult: (chatType: string, identity: string) => {
-          const mode = getChannelShowActivities(config, inst.name);
-          if (mode === 'none') return false;
-          if (mode === 'dm-only') return chatType === 'private';
-          if (mode === 'owner-dm-only') return chatType === 'private' && identity === 'owner';
-          return true;
-        },
-        showIdleMonitor: (chatType: string, identity: string) => {
-          const mode = getChannelShowActivities(config, inst.name);
-          if (mode === 'none') return false;
-          if (mode === 'dm-only') return chatType === 'private';
-          if (mode === 'owner-dm-only') return chatType === 'private' && identity === 'owner';
-          return true;
-        },
-        accumulateErrors: (chatType: string, identity: string) => true,
-      };
+    const policy = {
+      canSwitchProject: (_: string, identity: string) => identity === 'owner' || identity === 'admin',
+      canListProjects: (_: string, identity: string) => identity === 'owner' || identity === 'admin',
+      canCreateSession: () => true,
+      canDeleteSession: () => true,
+      canImportCliSession: (_: string, identity: string) => identity === 'owner' || identity === 'admin',
+      messagePrefix: (chatType: string, peerName?: string) => (chatType === 'group' && peerName) ? `[${peerName}] ` : '',
+      showMiddleResult: (chatType: string, identity: string) => showActivitiesPolicy(mode, chatType, identity),
+      showIdleMonitor: (chatType: string, identity: string) => showActivitiesPolicy(mode, chatType, identity),
+      accumulateErrors: () => true,
+    };
 
-      const options = {
-        flushDelay: inst.flushDelay ?? 3,
-        fileMarkerPattern: /\[SEND_FILE:(?:(\w+):)?([^\]]+)\]/g,
-      };
+    return {
+      channelType: 'aun', adapter, channel,
+      policy,
+      options: { flushDelay: inst.flushDelay ?? 3, fileMarkerPattern: /\[SEND_FILE:(?:(\w+):)?([^\]]+)\]/g },
+      connect: () => channel.connect(),
+      disconnect: () => channel.disconnect(),
+      onProjectPathRequest: () => Promise.resolve(ctx.defaultProjectPath),
+      registerBridge(bridge: MessageBridge, channelType: string) {
+        bridge.register(
+          adapter.channelName,
+          (handler) => channel.onMessage(async (opts) => {
+            handler(aunOptsToInbound(opts, adapter.channelName, channelType));
+          }),
+          (channelId, text, replyContext) => channel.sendMessage(channelId, text, replyContext),
+          adapter, channelType,
+        );
+      },
+      registerHooks(hookCtx: BridgeHookContext) {
+        channel.setEventBus(hookCtx.eventBus);
 
-      result.push({
-        channelType: 'aun',
-        adapter,
-        channel,
-        policy,
-        options,
-        connect: () => channel.connect(),
-        disconnect: () => channel.disconnect(),
-        onProjectPathRequest: (channelId: string) =>
-          Promise.resolve(config.projects?.defaultPath || process.cwd()),
-        registerBridge(bridge: MessageBridge, channelType: string) {
-          bridge.register(
-            adapter.channelName,
-            (handler) => channel.onMessage(async (opts) => {
-              handler(aunOptsToInbound(opts, adapter.channelName, channelType));
-            }),
-            (channelId, text, replyContext) => channel.sendMessage(channelId, text, replyContext),
-            adapter,
-            channelType
-          );
-        },
-        registerHooks(ctx: BridgeHookContext) {
-          channel.setEventBus(ctx.eventBus);
-
-          if (channel.setOnChannelDown) {
-            channel.setOnChannelDown(() => {
-              ctx.eventBus.publish({
-                type: 'channel:error',
-                channel: 'aun',
-                channelName: adapter.channelName,
-                status: 'auth_error',
-                message: `⚠️ AUN 渠道 ${adapter.channelName} 断连，自动重试已用尽。\n使用 /check rty aun 手动重连`,
-                timestamp: Date.now(),
-              });
+        if (channel.setOnChannelDown) {
+          channel.setOnChannelDown(() => {
+            hookCtx.eventBus.publish({
+              type: 'channel:error',
+              channel: 'aun',
+              channelName: adapter.channelName,
+              status: 'auth_error',
+              message: `⚠️ AUN 渠道 ${adapter.channelName} 断连，自动重试已用尽。\n使用 /check rty aun 手动重连`,
+              timestamp: Date.now(),
             });
-          }
+          });
+        }
 
-          if (typeof channel.setDispatchModeResolver === 'function') {
-            channel.setDispatchModeResolver(async (channelId: string) => {
-              const session = await ctx.sessionManager.getActiveSession(adapter.channelName, channelId);
-              return session?.metadata?.dispatchMode;
-            });
-          }
-        },
-      });
-    }
-
-    return result;
-  }
-
-  async createChannel(config: Config): Promise<ChannelInstance> {
-    const instances = await this.createChannels(config);
-    if (instances.length === 0) {
-      throw new Error('AUN config missing (aid required, e.g. "mybot.agentid.pub")');
-    }
-    return instances[0];
+        if (typeof channel.setDispatchModeResolver === 'function') {
+          channel.setDispatchModeResolver(async (channelId: string) => {
+            const session = await hookCtx.sessionManager.getActiveSession(adapter.channelName, channelId);
+            return session?.metadata?.dispatchMode;
+          });
+        }
+      },
+    };
   }
 }

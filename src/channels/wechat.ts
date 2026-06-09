@@ -847,159 +847,90 @@ export class WechatChannel {
 }
 
 // Plugin implementation
-import type { ChannelPlugin, ChannelInstance, BridgeHookContext } from '../core/channel-loader.js';
+import type { ChannelPlugin, ChannelInstance, ChannelBuildContext, BridgeHookContext } from '../core/channel-loader.js';
+import { resolveShowActivities, showActivitiesPolicy } from '../core/channel-loader.js';
 import type { MessageBridge } from '../core/message/message-bridge.js';
-import type { Config, WechatChannelConfig, ThoughtItem } from '../types.js';
-import { normalizeChannelInstances, getChannelShowActivities } from '../utils/channel-helpers.js';
+import type { WechatChannelInstance as WechatInst, ThoughtItem } from '../types.js';
 
 export class WechatChannelPlugin implements ChannelPlugin {
   readonly name = 'wechat';
 
-  isEnabled(config: Config): boolean {
-    const raw = config.channels?.wechat;
-    if (!raw) return false;
-    if (Array.isArray(raw)) {
-      return raw.some(inst => inst.enabled !== false && !!inst.token);
-    }
-    return raw.enabled === true && !!raw.token;
-  }
+  async createInstance(inst: WechatInst, ctx: ChannelBuildContext): Promise<ChannelInstance | null> {
+    if (inst.enabled === false || !inst.token) return null;
 
-  async createChannels(config: Config): Promise<ChannelInstance[]> {
-    const instances = normalizeChannelInstances<WechatChannelConfig>(
-      config.channels?.wechat,
-      'wechat',
-    );
+    const channel = new WechatChannel({
+      baseUrl: inst.baseUrl || 'https://ilinkai.weixin.qq.com',
+      token: inst.token,
+    });
 
-    const result: ChannelInstance[] = [];
-    for (const inst of instances) {
-      if (inst.enabled === false || !inst.token) continue;
-
-      const channel = new WechatChannel({
-        baseUrl: inst.baseUrl || 'https://ilinkai.weixin.qq.com',
-        token: inst.token,
-      });
-
-      const adapter = {
-        channelName: inst.name,
-        channelKey: inst.name,
-        capabilities: { file: false, image: false, interaction: false, markdown: false, thought: false, status: true, thread: false },
-        send: async (envelope: any, payload: any) => {
-          const channelId = envelope.channelId;
-          switch (payload.kind) {
-            case 'result.text':
-            case 'command.result':
-            case 'command.error':
-            case 'system.notice':
-            case 'system.error':
-            case 'result.error':
-              await channel.sendMessage(channelId, payload.text);
-              return;
-            case 'result.file': {
-              const name = payload.fileName || payload.filePath;
-              await channel.sendMessage(channelId, `\ud83d\udcce \u6587\u4ef6\u5df2\u751f\u6210\uff1a${name}\n\u8def\u5f84\uff1a${payload.filePath}`);
-              return;
-            }
-            case 'result.image':
-              return;
-            case 'activity.batch': {
-              // WeChat 不发送成功的 tool_result
-              const filtered = payload.items.filter((i: ThoughtItem) => !(i.kind === 'tool_result' && i.ok));
-              const text = formatItemsAsText(filtered);
-              if (text) await channel.sendMessage(channelId, text);
-              return;
-            }
-            case 'interaction':
-              if (payload.fallbackText) await channel.sendMessage(channelId, payload.fallbackText);
-              return;
-            case 'status.started':
-            case 'status.completed':
-            case 'status.interrupted':
-            case 'status.error':
-            case 'status.timeout':
-            case 'status.progress':
-            case 'custom':
-              return;
-            default:
-              logger.warn(`[WeChat] Unhandled payload kind: ${(payload as any).kind}`);
+    const mode = resolveShowActivities(inst);
+    const adapter = {
+      channelName: inst.name,
+      channelKey: inst.name,
+      capabilities: { file: false, image: false, interaction: false, markdown: false, thought: false, status: true, thread: false },
+      send: async (envelope: any, payload: any) => {
+        const channelId = envelope.channelId;
+        switch (payload.kind) {
+          case 'result.text': case 'command.result': case 'command.error':
+          case 'system.notice': case 'system.error': case 'result.error':
+            await channel.sendMessage(channelId, payload.text); return;
+          case 'result.file': {
+            const name = payload.fileName || payload.filePath;
+            await channel.sendMessage(channelId, `📎 文件已生成：${name}\n路径：${payload.filePath}`);
+            return;
           }
-        },      };
-
-      const policy = {
-        canSwitchProject: (chatType: string, identity: string) => identity === 'owner' || identity === 'admin',
-        canListProjects: (chatType: string, identity: string) => identity === 'owner' || identity === 'admin',
-        canCreateSession: (chatType: string, identity: string) => true,
-        canDeleteSession: (chatType: string, identity: string) => true,
-        canImportCliSession: (chatType: string, identity: string) => identity === 'owner' || identity === 'admin',
-        messagePrefix: (chatType: string, peerName?: string) => '',
-        showMiddleResult: (chatType: string, identity: string) => {
-          const mode = getChannelShowActivities(config, inst.name);
-          if (mode === 'none') return false;
-          if (mode === 'dm-only') return chatType === 'private';
-          if (mode === 'owner-dm-only') return chatType === 'private' && identity === 'owner';
-          return true;
-        },
-        showIdleMonitor: (chatType: string, identity: string) => {
-          const mode = getChannelShowActivities(config, inst.name);
-          if (mode === 'none') return false;
-          if (mode === 'dm-only') return chatType === 'private';
-          if (mode === 'owner-dm-only') return chatType === 'private' && identity === 'owner';
-          return true;
-        },
-        accumulateErrors: (chatType: string, identity: string) => true,
-      };
-
-      const options = {
-        fileMarkerPattern: /\[SEND_FILE:(?:(\w+):)?([^\]]+)\]/g,
-        flushDelay: inst.flushDelay ?? 3,  // WeChat 默认 3s
-      };
-
-      result.push({
-        channelType: 'wechat',
-        adapter,
-        channel,
-        policy,
-        options,
-        connect: () => channel.connect(),
-        disconnect: () => channel.disconnect(),
-        onProjectPathRequest: (channelId: string) =>
-          Promise.resolve(config.projects?.defaultPath || process.cwd()),
-        registerBridge(bridge: MessageBridge, channelType: string) {
-          bridge.register(
-            adapter.channelName,
-            (handler) => channel.onMessage(async (channelId: string, content: string, peerId?: string,
-              images?: Array<{ data: string; mimeType: string }>, chatType?: 'private' | 'group') => {
-              await handler({
-                channel: adapter.channelName,
-                channelType,
-                channelId,
-                selfAID: (inst as any).agentName,
-                content,
-                images,
-                chatType: chatType || 'private',
-                peerId: peerId || '',
-              });
-            }),
-            (channelId, text) => channel.sendMessage(channelId, text),
-            adapter,
-            channelType
-          );
-        },
-        registerHooks(ctx: BridgeHookContext) {
-          if (channel.setEventBus) {
-            channel.setEventBus(ctx.eventBus);
+          case 'result.image': return;
+          case 'activity.batch': {
+            const filtered = payload.items.filter((i: ThoughtItem) => !(i.kind === 'tool_result' && i.ok));
+            const text = formatItemsAsText(filtered);
+            if (text) await channel.sendMessage(channelId, text);
+            return;
           }
-        },
-      });
-    }
+          case 'interaction':
+            if (payload.fallbackText) await channel.sendMessage(channelId, payload.fallbackText);
+            return;
+          default: return;
+        }
+      },
+    };
 
-    return result;
-  }
+    const policy = {
+      canSwitchProject: (_: string, identity: string) => identity === 'owner' || identity === 'admin',
+      canListProjects: (_: string, identity: string) => identity === 'owner' || identity === 'admin',
+      canCreateSession: () => true,
+      canDeleteSession: () => true,
+      canImportCliSession: (_: string, identity: string) => identity === 'owner' || identity === 'admin',
+      messagePrefix: () => '',
+      showMiddleResult: (chatType: string, identity: string) => showActivitiesPolicy(mode, chatType, identity),
+      showIdleMonitor: (chatType: string, identity: string) => showActivitiesPolicy(mode, chatType, identity),
+      accumulateErrors: () => true,
+    };
 
-  async createChannel(config: Config): Promise<ChannelInstance> {
-    const instances = await this.createChannels(config);
-    if (instances.length === 0) {
-      throw new Error('WeChat config missing');
-    }
-    return instances[0];
+    return {
+      channelType: 'wechat', adapter, channel,
+      policy,
+      options: { fileMarkerPattern: /\[SEND_FILE:(?:(\w+):)?([^\]]+)\]/g, flushDelay: inst.flushDelay ?? 3 },
+      connect: () => channel.connect(),
+      disconnect: () => channel.disconnect(),
+      onProjectPathRequest: () => Promise.resolve(ctx.defaultProjectPath),
+      registerBridge(bridge: MessageBridge, channelType: string) {
+        bridge.register(
+          adapter.channelName,
+          (handler) => channel.onMessage(async (channelId: string, content: string, peerId?: string,
+            images?: Array<{ data: string; mimeType: string }>, chatType?: 'private' | 'group') => {
+            await handler({
+              channel: adapter.channelName, channelType, channelId,
+              selfAID: ctx.agentName, content, images,
+              chatType: chatType || 'private', peerId: peerId || '',
+            });
+          }),
+          (channelId, text) => channel.sendMessage(channelId, text),
+          adapter, channelType,
+        );
+      },
+      registerHooks(hookCtx: BridgeHookContext) {
+        if (channel.setEventBus) channel.setEventBus(hookCtx.eventBus);
+      },
+    };
   }
 }
