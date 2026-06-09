@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { loadEvolclawConfig, saveEvolclawConfig } from '../../src/evolclaw-config.js';
+import { loadEvolclawConfig, saveEvolclawConfig } from '../../src/config-store.js';
 import { _resetRoot } from '../../src/paths.js';
 
 let tmp: string;

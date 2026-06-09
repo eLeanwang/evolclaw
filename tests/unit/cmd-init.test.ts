@@ -24,7 +24,7 @@ vi.mock('../../src/aun/aid/control-aid.js', () => ({
 
 import { cmdInit } from '../../src/cli/init.js';
 import { resolvePaths, _resetRoot } from '../../src/paths.js';
-import { loadEvolclawConfig } from '../../src/evolclaw-config.js';
+import { loadEvolclawConfig } from '../../src/config-store.js';
 
 describe('cmdInit (non-interactive)', () => {
   let tmpRoot: string;

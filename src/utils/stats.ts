@@ -210,11 +210,24 @@ interface AidStatsEntry {
 
 export type QueueStatsProvider = (agentName: string) => { processing: number; queued: number };
 
+export interface MessageEventRecord {
+  ts: number;
+  agent_aid: string;
+  peer_key: string;
+  direction: 'in' | 'out';
+  msg_type?: string;
+  bytes: number;
+  encrypted?: boolean;
+  chatmode?: string;
+}
+
 export class AidStatsCollector {
   private entries = new Map<string, AidStatsEntry>();
   private queueStatsProvider?: QueueStatsProvider;
   /** sessionId → 当前正在跑该 session 的 agent，task:started 写入，task:completed/error 清除 */
   private sessionToAgent = new Map<string, string>();
+  /** 外部注入的持久化回调（写入 message_events 表） */
+  onMessage?: (event: MessageEventRecord) => void;
 
   constructor(eventBus?: EventBus) {
     if (!eventBus) return;
@@ -443,6 +456,12 @@ export class AidStatsCollector {
     }
     entry.bytesReceived += byteLength;
     entry.uniquePeers.add(fromPeer);
+    // 持久化
+    this.onMessage?.({
+      ts: Date.now(), agent_aid: aid, peer_key: `aun#${fromPeer}`,
+      direction: 'in', msg_type: isSystem ? 'system' : 'private',
+      bytes: byteLength, encrypted: encrypt, chatmode,
+    });
   }
 
   recordOutbound(aid: string, toPeer: string, byteLength: number, text?: string, isSystem: boolean = false, encrypt?: boolean, chatmode?: string): void {
@@ -465,6 +484,12 @@ export class AidStatsCollector {
     }
     entry.bytesSent += byteLength;
     entry.uniquePeers.add(toPeer);
+    // 持久化
+    this.onMessage?.({
+      ts: Date.now(), agent_aid: aid, peer_key: `aun#${toPeer}`,
+      direction: 'out', msg_type: isSystem ? 'system' : 'private',
+      bytes: byteLength, encrypted: encrypt, chatmode,
+    });
   }
 
   getAllSnapshots(): AidStatsSnapshot[] {

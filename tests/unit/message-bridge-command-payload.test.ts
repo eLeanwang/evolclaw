@@ -249,7 +249,7 @@ describe('MessageBridge — menu 协议', () => {
 
     await h.triggerInbound(makeInbound({ content: JSON.stringify({ type: 'menu.query', id: 'q1', name: 'chatmode' }) }));
 
-    expect(h.cmdHandler.execMenuQuery).toHaveBeenCalledWith('/chatmode', 'test-instance', 'chat-1', 'peer-1', undefined);
+    expect(h.cmdHandler.execMenuQuery).toHaveBeenCalledWith('/chatmode', 'test-instance', 'chat-1', 'peer-1', undefined, 'private');
     expect(parseCustomResponse(sendMock)).toEqual({
       type: 'menu.response',
       id: 'q1',
@@ -265,7 +265,7 @@ describe('MessageBridge — menu 协议', () => {
 
     await h.triggerInbound(makeInbound({ content: JSON.stringify({ type: 'menu.options', id: 'o1', name: 'chatmode' }) }));
 
-    expect(h.cmdHandler.getSubMenuItems).toHaveBeenCalledWith('/chatmode', 'test-instance', 'chat-1', 'peer-1', undefined);
+    expect(h.cmdHandler.getSubMenuItems).toHaveBeenCalledWith('/chatmode', 'test-instance', 'chat-1', 'peer-1', undefined, undefined, 'private');
     expect(parseCustomResponse(sendMock)).toEqual({
       type: 'menu.response',
       id: 'o1',
@@ -312,7 +312,7 @@ describe('MessageBridge — menu 协议', () => {
 
     await h.triggerInbound(makeInbound({ content: JSON.stringify({ type: 'menu.action', id: 'a1', name: 'session', action: 'stop' }) }));
 
-    expect(h.cmdHandler.execMenuAction).toHaveBeenCalledWith('/session', 'stop', undefined, 'test-instance', 'chat-1', 'peer-1');
+    expect(h.cmdHandler.execMenuAction).toHaveBeenCalledWith('/session', 'stop', undefined, 'test-instance', 'chat-1', 'peer-1', undefined, 'private');
     expect(parseCustomResponse(sendMock)).toEqual({
       type: 'menu.response',
       id: 'a1',
@@ -331,8 +331,24 @@ describe('MessageBridge — menu 协议', () => {
     }) }));
 
     expect(h.cmdHandler.execMenuAction).toHaveBeenCalledWith(
-      '/session', 'switch', { target: '前端重构' }, 'test-instance', 'chat-1', 'peer-1'
+      '/session', 'switch', { target: '前端重构' }, 'test-instance', 'chat-1', 'peer-1', undefined, 'private'
     );
+  });
+
+  it('menu.options 支持 topic name 映射', async () => {
+    const sendMock = vi.fn().mockResolvedValue(undefined);
+    const h = makeBridge({ adapterSend: sendMock });
+    h.cmdHandler.getSubMenuItems.mockResolvedValue([{ value: 'thread-1', label: '重构讨论' }]);
+
+    await h.triggerInbound(makeInbound({ content: JSON.stringify({ type: 'menu.options', id: 'topic-o1', name: 'topic' }) }));
+
+    expect(h.cmdHandler.getSubMenuItems).toHaveBeenCalledWith('/topic', 'test-instance', 'chat-1', 'peer-1', undefined, undefined, 'private');
+    expect(parseCustomResponse(sendMock)).toEqual({
+      type: 'menu.response',
+      id: 'topic-o1',
+      name: 'topic',
+      data: [{ value: 'thread-1', label: '重构讨论' }],
+    });
   });
 
   it('menu.query unknown name 返回 UNKNOWN_NAME 错误', async () => {

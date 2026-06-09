@@ -2,7 +2,7 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import crypto from 'crypto';
-import { type AgentRunnerFull, hasCompact, type AgentEvent, type Compactable } from '../../agents/runner-types.js';
+import { type AgentRunnerFull, hasCompact, type AgentEvent, type Compactable, type AgentTokenUsage, type AgentContextUsage, type AgentLastModelCall, type AgentModelCall } from '../../agents/runner-types.js';
 import { SessionManager } from '../session/session-manager.js';
 import { appendMessageLog, buildOutboundEntry } from './message-log.js';
 import { IMRenderer } from './im-renderer.js';
@@ -13,19 +13,39 @@ import { logger } from '../../utils/logger.js';
 import { getErrorMessage, classifyError, ErrorType, ERROR_PREFIX, isInfraError, prefixErrorType, isRetryableError } from '../../utils/error-utils.js';
 import { EventBus } from '../event-bus.js';
 import { summarizeToolInput } from '../permission.js';
-import type { Message, Session, ChannelAdapter, ChannelOptions, ChannelPolicy, CommandHandler, ReplyContext, AgentContext, EvolAgentRegistryHandle, GlobalSettings, OutboundEnvelope, OutboundPayload, InteractionRequest, InteractionKind, ActionInteraction, CommandCard } from '../../types.js';
+import type { Message, Session, ChannelAdapter, ChannelOptions, ChannelPolicy, CommandHandler, ReplyContext, AgentContext, EvolAgentRegistryHandle, GlobalSettings, OutboundEnvelope, OutboundPayload, InteractionRequest, InteractionKind, ActionInteraction, CommandCard, ResponseDepth } from '../../types.js';
 import type { TriggerManager } from '../trigger/manager.js';
 import { DEFAULT_PERMISSION_MODE } from '../../types.js';
 import { getPackageRoot, resolveRoot, resolvePaths } from '../../paths.js';
 import { renderKitSections, type KitRenderContext } from '../../eck/kit-renderer.js';
 import { renderMessageBody, type RenderMessageResult } from '../../eck/message-renderer.js';
 import { consumeHints, hintsToSubMessages, composeHintFallback } from './pending-hints.js';
+import { resolveResponseDepth as computeResponseDepth } from './response-depth.js';
 import type { SubMessage } from '../../types.js';
 import { normalizeBaseagent } from '../../agents/baseagent.js';
 import type { InteractionRouter } from '../interaction-router.js';
 import { renderActionAsText, renderCommandCardAsText } from '../interaction-router.js';
 import { formatPeerKey } from '../relation/peer-identity.js';
 import { resolveEffectiveModel } from '../model/model-scope.js';
+import { insertUsageEvent, insertContextBreakdown, insertModelCalls } from '../stats/writer.js';
+import { normalizeUsage } from '../stats/normalizer.js';
+import { getBudgetStatus } from '../stats/budget.js';
+
+type StreamRunResult = {
+  isError: boolean;
+  subtype?: string;
+  errors?: string[];
+  terminalReason?: string;
+  lastReplyText: string;
+  fullText: string;
+  hasReceivedText: boolean;
+  numTurns?: number;
+  ttftMs?: number;
+  tokenUsage?: AgentTokenUsage;
+  contextUsage?: AgentContextUsage;
+  lastModelCall?: AgentLastModelCall;
+  modelCalls?: AgentModelCall[];
+};
 
 /** OS 信息在进程生命周期内是常量，模块加载时算一次。例: "Windows 11 Pro (win32 10.0.26200)" */
 const OS_INFO = (() => {
@@ -326,6 +346,8 @@ export class MessageProcessor {
     // message.channel 现在存实例名（channelName），可直接用于精确路由
     const { session, absoluteProjectPath } = await this.resolveSession(message);
 
+    // 群聊响应深度决策（resolveSession 之后、_processMessageInternal 之前）
+    const responseDepth = await this.resolveResponseDepth(message, session);
     // thread(feishu) pending strategy: inject replyContext so first reply creates the thread
     if (message.triggerMeta?.pendingThread && message.triggerMeta?.rootMessageId) {
       const triggerId = message.triggerMeta.triggerId;
@@ -422,7 +444,7 @@ export class MessageProcessor {
 
     try {
       await Promise.race([
-        this._processMessageInternal(message, session, absoluteProjectPath, resetTimer, shouldSuppress, () => lastIdleSec),
+        this._processMessageInternal(message, session, absoluteProjectPath, resetTimer, shouldSuppress, () => lastIdleSec, responseDepth),
         timeoutPromise
       ]);
     } catch (error: any) {
@@ -467,7 +489,7 @@ export class MessageProcessor {
   }
 
   /** 自动安全模式已禁用：仅保留错误计数，不再自动切换状态 */
-  private async _processMessageInternal(message: Message, session: Session, absoluteProjectPath: string, resetTimer: (eventType?: string, toolName?: string) => void, shouldSuppress: () => boolean, getLastIdleSec?: () => number): Promise<void> {
+  private async _processMessageInternal(message: Message, session: Session, absoluteProjectPath: string, resetTimer: (eventType?: string, toolName?: string) => void, shouldSuppress: () => boolean, getLastIdleSec?: () => number, responseDepth?: ResponseDepth): Promise<void> {
     const messageId = `${message.channel}_${message.channelId}_${message.timestamp || Date.now()}`;
     const channelKey = session.metadata?.channelKey || message.channel;
     const channelInfo = this.resolveChannelInfo(channelKey);
@@ -496,7 +518,7 @@ export class MessageProcessor {
     const chatmode = session.sessionMode ?? 'interactive';
 
     // 诊断日志：记录 inbound message_id 和生成的 task_id 的对应关系
-    logger.info(`[MessageProcessor] Task created: inboundMsgId=${message.messageId ?? 'none'} taskId=${taskId} sessionId=${session.id} chatmode=${chatmode}`);
+    logger.info(`[MessageProcessor] Task created: inboundMsgId=${message.messageId ?? 'none'} taskId=${taskId} sessionId=${session.id} chatmode=${chatmode}${responseDepth && responseDepth !== 'standard' ? ` depth=${responseDepth}` : ''}`);
 
     // 构建带 taskId/chatmode 的 ReplyContext（本次任务所有出站消息共用）
     const taskReplyContext = (): ReplyContext => {
@@ -539,6 +561,18 @@ export class MessageProcessor {
         agentName: agentNameForStats,
         timestamp: Date.now()
       });
+
+      // ── 硬上限检查：超限直接返回提示，不调模型 ──
+      {
+        const budgetAgentAid = session.selfAID || message.selfAID || '';
+        const budgetPeerKey = formatPeerKey(message.channel, message.channelId);
+        const budgetStatus = getBudgetStatus(resolveRoot(), budgetAgentAid, budgetPeerKey);
+        if (budgetStatus.hard_blocked) {
+          logger.warn(`[MessageProcessor] Budget hard limit reached: agent=${budgetAgentAid} peer=${budgetPeerKey} pct=${budgetStatus.pct_used.toFixed(1)}%`);
+          adapter.send(envelope, { kind: 'status.completed', metadata: { durationMs: 0 } }).catch(() => {});
+          return;
+        }
+      }
 
       const imageInfo = message.images && message.images.length > 0 ? ` [${message.images.length} image(s)]` : '';
       const modeInfo = isBackground ? ' [\u540e\u53f0]' : '';
@@ -664,7 +698,7 @@ export class MessageProcessor {
       // 先用裸文本兜底；vars 构造完成后用消息渲染层重算（见下方 effectivePrompt 重赋值）。
       let effectivePrompt = wrapPrompt(message.content);
 
-      let streamResult: { isError: boolean; subtype?: string; errors?: string[]; terminalReason?: string; lastReplyText: string; fullText: string; hasReceivedText: boolean; numTurns?: number; ttftMs?: number; tokenUsage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number }; contextUsage?: { totalTokens: number; maxTokens: number; percentage: number; model: string; effort?: string } } = { isError: false, lastReplyText: '', fullText: '', hasReceivedText: false };
+      let streamResult: StreamRunResult = { isError: false, lastReplyText: '', fullText: '', hasReceivedText: false };
       let effectiveSystemPrompt: string | undefined;
       let modelOverride: { model?: string; effort?: string } | undefined;
       let usedFallback = false;
@@ -742,6 +776,21 @@ export class MessageProcessor {
           modelOverride = evolclawModelOverride;
         }
 
+        // ④ 群聊 responseDepth → effort 动态映射
+        // 仅当群聊且 evolclaw 作用域未显式指定 effort 时生效（显式配置优先）
+        if (message.chatType === 'group' && responseDepth && !(modelOverride?.effort)) {
+          const depthEffortMap: Record<string, string> = {
+            lightweight: 'low',
+            standard: 'medium',
+            deep: 'high',
+          };
+          const mappedEffort = depthEffortMap[responseDepth];
+          if (mappedEffort) {
+            modelOverride = { ...(modelOverride || {}), effort: mappedEffort };
+            logger.info(`[MessageProcessor] Group depth→effort: ${responseDepth} → ${mappedEffort} session=${session.id}`);
+          }
+        }
+
         agentModel = (typeof (agent as any).getModel === 'function') ? (agent as any).getModel() as string : undefined;
 
         // Kit renderer: 组装上下文
@@ -786,7 +835,9 @@ export class MessageProcessor {
             channel: currentChannelType || null,
             venueUid: undefined,
             // 群分发模式 / 客户端类型 / 权限模式
-            dispatch: session.metadata?.dispatchMode || undefined,
+            // 优先本地 session 覆盖（/dispatch 命令），fallback 到服务器 dispatch_mode
+            dispatch: session.metadata?.dispatchMode || message.dispatchMode || undefined,
+            responseDepth: responseDepth || undefined,
             clientType: message.clientType || undefined,
             permissionMode: session.metadata?.permissionMode || 'auto',
             capabilities: capParts.length > 0 ? capParts.join('、') : undefined,
@@ -822,6 +873,35 @@ export class MessageProcessor {
         if (kitContext) contextParts.push(kitContext);
 
         effectiveSystemPrompt = [options?.systemPromptAppend, ...contextParts].filter(Boolean).join('\n') || undefined;
+
+        // ── Stats: context_breakdown 旁路采集（各段估算 token 数，字符数/4 近似） ──
+        try {
+          const estTokens = (s?: string) => s ? Math.ceil(s.length / 4) : 0;
+          const cbModel = effectiveModel || agentModel || 'unknown';
+          const cbMaxTokens = 200000; // 保守默认，后续可从 model-catalog 取
+          const systemPromptTokens = estTokens(options?.systemPromptAppend);
+          const personaTokens = estTokens(persona);
+          const workingTokens = estTokens(working);
+          const kitTokens = estTokens(kitContext);
+          const totalEst = estTokens(effectiveSystemPrompt);
+          insertContextBreakdown(resolveRoot(), {
+            ts: Date.now(),
+            agent_aid: selfAid || session.selfAID || '',
+            session_id: session.id,
+            turn_count: 0, // 按 ts 排序得轮次
+            model: cbModel,
+            max_tokens: cbMaxTokens,
+            system_prompt: systemPromptTokens + personaTokens + workingTokens,
+            system_tools: 0, // 工具 schema 不在此层，留 0（后续 runner 层补）
+            mcp_tools: 0,
+            custom_agents: 0,
+            memory_files: kitTokens, // ECK 渲染的所有段（含 memory/skills/rules）
+            skills: 0,
+            messages: 0, // messages 段在 runner 层才知道
+            free_space: Math.max(0, cbMaxTokens - totalEst),
+            total_estimated: totalEst,
+          });
+        } catch { /* non-fatal */ }
 
         // 消息渲染层：用 message manifest 逐条渲染（时间 + 群聊发送者），组装成最终正文。
         // 单条消息构造单元素 items；批量合并的消息 message.items 已由队列填充。
@@ -1197,11 +1277,122 @@ export class MessageProcessor {
       } else {
         // 真正的成功
         const durationMs = Date.now() - startTime;
+
+        // ── Stats: 写入 usage_events（在 status.completed 之前，以便带上 cost） ──
+        let statsCostUsd = 0;
+        let statsCostCny = 0;
+        let statsCacheHitRate = 0;
+        if (streamResult.tokenUsage) {
+          try {
+            const statsAgentAid = session.selfAID || message.selfAID || '';
+            const statsPeerKey = formatPeerKey(message.channel, message.channelId);
+            const statsModel = streamResult.contextUsage?.model || 'unknown';
+            const ctxPct = streamResult.contextUsage?.percentage;
+            const event = normalizeUsage(streamResult.tokenUsage as any, {
+              ts: Date.now(),
+              agent_aid: statsAgentAid,
+              peer_key: statsPeerKey,
+              peer_type: session.chatType || undefined,
+              session_id: session.id,
+              model: statsModel,
+              turns: streamResult.numTurns,
+              duration_ms: durationMs,
+              context_window_pct: ctxPct,
+            });
+            insertUsageEvent(resolveRoot(), event);
+            // 逐次大模型调用明细落库（model_calls 表）
+            if (streamResult.modelCalls?.length) {
+              const mcRows = streamResult.modelCalls.map(mc => ({
+                ts: event.ts,
+                task_id: taskId,
+                session_id: session.id,
+                agent_session_id: session.agentSessionId ?? undefined,
+                agent_aid: statsAgentAid,
+                peer_key: statsPeerKey,
+                call_index: mc.call_index,
+                model: mc.model || statsModel,
+                request_id: mc.request_id,
+                message_id: mc.message_id,
+                input_tokens: mc.tokenUsage.input_tokens ?? 0,
+                output_tokens: mc.tokenUsage.output_tokens ?? 0,
+                cache_creation_tokens: mc.tokenUsage.cache_creation_input_tokens ?? 0,
+                cache_read_tokens: mc.tokenUsage.cache_read_input_tokens ?? 0,
+                degraded: mc.degraded ? 1 : 0,
+              } as import('../stats/writer.js').ModelCallRow));
+              insertModelCalls(resolveRoot(), mcRows);
+            }
+            // 计算费用（用于合入 status.completed）
+            const { calcCost } = await import('../stats/billing.js');
+            const cost = calcCost(resolveRoot(), { ...event, ts: event.ts, model: event.model, billing_fn: event.billing_fn });
+            statsCostUsd = cost.usd ?? 0;
+            statsCostCny = cost.cny ?? 0;
+            const totalIn = event.input_tokens + event.cache_read_tokens;
+            statsCacheHitRate = totalIn > 0 ? Math.round((event.cache_read_tokens / totalIn) * 100) / 100 : 0;
+          } catch (e) {
+            logger.debug(`[MessageProcessor] Stats write failed (non-fatal): ${e}`);
+          }
+        }
+
+        // 会话累计 + model spec（用于 status.completed 统计细目）
+        let sessionStats: { input_tokens: number; output_tokens: number; cache_read_tokens: number; cache_creation_tokens: number; cost_usd: number; cost_cny: number; call_count: number } | undefined;
+        let modelSpec: { context_window: number; max_input_tokens: number; max_output_tokens: number } | undefined;
+        try {
+          const { openReadonlyDb, getDbPath } = await import('../stats/db.js');
+          const { resolveModelSpec } = await import('../stats/billing.js');
+          const statsModel = streamResult.contextUsage?.model || 'unknown';
+          modelSpec = resolveModelSpec(resolveRoot(), statsModel);
+          const rdb = openReadonlyDb(getDbPath(resolveRoot()));
+          if (rdb) {
+            try {
+              const row = rdb.prepare(
+                `SELECT COALESCE(SUM(input_tokens),0) AS input_tokens, COALESCE(SUM(output_tokens),0) AS output_tokens,
+                        COALESCE(SUM(cache_read_tokens),0) AS cache_read_tokens, COALESCE(SUM(cache_creation_tokens),0) AS cache_creation_tokens,
+                        COUNT(*) AS call_count FROM usage_events WHERE session_id = ?`
+              ).get(session.id) as any;
+              if (row) {
+                // 逐行算费用太贵，用近似：最后一轮的 cost 乘以次数不准，所以这里用累加 token 近似
+                sessionStats = {
+                  input_tokens: row.input_tokens,
+                  output_tokens: row.output_tokens,
+                  cache_read_tokens: row.cache_read_tokens,
+                  cache_creation_tokens: row.cache_creation_tokens,
+                  cost_usd: 0, cost_cny: 0,
+                  call_count: row.call_count,
+                };
+                // 快速费用估算：用会话所有行逐行算
+                const rows: any[] = rdb.prepare(`SELECT * FROM usage_events WHERE session_id = ?`).all(session.id);
+                const { calcCost: cc } = await import('../stats/billing.js');
+                for (const r of rows) {
+                  const c = cc(resolveRoot(), r);
+                  sessionStats.cost_usd += c.usd ?? 0;
+                  sessionStats.cost_cny += c.cny ?? 0;
+                }
+              }
+            } finally { rdb.close(); }
+          }
+        } catch { /* non-fatal */ }
+
         if (message.source !== 'trigger') {
           if (interruptReason) {
             adapter.send(envelope, { kind: 'status.interrupted', metadata: { reason: interruptReason } }).catch(() => {});
           } else {
-            adapter.send(envelope, { kind: 'status.completed', metadata: { durationMs, ttftMs: streamResult.ttftMs, numTurns: streamResult.numTurns, tokenUsage: streamResult.tokenUsage, contextUsage: streamResult.contextUsage } }).catch(() => {});
+            adapter.send(envelope, { kind: 'status.completed', metadata: {
+              durationMs,
+              ttftMs: streamResult.ttftMs,
+              numTurns: streamResult.numTurns,
+              tokenUsage: streamResult.tokenUsage,
+              contextUsage: streamResult.contextUsage,
+              lastModelCall: streamResult.lastModelCall,
+              cost_usd: statsCostUsd,
+              cost_cny: statsCostCny,
+              cache_hit_rate: statsCacheHitRate,
+              model_spec: modelSpec,
+              session_total: sessionStats,
+              queue: {
+                pending: this.messageQueue?.getQueueLength(session.id) ?? 0,
+                processing: this.messageQueue?.isProcessing(session.id) ? 1 : 0,
+              },
+            } as any }).catch(() => {});
           }
         }
         if (message.triggerMeta) {
@@ -1437,6 +1628,15 @@ export class MessageProcessor {
       }
     }
 
+    // 群聊分发模式同步：aun.ts 从服务器信封解析的 dispatchMode 注入到 message，
+    // 此处写入 session.metadata，确保 ECK 上下文的 venue fragment 正确渲染 dispatch 变量。
+    // 仅当 message.dispatchMode 有值且与 session 记录不一致时更新。
+    if (message.chatType === 'group' && message.dispatchMode && session.metadata?.dispatchMode !== message.dispatchMode) {
+      logger.info(`[MessageProcessor] dispatchMode sync: sessionId=${session.id} ${session.metadata?.dispatchMode ?? 'none'} -> ${message.dispatchMode}`);
+      session.metadata = { ...(session.metadata || {}), dispatchMode: message.dispatchMode };
+      await this.sessionManager.updateSession(session.id, { metadata: session.metadata });
+    }
+
     // 兜底纠正2：旧 session 创建时没传 peerType（建为 interactive），后续非 human 消息进来时升级为 proactive。
     // 新建场景已由 getOrCreateSession 内部 resolveDefaultSessionMode 处理，这里只兜底历史会话。
     if (message.peerType && message.peerType !== 'human' && message.peerType !== 'unknown' && session.sessionMode !== 'proactive') {
@@ -1463,6 +1663,35 @@ export class MessageProcessor {
   }
 
   /**
+   * 群聊响应深度决策。根据 dispatch 模式、消息特征、话题轮次综合判断。
+   * 返回 per-message 的瞬时深度枚举，不持久化到 session.metadata。
+   * 同时更新 session.metadata 中的 topicRounds/lastTopicHash（话题追踪状态）。
+   */
+  private async resolveResponseDepth(message: Message, session: Session): Promise<ResponseDepth> {
+    const result = computeResponseDepth({
+      chatType: message.chatType,
+      content: message.content,
+      selfAid: session.selfAID || message.selfAID,
+      mentionAids: message.mentionAids,
+      dispatch: session.metadata?.dispatchMode || message.dispatchMode,
+      topicRounds: session.metadata?.topicRounds ?? 0,
+      lastTopicHash: session.metadata?.lastTopicHash,
+    });
+
+    // 持久化话题追踪状态（仅群聊时有意义）
+    if (message.chatType === 'group') {
+      session.metadata = {
+        ...(session.metadata || {}),
+        topicRounds: result.topicRounds,
+        lastTopicHash: result.topicHash,
+      };
+      await this.sessionManager.updateSession(session.id, { metadata: session.metadata });
+    }
+
+    return result.depth;
+  }
+
+  /**
    * 处理标准事件流（AgentEvent）
    *
    * 此方法只消费标准 AgentEvent 类型，不引用任何 SDK 特有事件。
@@ -1475,12 +1704,12 @@ export class MessageProcessor {
     renderer: IMRenderer,
     resetTimer: (eventType?: string, toolName?: string) => void,
     shouldSuppress: () => boolean
-  ): Promise<{ isError: boolean; subtype?: string; errors?: string[]; terminalReason?: string; lastReplyText: string; fullText: string; hasReceivedText: boolean; numTurns?: number; ttftMs?: number; tokenUsage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number }; contextUsage?: { totalTokens: number; maxTokens: number; percentage: number; model: string; effort?: string } }> {
+  ): Promise<StreamRunResult> {
     // Per-session agent name for stats bucketing
     const agentNameForStats = this.agentRegistry?.resolveByChannel(session.metadata?.channelKey || session.channel)?.name ?? '<unknown>';
     let hasReceivedText = false;
     let hasErrorResult = false;  // 是否已有 tool_result/error 事件输出过错误
-    let completeResult: { isError: boolean; subtype?: string; errors?: string[]; terminalReason?: string; lastReplyText: string; fullText: string; hasReceivedText: boolean; numTurns?: number; ttftMs?: number; tokenUsage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number }; contextUsage?: { totalTokens: number; maxTokens: number; percentage: number; model: string; effort?: string } } = { isError: false, lastReplyText: '', fullText: '', hasReceivedText: false };
+    let completeResult: StreamRunResult = { isError: false, lastReplyText: '', fullText: '', hasReceivedText: false };
 
     // 追踪最后一轮 assistant 回复文本（tool_use 之后的纯文本）
     let lastReplyText = '';
@@ -1663,7 +1892,7 @@ export class MessageProcessor {
           }
 
           // 记录完成状态 + 最后一轮回复文本（后续 complete 覆盖前序）
-          completeResult = { isError: !!event.isError, subtype: event.subtype, errors: event.errors, terminalReason: event.terminalReason, lastReplyText, fullText: event.result || '', hasReceivedText, numTurns: event.numTurns, ttftMs: event.ttftMs, tokenUsage: event.tokenUsage, contextUsage: event.contextUsage };
+          completeResult = { isError: !!event.isError, subtype: event.subtype, errors: event.errors, terminalReason: event.terminalReason, lastReplyText, fullText: event.result || '', hasReceivedText, numTurns: event.numTurns, ttftMs: event.ttftMs, tokenUsage: event.tokenUsage, contextUsage: event.contextUsage, lastModelCall: event.lastModelCall, modelCalls: event.modelCalls };
 
           // thought jsonl 写入已下沉到 aun.ts:sendThought 成功后，
           // 由那里按 LLM 输出的每个 text item 单独写一条，此处不再写。
@@ -1726,7 +1955,7 @@ export class MessageProcessor {
       }
 
       // 记录完成状态
-      completeResult = { isError: !!event.isError, subtype: event.subtype, errors: event.errors, terminalReason: event.terminalReason, lastReplyText, fullText: event.result || '', hasReceivedText, numTurns: event.numTurns, ttftMs: event.ttftMs, tokenUsage: event.tokenUsage, contextUsage: event.contextUsage };
+      completeResult = { isError: !!event.isError, subtype: event.subtype, errors: event.errors, terminalReason: event.terminalReason, lastReplyText, fullText: event.result || '', hasReceivedText, numTurns: event.numTurns, ttftMs: event.ttftMs, tokenUsage: event.tokenUsage, contextUsage: event.contextUsage, lastModelCall: event.lastModelCall };
 
       if (event.subtype === 'success') {
         this.messageCache.addEvent(session.id, {

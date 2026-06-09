@@ -1,11 +1,12 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="light">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>EvolClaw Watch</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="/style.css">
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
 </head>
 <body>
   <!-- 配对页 -->
@@ -30,8 +31,14 @@
         <button class="tab" data-view="triggers">Triggers</button>
         <button class="tab" data-view="cache">Cache</button>
         <button class="tab" data-view="system">System</button>
+        <button class="tab" data-view="usage">Usage</button>
+
       </nav>
+      <span id="today-cost" class="today-cost"></span>
+      <span style="flex:1"></span>
+      <span class="build-ts" style="font-size:10px;color:var(--dim)" title="构建时间">2026-06-07 21:55</span>
       <span id="conn-status" class="conn-status">连接中…</span>
+      <button id="theme-btn" class="theme-btn" title="切换主题">🌗</button>
       <button id="logout-btn" class="logout-btn" title="退出配对">退出</button>
     </header>
 
@@ -58,6 +65,80 @@
       </section>
       <section id="view-cache" class="view"></section>
       <section id="view-system" class="view"></section>
+      <section id="view-usage" class="view">
+        <div class="usage-layout">
+          <!-- 子 Tab：Dashboard / Explorer -->
+          <div class="usage-subtabs">
+            <button class="usage-subtab active" data-subview="overview">Overview</button>
+            <button class="usage-subtab" data-subview="dashboard">Dashboard</button>
+            <button class="usage-subtab" data-subview="explorer">Explorer</button>
+          </div>
+
+          <!-- Dashboard 面板 -->
+          <div id="usage-dashboard" class="usage-subpanel">
+            <div class="usage-cards" id="usage-cards"></div>
+            <div class="usage-chart-row">
+              <div id="usage-hourly-chart" class="usage-chart"></div>
+              <div id="usage-model-chart" class="usage-chart-sm"></div>
+            </div>
+            <div class="usage-table-section">
+              <h3>Top Peers (Today)</h3>
+              <table id="usage-top-peers" class="usage-table"></table>
+            </div>
+          </div>
+
+          <!-- Overview 面板 -->
+          <div id="usage-overview" class="usage-subpanel active">
+            <div id="ov-cards" class="usage-cards"></div>
+            <div class="usage-table-section" style="margin-top:4px">
+              <h3>按 Agent 汇总（全时段）</h3>
+              <table id="ov-agent-table" class="usage-table"></table>
+            </div>
+          </div>
+
+          <!-- Explorer 面板 -->
+          <div id="usage-explorer" class="usage-subpanel">
+            <div class="exp-layout">
+              <!-- 左侧列表 -->
+              <div class="exp-sidebar">
+                <div class="exp-sidebar-group">
+                  <div class="exp-sidebar-title">Agents</div>
+                  <div id="exp-agent-list"></div>
+                </div>
+                <div class="exp-sidebar-group">
+                  <div class="exp-sidebar-title">Peers</div>
+                  <div id="exp-peer-list"></div>
+                </div>
+              </div>
+              <!-- 右侧详情 -->
+              <div class="exp-detail">
+                <div id="exp-detail-header" class="exp-detail-header">
+                  <span id="exp-selected-name">请从左侧选择 Agent 或 Peer</span>
+                </div>
+                <div id="exp-detail-cards" class="usage-cards" style="display:none"></div>
+                <div class="explorer-filters">
+                  <label>From <input type="date" id="exp-from"></label>
+                  <label>To <input type="date" id="exp-to"></label>
+                  <label>Model <input type="text" id="exp-model" placeholder="model-id"></label>
+                  <select id="exp-granularity">
+                    <option value="hour">Hour</option>
+                    <option value="day" selected>Day</option>
+                    <option value="week">Week</option>
+                    <option value="month">Month</option>
+                  </select>
+                  <button id="exp-query-btn">Query</button>
+                </div>
+                <div id="usage-explorer-chart" class="usage-chart" style="height:260px"></div>
+                <div class="usage-table-section" style="margin-top:12px">
+                  <h3>Results</h3>
+                  <table id="usage-explorer-table" class="usage-table"></table>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
     </main>
   </div>
 

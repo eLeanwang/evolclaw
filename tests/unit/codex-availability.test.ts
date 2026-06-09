@@ -9,6 +9,7 @@ vi.mock('../../src/utils/cross-platform.js', () => ({
 }));
 
 vi.mock('../../src/agents/codex-runner.js', () => ({
+  getCodexAppServerAvailability: vi.fn(() => ({ available: true, version: '0.137.0' })),
   isCodexAppServerAvailable: vi.fn(() => true),
 }));
 

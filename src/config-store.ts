@@ -694,11 +694,9 @@ export function migrateIdentitiesIfNeeded(): void {
 
 // ── Project Migration ────────────────────────────────────────────────────────
 import os from 'os';
-
-/** 将绝对路径编码为 Claude Code 的目录名格式（/ \ . 替换为 -） */
-function encodePath(p: string): string {
-  return p.replace(/[/\\\.]/g, '-');
-}
+// 复用与 Claude SDK 对齐的统一编码（resolve→realpath→NFC→非字母数字替换为 -），
+// 避免本地实现规则不一致导致中文/非 ASCII 路径迁移时找不到 SDK 会话目录。
+import { encodePath } from './utils/cross-platform.js';
 
 /** 查找最新的 ~/.codex/state_*.sqlite */
 function findCodexDb(): string | null {

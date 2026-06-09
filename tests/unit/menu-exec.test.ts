@@ -5,8 +5,8 @@ import { EventBus } from '../../src/core/event-bus.js';
 // D1：/system 进程级鉴权查 evolclaw.json.owners。默认让 user1 在 owners 名单内，
 // 使既有正向用例继续通过；FORBIDDEN 用例按需覆写。
 const ownersMock = vi.hoisted(() => ({ value: ['user1'] as string[] }));
-vi.mock('../../src/evolclaw-config.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../../src/evolclaw-config.js')>();
+vi.mock('../../src/config-store.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/config-store.js')>();
   return {
     ...actual,
     loadEvolclawConfig: vi.fn(() => ({ $schema_version: 1, owners: ownersMock.value })),
@@ -24,6 +24,13 @@ function createMockSessionManager(overrides: Record<string, any> = {}) {
       metadata: { permissionMode: 'auto' },
       createdAt: Date.now(), updatedAt: Date.now(),
     }),
+    getActiveSessionSync: vi.fn().mockReturnValue({
+      id: 'sess-1', channel: 'aun', channelId: 'chat1',
+      projectPath: '/tmp/test', agentId: 'claude',
+      chatType: 'private', sessionMode: 'interactive',
+      metadata: { permissionMode: 'auto' },
+      createdAt: Date.now(), updatedAt: Date.now(),
+    }),
     resolveIdentity: vi.fn().mockReturnValue({ role: 'owner', mode: 'interactive' }),
     recordSuccess: vi.fn(),
     recordError: vi.fn().mockResolvedValue(0),
@@ -32,6 +39,8 @@ function createMockSessionManager(overrides: Record<string, any> = {}) {
     switchProject: vi.fn(),
     createNewSession: vi.fn(),
     listSessions: vi.fn().mockResolvedValue([]),
+    getThreadSession: vi.fn().mockResolvedValue(null),
+    unbindSession: vi.fn().mockResolvedValue(true),
     switchSession: vi.fn(),
     renameSession: vi.fn(),
     deleteSession: vi.fn(),
@@ -61,6 +70,7 @@ function createMockAgentRunner() {
     listModes: vi.fn().mockReturnValue([
       { key: 'auto', nameZh: '自动', description: '', available: true },
       { key: 'bypass', nameZh: '免审批', description: '', available: true },
+      { key: 'readonly', nameZh: '只读', description: '', available: true },
       { key: 'plan', nameZh: '计划', description: '', available: true },
       { key: 'edit', nameZh: '编辑', description: '', available: true },
       { key: 'request', nameZh: '请求', description: '', available: true },
@@ -68,6 +78,7 @@ function createMockAgentRunner() {
     ]),
     compact: vi.fn().mockResolvedValue(true),
     hasActiveStream: vi.fn().mockReturnValue(false),
+    closeSession: vi.fn().mockResolvedValue(undefined),
     capabilities: { fork: true },
     getSessionMessages: vi.fn().mockResolvedValue([]),
   } as any;
@@ -195,6 +206,37 @@ describe('execMenuQuery', () => {
     });
   });
 
+  describe('/topic', () => {
+    it('returns topic status by threadId', async () => {
+      const topic = {
+        id: 'topic-sess', channel: 'aun', channelId: 'chat1',
+        projectPath: '/tmp/test', agentId: 'claude',
+        agentSessionId: 'topic-agent-123',
+        threadId: 'thread-1',
+        name: '重构讨论',
+        chatType: 'private', sessionMode: 'interactive',
+        metadata: { peerId: 'user1' },
+        createdAt: 1000, updatedAt: 2000,
+      };
+      const sm = createMockSessionManager({ getThreadSession: vi.fn().mockResolvedValue(topic) });
+      const { handler } = createHandler({ sessionManager: sm });
+      const result = await handler.execMenuQuery('/topic', 'aun', 'chat1', 'user1', { target: 'thread-1' }) as { data: any };
+      expect(result.data).toMatchObject({
+        threadId: 'thread-1',
+        name: '重构讨论',
+        agentSessionId: 'topic-agent-123',
+        status: 'idle',
+        turns: 5,
+      });
+    });
+
+    it('returns NOT_FOUND for missing topic target', async () => {
+      const { handler } = createHandler();
+      const result = await handler.execMenuQuery('/topic', 'aun', 'chat1', 'user1', { target: 'missing' }) as any;
+      expect(result.code).toBe('NOT_FOUND');
+    });
+  });
+
   describe('/pwd', () => {
     it('returns current project path', async () => {
       const { handler } = createHandler();
@@ -247,6 +289,21 @@ describe('execMenuUpdate', () => {
       const result = await handler.execMenuUpdate('/perm', 'bypass', 'aun', 'chat1', 'user1');
       expect(result).toEqual({ data: { mode: 'bypass' } });
       expect(sm.updateSession).toHaveBeenCalledWith('sess-1', { metadata: { permissionMode: 'bypass' } });
+    });
+
+    it('switches to readonly mode (owner)', async () => {
+      const { handler, sm } = createHandler();
+      const result = await handler.execMenuUpdate('/perm', 'readonly', 'aun', 'chat1', 'user1');
+      expect(result).toEqual({ data: { mode: 'readonly' } });
+      expect(sm.updateSession).toHaveBeenCalledWith('sess-1', { metadata: { permissionMode: 'readonly' } });
+    });
+
+    it('handles /perm readonly through the chat command path', async () => {
+      const { handler, sm } = createHandler();
+      const result = await handler.handle('/perm readonly', 'aun', 'chat1', undefined, 'user1') as any;
+      expect(result.kind).toBe('command.result');
+      expect(result.text).toContain('readonly');
+      expect(sm.updateSession).toHaveBeenCalledWith('sess-1', { metadata: { permissionMode: 'readonly' } });
     });
 
     it('rejects invalid mode', async () => {
@@ -458,6 +515,44 @@ describe('execMenuAction', () => {
       expect(result.code).toBe('NO_ACTIVE_SESSION');
     });
 
+    it('reports Codex manual compact progress and completion', async () => {
+      const sm = createMockSessionManager({
+        getActiveSession: vi.fn().mockResolvedValue({
+          id: 'sess-1', channel: 'aun', channelId: 'chat1',
+          projectPath: '/tmp/test', agentId: 'codex',
+          agentSessionId: 'thread-1',
+          chatType: 'private', sessionMode: 'interactive',
+          metadata: { permissionMode: 'auto' },
+          createdAt: Date.now(), updatedAt: Date.now(),
+        }),
+      });
+      const agentRunner = createMockAgentRunner();
+      agentRunner.name = 'codex';
+      agentRunner.capabilities.compact = true;
+      agentRunner.compactSession = vi.fn().mockResolvedValue(true);
+      const mq = {
+        isProcessing: vi.fn().mockReturnValue(false),
+        getQueueLength: vi.fn().mockReturnValue(0),
+        getQueueLengthByAgent: vi.fn().mockReturnValue(0),
+        getProcessingCountByAgent: vi.fn().mockReturnValue(0),
+        acquireLock: vi.fn().mockReturnValue(() => {}),
+      } as any;
+      const cache = { getCount: vi.fn().mockReturnValue(0), addEvent: vi.fn(), getEvents: vi.fn().mockReturnValue([]), clearEvents: vi.fn(), hasMessages: vi.fn().mockReturnValue(false) } as any;
+      const handler = new CommandHandler(sm, agentRunner, cache, new EventBus());
+      handler.setMessageQueue(mq);
+      const send = vi.fn().mockResolvedValue(undefined);
+
+      const result = await handler.handle('/compact', 'aun', 'chat1', send, 'user1');
+
+      expect(result).toEqual({ kind: 'command.result', text: '✅ 会话压缩完成' });
+      expect(send).toHaveBeenCalledWith(
+        'chat1',
+        expect.stringContaining('正在压缩会话上下文'),
+        undefined
+      );
+      expect(agentRunner.compactSession).toHaveBeenCalledWith('sess-1', 'thread-1', '/tmp/test');
+    });
+
     it('fork returns NO_ACTIVE_SESSION when no session', async () => {
       const sm = createMockSessionManager({ getActiveSession: vi.fn().mockResolvedValue(null) });
       const { handler } = createHandler({ sessionManager: sm });
@@ -469,6 +564,45 @@ describe('execMenuAction', () => {
       const { handler } = createHandler();
       const result = await handler.execMenuAction('/session', 'frobnicate', undefined, 'aun', 'chat1', 'user1') as any;
       expect(result.code).toBe('NOT_SUPPORTED');
+    });
+  });
+
+  describe('/topic', () => {
+    it('deletes topic by threadId for owner', async () => {
+      const topic = {
+        id: 'topic-sess', channel: 'aun', channelId: 'chat1',
+        projectPath: '/tmp/test', agentId: 'claude',
+        threadId: 'thread-1',
+        name: '重构讨论',
+        chatType: 'private', sessionMode: 'interactive',
+        metadata: { peerId: 'user1' },
+        createdAt: Date.now(), updatedAt: Date.now(),
+      };
+      const sm = createMockSessionManager({ getThreadSession: vi.fn().mockResolvedValue(topic) });
+      const { handler } = createHandler({ sessionManager: sm });
+      const result = await handler.execMenuAction('/topic', 'delete', { target: 'thread-1' }, 'aun', 'chat1', 'user1') as any;
+      expect(result).toEqual({ data: { deleted: true } });
+      expect(sm.unbindSession).toHaveBeenCalledWith('topic-sess');
+    });
+
+    it('forbids group guest deleting topic', async () => {
+      const topic = {
+        id: 'topic-sess', channel: 'aun', channelId: 'chat1',
+        projectPath: '/tmp/test', agentId: 'claude',
+        threadId: 'thread-1',
+        name: '重构讨论',
+        chatType: 'group', sessionMode: 'proactive',
+        metadata: { peerId: 'admin1' },
+        createdAt: Date.now(), updatedAt: Date.now(),
+      };
+      const sm = createMockSessionManager({
+        getThreadSession: vi.fn().mockResolvedValue(topic),
+        resolveIdentity: vi.fn().mockReturnValue({ role: 'guest', mode: 'interactive' }),
+      });
+      const { handler } = createHandler({ sessionManager: sm });
+      const result = await handler.execMenuAction('/topic', 'delete', { target: 'thread-1' }, 'aun', 'chat1', 'guest1', undefined, 'group') as any;
+      expect(result.code).toBe('FORBIDDEN');
+      expect(sm.unbindSession).not.toHaveBeenCalled();
     });
   });
 
@@ -502,6 +636,23 @@ describe('getSubMenuItems — selected field', () => {
     expect(dev?.selected).toBe(false);
     expect(main?.agentSessionId).toBe('abc12345');
     expect(typeof main?.lastActive).toBe('number');
+  });
+
+  it('/s excludes topic sessions and /topic lists only topics without selected', async () => {
+    const sm = createMockSessionManager({
+      listSessions: vi.fn().mockResolvedValue([
+        { id: 'sess-1', name: 'main', threadId: '', agentSessionId: 'abc12345', updatedAt: Date.now(), projectPath: '/tmp', agentId: 'claude' },
+        { id: 'topic-1', name: 'topic', threadId: 'thread-1', agentSessionId: 'def67890', updatedAt: Date.now(), projectPath: '/tmp', agentId: 'claude' },
+      ]),
+    });
+    const { handler } = createHandler({ sessionManager: sm });
+    const sessionItems = await handler.getSubMenuItems('/s', 'aun', 'chat1');
+    expect(sessionItems?.some(i => i.value === 'thread-1')).toBe(false);
+
+    const topicItems = await handler.getSubMenuItems('/topic', 'aun', 'chat1', 'user1');
+    expect(topicItems).toHaveLength(1);
+    expect(topicItems?.[0]).toMatchObject({ value: 'thread-1', label: 'topic', agentSessionId: 'def67890' });
+    expect(topicItems?.[0].selected).toBeUndefined();
   });
 
   it('/baseagent marks current agent as selected', async () => {
@@ -563,8 +714,10 @@ describe('getSubMenuItems — selected field', () => {
     const items = await handler.getSubMenuItems('/perm', 'aun', 'chat1');
     const auto = items?.find(i => i.value === 'auto');
     const bypass = items?.find(i => i.value === 'bypass');
+    const readonly = items?.find(i => i.value === 'readonly');
     expect(auto?.selected).toBe(true);
     expect(bypass?.selected).toBe(false);
+    expect(readonly).toBeDefined();
   });
 
   it('/activity marks current mode as selected', async () => {

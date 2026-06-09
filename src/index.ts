@@ -342,6 +342,35 @@ async function main() {
   // Per-AID 消息统计收集器（累计，供 watch aid 实时展示）
   const aidStatsCollector = new AidStatsCollector(eventBus);
   aidStatsCollector.setSessionsDir(paths.sessionsDir);
+  // 持久化网络流量到 message_events 表
+  aidStatsCollector.onMessage = (ev) => {
+    import('./core/stats/writer.js').then(({ insertMessageEvent }) => {
+      insertMessageEvent(paths.root, ev);
+    }).catch(() => {});
+  };
+
+  // 日聚合表 usage_daily：首次启动回填 + 每日自愈。
+  // 首次：表为空但明细非空时全量回填历史数据；之后靠 writer 写时增量维护。
+  // 自愈：每日全量重建一次，纠正任何写时漂移。
+  import('./core/stats/db.js').then(({ getDb, rebuildDailyRollup }) => {
+    const db = getDb(paths.root);
+    if (!db) return;
+    try {
+      const daily = db.prepare('SELECT COUNT(*) AS n FROM usage_daily').get() as { n: number };
+      const events = db.prepare('SELECT COUNT(*) AS n FROM usage_events').get() as { n: number };
+      if (daily.n === 0 && events.n > 0) {
+        logger.info('[Stats] usage_daily 为空，回填历史数据…');
+        rebuildDailyRollup(paths.root);
+      }
+    } catch (e) {
+      logger.warn(`[Stats] usage_daily 回填检测失败（非致命）: ${e}`);
+    }
+    // 每日自愈（24h），纠正写时增量漂移。
+    setInterval(() => {
+      try { rebuildDailyRollup(paths.root); }
+      catch (e) { logger.warn(`[Stats] usage_daily 自愈失败（非致命）: ${e}`); }
+    }, 24 * 60 * 60 * 1000);
+  }).catch(() => {});
 
   // 初始化 SessionManager（文件系统后端）
   const sessionManager = new SessionManager(paths.sessionsDir, eventBus,

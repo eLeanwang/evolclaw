@@ -39,7 +39,7 @@ export type AgentEvent =
   | { type: 'task_progress'; summary?: string; toolUses?: number; durationMs?: number }
   | { type: 'session_id'; sessionId: string }
   | { type: 'state_changed'; state: 'idle' | 'running' | 'requires_action' }
-  | { type: 'complete'; result?: string; subtype?: string; isError?: boolean; errors?: string[]; durationMs?: number; ttftMs?: number; costUsd?: number; terminalReason?: string; sessionTitle?: string; numTurns?: number; tokenUsage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number }; contextUsage?: { totalTokens: number; maxTokens: number; percentage: number; model: string; effort?: string } }
+  | { type: 'complete'; result?: string; subtype?: string; isError?: boolean; errors?: string[]; durationMs?: number; ttftMs?: number; costUsd?: number; terminalReason?: string; sessionTitle?: string; numTurns?: number; tokenUsage?: AgentTokenUsage; contextUsage?: AgentContextUsage; lastModelCall?: AgentLastModelCall; modelCalls?: AgentModelCall[] }
   | { type: 'error'; error: string; errorType: 'context_too_long' | 'auth' | 'network' | 'unknown' };
 
 export interface QueryRequest {
@@ -194,4 +194,60 @@ export function hasPermissionController(agent: any): agent is PermissionControll
 
 export function hasCompact(agent: any): agent is Compactable {
   return typeof agent.compact === 'function';
+}
+
+// ── Token / Context usage types (from aliyun/main merge) ──
+export type AgentTokenUsage = {
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_read_input_tokens?: number | null;
+  cache_creation_input_tokens?: number | null;
+  iterations?: AgentTokenUsage[] | null;
+  [key: string]: unknown;
+};
+
+export type AgentContextUsage = {
+  totalTokens: number;
+  maxTokens: number;
+  percentage: number;
+  autoCompactTokens?: number;
+  model: string;
+  effort?: string;
+};
+
+export type AgentLastModelCall = {
+  messageId?: string;
+  uuid?: string;
+  requestId?: string;
+  model?: string;
+  tokenUsage: AgentTokenUsage;
+  contextUsage?: AgentContextUsage;
+};
+
+export type AgentModelCall = {
+  call_index: number;
+  model: string;
+  request_id?: string;
+  message_id?: string;
+  tokenUsage: AgentTokenUsage;
+  degraded?: boolean;
+};
+
+// ── Token usage helper functions ──
+export function numericToken(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
+}
+
+export function contextTokensForUsage(usage: AgentTokenUsage | undefined, isClaudeModel: boolean): number {
+  if (!usage) return 0;
+  if (!isClaudeModel) return numericToken(usage.input_tokens);
+  return numericToken(usage.input_tokens)
+    + numericToken(usage.cache_creation_input_tokens)
+    + numericToken(usage.cache_read_input_tokens);
+}
+
+export function usageForContext(usage: AgentTokenUsage | undefined): AgentTokenUsage | undefined {
+  const iterations = Array.isArray(usage?.iterations) ? usage.iterations : undefined;
+  const lastIteration = iterations?.slice().reverse().find(it => contextTokensForUsage(it, true) > 0);
+  return lastIteration ?? usage;
 }

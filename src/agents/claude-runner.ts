@@ -13,11 +13,16 @@ import { logger } from '../utils/logger.js';
 import { checkBlacklist, checkReadonly, summarizeToolInput } from '../core/permission.js';
 import { encodePath } from '../utils/cross-platform.js';
 import type { AgentPlugin, AgentInstance, AgentCallbacks } from '../core/baseagent-loader.js';
-import type { AgentEvent, ImageData, PermissionContext, PermissionModeInfo } from './runner-types.js';
+import type { AgentEvent, ImageData, PermissionContext, PermissionModeInfo, AgentTokenUsage, AgentContextUsage, AgentLastModelCall, AgentModelCall } from './runner-types.js';
+import { contextTokensForUsage, usageForContext, numericToken } from './runner-types.js';
 export type {
+  AgentContextUsage,
   AgentEvent,
+  AgentLastModelCall,
+  AgentModelCall,
   AgentRunnerFull,
   AgentRunnerInterface,
+  AgentTokenUsage,
   Compactable,
   ImageData,
   ModelSwitcher,
@@ -132,9 +137,18 @@ function applyContextWindow(modelId: string): string {
   return modelId;
 }
 
-/** 根据 SDK model 串（含 [1m] 后缀）返回合适的 autoCompactWindow 值。 */
-function contextWindowFor(sdkModel: string): number {
-  return /\[1m\]$/.test(sdkModel) ? 900000 : 200000;
+/** 真实上下文窗口大小：1M 模型 = 1000000，否则 200000 */
+function realContextWindowFor(sdkModel: string): number {
+  if (/\[1m\]$/.test(sdkModel)) return 1000000;
+  if (/deepseek-v4/i.test(sdkModel)) return 1000000;  // deepseek-v4 系列原生 1M 窗口（无 [1m] 后缀）
+  return 200000;
+}
+
+/** autoCompact 触发阈值：1M 模型 = 900000（留 ~100k buffer），否则 200000 */
+function autoCompactWindowFor(sdkModel: string): number {
+  if (/\[1m\]$/.test(sdkModel)) return 900000;
+  if (/deepseek-v4/i.test(sdkModel)) return 900000;
+  return 200000;
 }
 
 /** 解析别名 + 追加 1M 后缀，得到最终交给 SDK 的 model 串。 */
@@ -216,6 +230,7 @@ class MessageStream {
     }
   }
 }
+
 
 export class AgentRunner {
   readonly name: string = 'claude';
@@ -803,6 +818,9 @@ export class AgentRunner {
     const toolUseNames = new Map<string, string>();
     let turnCount = 0;
     const seenMessageIds = new Set<string>();
+    let lastModelCall: AgentLastModelCall | undefined;
+    // 流式收集各次大模型调用（fallback：SDK iterations 为空时使用）
+    const collectedCalls: AgentModelCall[] = [];
 
     try {
       for await (const event of sdkStream) {
@@ -811,6 +829,37 @@ export class AgentRunner {
         lastSessionId = event.session_id;
         this.updateSessionId(sessionId, event.session_id);
         yield { type: 'session_id', sessionId: event.session_id };
+      }
+
+      if (event.type === 'stream_event') {
+        const streamEvent = event.event;
+        if (streamEvent?.type === 'message_start' && streamEvent.message?.usage) {
+          lastModelCall = {
+            uuid: event.uuid,
+            model: streamEvent.message.model,
+            tokenUsage: streamEvent.message.usage,
+          };
+          // 流式收集：每个 message_start = 一次新的大模型调用
+          collectedCalls.push({
+            call_index: collectedCalls.length,
+            model: streamEvent.message.model ?? callModel ?? this.model,
+            request_id: (event as any).request_id,
+            tokenUsage: { ...streamEvent.message.usage },
+          });
+        } else if (streamEvent?.type === 'message_delta' && streamEvent.usage) {
+          lastModelCall = {
+            ...lastModelCall,
+            uuid: lastModelCall?.uuid ?? event.uuid,
+            tokenUsage: {
+              ...(lastModelCall?.tokenUsage ?? {}),
+              ...streamEvent.usage,
+            },
+          };
+          // 将 message_delta 的 usage 合并进当前(最后一次)收集的调用
+          const last = collectedCalls[collectedCalls.length - 1];
+          if (last) last.tokenUsage = { ...last.tokenUsage, ...streamEvent.usage };
+        }
+        continue;
       }
 
       // system: compact_boundary → compact
@@ -844,6 +893,18 @@ export class AgentRunner {
         if (!msgId || !seenMessageIds.has(msgId)) {
           if (msgId) seenMessageIds.add(msgId);
           turnCount++;
+        }
+        if (event.message.usage) {
+          lastModelCall = {
+            ...lastModelCall,
+            messageId: event.message.id,
+            requestId: event.request_id,
+            model: event.message.model,
+            tokenUsage: {
+              ...event.message.usage,
+              ...(lastModelCall?.tokenUsage ?? {}),
+            },
+          };
         }
         // 统计本轮 base agent 全部输出字符数（text + tool_use input）
         let turnOutputChars = 0;
@@ -906,19 +967,54 @@ export class AgentRunner {
           ? event.result.replace(/<thinking>[\s\S]*?<\/thinking>\s*/g, '').trim()
           : event.result;
 
-        // 从 usage 三项求和得到当前上下文占用（与 claude-hud getTotalTokens 相同算法）
-        const u = event.usage;
-        const totalTokens = u
-          ? (u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0)
-          : 0;
-        const maxTokens = sdkModel ? contextWindowFor(sdkModel) : 200000;
+        // 从 usage 求当前上下文占用。
+        // Claude：input_tokens 是净输入（不含 cache），三项求和 = 实际上下文长度。
+        // 非 Claude（DeepSeek/OpenAI 兼容）：cache_read 是服务端 KV cache 不占上下文窗口，
+        // input_tokens 本身就是完整的上下文输入量。
+        const u = event.usage as AgentTokenUsage | undefined;
+        const effectiveModel = callModel ?? this.model;
+        const isClaudeModel = effectiveModel?.startsWith('claude');
+        const totalTokens = contextTokensForUsage(u, !!isClaudeModel);
+        const contextWindowTokens = sdkModel ? realContextWindowFor(sdkModel) : 200000;
+        const autoCompactTokens   = sdkModel ? autoCompactWindowFor(sdkModel) : 200000;
         const contextUsage = totalTokens > 0 ? {
           totalTokens,
-          maxTokens,
-          percentage: Math.round((totalTokens / maxTokens) * 100),
+          maxTokens: contextWindowTokens,
+          percentage: Math.round((totalTokens / contextWindowTokens) * 100),
+          autoCompactTokens,
           model: callModel ?? this.model,
           effort: callEffort ?? this.effort,
         } : undefined;
+        if (lastModelCall?.tokenUsage) {
+          const lastUsageForContext = usageForContext(lastModelCall.tokenUsage);
+          const lastTotalTokens = contextTokensForUsage(lastUsageForContext, !!isClaudeModel);
+          lastModelCall = {
+            ...lastModelCall,
+            contextUsage: lastTotalTokens > 0 ? {
+              totalTokens: lastTotalTokens,
+              maxTokens: contextWindowTokens,
+              percentage: Math.round((lastTotalTokens / contextWindowTokens) * 100),
+              autoCompactTokens,
+              model: callModel ?? this.model,
+              effort: callEffort ?? this.effort,
+            } : undefined,
+          };
+        }
+
+        // 组装 modelCalls：优先 SDK iterations，fallback 流式收集，兜底降级单行。
+        const callModel_ = callModel ?? this.model;
+        let modelCalls: AgentModelCall[] | undefined;
+        const iterArr = Array.isArray(u?.iterations) && u!.iterations!.length > 0 ? u!.iterations! : null;
+        if (iterArr) {
+          modelCalls = iterArr.map((it, i) => ({
+            call_index: i, model: callModel_, tokenUsage: it,
+          }));
+        } else if (collectedCalls.length > 0) {
+          modelCalls = collectedCalls;
+        } else if (u) {
+          // 降级：无逐次数据，写一条累计行
+          modelCalls = [{ call_index: 0, model: callModel_, tokenUsage: u, degraded: true }];
+        }
 
         yield {
           type: 'complete',
@@ -934,6 +1030,8 @@ export class AgentRunner {
           numTurns: event.num_turns,
           tokenUsage: event.usage,
           contextUsage,
+          lastModelCall,
+          modelCalls,
         };
         // result 是 SDK 流的终结事件，不再等待后续（防止 interrupt 后流不关闭导致挂起）
         return;
@@ -1178,11 +1276,12 @@ export class AgentRunner {
       model: sdkModel,
       ...(callEffort ? { effort: callEffort } : {}),
       ...(this.claudeExecutablePath ? { pathToClaudeCodeExecutable: this.claudeExecutablePath } : {}),
-      autoCompactWindow: contextWindowFor(sdkModel),
+      autoCompactWindow: autoCompactWindowFor(sdkModel),
       advisorModel: 'haiku',
       canUseTool: canUseToolCallback,
       permissionMode: sdkPermissionMode,
       persistSession: true,
+      includePartialMessages: true,
       enableFileCheckpointing: true,
       hooks: {
         PreCompact: [{ matcher: '.*', hooks: [preCompactHook] }],

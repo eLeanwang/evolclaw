@@ -65,6 +65,7 @@ const PERMISSION_MODE_USAGE = PERMISSION_MODE_KEYS.join('|');
 const CLI_EXEC_WHITELIST: Record<string, '*' | Set<string>> = {
   status:  '*',
   model:   '*',
+  stats:   '*',
   agent:   new Set(['list', 'show', 'get']),
   aid:     new Set(['list', 'show', 'lookup']),
   storage: new Set(['ls', 'quota']),

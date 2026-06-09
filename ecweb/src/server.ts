@@ -25,6 +25,9 @@ import { sessionSource } from './sources/session.js';
 import { cacheSource } from './sources/cache.js';
 import { systemSource } from './sources/system.js';
 import { triggersSource } from './sources/triggers.js';
+import { queryStatsForDashboard, queryStatsExplorer, queryStatsByPeer, queryStatsByAgent, queryStatsOverview } from './sources/stats.js';
+import { getSessionsAunDir, listLocalAids, listPeers, readMessages } from './fs-utils.js';
+import { ccProjectsDir } from './paths.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const STATIC_DIR = path.join(__dirname, 'static');
@@ -123,6 +126,78 @@ function parseUrl(rawUrl: string): { path: string; query: Record<string, string>
     if (k) query[decodeURIComponent(k)] = decodeURIComponent(v || '');
   }
   return { path: rawUrl.slice(0, qIdx), query };
+}
+
+function handleStatsApi(req: http.IncomingMessage, res: http.ServerResponse): void {
+  const { path: urlPath, query } = parseUrl(req.url || '');
+  res.setHeader('Content-Type', 'application/json');
+
+  if (urlPath === '/api/stats/dashboard') {
+    const data = queryStatsForDashboard();
+    if (!data) {
+      res.writeHead(503);
+      res.end(JSON.stringify({ error: 'stats unavailable (node:sqlite missing or no data)' }));
+    } else {
+      res.writeHead(200);
+      res.end(JSON.stringify(data));
+    }
+  } else if (urlPath === '/api/stats/explorer') {
+    const params: any = {};
+    if (query.from) params.from_ts = Number(query.from);
+    if (query.to)   params.to_ts = Number(query.to);
+    if (query.agent) params.agent_aid = query.agent;
+    if (query.peer)  params.peer_key = query.peer;
+    if (query.model) params.model = query.model;
+    if (query.granularity) params.granularity = query.granularity;
+    const data = queryStatsExplorer(params);
+    res.writeHead(200);
+    res.end(JSON.stringify(data));
+  } else if (urlPath === '/api/stats/peers') {
+    const params: any = {};
+    if (query.from) params.from_ts = Number(query.from);
+    if (query.to)   params.to_ts = Number(query.to);
+    if (query.agent) params.agent_aid = query.agent;
+    if (query.limit) params.limit = Number(query.limit);
+    const data = queryStatsByPeer(params);
+    res.writeHead(200);
+    res.end(JSON.stringify(data));
+  } else if (urlPath === '/api/stats/agents') {
+    const params: any = {};
+    if (query.from) params.from_ts = Number(query.from);
+    if (query.to)   params.to_ts = Number(query.to);
+    if (query.limit) params.limit = Number(query.limit);
+    const data = queryStatsByAgent(params);
+    res.writeHead(200);
+    res.end(JSON.stringify(data));
+  } else if (urlPath === '/api/stats/overview') {
+    const tokenStats = queryStatsOverview();
+    // session count: scan all CC project dirs
+    let sessionCount = 0;
+    try {
+      const base = ccProjectsDir();
+      for (const d of fs.readdirSync(base, { withFileTypes: true })) {
+        if (!d.isDirectory()) continue;
+        try { sessionCount += fs.readdirSync(path.join(base, d.name)).filter(f => f.endsWith('.jsonl')).length; } catch {}
+      }
+    } catch {}
+    // message counts: scan aun dir
+    let msgIn = 0, msgOut = 0;
+    try {
+      const aunDir = getSessionsAunDir();
+      for (const aid of listLocalAids(aunDir)) {
+        for (const peer of listPeers(aunDir, aid)) {
+          for (const m of readMessages(aunDir, aid, peer)) {
+            if (m.dir === 'in') msgIn++; else msgOut++;
+          }
+        }
+      }
+    } catch {}
+    res.writeHead(200);
+    res.end(JSON.stringify({ token_stats: tokenStats, session_count: sessionCount, msg_in: msgIn, msg_out: msgOut }));
+  } else {
+    res.writeHead(404);
+    res.end(JSON.stringify({ error: 'not found' }));
+  }
 }
 
 function clientIp(req: http.IncomingMessage): string {
@@ -299,6 +374,18 @@ export async function startWatchWebServer(opts: { port?: number; log?: (s: strin
       res.end(JSON.stringify({ code, expiresAt }));
     } else if (req.method === 'POST' && (req.url || '').startsWith('/api/pair')) {
       handlePair(req, res, pairingCode, pairingExpiry, log);
+    } else if (req.method === 'GET' && (req.url || '').startsWith('/api/stats/')) {
+      // Stats API — requires auth
+      const authHeader = req.headers.authorization || '';
+      const bearerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
+      const { query } = parseUrl(req.url || '');
+      const token = bearerToken || query.token || '';
+      if (!validateAndRenew(token, Date.now())) {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'unauthorized' }));
+        return;
+      }
+      handleStatsApi(req, res);
     } else {
       serveStatic(req, res);
     }

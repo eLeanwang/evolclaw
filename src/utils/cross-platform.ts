@@ -9,15 +9,30 @@ const execFileAsync = promisify(execFile);
 
 export const isWindows = process.platform === 'win32';
 
+const ENCODE_PATH_MAX = 200;
+
+function encodePathHash(s: string): string {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h << 5) - h + s.charCodeAt(i) | 0;
+  return Math.abs(h).toString(36);
+}
+
 /**
  * Encode project path as directory name (Claude SDK convention).
- * Replace all path separators with '-'.
- * e.g. /home/user/project -> -home-user-project
- *      C:\Users\project -> C--Users-project
+ * Mirrors the SDK's F0(L_(path)) logic:
+ *   1. path.resolve → realpath (if exists) → Unicode NFC
+ *   2. replace every non-alphanumeric character with '-'
+ *   3. truncate to 200 chars + hash suffix for long paths
+ * This must stay in sync with the SDK so evolclaw can locate session files.
  */
 export function encodePath(projectPath: string): string {
-  const normalized = projectPath.replace(/[/\\]+$/, '');
-  return normalized.replace(/[/\\:]/g, '-');
+  const resolved = path.resolve(projectPath);
+  let real = resolved;
+  try { real = fs.realpathSync(resolved); } catch {}
+  const nfc = real.normalize('NFC');
+  const encoded = nfc.replace(/[^a-zA-Z0-9]/g, '-');
+  if (encoded.length <= ENCODE_PATH_MAX) return encoded;
+  return `${encoded.slice(0, ENCODE_PATH_MAX)}-${encodePathHash(nfc)}`;
 }
 
 /**

@@ -204,10 +204,16 @@ export interface SessionMetadata {
   dispatchMode?: string;  // 群聊分发模式（per-session）: mention | broadcast
   resumeAt?: string;  // /rewind chat 标记的回退点（assistant message uuid）
   lastProactiveFlag?: boolean;  // proactive 模式使用标志位后设置，interactive 切换时注入提示后清除
+  // 群聊话题追踪（responseDepth 决策信号）
+  topicRounds?: number;       // 同话题连续轮次
+  lastTopicHash?: string;     // 上条消息的话题指纹（前 20 字符 hash）
 }
 
 /** Default permission mode applied to new sessions. Change here to affect all roles. */
 export const DEFAULT_PERMISSION_MODE = 'bypass';
+
+/** 群聊响应深度（per-message 瞬时决策，不持久化） */
+export type ResponseDepth = 'lightweight' | 'standard' | 'deep';
 
 export interface ReplyContext {
   sessionId?: string;
@@ -307,6 +313,7 @@ export interface Message {
    */
   items?: SubMessage[];
   replyContext?: ReplyContext;       // Channel 预构建的回复上下文（渠道无关）
+  dispatchMode?: string;            // 群聊分发模式，由渠道适配器从服务器信封解析后注入（mention|broadcast）
   timestamp?: number;
   source?: 'user' | 'card-trigger' | 'trigger' | 'owner-inject';
   triggerMeta?: {
@@ -343,6 +350,7 @@ export interface InboundMessage {
   /** 本条被 @ 的全部 AID（含 self；@all 时含字面 "all"）。仅供消息信封渲染。 */
   mentionAids?: string[];
   replyContext?: ReplyContext;       // Channel 预构建的回复上下文（渠道无关）
+  dispatchMode?: string;            // 群聊分发模式（mention|broadcast）
   source?: 'user' | 'card-trigger';  // 消息来源：用户输入 / 卡片按钮触发
 }
 
@@ -858,7 +866,7 @@ export type OutboundPayload =
   | { kind: 'status.started'; metadata?: Record<string, unknown> }
   | { kind: 'status.progress'; metadata?: { activityType: 'text' | 'tool_call' | 'tool_result'; turn?: number; outputTokens?: number; toolName?: string; callId?: string; ok?: boolean; durationMs?: number } }
   | { kind: 'status.queued'; metadata?: Record<string, unknown> }
-  | { kind: 'status.completed'; metadata?: { durationMs?: number; ttftMs?: number; numTurns?: number; tokenUsage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number }; contextUsage?: { totalTokens: number; maxTokens: number; percentage: number; model: string; effort?: string } } }
+  | { kind: 'status.completed'; metadata?: { durationMs?: number; ttftMs?: number; numTurns?: number; tokenUsage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number }; contextUsage?: { totalTokens: number; maxTokens: number; percentage: number; autoCompactTokens?: number; model: string; effort?: string }; lastModelCall?: { messageId?: string; uuid?: string; requestId?: string; model?: string; tokenUsage: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number | null; cache_creation_input_tokens?: number | null; [key: string]: unknown }; contextUsage?: { totalTokens: number; maxTokens: number; percentage: number; autoCompactTokens?: number; model: string; effort?: string } } } }
   | { kind: 'status.interrupted'; metadata?: { reason: string } }
   | { kind: 'status.error'; metadata?: { errorType?: string } }
   | { kind: 'status.timeout'; metadata?: { idleSec?: number } }

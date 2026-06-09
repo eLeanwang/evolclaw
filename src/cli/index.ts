@@ -5107,6 +5107,18 @@ export async function main(args: string[]) {
       await cmdModel(args.slice(1));
       break;
     }
+    case 'stats': {
+      const { handleStats } = await import('./stats.js');
+      await handleStats(args.slice(1));
+      break;
+    }
+    case 'version':
+    case '-v':
+    case '--version': {
+      const { handleVersion } = await import('./version.js');
+      handleVersion(args.slice(1));
+      break;
+    }
     case 'bench': {
       const { suppressSdkLogs } = await import('../aun/aid/index.js');
       suppressSdkLogs();

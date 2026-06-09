@@ -181,6 +181,7 @@ export class MessageBridge {
           topicName: this.extractTopicName(msg),
           replyContext: msg.replyContext,
           source: msg.source,
+          dispatchMode: msg.dispatchMode,
         };
 
         // 5.5 写入消息记录（入方向）。
