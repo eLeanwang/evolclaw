@@ -1,5 +1,22 @@
 # Changelog
 
+## v3.3.0 (2026-06-10)
+
+### New Features
+
+- **Thread 会话继承 baseagent** — 创建 thread 会话时自动继承父会话的 `agentId` 及 baseagent 配置，多线程场景无需重新切换
+- **Codex runner 增强** — 新增 CLI 版本检测、streaming delta 支持、server 可用性检查；codex-app-server-client 补充类型定义
+- **Menu 话题管理** — command-handler 新增话题菜单的权限判定（`canReadTopics`/`canDeleteTopic`）与格式化（`buildTopicMenuItem`/`resolveMenuChatType`）
+
+### Improvements
+
+- **Channel plugin 接口统一** — `ChannelPlugin` 从 `isEnabled/createChannel/createChannels` 收敛为单一 `createInstance(inst, ctx)` 单实例模型，新增 `ChannelBuildContext` 与 `showActivities` 共享策略；六个渠道（aun/feishu/wechat/dingtalk/qqbot/wecom）同步迁移
+- **ECWeb 控制台重构** — control source 拆分为 `system`（evolclaw/fastaun/evolclaw-web 三包版本与健康检查）和 `triggers`（定时任务管理），前端联动更新
+- **Trigger 失败统计** — Trigger 新增 `failCount`/`lastResult` 字段，scheduler/manager/parser 同步
+- **Runner 类型模块化** — 抽出 `runner-types.ts` 统一共享类型，消除各 runner 重复声明
+- **Agent AID 展示** — `AgentInfo` 新增 `aid` 字段，`ec agent` 命令展示 agent AID
+- **缓存模块更名** — `read-cache` 重命名为 `daemon-file-cache`，语义更清晰
+
 ## v3.2.0 (2026-06-05)
 
 ### New Features
