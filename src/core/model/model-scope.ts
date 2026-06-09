@@ -19,8 +19,8 @@ import fs from 'fs';
 import path from 'path';
 import { agentRelationsDir, agentConfig as agentConfigPath, resolvePaths } from '../../paths.js';
 import { loadDefaults, saveDefaultsSafe, loadAgent, saveAgent } from '../../config-store.js';
-import { formatPeerKey, parsePeerKey } from '../relation/peer-key.js';
-import { fileCache } from '../cache/file-cache.js';
+import { formatPeerKey, parsePeerKey } from '../relation/peer-identity.js';
+import { fileCache } from '../daemon-file-cache.js';
 import type { BaseagentsBlock, AgentConfig, DefaultsConfig } from '../../types.js';
 
 export type ModelScope = 'global' | 'agent' | 'relation';

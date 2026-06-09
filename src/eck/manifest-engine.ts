@@ -6,7 +6,7 @@ import fs from 'fs';
 import path from 'path';
 import { kitsDir, resolveRoot, getPackageRoot } from '../paths.js';
 import { logger } from '../utils/logger.js';
-import { fileCache } from '../core/cache/file-cache.js';
+import { fileCache } from '../core/daemon-file-cache.js';
 
 // ── Types ──
 
