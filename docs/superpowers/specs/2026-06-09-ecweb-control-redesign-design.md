@@ -62,7 +62,7 @@ daemon 底下同时跑多个 EvolAgent（如 eleanbot / evolagent / evolai / mul
 
 ```
 │ … 最后活动 │ 最近消息      │ 操作                                       │
-│ … 2m      │ ↓ alice: hi  │ [编辑] [重载] [禁用] [删除] [名片↗]        │
+│ … 2m      │ ↓ alice: hi  │ [编辑] [重载] [禁用] [删除] [Agent.md↗]    │
 ```
 
 ### AID 行 ↔ Agent 归属
@@ -75,11 +75,19 @@ DefaultAgent 的 AID 同样可解析。无法归属到任何 agent 的 AID 行�
 
 | 按钮 | 后端入口 | 行为 |
 |---|---|---|
-| **编辑** | 新增 menu 写入口（见后端改动） | 弹结构化表单窗，见下 |
-| **重载** | `agentReload(aid)` / `evolagent.reload` IPC | 直接执行，需后端补 `menu.action name=agent action=reload` |
-| **禁用 / 启用** | `agentDisable(aid)` / `agentEnable(aid)` | 按当前 status 二选一显示，热重载 |
-| **删除** | `agentDelete(aid, purge)` | 危险确认弹窗，可勾选"同时清除数据"(purge) |
-| **名片↗** | — | 新窗口打开 `https://{aid}/agent.md` |
+| **编辑** | 新增 menu 写入口（见后端改动） | 弹结构化表单窗，见下。**保存只落盘，不自动重载**——需用户回表手动点「重载」生效 |
+| **重载** | `agentReload(aid)` / `evolagent.reload` IPC | **执行前检查该 agent 是否有任务在跑**，有则提示确认/阻止；需后端补 `menu.action name=agent action=reload` |
+| **禁用 / 启用** | `agentDisable(aid)` / `agentEnable(aid)` | 按当前 status 二选一显示；**禁用前检查是否有任务在跑**，有则提示 |
+| **删除** | `agentDelete(aid, purge)` | 危险确认弹窗，可勾选"同时清除数据"(purge)；**删除前检查是否有任务在跑**，有则提示 |
+| **Agent.md↗** | — | 新窗口打开 `https://{aid}/agent.md` |
+
+### 任务执行检查（重载 / 禁用 / 删除前置）
+
+重载、禁用、删除会中断 agent 正在处理的任务，故执行前需检查该 agent 是否繁忙：
+- 检查依据：`messageQueue.getProcessingCountByAgent(agentName)` > 0（处理中）或 `getQueueLengthByAgent` > 0（待处理）。
+- 繁忙时：弹窗提示"该 Agent 有 N 个任务执行中，确认仍要 {重载/禁用/删除}？"，用户确认后才执行。
+- 后端在对应 menu.action 内做二次校验（前端可绕过），繁忙时返回 `BUSY` 错误码，前端据此提示；
+  用户坚持时可带 `force: true` 参数再次提交。
 
 ### 编辑弹窗（含项目 / owners / 渠道）
 
@@ -90,7 +98,8 @@ DefaultAgent 的 AID 同样可解析。无法归属到任何 agent 的 AID 行�
 3. **owners**：owner AID 列表（增删行）。
 4. **渠道**：飞书 / 微信等渠道配置。AUN 渠道由 `agent.aid` 隐式管理，不可在此编辑（与 `agentChannelUpsert` 约束一致）。渠道凭证为敏感字段，单独区块并标注。
 
-保存流程：前端提交 config patch → 后端校验 → `saveAgent()` → 触发 `evolagent.reload`。失败回显错误，不静默。
+保存流程：前端提交 config patch → 后端校验 → `saveAgent()` 落盘。**不触发 `evolagent.reload`**——
+保存后提示"配置已保存，点「重载」生效"，由用户回表手动点重载（重载会做任务执行检查）。失败回显错误，不静默。
 
 ### 新建弹窗
 
@@ -128,17 +137,24 @@ DefaultAgent 的 AID 同样可解析。无法归属到任何 agent 的 AID 行�
 
 ### ① 进程概况（只读卡）
 
-数据来自 `menu.query name=system`（owner-gated）。5 张卡：
+数据来自 `menu.query name=system`（owner-gated）。卡片：
 
 | 卡 | 字段 | 来源 |
 |---|---|---|
 | 状态 | ● 运行中 | daemonRunning（圆点复用 `.dot.on/.off`） |
 | 版本 | `version`，命中新版叠加 `⬆` 角标 | package.json + upgrade 结果 |
+| fastaun 版本 | `fastaunVersion`，命中新版叠加 `⬆` 角标 | `@agentunion/fastaun` package.json + registry 比对 |
 | 运行时间 | `uptime` | process.uptime() |
 | PID | `pid` | process.pid |
 | Node | `node` | process.version |
 
 附：`agent`（owning agent 名）/ `channel` / `channels[]` 可作为副信息行展示。
+
+**新增 system query 字段**：
+- `fastaunVersion`：读 `node_modules/@agentunion/fastaun/package.json` 的 version（本地已装版本）。
+- fastaun 新版提示：`checkLatestVersion('@agentunion/fastaun')`（`npm-ops.ts` 已支持传包名），
+  与本地版本 `compareVersions` 比对；有新版时版本卡显示 `⬆ 0.4.12 → 0.x.y`。
+  与 evolclaw 自身的 upgrade 检查并列，由「检查更新」按钮触发。
 
 ### ② 操作区（按钮，全部 owner-gated）
 
@@ -164,7 +180,37 @@ DefaultAgent 的 AID 同样可解析。无法归属到任何 agent 的 AID 行�
 │ 收到 42 · 完成 40 · 出错 2 (timeout:1, api:1)    │
 │ 工具失败 1 (Bash:1) · 中断 3 · 平均响应 8.4s     │
 └──────────────────────────────────────────────────┘
+┌─ EvolAgent 健康 ──────────────────────────────────┐
+│ ● eleanbot   running  claude · 0 任务             │
+│ ● evolai     running  claude · 1 任务处理中        │
+│ ⊘ review     disabled —                           │
+│ ✗ broken     error    上次错误: API timeout        │
+└──────────────────────────────────────────────────┘
+┌─ BaseAgent 健康 ──────────────────────────────────┐
+│ claude   ● 有活跃流 (2)   Runner 正常             │
+│ codex    ○ 空闲            Runner 正常             │
+└──────────────────────────────────────────────────┘
 ```
+
+结构化 JSON 扩展字段（`/check` 返回）：
+
+```ts
+evolagents: Array<{
+  name: string;
+  aid: string;
+  status: 'running' | 'stopped' | 'disabled' | 'error';
+  baseagent: string | null;
+  activeTasks: number;      // getProcessingCountByAgent + getQueueLengthByAgent
+  error?: string;           // AgentInfo.error，有则标红
+}>;
+baseagents: Array<{
+  name: string;             // 'claude' | 'codex' | 'gemini' | ...
+  activeStreams: number;    // hasActiveStream 计数 / runners 遍历
+  healthy: boolean;
+}>;
+```
+
+数据来源：`agentRegistry.list()` 给 EvolAgent 列表；runner map 遍历给 BaseAgent 列表。
 
 ---
 
@@ -181,19 +227,35 @@ DefaultAgent 的 AID 同样可解析。无法归属到任何 agent 的 AID 行�
   queue: { pending: number, processing: number },
   uptimeMs: number,
   lastHour: { received, completed, errors, errorsByType, toolErrors, toolErrorsByName, interrupts, avgResponseMs },
+  evolagents: [{ name, aid, status, baseagent, activeTasks, error? }, ...],
+  baseagents: [{ name, activeStreams, healthy }, ...],
 }
 ```
 
-数据已存在于 `statsCollector.getSnapshot()` 与渠道对象，只是当前被格式化成文本。抽出结构化构造函数，文本渲染基于它。
+数据已存在于 `statsCollector.getSnapshot()`、渠道对象、`agentRegistry.list()` 与 runner map，只是当前部分被格式化成文本。抽出结构化构造函数，文本渲染基于它。
 
-### 2. `menu.action name=agent` 增加 `reload`
+### 1b. `menu.query name=system` 增加 fastaun 版本
+
+`/system` query（`command-handler.ts:959`）返回体增 `fastaunVersion`（读 `@agentunion/fastaun` 的 package.json）。
+fastaun 新版比对走 `action=upgrade` 路径（见下）。
+
+### 1c. `action=upgrade` 同时检查 fastaun
+
+`/upgrade`（`command-handler.ts:3059`）现仅查 evolclaw。扩展为并行查 evolclaw + `@agentunion/fastaun`（`checkLatestVersion('@agentunion/fastaun')`），
+结构化返回两者的 local/remote/hasUpdate，前端分别回写两张版本卡。
+
+### 2. `menu.action name=agent` 增加 `reload`（带任务检查）
 
 `execAgentAction`（`command-handler-agent-control.ts:83`）增 `reload` case，调用 `agentReload(aid)`（已存在于 `src/cli/agent.ts:836`，走 `evolagent.reload` IPC）。
+**reload / disable / delete 三个 action 执行前检查目标 agent 是否繁忙**：
+`getProcessingCountByAgent(agentName) + getQueueLengthByAgent(agentName) > 0` 即繁忙，
+返回 `{ error: '该 Agent 有 N 个任务执行中', code: 'BUSY' }`；调用方传 `force: true` 时跳过检查强制执行。
 
 ### 3. menu 层增加 agent config patch 写入口
 
 新增一个 menu action（如 `name=agent action=update`），接受 config patch（运行参数 / project / owners / channels），
-复用既有 `saveAgent()` + `evolagent.reload` 模式落盘并热重载。校验沿用 `validateAgentConfig` 与 `agentChannelUpsert` 的约束（AUN 渠道不可编辑等）。
+**仅 `saveAgent()` 落盘，不触发 `evolagent.reload`**——重载由用户在操作列手动触发（带任务检查）。
+校验沿用 `validateAgentConfig` 与 `agentChannelUpsert` 的约束（AUN 渠道不可编辑等）。
 
 ### 4. per-agent 配置解析不再用 `__ecweb__`
 
