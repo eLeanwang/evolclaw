@@ -19,7 +19,8 @@
     "*.md",
     "!CLAUDE.md",
     "!DEPLOYMENT.md",
-    "!ONBOARDING.md"
+    "!ONBOARDING.md",
+    "!TODO.md"
   ],
   "scripts": {
     "dev": "tsx watch src/index.ts",
