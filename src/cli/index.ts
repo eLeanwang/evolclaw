@@ -18,6 +18,7 @@ import { tryUpgrade, tryUpgradeAunSdk, tryUpgradeGlobalPkg, resolveGlobalPkg, ty
 import { fetchEcwebPairCode } from '../utils/ecweb-pair.js';
 import { resolveAunCoreSdkPkg, AUN_CORE_SDK_PKG } from '../aun/aid/client.js';
 import { scanInstances, cleanupInstances, readAidLastActivity, writeRestartMonitor, removeRestartMonitor, isRestartMonitorWinner, findOrphanProcesses, killOrphans, type OrphanProcess } from '../utils/instance-registry.js';
+import { filterLogFiles } from './watch-logs.js';
 import { displaySessionTitle } from '../core/session/session-title.js';
 
 // Suppress Node.js ExperimentalWarning (e.g. SQLite) from cluttering CLI output
@@ -1509,7 +1510,7 @@ async function cmdWatchMenu(): Promise<void> {
         process.stdin.pause();
         process.stdout.write('\x1b[2J\x1b[H');
         const chosen = items[index].key;
-        if (chosen === 'log') { cmdWatch(); }
+        if (chosen === 'log') { cmdWatch(new Set()) /* TODO: Task 4/5 替换 */; }
         else if (chosen === 'aid') { await cmdWatchAid(); }
         else if (chosen === 'msg') {
           const { cmdWatchMsg } = await import('./watch-msg.js');
@@ -1532,7 +1533,7 @@ async function cmdWatchMenu(): Promise<void> {
   });
 }
 
-function cmdWatch() {
+function cmdWatch(filterTypes: Set<string>) {
   const p = resolvePaths();
   if (!fs.existsSync(p.logs)) {
     console.log(`❌ Log directory not found: ${p.logs}`);
@@ -1577,7 +1578,10 @@ function cmdWatch() {
     return c;
   };
 
-  const listLogs = () => fs.readdirSync(p.logs).filter(f => f.endsWith('.log')).map(f => path.join(p.logs, f));
+  const listLogs = () => {
+    const all = fs.readdirSync(p.logs).filter(f => f.endsWith('.log')).map(f => path.join(p.logs, f));
+    return filterLogFiles(all, filterTypes);
+  };
   // Strip rotation suffix (e.g., "evolclaw-20260518-21" → "evolclaw")
   const shortName = (f: string) => path.basename(f, '.log').replace(/-\d{8}-\d{2}$/, '');
 
@@ -5075,13 +5079,13 @@ export async function main(args: string[]) {
         const { cmdWatchMsg } = await import('./watch-msg.js');
         await cmdWatchMsg();
       } else if (args[1] === 'log') {
-        cmdWatch();
+        cmdWatch(new Set()) /* TODO: Task 4/5 替换 */;
       } else if (args[1] === 'web' || args[1] === 'session') {
         await cmdWatchWeb();
       } else if (!args[1]) {
         await cmdWatchMenu();
       } else {
-        cmdWatch();
+        cmdWatch(new Set()) /* TODO: Task 4/5 替换 */;
       }
       break;
     }
