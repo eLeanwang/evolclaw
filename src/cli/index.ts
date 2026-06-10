@@ -18,7 +18,7 @@ import { tryUpgrade, tryUpgradeAunSdk, tryUpgradeGlobalPkg, resolveGlobalPkg, ty
 import { fetchEcwebPairCode } from '../utils/ecweb-pair.js';
 import { resolveAunCoreSdkPkg, AUN_CORE_SDK_PKG } from '../aun/aid/client.js';
 import { scanInstances, cleanupInstances, readAidLastActivity, writeRestartMonitor, removeRestartMonitor, isRestartMonitorWinner, findOrphanProcesses, killOrphans, type OrphanProcess } from '../utils/instance-registry.js';
-import { filterLogFiles } from './watch-logs.js';
+import { filterLogFiles, deriveLogTypes, computePreChecked } from './watch-logs.js';
 import { displaySessionTitle } from '../core/session/session-title.js';
 
 // Suppress Node.js ExperimentalWarning (e.g. SQLite) from cluttering CLI output
@@ -1527,6 +1527,79 @@ async function cmdWatchMenu(): Promise<void> {
       process.stdin.pause();
       process.stdout.write('\x1b[2J\x1b[H');
       resolve();
+    }
+
+    process.stdin.on('data', onData);
+  });
+}
+
+/**
+ * 勾选要监控的日志类型。返回选中类型数组；ESC/Ctrl+C 取消返回 null。
+ * types: 可用类型（字母序）。preChecked: 预勾集合。fileCount: 类型→当前文件数。
+ */
+async function cmdWatchLogsSelect(
+  types: string[],
+  preChecked: Set<string>,
+  fileCount: Map<string, number>,
+): Promise<string[] | null> {
+  let index = 0;
+  const checked = new Set(preChecked);
+  const useColor = !!process.stdout.isTTY;
+  const RST = useColor ? '\x1b[0m' : '';
+  const DIM = useColor ? '\x1b[2m' : '';
+  const BOLD = useColor ? '\x1b[1m' : '';
+  const CYAN = useColor ? '\x1b[36m' : '';
+  let hint = '';
+
+  function render() {
+    let buf = '\x1b[2J\x1b[H';
+    buf += `${BOLD}选择要监控的日志类型${RST}\n\n`;
+    for (let i = 0; i < types.length; i++) {
+      const sel = i === index;
+      const mark = checked.has(types[i]) ? '✔' : ' ';
+      const cursor = sel ? `${CYAN}${BOLD}▸ ` : '  ';
+      const n = fileCount.get(types[i]) ?? 0;
+      const label = sel ? `${types[i]}${RST}` : `${DIM}${types[i]}${RST}`;
+      buf += `${cursor}[${mark}] ${label}   ${DIM}(${n} file${n === 1 ? '' : 's'})${RST}\n`;
+    }
+    buf += `\n${DIM}  ↑↓ 移动  空格 勾选  Enter 确认  ESC 取消${RST}\n`;
+    if (hint) buf += `${CYAN}  ${hint}${RST}\n`;
+    process.stdout.write(buf);
+  }
+
+  render();
+
+  return new Promise((resolve) => {
+    if (!process.stdin.isTTY) { resolve(null); return; }
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+
+    const onData = (data: Buffer) => {
+      if ((data[0] === 0x1b && data.length === 1) || data[0] === 0x03) {
+        finish(null); return;
+      }
+      if (data[0] === 0x1b && data[1] === 0x5b) {
+        if (data[2] === 0x41) { index = Math.max(0, index - 1); hint = ''; render(); }
+        if (data[2] === 0x42) { index = Math.min(types.length - 1, index + 1); hint = ''; render(); }
+        return;
+      }
+      if (data[0] === 0x20) { // space
+        const t = types[index];
+        if (checked.has(t)) checked.delete(t); else checked.add(t);
+        hint = ''; render(); return;
+      }
+      if (data[0] === 0x0d) { // enter
+        if (checked.size === 0) { hint = '至少选择一项'; render(); return; }
+        finish(types.filter(t => checked.has(t)));
+      }
+    };
+
+    function finish(result: string[] | null) {
+      process.stdin.removeListener('data', onData);
+      if (process.stdin.isTTY) process.stdin.setRawMode(false);
+      process.stdin.pause();
+      process.stdout.write('\x1b[2J\x1b[H');
+      resolve(result);
     }
 
     process.stdin.on('data', onData);
