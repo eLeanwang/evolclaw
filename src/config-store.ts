@@ -67,6 +67,9 @@ export interface EvolclawConfig {
     enabled?: boolean;        // true = evolclaw start 时自动后台启动 ecweb
     port?: number;            // 监听端口，默认 42705
   };
+  watch?: {
+    logTypes?: string[];   // 上次勾选的日志类型（shortName，去轮转后缀）
+  };
 }
 
 /** 读 {root}/evolclaw.json。文件不存在返回 {}，不报错。 */

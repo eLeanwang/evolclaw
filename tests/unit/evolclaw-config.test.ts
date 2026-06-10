@@ -38,4 +38,9 @@ describe('evolclaw-config', () => {
     saveEvolclawConfig({ $schema_version: 1, owners: ['op.agentid.pub', 'op2.agentid.pub'] });
     expect(loadEvolclawConfig().owners).toEqual(['op.agentid.pub', 'op2.agentid.pub']);
   });
+  it('round-trips watch.logTypes', () => {
+    saveEvolclawConfig({ watch: { logTypes: ['evolclaw', 'aun'] } });
+    const cfg = loadEvolclawConfig();
+    expect(cfg.watch?.logTypes).toEqual(['evolclaw', 'aun']);
+  });
 });
