@@ -18,7 +18,7 @@ import { tryUpgrade, tryUpgradeAunSdk, tryUpgradeGlobalPkg, resolveGlobalPkg, ty
 import { fetchEcwebPairCode } from '../utils/ecweb-pair.js';
 import { resolveAunCoreSdkPkg, AUN_CORE_SDK_PKG } from '../aun/aid/client.js';
 import { scanInstances, cleanupInstances, readAidLastActivity, writeRestartMonitor, removeRestartMonitor, isRestartMonitorWinner, findOrphanProcesses, killOrphans, type OrphanProcess } from '../utils/instance-registry.js';
-import { filterLogFiles, deriveLogTypes, computePreChecked } from './watch-logs.js';
+import { filterLogFiles, deriveLogTypes, computePreChecked, validateLogTypes, shortLogName as shortLogNameLocal } from './watch-logs.js';
 import { displaySessionTitle } from '../core/session/session-title.js';
 
 // Suppress Node.js ExperimentalWarning (e.g. SQLite) from cluttering CLI output
@@ -1510,7 +1510,7 @@ async function cmdWatchMenu(): Promise<void> {
         process.stdin.pause();
         process.stdout.write('\x1b[2J\x1b[H');
         const chosen = items[index].key;
-        if (chosen === 'log') { cmdWatch(new Set()) /* TODO: Task 4/5 替换 */; }
+        if (chosen === 'log') { await cmdWatchLogsFlow(); }
         else if (chosen === 'aid') { await cmdWatchAid(); }
         else if (chosen === 'msg') {
           const { cmdWatchMsg } = await import('./watch-msg.js');
@@ -1604,6 +1604,38 @@ async function cmdWatchLogsSelect(
 
     process.stdin.on('data', onData);
   });
+}
+
+/** logs 勾选流程：扫描类型 → 预勾 → 菜单 → 保存 → 监控。 */
+async function cmdWatchLogsFlow(): Promise<void> {
+  const p = resolvePaths();
+  if (!fs.existsSync(p.logs)) {
+    console.log(`❌ Log directory not found: ${p.logs}`);
+    process.exit(1);
+  }
+  const files = fs.readdirSync(p.logs).filter(f => f.endsWith('.log'));
+  const types = deriveLogTypes(files);
+  if (types.length === 0) {
+    console.log(`⚠ ${p.logs} 下暂无 .log 文件`);
+    return;
+  }
+  const fileCount = new Map<string, number>();
+  for (const t of types) fileCount.set(t, files.filter(f => shortLogNameLocal(f) === t).length);
+
+  const cfg = loadEvolclawConfig();
+  const preChecked = computePreChecked(types, cfg.watch?.logTypes);
+
+  if (!process.stdin.isTTY) {
+    const fallback = cfg.watch?.logTypes && cfg.watch.logTypes.length > 0
+      ? new Set(cfg.watch.logTypes) : new Set(types);
+    cmdWatch(fallback);
+    return;
+  }
+
+  const selected = await cmdWatchLogsSelect(types, preChecked, fileCount);
+  if (selected === null) return;
+  saveEvolclawConfig({ ...cfg, watch: { ...cfg.watch, logTypes: selected } });
+  cmdWatch(new Set(selected));
 }
 
 function cmdWatch(filterTypes: Set<string>) {
@@ -5151,14 +5183,29 @@ export async function main(args: string[]) {
         }
         const { cmdWatchMsg } = await import('./watch-msg.js');
         await cmdWatchMsg();
-      } else if (args[1] === 'log') {
-        cmdWatch(new Set()) /* TODO: Task 4/5 替换 */;
+      } else if (args[1] === 'log' || args[1] === 'logs') {
+        const requested = args.slice(2);
+        if (requested.length > 0) {
+          const p2 = resolvePaths();
+          const avail = fs.existsSync(p2.logs)
+            ? deriveLogTypes(fs.readdirSync(p2.logs).filter(f => f.endsWith('.log')))
+            : [];
+          const invalid = validateLogTypes(requested, avail);
+          if (invalid.length > 0) {
+            console.log(`❌ 无效日志类型: ${invalid.join(', ')}`);
+            console.log(`可用类型: ${avail.join(', ') || '(无)'}`);
+            process.exit(1);
+          }
+          cmdWatch(new Set(requested));
+        } else {
+          await cmdWatchLogsFlow();
+        }
       } else if (args[1] === 'web' || args[1] === 'session') {
         await cmdWatchWeb();
       } else if (!args[1]) {
         await cmdWatchMenu();
       } else {
-        cmdWatch(new Set()) /* TODO: Task 4/5 替换 */;
+        await cmdWatchLogsFlow();
       }
       break;
     }
@@ -5267,7 +5314,8 @@ Commands:
                   --module <name>      只显示指定模块（如 feishu、AgentRunner）
                   --raw                原始输出，不着色
   watch         监控面板选择菜单（↑↓ 选择 log/aid/msg）
-  watch log     监控 logs/ 下所有 .log 文件（汇总实时输出，启动时显示最近 20 条）
+  watch logs    勾选日志类型后实时监控（记忆上次选择，存入 evolclaw.json）
+  watch log <类型...>  直接监控指定类型（如 evolclaw aun），不读写偏好
   watch aid     AID 连接状态实时监控（显示各 AID 在线/离线/重连状态）
   watch msg     消息监控（三面板交互式 TUI：AID 列表 / 对端统计 / 消息流）
   ctl           运行时自管理（模型切换、推理强度、压缩上下文等）
