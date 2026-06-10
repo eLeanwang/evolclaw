@@ -10,12 +10,19 @@ describe('shortLogName', () => {
   it('keeps plain name', () => {
     expect(shortLogName('aun.log')).toBe('aun');
   });
+  it('strips YYYY-MM-DD date suffix (ts-sdk series)', () => {
+    expect(shortLogName('ts-sdk-2026-05-27.log')).toBe('ts-sdk');
+  });
 });
 
 describe('deriveLogTypes', () => {
   it('dedups and sorts types', () => {
     const files = ['evolclaw.log', 'evolclaw-20260610-03.log', 'aun.log', 'channel-in-20260610-04.log'];
     expect(deriveLogTypes(files)).toEqual(['aun', 'channel-in', 'evolclaw']);
+  });
+  it('collapses ts-sdk date series into one type', () => {
+    const files = ['ts-sdk-2026-05-27.log', 'ts-sdk-2026-05-28.log', 'ts-sdk-2026-06-01.log'];
+    expect(deriveLogTypes(files)).toEqual(['ts-sdk']);
   });
 });
 
