@@ -16,7 +16,7 @@ const isMacOS = process.platform === 'darwin';
 /** 启动时间容差：2 秒（覆盖 macOS 秒级精度 + 时钟漂移） */
 const START_TIME_TOLERANCE_MS = 2000;
 
-export interface WatchWebRecord {
+export interface EcwebRecord {
   pid: number;
   startedAt: number;
   startedAtIso: string;
@@ -141,24 +141,32 @@ function instanceDir(): string {
   return resolvePaths().instanceDir;
 }
 
-function watchWebFile(pid: number): string {
-  return path.join(instanceDir(), `watch-web-${pid}.json`);
+function isEcwebInstanceFile(file: string): boolean {
+  return /^(ecweb|watch-web)-\d+\.json$/.test(file);
 }
 
-export function writeWatchWeb(port: number): string {
+function ecwebFile(pid: number): string {
+  return path.join(instanceDir(), `ecweb-${pid}.json`);
+}
+
+export function writeEcweb(port: number): string {
   const dir = instanceDir();
   fs.mkdirSync(dir, { recursive: true });
   const startedAt = getProcessStartTime(process.pid) ?? Date.now();
-  const record: WatchWebRecord = { pid: process.pid, startedAt, startedAtIso: new Date(startedAt).toISOString(), port };
-  const filePath = watchWebFile(process.pid);
+  const record: EcwebRecord = { pid: process.pid, startedAt, startedAtIso: new Date(startedAt).toISOString(), port };
+  const filePath = ecwebFile(process.pid);
   const tmp = filePath + '.tmp';
   fs.writeFileSync(tmp, JSON.stringify(record, null, 2));
   fs.renameSync(tmp, filePath);
   return filePath;
 }
 
-export function removeWatchWeb(pid?: number): void {
-  try { fs.unlinkSync(watchWebFile(pid ?? process.pid)); } catch {}
+export function removeEcweb(pid?: number): void {
+  const target = pid ?? process.pid;
+  const dir = instanceDir();
+  for (const prefix of ['ecweb', 'watch-web']) {
+    try { fs.unlinkSync(path.join(dir, `${prefix}-${target}.json`)); } catch {}
+  }
 }
 
 function safeParseJson<T>(filePath: string): T | null {
@@ -166,20 +174,21 @@ function safeParseJson<T>(filePath: string): T | null {
 }
 
 /**
- * 杀掉所有非自己 PID 的存活 watch-web 进程并清理文件。
+ * 杀掉所有非自己 PID 的存活 ecweb 进程并清理文件。
+ * 兼容清理迁移前遗留的 watch-web-*.json。
  * 用启动时间比对防 PID 复用。返回被杀的记录列表。
  */
-export function cleanupWatchWebs(): WatchWebRecord[] {
+export function cleanupEcwebs(): EcwebRecord[] {
   const dir = instanceDir();
   if (!fs.existsSync(dir)) return [];
   let files: string[];
   try { files = fs.readdirSync(dir); } catch { return []; }
 
-  const killed: WatchWebRecord[] = [];
+  const killed: EcwebRecord[] = [];
   for (const file of files) {
-    if (!file.startsWith('watch-web-') || !file.endsWith('.json')) continue;
+    if (!isEcwebInstanceFile(file)) continue;
     const filePath = path.join(dir, file);
-    const record = safeParseJson<WatchWebRecord>(filePath);
+    const record = safeParseJson<EcwebRecord>(filePath);
     if (record?.pid && record.pid !== process.pid) {
       if (isProcessRunning(record.pid) && startTimeMatches(record.startedAt, getProcessStartTime(record.pid))) {
         killPid(record.pid);
@@ -195,7 +204,7 @@ export function cleanupWatchWebs(): WatchWebRecord[] {
  * 兜底：按端口找占用进程，确认是 ecweb 进程后 SIGKILL。
  * 用于清理 instance 文件已丢失的孤儿进程（杀不掉的僵尸）。返回被杀的 PID 列表。
  */
-export function cleanupWatchWebByPort(port: number): number[] {
+export function cleanupEcwebByPort(port: number): number[] {
   const killed: number[] = [];
   for (const pid of findPidByPort(port)) {
     if (pid === process.pid || !isProcessRunning(pid)) continue;

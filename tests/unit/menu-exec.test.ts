@@ -266,10 +266,17 @@ describe('execMenuQuery', () => {
   describe('/system', () => {
     it('returns process info', async () => {
       const { handler } = createHandler();
-      const result = await handler.execMenuQuery('/system', 'aun', 'chat1', 'user1') as { data: any };
+      // /system 进程级：仅控制 channel（fromControlChannel=true）可执行
+      const result = await handler.execMenuQuery('/system', 'aun', 'chat1', 'user1', undefined, undefined, true) as { data: any };
       expect(result.data.pid).toBe(process.pid);
       expect(result.data.node).toBe(process.version);
       expect(typeof result.data.uptime).toBe('number');
+    });
+
+    it('rejects /system query from agent channel (not control)', async () => {
+      const { handler } = createHandler();
+      const result = await handler.execMenuQuery('/system', 'aun', 'chat1', 'user1') as any;
+      expect(result.code).toBe('FORBIDDEN');
     });
   });
 
@@ -385,6 +392,25 @@ describe('execMenuUpdate', () => {
       const result = await handler.execMenuUpdate('/dispatch', 'broadcast', 'aun', 'chat1', 'user1') as any;
       expect(result.code).toBe('NOT_APPLICABLE');
     });
+
+    it('clear removes dispatchModeOverride, follows server again', async () => {
+      const updateSession = vi.fn().mockResolvedValue(undefined);
+      const sm = createMockSessionManager({
+        getActiveSession: vi.fn().mockResolvedValue({
+          id: 'sess-1', chatType: 'group', sessionMode: 'interactive',
+          metadata: { permissionMode: 'auto', dispatchMode: 'mention', dispatchModeOverride: 'broadcast' },
+          projectPath: '/tmp', agentId: 'claude', createdAt: Date.now(), updatedAt: Date.now(),
+        }),
+        updateSession,
+      });
+      const { handler } = createHandler({ sessionManager: sm });
+      const result = await handler.execMenuUpdate('/dispatch', 'clear', 'aun', 'chat1', 'user1');
+      expect(result).toEqual({ data: { mode: null } });
+      // dispatchModeOverride dropped; dispatchMode (server cache) preserved
+      const written = updateSession.mock.calls[0][1].metadata;
+      expect(written.dispatchModeOverride).toBeUndefined();
+      expect(written.dispatchMode).toBe('mention');
+    });
   });
 
   describe('/activity', () => {
@@ -433,35 +459,43 @@ describe('execMenuUpdate', () => {
 
 describe('execMenuAction', () => {
   describe('/system', () => {
-    it('rejects restart for non-owner (not in evolclaw.json owners)', async () => {
-      ownersMock.value = ['someone-else.agentid.pub'];
+    it('rejects restart from agent channel (process-level gate)', async () => {
+      ownersMock.value = ['user1'];
       const { handler } = createHandler();
+      // 非控制 channel：进程级闸直接 FORBIDDEN（早于 owners 检查）
       const result = await handler.execMenuAction('/system', 'restart', undefined, 'aun', 'chat1', 'user1') as any;
       expect(result.code).toBe('FORBIDDEN');
-      ownersMock.value = ['user1'];
     });
 
-    it('rejects upgrade for non-owner (not in evolclaw.json owners)', async () => {
+    it('rejects restart for non-owner via control channel (owners check)', async () => {
       ownersMock.value = ['someone-else.agentid.pub'];
       const { handler } = createHandler();
-      const result = await handler.execMenuAction('/system', 'upgrade', undefined, 'aun', 'chat1', 'user1') as any;
+      const result = await handler.execMenuAction('/system', 'restart', undefined, 'aun', 'chat1', 'user1', undefined, undefined, undefined, true) as any;
       expect(result.code).toBe('FORBIDDEN');
       ownersMock.value = ['user1'];
     });
 
-    it('check works for owner in evolclaw.json owners', async () => {
+    it('rejects upgrade for non-owner via control channel (owners check)', async () => {
+      ownersMock.value = ['someone-else.agentid.pub'];
+      const { handler } = createHandler();
+      const result = await handler.execMenuAction('/system', 'upgrade', undefined, 'aun', 'chat1', 'user1', undefined, undefined, undefined, true) as any;
+      expect(result.code).toBe('FORBIDDEN');
+      ownersMock.value = ['user1'];
+    });
+
+    it('check works for owner via control channel', async () => {
       ownersMock.value = ['user1'];
       const { handler } = createHandler();
-      const result = await handler.execMenuAction('/system', 'check', undefined, 'aun', 'chat1', 'user1') as any;
-      // owners 名单内：check 通过鉴权
+      const result = await handler.execMenuAction('/system', 'check', undefined, 'aun', 'chat1', 'user1', undefined, undefined, undefined, true) as any;
+      // 控制 channel + owners 名单内：check 通过鉴权
       expect(result.code).not.toBe('FORBIDDEN');
       expect(result.data?.action).toBe('check');
     });
 
-    it('rejects unknown action', async () => {
+    it('rejects unknown action via control channel', async () => {
       ownersMock.value = ['user1'];
       const { handler } = createHandler();
-      const result = await handler.execMenuAction('/system', 'frobnicate', undefined, 'aun', 'chat1', 'user1') as any;
+      const result = await handler.execMenuAction('/system', 'frobnicate', undefined, 'aun', 'chat1', 'user1', undefined, undefined, undefined, true) as any;
       expect(result.code).toBe('NOT_SUPPORTED');
     });
   });
@@ -612,7 +646,7 @@ describe('execMenuAction', () => {
       // We bypass via test by stubbing a non-existent action — but /system check actually returns a result.
       // Instead test the actual contract: check that successful delegation returns success.
       const { handler } = createHandler();
-      const result = await handler.execMenuAction('/system', 'check', undefined, 'aun', 'chat1', 'user1') as any;
+      const result = await handler.execMenuAction('/system', 'check', undefined, 'aun', 'chat1', 'user1', undefined, undefined, undefined, true) as any;
       // /check returns command.result text → mapped to success
       expect(result.data?.action).toBe('check');
       expect(result.data?.success).toBe(true);

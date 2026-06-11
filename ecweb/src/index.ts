@@ -70,13 +70,13 @@ const fileLog = (line: string) => {
 const log = (line: string) => { logLine(line); fileLog(line); };
 
 // 单实例保护：
-// 1) 按 instance 文件杀掉登记在册的旧 watch-web 进程
-const { writeWatchWeb, removeWatchWeb, cleanupWatchWebs, cleanupWatchWebByPort } = await import('./process-utils.js');
-const killedWebs = cleanupWatchWebs();
-for (const r of killedWebs) logLine(`${YELLOW}↺ 已清理旧 watch 进程 PID ${r.pid}（端口 ${r.port}）${RST}`);
+// 1) 按 instance 文件杀掉登记在册的旧 ecweb 进程
+const { writeEcweb, removeEcweb, cleanupEcwebs, cleanupEcwebByPort } = await import('./process-utils.js');
+const killedWebs = cleanupEcwebs();
+for (const r of killedWebs) logLine(`${YELLOW}↺ 已清理旧 ecweb 进程 PID ${r.pid}（端口 ${r.port}）${RST}`);
 // 2) 兜底：按端口杀掉 instance 文件已丢失的孤儿进程（杀不掉的僵尸）
 const WATCH_WEB_PORT = port ?? 42705;
-const killedByPort = cleanupWatchWebByPort(WATCH_WEB_PORT);
+const killedByPort = cleanupEcwebByPort(WATCH_WEB_PORT);
 for (const pid of killedByPort) logLine(`${YELLOW}↺ 已强占端口 ${WATCH_WEB_PORT}：杀掉占用进程 PID ${pid}${RST}`);
 if (killedWebs.length > 0 || killedByPort.length > 0) {
   // 给 OS 释放端口的时间
@@ -92,7 +92,7 @@ try {
 }
 
 // 注册 instance 文件
-writeWatchWeb(handle.port);
+writeEcweb(handle.port);
 
 // 列出访问地址
 const ifaces = os.networkInterfaces();
@@ -118,13 +118,13 @@ const cleanup = () => {
   if (cleaningUp) return;   // 幂等：raw 模式下连按 Ctrl-C/q 不应重复触发
   cleaningUp = true;
   logLine(`${YELLOW}退出中…${RST}`);
-  removeWatchWeb();
+  removeEcweb();
   // 兜底：close() 万一卡住也强制退出，避免进程挂死
   const force = setTimeout(() => process.exit(0), 2000);
   force.unref();
   handle.close().finally(() => process.exit(0));
 };
-process.on('exit', () => removeWatchWeb());
+process.on('exit', () => removeEcweb());
 process.on('SIGINT', cleanup);
 process.on('SIGTERM', cleanup);
 

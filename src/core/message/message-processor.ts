@@ -855,8 +855,8 @@ export class MessageProcessor {
             channel: currentChannelType || null,
             venueUid: undefined,
             // 群分发模式 / 客户端类型 / 权限模式
-            // 优先本地 session 覆盖（/dispatch 命令），fallback 到服务器 dispatch_mode
-            dispatch: session.metadata?.dispatchMode || message.dispatchMode || undefined,
+            // 优先本地 session 覆盖（/dispatch 命令），fallback 到服务器 dispatch_mode 缓存
+            dispatch: (session.metadata?.dispatchModeOverride ?? session.metadata?.dispatchMode ?? message.dispatchMode) || undefined,
             responseDepth: responseDepth || undefined,
             clientType: message.clientType || undefined,
             permissionMode: session.metadata?.permissionMode || 'auto',
@@ -1693,7 +1693,7 @@ export class MessageProcessor {
       content: message.content,
       selfAid: session.selfAID || message.selfAID,
       mentionAids: message.mentionAids,
-      dispatch: session.metadata?.dispatchMode || message.dispatchMode,
+      dispatch: session.metadata?.dispatchModeOverride ?? session.metadata?.dispatchMode ?? message.dispatchMode,
       topicRounds: session.metadata?.topicRounds ?? 0,
       lastTopicHash: session.metadata?.lastTopicHash,
     });

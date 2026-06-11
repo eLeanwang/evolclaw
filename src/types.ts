@@ -201,7 +201,8 @@ export interface SessionMetadata {
     gemini?: string;
   };
   permissionMode?: string;  // 权限模式（per-session）: auto | bypass | readonly | request | edit | plan | noask
-  dispatchMode?: string;  // 群聊分发模式（per-session）: mention | broadcast
+  dispatchMode?: string;           // 群聊分发模式缓存（服务器下发值，per-session）: mention | broadcast
+  dispatchModeOverride?: string;   // 用户 /dispatch 命令写入的显式覆盖；undefined = 跟随服务器
   resumeAt?: string;  // /rewind chat 标记的回退点（assistant message uuid）
   lastProactiveFlag?: boolean;  // proactive 模式使用标志位后设置，interactive 切换时注入提示后清除
   // 群聊话题追踪（responseDepth 决策信号）
@@ -352,6 +353,9 @@ export interface InboundMessage {
   replyContext?: ReplyContext;       // Channel 预构建的回复上下文（渠道无关）
   dispatchMode?: string;            // 群聊分发模式（mention|broadcast）
   source?: 'user' | 'card-trigger';  // 消息来源：用户输入 / 卡片按钮触发
+  /** 来自控制 AID channel（evolclaw.json.aid）。控制面入口拥有全量权限（进程级 + 跨 agent），
+   *  由 index.ts 的 controlChannel.onMessage 在构造 InboundMessage 时注入。普通 agent channel 不设。 */
+  isControlChannel?: boolean;
 }
 
 // ── 交互协议类型（渠道无关） ──

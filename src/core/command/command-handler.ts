@@ -28,6 +28,7 @@ import { handleSlashCommand } from './slash-handler.js';
 import {
   execMenuAction as menuExecMenuAction,
   execMenuForEcweb as menuExecMenuForEcweb,
+  execMenuForControl as menuExecMenuForControl,
   execMenuQuery as menuExecMenuQuery,
   execMenuUpdate as menuExecMenuUpdate,
   getMenuItems as menuGetMenuItems,
@@ -487,8 +488,8 @@ export class CommandHandler {
   }
 
   /** 动态子菜单：根据 cmd 路径返回选项列表（供 menu.query + cmd 使用） */
-  async getSubMenuItems(cmd: string, channel: string, channelId: string, userId?: string, args?: Record<string, any>, overrideIdentity?: import('../../types.js').SessionIdentity, explicitChatType?: MenuChatType): Promise<MenuItem[] | null> {
-    return await menuGetSubMenuItems.call(this, cmd, channel, channelId, userId, args, overrideIdentity, explicitChatType);
+  async getSubMenuItems(cmd: string, channel: string, channelId: string, userId?: string, args?: Record<string, any>, overrideIdentity?: import('../../types.js').SessionIdentity, explicitChatType?: MenuChatType, fromControlChannel = false): Promise<MenuItem[] | null> {
+    return await menuGetSubMenuItems.call(this, cmd, channel, channelId, userId, args, overrideIdentity, explicitChatType, fromControlChannel);
   }
 
   // ── Menu Protocol exec ────────────────────────────────────────────────
@@ -506,17 +507,17 @@ export class CommandHandler {
 
   /** menu.query — 查询当前值。 */
   async execMenuQuery(
-    cmd: string, channel: string, channelId: string, userId?: string, args?: Record<string, any>, explicitChatType?: MenuChatType
+    cmd: string, channel: string, channelId: string, userId?: string, args?: Record<string, any>, explicitChatType?: MenuChatType, fromControlChannel = false
   ): Promise<{ data: any } | { error: string; code?: string }> {
-    return await menuExecMenuQuery.call(this, cmd, channel, channelId, userId, args, explicitChatType);
+    return await menuExecMenuQuery.call(this, cmd, channel, channelId, userId, args, explicitChatType, fromControlChannel);
   }
 
   /** menu.update — 写入新值。 */
   async execMenuUpdate(
     cmd: string, value: string, channel: string, channelId: string, userId?: string,
-    overrideIdentity?: import('../../types.js').SessionIdentity
+    overrideIdentity?: import('../../types.js').SessionIdentity, fromControlChannel = false
   ): Promise<{ data: any } | { error: string; code?: string }> {
-    return await menuExecMenuUpdate.call(this, cmd, value, channel, channelId, userId, overrideIdentity);
+    return await menuExecMenuUpdate.call(this, cmd, value, channel, channelId, userId, overrideIdentity, fromControlChannel);
   }
 
   /** menu.action — 触发动词。 */
@@ -524,14 +525,20 @@ export class CommandHandler {
     cmd: string, action: string, args: any, channel: string, channelId: string, userId?: string,
     overrideIdentity?: import('../../types.js').SessionIdentity,
     explicitChatType?: MenuChatType,
-    requestId?: string
+    requestId?: string,
+    fromControlChannel = false
   ): Promise<{ data: any } | { error: string; code?: string }> {
-    return await menuExecMenuAction.call(this, cmd, action, args, channel, channelId, userId, overrideIdentity, explicitChatType, requestId);
+    return await menuExecMenuAction.call(this, cmd, action, args, channel, channelId, userId, overrideIdentity, explicitChatType, requestId, fromControlChannel);
   }
 
   /** ECWeb 专用入口：注入 owner identity，进程级操作检查 owners 非空。不暴露 cli。 */
   async execMenuForEcweb(payload: any): Promise<import('../../types.js').MenuResponse> {
     return await menuExecMenuForEcweb.call(this, payload);
+  }
+
+  /** 控制 AID channel 专用入口：peerId 须 ∈ evolclaw.owners，全量权限。 */
+  async execMenuForControl(payload: any, peerId: string): Promise<import('../../types.js').MenuResponse> {
+    return await menuExecMenuForControl.call(this, payload, peerId);
   }
 
   /**

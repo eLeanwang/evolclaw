@@ -34,7 +34,13 @@ const CACHE_VERSION = 2;
 const _metaCache = new Map<string, { mtime: number; meta: TranscriptMeta }>();
 
 function cacheDir(encoded: string): string {
-  return path.join(resolvePaths().dataDir, 'watch-web-cache', encoded);
+  const dataDir = resolvePaths().dataDir;
+  const currentRoot = path.join(dataDir, 'ecweb-cache');
+  const legacyRoot = path.join(dataDir, 'watch-web-cache');
+  if (!fs.existsSync(currentRoot) && fs.existsSync(legacyRoot)) {
+    try { fs.renameSync(legacyRoot, currentRoot); } catch {}
+  }
+  return path.join(currentRoot, encoded);
 }
 
 interface CacheRecord { v: number; mtime: number; size: number; meta: TranscriptMeta; }

@@ -64,7 +64,13 @@ interface TokenRecord { token: string; createdAt: number; lastActive: number; la
 interface TokenStore { tokens: TokenRecord[]; }
 
 function tokenStorePath(): string {
-  return path.join(resolvePaths().instanceDir, 'watch-web-tokens.json');
+  const dir = resolvePaths().instanceDir;
+  const current = path.join(dir, 'ecweb-tokens.json');
+  const legacy = path.join(dir, 'watch-web-tokens.json');
+  if (!fs.existsSync(current) && fs.existsSync(legacy)) {
+    try { fs.renameSync(legacy, current); } catch {}
+  }
+  return current;
 }
 
 function loadTokens(): TokenStore {

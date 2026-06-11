@@ -244,11 +244,16 @@ function renderAgents(data) {
   const agentByAid = {};
   for (const ag of (data.agents || [])) agentByAid[ag.aid] = ag;
 
+  // 已禁用 / 未连接的 EvolAgent 不在 aids（活跃 AUN 连接）中，补成合成行，
+  // 否则无法在 UI 上重新启用。aids 优先，剩余 agents 追加在后。
+  const liveAids = new Set(aids.map(a => a.aid));
+  const offlineAgents = (data.agents || []).filter(ag => !liveAids.has(ag.aid));
+
   let html = '<div class="agents-toolbar"><button class="ctrl-btn" id="agent-new-btn">+ 新建 Agent</button></div>';
   if (!data.daemonRunning) {
     html += '<div class="banner">⚠ EvolClaw 主进程未运行，仅显示最近活动记录</div>';
   }
-  if (!aids.length) {
+  if (!aids.length && !offlineAgents.length) {
     html += '<div class="empty">暂无 AID</div>';
     el.innerHTML = html;
     bindAgentsEvents(el);
@@ -296,6 +301,27 @@ function renderAgents(data) {
       `<td>${s.uniquePeerCount ?? a.peerCount ?? 0}</td><td>${a.reconnectCount ?? 0}</td>` +
       `<td>${fmtAgo(lastTs)}</td>` +
       `<td class="preview">${esc(preview.replace(/\n/g, ' ').slice(0, 80))}</td>` +
+      `<td class="agent-ops-cell">${ops}</td>` +
+      '</tr>';
+  }
+  // 补充未连接的 EvolAgent（多为 disabled），让禁用项可被重新启用
+  for (const ag of offlineAgents) {
+    const status = ag.status || 'stopped';
+    const dotCls = status === 'running' ? 'on' : (status === 'disabled' || status === 'error' ? 'off' : 'idle');
+    const toggleLabel = status === 'disabled' ? '启用' : '禁用';
+    const ops = `<div class="agent-ops" data-aid="${esc(ag.aid)}" data-status="${esc(status)}">` +
+      `<button class="ctrl-btn" data-op="edit">编辑</button>` +
+      `<button class="ctrl-btn" data-op="reload">重载</button>` +
+      `<button class="ctrl-btn" data-op="toggle">${toggleLabel}</button>` +
+      `<button class="ctrl-btn danger" data-op="delete">删除</button>` +
+      `<a class="ctrl-btn" href="https://${esc(ag.aid)}/agent.md" target="_blank" rel="noopener">md↗</a>` +
+      `</div>`;
+    html += '<tr class="agent-offline">' +
+      `<td><span class="dot ${dotCls}"></span>${esc(status)}</td>` +
+      `<td>${esc(shortAid(ag.aid))}${ag.name ? ` <span style="color:var(--dim)">(${esc(ag.name)})</span>` : ''}</td>` +
+      `<td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td>` +
+      `<td>${ag.lastActivity ? fmtAgo(ag.lastActivity) : '-'}</td>` +
+      `<td class="preview"></td>` +
       `<td class="agent-ops-cell">${ops}</td>` +
       '</tr>';
   }

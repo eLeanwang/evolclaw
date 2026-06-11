@@ -140,6 +140,45 @@ export function isProcessLevelOwner(peerId: string | undefined, owners: string[]
   return (owners ?? []).includes(peerId);
 }
 
+// ── 控制面双轨鉴权（见 docs/.../2026-06-10-control-channel-auth-design.md）──
+// 白名单而非黑名单：默认安全，新增进程级 action 需显式加入。
+/** /agent 的进程级 action：仅控制 channel 可执行。 */
+export const PROCESS_LEVEL_AGENT_ACTIONS = new Set(['create', 'delete', 'enable', 'disable']);
+/** /agent 的「本 agent 自管理」action：agent channel 仅 owner 可对自身 aid 执行。 */
+export const SELF_MANAGE_AGENT_ACTIONS = new Set(['update', 'reload']);
+
+/** 判断 (cmdBase, action) 是否为进程级操作（仅控制 channel 可执行）。
+ *  /system 全部进程级；/agent 仅 create/delete/enable/disable 进程级；其余关系级。 */
+export function isProcessLevelAction(cmdBase: string, action?: string): boolean {
+  if (cmdBase === '/system') return true;
+  if (cmdBase === '/agent') return PROCESS_LEVEL_AGENT_ACTIONS.has(action ?? '');
+  return false;
+}
+
+/** 控制面作用域闸门：在每个 exec 入口算出 cmdBase/action 后调用。
+ *  闸1 进程级 action：仅控制 channel。
+ *  闸2 跨 agent 寻址（args.aid ≠ 自身）：仅控制 channel。
+ *  命中返回 FORBIDDEN 结果，否则返回 null（放行，后续走原有 owner/role 鉴权）。 */
+function gateControlScope(
+  this: any,
+  opts: { cmdBase: string; action?: string; args?: Record<string, any>; channel: string; fromControlChannel: boolean },
+): { error: string; code: string } | null {
+  const { cmdBase, action, args, channel, fromControlChannel } = opts;
+  if (fromControlChannel) return null;
+  if (isProcessLevelAction(cmdBase, action)) {
+    return { error: '此操作仅允许通过控制 AID channel 执行', code: 'FORBIDDEN' };
+  }
+  const targetAid = args?.aid;
+  if (targetAid) {
+    const currentAgentAid = this.getOwningAgent?.(channel)?.aid;
+    if (targetAid !== currentAgentAid) {
+      return { error: '跨 agent 操作仅允许通过控制 AID channel 执行', code: 'FORBIDDEN' };
+    }
+  }
+  return null;
+}
+
+
 function ecwebErr(id: string, name: string | undefined, code: string, message: string): import('../../types.js').MenuResponse {
   return { type: 'menu.response', id, ...(name ? { name } : {}), error: { code, message } };
 }
@@ -296,17 +335,32 @@ export function getMenuItems(this: any, role: string, chatType: string = 'privat
 }
 
 /** 动态子菜单：根据 cmd 路径返回选项列表（供 menu.query + cmd 使用） */
-export async function getSubMenuItems(this: any, cmd: string, channel: string, channelId: string, userId?: string, args?: Record<string, any>, overrideIdentity?: import('../../types.js').SessionIdentity, _explicitChatType?: MenuChatType): Promise<MenuItem[] | null> {
+export async function getSubMenuItems(this: any, cmd: string, channel: string, channelId: string, userId?: string, args?: Record<string, any>, overrideIdentity?: import('../../types.js').SessionIdentity, _explicitChatType?: MenuChatType, fromControlChannel = false): Promise<MenuItem[] | null> {
   const session = await this.sessionManager.getActiveSession(channel, channelId);
 
-  // ── 进程级 /agent list（owners 鉴权） ──
+  const cmdBase0 = cmd.trim().split(' ')[0];
+  const gated0 = gateControlScope.call(this, { cmdBase: cmdBase0, args, channel, fromControlChannel });
+  if (gated0) throw { code: gated0.code, message: gated0.error };
+
+  // ── /agent list（只读） ──
+  // 控制 channel：验 evolclaw.owners，返回全量；agent channel：放行但仅返回自身单条。
   if (cmd === '/agent') {
-    if (!isProcessLevelOwner(userId, loadEvolclawConfig().owners)) {
-      throw { code: 'FORBIDDEN', message: '操作需要 owner 权限' };
+    if (fromControlChannel) {
+      if (!isProcessLevelOwner(userId, loadEvolclawConfig().owners)) {
+        throw { code: 'FORBIDDEN', message: '操作需要 owner 权限' };
+      }
+      const res = await execAgentOptions(args);
+      if ('error' in res) throw { code: res.code, message: res.error };
+      return (res.data.agents as any[]).map(ag => ({ value: ag.aid, label: ag.name || ag.aid, desc: ag.status }));
     }
+    // agent channel：作用域绑定自身，仅返回自身单条
+    const selfAid = this.getOwningAgent?.(channel)?.aid;
+    if (!selfAid) throw { code: 'FORBIDDEN', message: '当前 channel 无绑定 agent' };
     const res = await execAgentOptions(args);
     if ('error' in res) throw { code: res.code, message: res.error };
-    return (res.data.agents as any[]).map(ag => ({ value: ag.aid, label: ag.name || ag.aid, desc: ag.status }));
+    return (res.data.agents as any[])
+      .filter(ag => ag.aid === selfAid)
+      .map(ag => ({ value: ag.aid, label: ag.name || ag.aid, desc: ag.status }));
   }
 
   // ── 关系级 /trigger list（每个 trigger 一个 MenuItem） ──
@@ -436,7 +490,7 @@ export async function getSubMenuItems(this: any, cmd: string, channel: string, c
   }
 
   if (cmd === '/dispatch') {
-    const currentMode = session?.metadata?.dispatchMode ?? null;
+    const currentMode = session?.metadata?.dispatchModeOverride ?? session?.metadata?.dispatchMode ?? null;
     return [
       { value: 'mention', label: '@提及时响应', selected: currentMode === 'mention' },
       { value: 'broadcast', label: '所有消息响应', selected: currentMode === 'broadcast' },
@@ -466,20 +520,29 @@ export async function getSubMenuItems(this: any, cmd: string, channel: string, c
 // 客户端可据此决定降级策略。message-bridge 把 code 透传到 menu.response。
 
 /** menu.query — 查询当前值。 */
-export async function execMenuQuery(this: any, 
-  cmd: string, channel: string, channelId: string, userId?: string, args?: Record<string, any>, _explicitChatType?: MenuChatType
+export async function execMenuQuery(this: any,
+  cmd: string, channel: string, channelId: string, userId?: string, args?: Record<string, any>, _explicitChatType?: MenuChatType, fromControlChannel = false
 ): Promise<{ data: any } | { error: string; code?: string }> {
   const cmdBase = cmd.trim().split(' ')[0];
   if (!cmdBase) return { error: '缺少命令', code: 'MISSING_CMD' };
+  const gated = gateControlScope.call(this, { cmdBase, args, channel, fromControlChannel });
+  if (gated) return gated;
   const { session, evolagent } = await this.loadMenuContext(channel, channelId);
 
-  // ── 进程级 /agent（owners 鉴权） ──
+  // ── /agent 查询（只读） ──
+  // 控制 channel：验 owners，按 args.aid 查任意 agent；agent channel：强制查自身。
   if (cmdBase === '/agent') {
-    if (!isProcessLevelOwner(userId, loadEvolclawConfig().owners)) {
-      return { error: '操作需要 owner 权限', code: 'FORBIDDEN' };
+    if (fromControlChannel) {
+      if (!isProcessLevelOwner(userId, loadEvolclawConfig().owners)) {
+        return { error: '操作需要 owner 权限', code: 'FORBIDDEN' };
+      }
+      return await execAgentQuery(args);
     }
-    return await execAgentQuery(args);
+    const selfAid = this.getOwningAgent?.(channel)?.aid;
+    if (!selfAid) return { error: '当前 channel 无绑定 agent', code: 'FORBIDDEN' };
+    return await execAgentQuery({ ...(args ?? {}), aid: selfAid });
   }
+
 
   if (cmdBase === '/pwd') {
     const sessPath = session?.projectPath;
@@ -608,7 +671,7 @@ export async function execMenuQuery(this: any,
     if (chatType !== 'group') {
       return { error: 'dispatch 仅在群聊会话中有效', code: 'NOT_APPLICABLE' };
     }
-    const sessionMode = session?.metadata?.dispatchMode;
+    const sessionMode = session?.metadata?.dispatchModeOverride ?? session?.metadata?.dispatchMode;
     const fallback = evolagent?.config?.dispatch;
     return { data: { mode: sessionMode ?? fallback ?? null } };
   }
@@ -691,12 +754,14 @@ export async function execMenuQuery(this: any,
 }
 
 /** menu.update — 写入新值。 */
-export async function execMenuUpdate(this: any, 
+export async function execMenuUpdate(this: any,
   cmd: string, value: string, channel: string, channelId: string, userId?: string,
-  overrideIdentity?: import('../../types.js').SessionIdentity
+  overrideIdentity?: import('../../types.js').SessionIdentity, fromControlChannel = false
 ): Promise<{ data: any } | { error: string; code?: string }> {
   const cmdBase = cmd.trim().split(' ')[0];
   if (!cmdBase) return { error: '缺少命令', code: 'MISSING_CMD' };
+  const gated = gateControlScope.call(this, { cmdBase, channel, fromControlChannel });
+  if (gated) return gated;
   const arg = value.trim();
   if (!arg) return { error: '缺少 value 参数', code: 'MISSING_VALUE' };
   const { session, evolagent } = await this.loadMenuContext(channel, channelId);
@@ -801,7 +866,7 @@ export async function execMenuUpdate(this: any,
   }
 
   if (cmdBase === '/dispatch') {
-    if (arg !== 'mention' && arg !== 'broadcast') {
+    if (arg !== 'mention' && arg !== 'broadcast' && arg !== 'clear') {
       return { error: `无效模式: ${arg}`, code: 'INVALID_VALUE' };
     }
     const chatType = session?.chatType;
@@ -811,7 +876,13 @@ export async function execMenuUpdate(this: any,
     if (identity.role !== 'owner' && identity.role !== 'admin') {
       return { error: '无权限：群聊中仅管理员可切换', code: 'NO_PERMISSION' };
     }
-    const metadata = { ...(session.metadata || {}), dispatchMode: arg };
+    if (arg === 'clear') {
+      const { dispatchModeOverride: _, ...rest } = session.metadata || {};
+      await this.sessionManager.updateSession(session.id, { metadata: rest });
+      this.eventBus.publish({ type: 'session:dispatch-mode-changed', sessionId: session.id, mode: undefined, timestamp: Date.now() });
+      return { data: { mode: null } };
+    }
+    const metadata = { ...(session.metadata || {}), dispatchModeOverride: arg };
     await this.sessionManager.updateSession(session.id, { metadata });
     this.eventBus.publish({ type: 'session:dispatch-mode-changed', sessionId: session.id, mode: arg, timestamp: Date.now() });
     return { data: { mode: arg } };
@@ -858,20 +929,32 @@ export async function execMenuAction(this: any,
   overrideIdentity?: import('../../types.js').SessionIdentity,
   explicitChatType?: MenuChatType,
   requestId?: string,
+  fromControlChannel = false,
 ): Promise<{ data: any } | { error: string; code?: string }> {
   const cmdBase = cmd.trim().split(' ')[0];
   if (!cmdBase) return { error: '缺少命令', code: 'MISSING_CMD' };
   if (!action) return { error: '缺少 action', code: 'MISSING_VALUE' };
+  const gated = gateControlScope.call(this, { cmdBase, action, args, channel, fromControlChannel });
+  if (gated) return gated;
   const { session } = await this.loadMenuContext(channel, channelId);
   const identity = overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId);
 
-  // ── 进程级 /agent（owners 鉴权，不依赖 session/channel） ──
-  // NOTE(D5): 本次进程级 /agent 仅按 evolclaw.json owners 鉴权，任意 evolagent 的 AUN
-  // channel 均可作为入口。part1（daemon 控制 AID）落地后，应叠加 isControlChannel(channelId)
-  // 闸：仅控制 AID channel 上的 /agent /system 生效。见 part1 计划。
+  // ── /agent action ──
+  // 控制 channel：验 evolclaw.owners，可执行进程级（create/delete/enable/disable）+ 自管理（update/reload）。
+  // agent channel：闸门已挡掉进程级 + 跨 agent，仅 update/reload 能到此；要求 owner 且作用于自身 aid。
   if (cmdBase === '/agent') {
-    if (!isProcessLevelOwner(userId, loadEvolclawConfig().owners)) {
-      return { error: '操作需要 owner 权限', code: 'FORBIDDEN' };
+    if (fromControlChannel) {
+      if (!isProcessLevelOwner(userId, loadEvolclawConfig().owners)) {
+        return { error: '操作需要 owner 权限', code: 'FORBIDDEN' };
+      }
+    } else {
+      // 本 agent 自管理：仅 owner（不含 admin），强制 aid = 自身
+      if (identity.role !== 'owner') {
+        return { error: '本 agent 自管理操作仅 owner 可执行', code: 'FORBIDDEN' };
+      }
+      const selfAid = this.getOwningAgent?.(channel)?.aid;
+      if (!selfAid) return { error: '当前 channel 无绑定 agent', code: 'FORBIDDEN' };
+      args = { ...(args ?? {}), aid: selfAid };
     }
     const a = { ...(args ?? {}) };
     if (action === 'create') {
@@ -1179,27 +1262,94 @@ export async function execMenuForEcweb(this: any, payload: any): Promise<import(
 
       case 'menu.query': {
         if (!cmd) return ecwebErr(id, name, 'MISSING_CMD', '缺少 name/cmd');
-        const r = await this.execMenuQuery(cmd, agentChannelKey, agentChannelKey, userId, payload.args);
+        const r = await this.execMenuQuery(cmd, agentChannelKey, agentChannelKey, userId, payload.args, undefined, true);
         return ecwebResp(id, name, r);
       }
 
       case 'menu.options': {
         if (!cmd) return ecwebErr(id, name, 'MISSING_CMD', '缺少 name/cmd');
-        const data = await this.getSubMenuItems(cmd, agentChannelKey, agentChannelKey, userId, payload.args, ownerIdentity) ?? [];
+        const data = await this.getSubMenuItems(cmd, agentChannelKey, agentChannelKey, userId, payload.args, ownerIdentity, undefined, true) ?? [];
         return { type: 'menu.response', id, name, data };
       }
 
       case 'menu.update': {
         if (!cmd) return ecwebErr(id, name, 'MISSING_CMD', '缺少 name/cmd');
         if (!payload.value) return ecwebErr(id, name, 'MISSING_VALUE', '缺少 value');
-        const r = await this.execMenuUpdate(cmd, payload.value, agentChannelKey, agentChannelKey, userId, ownerIdentity);
+        const r = await this.execMenuUpdate(cmd, payload.value, agentChannelKey, agentChannelKey, userId, ownerIdentity, true);
         return ecwebResp(id, name, r);
       }
 
       case 'menu.action': {
         if (!cmd) return ecwebErr(id, name, 'MISSING_CMD', '缺少 name/cmd');
         if (!payload.action) return ecwebErr(id, name, 'MISSING_VALUE', '缺少 action');
-        const r = await this.execMenuAction(cmd, payload.action, payload.args, agentChannelKey, agentChannelKey, userId, ownerIdentity, undefined, id);
+        const r = await this.execMenuAction(cmd, payload.action, payload.args, agentChannelKey, agentChannelKey, userId, ownerIdentity, undefined, id, true);
+        return ecwebResp(id, name, r);
+      }
+
+      default:
+        return ecwebErr(id, name, 'NOT_SUPPORTED', `未知类型: ${payload?.type}`);
+    }
+  } catch (e: any) {
+    return ecwebErr(id, name, 'INTERNAL', e?.message ?? String(e));
+  }
+}
+
+/** 控制 AID channel 专用入口：peerId 必须 ∈ evolclaw.owners。
+ *  全量权限（进程级 + 跨 agent + 关系级），fromControlChannel=true 放行闸门。
+ *  与 ECWeb 入口的区别：鉴权主体是真实 peerId（而非注入 owner），按 evolclaw.owners 校验。 */
+export async function execMenuForControl(this: any, payload: any, peerId: string): Promise<import('../../types.js').MenuResponse> {
+  const id = payload?.id ?? '';
+  const name = payload?.name;
+
+  const owners = loadEvolclawConfig().owners ?? [];
+  if (!isProcessLevelOwner(peerId, owners)) {
+    return { type: 'menu.response', id, ...(name ? { name } : {}), error: { code: 'FORBIDDEN', message: '控制 channel 操作需要 owner 权限' } };
+  }
+
+  if (name === 'cli' || payload?.cmd === '/cli') {
+    return { type: 'menu.response', id, name, error: { code: 'NOT_SUPPORTED', message: 'cli 不在控制 channel 范围' } };
+  }
+
+  const CONTROL_CHANNEL = '__control__';
+  const ownerIdentity: import('../../types.js').SessionIdentity = { role: 'owner', mode: 'interactive' };
+
+  const nameMap: Record<string, string> = {
+    pwd: '/pwd', session: '/session', baseagent: '/baseagent', model: '/model',
+    topic: '/topic',
+    effort: '/effort', chatmode: '/chatmode', dispatch: '/dispatch',
+    permission: '/perm', activity: '/activity', system: '/system',
+    agent: '/agent', trigger: '/trigger', file: '/file',
+  };
+  const cmd = name ? (nameMap[name] ?? payload.cmd) : payload.cmd;
+
+  try {
+    switch (payload?.type) {
+      case 'menu.list':
+        return { type: 'menu.response', id, data: this.getMenuItems('owner', 'private') };
+
+      case 'menu.query': {
+        if (!cmd) return ecwebErr(id, name, 'MISSING_CMD', '缺少 name/cmd');
+        const r = await this.execMenuQuery(cmd, CONTROL_CHANNEL, CONTROL_CHANNEL, peerId, payload.args, undefined, true);
+        return ecwebResp(id, name, r);
+      }
+
+      case 'menu.options': {
+        if (!cmd) return ecwebErr(id, name, 'MISSING_CMD', '缺少 name/cmd');
+        const data = await this.getSubMenuItems(cmd, CONTROL_CHANNEL, CONTROL_CHANNEL, peerId, payload.args, ownerIdentity, undefined, true) ?? [];
+        return { type: 'menu.response', id, name, data };
+      }
+
+      case 'menu.update': {
+        if (!cmd) return ecwebErr(id, name, 'MISSING_CMD', '缺少 name/cmd');
+        if (!payload.value) return ecwebErr(id, name, 'MISSING_VALUE', '缺少 value');
+        const r = await this.execMenuUpdate(cmd, payload.value, CONTROL_CHANNEL, CONTROL_CHANNEL, peerId, ownerIdentity, true);
+        return ecwebResp(id, name, r);
+      }
+
+      case 'menu.action': {
+        if (!cmd) return ecwebErr(id, name, 'MISSING_CMD', '缺少 name/cmd');
+        if (!payload.action) return ecwebErr(id, name, 'MISSING_VALUE', '缺少 action');
+        const r = await this.execMenuAction(cmd, payload.action, payload.args, CONTROL_CHANNEL, CONTROL_CHANNEL, peerId, ownerIdentity, undefined, id, true);
         return ecwebResp(id, name, r);
       }
 
