@@ -45,6 +45,39 @@ const FILE_FETCH_MAX_SIZE = 10 * 1024 * 1024;
 /** menu file: query 的 sha256 仅对 ≤ 2 MB 文件计算，超过返回 null（见设计文档 §7 决策 2） */
 const FILE_HASH_MAX_SIZE = 2 * 1024 * 1024;
 
+function getRenameName(args: any): string {
+  return (args?.name ?? args?.title ?? args?.value ?? '').toString().trim();
+}
+
+function buildSessionPayload(session: Session, name: string): Record<string, any> {
+  const payload: Record<string, any> = { id: session.id, name };
+  if (session.agentSessionId) payload.agentSessionId = session.agentSessionId;
+  return payload;
+}
+
+async function findMainSessionTarget(
+  sessionManager: any,
+  channel: string,
+  channelId: string,
+  target: string,
+  activeSession?: Session | null,
+): Promise<Session | undefined> {
+  if (!target) {
+    return activeSession && !activeSession.threadId ? activeSession : undefined;
+  }
+
+  const sessions = (await sessionManager.listSessions(channel, channelId) as Session[])
+    .filter((s: Session) => !s.threadId);
+
+  return sessions.find((s: Session) =>
+    s.name === target ||
+    s.id === target ||
+    (target.length >= 8 && s.id.startsWith(target)) ||
+    s.agentSessionId === target ||
+    (!!s.agentSessionId && target.length >= 8 && s.agentSessionId.startsWith(target))
+  );
+}
+
 /**
  * 解析并校验 menu `name=file` 的目标路径（query/fetch 共用）。
  *
@@ -144,7 +177,7 @@ export function isProcessLevelOwner(peerId: string | undefined, owners: string[]
 // 白名单而非黑名单：默认安全，新增进程级 action 需显式加入。
 /** /agent 的进程级 action：仅控制 channel 可执行。 */
 export const PROCESS_LEVEL_AGENT_ACTIONS = new Set(['create', 'delete', 'enable', 'disable']);
-/** /agent 的「本 agent 自管理」action：agent channel 仅 owner 可对自身 aid 执行。 */
+/** /agent 的「本 agent 自管理」action：agent channel 仅 owner/admin 可对自身 aid 执行；update 另行收紧为 owner。 */
 export const SELF_MANAGE_AGENT_ACTIONS = new Set(['update', 'reload']);
 
 /** 判断 (cmdBase, action) 是否为进程级操作（仅控制 channel 可执行）。
@@ -210,9 +243,10 @@ export function validateScheduleParams(scheduleType: string, scheduleValue: stri
  * 返回结构化命令菜单（供 menu.query 使用）
  * owner 看到全部命令，admin 看到管理级命令（不含 owner-only），guest 仅看到用户级命令
  */
-export function getMenuItems(this: any, role: string, chatType: string = 'private'): { group: string; commands: MenuItem[] }[] {
+export function getMenuItems(this: any, role: string, chatType: string = 'private', scope: 'agent' | 'control' = 'agent'): { group: string; commands: MenuItem[] }[] {
   const isOwner = role === 'owner';
   const isAdmin = role === 'owner' || role === 'admin';
+  const isControlScope = scope === 'control';
   const canReadTopic = role !== 'anonymous';
   const items: { group: string; commands: MenuItem[] }[] = [];
 
@@ -278,15 +312,13 @@ export function getMenuItems(this: any, role: string, chatType: string = 'privat
       group: '权限管理',
       commands: [
         { cmd: '/perm', label: '权限模式管理', desc: '控制工具调用的审批策略', next: { type: 'select', items: [
-          ...(isOwner ? [
-            { value: 'auto', label: '自动模式', desc: '根据风险等级自动决定是否审批' },
-            { value: 'bypass', label: '免审批模式', desc: '跳过所有工具审批确认' },
-            { value: 'readonly', label: '只读模式', desc: '允许读取和临时目录写入，拒绝项目文件修改' },
-            { value: 'plan', label: '计划模式', desc: '仅允许只读操作，写操作需审批' },
-            { value: 'edit', label: '编辑模式', desc: '允许文件编辑，其他操作需审批' },
-            { value: 'request', label: '请求模式', desc: '所有操作均需审批' },
-            { value: 'noask', label: '静默模式', desc: '不弹出审批，自动拒绝未授权操作' },
-          ] : []),
+          { value: 'auto', label: '自动模式', desc: '根据风险等级自动决定是否审批' },
+          { value: 'bypass', label: '免审批模式', desc: '跳过所有工具审批确认' },
+          { value: 'readonly', label: '只读模式', desc: '允许读取和临时目录写入，拒绝项目文件修改' },
+          { value: 'plan', label: '计划模式', desc: '仅允许只读操作，写操作需审批' },
+          { value: 'edit', label: '编辑模式', desc: '允许文件编辑，其他操作需审批' },
+          { value: 'request', label: '请求模式', desc: '所有操作均需审批' },
+          { value: 'noask', label: '静默模式', desc: '不弹出审批，自动拒绝未授权操作' },
           { value: 'allow', label: '允许此操作', desc: '本次允许当前待审批操作' },
           { value: 'always', label: '始终允许', desc: '永久允许同类操作' },
           { value: 'deny', label: '拒绝此操作', desc: '拒绝当前待审批操作' },
@@ -306,10 +338,10 @@ export function getMenuItems(this: any, role: string, chatType: string = 'privat
           { value: 'owner', label: '仅 owner 私聊', desc: '仅 owner 的私聊中显示' },
           { value: 'none', label: '不显示', desc: '关闭所有中间输出' },
         ] } },
-        ...(isAdmin ? [
+        ...(isControlScope && isOwner ? [
           { cmd: '/restart', label: '重启服务', desc: '重启整个 EvolClaw 服务进程' },
         ] : []),
-        ...(isOwner ? [
+        ...(isAdmin ? [
           { cmd: '/file', label: '发送项目内文件', desc: '将项目目录内的文件发送给用户' },
         ] : []),
       ]
@@ -766,6 +798,7 @@ export async function execMenuUpdate(this: any,
   if (!arg) return { error: '缺少 value 参数', code: 'MISSING_VALUE' };
   const { session, evolagent } = await this.loadMenuContext(channel, channelId);
   const identity = overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId);
+  const isAdmin = identity.role === 'owner' || identity.role === 'admin';
 
   // ── 关系级 /trigger update（调度参数，value 为 JSON 字符串） ──
   if (cmdBase === '/trigger') {
@@ -802,6 +835,7 @@ export async function execMenuUpdate(this: any,
   }
 
   if (cmdBase === '/baseagent') {
+    if (!isAdmin) return { error: '无权限', code: 'NO_PERMISSION' };
     const valid = this.getAvailableBaseagents(channel);
     if (valid.length && !valid.includes(arg)) {
       return { error: `无效 baseagent: ${arg}，可选: ${valid.join(' / ')}`, code: 'INVALID_VALUE' };
@@ -821,6 +855,7 @@ export async function execMenuUpdate(this: any,
   }
 
   if (cmdBase === '/model') {
+    if (!isAdmin) return { error: '无权限', code: 'NO_PERMISSION' };
     const agent = this.getAgent(channel, session?.agentId);
     if (hasModelSwitcher(agent)) {
       const models = (await agent.listModels?.()) ?? [];
@@ -834,6 +869,7 @@ export async function execMenuUpdate(this: any,
   }
 
   if (cmdBase === '/effort') {
+    if (!isAdmin) return { error: '无权限', code: 'NO_PERMISSION' };
     const agent = this.getAgent(channel, session?.agentId);
     const currentModel = hasModelSwitcher(agent) ? agent.getModel() : agent.name;
     const validEfforts = getAvailableEfforts(agent, currentModel);
@@ -849,14 +885,11 @@ export async function execMenuUpdate(this: any,
   }
 
   if (cmdBase === '/chatmode') {
+    if (!isAdmin) return { error: '无权限', code: 'NO_PERMISSION' };
     if (arg !== 'interactive' && arg !== 'proactive') {
       return { error: `无效模式: ${arg}`, code: 'INVALID_VALUE' };
     }
     if (session) {
-      const chatType = session.chatType || 'private';
-      if (chatType === 'group' && identity.role !== 'owner' && identity.role !== 'admin') {
-        return { error: '无权限：群聊中仅管理员可切换', code: 'NO_PERMISSION' };
-      }
       await this.sessionManager.updateSession(session.id, { sessionMode: arg });
       this.eventBus.publish({ type: 'session:chat-mode-changed', sessionId: session.id, mode: arg, timestamp: Date.now() });
     } else {
@@ -866,15 +899,13 @@ export async function execMenuUpdate(this: any,
   }
 
   if (cmdBase === '/dispatch') {
+    if (!isAdmin) return { error: '无权限', code: 'NO_PERMISSION' };
     if (arg !== 'mention' && arg !== 'broadcast' && arg !== 'clear') {
       return { error: `无效模式: ${arg}`, code: 'INVALID_VALUE' };
     }
     const chatType = session?.chatType;
     if (!session || chatType !== 'group') {
       return { error: 'dispatch 仅在群聊会话中有效', code: 'NOT_APPLICABLE' };
-    }
-    if (identity.role !== 'owner' && identity.role !== 'admin') {
-      return { error: '无权限：群聊中仅管理员可切换', code: 'NO_PERMISSION' };
     }
     if (arg === 'clear') {
       const { dispatchModeOverride: _, ...rest } = session.metadata || {};
@@ -891,7 +922,7 @@ export async function execMenuUpdate(this: any,
   if (cmdBase === '/perm') {
     const need = this.requireSession(session);
     if (need) return need;
-    if (identity.role !== 'owner') return { error: '无权限', code: 'NO_PERMISSION' };
+    if (!isAdmin) return { error: '无权限', code: 'NO_PERMISSION' };
     const permAgent = this.getAgent(channel, session!.agentId);
     const validModes = hasPermissionController(permAgent)
       ? permAgent.listModes().filter(m => m.available).map(m => m.key)
@@ -938,19 +969,22 @@ export async function execMenuAction(this: any,
   if (gated) return gated;
   const { session } = await this.loadMenuContext(channel, channelId);
   const identity = overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId);
+  const isMenuAdmin = identity.role === 'owner' || identity.role === 'admin';
 
   // ── /agent action ──
   // 控制 channel：验 evolclaw.owners，可执行进程级（create/delete/enable/disable）+ 自管理（update/reload）。
-  // agent channel：闸门已挡掉进程级 + 跨 agent，仅 update/reload 能到此；要求 owner 且作用于自身 aid。
+  // agent channel：闸门已挡掉进程级 + 跨 agent，仅 update/reload 能到此；reload 允许 owner/admin，update 仅 owner。
   if (cmdBase === '/agent') {
     if (fromControlChannel) {
       if (!isProcessLevelOwner(userId, loadEvolclawConfig().owners)) {
         return { error: '操作需要 owner 权限', code: 'FORBIDDEN' };
       }
     } else {
-      // 本 agent 自管理：仅 owner（不含 admin），强制 aid = 自身
-      if (identity.role !== 'owner') {
-        return { error: '本 agent 自管理操作仅 owner 可执行', code: 'FORBIDDEN' };
+      // 本 agent 自管理：reload 允许 owner/admin；update 会改鉴权相关元配置，仍仅 owner。
+      const isAgentOwner = identity.role === 'owner';
+      const isAgentAdmin = identity.role === 'owner' || identity.role === 'admin';
+      if (action === 'update' ? !isAgentOwner : !isAgentAdmin) {
+        return { error: action === 'update' ? '本 agent 配置更新仅 owner 可执行' : '本 agent 自管理操作仅 owner/admin 可执行', code: 'FORBIDDEN' };
       }
       const selfAid = this.getOwningAgent?.(channel)?.aid;
       if (!selfAid) return { error: '当前 channel 无绑定 agent', code: 'FORBIDDEN' };
@@ -1032,17 +1066,52 @@ export async function execMenuAction(this: any,
   }
 
   if (cmdBase === '/topic') {
-    if (action !== 'delete') {
+    if (action !== 'delete' && action !== 'rename') {
       return { error: `不支持的 topic action: ${action}`, code: 'NOT_SUPPORTED' };
     }
     const target = (args?.target ?? '').toString().trim();
     if (!target) return { error: '缺少 args.target', code: 'MISSING_VALUE' };
+    const renameName = action === 'rename' ? getRenameName(args) : '';
+    if (action === 'rename' && !renameName) return { error: '缺少 args.name', code: 'MISSING_VALUE' };
     const topic = await this.sessionManager.getThreadSession(channel, channelId, target);
     if (!topic) return { error: '话题不存在', code: 'NOT_FOUND' };
-    const chatType = this.resolveMenuChatType(channel, channelId, explicitChatType);
+    const chatType: MenuChatType = topic.chatType === 'group'
+      ? 'group'
+      : topic.chatType === 'private'
+        ? 'private'
+        : this.resolveMenuChatType(channel, channelId, explicitChatType);
     if (!this.canDeleteTopic(identity.role, chatType, topic, userId)) {
-      return { error: '无权限删除话题', code: 'FORBIDDEN' };
+      return { error: action === 'rename' ? '无权限重命名话题' : '无权限删除话题', code: 'FORBIDDEN' };
     }
+
+    if (action === 'rename') {
+      const newName = renameName;
+      const existing = await this.sessionManager.getSessionByName?.(channel, channelId, newName);
+      if (existing && existing.id !== topic.id) {
+        return { error: `名称 "${newName}" 已存在`, code: 'CONFLICT' };
+      }
+      const oldName = displaySessionTitle(topic.name, topic.threadId || '(未命名)');
+      const success = await this.sessionManager.renameSession(topic.id, newName);
+      if (!success) return { error: '重命名失败', code: 'EXEC_FAILED' };
+      if (topic.agentSessionId) {
+        try {
+          const targetAgent = this.getAgent(channel, topic.agentId);
+          await targetAgent.setSessionName?.(topic.agentSessionId, newName);
+        } catch {}
+      }
+      this.eventBus.publish({ type: 'session:renamed', sessionId: topic.id, oldName, newName });
+      return {
+        data: {
+          action: 'rename',
+          success: true,
+          topic: {
+            ...buildSessionPayload(topic, newName),
+            threadId: topic.threadId,
+          },
+        },
+      };
+    }
+
     const success = await this.sessionManager.unbindSession(topic.id);
     if (!success) return { error: '删除失败', code: 'DELETE_FAILED' };
     this.eventBus.publish({ type: 'session:deleted', sessionId: topic.id });
@@ -1076,6 +1145,41 @@ export async function execMenuAction(this: any,
     if (action === 'new') {
       const name = (args?.name ?? '').toString().trim();
       return await this.delegateAsAction(action, name ? `/new ${name}` : '/new', channel, channelId, userId, { enrichSession: true });
+    }
+
+    if (action === 'rename') {
+      const newName = getRenameName(args);
+      if (!newName) return { error: '缺少 args.name', code: 'MISSING_VALUE' };
+      const target = (args?.target ?? '').toString().trim();
+      const targetSession = await findMainSessionTarget(this.sessionManager, channel, channelId, target, session);
+      if (!targetSession) {
+        return target
+          ? { error: `会话不存在: ${target}`, code: 'NOT_FOUND' }
+          : { error: '当前无活跃会话', code: 'NO_ACTIVE_SESSION' };
+      }
+      const targetChatType: MenuChatType = targetSession.chatType === 'group'
+        ? 'group'
+        : targetSession.chatType === 'private'
+          ? 'private'
+          : this.resolveMenuChatType(channel, channelId, explicitChatType);
+      if (targetChatType === 'group' && !isMenuAdmin) {
+        return { error: '无权限：群聊中仅管理员可重命名会话', code: 'NO_PERMISSION' };
+      }
+      const existing = await this.sessionManager.getSessionByName?.(channel, channelId, newName);
+      if (existing && existing.id !== targetSession.id) {
+        return { error: `名称 "${newName}" 已存在`, code: 'CONFLICT' };
+      }
+      const oldName = displaySessionTitle(targetSession.name, '(未命名)');
+      const success = await this.sessionManager.renameSession(targetSession.id, newName);
+      if (!success) return { error: '重命名失败', code: 'EXEC_FAILED' };
+      if (targetSession.agentSessionId) {
+        try {
+          const targetAgent = this.getAgent(channel, targetSession.agentId);
+          await targetAgent.setSessionName?.(targetSession.agentSessionId, newName);
+        } catch {}
+      }
+      this.eventBus.publish({ type: 'session:renamed', sessionId: targetSession.id, oldName, newName });
+      return { data: { action: 'rename', success: true, session: buildSessionPayload(targetSession, newName) } };
     }
 
     if (action === 'delete') {
@@ -1258,7 +1362,7 @@ export async function execMenuForEcweb(this: any, payload: any): Promise<import(
   try {
     switch (payload?.type) {
       case 'menu.list':
-        return { type: 'menu.response', id, data: this.getMenuItems('owner', 'private') };
+        return { type: 'menu.response', id, data: this.getMenuItems('owner', 'private', 'control') };
 
       case 'menu.query': {
         if (!cmd) return ecwebErr(id, name, 'MISSING_CMD', '缺少 name/cmd');
@@ -1325,7 +1429,7 @@ export async function execMenuForControl(this: any, payload: any, peerId: string
   try {
     switch (payload?.type) {
       case 'menu.list':
-        return { type: 'menu.response', id, data: this.getMenuItems('owner', 'private') };
+        return { type: 'menu.response', id, data: this.getMenuItems('owner', 'private', 'control') };
 
       case 'menu.query': {
         if (!cmd) return ecwebErr(id, name, 'MISSING_CMD', '缺少 name/cmd');

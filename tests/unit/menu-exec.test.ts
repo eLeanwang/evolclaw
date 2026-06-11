@@ -40,6 +40,7 @@ function createMockSessionManager(overrides: Record<string, any> = {}) {
     createNewSession: vi.fn(),
     listSessions: vi.fn().mockResolvedValue([]),
     getThreadSession: vi.fn().mockResolvedValue(null),
+    getSessionByName: vi.fn().mockResolvedValue(null),
     unbindSession: vi.fn().mockResolvedValue(true),
     switchSession: vi.fn(),
     renameSession: vi.fn(),
@@ -79,20 +80,22 @@ function createMockAgentRunner() {
     compact: vi.fn().mockResolvedValue(true),
     hasActiveStream: vi.fn().mockReturnValue(false),
     closeSession: vi.fn().mockResolvedValue(undefined),
+    setSessionName: vi.fn().mockResolvedValue(undefined),
     capabilities: { fork: true },
     getSessionMessages: vi.fn().mockResolvedValue([]),
   } as any;
 }
 
-function createHandler(opts: { sessionManager?: any; agentRegistry?: any; messageQueue?: any } = {}) {
+function createHandler(opts: { sessionManager?: any; agentRegistry?: any; messageQueue?: any; agentRunner?: any } = {}) {
   const sm = opts.sessionManager ?? createMockSessionManager();
+  const agentRunner = opts.agentRunner ?? createMockAgentRunner();
   const cache = { getCount: vi.fn().mockReturnValue(0), addEvent: vi.fn(), getEvents: vi.fn().mockReturnValue([]), clearEvents: vi.fn(), hasMessages: vi.fn().mockReturnValue(false) } as any;
   const mq = opts.messageQueue ?? { isProcessing: vi.fn().mockReturnValue(false), getQueueLength: vi.fn().mockReturnValue(0), getQueueLengthByAgent: vi.fn().mockReturnValue(0), getProcessingCountByAgent: vi.fn().mockReturnValue(0) } as any;
   const eb = new EventBus();
-  const handler = new CommandHandler(sm, createMockAgentRunner(), cache, eb);
+  const handler = new CommandHandler(sm, agentRunner, cache, eb);
   handler.setMessageQueue(mq);
   if (opts.agentRegistry) handler.setAgentRegistry(opts.agentRegistry);
-  return { handler, sm };
+  return { handler, sm, eb, agentRunner };
 }
 
 describe('execMenuQuery', () => {
@@ -305,8 +308,25 @@ describe('execMenuUpdate', () => {
       expect(sm.updateSession).toHaveBeenCalledWith('sess-1', { metadata: { permissionMode: 'readonly' } });
     });
 
+    it('switches mode (admin)', async () => {
+      const sm = createMockSessionManager({ resolveIdentity: vi.fn().mockReturnValue({ role: 'admin' }) });
+      const { handler } = createHandler({ sessionManager: sm });
+      const result = await handler.execMenuUpdate('/perm', 'noask', 'aun', 'chat1', 'user1');
+      expect(result).toEqual({ data: { mode: 'noask' } });
+      expect(sm.updateSession).toHaveBeenCalledWith('sess-1', { metadata: { permissionMode: 'noask' } });
+    });
+
     it('handles /perm readonly through the chat command path', async () => {
       const { handler, sm } = createHandler();
+      const result = await handler.handle('/perm readonly', 'aun', 'chat1', undefined, 'user1') as any;
+      expect(result.kind).toBe('command.result');
+      expect(result.text).toContain('readonly');
+      expect(sm.updateSession).toHaveBeenCalledWith('sess-1', { metadata: { permissionMode: 'readonly' } });
+    });
+
+    it('handles /perm readonly through the chat command path for admin', async () => {
+      const sm = createMockSessionManager({ resolveIdentity: vi.fn().mockReturnValue({ role: 'admin' }) });
+      const { handler } = createHandler({ sessionManager: sm });
       const result = await handler.handle('/perm readonly', 'aun', 'chat1', undefined, 'user1') as any;
       expect(result.kind).toBe('command.result');
       expect(result.text).toContain('readonly');
@@ -319,7 +339,7 @@ describe('execMenuUpdate', () => {
       expect(result.code).toBe('INVALID_VALUE');
     });
 
-    it('rejects non-owner', async () => {
+    it('rejects guest', async () => {
       const sm = createMockSessionManager({ resolveIdentity: vi.fn().mockReturnValue({ role: 'guest' }) });
       const { handler } = createHandler({ sessionManager: sm });
       const result = await handler.execMenuUpdate('/perm', 'bypass', 'aun', 'chat1', 'user1') as any;
@@ -542,6 +562,124 @@ describe('execMenuAction', () => {
       expect(result.code).toBe('MISSING_VALUE');
     });
 
+    it('renames active session when target is omitted', async () => {
+      const session = {
+        id: 'sess-1', channel: 'aun', channelId: 'chat1',
+        projectPath: '/tmp/test', agentId: 'claude',
+        agentSessionId: 'agent-sess-123',
+        name: '旧会话',
+        chatType: 'private', sessionMode: 'interactive',
+        metadata: { permissionMode: 'auto' },
+        createdAt: Date.now(), updatedAt: Date.now(),
+      };
+      const sm = createMockSessionManager({
+        getActiveSession: vi.fn().mockResolvedValue(session),
+        getActiveSessionSync: vi.fn().mockReturnValue(session),
+        listSessions: vi.fn().mockResolvedValue([session]),
+        renameSession: vi.fn().mockResolvedValue(true),
+      });
+      const agentRunner = createMockAgentRunner();
+      const { handler, eb } = createHandler({ sessionManager: sm, agentRunner });
+      const events: any[] = [];
+      eb.on('*', (event) => events.push(event));
+
+      const result = await handler.execMenuAction('/session', 'rename', { name: '新会话' }, 'aun', 'chat1', 'user1') as any;
+
+      expect(result).toEqual({
+        data: {
+          action: 'rename',
+          success: true,
+          session: { id: 'sess-1', name: '新会话', agentSessionId: 'agent-sess-123' },
+        },
+      });
+      expect(sm.renameSession).toHaveBeenCalledWith('sess-1', '新会话');
+      expect(agentRunner.setSessionName).toHaveBeenCalledWith('agent-sess-123', '新会话');
+      expect(events).toContainEqual({ type: 'session:renamed', sessionId: 'sess-1', oldName: '旧会话', newName: '新会话' });
+    });
+
+    it('renames a target main session by name', async () => {
+      const active = {
+        id: 'sess-1', channel: 'aun', channelId: 'chat1',
+        projectPath: '/tmp/test', agentId: 'claude',
+        name: '当前会话',
+        chatType: 'private', sessionMode: 'interactive',
+        metadata: { permissionMode: 'auto' },
+        createdAt: Date.now(), updatedAt: Date.now(),
+      };
+      const target = {
+        id: 'sess-2', channel: 'aun', channelId: 'chat1',
+        projectPath: '/tmp/test', agentId: 'claude',
+        name: '目标会话',
+        chatType: 'private', sessionMode: 'interactive',
+        metadata: {},
+        createdAt: Date.now(), updatedAt: Date.now(),
+      };
+      const sm = createMockSessionManager({
+        getActiveSession: vi.fn().mockResolvedValue(active),
+        listSessions: vi.fn().mockResolvedValue([active, target]),
+        renameSession: vi.fn().mockResolvedValue(true),
+      });
+      const { handler } = createHandler({ sessionManager: sm });
+
+      const result = await handler.execMenuAction('/session', 'rename', { target: '目标会话', name: '新目标' }, 'aun', 'chat1', 'user1') as any;
+
+      expect(result.data.session).toEqual({ id: 'sess-2', name: '新目标' });
+      expect(sm.renameSession).toHaveBeenCalledWith('sess-2', '新目标');
+    });
+
+    it('rename requires args.name', async () => {
+      const { handler } = createHandler();
+      const result = await handler.execMenuAction('/session', 'rename', {}, 'aun', 'chat1', 'user1') as any;
+      expect(result.code).toBe('MISSING_VALUE');
+    });
+
+    it('rename returns CONFLICT when the new session name exists', async () => {
+      const active = {
+        id: 'sess-1', channel: 'aun', channelId: 'chat1',
+        projectPath: '/tmp/test', agentId: 'claude',
+        name: '旧会话',
+        chatType: 'private', sessionMode: 'interactive',
+        metadata: {},
+        createdAt: Date.now(), updatedAt: Date.now(),
+      };
+      const sm = createMockSessionManager({
+        getActiveSession: vi.fn().mockResolvedValue(active),
+        listSessions: vi.fn().mockResolvedValue([active]),
+        getSessionByName: vi.fn().mockResolvedValue({ id: 'sess-2', name: '已存在' }),
+        renameSession: vi.fn().mockResolvedValue(true),
+      });
+      const { handler } = createHandler({ sessionManager: sm });
+
+      const result = await handler.execMenuAction('/session', 'rename', { name: '已存在' }, 'aun', 'chat1', 'user1') as any;
+
+      expect(result.code).toBe('CONFLICT');
+      expect(sm.renameSession).not.toHaveBeenCalled();
+    });
+
+    it('forbids group guest renaming a main session', async () => {
+      const session = {
+        id: 'sess-1', channel: 'aun', channelId: 'chat1',
+        projectPath: '/tmp/test', agentId: 'claude',
+        name: '群会话',
+        chatType: 'group', sessionMode: 'proactive',
+        metadata: {},
+        createdAt: Date.now(), updatedAt: Date.now(),
+      };
+      const sm = createMockSessionManager({
+        getActiveSession: vi.fn().mockResolvedValue(session),
+        getActiveSessionSync: vi.fn().mockReturnValue(session),
+        listSessions: vi.fn().mockResolvedValue([session]),
+        resolveIdentity: vi.fn().mockReturnValue({ role: 'guest', mode: 'interactive' }),
+        renameSession: vi.fn().mockResolvedValue(true),
+      });
+      const { handler } = createHandler({ sessionManager: sm });
+
+      const result = await handler.execMenuAction('/session', 'rename', { name: '新群会话' }, 'aun', 'chat1', 'guest1') as any;
+
+      expect(result.code).toBe('NO_PERMISSION');
+      expect(sm.renameSession).not.toHaveBeenCalled();
+    });
+
     it('compact returns NO_ACTIVE_SESSION when no session', async () => {
       const sm = createMockSessionManager({ getActiveSession: vi.fn().mockResolvedValue(null) });
       const { handler } = createHandler({ sessionManager: sm });
@@ -619,6 +757,85 @@ describe('execMenuAction', () => {
       expect(sm.unbindSession).toHaveBeenCalledWith('topic-sess');
     });
 
+    it('renames topic by threadId for owner', async () => {
+      const topic = {
+        id: 'topic-sess', channel: 'aun', channelId: 'chat1',
+        projectPath: '/tmp/test', agentId: 'claude',
+        agentSessionId: 'topic-agent-123',
+        threadId: 'thread-1',
+        name: '重构讨论',
+        chatType: 'private', sessionMode: 'interactive',
+        metadata: { peerId: 'user1' },
+        createdAt: Date.now(), updatedAt: Date.now(),
+      };
+      const sm = createMockSessionManager({
+        getThreadSession: vi.fn().mockResolvedValue(topic),
+        renameSession: vi.fn().mockResolvedValue(true),
+      });
+      const agentRunner = createMockAgentRunner();
+      const { handler, eb } = createHandler({ sessionManager: sm, agentRunner });
+      const events: any[] = [];
+      eb.on('*', (event) => events.push(event));
+
+      const result = await handler.execMenuAction('/topic', 'rename', { target: 'thread-1', name: '新话题' }, 'aun', 'chat1', 'user1') as any;
+
+      expect(result).toEqual({
+        data: {
+          action: 'rename',
+          success: true,
+          topic: { id: 'topic-sess', name: '新话题', agentSessionId: 'topic-agent-123', threadId: 'thread-1' },
+        },
+      });
+      expect(sm.renameSession).toHaveBeenCalledWith('topic-sess', '新话题');
+      expect(agentRunner.setSessionName).toHaveBeenCalledWith('topic-agent-123', '新话题');
+      expect(events).toContainEqual({ type: 'session:renamed', sessionId: 'topic-sess', oldName: '重构讨论', newName: '新话题' });
+    });
+
+    it('rename requires args.target and args.name', async () => {
+      const { handler } = createHandler();
+
+      const missingTarget = await handler.execMenuAction('/topic', 'rename', { name: '新话题' }, 'aun', 'chat1', 'user1') as any;
+      expect(missingTarget.code).toBe('MISSING_VALUE');
+
+      const topic = {
+        id: 'topic-sess', channel: 'aun', channelId: 'chat1',
+        projectPath: '/tmp/test', agentId: 'claude',
+        threadId: 'thread-1',
+        name: '重构讨论',
+        chatType: 'private', sessionMode: 'interactive',
+        metadata: { peerId: 'user1' },
+        createdAt: Date.now(), updatedAt: Date.now(),
+      };
+      const sm = createMockSessionManager({ getThreadSession: vi.fn().mockResolvedValue(topic) });
+      const h = createHandler({ sessionManager: sm }).handler;
+
+      const missingName = await h.execMenuAction('/topic', 'rename', { target: 'thread-1' }, 'aun', 'chat1', 'user1') as any;
+      expect(missingName.code).toBe('MISSING_VALUE');
+    });
+
+    it('rename returns CONFLICT when the new topic name exists', async () => {
+      const topic = {
+        id: 'topic-sess', channel: 'aun', channelId: 'chat1',
+        projectPath: '/tmp/test', agentId: 'claude',
+        threadId: 'thread-1',
+        name: '重构讨论',
+        chatType: 'private', sessionMode: 'interactive',
+        metadata: { peerId: 'user1' },
+        createdAt: Date.now(), updatedAt: Date.now(),
+      };
+      const sm = createMockSessionManager({
+        getThreadSession: vi.fn().mockResolvedValue(topic),
+        getSessionByName: vi.fn().mockResolvedValue({ id: 'other-topic', name: '已存在' }),
+        renameSession: vi.fn().mockResolvedValue(true),
+      });
+      const { handler } = createHandler({ sessionManager: sm });
+
+      const result = await handler.execMenuAction('/topic', 'rename', { target: 'thread-1', name: '已存在' }, 'aun', 'chat1', 'user1') as any;
+
+      expect(result.code).toBe('CONFLICT');
+      expect(sm.renameSession).not.toHaveBeenCalled();
+    });
+
     it('forbids group guest deleting topic', async () => {
       const topic = {
         id: 'topic-sess', channel: 'aun', channelId: 'chat1',
@@ -638,6 +855,60 @@ describe('execMenuAction', () => {
       expect(result.code).toBe('FORBIDDEN');
       expect(sm.unbindSession).not.toHaveBeenCalled();
     });
+
+    it('forbids group guest renaming topic', async () => {
+      const topic = {
+        id: 'topic-sess', channel: 'aun', channelId: 'chat1',
+        projectPath: '/tmp/test', agentId: 'claude',
+        threadId: 'thread-1',
+        name: '重构讨论',
+        chatType: 'group', sessionMode: 'proactive',
+        metadata: { peerId: 'admin1' },
+        createdAt: Date.now(), updatedAt: Date.now(),
+      };
+      const sm = createMockSessionManager({
+        getThreadSession: vi.fn().mockResolvedValue(topic),
+        resolveIdentity: vi.fn().mockReturnValue({ role: 'guest', mode: 'interactive' }),
+        renameSession: vi.fn().mockResolvedValue(true),
+      });
+      const { handler } = createHandler({ sessionManager: sm });
+      const result = await handler.execMenuAction('/topic', 'rename', { target: 'thread-1', name: '新话题' }, 'aun', 'chat1', 'guest1', undefined, 'group') as any;
+      expect(result.code).toBe('FORBIDDEN');
+      expect(sm.renameSession).not.toHaveBeenCalled();
+    });
+
+    it('uses topic chatType for rename permission when explicit chatType is omitted', async () => {
+      const active = {
+        id: 'sess-1', channel: 'aun', channelId: 'chat1',
+        projectPath: '/tmp/test', agentId: 'claude',
+        name: '私聊主会话',
+        chatType: 'private', sessionMode: 'interactive',
+        metadata: {},
+        createdAt: Date.now(), updatedAt: Date.now(),
+      };
+      const topic = {
+        id: 'topic-sess', channel: 'aun', channelId: 'chat1',
+        projectPath: '/tmp/test', agentId: 'claude',
+        threadId: 'thread-1',
+        name: '群话题',
+        chatType: 'group', sessionMode: 'proactive',
+        metadata: { peerId: 'guest1' },
+        createdAt: Date.now(), updatedAt: Date.now(),
+      };
+      const sm = createMockSessionManager({
+        getActiveSession: vi.fn().mockResolvedValue(active),
+        getActiveSessionSync: vi.fn().mockReturnValue(active),
+        getThreadSession: vi.fn().mockResolvedValue(topic),
+        resolveIdentity: vi.fn().mockReturnValue({ role: 'guest', mode: 'interactive' }),
+        renameSession: vi.fn().mockResolvedValue(true),
+      });
+      const { handler } = createHandler({ sessionManager: sm });
+
+      const result = await handler.execMenuAction('/topic', 'rename', { target: 'thread-1', name: '新群话题' }, 'aun', 'chat1', 'guest1') as any;
+
+      expect(result.code).toBe('FORBIDDEN');
+      expect(sm.renameSession).not.toHaveBeenCalled();
+    });
   });
 
   describe('delegateAsAction null handling', () => {
@@ -651,6 +922,33 @@ describe('execMenuAction', () => {
       expect(result.data?.action).toBe('check');
       expect(result.data?.success).toBe(true);
     });
+  });
+});
+
+describe('getMenuItems', () => {
+  function flatten(items: { group: string; commands: any[] }[]) {
+    return items.flatMap(group => group.commands);
+  }
+
+  it('shows /perm modes and /file to admin in agent scope', () => {
+    const { handler } = createHandler();
+    const commands = flatten(handler.getMenuItems('admin', 'private', 'agent'));
+    const perm = commands.find(command => command.cmd === '/perm');
+
+    expect(perm?.next?.items.map((item: any) => item.value)).toEqual(expect.arrayContaining(['auto', 'bypass', 'readonly', 'edit', 'noask']));
+    expect(commands.some(command => command.cmd === '/file')).toBe(true);
+  });
+
+  it('hides process restart from agent-scope admin menu', () => {
+    const { handler } = createHandler();
+    const commands = flatten(handler.getMenuItems('admin', 'private', 'agent'));
+    expect(commands.some(command => command.cmd === '/restart')).toBe(false);
+  });
+
+  it('shows process restart in control-scope owner menu', () => {
+    const { handler } = createHandler();
+    const commands = flatten(handler.getMenuItems('owner', 'private', 'control'));
+    expect(commands.some(command => command.cmd === '/restart')).toBe(true);
   });
 });
 

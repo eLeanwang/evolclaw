@@ -320,7 +320,7 @@ export class MessageBridge {
     const { id } = req;
     try {
       const identity = this.sessionManager.resolveIdentity(channel, msg.peerId);
-      const data = this.cmdHandler.getMenuItems(identity.role, msg.chatType || 'private');
+      const data = this.cmdHandler.getMenuItems(identity.role, msg.chatType || 'private', msg.isControlChannel ? 'control' : 'agent');
       await this.sendMenuResponse(adapter, channel, msg.channelId,
         { type: 'menu.response', id, data }, sendReply);
     } catch (err: any) {

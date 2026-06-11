@@ -239,7 +239,20 @@ describe('MessageBridge — menu 协议', () => {
       chatType: 'group',
     }));
 
-    expect(h.cmdHandler.getMenuItems).toHaveBeenCalledWith('owner', 'group');
+    expect(h.cmdHandler.getMenuItems).toHaveBeenCalledWith('owner', 'group', 'agent');
+  });
+
+  it('menu.list 在控制 channel 使用 control scope', async () => {
+    const sendMock = vi.fn().mockResolvedValue(undefined);
+    const h = makeBridge({ adapterSend: sendMock });
+    h.cmdHandler.getMenuItems.mockReturnValue([]);
+
+    await h.triggerInbound(makeInbound({
+      content: JSON.stringify({ type: 'menu.list', id: 'l-control' }),
+      isControlChannel: true,
+    }));
+
+    expect(h.cmdHandler.getMenuItems).toHaveBeenCalledWith('owner', 'private', 'control');
   });
 
   it('menu.query 通过 name 解析 cmd 并调用 execMenuQuery', async () => {

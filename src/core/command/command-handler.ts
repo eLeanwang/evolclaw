@@ -483,8 +483,8 @@ export class CommandHandler {
    * 返回结构化命令菜单（供 menu.query 使用）
    * owner 看到全部命令，admin 看到管理级命令（不含 owner-only），guest 仅看到用户级命令
    */
-  getMenuItems(role: string, chatType: string = 'private'): { group: string; commands: MenuItem[] }[] {
-    return menuGetMenuItems.call(this, role, chatType);
+  getMenuItems(role: string, chatType: string = 'private', scope: 'agent' | 'control' = 'agent'): { group: string; commands: MenuItem[] }[] {
+    return menuGetMenuItems.call(this, role, chatType, scope);
   }
 
   /** 动态子菜单：根据 cmd 路径返回选项列表（供 menu.query + cmd 使用） */
