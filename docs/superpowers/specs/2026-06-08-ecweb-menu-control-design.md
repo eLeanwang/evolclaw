@@ -1,7 +1,7 @@
 # ECWeb Menu Control 视图设计
 
-最后更新：2026-06-08
-状态：设计已确认，待写实现计划
+最后更新：2026-06-11
+状态：历史设计，已按 2026-06-10 / 2026-06-11 控制面权限口径修订
 
 ## 1. 目标
 
@@ -11,7 +11,7 @@
 
 ## 2. 背景
 
-- **Menu 协议**（`docs/aun-menu-protocol-dev-guide-v2.2.md`）：`menu.*` JSON 请求/响应协议，定义 5 种请求（`list`/`query`/`options`/`update`/`action`）+ 统一响应（`menu.response`）。服务端在 `src/core/message/message-bridge.ts` 拦截，委派给 `CommandHandler.execMenu{Query,Options,Update,Action}` 和 `getMenuItems`/`getSubMenuItems`。
+- **Menu 协议**（`docs/aun-menu-protocol-dev-guide-v2.2.md`）：`menu.*` JSON 请求/响应协议，定义 5 种请求（`list`/`query`/`options`/`update`/`action`）+ 统一响应（`menu.response`）。服务端在 `src/core/message/message-bridge.ts` 拦截，委派给 `src/core/command/command-handler.ts` 门面；具体执行在 `src/core/command/menu-handler.ts`。
 - **ECWeb**（`ecweb/`）：独立 Node 进程，token 配对的只读浏览器面板。现有 4 个 tab（AID/Messages/Sessions/Cache），数据经 daemon 的 IPC socket（`ipcQuery`）+ `fs.watch` 获取。当前**纯只读**，无控制能力。
 - **"ucloud" 澄清**：指本机运行的 EvolClaw daemon 本身（非 UCloud 云服务，非远程 agent）。
 
@@ -37,7 +37,7 @@ ECWeb 本身已有鉴权：6 位配对码（5 分钟有效）→ token（24h）�
 
 规则：
 
-- daemon 侧 `menuExecutor` 对**会话级 / 关系级 / agent 级**操作（`session`/`model`/`baseagent`/`effort`/`chatmode`/`permission`/`activity`/`dispatch`/`trigger` 等）一律以 `role:'owner'` 执行。
+- daemon 侧 `menuExecutor` 对**会话级 / 关系级 / Agent 默认配置 / 本 agent 管理**操作（`session`/`model`/`baseagent`/`effort`/`chatmode`/`permission`/`activity`/`dispatch`/`trigger`/`agent.reload`/`agent.update` 等）一律以 `role:'owner'` 执行。
 - 对**进程级**操作（`system.restart`/`system.upgrade`、`agent.create`/`delete`/`enable`/`disable`）额外加一道闸：`evolclaw.json` 的 `owners` 名单**非空**才放行，为空则返回 `FORBIDDEN`（防止裸机零配置下误触发重启/升级/agent 删除）。
 - `cli`（owner-only CLI 透传）**不在 Control UI 暴露**——它是程序化 RCE 通道，非交互菜单。
 
@@ -63,8 +63,9 @@ Control 视图**不硬编码** section。渲染由协议驱动：
 | `permission` | ✅ | ✅ | ✅ | | 当前值 + 下拉切换 |
 | `activity` | ✅ | ✅ | ✅ | | 当前值 + 下拉切换 |
 | `dispatch` | ✅ | ✅ | ✅ | | 当前值 + 下拉（群聊才有意义） |
-| `session` | ✅ | ✅ | | `stop` `new` `delete` `compact` `fork` `switch` | 状态 + 列表 + 行内动词 |
-| `agent` | ✅ | ✅ | | `create` `delete` `enable` `disable` | 列表 + toggle + create 表单 |
+| `session` | ✅ | ✅ | | `stop` `new` `rename` `delete` `compact` `fork` `switch` | 状态 + 列表 + 行内动词 |
+| `topic` | ✅ | ✅ | | `rename` `delete` | 话题状态 + 列表 + 行内动词 |
+| `agent` | ✅ | ✅ | | `create` `delete` `enable` `disable` `reload` `update` | 列表 + toggle + create 表单 + 自管理动作 |
 | `trigger` | | ✅ | ✅ | `set` `cancel` | 列表 + 编辑 + set/cancel |
 | `cli` | | | | `exec` | **不渲染**（排除） |
 
@@ -103,7 +104,7 @@ Control 视图**不硬编码** section。渲染由协议驱动：
 
 | 文件 | 改动 | 估算 |
 |---|---|---|
-| `src/core/command-handler.ts`（或 `command-handler-agent-control.ts`） | 新增顶层入口 `execMenuForEcweb(payload)`：按 `payload.type` 分发到现有 `getMenuItems`/`getSubMenuItems`/`execMenuQuery`/`execMenuUpdate`/`execMenuAction`，注入 owner identity；进程级操作改判 owners 非空 | +60 行 |
+| `src/core/command/command-handler.ts` + `src/core/command/menu-handler.ts` | 新增顶层入口 `execMenuForEcweb(payload)`：按 `payload.type` 分发到现有 `getMenuItems`/`getSubMenuItems`/`execMenuQuery`/`execMenuUpdate`/`execMenuAction`，注入 owner identity；进程级操作改判 owners 非空 | +60 行 |
 | `src/ipc.ts` | 新增 `case 'menu.exec'` → 调 `this.menuExecutor`；新增 `menuExecutor` 字段 + setter | +25 行 |
 | `src/index.ts` | 构造 `menuExecutor` 闭包（绑定 cmdHandler，固定 channel=`__ecweb__`、ecwebMode=true）注入 IPC server | +15 行 |
 | `ecweb/src/sources/types.ts` | `ViewKind` 加 `'control'` | +1 行 |
@@ -146,11 +147,11 @@ type MenuExecutor = (payload: any) => Promise<MenuResponse>;
 - **daemon 侧单测**（vitest）：
   - `execMenuForEcweb` 按 type 正确分发到各 execMenu* 方法。
   - owner 注入：会话级/关系级操作以 owner 身份执行成功。
-  - 进程级闸门：`owners` 为空 → `system.restart`/`agent.create` 返回 `FORBIDDEN`；`owners` 非空 → 放行。
+  - 进程级闸门：`owners` 为空 → `system.restart`/`agent.create` 返回 `FORBIDDEN`；`owners` 非空 → 放行；`agent.reload`/`agent.update` 按自管理 action 覆盖。
   - `cli` 类型被拒绝（不在 ecweb 入口暴露）。
 - **ECWeb 侧**：项目无前端测试框架，手动验证——启动 daemon + `evolclaw-web`，浏览器配对后走查 Control 三类控件（状态卡 / 下拉切换 / 列表动词），确认读轮询刷新与写回显正常，确认无 daemon / owners 空时降级正确。
 
 ## 11. 范围与非目标
 
-- **范围内**：本机 daemon 的 System 状态、Agent 配置（baseagent/model/effort/chatmode/permission/activity）、Session 控制、EvolAgent 管理、trigger，全部经通用渲染器自动覆盖。
+- **范围内**：本机 daemon 的 System 状态、Agent 配置（baseagent/model/effort/chatmode/permission/activity）、Session 控制、EvolAgent 管理（create/delete/enable/disable/reload/update）、trigger，全部经通用渲染器自动覆盖。
 - **非目标**：远程 AUN agent 控制（本期走 IPC 本机）；`cli` 透传 UI；ECWeb 自身鉴权模型改动（沿用配对码 + token）。

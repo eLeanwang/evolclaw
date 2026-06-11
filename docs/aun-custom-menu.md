@@ -1,7 +1,7 @@
 # AUN 自定义菜单功能方案
 
 > ⚠️ **已废弃 (2026-05-26)**：本文档是 menu protocol 的最初设计稿，不含 `id` / `name` 字段，与当前实现不一致。
-> 当前规范见 [`aun-menu-protocol-dev-guide-v2.md`](./aun-menu-protocol-dev-guide-v2.md)。
+> 当前规范见 [`aun-menu-protocol-dev-guide-v2.2.md`](./aun-menu-protocol-dev-guide-v2.2.md)。
 > 本文保留为历史变更参考。
 
 ## 概述

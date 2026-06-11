@@ -1,5 +1,7 @@
 # Admin 角色设计
 
+> 当前口径更新（2026-06-11）：本文是 admin 角色的早期设计，权限细节以后续 slash/menu 对齐口径为准。`/perm <mode>` 不再按模式区分，owner/admin 都可设置 `auto` / `bypass` / `edit` / `noask` 等模式；`/file <path>` 发送项目内文件为 owner/admin，跨渠道 `/file <channel> <path>` 与项目外 menu file 仍仅 owner；`/restart` 是 daemon owner 进程级操作，不再按普通 channel owner/admin 放行；`/reload` 允许 daemon owner 跨 agent，也允许 agent owner/admin 仅重载自身；`/agent update` 仍仅 owner。
+
 ## 概述
 
 EvolClaw 当前只有 `owner` 和 `guest` 两级角色，权限划分过于粗糙。新增 `admin` 角色作为二级管理员，能执行大部分管理操作但不能做系统级运维。
@@ -69,15 +71,20 @@ admin 管理方式：手工编辑 `evolclaw.json`，不提供运行时命令。
 
 | 级别 | 可用角色 | 命令 |
 |------|---------|------|
-| owner only | owner | `/bind`, `/restart`, `/file`, `/perm`(模式切换) |
+| daemon owner | `evolclaw.json.owners` 内的 AID | `/restart`、跨 agent `/reload`、进程级 `agent.create/delete/enable/disable` |
+| owner only | owner | `/bind`, `/file <channel> <path>`、`/agent update`、项目外 menu file |
 | owner only (群聊) | owner | `/p`, `/agent` |
-| admin+ | owner, admin | `/pwd`, `/p`(私聊), `/model`, `/effort`, `/agent`(私聊), `/fork`, `/rewind`, `/compact`, `/clear`, `/stop`, `/check`, `/perm`(allow/deny/always 审批) |
+| admin+ | owner, admin | `/pwd`, `/p`(私聊), `/model`, `/effort`, `/chatmode`, `/dispatch`, `/agent`(私聊), `/agent reload`(自身), `/fork`, `/rewind`, `/compact`, `/clear`, `/stop`, `/check`, `/perm <mode>`、`/file <path>` |
 | user | 所有人 | `/new`, `/s`, `/slist`, `/name`, `/del`, `/status`, `/help` |
 
 ### 关键细节
 
 - `/p` 和 `/agent`：私聊中 admin 可用，群聊中 owner only（影响全群）
-- `/perm`：模式切换（`/perm auto`、`/perm bypass` 等）owner only；审批操作（`/perm allow|deny|always`）admin 可用
+- `/perm`：模式切换（`/perm auto`、`/perm bypass`、`/perm edit`、`/perm noask` 等）owner/admin 均可用，不再按模式区分；审批操作（`/perm allow|deny|always`）admin 可用
+- `/file`：`/file <path>` 只允许项目内相对路径，owner/admin 可用；`/file <channel> <path>` 跨渠道发送仅 owner 可用
+- `/restart`：进程级 daemon 操作，只认 `evolclaw.json.owners`
+- `/reload`：daemon owner 可跨 agent；agent owner/admin 只能 reload 当前 agent
+- `/agent update`：会修改鉴权相关配置，仍仅 owner
 - `/check`：admin 完全可用（包括 `/check rty` 重连）
 
 ## 受影响的模块
@@ -131,7 +138,7 @@ const sessionManager = new SessionManager(undefined, eventBus,
 );
 ```
 
-### 5. `src/core/command-handler.ts`（主要改动）
+### 5. `src/core/command/slash-handler.ts` / `src/core/command/menu-handler.ts`（主要改动）
 
 权限变量语义变更：
 
@@ -146,9 +153,10 @@ const isAdmin = identity.role === 'owner' || identity.role === 'admin';
 
 具体命令权限检查：
 
-- owner only 命令（`/bind`, `/restart`, `/file`, `/perm` 模式切换）：检查 `isOwner`
+- daemon owner 命令（`/restart`、跨 agent `/reload`、进程级 agent 生命周期）：检查 `evolclaw.json.owners`
+- owner only 命令（`/bind`, `/file <channel> <path>`, `/agent update`, 项目外 menu file）：检查 `isOwner`
+- admin+ 命令（`/file <path>`, `/perm <mode>`, 当前 agent `/reload`）：检查 `isAdmin`（包含 owner/admin）
 - 群聊 `/p` 和 `/agent`：检查 `isOwner`
-- admin+ 命令：检查 `isAdmin`（现在包含 admin 角色）
 - `/help` 输出按三级角色区分展示
 - `getMenuItems(role, chatType)` 参数从 `isAdmin: boolean` 改为 `role: string`，按角色返回对应菜单
 

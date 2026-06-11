@@ -1,5 +1,7 @@
 # Agent Ctl：Agent 自主管理指令
 
+> 当前口径更新（2026-06-11）：本文是早期 ctl 设计，权限细节以后续 slash/menu 对齐为准。`/perm <mode>` 已调整为 owner/admin 均可切换所有模式；`/file <path>` 项目内同渠道发送为 owner/admin，跨渠道发送仍仅 owner；`/restart` 是 daemon owner 进程级操作，不按当前会话 owner/admin 放行。当前实现路径也已从单文件 `src/core/command-handler.ts` 拆分为 `src/core/command/command-handler.ts` 门面、`slash-handler.ts` 与 `menu-handler.ts`。
+
 ## 概述
 
 让 evolclaw 托管的 Agent（Claude / Codex / Gemini）能通过 `evolclaw ctl <cmd>` 自主管理运行时配置——切换模型、调整 effort、压缩上下文等。Agent 通过 Bash 工具调用 CLI，CLI 通过 IPC 与运行中服务通信，服务端复用 CommandHandler 执行指令并返回结果。
@@ -40,11 +42,11 @@ Agent ctl 暴露的指令（排除 `/agent`、`/stop`、`/rewind`、`/new`、`/s
 | `check` | - | 渠道健康（纯只读） | guest |
 | `model` | `[model-id]` | 查看/切换模型 | 查看: admin, 切换: admin |
 | `effort` | `[level]` | 查看/切换推理强度 | 查看: admin, 切换: admin |
-| `perm` | `[mode]` | 查看/切换权限模式 | 查看: admin, 切换: owner |
+| `perm` | `[mode]` | 查看/切换权限模式 | 查看: admin, 切换: admin |
 | `compact` | - | 压缩会话上下文 | admin |
 | `activity` | `[all\|dm\|owner\|none]` | 查看/控制输出显示模式 | 查看: admin, 切换: owner |
-| `send` | `[channel] <path>` | 发送文件 | owner |
-| `restart` | - | 重启服务 | owner |
+| `send` | `[channel] <path>` | 发送文件 | 同渠道项目内 admin；跨渠道 owner |
+| `restart` | - | 重启服务 | daemon owner |
 
 权限判断：IPC 请求携带 `sessionId` → 服务端查 session → 查用户角色（owner/admin/guest）→ 复用现有 CommandHandler 权限逻辑。
 
@@ -54,7 +56,7 @@ Agent ctl 暴露的指令（排除 `/agent`、`/stop`、`/rewind`、`/new`、`/s
 
 1. **`/check` 下放 guest**：所有用户可用，但非 admin 用户隐藏渠道连接详情（仅返回"健康/异常"摘要）
 2. **`/check rty`（重连写操作）**：移至 `/restart` 下处理，`/check` 变为纯只读
-3. **`/perm` 模式切换**：从 admin 收紧为 owner only（查看保持 admin）
+3. **`/perm` 模式切换**：当前口径为 owner/admin 均可切换所有模式（早期“owner only”收紧方案已废弃）
 
 ## 实现计划
 
@@ -154,7 +156,7 @@ type CommandExecutor = (cmd: string, sessionId: string) => Promise<IpcCtlRespons
   }
   ```
 
-### 3. CommandHandler 适配（src/core/command-handler.ts）
+### 3. CommandHandler 适配（当前拆分为 `src/core/command/command-handler.ts` / `slash-handler.ts`）
 
 新增 `handleCtl()` 方法：
 
@@ -224,7 +226,7 @@ async handleCtl(cmd: string, sessionId: string): Promise<{ ok: boolean; result?:
 **权限调整**：
 - `/check`：将 `guestGroupCommands` 扩展为 `['/status', '/help', '/check']`；`/check` 处理逻辑中对非 admin 用户隐藏渠道详情
 - `/check rty`（重连写操作）：移至 `/restart` 下，`/check` 变为纯只读
-- `/perm` 模式切换：收紧为 owner only（查看保持 admin）
+- `/perm` 模式切换：owner/admin 均可切换所有模式（查看保持 admin+）
 
 ### 4. IPC Executor 注入（src/index.ts）
 
@@ -315,7 +317,7 @@ trigger: Agent 自主判断需要时（切换模型、调整配置、查看状�
 
 ### 权限类
 - `evolclaw ctl perm` — 查看当前权限模式（管理员）
-- `evolclaw ctl perm <mode>` — 切换权限模式（仅 owner）
+- `evolclaw ctl perm <mode>` — 切换权限模式（管理员）
 
 ### 运维类（仅 owner）
 - `evolclaw ctl activity <all|dm|owner|none>` — 控制中间输出显示模式
@@ -368,7 +370,7 @@ evolclaw ctl status
 |------|---------|------|
 | `src/cli.ts` | 修改 | 新增 `ctl` 子命令 |
 | `src/ipc.ts` | 修改 | 新增 `ctl` 命令类型，`handleCommand` 改 async，调用点 await |
-| `src/core/command-handler.ts` | 修改 | 新增 `handleCtl()`；`/check` 下放 guest；`/perm` 切换收紧 owner |
+| `src/core/command/command-handler.ts` / `slash-handler.ts` | 修改 | 新增 `handleCtl()`；`/check` 下放 guest；`/perm` 切换按当前 admin+ 口径 |
 | `src/index.ts` | 修改 | IpcServer 构造时注入 commandExecutor |
 | `src/agents/claude-runner.ts` | 修改 | `getAgentEnv()` 注入 `EVOLCLAW_SESSION_ID` |
 | `src/agents/codex-runner.ts` | 修改 | 子进程 env 注入 `EVOLCLAW_SESSION_ID` |

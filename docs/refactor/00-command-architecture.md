@@ -202,8 +202,10 @@ daemon 连接成功 → sendWelcomeMessage()
 |---|---|---|
 | `/status` | 显示会话状态 | guest+ |
 | `/check` | 检查渠道健康 | guest+ |
-| `/restart [channel]` | 重启/重连 | admin+/owner |
-| `/file [channel] <path>` | 发送项目文件 | owner |
+| `/restart` | 重启 daemon / 运行时 | daemon owner |
+| `/reload [aid]` | 重载 agent | daemon owner 可跨 agent；agent owner/admin 仅可重载自身 |
+| `/file <path>` | 发送当前项目内文件到当前渠道 | admin+ |
+| `/file <channel> <path>` | 跨渠道发送当前项目内文件 | owner |
 | `/send <text>` | 主动发消息 | owner |
 
 ### AID / RPC / Storage（CLI 转发）

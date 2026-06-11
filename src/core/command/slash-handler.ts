@@ -10,6 +10,9 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import { checkLatestVersion, getLocalVersion, isLinkedInstall, compareVersions } from '../../utils/npm-ops.js';
+import { loadEvolclawConfig } from '../../config-store.js';
+import { isProcessLevelOwner } from './menu-handler.js';
+import { execAgentAction } from '../message/command-handler-agent-control.js';
 import { displaySessionTitle } from '../session/session-title.js';
 import {
   guardIdleCommand,
@@ -46,6 +49,15 @@ function formatIdleTime(ms: number): string {
   if (hours > 0) return `${hours}小时前`;
   if (minutes > 0) return `${minutes}分钟前`;
   return '刚刚';
+}
+
+function getAgentBusyCount(handler: any, aid: string | undefined): number | null {
+  if (!aid || !handler.agentRegistry) return null;
+  const handle = handler.agentRegistry.get(aid) ?? null;
+  const agentName = handle?.name;
+  if (!agentName) return null;
+  return (handler.messageQueue?.getProcessingCountByAgent?.(agentName) ?? 0)
+    + (handler.messageQueue?.getQueueLengthByAgent?.(agentName) ?? 0);
 }
 
 export async function handleSlashCommand(this: any, 
@@ -90,7 +102,14 @@ export async function handleSlashCommand(this: any,
   const threadGuard = guardThreadCommand(normalizedContent, threadId);
   if (threadGuard) return threadGuard;
 
-  const roleGuard = guardRoleCommand(normalizedContent, activeChatType, isAdmin);
+  // daemon owner 判定（缓存一次，后续 /restart /reload 复用）
+  const evolclawConfig = loadEvolclawConfig();
+  const isDaemonOwner = isProcessLevelOwner(userId, evolclawConfig.owners);
+
+  // roleGuard 仅对进程级命令（/restart /reload）放行 daemon owner 绕过，
+  // 其余命令严格按 agent-channel 的 isAdmin 判定，不越权。
+  const isProcessLevelSlash = normalizedContent === '/restart' || normalizedContent === '/reload' || normalizedContent.startsWith('/reload ');
+  const roleGuard = guardRoleCommand(normalizedContent, activeChatType, isAdmin || (isDaemonOwner && isProcessLevelSlash));
   if (roleGuard) return roleGuard;
 
   const idleGuard = await guardIdleCommand({
@@ -114,6 +133,16 @@ export async function handleSlashCommand(this: any,
 
   // /help 命令不需要会话
   if (normalizedContent === '/help') {
+    const appendProcessCommands = (lines: string[]) => {
+      if (!isDaemonOwner) return;
+      lines.push(
+        '',
+        '🛠️ 进程级运维：',
+        '  /restart - 重启服务',
+        '  /reload [aid] - 热重载 Agent 配置',
+      );
+    };
+
     if (!isAdmin && activeChatType === 'group') {
       const lines = [
         '可用命令：',
@@ -123,6 +152,7 @@ export async function handleSlashCommand(this: any,
         '  /check - 检查渠道健康',
         '  /help - 显示此帮助信息',
       ];
+      appendProcessCommands(lines);
       return { kind: 'command.result' as const, text: lines.join('\n') };
     }
 
@@ -141,6 +171,7 @@ export async function handleSlashCommand(this: any,
         '❓ 帮助：',
         '  /help - 显示此帮助信息',
       ];
+      appendProcessCommands(lines);
       return { kind: 'command.result' as const, text: lines.join('\n') };
     }
 
@@ -172,23 +203,24 @@ export async function handleSlashCommand(this: any,
       '',
       '🔐 权限管理：',
       '  /perm - 查看当前权限模式',
-      ...(isOwner ? [`  /perm <${PERMISSION_MODE_USAGE}> - 切换权限模式`] : []),
+      ...(isAdmin ? [`  /perm <${PERMISSION_MODE_USAGE}> - 切换权限模式`] : []),
       '  /perm allow|always|deny - 审批权限请求',
       '',
       '🛠️ 运维：',
       '  /status - 显示会话状态',
       '  /stop - 中断当前任务',
       '  /check - 检查渠道状态',
-      ...(isAdmin ? [
-        '  /restart - 重启服务（owner only）',
-      ] : []),
-      ...(isOwner ? [
+      ...(isDaemonOwner ? [
         '  /restart - 重启服务',
+        '  /reload [aid] - 热重载 Agent 配置',
       ] : []),
-      ...(isOwner ? [
+      ...(!isDaemonOwner && isAdmin ? [
+        '  /reload - 热重载当前 Agent 配置',
+      ] : []),
+      ...(isAdmin ? [
         '',
         '🧰 工具：',
-        '  /file [channel] <path> - 发送项目内文件',
+        `  /file ${isOwner ? '[channel] ' : ''}<path> - 发送项目内文件`,
       ] : []),
       '',
       '❓ 帮助：',
@@ -225,7 +257,7 @@ export async function handleSlashCommand(this: any,
 
     // 权限管理
     if (isAdmin) {
-      cmds.push({ command: '/perm', args: isOwner ? `<${PERMISSION_MODE_USAGE}>` : undefined, description: '查看当前权限模式', category: '权限管理', roles: ['admin', 'owner'] });
+      cmds.push({ command: '/perm', args: `<${PERMISSION_MODE_USAGE}>`, description: '查看或切换当前权限模式', category: '权限管理', roles: ['admin', 'owner'] });
       cmds.push({ command: '/perm', args: 'allow|always|deny', description: '审批权限请求', category: '权限管理', roles: ['admin', 'owner'] });
     }
 
@@ -236,9 +268,15 @@ export async function handleSlashCommand(this: any,
     if (isAdmin) {
       cmds.push({ command: '/activity', args: '[all|dm|owner|none]', description: '查看/控制中间输出显示模式', category: '聊天设置', roles: ['admin', 'owner'] });
     }
-    if (isOwner) {
-      cmds.push({ command: '/restart', description: '重启服务', category: '运维', roles: ['owner'] });
-      cmds.push({ command: '/file', args: '[channel] <path>', description: '发送项目内文件', category: '工具', roles: ['owner'] });
+    if (isDaemonOwner) {
+      cmds.push({ command: '/restart', description: '重启服务', category: '运维', roles: ['daemon-owner'] });
+      cmds.push({ command: '/reload', args: '[aid]', description: '热重载 Agent 配置', category: '运维', roles: ['daemon-owner'] });
+    }
+    if (!isDaemonOwner && isAdmin) {
+      cmds.push({ command: '/reload', description: '热重载当前 Agent 配置', category: '运维', roles: ['admin', 'owner'] });
+    }
+    if (isAdmin) {
+      cmds.push({ command: '/file', args: isOwner ? '[channel] <path>' : '<path>', description: '发送项目内文件', category: '工具', roles: ['admin', 'owner'] });
     }
 
     // 聊天设置
@@ -298,7 +336,7 @@ export async function handleSlashCommand(this: any,
         };
 
         const replyCtx = this.getReplyContext(permSession);
-        const cardResult = await this.sendCommandCard({ channel, channelId, interaction, replyCtx, canWrite: isOwner });
+        const cardResult = await this.sendCommandCard({ channel, channelId, interaction, replyCtx, canWrite: isAdmin });
         if (cardResult === null) return null;
         return { kind: 'command.result' as const, text: cardResult };
       }
@@ -309,7 +347,7 @@ export async function handleSlashCommand(this: any,
         const suffix = m.available ? '' : ' ⚠️ 不可用';
         return `  ${prefix} ${m.key} (${m.nameZh}) - ${m.description}${suffix}`;
       }).join('\n');
-      if (isOwner) {
+      if (isAdmin) {
         return { kind: 'command.result' as const, text: `权限模式: ${currentMode}\n\n${modeList}\n\n用法: /perm <模式> 或 allow|always|deny` };
       }
         return { kind: 'command.result' as const, text: `当前权限模式: ${currentMode}` };
@@ -357,9 +395,9 @@ export async function handleSlashCommand(this: any,
           if (!matched.available) {
             return { kind: 'command.error' as const, text: `❌ ${matched.key} 模式当前不可用：${matched.unavailableReason}` };
           }
-          // guest 和 admin 用户不能切换权限模式（仅 owner）
-          if (!isOwner) {
-            return { kind: 'command.error' as const, text: '❌ 权限模式切换仅限 owner' };
+          // 关系级权限模式切换允许 owner/admin；guest 只能查询当前模式。
+          if (!isAdmin) {
+            return { kind: 'command.error' as const, text: '❌ 权限模式切换仅限管理员' };
           }
           const metadata = permSession.metadata || {};
           metadata.permissionMode = arg;
@@ -826,6 +864,38 @@ export async function handleSlashCommand(this: any,
     return { kind: 'command.result' as const, text: `✓ 推理强度: ${newEffort}` };
   }
 
+  // /reload [aid] — 热重载 agent 配置
+  // daemon owner：可 reload 任意 aid（无参则 reload 自身所在 agent）
+  // agent channel owner/admin：仅可 reload 自身 agent
+  if (normalizedContent === '/reload' || normalizedContent.startsWith('/reload ')) {
+    const aidArg = normalizedContent.slice('/reload'.length).trim() || undefined;
+    const selfAid = this.agentRegistry?.resolveByChannel(channel)?.aid;
+
+    // 权限判断：daemon owner 或 agent channel 的 owner/admin
+    if (!isDaemonOwner && !isAdmin) {
+      return { kind: 'command.error' as const, text: '❌ 无权限：/reload 仅限 daemon owner 或 agent owner/admin 使用' };
+    }
+    // agent channel 的 owner/admin 不能跨 agent reload
+    if (!isDaemonOwner && aidArg && aidArg !== selfAid) {
+      return { kind: 'command.error' as const, text: '❌ 无权限：跨 agent reload 仅限 daemon owner 使用' };
+    }
+
+    const targetAid = aidArg ?? selfAid;
+    if (!targetAid) {
+      return { kind: 'command.error' as const, text: '❌ 无法确定目标 agent，请指定 aid：/reload <aid>' };
+    }
+
+    // 繁忙检查（同 menu /agent reload）
+    const busy = getAgentBusyCount(this, targetAid);
+    if (busy !== null && busy > 0) {
+      return { kind: 'command.error' as const, text: `❌ 该 Agent 有 ${busy} 个任务执行中，请稍后重试` };
+    }
+
+    const res = await execAgentAction('reload', { aid: targetAid }, userId ?? '');
+    if ('error' in res) return { kind: 'command.error' as const, text: `❌ reload 失败：${res.error}` };
+    return { kind: 'command.result' as const, text: `✅ Agent ${targetAid} 配置已重载` };
+  }
+
   // /agent, /aid, /rpc, /storage — 仅限 ctl 调用，slash 输入拒绝
   if (normalizedContent === '/agent' || normalizedContent.startsWith('/agent ') ||
       normalizedContent === '/aid' || normalizedContent.startsWith('/aid ') ||
@@ -1027,7 +1097,7 @@ export async function handleSlashCommand(this: any,
     }
 
     const arg = normalizedContent.slice(9).trim();
-    const currentMode = dispatchSession.metadata?.dispatchMode;
+    const currentMode = dispatchSession.metadata?.dispatchModeOverride ?? dispatchSession.metadata?.dispatchMode ?? null;
 
     if (!arg) {
       const displayMode = currentMode ?? '未设置（跟随群设置）';
@@ -1064,24 +1134,35 @@ export async function handleSlashCommand(this: any,
 
       // 降级：文本
       if (isAdmin) {
-        return { kind: 'command.result' as const, text: `分发模式: ${displayMode}  用法: /dispatch <mention|broadcast>` };
+        return { kind: 'command.result' as const, text: `分发模式: ${displayMode}  用法: /dispatch <mention|broadcast|clear>` };
       }
       return { kind: 'command.result' as const, text: `分发模式: ${displayMode}` };
     }
 
-    if (arg !== 'mention' && arg !== 'broadcast') {
-      return { kind: 'command.error' as const, text: `❌ 无效模式: ${arg}\n可选: mention / broadcast\n用法: /dispatch <模式>` };
+    if (arg !== 'mention' && arg !== 'broadcast' && arg !== 'clear') {
+      return { kind: 'command.error' as const, text: `❌ 无效模式: ${arg}\n可选: mention / broadcast / clear\n用法: /dispatch <模式>` };
     }
 
     if (!isAdmin) {
       return { kind: 'command.error' as const, text: '❌ 无权限：群聊中切换分发模式仅限管理员使用' };
     }
 
+    if (arg === 'clear') {
+      if (!dispatchSession.metadata?.dispatchModeOverride) {
+        return { kind: 'command.result' as const, text: '当前无本地覆盖，已跟随群设置' };
+      }
+      const { dispatchModeOverride: _, ...rest } = dispatchSession.metadata;
+      await this.sessionManager.updateSession(dispatchSession.id, { metadata: rest });
+      this.eventBus.publish({ type: 'session:dispatch-mode-changed', sessionId: dispatchSession.id, mode: undefined, timestamp: Date.now() });
+      if (this.shouldSuppressCardTriggerResult(source, channel)) return null;
+      return { kind: 'command.result' as const, text: '✅ 已清除本地覆盖，将跟随群设置' };
+    }
+
     if (arg === currentMode) {
       return { kind: 'command.result' as const, text: `当前已是 ${arg}` };
     }
 
-    const metadata = { ...(dispatchSession.metadata || {}), dispatchMode: arg };
+    const metadata = { ...(dispatchSession.metadata || {}), dispatchModeOverride: arg };
     await this.sessionManager.updateSession(dispatchSession.id, { metadata });
     this.eventBus.publish({ type: 'session:dispatch-mode-changed', sessionId: dispatchSession.id, mode: arg, timestamp: Date.now() });
     if (this.shouldSuppressCardTriggerResult(source, channel)) return null;
@@ -1230,7 +1311,7 @@ export async function handleSlashCommand(this: any,
 
     const lines: string[] = [];
     const sessionMode = session.sessionMode || 'interactive';
-    const dispatchMode = session.metadata?.dispatchMode ?? '未设置（跟随群设置）';
+    const dispatchMode = session.metadata?.dispatchModeOverride ?? session.metadata?.dispatchMode ?? '未设置（跟随群设置）';
     const chatModeLine = `会话模式: ${sessionMode}`;
     const dispatchModeLine = session.chatType === 'group' ? `分发模式: ${dispatchMode}` : null;
     if (isAdmin) {
@@ -1353,7 +1434,7 @@ export async function handleSlashCommand(this: any,
     const groups = new Map<string, Array<{ name: string; status: string }>>();
     for (const [name] of this.adapters) {
       if (!allowedChannels.has(name)) continue;
-      const type = this.channelTypeMap.get(name) || name;
+      const type = this.resolveChannelType(name);
       const ch = this.channelObjects.get(name);
       let status: string;
       if (ch?.getStatus) {
@@ -1436,12 +1517,14 @@ export async function handleSlashCommand(this: any,
     }
     // 单个渠道实例的健康快照：基础连接态 + AUN 富状态
     const channelHealth = (cname: string) => {
-      const type = this.channelTypeMap.get(cname) || cname;
+      const type = this.resolveChannelType(cname);
       const cobj = this.channelObjects.get(cname);
       const seg = cname.split('#');
       const instName = seg.length >= 3 ? seg.slice(2).join('#') : cname;
       const aidState = aidStateByName.get(cname);
-      let connected = cobj?.getStatus ? !!cobj.getStatus().connected : true;
+      // cobj 缺失 = 渠道未注册（如 disabled agent），视为未连接；
+      // cobj 存在但无 getStatus = 已注册的活实例，视为已连接。
+      let connected = cobj ? (cobj.getStatus ? !!cobj.getStatus().connected : true) : false;
       const h: any = { name: cname, instName, type, connected };
       if (aidState) {
         connected = aidState.status === 'connected';
@@ -1497,10 +1580,18 @@ export async function handleSlashCommand(this: any,
     return { kind: 'command.result' as const, text: lines.join('\n'), structured } as any;
   }
 
-  // /restart 命令：重启服务（owner only）
+  // /restart 命令：重启服务（进程级，仅 daemon owner）
   if (normalizedContent === '/restart') {
-    // /restart（无参数）— 重启整个服务（owner only）
-    if (!isOwner) return { kind: 'command.error' as const, text: '❌ 无权限：服务重启仅限 owner 使用' };
+    // 进程级操作：必须是 daemon owner（evolclaw.json.owners），与 menu 协议 /system restart 一致。
+    // agent-channel 的 owner 角色不足以重启整个 daemon。
+    if (!isDaemonOwner) {
+      return { kind: 'command.error' as const, text: '❌ 无权限：服务重启仅限 daemon owner 使用' };
+    }
+    const selfAid = this.agentRegistry?.resolveByChannel(channel)?.aid;
+    const busy = getAgentBusyCount(this, selfAid);
+    if (busy !== null && busy > 0) {
+      return { kind: 'command.error' as const, text: `❌ 该 Agent 有 ${busy} 个任务执行中，请稍后重试` };
+    }
     const allSessions = await this.sessionManager.listSessions(channel, channelId);
     const sessionsWithMessages = allSessions
       .filter((s: Session) => this.messageCache.hasMessages(s.id))
@@ -1624,14 +1715,17 @@ export async function handleSlashCommand(this: any,
     return { kind: 'command.result' as const, text: `当前项目: ${session.projectPath}` };
   }
 
-  // /file 命令：发送项目内文件，支持 /file path 和 /file channel path（owner only）
+  // /file 命令：发送项目内文件，支持 /file path 和 /file channel path
   if (normalizedContent.startsWith('/file')) {
-    if (!isOwner) return { kind: 'command.error' as const, text: '❌ 无权限：此命令仅限 owner 使用' };
+    if (!isAdmin) return { kind: 'command.error' as const, text: '❌ 无权限：此命令仅限管理员使用' };
     // 飞书会将 .md 等后缀自动转为 Markdown 链接: foo.md → [foo.md](http://foo.md/)
     // 还原: 将 [text](url) 替换为 text
     const rawArg = normalizedContent.slice(5).trim().replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
     if (!rawArg) {
-      return { kind: 'command.result' as const, text: '用法: /file <相对路径> 或 /file <渠道> <相对路径>\n示例: /file src/index.ts\n示例: /file feishu report.md' };
+      const usage = isOwner
+        ? '用法: /file <相对路径> 或 /file <渠道> <相对路径>\n示例: /file src/index.ts\n示例: /file feishu report.md'
+        : '用法: /file <相对路径>\n示例: /file src/index.ts';
+      return { kind: 'command.result' as const, text: usage };
     }
 
     // 解析目标通道：第一个 token 按实例名匹配，再按 channelType 匹配
@@ -1660,9 +1754,9 @@ export async function handleSlashCommand(this: any,
     }
     const isCrossChannel = targetChannel !== channel;
 
-    // 跨通道仅限 owner
+    // 跨通道不属于当前关系级操作，仍仅限 owner。
     if (isCrossChannel && identity.role !== 'owner') {
-      return { kind: 'command.error' as const, text: '❌ 跨通道发送仅限管理员' };
+      return { kind: 'command.error' as const, text: '❌ 跨通道发送仅限 owner' };
     }
 
     // 找目标 adapter

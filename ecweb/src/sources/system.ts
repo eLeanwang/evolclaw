@@ -5,7 +5,7 @@
  * 另注入 ecwebVersion（ECWeb 进程自身 package.json 版本，由 server.ts 合并，不走 daemon IPC）。
  * check / upgrade 结果不在快照里——由前端按钮触发 menu.action 后写入 state。
  *
- * subscribe: 3s 轮询 + JSON diff，仅变化时 push。
+ * subscribe: 30s 轮询 + JSON diff，仅变化时 push。
  */
 
 import { resolvePaths } from '../paths.js';
@@ -51,7 +51,7 @@ export const systemSource: WatchSource = {
       } catch { /* ignore transient IPC errors */ }
     };
 
-    const timer = setInterval(tick, 3000);
+    const timer = setInterval(tick, 30000);
     return () => { stopped = true; clearInterval(timer); };
   },
 };

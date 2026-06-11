@@ -526,7 +526,8 @@ tr.ag-disabled .ag-name { color: var(--dim); }
 .tip-row { font-size: 12px; line-height: 1.8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 500; }
 .tip-row-in  { color: var(--msg-in); }
 .tip-row-out { color: var(--msg-out); }
-.tip-kind { margin: 0 2px; }
+.tip-kind { margin: 0 2px; font-weight: 600; }
+.tip-flag { margin: 0 2px; padding: 0 4px; border-radius: 3px; background: var(--bg3); color: var(--magenta); font-size: 10.5px; }
 .tip-row b { color: var(--orange); font-weight: 600; }
 
 

@@ -203,6 +203,24 @@ export function _setDictPath(p: string): void {
   _lastMtime = 0;  // 强制下次刷新
 }
 
+// ── 上下文过长检测（统一真相源）─────────────────────────────────────
+//
+// 覆盖所有已知的「上下文/输入超限」错误措辞，来源包括：
+//  - Anthropic 标准：prompt is too long / input is too long
+//  - OpenAI 兼容：context_length_exceeded / maximum context length
+//  - 网关自定义：reached its context window limit / context window limit
+//  - 中文：上下文过长
+//
+// ⚠️ 新增措辞统一往这里加，不要再在各模块本地复制正则。
+export const CONTEXT_TOO_LONG_PATTERN =
+  /prompt is too long|input is too long|context too long|context limit|context_length_exceeded|context_window_exceeded|context window limit|reached its context window|exceed(?:s|ed)? the context window|maximum context length|上下文过长/i;
+
+/** 判断一段文本是否为「上下文过长」类错误。空文本返回 false。 */
+export function isContextTooLongText(text: string | null | undefined): boolean {
+  if (!text) return false;
+  return CONTEXT_TOO_LONG_PATTERN.test(text);
+}
+
 // ── 错误分类 / 重试 / 消息 ──────────────────────────────────────────
 
 export function classifyError(error: any): ErrorType {
@@ -218,9 +236,7 @@ export function classifyError(error: any): ErrorType {
   }
 
   // 内置兜底规则（结构性、稳定的错误模式）
-  if (msg.includes('context_length_exceeded') || msg.includes('context_compact_failed')
-    || msg.includes('context limit') || msg.includes('input is too long')
-    || msg.includes('上下文过长')) {
+  if (msg.includes('context_compact_failed') || isContextTooLongText(msg)) {
     return ErrorType.CONTEXT_TOO_LONG;
   }
 
@@ -309,8 +325,7 @@ export function getErrorMessage(error: any, terminalReason?: string, includeEmoj
   // 内置兜底规则（结构性错误）
   const warnPrefix = includeEmoji ? '⚠️ ' : '';
   const errPrefix = includeEmoji ? '❌ ' : '';
-  if (msg.includes('CONTEXT_COMPACT_FAILED') || msg.includes('context_length_exceeded')
-    || msg.includes('Context limit')) {
+  if (msg.includes('CONTEXT_COMPACT_FAILED') || isContextTooLongText(msg)) {
     return `${warnPrefix}上下文过长，自动压缩失败，请手动输入 /compact 重试`;
   }
   if (msg.includes('401') || msg.includes('authentication_error')) {

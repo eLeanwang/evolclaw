@@ -239,7 +239,20 @@ describe('MessageBridge — menu 协议', () => {
       chatType: 'group',
     }));
 
-    expect(h.cmdHandler.getMenuItems).toHaveBeenCalledWith('owner', 'group');
+    expect(h.cmdHandler.getMenuItems).toHaveBeenCalledWith('owner', 'group', 'agent');
+  });
+
+  it('menu.list 在控制 channel 使用 control scope', async () => {
+    const sendMock = vi.fn().mockResolvedValue(undefined);
+    const h = makeBridge({ adapterSend: sendMock });
+    h.cmdHandler.getMenuItems.mockReturnValue([]);
+
+    await h.triggerInbound(makeInbound({
+      content: JSON.stringify({ type: 'menu.list', id: 'l-control' }),
+      isControlChannel: true,
+    }));
+
+    expect(h.cmdHandler.getMenuItems).toHaveBeenCalledWith('owner', 'private', 'control');
   });
 
   it('menu.query 通过 name 解析 cmd 并调用 execMenuQuery', async () => {
@@ -249,7 +262,7 @@ describe('MessageBridge — menu 协议', () => {
 
     await h.triggerInbound(makeInbound({ content: JSON.stringify({ type: 'menu.query', id: 'q1', name: 'chatmode' }) }));
 
-    expect(h.cmdHandler.execMenuQuery).toHaveBeenCalledWith('/chatmode', 'test-instance', 'chat-1', 'peer-1', undefined, 'private');
+    expect(h.cmdHandler.execMenuQuery).toHaveBeenCalledWith('/chatmode', 'test-instance', 'chat-1', 'peer-1', undefined, 'private', false);
     expect(parseCustomResponse(sendMock)).toEqual({
       type: 'menu.response',
       id: 'q1',
@@ -265,7 +278,7 @@ describe('MessageBridge — menu 协议', () => {
 
     await h.triggerInbound(makeInbound({ content: JSON.stringify({ type: 'menu.options', id: 'o1', name: 'chatmode' }) }));
 
-    expect(h.cmdHandler.getSubMenuItems).toHaveBeenCalledWith('/chatmode', 'test-instance', 'chat-1', 'peer-1', undefined, undefined, 'private');
+    expect(h.cmdHandler.getSubMenuItems).toHaveBeenCalledWith('/chatmode', 'test-instance', 'chat-1', 'peer-1', undefined, undefined, 'private', false);
     expect(parseCustomResponse(sendMock)).toEqual({
       type: 'menu.response',
       id: 'o1',
@@ -281,7 +294,7 @@ describe('MessageBridge — menu 协议', () => {
 
     await h.triggerInbound(makeInbound({ content: JSON.stringify({ type: 'menu.update', id: 'u1', name: 'chatmode', value: 'proactive' }) }));
 
-    expect(h.cmdHandler.execMenuUpdate).toHaveBeenCalledWith('/chatmode', 'proactive', 'test-instance', 'chat-1', 'peer-1');
+    expect(h.cmdHandler.execMenuUpdate).toHaveBeenCalledWith('/chatmode', 'proactive', 'test-instance', 'chat-1', 'peer-1', undefined, false);
     expect(parseCustomResponse(sendMock)).toEqual({
       type: 'menu.response',
       id: 'u1',
@@ -312,7 +325,7 @@ describe('MessageBridge — menu 协议', () => {
 
     await h.triggerInbound(makeInbound({ content: JSON.stringify({ type: 'menu.action', id: 'a1', name: 'session', action: 'stop' }) }));
 
-    expect(h.cmdHandler.execMenuAction).toHaveBeenCalledWith('/session', 'stop', undefined, 'test-instance', 'chat-1', 'peer-1', undefined, 'private', 'a1');
+    expect(h.cmdHandler.execMenuAction).toHaveBeenCalledWith('/session', 'stop', undefined, 'test-instance', 'chat-1', 'peer-1', undefined, 'private', 'a1', false);
     expect(parseCustomResponse(sendMock)).toEqual({
       type: 'menu.response',
       id: 'a1',
@@ -331,7 +344,7 @@ describe('MessageBridge — menu 协议', () => {
     }) }));
 
     expect(h.cmdHandler.execMenuAction).toHaveBeenCalledWith(
-      '/session', 'switch', { target: '前端重构' }, 'test-instance', 'chat-1', 'peer-1', undefined, 'private', 'a2'
+      '/session', 'switch', { target: '前端重构' }, 'test-instance', 'chat-1', 'peer-1', undefined, 'private', 'a2', false
     );
   });
 
@@ -342,7 +355,7 @@ describe('MessageBridge — menu 协议', () => {
 
     await h.triggerInbound(makeInbound({ content: JSON.stringify({ type: 'menu.options', id: 'topic-o1', name: 'topic' }) }));
 
-    expect(h.cmdHandler.getSubMenuItems).toHaveBeenCalledWith('/topic', 'test-instance', 'chat-1', 'peer-1', undefined, undefined, 'private');
+    expect(h.cmdHandler.getSubMenuItems).toHaveBeenCalledWith('/topic', 'test-instance', 'chat-1', 'peer-1', undefined, undefined, 'private', false);
     expect(parseCustomResponse(sendMock)).toEqual({
       type: 'menu.response',
       id: 'topic-o1',

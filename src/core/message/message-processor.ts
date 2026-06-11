@@ -10,17 +10,16 @@ import { MessageCache } from './message-cache.js';
 import type { MessageQueue } from './message-queue.js';
 import { StreamIdleMonitor } from './stream-idle-monitor.js';
 import { logger } from '../../utils/logger.js';
-import { getErrorMessage, classifyError, ErrorType, ERROR_PREFIX, isInfraError, prefixErrorType, isRetryableError } from '../../utils/error-utils.js';
+import { getErrorMessage, classifyError, ErrorType, ERROR_PREFIX, isInfraError, prefixErrorType, isRetryableError, isContextTooLongText } from '../../utils/error-utils.js';
 import { EventBus } from '../event-bus.js';
 import { summarizeToolInput } from '../permission.js';
-import type { Message, Session, ChannelAdapter, ChannelOptions, ChannelPolicy, CommandHandler, ReplyContext, AgentContext, EvolAgentRegistryHandle, GlobalSettings, OutboundEnvelope, OutboundPayload, InteractionRequest, InteractionKind, ActionInteraction, CommandCard, ResponseDepth } from '../../types.js';
+import type { Message, Session, ChannelAdapter, ChannelOptions, ChannelPolicy, CommandHandler, ReplyContext, AgentContext, EvolAgentRegistryHandle, GlobalSettings, OutboundEnvelope, OutboundPayload, InteractionRequest, InteractionKind, ActionInteraction, CommandCard } from '../../types.js';
 import type { TriggerManager } from '../trigger/manager.js';
 import { DEFAULT_PERMISSION_MODE } from '../../types.js';
 import { getPackageRoot, resolveRoot, resolvePaths } from '../../paths.js';
 import { renderKitSections, type KitRenderContext } from '../../eck/kit-renderer.js';
 import { renderMessageBody, type RenderMessageResult } from '../../eck/message-renderer.js';
 import { consumeHints, hintsToSubMessages, composeHintFallback } from './pending-hints.js';
-import { resolveResponseDepth as computeResponseDepth } from './response-depth.js';
 import type { SubMessage } from '../../types.js';
 import { normalizeBaseagent } from '../../agents/baseagent.js';
 import type { InteractionRouter } from '../interaction-router.js';
@@ -366,8 +365,6 @@ export class MessageProcessor {
     // message.channel 现在存实例名（channelName），可直接用于精确路由
     const { session, absoluteProjectPath } = await this.resolveSession(message);
 
-    // 群聊响应深度决策（resolveSession 之后、_processMessageInternal 之前）
-    const responseDepth = await this.resolveResponseDepth(message, session);
     // thread(feishu) pending strategy: inject replyContext so first reply creates the thread
     if (message.triggerMeta?.pendingThread && message.triggerMeta?.rootMessageId) {
       const triggerId = message.triggerMeta.triggerId;
@@ -464,7 +461,7 @@ export class MessageProcessor {
 
     try {
       await Promise.race([
-        this._processMessageInternal(message, session, absoluteProjectPath, resetTimer, shouldSuppress, () => lastIdleSec, responseDepth),
+        this._processMessageInternal(message, session, absoluteProjectPath, resetTimer, shouldSuppress, () => lastIdleSec),
         timeoutPromise
       ]);
     } catch (error: any) {
@@ -509,7 +506,7 @@ export class MessageProcessor {
   }
 
   /** 自动安全模式已禁用：仅保留错误计数，不再自动切换状态 */
-  private async _processMessageInternal(message: Message, session: Session, absoluteProjectPath: string, resetTimer: (eventType?: string, toolName?: string) => void, shouldSuppress: () => boolean, getLastIdleSec?: () => number, responseDepth?: ResponseDepth): Promise<void> {
+  private async _processMessageInternal(message: Message, session: Session, absoluteProjectPath: string, resetTimer: (eventType?: string, toolName?: string) => void, shouldSuppress: () => boolean, getLastIdleSec?: () => number): Promise<void> {
     const messageId = `${message.channel}_${message.channelId}_${message.timestamp || Date.now()}`;
     const channelKey = session.metadata?.channelKey || message.channel;
     const channelInfo = this.resolveChannelInfo(channelKey);
@@ -538,7 +535,7 @@ export class MessageProcessor {
     const chatmode = session.sessionMode ?? 'interactive';
 
     // 诊断日志：记录 inbound message_id 和生成的 task_id 的对应关系
-    logger.info(`[MessageProcessor] Task created: inboundMsgId=${message.messageId ?? 'none'} taskId=${taskId} sessionId=${session.id} chatmode=${chatmode}${responseDepth && responseDepth !== 'standard' ? ` depth=${responseDepth}` : ''}`);
+    logger.info(`[MessageProcessor] Task created: inboundMsgId=${message.messageId ?? 'none'} taskId=${taskId} sessionId=${session.id} chatmode=${chatmode}`);
 
     // 构建带 taskId/chatmode 的 ReplyContext（本次任务所有出站消息共用）
     const taskReplyContext = (): ReplyContext => {
@@ -796,21 +793,6 @@ export class MessageProcessor {
           modelOverride = evolclawModelOverride;
         }
 
-        // ④ 群聊 responseDepth → effort 动态映射
-        // 仅当群聊且 evolclaw 作用域未显式指定 effort 时生效（显式配置优先）
-        if (message.chatType === 'group' && responseDepth && !(modelOverride?.effort)) {
-          const depthEffortMap: Record<string, string> = {
-            lightweight: 'low',
-            standard: 'medium',
-            deep: 'high',
-          };
-          const mappedEffort = depthEffortMap[responseDepth];
-          if (mappedEffort) {
-            modelOverride = { ...(modelOverride || {}), effort: mappedEffort };
-            logger.info(`[MessageProcessor] Group depth→effort: ${responseDepth} → ${mappedEffort} session=${session.id}`);
-          }
-        }
-
         agentModel = (typeof (agent as any).getModel === 'function') ? (agent as any).getModel() as string : undefined;
 
         // Kit renderer: 组装上下文
@@ -855,9 +837,8 @@ export class MessageProcessor {
             channel: currentChannelType || null,
             venueUid: undefined,
             // 群分发模式 / 客户端类型 / 权限模式
-            // 优先本地 session 覆盖（/dispatch 命令），fallback 到服务器 dispatch_mode
-            dispatch: session.metadata?.dispatchMode || message.dispatchMode || undefined,
-            responseDepth: responseDepth || undefined,
+            // 优先本地 session 覆盖（/dispatch 命令），fallback 到服务器 dispatch_mode 缓存
+            dispatch: (session.metadata?.dispatchModeOverride ?? session.metadata?.dispatchMode ?? message.dispatchMode) || undefined,
             clientType: message.clientType || undefined,
             permissionMode: session.metadata?.permissionMode || 'auto',
             capabilities: capParts.length > 0 ? capParts.join('、') : undefined,
@@ -1060,14 +1041,13 @@ export class MessageProcessor {
 
       // prompt_too_long：SDK 以 complete 事件（非异常）返回，需在此处触发 compact
       // 检测条件：terminalReason 明确为 prompt_too_long，或文本/errors 包含相关错误文本
-      const contextTooLongPattern = /prompt is too long|input is too long|上下文过长/i;
-      const errorsText = streamResult.errors?.join(' ') || '';
-      const isPromptTooLong = streamResult.isError && session.agentSessionId && canCompactAgent(agent) && (
-        streamResult.terminalReason === 'prompt_too_long' ||
-        contextTooLongPattern.test(streamResult.lastReplyText) ||
-        contextTooLongPattern.test(errorsText) ||
-        contextTooLongPattern.test(streamResult.fullText)
-      );
+      const streamHitContextLimit = (sr: StreamRunResult): boolean =>
+        sr.terminalReason === 'prompt_too_long' ||
+        isContextTooLongText(sr.lastReplyText) ||
+        isContextTooLongText(sr.errors?.join(' ') || '') ||
+        isContextTooLongText(sr.fullText);
+      const isPromptTooLong = streamResult.isError && !!session.agentSessionId && canCompactAgent(agent)
+        && streamHitContextLimit(streamResult);
       if (isPromptTooLong) {
         renderer.addNotice('上下文过长，正在压缩会话...', 'warn', 'compact-trigger', true);
         await renderer.flush();
@@ -1088,27 +1068,19 @@ export class MessageProcessor {
           streamResult = await this.processEventStream(retryStream, session, agent, renderer, resetTimer, shouldSuppress);
 
           // 重试后仍然 prompt_too_long：清理 renderer 中可能混入的错误文本，显示友好提示
-          const retryErrorsText = streamResult.errors?.join(' ') || '';
-          const retryStillTooLong = streamResult.isError && (
-            streamResult.terminalReason === 'prompt_too_long' ||
-            contextTooLongPattern.test(streamResult.lastReplyText) ||
-            contextTooLongPattern.test(retryErrorsText) ||
-            contextTooLongPattern.test(streamResult.fullText)
-          );
+          const retryStillTooLong = streamResult.isError && streamHitContextLimit(streamResult);
           if (retryStillTooLong) {
             renderer.addNotice(getContextTooLongHint(agent), 'warn', 'context-too-long', true);
           }
         } else {
           throw new Error('CONTEXT_COMPACT_FAILED');
         }
-      } else if (streamResult.isError && !isPromptTooLong && (
-        streamResult.terminalReason === 'prompt_too_long' ||
-        contextTooLongPattern.test(streamResult.lastReplyText) ||
-        contextTooLongPattern.test(errorsText) ||
-        contextTooLongPattern.test(streamResult.fullText)
-      )) {
+      } else if (streamResult.isError && streamHitContextLimit(streamResult)) {
         // 上下文过长但无法 auto-compact（无 session ID 或 agent 不支持），显示友好提示
         renderer.addNotice(getContextTooLongHint(agent), 'warn', 'context-too-long', true);
+      } else if (!streamResult.isError) {
+        // 主动 compact 标记：延迟到回复送达之后执行（见下方 proactiveCompactNeeded）
+        // 不在此处阻塞——用户应先收到本轮回答
       }
 
       // 处理文件标记 - 支持 [SEND_FILE:path] 和 [SEND_FILE:channel:path]
@@ -1448,6 +1420,11 @@ export class MessageProcessor {
 
         // 写入消息记录（出方向）已下沉到 aun.ts:deliverTextEntry，
         // 所有 message.send 成功后统一写入 messages.jsonl，此处不再重复写入。
+
+        // 主动 compact：本轮成功且回复已送达，token 占用逼近 autoCompactTokens 阈值。
+        // 在下一条消息处理前压缩，避免下一轮命中硬上限。
+        // 放在回复之后：用户不必等压缩完才看到答案。
+        await this.maybeProactiveCompact(streamResult, session, agent, absoluteProjectPath, adapter, envelope);
       }
 
       const isFinallyBackground = this.isBackgroundSession(session, message.channel, message.channelId);
@@ -1572,6 +1549,41 @@ export class MessageProcessor {
   }
 
   /**
+   * 主动 compact：本轮执行成功且回复已送达，但 token 占用已达到或超过 autoCompactTokens 阈值。
+   * 在下一条消息到来前提前压缩上下文，避免下轮触发硬上限。
+   * 这不依赖任何网关的错误措辞——纯靠 contextUsage 数值判定。
+   *
+   * 调用时机：flush(true) + status.completed 之后，用户已收到回复。
+   * 通知通过 adapter.send 直接投递（renderer 已结束生命周期）。
+   */
+  private async maybeProactiveCompact(
+    streamResult: StreamRunResult,
+    session: Session,
+    agent: AgentRunnerFull,
+    absoluteProjectPath: string,
+    adapter: ChannelAdapter,
+    envelope: OutboundEnvelope,
+  ): Promise<void> {
+    const ctx = streamResult.contextUsage;
+    if (!ctx || !ctx.autoCompactTokens || !session.agentSessionId || !canCompactAgent(agent)) return;
+    if (ctx.totalTokens < ctx.autoCompactTokens) return;
+
+    logger.info(`[MessageProcessor] Proactive compact: totalTokens=${ctx.totalTokens} >= autoCompactTokens=${ctx.autoCompactTokens}, triggering compact`);
+    adapter.send(envelope, { kind: 'system.notice', text: '上下文接近上限，正在自动压缩...', subtype: 'proactive-compact' }).catch(() => {});
+
+    try {
+      const compacted = await agent.compact(session.id, session.agentSessionId!, absoluteProjectPath);
+      if (compacted) {
+        adapter.send(envelope, { kind: 'system.notice', text: '✅ 上下文压缩完成', subtype: 'proactive-compact' }).catch(() => {});
+      } else {
+        logger.warn(`[MessageProcessor] Proactive compact returned false (session=${session.id})`);
+      }
+    } catch (err) {
+      logger.warn(`[MessageProcessor] Proactive compact failed (non-fatal):`, err);
+    }
+  }
+
+  /**
    * 解析会话和项目路径
    */
   private async resolveSession(message: Message): Promise<{
@@ -1680,35 +1692,6 @@ export class MessageProcessor {
       : path.resolve(process.cwd(), session.projectPath);
 
     return { session, absoluteProjectPath };
-  }
-
-  /**
-   * 群聊响应深度决策。根据 dispatch 模式、消息特征、话题轮次综合判断。
-   * 返回 per-message 的瞬时深度枚举，不持久化到 session.metadata。
-   * 同时更新 session.metadata 中的 topicRounds/lastTopicHash（话题追踪状态）。
-   */
-  private async resolveResponseDepth(message: Message, session: Session): Promise<ResponseDepth> {
-    const result = computeResponseDepth({
-      chatType: message.chatType,
-      content: message.content,
-      selfAid: session.selfAID || message.selfAID,
-      mentionAids: message.mentionAids,
-      dispatch: session.metadata?.dispatchMode || message.dispatchMode,
-      topicRounds: session.metadata?.topicRounds ?? 0,
-      lastTopicHash: session.metadata?.lastTopicHash,
-    });
-
-    // 持久化话题追踪状态（仅群聊时有意义）
-    if (message.chatType === 'group') {
-      session.metadata = {
-        ...(session.metadata || {}),
-        topicRounds: result.topicRounds,
-        lastTopicHash: result.topicHash,
-      };
-      await this.sessionManager.updateSession(session.id, { metadata: session.metadata });
-    }
-
-    return result.depth;
   }
 
   /**
@@ -1891,7 +1874,7 @@ export class MessageProcessor {
           lastReplyText += event.error || '';
 
           // 上下文过长的错误不在此处输出 notice，留给外层 isPromptTooLong 触发 auto-compact
-          const isContextError = /prompt is too long|input is too long|上下文过长/i.test(event.error || '');
+          const isContextError = isContextTooLongText(event.error || '');
           if (!isContextError && !hasErrorResult && !shouldSuppress()) {
             hasErrorResult = true;
             renderer.addNotice(`${event.error}`, 'warn', 'runtime-error', true);
@@ -1923,8 +1906,8 @@ export class MessageProcessor {
           const interruptReason = this.interruptedSessions.get(session.id);
           const isUserInterrupt = interruptReason === 'new_message' || interruptReason === 'stop' || interruptReason === 'recalled';
           const isContextTooLong = event.terminalReason === 'prompt_too_long'
-            || /prompt is too long|input is too long|上下文过长/i.test(event.errors?.join(' ') || '')
-            || /prompt is too long|input is too long|上下文过长/i.test(lastReplyText);
+            || isContextTooLongText(event.errors?.join(' ') || '')
+            || isContextTooLongText(lastReplyText);
           if (event.isError && !hasErrorResult && !shouldSuppress() && !isUserInterrupt && !isContextTooLong) {
             const errorSummary = event.errors?.join('; ') || '任务执行失败';
             // 使用 terminalReason 提供更友好的错误提示（不带 emoji，由 formatter 统一加）

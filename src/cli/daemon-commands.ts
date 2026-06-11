@@ -15,6 +15,7 @@ import * as platform from '../utils/cross-platform.js';
 import { EventBus } from '../core/event-bus.js';
 import { tryUpgrade, tryUpgradeAunSdk, tryUpgradeGlobalPkg, resolveGlobalPkg, type UpgradeResult } from '../utils/npm-ops.js';
 import { fetchEcwebPairCode } from '../utils/ecweb-pair.js';
+import { resolveEcwebLaunchCommand } from '../utils/ecweb-launch.js';
 import { resolveAunCoreSdkPkg, AUN_CORE_SDK_PKG } from '../aun/aid/client.js';
 import { scanInstances, cleanupInstances, readAidLastActivity, findOrphanProcesses, killOrphans, type OrphanProcess } from '../utils/instance-registry.js';
 import { filterLogFiles, deriveLogTypes, computePreChecked, validateLogTypes, shortLogName as shortLogNameLocal } from './watch-logs.js';
@@ -2226,18 +2227,45 @@ async function cmdWatchAid(): Promise<void> {
   platform.onShutdown(cleanup);
 }
 
-/** 扫描 instance/ 目录，返回存活的 ecweb 实例（ecweb-<pid>.json）。 */
-function findAliveEcweb(p: ReturnType<typeof resolvePaths>): { pid: number; port: number } | null {
-  if (!fs.existsSync(p.instanceDir)) return null;
+interface EcwebInstanceRecord {
+  pid: number;
+  port: number;
+}
+
+function isEcwebInstanceFile(file: string): boolean {
+  return /^(ecweb|watch-web)-\d+\.json$/.test(file);
+}
+
+/** 扫描 instance/ 目录，返回存活的 ecweb 实例（兼容 ecweb-*.json 和旧 watch-web-*.json）。 */
+function findAliveEcwebs(p: ReturnType<typeof resolvePaths>): EcwebInstanceRecord[] {
+  const alive: EcwebInstanceRecord[] = [];
+  if (!fs.existsSync(p.instanceDir)) return alive;
   for (const file of fs.readdirSync(p.instanceDir)) {
-    if (!file.startsWith('ecweb-') || !file.endsWith('.json')) continue;
+    if (!isEcwebInstanceFile(file)) continue;
+    const filePath = path.join(p.instanceDir, file);
     try {
-      const rec = JSON.parse(fs.readFileSync(path.join(p.instanceDir, file), 'utf-8'));
-      if (rec.pid && platform.isProcessRunning(rec.pid)) return { pid: rec.pid, port: rec.port ?? 42705 };
-      fs.unlinkSync(path.join(p.instanceDir, file));
+      const rec = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+      if (rec.pid && platform.isProcessRunning(rec.pid)) {
+        alive.push({ pid: rec.pid, port: rec.port ?? 42705 });
+      } else {
+        fs.unlinkSync(filePath);
+      }
     } catch {}
   }
-  return null;
+  return alive;
+}
+
+function findAliveEcweb(p: ReturnType<typeof resolvePaths>): EcwebInstanceRecord | null {
+  const alive = findAliveEcwebs(p);
+  return alive[0] ?? null;
+}
+
+function removeEcwebInstanceFiles(p: ReturnType<typeof resolvePaths>): void {
+  if (!fs.existsSync(p.instanceDir)) return;
+  for (const file of fs.readdirSync(p.instanceDir)) {
+    if (!isEcwebInstanceFile(file)) continue;
+    try { fs.unlinkSync(path.join(p.instanceDir, file)); } catch {}
+  }
 }
 
 /** 若 ecweb 在运行则杀掉并清理 pid 文件，返回是否成功 kill。 */
@@ -2271,15 +2299,16 @@ function startEcwebIfEnabled(p: ReturnType<typeof resolvePaths>): void {
   if (!cfg.ecweb?.enabled) return;
   stopEcwebIfRunning(p);  // 先停旧进程（有则停），保证加载最新代码
 
-  const exe = platform.resolveCommandPath('evolclaw-web');
-  if (!exe) return; // 未安装，静默跳过
-
   const port = cfg.ecweb.port ?? 42705;
-  const isBatch = /\.(cmd|bat)$/i.test(exe);
   const args = ['--home', p.root, '--port', String(port)];
-  const child = isBatch
-    ? spawn(`"${exe}"`, args.map(a => `"${a}"`), { detached: true, stdio: 'ignore', shell: true, windowsHide: true })
-    : spawn(exe, args, { detached: true, stdio: 'ignore', windowsHide: true });
+  const launch = resolveEcwebLaunchCommand(args);
+  if (!launch) return; // 未安装，静默跳过
+
+  const child = spawn(launch.command, launch.args, {
+    detached: true,
+    stdio: 'ignore',
+    windowsHide: true,
+  });
 
   child.unref();
   const pid = child.pid;
@@ -2346,19 +2375,21 @@ async function cmdWatchWeb(): Promise<void> {
     }
   }
 
-  // 2. 检查是否已运行
-  const alive = findAliveEcweb(p);
-  if (alive) {
-    await printEcwebAccess(alive.port);
-    return;
-  }
-
-  // 3. 启动（后台）并同步配置
+  // 2. 启动（后台）并同步配置。默认行为是替换旧实例，确保新配置/新版静态资源生效。
   const cfg = loadEvolclawConfig();
   const port = cfg.ecweb?.port ?? 42705;
   if (cfg.ecweb?.enabled === undefined) {
     // 首次手动启动时自动写入 enabled:true
     saveEvolclawConfig({ ...cfg, ecweb: { enabled: true, port } });
+  }
+  if (cfg.ecweb?.enabled === false) {
+    const alive = findAliveEcweb(p);
+    if (alive) {
+      await printEcwebAccess(alive.port);
+      return;
+    }
+    process.stderr.write('❌ ECWeb 已禁用。请在 evolclaw.json 中启用 ecweb.enabled，或删除该字段后重试。\n');
+    process.exit(1);
   }
   startEcwebIfEnabled(p);
   const started = findAliveEcweb(p);

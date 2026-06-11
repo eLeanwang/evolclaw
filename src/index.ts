@@ -885,9 +885,10 @@ async function main() {
       logger.warn(`控制 AID 首连失败（后台自动重连，不影响 daemon 主流程）: ${e?.message || e}`);
     }
 
-    // 控制 AID 接收 owner 指令：本轮只做 ECWeb 登录入口（/pair 取配对码）。
-    // 发送方身份由 AUN X.509 证书链验证，非 owner 完全静默。daemon 直接处理，
-    // 不转回 ecweb——仅「配对码是 ecweb 持有的状态」需经 localhost 取一次。
+    // 控制 AID 接收 owner 指令：
+    // 1. /pair — ECWeb 配对码（文本快路径）
+    // 2. menu.* JSON — 路由到 cmdHandler.execMenuForControl（进程级 + 全量权限）
+    // 发送方身份由 AUN X.509 证书链验证，非 owner 完全静默。
     controlChannel.onMessage(async (opts) => {
       try {
         if (!isProcessLevelOwner(opts.peerId, evolclawCfg.owners)) {
@@ -908,7 +909,15 @@ async function main() {
           await controlChannel!.sendMessage(opts.channelId, reply);
           return;
         }
-        // owner 发的其他内容：提示可用指令，避免无响应让 owner 困惑
+        // menu.* JSON 路由：owner 已在上方校验，转交 execMenuForControl（fromControlChannel=true）
+        let parsed: any;
+        try { parsed = JSON.parse(text); } catch { parsed = null; }
+        if (parsed && typeof parsed === 'object' && typeof parsed.type === 'string' && parsed.type.startsWith('menu.')) {
+          const response = await cmdHandler.execMenuForControl(parsed, opts.peerId);
+          await controlChannel!.sendMessage(opts.channelId, JSON.stringify(response));
+          return;
+        }
+        // owner 发的其他内容：提示可用指令
         await controlChannel!.sendMessage(opts.channelId, '可用指令：/pair（获取 ECWeb 登录配对码）');
       } catch (e: any) {
         logger.warn(`控制 AID 消息处理失败: ${e?.message || e}`);

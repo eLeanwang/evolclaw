@@ -895,15 +895,27 @@ async function agentSetEnabled(aid: string, enabled: boolean): Promise<AgentResu
     return { ok: false, error: `Failed to read config: ${e?.message || e}` };
   }
 
+  const prevEnabled = config.enabled;
   config.enabled = enabled;
   saveAgent(config);
 
-  // Try hot-reload
+  // Sync in-memory registry; roll back disk on failure to keep disk/memory consistent
   let reloaded = false;
   try {
     const result = await ipcQuery(p.socket, { type: 'evolagent.reload', name: aid }) as any;
-    reloaded = !!result?.ok;
-  } catch {}
+    if (!result?.ok) {
+      // Reload rejected by daemon — roll back disk
+      config.enabled = prevEnabled;
+      saveAgent(config);
+      return { ok: false, error: result?.error || 'reload failed' };
+    }
+    reloaded = true;
+  } catch (e: any) {
+    // IPC unreachable (daemon not running) — roll back disk
+    config.enabled = prevEnabled;
+    saveAgent(config);
+    return { ok: false, error: `IPC error: ${e?.message || e}` };
+  }
 
   return { ok: true, aid, enabled, reloaded };
 }

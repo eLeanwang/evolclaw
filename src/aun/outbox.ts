@@ -4,16 +4,37 @@ import crypto from 'crypto';
 import { resolvePaths } from '../paths.js';
 import type { ReplyContext } from '../types.js';
 
+export type OutboxContentKind = 'text' | 'file' | 'image' | 'card' | 'custom';
+
+export type OutboxPostSendAction =
+  | {
+      type: 'register_interaction_card';
+      requestId: string;
+      isCommandCard: boolean;
+      initiatorAid?: string;
+      expiresAt?: number;
+    };
+
 export interface OutboxEntry {
   id: string;
   ts: number;
   aid: string;
   channelId: string;
-  type: 'text' | 'file';
+  /**
+   * Legacy entries use text/file. New durable content messages use payload.
+   * Keep the legacy variants so existing data/outbox/*.jsonl files can drain.
+   */
+  type: 'text' | 'file' | 'payload';
+  contentKind?: OutboxContentKind;
+  payload?: Record<string, any>;
   text?: string;
   filePath?: string;
+  logText?: string;
   context?: ReplyContext;
   ttl: number;
+  attempts?: number;
+  lastError?: string;
+  postSend?: OutboxPostSendAction;
 }
 
 const MAX_ENTRIES_PER_AID = 20;
@@ -64,11 +85,15 @@ function writeEntries(aid: string, entries: OutboxEntry[]): void {
 
 export function enqueue(aid: string, opts: {
   channelId: string;
-  type: 'text' | 'file';
+  type: 'text' | 'file' | 'payload';
+  contentKind?: OutboxContentKind;
+  payload?: Record<string, any>;
   text?: string;
   filePath?: string;
+  logText?: string;
   context?: ReplyContext;
   ttl?: number;
+  postSend?: OutboxPostSendAction;
 }): OutboxEntry {
   const entry: OutboxEntry = {
     id: generateId(),
@@ -76,10 +101,14 @@ export function enqueue(aid: string, opts: {
     aid,
     channelId: opts.channelId,
     type: opts.type,
+    contentKind: opts.contentKind,
+    payload: opts.payload,
     text: opts.text,
     filePath: opts.filePath,
+    logText: opts.logText,
     context: opts.context,
     ttl: opts.ttl ?? DEFAULT_TTL,
+    postSend: opts.postSend,
   };
 
   const dir = outboxDir();
@@ -120,6 +149,7 @@ export type SendFn = (entry: OutboxEntry) => Promise<boolean>;
 export async function drain(aid: string, sender: SendFn): Promise<{ sent: number; expired: number; failed: number }> {
   const entries = readEntries(aid);
   if (entries.length === 0) return { sent: 0, expired: 0, failed: 0 };
+  const drainedIds = new Set(entries.map(e => e.id));
 
   let sent = 0;
   let expired = 0;
@@ -132,20 +162,27 @@ export async function drain(aid: string, sender: SendFn): Promise<{ sent: number
       continue;
     }
     try {
+      entry.attempts = (entry.attempts ?? 0) + 1;
       const ok = await sender(entry);
       if (ok) {
         sent++;
       } else {
         failed++;
+        entry.lastError = 'sender returned false';
         remaining.push(entry);
       }
-    } catch {
+    } catch (e) {
       failed++;
+      entry.lastError = e instanceof Error ? e.message : String(e);
       remaining.push(entry);
     }
   }
 
-  writeEntries(aid, remaining);
+  const current = readEntries(aid);
+  const currentIds = new Set(current.map(e => e.id));
+  const retainedNewEntries = current.filter(e => !drainedIds.has(e.id));
+  const retainedFailedEntries = remaining.filter(e => currentIds.has(e.id));
+  writeEntries(aid, [...retainedFailedEntries, ...retainedNewEntries]);
   return { sent, expired, failed };
 }
 

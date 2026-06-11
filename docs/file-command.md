@@ -8,8 +8,8 @@
 
 | 项 | 说明 |
 |---|---|
-| 命令 | `/file <相对路径>` |
-| 权限 | **Admin（仅 owner）** |
+| 命令 | `/file <相对路径>`；owner 可用 `/file <channel> <相对路径>` 跨渠道发送 |
+| 权限 | 同渠道项目内文件：owner/admin；跨渠道发送：仅 owner |
 | 队列 | 快捷命令，**不进消息队列**，处理中也可使用 |
 | 渠道支持 | 需 `adapter.sendFile` 能力（Feishu ✅、WeChat ✅） |
 
@@ -19,7 +19,10 @@
 /file src/index.ts
 /file .claude/uploads/report.pdf
 /file dist/output.json
+/file feishu dist/output.json
 ```
+
+前三个示例发送到当前会话所在渠道，owner/admin 均可使用。最后一个示例显式指定目标渠道，属于跨渠道发送，仅 owner 可使用。
 
 ## 安全策略
 
@@ -29,6 +32,7 @@
 | 路径穿越 | 拒绝含 `..` 的路径段 |
 | 绝对路径 | 拒绝 `/` 开头的路径 |
 | 符号链接 | `realpathSync` 解析后验证仍在项目目录内 |
+| 跨渠道发送 | 仍执行同一套项目内路径校验，并额外要求 owner |
 | 文件大小 | 单文件最大 **10 MB** |
 | 目录 | 一期拒绝，提示后续版本支持 |
 
@@ -43,6 +47,7 @@
 ❌ 文件过大: 12.5 MB (限制 10 MB)
 ❌ 暂不支持发送目录（二期支持）
 ❌ 当前渠道不支持文件发送
+❌ 跨渠道发送需要 owner 权限
 ```
 
 ## 图片自动识别
@@ -59,7 +64,8 @@ Feishu 渠道的 `sendFile` 内部使用 `image-type` 库检测文件头：
 
 ## 实现位置
 
-- `src/core/command-handler.ts` — 命令注册 + 处理逻辑（~50 行）
+- `src/core/command/slash-handler.ts` — `/file` 文本命令解析、鉴权、项目内路径校验
+- `src/core/command/menu-handler.ts` — menu `file` 查询/拉取入口（支持项目内绝对路径；项目外仅 owner）
 - `src/channels/feishu.ts` — `sendFile` 图片自动识别（`image-type`）
 
 ## 二期规划：目录打包发送

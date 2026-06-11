@@ -320,7 +320,7 @@ export class MessageBridge {
     const { id } = req;
     try {
       const identity = this.sessionManager.resolveIdentity(channel, msg.peerId);
-      const data = this.cmdHandler.getMenuItems(identity.role, msg.chatType || 'private');
+      const data = this.cmdHandler.getMenuItems(identity.role, msg.chatType || 'private', msg.isControlChannel ? 'control' : 'agent');
       await this.sendMenuResponse(adapter, channel, msg.channelId,
         { type: 'menu.response', id, data }, sendReply);
     } catch (err: any) {
@@ -339,7 +339,7 @@ export class MessageBridge {
     const { id, name, cmd } = req;
     try {
       const resolvedCmd = this.resolveCmd(name, cmd);
-      const result = await this.cmdHandler.execMenuQuery(resolvedCmd, channel, msg.channelId, msg.peerId, (req as any).args, msg.chatType);
+      const result = await this.cmdHandler.execMenuQuery(resolvedCmd, channel, msg.channelId, msg.peerId, (req as any).args, msg.chatType, msg.isControlChannel ?? false);
       if ('error' in result) throw { code: result.code || 'EXEC_FAILED', message: result.error };
       await this.sendMenuResponse(adapter, channel, msg.channelId,
         { type: 'menu.response', id, name, data: result.data }, sendReply);
@@ -359,7 +359,7 @@ export class MessageBridge {
     const { id, name, cmd } = req;
     try {
       const resolvedCmd = this.resolveCmd(name, cmd);
-      const data = await this.cmdHandler.getSubMenuItems(resolvedCmd, channel, msg.channelId, msg.peerId, (req as any).args, undefined, msg.chatType) ?? [];
+      const data = await this.cmdHandler.getSubMenuItems(resolvedCmd, channel, msg.channelId, msg.peerId, (req as any).args, undefined, msg.chatType, msg.isControlChannel ?? false) ?? [];
       await this.sendMenuResponse(adapter, channel, msg.channelId,
         { type: 'menu.response', id, name, data }, sendReply);
     } catch (err: any) {
@@ -379,7 +379,7 @@ export class MessageBridge {
     try {
       if (!value) throw { code: 'MISSING_VALUE', message: '缺少 value 参数' };
       const resolvedCmd = this.resolveCmd(name, cmd);
-      const result = await this.cmdHandler.execMenuUpdate(resolvedCmd, value, channel, msg.channelId, msg.peerId);
+      const result = await this.cmdHandler.execMenuUpdate(resolvedCmd, value, channel, msg.channelId, msg.peerId, undefined, msg.isControlChannel ?? false);
       if ('error' in result) throw { code: result.code || 'EXEC_FAILED', message: result.error };
       await this.sendMenuResponse(adapter, channel, msg.channelId,
         { type: 'menu.response', id, name, data: result.data }, sendReply);
@@ -400,7 +400,7 @@ export class MessageBridge {
     try {
       if (!action) throw { code: 'MISSING_VALUE', message: '缺少 action 参数' };
       const resolvedCmd = this.resolveCmd(name, cmd);
-      const result = await this.cmdHandler.execMenuAction(resolvedCmd, action, args, channel, msg.channelId, msg.peerId, undefined, msg.chatType, id);
+      const result = await this.cmdHandler.execMenuAction(resolvedCmd, action, args, channel, msg.channelId, msg.peerId, undefined, msg.chatType, id, msg.isControlChannel ?? false);
       if ('error' in result) throw { code: result.code || 'EXEC_FAILED', message: result.error };
       await this.sendMenuResponse(adapter, channel, msg.channelId,
         { type: 'menu.response', id, name, data: result.data }, sendReply);
