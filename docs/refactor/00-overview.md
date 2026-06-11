@@ -110,7 +110,7 @@ evolclaw 提供的原子工具（4 套）：
 | 现有 slash | 权限 | 新体系归宿 |
 |---|---|---|
 | `/perm` (查看) | admin | `Read ~/.evolclaw/state/active/<...>.json` |
-| `/perm <mode>` | owner | `evolclaw ctl set session.current.perm <mode>` |
+| `/perm <mode>` | admin+ | `evolclaw ctl set session.current.perm <mode>` |
 | `/perm allow/always/deny` | admin | `evolclaw ctl call permission.respond <verdict>` |
 
 #### 运维 → ctl get / ctl call
@@ -121,8 +121,10 @@ evolclaw 提供的原子工具（4 套）：
 | `/stop` | user | `evolclaw ctl call session.interrupt` |
 | `/check` | user/admin | `evolclaw ctl get channels` |
 | `/activity [mode]` | admin/owner | `evolclaw ctl set session.current.activity <mode>` |
-| `/restart [channel]` | admin/owner | `evolclaw ctl call service.restart` / `evolclaw ctl call channel.reconnect <type>` |
-| `/file [channel] <path>` | owner | inline `[SEND_FILE:路径]` 标记（保留）|
+| `/restart` | daemon owner | `evolclaw ctl call service.restart` |
+| `/reload [aid]` | daemon owner 跨 agent；agent owner/admin 仅自身 | `evolclaw ctl call agent.reload [aid]` |
+| `/file <path>` | admin+ | inline `[SEND_FILE:路径]` 标记（保留）|
+| `/file <channel> <path>` | owner | inline `[SEND_FILE:路径]` 标记（保留，跨渠道）|
 | `/aid [list\|new]` | owner | `evolclaw aid list` / `evolclaw aid new <aid>` |
 | `/agentmd [put\|set]` | owner | `evolclaw aid agentmd put <aid>` / `Edit + put` |
 

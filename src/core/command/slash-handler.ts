@@ -51,6 +51,15 @@ function formatIdleTime(ms: number): string {
   return '刚刚';
 }
 
+function getAgentBusyCount(handler: any, aid: string | undefined): number | null {
+  if (!aid || !handler.agentRegistry) return null;
+  const handle = handler.agentRegistry.get(aid) ?? null;
+  const agentName = handle?.name;
+  if (!agentName) return null;
+  return (handler.messageQueue?.getProcessingCountByAgent?.(agentName) ?? 0)
+    + (handler.messageQueue?.getQueueLengthByAgent?.(agentName) ?? 0);
+}
+
 export async function handleSlashCommand(this: any, 
   content: string,
   channel: string,
@@ -124,6 +133,16 @@ export async function handleSlashCommand(this: any,
 
   // /help 命令不需要会话
   if (normalizedContent === '/help') {
+    const appendProcessCommands = (lines: string[]) => {
+      if (!isDaemonOwner) return;
+      lines.push(
+        '',
+        '🛠️ 进程级运维：',
+        '  /restart - 重启服务',
+        '  /reload [aid] - 热重载 Agent 配置',
+      );
+    };
+
     if (!isAdmin && activeChatType === 'group') {
       const lines = [
         '可用命令：',
@@ -133,6 +152,7 @@ export async function handleSlashCommand(this: any,
         '  /check - 检查渠道健康',
         '  /help - 显示此帮助信息',
       ];
+      appendProcessCommands(lines);
       return { kind: 'command.result' as const, text: lines.join('\n') };
     }
 
@@ -151,6 +171,7 @@ export async function handleSlashCommand(this: any,
         '❓ 帮助：',
         '  /help - 显示此帮助信息',
       ];
+      appendProcessCommands(lines);
       return { kind: 'command.result' as const, text: lines.join('\n') };
     }
 
@@ -182,23 +203,24 @@ export async function handleSlashCommand(this: any,
       '',
       '🔐 权限管理：',
       '  /perm - 查看当前权限模式',
-      ...(isOwner ? [`  /perm <${PERMISSION_MODE_USAGE}> - 切换权限模式`] : []),
+      ...(isAdmin ? [`  /perm <${PERMISSION_MODE_USAGE}> - 切换权限模式`] : []),
       '  /perm allow|always|deny - 审批权限请求',
       '',
       '🛠️ 运维：',
       '  /status - 显示会话状态',
       '  /stop - 中断当前任务',
       '  /check - 检查渠道状态',
-      ...(isAdmin ? [
-        '  /restart - 重启服务（owner only）',
-      ] : []),
-      ...(isOwner ? [
+      ...(isDaemonOwner ? [
         '  /restart - 重启服务',
+        '  /reload [aid] - 热重载 Agent 配置',
       ] : []),
-      ...(isOwner ? [
+      ...(!isDaemonOwner && isAdmin ? [
+        '  /reload - 热重载当前 Agent 配置',
+      ] : []),
+      ...(isAdmin ? [
         '',
         '🧰 工具：',
-        '  /file [channel] <path> - 发送项目内文件',
+        `  /file ${isOwner ? '[channel] ' : ''}<path> - 发送项目内文件`,
       ] : []),
       '',
       '❓ 帮助：',
@@ -235,7 +257,7 @@ export async function handleSlashCommand(this: any,
 
     // 权限管理
     if (isAdmin) {
-      cmds.push({ command: '/perm', args: isOwner ? `<${PERMISSION_MODE_USAGE}>` : undefined, description: '查看当前权限模式', category: '权限管理', roles: ['admin', 'owner'] });
+      cmds.push({ command: '/perm', args: `<${PERMISSION_MODE_USAGE}>`, description: '查看或切换当前权限模式', category: '权限管理', roles: ['admin', 'owner'] });
       cmds.push({ command: '/perm', args: 'allow|always|deny', description: '审批权限请求', category: '权限管理', roles: ['admin', 'owner'] });
     }
 
@@ -246,9 +268,15 @@ export async function handleSlashCommand(this: any,
     if (isAdmin) {
       cmds.push({ command: '/activity', args: '[all|dm|owner|none]', description: '查看/控制中间输出显示模式', category: '聊天设置', roles: ['admin', 'owner'] });
     }
-    if (isOwner) {
-      cmds.push({ command: '/restart', description: '重启服务', category: '运维', roles: ['owner'] });
-      cmds.push({ command: '/file', args: '[channel] <path>', description: '发送项目内文件', category: '工具', roles: ['owner'] });
+    if (isDaemonOwner) {
+      cmds.push({ command: '/restart', description: '重启服务', category: '运维', roles: ['daemon-owner'] });
+      cmds.push({ command: '/reload', args: '[aid]', description: '热重载 Agent 配置', category: '运维', roles: ['daemon-owner'] });
+    }
+    if (!isDaemonOwner && isAdmin) {
+      cmds.push({ command: '/reload', description: '热重载当前 Agent 配置', category: '运维', roles: ['admin', 'owner'] });
+    }
+    if (isAdmin) {
+      cmds.push({ command: '/file', args: isOwner ? '[channel] <path>' : '<path>', description: '发送项目内文件', category: '工具', roles: ['admin', 'owner'] });
     }
 
     // 聊天设置
@@ -308,7 +336,7 @@ export async function handleSlashCommand(this: any,
         };
 
         const replyCtx = this.getReplyContext(permSession);
-        const cardResult = await this.sendCommandCard({ channel, channelId, interaction, replyCtx, canWrite: isOwner });
+        const cardResult = await this.sendCommandCard({ channel, channelId, interaction, replyCtx, canWrite: isAdmin });
         if (cardResult === null) return null;
         return { kind: 'command.result' as const, text: cardResult };
       }
@@ -319,7 +347,7 @@ export async function handleSlashCommand(this: any,
         const suffix = m.available ? '' : ' ⚠️ 不可用';
         return `  ${prefix} ${m.key} (${m.nameZh}) - ${m.description}${suffix}`;
       }).join('\n');
-      if (isOwner) {
+      if (isAdmin) {
         return { kind: 'command.result' as const, text: `权限模式: ${currentMode}\n\n${modeList}\n\n用法: /perm <模式> 或 allow|always|deny` };
       }
         return { kind: 'command.result' as const, text: `当前权限模式: ${currentMode}` };
@@ -367,9 +395,9 @@ export async function handleSlashCommand(this: any,
           if (!matched.available) {
             return { kind: 'command.error' as const, text: `❌ ${matched.key} 模式当前不可用：${matched.unavailableReason}` };
           }
-          // guest 和 admin 用户不能切换权限模式（仅 owner）
-          if (!isOwner) {
-            return { kind: 'command.error' as const, text: '❌ 权限模式切换仅限 owner' };
+          // 关系级权限模式切换允许 owner/admin；guest 只能查询当前模式。
+          if (!isAdmin) {
+            return { kind: 'command.error' as const, text: '❌ 权限模式切换仅限管理员' };
           }
           const metadata = permSession.metadata || {};
           metadata.permissionMode = arg;
@@ -858,16 +886,9 @@ export async function handleSlashCommand(this: any,
     }
 
     // 繁忙检查（同 menu /agent reload）
-    if (this.agentRegistry) {
-      const handle = this.agentRegistry.get(targetAid) ?? null;
-      if (handle) {
-        const agentName = handle.name;
-        const busy = (this.messageQueue?.getProcessingCountByAgent?.(agentName) ?? 0)
-                   + (this.messageQueue?.getQueueLengthByAgent?.(agentName) ?? 0);
-        if (busy > 0) {
-          return { kind: 'command.error' as const, text: `❌ 该 Agent 有 ${busy} 个任务执行中，请稍后重试` };
-        }
-      }
+    const busy = getAgentBusyCount(this, targetAid);
+    if (busy !== null && busy > 0) {
+      return { kind: 'command.error' as const, text: `❌ 该 Agent 有 ${busy} 个任务执行中，请稍后重试` };
     }
 
     const res = await execAgentAction('reload', { aid: targetAid }, userId ?? '');
@@ -1501,7 +1522,9 @@ export async function handleSlashCommand(this: any,
       const seg = cname.split('#');
       const instName = seg.length >= 3 ? seg.slice(2).join('#') : cname;
       const aidState = aidStateByName.get(cname);
-      let connected = cobj?.getStatus ? !!cobj.getStatus().connected : true;
+      // cobj 缺失 = 渠道未注册（如 disabled agent），视为未连接；
+      // cobj 存在但无 getStatus = 已注册的活实例，视为已连接。
+      let connected = cobj ? (cobj.getStatus ? !!cobj.getStatus().connected : true) : false;
       const h: any = { name: cname, instName, type, connected };
       if (aidState) {
         connected = aidState.status === 'connected';
@@ -1563,6 +1586,11 @@ export async function handleSlashCommand(this: any,
     // agent-channel 的 owner 角色不足以重启整个 daemon。
     if (!isDaemonOwner) {
       return { kind: 'command.error' as const, text: '❌ 无权限：服务重启仅限 daemon owner 使用' };
+    }
+    const selfAid = this.agentRegistry?.resolveByChannel(channel)?.aid;
+    const busy = getAgentBusyCount(this, selfAid);
+    if (busy !== null && busy > 0) {
+      return { kind: 'command.error' as const, text: `❌ 该 Agent 有 ${busy} 个任务执行中，请稍后重试` };
     }
     const allSessions = await this.sessionManager.listSessions(channel, channelId);
     const sessionsWithMessages = allSessions
@@ -1687,14 +1715,17 @@ export async function handleSlashCommand(this: any,
     return { kind: 'command.result' as const, text: `当前项目: ${session.projectPath}` };
   }
 
-  // /file 命令：发送项目内文件，支持 /file path 和 /file channel path（owner only）
+  // /file 命令：发送项目内文件，支持 /file path 和 /file channel path
   if (normalizedContent.startsWith('/file')) {
-    if (!isOwner) return { kind: 'command.error' as const, text: '❌ 无权限：此命令仅限 owner 使用' };
+    if (!isAdmin) return { kind: 'command.error' as const, text: '❌ 无权限：此命令仅限管理员使用' };
     // 飞书会将 .md 等后缀自动转为 Markdown 链接: foo.md → [foo.md](http://foo.md/)
     // 还原: 将 [text](url) 替换为 text
     const rawArg = normalizedContent.slice(5).trim().replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
     if (!rawArg) {
-      return { kind: 'command.result' as const, text: '用法: /file <相对路径> 或 /file <渠道> <相对路径>\n示例: /file src/index.ts\n示例: /file feishu report.md' };
+      const usage = isOwner
+        ? '用法: /file <相对路径> 或 /file <渠道> <相对路径>\n示例: /file src/index.ts\n示例: /file feishu report.md'
+        : '用法: /file <相对路径>\n示例: /file src/index.ts';
+      return { kind: 'command.result' as const, text: usage };
     }
 
     // 解析目标通道：第一个 token 按实例名匹配，再按 channelType 匹配
@@ -1723,9 +1754,9 @@ export async function handleSlashCommand(this: any,
     }
     const isCrossChannel = targetChannel !== channel;
 
-    // 跨通道仅限 owner
+    // 跨通道不属于当前关系级操作，仍仅限 owner。
     if (isCrossChannel && identity.role !== 'owner') {
-      return { kind: 'command.error' as const, text: '❌ 跨通道发送仅限管理员' };
+      return { kind: 'command.error' as const, text: '❌ 跨通道发送仅限 owner' };
     }
 
     // 找目标 adapter

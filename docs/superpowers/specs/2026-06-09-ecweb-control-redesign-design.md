@@ -1,7 +1,7 @@
 # ECWeb 控制台重构设计
 
 日期：2026-06-09
-范围：`ecweb/` 前端 + `src/core/command-handler.ts` 等后端 menu 层
+范围：`ecweb/` 前端 + `src/core/command/command-handler.ts` 门面 / `src/core/command/menu-handler.ts` 执行层等后端 menu 层
 
 ## 背景与根因
 
@@ -9,7 +9,7 @@ EvolClaw Watch（ECWeb）现有 5 个标签：`AID · Messages · Sessions · Ca
 其中 **Control 页大面积为空**。根因不在样式，而在信息架构：
 
 `ecweb/src/sources/control.ts` 通过 IPC `menu.exec` 拉取 `menu.*` 状态；
-后端 `execMenuForEcweb()`（`src/core/command-handler.ts:1349`）用一个**虚构渠道 `__ecweb__`** 跑所有查询：
+后端 `execMenuForEcweb()`（门面在 `src/core/command/command-handler.ts`，执行在 `src/core/command/menu-handler.ts`）用一个**虚构渠道 `__ecweb__`** 跑所有查询：
 
 ```js
 const ECWEB_CHANNEL = '__ecweb__';
@@ -262,7 +262,7 @@ evolclaw-web 的 local 版本由 ECWeb 进程提供（前端已持有），daemo
 
 ### 2. `menu.action name=agent` 增加 `reload`（带任务检查）
 
-`execAgentAction`（`command-handler-agent-control.ts:83`）增 `reload` case，调用 `agentReload(aid)`（已存在于 `src/cli/agent.ts:836`，走 `evolagent.reload` IPC）。
+`execAgentAction`（`src/core/message/command-handler-agent-control.ts`）增 `reload` case，调用 `agentReload(aid)`（`src/cli/agent.ts`，走 `evolagent.reload` IPC）。
 **reload / disable / delete 三个 action 执行前检查目标 agent 是否繁忙**：
 `getProcessingCountByAgent(agentName) + getQueueLengthByAgent(agentName) > 0` 即繁忙，
 返回 `{ error: '该 Agent 有 N 个任务执行中', code: 'BUSY' }`；调用方传 `force: true` 时跳过检查强制执行。

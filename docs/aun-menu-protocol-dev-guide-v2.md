@@ -1,6 +1,8 @@
-# Menu Protocol — 客户端集成指南
+# Menu Protocol — 客户端集成指南（历史 v2）
 
-> 本文是 EvolClaw `menu.*` 协议**唯一权威**集成文档。面向客户端开发者（App / Bot / Web UI / CLI）。
+> 本文是历史 v2 版本，已被 [`aun-menu-protocol-dev-guide-v2.2.md`](./aun-menu-protocol-dev-guide-v2.2.md) 取代。当前 slash/menu 权限口径、`agent.reload/update`、`evolclaw.json.owners` 与关系/Agent 默认双层设置均以 v2.2 为准。
+>
+> 本文面向客户端开发者（App / Bot / Web UI / CLI），仅作历史参考。
 > 协议在 AUN `message.send` 之上传输 JSON payload，与文本消息共享同一通道。
 
 最后更新：2026-05-27

@@ -205,16 +205,10 @@ export interface SessionMetadata {
   dispatchModeOverride?: string;   // 用户 /dispatch 命令写入的显式覆盖；undefined = 跟随服务器
   resumeAt?: string;  // /rewind chat 标记的回退点（assistant message uuid）
   lastProactiveFlag?: boolean;  // proactive 模式使用标志位后设置，interactive 切换时注入提示后清除
-  // 群聊话题追踪（responseDepth 决策信号）
-  topicRounds?: number;       // 同话题连续轮次
-  lastTopicHash?: string;     // 上条消息的话题指纹（前 20 字符 hash）
 }
 
 /** Default permission mode applied to new sessions. Change here to affect all roles. */
 export const DEFAULT_PERMISSION_MODE = 'bypass';
-
-/** 群聊响应深度（per-message 瞬时决策，不持久化） */
-export type ResponseDepth = 'lightweight' | 'standard' | 'deep';
 
 export interface ReplyContext {
   sessionId?: string;
@@ -944,7 +938,7 @@ export interface Trigger {
 //   menu.query   → 查询某项当前值
 //   menu.options → 列举某项可选值
 //   menu.update  → 写入新值
-//   menu.action  → 触发动词（stop / restart / new / delete / ...）
+//   menu.action  → 触发动词（stop / restart / new / rename / delete / ...）
 //   menu.response → 统一响应
 
 export interface MenuListRequest {
@@ -980,7 +974,7 @@ export interface MenuActionRequest {
   type: 'menu.action';
   id: string;
   name: string;          // 动词所属 name（如 'session' / 'system'）
-  action: string;        // 'stop' / 'restart' / 'new' / 'delete' / ...
+  action: string;        // 'stop' / 'restart' / 'new' / 'rename' / 'delete' / ...
   // cli/exec 透传约定：args 为 { argv?: string[]; command?: string }
   //   argv    优先，已是数组免分词（推荐，无注入面）
   //   command 退化路径，字符串由 daemon 侧分词（尊重单/双引号，不走 shell）

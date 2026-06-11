@@ -1,8 +1,10 @@
 # AUN Agent 控制面设计方案
 
-**日期**：2026-06-04  
-**状态**：待实现  
+**日期**：2026-06-04
+**状态**：历史方案，已被 2026-06-10 / 2026-06-11 权限对齐口径修订
 **背景**：让 AUN 网络中已授权的客户端（owner）通过纯 AUN menu protocol 管理 daemon 上的 evolagent 生命周期。纯通道协议控制，无 HTTP 协议转换。
+
+> 当前口径更新（2026-06-11）：进程级 daemon 操作使用 `evolclaw.json` 顶层 `owners`，不是 `agents/defaults.json` 的 `defaults.owners`。`agent.create/delete/enable/disable` 属于进程级；`agent.reload` 可由 daemon owner 跨 agent 执行，也可由 agent owner/admin 仅对自身执行；`agent.update` 仍仅 owner。`model` / `chatmode` / `dispatch` / `permission` 均同时存在关系/会话覆盖层和 Agent 默认层，不能全部归为关系级。
 
 ---
 
@@ -12,7 +14,7 @@
 
 - 复用已有 menu protocol 框架（`message-bridge.ts` 的 `handleCustomPayload`）
 - 纯 AUN 通道内协议控制，**无 HTTP 协议转换**（与 ControlTunnel 不同）
-- 授权不依赖 session/channel owner 绑定，直接查 `defaults.owners`
+- 授权不依赖 session/channel owner 绑定，直接查 `evolclaw.json` 顶层 `owners`
 - 支持：创建、删除、启用、停用、列表、详情
 
 **与 ControlTunnel 的区别**：
@@ -32,10 +34,10 @@
 
 | 层级 | 操作对象 | menu name | 鉴权来源 |
 |---|---|---|---|
-| **进程级** | daemon 进程 / agent 集合生命周期 | `system`、`agent`（★新增） | `defaults.owners` |
-| **agent 级** | 单个 agent 全局配置 | `baseagent`、`pwd` | `resolveIdentity` |
-| **关系级** | 对端关系（按 peerId） | `model`、`effort`、`perm`、`trigger` | `resolveIdentity` |
-| **会话级** | 某个会话参数 | `chatmode`、`session`、`dispatch`、`activity` | `resolveIdentity` |
+| **进程级** | daemon 进程 / agent 集合生命周期 | `system`、`agent.create/delete/enable/disable` | `evolclaw.json.owners` |
+| **本 agent 管理** | 当前 channel 绑定的 agent 自管理 | `agent.reload/update` | `resolveIdentity`（`reload` owner/admin；`update` owner-only） |
+| **Agent 默认配置** | 单个 agent 的后续默认参数 | `baseagent`、`pwd`、`model`、`effort`、`chatmode`、`dispatch`、`permission` | `resolveIdentity` |
+| **关系级 / 会话级覆盖** | 对端关系、群 venue、主会话或话题会话参数 | `session`、`trigger`、`model`、`effort`、`chatmode`、`dispatch`、`permission`、`file` | `resolveIdentity` |
 
 **关系级已有的底层基础**（暂未暴露 menu 操作，供未来参考）：
 - `PeerIdentityCache`（`src/core/relation/peer-identity.ts`）——按 peerId 缓存对端身份
@@ -43,13 +45,13 @@
 - `peerKey` 格式（`src/core/relation/peer-key.ts`）
 - trigger 的 peerId scoping（`src/core/trigger/manager.ts`）
 
-**本次代码实际改动**：仅两个进程级 name。agent/关系/会话级的归类是概念框架，本次不重构其鉴权。
+**本次代码实际改动**：本设计最初只覆盖进程级 `agent`/`system` 与 `trigger` menu 入口。后续权限对齐已补充本 agent 自管理、Agent 默认配置与关系/会话覆盖的层级区分；最新完整协议以 `docs/aun-menu-protocol-dev-guide-v2.2.md` 为准。
 
 ---
 
 ## 三、Menu Protocol 方法语义
 
-四个方法的语义边界（来自 `command-handler.ts` + `message-bridge.ts`）：
+四个方法的语义边界（来自 `src/core/command/menu-handler.ts` + `src/core/message/message-bridge.ts`）：
 
 | 消息类型 | 方法 | 语义 | 判断标准 |
 |---|---|---|---|
@@ -155,42 +157,42 @@
 
 ## 四、授权机制
 
-### `DefaultsConfig` 新增 `owners` 字段
+### 进程级 owners 字段
+
+当前实现中，进程级 owners 位于 `evolclaw.json` 顶层；`agents/defaults.json` 不再持有 `owners`。
 
 ```typescript
-// src/types.ts — DefaultsConfig
-export interface DefaultsConfig {
+// src/types.ts — EvolclawConfig
+export interface EvolclawConfig {
   // ...已有字段...
-  /** defaults.owners 提供全局 owner 基础（AID），与 per-agent owners 数组合并去重。
-   *  用于进程级 menu 操作（system / agent）鉴权：仅名单内 AID 可执行。 */
+  /** 顶层 owners 是 AUN AID 列表，用于进程级 menu/slash 操作鉴权。 */
   owners?: string[];
-  admins?: string[];
   // ...
 }
 ```
 
-`defaults.json` 示例：
+`evolclaw.json` 示例：
 ```json
 {
   "owners": ["eleans-2022.agentid.pub"],
-  "admins": ["elean.agentid.pub"]
+  "agentsDir": "~/.evolclaw/agents"
 }
 ```
 
-机制作用域与 `admins` 相同：全局基础 + 与 per-agent `owners` 合并去重。
+Agent 自身的 `owners` / `admins` 仍在 `agents/<aid>/config.json` 中，供 `resolveIdentity()` 判断当前 agent channel 的关系级身份。
 
 ### 鉴权流程（进程级）
 
 ```
 menu.action/query (name="agent" 或 "system") 到达 CommandHandler
   ↓ 发送方 AID = peerId（AUN 协议必带，见下）
-  ↓ owners = loadDefaults()?.owners ?? []
+  ↓ owners = loadEvolclawConfig()?.owners ?? []
   ↓ owners.includes(peerId)?
   ├─ 否 → { error: { code: "FORBIDDEN" } }
   └─ 是 → 执行操作
 ```
 
-**关键约束**：进程级鉴权**不读** session/channel owner 绑定（`agentRegistry.getOwner`），**不调** `resolveIdentity`。直接比对 `defaults.owners` 与发送方 AID。无论是否有会话上下文，鉴权结果一致。
+**关键约束**：进程级鉴权**不读** session/channel owner 绑定（`agentRegistry.getOwner`），**不调** `resolveIdentity`。直接比对 `evolclaw.json.owners` 与发送方 AID。无论是否有会话上下文，鉴权结果一致。
 
 ### peerId 始终可得（AUN 协议保证）
 
@@ -198,7 +200,7 @@ AUN 的 `message.received` / `group.message_created` 事件永远携带 `msg.fro
 
 ### `name=system` 迁移
 
-现有 `system`（restart/upgrade/cli）在 `execMenuAction/Query` 里用 `resolveIdentity` 判 `role==='owner'`。本次将其与 `agent` 对齐，统一改为 `defaults.owners` 鉴权。这是顺带的一致性修复。
+现有 `system`（restart/upgrade/cli）在早期实现中用 `resolveIdentity` 判 `role==='owner'`。当前已与进程级 `agent` 对齐，统一改为 `evolclaw.json.owners` 鉴权。这是顺带的一致性修复。
 
 ---
 
@@ -212,6 +214,8 @@ AUN 的 `message.received` / `group.message_created` 事件永远携带 `msg.fro
 | delete | `agentDelete` | `(aid, purge=false)` |
 | enable | `agentEnable` | `(aid)` |
 | disable | `agentDisable` | `(aid)` |
+| reload | `agentReload` | `(aid)` |
+| update | agent config patch 保存入口 | `(aid, patch)` |
 | list | `agentList` | `()` |
 | show | `agentShow` | `(aid)` |
 
@@ -250,9 +254,10 @@ AUN 的 `message.received` / `group.message_created` 事件永远携带 `msg.fro
 
 | 文件 | 改动 |
 |---|---|
-| `src/types.ts` | `DefaultsConfig` 新增 `owners?: string[]` |
+| `src/types.ts` | `EvolclawConfig` 顶层 `owners?: string[]` 用于进程级鉴权；`DefaultsConfig` 不持有 owners |
 | `src/core/message/message-bridge.ts` | `MENU_NAME_MAP` 加 `agent`、`trigger`（或直接处理） |
-| `src/core/command-handler.ts` | `execMenuAction`/`execMenuQuery` 新增 `/agent`、`/trigger` 分支；进程级（`/agent`+`/system`）鉴权改为 `defaults.owners`；`/trigger` 复用现有 `handleTrigger` 内部逻辑 |
+| `src/core/command/menu-handler.ts` | `execMenuAction`/`execMenuQuery` 新增 `/agent`、`/trigger` 分支；进程级（`/agent`+`/system`）鉴权使用 `evolclaw.json.owners`；`/trigger` 复用现有底层逻辑 |
+| `src/core/command/slash-handler.ts` | `/restart` 与跨 agent `/reload` 使用 daemon owner；本 agent `/reload` 允许 owner/admin |
 | `src/cli/agent.ts` | 复用已导出的 `agentCreateNonInteractive` / `agentDelete` / `agentEnable` / `agentDisable` / `agentList` / `agentShow` |
 
 ---
@@ -271,7 +276,7 @@ AUN 的 `message.received` / `group.message_created` 事件永远携带 `msg.fro
 
 | 测试 | 内容 |
 |---|---|
-| 鉴权单测 | owners 名单内/外 AID 的放行与拒绝 |
+| 鉴权单测 | `evolclaw.json.owners` 名单内/外 AID 的放行与拒绝 |
 | create 单测 | 必填校验、兜底填充、CONFLICT |
 | delete/enable/disable 单测 | NOT_FOUND、正常路径 |
 | list/show 单测 | 返回结构 |
@@ -284,13 +289,13 @@ AUN 的 `message.received` / `group.message_created` 事件永远携带 `msg.fro
 
 | 模块 | 本次实现 |
 |---|---|
-| `DefaultsConfig.owners` 字段 | ✅ |
+| `evolclaw.json` 顶层 `owners` 字段 | ✅ |
 | 进程级鉴权（owners，含 system 迁移） | ✅ |
-| `name=agent` 的 create/delete/enable/disable/list/show | ✅ |
+| `name=agent` 的 create/delete/enable/disable/list/show/reload/update | ✅ |
 | `name=trigger` 的 set/update/cancel/query（补 menu protocol） | ✅ |
 | 协议消息解析与 menu.response 回发 | ✅ |
 | 单元测试 | ✅ |
-| agent/关系/会话级鉴权重构 | ❌ 不在本次范围（概念框架记录供未来） |
+| Agent 默认层与关系/会话覆盖层区分 | ✅ 已由 2026-06-11 权限对齐口径补充 |
 
 ---
 

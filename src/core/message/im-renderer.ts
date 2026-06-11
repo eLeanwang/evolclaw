@@ -2,26 +2,10 @@ import type { AgentEvent } from '../../agents/runner-types.js';
 import type { ChannelAdapter, OutboundEnvelope, OutboundPayload, ReplyContext, ThoughtItem } from '../../types.js';
 import { logger } from '../../utils/logger.js';
 import { summarizeToolInput } from '../permission.js';
+import { CONTEXT_TOO_LONG_PATTERN, isContextTooLongText } from '../../utils/error-utils.js';
 import fs from 'fs';
 import path from 'path';
 import { resolvePaths } from '../../paths.js';
-
-/**
- * 检测是否为上下文过长错误
- * 统一的检测逻辑，覆盖所有已知的错误文本模式
- */
-function isContextTooLongError(text: string): boolean {
-  if (!text) return false;
-  const lower = text.toLowerCase();
-  return (
-    lower.includes('prompt is too long') ||
-    lower.includes('input is too long') ||
-    lower.includes('context too long') ||
-    lower.includes('context limit') ||
-    lower.includes('context_length_exceeded') ||
-    text.includes('上下文过长')
-  );
-}
 
 let diagStream: fs.WriteStream | null = null;
 function getDiagStream(): fs.WriteStream {
@@ -364,7 +348,7 @@ export class IMRenderer {
     if (isFinal) {
       // 上下文错误短语过滤：剔除错误关键词本身，保留前后内容。
       // 只在最终 flush 清理，避免中间定时 flush trim 掉 Markdown 块级换行。
-      const ctxErrPattern = /prompt is too long|input is too long|context too long|context limit|context_length_exceeded|上下文过长/gi;
+      const ctxErrPattern = new RegExp(CONTEXT_TOO_LONG_PATTERN.source, 'gi');
       const stripCtxErr = (s: string) => s.replace(ctxErrPattern, '').trim();
       this.textBuffer = stripCtxErr(this.textBuffer);
       this.allText = stripCtxErr(this.allText);
@@ -571,15 +555,15 @@ export class IMRenderer {
 
       case 'error': {
         // 上下文过长错误不输出（留给外层 auto-compact 处理）
-        if (isContextTooLongError(event.error || '')) return null;
+        if (isContextTooLongText(event.error || '')) return null;
         return { kind: 'notice', text: event.error, severity: 'warn' };
       }
 
       case 'complete': {
         // 上下文过长错误不输出（留给外层 auto-compact 处理）
         const hasContextError = event.terminalReason === 'prompt_too_long'
-          || isContextTooLongError(event.errors?.join(' ') || '')
-          || isContextTooLongError(event.result || '');
+          || isContextTooLongText(event.errors?.join(' ') || '')
+          || isContextTooLongText(event.result || '');
         if (event.isError && hasContextError) {
           return null;
         }

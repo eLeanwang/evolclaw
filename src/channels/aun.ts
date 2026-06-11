@@ -109,6 +109,13 @@ export interface AUNMessageHandler {
   (options: AUNDispatchOptions): Promise<void>;
 }
 
+type DurablePayloadSendResult = {
+  ok: boolean;
+  messageId?: string;
+  result?: any;
+  encrypt?: boolean;
+};
+
 /**
  * 把 AUNChannel 投递的 opts 映射成渠道无关的 InboundMessage。
  *
@@ -608,6 +615,7 @@ export class AUNChannel {
   // AID 连接状态（供 status 命令聚合展示）
   private aidState: AidConnectionState;
   private aidStatsCollector?: AidStatsCollector;
+  private outboxInFlight = new Set<string>();
 
   constructor(private config: AUNConfig) {
     this.agentDir = agentDirPath(config.aid);
@@ -2166,6 +2174,210 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     this.recallHandler = handler;
   }
 
+  private async withOutboxInFlight<T>(
+    entry: outbox.OutboxEntry,
+    run: () => Promise<T>,
+    busyValue: T,
+  ): Promise<T> {
+    if (this.outboxInFlight.has(entry.id)) return busyValue;
+    this.outboxInFlight.add(entry.id);
+    try {
+      return await run();
+    } finally {
+      this.outboxInFlight.delete(entry.id);
+    }
+  }
+
+  private messageIdFromSendResult(result: any): string | null {
+    return result?.message?.message_id ?? result?.message_id ?? null;
+  }
+
+  private payloadLogText(payload: Record<string, any>, contentKind?: outbox.OutboxContentKind): string {
+    if (typeof payload.text === 'string' && payload.text) return payload.text;
+    switch (contentKind ?? payload.type) {
+      case 'image':
+        return payload.alt ? `[image] ${payload.alt}` : '[image]';
+      case 'card':
+      case 'action_card':
+        return payload.title ? `[card] ${payload.title}` : '[card]';
+      case 'file':
+        return payload.filename ? `[file] ${payload.filename}` : '[file]';
+      default:
+        return `[${String(payload.type ?? contentKind ?? 'payload')}]`;
+    }
+  }
+
+  private payloadByteLength(payload: Record<string, any>, logText: string): number {
+    if (payload.type === 'image' && typeof payload.data_base64 === 'string') {
+      return Buffer.byteLength(payload.data_base64, 'utf-8');
+    }
+    return Buffer.byteLength(logText, 'utf-8');
+  }
+
+  private applyReplyContextToPayload(payload: Record<string, any>, context?: ReplyContext): Record<string, any> {
+    const finalPayload: Record<string, any> = { ...payload };
+    if (context?.threadId && !finalPayload.thread_id) finalPayload.thread_id = context.threadId;
+    if (context?.metadata?.taskId && !finalPayload.task_id) finalPayload.task_id = context.metadata.taskId;
+    if (context?.metadata?.chatmode && !finalPayload.chatmode) finalPayload.chatmode = context.metadata.chatmode;
+    return finalPayload;
+  }
+
+  private registerCardPostSend(messageId: string, action: outbox.OutboxPostSendAction): void {
+    if (action.type !== 'register_interaction_card') return;
+    this.cardMessageIdMap.set(messageId, {
+      requestId: action.requestId,
+      isCommandCard: action.isCommandCard,
+      initiatorAid: action.initiatorAid,
+    });
+    this.ownedCardMsgIds.add(messageId);
+    const now = Date.now();
+    const mapTtl = action.expiresAt && action.expiresAt > now
+      ? action.expiresAt - now
+      : 20 * 60 * 1000;
+    setTimeout(() => this.cardMessageIdMap.delete(messageId), mapTtl);
+    setTimeout(() => this.ownedCardMsgIds.delete(messageId), 24 * 60 * 60 * 1000);
+  }
+
+  private runPostSend(entry: outbox.OutboxEntry, messageId: string): void {
+    if (!entry.postSend) return;
+    if (entry.postSend.type === 'register_interaction_card') {
+      this.registerCardPostSend(messageId, entry.postSend);
+    }
+  }
+
+  private async sendAunPayload(
+    channelId: string,
+    payload: Record<string, any>,
+    context: ReplyContext | undefined,
+    label: string,
+  ): Promise<DurablePayloadSendResult> {
+    if (!this.client || !this.connected) return { ok: false };
+
+    const isGroup = this.isGroupId(channelId);
+    const targetAid = channelId;
+    const encryptTarget = isGroup ? channelId : targetAid;
+    const encrypt = context?.metadata?.encrypted != null
+      ? !!(context.metadata.encrypted)
+      : this.shouldEncrypt(encryptTarget);
+    const method = isGroup ? 'group.send' : 'message.send';
+    const params: Record<string, any> = { payload, encrypt };
+    if (isGroup) params.group_id = channelId;
+    else params.to = targetAid;
+
+    const callOnce = async (sendParams: Record<string, any>, fallback: boolean): Promise<DurablePayloadSendResult> => {
+      const result = fallback
+        ? await this.client!.call(method, sendParams)
+        : await this.callAndTrace<any>(method, sendParams);
+      const mid = this.messageIdFromSendResult(result);
+      if (!mid) {
+        logger.warn(`${this.logPrefix()} ${method}${fallback ? ' fallback' : ''} (${label}) returned no message_id: ${JSON.stringify(result)}`);
+        return { ok: false, result, encrypt: !!sendParams.encrypt };
+      }
+      return { ok: true, messageId: mid, result, encrypt: !!sendParams.encrypt };
+    };
+
+    try {
+      return await callOnce(params, false);
+    } catch (e) {
+      if (encrypt && e instanceof E2EEError) {
+        this.peerE2ee.set(encryptTarget, { ok: false, ts: Date.now() });
+        logger.warn(`${this.logPrefix()} E2EE ${label} send failed to ${channelId}, retrying plaintext: ${e}`);
+        const fallbackParams = { ...params, encrypt: false };
+        try {
+          this.trace('OUT', `${method}.${label}.fallback`, fallbackParams);
+          const sent = await callOnce(fallbackParams, true);
+          this.trace('OUT', `${method}.${label}.fallback.${sent.ok ? 'ok' : 'missing_id'}`, { message_id: sent.messageId });
+          return sent;
+        } catch (e2) {
+          this.trace('OUT', `${method}.${label}.fallback.error`, { channelId, error: String(e2) });
+          logger.error(`${this.logPrefix()} Plaintext ${label} fallback also failed to ${channelId}: ${e2}`);
+          return { ok: false };
+        }
+      }
+      this.trace('OUT', `${method}.${label}.error`, { channelId, error: String(e) });
+      logger.error(`${this.logPrefix()} ${label} send failed to ${channelId}: ${e}`);
+      return { ok: false };
+    }
+  }
+
+  private recordDurableOutbound(
+    channelId: string,
+    payload: Record<string, any>,
+    messageId: string,
+    encrypt: boolean,
+    context: ReplyContext | undefined,
+    isGroup: boolean,
+    contentKind: outbox.OutboxContentKind | undefined,
+    logText: string,
+    result: any,
+  ): void {
+    const kind = contentKind ?? (payload.type as outbox.OutboxContentKind | undefined) ?? 'custom';
+    appendAidEvent({
+      ts: Date.now(),
+      iso: new Date().toISOString(),
+      event: 'message_out',
+      aid: this.config.aid,
+      to: channelId,
+      msgId: messageId,
+      kind,
+      len: Buffer.byteLength(logText, 'utf-8'),
+      ...(isGroup && { groupId: channelId }),
+    });
+    this.aidStatsCollector?.recordOutbound(
+      this.config.aid,
+      channelId,
+      this.payloadByteLength(payload, logText),
+      logText,
+      false,
+      encrypt,
+      context?.metadata?.chatmode as string | undefined,
+    );
+    const source = (context?.metadata?.source as 'daemon' | 'cli' | 'msg' | 'ctl' | undefined) ?? 'daemon';
+    this.appendOutboundJsonl(channelId, logText, messageId, encrypt, context, isGroup, 'text', source);
+    this.forwardOutbound(result);
+  }
+
+  async sendContentPayload(channelId: string, payload: Record<string, any>, opts: {
+    contentKind: outbox.OutboxContentKind;
+    context?: ReplyContext;
+    logText?: string;
+    ttl?: number;
+    postSend?: outbox.OutboxPostSendAction;
+  }): Promise<{ messageId?: string; queued?: boolean }> {
+    const finalPayload = this.applyReplyContextToPayload(payload, opts.context);
+    const logText = opts.logText ?? this.payloadLogText(finalPayload, opts.contentKind);
+    const entry = outbox.enqueue(this.config.aid, {
+      channelId,
+      type: 'payload',
+      contentKind: opts.contentKind,
+      payload: finalPayload,
+      context: opts.context,
+      logText,
+      ttl: opts.ttl,
+      postSend: opts.postSend,
+    });
+    logger.debug(`${this.logPrefix()} Outbox enqueued payload: id=${entry.id} kind=${opts.contentKind} channel=${channelId} text=${logText.slice(0, 40)}`);
+
+    if (!this.connected || !this.client) {
+      logger.warn(`${this.logPrefix()} Not connected, payload queued in outbox (id=${entry.id}, kind=${opts.contentKind}). Triggering reconnect.`);
+      if (!this.reconnectTimer && !this.client) {
+        this.initClient().catch(e => logger.error(`${this.logPrefix()} Reconnect from sendContentPayload failed: ${e}`));
+      }
+      return { queued: true };
+    }
+
+    const result = await this.withOutboxInFlight(
+      entry,
+      () => this.deliverPayloadEntry(entry),
+      { ok: false } satisfies DurablePayloadSendResult,
+    );
+    if (result.ok) {
+      outbox.remove(this.config.aid, entry.id);
+      return { messageId: result.messageId };
+    }
+    return { queued: true };
+  }
+
   async sendMessage(channelId: string, text: string, context?: ReplyContext): Promise<void> {
     if (!text?.trim()) {
       logger.warn(`${this.logPrefix()} Attempted to send empty message, skipping`);
@@ -2204,7 +2416,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     }
 
     // Attempt immediate delivery
-    const ok = await this.deliverTextEntry(entry);
+    const ok = await this.withOutboxInFlight(entry, () => this.deliverTextEntry(entry), false);
     if (ok) {
       outbox.remove(this.config.aid, entry.id);
     }
@@ -2291,10 +2503,11 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
         if (!mid) {
           const dispatchStatus = result?.message_dispatch?.status;
           if (dispatchStatus === 'debounced' || dispatchStatus === 'dispatched') {
-            logger.info(`${this.logPrefix()} group.send ok (${dispatchStatus}): group=${channelId} encrypt=${encrypt} text=${finalText.slice(0, 60)}`);
+            logger.warn(`${this.logPrefix()} group.send returned ${dispatchStatus} without message_id; keeping outbox entry: group=${channelId} encrypt=${encrypt} text=${finalText.slice(0, 60)}`);
           } else {
             logger.warn(`${this.logPrefix()} group.send returned no message_id: ${JSON.stringify(result)}`);
           }
+          return false;
         } else {
           logger.info(`${this.logPrefix()} group.send ok: group=${channelId} mid=${mid} encrypt=${encrypt} text=${finalText.slice(0, 60)}`);
           appendAidEvent({ ts: Date.now(), iso: new Date().toISOString(), event: 'message_out', aid: this.config.aid, to: channelId, msgId: mid, kind: 'text', len: finalText.length, groupId: channelId });
@@ -2308,6 +2521,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
         const result = await this.callAndTrace<any>('message.send', params);
         if (!result || !result.message_id) {
           logger.warn(`${this.logPrefix()} message.send returned no message_id: ${JSON.stringify(result)}`);
+          return false;
         } else {
           logger.info(`${this.logPrefix()} message.send ok: to=${this.peerLabel(targetAid)} mid=${result.message_id} encrypt=${encrypt} text=${finalText.slice(0, 60)}`);
           appendAidEvent({ ts: Date.now(), iso: new Date().toISOString(), event: 'message_out', aid: this.config.aid, to: targetAid, msgId: result.message_id, kind: 'text', len: finalText.length });
@@ -2327,18 +2541,28 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
           if (isGroup) {
             this.trace('OUT', 'group.send.fallback', params);
             const result = await this.client!.call('group.send', params);
-            this.trace('OUT', 'group.send.fallback.ok', { message_id: (result as any)?.message?.message_id ?? (result as any)?.message_id });
-            if (!result || !(result as any).message_id) {
+            const mid = this.messageIdFromSendResult(result);
+            this.trace('OUT', 'group.send.fallback.ok', { message_id: mid });
+            if (!mid) {
               logger.warn(`${this.logPrefix()} group.send fallback returned no message_id: ${JSON.stringify(result)}`);
+              return false;
             }
+            appendAidEvent({ ts: Date.now(), iso: new Date().toISOString(), event: 'message_out', aid: this.config.aid, to: channelId, msgId: mid, kind: 'text', len: finalText.length, groupId: channelId });
+            this.aidStatsCollector?.recordOutbound(this.config.aid, channelId, Buffer.byteLength(finalText, 'utf-8'), finalText, false, false, context?.metadata?.chatmode as string | undefined);
+            this.appendOutboundJsonl(channelId, finalText, mid, false, context, true, 'text', source);
             this.forwardOutbound(result as any);
           } else {
             this.trace('OUT', 'message.send.fallback', params);
             const result = await this.client!.call('message.send', params);
-            this.trace('OUT', 'message.send.fallback.ok', { message_id: (result as any)?.message_id });
-            if (!result || !(result as any).message_id) {
+            const mid = (result as any)?.message_id;
+            this.trace('OUT', 'message.send.fallback.ok', { message_id: mid });
+            if (!result || !mid) {
               logger.warn(`${this.logPrefix()} message.send fallback returned no message_id: ${JSON.stringify(result)}`);
+              return false;
             }
+            appendAidEvent({ ts: Date.now(), iso: new Date().toISOString(), event: 'message_out', aid: this.config.aid, to: targetAid, msgId: mid, kind: 'text', len: finalText.length });
+            this.aidStatsCollector?.recordOutbound(this.config.aid, targetAid, Buffer.byteLength(finalText, 'utf-8'), finalText, false, false, context?.metadata?.chatmode as string | undefined);
+            this.appendOutboundJsonl(targetAid, finalText, mid, false, context, false, 'text', source);
             this.forwardOutbound(result as any);
           }
           return true;
@@ -2353,6 +2577,39 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
         return false;
       }
     }
+  }
+
+  private async deliverPayloadEntry(entry: outbox.OutboxEntry): Promise<DurablePayloadSendResult> {
+    const channelId = entry.channelId;
+    const payload = entry.payload;
+    if (!payload) {
+      logger.warn(`${this.logPrefix()} deliverPayloadEntry: missing payload (outbox id=${entry.id})`);
+      return { ok: true };
+    }
+
+    const contentKind = entry.contentKind;
+    const logText = entry.logText ?? this.payloadLogText(payload, contentKind);
+    const context = entry.context;
+    logger.info(`${this.logPrefix()} deliverPayloadEntry: id=${entry.id} kind=${contentKind ?? payload.type ?? 'payload'} channelId=${channelId} thread_id=${payload.thread_id ?? 'none'} task_id=${payload.task_id ?? 'none'} textLen=${logText.length}`);
+
+    const sent = await this.sendAunPayload(channelId, payload, context, `${contentKind ?? payload.type ?? 'payload'}`);
+    if (!sent.ok || !sent.messageId) return sent;
+
+    const isGroup = this.isGroupId(channelId);
+    logger.info(`${this.logPrefix()} durable payload sent: kind=${contentKind ?? payload.type ?? 'payload'} target=${isGroup ? channelId : this.peerLabel(channelId)} mid=${sent.messageId} encrypt=${sent.encrypt} text=${logText.slice(0, 60)}`);
+    this.recordDurableOutbound(
+      channelId,
+      payload,
+      sent.messageId,
+      !!sent.encrypt,
+      context,
+      isGroup,
+      contentKind,
+      logText,
+      sent.result,
+    );
+    this.runPostSend(entry, sent.messageId);
+    return sent;
   }
 
   /** 出站消息写入 messages.jsonl（message.send/group.send/thought.put 成功后调用） */
@@ -2529,7 +2786,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       return;
     }
 
-    const ok = await this.deliverFileEntry(entry);
+    const ok = await this.withOutboxInFlight(entry, () => this.deliverFileEntry(entry), false);
     if (ok) {
       outbox.remove(this.config.aid, entry.id);
     }
@@ -2610,6 +2867,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       const params: Record<string, any> = { payload: filePayload, encrypt };
 
       let sendResult: any = null;
+      let sentMid: string | null = null;
       try {
         if (isGroup) {
           params.group_id = channelId;
@@ -2617,18 +2875,22 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
           const result = await this.client!.call('group.send', params);
           sendResult = result;
           const fileMid = (result as any)?.message?.message_id ?? (result as any)?.message_id;
+          sentMid = fileMid ?? null;
           this.trace('OUT', 'group.send.file.ok', { message_id: fileMid });
           if (!fileMid) {
             logger.warn(`${this.logPrefix()} group.send.file returned no message_id: ${JSON.stringify(result)}`);
+            return false;
           }
         } else {
           params.to = fileTargetAid;
           this.trace('OUT', 'message.send.file', params);
           const result = await this.client!.call('message.send', params);
           sendResult = result;
-          this.trace('OUT', 'message.send.file.ok', { message_id: (result as any)?.message_id });
-          if (!result || !(result as any).message_id) {
+          sentMid = (result as any)?.message_id ?? null;
+          this.trace('OUT', 'message.send.file.ok', { message_id: sentMid });
+          if (!result || !sentMid) {
             logger.warn(`${this.logPrefix()} message.send.file returned no message_id: ${JSON.stringify(result)}`);
+            return false;
           }
         }
       } catch (sendErr) {
@@ -2645,17 +2907,21 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
             const result = await this.client!.call('group.send', params);
             sendResult = result;
             const fbMid = (result as any)?.message?.message_id ?? (result as any)?.message_id;
+            sentMid = fbMid ?? null;
             this.trace('OUT', 'group.send.file.fallback.ok', { message_id: fbMid });
             if (!fbMid) {
               logger.warn(`${this.logPrefix()} group.send.file fallback returned no message_id: ${JSON.stringify(result)}`);
+              return false;
             }
           } else {
             this.trace('OUT', 'message.send.file.fallback', params);
             const result = await this.client!.call('message.send', params);
             sendResult = result;
-            this.trace('OUT', 'message.send.file.fallback.ok', { message_id: (result as any)?.message_id });
-            if (!result || !(result as any).message_id) {
+            sentMid = (result as any)?.message_id ?? null;
+            this.trace('OUT', 'message.send.file.fallback.ok', { message_id: sentMid });
+            if (!result || !sentMid) {
               logger.warn(`${this.logPrefix()} message.send.file fallback returned no message_id: ${JSON.stringify(result)}`);
+              return false;
             }
           }
         } else {
@@ -2663,6 +2929,13 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
         }
       }
       logger.info(`${this.logPrefix()} File sent: ${filename} (${formatSize(stat.size)}) → ${channelId}`);
+      if (sentMid) {
+        const fileText = filePayload.text;
+        appendAidEvent({ ts: Date.now(), iso: new Date().toISOString(), event: 'message_out', aid: this.config.aid, to: channelId, msgId: sentMid, kind: 'file', len: fileText.length, ...(isGroup && { groupId: channelId }) });
+        this.aidStatsCollector?.recordOutbound(this.config.aid, channelId, Buffer.byteLength(fileText, 'utf-8'), fileText, false, !!params.encrypt, context?.metadata?.chatmode as string | undefined);
+        const source = (context?.metadata?.source as 'daemon' | 'cli' | 'msg' | 'ctl' | undefined) ?? 'daemon';
+        this.appendOutboundJsonl(channelId, fileText, sentMid, !!params.encrypt, context, isGroup, 'text', source);
+      }
       if (sendResult) this.forwardOutbound(sendResult);
       return true;
     } catch (e) {
@@ -2699,9 +2972,16 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     logger.info(`${this.logPrefix()} Draining outbox...`);
     const result = await outbox.drain(this.config.aid, async (entry) => {
       if (entry.type === 'text') {
-        return this.deliverTextEntry(entry);
+        return this.withOutboxInFlight(entry, () => this.deliverTextEntry(entry), false);
       } else if (entry.type === 'file') {
-        return this.deliverFileEntry(entry);
+        return this.withOutboxInFlight(entry, () => this.deliverFileEntry(entry), false);
+      } else if (entry.type === 'payload') {
+        const sent = await this.withOutboxInFlight(
+          entry,
+          () => this.deliverPayloadEntry(entry),
+          { ok: false } satisfies DurablePayloadSendResult,
+        );
+        return sent.ok;
       }
       return true; // unknown type, discard
     });
@@ -3054,9 +3334,13 @@ export class AUNChannelPlugin implements ChannelPlugin {
           case 'result.image': {
             const buf = payload.data as Buffer;
             const b64 = buf.toString('base64');
-            await channel.sendStructured(channelId, {
+            await channel.sendContentPayload(channelId, {
               type: 'image', alt: payload.alt, data_base64: b64, mime_type: payload.mimeType,
-            }, replyCtx);
+            }, {
+              contentKind: 'image',
+              context: replyCtx,
+              logText: payload.alt ? `[image] ${payload.alt}` : '[image]',
+            });
             return;
           }
           case 'activity.batch': {
@@ -3101,15 +3385,18 @@ export class AUNChannelPlugin implements ChannelPlugin {
               if (action.body) aunCard.description = action.body;
               if (req.initiatorId && channel.isGroupId(channelId)) aunCard.initiator = req.initiatorId;
               if (replyCtx?.threadId) aunCard.thread_id = replyCtx.threadId;
-              const msgId = await channel.sendStructured(channelId, aunCard, replyCtx);
-              if (msgId) {
-                channel.cardMessageIdMap.set(msgId, { requestId: req.id, isCommandCard: false, initiatorAid: req.initiatorId });
-                channel.ownedCardMsgIds.add(msgId);
-                setTimeout(() => channel.cardMessageIdMap.delete(msgId), 20 * 60 * 1000);
-                // ownedCardMsgIds 比 cardMessageIdMap 长寿（区分"我发的已过期"vs"他人的卡"），
-                // 但仍需上界：24h 后清理，防止长进程无限增长。
-                setTimeout(() => channel.ownedCardMsgIds.delete(msgId), 24 * 60 * 60 * 1000);
-              }
+              await channel.sendContentPayload(channelId, aunCard, {
+                contentKind: 'card',
+                context: replyCtx,
+                logText: action.title ? `[card] ${action.title}` : '[card]',
+                postSend: {
+                  type: 'register_interaction_card',
+                  requestId: req.id,
+                  isCommandCard: false,
+                  initiatorAid: req.initiatorId,
+                  expiresAt: Date.now() + 20 * 60 * 1000,
+                },
+              });
             } else if (req.kind.kind === 'command-card') {
               const card = req.kind;
               const aunCard: Record<string, any> = {
@@ -3121,15 +3408,18 @@ export class AUNChannelPlugin implements ChannelPlugin {
               };
               if (card.body) aunCard.description = card.body;
               if (replyCtx?.threadId) aunCard.thread_id = replyCtx.threadId;
-              const msgId = await channel.sendStructured(channelId, aunCard, replyCtx);
-              if (msgId) {
-                channel.cardMessageIdMap.set(msgId, { requestId: req.id, isCommandCard: true, initiatorAid: req.initiatorId });
-                channel.ownedCardMsgIds.add(msgId);
-                setTimeout(() => channel.cardMessageIdMap.delete(msgId), 20 * 60 * 1000);
-                // ownedCardMsgIds 比 cardMessageIdMap 长寿（区分"我发的已过期"vs"他人的卡"），
-                // 但仍需上界：24h 后清理，防止长进程无限增长。
-                setTimeout(() => channel.ownedCardMsgIds.delete(msgId), 24 * 60 * 60 * 1000);
-              }
+              await channel.sendContentPayload(channelId, aunCard, {
+                contentKind: 'card',
+                context: replyCtx,
+                logText: card.title ? `[card] ${card.title}` : '[card]',
+                postSend: {
+                  type: 'register_interaction_card',
+                  requestId: req.id,
+                  isCommandCard: true,
+                  initiatorAid: req.initiatorId,
+                  expiresAt: Date.now() + 20 * 60 * 1000,
+                },
+              });
             } else if (payload.fallbackText) {
               await channel.sendMessage(channelId, payload.fallbackText, replyCtx);
             }
