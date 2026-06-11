@@ -859,7 +859,7 @@ export type ThoughtItem =
 
 export type OutboundPayload =
   | { kind: 'result.text'; text: string; isFinal: boolean; format?: 'markdown' | 'plain' }
-  | { kind: 'result.file'; filePath: string; fileName?: string; targetChannel?: string }
+  | { kind: 'result.file'; filePath: string; fileName?: string; targetChannel?: string; correlationId?: string }
   | { kind: 'result.image'; data: Buffer; mimeType?: string; alt?: string }
   | { kind: 'result.error'; text: string; reason?: string }
   | { kind: 'activity.batch'; items: ThoughtItem[] }

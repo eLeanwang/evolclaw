@@ -424,6 +424,28 @@ tr:hover td { background: var(--bg2); }
 .card-label { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 4px; }
 .card-val { font-size: 13px; color: var(--fg); }
 
+/* Agent 健康卡片网格 */
+.agent-health-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 10px;
+}
+.agent-health-card {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+.ahc-head { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
+.ahc-aid { font-weight: 600; font-size: 13px; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ahc-status { margin-left: auto; font-size: 11px; color: var(--dim); }
+.ahc-row { display: flex; gap: 8px; font-size: 12px; margin: 3px 0; }
+.ahc-k { color: var(--dim); width: 32px; flex-shrink: 0; }
+.ahc-v { color: var(--fg); flex: 1; min-width: 0; }
+.ahc-path { font-family: var(--mono, ui-monospace, monospace); color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ch-row { line-height: 1.6; }
+.ahc-err { margin-top: 6px; font-size: 12px; color: var(--red); white-space: normal; word-break: break-word; }
+
 /* ── Triggers 页 ── */
 .trig-layout { display: flex; height: 100%; overflow: hidden; }
 .trig-agents-col { width: 200px; border-right: 1px solid var(--border); flex-shrink: 0; overflow-y: auto; }

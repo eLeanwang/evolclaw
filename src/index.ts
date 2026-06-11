@@ -21,7 +21,7 @@ import { MessageProcessor, buildEnvelope } from './core/message/message-processo
 import { MessageQueue } from './core/message/message-queue.js';
 import { MessageBridge } from './core/message/message-bridge.js';
 import { MessageCache } from './core/message/message-cache.js';
-import { CommandHandler, isProcessLevelOwner } from './core/command-handler.js';
+import { CommandHandler, isProcessLevelOwner } from './core/command/command-handler.js';
 import { EventBus, GatewayEvent } from './core/event-bus.js';
 import { StatsCollector } from './utils/stats.js';
 import { AidStatsCollector } from './utils/stats.js';
@@ -63,6 +63,11 @@ function summarizeOutboundPayload(payload: any): Record<string, any> {
       s.isFinal = payload.isFinal;
       s.text = payload.text;
       break;
+    case 'command.result':
+    case 'command.error':
+    case 'result.error':
+      s.text = payload.text;
+      break;
     case 'result.file':
       s.filePath = payload.filePath;
       break;
@@ -76,6 +81,8 @@ function summarizeOutboundPayload(payload: any): Record<string, any> {
       s.interactionKind = payload.interaction?.kind?.kind;
       break;
     case 'status.started':
+    case 'status.progress':
+    case 'status.queued':
     case 'status.completed':
     case 'status.interrupted':
     case 'status.error':
@@ -1165,6 +1172,11 @@ async function main() {
     channelLoader,
     channelInstances,
     registerChannelInstance,
+    unregisterChannelInstance: (channelName: string) => {
+      processor.unregisterChannel(channelName);
+      cmdHandler.unregisterChannel(channelName);
+      msgBridge.removeChannel(channelName);
+    },
     messageQueue,
   });
 
@@ -1180,6 +1192,10 @@ async function main() {
     const instances = await channelLoader.createForAgent(agent);
     for (const inst of instances) {
       registerChannelInstance(inst);
+      if (inst.channelType === 'aun') {
+        const ch = inst.channel as any;
+        if (typeof ch?.setAidStatsCollector === 'function') ch.setAidStatsCollector(aidStatsCollector);
+      }
       agent.channels.set(inst.adapter.channelKey, inst.adapter);
       channelInstances.push(inst);
     }

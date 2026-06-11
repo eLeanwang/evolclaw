@@ -1,0 +1,1212 @@
+import { DEFAULT_PERMISSION_MODE, type Session, type Trigger } from '../../types.js';
+import { type AgentRunnerFull, hasModelSwitcher, hasPermissionController } from '../../agents/runner-types.js';
+import { getCodexEfforts } from '../../agents/codex-runner.js';
+import { resolvePaths, getPackageRoot } from '../../paths.js';
+import { buildEnvelope } from '../message/message-processor.js';
+import path from 'path';
+import fs from 'fs';
+import crypto from 'crypto';
+import type { ParsedTriggerSet } from '../trigger/parser.js';
+import { TriggerScheduler, calcNextFireAt } from '../trigger/scheduler.js';
+import { TriggerManager } from '../trigger/manager.js';
+import { checkLatestVersion, getLocalVersion, isLinkedInstall, compareVersions } from '../../utils/npm-ops.js';
+import { loadDefaults, loadEvolclawConfig } from '../../config-store.js';
+import { execAgentAction, execAgentQuery, execAgentOptions, resolveProjectPath } from '../message/command-handler-agent-control.js';
+import { displaySessionTitle } from '../session/session-title.js';
+
+export interface MenuNext {
+  type: 'select' | 'text';
+  items?: MenuItem[];
+  dynamic?: boolean;
+}
+
+export interface MenuItem {
+  cmd?: string;
+  value?: string;
+  label: string;
+  args?: string;
+  desc?: string;
+  selected?: boolean;
+  next?: MenuNext;
+  preview?: string;
+  lastActive?: number;
+  agentSessionId?: string;
+  turns?: number;
+}
+
+export type MenuChatType = 'private' | 'group';
+
+const allEfforts = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
+type Effort = typeof allEfforts[number];
+const PERMISSION_MODE_KEYS = ['auto', 'bypass', 'readonly', 'plan', 'edit', 'request', 'noask'] as const;
+
+/** menu file: fetch 文件大小上限（与 /file 一致） */
+const FILE_FETCH_MAX_SIZE = 10 * 1024 * 1024;
+/** menu file: query 的 sha256 仅对 ≤ 2 MB 文件计算，超过返回 null（见设计文档 §7 决策 2） */
+const FILE_HASH_MAX_SIZE = 2 * 1024 * 1024;
+
+/**
+ * 解析并校验 menu `name=file` 的目标路径（query/fetch 共用）。
+ *
+ * 与文本 `/file` 的差异（见设计文档 §6.2）：
+ *   - 接受项目内**绝对路径**（文本 /file 仍拒绝绝对路径）
+ *   - 项目外文件仅 aid channel owner（identity.role === 'owner'）可取
+ *
+ * 沿用 /file 的安全校验链：拒绝 `..` 穿越、realpathSync 后验证落点。
+ * 成功返回 `{ realPath, projectPath, stat }`；失败返回 `{ error, code }`。
+ */
+function resolveMenuFilePath(
+  input: string,
+  session: { projectPath: string } | null | undefined,
+  role: string | undefined,
+): { realPath: string; projectPath: string; stat: fs.Stats } | { error: string; code: string } {
+  if (!session?.projectPath) return { error: '当前无活跃会话', code: 'NO_ACTIVE_SESSION' };
+  const raw = (input ?? '').toString().trim();
+  if (!raw) return { error: '缺少 path 参数', code: 'MISSING_VALUE' };
+
+  // 拒绝 .. 路径穿越（兼容两种分隔符）
+  if (raw.split(path.sep).includes('..') || raw.split('/').includes('..')) {
+    return { error: '不支持 .. 路径穿越', code: 'NO_PERMISSION' };
+  }
+
+  // 相对路径基于 projectPath 解析；绝对路径原样
+  const resolved = path.isAbsolute(raw) ? raw : path.resolve(session.projectPath, raw);
+
+  if (!fs.existsSync(resolved)) {
+    return { error: '文件不存在', code: 'NOT_FOUND' };
+  }
+
+  let realPath: string;
+  let realProjectPath: string;
+  try {
+    realPath = fs.realpathSync(resolved);
+    realProjectPath = fs.realpathSync(session.projectPath);
+  } catch {
+    return { error: '文件不存在', code: 'NOT_FOUND' };
+  }
+
+  const inProject = realPath === realProjectPath || realPath.startsWith(realProjectPath + path.sep);
+  // 项目外文件：仅 aid channel owner 可取（§6.2）
+  if (!inProject && role !== 'owner') {
+    return { error: '无权限：项目外文件仅 owner 可取', code: 'NO_PERMISSION' };
+  }
+
+  const stat = fs.statSync(realPath);
+  if (stat.isDirectory()) {
+    return { error: '暂不支持目录', code: 'NOT_SUPPORTED' };
+  }
+
+  return { realPath, projectPath: realProjectPath, stat };
+}
+
+const CLI_EXEC_WHITELIST: Record<string, '*' | Set<string>> = {
+  status:  '*',
+  model:   '*',
+  stats:   '*',
+  agent:   new Set(['list', 'show', 'get']),
+  aid:     new Set(['list', 'show', 'lookup']),
+  storage: new Set(['ls', 'quota']),
+};
+
+function tokenizeArgv(line: string): string[] {
+  const out: string[] = [];
+  const re = /"([^"]*)"|'([^']*)'|(\S+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(line)) !== null) {
+    out.push(m[1] ?? m[2] ?? m[3] ?? '');
+  }
+  return out;
+}
+
+function getAvailableEfforts(agent: AgentRunnerFull, model: string): readonly Effort[] {
+  if (agent.name === 'claude') {
+    return allEfforts;
+  }
+
+  if (agent.name === 'codex') {
+    return getCodexEfforts(model) as readonly Effort[];
+  }
+
+  return [];
+}
+
+function modelDisplayLabel(agent: any, model: string): string {
+  const full = agent.resolveModelId?.(model);
+  return full && full !== model ? `${model} (${full})` : model;
+}
+
+export function isProcessLevelOwner(peerId: string | undefined, owners: string[] | undefined): boolean {
+  if (!peerId) return false;
+  return (owners ?? []).includes(peerId);
+}
+
+function ecwebErr(id: string, name: string | undefined, code: string, message: string): import('../../types.js').MenuResponse {
+  return { type: 'menu.response', id, ...(name ? { name } : {}), error: { code, message } };
+}
+
+function ecwebResp(id: string, name: string | undefined, result: { data: any } | { error: string; code?: string }): import('../../types.js').MenuResponse {
+  return 'error' in result
+    ? { type: 'menu.response', id, ...(name ? { name } : {}), error: { code: result.code ?? 'EXEC_FAILED', message: result.error } }
+    : { type: 'menu.response', id, ...(name ? { name } : {}), data: result.data };
+}
+
+export function validateScheduleParams(scheduleType: string, scheduleValue: string): string | null {
+  if (!['delay', 'at', 'cron'].includes(scheduleType)) {
+    return `无效 scheduleType: ${scheduleType}（可选: delay / at / cron）`;
+  }
+  if (scheduleType === 'delay') {
+    const ms = Number(scheduleValue);
+    if (!Number.isFinite(ms) || ms <= 0) return `delay 的 scheduleValue 需为正整数毫秒: ${scheduleValue}`;
+  } else if (scheduleType === 'at') {
+    const ts = new Date(scheduleValue).getTime();
+    if (!Number.isFinite(ts)) return `at 的 scheduleValue 需为合法时间: ${scheduleValue}`;
+  } else {
+    try { calcNextFireAt('cron', scheduleValue, Date.now()); }
+    catch { return `无效 cron 表达式: ${scheduleValue}`; }
+  }
+  return null;
+}
+
+/**
+ * 返回结构化命令菜单（供 menu.query 使用）
+ * owner 看到全部命令，admin 看到管理级命令（不含 owner-only），guest 仅看到用户级命令
+ */
+export function getMenuItems(this: any, role: string, chatType: string = 'private'): { group: string; commands: MenuItem[] }[] {
+  const isOwner = role === 'owner';
+  const isAdmin = role === 'owner' || role === 'admin';
+  const canReadTopic = role !== 'anonymous';
+  const items: { group: string; commands: MenuItem[] }[] = [];
+
+  if (!isAdmin && chatType === 'group') {
+    return [
+      ...(canReadTopic ? [{
+        group: '话题管理',
+        commands: [
+          { cmd: '/topic', label: '话题管理', desc: '查看当前聊天的话题会话', next: { type: 'select' as const, dynamic: true } },
+        ]
+      }] : []),
+      {
+        group: '其他',
+        commands: [
+          { cmd: '/status', label: '显示会话状态' },
+          { cmd: '/check', label: '检查渠道健康' },
+          { cmd: '/help', label: '显示帮助信息' },
+        ]
+      }
+    ];
+  }
+
+  items.push({
+    group: '会话管理',
+    commands: [
+      { cmd: '/new', label: '创建新会话', desc: '清空历史，开始全新对话', next: { type: 'text' as const } },
+      { cmd: '/s', label: '切换会话', desc: '切换到同项目下的其他会话', next: { type: 'select', dynamic: true } },
+      ...(canReadTopic ? [{ cmd: '/topic', label: '话题管理', desc: '查看与管理当前聊天的话题会话', next: { type: 'select' as const, dynamic: true } }] : []),
+      { cmd: '/name', label: '重命名当前会话', desc: '为当前会话设置一个易识别的名称', next: { type: 'text' as const } },
+      { cmd: '/del', label: '删除指定会话', desc: '永久删除一个非活跃会话', next: { type: 'select', dynamic: true } },
+      ...(isAdmin ? [
+        { cmd: '/fork', label: '分支当前会话', desc: '基于当前会话创建独立分支', next: { type: 'text' as const } },
+        { cmd: '/rewind', label: '查看历史/撤销指定轮次', desc: '回退会话到指定轮次，可选择撤销文件改动' },
+        { cmd: '/compact', label: '压缩会话上下文', desc: '将长对话压缩为摘要以节省 token' },
+      ] : []),
+    ]
+  });
+
+  if (isAdmin) {
+    items.push({
+      group: 'Agent 与模型',
+      commands: [
+        { cmd: '/baseagent', label: '切换 Agent 后端', desc: '切换当前会话使用的 AI 后端', next: { type: 'select', dynamic: true } },
+        { cmd: '/model', label: '切换模型', desc: '切换当前 Agent 使用的模型版本', next: { type: 'select', dynamic: true } },
+        { cmd: '/effort', label: '切换推理强度', desc: '调整模型推理深度，影响响应速度与质量', next: { type: 'select', items: [
+          { value: 'low', label: 'Low' },
+          { value: 'medium', label: 'Medium' },
+          { value: 'high', label: 'High' },
+          { value: 'max', label: 'Max' },
+        ] } },
+        { cmd: '/chatmode', label: '切换会话模式', desc: '控制 Agent 主动性（被动响应或主动推进）', next: { type: 'select', items: [
+          { value: 'interactive', label: '交互模式', desc: '仅在收到消息时响应' },
+          { value: 'proactive', label: '主动模式', desc: 'Agent 可主动推进任务' },
+        ] } },
+        { cmd: '/dispatch', label: '切换分发模式', desc: '控制群聊消息过滤（仅@提及或广播响应）', next: { type: 'select', items: [
+          { value: 'mention', label: '@ 提及', desc: '仅在被 @ 提及时响应' },
+          { value: 'broadcast', label: '广播', desc: '响应群内所有消息' },
+        ] } },
+      ]
+    });
+
+    items.push({
+      group: '权限管理',
+      commands: [
+        { cmd: '/perm', label: '权限模式管理', desc: '控制工具调用的审批策略', next: { type: 'select', items: [
+          ...(isOwner ? [
+            { value: 'auto', label: '自动模式', desc: '根据风险等级自动决定是否审批' },
+            { value: 'bypass', label: '免审批模式', desc: '跳过所有工具审批确认' },
+            { value: 'readonly', label: '只读模式', desc: '允许读取和临时目录写入，拒绝项目文件修改' },
+            { value: 'plan', label: '计划模式', desc: '仅允许只读操作，写操作需审批' },
+            { value: 'edit', label: '编辑模式', desc: '允许文件编辑，其他操作需审批' },
+            { value: 'request', label: '请求模式', desc: '所有操作均需审批' },
+            { value: 'noask', label: '静默模式', desc: '不弹出审批，自动拒绝未授权操作' },
+          ] : []),
+          { value: 'allow', label: '允许此操作', desc: '本次允许当前待审批操作' },
+          { value: 'always', label: '始终允许', desc: '永久允许同类操作' },
+          { value: 'deny', label: '拒绝此操作', desc: '拒绝当前待审批操作' },
+        ] } },
+      ]
+    });
+
+    items.push({
+      group: '运维',
+      commands: [
+        { cmd: '/status', label: '显示会话状态', desc: '查看当前会话、项目、Agent 的详细状态' },
+        { cmd: '/stop', label: '中断当前任务', desc: '立即中断正在执行的 Agent 任务' },
+        { cmd: '/check', label: '检查渠道状态', desc: '检查各消息渠道的连接健康状态' },
+        { cmd: '/activity', label: '控制中间输出显示', desc: '设置工具调用过程的可见范围', next: { type: 'select', items: [
+          { value: 'all', label: '全部显示', desc: '所有用户均可见中间输出' },
+          { value: 'dm', label: '仅私聊', desc: '仅私聊中显示中间输出' },
+          { value: 'owner', label: '仅 owner 私聊', desc: '仅 owner 的私聊中显示' },
+          { value: 'none', label: '不显示', desc: '关闭所有中间输出' },
+        ] } },
+        ...(isAdmin ? [
+          { cmd: '/restart', label: '重启服务', desc: '重启整个 EvolClaw 服务进程' },
+        ] : []),
+        ...(isOwner ? [
+          { cmd: '/file', label: '发送项目内文件', desc: '将项目目录内的文件发送给用户' },
+        ] : []),
+      ]
+    });
+  } else {
+    items.push({
+      group: '其他',
+      commands: [
+        { cmd: '/status', label: '显示会话状态', desc: '查看当前会话的基本状态' },
+        { cmd: '/check', label: '检查渠道健康', desc: '检查消息渠道连接状态' },
+      ]
+    });
+  }
+
+  items.push({
+    group: '帮助',
+    commands: [
+      { cmd: '/help', label: '显示帮助信息', desc: '列出所有可用命令及说明' },
+    ]
+  });
+
+  return items;
+}
+
+/** 动态子菜单：根据 cmd 路径返回选项列表（供 menu.query + cmd 使用） */
+export async function getSubMenuItems(this: any, cmd: string, channel: string, channelId: string, userId?: string, args?: Record<string, any>, overrideIdentity?: import('../../types.js').SessionIdentity, _explicitChatType?: MenuChatType): Promise<MenuItem[] | null> {
+  const session = await this.sessionManager.getActiveSession(channel, channelId);
+
+  // ── 进程级 /agent list（owners 鉴权） ──
+  if (cmd === '/agent') {
+    if (!isProcessLevelOwner(userId, loadEvolclawConfig().owners)) {
+      throw { code: 'FORBIDDEN', message: '操作需要 owner 权限' };
+    }
+    const res = await execAgentOptions(args);
+    if ('error' in res) throw { code: res.code, message: res.error };
+    return (res.data.agents as any[]).map(ag => ({ value: ag.aid, label: ag.name || ag.aid, desc: ag.status }));
+  }
+
+  // ── 关系级 /trigger list（每个 trigger 一个 MenuItem） ──
+  if (cmd === '/trigger') {
+    const owningAgent = this.getOwningAgent(channel);
+    const manager = (owningAgent?.triggerManager ?? this.triggerManager) as TriggerManager | undefined;
+    if (!manager) return [];
+    const scope = args?.options === 'all' ? 'all' : 'enabled';
+    const role = (overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId)).role;
+    const isAdmin = role === 'owner' || role === 'admin';
+    const all = manager.listAll();
+    const list = scope === 'all' ? all.active.concat(all.history as any[]) : manager.listActive();
+    const visible = isAdmin ? list
+      : list.filter((t: any) => t.createdByPeerId === (userId ?? '') && t.createdByChannel === channel);
+    return visible.map((t: any) => ({
+      // 透传完整 trigger 字段（ECWeb Triggers 表逐列渲染需要）
+      ...t,
+      value: t.id,
+      label: t.name,
+      desc: `${t.scheduleType}${t.nextFireAt ? ` | 下次 ${new Date(t.nextFireAt).toLocaleString()}` : ''}`,
+      // 状态标识：history 条目带 doneReason（fired/cancelled/expired），active 条目恒为 'active'
+      status: t.doneReason ?? 'active',
+    }));
+  }
+
+  if (cmd === '/topic') {
+    const identity = overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId);
+    if (!this.canReadTopics(identity.role)) {
+      throw { code: 'FORBIDDEN', message: '无权限查看话题' };
+    }
+    const sessions = await this.sessionManager.listSessions(channel, channelId);
+    return sessions
+      .filter((s: Session) => !!s.threadId)
+      .map((s: Session) => this.buildTopicMenuItem(s));
+  }
+
+  if (cmd === '/s' || cmd === '/session' || cmd === '/del') {
+    const sessions = await this.sessionManager.listSessions(channel, channelId);
+    const active = cmd === '/del' ? await this.sessionManager.getActiveSession(channel, channelId) : null;
+    const currentSession = session;
+    const items: MenuItem[] = sessions
+      .filter((s: Session) => !s.threadId)
+      .filter((s: Session) => !active || s.id !== active.id)
+      .map((s: Session) => {
+        const displayName = displaySessionTitle(s.name, s.id.slice(0, 8));
+        const item: MenuItem = {
+          value: s.name || s.id.slice(0, 8),
+          label: displayName,
+          selected: currentSession ? s.id === currentSession.id : false,
+        };
+        if (s.agentSessionId) {
+          item.agentSessionId = s.agentSessionId;
+          const fileInfo = this.sessionManager.getSessionFileInfo(s.projectPath, s.agentSessionId, s.agentId);
+          if (fileInfo.turns) item.turns = fileInfo.turns;
+          const firstMsg = this.sessionManager.readSessionFirstMessage(s.projectPath, s.agentSessionId, s.agentId);
+          if (firstMsg) item.preview = firstMsg.length > 80 ? firstMsg.slice(0, 80) + '…' : firstMsg;
+        }
+        if (s.updatedAt) item.lastActive = s.updatedAt;
+        return item;
+      });
+    if (cmd === '/s' || cmd === '/session') {
+      items.push({ value: 'cli', label: '查看 CLI 会话', desc: '列出未导入的 CLI 本地会话' });
+    }
+    return items;
+  }
+
+  if (cmd === '/baseagent') {
+    const currentAgent = session?.agentId;
+    return this.getAvailableBaseagents(channel).map((name: string) => ({ value: name, label: name, selected: name === currentAgent }));
+  }
+
+  if (cmd === '/model') {
+    const agent = this.getAgent(channel, session?.agentId);
+    if (hasModelSwitcher(agent) && agent.listModels) {
+      const models = await agent.listModels() ?? [];
+      const currentModel = agent.getModel();
+      if (models.length > 0) return models.map((m: string) => ({ value: m, label: modelDisplayLabel(agent, m), selected: m === currentModel }));
+    }
+    return null;
+  }
+
+  // if (cmd === '/restart') {
+  //   const isOwner = userId ? this.sessionManager.resolveIdentity(channel, userId).role === 'owner' : false;
+  //   // 列出所有 channel type
+  //   const visibleTypes = new Set<string>();
+  //   for (const [name] of this.adapters) {
+  //     const t = this.channelTypeMap.get(name);
+  //     if (t) visibleTypes.add(t);
+  //   }
+  //   const channels = [...visibleTypes].map(type => ({ value: type, label: type, desc: '重连此类型所有渠道实例' }));
+  //   if (isOwner) channels.unshift({ value: '', label: '重启服务', desc: '重启整个 EvolClaw 服务进程' });
+  //   return channels;
+  // }
+
+  if (cmd === '/activity') {
+    const currentMode = this.agentRegistry?.getShowActivities?.(channel) ?? 'all';
+    return [
+      { value: 'all', label: '全部显示', selected: currentMode === 'all' },
+      { value: 'dm', label: '仅私聊显示', selected: currentMode === 'dm-only' },
+      { value: 'owner', label: '仅 owner 私聊显示', selected: currentMode === 'owner-dm-only' },
+      { value: 'none', label: '全部静默', selected: currentMode === 'none' },
+    ];
+  }
+
+  if (cmd === '/effort') {
+    const agent = this.getAgent(channel, session?.agentId);
+    const currentModel = hasModelSwitcher(agent) ? agent.getModel() : agent.name;
+    const efforts = getAvailableEfforts(agent, currentModel);
+    const currentEffort = (agent as any).getEffort?.() || 'auto';
+    const allItems = [...efforts, 'auto'] as string[];
+    return allItems.map(e => ({ value: e, label: e === 'auto' ? 'auto (SDK默认)' : e, selected: e === currentEffort }));
+  }
+
+  if (cmd === '/chatmode') {
+    // 无活跃会话时，selected 跟随 evolagent.config.chatmode.private 默认值
+    let currentMode: string;
+    if (session?.sessionMode) {
+      currentMode = session.sessionMode;
+    } else {
+      const evolagent = this.agentRegistry?.resolveByChannel(channel);
+      currentMode = evolagent?.config?.chatmode?.private || 'interactive';
+    }
+    return [
+      { value: 'interactive', label: '交互模式', selected: currentMode === 'interactive' },
+      { value: 'proactive', label: '主动模式', selected: currentMode === 'proactive' },
+    ];
+  }
+
+  if (cmd === '/dispatch') {
+    const currentMode = session?.metadata?.dispatchMode ?? null;
+    return [
+      { value: 'mention', label: '@提及时响应', selected: currentMode === 'mention' },
+      { value: 'broadcast', label: '所有消息响应', selected: currentMode === 'broadcast' },
+    ];
+  }
+
+  if (cmd === '/perm') {
+    const currentMode = session?.metadata?.permissionMode ?? DEFAULT_PERMISSION_MODE;
+    const permAgent = this.getAgent(channel, session?.agentId);
+    const validModes = hasPermissionController(permAgent)
+      ? permAgent.listModes().filter(m => m.available).map(m => m.key)
+      : [...PERMISSION_MODE_KEYS];
+    return validModes.map(m => ({ value: m, label: m, selected: m === currentMode }));
+  }
+
+  return null;
+}
+
+// ── Menu Protocol exec ────────────────────────────────────────────────
+//
+// 三个入口对应 menu.query / menu.update / menu.action：
+//   execMenuQuery  — 查询某项当前值（无会话时多数 fallback 到 evolagent config）
+//   execMenuUpdate — 写入新值（持久化到 session 或 evolagent config）
+//   execMenuAction — 触发动词（stop/restart/new/delete/compact/fork/switch/check/upgrade）
+//
+// 所有方法返回 { data } 或 { error, code? }。code 是结构化错误码（NO_ACTIVE_SESSION 等），
+// 客户端可据此决定降级策略。message-bridge 把 code 透传到 menu.response。
+
+/** menu.query — 查询当前值。 */
+export async function execMenuQuery(this: any, 
+  cmd: string, channel: string, channelId: string, userId?: string, args?: Record<string, any>, _explicitChatType?: MenuChatType
+): Promise<{ data: any } | { error: string; code?: string }> {
+  const cmdBase = cmd.trim().split(' ')[0];
+  if (!cmdBase) return { error: '缺少命令', code: 'MISSING_CMD' };
+  const { session, evolagent } = await this.loadMenuContext(channel, channelId);
+
+  // ── 进程级 /agent（owners 鉴权） ──
+  if (cmdBase === '/agent') {
+    if (!isProcessLevelOwner(userId, loadEvolclawConfig().owners)) {
+      return { error: '操作需要 owner 权限', code: 'FORBIDDEN' };
+    }
+    return await execAgentQuery(args);
+  }
+
+  if (cmdBase === '/pwd') {
+    const sessPath = session?.projectPath;
+    const fallbackPath = evolagent?.config?.projects?.defaultPath;
+    const path = sessPath ?? fallbackPath ?? null;
+    const name = path ? this.getProjectName(path) : null;
+    return { data: { name, path } };
+  }
+
+  if (cmdBase === '/session' || cmdBase === '/s') {
+    if (!session) {
+      return { data: { status: 'no-session' } };
+    }
+    const sessionKey = this.getQueueKey(session, channel, channelId);
+    const sessionAgent = this.getAgent(channel, session.agentId);
+    const isProcessing = this.messageQueue.isProcessing(sessionKey) || sessionAgent.hasActiveStream(sessionKey);
+    const queueLength = this.messageQueue.getQueueLength(sessionKey);
+    const health = await this.sessionManager.getHealthStatus(session.id);
+
+    let processingDuration: number | undefined;
+    if (isProcessing && session.processingState) {
+      const elapsed = Date.now() - parseInt(session.processingState, 10);
+      if (!isNaN(elapsed) && elapsed > 0) processingDuration = Math.floor(elapsed / 1000);
+    }
+
+    let turns = 0;
+    if (session.agentSessionId) {
+      const fileInfo = this.sessionManager.getSessionFileInfo(session.projectPath, session.agentSessionId, session.agentId);
+      turns = fileInfo.turns;
+    }
+
+    const data: Record<string, any> = {
+      name: session.name || null,
+      agentSessionId: session.agentSessionId || null,
+      status: isProcessing ? 'processing' : 'idle',
+      createdAt: session.createdAt,
+      updatedAt: session.updatedAt,
+    };
+    if (processingDuration !== undefined) data.processingDuration = processingDuration;
+    if (queueLength > 0) data.queueLength = queueLength;
+    if (turns > 0) data.turns = turns;
+    if (health.lastSuccessTime) data.lastSuccess = health.lastSuccessTime;
+    if (health.consecutiveErrors) data.consecutiveErrors = health.consecutiveErrors;
+    if (health.lastError) data.lastError = { type: health.lastErrorType || 'unknown', message: health.lastError.substring(0, 100) };
+    return { data };
+  }
+
+  if (cmdBase === '/topic') {
+    const identity = this.sessionManager.resolveIdentity(channel, userId);
+    if (!this.canReadTopics(identity.role)) {
+      return { error: '无权限查看话题', code: 'FORBIDDEN' };
+    }
+    const target = (args?.target ?? '').toString().trim();
+    if (!target) return { error: '缺少 args.target', code: 'MISSING_VALUE' };
+    const topic = await this.sessionManager.getThreadSession(channel, channelId, target);
+    if (!topic) return { error: '话题不存在', code: 'NOT_FOUND' };
+    const sessionKey = this.getQueueKey(topic, channel, channelId);
+    const sessionAgent = this.getAgent(channel, topic.agentId);
+    const isProcessing = this.messageQueue.isProcessing(sessionKey) || sessionAgent.hasActiveStream(sessionKey);
+    const queueLength = this.messageQueue.getQueueLength(sessionKey);
+    const health = await this.sessionManager.getHealthStatus(topic.id);
+
+    let processingDuration: number | undefined;
+    if (isProcessing && topic.processingState) {
+      const elapsed = Date.now() - parseInt(topic.processingState, 10);
+      if (!isNaN(elapsed) && elapsed > 0) processingDuration = Math.floor(elapsed / 1000);
+    }
+
+    let turns = 0;
+    if (topic.agentSessionId) {
+      turns = this.sessionManager.getSessionFileInfo(topic.projectPath, topic.agentSessionId, topic.agentId).turns;
+    }
+
+    const data: Record<string, any> = {
+      threadId: topic.threadId,
+      name: topic.name || null,
+      agentSessionId: topic.agentSessionId || null,
+      status: isProcessing ? 'processing' : 'idle',
+      createdAt: topic.createdAt,
+      updatedAt: topic.updatedAt,
+    };
+    if (processingDuration !== undefined) data.processingDuration = processingDuration;
+    if (queueLength > 0) data.queueLength = queueLength;
+    if (turns > 0) data.turns = turns;
+    if (health.lastSuccessTime) data.lastSuccess = health.lastSuccessTime;
+    if (health.consecutiveErrors) data.consecutiveErrors = health.consecutiveErrors;
+    if (health.lastError) data.lastError = { type: health.lastErrorType || 'unknown', message: health.lastError.substring(0, 100) };
+    return { data };
+  }
+
+  if (cmdBase === '/baseagent') {
+    const value = session?.agentId ?? evolagent?.config?.active_baseagent ?? null;
+    return { data: { baseagent: value } };
+  }
+
+  if (cmdBase === '/model') {
+    if (session) {
+      const agent = this.getAgent(channel, session.agentId);
+      if (hasModelSwitcher(agent)) return { data: { model: agent.getModel() ?? null } };
+    }
+    const ba = evolagent?.config?.active_baseagent;
+    const block = ba && evolagent ? (evolagent.config.baseagents as any)?.[ba] : undefined;
+    return { data: { model: block?.model ?? null } };
+  }
+
+  if (cmdBase === '/effort') {
+    if (session) {
+      const agent = this.getAgent(channel, session.agentId);
+      const e = (agent as any).getEffort?.();
+      if (e !== undefined) return { data: { effort: e } };
+    }
+    const ba = evolagent?.config?.active_baseagent;
+    const block = ba && evolagent ? (evolagent.config.baseagents as any)?.[ba] : undefined;
+    const fallbackField = ba === 'codex' ? (block?.effort ?? block?.reasoning) : block?.effort;
+    return { data: { effort: fallbackField ?? null } };
+  }
+
+  if (cmdBase === '/chatmode') {
+    const sessionMode = session?.sessionMode;
+    const fallback = evolagent?.config?.chatmode?.private;
+    return { data: { mode: sessionMode || fallback || 'interactive' } };
+  }
+
+  if (cmdBase === '/dispatch') {
+    const chatType = session?.chatType || 'private';
+    if (chatType !== 'group') {
+      return { error: 'dispatch 仅在群聊会话中有效', code: 'NOT_APPLICABLE' };
+    }
+    const sessionMode = session?.metadata?.dispatchMode;
+    const fallback = evolagent?.config?.dispatch;
+    return { data: { mode: sessionMode ?? fallback ?? null } };
+  }
+
+  if (cmdBase === '/observable') {
+    return { data: { observable: evolagent?.getObservable() ?? false } };
+  }
+
+  if (cmdBase === '/perm') {
+    const need = this.requireSession(session);
+    if (need) return need;
+    const currentMode = session!.metadata?.permissionMode ?? DEFAULT_PERMISSION_MODE;
+    return { data: { mode: currentMode } };
+  }
+
+  if (cmdBase === '/activity') {
+    const currentMode = this.agentRegistry?.getShowActivities?.(channel) ?? 'all';
+    return { data: { mode: currentMode } };
+  }
+
+  if (cmdBase === '/system') {
+    if (!isProcessLevelOwner(userId, loadEvolclawConfig().owners)) {
+      return { error: '操作需要 owner 权限', code: 'FORBIDDEN' };
+    }
+    const owningAgent = this.getOwningAgent(channel);
+    const data: Record<string, any> = {
+      agent: owningAgent?.name ?? 'DefaultAgent',
+      channel: this.resolveChannelType(channel),
+      pid: process.pid,
+      node: process.version,
+      uptime: Math.floor(process.uptime()),
+    };
+    try {
+      const pkgPath = path.join(getPackageRoot(), 'package.json');
+      const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+      if (pkg?.version) data.version = pkg.version;
+    } catch {}
+    try {
+      const fp = path.join(getPackageRoot(), 'node_modules', '@agentunion', 'fastaun', 'package.json');
+      const fp2 = JSON.parse(fs.readFileSync(fp, 'utf-8'));
+      if (fp2?.version) data.fastaunVersion = fp2.version;
+    } catch {}
+    const channels = owningAgent?.channelInstanceNames?.() ?? [];
+    if (channels.length) data.channels = channels;
+    return { data };
+  }
+
+  // ── name=file：文件元信息（§5.1） ──
+  // 权限（§6.3）：agent owner/admin 或 aid channel owner。项目外文件仅 owner 可取（§6.2，由 resolveMenuFilePath 校验）。
+  if (cmdBase === '/file') {
+    const role = (this.sessionManager.resolveIdentity(channel, userId)).role;
+    if (role !== 'owner' && role !== 'admin') {
+      return { error: '无权限', code: 'NO_PERMISSION' };
+    }
+    const resolved = resolveMenuFilePath(args?.path, session, role);
+    if ('error' in resolved) return resolved;
+    const { realPath, stat } = resolved;
+
+    // sha256 仅对 ≤ 2 MB 文件计算，超过返回 null，客户端降级到 size+mtime（§4、§7 决策 2）
+    let sha256: string | null = null;
+    if (stat.size <= FILE_HASH_MAX_SIZE) {
+      try {
+        sha256 = crypto.createHash('sha256').update(fs.readFileSync(realPath)).digest('hex');
+      } catch {
+        sha256 = null;
+      }
+    }
+
+    return {
+      data: {
+        path: (args?.path ?? '').toString(),
+        sha256,
+        size: stat.size,
+        mtime: stat.mtimeMs,
+      },
+    };
+  }
+
+  return { error: `不支持 query: ${cmdBase}`, code: 'NOT_SUPPORTED' };
+}
+
+/** menu.update — 写入新值。 */
+export async function execMenuUpdate(this: any, 
+  cmd: string, value: string, channel: string, channelId: string, userId?: string,
+  overrideIdentity?: import('../../types.js').SessionIdentity
+): Promise<{ data: any } | { error: string; code?: string }> {
+  const cmdBase = cmd.trim().split(' ')[0];
+  if (!cmdBase) return { error: '缺少命令', code: 'MISSING_CMD' };
+  const arg = value.trim();
+  if (!arg) return { error: '缺少 value 参数', code: 'MISSING_VALUE' };
+  const { session, evolagent } = await this.loadMenuContext(channel, channelId);
+  const identity = overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId);
+
+  // ── 关系级 /trigger update（调度参数，value 为 JSON 字符串） ──
+  if (cmdBase === '/trigger') {
+    const owningAgent = this.getOwningAgent(channel);
+    const manager = (owningAgent?.triggerManager ?? this.triggerManager) as TriggerManager | undefined;
+    const scheduler = (owningAgent?.triggerScheduler ?? this.triggerScheduler) as TriggerScheduler | undefined;
+    if (!manager || !scheduler) return { error: '触发器功能未启用', code: 'NOT_SUPPORTED' };
+    let patch: any;
+    try { patch = JSON.parse(arg); } catch { return { error: 'value 需为 JSON', code: 'INVALID_ARGS' }; }
+    if (!patch?.nameOrId) return { error: '缺少 nameOrId', code: 'INVALID_ARGS' };
+    const isAdmin = identity.role === 'owner' || identity.role === 'admin';
+    if (!isAdmin && !userId) return { error: '无法确认身份，请确保渠道提供发送者 ID', code: 'FORBIDDEN' };
+    const trigger = isAdmin
+      ? (manager.getByName(patch.nameOrId) ?? manager.getById(patch.nameOrId))
+      : (manager.getByNameScoped(patch.nameOrId, userId ?? '', channel) ?? manager.getByIdScoped(patch.nameOrId, userId ?? '', channel));
+    if (!trigger) return { error: '触发器不存在或无权限', code: 'NOT_FOUND' };
+    const fields: any = {};
+    if (patch.scheduleType !== undefined) fields.scheduleType = patch.scheduleType;
+    if (patch.scheduleValue !== undefined) fields.scheduleValue = String(patch.scheduleValue);
+    if (patch.prompt !== undefined) fields.prompt = String(patch.prompt);
+    // 调度参数变化时重算 nextFireAt——先校验避免 NaN 污染 scheduler heap
+    if (fields.scheduleType !== undefined || fields.scheduleValue !== undefined) {
+      const effType = fields.scheduleType ?? trigger.scheduleType;
+      const effValue = fields.scheduleValue ?? trigger.scheduleValue;
+      const schedErr = validateScheduleParams(effType, effValue);
+      if (schedErr) return { error: schedErr, code: 'INVALID_ARGS' };
+      fields.nextFireAt = calcNextFireAt(effType, effValue, Date.now());
+    }
+    let updated: Trigger;
+    try { updated = manager.update(trigger.id, fields); }
+    catch (err: any) { return { error: `更新失败：${err?.message || err}`, code: 'INVALID_ARGS' }; }
+    scheduler.update(updated);
+    return { data: { id: updated.id, nextFireAt: updated.nextFireAt } };
+  }
+
+  if (cmdBase === '/baseagent') {
+    const valid = this.getAvailableBaseagents(channel);
+    if (valid.length && !valid.includes(arg)) {
+      return { error: `无效 baseagent: ${arg}，可选: ${valid.join(' / ')}`, code: 'INVALID_VALUE' };
+    }
+    // 当前会话切换走 slash 命令的完整逻辑（涉及 runner 状态、session.agentId 重新挂载等）
+    // 仅在 slash 命令成功后才持久化到 evolagent config，避免失败时配置已落盘
+    if (session && session.agentId !== arg) {
+      const result = await this._handleInternal(`/baseagent ${arg}`, channel, channelId, undefined, userId);
+      const payload = result as any;
+      if (payload?.kind === 'command.error') {
+        return { error: payload.text || '切换失败', code: 'EXEC_FAILED' };
+      }
+    }
+    // 持久化到 evolagent config（影响后续新会话）
+    if (evolagent) evolagent.setActiveBaseagent(arg);
+    return { data: { baseagent: arg } };
+  }
+
+  if (cmdBase === '/model') {
+    const agent = this.getAgent(channel, session?.agentId);
+    if (hasModelSwitcher(agent)) {
+      const models = (await agent.listModels?.()) ?? [];
+      if (models.length && !models.includes(arg)) {
+        return { error: `无效模型: ${arg}`, code: 'INVALID_VALUE' };
+      }
+      agent.setModel(arg);
+    }
+    if (evolagent) evolagent.setBaseagentModel(arg);
+    return { data: { model: arg } };
+  }
+
+  if (cmdBase === '/effort') {
+    const agent = this.getAgent(channel, session?.agentId);
+    const currentModel = hasModelSwitcher(agent) ? agent.getModel() : agent.name;
+    const validEfforts = getAvailableEfforts(agent, currentModel);
+    const allValid: string[] = [...validEfforts, 'auto'];
+    if (!allValid.includes(arg)) {
+      return { error: `无效推理强度: ${arg}，可选: ${allValid.join(' / ')}`, code: 'INVALID_VALUE' };
+    }
+    if (typeof (agent as any).setEffort === 'function') {
+      (agent as any).setEffort(arg === 'auto' ? undefined : arg);
+    }
+    if (evolagent) evolagent.setBaseagentEffort(arg === 'auto' ? undefined : arg);
+    return { data: { effort: arg } };
+  }
+
+  if (cmdBase === '/chatmode') {
+    if (arg !== 'interactive' && arg !== 'proactive') {
+      return { error: `无效模式: ${arg}`, code: 'INVALID_VALUE' };
+    }
+    if (session) {
+      const chatType = session.chatType || 'private';
+      if (chatType === 'group' && identity.role !== 'owner' && identity.role !== 'admin') {
+        return { error: '无权限：群聊中仅管理员可切换', code: 'NO_PERMISSION' };
+      }
+      await this.sessionManager.updateSession(session.id, { sessionMode: arg });
+      this.eventBus.publish({ type: 'session:chat-mode-changed', sessionId: session.id, mode: arg, timestamp: Date.now() });
+    } else {
+      if (evolagent) evolagent.setChatmodePrivate(arg);
+    }
+    return { data: { mode: arg } };
+  }
+
+  if (cmdBase === '/dispatch') {
+    if (arg !== 'mention' && arg !== 'broadcast') {
+      return { error: `无效模式: ${arg}`, code: 'INVALID_VALUE' };
+    }
+    const chatType = session?.chatType;
+    if (!session || chatType !== 'group') {
+      return { error: 'dispatch 仅在群聊会话中有效', code: 'NOT_APPLICABLE' };
+    }
+    if (identity.role !== 'owner' && identity.role !== 'admin') {
+      return { error: '无权限：群聊中仅管理员可切换', code: 'NO_PERMISSION' };
+    }
+    const metadata = { ...(session.metadata || {}), dispatchMode: arg };
+    await this.sessionManager.updateSession(session.id, { metadata });
+    this.eventBus.publish({ type: 'session:dispatch-mode-changed', sessionId: session.id, mode: arg, timestamp: Date.now() });
+    return { data: { mode: arg } };
+  }
+
+  if (cmdBase === '/perm') {
+    const need = this.requireSession(session);
+    if (need) return need;
+    if (identity.role !== 'owner') return { error: '无权限', code: 'NO_PERMISSION' };
+    const permAgent = this.getAgent(channel, session!.agentId);
+    const validModes = hasPermissionController(permAgent)
+      ? permAgent.listModes().filter(m => m.available).map(m => m.key)
+      : [...PERMISSION_MODE_KEYS];
+    if (!validModes.includes(arg)) return { error: `无效模式: ${arg}`, code: 'INVALID_VALUE' };
+    const metadata = { ...(session!.metadata || {}), permissionMode: arg };
+    await this.sessionManager.updateSession(session!.id, { metadata });
+    return { data: { mode: arg } };
+  }
+
+  if (cmdBase === '/activity') {
+    const modeMap: Record<string, string> = { all: 'all', dm: 'dm-only', owner: 'owner-dm-only', none: 'none' };
+    const newMode = modeMap[arg];
+    if (!newMode) return { error: `无效模式: ${arg}，可选: all / dm / owner / none`, code: 'INVALID_VALUE' };
+    if (identity.role !== 'owner') return { error: '中间输出模式切换仅限 owner', code: 'NO_PERMISSION' };
+    if (!this.agentRegistry?.setShowActivities) return { error: '找不到通道所属 agent，无法持久化', code: 'EXEC_FAILED' };
+    this.agentRegistry.setShowActivities(channel, newMode as any);
+    return { data: { mode: newMode } };
+  }
+
+  if (cmdBase === '/observable') {
+    if (identity.role !== 'owner') return { error: '观察者模式仅限 owner 开关', code: 'NO_PERMISSION' };
+    if (arg !== 'true' && arg !== 'false') return { error: `无效值: ${arg}，可选: true / false`, code: 'INVALID_VALUE' };
+    if (!evolagent) return { error: '找不到通道所属 agent，无法持久化', code: 'EXEC_FAILED' };
+    evolagent.setObservable(arg === 'true');
+    return { data: { observable: arg === 'true' } };
+  }
+
+  return { error: `不支持 update: ${cmdBase}`, code: 'NOT_SUPPORTED' };
+}
+
+/** menu.action — 触发动词。 */
+export async function execMenuAction(this: any,
+  cmd: string, action: string, args: any, channel: string, channelId: string, userId?: string,
+  overrideIdentity?: import('../../types.js').SessionIdentity,
+  explicitChatType?: MenuChatType,
+  requestId?: string,
+): Promise<{ data: any } | { error: string; code?: string }> {
+  const cmdBase = cmd.trim().split(' ')[0];
+  if (!cmdBase) return { error: '缺少命令', code: 'MISSING_CMD' };
+  if (!action) return { error: '缺少 action', code: 'MISSING_VALUE' };
+  const { session } = await this.loadMenuContext(channel, channelId);
+  const identity = overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId);
+
+  // ── 进程级 /agent（owners 鉴权，不依赖 session/channel） ──
+  // NOTE(D5): 本次进程级 /agent 仅按 evolclaw.json owners 鉴权，任意 evolagent 的 AUN
+  // channel 均可作为入口。part1（daemon 控制 AID）落地后，应叠加 isControlChannel(channelId)
+  // 闸：仅控制 AID channel 上的 /agent /system 生效。见 part1 计划。
+  if (cmdBase === '/agent') {
+    if (!isProcessLevelOwner(userId, loadEvolclawConfig().owners)) {
+      return { error: '操作需要 owner 权限', code: 'FORBIDDEN' };
+    }
+    const a = { ...(args ?? {}) };
+    if (action === 'create') {
+      a.project = resolveProjectPath(a.project, a.aid ?? '', loadDefaults());
+    }
+    // reload / disable / delete 会中断 agent 正在处理的任务，执行前检查是否繁忙。
+    // 队列按 agent 名计数，故先用 registry 把 aid 解析成 name；force 跳过。
+    if ((action === 'reload' || action === 'disable' || action === 'delete') && a.aid && !a.force) {
+      const handle = this.agentRegistry?.get(a.aid) ?? null;
+      const agentName = handle?.name;
+      if (agentName) {
+        const busy = this.messageQueue.getProcessingCountByAgent(agentName)
+                   + this.messageQueue.getQueueLengthByAgent(agentName);
+        if (busy > 0) {
+          return { error: `该 Agent 有 ${busy} 个任务执行中`, code: 'BUSY' };
+        }
+      }
+    }
+    return await execAgentAction(action, a, userId ?? '');
+  }
+
+  // ── 关系级 /trigger（不走 owners；复用 isAdmin + scoped 逻辑，D4 直调底层） ──
+  if (cmdBase === '/trigger') {
+    const role = identity.role;
+    const isAdmin = role === 'owner' || role === 'admin';
+    const owningAgent = this.getOwningAgent(channel);
+    const manager = (owningAgent?.triggerManager ?? this.triggerManager) as TriggerManager | undefined;
+    const scheduler = (owningAgent?.triggerScheduler ?? this.triggerScheduler) as TriggerScheduler | undefined;
+    if (!manager || !scheduler) return { error: '触发器功能未启用', code: 'NOT_SUPPORTED' };
+
+    if (action === 'set') {
+      // args 结构化 → 直接组装 ParsedTriggerSet（绕过 parseTriggerSet 文本解析，无注入风险）
+      if (!args?.scheduleType || !args?.scheduleValue || !args?.prompt) {
+        return { error: '缺少必填参数：scheduleType / scheduleValue / prompt', code: 'INVALID_ARGS' };
+      }
+      // menu 路径绕过了 parseTriggerSet 的校验，必须自行校验枚举/数值，
+      // 否则非法值会传到 calcNextFireAt 产出 NaN nextFireAt，污染 scheduler heap。
+      const schedErr = validateScheduleParams(args.scheduleType, String(args.scheduleValue));
+      if (schedErr) return { error: schedErr, code: 'INVALID_ARGS' };
+      const strategy = args.targetSessionStrategy ?? 'latest';
+      if (!['latest', 'current', 'thread'].includes(strategy)) {
+        return { error: `无效 targetSessionStrategy: ${strategy}`, code: 'INVALID_ARGS' };
+      }
+      const parsed: ParsedTriggerSet = {
+        scheduleType: args.scheduleType,
+        scheduleValue: String(args.scheduleValue),
+        prompt: String(args.prompt),
+        name: args.name,
+        targetChannel: args.targetChannel,
+        targetChannelId: args.targetChannelId,
+        targetThreadId: args.targetThreadId,
+        targetSessionStrategy: strategy,
+        agentId: args.agentId,
+      };
+      const r = await this.registerTriggerFromParsed(parsed, channel, channelId, userId ?? '', undefined);
+      if (!r.ok) return { error: r.error, code: /已存在|exists|重复/.test(r.error) ? 'CONFLICT' : 'INVALID_ARGS' };
+      return { data: { id: r.trigger.id, name: r.trigger.name, nextFireAt: r.trigger.nextFireAt } };
+    }
+
+    if (action === 'cancel') {
+      const nameOrId = args?.nameOrId;
+      if (!nameOrId) return { error: '缺少 nameOrId', code: 'INVALID_ARGS' };
+      if (!isAdmin && !userId) return { error: '无法确认身份，请确保渠道提供发送者 ID', code: 'FORBIDDEN' };
+      const trigger = isAdmin
+        ? (manager.getByName(nameOrId) ?? manager.getById(nameOrId))
+        : (manager.getByNameScoped(nameOrId, userId ?? '', channel) ?? manager.getByIdScoped(nameOrId, userId ?? '', channel));
+      if (!trigger) return { error: '触发器不存在或无权限', code: 'NOT_FOUND' };
+      manager.moveToDone(trigger.id, 'cancelled');
+      scheduler.cancel(trigger.id);
+      this.eventBus.publish({ type: 'trigger:cancelled', triggerId: trigger.id, name: trigger.name, by: userId ?? '' });
+      return { data: { id: trigger.id, cancelled: true } };
+    }
+
+    return { error: `不支持的 trigger action: ${action}`, code: 'INVALID_ARGS' };
+  }
+
+  if (cmdBase === '/topic') {
+    if (action !== 'delete') {
+      return { error: `不支持的 topic action: ${action}`, code: 'NOT_SUPPORTED' };
+    }
+    const target = (args?.target ?? '').toString().trim();
+    if (!target) return { error: '缺少 args.target', code: 'MISSING_VALUE' };
+    const topic = await this.sessionManager.getThreadSession(channel, channelId, target);
+    if (!topic) return { error: '话题不存在', code: 'NOT_FOUND' };
+    const chatType = this.resolveMenuChatType(channel, channelId, explicitChatType);
+    if (!this.canDeleteTopic(identity.role, chatType, topic, userId)) {
+      return { error: '无权限删除话题', code: 'FORBIDDEN' };
+    }
+    const success = await this.sessionManager.unbindSession(topic.id);
+    if (!success) return { error: '删除失败', code: 'DELETE_FAILED' };
+    this.eventBus.publish({ type: 'session:deleted', sessionId: topic.id });
+    const targetAgent = this.getAgent(channel, topic.agentId);
+    await targetAgent.closeSession?.(topic.id);
+    return { data: { deleted: true } };
+  }
+
+  // ── /session 系列 ──
+  if (cmdBase === '/session' || cmdBase === '/s') {
+    if (action === 'stop') {
+      if (!session) return { error: '当前无活跃会话', code: 'NO_ACTIVE_SESSION' };
+      const sessionKey = this.getQueueKey(session, channel, channelId);
+      const sessionAgent = this.getAgent(channel, session.agentId);
+      const hasActive = sessionAgent.hasActiveStream(sessionKey);
+      const queueLength = this.messageQueue.getQueueLength(sessionKey);
+      if (queueLength === 0 && !hasActive) {
+        return { error: '当前没有正在处理的任务', code: 'NO_ACTIVE_TASK' };
+      }
+      await sessionAgent.interrupt(sessionKey);
+      this.eventBus.publish({
+        type: 'task:interrupted',
+        sessionId: sessionKey,
+        reason: 'stop',
+        agentName: this.agentRegistry?.resolveByChannel(channel)?.name ?? '<unknown>',
+      });
+      this.sessionManager.clearProcessing(sessionKey);
+      return { data: { action: 'stop', success: true } };
+    }
+
+    if (action === 'new') {
+      const name = (args?.name ?? '').toString().trim();
+      return await this.delegateAsAction(action, name ? `/new ${name}` : '/new', channel, channelId, userId, { enrichSession: true });
+    }
+
+    if (action === 'delete') {
+      const target = (args?.target ?? '').toString().trim();
+      if (!target) return { error: '缺少 args.target', code: 'MISSING_VALUE' };
+      return await this.delegateAsAction(action, `/del ${target}`, channel, channelId, userId);
+    }
+
+    if (action === 'switch') {
+      const target = (args?.target ?? '').toString().trim();
+      if (!target) return { error: '缺少 args.target', code: 'MISSING_VALUE' };
+      return await this.delegateAsAction(action, `/s ${target}`, channel, channelId, userId, { enrichSession: true });
+    }
+
+    if (action === 'compact') {
+      const need = this.requireSession(session);
+      if (need) return need;
+      return await this.delegateAsAction(action, '/compact', channel, channelId, userId);
+    }
+
+    if (action === 'fork') {
+      const need = this.requireSession(session);
+      if (need) return need;
+      const name = (args?.name ?? '').toString().trim();
+      return await this.delegateAsAction(action, name ? `/fork ${name}` : '/fork', channel, channelId, userId, { enrichSession: true });
+    }
+
+    return { error: `不支持的 session action: ${action}`, code: 'NOT_SUPPORTED' };
+  }
+
+  // ── /system 系列 ──
+  if (cmdBase === '/system') {
+    // D1 迁移：进程级鉴权统一查 evolclaw.json owners，替代各 action 内联的 identity.role 判断
+    if (!isProcessLevelOwner(userId, loadEvolclawConfig().owners)) {
+      return { error: '操作需要 owner 权限', code: 'FORBIDDEN' };
+    }
+    if (action === 'restart') {
+      const restartInfo: Record<string, any> = { channel, channelId, timestamp: Date.now() };
+      fs.writeFileSync(path.join(resolvePaths().dataDir, 'restart-pending.json'), JSON.stringify(restartInfo));
+      const { spawn } = await import('child_process');
+      spawn('node', [path.join(getPackageRoot(), 'dist', 'cli', 'index.js'), 'restart-monitor'], {
+        detached: true,
+        stdio: 'ignore',
+        env: { ...process.env, EVOLCLAW_HOME: resolvePaths().root }
+      }).unref();
+      this.eventBus.publish({ type: 'system:restart', channel, channelId });
+      setTimeout(() => { process.kill(process.pid, 'SIGTERM'); }, 1000);
+      return { data: { action: 'restart', success: true } };
+    }
+
+    if (action === 'check') {
+      const r = await this.delegateAsAction(action, '/check', channel, channelId, userId, { overrideIdentity });
+      const structured = (r as any).data?.structured ?? null;
+      if (structured) return { data: { ...(r as any).data, ...structured } };
+      return r as any;
+    }
+
+    if (action === 'upgrade') {
+      const devMode = isLinkedInstall();
+      const localEvolclaw = getLocalVersion();
+      // fastaun 本地版本：从 node_modules 读取（与 menu.query name=system 一致）
+      let localFastaun: string | null = null;
+      try {
+        const fp = path.join(getPackageRoot(), 'node_modules', '@agentunion', 'fastaun', 'package.json');
+        localFastaun = JSON.parse(fs.readFileSync(fp, 'utf-8'))?.version ?? null;
+      } catch {}
+      const [evolclawRemote, fastaunRemote, ecwebRemote] = await Promise.all([
+        checkLatestVersion('evolclaw'),
+        checkLatestVersion('@agentunion/fastaun'),
+        checkLatestVersion('evolclaw-web'),
+      ]);
+      const cmp = (local: string | null, remote: string | null) =>
+        !!(local && remote && compareVersions(local, remote) < 0);
+      return {
+        data: {
+          devMode,
+          evolclaw: { local: localEvolclaw, remote: evolclawRemote, hasUpdate: cmp(localEvolclaw, evolclawRemote) },
+          fastaun:  { local: localFastaun, remote: fastaunRemote, hasUpdate: cmp(localFastaun, fastaunRemote) },
+          // ecweb 本地版本由 ECWeb 进程自身注入（data.ecwebVersion），此处仅给 remote
+          ecweb:    { remote: ecwebRemote },
+        },
+      };
+    }
+
+    return { error: `不支持的 system action: ${action}`, code: 'NOT_SUPPORTED' };
+  }
+
+  // ── /cli 透传 ──
+  if (cmdBase === '/cli') {
+    if (action !== 'exec') return { error: `不支持的 cli action: ${action}`, code: 'NOT_SUPPORTED' };
+    if (identity.role !== 'owner') return { error: '无权限：CLI 执行仅限 owner', code: 'NO_PERMISSION' };
+
+    const argv = Array.isArray(args?.argv) ? args.argv.map((x: any) => String(x))
+               : typeof args?.command === 'string' ? tokenizeArgv(args.command)
+               : null;
+    if (!argv || argv.length === 0) return { error: '缺少 argv 或 command', code: 'MISSING_VALUE' };
+
+    const allowed = CLI_EXEC_WHITELIST[argv[0]];
+    if (!allowed) return { error: `命令不在白名单: ${argv[0]}`, code: 'NOT_ALLOWED' };
+    if (allowed !== '*' && !allowed.has(argv[1] ?? '')) {
+      return { error: `子命令不在白名单: ${argv[0]} ${argv[1] ?? ''}`, code: 'NOT_ALLOWED' };
+    }
+    return await this.execCliPassthrough(argv);
+  }
+
+  // ── name=file action=fetch：拉取文件（§5.2） ──
+  // 内部等价于 /file <path>：复用 resolveMenuFilePath 校验链 + adapter.send(result.file)。
+  // 文件作为独立 result.file 消息异步发回；把请求 id 作为 correlationId 透传，
+  // 客户端用它把异步到达的文件消息对回这次 fetch 点击（§7.1）。
+  if (cmdBase === '/file') {
+    if (action !== 'fetch') return { error: `不支持的 file action: ${action}`, code: 'NOT_SUPPORTED' };
+    // 权限（§6.3）：agent owner/admin 或 aid channel owner。项目外文件仅 owner（§6.2，由 resolveMenuFilePath 校验）。
+    if (identity.role !== 'owner' && identity.role !== 'admin') {
+      return { error: '无权限', code: 'NO_PERMISSION' };
+    }
+    const resolved = resolveMenuFilePath(args?.path, session, identity.role);
+    if ('error' in resolved) return resolved;
+    const { realPath, stat } = resolved;
+
+    if (stat.size > FILE_FETCH_MAX_SIZE) {
+      return { error: `文件过大: ${(stat.size / 1024 / 1024).toFixed(1)} MB (限制 ${FILE_FETCH_MAX_SIZE / 1024 / 1024} MB)`, code: 'FILE_TOO_LARGE' };
+    }
+
+    const adapter = this.adapters.get(channel);
+    if (!adapter) return { error: '通道不存在', code: 'EXEC_FAILED' };
+    if (!adapter.capabilities?.file) return { error: '通道不支持文件发送', code: 'NOT_SUPPORTED' };
+
+    try {
+      const replyCtx = session ? this.getReplyContext(session) : undefined;
+      await adapter.send(
+        buildEnvelope({ channel: adapter.channelName, channelId, replyContext: replyCtx }),
+        { kind: 'result.file', filePath: realPath, correlationId: requestId },
+      );
+      return { data: { action: 'fetch', success: true, size: stat.size } };
+    } catch (e: any) {
+      return { error: `文件发送失败: ${e?.message ?? e}`, code: 'EXEC_FAILED' };
+    }
+  }
+
+  return { error: `不支持 action: ${cmdBase}`, code: 'NOT_SUPPORTED' };
+}
+
+/** ECWeb 专用入口：注入 owner identity，进程级操作检查 owners 非空。不暴露 cli。 */
+export async function execMenuForEcweb(this: any, payload: any): Promise<import('../../types.js').MenuResponse> {
+  const id = payload?.id ?? '';
+  const name = payload?.name;
+
+  if (name === 'cli' || payload?.cmd === '/cli') {
+    return { type: 'menu.response', id, name, error: { code: 'NOT_SUPPORTED', message: 'cli 不在 ECWeb 控制范围' } };
+  }
+
+  const isProcessLevel = name === 'system' || name === 'agent';
+  const owners = loadEvolclawConfig().owners ?? [];
+  if (isProcessLevel && owners.length === 0) {
+    return { type: 'menu.response', id, name, error: { code: 'FORBIDDEN', message: '请在 evolclaw.json 配置 owners 后使用进程级操作' } };
+  }
+
+  const ECWEB_CHANNEL = '__ecweb__';
+  // payload.agent（aid 或 name）时，用该 agent 的首个 channel 实例作为 channel 参数，
+  // 让 execMenuQuery / execMenuUpdate 能按真实 agent 解析 model/effort/perm 等会话级配置。
+  // system / agent 两个进程级 name 不走此路径，仍用 ECWEB_CHANNEL。
+  const agentChannelKey = (() => {
+    if (!payload?.agent || isProcessLevel) return ECWEB_CHANNEL;
+    const handle = this.agentRegistry?.get(payload.agent) ?? null;
+    return handle?.channelInstanceNames()?.[0] ?? ECWEB_CHANNEL;
+  })();
+  const ownerIdentity: import('../../types.js').SessionIdentity = { role: 'owner', mode: 'interactive' };
+  // 进程级操作用 owners[0] 让 isProcessLevelOwner() 通过；其余传 undefined
+  const userId = isProcessLevel ? (owners[0] ?? '') : undefined;
+
+  const nameMap: Record<string, string> = {
+    pwd: '/pwd', session: '/session', baseagent: '/baseagent', model: '/model',
+    topic: '/topic',
+    effort: '/effort', chatmode: '/chatmode', dispatch: '/dispatch',
+    permission: '/perm', activity: '/activity', system: '/system',
+    agent: '/agent', trigger: '/trigger', file: '/file',
+  };
+  const cmd = name ? (nameMap[name] ?? payload.cmd) : payload.cmd;
+
+  try {
+    switch (payload?.type) {
+      case 'menu.list':
+        return { type: 'menu.response', id, data: this.getMenuItems('owner', 'private') };
+
+      case 'menu.query': {
+        if (!cmd) return ecwebErr(id, name, 'MISSING_CMD', '缺少 name/cmd');
+        const r = await this.execMenuQuery(cmd, agentChannelKey, agentChannelKey, userId, payload.args);
+        return ecwebResp(id, name, r);
+      }
+
+      case 'menu.options': {
+        if (!cmd) return ecwebErr(id, name, 'MISSING_CMD', '缺少 name/cmd');
+        const data = await this.getSubMenuItems(cmd, agentChannelKey, agentChannelKey, userId, payload.args, ownerIdentity) ?? [];
+        return { type: 'menu.response', id, name, data };
+      }
+
+      case 'menu.update': {
+        if (!cmd) return ecwebErr(id, name, 'MISSING_CMD', '缺少 name/cmd');
+        if (!payload.value) return ecwebErr(id, name, 'MISSING_VALUE', '缺少 value');
+        const r = await this.execMenuUpdate(cmd, payload.value, agentChannelKey, agentChannelKey, userId, ownerIdentity);
+        return ecwebResp(id, name, r);
+      }
+
+      case 'menu.action': {
+        if (!cmd) return ecwebErr(id, name, 'MISSING_CMD', '缺少 name/cmd');
+        if (!payload.action) return ecwebErr(id, name, 'MISSING_VALUE', '缺少 action');
+        const r = await this.execMenuAction(cmd, payload.action, payload.args, agentChannelKey, agentChannelKey, userId, ownerIdentity, undefined, id);
+        return ecwebResp(id, name, r);
+      }
+
+      default:
+        return ecwebErr(id, name, 'NOT_SUPPORTED', `未知类型: ${payload?.type}`);
+    }
+  } catch (e: any) {
+    return ecwebErr(id, name, 'INTERNAL', e?.message ?? String(e));
+  }
+}

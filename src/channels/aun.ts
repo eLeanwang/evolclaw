@@ -259,6 +259,19 @@ export class AUNChannel {
     return name && name !== short ? `${short}(${name})` : short;
   }
 
+  private notifyCardActionFailure(channelId: string | undefined, text: string, operatorId?: string, threadId?: string): void {
+    if (!channelId) {
+      logger.warn(`${this.logPrefix()} Card action failure without channelId: ${text}`);
+      return;
+    }
+    const context: ReplyContext = {};
+    if (threadId) context.threadId = threadId;
+    if (operatorId && this.isGroupId(channelId)) context.peerId = operatorId;
+    void this.sendMessage(channelId, text, context).catch((err: unknown) => {
+      logger.error(`${this.logPrefix()} Failed to send card action error:`, err);
+    });
+  }
+
   private extractTextPayload(payload: unknown, channelId?: string, senderAid?: string): string {
     if (typeof payload === 'string') return payload;
     if (payload && typeof payload === 'object') {
@@ -273,6 +286,7 @@ export class AUNChannel {
         if (cardInfo) {
           const actionValue = typeof obj.value === 'string' ? obj.value
             : typeof obj.action_value === 'string' ? obj.action_value : text;
+          const threadId = typeof obj.thread_id === 'string' ? obj.thread_id : undefined;
 
           // 卡片点击者身份：只信认证信封（senderAid 参数，由调用方从 msg.from / msg.sender_aid 提取）。
           // payload 自报字段（from / sender_aid / user_id）不可信，可被客户端伪造，不读取。
@@ -289,10 +303,11 @@ export class AUNChannel {
               if (chatType === 'group' && cardInfo.initiatorAid && cardClickerAid
                 && cardClickerAid !== cardInfo.initiatorAid) {
                 logger.info(`${this.logPrefix()} CommandCard rejected: clicker=${cardClickerAid} initiator=${cardInfo.initiatorAid} mid=${cardMsgId}`);
+                this.notifyCardActionFailure(channelId, '⚠️ 仅卡片发起者可操作', cardClickerAid, threadId);
                 return '';
               }
 
-              this.messageHandler({
+              Promise.resolve(this.messageHandler({
                 channelId: channelId || '',
                 chatType,
                 content: actionValue,
@@ -300,7 +315,15 @@ export class AUNChannel {
                 peerName: typeof obj.label === 'string' ? obj.label : typeof obj.action_label === 'string' ? obj.action_label : undefined,
                 messageId: `card-trigger-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
                 source: 'card-trigger',
+              })).catch((err: unknown) => {
+                logger.error(`${this.logPrefix()} CommandCard handler failed: action=${actionValue} mid=${cardMsgId}`, err);
+                const message = err instanceof Error && err.message ? err.message : String(err || '未知错误');
+                this.notifyCardActionFailure(channelId, `❌ 操作失败: ${message}`, cardClickerAid, threadId);
               });
+            } else if (!this.messageHandler) {
+              this.notifyCardActionFailure(channelId, '❌ 操作失败：命令处理器未就绪', cardClickerAid, threadId);
+            } else {
+              this.notifyCardActionFailure(channelId, '❌ 操作失败：无效的卡片命令', cardClickerAid, threadId);
             }
           } else {
             // ActionInteraction：走 interactionCallback → InteractionRouter
@@ -314,10 +337,13 @@ export class AUNChannel {
                 values: { text, action_label: obj.label ?? obj.action_label, behavior: obj.behavior },
                 operatorId: cardClickerAid || undefined,
               });
+            } else {
+              this.notifyCardActionFailure(channelId, '❌ 操作失败：交互处理器未就绪', cardClickerAid, threadId);
             }
           }
         } else {
           logger.debug(`${this.logPrefix()} action_card_reply dropped: cardMsgId=${cardMsgId} hasCallback=${!!this.interactionCallback}`);
+          this.notifyCardActionFailure(channelId, '⚠️ 卡片已失效，请重新发起');
         }
         // 始终返回空字符串，阻止消息分发给 agent
         return '';
@@ -2545,6 +2571,8 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       if (context?.threadId) filePayload.thread_id = context.threadId;
       if (context?.metadata?.taskId) filePayload.task_id = context.metadata.taskId;
       if (context?.metadata?.chatmode) filePayload.chatmode = context.metadata.chatmode;
+      // file-link-cache: 回带点击请求的 correlationId，客户端用它把异步到达的文件消息对回这次 fetch 点击
+      if (context?.metadata?.correlationId) filePayload.correlation_id = context.metadata.correlationId;
       const isGroup = this.isGroupId(channelId);
       const fileTargetAid = channelId;
 
@@ -2989,9 +3017,13 @@ export class AUNChannelPlugin implements ChannelPlugin {
             await channel.sendMessage(channelId, payload.text, sendCtx);
             return;
           }
-          case 'result.file':
-            await channel.sendFile(channelId, payload.filePath, replyCtx);
+          case 'result.file': {
+            const fileCtx: ReplyContext = payload.correlationId
+              ? { ...(replyCtx ?? {}), metadata: { ...(replyCtx?.metadata ?? {}), correlationId: payload.correlationId } }
+              : replyCtx;
+            await channel.sendFile(channelId, payload.filePath, fileCtx);
             return;
+          }
           case 'result.image': {
             const buf = payload.data as Buffer;
             const b64 = buf.toString('base64');
@@ -3053,7 +3085,7 @@ export class AUNChannelPlugin implements ChannelPlugin {
                 type: 'action_card',
                 title: card.title,
                 actions: (card as CommandCard).buttons.map(btn => ({
-                  label: btn.label, value: btn.command, style: btn.style ?? 'default', behavior: 'reply',
+                  label: btn.label, value: btn.command, style: btn.style ?? 'default', behavior: 'reply', disabled: btn.disabled || undefined,
                 })),
               };
               if (card.body) aunCard.description = card.body;

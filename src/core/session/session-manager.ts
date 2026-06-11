@@ -13,6 +13,7 @@ import {
 } from './session-fs-store.js';
 import { sessionToFile, fileToSession } from './session-mapper.js';
 import { formatSessionKey, DEFAULT_THREAD_ID } from './session-key.js';
+import { tryParseChannelKey } from '../channel-loader.js';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
@@ -144,6 +145,29 @@ export class SessionManager {
     return chatDirPath(this.sessionsDir, session.channelType, session.channelId, session.selfAID);
   }
 
+  private deriveChannelIdentity(channel: string, channelId: string): { channelType: string; selfAID: string } {
+    const parsed = tryParseChannelKey(channel);
+    if (parsed) {
+      return { channelType: parsed.type, selfAID: parsed.type === 'aun' ? parsed.selfAID : '' };
+    }
+
+    const existingDir = this.findExistingChatDir(channel, channelId);
+    if (existingDir) {
+      const active = readJsonFile<SessionFile>(path.join(existingDir, 'active.json'));
+      if (active) {
+        return { channelType: active.channelType || channel, selfAID: active.selfAID || '' };
+      }
+      for (const metaFile of scanMetaFiles(existingDir)) {
+        const meta = readLastJsonlLine<SessionFile>(path.join(existingDir, metaFile));
+        if (meta) {
+          return { channelType: meta.channelType || channel, selfAID: meta.selfAID || '' };
+        }
+      }
+    }
+
+    return { channelType: channel, selfAID: '' };
+  }
+
   /** Public accessor: get the chat directory path for a session (for message log etc.) */
   getChatDir(session: Session): string {
     return this.resolveChatDirFromSession(session);
@@ -163,6 +187,27 @@ export class SessionManager {
    * 用于不知道 channelType/selfAID 的 caller 在调用 resolveChatDir 前定位已有目录。
    */
   private findExistingChatDir(channel: string, channelId: string): string | undefined {
+    const parsed = tryParseChannelKey(channel);
+    if (parsed) {
+      const exactDir = this.resolveChatDir(channel, channelId, parsed.type, parsed.type === 'aun' ? parsed.selfAID : undefined);
+      const active = readJsonFile<SessionFile>(path.join(exactDir, 'active.json'));
+      if (active && active.channel === channel) return exactDir;
+      for (const mf of scanMetaFiles(exactDir)) {
+        const meta = readLastJsonlLine<SessionFile>(path.join(exactDir, mf));
+        if (meta && meta.channel === channel) return exactDir;
+      }
+      const threadsDir = path.join(exactDir, '_threads');
+      if (fs.existsSync(threadsDir)) {
+        const threadMetas = scanMetaFiles(threadsDir);
+        for (const mf of threadMetas) {
+          const meta = readLastJsonlLine<SessionFile>(path.join(threadsDir, mf));
+          if (meta && meta.channel === channel) return exactDir;
+        }
+      }
+      if (fs.existsSync(exactDir)) return exactDir;
+      return undefined;
+    }
+
     const dirs = scanChatDirs(this.sessionsDir);
     for (const d of dirs) {
       if (d.channelId !== channelId) continue;
@@ -737,7 +782,8 @@ export class SessionManager {
     logger.info(`[SessionManager] switchProject: channel=${channel} channelId=${channelId} newPath=${newProjectPath} agent=${agentId}`);
     const inheritedChatType = this.getActiveChatType(channel, channelId);
 
-    const chatDir = this.ensureResolvedChatDirSafe(channel, channelId);
+    const identity = this.deriveChannelIdentity(channel, channelId);
+    const chatDir = this.ensureResolvedChatDir(channel, channelId, identity.channelType, identity.selfAID);
     const allSessions = this.findAllSessionsInChat(chatDir, false);
     const target = allSessions
       .filter(s => s.projectPath === newProjectPath && (s.agentId || 'claude') === agentId && !s.threadId)
@@ -752,8 +798,8 @@ export class SessionManager {
 
     // Derive selfAID and channelType from existing sessions in this chatDir
     const existingAny = allSessions[0];
-    const selfAID = existingAny?.selfAID || '';
-    const channelType = existingAny?.channelType || channel;
+    const selfAID = existingAny?.selfAID || identity.selfAID;
+    const channelType = existingAny?.channelType || identity.channelType;
 
     const session: Session = {
       id: generateSessionId(),
@@ -805,12 +851,10 @@ export class SessionManager {
 
   async switchAgent(channel: string, channelId: string, projectPath: string, newAgentId: string): Promise<Session> {
     const inheritedChatType = this.getActiveChatType(channel, channelId);
-    // Derive channelType/selfAID from existing sessions; fall back to channel name
-    const probeChatDir = this.resolveChatDir(channel, channelId, channel, '');
-    const probeSessions = fs.existsSync(probeChatDir) ? this.findAllSessionsInChat(probeChatDir, false) : [];
-    const existingAny = probeSessions[0];
-    const channelType = existingAny?.channelType || channel;
-    const selfAID = existingAny?.selfAID || '';
+    const identity = this.deriveChannelIdentity(channel, channelId);
+    // Derive channelType/selfAID from existing sessions; fall back to parsed channel key.
+    const channelType = identity.channelType;
+    const selfAID = identity.selfAID;
     const chatDir = this.ensureResolvedChatDir(channel, channelId, channelType, selfAID);
     const allSessions = this.findAllSessionsInChat(chatDir, false);
     const target = allSessions
@@ -1045,8 +1089,9 @@ export class SessionManager {
 
     // Derive selfAID and channelType from existing sessions
     const existingDir = this.findExistingChatDir(channel, channelId);
-    let channelType = channel;
-    let selfAID = '';
+    const identity = this.deriveChannelIdentity(channel, channelId);
+    let channelType = identity.channelType;
+    let selfAID = identity.selfAID;
     let inheritedRole: SessionIdentity['role'] = 'guest';
     if (existingDir) {
       const active = readJsonFile<SessionFile>(path.join(existingDir, 'active.json'));
@@ -1184,8 +1229,9 @@ export class SessionManager {
 
     // Derive selfAID and channelType from existing sessions
     const existingDir = this.findExistingChatDir(channel, channelId);
-    let channelType = channel;
-    let selfAID = '';
+    const identity = this.deriveChannelIdentity(channel, channelId);
+    let channelType = identity.channelType;
+    let selfAID = identity.selfAID;
     if (existingDir) {
       const active = readJsonFile<SessionFile>(path.join(existingDir, 'active.json'));
       if (active) {

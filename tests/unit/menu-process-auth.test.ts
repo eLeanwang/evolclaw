@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isProcessLevelOwner } from '../../src/core/command-handler.js';
+import { isProcessLevelOwner } from '../../src/core/command/command-handler.js';
 
 describe('isProcessLevelOwner (owners from evolclaw.json)', () => {
   it('allows AID in owners list', () => {

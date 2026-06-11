@@ -8,7 +8,7 @@ import { resolvePaths } from '../../paths.js';
 import type { SessionManager } from '../session/session-manager.js';
 import type { MessageProcessor } from './message-processor.js';
 import type { MessageQueue } from './message-queue.js';
-import type { CommandHandler as CmdHandler } from '../command-handler.js';
+import type { CommandHandler as CmdHandler } from '../command/command-handler.js';
 import type { EventBus } from '../event-bus.js';
 import type { Message, InboundMessage, ChannelAdapter, ReplyContext, EvolAgentRegistryHandle, OutboundPayload, MenuListRequest, MenuQueryRequest, MenuOptionsRequest, MenuUpdateRequest, MenuActionRequest, MenuResponse } from '../../types.js';
 
@@ -254,6 +254,7 @@ export class MessageBridge {
     cli: '/cli',
     agent: '/agent',
     trigger: '/trigger',
+    file: '/file',
   };
 
   private extractTopicName(msg: InboundMessage): string | undefined {
@@ -399,7 +400,7 @@ export class MessageBridge {
     try {
       if (!action) throw { code: 'MISSING_VALUE', message: '缺少 action 参数' };
       const resolvedCmd = this.resolveCmd(name, cmd);
-      const result = await this.cmdHandler.execMenuAction(resolvedCmd, action, args, channel, msg.channelId, msg.peerId, undefined, msg.chatType);
+      const result = await this.cmdHandler.execMenuAction(resolvedCmd, action, args, channel, msg.channelId, msg.peerId, undefined, msg.chatType, id);
       if ('error' in result) throw { code: result.code || 'EXEC_FAILED', message: result.error };
       await this.sendMenuResponse(adapter, channel, msg.channelId,
         { type: 'menu.response', id, name, data: result.data }, sendReply);
@@ -527,5 +528,14 @@ export class MessageBridge {
   dispose(): void {
     for (const d of this.debouncers.values()) d.dispose();
     this.debouncers.clear();
+  }
+
+  /** 注销单个渠道的 debouncer（热重载断开渠道时调用） */
+  removeChannel(channelName: string): void {
+    const d = this.debouncers.get(channelName);
+    if (d) {
+      d.dispose();
+      this.debouncers.delete(channelName);
+    }
   }
 }

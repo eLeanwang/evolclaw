@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { CommandHandler } from '../../src/core/command-handler.js';
+import { CommandHandler } from '../../src/core/command/command-handler.js';
 import { EventBus } from '../../src/core/event-bus.js';
 import type { EvolAgentHandle, EvolAgentRegistryHandle } from '../../src/types.js';
 

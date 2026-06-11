@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { CommandHandler } from '../../src/core/command-handler.js';
+import { CommandHandler } from '../../src/core/command/command-handler.js';
 import { EventBus } from '../../src/core/event-bus.js';
 
 // D1：/system 进程级鉴权查 evolclaw.json.owners。默认让 user1 在 owners 名单内，

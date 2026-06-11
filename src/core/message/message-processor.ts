@@ -282,6 +282,26 @@ export class MessageProcessor {
   }
 
   /**
+   * 注销渠道适配器（热重载断开渠道时调用，避免遗留死实例）。
+   * channelTypeMap 若指向被删实例，重定向到同类型的另一存活实例（无则删除映射）。
+   */
+  unregisterChannel(channelName: string): void {
+    const info = this.channels.get(channelName);
+    this.channels.delete(channelName);
+    const type = info?.options?.channelType || channelName;
+    if (this.channelTypeMap.get(type) === channelName) {
+      this.channelTypeMap.delete(type);
+      // 重定向到同类型的另一存活实例（保持按类型名路由可用）
+      for (const [name, ci] of this.channels) {
+        if ((ci.options?.channelType || name) === type) {
+          this.channelTypeMap.set(type, name);
+          break;
+        }
+      }
+    }
+  }
+
+  /**
    * 获取渠道适配器（支持实例名和 channelType）
    */
   getAdapter(channelName: string): ChannelAdapter | undefined {

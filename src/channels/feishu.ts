@@ -412,6 +412,8 @@ export class FeishuChannel {
             }
           } catch (err) {
             logger.error('[Feishu] Failed to handle card action:', err);
+            const detail = err instanceof Error && err.message ? err.message : String(err || '未知错误');
+            return { toast: { type: 'error', content: `❌ 操作失败: ${detail}` } };
           }
         },
       });

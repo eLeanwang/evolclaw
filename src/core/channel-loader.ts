@@ -243,13 +243,15 @@ export interface ReloadHooksDeps {
   channelLoader: ChannelLoader;
   channelInstances: ChannelInstance[];
   registerChannelInstance: (inst: ChannelInstance) => void;
+  /** 注销渠道在 core 各 map 中的登记（processor/cmdHandler/bridge）。热重载断开渠道时调用。 */
+  unregisterChannelInstance?: (channelName: string) => void;
   messageQueue?: { isChannelProcessing(channelName: string): boolean };
   drainDelayMs?: number;
   drainTimeoutMs?: number;
 }
 
 export function buildReloadHooks(deps: ReloadHooksDeps): ReloadHooks {
-  const { channelLoader, channelInstances, registerChannelInstance, messageQueue } = deps;
+  const { channelLoader, channelInstances, registerChannelInstance, unregisterChannelInstance, messageQueue } = deps;
   const drainDelayMs = deps.drainDelayMs ?? 500;
   const drainTimeoutMs = deps.drainTimeoutMs ?? 30000;
 
@@ -282,6 +284,8 @@ export function buildReloadHooks(deps: ReloadHooksDeps): ReloadHooks {
         await inst.disconnect();
         const idx = channelInstances.indexOf(inst);
         if (idx >= 0) channelInstances.splice(idx, 1);
+        // 从 core 各 map 注销，避免死实例残留在 /status「未归属渠道」、菜单路由和 adapter 查找里
+        unregisterChannelInstance?.(channelName);
         logger.info(`[Reload] Disconnected channel: ${channelName}`);
       } catch (e) {
         logger.error(`[Reload] Failed to disconnect ${channelName}: ${e}`);

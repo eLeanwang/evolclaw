@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { CommandHandler } from '../../src/core/command-handler.js';
+import { CommandHandler } from '../../src/core/command/command-handler.js';
 import { EventBus } from '../../src/core/event-bus.js';
 import type { Config, ChannelAdapter } from '../../src/types.js';
 

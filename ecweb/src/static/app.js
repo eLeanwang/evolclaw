@@ -150,6 +150,7 @@ let msgSel = { aid: null, peer: null };
 let sessSel = { sessionId: null, project: null };
 let trigSel = { agent: null };
 let sessSearch = '';
+let sessFilterNormal = false; // true=只显示有效会话（userMsgs >= 2）
 let sessChatMode = false;   // false=完整视图，true=对话视图（折叠处理过程）
 
 function switchView(view) {
@@ -502,17 +503,19 @@ function renderSession(data) {
 
   // 搜索过滤
   const q = sessSearch.trim().toLowerCase();
-  const filtered = q
-    ? transcripts.filter(t => (t.title || '').toLowerCase().includes(q) || (t.firstUser || '').toLowerCase().includes(q))
-    : transcripts;
+  const filtered = transcripts
+    .filter(t => !sessFilterNormal || (t.userMsgs || 0) >= 2)
+    .filter(t => !q || (t.title || '').toLowerCase().includes(q) || (t.firstUser || '').toLowerCase().includes(q));
 
   // 左栏：过滤条 + 列表
   const projOpts = projects.map(p =>
     `<option value="${esc(p.encoded)}"${p.encoded === sessSel.project ? ' selected' : ''}>${esc(p.label)} (${p.count})</option>`
   ).join('');
+  const normalCount = transcripts.filter(t => (t.userMsgs || 0) >= 2).length;
   let listHtml = '<div class="sess-filter">' +
     `<select id="sess-project">${projOpts}</select>` +
     `<input id="sess-search" type="text" placeholder="搜索标题/首条消息…" value="${esc(sessSearch)}">` +
+    `<button id="sess-filter-btn" class="ctrl-btn${sessFilterNormal ? ' active' : ''}" title="只显示有效会话（≥2 条用户消息）">有效 ${normalCount}</button>` +
     `<div class="sess-count">${filtered.length} / ${transcripts.length} 个会话</div></div>` +
     '<div class="sess-items">';
 
@@ -543,6 +546,8 @@ function renderSession(data) {
     sessSearch = '';
     subscribe('session', { project: sessSel.project });
   };
+  const filterBtn = $('#sess-filter-btn');
+  if (filterBtn) filterBtn.onclick = () => { sessFilterNormal = !sessFilterNormal; renderSession(state.session); };
   const searchEl = $('#sess-search');
   if (searchEl) {
     searchEl.oninput = () => { sessSearch = searchEl.value; renderSession(state.session); };
@@ -872,6 +877,41 @@ async function agentOpEdit(aid) {
 }
 
 // ── System 视图 ──
+function channelHealthRow(c) {
+  const dot = c.connected ? 'on' : (c.aidStatus === 'reconnecting' || c.aidStatus === 'kicked' ? 'idle' : 'off');
+  let meta = '';
+  if (c.aidStatus && c.aidStatus !== 'connected') meta += ` <span style="color:var(--dim)">${esc(c.aidStatus)}</span>`;
+  if (c.reconnectCount > 0) meta += ` <span style="color:var(--dim)">重连 ${c.reconnectCount}</span>`;
+  if (c.flapCount > 0) meta += ` <span style="color:var(--red)">抖动 ${c.flapCount}</span>`;
+  const reason = c.kickReason || c.lastError;
+  if (reason && !c.connected) meta += ` <span style="color:var(--red)" title="${esc(reason)}">"${esc(reason)}"</span>`;
+  return `<div class="ch-row"><span class="dot ${dot}"></span>${esc(c.type)}${c.instName && c.instName !== c.type ? ' ' + esc(c.instName) : ''}${meta}</div>`;
+}
+
+function agentHealthCard(ag) {
+  const dot = ag.status === 'running' ? 'on' : ag.status === 'disabled' ? 'idle' : 'off';
+  let h = `<div class="agent-health-card">`;
+  h += `<div class="ahc-head"><span class="dot ${dot}"></span><span class="ahc-aid">${esc(ag.aid || ag.name)}</span><span class="ahc-status">${esc(ag.status)}</span></div>`;
+  // 项目路径
+  if (ag.projectPath) h += `<div class="ahc-row"><span class="ahc-k">项目</span><span class="ahc-v ahc-path" title="${esc(ag.projectPath)}">${esc(ag.projectPath)}</span></div>`;
+  // 后端
+  const backend = [ag.baseagent, ag.model, ag.effort].filter(Boolean).map(esc).join(' · ');
+  h += `<div class="ahc-row"><span class="ahc-k">后端</span><span class="ahc-v">${backend || '—'}</span></div>`;
+  // 渠道
+  let chans = '';
+  for (const c of (ag.channels || [])) chans += channelHealthRow(c);
+  h += `<div class="ahc-row"><span class="ahc-k">渠道</span><span class="ahc-v">${chans || '<span style="color:var(--dim)">无</span>'}</span></div>`;
+  // 负载
+  const load = `${ag.processing ?? 0} 处理中 · ${ag.pending ?? 0} 待处理 · ${ag.activeSessions ?? 0} 会话`;
+  h += `<div class="ahc-row"><span class="ahc-k">负载</span><span class="ahc-v">${load}</span></div>`;
+  // 活动
+  if (ag.lastActivity) h += `<div class="ahc-row"><span class="ahc-k">活动</span><span class="ahc-v">${fmtAgo(ag.lastActivity)} 前</span></div>`;
+  // 错误
+  if (ag.error) h += `<div class="ahc-err">⚠ ${esc(String(ag.error).slice(0, 120))}</div>`;
+  h += '</div>';
+  return h;
+}
+
 function renderSystem(data) {
   const el = $('#view-system');
   if (!data) { el.innerHTML = '<div class="empty">加载中…</div>'; return; }
@@ -913,45 +953,26 @@ function renderSystem(data) {
   // ③ 健康快照
   if (chk) {
     html += '<div class="sys-health">';
-    // 渠道 + 队列
-    html += '<div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:8px">';
-    html += '<div class="cache-card" style="min-width:180px"><div class="card-label">渠道健康</div>';
-    for (const ch of (chk.channels || [])) {
-      for (const inst of (ch.instances || [])) {
-        const dot = inst.connected ? 'on' : 'idle';
-        html += `<div><span class="dot ${dot}"></span>${esc(ch.type)}${inst.name !== ch.type ? ' ' + esc(inst.name) : ''}</div>`;
-      }
-    }
-    html += '</div>';
-    html += `<div class="cache-card"><div class="card-label">队列</div><div>待处理 ${chk.queue?.pending ?? 0}</div><div>处理中 ${chk.queue?.processing ?? 0}</div></div>`;
-    html += '</div>';
-    // 近 1 小时
+    // 队列 + 近 1 小时（数字卡片同一行）
+    html += '<div class="cache-cards" style="margin-bottom:8px">';
+    html += `<div class="cache-card"><div class="card-label">队列</div><div class="card-val">${chk.queue?.pending ?? 0} 待 · ${chk.queue?.processing ?? 0} 处理中</div></div>`;
     const h = chk.lastHour;
     if (h) {
       const errDetail = h.errors > 0 ? ` (${Object.entries(h.errorsByType || {}).map(([t, c]) => `${t}:${c}`).join(', ')})` : '';
-      html += `<div class="cache-card" style="margin-bottom:8px"><div class="card-label">近 1 小时</div>` +
-        `<div>收到 ${h.received} · 完成 ${h.completed} · 出错 ${h.errors}${errDetail}</div>` +
-        `<div>中断 ${h.interrupts}${h.completed > 0 ? ' · 平均 ' + (h.avgResponseMs / 1000).toFixed(1) + 's' : ''}</div>` +
-        `</div>`;
+      const avg = h.completed > 0 ? ` · 均 ${(h.avgResponseMs / 1000).toFixed(1)}s` : '';
+      html += `<div class="cache-card"><div class="card-label">近 1 小时</div><div class="card-val">收 ${h.received} · 完 ${h.completed} · 错 ${h.errors}${errDetail} · 断 ${h.interrupts}${avg}</div></div>`;
     }
-    // EvolAgent 健康
+    html += '</div>';
+    // 每个 EvolAgent 一张卡片：后端 + 渠道健康 + 负载
     if (chk.evolagents?.length) {
-      html += '<div class="cache-card" style="margin-bottom:8px"><div class="card-label">EvolAgent 健康</div>';
-      for (const ag of chk.evolagents) {
-        const dot = ag.status === 'running' ? 'on' : ag.status === 'disabled' ? 'idle' : 'off';
-        const tasks = ag.activeTasks > 0 ? ` · ${ag.activeTasks} 任务` : '';
-        const err = ag.error ? ` <span style="color:var(--red)">${esc(ag.error.slice(0, 60))}</span>` : '';
-        html += `<div><span class="dot ${dot}"></span>${esc(ag.name)} ${esc(ag.status)}${tasks}${err}</div>`;
-      }
+      html += '<div class="agent-health-grid">';
+      for (const ag of chk.evolagents) html += agentHealthCard(ag);
       html += '</div>';
     }
-    // BaseAgent 健康
-    if (chk.baseagents?.length) {
-      html += '<div class="cache-card"><div class="card-label">BaseAgent 健康</div>';
-      for (const ba of chk.baseagents) {
-        const dot = ba.healthy ? (ba.activeStreams > 0 ? 'on' : 'idle') : 'off';
-        html += `<div><span class="dot ${dot}"></span>${esc(ba.name)} · 流 ${ba.activeStreams}</div>`;
-      }
+    // 未归属任何 EvolAgent 的渠道（系统级 / DefaultAgent）
+    if (chk.unownedChannels?.length) {
+      html += '<div class="cache-card" style="margin-top:8px"><div class="card-label">未归属渠道</div>';
+      for (const c of chk.unownedChannels) html += channelHealthRow(c);
       html += '</div>';
     }
     html += '</div>';

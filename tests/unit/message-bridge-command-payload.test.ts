@@ -312,7 +312,7 @@ describe('MessageBridge — menu 协议', () => {
 
     await h.triggerInbound(makeInbound({ content: JSON.stringify({ type: 'menu.action', id: 'a1', name: 'session', action: 'stop' }) }));
 
-    expect(h.cmdHandler.execMenuAction).toHaveBeenCalledWith('/session', 'stop', undefined, 'test-instance', 'chat-1', 'peer-1', undefined, 'private');
+    expect(h.cmdHandler.execMenuAction).toHaveBeenCalledWith('/session', 'stop', undefined, 'test-instance', 'chat-1', 'peer-1', undefined, 'private', 'a1');
     expect(parseCustomResponse(sendMock)).toEqual({
       type: 'menu.response',
       id: 'a1',
@@ -331,7 +331,7 @@ describe('MessageBridge — menu 协议', () => {
     }) }));
 
     expect(h.cmdHandler.execMenuAction).toHaveBeenCalledWith(
-      '/session', 'switch', { target: '前端重构' }, 'test-instance', 'chat-1', 'peer-1', undefined, 'private'
+      '/session', 'switch', { target: '前端重构' }, 'test-instance', 'chat-1', 'peer-1', undefined, 'private', 'a2'
     );
   });
 

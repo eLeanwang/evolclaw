@@ -14,7 +14,7 @@ import { EventBus } from '../../src/core/event-bus.js';
 import { SessionManager } from '../../src/core/session/session-manager.js';
 import { MessageQueue } from '../../src/core/message/message-queue.js';
 import { MessageCache } from '../../src/core/message/message-cache.js';
-import { CommandHandler } from '../../src/core/command-handler.js';
+import { CommandHandler } from '../../src/core/command/command-handler.js';
 
 function makeFakeRunner(): any {
   return {
