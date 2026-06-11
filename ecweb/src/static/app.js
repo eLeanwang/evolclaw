@@ -470,27 +470,6 @@ function renderAgents(data) {
       (preview ? `<div class="ag-msg-wrap">${tipHtml}<div class="ag-msg">${preview}</div></div>` : '') +
       '</div></td></tr>';
   }
-  // 补充未连接的 EvolAgent（多为 disabled），让禁用项可被重新启用
-  for (const ag of offlineAgents) {
-    const status = ag.status || 'stopped';
-    const dotCls = status === 'running' ? 'on' : (status === 'disabled' || status === 'error' ? 'off' : 'idle');
-    const toggleLabel = status === 'disabled' ? '启用' : '禁用';
-    const ops = `<div class="agent-ops" data-aid="${esc(ag.aid)}" data-status="${esc(status)}">` +
-      `<button class="ctrl-btn" data-op="edit">编辑</button>` +
-      `<button class="ctrl-btn" data-op="reload">重载</button>` +
-      `<button class="ctrl-btn" data-op="toggle">${toggleLabel}</button>` +
-      `<button class="ctrl-btn danger" data-op="delete">删除</button>` +
-      `<a class="ctrl-btn" href="https://${esc(ag.aid)}/agent.md" target="_blank" rel="noopener">md↗</a>` +
-      `</div>`;
-    html += '<tr class="agent-offline">' +
-      `<td><span class="dot ${dotCls}"></span>${esc(status)}</td>` +
-      `<td>${esc(shortAid(ag.aid))}${ag.name ? ` <span style="color:var(--dim)">(${esc(ag.name)})</span>` : ''}</td>` +
-      `<td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td>` +
-      `<td>${ag.lastActivity ? fmtAgo(ag.lastActivity) : '-'}</td>` +
-      `<td class="preview"></td>` +
-      `<td class="agent-ops-cell">${ops}</td>` +
-      '</tr>';
-  }
   html += '</tbody></table>';
   el.innerHTML = html;
   bindAgentsEvents(el);

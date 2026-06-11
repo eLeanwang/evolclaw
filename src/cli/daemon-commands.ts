@@ -408,7 +408,7 @@ export async function cmdStart() {
 
   // 等待 ready signal（最多 30 秒，AUN sidecar 超时 15s + 其他通道连接）
   const startTime = Date.now();
-  const checkReady = () => {
+  const checkReady = async () => {
     // ready signal 出现（优先检查，避免 Windows 上误判进程状态）
     if (fs.existsSync(p.readySignal)) {
       console.log(`✓ EvolClaw started successfully (PID: ${childPid})`);
@@ -456,7 +456,7 @@ export async function cmdStart() {
       }
       console.log(`⏱ done in ${((Date.now() - cmdStartedAt) / 1000).toFixed(1)}s`);
       // ECWeb 自动后台启动
-      startEcwebIfEnabled(p);
+      await startEcwebIfEnabled(p);
       return;
     }
 
@@ -2276,14 +2276,9 @@ function stopEcwebIfRunning(p: ReturnType<typeof resolvePaths>): boolean {
     try { platform.killProcess(alive.pid, true); } catch {}
     killed = true;
   }
-  // 清理 pid 文件
-  try {
-    for (const file of fs.readdirSync(p.instanceDir)) {
-      if (file.startsWith('ecweb-') && file.endsWith('.json')) {
-        fs.unlinkSync(path.join(p.instanceDir, file));
-      }
-    }
-  } catch {}
+  // 清理 pid 文件（仅 ecweb-<pid>.json / watch-web-<pid>.json，
+  // 不碰 ecweb-tokens.json 等非 pid 文件，否则会清空配对 token 库导致每次重启都要重新配对）
+  removeEcwebInstanceFiles(p);
   // 端口兜底：杀掉任何仍占用 ecweb 端口的残留进程（含手动启动、未登记 pid 文件的）。
   // 仅靠 pid 文件无法清理这类进程，会导致下次启动端口被占。
   const port = loadEvolclawConfig().ecweb?.port ?? 42705;
@@ -2293,16 +2288,23 @@ function stopEcwebIfRunning(p: ReturnType<typeof resolvePaths>): boolean {
   return killed;
 }
 
-/** 后台 detached 启动 ecweb；若已运行则先停再启（确保加载最新代码）。 */
-function startEcwebIfEnabled(p: ReturnType<typeof resolvePaths>): void {
+/**
+ * 后台 detached 启动 ecweb；若已运行则先停再启（确保加载最新代码）。
+ * 启动后轮询端口确认 HTTP 服务真正就绪，打印明确的成功/失败结论（而非模糊的「已在后台启动」状态描述）。
+ * 返回 true=本次确实启动成功，false=未启用/未安装/启动失败。
+ */
+async function startEcwebIfEnabled(p: ReturnType<typeof resolvePaths>): Promise<boolean> {
   const cfg = loadEvolclawConfig();
-  if (!cfg.ecweb?.enabled) return;
+  if (!cfg.ecweb?.enabled) return false;
   stopEcwebIfRunning(p);  // 先停旧进程（有则停），保证加载最新代码
 
   const port = cfg.ecweb.port ?? 42705;
   const args = ['--home', p.root, '--port', String(port)];
   const launch = resolveEcwebLaunchCommand(args);
-  if (!launch) return; // 未安装，静默跳过
+  if (!launch) {
+    console.log('⚠ ECWeb 未安装，跳过启动（运行 npm i -g evolclaw-web 后可用）');
+    return false;
+  }
 
   const child = spawn(launch.command, launch.args, {
     detached: true,
@@ -2312,15 +2314,33 @@ function startEcwebIfEnabled(p: ReturnType<typeof resolvePaths>): void {
 
   child.unref();
   const pid = child.pid;
-  if (!pid) return;
+  if (!pid) {
+    console.log('❌ ECWeb 启动失败（进程创建失败）');
+    return false;
+  }
 
   fs.mkdirSync(p.instanceDir, { recursive: true });
   fs.writeFileSync(
     path.join(p.instanceDir, `ecweb-${pid}.json`),
     JSON.stringify({ pid, port, startedAt: Date.now() }, null, 2),
   );
-  console.log(`🔭 ECWeb 已在后台启动 (PID: ${pid})  http://localhost:${port}`);
-  console.log(`   运行 ec watch web 查看配对码`);
+
+  // 轮询端口确认 HTTP 服务真正就绪（spawn 成功 ≠ 端口绑定成功），顺便拿配对码
+  let pair: { code: string; expiresAt: number } | null = null;
+  for (let i = 0; i < 20; i++) {
+    pair = await fetchEcwebPairCode(port);
+    if (pair) break;
+    await sleep(250);
+  }
+
+  if (pair) {
+    const mins = Math.max(0, Math.round((pair.expiresAt - Date.now()) / 60000));
+    console.log(`✓ ECWeb 启动成功 (PID: ${pid})  http://localhost:${port}`);
+    console.log(`   配对码: ${pair.code}  (约 ${mins} 分钟内有效，已配对过的浏览器无需重新配对)`);
+    return true;
+  }
+  console.log(`❌ ECWeb 启动失败：端口 ${port} 未就绪（进程 PID ${pid} 可能已退出，查看 logs/watch-web.log）`);
+  return false;
 }
 
 /** 显示 ecweb 访问信息 + 配对码（启动后 ecweb 需要一点时间起 HTTP，故重试几次）。 */
@@ -2391,13 +2411,9 @@ async function cmdWatchWeb(): Promise<void> {
     process.stderr.write('❌ ECWeb 已禁用。请在 evolclaw.json 中启用 ecweb.enabled，或删除该字段后重试。\n');
     process.exit(1);
   }
-  startEcwebIfEnabled(p);
-  const started = findAliveEcweb(p);
-  if (!started) {
-    process.stderr.write('❌ 启动失败，请检查 evolclaw-web 是否正确安装\n');
-    process.exit(1);
-  }
-  await printEcwebAccess(started.port);
+  const ok = await startEcwebIfEnabled(p);
+  if (!ok) process.exit(1);  // 失败原因已由 startEcwebIfEnabled 打印
+  await printEcwebAccess(port);
 }
 
 function sleep(ms: number): Promise<void> {

@@ -9,7 +9,7 @@
 
 import fs from 'fs';
 import path from 'path';
-import { execFile, execFileSync } from 'child_process';
+import { execFile, execSync } from 'child_process';
 import { promisify } from 'util';
 import { getPackageRoot } from '../paths.js';
 import { isWindows } from './cross-platform.js';
@@ -109,9 +109,11 @@ export function getLocalVersion(): string {
  */
 export function resolveGlobalPkg(pkgName: string): { version: string; path: string } | null {
   try {
+    // 命令完全静态（npm root -g，无用户输入），用 execSync 传完整命令字符串，
+    // 避免 "args 数组 + shell:true" 组合触发 Node DeprecationWarning，且无注入风险。
     const npmCmd = isWindows ? 'npm.cmd' : 'npm';
-    const globalRoot = execFileSync(npmCmd, ['root', '-g'], {
-      encoding: 'utf-8', timeout: 10000, shell: isWindows,
+    const globalRoot = execSync(`${npmCmd} root -g`, {
+      encoding: 'utf-8', timeout: 10000,
     }).trim();
     const pkgPath = path.join(globalRoot, ...pkgName.split('/'), 'package.json');
     if (fs.existsSync(pkgPath)) {
