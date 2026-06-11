@@ -245,13 +245,15 @@ export interface ReloadHooksDeps {
   registerChannelInstance: (inst: ChannelInstance) => void;
   /** 注销渠道在 core 各 map 中的登记（processor/cmdHandler/bridge）。热重载断开渠道时调用。 */
   unregisterChannelInstance?: (channelName: string) => void;
+  /** startChannel 重建渠道后回调，用于重新注入运行时依赖（如 AidStatsCollector）。 */
+  onChannelStarted?: (inst: ChannelInstance) => void;
   messageQueue?: { isChannelProcessing(channelName: string): boolean };
   drainDelayMs?: number;
   drainTimeoutMs?: number;
 }
 
 export function buildReloadHooks(deps: ReloadHooksDeps): ReloadHooks {
-  const { channelLoader, channelInstances, registerChannelInstance, unregisterChannelInstance, messageQueue } = deps;
+  const { channelLoader, channelInstances, registerChannelInstance, unregisterChannelInstance, messageQueue, onChannelStarted } = deps;
   const drainDelayMs = deps.drainDelayMs ?? 500;
   const drainTimeoutMs = deps.drainTimeoutMs ?? 30000;
 
@@ -328,6 +330,7 @@ export function buildReloadHooks(deps: ReloadHooksDeps): ReloadHooks {
       const newInst = await plugin.createInstance(effInst, ctx);
       if (!newInst) throw new Error(`[Reload] createInstance returned null for ${channelName}`);
       registerChannelInstance(newInst);
+      onChannelStarted?.(newInst);
       await newInst.connect();
       channelInstances.push(newInst);
       logger.info(`[Reload] Started channel: ${channelName}`);

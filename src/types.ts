@@ -520,6 +520,8 @@ export type AgentStatus = 'running' | 'stopped' | 'disabled' | 'error';
 
 export interface AgentInfo {
   name: string;
+  /** agent.md 里的友好名（本地缓存优先，缺失时异步从网络拉取）；无则回退 aid 短名 */
+  displayName?: string;
   aid: string;
   status: AgentStatus;
   channels: string[];
@@ -572,6 +574,8 @@ export interface EvolAgentRegistryHandle {
   get(name: string): EvolAgentHandle | null;
   list(): AgentInfo[];
   reload?(name: string, hooks: unknown): Promise<void>;
+  stopAgent?(name: string, hooks: unknown): Promise<void>;
+  startAgent?(name: string, hooks: unknown): Promise<void>;
   isOwner(channelName: string, userId: string): boolean;
   isAdmin(channelName: string, userId: string): boolean;
   getOwner(channelName: string): string | undefined;

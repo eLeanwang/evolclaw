@@ -58,7 +58,7 @@ let ws = null;
 let reconnectDelay = 1000;
 let currentView = 'agents';
 let pendingSub = null;        // 重连后要恢复的订阅
-const state = { agents: null, msg: null, session: null, cache: null, system: null, triggers: null };
+const state = { agents: null, msg: null, session: null, cache: null, system: null, triggers: null, monitor: null };
 
 function setConnStatus(text, cls) {
   const el = $('#conn-status');
@@ -152,6 +152,7 @@ let trigSel = { agent: null };
 let sessSearch = '';
 let sessFilterNormal = false; // true=只显示有效会话（userMsgs >= 2）
 let sessChatMode = false;   // false=完整视图，true=对话视图（折叠处理过程）
+let monRange = '2m';        // Monitor 时间窗口：2m / 10m / 1h
 
 function switchView(view) {
   currentView = view;
@@ -163,6 +164,7 @@ function switchView(view) {
   else if (view === 'cache') subscribe('cache', {});
   else if (view === 'system') subscribe('system', {});
   else if (view === 'triggers') subscribe('triggers', { agent: trigSel.agent });
+  else if (view === 'monitor') subscribe('monitor', { range: monRange });
   else subscribe('agents', {});
   if (state[view]) renderView(view);
 }
@@ -180,6 +182,7 @@ function renderView(view) {
   else if (view === 'cache') renderCache(state.cache);
   else if (view === 'system') renderSystem(state.system);
   else if (view === 'triggers') renderTriggers(state.triggers);
+  else if (view === 'monitor') renderMonitor(state.monitor);
 }
 
 // ── 工具 ──
@@ -232,72 +235,239 @@ function compareVer(a, b) {
   return 0;
 }
 
-// ── Agents 视图（旧 AID 页升级：加操作列 + 新建入口）──
+// ── Agents 视图（对齐终端 watch aid：状态点前置 + 名字为主 + 两行 + 工作态着色 + 顶部统计条）──
+
+// 逐 AID 异步操作状态（取代全局 _agentBusy）：aid → 操作中的描述文字
+const _agentOps = new Map(); // Map<aid, string>
+let _agentBusy = false;  // 保留兼容旧引用，不再用于阻塞渲染
+let _agSubtab = 'enabled'; // 'enabled' | 'disabled'
+
+// 工作状态徽标：一旦收到过消息就不再回 connected。
+// stopped → connected(仅首次连接无消息时) → idle(收到第一条后) → working → idle ...
+function agentStateBadge(s, agStatus, connStatus) {
+  if (agStatus === 'stopped' || connStatus === 'disconnected' || connStatus === 'failed')
+    return '<span class="state-badge stopped">停止</span>';
+  if (connStatus === 'reconnecting')
+    return '<span class="state-badge stopped">重连中</span>';
+  if ((s.processing || 0) > 0)
+    return '<span class="state-badge working">working</span>';
+  // 收到过消息 → 永远是 idle，不再回到 connected
+  if ((s.messagesReceived || 0) > 0 || (s.messagesSent || 0) > 0)
+    return '<span class="state-badge idle">idle</span>';
+  return '<span class="state-badge connected">connected</span>';
+}
+
+// 发送方式图标标记
+const MSG_KIND_META = { send: { icon: '💬', label: '回复' }, thought: { icon: '💭', label: '思考' }, inject: { icon: '📥', label: '注入' }, notify: { icon: '🔔', label: '通知' } };
+function msgTagsHtml(kind, encrypt, chatmode) {
+  let h = '';
+  const km = MSG_KIND_META[kind];
+  if (km) h += `<span class="mtag">${km.icon}${km.label}</span>`;
+  if (encrypt != null) h += `<span class="mtag">${encrypt ? '🔒密文' : '明文'}</span>`;
+  if (chatmode) h += `<span class="mtag">${chatmode === 'proactive' ? '自主' : (chatmode === 'inject' ? '注入' : '响应')}</span>`;
+  return h;
+}
+
+// 消息行：方向箭头 + 标记 + 对端 + 文字
+function agentPreviewHtml(s) {
+  const clip = (t) => esc(String(t).replace(/\n/g, ' ').slice(0, 80));
+  const line = (dir, peer, text, kind, encrypt, chatmode) => {
+    const arrow = dir === 'in' ? '<span class="arrow-in">↓</span>' : '<span class="arrow-out">↑</span>';
+    const tags = msgTagsHtml(kind, encrypt, chatmode);
+    const peerHtml = peer ? `<span class="peer">${esc(shortAid(peer))}</span>: ` : '';
+    const textCls = dir === 'in' ? 'text-in' : 'text-out';
+    return `${arrow}${tags ? ' ' + tags + ' ' : ' '}${peerHtml}<span class="${textCls}">${clip(text)}</span>`;
+  };
+  if ((s.processing || 0) > 0 && s.lastReceivedText)
+    return line('in', s.lastReceivedFrom, s.lastReceivedText, s.lastReceivedKind, s.lastReceivedEncrypt, s.lastReceivedChatmode);
+  const recvTs = s.lastReceivedAt || 0, sentTs = s.lastSentAt || 0;
+  if (!recvTs && !sentTs) return '';
+  if (sentTs > recvTs && s.lastSentText)
+    return line('out', s.lastSentTo, s.lastSentText, s.lastSentKind, s.lastSentEncrypt, s.lastSentChatmode);
+  if (s.lastReceivedText)
+    return line('in', s.lastReceivedFrom, s.lastReceivedText, s.lastReceivedKind, s.lastReceivedEncrypt, s.lastReceivedChatmode);
+  return '';
+}
+
+// HTML tooltip（最近 N 轮）：彩色箭头 + 方式 + 对端 + 文字
+function recentMsgTooltipHtml(recent) {
+  if (!recent || !recent.length) return '';
+  let h = '<div class="msg-tip">';
+  for (const m of recent) {
+    const rcls = m.dir === 'in' ? 'tip-row-in' : 'tip-row-out';
+    const arrow = m.dir === 'in' ? '↓' : '↑';
+    const km = MSG_KIND_META[m.kind];
+    const kh = km ? `<span class="tip-kind">${km.icon}</span>` : '';
+    const enc = m.encrypt ? '🔒' : '';
+    const peer = m.peer ? esc(shortAid(m.peer)) : '';
+    const text = esc(String(m.text).replace(/\n/g, ' ').slice(0, 60));
+    h += `<div class="tip-row ${rcls}">${arrow}${kh}${enc} <b>${peer}</b> ${text}</div>`;
+  }
+  return h + '</div>';
+}
+
+// 顶部统计条：Gateway / AIDs total·connected·offline / Messages ↓↑ / Traffic ↓↑ / Version·PID·Uptime
+function agentsStatsBar(data, aids, stats) {
+  const connected = aids.filter(a => (a.status || 'connected') === 'connected').length;
+  const offline = aids.length - connected;
+  let recv = 0, sent = 0, bin = 0, bout = 0;
+  for (const s of stats) {
+    recv += s.messagesReceived || 0; sent += s.messagesSent || 0;
+    bin += s.bytesReceived || 0; bout += s.bytesSent || 0;
+  }
+  const gws = [...new Set(aids.filter(a => a.gatewayUrl).map(a => a.gatewayUrl))];
+  const gw = gws.length ? gws.map(esc).join(', ') : '—';
+  const st = data.status || {};
+  const pid = st.pid != null ? st.pid : '—';
+  const uptime = st.uptime != null ? fmtDur(st.uptime / 1000) : '—';
+  const ver = data.version || '—';
+
+  let h = '<div class="agents-stats">';
+  h += `<span class="sg"><span class="sg-k">Gateway</span><span class="sg-gw">${gw}</span></span>`;
+  h += `<span class="sg"><span class="sg-k">AIDs</span>${aids.length} total · <span class="num-on">${connected} 在线</span>` +
+    `${offline ? ` · <span class="num-off">${offline} 离线</span>` : ''}</span>`;
+  h += `<span class="sg"><span class="sg-k">Messages</span><span class="in">↓${recv}</span> <span class="out">↑${sent}</span></span>`;
+  h += `<span class="sg"><span class="sg-k">Traffic</span><span class="in">↓${fmtBytes(bin)}</span> <span class="out">↑${fmtBytes(bout)}</span></span>`;
+  h += `<span class="sg"><span class="sg-k">Version</span>${esc(ver)} · <span class="sg-k">PID</span>${pid} · <span class="sg-k">Uptime</span>${uptime}</span>`;
+  h += '</div>';
+  return h;
+}
+
+// 操作列 HTML（启用页）：停止/启动 + 清空队列(conditional) + ···(禁用/重载/编辑/md/删除)
+function agentOpsHtml(aid, ag, s) {
+  if (_agentOps.has(aid)) {
+    return `<div class="agent-ops agent-ops-busy"><span class="ops-busy-label">${esc(_agentOps.get(aid) || '操作中…')}</span></div>`;
+  }
+  const queued = s.queued || 0;
+  const running = ag.status === 'running';
+  let h = `<div class="agent-ops" data-aid="${esc(aid)}" data-status="${esc(ag.status)}">`;
+  if (running) h += `<button class="ctrl-btn ops-stop" data-op="stop">停止</button>`;
+  else         h += `<button class="ctrl-btn ops-start" data-op="start">启动</button>`;
+  if (queued > 0) h += `<button class="ctrl-btn ops-clear-queue" data-op="clear-queue" title="清空 ${queued} 条待处理消息">清空队列</button>`;
+  h += `<div class="ops-more"><button class="ctrl-btn ops-more-btn" data-op="more">···</button>` +
+    `<div class="ops-dropdown">` +
+    `<button class="ops-dd-item" data-op="toggle">禁用</button>` +
+    `<button class="ops-dd-item" data-op="reload">重载配置</button>` +
+    `<button class="ops-dd-item" data-op="edit">编辑配置</button>` +
+    `<a class="ops-dd-item" href="https://${esc(aid)}/agent.md" target="_blank" rel="noopener">查看 agent.md ↗</a>` +
+    `<button class="ops-dd-item danger" data-op="delete">删除 Agent</button>` +
+    `</div></div>`;
+  h += '</div>';
+  return h;
+}
+
 function renderAgents(data) {
   const el = $('#view-agents');
   if (!data) { el.innerHTML = '<div class="empty">加载中…</div>'; return; }
-  if (_agentBusy) return;  // 编辑/操作进行中，跳过轮询重渲染
+  if (el.querySelector('.ops-more.open')) return;
+
+  const allAgents = data.agents || [];
   const aids = data.aids || [];
   const statsByAid = {};
   for (const s of (data.stats || [])) statsByAid[s.aid] = s;
-  // aid → agent 状态映射（来自 evolagent.list，用于操作列 启用/禁用 二选一）
-  const agentByAid = {};
-  for (const ag of (data.agents || [])) agentByAid[ag.aid] = ag;
+  const aidConnByAid = {};
+  for (const a of aids) aidConnByAid[a.aid] = a;
 
-  let html = '<div class="agents-toolbar"><button class="ctrl-btn" id="agent-new-btn">+ 新建 Agent</button></div>';
+  const enabledCount = allAgents.filter(ag => ag.status !== 'disabled').length;
+  const disabledCount = allAgents.filter(ag => ag.status === 'disabled').length;
+
+  // 子标签栏
+  let html = '<div class="agents-toolbar">' +
+    `<div class="ag-subtabs">` +
+    `<button class="ag-subtab${_agSubtab === 'enabled' ? ' active' : ''}" data-subtab="enabled">启用 (${enabledCount})</button>` +
+    `<button class="ag-subtab${_agSubtab === 'disabled' ? ' active' : ''}" data-subtab="disabled">禁用 (${disabledCount})</button>` +
+    `</div>` +
+    `<button class="ctrl-btn" id="agent-new-btn">+ 新建</button>` +
+    '</div>';
+
   if (!data.daemonRunning) {
     html += '<div class="banner">⚠ EvolClaw 主进程未运行，仅显示最近活动记录</div>';
+  } else if (_agSubtab === 'enabled') {
+    html += agentsStatsBar(data, aids, data.stats || []);
   }
-  if (!aids.length) {
-    html += '<div class="empty">暂无 AID</div>';
+
+  if (_agSubtab === 'disabled') {
+    const disabledAgents = allAgents.filter(ag => ag.status === 'disabled');
+    if (!disabledAgents.length) {
+      html += '<div class="empty">暂无禁用 Agent</div>';
+    } else {
+      html += '<table><thead><tr><th>Agent</th><th>项目路径</th><th>操作</th></tr></thead><tbody>';
+      for (const ag of disabledAgents) {
+        const busy = _agentOps.has(ag.aid);
+        const ops = busy
+          ? `<div class="agent-ops agent-ops-busy"><span class="ops-busy-label">${esc(_agentOps.get(ag.aid) || '操作中…')}</span></div>`
+          : `<div class="agent-ops" data-aid="${esc(ag.aid)}" data-status="disabled"><button class="ctrl-btn ops-enable" data-op="toggle">启用</button></div>`;
+        html += `<tr class="ag-main">` +
+          `<td><div class="ag-id"><span class="dot off"></span><span class="ag-id-text"><span class="ag-name">${esc(ag.displayName || shortAid(ag.aid))}</span><span class="ag-aid">${esc(ag.aid)}</span></span></div></td>` +
+          `<td style="font-size:11px;font-family:monospace">${esc(ag.projectPath || '—')}</td>` +
+          `<td class="agent-ops-cell">${ops}</td></tr>`;
+      }
+      html += '</tbody></table>';
+    }
+    el.innerHTML = html;
+    bindAgentsEvents(el);
+    return;
+  }
+
+  // ── 启用页 ──
+  // 按收发消息总数降序排序（活跃的排前面）
+  const totalMsgs = (ag) => {
+    const s = statsByAid[ag.aid] || {};
+    return (s.messagesReceived || 0) + (s.messagesSent || 0);
+  };
+  const enabledAgents = allAgents.filter(ag => ag.status !== 'disabled')
+    .sort((a, b) => totalMsgs(b) - totalMsgs(a));
+  if (!enabledAgents.length) {
+    html += '<div class="empty">暂无启用 Agent</div>';
     el.innerHTML = html;
     bindAgentsEvents(el);
     return;
   }
 
   html += '<table><thead><tr>' +
-    '<th>状态</th><th>AID</th><th>收</th><th>发</th><th>系统</th>' +
-    '<th>入字节</th><th>出字节</th><th>peers</th><th>重连</th><th>最后活动</th><th>最近消息</th><th>操作</th>' +
+    '<th>AID</th><th>工作</th><th>队列</th><th>模型</th><th>运行</th><th>收</th><th>发</th>' +
+    '<th>入字节</th><th>出字节</th><th>对端数量</th><th>最后活动</th><th>操作</th>' +
     '</tr></thead><tbody>';
 
-  for (const a of aids) {
-    const s = statsByAid[a.aid] || {};
-    const status = a.status || (a.lastEvent === 'disconnected' ? 'disconnected' : 'connected');
-    const dotCls = status === 'connected' ? 'on' : (status === 'reconnecting' ? 'idle' : 'off');
-    const name = s.selfName || a.agentName || '';
-    const lastTs = Math.max(s.lastReceivedAt || 0, s.lastSentAt || 0, a.lastActivity || 0);
-    let preview = '';
-    if (s.lastReceivedText && (s.lastReceivedAt || 0) >= (s.lastSentAt || 0)) {
-      preview = '↓ ' + shortAid(s.lastReceivedFrom) + ': ' + s.lastReceivedText;
-    } else if (s.lastSentText) {
-      preview = '↑ ' + shortAid(s.lastSentTo) + ': ' + s.lastSentText;
-    }
-    // 操作列：能归属到 EvolAgent 的才可操作；否则置灰
-    const ag = agentByAid[a.aid];
-    let ops;
-    if (ag) {
-      const toggleLabel = ag.status === 'disabled' ? '启用' : '禁用';
-      ops = `<div class="agent-ops" data-aid="${esc(a.aid)}" data-status="${esc(ag.status)}">` +
-        `<button class="ctrl-btn" data-op="edit">编辑</button>` +
-        `<button class="ctrl-btn" data-op="reload">重载</button>` +
-        `<button class="ctrl-btn" data-op="toggle">${toggleLabel}</button>` +
-        `<button class="ctrl-btn danger" data-op="delete">删除</button>` +
-        `<a class="ctrl-btn" href="https://${esc(a.aid)}/agent.md" target="_blank" rel="noopener">md↗</a>` +
-        `</div>`;
-    } else {
-      ops = '<span style="color:var(--dim)">—</span>';
-    }
-    html += '<tr>' +
-      `<td><span class="dot ${dotCls}"></span>${esc(status)}</td>` +
-      `<td>${esc(shortAid(a.aid))}${name ? ` <span style="color:var(--dim)">(${esc(name)})</span>` : ''}</td>` +
+  for (const ag of enabledAgents) {
+    const s = statsByAid[ag.aid] || {};
+    const conn = aidConnByAid[ag.aid] || {};
+    const connStatus = conn.status || (ag.status === 'running' ? 'connected' : 'disconnected');
+    const dotCls = connStatus === 'connected' ? 'on' : (connStatus === 'reconnecting' ? 'idle' : 'off');
+    const name = s.selfName || ag.displayName || shortAid(ag.aid);
+    const uptime = (connStatus === 'connected' && conn.lastConnectedAt) ? fmtDur((Date.now() - conn.lastConnectedAt) / 1000) : '—';
+    const lastTs = Math.max(s.lastReceivedAt || 0, s.lastSentAt || 0, ag.lastActivity || 0);
+    const preview = agentPreviewHtml(s);
+    // 队列数：不含正在处理的那条
+    const rawQueued = s.queued || 0;
+    const queued = rawQueued;
+    const queueCell = queued > 0 ? `<span class="ag-queue-num">${queued}</span>` : '<span style="color:var(--dim)">0</span>';
+    const model = ag.model || ag.baseagent || '—';
+
+    const idCell = `<div class="ag-id"><span class="dot ${dotCls}" title="${esc(connStatus)}"></span>` +
+      `<span class="ag-id-text"><span class="ag-name">${esc(name)}</span>` +
+      `<span class="ag-aid">${esc(ag.aid)}</span></span></div>`;
+
+    html += `<tr class="ag-main">` +
+      `<td>${idCell}</td>` +
+      `<td>${agentStateBadge(s, ag.status, connStatus)}</td>` +
+      `<td>${queueCell}</td>` +
+      `<td style="font-size:11px;color:var(--dim)">${esc(model)}</td>` +
+      `<td>${uptime}</td>` +
       `<td>${s.messagesReceived ?? 0}</td><td>${s.messagesSent ?? 0}</td>` +
-      `<td>${s.systemReceived ?? 0}/${s.systemSent ?? 0}</td>` +
       `<td>${fmtBytes(s.bytesReceived)}</td><td>${fmtBytes(s.bytesSent)}</td>` +
-      `<td>${s.uniquePeerCount ?? a.peerCount ?? 0}</td><td>${a.reconnectCount ?? 0}</td>` +
+      `<td>${s.uniquePeerCount ?? conn.peerCount ?? 0}</td>` +
       `<td>${fmtAgo(lastTs)}</td>` +
-      `<td class="preview">${esc(preview.replace(/\n/g, ' ').slice(0, 80))}</td>` +
-      `<td class="agent-ops-cell">${ops}</td>` +
+      `<td class="agent-ops-cell">${agentOpsHtml(ag.aid, ag, s)}</td>` +
       '</tr>';
+    // 自定义 tooltip（HTML，hover 显示）
+    const recent = (s.recentMessages || []);
+    const tipHtml = recentMsgTooltipHtml(recent);
+
+    html += `<tr class="ag-sub"><td colspan="12"><div class="ag-info">` +
+      (ag.projectPath ? `<div class="ag-path">${esc(ag.projectPath)}</div>` : '') +
+      (preview ? `<div class="ag-msg-wrap">${tipHtml}<div class="ag-msg">${preview}</div></div>` : '') +
+      '</div></td></tr>';
   }
   html += '</tbody></table>';
   el.innerHTML = html;
@@ -763,65 +933,130 @@ function toast(text, isErr) {
 }
 
 // ── Agents 操作 ──
-let _agentBusy = false;
+// （_agentBusy 已在 Agents 视图顶部声明，仅 agentOpNew 仍在用）
 
-function bindAgentsEvents(el) {
-  el.querySelector('#agent-new-btn')?.addEventListener('click', agentOpNew);
-  el.querySelectorAll('.agent-ops').forEach(div => {
-    const aid = div.dataset.aid;
-    const status = div.dataset.status;
-    div.querySelectorAll('button[data-op]').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const op = btn.dataset.op;
-        if (op === 'edit') agentOpEdit(aid);
-        else if (op === 'reload') agentOpReload(aid);
-        else if (op === 'toggle') agentOpToggle(aid, status);
-        else if (op === 'delete') agentOpDelete(aid);
-      });
+// 设置某 aid 的操作状态并立即刷新对应行的按钮区（不重渲整表）
+function setAgentOp(aid, label) {
+  if (label == null) _agentOps.delete(aid); else _agentOps.set(aid, label);
+  const cell = document.querySelector(`.agent-ops[data-aid="${CSS.escape(aid)}"], .agent-ops-busy[data-aid="${CSS.escape(aid)}"]`)?.closest('td');
+  if (!cell || !state.agents) return;
+  const ag = (state.agents.agents || []).find(x => x.aid === aid);
+  if (!ag) return;
+  if (ag.status === 'disabled') {
+    // 禁用页：只有启用按钮 / 操作中态
+    cell.innerHTML = _agentOps.has(aid)
+      ? `<div class="agent-ops agent-ops-busy"><span class="ops-busy-label">${esc(_agentOps.get(aid) || '操作中…')}</span></div>`
+      : `<div class="agent-ops" data-aid="${esc(aid)}" data-status="disabled"><button class="ctrl-btn ops-enable" data-op="toggle">启用</button></div>`;
+  } else {
+    const statsByAid = {};
+    for (const s of (state.agents.stats || [])) statsByAid[s.aid] = s;
+    cell.innerHTML = agentOpsHtml(aid, ag, statsByAid[aid] || {});
+  }
+  bindOpsCell(cell, aid, ag.status);
+}
+
+function bindOpsCell(cell, aid, status) {
+  cell.querySelectorAll('button[data-op]').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      const op = btn.dataset.op;
+      if (op === 'more') {
+        const more = btn.closest('.ops-more');
+        const wasOpen = more.classList.contains('open');
+        document.querySelectorAll('.ops-more.open').forEach(m => m.classList.remove('open'));
+        if (!wasOpen) more.classList.add('open');
+        e.stopPropagation();
+        return;
+      }
+      if (op === 'edit') agentOpEdit(aid);
+      else if (op === 'reload') agentOpReload(aid);
+      else if (op === 'toggle') agentOpToggle(aid, status);
+      else if (op === 'delete') agentOpDelete(aid);
+      else if (op === 'clear-queue') agentOpClearQueue(aid);
+      else if (op === 'stop') agentOpStop(aid);
+      else if (op === 'start') agentOpStart(aid);
+      else if (op === 'mute') agentOpMute(aid);
+      else if (op === 'unmute') agentOpUnmute(aid);
     });
   });
 }
 
+// click-outside 关闭下拉：全局只绑一次（避免每次重渲染叠加监听器）
+let _opsOutsideBound = false;
+function ensureOpsOutsideClose() {
+  if (_opsOutsideBound) return;
+  _opsOutsideBound = true;
+  document.addEventListener('click', (e) => {
+    if (e.target.closest && e.target.closest('.ops-more')) return; // 点在菜单内不关
+    document.querySelectorAll('.ops-more.open').forEach(m => m.classList.remove('open'));
+  });
+}
+
+function bindAgentsEvents(el) {
+  el.querySelector('#agent-new-btn')?.addEventListener('click', agentOpNew);
+  ensureOpsOutsideClose();
+  // 子标签切换：仅切视图变量并重渲，不重新订阅
+  el.querySelectorAll('.ag-subtab').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const tab = btn.dataset.subtab;
+      if (tab && tab !== _agSubtab) { _agSubtab = tab; renderAgents(state.agents); }
+    });
+  });
+  el.querySelectorAll('.agent-ops').forEach(div => {
+    const aid = div.dataset.aid;
+    const status = div.dataset.status;
+    bindOpsCell(div.closest('td'), aid, status);
+  });
+}
+
+// 异步操作包装：设置 "操作中" 状态、执行、清除
+async function withAgentOp(aid, label, fn) {
+  setAgentOp(aid, label);
+  try { await fn(); }
+  finally { setAgentOp(aid, null); }
+}
+
 async function agentOpReload(aid, force = false) {
-  _agentBusy = true;
-  try {
+  await withAgentOp(aid, '重载中…', async () => {
     const r = mResp(await menuSend({ type: 'menu.action', name: 'agent', action: 'reload', args: { aid, force } }));
     if (r.error?.code === 'BUSY') {
-      if (confirm(r.error.message + '\n确认强制重载？')) return agentOpReload(aid, true);
+      if (confirm(r.error.message + '\n确认强制重载？')) { setAgentOp(aid, null); return agentOpReload(aid, true); }
       return;
     }
     if (r.error) { toast(r.error.message || r.error.code, true); return; }
     toast('✓ 已重载');
     subscribe('agents', {});
-  } catch (e) { toast(e.message, true); }
-  finally { _agentBusy = false; }
+  });
 }
 
 async function agentOpToggle(aid, status) {
   const action = status === 'disabled' ? 'enable' : 'disable';
-  _agentBusy = true;
-  try {
+  const label = action === 'disable' ? '禁用中…' : '启用中…';
+  await withAgentOp(aid, label, async () => {
     const r = mResp(await menuSend({ type: 'menu.action', name: 'agent', action, args: { aid } }));
     if (r.error?.code === 'BUSY') {
       if (confirm(r.error.message + `\n确认强制${action === 'disable' ? '禁用' : '启用'}？`)) {
         const r2 = mResp(await menuSend({ type: 'menu.action', name: 'agent', action, args: { aid, force: true } }));
         if (r2.error) toast(r2.error.message || r2.error.code, true);
-        else { toast(`✓ 已${action === 'disable' ? '禁用' : '启用'}`); subscribe('agents', {}); }
+        else {
+          toast(`✓ 已${action === 'disable' ? '禁用' : '启用'}`);
+          // 禁用后立即切到禁用页；启用后等数据刷新（agent 需先完成启动才移到启用页）
+          if (action === 'disable') _agSubtab = 'disabled';
+          subscribe('agents', {});
+        }
       }
       return;
     }
     if (r.error) { toast(r.error.message || r.error.code, true); return; }
     toast(`✓ 已${action === 'disable' ? '禁用' : '启用'}`);
+    if (action === 'disable') _agSubtab = 'disabled';
     subscribe('agents', {});
-  } catch (e) { toast(e.message, true); }
-  finally { _agentBusy = false; }
+  });
 }
 
 async function agentOpDelete(aid) {
   if (!confirm(`删除 Agent ${aid}？\n此操作不可恢复。`)) return;
   const purge = confirm('同时清除 agent 数据目录？');
-  _agentBusy = true;
-  try {
+  await withAgentOp(aid, '删除中…', async () => {
     const r = mResp(await menuSend({ type: 'menu.action', name: 'agent', action: 'delete', args: { aid, purge } }));
     if (r.error?.code === 'BUSY') {
       if (confirm(r.error.message + '\n确认强制删除？')) {
@@ -834,8 +1069,53 @@ async function agentOpDelete(aid) {
     if (r.error) { toast(r.error.message || r.error.code, true); return; }
     toast('✓ 已删除');
     subscribe('agents', {});
-  } catch (e) { toast(e.message, true); }
-  finally { _agentBusy = false; }
+  });
+}
+
+async function agentOpClearQueue(aid) {
+  if (!confirm(`清空 ${aid} 的待处理消息队列？`)) return;
+  await withAgentOp(aid, '清空中…', async () => {
+    const r = mResp(await menuSend({ type: 'menu.action', name: 'agent', action: 'queue-clear', args: { aid } }));
+    if (r.error) { toast(r.error.message || r.error.code, true); return; }
+    toast(`✓ 已清空 ${r.data?.cleared ?? 0} 条待处理消息`);
+    subscribe('agents', {});
+  });
+}
+
+async function agentOpStop(aid) {
+  await withAgentOp(aid, '停止中…', async () => {
+    const r = mResp(await menuSend({ type: 'menu.action', name: 'agent', action: 'stop', args: { aid } }));
+    if (r.error) { toast(r.error.message || r.error.code, true); return; }
+    toast('✓ 已停止');
+    subscribe('agents', {});
+  });
+}
+
+async function agentOpStart(aid) {
+  await withAgentOp(aid, '启动中…', async () => {
+    const r = mResp(await menuSend({ type: 'menu.action', name: 'agent', action: 'start', args: { aid } }));
+    if (r.error) { toast(r.error.message || r.error.code, true); return; }
+    toast('✓ 已启动');
+    subscribe('agents', {});
+  });
+}
+
+async function agentOpMute(aid) {
+  await withAgentOp(aid, '禁言中…', async () => {
+    const r = mResp(await menuSend({ type: 'menu.action', name: 'agent', action: 'mute', args: { aid } }));
+    if (r.error) { toast(r.error.message || r.error.code, true); return; }
+    toast('✓ 已禁言');
+    subscribe('agents', {});
+  });
+}
+
+async function agentOpUnmute(aid) {
+  await withAgentOp(aid, '解禁中…', async () => {
+    const r = mResp(await menuSend({ type: 'menu.action', name: 'agent', action: 'unmute', args: { aid } }));
+    if (r.error) { toast(r.error.message || r.error.code, true); return; }
+    toast('✓ 已解禁');
+    subscribe('agents', {});
+  });
 }
 
 async function agentOpNew() {
@@ -854,26 +1134,23 @@ async function agentOpNew() {
 }
 
 async function agentOpEdit(aid) {
-  _agentBusy = true;
-  try {
-    const [qr] = await Promise.all([
-      menuSend({ type: 'menu.query', name: 'agent', args: { aid } }),
-    ]);
+  await withAgentOp(aid, '查询中…', async () => {
+    const qr = await menuSend({ type: 'menu.query', name: 'agent', args: { aid } });
     const q = mResp(qr);
-    if (q.error) { toast(q.error.message || q.error.code, true); _agentBusy = false; return; }
+    if (q.error) { toast(q.error.message || q.error.code, true); return; }
     const cfg = q.data;
-    // 简单 prompt 编辑表单
+    setAgentOp(aid, null); // 查询完毕先恢复，等用户填完 prompt
     const projectRaw = prompt('项目路径：', cfg.config?.projects?.defaultPath || '');
     const ownersRaw = prompt('Owners（逗号分隔 AID）：', (cfg.config?.owners || []).join(', '));
     const patch = {};
     if (projectRaw !== null) patch.projects = { defaultPath: projectRaw };
     if (ownersRaw !== null) patch.owners = ownersRaw.split(',').map(s => s.trim()).filter(Boolean);
-    if (Object.keys(patch).length === 0) { _agentBusy = false; return; }
+    if (!Object.keys(patch).length) return;
+    setAgentOp(aid, '保存中…');
     const r = mResp(await menuSend({ type: 'menu.action', name: 'agent', action: 'update', args: { aid, patch } }));
     if (r.error) toast(r.error.message || r.error.code, true);
     else toast('✓ 配置已保存，点「重载」生效');
-  } catch (e) { toast(e.message, true); }
-  finally { _agentBusy = false; }
+  });
 }
 
 // ── System 视图 ──
@@ -1123,7 +1400,11 @@ function initTheme() {
       btn.textContent = next === 'dark' ? '☀️' : '🌙';
       if (_hourlyChart) { _hourlyChart.dispose(); _hourlyChart = null; }
       if (_modelChart) { _modelChart.dispose(); _modelChart = null; }
+      ['_monCpu', '_monMem', '_monMsg', '_monErr'].forEach(function (k) {
+        if (window[k]) { window[k].dispose(); window[k] = null; }
+      });
       loadUsageDashboard();
+      if (currentView === 'monitor') renderMonitor(state.monitor);
     };
   }
 }
@@ -1463,6 +1744,220 @@ async function runExplorerQuery() {
           '</td><td>' + r.call_count + '</td></tr>';
       }).join('') + '</tbody>';
   }
+}
+
+// ── Monitor ──────────────────────────────────────
+// 绑定时间范围切换按钮（只绑一次）
+let _monRangeBound = false;
+function bindMonRangeTabs() {
+  if (_monRangeBound) return;
+  var tabs = document.querySelectorAll('#view-monitor .mon-range');
+  if (!tabs.length) return;
+  tabs.forEach(function (btn) {
+    btn.onclick = function () {
+      monRange = btn.dataset.range;
+      document.querySelectorAll('#view-monitor .mon-range').forEach(function (b) {
+        b.classList.toggle('active', b.dataset.range === monRange);
+      });
+      // 切范围 → 重新订阅（源按 range 返回不同分辨率的 history）
+      subscribe('monitor', { range: monRange });
+    };
+  });
+  _monRangeBound = true;
+}
+
+function renderMonitor(data) {
+  var wrap = $('#view-monitor .mon-layout');
+  if (!wrap) return;
+  bindMonRangeTabs();
+  if (!data) { return; }
+  if (!data.daemonRunning) {
+    // 不清空骨架，仅在卡片区提示，避免破坏 toolbar
+    var cardsEl0 = $('#mon-cards');
+    if (cardsEl0) cardsEl0.innerHTML = '<div class="empty" style="grid-column:1/-1">daemon 未运行</div>';
+    return;
+  }
+
+  var s = data.snapshot;
+  // history 是三档分辨率对象 { fine, mid, coarse }；按当前范围选一档
+  var rangeKey = { '2m': 'fine', '10m': 'mid', '1h': 'coarse' }[monRange] || 'fine';
+  var hist = data.history || {};
+  var h = Array.isArray(hist) ? hist : (hist[rangeKey] || []);
+  var sys = s.system || {};
+  var lh = (s.stats && s.stats.lastHour) || {};
+  var recentErrs = (s.stats && s.stats.recentErrors) || [];
+  var errRate = (lh.received > 0) ? ((lh.errors / lh.received) * 100).toFixed(1) + '%' : '0%';
+  var agents = s.agents || [];
+  var connected = agents.filter(function (a) { return a.status === 'connected'; }).length;
+
+  // ── Stat cards ──
+  var sysMemPct = (sys.memTotal > 0) ? Math.round((sys.memUsed / sys.memTotal) * 100) : 0;
+  var cards = [
+    ['Uptime', fmtDur(s.uptimeMs / 1000)],
+    ['消息 (1h)', lh.received || 0],
+    ['在线 Agent', connected + '/' + agents.length],
+    ['平均响应', Math.round(lh.avgResponseMs || 0) + 'ms'],
+    ['错误率', errRate],
+    ['进程 CPU', (s.cpuPercent != null ? s.cpuPercent : 0) + '%'],
+    ['系统 CPU', (sys.cpuPercent != null ? sys.cpuPercent : 0) + '%'],
+    ['进程内存', fmtBytes(s.memory ? s.memory.rss : 0)],
+    ['系统内存', sysMemPct + '%'],
+  ];
+  $('#mon-cards').innerHTML = cards.map(function (c) {
+    return '<div class="usage-card"><div class="card-value">' + c[1] + '</div><div class="card-label">' + c[0] + '</div></div>';
+  }).join('');
+
+  var isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+  var ts = h.map(function (p) { return new Date(p.ts).toLocaleTimeString(); });
+  var css = function (v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); };
+  var cProc = css('--accent'), cSys = css('--orange');
+
+  // ── CPU dual-line：进程 vs 系统 ──
+  monDualLine('mon-cpu-chart', '_monCpu', ts, isDark, 'CPU 占用',
+    [
+      { name: 'evolclaw 进程', data: h.map(function (p) { return p.procCpu; }), color: cProc },
+      { name: '整机系统', data: h.map(function (p) { return p.sysCpu != null ? p.sysCpu : null; }), color: cSys },
+    ],
+    function (v) { return Number(v).toFixed(1) + '%'; }, [0, 100]);
+
+  // ── Memory dual-line：进程 RSS vs 系统已用 ──
+  monDualLine('mon-mem-chart', '_monMem', ts, isDark, '内存占用',
+    [
+      { name: 'evolclaw RSS', data: h.map(function (p) { return p.procRss; }), color: cProc },
+      { name: '系统已用', data: h.map(function (p) { return p.sysMemUsed != null ? p.sysMemUsed : null; }), color: cSys },
+    ],
+    function (v) { return fmtBytes(v); }, null);
+
+  // ── Message activity bar chart ──
+  var msgEl = $('#mon-msg-chart');
+  if (msgEl) {
+    if (!window._monMsg) window._monMsg = echarts.init(msgEl, isDark ? 'dark' : null);
+    window._monMsg.setOption({
+      title: { text: '近一小时活动', left: 'center', top: 4, textStyle: { fontSize: 12, color: isDark ? '#e6edf3' : '#1a202c' } },
+      tooltip: { trigger: 'axis' },
+      grid: { top: 36, bottom: 24, left: 44, right: 12 },
+      xAxis: { type: 'category', data: ['Received', 'Completed', 'Errors', 'Interrupts', 'ToolErr'], axisLabel: { fontSize: 9 } },
+      yAxis: { type: 'value', minInterval: 1 },
+      series: [{
+        type: 'bar', barWidth: '45%',
+        data: [
+          { value: lh.received || 0, itemStyle: { color: css('--accent') } },
+          { value: lh.completed || 0, itemStyle: { color: css('--green') } },
+          { value: lh.errors || 0, itemStyle: { color: css('--red') } },
+          { value: lh.interrupts || 0, itemStyle: { color: css('--orange') } },
+          { value: lh.toolErrors || 0, itemStyle: { color: css('--blue') } },
+        ],
+      }],
+      animation: false,
+    });
+  }
+
+  // ── Error breakdown donut ──
+  var errEntries = Object.entries(lh.errorsByType || {});
+  var errEl = $('#mon-err-chart');
+  if (errEl) {
+    if (errEntries.length) {
+      if (!window._monErr) window._monErr = echarts.init(errEl, isDark ? 'dark' : null);
+      window._monErr.setOption({
+        title: { text: '错误分布', left: 'center', top: 4, textStyle: { fontSize: 12, color: isDark ? '#e6edf3' : '#1a202c' } },
+        tooltip: { trigger: 'item', formatter: '{b}: {c} ({d}%)' },
+        series: [{
+          type: 'pie', radius: ['32%', '64%'], center: ['50%', '56%'],
+          label: { fontSize: 10 },
+          data: errEntries.map(function (e) { return { name: e[0], value: e[1] }; }),
+        }],
+        animation: false,
+      });
+    } else {
+      if (window._monErr) { window._monErr.dispose(); window._monErr = null; }
+      errEl.innerHTML = '<div class="empty" style="padding:24px;font-size:12px">近一小时无错误</div>';
+    }
+  }
+
+  // ── Per-agent table ──
+  var dotMap = { connected: 'on', reconnecting: 'idle', aid_blocked: 'idle', kicked: 'off', kicked_no_retry: 'off', failed: 'off', disabled: 'off' };
+  $('#mon-agent-table-wrap').innerHTML =
+    '<div class="mon-section-title">各 Agent 运行状态</div>' +
+    '<table class="usage-table"><thead><tr>' +
+    '<th>Agent</th><th>状态</th><th>收</th><th>发</th><th>流入</th><th>流出</th><th>对端</th><th>队列</th><th>处理中</th>' +
+    '</tr></thead><tbody>' +
+    (agents.length ? agents.map(function (a) {
+      var st = a.stats || {};
+      var dot = dotMap[a.status] || 'off';
+      return '<tr>' +
+        '<td title="' + esc(a.aid) + '">' + esc(a.agentName || shortAid(a.aid)) + '</td>' +
+        '<td><span class="dot ' + dot + '"></span>' + esc(a.status) + '</td>' +
+        '<td>' + (st.messagesReceived || 0) + '</td>' +
+        '<td>' + (st.messagesSent || 0) + '</td>' +
+        '<td>' + fmtBytes(st.bytesReceived || 0) + '</td>' +
+        '<td>' + fmtBytes(st.bytesSent || 0) + '</td>' +
+        '<td>' + (st.uniquePeerCount || 0) + '</td>' +
+        '<td>' + (st.queued || 0) + '</td>' +
+        '<td>' + (st.processing ? '⚙ ' + st.processing : 0) + '</td>' +
+        '</tr>';
+    }).join('') : '<tr><td colspan="9" style="text-align:center;color:var(--dim)">暂无 Agent</td></tr>') +
+    '</tbody></table>';
+
+  // ── Recent errors（替换原 Channels 位置）──
+  $('#mon-err-list').innerHTML =
+    '<div class="mon-section-title">最近错误 <span class="mon-section-sub">(最多 50 条)</span></div>' +
+    (recentErrs.length
+      ? '<div class="mon-err-rows">' + recentErrs.map(function (e) {
+          var who = e.agentName ? shortAid(e.agentName) : '—';
+          var tag = e.kind === 'tool'
+            ? '<span class="mon-err-tag tag-tool">工具</span>'
+            : '<span class="mon-err-tag tag-task">任务</span>';
+          var label = e.kind === 'tool' ? (e.toolName || 'tool') : (e.errorType || 'error');
+          var msg = e.message ? esc(e.message) : '';
+          return '<div class="mon-err-row">' +
+            '<span class="mon-err-time">' + fmtAgo(e.ts) + '</span>' +
+            tag +
+            '<span class="mon-err-aid" title="' + esc(e.agentName || '') + '">' + esc(who) + '</span>' +
+            '<span class="mon-err-kind">' + esc(label) + '</span>' +
+            '<span class="mon-err-msg" title="' + msg + '">' + msg + '</span>' +
+            '</div>';
+        }).join('') + '</div>'
+      : '<div class="empty" style="padding:24px;font-size:12px">暂无错误记录</div>');
+}
+
+// 双线时序图（进程 + 系统）。series: [{name,data,color}]
+function monDualLine(elId, varKey, times, isDark, title, series, fmtY, yRange) {
+  var el = $('#' + elId);
+  if (!el) return;
+  if (!window[varKey]) window[varKey] = echarts.init(el, isDark ? 'dark' : null);
+  window[varKey].setOption({
+    title: { text: title, left: 'center', top: 4, textStyle: { fontSize: 12, color: isDark ? '#e6edf3' : '#1a202c' } },
+    legend: { show: false },
+    tooltip: {
+      trigger: 'axis',
+      formatter: function (params) {
+        var lines = [params[0].axisValue];
+        params.forEach(function (pt) {
+          if (pt.value == null) return;
+          lines.push(pt.marker + pt.seriesName + ': ' + (fmtY ? fmtY(pt.value) : pt.value));
+        });
+        return lines.join('<br/>');
+      },
+    },
+    grid: { top: 36, bottom: 24, left: 56, right: 12 },
+    xAxis: { type: 'category', data: times, boundaryGap: false, axisLabel: { fontSize: 9 } },
+    yAxis: {
+      type: 'value',
+      min: (yRange ? yRange[0] : 0),
+      max: (yRange ? yRange[1] : undefined),
+      axisLabel: { formatter: fmtY ? function (v) { return fmtY(v); } : '{value}' },
+    },
+    series: series.map(function (sr) {
+      return {
+        name: sr.name, type: 'line', data: sr.data, smooth: true, symbol: 'none',
+        connectNulls: true,
+        lineStyle: { width: 2, color: sr.color },
+        areaStyle: { color: sr.color, opacity: 0.08 },
+        itemStyle: { color: sr.color },
+      };
+    }),
+    animation: false,
+  });
 }
 
 window.addEventListener('DOMContentLoaded', () => {

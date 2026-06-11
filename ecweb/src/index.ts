@@ -104,7 +104,7 @@ for (const list of Object.values(ifaces)) {
 }
 
 process.stdout.write(`\n${BOLD}${CYAN}🔭 EvolClaw Watch${RST}  ${DIM}(home: ${p.root})${RST}\n\n`);
-process.stdout.write(`  ${BOLD}配对码:${RST}  ${GREEN}${BOLD}${handle.pairingCode}${RST}  ${DIM}(5 分钟内有效，配对后 token 缓存 24h 自动续期)${RST}\n\n`);
+process.stdout.write(`  ${BOLD}配对码:${RST}  ${GREEN}${BOLD}${handle.pairingCode}${RST}  ${DIM}(5 分钟内有效，配对后 token 缓存 30 天，有访问自动续期)${RST}\n\n`);
 process.stdout.write(`  ${BOLD}本机:${RST}    http://localhost:${handle.port}\n`);
 for (const ip of lanIps) process.stdout.write(`  ${BOLD}局域网:${RST}  http://${ip}:${handle.port}\n`);
 if (handle.displaced) {

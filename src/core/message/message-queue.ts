@@ -30,6 +30,7 @@ export class MessageQueue {
   private recentMessageIds = new Set<string>();
   private readonly DEDUP_WINDOW = 60_000; // 1 分钟窗口
   private interceptors = new Map<string, (message: Message) => void>();
+  private mutedAgents = new Set<string>();  // 禁言的 agent：消息照常入队，但不取出给大模型
 
   constructor(handler: MessageHandler) {
     this.handler = handler;
@@ -171,6 +172,15 @@ export class MessageQueue {
         this.currentSessionKey = undefined;
         this.currentProjectPath = undefined;
         this.activeMessageIds.clear();
+        return;
+      }
+
+      // 禁言：消息留在队列里，暂停消费（解禁后由 unmuteAgent 重新触发 processNext）
+      const headAgent = queue[0].agentName || DEFAULT_AGENT_NAME;
+      if (this.mutedAgents.has(headAgent)) {
+        logger.info(`[Queue] processNext: agent ${headAgent} muted, pausing key=${queueKey} (${queue.length} queued)`);
+        this.processing.delete(queueKey);
+        this.processingAgent.delete(queueKey);
         return;
       }
 
@@ -419,5 +429,66 @@ export class MessageQueue {
       if ((a || DEFAULT_AGENT_NAME) === agentName) total++;
     }
     return total;
+  }
+
+  /**
+   * 清空指定 agent 的待处理消息（不影响正在处理中的消息）。
+   * 被移除的消息直接 resolve（与 cancel 一致），让 enqueue 的等待方正常解除阻塞。
+   * @returns 被清除的消息数量
+   */
+  clearByAgent(agentName: string): number {
+    let cleared = 0;
+    for (const queue of this.queues.values()) {
+      for (let i = queue.length - 1; i >= 0; i--) {
+        if ((queue[i].agentName || DEFAULT_AGENT_NAME) === agentName) {
+          const [removed] = queue.splice(i, 1);
+          removed.resolve();
+          cleared++;
+        }
+      }
+    }
+    if (cleared > 0) logger.info(`[Queue] Cleared ${cleared} pending message(s) for agent ${agentName}`);
+    return cleared;
+  }
+
+  /** 禁言 agent：后续消息照常入队，但 processNext 不再取出处理。 */
+  muteAgent(agentName: string): void {
+    this.mutedAgents.add(agentName);
+    logger.info(`[Queue] Muted agent ${agentName}`);
+  }
+
+  /** 解除禁言：重新触发该 agent 已积压、且当前未在处理的队列。 */
+  unmuteAgent(agentName: string): void {
+    if (!this.mutedAgents.delete(agentName)) return;
+    logger.info(`[Queue] Unmuted agent ${agentName}, resuming queued messages`);
+    for (const [key, queue] of this.queues) {
+      if (queue.length > 0 && !this.processing.has(key)) {
+        const headAgent = queue[0].agentName || DEFAULT_AGENT_NAME;
+        if (headAgent === agentName) this.processNext(key);
+      }
+    }
+  }
+
+  isAgentMuted(agentName: string): boolean {
+    return this.mutedAgents.has(agentName);
+  }
+
+  /** 中断指定 agent 所有正在处理中的会话（停止 agent 时调用）。 */
+  interruptByAgent(agentName: string): void {
+    for (const [queueKey, name] of this.processingAgent) {
+      if ((name || DEFAULT_AGENT_NAME) === agentName) {
+        const sessionKey = queueKey.split('::')[0];
+        logger.info(`[Queue] Interrupting session ${sessionKey} for stopped agent ${agentName}`);
+        this.eventBus?.publish({
+          type: 'task:interrupted',
+          sessionId: sessionKey,
+          reason: 'new_message',
+          agentName: name,
+        });
+        if (this.interruptCallback) {
+          this.interruptCallback(sessionKey, this.currentAgentId, name).catch(() => {});
+        }
+      }
+    }
   }
 }

@@ -1,8 +1,9 @@
 import net from 'net';
 import fs from 'fs';
+import os from 'os';
 import { logger } from './utils/logger.js';
 import type { EvolAgentRegistryHandle, AidConnectionState } from './types.js';
-import type { AidStatsSnapshot } from './utils/stats.js';
+import type { AidStatsSnapshot, StatsSnapshot } from './utils/stats.js';
 import { fileCache } from './core/daemon-file-cache.js';
 import type { FileCacheStats } from './core/daemon-file-cache.js';
 
@@ -58,6 +59,7 @@ type AunAidProvider = () => AidConnectionState[];
 type AunAidStatsProvider = () => AidStatsSnapshot[];
 type AunAidStatsRecorder = (params: { aid: string; toPeer: string; text: string; encrypt?: boolean; chatmode?: string }) => void;
 type MenuExecutor = (payload: any) => Promise<any>;
+type StatsSnapshotProvider = () => StatsSnapshot;
 
 export class IpcServer {
   private server: net.Server | null = null;
@@ -66,6 +68,18 @@ export class IpcServer {
   private aunAidStatsProvider?: AunAidStatsProvider;
   private aunAidStatsRecorder?: AunAidStatsRecorder;
   private menuExecutor?: MenuExecutor;
+  private statsProvider?: StatsSnapshotProvider;
+
+  // CPU 占用追踪：IPC handler 是一次性同步调用，无法在响应里做 200ms 异步采样，
+  // 故用后台 1s interval 累积 process.cpuUsage() 增量，handler 直接读最近值。
+  // procCpuPercent = 本 daemon 进程占单核的百分比（可 >100% 仅当多核，已 clamp 到 100）；
+  // sysCpuPercent  = 整机所有核平均忙碌百分比（由 os.cpus() times 增量算出）。
+  private lastCpuUsage = process.cpuUsage();
+  private lastCpuTs = Date.now();
+  private cpuPercent = 0;            // 进程级
+  private sysCpuPercent = 0;         // 系统级
+  private lastCpuTimes: { idle: number; total: number } | null = null;
+  private cpuTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(
     private socketPath: string,
@@ -96,6 +110,51 @@ export class IpcServer {
   /** Inject AUN AID stats recorder for aun-aid-stats-record-outbound IPC handler */
   setAunAidStatsRecorder(recorder: AunAidStatsRecorder): void {
     this.aunAidStatsRecorder = recorder;
+  }
+
+  /** Inject global StatsSnapshot provider for monitor-snapshot IPC handler */
+  setStatsProvider(provider: StatsSnapshotProvider): void {
+    this.statsProvider = provider;
+  }
+
+  /** Start the 1s background CPU sampling loop (for monitor-snapshot). Call after start(). */
+  startCpuTracking(): void {
+    if (this.cpuTimer) return;
+    this.cpuTimer = setInterval(() => {
+      const now = Date.now();
+      const elapsedUs = (now - this.lastCpuTs) * 1000; // wall time in microseconds
+      if (elapsedUs > 0) {
+        const usage = process.cpuUsage(this.lastCpuUsage); // delta since last sample
+        this.cpuPercent = Math.min(100, ((usage.user + usage.system) / elapsedUs) * 100);
+      }
+      this.lastCpuUsage = process.cpuUsage();
+      this.lastCpuTs = now;
+
+      // 系统级 CPU：os.cpus() 累计 times 的增量 → 整机平均忙碌率
+      try {
+        const cpus = os.cpus();
+        let idle = 0, total = 0;
+        for (const c of cpus) {
+          idle += c.times.idle;
+          total += c.times.user + c.times.nice + c.times.sys + c.times.idle + c.times.irq;
+        }
+        if (this.lastCpuTimes) {
+          const idleDelta = idle - this.lastCpuTimes.idle;
+          const totalDelta = total - this.lastCpuTimes.total;
+          if (totalDelta > 0) {
+            this.sysCpuPercent = Math.max(0, Math.min(100, (1 - idleDelta / totalDelta) * 100));
+          }
+        }
+        this.lastCpuTimes = { idle, total };
+      } catch { /* os.cpus() 理论上不抛 */ }
+    }, 1000);
+    // Don't keep the event loop alive for sampling alone.
+    this.cpuTimer.unref?.();
+  }
+
+  /** Stop the CPU sampling loop. */
+  stopCpuTracking(): void {
+    if (this.cpuTimer) { clearInterval(this.cpuTimer); this.cpuTimer = null; }
   }
 
   start(): void {
@@ -250,6 +309,47 @@ export class IpcServer {
         } catch (e: any) {
           return { ok: false, error: e?.message ?? String(e) };
         }
+      }
+      case 'monitor-snapshot': {
+        // watch web Monitor 页用：进程级 + 系统级运行指标 + 全局 stats + per-agent 汇总。
+        const mem = process.memoryUsage();
+        const totalMem = os.totalmem();
+        const freeMem = os.freemem();
+        const aids = this.aunAidProvider ? this.aunAidProvider() : [];
+        const aidStats = this.aunAidStatsProvider ? this.aunAidStatsProvider() : [];
+        const statsMap = new Map(aidStats.map((s) => [s.aid, s]));
+        return {
+          ok: true,
+          snapshot: {
+            ts: Date.now(),
+            uptimeMs: Math.round(process.uptime() * 1000),
+            cpuCount: os.cpus().length,
+            // 进程级：本 daemon 进程
+            memory: {
+              rss: mem.rss,
+              heapUsed: mem.heapUsed,
+              heapTotal: mem.heapTotal,
+              external: mem.external,
+            },
+            cpuPercent: Math.round(this.cpuPercent * 10) / 10,
+            // 系统级：整机
+            system: {
+              memTotal: totalMem,
+              memUsed: totalMem - freeMem,
+              memFree: freeMem,
+              cpuPercent: Math.round(this.sysCpuPercent * 10) / 10,
+              loadAvg: os.loadavg(),   // [1m, 5m, 15m]（Windows 恒 0）
+            },
+            stats: this.statsProvider ? this.statsProvider() : null,
+            agents: aids.map((a) => ({
+              aid: a.aid,
+              agentName: a.agentName,
+              channelName: a.channelName,
+              status: a.status,
+              stats: statsMap.get(a.aid) ?? null,
+            })),
+          },
+        };
       }
       default:
         return { error: `unknown command: ${cmd.type}` };

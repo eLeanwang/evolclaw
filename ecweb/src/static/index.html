@@ -32,6 +32,7 @@
         <button class="tab" data-view="cache">Cache</button>
         <button class="tab" data-view="system">System</button>
         <button class="tab" data-view="usage">Usage</button>
+        <button class="tab" data-view="monitor">Monitor</button>
 
       </nav>
       <span id="today-cost" class="today-cost"></span>
@@ -136,6 +137,35 @@
               </div>
             </div>
           </div>
+        </div>
+      </section>
+
+      <section id="view-monitor" class="view">
+        <div class="mon-layout">
+          <div class="mon-toolbar">
+            <span class="mon-toolbar-label">时间范围</span>
+            <div class="mon-range-tabs">
+              <button class="mon-range active" data-range="2m">2 分钟</button>
+              <button class="mon-range" data-range="10m">10 分钟</button>
+              <button class="mon-range" data-range="1h">1 小时</button>
+            </div>
+            <span style="flex:1"></span>
+            <span class="mon-legend">
+              <span class="mon-legend-item"><i class="lg-dot lg-proc"></i>evolclaw 进程</span>
+              <span class="mon-legend-item"><i class="lg-dot lg-sys"></i>整机系统</span>
+            </span>
+          </div>
+          <div id="mon-cards" class="usage-cards"></div>
+          <div class="mon-row2">
+            <div id="mon-cpu-chart" class="mon-chart"></div>
+            <div id="mon-mem-chart" class="mon-chart"></div>
+          </div>
+          <div class="mon-row2">
+            <div id="mon-msg-chart" class="mon-chart"></div>
+            <div id="mon-err-chart" class="mon-chart"></div>
+          </div>
+          <div class="mon-table-wrap" id="mon-agent-table-wrap"></div>
+          <div class="mon-err-wrap" id="mon-err-list"></div>
         </div>
       </section>
 

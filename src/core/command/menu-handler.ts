@@ -877,6 +877,46 @@ export async function execMenuAction(this: any,
     if (action === 'create') {
       a.project = resolveProjectPath(a.project, a.aid ?? '', loadDefaults());
     }
+    // queue-clear：清空指定 agent 的待处理消息（不影响处理中），直接走 messageQueue。
+    if (action === 'queue-clear') {
+      if (!a.aid) return { error: '缺少 aid', code: 'INVALID_ARGS' };
+      const handle = this.agentRegistry?.get(a.aid) ?? null;
+      const agentName = handle?.name;
+      if (!agentName) return { error: `未找到 Agent: ${a.aid}`, code: 'NOT_FOUND' };
+      const cleared = this.messageQueue.clearByAgent(agentName);
+      return { data: { cleared } };
+    }
+    // mute / unmute：禁言/解禁。禁言后消息照常入队但不消费，解禁后恢复。
+    if (action === 'mute' || action === 'unmute') {
+      if (!a.aid) return { error: '缺少 aid', code: 'INVALID_ARGS' };
+      const handle = this.agentRegistry?.get(a.aid) ?? null;
+      const agentName = handle?.name;
+      if (!agentName) return { error: `未找到 Agent: ${a.aid}`, code: 'NOT_FOUND' };
+      if (action === 'mute') this.messageQueue.muteAgent(agentName);
+      else this.messageQueue.unmuteAgent(agentName);
+      return { data: { aid: a.aid, muted: action === 'mute' } };
+    }
+    // start / stop：运行时连/断渠道，不改 config.enabled。
+    if (action === 'start' || action === 'stop') {
+      if (!a.aid) return { error: '缺少 aid', code: 'INVALID_ARGS' };
+      const hooks = (globalThis as any).__evolclaw_reloadHooks;
+      if (!hooks) return { error: 'Reload hooks 未初始化', code: 'INTERNAL' };
+      try {
+        if (action === 'stop') {
+          if (!this.agentRegistry?.stopAgent) return { error: 'stopAgent 不可用', code: 'INTERNAL' };
+          await this.agentRegistry.stopAgent(a.aid, hooks);
+          // 中断该 agent 正在执行的大模型调用
+          const handle = this.agentRegistry.get(a.aid);
+          if (handle) this.messageQueue.interruptByAgent(handle.name);
+        } else {
+          if (!this.agentRegistry?.startAgent) return { error: 'startAgent 不可用', code: 'INTERNAL' };
+          await this.agentRegistry.startAgent(a.aid, hooks);
+        }
+        return { data: { aid: a.aid, action } };
+      } catch (e: any) {
+        return { error: e?.message || String(e), code: 'INTERNAL' };
+      }
+    }
     // reload / disable / delete 会中断 agent 正在处理的任务，执行前检查是否繁忙。
     // 队列按 agent 名计数，故先用 registry 把 aid 解析成 name；force 跳过。
     if ((action === 'reload' || action === 'disable' || action === 'delete') && a.aid && !a.force) {

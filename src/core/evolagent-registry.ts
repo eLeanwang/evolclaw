@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { EvolAgent } from './evolagent.js';
 import { logger } from '../utils/logger.js';
+import { agentMdPath } from '../paths.js';
 import {
   loadDefaults,
   loadAllAgents,
@@ -405,6 +406,38 @@ export class EvolAgentRegistry {
     }
   }
 
+  // ── Stop / Start（运行时断连/重连，不改 config.enabled）──────────────────
+
+  async stopAgent(aidOrName: string, hooks: ReloadHooks): Promise<void> {
+    const agent = this.agents.get(aidOrName);
+    if (!agent) throw new Error(`Agent "${aidOrName}" not found`);
+    if (agent.status === 'disabled') throw new Error(`Agent is disabled; use enable/disable instead`);
+    if (agent.status === 'stopped') return;
+    // 先断开 AID 连接（下线），让未送达的消息保留在云端；
+    // 然后中断正在执行的大模型调用（不等它跑完）。
+    for (const ch of agent.channelInstanceNames()) {
+      try { await hooks.disconnectChannel(ch); } catch {}
+    }
+    agent.status = 'stopped';
+    this.channelIndex.clear();
+    this.buildChannelIndex();
+    logger.info(`[Registry] Stopped agent ${aidOrName}`);
+  }
+
+  async startAgent(aidOrName: string, hooks: ReloadHooks): Promise<void> {
+    const agent = this.agents.get(aidOrName);
+    if (!agent) throw new Error(`Agent "${aidOrName}" not found`);
+    if (agent.status === 'disabled') throw new Error(`Agent is disabled; use enable instead`);
+    if (agent.status === 'running') return;
+    for (const ch of agent.channelInstanceNames()) {
+      await hooks.startChannel(agent, ch);
+    }
+    agent.status = 'running';
+    this.channelIndex.clear();
+    this.buildChannelIndex();
+    logger.info(`[Registry] Started agent ${aidOrName}`);
+  }
+
   private checkConflictForReload(newRaw: AgentConfig, excludeAid: string): string | null {
     const newFps = new Set<string>();
     for (const inst of newRaw.channels) {
@@ -422,9 +455,46 @@ export class EvolAgentRegistry {
     return null;
   }
 
+  // ── 友好名缓存（从本地 agent.md 解析，缺失时异步从网络拉取）──
+  private displayNameCache = new Map<string, string>();
+  private displayNamePending = new Set<string>();
+
+  private resolveDisplayName(aid: string): string | undefined {
+    const cached = this.displayNameCache.get(aid);
+    if (cached) return cached;
+    try {
+      const mdPath = agentMdPath(aid);
+      if (fs.existsSync(mdPath)) {
+        const content = fs.readFileSync(mdPath, 'utf-8');
+        const fm = content.match(/^---\n([\s\S]*?)\n---/);
+        if (fm) {
+          const nm = fm[1].match(/^name:\s*["']?(.+?)["']?\s*$/m);
+          if (nm?.[1]) { this.displayNameCache.set(aid, nm[1]); return nm[1]; }
+        }
+      }
+    } catch { /* ignore */ }
+    // 异步从网络拉取（仅一次，不阻塞）
+    if (!this.displayNamePending.has(aid)) {
+      this.displayNamePending.add(aid);
+      import('../aun/aid/index.js').then(({ agentmdGet }) => {
+        agentmdGet(aid).then(content => {
+          if (typeof content === 'string') {
+            const fm = content.match(/^---\n([\s\S]*?)\n---/);
+            if (fm) {
+              const nm = fm[1].match(/^name:\s*["']?(.+?)["']?\s*$/m);
+              if (nm?.[1]) this.displayNameCache.set(aid, nm[1]);
+            }
+          }
+        }).catch(() => {}).finally(() => this.displayNamePending.delete(aid));
+      }).catch(() => { this.displayNamePending.delete(aid); });
+    }
+    return undefined;
+  }
+
   private toInfo(agent: EvolAgent): AgentInfo {
     return {
       name: agent.name,
+      displayName: this.resolveDisplayName(agent.aid),
       aid: agent.aid,
       status: agent.status,
       channels: agent.channelInstanceNames(),

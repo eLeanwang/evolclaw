@@ -45,13 +45,29 @@ function scanAidActivity(): Map<string, { ts: number; event: string }> {
   return result;
 }
 
+// evolclaw 版本：与 watch aid 状态栏一致。daemon 进程级、整轮 watch 不变，
+// 故缓存一次（首次 menu.query name=system 拿到后复用），避免每秒多发一次 IPC。
+let _cachedVersion: string | null = null;
+async function fetchVersion(socket: string): Promise<string | null> {
+  if (_cachedVersion) return _cachedVersion;
+  try {
+    const r = await ipcQuery<{ ok: boolean; response?: any }>(
+      socket, { type: 'menu.exec', payload: { type: 'menu.query', id: 'aid-sys-q', name: 'system' } }, 4000,
+    );
+    const v = r?.ok ? r.response?.data?.version : null;
+    if (v) _cachedVersion = v;
+    return v ?? null;
+  } catch { return null; }
+}
+
 async function buildSnapshot(): Promise<any> {
   const p = resolvePaths();
-  const [aidsResp, statsResp, statusResp, agentsResp] = await Promise.all([
+  const [aidsResp, statsResp, statusResp, agentsResp, version] = await Promise.all([
     ipcQuery<{ ok: boolean; aids: any[] }>(p.socket, { type: 'aun-aids' }),
     ipcQuery<{ ok: boolean; stats: any[] }>(p.socket, { type: 'aun-aid-stats' }),
     ipcQuery<any>(p.socket, { type: 'status' }),
     ipcQuery<{ ok: boolean; agents: any[] }>(p.socket, { type: 'evolagent.list' }),
+    fetchVersion(p.socket),
   ]);
 
   const daemonRunning = aidsResp !== null || statusResp !== null;
@@ -73,6 +89,7 @@ async function buildSnapshot(): Promise<any> {
     stats: statsResp?.stats ?? [],
     status: statusResp ?? null,
     agents: agentsResp?.agents ?? [],
+    version: version ?? null,
   };
 }
 

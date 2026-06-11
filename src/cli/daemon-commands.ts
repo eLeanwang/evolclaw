@@ -2243,8 +2243,11 @@ function findAliveEcweb(p: ReturnType<typeof resolvePaths>): { pid: number; port
 /** 若 ecweb 在运行则杀掉并清理 pid 文件，返回是否成功 kill。 */
 function stopEcwebIfRunning(p: ReturnType<typeof resolvePaths>): boolean {
   const alive = findAliveEcweb(p);
-  if (!alive) return false;
-  try { platform.killProcess(alive.pid); } catch {}
+  let killed = false;
+  if (alive) {
+    try { platform.killProcess(alive.pid, true); } catch {}
+    killed = true;
+  }
   // 清理 pid 文件
   try {
     for (const file of fs.readdirSync(p.instanceDir)) {
@@ -2253,7 +2256,13 @@ function stopEcwebIfRunning(p: ReturnType<typeof resolvePaths>): boolean {
       }
     }
   } catch {}
-  return true;
+  // 端口兜底：杀掉任何仍占用 ecweb 端口的残留进程（含手动启动、未登记 pid 文件的）。
+  // 仅靠 pid 文件无法清理这类进程，会导致下次启动端口被占。
+  const port = loadEvolclawConfig().ecweb?.port ?? 42705;
+  for (const pid of platform.findProcessByPort(port)) {
+    try { platform.killProcess(pid, true); killed = true; } catch {}
+  }
+  return killed;
 }
 
 /** 后台 detached 启动 ecweb；若已运行则先停再启（确保加载最新代码）。 */

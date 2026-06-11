@@ -3,7 +3,7 @@
  *
  * - HTTP: 静态资源 + 配对 API
  * - WebSocket: 订阅式实时推送（aid / msg / session）
- * - 鉴权: 6 位配对码（5 分钟有效）→ token（24h，有访问自动续期），持久化到磁盘
+ * - 鉴权: 6 位配对码（5 分钟有效）→ token（30 天，有访问自动续期），持久化到磁盘
  * - 安全: 绑定 0.0.0.0（支持远程访问），token 校验，只读
  *
  * 与 evolclaw 的唯一通信：启动时发 ping 检查 protocolVersion（soft 校验）。
@@ -13,6 +13,7 @@ import http from 'http';
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
+import { spawnSync } from 'child_process';
 import { fileURLToPath } from 'url';
 import { WebSocketServer, WebSocket } from 'ws';
 import { resolvePaths } from './paths.js';
@@ -25,6 +26,7 @@ import { sessionSource } from './sources/session.js';
 import { cacheSource } from './sources/cache.js';
 import { systemSource } from './sources/system.js';
 import { triggersSource } from './sources/triggers.js';
+import { monitorSource } from './sources/monitor.js';
 import { queryStatsForDashboard, queryStatsExplorer, queryStatsByPeer, queryStatsByAgent, queryStatsOverview } from './sources/stats.js';
 import { getSessionsAunDir, listLocalAids, listPeers, readMessages } from './fs-utils.js';
 import { ccProjectsDir } from './paths.js';
@@ -32,12 +34,12 @@ import { ccProjectsDir } from './paths.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const STATIC_DIR = path.join(__dirname, 'static');
 
-const TOKEN_TTL_MS = 24 * 60 * 60 * 1000;  // 24h
+const TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;  // 30天（滑动窗口：每次有效访问刷新 lastActive 自动续期）
 const PAIRING_TTL_MS = 5 * 60 * 1000;       // 5min
 const DEFAULT_PORT = 42705;
 const PROTOCOL_VERSION = 1;                  // 与 evolclaw ping response 对齐的软校验版本
 
-const SOURCES: Record<ViewKind, WatchSource> = { agents: aidSource, msg: msgSource, session: sessionSource, cache: cacheSource, system: systemSource, triggers: triggersSource };
+const SOURCES: Record<ViewKind, WatchSource> = { agents: aidSource, msg: msgSource, session: sessionSource, cache: cacheSource, system: systemSource, triggers: triggersSource, monitor: monitorSource };
 
 // ECWeb 自身版本：渲染 System 页时随快照下发（不走 daemon IPC，ECWeb 就是这个进程）。
 function readEcwebVersion(): string {
@@ -243,7 +245,7 @@ function handlePair(req: http.IncomingMessage, res: http.ServerResponse, pairing
     store.tokens.push({ token, createdAt: now, lastActive: now, label: ip });
     saveTokens(store);
     res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ ok: true, token }));
-    log(`✓ 配对成功 from ${ip}（token 缓存 24h）`);
+    log(`✓ 配对成功 from ${ip}（token 缓存 30 天，有访问自动续期）`);
   });
 }
 
@@ -321,15 +323,63 @@ function handleConnection(ws: WebSocket, req: http.IncomingMessage, log: (s: str
 
 // ── Port binding ──
 
-function bindPort(server: http.Server, preferred: number): Promise<{ port: number; displaced: boolean }> {
+/** 跨平台：查端口上的 LISTENING 进程 PID（清理被占端口用）。 */
+function findPidsOnPort(port: number): number[] {
+  const pids = new Set<number>();
+  try {
+    if (process.platform === 'win32') {
+      const out = spawnSync('netstat', ['-ano', '-p', 'TCP'], { encoding: 'utf-8', windowsHide: true }).stdout || '';
+      for (const line of out.split('\n')) {
+        if (!/LISTENING/i.test(line)) continue;
+        const m = line.match(/:(\d+)\s+\S+\s+LISTENING\s+(\d+)/i);
+        if (m && Number(m[1]) === port) {
+          const pid = Number(m[2]);
+          if (pid && pid !== process.pid) pids.add(pid);
+        }
+      }
+    } else {
+      const out = spawnSync('lsof', ['-ti', `tcp:${port}`, '-sTCP:LISTEN'], { encoding: 'utf-8' }).stdout || '';
+      for (const l of out.split('\n')) {
+        const pid = parseInt(l.trim(), 10);
+        if (pid && pid !== process.pid) pids.add(pid);
+      }
+    }
+  } catch { /* netstat/lsof 缺失或无匹配 */ }
+  return [...pids];
+}
+
+/** 杀掉占用目标端口的旧进程（强制）。 */
+function killPidsOnPort(port: number, log: (s: string) => void): boolean {
+  let killed = false;
+  for (const pid of findPidsOnPort(port)) {
+    try {
+      if (process.platform === 'win32') spawnSync('taskkill', ['/PID', String(pid), '/F'], { windowsHide: true });
+      else process.kill(pid, 'SIGKILL');
+      log(`⚠ 端口 ${port} 被旧进程 PID ${pid} 占用，已终止`);
+      killed = true;
+    } catch { /* 已退出或无权限 */ }
+  }
+  return killed;
+}
+
+function sleepMs(ms: number): Promise<void> { return new Promise(r => setTimeout(r, ms)); }
+
+function bindPort(server: http.Server, preferred: number, log: (s: string) => void): Promise<{ port: number; displaced: boolean }> {
   return new Promise((resolve, reject) => {
-    let attempt = 0;
+    let killedOnce = false;
     const tryBind = (port: number) => {
-      server.once('error', (err: any) => {
-        if (err.code === 'EADDRINUSE' && attempt < 10) { attempt++; tryBind(port + 1); }
-        else reject(err);
+      server.once('error', async (err: any) => {
+        if (err.code === 'EADDRINUSE' && !killedOnce) {
+          // 默认行为：杀掉占用端口的旧进程并重试本端口（而非 +1 漂移），避免端口被占。
+          killedOnce = true;
+          killPidsOnPort(port, log);
+          await sleepMs(600);
+          tryBind(port);
+        } else {
+          reject(err);
+        }
       });
-      server.listen(port, '0.0.0.0', () => resolve({ port, displaced: port !== preferred }));
+      server.listen(port, '0.0.0.0', () => resolve({ port, displaced: false }));
     };
     tryBind(preferred);
   });
@@ -406,7 +456,7 @@ export async function startWatchWebServer(opts: { port?: number; log?: (s: strin
     });
   });
 
-  const { port, displaced } = await bindPort(server, opts.port ?? DEFAULT_PORT);
+  const { port, displaced } = await bindPort(server, opts.port ?? DEFAULT_PORT, log);
 
   return {
     url: `http://0.0.0.0:${port}`,

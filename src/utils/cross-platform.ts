@@ -85,6 +85,37 @@ export function findProcesses(pattern: string): number[] {
 }
 
 /**
+ * Cross-platform: find PIDs listening on a TCP port.
+ * Used to clean up stale/orphaned listeners (e.g. manually-spawned ecweb
+ * that never registered a pid file) before binding the port again.
+ */
+export function findProcessByPort(port: number): number[] {
+  const pids = new Set<number>();
+  try {
+    if (isWindows) {
+      const result = spawnSync('netstat', ['-ano', '-p', 'TCP'], { encoding: 'utf-8', windowsHide: true });
+      const output = result.stdout || '';
+      for (const line of output.split('\n')) {
+        // 形如:  TCP    0.0.0.0:42705   0.0.0.0:0   LISTENING   23004
+        if (!/LISTENING/i.test(line)) continue;
+        const m = line.match(/:(\d+)\s+\S+\s+LISTENING\s+(\d+)/i);
+        if (m && Number(m[1]) === port) {
+          const pid = Number(m[2]);
+          if (pid && pid !== process.pid) pids.add(pid);
+        }
+      }
+    } else {
+      const output = execFileSync('lsof', ['-ti', `tcp:${port}`, '-sTCP:LISTEN'], { encoding: 'utf-8' }).trim();
+      for (const line of output.split('\n')) {
+        const pid = parseInt(line.trim(), 10);
+        if (pid && pid !== process.pid) pids.add(pid);
+      }
+    }
+  } catch { /* netstat/lsof missing or no match */ }
+  return [...pids];
+}
+
+/**
  * Cross-platform process info retrieval.
  */
 export interface ProcessInfo {

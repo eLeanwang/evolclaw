@@ -1153,6 +1153,7 @@ async function main() {
   aidStatsCollector.setQueueStatsProvider((agentName: string) => ({
     processing: messageQueue.getProcessingCountByAgent(agentName),
     queued: messageQueue.getQueueLengthByAgent(agentName),
+    muted: messageQueue.isAgentMuted(agentName),
   }));
   ipcServer.setAunAidStatsProvider(() => aidStatsCollector.getAllSnapshots());
   ipcServer.setAunAidStatsRecorder((params) => {
@@ -1164,6 +1165,7 @@ async function main() {
       false,
       params.encrypt,
       params.chatmode,
+      'send',
     );
   });
 
@@ -1176,6 +1178,13 @@ async function main() {
       processor.unregisterChannel(channelName);
       cmdHandler.unregisterChannel(channelName);
       msgBridge.removeChannel(channelName);
+    },
+    onChannelStarted: (inst: ChannelInstance) => {
+      // startChannel 重建渠道时重新注入 AidStatsCollector（与 hot-load 路径对齐）
+      if (inst.channelType === 'aun') {
+        const ch = inst.channel as any;
+        if (typeof ch?.setAidStatsCollector === 'function') ch.setAidStatsCollector(aidStatsCollector);
+      }
     },
     messageQueue,
   });
@@ -1271,6 +1280,8 @@ async function main() {
 
   // I3: start IPC server LAST, after all hook setup, to eliminate race window
   ipcServer.start();
+  ipcServer.setStatsProvider(() => statsCollector.getSnapshot());
+  ipcServer.startCpuTracking();
 
   // 配置 reload 走 IPC `evolagent.reload` 触发，不再用 watchFile。
   // 双 rename 原子写下 watchFile 的语义会被破坏，且新结构有 N 个 config.json 要监控；
@@ -1283,6 +1294,7 @@ async function main() {
     const pid = process.pid;
     const ppid = process.ppid;
     logger.info(`\n\nShutting down gracefully... (signal=${shutdownSignal}, pid=${pid}, ppid=${ppid})`);
+    ipcServer.stopCpuTracking();
     ipcServer.stop();
     eventBus.publish({
       type: 'system:shutdown',
