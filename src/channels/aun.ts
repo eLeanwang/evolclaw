@@ -341,9 +341,13 @@ export class AUNChannel {
               this.notifyCardActionFailure(channelId, '❌ 操作失败：交互处理器未就绪', cardClickerAid, threadId);
             }
           }
-        } else {
-          logger.debug(`${this.logPrefix()} action_card_reply dropped: cardMsgId=${cardMsgId} hasCallback=${!!this.interactionCallback}`);
+        } else if (this.ownedCardMsgIds.has(cardMsgId)) {
+          // 本 agent 发出的卡片，但 entry 已过期（20min TTL）
+          logger.debug(`${this.logPrefix()} action_card_reply expired: cardMsgId=${cardMsgId}`);
           this.notifyCardActionFailure(channelId, '⚠️ 卡片已失效，请重新发起');
+        } else {
+          // 非本 agent 发出的卡片（broadcast 模式下其他 agent 的卡）→ 静默忽略
+          logger.debug(`${this.logPrefix()} action_card_reply ignored (not owned): cardMsgId=${cardMsgId}`);
         }
         // 始终返回空字符串，阻止消息分发给 agent
         return '';
@@ -486,6 +490,14 @@ export class AUNChannel {
       .trim();
   }
 
+  /** 剥离正文中所有 @aid（用于命令判定 + 命令消息进 agent 前的清理）。 */
+  private stripAllMentions(text: string): string {
+    return text
+      .replace(/(^|\s)@[\w.-]+(?=$|\s|[.,!?;:，。！？；：]|[\u4e00-\u9fff])/g, '$1')
+      .replace(/[ \t]+/g, ' ')
+      .trim();
+  }
+
   private extractMentionAids(mentions: unknown[]): string[] {
     const aids: string[] = [];
     for (const m of mentions) {
@@ -547,6 +559,8 @@ export class AUNChannel {
   interactionCallback?: (response: InteractionResponse) => void;
   // action_card message_id → { requestId, isCommandCard }（用于关联 action_card_reply）
   cardMessageIdMap = new Map<string, { requestId: string; isCommandCard: boolean; initiatorAid?: string }>();
+  /** 本 agent 曾发出过的卡片 msgId（只增不删，用于区分"过期失效"vs"他人发的卡"） */
+  ownedCardMsgIds = new Set<string>();
   private dispatchModeResolver?: (channelId: string) => Promise<string | undefined>;
 
   private static readonly PROACTIVE_ALLOW_TYPES = new Set([
@@ -1377,7 +1391,13 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     // 包含 [EvolClaw.xxx] trace 说明已被本系统处理过，是回声的回声，丢弃防止链式爆炸
     const firstLineGroup = text.split('\n')[0] || '';
     const hasEvolClawTraceGroup = /\[EvolClaw\.(receive|reply|agent)\]/.test(text);
-    if (/echo/i.test(firstLineGroup) && !hasEvolClawTraceGroup) {
+    const isEchoMsg = /echo/i.test(firstLineGroup) && !hasEvolClawTraceGroup;
+
+    // 命令判定：剥离所有 @ 后看是否 / 开头（多 @ 场景如 @a @b /status 也能正确识别）。
+    // echo 消息走独立的 trace 流程，不参与命令语义判定。
+    const isCommandMsg = !isEchoMsg && this.stripAllMentions(text).startsWith('/');
+
+    if (isEchoMsg) {
       // 短 echo（≤10 字符）已在前面的快速通道命中并 return，这里只处理长 echo
       // >10 字符：追加 trace,存 pending echo,跳过 mention 过滤继续走 Agent 流程
       const echoTs = () => {
@@ -1400,15 +1420,22 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       logger.info(`${this.logPrefix()} Group dropped: echo bomb (already-traced group=${groupId} sender=${senderAid} mid=${messageId})`);
       return;
     } else {
-      // 非 echo 消息：正常 mention 过滤
-      if (dispatchMode === 'mention' && !mentionedSelf && !mentionedAll) {
+      // 非 echo 消息：mention 过滤
+      // 命令豁免 broadcast：slash 命令在任何 dispatchMode 下都强制走 mention 语义，
+      // 即必须 @ 本 agent（或 @all）才处理，避免广播群里一条命令被全部 agent 各自执行。
+      const enforceMention = dispatchMode === 'mention' || isCommandMsg;
+      if (enforceMention && !mentionedSelf && !mentionedAll) {
         this.acknowledgeImmediately(messageId, seq);
-        logger.info(`${this.logPrefix()} Group dropped: unmentioned in mention-mode (group=${groupId} sender=${senderAid} mid=${messageId} textPreview=${JSON.stringify(text.slice(0, 80))})`);
+        logger.info(`${this.logPrefix()} Group dropped: unmentioned (group=${groupId} sender=${senderAid} mid=${messageId} mode=${dispatchMode} isCommand=${isCommandMsg} textPreview=${JSON.stringify(text.slice(0, 80))})`);
         return;
       }
     }
 
-    const strippedText = this.stripSelfMentionIfOnly(text, this._aid);
+    // 命令消息：剥离所有 @（多 agent 被 @ 时各自拿到干净的 /status 各自执行）；
+    // 普通消息：仅在唯一 @ 是自己时剥离，保留其他 @ 供 agent 感知。
+    const strippedText = isCommandMsg
+      ? this.stripAllMentions(text)
+      : this.stripSelfMentionIfOnly(text, this._aid);
 
     // Detect attachments before the empty-text guard (顶层 + 嵌套)
     const rawAttachments: any[] = this.collectAllAttachments(payload);
@@ -1478,7 +1505,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       mentions,
       mentionAids: renderMentionAids.length > 0 ? renderMentionAids : undefined,
       replyContext: this.buildGroupReplyContext(threadId, senderAid, msgEncrypted, messageId, msgChatmode),
-      dispatchMode,
+      dispatchMode: serverDispatchMode,
       images: inboundImages.length > 0 ? inboundImages : undefined,
     });
   }
@@ -3077,7 +3104,11 @@ export class AUNChannelPlugin implements ChannelPlugin {
               const msgId = await channel.sendStructured(channelId, aunCard, replyCtx);
               if (msgId) {
                 channel.cardMessageIdMap.set(msgId, { requestId: req.id, isCommandCard: false, initiatorAid: req.initiatorId });
+                channel.ownedCardMsgIds.add(msgId);
                 setTimeout(() => channel.cardMessageIdMap.delete(msgId), 20 * 60 * 1000);
+                // ownedCardMsgIds 比 cardMessageIdMap 长寿（区分"我发的已过期"vs"他人的卡"），
+                // 但仍需上界：24h 后清理，防止长进程无限增长。
+                setTimeout(() => channel.ownedCardMsgIds.delete(msgId), 24 * 60 * 60 * 1000);
               }
             } else if (req.kind.kind === 'command-card') {
               const card = req.kind;
@@ -3093,7 +3124,11 @@ export class AUNChannelPlugin implements ChannelPlugin {
               const msgId = await channel.sendStructured(channelId, aunCard, replyCtx);
               if (msgId) {
                 channel.cardMessageIdMap.set(msgId, { requestId: req.id, isCommandCard: true, initiatorAid: req.initiatorId });
+                channel.ownedCardMsgIds.add(msgId);
                 setTimeout(() => channel.cardMessageIdMap.delete(msgId), 20 * 60 * 1000);
+                // ownedCardMsgIds 比 cardMessageIdMap 长寿（区分"我发的已过期"vs"他人的卡"），
+                // 但仍需上界：24h 后清理，防止长进程无限增长。
+                setTimeout(() => channel.ownedCardMsgIds.delete(msgId), 24 * 60 * 60 * 1000);
               }
             } else if (payload.fallbackText) {
               await channel.sendMessage(channelId, payload.fallbackText, replyCtx);
@@ -3166,7 +3201,7 @@ export class AUNChannelPlugin implements ChannelPlugin {
         if (typeof channel.setDispatchModeResolver === 'function') {
           channel.setDispatchModeResolver(async (channelId: string) => {
             const session = await hookCtx.sessionManager.getActiveSession(adapter.channelName, channelId);
-            return session?.metadata?.dispatchMode;
+            return session?.metadata?.dispatchModeOverride;
           });
         }
       },
