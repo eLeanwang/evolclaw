@@ -1,5 +1,24 @@
 # Changelog
 
+## v1.2.0 (2026-06-12)
+
+### New Features
+
+- **Monitor 视图** — 新增 `monitor` source，展示进程级 + 系统级 CPU/内存指标、全局统计与 per-agent 摘要；CPU 由后端 1s 采样循环提供
+- **Agent 运行时控制** — Agent 页面支持 start / stop / mute / unmute / queue-clear：start/stop 连接/断开渠道（不改 config.enabled），stop 中断进行中的模型调用；mute/unmute 暂停/恢复队列消费但保留入队；queue-clear 清空待处理消息
+- **Agent displayName 展示** — 从 agent.md 解析显示名（本地缓存 + 异步网络拉取）
+
+### Improvements
+
+- **Web token TTL 延长** — 登录 token 有效期延长至 30 天并支持滑动续期
+- **端口冲突处理** — 端口被占时杀掉持有端口的旧进程，而非漂移到 port+1
+- **StatsCollector 错误追踪** — 记录近期错误供 Monitor 展示
+- **构建脚本清理** — build 前先清空 dist，避免陈旧产物残留
+
+### Bug Fixes
+
+- **启动就绪检测** — restart 后改用 HTTP 探测端口确认就绪，instance 文件清理逻辑修正
+
 ## v1.1.0 (2026-06-10)
 
 ### New Features

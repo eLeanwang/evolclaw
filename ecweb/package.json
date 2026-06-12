@@ -1,6 +1,6 @@
 {
   "name": "evolclaw-web",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Web-based monitoring dashboard for EvolClaw",
   "type": "module",
   "bin": {
