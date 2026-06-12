@@ -2388,6 +2388,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     if (envelope.chatmode) base.chatmode = envelope.chatmode;
     if (context?.threadId) base.thread_id = context.threadId;
     if (context?.peerId) base.initiator = context.peerId;
+    if (context?.replyToMessageId) base.ref_message_id = context.replyToMessageId;
     return base;
   }
 
