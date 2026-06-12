@@ -259,10 +259,13 @@ function agentStateBadge(s, agStatus, connStatus) {
 
 // 发送方式图标标记
 const MSG_KIND_META = { send: { icon: '💬', label: '回复' }, thought: { icon: '💭', label: '思考' }, inject: { icon: '📥', label: '注入' }, notify: { icon: '🔔', label: '通知' } };
-function msgTagsHtml(kind, encrypt, chatmode) {
+// 消息详情流用：jsonl 持久化的 msgType 词汇（text 为普通回复，不另标）
+const MSG_TYPE_META = { thought: { icon: '💭', label: '思考' }, image: { icon: '🖼️', label: '图片' }, file: { icon: '📎', label: '文件' }, command: { icon: '⌘', label: '命令' } };
+function msgTagsHtml(kind, encrypt, chatmode, dir) {
   let h = '';
-  const km = MSG_KIND_META[kind];
-  if (km) h += `<span class="mtag">${km.icon}${km.label}</span>`;
+  // 'send' 仅出向才是「回复」；入向是用户输入，不打回复标记
+  const km = (kind === 'send' && dir === 'in') ? null : MSG_KIND_META[kind];
+  if (km) h += `<span class="mtag${kind === 'send' ? ' mtag-reply' : ''}">${km.icon}${km.label}</span>`;
   if (encrypt != null) h += `<span class="mtag">${encrypt ? '🔒密文' : '明文'}</span>`;
   if (chatmode) h += `<span class="mtag">${chatmode === 'proactive' ? '自主' : (chatmode === 'inject' ? '注入' : '响应')}</span>`;
   return h;
@@ -273,7 +276,7 @@ function agentPreviewHtml(s) {
   const clip = (t) => esc(String(t).replace(/\n/g, ' ').slice(0, 80));
   const line = (dir, peer, text, kind, encrypt, chatmode) => {
     const arrow = dir === 'in' ? '<span class="arrow-in">↓</span>' : '<span class="arrow-out">↑</span>';
-    const tags = msgTagsHtml(kind, encrypt, chatmode);
+    const tags = msgTagsHtml(kind, encrypt, chatmode, dir);
     const peerHtml = peer ? `<span class="peer">${esc(shortAid(peer))}</span>: ` : '';
     const textCls = dir === 'in' ? 'text-in' : 'text-out';
     return `${arrow}${tags ? ' ' + tags + ' ' : ' '}${peerHtml}<span class="${textCls}">${clip(text)}</span>`;
@@ -289,22 +292,92 @@ function agentPreviewHtml(s) {
   return '';
 }
 
-// HTML tooltip（最近 N 轮）：彩色箭头 + 方式 + 对端 + 文字
+// HTML tooltip（最近 N 轮）：时间 + 彩色箭头 + 方式 + 对端 + 文字
+// 渲染为隐藏的内容持有节点（.msg-tip-src）；实际展示由 initMsgTipFloat 的浮层负责
 function recentMsgTooltipHtml(recent) {
   if (!recent || !recent.length) return '';
-  let h = '<div class="msg-tip">';
+  let h = '<div class="msg-tip-src">';
   for (const m of recent) {
     const rcls = m.dir === 'in' ? 'tip-row-in' : 'tip-row-out';
     const arrow = m.dir === 'in' ? '↓' : '↑';
-    const km = MSG_KIND_META[m.kind];
-    const kh = km ? `<span class="tip-kind">${km.icon}${km.label}</span>` : '';
+    // 'send' 仅出向才是「回复」；入向是用户输入，不打回复标记
+    const km = (m.kind === 'send' && m.dir === 'in') ? null : MSG_KIND_META[m.kind];
+    const kh = km ? `<span class="tip-kind${m.kind === 'send' ? ' tip-kind-reply' : ''}">${km.icon}${km.label}</span>` : '';
     const enc = m.encrypt != null ? `<span class="tip-flag">${m.encrypt ? '🔒密文' : '明文'}</span>` : '';
     const mode = m.chatmode ? `<span class="tip-flag">${m.chatmode === 'proactive' ? '自主' : (m.chatmode === 'inject' ? '注入' : '响应')}</span>` : '';
     const peer = m.peer ? esc(shortAid(m.peer)) : '';
-    const text = esc(String(m.text).replace(/\n/g, ' ').slice(0, 60));
-    h += `<div class="tip-row ${rcls}">${arrow}${kh}${enc}${mode} <b>${peer}</b> ${text}</div>`;
+    const text = esc(String(m.text).replace(/\n/g, ' ').slice(0, 140));
+    const time = m.ts ? `<span class="tip-time">${fmtTime(m.ts)}</span>` : '';
+    h += `<div class="tip-row ${rcls}">${time}${arrow}${kh}${enc}${mode} <b>${peer}</b> ${text}</div>`;
   }
   return h + '</div>';
+}
+
+// 单例浮层 tooltip：固定定位、自动翻转上下、横向夹取，确保始终在可视区域内；
+// 鼠标可移动到 tooltip 上而不消失（延迟隐藏 + 进入取消）。
+function initMsgTipFloat() {
+  if (initMsgTipFloat._done) return;
+  initMsgTipFloat._done = true;
+
+  let floatEl = null, hideTimer = null, curWrap = null;
+  const GAP = 8, MARGIN = 8;
+
+  function ensureFloat() {
+    if (floatEl) return floatEl;
+    floatEl = document.createElement('div');
+    floatEl.id = 'msg-tip-float';
+    floatEl.className = 'msg-tip';
+    document.body.appendChild(floatEl);
+    floatEl.addEventListener('mouseenter', cancelHide);
+    floatEl.addEventListener('mouseleave', scheduleHide);
+    return floatEl;
+  }
+  function cancelHide() { if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; } }
+  function scheduleHide() { cancelHide(); hideTimer = setTimeout(hideNow, 180); }
+  function hideNow() { cancelHide(); curWrap = null; if (floatEl) floatEl.classList.remove('show'); }
+
+  function position(wrap) {
+    const f = floatEl;
+    const r = wrap.getBoundingClientRect();
+    const vw = document.documentElement.clientWidth;
+    const vh = document.documentElement.clientHeight;
+    const fw = f.offsetWidth, fh = f.offsetHeight;
+    // 纵向：优先放上方；上方放不下则放下方；都放不下则在视口内夹取
+    let top;
+    if (r.top - GAP - fh >= MARGIN) top = r.top - GAP - fh;
+    else if (r.bottom + GAP + fh <= vh - MARGIN) top = r.bottom + GAP;
+    else top = Math.max(MARGIN, Math.min(vh - MARGIN - fh, r.top - GAP - fh));
+    // 横向：对齐左缘，超出右界则左移，再夹取左界
+    let left = r.left;
+    if (left + fw > vw - MARGIN) left = vw - MARGIN - fw;
+    if (left < MARGIN) left = MARGIN;
+    f.style.top = Math.round(top) + 'px';
+    f.style.left = Math.round(left) + 'px';
+  }
+
+  function show(wrap) {
+    const src = wrap.querySelector('.msg-tip-src');
+    if (!src || !src.innerHTML.trim()) return;
+    const f = ensureFloat();
+    cancelHide();
+    if (curWrap !== wrap) { f.innerHTML = src.innerHTML; curWrap = wrap; }
+    f.classList.add('show');
+    position(wrap);
+  }
+
+  document.addEventListener('mouseover', (e) => {
+    const wrap = e.target.closest && e.target.closest('.ag-msg-wrap');
+    if (wrap) show(wrap);
+  });
+  document.addEventListener('mouseout', (e) => {
+    const wrap = e.target.closest && e.target.closest('.ag-msg-wrap');
+    if (!wrap) return;
+    const to = e.relatedTarget;
+    if (to && (wrap.contains(to) || (floatEl && floatEl.contains(to)))) return;
+    scheduleHide();
+  });
+  // 滚动时隐藏，避免浮层与行脱节
+  window.addEventListener('scroll', hideNow, true);
 }
 
 // 顶部统计条：Gateway / AIDs total·connected·offline / Messages ↓↑ / Traffic ↓↑ / Version·PID·Uptime
@@ -648,8 +721,12 @@ function renderMsg(data) {
     const from = shortAid(m.from), to = shortAid(m.to);
     const tags = [];
     if (m.chatType === 'group') tags.push('群聊');
-    if (m.encrypt != null) tags.push(m.encrypt ? '密文' : '明文');
-    if (m.chatmode) tags.push(m.chatmode === 'proactive' ? '自主' : '响应');
+    // 消息详情流的 kind 来自 jsonl 的 msgType（text/thought/image/file/command），
+    // 与 agents 页内存态的 MsgKind（send/thought/inject/notify）不是同一套词汇。
+    const mt = MSG_TYPE_META[m.msgType];
+    if (mt) tags.push(`${mt.icon}${mt.label}`);
+    if (m.encrypt != null) tags.push(m.encrypt ? '🔒密文' : '明文');
+    if (m.chatmode) tags.push(m.chatmode === 'proactive' ? '自主' : (m.chatmode === 'inject' ? '注入' : '响应'));
     const tagHtml = tags.map(t => `<span class="tag">${esc(t)}</span>`).join('');
     msgHtml += `<div class="bubble ${cls}">` +
       `<div class="meta">${fmtTime(m.ts)} ${arrow} ${esc(from)}→${esc(to)}${tagHtml}</div>` +
@@ -1959,6 +2036,7 @@ function monDualLine(elId, varKey, times, isDark, title, series, fmtY, yRange) {
 window.addEventListener('DOMContentLoaded', () => {
   initTheme();
   initPairUI();
+  initMsgTipFloat();
   if (localStorage.getItem(TOKEN_KEY)) {
     showApp();
     startApp();
