@@ -361,6 +361,21 @@ export class IMRenderer {
       this.timer = undefined;
     }
 
+    // 文件标记过滤：marker 任何时候都不该出现在用户文本里，必须在 *每次* flush
+    // （含非最终的定时 flush）执行。否则文本块若滞留 buffer 后被定时器触发，会走
+    // 下方非-final 的 result.text 路径，把 [SEND_FILE:...] 原样发给用户。
+    // 非最终 flush 不做 trim，避免 trim 掉 Markdown 块级换行。
+    if (this.opts.fileMarkerPattern) {
+      const strip = (s: string) => {
+        const replaced = s.replace(this.opts.fileMarkerPattern!, '');
+        return isFinal ? replaced.trim() : replaced;
+      };
+      this.textBuffer = strip(this.textBuffer);
+      for (const item of this.itemsQueue) {
+        if (item.kind === 'text') item.text = item.text.replace(this.opts.fileMarkerPattern, '');
+      }
+    }
+
     if (isFinal) {
       // 上下文错误短语过滤：剔除错误关键词本身，保留前后内容。
       // 只在最终 flush 清理，避免中间定时 flush trim 掉 Markdown 块级换行。
@@ -370,14 +385,6 @@ export class IMRenderer {
       this.allText = stripCtxErr(this.allText);
       for (const item of this.itemsQueue) {
         if (item.kind === 'text') item.text = stripCtxErr(item.text);
-      }
-
-      // 文件标记过滤
-      if (this.opts.fileMarkerPattern) {
-        this.textBuffer = this.textBuffer.replace(this.opts.fileMarkerPattern, '').trim();
-        for (const item of this.itemsQueue) {
-          if (item.kind === 'text') item.text = item.text.replace(this.opts.fileMarkerPattern, '');
-        }
       }
     }
 
