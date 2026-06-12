@@ -541,6 +541,15 @@ export class MessageProcessor {
     const agent = this.getAgent(channelKey, session.agentId);
     const streamKey = session.id;
 
+    // 密文优先归一化：合并批次的 replyContext.metadata.encrypted 默认取自最后一条，
+    // 这里改用 message.encrypted（mergeItems 算出的密文优先值）覆盖，使本轮所有出站路径
+    // （IMRenderer.send / taskReplyContext / setSessionEncrypt / task:started）看到一致的加密态。
+    // 仅 aun 入站会设 message.encrypted；非 aun 渠道为 undefined，不覆盖、保持原状。
+    if (message.encrypted != null) {
+      if (!message.replyContext) message.replyContext = {};
+      message.replyContext.metadata = { ...(message.replyContext.metadata ?? {}), encrypted: message.encrypted };
+    }
+
     // 为本次任务处理生成唯一 task_id（客户端生成，格式 task-{10hex}）
     const taskId = `task-${crypto.randomUUID().replace(/-/g, '').slice(0, 10)}`;
     const chatmode = session.sessionMode ?? 'interactive';
@@ -559,6 +568,9 @@ export class MessageProcessor {
 
     const isProactive = session.sessionMode === 'proactive';
     const isAutonomous = session.sessionMode === 'autonomous';
+    // ── DEBUG: 自主模式排查 ──
+    logger.info(`[CHATMODE-DEBUG] sessionId=${session.id} sessionMode="${session.sessionMode}" isProactive=${isProactive} isAutonomous=${isAutonomous} chatType=${session.chatType} identityMode="${session.identity?.mode}" envelopeChatmode="${isProactive ? 'proactive' : 'interactive'}"`);
+    // ── END DEBUG ──
     const envelope = buildEnvelope({
       taskId,
       sessionId: session.id,
@@ -872,6 +884,9 @@ export class MessageProcessor {
             // Stage 3: sessionKey 持久化字段
             sessionKey: session.sessionKey,
             chatMode: isProactive ? 'proactive' : 'interactive',
+            // ── DEBUG: 自主模式排查 ──
+            _debug_chatMode_in_vars: `isProactive=${isProactive} isAutonomous=${isAutonomous} sessionMode="${session.sessionMode}" result="${isProactive ? 'proactive' : 'interactive'}"`,
+            // ── END DEBUG ──
             readonly: session.metadata?.permissionMode === 'readonly',
             baseAgent: normalizedBaseagent.canonical,
             baseAgentName: normalizedBaseagent.displayName,
@@ -931,6 +946,7 @@ export class MessageProcessor {
                 peerId: message.peerId, peerName: peerName || undefined,
                 peerType: message.peerType,
                 sameDevice: message.sameDevice, sameNetwork: message.sameNetwork, sameEgressIp: message.sameEgressIp,
+                encrypted: message.encrypted,
                 content: message.content, timestamp: message.timestamp,
                 images: message.images,
                 mentionAids: message.mentionAids,

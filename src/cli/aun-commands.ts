@@ -755,7 +755,8 @@ Commands:
 Options:
   --app <name>          指定应用 slot（独立消费通道，不影响 daemon）
   --format json         输出 JSON 格式
-  --encrypt             启用端到端加密
+  --encrypt             启用端到端加密（密文发送）
+  --no-encrypt          强制明文发送（优先于 --encrypt）
   --thread <id>         指定话题 ID（用于多话题路由）
   --content-type <mime> 显式覆盖 MIME（仅 --file 模式）
   --text <说明>          附件说明文字（仅 --file 模式）
@@ -839,7 +840,9 @@ Options:
       body = { mode: 'text', text };
     }
 
-    const encrypt = args.includes('--encrypt');
+    // 加密态：--encrypt 密文，--no-encrypt 明文，都不带默认明文（人类终端直用即此）。
+    // 模型自主发送时由系统提示规则要求按入站消息加密态显式带参。--no-encrypt 优先于 --encrypt。
+    const encrypt = args.includes('--encrypt') && !args.includes('--no-encrypt');
     const thread = getArgValue(args, '--thread');
 
     // 文件上传进度展示（非 JSON 输出时）。仅在大文件降级到 HTTP PUT 阶段会逐块更新。
@@ -1038,6 +1041,7 @@ Options:
   --app <name>          指定应用 slot（独立消费通道，不影响 daemon）
   --format json         输出 JSON 格式
   --encrypt             启用端到端加密（仅 send）
+  --no-encrypt          强制明文发送（优先于 --encrypt；仅 send）
   --mention <aid>       发送时 @ 某个成员（可多次，或用逗号分隔多个 aid）
   --mention-all         发送时 @ 所有人
   --                    end-of-options：其后所有参数按正文处理
@@ -1154,7 +1158,8 @@ Options:
     }
 
     const mentions = collectMentions();
-    const encryptGroup = args.includes('--encrypt');
+    // --encrypt 密文，--no-encrypt 明文，都不带默认明文。--no-encrypt 优先。
+    const encryptGroup = args.includes('--encrypt') && !args.includes('--no-encrypt');
     const result = await groupSend({ from, groupId, body, mentions: mentions.length ? mentions : undefined, encrypt: encryptGroup, ...commonOpts });
     outputResult(result, () => {
       const r = result as any;
@@ -1424,7 +1429,7 @@ const VALUE_FLAGS = new Set([
   '--aun-path', '--thread',
 ]);
 const BOOLEAN_FLAGS = new Set([
-  '--encrypt', '--mention-all',
+  '--encrypt', '--no-encrypt', '--mention-all',
 ]);
 function collectPositional(args: string[], startIdx: number): string[] {
   const out: string[] = [];

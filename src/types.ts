@@ -260,6 +260,8 @@ export interface SubMessage {
   sameDevice?: boolean;
   sameNetwork?: boolean;
   sameEgressIp?: boolean;
+  /** 本条入站消息是否端到端加密（仅 aun 渠道有意义；非 aun 渠道恒 undefined）。逐条保留以支持群聊批量逐条渲染加密标注。 */
+  encrypted?: boolean;
   content: string;
   timestamp?: number;
   images?: Array<{ data: string; mimeType: string }>;
@@ -293,6 +295,8 @@ export interface Message {
   sameDevice?: boolean;   // 对端与本端同一物理设备
   sameNetwork?: boolean;  // 对端与本端同一网络
   sameEgressIp?: boolean; // 对端与本端同一出口 IP
+  /** 本条入站消息是否端到端加密（仅 aun 渠道有意义；非 aun 渠道恒 undefined）。回复加密态跟随此值。 */
+  encrypted?: boolean;
   /** 对端使用的客户端类型；来自入站消息信封，由 channel 适配层填充。当前阶段先 undefined。 */
   clientType?: 'desktop' | 'web' | 'mobile' | string;
   content: string;
@@ -338,6 +342,8 @@ export interface InboundMessage {
   sameDevice?: boolean;
   sameNetwork?: boolean;
   sameEgressIp?: boolean;
+  /** 本条入站消息是否端到端加密（仅 aun 渠道有意义；非 aun 渠道恒 undefined）。回复加密态跟随此值。 */
+  encrypted?: boolean;
   content: string;
   messageId?: string;
   images?: Array<{ data: string; mimeType: string }>;

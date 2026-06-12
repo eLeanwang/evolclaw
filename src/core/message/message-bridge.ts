@@ -180,6 +180,9 @@ export class MessageBridge {
           sameDevice: msg.sameDevice,
           sameNetwork: msg.sameNetwork,
           sameEgressIp: msg.sameEgressIp,
+          // 入站加密态（仅 aun 渠道有意义；非 aun 为 undefined）。回复加密态跟随此值，
+          // 并经 mergeItems 逐条保留 + 密文优先聚合，message-renderer 据此标注。
+          encrypted: msg.replyContext?.metadata?.encrypted != null ? !!(msg.replyContext.metadata.encrypted) : undefined,
           messageId: msg.messageId,
           mentions: msg.mentions, mentionAids: msg.mentionAids, threadId: msg.threadId,
           topicName: this.extractTopicName(msg),

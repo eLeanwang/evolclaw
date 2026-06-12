@@ -510,16 +510,20 @@ tr.ag-disabled .ag-name { color: var(--dim); }
 .ag-msg .text-in  { color: var(--msg-in); font-weight: 500; }
 .ag-msg .text-out { color: var(--msg-out); font-weight: 500; }
 .ag-msg .mtag { display: inline-block; padding: 0 4px; margin: 0 2px; border-radius: 3px; font-size: 10px; background: var(--bg3); color: var(--magenta); vertical-align: middle; }
+.ag-msg .mtag-reply { color: var(--green); font-weight: 700; }
 .ag-msg .mtags { color: var(--magenta); font-size: 10.5px; }
 .ag-path { font-family: ui-monospace, Consolas, monospace; font-size: 10.5px; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 70vw; }
 
-/* 消息 tooltip（hover 浮层）*/
-.msg-tip { display: none; position: absolute; bottom: calc(100% + 4px); left: 0; z-index: 200; background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 4px 16px rgba(0,0,0,.2); padding: 8px 12px; min-width: 300px; max-width: 600px; white-space: normal; }
-.ag-msg-wrap:hover .msg-tip { display: block; }
-.tip-row { font-size: 12px; line-height: 1.8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 500; }
+/* 消息 tooltip（JS 定位的单例浮层）*/
+.msg-tip-src { display: none; }
+.msg-tip { display: none; position: fixed; top: 0; left: 0; z-index: 200; background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 4px 16px rgba(0,0,0,.2); padding: 8px 12px; min-width: 300px; max-width: 600px; white-space: normal; }
+.msg-tip.show { display: block; }
+.tip-row { font-size: 12px; line-height: 1.6; font-weight: 500; overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; word-break: break-word; }
 .tip-row-in  { color: var(--msg-in); }
 .tip-row-out { color: var(--msg-out); }
+.tip-time { margin-right: 4px; color: var(--dim); font-size: 10.5px; font-variant-numeric: tabular-nums; }
 .tip-kind { margin: 0 2px; font-weight: 600; }
+.tip-kind-reply { color: var(--green); font-weight: 700; }
 .tip-flag { margin: 0 2px; padding: 0 4px; border-radius: 3px; background: var(--bg3); color: var(--magenta); font-size: 10.5px; }
 .tip-row b { color: var(--orange); font-weight: 600; }
 

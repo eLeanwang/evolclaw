@@ -94,6 +94,8 @@ export interface AUNDispatchOptions {
   sameDevice?: boolean;
   sameNetwork?: boolean;
   sameEgressIp?: boolean;
+  /** 本条入站消息是否端到端加密（aun 专属）。回复加密态跟随此值。 */
+  encrypted?: boolean;
   messageId?: string;
   threadId?: string;
   mentions?: Array<{ userId: string; name?: string }>;
@@ -142,6 +144,7 @@ export function aunOptsToInbound(
     sameDevice: opts.sameDevice,
     sameNetwork: opts.sameNetwork,
     sameEgressIp: opts.sameEgressIp,
+    encrypted: opts.encrypted,
     messageId: opts.messageId,
     mentions: opts.mentions,
     mentionAids: opts.mentionAids,
@@ -1279,6 +1282,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       sameDevice: msg.same_device === true || undefined,
       sameNetwork: msg.same_network === true || undefined,
       sameEgressIp: msg.same_egress_ip === true || undefined,
+      encrypted: msgEncrypted,
       replyContext,
       images: inboundImages.length > 0 ? inboundImages : undefined,
     });
@@ -1514,6 +1518,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       threadId,
       mentions,
       mentionAids: renderMentionAids.length > 0 ? renderMentionAids : undefined,
+      encrypted: msgEncrypted,
       replyContext: this.buildGroupReplyContext(threadId, senderAid, msgEncrypted, messageId, msgChatmode),
       dispatchMode: serverDispatchMode,
       images: inboundImages.length > 0 ? inboundImages : undefined,
@@ -1525,6 +1530,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     chatType: 'private' | 'group'; messageId: string;
     peerName?: string; peerType?: string;
     sameDevice?: boolean; sameNetwork?: boolean; sameEgressIp?: boolean;
+    encrypted?: boolean;
     seq?: number; threadId?: string; mentions?: string[];
     mentionAids?: string[];
     replyContext?: ReplyContext;
@@ -1600,6 +1606,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       sameDevice: event.sameDevice,
       sameNetwork: event.sameNetwork,
       sameEgressIp: event.sameEgressIp,
+      encrypted: event.encrypted,
       messageId: event.messageId,
       threadId: event.threadId,
       mentions: mentionObjects,
