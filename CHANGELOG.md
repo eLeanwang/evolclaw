@@ -1,5 +1,41 @@
 # Changelog
 
+## v3.4.0 (2026-06-12)
+
+### New Features
+
+- **CLI 模块化** — 将4640行 `command-handler.ts` 和5131行 `cli/index.ts` 拆分为8个专注模块（`command/`、`cli/`子目录），claude-agent-sdk 升级至 ^0.3.170，净减约10000行
+- **ECWeb Monitor 视图** — 新增实时监控页面：进程级 CPU/内存采样（1s 后台循环）、全局统计、per-agent 摘要；IPC 新增 `monitor-snapshot` 处理器
+- **Agent 运行时控制** — ECWeb 支持对每个 agent 执行 start/stop/mute/unmute/queue-clear，stop 中断进行中的模型调用，mute 暂停队列消费同时保留入队消息
+- **`ec watch logs` 多选** — 新增日志类型多选菜单，支持按类型（session/tool/error等）筛选实时聚合日志；`watch.logTypes` 配置默认可选集
+- **AUN 结构化出站 payload** — task status 改走 `notify`（`event/app.task.status`）不入消息历史；activity 逐条结构化（`type:'activity'` + `item`）；notice/error 结构化；`ref_message_id`/`initiator`/`thread_id` 统一透传
+- **Context-aware auto-compact** — 根据 DB 中上次 model call 的实际 context token 记录决策压缩时机，在下一任务开始前执行；DB 新增 `context_tokens`/`max_tokens`/`auto_compact_tokens` 字段
+- **Codex Edit events 统一 diff** — fileChange 映射为 `Edit` tool_use 事件并附带 unified diff，permission 层直接渲染，不重新计算
+- **AUN 群命令 mention 过滤** — broadcast 指令强制要求 @ 触发；`action_card_reply` 归属由消息上下文精确判定
+- **群话题创建权限** — 由 AUN `group.get_admins` 实时查询，仅 owner/admin 可建话题，fail-closed；无权时静默丢弃避免 agent 互相拒绝循环
+- **`/baseagent scope` 参数** — 支持 `session`/`default`/`both` 三档控制切换范围
+- **Session topic rename** — 支持 `/rename` 重命名当前话题会话
+- **evolclaw-web 自动升级** — ECWeb 启动时检测并自动升级新版本，对标 fastaun 升级机制
+- **Agent displayName 解析** — 从 agent.md 本地缓存 + 异步网络拉取 displayName，ECWeb 展示更友好
+
+### Improvements
+
+- **用户中断归类** — 新消息/`/stop`/撤回触发的流中断独立为 `task:interrupted` 事件，不计入 `task:error`
+- **统一出站响应投递** — AUN 渠道所有出站路径收敛到 `adapter.send`，消除渠道间重复分支
+- **Feishu Pin→CheckMark 两阶段 ack** — 收到消息先加 Pin（排队中），runner 开始时升级为 CheckMark 并移除 Pin，视觉无空窗
+- **dispatchModeOverride 分离** — 动态覆盖与持久化 `dispatchMode` 解耦，避免一次性覆盖污染会话配置
+- **ECWeb token TTL 延长至30天** — 支持滑动续期；端口被占时杀旧进程而非漂移到 port+1
+- **`evolclaw status` 展示 ECWeb** — 状态命令新增 ECWeb 进程与 HTTP 就绪状态
+
+### Bug Fixes
+
+- **话题回复上下文丢失** — `ctl send/file` 在 Feishu 话题内未透传 `replyToMessageId`/`replyInThread`，回复落到主会话气泡
+- **文件标记提前暴露** — 定时 flush（非最终）触发时 `[SEND_FILE:...]` 未过滤，原样发给用户
+- **AUN inbound replyContext 缺字段** — 入站消息未填充 `peerId`/`replyToMessageId`，导致 task.status `initiator` 为空
+- **Codex SSE idle 重连误报错** — SSE 超时重连的空 error 事件被当作任务错误处理
+- **JSON parse error 自动重试** — API 返回 JSON 解析异常时触发指数退避重试
+- **ECWeb 启动就绪检测** — HTTP 探测根路径判断就绪，避免进程存活但 HTTP 未就绪的误判
+
 ## v3.3.0 (2026-06-10)
 
 ### New Features
