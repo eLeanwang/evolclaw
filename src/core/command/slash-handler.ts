@@ -1404,9 +1404,8 @@ export async function handleSlashCommand(this: any,
     return { kind: 'command.result' as const, text: `✓ 已创建新会话${sessionName ? `: ${sessionName}` : ''}\n  项目: ${this.getProjectName(projectPath)}\n  之前的对话历史已保留，可通过 /s 查看` };
   }
 
-  // /check 命令：检查渠道状态（guest 可用，详情仅 admin）/ 重连指定渠道（admin only）
+  // /check 命令：检查渠道状态（guest 可用，详情仅 admin）
   if (normalizedContent === '/check' || normalizedContent.startsWith('/check ')) {
-    const subCmd = normalizedContent.slice('/check'.length).trim();
 
     // 限定可见渠道：agent-owned 通道仅显示该 agent 名下的渠道；
     // __ecweb__ 是 ECWeb 系统级入口，展示全量渠道

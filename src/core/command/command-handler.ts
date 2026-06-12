@@ -515,9 +515,10 @@ export class CommandHandler {
   /** menu.update — 写入新值。 */
   async execMenuUpdate(
     cmd: string, value: string, channel: string, channelId: string, userId?: string,
-    overrideIdentity?: import('../../types.js').SessionIdentity, fromControlChannel = false
+    overrideIdentity?: import('../../types.js').SessionIdentity, fromControlChannel = false,
+    args?: Record<string, any>
   ): Promise<{ data: any } | { error: string; code?: string }> {
-    return await menuExecMenuUpdate.call(this, cmd, value, channel, channelId, userId, overrideIdentity, fromControlChannel);
+    return await menuExecMenuUpdate.call(this, cmd, value, channel, channelId, userId, overrideIdentity, fromControlChannel, args);
   }
 
   /** menu.action — 触发动词。 */

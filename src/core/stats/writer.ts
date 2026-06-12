@@ -157,6 +157,9 @@ export interface ModelCallRow {
   output_tokens: number;
   cache_creation_tokens: number;
   cache_read_tokens: number;
+  context_tokens?: number;
+  max_tokens?: number;
+  auto_compact_tokens?: number;
   degraded: 0 | 1;
 }
 
@@ -170,8 +173,8 @@ export function insertModelCalls(evolclawHome: string, rows: ModelCallRow[]): vo
       INSERT INTO model_calls
         (ts, task_id, session_id, agent_session_id, agent_aid, peer_key, call_index, model,
          request_id, message_id, input_tokens, output_tokens, cache_creation_tokens,
-         cache_read_tokens, degraded)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         cache_read_tokens, context_tokens, max_tokens, auto_compact_tokens, degraded)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     db.exec('BEGIN');
     for (const r of rows) {
@@ -180,6 +183,7 @@ export function insertModelCalls(evolclawHome: string, rows: ModelCallRow[]): vo
         r.agent_aid, r.peer_key, r.call_index, r.model,
         r.request_id ?? null, r.message_id ?? null,
         r.input_tokens, r.output_tokens, r.cache_creation_tokens, r.cache_read_tokens,
+        r.context_tokens ?? null, r.max_tokens ?? null, r.auto_compact_tokens ?? null,
         r.degraded,
       );
     }

@@ -687,6 +687,9 @@ export interface ModelCallDetailRow {
   output_tokens: number;
   cache_creation_tokens: number;
   cache_read_tokens: number;
+  context_tokens: number | null;
+  max_tokens: number | null;
+  auto_compact_tokens: number | null;
   degraded: number;
 }
 

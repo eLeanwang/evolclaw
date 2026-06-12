@@ -208,6 +208,11 @@ export class EvolAgent {
     const block = ((this.rawAgent.baseagents as any)[ba] ??= {});
     if (value === undefined) delete block.model;
     else block.model = value;
+    // sync merged so getter reflects the change immediately
+    if (!this.merged.baseagents) (this.merged as any).baseagents = {};
+    const mBlock = (((this.merged as any).baseagents)[ba] ??= {});
+    if (value === undefined) delete mBlock.model;
+    else mBlock.model = value;
     this.persist();
   }
 
@@ -218,6 +223,11 @@ export class EvolAgent {
     const fieldName = ba === 'codex' ? 'reasoning' : 'effort';
     if (value === undefined) delete block[fieldName];
     else block[fieldName] = value;
+    // sync merged so getter reflects the change immediately
+    if (!this.merged.baseagents) (this.merged as any).baseagents = {};
+    const mBlock = (((this.merged as any).baseagents)[ba] ??= {});
+    if (value === undefined) delete mBlock[fieldName];
+    else mBlock[fieldName] = value;
     this.persist();
   }
 

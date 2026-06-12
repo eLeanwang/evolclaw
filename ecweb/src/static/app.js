@@ -383,8 +383,6 @@ function renderAgents(data) {
 
   if (!data.daemonRunning) {
     html += '<div class="banner">⚠ EvolClaw 主进程未运行，仅显示最近活动记录</div>';
-  } else if (_agSubtab === 'enabled') {
-    html += agentsStatsBar(data, aids, data.stats || []);
   }
 
   if (_agSubtab === 'disabled') {
@@ -471,6 +469,9 @@ function renderAgents(data) {
       '</div></td></tr>';
   }
   html += '</tbody></table>';
+  if (data.daemonRunning) {
+    html += agentsStatsBar(data, aids, data.stats || []);
+  }
   el.innerHTML = html;
   bindAgentsEvents(el);
 }
@@ -1487,12 +1488,6 @@ async function loadUsageDashboard() {
       }).join('') + '</tbody>';
   }
 
-  // Topbar today cost
-  var costEl = $('#today-cost');
-  if (costEl) {
-    var totalTokens = t.input_tokens + t.output_tokens;
-    costEl.textContent = 'Today: ' + fmtTokens(totalTokens) + ' tokens · ' + t.call_count + ' calls';
-  }
 }
 
 // ── Usage Overview（全时段总览）──

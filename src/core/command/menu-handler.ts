@@ -788,7 +788,8 @@ export async function execMenuQuery(this: any,
 /** menu.update — 写入新值。 */
 export async function execMenuUpdate(this: any,
   cmd: string, value: string, channel: string, channelId: string, userId?: string,
-  overrideIdentity?: import('../../types.js').SessionIdentity, fromControlChannel = false
+  overrideIdentity?: import('../../types.js').SessionIdentity, fromControlChannel = false,
+  args?: Record<string, any>
 ): Promise<{ data: any } | { error: string; code?: string }> {
   const cmdBase = cmd.trim().split(' ')[0];
   if (!cmdBase) return { error: '缺少命令', code: 'MISSING_CMD' };
@@ -836,13 +837,21 @@ export async function execMenuUpdate(this: any,
 
   if (cmdBase === '/baseagent') {
     if (!isAdmin) return { error: '无权限', code: 'NO_PERMISSION' };
+    // scope 决定写入层级：
+    //   'session' — 仅切当前会话 runner（等价 /baseagent slash 命令），不改 agent 默认值
+    //   'default' — 仅改 agent 默认值（影响后续新会话），不触碰当前会话
+    //   'both'（默认，向后兼容）— 先切当前会话，成功后再写 agent 默认值
+    const scope: 'session' | 'default' | 'both' = (args?.scope === 'session' || args?.scope === 'default') ? args.scope : 'both';
+    if (scope === 'default' && !evolagent) {
+      return { error: '当前 channel 无绑定 agent，无法设置默认 baseagent', code: 'EXEC_FAILED' };
+    }
     const valid = this.getAvailableBaseagents(channel);
     if (valid.length && !valid.includes(arg)) {
       return { error: `无效 baseagent: ${arg}，可选: ${valid.join(' / ')}`, code: 'INVALID_VALUE' };
     }
     // 当前会话切换走 slash 命令的完整逻辑（涉及 runner 状态、session.agentId 重新挂载等）
     // 仅在 slash 命令成功后才持久化到 evolagent config，避免失败时配置已落盘
-    if (session && session.agentId !== arg) {
+    if (scope !== 'default' && session && session.agentId !== arg) {
       const result = await this._handleInternal(`/baseagent ${arg}`, channel, channelId, undefined, userId);
       const payload = result as any;
       if (payload?.kind === 'command.error') {
@@ -850,8 +859,8 @@ export async function execMenuUpdate(this: any,
       }
     }
     // 持久化到 evolagent config（影响后续新会话）
-    if (evolagent) evolagent.setActiveBaseagent(arg);
-    return { data: { baseagent: arg } };
+    if (scope !== 'session' && evolagent) evolagent.setActiveBaseagent(arg);
+    return { data: { baseagent: arg, scope } };
   }
 
   if (cmdBase === '/model') {
@@ -1419,7 +1428,7 @@ export async function execMenuForEcweb(this: any, payload: any): Promise<import(
       case 'menu.update': {
         if (!cmd) return ecwebErr(id, name, 'MISSING_CMD', '缺少 name/cmd');
         if (!payload.value) return ecwebErr(id, name, 'MISSING_VALUE', '缺少 value');
-        const r = await this.execMenuUpdate(cmd, payload.value, agentChannelKey, agentChannelKey, userId, ownerIdentity, true);
+        const r = await this.execMenuUpdate(cmd, payload.value, agentChannelKey, agentChannelKey, userId, ownerIdentity, true, payload.args);
         return ecwebResp(id, name, r);
       }
 
@@ -1486,7 +1495,7 @@ export async function execMenuForControl(this: any, payload: any, peerId: string
       case 'menu.update': {
         if (!cmd) return ecwebErr(id, name, 'MISSING_CMD', '缺少 name/cmd');
         if (!payload.value) return ecwebErr(id, name, 'MISSING_VALUE', '缺少 value');
-        const r = await this.execMenuUpdate(cmd, payload.value, CONTROL_CHANNEL, CONTROL_CHANNEL, peerId, ownerIdentity, true);
+        const r = await this.execMenuUpdate(cmd, payload.value, CONTROL_CHANNEL, CONTROL_CHANNEL, peerId, ownerIdentity, true, payload.args);
         return ecwebResp(id, name, r);
       }
 

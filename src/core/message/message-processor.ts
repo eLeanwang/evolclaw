@@ -2,7 +2,7 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import crypto from 'crypto';
-import { type AgentRunnerFull, hasCompact, type AgentEvent, type Compactable, type AgentTokenUsage, type AgentContextUsage, type AgentLastModelCall, type AgentModelCall } from '../../agents/runner-types.js';
+import { type AgentRunnerFull, hasCompact, type AgentEvent, type Compactable, type AgentTokenUsage, type AgentContextUsage, type AgentLastModelCall, type AgentModelCall, autoCompactWindowForModel, isClaudeContextUsageModel } from '../../agents/runner-types.js';
 import { SessionManager } from '../session/session-manager.js';
 import { appendMessageLog, buildOutboundEntry } from './message-log.js';
 import { IMRenderer } from './im-renderer.js';
@@ -92,6 +92,11 @@ function getContextCompactFailedHint(agent: AgentRunnerFull): string {
 
 function canCompactAgent(agent: AgentRunnerFull): agent is AgentRunnerFull & Compactable {
   return hasCompact(agent) && agent.capabilities?.compact !== false;
+}
+
+function autoCompactTokensFromMaxTokens(maxTokens: number | undefined): number | undefined {
+  if (!maxTokens || maxTokens <= 0) return undefined;
+  return maxTokens >= 1000000 ? maxTokens - 100000 : maxTokens;
 }
 
 /**
@@ -233,6 +238,12 @@ export class MessageProcessor {
 
   setAgentRegistry(registry: EvolAgentRegistryHandle): void {
     this.agentRegistry = registry;
+  }
+
+  /** 更新 EvolAgent.lastActivity —— 每次发出 status.* 事件（含 progress）时调用 */
+  private touchAgentActivity(channelKey: string): void {
+    const owning = this.agentRegistry?.resolveByChannel(channelKey);
+    if (owning) owning.lastActivity = Date.now();
   }
 
   private getAgentContext(channelName: string, chatType: string): AgentContext | null {
@@ -586,6 +597,7 @@ export class MessageProcessor {
         const budgetStatus = getBudgetStatus(resolveRoot(), budgetAgentAid, budgetPeerKey);
         if (budgetStatus.hard_blocked) {
           logger.warn(`[MessageProcessor] Budget hard limit reached: agent=${budgetAgentAid} peer=${budgetPeerKey} pct=${budgetStatus.pct_used.toFixed(1)}%`);
+          this.touchAgentActivity(channelKey);
           adapter.send(envelope, { kind: 'status.completed', metadata: { durationMs: 0 } }).catch(() => {});
           return;
         }
@@ -607,8 +619,11 @@ export class MessageProcessor {
       this.eventBus.publish({ type: 'task:started', sessionId: session.id, agentName: agentNameForStats, encrypt: taskEncrypt, chatmode: session.sessionMode || 'interactive' });
       // 触发器消息不发 processing status（无需通知用户）
       if (message.source !== 'trigger') {
+        this.touchAgentActivity(channelKey);
         adapter.send(envelope, { kind: 'status.started' }).catch(() => {});
       }
+
+      await this.runPendingAutoCompactAtTaskStart(session, agent, absoluteProjectPath, adapter, envelope);
 
       logger.message({
         msgId: messageId,
@@ -651,6 +666,7 @@ export class MessageProcessor {
           }
           opts.metadata = { ...(opts.metadata ?? {}), taskId, chatmode };
 
+          if (payload.kind.startsWith('status.')) this.touchAgentActivity(channelKey);
           const enrichedEnvelope: OutboundEnvelope = { ...envelope, replyContext: opts };
           await adapter.send(enrichedEnvelope, payload);
         },
@@ -938,6 +954,10 @@ export class MessageProcessor {
 
         // 可重试错误（403/429/5xx）指数退避重试，最多 3 次
         const MAX_RETRIES = 3;
+        // Runner 开始执行前：将 Pin 升级为 CheckMark（表示"正在处理"）
+        if (message.messageId && message.source !== 'trigger') {
+          adapter.promoteAck?.(message.messageId).catch(() => {});
+        }
         for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
           let streamRegistered = false;
           try {
@@ -1078,9 +1098,6 @@ export class MessageProcessor {
       } else if (streamResult.isError && streamHitContextLimit(streamResult)) {
         // 上下文过长但无法 auto-compact（无 session ID 或 agent 不支持），显示友好提示
         renderer.addNotice(getContextTooLongHint(agent), 'warn', 'context-too-long', true);
-      } else if (!streamResult.isError) {
-        // 主动 compact 标记：延迟到回复送达之后执行（见下方 proactiveCompactNeeded）
-        // 不在此处阻塞——用户应先收到本轮回答
       }
 
       // 处理文件标记 - 支持 [SEND_FILE:path] 和 [SEND_FILE:channel:path]
@@ -1219,11 +1236,6 @@ export class MessageProcessor {
         await renderer.flush(true);
       }
 
-      // 更新 EvolAgent.lastActivity
-      if (this.agentRegistry) {
-        const owningAgent = this.agentRegistry.resolveByChannel(channelKey);
-        if (owningAgent) owningAgent.lastActivity = Date.now();
-      }
       // 注意：不在此处清除 interruptedSessions，由下一条消息的 prompt 包装逻辑消费
       const interruptReason = this.interruptedSessions.get(session.id);
 
@@ -1232,40 +1244,62 @@ export class MessageProcessor {
         const errorSummary = streamResult.errors?.join('; ') || '任务执行失败';
         const rawSubtype = streamResult.subtype || 'agent_error';
         const errorType = prefixErrorType(ERROR_PREFIX.AGENT, rawSubtype);
-        if (message.source !== 'trigger') {
+        // 用户主动打断（新消息/​/stop/​撤回）会让 SDK 流在工具调用中途被掐断，
+        // 末尾 result message 形状异常并被标记为 error（含 SDK 内部 ede_diagnostic 串）。
+        // 这不是真正的失败，不应把诊断串暴露给用户，也不计入错误统计。
+        const isUserInterrupt = interruptReason === 'new_message' || interruptReason === 'stop' || interruptReason === 'recalled';
+        if (message.source !== 'trigger' && !isUserInterrupt) {
+          await adapter.send(envelope, { kind: 'result.error', text: errorSummary, reason: rawSubtype }).catch(() => {});
           adapter.send(envelope, { kind: 'status.error', metadata: { errorType: rawSubtype } }).catch(() => {});
+          this.touchAgentActivity(channelKey);
         }
-        if (message.triggerMeta) {
-          this.eventBus.publish({ type: 'trigger:failed', triggerId: message.triggerMeta.triggerId, name: message.triggerMeta.triggerName ?? '', messageId: messageId, error: errorSummary, targetChannel: message.channel, targetChannelId: message.channelId, fireTime: message.triggerMeta.fireTime ?? 0, phase: 'execute' });
-        }
-
-        this.eventBus.publish({
-          type: 'task:error',
-          sessionId: session.id,
-          error: errorSummary,
-          errorType,
-          agentName: agentNameForStats,
-          terminalReason: streamResult.terminalReason
-        });
-
-        // 系统级 subtype 仍累计错误计数，供 /status 诊断使用
-        if (isInfraError(rawSubtype, streamResult.terminalReason)) {
-          const chatType = message.chatType || 'private';
-          const identityRole = session.identity?.role || 'anonymous';
-          const { policy } = channelInfo;
-          if (policy.accumulateErrors(chatType, identityRole)) {
-            await this.sessionManager.recordError(session.id, errorType, errorSummary);
+        if (isUserInterrupt) {
+          // 用户打断：打断本身已由 message-queue 发过 task:interrupted 事件，
+          // 这里不再补发 task:error（否则同一次打断被记两遍且错误归类为 error）。
+          // 仅记 info 日志收尾。注意：task:interrupted 已填充 interruptedSessions，
+          // stats 侧已据此收尾任务生命周期，无需在此重复发事件。
+          logger.info(`[${message.channel}] Stream result error suppressed (user interrupt: ${interruptReason}): ${errorSummary}`);
+          logger.message({
+            msgId: messageId,
+            sessionId: session.id,
+            dir: 'inbound',
+            status: 'interrupted',
+            error: errorSummary,
+            terminalReason: streamResult.terminalReason
+          });
+        } else {
+          if (message.triggerMeta) {
+            this.eventBus.publish({ type: 'trigger:failed', triggerId: message.triggerMeta.triggerId, name: message.triggerMeta.triggerName ?? '', messageId: messageId, error: errorSummary, targetChannel: message.channel, targetChannelId: message.channelId, fireTime: message.triggerMeta.fireTime ?? 0, phase: 'execute' });
           }
-        }
 
-        logger.message({
-          msgId: messageId,
-          sessionId: session.id,
-          dir: 'inbound',
-          status: 'failed',
-          error: errorSummary,
-          terminalReason: streamResult.terminalReason
-        });
+          this.eventBus.publish({
+            type: 'task:error',
+            sessionId: session.id,
+            error: errorSummary,
+            errorType,
+            agentName: agentNameForStats,
+            terminalReason: streamResult.terminalReason
+          });
+
+          // 系统级 subtype 仍累计错误计数，供 /status 诊断使用
+          if (isInfraError(rawSubtype, streamResult.terminalReason)) {
+            const chatType = message.chatType || 'private';
+            const identityRole = session.identity?.role || 'anonymous';
+            const { policy } = channelInfo;
+            if (policy.accumulateErrors(chatType, identityRole)) {
+              await this.sessionManager.recordError(session.id, errorType, errorSummary);
+            }
+          }
+
+          logger.message({
+            msgId: messageId,
+            sessionId: session.id,
+            dir: 'inbound',
+            status: 'failed',
+            error: errorSummary,
+            terminalReason: streamResult.terminalReason
+          });
+        }
       } else {
         // 真正的成功
         const durationMs = Date.now() - startTime;
@@ -1309,6 +1343,9 @@ export class MessageProcessor {
                 output_tokens: mc.tokenUsage.output_tokens ?? 0,
                 cache_creation_tokens: mc.tokenUsage.cache_creation_input_tokens ?? 0,
                 cache_read_tokens: mc.tokenUsage.cache_read_input_tokens ?? 0,
+                context_tokens: mc.contextUsage?.totalTokens,
+                max_tokens: mc.contextUsage?.maxTokens,
+                auto_compact_tokens: mc.contextUsage?.autoCompactTokens,
                 degraded: mc.degraded ? 1 : 0,
               } as import('../stats/writer.js').ModelCallRow));
               insertModelCalls(resolveRoot(), mcRows);
@@ -1365,6 +1402,7 @@ export class MessageProcessor {
         } catch { /* non-fatal */ }
 
         if (message.source !== 'trigger') {
+          this.touchAgentActivity(channelKey);
           if (interruptReason) {
             adapter.send(envelope, { kind: 'status.interrupted', metadata: { reason: interruptReason } }).catch(() => {});
           } else {
@@ -1421,10 +1459,6 @@ export class MessageProcessor {
         // 写入消息记录（出方向）已下沉到 aun.ts:deliverTextEntry，
         // 所有 message.send 成功后统一写入 messages.jsonl，此处不再重复写入。
 
-        // 主动 compact：本轮成功且回复已送达，token 占用逼近 autoCompactTokens 阈值。
-        // 在下一条消息处理前压缩，避免下一轮命中硬上限。
-        // 放在回复之后：用户不必等压缩完才看到答案。
-        await this.maybeProactiveCompact(streamResult, session, agent, absoluteProjectPath, adapter, envelope);
       }
 
       const isFinallyBackground = this.isBackgroundSession(session, message.channel, message.channelId);
@@ -1467,6 +1501,7 @@ export class MessageProcessor {
           ? { kind: 'status.interrupted' as const, metadata: { reason: 'stream_error' } }
           : { kind: 'status.error' as const };
         adapter.send(envelope, statusPayload).catch(() => {});
+        this.touchAgentActivity(channelKey);
       }
 
       // 用户主动中断时降级日志；其余仍按 error 记录
@@ -1479,20 +1514,26 @@ export class MessageProcessor {
       const errorMsg = error instanceof Error ? error.message : String(error);
       const errorType = prefixErrorType(ERROR_PREFIX.INFRA, errType);
 
-      this.eventBus.publish({
-        type: 'task:error',
-        sessionId: session.id,
-        error: errorMsg,
-        errorType,
-        agentName: agentNameForStats,
-      });
+      // 用户主动打断：流被掐断抛出的异常不是真正的失败。打断发生时 source
+      // （message-queue / slash-handler）已发过 task:interrupted（它填充了
+      // interruptedSessions，isUserInterrupt 才会为真），stats 侧已据此收尾任务。
+      // 此处不再发任何事件——发 task:error 会误归类，重发 task:interrupted 会重复记账。
+      if (!isUserInterrupt) {
+        this.eventBus.publish({
+          type: 'task:error',
+          sessionId: session.id,
+          error: errorMsg,
+          errorType,
+          agentName: agentNameForStats,
+        });
+      }
 
       // 记录处理失败
       logger.message({
         msgId: messageId,
         sessionId: session.id,
         dir: 'inbound',
-        status: 'failed',
+        status: isUserInterrupt ? 'interrupted' : 'failed',
         error: error instanceof Error ? error.message : String(error)
       });
 
@@ -1538,9 +1579,11 @@ export class MessageProcessor {
           ...(sendOpts ?? {}),
           metadata: { ...(sendOpts?.metadata ?? {}), taskId, chatmode },
         };
-        const errorPayload = isTimeout
-          ? { kind: 'result.error' as const, text: userMessage, reason: 'timeout' }
-          : { kind: 'result.text' as const, text: userMessage, isFinal: true };
+        const errorPayload = {
+          kind: 'result.error' as const,
+          text: userMessage,
+          reason: isTimeout ? 'timeout' : errType,
+        };
         await adapter.send({ ...envelope, replyContext: sendOpts }, errorPayload);
 
         // Proactive 可观测：catch 块的基础设施错误也透传为 thought，保证按 task_id 聚合完整
@@ -1548,38 +1591,82 @@ export class MessageProcessor {
     }
   }
 
-  /**
-   * 主动 compact：本轮执行成功且回复已送达，但 token 占用已达到或超过 autoCompactTokens 阈值。
-   * 在下一条消息到来前提前压缩上下文，避免下轮触发硬上限。
-   * 这不依赖任何网关的错误措辞——纯靠 contextUsage 数值判定。
-   *
-   * 调用时机：flush(true) + status.completed 之后，用户已收到回复。
-   * 通知通过 adapter.send 直接投递（renderer 已结束生命周期）。
-   */
-  private async maybeProactiveCompact(
-    streamResult: StreamRunResult,
+  private async runPendingAutoCompactAtTaskStart(
     session: Session,
     agent: AgentRunnerFull,
     absoluteProjectPath: string,
     adapter: ChannelAdapter,
     envelope: OutboundEnvelope,
   ): Promise<void> {
-    const ctx = streamResult.contextUsage;
-    if (!ctx || !ctx.autoCompactTokens || !session.agentSessionId || !canCompactAgent(agent)) return;
-    if (ctx.totalTokens < ctx.autoCompactTokens) return;
+    if (!session.agentSessionId || !canCompactAgent(agent)) return;
 
-    logger.info(`[MessageProcessor] Proactive compact: totalTokens=${ctx.totalTokens} >= autoCompactTokens=${ctx.autoCompactTokens}, triggering compact`);
-    adapter.send(envelope, { kind: 'system.notice', text: '上下文接近上限，正在自动压缩...', subtype: 'proactive-compact' }).catch(() => {});
+    const ctx = await this.readLastModelCallContextUsage(session.id, session.agentSessionId);
+    if (!ctx || ctx.totalTokens < ctx.autoCompactTokens) return;
+
+    logger.info(`[MessageProcessor] Auto compact at task.start: session=${session.id} totalTokens=${ctx.totalTokens} autoCompactTokens=${ctx.autoCompactTokens}`);
+    await adapter.send(envelope, { kind: 'system.notice', text: '上下文接近上限，正在压缩会话...', subtype: 'auto-compact-start' }).catch(() => {});
 
     try {
-      const compacted = await agent.compact(session.id, session.agentSessionId!, absoluteProjectPath);
+      const compacted = await agent.compact(session.id, session.agentSessionId, absoluteProjectPath);
       if (compacted) {
-        adapter.send(envelope, { kind: 'system.notice', text: '✅ 上下文压缩完成', subtype: 'proactive-compact' }).catch(() => {});
+        await adapter.send(envelope, { kind: 'system.notice', text: '✅ 上下文压缩完成，继续处理...', subtype: 'auto-compact-complete' }).catch(() => {});
       } else {
-        logger.warn(`[MessageProcessor] Proactive compact returned false (session=${session.id})`);
+        logger.warn(`[MessageProcessor] Auto compact at task.start returned false (session=${session.id})`);
       }
     } catch (err) {
-      logger.warn(`[MessageProcessor] Proactive compact failed (non-fatal):`, err);
+      logger.warn(`[MessageProcessor] Auto compact at task.start failed (non-fatal):`, err);
+    }
+  }
+
+  private async readLastModelCallContextUsage(sessionId: string, agentSessionId: string): Promise<{ totalTokens: number; autoCompactTokens: number } | undefined> {
+    try {
+      const { openReadonlyDb, getDbPath } = await import('../stats/db.js');
+      const rdb = openReadonlyDb(getDbPath(resolveRoot()));
+      if (!rdb) return undefined;
+      try {
+        const row = rdb.prepare(
+          `SELECT model, input_tokens, cache_creation_tokens, cache_read_tokens,
+                  context_tokens, max_tokens, auto_compact_tokens
+             FROM model_calls
+            WHERE session_id = ?
+              AND agent_session_id = ?
+            ORDER BY ts DESC, call_index DESC
+            LIMIT 1`
+        ).get(sessionId, agentSessionId) as {
+          model?: string;
+          input_tokens?: number;
+          cache_creation_tokens?: number;
+          cache_read_tokens?: number;
+          context_tokens?: number | null;
+          max_tokens?: number | null;
+          auto_compact_tokens?: number | null;
+        } | undefined;
+        if (!row) return undefined;
+
+        const model = row.model || '';
+        const recordedTotalTokens = row.context_tokens ?? undefined;
+        let totalTokens: number;
+        if (recordedTotalTokens && recordedTotalTokens > 0) {
+          totalTokens = recordedTotalTokens;
+        } else if (isClaudeContextUsageModel(model)) {
+          totalTokens = (row.input_tokens ?? 0) + (row.cache_creation_tokens ?? 0) + (row.cache_read_tokens ?? 0);
+        } else {
+          totalTokens = row.input_tokens ?? 0;
+        }
+        if (totalTokens <= 0) return undefined;
+
+        const recordedAutoCompactTokens = row.auto_compact_tokens ?? undefined;
+        const inferredAutoCompactTokens = autoCompactTokensFromMaxTokens(row.max_tokens ?? undefined);
+        const autoCompactTokens = recordedAutoCompactTokens && recordedAutoCompactTokens > 0
+          ? recordedAutoCompactTokens
+          : inferredAutoCompactTokens ?? autoCompactWindowForModel(model);
+        return { totalTokens, autoCompactTokens };
+      } finally {
+        rdb.close();
+      }
+    } catch (err) {
+      logger.debug(`[MessageProcessor] Failed to read last model call context usage: ${err}`);
+      return undefined;
     }
   }
 
@@ -1601,15 +1688,8 @@ export class MessageProcessor {
 
     const projectPath = this.agentRegistry?.resolveByChannel(message.channel)?.projectPath || process.cwd();
 
-    if (message.chatType === 'group' && message.threadId && message.source !== 'trigger' && message.source !== 'owner-inject') {
-      const existing = await this.sessionManager.getThreadSession(message.channel, message.channelId, message.threadId);
-      if (!existing) {
-        const role = this.sessionManager.resolveIdentity(message.channel, message.peerId).role;
-        if (role !== 'owner' && role !== 'admin') {
-          throw new Error('群聊中无权限创建话题');
-        }
-      }
-    }
+    // 话题创建权限守卫已统一移至 MessageBridge.canCreateThreadSession（enqueue 前拦截），
+    // 此处不再重复检查——bridge 层拒绝后消息根本不会到达 processMessage。
 
     // current strategy: resume bound session, make it active so output is not suppressed
     if (message.triggerMeta?.boundSessionId) {
@@ -1758,6 +1838,7 @@ export class MessageProcessor {
       // session_id 已在 AgentRunner.transformStream 中处理，此处仅记录
       if (event.type === 'session_id') {
         logger.debug(`[MessageProcessor] Session ID updated: ${event.sessionId} for session: ${session.id}`);
+        session.agentSessionId = event.sessionId;
         continue;
       }
 
@@ -1847,7 +1928,6 @@ export class MessageProcessor {
             sessionId: session.id,
             toolName: event.name,
             isError: event.isError,
-            content: event.result,
             agentName: agentNameForStats,
             timestamp: Date.now()
           });

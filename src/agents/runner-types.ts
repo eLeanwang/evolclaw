@@ -230,6 +230,7 @@ export type AgentModelCall = {
   request_id?: string;
   message_id?: string;
   tokenUsage: AgentTokenUsage;
+  contextUsage?: AgentContextUsage;
   degraded?: boolean;
 };
 
@@ -250,4 +251,34 @@ export function usageForContext(usage: AgentTokenUsage | undefined): AgentTokenU
   const iterations = Array.isArray(usage?.iterations) ? usage.iterations : undefined;
   const lastIteration = iterations?.slice().reverse().find(it => contextTokensForUsage(it, true) > 0);
   return lastIteration ?? usage;
+}
+
+/** Models whose base ID uses a 1M context window when sent to the SDK with [1m]. */
+export const ONE_M_CONTEXT_MODEL_PREFIXES = ['claude-opus-4-8', 'claude-sonnet-4-6'];
+const ONE_M_CONTEXT_MODEL_ALIASES = ['opus', 'sonnet'];
+const CLAUDE_CONTEXT_MODEL_ALIASES = ['opus', 'sonnet', 'haiku'];
+
+export function isClaudeContextUsageModel(model: string | undefined): boolean {
+  if (!model) return false;
+  const baseModel = model.replace(/\[1m\]$/i, '');
+  return /^claude-/i.test(baseModel) || CLAUDE_CONTEXT_MODEL_ALIASES.includes(baseModel);
+}
+
+export function isOneMillionContextModel(model: string | undefined): boolean {
+  if (!model) return false;
+  if (ONE_M_CONTEXT_MODEL_ALIASES.includes(model)) return true;
+  if (/\[1m\]$/i.test(model)) return true;
+  if (/deepseek-v4/i.test(model)) return true;
+  const baseModel = model.replace(/\[1m\]$/i, '');
+  return ONE_M_CONTEXT_MODEL_PREFIXES.some(prefix => baseModel === prefix || baseModel.startsWith(`${prefix}-`));
+}
+
+/** Real context window size: 1M models = 1000000, otherwise 200000. */
+export function realContextWindowForModel(model: string | undefined): number {
+  return isOneMillionContextModel(model) ? 1000000 : 200000;
+}
+
+/** autoCompact trigger threshold: 1M models = 900000, otherwise 200000. */
+export function autoCompactWindowForModel(model: string | undefined): number {
+  return isOneMillionContextModel(model) ? 900000 : 200000;
 }

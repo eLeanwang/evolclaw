@@ -73,13 +73,12 @@ export class StatsCollector {
     });
 
     eventBus.subscribe('tool:result', (event) => {
-      const e = event as { isError?: boolean; toolName?: string; agentName?: string; content?: string };
+      const e = event as { isError?: boolean; toolName?: string; agentName?: string };
       if (e.isError) {
         const ts = Date.now();
         this.recordEvent({ type: 'tool-error', timestamp: ts, toolName: e.toolName, agentName: e.agentName });
         this.recordRecentError({
           ts, kind: 'tool', agentName: e.agentName, toolName: e.toolName,
-          message: this.truncate(e.content),
         });
       }
     });
@@ -212,7 +211,7 @@ export interface AidStatsSnapshot {
   recentMessages: Array<{ dir: 'in' | 'out'; peer: string; text: string; ts: number; kind?: MsgKind; encrypt?: boolean | null; chatmode?: string | null }>;
   lastTaskEnd?: {
     ts: number;
-    status: 'completed' | 'error';
+    status: 'completed' | 'error' | 'interrupted';
     errorType?: string;
     sentDuringTask: boolean;       // 期间是否有 message.send
     thoughtDuringTask: boolean;    // 期间是否有 thought.put
@@ -299,6 +298,12 @@ export class AidStatsCollector {
     eventBus.subscribe('task:error', (event) => {
       const e = event as { agentName?: string; sessionId?: string; errorType?: string };
       if (e.agentName) this.onTaskEnd(e.agentName, 'error', e.errorType);
+      if (e.sessionId) this.sessionToAgent.delete(e.sessionId);
+    });
+    // 用户主动打断（新消息/​/stop/​撤回）：任务有自己的生命周期收尾，不计为 error
+    eventBus.subscribe('task:interrupted', (event) => {
+      const e = event as { agentName?: string; sessionId?: string };
+      if (e.agentName) this.onTaskEnd(e.agentName, 'interrupted');
       if (e.sessionId) this.sessionToAgent.delete(e.sessionId);
     });
     // thought.put 次数 + 最后一次 thought 文本
@@ -398,7 +403,7 @@ export class AidStatsCollector {
     entry.currentTaskEncrypt = encrypt ?? null;
   }
 
-  private onTaskEnd(aid: string, status: 'completed' | 'error', errorType?: string, finalText?: string, numTurns?: number): void {
+  private onTaskEnd(aid: string, status: 'completed' | 'error' | 'interrupted', errorType?: string, finalText?: string, numTurns?: number): void {
     const entry = this.getOrCreate(aid);
     const startedAt = entry.currentTaskStartAt;
     const taskEndTs = Date.now();

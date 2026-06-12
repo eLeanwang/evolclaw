@@ -96,6 +96,13 @@
       "message": "⚠️ API 返回异常响应，正在重试..."
     },
     {
+      "id": "json-parse-error",
+      "match": "json parse error",
+      "action": "retry",
+      "type": "api_error",
+      "message": "⚠️ API 返回 JSON 解析异常，正在重试..."
+    },
+    {
       "id": "feishu-permission",
       "match": "im:resource",
       "action": "stop",

@@ -426,6 +426,8 @@ export interface ChannelAdapter {
 
   /** 入站回调 */
   acknowledge?(messageId: string): Promise<void>;
+  /** Runner 开始执行时调用：将收件确认（Pin）升级为处理中确认（CheckMark） */
+  promoteAck?(messageId: string): Promise<void>;
   onInteraction?(callback: (response: InteractionResponse) => void): void;
   onChatDissolved?(callback: (channelId: string) => void): void;
 
@@ -438,6 +440,10 @@ export interface ChannelAdapter {
   downloadAgentMd?(aid: string): Promise<string>;
   /** 群显示名解析（渠道私有，AUN 经 group.get；进程内缓存）。取不到返回 undefined，绝不抛出阻塞消息处理。 */
   getGroupName?(groupId: string): Promise<string | undefined>;
+  /** 查询某成员在群里的角色（AUN 经 group.get_admins）。
+   *  返回 'owner'|'admin'|'member'；非成员返回 'none'；查询失败返回 undefined（调用方按 fail-closed 处理）。
+   *  不缓存：每次查权威源，结果天然最新。绝不抛出。 */
+  getGroupMemberRole?(groupId: string, aid: string): Promise<'owner' | 'admin' | 'member' | 'none' | undefined>;
 }
 
 // 渠道配置选项
@@ -866,7 +872,7 @@ export type OutboundPayload =
   | { kind: 'result.error'; text: string; reason?: string }
   | { kind: 'activity.batch'; items: ThoughtItem[] }
   | { kind: 'status.started'; metadata?: Record<string, unknown> }
-  | { kind: 'status.progress'; metadata?: { activityType: 'text' | 'tool_call' | 'tool_result'; turn?: number; outputTokens?: number; toolName?: string; callId?: string; ok?: boolean; durationMs?: number } }
+  | { kind: 'status.progress'; metadata?: { activityType: 'text' | 'tool_call' | 'tool_result' | 'progress'; turn?: number; outputTokens?: number; toolName?: string; callId?: string; ok?: boolean; durationMs?: number; text?: string; state?: 'processing' | 'waiting'; toolUses?: number } }
   | { kind: 'status.queued'; metadata?: Record<string, unknown> }
   | { kind: 'status.completed'; metadata?: { durationMs?: number; ttftMs?: number; numTurns?: number; tokenUsage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number }; contextUsage?: { totalTokens: number; maxTokens: number; percentage: number; autoCompactTokens?: number; model: string; effort?: string }; lastModelCall?: { messageId?: string; uuid?: string; requestId?: string; model?: string; tokenUsage: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number | null; cache_creation_input_tokens?: number | null; [key: string]: unknown }; contextUsage?: { totalTokens: number; maxTokens: number; percentage: number; autoCompactTokens?: number; model: string; effort?: string } } } }
   | { kind: 'status.interrupted'; metadata?: { reason: string } }
@@ -972,6 +978,9 @@ export interface MenuUpdateRequest {
   name: string;
   value: string;         // 目标值
   cmd?: string;
+  // 结构化附加参数。baseagent 支持 args.scope:
+  //   'session' 仅切当前会话 | 'default' 仅改 agent 默认 | 'both'（默认）两者都改
+  args?: Record<string, any>;
 }
 
 export interface MenuActionRequest {
