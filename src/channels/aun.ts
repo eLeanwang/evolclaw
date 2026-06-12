@@ -1263,6 +1263,8 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     this.aidStatsCollector?.recordInbound(this.config.aid, fromAid, Buffer.byteLength(finalText, 'utf-8'), finalText, isSystemP2P, msgEncrypted, msgChatmode, isSystemP2P ? 'notify' : 'send');
     const replyContext: ReplyContext = { metadata: { encrypted: msgEncrypted, chatmode: msgChatmode } };
     if (threadId) replyContext.threadId = threadId;
+    replyContext.peerId = fromAid;
+    if (messageId) replyContext.replyToMessageId = messageId;
     this.dispatchMessage({
       channelId: chatId,
       userId: fromAid,
