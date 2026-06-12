@@ -137,12 +137,16 @@ export class IMRenderer {
       this.timer = undefined;
     }
 
-    const text = this.textBuffer;
+    // 文件标记过滤：tool_use 前的文本块也不能把 marker 暴露给用户
+    const rawText = this.opts.fileMarkerPattern
+      ? this.textBuffer.replace(this.opts.fileMarkerPattern, '')
+      : this.textBuffer;
     this.textBuffer = '';
+    if (!rawText) return;
     // 清掉 itemsQueue 中的 text items（已发出）
     this.itemsQueue = this.itemsQueue.filter(it => it.kind !== 'text');
 
-    const payload: OutboundPayload = { kind: 'result.text', text, isFinal: false };
+    const payload: OutboundPayload = { kind: 'result.text', text: rawText, isFinal: false };
     this.sentContent = true;
     this.sendChain = this.sendChain
       .then(() => this.opts.send(payload))
