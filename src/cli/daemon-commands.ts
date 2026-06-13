@@ -1078,6 +1078,9 @@ export async function cmdStatus() {
       // IPC query for agents failed — skip section
     }
   }
+
+  // ECWeb status（独立于 main 进程：ecweb 是单独 detached 进程）
+  await printEcwebStatus(p);
 }
 
 /**
@@ -2258,6 +2261,53 @@ function findAliveEcwebs(p: ReturnType<typeof resolvePaths>): EcwebInstanceRecor
 function findAliveEcweb(p: ReturnType<typeof resolvePaths>): EcwebInstanceRecord | null {
   const alive = findAliveEcwebs(p);
   return alive[0] ?? null;
+}
+
+/**
+ * 轻量 HTTP 就绪探测：GET / 返回 2xx 即视为就绪。
+ * 不走 /api/pair-code（会触发配对码刷新副作用），不走 /api/health（不存在）。
+ * 根路径由 serveStatic 处理，返回 index.html，无副作用。
+ */
+async function probeEcwebReady(port: number): Promise<boolean> {
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/`, {
+      method: 'GET',
+      signal: AbortSignal.timeout(2000),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 输出 ECWeb 状态。判定口径：
+ *   1. 进程是否存活（instance/ 下的 pid 文件 + isProcessRunning）
+ *   2. HTTP 是否就绪——探测根路径 /（serveStatic → index.html, 无副作用）。
+ */
+async function printEcwebStatus(p: ReturnType<typeof resolvePaths>): Promise<void> {
+  const cfg = loadEvolclawConfig();
+  if (cfg.ecweb?.enabled === false) {
+    console.log('');
+    console.log('🔭 ECWeb: 已禁用 (evolclaw.json → ecweb.enabled: false)');
+    return;
+  }
+
+  const inst = findAliveEcweb(p);
+  if (!inst) {
+    console.log('');
+    console.log('🔭 ECWeb: 未运行');
+    return;
+  }
+
+  // 进程存活，再确认 HTTP 真正就绪（探测根路径 /，无业务副作用）
+  const ready = await probeEcwebReady(inst.port);
+  console.log('');
+  if (ready) {
+    console.log(`🔭 ECWeb: 运行中 (PID: ${inst.pid})  http://localhost:${inst.port}`);
+  } else {
+    console.log(`🔭 ECWeb: 进程存活 (PID: ${inst.pid}) 但 HTTP 未就绪 (端口 ${inst.port})，查看 logs/watch-web.log`);
+  }
 }
 
 function removeEcwebInstanceFiles(p: ReturnType<typeof resolvePaths>): void {

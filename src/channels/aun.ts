@@ -94,6 +94,8 @@ export interface AUNDispatchOptions {
   sameDevice?: boolean;
   sameNetwork?: boolean;
   sameEgressIp?: boolean;
+  /** 本条入站消息是否端到端加密（aun 专属）。回复加密态跟随此值。 */
+  encrypted?: boolean;
   messageId?: string;
   threadId?: string;
   mentions?: Array<{ userId: string; name?: string }>;
@@ -142,6 +144,7 @@ export function aunOptsToInbound(
     sameDevice: opts.sameDevice,
     sameNetwork: opts.sameNetwork,
     sameEgressIp: opts.sameEgressIp,
+    encrypted: opts.encrypted,
     messageId: opts.messageId,
     mentions: opts.mentions,
     mentionAids: opts.mentionAids,
@@ -1263,6 +1266,8 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     this.aidStatsCollector?.recordInbound(this.config.aid, fromAid, Buffer.byteLength(finalText, 'utf-8'), finalText, isSystemP2P, msgEncrypted, msgChatmode, isSystemP2P ? 'notify' : 'send');
     const replyContext: ReplyContext = { metadata: { encrypted: msgEncrypted, chatmode: msgChatmode } };
     if (threadId) replyContext.threadId = threadId;
+    replyContext.peerId = fromAid;
+    if (messageId) replyContext.replyToMessageId = messageId;
     this.dispatchMessage({
       channelId: chatId,
       userId: fromAid,
@@ -1277,6 +1282,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       sameDevice: msg.same_device === true || undefined,
       sameNetwork: msg.same_network === true || undefined,
       sameEgressIp: msg.same_egress_ip === true || undefined,
+      encrypted: msgEncrypted,
       replyContext,
       images: inboundImages.length > 0 ? inboundImages : undefined,
     });
@@ -1512,6 +1518,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       threadId,
       mentions,
       mentionAids: renderMentionAids.length > 0 ? renderMentionAids : undefined,
+      encrypted: msgEncrypted,
       replyContext: this.buildGroupReplyContext(threadId, senderAid, msgEncrypted, messageId, msgChatmode),
       dispatchMode: serverDispatchMode,
       images: inboundImages.length > 0 ? inboundImages : undefined,
@@ -1523,6 +1530,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     chatType: 'private' | 'group'; messageId: string;
     peerName?: string; peerType?: string;
     sameDevice?: boolean; sameNetwork?: boolean; sameEgressIp?: boolean;
+    encrypted?: boolean;
     seq?: number; threadId?: string; mentions?: string[];
     mentionAids?: string[];
     replyContext?: ReplyContext;
@@ -1598,6 +1606,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       sameDevice: event.sameDevice,
       sameNetwork: event.sameNetwork,
       sameEgressIp: event.sameEgressIp,
+      encrypted: event.encrypted,
       messageId: event.messageId,
       threadId: event.threadId,
       mentions: mentionObjects,
@@ -2378,6 +2387,47 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     return { queued: true };
   }
 
+  buildTaskPayloadBase(envelope: any, context?: ReplyContext): Record<string, any> {
+    const base: Record<string, any> = {};
+    if (envelope.taskId) base.task_id = envelope.taskId;
+    if (envelope.sessionId) base.session_id = envelope.sessionId;
+    if (envelope.agentName) base.agent_name = envelope.agentName;
+    if (envelope.chatmode) base.chatmode = envelope.chatmode;
+    if (context?.threadId) base.thread_id = context.threadId;
+    if (context?.peerId) base.initiator = context.peerId;
+    if (context?.replyToMessageId) base.ref_message_id = context.replyToMessageId;
+    return base;
+  }
+
+  activityLogText(raw: any): string {
+    // 兼容两种入参：原始 ThoughtItem（顶层字段），或已构建的 activity payload（字段收在 .item 里）
+    const item = raw?.item && typeof raw.item === 'object' ? raw.item : raw;
+    if (typeof item?.text === 'string' && item.text) return item.text;
+    if (item?.kind === 'tool_call') return `[tool_call] ${item.name ?? ''}`.trim();
+    if (item?.kind === 'tool_result') return `[tool_result] ${item.name ?? ''} ${item.ok === false ? 'failed' : 'ok'}`.trim();
+    if (item?.kind) return `[activity:${item.kind}]`;
+    return '[activity]';
+  }
+
+  buildActivityPayload(envelope: any, context: ReplyContext | undefined, item: unknown): Record<string, any> {
+    const activityItem: Record<string, any> = item && typeof item === 'object' && !Array.isArray(item)
+      ? { ...(item as Record<string, any>) }
+      : { kind: 'unknown', text: String(item ?? '') };
+    return {
+      ...this.buildTaskPayloadBase(envelope, context),
+      type: 'activity',
+      item: activityItem,
+    };
+  }
+
+  async sendReliableStructured(channelId: string, payload: Record<string, any>, context?: ReplyContext, logText?: string): Promise<void> {
+    await this.sendContentPayload(channelId, payload, {
+      contentKind: 'custom',
+      context,
+      logText: logText ?? this.payloadLogText(payload, 'custom'),
+    });
+  }
+
   async sendMessage(channelId: string, text: string, context?: ReplyContext): Promise<void> {
     if (!text?.trim()) {
       logger.warn(`${this.logPrefix()} Attempted to send empty message, skipping`);
@@ -2665,10 +2715,10 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     };
 
     try {
-      const itemCount = Array.isArray((payload as any)?.items) ? (payload as any).items.length : 0;
-      const stage = (payload as any)?.stage ?? `items=${itemCount}`;
-      // 提取 thought 文本（只对 kind=text 的 item 写 jsonl，过滤 tool_use/tool_result 等结构化项）
       const items = (payload as any)?.items;
+      const itemCount = Array.isArray(items) ? items.length : 1;
+      const stage = (payload as any)?.stage ?? ((payload as any)?.kind ? `kind=${(payload as any).kind}` : `items=${itemCount}`);
+      // 提取 thought 文本：兼容旧 items[] 和新扁平 activity payload。
       let thoughtText: string | undefined;
       if (Array.isArray(items) && items.length > 0) {
         const lastItem = items[items.length - 1];
@@ -2682,6 +2732,8 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
         } else if (typeof lastItem === 'string') {
           thoughtText = lastItem;
         }
+      } else {
+        thoughtText = this.activityLogText(payload);
       }
       if (this.isGroupId(channelId)) {
         params.group_id = targetId;
@@ -3012,57 +3064,38 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       progress: 'progress',
     };
     const statusPayload: Record<string, any> = {
-      type: 'status',
-      state: stateMap[status] ?? status,
+      type: 'task.status',
+      status: stateMap[status] ?? status,
       task_id: taskId,
       session_id: sessionId,
       severity,
+      terminal: ['done', 'interrupted', 'error', 'timeout'].includes(status),
       ...(extraMeta && Object.keys(extraMeta).length > 0 && { metadata: extraMeta }),
     };
     if (context?.threadId) statusPayload.thread_id = context.threadId;
     if (context?.peerId) statusPayload.initiator = context.peerId;
+    if (context?.metadata?.chatmode) statusPayload.chatmode = context.metadata.chatmode;
     if (context?.replyToMessageId) statusPayload.ref_message_id = context.replyToMessageId;
 
-    const isGroup = this.isGroupId(channelId);
-    // 私聊 channelId = 对端 AID（不含 device_id）
-    const statusTargetAid = channelId;
-    const encryptTarget = isGroup ? channelId : statusTargetAid;
+    const notifyOptions: Record<string, any> = { ttlMs: 60_000 };
+    if (this.isGroupId(channelId)) notifyOptions.groupId = channelId;
+    else notifyOptions.to = channelId;
 
-    const computeEncrypt = (): boolean => context?.metadata?.encrypted != null
-      ? !!(context.metadata.encrypted)
-      : this.shouldEncrypt(encryptTarget);
-
-    const sendOne = (method: string, payload: Record<string, any>, label: string): Promise<any> => {
-      const c = this.client;
-      if (!c) {
-        logger.debug(`${this.logPrefix()} ${label} skipped: client gone`);
-        return Promise.resolve(null);
-      }
-      const encrypt = computeEncrypt();
-      const params: Record<string, any> = { payload, encrypt };
-      if (isGroup) params.group_id = channelId;
-      else params.to = statusTargetAid;
-      this.trace('OUT', `${method}.task_${label}`, params);
-      return c.call(method, params).catch((e: any) => {
-        if (encrypt && e instanceof E2EEError) {
-          this.peerE2ee.set(encryptTarget, { ok: false, ts: Date.now() });
-          logger.warn(`${this.logPrefix()} E2EE task_${label} send failed to ${channelId}, retrying plaintext`);
-          const c2 = this.client;
-          if (!c2) return null;
-          const fallbackParams = { ...params, encrypt: false };
-          return c2.call(method, fallbackParams).catch((e2: any) => {
-            logger.debug(`${this.logPrefix()} task_${label} fallback failed: ${e2}`);
-            return null;
-          });
-        }
-        logger.debug(`${this.logPrefix()} task_${label} failed: ${e}`);
-        return null;
-      });
-    };
-
-    const method = isGroup ? 'group.send' : 'message.send';
-    sendOne(method, statusPayload, 'status').then(result => {
-      if (result) this.forwardOutbound(result as any);
+    this.trace('OUT', 'notify.task_status', {
+      method: 'event/app.task.status',
+      params: statusPayload,
+      options: notifyOptions,
+    });
+    const notify = (this.client as any).notify;
+    if (typeof notify !== 'function') {
+      logger.warn(`${this.logPrefix()} task.${status} notify skipped: client.notify unavailable`);
+      return;
+    }
+    Promise.resolve(notify.call(this.client, 'event/app.task.status', statusPayload, notifyOptions)).then(() => {
+      this.trace('OUT', 'notify.task_status.ok', { task_id: taskId, status: statusPayload.status });
+    }).catch((e: any) => {
+      this.trace('OUT', 'notify.task_status.error', { task_id: taskId, status: statusPayload.status, error: String(e) });
+      logger.debug(`${this.logPrefix()} task_status notify failed: ${e}`);
     }).catch(() => {});
 
     this.aidStatsCollector?.recordOutbound(this.config.aid, channelId, JSON.stringify(statusPayload).length, undefined, true, undefined, undefined, 'notify');
@@ -3284,6 +3317,29 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       return undefined;  // 不写缓存，下次仍可重试
     }
   }
+
+  /**
+   * 查询某成员在群里的角色（经 group.get_admins）。
+   * 仅用于话题创建权限校验（稀有事件），故不缓存：每次查权威源，结果天然最新。
+   * 命中 admins 列表（owner+admin）返回其 role；不在列表（含普通 member / observer）返回 'none'；
+   * 未连接 / 异常返回 undefined —— 绝不抛出，由调用方按 fail-closed 处理。
+   */
+  async getGroupMemberRole(groupId: string, aid: string): Promise<'owner' | 'admin' | 'member' | 'none' | undefined> {
+    if (!groupId || !aid) return undefined;
+    if (!this.client) return undefined;
+    try {
+      const result: any = await this.callAndTrace('group.get_admins', { group_id: groupId });
+      const admins: any[] = Array.isArray(result?.admins) ? result.admins : [];
+      const hit = admins.find((m) => m?.aid === aid);
+      if (hit) {
+        const role = hit.role;
+        return role === 'owner' || role === 'admin' ? role : 'admin';
+      }
+      return 'none';  // 不在 owner/admin 列表 → 普通 member / observer / 非成员
+    } catch {
+      return undefined;  // 查询失败，调用方 fail-closed
+    }
+  }
 }
 
 // Plugin implementation
@@ -3316,12 +3372,45 @@ export class AUNChannelPlugin implements ChannelPlugin {
       send: async (envelope: any, payload: any) => {
         const replyCtx = envelope.replyContext;
         const channelId = envelope.channelId;
+        const taskBase = () => channel.buildTaskPayloadBase(envelope, replyCtx);
         switch (payload.kind) {
-          case 'result.text': case 'command.result': case 'command.error':
-          case 'system.notice': case 'system.error': case 'result.error': {
+          case 'result.text': case 'command.result': case 'command.error': {
             const sendCtx: ReplyContext = { ...(replyCtx ?? {}) };
             if (payload.kind === 'result.text' && payload.isFinal) sendCtx.title = '✅ 最终回复:';
             await channel.sendMessage(channelId, payload.text, sendCtx);
+            return;
+          }
+          case 'system.notice': {
+            await channel.sendReliableStructured(channelId, {
+              type: 'notice',
+              ...taskBase(),
+              subtype: payload.subtype,
+              text: payload.text,
+              severity: 'info',
+            }, replyCtx, payload.text);
+            return;
+          }
+          case 'system.error': {
+            await channel.sendReliableStructured(channelId, {
+              type: 'error',
+              ...taskBase(),
+              subtype: payload.subtype,
+              message: payload.text,
+              user_message: payload.text,
+              recoverable: payload.recoverable,
+              terminal: !payload.recoverable,
+            }, replyCtx, payload.text);
+            return;
+          }
+          case 'result.error': {
+            await channel.sendReliableStructured(channelId, {
+              type: 'error',
+              ...taskBase(),
+              reason: payload.reason,
+              message: payload.text,
+              user_message: payload.text,
+              terminal: true,
+            }, replyCtx, payload.text);
             return;
           }
           case 'result.file': {
@@ -3344,16 +3433,31 @@ export class AUNChannelPlugin implements ChannelPlugin {
             return;
           }
           case 'activity.batch': {
-            const aunPayload: Record<string, any> = {
-              type: 'thought',
-              items: payload.items,
-              client_context: { task_id: envelope.taskId, chatmode: envelope.chatmode, agent_name: envelope.agentName },
-            };
-            if (replyCtx?.threadId) aunPayload.thread_id = replyCtx.threadId;
-            if (envelope.chatmode === 'proactive') {
-              await channel.sendThought(channelId, envelope.taskId, aunPayload, replyCtx);
-            } else {
-              await channel.sendStructured(channelId, aunPayload, replyCtx);
+            const items = Array.isArray(payload.items) ? payload.items : [];
+            for (const item of items) {
+              if (item?.kind === 'progress') {
+                channel.sendProcessingStatus(
+                  channelId,
+                  'progress',
+                  envelope.sessionId ?? envelope.taskId,
+                  envelope.taskId,
+                  replyCtx,
+                  {
+                    activityType: 'progress',
+                    text: item.text,
+                    state: item.state,
+                    toolUses: item.tool_uses,
+                    durationMs: item.duration_ms,
+                  },
+                );
+                continue;
+              }
+              const aunPayload = channel.buildActivityPayload(envelope, replyCtx, item);
+              if (envelope.chatmode === 'proactive') {
+                await channel.sendThought(channelId, envelope.taskId, aunPayload, replyCtx);
+              } else {
+                await channel.sendReliableStructured(channelId, aunPayload, replyCtx, channel.activityLogText(item));
+              }
             }
             return;
           }
@@ -3439,6 +3543,7 @@ export class AUNChannelPlugin implements ChannelPlugin {
       uploadAgentMd: (content: string) => channel.uploadAgentMd(content),
       downloadAgentMd: (aid: string) => channel.downloadAgentMd(aid),
       getGroupName: (groupId: string) => channel.getGroupName(groupId),
+      getGroupMemberRole: (groupId: string, aid: string) => channel.getGroupMemberRole(groupId, aid),
       _selfAid: () => channel.getStatus().aid,
       _selfName: () => channel.getSelfName(),
     };

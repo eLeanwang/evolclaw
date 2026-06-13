@@ -492,9 +492,10 @@ export class EvolAgentRegistry {
   }
 
   private toInfo(agent: EvolAgent): AgentInfo {
+    const displayName = this.resolveDisplayName(agent.aid);
     return {
-      name: agent.name,
-      displayName: this.resolveDisplayName(agent.aid),
+      name: displayName || agent.name || agent.aid,
+      displayName,
       aid: agent.aid,
       status: agent.status,
       channels: agent.channelInstanceNames(),

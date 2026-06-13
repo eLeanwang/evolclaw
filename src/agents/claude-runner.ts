@@ -14,7 +14,7 @@ import { checkBlacklist, checkReadonly, summarizeToolInput } from '../core/permi
 import { encodePath } from '../utils/cross-platform.js';
 import type { AgentPlugin, AgentInstance, AgentCallbacks } from '../core/baseagent-loader.js';
 import type { AgentEvent, ImageData, PermissionContext, PermissionModeInfo, AgentTokenUsage, AgentContextUsage, AgentLastModelCall, AgentModelCall } from './runner-types.js';
-import { contextTokensForUsage, usageForContext, numericToken } from './runner-types.js';
+import { contextTokensForUsage, usageForContext, numericToken, isClaudeContextUsageModel, isOneMillionContextModel, realContextWindowForModel, autoCompactWindowForModel } from './runner-types.js';
 export type {
   AgentContextUsage,
   AgentEvent,
@@ -124,31 +124,14 @@ function resolveModelAlias(model: string, baseUrl?: string): string {
   return STATIC_MODEL_ALIASES[model] || model;
 }
 
-/** 支持 1M 上下文窗口的模型 ID 前缀（SDK 通过 `[1m]` 后缀启用）。 */
-const ONE_M_CONTEXT_PREFIXES = ['claude-opus-4-8', 'claude-sonnet-4-6'];
-
 /**
  * 为支持 1M 上下文的模型追加 `[1m]` 后缀——仅在交给 SDK query() 时调用。
  * 目录与校验层始终使用不带后缀的基础 ID，避免与网关 /models 返回值（无 `[1m]`）冲突。
  */
 function applyContextWindow(modelId: string): string {
   if (/\[1m\]$/.test(modelId)) return modelId; // 已带后缀
-  if (ONE_M_CONTEXT_PREFIXES.some(p => modelId === p)) return `${modelId}[1m]`;
+  if (isOneMillionContextModel(modelId)) return `${modelId}[1m]`;
   return modelId;
-}
-
-/** 真实上下文窗口大小：1M 模型 = 1000000，否则 200000 */
-function realContextWindowFor(sdkModel: string): number {
-  if (/\[1m\]$/.test(sdkModel)) return 1000000;
-  if (/deepseek-v4/i.test(sdkModel)) return 1000000;  // deepseek-v4 系列原生 1M 窗口（无 [1m] 后缀）
-  return 200000;
-}
-
-/** autoCompact 触发阈值：1M 模型 = 900000（留 ~100k buffer），否则 200000 */
-function autoCompactWindowFor(sdkModel: string): number {
-  if (/\[1m\]$/.test(sdkModel)) return 900000;
-  if (/deepseek-v4/i.test(sdkModel)) return 900000;
-  return 200000;
 }
 
 /** 解析别名 + 追加 1M 后缀，得到最终交给 SDK 的 model 串。 */
@@ -973,10 +956,10 @@ export class AgentRunner {
         // input_tokens 本身就是完整的上下文输入量。
         const u = event.usage as AgentTokenUsage | undefined;
         const effectiveModel = callModel ?? this.model;
-        const isClaudeModel = effectiveModel?.startsWith('claude');
+        const isClaudeModel = isClaudeContextUsageModel(effectiveModel);
         const totalTokens = contextTokensForUsage(u, !!isClaudeModel);
-        const contextWindowTokens = sdkModel ? realContextWindowFor(sdkModel) : 200000;
-        const autoCompactTokens   = sdkModel ? autoCompactWindowFor(sdkModel) : 200000;
+        const contextWindowTokens = realContextWindowForModel(sdkModel);
+        const autoCompactTokens   = autoCompactWindowForModel(sdkModel);
         const contextUsage = totalTokens > 0 ? {
           totalTokens,
           maxTokens: contextWindowTokens,
@@ -1001,19 +984,34 @@ export class AgentRunner {
           };
         }
 
+        const contextUsageForCall = (usage: AgentTokenUsage): AgentContextUsage | undefined => {
+          const callTotalTokens = contextTokensForUsage(usageForContext(usage), !!isClaudeModel);
+          return callTotalTokens > 0 ? {
+            totalTokens: callTotalTokens,
+            maxTokens: contextWindowTokens,
+            percentage: Math.round((callTotalTokens / contextWindowTokens) * 100),
+            autoCompactTokens,
+            model: callModel ?? this.model,
+            effort: callEffort ?? this.effort,
+          } : undefined;
+        };
+
         // 组装 modelCalls：优先 SDK iterations，fallback 流式收集，兜底降级单行。
         const callModel_ = callModel ?? this.model;
         let modelCalls: AgentModelCall[] | undefined;
         const iterArr = Array.isArray(u?.iterations) && u!.iterations!.length > 0 ? u!.iterations! : null;
         if (iterArr) {
           modelCalls = iterArr.map((it, i) => ({
-            call_index: i, model: callModel_, tokenUsage: it,
+            call_index: i, model: callModel_, tokenUsage: it, contextUsage: contextUsageForCall(it),
           }));
         } else if (collectedCalls.length > 0) {
-          modelCalls = collectedCalls;
+          modelCalls = collectedCalls.map(call => ({
+            ...call,
+            contextUsage: contextUsageForCall(call.tokenUsage),
+          }));
         } else if (u) {
           // 降级：无逐次数据，写一条累计行
-          modelCalls = [{ call_index: 0, model: callModel_, tokenUsage: u, degraded: true }];
+          modelCalls = [{ call_index: 0, model: callModel_, tokenUsage: u, contextUsage: contextUsageForCall(u), degraded: true }];
         }
 
         yield {
@@ -1276,7 +1274,7 @@ export class AgentRunner {
       model: sdkModel,
       ...(callEffort ? { effort: callEffort } : {}),
       ...(this.claudeExecutablePath ? { pathToClaudeCodeExecutable: this.claudeExecutablePath } : {}),
-      autoCompactWindow: autoCompactWindowFor(sdkModel),
+      autoCompactWindow: autoCompactWindowForModel(sdkModel),
       advisorModel: 'haiku',
       canUseTool: canUseToolCallback,
       permissionMode: sdkPermissionMode,

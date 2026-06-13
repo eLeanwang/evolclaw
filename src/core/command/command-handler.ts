@@ -515,9 +515,10 @@ export class CommandHandler {
   /** menu.update — 写入新值。 */
   async execMenuUpdate(
     cmd: string, value: string, channel: string, channelId: string, userId?: string,
-    overrideIdentity?: import('../../types.js').SessionIdentity, fromControlChannel = false
+    overrideIdentity?: import('../../types.js').SessionIdentity, fromControlChannel = false,
+    args?: Record<string, any>
   ): Promise<{ data: any } | { error: string; code?: string }> {
-    return await menuExecMenuUpdate.call(this, cmd, value, channel, channelId, userId, overrideIdentity, fromControlChannel);
+    return await menuExecMenuUpdate.call(this, cmd, value, channel, channelId, userId, overrideIdentity, fromControlChannel, args);
   }
 
   /** menu.action — 触发动词。 */
@@ -1132,13 +1133,17 @@ export class CommandHandler {
     if (meta?.replyContext?.threadId) ctx.threadId = meta.replyContext.threadId;
     if (meta?.replyContext?.peerId) ctx.peerId = meta.replyContext.peerId;
     if (!ctx.peerId && meta?.peerId) ctx.peerId = meta.peerId;
+    // 话题（Feishu thread）路由：透传 replyToMessageId + replyInThread，
+    // 否则 ctl send/file 会丢失话题归属、落到主会话气泡。
+    if (meta?.replyContext?.replyToMessageId) ctx.replyToMessageId = meta.replyContext.replyToMessageId;
+    if (meta?.replyContext?.replyInThread) ctx.replyInThread = meta.replyContext.replyInThread;
 
     const taskId = this.sessionManager.getActiveTaskId(session.id);
     const chatmode = session.sessionMode || 'interactive';
     const encrypted = this.sessionManager.getSessionEncrypt(session.id);
 
     // 诊断日志：记录 task_id 解析结果
-    logger.info(`[CommandHandler] buildCtlReplyContext: sessionId=${session.id} taskId=${taskId ?? 'none'} chatmode=${chatmode} threadId=${ctx.threadId ?? 'none'}`);
+    logger.info(`[CommandHandler] buildCtlReplyContext: sessionId=${session.id} taskId=${taskId ?? 'none'} chatmode=${chatmode} threadId=${ctx.threadId ?? 'none'} replyTo=${ctx.replyToMessageId ?? 'none'} inThread=${ctx.replyInThread ?? false}`);
 
     if (taskId || chatmode !== 'interactive' || encrypted != null) {
       ctx.metadata = {};

@@ -137,12 +137,16 @@ export class IMRenderer {
       this.timer = undefined;
     }
 
-    const text = this.textBuffer;
+    // 文件标记过滤：tool_use 前的文本块也不能把 marker 暴露给用户
+    const rawText = this.opts.fileMarkerPattern
+      ? this.textBuffer.replace(this.opts.fileMarkerPattern, '')
+      : this.textBuffer;
     this.textBuffer = '';
+    if (!rawText) return;
     // 清掉 itemsQueue 中的 text items（已发出）
     this.itemsQueue = this.itemsQueue.filter(it => it.kind !== 'text');
 
-    const payload: OutboundPayload = { kind: 'result.text', text, isFinal: false };
+    const payload: OutboundPayload = { kind: 'result.text', text: rawText, isFinal: false };
     this.sentContent = true;
     this.sendChain = this.sendChain
       .then(() => this.opts.send(payload))
@@ -171,8 +175,8 @@ export class IMRenderer {
 
   /** 添加文本片段（流式 text） */
   addText(text: string, outputTokens?: number, turn?: number): void {
-    this.emitProgress('text', outputTokens, turn);
     if (this.opts.envelope.chatmode === 'proactive') return;
+    this.emitProgress('text', outputTokens, turn);
     if (!text) return;
 
     // 同一窗口内连续 text delta 合并到最后一个 text item
@@ -198,8 +202,8 @@ export class IMRenderer {
 
   /** 添加工具调用 */
   addToolCall(name: string, input: Record<string, unknown> | undefined, callId?: string, descText?: string, turn?: number, outputTokens?: number): void {
-    this.emitProgress('tool_call', outputTokens, turn, { toolName: name, callId });
     if (this.opts.envelope.chatmode === 'proactive') return;
+    this.emitProgress('tool_call', outputTokens, turn, { toolName: name, callId });
     if (this.opts.suppressActivities) return;
     this.itemsQueue.push({
       kind: 'tool_call',
@@ -215,8 +219,8 @@ export class IMRenderer {
 
   /** 添加工具结果 */
   addToolResult(name: string, ok: boolean, result?: unknown, error?: string, callId?: string, durationMs?: number, descText?: string): void {
-    this.emitProgress('tool_result', undefined, undefined, { toolName: name, callId, ok, durationMs });
     if (this.opts.envelope.chatmode === 'proactive') return;
+    this.emitProgress('tool_result', undefined, undefined, { toolName: name, callId, ok, durationMs });
     if (this.opts.suppressActivities) return;
     this.itemsQueue.push({
       kind: 'tool_result',
@@ -237,20 +241,36 @@ export class IMRenderer {
   addProgress(text: string, opts: { state?: 'processing' | 'waiting'; toolUses?: number; durationMs?: number } = {}): void {
     if (this.opts.envelope.chatmode === 'proactive') return;
     if (this.opts.suppressActivities) return;
-    this.itemsQueue.push({
-      kind: 'progress',
+    this.emitProgress('progress', undefined, undefined, {
       text,
       state: opts.state,
-      tool_uses: opts.toolUses,
-      duration_ms: opts.durationMs,
+      toolUses: opts.toolUses,
+      durationMs: opts.durationMs,
     });
-    this.messageTimestamps.push(Date.now());
-    this.scheduleFlush();
   }
+
+  /**
+   * proactive 下放行为 thought 的 notice subtype 白名单——仅"真·终态错误"：
+   * - context-too-long：上下文超限且无法 auto-compact，任务到此终止
+   * - process-exit：Agent 子进程异常崩溃（无 complete 事件，emit 完全覆盖不到）
+   * 二者都是用户必须知道、否则会困惑"任务为什么停了"的终态信号。
+   *
+   * 其余 subtype 一律不发：
+   * - compact / runtime-error / task-error：emit() 路径（mapEventToItem）已投影，重复
+   * - compact-start / compact-trigger / compact-retry / retry：内部机务噪音（压缩中/
+   *   重试中/压缩完成），proactive 下用户要的是工作产出而非流水账，压缩后 thought 会
+   *   继续输出，过程本身无需播报。
+   */
+  private static readonly PROACTIVE_NOTICE_ALLOW = new Set(['context-too-long', 'process-exit']);
 
   /** 添加系统提示 / 通知。force=true 时绕过 suppressActivities（用于 compact/retry/error 等操作反馈） */
   addNotice(text: string, severity: 'info' | 'warn', subtype?: string, force = false): void {
-    if (this.opts.envelope.chatmode === 'proactive') return;
+    // proactive 模式：只放行真·终态错误，机务噪音（压缩/重试）和 emit 已覆盖的 subtype 均不发。
+    if (this.opts.envelope.chatmode === 'proactive') {
+      if (subtype == null || !IMRenderer.PROACTIVE_NOTICE_ALLOW.has(subtype)) return;
+      this.emitProactiveItem({ kind: 'notice', text, severity, subtype });
+      return;
+    }
     if (this.opts.suppressActivities && !force) return;
     this.itemsQueue.push({ kind: 'notice', text, severity, subtype });
     this.messageTimestamps.push(Date.now());
@@ -345,6 +365,21 @@ export class IMRenderer {
       this.timer = undefined;
     }
 
+    // 文件标记过滤：marker 任何时候都不该出现在用户文本里，必须在 *每次* flush
+    // （含非最终的定时 flush）执行。否则文本块若滞留 buffer 后被定时器触发，会走
+    // 下方非-final 的 result.text 路径，把 [SEND_FILE:...] 原样发给用户。
+    // 非最终 flush 不做 trim，避免 trim 掉 Markdown 块级换行。
+    if (this.opts.fileMarkerPattern) {
+      const strip = (s: string) => {
+        const replaced = s.replace(this.opts.fileMarkerPattern!, '');
+        return isFinal ? replaced.trim() : replaced;
+      };
+      this.textBuffer = strip(this.textBuffer);
+      for (const item of this.itemsQueue) {
+        if (item.kind === 'text') item.text = item.text.replace(this.opts.fileMarkerPattern, '');
+      }
+    }
+
     if (isFinal) {
       // 上下文错误短语过滤：剔除错误关键词本身，保留前后内容。
       // 只在最终 flush 清理，避免中间定时 flush trim 掉 Markdown 块级换行。
@@ -354,14 +389,6 @@ export class IMRenderer {
       this.allText = stripCtxErr(this.allText);
       for (const item of this.itemsQueue) {
         if (item.kind === 'text') item.text = stripCtxErr(item.text);
-      }
-
-      // 文件标记过滤
-      if (this.opts.fileMarkerPattern) {
-        this.textBuffer = this.textBuffer.replace(this.opts.fileMarkerPattern, '').trim();
-        for (const item of this.itemsQueue) {
-          if (item.kind === 'text') item.text = item.text.replace(this.opts.fileMarkerPattern, '');
-        }
       }
     }
 
@@ -436,10 +463,10 @@ export class IMRenderer {
   // ── 内部：status.progress 发送 ──
 
   private emitProgress(
-    activityType: 'text' | 'tool_call' | 'tool_result',
+    activityType: 'text' | 'tool_call' | 'tool_result' | 'progress',
     outputTokens?: number,
     turn?: number,
-    extra?: { toolName?: string; callId?: string; ok?: boolean; durationMs?: number },
+    extra?: { toolName?: string; callId?: string; ok?: boolean; durationMs?: number; text?: string; state?: 'processing' | 'waiting'; toolUses?: number },
   ): void {
     const payload: OutboundPayload = {
       kind: 'status.progress',
@@ -451,6 +478,9 @@ export class IMRenderer {
         ...(extra?.callId != null && { callId: extra.callId }),
         ...(extra?.ok != null && { ok: extra.ok }),
         ...(extra?.durationMs != null && { durationMs: extra.durationMs }),
+        ...(extra?.text != null && { text: extra.text }),
+        ...(extra?.state != null && { state: extra.state }),
+        ...(extra?.toolUses != null && { toolUses: extra.toolUses }),
       },
     };
     this.opts.send(payload).catch(() => {});
@@ -477,17 +507,21 @@ export class IMRenderer {
       this.allText += item.text;
     }
 
-    const outputTokens: number | undefined = (event as any).outputTokens;
-    const turn: number | undefined = (event as any).turn;
-    const activityType = item.kind === 'text' ? 'text' : item.kind === 'tool_call' ? 'tool_call' : 'tool_result';
-    const extra = item.kind === 'tool_call'
-      ? { toolName: item.name, callId: item.call_id }
-      : item.kind === 'tool_result'
-        ? { toolName: item.name, callId: item.call_id, ok: item.ok, durationMs: item.duration_ms }
-        : undefined;
-    this.emitProgress(activityType as 'text' | 'tool_call' | 'tool_result', outputTokens, turn, extra);
+    // proactive 模式：status.progress 是 interactive 的处理状态指示器，proactive 下
+    // 过程由 thought（activity.batch）表达，不再发 status.progress（与 addProgress 在
+    // proactive 下的拦截保持一致）。progress-kind item 若进 activity.batch 会被 aun 侧
+    // 回转成 status.progress（见 aun.ts 'activity.batch' 分支），故直接丢弃。
+    // 终态 status（started/completed/interrupted/error）由 message-processor 发送，不受影响。
+    if (item.kind === 'progress') {
+      return;
+    }
+
+    this.emitProactiveItem(item);
+  }
+
+  /** proactive 模式逐条投影：单个 ThoughtItem 包成 activity.batch[1] 发出（fire-and-forget）。 */
+  private emitProactiveItem(item: ThoughtItem): void {
     const payload: OutboundPayload = { kind: 'activity.batch', items: [item] };
-    // fire-and-forget
     this.opts.send(payload).catch(err => {
       logger.debug(`[IMRenderer] proactive send failed: ${(err as Error).message}`);
     });

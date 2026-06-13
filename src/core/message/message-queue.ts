@@ -260,6 +260,7 @@ export class MessageQueue {
         subMessages.push({
           peerId: m.peerId, peerName: m.peerName, peerType: m.peerType,
           sameDevice: m.sameDevice, sameNetwork: m.sameNetwork, sameEgressIp: m.sameEgressIp,
+          encrypted: m.encrypted,
           content: m.content, timestamp: m.timestamp,
           images: m.images && m.images.length > 0 ? m.images : undefined,
           mentionAids: m.mentionAids && m.mentionAids.length > 0 ? m.mentionAids : undefined,
@@ -283,6 +284,11 @@ export class MessageQueue {
       images: allImages.length > 0 ? allImages : undefined,
       mentions: allMentions.length > 0 ? allMentions : undefined,
       messageId: latestMessageId,
+      // 密文优先：合并批次内任一条密文，则整轮（interactive 自动回复的单值出站）按密文。
+      // 任一条 encrypted===true 即 true；否则若有明确的 false 则 false；全 undefined（非 aun）则 undefined。
+      encrypted: subMessages.some(s => s.encrypted === true)
+        ? true
+        : (subMessages.some(s => s.encrypted === false) ? false : undefined),
     };
 
     return {

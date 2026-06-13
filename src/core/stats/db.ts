@@ -180,6 +180,9 @@ function _initTables(db: any): void {
       output_tokens         INTEGER NOT NULL DEFAULT 0,
       cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
       cache_read_tokens     INTEGER NOT NULL DEFAULT 0,
+      context_tokens        INTEGER,
+      max_tokens            INTEGER,
+      auto_compact_tokens   INTEGER,
       degraded      INTEGER NOT NULL DEFAULT 0
     );
     CREATE INDEX IF NOT EXISTS idx_mc_task        ON model_calls(task_id);
@@ -197,6 +200,23 @@ function _initTables(db: any): void {
     }
   } catch (e) {
     logger.warn(`[StatsDB] usage_daily peer_type 迁移检测失败: ${e}`);
+  }
+
+  // 轻量迁移：model_calls 早期只记录 usage 原始 token，task.start 自动压缩需要
+  // 使用上轮真实 context/max/compact window，避免按模型名猜窗口。
+  try {
+    const cols = db.prepare(`PRAGMA table_info(model_calls)`).all() as Array<{ name: string }>;
+    if (!cols.some(c => c.name === 'context_tokens')) {
+      db.exec(`ALTER TABLE model_calls ADD COLUMN context_tokens INTEGER`);
+    }
+    if (!cols.some(c => c.name === 'max_tokens')) {
+      db.exec(`ALTER TABLE model_calls ADD COLUMN max_tokens INTEGER`);
+    }
+    if (!cols.some(c => c.name === 'auto_compact_tokens')) {
+      db.exec(`ALTER TABLE model_calls ADD COLUMN auto_compact_tokens INTEGER`);
+    }
+  } catch (e) {
+    logger.warn(`[StatsDB] model_calls context window 迁移检测失败: ${e}`);
   }
 }
 

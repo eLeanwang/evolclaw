@@ -166,6 +166,12 @@ export type PermissionDecision = 'allow' | 'always' | 'deny';
 /** 为 Edit 工具生成 diff 风格摘要 */
 function formatEditSummary(input: any): string {
   const filePath = input.file_path || '';
+  const protocolDiff = typeof input.unified_diff === 'string' ? input.unified_diff
+    : typeof input.unifiedDiff === 'string' ? input.unifiedDiff
+    : typeof input.diff === 'string' ? input.diff
+    : '';
+  if (protocolDiff) return formatProtocolDiffSummary(filePath, protocolDiff);
+
   const oldStr = typeof input.old_string === 'string' ? input.old_string : '';
   const newStr = typeof input.new_string === 'string' ? input.new_string : '';
 
@@ -251,6 +257,17 @@ function formatEditSummary(input: any): string {
   }
 
   return `${filePath}\n\`\`\`\n${diffLines.join('\n')}\n\`\`\``;
+}
+
+/** 展示 runner/协议已返回的 unified diff；不在 EvolClaw 内重新计算 diff。 */
+function formatProtocolDiffSummary(filePath: string, diff: string): string {
+  const MAX_DIFF_LINES = 32;
+  const lines = diff.trimEnd().split('\n');
+  const displayLines = lines.length > MAX_DIFF_LINES
+    ? [...lines.slice(0, MAX_DIFF_LINES), `...(省略 ${lines.length - MAX_DIFF_LINES} 行)`]
+    : lines;
+  const body = displayLines.join('\n');
+  return `${filePath}\n\`\`\`diff\n${body}\n\`\`\``;
 }
 
 interface PendingPermission {

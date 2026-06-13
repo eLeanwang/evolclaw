@@ -42,7 +42,7 @@ EvolClaw 是一个轻量级 AI Agent 网关系统。它为 Claude Code / Codex �
 
 1. **消息渠道层** (`src/channels/`) - Feishu + WeChat + DingTalk + QQBot + WeCom + AUN 网络
 2. **消息队列层** (`src/core/message/message-queue.ts`) - 会话级串行处理 + 中断支持
-3. **命令处理层** (`src/core/command-handler.ts`) - 斜杠命令处理（CommandHandler 类）
+3. **命令处理层** (`src/core/command/`) - 斜杠命令处理（slash-handler / menu-handler / command-handler）
 4. **消息处理层** (`src/core/message/message-processor.ts`) - 统一事件处理引擎
 5. **会话管理层** (`src/core/session/session-manager.ts`) - 多项目会话管理
 6. **交互路由层** (`src/core/interaction-router.ts`) - 卡片交互回调注册与路由
@@ -190,6 +190,11 @@ evolclaw/
 │   │   └── gemini-runner.ts        # Gemini CLI 封装
 │   ├── aun/                        # AUN 协议工具
 │   ├── core/
+│   │   ├── command/
+│   │   │   ├── command-handler.ts  # 命令派发入口
+│   │   │   ├── slash-handler.ts    # 斜杠命令实现
+│   │   │   ├── menu-handler.ts     # Menu 协议处理
+│   │   │   └── slash-gate.ts       # 权限前置拦截
 │   │   ├── message/
 │   │   │   ├── message-bridge.ts   # 渠道 ↔ 核心消息桥
 │   │   │   ├── message-processor.ts # 统一消息处理引擎
@@ -202,7 +207,6 @@ evolclaw/
 │   │   │   ├── session-fs-store.ts # 文件系统存储原语
 │   │   │   └── session-manager.ts  # 会话管理（多项目支持）
 │   │   ├── trigger/                # 触发器引擎
-│   │   ├── command-handler.ts      # 斜杠命令处理
 │   │   ├── evolagent.ts            # EvolAgent 实体
 │   │   ├── evolagent-registry.ts   # Agent 注册表（扫描/路由/热重载）
 │   │   ├── interaction-router.ts   # 卡片交互回调路由
@@ -295,7 +299,7 @@ v3.2 新增进程级身份标识。启动时自动生成 `ec+5位数字.agentid.
 ## 技术栈
 
 - **运行时**：Node.js >= 22 + TypeScript（ES modules）
-- **AI 后端**：@anthropic-ai/claude-agent-sdk >= 0.2.100、Codex CLI app-server、Gemini CLI
+- **AI 后端**：@anthropic-ai/claude-agent-sdk >= 0.3.170、Codex CLI app-server、Gemini CLI
 - **消息渠道**：飞书（@larksuiteoapi/node-sdk）、微信（ClawBot ilink API）、钉钉（dingtalk-stream）、QQ频道（pure-qqbot）、企业微信（AI Bot API）、AUN 网络
 - **数据存储**：文件系统（per-chat 目录） + JSONL（CLI 共用）
 - **测试框架**：Vitest

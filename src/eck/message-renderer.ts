@@ -79,6 +79,10 @@ function renderOneItem(
     sameDevice: item.sameDevice ?? sessionVars.sameDevice,
     sameNetwork: item.sameNetwork ?? sessionVars.sameNetwork,
     sameEgressIp: item.sameEgressIp ?? sessionVars.sameEgressIp,
+    // 入站加密态（仅 aun 有意义；非 aun 渠道为 undefined）。透传原始布尔：
+    // 模板 {{?encrypted=true}}→🔒密文、{{?encrypted=false}}→✉️明文、undefined 两者均落空。
+    // 注意：必须传原始布尔（含 false），不能折成 true|undefined，否则 false 分支永不命中。
+    encrypted: item.encrypted,
     // 模板引擎不支持数组循环：被 @ 的 AID 预先 join 成串，空则 undefined 使 {{?mentionAids}} 落空。
     mentionAids: (item.mentionAids && item.mentionAids.length > 0) ? item.mentionAids.join(',') : undefined,
     now: formatLocalTime(

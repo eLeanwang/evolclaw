@@ -127,7 +127,11 @@ export class MessageBridge {
         // 3. session 解析（使用 Channel 层填充的 chatType）
         const chatType = msg.chatType || 'private';
         if (!(await this.canCreateThreadSession(channelName, msg, chatType))) {
-          await sendReply(msg.channelId, '群聊中无权限创建话题', msg.replyContext);
+          // 静默丢弃：绝不向群里注入回复。
+          // 拒绝消息本身会带原 thread_id（AUN replyContext 透传），变成一条新群消息；
+          // 若发送者也是 agent，该拒绝消息又会 @ 回对方 → A 拒绝→B 收到→B 拒绝→A 收到 的无限循环。
+          // AUN 自主模式下「不响应」是合法的，因此无权限创建话题时只记日志、直接 return。
+          logger.info(`[MessageBridge] Thread creation denied (silent drop): channel=${channelName} channelId=${msg.channelId} thread=${msg.threadId} sender=${msg.peerId}`);
           return;
         }
         const metadata: Record<string, any> = {};
@@ -176,6 +180,9 @@ export class MessageBridge {
           sameDevice: msg.sameDevice,
           sameNetwork: msg.sameNetwork,
           sameEgressIp: msg.sameEgressIp,
+          // 入站加密态（仅 aun 渠道有意义；非 aun 为 undefined）。回复加密态跟随此值，
+          // 并经 mergeItems 逐条保留 + 密文优先聚合，message-renderer 据此标注。
+          encrypted: msg.replyContext?.metadata?.encrypted != null ? !!(msg.replyContext.metadata.encrypted) : undefined,
           messageId: msg.messageId,
           mentions: msg.mentions, mentionAids: msg.mentionAids, threadId: msg.threadId,
           topicName: this.extractTopicName(msg),
@@ -270,8 +277,16 @@ export class MessageBridge {
     if (chatType !== 'group' || !msg.threadId) return true;
     const existing = await this.sessionManager.getThreadSession(channel, msg.channelId, msg.threadId);
     if (existing) return true;
-    const role = this.sessionManager.resolveIdentity(channel, msg.peerId).role;
-    return role === 'owner' || role === 'admin';
+    // 群话题创建权限只看「发送者在该群里的角色」（AUN 经 group.get_admins 实时查询，权威源）。
+    // 仅群 owner/admin 可建话题；member / 非成员 / 查询失败（undefined）一律 fail-closed 拒绝。
+    // 这与 bot 的 owner/admin 无关——不引入 resolveIdentity 兜底。
+    // 不暴露群角色的渠道（adapter 无 getGroupMemberRole）不受此守卫约束，放行。
+    const adapter = this.processor?.getChannelInfo?.(channel)?.adapter;
+    if (adapter?.getGroupMemberRole) {
+      const groupRole = await adapter.getGroupMemberRole(msg.channelId, msg.peerId);
+      return groupRole === 'owner' || groupRole === 'admin';
+    }
+    return true;
   }
 
   private resolveCmd(name: string, cmd?: string): string {
@@ -375,11 +390,11 @@ export class MessageBridge {
     adapter: ChannelAdapter | undefined,
     sendReply: (channelId: string, text: string, replyContext?: ReplyContext) => Promise<void>
   ): Promise<void> {
-    const { id, name, cmd, value } = req;
+    const { id, name, cmd, value, args } = req;
     try {
       if (!value) throw { code: 'MISSING_VALUE', message: '缺少 value 参数' };
       const resolvedCmd = this.resolveCmd(name, cmd);
-      const result = await this.cmdHandler.execMenuUpdate(resolvedCmd, value, channel, msg.channelId, msg.peerId, undefined, msg.isControlChannel ?? false);
+      const result = await this.cmdHandler.execMenuUpdate(resolvedCmd, value, channel, msg.channelId, msg.peerId, undefined, msg.isControlChannel ?? false, args);
       if ('error' in result) throw { code: result.code || 'EXEC_FAILED', message: result.error };
       await this.sendMenuResponse(adapter, channel, msg.channelId,
         { type: 'menu.response', id, name, data: result.data }, sendReply);

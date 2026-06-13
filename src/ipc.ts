@@ -256,7 +256,7 @@ export class IpcServer {
         if (!name || typeof name !== 'string') return { ok: false, error: 'missing name' };
         const agent = this.agentRegistry.get(name);
         if (!agent) return { ok: false, error: `Agent "${name}" not found` };
-        const info = this.agentRegistry.list().find((i) => i.name === name);
+        const info = this.agentRegistry.list().find((i) => i.aid === name);
         // I7: null-guard list().find() result
         if (!info) return { ok: false, error: `Agent "${name}" found but info missing (race?)` };
         return { ok: true, agent: info };

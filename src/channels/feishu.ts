@@ -1125,14 +1125,36 @@ export class FeishuChannel {
     }
   }
 
-  addAckReaction(messageId: string): void {
+  // messageId → Pin reaction create promise（等待 reaction_id 落地，供 promoteAck 删除）
+  private pinReactions = new Map<string, Promise<string | undefined>>();
+
+  /** 收到消息时添加 Pin 表情（表示"已收到，排队中"） */
+  addPinReaction(messageId: string): void {
     if (!this.client) return;
+    const p = this.client.im.messageReaction.create({
+      path: { message_id: messageId },
+      data: { reaction_type: { emoji_type: 'Pin' } },
+    }).then((res: any) => res?.data?.reaction_id as string | undefined)
+      .catch(() => undefined);
+    this.pinReactions.set(messageId, p);
+  }
+
+  /** Runner 开始执行时：添加 CheckMark，然后异步移除 Pin（视觉无闪烁） */
+  async promoteAckReaction(messageId: string): Promise<void> {
+    if (!this.client) return;
+    // 先加 CheckMark，再删 Pin——用户看到的是 Pin→Pin+CheckMark→CheckMark，无空窗
     this.client.im.messageReaction.create({
       path: { message_id: messageId },
-      data: {
-        reaction_type: { emoji_type: 'CheckMark' }
-      }
+      data: { reaction_type: { emoji_type: 'CheckMark' } },
     }).catch(() => {});
+    const pending = this.pinReactions.get(messageId);
+    this.pinReactions.delete(messageId);
+    const reactionId = await pending;
+    if (reactionId) {
+      this.client.im.messageReaction.delete({
+        path: { message_id: messageId, reaction_id: reactionId },
+      }).catch(() => {});
+    }
   }
 }
 
@@ -1635,7 +1657,8 @@ export class FeishuChannelPlugin implements ChannelPlugin {
           default: logger.warn(`[Feishu] Unhandled payload kind: ${(payload as any).kind}`);
         }
       },
-      acknowledge: (messageId: string) => { channel.addAckReaction(messageId); return Promise.resolve(); },
+      acknowledge: (messageId: string) => { channel.addPinReaction(messageId); return Promise.resolve(); },
+      promoteAck: (messageId: string) => channel.promoteAckReaction(messageId),
       onInteraction: (callback: (response: InteractionResponse) => void) => channel.onInteraction(callback),
     };
 

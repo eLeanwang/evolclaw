@@ -77,6 +77,7 @@ interface AppServerStreamState {
   streamedAgentMessageIds: Set<string>;
   agentMessageDeltaText: Map<string, string>;
   completedItemIds: Set<string>;
+  emittedEditCallIds: Set<string>;
   completedTurnIds: Set<string>;
   tokenUsage?: any;
 }
@@ -370,6 +371,7 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
       streamedAgentMessageIds: new Set(),
       agentMessageDeltaText: new Map(),
       completedItemIds: new Set(),
+      emittedEditCallIds: new Set(),
       completedTurnIds: new Set(),
     };
     const unsubscribe = appServer.onNotification(notification => {
@@ -1199,7 +1201,7 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
       }
 
       case 'item/started': {
-        yield* this.mapAppServerItemStarted(params.item);
+        yield* this.mapAppServerItemStarted(params.item, state);
         break;
       }
 
@@ -1219,6 +1221,11 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
         const item = params.item;
         if (item?.id) state.completedItemIds.add(item.id);
         yield* this.mapAppServerItemCompleted(item, state);
+        break;
+      }
+
+      case 'item/fileChange/patchUpdated': {
+        yield* this.mapAppServerFileChangePatchUpdated(params, state);
         break;
       }
 
@@ -1255,13 +1262,18 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
       }
 
       case 'error': {
-        yield { type: 'error', error: params.message || 'Codex app-server error', errorType: 'unknown' };
+        if (!params.message) {
+          // SSE idle timeout reconnect — not a real task error, suppress
+          logger.debug(`[CodexRunner] app-server SSE reconnect (no message)`);
+          break;
+        }
+        yield { type: 'error', error: params.message, errorType: 'unknown' };
         break;
       }
     }
   }
 
-  private *mapAppServerItemStarted(item: any): Iterable<AgentEvent> {
+  private *mapAppServerItemStarted(item: any, state?: AppServerStreamState): Iterable<AgentEvent> {
     if (!item) return;
     switch (item.type) {
       case 'commandExecution':
@@ -1274,8 +1286,11 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
         yield { type: 'tool_use', name: item.namespace ? `${item.namespace}:${item.tool}` : item.tool, input: item.arguments, callId: item.id };
         break;
       case 'fileChange': {
-        const desc = this.normalizeFileChanges(item.changes).map((change: any) => this.describeFileChange(change)).join(', ');
-        yield { type: 'tool_use', name: 'FileChange', input: { description: desc }, callId: item.id };
+        const editEvent = this.buildCodexEditEvent(item.id, item.changes);
+        if (editEvent) {
+          if (item.id) state?.emittedEditCallIds.add(item.id);
+          yield editEvent;
+        }
         break;
       }
       case 'webSearch':
@@ -1327,9 +1342,79 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
         };
         break;
       case 'fileChange':
-        yield { type: 'tool_result', name: 'FileChange', result: item.changes, isError: item.status === 'failed', callId: item.id };
+        if (this.fileChangesHaveProtocolDiff(item.changes)) {
+          if (item.id && !state.emittedEditCallIds.has(item.id)) {
+            const editEvent = this.buildCodexEditEvent(item.id, item.changes);
+            if (editEvent) {
+              state.emittedEditCallIds.add(item.id);
+              yield editEvent;
+            }
+          }
+          yield { type: 'tool_result', name: 'Edit', result: item.changes, isError: item.status === 'failed', callId: item.id };
+        } else {
+          const desc = this.normalizeFileChanges(item.changes).map((change: any) => this.describeFileChange(change)).join(', ');
+          yield { type: 'tool_use', name: 'FileChange', input: { description: desc }, callId: item.id };
+          yield { type: 'tool_result', name: 'FileChange', result: item.changes, isError: item.status === 'failed', callId: item.id };
+        }
         break;
     }
+  }
+
+  private *mapAppServerFileChangePatchUpdated(params: any, state: AppServerStreamState): Iterable<AgentEvent> {
+    const itemId = typeof params.itemId === 'string' ? params.itemId : undefined;
+    if (!itemId || state.emittedEditCallIds.has(itemId)) return;
+    const editEvent = this.buildCodexEditEvent(itemId, params.changes);
+    if (!editEvent) return;
+    state.emittedEditCallIds.add(itemId);
+    yield editEvent;
+  }
+
+  private buildCodexEditEvent(callId: string | undefined, changes: unknown): AgentEvent | null {
+    const editInput = this.buildCodexEditInput(changes);
+    if (!editInput) return null;
+    return { type: 'tool_use', name: 'Edit', input: editInput, callId };
+  }
+
+  private buildCodexEditInput(changes: unknown): Record<string, unknown> | null {
+    const normalized = this.normalizeFileChanges(changes)
+      .map((change: any) => this.normalizeCodexProtocolDiffChange(change))
+      .filter((change): change is { path: string; diff: string; kind?: string } => !!change);
+    if (normalized.length === 0) return null;
+    const first = normalized[0];
+    return {
+      file_path: first.path,
+      unified_diff: normalized.map(change => this.formatCodexUnifiedDiff(change)).join('\n'),
+      codex_file_changes: normalized,
+    };
+  }
+
+  private normalizeCodexProtocolDiffChange(change: any): { path: string; diff: string; kind?: string } | null {
+    const filePath = typeof change?.path === 'string' ? change.path : '';
+    const diff = typeof change?.diff === 'string' ? change.diff
+      : typeof change?.unified_diff === 'string' ? change.unified_diff
+      : typeof change?.unifiedDiff === 'string' ? change.unifiedDiff
+      : '';
+    if (!filePath || !diff) return null;
+    return {
+      path: filePath,
+      diff,
+      kind: this.normalizeFileChangeKind(change.kind ?? change.type),
+    };
+  }
+
+  private fileChangesHaveProtocolDiff(changes: unknown): boolean {
+    return this.buildCodexEditInput(changes) !== null;
+  }
+
+  private formatCodexUnifiedDiff(change: { path: string; diff: string; kind?: string }): string {
+    const pathLabel = change.path.replace(/\\/g, '/');
+    const diffPath = pathLabel.replace(/^\/+/, '');
+    const header = change.diff.startsWith('diff ')
+      || change.diff.startsWith('--- ')
+      || change.diff.startsWith('+++ ')
+      ? ''
+      : `--- a/${diffPath}\n+++ b/${diffPath}\n`;
+    return `${header}${change.diff.trimEnd()}`;
   }
 
   private pickNumber(...values: unknown[]): number | undefined {

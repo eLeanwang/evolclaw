@@ -50,7 +50,7 @@ export type TaskBusEvent =
 // ── 工具事件 ──
 export type ToolEvent =
   | { type: 'tool:use'; sessionId: string; toolName: string; input: any; timestamp?: number }
-  | { type: 'tool:result'; sessionId: string; toolName: string; isError?: boolean; content?: string; agentName?: string; timestamp?: number };
+  | { type: 'tool:result'; sessionId: string; toolName: string; isError?: boolean; agentName?: string; timestamp?: number };
 
 // ── 权限事件 ──
 export type PermissionEvent =
