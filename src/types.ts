@@ -532,6 +532,8 @@ export interface AgentInfo {
   name: string;
   /** agent.md 里的友好名（本地缓存优先，缺失时异步从网络拉取）；无则回退 aid 短名 */
   displayName?: string;
+  /** personal/persona.md 里 "我叫**名字**" 提取的个人名 */
+  personalName?: string;
   aid: string;
   status: AgentStatus;
   channels: string[];

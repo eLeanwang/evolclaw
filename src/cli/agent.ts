@@ -16,6 +16,7 @@ import { getCodexAppServerAvailability, isCodexAppServerAvailable } from '../age
 export interface AgentListItem {
   aid: string;
   name: string;
+  personalName?: string | null;
   status: string;
   channels: string[];
   projectPath: string | null;
@@ -232,6 +233,7 @@ export async function agentList(): Promise<AgentResult<AgentListResult>> {
       const agents: AgentListItem[] = result.agents.map((info: any) => ({
         aid: info.aid || info.name,
         name: info.name,
+        personalName: info.personalName || null,
         status: info.status || 'stopped',
         channels: info.channels || [],
         projectPath: toPosix(info.projectPath || null),
@@ -249,6 +251,7 @@ export async function agentList(): Promise<AgentResult<AgentListResult>> {
   const agents: AgentListItem[] = registry.list().map((info: any) => ({
     aid: info.aid || info.name,
     name: info.name,
+    personalName: info.personalName || null,
     status: info.status || 'stopped',
     channels: info.channels || [],
     projectPath: toPosix(info.projectPath || null),
