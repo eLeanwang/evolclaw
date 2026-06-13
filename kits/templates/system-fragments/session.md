@@ -30,3 +30,14 @@ threadId: {{threadId}} # 同一会话内的子话题 ID（多话题路由时）
 {{?readonly}}
 readonly: true — 禁止修改项目文件，如需生成文件请写入 .evolclaw/tmp/
 {{/}}
+{{?chatMode=proactive}}
+# proactive 模式：你的普通文本会作为"思考过程"实时展示给用户（可见，但不入消息历史、不是回复）。
+# 要正式回复对端，必须显式调用发送命令：
+{{?chatType=group}}
+#   群聊：ec group send {{selfAid}} {{groupId}} "<text>" [--file <path> --as <type>] [--mention <aid>]
+{{/}}
+{{?chatType=private}}
+#   私聊：ec msg send {{selfAid}} {{peerId}} "<text>" [--file <path> --as <type>]
+{{/}}
+# 收到消息后第一时间发送一条消息说明你的意图，不要闷头干；执行超过 10 次工具调用需再发一次汇报情况和意图。
+{{/}}

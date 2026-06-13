@@ -1,5 +1,6 @@
-import { Message, SubMessage } from '../../types.js';
+import { Message, SessionIdentity, SubMessage } from '../../types.js';
 import path from 'path';
+import fs from 'fs';
 import { logger } from '../../utils/logger.js';
 import type { EventBus } from '../event-bus.js';
 
@@ -9,11 +10,56 @@ interface QueuedMessage {
   message: Message;
   projectPath: string;
   agentName: string;
+  role?: SessionIdentity['role'];
+  resolve: () => void;
+  reject: (error: Error) => void;
+  parts?: QueuedMessagePart[];
+}
+
+interface QueuedMessagePart {
+  message: Message;
+  projectPath: string;
+  agentName: string;
+  role?: SessionIdentity['role'];
   resolve: () => void;
   reject: (error: Error) => void;
 }
 
+interface PersistedQueueItem {
+  message: Message;
+  projectPath: string;
+  agentName?: string;
+  role?: SessionIdentity['role'];
+  enqueuedAt?: number;
+  parts?: PersistedQueuePart[];
+}
+
+interface PersistedQueuePart {
+  message: Message;
+  projectPath: string;
+  agentName?: string;
+  role?: SessionIdentity['role'];
+  enqueuedAt?: number;
+}
+
+interface PersistedQueueBucket {
+  queueKey: string;
+  items: PersistedQueueItem[];
+}
+
+interface PersistedQueueFile {
+  version: 1 | 2;
+  updatedAt: number;
+  queues: PersistedQueueBucket[];
+  active?: PersistedQueueBucket[];
+}
+
+interface MessageQueueOptions {
+  persistencePath?: string;
+}
+
 const DEFAULT_AGENT_NAME = '<unknown>';
+const RESTART_RESUME_CONTENT = 'evolclaw 服务已重启，请继续之前未完成的任务。';
 
 export class MessageQueue {
   private queues = new Map<string, QueuedMessage[]>();
@@ -24,6 +70,7 @@ export class MessageQueue {
   private currentSessionKey?: string;
   private currentProjectPath?: string;
   private currentAgentId?: string;
+  private currentPeerId?: string;  // 当前在途消息的发送者（群聊同人打断判定用）
   private activeMessageIds = new Set<string>();  // 正在执行的消息 ID
   private interruptCallback?: (sessionKey: string, agentId?: string, evolagentName?: string, reason?: 'new_message') => Promise<void>;
   private eventBus?: EventBus;
@@ -31,9 +78,12 @@ export class MessageQueue {
   private readonly DEDUP_WINDOW = 60_000; // 1 分钟窗口
   private interceptors = new Map<string, (message: Message) => void>();
   private mutedAgents = new Set<string>();  // 禁言的 agent：消息照常入队，但不取出给大模型
+  private persistencePath?: string;
+  private activeBatches = new Map<string, QueuedMessage>();
 
-  constructor(handler: MessageHandler) {
+  constructor(handler: MessageHandler, options?: MessageQueueOptions) {
     this.handler = handler;
+    this.persistencePath = options?.persistencePath;
   }
 
   setInterruptCallback(callback: (sessionKey: string, agentId?: string, evolagentName?: string, reason?: 'new_message') => Promise<void>): void {
@@ -94,7 +144,337 @@ export class MessageQueue {
     return `${sessionKey}::${normalized}`;
   }
 
-  async enqueue(sessionKey: string, message: Message, projectPath: string, options?: { interruptible?: boolean; agentName?: string }): Promise<void> {
+  private sessionKeyFromQueueKey(queueKey: string): string {
+    const idx = queueKey.indexOf('::');
+    return idx >= 0 ? queueKey.slice(0, idx) : queueKey;
+  }
+
+  private partFromItem(item: QueuedMessage): QueuedMessagePart {
+    return {
+      message: item.message,
+      projectPath: item.projectPath,
+      agentName: item.agentName,
+      role: item.role,
+      resolve: item.resolve,
+      reject: item.reject,
+    };
+  }
+
+  private itemFromPart(part: QueuedMessagePart): QueuedMessage {
+    return {
+      message: part.message,
+      projectPath: part.projectPath,
+      agentName: part.agentName,
+      role: part.role,
+      resolve: part.resolve,
+      reject: part.reject,
+    };
+  }
+
+  private partsOf(item: QueuedMessage): QueuedMessagePart[] {
+    return item.parts ?? [this.partFromItem(item)];
+  }
+
+  private partCount(item: QueuedMessage): number {
+    return item.parts?.length ?? 1;
+  }
+
+  private queueRawMessageCount(queue: QueuedMessage[]): number {
+    return queue.reduce((sum, item) => sum + this.partCount(item), 0);
+  }
+
+  private messageIdsFor(item: QueuedMessage): string[] {
+    return this.partsOf(item)
+      .map(part => part.message.messageId)
+      .filter((id): id is string => !!id);
+  }
+
+  private peerIdsFor(item: QueuedMessage): Array<string | undefined> {
+    return this.partsOf(item).map(part => part.message.peerId);
+  }
+
+  private serializePart(part: QueuedMessagePart, enqueuedAt: number): PersistedQueuePart {
+    return {
+      message: part.message,
+      projectPath: part.projectPath,
+      agentName: part.agentName,
+      role: part.role,
+      enqueuedAt,
+    };
+  }
+
+  private serializeItem(item: QueuedMessage, enqueuedAt: number): PersistedQueueItem {
+    return {
+      message: item.message,
+      projectPath: item.projectPath,
+      agentName: item.agentName,
+      role: item.role,
+      enqueuedAt,
+      parts: item.parts?.map(part => this.serializePart(part, enqueuedAt)),
+    };
+  }
+
+  private restoredPart(item: PersistedQueuePart): QueuedMessagePart {
+    return {
+      message: item.message,
+      projectPath: item.projectPath,
+      agentName: item.agentName || DEFAULT_AGENT_NAME,
+      role: item.role,
+      resolve: () => {},
+      reject: () => {},
+    };
+  }
+
+  private restoreSubmittedPart(item: PersistedQueuePart): QueuedMessagePart {
+    const source = item.message;
+    const message: Message = {
+      ...source,
+      content: RESTART_RESUME_CONTENT,
+      images: undefined,
+      mentions: undefined,
+      mentionAids: undefined,
+      messageId: undefined,
+      batchRole: item.role,
+      items: [{
+        kind: 'restart-resume',
+        peerId: source.peerId,
+        peerName: source.peerName,
+        peerType: source.peerType,
+        peerRole: item.role,
+        sameDevice: source.sameDevice,
+        sameNetwork: source.sameNetwork,
+        sameEgressIp: source.sameEgressIp,
+        content: RESTART_RESUME_CONTENT,
+        timestamp: source.timestamp,
+      }],
+      restartResume: { submitted: true },
+    };
+    return {
+      message,
+      projectPath: item.projectPath,
+      agentName: item.agentName || DEFAULT_AGENT_NAME,
+      role: item.role,
+      resolve: () => {},
+      reject: () => {},
+    };
+  }
+
+  private buildCoalescedItem(parts: QueuedMessagePart[]): QueuedMessage {
+    if (parts.length === 1) return this.itemFromPart(parts[0]);
+
+    const merged = this.mergeItems(parts.map(part => this.itemFromPart(part)));
+    return {
+      message: merged.message,
+      projectPath: merged.projectPath,
+      agentName: merged.agentName,
+      role: this.highestRole(parts),
+      resolve: () => parts.forEach(part => part.resolve()),
+      reject: (error: Error) => parts.forEach(part => part.reject(error)),
+      parts,
+    };
+  }
+
+  private highestRole(items: Array<QueuedMessage | QueuedMessagePart>): SessionIdentity['role'] | undefined {
+    const rank: Record<SessionIdentity['role'], number> = {
+      anonymous: 0,
+      guest: 1,
+      admin: 2,
+      owner: 3,
+    };
+    let best: SessionIdentity['role'] | undefined;
+    for (const item of items) {
+      if (!item.role) continue;
+      if (!best || rank[item.role] > rank[best]) best = item.role;
+    }
+    return best;
+  }
+
+  private commonRole(items: Array<QueuedMessage | QueuedMessagePart>): SessionIdentity['role'] | undefined {
+    let role: SessionIdentity['role'] | undefined;
+    for (const item of items) {
+      if (!item.role) return undefined;
+      if (!role) {
+        role = item.role;
+      } else if (role !== item.role) {
+        return undefined;
+      }
+    }
+    return role;
+  }
+
+  private canDequeueGroupTimeline(first: QueuedMessage, next: QueuedMessage): boolean {
+    if (first.role === undefined || next.role === undefined) return false;
+    if ((first.agentName || DEFAULT_AGENT_NAME) !== (next.agentName || DEFAULT_AGENT_NAME)) return false;
+    if (path.resolve(first.projectPath) !== path.resolve(next.projectPath)) return false;
+    return true;
+  }
+
+  private canDequeueAfterSubmittedResume(first: QueuedMessage, next: QueuedMessage): boolean {
+    if (!first.message.restartResume?.submitted) return false;
+    if ((first.agentName || DEFAULT_AGENT_NAME) !== (next.agentName || DEFAULT_AGENT_NAME)) return false;
+    if (path.resolve(first.projectPath) !== path.resolve(next.projectPath)) return false;
+    return true;
+  }
+
+  /**
+   * 写盘队列状态。每次队列结构变化（入队/出队/取消/清理）后调用。
+   * 仅在内容真正变化时写盘，文件小（数 KB），renameSync 原子替换保证崩溃一致性。
+   */
+  private persistQueues(): void {
+    this.persistQueuesSync();
+  }
+
+  /** 立即同步写盘（语义同 persistQueues，保留供进程退出钩子显式调用） */
+  persistQueuesImmediate(): void {
+    this.persistQueuesSync();
+  }
+
+  private persistQueuesSync(): void {
+    if (!this.persistencePath) return;
+    try {
+      const buckets: PersistedQueueBucket[] = [];
+      const activeBuckets: PersistedQueueBucket[] = [];
+      const enqueuedAt = Date.now();
+      for (const [queueKey, queue] of this.queues.entries()) {
+        if (queue.length === 0) continue;
+        buckets.push({
+          queueKey,
+          items: queue.map(item => this.serializeItem(item, enqueuedAt)),
+        });
+      }
+      for (const [queueKey, item] of this.activeBatches.entries()) {
+        activeBuckets.push({
+          queueKey,
+          items: [this.serializeItem(item, enqueuedAt)],
+        });
+      }
+
+      fs.mkdirSync(path.dirname(this.persistencePath), { recursive: true });
+      if (buckets.length === 0 && activeBuckets.length === 0) {
+        try { fs.unlinkSync(this.persistencePath); } catch {}
+        return;
+      }
+
+      const data: PersistedQueueFile = {
+        version: 2,
+        updatedAt: Date.now(),
+        queues: buckets,
+        active: activeBuckets,
+      };
+      const tmp = `${this.persistencePath}.tmp-${process.pid}-${Date.now()}`;
+      fs.writeFileSync(tmp, JSON.stringify(data), 'utf-8');
+      fs.renameSync(tmp, this.persistencePath);
+    } catch (error) {
+      logger.error('[Queue] Failed to persist queue state:', error);
+    }
+  }
+
+  private restoreBucket(bucket: PersistedQueueBucket, restoredKeys: Set<string>): number {
+    if (!bucket.queueKey || !Array.isArray(bucket.items)) return 0;
+    if (!this.queues.has(bucket.queueKey)) this.queues.set(bucket.queueKey, []);
+    const queue = this.queues.get(bucket.queueKey)!;
+    const sessionKey = this.sessionKeyFromQueueKey(bucket.queueKey);
+    let restored = 0;
+
+    for (const item of bucket.items) {
+      if (!item?.message || !item.projectPath) continue;
+      const parts = Array.isArray(item.parts) && item.parts.length > 0
+        ? item.parts
+            .filter(part => part?.message && part.projectPath)
+            .map(part => this.restoredPart(part))
+        : [this.restoredPart(item)];
+      if (parts.length === 0) continue;
+      const rawParts = parts
+        .sort((a, b) => (a.message.timestamp ?? 0) - (b.message.timestamp ?? 0));
+      for (const part of rawParts) {
+        const rawItem = this.itemFromPart(part);
+        queue.push(rawItem);
+        if (rawItem.message.messageId) {
+          const dedupKey = `${sessionKey}:${rawItem.message.messageId}`;
+          this.recentMessageIds.add(dedupKey);
+          setTimeout(() => this.recentMessageIds.delete(dedupKey), this.DEDUP_WINDOW);
+        }
+      }
+      restored += rawParts.length;
+    }
+
+    if (queue.length > 0) restoredKeys.add(bucket.queueKey);
+    return restored;
+  }
+
+  private restoreSubmittedBucket(bucket: PersistedQueueBucket, restoredKeys: Set<string>): number {
+    if (!bucket.queueKey || !Array.isArray(bucket.items)) return 0;
+    if (!this.queues.has(bucket.queueKey)) this.queues.set(bucket.queueKey, []);
+    const queue = this.queues.get(bucket.queueKey)!;
+    let restored = 0;
+
+    for (const item of bucket.items) {
+      if (!item?.message || !item.projectPath) continue;
+      const rawParts = Array.isArray(item.parts) && item.parts.length > 0
+        ? item.parts.filter(part => part?.message && part.projectPath)
+        : [item];
+      if (rawParts.length === 0) continue;
+
+      const first = rawParts[0];
+      const submittedPart = this.restoreSubmittedPart(first);
+      const submittedItem = this.itemFromPart(submittedPart);
+      submittedItem.message.timestamp = first.message.timestamp;
+      queue.push(submittedItem);
+
+      const sessionKey = this.sessionKeyFromQueueKey(bucket.queueKey);
+      for (const part of rawParts) {
+        if (!part.message.messageId) continue;
+        const dedupKey = `${sessionKey}:${part.message.messageId}`;
+        this.recentMessageIds.add(dedupKey);
+        setTimeout(() => this.recentMessageIds.delete(dedupKey), this.DEDUP_WINDOW);
+      }
+      restored += rawParts.length;
+    }
+
+    if (queue.length > 0) restoredKeys.add(bucket.queueKey);
+    return restored;
+  }
+
+  restorePersisted(startProcessing = true): number {
+    if (!this.persistencePath || !fs.existsSync(this.persistencePath)) return 0;
+
+    let restored = 0;
+    try {
+      const raw = fs.readFileSync(this.persistencePath, 'utf-8');
+      const parsed = JSON.parse(raw) as PersistedQueueFile;
+      if ((parsed.version !== 1 && parsed.version !== 2) || !Array.isArray(parsed.queues)) {
+        logger.warn('[Queue] Ignoring unsupported persisted queue file');
+        return 0;
+      }
+
+      const restoredKeys = new Set<string>();
+      if (Array.isArray(parsed.active)) {
+        for (const bucket of parsed.active) {
+          restored += this.restoreSubmittedBucket(bucket, restoredKeys);
+        }
+      }
+      for (const bucket of parsed.queues) {
+        restored += this.restoreBucket(bucket, restoredKeys);
+      }
+
+      this.persistQueuesImmediate();
+      if (restored > 0) {
+        logger.info(`[Queue] Restored ${restored} persisted message(s) from ${this.persistencePath}`);
+      }
+
+      if (startProcessing) {
+        for (const key of restoredKeys) {
+          if (!this.processing.has(key)) this.processNext(key);
+        }
+      }
+    } catch (error) {
+      logger.error('[Queue] Failed to restore persisted queue:', error);
+    }
+
+    return restored;
+  }
+
+  async enqueue(sessionKey: string, message: Message, projectPath: string, options?: { interruptible?: boolean; interruptSamePeer?: boolean; agentName?: string; role?: SessionIdentity['role'] }): Promise<void> {
     // 消息去重检查
     if (!this.shouldProcess(sessionKey, message)) {
       return Promise.resolve();
@@ -112,7 +492,8 @@ export class MessageQueue {
     const queueKey = this.getQueueKey(sessionKey, projectPath);
     const agentName = options?.agentName || DEFAULT_AGENT_NAME;
     const isProcessing = this.processing.has(queueKey);
-    logger.info(`[Queue] enqueue: key=${queueKey} processing=${isProcessing} queueLen=${this.queues.get(queueKey)?.length ?? 0} agent=${agentName}`);
+    const currentQueue = this.queues.get(queueKey);
+    logger.info(`[Queue] enqueue: key=${queueKey} processing=${isProcessing} queueLen=${currentQueue?.length ?? 0} pending=${currentQueue?.length ?? 0} rawPending=${currentQueue ? this.queueRawMessageCount(currentQueue) : 0} agent=${agentName} role=${options?.role ?? '<none>'} peer=${message.peerId ?? '<none>'} msg=${message.messageId ?? '<none>'}`);
 
     return new Promise((resolve, reject) => {
       if (!this.queues.has(queueKey)) {
@@ -120,12 +501,24 @@ export class MessageQueue {
       }
 
       const queue = this.queues.get(queueKey)!;
-      queue.push({ message, projectPath, agentName, resolve, reject });
+      queue.push({ message, projectPath, agentName, role: options?.role, resolve, reject });
+      this.persistQueues();
 
       if (this.processing.has(queueKey)) {
-        if (options?.interruptible !== false) {
-          // 单聊：保留中断行为
-          logger.debug(`[Queue] ${queueKey} is processing, triggering interrupt`);
+        // 打断判定：
+        //  - 单聊（interruptible !== false）：始终打断
+        //  - 群聊（interruptible === false）+ interruptSamePeer：仅当「同一发送者连发」
+        //    且队列里没有其他人的消息时打断，避免抢占群里他人的排队消息
+        const interruptSingle = options?.interruptible !== false;
+        const interruptGroupSamePeer =
+          options?.interruptible === false &&
+          options?.interruptSamePeer === true &&
+          !!message.peerId &&
+          this.currentPeerId === message.peerId &&
+          !this.hasOtherPeerQueued(queueKey, message.peerId);
+
+        if (interruptSingle || interruptGroupSamePeer) {
+          logger.debug(`[Queue] ${queueKey} is processing, triggering interrupt (samePeer=${interruptGroupSamePeer})`);
           this.eventBus?.publish({
             type: 'task:interrupted',
             sessionId: sessionKey,
@@ -152,6 +545,16 @@ export class MessageQueue {
     });
   }
 
+  /**
+   * 队列中是否存在 peerId 不同于给定值的消息（群聊同人打断守卫）。
+   * 忽略 peerId 为 undefined 的消息（系统消息等不参与打断判定）。
+   */
+  private hasOtherPeerQueued(queueKey: string, peerId?: string): boolean {
+    const q = this.queues.get(queueKey);
+    if (!q) return false;
+    return q.some(item => this.peerIdsFor(item).some(queuedPeerId => !!queuedPeerId && queuedPeerId !== peerId));
+  }
+
   private async processNext(queueKey: string): Promise<void> {
     this.processing.add(queueKey);
     logger.info(`[Queue] processNext: start key=${queueKey}`);
@@ -171,6 +574,7 @@ export class MessageQueue {
         this.processingAgent.delete(queueKey);
         this.currentSessionKey = undefined;
         this.currentProjectPath = undefined;
+        this.currentPeerId = undefined;
         this.activeMessageIds.clear();
         return;
       }
@@ -178,31 +582,51 @@ export class MessageQueue {
       // 禁言：消息留在队列里，暂停消费（解禁后由 unmuteAgent 重新触发 processNext）
       const headAgent = queue[0].agentName || DEFAULT_AGENT_NAME;
       if (this.mutedAgents.has(headAgent)) {
-        logger.info(`[Queue] processNext: agent ${headAgent} muted, pausing key=${queueKey} (${queue.length} queued)`);
+        logger.info(`[Queue] processNext: agent ${headAgent} muted, pausing key=${queueKey} (${queue.length} pending, ${this.queueRawMessageCount(queue)} raw)`);
         this.processing.delete(queueKey);
         this.processingAgent.delete(queueKey);
         return;
       }
 
-      // FIFO 贪心合并：弹出队首连续同 peerId 的消息
+      // FIFO 贪心合并：群聊按完整时间线，旧路径/私聊按 peerId
       const items = this.dequeueGreedy(queue);
       const merged = items.length === 1 ? items[0] : this.mergeItems(items);
+      const rawItems = items.flatMap(item => this.partsOf(item).map(part => this.itemFromPart(part)));
+      const rawParts = rawItems.map(item => this.partFromItem(item));
+      // activeItem 复用已合并的 message，仅额外持有 parts 用于持久化和撤回定位（不重复 merge）
+      const activeItem: QueuedMessage = rawParts.length === 1
+        ? this.itemFromPart(rawParts[0])
+        : {
+            message: merged.message,
+            projectPath: merged.projectPath,
+            agentName: merged.agentName,
+            role: this.highestRole(rawParts),
+            resolve: () => rawParts.forEach(part => part.resolve()),
+            reject: (error: Error) => rawParts.forEach(part => part.reject(error)),
+            parts: rawParts,
+          };
+      const batchRole = this.commonRole(rawItems);
+      if (batchRole && !merged.message.batchRole) merged.message.batchRole = batchRole;
 
       this.currentSessionKey = queueKey;
       this.currentProjectPath = merged.projectPath;
       this.currentAgentId = merged.message.agentId;
+      this.currentPeerId = this.uniquePeerId(rawItems);
       this.processingAgent.set(queueKey, merged.agentName);
 
       // 记录正在执行的 messageId（用于撤回中断）
       this.activeMessageIds.clear();
-      for (const item of items) {
+      for (const item of rawItems) {
         if (item.message.messageId) this.activeMessageIds.add(item.message.messageId);
       }
 
-      const resolves = items.map(i => i.resolve);
-      const rejects = items.map(i => i.reject);
+      const resolves = rawItems.map(i => i.resolve);
+      const rejects = rawItems.map(i => i.reject);
 
-      logger.debug(`[Queue] Processing ${items.length} message(s) from ${merged.message.channel}:${merged.message.channelId}`);
+      this.activeBatches.set(queueKey, activeItem);
+      this.persistQueuesImmediate();
+
+      logger.info(`[Queue] processing batch: key=${queueKey} items=${rawItems.length} pending=${queue.length} rawPending=${this.queueRawMessageCount(queue)} batchRole=${merged.message.batchRole ?? '<mixed>'} peer=${this.currentPeerId ?? '<multi>'} msg=${merged.message.messageId ?? '<none>'}`);
       try {
         await this.handler(merged.message);
         logger.debug(`[Queue] Message processed successfully`);
@@ -210,32 +634,85 @@ export class MessageQueue {
       } catch (error) {
         logger.error(`[Queue] Message processing failed:`, error);
         rejects.forEach(r => r(error as Error));
+      } finally {
+        this.activeBatches.delete(queueKey);
+        this.persistQueuesImmediate();
       }
     }
   }
 
   /**
-   * 贪心弹出队首连续同 peerId 的消息。
-   * 遇到不同 peerId 或队列为空时停止。
+   * 贪心弹出队首可合并消息。
+   * 群聊入队携带 role，此时取出当前所有群聊 pending 并按时间线合并；
+   * role 只作为逐条元数据，不作为分批边界。未携带 role 的旧路径/私聊按 peerId 合并。
    */
   private dequeueGreedy(queue: QueuedMessage[]): QueuedMessage[] {
     const first = queue.shift()!;
     const result = [first];
-    const peerId = first.message.peerId;
+    const mergeSubmittedResume = first.message.restartResume?.submitted === true;
+    const mergeGroupTimeline = first.role !== undefined;
+    const mergeKey = mergeGroupTimeline ? '<group-timeline>' : first.message.peerId;
 
-    while (queue.length > 0 && queue[0].message.peerId === peerId) {
-      result.push(queue.shift()!);
+    if (mergeSubmittedResume) {
+      const remaining: QueuedMessage[] = [];
+      for (const item of queue) {
+        if (this.canDequeueAfterSubmittedResume(first, item)) {
+          result.push(item);
+        } else {
+          remaining.push(item);
+        }
+      }
+      queue.length = 0;
+      queue.push(...remaining);
+      result.sort((a, b) => {
+        if (a.message.restartResume?.submitted) return -1;
+        if (b.message.restartResume?.submitted) return 1;
+        return this.firstTimestamp(a) - this.firstTimestamp(b);
+      });
+    } else if (mergeGroupTimeline) {
+      const remaining: QueuedMessage[] = [];
+      for (const item of queue) {
+        if (this.canDequeueGroupTimeline(first, item)) {
+          result.push(item);
+        } else {
+          remaining.push(item);
+        }
+      }
+      queue.length = 0;
+      queue.push(...remaining);
+      result.sort((a, b) => this.firstTimestamp(a) - this.firstTimestamp(b));
+    } else {
+      while (queue.length > 0 && queue[0].message.peerId === mergeKey) {
+        result.push(queue.shift()!);
+      }
     }
 
     if (result.length > 1) {
-      logger.debug(`[Queue] Greedy dequeue: merged ${result.length} messages from peerId=${peerId}`);
+      logger.info(`[Queue] Greedy dequeue: merged ${result.length} pending item(s) by ${mergeSubmittedResume ? 'restart-resume' : (mergeGroupTimeline ? 'group-timeline' : 'peerId')}=${mergeKey ?? '<none>'}`);
     }
 
     return result;
   }
 
+  private firstTimestamp(item: QueuedMessage): number {
+    const parts = this.partsOf(item);
+    let ts = Number.POSITIVE_INFINITY;
+    for (const part of parts) ts = Math.min(ts, part.message.timestamp ?? 0);
+    return Number.isFinite(ts) ? ts : 0;
+  }
+
   /**
-   * 合并多条同 peerId 消息：
+   * 当前在途任务只有一个真实发送者时才启用 same-peer 打断。
+   * 多发送者群聊批次返回 undefined，避免其中某个成员的新消息不断打断聚合推理。
+   */
+  private uniquePeerId(items: QueuedMessage[]): string | undefined {
+    const peers = new Set(items.map(item => item.message.peerId).filter(Boolean));
+    if (peers.size !== 1) return undefined;
+    return [...peers][0];
+  }
+
+  /**
+   * 合并多条同 peerId 或群聊时间线消息：
    * - content: \n 连接（兜底用，渲染层优先用 items）
    * - items: 保留每条子消息（含各自 peer/timestamp），供消息渲染层逐条渲染
    * - images / mentions: 扁平合并
@@ -247,18 +724,33 @@ export class MessageQueue {
     const allImages: Array<{ data: string; mimeType: string }> = [];
     const allMentions: Array<{ userId: string; name?: string; key?: string }> = [];
     const subMessages: SubMessage[] = [];
+    let mergedPeerType: string | undefined;
+    let hasRestartResume = false;
+    let hasMessagesAfterRestartResume = false;
 
     for (const item of items) {
       const m = item.message;
+      if (hasRestartResume && !m.restartResume?.submitted) {
+        hasMessagesAfterRestartResume = true;
+      }
+      if (m.restartResume?.submitted) {
+        hasRestartResume = true;
+      }
       contents.push(m.content);
       if (m.images) allImages.push(...m.images);
       if (m.mentions) allMentions.push(...m.mentions);
+      if (m.peerType && m.peerType !== 'human') {
+        mergedPeerType = m.peerType;
+      } else if (!mergedPeerType && m.peerType) {
+        mergedPeerType = m.peerType;
+      }
       // 逐条保留发送者、时刻、图片；若该条已自带 items（罕见），展开保留细粒度
       if (m.items && m.items.length > 0) {
-        subMessages.push(...m.items);
+        subMessages.push(...m.items.map(sub => ({ ...sub, peerRole: sub.peerRole ?? item.role })));
       } else {
         subMessages.push({
           peerId: m.peerId, peerName: m.peerName, peerType: m.peerType,
+          peerRole: item.role,
           sameDevice: m.sameDevice, sameNetwork: m.sameNetwork, sameEgressIp: m.sameEgressIp,
           encrypted: m.encrypted,
           content: m.content, timestamp: m.timestamp,
@@ -269,6 +761,7 @@ export class MessageQueue {
     }
 
     const last = items[items.length - 1];
+    const role = this.commonRole(items);
     // 保留最新一条的 messageId（若最后一条无 ID 则回退到前面已有的 ID）
     let latestMessageId: string | undefined;
     for (let i = items.length - 1; i >= 0; i--) {
@@ -289,6 +782,11 @@ export class MessageQueue {
       encrypted: subMessages.some(s => s.encrypted === true)
         ? true
         : (subMessages.some(s => s.encrypted === false) ? false : undefined),
+      batchRole: role,
+      peerType: mergedPeerType,
+      restartResume: hasRestartResume
+        ? { submitted: true, pendingInterrupted: hasMessagesAfterRestartResume }
+        : undefined,
     };
 
     return {
@@ -338,13 +836,26 @@ export class MessageQueue {
 
   cancel(messageId: string): boolean {
     for (const queue of this.queues.values()) {
-      const idx = queue.findIndex(q => q.message.messageId === messageId);
-      if (idx !== -1) {
+      const idx = queue.findIndex(q => this.messageIdsFor(q).includes(messageId));
+      if (idx === -1) continue;
+
+      const target = queue[idx];
+      const parts = this.partsOf(target);
+      const partIdx = parts.findIndex(part => part.message.messageId === messageId);
+      if (partIdx === -1) continue;
+
+      if (parts.length === 1) {
         const [removed] = queue.splice(idx, 1);
         removed.resolve();
-        logger.info(`[Queue] Cancelled queued message ${messageId}`);
-        return true;
+      } else {
+        const [removed] = parts.splice(partIdx, 1);
+        removed.resolve();
+        queue[idx] = this.buildCoalescedItem(parts);
       }
+
+      this.persistQueuesImmediate();
+      logger.info(`[Queue] Cancelled queued message ${messageId}`);
+      return true;
     }
     return false;
   }
@@ -356,6 +867,18 @@ export class MessageQueue {
   cancelActive(messageId: string): boolean {
     if (!this.activeMessageIds.has(messageId)) return false;
     if (!this.currentSessionKey) return false;
+
+    const active = this.activeBatches.get(this.currentSessionKey);
+    if (active && this.messageIdsFor(active).includes(messageId)) {
+      const parts = this.partsOf(active);
+      const remaining = parts.filter(part => part.message.messageId !== messageId);
+      if (remaining.length === 0) {
+        this.activeBatches.delete(this.currentSessionKey);
+      } else {
+        this.activeBatches.set(this.currentSessionKey, this.buildCoalescedItem(remaining));
+      }
+      this.persistQueuesImmediate();
+    }
 
     // 从 queueKey 提取 sessionKey
     const sessionKey = this.currentSessionKey.split('::')[0];
@@ -472,7 +995,10 @@ export class MessageQueue {
         }
       }
     }
-    if (cleared > 0) logger.info(`[Queue] Cleared ${cleared} pending message(s) for agent ${agentName}`);
+    if (cleared > 0) {
+      this.persistQueuesImmediate();
+      logger.info(`[Queue] Cleared ${cleared} pending message(s) for agent ${agentName}`);
+    }
     return cleared;
   }
 

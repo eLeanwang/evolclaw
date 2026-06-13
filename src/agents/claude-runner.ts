@@ -226,6 +226,7 @@ export class AgentRunner {
   private config?: Config;
   private activeSessions: Map<string, string> = new Map();
   private activeStreams = new Map<string, AsyncIterable<any>>();
+  private activeMessageStreams = new Map<string, MessageStream>();
   private interruptFns = new Map<string, () => Promise<void>>();
   private onSessionIdUpdate?: (sessionId: string, agentSessionId: string) => void;
   private onCompactStart?: (sessionId: string) => void;
@@ -538,6 +539,20 @@ export class AgentRunner {
             // 用户通过追加的 input 提交了自定义文本
             const customText = values?.custom_text;
             resolve(typeof customText === 'string' && customText.trim() ? customText.trim() : null);
+          } else if (action === '_show_input') {
+            // 无内嵌输入框的渠道（如 AUN）：点「手动输入」→ 拦截下一条消息作为答案。
+            // router handler 已被消费（decPending 已触发），重新 markWaiting 保持 idle 暂停。
+            if (permCtx?.interceptNextMessage) {
+              permCtx.interactionRouter?.markWaiting(sessionId);
+              sendPrompt?.('✏️ 请直接发送你的自定义回复').catch(() => {});
+              permCtx.interceptNextMessage(sessionId, (msg) => {
+                permCtx.interactionRouter?.unmarkWaiting(sessionId);
+                const text = (msg.content || '').trim();
+                resolve(text || null);
+              });
+            } else {
+              resolve(null);
+            }
           } else if (action === 'submit' && q.multiSelect && values) {
             // checker 多选提交：从 form_value 收集 checked 选项
             const selected: string[] = [];
@@ -736,6 +751,19 @@ export class AgentRunner {
             if (trimmed === '_custom_input') {
               const feedback = typeof values?.custom_text === 'string' ? values.custom_text.trim() : '';
               resolve({ behavior: 'deny' as const, message: feedback || '用户提交了反馈', decisionClassification: 'user_reject' as const });
+            } else if (trimmed === '_show_input') {
+              // 无内嵌输入框的渠道（如 AUN）：点「手动输入」→ 拦截下一条消息作为反馈。
+              if (permCtx.interceptNextMessage) {
+                permCtx.interactionRouter?.markWaiting(sessionId);
+                sendPrompt?.('✏️ 请直接发送你的反馈意见').catch(() => {});
+                permCtx.interceptNextMessage(sessionId, (msg) => {
+                  permCtx.interactionRouter?.unmarkWaiting(sessionId);
+                  const feedback = (msg.content || '').trim();
+                  resolve({ behavior: 'deny' as const, message: feedback || '用户提交了反馈', decisionClassification: 'user_reject' as const });
+                });
+              } else {
+                resolve({ behavior: 'deny' as const, message: '用户提交了反馈', decisionClassification: 'user_reject' as const });
+              }
             } else if (trimmed === '2' || trimmed.toLowerCase() === 'reject' || trimmed === '拒绝') {
               resolve({ behavior: 'deny' as const, message: '用户拒绝了计划', decisionClassification: 'user_reject' as const });
             } else {
@@ -1120,6 +1148,12 @@ export class AgentRunner {
 
     // PreToolUse Hook - 黑名单检查 + input 修正（不可绕过，所有模式都走）
     const preToolUseHook = async (input: any) => {
+      // proactive 模式行为策略（首次工具调用必须是 ec msg send）
+      const policyResult = this.permissionContexts.get(sessionId)?.policyHook?.(input.tool_name, input.tool_input || {});
+      if (policyResult?.block) {
+        return { decision: 'block' as const, reason: policyResult.reason };
+      }
+
       const result = await checkBlacklist(input.tool_name, input.tool_input || {});
       if (result.behavior === 'deny') {
         return { decision: 'block' as const, reason: result.message };
@@ -1392,17 +1426,19 @@ export class AgentRunner {
     }
 
     let sdkStream;
+    const msgStream = new MessageStream();
     if (images && images.length > 0) {
       logger.info('[AgentRunner] Creating query with images:', images.length, 'first image size:', images[0]?.data?.length ?? 0);
       logger.debug('[AgentRunner] Skipping resume for image message to avoid history conflict');
-      const stream = new MessageStream();
-      stream.push(prompt, images);
-      stream.end();
-      sdkStream = createQuery(stream);
+      msgStream.push(prompt, images);
+      msgStream.end();
+      sdkStream = createQuery(msgStream);
     } else {
       logger.debug('[AgentRunner] Creating query with text only, agentSessionId:', initialClaudeSessionId);
-      sdkStream = createQuery(prompt, agentSessionId, resumeAt);
+      msgStream.push(prompt);
+      sdkStream = createQuery(msgStream, agentSessionId, resumeAt);
     }
+    this.activeMessageStreams.set(sessionId, msgStream);
     // 保存 interrupt 能力（不写 activeStreams，由 registerStream 管理活跃状态）
     if ('interrupt' in sdkStream && typeof (sdkStream as any).interrupt === 'function') {
       this.interruptFns.set(sessionId, () => (sdkStream as any).interrupt());
@@ -1434,9 +1470,15 @@ export class AgentRunner {
   }
 
   cleanupStream(sessionId: string): void {
+    this.activeMessageStreams.get(sessionId)?.end();
+    this.activeMessageStreams.delete(sessionId);
     this.activeStreams.delete(sessionId);
     this.interruptFns.delete(sessionId);
     this.recentStderr.delete(sessionId);
+  }
+
+  injectUserMessage(sessionId: string, text: string): void {
+    this.activeMessageStreams.get(sessionId)?.push(text);
   }
 
   updateSessionId(sessionId: string, agentSessionId: string): void {

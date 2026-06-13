@@ -14,6 +14,7 @@ import { GeminiAgentPlugin } from './agents/gemini-runner.js';
 import { FeishuChannelPlugin } from './channels/feishu.js';
 import { WechatChannelPlugin } from './channels/wechat.js';
 import { AUNChannel, AUNChannelPlugin } from './channels/aun.js';
+import { startServiceProxy } from './aun/service-proxy.js';
 import { DingtalkChannelPlugin } from './channels/dingtalk.js';
 import { QQBotChannelPlugin } from './channels/qqbot.js';
 import { WecomChannelPlugin } from './channels/wecom.js';
@@ -526,6 +527,8 @@ async function main() {
   // 创建消息队列
   const messageQueue = new MessageQueue(async (message) => {
     await processor.processMessage(message);
+  }, {
+    persistencePath: path.join(resolvePaths().dataDir, 'message-queue.json'),
   });
 
   // 设置中断回调（精确中断正在处理的 agent）
@@ -539,6 +542,9 @@ async function main() {
     }
   });
   messageQueue.setEventBus(eventBus);
+
+  // 进程退出时立即刷盘队列状态（防止 debounce 期间的消息丢失）
+  onShutdown(() => messageQueue.persistQueuesImmediate());
 
   // 回填 messageQueue 引用
   cmdHandler.setMessageQueue(messageQueue);
@@ -913,6 +919,16 @@ async function main() {
         logger.warn(`控制 AID 消息处理失败: ${e?.message || e}`);
       }
     });
+
+    // ── Service Proxy：把本地服务（ecweb 等）通过控制 AID 暴露到 AUN 网络 ──
+    // 挂在控制 AUNChannel 上，动态解引用其 client（规避重连换 client）。
+    // 失败只 warn，不影响 daemon 主流程。
+    if (evolclawCfg.serviceProxy?.enabled) {
+      const proxyHandle = startServiceProxy(controlChannel, evolclawCfg.aid, evolclawCfg.serviceProxy);
+      if (proxyHandle) {
+        onShutdown(() => proxyHandle.stop());
+      }
+    }
   }
 
   // 上线通知：延迟 1-3 秒后向 owner 发送上线消息（带 name + 工作目录）
@@ -1013,11 +1029,18 @@ async function main() {
     timestamp: Date.now()
   });
 
-  // 恢复重启前未完成的会话
+  // 先恢复消息队列。若某个 session 有原始 active/pending 消息，下面的泛化 resume 会跳过它。
+  messageQueue.restorePersisted(true);
+
+  // 恢复重启前未完成的会话。这里是兜底路径：仅当队列文件没有原始消息时，才注入恢复提示。
   const pendingSessions = sessionManager.getPendingProcessingSessions();
   if (pendingSessions.length > 0) {
     logger.info(`[Resume] Found ${pendingSessions.length} pending session(s) from before restart`);
     for (const session of pendingSessions) {
+      if (messageQueue.isProcessing(session.id) || messageQueue.getQueueLength(session.id) > 0) {
+        logger.info(`[Resume] session ${session.id}: persisted queue already restored, skipping generic resume`);
+        continue;
+      }
       if (!session.agentSessionId) {
         sessionManager.clearProcessing(session.id);
         continue;
@@ -1328,7 +1351,7 @@ async function main() {
 }
 
 // 仅在直接执行时启动；导入此模块（如单元测试）时不触发 main()。
-import { isMainScript } from './utils/cross-platform.js';
+import { isMainScript, onShutdown } from './utils/cross-platform.js';
 if (isMainScript(import.meta.url)) {
   main().catch((error) => {
     const msg = `Fatal error: ${error?.stack || error}`;

@@ -91,7 +91,7 @@ export interface ReloadHooks {
  */
 export interface GlobalConfigWriter {
   setOwner(channelName: string, userId: string): void;
-  setShowActivities?(channelName: string, mode: 'all' | 'dm-only' | 'owner-dm-only' | 'none'): void;
+  setShowActivities?(channelName: string, mode: 'all' | 'none'): void;
 }
 
 // ── Registry ───────────────────────────────────────────────────────────────
@@ -212,11 +212,11 @@ export class EvolAgentRegistry {
     agent.setOwner(channelKey, userId);
   }
 
-  getShowActivities(channelKey: string): 'all' | 'dm-only' | 'owner-dm-only' | 'none' {
+  getShowActivities(channelKey: string): 'all' | 'none' {
     return this.resolveByChannel(channelKey)?.getShowActivities(channelKey) ?? 'all';
   }
 
-  setShowActivities(channelKey: string, mode: 'all' | 'dm-only' | 'owner-dm-only' | 'none'): void {
+  setShowActivities(channelKey: string, mode: 'all' | 'none'): void {
     const agent = this.resolveByChannel(channelKey);
     if (!agent) {
       logger.warn(`[EvolAgentRegistry] setShowActivities: channel "${channelKey}" not found`);

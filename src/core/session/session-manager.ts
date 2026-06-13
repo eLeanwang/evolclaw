@@ -1,4 +1,4 @@
-import { Session, SessionIdentity, DEFAULT_PERMISSION_MODE } from '../../types.js';
+import { Session, SessionIdentity } from '../../types.js';
 import { ensureDir } from '../../utils/atomic-write.js';
 import { resolvePaths } from '../../paths.js';
 import { logger } from '../../utils/logger.js';
@@ -85,10 +85,6 @@ export class SessionManager {
     if (this.ownerResolver?.(channel, userId)) return { role: 'owner', mode: 'interactive' };
     if (this.adminResolver?.(channel, userId)) return { role: 'admin', mode: 'interactive' };
     return { role: 'guest', mode: 'interactive' };
-  }
-
-  private resolvePermissionMode(role: SessionIdentity['role']): string {
-    return (role === 'owner' || role === 'admin') ? 'bypass' : 'readonly';
   }
 
   async updateIdentity(sessionId: string, identity: SessionIdentity): Promise<void> {
@@ -554,10 +550,6 @@ export class SessionManager {
     if (threadId) {
       const session = this.getOrCreateThreadSession(channel, channelId, threadId, defaultProjectPath, metadata, name, agentId, selfAID, channelType, peerType, chatType);
       session.identity = this.resolveIdentity(channel, userId);
-      if (session.metadata && !session.metadata.permissionMode) {
-        session.metadata.permissionMode = this.resolvePermissionMode(session.identity.role);
-        this.persistSession(session, 'none');
-      }
       return session;
     }
 
@@ -648,7 +640,6 @@ export class SessionManager {
     // Create new session
     const sessionMetadata: any = { ...(metadata || {}) };
     const newIdentity = this.resolveIdentity(channel, userId);
-    if (!sessionMetadata.permissionMode) sessionMetadata.permissionMode = this.resolvePermissionMode(newIdentity.role);
 
     const session: Session = {
       id: generateSessionId(),
@@ -1095,14 +1086,11 @@ export class SessionManager {
     const identity = this.deriveChannelIdentity(channel, channelId);
     let channelType = identity.channelType;
     let selfAID = identity.selfAID;
-    let inheritedRole: SessionIdentity['role'] = 'guest';
     if (existingDir) {
       const active = readJsonFile<SessionFile>(path.join(existingDir, 'active.json'));
       if (active) {
         channelType = active.channelType || channel;
         selfAID = active.selfAID || '';
-        // 从现有 session 的 permissionMode 反推 role，bypass→owner，其余→guest
-        if (active.permissionMode === 'bypass') inheritedRole = 'owner';
         if (!agentId && active.agentType) agentId = active.agentType;
       }
     }
@@ -1119,7 +1107,7 @@ export class SessionManager {
       sessionKey: formatSessionKey(channelType, channelId, DEFAULT_THREAD_ID),
       chatType: inheritedChatType,
       sessionMode: this.resolveDefaultSessionMode(channel, inheritedChatType),
-      metadata: { permissionMode: this.resolvePermissionMode(inheritedRole) },
+      metadata: {},
       name: name || '默认会话',
       createdAt: Date.now(),
       updatedAt: Date.now(),
@@ -1158,7 +1146,7 @@ export class SessionManager {
       chatType: sourceSession.chatType || 'private',
       sessionMode: sourceSession.sessionMode || 'interactive',
       agentSessionId: forkedAgentSessionId,
-      metadata: { permissionMode: sourceSession.metadata?.permissionMode || DEFAULT_PERMISSION_MODE },
+      metadata: {},
       name: name || `${sourceSession.name || '会话'}-分支`,
       createdAt: Date.now(),
       updatedAt: Date.now(),

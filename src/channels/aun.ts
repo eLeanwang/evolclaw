@@ -646,6 +646,24 @@ export class AUNChannel {
     return { ...this.aidState, flapCount: this.flapCount };
   }
 
+  /**
+   * 当前底层 AUN SDK client（可能为 null：未连接 / 重连销毁重建期间）。
+   * 注意：重连会销毁重建 client，调用方不可缓存引用，每次动态读取。
+   */
+  getClient(): AUNClient | null {
+    return this.client;
+  }
+
+  /** 已连接的 provider AID（连接成功后才有值）。 */
+  getAid(): string | undefined {
+    return this._aid ?? this.config.aid;
+  }
+
+  /** 是否已连接（client 存在且认证完成）。 */
+  isConnected(): boolean {
+    return this.connected && this.client !== null;
+  }
+
   setAidStatsCollector(collector: AidStatsCollector): void {
     this.aidStatsCollector = collector;
   }
@@ -3486,6 +3504,11 @@ export class AUNChannelPlugin implements ChannelPlugin {
                   label: btn.label, value: btn.key, style: btn.style ?? 'default', behavior: 'reply',
                 })),
               };
+              // AUN action_card 无法内嵌输入框（只有按钮），手动输入降级为「✏️ 手动输入」按钮：
+              // 点击回传 _show_input → claude-runner 用 interceptNextMessage 拦截下一条消息作为答案。
+              if ((action as ActionInteraction).allowCustomInput) {
+                aunCard.actions.push({ label: '✏️ 手动输入', value: '_show_input', style: 'default', behavior: 'reply' });
+              }
               if (action.body) aunCard.description = action.body;
               if (req.initiatorId && channel.isGroupId(channelId)) aunCard.initiator = req.initiatorId;
               if (replyCtx?.threadId) aunCard.thread_id = replyCtx.threadId;

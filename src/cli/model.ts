@@ -16,7 +16,7 @@ import {
   ModelScopeError, normalizePeer, determineScope, activeBaseagent,
   readScope, writeScope, clearScope, resolveEffectiveModel,
   type ScopeSelector, type ModelScope,
-} from '../core/model/model-scope.js';
+} from '../core/model/config-scope.js';
 import { loadDefaults, loadAgent } from '../config-store.js';
 import { resolveAnthropicConfig } from '../agents/baseagent.js';
 import { getCatalog, getModelInfo } from '../core/model/model-catalog.js';
@@ -24,7 +24,7 @@ import { getCatalog, getModelInfo } from '../core/model/model-catalog.js';
 const ALL_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max', 'auto'];
 
 const SCOPE_LABEL: Record<ModelScope, string> = {
-  global: '全局', agent: 'agent级', relation: '关系级',
+  global: '全局', agent: 'agent级', role: '角色级', relation: '关系级',
 };
 
 /** 输出 JSON 并退出（success=false 时 exit 1）。 */
@@ -125,7 +125,7 @@ async function dispatch(sub: string, args: string[], formatJson: boolean): Promi
 // ── list ──────────────────────────────────────────────────────────────
 
 const ICON: Record<ModelScope, string> = {
-  global: '⬡', agent: '◆', relation: '★',
+  global: '⬡', agent: '◆', role: '●', relation: '★',
 };
 
 async function cmdList(args: string[], formatJson: boolean): Promise<void> {

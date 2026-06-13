@@ -16,7 +16,7 @@ export interface SessionFile {
   agentSessionId: string | null;
   name: string | null;
   activeTask: string | null;
-  permissionMode: string;
+  permissionMode?: string;  // 历史兼容字段（不再写入，运行时 per-message 解析）
   metadata: Record<string, any>;
   createdAt: number;
   createdAtStr: string;

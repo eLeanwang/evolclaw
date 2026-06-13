@@ -36,7 +36,6 @@ export function sessionToFile(session: Session): SessionFile {
     agentSessionId: session.agentSessionId ?? null,
     name: session.name ?? null,
     activeTask: session.processingState ?? null,
-    permissionMode: session.metadata?.permissionMode || 'auto',
     metadata,
     createdAt: session.createdAt,
     createdAtStr: formatTimestamp(session.createdAt),
@@ -53,10 +52,10 @@ export function fileToSession(file: SessionFile): Session {
   if (file.metadata.replyContext) metadata.replyContext = file.metadata.replyContext;
   if (file.metadata.agentSessions) metadata.agentSessions = file.metadata.agentSessions;
   if (file.metadata.resumeAt) metadata.resumeAt = file.metadata.resumeAt;
-  if (file.permissionMode) metadata.permissionMode = file.permissionMode;
+  // permissionMode 不再从文件还原到 metadata（运行时 per-message 解析）
 
   for (const [k, v] of Object.entries(file.metadata)) {
-    if (['peerId', 'peerName', 'groupId', 'replyContext', 'agentSessions', 'resumeAt'].includes(k)) continue;
+    if (['peerId', 'peerName', 'groupId', 'replyContext', 'agentSessions', 'resumeAt', 'permissionMode'].includes(k)) continue;
     if (v !== undefined) (metadata as any)[k] = v;
   }
 

@@ -4,7 +4,7 @@ import type { SessionManager } from '../session/session-manager.js';
 import type { MessageQueue } from '../message/message-queue.js';
 
 // 支持的命令列表
-const commands = ['/new', '/pwd', '/help', '/evolhelp', '/status', '/restart', '/reload', '/model', '/setmodel', '/effort', '/baseagent', '/slist', '/session', '/rename', '/stop', '/compact', '/repair', '/safe', '/fork', '/del', '/perm', '/file', '/check', '/rewind', '/activity', '/chatmode', '/dispatch', '/ask', '/resume', '/aid', '/rpc', '/storage', '/agent', '/trigger', '/upgrade'];
+const commands = ['/new', '/pwd', '/help', '/evolhelp', '/status', '/restart', '/reload', '/model', '/setmodel', '/effort', '/baseagent', '/slist', '/session', '/rename', '/stop', '/compact', '/repair', '/fork', '/del', '/perm', '/file', '/check', '/rewind', '/activity', '/chatmode', '/dispatch', '/ask', '/resume', '/aid', '/rpc', '/storage', '/agent', '/trigger', '/upgrade'];
 const deprecatedCommands = ['/clear'];
 
 // 命令别名映射
@@ -16,7 +16,7 @@ const aliases: Record<string, string> = {
 };
 
 // 命令快速路径前缀（所有命令都不进入消息队列）
-const quickCommandPrefixes = ['/new', '/pwd', '/help', '/evolhelp', '/status', '/restart', '/reload', '/model', '/setmodel', '/effort', '/baseagent', '/slist', '/session', '/rename', '/repair', '/fork', '/stop', '/clear', '/compact', '/safe', '/del', '/perm', '/file', '/check', '/s ', '/name', '/rewind', '/rw', '/rw ', '/activity', '/chatmode', '/dispatch', '/ask', '/resume', '/base ', '/aid', '/rpc', '/storage', '/agent', '/trigger', '/upgrade'];
+const quickCommandPrefixes = ['/new', '/pwd', '/help', '/evolhelp', '/status', '/restart', '/reload', '/model', '/setmodel', '/effort', '/baseagent', '/slist', '/session', '/rename', '/repair', '/fork', '/stop', '/clear', '/compact', '/del', '/perm', '/file', '/check', '/s ', '/name', '/rewind', '/rw', '/rw ', '/activity', '/chatmode', '/dispatch', '/ask', '/resume', '/base ', '/aid', '/rpc', '/storage', '/agent', '/trigger', '/upgrade'];
 
 /**
  * 计算两个字符串的 Levenshtein 距离（编辑距离）
@@ -83,7 +83,7 @@ export function guardRoleCommand(content: string, activeChatType: string, isAdmi
   // guest 在群聊和私聊中均可访问的只读命令：纯查询形态（带参写操作由各 handler 内部守卫拦截）
   const guestGroupCommands = [
     '/status', '/help', '/evolhelp', '/check', '/chatmode', '/dispatch',
-    '/model', '/setmodel', '/effort', '/baseagent', '/perm', '/activity', '/safe', '/stop',
+    '/model', '/setmodel', '/effort', '/baseagent', '/perm', '/activity', '/stop',
     '/resume', '/trigger',
   ];
   const userCommands = activeChatType === 'group' && !isAdmin
@@ -122,7 +122,6 @@ export async function guardIdleCommand(opts: {
   // - 仅带参时需要 idle（无参是列表/用法）：/session /baseagent /rewind
   // - /chatmode：在 handler 内部自行做写操作的 idle 检查
   // - /dispatch：在 handler 内部自行做写操作的 idle 检查
-  // - /safe：已禁用 no-op，不再要求 idle
   const idleAlways = ['/compact', '/repair', '/fork', '/new'];
   const idleWhenArg = ['/session', '/baseagent', '/rewind'];
   const needsIdle =

@@ -15,7 +15,6 @@ import { EventBus } from '../event-bus.js';
 import { summarizeToolInput } from '../permission.js';
 import type { Message, Session, ChannelAdapter, ChannelOptions, ChannelPolicy, CommandHandler, ReplyContext, AgentContext, EvolAgentRegistryHandle, GlobalSettings, OutboundEnvelope, OutboundPayload, InteractionRequest, InteractionKind, ActionInteraction, CommandCard } from '../../types.js';
 import type { TriggerManager } from '../trigger/manager.js';
-import { DEFAULT_PERMISSION_MODE } from '../../types.js';
 import { getPackageRoot, resolveRoot, resolvePaths } from '../../paths.js';
 import { renderKitSections, type KitRenderContext } from '../../eck/kit-renderer.js';
 import { renderMessageBody, type RenderMessageResult } from '../../eck/message-renderer.js';
@@ -25,7 +24,7 @@ import { normalizeBaseagent } from '../../agents/baseagent.js';
 import type { InteractionRouter } from '../interaction-router.js';
 import { renderActionAsText, renderCommandCardAsText } from '../interaction-router.js';
 import { formatPeerKey } from '../relation/peer-identity.js';
-import { resolveEffectiveModel } from '../model/model-scope.js';
+import { resolveEffectiveModel, resolvePermissionMode } from '../model/config-scope.js';
 import { insertUsageEvent, insertContextBreakdown, insertModelCalls } from '../stats/writer.js';
 import { normalizeUsage } from '../stats/normalizer.js';
 import { getBudgetStatus } from '../stats/budget.js';
@@ -355,7 +354,7 @@ export class MessageProcessor {
   private static readonly COMMAND_PREFIXES = [
     '/new', '/pwd', '/help', '/status', '/restart',
     '/model', '/effort', '/agent', '/slist', '/session', '/rename', '/repair', '/fork',
-    '/stop', '/clear', '/compact', '/safe', '/del', '/perm', '/file', '/check',
+    '/stop', '/clear', '/compact', '/del', '/perm', '/file', '/check',
     '/s ', '/name ', '/rewind', '/rw', '/rw ', '/activity', '/chatmode',
     '/aid', '/upgrade', '/evolagent',
   ];
@@ -568,6 +567,15 @@ export class MessageProcessor {
 
     const isProactive = session.sessionMode === 'proactive';
     const isAutonomous = session.sessionMode === 'autonomous';
+
+    const chatType = message.chatType || 'private';
+    // proactive 模式行为约束状态（每条消息独立）
+    const proactive = isProactive ? {
+      firstToolDone: false,
+      toolCount: 0,
+      lastQueueReminder: 0,
+      chatType
+    } : null;
     const envelope = buildEnvelope({
       taskId,
       sessionId: session.id,
@@ -718,10 +726,31 @@ export class MessageProcessor {
         cancelIntercept: this.messageQueue
           ? (sessionKey) => this.messageQueue!.cancelIntercept(sessionKey)
           : undefined,
+        policyHook: proactive ? (toolName, toolInput) => {
+          // 解析是否是允许的首次表态命令
+          const isAllowedFirstTool = toolName === 'Bash' && (() => {
+            const cmd = (toolInput.command as string) || '';
+            // 白名单：ec msg/group/ctl send|file 到当前会话
+            const match = cmd.match(/^\s*(?:ec|evolclaw)\s+(msg|group|ctl)\s+(send|file)\s+(?:\S+\s+)?(\S+)/);
+            if (!match) return false;
+            const [, subCmd, action, targetId] = match;
+            // ctl send/file 的 targetId 是第一个参数（无 <from>），msg/group 是第二个
+            // 简化判断：如果 targetId 匹配 session.channelId 即认为是发往当前会话
+            return targetId === session.channelId;
+          })();
+
+          if (!proactive.firstToolDone) {
+            proactive.firstToolDone = true;
+            if (!isAllowedFirstTool) {
+              const cmdHint = proactive.chatType === 'group' ? 'ec group send' : 'ec msg send';
+              adapter.send(envelope, { kind: 'result.text', text: `收到消息后第一时间用 ${cmdHint} 说明你的意图，不要闷头干`, isFinal: true }).catch(() => {});
+              return { block: true, reason: `请先用 ${cmdHint} 向${proactive.chatType === 'group' ? '群里' : '对方'}说明你的意图，再执行其他工具` };
+            }
+          }
+        } : undefined,
       });
 
-      // 设置 per-session 权限模式（默认 bypass，所有角色统一）
-      agent.setMode(session.metadata?.permissionMode ?? DEFAULT_PERMISSION_MODE);
+      // per-session 权限模式在 try 内、peerKey 解析后设置（见 resolvePermissionMode 调用）
 
       // 标记会话为处理中（实时持久化，重启后可恢复）
       this.sessionManager.markProcessing(session.id, taskId);
@@ -735,7 +764,7 @@ export class MessageProcessor {
       this.interruptedSessions.delete(session.id);
       const wasInterrupted = prevInterruptReason === 'new_message' && !!session.agentSessionId;
       const wrapPrompt = (body: string) => wasInterrupted
-        ? `【新消息插入】\n\n${body}\n\n【请无视之前中断继续处理】`
+        ? `【新消息插入】\n\n${body}\n\n【请根据前后消息酌情处理】`
         : body;
       // 先用裸文本兜底；vars 构造完成后用消息渲染层重算（见下方 effectivePrompt 重赋值）。
       let effectivePrompt = wrapPrompt(message.content);
@@ -775,12 +804,28 @@ export class MessageProcessor {
         if (persona) contextParts.push(persona);
         if (working) contextParts.push(`[当前关注]\n${working}`);
 
-        // 计算 peerKey: <channelType>#<urlEncode(peerId)>
+        // 计算 peerKey：群聊固定按 groupId/channelId，私聊按发送者 peerId。
+        // 这样单条和积压合并批次不会因队列状态不同而切换关系级配置。
         const peerIdRaw = message.peerId;
-        const peerKey = (currentChannelType && peerIdRaw)
-          ? formatPeerKey(currentChannelType, peerIdRaw)
+        const peerKeyId = session.chatType === 'group'
+          ? (session.metadata?.groupId || message.channelId)
+          : peerIdRaw;
+        const peerKey = (currentChannelType && peerKeyId)
+          ? formatPeerKey(currentChannelType, peerKeyId)
           : undefined;
+        const peerRole = session.identity?.role || 'anonymous';
         const normalizedBaseagent = normalizeBaseagent(agent.name);
+
+        // 设置 per-session 权限模式：运行时按 关系 > 角色 > 出厂默认[role] 解析（不再读/写 session.metadata）
+        // resolvePermissionMode 设计为不抛出（配置损坏返回兜底），但防御性 try-catch 确保 setMode 必定执行
+        let effectivePermissionMode: string;
+        try {
+          effectivePermissionMode = resolvePermissionMode({ self: selfAid || undefined, peerKey, role: peerRole });
+        } catch (e) {
+          logger.warn(`[MessageProcessor] resolvePermissionMode failed, using fallback: ${e instanceof Error ? e.message : String(e)}`);
+          effectivePermissionMode = 'auto';
+        }
+        agent.setMode(effectivePermissionMode);
 
         // 按 关系级 > agent级 > 全局 解析本次调用的模型/强度，作为 per-call 入参传入 runQuery。
         // 不缓存、不绑会话——改关系级/agent级后该范围所有会话的下条消息即时生效；
@@ -805,7 +850,7 @@ export class MessageProcessor {
         if (!skipEvolclawModel) {
           try {
             const resolved = resolveEffectiveModel(
-              { self: selfAid || undefined, peerKey },
+              { self: selfAid || undefined, peerKey, role: session.identity?.role || 'anonymous' },
               normalizedBaseagent.canonical,
             );
             if (resolved.model) {
@@ -847,7 +892,7 @@ export class MessageProcessor {
             peerId: peerIdRaw || undefined,
             peerKey,
             peerName: peerName || undefined,
-            peerRole: session.identity?.role || 'anonymous',
+            peerRole,
             peerType: message.peerType || undefined,
             sameDevice: message.sameDevice ?? false,
             sameNetwork: message.sameNetwork ?? false,
@@ -865,7 +910,7 @@ export class MessageProcessor {
             // 优先本地 session 覆盖（/dispatch 命令），fallback 到服务器 dispatch_mode 缓存
             dispatch: (session.metadata?.dispatchModeOverride ?? session.metadata?.dispatchMode ?? message.dispatchMode) || undefined,
             clientType: message.clientType || undefined,
-            permissionMode: session.metadata?.permissionMode || 'auto',
+            permissionMode: effectivePermissionMode,
             capabilities: capParts.length > 0 ? capParts.join('、') : undefined,
             project: path.basename(absoluteProjectPath),
             sessionId: session.id,
@@ -881,7 +926,7 @@ export class MessageProcessor {
             // Stage 3: sessionKey 持久化字段
             sessionKey: session.sessionKey,
             chatMode: isProactive ? 'proactive' : 'interactive',
-            readonly: session.metadata?.permissionMode === 'readonly',
+            readonly: effectivePermissionMode === 'readonly',
             baseAgent: normalizedBaseagent.canonical,
             baseAgentName: normalizedBaseagent.displayName,
             baseAgentModel: agentModel || undefined,
@@ -939,6 +984,7 @@ export class MessageProcessor {
             : [{
                 peerId: message.peerId, peerName: peerName || undefined,
                 peerType: message.peerType,
+                peerRole: message.batchRole || session.identity?.role || 'anonymous',
                 sameDevice: message.sameDevice, sameNetwork: message.sameNetwork, sameEgressIp: message.sameEgressIp,
                 encrypted: message.encrypted,
                 content: message.content, timestamp: message.timestamp,
@@ -951,14 +997,42 @@ export class MessageProcessor {
           // 这样即便 renderMessageBody 抛错走 raw 兜底，也把提示原文拼进去——绝不静默丢提示。
           const hintItems = this.consumeOwnerHints(session, message);
           const renderItems: SubMessage[] = hintItems.length > 0 ? [...hintItems, ...peerItems] : peerItems;
+          const fallbackContent = (() => {
+            if (!message.restartResume?.submitted || peerItems.length === 0) return message.content;
+            const resumeIdx = peerItems.findIndex(item => item.kind === 'restart-resume');
+            if (message.restartResume.pendingInterrupted && resumeIdx >= 0 && resumeIdx < peerItems.length - 1) {
+              const resumeText = peerItems.slice(0, resumeIdx + 1).map(item => item.content).join('\n');
+              const pendingText = peerItems.slice(resumeIdx + 1).map(item => item.content).join('\n');
+              return `${resumeText}\n\n【新消息插入】\n\n${pendingText}\n\n【请根据前后消息酌情处理】`;
+            }
+            return peerItems.map(item => item.content).join('\n');
+          })();
 
           try {
-            renderResult = renderMessageBody(renderItems, kitCtx.vars, session.id);
+            if (message.restartResume?.pendingInterrupted) {
+              const resumeIdx = renderItems.findIndex(item => item.kind === 'restart-resume');
+              if (resumeIdx >= 0 && resumeIdx < renderItems.length - 1) {
+                const resumeRender = renderMessageBody(renderItems.slice(0, resumeIdx + 1), kitCtx.vars, session.id);
+                const pendingRender = renderMessageBody(renderItems.slice(resumeIdx + 1), kitCtx.vars, session.id);
+                const body = [
+                  resumeRender.body.trim(),
+                  `【新消息插入】\n\n${pendingRender.body.trim()}\n\n【请根据前后消息酌情处理】`,
+                ].filter(Boolean).join('\n\n');
+                renderResult = {
+                  body,
+                  images: [...resumeRender.images, ...pendingRender.images],
+                };
+              } else {
+                renderResult = renderMessageBody(renderItems, kitCtx.vars, session.id);
+              }
+            } else {
+              renderResult = renderMessageBody(renderItems, kitCtx.vars, session.id);
+            }
             if (renderResult.body.trim()) effectivePrompt = wrapPrompt(renderResult.body);
-            else effectivePrompt = wrapPrompt(composeHintFallback(hintItems, message.content));
+            else effectivePrompt = wrapPrompt(composeHintFallback(hintItems, fallbackContent));
           } catch (e) {
             logger.warn(`[MessageProcessor] renderMessageBody failed, using raw content: ${e instanceof Error ? e.message : String(e)}`);
-            effectivePrompt = wrapPrompt(composeHintFallback(hintItems, message.content));
+            effectivePrompt = wrapPrompt(composeHintFallback(hintItems, fallbackContent));
           }
         }
 
@@ -991,7 +1065,8 @@ export class MessageProcessor {
               agent,
               renderer,
               resetTimer,
-              shouldSuppress
+              shouldSuppress,
+              proactive
             );
             // 探测成功（退避期内到达探测点且用的是 evolclaw 模型）→ 清零降级状态
             if (fbState.fallbackActive && !skipEvolclawModel && !usedFallback) {
@@ -1059,7 +1134,8 @@ export class MessageProcessor {
               agent,
               renderer,
               resetTimer,
-              shouldSuppress
+              shouldSuppress,
+              proactive
             );
           } else {
             throw new Error('CONTEXT_COMPACT_FAILED');
@@ -1095,7 +1171,7 @@ export class MessageProcessor {
             modelOverride
           );
           agent.registerStream(streamKey, retryStream);
-          streamResult = await this.processEventStream(retryStream, session, agent, renderer, resetTimer, shouldSuppress);
+          streamResult = await this.processEventStream(retryStream, session, agent, renderer, resetTimer, shouldSuppress, proactive);
 
           // 重试后仍然 prompt_too_long：清理 renderer 中可能混入的错误文本，显示友好提示
           const retryStillTooLong = streamResult.isError && streamHitContextLimit(streamResult);
@@ -1796,7 +1872,8 @@ export class MessageProcessor {
     agent: AgentRunnerFull,
     renderer: IMRenderer,
     resetTimer: (eventType?: string, toolName?: string) => void,
-    shouldSuppress: () => boolean
+    shouldSuppress: () => boolean,
+    proactive?: { firstToolDone: boolean; toolCount: number; lastQueueReminder: number; chatType: string } | null
   ): Promise<StreamRunResult> {
     // Per-session agent name for stats bucketing
     const agentNameForStats = this.agentRegistry?.resolveByChannel(session.metadata?.channelKey || session.channel)?.name ?? '<unknown>';
@@ -1928,6 +2005,37 @@ export class MessageProcessor {
               toolDescByCallId.set(event.callId, desc);
             }
             renderer.addToolCall(event.name, event.input, event.callId, desc, (event as any).turn, (event as any).outputTokens);
+          }
+          // proactive 模式：队列积压或工具调用过多时注入提醒
+          if (proactive) {
+            // 解析是否是允许的表态命令（排除计数）
+            const isAllowedTool = event.name === 'Bash' && (() => {
+              const cmd = (event.input?.command as string) || '';
+              const match = cmd.match(/^\s*(?:ec|evolclaw)\s+(msg|group|ctl)\s+(send|file)\s+(?:\S+\s+)?(\S+)/);
+              if (!match) return false;
+              const [, subCmd, action, targetId] = match;
+              return targetId === session.channelId;
+            })();
+
+            // 工具计数（排除白名单命令）
+            if (!isAllowedTool) {
+              proactive.toolCount++;
+            }
+
+            // 每 7 次工具调用检查队列深度
+            if (proactive.toolCount > 0 && proactive.toolCount % 7 === 0) {
+              const queueLen = this.messageQueue?.getQueueLength(session.id) ?? 0;
+              if (queueLen >= 5 && queueLen > proactive.lastQueueReminder) {
+                proactive.lastQueueReminder = queueLen;
+                agent.injectUserMessage?.(session.id, `⚠️ 当前还有 ${queueLen} 条消息未读，请快速完成任务后处理。`);
+              }
+            }
+
+            // 工具调用计数检查
+            if (proactive.toolCount === 10) {
+              const cmdHint = proactive.chatType === 'group' ? 'ec group send' : 'ec msg send';
+              agent.injectUserMessage?.(session.id, `⚠️ 工具调用已超过 10 次，请立即用 ${cmdHint} 向${proactive.chatType === 'group' ? '群里' : '对方'}汇报当前情况和下一步意图。`);
+            }
           }
         }
 

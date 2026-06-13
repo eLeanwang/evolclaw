@@ -76,6 +76,7 @@ function renderOneItem(
     peerId: item.peerId ?? sessionVars.peerId,
     peerName: item.peerName ?? sessionVars.peerName,
     peerType: item.peerType ?? sessionVars.peerType,
+    peerRole: item.peerRole ?? sessionVars.peerRole,
     sameDevice: item.sameDevice ?? sessionVars.sameDevice,
     sameNetwork: item.sameNetwork ?? sessionVars.sameNetwork,
     sameEgressIp: item.sameEgressIp ?? sessionVars.sameEgressIp,

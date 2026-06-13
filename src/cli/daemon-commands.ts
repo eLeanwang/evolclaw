@@ -2463,7 +2463,7 @@ async function cmdWatchWeb(): Promise<void> {
   }
   const ok = await startEcwebIfEnabled(p);
   if (!ok) process.exit(1);  // 失败原因已由 startEcwebIfEnabled 打印
-  await printEcwebAccess(port);
+  // 启动成功的访问信息已由 startEcwebIfEnabled 打印，无需 printEcwebAccess 重复输出
 }
 
 function sleep(ms: number): Promise<void> {
