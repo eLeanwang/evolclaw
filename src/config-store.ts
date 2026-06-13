@@ -35,6 +35,7 @@ import type {
   RoleOverride,
   ProjectsBlock,
   ChatmodeBlock,
+  ShowActivitiesMode,
   DebugBlock,
 } from './types.js';
 import { CONFIG_SCHEMA_VERSION } from './types.js';
@@ -286,8 +287,8 @@ export function autoMigrateIfNeeded(): void {
     baseagents: {} as any,
     models: oldConfig.models,
     projects: oldConfig.projects ? { defaultPath: oldConfig.projects.defaultPath } : undefined,
-    chatmode: oldConfig.chatmode,
-    show_activities: oldConfig.showActivities,
+    chatmode: migrateChatmode(oldConfig.chatmode),
+    show_activities: migrateShowActivities(oldConfig.showActivities),
     flush_delay: oldConfig.flushDelay,
     debounce: oldConfig.debounce,
     aun: oldConfig.channels?.aun?.keystorePath ? { keystorePath: oldConfig.channels.aun.keystorePath } : undefined,
@@ -415,7 +416,8 @@ function buildAgentConfigFromLegacy(aid: string, raw: any, globalConfig: any): A
     active_baseagent: activeBaseagent,
     baseagents: raw.agents ? filterBaseagents(raw.agents) : undefined,
     projects: raw.projects,
-    chatmode: raw.chatmode,
+    chatmode: migrateChatmode(raw.chatmode),
+    show_activities: migrateShowActivities(raw.show_activities),
   } as AgentConfig;
 }
 
@@ -460,7 +462,8 @@ function buildAgentConfigFromGlobalChannels(aid: string, globalConfig: any): Age
     channels,
     active_baseagent: activeBaseagent,
     projects: globalConfig.projects,
-    chatmode: globalConfig.chatmode,
+    chatmode: migrateChatmode(globalConfig.chatmode),
+    show_activities: migrateShowActivities(globalConfig.showActivities),
   } as AgentConfig;
 }
 
@@ -471,6 +474,28 @@ function filterBaseagents(agents: any): BaseagentsBlock | undefined {
     if (agents[k] && typeof agents[k] === 'object') result[k] = agents[k];
   }
   return Object.keys(result).length > 0 ? result : undefined;
+}
+
+/**
+ * 迁移 chatmode：保持对象形式向后兼容（旧格式 {private, group} → 保留原值）
+ */
+function migrateChatmode(old: any): ChatmodeBlock | undefined {
+  if (!old) return undefined;
+  if (typeof old === 'object') return old;  // 已是对象，直接返回
+  // 标量（极少见） → 转为 {private: value}
+  if (typeof old === 'string') return { private: old as any };
+  return undefined;
+}
+
+/**
+ * 迁移 show_activities：四值（all/dm-only/owner-dm-only/none）→ 二值（all/none）
+ */
+function migrateShowActivities(old: any): ShowActivitiesMode | undefined {
+  if (!old) return undefined;
+  if (old === 'all') return 'all';
+  if (old === 'none') return 'none';
+  // dm-only / owner-dm-only 映射为 all（语义最接近："私聊时显示"）
+  return 'all';
 }
 
 
