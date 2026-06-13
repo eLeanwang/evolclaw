@@ -743,7 +743,9 @@ export class MessageProcessor {
             proactive.firstToolDone = true;
             if (!isAllowedFirstTool) {
               const cmdHint = proactive.chatType === 'group' ? 'ec group send' : 'ec msg send';
-              adapter.send(envelope, { kind: 'result.text', text: `收到消息后第一时间用 ${cmdHint} 说明你的意图，不要闷头干`, isFinal: true }).catch(() => {});
+              const errorMsg = `⚠️ proactive 模式违规：收到消息后首次工具调用必须是 ${cmdHint} 向${proactive.chatType === 'group' ? '群里' : '对方'}表态，不要闷头干。请重新执行正确的命令。`;
+              // 注入回模型上下文，不发给用户/群
+              agent.injectUserMessage?.(session.id, errorMsg);
               return { block: true, reason: `请先用 ${cmdHint} 向${proactive.chatType === 'group' ? '群里' : '对方'}说明你的意图，再执行其他工具` };
             }
           }
