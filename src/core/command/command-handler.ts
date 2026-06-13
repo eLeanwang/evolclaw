@@ -552,6 +552,22 @@ export class CommandHandler {
     const { spawn } = await import('child_process');
     const cliEntry = path.join(getPackageRoot(), 'dist', 'cli', 'index.js');
     const startedAt = Date.now();
+    const logPath = path.join(resolvePaths().root, 'logs', 'menu-cli-exec.log');
+
+    // 确保日志目录存在
+    try {
+      const logDir = path.dirname(logPath);
+      if (!fs.existsSync(logDir)) fs.mkdirSync(logDir, { recursive: true });
+    } catch {}
+
+    const logEntry = (msg: string) => {
+      try {
+        const ts = new Date().toISOString();
+        fs.appendFileSync(logPath, `[${ts}] ${msg}\n`, 'utf-8');
+      } catch {}
+    };
+
+    logEntry(`CALL: argv=${JSON.stringify(argv)} cwd=${process.cwd()}`);
 
     return await new Promise((resolve) => {
       let stdout = '';
@@ -559,11 +575,15 @@ export class CommandHandler {
       let total = 0;
       let truncated = false;
       let settled = false;
+      let stdoutChunks = 0;
+      let stderrChunks = 0;
 
       const child = spawn('node', [cliEntry, ...argv], {
         env: { ...process.env, EVOLCLAW_HOME: resolvePaths().root },
         windowsHide: true,
       });
+
+      logEntry(`SPAWN: pid=${child.pid} at=${startedAt}`);
 
       const append = (buf: Buffer, sink: 'out' | 'err') => {
         if (truncated) return;
@@ -571,17 +591,29 @@ export class CommandHandler {
         if (remaining <= 0) { truncated = true; return; }
         const chunk = buf.length > remaining ? buf.subarray(0, remaining) : buf;
         total += chunk.length;
-        if (sink === 'out') stdout += chunk.toString('utf-8');
-        else stderr += chunk.toString('utf-8');
+        if (sink === 'out') {
+          stdout += chunk.toString('utf-8');
+          stdoutChunks++;
+        } else {
+          stderr += chunk.toString('utf-8');
+          stderrChunks++;
+        }
         if (buf.length > remaining) truncated = true;
       };
-      child.stdout?.on('data', (b: Buffer) => append(b, 'out'));
-      child.stderr?.on('data', (b: Buffer) => append(b, 'err'));
+      child.stdout?.on('data', (b: Buffer) => {
+        append(b, 'out');
+        logEntry(`STDOUT: chunk_size=${b.length} total_chunks=${stdoutChunks} elapsed=${Date.now() - startedAt}ms`);
+      });
+      child.stderr?.on('data', (b: Buffer) => {
+        append(b, 'err');
+        logEntry(`STDERR: chunk_size=${b.length} total_chunks=${stderrChunks} elapsed=${Date.now() - startedAt}ms`);
+      });
 
       const timer = setTimeout(() => {
         if (settled) return;
         settled = true;
         try { child.kill('SIGKILL'); } catch {}
+        logEntry(`TIMEOUT: after=${CLI_EXEC_TIMEOUT_MS}ms stdout_size=${stdout.length} stderr_size=${stderr.length}`);
         logger.warn(`[CommandHandler] cli exec timeout: ${argv.join(' ')}`);
         resolve({ error: `执行超时（${CLI_EXEC_TIMEOUT_MS / 1000}s）：${argv[0]}`, code: 'TIMEOUT' });
       }, CLI_EXEC_TIMEOUT_MS);
@@ -590,6 +622,7 @@ export class CommandHandler {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        logEntry(`ERROR: ${e?.message || String(e)} elapsed=${Date.now() - startedAt}ms`);
         resolve({ error: e?.message || String(e), code: 'INTERNAL' });
       });
 
@@ -597,10 +630,12 @@ export class CommandHandler {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        const elapsed = Date.now() - startedAt;
+        logEntry(`CLOSE: exitCode=${exitCode} elapsed=${elapsed}ms stdout_size=${stdout.length} stderr_size=${stderr.length} truncated=${truncated}`);
         resolve({ data: {
           exitCode: exitCode ?? -1,
           stdout, stderr, truncated,
-          durationMs: Date.now() - startedAt,
+          durationMs: elapsed,
         } });
       });
     });
