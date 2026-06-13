@@ -385,17 +385,7 @@ async function main() {
     (channel, userId) => agentRegistry.isAdmin(channel, userId)
   );
 
-  // sessionMode 解析：从 channel 路由到具体 agent，按 agent.config.chatmode
-  sessionManager.setSessionModeResolver((channelKey, chatType, peerType) => {
-    const agent = agentRegistry.resolveByChannel(channelKey);
-    const cm = agent?.config.chatmode;
-    if (!cm) return undefined;
-
-    // 优先级：群聊 > nothuman > private
-    if (chatType === 'group') return cm.group;
-    if (peerType && peerType !== 'human') return cm.nothuman;
-    return cm.private;
-  });
+  // sessionMode 已写死在 resolveDefaultSessionMode 中（session-manager.ts），不再读 agent config
   logger.info('✓ Database initialized');
 
   // 注册会话文件适配器（Claude / Codex 各自的会话文件操作）

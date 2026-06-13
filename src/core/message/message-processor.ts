@@ -568,9 +568,6 @@ export class MessageProcessor {
 
     const isProactive = session.sessionMode === 'proactive';
     const isAutonomous = session.sessionMode === 'autonomous';
-    // ── DEBUG: 自主模式排查 ──
-    logger.info(`[CHATMODE-DEBUG] sessionId=${session.id} sessionMode="${session.sessionMode}" isProactive=${isProactive} isAutonomous=${isAutonomous} chatType=${session.chatType} identityMode="${session.identity?.mode}" envelopeChatmode="${isProactive ? 'proactive' : 'interactive'}"`);
-    // ── END DEBUG ──
     const envelope = buildEnvelope({
       taskId,
       sessionId: session.id,
@@ -884,9 +881,6 @@ export class MessageProcessor {
             // Stage 3: sessionKey 持久化字段
             sessionKey: session.sessionKey,
             chatMode: isProactive ? 'proactive' : 'interactive',
-            // ── DEBUG: 自主模式排查 ──
-            _debug_chatMode_in_vars: `isProactive=${isProactive} isAutonomous=${isAutonomous} sessionMode="${session.sessionMode}" result="${isProactive ? 'proactive' : 'interactive'}"`,
-            // ── END DEBUG ──
             readonly: session.metadata?.permissionMode === 'readonly',
             baseAgent: normalizedBaseagent.canonical,
             baseAgentName: normalizedBaseagent.displayName,

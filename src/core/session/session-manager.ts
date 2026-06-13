@@ -23,17 +23,11 @@ export type OwnerResolver = (channel: string, userId: string) => boolean;
 /** 判定用户是否为指定渠道的 admin */
 export type AdminResolver = (channel: string, userId: string) => boolean;
 
-/**
- * 解析新建 session 时的默认 sessionMode
- */
-export type SessionModeResolver = (channel: string, chatType: string, peerType?: string) => 'interactive' | 'proactive' | undefined;
-
 export class SessionManager {
   private sessionsDir: string;
   private eventBus: EventBus;
   private ownerResolver?: OwnerResolver;
   private adminResolver?: AdminResolver;
-  private sessionModeResolver?: SessionModeResolver;
   private fileAdapters = new Map<string, SessionFileAdapter>();
   private sessionEncryptState = new Map<string, boolean>();
 
@@ -54,22 +48,17 @@ export class SessionManager {
     this.adminResolver = resolver;
   }
 
-  setSessionModeResolver(resolver: SessionModeResolver): void {
-    this.sessionModeResolver = resolver;
-  }
-
   private resolveDefaultSessionMode(channel: string, chatType?: string, peerType?: string): 'interactive' | 'proactive' {
     const ct = chatType || 'private';
 
-    // 来源2：群聊强制 proactive
+    // 群聊强制 proactive
     if (ct === 'group') return 'proactive';
 
-    // 来源3：非 human 对端强制 proactive，无视 agent 的默认 chatmode 配置
+    // Agent-to-Agent 强制 proactive
     if (peerType && peerType !== 'human') return 'proactive';
 
-    // 来源1：agent 配置默认值
-    const resolved = this.sessionModeResolver?.(channel, ct, peerType);
-    return resolved || 'interactive';
+    // Human-to-Agent 私聊永远是 interactive（暂不读 agent config，将来可通过前端+配置文件改为 proactive）
+    return 'interactive';
   }
 
   registerFileAdapter(adapter: SessionFileAdapter): void {
@@ -593,6 +582,14 @@ export class SessionManager {
         mutated = true;
       }
 
+      // D2: 存量 session 的 sessionMode 按新规则纠正（存量可能残留旧值如 proactive）
+      const expectedMode = this.resolveDefaultSessionMode(channel, chatType, peerType);
+      if (session.sessionMode !== expectedMode) {
+        logger.info(`[SessionManager] Aligning sessionMode for session ${session.id}: ${session.sessionMode} -> ${expectedMode}`);
+        session.sessionMode = expectedMode;
+        mutated = true;
+      }
+
       if (chatType === 'private' && userId) {
         if (!session.metadata) session.metadata = {};
         if (!session.metadata.peerId) { session.metadata.peerId = userId; mutated = true; }
@@ -631,6 +628,12 @@ export class SessionManager {
       if (chatType && session.chatType !== chatType) {
         logger.info(`[SessionManager] Updating chatType for session ${session.id}: ${session.chatType} -> ${chatType}`);
         session.chatType = chatType;
+      }
+      // D2: 存量 session 的 sessionMode 按新规则纠正
+      const expectedMode = this.resolveDefaultSessionMode(channel, chatType, peerType);
+      if (session.sessionMode !== expectedMode) {
+        logger.info(`[SessionManager] Aligning sessionMode for session ${session.id}: ${session.sessionMode} -> ${expectedMode}`);
+        session.sessionMode = expectedMode;
       }
       if (chatType === 'private' && userId && !session.metadata.peerId) {
         session.metadata.peerId = userId;

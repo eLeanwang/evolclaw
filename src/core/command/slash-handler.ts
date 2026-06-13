@@ -51,13 +51,13 @@ function formatIdleTime(ms: number): string {
   return '刚刚';
 }
 
-function getAgentBusyCount(handler: any, aid: string | undefined): number | null {
+function getAgentBusyCount(handler: any, aid: string | undefined, excludeSessionKey?: string): number | null {
   if (!aid || !handler.agentRegistry) return null;
   const handle = handler.agentRegistry.get(aid) ?? null;
   const agentName = handle?.name;
   if (!agentName) return null;
-  return (handler.messageQueue?.getProcessingCountByAgent?.(agentName) ?? 0)
-    + (handler.messageQueue?.getQueueLengthByAgent?.(agentName) ?? 0);
+  return (handler.messageQueue?.getProcessingCountByAgent?.(agentName, excludeSessionKey) ?? 0)
+    + (handler.messageQueue?.getQueueLengthByAgent?.(agentName, excludeSessionKey) ?? 0);
 }
 
 export async function handleSlashCommand(this: any, 
@@ -1587,7 +1587,7 @@ export async function handleSlashCommand(this: any,
       return { kind: 'command.error' as const, text: '❌ 无权限：服务重启仅限 daemon owner 使用' };
     }
     const selfAid = this.agentRegistry?.resolveByChannel(channel)?.aid;
-    const busy = getAgentBusyCount(this, selfAid);
+    const busy = getAgentBusyCount(this, selfAid, activeSession?.id);
     if (busy !== null && busy > 0) {
       return { kind: 'command.error' as const, text: `❌ 该 Agent 有 ${busy} 个任务执行中，请稍后重试` };
     }

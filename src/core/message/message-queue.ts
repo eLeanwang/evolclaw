@@ -415,10 +415,12 @@ export class MessageQueue {
   /**
    * 获取指定 agent 的待处理消息数量。
    * agent 维度按 enqueue 时传入的 agentName 计数。
+   * 可传入 excludeSessionKey 排除某个会话。
    */
-  getQueueLengthByAgent(agentName: string): number {
+  getQueueLengthByAgent(agentName: string, excludeSessionKey?: string): number {
     let total = 0;
-    for (const queue of this.queues.values()) {
+    for (const [key, queue] of this.queues.entries()) {
+      if (excludeSessionKey && key.startsWith(`${excludeSessionKey}::`)) continue;
       for (const item of queue) {
         if ((item.agentName || DEFAULT_AGENT_NAME) === agentName) total++;
       }
@@ -428,10 +430,12 @@ export class MessageQueue {
 
   /**
    * 获取指定 agent 的处理中队列数量。
+   * 可传入 excludeSessionKey 排除某个会话（用于 restart 等操作排除自身）。
    */
-  getProcessingCountByAgent(agentName: string): number {
+  getProcessingCountByAgent(agentName: string, excludeSessionKey?: string): number {
     let total = 0;
-    for (const a of this.processingAgent.values()) {
+    for (const [key, a] of this.processingAgent.entries()) {
+      if (excludeSessionKey && key.startsWith(`${excludeSessionKey}::`)) continue;
       if ((a || DEFAULT_AGENT_NAME) === agentName) total++;
     }
     return total;
