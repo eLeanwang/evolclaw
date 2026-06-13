@@ -51,13 +51,18 @@ function formatIdleTime(ms: number): string {
   return '刚刚';
 }
 
-function getAgentBusyCount(handler: any, aid: string | undefined, excludeSessionKey?: string): number | null {
+function getAgentBusyInfo(handler: any, aid: string | undefined, excludeSessionKey?: string): { count: number; processing: Array<{ queueKey: string; agentName: string }>; agentName: string } | null {
   if (!aid || !handler.agentRegistry) return null;
   const handle = handler.agentRegistry.get(aid) ?? null;
   const agentName = handle?.name;
   if (!agentName) return null;
-  return (handler.messageQueue?.getProcessingCountByAgent?.(agentName, excludeSessionKey) ?? 0)
-    + (handler.messageQueue?.getQueueLengthByAgent?.(agentName, excludeSessionKey) ?? 0);
+  const processing = handler.messageQueue?.getProcessingDetailsByAgent?.(agentName, excludeSessionKey) ?? [];
+  const queueCount = handler.messageQueue?.getQueueLengthByAgent?.(agentName, excludeSessionKey) ?? 0;
+  return { count: processing.length + queueCount, processing, agentName };
+}
+
+function getAgentBusyCount(handler: any, aid: string | undefined, excludeSessionKey?: string): number | null {
+  return getAgentBusyInfo(handler, aid, excludeSessionKey)?.count ?? null;
 }
 
 export async function handleSlashCommand(this: any, 
@@ -886,9 +891,13 @@ export async function handleSlashCommand(this: any,
     }
 
     // 繁忙检查（同 menu /agent reload）
-    const busy = getAgentBusyCount(this, targetAid);
-    if (busy !== null && busy > 0) {
-      return { kind: 'command.error' as const, text: `❌ 该 Agent 有 ${busy} 个任务执行中，请稍后重试` };
+    const busyInfo = getAgentBusyInfo(this, targetAid);
+    if (busyInfo && busyInfo.count > 0) {
+      const processingLines = busyInfo.processing.map(p => {
+        const sessionId = p.queueKey.split('::')[0] || '?';
+        return `  · ${sessionId.slice(0, 32)}...`;
+      }).join('\n');
+      return { kind: 'command.error' as const, text: `❌ 该 Agent 有 ${busyInfo.count} 个任务执行中，无法 reload。\n\n处理中：\n${processingLines}\n\n等待任务完成后重试，通常 30-60 秒。` };
     }
 
     const res = await execAgentAction('reload', { aid: targetAid }, userId ?? '');
@@ -1587,9 +1596,17 @@ export async function handleSlashCommand(this: any,
       return { kind: 'command.error' as const, text: '❌ 无权限：服务重启仅限 daemon owner 使用' };
     }
     const selfAid = this.agentRegistry?.resolveByChannel(channel)?.aid;
-    const busy = getAgentBusyCount(this, selfAid, activeSession?.id);
-    if (busy !== null && busy > 0) {
-      return { kind: 'command.error' as const, text: `❌ 该 Agent 有 ${busy} 个任务执行中，请稍后重试` };
+    const busyInfo = getAgentBusyInfo(this, selfAid, activeSession?.id);
+    if (busyInfo && busyInfo.count > 0) {
+      const processingLines = busyInfo.processing.map(p => {
+        const keyParts = p.queueKey.split('::');
+        const sessionId = keyParts[0] || '?';
+        return `  · session ${sessionId.slice(0, 32)}... (agent: ${p.agentName})`;
+      }).join('\n');
+      return {
+        kind: 'command.error' as const,
+        text: `❌ 该 Agent 有 ${busyInfo.count} 个任务执行中，无法重启。\n\n处理中的会话：\n${processingLines}\n\n建议：等待这些任务完成后重试。可通过 ec ctl status 查看队列状态；典型等待时间 30-60 秒，群聊大型任务可能更长。`,
+      };
     }
     const allSessions = await this.sessionManager.listSessions(channel, channelId);
     const sessionsWithMessages = allSessions

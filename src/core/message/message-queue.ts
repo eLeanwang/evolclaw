@@ -442,6 +442,21 @@ export class MessageQueue {
   }
 
   /**
+   * 获取指定 agent 的处理中队列详情列表（用于阻塞提示，帮助 agent 判断等待时长）。
+   * 每项包含 queueKey（可从中解析 sessionId 和路径）和 agentName。
+   */
+  getProcessingDetailsByAgent(agentName: string, excludeSessionKey?: string): Array<{ queueKey: string; agentName: string }> {
+    const results: Array<{ queueKey: string; agentName: string }> = [];
+    for (const [key, a] of this.processingAgent.entries()) {
+      if (excludeSessionKey && key.startsWith(`${excludeSessionKey}::`)) continue;
+      if ((a || DEFAULT_AGENT_NAME) === agentName) {
+        results.push({ queueKey: key, agentName: a || DEFAULT_AGENT_NAME });
+      }
+    }
+    return results;
+  }
+
+  /**
    * 清空指定 agent 的待处理消息（不影响正在处理中的消息）。
    * 被移除的消息直接 resolve（与 cancel 一致），让 enqueue 的等待方正常解除阻塞。
    * @returns 被清除的消息数量
