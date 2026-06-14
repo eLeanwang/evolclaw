@@ -878,6 +878,7 @@ async function main() {
           prompt: '检查 evolclaw 是否有新版本可用。执行 `npm view evolclaw version` 获取最新版本，与当前版本（执行 `evolclaw --version`）对比。如果有新版本，执行 /restart 进行升级。如果已是最新版本，无需任何操作。',
           createdByPeerId: '__system__',
           createdByChannel: '__system__',
+          schedulerAid: primaryAgentForTrigger.aid,
           fireCount: 0,
           failCount: 0,
           createdAt: Date.now(),
