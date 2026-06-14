@@ -881,8 +881,21 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
     return process.cwd();
   }
 
-  private checkCodexReadonly(toolName: string, input: Record<string, unknown>, projectPath: string): { behavior: 'allow' } | { behavior: 'deny'; message: string } {
-    if (toolName === 'Bash') return checkReadonly(toolName, input, projectPath);
+  private checkCodexReadonly(
+    toolName: string,
+    input: Record<string, unknown>,
+    projectPath: string,
+    sessionKey?: string
+  ): { behavior: 'allow' } | { behavior: 'deny'; message: string } {
+    const permCtx = sessionKey ? this.permissionContexts.get(sessionKey) : undefined;
+    const readonlyContext = sessionKey ? {
+      sessionId: sessionKey,
+      channel: permCtx?.channel,
+      peerId: permCtx?.userId,
+      role: undefined  // codex doesn't track role in session
+    } : undefined;
+
+    if (toolName === 'Bash') return checkReadonly(toolName, input, projectPath, readonlyContext);
     if (toolName !== 'FileChange') return { behavior: 'allow' };
 
     const tmpDir = path.join(projectPath, '.evolclaw', 'tmp') + path.sep;
@@ -921,7 +934,7 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
     }
 
     if (this.currentMode === 'readonly') {
-      const readonly = this.checkCodexReadonly(toolName, blacklist.updatedInput, projectPath);
+      const readonly = this.checkCodexReadonly(toolName, blacklist.updatedInput, projectPath, sessionKey);
       if (readonly.behavior === 'deny') return 'deny';
       return 'allow';
     }

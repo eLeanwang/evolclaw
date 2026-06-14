@@ -1160,7 +1160,15 @@ export class AgentRunner {
       }
 
       if (this.permissionMode === 'readonly') {
-        const roResult = checkReadonly(input.tool_name, input.tool_input || {}, projectPath);
+        const permCtx = this.permissionContexts.get(sessionId);
+        const session = sessionManager?.getActiveSession?.(sessionId);
+        const readonlyContext = {
+          sessionId,
+          channel: permCtx?.channel,
+          peerId: permCtx?.userId,
+          role: session?.identity?.role
+        };
+        const roResult = checkReadonly(input.tool_name, input.tool_input || {}, projectPath, readonlyContext);
         if (roResult.behavior === 'deny') {
           return { decision: 'block' as const, reason: roResult.message };
         }
@@ -1239,7 +1247,15 @@ export class AgentRunner {
 
       // readonly 模式：二次拦截（belt-and-suspenders）
       if (this.permissionMode === 'readonly') {
-        const roResult = checkReadonly(toolName, input, projectPath);
+        const permCtx = this.permissionContexts.get(sessionId);
+        const session = sessionManager?.getActiveSession?.(sessionId);
+        const readonlyContext = {
+          sessionId,
+          channel: permCtx?.channel,
+          peerId: permCtx?.userId,
+          role: session?.identity?.role
+        };
+        const roResult = checkReadonly(toolName, input, projectPath, readonlyContext);
         if (roResult.behavior === 'deny') {
           return { behavior: 'deny' as const, message: roResult.message, decisionClassification: 'user_reject' as const };
         }
