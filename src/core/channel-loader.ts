@@ -59,23 +59,25 @@ export interface ChannelPlugin {
 
 // ── Shared helpers for plugins ─────────────────────────────────────────────
 
-type ShowActivitiesMode = 'all' | 'dm-only' | 'owner-dm-only' | 'none';
+type ShowActivitiesMode = 'all' | 'none';
 
 /** Resolve showActivities for a single instance (instance overrides default). */
 export function resolveShowActivities(inst: ChannelInstanceConfig): ShowActivitiesMode {
   return (inst as any).showActivities ?? 'all';
 }
 
-/** Standard showMiddleResult / showIdleMonitor policy function. */
+/**
+ * showMiddleResult / showIdleMonitor 策略。
+ * show_activities 收敛为 all|none，只对私聊有意义：
+ *   none → 不显示；all → 仅私聊显示（群聊强制 proactive，本就不发中间活动）。
+ */
 export function showActivitiesPolicy(
   mode: ShowActivitiesMode,
   chatType: string,
-  identity: string,
+  _identity: string,
 ): boolean {
   if (mode === 'none') return false;
-  if (mode === 'dm-only') return chatType === 'private';
-  if (mode === 'owner-dm-only') return chatType === 'private' && identity === 'owner';
-  return true;
+  return chatType === 'private';
 }
 
 // ── ChannelLoader ──────────────────────────────────────────────────────────

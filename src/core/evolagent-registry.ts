@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { EvolAgent } from './evolagent.js';
 import { logger } from '../utils/logger.js';
-import { agentMdPath } from '../paths.js';
+import { agentMdPath, agentPersonalDir } from '../paths.js';
 import {
   loadDefaults,
   loadAllAgents,
@@ -91,7 +91,7 @@ export interface ReloadHooks {
  */
 export interface GlobalConfigWriter {
   setOwner(channelName: string, userId: string): void;
-  setShowActivities?(channelName: string, mode: 'all' | 'dm-only' | 'owner-dm-only' | 'none'): void;
+  setShowActivities?(channelName: string, mode: 'all' | 'none'): void;
 }
 
 // ── Registry ───────────────────────────────────────────────────────────────
@@ -212,11 +212,11 @@ export class EvolAgentRegistry {
     agent.setOwner(channelKey, userId);
   }
 
-  getShowActivities(channelKey: string): 'all' | 'dm-only' | 'owner-dm-only' | 'none' {
+  getShowActivities(channelKey: string): 'all' | 'none' {
     return this.resolveByChannel(channelKey)?.getShowActivities(channelKey) ?? 'all';
   }
 
-  setShowActivities(channelKey: string, mode: 'all' | 'dm-only' | 'owner-dm-only' | 'none'): void {
+  setShowActivities(channelKey: string, mode: 'all' | 'none'): void {
     const agent = this.resolveByChannel(channelKey);
     if (!agent) {
       logger.warn(`[EvolAgentRegistry] setShowActivities: channel "${channelKey}" not found`);
@@ -491,11 +491,35 @@ export class EvolAgentRegistry {
     return undefined;
   }
 
+  // ── personal 名缓存（从 personal/persona.md 解析 "我叫**名字**"）──
+  private personalNameCache = new Map<string, string | undefined>();
+
+  private resolvePersonalName(aid: string): string | undefined {
+    const cached = this.personalNameCache.get(aid);
+    if (cached !== undefined) return cached;
+    try {
+      const personaPath = path.join(agentPersonalDir(aid), 'persona.md');
+      if (fs.existsSync(personaPath)) {
+        const content = fs.readFileSync(personaPath, 'utf-8');
+        // 1) 加粗格式: "我叫**名字**" 或 "我是**名字**"
+        const bold = content.match(/我[叫是]\s*\*{1,2}(.+?)\*{1,2}/);
+        if (bold?.[1]) { this.personalNameCache.set(aid, bold[1]); return bold[1]; }
+        // 2) 无加粗格式: "我是栖梧，" → 取到第一个分隔符（逗号/句号/括号/空格）前
+        const plain = content.match(/(?:我是|我叫)\s*([^\s（(，,。.)]+)/);
+        if (plain?.[1]) { this.personalNameCache.set(aid, plain[1]); return plain[1]; }
+      }
+    } catch { /* ignore */ }
+    this.personalNameCache.set(aid, undefined);
+    return undefined;
+  }
+
   private toInfo(agent: EvolAgent): AgentInfo {
     const displayName = this.resolveDisplayName(agent.aid);
+    const personalName = this.resolvePersonalName(agent.aid);
     return {
       name: displayName || agent.name || agent.aid,
       displayName,
+      personalName,
       aid: agent.aid,
       status: agent.status,
       channels: agent.channelInstanceNames(),

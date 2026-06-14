@@ -1,4 +1,4 @@
-import { DEFAULT_PERMISSION_MODE, type InteractionRequest, type OutboundPayload, type ReplyContext, type Session } from '../../types.js';
+import { type InteractionRequest, type OutboundPayload, type ReplyContext, type Session } from '../../types.js';
 import type { PermissionDecision } from '../permission.js';
 import { hasModelSwitcher, hasPermissionController } from '../../agents/runner-types.js';
 import { getCodexEfforts } from '../../agents/codex-runner.js';
@@ -13,6 +13,8 @@ import { checkLatestVersion, getLocalVersion, isLinkedInstall, compareVersions }
 import { loadEvolclawConfig } from '../../config-store.js';
 import { isProcessLevelOwner } from './menu-handler.js';
 import { execAgentAction } from '../message/command-handler-agent-control.js';
+import { resolvePermissionMode, writeRelationPermissionMode } from '../model/config-scope.js';
+import { formatPeerKey } from '../relation/peer-identity.js';
 import { displaySessionTitle } from '../session/session-title.js';
 import {
   guardIdleCommand,
@@ -51,13 +53,18 @@ function formatIdleTime(ms: number): string {
   return '刚刚';
 }
 
-function getAgentBusyCount(handler: any, aid: string | undefined): number | null {
+function getAgentBusyInfo(handler: any, aid: string | undefined, excludeSessionKey?: string): { count: number; processing: Array<{ queueKey: string; agentName: string }>; agentName: string } | null {
   if (!aid || !handler.agentRegistry) return null;
   const handle = handler.agentRegistry.get(aid) ?? null;
   const agentName = handle?.name;
   if (!agentName) return null;
-  return (handler.messageQueue?.getProcessingCountByAgent?.(agentName) ?? 0)
-    + (handler.messageQueue?.getQueueLengthByAgent?.(agentName) ?? 0);
+  const processing = handler.messageQueue?.getProcessingDetailsByAgent?.(agentName, excludeSessionKey) ?? [];
+  const queueCount = handler.messageQueue?.getQueueLengthByAgent?.(agentName, excludeSessionKey) ?? 0;
+  return { count: processing.length + queueCount, processing, agentName };
+}
+
+function getAgentBusyCount(handler: any, aid: string | undefined, excludeSessionKey?: string): number | null {
+  return getAgentBusyInfo(handler, aid, excludeSessionKey)?.count ?? null;
 }
 
 export async function handleSlashCommand(this: any, 
@@ -197,7 +204,7 @@ export async function handleSlashCommand(this: any,
       '  /effort [level] - 查看或切换推理强度',
       '',
       '💬 聊天设置：',
-      '  /activity [all|dm|owner|none] - 查看/控制中间输出显示模式',
+      '  /activity [all|none] - 查看/控制中间输出显示模式',
       '  /chatmode [interactive|proactive] - 查看/切换会话模式（被动响应或主动推进）',
       '  /dispatch [mention|broadcast] - 查看/切换群聊分发模式（仅@响应或广播响应，仅群聊）',
       '',
@@ -266,7 +273,7 @@ export async function handleSlashCommand(this: any,
     cmds.push({ command: '/stop', description: '中断当前任务', category: '运维', roles: ['admin', 'owner'] });
     cmds.push({ command: '/check', description: '检查渠道状态', category: '运维', roles: ['guest', 'admin', 'owner'] });
     if (isAdmin) {
-      cmds.push({ command: '/activity', args: '[all|dm|owner|none]', description: '查看/控制中间输出显示模式', category: '聊天设置', roles: ['admin', 'owner'] });
+      cmds.push({ command: '/activity', args: '[all|none]', description: '查看/控制中间输出显示模式', category: '聊天设置', roles: ['admin', 'owner'] });
     }
     if (isDaemonOwner) {
       cmds.push({ command: '/restart', description: '重启服务', category: '运维', roles: ['daemon-owner'] });
@@ -305,12 +312,24 @@ export async function handleSlashCommand(this: any,
     const { session: permSession } = permResult;
     const permAgent = this.getAgent(channel, permSession.agentId);
 
+    // 关系级 scope 选择器：用于读/写关系级 permissionMode
+    const permSelfAid = selfAID ?? this.resolveSelfAID(channel);
+    const permChannelType = this.resolveChannelType(channel);
+    const permPeerKeyId = permSession.chatType === 'group'
+      ? (permSession.metadata?.groupId || channelId)
+      : (userId || permSession.metadata?.peerId);
+    const permPeerKey = (permChannelType && permPeerKeyId)
+      ? formatPeerKey(permChannelType, permPeerKeyId)
+      : undefined;
+    const permRole = permSession.identity?.role || identity.role || 'anonymous';
+    const permScope = { self: permSelfAid || undefined, peerKey: permPeerKey, role: permRole };
+
     // /perm（无参数）：显示当前模式和可选模式
     if (!args) {
       if (!hasPermissionController(permAgent)) {
         return { kind: 'command.error' as const, text: '❌ 权限控制不可用' };
       }
-      const currentMode = permSession.metadata?.permissionMode ?? DEFAULT_PERMISSION_MODE;
+      const currentMode = resolvePermissionMode(permScope);
       const modes = permAgent.listModes();
 
       // 尝试发送 CommandCard 卡片
@@ -340,17 +359,6 @@ export async function handleSlashCommand(this: any,
         if (cardResult === null) return null;
         return { kind: 'command.result' as const, text: cardResult };
       }
-
-      // 降级：文本
-      const modeList = modes.map(m => {
-        const prefix = m.key === currentMode ? '✓' : ' ';
-        const suffix = m.available ? '' : ' ⚠️ 不可用';
-        return `  ${prefix} ${m.key} (${m.nameZh}) - ${m.description}${suffix}`;
-      }).join('\n');
-      if (isAdmin) {
-        return { kind: 'command.result' as const, text: `权限模式: ${currentMode}\n\n${modeList}\n\n用法: /perm <模式> 或 allow|always|deny` };
-      }
-        return { kind: 'command.result' as const, text: `当前权限模式: ${currentMode}` };
     }
 
     const parts = args.split(/\s+/);
@@ -399,9 +407,10 @@ export async function handleSlashCommand(this: any,
           if (!isAdmin) {
             return { kind: 'command.error' as const, text: '❌ 权限模式切换仅限管理员' };
           }
-          const metadata = permSession.metadata || {};
-          metadata.permissionMode = arg;
-          await this.sessionManager.updateSession(permSession.id, { metadata });
+          // 写关系级 config.json（运行时按 关系>角色>出厂默认 解析）；无法定位 self/peer 时跳过写入（仅响应）
+          if (permScope.self && permScope.peerKey) {
+            writeRelationPermissionMode(permScope.self, permScope.peerKey, arg);
+          }
           if (this.shouldSuppressCardTriggerResult(source, channel)) return null;
           return { kind: 'command.result' as const, text: `✓ 权限模式已切换为: ${matched.key} (${matched.nameZh})\n${matched.description}` };
         }
@@ -886,9 +895,13 @@ export async function handleSlashCommand(this: any,
     }
 
     // 繁忙检查（同 menu /agent reload）
-    const busy = getAgentBusyCount(this, targetAid);
-    if (busy !== null && busy > 0) {
-      return { kind: 'command.error' as const, text: `❌ 该 Agent 有 ${busy} 个任务执行中，请稍后重试` };
+    const busyInfo = getAgentBusyInfo(this, targetAid);
+    if (busyInfo && busyInfo.count > 0) {
+      const processingLines = busyInfo.processing.map(p => {
+        const sessionId = p.queueKey.split('::')[0] || '?';
+        return `  · ${sessionId.slice(0, 32)}...`;
+      }).join('\n');
+      return { kind: 'command.error' as const, text: `❌ 该 Agent 有 ${busyInfo.count} 个任务执行中，无法 reload。\n\n处理中：\n${processingLines}\n\n等待任务完成后重试，通常 30-60 秒。` };
     }
 
     const res = await execAgentAction('reload', { aid: targetAid }, userId ?? '');
@@ -915,20 +928,17 @@ export async function handleSlashCommand(this: any,
       return { kind: 'command.error' as const, text: '❌ 当前会话为 proactive 模式，不支持 activity 配置（流式输出已全部静默）' };
     }
 
-    const modeMap: Record<string, 'all' | 'dm-only' | 'owner-dm-only' | 'none'> = {
+    const modeMap: Record<string, 'all' | 'none'> = {
       all: 'all',
-      dm: 'dm-only',
-      owner: 'owner-dm-only',
       none: 'none',
     };
 
     const currentMode = this.agentRegistry?.getShowActivities?.(channel) ?? 'all';
 
-    // 模式描述列表（用于 body 和文本降级）
+    // 模式描述列表（用于 body 和文本降级）。show_activities 收敛为 all|none：
+    // all = 私聊显示中间输出；none = 全部静默（群聊本就强制 proactive、不发活动）。
     const modeDescriptions: { key: string; configVal: string; label: string }[] = [
-      { key: 'all', configVal: 'all', label: '全部显示' },
-      { key: 'dm', configVal: 'dm-only', label: '仅私聊显示' },
-      { key: 'owner', configVal: 'owner-dm-only', label: '仅 owner 私聊显示' },
+      { key: 'all', configVal: 'all', label: '私聊显示' },
       { key: 'none', configVal: 'none', label: '全部静默' },
     ];
 
@@ -968,14 +978,14 @@ export async function handleSlashCommand(this: any,
         return `  ${prefix} ${m.key} — ${m.label}`;
       }).join('\n');
       if (isOwner) {
-        return { kind: 'command.result' as const, text: `中间输出: ${currentMode}  用法: /activity <all|dm|owner|none>` };
+        return { kind: 'command.result' as const, text: `中间输出: ${currentMode}  用法: /activity <all|none>` };
       }
       return { kind: 'command.result' as const, text: `中间输出: ${currentMode}` };
     }
 
     const newMode = modeMap[activityArg];
     if (!newMode) {
-      return { kind: 'command.error' as const, text: `❌ 无效参数: ${activityArg}\n可选: all / dm / owner / none` };
+      return { kind: 'command.error' as const, text: `❌ 无效参数: ${activityArg}\n可选: all / none` };
     }
 
     const label = modeDescriptions.find(m => m.configVal === newMode)?.label || newMode;
@@ -1587,9 +1597,17 @@ export async function handleSlashCommand(this: any,
       return { kind: 'command.error' as const, text: '❌ 无权限：服务重启仅限 daemon owner 使用' };
     }
     const selfAid = this.agentRegistry?.resolveByChannel(channel)?.aid;
-    const busy = getAgentBusyCount(this, selfAid);
-    if (busy !== null && busy > 0) {
-      return { kind: 'command.error' as const, text: `❌ 该 Agent 有 ${busy} 个任务执行中，请稍后重试` };
+    const busyInfo = getAgentBusyInfo(this, selfAid, activeSession?.id);
+    if (busyInfo && busyInfo.count > 0) {
+      const processingLines = busyInfo.processing.map(p => {
+        const keyParts = p.queueKey.split('::');
+        const sessionId = keyParts[0] || '?';
+        return `  · session ${sessionId.slice(0, 32)}... (agent: ${p.agentName})`;
+      }).join('\n');
+      return {
+        kind: 'command.error' as const,
+        text: `❌ 该 Agent 有 ${busyInfo.count} 个任务执行中，无法重启。\n\n处理中的会话：\n${processingLines}\n\n建议：等待这些任务完成后重试。可通过 ec ctl status 查看队列状态；典型等待时间 30-60 秒，群聊大型任务可能更长。`,
+      };
     }
     const allSessions = await this.sessionManager.listSessions(channel, channelId);
     const sessionsWithMessages = allSessions
@@ -2350,11 +2368,6 @@ export async function handleSlashCommand(this: any,
       logger.error('[Repair] Failed:', error);
       return { kind: 'command.error' as const, text: `❌ 修复失败: ${error.message}` };
     }
-  }
-
-  // /safe 命令：安全模式已禁用
-  if (normalizedContent === '/safe') {
-    return { kind: 'command.result' as const, text: `ℹ️ 安全模式已禁用\n\n如需重置会话，请使用 /new 创建新会话。` };
   }
 
   // /trigger 命令

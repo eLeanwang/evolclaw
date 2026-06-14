@@ -87,11 +87,12 @@ Options:
     // 表头跟随系统语言
     const isChinese = (process.env.LANG || process.env.LC_ALL || process.env.LANGUAGE || Intl.DateTimeFormat().resolvedOptions().locale || '').toLowerCase().includes('zh');
     const headers = isChinese
-      ? { name: '名称', status: '状态', channels: '渠道', project: '项目', baseagent: '基座', lastActive: '最后活跃' }
-      : { name: 'NAME', status: 'STATUS', channels: 'CHANNELS', project: 'PROJECT', baseagent: 'BASEAGENT', lastActive: 'LAST ACTIVE' };
+      ? { name: '名称', personal: 'Personal名', status: '状态', channels: '渠道', project: '项目', baseagent: '基座', lastActive: '最后活跃' }
+      : { name: 'NAME', personal: 'PERSONAL', status: 'STATUS', channels: 'CHANNELS', project: 'PROJECT', baseagent: 'BASEAGENT', lastActive: 'LAST ACTIVE' };
 
     // 计算各列实际需要的宽度
     let maxNameLen = headers.name.length;
+    let maxPersonalLen = headers.personal.length;
     let maxStatusLen = headers.status.length;
     let maxChannelsLen = headers.channels.length;
     let maxProjectLen = headers.project.length;
@@ -99,6 +100,7 @@ Options:
 
     for (const info of result.agents) {
       maxNameLen = Math.max(maxNameLen, info.name.length);
+      maxPersonalLen = Math.max(maxPersonalLen, (info.personalName || '—').length);
       maxStatusLen = Math.max(maxStatusLen, (info.status || 'stopped').length);
       const channelsStr = info.channels?.length > 0 ? info.channels.join(', ') : '—';
       maxChannelsLen = Math.max(maxChannelsLen, channelsStr.length);
@@ -109,24 +111,26 @@ Options:
 
     // 加 2 作为列间距
     const colName = maxNameLen + 2;
+    const colPersonal = maxPersonalLen + 2;
     const colStatus = maxStatusLen + 2;
     const colChannels = maxChannelsLen + 1;
     const colProject = maxProjectLen + 2;
     const colBaseagent = maxBaseagentLen + 2;
 
     console.log(
-      headers.name.padEnd(colName) + headers.status.padEnd(colStatus) + headers.channels.padEnd(colChannels) +
+      headers.name.padEnd(colName) + headers.personal.padEnd(colPersonal) + headers.status.padEnd(colStatus) + headers.channels.padEnd(colChannels) +
       headers.project.padEnd(colProject) + headers.baseagent.padEnd(colBaseagent) + headers.lastActive
     );
     for (const info of result.agents) {
       const name = info.name;
+      const personal = info.personalName || '—';
       const status = info.status || 'stopped';
       const channels = info.channels?.length > 0 ? info.channels.join(', ') : '—';
       const project = info.projectPath ? path.basename(info.projectPath) : '—';
       const baseagent = info.baseagent || '—';
       const lastActive = info.lastActivity ? formatTimeAgo(Date.now() - info.lastActivity) : '—';
       console.log(
-        name.padEnd(colName) + status.padEnd(colStatus) + channels.padEnd(colChannels) +
+        name.padEnd(colName) + personal.padEnd(colPersonal) + status.padEnd(colStatus) + channels.padEnd(colChannels) +
         project.padEnd(colProject) + baseagent.padEnd(colBaseagent) + lastActive
       );
     }

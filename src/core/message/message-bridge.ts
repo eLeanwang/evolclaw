@@ -222,7 +222,9 @@ export class MessageBridge {
         const doEnqueue = async (m: Message) => {
           return this.messageQueue.enqueue(session.id, m, session.projectPath, {
             interruptible: isInterrupt,
+            interruptSamePeer: !isInterrupt,  // 群聊：同人连发且队列无他人时打断
             agentName: enqueueAgentName,
+            role: !isInterrupt ? (session.identity?.role ?? 'anonymous') : undefined,
           });
         };
 

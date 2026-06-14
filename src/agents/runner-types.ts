@@ -20,6 +20,8 @@ export interface PermissionContext {
   taskId?: string;
   /** 当前会话 chatmode（interactive | proactive） */
   chatmode?: 'interactive' | 'proactive';
+  /** proactive 模式行为策略钩子：PreToolUse 阶段调用，返回 block 则拒绝工具调用 */
+  policyHook?: (toolName: string, toolInput: Record<string, unknown>) => { block: boolean; reason?: string } | undefined;
   /** 发送交互卡片前刷新当前 renderer 队列，避免卡片早于事件消息到达 */
   flushPending?: () => Promise<void>;
 }
@@ -128,6 +130,9 @@ export interface AgentRunnerFull {
     message: unknown;
     parent_tool_use_id: null;
   }>>;
+
+  /** 向当前活跃流注入一条用户消息（工具调用后上下文注入） */
+  injectUserMessage?(sessionId: string, text: string): void;
 
   /** 回退文件到指定轮次 */
   rewindFiles?(agentSessionId: string, projectPath: string, userMessageId: string): Promise<{

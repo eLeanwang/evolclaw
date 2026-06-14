@@ -339,10 +339,21 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
     const callModel = modelOverride?.model || this.model;
     const callEffort = modelOverride?.effort ?? this.effort;
     const appServer = this.getAppServerClient();
+
+    // proactive 模式需要审批工具调用（让 policyHook 生效）
+    const context = this.permissionContexts.get(sessionId);
+    const effectiveApprovalPolicy = (context?.chatmode === 'proactive' && this.approvalPolicy === 'never')
+      ? 'on-request'
+      : this.approvalPolicy;
+
+    if (effectiveApprovalPolicy !== this.approvalPolicy) {
+      logger.info(`[CodexRunner] Proactive mode: upgraded approvalPolicy from ${this.approvalPolicy} to ${effectiveApprovalPolicy} for session=${sessionId}`);
+    }
+
     const threadOptions = {
       model: callModel,
       effort: callEffort,
-      approvalPolicy: this.approvalPolicy,
+      approvalPolicy: effectiveApprovalPolicy,
       approvalsReviewer: this.resolvedConfig.approvalsReviewer,
       sandbox: this.sandboxMode,
       config: this.buildEvolclawShellEnvironmentConfig(sessionId),
@@ -398,7 +409,7 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
         cwd: projectPath,
         model: callModel,
         effort: callEffort,
-        approvalPolicy: this.approvalPolicy,
+        approvalPolicy: effectiveApprovalPolicy,
         sandbox: this.sandboxMode,
       });
       const turnId = turnResponse.turn?.id;
@@ -501,10 +512,14 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
       } catch (error) {
         if (!this.isThreadNotFoundError(error)) throw error;
         logger.info(`[CodexRunner] Compact thread not loaded, resuming before compact: ${agentSessionId}`);
+        const ctx = this.permissionContexts.get(_sessionId);
+        const compactApprovalPolicy = (ctx?.chatmode === 'proactive' && this.approvalPolicy === 'never')
+          ? 'on-request'
+          : this.approvalPolicy;
         await appServer.threadResume(agentSessionId, _projectPath, {
           model: this.model,
           effort: this.effort,
-          approvalPolicy: this.approvalPolicy,
+          approvalPolicy: compactApprovalPolicy,
           approvalsReviewer: this.resolvedConfig.approvalsReviewer,
           sandbox: this.sandboxMode,
           config: this.buildEvolclawShellEnvironmentConfig(_sessionId),
@@ -664,6 +679,12 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
     const sessionKey = this.findSessionKeyByThread(params.threadId || params.conversationId);
     const toolName = request.method.includes('fileChange') || request.method === 'applyPatchApproval' ? 'FileChange' : 'Bash';
     const toolInput = this.buildPermissionInput(request.method, params);
+
+    // proactive 模式行为策略（首次工具调用必须是 ec msg send）
+    const policyResult = this.permissionContexts.get(sessionKey)?.policyHook?.(toolName, toolInput);
+    if (policyResult?.block) {
+      return this.toAppServerApprovalResponse(request.method, 'deny');
+    }
     const summary = this.summarizeAppServerRequest(request.method, params);
     const reason = params.reason || params.decisionReason || undefined;
     const projectPath = this.resolvePermissionProjectPath(params);

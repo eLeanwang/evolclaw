@@ -1,4 +1,4 @@
-import { Session, SessionIdentity, DEFAULT_PERMISSION_MODE } from '../../types.js';
+import { Session, SessionIdentity } from '../../types.js';
 import { ensureDir } from '../../utils/atomic-write.js';
 import { resolvePaths } from '../../paths.js';
 import { logger } from '../../utils/logger.js';
@@ -23,17 +23,11 @@ export type OwnerResolver = (channel: string, userId: string) => boolean;
 /** 判定用户是否为指定渠道的 admin */
 export type AdminResolver = (channel: string, userId: string) => boolean;
 
-/**
- * 解析新建 session 时的默认 sessionMode
- */
-export type SessionModeResolver = (channel: string, chatType: string, peerType?: string) => 'interactive' | 'proactive' | undefined;
-
 export class SessionManager {
   private sessionsDir: string;
   private eventBus: EventBus;
   private ownerResolver?: OwnerResolver;
   private adminResolver?: AdminResolver;
-  private sessionModeResolver?: SessionModeResolver;
   private fileAdapters = new Map<string, SessionFileAdapter>();
   private sessionEncryptState = new Map<string, boolean>();
 
@@ -54,22 +48,17 @@ export class SessionManager {
     this.adminResolver = resolver;
   }
 
-  setSessionModeResolver(resolver: SessionModeResolver): void {
-    this.sessionModeResolver = resolver;
-  }
-
   private resolveDefaultSessionMode(channel: string, chatType?: string, peerType?: string): 'interactive' | 'proactive' {
     const ct = chatType || 'private';
 
-    // 来源2：群聊强制 proactive
+    // 群聊强制 proactive
     if (ct === 'group') return 'proactive';
 
-    // 来源3：非 human 对端强制 proactive，无视 agent 的默认 chatmode 配置
+    // Agent-to-Agent 强制 proactive
     if (peerType && peerType !== 'human') return 'proactive';
 
-    // 来源1：agent 配置默认值
-    const resolved = this.sessionModeResolver?.(channel, ct, peerType);
-    return resolved || 'interactive';
+    // Human-to-Agent 私聊永远是 interactive（暂不读 agent config，将来可通过前端+配置文件改为 proactive）
+    return 'interactive';
   }
 
   registerFileAdapter(adapter: SessionFileAdapter): void {
@@ -96,10 +85,6 @@ export class SessionManager {
     if (this.ownerResolver?.(channel, userId)) return { role: 'owner', mode: 'interactive' };
     if (this.adminResolver?.(channel, userId)) return { role: 'admin', mode: 'interactive' };
     return { role: 'guest', mode: 'interactive' };
-  }
-
-  private resolvePermissionMode(role: SessionIdentity['role']): string {
-    return (role === 'owner' || role === 'admin') ? 'bypass' : 'readonly';
   }
 
   async updateIdentity(sessionId: string, identity: SessionIdentity): Promise<void> {
@@ -565,10 +550,6 @@ export class SessionManager {
     if (threadId) {
       const session = this.getOrCreateThreadSession(channel, channelId, threadId, defaultProjectPath, metadata, name, agentId, selfAID, channelType, peerType, chatType);
       session.identity = this.resolveIdentity(channel, userId);
-      if (session.metadata && !session.metadata.permissionMode) {
-        session.metadata.permissionMode = this.resolvePermissionMode(session.identity.role);
-        this.persistSession(session, 'none');
-      }
       return session;
     }
 
@@ -590,6 +571,14 @@ export class SessionManager {
 
       if (session.selfAID !== selfAID) {
         session.selfAID = selfAID;
+        mutated = true;
+      }
+
+      // D2: 存量 session 的 sessionMode 按新规则纠正（存量可能残留旧值如 proactive）
+      const expectedMode = this.resolveDefaultSessionMode(channel, chatType, peerType);
+      if (session.sessionMode !== expectedMode) {
+        logger.info(`[SessionManager] Aligning sessionMode for session ${session.id}: ${session.sessionMode} -> ${expectedMode}`);
+        session.sessionMode = expectedMode;
         mutated = true;
       }
 
@@ -632,6 +621,12 @@ export class SessionManager {
         logger.info(`[SessionManager] Updating chatType for session ${session.id}: ${session.chatType} -> ${chatType}`);
         session.chatType = chatType;
       }
+      // D2: 存量 session 的 sessionMode 按新规则纠正
+      const expectedMode = this.resolveDefaultSessionMode(channel, chatType, peerType);
+      if (session.sessionMode !== expectedMode) {
+        logger.info(`[SessionManager] Aligning sessionMode for session ${session.id}: ${session.sessionMode} -> ${expectedMode}`);
+        session.sessionMode = expectedMode;
+      }
       if (chatType === 'private' && userId && !session.metadata.peerId) {
         session.metadata.peerId = userId;
       }
@@ -645,7 +640,6 @@ export class SessionManager {
     // Create new session
     const sessionMetadata: any = { ...(metadata || {}) };
     const newIdentity = this.resolveIdentity(channel, userId);
-    if (!sessionMetadata.permissionMode) sessionMetadata.permissionMode = this.resolvePermissionMode(newIdentity.role);
 
     const session: Session = {
       id: generateSessionId(),
@@ -1092,14 +1086,11 @@ export class SessionManager {
     const identity = this.deriveChannelIdentity(channel, channelId);
     let channelType = identity.channelType;
     let selfAID = identity.selfAID;
-    let inheritedRole: SessionIdentity['role'] = 'guest';
     if (existingDir) {
       const active = readJsonFile<SessionFile>(path.join(existingDir, 'active.json'));
       if (active) {
         channelType = active.channelType || channel;
         selfAID = active.selfAID || '';
-        // 从现有 session 的 permissionMode 反推 role，bypass→owner，其余→guest
-        if (active.permissionMode === 'bypass') inheritedRole = 'owner';
         if (!agentId && active.agentType) agentId = active.agentType;
       }
     }
@@ -1116,7 +1107,7 @@ export class SessionManager {
       sessionKey: formatSessionKey(channelType, channelId, DEFAULT_THREAD_ID),
       chatType: inheritedChatType,
       sessionMode: this.resolveDefaultSessionMode(channel, inheritedChatType),
-      metadata: { permissionMode: this.resolvePermissionMode(inheritedRole) },
+      metadata: {},
       name: name || '默认会话',
       createdAt: Date.now(),
       updatedAt: Date.now(),
@@ -1155,7 +1146,7 @@ export class SessionManager {
       chatType: sourceSession.chatType || 'private',
       sessionMode: sourceSession.sessionMode || 'interactive',
       agentSessionId: forkedAgentSessionId,
-      metadata: { permissionMode: sourceSession.metadata?.permissionMode || DEFAULT_PERMISSION_MODE },
+      metadata: {},
       name: name || `${sourceSession.name || '会话'}-分支`,
       createdAt: Date.now(),
       updatedAt: Date.now(),

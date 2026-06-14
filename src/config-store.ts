@@ -32,8 +32,10 @@ import type {
   AunRuntimeBlock,
   BaseagentsBlock,
   ModelsBlock,
+  RoleOverride,
   ProjectsBlock,
   ChatmodeBlock,
+  ShowActivitiesMode,
   DebugBlock,
 } from './types.js';
 import { CONFIG_SCHEMA_VERSION } from './types.js';
@@ -56,6 +58,28 @@ export interface EvolclawAunConfig {
   encryptionSeed?: string | null;  // null 原样保留（迁移自旧 config.json）
 }
 
+/**
+ * 单个 Service Proxy 服务：把一个本地 HTTP/WS 服务暴露到 AUN 网络。
+ * 访问路径为 https://{providerAid}/{name}/...，proxy-server 剥掉 {name} 前缀后
+ * 转发剩余 path 回连本地 endpoint。
+ */
+export interface ServiceProxyService {
+  name: string;                 // 服务名（URL 段），仅 [a-z0-9_-]+，不得用 api/health/proxy/ws 等保留名
+  enabled?: boolean;            // 默认 true
+  endpoint?: string;            // 本地回连地址，如 http://127.0.0.1:42705。
+                                //   省略时按 source 自动发现（见 source 字段）
+  source?: 'ecweb' | 'static';  // endpoint 来源：'ecweb'=读 instance 文件发现端口（忽略 endpoint）；
+                                //   'static'=用显式 endpoint。默认 static
+  serviceType?: string;         // http / websocket / sse / mcp，默认 http
+  visibility?: string;          // public / private，默认 private
+  metadata?: Record<string, unknown>;  // 非敏感描述（label 等）
+}
+
+export interface ServiceProxyConfig {
+  enabled?: boolean;            // 总开关，默认 false
+  services?: ServiceProxyService[];
+}
+
 export interface EvolclawConfig {
   $schema_version?: number;
   aid?: string;
@@ -63,6 +87,7 @@ export interface EvolclawConfig {
   debug?: DebugBlock;
   tunnel?: TunnelConfig;
   aun?: EvolclawAunConfig;   // 从旧 config.json 迁入
+  serviceProxy?: ServiceProxyConfig;  // AUN Service Proxy：把本地服务暴露到 AUN 网络
   ecweb?: {
     enabled?: boolean;        // true = evolclaw start 时自动后台启动 ecweb
     port?: number;            // 监听端口，默认 42705
@@ -262,8 +287,8 @@ export function autoMigrateIfNeeded(): void {
     baseagents: {} as any,
     models: oldConfig.models,
     projects: oldConfig.projects ? { defaultPath: oldConfig.projects.defaultPath } : undefined,
-    chatmode: oldConfig.chatmode,
-    show_activities: oldConfig.showActivities,
+    chatmode: migrateChatmode(oldConfig.chatmode),
+    show_activities: migrateShowActivities(oldConfig.showActivities),
     flush_delay: oldConfig.flushDelay,
     debounce: oldConfig.debounce,
     aun: oldConfig.channels?.aun?.keystorePath ? { keystorePath: oldConfig.channels.aun.keystorePath } : undefined,
@@ -391,7 +416,8 @@ function buildAgentConfigFromLegacy(aid: string, raw: any, globalConfig: any): A
     active_baseagent: activeBaseagent,
     baseagents: raw.agents ? filterBaseagents(raw.agents) : undefined,
     projects: raw.projects,
-    chatmode: raw.chatmode,
+    chatmode: migrateChatmode(raw.chatmode),
+    show_activities: migrateShowActivities(raw.show_activities),
   } as AgentConfig;
 }
 
@@ -436,7 +462,8 @@ function buildAgentConfigFromGlobalChannels(aid: string, globalConfig: any): Age
     channels,
     active_baseagent: activeBaseagent,
     projects: globalConfig.projects,
-    chatmode: globalConfig.chatmode,
+    chatmode: migrateChatmode(globalConfig.chatmode),
+    show_activities: migrateShowActivities(globalConfig.showActivities),
   } as AgentConfig;
 }
 
@@ -447,6 +474,28 @@ function filterBaseagents(agents: any): BaseagentsBlock | undefined {
     if (agents[k] && typeof agents[k] === 'object') result[k] = agents[k];
   }
   return Object.keys(result).length > 0 ? result : undefined;
+}
+
+/**
+ * 迁移 chatmode：保持对象形式向后兼容（旧格式 {private, group} → 保留原值）
+ */
+function migrateChatmode(old: any): ChatmodeBlock | undefined {
+  if (!old) return undefined;
+  if (typeof old === 'object') return old;  // 已是对象，直接返回
+  // 标量（极少见） → 转为 {private: value}
+  if (typeof old === 'string') return { private: old as any };
+  return undefined;
+}
+
+/**
+ * 迁移 show_activities：四值（all/dm-only/owner-dm-only/none）→ 二值（all/none）
+ */
+function migrateShowActivities(old: any): ShowActivitiesMode | undefined {
+  if (!old) return undefined;
+  if (old === 'all') return 'all';
+  if (old === 'none') return 'none';
+  // dm-only / owner-dm-only 映射为 all（语义最接近："私聊时显示"）
+  return 'all';
 }
 
 
@@ -609,6 +658,7 @@ export function mergeForAgent(agent: AgentConfig, defaults: DefaultsConfig | nul
     active_baseagent: agent.active_baseagent ?? d.active_baseagent,
     baseagents: deepMergeBlocks<BaseagentsBlock>(d.baseagents, agent.baseagents),
     models: deepMergeBlocks<ModelsBlock>(d.models, agent.models),
+    roles: deepMergeBlocks<Record<string, RoleOverride>>(d.roles, agent.roles),
     projects: deepMergeBlocks<ProjectsBlock>(d.projects, agent.projects),
     chatmode: deepMergeBlocks<ChatmodeBlock>(d.chatmode, agent.chatmode),
     show_activities: agent.show_activities ?? d.show_activities,

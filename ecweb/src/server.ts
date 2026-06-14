@@ -111,6 +111,26 @@ function validateAndRenew(token: string, now: number): boolean {
 
 // ── Static ──
 
+// 经 AUN Service Proxy 转发时，proxy-server 注入 x-forwarded-prefix 头，
+// 值为外部前缀（如 /evolai/ecweb）。把它作为 <base href> 注入 index.html，
+// 使相对路径资源（style.css / app.js / api / ws）在带不带尾斜杠时都正确解析。
+// 本地直连无此头，<base> 注入为 "/"，行为不变。
+function forwardedPrefix(req: http.IncomingMessage): string {
+  const raw = req.headers['x-forwarded-prefix'];
+  const value = (Array.isArray(raw) ? raw[0] : raw || '').trim();
+  // 安全：只接受形如 /a/b 的简单路径，拒绝含协议、双斜杠、引号、尖括号等的值
+  if (!value || !/^\/[A-Za-z0-9._~%/-]*$/.test(value)) return '';
+  return value.replace(/\/+$/, '');  // 去尾斜杠，注入时统一补
+}
+
+function injectBaseHref(html: string, prefix: string): string {
+  const base = prefix ? `${prefix}/` : '/';
+  const tag = `<base href="${base}">`;
+  // 若已有 <base> 则替换，否则插在 <head> 之后
+  if (/<base\b[^>]*>/i.test(html)) return html.replace(/<base\b[^>]*>/i, tag);
+  return html.replace(/<head[^>]*>/i, (m) => `${m}\n  ${tag}`);
+}
+
 function serveStatic(req: http.IncomingMessage, res: http.ServerResponse): void {
   let urlPath = (req.url || '/').split('?')[0];
   if (urlPath === '/') urlPath = '/index.html';
@@ -119,7 +139,16 @@ function serveStatic(req: http.IncomingMessage, res: http.ServerResponse): void 
   if (!file.startsWith(STATIC_DIR)) { res.writeHead(403).end('Forbidden'); return; }
   fs.readFile(file, (err, data) => {
     if (err) { res.writeHead(404).end('Not Found'); return; }
-    res.writeHead(200, { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream' });
+    const ext = path.extname(file);
+    // index.html 注入 <base href>，适配 AUN Service Proxy 前缀
+    if (ext === '.html') {
+      const prefix = forwardedPrefix(req);
+      const html = injectBaseHref(data.toString('utf-8'), prefix);
+      res.writeHead(200, { 'Content-Type': MIME[ext] });
+      res.end(html);
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream' });
     res.end(data);
   });
 }
@@ -222,6 +251,18 @@ function isLocalhost(req: http.IncomingMessage): boolean {
   return addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1';
 }
 
+/**
+ * 判定「真本地直连」：socket 地址是回环 AND 无 x-aun-provider-aid 头。
+ * proxy-server 回连本地时 remoteAddress 也是 127.0.0.1，但会注入 x-aun-provider-aid
+ * 可信头（访客伪造的 x-aun-* 会被 proxy-server 剥掉）。只有真本地直连时两条件同时满足。
+ * 真本地直连免配对（自动发 token），隧道/远程需配对码。
+ */
+function isLocalDirect(req: http.IncomingMessage): boolean {
+  if (!isLocalhost(req)) return false;
+  const providerAid = req.headers['x-aun-provider-aid'];
+  return !providerAid || (Array.isArray(providerAid) ? providerAid.length === 0 : !providerAid.trim());
+}
+
 function genPairingCode(): string {
   return String(crypto.randomInt(0, 1000000)).padStart(6, '0');
 }
@@ -254,6 +295,23 @@ function handlePair(req: http.IncomingMessage, res: http.ServerResponse, pairing
     res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ ok: true, token }));
     log(`✓ 配对成功 from ${ip}（token 缓存 30 天，有访问自动续期）`);
   });
+}
+
+/**
+ * 本地直连免配对：自动发 token。远程（隧道或真远程）需配对码。
+ * 本地直连判定：socket 来源是回环 AND 无 x-aun-provider-aid 头（非隧道）。
+ */
+function issueLocalDirectToken(req: http.IncomingMessage, log: (s: string) => void): string | null {
+  if (!isLocalDirect(req)) return null;
+  const now = Date.now();
+  const token = crypto.randomBytes(32).toString('hex');
+  const store = loadTokens();
+  pruneExpired(store, now);
+  const ip = clientIp(req);
+  store.tokens.push({ token, createdAt: now, lastActive: now, label: `local-direct:${ip}` });
+  saveTokens(store);
+  log(`✓ 本地直连自动授权 from ${ip}`);
+  return token;
 }
 
 // ── WebSocket connection ──
@@ -420,8 +478,10 @@ export async function startWatchWebServer(opts: { port?: number; log?: (s: strin
 
   const server = http.createServer((req, res) => {
     if (req.method === 'GET' && (req.url || '') === '/api/pair-code') {
-      // 仅 localhost 可取码：远程浏览器拿不到，必须由同机的 `ec watch web` 显示给用户
-      if (!isLocalhost(req)) {
+      // 取码 API：仅真本地直连可用（socket 回环 + 无 x-aun-provider-aid）。
+      // 隧道回连虽然 socket 也是 127.0.0.1，但有 x-aun-provider-aid 头 → 拒绝，
+      // 防止远程访客通过隧道拿到配对码（安全漏洞）。
+      if (!isLocalDirect(req)) {
         res.writeHead(403, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'forbidden' }));
         return;
@@ -430,14 +490,25 @@ export async function startWatchWebServer(opts: { port?: number; log?: (s: strin
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ code, expiresAt }));
     } else if (req.method === 'POST' && (req.url || '').startsWith('/api/pair')) {
+      // 配对 API：远程（隧道/真远程）需要配对码；本地直连自动发 token 跳过配对。
+      const autoToken = issueLocalDirectToken(req, log);
+      if (autoToken) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, token: autoToken }));
+        return;
+      }
       handlePair(req, res, pairingCode, pairingExpiry, log);
     } else if (req.method === 'GET' && (req.url || '').startsWith('/api/stats/')) {
-      // Stats API — requires auth
+      // Stats API — 本地直连自动发 token（免鉴权），远程需鉴权
       const authHeader = req.headers.authorization || '';
       const bearerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
       const { query } = parseUrl(req.url || '');
-      const token = bearerToken || query.token || '';
-      if (!validateAndRenew(token, Date.now())) {
+      let token = bearerToken || query.token || '';
+      if (!token) {
+        const autoToken = issueLocalDirectToken(req, log);
+        if (autoToken) token = autoToken;
+      }
+      if (!token || !validateAndRenew(token, Date.now())) {
         res.writeHead(401, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'unauthorized' }));
         return;
@@ -452,7 +523,8 @@ export async function startWatchWebServer(opts: { port?: number; log?: (s: strin
 
   server.on('upgrade', (req, socket, head) => {
     const { query } = parseUrl(req.url || '');
-    const authed = validateAndRenew(query.token || '', Date.now());
+    // 本地直连免 token；远程需 token。
+    const authed = isLocalDirect(req) || validateAndRenew(query.token || '', Date.now());
     wss.handleUpgrade(req, socket, head, (ws) => {
       if (!authed) {
         log(`✗ WS 拒绝（无效 token） from ${clientIp(req)}`);

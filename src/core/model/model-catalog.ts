@@ -12,7 +12,7 @@
 
 import { loadDefaults, loadAgent } from '../../config-store.js';
 import { resolveAnthropicConfig, resolveOpenaiConfig } from '../../agents/baseagent.js';
-import { activeBaseagent } from './model-scope.js';
+import { activeBaseagent } from './config-scope.js';
 import type { BaseagentsBlock } from '../../types.js';
 
 export interface ModelCatalogEntry {

@@ -11,7 +11,7 @@ export interface FeishuChannelConfig {
   admins?: string[];
   flushDelay?: number;  // flush 间隔(秒)，默认使用全局值
   debounce?: number;    // 入站消息去抖间隔(秒)，覆盖全局 debounce
-  showActivities?: 'all' | 'dm-only' | 'owner-dm-only' | 'none';  // 覆盖全局 showActivities
+  showActivities?: 'all' | 'none';  // 覆盖全局 showActivities
 }
 
 export interface FeishuChannelInstanceConfig extends FeishuChannelConfig {
@@ -27,7 +27,7 @@ export interface WechatChannelConfig {
   admins?: string[];
   flushDelay?: number;  // flush 间隔(秒)，默认 3
   debounce?: number;    // 入站消息去抖间隔(秒)，覆盖全局 debounce
-  showActivities?: 'all' | 'dm-only' | 'owner-dm-only' | 'none';  // 覆盖全局 showActivities
+  showActivities?: 'all' | 'none';  // 覆盖全局 showActivities
 }
 
 export interface WechatChannelInstanceConfig extends WechatChannelConfig {
@@ -61,7 +61,7 @@ export interface DingtalkChannelConfig {
   admins?: string[];
   flushDelay?: number;
   debounce?: number;
-  showActivities?: 'all' | 'dm-only' | 'owner-dm-only' | 'none';
+  showActivities?: 'all' | 'none';
   requireMention?: boolean;       // default true — group chats require @mention
   freeResponseChats?: string[];   // conversationId whitelist (skip @mention gate)
 }
@@ -79,7 +79,7 @@ export interface QQBotChannelConfig {
   admins?: string[];
   flushDelay?: number;
   debounce?: number;
-  showActivities?: 'all' | 'dm-only' | 'owner-dm-only' | 'none';
+  showActivities?: 'all' | 'none';
 }
 
 export interface QQBotChannelInstanceConfig extends QQBotChannelConfig {
@@ -95,7 +95,7 @@ export interface WecomChannelConfig {
   admins?: string[];
   flushDelay?: number;
   debounce?: number;
-  showActivities?: 'all' | 'dm-only' | 'owner-dm-only' | 'none';
+  showActivities?: 'all' | 'none';
 }
 
 export interface WecomChannelInstanceConfig extends WecomChannelConfig {
@@ -170,7 +170,7 @@ export interface Config {
     safeModeThreshold?: number;
     timeout?: number;
   };
-  showActivities?: 'all' | 'dm-only' | 'owner-dm-only' | 'none';
+  showActivities?: 'all' | 'none';
   flushDelay?: number;
   debounce?: number;
   chatmode?: {
@@ -256,6 +256,8 @@ export interface SubMessage {
   peerId?: string;
   peerName?: string;
   peerType?: string;
+  /** 入队时解析到的发送者权限角色。群聊批量合并后逐条保留，避免用批次顶层 role 覆盖所有发言。 */
+  peerRole?: SessionIdentity['role'];
   /** 对端网络邻近性（SDK 0.4.9 起明文/密文消息均可携带，具体字段以网关下发为准；逐条保留以支持群聊批量逐条渲染）*/
   sameDevice?: boolean;
   sameNetwork?: boolean;
@@ -270,9 +272,10 @@ export interface SubMessage {
   /**
    * 子消息类别。缺省（普通对端消息）走 private/group 渲染模式；
    * 'owner-hint' 为观察者插话提示，走 inject 渲染模式（owner 信封头）。
+   * 'restart-resume' 为队列恢复提示，仍走普通信封渲染，但处理器会用它切分 pending 插入段。
    * 详见 docs/observer-insert-design.md 第二部分。
    */
-  kind?: 'owner-hint';
+  kind?: 'owner-hint' | 'restart-resume';
   /** owner-hint 专用：提示发出时间（epoch ms），渲染成信封头 {{injectTime}}。 */
   injectTime?: number;
   /** owner-hint 专用：提示来源 owner AID。 */
@@ -305,12 +308,22 @@ export interface Message {
   /** 本条被 @ 的全部 AID（含 self；@all 时含字面 "all"）。仅供消息信封渲染。 */
   mentionAids?: string[];
   messageId?: string;
+  /** 队列批量合并时的批次 role。仅当批内 role 完全一致时设置；逐条 role 见 SubMessage.peerRole。 */
+  batchRole?: SessionIdentity['role'];
   /**
    * 批量合并时保留的逐条子消息（每条带自己的发送者与时刻）。
    * 队列贪心合并多条消息后挂在这里；消息渲染层逐条渲染再组装。
    * 单条消息可不设（渲染层退回 content）。
    */
   items?: SubMessage[];
+  /**
+   * 队列重启恢复标记。
+   * submitted=true 表示该消息来自重启前已提交给 runner 的 active batch，
+   * 只能用恢复提示继续，不应重放原始 active 内容。
+   * pendingInterrupted=true 表示恢复提示后面拼接了仍处于 queued 的新消息，
+   * 渲染层只把 pending 部分包进“新消息插入”提示。
+   */
+  restartResume?: { submitted: true; pendingInterrupted?: boolean };
   replyContext?: ReplyContext;       // Channel 预构建的回复上下文（渠道无关）
   dispatchMode?: string;            // 群聊分发模式，由渠道适配器从服务器信封解析后注入（mention|broadcast）
   timestamp?: number;
@@ -459,7 +472,7 @@ export interface ChannelOptions {
   fileMarkerPattern?: RegExp;       // Feishu: /\[SEND_FILE:([^\]]+)\]/g
   supportsImages?: boolean;         // Feishu: true, AUN: false
   flushDelay?: number;              // 渠道级 flush 间隔(秒)，覆盖全局 config.flushDelay
-  showActivities?: 'all' | 'dm-only' | 'owner-dm-only' | 'none';  // 覆盖全局 showActivities
+  showActivities?: 'all' | 'none';  // 覆盖全局 showActivities
 }
 
 // 渠道策略接口
@@ -532,6 +545,8 @@ export interface AgentInfo {
   name: string;
   /** agent.md 里的友好名（本地缓存优先，缺失时异步从网络拉取）；无则回退 aid 短名 */
   displayName?: string;
+  /** personal/persona.md 里 "我叫**名字**" 提取的个人名 */
+  personalName?: string;
   aid: string;
   status: AgentStatus;
   channels: string[];
@@ -562,8 +577,8 @@ export interface EvolAgentHandle {
   isOwner(channelName: string, userId: string): boolean;
   isAdmin(channelName: string, userId: string): boolean;
   setOwner(channelName: string, userId: string): void;
-  getShowActivities(channelName: string): 'all' | 'dm-only' | 'owner-dm-only' | 'none';
-  setShowActivities(channelName: string, mode: 'all' | 'dm-only' | 'owner-dm-only' | 'none'): void;
+  getShowActivities(channelName: string): 'all' | 'none';
+  setShowActivities(channelName: string, mode: 'all' | 'none'): void;
   setActiveBaseagent(value: string | undefined): void;
   setBaseagentModel(value: string | undefined): void;
   setBaseagentEffort(value: string | undefined): void;
@@ -590,8 +605,8 @@ export interface EvolAgentRegistryHandle {
   isAdmin(channelName: string, userId: string): boolean;
   getOwner(channelName: string): string | undefined;
   setChannelOwner(channelName: string, userId: string): void;
-  getShowActivities(channelName: string): 'all' | 'dm-only' | 'owner-dm-only' | 'none';
-  setShowActivities(channelName: string, mode: 'all' | 'dm-only' | 'owner-dm-only' | 'none'): void;
+  getShowActivities(channelName: string): 'all' | 'none';
+  setShowActivities(channelName: string, mode: 'all' | 'none'): void;
 }
 
 // ── AUN AID Connection State ───────────────────────────────────────
@@ -685,11 +700,16 @@ export interface BaseagentsBlock {
 export interface ModelsBlock {
   default?: string;
   allowed?: string[];
-  by_role?: {
-    owner?: string;
-    admin?: string;
-    guest?: string;
-  };
+}
+
+/**
+ * 角色级配置覆盖块——内嵌在 AgentConfig.roles[role] 下。
+ * 只承载真正"按角色派生值"的字段：model/effort（baseagents）+ permissionMode。
+ * 其余字段（show_activities/chatmode/dispatch）与角色无关，不在此。
+ */
+export interface RoleOverride {
+  baseagents?: BaseagentsBlock;
+  permissionMode?: string;
 }
 
 export interface ProjectsBlock {
@@ -718,7 +738,7 @@ export interface DebugBlock {
   upmsg?: boolean;
 }
 
-export type ShowActivitiesMode = 'all' | 'dm-only' | 'owner-dm-only' | 'none';
+export type ShowActivitiesMode = 'all' | 'none';
 
 // channels[].* —— per-agent，新结构里以列表形式存储。
 // 元素必带 type + name，name 是该 agent 内 channel 类型下的本地标识（不含 '#'）。
@@ -794,6 +814,8 @@ export interface DefaultsConfig {
   active_baseagent?: string;
   baseagents?: BaseagentsBlock;
   models?: ModelsBlock;
+  /** 角色级配置覆盖：role → { baseagents, permissionMode }。提供全局角色基线，被 per-agent roles 覆盖。 */
+  roles?: Record<string, RoleOverride>;
   projects?: ProjectsBlock;
   chatmode?: ChatmodeBlock;
   show_activities?: ShowActivitiesMode;
@@ -828,6 +850,8 @@ export interface AgentConfig {
   active_baseagent?: string;
   baseagents?: BaseagentsBlock;
   models?: ModelsBlock;
+  /** 角色级配置覆盖：role → { baseagents, permissionMode }。覆盖 defaults.roles 的同名角色。 */
+  roles?: Record<string, RoleOverride>;
   projects?: ProjectsBlock;
   chatmode?: ChatmodeBlock;
   dispatch?: 'mention' | 'broadcast';

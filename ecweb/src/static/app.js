@@ -3,14 +3,34 @@
 const $ = (sel) => document.querySelector(sel);
 const TOKEN_KEY = 'ecWatchToken';
 
+// ── 基础路径 ──
+// 本地直连时页面在 "/"，经 AUN Service Proxy 时页面在 "/ecweb/"。
+// 取当前页面所在目录（含尾斜杠）作为所有 API/WS 的前缀，使绝对路径在两种
+// 部署下都正确（proxy-server 用首段路径选服务，前缀不能丢）。
+const BASE = location.pathname.replace(/[^/]*$/, '');
+const apiUrl = (p) => BASE + p.replace(/^\/+/, '');
+
 // ── 配对 ──
 async function pair(code) {
-  const resp = await fetch('/api/pair', {
+  const resp = await fetch(apiUrl('api/pair'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ code }),
   });
   return resp.json();
+}
+
+// 本地直连免配对：用空码探测，服务端若判定本地直连会直接发 token。
+// 远程（隧道/真远程）会返回配对码错误，此时回落到配对页。
+async function tryLocalAutoPair() {
+  try {
+    const res = await pair('');
+    if (res && res.ok && res.token) {
+      localStorage.setItem(TOKEN_KEY, res.token);
+      return true;
+    }
+  } catch {}
+  return false;
 }
 
 function showPairPage(hint) {
@@ -70,7 +90,7 @@ function connect() {
   const token = localStorage.getItem(TOKEN_KEY);
   if (!token) { showPairPage(); return; }
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  ws = new WebSocket(`${proto}://${location.host}/ws?token=${encodeURIComponent(token)}`);
+  ws = new WebSocket(`${proto}://${location.host}${BASE}ws?token=${encodeURIComponent(token)}`);
 
   ws.onopen = () => {
     setConnStatus('● 已连接', 'ok');
@@ -1799,7 +1819,7 @@ function fmtTokens(n) {
 async function loadUsageDashboard() {
   let data;
   try {
-    const resp = await fetch('/api/stats/dashboard', {
+    const resp = await fetch(apiUrl('api/stats/dashboard'), {
       headers: { Authorization: 'Bearer ' + localStorage.getItem(TOKEN_KEY) }
     });
     if (!resp.ok) data = null;
@@ -1869,7 +1889,7 @@ async function loadUsageDashboard() {
 async function loadUsageOverview() {
   let data;
   try {
-    const resp = await fetch('/api/stats/overview', {
+    const resp = await fetch(apiUrl('api/stats/overview'), {
       headers: { Authorization: 'Bearer ' + localStorage.getItem(TOKEN_KEY) }
     });
     data = resp.ok ? await resp.json() : null;
@@ -1979,8 +1999,8 @@ async function loadExplorerSidebar() {
   var headers = { Authorization: 'Bearer ' + token };
   try {
     var [agentsResp, peersResp] = await Promise.all([
-      fetch('/api/stats/agents', { headers }),
-      fetch('/api/stats/peers', { headers }),
+      fetch(apiUrl('api/stats/agents'), { headers }),
+      fetch(apiUrl('api/stats/peers'), { headers }),
     ]);
     var agents = agentsResp.ok ? await agentsResp.json() : [];
     var peers = peersResp.ok ? await peersResp.json() : [];
@@ -2052,7 +2072,7 @@ async function runExplorerQuery() {
 
   var data;
   try {
-    var resp = await fetch('/api/stats/explorer?' + params.toString(), {
+    var resp = await fetch(apiUrl('api/stats/explorer?' + params.toString()), {
       headers: { Authorization: 'Bearer ' + localStorage.getItem(TOKEN_KEY) }
     });
     if (!resp.ok) return;
@@ -2331,10 +2351,14 @@ function monDualLine(elId, varKey, times, isDark, title, series, fmtY, yRange) {
   });
 }
 
-window.addEventListener('DOMContentLoaded', () => {
+window.addEventListener('DOMContentLoaded', async () => {
   initTheme();
   initPairUI();
   initMsgTipFloat();
+  // 已有 token 直接进；否则先试本地直连免配对，失败再回落配对页。
+  if (!localStorage.getItem(TOKEN_KEY)) {
+    await tryLocalAutoPair();
+  }
   if (localStorage.getItem(TOKEN_KEY)) {
     showApp();
     startApp();

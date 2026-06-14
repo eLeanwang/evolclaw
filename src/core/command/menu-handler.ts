@@ -1,4 +1,6 @@
-import { DEFAULT_PERMISSION_MODE, type Session, type Trigger } from '../../types.js';
+import { type Session, type Trigger } from '../../types.js';
+import { resolvePermissionMode } from '../model/config-scope.js';
+import { formatPeerKey } from '../relation/peer-identity.js';
 import { type AgentRunnerFull, hasModelSwitcher, hasPermissionController } from '../../agents/runner-types.js';
 import { getCodexEfforts } from '../../agents/codex-runner.js';
 import { resolvePaths, getPackageRoot } from '../../paths.js';
@@ -336,8 +338,6 @@ export function getMenuItems(this: any, role: string, chatType: string = 'privat
         { cmd: '/check', label: '检查渠道状态', desc: '检查各消息渠道的连接健康状态' },
         { cmd: '/activity', label: '控制中间输出显示', desc: '设置工具调用过程的可见范围', next: { type: 'select', items: [
           { value: 'all', label: '全部显示', desc: '所有用户均可见中间输出' },
-          { value: 'dm', label: '仅私聊', desc: '仅私聊中显示中间输出' },
-          { value: 'owner', label: '仅 owner 私聊', desc: '仅 owner 的私聊中显示' },
           { value: 'none', label: '不显示', desc: '关闭所有中间输出' },
         ] } },
         ...(isControlScope && isOwner ? [
@@ -492,9 +492,7 @@ export async function getSubMenuItems(this: any, cmd: string, channel: string, c
   if (cmd === '/activity') {
     const currentMode = this.agentRegistry?.getShowActivities?.(channel) ?? 'all';
     return [
-      { value: 'all', label: '全部显示', selected: currentMode === 'all' },
-      { value: 'dm', label: '仅私聊显示', selected: currentMode === 'dm-only' },
-      { value: 'owner', label: '仅 owner 私聊显示', selected: currentMode === 'owner-dm-only' },
+      { value: 'all', label: '私聊显示', selected: currentMode === 'all' },
       { value: 'none', label: '全部静默', selected: currentMode === 'none' },
     ];
   }
@@ -532,7 +530,16 @@ export async function getSubMenuItems(this: any, cmd: string, channel: string, c
   }
 
   if (cmd === '/perm') {
-    const currentMode = session?.metadata?.permissionMode ?? DEFAULT_PERMISSION_MODE;
+    const permSelfAid = this.getOwningAgent?.(channel)?.aid;
+    const permChannelType = this.resolveChannelType?.(channel);
+    const permPeerKeyId = session?.chatType === 'group'
+      ? (session.metadata?.groupId || channelId)
+      : (userId || session?.metadata?.peerId);
+    const permPeerKey = (permChannelType && permPeerKeyId)
+      ? formatPeerKey(permChannelType, permPeerKeyId)
+      : undefined;
+    const permRole = (overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId)).role;
+    const currentMode = resolvePermissionMode({ self: permSelfAid || undefined, peerKey: permPeerKey, role: permRole });
     const permAgent = this.getAgent(channel, session?.agentId);
     const validModes = hasPermissionController(permAgent)
       ? permAgent.listModes().filter(m => m.available).map(m => m.key)
@@ -725,7 +732,16 @@ export async function execMenuQuery(this: any,
   if (cmdBase === '/perm') {
     const need = this.requireSession(session);
     if (need) return need;
-    const currentMode = session!.metadata?.permissionMode ?? DEFAULT_PERMISSION_MODE;
+    const pmSelfAid = this.getOwningAgent?.(channel)?.aid;
+    const pmChannelType = this.resolveChannelType?.(channel);
+    const pmPeerKeyId = session!.chatType === 'group'
+      ? (session!.metadata?.groupId || channelId)
+      : (userId || session!.metadata?.peerId);
+    const pmPeerKey = (pmChannelType && pmPeerKeyId)
+      ? formatPeerKey(pmChannelType, pmPeerKeyId)
+      : undefined;
+    const pmRole = this.sessionManager.resolveIdentity(channel, userId).role;
+    const currentMode = resolvePermissionMode({ self: pmSelfAid || undefined, peerKey: pmPeerKey, role: pmRole });
     return { data: { mode: currentMode } };
   }
 
@@ -954,15 +970,26 @@ export async function execMenuUpdate(this: any,
       ? permAgent.listModes().filter(m => m.available).map(m => m.key)
       : [...PERMISSION_MODE_KEYS];
     if (!validModes.includes(arg)) return { error: `无效模式: ${arg}`, code: 'INVALID_VALUE' };
-    const metadata = { ...(session!.metadata || {}), permissionMode: arg };
-    await this.sessionManager.updateSession(session!.id, { metadata });
+    // 写关系级 config.json（运行时 per-message 解析，不再写 session.metadata）
+    const permSelfAid = this.getOwningAgent?.(channel)?.aid;
+    const permChannelType = this.resolveChannelType?.(channel);
+    const permPeerKeyId = session!.chatType === 'group'
+      ? (session!.metadata?.groupId || channelId)
+      : (userId || session!.metadata?.peerId);
+    const permPeerKey = (permChannelType && permPeerKeyId)
+      ? formatPeerKey(permChannelType, permPeerKeyId)
+      : undefined;
+    if (permSelfAid && permPeerKey) {
+      const { writeRelationPermissionMode } = await import('../model/config-scope.js');
+      writeRelationPermissionMode(permSelfAid, permPeerKey, arg);
+    }
     return { data: { mode: arg } };
   }
 
   if (cmdBase === '/activity') {
-    const modeMap: Record<string, string> = { all: 'all', dm: 'dm-only', owner: 'owner-dm-only', none: 'none' };
+    const modeMap: Record<string, string> = { all: 'all', none: 'none' };
     const newMode = modeMap[arg];
-    if (!newMode) return { error: `无效模式: ${arg}，可选: all / dm / owner / none`, code: 'INVALID_VALUE' };
+    if (!newMode) return { error: `无效模式: ${arg}，可选: all / none`, code: 'INVALID_VALUE' };
     if (identity.role !== 'owner') return { error: '中间输出模式切换仅限 owner', code: 'NO_PERMISSION' };
     if (!this.agentRegistry?.setShowActivities) return { error: '找不到通道所属 agent，无法持久化', code: 'EXEC_FAILED' };
     this.agentRegistry.setShowActivities(channel, newMode as any);
