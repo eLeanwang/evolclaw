@@ -1017,6 +1017,7 @@ export interface Trigger {
   nextFireAt: number;          // Unix ms
   targetChannel: string;
   targetChannelId: string;
+  targetChatType?: 'private' | 'group';
   /** Channel type resolved at creation time (CommandHandler has channelTypeMap);
    *  the scheduler has no channelTypeMap, so it relies on this stored value. */
   targetChannelType?: string;

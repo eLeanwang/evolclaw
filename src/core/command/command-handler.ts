@@ -724,6 +724,7 @@ export class CommandHandler {
     peerId: string,
     isAdmin: boolean,
     messageId?: string,
+    chatType?: string,
   ): Promise<string> {
     // Resolve trigger manager/scheduler from the owning agent of this channel
     const owningAgent = this.getOwningAgent(channel);
@@ -871,7 +872,7 @@ export class CommandHandler {
       const result = parseTriggerSet(args);
       if (!result.ok) return `❌ ${result.error}`;
 
-      const reg = await this.registerTriggerFromParsed(result.value, channel, channelId, peerId, messageId);
+      const reg = await this.registerTriggerFromParsed(result.value, channel, channelId, peerId, messageId, chatType);
       if (!reg.ok) return `❌ ${reg.error}`;
       const nextStr = new Date(reg.trigger.nextFireAt).toLocaleString();
       return `✅ 触发器已注册：**${reg.trigger.name}**\n下次触发：${nextStr}`;
@@ -886,6 +887,7 @@ export class CommandHandler {
   private async registerTriggerFromParsed(
     parsed: ParsedTriggerSet,
     channel: string, channelId: string, peerId: string, messageId?: string,
+    chatType?: string,
   ): Promise<{ ok: true; trigger: Trigger } | { ok: false; error: string }> {
     const owningAgent = this.getOwningAgent(channel);
     const scheduler = (owningAgent?.triggerScheduler ?? this.triggerScheduler) as TriggerScheduler | undefined;
@@ -906,6 +908,14 @@ export class CommandHandler {
     // Validate channelId format for AUN: must look like an AID (contains '.')
     const targetChannelType = this.resolveChannelType(targetChannelName);
     const targetChannelId = parsed.targetChannelId ?? channelId;
+    const activeTarget = this.sessionManager.getActiveSessionSync(targetChannelName, targetChannelId);
+    const targetChatType = activeTarget?.chatType === 'group'
+      ? 'group'
+      : activeTarget?.chatType === 'private'
+        ? 'private'
+        : chatType === 'group'
+          ? 'group'
+          : 'private';
     if (targetChannelType === 'aun' && parsed.targetChannelId && !parsed.targetChannelId.includes('.')) {
       return { ok: false, error: `AUN 渠道的 --channelid 必须是 AID 格式（如 user.agentid.pub），收到："${parsed.targetChannelId}"` };
     }
@@ -918,6 +928,7 @@ export class CommandHandler {
       nextFireAt,
       targetChannel: targetChannelName,
       targetChannelId,
+      targetChatType,
       targetChannelType,
       targetThreadId: parsed.targetThreadId,
       targetSessionStrategy: parsed.targetSessionStrategy,

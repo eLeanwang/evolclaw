@@ -727,6 +727,8 @@ export class MessageProcessor {
           ? (sessionKey) => this.messageQueue!.cancelIntercept(sessionKey)
           : undefined,
         policyHook: proactive ? (toolName, toolInput) => {
+          // Trigger messages exempt from first-tool enforcement (cron intent is silent execution)
+          if (message.source === 'trigger') return undefined;
           // 解析是否是允许的首次表态命令
           const isAllowedFirstTool = toolName === 'Bash' && (() => {
             const cmd = (toolInput.command as string) || '';
@@ -1068,7 +1070,8 @@ export class MessageProcessor {
               renderer,
               resetTimer,
               shouldSuppress,
-              proactive
+              proactive,
+              message.source === 'trigger'
             );
             // 探测成功（退避期内到达探测点且用的是 evolclaw 模型）→ 清零降级状态
             if (fbState.fallbackActive && !skipEvolclawModel && !usedFallback) {
@@ -1137,7 +1140,8 @@ export class MessageProcessor {
               renderer,
               resetTimer,
               shouldSuppress,
-              proactive
+              proactive,
+              message.source === 'trigger'
             );
           } else {
             throw new Error('CONTEXT_COMPACT_FAILED');
@@ -1173,7 +1177,7 @@ export class MessageProcessor {
             modelOverride
           );
           agent.registerStream(streamKey, retryStream);
-          streamResult = await this.processEventStream(retryStream, session, agent, renderer, resetTimer, shouldSuppress, proactive);
+          streamResult = await this.processEventStream(retryStream, session, agent, renderer, resetTimer, shouldSuppress, proactive, message.source === 'trigger');
 
           // 重试后仍然 prompt_too_long：清理 renderer 中可能混入的错误文本，显示友好提示
           const retryStillTooLong = streamResult.isError && streamHitContextLimit(streamResult);
@@ -1875,7 +1879,8 @@ export class MessageProcessor {
     renderer: IMRenderer,
     resetTimer: (eventType?: string, toolName?: string) => void,
     shouldSuppress: () => boolean,
-    proactive?: { firstToolDone: boolean; toolCount: number; lastQueueReminder: number; chatType: string } | null
+    proactive?: { firstToolDone: boolean; toolCount: number; lastQueueReminder: number; chatType: string } | null,
+    isTrigger?: boolean
   ): Promise<StreamRunResult> {
     // Per-session agent name for stats bucketing
     const agentNameForStats = this.agentRegistry?.resolveByChannel(session.metadata?.channelKey || session.channel)?.name ?? '<unknown>';
@@ -2108,7 +2113,7 @@ export class MessageProcessor {
           const isContextTooLong = event.terminalReason === 'prompt_too_long'
             || isContextTooLongText(event.errors?.join(' ') || '')
             || isContextTooLongText(lastReplyText);
-          if (event.isError && !hasErrorResult && !shouldSuppress() && !isUserInterrupt && !isContextTooLong) {
+          if (event.isError && !hasErrorResult && !shouldSuppress() && !isUserInterrupt && !isContextTooLong && !isTrigger) {
             const errorSummary = event.errors?.join('; ') || '任务执行失败';
             // 使用 terminalReason 提供更友好的错误提示（不带 emoji，由 formatter 统一加）
             const userFriendlyMessage = event.terminalReason === 'prompt_too_long'

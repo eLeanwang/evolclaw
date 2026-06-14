@@ -698,38 +698,6 @@ async function main() {
       if (ev.reason === 'interrupted') scheduler.onTriggerComplete(ev.triggerId, 'interrupted');
     });
 
-    // ── Trigger 失败/跳过通知：向 targetChannel 发送告警消息 ──
-    eventBus.subscribe('trigger:failed', (ev: any) => {
-      const adapter = processor.getAdapter(ev.targetChannel);
-      if (!adapter) return;
-      const phaseLabel = ev.phase === 'enqueue' ? '入队' : '执行';
-      const timeStr = ev.fireTime ? new Date(ev.fireTime).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) : '未知';
-      const text = `⚠️ 定时任务 [${ev.name || ev.triggerId}] 执行失败\n阶段：${phaseLabel}\n原因：${ev.error}\n触发时间：${timeStr}`;
-      const envelope: OutboundEnvelope = {
-        taskId: `trigger-notify:${ev.triggerId}`,
-        channel: ev.targetChannel,
-        channelId: ev.targetChannelId,
-        agentName: 'system',
-        chatmode: 'interactive',
-        timestamp: Date.now(),
-      };
-      adapter.send(envelope, { kind: 'result.text', text, isFinal: true, format: 'plain' }).catch(() => {});
-    });
-    eventBus.subscribe('trigger:skipped', (ev: any) => {
-      if (ev.reason !== 'overlap') return;
-      const adapter = processor.getAdapter(ev.targetChannel);
-      if (!adapter) return;
-      const text = `⚠️ 定时任务 [${ev.name || ev.triggerId}] 本次跳过（上次执行仍在进行中）`;
-      const envelope: OutboundEnvelope = {
-        taskId: `trigger-notify:${ev.triggerId}`,
-        channel: ev.targetChannel,
-        channelId: ev.targetChannelId,
-        agentName: 'system',
-        chatmode: 'interactive',
-        timestamp: Date.now(),
-      };
-      adapter.send(envelope, { kind: 'result.text', text, isFinal: true, format: 'plain' }).catch(() => {});
-    });
     // Note: only the primary agent's scheduler is wired to cmdHandler.
     // Non-primary agent channels will receive "⚠️ 触发器功能未启用" when using /trigger.
     // Full per-channel scheduler routing is a future improvement.
@@ -739,6 +707,39 @@ async function main() {
       logger.error(`[Trigger] Scheduler init failed for ${agent.aid}: ${err}`);
     }
   }
+
+  // ── Trigger 失败/跳过通知：向 targetChannel 发送告警消息（仅注册一次，在循环外）──
+  eventBus.subscribe('trigger:failed', (ev: any) => {
+    const adapter = processor.getAdapter(ev.targetChannel);
+    if (!adapter) return;
+    const phaseLabel = ev.phase === 'enqueue' ? '入队' : '执行';
+    const timeStr = ev.fireTime ? new Date(ev.fireTime).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) : '未知';
+    const text = `⚠️ 定时任务 [${ev.name || ev.triggerId}] 执行失败\n阶段：${phaseLabel}\n原因：${ev.error}\n触发时间：${timeStr}`;
+    const envelope: OutboundEnvelope = {
+      taskId: `trigger-notify:${ev.triggerId}`,
+      channel: ev.targetChannel,
+      channelId: ev.targetChannelId,
+      agentName: 'system',
+      chatmode: 'interactive',
+      timestamp: Date.now(),
+    };
+    adapter.send(envelope, { kind: 'result.text', text, isFinal: true, format: 'plain' }).catch(() => {});
+  });
+  eventBus.subscribe('trigger:skipped', (ev: any) => {
+    if (ev.reason !== 'overlap') return;
+    const adapter = processor.getAdapter(ev.targetChannel);
+    if (!adapter) return;
+    const text = `⚠️ 定时任务 [${ev.name || ev.triggerId}] 本次跳过（上次执行仍在进行中）`;
+    const envelope: OutboundEnvelope = {
+      taskId: `trigger-notify:${ev.triggerId}`,
+      channel: ev.targetChannel,
+      channelId: ev.targetChannelId,
+      agentName: 'system',
+      chatmode: 'interactive',
+      timestamp: Date.now(),
+    };
+    adapter.send(envelope, { kind: 'result.text', text, isFinal: true, format: 'plain' }).catch(() => {});
+  });
 
 
   // 默认策略
