@@ -81,13 +81,13 @@ export async function main(args: string[]) {
       }
       break;
     case 'start':
-      await cmdStart();
+      await cmdStart({ diagnose: args.includes('--diagnose') || args.includes('-d') });
       break;
     case 'stop':
       await cmdStop();
       break;
     case 'restart':
-      await cmdRestart({ clear: args.includes('--clear') });
+      await cmdRestart({ clear: args.includes('--clear'), diagnose: args.includes('--diagnose') || args.includes('-d') });
       break;
     case 'status':
       await cmdStatus();
@@ -157,6 +157,11 @@ export async function main(args: string[]) {
     case 'model': {
       const { cmdModel } = await import('./model.js');
       await cmdModel(args.slice(1));
+      break;
+    }
+    case 'config': {
+      const { cmdConfig } = await import('./config.js');
+      await cmdConfig(args.slice(1));
       break;
     }
     case 'stats': {

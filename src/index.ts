@@ -3,7 +3,10 @@ import { CodexSessionFileAdapter } from './core/session/adapters/codex-session-f
 import { GeminiSessionFileAdapter } from './core/session/adapters/gemini-session-file-adapter.js';
 import { ensureDataDirs, resolvePaths, agentDir, getPackageRoot, agentMdPath } from './paths.js';
 import { resolveAnthropicConfig } from './agents/baseagent.js';
-import { loadDefaults, loadAllAgents, mergeForAgent, ensureAgentDirSkeleton, autoMigrateIfNeeded, migrateIdentitiesIfNeeded, migrateProcessConfigIfNeeded, loadEvolclawConfig } from './config-store.js';
+import { loadDefaults, loadAllAgents, mergeForAgent, ensureAgentDirSkeleton, migrateIdentitiesIfNeeded, migrateProcessConfigIfNeeded, loadEvolclawConfig } from './config-store.js';
+import { initConfigManager } from './core/config/config-manager.js';
+import { snapshot as configSnapshot, retentionCleanup, readCurrent, readWVersion, writeWVersion, diffWorkingVsVersion, paramDiff, incrementSuccessCount, collectConfigFiles } from './core/config/snapshot.js';
+import { appendBootLog, selfDiagnose } from './core/config/boot-log.js';
 import type { Config, MergedAgentConfig, AgentConfig, DefaultsConfig } from './types.js';
 import { CONFIG_SCHEMA_VERSION } from './types.js';
 import dotenv from 'dotenv';
@@ -121,6 +124,68 @@ function readEvolclawVersion(): string {
   }
 }
 
+/**
+ * 启动失败时分类打印（不交互、不自动回落，只给准确提示）。
+ * 分类：W 解析失败 / W 有未存改动(param diff) / W==w-version(版本自身坏) → 建议自检命令。
+ */
+function printConfigFailure(skipped: Array<{ dirName: string; reason: string }>): void {
+  const root = resolvePaths().root;
+  const agentsDir = path.join(root, 'agents');
+  const lines: string[] = ['❌ 启动失败：无法加载任何 self-agent 配置。'];
+
+  // 先检查是否有解析错误（语法级失败）
+  const parseErrors: string[] = [];
+  if (fs.existsSync(agentsDir)) {
+    for (const entry of fs.readdirSync(agentsDir, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const cfgPath = path.join(agentsDir, entry.name, 'config.json');
+      if (!fs.existsSync(cfgPath)) continue;
+      try { JSON.parse(fs.readFileSync(cfgPath, 'utf-8')); } catch (e) {
+        parseErrors.push(`  agents/${entry.name}/config.json 无法解析: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+  }
+
+  if (parseErrors.length > 0) {
+    lines.push('配置文件语法错误：');
+    lines.push(...parseErrors);
+    const wv = readWVersion();
+    if (wv) lines.push(`  回退到上一版本: ec config restore ${wv.delta}`);
+  } else {
+    // 检查 W vs w-version
+    const wv = readWVersion();
+    if (wv) {
+      const diff = diffWorkingVsVersion(wv.delta);
+      if (!('error' in diff) && (diff.modified.length + diff.added.length + diff.deleted.length > 0)) {
+        lines.push(`当前参数与版本 ${wv.delta} 存在差异（可能是失败原因）：`);
+        const pdiff = paramDiff(wv.delta);
+        if (!('error' in pdiff)) {
+          for (const fd of pdiff) {
+            for (const c of fd.changes) {
+              lines.push(`  ${fd.file}: ${c.path}: ${JSON.stringify(c.before)} → ${JSON.stringify(c.after)}`);
+            }
+          }
+        }
+        lines.push(`  回退: ec config restore ${wv.delta}`);
+      } else {
+        // W == w-version，版本自身有问题
+        lines.push('当前配置版本无法加载。');
+        lines.push('  用自检模式逐版本回落: ec start --diagnose  或  ec restart --diagnose');
+      }
+    } else {
+      lines.push('No self-agent configured. Run `evolclaw aid new <name>` to create one.');
+    }
+    if (skipped.length > 0) {
+      lines.push(`  跳过的目录 (${skipped.length}):`);
+      for (const s of skipped) lines.push(`    - ${s.dirName}: ${s.reason}`);
+    }
+  }
+
+  const msg = lines.join('\n');
+  logger.error(msg);
+  console.error(msg);
+}
+
 function readFastaunVersion(): string {
   try {
     const url = (import.meta as any).resolve?.('@agentunion/fastaun');
@@ -232,10 +297,35 @@ async function main() {
 
   // ── 自动迁移 ──
   migrateIdentitiesIfNeeded();
-  autoMigrateIfNeeded();
+  // autoMigrateIfNeeded 已随配置体系 v2 退场（fresh init，不做兼容过渡）。
   // config.json（ProcessConfig）→ evolclaw.json：必须在任何 getAidStore（AUN 连接）之前，
   // 否则首次读 encryptionSeed 时迁移还没发生。
   migrateProcessConfigIfNeeded();
+
+  // ── 配置体系初始化（schema 字段不相交硬约束校验）──
+  try {
+    initConfigManager();
+  } catch (e) {
+    const msg = `❌ 配置 schema 校验失败: ${e instanceof Error ? e.message : String(e)}`;
+    logger.error(msg);
+    console.error(msg);
+    process.exit(1);
+  }
+
+  // ── 自检模式（EVOLCLAW_DIAGNOSE=1 由 ec start --diagnose / ec restart --diagnose 注入）──
+  if (process.env.EVOLCLAW_DIAGNOSE === '1') {
+    logger.info('[diagnose] 进入自检模式，逐版本回落尝试...');
+    const result = await selfDiagnose();
+    if (result.ok) {
+      logger.info(`[diagnose] ✓ 回落到 ${result.actualVersion?.delta} 成功，继续启动。`);
+      // W 已展开为好版本，继续正常启动流程（不再是诊断）
+    } else {
+      const msg = result.message ?? '✗ 自检失败：未找到可用版本。';
+      logger.error(msg);
+      console.error(msg);
+      process.exit(1);
+    }
+  }
 
   // ── ECK 运行时初始化 ──
   initEck();
@@ -269,17 +359,7 @@ async function main() {
   // 启动期硬约束：必须至少有一个 self-agent
   if (agentInfos.length === 0) {
     const skipped = agentRegistry.getSkipped();
-    const lines = [
-      '❌ No self-agent configured.',
-      `  Run \`evolclaw aid new <name>\` to create one.`,
-    ];
-    if (skipped.length > 0) {
-      lines.push(`  Skipped ${skipped.length} dir(s):`);
-      for (const s of skipped) lines.push(`    - ${s.dirName}: ${s.reason}`);
-    }
-    const msg = lines.join('\n');
-    logger.error(msg);
-    console.error(msg);
+    printConfigFailure(skipped);
     process.exit(1);
   }
 
@@ -827,6 +907,45 @@ async function main() {
   const readySignalPath = resolvePaths().readySignal;
   fs.writeFileSync(readySignalPath, String(Date.now()));
   logger.info(`✓ Ready signal written: ${readySignalPath}`);
+
+  // ── 配置快照 + 启动日志（启动完毕锚点，网络无关）──────────────────
+  try {
+    const wv = readWVersion();
+    const isDiagnoseMode = process.env.EVOLCLAW_DIAGNOSE === '1';
+
+    // P2: W≠w-version → 自动建版本（新版本 → current + w-version 自动更新）
+    //     自检模式下已由 selfDiagnose 处理，跳过（避免重复保存刚展开的回落版本）
+    let startupVersion = wv;
+    if (!isDiagnoseMode && wv) {
+      const diff = diffWorkingVsVersion(wv.delta);
+      const hasChanges = !('error' in diff) && (diff.modified.length + diff.added.length + diff.deleted.length) > 0;
+      if (hasChanges) {
+        const r = configSnapshot('startup');
+        if (r.created) startupVersion = readWVersion(); // P2 产生了新版本，w-version 已更新
+      }
+    }
+
+    // P3/回落成功：W==w-version → successCount++
+    if (startupVersion) {
+      incrementSuccessCount(startupVersion.delta);
+    }
+
+    // boot-log
+    const startMethod = process.env.EVOLCLAW_DIAGNOSE === '1' ? 'diagnose'
+      : (process.env.EVOLCLAW_LAUNCHED_BY === 'start' ? 'manual' : 'auto');
+    appendBootLog({
+      bootedAt: new Date().toISOString(),
+      startMethod: startMethod as any,
+      selectedVersion: readCurrent(),
+      actualVersion: startupVersion,
+      fellBack: !!(isDiagnoseMode && startupVersion && readCurrent()?.delta !== startupVersion.delta),
+      versions: { evolclaw: readEvolclawVersion(), '@agentunion/fastaun': readFastaunVersion(), node: process.version },
+      platform: `${process.platform}/${process.arch}`,
+    });
+    retentionCleanup();
+  } catch (e) {
+    logger.warn(`[config] startup snapshot/boot-log failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
+  }
 
   // ── 连接所有渠道（异步，AUN 等 WebSocket 渠道在后台重连）──
   const connected = await channelLoader.connectAll(channelInstances);

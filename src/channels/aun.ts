@@ -21,6 +21,7 @@ import { getAidStore, loadClient, SLOT } from '../aun/aid/store.js';
 import type { AIDStore } from '@agentunion/fastaun';
 import type { AidStatsCollector } from '../utils/stats.js';
 import { loadAgent, saveAgent } from '../config-store.js';
+import { activeBaseagent } from '../core/model/config-scope.js';
 import { getProcessStartTime } from '../utils/process-introspect.js';
 import * as outbox from '../aun/outbox.js';
 import { guessMime, formatSize } from '../utils/media-cache.js';
@@ -1036,7 +1037,8 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       logger.info(`${this.logPrefix()} Welcome message sent to owner: ${owner}`);
 
       // Send binding credential for Evol App to persist locally
-      await this.sendBindingCredential(owner, agentDisplayName, agentConfig.active_baseagent || 'claude').catch(e =>
+      // active_baseagent 是 HA 字段（behavior.json）；经 config-scope 解析。
+      await this.sendBindingCredential(owner, agentDisplayName, activeBaseagent(aidName)).catch(e =>
         logger.warn(`${this.logPrefix()} Binding credential failed: ${e}`)
       );
 

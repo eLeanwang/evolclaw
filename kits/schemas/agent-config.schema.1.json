@@ -1,0 +1,79 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "agent-config.schema.1.json",
+  "title": "AgentConfig (agents/{aid}/config.json)",
+  "description": "单 agent 的身份、凭证、管控字段。H 链中级，覆盖 defaults。",
+  "x-logical-name": "agent-config",
+  "x-permission": "H",
+  "x-scope": "agent",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["aid", "channels"],
+  "properties": {
+    "$schema_version": { "type": "number", "default": 1, "x-merge": "scalar" },
+    "aid": { "type": "string", "description": "Agent 标识（必填）", "x-merge": "scalar" },
+    "enabled": { "type": "boolean", "description": "Agent 启用状态", "x-merge": "scalar" },
+    "initialized": { "type": "boolean", "description": "AUN 首次初始化标记", "x-merge": "scalar" },
+    "owners": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Agent owner（AID，沿链并集）",
+      "x-merge": "list"
+    },
+    "admins": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Agent 管理员（AID，沿链并集）",
+      "x-merge": "list"
+    },
+    "channels": {
+      "type": "array",
+      "items": { "type": "object" },
+      "description": "渠道实例（含 appSecret/token，应为 ${VAR} 引用）",
+      "x-merge": "list"
+    },
+    "aun": {
+      "type": "object",
+      "description": "该 agent 的 AUN 配置",
+      "x-merge": "dict",
+      "properties": {
+        "keystorePath": { "type": "string" },
+        "encryptionSeed": { "type": "string" },
+        "gatewayUrl": { "type": "string" }
+      }
+    },
+    "models": {
+      "type": "object",
+      "description": "模型白名单（覆盖 defaults）",
+      "x-merge": "dict",
+      "properties": {
+        "default": { "type": "string" },
+        "allowed": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "projects": {
+      "type": "object",
+      "description": "项目路径",
+      "x-merge": "dict",
+      "properties": {
+        "rootPath": { "type": "string" },
+        "defaultPath": { "type": "string" }
+      }
+    },
+    "debug": { "type": "object", "x-merge": "dict" },
+    "observable": { "type": "boolean", "description": "观察者模式：入站/出站各转一份给 owners", "x-merge": "scalar" },
+    "extra_backup": {
+      "type": "array",
+      "description": "快照额外备份文件声明（不得指向 .env）",
+      "x-merge": "list",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "path": { "type": "string" },
+          "pattern": { "type": "string" }
+        }
+      }
+    }
+  }
+}

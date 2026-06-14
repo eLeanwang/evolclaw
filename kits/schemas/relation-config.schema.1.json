@@ -1,0 +1,38 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "relation-config.schema.1.json",
+  "title": "RelationConfig (agents/{aid}/relations/{peerKey}/config.json)",
+  "description": "对特定对端的人专属配置，H 链最高优先级。机制先行：当前为空骨架（角色字段 + extra_backup）。",
+  "x-logical-name": "relation-config",
+  "x-permission": "H",
+  "x-scope": "relation",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema_version": { "type": "number", "default": 1, "x-merge": "scalar" },
+    "owners": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "关系级 owner（list，关系级只能往上加角色）",
+      "x-merge": "list"
+    },
+    "admins": {
+      "type": "array",
+      "items": { "type": "string" },
+      "x-merge": "list"
+    },
+    "extra_backup": {
+      "type": "array",
+      "description": "快照额外备份文件声明（不得指向 .env）",
+      "x-merge": "list",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "path": { "type": "string" },
+          "pattern": { "type": "string" }
+        }
+      }
+    }
+  }
+}

@@ -29,16 +29,13 @@ import type {
   AgentConfig,
   MergedAgentConfig,
   ChannelInstance,
-  AunRuntimeBlock,
-  BaseagentsBlock,
-  ModelsBlock,
-  RoleOverride,
-  ProjectsBlock,
   ChatmodeBlock,
   ShowActivitiesMode,
   DebugBlock,
 } from './types.js';
 import { CONFIG_SCHEMA_VERSION } from './types.js';
+import { resolveAgentConfig, resolveBehavior } from './core/config/config-manager.js';
+import { expandVars, buildEnvResolver } from './core/config/merge.js';
 import { logger } from './utils/logger.js';
 
 // ── 进程级配置（{root}/evolclaw.json）─────────────────────────────────────
@@ -112,46 +109,21 @@ const SUPPORTED_CHANNEL_TYPES = new Set([
   'aun', 'feishu', 'wechat', 'dingtalk', 'qqbot', 'wecom',
 ]);
 
-const ENV_PREFIX = '$ENV:';
+// ── env 展开（${VAR}，design §五）─────────────────────────────────────────
+//
+// 仅支持 ${VAR}（旧 $ENV:NAME 已废弃）。展开经 merge.ts 的 expandVars + 三级 .env 解析器
+// （关系 > agent > 全局 > process.env）。loadAgent 传 agent 作用域；loadDefaults 用全局。
 
-// ── env 展开 ────────────────────────────────────────────────────────────
-
-/**
- * 递归展开对象中形如 "$ENV:NAME" 的字符串。
- *   - 命中环境变量 → 替换为变量值
- *   - 未设置环境变量 → 字段视为空字符串，并 warning 提示一次（同一变量名只警告一次）
- *
- * 真正"漏配是否致命"由调用方在 use 时报错。
- */
-const warnedEnvKeys = new Set<string>();
-
+/** 全局作用域（仅 {root}/.env + process.env）展开 ${VAR}。 */
 export function expandEnvRefs<T>(value: T): T {
-  return walk(value) as T;
+  const resolver = buildEnvResolver({ rootDir: resolvePaths().root });
+  return expandVars(value, resolver);
 }
 
-function walk(v: any): any {
-  if (typeof v === 'string') {
-    if (v.startsWith(ENV_PREFIX)) {
-      const name = v.slice(ENV_PREFIX.length);
-      const env = process.env[name];
-      if (env === undefined) {
-        if (!warnedEnvKeys.has(name)) {
-          logger.warn(`[config] env "${name}" not set; field will be empty`);
-          warnedEnvKeys.add(name);
-        }
-        return '';
-      }
-      return env;
-    }
-    return v;
-  }
-  if (Array.isArray(v)) return v.map(walk);
-  if (v && typeof v === 'object') {
-    const out: Record<string, any> = {};
-    for (const [k, val] of Object.entries(v)) out[k] = walk(val);
-    return out;
-  }
-  return v;
+/** agent 作用域展开（agent/.env > 全局 .env > process.env）。 */
+function expandEnvRefsForAgent<T>(value: T, aid: string): T {
+  const resolver = buildEnvResolver({ rootDir: resolvePaths().root, agentDir: agentDir(aid) });
+  return expandVars(value, resolver);
 }
 
 // ── 加载/写入 ──────────────────────────────────────────────────────────
@@ -214,6 +186,20 @@ export function saveDefaultsSafe(patch: Partial<DefaultsConfig>): void {
   atomicWriteJson(p, merged);
 }
 
+/** 递归对象合并：overlay 覆盖 base；标量与数组按 overlay 替换；plain object 递归。
+ *  saveDefaultsSafe 内部用（保留现有"补丁式写 defaults"语义，与覆盖链合并无关）。 */
+function deepMergeObject(base: any, overlay: any): any {
+  if (overlay === undefined) return base;
+  if (base === undefined) return overlay;
+  if (!isPlainObject(base) || !isPlainObject(overlay)) return overlay;
+  const out: Record<string, any> = { ...base };
+  for (const [k, v] of Object.entries(overlay)) out[k] = deepMergeObject(base[k], v);
+  return out;
+}
+function isPlainObject(v: any): boolean {
+  return v !== null && typeof v === 'object' && !Array.isArray(v);
+}
+
 // ── 进程配置迁移（旧 {root}/config.json ProcessConfig → evolclaw.json）──────
 //
 // ProcessConfig 类型 + loadProcessConfig/saveProcessConfig 已废弃并删除：
@@ -252,252 +238,14 @@ export function migrateProcessConfigIfNeeded(): void {
   logger.info(`[migrate] config.json → evolclaw.json (${what}，config.json 已归档为 .migrated)`);
 }
 
-// ── 自动迁移 ───────────────────────────────────────────────────────────
-
-/**
- * 启动时自动迁移：如果 agents/defaults.json 不存在但 data/evolclaw.json 存在，
- * 从旧配置构造新结构（defaults.json + per-agent config.json），然后把旧文件改名。
- *
- * 同时处理旧 agents/<name>.json 文件（friendly-name 形态）。
- *
- * 幂等：已迁移过（defaults.json 存在）则跳过。
- */
+// ── 自动迁移（已删除）─────────────────────────────────────────────────
+//
+// 旧 data/evolclaw.json / agents/<name>.json → 新结构的一次性迁移已随配置体系 v2 退场
+// （fresh init，不做兼容过渡，见 docs/config-system-design-v2.md §七）。
+// 保留空壳仅为调用点签名兼容——startup 不再调用。
 export function autoMigrateIfNeeded(): void {
-  const p = resolvePaths();
-  const defaultsPath = p.defaultsConfig;
-  const oldConfigPath = path.join(p.dataDir, 'evolclaw.json');
-
-  if (fs.existsSync(defaultsPath)) return;
-  if (!fs.existsSync(oldConfigPath)) return;
-
-  logger.info('[migrate] Detected legacy data/evolclaw.json without agents/defaults.json — auto-migrating...');
-
-  let oldConfig: any;
-  try {
-    oldConfig = JSON.parse(fs.readFileSync(oldConfigPath, 'utf-8'));
-  } catch (e) {
-    logger.error(`[migrate] Failed to parse ${oldConfigPath}: ${e}`);
-    return;
-  }
-
-  // 1. 构造 defaults.json
-  const defaults: DefaultsConfig = {
-    $schema_version: CONFIG_SCHEMA_VERSION,
-    active_baseagent: oldConfig.agents?.defaultAgent || 'claude',
-    baseagents: {} as any,
-    models: oldConfig.models,
-    projects: oldConfig.projects ? { defaultPath: oldConfig.projects.defaultPath } : undefined,
-    chatmode: migrateChatmode(oldConfig.chatmode),
-    show_activities: migrateShowActivities(oldConfig.showActivities),
-    flush_delay: oldConfig.flushDelay,
-    debounce: oldConfig.debounce,
-    aun: oldConfig.channels?.aun?.keystorePath ? { keystorePath: oldConfig.channels.aun.keystorePath } : undefined,
-  };
-
-  // 搬 baseagents
-  const KNOWN_BASEAGENTS = ['claude', 'codex', 'gemini', 'hermes'];
-  for (const ba of KNOWN_BASEAGENTS) {
-    const block = oldConfig.agents?.[ba];
-    if (block && typeof block === 'object') {
-      (defaults.baseagents as any)[ba] = { ...block };
-    }
-  }
-
-  fs.mkdirSync(path.dirname(defaultsPath), { recursive: true });
-  atomicWriteJson(defaultsPath, defaults);
-  logger.info(`[migrate] ✓ Created ${defaultsPath}`);
-
-  // 2. 从旧 evolclaw.json 的 channels 块 + 旧 agents/<name>.json 构造 per-agent config.json
-  //    旧结构：evolclaw.json.channels 是全局 channel dict（属于 "default agent"），
-  //    agents/<name>.json 是 named agent。
-
-  // 2a. 处理旧 agents/<name>.json 文件
-  const agentsDir = p.agentsDir;
-  if (fs.existsSync(agentsDir)) {
-    const entries = fs.readdirSync(agentsDir);
-    for (const entry of entries) {
-      if (!entry.endsWith('.json') || entry === 'defaults.json' || entry.startsWith('schema-')) continue;
-      const filePath = path.join(agentsDir, entry);
-      if (!fs.statSync(filePath).isFile()) continue;
-
-      try {
-        const raw = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-        const aid = raw.channels?.aun?.aid;
-        if (!aid || !isValidAid(aid)) {
-          logger.warn(`[migrate] skip ${entry}: no valid AID in channels.aun.aid`);
-          continue;
-        }
-
-        const agentConfig = buildAgentConfigFromLegacy(aid, raw, oldConfig);
-        const agentDirPath = path.join(agentsDir, aid);
-        fs.mkdirSync(agentDirPath, { recursive: true });
-        atomicWriteJson(path.join(agentDirPath, 'config.json'), agentConfig);
-        ensureAgentDirSkeleton(aid);
-
-        // 改名旧文件
-        fs.renameSync(filePath, filePath + '_');
-        logger.info(`[migrate] ✓ ${entry} → agents/${aid}/config.json`);
-      } catch (e) {
-        logger.warn(`[migrate] skip ${entry}: ${e}`);
-      }
-    }
-  }
-
-  // 2b. 如果 evolclaw.json 的 channels 里有 AUN 实例且没有对应的 agents/<name>.json，
-  //     说明旧结构只有一个"default agent"——为它也建一个 per-agent config.json
-  const globalAun = oldConfig.channels?.aun;
-  const globalAunAid = Array.isArray(globalAun)
-    ? globalAun[0]?.aid
-    : globalAun?.aid;
-
-  if (globalAunAid && isValidAid(globalAunAid)) {
-    const targetDir = path.join(agentsDir, globalAunAid);
-    if (!fs.existsSync(path.join(targetDir, 'config.json'))) {
-      const agentConfig = buildAgentConfigFromGlobalChannels(globalAunAid, oldConfig);
-      fs.mkdirSync(targetDir, { recursive: true });
-      atomicWriteJson(path.join(targetDir, 'config.json'), agentConfig);
-      ensureAgentDirSkeleton(globalAunAid);
-      logger.info(`[migrate] ✓ global channels → agents/${globalAunAid}/config.json`);
-    }
-  }
-
-  // 3. 改名旧 evolclaw.json
-  try {
-    fs.renameSync(oldConfigPath, oldConfigPath + '_');
-    logger.info(`[migrate] ✓ Renamed ${oldConfigPath} → evolclaw.json_`);
-  } catch (e) {
-    logger.warn(`[migrate] Failed to rename old config: ${e}`);
-  }
-
-  logger.info('[migrate] Auto-migration complete.');
+  /* no-op: legacy migration removed (config-system v2 fresh init) */
 }
-
-/**
- * 从旧 agents/<name>.json 构造新 AgentConfig。
- * 旧格式：{ name, enabled, agents: { claude: {...} }, channels: { aun: {...}, feishu: {...} }, projects, chatmode }
- */
-function buildAgentConfigFromLegacy(aid: string, raw: any, globalConfig: any): AgentConfig {
-  const channels: ChannelInstance[] = [];
-
-  // AUN 是隐式的（从 aid 派生），不放进 channels[]
-  const aunBlock = raw.channels?.aun;
-
-  // 其它 channels（非 AUN）
-  for (const [type, block] of Object.entries(raw.channels || {})) {
-    if (type === 'aun' || type === 'defaultChannel') continue;
-    const instances = Array.isArray(block) ? block : [block];
-    for (const inst of instances) {
-      if (!inst || typeof inst !== 'object') continue;
-      channels.push({
-        ...inst,
-        type,
-        name: (inst as any).name || 'main',
-      } as any);
-    }
-  }
-
-  // owners / admins
-  const owners: string[] = [];
-  const admins: string[] = [];
-  if (aunBlock?.owner) owners.push(aunBlock.owner);
-  if (aunBlock?.admins) admins.push(...aunBlock.admins);
-
-  // baseagent
-  const agentKeys = Object.keys(raw.agents || {}).filter(k => k !== 'defaultAgent');
-  const activeBaseagent = agentKeys[0] || globalConfig.agents?.defaultAgent || 'claude';
-
-  return {
-    $schema_version: CONFIG_SCHEMA_VERSION,
-    aid,
-    enabled: raw.enabled !== false,
-    owners,
-    admins: admins.length > 0 ? admins : undefined,
-    channels,
-    active_baseagent: activeBaseagent,
-    baseagents: raw.agents ? filterBaseagents(raw.agents) : undefined,
-    projects: raw.projects,
-    chatmode: migrateChatmode(raw.chatmode),
-    show_activities: migrateShowActivities(raw.show_activities),
-  } as AgentConfig;
-}
-
-/**
- * 从旧 evolclaw.json 的全局 channels 块构造 per-agent config（"default agent" 场景）。
- */
-function buildAgentConfigFromGlobalChannels(aid: string, globalConfig: any): AgentConfig {
-  const channels: ChannelInstance[] = [];
-
-  // AUN 是隐式的（从 aid 派生），不放进 channels[]
-  const aunRaw = globalConfig.channels?.aun;
-  const aunInst = Array.isArray(aunRaw) ? aunRaw[0] : aunRaw;
-
-  // 其它 channels（非 AUN）
-  for (const [type, block] of Object.entries(globalConfig.channels || {})) {
-    if (type === 'aun' || type === 'defaultChannel') continue;
-    const instances = Array.isArray(block) ? block : [block];
-    for (const inst of instances) {
-      if (!inst || typeof inst !== 'object') continue;
-      if ((inst as any).enabled === false) continue;
-      channels.push({
-        ...inst,
-        type,
-        name: (inst as any).name || 'main',
-      } as any);
-    }
-  }
-
-  const owners: string[] = [];
-  const admins: string[] = [];
-  if (aunInst?.owner) owners.push(aunInst.owner);
-  if (aunInst?.admins) admins.push(...aunInst.admins);
-
-  const activeBaseagent = globalConfig.agents?.defaultAgent || 'claude';
-
-  return {
-    $schema_version: CONFIG_SCHEMA_VERSION,
-    aid,
-    enabled: true,
-    owners,
-    admins: admins.length > 0 ? admins : undefined,
-    channels,
-    active_baseagent: activeBaseagent,
-    projects: globalConfig.projects,
-    chatmode: migrateChatmode(globalConfig.chatmode),
-    show_activities: migrateShowActivities(globalConfig.showActivities),
-  } as AgentConfig;
-}
-
-function filterBaseagents(agents: any): BaseagentsBlock | undefined {
-  const result: any = {};
-  const KNOWN = ['claude', 'codex', 'gemini', 'hermes'];
-  for (const k of KNOWN) {
-    if (agents[k] && typeof agents[k] === 'object') result[k] = agents[k];
-  }
-  return Object.keys(result).length > 0 ? result : undefined;
-}
-
-/**
- * 迁移 chatmode：保持对象形式向后兼容（旧格式 {private, group} → 保留原值）
- */
-function migrateChatmode(old: any): ChatmodeBlock | undefined {
-  if (!old) return undefined;
-  if (typeof old === 'object') return old;  // 已是对象，直接返回
-  // 标量（极少见） → 转为 {private: value}
-  if (typeof old === 'string') return { private: old as any };
-  return undefined;
-}
-
-/**
- * 迁移 show_activities：四值（all/dm-only/owner-dm-only/none）→ 二值（all/none）
- */
-function migrateShowActivities(old: any): ShowActivitiesMode | undefined {
-  if (!old) return undefined;
-  if (old === 'all') return 'all';
-  if (old === 'none') return 'none';
-  // dm-only / owner-dm-only 映射为 all（语义最接近："私聊时显示"）
-  return 'all';
-}
-
 
 export function loadAgent(aid: string): AgentConfig | null {
   const p = agentConfigPath(aid);
@@ -506,7 +254,7 @@ export function loadAgent(aid: string): AgentConfig | null {
   if (raw.aid !== aid) {
     throw new Error(`[config] ${p}: aid field "${raw.aid}" != directory name "${aid}"`);
   }
-  const cfg = expandEnvRefs(raw);
+  const cfg = expandEnvRefsForAgent(raw, aid);
   if (cfg.projects?.defaultPath) {
     cfg.projects.defaultPath = cfg.projects.defaultPath.replace(/[/\\]+$/, '');
   }
@@ -595,6 +343,17 @@ export function loadAllAgents(): AgentLoadResult {
 
 // ── 校验 ───────────────────────────────────────────────────────────────
 
+/**
+ * @deprecated 设计目标（config-system-design-v2 §七）是用 ConfigManager 的 ajv schema
+ * 校验替代本函数。但**当前 agent config.json 尚未完成 H/HA 物理分离迁移**——现有文件仍
+ * 混有 behavior(HA) 字段（active_baseagent/baseagents 等）和 schema 未定义的子字段
+ * （projects.autoCreate/list 等）。agent-config schema 是 `additionalProperties:false`，
+ * 此刻切到 schema 校验会让所有现存 agent 加载失败。
+ *
+ * 因此本函数**暂保留纯业务规则校验**（不接 schema）。待数据迁移（behavior 字段拆出 +
+ * schema 补齐 projects 子字段）完成后，再切换到 ConfigManager.validateConfig。
+ * 见 docs/config-v2-inconsistencies-analysis.md 问题 B / config-system-v2-implementation-status.md。
+ */
 export function validateAgentConfig(cfg: AgentConfig): string[] {
   const errs: string[] = [];
   if (!cfg.aid || !isValidAid(cfg.aid)) errs.push(`invalid aid: ${cfg.aid}`);
@@ -641,58 +400,24 @@ export function validateAgentConfig(cfg: AgentConfig): string[] {
 // ── 合并 ───────────────────────────────────────────────────────────────
 
 /**
- * defaults + per-agent → MergedAgentConfig
- * defaults 缺失时直接返回 per-agent（视 defaults 为空对象）。
+ * defaults + per-agent + agent/behavior → MergedAgentConfig（运行时扁平视图）。
+ *
+ * H 段（defaults → agent/config）+ HA 段（agent/behavior，agent 级快照）平铺合并，
+ * 经 ConfigManager（全项目唯一合并实现点）。带 peer/role 的逐消息解析另走
+ * ConfigManager.resolveBehavior（见 message-processor / config-scope）。
+ *
+ * @deprecated 使用 ConfigManager.resolveMerged 替代（配置体系 v2）。
+ * 当前保留用于向后兼容，内部已委托 ConfigManager。
+ * 计划在 v2.2 移除。见 docs/config-v2-inconsistencies-analysis.md 问题 B。
  */
 export function mergeForAgent(agent: AgentConfig, defaults: DefaultsConfig | null): MergedAgentConfig {
-  const d = defaults ?? ({ $schema_version: CONFIG_SCHEMA_VERSION } as DefaultsConfig);
-
-  const merged: MergedAgentConfig = {
-    $schema_version: agent.$schema_version ?? CONFIG_SCHEMA_VERSION,
-    aid: agent.aid,
-    enabled: agent.enabled,
-    owners: agent.owners,
-    admins: agent.admins,
-    aun: deepMergeBlocks<AunRuntimeBlock>(d.aun, agent.aun),
-    channels: agent.channels,
-    active_baseagent: agent.active_baseagent ?? d.active_baseagent,
-    baseagents: deepMergeBlocks<BaseagentsBlock>(d.baseagents, agent.baseagents),
-    models: deepMergeBlocks<ModelsBlock>(d.models, agent.models),
-    roles: deepMergeBlocks<Record<string, RoleOverride>>(d.roles, agent.roles),
-    projects: deepMergeBlocks<ProjectsBlock>(d.projects, agent.projects),
-    chatmode: deepMergeBlocks<ChatmodeBlock>(d.chatmode, agent.chatmode),
-    show_activities: agent.show_activities ?? d.show_activities,
-    flush_delay: agent.flush_delay ?? d.flush_delay,
-    debounce: agent.debounce ?? d.debounce,
-    debug: deepMergeBlocks(d.debug, agent.debug),
-    enable_rich_content: agent.enable_rich_content ?? d.enable_rich_content,
-    dispatch: agent.dispatch,
-    observable: agent.observable,
-  };
-  return merged;
-}
-
-function deepMergeBlocks<T extends object>(base?: T, overlay?: T): T | undefined {
-  if (!base && !overlay) return undefined;
-  if (!base) return overlay;
-  if (!overlay) return base;
-  return deepMergeObject(base, overlay) as T;
-}
-
-/** 递归对象合并：overlay 覆盖 base；标量与数组按 overlay 直接替换；plain object 递归。 */
-function deepMergeObject(base: any, overlay: any): any {
-  if (overlay === undefined) return base;
-  if (base === undefined) return overlay;
-  if (!isPlainObject(base) || !isPlainObject(overlay)) return overlay;
-  const out: Record<string, any> = { ...base };
-  for (const [k, v] of Object.entries(overlay)) {
-    out[k] = deepMergeObject(base[k], v);
-  }
-  return out;
-}
-
-function isPlainObject(v: any): boolean {
-  return v !== null && typeof v === 'object' && !Array.isArray(v);
+  void defaults; // defaults 由 ConfigManager 自己从磁盘读取（唯一合并点），参数保留作签名兼容
+  const sel = { self: agent.aid };
+  // H 链合并（从磁盘读 defaults + agent/config）。若磁盘无对应文件，回退到传入 agent。
+  const h = resolveAgentConfig(sel);
+  const behavior = resolveBehavior(sel);
+  const base: AgentConfig = (h && h.aid) ? h : agent;
+  return { ...behavior, ...base } as MergedAgentConfig;
 }
 
 // ── 目录骨架 ───────────────────────────────────────────────────────────
@@ -700,6 +425,11 @@ function isPlainObject(v: any): boolean {
 /**
  * 为某个 self-agent 创建文档约定的子目录骨架（personal/、identities/、venues/ 等）。
  * 已存在则跳过，幂等可重复调用。
+ *
+ * 注：本函数只建**目录骨架**，不碰 config.json/behavior.json——后两者由 saveAgent /
+ * saveInitialBehavior（创建路径）或 ConfigManager.ensureFile（设计目标）负责。
+ * config-system-design-v2 §七 列的 `ensureAgentDirSkeleton → ensureFile` 仅指配置文件
+ * 骨架那部分职责，目录骨架职责保留在此。
  */
 export function ensureAgentDirSkeleton(aid: string): void {
   const root = agentDir(aid);

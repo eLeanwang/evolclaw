@@ -10,9 +10,9 @@
  * 详见 docs/model-command-design.md。
  */
 
-import { loadDefaults, loadAgent } from '../../config-store.js';
 import { resolveAnthropicConfig, resolveOpenaiConfig } from '../../agents/baseagent.js';
 import { activeBaseagent } from './config-scope.js';
+import { resolveBehavior } from '../config/config-manager.js';
 import type { BaseagentsBlock } from '../../types.js';
 
 export interface ModelCatalogEntry {
@@ -36,9 +36,9 @@ export interface ModelInfo {
 /** 取指定 baseagent 的 baseUrl + apiKey（复用现有解析链）。 */
 function resolveCreds(self?: string, ba?: string): { baseUrl?: string; apiKey?: string } {
   const baseagent = ba || activeBaseagent(self);
-  const agentCfg = self ? loadAgent(self) : null;
-  const defaults = loadDefaults();
-  const block = (agentCfg?.baseagents || defaults?.baseagents || {}) as BaseagentsBlock;
+  // baseagents 是 HA 字段（behavior.json）；经 ConfigManager 合并取得。
+  const behavior = self ? resolveBehavior({ self }, { cache: true }) : { baseagents: {} };
+  const block = (behavior.baseagents || {}) as BaseagentsBlock;
 
   try {
     if (baseagent === 'codex') {

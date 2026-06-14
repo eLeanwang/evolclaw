@@ -276,7 +276,7 @@ function printStartupInfo(opts: { pid?: number; running?: boolean } = {}): void 
   console.log(`  代码时间:   ${latestMtime ? formatLocalTime(latestMtime) : '?'}`);
 }
 
-export async function cmdStart() {
+export async function cmdStart(opts: { diagnose?: boolean } = {}) {
   const cmdStartedAt = Date.now();
   printStartupInfo();
 
@@ -287,9 +287,11 @@ export async function cmdStart() {
   const { autoMigrateIfNeeded } = await import('../config-store.js');
   autoMigrateIfNeeded();
 
-  // 未初始化时自动引导
+  // 未初始化时自动引导：无 defaults 文件且无任何 agent → 视为未初始化
+  // （baseagents 已从 defaults 移入各 agent behavior.json，故改用"有无 agent"判定）
   const defaults = loadDefaults();
-  if (!defaults || !defaults.baseagents || Object.keys(defaults.baseagents).length === 0) {
+  const hasAnyAgent = loadAllAgents().agents.length > 0;
+  if (!defaults && !hasAnyAgent) {
     console.log('⚡ 未检测到初始化配置，自动启动初始化向导...\n');
     await cmdInit();
     return;
@@ -400,6 +402,7 @@ export async function cmdStart() {
       LOG_LEVEL: process.env.LOG_LEVEL || 'INFO',
       MESSAGE_LOG: process.env.MESSAGE_LOG || 'true',
       EVENT_LOG: process.env.EVENT_LOG || 'true',
+      ...(opts.diagnose ? { EVOLCLAW_DIAGNOSE: '1' } : {}),
     }
   });
 
@@ -536,7 +539,7 @@ export async function cmdStop() {
   }
 }
 
-export async function cmdRestart(opts: { clear?: boolean } = {}) {
+export async function cmdRestart(opts: { clear?: boolean; diagnose?: boolean } = {}) {
   const cmdStartedAt = Date.now();
 
   console.log('🔄 Restarting EvolClaw...');
