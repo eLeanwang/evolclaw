@@ -223,6 +223,13 @@ export class TriggerScheduler {
     // 用 id 重读磁盘最新版，读盘失败则回退到 heap 副本。
     const fresh = this.manager.getByIdFresh(trigger.id) ?? trigger;
 
+    // 归属防御：schedulerAid 与本 scheduler 的 aid 不一致 → 错位数据，跳过不执行。
+    // 字段为空（旧数据未补）则跳过校验，保持向后兼容。
+    if (fresh.schedulerAid && fresh.schedulerAid !== this.aid) {
+      logger.warn(`[${this.aid}] schedulerAid mismatch: trigger ${fresh.name} (${fresh.id}) owned by ${fresh.schedulerAid}, skipping`);
+      return;
+    }
+
     const messageId = `trigger:${fresh.id}:${now}`;
     const msg = this.buildSyntheticMessage(fresh, messageId, now);
 
