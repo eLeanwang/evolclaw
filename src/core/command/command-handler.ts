@@ -889,11 +889,6 @@ export class CommandHandler {
     channel: string, channelId: string, peerId: string, messageId?: string,
     chatType?: string,
   ): Promise<{ ok: true; trigger: Trigger } | { ok: false; error: string }> {
-    const owningAgent = this.getOwningAgent(channel);
-    const scheduler = (owningAgent?.triggerScheduler ?? this.triggerScheduler) as TriggerScheduler | undefined;
-    const manager = (owningAgent?.triggerManager ?? this.triggerManager) as TriggerManager | undefined;
-    if (!manager || !scheduler) return { ok: false, error: '触发器功能未启用' };
-
     const now = Date.now();
     const nextFireAt = calcNextFireAt(parsed.scheduleType, parsed.scheduleValue, now);
 
@@ -920,6 +915,15 @@ export class CommandHandler {
       return { ok: false, error: `AUN 渠道的 --channelid 必须是 AID 格式（如 user.agentid.pub），收到："${parsed.targetChannelId}"` };
     }
 
+    // 用 targetChannel 解析归属 agent（谁执行归谁），不兜底到 primary
+    const schedulerAid = tryParseChannelKey(targetChannelName)?.selfAID;
+    const owningAgent = schedulerAid ? this.agentRegistry?.get(schedulerAid) : null;
+    const scheduler = owningAgent?.triggerScheduler as TriggerScheduler | undefined;
+    const manager = owningAgent?.triggerManager as TriggerManager | undefined;
+    if (!manager || !scheduler || !schedulerAid) {
+      return { ok: false, error: `目标 agent 不存在或未就绪：${schedulerAid ?? targetChannelName}` };
+    }
+
     const trigger: Trigger = {
       id: crypto.randomUUID(),
       name,
@@ -936,6 +940,7 @@ export class CommandHandler {
       prompt: parsed.prompt,
       createdByPeerId: peerId,
       createdByChannel: channel,
+      schedulerAid,
       fireCount: 0,
       failCount: 0,
       createdAt: now,
