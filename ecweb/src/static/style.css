@@ -766,3 +766,49 @@ tr.ag-disabled .ag-name { color: var(--dim); }
 .gw-price-edit { padding: 3px 10px; font-size: 11px; }
 .gw-src-gateway { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); }
 .gw-src-local { background: var(--bg3); color: var(--dim); }
+
+/* 网关配置：模型系列分组 */
+.gw-model-series { margin-bottom: 16px; }
+.gw-series-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.15s;
+}
+.gw-series-header:hover { background: color-mix(in srgb, var(--bg3) 90%, var(--accent)); }
+.gw-series-toggle {
+  font-size: 10px;
+  color: var(--dim);
+  transition: transform 0.2s;
+  width: 12px;
+  display: inline-block;
+}
+.gw-series-title {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--fg);
+  flex: 1;
+}
+.gw-series-count {
+  font-size: 11px;
+  color: var(--dim);
+  background: var(--bg2);
+  padding: 2px 8px;
+  border-radius: 10px;
+}
+.gw-series-content {
+  margin-top: 8px;
+  overflow: hidden;
+  transition: max-height 0.3s ease;
+}
+.gw-series-content .gw-price-table {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+}

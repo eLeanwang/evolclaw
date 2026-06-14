@@ -1753,33 +1753,87 @@ function bindGatewayEvents(el, data) {
 // 网关配置弹窗：模型 + 官方价格 + 网关价格（可编辑）
 function showGatewayConfigModal(aidLabel, type, data) {
   const models = data.models || [];
+
+  // 按模型系列分组
+  const groups = new Map();
+  for (const m of models) {
+    const id = m.id || m.name || '';
+    let series = 'other';
+    if (id.startsWith('claude')) series = 'claude';
+    else if (id.startsWith('gpt') || id.startsWith('o1') || id.startsWith('o3')) series = 'gpt';
+    else if (id.startsWith('gemini')) series = 'gemini';
+    else if (id.startsWith('deepseek')) series = 'deepseek';
+    else if (id.startsWith('kimi')) series = 'kimi';
+    else if (id.startsWith('glm')) series = 'glm';
+    else if (id.startsWith('MiniMax')) series = 'minimax';
+
+    if (!groups.has(series)) groups.set(series, []);
+    groups.get(series).push(m);
+  }
+
+  const seriesNames = {
+    claude: 'Claude 系列',
+    gpt: 'GPT 系列',
+    gemini: 'Gemini 系列',
+    deepseek: 'DeepSeek 系列',
+    kimi: 'Kimi 系列',
+    glm: 'GLM 系列',
+    minimax: 'MiniMax 系列',
+    other: '其他模型'
+  };
+
   let html = '<div class="gw-modal-backdrop" id="gw-config-backdrop"><div class="gw-modal gw-modal-wide">';
   html += `<div class="gw-modal-head">${esc(aidLabel)} · ${esc(type)} 网关配置 <span style="font-weight:normal;color:var(--dim);font-size:12px">（${models.length} 个模型）</span></div>`;
-  html += '<div class="gw-modal-body"><table class="gw-price-table"><thead><tr>' +
-    '<th>模型</th><th>分组</th><th colspan="2">官方价格（USD/1M tokens）</th><th colspan="2">网关价格（USD/1M tokens）</th><th>来源</th><th></th>' +
-    '</tr><tr class="gw-price-subhead">' +
-    '<th></th><th></th><th>Input</th><th>Output</th><th>Input</th><th>Output</th><th></th><th></th>' +
-    '</tr></thead><tbody>';
+  html += '<div class="gw-modal-body">';
+
   if (!models.length) {
-    html += '<tr><td colspan="8" class="empty">网关未返回模型列表</td></tr>';
+    html += '<div class="empty">网关未返回模型列表</div>';
   } else {
-    for (const m of models) {
-      const srcLabel = { gateway: '网关接口', local: '本地配置', none: '—' }[m.officialSource] || '—';
-      const srcCls = { gateway: 'gw-src-gateway', local: 'gw-src-local', none: 'gw-src-none' }[m.officialSource] || '';
-      const fmt = (v) => (typeof v === 'number' ? v.toFixed(2) : '—');
-      const off = m.official || {};
-      const gw = m.gateway || {};
-      html += `<tr class="gw-price-row">` +
-        `<td class="gw-price-model" title="${esc(m.id)}"><code>${esc(m.name || m.id)}</code></td>` +
-        `<td>${esc(m.group || '—')}</td>` +
-        `<td>${fmt(off.input)}</td><td>${fmt(off.output)}</td>` +
-        `<td>${fmt(gw.input)}</td><td>${fmt(gw.output)}</td>` +
-        `<td><span class="gw-eff-src-tag ${srcCls}">${srcLabel}</span></td>` +
-        `<td><button class="ctrl-btn gw-price-edit" data-model="${esc(m.id)}" data-scope="${esc(data.scope)}" data-type="${esc(type)}">改价</button></td>` +
-        `</tr>`;
+    // 按系列渲染表格
+    const sortedSeries = ['claude', 'gpt', 'gemini', 'deepseek', 'kimi', 'glm', 'minimax', 'other']
+      .filter(s => groups.has(s));
+
+    for (const series of sortedSeries) {
+      const seriesModels = groups.get(series);
+      html += `<div class="gw-model-series">`;
+      html += `<div class="gw-series-header" data-series="${series}">
+        <span class="gw-series-toggle">▼</span>
+        <span class="gw-series-title">${seriesNames[series] || series}</span>
+        <span class="gw-series-count">${seriesModels.length} 个模型</span>
+      </div>`;
+      html += `<div class="gw-series-content" data-series="${series}">`;
+      html += '<table class="gw-price-table"><thead><tr>' +
+        '<th>模型</th>' +
+        '<th colspan="4">官方价格（USD/1M tokens）</th>' +
+        '<th colspan="4">网关价格（USD/1M tokens）</th>' +
+        '<th>来源</th><th></th>' +
+        '</tr><tr class="gw-price-subhead">' +
+        '<th></th>' +
+        '<th>Input</th><th>Output</th><th>Cache R</th><th>Cache W</th>' +
+        '<th>Input</th><th>Output</th><th>Cache R</th><th>Cache W</th>' +
+        '<th></th><th></th>' +
+        '</tr></thead><tbody>';
+
+      for (const m of seriesModels) {
+        const srcLabel = { gateway: '网关接口', local: '本地配置', none: '—' }[m.officialSource] || '—';
+        const srcCls = { gateway: 'gw-src-gateway', local: 'gw-src-local', none: 'gw-src-none' }[m.officialSource] || '';
+        const fmt = (v) => (typeof v === 'number' ? v.toFixed(2) : '—');
+        const off = m.official || {};
+        const gw = m.gateway || {};
+        html += `<tr class="gw-price-row">` +
+          `<td class="gw-price-model" title="${esc(m.id)}"><code>${esc(m.name || m.id)}</code></td>` +
+          `<td>${fmt(off.input)}</td><td>${fmt(off.output)}</td><td>${fmt(off.cache_read)}</td><td>${fmt(off.cache_write)}</td>` +
+          `<td>${fmt(gw.input)}</td><td>${fmt(gw.output)}</td><td>${fmt(gw.cache_read)}</td><td>${fmt(gw.cache_write)}</td>` +
+          `<td><span class="gw-eff-src-tag ${srcCls}">${srcLabel}</span></td>` +
+          `<td><button class="ctrl-btn gw-price-edit" data-model="${esc(m.id)}" data-scope="${esc(data.scope)}" data-type="${esc(type)}">改价</button></td>` +
+          `</tr>`;
+      }
+      html += '</tbody></table>';
+      html += '</div></div>';
     }
   }
-  html += '</tbody></table></div>';
+
+  html += '</div>';
   html += '<div class="gw-modal-actions"><button class="ctrl-btn primary" id="gw-config-close">关闭</button></div>';
   html += '</div></div>';
 
@@ -1790,6 +1844,22 @@ function showGatewayConfigModal(aidLabel, type, data) {
   const close = () => { try { backdrop.remove(); } catch {} };
   backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close(); });
   $('#gw-config-close').onclick = close;
+
+  // 展开/收起功能
+  backdrop.querySelectorAll('.gw-series-header').forEach(header => {
+    header.addEventListener('click', () => {
+      const series = header.dataset.series;
+      const content = backdrop.querySelector(`.gw-series-content[data-series="${series}"]`);
+      const toggle = header.querySelector('.gw-series-toggle');
+      if (content.style.display === 'none') {
+        content.style.display = 'block';
+        toggle.textContent = '▼';
+      } else {
+        content.style.display = 'none';
+        toggle.textContent = '▶';
+      }
+    });
+  });
 
   // 改价按钮
   backdrop.querySelectorAll('.gw-price-edit').forEach(btn => {
