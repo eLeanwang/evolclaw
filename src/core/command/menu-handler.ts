@@ -12,6 +12,7 @@ import { TriggerManager } from '../trigger/manager.js';
 import { checkLatestVersion, getLocalVersion, isLinkedInstall, compareVersions } from '../../utils/npm-ops.js';
 import { loadDefaults, loadEvolclawConfig } from '../../config-store.js';
 import { execAgentAction, execAgentQuery, execAgentOptions, resolveProjectPath } from '../message/command-handler-agent-control.js';
+import { gatewayList, gatewayUpdate, gatewayDelete, gatewayTest } from '../message/command-handler-gateway-control.js';
 import { displaySessionTitle } from '../session/session-title.js';
 
 export interface MenuNext {
@@ -184,6 +185,7 @@ export const SELF_MANAGE_AGENT_ACTIONS = new Set(['update', 'reload']);
  *  /system 全部进程级；/agent 仅 create/delete/enable/disable 进程级；其余关系级。 */
 export function isProcessLevelAction(cmdBase: string, action?: string): boolean {
   if (cmdBase === '/system') return true;
+  if (cmdBase === '/gateway') return true;  // 网关改 baseagent 凭证，进程级，仅控制 channel
   if (cmdBase === '/agent') return PROCESS_LEVEL_AGENT_ACTIONS.has(action ?? '');
   return false;
 }
@@ -575,6 +577,14 @@ export async function execMenuQuery(this: any,
     return await execAgentQuery({ ...(args ?? {}), aid: selfAid });
   }
 
+  // ── /gateway 查询（只读，列出全部作用域的网关配置；apiKey 已掩码） ──
+  // 进程级：闸门已要求 fromControlChannel；此处再验 owners 非空。
+  if (cmdBase === '/gateway') {
+    if (!isProcessLevelOwner(userId, loadEvolclawConfig().owners)) {
+      return { error: '操作需要 owner 权限', code: 'FORBIDDEN' };
+    }
+    return gatewayList();
+  }
 
   if (cmdBase === '/pwd') {
     const sessPath = session?.projectPath;
@@ -801,6 +811,13 @@ export async function execMenuUpdate(this: any,
   const identity = overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId);
   const isAdmin = identity.role === 'owner' || identity.role === 'admin';
 
+  // ── 进程级 /gateway update（网关配置，value 为 JSON：{scope,type,patch}） ──
+  if (cmdBase === '/gateway') {
+    let body: any;
+    try { body = JSON.parse(arg); } catch { return { error: 'value 需为 JSON', code: 'INVALID_ARGS' }; }
+    return await gatewayUpdate(body);
+  }
+
   // ── 关系级 /trigger update（调度参数，value 为 JSON 字符串） ──
   if (cmdBase === '/trigger') {
     const owningAgent = this.getOwningAgent(channel);
@@ -976,6 +993,15 @@ export async function execMenuAction(this: any,
   if (!action) return { error: '缺少 action', code: 'MISSING_VALUE' };
   const gated = gateControlScope.call(this, { cmdBase, action, args, channel, fromControlChannel });
   if (gated) return gated;
+
+  // ── /gateway action（进程级，gate 已确保 fromControlChannel） ──
+  // test=连通性测试；delete=删除配置；reload=重载受影响 agent。
+  if (cmdBase === '/gateway') {
+    if (action === 'test') return await gatewayTest(args);
+    if (action === 'delete') return await gatewayDelete(args);
+    return { error: `不支持 gateway action: ${action}`, code: 'NOT_SUPPORTED' };
+  }
+
   const { session } = await this.loadMenuContext(channel, channelId);
   const identity = overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId);
   const isMenuAdmin = identity.role === 'owner' || identity.role === 'admin';
@@ -1380,7 +1406,7 @@ export async function execMenuForEcweb(this: any, payload: any): Promise<import(
     return { type: 'menu.response', id, name, error: { code: 'NOT_SUPPORTED', message: 'cli 不在 ECWeb 控制范围' } };
   }
 
-  const isProcessLevel = name === 'system' || name === 'agent';
+  const isProcessLevel = name === 'system' || name === 'agent' || name === 'gateway';
   const owners = loadEvolclawConfig().owners ?? [];
   if (isProcessLevel && owners.length === 0) {
     return { type: 'menu.response', id, name, error: { code: 'FORBIDDEN', message: '请在 evolclaw.json 配置 owners 后使用进程级操作' } };
@@ -1404,7 +1430,7 @@ export async function execMenuForEcweb(this: any, payload: any): Promise<import(
     topic: '/topic',
     effort: '/effort', chatmode: '/chatmode', dispatch: '/dispatch',
     permission: '/perm', activity: '/activity', system: '/system',
-    agent: '/agent', trigger: '/trigger', file: '/file',
+    agent: '/agent', trigger: '/trigger', file: '/file', gateway: '/gateway',
   };
   const cmd = name ? (nameMap[name] ?? payload.cmd) : payload.cmd;
 
@@ -1471,7 +1497,7 @@ export async function execMenuForControl(this: any, payload: any, peerId: string
     topic: '/topic',
     effort: '/effort', chatmode: '/chatmode', dispatch: '/dispatch',
     permission: '/perm', activity: '/activity', system: '/system',
-    agent: '/agent', trigger: '/trigger', file: '/file',
+    agent: '/agent', trigger: '/trigger', file: '/file', gateway: '/gateway',
   };
   const cmd = name ? (nameMap[name] ?? payload.cmd) : payload.cmd;
 

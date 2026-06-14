@@ -27,6 +27,7 @@ import { cacheSource } from './sources/cache.js';
 import { systemSource } from './sources/system.js';
 import { triggersSource } from './sources/triggers.js';
 import { monitorSource } from './sources/monitor.js';
+import { gatewaySource } from './sources/gateway.js';
 import { queryStatsForDashboard, queryStatsExplorer, queryStatsByPeer, queryStatsByAgent, queryStatsOverview } from './sources/stats.js';
 import { getSessionsAunDir, listLocalAids, listPeers, readMessages } from './fs-utils.js';
 import { ccProjectsDir } from './paths.js';
@@ -39,7 +40,7 @@ const PAIRING_TTL_MS = 5 * 60 * 1000;       // 5min
 const DEFAULT_PORT = 42705;
 const PROTOCOL_VERSION = 1;                  // 与 evolclaw ping response 对齐的软校验版本
 
-const SOURCES: Record<ViewKind, WatchSource> = { agents: aidSource, msg: msgSource, session: sessionSource, cache: cacheSource, system: systemSource, triggers: triggersSource, monitor: monitorSource };
+const SOURCES: Record<ViewKind, WatchSource> = { agents: aidSource, msg: msgSource, session: sessionSource, cache: cacheSource, system: systemSource, triggers: triggersSource, monitor: monitorSource, gateway: gatewaySource };
 
 // ECWeb 自身版本：渲染 System 页时随快照下发（不走 daemon IPC，ECWeb 就是这个进程）。
 function readEcwebVersion(): string {

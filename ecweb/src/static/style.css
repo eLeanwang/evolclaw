@@ -671,3 +671,44 @@ tr.ag-disabled .ag-name { color: var(--dim); }
   .mon-toolbar { flex-wrap: wrap; }
 }
 
+
+/* ── Gateway 视图 ── */
+.gw-wrap { padding: 12px 16px; }
+.gw-intro { font-size: 12px; color: var(--dim); line-height: 1.6; margin-bottom: 16px; padding: 8px 12px; background: var(--bg3); border-radius: 5px; border: 1px solid var(--border); }
+.gw-intro code { background: var(--bg); padding: 1px 5px; border-radius: 3px; color: var(--accent); font-size: 11px; }
+.gw-scope { margin-bottom: 20px; }
+.gw-scope-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
+.gw-scope-title { font-size: 14px; font-weight: 700; color: var(--fg); }
+.gw-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
+.gw-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 6px; padding: 12px; display: flex; flex-direction: column; }
+.gw-card-head { display: flex; align-items: center; gap: 6px; margin-bottom: 10px; }
+.gw-card-icon { font-size: 16px; }
+.gw-card-title { font-weight: 700; font-size: 13px; color: var(--fg); }
+.gw-card-type { font-size: 10px; color: var(--dim); background: var(--bg3); padding: 1px 6px; border-radius: 8px; margin-left: auto; }
+.gw-card-body { display: flex; flex-direction: column; gap: 5px; margin-bottom: 10px; }
+.gw-row { display: flex; align-items: baseline; gap: 8px; font-size: 12px; }
+.gw-row-label { flex-shrink: 0; width: 72px; color: var(--dim); }
+.gw-row-val { flex: 1; color: var(--fg); word-break: break-all; }
+.gw-dim { color: var(--dim); font-style: italic; }
+.gw-env { background: var(--bg3); padding: 1px 5px; border-radius: 3px; color: var(--green); font-size: 11px; }
+.gw-card-actions { display: flex; gap: 5px; margin-top: auto; padding-top: 8px; border-top: 1px solid var(--border); }
+.gw-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.gw-dot-ok { background: var(--green); }
+.gw-dot-err { background: var(--red); }
+.gw-dot-unknown { background: var(--dim); opacity: .4; }
+.ctrl-btn.primary { color: #fff; background: var(--accent); border-color: var(--accent); }
+.ctrl-btn.primary:hover { opacity: .9; }
+
+/* Gateway 编辑弹窗 */
+.gw-modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.45); display: flex; align-items: center; justify-content: center; z-index: 200; }
+.gw-modal { background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; width: 440px; max-width: 92vw; max-height: 88vh; overflow-y: auto; box-shadow: 0 8px 32px rgba(0,0,0,.3); }
+.gw-modal-head { font-size: 15px; font-weight: 700; padding: 14px 18px; border-bottom: 1px solid var(--border); color: var(--fg); }
+.gw-modal-body { padding: 16px 18px; display: flex; flex-direction: column; gap: 12px; }
+.gw-field { display: flex; flex-direction: column; gap: 4px; }
+.gw-field-label { font-size: 12px; color: var(--dim); font-weight: 500; }
+.gw-field input, .gw-field select { font-size: 13px; padding: 6px 9px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg); color: var(--fg); font-family: inherit; }
+.gw-field input:focus, .gw-field select:focus { outline: none; border-color: var(--accent); }
+.gw-field input:disabled { opacity: .55; cursor: not-allowed; }
+.gw-hint { font-size: 11px; color: var(--dim); line-height: 1.5; }
+.gw-hint code { background: var(--bg3); padding: 1px 4px; border-radius: 3px; color: var(--accent); }
+.gw-modal-actions { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 18px; border-top: 1px solid var(--border); }

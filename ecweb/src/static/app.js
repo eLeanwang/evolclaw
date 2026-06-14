@@ -58,7 +58,7 @@ let ws = null;
 let reconnectDelay = 1000;
 let currentView = 'agents';
 let pendingSub = null;        // 重连后要恢复的订阅
-const state = { agents: null, msg: null, session: null, cache: null, system: null, triggers: null, monitor: null };
+const state = { agents: null, msg: null, session: null, cache: null, system: null, triggers: null, monitor: null, gateway: null };
 
 function setConnStatus(text, cls) {
   const el = $('#conn-status');
@@ -165,6 +165,7 @@ function switchView(view) {
   else if (view === 'system') subscribe('system', {});
   else if (view === 'triggers') subscribe('triggers', { agent: trigSel.agent });
   else if (view === 'monitor') subscribe('monitor', { range: monRange });
+  else if (view === 'gateway') subscribe('gateway', {});
   else subscribe('agents', {});
   if (state[view]) renderView(view);
 }
@@ -183,6 +184,7 @@ function renderView(view) {
   else if (view === 'system') renderSystem(state.system);
   else if (view === 'triggers') renderTriggers(state.triggers);
   else if (view === 'monitor') renderMonitor(state.monitor);
+  else if (view === 'gateway') renderGateway(state.gateway);
 }
 
 // ── 工具 ──
@@ -1362,6 +1364,302 @@ function bindSystemEvents(el, data) {
       await menuSend({ type: 'menu.action', name: 'system', action: 'restart' });
       toast('重启中…');
     } catch (e) { toast(e.message, true); }
+  });
+}
+
+// ── Gateway 视图（网关 = baseagent 后端接入配置） ──
+// 数据来自 daemon menu.query name=gateway（apiKey 已掩码）。
+// 写操作走 menuSend({name:'gateway', ...})：update/test/delete。
+
+// 各 baseagent 类型的可编辑字段定义（驱动编辑表单与展示）
+const GATEWAY_FIELDS = {
+  claude: [
+    { key: 'baseUrl', label: 'Base URL', placeholder: 'https://gateway.example.com（留空=官方）' },
+    { key: 'model', label: '默认模型', placeholder: 'opus / sonnet / claude-...' },
+    { key: 'effort', label: 'Effort', placeholder: 'low / medium / high / xhigh / max' },
+  ],
+  codex: [
+    { key: 'baseUrl', label: 'Base URL', placeholder: 'https://gateway.example.com（留空=官方）' },
+    { key: 'model', label: '默认模型', placeholder: 'gpt-5.2-codex / ...' },
+    { key: 'effort', label: 'Effort', placeholder: 'low / medium / high' },
+    { key: 'reasoning', label: 'Reasoning', placeholder: '（可选）' },
+  ],
+  gemini: [
+    { key: 'model', label: '默认模型', placeholder: 'gemini-2.5-flash / ...' },
+    { key: 'mode', label: '模式', placeholder: 'cli / sdk' },
+    { key: 'cliPath', label: 'CLI 路径', placeholder: 'gemini' },
+    { key: 'project', label: 'GCP Project', placeholder: '（Vertex 用）' },
+    { key: 'location', label: 'Location', placeholder: 'us-central1' },
+  ],
+};
+
+const GATEWAY_TYPE_ICON = { claude: '🟣', codex: '🟢', gemini: '🔵' };
+
+// 标记每条网关的运行时测试结果：`${scope}#${type}` → { ok, latency, modelCount, error }
+const _gwTest = new Map();
+let _gwEditing = null;  // 当前编辑中的网关 key（`${scope}#${type}`）或 'new'
+
+function gwKey(scope, type) { return scope + '#' + type; }
+
+function renderGateway(data) {
+  const el = $('#view-gateway');
+  if (!data) { el.innerHTML = '<div class="empty">加载中…</div>'; return; }
+  if (data.error) {
+    el.innerHTML = `<div class="empty">⚠ ${esc(data.error)}</div>`;
+    return;
+  }
+  const gateways = data.gateways || [];
+  const scopes = data.scopes || ['defaults'];
+
+  // 按 scope 分组
+  const byScope = new Map();
+  for (const s of scopes) byScope.set(s, []);
+  for (const g of gateways) {
+    if (!byScope.has(g.scope)) byScope.set(g.scope, []);
+    byScope.get(g.scope).push(g);
+  }
+
+  let html = '<div class="gw-wrap">';
+  html += '<div class="gw-intro">网关 = 各 AI 后端（baseagent）的接入配置。Base URL 即网关地址，留空走官方端点。' +
+    'API Key 仅接受 <code>$ENV:变量名</code> 引用，明文不会在此显示或写入。</div>';
+
+  for (const [scope, list] of byScope) {
+    const scopeLabel = scope === 'defaults'
+      ? '🌐 全局默认 (defaults)'
+      : '🤖 ' + esc(shortAid(scope));
+    html += `<div class="gw-scope">`;
+    html += `<div class="gw-scope-head"><span class="gw-scope-title">${scopeLabel}</span>` +
+      `<button class="ctrl-btn gw-add" data-scope="${esc(scope)}">+ 添加网关</button></div>`;
+    html += '<div class="gw-cards">';
+    if (!list.length) {
+      html += '<div class="empty" style="padding:12px">该作用域暂无网关配置</div>';
+    } else {
+      for (const g of list) html += gatewayCard(g);
+    }
+    html += '</div></div>';
+  }
+
+  html += '</div>';
+  el.innerHTML = html;
+  bindGatewayEvents(el, data);
+}
+
+function gatewayCard(g) {
+  const key = gwKey(g.scope, g.type);
+  const icon = GATEWAY_TYPE_ICON[g.type] || '⚙';
+  const test = _gwTest.get(key);
+
+  // 连通性测试状态点
+  let dot = '<span class="gw-dot gw-dot-unknown" title="未测试"></span>';
+  if (test) {
+    if (test.ok) dot = `<span class="gw-dot gw-dot-ok" title="${test.latency}ms · ${test.modelCount} 模型"></span>`;
+    else dot = `<span class="gw-dot gw-dot-err" title="${esc(test.error || '失败')}"></span>`;
+  }
+
+  // API Key 展示
+  let keyHtml;
+  if (!g.apiKeyMask) keyHtml = '<span class="gw-dim">未配置</span>';
+  else if (g.apiKeyIsEnvRef) keyHtml = `<code class="gw-env">${esc(g.apiKeyMask)}</code>`;
+  else keyHtml = '<span class="gw-dim" title="明文密钥已隐藏，建议改用 $ENV 引用">*** (明文)</span>';
+
+  const rows = [];
+  rows.push(['Base URL', g.baseUrl ? esc(g.baseUrl) : '<span class="gw-dim">官方端点</span>']);
+  rows.push(['默认模型', g.model ? esc(g.model) : '<span class="gw-dim">—</span>']);
+  rows.push(['API Key', keyHtml]);
+  if (g.effort) rows.push(['Effort', esc(g.effort)]);
+  if (g.reasoning) rows.push(['Reasoning', esc(g.reasoning)]);
+  if (g.mode) rows.push(['模式', esc(g.mode)]);
+  if (g.cliPath) rows.push(['CLI 路径', esc(g.cliPath)]);
+  if (g.project) rows.push(['Project', esc(g.project)]);
+  if (g.location) rows.push(['Location', esc(g.location)]);
+
+  let html = `<div class="gw-card" data-key="${esc(key)}">`;
+  html += `<div class="gw-card-head">${dot}<span class="gw-card-icon">${icon}</span>` +
+    `<span class="gw-card-title">${esc(g.name)}</span>` +
+    `<span class="gw-card-type">${esc(g.type)}</span></div>`;
+  html += '<div class="gw-card-body">';
+  for (const [label, val] of rows) {
+    html += `<div class="gw-row"><span class="gw-row-label">${esc(label)}</span><span class="gw-row-val">${val}</span></div>`;
+  }
+  html += '</div>';
+  html += '<div class="gw-card-actions">';
+  const testable = g.type === 'claude' || g.type === 'codex';
+  if (testable) html += `<button class="ctrl-btn gw-test" data-scope="${esc(g.scope)}" data-type="${esc(g.type)}">⚡ 测试</button> `;
+  html += `<button class="ctrl-btn gw-edit" data-scope="${esc(g.scope)}" data-type="${esc(g.type)}">✎ 编辑</button> `;
+  html += `<button class="ctrl-btn danger gw-del" data-scope="${esc(g.scope)}" data-type="${esc(g.type)}">🗑 删除</button>`;
+  html += '</div>';
+  html += '</div>';
+  return html;
+}
+
+// 编辑/新增弹窗
+function openGatewayEditor(scope, type, existing, scopes) {
+  const isNew = !existing;
+  const fields = GATEWAY_FIELDS[type] || GATEWAY_FIELDS.claude;
+
+  let html = '<div class="gw-modal-backdrop" id="gw-modal-backdrop"><div class="gw-modal">';
+  html += `<div class="gw-modal-head">${isNew ? '添加网关' : '编辑网关'}</div>`;
+  html += '<div class="gw-modal-body">';
+
+  // scope 选择（新增时可选，编辑时锁定）
+  html += '<label class="gw-field"><span class="gw-field-label">作用域</span>';
+  if (isNew) {
+    html += '<select id="gw-f-scope">';
+    for (const s of (scopes || ['defaults'])) {
+      const lbl = s === 'defaults' ? '全局默认' : shortAid(s);
+      html += `<option value="${esc(s)}"${s === scope ? ' selected' : ''}>${esc(lbl)}</option>`;
+    }
+    html += '</select>';
+  } else {
+    html += `<input id="gw-f-scope" type="text" value="${esc(scope)}" disabled>`;
+  }
+  html += '</label>';
+
+  // type 选择（新增时可选，编辑时锁定）
+  html += '<label class="gw-field"><span class="gw-field-label">后端类型</span>';
+  if (isNew) {
+    html += '<select id="gw-f-type">';
+    for (const t of ['claude', 'codex', 'gemini']) {
+      html += `<option value="${t}"${t === type ? ' selected' : ''}>${t}</option>`;
+    }
+    html += '</select>';
+  } else {
+    html += `<input id="gw-f-type" type="text" value="${esc(type)}" disabled>`;
+  }
+  html += '</label>';
+
+  // 动态字段
+  html += '<div id="gw-dyn-fields">';
+  for (const f of fields) {
+    const val = existing ? (existing[f.key] || '') : '';
+    html += `<label class="gw-field"><span class="gw-field-label">${esc(f.label)}</span>` +
+      `<input class="gw-dyn" data-key="${esc(f.key)}" type="text" value="${esc(val)}" placeholder="${esc(f.placeholder || '')}"></label>`;
+  }
+  html += '</div>';
+
+  // API Key（仅 $ENV 引用）
+  const curKey = existing && existing.apiKeyIsEnvRef ? existing.apiKeyMask : '';
+  html += '<label class="gw-field"><span class="gw-field-label">API Key 引用</span>' +
+    `<input id="gw-f-apikey" type="text" value="${esc(curKey)}" placeholder="$ENV:ANTHROPIC_AUTH_TOKEN（留空不改）"></label>`;
+  html += '<div class="gw-hint">仅支持环境变量引用，格式 <code>$ENV:变量名</code>。明文密钥请写入环境变量后引用。</div>';
+
+  html += '</div>';  // body
+  html += '<div class="gw-modal-actions">' +
+    '<button class="ctrl-btn" id="gw-cancel">取消</button> ' +
+    '<button class="ctrl-btn primary" id="gw-save">保存</button>' +
+    '</div>';
+  html += '</div></div>';
+
+  const wrap = document.createElement('div');
+  wrap.innerHTML = html;
+  document.body.appendChild(wrap.firstChild);
+
+  const backdrop = $('#gw-modal-backdrop');
+  const close = () => { try { backdrop.remove(); } catch {} };
+  backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close(); });
+  $('#gw-cancel').onclick = close;
+
+  // 新增时切换 type 重建动态字段
+  if (isNew) {
+    $('#gw-f-type').onchange = (e) => {
+      const newType = e.target.value;
+      const dyn = $('#gw-dyn-fields');
+      const fs2 = GATEWAY_FIELDS[newType] || GATEWAY_FIELDS.claude;
+      dyn.innerHTML = fs2.map(f =>
+        `<label class="gw-field"><span class="gw-field-label">${esc(f.label)}</span>` +
+        `<input class="gw-dyn" data-key="${esc(f.key)}" type="text" value="" placeholder="${esc(f.placeholder || '')}"></label>`
+      ).join('');
+    };
+  }
+
+  $('#gw-save').onclick = async () => {
+    const fScope = $('#gw-f-scope').value;
+    const fType = $('#gw-f-type').value;
+    const patch = {};
+    document.querySelectorAll('#gw-dyn-fields .gw-dyn').forEach(inp => {
+      patch[inp.dataset.key] = inp.value.trim();
+    });
+    const apiKey = $('#gw-f-apikey').value.trim();
+    if (apiKey) {
+      if (!apiKey.startsWith('$ENV:')) { toast('API Key 必须是 $ENV:变量名 引用', true); return; }
+      patch.apiKey = apiKey;
+    }
+    try {
+      const r = mResp(await menuSend({
+        type: 'menu.update', name: 'gateway',
+        value: JSON.stringify({ scope: fScope, type: fType, patch }),
+      }));
+      if (r.error) { toast(r.error.message || r.error.code, true); return; }
+      toast(r.data && r.data.reloaded ? '已保存并重载' : '已保存（未重载）');
+      close();
+      subscribe('gateway', {});  // 刷新
+    } catch (e) { toast(e.message, true); }
+  };
+}
+
+function bindGatewayEvents(el, data) {
+  const scopes = data.scopes || ['defaults'];
+  const findGw = (scope, type) => (data.gateways || []).find(g => g.scope === scope && g.type === type);
+
+  // 添加
+  el.querySelectorAll('.gw-add').forEach(btn => {
+    btn.addEventListener('click', () => {
+      openGatewayEditor(btn.dataset.scope, 'claude', null, scopes);
+    });
+  });
+
+  // 编辑
+  el.querySelectorAll('.gw-edit').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const g = findGw(btn.dataset.scope, btn.dataset.type);
+      openGatewayEditor(btn.dataset.scope, btn.dataset.type, g, scopes);
+    });
+  });
+
+  // 测试
+  el.querySelectorAll('.gw-test').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const { scope, type } = btn.dataset;
+      btn.disabled = true;
+      const orig = btn.textContent;
+      btn.textContent = '测试中…';
+      try {
+        const r = mResp(await menuSend({
+          type: 'menu.action', name: 'gateway', action: 'test',
+          args: { scope, type },
+        }));
+        if (r.error) {
+          _gwTest.set(gwKey(scope, type), { ok: false, error: r.error.message || r.error.code });
+          toast(r.error.message || r.error.code, true);
+        } else {
+          _gwTest.set(gwKey(scope, type), r.data);
+          toast(r.data.ok ? `✓ ${r.data.latency}ms · ${r.data.modelCount} 模型` : `✗ ${r.data.error || '失败'}`, !r.data.ok);
+        }
+        renderGateway(state.gateway);
+      } catch (e) {
+        toast(e.message, true);
+      } finally {
+        btn.disabled = false; btn.textContent = orig;
+      }
+    });
+  });
+
+  // 删除
+  el.querySelectorAll('.gw-del').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const { scope, type } = btn.dataset;
+      const label = scope === 'defaults' ? '全局默认' : shortAid(scope);
+      if (!confirm(`确认删除 ${label} 的 ${type} 网关配置？`)) return;
+      try {
+        const r = mResp(await menuSend({
+          type: 'menu.action', name: 'gateway', action: 'delete',
+          args: { scope, type },
+        }));
+        if (r.error) { toast(r.error.message || r.error.code, true); return; }
+        toast(r.data && r.data.reloaded ? '已删除并重载' : '已删除');
+        subscribe('gateway', {});
+      } catch (e) { toast(e.message, true); }
+    });
   });
 }
 
