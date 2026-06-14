@@ -4,6 +4,8 @@ import { saveAgent } from '../config-store.js';
 import { formatChannelKey, tryParseChannelKey } from './channel-loader.js';
 import { agentPersonalDir } from '../paths.js';
 import { fileCache } from './daemon-file-cache.js';
+import { ConfigTarget, read as cfgRead, write as cfgWrite, ensureFile as cfgEnsure } from './config/config-manager.js';
+import type { BehaviorConfig } from '../types.js';
 import type {
   AgentConfig,
   MergedAgentConfig,
@@ -187,66 +189,62 @@ export class EvolAgent {
   }
 
   setShowActivities(_channelKey: string, mode: ShowActivitiesMode): void {
-    this.rawAgent.show_activities = mode;
     this.merged.show_activities = mode;
-    this.persist();
+    this.mutateBehavior(b => { b.show_activities = mode; });
   }
 
-  // ── Baseagent 字段写入 ────────────────────────────────────────────────
+  // ── Baseagent 字段写入（HA → behavior.json）────────────────────────────
 
-  /** 切换当前活跃 baseagent（写顶层 active_baseagent）。 */
+  /** 切换当前活跃 baseagent（写 behavior.active_baseagent）。 */
   setActiveBaseagent(value: string | undefined): void {
-    if (value === undefined) delete this.rawAgent.active_baseagent;
-    else this.rawAgent.active_baseagent = value;
     this.merged.active_baseagent = value;
-    this.persist();
+    this.mutateBehavior(b => {
+      if (value === undefined) delete b.active_baseagent;
+      else b.active_baseagent = value;
+    });
   }
 
   setBaseagentModel(value: string | undefined): void {
     const ba = this.baseagent;
-    if (!this.rawAgent.baseagents) this.rawAgent.baseagents = {};
-    const block = ((this.rawAgent.baseagents as any)[ba] ??= {});
-    if (value === undefined) delete block.model;
-    else block.model = value;
-    // sync merged so getter reflects the change immediately
     if (!this.merged.baseagents) (this.merged as any).baseagents = {};
     const mBlock = (((this.merged as any).baseagents)[ba] ??= {});
-    if (value === undefined) delete mBlock.model;
-    else mBlock.model = value;
-    this.persist();
+    if (value === undefined) delete mBlock.model; else mBlock.model = value;
+    this.mutateBehavior(b => {
+      b.baseagents = b.baseagents || {};
+      const blk = ((b.baseagents as any)[ba] ??= {});
+      if (value === undefined) delete blk.model; else blk.model = value;
+    });
   }
 
   setBaseagentEffort(value: string | undefined): void {
     const ba = this.baseagent;
-    if (!this.rawAgent.baseagents) this.rawAgent.baseagents = {};
-    const block = ((this.rawAgent.baseagents as any)[ba] ??= {});
     const fieldName = ba === 'codex' ? 'reasoning' : 'effort';
-    if (value === undefined) delete block[fieldName];
-    else block[fieldName] = value;
-    // sync merged so getter reflects the change immediately
     if (!this.merged.baseagents) (this.merged as any).baseagents = {};
     const mBlock = (((this.merged as any).baseagents)[ba] ??= {});
-    if (value === undefined) delete mBlock[fieldName];
-    else mBlock[fieldName] = value;
-    this.persist();
+    if (value === undefined) delete mBlock[fieldName]; else mBlock[fieldName] = value;
+    this.mutateBehavior(b => {
+      b.baseagents = b.baseagents || {};
+      const blk = ((b.baseagents as any)[ba] ??= {});
+      if (value === undefined) delete blk[fieldName]; else blk[fieldName] = value;
+    });
   }
 
   /** 设置私聊 chatmode（群聊/非 human 强制 proactive，无可写入项）。 */
   setChatmodePrivate(value: 'interactive' | 'proactive' | undefined): void {
-    if (!this.rawAgent.chatmode) this.rawAgent.chatmode = {};
-    if (value === undefined) delete this.rawAgent.chatmode.private;
-    else this.rawAgent.chatmode.private = value;
     if (!this.merged.chatmode) this.merged.chatmode = {};
     this.merged.chatmode.private = value;
-    this.persist();
+    this.mutateBehavior(b => {
+      b.chatmode = b.chatmode || {};
+      if (value === undefined) delete b.chatmode.private; else b.chatmode.private = value;
+    });
   }
 
   /** 设置群聊 dispatch 默认值（mention | broadcast）。 */
   setDispatch(value: 'mention' | 'broadcast' | undefined): void {
-    if (value === undefined) delete this.rawAgent.dispatch;
-    else this.rawAgent.dispatch = value;
     this.merged.dispatch = value;
-    this.persist();
+    this.mutateBehavior(b => {
+      if (value === undefined) delete b.dispatch; else b.dispatch = value;
+    });
   }
 
   /** 读取观察者模式开关（默认 false）。 */
@@ -354,5 +352,14 @@ export class EvolAgent {
 
   private persist(): void {
     saveAgent(this.rawAgent);
+  }
+
+  /** 读改写 agent 级 behavior.json（HA 字段落点；走 ConfigManager 唯一写入口）。 */
+  private mutateBehavior(fn: (b: BehaviorConfig) => void): void {
+    const sel = { self: this.aid };
+    const cur = (cfgRead<BehaviorConfig>(ConfigTarget.AgentBehavior, sel) as BehaviorConfig) || {};
+    fn(cur);
+    cfgEnsure(ConfigTarget.AgentBehavior, sel);
+    cfgWrite(ConfigTarget.AgentBehavior, cur, sel);
   }
 }

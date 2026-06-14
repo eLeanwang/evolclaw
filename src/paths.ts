@@ -47,7 +47,25 @@ export function resolvePaths() {
     instanceReadySignal: path.join(root, 'data', 'instance', 'ready.signal'),
     instanceSocket: resolveInstanceSocketPath(root),
     aidLogsDir: path.join(root, 'logs', 'aids'),
+
+    // ── 配置快照体系（config-system-design-v2.md §八/§九）──────
+    configBackupsDir: path.join(root, 'backups', 'config'),
+    configCurrentPointer: path.join(root, 'backups', 'config', 'current.json'),
+    configWVersion: path.join(root, 'backups', 'config', 'w-version.json'),
+    configBootLog: path.join(root, 'backups', 'config', 'boot-log.jsonl'),
+    configBootLogArchiveDir: path.join(root, 'backups', 'config', 'boot-log-archive'),
   };
+}
+
+// per-agent relation 路径
+export function agentRelationConfig(aid: string, peerKey: string): string {
+  return path.join(resolveRoot(), 'agents', aid, 'relations', peerKey, 'config.json');
+}
+export function agentBehaviorConfig(aid: string): string {
+  return path.join(resolveRoot(), 'agents', aid, 'behavior.json');
+}
+export function agentRelationBehaviorConfig(aid: string, peerKey: string): string {
+  return path.join(resolveRoot(), 'agents', aid, 'relations', peerKey, 'behavior.json');
 }
 
 // ── AID 路径（agent.md 存放在 $EVOLCLAW_HOME/AIDs/<aid>/）──
@@ -229,6 +247,9 @@ export function kitsDocsDir(): string {
 }
 export function kitsTemplatesDir(): string {
   return path.join(getPackageRoot(), 'kits', 'templates');
+}
+export function kitsSchemasDir(): string {
+  return path.join(getPackageRoot(), 'kits', 'schemas');
 }
 
 // ── 调试输出 ──

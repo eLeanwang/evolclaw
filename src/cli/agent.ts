@@ -4,9 +4,10 @@ import os from 'os';
 import readline from 'readline';
 import { resolvePaths, agentMdPath as getAgentMdPathFromPaths, aunPath as defaultAunPath } from '../paths.js';
 import { loadDefaults, loadAllAgents, loadAgent, saveAgent, ensureAgentDirSkeleton } from '../config-store.js';
+import { ConfigTarget, write as cfgWrite, ensureFile as cfgEnsure, read as cfgRead, routeField, initConfigManager } from '../core/config/config-manager.js';
 import { ipcQuery } from '../ipc.js';
 import { CONFIG_SCHEMA_VERSION } from '../types.js';
-import type { AgentConfig, ChannelInstance } from '../types.js';
+import type { AgentConfig, ChannelInstance, BehaviorConfig } from '../types.js';
 import { isValidChannelName } from '../core/channel-loader.js';
 import { commandExists } from '../utils/cross-platform.js';
 import { getCodexAppServerAvailability, isCodexAppServerAvailable } from '../agents/codex-runner.js';
@@ -154,6 +155,21 @@ function buildBaseagentsBlock(chosen: Baseagent): Record<string, any> {
 
 const DEFAULT_CHATMODE = { private: 'interactive', group: 'proactive', nothuman: 'proactive' } as const;
 const DEFAULT_DISPATCH = 'mention' as const;
+
+/**
+ * 写入新 agent 的初始 behavior.json（HA 字段：active_baseagent/baseagents/chatmode/dispatch）。
+ * 与 H 配置（config.json，saveAgent）分离——HA 字段不进 config.json（config 体系 v2）。
+ */
+function saveInitialBehavior(aid: string, baseagent: Baseagent): void {
+  const behavior: BehaviorConfig = {
+    active_baseagent: baseagent,
+    baseagents: buildBaseagentsBlock(baseagent),
+    chatmode: { ...DEFAULT_CHATMODE },
+    dispatch: DEFAULT_DISPATCH,
+  };
+  cfgEnsure(ConfigTarget.AgentBehavior, { self: aid });
+  cfgWrite(ConfigTarget.AgentBehavior, behavior, { self: aid });
+}
 
 function deriveAgentProjectPath(rootPath: string, aid: string): string {
   const baseName = aid.split('.')[0];
@@ -503,14 +519,11 @@ export async function agentCreateInteractive(opts: AgentCreateInteractiveOpts = 
       initialized: false,
       owners: owner ? [owner] : [],
       channels: [],
-      active_baseagent: baseagent,
-      baseagents: buildBaseagentsBlock(baseagent),
       projects: { defaultPath: projectPath },
-      chatmode: { ...DEFAULT_CHATMODE },
-      dispatch: DEFAULT_DISPATCH,
     };
 
     saveAgent(agentConfig);
+    saveInitialBehavior(aid, baseagent);
     ensureAgentDirSkeleton(aid);
 
     // Generate and upload agent.md
@@ -683,15 +696,12 @@ export async function agentCreateNonInteractive(opts: AgentCreateNonInteractiveO
     initialized: preservedInitialized,
     owners: opts.owner ? [opts.owner] : [],
     channels: [],
-    active_baseagent: baseagent,
-    baseagents: buildBaseagentsBlock(baseagent),
     projects: { defaultPath: opts.project },
-    chatmode: { ...DEFAULT_CHATMODE },
-    dispatch: DEFAULT_DISPATCH,
   };
 
   opts.onPhase?.('config_saved', 'begin');
   saveAgent(agentConfig);
+  saveInitialBehavior(opts.aid, baseagent);
   ensureAgentDirSkeleton(opts.aid);
   opts.onPhase?.('config_saved', 'done');
 
@@ -923,42 +933,33 @@ async function agentSetEnabled(aid: string, enabled: boolean): Promise<AgentResu
   return { ok: true, aid, enabled, reloaded };
 }
 
-// ==================== agentGet ====================
+// ==================== agentGet / agentSet ====================
+//
+// addendum D2：`ec agent get/set <aid> <key>` 是 `ec config get/set --self <aid>` 的
+// 位置参数别名。内部走 ConfigManager，按 schema 自动分流 config(H) / behavior(HA)，
+// 不再直接 fs+setNestedValue+saveAgent（否则迁移后把 HA 字段误写进 config.json）。
 
 export async function agentGet(aid: string, key: string): Promise<AgentResult<AgentGetResult>> {
   const p = resolvePaths();
-  const configPath = path.join(p.agentsDir, aid, 'config.json');
-
-  if (!fs.existsSync(configPath)) {
+  if (!fs.existsSync(path.join(p.agentsDir, aid, 'config.json'))) {
     return { ok: false, error: `Agent "${aid}" not found` };
   }
-
-  let config: any;
   try {
-    config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    initConfigManager();
+    const top = key.split('.')[0];
+    const route = routeField(top, 'agent');
+    const cfg = cfgRead<Record<string, any>>(route.target, { self: aid }) || {};
+    const value = getNestedValue(cfg, key);
+    return { ok: true, aid, key, value };
   } catch (e: any) {
-    return { ok: false, error: `Failed to read config: ${e?.message || e}` };
+    return { ok: false, error: e?.message || String(e) };
   }
-
-  const value = getNestedValue(config, key);
-  return { ok: true, aid, key, value };
 }
-
-// ==================== agentSet ====================
 
 export async function agentSet(aid: string, key: string, rawValue: string): Promise<AgentResult<AgentSetResult>> {
   const p = resolvePaths();
-  const configPath = path.join(p.agentsDir, aid, 'config.json');
-
-  if (!fs.existsSync(configPath)) {
+  if (!fs.existsSync(path.join(p.agentsDir, aid, 'config.json'))) {
     return { ok: false, error: `Agent "${aid}" not found` };
-  }
-
-  let config: any;
-  try {
-    config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-  } catch (e: any) {
-    return { ok: false, error: `Failed to read config: ${e?.message || e}` };
   }
 
   const value = parseJsonValue(rawValue);
@@ -970,9 +971,14 @@ export async function agentSet(aid: string, key: string, rawValue: string): Prom
     }
   }
 
-  setNestedValue(config, key, value);
   try {
-    saveAgent(config);
+    initConfigManager();
+    const top = key.split('.')[0];
+    const route = routeField(top, 'agent');  // 按 schema 分流 → config.json 或 behavior.json
+    const cur = cfgRead<Record<string, any>>(route.target, { self: aid }) || {};
+    setNestedValue(cur, key, value);
+    cfgEnsure(route.target, { self: aid });
+    cfgWrite(route.target, cur, { self: aid });
   } catch (e: any) {
     return { ok: false, error: e?.message || String(e) };
   }

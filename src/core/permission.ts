@@ -5,6 +5,7 @@ import type { ChannelAdapter, ReplyContext, InteractionRequest } from '../types.
 import type { InteractionRouter } from './interaction-router.js';
 import { renderActionAsText } from './interaction-router.js';
 import { buildEnvelope, sendInteractionPayload } from './message/message-processor.js';
+import { logger } from '../utils/logger.js';
 
 // 危险命令黑名单（正则表达式）
 const DANGEROUS_PATTERNS = [
@@ -45,7 +46,8 @@ const READONLY_WRITE_PATTERNS = [
 export function checkReadonly(
   toolName: string,
   input: Record<string, unknown>,
-  projectPath: string
+  projectPath: string,
+  context?: { sessionId?: string; channel?: string; peerId?: string; role?: string }
 ): { behavior: 'allow' } | { behavior: 'deny'; message: string } {
   if (toolName === 'Write' || toolName === 'Edit' || toolName === 'NotebookEdit') {
     const filePath = (input.file_path || input.notebook_path) as string | undefined;
@@ -53,6 +55,7 @@ export function checkReadonly(
     const tmpDir = path.join(projectPath, '.evolclaw', 'tmp') + path.sep;
     const resolved = path.resolve(projectPath, filePath) + (filePath.endsWith(path.sep) ? path.sep : '');
     if (!resolved.startsWith(tmpDir) && resolved !== tmpDir.slice(0, -1)) {
+      logger.warn(`[ReadonlyCheck] 🔒 File write blocked: tool=${toolName} path=${filePath} session=${context?.sessionId} channel=${context?.channel} peer=${context?.peerId} role=${context?.role}`);
       return { behavior: 'deny', message: '🔒 只读模式：禁止修改项目文件。如需生成文件请写入 .evolclaw/tmp/ 目录' };
     }
   }
@@ -61,6 +64,8 @@ export function checkReadonly(
     const cmd = (input.command as string) || '';
     for (const pattern of READONLY_WRITE_PATTERNS) {
       if (pattern.test(cmd)) {
+        const cmdPreview = cmd.length > 80 ? cmd.substring(0, 80) + '...' : cmd;
+        logger.warn(`[ReadonlyCheck] 🔒 Bash write blocked: cmd="${cmdPreview}" pattern=${pattern} session=${context?.sessionId} channel=${context?.channel} peer=${context?.peerId} role=${context?.role}`);
         return { behavior: 'deny', message: '🔒 只读模式：禁止执行写入操作' };
       }
     }

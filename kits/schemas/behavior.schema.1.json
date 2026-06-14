@@ -1,0 +1,59 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "behavior.schema.1.json",
+  "title": "BehaviorConfig (agent 级与关系级 behavior.json 共用)",
+  "description": "行为参数。HA 类——人和 agent 均可写。agent/behavior.json 是 HA 链最低层（无 defaults 层）。",
+  "x-logical-name": "behavior",
+  "x-permission": "HA",
+  "x-scope": "behavior",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema_version": { "type": "number", "default": 1, "x-merge": "scalar" },
+    "active_baseagent": { "type": "string", "description": "当前活跃 base agent（claude/codex/gemini）", "x-merge": "scalar" },
+    "baseagents": {
+      "type": "object",
+      "description": "各 base agent 的 model/effort 等（.claude.model / .codex.reasoning）",
+      "x-merge": "dict"
+    },
+    "chatmode": {
+      "type": "object",
+      "description": "对话模式：interactive=直接输出即回复；proactive=须显式发送",
+      "x-merge": "dict",
+      "properties": {
+        "private": { "type": "string", "enum": ["interactive", "proactive"] },
+        "group": { "type": "string", "enum": ["interactive", "proactive"] },
+        "nothuman": { "type": "string", "enum": ["interactive", "proactive"] }
+      }
+    },
+    "flush_delay": { "type": "number", "description": "消息 flush 间隔（秒）", "x-merge": "scalar" },
+    "debounce": { "type": "number", "description": "入站消息去抖（秒）", "x-merge": "scalar" },
+    "dispatch": { "type": "string", "enum": ["mention", "broadcast"], "description": "群聊分发策略", "x-merge": "scalar" },
+    "show_activities": { "type": "string", "enum": ["all", "none"], "description": "中间活动可见性", "x-merge": "scalar" },
+    "render": {
+      "type": "object",
+      "description": "各渲染类型当前激活的 modeName",
+      "x-merge": "dict",
+      "properties": {
+        "private": { "type": "string" },
+        "group": { "type": "string" },
+        "inject": { "type": "string" }
+      }
+    },
+    "enable_rich_content": { "type": "boolean", "description": "启用富内容渲染（如飞书富文本卡片）", "x-merge": "scalar" },
+    "permissionMode": { "type": "string", "description": "执行权限模式（bypass/readonly/auto 等）", "x-merge": "scalar" },
+    "roles": {
+      "type": "object",
+      "description": "角色级行为覆盖：role → { baseagents, permissionMode }。提供按角色派生的 model/effort/permissionMode 覆盖。",
+      "x-merge": "dict",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "baseagents": { "type": "object" },
+          "permissionMode": { "type": "string" }
+        }
+      }
+    }
+  }
+}

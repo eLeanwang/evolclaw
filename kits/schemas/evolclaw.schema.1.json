@@ -1,0 +1,63 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "evolclaw.schema.1.json",
+  "title": "ProcessConfig (evolclaw.json)",
+  "description": "进程级配置：daemon 自身运行配置，链外单 H 作用域，不进覆盖链。",
+  "x-logical-name": "evolclaw",
+  "x-permission": "H",
+  "x-scope": "process",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema_version": { "type": "number", "default": 1, "x-merge": "scalar" },
+    "aid": { "type": "string", "description": "daemon 默认身份 AID", "x-merge": "scalar" },
+    "owners": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "进程控制面鉴权名单（谁能远程管 daemon）",
+      "x-merge": "list"
+    },
+    "debug": { "type": "object", "x-merge": "dict" },
+    "tunnel": {
+      "type": "object",
+      "description": "内网穿透配置",
+      "x-merge": "dict",
+      "properties": {
+        "targets": { "type": "array", "items": { "type": "object" } }
+      }
+    },
+    "aun": {
+      "type": "object",
+      "description": "keystore 加密种子等（值用 ${VAR} 引用）",
+      "x-merge": "dict",
+      "properties": {
+        "encryptionSeed": { "type": ["string", "null"] }
+      }
+    },
+    "serviceProxy": {
+      "type": "object",
+      "description": "AUN Service Proxy：把本地服务暴露到 AUN 网络",
+      "x-merge": "dict",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "services": { "type": "array", "items": { "type": "object" } }
+      }
+    },
+    "ecweb": {
+      "type": "object",
+      "description": "web 控制台开关/端口",
+      "x-merge": "dict",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "port": { "type": "number" }
+      }
+    },
+    "watch": {
+      "type": "object",
+      "x-merge": "dict",
+      "properties": {
+        "logTypes": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  }
+}

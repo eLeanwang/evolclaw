@@ -727,6 +727,8 @@ export class MessageProcessor {
           ? (sessionKey) => this.messageQueue!.cancelIntercept(sessionKey)
           : undefined,
         policyHook: proactive ? (toolName, toolInput) => {
+          // Trigger messages exempt from first-tool enforcement (cron intent is silent execution)
+          if (message.source === 'trigger') return undefined;
           // 解析是否是允许的首次表态命令
           const isAllowedFirstTool = toolName === 'Bash' && (() => {
             const cmd = (toolInput.command as string) || '';
@@ -773,7 +775,7 @@ export class MessageProcessor {
 
       let streamResult: StreamRunResult = { isError: false, lastReplyText: '', fullText: '', hasReceivedText: false };
       let effectiveSystemPrompt: string | undefined;
-      let modelOverride: { model?: string; effort?: string } | undefined;
+      let modelOverride: { model?: string; effort?: string; permissionMode?: string } | undefined;
       let usedFallback = false;
       let skipEvolclawModel = false;
       let agentModel: string | undefined;
@@ -818,8 +820,10 @@ export class MessageProcessor {
         const peerRole = session.identity?.role || 'anonymous';
         const normalizedBaseagent = normalizeBaseagent(agent.name);
 
-        // 设置 per-session 权限模式：运行时按 关系 > 角色 > 出厂默认[role] 解析（不再读/写 session.metadata）
-        // resolvePermissionMode 设计为不抛出（配置损坏返回兜底），但防御性 try-catch 确保 setMode 必定执行
+        // 设置 per-call 权限模式：运行时按 关系 > 角色 > 出厂默认[role] 解析（不再读/写 session.metadata）
+        // resolvePermissionMode 设计为不抛出（配置损坏返回兜底），但防御性 try-catch 确保有确定值。
+        // 作为 per-call 入参随 modelOverride 传入 runQuery —— 与 model/effort 同构，
+        // 不写 AgentRunner 实例字段，多对端/多会话并发共享同一 runner 实例时互不污染。
         let effectivePermissionMode: string;
         try {
           effectivePermissionMode = resolvePermissionMode({ self: selfAid || undefined, peerKey, role: peerRole });
@@ -827,7 +831,6 @@ export class MessageProcessor {
           logger.warn(`[MessageProcessor] resolvePermissionMode failed, using fallback: ${e instanceof Error ? e.message : String(e)}`);
           effectivePermissionMode = 'auto';
         }
-        agent.setMode(effectivePermissionMode);
 
         // 按 关系级 > agent级 > 全局 解析本次调用的模型/强度，作为 per-call 入参传入 runQuery。
         // 不缓存、不绑会话——改关系级/agent级后该范围所有会话的下条消息即时生效；
@@ -864,6 +867,10 @@ export class MessageProcessor {
           }
           modelOverride = evolclawModelOverride;
         }
+
+        // permissionMode 始终随 per-call override 传入（与 model/effort 解耦：
+        // 即使跳过 evolclaw 作用域模型或模型解析失败，权限模式也必须生效）。
+        modelOverride = { ...(modelOverride || {}), permissionMode: effectivePermissionMode };
 
         agentModel = (typeof (agent as any).getModel === 'function') ? (agent as any).getModel() as string : undefined;
 
@@ -1068,7 +1075,8 @@ export class MessageProcessor {
               renderer,
               resetTimer,
               shouldSuppress,
-              proactive
+              proactive,
+              message.source === 'trigger'
             );
             // 探测成功（退避期内到达探测点且用的是 evolclaw 模型）→ 清零降级状态
             if (fbState.fallbackActive && !skipEvolclawModel && !usedFallback) {
@@ -1090,8 +1098,9 @@ export class MessageProcessor {
               }
               this.modelFallbackMap.set(session.id, fbState);
               logger.warn(`[MessageProcessor] Model unavailable: ${evolclawModelOverride.model}, failCount=${fbState.failCount}, fallbackActive=${fbState.fallbackActive}`);
-              // 切换到 baseAgentModel 重试（清除 modelOverride，让 runQuery 使用 this.model）
-              modelOverride = undefined;
+              // 切换到 baseAgentModel 重试（清除 model/effort，让 runQuery 使用 this.model；
+              // 保留 permissionMode —— 它与模型无关，不能因模型降级而丢失）
+              modelOverride = { permissionMode: effectivePermissionMode };
               usedFallback = true;
               continue;
             }
@@ -1137,7 +1146,8 @@ export class MessageProcessor {
               renderer,
               resetTimer,
               shouldSuppress,
-              proactive
+              proactive,
+              message.source === 'trigger'
             );
           } else {
             throw new Error('CONTEXT_COMPACT_FAILED');
@@ -1173,7 +1183,7 @@ export class MessageProcessor {
             modelOverride
           );
           agent.registerStream(streamKey, retryStream);
-          streamResult = await this.processEventStream(retryStream, session, agent, renderer, resetTimer, shouldSuppress, proactive);
+          streamResult = await this.processEventStream(retryStream, session, agent, renderer, resetTimer, shouldSuppress, proactive, message.source === 'trigger');
 
           // 重试后仍然 prompt_too_long：清理 renderer 中可能混入的错误文本，显示友好提示
           const retryStillTooLong = streamResult.isError && streamHitContextLimit(streamResult);
@@ -1875,7 +1885,8 @@ export class MessageProcessor {
     renderer: IMRenderer,
     resetTimer: (eventType?: string, toolName?: string) => void,
     shouldSuppress: () => boolean,
-    proactive?: { firstToolDone: boolean; toolCount: number; lastQueueReminder: number; chatType: string } | null
+    proactive?: { firstToolDone: boolean; toolCount: number; lastQueueReminder: number; chatType: string } | null,
+    isTrigger?: boolean
   ): Promise<StreamRunResult> {
     // Per-session agent name for stats bucketing
     const agentNameForStats = this.agentRegistry?.resolveByChannel(session.metadata?.channelKey || session.channel)?.name ?? '<unknown>';
@@ -2108,7 +2119,7 @@ export class MessageProcessor {
           const isContextTooLong = event.terminalReason === 'prompt_too_long'
             || isContextTooLongText(event.errors?.join(' ') || '')
             || isContextTooLongText(lastReplyText);
-          if (event.isError && !hasErrorResult && !shouldSuppress() && !isUserInterrupt && !isContextTooLong) {
+          if (event.isError && !hasErrorResult && !shouldSuppress() && !isUserInterrupt && !isContextTooLong && !isTrigger) {
             const errorSummary = event.errors?.join('; ') || '任务执行失败';
             // 使用 terminalReason 提供更友好的错误提示（不带 emoji，由 formatter 统一加）
             const userFriendlyMessage = event.terminalReason === 'prompt_too_long'

@@ -1147,7 +1147,14 @@ export async function execMenuAction(this: any,
         targetSessionStrategy: strategy,
         agentId: args.agentId,
       };
-      const r = await this.registerTriggerFromParsed(parsed, channel, channelId, userId ?? '', undefined);
+      const r = await this.registerTriggerFromParsed(
+        parsed,
+        channel,
+        channelId,
+        userId ?? '',
+        undefined,
+        this.resolveMenuChatType(channel, channelId, explicitChatType)
+      );
       if (!r.ok) return { error: r.error, code: /已存在|exists|重复/.test(r.error) ? 'CONFLICT' : 'INVALID_ARGS' };
       return { data: { id: r.trigger.id, name: r.trigger.name, nextFireAt: r.trigger.nextFireAt } };
     }

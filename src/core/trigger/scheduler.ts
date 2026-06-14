@@ -3,6 +3,7 @@ import { logger as baseLogger } from '../../utils/logger.js';
 import type { Trigger, Message } from '../../types.js';
 import type { EventBus } from '../event-bus.js';
 import type { TriggerManager } from './manager.js';
+import { tryParseChannelKey } from '../channel-loader.js';
 
 const logger = {
   info: (msg: string) => baseLogger.info(msg),
@@ -222,8 +223,15 @@ export class TriggerScheduler {
     // 用 id 重读磁盘最新版，读盘失败则回退到 heap 副本。
     const fresh = this.manager.getByIdFresh(trigger.id) ?? trigger;
 
+    // 归属防御：schedulerAid 与本 scheduler 的 aid 不一致 → 错位数据，跳过不执行。
+    // 字段为空（旧数据未补）则跳过校验，保持向后兼容。
+    if (fresh.schedulerAid && fresh.schedulerAid !== this.aid) {
+      logger.warn(`[${this.aid}] schedulerAid mismatch: trigger ${fresh.name} (${fresh.id}) owned by ${fresh.schedulerAid}, skipping`);
+      return;
+    }
+
     const messageId = `trigger:${fresh.id}:${now}`;
-    const msg = this.buildSyntheticMessage(fresh, messageId);
+    const msg = this.buildSyntheticMessage(fresh, messageId, now);
 
     logger.info(`[${this.aid}] Firing trigger: ${fresh.name} (${fresh.id})`);
 
@@ -254,15 +262,17 @@ export class TriggerScheduler {
     this.manager.updateResult(triggerId, outcome);
   }
 
-  private buildSyntheticMessage(trigger: Trigger, messageId: string): Message {
+  private buildSyntheticMessage(trigger: Trigger, messageId: string, fireTime: number): Message {
+    const targetChatType = this.resolveTriggerChatType(trigger);
     const base: Message = {
       channel: trigger.targetChannel,
       channelType: trigger.targetChannelType,
       channelId: trigger.targetChannelId,
-      selfAID: this.aid,
+      selfAID: tryParseChannelKey(trigger.targetChannel)?.selfAID ?? this.aid,
       threadId: '',
       agentId: trigger.agentId,
-      chatType: 'private',
+      chatType: targetChatType,
+      ...(targetChatType === 'group' ? { groupId: trigger.targetChannelId } : {}),
       peerId: `__trigger__:${trigger.id}`,  // unique per trigger to prevent greedy merge
       content: trigger.prompt,
       messageId,
@@ -270,21 +280,33 @@ export class TriggerScheduler {
       source: 'trigger',
     };
 
+    const metaBase = { triggerName: trigger.name, fireTime };
     if (trigger.targetSessionStrategy === 'current') {
-      base.triggerMeta = { triggerId: trigger.id, boundSessionId: trigger.boundSessionId };
+      base.triggerMeta = { triggerId: trigger.id, boundSessionId: trigger.boundSessionId, ...metaBase };
     } else if (trigger.targetSessionStrategy === 'thread') {
       if (trigger.threadKind === 'feishu' && trigger.pendingThread) {
-        base.triggerMeta = { triggerId: trigger.id, pendingThread: true, rootMessageId: trigger.rootMessageId };
+        base.triggerMeta = { triggerId: trigger.id, pendingThread: true, rootMessageId: trigger.rootMessageId, ...metaBase };
         // threadId intentionally empty — first fire builds the thread via reply_in_thread
       } else {
         base.threadId = trigger.targetThreadId ?? '';
-        base.triggerMeta = { triggerId: trigger.id };
+        base.triggerMeta = { triggerId: trigger.id, ...metaBase };
       }
     } else {
       // latest
-      base.triggerMeta = { triggerId: trigger.id };
+      base.triggerMeta = { triggerId: trigger.id, ...metaBase };
     }
 
     return base;
+  }
+
+  private resolveTriggerChatType(trigger: Trigger): 'private' | 'group' {
+    if (trigger.targetChatType === 'group' || trigger.targetChatType === 'private') {
+      return trigger.targetChatType;
+    }
+    // Backward-compatible fallback for old trigger records that predate targetChatType.
+    if (trigger.targetChannelType === 'aun' && trigger.targetChannelId.includes('/')) {
+      return 'group';
+    }
+    return 'private';
   }
 }

@@ -91,6 +91,8 @@ export class CommandHandler {
   private agentMap: Map<string, AgentRunnerFull>;
   private primaryRunnerKey: string;
   private agentRegistry?: EvolAgentRegistryHandle;
+  // 注：trigger 归属已改为按 targetChannel/channel 解析 owning agent 的 scheduler/manager。
+  // 以下字段仅保留 setTriggerScheduler 接口兼容（index.ts 仍调用），注册/管理路径不再读取。
   private triggerScheduler?: TriggerScheduler;
   private triggerManager?: TriggerManager;
 
@@ -724,11 +726,12 @@ export class CommandHandler {
     peerId: string,
     isAdmin: boolean,
     messageId?: string,
+    chatType?: string,
   ): Promise<string> {
     // Resolve trigger manager/scheduler from the owning agent of this channel
     const owningAgent = this.getOwningAgent(channel);
-    const scheduler = (owningAgent?.triggerScheduler ?? this.triggerScheduler) as TriggerScheduler | undefined;
-    const manager = (owningAgent?.triggerManager ?? this.triggerManager) as TriggerManager | undefined;
+    const scheduler = owningAgent?.triggerScheduler as TriggerScheduler | undefined;
+    const manager = owningAgent?.triggerManager as TriggerManager | undefined;
 
     // Bare /trigger → list active
     if (content === '/trigger') {
@@ -871,7 +874,7 @@ export class CommandHandler {
       const result = parseTriggerSet(args);
       if (!result.ok) return `❌ ${result.error}`;
 
-      const reg = await this.registerTriggerFromParsed(result.value, channel, channelId, peerId, messageId);
+      const reg = await this.registerTriggerFromParsed(result.value, channel, channelId, peerId, messageId, chatType);
       if (!reg.ok) return `❌ ${reg.error}`;
       const nextStr = new Date(reg.trigger.nextFireAt).toLocaleString();
       return `✅ 触发器已注册：**${reg.trigger.name}**\n下次触发：${nextStr}`;
@@ -886,12 +889,8 @@ export class CommandHandler {
   private async registerTriggerFromParsed(
     parsed: ParsedTriggerSet,
     channel: string, channelId: string, peerId: string, messageId?: string,
+    chatType?: string,
   ): Promise<{ ok: true; trigger: Trigger } | { ok: false; error: string }> {
-    const owningAgent = this.getOwningAgent(channel);
-    const scheduler = (owningAgent?.triggerScheduler ?? this.triggerScheduler) as TriggerScheduler | undefined;
-    const manager = (owningAgent?.triggerManager ?? this.triggerManager) as TriggerManager | undefined;
-    if (!manager || !scheduler) return { ok: false, error: '触发器功能未启用' };
-
     const now = Date.now();
     const nextFireAt = calcNextFireAt(parsed.scheduleType, parsed.scheduleValue, now);
 
@@ -906,8 +905,25 @@ export class CommandHandler {
     // Validate channelId format for AUN: must look like an AID (contains '.')
     const targetChannelType = this.resolveChannelType(targetChannelName);
     const targetChannelId = parsed.targetChannelId ?? channelId;
+    const activeTarget = this.sessionManager.getActiveSessionSync(targetChannelName, targetChannelId);
+    const targetChatType = activeTarget?.chatType === 'group'
+      ? 'group'
+      : activeTarget?.chatType === 'private'
+        ? 'private'
+        : chatType === 'group'
+          ? 'group'
+          : 'private';
     if (targetChannelType === 'aun' && parsed.targetChannelId && !parsed.targetChannelId.includes('.')) {
       return { ok: false, error: `AUN 渠道的 --channelid 必须是 AID 格式（如 user.agentid.pub），收到："${parsed.targetChannelId}"` };
+    }
+
+    // 用 targetChannel 解析归属 agent（谁执行归谁），不兜底到 primary
+    const schedulerAid = tryParseChannelKey(targetChannelName)?.selfAID;
+    const owningAgent = schedulerAid ? this.agentRegistry?.get(schedulerAid) : null;
+    const scheduler = owningAgent?.triggerScheduler as TriggerScheduler | undefined;
+    const manager = owningAgent?.triggerManager as TriggerManager | undefined;
+    if (!manager || !scheduler || !schedulerAid) {
+      return { ok: false, error: `目标 agent 不存在或未就绪：${schedulerAid ?? targetChannelName}` };
     }
 
     const trigger: Trigger = {
@@ -918,6 +934,7 @@ export class CommandHandler {
       nextFireAt,
       targetChannel: targetChannelName,
       targetChannelId,
+      targetChatType,
       targetChannelType,
       targetThreadId: parsed.targetThreadId,
       targetSessionStrategy: parsed.targetSessionStrategy,
@@ -925,6 +942,7 @@ export class CommandHandler {
       prompt: parsed.prompt,
       createdByPeerId: peerId,
       createdByChannel: channel,
+      schedulerAid,
       fireCount: 0,
       failCount: 0,
       createdAt: now,

@@ -1,0 +1,55 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "defaults.schema.1.json",
+  "title": "DefaultsConfig (agents/defaults.json)",
+  "description": "全局级人专属基础设施默认值，H 覆盖链最低优先级。只放 H 字段，不含任何 HA（behavior）字段。",
+  "x-logical-name": "defaults",
+  "x-permission": "H",
+  "x-scope": "defaults",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema_version": { "type": "number", "default": 1, "x-merge": "scalar" },
+    "owners": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "全局基础 owner（AID，沿链并集）",
+      "x-merge": "list"
+    },
+    "admins": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "全局基础管理员（AID，沿链并集）",
+      "x-merge": "list"
+    },
+    "models": {
+      "type": "object",
+      "description": "模型管控（白名单等）",
+      "x-merge": "dict",
+      "properties": {
+        "default": { "type": "string" },
+        "allowed": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "projects": {
+      "type": "object",
+      "description": "项目路径默认值",
+      "x-merge": "dict",
+      "properties": {
+        "rootPath": { "type": "string" },
+        "defaultPath": { "type": "string" }
+      }
+    },
+    "aun": {
+      "type": "object",
+      "description": "AUN 连接默认配置",
+      "x-merge": "dict",
+      "properties": {
+        "keystorePath": { "type": "string" },
+        "encryptionSeed": { "type": "string" },
+        "gatewayUrl": { "type": "string" }
+      }
+    },
+    "debug": { "type": "object", "x-merge": "dict" }
+  }
+}

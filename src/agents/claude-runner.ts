@@ -349,7 +349,7 @@ export class AgentRunner {
     this.permissionContexts.set(sessionId, context);
   }
 
-  private toSdkPermissionMode(): 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan' | 'dontAsk' | 'auto' {
+  private toSdkPermissionMode(mode?: string): 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan' | 'dontAsk' | 'auto' {
     const map: Record<string, 'default' | 'acceptEdits' | 'bypassPermissions' | 'plan' | 'dontAsk' | 'auto'> = {
       'auto': 'auto',         // AI 分类器自动判断
       'bypass': 'bypassPermissions',  // 全部自动放行（SDK 跳过分类器，canUseTool 仍保留 hook 安全检查）
@@ -359,7 +359,7 @@ export class AgentRunner {
       'noask': 'dontAsk',
       'readonly': 'default',
     };
-    return map[this.permissionMode] || 'auto';
+    return map[mode ?? this.permissionMode] || 'auto';
   }
 
   // ── Compactable 接口 ──
@@ -1078,7 +1078,7 @@ export class AgentRunner {
     }
   }
 
-  async runQuery(sessionId: string, prompt: string, projectPath: string, initialClaudeSessionId?: string, images?: ImageData[], systemPromptAppend?: string, sessionManager?: any, modelOverride?: { model?: string; effort?: string }): Promise<AsyncIterable<AgentEvent>> {
+  async runQuery(sessionId: string, prompt: string, projectPath: string, initialClaudeSessionId?: string, images?: ImageData[], systemPromptAppend?: string, sessionManager?: any, modelOverride?: { model?: string; effort?: string; permissionMode?: string }): Promise<AsyncIterable<AgentEvent>> {
     // 记录当前 evolclaw session ID，用于 Agent ctl 环境变量注入
     this.currentEvolclawSessionId = sessionId;
 
@@ -1146,6 +1146,11 @@ export class AgentRunner {
       return {};
     };
 
+    // 本次调用使用的权限模式：优先 permissionModeOverride（message-processor 按 关系>角色>出厂默认 解析后传入），
+    // 缺省回落 agent 级 this.permissionMode。作为 per-call 入参（hook/canUseTool 闭包捕获），
+    // 不写实例字段，多对端并发互不污染（与 model/effort 同构）。
+    const callPermissionMode = modelOverride?.permissionMode || this.permissionMode;
+
     // PreToolUse Hook - 黑名单检查 + input 修正（不可绕过，所有模式都走）
     const preToolUseHook = async (input: any) => {
       // proactive 模式行为策略（首次工具调用必须是 ec msg send）
@@ -1159,8 +1164,16 @@ export class AgentRunner {
         return { decision: 'block' as const, reason: result.message };
       }
 
-      if (this.permissionMode === 'readonly') {
-        const roResult = checkReadonly(input.tool_name, input.tool_input || {}, projectPath);
+      if (callPermissionMode === 'readonly') {
+        const permCtx = this.permissionContexts.get(sessionId);
+        const session = sessionManager?.getActiveSession?.(sessionId);
+        const readonlyContext = {
+          sessionId,
+          channel: permCtx?.channel,
+          peerId: permCtx?.userId,
+          role: session?.identity?.role
+        };
+        const roResult = checkReadonly(input.tool_name, input.tool_input || {}, projectPath, readonlyContext);
         if (roResult.behavior === 'deny') {
           return { decision: 'block' as const, reason: roResult.message };
         }
@@ -1192,7 +1205,7 @@ export class AgentRunner {
 
     // PermissionDenied Hook - auto 模式下 SDK 拒绝操作时通知用户
     const permissionDeniedHook = async (input: any) => {
-      if (this.permissionMode === 'auto' && this.sendPromptFn) {
+      if (callPermissionMode === 'auto' && this.sendPromptFn) {
         const toolName = input.tool_name || '未知工具';
         const reason = input.reason || 'AI 判断此操作有风险';
         const message = `⚠️ 操作已自动拦截\n工具: ${toolName}\n原因: ${reason}`;
@@ -1224,7 +1237,7 @@ export class AgentRunner {
       }
 
       // bypass 模式：一律 allow
-      if (this.permissionMode === 'bypass') {
+      if (callPermissionMode === 'bypass') {
         return { behavior: 'allow' as const, updatedInput: input, decisionClassification: 'user_permanent' as const };
       }
 
@@ -1238,8 +1251,16 @@ export class AgentRunner {
       }
 
       // readonly 模式：二次拦截（belt-and-suspenders）
-      if (this.permissionMode === 'readonly') {
-        const roResult = checkReadonly(toolName, input, projectPath);
+      if (callPermissionMode === 'readonly') {
+        const permCtx = this.permissionContexts.get(sessionId);
+        const session = sessionManager?.getActiveSession?.(sessionId);
+        const readonlyContext = {
+          sessionId,
+          channel: permCtx?.channel,
+          peerId: permCtx?.userId,
+          role: session?.identity?.role
+        };
+        const roResult = checkReadonly(toolName, input, projectPath, readonlyContext);
         if (roResult.behavior === 'deny') {
           return { behavior: 'deny' as const, message: roResult.message, decisionClassification: 'user_reject' as const };
         }
@@ -1248,7 +1269,7 @@ export class AgentRunner {
 
       // auto 模式：SDK 内置分类器自动判断，正常情况下不会触发 canUseTool 回调。
       // 防御性兜底：确保即使 SDK 边界场景或版本变化意外调用了此回调，也不会阻塞流程。
-      if (this.permissionMode === 'auto') {
+      if (callPermissionMode === 'auto') {
         return { behavior: 'allow' as const, updatedInput: input, decisionClassification: 'user_permanent' as const };
       }
 
@@ -1291,12 +1312,12 @@ export class AgentRunner {
     const excludeDynamic = this.config?.agents?.claude?.excludeDynamicSections === true;
 
     // 公共 options（新旧模式共用）
-    const sdkPermissionMode = this.toSdkPermissionMode();
+    const sdkPermissionMode = this.toSdkPermissionMode(callPermissionMode);
     // 本次调用使用的模型/强度：优先 modelOverride（message-processor 按 关系>agent>全局 解析后传入），
     // 缺省回落 agent 级 this.model。作为 per-call 入参传入，无共享状态，多对端并发互不污染。
     const callModel = modelOverride?.model || this.model;
     const callEffort = (modelOverride?.effort ?? this.effort) as ('low' | 'medium' | 'high' | 'xhigh' | 'max' | undefined);
-    logger.info(`[AgentRunner] runQuery model=${callModel} effort=${callEffort ?? 'auto'} permMode=${this.permissionMode} sdkMode=${sdkPermissionMode}`);
+    logger.info(`[AgentRunner] runQuery model=${callModel} effort=${callEffort ?? 'auto'} permMode=${callPermissionMode} sdkMode=${sdkPermissionMode}`);
     if (systemPromptAppend) {
       logger.info(`[AgentRunner] systemPromptAppend: ${systemPromptAppend.length} chars`);
     } else {
