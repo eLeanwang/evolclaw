@@ -1027,6 +1027,7 @@ export interface Trigger {
   prompt: string;
   createdByPeerId: string;
   createdByChannel: string;
+  schedulerAid: string;          // 拥有/调度/执行这条 trigger 的 agent aid（= parseChannelKey(targetChannel).selfAID）
   lastFiredAt?: number;
   fireCount: number;
   failCount: number;
