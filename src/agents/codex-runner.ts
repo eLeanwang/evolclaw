@@ -273,20 +273,26 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
   private currentMode: string = 'auto';
   private approvalPolicy: string = 'never';
   private sandboxMode: string = 'danger-full-access';
+  // per-call/per-session 权限模式：runQuery 按本次解析结果写入，审批回调（异步、按 sessionKey 路由）据此判定。
+  // 避免多会话共享 this.currentMode 时的并发污染（与 claude-runner 的 per-call permissionMode 同构）。
+  private sessionModes = new Map<string, string>();
 
-  setMode(mode: string): void {
+  /** 将权限模式映射为 Codex app-server 的 approvalPolicy（纯函数，无副作用，供 per-call 派生用）。 */
+  private toApprovalPolicy(mode: string): string {
     const map: Record<string, string> = {
-      // Codex app-server also supports auto_review, but EvolClaw auto currently means:
-      // run local blacklist/readonly guards, then approve app-server requests without
-      // app-server reviewer escalation. Changing this requires a semantic decision.
-      'auto': 'never',
-      'bypass': 'never',
-      'readonly': 'on-request',
-      'request': 'on-request',
+      'auto': 'never', 'bypass': 'never',
+      'readonly': 'on-request', 'request': 'on-request',
       'noask': 'untrusted',
     };
+    return map[mode] || 'never';
+  }
+
+  setMode(mode: string): void {
+    // Codex app-server also supports auto_review, but EvolClaw auto currently means:
+    // run local blacklist/readonly guards, then approve app-server requests without
+    // app-server reviewer escalation. Changing this requires a semantic decision.
     this.currentMode = mode;
-    this.approvalPolicy = map[mode] || 'never';
+    this.approvalPolicy = this.toApprovalPolicy(mode);
     this.sandboxMode = this.toSandboxMode(mode);
   }
   getMode(): string { return this.currentMode; }
@@ -333,21 +339,28 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
     images?: Array<{ data: string; mimeType?: string }>,
     systemPromptAppend?: string,
     sessionManager?: any,
-    modelOverride?: { model?: string; effort?: string }
+    modelOverride?: { model?: string; effort?: string; permissionMode?: string }
   ): Promise<AsyncIterable<AgentEvent>> {
     let agentSessionId = initialAgentSessionId || this.activeSessions.get(sessionId);
     const callModel = modelOverride?.model || this.model;
     const callEffort = modelOverride?.effort ?? this.effort;
+    // per-call 权限模式：优先 override（message-processor 解析后传入），缺省回落实例级 currentMode。
+    // 写入 sessionModes 供异步审批回调按 sessionKey 读取，并据此派生本次 thread 的 approvalPolicy/sandbox，
+    // 不依赖共享的 this.approvalPolicy/this.sandboxMode（多会话并发互不污染）。
+    const callMode = modelOverride?.permissionMode || this.currentMode;
+    this.sessionModes.set(sessionId, callMode);
+    const callApprovalPolicy = this.toApprovalPolicy(callMode);
+    const callSandboxMode = this.toSandboxMode(callMode);
     const appServer = this.getAppServerClient();
 
     // proactive 模式需要审批工具调用（让 policyHook 生效）
     const context = this.permissionContexts.get(sessionId);
-    const effectiveApprovalPolicy = (context?.chatmode === 'proactive' && this.approvalPolicy === 'never')
+    const effectiveApprovalPolicy = (context?.chatmode === 'proactive' && callApprovalPolicy === 'never')
       ? 'on-request'
-      : this.approvalPolicy;
+      : callApprovalPolicy;
 
-    if (effectiveApprovalPolicy !== this.approvalPolicy) {
-      logger.info(`[CodexRunner] Proactive mode: upgraded approvalPolicy from ${this.approvalPolicy} to ${effectiveApprovalPolicy} for session=${sessionId}`);
+    if (effectiveApprovalPolicy !== callApprovalPolicy) {
+      logger.info(`[CodexRunner] Proactive mode: upgraded approvalPolicy from ${callApprovalPolicy} to ${effectiveApprovalPolicy} for session=${sessionId}`);
     }
 
     const threadOptions = {
@@ -355,7 +368,7 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
       effort: callEffort,
       approvalPolicy: effectiveApprovalPolicy,
       approvalsReviewer: this.resolvedConfig.approvalsReviewer,
-      sandbox: this.sandboxMode,
+      sandbox: callSandboxMode,
       config: this.buildEvolclawShellEnvironmentConfig(sessionId),
       ...(systemPromptAppend ? { developerInstructions: systemPromptAppend } : {}),
     };
@@ -410,7 +423,7 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
         model: callModel,
         effort: callEffort,
         approvalPolicy: effectiveApprovalPolicy,
-        sandbox: this.sandboxMode,
+        sandbox: callSandboxMode,
       });
       const turnId = turnResponse.turn?.id;
       if (turnId && !state.turnId) {
@@ -499,6 +512,7 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
   async clearSession(sessionId: string, _agentSessionId: string, _projectPath: string): Promise<boolean> {
     // Codex: 清空会话 = 下次 runQuery 不传 resumeId，自动创建新 thread
     this.activeSessions.delete(sessionId);
+    this.sessionModes.delete(sessionId);
     this.onSessionIdUpdate?.(sessionId, '');
     return true;
   }
@@ -513,15 +527,18 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
         if (!this.isThreadNotFoundError(error)) throw error;
         logger.info(`[CodexRunner] Compact thread not loaded, resuming before compact: ${agentSessionId}`);
         const ctx = this.permissionContexts.get(_sessionId);
-        const compactApprovalPolicy = (ctx?.chatmode === 'proactive' && this.approvalPolicy === 'never')
+        // 优先用 per-session 模式派生（与 runQuery 一致），缺省回落实例级
+        const compactMode = this.sessionModes.get(_sessionId) ?? this.currentMode;
+        const compactPolicy = this.toApprovalPolicy(compactMode);
+        const compactApprovalPolicy = (ctx?.chatmode === 'proactive' && compactPolicy === 'never')
           ? 'on-request'
-          : this.approvalPolicy;
+          : compactPolicy;
         await appServer.threadResume(agentSessionId, _projectPath, {
           model: this.model,
           effort: this.effort,
           approvalPolicy: compactApprovalPolicy,
           approvalsReviewer: this.resolvedConfig.approvalsReviewer,
-          sandbox: this.sandboxMode,
+          sandbox: this.toSandboxMode(compactMode),
           config: this.buildEvolclawShellEnvironmentConfig(_sessionId),
         });
         return await this.startAndWaitForCompact(appServer, agentSessionId);
@@ -933,14 +950,17 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
       return 'allow';
     }
 
-    if (this.currentMode === 'readonly') {
+    // per-session 权限模式（runQuery 写入）；缺省回落实例级 currentMode（兼容无 runQuery 上下文的调用）
+    const mode = this.sessionModes.get(sessionKey) ?? this.currentMode;
+
+    if (mode === 'readonly') {
       const readonly = this.checkCodexReadonly(toolName, blacklist.updatedInput, projectPath, sessionKey);
       if (readonly.behavior === 'deny') return 'deny';
       return 'allow';
     }
 
-    if (this.currentMode === 'bypass' || this.currentMode === 'auto') return 'allow';
-    if (this.currentMode === 'noask') return 'deny';
+    if (mode === 'bypass' || mode === 'auto') return 'allow';
+    if (mode === 'noask') return 'deny';
     if (!this.permissionGateway || !this.sendPromptFn) return 'allow';
     if (this.permissionGateway.isAlwaysAllowed(toolName)) return 'always';
     return this.permissionGateway.requestPermission(
@@ -1526,6 +1546,7 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
     this.activeSessions.clear();
     this.activeTurns.clear();
     this.permissionContexts.clear();
+    this.sessionModes.clear();
     await this.appServerClient?.close();
     this.appServerClient = null;
   }

@@ -120,8 +120,12 @@ export class GeminiRunner implements AgentRunnerFull, ModelSwitcher {
     images?: Array<{ data: string; mimeType?: string }>,
     systemPromptAppend?: string,
     sessionManager?: any,
+    modelOverride?: { model?: string; effort?: string; permissionMode?: string }
   ): Promise<AsyncIterable<AgentEvent>> {
     let geminiSessionId = initialAgentSessionId || this.activeSessions.get(sessionId);
+    // per-call 权限模式/模型：优先 override，缺省回落实例级（多会话并发互不污染）
+    const callMode = modelOverride?.permissionMode || this.currentMode;
+    const callModel = modelOverride?.model || this.model;
 
     // Build CLI args
     const args: string[] = [];
@@ -153,12 +157,12 @@ export class GeminiRunner implements AgentRunnerFull, ModelSwitcher {
 
     args.push('-p', fullPrompt);
     args.push('--output-format', 'stream-json');
-    args.push('-m', this.model);
+    args.push('-m', callModel);
 
     // Permission mode
-    if (this.currentMode === 'plan') {
+    if (callMode === 'plan') {
       args.push('--approval-mode=plan');
-    } else if (this.currentMode === 'noask') {
+    } else if (callMode === 'noask') {
       args.push('--approval-mode=default');
     } else {
       args.push('--yolo');

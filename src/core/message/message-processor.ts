@@ -775,7 +775,7 @@ export class MessageProcessor {
 
       let streamResult: StreamRunResult = { isError: false, lastReplyText: '', fullText: '', hasReceivedText: false };
       let effectiveSystemPrompt: string | undefined;
-      let modelOverride: { model?: string; effort?: string } | undefined;
+      let modelOverride: { model?: string; effort?: string; permissionMode?: string } | undefined;
       let usedFallback = false;
       let skipEvolclawModel = false;
       let agentModel: string | undefined;
@@ -820,8 +820,10 @@ export class MessageProcessor {
         const peerRole = session.identity?.role || 'anonymous';
         const normalizedBaseagent = normalizeBaseagent(agent.name);
 
-        // 设置 per-session 权限模式：运行时按 关系 > 角色 > 出厂默认[role] 解析（不再读/写 session.metadata）
-        // resolvePermissionMode 设计为不抛出（配置损坏返回兜底），但防御性 try-catch 确保 setMode 必定执行
+        // 设置 per-call 权限模式：运行时按 关系 > 角色 > 出厂默认[role] 解析（不再读/写 session.metadata）
+        // resolvePermissionMode 设计为不抛出（配置损坏返回兜底），但防御性 try-catch 确保有确定值。
+        // 作为 per-call 入参随 modelOverride 传入 runQuery —— 与 model/effort 同构，
+        // 不写 AgentRunner 实例字段，多对端/多会话并发共享同一 runner 实例时互不污染。
         let effectivePermissionMode: string;
         try {
           effectivePermissionMode = resolvePermissionMode({ self: selfAid || undefined, peerKey, role: peerRole });
@@ -829,7 +831,6 @@ export class MessageProcessor {
           logger.warn(`[MessageProcessor] resolvePermissionMode failed, using fallback: ${e instanceof Error ? e.message : String(e)}`);
           effectivePermissionMode = 'auto';
         }
-        agent.setMode(effectivePermissionMode);
 
         // 按 关系级 > agent级 > 全局 解析本次调用的模型/强度，作为 per-call 入参传入 runQuery。
         // 不缓存、不绑会话——改关系级/agent级后该范围所有会话的下条消息即时生效；
@@ -866,6 +867,10 @@ export class MessageProcessor {
           }
           modelOverride = evolclawModelOverride;
         }
+
+        // permissionMode 始终随 per-call override 传入（与 model/effort 解耦：
+        // 即使跳过 evolclaw 作用域模型或模型解析失败，权限模式也必须生效）。
+        modelOverride = { ...(modelOverride || {}), permissionMode: effectivePermissionMode };
 
         agentModel = (typeof (agent as any).getModel === 'function') ? (agent as any).getModel() as string : undefined;
 
@@ -1093,8 +1098,9 @@ export class MessageProcessor {
               }
               this.modelFallbackMap.set(session.id, fbState);
               logger.warn(`[MessageProcessor] Model unavailable: ${evolclawModelOverride.model}, failCount=${fbState.failCount}, fallbackActive=${fbState.fallbackActive}`);
-              // 切换到 baseAgentModel 重试（清除 modelOverride，让 runQuery 使用 this.model）
-              modelOverride = undefined;
+              // 切换到 baseAgentModel 重试（清除 model/effort，让 runQuery 使用 this.model；
+              // 保留 permissionMode —— 它与模型无关，不能因模型降级而丢失）
+              modelOverride = { permissionMode: effectivePermissionMode };
               usedFallback = true;
               continue;
             }
