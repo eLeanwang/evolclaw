@@ -91,6 +91,8 @@ export class CommandHandler {
   private agentMap: Map<string, AgentRunnerFull>;
   private primaryRunnerKey: string;
   private agentRegistry?: EvolAgentRegistryHandle;
+  // 注：trigger 归属已改为按 targetChannel/channel 解析 owning agent 的 scheduler/manager。
+  // 以下字段仅保留 setTriggerScheduler 接口兼容（index.ts 仍调用），注册/管理路径不再读取。
   private triggerScheduler?: TriggerScheduler;
   private triggerManager?: TriggerManager;
 
@@ -728,8 +730,8 @@ export class CommandHandler {
   ): Promise<string> {
     // Resolve trigger manager/scheduler from the owning agent of this channel
     const owningAgent = this.getOwningAgent(channel);
-    const scheduler = (owningAgent?.triggerScheduler ?? this.triggerScheduler) as TriggerScheduler | undefined;
-    const manager = (owningAgent?.triggerManager ?? this.triggerManager) as TriggerManager | undefined;
+    const scheduler = owningAgent?.triggerScheduler as TriggerScheduler | undefined;
+    const manager = owningAgent?.triggerManager as TriggerManager | undefined;
 
     // Bare /trigger → list active
     if (content === '/trigger') {
