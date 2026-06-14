@@ -5,7 +5,7 @@
 
 import path from 'path';
 import { openReadonlyDb, getDbPath, listArchivePaths } from './db.js';
-import { calcCost } from './billing.js';
+import { calcCost } from './billing.js';  // 保留用于尚未迁移的函数
 
 export type Granularity = 'hour' | 'day' | 'week' | 'month' | 'model' | 'peer' | 'agent';
 
@@ -31,8 +31,12 @@ export interface AggRow {
   total_context_tokens: number;
   turns: number;
   call_count: number;
-  usd: number;
-  cny: number;
+  cost_official_usd: number;
+  cost_official_cny: number;
+  cost_gateway_usd: number;
+  cost_gateway_cny: number;
+  usd: number;             // 向后兼容：= cost_gateway_usd
+  cny: number;             // 向后兼容：= cost_gateway_cny
   cache_hit_rate: number;  // 0-1
 }
 
@@ -50,8 +54,12 @@ export interface PeerListRow {
   session_count: number;
   first_day: string;       // MIN(day)
   last_day: string;        // MAX(day)
-  usd: number;
-  cny: number;
+  cost_official_usd: number;
+  cost_official_cny: number;
+  cost_gateway_usd: number;
+  cost_gateway_cny: number;
+  usd: number;             // 向后兼容：= cost_gateway_usd
+  cny: number;             // 向后兼容：= cost_gateway_cny
 }
 
 /** 总消耗汇总（单行）。 */
@@ -62,9 +70,12 @@ export interface SummaryRow {
   cache_read_tokens: number;
   total_tokens: number;
   calls: number;
-  cache_hit_rate: number;  // 0-1
-  usd: number;
-  cny: number;
+  cost_official_usd: number;
+  cost_official_cny: number;
+  cost_gateway_usd: number;
+  cost_gateway_cny: number;
+  usd: number;             // 向后兼容：= cost_gateway_usd
+  cny: number;             // 向后兼容：= cost_gateway_cny
 }
 
 export interface TurnRow {
@@ -200,51 +211,22 @@ function _queryAggregatedDaily(
         SUM(image_tokens)          AS image_tokens,
         SUM(total_context_tokens)  AS total_context_tokens,
         SUM(turns)                 AS turns,
-        SUM(calls)                 AS call_count
+        SUM(calls)                 AS call_count,
+        COALESCE(SUM(cost_official_usd), 0) AS cost_official_usd,
+        COALESCE(SUM(cost_official_cny), 0) AS cost_official_cny,
+        COALESCE(SUM(cost_gateway_usd), 0)  AS cost_gateway_usd,
+        COALESCE(SUM(cost_gateway_cny), 0)  AS cost_gateway_cny
       FROM usage_daily ${clause}
       GROUP BY ${periodExpr}
     `;
-    const periodMap = new Map<string, any>();
-    for (const r of db.prepare(sql).all(...params) as any[]) periodMap.set(r.period, r);
+    const rows = db.prepare(sql).all(...params) as any[];
 
-    // 按 period + model + billing_fn 分组精确计费（口径与原明细路径一致）。
-    const costSql = `
-      SELECT ${periodExpr} AS period, model, COALESCE(billing_fn,'') AS billing_fn,
-        SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens,
-        SUM(cache_creation_tokens) AS cache_creation_tokens, SUM(cache_read_tokens) AS cache_read_tokens,
-        SUM(cache_hit_tokens) AS cache_hit_tokens, SUM(cache_miss_tokens) AS cache_miss_tokens,
-        SUM(image_tokens) AS image_tokens, SUM(total_context_tokens) AS total_context_tokens
-      FROM usage_daily ${clause}
-      GROUP BY ${periodExpr}, model, billing_fn
-    `;
-    const costMap = new Map<string, { usd: number; cny: number }>();
-    for (const r of db.prepare(costSql).all(...params) as any[]) {
-      const cost = calcCost(evolclawHome, {
-        model: r.model || 'unknown',
-        billing_fn: r.billing_fn || 'per_token_v1',
-        ts: Date.now(),
-        input_tokens: r.input_tokens ?? 0,
-        output_tokens: r.output_tokens ?? 0,
-        cache_creation_tokens: r.cache_creation_tokens ?? 0,
-        cache_read_tokens: r.cache_read_tokens ?? 0,
-        cache_hit_tokens: r.cache_hit_tokens ?? 0,
-        cache_miss_tokens: r.cache_miss_tokens ?? 0,
-        image_tokens: r.image_tokens ?? 0,
-        total_context_tokens: r.total_context_tokens ?? 0,
-      });
-      const e = costMap.get(r.period) ?? { usd: 0, cny: 0 };
-      e.usd += cost.usd ?? 0;
-      e.cny += cost.cny ?? 0;
-      costMap.set(r.period, e);
-    }
-
-    const sorted = Array.from(periodMap.entries());
     if (groupCol) {
-      sorted.sort((a, b) => ((b[1].input_tokens ?? 0) + (b[1].output_tokens ?? 0)) - ((a[1].input_tokens ?? 0) + (a[1].output_tokens ?? 0)));
+      rows.sort((a, b) => ((b.input_tokens ?? 0) + (b.output_tokens ?? 0)) - ((a.input_tokens ?? 0) + (a.output_tokens ?? 0)));
     } else {
-      sorted.sort((a, b) => a[0].localeCompare(b[0]));
+      rows.sort((a, b) => a.period.localeCompare(b.period));
     }
-    return sorted.map(([, r]) => _enrichRow(evolclawHome, r, costMap.get(r.period)));
+    return rows.map(r => _enrichRow(evolclawHome, r));
   } finally { db.close(); }
 }
 
@@ -294,7 +276,11 @@ function _queryAggregatedEvents(
         SUM(COALESCE(image_tokens,0))      AS image_tokens,
         SUM(COALESCE(total_context_tokens,0)) AS total_context_tokens,
         SUM(turns)                  AS turns,
-        COUNT(*)                    AS call_count
+        COUNT(*)                    AS call_count,
+        COALESCE(SUM(cost_official_usd), 0) AS cost_official_usd,
+        COALESCE(SUM(cost_official_cny), 0) AS cost_official_cny,
+        COALESCE(SUM(cost_gateway_usd), 0)  AS cost_gateway_usd,
+        COALESCE(SUM(cost_gateway_cny), 0)  AS cost_gateway_cny
       FROM usage_events ${clause}
       GROUP BY period ORDER BY period
     `;
@@ -322,49 +308,7 @@ function _queryAggregatedEvents(
     sorted.sort((a, b) => a[0].localeCompare(b[0]));
   }
 
-  // ── 方案 B：按 period + model + billing_fn 分组精确计费 ──
-  // 辅助 SQL：保留 model/billing_fn 维度用于逐组调用 calcCost
-  const costSql = groupCol
-    ? `SELECT ${groupCol} AS period, model, COALESCE(billing_fn,'') AS billing_fn,
-         SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens,
-         SUM(cache_creation_tokens) AS cache_creation_tokens, SUM(cache_read_tokens) AS cache_read_tokens,
-         SUM(COALESCE(image_tokens,0)) AS image_tokens
-       FROM usage_events ${clause}
-       GROUP BY ${groupCol}, model, billing_fn`
-    : `SELECT strftime('${GRAN_FMT[granularity] || GRAN_FMT.day}', ts/1000, 'unixepoch', 'localtime') AS period,
-         model, COALESCE(billing_fn,'') AS billing_fn,
-         SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens,
-         SUM(cache_creation_tokens) AS cache_creation_tokens, SUM(cache_read_tokens) AS cache_read_tokens,
-         SUM(COALESCE(image_tokens,0)) AS image_tokens
-       FROM usage_events ${clause}
-       GROUP BY period, model, billing_fn`;
-
-  const costMap = new Map<string, { usd: number; cny: number }>();
-  for (const dbPath of _relevantDbs(evolclawHome, filter)) {
-    const db = openReadonlyDb(dbPath);
-    if (!db) continue;
-    try {
-      const rows: any[] = db.prepare(costSql).all(...params);
-      for (const r of rows) {
-        const cost = calcCost(evolclawHome, {
-          model: r.model || 'unknown',
-          billing_fn: r.billing_fn || 'per_token_v1',
-          ts: Date.now(),
-          input_tokens: r.input_tokens ?? 0,
-          output_tokens: r.output_tokens ?? 0,
-          cache_creation_tokens: r.cache_creation_tokens ?? 0,
-          cache_read_tokens: r.cache_read_tokens ?? 0,
-          image_tokens: r.image_tokens ?? 0,
-        });
-        const existing = costMap.get(r.period) ?? { usd: 0, cny: 0 };
-        existing.usd += cost.usd ?? 0;
-        existing.cny += cost.cny ?? 0;
-        costMap.set(r.period, existing);
-      }
-    } finally { db.close(); }
-  }
-
-  return sorted.map(([, r]) => _enrichRow(evolclawHome, r, costMap.get(r.period)));
+  return sorted.map(([, r]) => _enrichRow(evolclawHome, r));
 }
 
 /** 查今日概览（单行汇总）。 */
@@ -386,8 +330,15 @@ export function querySessionTurns(evolclawHome: string, sessionId: string): Turn
     try {
       const rows: any[] = db.prepare(sql).all(...params);
       for (const r of rows) {
-        const cost = calcCost(evolclawHome, r);
-        result.push({ ...r, usd: cost.usd ?? 0, cny: cost.cny ?? 0 });
+        result.push({
+          ...r,
+          cost_official_usd: r.cost_official_usd ?? 0,
+          cost_official_cny: r.cost_official_cny ?? 0,
+          cost_gateway_usd: r.cost_gateway_usd ?? 0,
+          cost_gateway_cny: r.cost_gateway_cny ?? 0,
+          usd: r.cost_gateway_usd ?? 0,
+          cny: r.cost_gateway_cny ?? 0
+        });
       }
     } finally { db.close(); }
   }
@@ -543,6 +494,10 @@ export function queryPeerList(evolclawHome: string, opts: PeerListOpts): PeerLis
         session_count: r.session_count ?? 0,
         first_day: r.first_day ?? '',
         last_day: r.last_day ?? '',
+        cost_official_usd: cost.usd,
+        cost_official_cny: cost.cny,
+        cost_gateway_usd: cost.usd,
+        cost_gateway_cny: cost.cny,
         usd: cost.usd,
         cny: cost.cny,
       };
@@ -564,7 +519,9 @@ export function querySummary(evolclawHome: string, opts: SummaryOpts): SummaryRo
   });
   const empty: SummaryRow = {
     input_tokens: 0, output_tokens: 0, cache_creation_tokens: 0, cache_read_tokens: 0,
-    total_tokens: 0, calls: 0, cache_hit_rate: 0, usd: 0, cny: 0,
+    total_tokens: 0, calls: 0,
+    cost_official_usd: 0, cost_official_cny: 0, cost_gateway_usd: 0, cost_gateway_cny: 0,
+    usd: 0, cny: 0,
   };
   const db = openReadonlyDb(getDbPath(evolclawHome));
   if (!db) return empty;
@@ -574,25 +531,17 @@ export function querySummary(evolclawHome: string, opts: SummaryOpts): SummaryRo
         SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens,
         SUM(cache_creation_tokens) AS cache_creation_tokens,
         SUM(cache_read_tokens) AS cache_read_tokens,
-        SUM(calls) AS calls
+        SUM(calls) AS calls,
+        COALESCE(SUM(cost_official_usd), 0) AS cost_official_usd,
+        COALESCE(SUM(cost_official_cny), 0) AS cost_official_cny,
+        COALESCE(SUM(cost_gateway_usd), 0) AS cost_gateway_usd,
+        COALESCE(SUM(cost_gateway_cny), 0) AS cost_gateway_cny
       FROM usage_daily ${clause}
     `).get(...params) as any;
     if (!row || row.calls == null) return empty;
 
-    const costRows = db.prepare(`
-      SELECT model, COALESCE(billing_fn,'') AS billing_fn,
-        SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens,
-        SUM(cache_creation_tokens) AS cache_creation_tokens, SUM(cache_read_tokens) AS cache_read_tokens,
-        SUM(cache_hit_tokens) AS cache_hit_tokens, SUM(cache_miss_tokens) AS cache_miss_tokens,
-        SUM(image_tokens) AS image_tokens, SUM(total_context_tokens) AS total_context_tokens
-      FROM usage_daily ${clause}
-      GROUP BY model, billing_fn
-    `).all(...params) as any[];
-    const cost = _accumCost(evolclawHome, costRows);
-
     const inTok = row.input_tokens ?? 0;
     const cacheRead = row.cache_read_tokens ?? 0;
-    const totalIn = inTok + cacheRead;
     return {
       input_tokens: inTok,
       output_tokens: row.output_tokens ?? 0,
@@ -600,9 +549,12 @@ export function querySummary(evolclawHome: string, opts: SummaryOpts): SummaryRo
       cache_read_tokens: cacheRead,
       total_tokens: inTok + (row.output_tokens ?? 0) + cacheRead + (row.cache_creation_tokens ?? 0),
       calls: row.calls ?? 0,
-      cache_hit_rate: totalIn > 0 ? cacheRead / totalIn : 0,
-      usd: cost.usd,
-      cny: cost.cny,
+      cost_official_usd: row.cost_official_usd ?? 0,
+      cost_official_cny: row.cost_official_cny ?? 0,
+      cost_gateway_usd: row.cost_gateway_usd ?? 0,
+      cost_gateway_cny: row.cost_gateway_cny ?? 0,
+      usd: row.cost_gateway_usd ?? 0,
+      cny: row.cost_gateway_cny ?? 0,
     };
   } finally { db.close(); }
 }
@@ -662,11 +614,20 @@ export function queryPeerDaily(evolclawHome: string, opts: PeerDailyOpts): AggRo
       arr.push(r);
       byPeriod.set(r.period, arr);
     }
-    for (const [period, rows] of byPeriod) costMap.set(period, _accumCost(evolclawHome, rows));
+    for (const [period, rows] of byPeriod) {
+      const cost = _accumCost(evolclawHome, rows);
+      const existing = periodMap.get(period);
+      if (existing) {
+        existing.cost_official_usd = cost.usd;
+        existing.cost_official_cny = cost.cny;
+        existing.cost_gateway_usd = cost.usd;
+        existing.cost_gateway_cny = cost.cny;
+      }
+    }
 
     return Array.from(periodMap.entries())
       .sort((a, b) => a[0].localeCompare(b[0]))
-      .map(([, r]) => _enrichRow(evolclawHome, r, costMap.get(r.period)));
+      .map(([, r]) => _enrichRow(evolclawHome, r));
   } finally { db.close(); }
 }
 
@@ -715,7 +676,7 @@ export function querySessionModelCalls(evolclawHome: string, sessionId: string):
   } finally { db.close(); }
 }
 
-function _enrichRow(evolclawHome: string, r: any, cost?: { usd: number; cny: number }): AggRow {
+function _enrichRow(evolclawHome: string, r: any): AggRow {
   const totalIn = (r.input_tokens ?? 0) + (r.cache_read_tokens ?? 0);
   const cacheHitRate = totalIn > 0 ? (r.cache_read_tokens ?? 0) / totalIn : 0;
   return {
@@ -730,8 +691,12 @@ function _enrichRow(evolclawHome: string, r: any, cost?: { usd: number; cny: num
     total_context_tokens: r.total_context_tokens ?? 0,
     turns: r.turns ?? 0,
     call_count: r.call_count ?? 0,
-    usd: cost?.usd ?? 0,
-    cny: cost?.cny ?? 0,
+    cost_official_usd: r.cost_official_usd ?? 0,
+    cost_official_cny: r.cost_official_cny ?? 0,
+    cost_gateway_usd: r.cost_gateway_usd ?? 0,
+    cost_gateway_cny: r.cost_gateway_cny ?? 0,
+    usd: r.cost_gateway_usd ?? 0,  // 向后兼容
+    cny: r.cost_gateway_cny ?? 0,  // 向后兼容
     cache_hit_rate: cacheHitRate,
   };
 }

@@ -91,7 +91,11 @@ function _initTables(db: any): void {
       total_context_tokens  INTEGER,
       turns                 INTEGER NOT NULL DEFAULT 1,
       duration_ms           INTEGER,
-      context_window_pct    REAL
+      context_window_pct    REAL,
+      cost_official_usd     REAL,
+      cost_official_cny     REAL,
+      cost_gateway_usd      REAL,
+      cost_gateway_cny      REAL
     );
     CREATE INDEX IF NOT EXISTS idx_ue_ts         ON usage_events(ts);
     CREATE INDEX IF NOT EXISTS idx_ue_agent_ts   ON usage_events(agent_aid, ts);
@@ -157,6 +161,10 @@ function _initTables(db: any): void {
       total_context_tokens  INTEGER NOT NULL DEFAULT 0,
       turns        INTEGER NOT NULL DEFAULT 0,
       calls        INTEGER NOT NULL DEFAULT 0,
+      cost_official_usd     REAL,
+      cost_official_cny     REAL,
+      cost_gateway_usd      REAL,
+      cost_gateway_cny      REAL,
       PRIMARY KEY (day, agent_aid, peer_key, session_id, model, billing_fn)
     );
     CREATE INDEX IF NOT EXISTS idx_ud_day     ON usage_daily(day);
@@ -190,6 +198,31 @@ function _initTables(db: any): void {
     CREATE INDEX IF NOT EXISTS idx_mc_agentsession ON model_calls(agent_session_id);
     CREATE INDEX IF NOT EXISTS idx_mc_ts          ON model_calls(ts);
   `);
+
+  // ── Schema Migration: 添加 cost 列 ───────────────────────────────────────
+  try {
+    const cols = db.prepare(`PRAGMA table_info(usage_events)`).all();
+    const hasCostCols = cols.some((c: any) => c.name === 'cost_official_usd');
+
+    if (!hasCostCols) {
+      logger.info('[StatsDB] Migrating schema: adding cost columns to usage_events and usage_daily...');
+      db.exec(`
+        ALTER TABLE usage_events ADD COLUMN cost_official_usd REAL;
+        ALTER TABLE usage_events ADD COLUMN cost_official_cny REAL;
+        ALTER TABLE usage_events ADD COLUMN cost_gateway_usd REAL;
+        ALTER TABLE usage_events ADD COLUMN cost_gateway_cny REAL;
+      `);
+      db.exec(`
+        ALTER TABLE usage_daily ADD COLUMN cost_official_usd REAL;
+        ALTER TABLE usage_daily ADD COLUMN cost_official_cny REAL;
+        ALTER TABLE usage_daily ADD COLUMN cost_gateway_usd REAL;
+        ALTER TABLE usage_daily ADD COLUMN cost_gateway_cny REAL;
+      `);
+      logger.info('[StatsDB] Migration complete. Run "ec stats --rebuild" to backfill historical costs.');
+    }
+  } catch (e) {
+    logger.warn(`[StatsDB] Cost column migration failed (non-fatal): ${e}`);
+  }
 
   // 轻量迁移：旧库的 usage_daily 可能缺 peer_type 列（无 migration 机制，CREATE IF NOT EXISTS
   // 不会补列）。检测后 ALTER 补上；补列后旧行 peer_type 为空，需跑一次 rebuildDailyRollup 回填。
@@ -238,7 +271,8 @@ export function rebuildDailyRollup(evolclawHome: string): number {
         (day, agent_aid, peer_key, peer_type, session_id, model, billing_fn,
          input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
          cache_hit_tokens, cache_miss_tokens, image_tokens, total_context_tokens,
-         turns, calls)
+         turns, calls,
+         cost_official_usd, cost_official_cny, cost_gateway_usd, cost_gateway_cny)
       SELECT
         strftime('%Y-%m-%d', ts/1000, 'unixepoch', 'localtime') AS day,
         agent_aid, peer_key, MAX(COALESCE(peer_type, '')),
@@ -247,7 +281,9 @@ export function rebuildDailyRollup(evolclawHome: string): number {
         SUM(cache_creation_tokens), SUM(cache_read_tokens),
         SUM(COALESCE(cache_hit_tokens, 0)), SUM(COALESCE(cache_miss_tokens, 0)),
         SUM(COALESCE(image_tokens, 0)), SUM(COALESCE(total_context_tokens, 0)),
-        SUM(turns), COUNT(*)
+        SUM(turns), COUNT(*),
+        SUM(COALESCE(cost_official_usd, 0)), SUM(COALESCE(cost_official_cny, 0)),
+        SUM(COALESCE(cost_gateway_usd, 0)), SUM(COALESCE(cost_gateway_cny, 0))
       FROM usage_events
       GROUP BY day, agent_aid, peer_key, COALESCE(session_id, ''), model, billing_fn
     `);

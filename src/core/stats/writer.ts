@@ -4,6 +4,7 @@
 
 import { getDb } from './db.js';
 import type { UsageEvent } from './normalizer.js';
+import { resolvePrices, type GatewayPricingCache } from './price-resolver.js';
 
 export interface ContextBreakdown {
   ts: number;
@@ -23,9 +24,17 @@ export interface ContextBreakdown {
   total_estimated?: number;
 }
 
-export function insertUsageEvent(evolclawHome: string, event: UsageEvent): void {
+export function insertUsageEvent(
+  evolclawHome: string,
+  event: UsageEvent,
+  gatewayPricing?: GatewayPricingCache
+): void {
   const db = getDb(evolclawHome);
   if (!db) return;
+
+  // 写入时计算费用（官方价格 + 网关价格）
+  const prices = resolvePrices(evolclawHome, event, gatewayPricing);
+
   try {
     // 明细 INSERT + rollup UPSERT 包进同一事务：进程在两者间崩溃也不会让 rollup 与明细漂移。
     db.exec('BEGIN');
@@ -34,9 +43,10 @@ export function insertUsageEvent(evolclawHome: string, event: UsageEvent): void 
         (ts, agent_aid, peer_key, peer_type, session_id, model, billing_fn,
          input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
          cache_hit_tokens, cache_miss_tokens, image_tokens, total_context_tokens,
-         turns, duration_ms, context_window_pct)
+         turns, duration_ms, context_window_pct,
+         cost_official_usd, cost_official_cny, cost_gateway_usd, cost_gateway_cny)
       VALUES
-        (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       event.ts, event.agent_aid, event.peer_key, event.peer_type ?? null,
       event.session_id ?? null, event.model, event.billing_fn,
@@ -45,6 +55,8 @@ export function insertUsageEvent(evolclawHome: string, event: UsageEvent): void 
       event.cache_hit_tokens ?? null, event.cache_miss_tokens ?? null,
       event.image_tokens ?? null, event.total_context_tokens ?? null,
       event.turns, event.duration_ms ?? null, event.context_window_pct ?? null,
+      prices.official?.usd ?? null, prices.official?.cny ?? null,
+      prices.gateway?.usd ?? null, prices.gateway?.cny ?? null,
     );
     // 写时增量：累加到日级预聚合表（grain 与 db.ts rebuildDailyRollup 一致）。
     db.prepare(`
@@ -52,10 +64,11 @@ export function insertUsageEvent(evolclawHome: string, event: UsageEvent): void 
         (day, agent_aid, peer_key, peer_type, session_id, model, billing_fn,
          input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
          cache_hit_tokens, cache_miss_tokens, image_tokens, total_context_tokens,
-         turns, calls)
+         turns, calls,
+         cost_official_usd, cost_official_cny, cost_gateway_usd, cost_gateway_cny)
       VALUES
         (strftime('%Y-%m-%d', ?/1000, 'unixepoch', 'localtime'),
-         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
       ON CONFLICT(day, agent_aid, peer_key, session_id, model, billing_fn) DO UPDATE SET
         peer_type             = excluded.peer_type,
         input_tokens          = input_tokens          + excluded.input_tokens,
@@ -67,7 +80,11 @@ export function insertUsageEvent(evolclawHome: string, event: UsageEvent): void 
         image_tokens          = image_tokens          + excluded.image_tokens,
         total_context_tokens  = total_context_tokens  + excluded.total_context_tokens,
         turns                 = turns                 + excluded.turns,
-        calls                 = calls                 + 1
+        calls                 = calls                 + 1,
+        cost_official_usd     = COALESCE(cost_official_usd, 0) + COALESCE(excluded.cost_official_usd, 0),
+        cost_official_cny     = COALESCE(cost_official_cny, 0) + COALESCE(excluded.cost_official_cny, 0),
+        cost_gateway_usd      = COALESCE(cost_gateway_usd, 0)  + COALESCE(excluded.cost_gateway_usd, 0),
+        cost_gateway_cny      = COALESCE(cost_gateway_cny, 0)  + COALESCE(excluded.cost_gateway_cny, 0)
     `).run(
       event.ts,
       event.agent_aid, event.peer_key, event.peer_type ?? '', event.session_id ?? '',
@@ -77,6 +94,8 @@ export function insertUsageEvent(evolclawHome: string, event: UsageEvent): void 
       event.cache_hit_tokens ?? 0, event.cache_miss_tokens ?? 0,
       event.image_tokens ?? 0, event.total_context_tokens ?? 0,
       event.turns,
+      prices.official?.usd ?? null, prices.official?.cny ?? null,
+      prices.gateway?.usd ?? null, prices.gateway?.cny ?? null,
     );
     db.exec('COMMIT');
   } catch (e) {

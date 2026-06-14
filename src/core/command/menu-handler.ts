@@ -14,7 +14,7 @@ import { TriggerManager } from '../trigger/manager.js';
 import { checkLatestVersion, getLocalVersion, isLinkedInstall, compareVersions } from '../../utils/npm-ops.js';
 import { loadDefaults, loadEvolclawConfig } from '../../config-store.js';
 import { execAgentAction, execAgentQuery, execAgentOptions, resolveProjectPath } from '../message/command-handler-agent-control.js';
-import { gatewayList, gatewayUpdate, gatewayDelete, gatewayTest } from '../message/command-handler-gateway-control.js';
+import { gatewayList, gatewayUpdate, gatewayDelete, gatewayTest, gatewayModels, gatewaySetPrice } from '../message/command-handler-gateway-control.js';
 import { displaySessionTitle } from '../session/session-title.js';
 
 export interface MenuNext {
@@ -1022,10 +1022,12 @@ export async function execMenuAction(this: any,
   if (gated) return gated;
 
   // ── /gateway action（进程级，gate 已确保 fromControlChannel） ──
-  // test=连通性测试；delete=删除配置；reload=重载受影响 agent。
+  // test=连通性测试；delete=删除配置；models=模型+价格；set-price=改网关价格。
   if (cmdBase === '/gateway') {
     if (action === 'test') return await gatewayTest(args);
     if (action === 'delete') return await gatewayDelete(args);
+    if (action === 'models') return await gatewayModels(args);
+    if (action === 'set-price') return gatewaySetPrice(args);
     return { error: `不支持 gateway action: ${action}`, code: 'NOT_SUPPORTED' };
   }
 

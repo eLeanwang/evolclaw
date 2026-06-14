@@ -17,6 +17,7 @@ import path from 'path';
 import { resolvePaths } from '../../paths.js';
 import { saveDefaultsSafe, saveAgent } from '../../config-store.js';
 import { resolveAnthropicConfig, resolveOpenaiConfig } from '../../agents/baseagent.js';
+import { resolvePriceRow } from '../../core/stats/billing.js';
 import { ipcQuery } from '../../ipc.js';
 import { logger } from '../../utils/logger.js';
 import type { Config } from '../../types.js';
@@ -124,7 +125,7 @@ function extractEntries(raw: any, scope: string): GatewayEntry[] {
   return out;
 }
 
-/** gatewayList — 列出全部作用域的网关配置（apiKey 掩码）。 */
+/** gatewayList — 列出全部作用域的网关配置（apiKey 掩码）+ 每个 agent 的 effective 配置（带来源标注）。 */
 export function gatewayList(): ExecResult {
   const gateways: GatewayEntry[] = [];
   const defaults = readDefaultsRaw();
@@ -135,7 +136,90 @@ export function gatewayList(): ExecResult {
     const raw = readAgentRaw(aid);
     if (raw) gateways.push(...extractEntries(raw, aid));
   }
-  return { data: { gateways, scopes: ['defaults', ...aids], types: GATEWAY_TYPES } };
+
+  // 计算每个 agent 的 effective 配置（含来源标注）
+  const effective = computeEffective(defaults, aids);
+
+  return { data: { gateways, scopes: ['defaults', ...aids], types: GATEWAY_TYPES, effective } };
+}
+
+// ── Effective 配置（每个 agent 实际生效的值 + 来源标注）──
+
+type FieldSource = 'agent' | 'defaults' | 'env' | 'none';
+
+interface EffectiveField {
+  value?: string;
+  source: FieldSource;
+}
+
+export interface EffectiveGateway {
+  aid: string;
+  type: string;
+  name: string;
+  activeBaseagent: string;     // 该 agent 的 active_baseagent（实际使用的后端）
+  activeSource: FieldSource;   // active_baseagent 的来源（agent 自己配 / 继承 defaults）
+  blockSource: FieldSource;    // 整个网关块的来源（agent 有覆盖 / 全继承 defaults）
+  fields: Record<string, EffectiveField>;
+}
+
+/** 判断字段来源：agent 自己有 → 'agent'；defaults 有 → 'defaults'；否则 'none'。 */
+function fieldSource(agentBlock: any, defaultsBlock: any, key: string): { value?: string; source: FieldSource } {
+  const agentVal = agentBlock?.[key];
+  if (agentVal !== undefined && agentVal !== null && agentVal !== '') {
+    return { value: key === 'apiKey' ? maskApiKey(agentVal).mask : String(agentVal), source: 'agent' };
+  }
+  const defaultsVal = defaultsBlock?.[key];
+  if (defaultsVal !== undefined && defaultsVal !== null && defaultsVal !== '') {
+    return { value: key === 'apiKey' ? maskApiKey(defaultsVal).mask : String(defaultsVal), source: 'defaults' };
+  }
+  return { value: undefined, source: 'none' };
+}
+
+/** 为所有 agent 计算 effective 网关配置。
+ *  聚焦每个 agent 的 active_baseagent（实际使用的后端）：
+ *    - agent 自己配了该后端的网关块 → 用 agent 的（标注 'agent'）
+ *    - 没配 → 回落 defaults 对应后端的默认网关（标注 'defaults'）
+ *  active_baseagent 缺失时回落 defaults.active_baseagent，再回落 'claude'。 */
+function computeEffective(defaults: any, aids: string[]): EffectiveGateway[] {
+  const result: EffectiveGateway[] = [];
+  const defaultsBa = defaults?.baseagents || {};
+  const defaultsActive = defaults?.active_baseagent;
+
+  for (const aid of aids) {
+    const agentRaw = readAgentRaw(aid);
+    const agentBa = agentRaw?.baseagents || {};
+
+    // 该 agent 实际使用的后端
+    const activeRaw = agentRaw?.active_baseagent || defaultsActive || 'claude';
+    const type = (GATEWAY_TYPES as readonly string[]).includes(activeRaw) ? activeRaw as GatewayType : 'claude';
+    const activeSource: FieldSource = agentRaw?.active_baseagent ? 'agent' : 'defaults';
+
+    const dBlock = defaultsBa[type] || {};
+    const aBlock = agentBa[type] || {};
+
+    // 整块来源：agent 配了该后端的网关块 → 'agent'；否则继承 defaults
+    const blockSource: FieldSource = (aBlock && Object.keys(aBlock).length > 0) ? 'agent' : 'defaults';
+
+    const keys = type === 'gemini'
+      ? ['model', 'apiKey', 'mode', 'cliPath', 'useVertex', 'project', 'location']
+      : ['baseUrl', 'apiKey', 'model', 'effort', ...(type === 'codex' ? ['reasoning'] : [])];
+
+    const fields: Record<string, EffectiveField> = {};
+    for (const k of keys) {
+      fields[k] = fieldSource(aBlock, dBlock, k);
+    }
+
+    result.push({
+      aid,
+      type,
+      name: DISPLAY_NAMES[type] ?? type,
+      activeBaseagent: type,
+      activeSource,
+      blockSource,
+      fields,
+    });
+  }
+  return result;
 }
 
 // ── 写入 ──
@@ -253,37 +337,37 @@ export async function gatewayDelete(args: any): Promise<ExecResult> {
   return { data: { scope, type, deleted: true, reloaded } };
 }
 
+/** 解析某 scope/type 的真实 baseUrl + apiKey（在 daemon 内展开 $ENV，不出站）。 */
+function resolveGatewayCreds(scope: string, type: GatewayType): { baseUrl?: string; apiKey?: string } | { error: string; code: string } {
+  const raw = scope === 'defaults' ? readDefaultsRaw() : readAgentRaw(scope);
+  const block = raw?.baseagents?.[type];
+  if (!block) return { error: `${scope}/${type} 未配置`, code: 'NOT_FOUND' };
+
+  const expanded = expandEnv(block);
+  try {
+    const synth = { agents: { [type]: expanded } } as unknown as Config;
+    if (type === 'codex') {
+      const r = resolveOpenaiConfig(synth, expanded);
+      return { baseUrl: r.baseUrl, apiKey: r.apiKey };
+    } else if (type === 'claude') {
+      const r = resolveAnthropicConfig(synth, expanded);
+      return { baseUrl: r.baseUrl, apiKey: r.apiKey };
+    }
+    return { error: 'gemini 暂不支持 HTTP 探测（CLI 后端）', code: 'NOT_SUPPORTED' };
+  } catch (e: any) {
+    return { error: `凭证解析失败：${e?.message || e}`, code: 'EXEC_FAILED' };
+  }
+}
+
 /** gatewayTest — 连通性测试。在 daemon 内解析真实 key（不出站）发 /v1/models。 */
 export async function gatewayTest(args: any): Promise<ExecResult> {
   const scope = String(args?.scope ?? '').trim();
   const type = args?.type;
   if (!validateType(type)) return { error: `无效 type: ${type}`, code: 'INVALID_ARGS' };
 
-  // 取该作用域的原始 baseagent 块，构造 syntheticConfig 交给既有 resolver
-  const raw = scope === 'defaults' ? readDefaultsRaw() : readAgentRaw(scope);
-  const block = raw?.baseagents?.[type];
-  if (!block) return { error: `${scope}/${type} 未配置`, code: 'NOT_FOUND' };
-
-  // $ENV 引用需展开成真实值（resolver 吃展开后的 config）
-  const expanded = expandEnv(block);
-  let baseUrl: string | undefined;
-  let apiKey: string | undefined;
-  try {
-    const synth = { agents: { [type]: expanded } } as unknown as Config;
-    if (type === 'codex') {
-      const r = resolveOpenaiConfig(synth, expanded);
-      baseUrl = r.baseUrl; apiKey = r.apiKey;
-    } else if (type === 'claude') {
-      const r = resolveAnthropicConfig(synth, expanded);
-      baseUrl = r.baseUrl; apiKey = r.apiKey;
-    } else {
-      // gemini 多为 CLI，无统一 /v1/models HTTP 探测口径
-      return { error: 'gemini 暂不支持连通性测试（CLI 后端）', code: 'NOT_SUPPORTED' };
-    }
-  } catch (e: any) {
-    return { error: `凭证解析失败：${e?.message || e}`, code: 'EXEC_FAILED' };
-  }
-
+  const creds = resolveGatewayCreds(scope, type);
+  if ('error' in creds) return creds;
+  const { baseUrl, apiKey } = creds;
   if (!baseUrl) return { error: '未配置 baseUrl（或为官方占位地址）', code: 'INVALID_ARGS' };
 
   const start = Date.now();
@@ -298,13 +382,132 @@ export async function gatewayTest(args: any): Promise<ExecResult> {
     const latency = Date.now() - start;
     if (!resp.ok) return { data: { ok: false, latency, error: `HTTP ${resp.status}` } };
     const json: any = await resp.json().catch(() => null);
-    const count = Array.isArray(json?.data) ? json.data.length
-                : Array.isArray(json?.models) ? json.models.length : 0;
-    return { data: { ok: true, latency, modelCount: count } };
+    const arr: any[] = Array.isArray(json?.data) ? json.data
+                     : Array.isArray(json?.models) ? json.models : [];
+    const models = arr.map((m: any) => (typeof m === 'string' ? m : (m?.id || m?.name || m?.model))).filter(Boolean);
+    return { data: { ok: true, latency, modelCount: models.length, models } };
   } catch (e: any) {
     return { data: { ok: false, latency: Date.now() - start, error: e?.message || String(e) } };
   }
 }
+
+// ── 模型 + 价格 ──
+
+interface PriceQuad { input?: number; output?: number; cache_read?: number; cache_write?: number; }
+
+/** 从 model-prices.jsonl 的 PriceRecord 提取展示用价格四元组。 */
+function priceRowToQuad(row: any): PriceQuad | undefined {
+  if (!row) return undefined;
+  return {
+    input: typeof row.price_input === 'number' ? row.price_input : undefined,
+    output: typeof row.price_output === 'number' ? row.price_output : undefined,
+    cache_read: typeof row.price_cache_read === 'number' ? row.price_cache_read : undefined,
+    cache_write: typeof row.price_cache_creation === 'number' ? row.price_cache_creation : undefined,
+  };
+}
+
+/** 从接口 pricing 对象提取四元组。 */
+function apiPricingToQuad(p: any): PriceQuad | undefined {
+  if (!p || typeof p !== 'object') return undefined;
+  return {
+    input: typeof p.input === 'number' ? p.input : undefined,
+    output: typeof p.output === 'number' ? p.output : undefined,
+    cache_read: typeof p.cache_read === 'number' ? p.cache_read : undefined,
+    cache_write: typeof p.cache_write === 'number' ? p.cache_write : undefined,
+  };
+}
+
+/** gatewayModels — 拉取该网关模型列表 + 官方价格 + 网关价格（接口缺失则回退 model-prices.jsonl）。 */
+export async function gatewayModels(args: any): Promise<ExecResult> {
+  const scope = String(args?.scope ?? '').trim();
+  const type = args?.type;
+  if (!validateType(type)) return { error: `无效 type: ${type}`, code: 'INVALID_ARGS' };
+
+  const creds = resolveGatewayCreds(scope, type);
+  if ('error' in creds) return creds;
+  const { baseUrl, apiKey } = creds;
+  if (!baseUrl) return { error: '未配置 baseUrl（或为官方占位地址）', code: 'INVALID_ARGS' };
+
+  let arr: any[] = [];
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8000);
+    const resp = await fetch(`${baseUrl.replace(/\/+$/, '')}/v1/models`, {
+      headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    if (!resp.ok) return { error: `HTTP ${resp.status}`, code: 'EXEC_FAILED' };
+    const json: any = await resp.json().catch(() => null);
+    arr = Array.isArray(json?.data) ? json.data : Array.isArray(json?.models) ? json.models : [];
+  } catch (e: any) {
+    return { error: `请求失败：${e?.message || e}`, code: 'EXEC_FAILED' };
+  }
+
+  const evolclawHome = resolvePaths().root;
+  const now = Date.now();
+
+  const models = arr.map((m: any) => {
+    const id = typeof m === 'string' ? m : (m?.id || m?.name || m?.model);
+    if (!id) return null;
+    const name = (m && typeof m === 'object' && m.name) ? m.name : id;
+    const group = (m && typeof m === 'object' && m.group) ? m.group : undefined;
+
+    // 官方价格：接口 pricing 优先，缺失回退 model-prices.jsonl
+    let official = apiPricingToQuad(m?.pricing);
+    let officialSource: 'gateway' | 'local' | 'none' = official ? 'gateway' : 'none';
+    if (!official) {
+      const row = resolvePriceRow(evolclawHome, id, now);
+      const quad = priceRowToQuad(row);
+      if (quad) { official = quad; officialSource = 'local'; }
+    }
+
+    // 网关价格：接口 effective_pricing；缺失则留空（用户可手动设）
+    const gatewayPrice = apiPricingToQuad(m?.effective_pricing);
+
+    return { id, name, group, official: official ?? null, officialSource, gateway: gatewayPrice ?? null };
+  }).filter(Boolean);
+
+  return { data: { scope, type, models } };
+}
+
+/** gatewaySetPrice — 把用户改的网关价格 append 到用户覆盖层 model-prices.jsonl。 */
+export function gatewaySetPrice(args: any): ExecResult {
+  const modelId = String(args?.modelId ?? '').trim();
+  if (!modelId) return { error: '缺少 modelId', code: 'INVALID_ARGS' };
+  const p = args?.pricing;
+  if (!p || typeof p !== 'object') return { error: '缺少 pricing', code: 'INVALID_ARGS' };
+
+  const num = (v: any) => (typeof v === 'number' && isFinite(v) && v >= 0) ? v : undefined;
+  const record: any = {
+    model: modelId,
+    effective_from: Date.now(),
+    billing_fn: 'per_token_v1',
+    currency: 'USD',
+  };
+  if (num(p.input) !== undefined) record.price_input = num(p.input);
+  if (num(p.output) !== undefined) record.price_output = num(p.output);
+  if (num(p.cache_read) !== undefined) record.price_cache_read = num(p.cache_read);
+  if (num(p.cache_write) !== undefined) record.price_cache_creation = num(p.cache_write);
+
+  if (record.price_input === undefined && record.price_output === undefined
+    && record.price_cache_read === undefined && record.price_cache_creation === undefined) {
+    return { error: '至少需提供一个有效价格字段', code: 'INVALID_ARGS' };
+  }
+
+  try {
+    const dir = path.join(resolvePaths().root, 'data', 'stats');
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, 'model-prices.jsonl');
+    fs.appendFileSync(file, JSON.stringify(record) + '\n', 'utf-8');
+    logger.info(`[gateway] 网关价格已更新: ${modelId}（写入用户覆盖层 model-prices.jsonl）`);
+  } catch (e: any) {
+    return { error: e?.message || String(e), code: 'EXEC_FAILED' };
+  }
+
+  return { data: { modelId, saved: true } };
+}
+
 
 /** 递归展开 $ENV 引用（仅用于 test 的临时解析，不落盘）。 */
 function expandEnv(obj: any): any {

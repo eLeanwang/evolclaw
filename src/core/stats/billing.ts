@@ -115,7 +115,7 @@ interface BillingInput {
   total_context_tokens?: number;
 }
 
-const BILLING_FNS: Record<string, BillingFn> = {
+export const BILLING_FNS: Record<string, BillingFn> = {
   // 通用 per-token（Claude / OpenAI 兼容 / Kimi / MiniMax）
   per_token_v1: (e, p) => {
     const r = (p.price_input as number ?? 0) * e.input_tokens / 1e6

@@ -141,6 +141,16 @@ export async function cmdInit(options?: {
   }
 
   // ── 共享 tail（单一出口）：提示创建 agent + 生成控制 AID ──
+  // 种入网关配置：从 env / settings.json 导入 baseUrl+apiKey 到 defaults（幂等）
+  const { reconcileBaseagentDefaults } = await import('../core/baseagent-seed.js');
+  const seedResult = reconcileBaseagentDefaults();
+  if (seedResult.seeded) {
+    console.log(`✓ 网关配置已导入 defaults（baseUrl: ${seedResult.baseUrl || '—'}，来源: ${seedResult.source || '—'}）`);
+    if (seedResult.deletedFromSettings.length > 0) {
+      console.log(`  已从 ~/.claude/settings.json 移除: ${seedResult.deletedFromSettings.join(', ')}`);
+    }
+  }
+
   await initTail();
 
   // ── 内部函数 ──

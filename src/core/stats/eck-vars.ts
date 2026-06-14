@@ -7,7 +7,6 @@
  */
 
 import { openReadonlyDb, getDbPath } from './db.js';
-import { calcCost } from './billing.js';
 import { getBudgetStatus } from './budget.js';
 
 export interface StatsSystemVars {
@@ -53,17 +52,26 @@ function _calcTodayCosts(evolclawHome: string, agentAid?: string, peerKey?: stri
   const params: unknown[] = [from_ts];
   if (agentAid) { conds.push('agent_aid = ?'); params.push(agentAid); }
   if (peerKey)  { conds.push('peer_key = ?');  params.push(peerKey); }
-  let usd = 0, cny = 0, input = 0, output = 0, cacheRead = 0, calls = 0;
   try {
-    const rows: any[] = db.prepare(`SELECT * FROM usage_events WHERE ${conds.join(' AND ')}`).all(...params);
-    for (const r of rows) {
-      const cost = calcCost(evolclawHome, r);
-      usd += cost.usd ?? 0; cny += cost.cny ?? 0;
-      input += r.input_tokens ?? 0; output += r.output_tokens ?? 0;
-      cacheRead += r.cache_read_tokens ?? 0; calls++;
-    }
+    const row = db.prepare(`
+      SELECT
+        SUM(input_tokens) AS input,
+        SUM(output_tokens) AS output,
+        SUM(cache_read_tokens) AS cacheRead,
+        COUNT(*) AS calls,
+        COALESCE(SUM(cost_gateway_usd), 0) AS usd,
+        COALESCE(SUM(cost_gateway_cny), 0) AS cny
+      FROM usage_events WHERE ${conds.join(' AND ')}
+    `).get(...params) as any;
+    return {
+      usd: row?.usd ?? 0,
+      cny: row?.cny ?? 0,
+      input: row?.input ?? 0,
+      output: row?.output ?? 0,
+      cacheRead: row?.cacheRead ?? 0,
+      calls: row?.calls ?? 0,
+    };
   } finally { db.close(); }
-  return { usd, cny, input, output, cacheRead, calls };
 }
 
 /** 注入 system prompt 的变量（变化慢，可缓存）。 */

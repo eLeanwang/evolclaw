@@ -130,13 +130,51 @@ export async function handleStats(args: string[]): Promise<void> {
 
   // 全量重建日聚合表（运维兜底/排查），不依赖时间范围。
   if (flags.rebuild) {
-    const { rebuildDailyRollup } = await import('../core/stats/db.js');
+    const { rebuildDailyRollup, getDb } = await import('../core/stats/db.js');
+    const { resolvePrices } = await import('../core/stats/price-resolver.js');
     const startedAt = Date.now();
+
+    // 步骤1：回填 usage_events 的 cost 字段（只处理 cost_official_usd IS NULL 的行）
+    console.log(`${CYAN}正在回填历史事件的费用数据...${RESET}`);
+    const db = getDb(home);
+    if (!db) fail(isJson, 'REBUILD_FAILED', 'usage_events 回填失败（DB 不可用）');
+
+    const allEvents = db.prepare(`SELECT * FROM usage_events WHERE cost_official_usd IS NULL`).all() as any[];
+    let updated = 0;
+    const batchSize = 1000;
+
+    for (let i = 0; i < allEvents.length; i += batchSize) {
+      db.exec('BEGIN');
+      const batch = allEvents.slice(i, i + batchSize);
+      for (const event of batch) {
+        const prices = resolvePrices(home, event);  // 不传 gatewayPricing，全走本地 JSONL
+        db.prepare(`
+          UPDATE usage_events
+          SET cost_official_usd = ?, cost_official_cny = ?,
+              cost_gateway_usd = ?, cost_gateway_cny = ?
+          WHERE id = ?
+        `).run(
+          prices.official?.usd ?? null, prices.official?.cny ?? null,
+          prices.gateway?.usd ?? null, prices.gateway?.cny ?? null,
+          event.id
+        );
+        updated++;
+      }
+      db.exec('COMMIT');
+      if (!isJson && (i + batch.length) % 5000 === 0) {
+        console.log(`  已处理 ${i + batch.length}/${allEvents.length} 条事件...`);
+      }
+    }
+    console.log(`${GREEN}✓ 回填完成：${updated} 条事件${RESET}`);
+
+    // 步骤2：重建 usage_daily（会自动聚合 cost 字段）
+    console.log(`${CYAN}正在重建日聚合表...${RESET}`);
     const n = rebuildDailyRollup(home);
     const ms = Date.now() - startedAt;
+
     if (n < 0) fail(isJson, 'REBUILD_FAILED', 'usage_daily 重建失败（DB 不可用或 SQL 错误）');
-    if (isJson) { console.log(JSON.stringify({ ok: true, rows: n, duration_ms: ms }, null, 2)); }
-    else { console.log(`✓ usage_daily 重建完成：${n} 行，耗时 ${ms}ms`); }
+    if (isJson) { console.log(JSON.stringify({ ok: true, events_backfilled: updated, daily_rows: n, duration_ms: ms }, null, 2)); }
+    else { console.log(`${GREEN}✓ usage_daily 重建完成：${n} 行，总耗时 ${ms}ms${RESET}`); }
     return;
   }
 
@@ -212,9 +250,17 @@ export async function handleStats(args: string[]): Promise<void> {
     console.log(`  Cache write:   ${fmtTokens(result.cache_creation_tokens)}`);
     console.log(`  Total tokens:  ${fmtTokens(result.total_tokens)}`);
     console.log(`  Calls:         ${result.calls}`);
-    console.log(`  Cache hit:     ${(result.cache_hit_rate * 100).toFixed(1)}%`);
-    if (result.usd > 0) console.log(`  Cost USD:      ${GREEN}$${result.usd.toFixed(4)}${RESET}`);
-    if (result.cny > 0) console.log(`  Cost CNY:      ${GREEN}¥${result.cny.toFixed(4)}${RESET}`);
+    const totalIn = result.input_tokens + result.cache_read_tokens;
+    const cacheHitRate = totalIn > 0 ? (result.cache_read_tokens / totalIn * 100).toFixed(1) : '0.0';
+    console.log(`  Cache hit:     ${cacheHitRate}%`);
+    console.log();
+    console.log(`${BOLD}Cost:${RESET}`);
+    if (result.cost_official_usd > 0 || result.cost_official_cny > 0) {
+      console.log(`  Official:      ${GREEN}$${result.cost_official_usd.toFixed(4)}${RESET}  ¥${result.cost_official_cny.toFixed(4)}`);
+    }
+    if (result.cost_gateway_usd > 0 || result.cost_gateway_cny > 0) {
+      console.log(`  Gateway:       ${GREEN}$${result.cost_gateway_usd.toFixed(4)}${RESET}  ¥${result.cost_gateway_cny.toFixed(4)}`);
+    }
     console.log();
     return;
   }

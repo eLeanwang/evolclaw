@@ -1443,10 +1443,10 @@ function renderGateway(data) {
   html += '<div class="gw-intro">网关 = 各 AI 后端（baseagent）的接入配置。Base URL 即网关地址，留空走官方端点。' +
     'API Key 仅接受 <code>$ENV:变量名</code> 引用，明文不会在此显示或写入。</div>';
 
+  // 只展示全局默认配置块（用于编辑）
   for (const [scope, list] of byScope) {
-    const scopeLabel = scope === 'defaults'
-      ? '🌐 全局默认 (defaults)'
-      : '🤖 ' + esc(shortAid(scope));
+    if (scope !== 'defaults') continue;  // 跳过 per-agent 原始配置块（已在下方 effective 展示）
+    const scopeLabel = '🌐 全局默认 (defaults)';
     html += `<div class="gw-scope">`;
     html += `<div class="gw-scope-head"><span class="gw-scope-title">${scopeLabel}</span>` +
       `<button class="ctrl-btn gw-add" data-scope="${esc(scope)}">+ 添加网关</button></div>`;
@@ -1457,6 +1457,41 @@ function renderGateway(data) {
       for (const g of list) html += gatewayCard(g);
     }
     html += '</div></div>';
+  }
+
+  // ── Agent 使用配置（effective）：紧凑表格 + 编辑按钮 ──
+  const effective = data.effective || [];
+  if (effective.length > 0) {
+    html += '<div class="gw-effective-section">';
+    html += '<div class="gw-scope-head"><span class="gw-scope-title">📋 Agent 网关配置</span></div>';
+    html += '<table class="gw-eff-table"><thead><tr>' +
+      '<th>Agent</th><th>Base Agent</th><th>Base URL</th><th>模型</th><th>API Key</th><th>Effort</th><th>来源</th><th>操作</th>' +
+      '</tr></thead><tbody>';
+    for (const eff of effective) {
+      const f = eff.fields || {};
+      const blockSrc = eff.blockSource || 'defaults';
+      const srcCls = blockSrc === 'agent' ? 'gw-src-agent' : 'gw-src-defaults';
+      const srcLabel = blockSrc === 'agent' ? '⚡ agent' : '🔗 默认';
+      const baseUrlVal = f.baseUrl?.value || '';
+      const modelVal = f.model?.value || '';
+      const keyVal = f.apiKey?.value || '';
+      const effortVal = f.effort?.value || '';
+
+      html += `<tr class="gw-eff-tr${blockSrc === 'defaults' ? ' gw-eff-tr-inherited' : ''}">` +
+        `<td class="gw-eff-td-aid" title="${esc(eff.aid)}">${esc(shortAid(eff.aid))}</td>` +
+        `<td>${GATEWAY_TYPE_ICON[eff.type] || ''} ${esc(eff.type)}</td>` +
+        `<td class="gw-eff-td-url" title="${esc(baseUrlVal)}">${baseUrlVal ? esc(baseUrlVal) : '<span class="gw-dim">官方</span>'}</td>` +
+        `<td>${modelVal ? esc(modelVal) : '<span class="gw-dim">—</span>'}</td>` +
+        `<td>${keyVal ? esc(keyVal) : '<span class="gw-dim">—</span>'}</td>` +
+        `<td>${effortVal ? esc(effortVal) : '<span class="gw-dim">—</span>'}</td>` +
+        `<td><span class="gw-eff-src-tag ${srcCls}">${srcLabel}</span></td>` +
+        `<td class="gw-eff-td-actions">` +
+          `<button class="ctrl-btn gw-eff-edit" data-aid="${esc(eff.aid)}" data-type="${esc(eff.type)}" title="编辑该 agent 的网关配置">编辑</button>` +
+          `<button class="ctrl-btn gw-eff-models" data-aid="${esc(eff.aid)}" data-type="${esc(eff.type)}" title="查看网关支持的模型及价格">查看网关配置</button>` +
+        `</td>` +
+        `</tr>`;
+    }
+    html += '</tbody></table></div>';
   }
 
   html += '</div>';
@@ -1636,6 +1671,16 @@ function bindGatewayEvents(el, data) {
     });
   });
 
+  // Effective 表格编辑
+  el.querySelectorAll('.gw-eff-edit').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const aid = btn.dataset.aid;
+      const type = btn.dataset.type;
+      const existing = findGw(aid, type);
+      openGatewayEditor(aid, type, existing, scopes);
+    });
+  });
+
   // 测试
   el.querySelectorAll('.gw-test').forEach(btn => {
     btn.addEventListener('click', async () => {
@@ -1681,6 +1726,141 @@ function bindGatewayEvents(el, data) {
       } catch (e) { toast(e.message, true); }
     });
   });
+
+  // Effective 表格「查看网关配置」按钮：拉模型+价格，弹窗展示
+  el.querySelectorAll('.gw-eff-models').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const { aid, type } = btn.dataset;
+      btn.disabled = true;
+      const orig = btn.textContent;
+      btn.textContent = '加载中…';
+      try {
+        const r = mResp(await menuSend({
+          type: 'menu.action', name: 'gateway', action: 'models',
+          args: { scope: aid, type },
+        }));
+        if (r.error) { toast(r.error.message || r.error.code, true); return; }
+        showGatewayConfigModal(shortAid(aid), type, r.data);
+      } catch (e) {
+        toast(e.message, true);
+      } finally {
+        btn.disabled = false; btn.textContent = orig;
+      }
+    });
+  });
+}
+
+// 网关配置弹窗：模型 + 官方价格 + 网关价格（可编辑）
+function showGatewayConfigModal(aidLabel, type, data) {
+  const models = data.models || [];
+  let html = '<div class="gw-modal-backdrop" id="gw-config-backdrop"><div class="gw-modal gw-modal-wide">';
+  html += `<div class="gw-modal-head">${esc(aidLabel)} · ${esc(type)} 网关配置 <span style="font-weight:normal;color:var(--dim);font-size:12px">（${models.length} 个模型）</span></div>`;
+  html += '<div class="gw-modal-body"><table class="gw-price-table"><thead><tr>' +
+    '<th>模型</th><th>分组</th><th colspan="2">官方价格（USD/1M tokens）</th><th colspan="2">网关价格（USD/1M tokens）</th><th>来源</th><th></th>' +
+    '</tr><tr class="gw-price-subhead">' +
+    '<th></th><th></th><th>Input</th><th>Output</th><th>Input</th><th>Output</th><th></th><th></th>' +
+    '</tr></thead><tbody>';
+  if (!models.length) {
+    html += '<tr><td colspan="8" class="empty">网关未返回模型列表</td></tr>';
+  } else {
+    for (const m of models) {
+      const srcLabel = { gateway: '网关接口', local: '本地配置', none: '—' }[m.officialSource] || '—';
+      const srcCls = { gateway: 'gw-src-gateway', local: 'gw-src-local', none: 'gw-src-none' }[m.officialSource] || '';
+      const fmt = (v) => (typeof v === 'number' ? v.toFixed(2) : '—');
+      const off = m.official || {};
+      const gw = m.gateway || {};
+      html += `<tr class="gw-price-row">` +
+        `<td class="gw-price-model" title="${esc(m.id)}"><code>${esc(m.name || m.id)}</code></td>` +
+        `<td>${esc(m.group || '—')}</td>` +
+        `<td>${fmt(off.input)}</td><td>${fmt(off.output)}</td>` +
+        `<td>${fmt(gw.input)}</td><td>${fmt(gw.output)}</td>` +
+        `<td><span class="gw-eff-src-tag ${srcCls}">${srcLabel}</span></td>` +
+        `<td><button class="ctrl-btn gw-price-edit" data-model="${esc(m.id)}" data-scope="${esc(data.scope)}" data-type="${esc(type)}">改价</button></td>` +
+        `</tr>`;
+    }
+  }
+  html += '</tbody></table></div>';
+  html += '<div class="gw-modal-actions"><button class="ctrl-btn primary" id="gw-config-close">关闭</button></div>';
+  html += '</div></div>';
+
+  const wrap = document.createElement('div');
+  wrap.innerHTML = html;
+  document.body.appendChild(wrap.firstChild);
+  const backdrop = $('#gw-config-backdrop');
+  const close = () => { try { backdrop.remove(); } catch {} };
+  backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close(); });
+  $('#gw-config-close').onclick = close;
+
+  // 改价按钮
+  backdrop.querySelectorAll('.gw-price-edit').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const modelId = btn.dataset.model;
+      const scope = btn.dataset.scope;
+      const gwType = btn.dataset.type;
+      showPriceEditModal(modelId, scope, gwType, () => {
+        close();
+        // 重新拉取并展示
+        setTimeout(async () => {
+          const r = mResp(await menuSend({
+            type: 'menu.action', name: 'gateway', action: 'models',
+            args: { scope, type: gwType },
+          }));
+          if (!r.error) showGatewayConfigModal(aidLabel, gwType, r.data);
+        }, 100);
+      });
+    });
+  });
+}
+
+// 改价弹窗：四个输入框（input/output/cache_read/cache_write）
+function showPriceEditModal(modelId, scope, type, onSaved) {
+  let html = '<div class="gw-modal-backdrop" id="gw-price-edit-backdrop"><div class="gw-modal">';
+  html += `<div class="gw-modal-head">修改网关价格<div class="gw-modal-subtitle">模型: ${esc(modelId)}</div></div>`;
+  html += '<div class="gw-modal-body">';
+  html += '<div class="gw-hint">留空的字段不修改。单位：USD / 1M tokens。</div>';
+  html += '<label class="gw-field"><span class="gw-field-label">Input</span><input id="gw-price-input" type="number" step="0.01" min="0" placeholder="5.0"></label>';
+  html += '<label class="gw-field"><span class="gw-field-label">Output</span><input id="gw-price-output" type="number" step="0.01" min="0" placeholder="25.0"></label>';
+  html += '<label class="gw-field"><span class="gw-field-label">Cache Read</span><input id="gw-price-cache-read" type="number" step="0.01" min="0" placeholder="0.5"></label>';
+  html += '<label class="gw-field"><span class="gw-field-label">Cache Write</span><input id="gw-price-cache-write" type="number" step="0.01" min="0" placeholder="6.25"></label>';
+  html += '</div>';
+  html += '<div class="gw-modal-actions">' +
+    '<button class="ctrl-btn" id="gw-price-cancel">取消</button> ' +
+    '<button class="ctrl-btn primary" id="gw-price-save">保存</button></div>';
+  html += '</div></div>';
+
+  const wrap = document.createElement('div');
+  wrap.innerHTML = html;
+  document.body.appendChild(wrap.firstChild);
+  const backdrop = $('#gw-price-edit-backdrop');
+  const close = () => { try { backdrop.remove(); } catch {} };
+  backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close(); });
+  $('#gw-price-cancel').onclick = close;
+
+  $('#gw-price-save').onclick = async () => {
+    const pricing = {};
+    const inp = parseFloat($('#gw-price-input').value);
+    const out = parseFloat($('#gw-price-output').value);
+    const cr = parseFloat($('#gw-price-cache-read').value);
+    const cw = parseFloat($('#gw-price-cache-write').value);
+    if (!isNaN(inp) && inp >= 0) pricing.input = inp;
+    if (!isNaN(out) && out >= 0) pricing.output = out;
+    if (!isNaN(cr) && cr >= 0) pricing.cache_read = cr;
+    if (!isNaN(cw) && cw >= 0) pricing.cache_write = cw;
+    if (!Object.keys(pricing).length) { toast('至少填一个字段', true); return; }
+
+    try {
+      const r = mResp(await menuSend({
+        type: 'menu.action', name: 'gateway', action: 'set-price',
+        args: { modelId, pricing },
+      }));
+      if (r.error) { toast(r.error.message || r.error.code, true); return; }
+      toast('价格已保存到用户覆盖层');
+      close();
+      if (onSaved) onSaved();
+    } catch (e) {
+      toast(e.message, true);
+    }
+  };
 }
 
 // ── Triggers 视图 ──

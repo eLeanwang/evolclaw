@@ -24,7 +24,7 @@
   ],
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc && node -e \"const f='dist/cli/index.js',c=require('fs').readFileSync(f,'utf8');if(!c.startsWith('#!'))require('fs').writeFileSync(f,'#!/usr/bin/env node\\n'+c)\" && node -e \"try{require('child_process').execFileSync('chmod',['+x','dist/cli/index.js'])}catch{}\" && node -e \"require('fs').mkdirSync('dist/data',{recursive:true});require('fs').copyFileSync('src/data/error-dict.json','dist/data/error-dict.json')\"",
+    "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc && node -e \"const f='dist/cli/index.js',c=require('fs').readFileSync(f,'utf8');if(!c.startsWith('#!'))require('fs').writeFileSync(f,'#!/usr/bin/env node\\n'+c)\" && node -e \"try{require('child_process').execFileSync('chmod',['+x','dist/cli/index.js'])}catch{}\" && node -e \"require('fs').mkdirSync('dist/data',{recursive:true});require('fs').copyFileSync('src/data/error-dict.json','dist/data/error-dict.json');require('fs').cpSync('src/data/stats','dist/data/stats',{recursive:true})\"",
     "start": "node dist/index.js",
     "test": "vitest run",
     "test:watch": "vitest",

@@ -712,3 +712,57 @@ tr.ag-disabled .ag-name { color: var(--dim); }
 .gw-hint { font-size: 11px; color: var(--dim); line-height: 1.5; }
 .gw-hint code { background: var(--bg3); padding: 1px 4px; border-radius: 3px; color: var(--accent); }
 .gw-modal-actions { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 18px; border-top: 1px solid var(--border); }
+
+/* Gateway Effective 视图 */
+.gw-effective-section { margin-top: 24px; padding-top: 16px; border-top: 2px solid var(--border); }
+.gw-eff-agent { margin-bottom: 16px; }
+.gw-eff-agent-head { font-size: 13px; font-weight: 700; color: var(--fg); margin-bottom: 8px; }
+.gw-eff-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px; }
+.gw-eff-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; }
+.gw-eff-card-head { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
+.gw-eff-card-body { display: flex; flex-direction: column; gap: 4px; }
+.gw-eff-row { display: flex; align-items: baseline; gap: 6px; font-size: 12px; }
+.gw-eff-row.gw-eff-inherited { opacity: .7; font-style: italic; }
+.gw-eff-label { flex-shrink: 0; width: 64px; color: var(--dim); font-style: normal; }
+.gw-eff-val { flex: 1; color: var(--fg); word-break: break-all; font-style: normal; }
+.gw-eff-src { flex-shrink: 0; font-size: 10px; padding: 1px 5px; border-radius: 8px; white-space: nowrap; }
+.gw-src-agent { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.gw-src-defaults { color: var(--dim); background: var(--bg3); }
+.gw-src-env { color: var(--green); background: color-mix(in srgb, var(--green) 12%, transparent); }
+.gw-src-none { color: var(--dim); background: transparent; }
+.gw-eff-card.gw-eff-inherited-block { border-left: 3px solid var(--dim); opacity: .85; }
+.gw-eff-block-hint { margin-left: auto; font-size: 14px; opacity: .7; }
+
+/* Gateway Effective 表格（替换卡片布局） */
+.gw-eff-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 12px; background: var(--bg2); border-radius: 6px; overflow: hidden; }
+.gw-eff-table thead { background: var(--bg3); }
+.gw-eff-table th { padding: 8px 10px; text-align: left; font-weight: 600; color: var(--dim); border-bottom: 1px solid var(--border); }
+.gw-eff-table td { padding: 8px 10px; border-bottom: 1px solid var(--border); }
+.gw-eff-tr:hover { background: var(--bg3); }
+.gw-eff-tr-inherited { opacity: .75; }
+.gw-eff-td-aid { font-weight: 600; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gw-eff-td-url { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: monospace; font-size: 11px; }
+.gw-eff-src-tag { padding: 2px 6px; border-radius: 8px; font-size: 10px; white-space: nowrap; }
+.gw-eff-edit { padding: 3px 8px; font-size: 11px; }
+
+/* Effective 表格：URL 完整显示 + 操作列 + 模型弹窗 */
+.gw-eff-td-url { max-width: none; white-space: normal; word-break: break-all; font-family: monospace; font-size: 11px; min-width: 240px; }
+.gw-eff-td-actions { white-space: nowrap; }
+.gw-eff-td-actions .ctrl-btn { padding: 3px 10px; font-size: 11px; margin-right: 4px; }
+.gw-model-list { max-height: 50vh; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
+.gw-model-item { padding: 6px 10px; background: var(--bg3); border-radius: 4px; }
+.gw-model-item code { font-size: 12px; color: var(--fg); background: transparent; }
+
+/* Gateway config modal (wide) + price table */
+.gw-modal-wide { max-width: 90vw; width: 1100px; }
+.gw-modal-subtitle { font-size: 12px; font-weight: normal; color: var(--dim); margin-top: 4px; }
+.gw-price-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.gw-price-table thead { background: var(--bg3); }
+.gw-price-table th { padding: 8px 10px; text-align: left; font-weight: 600; color: var(--dim); border-bottom: 1px solid var(--border); }
+.gw-price-subhead th { font-weight: 500; font-size: 11px; padding: 4px 10px; }
+.gw-price-table td { padding: 8px 10px; border-bottom: 1px solid var(--border); }
+.gw-price-row:hover { background: var(--bg3); }
+.gw-price-model code { font-size: 11px; background: transparent; color: var(--fg); }
+.gw-price-edit { padding: 3px 10px; font-size: 11px; }
+.gw-src-gateway { background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent); }
+.gw-src-local { background: var(--bg3); color: var(--dim); }
