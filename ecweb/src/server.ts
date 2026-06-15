@@ -22,7 +22,7 @@ import { setDebugLog, dlog } from './debug-log.js';
 import type { WatchSource, ViewKind } from './sources/types.js';
 import { aidSource } from './sources/aid.js';
 import { msgSource } from './sources/msg.js';
-import { sessionSource } from './sources/session.js';
+import { sessionSource, buildBindMap } from './sources/session.js';
 import { cacheSource } from './sources/cache.js';
 import { systemSource } from './sources/system.js';
 import { triggersSource } from './sources/triggers.js';
@@ -223,9 +223,22 @@ function handleStatsApi(req: http.IncomingMessage, res: http.ServerResponse): vo
 
     const tokenStats = queryStatsOverview(params);
 
-    // session count: scan all CC project dirs, 根据时间范围过滤
+    // session count: 使用 bindMap 按 agent 和 peer 筛选
     let sessionCount = 0;
     try {
+      // 构建 agentSessionId → agent_aid 的映射
+      const bindMap = buildBindMap();
+
+      // 如果指定了 peer_key，提取并解码 channelId
+      let targetChannelId: string | undefined;
+      if (params.peer_key) {
+        const parts = params.peer_key.split('#');
+        if (parts.length >= 4) {
+          // aun#{agent}#main#{channelId}，需要解码 URL 编码
+          targetChannelId = decodeURIComponent(parts[3]);
+        }
+      }
+
       const base = ccProjectsDir();
       for (const d of fs.readdirSync(base, { withFileTypes: true })) {
         if (!d.isDirectory()) continue;
@@ -233,6 +246,20 @@ function handleStatsApi(req: http.IncomingMessage, res: http.ServerResponse): vo
         try {
           const sessionFiles = fs.readdirSync(projectDir).filter(f => f.endsWith('.jsonl'));
           for (const sessionFile of sessionFiles) {
+            const sessionId = sessionFile.replace('.jsonl', '');
+
+            // 如果指定了 agent 或 peer，检查该会话是否匹配
+            if (params.agent_aid || targetChannelId) {
+              const bindInfo = bindMap.get(sessionId);
+              if (!bindInfo) continue;
+
+              // 检查 agent
+              if (params.agent_aid && bindInfo.selfAID !== params.agent_aid) continue;
+
+              // 检查 peer
+              if (targetChannelId && bindInfo.channelId !== targetChannelId) continue;
+            }
+
             // 如果有时间范围限制，检查会话文件的修改时间
             if (params.from_ts || params.to_ts) {
               const stat = fs.statSync(path.join(projectDir, sessionFile));

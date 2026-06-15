@@ -167,7 +167,7 @@ function resolveProject(params: Record<string, any>, projects: ProjectEntry[]): 
 
 interface BindInfo { channelType: string; channelId: string; selfAID: string; peerName: string | null; name: string | null; updatedAt: number; }
 
-function buildBindMap(): Map<string, BindInfo> {
+export function buildBindMap(): Map<string, BindInfo> {
   const map = new Map<string, BindInfo>();
   try {
     const p = resolvePaths();

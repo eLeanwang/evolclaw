@@ -183,7 +183,7 @@ export function queryStatsByPeer(params: {
         COALESCE(SUM(cache_read_tokens),0) AS cache_read_tokens,
         COUNT(*) AS call_count
       FROM usage_events ${where}
-      GROUP BY peer_key ORDER BY (input_tokens+output_tokens) DESC LIMIT ${limit}
+      GROUP BY peer_key ORDER BY (COALESCE(SUM(input_tokens),0) + COALESCE(SUM(output_tokens),0)) DESC LIMIT ${limit}
     `).all(...p) as any[];
 
     // 为每个peer添加名称和详细信息
@@ -270,7 +270,7 @@ export function queryStatsOverview(params?: {
         COALESCE(SUM(cost_gateway_cny),0) AS cost_cny
       FROM usage_events ${where}
       GROUP BY agent_aid
-      ORDER BY (input_tokens+output_tokens) DESC
+      ORDER BY (COALESCE(SUM(input_tokens),0) + COALESCE(SUM(output_tokens),0)) DESC
     `).all(...p);
 
     // 为每个agent添加名称
@@ -340,7 +340,7 @@ export function queryStatsByAgent(params: {
         COALESCE(SUM(cache_read_tokens),0) AS cache_read_tokens,
         COUNT(*) AS call_count
       FROM usage_events ${where}
-      GROUP BY agent_aid ORDER BY (input_tokens+output_tokens) DESC LIMIT ${limit}
+      GROUP BY agent_aid ORDER BY (COALESCE(SUM(input_tokens),0) + COALESCE(SUM(output_tokens),0)) DESC LIMIT ${limit}
     `).all(...p) as any[];
 
     // 为每个agent添加名称
@@ -479,11 +479,12 @@ function getPeerInfo(peerKey: string): {
     if (target.startsWith('group.')) {
       // 群聊：读取群信息
       const { sessionsDir } = resolvePaths();
-      const groupDir = path.join(sessionsDir, 'aun', encodeSegment(agentAid), target);
+      const groupDir = path.join(sessionsDir, 'aun', encodeSegment(agentAid), encodeSegment(target));
       const activeJsonPath = path.join(groupDir, 'active.json');
 
       if (fs.existsSync(activeJsonPath)) {
         const activeData = JSON.parse(fs.readFileSync(activeJsonPath, 'utf-8'));
+        // 使用 metadata.groupName 作为显示名称
         const groupName = activeData.metadata?.groupName || null;
 
         // 计算群人数：从groupName中的成员数量（以"、"分隔）+ "..."表示还有更多
