@@ -43,6 +43,7 @@ async function getSnapshot(): Promise<any> {
     scopes: Array.isArray(data.scopes) ? data.scopes : [],
     types: Array.isArray(data.types) ? data.types : [],
     effective: Array.isArray(data.effective) ? data.effective : [],
+    envMismatch: data.envMismatch || { hasMismatch: false, mismatches: [] },
   };
 }
 

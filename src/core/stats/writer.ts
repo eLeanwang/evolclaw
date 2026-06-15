@@ -4,7 +4,7 @@
 
 import { getDb } from './db.js';
 import type { UsageEvent } from './normalizer.js';
-import { resolvePrices, type GatewayPricingCache } from './price-resolver.js';
+import { resolvePrices, type GatewayPricingCache, type PricePair } from './price-resolver.js';
 
 export interface ContextBreakdown {
   ts: number;
@@ -28,12 +28,12 @@ export function insertUsageEvent(
   evolclawHome: string,
   event: UsageEvent,
   gatewayPricing?: GatewayPricingCache
-): void {
+): PricePair {
   const db = getDb(evolclawHome);
-  if (!db) return;
 
-  // 写入时计算费用（官方价格 + 网关价格）
+  // 写入时计算费用（官方价格 + 网关价格）。即使 DB 不可用也返回价格对，供调用方合入状态回执。
   const prices = resolvePrices(evolclawHome, event, gatewayPricing);
+  if (!db) return prices;
 
   try {
     // 明细 INSERT + rollup UPSERT 包进同一事务：进程在两者间崩溃也不会让 rollup 与明细漂移。
@@ -105,6 +105,7 @@ export function insertUsageEvent(
       logger.warn(`[StatsWriter] insertUsageEvent failed: ${e}`)
     );
   }
+  return prices;
 }
 
 export function insertContextBreakdown(evolclawHome: string, bd: ContextBreakdown): void {

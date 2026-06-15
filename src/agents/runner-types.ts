@@ -162,6 +162,10 @@ export interface AgentRunnerFull {
   compact?(sessionId: string, agentSessionId: string, projectPath: string): Promise<boolean>;
   setPermissionGateway?(gateway: any): void;
   setCompactStartCallback?(callback: (sessionId: string) => void): void;
+
+  /** 返回当前网关 /v1/models 的价格缓存（1h TTL，stale-while-revalidate）。仅 claude runner 实现；
+   *  其余 runner 不实现 → undefined → 计费回退本地价表 / official。 */
+  getGatewayPricing?(): import('../core/stats/price-resolver.js').GatewayPricingCache | undefined;
 }
 
 // ── 可选能力接口 ──
@@ -228,6 +232,11 @@ export type AgentLastModelCall = {
   model?: string;
   tokenUsage: AgentTokenUsage;
   contextUsage?: AgentContextUsage;
+  // 价格对：原价(official) + 网关实际价(gateway)，由 message-processor 写库后合入。
+  cost?: {
+    official: { usd: number; cny: number };
+    gateway: { usd: number; cny: number };
+  };
 };
 
 export type AgentModelCall = {

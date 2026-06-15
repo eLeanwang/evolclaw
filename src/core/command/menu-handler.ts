@@ -14,7 +14,7 @@ import { TriggerManager } from '../trigger/manager.js';
 import { checkLatestVersion, getLocalVersion, isLinkedInstall, compareVersions } from '../../utils/npm-ops.js';
 import { loadDefaults, loadEvolclawConfig } from '../../config-store.js';
 import { execAgentAction, execAgentQuery, execAgentOptions, resolveProjectPath } from '../message/command-handler-agent-control.js';
-import { gatewayList, gatewayUpdate, gatewayDelete, gatewayTest, gatewayModels, gatewaySetPrice } from '../message/command-handler-gateway-control.js';
+import { gatewayList, gatewayUpdate, gatewayDelete, gatewayTest, gatewayModels, gatewaySetPrice, gatewaySyncEnv } from '../message/command-handler-gateway-control.js';
 import { displaySessionTitle } from '../session/session-title.js';
 
 export interface MenuNext {
@@ -587,9 +587,17 @@ export async function execMenuQuery(this: any,
   // ── /gateway 查询（只读，列出全部作用域的网关配置；apiKey 已掩码） ──
   // 进程级：闸门已要求 fromControlChannel；此处再验 owners 非空。
   if (cmdBase === '/gateway') {
+    console.log('[gateway-env-debug] /gateway 查询请求，fromControlChannel:', fromControlChannel);
+    console.log('[gateway-env-debug] userId:', userId);
+    const owners = loadEvolclawConfig().owners;
+    console.log('[gateway-env-debug] evolclaw.owners:', owners);
+    console.log('[gateway-env-debug] isProcessLevelOwner:', isProcessLevelOwner(userId, owners));
+
     if (!isProcessLevelOwner(userId, loadEvolclawConfig().owners)) {
+      console.log('[gateway-env-debug] 权限检查失败：不是 owner');
       return { error: '操作需要 owner 权限', code: 'FORBIDDEN' };
     }
+    console.log('[gateway-env-debug] 权限检查通过，调用 gatewayList()');
     return gatewayList();
   }
 
@@ -1022,12 +1030,13 @@ export async function execMenuAction(this: any,
   if (gated) return gated;
 
   // ── /gateway action（进程级，gate 已确保 fromControlChannel） ──
-  // test=连通性测试；delete=删除配置；models=模型+价格；set-price=改网关价格。
+  // test=连通性测试；delete=删除配置；models=模型+价格；set-price=改网关价格；sync-env=同步环境变量。
   if (cmdBase === '/gateway') {
     if (action === 'test') return await gatewayTest(args);
     if (action === 'delete') return await gatewayDelete(args);
     if (action === 'models') return await gatewayModels(args);
     if (action === 'set-price') return gatewaySetPrice(args);
+    if (action === 'sync-env') return await gatewaySyncEnv(args);
     return { error: `不支持 gateway action: ${action}`, code: 'NOT_SUPPORTED' };
   }
 

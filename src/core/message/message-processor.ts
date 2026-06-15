@@ -27,6 +27,7 @@ import { formatPeerKey } from '../relation/peer-identity.js';
 import { resolveEffectiveModel, resolvePermissionMode } from '../model/config-scope.js';
 import { insertUsageEvent, insertContextBreakdown, insertModelCalls } from '../stats/writer.js';
 import { normalizeUsage } from '../stats/normalizer.js';
+import { resolvePrices } from '../stats/price-resolver.js';
 import { getBudgetStatus } from '../stats/budget.js';
 
 type StreamRunResult = {
@@ -1403,8 +1404,8 @@ export class MessageProcessor {
         const durationMs = Date.now() - startTime;
 
         // ── Stats: 写入 usage_events（在 status.completed 之前，以便带上 cost） ──
-        let statsCostUsd = 0;
-        let statsCostCny = 0;
+        // cost 含原价(official)与网关实际价(gateway)两套，由 insertUsageEvent 写库时一并算出。
+        let turnCost: { official: { usd: number; cny: number } | null; gateway: { usd: number; cny: number } | null } = { official: null, gateway: null };
         let statsCacheHitRate = 0;
         if (streamResult.tokenUsage) {
           try {
@@ -1423,7 +1424,11 @@ export class MessageProcessor {
               duration_ms: durationMs,
               context_window_pct: ctxPct,
             });
-            insertUsageEvent(resolveRoot(), event);
+            // 写库即得价格对（原价 + 网关价），无需再调 calcCost 重复计算。
+            // 网关价格缓存（/v1/models 的 pricing/effective_pricing，1h TTL）由当前 runner 提供。
+            const gwPricing = agent.getGatewayPricing?.();
+            const prices = insertUsageEvent(resolveRoot(), event, gwPricing);
+            turnCost = { official: prices.official, gateway: prices.gateway };
             // 逐次大模型调用明细落库（model_calls 表）
             if (streamResult.modelCalls?.length) {
               const mcRows = streamResult.modelCalls.map(mc => ({
@@ -1448,11 +1453,6 @@ export class MessageProcessor {
               } as import('../stats/writer.js').ModelCallRow));
               insertModelCalls(resolveRoot(), mcRows);
             }
-            // 计算费用（用于合入 status.completed）
-            const { calcCost } = await import('../stats/billing.js');
-            const cost = calcCost(resolveRoot(), { ...event, ts: event.ts, model: event.model, billing_fn: event.billing_fn });
-            statsCostUsd = cost.usd ?? 0;
-            statsCostCny = cost.cny ?? 0;
             const totalIn = event.input_tokens + event.cache_read_tokens;
             statsCacheHitRate = totalIn > 0 ? Math.round((event.cache_read_tokens / totalIn) * 100) / 100 : 0;
           } catch (e) {
@@ -1461,41 +1461,34 @@ export class MessageProcessor {
         }
 
         // 会话累计 + model spec（用于 status.completed 统计细目）
-        let sessionStats: { input_tokens: number; output_tokens: number; cache_read_tokens: number; cache_creation_tokens: number; cost_usd: number; cost_cny: number; call_count: number } | undefined;
+        // 直接读已落库的 cost 列（querySessionSummary 单条 SUM，含原价 + 网关价），不再逐行 calcCost。
+        let sessionStats: {
+          input_tokens: number; output_tokens: number; cache_read_tokens: number; cache_creation_tokens: number;
+          cost_usd: number; cost_cny: number; call_count: number;
+          cost: { official: { usd: number; cny: number }; gateway: { usd: number; cny: number } };
+        } | undefined;
         let modelSpec: { context_window: number; max_input_tokens: number; max_output_tokens: number } | undefined;
         try {
-          const { openReadonlyDb, getDbPath } = await import('../stats/db.js');
           const { resolveModelSpec } = await import('../stats/billing.js');
+          const { querySessionSummary } = await import('../stats/query.js');
           const statsModel = streamResult.contextUsage?.model || 'unknown';
           modelSpec = resolveModelSpec(resolveRoot(), statsModel);
-          const rdb = openReadonlyDb(getDbPath(resolveRoot()));
-          if (rdb) {
-            try {
-              const row = rdb.prepare(
-                `SELECT COALESCE(SUM(input_tokens),0) AS input_tokens, COALESCE(SUM(output_tokens),0) AS output_tokens,
-                        COALESCE(SUM(cache_read_tokens),0) AS cache_read_tokens, COALESCE(SUM(cache_creation_tokens),0) AS cache_creation_tokens,
-                        COUNT(*) AS call_count FROM usage_events WHERE session_id = ?`
-              ).get(session.id) as any;
-              if (row) {
-                // 逐行算费用太贵，用近似：最后一轮的 cost 乘以次数不准，所以这里用累加 token 近似
-                sessionStats = {
-                  input_tokens: row.input_tokens,
-                  output_tokens: row.output_tokens,
-                  cache_read_tokens: row.cache_read_tokens,
-                  cache_creation_tokens: row.cache_creation_tokens,
-                  cost_usd: 0, cost_cny: 0,
-                  call_count: row.call_count,
-                };
-                // 快速费用估算：用会话所有行逐行算
-                const rows: any[] = rdb.prepare(`SELECT * FROM usage_events WHERE session_id = ?`).all(session.id);
-                const { calcCost: cc } = await import('../stats/billing.js');
-                for (const r of rows) {
-                  const c = cc(resolveRoot(), r);
-                  sessionStats.cost_usd += c.usd ?? 0;
-                  sessionStats.cost_cny += c.cny ?? 0;
-                }
-              }
-            } finally { rdb.close(); }
+          const sum = querySessionSummary(resolveRoot(), session.id);
+          if (sum.calls > 0) {
+            sessionStats = {
+              input_tokens: sum.input_tokens,
+              output_tokens: sum.output_tokens,
+              cache_read_tokens: sum.cache_read_tokens,
+              cache_creation_tokens: sum.cache_creation_tokens,
+              // 顶层 cost_usd/cost_cny 保持向后兼容 = 网关实际价
+              cost_usd: sum.cost_gateway_usd,
+              cost_cny: sum.cost_gateway_cny,
+              call_count: sum.calls,
+              cost: {
+                official: { usd: sum.cost_official_usd, cny: sum.cost_official_cny },
+                gateway:  { usd: sum.cost_gateway_usd,  cny: sum.cost_gateway_cny },
+              },
+            };
           }
         } catch { /* non-fatal */ }
 
@@ -1504,15 +1497,43 @@ export class MessageProcessor {
           if (interruptReason) {
             adapter.send(envelope, { kind: 'status.interrupted', metadata: { reason: interruptReason } }).catch(() => {});
           } else {
+            // cost 同时给原价(official)与网关实际价(gateway)；顶层 cost_usd/cost_cny 保持向后兼容 = 网关价。
+            const gatewayUsd = turnCost.gateway?.usd ?? turnCost.official?.usd ?? 0;
+            const gatewayCny = turnCost.gateway?.cny ?? turnCost.official?.cny ?? 0;
+            const turnCostBlock = {
+              official: { usd: turnCost.official?.usd ?? 0, cny: turnCost.official?.cny ?? 0 },
+              gateway:  { usd: gatewayUsd, cny: gatewayCny },
+            };
+            // 最后一次访问：本轮可能有多次大模型调用（numTurns>1），整轮的 turnCostBlock 不等于
+            // 最后一次的价。用 lastModelCall.tokenUsage 单独走一遍 resolvePrices（与落库同一套定价逻辑），
+            // 得到「最后一次访问」自己的原价 + 网关价。
+            let lastModelCall = streamResult.lastModelCall;
+            if (lastModelCall?.tokenUsage) {
+              try {
+                const lastModel = lastModelCall.model || streamResult.contextUsage?.model || 'unknown';
+                const lastEvent = normalizeUsage(lastModelCall.tokenUsage as any, {
+                  ts: Date.now(), agent_aid: '', peer_key: '', session_id: session.id,
+                  model: lastModel, turns: 1,
+                });
+                const lp = resolvePrices(resolveRoot(), lastEvent, agent.getGatewayPricing?.());
+                const lpGwUsd = lp.gateway?.usd ?? lp.official?.usd ?? 0;
+                const lpGwCny = lp.gateway?.cny ?? lp.official?.cny ?? 0;
+                lastModelCall = { ...lastModelCall, cost: {
+                  official: { usd: lp.official?.usd ?? 0, cny: lp.official?.cny ?? 0 },
+                  gateway:  { usd: lpGwUsd, cny: lpGwCny },
+                } };
+              } catch { /* 价格解析失败时不附 cost，不影响回执 */ }
+            }
             adapter.send(envelope, { kind: 'status.completed', metadata: {
               durationMs,
               ttftMs: streamResult.ttftMs,
               numTurns: streamResult.numTurns,
               tokenUsage: streamResult.tokenUsage,
               contextUsage: streamResult.contextUsage,
-              lastModelCall: streamResult.lastModelCall,
-              cost_usd: statsCostUsd,
-              cost_cny: statsCostCny,
+              lastModelCall,
+              cost_usd: gatewayUsd,
+              cost_cny: gatewayCny,
+              cost: turnCostBlock,
               cache_hit_rate: statsCacheHitRate,
               model_spec: modelSpec,
               session_total: sessionStats,

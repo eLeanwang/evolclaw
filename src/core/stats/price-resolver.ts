@@ -10,11 +10,12 @@ import path from 'path';
 
 /**
  * 网关价格缓存（从网关 /v1/models 接口获取）。
- * 每个网关维护一份内存缓存（5 分钟 TTL）。
+ * 每个网关维护一份内存缓存（1 小时 TTL）。
  */
 export interface GatewayPricingCache {
   official: Map<string, PriceQuad>;   // pricing 字段（官方价格）
   gateway: Map<string, PriceQuad>;    // effective_pricing 字段（网关实际价格）
+  usdToCny?: number;                  // 接口返回的汇率（usd_to_cny），缺失时计费层默认用 7
 }
 
 /** 价格四元组（统一格式：USD per 1M tokens） */
@@ -163,8 +164,20 @@ export function resolvePrices(
   }
 
   // ── 3. 转换为统一格式 ───────────────────────────────────────────────────
+  // 计费函数按价格行币种只产出一种货币（接口价恒为 USD）。用网关汇率(usd_to_cny，缺省 7)
+  // 补齐另一种货币：有 usd 缺 cny → cny=usd*rate；有 cny 缺 usd → usd=cny/rate。
+  const rate = (typeof gatewayPricing?.usdToCny === 'number' && gatewayPricing.usdToCny > 0)
+    ? gatewayPricing.usdToCny : 7;
+  const toPair = (c: BillingResult | null): { usd: number; cny: number } | null => {
+    if (!c) return null;
+    const hasUsd = typeof c.usd === 'number';
+    const hasCny = typeof c.cny === 'number';
+    const usd = hasUsd ? c.usd! : (hasCny ? c.cny! / rate : 0);
+    const cny = hasCny ? c.cny! : (hasUsd ? c.usd! * rate : 0);
+    return { usd, cny };
+  };
   return {
-    official: officialCost ? { usd: officialCost.usd ?? 0, cny: officialCost.cny ?? 0 } : null,
-    gateway: gatewayCost ? { usd: gatewayCost.usd ?? 0, cny: gatewayCost.cny ?? 0 } : null,
+    official: toPair(officialCost),
+    gateway: toPair(gatewayCost),
   };
 }

@@ -25,22 +25,23 @@
     <header class="topbar">
       <span class="brand">🔭 EvolClaw Watch</span>
       <nav class="tabs">
-        <button class="tab active" data-view="agents">Agents</button>
-        <button class="tab" data-view="msg">Messages</button>
-        <button class="tab" data-view="session">Sessions</button>
-        <button class="tab" data-view="triggers">Triggers</button>
-        <button class="tab" data-view="cache">Cache</button>
-        <button class="tab" data-view="system">System</button>
-        <button class="tab" data-view="gateway">Gateway</button>
-        <button class="tab" data-view="usage">Usage</button>
-        <button class="tab" data-view="monitor">Monitor</button>
+        <button class="tab active" data-view="agents" data-i18n="tab.agents">Agents</button>
+        <button class="tab" data-view="msg" data-i18n="tab.messages">Messages</button>
+        <button class="tab" data-view="session" data-i18n="tab.sessions">Sessions</button>
+        <button class="tab" data-view="triggers" data-i18n="tab.triggers">Triggers</button>
+        <button class="tab" data-view="cache" data-i18n="tab.cache">Cache</button>
+        <button class="tab" data-view="system" data-i18n="tab.system">System</button>
+        <button class="tab" data-view="gateway" data-i18n="tab.gateway">AgentGateway</button>
+        <button class="tab" data-view="usage" data-i18n="tab.usage">Usage</button>
+        <button class="tab" data-view="monitor" data-i18n="tab.monitor">Monitor</button>
 
       </nav>
       <span style="flex:1"></span>
       <span class="build-ts" style="font-size:10px;color:var(--dim)" title="构建时间">2026-06-07 21:55</span>
-      <span id="conn-status" class="conn-status">连接中…</span>
+      <span id="conn-status" class="conn-status" data-i18n="status.connecting">连接中…</span>
+      <button id="lang-btn" class="theme-btn" title="切换语言">🌐</button>
       <button id="theme-btn" class="theme-btn" title="切换主题">🌗</button>
-      <button id="logout-btn" class="logout-btn" title="退出配对">退出</button>
+      <button id="logout-btn" class="logout-btn" data-i18n="action.logout" title="退出配对">退出</button>
     </header>
 
     <main class="content">

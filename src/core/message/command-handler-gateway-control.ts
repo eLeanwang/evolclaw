@@ -127,20 +127,49 @@ function extractEntries(raw: any, scope: string): GatewayEntry[] {
 
 /** gatewayList — 列出全部作用域的网关配置（apiKey 掩码）+ 每个 agent 的 effective 配置（带来源标注）。 */
 export function gatewayList(): ExecResult {
-  const gateways: GatewayEntry[] = [];
-  const defaults = readDefaultsRaw();
-  if (defaults) gateways.push(...extractEntries(defaults, 'defaults'));
+  // 添加函数入口日志
+  console.log('[gateway-env-debug] gatewayList() 被调用');
+  logger.info('[gateway-env-debug] gatewayList() 被调用');
 
-  const aids = listAgentAids();
-  for (const aid of aids) {
-    const raw = readAgentRaw(aid);
-    if (raw) gateways.push(...extractEntries(raw, aid));
+  try {
+    const gateways: GatewayEntry[] = [];
+    const defaults = readDefaultsRaw();
+    logger.info('[gateway-env-debug] readDefaultsRaw 完成');
+
+    if (defaults) gateways.push(...extractEntries(defaults, 'defaults'));
+    logger.info('[gateway-env-debug] extractEntries 完成');
+
+    const aids = listAgentAids();
+    logger.info('[gateway-env-debug] listAgentAids 完成, aids:', aids);
+
+    for (const aid of aids) {
+      const raw = readAgentRaw(aid);
+      if (raw) gateways.push(...extractEntries(raw, aid));
+    }
+    logger.info('[gateway-env-debug] 所有 agent 的 gateways 提取完成');
+
+    // 计算每个 agent 的 effective 配置（含来源标注）
+    const effective = computeEffective(defaults, aids);
+    logger.info('[gateway-env-debug] computeEffective 完成');
+
+    console.log('[gateway-env-debug] 准备调用 detectEnvMismatch');
+    logger.info('[gateway-env-debug] 准备调用 detectEnvMismatch');
+
+    // 检测环境变量配置与全局配置的差异
+    const envMismatch = detectEnvMismatch(defaults, aids);
+
+    console.log('[gateway-env-debug] detectEnvMismatch 返回:', JSON.stringify(envMismatch));
+    logger.info('[gateway-env-debug] detectEnvMismatch 返回:', JSON.stringify(envMismatch));
+
+    const result = { data: { gateways, scopes: ['defaults', ...aids], types: GATEWAY_TYPES, effective, envMismatch } };
+    logger.info('[gateway-env-debug] 准备返回结果, envMismatch.debug 存在:', !!envMismatch.debug);
+
+    return result;
+  } catch (e) {
+    logger.error('[gateway-env-debug] gatewayList 执行出错:', e);
+    console.error('[gateway-env-debug] gatewayList 执行出错:', e);
+    throw e;
   }
-
-  // 计算每个 agent 的 effective 配置（含来源标注）
-  const effective = computeEffective(defaults, aids);
-
-  return { data: { gateways, scopes: ['defaults', ...aids], types: GATEWAY_TYPES, effective } };
 }
 
 // ── Effective 配置（每个 agent 实际生效的值 + 来源标注）──
@@ -220,6 +249,272 @@ function computeEffective(defaults: any, aids: string[]): EffectiveGateway[] {
     });
   }
   return result;
+}
+
+// ── 环境变量配置差异检测 ──
+
+interface EnvMismatch {
+  hasMismatch: boolean;
+  mismatches: Array<{
+    aid: string;
+    type: string;
+    field: string;
+    envValue: string;
+    configValue: string;
+    envVarName?: string;  // 环境变量名
+    processValue?: string;  // 进程环境变量的值
+  }>;
+  debug?: {
+    processEnv: Record<string, string>;
+    rootEnvFile: Record<string, string>;
+    defaultsConfig: any;
+  };
+}
+
+/** 检测环境变量配置与本地 .env 文件的差异 */
+function detectEnvMismatch(defaults: any, aids: string[]): EnvMismatch {
+  const result: EnvMismatch = { hasMismatch: false, mismatches: [] };
+  const defaultsBa = defaults?.baseagents || {};
+
+  // 创建调试日志文件
+  const debugLogPath = path.join(resolvePaths().root, 'gateway-env-debug.log');
+  const logLines: string[] = [];
+  const log = (msg: string) => {
+    const timestamp = new Date().toISOString();
+    const line = `[${timestamp}] ${msg}`;
+    logLines.push(line);
+    console.log(`[gateway-env-debug] ${msg}`);
+  };
+
+  log('=== 开始检测环境变量配置 ===');
+
+  // 读取全局 .env 文件
+  const rootEnvPath = path.join(resolvePaths().root, '.env');
+  log(`全局 .env 路径: ${rootEnvPath}`);
+  log(`全局 .env 是否存在: ${fs.existsSync(rootEnvPath)}`);
+
+  const rootEnvVars = parseEnvFileSync(rootEnvPath);
+  log(`全局 .env 中的变量: ${JSON.stringify(Object.keys(rootEnvVars))}`);
+  log(`全局 .env 内容: ${JSON.stringify(rootEnvVars, null, 2)}`);
+
+  // 标准环境变量映射
+  const standardEnvKeys: Record<string, string> = {
+    apiKey: 'ANTHROPIC_AUTH_TOKEN',
+    baseUrl: 'ANTHROPIC_BASE_URL',
+  };
+
+  // 记录进程环境变量
+  const processEnvDebug = {
+    ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL || '(未设置)',
+    ANTHROPIC_AUTH_TOKEN: process.env.ANTHROPIC_AUTH_TOKEN || '(未设置)',
+  };
+  log(`进程环境变量 ANTHROPIC_BASE_URL: ${processEnvDebug.ANTHROPIC_BASE_URL}`);
+  log(`进程环境变量 ANTHROPIC_AUTH_TOKEN: ${processEnvDebug.ANTHROPIC_AUTH_TOKEN}`);
+
+  log(`\ndefaults.baseagents 内容: ${JSON.stringify(defaultsBa, null, 2)}`);
+
+  // 收集调试信息返回给前端
+  result.debug = {
+    processEnv: processEnvDebug,
+    rootEnvFile: rootEnvVars,
+    defaultsConfig: defaultsBa,
+  };
+
+  // 检测全局默认配置中的环境变量
+  for (const type of GATEWAY_TYPES) {
+    const block = defaultsBa[type];
+    if (!block) {
+      log(`跳过类型 ${type}: 配置块不存在`);
+      continue;
+    }
+
+    log(`\n检测类型: ${type}`);
+    log(`配置块内容: ${JSON.stringify(block, null, 2)}`);
+
+    for (const [field, val] of Object.entries(block)) {
+      log(`  检查字段 ${field}: ${JSON.stringify(val)}`);
+
+      // 情况1：配置值是 $ENV 引用
+      if (typeof val === 'string' && val.startsWith(ENV_PREFIX)) {
+        const envVarName = val.slice(ENV_PREFIX.length);
+        const fileValue = rootEnvVars[envVarName];
+        const processValue = process.env[envVarName];
+
+        log(`    -> $ENV 引用: ${envVarName}`);
+        log(`    -> .env 文件中的值: ${fileValue || '(未设置)'}`);
+        log(`    -> 进程环境变量值: ${processValue ? '(已设置)' : '(未设置)'}`);
+
+        // .env 文件中未设置，但进程环境中有值
+        if (!fileValue && processValue) {
+          log(`    -> 检测到不一致: .env 未设置但进程环境有值`);
+          result.hasMismatch = true;
+          result.mismatches.push({
+            aid: 'defaults',
+            type,
+            field,
+            envValue: '(.env 中未设置)',
+            configValue: val,
+          });
+        }
+      }
+      // 情况2：配置值是实际值（非 $ENV 引用），检查是否应该使用环境变量
+      else if (typeof val === 'string' && val && standardEnvKeys[field]) {
+        const envVarName = standardEnvKeys[field];
+        const fileValue = rootEnvVars[envVarName];
+        const processValue = process.env[envVarName];
+
+        log(`    -> 实际值，对应环境变量: ${envVarName}`);
+        log(`    -> 配置中的值: ${val}`);
+        log(`    -> .env 文件中的值: ${fileValue || '(未设置)'}`);
+        log(`    -> 进程环境变量值: ${processValue || '(未设置)'}`);
+
+        // 如果进程环境中有值，但配置中的值与进程环境不一致
+        if (processValue && val !== processValue) {
+          log(`    -> 配置值与进程环境不一致`);
+          // 同时检查 .env 文件：如果 .env 也没有这个值，说明需要同步
+          if (!fileValue || fileValue !== processValue) {
+            log(`    -> 检测到不一致: .env 文件值也不匹配进程环境`);
+            result.hasMismatch = true;
+            result.mismatches.push({
+              aid: 'defaults',
+              type,
+              field,
+              envValue: fileValue || '(.env 中未设置)',
+              configValue: val, // 显示配置文件中的实际值
+              envVarName, // 添加环境变量名
+              processValue, // 添加进程环境的值
+            });
+          } else {
+            log(`    -> .env 文件值与进程环境一致，跳过`);
+          }
+        } else if (!processValue) {
+          log(`    -> 进程环境变量未设置，跳过`);
+        } else {
+          log(`    -> 配置值与进程环境一致，跳过`);
+        }
+      } else {
+        log(`    -> 跳过: 不是字符串或不在标准字段列表中`);
+      }
+    }
+  }
+
+  // 检测每个 agent 的配置
+  log(`\n=== 开始检测 Agent 配置 ===`);
+  log(`Agent 列表: ${JSON.stringify(aids)}`);
+
+  for (const aid of aids) {
+    log(`\n检测 Agent: ${aid}`);
+    const agentRaw = readAgentRaw(aid);
+    const agentBa = agentRaw?.baseagents || {};
+
+    log(`Agent ${aid} baseagents 内容: ${JSON.stringify(agentBa, null, 2)}`);
+
+    // 读取该 agent 的 .env 文件
+    const agentEnvPath = path.join(resolvePaths().agentsDir, aid, '.env');
+    log(`Agent ${aid} .env 路径: ${agentEnvPath}`);
+    log(`Agent ${aid} .env 是否存在: ${fs.existsSync(agentEnvPath)}`);
+
+    const agentEnvVars = parseEnvFileSync(agentEnvPath);
+    log(`Agent ${aid} .env 中的变量: ${JSON.stringify(Object.keys(agentEnvVars))}`);
+
+    for (const type of GATEWAY_TYPES) {
+      const block = agentBa[type];
+      if (!block) {
+        log(`Agent ${aid} 跳过类型 ${type}: 配置块不存在`);
+        continue;
+      }
+
+      log(`Agent ${aid} 检测类型: ${type}`);
+
+      for (const [field, val] of Object.entries(block)) {
+        log(`  Agent ${aid} 检查字段 ${field}: ${JSON.stringify(val)}`);
+
+        // 情况1：配置值是 $ENV 引用
+        if (typeof val === 'string' && val.startsWith(ENV_PREFIX)) {
+          const envVarName = val.slice(ENV_PREFIX.length);
+          const fileValue = agentEnvVars[envVarName];
+          const processValue = process.env[envVarName];
+
+          log(`    -> $ENV 引用: ${envVarName}`);
+          log(`    -> Agent .env 文件中的值: ${fileValue || '(未设置)'}`);
+          log(`    -> 进程环境变量值: ${processValue ? '(已设置)' : '(未设置)'}`);
+
+          if (!fileValue && processValue) {
+            log(`    -> 检测到不一致`);
+            result.hasMismatch = true;
+            result.mismatches.push({
+              aid,
+              type,
+              field,
+              envValue: '(.env 中未设置)',
+              configValue: val,
+            });
+          }
+        }
+        // 情况2：配置值是实际值
+        else if (typeof val === 'string' && val && standardEnvKeys[field]) {
+          const envVarName = standardEnvKeys[field];
+          const fileValue = agentEnvVars[envVarName];
+          const processValue = process.env[envVarName];
+
+          log(`    -> 实际值，对应环境变量: ${envVarName}`);
+          log(`    -> Agent .env 文件中的值: ${fileValue || '(未设置)'}`);
+
+          if (processValue && val !== processValue) {
+            if (!fileValue || fileValue !== processValue) {
+              log(`    -> 检测到不一致`);
+              result.hasMismatch = true;
+              result.mismatches.push({
+                aid,
+                type,
+                field,
+                envValue: fileValue || '(.env 中未设置)',
+                configValue: `配置值与环境变量 ${envVarName} 不一致`,
+              });
+            }
+          }
+        }
+      }
+    }
+  }
+
+  log(`\n=== 检测完成 ===`);
+  log(`发现不一致: ${result.hasMismatch}`);
+  log(`不一致数量: ${result.mismatches.length}`);
+  log(`不一致详情: ${JSON.stringify(result.mismatches, null, 2)}`);
+
+  // 写入日志文件
+  try {
+    fs.writeFileSync(debugLogPath, logLines.join('\n'), 'utf-8');
+    console.log(`[gateway-env-debug] 日志已写入: ${debugLogPath}`);
+  } catch (e) {
+    console.error(`[gateway-env-debug] 写入日志失败: ${e}`);
+  }
+
+  return result;
+}
+
+/** 同步解析 .env 文件（复用 merge.ts 的逻辑） */
+function parseEnvFileSync(file: string): Record<string, string> {
+  try {
+    const text = fs.readFileSync(file, 'utf-8');
+    const out: Record<string, string> = {};
+    for (const line of text.split(/\r?\n/)) {
+      const t = line.trim();
+      if (!t || t.startsWith('#')) continue;
+      const eq = t.indexOf('=');
+      if (eq <= 0) continue;
+      const key = t.slice(0, eq).trim();
+      let val = t.slice(eq + 1).trim();
+      if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+        val = val.slice(1, -1);
+      }
+      out[key] = val;
+    }
+    return out;
+  } catch {
+    return {};
+  }
 }
 
 // ── 写入 ──
@@ -429,6 +724,8 @@ export async function gatewayModels(args: any): Promise<ExecResult> {
   if (!baseUrl) return { error: '未配置 baseUrl（或为官方占位地址）', code: 'INVALID_ARGS' };
 
   let arr: any[] = [];
+  let usdToCny = 7; // 默认汇率
+
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 8000);
@@ -440,6 +737,11 @@ export async function gatewayModels(args: any): Promise<ExecResult> {
     if (!resp.ok) return { error: `HTTP ${resp.status}`, code: 'EXEC_FAILED' };
     const json: any = await resp.json().catch(() => null);
     arr = Array.isArray(json?.data) ? json.data : Array.isArray(json?.models) ? json.models : [];
+
+    // 提取汇率（usd_to_cny），如果没有则使用默认值 7
+    if (typeof json?.usd_to_cny === 'number') {
+      usdToCny = json.usd_to_cny;
+    }
   } catch (e: any) {
     return { error: `请求失败：${e?.message || e}`, code: 'EXEC_FAILED' };
   }
@@ -468,7 +770,7 @@ export async function gatewayModels(args: any): Promise<ExecResult> {
     return { id, name, group, official: official ?? null, officialSource, gateway: gatewayPrice ?? null };
   }).filter(Boolean);
 
-  return { data: { scope, type, models } };
+  return { data: { scope, type, models, usdToCny } };
 }
 
 /** gatewaySetPrice — 把用户改的网关价格 append 到用户覆盖层 model-prices.jsonl。 */
@@ -498,14 +800,220 @@ export function gatewaySetPrice(args: any): ExecResult {
   try {
     const dir = path.join(resolvePaths().root, 'data', 'stats');
     fs.mkdirSync(dir, { recursive: true });
-    const file = path.join(dir, 'model-prices.jsonl');
+    // 写入网关价格覆盖层（price-resolver 的「优先级1 用户手动设置网关价」读此文件）。
+    // 注意：必须是 model-prices-gateway.jsonl，不是 model-prices.jsonl（后者是官方价表）。
+    const file = path.join(dir, 'model-prices-gateway.jsonl');
     fs.appendFileSync(file, JSON.stringify(record) + '\n', 'utf-8');
-    logger.info(`[gateway] 网关价格已更新: ${modelId}（写入用户覆盖层 model-prices.jsonl）`);
+    logger.info(`[gateway] 网关价格已更新: ${modelId}（写入网关价覆盖层 model-prices-gateway.jsonl）`);
   } catch (e: any) {
     return { error: e?.message || String(e), code: 'EXEC_FAILED' };
   }
 
   return { data: { modelId, saved: true } };
+}
+
+/** gatewaySyncEnv — 同步环境变量到配置文件（将进程环境变量的值写入配置文件） */
+export async function gatewaySyncEnv(args: any): Promise<ExecResult> {
+  const syncType = args?.syncType; // 'global' | 'all-agents' | 'specific-agents'
+  const targetAids = args?.targetAids || []; // 指定的 agent IDs（仅 specific-agents 时使用）
+
+  if (!['global', 'all-agents', 'specific-agents'].includes(syncType)) {
+    return { error: '无效的 syncType，可选值：global / all-agents / specific-agents', code: 'INVALID_ARGS' };
+  }
+
+  if (syncType === 'specific-agents' && (!Array.isArray(targetAids) || targetAids.length === 0)) {
+    return { error: 'specific-agents 模式需要提供 targetAids 数组', code: 'INVALID_ARGS' };
+  }
+
+  try {
+    const synced: string[] = [];
+
+    // 1. 同步全局配置
+    if (syncType === 'global' || syncType === 'all-agents' || syncType === 'specific-agents') {
+      const defaults = readDefaultsRaw();
+      if (defaults?.baseagents) {
+        let hasChanges = false;
+        for (const type of GATEWAY_TYPES) {
+          const block = defaults.baseagents[type];
+          if (!block) continue;
+
+          for (const [field, val] of Object.entries(block)) {
+            // 检测配置值是否与进程环境变量不一致
+            if (typeof val === 'string') {
+              // 情况1：引用型 $ENV:XXX
+              if (val.startsWith(ENV_PREFIX)) {
+                const varName = val.slice(ENV_PREFIX.length);
+                const processValue = process.env[varName];
+                if (processValue) {
+                  // 将引用改为实际值
+                  block[field] = processValue;
+                  hasChanges = true;
+                }
+              }
+              // 情况2：实际值型，但与进程环境变量不一致
+              else {
+                const standardEnvKey = field === 'apiKey' ? 'ANTHROPIC_AUTH_TOKEN' : field === 'baseUrl' ? 'ANTHROPIC_BASE_URL' : null;
+                if (standardEnvKey) {
+                  const processValue = process.env[standardEnvKey];
+                  if (processValue && val !== processValue) {
+                    block[field] = processValue;
+                    hasChanges = true;
+                  }
+                }
+              }
+            }
+          }
+        }
+
+        if (hasChanges) {
+          const defaultsPath = path.join(resolvePaths().agentsDir, 'defaults.json');
+          fs.writeFileSync(defaultsPath, JSON.stringify(defaults, null, 2), 'utf-8');
+          synced.push('全局配置 (defaults.json)');
+        }
+      }
+    }
+
+    // 2. 同步 agent 配置
+    if (syncType === 'all-agents' || syncType === 'specific-agents') {
+      const aids = syncType === 'all-agents' ? listAgentAids() : targetAids;
+
+      for (const aid of aids) {
+        const agentRaw = readAgentRaw(aid);
+        if (!agentRaw?.baseagents) continue;
+
+        let hasChanges = false;
+        for (const type of GATEWAY_TYPES) {
+          const block = agentRaw.baseagents[type];
+          if (!block) continue;
+
+          for (const [field, val] of Object.entries(block)) {
+            if (typeof val === 'string') {
+              // 情况1：引用型
+              if (val.startsWith(ENV_PREFIX)) {
+                const varName = val.slice(ENV_PREFIX.length);
+                const processValue = process.env[varName];
+                if (processValue) {
+                  block[field] = processValue;
+                  hasChanges = true;
+                }
+              }
+              // 情况2：实际值型
+              else {
+                const standardEnvKey = field === 'apiKey' ? 'ANTHROPIC_AUTH_TOKEN' : field === 'baseUrl' ? 'ANTHROPIC_BASE_URL' : null;
+                if (standardEnvKey) {
+                  const processValue = process.env[standardEnvKey];
+                  if (processValue && val !== processValue) {
+                    block[field] = processValue;
+                    hasChanges = true;
+                  }
+                }
+              }
+            }
+          }
+        }
+
+        if (hasChanges) {
+          const agentConfigPath = path.join(resolvePaths().agentsDir, aid, 'config.json');
+          fs.writeFileSync(agentConfigPath, JSON.stringify(agentRaw, null, 2), 'utf-8');
+          synced.push(`${aid} (config.json)`);
+        }
+      }
+    }
+
+    return { data: { synced, count: synced.length } };
+  } catch (e: any) {
+    return { error: e?.message || String(e), code: 'EXEC_FAILED' };
+  }
+}
+
+/** 从配置中提取所有环境变量引用 */
+function extractEnvVarsFromConfig(baseagents: any): Array<{ varName: string; currentValue: string }> {
+  const envVars: Array<{ varName: string; currentValue: string }> = [];
+  const seen = new Set<string>();
+
+  for (const type of GATEWAY_TYPES) {
+    const block = baseagents[type];
+    if (!block) continue;
+
+    for (const val of Object.values(block)) {
+      if (typeof val === 'string' && val.startsWith(ENV_PREFIX)) {
+        const varName = val.slice(ENV_PREFIX.length);
+        if (!seen.has(varName)) {
+          seen.add(varName);
+          const currentValue = process.env[varName] || '';
+          envVars.push({ varName, currentValue });
+        }
+      }
+    }
+  }
+
+  return envVars;
+}
+
+/** 同步环境变量到 .env 文件（保留现有内容，更新或追加变量） */
+async function syncEnvFile(envPath: string, envVars: Array<{ varName: string; currentValue: string }>): Promise<void> {
+  let existingContent = '';
+  const existingVars = new Map<string, string>();
+
+  // 读取现有 .env 文件
+  if (fs.existsSync(envPath)) {
+    existingContent = fs.readFileSync(envPath, 'utf-8');
+    const lines = existingContent.split(/\r?\n/);
+
+    for (const line of lines) {
+      const t = line.trim();
+      if (!t || t.startsWith('#')) continue;
+      const eq = t.indexOf('=');
+      if (eq <= 0) continue;
+      const key = t.slice(0, eq).trim();
+      existingVars.set(key, line); // 保留原始行（含格式）
+    }
+  }
+
+  // 构建新内容
+  const newLines: string[] = [];
+  const updatedVars = new Set<string>();
+
+  // 保留现有内容，更新匹配的变量
+  if (existingContent) {
+    const lines = existingContent.split(/\r?\n/);
+    for (const line of lines) {
+      const t = line.trim();
+      if (!t || t.startsWith('#')) {
+        newLines.push(line);
+        continue;
+      }
+
+      const eq = t.indexOf('=');
+      if (eq <= 0) {
+        newLines.push(line);
+        continue;
+      }
+
+      const key = t.slice(0, eq).trim();
+      const envVar = envVars.find(v => v.varName === key);
+
+      if (envVar && envVar.currentValue) {
+        // 更新为当前进程环境变量的值
+        newLines.push(`${key}=${envVar.currentValue}`);
+        updatedVars.add(key);
+      } else {
+        newLines.push(line);
+      }
+    }
+  }
+
+  // 追加新的环境变量
+  for (const envVar of envVars) {
+    if (!updatedVars.has(envVar.varName) && envVar.currentValue) {
+      newLines.push(`${envVar.varName}=${envVar.currentValue}`);
+    }
+  }
+
+  // 写入文件
+  fs.mkdirSync(path.dirname(envPath), { recursive: true });
+  fs.writeFileSync(envPath, newLines.join('\n') + '\n', 'utf-8');
+  logger.info(`[gateway] 已同步环境变量到: ${envPath}`);
 }
 
 

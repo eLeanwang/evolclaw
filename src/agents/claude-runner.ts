@@ -14,6 +14,7 @@ import { checkBlacklist, checkReadonly, summarizeToolInput } from '../core/permi
 import { encodePath } from '../utils/cross-platform.js';
 import type { AgentPlugin, AgentInstance, AgentCallbacks } from '../core/baseagent-loader.js';
 import type { AgentEvent, ImageData, PermissionContext, PermissionModeInfo, AgentTokenUsage, AgentContextUsage, AgentLastModelCall, AgentModelCall } from './runner-types.js';
+import type { GatewayPricingCache, PriceQuad } from '../core/stats/price-resolver.js';
 import { contextTokensForUsage, usageForContext, numericToken, isClaudeContextUsageModel, isOneMillionContextModel, realContextWindowForModel, autoCompactWindowForModel } from './runner-types.js';
 export type {
   AgentContextUsage,
@@ -55,6 +56,72 @@ const MODEL_ALIAS_TTL_MS = 5 * 60 * 1000; // 5min
 interface AliasCacheEntry { aliases: Record<string, string>; ids: string[]; fetchedAt: number; }
 const modelAliasCache = new Map<string, AliasCacheEntry>(); // key: baseUrl
 const modelAliasInFlight = new Set<string>();               // 去重并发刷新
+
+// ── 网关价格缓存（从 /v1/models 的 pricing/effective_pricing 提取）─────────────
+// 与别名刷新同范式：按 baseUrl 缓存，1h TTL，stale-while-revalidate（缺失/过期时
+// fire-and-forget 触发刷新，本轮先用旧值或回退，不阻塞查询）。
+const GATEWAY_PRICING_TTL_MS = 60 * 60 * 1000; // 1h
+interface PricingCacheEntry { cache: GatewayPricingCache; fetchedAt: number; }
+const gatewayPricingCache = new Map<string, PricingCacheEntry>(); // key: baseUrl
+const gatewayPricingInFlight = new Set<string>();                 // 去重并发刷新
+
+/** 把 /v1/models 单个 model 的价格对象转为 PriceQuad（与 gateway-control 的 apiPricingToQuad 等价）。
+ *  单位假设：接口价与 model-prices.jsonl 同口径（USD per 1M token），不做换算。 */
+function apiPricingToQuad(p: any): PriceQuad | undefined {
+  if (!p || typeof p !== 'object') return undefined;
+  const n = (v: any) => (typeof v === 'number' && isFinite(v) ? v : undefined);
+  const quad: PriceQuad = {
+    input: n(p.input),
+    output: n(p.output),
+    cache_read: n(p.cache_read),
+    cache_write: n(p.cache_write),
+  };
+  // 全空则视为无价
+  if (quad.input === undefined && quad.output === undefined
+    && quad.cache_read === undefined && quad.cache_write === undefined) return undefined;
+  return quad;
+}
+
+/** 拉取网关 /v1/models 的官方价(pricing) + 网关价(effective_pricing)，写入 gatewayPricingCache。
+ *  失败静默——保持回退到本地价表 / official。 */
+async function refreshGatewayPricing(baseUrl: string, apiKey?: string): Promise<void> {
+  if (gatewayPricingInFlight.has(baseUrl)) return;
+  gatewayPricingInFlight.add(baseUrl);
+  try {
+    const url = `${baseUrl.replace(/\/+$/, '')}/v1/models`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5000);
+    const resp = await fetch(url, {
+      signal: controller.signal,
+      headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+    });
+    clearTimeout(timer);
+    if (!resp.ok) return;
+    const json: any = await resp.json();
+    const arr: any[] = Array.isArray(json?.data) ? json.data
+                     : Array.isArray(json?.models) ? json.models : [];
+    const official = new Map<string, PriceQuad>();
+    const gateway = new Map<string, PriceQuad>();
+    for (const m of arr) {
+      const id = typeof m === 'string' ? m : (m?.id || m?.name || m?.model);
+      if (!id || typeof m !== 'object') continue;
+      const off = apiPricingToQuad(m.pricing);
+      if (off) official.set(id, off);
+      const gw = apiPricingToQuad(m.effective_pricing);
+      if (gw) gateway.set(id, gw);
+    }
+    // 汇率：接口 usd_to_cny，缺失则留空（计费层默认用 7）
+    const usdToCny = (typeof json?.usd_to_cny === 'number' && json.usd_to_cny > 0) ? json.usd_to_cny : undefined;
+    if (official.size > 0 || gateway.size > 0) {
+      gatewayPricingCache.set(baseUrl, { cache: { official, gateway, usdToCny }, fetchedAt: Date.now() });
+      logger.info(`[AgentRunner] Refreshed gateway pricing from ${url}: official=${official.size} gateway=${gateway.size} usd_to_cny=${usdToCny ?? '(default 7)'}`);
+    }
+  } catch {
+    // 网络/解析失败：保持回退，不打断查询
+  } finally {
+    gatewayPricingInFlight.delete(baseUrl);
+  }
+}
 
 /** 从模型 ID 列表中提取各 claude 系列的最新版本（按 major.minor 取最高） */
 function deriveAliasesFromModelIds(ids: string[]): Record<string, string> {
@@ -281,6 +348,17 @@ export class AgentRunner {
 
   getModel(): string {
     return this.model;
+  }
+
+  /** 返回当前网关 /v1/models 的价格缓存（1h TTL，stale-while-revalidate）。
+   *  缺失/过期时 fire-and-forget 触发刷新，本轮先返回旧值或 undefined（回退本地价表）。 */
+  getGatewayPricing(): GatewayPricingCache | undefined {
+    if (!this.baseUrl) return undefined;
+    const entry = gatewayPricingCache.get(this.baseUrl);
+    if (!entry || Date.now() - entry.fetchedAt > GATEWAY_PRICING_TTL_MS) {
+      refreshGatewayPricing(this.baseUrl, this.apiKey); // 不 await，stale-while-revalidate
+    }
+    return entry?.cache;
   }
 
   async listModels(): Promise<string[]> {
@@ -1090,6 +1168,11 @@ export class AgentRunner {
       const cached = modelAliasCache.get(this.baseUrl);
       if (!cached || (Date.now() - cached.fetchedAt > MODEL_ALIAS_TTL_MS)) {
         refreshModelAliases(this.baseUrl, this.apiKey);
+      }
+      // 顺带预热网关价格缓存（1h TTL），让本轮结束写库时已就绪
+      const pricing = gatewayPricingCache.get(this.baseUrl);
+      if (!pricing || (Date.now() - pricing.fetchedAt > GATEWAY_PRICING_TTL_MS)) {
+        refreshGatewayPricing(this.baseUrl, this.apiKey);
       }
     }
 

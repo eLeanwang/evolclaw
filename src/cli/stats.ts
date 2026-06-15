@@ -438,6 +438,10 @@ export async function handleStats(args: string[]): Promise<void> {
       const totCacheCreation = rows.reduce((s, r) => s + r.cache_creation_tokens, 0);
       const totUsd = rows.reduce((s, r) => s + r.usd, 0);
       const totCny = rows.reduce((s, r) => s + r.cny, 0);
+      const totOfficialUsd = rows.reduce((s, r) => s + r.cost_official_usd, 0);
+      const totOfficialCny = rows.reduce((s, r) => s + r.cost_official_cny, 0);
+      const totGatewayUsd = rows.reduce((s, r) => s + r.cost_gateway_usd, 0);
+      const totGatewayCny = rows.reduce((s, r) => s + r.cost_gateway_cny, 0);
       const totCacheAll = totIn + totCacheRead;
       const sessionCacheHitRate = totCacheAll > 0 ? totCacheRead / totCacheAll : 0;
 
@@ -454,6 +458,11 @@ export async function handleStats(args: string[]): Promise<void> {
           model: last.model,
           cost_usd: last.usd,
           cost_cny: last.cny,
+          // 原价 + 网关实际价
+          cost: {
+            official: { usd: last.cost_official_usd, cny: last.cost_official_cny },
+            gateway:  { usd: last.cost_gateway_usd,  cny: last.cost_gateway_cny },
+          },
           cache_hit_rate: last.cache_read_tokens / ((last.input_tokens + last.cache_read_tokens) || 1),
           context_window_pct: last.context_window_pct ?? 0,
           duration_ms: last.duration_ms ?? 0,
@@ -465,6 +474,10 @@ export async function handleStats(args: string[]): Promise<void> {
           cache_creation_tokens: totCacheCreation,
           cost_usd: totUsd,
           cost_cny: totCny,
+          cost: {
+            official: { usd: totOfficialUsd, cny: totOfficialCny },
+            gateway:  { usd: totGatewayUsd,  cny: totGatewayCny },
+          },
           call_count: rows.length,
           cache_hit_rate: sessionCacheHitRate,
         },

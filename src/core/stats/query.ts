@@ -93,8 +93,12 @@ export interface TurnRow {
   turns: number;
   duration_ms: number | null;
   context_window_pct: number | null;
-  usd: number;
-  cny: number;
+  cost_official_usd: number;
+  cost_official_cny: number;
+  cost_gateway_usd: number;
+  cost_gateway_cny: number;
+  usd: number;             // 向后兼容：= cost_gateway_usd
+  cny: number;             // 向后兼容：= cost_gateway_cny
 }
 
 const GRAN_FMT: Record<string, string> = {
@@ -343,6 +347,53 @@ export function querySessionTurns(evolclawHome: string, sessionId: string): Turn
     } finally { db.close(); }
   }
   return result.sort((a, b) => a.ts - b.ts);
+}
+
+/**
+ * 单个 session 的累计汇总，单行。直接 SUM 已落库的 official/gateway 成本列，
+ * 不再逐行 calcCost（避免重复计算 + 全表扫描）。跨归档库累加。
+ */
+export function querySessionSummary(evolclawHome: string, sessionId: string): SummaryRow {
+  const empty: SummaryRow = {
+    input_tokens: 0, output_tokens: 0, cache_creation_tokens: 0, cache_read_tokens: 0,
+    total_tokens: 0, calls: 0,
+    cost_official_usd: 0, cost_official_cny: 0, cost_gateway_usd: 0, cost_gateway_cny: 0,
+    usd: 0, cny: 0,
+  };
+  const sql = `
+    SELECT
+      COALESCE(SUM(input_tokens), 0)          AS input_tokens,
+      COALESCE(SUM(output_tokens), 0)         AS output_tokens,
+      COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens,
+      COALESCE(SUM(cache_read_tokens), 0)     AS cache_read_tokens,
+      COUNT(*)                                AS calls,
+      COALESCE(SUM(cost_official_usd), 0)     AS cost_official_usd,
+      COALESCE(SUM(cost_official_cny), 0)     AS cost_official_cny,
+      COALESCE(SUM(cost_gateway_usd), 0)      AS cost_gateway_usd,
+      COALESCE(SUM(cost_gateway_cny), 0)      AS cost_gateway_cny
+    FROM usage_events WHERE session_id = ?`;
+  const acc = { ...empty };
+  for (const dbPath of _relevantDbs(evolclawHome, {})) {
+    const db = openReadonlyDb(dbPath);
+    if (!db) continue;
+    try {
+      const r = db.prepare(sql).get(sessionId) as any;
+      if (!r) continue;
+      acc.input_tokens          += r.input_tokens ?? 0;
+      acc.output_tokens         += r.output_tokens ?? 0;
+      acc.cache_creation_tokens += r.cache_creation_tokens ?? 0;
+      acc.cache_read_tokens     += r.cache_read_tokens ?? 0;
+      acc.calls                 += r.calls ?? 0;
+      acc.cost_official_usd      += r.cost_official_usd ?? 0;
+      acc.cost_official_cny      += r.cost_official_cny ?? 0;
+      acc.cost_gateway_usd       += r.cost_gateway_usd ?? 0;
+      acc.cost_gateway_cny       += r.cost_gateway_cny ?? 0;
+    } finally { db.close(); }
+  }
+  acc.total_tokens = acc.input_tokens + acc.output_tokens + acc.cache_read_tokens + acc.cache_creation_tokens;
+  acc.usd = acc.cost_gateway_usd;
+  acc.cny = acc.cost_gateway_cny;
+  return acc;
 }
 
 /** 查会话 context_breakdown 细目（每轮各段 token）。 */
