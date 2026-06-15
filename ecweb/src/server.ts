@@ -28,7 +28,7 @@ import { systemSource } from './sources/system.js';
 import { triggersSource } from './sources/triggers.js';
 import { monitorSource } from './sources/monitor.js';
 import { gatewaySource } from './sources/gateway.js';
-import { queryStatsForDashboard, queryStatsExplorer, queryStatsByPeer, queryStatsByAgent, queryStatsOverview } from './sources/stats.js';
+import { queryStatsForDashboard, queryStatsExplorer, queryStatsByPeer, queryStatsByAgent, queryStatsOverview, queryUsageDetail, queryUsedModels } from './sources/stats.js';
 import { getSessionsAunDir, listLocalAids, listPeers, readMessages } from './fs-utils.js';
 import { ccProjectsDir } from './paths.js';
 
@@ -200,31 +200,67 @@ function handleStatsApi(req: http.IncomingMessage, res: http.ServerResponse): vo
     res.writeHead(200);
     res.end(JSON.stringify(data));
   } else if (urlPath === '/api/stats/agents') {
-    const params: any = {};
+    // 返回所有agent列表（与智能体管理页面一致，从aidSource获取）
+    aidSource.snapshot().then(snapshot => {
+      const agents = (snapshot?.agents || []).map((ag: any) => ({
+        agent_aid: ag.aid,
+        agent_name: ag.displayName || null
+      }));
+      res.writeHead(200);
+      res.end(JSON.stringify(agents));
+    }).catch(err => {
+      res.writeHead(500);
+      res.end(JSON.stringify({ error: 'Failed to fetch agents' }));
+    });
+    return;
+  } else if (urlPath === '/api/stats/overview') {
+    // 从查询参数中获取时间范围和筛选条件
+    const params: { from_ts?: number; to_ts?: number; agent_aid?: string; peer_key?: string } = {};
     if (query.from) params.from_ts = Number(query.from);
     if (query.to)   params.to_ts = Number(query.to);
-    if (query.limit) params.limit = Number(query.limit);
-    const data = queryStatsByAgent(params);
-    res.writeHead(200);
-    res.end(JSON.stringify(data));
-  } else if (urlPath === '/api/stats/overview') {
-    const tokenStats = queryStatsOverview();
-    // session count: scan all CC project dirs
+    if (query.agent) params.agent_aid = String(query.agent);
+    if (query.peer) params.peer_key = String(query.peer);
+
+    const tokenStats = queryStatsOverview(params);
+
+    // session count: scan all CC project dirs, 根据时间范围过滤
     let sessionCount = 0;
     try {
       const base = ccProjectsDir();
       for (const d of fs.readdirSync(base, { withFileTypes: true })) {
         if (!d.isDirectory()) continue;
-        try { sessionCount += fs.readdirSync(path.join(base, d.name)).filter(f => f.endsWith('.jsonl')).length; } catch {}
+        const projectDir = path.join(base, d.name);
+        try {
+          const sessionFiles = fs.readdirSync(projectDir).filter(f => f.endsWith('.jsonl'));
+          for (const sessionFile of sessionFiles) {
+            // 如果有时间范围限制，检查会话文件的修改时间
+            if (params.from_ts || params.to_ts) {
+              const stat = fs.statSync(path.join(projectDir, sessionFile));
+              const mtime = stat.mtimeMs;
+              if (params.from_ts && mtime < params.from_ts) continue;
+              if (params.to_ts && mtime > params.to_ts) continue;
+            }
+            sessionCount++;
+          }
+        } catch {}
       }
     } catch {}
-    // message counts: scan aun dir
+
+    // message counts: scan aun dir, 根据时间范围和 agent/peer 过滤
     let msgIn = 0, msgOut = 0;
     try {
       const aunDir = getSessionsAunDir();
-      for (const aid of listLocalAids(aunDir)) {
-        for (const peer of listPeers(aunDir, aid)) {
+      const aids = params.agent_aid ? [params.agent_aid] : listLocalAids(aunDir);
+
+      for (const aid of aids) {
+        const peers = params.peer_key ? [params.peer_key] : listPeers(aunDir, aid);
+
+        for (const peer of peers) {
           for (const m of readMessages(aunDir, aid, peer)) {
+            // 根据消息时间戳过滤
+            if (params.from_ts && m.ts < params.from_ts) continue;
+            if (params.to_ts && m.ts > params.to_ts) continue;
+
             if (m.dir === 'in') msgIn++; else msgOut++;
           }
         }
@@ -232,6 +268,27 @@ function handleStatsApi(req: http.IncomingMessage, res: http.ServerResponse): vo
     } catch {}
     res.writeHead(200);
     res.end(JSON.stringify({ token_stats: tokenStats, session_count: sessionCount, msg_in: msgIn, msg_out: msgOut }));
+  } else if (urlPath === '/api/stats/detail') {
+    // 模型访问明细查询
+    const params: { from_ts?: number; to_ts?: number; agent_aid?: string; limit?: number; offset?: number } = {};
+    if (query.from) params.from_ts = Number(query.from);
+    if (query.to)   params.to_ts = Number(query.to);
+    if (query.agent) params.agent_aid = query.agent;
+    params.limit = Number(query.limit) || 50; // 默认限制50条
+    params.offset = Number(query.offset) || 0; // 默认从0开始
+
+    const result = queryUsageDetail(params);
+    res.writeHead(200);
+    res.end(JSON.stringify(result));
+  } else if (urlPath === '/api/stats/models') {
+    // 获取指定时间范围内使用过的模型列表
+    const params: { from_ts?: number; to_ts?: number } = {};
+    if (query.from) params.from_ts = Number(query.from);
+    if (query.to)   params.to_ts = Number(query.to);
+
+    const models = queryUsedModels(params);
+    res.writeHead(200);
+    res.end(JSON.stringify(models));
   } else {
     res.writeHead(404);
     res.end(JSON.stringify({ error: 'not found' }));

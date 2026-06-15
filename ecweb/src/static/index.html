@@ -12,10 +12,10 @@
   <!-- 配对页 -->
   <div id="pair-page" class="pair-page">
     <div class="pair-box">
-      <h1>🔭 EvolClaw Watch</h1>
-      <p class="pair-hint">输入终端显示的 6 位配对码</p>
-      <input id="pair-input" type="text" inputmode="numeric" maxlength="6" placeholder="000000" autocomplete="off">
-      <button id="pair-btn">配对</button>
+      <h1 data-i18n="pair.title">🔭 EvolClaw Watch</h1>
+      <p class="pair-hint" data-i18n="pair.hint">输入终端显示的 6 位配对码</p>
+      <input id="pair-input" type="text" inputmode="numeric" maxlength="6" placeholder="000000" data-i18n="pair.placeholder" autocomplete="off">
+      <button id="pair-btn" data-i18n="action.pair">配对</button>
       <div id="pair-error" class="pair-error"></div>
     </div>
   </div>
@@ -37,10 +37,10 @@
 
       </nav>
       <span style="flex:1"></span>
-      <span class="build-ts" style="font-size:10px;color:var(--dim)" title="构建时间">2026-06-07 21:55</span>
+      <span class="build-ts" style="font-size:10px;color:var(--dim)" data-i18n-title="common.buildTime" title="构建时间">2026-06-07 21:55</span>
       <span id="conn-status" class="conn-status" data-i18n="status.connecting">连接中…</span>
-      <button id="lang-btn" class="theme-btn" title="切换语言">🌐</button>
-      <button id="theme-btn" class="theme-btn" title="切换主题">🌗</button>
+      <button id="lang-btn" class="theme-btn" title="Switch Language / 切换语言">🌐</button>
+      <button id="theme-btn" class="theme-btn" title="Toggle Theme / 切换主题">🌗</button>
       <button id="logout-btn" class="logout-btn" data-i18n="action.logout" title="退出配对">退出</button>
     </header>
 
@@ -70,32 +70,62 @@
       <section id="view-gateway" class="view"></section>
       <section id="view-usage" class="view">
         <div class="usage-layout">
-          <!-- 子 Tab：Dashboard / Explorer -->
+          <!-- 子 Tab：Overview / Explorer -->
           <div class="usage-subtabs">
-            <button class="usage-subtab active" data-subview="overview">Overview</button>
-            <button class="usage-subtab" data-subview="dashboard">Dashboard</button>
-            <button class="usage-subtab" data-subview="explorer">Explorer</button>
-          </div>
-
-          <!-- Dashboard 面板 -->
-          <div id="usage-dashboard" class="usage-subpanel">
-            <div class="usage-cards" id="usage-cards"></div>
-            <div class="usage-chart-row">
-              <div id="usage-hourly-chart" class="usage-chart"></div>
-              <div id="usage-model-chart" class="usage-chart-sm"></div>
-            </div>
-            <div class="usage-table-section">
-              <h3>Top Peers (Today)</h3>
-              <table id="usage-top-peers" class="usage-table"></table>
-            </div>
+            <button class="usage-subtab active" data-subview="overview" data-i18n="usage.subtab.overview">Overview</button>
+            <button class="usage-subtab" data-subview="explorer" data-i18n="usage.subtab.explorer">Explorer</button>
           </div>
 
           <!-- Overview 面板 -->
           <div id="usage-overview" class="usage-subpanel active">
+            <div class="overview-filters">
+              <div class="ov-range-tabs">
+                <button class="ov-range-btn active" data-range="today" data-i18n="usage.overview.range.today">今日</button>
+                <button class="ov-range-btn" data-range="week" data-i18n="usage.overview.range.week">本周</button>
+                <button class="ov-range-btn" data-range="lastWeek" data-i18n="usage.overview.range.lastWeek">上周</button>
+                <button class="ov-range-btn" data-range="month" data-i18n="usage.overview.range.month">本月</button>
+                <button class="ov-range-btn" data-range="last30" data-i18n="usage.overview.range.last30">最近30天</button>
+                <button class="ov-range-btn" data-range="custom" data-i18n="usage.overview.range.custom">自定义</button>
+              </div>
+              <div class="ov-custom-date" id="ov-custom-date" style="display:none;">
+                <label><span data-i18n="usage.explorer.filter.from">From</span> <input type="datetime-local" id="ov-from"></label>
+                <label><span data-i18n="usage.explorer.filter.to">To</span> <input type="datetime-local" id="ov-to"></label>
+                <button id="ov-query-btn" data-i18n="action.query">Query</button>
+              </div>
+            </div>
             <div id="ov-cards" class="usage-cards"></div>
             <div class="usage-table-section" style="margin-top:4px">
-              <h3>按 Agent 汇总（全时段）</h3>
+              <h3 id="ov-table-title" data-i18n="usage.overview.title">按 Agent 汇总</h3>
               <table id="ov-agent-table" class="usage-table"></table>
+            </div>
+
+            <!-- 模型访问明细查询 -->
+            <div class="usage-table-section" style="margin-top:16px">
+              <h3 data-i18n="usage.detail.title">模型访问明细</h3>
+              <div class="detail-filters">
+                <label><span data-i18n="usage.detail.agent">Agent</span>
+                  <select id="detail-agent">
+                    <option value="" data-i18n="usage.explorer.all">全部</option>
+                  </select>
+                </label>
+                <label><span data-i18n="usage.detail.pageSize">每页</span>
+                  <select id="detail-page-size">
+                    <option value="20">20</option>
+                    <option value="50" selected>50</option>
+                    <option value="100">100</option>
+                    <option value="200">200</option>
+                  </select>
+                </label>
+              </div>
+              <div id="detail-result" style="margin-top:12px;max-height:400px;overflow-y:auto;">
+                <table id="detail-table" class="usage-table"></table>
+              </div>
+              <div class="detail-pagination">
+                <button id="detail-prev-page" data-i18n="usage.detail.prevPage">上一页</button>
+                <input type="number" id="detail-page" value="1" min="1" style="width:60px;text-align:center">
+                <button id="detail-next-page" data-i18n="usage.detail.nextPage">下一页</button>
+                <span id="detail-pagination-info" style="margin-left:12px;color:var(--dim);font-size:12px"></span>
+              </div>
             </div>
           </div>
 
@@ -105,35 +135,62 @@
               <!-- 左侧列表 -->
               <div class="exp-sidebar">
                 <div class="exp-sidebar-group">
-                  <div class="exp-sidebar-title">Agents</div>
+                  <div class="exp-sidebar-title" data-i18n="usage.explorer.sidebar.agents">Agents</div>
                   <div id="exp-agent-list"></div>
                 </div>
                 <div class="exp-sidebar-group">
-                  <div class="exp-sidebar-title">Peers</div>
+                  <div class="exp-sidebar-title" data-i18n="usage.explorer.sidebar.peers">Peers</div>
                   <div id="exp-peer-list"></div>
                 </div>
               </div>
               <!-- 右侧详情 -->
               <div class="exp-detail">
                 <div id="exp-detail-header" class="exp-detail-header">
-                  <span id="exp-selected-name">请从左侧选择 Agent 或 Peer</span>
+                  <span id="exp-selected-name" data-i18n="usage.explorer.selectHint">请从左侧选择 Agent 或 Peer</span>
                 </div>
-                <div id="exp-detail-cards" class="usage-cards" style="display:none"></div>
+
+                <!-- 时间范围选择（与总览类似，但支持精确到时分秒） -->
+                <div class="exp-time-filters">
+                  <div class="exp-range-tabs">
+                    <button class="exp-range-btn active" data-range="today" data-i18n="usage.overview.range.today">今日</button>
+                    <button class="exp-range-btn" data-range="week" data-i18n="usage.overview.range.week">本周</button>
+                    <button class="exp-range-btn" data-range="lastWeek" data-i18n="usage.overview.range.lastWeek">上周</button>
+                    <button class="exp-range-btn" data-range="month" data-i18n="usage.overview.range.month">本月</button>
+                    <button class="exp-range-btn" data-range="last30" data-i18n="usage.overview.range.last30">最近30天</button>
+                    <button class="exp-range-btn" data-range="custom" data-i18n="usage.overview.range.custom">自定义</button>
+                  </div>
+                  <div class="exp-custom-date" id="exp-custom-date" style="display:none;">
+                    <label><span data-i18n="usage.explorer.filter.from">From</span> <input type="datetime-local" id="exp-from"></label>
+                    <label><span data-i18n="usage.explorer.filter.to">To</span> <input type="datetime-local" id="exp-to"></label>
+                    <button id="exp-time-query-btn" data-i18n="action.query">Query</button>
+                  </div>
+                </div>
+
+                <div id="exp-detail-cards" class="usage-cards"></div>
+
+                <!-- 模型和粒度筛选 -->
                 <div class="explorer-filters">
-                  <label>From <input type="date" id="exp-from"></label>
-                  <label>To <input type="date" id="exp-to"></label>
-                  <label>Model <input type="text" id="exp-model" placeholder="model-id"></label>
-                  <select id="exp-granularity">
-                    <option value="hour">Hour</option>
-                    <option value="day" selected>Day</option>
-                    <option value="week">Week</option>
-                    <option value="month">Month</option>
-                  </select>
-                  <button id="exp-query-btn">Query</button>
+                  <label>
+                    <span data-i18n="usage.explorer.filter.model">Model</span>
+                    <select id="exp-model">
+                      <option value="" data-i18n="usage.explorer.all">全部</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span data-i18n="usage.explorer.filter.granularity">Granularity</span>
+                    <select id="exp-granularity">
+                      <option value="hour" data-i18n="usage.explorer.filter.granularity.hour">Hour</option>
+                      <option value="day" selected data-i18n="usage.explorer.filter.granularity.day">Day</option>
+                      <option value="week" data-i18n="usage.explorer.filter.granularity.week">Week</option>
+                      <option value="month" data-i18n="usage.explorer.filter.granularity.month">Month</option>
+                    </select>
+                  </label>
+                  <button id="exp-query-btn" data-i18n="action.query">Query</button>
                 </div>
+
                 <div id="usage-explorer-chart" class="usage-chart" style="height:260px"></div>
                 <div class="usage-table-section" style="margin-top:12px">
-                  <h3>Results</h3>
+                  <h3 data-i18n="usage.explorer.results">Results</h3>
                   <table id="usage-explorer-table" class="usage-table"></table>
                 </div>
               </div>
@@ -145,16 +202,16 @@
       <section id="view-monitor" class="view">
         <div class="mon-layout">
           <div class="mon-toolbar">
-            <span class="mon-toolbar-label">时间范围</span>
+            <span class="mon-toolbar-label" data-i18n="monitor.toolbar.timeRange">时间范围</span>
             <div class="mon-range-tabs">
-              <button class="mon-range active" data-range="2m">2 分钟</button>
-              <button class="mon-range" data-range="10m">10 分钟</button>
-              <button class="mon-range" data-range="1h">1 小时</button>
+              <button class="mon-range active" data-range="2m" data-i18n="monitor.range.2m">2 分钟</button>
+              <button class="mon-range" data-range="10m" data-i18n="monitor.range.10m">10 分钟</button>
+              <button class="mon-range" data-range="1h" data-i18n="monitor.range.1h">1 小时</button>
             </div>
             <span style="flex:1"></span>
             <span class="mon-legend">
-              <span class="mon-legend-item"><i class="lg-dot lg-proc"></i>evolclaw 进程</span>
-              <span class="mon-legend-item"><i class="lg-dot lg-sys"></i>整机系统</span>
+              <span class="mon-legend-item"><i class="lg-dot lg-proc"></i><span data-i18n="monitor.legend.process">evolclaw 进程</span></span>
+              <span class="mon-legend-item"><i class="lg-dot lg-sys"></i><span data-i18n="monitor.legend.system">整机系统</span></span>
             </span>
           </div>
           <div id="mon-cards" class="usage-cards"></div>

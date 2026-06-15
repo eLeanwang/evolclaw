@@ -7,34 +7,552 @@ const LANG_KEY = 'ecWatchLang';
 // ── 国际化 (i18n) ──
 const translations = {
   'zh-CN': {
-    'tab.agents': 'Agents',
-    'tab.messages': 'Messages',
-    'tab.sessions': 'Sessions',
-    'tab.triggers': 'Triggers',
-    'tab.cache': 'Cache',
-    'tab.system': 'System',
-    'tab.gateway': 'AgentGateway',
-    'tab.usage': 'Usage',
-    'tab.monitor': 'Monitor',
+    // Tabs
+    'tab.agents': '智能体',
+    'tab.messages': '消息',
+    'tab.sessions': '会话',
+    'tab.triggers': '触发器',
+    'tab.cache': '缓存',
+    'tab.system': '系统',
+    'tab.gateway': '智能体网关',
+    'tab.usage': '用量',
+    'tab.monitor': '监控',
+
+    // Status
     'status.connecting': '连接中…',
     'status.connected': '已连接',
     'status.disconnected': '已断开',
+    'status.reconnecting': '重连中',
+    'status.stopped': '停止',
+    'status.idle': 'idle',
+    'status.working': 'working',
+
+    // Actions
     'action.logout': '退出',
+    'action.pair': '配对',
+    'action.stop': '停止',
+    'action.start': '启动',
+    'action.enable': '启用',
+    'action.disable': '禁用',
+    'action.reload': '重载配置',
+    'action.edit': '编辑配置',
+    'action.delete': '删除 Agent',
+    'action.clearQueue': '清空队列',
+    'action.new': '+ 新建',
+    'action.query': '查询',
+
+    // Pair page
+    'pair.title': '🔭 EvolClaw Watch',
+    'pair.hint': '输入终端显示的 6 位配对码',
+    'pair.placeholder': '000000',
+    'pair.error.length': '请输入 6 位配对码',
+    'pair.error.failed': '配对失败',
+    'pair.error.network': '网络错误',
+    'pair.error.tokenInvalid': 'token 已失效，请重新配对',
+
+    // Common
+    'common.loading': '加载中…',
+    'common.empty': '暂无数据',
+    'common.noData': '暂无',
+    'common.operating': '操作中…',
+    'common.buildTime': '构建时间',
+
+    // Agents view
+    'agents.subtitle.enabled': '启用',
+    'agents.subtitle.disabled': '禁用',
+    'agents.daemonStopped': '⚠ EvolClaw 主进程未运行，仅显示最近活动记录',
+    'agents.empty.disabled': '暂无禁用 Agent',
+    'agents.empty.enabled': '暂无启用 Agent',
+    'agents.stats.gateway': 'Gateway',
+    'agents.stats.aids': 'AIDs',
+    'agents.stats.total': 'total',
+    'agents.stats.online': '在线',
+    'agents.stats.offline': '离线',
+    'agents.stats.messages': 'Messages',
+    'agents.stats.traffic': 'Traffic',
+    'agents.stats.version': 'Version',
+    'agents.stats.pid': 'PID',
+    'agents.stats.uptime': 'Uptime',
+
+    // Agent table headers
+    'agents.th.agent': 'Agent',
+    'agents.th.aid': 'AID',
+    'agents.th.work': '工作',
+    'agents.th.queue': '队列',
+    'agents.th.model': '模型',
+    'agents.th.runtime': '运行',
+    'agents.th.received': '收',
+    'agents.th.sent': '发',
+    'agents.th.bytesIn': '入字节',
+    'agents.th.bytesOut': '出字节',
+    'agents.th.peerCount': '对端数量',
+    'agents.th.lastActivity': '最后活动',
+    'agents.th.operations': '操作',
+    'agents.th.projectPath': '项目路径',
+
+    // Agent operations
+    'agents.op.stopping': '停止中…',
+    'agents.op.starting': '启动中…',
+    'agents.op.reloading': '重载中…',
+    'agents.op.disabling': '禁用中…',
+    'agents.op.enabling': '启用中…',
+    'agents.op.deleting': '删除中…',
+    'agents.op.stopped': '✓ 已停止',
+    'agents.op.started': '✓ 已启动',
+    'agents.op.reloaded': '✓ 已重载',
+    'agents.op.disabled': '✓ 已禁用',
+    'agents.op.enabled': '✓ 已启用',
+    'agents.op.deleted': '✓ 已删除',
+    'agents.op.saved': '✓ 配置已保存，点「重载」生效',
+    'agents.op.confirmReload': '确认强制重载？',
+    'agents.op.confirmToggle': '确认强制',
+    'agents.op.confirmDelete': '删除 Agent {aid}？\n此操作不可恢复。',
+    'agents.op.confirmForceDelete': '确认强制删除？',
+    'agents.op.confirmClearQueue': '清空 {aid} 的待处理消息队列？',
+    'agents.op.clearQueueTitle': '清空 {count} 条待处理消息',
+    'agents.op.viewAgentMd': '查看 agent.md ↗',
+
+    // Messages view
+    'messages.colTitle.aid': 'AID',
+    'messages.colTitle.peers': 'Peers',
+    'messages.colTitle.all': 'All',
+    'messages.empty.selectAid': '← 选择一个 AID',
+    'messages.empty.selectToView': '选择 AID 查看消息',
+    'messages.empty.noMessages': '暂无消息',
+    'messages.tag.group': '群聊',
+    'messages.tag.encrypted': '🔒密文',
+    'messages.tag.plain': '明文',
+    'messages.tag.proactive': '自主',
+    'messages.tag.inject': '注入',
+    'messages.tag.responsive': '响应',
+    'messages.msgKind.reply': '回复',
+    'messages.msgKind.thought': '思考',
+    'messages.msgKind.inject': '注入',
+    'messages.msgKind.notify': '通知',
+    'messages.msgType.thought': '思考',
+    'messages.msgType.image': '图片',
+    'messages.msgType.file': '文件',
+    'messages.msgType.command': '命令',
+
+    // Sessions view
+    'sessions.filter.normal': '🔍 仅有效',
+    'sessions.filter.chat': '💬 对话',
+    'sessions.search.placeholder': '🔎 搜索 peer / 内容',
+    'sessions.empty.noMatch': '无匹配会话',
+    'sessions.empty.noSessions': '该项目暂无会话',
+    'sessions.empty.noContent': '该会话暂无内容',
+    'sessions.header.project': '项目',
+    'sessions.header.session': '会话',
+    'sessions.stat.context': '📐 {tokens} ctx',
+    'sessions.stat.cost': '💰 ${cost}',
+    'sessions.turnType.modelOutput': '模型输出',
+    'sessions.turnType.toolUse': '工具使用',
+    'sessions.turnType.toolResult': '工具结果',
+    'sessions.turnType.msgSend': '发送消息',
+
+    // Cache view
+    'cache.daemonStopped': '⚠ EvolClaw 主进程未运行，无缓存统计可显示',
+    'cache.notSupported': '⚠ 当前 EvolClaw 版本不支持 cache-stats（请升级 daemon）',
+    'cache.card.hitRate': '命中率',
+    'cache.card.reads': '读取总数',
+    'cache.card.entries': '缓存条目',
+    'cache.card.statChecks': 'stat 检查',
+    'cache.card.reReads': '重读',
+    'cache.card.evictions': '驱逐',
+    'cache.card.invalidations': '失效',
+    'cache.card.since': '统计起始',
+    'cache.card.ago': '前',
+    'cache.card.memory': '近似内存',
+    'cache.card.hit': '命中',
+    'cache.card.miss': '未命中',
+    'cache.section.byGroup': '按缓存组',
+    'cache.section.byPolicy': '按策略',
+    'cache.th.group': '组',
+    'cache.th.type': '类型',
+    'cache.th.reads': '读取',
+    'cache.th.hits': '命中',
+    'cache.th.misses': '未命中',
+    'cache.th.hitRate': '命中率',
+    'cache.th.reReads': '重读',
+    'cache.th.evictions': '驱逐',
+    'cache.th.entries': '条目',
+    'cache.th.memory': '内存',
+    'cache.th.capacity': '容量',
+    'cache.th.policy': '策略',
+    'cache.th.statChecks': 'stat 检查',
+    'cache.note': '注：config/defaults 与关系级 preferences 的读取也已并入本统计；渲染后结果（按 vars）不缓存，故不在此列。',
+    'cache.policy.onReload': '靠 reload 刷新，平时零检查',
+    'cache.policy.manual': '显式单刷',
+    'cache.policy.mtime': '每读 statSync 门控',
+
+    // Monitor view
+    'monitor.toolbar.timeRange': '时间范围',
+    'monitor.range.2m': '2 分钟',
+    'monitor.range.10m': '10 分钟',
+    'monitor.range.1h': '1 小时',
+    'monitor.legend.process': 'evolclaw 进程',
+    'monitor.legend.system': '整机系统',
+
+    // Usage view
+    'usage.subtab.overview': '总览',
+    'usage.subtab.explorer': '详细统计',
+    'usage.overview.range.today': '今日',
+    'usage.overview.range.week': '本周',
+    'usage.overview.range.lastWeek': '上周',
+    'usage.overview.range.month': '本月',
+    'usage.overview.range.last30': '最近30天',
+    'usage.overview.range.custom': '自定义',
+    'usage.card.input': '输入',
+    'usage.card.output': '输出',
+    'usage.card.cacheRead': '缓存读取',
+    'usage.card.cacheHit': '缓存命中',
+    'usage.card.calls': '调用',
+    'usage.card.sessionCount': '会话数',
+    'usage.card.msgIn': '收到消息',
+    'usage.card.msgOut': '发出消息',
+    'usage.card.modelCalls': '模型调用',
+    'usage.card.inputTokens': '输入 Token',
+    'usage.card.outputTokens': '输出 Token',
+    'usage.card.cacheCreation': '缓存创建',
+    'usage.card.cacheHitTokens': '缓存命中',
+    'usage.card.cacheHitRate': '缓存命中率',
+    'usage.card.totalCost': '总花费',
+    'usage.card.costOfficial': '官方价格',
+    'usage.card.costGateway': '网关价格',
+    'usage.card.sessionInfo': '会话信息',
+    'usage.card.usageInfo': '用量信息',
+    'usage.card.costInfo': '花费信息',
+    'usage.detail.title': '模型访问明细',
+    'usage.detail.agent': '智能体',
+    'usage.detail.error': '查询失败',
+    'usage.detail.th.time': '时间',
+    'usage.detail.th.agent': '智能体',
+    'usage.detail.th.peer': 'Peer',
+    'usage.detail.th.model': '模型',
+    'usage.detail.th.input': '输入',
+    'usage.detail.th.output': '输出',
+    'usage.detail.th.cacheCreation': '缓存创建',
+    'usage.detail.th.cacheRead': '缓存读取',
+    'usage.detail.th.costOfficial': '官方价格',
+    'usage.detail.th.costGateway': '网关价格',
+    'usage.detail.pageSize': '每页',
+    'usage.detail.prevPage': '上一页',
+    'usage.detail.nextPage': '下一页',
+    'usage.detail.pagination': '显示 {start}-{end} / 共 {total} 条 (第 {page}/{totalPages} 页)',
+    'usage.overview.title': '按 Agent 汇总（全时段）',
+    'usage.overview.noData': '暂无数据',
+    'usage.overview.th.agent': '智能体',
+    'usage.overview.th.calls': '调用',
+    'usage.overview.th.input': '输入',
+    'usage.overview.th.output': '输出',
+    'usage.overview.th.cacheCreation': '缓存创建',
+    'usage.overview.th.cacheHit': '缓存命中',
+    'usage.overview.th.cacheHitRate': '命中率',
+    'usage.overview.th.costOfficial': '官方价格',
+    'usage.overview.th.costGateway': '网关价格',
+    'usage.overview.th.cost': '花费',
+    'usage.dashboard.title.topPeers': 'Top Peers (Today)',
+    'usage.dashboard.th.rank': '#',
+    'usage.dashboard.th.peer': 'Peer',
+    'usage.dashboard.th.tokens': 'Tokens',
+    'usage.dashboard.th.calls': 'Calls',
+    'usage.explorer.sidebar.agents': '智能体',
+    'usage.explorer.sidebar.peers': '对端智能体',
+    'usage.explorer.chatType.group': '群聊',
+    'usage.explorer.chatType.private': '单聊',
+    'usage.explorer.memberCount': '人',
+    'usage.explorer.selectHint': '请从左侧选择 Agent 或 Peer',
+    'usage.explorer.all': '全部',
+    'usage.explorer.filter.from': 'From',
+    'usage.explorer.filter.to': 'To',
+    'usage.explorer.filter.model': 'Model',
+    'usage.explorer.filter.granularity': '粒度',
+    'usage.explorer.filter.granularity.hour': 'Hour',
+    'usage.explorer.filter.granularity.day': 'Day',
+    'usage.explorer.filter.granularity.week': 'Week',
+    'usage.explorer.filter.granularity.month': 'Month',
+    'usage.explorer.results': 'Results',
+    'usage.explorer.noData': 'No data for selected range.',
+    'usage.explorer.th.period': 'Period',
+    'usage.explorer.th.input': 'Input',
+    'usage.explorer.th.output': 'Output',
+    'usage.explorer.th.cacheCreation': 'Cache↑',
+    'usage.explorer.th.cacheHit': 'CacheHit',
+    'usage.explorer.th.calls': 'Calls',
   },
   'en-US': {
+    // Tabs
     'tab.agents': 'Agents',
     'tab.messages': 'Messages',
     'tab.sessions': 'Sessions',
     'tab.triggers': 'Triggers',
     'tab.cache': 'Cache',
     'tab.system': 'System',
-    'tab.gateway': 'AgentGateway',
+    'tab.gateway': 'Agent Gateway',
     'tab.usage': 'Usage',
     'tab.monitor': 'Monitor',
+
+    // Status
     'status.connecting': 'Connecting…',
     'status.connected': 'Connected',
     'status.disconnected': 'Disconnected',
+    'status.reconnecting': 'Reconnecting',
+    'status.stopped': 'Stopped',
+    'status.idle': 'Idle',
+    'status.working': 'Working',
+
+    // Actions
     'action.logout': 'Logout',
+    'action.pair': 'Pair',
+    'action.stop': 'Stop',
+    'action.start': 'Start',
+    'action.enable': 'Enable',
+    'action.disable': 'Disable',
+    'action.reload': 'Reload Config',
+    'action.edit': 'Edit Config',
+    'action.delete': 'Delete Agent',
+    'action.clearQueue': 'Clear Queue',
+    'action.new': '+ New',
+    'action.query': 'Query',
+
+    // Pair page
+    'pair.title': '🔭 EvolClaw Watch',
+    'pair.hint': 'Enter the 6-digit pairing code shown in terminal',
+    'pair.placeholder': '000000',
+    'pair.error.length': 'Please enter 6-digit pairing code',
+    'pair.error.failed': 'Pairing failed',
+    'pair.error.network': 'Network error',
+    'pair.error.tokenInvalid': 'Token expired, please pair again',
+
+    // Common
+    'common.loading': 'Loading…',
+    'common.empty': 'No data',
+    'common.noData': 'N/A',
+    'common.operating': 'Operating…',
+    'common.buildTime': 'Build Time',
+
+    // Agents view
+    'agents.subtitle.enabled': 'Enabled',
+    'agents.subtitle.disabled': 'Disabled',
+    'agents.daemonStopped': '⚠ EvolClaw daemon not running, showing recent activity only',
+    'agents.empty.disabled': 'No disabled agents',
+    'agents.empty.enabled': 'No enabled agents',
+    'agents.stats.gateway': 'Gateway',
+    'agents.stats.aids': 'AIDs',
+    'agents.stats.total': 'total',
+    'agents.stats.online': 'online',
+    'agents.stats.offline': 'offline',
+    'agents.stats.messages': 'Messages',
+    'agents.stats.traffic': 'Traffic',
+    'agents.stats.version': 'Version',
+    'agents.stats.pid': 'PID',
+    'agents.stats.uptime': 'Uptime',
+
+    // Agent table headers
+    'agents.th.agent': 'Agent',
+    'agents.th.aid': 'AID',
+    'agents.th.work': 'Work',
+    'agents.th.queue': 'Queue',
+    'agents.th.model': 'Model',
+    'agents.th.runtime': 'Runtime',
+    'agents.th.received': 'Recv',
+    'agents.th.sent': 'Sent',
+    'agents.th.bytesIn': 'Bytes In',
+    'agents.th.bytesOut': 'Bytes Out',
+    'agents.th.peerCount': 'Peers',
+    'agents.th.lastActivity': 'Last Activity',
+    'agents.th.operations': 'Operations',
+    'agents.th.projectPath': 'Project Path',
+
+    // Agent operations
+    'agents.op.stopping': 'Stopping…',
+    'agents.op.starting': 'Starting…',
+    'agents.op.reloading': 'Reloading…',
+    'agents.op.disabling': 'Disabling…',
+    'agents.op.enabling': 'Enabling…',
+    'agents.op.deleting': 'Deleting…',
+    'agents.op.stopped': '✓ Stopped',
+    'agents.op.started': '✓ Started',
+    'agents.op.reloaded': '✓ Reloaded',
+    'agents.op.disabled': '✓ Disabled',
+    'agents.op.enabled': '✓ Enabled',
+    'agents.op.deleted': '✓ Deleted',
+    'agents.op.saved': '✓ Config saved, click "Reload" to apply',
+    'agents.op.confirmReload': 'Force reload?',
+    'agents.op.confirmToggle': 'Force',
+    'agents.op.confirmDelete': 'Delete agent {aid}?\nThis cannot be undone.',
+    'agents.op.confirmForceDelete': 'Force delete?',
+    'agents.op.confirmClearQueue': 'Clear pending message queue for {aid}?',
+    'agents.op.clearQueueTitle': 'Clear {count} pending messages',
+    'agents.op.viewAgentMd': 'View agent.md ↗',
+
+    // Messages view
+    'messages.colTitle.aid': 'AID',
+    'messages.colTitle.peers': 'Peers',
+    'messages.colTitle.all': 'All',
+    'messages.empty.selectAid': '← Select an AID',
+    'messages.empty.selectToView': 'Select AID to view messages',
+    'messages.empty.noMessages': 'No messages',
+    'messages.tag.group': 'Group',
+    'messages.tag.encrypted': '🔒Encrypted',
+    'messages.tag.plain': 'Plain',
+    'messages.tag.proactive': 'Proactive',
+    'messages.tag.inject': 'Inject',
+    'messages.tag.responsive': 'Responsive',
+    'messages.msgKind.reply': 'Reply',
+    'messages.msgKind.thought': 'Thought',
+    'messages.msgKind.inject': 'Inject',
+    'messages.msgKind.notify': 'Notify',
+    'messages.msgType.thought': 'Thought',
+    'messages.msgType.image': 'Image',
+    'messages.msgType.file': 'File',
+    'messages.msgType.command': 'Command',
+
+    // Sessions view
+    'sessions.filter.normal': '🔍 Valid Only',
+    'sessions.filter.chat': '💬 Chat',
+    'sessions.search.placeholder': '🔎 Search peer / content',
+    'sessions.empty.noMatch': 'No matching sessions',
+    'sessions.empty.noSessions': 'No sessions in this project',
+    'sessions.empty.noContent': 'No content in this session',
+    'sessions.header.project': 'Project',
+    'sessions.header.session': 'Session',
+    'sessions.stat.context': '📐 {tokens} ctx',
+    'sessions.stat.cost': '💰 ${cost}',
+    'sessions.turnType.modelOutput': 'Model Output',
+    'sessions.turnType.toolUse': 'Tool Use',
+    'sessions.turnType.toolResult': 'Tool Result',
+    'sessions.turnType.msgSend': 'Send Message',
+
+    // Cache view
+    'cache.daemonStopped': '⚠ EvolClaw daemon not running, no cache stats available',
+    'cache.notSupported': '⚠ Current EvolClaw version does not support cache-stats (please upgrade daemon)',
+    'cache.card.hitRate': 'Hit Rate',
+    'cache.card.reads': 'Total Reads',
+    'cache.card.entries': 'Cache Entries',
+    'cache.card.statChecks': 'Stat Checks',
+    'cache.card.reReads': 'Re-reads',
+    'cache.card.evictions': 'Evictions',
+    'cache.card.invalidations': 'Invalidations',
+    'cache.card.since': 'Stats Since',
+    'cache.card.ago': 'ago',
+    'cache.card.memory': 'approx memory',
+    'cache.card.hit': 'hit',
+    'cache.card.miss': 'miss',
+    'cache.section.byGroup': 'By Cache Group',
+    'cache.section.byPolicy': 'By Policy',
+    'cache.th.group': 'Group',
+    'cache.th.type': 'Type',
+    'cache.th.reads': 'Reads',
+    'cache.th.hits': 'Hits',
+    'cache.th.misses': 'Misses',
+    'cache.th.hitRate': 'Hit Rate',
+    'cache.th.reReads': 'Re-reads',
+    'cache.th.evictions': 'Evictions',
+    'cache.th.entries': 'Entries',
+    'cache.th.memory': 'Memory',
+    'cache.th.capacity': 'Capacity',
+    'cache.th.policy': 'Policy',
+    'cache.th.statChecks': 'Stat Checks',
+    'cache.note': 'Note: Reads of config/defaults and relation-level preferences are included; rendered results (by vars) are not cached and not shown here.',
+    'cache.policy.onReload': 'Refresh on reload, zero checks normally',
+    'cache.policy.manual': 'Explicit single refresh',
+    'cache.policy.mtime': 'statSync gate on each read',
+
+    // Monitor view
+    'monitor.toolbar.timeRange': 'Time Range',
+    'monitor.range.2m': '2 minutes',
+    'monitor.range.10m': '10 minutes',
+    'monitor.range.1h': '1 hour',
+    'monitor.legend.process': 'evolclaw process',
+    'monitor.legend.system': 'system',
+
+    // Usage view
+    'usage.subtab.overview': 'Overview',
+    'usage.subtab.explorer': 'Detailed Statistics',
+    'usage.overview.range.today': 'Today',
+    'usage.overview.range.week': 'This Week',
+    'usage.overview.range.lastWeek': 'Last Week',
+    'usage.overview.range.month': 'This Month',
+    'usage.overview.range.last30': 'Last 30 Days',
+    'usage.overview.range.custom': 'Custom',
+    'usage.card.input': 'Input',
+    'usage.card.output': 'Output',
+    'usage.card.cacheRead': 'Cache Read',
+    'usage.card.cacheHit': 'Cache Hit',
+    'usage.card.calls': 'Calls',
+    'usage.card.sessionCount': 'Sessions',
+    'usage.card.msgIn': 'Received Messages',
+    'usage.card.msgOut': 'Sent Messages',
+    'usage.card.modelCalls': 'Model Calls',
+    'usage.card.inputTokens': 'Input Tokens',
+    'usage.card.outputTokens': 'Output Tokens',
+    'usage.card.cacheCreation': 'Cache Creation',
+    'usage.card.cacheHitTokens': 'Cache Hit',
+    'usage.card.cacheHitRate': 'Cache Hit Rate',
+    'usage.card.totalCost': 'Total Cost',
+    'usage.card.costOfficial': 'Official Price',
+    'usage.card.costGateway': 'Gateway Price',
+    'usage.card.sessionInfo': 'Session Info',
+    'usage.card.usageInfo': 'Usage Info',
+    'usage.card.costInfo': 'Cost Info',
+    'usage.detail.title': 'Model Access Details',
+    'usage.detail.agent': 'Agent',
+    'usage.detail.error': 'Query failed',
+    'usage.detail.th.time': 'Time',
+    'usage.detail.th.agent': 'Agent',
+    'usage.detail.th.peer': 'Peer',
+    'usage.detail.th.model': 'Model',
+    'usage.detail.th.input': 'Input',
+    'usage.detail.th.output': 'Output',
+    'usage.detail.th.cacheCreation': 'Cache Creation',
+    'usage.detail.th.cacheRead': 'Cache Read',
+    'usage.detail.th.costOfficial': 'Official',
+    'usage.detail.th.costGateway': 'Gateway',
+    'usage.detail.pageSize': 'Per page',
+    'usage.detail.prevPage': 'Previous',
+    'usage.detail.nextPage': 'Next',
+    'usage.detail.pagination': 'Showing {start}-{end} of {total} (Page {page}/{totalPages})',
+    'usage.overview.title': 'Summary by Agent (All Time)',
+    'usage.overview.noData': 'No data',
+    'usage.overview.th.agent': 'Agent',
+    'usage.overview.th.calls': 'Calls',
+    'usage.overview.th.input': 'Input',
+    'usage.overview.th.output': 'Output',
+    'usage.overview.th.cacheCreation': 'Cache Creation',
+    'usage.overview.th.cacheHit': 'Cache Hit',
+    'usage.overview.th.cacheHitRate': 'Hit Rate',
+    'usage.overview.th.costOfficial': 'Official Price',
+    'usage.overview.th.costGateway': 'Gateway Price',
+    'usage.overview.th.cost': 'Cost',
+    'usage.dashboard.title.topPeers': 'Top Peers (Today)',
+    'usage.dashboard.th.rank': '#',
+    'usage.dashboard.th.peer': 'Peer',
+    'usage.dashboard.th.tokens': 'Tokens',
+    'usage.dashboard.th.calls': 'Calls',
+    'usage.explorer.sidebar.agents': 'Agents',
+    'usage.explorer.sidebar.peers': 'Peers',
+    'usage.explorer.chatType.group': 'Group',
+    'usage.explorer.chatType.private': 'Private',
+    'usage.explorer.memberCount': ' members',
+    'usage.explorer.selectHint': 'Select an Agent or Peer from the left',
+    'usage.explorer.all': 'All',
+    'usage.explorer.filter.from': 'From',
+    'usage.explorer.filter.to': 'To',
+    'usage.explorer.filter.model': 'Model',
+    'usage.explorer.filter.granularity': 'Granularity',
+    'usage.explorer.filter.granularity.hour': 'Hour',
+    'usage.explorer.filter.granularity.day': 'Day',
+    'usage.explorer.filter.granularity.week': 'Week',
+    'usage.explorer.filter.granularity.month': 'Month',
+    'usage.explorer.results': 'Results',
+    'usage.explorer.noData': 'No data for selected range.',
+    'usage.explorer.th.period': 'Period',
+    'usage.explorer.th.input': 'Input',
+    'usage.explorer.th.output': 'Output',
+    'usage.explorer.th.cacheCreation': 'Cache↑',
+    'usage.explorer.th.cacheHit': 'CacheHit',
+    'usage.explorer.th.calls': 'Calls',
   }
 };
 
@@ -45,23 +563,33 @@ function t(key) {
 }
 
 function updateI18n() {
+  // 处理元素文本内容
   document.querySelectorAll('[data-i18n]').forEach(el => {
     const key = el.getAttribute('data-i18n');
     const text = t(key);
     if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
       el.placeholder = text;
-    } else if (el.hasAttribute('title')) {
-      el.title = text;
+    } else if (el.tagName === 'OPTION') {
+      el.textContent = text;
     } else {
       el.textContent = text;
     }
   });
+  // 处理 title 属性（单独的 data-i18n-title）
+  document.querySelectorAll('[data-i18n-title]').forEach(el => {
+    const key = el.getAttribute('data-i18n-title');
+    el.title = t(key);
+  });
+  // 更新 html lang 属性
+  document.documentElement.lang = currentLang;
 }
 
 function toggleLang() {
   currentLang = currentLang === 'zh-CN' ? 'en-US' : 'zh-CN';
   localStorage.setItem(LANG_KEY, currentLang);
   updateI18n();
+  // 强制重新渲染当前视图
+  if (state[currentView]) renderView(currentView);
 }
 
 // ── 基础路径 ──
@@ -112,7 +640,7 @@ function initPairUI() {
   const err = $('#pair-error');
   const submit = async () => {
     const code = input.value.trim();
-    if (code.length !== 6) { err.textContent = '请输入 6 位配对码'; return; }
+    if (code.length !== 6) { err.textContent = t('pair.error.length'); return; }
     btn.disabled = true; err.textContent = '';
     try {
       const res = await pair(code);
@@ -121,10 +649,10 @@ function initPairUI() {
         showApp();
         startApp();
       } else {
-        err.textContent = res.reason || '配对失败';
+        err.textContent = res.reason || t('pair.error.failed');
       }
     } catch {
-      err.textContent = '网络错误';
+      err.textContent = t('pair.error.network');
     } finally {
       btn.disabled = false;
     }
@@ -154,7 +682,7 @@ function connect() {
   ws = new WebSocket(`${proto}://${location.host}${BASE}ws?token=${encodeURIComponent(token)}`);
 
   ws.onopen = () => {
-    setConnStatus('● 已连接', 'ok');
+    setConnStatus('● ' + t('status.connected'), 'ok');
     reconnectDelay = 1000;
     subscribe(currentView, pendingSub || {});
   };
@@ -187,10 +715,10 @@ function connect() {
   ws.onclose = (ev) => {
     if (ev.code === 4001) {
       localStorage.removeItem(TOKEN_KEY);
-      showPairPage('token 已失效，请重新配对');
+      showPairPage(t('pair.error.tokenInvalid'));
       return;
     }
-    setConnStatus('○ 重连中…', 'err');
+    setConnStatus('○ ' + t('status.reconnecting') + '…', 'err');
     setTimeout(connect, reconnectDelay);
     reconnectDelay = Math.min(reconnectDelay * 1.5, 15000);
   };
@@ -329,28 +857,38 @@ let _agSubtab = 'enabled'; // 'enabled' | 'disabled'
 // stopped → connected(仅首次连接无消息时) → idle(收到第一条后) → working → idle ...
 function agentStateBadge(s, agStatus, connStatus) {
   if (agStatus === 'stopped' || connStatus === 'disconnected' || connStatus === 'failed')
-    return '<span class="state-badge stopped">停止</span>';
+    return `<span class="state-badge stopped">${t('status.stopped')}</span>`;
   if (connStatus === 'reconnecting')
-    return '<span class="state-badge stopped">重连中</span>';
+    return `<span class="state-badge stopped">${t('status.reconnecting')}</span>`;
   if ((s.processing || 0) > 0)
-    return '<span class="state-badge working">working</span>';
+    return `<span class="state-badge working">${t('status.working')}</span>`;
   // 收到过消息 → 永远是 idle，不再回到 connected
   if ((s.messagesReceived || 0) > 0 || (s.messagesSent || 0) > 0)
-    return '<span class="state-badge idle">idle</span>';
-  return '<span class="state-badge connected">connected</span>';
+    return `<span class="state-badge idle">${t('status.idle')}</span>`;
+  return `<span class="state-badge connected">${t('status.connected')}</span>`;
 }
 
 // 发送方式图标标记
-const MSG_KIND_META = { send: { icon: '💬', label: '回复' }, thought: { icon: '💭', label: '思考' }, inject: { icon: '📥', label: '注入' }, notify: { icon: '🔔', label: '通知' } };
+const MSG_KIND_META = {
+  send: { icon: '💬', label: () => t('messages.msgKind.reply') },
+  thought: { icon: '💭', label: () => t('messages.msgKind.thought') },
+  inject: { icon: '📥', label: () => t('messages.msgKind.inject') },
+  notify: { icon: '🔔', label: () => t('messages.msgKind.notify') }
+};
 // 消息详情流用：jsonl 持久化的 msgType 词汇（text 为普通回复，不另标）
-const MSG_TYPE_META = { thought: { icon: '💭', label: '思考' }, image: { icon: '🖼️', label: '图片' }, file: { icon: '📎', label: '文件' }, command: { icon: '⌘', label: '命令' } };
+const MSG_TYPE_META = {
+  thought: { icon: '💭', label: () => t('messages.msgType.thought') },
+  image: { icon: '🖼️', label: () => t('messages.msgType.image') },
+  file: { icon: '📎', label: () => t('messages.msgType.file') },
+  command: { icon: '⌘', label: () => t('messages.msgType.command') }
+};
 function msgTagsHtml(kind, encrypt, chatmode, dir) {
   let h = '';
   // 'send' 仅出向才是「回复」；入向是用户输入，不打回复标记
   const km = (kind === 'send' && dir === 'in') ? null : MSG_KIND_META[kind];
-  if (km) h += `<span class="mtag${kind === 'send' ? ' mtag-reply' : ''}">${km.icon}${km.label}</span>`;
-  if (encrypt != null) h += `<span class="mtag">${encrypt ? '🔒密文' : '明文'}</span>`;
-  if (chatmode) h += `<span class="mtag">${chatmode === 'proactive' ? '自主' : (chatmode === 'inject' ? '注入' : '响应')}</span>`;
+  if (km) h += `<span class="mtag${kind === 'send' ? ' mtag-reply' : ''}">${km.icon}${km.label()}</span>`;
+  if (encrypt != null) h += `<span class="mtag">${encrypt ? t('messages.tag.encrypted') : t('messages.tag.plain')}</span>`;
+  if (chatmode) h += `<span class="mtag">${chatmode === 'proactive' ? t('messages.tag.proactive') : (chatmode === 'inject' ? t('messages.tag.inject') : t('messages.tag.responsive'))}</span>`;
   return h;
 }
 
@@ -385,9 +923,9 @@ function recentMsgTooltipHtml(recent) {
     const arrow = m.dir === 'in' ? '↓' : '↑';
     // 'send' 仅出向才是「回复」；入向是用户输入，不打回复标记
     const km = (m.kind === 'send' && m.dir === 'in') ? null : MSG_KIND_META[m.kind];
-    const kh = km ? `<span class="tip-kind${m.kind === 'send' ? ' tip-kind-reply' : ''}">${km.icon}${km.label}</span>` : '';
-    const enc = m.encrypt != null ? `<span class="tip-flag">${m.encrypt ? '🔒密文' : '明文'}</span>` : '';
-    const mode = m.chatmode ? `<span class="tip-flag">${m.chatmode === 'proactive' ? '自主' : (m.chatmode === 'inject' ? '注入' : '响应')}</span>` : '';
+    const kh = km ? `<span class="tip-kind${m.kind === 'send' ? ' tip-kind-reply' : ''}">${km.icon}${km.label()}</span>` : '';
+    const enc = m.encrypt != null ? `<span class="tip-flag">${m.encrypt ? t('messages.tag.encrypted') : t('messages.tag.plain')}</span>` : '';
+    const mode = m.chatmode ? `<span class="tip-flag">${m.chatmode === 'proactive' ? t('messages.tag.proactive') : (m.chatmode === 'inject' ? t('messages.tag.inject') : t('messages.tag.responsive'))}</span>` : '';
     const peer = m.peer ? esc(shortAid(m.peer)) : '';
     const text = esc(String(m.text).replace(/\n/g, ' ').slice(0, 140));
     const time = m.ts ? `<span class="tip-time">${fmtTime(m.ts)}</span>` : '';
@@ -480,12 +1018,12 @@ function agentsStatsBar(data, aids, stats) {
   const ver = data.version || '—';
 
   let h = '<div class="agents-stats">';
-  h += `<span class="sg"><span class="sg-k">Gateway</span><span class="sg-gw">${gw}</span></span>`;
-  h += `<span class="sg"><span class="sg-k">AIDs</span>${aids.length} total · <span class="num-on">${connected} 在线</span>` +
-    `${offline ? ` · <span class="num-off">${offline} 离线</span>` : ''}</span>`;
-  h += `<span class="sg"><span class="sg-k">Messages</span><span class="in">↓${recv}</span> <span class="out">↑${sent}</span></span>`;
-  h += `<span class="sg"><span class="sg-k">Traffic</span><span class="in">↓${fmtBytes(bin)}</span> <span class="out">↑${fmtBytes(bout)}</span></span>`;
-  h += `<span class="sg"><span class="sg-k">Version</span>${esc(ver)} · <span class="sg-k">PID</span>${pid} · <span class="sg-k">Uptime</span>${uptime}</span>`;
+  h += `<span class="sg"><span class="sg-k">${t('agents.stats.gateway')}</span><span class="sg-gw">${gw}</span></span>`;
+  h += `<span class="sg"><span class="sg-k">${t('agents.stats.aids')}</span>${aids.length} ${t('agents.stats.total')} · <span class="num-on">${connected} ${t('agents.stats.online')}</span>` +
+    `${offline ? ` · <span class="num-off">${offline} ${t('agents.stats.offline')}</span>` : ''}</span>`;
+  h += `<span class="sg"><span class="sg-k">${t('agents.stats.messages')}</span><span class="in">↓${recv}</span> <span class="out">↑${sent}</span></span>`;
+  h += `<span class="sg"><span class="sg-k">${t('agents.stats.traffic')}</span><span class="in">↓${fmtBytes(bin)}</span> <span class="out">↑${fmtBytes(bout)}</span></span>`;
+  h += `<span class="sg"><span class="sg-k">${t('agents.stats.version')}</span>${esc(ver)} · <span class="sg-k">${t('agents.stats.pid')}</span>${pid} · <span class="sg-k">${t('agents.stats.uptime')}</span>${uptime}</span>`;
   h += '</div>';
   return h;
 }
@@ -493,21 +1031,21 @@ function agentsStatsBar(data, aids, stats) {
 // 操作列 HTML（启用页）：停止/启动 + 清空队列(conditional) + ···(禁用/重载/编辑/md/删除)
 function agentOpsHtml(aid, ag, s) {
   if (_agentOps.has(aid)) {
-    return `<div class="agent-ops agent-ops-busy"><span class="ops-busy-label">${esc(_agentOps.get(aid) || '操作中…')}</span></div>`;
+    return `<div class="agent-ops agent-ops-busy"><span class="ops-busy-label">${esc(_agentOps.get(aid) || t('common.operating'))}</span></div>`;
   }
   const queued = s.queued || 0;
   const running = ag.status === 'running';
   let h = `<div class="agent-ops" data-aid="${esc(aid)}" data-status="${esc(ag.status)}">`;
-  if (running) h += `<button class="ctrl-btn ops-stop" data-op="stop">停止</button>`;
-  else         h += `<button class="ctrl-btn ops-start" data-op="start">启动</button>`;
-  if (queued > 0) h += `<button class="ctrl-btn ops-clear-queue" data-op="clear-queue" title="清空 ${queued} 条待处理消息">清空队列</button>`;
+  if (running) h += `<button class="ctrl-btn ops-stop" data-op="stop">${t('action.stop')}</button>`;
+  else         h += `<button class="ctrl-btn ops-start" data-op="start">${t('action.start')}</button>`;
+  if (queued > 0) h += `<button class="ctrl-btn ops-clear-queue" data-op="clear-queue" title="${t('agents.op.clearQueueTitle').replace('{count}', queued)}">${t('action.clearQueue')}</button>`;
   h += `<div class="ops-more"><button class="ctrl-btn ops-more-btn" data-op="more">···</button>` +
     `<div class="ops-dropdown">` +
-    `<button class="ops-dd-item" data-op="toggle">禁用</button>` +
-    `<button class="ops-dd-item" data-op="reload">重载配置</button>` +
-    `<button class="ops-dd-item" data-op="edit">编辑配置</button>` +
-    `<a class="ops-dd-item" href="https://${esc(aid)}/agent.md" target="_blank" rel="noopener">查看 agent.md ↗</a>` +
-    `<button class="ops-dd-item danger" data-op="delete">删除 Agent</button>` +
+    `<button class="ops-dd-item" data-op="toggle">${t('action.disable')}</button>` +
+    `<button class="ops-dd-item" data-op="reload">${t('action.reload')}</button>` +
+    `<button class="ops-dd-item" data-op="edit">${t('action.edit')}</button>` +
+    `<a class="ops-dd-item" href="https://${esc(aid)}/agent.md" target="_blank" rel="noopener">${t('agents.op.viewAgentMd')}</a>` +
+    `<button class="ops-dd-item danger" data-op="delete">${t('action.delete')}</button>` +
     `</div></div>`;
   h += '</div>';
   return h;
@@ -515,7 +1053,7 @@ function agentOpsHtml(aid, ag, s) {
 
 function renderAgents(data) {
   const el = $('#view-agents');
-  if (!data) { el.innerHTML = '<div class="empty">加载中…</div>'; return; }
+  if (!data) { el.innerHTML = `<div class="empty">${t('common.loading')}</div>`; return; }
   if (el.querySelector('.ops-more.open')) return;
 
   const allAgents = data.agents || [];
@@ -531,27 +1069,27 @@ function renderAgents(data) {
   // 子标签栏
   let html = '<div class="agents-toolbar">' +
     `<div class="ag-subtabs">` +
-    `<button class="ag-subtab${_agSubtab === 'enabled' ? ' active' : ''}" data-subtab="enabled">启用 (${enabledCount})</button>` +
-    `<button class="ag-subtab${_agSubtab === 'disabled' ? ' active' : ''}" data-subtab="disabled">禁用 (${disabledCount})</button>` +
+    `<button class="ag-subtab${_agSubtab === 'enabled' ? ' active' : ''}" data-subtab="enabled">${t('agents.subtitle.enabled')} (${enabledCount})</button>` +
+    `<button class="ag-subtab${_agSubtab === 'disabled' ? ' active' : ''}" data-subtab="disabled">${t('agents.subtitle.disabled')} (${disabledCount})</button>` +
     `</div>` +
-    `<button class="ctrl-btn" id="agent-new-btn">+ 新建</button>` +
+    `<button class="ctrl-btn" id="agent-new-btn">${t('action.new')}</button>` +
     '</div>';
 
   if (!data.daemonRunning) {
-    html += '<div class="banner">⚠ EvolClaw 主进程未运行，仅显示最近活动记录</div>';
+    html += `<div class="banner">${t('agents.daemonStopped')}</div>`;
   }
 
   if (_agSubtab === 'disabled') {
     const disabledAgents = allAgents.filter(ag => ag.status === 'disabled');
     if (!disabledAgents.length) {
-      html += '<div class="empty">暂无禁用 Agent</div>';
+      html += `<div class="empty">${t('agents.empty.disabled')}</div>`;
     } else {
-      html += '<table><thead><tr><th>Agent</th><th>项目路径</th><th>操作</th></tr></thead><tbody>';
+      html += `<table><thead><tr><th>${t('agents.th.agent')}</th><th>${t('agents.th.projectPath')}</th><th>${t('agents.th.operations')}</th></tr></thead><tbody>`;
       for (const ag of disabledAgents) {
         const busy = _agentOps.has(ag.aid);
         const ops = busy
-          ? `<div class="agent-ops agent-ops-busy"><span class="ops-busy-label">${esc(_agentOps.get(ag.aid) || '操作中…')}</span></div>`
-          : `<div class="agent-ops" data-aid="${esc(ag.aid)}" data-status="disabled"><button class="ctrl-btn ops-enable" data-op="toggle">启用</button></div>`;
+          ? `<div class="agent-ops agent-ops-busy"><span class="ops-busy-label">${esc(_agentOps.get(ag.aid) || t('common.operating'))}</span></div>`
+          : `<div class="agent-ops" data-aid="${esc(ag.aid)}" data-status="disabled"><button class="ctrl-btn ops-enable" data-op="toggle">${t('action.enable')}</button></div>`;
         html += `<tr class="ag-main">` +
           `<td><div class="ag-id"><span class="dot off"></span><span class="ag-id-text"><span class="ag-name">${esc(ag.displayName || shortAid(ag.aid))}</span><span class="ag-aid">${esc(ag.aid)}</span></span></div></td>` +
           `<td style="font-size:11px;font-family:monospace">${esc(ag.projectPath || '—')}</td>` +
@@ -573,15 +1111,15 @@ function renderAgents(data) {
   const enabledAgents = allAgents.filter(ag => ag.status !== 'disabled')
     .sort((a, b) => totalMsgs(b) - totalMsgs(a));
   if (!enabledAgents.length) {
-    html += '<div class="empty">暂无启用 Agent</div>';
+    html += `<div class="empty">${t('agents.empty.enabled')}</div>`;
     el.innerHTML = html;
     bindAgentsEvents(el);
     return;
   }
 
   html += '<table><thead><tr>' +
-    '<th>AID</th><th>工作</th><th>队列</th><th>模型</th><th>运行</th><th>收</th><th>发</th>' +
-    '<th>入字节</th><th>出字节</th><th>对端数量</th><th>最后活动</th><th>操作</th>' +
+    `<th>${t('agents.th.aid')}</th><th>${t('agents.th.work')}</th><th>${t('agents.th.queue')}</th><th>${t('agents.th.model')}</th><th>${t('agents.th.runtime')}</th><th>${t('agents.th.received')}</th><th>${t('agents.th.sent')}</th>` +
+    `<th>${t('agents.th.bytesIn')}</th><th>${t('agents.th.bytesOut')}</th><th>${t('agents.th.peerCount')}</th><th>${t('agents.th.lastActivity')}</th><th>${t('agents.th.operations')}</th>` +
     '</tr></thead><tbody>';
 
   for (const ag of enabledAgents) {
@@ -660,17 +1198,17 @@ function groupLabel(g) {
 
 function renderCache(data) {
   const el = $('#view-cache');
-  if (!data) { el.innerHTML = '<div class="empty">加载中…</div>'; return; }
+  if (!data) { el.innerHTML = `<div class="empty">${t('common.loading')}</div>`; return; }
   if (!data.daemonRunning) {
-    el.innerHTML = '<div class="banner">⚠ EvolClaw 主进程未运行，无缓存统计可显示</div>';
+    el.innerHTML = `<div class="banner">${t('cache.daemonStopped')}</div>`;
     return;
   }
   if (!data.supported || !data.stats) {
-    el.innerHTML = '<div class="banner">⚠ 当前 EvolClaw 版本不支持 cache-stats（请升级 daemon）</div>';
+    el.innerHTML = `<div class="banner">${t('cache.notSupported')}</div>`;
     return;
   }
   const s = data.stats;
-  const t = s.totals;
+  const tot = s.totals;
   const occ = s.occupancy || {};
   // 全部组占用合计
   let totalBytes = 0;
@@ -679,23 +1217,23 @@ function renderCache(data) {
   let html = '';
 
   // ① 总览卡片
-  const rate = hitRate(t);
+  const rate = hitRate(tot);
   html += '<div class="cache-cards">';
-  html += card('命中率', fmtPct(rate), rateCls(rate), `${fmtNum(t.hits)} 命中 / ${fmtNum(t.misses)} 未命中`);
-  html += card('读取总数', fmtNum(t.gets), '', `${fmtNum(t.hits)} hit · ${fmtNum(t.misses)} miss`);
-  html += card('缓存条目', fmtNum(s.size), '', fmtBytes(totalBytes) + ' 近似内存');
-  html += card('stat 检查', fmtNum(t.statChecks), '', 'mtime 策略每读一次');
-  html += card('重读', fmtNum(t.reReads), '', '带外改后自动重读');
-  html += card('驱逐', fmtNum(t.evictions), t.evictions ? 'idle' : '', 'LRU 超限');
-  html += card('失效', fmtNum(t.invalidations), '', 'reload/单刷清除');
-  html += card('统计起始', fmtAgo(s.since) + ' 前', '', fmtTime(s.since));
+  html += card(t('cache.card.hitRate'), fmtPct(rate), rateCls(rate), `${fmtNum(tot.hits)} ${t('cache.card.hit')} / ${fmtNum(tot.misses)} ${t('cache.card.miss')}`);
+  html += card(t('cache.card.reads'), fmtNum(tot.gets), '', `${fmtNum(tot.hits)} ${t('cache.card.hit')} · ${fmtNum(tot.misses)} ${t('cache.card.miss')}`);
+  html += card(t('cache.card.entries'), fmtNum(s.size), '', fmtBytes(totalBytes) + ' ' + t('cache.card.memory'));
+  html += card(t('cache.card.statChecks'), fmtNum(tot.statChecks), '', 'mtime ' + t('cache.policy.mtime'));
+  html += card(t('cache.card.reReads'), fmtNum(tot.reReads), '', t('cache.policy.manual'));
+  html += card(t('cache.card.evictions'), fmtNum(tot.evictions), tot.evictions ? 'idle' : '', 'LRU');
+  html += card(t('cache.card.invalidations'), fmtNum(tot.invalidations), '', 'reload');
+  html += card(t('cache.card.since'), fmtAgo(s.since) + ' ' + t('cache.card.ago'), '', fmtTime(s.since));
   html += '</div>';
 
   // ② 按 group 表（每组命中率 + 占用 + 容量水位）
-  html += '<h3 class="cache-h">按缓存组</h3>';
+  html += `<h3 class="cache-h">${t('cache.section.byGroup')}</h3>`;
   html += '<table><thead><tr>' +
-    '<th>组</th><th>类型</th><th>读取</th><th>命中</th><th>未命中</th><th>命中率</th>' +
-    '<th>重读</th><th>驱逐</th><th>条目</th><th>内存</th><th>容量</th>' +
+    `<th>${t('cache.th.group')}</th><th>${t('cache.th.type')}</th><th>${t('cache.th.reads')}</th><th>${t('cache.th.hits')}</th><th>${t('cache.th.misses')}</th><th>${t('cache.th.hitRate')}</th>` +
+    `<th>${t('cache.th.reReads')}</th><th>${t('cache.th.evictions')}</th><th>${t('cache.th.entries')}</th><th>${t('cache.th.memory')}</th><th>${t('cache.th.capacity')}</th>` +
     '</tr></thead><tbody>';
   const groups = Object.keys(s.byGroup).sort((a, b) => (s.byGroup[b].gets || 0) - (s.byGroup[a].gets || 0));
   for (const g of groups) {
@@ -721,11 +1259,15 @@ function renderCache(data) {
   html += '</tbody></table>';
 
   // ③ 按 policy 表
-  html += '<h3 class="cache-h">按策略</h3>';
+  html += `<h3 class="cache-h">${t('cache.section.byPolicy')}</h3>`;
   html += '<table><thead><tr>' +
-    '<th>策略</th><th>读取</th><th>命中</th><th>未命中</th><th>命中率</th><th>stat 检查</th><th>重读</th>' +
+    `<th>${t('cache.th.policy')}</th><th>${t('cache.th.reads')}</th><th>${t('cache.th.hits')}</th><th>${t('cache.th.misses')}</th><th>${t('cache.th.hitRate')}</th><th>${t('cache.th.statChecks')}</th><th>${t('cache.th.reReads')}</th>` +
     '</tr></thead><tbody>';
-  const POLICY_DESC = { 'on-reload': '靠 reload 刷新，平时零检查', 'manual': '显式单刷', 'mtime': '每读 statSync 门控' };
+  const POLICY_DESC = {
+    'on-reload': t('cache.policy.onReload'),
+    'manual': t('cache.policy.manual'),
+    'mtime': t('cache.policy.mtime')
+  };
   for (const pol of ['on-reload', 'mtime', 'manual']) {
     const c = s.byPolicy[pol];
     if (!c || !c.gets) continue;
@@ -739,8 +1281,7 @@ function renderCache(data) {
   }
   html += '</tbody></table>';
 
-  html += '<div class="cache-note">注：config/defaults 与关系级 preferences 的读取也已并入本统计；' +
-    '渲染后结果（按 vars）不缓存，故不在此列。</div>';
+  html += `<div class="cache-note">${t('cache.note')}</div>`;
 
   el.innerHTML = html;
 }
@@ -761,7 +1302,7 @@ function renderMsg(data) {
   const messages = data.messages || [];
 
   // 左：AID 列表
-  let aidsHtml = '<div class="col-title">AID</div>';
+  let aidsHtml = `<div class="col-title">${t('messages.colTitle.aid')}</div>`;
   for (const a of aids) {
     const sel = a.aid === msgSel.aid ? ' sel' : '';
     aidsHtml += `<div class="list-item${sel}" data-aid="${esc(a.aid)}">` +
@@ -774,10 +1315,10 @@ function renderMsg(data) {
   });
 
   // 中：对端列表
-  let peersHtml = '<div class="col-title">Peers</div>';
+  let peersHtml = `<div class="col-title">${t('messages.colTitle.peers')}</div>`;
   if (msgSel.aid) {
     const allSel = msgSel.peer === null ? ' sel' : '';
-    peersHtml += `<div class="list-item${allSel}" data-peer=""><div class="name">All</div>` +
+    peersHtml += `<div class="list-item${allSel}" data-peer=""><div class="name">${t('messages.colTitle.all')}</div>` +
       `<div class="sub">${peers.length} peers</div></div>`;
     for (const p of peers) {
       const sel = p.peerId === msgSel.peer ? ' sel' : '';
@@ -786,7 +1327,7 @@ function renderMsg(data) {
         `<div class="sub">↓${p.inbound} ↑${p.outbound} · ${fmtAgo(p.lastAt)}</div></div>`;
     }
   } else {
-    peersHtml += '<div class="empty">← 选择一个 AID</div>';
+    peersHtml += `<div class="empty">${t('messages.empty.selectAid')}</div>`;
   }
   $('#msg-peers').innerHTML = peersHtml;
   $('#msg-peers').querySelectorAll('.list-item').forEach(item => {
@@ -795,7 +1336,7 @@ function renderMsg(data) {
 
   // 右：消息流
   const stream = $('#msg-stream');
-  if (!msgSel.aid) { stream.innerHTML = '<div class="empty">选择 AID 查看消息</div>'; return; }
+  if (!msgSel.aid) { stream.innerHTML = `<div class="empty">${t('messages.empty.selectToView')}</div>`; return; }
   const atBottom = stream.scrollHeight - stream.scrollTop - stream.clientHeight < 60;
   let msgHtml = '';
   for (const m of messages) {
@@ -803,19 +1344,19 @@ function renderMsg(data) {
     const arrow = m.dir === 'in' ? '↓' : '↑';
     const from = shortAid(m.from), to = shortAid(m.to);
     const tags = [];
-    if (m.chatType === 'group') tags.push('群聊');
+    if (m.chatType === 'group') tags.push(t('messages.tag.group'));
     // 消息详情流的 kind 来自 jsonl 的 msgType（text/thought/image/file/command），
     // 与 agents 页内存态的 MsgKind（send/thought/inject/notify）不是同一套词汇。
     const mt = MSG_TYPE_META[m.msgType];
-    if (mt) tags.push(`${mt.icon}${mt.label}`);
-    if (m.encrypt != null) tags.push(m.encrypt ? '🔒密文' : '明文');
-    if (m.chatmode) tags.push(m.chatmode === 'proactive' ? '自主' : (m.chatmode === 'inject' ? '注入' : '响应'));
-    const tagHtml = tags.map(t => `<span class="tag">${esc(t)}</span>`).join('');
+    if (mt) tags.push(`${mt.icon}${mt.label()}`);
+    if (m.encrypt != null) tags.push(m.encrypt ? t('messages.tag.encrypted') : t('messages.tag.plain'));
+    if (m.chatmode) tags.push(m.chatmode === 'proactive' ? t('messages.tag.proactive') : (m.chatmode === 'inject' ? t('messages.tag.inject') : t('messages.tag.responsive')));
+    const tagHtml = tags.map(tag => `<span class="tag">${esc(tag)}</span>`).join('');
     msgHtml += `<div class="bubble ${cls}">` +
       `<div class="meta">${fmtTime(m.ts)} ${arrow} ${esc(from)}→${esc(to)}${tagHtml}</div>` +
       `<div class="body">${esc(m.content)}</div></div>`;
   }
-  stream.innerHTML = msgHtml || '<div class="empty">暂无消息</div>';
+  stream.innerHTML = msgHtml || `<div class="empty">${t('messages.empty.noMessages')}</div>`;
   if (atBottom) stream.scrollTop = stream.scrollHeight;
 }
 
@@ -1107,8 +1648,8 @@ function setAgentOp(aid, label) {
   if (ag.status === 'disabled') {
     // 禁用页：只有启用按钮 / 操作中态
     cell.innerHTML = _agentOps.has(aid)
-      ? `<div class="agent-ops agent-ops-busy"><span class="ops-busy-label">${esc(_agentOps.get(aid) || '操作中…')}</span></div>`
-      : `<div class="agent-ops" data-aid="${esc(aid)}" data-status="disabled"><button class="ctrl-btn ops-enable" data-op="toggle">启用</button></div>`;
+      ? `<div class="agent-ops agent-ops-busy"><span class="ops-busy-label">${esc(_agentOps.get(aid) || t('common.operating'))}</span></div>`
+      : `<div class="agent-ops" data-aid="${esc(aid)}" data-status="disabled"><button class="ctrl-btn ops-enable" data-op="toggle">${t('action.enable')}</button></div>`;
   } else {
     const statsByAid = {};
     for (const s of (state.agents.stats || [])) statsByAid[s.aid] = s;
@@ -1178,29 +1719,29 @@ async function withAgentOp(aid, label, fn) {
 }
 
 async function agentOpReload(aid, force = false) {
-  await withAgentOp(aid, '重载中…', async () => {
+  await withAgentOp(aid, t('agents.op.reloading'), async () => {
     const r = mResp(await menuSend({ type: 'menu.action', name: 'agent', action: 'reload', args: { aid, force } }));
     if (r.error?.code === 'BUSY') {
-      if (confirm(r.error.message + '\n确认强制重载？')) { setAgentOp(aid, null); return agentOpReload(aid, true); }
+      if (confirm(r.error.message + '\n' + t('agents.op.confirmReload'))) { setAgentOp(aid, null); return agentOpReload(aid, true); }
       return;
     }
     if (r.error) { toast(r.error.message || r.error.code, true); return; }
-    toast('✓ 已重载');
+    toast(t('agents.op.reloaded'));
     subscribe('agents', {});
   });
 }
 
 async function agentOpToggle(aid, status) {
   const action = status === 'disabled' ? 'enable' : 'disable';
-  const label = action === 'disable' ? '禁用中…' : '启用中…';
+  const label = action === 'disable' ? t('agents.op.disabling') : t('agents.op.enabling');
   await withAgentOp(aid, label, async () => {
     const r = mResp(await menuSend({ type: 'menu.action', name: 'agent', action, args: { aid } }));
     if (r.error?.code === 'BUSY') {
-      if (confirm(r.error.message + `\n确认强制${action === 'disable' ? '禁用' : '启用'}？`)) {
+      if (confirm(r.error.message + `\n${t('agents.op.confirmToggle')}${action === 'disable' ? t('action.disable') : t('action.enable')}？`)) {
         const r2 = mResp(await menuSend({ type: 'menu.action', name: 'agent', action, args: { aid, force: true } }));
         if (r2.error) toast(r2.error.message || r2.error.code, true);
         else {
-          toast(`✓ 已${action === 'disable' ? '禁用' : '启用'}`);
+          toast(action === 'disable' ? t('agents.op.disabled') : t('agents.op.enabled'));
           // 禁用后立即切到禁用页；启用后等数据刷新（agent 需先完成启动才移到启用页）
           if (action === 'disable') _agSubtab = 'disabled';
           subscribe('agents', {});
@@ -1209,55 +1750,55 @@ async function agentOpToggle(aid, status) {
       return;
     }
     if (r.error) { toast(r.error.message || r.error.code, true); return; }
-    toast(`✓ 已${action === 'disable' ? '禁用' : '启用'}`);
+    toast(action === 'disable' ? t('agents.op.disabled') : t('agents.op.enabled'));
     if (action === 'disable') _agSubtab = 'disabled';
     subscribe('agents', {});
   });
 }
 
 async function agentOpDelete(aid) {
-  if (!confirm(`删除 Agent ${aid}？\n此操作不可恢复。`)) return;
+  if (!confirm(t('agents.op.confirmDelete').replace('{aid}', aid))) return;
   const purge = confirm('同时清除 agent 数据目录？');
-  await withAgentOp(aid, '删除中…', async () => {
+  await withAgentOp(aid, t('agents.op.deleting'), async () => {
     const r = mResp(await menuSend({ type: 'menu.action', name: 'agent', action: 'delete', args: { aid, purge } }));
     if (r.error?.code === 'BUSY') {
-      if (confirm(r.error.message + '\n确认强制删除？')) {
+      if (confirm(r.error.message + '\n' + t('agents.op.confirmForceDelete'))) {
         const r2 = mResp(await menuSend({ type: 'menu.action', name: 'agent', action: 'delete', args: { aid, purge, force: true } }));
         if (r2.error) toast(r2.error.message || r2.error.code, true);
-        else { toast('✓ 已删除'); subscribe('agents', {}); }
+        else { toast(t('agents.op.deleted')); subscribe('agents', {}); }
       }
       return;
     }
     if (r.error) { toast(r.error.message || r.error.code, true); return; }
-    toast('✓ 已删除');
+    toast(t('agents.op.deleted'));
     subscribe('agents', {});
   });
 }
 
 async function agentOpClearQueue(aid) {
-  if (!confirm(`清空 ${aid} 的待处理消息队列？`)) return;
-  await withAgentOp(aid, '清空中…', async () => {
+  if (!confirm(t('agents.op.confirmClearQueue').replace('{aid}', aid))) return;
+  await withAgentOp(aid, t('common.operating'), async () => {
     const r = mResp(await menuSend({ type: 'menu.action', name: 'agent', action: 'queue-clear', args: { aid } }));
     if (r.error) { toast(r.error.message || r.error.code, true); return; }
-    toast(`✓ 已清空 ${r.data?.cleared ?? 0} 条待处理消息`);
+    toast(`✓ ${r.data?.cleared ?? 0} messages cleared`);
     subscribe('agents', {});
   });
 }
 
 async function agentOpStop(aid) {
-  await withAgentOp(aid, '停止中…', async () => {
+  await withAgentOp(aid, t('agents.op.stopping'), async () => {
     const r = mResp(await menuSend({ type: 'menu.action', name: 'agent', action: 'stop', args: { aid } }));
     if (r.error) { toast(r.error.message || r.error.code, true); return; }
-    toast('✓ 已停止');
+    toast(t('agents.op.stopped'));
     subscribe('agents', {});
   });
 }
 
 async function agentOpStart(aid) {
-  await withAgentOp(aid, '启动中…', async () => {
+  await withAgentOp(aid, t('agents.op.starting'), async () => {
     const r = mResp(await menuSend({ type: 'menu.action', name: 'agent', action: 'start', args: { aid } }));
     if (r.error) { toast(r.error.message || r.error.code, true); return; }
-    toast('✓ 已启动');
+    toast(t('agents.op.started'));
     subscribe('agents', {});
   });
 }
@@ -1296,7 +1837,7 @@ async function agentOpNew() {
 }
 
 async function agentOpEdit(aid) {
-  await withAgentOp(aid, '查询中…', async () => {
+  await withAgentOp(aid, t('common.operating'), async () => {
     const qr = await menuSend({ type: 'menu.query', name: 'agent', args: { aid } });
     const q = mResp(qr);
     if (q.error) { toast(q.error.message || q.error.code, true); return; }
@@ -1308,10 +1849,10 @@ async function agentOpEdit(aid) {
     if (projectRaw !== null) patch.projects = { defaultPath: projectRaw };
     if (ownersRaw !== null) patch.owners = ownersRaw.split(',').map(s => s.trim()).filter(Boolean);
     if (!Object.keys(patch).length) return;
-    setAgentOp(aid, '保存中…');
+    setAgentOp(aid, t('common.operating'));
     const r = mResp(await menuSend({ type: 'menu.action', name: 'agent', action: 'update', args: { aid, patch } }));
     if (r.error) toast(r.error.message || r.error.code, true);
-    else toast('✓ 配置已保存，点「重载」生效');
+    else toast(t('agents.op.saved'));
   });
 }
 
@@ -2393,149 +2934,421 @@ function initTheme() {
       ['_monCpu', '_monMem', '_monMsg', '_monErr'].forEach(function (k) {
         if (window[k]) { window[k].dispose(); window[k] = null; }
       });
-      loadUsageDashboard();
       if (currentView === 'monitor') renderMonitor(state.monitor);
     };
   }
 }
 
-// ── Usage Dashboard ──
-let _hourlyChart = null;
-let _modelChart = null;
-
+// ── Usage 相关函数 ──
 function fmtTokens(n) {
   if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
   if (n >= 1e3) return (n / 1e3).toFixed(1) + 'k';
   return String(n);
 }
 
-async function loadUsageDashboard() {
+// ── Usage Overview（总览，支持日期范围筛选）──
+let _ovCurrentRange = 'today'; // 当前选择的范围
+
+async function loadUsageOverview(rangeType, customFrom, customTo) {
+  rangeType = rangeType || _ovCurrentRange;
+  _ovCurrentRange = rangeType;
+
+  // 计算日期范围
+  let fromTs, toTs;
+  const now = new Date();
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const todayEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999).getTime();
+
+  switch (rangeType) {
+    case 'today':
+      fromTs = todayStart;
+      toTs = todayEnd;
+      break;
+    case 'week': // 本周（周一到今天）
+      const dayOfWeek = now.getDay() || 7; // 周日=7
+      const weekStart = new Date(todayStart - (dayOfWeek - 1) * 86400000);
+      fromTs = weekStart.getTime();
+      toTs = todayEnd;
+      break;
+    case 'lastWeek': // 上周（上周一到上周日）
+      const lastWeekEnd = new Date(todayStart - now.getDay() * 86400000);
+      const lastWeekStart = new Date(lastWeekEnd.getTime() - 6 * 86400000);
+      fromTs = lastWeekStart.getTime();
+      toTs = new Date(lastWeekEnd.getTime() + 86400000 - 1).getTime();
+      break;
+    case 'month': // 本月
+      const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+      fromTs = monthStart.getTime();
+      toTs = todayEnd;
+      break;
+    case 'last30': // 最近30天
+      fromTs = todayStart - 29 * 86400000;
+      toTs = todayEnd;
+      break;
+    case 'custom': // 自定义
+      if (customFrom && customTo) {
+        // 支持 datetime-local 输入，直接解析时间戳
+        fromTs = new Date(customFrom).getTime();
+        toTs = new Date(customTo).getTime();
+      } else {
+        fromTs = todayStart;
+        toTs = todayEnd;
+      }
+      break;
+    default:
+      fromTs = null;
+      toTs = null;
+  }
+
+  // 保存当前时间范围到全局变量，供详细统计使用
+  window._currentOverviewTimeRange = { fromTs, toTs, rangeType, customFrom, customTo };
+
   let data;
   try {
-    const resp = await fetch(apiUrl('api/stats/dashboard'), {
-      headers: { Authorization: 'Bearer ' + localStorage.getItem(TOKEN_KEY) }
-    });
-    if (!resp.ok) data = null;
-    else data = await resp.json();
-  } catch { data = null; }
+    const params = new URLSearchParams();
+    if (fromTs) params.set('from', String(fromTs));
+    if (toTs) params.set('to', String(toTs));
 
-  // 无数据时渲染默认空状态
-  const t = (data && data.today) ? data.today : { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_hit_rate: 0, call_count: 0 };
-  var cards = $('#usage-cards');
-  if (cards) {
-    cards.innerHTML =
-      '<div class="usage-card"><div class="card-value">' + fmtTokens(t.input_tokens) + '</div><div class="card-label">Input</div></div>' +
-      '<div class="usage-card"><div class="card-value">' + fmtTokens(t.output_tokens) + '</div><div class="card-label">Output</div></div>' +
-      '<div class="usage-card"><div class="card-value">' + fmtTokens(t.cache_read_tokens) + '</div><div class="card-label">Cache Read</div></div>' +
-      '<div class="usage-card"><div class="card-value">' + (t.cache_hit_rate * 100).toFixed(1) + '%</div><div class="card-label">Cache Hit</div></div>' +
-      '<div class="usage-card"><div class="card-value">' + t.call_count + '</div><div class="card-label">Calls</div></div>';
-  }
-
-  // Hourly stacked bar
-  var hourlyEl = $('#usage-hourly-chart');
-  if (hourlyEl && data.hourly && data.hourly.length) {
-    var isDark = document.documentElement.getAttribute('data-theme') === 'dark';
-    if (!_hourlyChart) _hourlyChart = echarts.init(hourlyEl, isDark ? 'dark' : null);
-    var hours = data.hourly.map(function(h) { return (h.hour.split(' ')[1] || h.hour); });
-    _hourlyChart.setOption({
-      tooltip: { trigger: 'axis' },
-      legend: { data: ['Input', 'Output', 'Cache'], top: 0, textStyle: { fontSize: 11 } },
-      grid: { top: 30, bottom: 24, left: 50, right: 16 },
-      xAxis: { type: 'category', data: hours, axisLabel: { fontSize: 10 } },
-      yAxis: { type: 'value', axisLabel: { formatter: function(v) { return fmtTokens(v); } } },
-      series: [
-        { name: 'Input', type: 'bar', stack: 'tokens', data: data.hourly.map(function(h) { return h.input_tokens; }), itemStyle: { color: '#4f6ef7' } },
-        { name: 'Output', type: 'bar', stack: 'tokens', data: data.hourly.map(function(h) { return h.output_tokens; }), itemStyle: { color: '#38a169' } },
-        { name: 'Cache', type: 'bar', stack: 'tokens', data: data.hourly.map(function(h) { return h.cache_read_tokens; }), itemStyle: { color: '#dd6b20', opacity: 0.6 } },
-      ]
-    });
-  }
-
-  // Model pie
-  var modelEl = $('#usage-model-chart');
-  if (modelEl && data.top_models && data.top_models.length) {
-    var isDark2 = document.documentElement.getAttribute('data-theme') === 'dark';
-    if (!_modelChart) _modelChart = echarts.init(modelEl, isDark2 ? 'dark' : null);
-    _modelChart.setOption({
-      tooltip: { trigger: 'item', formatter: '{b}: {c} ({d}%)' },
-      series: [{
-        type: 'pie', radius: ['35%', '70%'], center: ['50%', '55%'],
-        label: { fontSize: 10 },
-        data: data.top_models.map(function(m) { return { name: m.model.split('/').pop(), value: m.total_tokens }; }),
-      }]
-    });
-  }
-
-  // Top peers table
-  var peersEl = $('#usage-top-peers');
-  if (peersEl && data.top_peers && data.top_peers.length) {
-    peersEl.innerHTML =
-      '<thead><tr><th>#</th><th>Peer</th><th>Tokens</th><th>Calls</th></tr></thead>' +
-      '<tbody>' + data.top_peers.map(function(p, i) {
-        return '<tr><td>' + (i + 1) + '</td><td>' + p.peer_key + '</td><td>' + fmtTokens(p.total_tokens) + '</td><td>' + p.call_count + '</td></tr>';
-      }).join('') + '</tbody>';
-  }
-
-}
-
-// ── Usage Overview（全时段总览）──
-async function loadUsageOverview() {
-  let data;
-  try {
-    const resp = await fetch(apiUrl('api/stats/overview'), {
+    const resp = await fetch(apiUrl('api/stats/overview?' + params.toString()), {
       headers: { Authorization: 'Bearer ' + localStorage.getItem(TOKEN_KEY) }
     });
     data = resp.ok ? await resp.json() : null;
   } catch { data = null; }
 
   const ts = (data && data.token_stats && data.token_stats.all_time) ? data.token_stats.all_time
-    : { input_tokens: 0, output_tokens: 0, cache_creation_tokens: 0, cache_read_tokens: 0, call_count: 0, cost_usd: 0, cost_cny: 0 };
+    : { input_tokens: 0, output_tokens: 0, cache_creation_tokens: 0, cache_read_tokens: 0, call_count: 0, cost_official_usd: 0, cost_official_cny: 0, cost_usd: 0, cost_cny: 0 };
   const sessionCount = (data && data.session_count) || 0;
   const msgIn = (data && data.msg_in) || 0;
   const msgOut = (data && data.msg_out) || 0;
-  const totalIn = ts.input_tokens + ts.cache_read_tokens;
-  const hitRate = totalIn > 0 ? (ts.cache_read_tokens / totalIn) * 100 : 0;
+  // 新的缓存命中率计算规则：缓存命中 / (缓存命中 + 缓存写入 + 输入token + 输出token)
+  const totalTokens = ts.cache_read_tokens + ts.cache_creation_tokens + ts.input_tokens + ts.output_tokens;
+  const hitRate = totalTokens > 0 ? (ts.cache_read_tokens / totalTokens) * 100 : 0;
 
   const cardsEl = $('#ov-cards');
   if (cardsEl) {
-    cardsEl.innerHTML = [
-      ovCard(sessionCount, '会话数'),
-      ovCard(msgIn, '收到消息'),
-      ovCard(msgOut, '发出消息'),
-      ovCard(ts.call_count, '模型调用'),
-      ovCard(fmtTokens(ts.input_tokens), '输入 Token'),
-      ovCard(fmtTokens(ts.output_tokens), '输出 Token'),
-      ovCard(fmtTokens(ts.cache_creation_tokens), '缓存创建'),
-      ovCard(fmtTokens(ts.cache_read_tokens), '缓存命中'),
-      ovCard(hitRate.toFixed(1) + '%', '缓存命中率'),
-      ovCard(fmtCost(ts.cost_usd, ts.cost_cny), '总花费'),
-    ].join('');
+    // 合并相关信息到大卡片中
+    const sessionCard = makeMultiValueCard([
+      { label: t('usage.card.sessionCount'), value: sessionCount },
+      { label: t('usage.card.msgIn'), value: msgIn },
+      { label: t('usage.card.msgOut'), value: msgOut }
+    ], t('usage.card.sessionInfo'), 'session-group');
+
+    const usageCard = makeMultiValueCard([
+      { label: t('usage.card.modelCalls'), value: ts.call_count },
+      { label: t('usage.card.inputTokens'), value: fmtTokens(ts.input_tokens) },
+      { label: t('usage.card.outputTokens'), value: fmtTokens(ts.output_tokens) },
+      { label: t('usage.card.cacheCreation'), value: fmtTokens(ts.cache_creation_tokens) },
+      { label: t('usage.card.cacheHitTokens'), value: fmtTokens(ts.cache_read_tokens) },
+      { label: t('usage.card.cacheHitRate'), value: hitRate.toFixed(1) + '%' }
+    ], t('usage.card.usageInfo'), 'usage-group');
+
+    const costCard = makeMultiValueCard([
+      { label: t('usage.card.costOfficial'), value: fmtCost(ts.cost_official_usd, ts.cost_official_cny) },
+      { label: t('usage.card.costGateway'), value: fmtCost(ts.cost_usd, ts.cost_cny) }
+    ], t('usage.card.costInfo'), 'cost-group');
+
+    cardsEl.innerHTML = sessionCard + usageCard + costCard;
   }
 
   const agentTbl = $('#ov-agent-table');
   const agents = (data && data.token_stats && data.token_stats.by_agent) || [];
   if (agentTbl) {
     if (!agents.length) {
-      agentTbl.innerHTML = '<tbody><tr><td>暂无数据</td></tr></tbody>';
+      agentTbl.innerHTML = '<tbody><tr><td>' + t('usage.overview.noData') + '</td></tr></tbody>';
     } else {
       agentTbl.innerHTML =
-        '<thead><tr><th>Agent</th><th>调用</th><th>输入</th><th>输出</th><th>缓存创建</th><th>缓存命中</th><th>花费</th></tr></thead>' +
+        '<thead><tr><th>' + t('usage.overview.th.agent') + '</th><th>' + t('usage.overview.th.calls') + '</th><th>' + t('usage.overview.th.input') + '</th><th>' + t('usage.overview.th.output') + '</th><th>' + t('usage.overview.th.cacheCreation') + '</th><th>' + t('usage.overview.th.cacheHit') + '</th><th>' + t('usage.overview.th.cacheHitRate') + '</th><th>' + t('usage.overview.th.costOfficial') + '</th><th>' + t('usage.overview.th.costGateway') + '</th></tr></thead>' +
         '<tbody>' + agents.map(function(a) {
-          var name = a.agent_aid ? a.agent_aid.split('.')[0] : '(unknown)';
+          var name = a.agent_name || (a.agent_aid ? a.agent_aid.split('.')[0] : '(unknown)');
+          // 计算缓存命中率
+          var totalTokens = (a.cache_read_tokens || 0) + (a.cache_creation_tokens || 0) + (a.input_tokens || 0) + (a.output_tokens || 0);
+          var hitRate = totalTokens > 0 ? ((a.cache_read_tokens || 0) / totalTokens * 100).toFixed(1) : '0.0';
+
           return '<tr><td title="' + esc(a.agent_aid) + '">' + esc(name) + '</td>' +
             '<td>' + a.call_count + '</td>' +
             '<td>' + fmtTokens(a.input_tokens) + '</td>' +
             '<td>' + fmtTokens(a.output_tokens) + '</td>' +
             '<td>' + fmtTokens(a.cache_creation_tokens) + '</td>' +
             '<td>' + fmtTokens(a.cache_read_tokens) + '</td>' +
-            '<td>' + fmtCost(a.cost_usd, a.cost_cny) + '</td></tr>';
+            '<td>' + hitRate + '%</td>' +
+            '<td>' + fmtCostSplit(a.cost_official_usd, a.cost_official_cny) + '</td>' +
+            '<td>' + fmtCostSplit(a.cost_usd, a.cost_cny) + '</td></tr>';
         }).join('') + '</tbody>';
     }
   }
+
+  // 保存总览数据供详细统计使用
+  window._currentOverviewData = { ts, sessionCount, msgIn, msgOut, hitRate };
 }
 
-function ovCard(value, label) {
-  return '<div class="usage-card"><div class="card-value">' + value + '</div><div class="card-label">' + label + '</div></div>';
+function initOverviewFilters() {
+  // 范围按钮切换
+  document.querySelectorAll('.ov-range-btn').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      document.querySelectorAll('.ov-range-btn').forEach(function(b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+
+      const range = btn.getAttribute('data-range');
+      const customDateEl = $('#ov-custom-date');
+
+      if (range === 'custom') {
+        if (customDateEl) customDateEl.style.display = 'flex';
+      } else {
+        if (customDateEl) customDateEl.style.display = 'none';
+        loadUsageOverview(range);
+      }
+    });
+  });
+
+  // 自定义日期查询按钮
+  const queryBtn = $('#ov-query-btn');
+  if (queryBtn) {
+    queryBtn.addEventListener('click', function() {
+      const fromEl = $('#ov-from');
+      const toEl = $('#ov-to');
+      if (fromEl && toEl && fromEl.value && toEl.value) {
+        loadUsageOverview('custom', fromEl.value, toEl.value);
+      }
+    });
+  }
+
+  // 设置默认日期为最近7天
+  const now = new Date();
+  const from = new Date(now.getTime() - 6 * 86400000);
+  const fromEl = $('#ov-from');
+  const toEl = $('#ov-to');
+  if (fromEl) fromEl.value = formatDatetimeLocal(from);
+  if (toEl) toEl.value = formatDatetimeLocal(now);
+
+  // 初始化明细查询
+  initDetailQuery();
+}
+
+// 格式化为 datetime-local 输入框的格式 (YYYY-MM-DDTHH:mm)
+function formatDatetimeLocal(date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  const hours = String(date.getHours()).padStart(2, '0');
+  const minutes = String(date.getMinutes()).padStart(2, '0');
+  return `${year}-${month}-${day}T${hours}:${minutes}`;
+}
+
+// 模型访问明细查询
+function initDetailQuery() {
+  // 填充Agent选择器
+  loadDetailAgentList();
+
+  // 绑定分页大小变化
+  const pageSizeEl = $('#detail-page-size');
+  if (pageSizeEl) {
+    pageSizeEl.addEventListener('change', function() {
+      // 重置到第一页并查询
+      const pageEl = $('#detail-page');
+      if (pageEl) pageEl.value = '1';
+      queryDetailUsage();
+    });
+  }
+
+  // 绑定上一页/下一页按钮
+  const prevBtn = $('#detail-prev-page');
+  const nextBtn = $('#detail-next-page');
+  if (prevBtn) {
+    prevBtn.addEventListener('click', function() {
+      const pageEl = $('#detail-page');
+      if (pageEl && Number(pageEl.value) > 1) {
+        pageEl.value = String(Number(pageEl.value) - 1);
+        queryDetailUsage();
+      }
+    });
+  }
+  if (nextBtn) {
+    nextBtn.addEventListener('click', function() {
+      const pageEl = $('#detail-page');
+      if (pageEl) {
+        pageEl.value = String(Number(pageEl.value) + 1);
+        queryDetailUsage();
+      }
+    });
+  }
+
+  // 绑定页码输入框回车事件
+  const pageEl = $('#detail-page');
+  if (pageEl) {
+    pageEl.addEventListener('keypress', function(e) {
+      if (e.key === 'Enter') {
+        queryDetailUsage();
+      }
+    });
+  }
+
+  // 绑定Agent选择器变化事件
+  const agentEl = $('#detail-agent');
+  if (agentEl) {
+    agentEl.addEventListener('change', function() {
+      const pageEl = $('#detail-page');
+      if (pageEl) pageEl.value = '1';
+      queryDetailUsage();
+    });
+  }
+}
+
+async function loadDetailAgentList() {
+  try {
+    const resp = await fetch(apiUrl('api/stats/agents'), {
+      headers: { Authorization: 'Bearer ' + localStorage.getItem(TOKEN_KEY) }
+    });
+    if (!resp.ok) return;
+    const agents = await resp.json();
+
+    const selectEl = $('#detail-agent');
+    if (selectEl && agents.length) {
+      agents.forEach(function(a) {
+        const option = document.createElement('option');
+        option.value = a.agent_aid;
+        // 优先显示agent_name，没有则显示aid前缀
+        option.textContent = a.agent_name || a.agent_aid.split('.')[0];
+        selectEl.appendChild(option);
+      });
+      // 默认选中第一个agent
+      if (agents.length > 0) {
+        selectEl.value = agents[0].agent_aid;
+      }
+      // 加载完成后自动查询一次
+      queryDetailUsage();
+    }
+  } catch {}
+}
+
+async function queryDetailUsage() {
+  // 使用总览的时间范围
+  const timeRange = window._currentOverviewTimeRange || {};
+  const fromTs = timeRange.fromTs;
+  const toTs = timeRange.toTs;
+
+  const agentEl = $('#detail-agent');
+  const pageEl = $('#detail-page');
+  const pageSizeEl = $('#detail-page-size');
+
+  const page = pageEl ? Number(pageEl.value) || 1 : 1;
+  const pageSize = pageSizeEl ? Number(pageSizeEl.value) || 50 : 50;
+  const offset = (page - 1) * pageSize;
+
+  const params = new URLSearchParams();
+  if (fromTs) params.set('from', String(fromTs));
+  if (toTs) params.set('to', String(toTs));
+  if (agentEl && agentEl.value) params.set('agent', agentEl.value);
+  params.set('limit', String(pageSize));
+  params.set('offset', String(offset));
+
+  try {
+    const resp = await fetch(apiUrl('api/stats/detail?' + params.toString()), {
+      headers: { Authorization: 'Bearer ' + localStorage.getItem(TOKEN_KEY) }
+    });
+    if (!resp.ok) {
+      showDetailError(t('usage.detail.error'));
+      return;
+    }
+    const result = await resp.json();
+    renderDetailTable(result.data, result.total, page, pageSize);
+  } catch {
+    showDetailError(t('usage.detail.error'));
+  }
+}
+
+function renderDetailTable(data, total, currentPage, pageSize) {
+  const tableEl = $('#detail-table');
+  if (!tableEl) return;
+
+  if (!data || !data.length) {
+    tableEl.innerHTML = '<tbody><tr><td colspan="10" style="text-align:center;color:var(--dim)">' + t('usage.explorer.noData') + '</td></tr></tbody>';
+    updatePaginationInfo(0, currentPage, pageSize);
+    return;
+  }
+
+  const html = '<thead><tr>' +
+    '<th>' + t('usage.detail.th.time') + '</th>' +
+    '<th>' + t('usage.detail.th.agent') + '</th>' +
+    '<th>' + t('usage.detail.th.peer') + '</th>' +
+    '<th>' + t('usage.detail.th.model') + '</th>' +
+    '<th>' + t('usage.detail.th.input') + '</th>' +
+    '<th>' + t('usage.detail.th.output') + '</th>' +
+    '<th>' + t('usage.detail.th.cacheCreation') + '</th>' +
+    '<th>' + t('usage.detail.th.cacheRead') + '</th>' +
+    '<th>' + t('usage.detail.th.costOfficial') + '</th>' +
+    '<th>' + t('usage.detail.th.costGateway') + '</th>' +
+    '</tr></thead><tbody>' +
+    data.map(function(row) {
+      const time = new Date(row.ts).toLocaleString();
+      const agentName = row.agent_name || (row.agent_aid || '').split('.')[0];
+      const peerName = (row.peer_key || '').replace(/^aun#/, '').split('.')[0];
+      return '<tr>' +
+        '<td style="white-space:nowrap">' + time + '</td>' +
+        '<td title="' + esc(row.agent_aid) + '">' + esc(agentName) + '</td>' +
+        '<td title="' + esc(row.peer_key) + '">' + esc(peerName) + '</td>' +
+        '<td>' + esc(row.model || '') + '</td>' +
+        '<td>' + fmtTokens(row.input_tokens || 0) + '</td>' +
+        '<td>' + fmtTokens(row.output_tokens || 0) + '</td>' +
+        '<td>' + fmtTokens(row.cache_creation_tokens || 0) + '</td>' +
+        '<td>' + fmtTokens(row.cache_read_tokens || 0) + '</td>' +
+        '<td>' + fmtCostCompact(row.cost_official_usd, row.cost_official_cny) + '</td>' +
+        '<td>' + fmtCostCompact(row.cost_gateway_usd, row.cost_gateway_cny) + '</td>' +
+        '</tr>';
+    }).join('') +
+    '</tbody>';
+
+  tableEl.innerHTML = html;
+  updatePaginationInfo(total, currentPage, pageSize);
+}
+
+function updatePaginationInfo(total, currentPage, pageSize) {
+  const infoEl = $('#detail-pagination-info');
+  const prevBtn = $('#detail-prev-page');
+  const nextBtn = $('#detail-next-page');
+
+  if (infoEl) {
+    const start = total > 0 ? (currentPage - 1) * pageSize + 1 : 0;
+    const end = Math.min(currentPage * pageSize, total);
+    const totalPages = Math.ceil(total / pageSize) || 1;
+    infoEl.textContent = t('usage.detail.pagination')
+      .replace('{start}', start)
+      .replace('{end}', end)
+      .replace('{total}', total)
+      .replace('{page}', currentPage)
+      .replace('{totalPages}', totalPages);
+  }
+
+  if (prevBtn) prevBtn.disabled = currentPage <= 1;
+  if (nextBtn) nextBtn.disabled = currentPage >= Math.ceil(total / pageSize);
+}
+
+function showDetailError(msg) {
+  const tableEl = $('#detail-table');
+  if (tableEl) {
+    tableEl.innerHTML = '<tbody><tr><td colspan="10" style="text-align:center;color:var(--red)">' + esc(msg) + '</td></tr></tbody>';
+  }
+}
+
+function fmtCostCompact(usd, cny) {
+  var parts = [];
+  if (usd > 0) parts.push('$' + (usd < 0.01 ? usd.toFixed(4) : usd.toFixed(2)));
+  if (cny > 0) parts.push('¥' + (cny < 0.01 ? cny.toFixed(4) : cny.toFixed(2)));
+  if (parts.length === 0) return '-';
+  return parts.join(' / ');
+}
+
+function ovCard(value, label, groupClass) {
+  var cls = 'usage-card' + (groupClass ? ' ' + groupClass : '');
+  return '<div class="' + cls + '"><div class="card-value">' + value + '</div><div class="card-label">' + label + '</div></div>';
+}
+
+// 创建多值卡片（合并多个指标到一个卡片中）
+function makeMultiValueCard(items, title, groupClass) {
+  var cls = 'usage-card multi-value-card' + (groupClass ? ' ' + groupClass : '');
+  var itemsHtml = items.map(function(item) {
+    return '<div class="card-item"><div class="card-item-label">' + item.label + '</div><div class="card-item-value">' + item.value + '</div></div>';
+  }).join('');
+  return '<div class="' + cls + '"><div class="card-title">' + title + '</div><div class="card-items">' + itemsHtml + '</div></div>';
 }
 
 function fmtCost(usd, cny) {
@@ -2543,6 +3356,25 @@ function fmtCost(usd, cny) {
   if (usd > 0) parts.push('$' + (usd < 0.01 ? usd.toFixed(4) : usd.toFixed(2)));
   if (cny > 0) parts.push('¥' + (cny < 0.01 ? cny.toFixed(4) : cny.toFixed(2)));
   return parts.length ? parts.join(' / ') : '$0';
+}
+
+// 分行显示美元和人民币
+function fmtCostSplit(usd, cny) {
+  var parts = [];
+  if (usd > 0) parts.push('$' + (usd < 0.01 ? usd.toFixed(4) : usd.toFixed(2)));
+  if (cny > 0) parts.push('¥' + (cny < 0.01 ? cny.toFixed(4) : cny.toFixed(2)));
+  if (parts.length === 0) return '<span style="color:var(--dim)">$0</span>';
+  if (parts.length === 1) return parts[0];
+  return parts[0] + '<br><span style="font-size:10px;color:var(--dim)">' + parts[1] + '</span>';
+}
+
+// 带标签的价格显示（用于卡片）
+function fmtCostWithLabel(usd, cny, label) {
+  var parts = [];
+  if (usd > 0) parts.push('$' + (usd < 0.01 ? usd.toFixed(4) : usd.toFixed(2)));
+  if (cny > 0) parts.push('¥' + (cny < 0.01 ? cny.toFixed(4) : cny.toFixed(2)));
+  var value = parts.length ? parts.join(' / ') : '$0';
+  return '<div class="card-label" style="margin-bottom:4px;margin-top:0">' + label + '</div><div class="card-value" style="font-size:18px">' + value + '</div>';
 }
 
 // ── Usage subtab switching ──
@@ -2559,89 +3391,324 @@ function initUsageSubtabs() {
       });
       var panel = $('#usage-' + target);
       if (panel) { panel.classList.add('active'); panel.style.display = ''; }
-      if (target === 'overview') loadUsageOverview();
-      else if (target === 'dashboard') loadUsageDashboard();
-      else if (target === 'explorer') initExplorer();
+      if (target === 'overview') {
+        initOverviewFilters();
+        loadUsageOverview();
+      } else if (target === 'explorer') {
+        initExplorer();
+        // 自动加载模型列表和执行查询
+        loadExplorerModels();
+        setTimeout(() => runExplorerQuery(), 100);
+      }
     });
   });
+
+  // 初始化总览页面的过滤器并加载默认数据（今日）
+  initOverviewFilters();
+  loadUsageOverview('today');
 }
 
 // ── Explorer ──
 var _explorerChart = null;
 var _explorerInited = false;
 var _expSelection = { type: null, key: null }; // { type: 'agent'|'peer', key: string } or null
+var _expCurrentRange = 'today'; // Explorer 当前选择的时间范围
+var _expTimeRange = { fromTs: null, toTs: null }; // Explorer 的时间范围
 
 function initExplorer() {
   if (_explorerInited) return;
   _explorerInited = true;
+
+  // 初始化时间范围选择
+  initExplorerTimeFilters();
+
+  // 绑定查询按钮
   var btn = $('#exp-query-btn');
   if (btn) btn.onclick = runExplorerQuery;
-  // Default date range: last 7 days
-  var now = new Date();
-  var from = new Date(now.getTime() - 7 * 86400000);
-  var fromEl = $('#exp-from');
-  var toEl = $('#exp-to');
-  if (fromEl) fromEl.value = from.toISOString().slice(0, 10);
-  if (toEl) toEl.value = now.toISOString().slice(0, 10);
+
   // Load sidebar lists
   loadExplorerSidebar();
+}
+
+// 初始化 Explorer 的时间范围选择
+function initExplorerTimeFilters() {
+  // 范围按钮切换
+  document.querySelectorAll('.exp-range-btn').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      document.querySelectorAll('.exp-range-btn').forEach(function(b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+
+      const range = btn.getAttribute('data-range');
+      const customDateEl = $('#exp-custom-date');
+
+      if (range === 'custom') {
+        if (customDateEl) customDateEl.style.display = 'flex';
+      } else {
+        if (customDateEl) customDateEl.style.display = 'none';
+        _expCurrentRange = range;
+        calculateExplorerTimeRange(range);
+        loadExplorerModels(); // 加载可用模型
+        runExplorerQuery();
+      }
+    });
+  });
+
+  // 自定义时间查询按钮
+  const timeQueryBtn = $('#exp-time-query-btn');
+  if (timeQueryBtn) {
+    timeQueryBtn.addEventListener('click', function() {
+      const fromEl = $('#exp-from');
+      const toEl = $('#exp-to');
+      if (fromEl && toEl && fromEl.value && toEl.value) {
+        _expCurrentRange = 'custom';
+        _expTimeRange.fromTs = new Date(fromEl.value).getTime();
+        _expTimeRange.toTs = new Date(toEl.value).getTime();
+        loadExplorerModels(); // 加载可用模型
+        runExplorerQuery();
+      }
+    });
+  }
+
+  // 设置默认时间范围（今日）并初始化日期选择器
+  const now = new Date();
+  const fromEl = $('#exp-from');
+  const toEl = $('#exp-to');
+  if (fromEl) fromEl.value = formatDatetimeLocal(new Date(now.getFullYear(), now.getMonth(), now.getDate()));
+  if (toEl) toEl.value = formatDatetimeLocal(now);
+
+  // 计算默认时间范围（今日）
+  calculateExplorerTimeRange('today');
+}
+
+// 计算 Explorer 的时间范围
+function calculateExplorerTimeRange(rangeType) {
+  const now = new Date();
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const todayEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999).getTime();
+
+  switch (rangeType) {
+    case 'today':
+      _expTimeRange.fromTs = todayStart;
+      _expTimeRange.toTs = todayEnd;
+      break;
+    case 'week':
+      const dayOfWeek = now.getDay() || 7;
+      const weekStart = new Date(todayStart - (dayOfWeek - 1) * 86400000);
+      _expTimeRange.fromTs = weekStart.getTime();
+      _expTimeRange.toTs = todayEnd;
+      break;
+    case 'lastWeek':
+      const lastWeekEnd = new Date(todayStart - now.getDay() * 86400000);
+      const lastWeekStart = new Date(lastWeekEnd.getTime() - 6 * 86400000);
+      _expTimeRange.fromTs = lastWeekStart.getTime();
+      _expTimeRange.toTs = new Date(lastWeekEnd.getTime() + 86400000 - 1).getTime();
+      break;
+    case 'month':
+      const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+      _expTimeRange.fromTs = monthStart.getTime();
+      _expTimeRange.toTs = todayEnd;
+      break;
+    case 'last30':
+      _expTimeRange.fromTs = todayStart - 29 * 86400000;
+      _expTimeRange.toTs = todayEnd;
+      break;
+  }
+}
+
+// 加载 Explorer 可用的模型列表（根据当前时间范围）
+async function loadExplorerModels() {
+  const params = new URLSearchParams();
+  if (_expTimeRange.fromTs) params.set('from', String(_expTimeRange.fromTs));
+  if (_expTimeRange.toTs) params.set('to', String(_expTimeRange.toTs));
+
+  try {
+    const resp = await fetch(apiUrl('api/stats/models?' + params.toString()), {
+      headers: { Authorization: 'Bearer ' + localStorage.getItem(TOKEN_KEY) }
+    });
+    if (!resp.ok) return;
+    const models = await resp.json();
+
+    const selectEl = $('#exp-model');
+    if (selectEl) {
+      const currentValue = selectEl.value;
+      selectEl.innerHTML = '<option value="">' + t('usage.explorer.all') + '</option>';
+      models.forEach(function(model) {
+        const option = document.createElement('option');
+        option.value = model;
+        option.textContent = model;
+        selectEl.appendChild(option);
+      });
+      // 恢复之前的选择（如果还存在）
+      if (currentValue && models.includes(currentValue)) {
+        selectEl.value = currentValue;
+      }
+    }
+  } catch {}
+}
+
+// 获取 Explorer 时间范围的总览数据
+async function fetchExplorerOverviewData(filterParams) {
+  try {
+    const params = new URLSearchParams();
+    if (_expTimeRange.fromTs) params.set('from', String(_expTimeRange.fromTs));
+    if (_expTimeRange.toTs) params.set('to', String(_expTimeRange.toTs));
+
+    // 添加筛选参数
+    if (filterParams) {
+      if (filterParams.agent) params.set('agent', filterParams.agent);
+      if (filterParams.peer) params.set('peer', filterParams.peer);
+    }
+
+    const resp = await fetch(apiUrl('api/stats/overview?' + params.toString()), {
+      headers: { Authorization: 'Bearer ' + localStorage.getItem(TOKEN_KEY) }
+    });
+    const data = resp.ok ? await resp.json() : null;
+
+    if (data) {
+      const ts = (data.token_stats && data.token_stats.all_time) ? data.token_stats.all_time
+        : { input_tokens: 0, output_tokens: 0, cache_creation_tokens: 0, cache_read_tokens: 0, call_count: 0, cost_official_usd: 0, cost_official_cny: 0, cost_usd: 0, cost_cny: 0 };
+      const sessionCount = data.session_count || 0;
+      const msgIn = data.msg_in || 0;
+      const msgOut = data.msg_out || 0;
+      const totalTokens = ts.cache_read_tokens + ts.cache_creation_tokens + ts.input_tokens + ts.output_tokens;
+      const hitRate = totalTokens > 0 ? (ts.cache_read_tokens / totalTokens) * 100 : 0;
+
+      return { ts, sessionCount, msgIn, msgOut, hitRate };
+    }
+  } catch {}
+
+  // 返回空数据
+  return {
+    ts: { call_count: 0, input_tokens: 0, output_tokens: 0, cache_creation_tokens: 0, cache_read_tokens: 0, cost_official_usd: 0, cost_official_cny: 0, cost_usd: 0, cost_cny: 0 },
+    sessionCount: 0,
+    msgIn: 0,
+    msgOut: 0,
+    hitRate: 0
+  };
 }
 
 async function loadExplorerSidebar() {
   var token = localStorage.getItem(TOKEN_KEY);
   var headers = { Authorization: 'Bearer ' + token };
   try {
-    var [agentsResp, peersResp] = await Promise.all([
-      fetch(apiUrl('api/stats/agents'), { headers }),
-      fetch(apiUrl('api/stats/peers'), { headers }),
-    ]);
+    var agentsResp = await fetch(apiUrl('api/stats/agents'), { headers });
     var agents = agentsResp.ok ? await agentsResp.json() : [];
-    var peers = peersResp.ok ? await peersResp.json() : [];
-    renderExplorerSidebar(agents, peers);
+    renderExplorerAgentList(agents);
+
+    // 初始加载时不加载 peers（等待用户选择 agent）
+    renderExplorerPeerList([]);
   } catch {}
 }
 
-function renderExplorerSidebar(agents, peers) {
+// 渲染 Agent 列表
+function renderExplorerAgentList(agents) {
   var agentList = $('#exp-agent-list');
-  var peerList = $('#exp-peer-list');
-  if (!agentList || !peerList) return;
+  if (!agentList) return;
 
   // "All" item for agents
   var allHtml = '<div class="exp-sidebar-item active" data-type="all" data-key="">' +
-    '<span class="item-name">全部</span></div>';
+    '<span class="item-name">' + t('usage.explorer.all') + '</span></div>';
 
   agentList.innerHTML = allHtml + agents.map(function(a) {
-    var name = a.agent_aid ? a.agent_aid.split('.')[0] : 'unknown';
+    var name = a.agent_name || (a.agent_aid ? a.agent_aid.split('.')[0] : 'unknown');
     return '<div class="exp-sidebar-item" data-type="agent" data-key="' + escHtml(a.agent_aid) + '">' +
-      '<span class="item-name" title="' + escHtml(a.agent_aid) + '">' + escHtml(name) + '</span>' +
-      '<span class="item-meta">' + fmtTokens(a.input_tokens + a.output_tokens) + '</span></div>';
+      '<span class="item-name" title="' + escHtml(a.agent_aid) + '">' + escHtml(name) + '</span></div>';
   }).join('');
+
+  // 绑定点击事件
+  agentList.querySelectorAll('.exp-sidebar-item').forEach(function(el) {
+    el.addEventListener('click', async function() {
+      // Clear active from all
+      document.querySelectorAll('#exp-agent-list .exp-sidebar-item').forEach(function(x) { x.classList.remove('active'); });
+      el.classList.add('active');
+
+      var type = el.getAttribute('data-type');
+      var key = el.getAttribute('data-key');
+
+      if (type === 'all') {
+        _expSelection = { type: null, key: null };
+        $('#exp-selected-name').textContent = t('usage.explorer.all');
+        // 选择"全部"时，清空 peers 列表
+        renderExplorerPeerList([]);
+      } else {
+        _expSelection = { type: type, key: key };
+        var name = el.querySelector('.item-name').textContent.trim();
+        $('#exp-selected-name').textContent = name;
+        // 选择特定 agent 时，加载该 agent 的 peers
+        await loadPeersForAgent(key);
+      }
+
+      runExplorerQuery();
+    });
+  });
+}
+
+// 加载指定 agent 的 peers
+async function loadPeersForAgent(agentAid) {
+  var token = localStorage.getItem(TOKEN_KEY);
+  var headers = { Authorization: 'Bearer ' + token };
+  try {
+    const params = new URLSearchParams();
+    params.set('agent', agentAid);
+    // 不传递时间范围，获取该 agent 的所有 peers
+
+    var resp = await fetch(apiUrl('api/stats/peers?' + params.toString()), { headers });
+    var peers = resp.ok ? await resp.json() : [];
+    renderExplorerPeerList(peers);
+  } catch {
+    renderExplorerPeerList([]);
+  }
+}
+
+// 渲染 Peer 列表
+function renderExplorerPeerList(peers) {
+  var peerList = $('#exp-peer-list');
+  if (!peerList) return;
+
+  if (!peers || peers.length === 0) {
+    peerList.innerHTML = '<div style="padding: 12px; color: var(--dim); font-size: 12px; text-align: center;">' + t('common.noData') + '</div>';
+    return;
+  }
 
   peerList.innerHTML = peers.map(function(p) {
     var name = p.peer_key || 'unknown';
-    // 简化显示：去掉 channel# 前缀中的 aun#，保留核心部分
-    var display = name.replace(/^aun#/, '').split('.')[0];
+    // 优先显示peer_name，否则简化显示peer_key
+    var display = p.peer_name || name.replace(/^aun#/, '').split('#')[0].split('.')[0];
+
+    // 添加聊天类型标签
+    var typeTag = '';
+    if (p.peer_chat_type === 'group') {
+      typeTag = '<span class="peer-tag peer-tag-group">' + t('usage.explorer.chatType.group') + '</span>';
+    } else if (p.peer_chat_type === 'private') {
+      typeTag = '<span class="peer-tag peer-tag-private">' + t('usage.explorer.chatType.private') + '</span>';
+    }
+
+    // 群聊人数标签
+    var memberTag = '';
+    if (p.peer_chat_type === 'group' && p.peer_group_member_count) {
+      memberTag = '<span class="peer-tag peer-tag-count">' + p.peer_group_member_count + t('usage.explorer.memberCount') + '</span>';
+    }
+
     return '<div class="exp-sidebar-item" data-type="peer" data-key="' + escHtml(p.peer_key) + '">' +
-      '<span class="item-name" title="' + escHtml(name) + '">' + escHtml(display) + '</span>' +
+      '<span class="item-name" title="' + escHtml(name) + '">' +
+      (typeTag ? typeTag + ' ' : '') + escHtml(display) + (memberTag ? ' ' + memberTag : '') +
+      '</span>' +
       '<span class="item-meta">' + fmtTokens((p.input_tokens || 0) + (p.output_tokens || 0)) + '</span></div>';
   }).join('');
 
-  // Bind click events
-  var allItems = document.querySelectorAll('#exp-agent-list .exp-sidebar-item, #exp-peer-list .exp-sidebar-item');
-  allItems.forEach(function(el) {
+  // Bind click events for peers
+  peerList.querySelectorAll('.exp-sidebar-item').forEach(function(el) {
     el.addEventListener('click', function() {
-      // Clear active from all
-      allItems.forEach(function(x) { x.classList.remove('active'); });
+      // Clear active from all peers
+      document.querySelectorAll('#exp-peer-list .exp-sidebar-item').forEach(function(x) { x.classList.remove('active'); });
       el.classList.add('active');
+
       var type = el.getAttribute('data-type');
       var key = el.getAttribute('data-key');
-      if (type === 'all') {
-        _expSelection = { type: null, key: null };
-        $('#exp-selected-name').textContent = '全部';
-      } else {
-        _expSelection = { type: type, key: key };
-        $('#exp-selected-name').textContent = key;
-      }
+      _expSelection = { type: type, key: key };
+      var name = el.querySelector('.item-name').textContent.trim();
+      $('#exp-selected-name').textContent = name;
+
       runExplorerQuery();
     });
   });
@@ -2650,11 +3717,13 @@ function renderExplorerSidebar(agents, peers) {
 function escHtml(s) { return (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
 async function runExplorerQuery() {
+  // 使用 Explorer 自己的时间范围
+  const fromTs = _expTimeRange.fromTs;
+  const toTs = _expTimeRange.toTs;
+
   var params = new URLSearchParams();
-  var fromEl = $('#exp-from');
-  var toEl = $('#exp-to');
-  if (fromEl && fromEl.value) params.set('from', String(new Date(fromEl.value + 'T00:00:00').getTime()));
-  if (toEl && toEl.value) params.set('to', String(new Date(toEl.value + 'T23:59:59').getTime()));
+  if (fromTs) params.set('from', String(fromTs));
+  if (toTs) params.set('to', String(toTs));
   // Inject selection from sidebar
   if (_expSelection.type === 'agent' && _expSelection.key) params.set('agent', _expSelection.key);
   if (_expSelection.type === 'peer' && _expSelection.key) params.set('peer', _expSelection.key);
@@ -2672,26 +3741,116 @@ async function runExplorerQuery() {
     data = await resp.json();
   } catch { return; }
 
-  // Show/hide detail cards
+  // 根据查询结果计算卡片数据
   var cardsEl = $('#exp-detail-cards');
-  if (data && data.length) {
-    var totIn = 0, totOut = 0, totCache = 0, totCalls = 0;
-    data.forEach(function(r) { totIn += r.input_tokens; totOut += r.output_tokens; totCache += r.cache_read_tokens; totCalls += r.call_count; });
-    if (cardsEl) {
-      cardsEl.style.display = 'flex';
-      cardsEl.innerHTML =
-        '<div class="usage-card"><div class="card-value">' + fmtTokens(totIn) + '</div><div class="card-label">Input</div></div>' +
-        '<div class="usage-card"><div class="card-value">' + fmtTokens(totOut) + '</div><div class="card-label">Output</div></div>' +
-        '<div class="usage-card"><div class="card-value">' + fmtTokens(totCache) + '</div><div class="card-label">Cache Read</div></div>' +
-        '<div class="usage-card"><div class="card-value">' + totCalls + '</div><div class="card-label">Calls</div></div>';
+  if (cardsEl) {
+    // 如果有筛选条件（agent/peer），使用查询结果计算；否则需要获取总览数据
+    const hasFilter = _expSelection.type && _expSelection.key;
+
+    let cardData;
+    let cardTitle = null; // 用于显示选中的 agent/peer 信息
+
+    if (hasFilter) {
+      // 有筛选：根据查询结果计算 token 数据，并获取会话信息
+      var totIn = 0, totOut = 0, totCacheCreation = 0, totCacheRead = 0, totCalls = 0;
+      if (data && data.length) {
+        data.forEach(function(r) {
+          totIn += r.input_tokens || 0;
+          totOut += r.output_tokens || 0;
+          totCacheCreation += r.cache_creation_tokens || 0;
+          totCacheRead += r.cache_read_tokens || 0;
+          totCalls += r.call_count || 0;
+        });
+      }
+      const totalTokens = totCacheRead + totCacheCreation + totIn + totOut;
+      const hitRate = totalTokens > 0 ? (totCacheRead / totalTokens) * 100 : 0;
+
+      // 构建筛选参数
+      const filterParams = {};
+      if (_expSelection.type === 'agent') filterParams.agent = _expSelection.key;
+      if (_expSelection.type === 'peer') filterParams.peer = _expSelection.key;
+
+      // 获取该筛选条件下的会话信息
+      const overviewData = await fetchExplorerOverviewData(filterParams);
+
+      cardData = {
+        ts: {
+          call_count: totCalls,
+          input_tokens: totIn,
+          output_tokens: totOut,
+          cache_creation_tokens: totCacheCreation,
+          cache_read_tokens: totCacheRead,
+          cost_official_usd: overviewData.ts.cost_official_usd || 0,
+          cost_official_cny: overviewData.ts.cost_official_cny || 0,
+          cost_usd: overviewData.ts.cost_usd || 0,
+          cost_cny: overviewData.ts.cost_cny || 0
+        },
+        sessionCount: overviewData.sessionCount || 0,
+        msgIn: overviewData.msgIn || 0,
+        msgOut: overviewData.msgOut || 0,
+        hitRate: hitRate
+      };
+
+      // 构建卡片标题
+      if (_expSelection.type === 'agent') {
+        // 从侧边栏获取 agent 名称
+        const selectedItem = document.querySelector('#exp-agent-list .exp-sidebar-item.active .item-name');
+        const agentName = selectedItem ? selectedItem.textContent.trim() : '';
+        const agentAid = _expSelection.key;
+        cardTitle = agentName && agentName !== agentAid.split('.')[0]
+          ? `${agentName} (AID: ${agentAid})`
+          : `AID: ${agentAid}`;
+      } else if (_expSelection.type === 'peer') {
+        // 从侧边栏获取 peer 名称（去掉标签）
+        const selectedItem = document.querySelector('#exp-peer-list .exp-sidebar-item.active .item-name');
+        if (selectedItem) {
+          // 克隆节点并移除所有标签元素
+          const clone = selectedItem.cloneNode(true);
+          const tags = clone.querySelectorAll('.peer-tag');
+          tags.forEach(tag => tag.remove());
+          const peerName = clone.textContent.trim();
+          const peerKey = _expSelection.key;
+          cardTitle = peerName ? `${peerName} (Peer: ${peerKey.split('#')[3] || peerKey.split('#')[0]})` : `Peer: ${peerKey}`;
+        } else {
+          cardTitle = `Peer: ${_expSelection.key}`;
+        }
+      }
+    } else {
+      // 无筛选：获取 Explorer 时间范围的总览数据
+      cardData = await fetchExplorerOverviewData();
     }
-  } else {
-    if (cardsEl) cardsEl.style.display = 'none';
+
+    const { ts, sessionCount, msgIn, msgOut, hitRate } = cardData;
+
+    // 不显示标题行，直接显示卡片
+    // 注意：会话信息是该时间范围的总数（不区分 agent/peer）
+    const sessionCard = makeMultiValueCard([
+      { label: t('usage.card.sessionCount'), value: sessionCount },
+      { label: t('usage.card.msgIn'), value: msgIn },
+      { label: t('usage.card.msgOut'), value: msgOut }
+    ], t('usage.card.sessionInfo'), 'session-group');
+
+    const usageCard = makeMultiValueCard([
+      { label: t('usage.card.modelCalls'), value: ts.call_count },
+      { label: t('usage.card.inputTokens'), value: fmtTokens(ts.input_tokens) },
+      { label: t('usage.card.outputTokens'), value: fmtTokens(ts.output_tokens) },
+      { label: t('usage.card.cacheCreation'), value: fmtTokens(ts.cache_creation_tokens) },
+      { label: t('usage.card.cacheHitTokens'), value: fmtTokens(ts.cache_read_tokens) },
+      { label: t('usage.card.cacheHitRate'), value: hitRate.toFixed(1) + '%' }
+    ], t('usage.card.usageInfo'), 'usage-group');
+
+    const costCard = makeMultiValueCard([
+      { label: t('usage.card.costOfficial'), value: fmtCost(ts.cost_official_usd, ts.cost_official_cny) },
+      { label: t('usage.card.costGateway'), value: fmtCost(ts.cost_usd, ts.cost_cny) }
+    ], t('usage.card.costInfo'), 'cost-group');
+
+    cardsEl.innerHTML = sessionCard + usageCard + costCard;
+    cardsEl.style.display = 'flex';
   }
 
   if (!data || !data.length) {
     var tbl = $('#usage-explorer-table');
-    if (tbl) tbl.innerHTML = '<tr><td>No data for selected range.</td></tr>';
+    if (tbl) tbl.innerHTML = '<tr><td>' + t('usage.explorer.noData') + '</td></tr>';
     var chartEl = $('#usage-explorer-chart');
     if (chartEl && _explorerChart) { _explorerChart.dispose(); _explorerChart = null; }
     return;
@@ -2706,13 +3865,13 @@ async function runExplorerQuery() {
     var periods = data.map(function(r) { return r.period; });
     _explorerChart.setOption({
       tooltip: { trigger: 'axis' },
-      legend: { data: ['Input', 'Output'], top: 0, textStyle: { fontSize: 11 } },
+      legend: { data: [t('usage.card.input'), t('usage.card.output')], top: 0, textStyle: { fontSize: 11 } },
       grid: { top: 30, bottom: 30, left: 60, right: 16 },
       xAxis: { type: 'category', data: periods, axisLabel: { fontSize: 10, rotate: 30 } },
       yAxis: { type: 'value', axisLabel: { formatter: function(v) { return fmtTokens(v); } } },
       series: [
-        { name: 'Input', type: 'line', data: data.map(function(r) { return r.input_tokens; }), smooth: true, areaStyle: { opacity: 0.15 }, itemStyle: { color: '#4f6ef7' } },
-        { name: 'Output', type: 'line', data: data.map(function(r) { return r.output_tokens; }), smooth: true, areaStyle: { opacity: 0.15 }, itemStyle: { color: '#38a169' } },
+        { name: t('usage.card.input'), type: 'line', data: data.map(function(r) { return r.input_tokens; }), smooth: true, areaStyle: { opacity: 0.15 }, itemStyle: { color: '#4f6ef7' } },
+        { name: t('usage.card.output'), type: 'line', data: data.map(function(r) { return r.output_tokens; }), smooth: true, areaStyle: { opacity: 0.15 }, itemStyle: { color: '#38a169' } },
       ]
     });
   }
@@ -2721,7 +3880,7 @@ async function runExplorerQuery() {
   var tbl = $('#usage-explorer-table');
   if (tbl) {
     tbl.innerHTML =
-      '<thead><tr><th>Period</th><th>Input</th><th>Output</th><th>Cache↑</th><th>CacheHit</th><th>Calls</th></tr></thead>' +
+      '<thead><tr><th>' + t('usage.explorer.th.period') + '</th><th>' + t('usage.explorer.th.input') + '</th><th>' + t('usage.explorer.th.output') + '</th><th>' + t('usage.explorer.th.cacheCreation') + '</th><th>' + t('usage.explorer.th.cacheHit') + '</th><th>' + t('usage.explorer.th.calls') + '</th></tr></thead>' +
       '<tbody>' + data.map(function(r) {
         return '<tr><td>' + r.period + '</td><td>' + fmtTokens(r.input_tokens) + '</td><td>' + fmtTokens(r.output_tokens) +
           '</td><td>' + fmtTokens(r.cache_creation_tokens) + '</td><td>' + fmtTokens(r.cache_read_tokens) +
@@ -2963,8 +4122,6 @@ window.addEventListener('DOMContentLoaded', async () => {
   if (localStorage.getItem(TOKEN_KEY)) {
     showApp();
     startApp();
-    loadUsageDashboard();
-    loadUsageOverview();
     initUsageSubtabs();
   } else {
     showPairPage();
