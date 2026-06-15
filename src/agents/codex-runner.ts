@@ -9,7 +9,7 @@
 import type { Config, InteractionRequest } from '../types.js';
 import type { AgentPlugin, AgentInstance, AgentCallbacks } from '../core/baseagent-loader.js';
 import type { AgentEvent, AgentRunnerFull, ModelSwitcher, PermissionContext, PermissionModeInfo } from './runner-types.js';
-import { checkBlacklist, checkReadonly, type PermissionGateway } from '../core/permission.js';
+import { checkBlacklist, checkReadonly, parseEvolclawSendCommand, type PermissionGateway } from '../core/permission.js';
 import { CodexAppServerClient, type CodexServerNotification, type CodexServerRequest, type CodexThreadResponse, type CodexTurnItem } from './codex-app-server-client.js';
 import { resolveOpenaiConfig } from './baseagent.js';
 import { logger } from '../utils/logger.js';
@@ -353,9 +353,9 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
     const callSandboxMode = this.toSandboxMode(callMode);
     const appServer = this.getAppServerClient();
 
-    // proactive 模式需要审批工具调用（让 policyHook 生效）
+    // policyHook 需要审批回调才能生效；关闭 proactive pre-tool policy 时不额外升级。
     const context = this.permissionContexts.get(sessionId);
-    const effectiveApprovalPolicy = (context?.chatmode === 'proactive' && callApprovalPolicy === 'never')
+    const effectiveApprovalPolicy = (context?.policyHook && callApprovalPolicy === 'never')
       ? 'on-request'
       : callApprovalPolicy;
 
@@ -530,7 +530,7 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
         // 优先用 per-session 模式派生（与 runQuery 一致），缺省回落实例级
         const compactMode = this.sessionModes.get(_sessionId) ?? this.currentMode;
         const compactPolicy = this.toApprovalPolicy(compactMode);
-        const compactApprovalPolicy = (ctx?.chatmode === 'proactive' && compactPolicy === 'never')
+        const compactApprovalPolicy = (ctx?.policyHook && compactPolicy === 'never')
           ? 'on-request'
           : compactPolicy;
         await appServer.threadResume(agentSessionId, _projectPath, {
@@ -975,11 +975,8 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
   }
 
   private isEvolclawCtlSendOrFile(input: Record<string, unknown>): boolean {
-    const command = typeof input.command === 'string' ? input.command.trim() : '';
-    if (!/^(?:ec|evolclaw)\s+ctl\s+(?:send|file)(?:\s|$)/.test(command)) return false;
-    // Keep the whitelist to a single CLI invocation. If text contains shell control
-    // syntax, fall back to the normal permission mode instead of silently approving.
-    return !/[;&|`]|[$][(]|\r|\n/.test(command);
+    const command = typeof input.command === 'string' ? input.command : '';
+    return parseEvolclawSendCommand(command)?.scope === 'ctl';
   }
 
   private toAppServerApprovalResponse(method: string, decision: 'allow' | 'always' | 'deny'): Record<string, unknown> {

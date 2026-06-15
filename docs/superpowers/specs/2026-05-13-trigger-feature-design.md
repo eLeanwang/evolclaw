@@ -60,7 +60,7 @@ AI 在回复中输出 `/trigger` 命令，系统从 agent 输出流中拦截（�
 | `--channel <name>` | 当前 channel 实例名 | 目标通道实例（adapter.channelName） |
 | `--channelid <id>` | 当前 channelId | 目标对话 ID |
 | `--thread <id>` | 无 | 进入指定 thread（需通道支持；与 `--session` 互斥） |
-| `--session latest\|silent` | `latest` | 会话策略（见 2.2） |
+| `--session latest\|current\|thread` | `latest` | 会话策略（见 2.2） |
 
 **其他**：
 
@@ -72,12 +72,22 @@ AI 在回复中输出 `/trigger` 命令，系统从 agent 输出流中拦截（�
 
 ### 2.2 Session 策略
 
-| 值 | 行为 | sessionMode | 用户可见性 |
-|----|------|-------------|----------|
-| `latest` | 续接目标 scope 下最后活跃会话 | 继承原 session mode | 按原 mode 输出 |
-| `silent` | 新建独立会话 | **强制 `autonomous`** | 不自动 flush 到通道 |
+| 值 | 触发时行为 | 输出可见性 | 上下文累积 |
+|----|-----------|----------|----------|
+| `latest` | 续接触发时的当前活跃会话 | 按 sessionMode | 当前活跃会话历史 |
+| `current` | 续接**创建时**绑定的会话（切 active，不切回） | 可见 | 该会话历史，跨触发累积 |
+| `thread` | 专属 thread 话题会话 | 可见（落在话题里） | 该 thread 会话，跨触发累积 |
 
-`silent` 用于后台静默任务（清理、扫描、生成报告等）。`autonomous` 模式行为见 §5.3。
+**策略说明**：
+- `latest`：适用于临时提醒（"30 分钟后提醒我开会"），触发时插入当前对话
+- `current`：适用于周期任务需要保留上下文（日报、定期检查），每次触发续接同一会话
+- `thread`：适用于独立话题隔离（周报生成、后台监控），输出不干扰主对话
+
+**实现细节**：
+- `current` 注册时绑定 `boundSessionId`，触发时检查会话忙闲状态（忙则延迟补发）
+- `thread` 在 AUN 上使用合成 threadId（`trigger-<triggerId>`），在飞书上首次触发时通过 `reply_in_thread` 创建话题并回填 `targetThreadId`
+
+详细设计见 `2026-06-01-trigger-dedicated-session-design.md`。
 
 ### 2.3 管理
 
@@ -120,8 +130,8 @@ AI 在回复中输出 `/trigger` 命令，系统从 agent 输出流中拦截（�
 # 明天 9 点在指定项目生成日报
 /trigger set --at 2026-05-14T09:00 --agent evolclaw --prompt "生成昨日日报"
 
-# 每天 9 点静默生成工作摘要
-/trigger set --cron "0 9 * * *" --name daily --session silent \
+# 每天 9 点在专属 thread 生成工作摘要
+/trigger set --cron "0 9 * * *" --name daily --session thread \
   --prompt "汇总昨日提交写入 daily.md"
 
 # 跨对话通知（群里注册，私聊通知）
@@ -159,7 +169,8 @@ interface Message {
   source?: 'user' | 'trigger';   // 与 InboundMessage.source 风格一致
   triggerMeta?: {
     triggerId: string;
-    silent: boolean;
+    triggerName?: string;
+    fireTime?: number;
   };
 }
 ```
@@ -170,23 +181,21 @@ interface Message {
 |------|-----|------|
 | `channel` | trigger.targetChannel | 目标 adapter 名 |
 | `channelId` | trigger.targetChannelId | 目标对话 ID |
-| `selfId` | 触发器所属 EvolAgent 的 AID | 自动从 scheduler 所属 agent 注入 |
-| `threadId` | trigger.targetThreadId | 可选 |
+| `selfAID` | 触发器所属 EvolAgent 的 AID | 从 `targetChannel` 的 channelKey 解析，回落 scheduler 所属 agent 的 aid |
+| `threadId` | trigger.targetThreadId | 可选（thread 策略使用） |
 | `content` | trigger.prompt | 任务内容原文 |
-| `peerId` | `__trigger__` | 固定虚拟 ID，避免和用户消息 greedy merge |
-| `messageId` | `trigger:<id>:<fireTime>` | 全局唯一，便于去重追踪 |
-| `chatType` | 从目标 session 查 | 保持一致 |
+| `peerId` | `__trigger__:<triggerId>` | 每个触发器唯一的虚拟 ID，避免不同触发器/用户消息被 greedy merge |
+| `messageId` | `trigger:<id>:<fireTime>` | 全局唯一（`fireTime` 区分 cron 多次触发），便于日志追踪 |
+| `chatType` | 从目标 trigger 解析 | 保持一致（group 时额外带 `groupId`） |
 | `source` | `'trigger'` | 来源标记 |
-| `triggerMeta` | `{ triggerId, silent }` | 触发器详细信息 |
+| `triggerMeta` | `{ triggerId, ... }` | 触发器详细信息 |
 
 ### 3.3 MessageProcessor 差异化分支
 
 识别 `message.source === 'trigger'` 时：
 
 - **跳过 processing status**：不发 `sendProcessingStatus('start')` / `sendProcessingStatus('done')`
-- **输出控制**：
-  - `triggerMeta.silent=true` → IMRenderer 静默（不向通道 flush）
-  - 否则按现有 sessionMode 正常输出
+- **输出控制**：按 session 的 sessionMode 正常输出（latest/current/thread 策略决定目标会话）
 - **事件发射**：处理完成后发 `trigger:completed`（携带 triggerId、duration），处理失败发 `trigger:failed`
 
 ### 3.4 并发冲突（中断策略）
@@ -280,41 +289,7 @@ TriggerScheduler
 
 ---
 
-## 5. Session 模式与 `autonomous` 落地
-
-### 5.1 背景
-
-`types.ts` 标注 `sessionMode` 有三态：`interactive` / `proactive` / `autonomous`，其中 `autonomous` 为"预留未实现"。触发器 `--session silent` 创建的 session 使用 `autonomous` 模式，需要顺带把该模式的行为落地。
-
-### 5.2 三种 mode 的行为对比
-
-| mode | 触发来源 | IMRenderer | processing status | thought.put 约束 | 典型场景 |
-|------|----------|-----------|------------------|-----------------|---------|
-| `interactive` | 用户消息 | 正常 flush | 发送 | 无要求 | 单聊 |
-| `proactive` | 用户消息 | 静默（通过 thought 投影） | 发送 | **要求用 thought.put 输出** | 群聊 |
-| `autonomous` | 触发器/webhook | 静默 | **不发送** | **无要求**（可不输出、可主动 `/ctl send`） | 触发器 silent |
-
-### 5.3 autonomous 实现要点
-
-改动集中在 `MessageProcessor`：
-
-- `session.sessionMode === 'autonomous'`：
-  - IMRenderer 静默（等同 proactive 的 suppress 行为）
-  - 不发 `sendProcessingStatus`（跳过 start/done/error 状态通知）
-  - 不强制 thought.put（proactive 的 fallback 逻辑不触发）
-  - Agent 可调用 `/ctl send`、`/ctl file` 等命令主动输出
-
-### 5.4 Session 创建时机
-
-`--session silent` 触发器的处理流程：
-1. **注册时**：仅记录策略（`targetSessionStrategy='silent'`），不预创建 session
-2. **触发时**：使用现有 session 创建流程，传入 `sessionMode: 'autonomous'`，合成消息携带此 sessionId
-
-理由：避免注册后从未触发的触发器产生孤儿 session。
-
----
-
-## 6. 持久化设计
+## 5. 持久化设计
 
 ### 6.1 存储布局
 
@@ -466,8 +441,9 @@ active 触发器存在 `triggers.json` 中；转为 done 时移入 `history.json
   --channel <实例名>     目标通道实例
   --channelid <id>       目标对话 ID
   --thread <id>          目标 thread（与 --session 互斥，需通道支持）
-  --session latest       续接最后活跃会话（默认，用户可见输出）
-  --session silent       新建独立会话静默执行（不打扰用户）
+  --session latest       续接最后活跃会话（默认）
+  --session current      续接创建时绑定的会话（跨触发累积上下文）
+  --session thread       专属 thread 话题会话（隔离输出）
 
 其他：
   --name <标识>          触发器名（默认自动生成）
@@ -484,8 +460,9 @@ active 触发器存在 `triggers.json` 中；转为 done 时移入 `history.json
 
 - 当用户要求"稍后/明天/定时"做某事时使用
 - 当你判断某任务需要延迟到特定时刻才合适时主动使用
-- silent：清理、扫描、生成文件等不需要打扰用户的后台任务
-- latest：提醒用户、跟进对话、结果需要用户看到
+- latest：临时提醒，触发时插入当前对话
+- current：周期任务需要保留上下文（如日报、定期检查）
+- thread：独立话题隔离（如周报生成、后台监控）
 - 触发器不支持修改，改内容请 cancel 后重建
 - 失败不自动重试，由你在后续交互中自行决定是否重建
 ```
@@ -547,13 +524,13 @@ v1 有意不暴露过多配置项，避免设计过度。
 
 | 文件 | 改动 |
 |------|------|
-| `src/types.ts` | 新增 `Trigger` 类型、`Message.source` 扩展（`'trigger'`）、`Message.triggerMeta` 字段 |
+| `src/types.ts` | 新增 `Trigger` 类型、`Message.source` 扩展（`'trigger'`）、`Message.triggerMeta` 字段、`TriggerSessionStrategy` 类型 |
 | `src/config.ts` 或 `src/config-store.ts` | 新增 `triggers` 配置段 |
 | `src/paths.ts` | 新增 `agentTriggersDir(aid)` 路径辅助函数 |
-| `src/core/command-handler.ts` | 新增 `/trigger set/list/cancel` 命令处理 + 权限检查 |
-| `src/core/message/message-queue.ts` | 无需修改（已有 `interruptible` 选项） |
-| `src/core/message/message-processor.ts` | 识别 trigger 源消息：跳过 processing status、silent 控制 IMRenderer、autonomous 模式落地 |
-| `src/core/session/session-manager.ts` | 确认 `getActiveSession` 满足 latest 查询需求；autonomous session 创建 |
+| `src/core/command-handler.ts` | 新增 `/trigger set/list/cancel/update` 命令处理 + 权限检查 |
+| `src/core/message/message-queue.ts` | 支持触发器消息的排队和中断策略 |
+| `src/core/message/message-processor.ts` | 识别 trigger 源消息：跳过 processing status |
+| `src/core/session/session-manager.ts` | 支持 `current` 策略的 boundSessionId 查找，`thread` 策略的话题会话 |
 | `src/core/event-bus.ts` | 新增 `TriggerEvent` 到 `GatewayEvent` 联合类型 |
 | `src/core/evolagent.ts` | EvolAgent 实例持有 TriggerScheduler 引用 |
 | `src/core/evolagent-registry.ts` | reload 时重启对应 agent 的 scheduler |
@@ -587,7 +564,7 @@ v1 有意不暴露过多配置项，避免设计过度。
 | 命令格式 | 严格结构化 `--flag value`，AI 负责翻译用户意图 |
 | 时间表达 | delay / at / cron 三选一 |
 | 定位参数 | channel + channelid + thread/session（thread 与 session 互斥） |
-| 输出模式 | `--session latest`（可见）/ `--session silent`（autonomous 静默） |
+| Session 策略 | `latest` / `current` / `thread`（详见 2026-06-01-trigger-dedicated-session-design.md） |
 | 执行路径 | 合成 Message → MessageQueue → MessageProcessor（复用现有流程） |
 | 中断策略 | 用户优先：用户打断触发器，触发器不打断用户，触发器间排队 |
 | 失败处理 | 不重试，写日志，AI 自决是否重建 |
@@ -595,11 +572,10 @@ v1 有意不暴露过多配置项，避免设计过度。
 | 持久化 | `data/triggers/<aid>/` 文件系统，per-agent 隔离 |
 | 状态语义 | 二态 `active / done`，以"投递"为完成标志 |
 | 启动恢复 | delay/at 补执行，cron 不补执行 |
-| 修改操作 | 不支持，cancel + 重建 |
-| 权限 | list 全局可见；cancel 仅创建者可操作，owner/admin 不受限 |
+| 修改操作 | 支持 `/trigger update`（修改 schedule/prompt/session 等参数） |
+| 权限 | list 全局可见；cancel/update 仅创建者可操作，owner/admin 不受限 |
 | 创建者归属 | `(peer_id, channel)`，AI 代创建 = 用户创建 |
 | AI 引导 | system prompt 全局注入 `/trigger` 说明 |
-| sessionMode | 复用 `autonomous`（顺带落地预留模式） |
 | 执行历史 | 写 `evolclaw.log`，日志前缀 `[trigger.<id>]` |
 
 ---

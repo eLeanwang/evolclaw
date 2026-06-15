@@ -166,6 +166,46 @@ export function summarizeToolInput(toolName: string, input: Record<string, unkno
     || '';
 }
 
+export interface EvolclawSendCommand {
+  scope: 'msg' | 'group' | 'ctl';
+  action: 'send' | 'file';
+  /** msg/group 的会话目标；ctl send/file 通过当前 ctl session 路由，不携带目标。 */
+  targetId?: string;
+}
+
+const SHELL_CONTROL_RE = /[;&|`]|[$][(]|\r|\n/;
+
+export function parseEvolclawSendCommand(command: string): EvolclawSendCommand | null {
+  const trimmed = command.trim();
+  if (!trimmed || SHELL_CONTROL_RE.test(trimmed)) return null;
+
+  const ctlMatch = trimmed.match(/^(?:ec|evolclaw)\s+ctl\s+(send|file)(?:\s|$)/);
+  if (ctlMatch) {
+    return { scope: 'ctl', action: ctlMatch[1] as 'send' | 'file' };
+  }
+
+  const sessionMatch = trimmed.match(/^(?:ec|evolclaw)\s+(msg|group)\s+(send|file)\s+\S+\s+(\S+)(?:\s|$)/);
+  if (!sessionMatch) return null;
+  return {
+    scope: sessionMatch[1] as 'msg' | 'group',
+    action: sessionMatch[2] as 'send' | 'file',
+    targetId: sessionMatch[3],
+  };
+}
+
+export function isEvolclawSendCommandForSession(
+  toolName: string,
+  input: Record<string, unknown>,
+  channelId: string,
+): boolean {
+  if (toolName !== 'Bash') return false;
+  const cmd = typeof input.command === 'string' ? input.command : '';
+  const parsed = parseEvolclawSendCommand(cmd);
+  if (!parsed) return false;
+  if (parsed.scope === 'ctl') return true;
+  return parsed.targetId === channelId;
+}
+
 export type PermissionDecision = 'allow' | 'always' | 'deny';
 
 /** 为 Edit 工具生成 diff 风格摘要 */

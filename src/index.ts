@@ -661,7 +661,7 @@ async function main() {
         if (messageQueue.isProcessing(boundId)) { scheduleRetryWhenIdle(boundId, msg, trigger); return; }
         sessionManager.getSessionById(boundId).then(bound => {
           if (!bound) { logger.warn(`[Trigger] Bound session ${boundId} deleted, aborting`); return; }
-          messageQueue.enqueue(boundId, msg, bound.projectPath, { interruptible: false })
+          messageQueue.enqueue(boundId, msg, bound.projectPath, { interruptible: false, sessionKeyField: bound.sessionKey })
             .catch(err => logger.error(`[Trigger] Retry failed ${trigger.id}: ${err}`));
         });
       }
@@ -688,7 +688,7 @@ async function main() {
         }
         sessionManager.getSessionById(boundId).then(bound => {
           if (!bound) { logger.warn(`[Trigger] Bound session ${boundId} not found`); return; }
-          messageQueue.enqueue(boundId, msg, bound.projectPath, { interruptible: false })
+          messageQueue.enqueue(boundId, msg, bound.projectPath, { interruptible: false, sessionKeyField: bound.sessionKey })
             .catch(onEnqueueFailed);
         });
         return;
@@ -1200,7 +1200,7 @@ async function main() {
       };
       // 清除状态后入队（processMessage 会重新标记）
       sessionManager.clearProcessing(session.id);
-      messageQueue.enqueue(session.id, resumeMessage, session.projectPath).catch(err => {
+      messageQueue.enqueue(session.id, resumeMessage, session.projectPath, { sessionKeyField: session.sessionKey }).catch(err => {
         logger.error(`[Resume] Failed to resume session ${session.id}:`, err);
       });
     }
@@ -1429,6 +1429,36 @@ async function main() {
   // I3: start IPC server LAST, after all hook setup, to eliminate race window
   ipcServer.start();
   ipcServer.setStatsProvider(() => statsCollector.getSnapshot());
+
+  // Queue snapshot & action (for evolclaw queue --agent CLI)
+  ipcServer.setQueueSnapshotProvider((params: { agent: string }) => {
+    const handle = agentRegistry.get(params.agent);
+    const agentName = handle?.name;
+    if (!agentName) return [];
+    return messageQueue.getQueueItemsByAgent(agentName);
+  });
+  ipcServer.setQueueActionExecutor(async (params) => {
+    const handle = agentRegistry.get(params.agent);
+    const agentName = handle?.name;
+    if (!agentName) return { ok: false, error: `agent not found: ${params.agent}` };
+
+    switch (params.action) {
+      case 'clear':
+        return { ok: true, cleared: messageQueue.clearByAgent(agentName) };
+      case 'cancel':
+        if (!params.messageId) return { ok: false, error: 'missing messageId' };
+        return { ok: true, cancelled: messageQueue.cancelMessageById(agentName, params.messageId) };
+      case 'interrupt':
+        if (!params.sessionKey) return { ok: false, error: 'missing sessionKey' };
+        {
+          const sessionId = messageQueue.findSessionIdBySessionKey(params.sessionKey);
+          if (!sessionId) return { ok: false, error: `session not found: ${params.sessionKey}` };
+          return { ok: true, interrupted: await messageQueue.interruptBySession(sessionId) };
+        }
+      default:
+        return { ok: false, error: `unknown action: ${params.action}` };
+    }
+  });
   ipcServer.startCpuTracking();
 
   // 配置 reload 走 IPC `evolagent.reload` 触发，不再用 watchFile。

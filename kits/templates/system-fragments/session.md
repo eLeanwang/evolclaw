@@ -39,5 +39,10 @@ readonly: true — 禁止修改项目文件，如需生成文件请写入 .evolc
 {{?chatType=private}}
 #   私聊：ec msg send {{selfAid}} {{peerId}} "<text>" [--file <path> --as <type>]
 {{/}}
-# 收到消息后第一时间发送一条消息说明你的意图，不要闷头干；执行超过 10 次工具调用需再发一次汇报情况和意图。
+{{?proactivePreTool1stMsgChk!=false}}
+# 收到消息后第一时间发送一条消息说明你的意图，不要闷头干。
+{{/}}
+{{?proactiveToolUseReminder!=false}}
+# 执行超过 10 次工具调用需再发一次汇报情况和意图。
+{{/}}
 {{/}}

@@ -1134,6 +1134,7 @@ export class CommandHandler {
     '/compact', '/file', '/send', '/restart', '/aid', '/rpc', '/storage',
     '/rename', '/name', '/trigger',
     '/chatmode', '/dispatch', '/activity',
+    '/queue',
   ];
 
   /** ctl 中仅允许查询形态的指令；写形态（带参）一律拒绝 */
@@ -1285,7 +1286,13 @@ export class CommandHandler {
       }
     }
 
-    // 5.1 /aid, /rpc, /storage — ctl 专属，转发到 CLI 执行
+    // 5.1 /queue: 消息队列查询与操作（直接操作 MessageQueue，不走 handle()）
+    if (cmd === '/queue' || cmd.startsWith('/queue ')) {
+      const args = cmd.slice('/queue'.length).trim();
+      return await this.handleQueueCommand(sessionId, args);
+    }
+
+    // 5.2 /aid, /rpc, /storage — ctl 专属，转发到 CLI 执行
     if (cmd === '/aid' || cmd.startsWith('/aid ') ||
         cmd === '/rpc' || cmd.startsWith('/rpc ') ||
         cmd === '/storage' || cmd.startsWith('/storage ')) {
@@ -1382,4 +1389,82 @@ export class CommandHandler {
     if (!text) return '';
     return text.length > 50 ? text.substring(0, 50) + '…' : text;
   }
+
+  // ── Queue command ──
+
+  /** 提取命名参数值（如 --cancel msg123 → "msg123"） */
+  private extractArg(args: string, flag: string): string {
+    const idx = args.indexOf(flag);
+    if (idx === -1) return '';
+    const rest = args.slice(idx + flag.length).trim();
+    const spaceIdx = rest.indexOf(' ');
+    return spaceIdx >= 0 ? rest.slice(0, spaceIdx) : rest;
+  }
+
+  private async handleQueueCommand(sessionId: string, args: string): Promise<{ ok: boolean; result?: string; error?: string }> {
+    const showId = args.includes('--showid');
+    const formatJson = args.includes('--format json');
+    const full = args.includes('--full');
+
+    // 操作分支
+    if (args.includes('--clear')) {
+      const count = this.messageQueue.clearBySession(sessionId);
+      return { ok: true, result: `✅ 已清空 ${count} 条待处理消息` };
+    }
+
+    if (args.includes('--cancel')) {
+      const msgId = this.extractArg(args, '--cancel');
+      if (!msgId) return { ok: false, error: '❌ --cancel 需要指定 messageId' };
+      const success = this.messageQueue.cancelMessageByIdInSession(sessionId, msgId);
+      return success
+        ? { ok: true, result: `✅ 已取消消息 ${msgId}` }
+        : { ok: false, error: `❌ 未找到消息 ${msgId}` };
+    }
+
+    if (args.includes('--interrupt')) {
+      const interrupted = await this.messageQueue.interruptBySession(sessionId);
+      return interrupted
+        ? { ok: true, result: `✅ 已打断处理中任务` }
+        : { ok: false, error: `❌ 当前无处理中任务` };
+    }
+
+    // 查询
+    const items = this.messageQueue.getQueueItemsBySession(sessionId);
+    if (formatJson) {
+      return { ok: true, result: JSON.stringify({ items }, null, 2) };
+    }
+    return { ok: true, result: renderQueueItemsCtl(items, showId, full) };
+  }
+}
+
+/**
+ * ctl 专用渲染：不显示 session 标识列（因为只有一个 session）
+ */
+function renderQueueItemsCtl(items: Array<{ messageId?: string; peerName?: string; preview: string }>, showId: boolean, full: boolean): string {
+  if (items.length === 0) {
+    return `当前会话队列 (0 条待处理)\n\n(无待处理消息)`;
+  }
+
+  const lines: string[] = [`当前会话队列 (${items.length} 条待处理)`, ''];
+
+  // 计算列宽
+  const maxIdLen = showId ? Math.max(...items.map(i => i.messageId?.length ?? 0)) : 0;
+  const maxNameLen = Math.max(...items.map(i => (i.peerName ? `[${i.peerName}]`.length : 0)));
+
+  for (const item of items) {
+    const parts: string[] = [' '];
+    if (showId) {
+      const id = (item.messageId || '').padEnd(maxIdLen);
+      parts.push(` ${id}  `);
+    }
+    if (item.peerName) {
+      const name = `[${item.peerName}]`.padEnd(maxNameLen);
+      parts.push(` ${name}  `);
+    }
+    const content = full ? item.preview.replace('...', '') : item.preview;
+    parts.push(`"${content}"`);
+    lines.push(parts.join(''));
+  }
+
+  return lines.join('\n');
 }

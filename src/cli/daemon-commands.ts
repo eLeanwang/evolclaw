@@ -625,6 +625,15 @@ export async function cmdRestart(opts: { clear?: boolean; diagnose?: boolean } =
     }
   }
 
+  // 清理 codex app-server 孤儿进程（无 HOME 区分，全局清理）
+  {
+    const killed = stopCodexAppServerOrphans();
+    if (killed > 0) {
+      console.log(`☠ 已清理 ${killed} 个 codex app-server 孤儿进程`);
+      await sleep(500);
+    }
+  }
+
   console.log(`⏱ restart prep done in ${((Date.now() - cmdStartedAt) / 1000).toFixed(1)}s, starting...`);
   setTimeout(() => cmdStart(), 1000);
 }
@@ -2323,6 +2332,20 @@ function removeEcwebInstanceFiles(p: ReturnType<typeof resolvePaths>): void {
     if (!isEcwebInstanceFile(file)) continue;
     try { fs.unlinkSync(path.join(p.instanceDir, file)); } catch {}
   }
+}
+
+/** 清理所有 codex app-server 孤儿进程，返回清理的进程数。 */
+function stopCodexAppServerOrphans(): number {
+  // 查找所有 codex app-server 进程（无论是 node 启动的还是原生二进制）
+  const codexProcs = platform.findProcesses('codex app-server');
+  let killed = 0;
+  for (const pid of codexProcs) {
+    try {
+      platform.killProcess(pid, true);
+      killed++;
+    } catch {}
+  }
+  return killed;
 }
 
 /** 若 ecweb 在运行则杀掉并清理 pid 文件，返回是否成功 kill。 */

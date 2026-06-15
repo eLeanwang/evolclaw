@@ -23,6 +23,7 @@ export async function cmdCtl(args: string[]): Promise<void> {
 消息:
   send <消息内容>           主动发送文本消息（proactive 模式）
   file [channel] <path>     发送项目内文件
+  queue                     查看/管理会话消息队列
 
 Agent:
   agent <subcommand>        EvolAgent 管理（list/show/new/enable/disable/reload/delete）

@@ -225,6 +225,7 @@ export class MessageBridge {
             interruptSamePeer: !isInterrupt,  // 群聊：同人连发且队列无他人时打断
             agentName: enqueueAgentName,
             role: !isInterrupt ? (session.identity?.role ?? 'anonymous') : undefined,
+            sessionKeyField: session.sessionKey,
           });
         };
 

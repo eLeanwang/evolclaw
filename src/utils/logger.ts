@@ -10,29 +10,29 @@ const config = {
   eventLog: process.env.EVENT_LOG === 'true'
 };
 
-// 主日志：按小时切片，保留 12 小时
+// 主日志：按小时切片，保留 24 小时
 const mainWriter = new LogWriter({
   baseName: 'evolclaw',
   logDir: LOG_DIR,
   rotation: 'hourly',
-  retention: { hours: 12 },
+  retention: { hours: 24 },
 });
 
-// 消息日志：按小时切片，保留 12 小时
+// 消息日志：按小时切片，保留 24 小时
 const messageWriter = config.messageLog
-  ? new LogWriter({ baseName: 'messages', logDir: LOG_DIR, rotation: 'hourly', retention: { hours: 12 } })
+  ? new LogWriter({ baseName: 'messages', logDir: LOG_DIR, rotation: 'hourly', retention: { hours: 24 } })
   : null;
 
-// 事件日志：按小时切片，保留 12 小时（由 index.ts 订阅 EventBus 后填充）
+// 事件日志：按小时切片，保留 24 小时（由 index.ts 订阅 EventBus 后填充）
 const eventWriter = config.eventLog
-  ? new LogWriter({ baseName: 'events', logDir: LOG_DIR, rotation: 'hourly', retention: { hours: 12 } })
+  ? new LogWriter({ baseName: 'events', logDir: LOG_DIR, rotation: 'hourly', retention: { hours: 24 } })
   : null;
 
 // 渠道入站日志：记录从渠道收到的原始消息
-const channelInWriter = new LogWriter({ baseName: 'channel-in', logDir: LOG_DIR, rotation: 'hourly', retention: { hours: 12 } });
+const channelInWriter = new LogWriter({ baseName: 'channel-in', logDir: LOG_DIR, rotation: 'hourly', retention: { hours: 24 } });
 
 // 渠道出站日志：记录发往渠道的所有消息
-const channelOutWriter = new LogWriter({ baseName: 'channel-out', logDir: LOG_DIR, rotation: 'hourly', retention: { hours: 12 } });
+const channelOutWriter = new LogWriter({ baseName: 'channel-out', logDir: LOG_DIR, rotation: 'hourly', retention: { hours: 24 } });
 
 function shouldLog(level: string): boolean {
   return (LEVELS[level] ?? 1) >= (LEVELS[currentLevel] ?? 1);

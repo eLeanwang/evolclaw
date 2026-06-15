@@ -274,8 +274,26 @@ export class CodexAppServerClient {
     }
     this.pending.clear();
     if (!proc) return;
+
+    // 优雅关闭：先关闭 stdin，然后发送 SIGTERM，等待进程退出
     proc.stdin.end();
     proc.kill('SIGTERM');
+
+    // 等待进程退出，最多等待 5 秒
+    await new Promise<void>((resolve) => {
+      const timeout = setTimeout(() => {
+        if (!proc.killed) {
+          logger.warn('[CodexAppServer] Process did not exit after SIGTERM, sending SIGKILL');
+          proc.kill('SIGKILL');
+        }
+        resolve();
+      }, 5000);
+
+      proc.once('exit', () => {
+        clearTimeout(timeout);
+        resolve();
+      });
+    });
   }
 
   private async ensureStarted(): Promise<void> {
