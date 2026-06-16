@@ -3207,6 +3207,11 @@ async function loadDetailAgentList() {
 
     const selectEl = $('#detail-agent');
     if (selectEl && agents.length) {
+      // 清空除第一个"全部"选项之外的所有选项
+      while (selectEl.options.length > 1) {
+        selectEl.remove(1);
+      }
+
       agents.forEach(function(a) {
         const option = document.createElement('option');
         option.value = a.agent_aid;
