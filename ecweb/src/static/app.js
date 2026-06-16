@@ -225,6 +225,7 @@ const translations = {
     'usage.card.costInfo': '花费信息',
     'usage.detail.title': '模型访问明细',
     'usage.detail.agent': '智能体',
+    'usage.detail.model': '模型',
     'usage.detail.error': '查询失败',
     'usage.detail.th.time': '时间',
     'usage.detail.th.agent': '智能体',
@@ -499,6 +500,7 @@ const translations = {
     'usage.card.costInfo': 'Cost Info',
     'usage.detail.title': 'Model Access Details',
     'usage.detail.agent': 'Agent',
+    'usage.detail.model': 'Model',
     'usage.detail.error': 'Query failed',
     'usage.detail.th.time': 'Time',
     'usage.detail.th.agent': 'Agent',
@@ -3007,6 +3009,14 @@ async function loadUsageOverview(rangeType, customFrom, customTo) {
   // 保存当前时间范围到全局变量，供详细统计使用
   window._currentOverviewTimeRange = { fromTs, toTs, rangeType, customFrom, customTo };
 
+  // 时间范围变化后，刷新明细的模型列表与查询结果（重置到第一页）
+  if ($('#detail-model')) {
+    const detailPageEl = $('#detail-page');
+    if (detailPageEl) detailPageEl.value = '1';
+    loadDetailModelList();
+    queryDetailUsage();
+  }
+
   let data;
   try {
     const params = new URLSearchParams();
@@ -3142,6 +3152,8 @@ function formatDatetimeLocal(date) {
 function initDetailQuery() {
   // 填充Agent选择器
   loadDetailAgentList();
+  // 填充Model选择器（按上面总览的时间范围）
+  loadDetailModelList();
 
   // 绑定分页大小变化
   const pageSizeEl = $('#detail-page-size');
@@ -3195,6 +3207,16 @@ function initDetailQuery() {
       queryDetailUsage();
     });
   }
+
+  // 绑定Model选择器变化事件
+  const modelEl = $('#detail-model');
+  if (modelEl) {
+    modelEl.addEventListener('change', function() {
+      const pageEl = $('#detail-page');
+      if (pageEl) pageEl.value = '1';
+      queryDetailUsage();
+    });
+  }
 }
 
 async function loadDetailAgentList() {
@@ -3229,6 +3251,43 @@ async function loadDetailAgentList() {
   } catch {}
 }
 
+// 加载模型列表（按上面总览的时间范围）
+async function loadDetailModelList() {
+  const selectEl = $('#detail-model');
+  if (!selectEl) return;
+  // 记住当前选中值，刷新后尽量保持
+  const prev = selectEl.value;
+  try {
+    const timeRange = window._currentOverviewTimeRange || {};
+    const params = new URLSearchParams();
+    if (timeRange.fromTs) params.set('from', String(timeRange.fromTs));
+    if (timeRange.toTs) params.set('to', String(timeRange.toTs));
+
+    const resp = await fetch(apiUrl('api/stats/models?' + params.toString()), {
+      headers: { Authorization: 'Bearer ' + localStorage.getItem(TOKEN_KEY) }
+    });
+    if (!resp.ok) return;
+    const models = await resp.json();
+
+    // 清空除第一个"全部"选项之外的所有选项
+    while (selectEl.options.length > 1) {
+      selectEl.remove(1);
+    }
+    (models || []).forEach(function(m) {
+      const option = document.createElement('option');
+      option.value = m;
+      option.textContent = m;
+      selectEl.appendChild(option);
+    });
+    // 恢复之前的选择（若仍存在）
+    if (prev && Array.prototype.some.call(selectEl.options, function(o) { return o.value === prev; })) {
+      selectEl.value = prev;
+    } else {
+      selectEl.value = '';
+    }
+  } catch {}
+}
+
 async function queryDetailUsage() {
   // 使用总览的时间范围
   const timeRange = window._currentOverviewTimeRange || {};
@@ -3236,6 +3295,7 @@ async function queryDetailUsage() {
   const toTs = timeRange.toTs;
 
   const agentEl = $('#detail-agent');
+  const modelEl = $('#detail-model');
   const pageEl = $('#detail-page');
   const pageSizeEl = $('#detail-page-size');
 
@@ -3247,6 +3307,7 @@ async function queryDetailUsage() {
   if (fromTs) params.set('from', String(fromTs));
   if (toTs) params.set('to', String(toTs));
   if (agentEl && agentEl.value) params.set('agent', agentEl.value);
+  if (modelEl && modelEl.value) params.set('model', modelEl.value);
   params.set('limit', String(pageSize));
   params.set('offset', String(offset));
 

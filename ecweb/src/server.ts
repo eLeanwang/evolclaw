@@ -297,10 +297,11 @@ function handleStatsApi(req: http.IncomingMessage, res: http.ServerResponse): vo
     res.end(JSON.stringify({ token_stats: tokenStats, session_count: sessionCount, msg_in: msgIn, msg_out: msgOut }));
   } else if (urlPath === '/api/stats/detail') {
     // 模型访问明细查询
-    const params: { from_ts?: number; to_ts?: number; agent_aid?: string; limit?: number; offset?: number } = {};
+    const params: { from_ts?: number; to_ts?: number; agent_aid?: string; model?: string; limit?: number; offset?: number } = {};
     if (query.from) params.from_ts = Number(query.from);
     if (query.to)   params.to_ts = Number(query.to);
     if (query.agent) params.agent_aid = query.agent;
+    if (query.model) params.model = String(query.model);
     params.limit = Number(query.limit) || 50; // 默认限制50条
     params.offset = Number(query.offset) || 0; // 默认从0开始
 

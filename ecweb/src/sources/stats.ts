@@ -353,7 +353,7 @@ export function queryStatsByAgent(params: {
 
 /** 查询模型访问明细（支持分页）*/
 export function queryUsageDetail(params: {
-  from_ts?: number; to_ts?: number; agent_aid?: string; limit?: number; offset?: number;
+  from_ts?: number; to_ts?: number; agent_aid?: string; model?: string; limit?: number; offset?: number;
 }): { data: Array<{
   ts: number;
   agent_aid: string;
@@ -377,6 +377,7 @@ export function queryUsageDetail(params: {
   if (params.from_ts) { conds.push('ts >= ?'); p.push(params.from_ts); }
   if (params.to_ts)   { conds.push('ts <= ?'); p.push(params.to_ts); }
   if (params.agent_aid) { conds.push('agent_aid = ?'); p.push(params.agent_aid); }
+  if (params.model)     { conds.push('model = ?');     p.push(params.model); }
   const where = conds.length ? 'WHERE ' + conds.join(' AND ') : '';
   const limit = params.limit ?? 50;
   const offset = params.offset ?? 0;
