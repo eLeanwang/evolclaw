@@ -3,6 +3,7 @@
 const $ = (sel) => document.querySelector(sel);
 const TOKEN_KEY = 'ecWatchToken';
 const LANG_KEY = 'ecWatchLang';
+const VIEW_KEY = 'ecWatchCurrentView';
 
 // ── 国际化 (i18n) ──
 const translations = {
@@ -665,7 +666,7 @@ function initPairUI() {
 // ── WebSocket 客户端（自动重连）──
 let ws = null;
 let reconnectDelay = 1000;
-let currentView = 'agents';
+let currentView = localStorage.getItem(VIEW_KEY) || 'agents';
 let pendingSub = null;        // 重连后要恢复的订阅
 const state = { agents: null, msg: null, session: null, cache: null, system: null, triggers: null, monitor: null, gateway: null };
 
@@ -765,6 +766,7 @@ let monRange = '2m';        // Monitor 时间窗口：2m / 10m / 1h
 
 function switchView(view) {
   currentView = view;
+  localStorage.setItem(VIEW_KEY, view);
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.view === view));
   document.querySelectorAll('.view').forEach(v => v.classList.toggle('active', v.id === 'view-' + view));
   // 切换时按当前选择恢复订阅
@@ -2909,6 +2911,8 @@ function renderTriggers(data) {
 
 function startApp() {
   initTabs();
+  // 恢复保存的 tab 视图
+  switchView(currentView);
   connect();
   $('#logout-btn').onclick = () => {
     localStorage.removeItem(TOKEN_KEY);
