@@ -412,15 +412,8 @@ async function main() {
     setLogLevel(globalSettings.debug.logLevel);
   }
 
-  // 启动期 anthropic 凭证校验（用 primaryAgent 的 baseagents.claude）
-  const anthropic = resolveAnthropicConfig({
-    agents: { claude: primaryAgent.config.baseagents?.claude as any },
-  } as any);
-  logger.info('✓ Config loaded (API keys hidden)');
-
-  if (anthropic.baseUrl) {
-    logger.info(`✓ Using custom API base URL: ${anthropic.baseUrl}`);
-  }
+  // 启动期 anthropic 凭证校验已移除：runner 创建时由 AgentLoader 错误处理
+  logger.info('✓ Config loaded');
 
 
   // Store for IPC access (T10 will wire this)
