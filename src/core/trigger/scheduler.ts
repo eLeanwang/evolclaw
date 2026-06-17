@@ -1,312 +1,563 @@
+import crypto from 'crypto';
 import { CronExpressionParser } from 'cron-parser';
-import { logger as baseLogger } from '../../utils/logger.js';
-import type { Trigger, Message } from '../../types.js';
-import type { EventBus } from '../event-bus.js';
-import type { TriggerManager } from './manager.js';
-import { tryParseChannelKey } from '../channel-loader.js';
+import { logger } from '../../utils/logger.js';
+import type { TriggerDefinitionManager } from './manager.js';
+import type { TriggerRunStateStore } from './state.js';
+import type { TriggerAuditLogger } from './audit.js';
+import type { TriggerScriptExecutor } from './script-executor.js';
+import type { TriggerFeedbackDispatcher } from './feedback.js';
+import {
+  definitionRevision,
+} from './validation.js';
+import type {
+  TriggerActiveRun,
+  TriggerAuditRecord,
+  TriggerCreateFile,
+  TriggerDefinition,
+  TriggerFeedbackBranch,
+  TriggerRunPayload,
+  TriggerRuntimeResult,
+  TriggerScheduleState,
+  TriggerScriptResult,
+  TriggerSource,
+  TriggerSourceRunInfo,
+} from './types.js';
 
-const logger = {
-  info: (msg: string) => baseLogger.info(msg),
-  warn: (msg: string) => baseLogger.warn(msg),
-  debug: (msg: string) => baseLogger.debug(msg),
-};
+const MAX_TIMER_MS = 2_147_483_647;
 
-export type FireCallback = (message: Message, trigger: Trigger) => void;
-
-// Min-heap ordered by nextFireAt
-class TriggerHeap {
-  private heap: Trigger[] = [];
-
-  push(t: Trigger): void {
-    this.heap.push(t);
-    this.bubbleUp(this.heap.length - 1);
-  }
-
-  pop(): Trigger | undefined {
-    if (this.heap.length === 0) return undefined;
-    const top = this.heap[0];
-    const last = this.heap.pop()!;
-    if (this.heap.length > 0) {
-      this.heap[0] = last;
-      this.sinkDown(0);
-    }
-    return top;
-  }
-
-  peek(): Trigger | undefined {
-    return this.heap[0];
-  }
-
-  remove(id: string): boolean {
-    const idx = this.heap.findIndex(t => t.id === id);
-    if (idx === -1) return false;
-    const last = this.heap.pop()!;
-    if (idx < this.heap.length) {
-      this.heap[idx] = last;
-      this.bubbleUp(idx);
-      this.sinkDown(idx);
-    }
-    return true;
-  }
-
-  private bubbleUp(i: number): void {
-    while (i > 0) {
-      const parent = (i - 1) >> 1;
-      if (this.heap[parent].nextFireAt <= this.heap[i].nextFireAt) break;
-      [this.heap[parent], this.heap[i]] = [this.heap[i], this.heap[parent]];
-      i = parent;
-    }
-  }
-
-  private sinkDown(i: number): void {
-    const n = this.heap.length;
-    while (true) {
-      let smallest = i;
-      const l = 2 * i + 1, r = 2 * i + 2;
-      if (l < n && this.heap[l].nextFireAt < this.heap[smallest].nextFireAt) smallest = l;
-      if (r < n && this.heap[r].nextFireAt < this.heap[smallest].nextFireAt) smallest = r;
-      if (smallest === i) break;
-      [this.heap[smallest], this.heap[i]] = [this.heap[i], this.heap[smallest]];
-      i = smallest;
-    }
-  }
-
-  get size(): number { return this.heap.length; }
+interface RunningRun {
+  run: TriggerActiveRun;
+  controller: AbortController;
 }
 
-/**
- * Calculate the next fire timestamp for a trigger.
- *
- * For `delay` type: `now` is the reference point — returns `now + delayMs`.
- *   Pass `Date.now()` at registration time to get the original fire time.
- *   Do NOT pass a stored `nextFireAt` as `now` — that would double-add the delay.
- * For `at` type: `now` is ignored; returns the absolute ISO timestamp.
- * For `cron` type: returns the next occurrence after `now`.
- */
-export function calcNextFireAt(scheduleType: string, scheduleValue: string, now = Date.now()): number {
-  if (scheduleType === 'delay') {
-    return now + parseInt(scheduleValue);
-  }
-  if (scheduleType === 'at') {
-    return new Date(scheduleValue).getTime();
-  }
-  // cron
-  const interval = CronExpressionParser.parse(scheduleValue, { currentDate: new Date(now) });
-  return interval.next().getTime();
-}
-
-export class TriggerScheduler {
-  private heap = new TriggerHeap();
-  private timer: ReturnType<typeof setTimeout> | null = null;
-  private inflightCron = new Set<string>(); // trigger IDs currently executing (cron)
-  private fireCallback?: FireCallback;
+export class TriggerRuntimeScheduler {
+  private timers = new Map<string, ReturnType<typeof setTimeout>>();
+  private running = new Map<string, Map<string, RunningRun>>();
+  private initialized = false;
 
   constructor(
-    private aid: string,
-    private manager: TriggerManager,
-    private eventBus: EventBus,
+    private manager: TriggerDefinitionManager,
+    private state: TriggerRunStateStore,
+    private audit: TriggerAuditLogger,
+    private scriptExecutor: TriggerScriptExecutor,
+    private feedback: TriggerFeedbackDispatcher,
   ) {}
 
-  setFireCallback(cb: FireCallback): void {
-    this.fireCallback = cb;
-  }
-
   async init(): Promise<void> {
-    const triggers = this.manager.load();
-    const now = Date.now();
-
-    for (const t of triggers) {
-      if (t.scheduleType === 'cron') {
-        // Recalculate next fire from now (don't backfill missed cron runs)
-        const next = calcNextFireAt('cron', t.scheduleValue, now);
-        if (next !== t.nextFireAt) {
-          this.manager.updateNextFireAt(t.id, next);
-          t.nextFireAt = next;
-        }
-        this.heap.push(t);
-      } else {
-        // delay/at: if missed, fire immediately (backfill)
-        if (t.nextFireAt < now) {
-          logger.info(`[${this.aid}] Backfilling missed trigger: ${t.name} (${t.id})`);
-          this.heap.push({ ...t, nextFireAt: now });
-        } else {
-          this.heap.push(t);
-        }
-      }
+    this.stop();
+    this.recoverOpenRuns();
+    for (const definition of this.manager.list()) {
+      this.schedule(definition);
     }
-
-    this.resetTimer();
-    logger.info(`[${this.aid}] Scheduler initialized with ${triggers.length} trigger(s)`);
-  }
-
-  register(trigger: Trigger): void {
-    this.heap.push(trigger);
-    this.resetTimer();
-    this.eventBus.publish({ type: 'trigger:registered', triggerId: trigger.id, name: trigger.name, peerId: trigger.createdByPeerId, targetChannel: trigger.targetChannel, targetChannelId: trigger.targetChannelId, scheduleType: trigger.scheduleType, scheduleValue: trigger.scheduleValue });
-  }
-
-  cancel(id: string): void {
-    this.heap.remove(id);
-    this.inflightCron.delete(id);
-    this.resetTimer();
-  }
-
-  update(trigger: Trigger): void {
-    this.heap.remove(trigger.id);
-    this.heap.push(trigger);
-    this.resetTimer();
-    this.eventBus.publish({ type: 'trigger:updated', triggerId: trigger.id, name: trigger.name, peerId: trigger.createdByPeerId, scheduleType: trigger.scheduleType, scheduleValue: trigger.scheduleValue });
+    this.initialized = true;
+    logger.info(`[Trigger] scheduler initialized for ${this.manager.agentAid}`);
   }
 
   stop(): void {
-    if (this.timer) {
-      clearTimeout(this.timer);
-      this.timer = null;
+    for (const timer of this.timers.values()) clearTimeout(timer);
+    this.timers.clear();
+    for (const runs of this.running.values()) {
+      for (const runtime of runs.values()) runtime.controller.abort();
     }
-    this.inflightCron.clear();
+    this.running.clear();
+    this.initialized = false;
   }
 
-  private resetTimer(): void {
-    if (this.timer) {
-      clearTimeout(this.timer);
-      this.timer = null;
-    }
-    const top = this.heap.peek();
-    if (!top) return;
-    const delay = Math.max(0, top.nextFireAt - Date.now());
-    this.timer = setTimeout(() => this.onFire(), delay).unref();
+  list(opts: { all?: boolean } = {}): TriggerDefinition[] {
+    return this.manager.list(opts);
   }
 
-  private onFire(): void {
-    this.timer = null;
-    const now = Date.now();
+  show(triggerId: string): { definition: TriggerDefinition; active: TriggerActiveRun[]; schedule?: TriggerScheduleState; recentRuns: TriggerAuditRecord[] } {
+    return {
+      definition: this.manager.require(triggerId),
+      active: this.state.list(triggerId),
+      schedule: this.state.readSchedule(triggerId),
+      recentRuns: this.audit.recent(triggerId, 10),
+    };
+  }
 
-    // Loop guard reads a LIVE clock (not the frozen `now`): if rescheduling ever regresses
-    // and pushes an occurrence back inside the window, re-reading the clock each iteration
-    // still lets time advance past it so the loop drains and terminates.
-    while (this.heap.peek() && this.heap.peek()!.nextFireAt <= Date.now() + 50) {
-      const trigger = this.heap.pop()!;
+  create(input: unknown, files: TriggerCreateFile[] = [], opts: { enable?: boolean } = {}): TriggerDefinition {
+    const definition = this.manager.create(input, files, opts);
+    this.state.clearSchedule(definition.id);
+    if (definition.enabled && this.initialized) this.schedule(definition);
+    return definition;
+  }
 
-      if (trigger.scheduleType === 'cron' && this.inflightCron.has(trigger.id)) {
-        // Previous run still in flight — skip this occurrence, reschedule the next one.
-        logger.warn(`[${this.aid}] Cron trigger ${trigger.name} still running, skipping`);
-        this.eventBus.publish({ type: 'trigger:skipped', triggerId: trigger.id, name: trigger.name, reason: 'overlap', targetChannel: trigger.targetChannel, targetChannelId: trigger.targetChannelId });
-        const next = this.nextCronFireAt(trigger.scheduleValue, Date.now());
-        this.manager.updateNextFireAt(trigger.id, next);
-        this.heap.push({ ...trigger, nextFireAt: next });
-        continue;
+  update(triggerId: string, input: unknown, files: TriggerCreateFile[] = []): TriggerDefinition {
+    const definition = this.manager.update(triggerId, input, files);
+    this.clearTimer(triggerId);
+    this.state.clearSchedule(triggerId);
+    if (definition.enabled && this.initialized) this.schedule(definition);
+    return definition;
+  }
+
+  setEnabled(triggerId: string, enabled: boolean): TriggerDefinition {
+    const definition = this.manager.setEnabled(triggerId, enabled);
+    this.clearTimer(triggerId);
+    this.state.clearSchedule(triggerId);
+    if (definition.enabled && this.initialized) this.schedule(definition);
+    return definition;
+  }
+
+  cancel(triggerId: string): TriggerDefinition {
+    return this.setEnabled(triggerId, false);
+  }
+
+  async run(triggerId: string, opts: { dryRun?: boolean } = {}): Promise<TriggerRuntimeResult> {
+    const definition = this.manager.require(triggerId);
+    return await this.startRun(definition, {
+      firedAt: Date.now(),
+      payload: this.sourcePayload(definition.source),
+      dryRun: opts.dryRun,
+    });
+  }
+
+  private schedule(definition: TriggerDefinition): void {
+    this.clearTimer(definition.id);
+    const scheduledAt = this.resolveScheduledAt(definition);
+    if (scheduledAt === null) {
+      if (this.isOneShot(definition.source) && definition.reliability.missedPolicy === 'skip') {
+        this.writeSkippedAudit(definition, undefined, Date.now(), 'missed_skip');
+        this.setEnabled(definition.id, false);
       }
+      return;
+    }
+    const now = Date.now();
+    if (this.isPeriodic(definition.source) && scheduledAt < now - 1000 && definition.reliability.missedPolicy === 'skip') {
+      this.writeSkippedAudit(definition, scheduledAt, now, 'missed_skip');
+      this.advancePeriodicSchedule(definition, scheduledAt, now);
+      this.schedule(definition);
+      return;
+    }
+    const rawDelay = Math.max(0, scheduledAt - Date.now());
+    const delay = Math.min(MAX_TIMER_MS, rawDelay);
+    const timer = setTimeout(() => {
+      this.timers.delete(definition.id);
+      if (scheduledAt - Date.now() > 1000) {
+        this.schedule(definition);
+        return;
+      }
+      void this.handleScheduledFire(definition.id, scheduledAt);
+    }, delay);
+    timer.unref?.();
+    this.timers.set(definition.id, timer);
+  }
 
-      this.fireTrigger(trigger, now);
+  private async handleScheduledFire(triggerId: string, scheduledAt: number): Promise<void> {
+    const definition = this.manager.get(triggerId);
+    if (!definition?.enabled) return;
+    const firedAt = Date.now();
+    if (this.isOneShot(definition.source) && scheduledAt < firedAt - 1000 && definition.reliability.missedPolicy === 'skip') {
+      this.writeSkippedAudit(definition, scheduledAt, firedAt, 'missed_skip');
+      this.setEnabled(definition.id, false);
+      return;
+    }
+    if (this.isPeriodic(definition.source)) {
+      if (scheduledAt < firedAt - 1000 && definition.reliability.missedPolicy === 'skip') {
+        this.writeSkippedAudit(definition, scheduledAt, firedAt, 'missed_skip');
+        this.advancePeriodicSchedule(definition, scheduledAt, firedAt);
+        this.schedule(definition);
+        return;
+      }
+      this.advancePeriodicSchedule(definition, scheduledAt, firedAt);
     }
 
-    this.resetTimer();
-  }
+    const runPromise = this.startRun(definition, {
+      scheduledAt,
+      firedAt,
+      payload: this.sourcePayload(definition.source),
+    });
 
-  /**
-   * Next cron occurrence strictly outside the firing window.
-   *
-   * cron-parser returns the next match at-or-after the reference instant. When the timer
-   * wakes a hair early — e.g. 08:59:59.999 for a `0 9 * * *` trigger — the "next" occurrence
-   * computes to 09:00:00.000, only ~1ms ahead and inside onFire's `<= now + 50` window. That
-   * occurrence gets popped and re-fired in the same pass, producing a tight loop. Recomputing
-   * from past the window forces the genuine next occurrence (e.g. tomorrow 09:00).
-   */
-  private nextCronFireAt(scheduleValue: string, ref: number): number {
-    let next = calcNextFireAt('cron', scheduleValue, ref);
-    if (next <= ref + 50) next = calcNextFireAt('cron', scheduleValue, ref + 51);
-    return next;
-  }
-
-  private fireTrigger(trigger: Trigger, now: number): void {
-    // 触发时刻以磁盘为真相源：heap 里的副本可能因外部编辑而过期。
-    // 用 id 重读磁盘最新版，读盘失败则回退到 heap 副本。
-    const fresh = this.manager.getByIdFresh(trigger.id) ?? trigger;
-
-    // 归属防御：schedulerAid 与本 scheduler 的 aid 不一致 → 错位数据，跳过不执行。
-    // 字段为空（旧数据未补）则跳过校验，保持向后兼容。
-    if (fresh.schedulerAid && fresh.schedulerAid !== this.aid) {
-      logger.warn(`[${this.aid}] schedulerAid mismatch: trigger ${fresh.name} (${fresh.id}) owned by ${fresh.schedulerAid}, skipping`);
+    if (this.isPeriodic(definition.source)) {
+      this.schedule(definition);
+      await runPromise;
       return;
     }
 
-    const messageId = `trigger:${fresh.id}:${now}`;
-    const msg = this.buildSyntheticMessage(fresh, messageId, now);
-
-    logger.info(`[${this.aid}] Firing trigger: ${fresh.name} (${fresh.id})`);
-
-    // Update stats before moving to done so history captures the updated count
-    this.manager.updateFireStats(fresh.id, now);
-
-    if (fresh.scheduleType === 'cron') {
-      this.inflightCron.add(fresh.id);
-      // Re-schedule next occurrence (outside the firing window — see nextCronFireAt)
-      const next = this.nextCronFireAt(fresh.scheduleValue, now);
-      this.manager.updateNextFireAt(fresh.id, next);
-      this.heap.push({ ...fresh, nextFireAt: next });
-    } else {
-      // delay/at: one-shot, move to done
-      this.manager.moveToDone(fresh.id, 'fired');
-    }
-
-    this.eventBus.publish({ type: 'trigger:fired', triggerId: fresh.id, name: fresh.name, fireTime: now, targetChannel: fresh.targetChannel, targetChannelId: fresh.targetChannelId, scheduleType: fresh.scheduleType });
-
-    if (this.fireCallback) {
-      this.fireCallback(msg, fresh);
-    }
+    await runPromise;
+    const fresh = this.manager.get(triggerId);
+    if (fresh?.enabled) this.setEnabled(triggerId, false);
   }
 
-  // Called by MessageProcessor when a trigger message completes/fails/is interrupted
-  onTriggerComplete(triggerId: string, outcome: 'completed' | 'failed' | 'interrupted'): void {
-    this.inflightCron.delete(triggerId);
-    this.manager.updateResult(triggerId, outcome);
-  }
+  private async startRun(definition: TriggerDefinition, payload: TriggerRunPayload): Promise<TriggerRuntimeResult> {
+    const firedAt = payload.firedAt;
+    const runId = `run_${firedAt}_${crypto.randomBytes(3).toString('hex')}`;
+    const source = this.buildSourceInfo(definition.source, firedAt, payload.scheduledAt, payload.payload);
 
-  private buildSyntheticMessage(trigger: Trigger, messageId: string, fireTime: number): Message {
-    const targetChatType = this.resolveTriggerChatType(trigger);
-    const base: Message = {
-      channel: trigger.targetChannel,
-      channelType: trigger.targetChannelType,
-      channelId: trigger.targetChannelId,
-      selfAID: tryParseChannelKey(trigger.targetChannel)?.selfAID ?? this.aid,
-      threadId: '',
-      agentId: trigger.agentId,
-      chatType: targetChatType,
-      ...(targetChatType === 'group' ? { groupId: trigger.targetChannelId } : {}),
-      peerId: `__trigger__:${trigger.id}`,  // unique per trigger to prevent greedy merge
-      content: trigger.prompt,
-      messageId,
-      timestamp: Date.now(),
-      source: 'trigger',
+    if (!payload.dryRun) {
+      const conflict = this.checkConcurrency(definition, runId, source);
+      if (conflict) return conflict;
+    }
+
+    const startedAt = Date.now();
+    const controller = new AbortController();
+    const activeRun: TriggerActiveRun = {
+      phase: 'running',
+      triggerId: definition.id,
+      runId,
+      startedAt,
+      events: [{ seq: 0, event: 'run.started', ts: startedAt }],
     };
 
-    const metaBase = { triggerName: trigger.name, fireTime };
-    if (trigger.targetSessionStrategy === 'current') {
-      base.triggerMeta = { triggerId: trigger.id, boundSessionId: trigger.boundSessionId, ...metaBase };
-    } else if (trigger.targetSessionStrategy === 'thread') {
-      if (trigger.threadKind === 'feishu' && trigger.pendingThread) {
-        base.triggerMeta = { triggerId: trigger.id, pendingThread: true, rootMessageId: trigger.rootMessageId, ...metaBase };
-        // threadId intentionally empty — first fire builds the thread via reply_in_thread
-      } else {
-        base.threadId = trigger.targetThreadId ?? '';
-        base.triggerMeta = { triggerId: trigger.id, ...metaBase };
+    if (!payload.dryRun) {
+      this.addRunning(definition.id, runId, { run: activeRun, controller });
+      this.state.upsert(definition.id, activeRun);
+    }
+
+    let script: TriggerScriptResult | null = null;
+    let branch: TriggerFeedbackBranch = 'onSuccess';
+    let result: Record<string, unknown> | undefined;
+    let error: { code?: string; message?: string } | undefined;
+
+    try {
+      script = await this.runScriptWithRetry(definition, runId, firedAt, source.payload, controller.signal);
+      if (!payload.dryRun && !this.isRunning(definition.id, runId)) {
+        return {
+          ok: false,
+          runId,
+          triggerId: definition.id,
+          status: 'failed',
+          reason: controller.signal.aborted ? 'replaced' : 'cancelled',
+        };
       }
-    } else {
-      // latest
-      base.triggerMeta = { triggerId: trigger.id, ...metaBase };
-    }
+      if (script.error || script.exitCode !== 0) {
+        branch = 'onFailure';
+        error = { code: script.error?.code || 'script_error', message: script.error?.message || 'script failed' };
+      } else {
+        result = script.result ?? {};
+        branch = result.matched === false ? 'onNoop' : 'onSuccess';
+      }
 
-    return base;
+      if (!payload.dryRun) {
+        this.state.appendEvent(definition.id, runId, {
+          event: script.error ? 'script.failed' : 'script.completed',
+          ts: Date.now(),
+          exitCode: script.exitCode,
+        });
+        this.state.setPhase(definition.id, runId, 'feedback-pending', {
+          deadlineAt: Date.now() + 30_000,
+        });
+        this.state.appendEvent(definition.id, runId, {
+          event: 'feedback.pending',
+          ts: Date.now(),
+          branch,
+        });
+      }
+
+      const action = branch === 'onNoop'
+        ? (definition.feedback.onNoop ?? { mode: 'none' as const })
+        : definition.feedback[branch];
+      const feedbackResult = await this.feedback.dispatch({
+        trigger: definition,
+        runId,
+        firedAt,
+        branch,
+        action,
+        result,
+        error,
+        dryRun: payload.dryRun,
+      });
+
+      const audit = this.buildAudit({
+        definition,
+        runId,
+        startedAt,
+        status: payload.dryRun ? 'dry-run' : feedbackResult.status,
+        reason: feedbackResult.reason,
+        source,
+        script,
+        feedback: feedbackResult.feedback,
+        effects: feedbackResult.effects,
+        error: feedbackResult.error,
+      });
+
+      if (!payload.dryRun) {
+        this.audit.write(audit);
+        this.finishRun(definition.id, runId);
+      }
+
+      return {
+        ok: feedbackResult.status !== 'failed',
+        runId,
+        triggerId: definition.id,
+        status: audit.status,
+        reason: audit.reason,
+        audit,
+        error: audit.error?.message,
+      };
+    } catch (err: any) {
+      const message = err?.message || String(err);
+      const audit = this.buildAudit({
+        definition,
+        runId,
+        startedAt,
+        status: 'failed',
+        reason: 'daemon_error',
+        source,
+        script,
+        feedback: null,
+        effects: [],
+        error: { code: 'daemon_error', message },
+      });
+      if (!payload.dryRun) {
+        this.audit.write(audit);
+        this.finishRun(definition.id, runId);
+      }
+      return { ok: false, runId, triggerId: definition.id, status: 'failed', reason: 'daemon_error', audit, error: message };
+    }
   }
 
-  private resolveTriggerChatType(trigger: Trigger): 'private' | 'group' {
-    if (trigger.targetChatType === 'group' || trigger.targetChatType === 'private') {
-      return trigger.targetChatType;
+  private async runScriptWithRetry(
+    definition: TriggerDefinition,
+    runId: string,
+    firedAt: number,
+    sourcePayload: Record<string, unknown>,
+    signal: AbortSignal,
+  ): Promise<TriggerScriptResult> {
+    const maxAttempts = definition.reliability.scriptRetry.maxAttempts;
+    const backoffMs = definition.reliability.scriptRetry.backoffMs;
+    let last: TriggerScriptResult | undefined;
+    for (let attempt = 0; attempt <= maxAttempts; attempt++) {
+      last = await this.scriptExecutor.execute({
+        trigger: definition,
+        triggerDir: this.manager.triggerDir(definition.id),
+        runId,
+        firedAt,
+        sourcePayload,
+        signal,
+      });
+      if (!last.error && last.exitCode === 0) return last;
+      if (attempt < maxAttempts && !signal.aborted) await sleep(backoffMs);
     }
-    // Backward-compatible fallback for old trigger records that predate targetChatType.
-    if (trigger.targetChannelType === 'aun' && trigger.targetChannelId.includes('/')) {
-      return 'group';
-    }
-    return 'private';
+    return last!;
   }
+
+  private checkConcurrency(definition: TriggerDefinition, nextRunId: string, source: TriggerSourceRunInfo): TriggerRuntimeResult | undefined {
+    const runs = this.running.get(definition.id);
+    if (!runs || runs.size === 0 || definition.reliability.concurrency === 'allow') return undefined;
+    const first = runs.values().next().value as RunningRun | undefined;
+    const conflictRunId = first?.run.runId;
+
+    if (definition.reliability.concurrency === 'forbid') {
+      this.writeSkippedAudit(definition, source.scheduledAt, source.firedAt, 'concurrency_forbid', conflictRunId);
+      return {
+        ok: true,
+        runId: nextRunId,
+        triggerId: definition.id,
+        status: 'skipped',
+        reason: 'concurrency_forbid',
+      };
+    }
+
+    for (const [runId, runtime] of runs.entries()) {
+      runtime.controller.abort();
+      const audit = this.buildAudit({
+        definition,
+        runId,
+        startedAt: runtime.run.startedAt,
+        status: 'failed',
+        reason: 'replaced',
+        source,
+        script: null,
+        feedback: null,
+        effects: [],
+        error: { code: 'replaced', message: `run replaced by ${nextRunId}` },
+      });
+      this.audit.write(audit);
+      this.state.remove(definition.id, runId);
+    }
+    this.running.delete(definition.id);
+    return undefined;
+  }
+
+  private recoverOpenRuns(): void {
+    for (const definition of this.manager.list({ all: true })) {
+      const activeRuns = this.state.list(definition.id);
+      if (activeRuns.length === 0) continue;
+      for (const run of activeRuns) {
+        const status = run.phase === 'feedback-pending' ? 'skipped' : 'failed';
+        const audit = this.buildAudit({
+          definition,
+          runId: run.runId,
+          startedAt: run.startedAt,
+          status,
+          reason: 'daemon_restart',
+          source: this.buildSourceInfo(definition.source, run.startedAt, run.startedAt, this.sourcePayload(definition.source)),
+          script: null,
+          feedback: null,
+          effects: [],
+          error: status === 'failed' ? { code: 'daemon_restart', message: 'daemon restarted while run was open' } : null,
+        });
+        this.audit.write(audit);
+      }
+      this.state.clear(definition.id);
+    }
+  }
+
+  private resolveScheduledAt(definition: TriggerDefinition): number | null {
+    const now = Date.now();
+    switch (definition.source.type) {
+      case 'delay': {
+        const at = definition.createdAt + definition.source.afterMs;
+        return at <= now && definition.reliability.missedPolicy === 'skip' ? null : Math.max(at, now);
+      }
+      case 'at': {
+        const at = new Date(definition.source.at).getTime();
+        return at <= now && definition.reliability.missedPolicy === 'skip' ? null : Math.max(at, now);
+      }
+      case 'interval':
+      case 'cron': {
+        const signature = this.sourceSignature(definition.source);
+        const state = this.state.readSchedule(definition.id);
+        if (state?.sourceSignature === signature) return state.nextFireAt;
+        const nextFireAt = this.nextPeriodicFireAt(definition.source, now);
+        this.writeScheduleCursor(definition, nextFireAt, signature);
+        return nextFireAt;
+      }
+    }
+  }
+
+  private advancePeriodicSchedule(definition: TriggerDefinition, scheduledAt: number, firedAt: number): void {
+    if (!this.isPeriodic(definition.source)) return;
+    const missed = scheduledAt < firedAt - 1000;
+    const ref = missed ? firedAt : scheduledAt;
+    let nextFireAt = this.nextPeriodicFireAt(definition.source, ref);
+    const now = Date.now();
+    if (nextFireAt <= now && missed) {
+      nextFireAt = this.nextPeriodicFireAt(definition.source, now);
+    }
+    this.writeScheduleCursor(definition, nextFireAt);
+  }
+
+  private nextPeriodicFireAt(source: Extract<TriggerSource, { type: 'cron' | 'interval' }>, ref: number): number {
+    if (source.type === 'interval') return ref + source.everyMs;
+    return this.nextCronFireAt(source, ref);
+  }
+
+  private nextCronFireAt(source: Extract<TriggerSource, { type: 'cron' }>, ref: number): number {
+    const interval = CronExpressionParser.parse(source.expression, {
+      currentDate: new Date(ref),
+      tz: source.timezone,
+    });
+    return interval.next().getTime();
+  }
+
+  private writeScheduleCursor(definition: TriggerDefinition, nextFireAt: number, signature = this.sourceSignature(definition.source)): void {
+    this.state.writeSchedule(definition.id, {
+      nextFireAt,
+      updatedAt: Date.now(),
+      sourceSignature: signature,
+    });
+  }
+
+  private sourceSignature(source: TriggerSource): string {
+    return JSON.stringify(source);
+  }
+
+  private sourcePayload(source: TriggerSource): Record<string, unknown> {
+    switch (source.type) {
+      case 'delay': return { afterMs: source.afterMs };
+      case 'at': return { at: source.at };
+      case 'cron': return { expression: source.expression, timezone: source.timezone };
+      case 'interval': return { everyMs: source.everyMs };
+    }
+  }
+
+  private buildSourceInfo(source: TriggerSource, firedAt: number, scheduledAt?: number, payload?: Record<string, unknown>): TriggerSourceRunInfo {
+    return {
+      type: source.type,
+      scheduledAt,
+      firedAt,
+      payload: payload ?? this.sourcePayload(source),
+    };
+  }
+
+  private buildAudit(input: {
+    definition: TriggerDefinition;
+    runId: string;
+    startedAt: number;
+    status: TriggerAuditRecord['status'];
+    reason?: string;
+    source: TriggerSourceRunInfo;
+    script: TriggerScriptResult | null;
+    feedback: TriggerAuditRecord['feedback'];
+    effects: TriggerAuditRecord['effects'];
+    error: TriggerAuditRecord['error'];
+    conflictRunId?: string;
+  }): TriggerAuditRecord {
+    return {
+      runId: input.runId,
+      triggerId: input.definition.id,
+      agentAid: input.definition.agentAid,
+      startedAt: input.startedAt,
+      finishedAt: Date.now(),
+      status: input.status,
+      reason: input.reason,
+      conflictRunId: input.conflictRunId,
+      definition: {
+        schemaVersion: 1,
+        revision: definitionRevision(input.definition),
+        name: input.definition.name,
+      },
+      source: input.source,
+      script: input.script,
+      feedback: input.feedback,
+      effects: input.effects,
+      error: input.error,
+    };
+  }
+
+  private writeSkippedAudit(definition: TriggerDefinition, scheduledAt: number | undefined, firedAt: number, reason: string, conflictRunId?: string): void {
+    this.audit.write(this.buildAudit({
+      definition,
+      runId: `run_${firedAt}_${crypto.randomBytes(3).toString('hex')}`,
+      startedAt: firedAt,
+      status: 'skipped',
+      reason,
+      source: this.buildSourceInfo(definition.source, firedAt, scheduledAt, this.sourcePayload(definition.source)),
+      script: null,
+      feedback: null,
+      effects: [],
+      error: null,
+      conflictRunId,
+    }));
+  }
+
+  private isOneShot(source: TriggerSource): boolean {
+    return source.type === 'delay' || source.type === 'at';
+  }
+
+  private isPeriodic(source: TriggerSource): source is Extract<TriggerSource, { type: 'cron' | 'interval' }> {
+    return source.type === 'cron' || source.type === 'interval';
+  }
+
+  private addRunning(triggerId: string, runId: string, runtime: RunningRun): void {
+    let runs = this.running.get(triggerId);
+    if (!runs) {
+      runs = new Map();
+      this.running.set(triggerId, runs);
+    }
+    runs.set(runId, runtime);
+  }
+
+  private finishRun(triggerId: string, runId: string): void {
+    const runs = this.running.get(triggerId);
+    runs?.delete(runId);
+    if (runs && runs.size === 0) this.running.delete(triggerId);
+    this.state.remove(triggerId, runId);
+  }
+
+  private isRunning(triggerId: string, runId: string): boolean {
+    return this.running.get(triggerId)?.has(runId) === true;
+  }
+
+  private clearTimer(triggerId: string): void {
+    const timer = this.timers.get(triggerId);
+    if (timer) clearTimeout(timer);
+    this.timers.delete(triggerId);
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }

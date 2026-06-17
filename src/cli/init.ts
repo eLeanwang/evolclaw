@@ -294,6 +294,24 @@ export async function initTail(): Promise<void> {
       }
     }
   }
+
+  // 初始化完成总结
+  console.log('\n✓ EvolClaw 初始化完成');
+  const finalCfg = loadEvolclawConfig();
+  console.log(`  控制 AID: ${finalCfg.aid || '(未配置)'}`);
+  console.log(`  管理者: ${finalCfg.owners?.join(', ') || '(未配置)'}`);
+  console.log(`  ECWeb 自启动: ${finalCfg.ecweb?.enabled ? '已启用' : '已禁用'}`);
+
+  const { agents: finalAgents } = loadAllAgents();
+  if (finalAgents.length === 0) {
+    console.log('\n📌 下一步：创建 agent');
+    console.log('  evolclaw agent new <your-aid>.agentid.pub');
+    console.log('  evolclaw init feishu    # 绑定飞书');
+    console.log('  evolclaw start          # 启动服务');
+  } else {
+    console.log(`\n✓ 已有 ${finalAgents.length} 个 agent，可直接运行:`);
+    console.log('  evolclaw start');
+  }
 }
 
 // ==================== Instance Selection (shared with init-channel) ====================

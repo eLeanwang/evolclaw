@@ -36,17 +36,21 @@ import { AgentLoader } from './core/baseagent-loader.js';
 import { EvolAgentRegistry, type ReloadHooks } from './core/evolagent-registry.js';
 import { buildReloadHooks } from './core/channel-loader.js';
 import { IpcServer, IpcStatusResponse, ChannelStatus } from './ipc.js';
-import { ChannelAdapter, Message, OutboundEnvelope, OutboundPayload, Trigger } from './types.js';
+import { ChannelAdapter, Message, OutboundEnvelope, OutboundPayload } from './types.js';
 import { logger, setLogLevel } from './utils/logger.js';
 import { fetchEcwebPairCode } from './utils/ecweb-pair.js';
 import { writeMain, removeAll, isMainWinner, scanInstances } from './utils/instance-registry.js';
 import { detectDuplicates } from './core/evolagent-registry.js';
 import { loadKitManifest, cleanEckDebug, invalidateKitCache } from './eck/kit-renderer.js';
 import { initEck } from './eck/init.js';
-import { TriggerManager } from './core/trigger/manager.js';
-import { TriggerScheduler, calcNextFireAt } from './core/trigger/scheduler.js';
-import { agentTriggersDir } from './paths.js';
-import { isLinkedInstall } from './utils/npm-ops.js';
+import { TriggerDefinitionManager } from './core/trigger/manager.js';
+import { TriggerRunStateStore } from './core/trigger/state.js';
+import { TriggerAuditLogger } from './core/trigger/audit.js';
+import { TriggerScriptExecutor } from './core/trigger/script-executor.js';
+import { TriggerFeedbackDispatcher } from './core/trigger/feedback.js';
+import { TriggerRuntimeScheduler } from './core/trigger/scheduler.js';
+import { normalizeTriggerDefinition } from './core/trigger/validation.js';
+import type { TriggerDefinition, TriggerFeedbackAction } from './core/trigger/types.js';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
@@ -550,15 +554,6 @@ async function main() {
   const channelInstances = evolagentInstances;
   logger.info(`✓ Created ${channelInstances.length} channel instance(s)`);
 
-  // 初始化触发器调度器（每个 EvolAgent 独立）
-  for (const agent of agentRegistry.runnableAgents()) {
-    const triggersDir = agentTriggersDir(agent.aid);
-    const triggerManager = new TriggerManager(agent.aid, triggersDir);
-    const triggerScheduler = new TriggerScheduler(agent.aid, triggerManager, eventBus);
-    agent.triggerManager = triggerManager;
-    agent.triggerScheduler = triggerScheduler;
-  }
-
   // 创建命令处理器
   const cmdHandler = new CommandHandler(sessionManager, agentMap, messageCache, eventBus, primaryRunnerKey);
   cmdHandler.setPermissionGateway(permissionGateway);
@@ -635,117 +630,62 @@ async function main() {
   cmdHandler.setMessageQueue(messageQueue);
   processor.setMessageQueue(messageQueue);
 
-  // 启动触发器调度器，设置 fireCallback 投递合成消息
-  for (const agent of agentRegistry.runnableAgents()) {
-    if (!agent.triggerScheduler || !agent.triggerManager) continue;
-    const scheduler = agent.triggerScheduler;
-    const primaryProjectPath = agent.config.projects?.defaultPath ?? primaryAgent.projectPath;
-    function scheduleRetryWhenIdle(boundId: string, msg: Message, trigger: Trigger) {
-      let done = false;
-      const handler = (ev: GatewayEvent) => {
-        if ((ev as any).sessionId !== boundId || done) return;
-        done = true;
-        clearTimeout(timer);
-        eventBus.unsubscribe('task:completed', handler);
-        retry();
-      };
-      const timer = setTimeout(() => {
-        if (done) return;
-        done = true;
-        eventBus.unsubscribe('task:completed', handler);
-        retry();
-      }, 30_000);
-      eventBus.subscribe('task:completed', handler);
-
-      function retry() {
-        if (messageQueue.isProcessing(boundId)) { scheduleRetryWhenIdle(boundId, msg, trigger); return; }
-        sessionManager.getSessionById(boundId).then(bound => {
-          if (!bound) { logger.warn(`[Trigger] Bound session ${boundId} deleted, aborting`); return; }
-          messageQueue.enqueue(boundId, msg, bound.projectPath, { interruptible: false, sessionKeyField: bound.sessionKey })
-            .catch(err => logger.error(`[Trigger] Retry failed ${trigger.id}: ${err}`));
-        });
+  // Trigger runtime: daemon-level script + feedback scheduler.
+  const triggerSchedulers = new Map<string, TriggerRuntimeScheduler>();
+  const triggerAudit = new TriggerAuditLogger();
+  const triggerScriptExecutor = new TriggerScriptExecutor();
+  const triggerStartupAgents = [...agentRegistry.runnableAgents()];
+  const getTriggerChannel = (agentAid: string, channelType: string, channelName?: string) => {
+    const agent = agentRegistry.get(agentAid);
+    if (!agent) return undefined;
+    const inst = channelInstances.find((candidate) => {
+      const parsed = tryParseChannelKey(candidate.adapter.channelKey);
+      const type = candidate.channelType || parsed?.type || candidate.adapter.channelName;
+      if (channelName && candidate.adapter.channelName !== channelName && candidate.adapter.channelKey !== channelName) return false;
+      return parsed?.selfAID === agentAid && type === channelType;
+    });
+    if (!inst) return undefined;
+    return {
+      adapter: inst.adapter,
+      agentAid,
+      agentName: agent.aid,
+      projectPath: agent.projectPath,
+      baseagent: agent.baseagent,
+    };
+  };
+  const validateTriggerFeedbackChannels = (definition: TriggerDefinition) => {
+    const actions: TriggerFeedbackAction[] = [
+      definition.feedback.onSuccess,
+      definition.feedback.onNoop,
+      definition.feedback.onFailure,
+    ].filter((a): a is TriggerFeedbackAction => !!a);
+    for (const action of actions) {
+      if (action.mode === 'none') continue;
+      const target = action.target;
+      if (!target) throw new Error(`feedback target missing for ${action.mode}`);
+      if (!getTriggerChannel(definition.agentAid, target.channelType, target.channelName)) {
+        throw new Error(`agent ${definition.agentAid} has no configured channel ${target.channelName ?? target.channelType}`);
       }
     }
-
-    scheduler.setFireCallback((msg, trigger) => {
-      const onEnqueueFailed = (err: any) => {
-        const error = err instanceof Error ? err.message : String(err);
-        logger.error(`[Trigger] Enqueue failed ${trigger.id}: ${error}`);
-        eventBus.publish({
-          type: 'trigger:failed', triggerId: trigger.id, name: trigger.name,
-          messageId: msg.messageId || '', error,
-          targetChannel: trigger.targetChannel, targetChannelId: trigger.targetChannelId,
-          fireTime: msg.triggerMeta?.fireTime ?? Date.now(), phase: 'enqueue',
-        });
-        scheduler.onTriggerComplete(trigger.id, 'failed');
-      };
-
-      if (trigger.targetSessionStrategy === 'current' && trigger.boundSessionId) {
-        const boundId = trigger.boundSessionId;
-        if (messageQueue.isProcessing(boundId)) {
-          scheduleRetryWhenIdle(boundId, msg, trigger);
-          return;
-        }
-        sessionManager.getSessionById(boundId).then(bound => {
-          if (!bound) { logger.warn(`[Trigger] Bound session ${boundId} not found`); return; }
-          messageQueue.enqueue(boundId, msg, bound.projectPath, { interruptible: false, sessionKeyField: bound.sessionKey })
-            .catch(onEnqueueFailed);
-        });
-        return;
-      }
-      messageQueue.enqueue(`${msg.channel}:${msg.channelId}`, msg, primaryProjectPath, { interruptible: false })
-        .catch(onEnqueueFailed);
+  };
+  const startTriggerScheduler = async (agent: typeof triggerStartupAgents[number]) => {
+    triggerSchedulers.get(agent.aid)?.stop();
+    const manager = new TriggerDefinitionManager(agent.aid);
+    const state = new TriggerRunStateStore(manager);
+    const dispatcher = new TriggerFeedbackDispatcher({
+      getChannel: getTriggerChannel,
+      sessionManager,
+      messageQueue,
     });
-    // Subscribe to trigger:completed/failed/skipped to update cron inflight state
-    eventBus.subscribe('trigger:completed', (ev: any) => scheduler.onTriggerComplete(ev.triggerId, 'completed'));
-    eventBus.subscribe('trigger:failed', (ev: any) => scheduler.onTriggerComplete(ev.triggerId, 'failed'));
-    eventBus.subscribe('trigger:skipped', (ev: any) => {
-      if (ev.reason === 'interrupted') scheduler.onTriggerComplete(ev.triggerId, 'interrupted');
-    });
-
-    // Note: only the primary agent's scheduler is wired to cmdHandler.
-    // Non-primary agent channels will receive "⚠️ 触发器功能未启用" when using /trigger.
-    // Full per-channel scheduler routing is a future improvement.
+    const scheduler = new TriggerRuntimeScheduler(manager, state, triggerAudit, triggerScriptExecutor, dispatcher);
+    triggerSchedulers.set(agent.aid, scheduler);
     try {
       await scheduler.init();
     } catch (err) {
       logger.error(`[Trigger] Scheduler init failed for ${agent.aid}: ${err}`);
     }
-  }
-
-  // ── Trigger 失败/跳过通知：向 targetChannel 发送告警消息（仅注册一次，在循环外）──
-  eventBus.subscribe('trigger:failed', (ev: any) => {
-    const adapter = processor.getAdapter(ev.targetChannel);
-    if (!adapter) return;
-    const phaseLabel = ev.phase === 'enqueue' ? '入队' : '执行';
-    const timeStr = ev.fireTime ? new Date(ev.fireTime).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) : '未知';
-    const text = `⚠️ 定时任务 [${ev.name || ev.triggerId}] 执行失败\n阶段：${phaseLabel}\n原因：${ev.error}\n触发时间：${timeStr}`;
-    const envelope: OutboundEnvelope = {
-      taskId: `trigger-notify:${ev.triggerId}`,
-      channel: ev.targetChannel,
-      channelId: ev.targetChannelId,
-      agentName: 'system',
-      chatmode: 'interactive',
-      timestamp: Date.now(),
-    };
-    adapter.send(envelope, { kind: 'result.text', text, isFinal: true, format: 'plain' }).catch(() => {});
-  });
-  eventBus.subscribe('trigger:skipped', (ev: any) => {
-    if (ev.reason !== 'overlap') return;
-    const adapter = processor.getAdapter(ev.targetChannel);
-    if (!adapter) return;
-    const text = `⚠️ 定时任务 [${ev.name || ev.triggerId}] 本次跳过（上次执行仍在进行中）`;
-    const envelope: OutboundEnvelope = {
-      taskId: `trigger-notify:${ev.triggerId}`,
-      channel: ev.targetChannel,
-      channelId: ev.targetChannelId,
-      agentName: 'system',
-      chatmode: 'interactive',
-      timestamp: Date.now(),
-    };
-    adapter.send(envelope, { kind: 'result.text', text, isFinal: true, format: 'plain' }).catch(() => {});
-  });
-
+  };
+  cmdHandler.setTriggerSchedulerResolver((agentAid) => triggerSchedulers.get(agentAid));
 
   // 默认策略
   const defaultPolicy = {
@@ -849,57 +789,6 @@ async function main() {
     registerChannelInstance(inst);
   }
 
-  // Inject primary agent's trigger scheduler after all channels are registered so
-  // channelTypeMap is fully populated when setTriggerScheduler backfills old triggers.
-  // Seed __upgrade-check here too — needs channelInstances[0].channelType to be resolved.
-  const primaryAgentForTrigger = agentRegistry.runnableAgents()[0];
-  if (primaryAgentForTrigger?.triggerScheduler && primaryAgentForTrigger?.triggerManager) {
-    cmdHandler.setTriggerScheduler(primaryAgentForTrigger.triggerScheduler, primaryAgentForTrigger.triggerManager);
-  }
-
-  // Seed default __upgrade-check trigger (daily at random time 3:00~3:59)
-  // 用户可通过 /trigger cancel __upgrade-check 永久禁用（不会再自动重建）
-  if (!isLinkedInstall() && primaryAgentForTrigger?.triggerManager && primaryAgentForTrigger?.triggerScheduler) {
-    const mgr = primaryAgentForTrigger.triggerManager;
-    const sched = primaryAgentForTrigger.triggerScheduler;
-    const UPGRADE_TRIGGER_NAME = '__upgrade-check';
-    if (!mgr.getByName(UPGRADE_TRIGGER_NAME)) {
-      const { history } = mgr.listAll();
-      const wasCancelled = history.some(h => h.name === UPGRADE_TRIGGER_NAME && h.doneReason === 'cancelled');
-      if (!wasCancelled) {
-        const randomMinute = Math.floor(Math.random() * 60);
-        const cronExpr = `${randomMinute} 3 * * *`;
-        const firstChannelInst = channelInstances[0];
-        const firstChannel = firstChannelInst?.adapter?.channelName || 'system';
-        const trigger: import('./types.js').Trigger = {
-          id: crypto.randomUUID(),
-          name: UPGRADE_TRIGGER_NAME,
-          scheduleType: 'cron',
-          scheduleValue: cronExpr,
-          nextFireAt: calcNextFireAt('cron', cronExpr),
-          targetChannel: firstChannel,
-          targetChannelId: '__system__',
-          targetSessionStrategy: 'latest',
-          prompt: '检查 evolclaw 是否有新版本可用。执行 `npm view evolclaw version` 获取最新版本，与当前版本（执行 `evolclaw --version`）对比。如果有新版本，执行 /restart 进行升级。如果已是最新版本，无需任何操作。',
-          createdByPeerId: '__system__',
-          createdByChannel: '__system__',
-          schedulerAid: primaryAgentForTrigger.aid,
-          fireCount: 0,
-          failCount: 0,
-          createdAt: Date.now(),
-          updatedAt: Date.now(),
-        };
-        try {
-          mgr.register(trigger);
-          sched.register(trigger);
-          logger.info(`[Trigger] Seeded default trigger: ${UPGRADE_TRIGGER_NAME} (cron ${cronExpr})`);
-        } catch (e) {
-          logger.warn(`[Trigger] Failed to seed ${UPGRADE_TRIGGER_NAME}: ${e}`);
-        }
-      }
-    }
-  }
-
   // Bind adapters to their owning agents and mark running
   for (const inst of channelInstances) {
     const agent = agentRegistry.resolveByChannel(inst.adapter.channelKey);
@@ -975,6 +864,12 @@ async function main() {
       channelName: name,
       timestamp: Date.now()
     });
+  }
+
+  // Start trigger after channel adapters have been registered and connected.
+  // Immediate direct-message feedback then sees a usable adapter instead of racing startup.
+  for (const agent of triggerStartupAgents) {
+    await startTriggerScheduler(agent);
   }
 
   // ── 控制 AID（daemon 进程身份）：pureIdentity 接入 AUN，独立于 evolagent ──
@@ -1360,6 +1255,7 @@ async function main() {
 
     // 连接
     await channelLoader.connectAll(instances);
+    await startTriggerScheduler(agent);
     logger.info(`[HotLoad] ✓ Agent ${aid} online with ${instances.length} channel(s)`);
   };
 
@@ -1376,6 +1272,8 @@ async function main() {
     for (const [aid, agent] of [...(agentRegistry as any).agents.entries()] as [string, any][]) {
       const diskCfg = diskAgents.find(a => a.aid === aid);
       if (!diskCfg || diskCfg.enabled === false) {
+        triggerSchedulers.get(aid)?.stop();
+        triggerSchedulers.delete(aid);
         // 断开所有 channels
         for (const chName of agent.channelInstanceNames()) {
           const inst = channelInstances.find(i => i.adapter.channelName === chName);
@@ -1411,6 +1309,8 @@ async function main() {
       // 只有磁盘上存在且运行时也存在的才 reload
       try {
         await agentRegistry.reload(cfg.aid, hooks);
+        const runtimeAgent = agentRegistry.get(cfg.aid);
+        if (runtimeAgent) await startTriggerScheduler(runtimeAgent);
         results.push(`↻ ${cfg.aid} (reloaded)`);
       } catch (e: any) {
         results.push(`⚠ ${cfg.aid}: ${e?.message || e}`);
@@ -1459,6 +1359,67 @@ async function main() {
         return { ok: false, error: `unknown action: ${params.action}` };
     }
   });
+  ipcServer.setTriggerExecutor(async (cmd: { type: string; [key: string]: any }) => {
+    const schedulerFor = (agentAid: string): TriggerRuntimeScheduler => {
+      const scheduler = triggerSchedulers.get(agentAid);
+      if (!scheduler) throw new Error(`trigger scheduler not found for agent: ${agentAid}`);
+      return scheduler;
+    };
+    const requireAgent = (agentAid: unknown): string => {
+      if (typeof agentAid !== 'string' || !agentAid) throw new Error('missing agentAid');
+      if (!agentRegistry.get(agentAid)) throw new Error(`agent not found: ${agentAid}`);
+      return agentAid;
+    };
+
+    switch (cmd.type) {
+      case 'trigger.list': {
+        const agentAid = requireAgent(cmd.agentAid);
+        return { ok: true, triggers: schedulerFor(agentAid).list({ all: cmd.all === true }) };
+      }
+      case 'trigger.show': {
+        const agentAid = requireAgent(cmd.agentAid);
+        if (!cmd.triggerId) throw new Error('missing triggerId');
+        return { ok: true, ...schedulerFor(agentAid).show(cmd.triggerId) };
+      }
+      case 'trigger.create': {
+        const definition = normalizeTriggerDefinition(cmd.definition);
+        requireAgent(definition.agentAid);
+        validateTriggerFeedbackChannels(definition);
+        const trigger = schedulerFor(definition.agentAid).create(definition, cmd.files ?? [], { enable: cmd.enable });
+        return { ok: true, trigger };
+      }
+      case 'trigger.update': {
+        const agentAid = requireAgent(cmd.agentAid);
+        if (!cmd.triggerId) throw new Error('missing triggerId');
+        const definition = normalizeTriggerDefinition({ ...cmd.definition, id: cmd.triggerId, agentAid });
+        if (definition.agentAid !== agentAid) throw new Error('definition.agentAid does not match request agentAid');
+        validateTriggerFeedbackChannels(definition);
+        const trigger = schedulerFor(agentAid).update(cmd.triggerId, definition, cmd.files ?? []);
+        return { ok: true, trigger };
+      }
+      case 'trigger.setEnabled': {
+        const agentAid = requireAgent(cmd.agentAid);
+        if (!cmd.triggerId) throw new Error('missing triggerId');
+        if (typeof cmd.enabled !== 'boolean') throw new Error('missing enabled');
+        const trigger = schedulerFor(agentAid).setEnabled(cmd.triggerId, cmd.enabled);
+        return { ok: true, trigger };
+      }
+      case 'trigger.cancel': {
+        const agentAid = requireAgent(cmd.agentAid);
+        if (!cmd.triggerId) throw new Error('missing triggerId');
+        const trigger = schedulerFor(agentAid).cancel(cmd.triggerId);
+        return { ok: true, trigger };
+      }
+      case 'trigger.run': {
+        const agentAid = requireAgent(cmd.agentAid);
+        if (!cmd.triggerId) throw new Error('missing triggerId');
+        const result = await schedulerFor(agentAid).run(cmd.triggerId, { dryRun: cmd.dryRun === true });
+        return { ok: result.ok, result };
+      }
+      default:
+        return { ok: false, error: `unknown trigger command: ${cmd.type}` };
+    }
+  });
   ipcServer.startCpuTracking();
 
   // 配置 reload 走 IPC `evolagent.reload` 触发，不再用 watchFile。
@@ -1474,6 +1435,9 @@ async function main() {
     logger.info(`\n\nShutting down gracefully... (signal=${shutdownSignal}, pid=${pid}, ppid=${ppid})`);
     ipcServer.stopCpuTracking();
     ipcServer.stop();
+    for (const scheduler of triggerSchedulers.values()) {
+      scheduler.stop();
+    }
     eventBus.publish({
       type: 'system:shutdown',
       timestamp: Date.now()
@@ -1499,6 +1463,32 @@ async function main() {
 
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
+
+  // 全局错误处理：防止未捕获的 WebSocket 错误导致进程崩溃
+  // 特别是 fastaun SDK 在连接超时时，WebSocket 可能发出未被监听的 'error' 事件
+  process.on('uncaughtException', (error: Error) => {
+    // 检查是否是 WebSocket 连接超时相关错误
+    const isWsError = error.message?.includes('WebSocket was closed before the connection was established');
+    const isFastaunError = error.stack?.includes('@agentunion/fastaun');
+
+    if (isWsError || isFastaunError) {
+      logger.warn(`Caught WebSocket connection error (non-fatal): ${error.message}`);
+      logger.debug(`WebSocket error stack: ${error.stack}`);
+      // 不退出进程，让 AUN 重连机制处理
+      return;
+    }
+
+    // 其他未捕获错误仍然是致命的
+    logger.error('Uncaught exception:', error);
+    console.error('Uncaught exception:', error);
+    shutdown('uncaughtException');
+  });
+
+  process.on('unhandledRejection', (reason: any) => {
+    logger.error('Unhandled promise rejection:', reason);
+    console.error('Unhandled promise rejection:', reason);
+    // Promise rejection 不立即退出，记录后继续运行
+  });
 
   // 兜底：进程退出前同步删除 instance 文件（防 async shutdown 未完成就被杀）
   process.on('exit', () => {

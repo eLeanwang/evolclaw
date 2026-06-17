@@ -1,211 +1,286 @@
 import fs from 'fs';
 import path from 'path';
-import { atomicWriteJson, appendJsonl } from '../session/session-fs-store.js';
-import { formatChannelKey } from '../channel-loader.js';
+import { agentTriggersDir } from '../../paths.js';
+import { tryParseChannelKey } from '../channel-loader.js';
 import { logger } from '../../utils/logger.js';
-import type { Trigger } from '../../types.js';
+import {
+  normalizeTriggerDefinition,
+  resolveScriptPath,
+  safeRelativePath,
+} from './validation.js';
+import type {
+  TriggerCreateFile,
+  TriggerDefinition,
+} from './types.js';
+import { atomicWriteJson } from '../session/session-fs-store.js';
 
-interface TriggersFile {
-  version: number;
-  triggers: Record<string, Trigger>;
+export interface TriggerListOptions {
+  all?: boolean;
 }
 
-interface HistoryEntry extends Trigger {
-  doneAt: number;
-  doneReason: 'fired' | 'cancelled' | 'expired';
-}
-
-export class TriggerManager {
-  private triggersPath: string;
-  private historyPath: string;
-  private triggers: Map<string, Trigger> = new Map();
-
-  constructor(private aid: string, triggersDir: string) {
-    fs.mkdirSync(triggersDir, { recursive: true });
-    this.triggersPath = path.join(triggersDir, 'triggers.json');
-    this.historyPath = path.join(triggersDir, 'history.jsonl');
+export class TriggerDefinitionManager {
+  constructor(
+    readonly agentAid: string,
+    readonly rootDir = agentTriggersDir(agentAid),
+  ) {
+    fs.mkdirSync(this.rootDir, { recursive: true });
+    this.migrateLegacyTriggers();
   }
 
-  load(): Trigger[] {
-    if (!fs.existsSync(this.triggersPath)) {
-      this.triggers = new Map();
-      return [];
+  list(opts: TriggerListOptions = {}): TriggerDefinition[] {
+    const definitions: TriggerDefinition[] = [];
+    for (const triggerId of this.listTriggerIds()) {
+      const definition = this.get(triggerId);
+      if (!definition) continue;
+      if (!opts.all && !definition.enabled) continue;
+      definitions.push(definition);
     }
+    return definitions.sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  get(triggerId: string): TriggerDefinition | undefined {
+    const file = this.definitionPath(triggerId);
+    if (!fs.existsSync(file)) return undefined;
+    const raw = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    return normalizeTriggerDefinition(raw);
+  }
+
+  require(triggerId: string): TriggerDefinition {
+    const def = this.get(triggerId);
+    if (!def) throw new Error(`trigger not found: ${triggerId}`);
+    return def;
+  }
+
+  create(input: unknown, files: TriggerCreateFile[] = [], opts: { enable?: boolean } = {}): TriggerDefinition {
+    const now = Date.now();
+    const definition = normalizeTriggerDefinition(input, { now });
+    this.assertAgent(definition);
+    if (opts.enable !== undefined) definition.enabled = opts.enable;
+    definition.createdAt = definition.createdAt || now;
+    definition.updatedAt = now;
+    this.assertUnique(definition);
+
+    const dir = this.triggerDir(definition.id);
+    if (fs.existsSync(dir)) throw new Error(`trigger directory already exists: ${definition.id}`);
+    fs.mkdirSync(dir, { recursive: true });
+    this.writeFiles(dir, files);
+    this.validateScriptFile(definition, dir);
+    this.writeDefinition(definition);
+    this.clearActive(definition.id);
+    return definition;
+  }
+
+  update(triggerId: string, input: unknown, files: TriggerCreateFile[] = []): TriggerDefinition {
+    const existing = this.require(triggerId);
+    const updated = normalizeTriggerDefinition({ ...(input as Record<string, unknown>), id: triggerId }, { now: Date.now() });
+    this.assertAgent(updated);
+    updated.createdAt = existing.createdAt;
+    updated.updatedAt = Date.now();
+    this.assertUnique(updated, triggerId);
+
+    const dir = this.triggerDir(triggerId);
+    fs.mkdirSync(dir, { recursive: true });
+    this.writeFiles(dir, files);
+    this.validateScriptFile(updated, dir);
+    this.writeDefinition(updated);
+    return updated;
+  }
+
+  setEnabled(triggerId: string, enabled: boolean): TriggerDefinition {
+    const definition = this.require(triggerId);
+    definition.enabled = enabled;
+    definition.updatedAt = Date.now();
+    this.writeDefinition(definition);
+    return definition;
+  }
+
+  cancel(triggerId: string): TriggerDefinition {
+    return this.setEnabled(triggerId, false);
+  }
+
+  triggerDir(triggerId: string): string {
+    return path.join(this.rootDir, safeRelativePath(triggerId));
+  }
+
+  definitionPath(triggerId: string): string {
+    return path.join(this.triggerDir(triggerId), 'trigger.json');
+  }
+
+  activePath(triggerId: string): string {
+    return path.join(this.triggerDir(triggerId), 'active.json');
+  }
+
+  clearActive(triggerId: string): void {
+    const file = this.activePath(triggerId);
+    try { fs.unlinkSync(file); } catch (e: any) { if (e.code !== 'ENOENT') throw e; }
+  }
+
+  readRawDefinition(triggerId: string): unknown {
+    return JSON.parse(fs.readFileSync(this.definitionPath(triggerId), 'utf-8'));
+  }
+
+  importFromPath(inputPath: string, opts: { enable?: boolean } = {}): TriggerDefinition {
+    const stat = fs.statSync(inputPath);
+    const sourceDir = stat.isDirectory() ? inputPath : path.dirname(inputPath);
+    const triggerJson = stat.isDirectory() ? path.join(inputPath, 'trigger.json') : inputPath;
+    const definitionRaw = JSON.parse(fs.readFileSync(triggerJson, 'utf-8'));
+    const definition = normalizeTriggerDefinition(definitionRaw);
+    const files: TriggerCreateFile[] = [];
+
+    if (definition.script?.path) {
+      const scriptAbs = resolveScriptPath(sourceDir, definition.script.path);
+      const rel = path.relative(sourceDir, scriptAbs).replace(/\\/g, '/');
+      files.push({
+        relativePath: rel,
+        contentBase64: fs.readFileSync(scriptAbs).toString('base64'),
+      });
+    }
+    return this.create(definition, files, opts);
+  }
+
+  private writeDefinition(definition: TriggerDefinition): void {
+    const dir = this.triggerDir(definition.id);
+    fs.mkdirSync(dir, { recursive: true });
+    atomicWriteJson(this.definitionPath(definition.id), definition);
+  }
+
+  private listTriggerIds(): string[] {
+    let entries: fs.Dirent[];
+    try { entries = fs.readdirSync(this.rootDir, { withFileTypes: true }); } catch { return []; }
+    return entries.filter(e => e.isDirectory()).map(e => e.name);
+  }
+
+  private writeFiles(dir: string, files: TriggerCreateFile[]): void {
+    for (const file of files) {
+      const rel = safeRelativePath(file.relativePath);
+      const target = path.resolve(dir, rel);
+      const relFromRoot = path.relative(path.resolve(dir), target);
+      if (relFromRoot.startsWith('..') || path.isAbsolute(relFromRoot)) {
+        throw new Error(`file escapes trigger directory: ${file.relativePath}`);
+      }
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.writeFileSync(target, Buffer.from(file.contentBase64, 'base64'));
+    }
+  }
+
+  private validateScriptFile(definition: TriggerDefinition, dir: string): void {
+    if (!definition.script) return;
+    const scriptAbs = resolveScriptPath(dir, definition.script.path);
+    if (!fs.existsSync(scriptAbs)) {
+      throw new Error(`script file not found: ${definition.script.path}`);
+    }
+    const stat = fs.statSync(scriptAbs);
+    if (!stat.isFile()) throw new Error(`script.path is not a file: ${definition.script.path}`);
+  }
+
+  private assertAgent(definition: TriggerDefinition): void {
+    if (definition.agentAid !== this.agentAid) {
+      throw new Error(`definition.agentAid (${definition.agentAid}) does not match request agent (${this.agentAid})`);
+    }
+  }
+
+  private assertUnique(definition: TriggerDefinition, existingId?: string): void {
+    for (const other of this.list({ all: true })) {
+      if (existingId && other.id === existingId) continue;
+      if (other.id === definition.id) throw new Error(`trigger ID already exists: ${definition.id}`);
+      if (other.name === definition.name) throw new Error(`trigger name already exists: ${definition.name}`);
+    }
+  }
+
+  private migrateLegacyTriggers(): void {
+    const legacyPath = path.join(this.rootDir, 'triggers.json');
+    if (!fs.existsSync(legacyPath)) return;
+    let migrated = 0;
+    let skipped = 0;
     try {
-      const raw = fs.readFileSync(this.triggersPath, 'utf8');
-      const data: TriggersFile = JSON.parse(raw);
-      this.triggers = new Map(Object.entries(data.triggers ?? {}));
-      // Migrate old channel key format: "selfAID#type#name" → "type#selfAID#name"
-      let migrated = false;
-      for (const trigger of this.triggers.values()) {
-        const fixed = this.migrateChannelKey(trigger.targetChannel);
-        if (fixed !== trigger.targetChannel) { trigger.targetChannel = fixed; migrated = true; }
-        if (trigger.createdByChannel) {
-          const fixedBy = this.migrateChannelKey(trigger.createdByChannel);
-          if (fixedBy !== trigger.createdByChannel) { trigger.createdByChannel = fixedBy; migrated = true; }
+      const raw = JSON.parse(fs.readFileSync(legacyPath, 'utf-8')) as { triggers?: Record<string, any> };
+      for (const legacy of Object.values(raw.triggers ?? {})) {
+        try {
+          const definition = this.legacyToDefinition(legacy);
+          if (!definition) { skipped += 1; continue; }
+          if (fs.existsSync(this.definitionPath(definition.id))) { skipped += 1; continue; }
+          if (this.list({ all: true }).some(other => other.name === definition.name)) { skipped += 1; continue; }
+          this.writeDefinition(definition);
+          migrated += 1;
+        } catch {
+          skipped += 1;
         }
       }
-      if (migrated) { logger.info(`[TriggerManager] Migrated old channel key format`); this.save(); }
-      return [...this.triggers.values()];
-    } catch (e) {
-      logger.warn(`[TriggerManager] Failed to parse ${this.triggersPath}, starting empty: ${e}`);
-      this.triggers = new Map();
-      return [];
-    }
-  }
-
-  /**
-   * Detect and fix old format "selfAID#type#name" → current "type#selfAID#name".
-   * Old format: first segment contains '.' (AID like "evolai.agentid.pub").
-   */
-  private migrateChannelKey(key: string): string {
-    if (!key || !key.includes('#')) return key;
-    const parts = key.split('#');
-    if (parts.length !== 3) return key;
-    const [first, second, third] = parts;
-    if (first.includes('.') && !second.includes('.')) {
-      return formatChannelKey({ type: second, selfAID: first, name: third });
-    }
-    return key;
-  }
-
-  private save(): void {
-    const data: TriggersFile = {
-      version: 1,
-      triggers: Object.fromEntries(this.triggers),
-    };
-    atomicWriteJson(this.triggersPath, data);
-  }
-
-  register(trigger: Trigger): void {
-    if (this.triggers.has(trigger.id)) {
-      throw new Error(`触发器 ID 已存在：${trigger.id}`);
-    }
-    // Check name uniqueness within this agent
-    for (const t of this.triggers.values()) {
-      if (t.name === trigger.name) {
-        throw new Error(`触发器名称已存在：${trigger.name}`);
+      const backup = path.join(this.rootDir, `triggers.legacy.migrated.${Date.now()}.json`);
+      fs.renameSync(legacyPath, backup);
+      if (migrated > 0 || skipped > 0) {
+        logger.info(`[Trigger] migrated legacy triggers for ${this.agentAid}: migrated=${migrated}, skipped=${skipped}, backup=${backup}`);
       }
+    } catch (err) {
+      logger.warn(`[Trigger] failed to migrate legacy triggers for ${this.agentAid}: ${err}`);
     }
-    this.triggers.set(trigger.id, trigger);
-    this.save();
   }
 
-  getById(id: string): Trigger | undefined {
-    return this.triggers.get(id);
-  }
+  private legacyToDefinition(legacy: any): TriggerDefinition | undefined {
+    if (!legacy || typeof legacy !== 'object') return undefined;
+    const id = typeof legacy.id === 'string' && legacy.id ? legacy.id : undefined;
+    const name = typeof legacy.name === 'string' && legacy.name ? legacy.name : undefined;
+    if (!id || !name) return undefined;
+    if (legacy.schedulerAid && legacy.schedulerAid !== this.agentAid) return undefined;
 
-  /**
-   * 按 id 从磁盘重读单条 trigger（不走内存缓存）。
-   * 用于触发时刻取最新数据，消除内存/磁盘漂移。
-   * 读盘失败或不存在时返回 undefined（调用方回退到内存副本）。
-   */
-  getByIdFresh(id: string): Trigger | undefined {
-    if (!fs.existsSync(this.triggersPath)) return undefined;
-    try {
-      const raw = fs.readFileSync(this.triggersPath, 'utf8');
-      const data: TriggersFile = JSON.parse(raw);
-      return data.triggers?.[id];
-    } catch {
+    let source: any;
+    if (legacy.scheduleType === 'delay') {
+      const afterMs = Number(legacy.scheduleValue);
+      if (!Number.isFinite(afterMs) || afterMs <= 0) return undefined;
+      source = { type: 'delay', afterMs };
+    } else if (legacy.scheduleType === 'at') {
+      source = { type: 'at', at: String(legacy.scheduleValue) };
+    } else if (legacy.scheduleType === 'cron') {
+      source = { type: 'cron', expression: String(legacy.scheduleValue) };
+    } else {
       return undefined;
     }
-  }
 
-  /**
-   * 从磁盘重新加载到内存 Map（外部编辑 triggers.json 后调用）。
-   * 等价于 load()，语义上强调"丢弃内存副本、以磁盘为准"。
-   */
-  reloadFromDisk(): Trigger[] {
-    return this.load();
-  }
+    const channelType = legacy.targetChannelType || tryParseChannelKey(String(legacy.targetChannel || ''))?.type || legacy.targetChannel;
+    const channelId = legacy.targetChannelId;
+    if (!channelType || !channelId) return undefined;
 
-  getByName(name: string): Trigger | undefined {
-    for (const t of this.triggers.values()) {
-      if (t.name === name) return t;
+    const sessionStrategy = legacy.targetSessionStrategy || 'latest';
+    const target: any = {
+      channelType: String(channelType),
+      channelName: typeof legacy.targetChannel === 'string' && legacy.targetChannel ? legacy.targetChannel : undefined,
+      channelId: String(channelId),
+      sessionStrategy,
+    };
+    if (sessionStrategy === 'current') {
+      if (!legacy.boundSessionId) return undefined;
+      target.sessionId = legacy.boundSessionId;
     }
-    return undefined;
-  }
+    if (sessionStrategy === 'thread') target.threadId = legacy.targetThreadId || `trigger-${id}`;
 
-  // Scoped lookup: only returns triggers owned by (peerId, channel) — prevents info disclosure
-  getByNameScoped(name: string, peerId: string, channel: string): Trigger | undefined {
-    for (const t of this.triggers.values()) {
-      if (t.name === name && t.createdByPeerId === peerId && t.createdByChannel === channel) return t;
-    }
-    return undefined;
-  }
-
-  // Scoped ID lookup: allows creator to cancel by UUID without revealing others' triggers
-  getByIdScoped(id: string, peerId: string, channel: string): Trigger | undefined {
-    const t = this.triggers.get(id);
-    if (t && t.createdByPeerId === peerId && t.createdByChannel === channel) return t;
-    return undefined;
-  }
-
-  listActive(): Trigger[] {
-    return [...this.triggers.values()].sort((a, b) => a.nextFireAt - b.nextFireAt);
-  }
-
-  listAll(): { active: Trigger[]; history: HistoryEntry[] } {
-    const active = this.listActive();
-    const history: HistoryEntry[] = [];
-    if (fs.existsSync(this.historyPath)) {
-      const lines = fs.readFileSync(this.historyPath, 'utf8').split('\n').filter(Boolean);
-      for (const line of lines) {
-        try { history.push(JSON.parse(line)); } catch { /* skip malformed */ }
-      }
-    }
-    return { active, history };
-  }
-
-  update(id: string, patch: Partial<Pick<Trigger, 'name' | 'scheduleType' | 'scheduleValue' | 'nextFireAt' | 'targetChannel' | 'targetChannelId' | 'targetChannelType' | 'targetThreadId' | 'targetSessionStrategy' | 'boundSessionId' | 'agentId' | 'prompt' | 'pendingThread'>>): Trigger {
-    const t = this.triggers.get(id);
-    if (!t) throw new Error(`触发器不存在：${id}`);
-    // Check name uniqueness if name is being changed
-    if (patch.name && patch.name !== t.name) {
-      for (const other of this.triggers.values()) {
-        if (other.id !== id && other.name === patch.name) {
-          throw new Error(`触发器名称已存在：${patch.name}`);
-        }
-      }
-    }
-    Object.assign(t, patch, { updatedAt: Date.now() });
-    this.save();
-    return t;
-  }
-
-  updateFireStats(id: string, firedAt: number): void {
-    const t = this.triggers.get(id);
-    if (!t) return;
-    t.lastFiredAt = firedAt;
-    t.fireCount += 1;
-    t.updatedAt = Date.now();
-    this.save();
-  }
-
-  updateResult(id: string, outcome: 'completed' | 'failed' | 'interrupted'): void {
-    const t = this.triggers.get(id);
-    if (!t) return;
-    t.lastResult = outcome;
-    if (outcome === 'failed') t.failCount = (t.failCount ?? 0) + 1;
-    t.updatedAt = Date.now();
-    this.save();
-  }
-
-  updateNextFireAt(id: string, nextFireAt: number): void {
-    const t = this.triggers.get(id);
-    if (!t) return;
-    t.nextFireAt = nextFireAt;
-    t.updatedAt = Date.now();
-    this.save();
-  }
-
-  moveToDone(id: string, reason: HistoryEntry['doneReason']): Trigger | undefined {
-    const t = this.triggers.get(id);
-    if (!t) return undefined;
-    this.triggers.delete(id);
-    this.save();
-    const entry: HistoryEntry = { ...t, doneAt: Date.now(), doneReason: reason };
-    appendJsonl(this.historyPath, entry);
-    return t;
+    return normalizeTriggerDefinition({
+      $schema_version: 1,
+      id,
+      agentAid: this.agentAid,
+      enabled: true,
+      name,
+      description: legacy.description,
+      createdAt: legacy.createdAt,
+      updatedAt: legacy.updatedAt,
+      origin: {
+        channel: legacy.createdByChannel,
+        peerId: legacy.createdByPeerId,
+      },
+      source,
+      feedback: {
+        onSuccess: {
+          mode: 'agent-runner',
+          target,
+          template: String(legacy.prompt ?? ''),
+        },
+        onNoop: { mode: 'none' },
+        onFailure: { mode: 'none' },
+      },
+      reliability: {
+        concurrency: 'forbid',
+        missedPolicy: 'run_once',
+        scriptRetry: { maxAttempts: 0, backoffMs: 30_000 },
+      },
+    });
   }
 }

@@ -5,6 +5,8 @@ import { resolveShowActivities, showActivitiesPolicy } from '../core/channel-loa
 import type { MessageBridge } from '../core/message/message-bridge.js';
 import type { DingtalkChannelInstance as DingtalkInst, ThoughtItem } from '../types.js';
 import { formatItemsAsText } from '../core/message/items-formatter.js';
+import type { FirstInteractionWelcomeManager } from '../utils/welcome.js';
+import { initWelcomeManager, sendWelcomeIfNeeded } from '../utils/welcome.js';
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -46,8 +48,16 @@ export class DingtalkChannel {
   private cleanupInterval: ReturnType<typeof setInterval> | null = null;
   projectPathProvider: ((channelId: string) => Promise<string>) | null = null;
 
-  constructor(config: DingtalkConfig) {
+  // Welcome message manager
+  private welcomeManager?: FirstInteractionWelcomeManager;
+
+  constructor(config: DingtalkConfig, private agentAid?: string, private channelName?: string) {
     this.config = config;
+
+    // 初始化 welcomeManager（使用共享帮助函数）
+    if (agentAid && channelName) {
+      this.welcomeManager = initWelcomeManager('dingtalk', agentAid, channelName);
+    }
   }
 
   // ── Public helpers (testable) ──────────────────────────────────────────────
@@ -182,6 +192,15 @@ export class DingtalkChannel {
 
       // Dispatch by msgtype
       if (!this.messageHandler) return;
+
+      // 首次交互欢迎消息（使用共享帮助函数）
+      await sendWelcomeIfNeeded(
+        this.welcomeManager,
+        senderId,
+        chatId,
+        (id, text) => this.sendMessage(id, text),
+        'DingTalk'
+      );
 
       if (msgtype === 'text' || !msgtype) {
         const text = this.extractText(data);
@@ -492,7 +511,7 @@ export class DingtalkChannelPlugin implements ChannelPlugin {
       clientSecret: inst.clientSecret,
       requireMention: inst.requireMention,
       freeResponseChats: inst.freeResponseChats,
-    });
+    }, ctx.agentName, inst.name);
 
     const mode = resolveShowActivities(inst);
     const adapter = {

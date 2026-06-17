@@ -565,12 +565,11 @@ export interface AgentInfo {
  * (avoids circular imports). The actual EvolAgent class satisfies this shape.
  */
 export interface EvolAgentHandle {
+  readonly aid: string;
   readonly name: string;
   readonly baseagent: string;
   readonly projectPath: string;
   readonly config: MergedAgentConfig;
-  readonly triggerManager?: unknown;
-  readonly triggerScheduler?: unknown;
   lastActivity?: number;
   getContext(channelName: string, chatType: string, globalChatmode?: { private?: 'interactive' | 'proactive'; group?: 'interactive' | 'proactive' }): AgentContext;
   getOwner(channelName: string): string | undefined;

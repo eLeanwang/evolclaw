@@ -208,6 +208,19 @@ export function isEvolclawSendCommandForSession(
 
 export type PermissionDecision = 'allow' | 'always' | 'deny';
 
+const EDIT_PREVIEW_MAX_LINES = 14;
+const EDIT_PREVIEW_CONTEXT_LINES = 2;
+const EDIT_PREVIEW_INLINE_GAP_LINES = 4;
+
+type EditPreviewMarker = '−' | '＋' | ' ';
+interface EditPreviewLine {
+  marker: EditPreviewMarker;
+  text: string;
+  lineNo?: number;
+  changed?: boolean;
+  raw?: string;
+}
+
 /** 为 Edit 工具生成 diff 风格摘要 */
 function formatEditSummary(input: any): string {
   const filePath = input.file_path || '';
@@ -221,8 +234,6 @@ function formatEditSummary(input: any): string {
   const newStr = typeof input.new_string === 'string' ? input.new_string : '';
 
   if (!oldStr && !newStr) return filePath;
-
-  const MAX_DIFF_LINES = 14;
 
   const oldLines = oldStr.split('\n');
   const newLines = newStr.split('\n');
@@ -241,8 +252,6 @@ function formatEditSummary(input: any): string {
     }
   }
 
-  const diffLines: string[] = [];
-
   // 找公共前缀行数
   let prefixLen = 0;
   while (prefixLen < oldLines.length && prefixLen < newLines.length && oldLines[prefixLen] === newLines[prefixLen]) {
@@ -258,61 +267,190 @@ function formatEditSummary(input: any): string {
     suffixLen++;
   }
 
-  const CONTEXT = 2;
-  // 计算行号宽度（用于对齐）
-  const maxLineNo = startLine > 0 ? startLine + oldLines.length - 1 : 0;
-  const newMaxLineNo = startLine > 0 ? startLine + prefixLen + (newLines.length - suffixLen - prefixLen) - 1 : 0;
-  const padWidth = startLine > 0 ? Math.max(maxLineNo, newMaxLineNo).toString().length : 0;
+  const diffLines: EditPreviewLine[] = [];
+  const makeLine = (idx: number, marker: EditPreviewMarker, text: string, changed = marker !== ' ') => ({
+    lineNo: startLine > 0 ? startLine + idx : undefined,
+    marker,
+    text,
+    changed,
+  });
 
-  // 格式化一行：行号 + 标记 + 内容
-  // 使用 Unicode 符号避免飞书 Markdown 将 "- " 解析为列表
-  const fmtLine = (lineNo: number, marker: '−' | '＋' | ' ', text: string) => {
-    if (startLine > 0) {
-      return `${lineNo.toString().padStart(padWidth)} ${marker}  ${text}`;
-    }
-    return `${marker}  ${text}`;
-  };
-
-  // 上下文前缀（最多 CONTEXT 行）
-  const ctxStart = Math.max(0, prefixLen - CONTEXT);
+  // 上下文前缀（最多 EDIT_PREVIEW_CONTEXT_LINES 行）
+  const ctxStart = Math.max(0, prefixLen - EDIT_PREVIEW_CONTEXT_LINES);
   for (let i = ctxStart; i < prefixLen; i++) {
-    diffLines.push(fmtLine(startLine + i, ' ', oldLines[i]));
+    diffLines.push(makeLine(i, ' ', oldLines[i], false));
   }
 
   // 删除行
   const removedEnd = oldLines.length - suffixLen;
-  for (let i = prefixLen; i < removedEnd && diffLines.length < MAX_DIFF_LINES; i++) {
-    diffLines.push(fmtLine(startLine + i, '−', oldLines[i]));
+  for (let i = prefixLen; i < removedEnd; i++) {
+    diffLines.push(makeLine(i, '−', oldLines[i]));
   }
 
   // 新增行（行号从 prefixLen 位置开始递增）
   const addedEnd = newLines.length - suffixLen;
-  for (let i = prefixLen; i < addedEnd && diffLines.length < MAX_DIFF_LINES; i++) {
-    diffLines.push(fmtLine(startLine + i, '＋', newLines[i]));
+  for (let i = prefixLen; i < addedEnd; i++) {
+    diffLines.push(makeLine(i, '＋', newLines[i]));
   }
 
-  // 上下文后缀（最多 CONTEXT 行）
-  const ctxEnd = Math.min(oldLines.length, removedEnd + CONTEXT);
-  for (let i = removedEnd; i < ctxEnd && diffLines.length < MAX_DIFF_LINES + 2; i++) {
-    diffLines.push(fmtLine(startLine + i, ' ', oldLines[i]));
+  // 上下文后缀（最多 EDIT_PREVIEW_CONTEXT_LINES 行）
+  const ctxEnd = Math.min(oldLines.length, removedEnd + EDIT_PREVIEW_CONTEXT_LINES);
+  for (let i = removedEnd; i < ctxEnd; i++) {
+    diffLines.push(makeLine(i, ' ', oldLines[i], false));
   }
 
-  if (diffLines.length > MAX_DIFF_LINES + 2) {
-    diffLines.splice(MAX_DIFF_LINES, diffLines.length, '  ...');
-  }
-
-  return `${filePath}\n\`\`\`\n${diffLines.join('\n')}\n\`\`\``;
+  return renderEditPreview(filePath, diffLines);
 }
 
-/** 展示 runner/协议已返回的 unified diff；不在 EvolClaw 内重新计算 diff。 */
+/** 展示 runner/协议已返回的 unified diff；按 Claude Edit 预览策略投影为行号摘要。 */
 function formatProtocolDiffSummary(filePath: string, diff: string): string {
-  const MAX_DIFF_LINES = 32;
-  const lines = diff.trimEnd().split('\n');
-  const displayLines = lines.length > MAX_DIFF_LINES
-    ? [...lines.slice(0, MAX_DIFF_LINES), `...(省略 ${lines.length - MAX_DIFF_LINES} 行)`]
-    : lines;
-  const body = displayLines.join('\n');
-  return `${filePath}\n\`\`\`diff\n${body}\n\`\`\``;
+  const parsed = parseUnifiedDiffPreview(diff);
+  if (parsed.length > 0) {
+    return renderEditPreview(filePath, selectEditPreviewRows(parsed));
+  }
+
+  const fallback = diff.trimEnd().split('\n')
+    .filter(line => !isDiffMetadataLine(line))
+    .map(line => {
+      const marker: EditPreviewMarker = line.startsWith('-') ? '−' : line.startsWith('+') ? '＋' : ' ';
+      const text = line.startsWith('-') || line.startsWith('+') ? line.slice(1) : line;
+      return { marker, text, changed: marker !== ' ' };
+    });
+  return renderEditPreview(filePath, selectEditPreviewRows(fallback));
+}
+
+function renderEditPreview(filePath: string, lines: EditPreviewLine[]): string {
+  if (lines.length === 0) return filePath;
+  const maxLineNo = lines.reduce((max, line) => Math.max(max, line.lineNo ?? 0), 0);
+  const padWidth = maxLineNo > 0 ? maxLineNo.toString().length : 0;
+  const body = lines.map(line => {
+    if (line.raw) return line.raw;
+    if (line.lineNo != null && line.lineNo > 0) {
+      return `${line.lineNo.toString().padStart(padWidth)} ${line.marker}  ${line.text}`;
+    }
+    return `${line.marker}  ${line.text}`;
+  }).join('\n');
+  return `${filePath}\n\`\`\`\n${body}\n\`\`\``;
+}
+
+function parseUnifiedDiffPreview(diff: string): EditPreviewLine[] {
+  const preview: EditPreviewLine[] = [];
+  let oldLine = 0;
+  let newLine = 0;
+  let inHunk = false;
+
+  for (const line of diff.trimEnd().split('\n')) {
+    const hunk = line.match(/^@@\s+-(\d+)(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@/);
+    if (hunk) {
+      oldLine = Number(hunk[1]);
+      newLine = Number(hunk[2]);
+      inHunk = true;
+      continue;
+    }
+    if (!inHunk) continue;
+    if (line.startsWith('\\ No newline')) continue;
+
+    const prefix = line[0];
+    const text = line.slice(1);
+    if (prefix === ' ') {
+      preview.push({ lineNo: oldLine, marker: ' ', text, changed: false });
+      oldLine++;
+      newLine++;
+    } else if (prefix === '-') {
+      preview.push({ lineNo: oldLine, marker: '−', text, changed: true });
+      oldLine++;
+    } else if (prefix === '+') {
+      preview.push({ lineNo: newLine, marker: '＋', text, changed: true });
+      newLine++;
+    }
+  }
+
+  return preview;
+}
+
+function selectEditPreviewRows(lines: EditPreviewLine[]): EditPreviewLine[] {
+  const changeIdxs = lines
+    .map((line, idx) => line.changed ? idx : -1)
+    .filter(idx => idx >= 0);
+  if (changeIdxs.length === 0) {
+    return lines.slice(0, EDIT_PREVIEW_MAX_LINES + EDIT_PREVIEW_CONTEXT_LINES);
+  }
+
+  const changed = new Set(changeIdxs);
+  const keep = new Set<number>(changeIdxs);
+  const contextCandidates = new Map<number, number>();
+  let groupStart = changeIdxs[0];
+  let prev = changeIdxs[0];
+  const addGroup = (start: number, end: number) => {
+    for (let distance = 1; distance <= EDIT_PREVIEW_CONTEXT_LINES; distance++) {
+      const before = start - distance;
+      const after = end + distance;
+      if (before >= 0 && !changed.has(before)) {
+        contextCandidates.set(before, Math.min(contextCandidates.get(before) ?? distance, distance));
+      }
+      if (after < lines.length && !changed.has(after)) {
+        contextCandidates.set(after, Math.min(contextCandidates.get(after) ?? distance, distance));
+      }
+    }
+  };
+
+  for (let i = 1; i < changeIdxs.length; i++) {
+    const idx = changeIdxs[i];
+    if (idx === prev + 1) {
+      prev = idx;
+      continue;
+    }
+    addGroup(groupStart, prev);
+    groupStart = idx;
+    prev = idx;
+  }
+  addGroup(groupStart, prev);
+
+  const contextBudget = Math.max(0, EDIT_PREVIEW_MAX_LINES + EDIT_PREVIEW_CONTEXT_LINES - keep.size);
+  const orderedCandidates = [...contextCandidates.entries()]
+    .sort(([idxA, distA], [idxB, distB]) => distA - distB || idxA - idxB);
+  for (const [idx] of orderedCandidates.slice(0, contextBudget)) {
+    keep.add(idx);
+  }
+
+  const ordered = [...keep].sort((a, b) => a - b);
+  const selected: EditPreviewLine[] = [];
+  let previousIdx: number | undefined;
+  for (const idx of ordered) {
+    if (previousIdx !== undefined) {
+      const gap = idx - previousIdx - 1;
+      if (gap > EDIT_PREVIEW_INLINE_GAP_LINES) {
+        selected.push({ marker: ' ', text: '...', raw: '  ...' });
+      } else {
+        for (let i = previousIdx + 1; i < idx; i++) {
+          selected.push(lines[i]);
+        }
+      }
+    }
+    selected.push(lines[idx]);
+    previousIdx = idx;
+  }
+  const lastIdx = ordered[ordered.length - 1];
+  const tailGap = lines.length - 1 - lastIdx;
+  if (tailGap > EDIT_PREVIEW_INLINE_GAP_LINES) {
+    selected.push({ marker: ' ', text: '...', raw: '  ...' });
+  } else {
+    for (let i = lastIdx + 1; i < lines.length; i++) {
+      selected.push(lines[i]);
+    }
+  }
+  return selected;
+}
+
+function isDiffMetadataLine(line: string): boolean {
+  return /^diff --git /.test(line)
+    || /^index /.test(line)
+    || /^new file mode /.test(line)
+    || /^deleted file mode /.test(line)
+    || /^similarity index /.test(line)
+    || /^rename (?:from|to) /.test(line)
+    || /^--- /.test(line)
+    || /^\+\+\+ /.test(line);
 }
 
 interface PendingPermission {

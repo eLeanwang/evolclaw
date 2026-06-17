@@ -6,6 +6,8 @@ import { resolveShowActivities, showActivitiesPolicy } from '../core/channel-loa
 import type { MessageBridge } from '../core/message/message-bridge.js';
 import type { WecomChannelInstance as WecomInst, ThoughtItem } from '../types.js';
 import { formatItemsAsText } from '../core/message/items-formatter.js';
+import type { FirstInteractionWelcomeManager } from '../utils/welcome.js';
+import { initWelcomeManager, sendWelcomeIfNeeded } from '../utils/welcome.js';
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -40,8 +42,16 @@ export class WecomChannel {
   // Stream reply state: reqId → { streamId, frame }
   private activeStreams = new Map<string, { streamId: string; frame: any }>();
 
-  constructor(config: WecomConfig) {
+  // Welcome message manager
+  private welcomeManager?: FirstInteractionWelcomeManager;
+
+  constructor(config: WecomConfig, private agentAid?: string, private channelName?: string) {
     this.config = config;
+
+    // 初始化 welcomeManager（使用共享帮助函数）
+    if (agentAid && channelName) {
+      this.welcomeManager = initWelcomeManager('wecom', agentAid, channelName);
+    }
   }
 
   // ── Public helpers (testable) ─────────────────────────────────────────────
@@ -173,6 +183,15 @@ export class WecomChannel {
     });
 
     if (!this.messageHandler) return;
+
+    // 首次交互欢迎消息（使用共享帮助函数）
+    await sendWelcomeIfNeeded(
+      this.welcomeManager,
+      userid,
+      channelId,
+      (id, text) => this.sendMessage(id, text),
+      'WeCom'
+    );
 
     if (msgtype === 'text') {
       const text = body.text?.content?.trim();
@@ -545,7 +564,7 @@ export class WecomChannelPlugin implements ChannelPlugin {
     const channel = new WecomChannel({
       botId: inst.botId,
       secret: inst.secret,
-    });
+    }, ctx.agentName, inst.name);
 
     const mode = resolveShowActivities(inst);
     const adapter = {

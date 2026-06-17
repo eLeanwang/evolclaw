@@ -2372,7 +2372,7 @@ export async function handleSlashCommand(this: any,
 
   // /trigger 命令
   if (normalizedContent === '/trigger' || normalizedContent.startsWith('/trigger ')) {
-    const text = await this.handleTrigger(normalizedContent, channel, channelId, userId ?? '', isAdmin, messageId, chatType);
+    const text = await this.handleTrigger(normalizedContent, channel, channelId, userId ?? '', isAdmin, messageId, chatType, threadId);
     return { kind: 'command.result' as const, text };
   }
 

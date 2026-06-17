@@ -330,7 +330,13 @@ export function buildReloadHooks(deps: ReloadHooksDeps): ReloadHooks {
       if (!plugin) throw new Error(`[Reload] No plugin for channel type '${cfgInst.type}'`);
       const effInst = { ...cfgInst, name: channelName };
       const newInst = await plugin.createInstance(effInst, ctx);
-      if (!newInst) throw new Error(`[Reload] createInstance returned null for ${channelName}`);
+      if (!newInst) {
+        // createInstance returns null for a disabled / invalid-credential channel.
+        // Not an error: skip it. Throwing here would propagate to reload(), which
+        // turns it into agent error state and takes down every healthy channel too.
+        logger.warn(`[Reload] Channel ${channelName} (${cfgInst.type}) disabled or invalid credentials, skipping`);
+        return;
+      }
       registerChannelInstance(newInst);
       onChannelStarted?.(newInst);
       await newInst.connect();

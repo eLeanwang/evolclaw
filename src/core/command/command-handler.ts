@@ -18,9 +18,8 @@ import fs from 'fs';
 import os from 'os';
 import { parseTriggerSet, parseTriggerUpdate } from '../trigger/parser.js';
 import type { ParsedTriggerSet } from '../trigger/parser.js';
-import { TriggerManager } from '../trigger/manager.js';
-import { TriggerScheduler, calcNextFireAt } from '../trigger/scheduler.js';
-import type { Trigger } from '../../types.js';
+import type { TriggerRuntimeScheduler } from '../trigger/scheduler.js';
+import type { TriggerDefinition, TriggerFeedbackTarget, TriggerSource } from '../trigger/types.js';
 import { tryParseChannelKey } from '../channel-loader.js';
 import { displaySessionTitle } from '../session/session-title.js';
 import { isQuickCommand } from './slash-gate.js';
@@ -91,10 +90,7 @@ export class CommandHandler {
   private agentMap: Map<string, AgentRunnerFull>;
   private primaryRunnerKey: string;
   private agentRegistry?: EvolAgentRegistryHandle;
-  // 注：trigger 归属已改为按 targetChannel/channel 解析 owning agent 的 scheduler/manager。
-  // 以下字段仅保留 setTriggerScheduler 接口兼容（index.ts 仍调用），注册/管理路径不再读取。
-  private triggerScheduler?: TriggerScheduler;
-  private triggerManager?: TriggerManager;
+  private triggerSchedulerResolver?: (agentAid: string) => TriggerRuntimeScheduler | undefined;
 
   /**
    * Get the runner for a (channel, baseagent) pair.
@@ -151,16 +147,185 @@ export class CommandHandler {
     this.agentRegistry = registry;
   }
 
-  /** 注入触发器调度器（由 index.ts 在初始化后调用） */
-  setTriggerScheduler(scheduler: TriggerScheduler, manager: TriggerManager): void {
-    this.triggerScheduler = scheduler;
-    this.triggerManager = manager;
+  setTriggerSchedulerResolver(resolver: (agentAid: string) => TriggerRuntimeScheduler | undefined): void {
+    this.triggerSchedulerResolver = resolver;
   }
 
   /** 返回管理当前通道的 EvolAgent，无则返回 null */
   private getOwningAgent(channel: string): EvolAgentHandle | null {
     if (!this.agentRegistry) return null;
     return this.agentRegistry.resolveByChannel(channel);
+  }
+
+  getTriggerSchedulerForChannel(channel: string): TriggerRuntimeScheduler | undefined {
+    const agentAid = this.getOwningAgent(channel)?.aid ?? tryParseChannelKey(channel)?.selfAID;
+    return agentAid ? this.triggerSchedulerResolver?.(agentAid) : undefined;
+  }
+
+  private getTriggerSchedulerForAgent(agentAid: string): TriggerRuntimeScheduler | undefined {
+    return this.triggerSchedulerResolver?.(agentAid);
+  }
+
+  private triggerSourceFromSchedule(scheduleType: string, scheduleValue: string): TriggerSource {
+    if (scheduleType === 'delay') return { type: 'delay', afterMs: Number(scheduleValue) };
+    if (scheduleType === 'at') return { type: 'at', at: scheduleValue };
+    if (scheduleType === 'cron') return { type: 'cron', expression: scheduleValue };
+    throw new Error(`unsupported scheduleType: ${scheduleType}`);
+  }
+
+  private scheduleViewFromSource(source: TriggerSource): { scheduleType: string; scheduleValue: string } {
+    switch (source.type) {
+      case 'delay': return { scheduleType: 'delay', scheduleValue: String(source.afterMs) };
+      case 'at': return { scheduleType: 'at', scheduleValue: source.at };
+      case 'cron': return { scheduleType: 'cron', scheduleValue: source.expression };
+      case 'interval': return { scheduleType: 'interval', scheduleValue: String(source.everyMs) };
+    }
+  }
+
+  private nextFireAtForDefinition(scheduler: TriggerRuntimeScheduler | undefined, definition: TriggerDefinition): number | undefined {
+    if (definition.source.type === 'delay') return definition.createdAt + definition.source.afterMs;
+    if (definition.source.type === 'at') return new Date(definition.source.at).getTime();
+    try {
+      return scheduler?.show(definition.id).schedule?.nextFireAt;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private triggerPrompt(definition: TriggerDefinition): string {
+    return definition.feedback.onSuccess.template ?? '';
+  }
+
+  private definitionToTriggerView(definition: TriggerDefinition, scheduler?: TriggerRuntimeScheduler): any {
+    const target = definition.feedback.onSuccess.target ?? definition.feedback.onFailure.target;
+    const schedule = this.scheduleViewFromSource(definition.source);
+    return {
+      id: definition.id,
+      name: definition.name,
+      enabled: definition.enabled,
+      scheduleType: schedule.scheduleType,
+      scheduleValue: schedule.scheduleValue,
+      nextFireAt: this.nextFireAtForDefinition(scheduler, definition),
+      targetChannel: target?.channelType,
+      targetChannelName: target?.channelName,
+      targetChannelId: target?.channelId,
+      targetChannelType: target?.channelType,
+      targetSessionStrategy: target?.sessionStrategy ?? 'latest',
+      targetThreadId: target?.threadId,
+      boundSessionId: target?.sessionId,
+      prompt: this.triggerPrompt(definition),
+      createdByPeerId: definition.origin?.peerId ?? '',
+      createdByChannel: definition.origin?.channel ?? '',
+      schedulerAid: definition.agentAid,
+      fireCount: 0,
+      failCount: 0,
+      createdAt: definition.createdAt,
+      updatedAt: definition.updatedAt,
+      status: definition.enabled ? 'active' : 'disabled',
+    };
+  }
+
+  private canAccessTriggerDefinition(definition: TriggerDefinition, peerId: string, channel: string, isAdmin: boolean): boolean {
+    if (isAdmin) return true;
+    return definition.origin?.peerId === peerId && definition.origin?.channel === channel;
+  }
+
+  private findTriggerDefinition(
+    scheduler: TriggerRuntimeScheduler,
+    nameOrId: string,
+    peerId: string,
+    channel: string,
+    isAdmin: boolean,
+  ): TriggerDefinition | undefined {
+    return scheduler
+      .list({ all: true })
+      .find(definition =>
+        (definition.id === nameOrId || definition.name === nameOrId)
+        && this.canAccessTriggerDefinition(definition, peerId, channel, isAdmin));
+  }
+
+  private async buildTriggerDefinitionFromParsed(
+    parsed: ParsedTriggerSet,
+    channel: string,
+    channelId: string,
+    peerId: string,
+    messageId?: string,
+    threadId?: string,
+  ): Promise<{ definition: TriggerDefinition; scheduler: TriggerRuntimeScheduler } | { error: string }> {
+    const now = Date.now();
+    const id = `trig_${now}_${crypto.randomBytes(4).toString('hex')}`;
+    const name = parsed.name ?? `trigger-${now.toString(36)}`;
+    const targetChannelName = parsed.targetChannel ?? channel;
+    if (parsed.targetChannel && !this.adapters.has(parsed.targetChannel)) {
+      return { error: `目标渠道不存在或未启用：${parsed.targetChannel}` };
+    }
+
+    const targetChannelType = this.resolveChannelType(targetChannelName);
+    const targetChannelId = parsed.targetChannelId ?? channelId;
+    if (targetChannelType === 'aun' && parsed.targetChannelId && !parsed.targetChannelId.includes('.')) {
+      return { error: `AUN 渠道的 --channelid 必须是 AID 格式（如 user.agentid.pub），收到："${parsed.targetChannelId}"` };
+    }
+
+    const schedulerAid = this.getOwningAgent(targetChannelName)?.aid ?? tryParseChannelKey(targetChannelName)?.selfAID;
+    const scheduler = schedulerAid ? this.getTriggerSchedulerForAgent(schedulerAid) : undefined;
+    if (!schedulerAid || !scheduler) {
+      return { error: `目标 agent 不存在或未就绪：${schedulerAid ?? targetChannelName}` };
+    }
+
+    const strategy = parsed.targetThreadId ? 'thread' : parsed.targetSessionStrategy;
+    const target: TriggerFeedbackTarget = {
+      channelType: targetChannelType,
+      channelName: targetChannelName,
+      channelId: targetChannelId,
+      sessionStrategy: strategy,
+    };
+
+    if (strategy === 'current') {
+      if (parsed.targetChannel && parsed.targetChannel !== channel) {
+        return { error: '跨渠道不支持 --session current，请改用 latest 或 thread' };
+      }
+      const active = await this.sessionManager.getActiveSession(channel, channelId);
+      if (!active) return { error: '当前没有活跃会话，改用 --session latest 或 thread' };
+      target.sessionId = active.id;
+    } else if (strategy === 'thread') {
+      const adapter = this.adapters.get(targetChannelName);
+      if (!adapter?.capabilities.thread) return { error: '目标渠道不支持 thread 会话' };
+      const explicitThread = typeof parsed.targetThreadId === 'string' && parsed.targetThreadId !== 'true' ? parsed.targetThreadId : undefined;
+      target.threadId = explicitThread || threadId || messageId || `trigger-${id}`;
+    }
+
+    const activeSession = this.sessionManager.getActiveSessionSync(channel, channelId);
+    const definition = {
+      $schema_version: 1 as const,
+      id,
+      agentAid: schedulerAid,
+      enabled: true,
+      name,
+      createdAt: now,
+      updatedAt: now,
+      origin: {
+        channel,
+        peerId,
+        sessionKey: activeSession?.sessionKey,
+      },
+      source: this.triggerSourceFromSchedule(parsed.scheduleType, parsed.scheduleValue),
+      feedback: {
+        onSuccess: {
+          mode: 'agent-runner' as const,
+          target,
+          template: parsed.prompt,
+        },
+        onNoop: { mode: 'none' as const },
+        onFailure: { mode: 'none' as const },
+      },
+      reliability: {
+        concurrency: 'forbid' as const,
+        missedPolicy: 'run_once' as const,
+        scriptRetry: { maxAttempts: 0, backoffMs: 30_000 },
+      },
+    };
+
+    return { definition, scheduler };
   }
 
   /** 返回当前通道的有效项目路径：从 owning agent 取。*/
@@ -719,6 +884,93 @@ export class CommandHandler {
     return await handleSlashCommand.call(this, content, channel, channelId, sendMessage, userId, threadId, chatType, source, messageId, selfAID, overrideIdentity);
   }
 
+  private async handleTriggerCommand(
+    scheduler: TriggerRuntimeScheduler,
+    content: string,
+    channel: string,
+    channelId: string,
+    peerId: string,
+    isAdmin: boolean,
+    messageId?: string,
+    threadId?: string,
+  ): Promise<string> {
+    if (content === '/trigger') {
+      const visible = scheduler
+        .list()
+        .filter(definition => this.canAccessTriggerDefinition(definition, peerId, channel, isAdmin));
+      if (visible.length === 0) return '📭 当前没有活跃的触发器';
+      const lines = visible.map(definition => {
+        const view = this.definitionToTriggerView(definition, scheduler);
+        const next = view.nextFireAt ? new Date(view.nextFireAt).toLocaleString() : '未计算';
+        return `• **${view.name}** [${view.scheduleType}] 下次: ${next}`;
+      });
+      return `📋 活跃触发器（${visible.length} 个）：\n\n${lines.join('\n')}`;
+    }
+
+    const sub = content.slice('/trigger '.length).trim();
+
+    if (sub === 'list' || sub.startsWith('list ')) {
+      const includeDisabled = sub.includes('--all') || sub.includes('all');
+      const visible = scheduler
+        .list({ all: includeDisabled })
+        .filter(definition => this.canAccessTriggerDefinition(definition, peerId, channel, isAdmin));
+      if (visible.length === 0) return '📭 没有触发器记录';
+      const lines = visible.map(definition => {
+        const view = this.definitionToTriggerView(definition, scheduler);
+        const next = view.nextFireAt ? new Date(view.nextFireAt).toLocaleString() : '未计算';
+        const status = definition.enabled ? 'active' : 'disabled';
+        return `• ${view.name} [${view.scheduleType}] ${status} | 下次: ${next}`;
+      });
+      return `📋 触发器（${visible.length} 个）：\n\n${lines.join('\n')}`;
+    }
+
+    if (sub.startsWith('cancel ')) {
+      const nameOrId = sub.slice('cancel '.length).trim();
+      if (!nameOrId) return '❌ 用法：/trigger cancel <名称>';
+      const definition = this.findTriggerDefinition(scheduler, nameOrId, peerId, channel, isAdmin);
+      if (!definition) {
+        return isAdmin
+          ? `❌ 未找到触发器：${nameOrId}`
+          : `❌ 未找到触发器 "${nameOrId}"，或无权限取消`;
+      }
+      const cancelled = scheduler.cancel(definition.id);
+      this.eventBus.publish({ type: 'trigger:cancelled', triggerId: cancelled.id, name: cancelled.name, by: peerId });
+      return `✅ 触发器已取消：**${cancelled.name}**`;
+    }
+
+    if (sub.startsWith('update ')) {
+      const args = sub.slice('update '.length);
+      const result = parseTriggerUpdate(args);
+      if (!result.ok) return `❌ ${result.error}`;
+      const updated = await this.updateTriggerFromPatch(
+        scheduler,
+        result.nameOrId,
+        result.value,
+        channel,
+        channelId,
+        peerId,
+        isAdmin,
+        messageId,
+        threadId,
+      );
+      if (!updated.ok) return `❌ ${updated.error}`;
+      const nextStr = updated.trigger.nextFireAt ? new Date(updated.trigger.nextFireAt).toLocaleString() : '未计算';
+      return `✅ 触发器已更新：**${updated.trigger.name}**\n下次触发：${nextStr}`;
+    }
+
+    if (sub.startsWith('set ')) {
+      const args = sub.slice('set '.length);
+      const result = parseTriggerSet(args);
+      if (!result.ok) return `❌ ${result.error}`;
+      const reg = await this.registerTriggerFromParsed(result.value, channel, channelId, peerId, messageId, undefined, threadId);
+      if (!reg.ok) return `❌ ${reg.error}`;
+      const nextStr = reg.trigger.nextFireAt ? new Date(reg.trigger.nextFireAt).toLocaleString() : '未计算';
+      return `✅ 触发器已注册：**${reg.trigger.name}**\n下次触发：${nextStr}`;
+    }
+
+    return `❌ 未知子命令。用法：\n/trigger — 查看活跃触发器\n/trigger list [--all] — 查看触发器\n/trigger set <参数> — 注册触发器\n/trigger update <名称|ID> <参数> — 修改触发器\n/trigger cancel <名称|ID> — 取消触发器`;
+  }
+
   private async handleTrigger(
     content: string,
     channel: string,
@@ -726,265 +978,119 @@ export class CommandHandler {
     peerId: string,
     isAdmin: boolean,
     messageId?: string,
-    chatType?: string,
+    _chatType?: string,
+    threadId?: string,
   ): Promise<string> {
-    // Resolve trigger manager/scheduler from the owning agent of this channel
-    const owningAgent = this.getOwningAgent(channel);
-    const scheduler = owningAgent?.triggerScheduler as TriggerScheduler | undefined;
-    const manager = owningAgent?.triggerManager as TriggerManager | undefined;
-
-    // Bare /trigger → list active
-    if (content === '/trigger') {
-      if (!manager) return '⚠️ 触发器功能未启用';
-      const active = manager.listActive();
-      if (active.length === 0) return '📭 当前没有活跃的触发器';
-      const lines = active.map(t => {
-        const next = new Date(t.nextFireAt).toLocaleString();
-        const fired = t.fireCount > 0 ? ` | 已触发 ${t.fireCount} 次` : '';
-        return `• **${t.name}** [${t.scheduleType}] 下次: ${next}${fired}`;
-      });
-      return `📋 活跃触发器（${active.length} 个）：\n\n${lines.join('\n')}`;
-    }
-
-    const sub = content.slice('/trigger '.length).trim();
-
-    // /trigger list → list all (active + history)
-    if (sub === 'list' || sub.startsWith('list ')) {
-      if (!manager) return '⚠️ 触发器功能未启用';
-      const { active, history } = manager.listAll();
-      const lines: string[] = [];
-      if (active.length > 0) {
-        lines.push(`**活跃 (${active.length})**`);
-        for (const t of active) {
-          const next = new Date(t.nextFireAt).toLocaleString();
-          lines.push(`• ${t.name} [${t.scheduleType}] 下次: ${next} | 触发 ${t.fireCount} 次`);
-        }
-      }
-      if (history.length > 0) {
-        lines.push(`\n**历史 (${history.length})**`);
-        for (const h of history.slice(-10)) {
-          const done = new Date((h as any).doneAt).toLocaleString();
-          lines.push(`• ${h.name} [${(h as any).doneReason}] ${done}`);
-        }
-      }
-      if (lines.length === 0) return '📭 没有触发器记录';
-      return lines.join('\n');
-    }
-
-    // /trigger cancel <name|id>
-    if (sub.startsWith('cancel ')) {
-      if (!manager || !scheduler) return '⚠️ 触发器功能未启用';
-      const nameOrId = sub.slice('cancel '.length).trim();
-      if (!nameOrId) return '❌ 用法：/trigger cancel <名称>';
-
-      // Find trigger: non-admin lookup is scoped to (peerId, channel) to avoid info disclosure
-      // Non-admins can cancel by name or by their own trigger's UUID
-      let trigger: ReturnType<typeof manager.getById>;
-      if (isAdmin) {
-        trigger = manager.getByName(nameOrId) ?? manager.getById(nameOrId);
-      } else {
-        trigger = manager.getByNameScoped(nameOrId, peerId, channel)
-               ?? manager.getByIdScoped(nameOrId, peerId, channel);
-      }
-      if (!trigger) {
-        return isAdmin
-          ? `❌ 未找到触发器：${nameOrId}`
-          : `❌ 未找到触发器 "${nameOrId}"，或无权限取消`;
-      }
-
-      manager.moveToDone(trigger.id, 'cancelled');
-      scheduler.cancel(trigger.id);
-      this.eventBus.publish({ type: 'trigger:cancelled', triggerId: trigger.id, name: trigger.name, by: peerId });
-      return `✅ 触发器已取消：**${trigger.name}**`;
-    }
-
-    // /trigger update <name|id> [--参数...]
-    if (sub.startsWith('update ')) {
-      if (!manager || !scheduler) return '⚠️ 触发器功能未启用';
-      const args = sub.slice('update '.length);
-      const result = parseTriggerUpdate(args);
-      if (!result.ok) return `❌ ${result.error}`;
-
-      const { nameOrId, value: patch } = result;
-
-      // Find trigger: non-admin lookup is scoped
-      let trigger: ReturnType<typeof manager.getById>;
-      if (isAdmin) {
-        trigger = manager.getByName(nameOrId) ?? manager.getById(nameOrId);
-      } else {
-        trigger = manager.getByNameScoped(nameOrId, peerId, channel)
-               ?? manager.getByIdScoped(nameOrId, peerId, channel);
-      }
-      if (!trigger) {
-        return isAdmin
-          ? `❌ 未找到触发器：${nameOrId}`
-          : `❌ 未找到触发器 "${nameOrId}"，或无权限修改`;
-      }
-
-      // If schedule changed, recalculate nextFireAt
-      if (patch.scheduleType && patch.scheduleValue) {
-        const now = Date.now();
-        patch.nextFireAt = calcNextFireAt(patch.scheduleType, patch.scheduleValue, now);
-      }
-
-      // 跨渠道迁移：改了 targetChannel 时必须同步重算 targetChannelType，
-      // 并按 session 策略重新绑定执行会话（与 set 路径保持一致，否则 trigger
-      // 仍按旧 channelType 路由 / 仍绑在旧渠道的 boundSessionId 上）。
-      const effectiveChannel = patch.targetChannel ?? trigger.targetChannel;
-      const effectiveChannelId = patch.targetChannelId ?? trigger.targetChannelId;
-      if (patch.targetChannel) {
-        patch.targetChannelType = this.resolveChannelType(patch.targetChannel);
-      }
-      // 解析最终生效的 session 策略（patch 优先，否则沿用原 trigger）
-      const effStrategy = patch.targetSessionStrategy ?? trigger.targetSessionStrategy;
-      // 渠道或策略变化时，按策略重新绑定会话
-      if (patch.targetChannel || patch.targetSessionStrategy) {
-        if (effStrategy === 'current') {
-          if (patch.targetChannel && patch.targetChannel !== trigger.targetChannel) {
-            return '❌ 跨渠道不支持 --session current，请改用 latest 或 thread';
-          }
-          const active = await this.sessionManager.getActiveSession(effectiveChannel, effectiveChannelId);
-          if (!active) return '❌ 目标渠道当前没有活跃会话，改用 --session latest 或先在该渠道发一条消息';
-          patch.boundSessionId = active.id;
-        } else if (effStrategy === 'thread') {
-          const adapter = this.adapters.get(effectiveChannel);
-          if (!adapter?.capabilities.thread) return '❌ 目标渠道不支持 thread 会话';
-        } else {
-          // latest 策略：清除旧的 boundSessionId（若有），按渠道动态取最新会话
-          if (trigger.boundSessionId) patch.boundSessionId = undefined;
-        }
-      }
-
-      let updated: Trigger;
-      try {
-        updated = manager.update(trigger.id, patch);
-        scheduler.update(updated);
-      } catch (err: any) {
-        return `❌ 更新失败：${err.message}`;
-      }
-
-      const nextStr = new Date(updated.nextFireAt).toLocaleString();
-      return `✅ 触发器已更新：**${updated.name}**\n下次触发：${nextStr}`;
-    }
-
-    // /trigger set ...
-    if (sub.startsWith('set ')) {
-      if (!manager || !scheduler) return '⚠️ 触发器功能未启用';
-      const args = sub.slice('set '.length);
-      const result = parseTriggerSet(args);
-      if (!result.ok) return `❌ ${result.error}`;
-
-      const reg = await this.registerTriggerFromParsed(result.value, channel, channelId, peerId, messageId, chatType);
-      if (!reg.ok) return `❌ ${reg.error}`;
-      const nextStr = new Date(reg.trigger.nextFireAt).toLocaleString();
-      return `✅ 触发器已注册：**${reg.trigger.name}**\n下次触发：${nextStr}`;
-    }
-
-    return `❌ 未知子命令。用法：\n/trigger — 查看活跃触发器\n/trigger list — 查看所有触发器\n/trigger set <参数> — 注册触发器\n/trigger update <名称|ID> <参数> — 修改触发器\n/trigger cancel <名称> — 取消触发器`;
+    const scheduler = this.getTriggerSchedulerForChannel(channel);
+    if (!scheduler) return '⚠️ 触发器功能未启用';
+    return await this.handleTriggerCommand(scheduler, content, channel, channelId, peerId, isAdmin, messageId, threadId);
   }
 
-  /** 从已解析的 trigger 参数组装 Trigger 并注册。文本路径（handleTrigger）与 menu 路径共用。
-   *  parsed 形状 = parseTriggerSet 的 result.value（ParsedTriggerSet）。
-   *  失败 return { ok:false, error }；成功 return { ok:true, trigger }。本方法不改变原文本路径行为。 */
-  private async registerTriggerFromParsed(
-    parsed: ParsedTriggerSet,
-    channel: string, channelId: string, peerId: string, messageId?: string,
-    chatType?: string,
-  ): Promise<{ ok: true; trigger: Trigger } | { ok: false; error: string }> {
-    const now = Date.now();
-    const nextFireAt = calcNextFireAt(parsed.scheduleType, parsed.scheduleValue, now);
-
-    // Auto-generate name if not provided
-    const name = parsed.name ?? `trigger-${Date.now().toString(36)}`;
-
-    // Validate target channel exists
-    const targetChannelName = parsed.targetChannel ?? channel;
-    if (parsed.targetChannel && !this.adapters.has(parsed.targetChannel)) {
-      return { ok: false, error: `目标渠道不存在或未启用：${parsed.targetChannel}` };
-    }
-    // Validate channelId format for AUN: must look like an AID (contains '.')
-    const targetChannelType = this.resolveChannelType(targetChannelName);
-    const targetChannelId = parsed.targetChannelId ?? channelId;
-    const activeTarget = this.sessionManager.getActiveSessionSync(targetChannelName, targetChannelId);
-    const targetChatType = activeTarget?.chatType === 'group'
-      ? 'group'
-      : activeTarget?.chatType === 'private'
-        ? 'private'
-        : chatType === 'group'
-          ? 'group'
-          : 'private';
-    if (targetChannelType === 'aun' && parsed.targetChannelId && !parsed.targetChannelId.includes('.')) {
-      return { ok: false, error: `AUN 渠道的 --channelid 必须是 AID 格式（如 user.agentid.pub），收到："${parsed.targetChannelId}"` };
+  async updateTriggerFromPatch(
+    scheduler: TriggerRuntimeScheduler,
+    nameOrId: string,
+    patch: any,
+    channel: string,
+    channelId: string,
+    peerId: string,
+    isAdmin: boolean,
+    messageId?: string,
+    threadId?: string,
+  ): Promise<{ ok: true; trigger: any } | { ok: false; error: string }> {
+    const definition = this.findTriggerDefinition(scheduler, nameOrId, peerId, channel, isAdmin);
+    if (!definition) {
+      return { ok: false, error: isAdmin ? `未找到触发器：${nameOrId}` : `未找到触发器 "${nameOrId}"，或无权限修改` };
     }
 
-    // 用 targetChannel 解析归属 agent（谁执行归谁），不兜底到 primary
-    const schedulerAid = tryParseChannelKey(targetChannelName)?.selfAID;
-    const owningAgent = schedulerAid ? this.agentRegistry?.get(schedulerAid) : null;
-    const scheduler = owningAgent?.triggerScheduler as TriggerScheduler | undefined;
-    const manager = owningAgent?.triggerManager as TriggerManager | undefined;
-    if (!manager || !scheduler || !schedulerAid) {
-      return { ok: false, error: `目标 agent 不存在或未就绪：${schedulerAid ?? targetChannelName}` };
-    }
-
-    const trigger: Trigger = {
-      id: crypto.randomUUID(),
-      name,
-      scheduleType: parsed.scheduleType,
-      scheduleValue: parsed.scheduleValue,
-      nextFireAt,
-      targetChannel: targetChannelName,
-      targetChannelId,
-      targetChatType,
-      targetChannelType,
-      targetThreadId: parsed.targetThreadId,
-      targetSessionStrategy: parsed.targetSessionStrategy,
-      agentId: parsed.agentId,
-      prompt: parsed.prompt,
-      createdByPeerId: peerId,
-      createdByChannel: channel,
-      schedulerAid,
-      fireCount: 0,
-      failCount: 0,
-      createdAt: now,
-      updatedAt: now,
+    const updated: TriggerDefinition = {
+      ...definition,
+      source: { ...definition.source } as TriggerSource,
+      feedback: {
+        onSuccess: { ...definition.feedback.onSuccess, target: definition.feedback.onSuccess.target ? { ...definition.feedback.onSuccess.target } : undefined },
+        onNoop: definition.feedback.onNoop ? { ...definition.feedback.onNoop, target: definition.feedback.onNoop.target ? { ...definition.feedback.onNoop.target } : undefined } : undefined,
+        onFailure: { ...definition.feedback.onFailure, target: definition.feedback.onFailure.target ? { ...definition.feedback.onFailure.target } : undefined },
+      },
+      reliability: {
+        ...definition.reliability,
+        scriptRetry: { ...definition.reliability.scriptRetry },
+      },
     };
 
-    try {
-      // Strategy-based session binding
-      if (parsed.targetSessionStrategy === 'current') {
-        if (parsed.targetChannel && parsed.targetChannel !== channel) {
+    if (patch.name !== undefined) updated.name = String(patch.name);
+    if (patch.prompt !== undefined) updated.feedback.onSuccess.template = String(patch.prompt);
+    if (patch.scheduleType !== undefined || patch.scheduleValue !== undefined) {
+      const current = this.scheduleViewFromSource(definition.source);
+      updated.source = this.triggerSourceFromSchedule(
+        patch.scheduleType ?? current.scheduleType,
+        String(patch.scheduleValue ?? current.scheduleValue),
+      );
+    }
+
+    if (
+      patch.targetChannel !== undefined
+      || patch.targetChannelId !== undefined
+      || patch.targetSessionStrategy !== undefined
+      || patch.targetThreadId !== undefined
+    ) {
+      const previousTarget = definition.feedback.onSuccess.target;
+      if (!previousTarget) return { ok: false, error: '现有触发器缺少 target，无法更新目标' };
+      const targetChannelName = patch.targetChannel ?? previousTarget.channelType;
+      if (patch.targetChannel && !this.adapters.has(patch.targetChannel)) {
+        return { ok: false, error: `目标渠道不存在或未启用：${patch.targetChannel}` };
+      }
+      const targetChannelType = patch.targetChannel ? this.resolveChannelType(patch.targetChannel) : previousTarget.channelType;
+      const targetAid = this.getOwningAgent(targetChannelName)?.aid ?? tryParseChannelKey(targetChannelName)?.selfAID ?? definition.agentAid;
+      if (targetAid !== definition.agentAid) {
+        return { ok: false, error: '暂不支持把 trigger 跨 agent 迁移，请新建触发器' };
+      }
+
+      const strategy = patch.targetThreadId ? 'thread' : (patch.targetSessionStrategy ?? previousTarget.sessionStrategy ?? 'latest');
+      const target: TriggerFeedbackTarget = {
+        channelType: targetChannelType,
+        channelName: patch.targetChannel ? targetChannelName : previousTarget.channelName,
+        channelId: String(patch.targetChannelId ?? previousTarget.channelId),
+        sessionStrategy: strategy,
+      };
+      if (strategy === 'current') {
+        if (patch.targetChannel && patch.targetChannel !== channel) {
           return { ok: false, error: '跨渠道不支持 --session current，请改用 latest 或 thread' };
         }
         const active = await this.sessionManager.getActiveSession(channel, channelId);
-        if (!active) return { ok: false, error: '当前没有活跃会话，改用 --session latest 或 thread' };
-        trigger.boundSessionId = active.id;
-      } else if (parsed.targetSessionStrategy === 'thread') {
-        const targetAdapterName = parsed.targetChannel ?? channel;
-        const adapter = this.adapters.get(targetAdapterName);
+        if (!active) return { ok: false, error: '目标渠道当前没有活跃会话，改用 latest 或先在该渠道发一条消息' };
+        target.sessionId = active.id;
+      } else if (strategy === 'thread') {
+        const adapter = this.getAdapter(targetChannelName);
         if (!adapter?.capabilities.thread) return { ok: false, error: '目标渠道不支持 thread 会话' };
-        const channelType = adapter.channelKey.split('#')[0];
-        trigger.targetChannelType = channelType;
-        if (channelType === 'aun') {
-          trigger.threadKind = 'aun';
-          trigger.targetThreadId = `trigger-${trigger.id}`;
-        } else {
-          if (!messageId) return { ok: false, error: '飞书 thread 模式需要消息 ID，请重新发送命令' };
-          trigger.threadKind = 'feishu';
-          trigger.rootMessageId = messageId;
-          trigger.pendingThread = true;
-        }
+        target.threadId = String(patch.targetThreadId ?? threadId ?? messageId ?? previousTarget.threadId ?? `trigger-${definition.id}`);
       }
-
-      // Validate name uniqueness before persisting (manager.register writes to disk)
-      // scheduler.register is in-memory only and cannot fail, so order is safe here.
-      // If manager.register throws (duplicate name/ID), nothing is persisted.
-      manager.register(trigger);
-      scheduler.register(trigger);
-    } catch (err: any) {
-      return { ok: false, error: `注册失败：${err.message}` };
+      updated.feedback.onSuccess.target = target;
     }
 
-    return { ok: true, trigger };
+    try {
+      const saved = scheduler.update(definition.id, updated);
+      return { ok: true, trigger: this.definitionToTriggerView(saved, scheduler) };
+    } catch (err: any) {
+      return { ok: false, error: `更新失败：${err?.message || err}` };
+    }
+  }
+
+  /** 从已解析的 trigger 参数组装 definition 并注册。文本路径（handleTrigger）与 menu 路径共用。
+   *  parsed 形状 = parseTriggerSet 的 result.value（ParsedTriggerSet）。
+   *  失败 return { ok:false, error }；成功 return { ok:true, trigger }。 */
+  async registerTriggerFromParsed(
+    parsed: ParsedTriggerSet,
+    channel: string, channelId: string, peerId: string, messageId?: string,
+    _chatType?: string,
+    threadId?: string,
+  ): Promise<{ ok: true; trigger: any } | { ok: false; error: string }> {
+    const built = await this.buildTriggerDefinitionFromParsed(parsed, channel, channelId, peerId, messageId, threadId);
+    if ('error' in built) return { ok: false, error: built.error };
+    try {
+      const created = built.scheduler.create(built.definition, [], { enable: true });
+      return { ok: true, trigger: this.definitionToTriggerView(created, built.scheduler) };
+    } catch (err: any) {
+      return { ok: false, error: `注册失败：${err?.message || err}` };
+    }
   }
 
   // ── /rewind helpers ──

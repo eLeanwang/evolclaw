@@ -286,6 +286,10 @@ export async function cmdInitFeishu(): Promise<void> {
   console.log(`  App ID: ${result.appId}`);
   if (result.openId) console.log(`  Owner: ${result.openId}`);
   if (result.domain !== 'unknown') console.log(`  Domain: ${result.domain}`);
+
+  // Show unified init success message
+  const { generateInitSuccessMessage } = await import('../utils/welcome.js');
+  console.log(generateInitSuccessMessage('feishu', !!result.openId));
 }
 
 // ==================== WeChat ====================
@@ -437,6 +441,10 @@ export async function cmdInitWechat(): Promise<void> {
   } as ChannelInstance;
 
   await commitChannel(aid!, channel, choice.action);
+
+  // Show unified init success message
+  const { generateInitSuccessMessage } = await import('../utils/welcome.js');
+  console.log(generateInitSuccessMessage('wechat', false));
 }
 
 // ==================== AUN ====================
@@ -475,6 +483,8 @@ export async function cmdInitAun(): Promise<void> {
 
     console.log(`\n✅ AUN 渠道 Owner 已设置: ${owner}`);
     console.log(`\n重启生效: evolclaw restart`);
+    const { generateInitSuccessMessage } = await import('../utils/welcome.js');
+    console.log(generateInitSuccessMessage('aun', true));
   } finally {
     rl.close();
   }
@@ -707,6 +717,9 @@ export async function cmdInitDingtalk(): Promise<void> {
 
   await commitChannel(aid!, channel, choice.action);
   console.log(`  Client ID: ${result.clientId}`);
+
+  const { generateInitSuccessMessage } = await import('../utils/welcome.js');
+  console.log(generateInitSuccessMessage('dingtalk', false));
 }
 
 // ==================== QQBot ====================
@@ -939,6 +952,9 @@ export async function cmdInitQQBot(): Promise<void> {
 
   await commitChannel(aid!, channel, choice.action);
   console.log(`  App ID: ${result.appId}`);
+
+  const { generateInitSuccessMessage } = await import('../utils/welcome.js');
+  console.log(generateInitSuccessMessage('qqbot', false));
 }
 
 // ==================== WeCom (企业微信) ====================
@@ -988,6 +1004,9 @@ export async function cmdInitWecom(): Promise<void> {
 
   await commitChannel(aid!, channel, choice.action);
   console.log(`  Bot ID: ${botId}`);
+
+  const { generateInitSuccessMessage } = await import('../utils/welcome.js');
+  console.log(generateInitSuccessMessage('wecom', false));
 }
 
 // ==================== Shared helpers for per-agent init <channel> ====================

@@ -298,8 +298,8 @@ evolclaw ctl send "你好"          # proactive 模式发送消息
 /trigger set --at 2026-05-16T09:00 --prompt "生成日报" --session silent
 /trigger set --cron "0 */6 * * *" --prompt "检查服务健康" --session silent --name health-check
 /trigger update health-check --cron "0 */4 * * *"
-/trigger update health-check --prompt "检查服务健康并清理过期日志" --name health-check-v2
-/trigger cancel health-check-v2
+/trigger update health-check --prompt "检查服务健康并清理过期日志" --name health-check-cleanup
+/trigger cancel health-check-cleanup
 ```
 
 ### 注意事项
