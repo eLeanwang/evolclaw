@@ -1492,8 +1492,8 @@ export class MessageProcessor {
         } | undefined;
         let modelSpec: { context_window: number; max_input_tokens: number; max_output_tokens: number } | undefined;
         try {
-          const { resolveModelSpec } = await import('../stats/billing.js');
-          const { querySessionSummary } = await import('../stats/query.js');
+          const { resolveModelSpec } = await import('../../stats/billing.js');
+          const { querySessionSummary } = await import('../../stats/query.js');
           const statsModel = streamResult.contextUsage?.model || 'unknown';
           modelSpec = resolveModelSpec(resolveRoot(), statsModel);
           const sum = querySessionSummary(resolveRoot(), session.id);

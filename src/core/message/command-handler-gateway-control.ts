@@ -17,7 +17,7 @@ import path from 'path';
 import { resolvePaths } from '../../paths.js';
 import { saveDefaultsSafe, saveAgent } from '../../config-store.js';
 import { resolveAnthropicConfig, resolveOpenaiConfig } from '../../agents/baseagent.js';
-import { resolvePriceRow } from '../../core/stats/billing.js';
+import { resolvePriceRow } from '../../stats/billing.js';
 import { ipcQuery } from '../../ipc.js';
 import { logger } from '../../utils/logger.js';
 import type { Config } from '../../types.js';

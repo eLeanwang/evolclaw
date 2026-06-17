@@ -14,7 +14,7 @@ import { checkBlacklist, checkReadonly, parseEvolclawSendCommand, summarizeToolI
 import { encodePath } from '../utils/cross-platform.js';
 import type { AgentPlugin, AgentInstance, AgentCallbacks } from '../core/baseagent-loader.js';
 import type { AgentEvent, ImageData, PermissionContext, PermissionModeInfo, AgentTokenUsage, AgentContextUsage, AgentLastModelCall, AgentModelCall } from './runner-types.js';
-import type { GatewayPricingCache, PriceQuad } from '../core/stats/price-resolver.js';
+import type { GatewayPricingCache, PriceQuad } from '../stats/price-resolver.js';
 import { contextTokensForUsage, usageForContext, numericToken, isClaudeContextUsageModel, isOneMillionContextModel, realContextWindowForModel, autoCompactWindowForModel } from './runner-types.js';
 export type {
   AgentContextUsage,

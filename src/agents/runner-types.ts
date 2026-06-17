@@ -165,7 +165,7 @@ export interface AgentRunnerFull {
 
   /** 返回当前网关 /v1/models 的价格缓存（1h TTL，stale-while-revalidate）。仅 claude runner 实现；
    *  其余 runner 不实现 → undefined → 计费回退本地价表 / official。 */
-  getGatewayPricing?(): import('../core/stats/price-resolver.js').GatewayPricingCache | undefined;
+  getGatewayPricing?(): import('../stats/price-resolver.js').GatewayPricingCache | undefined;
 }
 
 // ── 可选能力接口 ──
