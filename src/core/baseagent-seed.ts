@@ -5,12 +5,13 @@
  *   - 若 defaults.baseagents.claude.baseUrl 已有非空值 → 跳过（已种入或手动配）
  *   - 若为空 → 按优先级从 process.env / ~/.claude/settings.json 读取 baseUrl+apiKey
  *   - 种入 defaults.baseagents.claude（saveDefaultsSafe 深合并 + 自动备份）
- *   - 若来源是 settings.json → 删除 settings.json 的 env 块中已导入的 key（消除 #8500 覆盖风险）
+ *   - ⚠️ 已禁用：原会在来源是 settings.json 时删除其 env 块对应 key（消除 #8500 覆盖风险），
+ *     现按需求不再修改用户的 ~/.claude/settings.json（仅读取，不写入）。
  *
  * 设计动机详见 plan：
  *   Claude Code v2.0.1 起 settings.json env 块覆盖进程环境变量，evolclaw 注入的
  *   ANTHROPIC_BASE_URL 会被压制。本模块把 settings.json 的值"提前收编"到 evolclaw 的
- *   显式配置里，再删掉 settings.json 里的源——环境变量重新生效。
+ *   显式配置里（删源步骤现已禁用，settings.json 保持原样）。
  *
  * 调用点：install/init、daemon 启动、agent create（均幂等，多次调用安全）。
  */
@@ -39,6 +40,8 @@ function writeClaudeSettings(settings: any): void {
   fs.mkdirSync(path.dirname(p), { recursive: true });
   fs.writeFileSync(p, JSON.stringify(settings, null, 2), 'utf-8');
 }
+// 标记为已使用以避免 TS 未使用告警（实际调用已在 reconcile 步骤4 中禁用）。
+void writeClaudeSettings;
 
 // ── Defaults 原始读取（不走 expandEnvRefs，看盘上原始值） ──
 
@@ -139,33 +142,36 @@ export function reconcileBaseagentDefaults(): ReconcileResult {
   }
 
   // 4. 若来源是 settings.json → 删除已导入的 env key
-  if (settings && settingsEnv) {
-    const keysToDelete: string[] = [];
-
-    if (patch.baseUrl && settingsBaseUrl && !isPlaceholderUrl(settingsBaseUrl)) {
-      keysToDelete.push('ANTHROPIC_BASE_URL');
-    }
-    if (patch.apiKey && settingsApiKey) {
-      keysToDelete.push('ANTHROPIC_AUTH_TOKEN');
-    }
-
-    if (keysToDelete.length > 0) {
-      try {
-        for (const k of keysToDelete) {
-          delete settingsEnv[k];
-        }
-        // env 块为空时删除整个 env 字段
-        if (Object.keys(settingsEnv).length === 0) {
-          delete settings.env;
-        }
-        writeClaudeSettings(settings);
-        result.deletedFromSettings = keysToDelete;
-        logger.info(`[baseagent-seed] 已从 ~/.claude/settings.json env 块删除: ${keysToDelete.join(', ')}（消除 #8500 覆盖风险）`);
-      } catch (e) {
-        logger.warn(`[baseagent-seed] 删除 settings.json env key 失败: ${e}`);
-      }
-    }
-  }
+  // ⚠️ 已禁用：按需求不再修改用户的 ~/.claude/settings.json 文件。
+  //    （原逻辑会在种入后删除 settings.json env 块里的 ANTHROPIC_* key 以消除 #8500 覆盖风险，
+  //     现保留 settings.json 原样不动；如需恢复，取消下方注释即可。）
+  // if (settings && settingsEnv) {
+  //   const keysToDelete: string[] = [];
+  //
+  //   if (patch.baseUrl && settingsBaseUrl && !isPlaceholderUrl(settingsBaseUrl)) {
+  //     keysToDelete.push('ANTHROPIC_BASE_URL');
+  //   }
+  //   if (patch.apiKey && settingsApiKey) {
+  //     keysToDelete.push('ANTHROPIC_AUTH_TOKEN');
+  //   }
+  //
+  //   if (keysToDelete.length > 0) {
+  //     try {
+  //       for (const k of keysToDelete) {
+  //         delete settingsEnv[k];
+  //       }
+  //       // env 块为空时删除整个 env 字段
+  //       if (Object.keys(settingsEnv).length === 0) {
+  //         delete settings.env;
+  //       }
+  //       writeClaudeSettings(settings);
+  //       result.deletedFromSettings = keysToDelete;
+  //       logger.info(`[baseagent-seed] 已从 ~/.claude/settings.json env 块删除: ${keysToDelete.join(', ')}（消除 #8500 覆盖风险）`);
+  //     } catch (e) {
+  //       logger.warn(`[baseagent-seed] 删除 settings.json env key 失败: ${e}`);
+  //     }
+  //   }
+  // }
 
   return result;
 }

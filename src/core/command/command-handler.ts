@@ -16,6 +16,7 @@ import crypto from 'crypto';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
+void os;  // 保留导入：writeUserSettings 写盘逻辑已禁用（见下），恢复注释代码时仍需 os。
 import { parseTriggerSet, parseTriggerUpdate } from '../trigger/parser.js';
 import type { ParsedTriggerSet } from '../trigger/parser.js';
 import { TriggerManager } from '../trigger/manager.js';
@@ -43,35 +44,43 @@ const CLI_EXEC_MAX_OUTPUT = 128 * 1024;
 
 /**
  * 写入用户级 ~/.claude/settings.json（与 Claude CLI 行为一致）
+ * ⚠️ 已禁用：按需求不再修改用户的 ~/.claude/settings.json 文件。
+ *    原会把 model/effortLevel 写入 settings.json（仅在找不到 owning agent 的 fallback 路径触发）。
+ *    现直接返回成功且不落盘；如需恢复，取消下方注释即可。
  */
 function writeUserSettings(updates: { model?: string; effortLevel?: string | null }): { success: boolean; error?: string } {
-  try {
-    const settingsPath = path.join(os.homedir(), '.claude', 'settings.json');
-    let settings: any = {};
+  void updates;
+  return { success: true };
 
-    if (fs.existsSync(settingsPath)) {
-      settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
-    }
-
-    if (updates.model !== undefined) settings.model = updates.model;
-    if (updates.effortLevel !== undefined) {
-      if (updates.effortLevel === null) {
-        delete settings.effortLevel;
-      } else {
-        settings.effortLevel = updates.effortLevel;
-      }
-    }
-
-    const claudeDir = path.join(os.homedir(), '.claude');
-    if (!fs.existsSync(claudeDir)) {
-      fs.mkdirSync(claudeDir, { recursive: true });
-    }
-
-    fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf-8');
-    return { success: true };
-  } catch (error: any) {
-    return { success: false, error: error.message };
-  }
+  /* eslint-disable no-unreachable */
+  // try {
+  //   const settingsPath = path.join(os.homedir(), '.claude', 'settings.json');
+  //   let settings: any = {};
+  //
+  //   if (fs.existsSync(settingsPath)) {
+  //     settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+  //   }
+  //
+  //   if (updates.model !== undefined) settings.model = updates.model;
+  //   if (updates.effortLevel !== undefined) {
+  //     if (updates.effortLevel === null) {
+  //       delete settings.effortLevel;
+  //     } else {
+  //       settings.effortLevel = updates.effortLevel;
+  //     }
+  //   }
+  //
+  //   const claudeDir = path.join(os.homedir(), '.claude');
+  //   if (!fs.existsSync(claudeDir)) {
+  //     fs.mkdirSync(claudeDir, { recursive: true });
+  //   }
+  //
+  //   fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf-8');
+  //   return { success: true };
+  // } catch (error: any) {
+  //   return { success: false, error: error.message };
+  // }
+  /* eslint-enable no-unreachable */
 }
 
 function isAdminRole(role: string): boolean {

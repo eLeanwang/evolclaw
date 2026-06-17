@@ -2029,8 +2029,6 @@ function gwKey(scope, type) { return scope + '#' + type; }
 
 function renderGateway(data) {
   const el = $('#view-gateway');
-  console.log('[gateway-debug] renderGateway 被调用');
-  console.log('[gateway-debug] data 完整内容:', JSON.stringify(data, null, 2));
 
   if (!data) { el.innerHTML = '<div class="empty">加载中…</div>'; return; }
   if (data.error) {
@@ -2039,23 +2037,6 @@ function renderGateway(data) {
   }
   const gateways = data.gateways || [];
   const scopes = data.scopes || ['defaults'];
-  const envMismatch = data.envMismatch || { hasMismatch: false, mismatches: [] };
-
-  console.log('[gateway-debug] envMismatch 完整内容:', JSON.stringify(envMismatch, null, 2));
-  console.log('[gateway-debug] envMismatch.hasMismatch:', envMismatch.hasMismatch);
-  console.log('[gateway-debug] envMismatch.mismatches:', envMismatch.mismatches);
-  console.log('[gateway-debug] envMismatch.debug 是否存在:', !!envMismatch.debug);
-  console.log('[gateway-debug] envMismatch.debug 内容:', envMismatch.debug);
-
-  // 显示调试信息
-  if (envMismatch.debug) {
-    console.log('[gateway-debug] 找到 debug 信息:');
-    console.log('[gateway-debug] - 进程环境变量:', envMismatch.debug.processEnv);
-    console.log('[gateway-debug] - .env 文件内容:', envMismatch.debug.rootEnvFile);
-    console.log('[gateway-debug] - defaults 配置:', envMismatch.debug.defaultsConfig);
-  } else {
-    console.log('[gateway-debug] 警告：没有找到 debug 信息！');
-  }
 
   // 按 scope 分组
   const byScope = new Map();
@@ -2067,110 +2048,15 @@ function renderGateway(data) {
 
   let html = '<div class="gw-wrap">';
 
-  // 环境变量配置不一致横幅提醒
-  if (envMismatch.hasMismatch) {
-    console.log('[gateway-debug] 显示横幅提醒');
-    html += '<div class="gw-env-mismatch-banner">';
-    html += '<div class="gw-env-mismatch-icon">⚠️</div>';
-    html += '<div class="gw-env-mismatch-content">';
-    html += '<div class="gw-env-mismatch-title">配置与本地环境配置不一致</div>';
-    html += '<div class="gw-env-mismatch-desc">检测到 ' + envMismatch.mismatches.length + ' 个配置项与进程环境变量不一致：</div>';
-
-    // 显示详细的不一致信息
-    html += '<div class="gw-mismatch-details">';
-
-    // 过滤掉敏感字段（apiKey, token 等）
-    const visibleMismatches = envMismatch.mismatches.filter(m => {
-      const fieldLower = m.field.toLowerCase();
-      return !fieldLower.includes('key') && !fieldLower.includes('token') && !fieldLower.includes('secret');
-    });
-
-    if (visibleMismatches.length === 0) {
-      html += '<div class="gw-mismatch-empty-hint">检测到的配置不一致项均为敏感信息，已隐藏显示。</div>';
-    }
-
-    for (const m of visibleMismatches) {
-      const scope = m.aid === 'defaults' ? '🌐 全局默认配置' : `📁 Agent: ${shortAid(m.aid)}`;
-
-      // 提取环境变量名
-      let envVarName = m.envVarName || '';
-      if (!envVarName && m.configValue && m.configValue.startsWith('$ENV:')) {
-        envVarName = m.configValue.replace('$ENV:', '');
-      }
-
-      // 获取实际值
-      const processValue = m.processValue || envMismatch.debug?.processEnv?.[envVarName] || '(进程环境中未设置)';
-      const configValue = m.configValue || '(未设置)';
-
-      // 判断是引用型还是实际值型
-      const isReference = configValue.startsWith('$ENV:');
-
-      html += '<div class="gw-mismatch-item">';
-      html += '<div class="gw-mismatch-header-row">';
-      html += '<span class="gw-mismatch-scope">' + esc(scope) + '</span>';
-      html += '<span class="gw-mismatch-field">baseagent:' + esc(m.type) + ' · ' + esc(m.field) + '</span>';
-      html += '</div>';
-      html += '<div class="gw-mismatch-info">';
-
-      if (isReference) {
-        // 引用型：配置文件使用 $ENV:XXX 引用，但进程环境有值
-        html += '<div class="gw-info-row">';
-        html += '<span class="gw-info-label">进程环境变量:</span>';
-        html += '<code class="gw-info-value">' + esc(envVarName) + '</code>';
-        html += '</div>';
-
-        html += '<div class="gw-info-row">';
-        html += '<span class="gw-info-label">当前值:</span>';
-        html += '<span class="gw-info-value gw-value-env">✓ ' + esc(processValue) + '</span>';
-        html += '</div>';
-
-        html += '<div class="gw-info-hint">💡 配置文件引用环境变量，同步将持久化当前值</div>';
-      } else {
-        // 实际值型：配置文件直接写了值，但与进程环境不一致
-        html += '<div class="gw-info-row">';
-        html += '<span class="gw-info-label">进程环境变量:</span>';
-        html += '<span class="gw-info-value gw-value-env">✓ ' + esc(processValue) + '</span>';
-        html += '</div>';
-
-        html += '<div class="gw-info-row">';
-        html += '<span class="gw-info-label">配置文件当前值:</span>';
-        html += '<span class="gw-info-value gw-value-config gw-value-diff">✗ ' + esc(configValue) + '</span>';
-        html += '</div>';
-
-        html += '<div class="gw-info-hint">💡 配置文件值与进程环境变量不一致，同步将更新配置文件</div>';
-      }
-
-      html += '</div>';
-      html += '</div>';
-    }
-    html += '</div>';
-
-    html += '<div class="gw-env-mismatch-help">';
-    html += '💡 <strong>同步说明：</strong>将从<strong>进程环境变量</strong>读取值，写入到<strong>配置文件</strong>中（defaults.json 或 agents/&lt;aid&gt;/config.json）。';
-    html += '</div>';
-
-    html += '</div>';
-    html += '<div class="gw-env-mismatch-actions">';
-    html += '<button class="ctrl-btn gw-sync-global" title="同步到全局默认配置（defaults.json）">同步全局配置</button> ';
-    html += '<button class="ctrl-btn gw-sync-all" title="同步到全局配置 + 所有 Agent 配置">同步所有 Agent</button> ';
-    html += '<button class="ctrl-btn gw-sync-select" title="选择特定 Agent 进行同步">指定 Agent 同步</button> ';
-    html += '<button class="ctrl-btn gw-dismiss-banner" title="暂时忽略">×</button>';
-    html += '</div>';
-    html += '</div>';
-  } else {
-    console.log('[gateway-debug] 没有不一致，不显示横幅');
-  }
-
   html += '<div class="gw-intro">网关 = 各 AI 后端（baseagent）的接入配置。Base URL 即网关地址，留空走官方端点。' +
-    'API Key 仅接受 <code>$ENV:变量名</code> 引用，明文不会在此显示或写入。</div>';
+    '此处为只读展示，配置请通过配置文件（defaults.json / agents/&lt;aid&gt;/config.json）管理。</div>';
 
   // 只展示全局默认配置块（用于编辑）
   for (const [scope, list] of byScope) {
     if (scope !== 'defaults') continue;  // 跳过 per-agent 原始配置块（已在下方 effective 展示）
     const scopeLabel = '🌐 全局默认 (defaults)';
     html += `<div class="gw-scope">`;
-    html += `<div class="gw-scope-head"><span class="gw-scope-title">${scopeLabel}</span>` +
-      `<button class="ctrl-btn gw-add" data-scope="${esc(scope)}">+ 添加网关</button></div>`;
+    html += `<div class="gw-scope-head"><span class="gw-scope-title">${scopeLabel}</span></div>`;
     html += '<div class="gw-cards">';
     if (!list.length) {
       html += '<div class="empty" style="padding:12px">该作用域暂无网关配置</div>';
@@ -2186,7 +2072,7 @@ function renderGateway(data) {
     html += '<div class="gw-effective-section">';
     html += '<div class="gw-scope-head"><span class="gw-scope-title">📋 Agent 网关配置</span></div>';
     html += '<table class="gw-eff-table"><thead><tr>' +
-      '<th>Agent</th><th>Base Agent</th><th>Base URL</th><th>模型</th><th>API Key</th><th>Effort</th><th>来源</th><th>操作</th>' +
+      '<th>Agent</th><th>Base Agent</th><th>Base URL</th><th>模型</th><th>API Key</th><th>Effort</th><th>来源</th>' +
       '</tr></thead><tbody>';
     for (const eff of effective) {
       const f = eff.fields || {};
@@ -2206,10 +2092,6 @@ function renderGateway(data) {
         `<td>${keyVal ? esc(keyVal) : '<span class="gw-dim">—</span>'}</td>` +
         `<td>${effortVal ? esc(effortVal) : '<span class="gw-dim">—</span>'}</td>` +
         `<td><span class="gw-eff-src-tag ${srcCls}">${srcLabel}</span></td>` +
-        `<td class="gw-eff-td-actions">` +
-          `<button class="ctrl-btn gw-eff-edit" data-aid="${esc(eff.aid)}" data-type="${esc(eff.type)}" title="编辑该 agent 的网关配置">编辑</button>` +
-          `<button class="ctrl-btn gw-eff-models" data-aid="${esc(eff.aid)}" data-type="${esc(eff.type)}" title="查看网关支持的模型及价格">查看网关配置</button>` +
-        `</td>` +
         `</tr>`;
     }
     html += '</tbody></table></div>';
@@ -2258,16 +2140,15 @@ function gatewayCard(g) {
     html += `<div class="gw-row"><span class="gw-row-label">${esc(label)}</span><span class="gw-row-val">${val}</span></div>`;
   }
   html += '</div>';
-  html += '<div class="gw-card-actions">';
-  const testable = g.type === 'claude' || g.type === 'codex';
-  if (testable) html += `<button class="ctrl-btn gw-test" data-scope="${esc(g.scope)}" data-type="${esc(g.type)}">⚡ 测试</button> `;
-  html += `<button class="ctrl-btn gw-edit" data-scope="${esc(g.scope)}" data-type="${esc(g.type)}">✎ 编辑</button> `;
-  html += `<button class="ctrl-btn danger gw-del" data-scope="${esc(g.scope)}" data-type="${esc(g.type)}">🗑 删除</button>`;
-  html += '</div>';
+  // 卡片操作按钮已移除（只读模式）
   html += '</div>';
   return html;
 }
 
+// ── Gateway 编辑/操作弹窗函数（已禁用，网关配置现为只读展示）──
+// 如需恢复网关编辑功能，取消下方注释即可。
+
+/*
 // 编辑/新增弹窗
 function openGatewayEditor(scope, type, existing, scopes) {
   const isNew = !existing;
@@ -2372,453 +2253,14 @@ function openGatewayEditor(scope, type, existing, scopes) {
     } catch (e) { toast(e.message, true); }
   };
 }
+*/
+
+// openAgentSelectModal、showGatewayConfigModal、showPriceEditModal 等函数已移除（只读模式）
+// 如需恢复，取消上方注释块即可。
 
 function bindGatewayEvents(el, data) {
-  const scopes = data.scopes || ['defaults'];
-  const findGw = (scope, type) => (data.gateways || []).find(g => g.scope === scope && g.type === type);
-  const envMismatch = data.envMismatch || { hasMismatch: false, mismatches: [] };
-
-  // 环境变量同步横幅按钮
-  const syncGlobalBtn = el.querySelector('.gw-sync-global');
-  const syncAllBtn = el.querySelector('.gw-sync-all');
-  const syncSelectBtn = el.querySelector('.gw-sync-select');
-  const dismissBtn = el.querySelector('.gw-dismiss-banner');
-
-  if (syncGlobalBtn) {
-    syncGlobalBtn.addEventListener('click', async () => {
-      // 显示详细的确认对话框
-      const confirmMsg =
-        '🔄 同步到全局默认配置\n\n' +
-        '操作说明：\n' +
-        '• 从：进程环境变量（process.env）\n' +
-        '• 到：agents/defaults.json（全局默认配置）\n' +
-        '• 影响：所有未单独配置的 Agent 将使用新值\n\n' +
-        '将会同步以下环境变量到配置文件：\n' +
-        (envMismatch.debug?.processEnv ?
-          Object.entries(envMismatch.debug.processEnv).map(([k, v]) => `  • ${k}: ${v}`).join('\n') :
-          '  • ANTHROPIC_AUTH_TOKEN\n  • ANTHROPIC_BASE_URL') +
-        '\n\n⚠️ 配置文件将被更新，原有值会被覆盖。\n\n确认同步？';
-
-      if (!confirm(confirmMsg)) return;
-
-      syncGlobalBtn.disabled = true;
-      const orig = syncGlobalBtn.textContent;
-      syncGlobalBtn.textContent = '同步中…';
-      try {
-        const r = mResp(await menuSend({
-          type: 'menu.action', name: 'gateway', action: 'sync-env',
-          args: { syncType: 'global' },
-        }));
-        if (r.error) { toast(r.error.message || r.error.code, true); return; }
-        toast(`✓ 已同步到全局配置`);
-        subscribe('gateway', {}); // 刷新视图
-      } catch (e) {
-        toast(e.message, true);
-      } finally {
-        syncGlobalBtn.disabled = false;
-        syncGlobalBtn.textContent = orig;
-      }
-    });
-  }
-
-  if (syncAllBtn) {
-    syncAllBtn.addEventListener('click', async () => {
-      const agentCount = (data.scopes || []).filter(s => s !== 'defaults').length;
-      const confirmMsg =
-        '🔄 同步到全局配置 + 所有 Agent 配置\n\n' +
-        '操作说明：\n' +
-        '• 从：进程环境变量（process.env）\n' +
-        '• 到：agents/defaults.json + agents/<aid>/config.json\n' +
-        `• 影响：全局配置 + ${agentCount} 个 Agent 的配置文件\n\n` +
-        '将会同步以下环境变量到所有配置文件：\n' +
-        (envMismatch.debug?.processEnv ?
-          Object.entries(envMismatch.debug.processEnv).map(([k, v]) => `  • ${k}: ${v}`).join('\n') :
-          '  • ANTHROPIC_AUTH_TOKEN\n  • ANTHROPIC_BASE_URL') +
-        '\n\n⚠️ 所有 Agent 的配置文件将被更新，原有值会被覆盖。\n\n确认同步？';
-
-      if (!confirm(confirmMsg)) return;
-
-      syncAllBtn.disabled = true;
-      const orig = syncAllBtn.textContent;
-      syncAllBtn.textContent = '同步中…';
-      try {
-        const r = mResp(await menuSend({
-          type: 'menu.action', name: 'gateway', action: 'sync-env',
-          args: { syncType: 'all-agents' },
-        }));
-        if (r.error) { toast(r.error.message || r.error.code, true); return; }
-        toast(`✓ 已同步 ${agentCount + 1} 个配置文件`);
-        subscribe('gateway', {}); // 刷新视图
-      } catch (e) {
-        toast(e.message, true);
-      } finally {
-        syncAllBtn.disabled = false;
-        syncAllBtn.textContent = orig;
-      }
-    });
-  }
-
-  if (syncSelectBtn) {
-    syncSelectBtn.addEventListener('click', () => {
-      openAgentSelectModal(data, scopes);
-    });
-  }
-
-  if (dismissBtn) {
-    dismissBtn.addEventListener('click', () => {
-      const banner = el.querySelector('.gw-env-mismatch-banner');
-      if (banner) banner.style.display = 'none';
-    });
-  }
-
-  // 添加
-  el.querySelectorAll('.gw-add').forEach(btn => {
-    btn.addEventListener('click', () => {
-      openGatewayEditor(btn.dataset.scope, 'claude', null, scopes);
-    });
-  });
-
-  // 编辑
-  el.querySelectorAll('.gw-edit').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const g = findGw(btn.dataset.scope, btn.dataset.type);
-      openGatewayEditor(btn.dataset.scope, btn.dataset.type, g, scopes);
-    });
-  });
-
-  // Effective 表格编辑
-  el.querySelectorAll('.gw-eff-edit').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const aid = btn.dataset.aid;
-      const type = btn.dataset.type;
-      const existing = findGw(aid, type);
-      openGatewayEditor(aid, type, existing, scopes);
-    });
-  });
-
-  // 测试
-  el.querySelectorAll('.gw-test').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      const { scope, type } = btn.dataset;
-      btn.disabled = true;
-      const orig = btn.textContent;
-      btn.textContent = '测试中…';
-      try {
-        const r = mResp(await menuSend({
-          type: 'menu.action', name: 'gateway', action: 'test',
-          args: { scope, type },
-        }));
-        if (r.error) {
-          _gwTest.set(gwKey(scope, type), { ok: false, error: r.error.message || r.error.code });
-          toast(r.error.message || r.error.code, true);
-        } else {
-          _gwTest.set(gwKey(scope, type), r.data);
-          toast(r.data.ok ? `✓ ${r.data.latency}ms · ${r.data.modelCount} 模型` : `✗ ${r.data.error || '失败'}`, !r.data.ok);
-        }
-        renderGateway(state.gateway);
-      } catch (e) {
-        toast(e.message, true);
-      } finally {
-        btn.disabled = false; btn.textContent = orig;
-      }
-    });
-  });
-
-  // 删除
-  el.querySelectorAll('.gw-del').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      const { scope, type } = btn.dataset;
-      const label = scope === 'defaults' ? '全局默认' : shortAid(scope);
-      if (!confirm(`确认删除 ${label} 的 ${type} 网关配置？`)) return;
-      try {
-        const r = mResp(await menuSend({
-          type: 'menu.action', name: 'gateway', action: 'delete',
-          args: { scope, type },
-        }));
-        if (r.error) { toast(r.error.message || r.error.code, true); return; }
-        toast(r.data && r.data.reloaded ? '已删除并重载' : '已删除');
-        subscribe('gateway', {});
-      } catch (e) { toast(e.message, true); }
-    });
-  });
-
-  // Effective 表格「查看网关配置」按钮：拉模型+价格，弹窗展示
-  el.querySelectorAll('.gw-eff-models').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      const { aid, type } = btn.dataset;
-      btn.disabled = true;
-      const orig = btn.textContent;
-      btn.textContent = '加载中…';
-      try {
-        const r = mResp(await menuSend({
-          type: 'menu.action', name: 'gateway', action: 'models',
-          args: { scope: aid, type },
-        }));
-        if (r.error) { toast(r.error.message || r.error.code, true); return; }
-        showGatewayConfigModal(shortAid(aid), type, r.data);
-      } catch (e) {
-        toast(e.message, true);
-      } finally {
-        btn.disabled = false; btn.textContent = orig;
-      }
-    });
-  });
-}
-
-// Agent 选择模态框（用于同步指定 Agent 的环境变量）
-function openAgentSelectModal(data, scopes) {
-  const agents = scopes.filter(s => s !== 'defaults');
-
-  let html = '<div class="gw-modal-backdrop" id="gw-agent-select-backdrop"><div class="gw-modal">';
-  html += '<div class="gw-modal-head">选择要同步的 Agent</div>';
-  html += '<div class="gw-modal-body">';
-  html += '<div class="gw-hint">请选择需要同步环境变量配置的 Agent（可多选）</div>';
-  html += '<div class="gw-agent-select-list">';
-
-  if (!agents.length) {
-    html += '<div class="empty">暂无可用的 Agent</div>';
-  } else {
-    for (const aid of agents) {
-      html += `<label class="gw-agent-select-item">` +
-        `<input type="checkbox" class="gw-agent-checkbox" value="${esc(aid)}">` +
-        `<span class="gw-agent-label">${esc(shortAid(aid))}</span>` +
-        `<span class="gw-agent-aid" title="${esc(aid)}">${esc(aid)}</span>` +
-        `</label>`;
-    }
-  }
-
-  html += '</div></div>';
-  html += '<div class="gw-modal-actions">' +
-    '<button class="ctrl-btn" id="gw-agent-cancel">取消</button> ' +
-    '<button class="ctrl-btn primary" id="gw-agent-sync">同步选中的 Agent</button>' +
-    '</div>';
-  html += '</div></div>';
-
-  const wrap = document.createElement('div');
-  wrap.innerHTML = html;
-  document.body.appendChild(wrap.firstChild);
-
-  const backdrop = $('#gw-agent-select-backdrop');
-  const close = () => { try { backdrop.remove(); } catch {} };
-  backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close(); });
-  $('#gw-agent-cancel').onclick = close;
-
-  $('#gw-agent-sync').onclick = async () => {
-    const checkboxes = backdrop.querySelectorAll('.gw-agent-checkbox:checked');
-    const selectedAids = Array.from(checkboxes).map(cb => cb.value);
-
-    if (selectedAids.length === 0) {
-      toast('请至少选择一个 Agent', true);
-      return;
-    }
-
-    if (!confirm(`确认同步全局配置 + ${selectedAids.length} 个 Agent 的环境变量？`)) return;
-
-    const btn = $('#gw-agent-sync');
-    btn.disabled = true;
-    const orig = btn.textContent;
-    btn.textContent = '同步中…';
-
-    try {
-      const r = mResp(await menuSend({
-        type: 'menu.action', name: 'gateway', action: 'sync-env',
-        args: { syncType: 'specific-agents', targetAids: selectedAids },
-      }));
-      if (r.error) { toast(r.error.message || r.error.code, true); return; }
-      toast(`已同步 ${r.data.count} 个配置文件`);
-      close();
-      subscribe('gateway', {}); // 刷新视图
-    } catch (e) {
-      toast(e.message, true);
-    } finally {
-      btn.disabled = false;
-      btn.textContent = orig;
-    }
-  };
-}
-
-// 网关配置弹窗：模型 + 官方价格 + 网关价格（可编辑）
-function showGatewayConfigModal(aidLabel, type, data) {
-  const models = data.models || [];
-  const usdToCny = data.usdToCny || 7; // 汇率，默认 7
-
-  // 按模型系列分组
-  const groups = new Map();
-  for (const m of models) {
-    const id = m.id || m.name || '';
-    let series = 'other';
-    if (id.startsWith('claude')) series = 'claude';
-    else if (id.startsWith('gpt') || id.startsWith('o1') || id.startsWith('o3')) series = 'gpt';
-    else if (id.startsWith('gemini')) series = 'gemini';
-    else if (id.startsWith('deepseek')) series = 'deepseek';
-    else if (id.startsWith('kimi')) series = 'kimi';
-    else if (id.startsWith('glm')) series = 'glm';
-    else if (id.startsWith('MiniMax')) series = 'minimax';
-
-    if (!groups.has(series)) groups.set(series, []);
-    groups.get(series).push(m);
-  }
-
-  const seriesNames = {
-    claude: 'Claude 系列',
-    gpt: 'GPT 系列',
-    gemini: 'Gemini 系列',
-    deepseek: 'DeepSeek 系列',
-    kimi: 'Kimi 系列',
-    glm: 'GLM 系列',
-    minimax: 'MiniMax 系列',
-    other: '其他模型'
-  };
-
-  let html = '<div class="gw-modal-backdrop" id="gw-config-backdrop"><div class="gw-modal gw-modal-wide">';
-  html += `<div class="gw-modal-head">${esc(aidLabel)} · ${esc(type)} 网关配置 <span style="font-weight:normal;color:var(--dim);font-size:12px">（${models.length} 个模型 · 汇率: ${usdToCny.toFixed(2)}）</span></div>`;
-  html += '<div class="gw-modal-body">';
-
-  if (!models.length) {
-    html += '<div class="empty">网关未返回模型列表</div>';
-  } else {
-    // 按系列渲染表格
-    const sortedSeries = ['claude', 'gpt', 'gemini', 'deepseek', 'kimi', 'glm', 'minimax', 'other']
-      .filter(s => groups.has(s));
-
-    for (const series of sortedSeries) {
-      const seriesModels = groups.get(series);
-      html += `<div class="gw-model-series">`;
-      html += `<div class="gw-series-header" data-series="${series}">
-        <span class="gw-series-toggle">▼</span>
-        <span class="gw-series-title">${seriesNames[series] || series}</span>
-        <span class="gw-series-count">${seriesModels.length} 个模型</span>
-      </div>`;
-      html += `<div class="gw-series-content" data-series="${series}">`;
-      html += '<table class="gw-price-table"><thead><tr>' +
-        '<th>模型</th>' +
-        '<th colspan="4">官方价格（USD/1M tokens）</th>' +
-        '<th colspan="4">网关价格（USD/1M tokens）</th>' +
-        '<th>来源</th><th></th>' +
-        '</tr><tr class="gw-price-subhead">' +
-        '<th></th>' +
-        '<th>Input</th><th>Output</th><th>Cache R</th><th>Cache W</th>' +
-        '<th>Input</th><th>Output</th><th>Cache R</th><th>Cache W</th>' +
-        '<th></th><th></th>' +
-        '</tr></thead><tbody>';
-
-      for (const m of seriesModels) {
-        const srcLabel = { gateway: '网关接口', local: '本地配置', none: '—' }[m.officialSource] || '—';
-        const srcCls = { gateway: 'gw-src-gateway', local: 'gw-src-local', none: 'gw-src-none' }[m.officialSource] || '';
-        const fmt = (v) => (typeof v === 'number' ? v.toFixed(2) : '—');
-        const off = m.official || {};
-        const gw = m.gateway || {};
-        html += `<tr class="gw-price-row">` +
-          `<td class="gw-price-model" title="${esc(m.id)}"><code>${esc(m.id)}</code></td>` +
-          `<td>${fmt(off.input)}</td><td>${fmt(off.output)}</td><td>${fmt(off.cache_read)}</td><td>${fmt(off.cache_write)}</td>` +
-          `<td>${fmt(gw.input)}</td><td>${fmt(gw.output)}</td><td>${fmt(gw.cache_read)}</td><td>${fmt(gw.cache_write)}</td>` +
-          `<td><span class="gw-eff-src-tag ${srcCls}">${srcLabel}</span></td>` +
-          `<td><button class="ctrl-btn gw-price-edit" data-model="${esc(m.id)}" data-scope="${esc(data.scope)}" data-type="${esc(type)}">改价</button></td>` +
-          `</tr>`;
-      }
-      html += '</tbody></table>';
-      html += '</div></div>';
-    }
-  }
-
-  html += '</div>';
-  html += '<div class="gw-modal-actions"><button class="ctrl-btn primary" id="gw-config-close">关闭</button></div>';
-  html += '</div></div>';
-
-  const wrap = document.createElement('div');
-  wrap.innerHTML = html;
-  document.body.appendChild(wrap.firstChild);
-  const backdrop = $('#gw-config-backdrop');
-  const close = () => { try { backdrop.remove(); } catch {} };
-  backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close(); });
-  $('#gw-config-close').onclick = close;
-
-  // 展开/收起功能
-  backdrop.querySelectorAll('.gw-series-header').forEach(header => {
-    header.addEventListener('click', () => {
-      const series = header.dataset.series;
-      const content = backdrop.querySelector(`.gw-series-content[data-series="${series}"]`);
-      const toggle = header.querySelector('.gw-series-toggle');
-      if (content.style.display === 'none') {
-        content.style.display = 'block';
-        toggle.textContent = '▼';
-      } else {
-        content.style.display = 'none';
-        toggle.textContent = '▶';
-      }
-    });
-  });
-
-  // 改价按钮
-  backdrop.querySelectorAll('.gw-price-edit').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const modelId = btn.dataset.model;
-      const scope = btn.dataset.scope;
-      const gwType = btn.dataset.type;
-      showPriceEditModal(modelId, scope, gwType, () => {
-        close();
-        // 重新拉取并展示
-        setTimeout(async () => {
-          const r = mResp(await menuSend({
-            type: 'menu.action', name: 'gateway', action: 'models',
-            args: { scope, type: gwType },
-          }));
-          if (!r.error) showGatewayConfigModal(aidLabel, gwType, r.data);
-        }, 100);
-      });
-    });
-  });
-}
-
-// 改价弹窗：四个输入框（input/output/cache_read/cache_write）
-function showPriceEditModal(modelId, scope, type, onSaved) {
-  let html = '<div class="gw-modal-backdrop" id="gw-price-edit-backdrop"><div class="gw-modal">';
-  html += `<div class="gw-modal-head">修改网关价格<div class="gw-modal-subtitle">模型: ${esc(modelId)}</div></div>`;
-  html += '<div class="gw-modal-body">';
-  html += '<div class="gw-hint">留空的字段不修改。单位：USD / 1M tokens。</div>';
-  html += '<label class="gw-field"><span class="gw-field-label">Input</span><input id="gw-price-input" type="number" step="0.01" min="0" placeholder="5.0"></label>';
-  html += '<label class="gw-field"><span class="gw-field-label">Output</span><input id="gw-price-output" type="number" step="0.01" min="0" placeholder="25.0"></label>';
-  html += '<label class="gw-field"><span class="gw-field-label">Cache Read</span><input id="gw-price-cache-read" type="number" step="0.01" min="0" placeholder="0.5"></label>';
-  html += '<label class="gw-field"><span class="gw-field-label">Cache Write</span><input id="gw-price-cache-write" type="number" step="0.01" min="0" placeholder="6.25"></label>';
-  html += '</div>';
-  html += '<div class="gw-modal-actions">' +
-    '<button class="ctrl-btn" id="gw-price-cancel">取消</button> ' +
-    '<button class="ctrl-btn primary" id="gw-price-save">保存</button></div>';
-  html += '</div></div>';
-
-  const wrap = document.createElement('div');
-  wrap.innerHTML = html;
-  document.body.appendChild(wrap.firstChild);
-  const backdrop = $('#gw-price-edit-backdrop');
-  const close = () => { try { backdrop.remove(); } catch {} };
-  backdrop.addEventListener('click', (e) => { if (e.target === backdrop) close(); });
-  $('#gw-price-cancel').onclick = close;
-
-  $('#gw-price-save').onclick = async () => {
-    const pricing = {};
-    const inp = parseFloat($('#gw-price-input').value);
-    const out = parseFloat($('#gw-price-output').value);
-    const cr = parseFloat($('#gw-price-cache-read').value);
-    const cw = parseFloat($('#gw-price-cache-write').value);
-    if (!isNaN(inp) && inp >= 0) pricing.input = inp;
-    if (!isNaN(out) && out >= 0) pricing.output = out;
-    if (!isNaN(cr) && cr >= 0) pricing.cache_read = cr;
-    if (!isNaN(cw) && cw >= 0) pricing.cache_write = cw;
-    if (!Object.keys(pricing).length) { toast('至少填一个字段', true); return; }
-
-    try {
-      const r = mResp(await menuSend({
-        type: 'menu.action', name: 'gateway', action: 'set-price',
-        args: { modelId, pricing },
-      }));
-      if (r.error) { toast(r.error.message || r.error.code, true); return; }
-      toast('价格已保存到用户覆盖层');
-      close();
-      if (onSaved) onSaved();
-    } catch (e) {
-      toast(e.message, true);
-    }
-  };
+  // 已移除所有编辑操作事件绑定（网关配置现为只读展示）
+  void el; void data;
 }
 
 // ── Triggers 视图 ──
