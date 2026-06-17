@@ -339,11 +339,6 @@ async function main() {
   loadKitManifest();
 
   // 加载配置（新结构：defaults.json + per-agent config.json）
-  // 种入网关配置：若 defaults 缺 baseUrl/apiKey，从 env / ~/.claude/settings.json 导入
-  // （幂等；导入后删除 settings.json 对应 key 以消除 #8500 覆盖风险）
-  const { reconcileBaseagentDefaults } = await import('./core/baseagent-seed.js');
-  reconcileBaseagentDefaults();
-
   const defaults: DefaultsConfig = loadDefaults() ?? { $schema_version: CONFIG_SCHEMA_VERSION };
   const evolclawCfg = loadEvolclawConfig();
 
