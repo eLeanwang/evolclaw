@@ -1,8 +1,8 @@
 import fs from 'fs';
 import path from 'path';
-import { agentTriggersDir } from '../../paths.js';
-import { tryParseChannelKey } from '../channel-loader.js';
-import { logger } from '../../utils/logger.js';
+import { agentTriggersDir } from '../paths.js';
+import { tryParseChannelKey } from '../core/channel-loader.js';
+import { logger } from '../utils/logger.js';
 import {
   normalizeTriggerDefinition,
   resolveScriptPath,
@@ -12,7 +12,7 @@ import type {
   TriggerCreateFile,
   TriggerDefinition,
 } from './types.js';
-import { atomicWriteJson } from '../session/session-fs-store.js';
+import { atomicWriteJson } from '../core/session/session-fs-store.js';
 
 export interface TriggerListOptions {
   all?: boolean;

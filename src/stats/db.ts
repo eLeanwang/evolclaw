@@ -6,7 +6,7 @@
 import fs from 'fs';
 import path from 'path';
 import { createRequire } from 'module';
-import { logger } from '../../utils/logger.js';
+import { logger } from '../utils/logger.js';
 
 const requireFromHere = createRequire(import.meta.url);
 

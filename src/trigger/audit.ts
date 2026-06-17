@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
-import { resolvePaths } from '../../paths.js';
-import { LogWriter } from '../../utils/log-writer.js';
+import { resolvePaths } from '../paths.js';
+import { LogWriter } from '../utils/log-writer.js';
 import type { TriggerAuditRecord } from './types.js';
 
 export class TriggerAuditLogger {

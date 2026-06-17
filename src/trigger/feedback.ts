@@ -1,6 +1,6 @@
-import type { ChannelAdapter, Message, Session } from '../../types.js';
-import type { MessageQueue } from '../message/message-queue.js';
-import type { SessionManager } from '../session/session-manager.js';
+import type { ChannelAdapter, Message, Session } from '../types.js';
+import type { MessageQueue } from '../core/message/message-queue.js';
+import type { SessionManager } from '../core/session/session-manager.js';
 import { renderTemplate, previewText, sha256 } from './validation.js';
 import type {
   TriggerAuditRecord,

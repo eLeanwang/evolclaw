@@ -4,7 +4,7 @@ import { saveAgent } from '../config-store.js';
 import { formatChannelKey, tryParseChannelKey } from './channel-loader.js';
 import { agentPersonalDir } from '../paths.js';
 import { fileCache } from './daemon-file-cache.js';
-import { ConfigTarget, read as cfgRead, write as cfgWrite, ensureFile as cfgEnsure } from './config/config-manager.js';
+import { ConfigTarget, read as cfgRead, write as cfgWrite, ensureFile as cfgEnsure } from '../config/config-manager.js';
 import type { BehaviorConfig } from '../types.js';
 import type {
   AgentConfig,

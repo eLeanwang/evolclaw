@@ -21,9 +21,9 @@ import {
   agentRelationBehaviorConfig,
   agentDir,
   agentRelationsDir,
-} from '../../paths.js';
-import { atomicReadJson, atomicWriteJson } from '../../utils/atomic-write.js';
-import { fileCache } from '../daemon-file-cache.js';
+} from '../paths.js';
+import { atomicReadJson, atomicWriteJson } from '../utils/atomic-write.js';
+import { fileCache } from '../core/daemon-file-cache.js';
 import {
   loadSchema,
   currentVersion,
@@ -40,7 +40,7 @@ import type {
   BehaviorConfig,
   EffectiveAgentConfig,
   MergedAgentConfig,
-} from '../../types.js';
+} from '../types.js';
 
 export enum ConfigTarget {
   Process = 'process',                  // evolclaw.json（链外 H）

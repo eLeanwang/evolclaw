@@ -6,8 +6,8 @@ import { isHelpFlag } from './help.js';
 import {
   normalizeTriggerDefinition,
   resolveScriptPath,
-} from '../core/trigger/validation.js';
-import type { TriggerCreateFile, TriggerDefinition } from '../core/trigger/types.js';
+} from '../trigger/validation.js';
+import type { TriggerCreateFile, TriggerDefinition } from '../trigger/types.js';
 
 export async function cmdTrigger(args: string[]): Promise<void> {
   const sub = args[0];

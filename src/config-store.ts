@@ -34,8 +34,8 @@ import type {
   DebugBlock,
 } from './types.js';
 import { CONFIG_SCHEMA_VERSION } from './types.js';
-import { resolveAgentConfig, resolveBehavior } from './core/config/config-manager.js';
-import { expandVars, buildEnvResolver } from './core/config/merge.js';
+import { resolveAgentConfig, resolveBehavior } from './config/config-manager.js';
+import { expandVars, buildEnvResolver } from './config/merge.js';
 import { logger } from './utils/logger.js';
 
 // ── 进程级配置（{root}/evolclaw.json）─────────────────────────────────────

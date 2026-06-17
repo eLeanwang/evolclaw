@@ -4,7 +4,7 @@ import os from 'os';
 import readline from 'readline';
 import { resolvePaths, agentMdPath as getAgentMdPathFromPaths, aunPath as defaultAunPath } from '../paths.js';
 import { loadDefaults, loadAllAgents, loadAgent, saveAgent, ensureAgentDirSkeleton, loadEvolclawConfig } from '../config-store.js';
-import { ConfigTarget, write as cfgWrite, ensureFile as cfgEnsure, read as cfgRead, routeField, initConfigManager } from '../core/config/config-manager.js';
+import { ConfigTarget, write as cfgWrite, ensureFile as cfgEnsure, read as cfgRead, routeField, initConfigManager } from '../config/config-manager.js';
 import { ipcQuery } from '../ipc.js';
 import { CONFIG_SCHEMA_VERSION } from '../types.js';
 import type { AgentConfig, ChannelInstance, BehaviorConfig } from '../types.js';

@@ -24,11 +24,11 @@ import type { InteractionRouter } from '../interaction-router.js';
 import { renderActionAsText, renderCommandCardAsText } from '../interaction-router.js';
 import { formatPeerKey } from '../relation/peer-identity.js';
 import { resolveEffectiveModel, resolvePermissionMode } from '../model/config-scope.js';
-import { resolveBehavior } from '../config/config-manager.js';
-import { insertUsageEvent, insertContextBreakdown, insertModelCalls } from '../stats/writer.js';
-import { normalizeUsage } from '../stats/normalizer.js';
-import { resolvePrices } from '../stats/price-resolver.js';
-import { getBudgetStatus } from '../stats/budget.js';
+import { resolveBehavior } from '../../config/config-manager.js';
+import { insertUsageEvent, insertContextBreakdown, insertModelCalls } from '../../stats/writer.js';
+import { normalizeUsage } from '../../stats/normalizer.js';
+import { resolvePrices } from '../../stats/price-resolver.js';
+import { getBudgetStatus } from '../../stats/budget.js';
 
 type StreamRunResult = {
   isError: boolean;
@@ -1473,7 +1473,7 @@ export class MessageProcessor {
                 max_tokens: mc.contextUsage?.maxTokens,
                 auto_compact_tokens: mc.contextUsage?.autoCompactTokens,
                 degraded: mc.degraded ? 1 : 0,
-              } as import('../stats/writer.js').ModelCallRow));
+              } as import('../../stats/writer.js').ModelCallRow));
               insertModelCalls(resolveRoot(), mcRows);
             }
             const totalIn = event.input_tokens + event.cache_read_tokens;
@@ -1765,7 +1765,7 @@ export class MessageProcessor {
 
   private async readLastModelCallContextUsage(sessionId: string, agentSessionId: string): Promise<{ totalTokens: number; autoCompactTokens: number } | undefined> {
     try {
-      const { openReadonlyDb, getDbPath } = await import('../stats/db.js');
+      const { openReadonlyDb, getDbPath } = await import('../../stats/db.js');
       const rdb = openReadonlyDb(getDbPath(resolveRoot()));
       if (!rdb) return undefined;
       try {

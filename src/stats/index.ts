@@ -1,5 +1,5 @@
 /**
- * src/core/stats/index.ts — Stats 模块公开 API。
+ * src/stats/index.ts — Stats 模块公开 API。
  */
 
 export { getDb, openReadonlyDb, getStatsDir, getDbPath, archiveOldData, listArchivePaths, rebuildDailyRollup } from './db.js';

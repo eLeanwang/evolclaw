@@ -15,12 +15,12 @@ import {
   ConfigTarget, read, write, ensureFile, resolveEffective, resolveAgentConfig, resolveBehavior,
   routeField, listFields, initConfigManager, ConfigError,
   type Selector, type FieldRoute,
-} from '../core/config/config-manager.js';
+} from '../config/config-manager.js';
 import {
   snapshot, restore, diffVersions, listAllVersions, readCurrent, prune, collectConfigFiles,
-} from '../core/config/snapshot.js';
-import { readBootLog } from '../core/config/boot-log.js';
-import { loadSchema } from '../core/config/schema-registry.js';
+} from '../config/snapshot.js';
+import { readBootLog } from '../config/boot-log.js';
+import { loadSchema } from '../config/schema-registry.js';
 import { resolvePaths } from '../paths.js';
 
 type Scope = 'process' | 'defaults' | 'agent' | 'relation';

@@ -9,7 +9,7 @@ import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
 import { CronExpressionParser } from 'cron-parser';
-import type { ParsedTriggerSet } from '../trigger/parser.js';
+import type { ParsedTriggerSet } from '../../trigger/parser.js';
 import { checkLatestVersion, getLocalVersion, isLinkedInstall, compareVersions } from '../../utils/npm-ops.js';
 import { loadDefaults, loadEvolclawConfig } from '../../config-store.js';
 import { execAgentAction, execAgentQuery, execAgentOptions, resolveProjectPath } from '../message/command-handler-agent-control.js';

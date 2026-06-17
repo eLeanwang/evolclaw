@@ -17,7 +17,7 @@ import {
   readScope, writeScope, clearScope, resolveEffectiveModel,
   type ScopeSelector, type ModelScope,
 } from '../core/model/config-scope.js';
-import { resolveBehavior } from '../core/config/config-manager.js';
+import { resolveBehavior } from '../config/config-manager.js';
 import { resolveAnthropicConfig } from '../agents/baseagent.js';
 import { getCatalog, getModelInfo } from '../core/model/model-catalog.js';
 

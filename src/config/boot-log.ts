@@ -11,8 +11,8 @@
 
 import fs from 'fs';
 import path from 'path';
-import { resolvePaths } from '../../paths.js';
-import { logger } from '../../utils/logger.js';
+import { resolvePaths } from '../paths.js';
+import { logger } from '../utils/logger.js';
 import {
   readCurrent, readWVersion, writeWVersion, materializeVersion, listAllVersions,
   diffVersions, snapshot, restore, paramDiff,
@@ -220,8 +220,8 @@ async function workingDiffersFromVersion(version: string): Promise<boolean> {
 }
 
 async function makeDefaultProbe(): Promise<DiagnoseProbe> {
-  // 延迟 import 避免循环依赖：config-store → core/config，boot-log 在 core/config
-  const { loadAllAgents } = await import('../../config-store.js');
+  // 延迟 import 避免循环依赖：config-store → config，boot-log 在 config
+  const { loadAllAgents } = await import('../config-store.js');
   return () => {
     try {
       const { agents } = loadAllAgents();

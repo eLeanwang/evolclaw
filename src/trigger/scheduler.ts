@@ -1,6 +1,6 @@
 import crypto from 'crypto';
 import { CronExpressionParser } from 'cron-parser';
-import { logger } from '../../utils/logger.js';
+import { logger } from '../utils/logger.js';
 import type { TriggerDefinitionManager } from './manager.js';
 import type { TriggerRunStateStore } from './state.js';
 import type { TriggerAuditLogger } from './audit.js';

@@ -1,5 +1,5 @@
 import { CronExpressionParser } from 'cron-parser';
-import type { TriggerScheduleType, TriggerSessionStrategy } from '../../types.js';
+import type { TriggerScheduleType, TriggerSessionStrategy } from '../types.js';
 
 export interface ParsedTriggerSet {
   scheduleType: TriggerScheduleType;

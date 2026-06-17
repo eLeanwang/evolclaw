@@ -1,5 +1,5 @@
 import fs from 'fs';
-import { atomicWriteJson } from '../session/session-fs-store.js';
+import { atomicWriteJson } from '../core/session/session-fs-store.js';
 import type {
   TriggerActiveFile,
   TriggerActiveRun,

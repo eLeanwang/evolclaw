@@ -16,8 +16,8 @@
 
 import fs from 'fs';
 import path from 'path';
-import { resolvePaths } from '../../paths.js';
-import { logger } from '../../utils/logger.js';
+import { resolvePaths } from '../paths.js';
+import { logger } from '../utils/logger.js';
 
 export type SnapshotTrigger = 'manual' | 'startup' | 'schema-migration';
 

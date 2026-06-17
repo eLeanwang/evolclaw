@@ -20,7 +20,7 @@ import { formatPeerKey, parsePeerKey } from '../relation/peer-identity.js';
 import {
   ConfigTarget, read, write, ensureFile, resolveBehavior,
   type Selector,
-} from '../config/config-manager.js';
+} from '../../config/config-manager.js';
 import type { BehaviorConfig, RoleOverride } from '../../types.js';
 
 export type ModelScope = 'global' | 'agent' | 'role' | 'relation';

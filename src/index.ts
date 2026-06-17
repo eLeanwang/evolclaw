@@ -4,9 +4,9 @@ import { GeminiSessionFileAdapter } from './core/session/adapters/gemini-session
 import { ensureDataDirs, resolvePaths, agentDir, getPackageRoot, agentMdPath } from './paths.js';
 import { resolveAnthropicConfig } from './agents/baseagent.js';
 import { loadDefaults, loadAllAgents, mergeForAgent, ensureAgentDirSkeleton, migrateIdentitiesIfNeeded, migrateProcessConfigIfNeeded, loadEvolclawConfig } from './config-store.js';
-import { initConfigManager } from './core/config/config-manager.js';
-import { snapshot as configSnapshot, retentionCleanup, readCurrent, readWVersion, writeWVersion, diffWorkingVsVersion, paramDiff, incrementSuccessCount, collectConfigFiles } from './core/config/snapshot.js';
-import { appendBootLog, selfDiagnose } from './core/config/boot-log.js';
+import { initConfigManager } from './config/config-manager.js';
+import { snapshot as configSnapshot, retentionCleanup, readCurrent, readWVersion, writeWVersion, diffWorkingVsVersion, paramDiff, incrementSuccessCount, collectConfigFiles } from './config/snapshot.js';
+import { appendBootLog, selfDiagnose } from './config/boot-log.js';
 import type { Config, MergedAgentConfig, AgentConfig, DefaultsConfig } from './types.js';
 import { CONFIG_SCHEMA_VERSION } from './types.js';
 import dotenv from 'dotenv';
@@ -38,19 +38,19 @@ import { buildReloadHooks } from './core/channel-loader.js';
 import { IpcServer, IpcStatusResponse, ChannelStatus } from './ipc.js';
 import { ChannelAdapter, Message, OutboundEnvelope, OutboundPayload } from './types.js';
 import { logger, setLogLevel } from './utils/logger.js';
-import { fetchEcwebPairCode } from './utils/ecweb-pair.js';
+import { fetchEcwebPairCode } from './utils/ecweb-utils.js';
 import { writeMain, removeAll, isMainWinner, scanInstances } from './utils/instance-registry.js';
 import { detectDuplicates } from './core/evolagent-registry.js';
 import { loadKitManifest, cleanEckDebug, invalidateKitCache } from './eck/kit-renderer.js';
 import { initEck } from './eck/init.js';
-import { TriggerDefinitionManager } from './core/trigger/manager.js';
-import { TriggerRunStateStore } from './core/trigger/state.js';
-import { TriggerAuditLogger } from './core/trigger/audit.js';
-import { TriggerScriptExecutor } from './core/trigger/script-executor.js';
-import { TriggerFeedbackDispatcher } from './core/trigger/feedback.js';
-import { TriggerRuntimeScheduler } from './core/trigger/scheduler.js';
-import { normalizeTriggerDefinition } from './core/trigger/validation.js';
-import type { TriggerDefinition, TriggerFeedbackAction } from './core/trigger/types.js';
+import { TriggerDefinitionManager } from './trigger/manager.js';
+import { TriggerRunStateStore } from './trigger/state.js';
+import { TriggerAuditLogger } from './trigger/audit.js';
+import { TriggerScriptExecutor } from './trigger/script-executor.js';
+import { TriggerFeedbackDispatcher } from './trigger/feedback.js';
+import { TriggerRuntimeScheduler } from './trigger/scheduler.js';
+import { normalizeTriggerDefinition } from './trigger/validation.js';
+import type { TriggerDefinition, TriggerFeedbackAction } from './trigger/types.js';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
@@ -441,7 +441,7 @@ async function main() {
   aidStatsCollector.setSessionsDir(paths.sessionsDir);
   // 持久化网络流量到 message_events 表
   aidStatsCollector.onMessage = (ev) => {
-    import('./core/stats/writer.js').then(({ insertMessageEvent }) => {
+    import('./stats/writer.js').then(({ insertMessageEvent }) => {
       insertMessageEvent(paths.root, ev);
     }).catch(() => {});
   };
@@ -449,7 +449,7 @@ async function main() {
   // 日聚合表 usage_daily：首次启动回填 + 每日自愈。
   // 首次：表为空但明细非空时全量回填历史数据；之后靠 writer 写时增量维护。
   // 自愈：每日全量重建一次，纠正任何写时漂移。
-  import('./core/stats/db.js').then(({ getDb, rebuildDailyRollup }) => {
+  import('./stats/db.js').then(({ getDb, rebuildDailyRollup }) => {
     const db = getDb(paths.root);
     if (!db) return;
     try {

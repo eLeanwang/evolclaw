@@ -16,7 +16,7 @@ import fs from 'fs';
 import path from 'path';
 import Ajv from 'ajv';
 import type { ValidateFunction } from 'ajv';
-import { kitsSchemasDir } from '../../paths.js';
+import { kitsSchemasDir } from '../paths.js';
 
 export type LogicalSchemaName =
   | 'evolclaw'
