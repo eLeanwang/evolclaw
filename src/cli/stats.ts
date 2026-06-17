@@ -4,8 +4,8 @@
 
 import { resolveRoot } from '../paths.js';
 import { wantsHelp, getArgValue } from './help.js';
-import { queryAggregated, queryTodaySummary, querySessionTurns, queryContextBreakdown, queryTopPeers, queryTopModels, queryMessageAggregated, queryPeerList, querySummary, queryPeerDaily, queryTaskModelCalls, querySessionModelCalls, type Granularity, type StatsFilter } from '../core/stats/query.js';
-import { getBudgetStatus } from '../core/stats/budget.js';
+import { queryAggregated, queryTodaySummary, querySessionTurns, queryContextBreakdown, queryTopPeers, queryTopModels, queryMessageAggregated, queryPeerList, querySummary, queryPeerDaily, queryTaskModelCalls, querySessionModelCalls, type Granularity, type StatsFilter } from '../stats/query.js';
+import { getBudgetStatus } from '../stats/budget.js';
 
 const HELP = `ec stats — Token 用量与费用统计
 
@@ -130,8 +130,8 @@ export async function handleStats(args: string[]): Promise<void> {
 
   // 全量重建日聚合表（运维兜底/排查），不依赖时间范围。
   if (flags.rebuild) {
-    const { rebuildDailyRollup, getDb } = await import('../core/stats/db.js');
-    const { resolvePrices } = await import('../core/stats/price-resolver.js');
+    const { rebuildDailyRollup, getDb } = await import('../stats/db.js');
+    const { resolvePrices } = await import('../stats/price-resolver.js');
     const startedAt = Date.now();
 
     // 步骤1：回填 usage_events 的 cost 字段（只处理 cost_official_usd IS NULL 的行）
@@ -318,7 +318,7 @@ export async function handleStats(args: string[]): Promise<void> {
       console.error('Only SELECT queries are allowed.');
       return;
     }
-    const { openReadonlyDb, getDbPath } = await import('../core/stats/db.js');
+    const { openReadonlyDb, getDbPath } = await import('../stats/db.js');
     const db = openReadonlyDb(getDbPath(home));
     if (!db) { console.error('Stats DB not available.'); return; }
     try {
@@ -446,7 +446,7 @@ export async function handleStats(args: string[]): Promise<void> {
       const sessionCacheHitRate = totCacheAll > 0 ? totCacheRead / totCacheAll : 0;
 
       // model_spec
-      const { resolveModelSpec } = await import('../core/stats/billing.js');
+      const { resolveModelSpec } = await import('../stats/billing.js');
       const spec = resolveModelSpec(home, last.model);
 
       const result = {

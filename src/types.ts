@@ -565,12 +565,11 @@ export interface AgentInfo {
  * (avoids circular imports). The actual EvolAgent class satisfies this shape.
  */
 export interface EvolAgentHandle {
+  readonly aid: string;
   readonly name: string;
   readonly baseagent: string;
   readonly projectPath: string;
   readonly config: MergedAgentConfig;
-  readonly triggerManager?: unknown;
-  readonly triggerScheduler?: unknown;
   lastActivity?: number;
   getContext(channelName: string, chatType: string, globalChatmode?: { private?: 'interactive' | 'proactive'; group?: 'interactive' | 'proactive' }): AgentContext;
   getOwner(channelName: string): string | undefined;
@@ -740,6 +739,13 @@ export interface DebugBlock {
 
 export type ShowActivitiesMode = 'all' | 'none';
 
+export interface ProactiveBehaviorBlock {
+  /** proactive 下首个工具调用是否必须先通过 send/file 表态。 */
+  pre_tool_1stmsgchk?: boolean;
+  /** proactive 下是否启用队列未读提醒和 10 次工具汇报提醒。 */
+  tool_use_reminder?: boolean;
+}
+
 // channels[].* —— per-agent，新结构里以列表形式存储。
 // 元素必带 type + name，name 是该 agent 内 channel 类型下的本地标识（不含 '#'）。
 // AUN 类型一个 agent 只允许一个实例，name 通常约定 'main'。
@@ -905,6 +911,8 @@ export interface BehaviorConfig {
   dispatch?: 'mention' | 'broadcast';
   // 可见性
   show_activities?: ShowActivitiesMode;
+  // proactive 模式细粒度策略
+  proactive?: ProactiveBehaviorBlock;
   // 渲染
   render?: { private?: string; group?: string; inject?: string };
   // 富内容
@@ -959,6 +967,8 @@ export type ThoughtItem =
   | { kind: 'tool_call'; call_id: string; name: string; arguments?: Record<string, unknown>; text?: string }
   | { kind: 'tool_result'; call_id: string; name: string; ok: boolean; result?: unknown; error?: string; duration_ms?: number; text?: string }
   | { kind: 'progress'; text: string; state?: 'processing' | 'waiting'; tool_uses?: number; duration_ms?: number }
+  | { kind: 'started'; text?: string; metadata?: Record<string, unknown> }
+  | { kind: 'completed'; text?: string; metadata?: Record<string, unknown> }
   | { kind: 'notice'; text: string; severity: 'info' | 'warn'; subtype?: string }
   | { kind: 'summary'; text: string; subtype?: string; is_error?: boolean; duration_ms?: number };
 

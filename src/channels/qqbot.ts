@@ -6,6 +6,8 @@ import { resolveShowActivities, showActivitiesPolicy } from '../core/channel-loa
 import type { MessageBridge } from '../core/message/message-bridge.js';
 import type { QQBotChannelInstance as QQBotInst, ThoughtItem } from '../types.js';
 import { formatItemsAsText } from '../core/message/items-formatter.js';
+import type { FirstInteractionWelcomeManager } from '../utils/welcome.js';
+import { initWelcomeManager, sendWelcomeIfNeeded } from '../utils/welcome.js';
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -55,8 +57,16 @@ export class QQBotChannel {
   private cleanupInterval: ReturnType<typeof setInterval> | null = null;
   projectPathProvider: ((channelId: string) => Promise<string>) | null = null;
 
-  constructor(config: QQBotConfig) {
+  // Welcome message manager
+  private welcomeManager?: FirstInteractionWelcomeManager;
+
+  constructor(config: QQBotConfig, private agentAid?: string, private channelName?: string) {
     this.config = config;
+
+    // 初始化 welcomeManager（使用共享帮助函数）
+    if (agentAid && channelName) {
+      this.welcomeManager = initWelcomeManager('qqbot', agentAid, channelName);
+    }
   }
 
   // ── Public helpers (testable) ──────────────────────────────────────────────
@@ -161,6 +171,15 @@ export class QQBotChannel {
       if (event.groupOpenid) this.groupOpenidCache.set(chatId, event.groupOpenid);
 
       if (!this.messageHandler) return;
+
+      // 首次交互欢迎消息（使用共享帮助函数）
+      await sendWelcomeIfNeeded(
+        this.welcomeManager,
+        event.senderId,
+        chatId,
+        (id, text) => this.sendMessage(id, text),
+        'QQBot'
+      );
 
       // Check for attachments (images/files)
       const attachments = event.attachments || [];
@@ -379,7 +398,7 @@ export class QQBotChannelPlugin implements ChannelPlugin {
     const channel = new QQBotChannel({
       appId: inst.appId,
       clientSecret: inst.clientSecret,
-    });
+    }, ctx.agentName, inst.name);
 
     const mode = resolveShowActivities(inst);
     const adapter = {

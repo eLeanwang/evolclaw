@@ -14,8 +14,8 @@ import { cmdInit, needsControlAidInit, initTail } from './init.js';
 import * as platform from '../utils/cross-platform.js';
 import { EventBus } from '../core/event-bus.js';
 import { tryUpgrade, tryUpgradeAunSdk, tryUpgradeGlobalPkg, resolveGlobalPkg, type UpgradeResult } from '../utils/npm-ops.js';
-import { fetchEcwebPairCode } from '../utils/ecweb-pair.js';
-import { resolveEcwebLaunchCommand } from '../utils/ecweb-launch.js';
+import { fetchEcwebPairCode } from '../utils/ecweb-utils.js';
+import { resolveEcwebLaunchCommand } from '../utils/ecweb-utils.js';
 import { resolveAunCoreSdkPkg, AUN_CORE_SDK_PKG } from '../aun/aid/client.js';
 import { scanInstances, cleanupInstances, readAidLastActivity, findOrphanProcesses, killOrphans, type OrphanProcess } from '../utils/instance-registry.js';
 import { filterLogFiles, deriveLogTypes, computePreChecked, validateLogTypes, shortLogName as shortLogNameLocal } from './watch-logs.js';
@@ -102,12 +102,15 @@ function countLines(pkgRoot: string, logDir: string) {
   const utils = countDir(path.join(srcDir, 'utils'));
   const cli = countDir(path.join(srcDir, 'cli'));
   const aun = countDir(path.join(srcDir, 'aun'));
+  const sys = countDir(path.join(srcDir, 'trigger'))
+    + countDir(path.join(srcDir, 'config'))
+    + countDir(path.join(srcDir, 'stats'));
   const entry = countFile(path.join(srcDir, 'index.ts'))
     + countFile(path.join(srcDir, 'config-store.ts'))
     + countFile(path.join(srcDir, 'types.ts'))
     + countFile(path.join(srcDir, 'ipc.ts'))
     + countFile(path.join(srcDir, 'paths.ts'));
-  const total = core + agents + channels + utils + cli + aun + entry;
+  const total = core + agents + channels + utils + cli + aun + sys + entry;
 
   console.log('==================================================');
   console.log('EvolClaw 代码统计');
@@ -118,6 +121,7 @@ function countLines(pkgRoot: string, logDir: string) {
   console.log(`工具库:           ${String(utils).padStart(8)} 行`);
   console.log(`CLI:              ${String(cli).padStart(8)} 行`);
   console.log(`AUN 协议:         ${String(aun).padStart(8)} 行`);
+  console.log(`子系统 (T/C/S):   ${String(sys).padStart(8)} 行`);
   console.log(`入口与配置:       ${String(entry).padStart(8)} 行`);
   console.log('--------------------------------------------------');
   console.log(`总计:             ${String(total).padStart(8)} 行`);
@@ -132,8 +136,9 @@ function countLines(pkgRoot: string, logDir: string) {
       const lastLine = lines[lines.length - 1];
       const parts = lastLine.split('\t');
       // 旧格式8列: time core agents channels utils entry total delta → total at [6]
-      // 新格式10列: time core agents channels utils cli aun entry total delta → total at [8]
-      const lastTotalStr = parts.length >= 10 ? parts[8] : parts[6];
+      // 旧格式10列: time core agents channels utils cli aun entry total delta → total at [8]
+      // 新格式11列: time core agents channels utils cli aun sys entry total delta → total at [9]
+      const lastTotalStr = parts.length >= 11 ? parts[9] : parts.length >= 10 ? parts[8] : parts[6];
       prevTotal = parseInt(lastTotalStr ?? parts[parts.length - 2], 10) || 0;
       if (prevTotal === total) {
         shouldAppend = false;
@@ -146,7 +151,7 @@ function countLines(pkgRoot: string, logDir: string) {
     const now = `${_d.getFullYear()}-${_p(_d.getMonth() + 1)}-${_p(_d.getDate())} ${_p(_d.getHours())}:${_p(_d.getMinutes())}:${_p(_d.getSeconds())}`;
     const delta = total - prevTotal;
     const deltaStr = delta >= 0 ? `+${delta}` : `${delta}`;
-    fs.appendFileSync(statsFile, `${now}\t${core}\t${agents}\t${channels}\t${utils}\t${cli}\t${aun}\t${entry}\t${total}\t${deltaStr}\n`);
+    fs.appendFileSync(statsFile, `${now}\t${core}\t${agents}\t${channels}\t${utils}\t${cli}\t${aun}\t${sys}\t${entry}\t${total}\t${deltaStr}\n`);
   }
 
   showHistory(statsFile);
@@ -161,7 +166,7 @@ function showHistory(statsFile: string) {
   console.log('\n==================================================');
   console.log('历史记录（最近 10 次）');
   console.log('==================================================');
-  console.log(`${'Time'.padEnd(19)} ${'Core'.padStart(6)} ${'Agent'.padStart(6)} ${'Chan'.padStart(6)} ${'Utils'.padStart(6)} ${'CLI'.padStart(6)} ${'AUN'.padStart(6)} ${'Entry'.padStart(6)} ${'Total'.padStart(6)} ${'Delta'.padStart(8)}`);
+  console.log(`${'Time'.padEnd(19)} ${'Core'.padStart(6)} ${'Agent'.padStart(6)} ${'Chan'.padStart(6)} ${'Utils'.padStart(6)} ${'CLI'.padStart(6)} ${'AUN'.padStart(6)} ${'Sys'.padStart(6)} ${'Entry'.padStart(6)} ${'Total'.padStart(6)} ${'Delta'.padStart(8)}`);
   console.log('--------------------------------------------------');
 
   let prevTotal: number | null = null;
@@ -171,21 +176,25 @@ function showHistory(statsFile: string) {
     // 旧6列: time core channels utils entry total
     // 旧7列: time core agents channels utils entry total
     // 旧8列: time core agents channels utils entry total delta
-    // 新10列: time core agents channels utils cli aun entry total delta
-    let time: string, c: string, a: string, ch: string, u: string, cl: string, au: string, e: string, t: string, d: string | undefined;
-    if (parts.length >= 10) {
+    // 旧10列: time core agents channels utils cli aun entry total delta
+    // 新11列: time core agents channels utils cli aun sys entry total delta
+    let time: string, c: string, a: string, ch: string, u: string, cl: string, au: string, sy: string, e: string, t: string, d: string | undefined;
+    if (parts.length >= 11) {
+      [time, c, a, ch, u, cl, au, sy, e, t, d] = parts;
+    } else if (parts.length >= 10) {
       [time, c, a, ch, u, cl, au, e, t, d] = parts;
+      sy = '-';
     } else if (parts.length >= 8) {
       // 旧8列: time core agents channels utils entry total delta
       [time, c, a, ch, u, e, t, d] = parts;
-      cl = '-'; au = '-';
+      cl = '-'; au = '-'; sy = '-';
     } else if (parts.length >= 7) {
       // 旧7列: time core agents channels utils entry total
       [time, c, a, ch, u, e, t] = parts;
-      cl = '-'; au = '-';
+      cl = '-'; au = '-'; sy = '-';
     } else if (parts.length >= 6) {
       [time, c, ch, u, e, t] = parts;
-      a = '-'; cl = '-'; au = '-';
+      a = '-'; cl = '-'; au = '-'; sy = '-';
     } else {
       continue;
     }
@@ -199,7 +208,7 @@ function showHistory(statsFile: string) {
     } else {
       diff = '-';
     }
-    console.log(`${time.padEnd(19)} ${c.padStart(6)} ${a.padStart(6)} ${ch.padStart(6)} ${u.padStart(6)} ${cl.padStart(6)} ${au.padStart(6)} ${e.padStart(6)} ${t.padStart(6)} ${diff.padStart(8)}`);
+    console.log(`${time.padEnd(19)} ${c.padStart(6)} ${a.padStart(6)} ${ch.padStart(6)} ${u.padStart(6)} ${cl.padStart(6)} ${au.padStart(6)} ${sy.padStart(6)} ${e.padStart(6)} ${t.padStart(6)} ${diff.padStart(8)}`);
     prevTotal = total;
   }
   console.log('==================================================');
@@ -621,6 +630,15 @@ export async function cmdRestart(opts: { clear?: boolean; diagnose?: boolean } =
     if (opts.clear && otherHome.length > 0) {
       const killed = killOrphans(otherHome);
       console.log(`☠ 已 SIGKILL ${killed.length} 个跨 HOME 孤儿进程: ${killed.join(', ')}`);
+      await sleep(500);
+    }
+  }
+
+  // 清理 codex app-server 孤儿进程（无 HOME 区分，全局清理）
+  {
+    const killed = stopCodexAppServerOrphans();
+    if (killed > 0) {
+      console.log(`☠ 已清理 ${killed} 个 codex app-server 孤儿进程`);
       await sleep(500);
     }
   }
@@ -2323,6 +2341,20 @@ function removeEcwebInstanceFiles(p: ReturnType<typeof resolvePaths>): void {
     if (!isEcwebInstanceFile(file)) continue;
     try { fs.unlinkSync(path.join(p.instanceDir, file)); } catch {}
   }
+}
+
+/** 清理所有 codex app-server 孤儿进程，返回清理的进程数。 */
+function stopCodexAppServerOrphans(): number {
+  // 查找所有 codex app-server 进程（无论是 node 启动的还是原生二进制）
+  const codexProcs = platform.findProcesses('codex app-server');
+  let killed = 0;
+  for (const pid of codexProcs) {
+    try {
+      platform.killProcess(pid, true);
+      killed++;
+    } catch {}
+  }
+  return killed;
 }
 
 /** 若 ecweb 在运行则杀掉并清理 pid 文件，返回是否成功 kill。 */

@@ -10,11 +10,11 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import { logger } from '../utils/logger.js';
-import { checkBlacklist, checkReadonly, summarizeToolInput } from '../core/permission.js';
+import { checkBlacklist, checkReadonly, parseEvolclawSendCommand, summarizeToolInput } from '../core/permission.js';
 import { encodePath } from '../utils/cross-platform.js';
 import type { AgentPlugin, AgentInstance, AgentCallbacks } from '../core/baseagent-loader.js';
 import type { AgentEvent, ImageData, PermissionContext, PermissionModeInfo, AgentTokenUsage, AgentContextUsage, AgentLastModelCall, AgentModelCall } from './runner-types.js';
-import type { GatewayPricingCache, PriceQuad } from '../core/stats/price-resolver.js';
+import type { GatewayPricingCache, PriceQuad } from '../stats/price-resolver.js';
 import { contextTokensForUsage, usageForContext, numericToken, isClaudeContextUsageModel, isOneMillionContextModel, realContextWindowForModel, autoCompactWindowForModel } from './runner-types.js';
 export type {
   AgentContextUsage,
@@ -1327,8 +1327,8 @@ export class AgentRunner {
       // evolclaw ctl send/file 白名单：proactive 模式下 agent 必须通过这些命令发送消息，
       // 任何权限模式下都不应拦截，否则 agent 无法回复用户
       if (toolName === 'Bash') {
-        const cmd = (input.command as string) || '';
-        if (/^\s*evolclaw\s+ctl\s+(send|file)\b/.test(cmd)) {
+        const cmd = typeof input.command === 'string' ? input.command : '';
+        if (parseEvolclawSendCommand(cmd)?.scope === 'ctl') {
           return { behavior: 'allow' as const, updatedInput: input, decisionClassification: 'user_permanent' as const };
         }
       }

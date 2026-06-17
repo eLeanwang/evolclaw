@@ -4,7 +4,7 @@ import { saveAgent } from '../config-store.js';
 import { formatChannelKey, tryParseChannelKey } from './channel-loader.js';
 import { agentPersonalDir } from '../paths.js';
 import { fileCache } from './daemon-file-cache.js';
-import { ConfigTarget, read as cfgRead, write as cfgWrite, ensureFile as cfgEnsure } from './config/config-manager.js';
+import { ConfigTarget, read as cfgRead, write as cfgWrite, ensureFile as cfgEnsure } from '../config/config-manager.js';
 import type { BehaviorConfig } from '../types.js';
 import type {
   AgentConfig,
@@ -16,8 +16,6 @@ import type {
   ShowActivitiesMode,
   ChatmodeBlock,
 } from '../types.js';
-import type { TriggerScheduler } from './trigger/scheduler.js';
-import type { TriggerManager } from './trigger/manager.js';
 
 // ── 校验：迁到 config-store.validateAgentConfig ──
 // EvolAgent 假定传入的 AgentConfig 已通过 ConfigStore.validateAgentConfig，
@@ -49,8 +47,6 @@ export class EvolAgent {
   lastActivity?: number;
   status: AgentStatus;
   error?: string;
-  triggerScheduler?: TriggerScheduler;
-  triggerManager?: TriggerManager;
 
   constructor(rawAgent: AgentConfig, merged: MergedAgentConfig) {
     if (rawAgent.aid !== merged.aid) {

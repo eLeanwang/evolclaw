@@ -75,7 +75,7 @@ ec config prune [--keep-full N] [--keep-delta N] [--yes]
 
 ## 权限（H/HA）
 
-- **HA 字段**（behavior.json：active_baseagent/baseagents(model/effort)/chatmode/dispatch/show_activities/flush_delay/debounce/render/enable_rich_content/permissionMode/roles）→ 人和 agent 均可写。
+- **HA 字段**（behavior.json：active_baseagent/baseagents(model/effort)/chatmode/dispatch/show_activities/proactive/flush_delay/debounce/render/enable_rich_content/permissionMode/roles）→ 人和 agent 均可写。
 - **H 字段**（config.json/defaults.json/evolclaw.json：channels/owners/admins/凭证/aid/enabled/projects 等）→ 仅人可写；agent 托管环境写 H 被拒。
 - `snapshot`/`restore`/`init`/`prune` 仅人可执行；所有读命令（get/show/list/effective/fields/history/diff/current/boots/validate）人和 agent 均可。
 - 凭证一律 `${VAR}` 引用，CLI 读命令永不展开、不泄露明文；`.env` 全程禁读写。

@@ -7,6 +7,8 @@ import { sanitizeFileName, saveToUploads, safeFetch, bufferToInboundImage } from
 import { markdownToPlainText } from '../utils/rich-content-renderer.js';
 import type { EventBus } from '../core/event-bus.js';
 import { formatItemsAsText } from '../core/message/items-formatter.js';
+import type { FirstInteractionWelcomeManager } from '../utils/welcome.js';
+import { initWelcomeManager, sendWelcomeIfNeeded } from '../utils/welcome.js';
 
 // ── Config ──────────────────────────────────────────────────────────────────
 
@@ -185,11 +187,19 @@ export class WechatChannel {
   // Project path resolver（用于保存文件到 uploads 目录）
   private projectPathResolver?: (channelId: string) => Promise<string>;
 
-  constructor(config: WechatConfig) {
+  // Welcome message manager
+  private welcomeManager?: FirstInteractionWelcomeManager;
+
+  constructor(config: WechatConfig, private agentAid?: string, private channelName?: string) {
     this.config = config;
     const dataDir = resolvePaths().dataDir;
     this.syncBufPath = path.join(dataDir, 'wechat-sync-buf.txt');
     this.contextTokensPath = path.join(dataDir, 'wechat-context-tokens.json');
+
+    // 初始化 welcomeManager（使用共享帮助函数）
+    if (agentAid && channelName) {
+      this.welcomeManager = initWelcomeManager('wechat', agentAid, channelName);
+    }
   }
 
   // ── Public API ──────────────────────────────────────────────────────────
@@ -575,6 +585,15 @@ export class WechatChannel {
     // 发送 typing 指示器（异步，不阻塞）
     this.acknowledgeMessage(fromUserId, msg.context_token).catch(() => {});
 
+    // 首次交互欢迎消息（使用共享帮助函数）
+    await sendWelcomeIfNeeded(
+      this.welcomeManager,
+      fromUserId,
+      fromUserId,
+      (id, text) => this.sendMessage(id, text),
+      'WeChat'
+    );
+
     // 回调主流程
     if (this.messageHandler) {
       try {
@@ -861,7 +880,7 @@ export class WechatChannelPlugin implements ChannelPlugin {
     const channel = new WechatChannel({
       baseUrl: inst.baseUrl || 'https://ilinkai.weixin.qq.com',
       token: inst.token,
-    });
+    }, ctx.agentName, inst.name);
 
     const mode = resolveShowActivities(inst);
     const adapter = {

@@ -9,6 +9,8 @@ import { cmdRestartMonitor } from './restart-monitor.js';
 import { cmdAid, cmdRpc, cmdStorage, cmdMsg, cmdGroup } from './aun-commands.js';
 import { cmdAgent } from './agent-command.js';
 import { cmdCtl } from './ctl-command.js';
+import { cmdQueue } from './queue-command.js';
+import { cmdTrigger } from './trigger-command.js';
 import { cmdStart, cmdStop, cmdRestart, cmdStatus, cmdLogs, cmdWatchCommand, cmdDev, cmdMv, cmdDiagnose } from './daemon-commands.js';
 
 // Suppress Node.js ExperimentalWarning (e.g. SQLite) from cluttering CLI output
@@ -118,6 +120,12 @@ export async function main(args: string[]) {
     case 'ctl':
       await cmdCtl(args.slice(1));
       break;
+    case 'queue':
+      await cmdQueue(args.slice(1));
+      break;
+    case 'trigger':
+      await cmdTrigger(args.slice(1));
+      break;
     case 'agent': {
       const { suppressSdkLogs } = await import('../aun/aid/index.js');
       suppressSdkLogs();
@@ -189,7 +197,7 @@ export async function main(args: string[]) {
       break;
     }
     default:
-      console.log(`Usage: evolclaw {init|start|stop|restart|status|logs|watch|ctl|diagnose|net|mv}
+      console.log(`Usage: evolclaw {init|start|stop|restart|status|logs|watch|ctl|queue|trigger|diagnose|net|mv}
 
 Commands:
   init          初始化 evolclaw home (${resolvePaths().defaultsConfig})
@@ -214,6 +222,11 @@ Commands:
   watch msg     消息监控（三面板交互式 TUI：AID 列表 / 对端统计 / 消息流）
   ctl           运行时自管理（模型切换、推理强度、压缩上下文等）
                   evolclaw ctl help 查看完整命令列表
+  trigger       daemon 级触发器管理（list/show/create/update/run）
+  queue          消息队列查询与操作
+                  queue --agent <aid>          查看 agent 的所有队列
+                  queue --agent <aid> --clear  清空待处理消息
+                  queue --agent <aid> --interrupt --sessionkey <key>  打断处理中任务
   agent         管理 EvolAgent
                   agent              列出所有 agent
                   agent <name>       查看指定 agent 详情

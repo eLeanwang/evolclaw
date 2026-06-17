@@ -9,6 +9,7 @@ evolclaw.json_
 # 运行时数据
 data/*
 dns_cache.db*
+backups/
 
 # aunproxy（独立仓库，嵌套工作树中）
 aunproxy/

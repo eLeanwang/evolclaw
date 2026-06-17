@@ -1001,22 +1001,13 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       }
 
       // Send welcome message
-      const welcomeText = `🎉 欢迎使用 EvolClaw！
-
-我是您的 AI Agent 网关，已成功连接到 AUN 网络。
-
-📋 **日常使用方法**：
-
-1. **查看帮助**：发送 \`/help\` 查看所有可用命令
-2. **查看状态**：发送 \`/status\` 查看当前会话状态
-3. **会话管理**：发送 \`/session\` 查看和切换会话
-
-💡 **提示**：
-- 直接发送消息即可与 Claude/Codex 对话
-- 支持多会话管理，每个会话独立上下文
-- 所有命令以 \`/\` 开头
-
-现在就可以开始工作了！`;
+      const { generateWelcomeMessage } = await import('../utils/welcome.js');
+      const welcomeText = generateWelcomeMessage({
+        channelType: 'aun',
+        agentName: agentDisplayName,
+        ownerName: ownerDisplayName,
+        includeBindingNote: true,
+      });
 
       // First contact with Owner races against Owner's async cert fetch from
       // gateway PKI; a 3s pause lets the cert propagate. persist_required asks
@@ -2422,6 +2413,13 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
   activityLogText(raw: any): string {
     // 兼容两种入参：原始 ThoughtItem（顶层字段），或已构建的 activity payload（字段收在 .item 里）
     const item = raw?.item && typeof raw.item === 'object' ? raw.item : raw;
+    if (item?.kind === 'started') return '任务开始';
+    if (item?.kind === 'completed') {
+      const ms = item?.metadata && typeof item.metadata === 'object'
+        ? (item.metadata as Record<string, unknown>).durationMs
+        : undefined;
+      return typeof ms === 'number' && Number.isFinite(ms) && ms > 0 ? `任务完成 (${ms}ms)` : '任务完成';
+    }
     if (typeof item?.text === 'string' && item.text) return item.text;
     if (item?.kind === 'tool_call') return `[tool_call] ${item.name ?? ''}`.trim();
     if (item?.kind === 'tool_result') return `[tool_result] ${item.name ?? ''} ${item.ok === false ? 'failed' : 'ok'}`.trim();

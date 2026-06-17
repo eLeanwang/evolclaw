@@ -1,11 +1,14 @@
 import path from 'path';
-import fs from 'fs';
 import type { EventBus } from './event-bus.js';
 import type { ChannelAdapter, ReplyContext, InteractionRequest } from '../types.js';
 import type { InteractionRouter } from './interaction-router.js';
 import { renderActionAsText } from './interaction-router.js';
 import { buildEnvelope, sendInteractionPayload } from './message/message-processor.js';
 import { logger } from '../utils/logger.js';
+import { summarizeToolInput } from '../utils/tool-summary.js';
+
+// 工具摘要/Edit diff 预览已迁至 utils/tool-summary.ts；此处再导出以保持既有引用路径兼容。
+export { summarizeToolInput };
 
 // 危险命令黑名单（正则表达式）
 const DANGEROUS_PATTERNS = [
@@ -107,173 +110,47 @@ export async function checkBlacklist(
   return { behavior: 'allow', updatedInput: input };
 }
 
-/**
- * 工具输入摘要（提取工具调用的可读描述，供权限审批和消息展示使用）
- */
-export function summarizeToolInput(toolName: string, input: Record<string, unknown>): string {
-  if (!input) return '';
+export interface EvolclawSendCommand {
+  scope: 'msg' | 'group' | 'ctl';
+  action: 'send' | 'file';
+  /** msg/group 的会话目标；ctl send/file 通过当前 ctl session 路由，不携带目标。 */
+  targetId?: string;
+}
 
-  const extractors: Record<string, (i: any) => string | undefined> = {
-    'Read':  (i) => i.file_path,
-    'Edit':  (i) => formatEditSummary(i),
-    'Write': (i) => i.file_path,
-    'Bash':  (i) => {
-      const cmd = i.command?.substring(0, 80) || '';
-      const desc = i.description;
-      if (desc && cmd) return `${cmd} | ${desc}`;
-      return cmd || desc;
-    },
-    'Grep':  (i) => `pattern: ${i.pattern}`,
-    'Glob':  (i) => `pattern: ${i.pattern}`,
-    'Agent': (i) => i.description || i.prompt?.substring(0, 80),
-    'Skill': (i) => i.skill ? `${i.skill}${i.args ? ' ' + i.args : ''}` : undefined,
-    'ExitPlanMode': (i) => {
-      if (i.allowedPrompts?.length) {
-        return `计划包含 ${i.allowedPrompts.length} 项操作权限`;
-      }
-      return '计划审批';
-    },
-    'TodoWrite': (i) => {
-      if (Array.isArray(i.todos)) {
-        return i.todos.map((t: any) => t.content || t.task || t.text).filter(Boolean).join(', ').substring(0, 80);
-      }
-      return undefined;
-    },
-    'TaskCreate': (i) => i.subject || i.description?.substring(0, 80),
-    'TaskUpdate': (i) => i.status ? `${i.taskId} → ${i.status}` : i.taskId,
-    'TaskOutput': (i) => `${i.task_id || '?'}${i.block === false ? ' (non-blocking)' : ''}${i.timeout ? ` timeout=${i.timeout}ms` : ''}`,
-    'TaskStop': (i) => i.task_id || i.shell_id || '?',
-    'NotebookEdit': (i) => i.notebook_path,
-    'WebFetch': (i) => i.url,
-    'WebSearch': (i) => i.query?.substring(0, 80),
-  };
+const SHELL_CONTROL_RE = /[;&|`]|[$][(]|\r|\n/;
 
-  const extractor = extractors[toolName];
-  if (extractor) {
-    const result = extractor(input);
-    if (result) return result;
+export function parseEvolclawSendCommand(command: string): EvolclawSendCommand | null {
+  const trimmed = command.trim();
+  if (!trimmed || SHELL_CONTROL_RE.test(trimmed)) return null;
+
+  const ctlMatch = trimmed.match(/^(?:ec|evolclaw)\s+ctl\s+(send|file)(?:\s|$)/);
+  if (ctlMatch) {
+    return { scope: 'ctl', action: ctlMatch[1] as 'send' | 'file' };
   }
 
-  return (input as any).description
-    || (input as any).subject
-    || (input as any).file_path
-    || (input as any).pattern
-    || (input as any).command?.substring(0, 80)
-    || (input as any).prompt?.substring(0, 80)
-    || (input as any).query?.substring(0, 80)
-    || (input as any).skill
-    || (input as any).url
-    || '';
+  const sessionMatch = trimmed.match(/^(?:ec|evolclaw)\s+(msg|group)\s+(send|file)\s+\S+\s+(\S+)(?:\s|$)/);
+  if (!sessionMatch) return null;
+  return {
+    scope: sessionMatch[1] as 'msg' | 'group',
+    action: sessionMatch[2] as 'send' | 'file',
+    targetId: sessionMatch[3],
+  };
+}
+
+export function isEvolclawSendCommandForSession(
+  toolName: string,
+  input: Record<string, unknown>,
+  channelId: string,
+): boolean {
+  if (toolName !== 'Bash') return false;
+  const cmd = typeof input.command === 'string' ? input.command : '';
+  const parsed = parseEvolclawSendCommand(cmd);
+  if (!parsed) return false;
+  if (parsed.scope === 'ctl') return true;
+  return parsed.targetId === channelId;
 }
 
 export type PermissionDecision = 'allow' | 'always' | 'deny';
-
-/** 为 Edit 工具生成 diff 风格摘要 */
-function formatEditSummary(input: any): string {
-  const filePath = input.file_path || '';
-  const protocolDiff = typeof input.unified_diff === 'string' ? input.unified_diff
-    : typeof input.unifiedDiff === 'string' ? input.unifiedDiff
-    : typeof input.diff === 'string' ? input.diff
-    : '';
-  if (protocolDiff) return formatProtocolDiffSummary(filePath, protocolDiff);
-
-  const oldStr = typeof input.old_string === 'string' ? input.old_string : '';
-  const newStr = typeof input.new_string === 'string' ? input.new_string : '';
-
-  if (!oldStr && !newStr) return filePath;
-
-  const MAX_DIFF_LINES = 14;
-
-  const oldLines = oldStr.split('\n');
-  const newLines = newStr.split('\n');
-
-  // 尝试从文件中定位 old_string 的起始行号
-  let startLine = 0; // 0-based; 0 means unknown
-  if (filePath && oldStr) {
-    try {
-      const content = fs.readFileSync(filePath, 'utf-8');
-      const idx = content.indexOf(oldStr);
-      if (idx >= 0) {
-        startLine = content.slice(0, idx).split('\n').length; // 1-based
-      }
-    } catch {
-      // 文件不可读，行号留空
-    }
-  }
-
-  const diffLines: string[] = [];
-
-  // 找公共前缀行数
-  let prefixLen = 0;
-  while (prefixLen < oldLines.length && prefixLen < newLines.length && oldLines[prefixLen] === newLines[prefixLen]) {
-    prefixLen++;
-  }
-  // 找公共后缀行数
-  let suffixLen = 0;
-  while (
-    suffixLen < oldLines.length - prefixLen &&
-    suffixLen < newLines.length - prefixLen &&
-    oldLines[oldLines.length - 1 - suffixLen] === newLines[newLines.length - 1 - suffixLen]
-  ) {
-    suffixLen++;
-  }
-
-  const CONTEXT = 2;
-  // 计算行号宽度（用于对齐）
-  const maxLineNo = startLine > 0 ? startLine + oldLines.length - 1 : 0;
-  const newMaxLineNo = startLine > 0 ? startLine + prefixLen + (newLines.length - suffixLen - prefixLen) - 1 : 0;
-  const padWidth = startLine > 0 ? Math.max(maxLineNo, newMaxLineNo).toString().length : 0;
-
-  // 格式化一行：行号 + 标记 + 内容
-  // 使用 Unicode 符号避免飞书 Markdown 将 "- " 解析为列表
-  const fmtLine = (lineNo: number, marker: '−' | '＋' | ' ', text: string) => {
-    if (startLine > 0) {
-      return `${lineNo.toString().padStart(padWidth)} ${marker}  ${text}`;
-    }
-    return `${marker}  ${text}`;
-  };
-
-  // 上下文前缀（最多 CONTEXT 行）
-  const ctxStart = Math.max(0, prefixLen - CONTEXT);
-  for (let i = ctxStart; i < prefixLen; i++) {
-    diffLines.push(fmtLine(startLine + i, ' ', oldLines[i]));
-  }
-
-  // 删除行
-  const removedEnd = oldLines.length - suffixLen;
-  for (let i = prefixLen; i < removedEnd && diffLines.length < MAX_DIFF_LINES; i++) {
-    diffLines.push(fmtLine(startLine + i, '−', oldLines[i]));
-  }
-
-  // 新增行（行号从 prefixLen 位置开始递增）
-  const addedEnd = newLines.length - suffixLen;
-  for (let i = prefixLen; i < addedEnd && diffLines.length < MAX_DIFF_LINES; i++) {
-    diffLines.push(fmtLine(startLine + i, '＋', newLines[i]));
-  }
-
-  // 上下文后缀（最多 CONTEXT 行）
-  const ctxEnd = Math.min(oldLines.length, removedEnd + CONTEXT);
-  for (let i = removedEnd; i < ctxEnd && diffLines.length < MAX_DIFF_LINES + 2; i++) {
-    diffLines.push(fmtLine(startLine + i, ' ', oldLines[i]));
-  }
-
-  if (diffLines.length > MAX_DIFF_LINES + 2) {
-    diffLines.splice(MAX_DIFF_LINES, diffLines.length, '  ...');
-  }
-
-  return `${filePath}\n\`\`\`\n${diffLines.join('\n')}\n\`\`\``;
-}
-
-/** 展示 runner/协议已返回的 unified diff；不在 EvolClaw 内重新计算 diff。 */
-function formatProtocolDiffSummary(filePath: string, diff: string): string {
-  const MAX_DIFF_LINES = 32;
-  const lines = diff.trimEnd().split('\n');
-  const displayLines = lines.length > MAX_DIFF_LINES
-    ? [...lines.slice(0, MAX_DIFF_LINES), `...(省略 ${lines.length - MAX_DIFF_LINES} 行)`]
-    : lines;
-  const body = displayLines.join('\n');
-  return `${filePath}\n\`\`\`diff\n${body}\n\`\`\``;
-}
 
 interface PendingPermission {
   sessionId: string;

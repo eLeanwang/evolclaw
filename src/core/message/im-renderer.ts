@@ -122,6 +122,14 @@ export class IMRenderer {
     return this.textBuffer.length > 0 || this.itemsQueue.some(it => it.kind !== 'text');
   }
 
+  /** 是否有会抑制兜底错误消息的正文/过程内容；lifecycle 边界不算。 */
+  hasNonLifecycleContent(): boolean {
+    return this.textBuffer.length > 0 || this.itemsQueue.some(it => {
+      if (it.kind === 'text') return it.text.length > 0;
+      return it.kind !== 'started' && it.kind !== 'completed';
+    });
+  }
+
   /** 是否有待发送的文本 */
   hasTextPending(): boolean {
     return this.textBuffer.length > 0;
@@ -247,6 +255,24 @@ export class IMRenderer {
       toolUses: opts.toolUses,
       durationMs: opts.durationMs,
     });
+  }
+
+  /** 添加任务生命周期边界事件，复用 activity.batch 投影路径。 */
+  addLifecycle(phase: 'started' | 'completed', metadata?: Record<string, unknown>, text?: string): void {
+    const item: ThoughtItem = {
+      kind: phase,
+      ...(text !== undefined && { text }),
+      ...(metadata !== undefined && { metadata }),
+    };
+
+    if (this.opts.envelope.chatmode === 'proactive') {
+      this.emitProactiveItem(item);
+      return;
+    }
+
+    this.itemsQueue.push(item);
+    this.messageTimestamps.push(Date.now());
+    this.scheduleFlush();
   }
 
   /**

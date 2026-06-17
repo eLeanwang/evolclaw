@@ -60,6 +60,9 @@ type AunAidStatsProvider = () => AidStatsSnapshot[];
 type AunAidStatsRecorder = (params: { aid: string; toPeer: string; text: string; encrypt?: boolean; chatmode?: string }) => void;
 type MenuExecutor = (payload: any) => Promise<any>;
 type StatsSnapshotProvider = () => StatsSnapshot;
+type QueueSnapshotProvider = (params: { agent: string }) => Array<{ status: string; sessionKey: string; channelType: string; channelId: string; projectPath: string; peerName?: string; preview: string; messageId?: string; elapsedMs?: number }>;
+type QueueActionExecutor = (params: { agent: string; action: 'clear' | 'cancel' | 'interrupt'; messageId?: string; sessionKey?: string }) => Promise<{ ok: boolean; cleared?: number; cancelled?: boolean; interrupted?: boolean; error?: string }>;
+type TriggerExecutor = (cmd: { type: string; [key: string]: any }) => Promise<any>;
 
 export class IpcServer {
   private server: net.Server | null = null;
@@ -69,6 +72,9 @@ export class IpcServer {
   private aunAidStatsRecorder?: AunAidStatsRecorder;
   private menuExecutor?: MenuExecutor;
   private statsProvider?: StatsSnapshotProvider;
+  private queueSnapshotProvider?: QueueSnapshotProvider;
+  private queueActionExecutor?: QueueActionExecutor;
+  private triggerExecutor?: TriggerExecutor;
 
   // CPU 占用追踪：IPC handler 是一次性同步调用，无法在响应里做 200ms 异步采样，
   // 故用后台 1s interval 累积 process.cpuUsage() 增量，handler 直接读最近值。
@@ -115,6 +121,21 @@ export class IpcServer {
   /** Inject global StatsSnapshot provider for monitor-snapshot IPC handler */
   setStatsProvider(provider: StatsSnapshotProvider): void {
     this.statsProvider = provider;
+  }
+
+  /** Inject queue snapshot provider for queue-snapshot IPC handler (query mode) */
+  setQueueSnapshotProvider(provider: QueueSnapshotProvider): void {
+    this.queueSnapshotProvider = provider;
+  }
+
+  /** Inject queue action executor for queue-snapshot IPC handler (action mode) */
+  setQueueActionExecutor(executor: QueueActionExecutor): void {
+    this.queueActionExecutor = executor;
+  }
+
+  /** Inject daemon-level trigger executor for ec trigger. */
+  setTriggerExecutor(executor: TriggerExecutor): void {
+    this.triggerExecutor = executor;
   }
 
   /** Start the 1s background CPU sampling loop (for monitor-snapshot). Call after start(). */
@@ -225,6 +246,22 @@ export class IpcServer {
         // 直接读单例，无需 provider 注入（与 manifest-engine 等 import 单例同款）。
         return { ok: true, stats: fileCache.stats() };
       }
+      case 'queue-snapshot': {
+        if (!cmd.agent) return { ok: false, error: 'missing agent' };
+        if (!cmd.action) {
+          // 纯查询
+          if (!this.queueSnapshotProvider) return { ok: false, error: 'queue-snapshot not configured' };
+          return { ok: true, items: this.queueSnapshotProvider({ agent: cmd.agent }) };
+        }
+        // 操作：clear / cancel / interrupt
+        if (!this.queueActionExecutor) return { ok: false, error: 'queue actions not configured' };
+        return await this.queueActionExecutor({
+          agent: cmd.agent,
+          action: cmd.action,
+          messageId: cmd.messageId,
+          sessionKey: cmd.sessionKey,
+        });
+      }
       case 'aun-aid-stats-record-outbound': {
         if (!this.aunAidStatsRecorder) return { ok: false, error: 'recorder not configured' };
         try {
@@ -245,6 +282,20 @@ export class IpcServer {
         const { cmd: slashCmd, sessionId } = cmd as unknown as IpcCtlRequest;
         if (!slashCmd || !sessionId) return { ok: false, error: 'missing cmd or sessionId' };
         return await this.commandExecutor(slashCmd, sessionId);
+      }
+      case 'trigger.list':
+      case 'trigger.show':
+      case 'trigger.create':
+      case 'trigger.update':
+      case 'trigger.setEnabled':
+      case 'trigger.cancel':
+      case 'trigger.run': {
+        if (!this.triggerExecutor) return { ok: false, error: 'trigger executor not configured' };
+        try {
+          return await this.triggerExecutor(cmd);
+        } catch (e: any) {
+          return { ok: false, error: e?.message || String(e) };
+        }
       }
       case 'evolagent.list': {
         if (!this.agentRegistry) return { ok: false, error: 'EvolAgentRegistry not available' };

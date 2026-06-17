@@ -5,7 +5,7 @@
 
 import fs from 'fs';
 import path from 'path';
-import { getPackageRoot } from '../../paths.js';
+import { getPackageRoot } from '../paths.js';
 
 export interface PriceRecord {
   model: string;

@@ -6,6 +6,18 @@ import type { EventBus } from '../event-bus.js';
 
 type MessageHandler = (message: Message) => Promise<void>;
 
+export interface QueueItemSnapshot {
+  status: 'active' | 'pending';
+  sessionKey: string;       // 格式：channelType#urlEncode(channelId)#urlEncode(threadId)
+  channelType: string;      // 从 sessionKey 解析
+  channelId: string;        // 从 sessionKey 解析（解码后，人类可读）
+  projectPath: string;      // 从 queueKey 解析（格式：sessionId::projectPath）
+  peerName?: string;        // 发送者名称
+  preview: string;          // 消息内容（默认 80 字符截断）
+  messageId?: string;       // 消息 ID
+  elapsedMs?: number;       // 处理时长（仅 active 有值）
+}
+
 interface QueuedMessage {
   message: Message;
   projectPath: string;
@@ -80,6 +92,8 @@ export class MessageQueue {
   private mutedAgents = new Set<string>();  // 禁言的 agent：消息照常入队，但不取出给大模型
   private persistencePath?: string;
   private activeBatches = new Map<string, QueuedMessage>();
+  private processingStartTime = new Map<string, number>();  // queueKey → 处理开始时间戳
+  private queueKeyToSessionKey = new Map<string, string>();  // queueKey → sessionKey（human-readable 格式）
 
   constructor(handler: MessageHandler, options?: MessageQueueOptions) {
     this.handler = handler;
@@ -474,7 +488,7 @@ export class MessageQueue {
     return restored;
   }
 
-  async enqueue(sessionKey: string, message: Message, projectPath: string, options?: { interruptible?: boolean; interruptSamePeer?: boolean; agentName?: string; role?: SessionIdentity['role'] }): Promise<void> {
+  async enqueue(sessionKey: string, message: Message, projectPath: string, options?: { interruptible?: boolean; interruptSamePeer?: boolean; agentName?: string; role?: SessionIdentity['role']; sessionKeyField?: string }): Promise<void> {
     // 消息去重检查
     if (!this.shouldProcess(sessionKey, message)) {
       return Promise.resolve();
@@ -490,6 +504,10 @@ export class MessageQueue {
     }
 
     const queueKey = this.getQueueKey(sessionKey, projectPath);
+    // 记录 sessionKey 映射（human-readable 格式，供 getQueueItemsBySession/getQueueItemsByAgent 输出）
+    if (options?.sessionKeyField) {
+      this.queueKeyToSessionKey.set(queueKey, options.sessionKeyField);
+    }
     const agentName = options?.agentName || DEFAULT_AGENT_NAME;
     const isProcessing = this.processing.has(queueKey);
     const currentQueue = this.queues.get(queueKey);
@@ -624,6 +642,7 @@ export class MessageQueue {
       const rejects = rawItems.map(i => i.reject);
 
       this.activeBatches.set(queueKey, activeItem);
+      this.processingStartTime.set(queueKey, Date.now());
       this.persistQueuesImmediate();
 
       logger.info(`[Queue] processing batch: key=${queueKey} items=${rawItems.length} pending=${queue.length} rawPending=${this.queueRawMessageCount(queue)} batchRole=${merged.message.batchRole ?? '<mixed>'} peer=${this.currentPeerId ?? '<multi>'} msg=${merged.message.messageId ?? '<none>'}`);
@@ -636,6 +655,7 @@ export class MessageQueue {
         rejects.forEach(r => r(error as Error));
       } finally {
         this.activeBatches.delete(queueKey);
+        this.processingStartTime.delete(queueKey);
         this.persistQueuesImmediate();
       }
     }
@@ -874,6 +894,7 @@ export class MessageQueue {
       const remaining = parts.filter(part => part.message.messageId !== messageId);
       if (remaining.length === 0) {
         this.activeBatches.delete(this.currentSessionKey);
+        this.processingStartTime.delete(this.currentSessionKey);
       } else {
         this.activeBatches.set(this.currentSessionKey, this.buildCoalescedItem(remaining));
       }
@@ -1041,5 +1062,233 @@ export class MessageQueue {
         }
       }
     }
+  }
+
+  // ── Queue query/management methods ──
+
+  /**
+   * 解析 sessionKey 的 channelType 和 channelId 组件。
+   * sessionKey 格式：channelType#urlEncode(channelId)#urlEncode(threadId)
+   */
+  private parseSessionKey(sessionKey: string): { channelType: string; channelId: string } {
+    const parts = sessionKey.split('#');
+    const channelType = parts[0] || '';
+    let channelId = '';
+    if (parts.length > 1) {
+      try { channelId = decodeURIComponent(parts[1]); } catch { channelId = parts[1]; }
+    }
+    return { channelType, channelId };
+  }
+
+  /** 从 queueKey 提取 projectPath */
+  private projectPathFromQueueKey(queueKey: string): string {
+    const idx = queueKey.indexOf('::');
+    return idx >= 0 ? queueKey.slice(idx + 2) : queueKey;
+  }
+
+  /** 截断消息内容用于预览 */
+  private truncatePreview(content: string, maxLen = 80): string {
+    if (!content) return '';
+    const cleaned = content.replace(/\s+/g, ' ').trim();
+    return cleaned.length > maxLen ? cleaned.slice(0, maxLen) + '...' : cleaned;
+  }
+
+  /** 构建 QueueItemSnapshot */
+  private buildSnapshot(
+    status: 'active' | 'pending',
+    queueKey: string,
+    sessionKey: string,
+    item: QueuedMessage,
+  ): QueueItemSnapshot {
+    const { channelType, channelId } = this.parseSessionKey(sessionKey);
+    const startTime = this.processingStartTime.get(queueKey);
+    const elapsedMs = status === 'active' && startTime != null
+      ? Date.now() - startTime
+      : undefined;
+    return {
+      status,
+      sessionKey,
+      channelType,
+      channelId,
+      projectPath: this.projectPathFromQueueKey(queueKey),
+      peerName: item.message.peerName,
+      preview: this.truncatePreview(item.message.content),
+      messageId: item.message.messageId,
+      elapsedMs,
+    };
+  }
+
+  /**
+   * 通过 human-readable sessionKey 反查 sessionId（cli interrupt 用）
+   */
+  findSessionIdBySessionKey(sessionKey: string): string | undefined {
+    for (const [queueKey, sk] of this.queueKeyToSessionKey.entries()) {
+      if (sk === sessionKey) return this.sessionKeyFromQueueKey(queueKey);
+    }
+    return undefined;
+  }
+
+  /**
+   * 按 sessionId 查询队列（ctl 用）
+   * @param sessionId - Session.id（meta_YYYYMMDD_TS）
+   * @returns 仅返回 pending 状态的消息
+   */
+  getQueueItemsBySession(sessionId: string): QueueItemSnapshot[] {
+    const result: QueueItemSnapshot[] = [];
+    for (const [queueKey, queue] of this.queues.entries()) {
+      if (!this.matchesSession(queueKey, sessionId)) continue;
+      const sessionKey = this.queueKeyToSessionKey.get(queueKey)
+        || this.sessionKeyFromQueueKey(queueKey);
+      for (const item of queue) {
+        result.push(this.buildSnapshot('pending', queueKey, sessionKey, item));
+      }
+    }
+    return result;
+  }
+
+  /**
+   * 按 agent 查询队列（cli 用）
+   * @param agentName - agent 内部名称
+   * @returns 返回所有状态（active + pending）的消息
+   */
+  getQueueItemsByAgent(agentName: string): QueueItemSnapshot[] {
+    const result: QueueItemSnapshot[] = [];
+
+    // active 项
+    for (const [queueKey, item] of this.activeBatches.entries()) {
+      const itemAgent = item.agentName || DEFAULT_AGENT_NAME;
+      if (itemAgent !== agentName) continue;
+      const sessionKey = this.queueKeyToSessionKey.get(queueKey)
+        || this.sessionKeyFromQueueKey(queueKey);
+      result.push(this.buildSnapshot('active', queueKey, sessionKey, item));
+    }
+
+    // pending 项
+    for (const [queueKey, queue] of this.queues.entries()) {
+      for (const item of queue) {
+        const itemAgent = item.agentName || DEFAULT_AGENT_NAME;
+        if (itemAgent !== agentName) continue;
+        const sessionKey = this.queueKeyToSessionKey.get(queueKey)
+          || this.sessionKeyFromQueueKey(queueKey);
+        result.push(this.buildSnapshot('pending', queueKey, sessionKey, item));
+      }
+    }
+
+    return result;
+  }
+
+  /**
+   * 按 sessionId 清空待处理消息（ctl 用）
+   * @returns 被清除的消息数量
+   */
+  clearBySession(sessionId: string): number {
+    let cleared = 0;
+    for (const [queueKey, queue] of this.queues.entries()) {
+      if (!this.matchesSession(queueKey, sessionId)) continue;
+      while (queue.length > 0) {
+        const item = queue.shift()!;
+        item.resolve();
+        cleared++;
+      }
+    }
+    if (cleared > 0) {
+      this.persistQueuesImmediate();
+      logger.info(`[Queue] Cleared ${cleared} pending message(s) for sessionId ${sessionId}`);
+    }
+    return cleared;
+  }
+
+  /**
+   * 按 messageId 取消消息（sessionId 作用域，ctl 用）
+   * @returns 是否成功
+   */
+  cancelMessageByIdInSession(sessionId: string, messageId: string): boolean {
+    for (const [queueKey, queue] of this.queues.entries()) {
+      if (!this.matchesSession(queueKey, sessionId)) continue;
+      const idx = queue.findIndex(q => this.messageIdsFor(q).includes(messageId));
+      if (idx === -1) continue;
+      const target = queue[idx];
+      const parts = this.partsOf(target);
+      const partIdx = parts.findIndex(part => part.message.messageId === messageId);
+      if (partIdx === -1) continue;
+      if (parts.length === 1) {
+        const [removed] = queue.splice(idx, 1);
+        removed.resolve();
+      } else {
+        const [removed] = parts.splice(partIdx, 1);
+        removed.resolve();
+        queue[idx] = this.buildCoalescedItem(parts);
+      }
+      this.persistQueuesImmediate();
+      logger.info(`[Queue] Cancelled queued message ${messageId} in session ${sessionId}`);
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * 按 messageId 取消消息（agent 作用域，cli 用）
+   * @returns 是否成功
+   */
+  cancelMessageById(agentName: string, messageId: string): boolean {
+    for (const [queueKey, queue] of this.queues.entries()) {
+      const idx = queue.findIndex(q => {
+        if ((q.agentName || DEFAULT_AGENT_NAME) !== agentName) return false;
+        return this.messageIdsFor(q).includes(messageId);
+      });
+      if (idx === -1) continue;
+      const target = queue[idx];
+      const parts = this.partsOf(target);
+      const partIdx = parts.findIndex(part => part.message.messageId === messageId);
+      if (partIdx === -1) continue;
+      if (parts.length === 1) {
+        const [removed] = queue.splice(idx, 1);
+        removed.resolve();
+      } else {
+        const [removed] = parts.splice(partIdx, 1);
+        removed.resolve();
+        queue[idx] = this.buildCoalescedItem(parts);
+      }
+      this.persistQueuesImmediate();
+      logger.info(`[Queue] Cancelled queued message ${messageId} for agent ${agentName}`);
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * 打断 session 的处理中任务（ctl 用）
+   * 一个 session 只可能有一个 queueKey。
+   * @returns 是否有任务被打断
+   */
+  async interruptBySession(sessionId: string): Promise<boolean> {
+    let targetQueueKey: string | undefined;
+    let targetAgentName: string | undefined;
+
+    for (const queueKey of this.processing) {
+      if (this.matchesSession(queueKey, sessionId)) {
+        targetQueueKey = queueKey;
+        targetAgentName = this.processingAgent.get(queueKey);
+        break;
+      }
+    }
+
+    if (!targetQueueKey) return false;
+
+    const sessionKey = this.sessionKeyFromQueueKey(targetQueueKey);
+    logger.info(`[Queue] Interrupting session ${sessionKey} (queueKey=${targetQueueKey})`);
+
+    this.eventBus?.publish({
+      type: 'task:interrupted',
+      sessionId: sessionKey,
+      reason: 'new_message',
+      agentName: targetAgentName,
+    });
+
+    if (this.interruptCallback) {
+      await this.interruptCallback(sessionKey, this.currentAgentId, targetAgentName);
+    }
+
+    return true;
   }
 }

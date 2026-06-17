@@ -1,4 +1,4 @@
-import { type Session, type Trigger } from '../../types.js';
+import { type Session } from '../../types.js';
 import { resolvePermissionMode } from '../model/config-scope.js';
 import { formatPeerKey } from '../relation/peer-identity.js';
 import { type AgentRunnerFull, hasModelSwitcher, hasPermissionController } from '../../agents/runner-types.js';
@@ -8,9 +8,8 @@ import { buildEnvelope } from '../message/message-processor.js';
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
-import type { ParsedTriggerSet } from '../trigger/parser.js';
-import { TriggerScheduler, calcNextFireAt } from '../trigger/scheduler.js';
-import { TriggerManager } from '../trigger/manager.js';
+import { CronExpressionParser } from 'cron-parser';
+import type { ParsedTriggerSet } from '../../trigger/parser.js';
 import { checkLatestVersion, getLocalVersion, isLinkedInstall, compareVersions } from '../../utils/npm-ops.js';
 import { loadDefaults, loadEvolclawConfig } from '../../config-store.js';
 import { execAgentAction, execAgentQuery, execAgentOptions, resolveProjectPath } from '../message/command-handler-agent-control.js';
@@ -237,7 +236,7 @@ export function validateScheduleParams(scheduleType: string, scheduleValue: stri
     const ts = new Date(scheduleValue).getTime();
     if (!Number.isFinite(ts)) return `at 的 scheduleValue 需为合法时间: ${scheduleValue}`;
   } else {
-    try { calcNextFireAt('cron', scheduleValue, Date.now()); }
+    try { CronExpressionParser.parse(scheduleValue); }
     catch { return `无效 cron 表达式: ${scheduleValue}`; }
   }
   return null;
@@ -399,25 +398,24 @@ export async function getSubMenuItems(this: any, cmd: string, channel: string, c
 
   // ── 关系级 /trigger list（每个 trigger 一个 MenuItem） ──
   if (cmd === '/trigger') {
-    const owningAgent = this.getOwningAgent(channel);
-    const manager = (owningAgent?.triggerManager ?? this.triggerManager) as TriggerManager | undefined;
-    if (!manager) return [];
+    const triggerScheduler = this.getTriggerSchedulerForChannel?.(channel);
     const scope = args?.options === 'all' ? 'all' : 'enabled';
     const role = (overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId)).role;
     const isAdmin = role === 'owner' || role === 'admin';
-    const all = manager.listAll();
-    const list = scope === 'all' ? all.active.concat(all.history as any[]) : manager.listActive();
-    const visible = isAdmin ? list
-      : list.filter((t: any) => t.createdByPeerId === (userId ?? '') && t.createdByChannel === channel);
-    return visible.map((t: any) => ({
-      // 透传完整 trigger 字段（ECWeb Triggers 表逐列渲染需要）
-      ...t,
-      value: t.id,
-      label: t.name,
-      desc: `${t.scheduleType}${t.nextFireAt ? ` | 下次 ${new Date(t.nextFireAt).toLocaleString()}` : ''}`,
-      // 状态标识：history 条目带 doneReason（fired/cancelled/expired），active 条目恒为 'active'
-      status: t.doneReason ?? 'active',
-    }));
+    if (!triggerScheduler) return [];
+    const list = triggerScheduler.list({ all: scope === 'all' });
+    return list
+      .filter((definition: any) => this.canAccessTriggerDefinition(definition, userId ?? '', channel, isAdmin))
+      .map((definition: any) => {
+        const view = this.definitionToTriggerView(definition, triggerScheduler);
+        return {
+          ...view,
+          value: definition.id,
+          label: definition.name,
+          desc: `${view.scheduleType}${view.nextFireAt ? ` | 下次 ${new Date(view.nextFireAt).toLocaleString()}` : ''}`,
+          status: definition.enabled ? 'active' : 'disabled',
+        };
+      });
   }
 
   if (cmd === '/topic') {
@@ -844,36 +842,24 @@ export async function execMenuUpdate(this: any,
 
   // ── 关系级 /trigger update（调度参数，value 为 JSON 字符串） ──
   if (cmdBase === '/trigger') {
-    const owningAgent = this.getOwningAgent(channel);
-    const manager = (owningAgent?.triggerManager ?? this.triggerManager) as TriggerManager | undefined;
-    const scheduler = (owningAgent?.triggerScheduler ?? this.triggerScheduler) as TriggerScheduler | undefined;
-    if (!manager || !scheduler) return { error: '触发器功能未启用', code: 'NOT_SUPPORTED' };
     let patch: any;
     try { patch = JSON.parse(arg); } catch { return { error: 'value 需为 JSON', code: 'INVALID_ARGS' }; }
     if (!patch?.nameOrId) return { error: '缺少 nameOrId', code: 'INVALID_ARGS' };
     const isAdmin = identity.role === 'owner' || identity.role === 'admin';
     if (!isAdmin && !userId) return { error: '无法确认身份，请确保渠道提供发送者 ID', code: 'FORBIDDEN' };
-    const trigger = isAdmin
-      ? (manager.getByName(patch.nameOrId) ?? manager.getById(patch.nameOrId))
-      : (manager.getByNameScoped(patch.nameOrId, userId ?? '', channel) ?? manager.getByIdScoped(patch.nameOrId, userId ?? '', channel));
-    if (!trigger) return { error: '触发器不存在或无权限', code: 'NOT_FOUND' };
-    const fields: any = {};
-    if (patch.scheduleType !== undefined) fields.scheduleType = patch.scheduleType;
-    if (patch.scheduleValue !== undefined) fields.scheduleValue = String(patch.scheduleValue);
-    if (patch.prompt !== undefined) fields.prompt = String(patch.prompt);
-    // 调度参数变化时重算 nextFireAt——先校验避免 NaN 污染 scheduler heap
-    if (fields.scheduleType !== undefined || fields.scheduleValue !== undefined) {
-      const effType = fields.scheduleType ?? trigger.scheduleType;
-      const effValue = fields.scheduleValue ?? trigger.scheduleValue;
-      const schedErr = validateScheduleParams(effType, effValue);
-      if (schedErr) return { error: schedErr, code: 'INVALID_ARGS' };
-      fields.nextFireAt = calcNextFireAt(effType, effValue, Date.now());
-    }
-    let updated: Trigger;
-    try { updated = manager.update(trigger.id, fields); }
-    catch (err: any) { return { error: `更新失败：${err?.message || err}`, code: 'INVALID_ARGS' }; }
-    scheduler.update(updated);
-    return { data: { id: updated.id, nextFireAt: updated.nextFireAt } };
+    const triggerScheduler = this.getTriggerSchedulerForChannel?.(channel);
+    if (!triggerScheduler) return { error: '触发器功能未启用', code: 'NOT_SUPPORTED' };
+    const updated = await this.updateTriggerFromPatch(
+      triggerScheduler,
+      patch.nameOrId,
+      patch,
+      channel,
+      channelId,
+      userId ?? '',
+      isAdmin,
+    );
+    if (!updated.ok) return { error: updated.error, code: /不存在|无权限/.test(updated.error) ? 'NOT_FOUND' : 'INVALID_ARGS' };
+    return { data: { id: updated.trigger.id, nextFireAt: updated.trigger.nextFireAt } };
   }
 
   if (cmdBase === '/baseagent') {
@@ -1127,10 +1113,8 @@ export async function execMenuAction(this: any,
   if (cmdBase === '/trigger') {
     const role = identity.role;
     const isAdmin = role === 'owner' || role === 'admin';
-    const owningAgent = this.getOwningAgent(channel);
-    const manager = (owningAgent?.triggerManager ?? this.triggerManager) as TriggerManager | undefined;
-    const scheduler = (owningAgent?.triggerScheduler ?? this.triggerScheduler) as TriggerScheduler | undefined;
-    if (!manager || !scheduler) return { error: '触发器功能未启用', code: 'NOT_SUPPORTED' };
+    const triggerScheduler = this.getTriggerSchedulerForChannel?.(channel);
+    if (!triggerScheduler) return { error: '触发器功能未启用', code: 'NOT_SUPPORTED' };
 
     if (action === 'set') {
       // args 结构化 → 直接组装 ParsedTriggerSet（绕过 parseTriggerSet 文本解析，无注入风险）
@@ -1138,7 +1122,7 @@ export async function execMenuAction(this: any,
         return { error: '缺少必填参数：scheduleType / scheduleValue / prompt', code: 'INVALID_ARGS' };
       }
       // menu 路径绕过了 parseTriggerSet 的校验，必须自行校验枚举/数值，
-      // 否则非法值会传到 calcNextFireAt 产出 NaN nextFireAt，污染 scheduler heap。
+      // 避免非法调度参数进入 scheduler。
       const schedErr = validateScheduleParams(args.scheduleType, String(args.scheduleValue));
       if (schedErr) return { error: schedErr, code: 'INVALID_ARGS' };
       const strategy = args.targetSessionStrategy ?? 'latest';
@@ -1172,14 +1156,11 @@ export async function execMenuAction(this: any,
       const nameOrId = args?.nameOrId;
       if (!nameOrId) return { error: '缺少 nameOrId', code: 'INVALID_ARGS' };
       if (!isAdmin && !userId) return { error: '无法确认身份，请确保渠道提供发送者 ID', code: 'FORBIDDEN' };
-      const trigger = isAdmin
-        ? (manager.getByName(nameOrId) ?? manager.getById(nameOrId))
-        : (manager.getByNameScoped(nameOrId, userId ?? '', channel) ?? manager.getByIdScoped(nameOrId, userId ?? '', channel));
+      const trigger = this.findTriggerDefinition(triggerScheduler, nameOrId, userId ?? '', channel, isAdmin);
       if (!trigger) return { error: '触发器不存在或无权限', code: 'NOT_FOUND' };
-      manager.moveToDone(trigger.id, 'cancelled');
-      scheduler.cancel(trigger.id);
-      this.eventBus.publish({ type: 'trigger:cancelled', triggerId: trigger.id, name: trigger.name, by: userId ?? '' });
-      return { data: { id: trigger.id, cancelled: true } };
+      const cancelled = triggerScheduler.cancel(trigger.id);
+      this.eventBus.publish({ type: 'trigger:cancelled', triggerId: cancelled.id, name: cancelled.name, by: userId ?? '' });
+      return { data: { id: cancelled.id, cancelled: true } };
     }
 
     return { error: `不支持的 trigger action: ${action}`, code: 'INVALID_ARGS' };

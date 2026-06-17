@@ -6,6 +6,8 @@ import { logger } from '../utils/logger.js';
 import { hasRichContent, renderAllRichContent, checkDependencies } from '../utils/rich-content-renderer.js';
 import type { InteractionRequest, InteractionResponse, ActionInteraction, ThoughtItem } from '../types.js';
 import { formatItemsAsText } from '../core/message/items-formatter.js';
+import type { FirstInteractionWelcomeManager } from '../utils/welcome.js';
+import { initWelcomeManager, sendWelcomeIfNeeded } from '../utils/welcome.js';
 
 
 export interface FeishuConfig {
@@ -55,8 +57,16 @@ export class FeishuChannel {
   private pendingCardsByChat = new Map<string, Set<string>>();
   readonly cardMetaStore = new CardMetaStore();
 
-  constructor(private config: FeishuConfig) {
+  // Welcome message manager（首次交互欢迎消息，与其他 IM 渠道统一）
+  private welcomeManager?: FirstInteractionWelcomeManager;
+
+  constructor(private config: FeishuConfig, private agentAid?: string, private channelName?: string) {
     this.enableRichContent = config.enableRichContent ?? false;  // 默认关闭
+
+    // 初始化 welcomeManager（使用共享帮助函数）
+    if (agentAid && channelName) {
+      this.welcomeManager = initWelcomeManager('feishu', agentAid, channelName);
+    }
   }
 
   /**
@@ -152,6 +162,17 @@ export class FeishuChannel {
           }
 
           try {
+            // 首次交互欢迎消息（使用共享帮助函数）
+            if (peerId) {
+              await sendWelcomeIfNeeded(
+                this.welcomeManager,
+                peerId,
+                msg.chat_id,
+                (id, text) => this.sendMessage(id, text),
+                'Feishu'
+              );
+            }
+
             // 提取话题信息
             const threadId = msg.thread_id || undefined;
             const rootId = msg.root_id || undefined;
@@ -1619,7 +1640,7 @@ export class FeishuChannelPlugin implements ChannelPlugin {
       appSecret: inst.appSecret,
       enableRichContent: ctx.enableRichContent,
       seenMsgFile: path.join(resolvePaths().dataDir, `feishu-seen-${inst.name}.jsonl`),
-    });
+    }, ctx.agentName, inst.name);
 
     const mode = resolveShowActivities(inst);
     const adapter = {

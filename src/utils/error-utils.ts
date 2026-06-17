@@ -88,8 +88,8 @@ function getDictPath(): string {
     if (fs.existsSync(userDict)) {
       _dictPath = userDict;
     } else {
-      // Bundled default: src/utils/ → src/data/ (dev) or dist/utils/ → dist/data/ (prod)
-      _dictPath = path.resolve(import.meta.dirname, '..', 'data', 'error-dict.json');
+      // Bundled default: 与本文件同目录（src/utils/ 或 dist/utils/）
+      _dictPath = path.resolve(import.meta.dirname, 'error-dict.json');
     }
   }
   return _dictPath;

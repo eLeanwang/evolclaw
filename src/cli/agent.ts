@@ -3,8 +3,8 @@ import path from 'path';
 import os from 'os';
 import readline from 'readline';
 import { resolvePaths, agentMdPath as getAgentMdPathFromPaths, aunPath as defaultAunPath } from '../paths.js';
-import { loadDefaults, loadAllAgents, loadAgent, saveAgent, ensureAgentDirSkeleton } from '../config-store.js';
-import { ConfigTarget, write as cfgWrite, ensureFile as cfgEnsure, read as cfgRead, routeField, initConfigManager } from '../core/config/config-manager.js';
+import { loadDefaults, loadAllAgents, loadAgent, saveAgent, ensureAgentDirSkeleton, loadEvolclawConfig } from '../config-store.js';
+import { ConfigTarget, write as cfgWrite, ensureFile as cfgEnsure, read as cfgRead, routeField, initConfigManager } from '../config/config-manager.js';
 import { ipcQuery } from '../ipc.js';
 import { CONFIG_SCHEMA_VERSION } from '../types.js';
 import type { AgentConfig, ChannelInstance, BehaviorConfig } from '../types.js';
@@ -492,11 +492,18 @@ export async function agentCreateInteractive(opts: AgentCreateInteractiveOpts = 
       baseagent = chosen;
     }
 
-    // Owner
+    // Owner (default to daemon's first owner if available)
+    const daemonOwner = loadEvolclawConfig().owners?.[0];
     let owner: string | undefined;
     while (true) {
-      const ownerInput = (await ask('Owner AID (leave empty for auto-bind on first message): ')).trim();
-      if (!ownerInput) { owner = undefined; break; }
+      const prompt = daemonOwner
+        ? `Owner AID [${daemonOwner}]: `
+        : 'Owner AID (leave empty for auto-bind on first message): ';
+      const ownerInput = (await ask(prompt)).trim();
+      if (!ownerInput) {
+        owner = daemonOwner; // Use daemon owner as default, or undefined if no daemon owner
+        break;
+      }
       if (!isValidAid(ownerInput)) {
         console.log(`  ⚠ Invalid Owner AID "${ownerInput}": must be a valid multi-level domain (e.g. alice.agentid.pub)`);
         continue;

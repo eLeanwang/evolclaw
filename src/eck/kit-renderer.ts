@@ -183,6 +183,8 @@ const PARAM_DESCRIPTIONS: Record<string, string> = {
   osInfo: '操作系统及版本（如 Windows 11 Pro (win32 10.0.26200)）',
   threadId: '话题 ID（多话题路由时）',
   chatMode: '会话模式（interactive=同步交互 / proactive=主动推送）',
+  proactivePreTool1stMsgChk: 'proactive 前置工具首消息检查（true/false）',
+  proactiveToolUseReminder: 'proactive 工具调用提醒（true/false）',
   readonly: '是否只读模式',
   evolclawMode: 'evolclaw 运行模式（dev=源码仓库可直接修改 | install=全局安装包只读）',
   baseAgent: 'base agent 规范值（claude/codex/gemini/hermes）',

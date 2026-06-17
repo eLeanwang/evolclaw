@@ -101,7 +101,7 @@ export function insertUsageEvent(
   } catch (e) {
     // 写入失败不影响主流程
     try { db.exec('ROLLBACK'); } catch {}
-    import('../../utils/logger.js').then(({ logger }) =>
+    import('../utils/logger.js').then(({ logger }) =>
       logger.warn(`[StatsWriter] insertUsageEvent failed: ${e}`)
     );
   }
@@ -125,7 +125,7 @@ export function insertContextBreakdown(evolclawHome: string, bd: ContextBreakdow
       bd.messages ?? null, bd.free_space ?? null, bd.total_estimated ?? null,
     );
   } catch (e) {
-    import('../../utils/logger.js').then(({ logger }) =>
+    import('../utils/logger.js').then(({ logger }) =>
       logger.warn(`[StatsWriter] insertContextBreakdown failed: ${e}`)
     );
   }
@@ -156,7 +156,7 @@ export function insertMessageEvent(evolclawHome: string, event: MessageEvent): v
       event.encrypted ? 1 : 0, event.chatmode ?? null,
     );
   } catch (e) {
-    import('../../utils/logger.js').then(({ logger }) =>
+    import('../utils/logger.js').then(({ logger }) =>
       logger.warn(`[StatsWriter] insertMessageEvent failed: ${e}`)
     );
   }
@@ -210,7 +210,7 @@ export function insertModelCalls(evolclawHome: string, rows: ModelCallRow[]): vo
     db.exec('COMMIT');
   } catch (e) {
     try { db.exec('ROLLBACK'); } catch {}
-    import('../../utils/logger.js').then(({ logger }) =>
+    import('../utils/logger.js').then(({ logger }) =>
       logger.warn(`[StatsWriter] insertModelCalls failed: ${e}`)
     );
   }

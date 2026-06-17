@@ -384,14 +384,6 @@ export class EvolAgentRegistry {
 
       oldAgent.status = 'running';
 
-      // 重启触发器调度器（如果已初始化）
-      if (oldAgent.triggerScheduler) {
-        oldAgent.triggerScheduler.stop();
-        oldAgent.triggerScheduler.init().catch(err => {
-          logger.error(`[Reload] TriggerScheduler re-init failed for ${oldAgent.aid}: ${err}`);
-        });
-      }
-
       this.channelIndex.clear();
       this.buildChannelIndex();
     } catch (err) {

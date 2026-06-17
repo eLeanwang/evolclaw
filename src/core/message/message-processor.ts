@@ -12,9 +12,8 @@ import { StreamIdleMonitor } from './stream-idle-monitor.js';
 import { logger } from '../../utils/logger.js';
 import { getErrorMessage, classifyError, ErrorType, ERROR_PREFIX, isInfraError, prefixErrorType, isRetryableError, isContextTooLongText } from '../../utils/error-utils.js';
 import { EventBus } from '../event-bus.js';
-import { summarizeToolInput } from '../permission.js';
-import type { Message, Session, ChannelAdapter, ChannelOptions, ChannelPolicy, CommandHandler, ReplyContext, AgentContext, EvolAgentRegistryHandle, GlobalSettings, OutboundEnvelope, OutboundPayload, InteractionRequest, InteractionKind, ActionInteraction, CommandCard } from '../../types.js';
-import type { TriggerManager } from '../trigger/manager.js';
+import { isEvolclawSendCommandForSession, summarizeToolInput } from '../permission.js';
+import type { Message, Session, ChannelAdapter, ChannelOptions, ChannelPolicy, CommandHandler as CommandHandlerFn, ReplyContext, AgentContext, EvolAgentRegistryHandle, GlobalSettings, OutboundEnvelope, OutboundPayload, InteractionRequest, InteractionKind, ActionInteraction, CommandCard, ProactiveBehaviorBlock } from '../../types.js';
 import { getPackageRoot, resolveRoot, resolvePaths } from '../../paths.js';
 import { renderKitSections, type KitRenderContext } from '../../eck/kit-renderer.js';
 import { renderMessageBody, type RenderMessageResult } from '../../eck/message-renderer.js';
@@ -25,10 +24,11 @@ import type { InteractionRouter } from '../interaction-router.js';
 import { renderActionAsText, renderCommandCardAsText } from '../interaction-router.js';
 import { formatPeerKey } from '../relation/peer-identity.js';
 import { resolveEffectiveModel, resolvePermissionMode } from '../model/config-scope.js';
-import { insertUsageEvent, insertContextBreakdown, insertModelCalls } from '../stats/writer.js';
-import { normalizeUsage } from '../stats/normalizer.js';
-import { resolvePrices } from '../stats/price-resolver.js';
-import { getBudgetStatus } from '../stats/budget.js';
+import { resolveBehavior } from '../../config/config-manager.js';
+import { insertUsageEvent, insertContextBreakdown, insertModelCalls } from '../../stats/writer.js';
+import { normalizeUsage } from '../../stats/normalizer.js';
+import { resolvePrices } from '../../stats/price-resolver.js';
+import { getBudgetStatus } from '../../stats/budget.js';
 
 type StreamRunResult = {
   isError: boolean;
@@ -45,6 +45,36 @@ type StreamRunResult = {
   lastModelCall?: AgentLastModelCall;
   modelCalls?: AgentModelCall[];
 };
+
+type CtlCommandHandler = CommandHandlerFn & {
+  handleCtl?: (cmd: string, sessionId: string) => Promise<{ ok: boolean; result?: string; error?: string }>;
+};
+
+type ProactiveRuntimeState = {
+  firstToolDone: boolean;
+  toolCount: number;
+  lastQueueReminderLen: number;
+  chatType: string;
+  preTool1stMsgChk: boolean;
+  toolUseReminder: boolean;
+};
+
+function resolveProactiveBehavior(block?: ProactiveBehaviorBlock): Required<ProactiveBehaviorBlock> {
+  return {
+    pre_tool_1stmsgchk: block?.pre_tool_1stmsgchk ?? true,
+    tool_use_reminder: block?.tool_use_reminder ?? true,
+  };
+}
+
+const SHELL_CONTROL_RE = /[;&|`]|[$][(]|\r|\n/;
+
+function isCtlQueueReadCommand(toolName: string, input: Record<string, unknown> | undefined): boolean {
+  if (toolName !== 'Bash' && toolName !== 'Shell') return false;
+  const command = typeof input?.command === 'string' ? input.command.trim() : '';
+  if (!command || SHELL_CONTROL_RE.test(command)) return false;
+  if (!/^(?:ec|evolclaw)\s+ctl\s+queue(?:\s|$)/.test(command)) return false;
+  return !/(?:^|\s)--(?:clear|cancel|interrupt)(?:\s|$)/.test(command);
+}
 
 /** OS 信息在进程生命周期内是常量，模块加载时算一次。例: "Windows 11 Pro (win32 10.0.26200)" */
 const OS_INFO = (() => {
@@ -196,7 +226,7 @@ export class MessageProcessor {
     private globalSettings: GlobalSettings,
     private messageCache: MessageCache,
     private eventBus: EventBus,
-    private commandHandler?: CommandHandler,
+    private commandHandler?: CtlCommandHandler,
     primaryRunnerKey?: string
   ) {
     if (agentRunnerOrMap instanceof Map) {
@@ -378,24 +408,10 @@ export class MessageProcessor {
 
     // thread(feishu) pending strategy: inject replyContext so first reply creates the thread
     if (message.triggerMeta?.pendingThread && message.triggerMeta?.rootMessageId) {
-      const triggerId = message.triggerMeta.triggerId;
-      const channelKeyForAgent = session.metadata?.channelKey || message.channel;
-      const trigMgr = this.agentRegistry?.resolveByChannel(channelKeyForAgent)?.triggerManager as TriggerManager | undefined;
-      const onThreadCreated = trigMgr
-        ? (threadId: string) => {
-            try {
-              trigMgr.update(triggerId, { targetThreadId: threadId, pendingThread: false });
-              logger.info(`[MessageProcessor] Feishu thread created for trigger ${triggerId}: ${threadId}`);
-            } catch (e) {
-              logger.warn(`[MessageProcessor] Failed to write back thread_id for trigger ${triggerId}: ${e}`);
-            }
-          }
-        : undefined;
       message.replyContext = {
         ...(message.replyContext ?? {}),
         replyToMessageId: message.triggerMeta.rootMessageId,
         replyInThread: true,
-        ...(onThreadCreated ? { metadata: { ...(message.replyContext?.metadata ?? {}), onThreadCreated } } : {}),
       };
     }
 
@@ -569,13 +585,42 @@ export class MessageProcessor {
     const isProactive = session.sessionMode === 'proactive';
     const isAutonomous = session.sessionMode === 'autonomous';
 
+    const currentChannelType = options?.channelType || message.channel;
+    const adapterAny = channelInfo.adapter as unknown as {
+      _selfAid?: () => string | undefined;
+      _selfName?: () => string | undefined;
+    };
+    const adapterSelfAid = typeof adapterAny._selfAid === 'function' ? adapterAny._selfAid() : undefined;
+    const selfAid = adapterSelfAid || message.selfAID || session.selfAID || undefined;
+    const selfName = typeof adapterAny._selfName === 'function' ? adapterAny._selfName() : undefined;
+    const peerName = message.peerName || session.metadata?.peerName;
+    const peerIdRaw = message.peerId;
+    const peerKeyId = session.chatType === 'group'
+      ? (session.metadata?.groupId || message.channelId)
+      : peerIdRaw;
+    const peerKey = (currentChannelType && peerKeyId)
+      ? formatPeerKey(currentChannelType, peerKeyId)
+      : undefined;
+    const peerRole = session.identity?.role || 'anonymous';
+    const proactiveBehavior = (() => {
+      try {
+        const behavior = resolveBehavior({ self: selfAid || undefined, peerKey, role: peerRole }, { cache: true });
+        return resolveProactiveBehavior(behavior.proactive);
+      } catch (e) {
+        logger.warn(`[MessageProcessor] resolve proactive behavior failed, using defaults: ${e instanceof Error ? e.message : String(e)}`);
+        return resolveProactiveBehavior();
+      }
+    })();
+
     const chatType = message.chatType || 'private';
     // proactive 模式行为约束状态（每条消息独立）
-    const proactive = isProactive ? {
+    const proactive: ProactiveRuntimeState | null = isProactive ? {
       firstToolDone: false,
       toolCount: 0,
-      lastQueueReminder: 0,
-      chatType
+      lastQueueReminderLen: 0,
+      chatType,
+      preTool1stMsgChk: proactiveBehavior.pre_tool_1stmsgchk,
+      toolUseReminder: proactiveBehavior.tool_use_reminder,
     } : null;
     const envelope = buildEnvelope({
       taskId,
@@ -692,6 +737,10 @@ export class MessageProcessor {
 
       this.currentRenderer = renderer;
 
+      if (message.source !== 'trigger') {
+        renderer.addLifecycle('started');
+      }
+
       if (isProactive) {
         logger.info(`[MessageProcessor] proactive mode: outputs via thought.put task=${taskId}`);
       }
@@ -727,20 +776,11 @@ export class MessageProcessor {
         cancelIntercept: this.messageQueue
           ? (sessionKey) => this.messageQueue!.cancelIntercept(sessionKey)
           : undefined,
-        policyHook: proactive ? (toolName, toolInput) => {
+        policyHook: proactive && proactive.preTool1stMsgChk ? (toolName, toolInput) => {
           // Trigger messages exempt from first-tool enforcement (cron intent is silent execution)
           if (message.source === 'trigger') return undefined;
           // 解析是否是允许的首次表态命令
-          const isAllowedFirstTool = toolName === 'Bash' && (() => {
-            const cmd = (toolInput.command as string) || '';
-            // 白名单：ec msg/group/ctl send|file 到当前会话
-            const match = cmd.match(/^\s*(?:ec|evolclaw)\s+(msg|group|ctl)\s+(send|file)\s+(?:\S+\s+)?(\S+)/);
-            if (!match) return false;
-            const [, subCmd, action, targetId] = match;
-            // ctl send/file 的 targetId 是第一个参数（无 <from>），msg/group 是第二个
-            // 简化判断：如果 targetId 匹配 session.channelId 即认为是发往当前会话
-            return targetId === session.channelId;
-          })();
+          const isAllowedFirstTool = isEvolclawSendCommandForSession(toolName, toolInput, session.channelId);
 
           if (!proactive.firstToolDone) {
             proactive.firstToolDone = true;
@@ -784,17 +824,6 @@ export class MessageProcessor {
       try {
         // 动态构建运行时上下文提示
         const contextParts: string[] = [];
-        const currentChannelType = options?.channelType || message.channel;
-
-        // 提取 self 信息
-        const adapterAny = channelInfo.adapter as unknown as {
-          _selfAid?: () => string | undefined;
-          _selfName?: () => string | undefined;
-        };
-        const adapterSelfAid = typeof adapterAny._selfAid === 'function' ? adapterAny._selfAid() : undefined;
-        const selfAid = adapterSelfAid || message.selfAID || session.selfAID || undefined;
-        const selfName = typeof adapterAny._selfName === 'function' ? adapterAny._selfName() : undefined;
-        const peerName = message.peerName || session.metadata?.peerName;
 
         // 通道能力
         const capParts: string[] = [];
@@ -811,14 +840,6 @@ export class MessageProcessor {
 
         // 计算 peerKey：群聊固定按 groupId/channelId，私聊按发送者 peerId。
         // 这样单条和积压合并批次不会因队列状态不同而切换关系级配置。
-        const peerIdRaw = message.peerId;
-        const peerKeyId = session.chatType === 'group'
-          ? (session.metadata?.groupId || message.channelId)
-          : peerIdRaw;
-        const peerKey = (currentChannelType && peerKeyId)
-          ? formatPeerKey(currentChannelType, peerKeyId)
-          : undefined;
-        const peerRole = session.identity?.role || 'anonymous';
         const normalizedBaseagent = normalizeBaseagent(agent.name);
 
         // 设置 per-call 权限模式：运行时按 关系 > 角色 > 出厂默认[role] 解析（不再读/写 session.metadata）
@@ -936,6 +957,8 @@ export class MessageProcessor {
             // Stage 3: sessionKey 持久化字段
             sessionKey: session.sessionKey,
             chatMode: isProactive ? 'proactive' : 'interactive',
+            proactivePreTool1stMsgChk: proactiveBehavior.pre_tool_1stmsgchk,
+            proactiveToolUseReminder: proactiveBehavior.tool_use_reminder,
             readonly: effectivePermissionMode === 'readonly',
             baseAgent: normalizedBaseagent.canonical,
             baseAgentName: normalizedBaseagent.displayName,
@@ -1450,7 +1473,7 @@ export class MessageProcessor {
                 max_tokens: mc.contextUsage?.maxTokens,
                 auto_compact_tokens: mc.contextUsage?.autoCompactTokens,
                 degraded: mc.degraded ? 1 : 0,
-              } as import('../stats/writer.js').ModelCallRow));
+              } as import('../../stats/writer.js').ModelCallRow));
               insertModelCalls(resolveRoot(), mcRows);
             }
             const totalIn = event.input_tokens + event.cache_read_tokens;
@@ -1469,8 +1492,8 @@ export class MessageProcessor {
         } | undefined;
         let modelSpec: { context_window: number; max_input_tokens: number; max_output_tokens: number } | undefined;
         try {
-          const { resolveModelSpec } = await import('../stats/billing.js');
-          const { querySessionSummary } = await import('../stats/query.js');
+          const { resolveModelSpec } = await import('../../stats/billing.js');
+          const { querySessionSummary } = await import('../../stats/query.js');
           const statsModel = streamResult.contextUsage?.model || 'unknown';
           modelSpec = resolveModelSpec(resolveRoot(), statsModel);
           const sum = querySessionSummary(resolveRoot(), session.id);
@@ -1524,7 +1547,7 @@ export class MessageProcessor {
                 } };
               } catch { /* 价格解析失败时不附 cost，不影响回执 */ }
             }
-            adapter.send(envelope, { kind: 'status.completed', metadata: {
+            const completedMetadata: Record<string, unknown> = {
               durationMs,
               ttftMs: streamResult.ttftMs,
               numTurns: streamResult.numTurns,
@@ -1541,7 +1564,10 @@ export class MessageProcessor {
                 pending: this.messageQueue?.getQueueLength(session.id) ?? 0,
                 processing: this.messageQueue?.isProcessing(session.id) ? 1 : 0,
               },
-            } as any }).catch(() => {});
+            };
+            renderer.addLifecycle('completed', completedMetadata);
+            renderer.flushActivitiesOnly().catch(() => {});
+            adapter.send(envelope, { kind: 'status.completed', metadata: completedMetadata as any }).catch(() => {});
           }
         }
         if (message.triggerMeta) {
@@ -1739,7 +1765,7 @@ export class MessageProcessor {
 
   private async readLastModelCallContextUsage(sessionId: string, agentSessionId: string): Promise<{ totalTokens: number; autoCompactTokens: number } | undefined> {
     try {
-      const { openReadonlyDb, getDbPath } = await import('../stats/db.js');
+      const { openReadonlyDb, getDbPath } = await import('../../stats/db.js');
       const rdb = openReadonlyDb(getDbPath(resolveRoot()));
       if (!rdb) return undefined;
       try {
@@ -1906,7 +1932,7 @@ export class MessageProcessor {
     renderer: IMRenderer,
     resetTimer: (eventType?: string, toolName?: string) => void,
     shouldSuppress: () => boolean,
-    proactive?: { firstToolDone: boolean; toolCount: number; lastQueueReminder: number; chatType: string } | null,
+    proactive?: ProactiveRuntimeState | null,
     isTrigger?: boolean
   ): Promise<StreamRunResult> {
     // Per-session agent name for stats bucketing
@@ -1920,6 +1946,7 @@ export class MessageProcessor {
 
     // callId → description 映射，用于 tool_result 回显描述
     const toolDescByCallId = new Map<string, string>();
+    const ctlQueueReadCallIds = new Set<string>();
 
     try {
       for await (const event of stream) {
@@ -2040,29 +2067,28 @@ export class MessageProcessor {
             }
             renderer.addToolCall(event.name, event.input, event.callId, desc, (event as any).turn, (event as any).outputTokens);
           }
-          // proactive 模式：队列积压或工具调用过多时注入提醒
-          if (proactive) {
+          if (event.callId && isCtlQueueReadCommand(event.name, event.input || {})) {
+            ctlQueueReadCallIds.add(event.callId);
+          }
+          // proactive 模式：队列未读变化或工具调用过多时注入提醒
+          if (proactive && proactive.toolUseReminder) {
+            const queueLen = this.messageQueue?.getQueueLength(session.id) ?? 0;
+            if (queueLen !== proactive.lastQueueReminderLen) {
+              proactive.lastQueueReminderLen = queueLen;
+              if (queueLen > 0) {
+                const queueMsg = queueLen >= 5
+                  ? `⚠️ 有 ${queueLen} 条消息未读，请尽快完成当前任务，或使用 ec ctl queue 读取后同步处理。`
+                  : `⚠️ 有 ${queueLen} 条消息未读，可使用 ec ctl queue 读取。`;
+                agent.injectUserMessage?.(session.id, queueMsg);
+              }
+            }
+
             // 解析是否是允许的表态命令（排除计数）
-            const isAllowedTool = event.name === 'Bash' && (() => {
-              const cmd = (event.input?.command as string) || '';
-              const match = cmd.match(/^\s*(?:ec|evolclaw)\s+(msg|group|ctl)\s+(send|file)\s+(?:\S+\s+)?(\S+)/);
-              if (!match) return false;
-              const [, subCmd, action, targetId] = match;
-              return targetId === session.channelId;
-            })();
+            const isAllowedTool = isEvolclawSendCommandForSession(event.name, event.input || {}, session.channelId);
 
             // 工具计数（排除白名单命令）
             if (!isAllowedTool) {
               proactive.toolCount++;
-            }
-
-            // 每 7 次工具调用检查队列深度
-            if (proactive.toolCount > 0 && proactive.toolCount % 7 === 0) {
-              const queueLen = this.messageQueue?.getQueueLength(session.id) ?? 0;
-              if (queueLen >= 5 && queueLen > proactive.lastQueueReminder) {
-                proactive.lastQueueReminder = queueLen;
-                agent.injectUserMessage?.(session.id, `⚠️ 当前还有 ${queueLen} 条消息未读，请快速完成任务后处理。`);
-              }
             }
 
             // 工具调用计数检查
@@ -2075,6 +2101,17 @@ export class MessageProcessor {
 
         // 工具结果
         if (event.type === 'tool_result') {
+          if (event.callId && ctlQueueReadCallIds.delete(event.callId) && !event.isError) {
+            try {
+              const clearResult = await this.commandHandler?.handleCtl?.('/queue --clear', session.id);
+              if (clearResult && !clearResult.ok) {
+                logger.warn(`[MessageProcessor] auto clear queue after ec ctl queue failed: ${clearResult.error || 'unknown error'}`);
+              }
+            } catch (error) {
+              logger.warn('[MessageProcessor] auto clear queue after ec ctl queue failed:', error);
+            }
+          }
+
           this.eventBus.publish({
             type: 'tool:result',
             sessionId: session.id,
@@ -2265,11 +2302,14 @@ export class MessageProcessor {
       }
       // Flush any pending error activities before re-throwing,
       // and mark the error so outer catch won't send a duplicate message
-      if (hasErrorResult || renderer.hasContent()) {
+      const hasErrorSuppressingContent = hasErrorResult || renderer.hasNonLifecycleContent();
+      if (hasErrorSuppressingContent) {
         try { await renderer.flush(true); } catch {}
         if (error instanceof Error) {
           (error as any)._errorAlreadySent = true;
         }
+      } else if (renderer.hasContent()) {
+        renderer.flushActivitiesOnly().catch(() => {});
       }
       throw error;
     }
