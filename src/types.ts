@@ -1016,7 +1016,7 @@ export interface ChannelCapabilities {
 
 // ── Trigger types ──
 
-export type TriggerScheduleType = 'delay' | 'at' | 'cron';
+export type TriggerScheduleType = 'delay' | 'at' | 'cron' | 'interval';
 export type TriggerSessionStrategy = 'latest' | 'current' | 'thread';
 
 export interface Trigger {

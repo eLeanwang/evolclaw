@@ -42,8 +42,22 @@ const CLI_EXEC_MAX_OUTPUT = 128 * 1024;
 
 /**
  * 写入用户级 ~/.claude/settings.json（与 Claude CLI 行为一致）
+ *
+ * ⚠️ 保护机制：默认禁用写入，避免影响同时使用 claude cli 的用户。
+ * 如需启用，设置环境变量 EVOLCLAW_ALLOW_SETTINGS_WRITE=1
  */
-function writeUserSettings(updates: { model?: string; effortLevel?: string | null }): { success: boolean; error?: string } {
+function writeUserSettings(updates: { model?: string; effortLevel?: string | null }): { success: boolean; error?: string; skipped?: boolean } {
+  // 保护开关：默认禁用 settings.json 写入（属预期行为，非错误）
+  if (process.env.EVOLCLAW_ALLOW_SETTINGS_WRITE !== '1') {
+    logger.warn('[writeUserSettings] 已跳过 settings.json 写入（保护模式）。' +
+      '如需启用，设置环境变量 EVOLCLAW_ALLOW_SETTINGS_WRITE=1');
+    return {
+      success: false,
+      skipped: true,
+      error: 'settings.json 写入已禁用（保护模式）。配置已写入 agent config.json，无需修改 settings.json。'
+    };
+  }
+
   try {
     const settingsPath = path.join(os.homedir(), '.claude', 'settings.json');
     let settings: any = {};
@@ -67,6 +81,7 @@ function writeUserSettings(updates: { model?: string; effortLevel?: string | nul
     }
 
     fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf-8');
+    logger.info(`[writeUserSettings] 已写入 ~/.claude/settings.json: ${Object.keys(updates).join(', ')}`);
     return { success: true };
   } catch (error: any) {
     return { success: false, error: error.message };
@@ -170,6 +185,7 @@ export class CommandHandler {
     if (scheduleType === 'delay') return { type: 'delay', afterMs: Number(scheduleValue) };
     if (scheduleType === 'at') return { type: 'at', at: scheduleValue };
     if (scheduleType === 'cron') return { type: 'cron', expression: scheduleValue };
+    if (scheduleType === 'interval') return { type: 'interval', everyMs: Number(scheduleValue) };
     throw new Error(`unsupported scheduleType: ${scheduleType}`);
   }
 
@@ -303,6 +319,28 @@ export class CommandHandler {
     }
 
     const activeSession = this.sessionManager.getActiveSessionSync(channel, channelId);
+
+    // Build source with optional timezone
+    const source = this.triggerSourceFromSchedule(parsed.scheduleType, parsed.scheduleValue);
+    if (parsed.timezone && source.type === 'cron') {
+      (source as any).timezone = parsed.timezone;
+    }
+
+    // Build script config if provided
+    const script = parsed.scriptPath ? {
+      path: parsed.scriptPath,
+      runtime: parsed.scriptRuntime!,
+      args: parsed.scriptArgs,
+      timeoutMs: 30_000,
+    } : undefined;
+
+    // Determine feedback mode (default: agent-runner if no script; direct-message if script present)
+    const feedbackMode = parsed.mode ?? (script ? 'direct-message' : 'agent-runner');
+
+    // Determine onFailure mode (default: notify if origin present, silent otherwise)
+    const onFailureMode = parsed.onFailure ?? (peerId ? 'notify' : 'silent');
+    const onNoopMode = parsed.onNoop ?? 'silent';
+
     const definition = {
       $schema_version: 1 as const,
       id,
@@ -316,15 +354,16 @@ export class CommandHandler {
         peerId,
         sessionKey: activeSession?.sessionKey,
       },
-      source: this.triggerSourceFromSchedule(parsed.scheduleType, parsed.scheduleValue),
+      source,
+      script,
       feedback: {
         onSuccess: {
-          mode: 'agent-runner' as const,
+          mode: feedbackMode,
           target,
-          template: parsed.prompt,
+          template: parsed.prompt || (script ? undefined : '{{result.text}}'),
         },
-        onNoop: { mode: 'none' as const },
-        onFailure: { mode: 'none' as const },
+        onNoop: onNoopMode === 'notify' ? { mode: 'direct-message' as const, target, template: '{{error.message}}' } : { mode: 'none' as const },
+        onFailure: onFailureMode === 'notify' ? { mode: 'direct-message' as const, target, template: '❌ 触发器执行失败：{{error.message}}' } : { mode: 'none' as const },
       },
       reliability: {
         concurrency: 'forbid' as const,
@@ -365,7 +404,8 @@ export class CommandHandler {
     const updates: { model?: string; effortLevel?: string } = {};
     if (newModel) updates.model = newModel;
     const writeResult = writeUserSettings(updates);
-    if (!writeResult.success) {
+    // 保护模式跳过属预期行为，不视为失败（运行时已切换，无 agent config 可落盘）
+    if (!writeResult.success && !writeResult.skipped) {
       return `⚠️ 写入用户配置失败: ${writeResult.error}`;
     }
     return undefined;
@@ -389,7 +429,8 @@ export class CommandHandler {
     }
     const updates: { effortLevel?: string | null } = { effortLevel: newEffort ?? null };
     const writeResult = writeUserSettings(updates);
-    if (!writeResult.success) {
+    // 保护模式跳过属预期行为，不视为失败（运行时已切换，无 agent config 可落盘）
+    if (!writeResult.success && !writeResult.skipped) {
       return `⚠️ 写入用户配置失败: ${writeResult.error}`;
     }
     return undefined;
@@ -946,6 +987,83 @@ export class CommandHandler {
       return `✅ 触发器已取消：**${cancelled.name}**`;
     }
 
+    if (sub.startsWith('enable ')) {
+      const nameOrId = sub.slice('enable '.length).trim();
+      if (!nameOrId) return '❌ 用法：/trigger enable <名称>';
+      const definition = this.findTriggerDefinition(scheduler, nameOrId, peerId, channel, isAdmin);
+      if (!definition) {
+        return isAdmin
+          ? `❌ 未找到触发器：${nameOrId}`
+          : `❌ 未找到触发器 "${nameOrId}"，或无权限修改`;
+      }
+      scheduler.setEnabled(definition.id, true);
+      return `✅ 触发器已启用：**${definition.name}**`;
+    }
+
+    if (sub.startsWith('disable ')) {
+      const nameOrId = sub.slice('disable '.length).trim();
+      if (!nameOrId) return '❌ 用法：/trigger disable <名称>';
+      const definition = this.findTriggerDefinition(scheduler, nameOrId, peerId, channel, isAdmin);
+      if (!definition) {
+        return isAdmin
+          ? `❌ 未找到触发器：${nameOrId}`
+          : `❌ 未找到触发器 "${nameOrId}"，或无权限修改`;
+      }
+      scheduler.setEnabled(definition.id, false);
+      return `✅ 触发器已暂停：**${definition.name}**`;
+    }
+
+    if (sub.startsWith('show ')) {
+      const nameOrId = sub.slice('show '.length).trim();
+      if (!nameOrId) return '❌ 用法：/trigger show <名称>';
+      const definition = this.findTriggerDefinition(scheduler, nameOrId, peerId, channel, isAdmin);
+      if (!definition) {
+        return isAdmin
+          ? `❌ 未找到触发器：${nameOrId}`
+          : `❌ 未找到触发器 "${nameOrId}"，或无权限查看`;
+      }
+      const details = scheduler.show(definition.id);
+      const view = this.definitionToTriggerView(definition, scheduler);
+      const nextStr = view.nextFireAt ? new Date(view.nextFireAt).toLocaleString() : '未计算';
+      const activeRuns = details.active?.length ?? 0;
+      const recentRuns = details.recentRuns?.slice(0, 5) ?? [];
+      let result = `📋 **${definition.name}** (${definition.id})\n`;
+      result += `状态: ${definition.enabled ? 'active' : 'disabled'}\n`;
+      result += `调度: ${view.scheduleType} | 下次: ${nextStr}\n`;
+      result += `模式: ${definition.feedback.onSuccess.mode}\n`;
+      result += `失败通知: ${definition.feedback.onFailure.mode === 'none' ? 'silent' : 'notify'}\n`;
+      if (definition.script) result += `脚本: ${definition.script.runtime} ${definition.script.path}\n`;
+      result += `活跃运行: ${activeRuns}\n`;
+      if (recentRuns.length > 0) {
+        result += `\n最近运行:\n`;
+        for (const r of recentRuns) {
+          const ts = new Date(r.finishedAt).toLocaleString();
+          result += `  • ${r.status} ${r.reason ?? ''} (${ts})\n`;
+        }
+      }
+      return result;
+    }
+
+    if (sub.startsWith('run ')) {
+      const args = sub.slice('run '.length).trim();
+      const dryRun = args.includes('--dry-run');
+      const nameOrId = args.replace('--dry-run', '').trim();
+      if (!nameOrId) return '❌ 用法：/trigger run <名称> [--dry-run]';
+      const definition = this.findTriggerDefinition(scheduler, nameOrId, peerId, channel, isAdmin);
+      if (!definition) {
+        return isAdmin
+          ? `❌ 未找到触发器：${nameOrId}`
+          : `❌ 未找到触发器 "${nameOrId}"，或无权限执行`;
+      }
+      try {
+        const result = await scheduler.run(definition.id, { dryRun });
+        const prefix = dryRun ? '🔍 试运行' : '▶️ 手动触发';
+        return `${prefix}：**${definition.name}**\n状态: ${result.status}${result.reason ? ` (${result.reason})` : ''}`;
+      } catch (err: any) {
+        return `❌ 执行失败：${err?.message || err}`;
+      }
+    }
+
     if (sub.startsWith('update ')) {
       const args = sub.slice('update '.length);
       const result = parseTriggerUpdate(args);
@@ -976,7 +1094,16 @@ export class CommandHandler {
       return `✅ 触发器已注册：**${reg.trigger.name}**\n下次触发：${nextStr}`;
     }
 
-    return `❌ 未知子命令。用法：\n/trigger — 查看活跃触发器\n/trigger list [--all] — 查看触发器\n/trigger set <参数> — 注册触发器\n/trigger update <名称|ID> <参数> — 修改触发器\n/trigger cancel <名称|ID> — 取消触发器`;
+    return `❌ 未知子命令。用法：
+/trigger — 查看活跃触发器
+/trigger list [--all] — 查看所有触发器
+/trigger set <参数> — 注册触发器
+/trigger update <名称|ID> <参数> — 修改触发器
+/trigger enable <名称|ID> — 启用触发器
+/trigger disable <名称|ID> — 暂停触发器
+/trigger show <名称|ID> — 查看触发器详情
+/trigger run <名称|ID> [--dry-run] — 手动触发
+/trigger cancel <名称|ID> — 取消触发器`;
   }
 
   private async handleTrigger(
@@ -1072,6 +1199,56 @@ export class CommandHandler {
         target.threadId = String(patch.targetThreadId ?? threadId ?? messageId ?? previousTarget.threadId ?? `trigger-${definition.id}`);
       }
       updated.feedback.onSuccess.target = target;
+    }
+
+    // Update optional new fields
+    if (patch.timezone !== undefined && updated.source.type === 'cron') {
+      (updated.source as any).timezone = patch.timezone || undefined;
+    }
+
+    if (patch.scriptPath !== undefined || patch.scriptRuntime !== undefined || patch.scriptArgs !== undefined) {
+      if (patch.scriptPath && patch.scriptRuntime) {
+        updated.script = {
+          path: patch.scriptPath,
+          runtime: patch.scriptRuntime,
+          args: patch.scriptArgs,
+          timeoutMs: updated.script?.timeoutMs ?? 30_000,
+        };
+      } else if (patch.scriptPath === null || patch.scriptRuntime === null) {
+        updated.script = undefined;
+      }
+    }
+
+    if (patch.mode !== undefined) {
+      updated.feedback.onSuccess.mode = patch.mode;
+    }
+
+    if (patch.onFailure !== undefined) {
+      if (patch.onFailure === 'notify') {
+        const target = updated.feedback.onSuccess.target;
+        if (!target) return { ok: false, error: 'onFailure notify 需要 target，但现有定义缺少 target' };
+        updated.feedback.onFailure = {
+          mode: 'direct-message',
+          target: { ...target },
+          template: '❌ 触发器执行失败：{{error.message}}',
+        };
+      } else {
+        updated.feedback.onFailure = { mode: 'none' };
+      }
+    }
+
+    if (patch.onNoop !== undefined) {
+      if (patch.onNoop === 'notify') {
+        const target = updated.feedback.onSuccess.target;
+        if (!target) return { ok: false, error: 'onNoop notify 需要 target，但现有定义缺少 target' };
+        updated.feedback.onNoop = {
+          mode: 'direct-message',
+          target: { ...target },
+          template: '{{error.message}}',
+        };
+      } else {
+        updated.feedback.onNoop = { mode: 'none' };
+      }
     }
 
     try {

@@ -4,6 +4,7 @@ import type { TriggerScheduleType, TriggerSessionStrategy } from '../types.js';
 export interface ParsedTriggerSet {
   scheduleType: TriggerScheduleType;
   scheduleValue: string;
+  timezone?: string;  // cron timezone
   targetChannel?: string;
   targetChannelId?: string;
   targetThreadId?: string;
@@ -11,6 +12,12 @@ export interface ParsedTriggerSet {
   agentId?: string;
   name?: string;
   prompt: string;
+  scriptPath?: string;
+  scriptRuntime?: string;
+  scriptArgs?: unknown;
+  mode?: 'agent-runner' | 'direct-message';
+  onFailure?: 'notify' | 'silent';
+  onNoop?: 'notify' | 'silent';
 }
 
 export type ParseResult =
@@ -66,6 +73,7 @@ export function validateCronExpr(expr: string): boolean {
 export interface ParsedTriggerUpdate {
   scheduleType?: TriggerScheduleType;
   scheduleValue?: string;
+  timezone?: string;  // cron timezone
   nextFireAt?: number;  // Calculated by caller if schedule changed
   targetChannel?: string;
   targetChannelId?: string;
@@ -76,6 +84,12 @@ export interface ParsedTriggerUpdate {
   agentId?: string;
   name?: string;
   prompt?: string;
+  scriptPath?: string;
+  scriptRuntime?: string;
+  scriptArgs?: unknown;
+  mode?: 'agent-runner' | 'direct-message';
+  onFailure?: 'notify' | 'silent';
+  onNoop?: 'notify' | 'silent';
 }
 
 export type UpdateParseResult =
@@ -124,9 +138,10 @@ export function parseTriggerUpdate(args: string): UpdateParseResult {
   const hasDelay = flags.has('delay');
   const hasAt = flags.has('at');
   const hasCron = flags.has('cron');
-  const timeCount = [hasDelay, hasAt, hasCron].filter(Boolean).length;
+  const hasEvery = flags.has('every');
+  const timeCount = [hasDelay, hasAt, hasCron, hasEvery].filter(Boolean).length;
   if (timeCount > 1) {
-    return { ok: false, error: '--delay、--at、--cron 互斥，只能指定一个' };
+    return { ok: false, error: '--delay、--at、--cron、--every 互斥，只能指定一个' };
   }
   if (hasDelay) {
     const raw = flags.get('delay') as string;
@@ -150,6 +165,13 @@ export function parseTriggerUpdate(args: string): UpdateParseResult {
     }
     result.scheduleType = 'cron';
     result.scheduleValue = raw;
+  } else if (hasEvery) {
+    const raw = flags.get('every');
+    if (!raw || raw === true) return { ok: false, error: '--every 不能为空' };
+    const ms = parseDuration(raw);
+    if (ms === null) return { ok: false, error: `无法解析 --every "${raw}"，支持格式：30m、2h、1d、2h30m` };
+    result.scheduleType = 'interval';
+    result.scheduleValue = String(ms);
   }
 
   // Parse optional fields
@@ -193,6 +215,58 @@ export function parseTriggerUpdate(args: string): UpdateParseResult {
     result.targetThreadId = flags.get('thread') as string;
   }
 
+  // Parse optional new fields
+  if (flags.has('tz')) {
+    result.timezone = flags.get('tz') as string;
+  }
+
+  if (flags.has('script')) {
+    const scriptPath = flags.get('script');
+    if (!scriptPath || scriptPath === true) return { ok: false, error: '--script 不能为空' };
+    result.scriptPath = scriptPath;
+  }
+
+  if (flags.has('runtime')) {
+    const runtime = flags.get('runtime') as string;
+    if (runtime !== 'node' && runtime !== 'python' && runtime !== 'bash') {
+      return { ok: false, error: '--runtime 只接受 node、python 或 bash' };
+    }
+    result.scriptRuntime = runtime;
+  }
+
+  if (flags.has('script-args')) {
+    const raw = flags.get('script-args') as string;
+    try {
+      result.scriptArgs = JSON.parse(raw);
+    } catch {
+      return { ok: false, error: '--script-args 必须是合法的 JSON' };
+    }
+  }
+
+  if (flags.has('mode')) {
+    const m = flags.get('mode') as string;
+    if (m !== 'agent' && m !== 'direct') {
+      return { ok: false, error: '--mode 只接受 agent 或 direct' };
+    }
+    result.mode = m === 'direct' ? 'direct-message' : 'agent-runner';
+  }
+
+  if (flags.has('on-fail')) {
+    const f = flags.get('on-fail') as string;
+    if (f !== 'notify' && f !== 'silent') {
+      return { ok: false, error: '--on-fail 只接受 notify 或 silent' };
+    }
+    result.onFailure = f;
+  }
+
+  if (flags.has('on-noop')) {
+    const n = flags.get('on-noop') as string;
+    if (n !== 'notify' && n !== 'silent') {
+      return { ok: false, error: '--on-noop 只接受 notify 或 silent' };
+    }
+    result.onNoop = n;
+  }
+
   return { ok: true, nameOrId, value: result };
 }
 
@@ -202,13 +276,14 @@ export function parseTriggerSet(args: string): ParseResult {
   const hasDelay = flags.has('delay');
   const hasAt = flags.has('at');
   const hasCron = flags.has('cron');
-  const timeCount = [hasDelay, hasAt, hasCron].filter(Boolean).length;
+  const hasEvery = flags.has('every');
+  const timeCount = [hasDelay, hasAt, hasCron, hasEvery].filter(Boolean).length;
 
   if (timeCount === 0) {
-    return { ok: false, error: '必须指定时间参数：--delay <时长> | --at <ISO时间> | --cron <表达式>' };
+    return { ok: false, error: '必须指定时间参数：--delay <时长> | --at <ISO时间> | --cron <表达式> | --every <时长>' };
   }
   if (timeCount > 1) {
-    return { ok: false, error: '--delay、--at、--cron 互斥，只能指定一个' };
+    return { ok: false, error: '--delay、--at、--cron、--every 互斥，只能指定一个' };
   }
 
   let scheduleType: TriggerScheduleType;
@@ -233,7 +308,7 @@ export function parseTriggerSet(args: string): ParseResult {
     }
     scheduleType = 'at';
     scheduleValue = new Date(ts).toISOString();
-  } else {
+  } else if (hasCron) {
     const raw = flags.get('cron') as string;
     if (!validateCronExpr(raw)) {
       // Detect likely space-truncation: raw looks like one cron segment and args contains space-separated * or digits after it
@@ -243,6 +318,17 @@ export function parseTriggerSet(args: string): ParseResult {
     }
     scheduleType = 'cron';
     scheduleValue = raw;
+  } else {
+    const raw = flags.get('every');
+    if (!raw || raw === true) {
+      return { ok: false, error: '--every 不能为空' };
+    }
+    const ms = parseDuration(raw);
+    if (ms === null) {
+      return { ok: false, error: `无法解析 --every "${raw}"，支持格式：30m、2h、1d、2h30m` };
+    }
+    scheduleType = 'interval';
+    scheduleValue = String(ms);
   }
 
   const prompt = flags.get('prompt');
@@ -274,11 +360,83 @@ export function parseTriggerSet(args: string): ParseResult {
     targetSessionStrategy = sv;
   }
 
+  // Parse optional timezone (only for cron)
+  let timezone: string | undefined;
+  if (flags.has('tz')) {
+    if (scheduleType !== 'cron') {
+      return { ok: false, error: '--tz 只能和 --cron 一起使用' };
+    }
+    timezone = flags.get('tz') as string;
+  }
+
+  // Parse optional script
+  let scriptPath: string | undefined;
+  let scriptRuntime: string | undefined;
+  let scriptArgs: unknown;
+  if (flags.has('script')) {
+    const sp = flags.get('script');
+    if (!sp || sp === true) {
+      return { ok: false, error: '--script 不能为空' };
+    }
+    scriptPath = sp;
+    if (!flags.has('runtime')) {
+      return { ok: false, error: '--script 必须配合 --runtime 使用（node|python|bash）' };
+    }
+    const rt = flags.get('runtime');
+    if (!rt || rt === true) {
+      return { ok: false, error: '--runtime 不能为空' };
+    }
+    if (rt !== 'node' && rt !== 'python' && rt !== 'bash') {
+      return { ok: false, error: '--runtime 只接受 node、python 或 bash' };
+    }
+    scriptRuntime = rt;
+    if (flags.has('script-args')) {
+      const raw = flags.get('script-args') as string;
+      try {
+        scriptArgs = JSON.parse(raw);
+      } catch {
+        return { ok: false, error: '--script-args 必须是合法的 JSON' };
+      }
+    }
+  } else if (flags.has('runtime')) {
+    return { ok: false, error: '--runtime 必须配合 --script 使用' };
+  }
+
+  // Parse optional mode
+  let mode: 'agent-runner' | 'direct-message' | undefined;
+  if (flags.has('mode')) {
+    const m = flags.get('mode') as string;
+    if (m !== 'agent' && m !== 'direct') {
+      return { ok: false, error: '--mode 只接受 agent 或 direct' };
+    }
+    mode = m === 'direct' ? 'direct-message' : 'agent-runner';
+  }
+
+  // Parse optional on-fail / on-noop
+  let onFailure: 'notify' | 'silent' | undefined;
+  if (flags.has('on-fail')) {
+    const f = flags.get('on-fail') as string;
+    if (f !== 'notify' && f !== 'silent') {
+      return { ok: false, error: '--on-fail 只接受 notify 或 silent' };
+    }
+    onFailure = f;
+  }
+
+  let onNoop: 'notify' | 'silent' | undefined;
+  if (flags.has('on-noop')) {
+    const n = flags.get('on-noop') as string;
+    if (n !== 'notify' && n !== 'silent') {
+      return { ok: false, error: '--on-noop 只接受 notify 或 silent' };
+    }
+    onNoop = n;
+  }
+
   return {
     ok: true,
     value: {
       scheduleType,
       scheduleValue,
+      timezone,
       targetChannel: hasChannel ? (flags.get('channel') as string) : undefined,
       targetChannelId: hasChannelId ? (flags.get('channelid') as string) : undefined,
       targetThreadId: hasThread ? (flags.get('thread') as string) : undefined,
@@ -286,6 +444,12 @@ export function parseTriggerSet(args: string): ParseResult {
       agentId: flags.has('agent') ? (flags.get('agent') as string) : undefined,
       name: flags.has('name') ? (flags.get('name') as string) : undefined,
       prompt: prompt as string,
+      scriptPath,
+      scriptRuntime,
+      scriptArgs,
+      mode,
+      onFailure,
+      onNoop,
     },
   };
 }

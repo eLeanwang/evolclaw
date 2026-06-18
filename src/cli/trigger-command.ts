@@ -65,12 +65,25 @@ function printHelp(): void {
   list --agent <aid> [--all] [--json]
   show --agent <aid> <triggerId> [--json]
   create --file <trigger.json|trigger-dir> [--enable] [--json]
+    OR
+  create --agent <aid> --cron <expr> --prompt <text> [--enable] [其他flag]
   update --agent <aid> <triggerId> --file <trigger.json> [--json]
   enable --agent <aid> <triggerId>
   disable --agent <aid> <triggerId>
   cancel --agent <aid> <triggerId>
   run --agent <aid> <triggerId> [--dry-run] [--json]
-  template list|show <name> [--json]`);
+  template list|show <name> [--json]
+
+Flag 模式支持的参数（与 /trigger 命令一致）:
+  --delay <时长> | --at <ISO时间> | --cron <表达式> | --every <时长>
+  --prompt <文本>
+  --script <路径> --runtime <node|python|bash>
+  --mode <agent|direct>
+  --on-fail <notify|silent>  --on-noop <notify|silent>
+  --tz <时区> (仅 cron)
+  --channel <名称> --channelid <ID>
+  --session <latest|current|thread>
+  --name <名称>`);
 }
 
 async function listTriggers(args: string[], json: boolean): Promise<void> {
@@ -111,16 +124,100 @@ async function showTrigger(args: string[], json: boolean): Promise<void> {
 }
 
 async function createTrigger(args: string[], json: boolean): Promise<void> {
-  const file = requireFlag(args, '--file');
-  const { definition, files } = loadDefinitionWithFiles(file);
+  // Support two modes: --file (full JSON) or flags (parser-based)
+  if (hasFlag(args, '--file')) {
+    const file = requireFlag(args, '--file');
+    const { definition, files } = loadDefinitionWithFiles(file);
+    const res = await request({
+      type: 'trigger.create',
+      definition,
+      files,
+      enable: hasFlag(args, '--enable') ? true : undefined,
+    }, 30_000);
+    if (json) return printJson(res);
+    console.log(`✓ created ${res.trigger.id} (${res.trigger.name})`);
+    return;
+  }
+
+  // Flag mode: use parser
+  const { parseTriggerSet } = await import('../trigger/parser.js');
+  const flagStr = args.filter(a => a !== '--enable' && a !== '--json' && !a.startsWith('--format')).join(' ');
+  const parseResult = parseTriggerSet(flagStr);
+  if (!parseResult.ok) {
+    throw new Error(parseResult.error);
+  }
+
+  const parsed = parseResult.value;
+  const agentAid = parsed.agentId;
+  if (!agentAid) {
+    throw new Error('flag 模式需要 --agent <aid> 参数');
+  }
+
+  // Build minimal definition from parsed flags (server will normalize)
+  const now = Date.now();
+  const definition: any = {
+    $schema_version: 1,
+    agentAid,
+    name: parsed.name || `trigger-${now.toString(36)}`,
+    enabled: hasFlag(args, '--enable'),
+    createdAt: now,
+    updatedAt: now,
+    source: sourceFromParsed(parsed),
+    feedback: feedbackFromParsed(parsed),
+    reliability: { concurrency: 'forbid', missedPolicy: 'run_once', scriptRetry: { maxAttempts: 0, backoffMs: 30_000 } },
+  };
+
+  if (parsed.scriptPath) {
+    definition.script = {
+      path: parsed.scriptPath,
+      runtime: parsed.scriptRuntime!,
+      args: parsed.scriptArgs,
+      timeoutMs: 30_000,
+    };
+  }
+
   const res = await request({
     type: 'trigger.create',
     definition,
-    files,
+    files: [],
     enable: hasFlag(args, '--enable') ? true : undefined,
   }, 30_000);
   if (json) return printJson(res);
   console.log(`✓ created ${res.trigger.id} (${res.trigger.name})`);
+}
+
+function sourceFromParsed(parsed: any): any {
+  if (parsed.scheduleType === 'delay') return { type: 'delay', afterMs: Number(parsed.scheduleValue) };
+  if (parsed.scheduleType === 'at') return { type: 'at', at: parsed.scheduleValue };
+  if (parsed.scheduleType === 'cron') {
+    const src: any = { type: 'cron', expression: parsed.scheduleValue };
+    if (parsed.timezone) src.timezone = parsed.timezone;
+    return src;
+  }
+  if (parsed.scheduleType === 'interval') return { type: 'interval', everyMs: Number(parsed.scheduleValue) };
+  throw new Error(`unsupported scheduleType: ${parsed.scheduleType}`);
+}
+
+function feedbackFromParsed(parsed: any): any {
+  const mode = parsed.mode || (parsed.scriptPath ? 'direct-message' : 'agent-runner');
+  const target = parsed.targetChannelId ? {
+    channelType: 'unknown',  // Will be resolved by server
+    channelId: parsed.targetChannelId,
+    sessionStrategy: parsed.targetSessionStrategy,
+  } : undefined;
+
+  const onFailureMode = parsed.onFailure || 'notify';
+  const onNoopMode = parsed.onNoop || 'silent';
+
+  return {
+    onSuccess: {
+      mode,
+      target,
+      template: parsed.prompt || (parsed.scriptPath ? undefined : '{{result.text}}'),
+    },
+    onNoop: onNoopMode === 'notify' && target ? { mode: 'direct-message', target, template: '{{error.message}}' } : { mode: 'none' },
+    onFailure: onFailureMode === 'notify' && target ? { mode: 'direct-message', target, template: '❌ 触发器执行失败：{{error.message}}' } : { mode: 'none' },
+  };
 }
 
 async function updateTrigger(args: string[], json: boolean): Promise<void> {
