@@ -213,7 +213,7 @@ function feedbackFromParsed(parsed: any): any {
     onSuccess: {
       mode,
       target,
-      template: parsed.prompt || (parsed.scriptPath ? undefined : '{{result.text}}'),
+      template: parsed.prompt || '{{result.text}}',
     },
     onNoop: onNoopMode === 'notify' && target ? { mode: 'direct-message', target, template: '{{error.message}}' } : { mode: 'none' },
     onFailure: onFailureMode === 'notify' && target ? { mode: 'direct-message', target, template: '❌ 触发器执行失败：{{error.message}}' } : { mode: 'none' },

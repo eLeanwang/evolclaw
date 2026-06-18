@@ -1,6 +1,6 @@
 import { ChannelAdapter, Session, ChannelPolicy, InteractionRequest, ReplyContext, type OutboundPayload, type EvolAgentRegistryHandle, type EvolAgentHandle } from '../../types.js';
 import { SessionManager } from '../session/session-manager.js';
-import { type AgentRunnerFull } from '../../agents/runner-types.js';
+import { BaseagentRunnerUnavailableError, type AgentRunnerFull } from '../../agents/runner-types.js';
 import { MessageCache } from '../message/message-cache.js';
 import { MessageProcessor } from '../message/message-processor.js';
 import { EventBus } from '../event-bus.js';
@@ -110,17 +110,34 @@ export class CommandHandler {
   /**
    * Get the runner for a (channel, baseagent) pair.
    *
-   * Resolves the owning EvolAgent via the registry; falls back to default key.
-   * `baseagent` typically comes from `session.agentId` (e.g. 'claude').
+   * Resolves the owning EvolAgent via the registry. If the owner is known and
+   * the requested baseagent runner is absent, do not silently fall back to a
+   * different backend; that would corrupt session metadata.
    */
   private getAgent(channel?: string, baseagent?: string): AgentRunnerFull {
     if (channel && baseagent) {
-      const evolName = this.agentRegistry?.resolveByChannel(channel)?.name || '<unknown>';
+      const owner = this.agentRegistry?.resolveByChannel(channel);
+      const evolName = owner?.name || '<unknown>';
       const key = `${evolName}::${baseagent}`;
       if (this.agentMap.has(key)) return this.agentMap.get(key)!;
+      if (owner) {
+        throw new BaseagentRunnerUnavailableError(evolName, baseagent, this.getAvailableBaseagentsForOwner(evolName));
+      }
     }
     if (this.agentMap.has(this.primaryRunnerKey)) return this.agentMap.get(this.primaryRunnerKey)!;
     return this.agentMap.values().next().value!;
+  }
+
+  private getAvailableBaseagentsForOwner(evolName: string): string[] {
+    const prefix = `${evolName}::`;
+    return [...this.agentMap.keys()]
+      .filter(key => key.startsWith(prefix))
+      .map(key => key.slice(prefix.length));
+  }
+
+  private formatBaseagentUnavailable(error: BaseagentRunnerUnavailableError): string {
+    const available = error.availableBaseagents.length ? error.availableBaseagents.join(', ') : '(none)';
+    return `❌ 当前会话绑定的 baseagent 不可用: ${error.baseagent}\nAgent: ${error.evolagentName}\n可用: ${available}\n请使用 /baseagent 切换到可用后端。`;
   }
 
   /** Return the list of baseagents available to a given channel (per-EvolAgent isolation). */
@@ -360,7 +377,7 @@ export class CommandHandler {
         onSuccess: {
           mode: feedbackMode,
           target,
-          template: parsed.prompt || (script ? undefined : '{{result.text}}'),
+          template: parsed.prompt || '{{result.text}}',
         },
         onNoop: onNoopMode === 'notify' ? { mode: 'direct-message' as const, target, template: '{{error.message}}' } : { mode: 'none' as const },
         onFailure: onFailureMode === 'notify' ? { mode: 'direct-message' as const, target, template: '❌ 触发器执行失败：{{error.message}}' } : { mode: 'none' as const },
@@ -912,9 +929,16 @@ export class CommandHandler {
     messageId?: string,
     selfAID?: string,
   ): Promise<OutboundPayload | string | null | undefined> {
-    const result = await this._handleInternal(content, channel, channelId, sendMessage, userId, threadId, chatType, source, messageId, selfAID);
-
-    return result;
+    try {
+      const result = await this._handleInternal(content, channel, channelId, sendMessage, userId, threadId, chatType, source, messageId, selfAID);
+      return result;
+    } catch (error) {
+      if (error instanceof BaseagentRunnerUnavailableError) {
+        logger.error(`[CommandHandler] baseagent mismatch blocked: channel=${channel} requested=${error.baseagent} owner=${error.evolagentName} available=${error.availableBaseagents.join(',') || '<none>'}`);
+        return { kind: 'command.error' as const, text: this.formatBaseagentUnavailable(error), reason: error.code };
+      }
+      throw error;
+    }
   }
 
   private async _handleInternal(
@@ -973,88 +997,86 @@ export class CommandHandler {
       return `📋 触发器（${visible.length} 个）：\n\n${lines.join('\n')}`;
     }
 
-    if (sub.startsWith('cancel ')) {
-      const nameOrId = sub.slice('cancel '.length).trim();
-      if (!nameOrId) return '❌ 用法：/trigger cancel <名称>';
+    // Helper: extract nameOrId and find trigger with permission check
+    const extractAndFindTrigger = (sub: string, prefix: string, action: string): { error: string } | { definition: TriggerDefinition; nameOrId: string } => {
+      const nameOrId = sub.slice(prefix.length).trim();
+      if (!nameOrId) return { error: `❌ 用法：/trigger ${action} <名称>` };
       const definition = this.findTriggerDefinition(scheduler, nameOrId, peerId, channel, isAdmin);
       if (!definition) {
-        return isAdmin
-          ? `❌ 未找到触发器：${nameOrId}`
-          : `❌ 未找到触发器 "${nameOrId}"，或无权限取消`;
+        return {
+          error: isAdmin
+            ? `❌ 未找到触发器：${nameOrId}`
+            : `❌ 未找到触发器 "${nameOrId}"，或无权限${action === 'show' ? '查看' : '修改'}`,
+        };
       }
-      const cancelled = scheduler.cancel(definition.id);
+      return { definition, nameOrId };
+    };
+
+    if (sub.startsWith('cancel ')) {
+      const result = extractAndFindTrigger(sub, 'cancel ', 'cancel');
+      if ('error' in result) return result.error;
+      const cancelled = scheduler.cancel(result.definition.id);
       this.eventBus.publish({ type: 'trigger:cancelled', triggerId: cancelled.id, name: cancelled.name, by: peerId });
       return `✅ 触发器已取消：**${cancelled.name}**`;
     }
 
     if (sub.startsWith('enable ')) {
-      const nameOrId = sub.slice('enable '.length).trim();
-      if (!nameOrId) return '❌ 用法：/trigger enable <名称>';
-      const definition = this.findTriggerDefinition(scheduler, nameOrId, peerId, channel, isAdmin);
-      if (!definition) {
-        return isAdmin
-          ? `❌ 未找到触发器：${nameOrId}`
-          : `❌ 未找到触发器 "${nameOrId}"，或无权限修改`;
-      }
-      scheduler.setEnabled(definition.id, true);
-      return `✅ 触发器已启用：**${definition.name}**`;
+      const result = extractAndFindTrigger(sub, 'enable ', 'enable');
+      if ('error' in result) return result.error;
+      scheduler.setEnabled(result.definition.id, true);
+      return `✅ 触发器已启用：**${result.definition.name}**`;
     }
 
     if (sub.startsWith('disable ')) {
-      const nameOrId = sub.slice('disable '.length).trim();
-      if (!nameOrId) return '❌ 用法：/trigger disable <名称>';
-      const definition = this.findTriggerDefinition(scheduler, nameOrId, peerId, channel, isAdmin);
-      if (!definition) {
-        return isAdmin
-          ? `❌ 未找到触发器：${nameOrId}`
-          : `❌ 未找到触发器 "${nameOrId}"，或无权限修改`;
-      }
-      scheduler.setEnabled(definition.id, false);
-      return `✅ 触发器已暂停：**${definition.name}**`;
+      const result = extractAndFindTrigger(sub, 'disable ', 'disable');
+      if ('error' in result) return result.error;
+      scheduler.setEnabled(result.definition.id, false);
+      return `✅ 触发器已暂停：**${result.definition.name}**`;
     }
 
     if (sub.startsWith('show ')) {
-      const nameOrId = sub.slice('show '.length).trim();
-      if (!nameOrId) return '❌ 用法：/trigger show <名称>';
-      const definition = this.findTriggerDefinition(scheduler, nameOrId, peerId, channel, isAdmin);
-      if (!definition) {
-        return isAdmin
-          ? `❌ 未找到触发器：${nameOrId}`
-          : `❌ 未找到触发器 "${nameOrId}"，或无权限查看`;
-      }
+      const result = extractAndFindTrigger(sub, 'show ', 'show');
+      if ('error' in result) return result.error;
+      const definition = result.definition;
       const details = scheduler.show(definition.id);
       const view = this.definitionToTriggerView(definition, scheduler);
       const nextStr = view.nextFireAt ? new Date(view.nextFireAt).toLocaleString() : '未计算';
       const activeRuns = details.active?.length ?? 0;
       const recentRuns = details.recentRuns?.slice(0, 5) ?? [];
-      let result = `📋 **${definition.name}** (${definition.id})\n`;
-      result += `状态: ${definition.enabled ? 'active' : 'disabled'}\n`;
-      result += `调度: ${view.scheduleType} | 下次: ${nextStr}\n`;
-      result += `模式: ${definition.feedback.onSuccess.mode}\n`;
-      result += `失败通知: ${definition.feedback.onFailure.mode === 'none' ? 'silent' : 'notify'}\n`;
-      if (definition.script) result += `脚本: ${definition.script.runtime} ${definition.script.path}\n`;
-      result += `活跃运行: ${activeRuns}\n`;
+      let output = `📋 **${definition.name}** (${definition.id})\n`;
+      output += `状态: ${definition.enabled ? 'active' : 'disabled'}\n`;
+      output += `调度: ${view.scheduleType} | 下次: ${nextStr}\n`;
+      output += `模式: ${definition.feedback.onSuccess.mode}\n`;
+      output += `失败通知: ${definition.feedback.onFailure.mode === 'none' ? 'silent' : 'notify'}\n`;
+      if (definition.script) output += `脚本: ${definition.script.runtime} ${definition.script.path}\n`;
+      output += `活跃运行: ${activeRuns}\n`;
       if (recentRuns.length > 0) {
-        result += `\n最近运行:\n`;
+        output += `\n最近运行:\n`;
         for (const r of recentRuns) {
           const ts = new Date(r.finishedAt).toLocaleString();
-          result += `  • ${r.status} ${r.reason ?? ''} (${ts})\n`;
+          output += `  • ${r.status} ${r.reason ?? ''} (${ts})\n`;
         }
       }
-      return result;
+      return output;
     }
 
     if (sub.startsWith('run ')) {
       const args = sub.slice('run '.length).trim();
-      const dryRun = args.includes('--dry-run');
-      const nameOrId = args.replace('--dry-run', '').trim();
+      const parts = args.split(/\s+/);
+      const dryRunIdx = parts.indexOf('--dry-run');
+      const dryRun = dryRunIdx >= 0;
+      const nameOrId = dryRunIdx >= 0
+        ? parts.filter((_, i) => i !== dryRunIdx).join(' ').trim()
+        : args.trim();
       if (!nameOrId) return '❌ 用法：/trigger run <名称> [--dry-run]';
+
       const definition = this.findTriggerDefinition(scheduler, nameOrId, peerId, channel, isAdmin);
       if (!definition) {
         return isAdmin
           ? `❌ 未找到触发器：${nameOrId}`
           : `❌ 未找到触发器 "${nameOrId}"，或无权限执行`;
       }
+
       try {
         const result = await scheduler.run(definition.id, { dryRun });
         const prefix = dryRun ? '🔍 试运行' : '▶️ 手动触发';
