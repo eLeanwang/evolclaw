@@ -285,7 +285,7 @@ function printStartupInfo(opts: { pid?: number; running?: boolean } = {}): void 
   console.log(`  代码时间:   ${latestMtime ? formatLocalTime(latestMtime) : '?'}`);
 }
 
-export async function cmdStart(opts: { diagnose?: boolean } = {}) {
+export async function cmdStart(opts: { diagnose?: boolean; bindBootstrap?: boolean } = {}) {
   const cmdStartedAt = Date.now();
   printStartupInfo();
 
@@ -301,9 +301,13 @@ export async function cmdStart(opts: { diagnose?: boolean } = {}) {
   const defaults = loadDefaults();
   const hasAnyAgent = loadAllAgents().agents.length > 0;
   if (!defaults && !hasAnyAgent) {
-    console.log('⚡ 未检测到初始化配置，自动启动初始化向导...\n');
-    await cmdInit();
-    return;
+    if (opts.bindBootstrap) {
+      console.log('⚡ 未检测到 agent，进入绑定 bootstrap 模式...\n');
+    } else {
+      console.log('⚡ 未检测到初始化配置，自动启动初始化向导...\n');
+      await cmdInit();
+      return;
+    }
   }
 
   // 种入网关配置：从 env / settings.json 导入 baseUrl+apiKey 到 defaults（幂等）
@@ -345,17 +349,21 @@ export async function cmdStart(opts: { diagnose?: boolean } = {}) {
   // 检查至少有一个 self-agent
   const { agents, skipped } = loadAllAgents();
   if (agents.length === 0) {
-    console.log('❌ 未配置任何 self-agent。');
-    console.log('');
-    console.log('创建方式：');
-    console.log('  1. 下载 Evol App（https://evolai.cn）→ 创建 Agent → 将引导文本输入给 baseagent 执行');
-    console.log('  2. 手动创建：evolclaw agent new <your-aid>.agentid.pub');
-    console.log('');
-    if (skipped.length > 0) {
-      console.log(`跳过的目录:`);
-      for (const s of skipped) console.log(`  - ${s.dirName}: ${s.reason}`);
+    if (opts.bindBootstrap && evolclawCfgStart.aid) {
+      console.log('ℹ 未配置任何 self-agent，绑定 bootstrap 将仅启动控制 AID');
+    } else {
+      console.log('❌ 未配置任何 self-agent。');
+      console.log('');
+      console.log('创建方式：');
+      console.log('  1. 下载 Evol App（https://evolai.cn）→ 创建 Agent → 将引导文本输入给 baseagent 执行');
+      console.log('  2. 手动创建：evolclaw agent new <your-aid>.agentid.pub');
+      console.log('');
+      if (skipped.length > 0) {
+        console.log(`跳过的目录:`);
+        for (const s of skipped) console.log(`  - ${s.dirName}: ${s.reason}`);
+      }
+      process.exit(1);
     }
-    process.exit(1);
   }
 
   // 检查 instance 目录中的进程状态
@@ -416,6 +424,7 @@ export async function cmdStart(opts: { diagnose?: boolean } = {}) {
       MESSAGE_LOG: process.env.MESSAGE_LOG || 'true',
       EVENT_LOG: process.env.EVENT_LOG || 'true',
       ...(opts.diagnose ? { EVOLCLAW_DIAGNOSE: '1' } : {}),
+      ...(opts.bindBootstrap ? { EVOLCLAW_BIND_BOOTSTRAP: '1' } : {}),
     }
   });
 

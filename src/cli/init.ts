@@ -252,6 +252,22 @@ export async function initTail(): Promise<void> {
   // 配置进程级管理者（owners）：仅交互式 + aid 已配置 + owners 未配置时询问
   const evcForOwners = loadEvolclawConfig();
   if (process.stdin.isTTY && evcForOwners.aid && (!evcForOwners.owners || evcForOwners.owners.length === 0)) {
+    console.log('\n📡 进程级管理者绑定 — 请用 evol app 扫描二维码\n');
+    try {
+      const { runDaemonOwnerQrBindFlow } = await import('./init-channel.js');
+      const result = await runDaemonOwnerQrBindFlow('append');
+      if (result?.boundAid) {
+        console.log(`  ✓ 已配置管理者: ${result.boundAid}`);
+      } else {
+        await promptOwnersManually();
+      }
+    } catch (e: any) {
+      console.log(`  ⚠ 扫码绑定不可用: ${e?.message || e}`);
+      await promptOwnersManually();
+    }
+  }
+
+  async function promptOwnersManually(): Promise<void> {
     const { isValidAid } = await import('../aun/aid/index.js');
     const rlOwners = readline.createInterface({ input: process.stdin, output: process.stdout });
     try {

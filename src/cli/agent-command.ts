@@ -193,6 +193,11 @@ Options:
           : result.hotLoadError
             ? `  ✗ 热重载失败：${result.hotLoadError}`
             : '  ⚠ 服务未运行，下次 evolclaw start 时生效');
+        if (result.ownerBoundAid) {
+          console.log(`  ✓ agent owner 已绑定: ${result.ownerBoundAid}`);
+        } else if (result.ownerBindSkipped) {
+          console.log('  ⚠ agent owner 未通过二维码绑定');
+        }
       }
     } else {
       const result = await agentCreateInteractive({ suggestedName: name });
@@ -212,6 +217,11 @@ Options:
           : result.hotLoadError
             ? `  ✗ 热重载失败：${result.hotLoadError}`
             : '  ⚠ 服务未运行，下次 evolclaw start 时生效');
+        if (result.ownerBoundAid) {
+          console.log(`  ✓ agent owner 已绑定: ${result.ownerBoundAid}`);
+        } else if (result.ownerBindSkipped) {
+          console.log('  ⚠ agent owner 未通过二维码绑定');
+        }
       }
     }
     return;
@@ -512,4 +522,3 @@ function formatDurationMs(ms: number): string {
   const day = Math.floor(hour / 24);
   return `${day}d${hour % 24}h${String(m).padStart(2, '0')}m`;
 }
-

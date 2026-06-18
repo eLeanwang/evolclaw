@@ -6,6 +6,7 @@ import type { EvolAgentRegistryHandle, AidConnectionState } from './types.js';
 import type { AidStatsSnapshot, StatsSnapshot } from './utils/stats.js';
 import { fileCache } from './core/daemon-file-cache.js';
 import type { FileCacheStats } from './core/daemon-file-cache.js';
+import type { BindBeginRequest, BindBeginResponse, BindErrorResponse, BindStatusResponse } from './core/bind.js';
 
 const isWindows = process.platform === 'win32';
 const isNamedPipe = (p: string) => isWindows && p.startsWith('\\\\.\\pipe\\');
@@ -63,6 +64,11 @@ type StatsSnapshotProvider = () => StatsSnapshot;
 type QueueSnapshotProvider = (params: { agent: string }) => Array<{ status: string; sessionKey: string; channelType: string; channelId: string; projectPath: string; peerName?: string; preview: string; messageId?: string; elapsedMs?: number }>;
 type QueueActionExecutor = (params: { agent: string; action: 'clear' | 'cancel' | 'interrupt'; messageId?: string; sessionKey?: string }) => Promise<{ ok: boolean; cleared?: number; cancelled?: boolean; interrupted?: boolean; error?: string }>;
 type TriggerExecutor = (cmd: { type: string; [key: string]: any }) => Promise<any>;
+type BindExecutor = {
+  begin: (cmd: BindBeginRequest) => BindBeginResponse | BindErrorResponse;
+  status: (taskId: string) => BindStatusResponse | BindErrorResponse;
+  cancel: (taskId: string) => BindStatusResponse | BindErrorResponse;
+};
 
 export class IpcServer {
   private server: net.Server | null = null;
@@ -75,6 +81,7 @@ export class IpcServer {
   private queueSnapshotProvider?: QueueSnapshotProvider;
   private queueActionExecutor?: QueueActionExecutor;
   private triggerExecutor?: TriggerExecutor;
+  private bindExecutor?: BindExecutor;
 
   // CPU 占用追踪：IPC handler 是一次性同步调用，无法在响应里做 200ms 异步采样，
   // 故用后台 1s interval 累积 process.cpuUsage() 增量，handler 直接读最近值。
@@ -136,6 +143,11 @@ export class IpcServer {
   /** Inject daemon-level trigger executor for ec trigger. */
   setTriggerExecutor(executor: TriggerExecutor): void {
     this.triggerExecutor = executor;
+  }
+
+  /** Inject bootstrap QR bind executor for init/init aun. */
+  setBindExecutor(executor: BindExecutor): void {
+    this.bindExecutor = executor;
   }
 
   /** Start the 1s background CPU sampling loop (for monitor-snapshot). Call after start(). */
@@ -233,6 +245,24 @@ export class IpcServer {
         return this.getStatus();
       case 'ping':
         return { pong: true, pid: process.pid, protocolVersion: 1 };
+      case 'bind.begin': {
+        if (!this.bindExecutor) return { ok: false, error: 'bind executor not configured' };
+        return this.bindExecutor.begin({
+          bindType: cmd.bindType,
+          targetAid: cmd.targetAid,
+          agentName: cmd.agentName,
+          ownerMode: cmd.ownerMode,
+          ttlMs: cmd.ttlMs,
+        });
+      }
+      case 'bind.status': {
+        if (!this.bindExecutor) return { ok: false, error: 'bind executor not configured' };
+        return this.bindExecutor.status(cmd.taskId);
+      }
+      case 'bind.cancel': {
+        if (!this.bindExecutor) return { ok: false, error: 'bind executor not configured' };
+        return this.bindExecutor.cancel(cmd.taskId);
+      }
       case 'aun-aids': {
         const aids = this.aunAidProvider ? this.aunAidProvider() : [];
         return { ok: true, aids };

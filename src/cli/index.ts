@@ -38,7 +38,7 @@ export async function main(args: string[]) {
     --force                              已存在 defaults.json 时覆盖
 
 配置渠道（先 evolclaw agent new 创建 agent）:
-  evolclaw init aun           AUN 渠道配置（AID 创建/绑定）
+  evolclaw init aun           AUN owner 绑定（daemon 或指定 agent）
   evolclaw init feishu        飞书扫码登录
   evolclaw init wechat        微信扫码登录
   evolclaw init dingtalk      钉钉扫码登录

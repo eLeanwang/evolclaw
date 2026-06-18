@@ -3,7 +3,7 @@ import path from 'path';
 import os from 'os';
 import readline from 'readline';
 import { resolvePaths, agentMdPath as getAgentMdPathFromPaths, aunPath as defaultAunPath } from '../paths.js';
-import { loadDefaults, loadAllAgents, loadAgent, saveAgent, ensureAgentDirSkeleton, loadEvolclawConfig } from '../config-store.js';
+import { loadDefaults, loadAllAgents, loadAgent, saveAgent, ensureAgentDirSkeleton } from '../config-store.js';
 import { ConfigTarget, write as cfgWrite, ensureFile as cfgEnsure, read as cfgRead, routeField, initConfigManager } from '../config/config-manager.js';
 import { ipcQuery } from '../ipc.js';
 import { CONFIG_SCHEMA_VERSION } from '../types.js';
@@ -73,6 +73,8 @@ export interface AgentCreateResult {
   agentmdUploaded?: boolean;
   hotLoaded?: boolean;
   hotLoadError?: string;
+  ownerBoundAid?: string;
+  ownerBindSkipped?: boolean;
 }
 
 export interface AgentSyncResult {
@@ -492,16 +494,13 @@ export async function agentCreateInteractive(opts: AgentCreateInteractiveOpts = 
       baseagent = chosen;
     }
 
-    // Owner (default to daemon's first owner if available)
-    const daemonOwner = loadEvolclawConfig().owners?.[0];
+    // Owner: prefer QR binding after the agent is created. Manual owner remains as a fallback.
     let owner: string | undefined;
     while (true) {
-      const prompt = daemonOwner
-        ? `Owner AID [${daemonOwner}]: `
-        : 'Owner AID (leave empty for auto-bind on first message): ';
+      const prompt = 'Owner AID (leave empty to bind with evol app QR): ';
       const ownerInput = (await ask(prompt)).trim();
       if (!ownerInput) {
-        owner = daemonOwner; // Use daemon owner as default, or undefined if no daemon owner
+        owner = undefined;
         break;
       }
       if (!isValidAid(ownerInput)) {
@@ -586,6 +585,27 @@ export async function agentCreateInteractive(opts: AgentCreateInteractiveOpts = 
       }
     } catch { /* daemon not running */ }
 
+    let ownerBoundAid: string | undefined;
+    let ownerBindSkipped = false;
+    if (!owner && process.stdin.isTTY) {
+      console.log('\n📡 Agent owner 绑定 — 请用 evol app 扫描二维码\n');
+      try {
+        const { runAgentOwnerQrBindFlow } = await import('./init-channel.js');
+        const bound = await runAgentOwnerQrBindFlow(aid, agentName, 'append');
+        if (bound?.boundAid) {
+          ownerBoundAid = bound.boundAid;
+          console.log(`  ✓ 已配置 agent owner: ${bound.boundAid}`);
+        } else {
+          ownerBindSkipped = true;
+          ownerBoundAid = await promptAgentOwnerManually(aid);
+        }
+      } catch (e: any) {
+        ownerBindSkipped = true;
+        console.log(`  ⚠ 扫码绑定不可用: ${e?.message || e}`);
+        ownerBoundAid = await promptAgentOwnerManually(aid);
+      }
+    }
+
     return {
       ok: true,
       aid,
@@ -594,9 +614,45 @@ export async function agentCreateInteractive(opts: AgentCreateInteractiveOpts = 
       agentmdUploaded,
       hotLoaded,
       hotLoadError,
+      ownerBoundAid,
+      ownerBindSkipped,
     };
   } finally {
     if (ownRl) { try { rl.close(); } catch { /* ignore */ } }
+  }
+}
+
+async function promptAgentOwnerManually(aid: string): Promise<string | undefined> {
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    while (true) {
+      const raw = await new Promise<string>(resolve => rl.question('\n扫码未完成。手动输入 agent owner AID（留空跳过）: ', resolve));
+      const owner = raw.trim();
+      if (!owner) {
+        console.log('  已跳过 agent owner 配置');
+        return undefined;
+      }
+      const { isValidAid } = await import('../aun/aid/index.js');
+      if (!isValidAid(owner)) {
+        console.log('  ⚠ Owner AID 格式无效（需合法多级域名，如 alice.agentid.pub）');
+        continue;
+      }
+      const agent = loadAgent(aid);
+      if (!agent) {
+        console.log(`  ⚠ 无法加载 agent 配置: ${aid}`);
+        return undefined;
+      }
+      const owners = [owner, ...(agent.owners || []).filter(o => o !== owner)];
+      saveAgent({ ...agent, owners });
+      try {
+        const result = await ipcQuery<any>(resolvePaths().socket, { type: 'evolagent.reload', name: aid }, 30_000);
+        if (result?.ok) console.log('  ✓ agent owner 已热重载');
+      } catch { /* daemon not running */ }
+      console.log(`  ✓ 已配置 agent owner: ${owner}`);
+      return owner;
+    }
+  } finally {
+    rl.close();
   }
 }
 

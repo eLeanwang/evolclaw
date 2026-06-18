@@ -18,6 +18,7 @@ import { FeishuChannelPlugin } from './channels/feishu.js';
 import { WechatChannelPlugin } from './channels/wechat.js';
 import { AUNChannel, AUNChannelPlugin } from './channels/aun.js';
 import { startServiceProxy } from './aun/service-proxy.js';
+import { BindService, type BindRequestPayload } from './core/bind.js';
 import { DingtalkChannelPlugin } from './channels/dingtalk.js';
 import { QQBotChannelPlugin } from './channels/qqbot.js';
 import { WecomChannelPlugin } from './channels/wecom.js';
@@ -119,6 +120,75 @@ export async function sendSystemPayload(
   await adapter.send(envelope, payload);
 }
 
+async function runBindBootstrapDaemon(evolclawCfg: ReturnType<typeof loadEvolclawConfig>, defaults: DefaultsConfig): Promise<void> {
+  logger.warn('[bind-bootstrap] starting control AID + IPC only');
+  const bindService = new BindService({
+    receiverAid: evolclawCfg.aid!,
+    getAvailableBaseagents: detectAvailableBaseagentsForBind,
+    getUptimeSeconds: () => Math.floor(process.uptime()),
+  });
+  bindService.startCleanup();
+
+  let controlChannel: AUNChannel | undefined;
+  controlChannel = new AUNChannel({
+    aid: evolclawCfg.aid!,
+    agentName: evolclawCfg.aid!,
+    channelName: 'control',
+    pureIdentity: true,
+    aunTrace: evolclawCfg.debug?.aunTrace ?? defaults.debug?.aunTrace,
+    aunSdkLog: evolclawCfg.debug?.aunSdkLog ?? defaults.debug?.aunSdkLog,
+  });
+
+  try {
+    await controlChannel.connect();
+    logger.info(`✓ 控制 AID 已连接: ${evolclawCfg.aid}`);
+  } catch (e: any) {
+    logger.warn(`控制 AID 首连失败（后台自动重连，不影响 bootstrap IPC）: ${e?.message || e}`);
+  }
+
+  controlChannel.onMessage(async (opts) => {
+    const text = (opts.content || '').trim();
+    let parsed: BindRequestPayload | null = null;
+    try { parsed = JSON.parse(text); } catch { parsed = null; }
+    const response = parsed ? await bindService.handleRequest(parsed, opts.peerId) : null;
+    if (response) {
+      await controlChannel!.sendMessage(opts.channelId, JSON.stringify(response));
+    }
+  });
+
+  const ipcServer = new IpcServer(resolvePaths().socket, (): IpcStatusResponse => ({
+    pid: process.pid,
+    uptime: Math.round(process.uptime() * 1000),
+    channels: {},
+    channelsByType: {},
+    queue: { pending: 0, processing: 0 },
+    controlAid: { aid: evolclawCfg.aid!, connected: controlChannel?.getAidState().status === 'connected' },
+  }));
+  ipcServer.setBindExecutor({
+    begin: (cmd) => bindService.begin(cmd),
+    status: (taskId) => bindService.status(taskId),
+    cancel: (taskId) => bindService.cancel(taskId),
+  });
+  ipcServer.start();
+
+  fs.writeFileSync(resolvePaths().readySignal, String(Date.now()));
+  logger.info(`✓ Bind bootstrap ready signal written: ${resolvePaths().readySignal}`);
+
+  const shutdown = async (signal?: string) => {
+    logger.info(`[bind-bootstrap] shutting down${signal ? ` (${signal})` : ''}`);
+    ipcServer.stop();
+    bindService.stopCleanup();
+    if (controlChannel) {
+      try { await controlChannel.disconnect(); } catch { /* ignore */ }
+    }
+    removeAll();
+    process.exit(0);
+  };
+  process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('exit', () => removeAll());
+}
+
 function readEvolclawVersion(): string {
   try {
     const pkg = JSON.parse(fs.readFileSync(path.join(getPackageRoot(), 'package.json'), 'utf-8'));
@@ -126,6 +196,23 @@ function readEvolclawVersion(): string {
   } catch {
     return 'unknown';
   }
+}
+
+function detectAvailableBaseagentsForBind(): string[] {
+  const out: string[] = [];
+  for (const cmd of ['claude', 'gemini']) {
+    try {
+      const dirs = (process.env.PATH || '').split(path.delimiter);
+      const exe = process.platform === 'win32' ? `${cmd}.cmd` : cmd;
+      if (dirs.some(dir => fs.existsSync(path.join(dir, exe)) || fs.existsSync(path.join(dir, cmd)))) out.push(cmd);
+    } catch { /* ignore */ }
+  }
+  try {
+    const dirs = (process.env.PATH || '').split(path.delimiter);
+    const exe = process.platform === 'win32' ? 'codex.cmd' : 'codex';
+    if (dirs.some(dir => fs.existsSync(path.join(dir, exe)) || fs.existsSync(path.join(dir, 'codex')))) out.push('codex');
+  } catch { /* ignore */ }
+  return out;
 }
 
 /**
@@ -346,10 +433,12 @@ async function main() {
 
   const defaults: DefaultsConfig = loadDefaults() ?? { $schema_version: CONFIG_SCHEMA_VERSION };
   const evolclawCfg = loadEvolclawConfig();
+  let processLevelOwners = evolclawCfg.owners ?? [];
+  const bindBootstrapMode = process.env.EVOLCLAW_BIND_BOOTSTRAP === '1';
 
   // 进程级 menu 操作（/system /agent）鉴权：owners 来自 evolclaw.json 顶层。
   // owners 为空时这些操作一律 FORBIDDEN，启动时提示如何配置。
-  if (!evolclawCfg.owners || evolclawCfg.owners.length === 0) {
+  if (processLevelOwners.length === 0) {
     logger.warn('[startup] evolclaw.json.owners 未配置：进程级 menu 操作（/system /agent）将一律拒绝。' +
       '如需远程管理，请在 evolclaw.json 配置 owners: [<你的 AID>]');
   }
@@ -359,6 +448,11 @@ async function main() {
   // 阶段 2c 暂跳过
 
   const paths = resolvePaths();
+
+  if (bindBootstrapMode && evolclawCfg.aid && loadAllAgents().agents.length === 0) {
+    await runBindBootstrapDaemon(evolclawCfg, defaults);
+    return;
+  }
 
   // ── EvolAgent Registry：加载 agents/<aid>/config.json ──
   const agentRegistry = new EvolAgentRegistry(paths.agentsDir);
@@ -546,6 +640,16 @@ async function main() {
 
   const channelInstances = evolagentInstances;
   logger.info(`✓ Created ${channelInstances.length} channel instance(s)`);
+
+  const bindService = evolclawCfg.aid
+    ? new BindService({
+        receiverAid: evolclawCfg.aid,
+        getAvailableBaseagents: () => ['claude', 'codex', 'gemini'].filter(name => (defaults as any).baseagents?.[name] !== undefined),
+        getUptimeSeconds: () => Math.floor(process.uptime()),
+        onDaemonOwnersUpdated: owners => { processLevelOwners = owners; },
+      })
+    : null;
+  bindService?.startCleanup();
 
   // 创建命令处理器
   const cmdHandler = new CommandHandler(sessionManager, agentMap, messageCache, eventBus, primaryRunnerKey);
@@ -901,11 +1005,20 @@ async function main() {
     // 发送方身份由 AUN X.509 证书链验证，非 owner 完全静默。
     controlChannel.onMessage(async (opts) => {
       try {
-        if (!isProcessLevelOwner(opts.peerId, evolclawCfg.owners)) {
+        const text = (opts.content || '').trim();
+        let parsed: any;
+        try { parsed = JSON.parse(text); } catch { parsed = null; }
+        if (bindService && parsed?.type === 'bind.request') {
+          const response = await bindService.handleRequest(parsed, opts.peerId);
+          if (response) {
+            await controlChannel!.sendMessage(opts.channelId, JSON.stringify(response));
+          }
+          return;
+        }
+        if (!isProcessLevelOwner(opts.peerId, processLevelOwners)) {
           logger.debug(`控制 AID 收到非 owner 消息，忽略: from=${opts.peerId}`);
           return;
         }
-        const text = (opts.content || '').trim();
         if (text.toLowerCase() === '/pair') {
           const port = evolclawCfg.ecweb?.port ?? 42705;
           const pair = await fetchEcwebPairCode(port);
@@ -920,8 +1033,6 @@ async function main() {
           return;
         }
         // menu.* JSON 路由：owner 已在上方校验，转交 execMenuForControl（fromControlChannel=true）
-        let parsed: any;
-        try { parsed = JSON.parse(text); } catch { parsed = null; }
         if (parsed && typeof parsed === 'object' && typeof parsed.type === 'string' && parsed.type.startsWith('menu.')) {
           const response = await cmdHandler.execMenuForControl(parsed, opts.peerId);
           await controlChannel!.sendMessage(opts.channelId, JSON.stringify(response));
@@ -1162,6 +1273,13 @@ async function main() {
   // M3: direct call (not cast) — wire EvolAgentRegistry into IPC for evolagent.* handlers
   ipcServer.setAgentRegistry(agentRegistry);
   ipcServer.setMenuExecutor((payload) => cmdHandler.execMenuForEcweb(payload));
+  if (bindService) {
+    ipcServer.setBindExecutor({
+      begin: (cmd) => bindService.begin(cmd),
+      status: (taskId) => bindService.status(taskId),
+      cancel: (taskId) => bindService.cancel(taskId),
+    });
+  }
 
   // 注入 AUN AID 状态聚合器：遍历所有 aun 类型 channel，调 getAidState() 收集
   ipcServer.setAunAidProvider(() => {
@@ -1428,6 +1546,7 @@ async function main() {
     logger.info(`\n\nShutting down gracefully... (signal=${shutdownSignal}, pid=${pid}, ppid=${ppid})`);
     ipcServer.stopCpuTracking();
     ipcServer.stop();
+    bindService?.stopCleanup();
     for (const scheduler of triggerSchedulers.values()) {
       scheduler.stop();
     }

@@ -9,13 +9,239 @@
 import readline from 'readline';
 import crypto from 'crypto';
 import { selectInstance, type InstanceChoice } from './init.js';
-import { loadAllAgents, loadAgent, saveAgent } from '../config-store.js';
+import { loadAllAgents, loadAgent, saveAgent, loadEvolclawConfig, saveEvolclawConfig } from '../config-store.js';
 import { agentChannelUpsert } from './agent.js';
 import type { ChannelInstance, AgentConfig } from '../types.js';
 import { isValidAid } from '../aun/aid/index.js';
+import { resolvePaths } from '../paths.js';
+import { ipcQuery } from '../ipc.js';
+import { cmdStart } from './daemon-commands.js';
+import * as platform from '../utils/cross-platform.js';
+import { cleanupInstances } from '../utils/instance-registry.js';
 
 function ask(rl: readline.Interface, question: string): Promise<string> {
   return new Promise(resolve => rl.question(question, resolve));
+}
+
+type BindFlowResult = { boundAid: string; boundName?: string } | null;
+
+export async function runDaemonOwnerQrBindFlow(ownerMode: 'append' | 'replace' = 'append'): Promise<BindFlowResult> {
+  const p = resolvePaths();
+  const evc = loadEvolclawConfig();
+  if (!evc.aid) {
+    console.log('❌ 未找到控制 AID，请先运行 evolclaw init');
+    return null;
+  }
+
+  let status = await ipcQuery<any>(p.socket, { type: 'status' }, 1000);
+  let startedBootstrapDaemon = false;
+  if (!status) {
+    await cmdStart({ bindBootstrap: true });
+    startedBootstrapDaemon = loadAllAgents().agents.length === 0;
+    status = await waitForIpcStatus(30_000);
+  }
+  try {
+    if (!status) {
+      console.log('❌ daemon 未就绪，无法创建绑定任务');
+      return null;
+    }
+    if (!status.controlAid?.connected) {
+      console.log('⚠ daemon 已启动，但 AUN 控制通道尚未连接；仍将生成二维码，daemon 会后台重连');
+    }
+
+    const begin = await ipcQuery<any>(p.socket, {
+      type: 'bind.begin',
+      bindType: 'daemon',
+      ownerMode,
+    }, 3000);
+    if (!begin?.ok) {
+      console.log(`❌ 创建绑定任务失败: ${begin?.error || 'unknown error'}`);
+      return null;
+    }
+
+    await printQr(begin.qrData);
+    console.log('\n请用 evol app 扫描上方二维码完成绑定');
+    console.log('按 q 取消 | 10 分钟内有效\n');
+
+    const result = await pollBindStatusWithKeyboard(begin.taskId, begin.expiresAt);
+    if (result === 'quit') {
+      await ipcQuery(p.socket, { type: 'bind.cancel', taskId: begin.taskId }, 1000);
+      console.log('已取消');
+      return null;
+    }
+    if (!result) {
+      console.log('绑定超时，请重新生成二维码');
+      return null;
+    }
+    return { boundAid: result.boundAid, boundName: result.boundName };
+  } finally {
+    if (startedBootstrapDaemon) {
+      await stopStartedBootstrapDaemon();
+    }
+  }
+}
+
+export async function runAgentOwnerQrBindFlow(
+  targetAid: string,
+  agentName?: string,
+  ownerMode: 'append' | 'replace' = 'append',
+): Promise<BindFlowResult> {
+  const p = resolvePaths();
+  const evc = loadEvolclawConfig();
+  if (!evc.aid) {
+    console.log('❌ 未找到控制 AID，请先运行 evolclaw init');
+    return null;
+  }
+
+  let status = await ipcQuery<any>(p.socket, { type: 'status' }, 1000);
+  if (!status) {
+    await cmdStart();
+    status = await waitForIpcStatus(30_000);
+  }
+  if (!status) {
+    console.log('❌ daemon 未就绪，无法创建 agent 绑定任务');
+    return null;
+  }
+  if (!status.controlAid?.connected) {
+    console.log('⚠ daemon 已启动，但 AUN 控制通道尚未连接；仍将生成二维码，daemon 会后台重连');
+  }
+
+  const begin = await ipcQuery<any>(p.socket, {
+    type: 'bind.begin',
+    bindType: 'agent',
+    targetAid,
+    agentName,
+    ownerMode,
+  }, 3000);
+  if (!begin?.ok) {
+    console.log(`❌ 创建 agent 绑定任务失败: ${begin?.error || 'unknown error'}`);
+    return null;
+  }
+
+  await printQr(begin.qrData);
+  console.log('\n请用 evol app 扫描上方二维码完成 agent owner 绑定');
+  console.log('按 q 取消 | 10 分钟内有效\n');
+
+  const result = await pollBindStatusWithKeyboard(begin.taskId, begin.expiresAt);
+  if (result === 'quit') {
+    await ipcQuery(p.socket, { type: 'bind.cancel', taskId: begin.taskId }, 1000);
+    console.log('已取消');
+    return null;
+  }
+  if (!result) {
+    console.log('绑定超时，请重新生成二维码');
+    return null;
+  }
+  await reloadAgentAfterBind(targetAid);
+  return { boundAid: result.boundAid, boundName: result.boundName };
+}
+
+async function waitForIpcStatus(timeoutMs: number): Promise<any | null> {
+  const deadline = Date.now() + timeoutMs;
+  const p = resolvePaths();
+  while (Date.now() < deadline) {
+    const status = await ipcQuery<any>(p.socket, { type: 'status' }, 1000);
+    if (status?.pid) return status;
+    await new Promise(r => setTimeout(r, 500));
+  }
+  return null;
+}
+
+async function stopStartedBootstrapDaemon(): Promise<void> {
+  const status = await ipcQuery<any>(resolvePaths().socket, { type: 'status' }, 1000);
+  const pid = typeof status?.pid === 'number' ? status.pid : null;
+  if (!pid) return;
+
+  platform.killProcess(pid);
+  if (!await waitForProcessExit(pid, 5_000)) {
+    platform.killProcess(pid, true);
+    await waitForProcessExit(pid, 3_000);
+  }
+  cleanupInstances();
+
+  const stale = await ipcQuery<any>(resolvePaths().socket, { type: 'status' }, 500);
+  if (stale?.pid === pid) {
+    console.log(`⚠ bootstrap daemon PID ${pid} 仍在响应 IPC，后续 start 可能需要先执行 evolclaw stop`);
+  }
+}
+
+async function waitForProcessExit(pid: number, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!platform.isProcessRunning(pid)) {
+      return true;
+    }
+    await new Promise(r => setTimeout(r, 250));
+  }
+  return !platform.isProcessRunning(pid);
+}
+
+async function reloadAgentAfterBind(aid: string): Promise<void> {
+  try {
+    const result = await ipcQuery<any>(resolvePaths().socket, { type: 'evolagent.reload', name: aid }, 30_000);
+    if (result?.ok) {
+      console.log('  ✓ agent owner 已热重载');
+    } else if (result?.error) {
+      console.log(`  ⚠ agent owner 已写入配置，热重载失败：${result.error}`);
+    }
+  } catch {
+    console.log('  ⚠ agent owner 已写入配置，daemon 未响应热重载；下次启动生效');
+  }
+}
+
+async function printQr(qrData: Record<string, unknown>): Promise<void> {
+  const qrText = JSON.stringify(qrData);
+  try {
+    const qrterm = await import('qrcode-terminal');
+    await new Promise<void>(resolve => {
+      qrterm.default.generate(qrText, { small: true }, (qr: string) => {
+        console.log(qr);
+        resolve();
+      });
+    });
+  } catch {
+    console.log(qrText);
+  }
+}
+
+async function pollBindStatusWithKeyboard(
+  taskId: string,
+  expiresAt: number
+): Promise<{ boundAid: string; boundName?: string } | 'quit' | null> {
+  let quit = false;
+  const p = resolvePaths();
+  const setupKeyListener = () => {
+    if (!process.stdin.isTTY) return () => {};
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+    process.stdin.setEncoding('utf8');
+    const handler = (key: string) => {
+      if (key === 'q' || key === '\u0003') quit = true;
+    };
+    process.stdin.on('data', handler);
+    return () => {
+      process.stdin.removeListener('data', handler);
+      process.stdin.setRawMode(false);
+      process.stdin.pause();
+    };
+  };
+  const cleanup = setupKeyListener();
+  try {
+    while (Date.now() < expiresAt) {
+      if (quit) return 'quit';
+      const status = await ipcQuery<any>(p.socket, { type: 'bind.status', taskId }, 1500);
+      if (status?.ok && status.status === 'bound') {
+        return { boundAid: status.boundAid, boundName: status.boundName };
+      }
+      if (status?.ok && (status.status === 'expired' || status.status === 'cancelled')) {
+        return null;
+      }
+      await new Promise(r => setTimeout(r, 1000));
+    }
+    return null;
+  } finally {
+    cleanup();
+  }
 }
 
 // ==================== Feishu ====================
@@ -450,44 +676,97 @@ export async function cmdInitWechat(): Promise<void> {
 // ==================== AUN ====================
 
 export async function cmdInitAun(): Promise<void> {
-  // AUN channel 从 agent.aid 隐式派生，AID 密钥在 `agent new` 时已创建就绪——本命令不碰 aid。
-  // 与其他渠道一致，职责是配置 owner；AUN 的 owner 存于 agent 顶层 owners[]（见 evolagent.ts）。
+  const evc = loadEvolclawConfig();
+  if (!evc.aid) {
+    console.log('❌ 未找到控制 AID，请先运行 evolclaw init');
+    return;
+  }
+
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   try {
-    const agentId = await pickAgentForChannel(rl);
-    if (!agentId) return;
+    const target = await pickAunOwnerBindTarget(rl, evc.aid);
+    if (!target) return;
 
-    const agentConfig = loadAgent(agentId);
-    if (!agentConfig) { console.error(`❌ 无法加载 agent ${agentId} 的配置`); return; }
-
-    console.log(`\n📡 AUN 渠道配置 — agent ${agentConfig.aid}`);
-    const current = agentConfig.owners?.[0];
-    if (current) console.log(`  当前 Owner: ${current}`);
-    console.log('  Owner 将接收欢迎消息并拥有管理权限\n');
-
-    let owner = '';
-    while (!owner) {
-      const input = (await ask(rl, `  Owner AID${current ? ` [${current}]` : ''}: `)).trim();
-      if (!input) {
-        if (current) { owner = current; break; }
-        console.log('  ⚠ Owner AID 不能为空');
-        continue;
+    if (target.kind === 'daemon') {
+      console.log(`\n📡 EvolClaw daemon owner 绑定 — ${evc.aid}\n`);
+      const result = await runDaemonOwnerQrBindFlow('append');
+      if (result?.boundAid) {
+        console.log(`\n✅ daemon owner 已绑定: ${result.boundAid}`);
+        return;
       }
-      if (!isValidAid(input)) { console.log('  ⚠ Owner AID 格式无效（需合法多级域名，如 alice.agentid.pub）'); continue; }
-      owner = input;
+      await promptDaemonOwnerManually(rl);
+      return;
     }
 
-    // 写入顶层 owners：新 owner 置首位（getOwner 取 owners[0]），保留其余去重
-    agentConfig.owners = [owner, ...(agentConfig.owners || []).filter(o => o !== owner)];
-    saveAgent(agentConfig);
-
-    console.log(`\n✅ AUN 渠道 Owner 已设置: ${owner}`);
-    console.log(`\n重启生效: evolclaw restart`);
-    const { generateInitSuccessMessage } = await import('../utils/welcome.js');
-    console.log(generateInitSuccessMessage('aun', true));
+    const agentConfig = loadAgent(target.aid);
+    console.log(`\n📡 Agent owner 绑定 — ${target.aid}\n`);
+    const result = await runAgentOwnerQrBindFlow(target.aid, agentConfig?.aid ?? target.aid, 'append');
+    if (result?.boundAid) {
+      console.log(`\n✅ agent owner 已绑定: ${result.boundAid}`);
+      return;
+    }
+    await promptAgentOwnerForAunManually(rl, target.aid);
   } finally {
     rl.close();
   }
+}
+
+async function pickAunOwnerBindTarget(
+  rl: readline.Interface,
+  daemonAid: string,
+): Promise<{ kind: 'daemon' } | { kind: 'agent'; aid: string } | null> {
+  const { agents } = loadAllAgents();
+  console.log('\n请选择 AUN owner 绑定目标：');
+  console.log(`  d. daemon owner (${daemonAid})`);
+  const letters = 'abcdefghijklmnopqrstuvwxyz';
+  for (let i = 0; i < agents.length; i++) {
+    console.log(`  ${letters[i]}. agent owner (${agents[i].aid})`);
+  }
+  console.log('  q. 取消');
+
+  const validAgentLetters = letters.slice(0, agents.length).split('');
+  while (true) {
+    const input = (await ask(rl, '请选择 [d]: ')).trim().toLowerCase() || 'd';
+    if (input === 'q') return null;
+    if (input === 'd') return { kind: 'daemon' };
+    if (validAgentLetters.includes(input)) {
+      return { kind: 'agent', aid: agents[letters.indexOf(input)].aid };
+    }
+    console.log(`无效选择，请输入 d${validAgentLetters.length ? `/${validAgentLetters.join('/')}` : ''}/q`);
+  }
+}
+
+async function promptDaemonOwnerManually(rl: readline.Interface): Promise<void> {
+  const fallback = (await ask(rl, '\n扫码未完成。手动输入 daemon owner AID（留空跳过）: ')).trim();
+  if (!fallback) return;
+  if (!isValidAid(fallback)) {
+    console.log('  ⚠ Owner AID 格式无效（需合法多级域名，如 alice.agentid.pub）');
+    return;
+  }
+  const owners = [fallback, ...(loadEvolclawConfig().owners || []).filter(o => o !== fallback)];
+  saveEvolclawConfig({ ...loadEvolclawConfig(), owners });
+  console.log(`✅ daemon owner 已设置: ${fallback}`);
+}
+
+async function promptAgentOwnerForAunManually(rl: readline.Interface, aid: string): Promise<void> {
+  const fallback = (await ask(rl, '\n扫码未完成。手动输入 agent owner AID（留空跳过）: ')).trim();
+  if (!fallback) return;
+  if (!isValidAid(fallback)) {
+    console.log('  ⚠ Owner AID 格式无效（需合法多级域名，如 alice.agentid.pub）');
+    return;
+  }
+  const agent = loadAgent(aid);
+  if (!agent) {
+    console.log(`  ⚠ 无法加载 agent 配置: ${aid}`);
+    return;
+  }
+  const owners = [fallback, ...(agent.owners || []).filter(o => o !== fallback)];
+  saveAgent({ ...agent, owners });
+  try {
+    const result = await ipcQuery<any>(resolvePaths().socket, { type: 'evolagent.reload', name: aid }, 30_000);
+    if (result?.ok) console.log('  ✓ agent owner 已热重载');
+  } catch { /* daemon not running */ }
+  console.log(`✅ agent owner 已设置: ${fallback}`);
 }
 
 // ==================== DingTalk ====================
