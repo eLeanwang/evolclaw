@@ -37,6 +37,15 @@ export async function main(args: string[]) {
     --baseagent <claude|codex|gemini>    默认: PATH 中第一个可用项
     --force                              已存在 defaults.json 时覆盖
 
+云部署非交互式初始化（结构化 JSON 输出）:
+  evolclaw init --non-interactive --owner <aid> [--format json] [选项]
+    --owner <aid>                        必填。唯一 daemon owner AID
+    --baseagent <claude|codex|gemini>    可选。默认从 PATH 检测
+    --projectpath <abs-path>             可选。默认项目目录（必须绝对路径，自动创建）
+    --ecweb                              可选。启用 ECWeb 自启动
+    --format json                        可选但推荐。stdout 输出 init.result JSON
+    --force                              已有不同 owner 时强制覆盖
+
 配置渠道（先 evolclaw agent new 创建 agent）:
   evolclaw init aun           AUN owner 绑定（daemon 或指定 agent）
   evolclaw init feishu        飞书扫码登录
@@ -79,6 +88,10 @@ export async function main(args: string[]) {
           nonInteractive,
           baseagent: getArgValue(args, '--baseagent'),
           force: args.includes('--force'),
+          owner: getArgValue(args, '--owner'),
+          projectpath: getArgValue(args, '--projectpath'),
+          ecweb: args.includes('--ecweb'),
+          format: getArgValue(args, '--format'),
         });
       }
       break;

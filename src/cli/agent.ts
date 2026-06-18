@@ -68,6 +68,7 @@ export interface AgentListResult {
 export interface AgentCreateResult {
   ok: true;
   aid: string;
+  ownerAid?: string;
   configPath: string;
   aidCreated: boolean;
   agentmdUploaded?: boolean;
@@ -830,6 +831,7 @@ export async function agentCreateNonInteractive(opts: AgentCreateNonInteractiveO
   return {
     ok: true,
     aid: opts.aid,
+    ownerAid: opts.owner,
     configPath: toPosix(path.join(agentDirPath, 'config.json'))!,
     aidCreated,
     agentmdUploaded,

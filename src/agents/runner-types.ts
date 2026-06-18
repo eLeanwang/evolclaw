@@ -308,7 +308,7 @@ export function realContextWindowForModel(model: string | undefined): number {
   return isOneMillionContextModel(model) ? 1000000 : 200000;
 }
 
-/** autoCompact trigger threshold: 1M models = 900000, otherwise 200000. */
-export function autoCompactWindowForModel(model: string | undefined): number {
-  return isOneMillionContextModel(model) ? 900000 : 200000;
+/** autoCompact trigger threshold: 180000 for all models (conservative for cache limits). */
+export function autoCompactWindowForModel(_model: string | undefined): number {
+  return 180000;
 }
