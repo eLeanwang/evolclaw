@@ -57,6 +57,29 @@ export class MessageBridge {
     return d;
   }
 
+  private availableBaseagentsFor(channelName: string): string[] {
+    const owningAgent = this.agentRegistry?.resolveByChannel(channelName);
+    if (!owningAgent) return [];
+    const prefix = `${owningAgent.name}::`;
+    return this.processor.getAvailableAgents()
+      .filter(key => key.startsWith(prefix))
+      .map(key => key.slice(prefix.length));
+  }
+
+  private async alignSessionBaseagent(channelName: string, session: any): Promise<any> {
+    const owningAgent = this.agentRegistry?.resolveByChannel(channelName);
+    if (!owningAgent) return session;
+    const available = this.availableBaseagentsFor(channelName);
+    if (available.length === 0 || available.includes(session.agentId)) return session;
+
+    const preferred = available.includes(owningAgent.baseagent)
+      ? owningAgent.baseagent
+      : available[0];
+    logger.warn(`[MessageBridge] Aligning unavailable session baseagent: session=${session.id} ${session.agentId} -> ${preferred} agent=${owningAgent.name} available=${available.join(',')}`);
+    await this.sessionManager.updateSession(session.id, { agentId: preferred, agentSessionId: null });
+    return { ...session, agentId: preferred, agentSessionId: undefined };
+  }
+
   /**
    * 为渠道注册消息桥梁：入站处理管线 + 出站命令响应
    *
@@ -155,13 +178,14 @@ export class MessageBridge {
         const effectiveProjectPath = owningAgent?.projectPath
           ?? this.defaultProjectPath;
 
-        const session = await this.sessionManager.getOrCreateSession(
+        let session = await this.sessionManager.getOrCreateSession(
           channelName, msg.channelId,
           effectiveProjectPath,
           msg.threadId, Object.keys(metadata).length ? metadata : undefined, this.extractTopicName(msg), msg.peerId, chatType,
-          undefined, msg.selfAID, msg.channelType || effectiveChannelType,
+          owningAgent?.baseagent, msg.selfAID, msg.channelType || effectiveChannelType,
           msg.peerType
         );
+        session = await this.alignSessionBaseagent(channelName, session);
 
         // 4. 群聊发送者标注由消息渲染层（message-renderer）逐条承担，不再在此硬编码前缀，
         //    消息日志因此保存干净原文。policy.messagePrefix 暂保留（未来清理）。

@@ -189,7 +189,7 @@ async function runBindBootstrapDaemon(evolclawCfg: ReturnType<typeof loadEvolcla
   process.on('exit', () => removeAll());
 }
 
-function readEvolclawVersion(): string {
+export function readEvolclawVersion(): string {
   try {
     const pkg = JSON.parse(fs.readFileSync(path.join(getPackageRoot(), 'package.json'), 'utf-8'));
     return pkg.version || 'unknown';
@@ -200,18 +200,9 @@ function readEvolclawVersion(): string {
 
 function detectAvailableBaseagentsForBind(): string[] {
   const out: string[] = [];
-  for (const cmd of ['claude', 'gemini']) {
-    try {
-      const dirs = (process.env.PATH || '').split(path.delimiter);
-      const exe = process.platform === 'win32' ? `${cmd}.cmd` : cmd;
-      if (dirs.some(dir => fs.existsSync(path.join(dir, exe)) || fs.existsSync(path.join(dir, cmd)))) out.push(cmd);
-    } catch { /* ignore */ }
+  for (const cmd of ['claude', 'gemini', 'codex']) {
+    if (commandExists(cmd)) out.push(cmd);
   }
-  try {
-    const dirs = (process.env.PATH || '').split(path.delimiter);
-    const exe = process.platform === 'win32' ? 'codex.cmd' : 'codex';
-    if (dirs.some(dir => fs.existsSync(path.join(dir, exe)) || fs.existsSync(path.join(dir, 'codex')))) out.push('codex');
-  } catch { /* ignore */ }
   return out;
 }
 
@@ -644,7 +635,7 @@ async function main() {
   const bindService = evolclawCfg.aid
     ? new BindService({
         receiverAid: evolclawCfg.aid,
-        getAvailableBaseagents: () => ['claude', 'codex', 'gemini'].filter(name => (defaults as any).baseagents?.[name] !== undefined),
+        getAvailableBaseagents: detectAvailableBaseagentsForBind,
         getUptimeSeconds: () => Math.floor(process.uptime()),
         onDaemonOwnersUpdated: owners => { processLevelOwners = owners; },
       })
@@ -1069,10 +1060,13 @@ async function main() {
       timestamp: Date.now()
     });
 
+    // Run async operations in parallel
     const agent = agentRegistry.resolveByChannel(inst.adapter.channelKey) ?? agentRegistry.resolveByChannel(name);
-    if (agent) await ensureTriggerSchedulerStarted(agent);
-    sendOnlineNoticeForChannel(inst);
-    await trySendPendingRestartNotice();
+    await Promise.all([
+      agent ? ensureTriggerSchedulerStarted(agent) : Promise.resolve(),
+      Promise.resolve().then(() => sendOnlineNoticeForChannel(inst)),
+      trySendPendingRestartNotice(),
+    ]);
   };
   const markChannelDisconnected = (channelName: string): void => {
     connectedChannels.delete(channelName);
@@ -1154,7 +1148,14 @@ async function main() {
         if (bindService && parsed?.type === 'bind.request') {
           const response = await bindService.handleRequest(parsed, opts.peerId);
           if (response) {
-            await controlChannel!.sendMessage(opts.channelId, JSON.stringify(response));
+            // 用 sendStructured 直发 typed payload（payload.type='bind.response'），
+            // 不能用 sendMessage——它会把内容包成 {type:'text', text:...}，App 无法识别。
+            // encrypted 跟随入站请求：bind.response 与 bind.request 的加密/明文对称。
+            await controlChannel!.sendStructured(
+              opts.channelId,
+              response as unknown as Record<string, any>,
+              { metadata: { encrypted: opts.encrypted } },
+            );
           }
           return;
         }
@@ -1178,7 +1179,13 @@ async function main() {
         // menu.* JSON 路由：owner 已在上方校验，转交 execMenuForControl（fromControlChannel=true）
         if (parsed && typeof parsed === 'object' && typeof parsed.type === 'string' && parsed.type.startsWith('menu.')) {
           const response = await cmdHandler.execMenuForControl(parsed, opts.peerId);
-          await controlChannel!.sendMessage(opts.channelId, JSON.stringify(response));
+          // 同 bind.response：sendStructured 直发 typed payload（payload.type='menu.response'），
+          // 不能用 sendMessage（会包成 {type:'text',...}）；encrypted 跟随入站请求保持对称。
+          await controlChannel!.sendStructured(
+            opts.channelId,
+            response as unknown as Record<string, any>,
+            { metadata: { encrypted: opts.encrypted } },
+          );
           return;
         }
         // owner 发的其他内容：提示可用指令
@@ -1660,7 +1667,7 @@ async function main() {
 }
 
 // 仅在直接执行时启动；导入此模块（如单元测试）时不触发 main()。
-import { isMainScript, onShutdown } from './utils/cross-platform.js';
+import { isMainScript, onShutdown, commandExists } from './utils/cross-platform.js';
 if (isMainScript(import.meta.url)) {
   main().catch((error) => {
     const msg = `Fatal error: ${error?.stack || error}`;

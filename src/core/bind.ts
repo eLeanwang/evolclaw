@@ -2,8 +2,9 @@ import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { getPackageRoot } from '../paths.js';
-import { loadAgent, loadDefaults, loadEvolclawConfig, saveAgent, saveEvolclawConfig } from '../config-store.js';
+import { loadAgent, loadEvolclawConfig, saveAgent, saveEvolclawConfig } from '../config-store.js';
 import { resolveBehavior } from '../config/config-manager.js';
+import { readEvolclawVersion } from '../index.js';
 import type { BaseagentsBlock, BehaviorConfig, ChannelInstance } from '../types.js';
 
 export type BindType = 'daemon' | 'agent';
@@ -82,10 +83,11 @@ export interface BindResponsePayload {
     daemonAid: string;
     agentAid?: string;
     bindType: BindType;
-    active_baseagent: string;
+    baseagents?: string[];
+    active_baseagent?: string;
     model?: string;
     effort?: string;
-    channels: BindChannelInfo[];
+    channels?: BindChannelInfo[];
     version?: string;
     platform?: 'windows' | 'macos' | 'linux';
     uptime?: number;
@@ -264,7 +266,7 @@ export class BindService {
       task.boundAid = fromAid;
       task.boundName = payload.clientName;
       task.finishedAt = Date.now();
-      const details = this.buildBindDetails(task);
+      const details = task.bindType === 'agent' ? this.buildAgentBindDetails(task) : null;
       return {
         type: 'bind.response',
         bindType: task.bindType,
@@ -273,17 +275,18 @@ export class BindService {
           daemonAid: task.receiverAid,
           ...(task.bindType === 'agent' ? { agentAid: task.targetAid } : {}),
           bindType: task.bindType,
-          active_baseagent: details.baseagent.active_baseagent,
-          model: details.baseagent.model,
-          effort: details.baseagent.effort,
-          channels: details.channels,
           ...(task.bindType === 'daemon'
             ? {
                 version: readEvolclawVersion(),
                 platform: getPlatform(),
                 uptime: this.opts.getUptimeSeconds(),
+                baseagents: this.opts.getAvailableBaseagents(),
               }
             : {
+                active_baseagent: details!.baseagent.active_baseagent,
+                model: details!.baseagent.model,
+                effort: details!.baseagent.effort,
+                channels: details!.channels,
                 agentName: task.agentName,
               }),
         },
@@ -293,20 +296,12 @@ export class BindService {
     }
   }
 
-  private buildBindDetails(task: BindTask): { baseagent: BindBaseagentInfo; channels: BindChannelInfo[] } {
-    if (task.bindType === 'agent') {
-      const agent = loadAgent(task.targetAid);
-      const behavior = resolveBehavior({ self: task.targetAid }, { expand: true });
-      return {
-        baseagent: resolveBaseagentInfo(behavior),
-        channels: summarizeChannels(agent?.channels ?? []),
-      };
-    }
-
-    const defaults = loadDefaults() as BaseagentConfigLike | null;
+  private buildAgentBindDetails(task: BindTask): { baseagent: BindBaseagentInfo; channels: BindChannelInfo[] } {
+    const agent = loadAgent(task.targetAid);
+    const behavior = resolveBehavior({ self: task.targetAid }, { expand: true });
     return {
-      baseagent: resolveBaseagentInfo(defaults),
-      channels: [],
+      baseagent: resolveBaseagentInfo(behavior),
+      channels: summarizeChannels(agent?.channels ?? []),
     };
   }
 
@@ -383,9 +378,7 @@ function timingSafeTokenEqual(token: string, expectedHash: string): boolean {
   return crypto.timingSafeEqual(actual, expected);
 }
 
-type BaseagentConfigLike = Pick<BehaviorConfig, 'active_baseagent' | 'baseagents'>;
-
-function resolveBaseagentInfo(config: BaseagentConfigLike | null): BindBaseagentInfo {
+function resolveBaseagentInfo(config: Pick<BehaviorConfig, 'active_baseagent' | 'baseagents'> | null): BindBaseagentInfo {
   const baseagents = (config?.baseagents ?? {}) as BaseagentsBlock;
   const active_baseagent = ('active_baseagent' in (config ?? {}) && typeof (config as BehaviorConfig)?.active_baseagent === 'string')
     ? (config as BehaviorConfig).active_baseagent!
@@ -417,13 +410,4 @@ function getPlatform(): 'windows' | 'macos' | 'linux' {
   if (process.platform === 'win32') return 'windows';
   if (process.platform === 'darwin') return 'macos';
   return 'linux';
-}
-
-function readEvolclawVersion(): string {
-  try {
-    const pkg = JSON.parse(fs.readFileSync(path.join(getPackageRoot(), 'package.json'), 'utf-8'));
-    return pkg.version || 'unknown';
-  } catch {
-    return 'unknown';
-  }
 }

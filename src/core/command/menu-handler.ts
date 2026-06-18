@@ -229,16 +229,24 @@ function listDirectory(
   const entries: FileListEntry[] = page.map(dirent => {
     const full = path.join(realPath, dirent.name);
     const info = entryInfoByName.get(dirent.name) ?? { isDirectory: false, followTarget: true };
-    let stat: fs.Stats | null = null;
-    try {
-      stat = info.followTarget ? fs.statSync(full) : fs.lstatSync(full);
-    } catch {}
+    // Only stat when we need size/mtime (dirent already tells us if it's a directory)
+    let size: number | null = null;
+    let mtime = 0;
+    let birthtime = 0;
+    if (!info.isDirectory) {
+      try {
+        const stat = info.followTarget ? fs.statSync(full) : fs.lstatSync(full);
+        size = stat.size;
+        mtime = stat.mtimeMs;
+        birthtime = stat.birthtimeMs;
+      } catch {}
+    }
     return {
       name: dirent.name,
       type: info.isDirectory ? 'directory' : 'file',
-      size: info.isDirectory ? null : (stat?.size ?? null),
-      mtime: stat?.mtimeMs ?? 0,
-      birthtime: stat?.birthtimeMs ?? 0,
+      size,
+      mtime,
+      birthtime,
     };
   });
 
@@ -982,31 +990,14 @@ export async function execMenuUpdate(this: any,
   }
 
   if (cmdBase === '/baseagent') {
-    if (!isAdmin) return { error: '无权限', code: 'NO_PERMISSION' };
-    // scope 决定写入层级：
-    //   'session' — 仅切当前会话 runner（等价 /baseagent slash 命令），不改 agent 默认值
-    //   'default' — 仅改 agent 默认值（影响后续新会话），不触碰当前会话
-    //   'both'（默认，向后兼容）— 先切当前会话，成功后再写 agent 默认值
-    const scope: 'session' | 'default' | 'both' = (args?.scope === 'session' || args?.scope === 'default') ? args.scope : 'both';
-    if (scope === 'default' && !evolagent) {
-      return { error: '当前 channel 无绑定 agent，无法设置默认 baseagent', code: 'EXEC_FAILED' };
-    }
+    if (identity.role !== 'owner') return { error: '无权限', code: 'NO_PERMISSION' };
+    if (!evolagent) return { error: '当前 channel 无绑定 agent，无法设置默认 baseagent', code: 'EXEC_FAILED' };
     const valid = this.getAvailableBaseagents(channel);
     if (valid.length && !valid.includes(arg)) {
       return { error: `无效 baseagent: ${arg}，可选: ${valid.join(' / ')}`, code: 'INVALID_VALUE' };
     }
-    // 当前会话切换走 slash 命令的完整逻辑（涉及 runner 状态、session.agentId 重新挂载等）
-    // 仅在 slash 命令成功后才持久化到 evolagent config，避免失败时配置已落盘
-    if (scope !== 'default' && session && session.agentId !== arg) {
-      const result = await this._handleInternal(`/baseagent ${arg}`, channel, channelId, undefined, userId);
-      const payload = result as any;
-      if (payload?.kind === 'command.error') {
-        return { error: payload.text || '切换失败', code: 'EXEC_FAILED' };
-      }
-    }
-    // 持久化到 evolagent config（影响后续新会话）
-    if (scope !== 'session' && evolagent) evolagent.setActiveBaseagent(arg);
-    return { data: { baseagent: arg, scope } };
+    evolagent.setActiveBaseagent(arg);
+    return { data: { baseagent: arg, scope: 'default', currentSessionBaseagent: session?.agentId ?? null } };
   }
 
   if (cmdBase === '/model') {

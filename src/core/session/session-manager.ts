@@ -674,11 +674,12 @@ export class SessionManager {
     return session;
   }
 
-  async updateSession(sessionId: string, updates: Partial<Pick<Session, 'chatType' | 'name' | 'metadata' | 'sessionMode'>> & { agentSessionId?: string | null }): Promise<void> {
+  async updateSession(sessionId: string, updates: Partial<Pick<Session, 'agentId' | 'chatType' | 'name' | 'metadata' | 'sessionMode'>> & { agentSessionId?: string | null }): Promise<void> {
     const loaded = this.loadSessionForUpdate(sessionId);
     if (!loaded) return;
     const { current } = loaded;
 
+    if (updates.agentId !== undefined) current.agentId = updates.agentId;
     if (updates.chatType !== undefined) current.chatType = updates.chatType;
     if (updates.name !== undefined) current.name = updates.name;
     if (updates.sessionMode !== undefined) current.sessionMode = updates.sessionMode;

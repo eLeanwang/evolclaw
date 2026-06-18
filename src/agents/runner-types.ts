@@ -1,6 +1,21 @@
 import type { ChannelAdapter, ReplyContext, InteractionRequest, Message } from '../types.js';
 import type { InteractionRouter } from '../core/interaction-router.js';
 
+export const BASEAGENT_RUNNER_UNAVAILABLE = 'BASEAGENT_RUNNER_UNAVAILABLE';
+
+export class BaseagentRunnerUnavailableError extends Error {
+  readonly code = BASEAGENT_RUNNER_UNAVAILABLE;
+
+  constructor(
+    readonly evolagentName: string,
+    readonly baseagent: string,
+    readonly availableBaseagents: string[],
+  ) {
+    super(`Baseagent runner unavailable: ${evolagentName}::${baseagent}`);
+    this.name = 'BaseagentRunnerUnavailableError';
+  }
+}
+
 /** 权限审批的渠道交互上下文 */
 export interface PermissionContext {
   adapter?: ChannelAdapter;

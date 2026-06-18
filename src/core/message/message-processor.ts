@@ -2,7 +2,7 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import crypto from 'crypto';
-import { type AgentRunnerFull, hasCompact, type AgentEvent, type Compactable, type AgentTokenUsage, type AgentContextUsage, type AgentLastModelCall, type AgentModelCall, autoCompactWindowForModel, isClaudeContextUsageModel } from '../../agents/runner-types.js';
+import { BaseagentRunnerUnavailableError, type AgentRunnerFull, hasCompact, type AgentEvent, type Compactable, type AgentTokenUsage, type AgentContextUsage, type AgentLastModelCall, type AgentModelCall, autoCompactWindowForModel, isClaudeContextUsageModel } from '../../agents/runner-types.js';
 import { SessionManager } from '../session/session-manager.js';
 import { appendMessageLog, buildOutboundEntry } from './message-log.js';
 import { IMRenderer } from './im-renderer.js';
@@ -194,17 +194,51 @@ export class MessageProcessor {
    * - `channel` is used to look up the owning EvolAgent (via registry).
    * - `baseagent` (e.g. 'claude') comes from `session.agentId`.
    *
-   * Falls back to `primaryRunnerKey` (a composite key, e.g. `aid::claude`)
-   * when no match is found.
+   * Falls back only when the channel is not owned by a known EvolAgent. If the
+   * owner is known but its requested baseagent runner is missing, this is a
+   * session/config mismatch and must not silently route to a different backend.
    */
   getAgent(channel?: string, baseagent?: string): AgentRunnerFull {
     if (channel && baseagent) {
-      const evolName = this.agentRegistry?.resolveByChannel(channel)?.name || '<unknown>';
+      const owner = this.agentRegistry?.resolveByChannel(channel);
+      const evolName = owner?.name || '<unknown>';
       const key = `${evolName}::${baseagent}`;
       if (this.agentMap.has(key)) return this.agentMap.get(key)!;
+      if (owner) {
+        throw new BaseagentRunnerUnavailableError(evolName, baseagent, this.getAvailableBaseagentsForOwner(evolName));
+      }
     }
     if (this.agentMap.has(this.primaryRunnerKey)) return this.agentMap.get(this.primaryRunnerKey)!;
     return this.agentMap.values().next().value!;
+  }
+
+  private getAvailableBaseagentsForOwner(evolName: string): string[] {
+    const prefix = `${evolName}::`;
+    return [...this.agentMap.keys()]
+      .filter(key => key.startsWith(prefix))
+      .map(key => key.slice(prefix.length));
+  }
+
+  private async sendBaseagentMismatch(
+    channelKey: string,
+    channelId: string,
+    session: Session,
+    error: BaseagentRunnerUnavailableError,
+    replyContext?: ReplyContext,
+  ): Promise<void> {
+    const channelInfo = this.resolveChannelInfo(channelKey);
+    if (!channelInfo) return;
+    const available = error.availableBaseagents.length ? error.availableBaseagents.join(', ') : '(none)';
+    const text = `❌ 当前会话绑定的 baseagent 不可用: ${error.baseagent}\nAgent: ${error.evolagentName}\n可用: ${available}\n请使用 /baseagent 切换到可用后端。`;
+    await channelInfo.adapter.send(buildEnvelope({
+      taskId: `system-${crypto.randomUUID().replace(/-/g, '').slice(0, 10)}`,
+      sessionId: session.id,
+      channel: channelKey,
+      channelId,
+      agentName: error.evolagentName,
+      chatmode: session.sessionMode === 'proactive' ? 'proactive' : 'interactive',
+      replyContext,
+    }), { kind: 'system.error', text, subtype: 'baseagent_unavailable', recoverable: true });
   }
 
   /** 获取可用 agent 列表 */
@@ -429,7 +463,17 @@ export class MessageProcessor {
     const identityRole = session.identity?.role || 'anonymous';
     const monitorEnabled = this.globalSettings.idleMonitor?.enabled !== false;
     // 按 session.agentId 选择 agent 后端（idle-kill 路径需要 interrupt）
-    const agent = this.getAgent(channelKey, session.agentId);
+    let agent: AgentRunnerFull;
+    try {
+      agent = this.getAgent(channelKey, session.agentId);
+    } catch (error) {
+      if (error instanceof BaseagentRunnerUnavailableError) {
+        logger.error(`[MessageProcessor] baseagent mismatch blocked: session=${session.id} channel=${channelKey} requested=${session.agentId} owner=${error.evolagentName} available=${error.availableBaseagents.join(',') || '<none>'}`);
+        await this.sendBaseagentMismatch(channelKey, message.channelId, session, error, message.replyContext);
+        return;
+      }
+      throw error;
+    }
 
     // 计算是否抑制中间输出（工具活动 + 流式文本）
     const shouldSuppress = (): boolean => {
@@ -554,7 +598,17 @@ export class MessageProcessor {
     }
 
     const { adapter, options } = channelInfo;
-    const agent = this.getAgent(channelKey, session.agentId);
+    let agent: AgentRunnerFull;
+    try {
+      agent = this.getAgent(channelKey, session.agentId);
+    } catch (error) {
+      if (error instanceof BaseagentRunnerUnavailableError) {
+        logger.error(`[MessageProcessor] baseagent mismatch blocked: session=${session.id} channel=${channelKey} requested=${session.agentId} owner=${error.evolagentName} available=${error.availableBaseagents.join(',') || '<none>'}`);
+        await this.sendBaseagentMismatch(channelKey, message.channelId, session, error, message.replyContext);
+        return;
+      }
+      throw error;
+    }
     const streamKey = session.id;
 
     // 密文优先归一化：合并批次的 replyContext.metadata.encrypted 默认取自最后一条，
@@ -1188,12 +1242,13 @@ export class MessageProcessor {
         isContextTooLongText(sr.lastReplyText) ||
         isContextTooLongText(sr.errors?.join(' ') || '') ||
         isContextTooLongText(sr.fullText);
-      const isPromptTooLong = streamResult.isError && !!session.agentSessionId && canCompactAgent(agent)
+      const compactAgent = canCompactAgent(agent) ? agent : undefined;
+      const isPromptTooLong = streamResult.isError && !!session.agentSessionId && !!compactAgent
         && streamHitContextLimit(streamResult);
       if (isPromptTooLong) {
         renderer.addNotice('上下文过长，正在压缩会话...', 'warn', 'compact-trigger', true);
         await renderer.flush();
-        const compacted = await agent.compact(session.id, session.agentSessionId!, absoluteProjectPath);
+        const compacted = await compactAgent.compact(session.id, session.agentSessionId!, absoluteProjectPath);
         if (compacted) {
           renderer.addNotice('✅ 压缩完成，继续处理...', 'info', 'compact-retry', true);
           const retryStream = await agent.runQuery(

@@ -998,46 +998,41 @@ export class CommandHandler {
     }
 
     // Helper: extract nameOrId and find trigger with permission check
-    const extractAndFindTrigger = (sub: string, prefix: string, action: string): { error: string } | { definition: TriggerDefinition; nameOrId: string } => {
+    const extractAndFindTrigger = (sub: string, prefix: string, action: string): { definition: TriggerDefinition; nameOrId: string } => {
       const nameOrId = sub.slice(prefix.length).trim();
-      if (!nameOrId) return { error: `❌ 用法：/trigger ${action} <名称>` };
+      if (!nameOrId) throw new Error(`❌ 用法：/trigger ${action} <名称>`);
       const definition = this.findTriggerDefinition(scheduler, nameOrId, peerId, channel, isAdmin);
       if (!definition) {
-        return {
-          error: isAdmin
+        throw new Error(
+          isAdmin
             ? `❌ 未找到触发器：${nameOrId}`
-            : `❌ 未找到触发器 "${nameOrId}"，或无权限${action === 'show' ? '查看' : '修改'}`,
-        };
+            : `❌ 未找到触发器 "${nameOrId}"，或无权限${action === 'show' ? '查看' : '修改'}`
+        );
       }
       return { definition, nameOrId };
     };
 
     if (sub.startsWith('cancel ')) {
-      const result = extractAndFindTrigger(sub, 'cancel ', 'cancel');
-      if ('error' in result) return result.error;
-      const cancelled = scheduler.cancel(result.definition.id);
+      const { definition } = extractAndFindTrigger(sub, 'cancel ', 'cancel');
+      const cancelled = scheduler.cancel(definition.id);
       this.eventBus.publish({ type: 'trigger:cancelled', triggerId: cancelled.id, name: cancelled.name, by: peerId });
       return `✅ 触发器已取消：**${cancelled.name}**`;
     }
 
     if (sub.startsWith('enable ')) {
-      const result = extractAndFindTrigger(sub, 'enable ', 'enable');
-      if ('error' in result) return result.error;
-      scheduler.setEnabled(result.definition.id, true);
-      return `✅ 触发器已启用：**${result.definition.name}**`;
+      const { definition } = extractAndFindTrigger(sub, 'enable ', 'enable');
+      scheduler.setEnabled(definition.id, true);
+      return `✅ 触发器已启用：**${definition.name}**`;
     }
 
     if (sub.startsWith('disable ')) {
-      const result = extractAndFindTrigger(sub, 'disable ', 'disable');
-      if ('error' in result) return result.error;
-      scheduler.setEnabled(result.definition.id, false);
-      return `✅ 触发器已暂停：**${result.definition.name}**`;
+      const { definition } = extractAndFindTrigger(sub, 'disable ', 'disable');
+      scheduler.setEnabled(definition.id, false);
+      return `✅ 触发器已暂停：**${definition.name}**`;
     }
 
     if (sub.startsWith('show ')) {
-      const result = extractAndFindTrigger(sub, 'show ', 'show');
-      if ('error' in result) return result.error;
-      const definition = result.definition;
+      const { definition } = extractAndFindTrigger(sub, 'show ', 'show');
       const details = scheduler.show(definition.id);
       const view = this.definitionToTriggerView(definition, scheduler);
       const nextStr = view.nextFireAt ? new Date(view.nextFireAt).toLocaleString() : '未计算';

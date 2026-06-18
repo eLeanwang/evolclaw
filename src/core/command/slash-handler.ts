@@ -88,9 +88,20 @@ export async function handleSlashCommand(this: any,
   const identity = overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId);
   const policy = this.getPolicy(channel);
 
-  // 按当前会话选择 agent 后端
+  // 按当前会话选择 agent 后端。懒加载，避免错配 session 卡住 /baseagent 等恢复命令。
   const activeSession = await this.sessionManager.getActiveSession(channel, channelId);
-  const agent = this.getAgent(channel, activeSession?.agentId);
+  let activeAgent: any | undefined;
+  const getActiveAgent = () => {
+    if (!activeAgent) activeAgent = this.getAgent(channel, activeSession?.agentId);
+    return activeAgent;
+  };
+  const getActiveAgentIfAvailable = () => {
+    try {
+      return activeSession ? getActiveAgent() : undefined;
+    } catch {
+      return undefined;
+    }
+  };
 
   // 规范化命令（将别名转换为完整命令）
   const normalizedContent = normalizeSlashContent(content);
@@ -125,7 +136,7 @@ export async function handleSlashCommand(this: any,
     channel,
     channelId,
     activeSession,
-    activeAgent: agent,
+    activeAgent: getActiveAgentIfAvailable(),
     sessionManager: this.sessionManager,
     messageQueue: this.messageQueue,
     getAgentForSession: session => this.getAgent(channel, session.agentId),
@@ -548,9 +559,10 @@ export async function handleSlashCommand(this: any,
   // /baseagent 命令：查看或切换 Agent 后端
   if (normalizedContent === '/baseagent' || normalizedContent.startsWith('/baseagent ')) {
     const args = normalizedContent.slice(10).trim();
-    // 切换（带参）需权限：群聊 owner only，私聊 admin+；无参查询对所有人放开
-    if (args && (activeChatType === 'group' ? !isOwner : !isAdmin)) {
-      return { kind: 'command.error' as const, text: '❌ 无权限：此命令仅限管理员使用' };
+    const owningAgent = this.agentRegistry?.resolveByChannel(channel);
+    // 切换（带参）会修改 agent 默认 baseagent，仅 owner 可操作；无参查询对所有人放开
+    if (args && !isOwner) {
+      return { kind: 'command.error' as const, text: '❌ 无权限：切换 baseagent 仅限 owner 使用' };
     }
     const available = this.getAvailableBaseagents(channel);
 
@@ -559,6 +571,7 @@ export async function handleSlashCommand(this: any,
       const currentAgent = activeSession?.agentId
         || this.agentRegistry?.resolveByChannel(channel)?.baseagent
         || this.parseDefaultBaseagent();
+      const defaultAgent = owningAgent?.baseagent || this.parseDefaultBaseagent();
 
       // 尝试发送 CommandCard 卡片
       if (this.interactionRouter && available.length > 1) {
@@ -572,25 +585,25 @@ export async function handleSlashCommand(this: any,
             kind: 'command-card',
             title: '🔌 切换 Agent',
             buttons: available.map((a: string) => ({
-              label: a === currentAgent ? `✓ ${a}` : a,
+              label: a === defaultAgent ? `✓ ${a}` : a,
               command: `/baseagent ${a}`,
-              style: (a === currentAgent ? 'primary' : 'default') as 'primary' | 'default',
-              disabled: a === currentAgent,
+              style: (a === defaultAgent ? 'primary' : 'default') as 'primary' | 'default',
+              disabled: a === defaultAgent,
             })),
           },
         };
 
         const replyCtx = activeSession ? this.getReplyContext(activeSession) : undefined;
-        const cardResult = await this.sendCommandCard({ channel, channelId, interaction, replyCtx, canWrite: activeChatType === 'group' ? isOwner : isAdmin });
+        const cardResult = await this.sendCommandCard({ channel, channelId, interaction, replyCtx, canWrite: isOwner });
         if (cardResult === null) return null;
         return { kind: 'command.result' as const, text: cardResult };
       }
 
       // 降级：文本
-      const list = available.map((a: string) => `${a === currentAgent ? ' ✓' : '  '} ${a}`).join('\n');
-      const canSwitchAgent = activeChatType === 'group' ? isOwner : isAdmin;
+      const list = available.map((a: string) => `${a === defaultAgent ? ' ✓' : '  '} ${a}`).join('\n');
+      const canSwitchAgent = isOwner;
       if (canSwitchAgent) {
-        return { kind: 'command.result' as const, text: `当前 Agent: ${currentAgent}\n\n可用:\n${list}\n用法: /baseagent <name>` };
+        return { kind: 'command.result' as const, text: `当前会话: ${currentAgent}\n新会话默认: ${defaultAgent}\n\n可用:\n${list}\n用法: /baseagent <name>` };
       }
       return { kind: 'command.result' as const, text: `当前 Agent: ${currentAgent}` };
     }
@@ -599,23 +612,20 @@ export async function handleSlashCommand(this: any,
       return { kind: 'command.error' as const, text: `❌ 未知 Agent: ${args}\n可用: ${available.join(', ')}` };
     }
 
-    const result = await this.ensureSession(channel, channelId, threadId, chatType);
-    if ('error' in result) return { kind: 'command.error' as const, text: result.error };
-    const { session } = result;
-
-    // 取消原会话的 pending 权限请求和交互卡片
-    if (this.permissionGateway) {
-      this.permissionGateway.cancelAll(session.id);
-    }
-    if (this.interactionRouter) {
-      this.interactionRouter.cancelAll(session.id);
+    if (!owningAgent) {
+      return { kind: 'command.error' as const, text: '❌ 当前 channel 无绑定 agent，无法设置默认 baseagent' };
     }
 
-    // 切换到目标 agent（恢复已有会话或创建新会话）
-    const newSession = await this.sessionManager.switchAgent(channel, channelId, session.projectPath, args);
-    const hasExistingSession = newSession.agentSessionId ? '（恢复已有会话）' : '（新建会话）';
-    const projectName = this.getProjectName(session.projectPath);
-    let agentSwitchResponse = `✓ 已切换 Agent: ${args}\n  项目: ${projectName}\n  会话: ${displaySessionTitle(newSession.name, '(未命名)')}\n  ${hasExistingSession}`;
+    const currentSessionAgent = activeSession?.agentId || owningAgent.baseagent || this.parseDefaultBaseagent();
+    owningAgent.setActiveBaseagent(args);
+    const projectName = this.getProjectName(owningAgent.projectPath);
+    const agentSwitchResponse = [
+      `✓ 已设置新会话默认 baseagent: ${args}`,
+      `  Agent: ${owningAgent.name}`,
+      `  项目: ${projectName}`,
+      `  当前会话仍使用: ${currentSessionAgent}`,
+      '  新会话/新话题会话将使用新的默认 baseagent',
+    ].join('\n');
 
     if (this.shouldSuppressCardTriggerResult(source, channel)) return null;
     return { kind: 'command.result' as const, text: agentSwitchResponse };
@@ -650,6 +660,11 @@ export async function handleSlashCommand(this: any,
   // /model 命令：查看或切换模型/推理强度
   if (normalizedContent.startsWith('/model')) {
     const args = normalizedContent.slice(6).trim();
+
+    // 带参（切换/调整）需 admin+；无参查询仍允许低权限查看当前模型。
+    // Must happen before runner lookup so unavailable-session recovery errors
+    // do not mask authorization failures.
+    if (args && !isAdmin) return { kind: 'command.error' as const, text: '❌ 无权限：切换模型仅限管理员使用' };
 
     // 获取当前会话（话题会话可能绑定不同 agent）
     const modelResult = await this.ensureSession(channel, channelId, threadId, chatType);
@@ -703,9 +718,6 @@ export async function handleSlashCommand(this: any,
       }
       return { kind: 'command.result' as const, text: `当前模型: ${modelDisplayLabel(modelAgent, currentModel)}${effortHint}` };
     }
-
-    // 带参（切换/调整）需 admin+；无参查询已在上方返回
-    if (!isAdmin) return { kind: 'command.error' as const, text: '❌ 无权限：切换模型仅限管理员使用' };
 
     const parts = args.split(/\s+/);
     let newModel: string | undefined;
@@ -1084,7 +1096,7 @@ export async function handleSlashCommand(this: any,
           return { kind: 'command.error' as const, text: '⚠️ 当前正在处理消息，请稍后再试\n使用 /stop 中断当前任务后重试' };
         }
       }
-    } else if (agent.hasActiveStream(chatmodeSession.id) || this.messageQueue?.isProcessing(chatmodeSession.id)) {
+    } else if (getActiveAgent().hasActiveStream(chatmodeSession.id) || this.messageQueue?.isProcessing(chatmodeSession.id)) {
       return { kind: 'command.error' as const, text: '⚠️ 当前正在处理消息，请稍后再试\n使用 /stop 中断当前任务后重试' };
     }
 
@@ -1391,7 +1403,7 @@ export async function handleSlashCommand(this: any,
       channelId,
       projectPath,
       sessionName,
-      session?.agentId || this.primaryRunnerKey
+      this.agentRegistry?.resolveByChannel(channel)?.baseagent || session?.agentId || this.parseDefaultBaseagent()
     );
 
     this.eventBus.publish({
@@ -1404,11 +1416,12 @@ export async function handleSlashCommand(this: any,
       timestamp: Date.now()
     });
 
-    if (session) {
+    const previousAgent = getActiveAgentIfAvailable();
+    if (session && previousAgent) {
       // Reset agent backend state so the new
       // session starts with a fresh conversation history
-      await agent.clearSession(session.id, session.agentSessionId || '', session.projectPath);
-      await agent.closeSession(session.id);
+      await previousAgent.clearSession(session.id, session.agentSessionId || '', session.projectPath);
+      await previousAgent.closeSession(session.id);
     }
 
     return { kind: 'command.result' as const, text: `✓ 已创建新会话${sessionName ? `: ${sessionName}` : ''}\n  项目: ${this.getProjectName(projectPath)}\n  之前的对话历史已保留，可通过 /s 查看` };

@@ -182,18 +182,20 @@ export class ChannelLoader {
         try {
           await inst.connect();
           connected.push(inst.adapter.channelName);
-          try {
-            await onConnected?.(inst);
-          } catch (callbackErr) {
-            logger.warn(`[connectAll] ${inst.adapter.channelName} onConnected callback failed: ${callbackErr}`);
+          // Fire callback without blocking the connection pipeline
+          if (onConnected) {
+            Promise.resolve(onConnected(inst)).catch((callbackErr: any) => {
+              logger.warn(`[connectAll] ${inst.adapter.channelName} onConnected callback failed: ${callbackErr}`);
+            });
           }
         } catch (e) {
           failed.push({ name: inst.adapter.channelName, error: e });
           logger.warn(`[connectAll] ${inst.adapter.channelName} connect failed: ${e}`);
-          try {
-            await onFailed?.(inst, e);
-          } catch (callbackErr) {
-            logger.warn(`[connectAll] ${inst.adapter.channelName} onFailed callback failed: ${callbackErr}`);
+          // Fire callback without blocking the connection pipeline
+          if (onFailed) {
+            Promise.resolve(onFailed(inst, e)).catch((callbackErr: any) => {
+              logger.warn(`[connectAll] ${inst.adapter.channelName} onFailed callback failed: ${callbackErr}`);
+            });
           }
         }
       })();

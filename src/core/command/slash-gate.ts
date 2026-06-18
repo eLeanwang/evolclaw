@@ -113,7 +113,7 @@ export async function guardIdleCommand(opts: {
   channel: string;
   channelId: string;
   activeSession?: Session;
-  activeAgent: AgentRunnerFull;
+  activeAgent?: AgentRunnerFull;
   sessionManager: SessionManager;
   messageQueue?: MessageQueue;
   getAgentForSession: (session: Session) => AgentRunnerFull;
@@ -135,15 +135,19 @@ export async function guardIdleCommand(opts: {
     // 话题中：检查话题 session 是否在处理（不创建）
     const threadSession = await opts.sessionManager.getThreadSession(opts.channel, opts.channelId, opts.threadId);
     if (threadSession) {
-      const threadAgent = opts.getAgentForSession(threadSession);
-      const isBusy = threadAgent.hasActiveStream(threadSession.id) ||
-        opts.messageQueue?.isProcessing(threadSession.id);
+      let hasActiveStream = false;
+      try {
+        hasActiveStream = opts.getAgentForSession(threadSession).hasActiveStream(threadSession.id);
+      } catch {
+        // Runner mismatch should not block recovery commands such as /baseagent.
+      }
+      const isBusy = hasActiveStream || opts.messageQueue?.isProcessing(threadSession.id);
       if (isBusy) {
         return { kind: 'command.error', text: '⚠️ 当前正在处理消息，请稍后再试\n使用 /stop 中断当前任务后重试' };
       }
     }
   } else if (opts.activeSession) {
-    const isBusy = opts.activeAgent.hasActiveStream(opts.activeSession.id) ||
+    const isBusy = (opts.activeAgent?.hasActiveStream(opts.activeSession.id) ?? false) ||
       opts.messageQueue?.isProcessing(opts.activeSession.id);
     if (isBusy) {
       return { kind: 'command.error', text: '⚠️ 当前正在处理消息，请稍后再试\n使用 /stop 中断当前任务后重试' };

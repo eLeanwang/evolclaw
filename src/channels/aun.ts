@@ -587,6 +587,9 @@ export class AUNChannel {
   /** 观察者插话请求类型（owner → agent.AID）。详见 docs/observer-insert-design.md。 */
   private static readonly INJECT_REQUEST_TYPE = 'observer.inject';
 
+  /** 绑定请求类型（Evol App → 控制 AID）：快速路径，绕过白名单透传原始 payload JSON 给 bridge。 */
+  private static readonly BIND_REQUEST_TYPE = 'bind.request';
+
   // Reconnect state
   // SDK 自己跑无限指数退避（1s → 5min）；TS 层只在 SDK 够不到的两类场景下接管：
   //  1. flap：短命 connected 反复出现（SDK 不记忆跨轮 base delay，会从 1s 重新开始）
@@ -1248,6 +1251,21 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     if (p2pPayloadType === AUNChannel.INJECT_REQUEST_TYPE) {
       this.acknowledgeImmediately(messageId, seq);
       this.handleObserverInject(fromAid, payload, displayName, peerIdentity.type);
+      return;
+    }
+    // bind.request：Evol App 绑定请求。绕过白名单透传原始 payload JSON 给 bridge，
+    // 由控制 AID 的 onMessage 处理器（BindService.handleRequest）解析并回 bind.response。
+    // 透传 encrypted：bind.response 须与请求的加密/明文对称（见 onMessage 处理）。
+    if (p2pPayloadType === AUNChannel.BIND_REQUEST_TYPE) {
+      this.acknowledgeImmediately(messageId, seq);
+      this.dispatchMessage({
+        channelId: chatId, userId: fromAid,
+        text: JSON.stringify(payload),
+        chatType: 'private', messageId, seq,
+        peerName: displayName || undefined,
+        peerType: peerIdentity.type,
+        encrypted: msgEncrypted,
+      });
       return;
     }
     // payload 类型白名单：信号类消息（status / event / thought 等）不进 Agent

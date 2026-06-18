@@ -104,13 +104,16 @@ export async function cmdInit(options?: {
   console.log('');
 
   const defaultsPath = p.defaultsConfig;
-  const exists = fs.existsSync(defaultsPath);
+  const defaultsExisted = fs.existsSync(defaultsPath);
+  // “已初始化”以 evolclaw.json 为准：文件存在且控制 AID 已生成。
+  // 删除 evolclaw.json（aid 丢失）即视为未初始化，向导会重新补全 aid + owners。
+  const initialized = fs.existsSync(p.evolclawJson) && !!loadEvolclawConfig().aid;
 
   // ── 3. 非交互式分支 ──
   if (options?.nonInteractive) {
-    if (exists && !options.force) {
-      // 配置已存在且未 --force：不重写 defaults，但仍落到共享 tail（幂等补生成控制 AID）
-      console.log(`配置已存在: ${defaultsPath}（加 --force 可覆盖）`);
+    if (initialized && !options.force) {
+      // 已初始化（evolclaw.json + aid）且未 --force：不重写 defaults，但仍落到共享 tail（幂等补全）
+      console.log(`配置已存在: ${p.evolclawJson}（加 --force 可覆盖）`);
     } else {
       let chosen: Baseagent;
       if (options.baseagent) {
@@ -131,7 +134,7 @@ export async function cmdInit(options?: {
       }
 
       writeDefaults(chosen, available);
-      console.log(`✓ 已${exists ? '覆盖' : '创建'}: ${defaultsPath}`);
+      console.log(`✓ 已${defaultsExisted ? '覆盖' : '创建'}: ${defaultsPath}`);
       console.log(`  active_baseagent: ${chosen}`);
     }
     // 落到共享 tail（不 return）
@@ -201,7 +204,7 @@ export async function cmdInit(options?: {
     }
 
     try {
-      if (exists) {
+      if (defaultsExisted) {
         const ans = (await ask(rl, `配置文件已存在: ${defaultsPath}\n  是否覆盖？[y/N] `)).trim().toLowerCase();
         if (ans === 'y' || ans === 'yes') {
           const chosen = await askBaseagent();
