@@ -1,4 +1,4 @@
-import { AUNClient, GatewayDiscovery, E2EEError, type JsonObject } from '@agentunion/fastaun';
+import { AUNClient, E2EEError, type JsonObject } from '@agentunion/fastaun';
 
 import crypto from 'crypto';
 import fs from 'fs';
@@ -722,26 +722,11 @@ export class AUNChannel {
 
     // Migration from ~/.aun is handled by ensureDataDirs() at startup with a marker file.
 
-    // Gateway URL 解析：优先用配置的 gatewayUrl，否则通过 well-known 自动发现
-    let gateway = this.config.gatewayUrl || '';
-    if (!gateway) {
-      // AID 本身即域名（如 evolai.agentid.pub），用其查询 well-known，与 Python SDK 行为对齐
-      const wellKnownUrl = `https://${aidName}/.well-known/aun-gateway`;
-      try {
-        const discovery = new GatewayDiscovery({});
-        gateway = await discovery.discover(wellKnownUrl);
-        logger.info(`${this.logPrefix()} Gateway discovered: ${gateway}`);
-      } catch (e) {
-        logger.warn(`${this.logPrefix()} Well-known discovery failed (${e}), no fallback available`);
-      }
-    }
-
-    if (!gateway) {
-      logger.error(`${this.logPrefix()} Cannot resolve gateway URL from AID`);
-      throw new Error('Cannot resolve gateway URL from AID');
-    }
-
-    logger.info(`${this.logPrefix()} Initializing: aid=${aidName}, gateway=${gateway}, aun_path=${aunPath}`);
+    // Gateway discovery/cache is owned by the SDK. Do not do a blocking
+    // well-known probe here: it prevents the SDK from using its token-store
+    // gateway metadata cache when well-known is temporarily unavailable.
+    const configuredGateway = this.config.gatewayUrl || '';
+    logger.info(`${this.logPrefix()} Initializing: aid=${aidName}, gateway=${configuredGateway || '<sdk-discovery>'}, aun_path=${aunPath}`);
 
     // 构造 AIDStore（slot=evolclaw daemon，与 cli/netcheck 共享 evolclaw 隔离键）
     // encryptionSeed / rootCaPath 由 getAidStore 内部注入
@@ -753,8 +738,9 @@ export class AUNChannel {
     this.store = store;
     const client = await loadClient(store, aidName);
     this.client = client;
-    // 记录应用层发现的 gateway 作为初始值（authenticate 后会用权威值覆盖）
-    this.gatewayUrl = gateway;
+    // 仅作为配置/状态展示。当前 SDK public API 不接受 authenticate gateway override；
+    // 实际 gateway 由 SDK discovery + token-store metadata cache 解析。
+    this.gatewayUrl = configuredGateway;
 
     // Register event handlers before connecting
     client.on('message.received', (data: unknown) => {
@@ -839,7 +825,7 @@ export class AUNChannel {
       const auth = await client.authenticate();
       this.trace('OUT', 'auth.authenticate.ok', { aid: client.aid, gateway: auth?.gateway, hasToken: !!auth?.access_token });
       this.trace('IN', 'auth.result', { aid: client.aid, gateway: auth?.gateway, hasToken: !!auth?.access_token });
-      const resolvedGateway = String(auth?.gateway ?? gateway);
+      const resolvedGateway = String(auth?.gateway ?? this.gatewayUrl);
       this.gatewayUrl = resolvedGateway;
       logger.info(`${this.logPrefix()} Authenticated as ${client.aid ?? '?'}, gateway=${resolvedGateway}`);
     } catch (e: any) {

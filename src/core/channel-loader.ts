@@ -57,6 +57,13 @@ export interface ChannelPlugin {
   createInstance(inst: ChannelInstanceConfig, ctx: ChannelBuildContext): Promise<ChannelInstance | null>;
 }
 
+export interface ConnectAllOptions {
+  concurrency?: number;
+  intervalMs?: number;
+  onConnected?: (inst: ChannelInstance) => void | Promise<void>;
+  onFailed?: (inst: ChannelInstance, error: unknown) => void | Promise<void>;
+}
+
 // ── Shared helpers for plugins ─────────────────────────────────────────────
 
 type ShowActivitiesMode = 'all' | 'none';
@@ -158,9 +165,12 @@ export class ChannelLoader {
     return result;
   }
 
-  async connectAll(instances: ChannelInstance[], { concurrency = 3, intervalMs = 50 } = {}): Promise<string[]> {
+  async connectAll(
+    instances: ChannelInstance[],
+    { concurrency = 3, intervalMs = 50, onConnected, onFailed }: ConnectAllOptions = {},
+  ): Promise<string[]> {
     const connected: string[] = [];
-    const failed: { name: string; error: any }[] = [];
+    const failed: { name: string; error: unknown }[] = [];
     const inflight = new Set<Promise<void>>();
 
     for (const inst of instances) {
@@ -172,13 +182,23 @@ export class ChannelLoader {
         try {
           await inst.connect();
           connected.push(inst.adapter.channelName);
+          try {
+            await onConnected?.(inst);
+          } catch (callbackErr) {
+            logger.warn(`[connectAll] ${inst.adapter.channelName} onConnected callback failed: ${callbackErr}`);
+          }
         } catch (e) {
           failed.push({ name: inst.adapter.channelName, error: e });
           logger.warn(`[connectAll] ${inst.adapter.channelName} connect failed: ${e}`);
+          try {
+            await onFailed?.(inst, e);
+          } catch (callbackErr) {
+            logger.warn(`[connectAll] ${inst.adapter.channelName} onFailed callback failed: ${callbackErr}`);
+          }
         }
       })();
 
-      const tracked = task.then(() => { inflight.delete(tracked); });
+      const tracked = task.finally(() => { inflight.delete(tracked); });
       inflight.add(tracked);
 
       if (intervalMs > 0) {
@@ -249,13 +269,15 @@ export interface ReloadHooksDeps {
   unregisterChannelInstance?: (channelName: string) => void;
   /** startChannel 重建渠道后回调，用于重新注入运行时依赖（如 AidStatsCollector）。 */
   onChannelStarted?: (inst: ChannelInstance) => void;
+  /** startChannel 首连成功后回调，用于同步连接状态/事件。 */
+  onChannelConnected?: (inst: ChannelInstance) => void | Promise<void>;
   messageQueue?: { isChannelProcessing(channelName: string): boolean };
   drainDelayMs?: number;
   drainTimeoutMs?: number;
 }
 
 export function buildReloadHooks(deps: ReloadHooksDeps): ReloadHooks {
-  const { channelLoader, channelInstances, registerChannelInstance, unregisterChannelInstance, messageQueue, onChannelStarted } = deps;
+  const { channelLoader, channelInstances, registerChannelInstance, unregisterChannelInstance, messageQueue, onChannelStarted, onChannelConnected } = deps;
   const drainDelayMs = deps.drainDelayMs ?? 500;
   const drainTimeoutMs = deps.drainTimeoutMs ?? 30000;
 
@@ -341,6 +363,7 @@ export function buildReloadHooks(deps: ReloadHooksDeps): ReloadHooks {
       onChannelStarted?.(newInst);
       await newInst.connect();
       channelInstances.push(newInst);
+      await onChannelConnected?.(newInst);
       logger.info(`[Reload] Started channel: ${channelName}`);
     },
   };

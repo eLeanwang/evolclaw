@@ -783,6 +783,12 @@ async function main() {
     }
   };
   cmdHandler.setTriggerSchedulerResolver((agentAid) => triggerSchedulers.get(agentAid));
+  const startedTriggerAgents = new Set<string>();
+  const ensureTriggerSchedulerStarted = async (agent: typeof triggerStartupAgents[number]) => {
+    if (startedTriggerAgents.has(agent.aid)) return;
+    startedTriggerAgents.add(agent.aid);
+    await startTriggerScheduler(agent);
+  };
 
   // 默认策略
   const defaultPolicy = {
@@ -940,10 +946,8 @@ async function main() {
     logger.warn(`[config] startup snapshot/boot-log failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
   }
 
-  // ── 连接所有渠道（异步，AUN 等 WebSocket 渠道在后台重连）──
-  const connected = await channelLoader.connectAll(channelInstances);
-
-  // 预填充 Feishu 已知 thread_id（重启后避免误判话题创建）
+  // 预填充 Feishu 已知 thread_id（重启后避免误判话题创建）。
+  // 必须早于 connect()，后台连接后 Feishu 可能立即收到消息。
   for (const inst of channelInstances) {
     const channelType = inst.channelType || inst.adapter.channelName;
     if (channelType === 'feishu' && 'preloadThreads' in inst.channel) {
@@ -952,21 +956,160 @@ async function main() {
     }
   }
 
-  for (const name of connected) {
-    const inst = channelInstances.find(i => i.adapter.channelName === name);
-    const type = inst?.channelType || name;
+  const connectedChannels = new Set<string>();
+  const onlineNoticeSent = new Set<string>();
+  const pendingFile = path.join(resolvePaths().dataDir, 'restart-pending.json');
+
+  const sendOnlineNoticeForChannel = (inst: ChannelInstance): void => {
+    const name = inst.adapter.channelName;
+    const agent = agentRegistry.resolveByChannel(inst.adapter.channelKey) ?? agentRegistry.resolveByChannel(name);
+    if (!agent) return;
+    if (!agent.config.debug?.upmsg) return;
+    const ownerAid = agent.config.owners?.[0];
+    if (!ownerAid) return;
+    const noticeKey = `${agent.aid}#${name}`;
+    if (onlineNoticeSent.has(noticeKey)) return;
+    onlineNoticeSent.add(noticeKey);
+
+    setTimeout(() => {
+      const adapter = agent.channels.get(inst.adapter.channelKey) ?? agent.channels.get(name);
+      if (!adapter) return;
+      let agentName = agent.aid;
+      try {
+        const mdPath = agentMdPath(agent.aid);
+        const content = fs.readFileSync(mdPath, 'utf-8');
+        const nameMatch = content.match(/^name:\s*"?([^"\n]+)/m);
+        if (nameMatch) agentName = nameMatch[1].trim().replace(/"$/, '');
+      } catch {}
+      const projectDir = path.basename(agent.projectPath);
+      const text = `✓ ${agentName} 已上线 | 工作目录: ${projectDir}`;
+      const envelope = buildEnvelope({
+        taskId: `system-online-${crypto.randomBytes(5).toString('hex')}`,
+        channel: adapter.channelName,
+        channelId: ownerAid,
+        agentName,
+      });
+      sendSystemPayload(adapter, envelope, {
+        kind: 'system.notice',
+        text,
+        subtype: 'restarted',
+      }).catch(() => {});
+    }, 1000 + Math.random() * 2000);
+  };
+
+  const trySendPendingRestartNotice = async (): Promise<void> => {
+    if (!fs.existsSync(pendingFile)) return;
+    try {
+      const pending = JSON.parse(fs.readFileSync(pendingFile, 'utf-8'));
+      const adapter = cmdHandler.getAdapter(pending.channel)
+        ?? channelInstances.find(inst => inst.adapter.channelKey === pending.channel)?.adapter;
+      if (!adapter) return;
+      if (!connectedChannels.has(pending.channel)
+        && !connectedChannels.has(adapter.channelName)
+        && !connectedChannels.has(adapter.channelKey)) {
+        logger.info(`[Restart] Pending notification waits for channel connection: ${pending.channel}`);
+        return;
+      }
+      const replyContext = pending.rootId
+        ? { replyToMessageId: pending.rootId, replyInThread: !!pending.threadId }
+        : undefined;
+      const owningAgent = agentRegistry.resolveByChannel(adapter.channelKey);
+      const envelope = buildEnvelope({
+        taskId: `system-restart-${process.pid}`,
+        channel: adapter.channelKey,
+        channelId: pending.channelId,
+        agentName: owningAgent?.aid || 'evolclaw',
+        replyContext,
+      });
+      await sendSystemPayload(adapter, envelope, {
+        kind: 'system.notice',
+        text: '✅ 服务重启成功！',
+        subtype: 'restarted',
+      });
+      fs.unlinkSync(pendingFile);
+      logger.info(`[Restart] Notification sent via ${pending.channel}`);
+    } catch (e) {
+      logger.error('[Restart] Failed to send restart notification:', e);
+    }
+  };
+
+  const summarizeConnectedChannels = (connected: string[]): string => {
+    const connectedTypeCount = new Map<string, number>();
+    const typeOrder: string[] = [];
+    for (const inst of channelInstances) {
+      const name = inst.adapter.channelName;
+      if (!connected.includes(name)) continue;
+      const type = inst.channelType || name;
+      if (!connectedTypeCount.has(type)) {
+        connectedTypeCount.set(type, 0);
+        typeOrder.push(type);
+      }
+      connectedTypeCount.set(type, connectedTypeCount.get(type)! + 1);
+    }
+    return typeOrder
+      .map(type => {
+        const n = connectedTypeCount.get(type)!;
+        return n === 1 ? type : `${type}×${n}`;
+      })
+      .join(', ');
+  };
+
+  const markChannelConnected = async (inst: ChannelInstance): Promise<void> => {
+    const name = inst.adapter.channelName;
+    const key = inst.adapter.channelKey;
+    if (connectedChannels.has(name)) return;
+    connectedChannels.add(name);
+    connectedChannels.add(key);
+
+    const type = inst.channelType || name;
     eventBus.publish({
       type: 'channel:connected',
       channel: type.toLowerCase(),
       channelName: name,
       timestamp: Date.now()
     });
-  }
 
-  // Start trigger after channel adapters have been registered and connected.
-  // Immediate direct-message feedback then sees a usable adapter instead of racing startup.
+    const agent = agentRegistry.resolveByChannel(inst.adapter.channelKey) ?? agentRegistry.resolveByChannel(name);
+    if (agent) await ensureTriggerSchedulerStarted(agent);
+    sendOnlineNoticeForChannel(inst);
+    await trySendPendingRestartNotice();
+  };
+  const markChannelDisconnected = (channelName: string): void => {
+    connectedChannels.delete(channelName);
+    const inst = channelInstances.find(candidate => candidate.adapter.channelName === channelName);
+    if (inst) connectedChannels.delete(inst.adapter.channelKey);
+  };
+
+  // ── 连接所有渠道（后台首连，AUN/任意渠道故障不阻塞 daemon 主流程）──
+  logger.info(`🚀 EvolClaw core is ready; connecting ${channelInstances.length} channel(s) in background`);
+  const connectAllPromise = channelLoader.connectAll(channelInstances, {
+    concurrency: 10,
+    onConnected: markChannelConnected,
+    onFailed: (inst, error) => {
+      logger.warn(`[startup] ${inst.adapter.channelName} initial connect failed: ${error}`);
+    },
+  });
+
+  connectAllPromise.then((connected) => {
+    const channelSummary = summarizeConnectedChannels(connected);
+    logger.info(`✅ ${connected.length} channel(s) connected: ${channelSummary}`);
+    eventBus.publish({
+      type: 'system:started',
+      channels: connected.map(c => c.toLowerCase()),
+      timestamp: Date.now()
+    });
+  }).catch((e) => {
+    logger.warn(`[startup] channel connection task failed unexpectedly: ${e}`);
+  });
+
+  // Trigger scheduler 与渠道连接解耦：cron 定时任务独立于渠道可用性运行
+  // （触发时若渠道未连，发送侧自行排队/重试）。markChannelConnected 里的
+  // ensureTriggerSchedulerStarted 仅作"尽早启动"优化，此处保证即使渠道首连
+  // 全部失败（如 gateway 宕机），trigger 仍无条件启动。Set 去重，不会重复。
   for (const agent of triggerStartupAgents) {
-    await startTriggerScheduler(agent);
+    ensureTriggerSchedulerStarted(agent).catch((e) => {
+      logger.warn(`[startup] trigger scheduler start failed for ${agent.aid}: ${e}`);
+    });
   }
 
   // ── 控制 AID（daemon 进程身份）：pureIdentity 接入 AUN，独立于 evolagent ──
@@ -1056,41 +1199,6 @@ async function main() {
     }
   }
 
-  // 上线通知：延迟 1-3 秒后向 owner 发送上线消息（带 name + 工作目录）
-  // 需在配置中 debug.upmsg: true 手动开启
-  setTimeout(() => {
-    for (const name of connected) {
-      const agent = agentRegistry.resolveByChannel(name);
-      if (!agent) continue;
-      if (!agent.config.debug?.upmsg) continue;
-      const ownerAid = agent.config.owners?.[0];
-      if (!ownerAid) continue;
-      const adapter = agent.channels.get(name);
-      if (!adapter) continue;
-      // 尝试从 agent.md 读取 name
-      let agentName = agent.aid;
-      try {
-        const mdPath = agentMdPath(agent.aid);
-        const content = fs.readFileSync(mdPath, 'utf-8');
-        const nameMatch = content.match(/^name:\s*"?([^"\n]+)/m);
-        if (nameMatch) agentName = nameMatch[1].trim().replace(/"$/, '');
-      } catch {}
-      const projectDir = path.basename(agent.projectPath);
-      const text = `✓ ${agentName} 已上线 | 工作目录: ${projectDir}`;
-      const envelope = buildEnvelope({
-        taskId: `system-online-${crypto.randomBytes(5).toString('hex')}`,
-        channel: adapter.channelName,
-        channelId: ownerAid,
-        agentName,
-      });
-      sendSystemPayload(adapter, envelope, {
-        kind: 'system.notice',
-        text,
-        subtype: 'restarted',
-      }).catch(() => {});
-    }
-  }, 1000 + Math.random() * 2000);
-
   // 统一 channel:health 跨通道通知（仅 auth_error）
   // 按 (channelType, ownerId) 去重，避免同类型多实例重复通知
   eventBus.subscribe('channel:error', (event) => {
@@ -1124,34 +1232,6 @@ async function main() {
         logger.error(`[ChannelHealth] Failed to notify ${other.adapter.channelName} owner:`, err);
       });
     }
-  });
-
-  // 按 channelType 归组显示连接摘要（启动 banner 只显示类型+计数，详情看 `evolclaw status`）
-  const connectedTypeCount = new Map<string, number>();
-  const typeOrder: string[] = [];
-  for (const inst of channelInstances) {
-    const name = inst.adapter.channelName;
-    if (!connected.includes(name)) continue;
-    const type = inst.channelType || name;
-    if (!connectedTypeCount.has(type)) {
-      connectedTypeCount.set(type, 0);
-      typeOrder.push(type);
-    }
-    connectedTypeCount.set(type, connectedTypeCount.get(type)! + 1);
-  }
-  const channelSummary = typeOrder
-    .map(type => {
-      const n = connectedTypeCount.get(type)!;
-      return n === 1 ? type : `${type}×${n}`;
-    })
-    .join(', ');
-  const totalCount = connected.length;
-
-  logger.info(`🚀 EvolClaw is running with ${totalCount} channel(s): ${channelSummary}`);
-  eventBus.publish({
-    type: 'system:started',
-    channels: connected.map(c => c.toLowerCase()),
-    timestamp: Date.now()
   });
 
   // 先恢复消息队列。若某个 session 有原始 active/pending 消息，下面的泛化 resume 会跳过它。
@@ -1202,37 +1282,6 @@ async function main() {
       messageQueue.enqueue(session.id, resumeMessage, session.projectPath, { sessionKeyField: session.sessionKey }).catch(err => {
         logger.error(`[Resume] Failed to resume session ${session.id}:`, err);
       });
-    }
-  }
-
-  // 重启通知：通过渠道 adapter 发送（channel-agnostic）
-  const pendingFile = path.join(resolvePaths().dataDir, 'restart-pending.json');
-  if (fs.existsSync(pendingFile)) {
-    try {
-      const pending = JSON.parse(fs.readFileSync(pendingFile, 'utf-8'));
-      const adapter = cmdHandler.getAdapter(pending.channel);
-      if (adapter) {
-        const replyContext = pending.rootId
-          ? { replyToMessageId: pending.rootId, replyInThread: !!pending.threadId }
-          : undefined;
-        const owningAgent = agentRegistry.resolveByChannel(adapter.channelKey);
-        const envelope = buildEnvelope({
-          taskId: `system-restart-${process.pid}`,
-          channel: adapter.channelKey,
-          channelId: pending.channelId,
-          agentName: owningAgent?.aid || 'evolclaw',
-          replyContext,
-        });
-        await sendSystemPayload(adapter, envelope, {
-          kind: 'system.notice',
-          text: '✅ 服务重启成功！',
-          subtype: 'restarted',
-        });
-        logger.info(`[Restart] Notification sent via ${pending.channel}`);
-      }
-      fs.unlinkSync(pendingFile);
-    } catch (e) {
-      logger.error('[Restart] Failed to send restart notification:', e);
     }
   }
 
@@ -1329,6 +1378,7 @@ async function main() {
     channelInstances,
     registerChannelInstance,
     unregisterChannelInstance: (channelName: string) => {
+      markChannelDisconnected(channelName);
       processor.unregisterChannel(channelName);
       cmdHandler.unregisterChannel(channelName);
       msgBridge.removeChannel(channelName);
@@ -1340,6 +1390,7 @@ async function main() {
         if (typeof ch?.setAidStatsCollector === 'function') ch.setAidStatsCollector(aidStatsCollector);
       }
     },
+    onChannelConnected: markChannelConnected,
     messageQueue,
   });
 
@@ -1365,8 +1416,7 @@ async function main() {
     agent.status = 'running';
 
     // 连接
-    await channelLoader.connectAll(instances);
-    await startTriggerScheduler(agent);
+    await channelLoader.connectAll(instances, { onConnected: markChannelConnected });
     logger.info(`[HotLoad] ✓ Agent ${aid} online with ${instances.length} channel(s)`);
   };
 
@@ -1390,6 +1440,7 @@ async function main() {
           const inst = channelInstances.find(i => i.adapter.channelName === chName);
           if (inst) {
             try { await inst.disconnect(); } catch {}
+            markChannelDisconnected(inst.adapter.channelName);
             const idx = channelInstances.indexOf(inst);
             if (idx >= 0) channelInstances.splice(idx, 1);
           }
