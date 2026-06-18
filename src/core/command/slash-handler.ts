@@ -1552,8 +1552,11 @@ export async function handleSlashCommand(this: any,
     const ownedNames = new Set<string>();
     const evolagents = (this.agentRegistry?.list() ?? []).map((ag: any) => {
       const chans = (ag.channels ?? []).map((n: string) => { ownedNames.add(n); return channelHealth(n); });
-      const processing = this.messageQueue.getProcessingCountByAgent(ag.name);
-      const pending = this.messageQueue.getQueueLengthByAgent(ag.name);
+      // 队列按 agentName 聚合，入队时 agentName === EvolAgent.aid（见 message-bridge enqueue）。
+      // 这里必须用 ag.aid，不能用 ag.name —— toInfo 的 name 可能是 agent.md 的 displayName 短名，
+      // 与队列里的 AID 不匹配会导致 processing/pending 恒为 0。
+      const processing = this.messageQueue.getProcessingCountByAgent(ag.aid);
+      const pending = this.messageQueue.getQueueLengthByAgent(ag.aid);
       return {
         name: ag.name, aid: ag.aid ?? '', status: ag.status,
         baseagent: ag.baseagent ?? null,
@@ -1562,7 +1565,6 @@ export async function handleSlashCommand(this: any,
         projectPath: ag.projectPath ?? null,
         processing, pending,
         activeTasks: processing + pending,
-        activeSessions: ag.activeSessions ?? 0,
         lastActivity: ag.lastActivity ?? 0,
         error: ag.error,
         channels: chans,

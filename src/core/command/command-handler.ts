@@ -199,6 +199,12 @@ export class CommandHandler {
   private definitionToTriggerView(definition: TriggerDefinition, scheduler?: TriggerRuntimeScheduler): any {
     const target = definition.feedback.onSuccess.target ?? definition.feedback.onFailure.target;
     const schedule = this.scheduleViewFromSource(definition.source);
+    // 运行统计（fireCount/failCount/lastFiredAt/lastResult）不再存进 trigger.json
+    // （定义是不可变配置），改从审计日志按需汇总。受日志保留期限制，是保留窗口内的统计。
+    let stats: { fireCount: number; failCount: number; lastFiredAt?: number; lastResult?: string } = { fireCount: 0, failCount: 0 };
+    try {
+      if (scheduler?.stats) stats = scheduler.stats(definition.id);
+    } catch { /* 审计日志缺失/损坏时退回零值 */ }
     return {
       id: definition.id,
       name: definition.name,
@@ -217,8 +223,10 @@ export class CommandHandler {
       createdByPeerId: definition.origin?.peerId ?? '',
       createdByChannel: definition.origin?.channel ?? '',
       schedulerAid: definition.agentAid,
-      fireCount: 0,
-      failCount: 0,
+      fireCount: stats.fireCount,
+      failCount: stats.failCount,
+      lastFiredAt: stats.lastFiredAt,
+      lastResult: stats.lastResult,
       createdAt: definition.createdAt,
       updatedAt: definition.updatedAt,
       status: definition.enabled ? 'active' : 'disabled',

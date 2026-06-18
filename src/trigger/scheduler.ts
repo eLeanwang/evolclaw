@@ -3,7 +3,7 @@ import { CronExpressionParser } from 'cron-parser';
 import { logger } from '../utils/logger.js';
 import type { TriggerDefinitionManager } from './manager.js';
 import type { TriggerRunStateStore } from './state.js';
-import type { TriggerAuditLogger } from './audit.js';
+import type { TriggerAuditLogger, TriggerRunStats } from './audit.js';
 import type { TriggerScriptExecutor } from './script-executor.js';
 import type { TriggerFeedbackDispatcher } from './feedback.js';
 import {
@@ -74,6 +74,11 @@ export class TriggerRuntimeScheduler {
       schedule: this.state.readSchedule(triggerId),
       recentRuns: this.audit.recent(triggerId, 10),
     };
+  }
+
+  /** 运行统计（保留窗口内）：fireCount / failCount / lastFiredAt / lastResult。 */
+  stats(triggerId: string): TriggerRunStats {
+    return this.audit.stats(triggerId);
   }
 
   create(input: unknown, files: TriggerCreateFile[] = [], opts: { enable?: boolean } = {}): TriggerDefinition {

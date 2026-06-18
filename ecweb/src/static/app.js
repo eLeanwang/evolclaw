@@ -1886,7 +1886,7 @@ function agentHealthCard(ag) {
   for (const c of (ag.channels || [])) chans += channelHealthRow(c);
   h += `<div class="ahc-row"><span class="ahc-k">渠道</span><span class="ahc-v">${chans || '<span style="color:var(--dim)">无</span>'}</span></div>`;
   // 负载
-  const load = `${ag.processing ?? 0} 处理中 · ${ag.pending ?? 0} 待处理 · ${ag.activeSessions ?? 0} 会话`;
+  const load = `${ag.processing ?? 0} 处理中 · ${ag.pending ?? 0} 待处理`;
   h += `<div class="ahc-row"><span class="ahc-k">负载</span><span class="ahc-v">${load}</span></div>`;
   // 活动
   if (ag.lastActivity) h += `<div class="ahc-row"><span class="ahc-k">活动</span><span class="ahc-v">${fmtAgo(ag.lastActivity)} 前</span></div>`;
