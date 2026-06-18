@@ -69,6 +69,11 @@ scripts/
 
 # 备份文件
 *.bak
+*.backup
+
+# 临时图片
+tmp_*.png
+tmp_*.jpg
 
 # Hermes（已归档）
 hermes/
