@@ -46,6 +46,21 @@ const PERMISSION_MODE_KEYS = ['auto', 'bypass', 'readonly', 'plan', 'edit', 'req
 const FILE_FETCH_MAX_SIZE = 10 * 1024 * 1024;
 /** menu file: query 的 sha256 仅对 ≤ 2 MB 文件计算，超过返回 null（见设计文档 §7 决策 2） */
 const FILE_HASH_MAX_SIZE = 2 * 1024 * 1024;
+const FILE_LIST_DEFAULT_LIMIT = 500;
+const FILE_LIST_MAX_LIMIT = 1000;
+
+interface FileListEntry {
+  name: string;
+  type: 'file' | 'directory';
+  size: number | null;
+  mtime: number;
+  birthtime: number;
+}
+
+interface FileListEntryInfo {
+  isDirectory: boolean;
+  followTarget: boolean;
+}
 
 function getRenameName(args: any): string {
   return (args?.name ?? args?.title ?? args?.value ?? '').toString().trim();
@@ -94,6 +109,7 @@ function resolveMenuFilePath(
   input: string,
   session: { projectPath: string } | null | undefined,
   role: string | undefined,
+  expectType?: 'file' | 'directory',
 ): { realPath: string; projectPath: string; stat: fs.Stats } | { error: string; code: string } {
   if (!session?.projectPath) return { error: '当前无活跃会话', code: 'NO_ACTIVE_SESSION' };
   const raw = (input ?? '').toString().trim();
@@ -126,12 +142,115 @@ function resolveMenuFilePath(
     return { error: '无权限：项目外文件仅 owner 可取', code: 'NO_PERMISSION' };
   }
 
-  const stat = fs.statSync(realPath);
-  if (stat.isDirectory()) {
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(realPath);
+  } catch {
+    return { error: '文件不存在', code: 'NOT_FOUND' };
+  }
+  if (expectType === 'file' && stat.isDirectory()) {
     return { error: '暂不支持目录', code: 'NOT_SUPPORTED' };
+  }
+  if (expectType === 'directory' && !stat.isDirectory()) {
+    return { error: '不是目录', code: 'NOT_A_DIRECTORY' };
   }
 
   return { realPath, projectPath: realProjectPath, stat };
+}
+
+function parseFileListOffset(value: unknown): number {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.max(0, Math.floor(n)) : 0;
+}
+
+function parseFileListLimit(value: unknown): number {
+  const raw = value === undefined || value === null || value === ''
+    ? FILE_LIST_DEFAULT_LIMIT
+    : Number(value);
+  const n = Number.isFinite(raw) ? Math.floor(raw) : FILE_LIST_DEFAULT_LIMIT;
+  return Math.min(Math.max(1, n), FILE_LIST_MAX_LIMIT);
+}
+
+function isInProject(realPath: string, realProjectPath: string): boolean {
+  return realPath === realProjectPath || realPath.startsWith(realProjectPath + path.sep);
+}
+
+function getDirectoryEntryInfo(realPath: string, realProjectPath: string, role: string | undefined, dirent: fs.Dirent): FileListEntryInfo {
+  if (dirent.isDirectory()) return { isDirectory: true, followTarget: true };
+  if (!dirent.isSymbolicLink()) return { isDirectory: false, followTarget: true };
+  const full = path.join(realPath, dirent.name);
+  let targetRealPath: string;
+  try {
+    targetRealPath = fs.realpathSync(full);
+  } catch {
+    return { isDirectory: false, followTarget: false };
+  }
+  if (role !== 'owner' && !isInProject(targetRealPath, realProjectPath)) {
+    return { isDirectory: false, followTarget: false };
+  }
+  try {
+    return { isDirectory: fs.statSync(full).isDirectory(), followTarget: true };
+  } catch {
+    return { isDirectory: false, followTarget: false };
+  }
+}
+
+function listDirectory(
+  realPath: string,
+  options: { offset: number; limit: number; includeHidden: boolean; projectPath: string; role: string | undefined },
+): { data: { entries: FileListEntry[]; total: number; offset: number; limit: number; hasMore: boolean } } | { error: string; code: string } {
+  const { offset, limit, includeHidden, projectPath, role } = options;
+  let dirents: fs.Dirent[];
+  try {
+    dirents = fs.readdirSync(realPath, { withFileTypes: true });
+  } catch (e: any) {
+    const code = e?.code === 'EACCES' || e?.code === 'EPERM' ? 'NO_PERMISSION' : 'EXEC_FAILED';
+    return { error: `目录读取失败: ${e?.message ?? e}`, code };
+  }
+
+  if (!includeHidden) {
+    dirents = dirents.filter(d => !d.name.startsWith('.'));
+  }
+
+  const entryInfoByName = new Map<string, FileListEntryInfo>();
+  for (const dirent of dirents) {
+    entryInfoByName.set(dirent.name, getDirectoryEntryInfo(realPath, projectPath, role, dirent));
+  }
+
+  dirents.sort((a, b) => {
+    const ad = entryInfoByName.get(a.name)?.isDirectory ?? false;
+    const bd = entryInfoByName.get(b.name)?.isDirectory ?? false;
+    if (ad !== bd) return ad ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
+
+  const total = dirents.length;
+  const page = dirents.slice(offset, offset + limit);
+  const entries: FileListEntry[] = page.map(dirent => {
+    const full = path.join(realPath, dirent.name);
+    const info = entryInfoByName.get(dirent.name) ?? { isDirectory: false, followTarget: true };
+    let stat: fs.Stats | null = null;
+    try {
+      stat = info.followTarget ? fs.statSync(full) : fs.lstatSync(full);
+    } catch {}
+    return {
+      name: dirent.name,
+      type: info.isDirectory ? 'directory' : 'file',
+      size: info.isDirectory ? null : (stat?.size ?? null),
+      mtime: stat?.mtimeMs ?? 0,
+      birthtime: stat?.birthtimeMs ?? 0,
+    };
+  });
+
+  return {
+    data: {
+      entries,
+      total,
+      offset,
+      limit,
+      hasMore: offset + entries.length < total,
+    },
+  };
 }
 
 const CLI_EXEC_WHITELIST: Record<string, '*' | Set<string>> = {
@@ -790,7 +909,7 @@ export async function execMenuQuery(this: any,
     if (role !== 'owner' && role !== 'admin') {
       return { error: '无权限', code: 'NO_PERMISSION' };
     }
-    const resolved = resolveMenuFilePath(args?.path, session, role);
+    const resolved = resolveMenuFilePath(args?.path, session, role, 'file');
     if ('error' in resolved) return resolved;
     const { realPath, stat } = resolved;
 
@@ -1386,17 +1505,31 @@ export async function execMenuAction(this: any,
     return await this.execCliPassthrough(argv);
   }
 
-  // ── name=file action=fetch：拉取文件（§5.2） ──
-  // 内部等价于 /file <path>：复用 resolveMenuFilePath 校验链 + adapter.send(result.file)。
-  // 文件作为独立 result.file 消息异步发回；把请求 id 作为 correlationId 透传，
-  // 客户端用它把异步到达的文件消息对回这次 fetch 点击（§7.1）。
+  // ── name=file action=list/fetch：目录浏览 / 拉取文件 ──
+  // list 返回 JSON 目录项；fetch 内部等价于 /file <path>，复用 resolveMenuFilePath 校验链 + adapter.send(result.file)。
+  // fetch 文件作为独立 result.file 消息异步发回；把请求 id 作为 correlationId 透传，
+  // 客户端用它把异步到达的文件消息对回这次 fetch 点击。
   if (cmdBase === '/file') {
-    if (action !== 'fetch') return { error: `不支持的 file action: ${action}`, code: 'NOT_SUPPORTED' };
     // 权限（§6.3）：agent owner/admin 或 aid channel owner。项目外文件仅 owner（§6.2，由 resolveMenuFilePath 校验）。
     if (identity.role !== 'owner' && identity.role !== 'admin') {
       return { error: '无权限', code: 'NO_PERMISSION' };
     }
-    const resolved = resolveMenuFilePath(args?.path, session, identity.role);
+
+    if (action === 'list') {
+      const dirArg = (args?.path ?? '.').toString().trim() || '.';
+      const resolved = resolveMenuFilePath(dirArg, session, identity.role, 'directory');
+      if ('error' in resolved) return resolved;
+      const offset = parseFileListOffset(args?.offset);
+      const limit = parseFileListLimit(args?.limit);
+      const includeHidden = args?.includeHidden === true;
+      const listed = listDirectory(resolved.realPath, { offset, limit, includeHidden, projectPath: resolved.projectPath, role: identity.role });
+      if ('error' in listed) return listed;
+      return { data: { path: dirArg, ...listed.data } };
+    }
+
+    if (action !== 'fetch') return { error: `不支持的 file action: ${action}`, code: 'NOT_SUPPORTED' };
+
+    const resolved = resolveMenuFilePath(args?.path, session, identity.role, 'file');
     if ('error' in resolved) return resolved;
     const { realPath, stat } = resolved;
 
