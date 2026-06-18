@@ -696,7 +696,13 @@ export function gatewaySetPrice(args: any): ExecResult {
     // 写入网关价格覆盖层（price-resolver 的「优先级1 用户手动设置网关价」读此文件）。
     // 注意：必须是 model-prices-gateway.jsonl，不是 model-prices.jsonl（后者是官方价表）。
     const file = path.join(dir, 'model-prices-gateway.jsonl');
-    fs.appendFileSync(file, JSON.stringify(record) + '\n', 'utf-8');
+    const mode = 0o600; // owner-only read/write for security
+    const fd = fs.openSync(file, 'a', mode);
+    try {
+      fs.writeSync(fd, JSON.stringify(record) + '\n');
+    } finally {
+      fs.closeSync(fd);
+    }
     logger.info(`[gateway] 网关价格已更新: ${modelId}（写入网关价覆盖层 model-prices-gateway.jsonl）`);
   } catch (e: any) {
     return { error: e?.message || String(e), code: 'EXEC_FAILED' };

@@ -368,7 +368,7 @@ function hashToken(token: string): string {
 }
 
 function generatePublicToken(): string {
-  return crypto.randomBytes(12).toString('base64url');
+  return crypto.randomBytes(16).toString('base64url'); // 128 bits for stronger security
 }
 
 function timingSafeTokenEqual(token: string, expectedHash: string): boolean {
