@@ -127,47 +127,28 @@ function extractEntries(raw: any, scope: string): GatewayEntry[] {
 
 /** gatewayList — 列出全部作用域的网关配置（apiKey 掩码）+ 每个 agent 的 effective 配置（带来源标注）。 */
 export function gatewayList(): ExecResult {
-  // 添加函数入口日志
-  console.log('[gateway-env-debug] gatewayList() 被调用');
-  logger.info('[gateway-env-debug] gatewayList() 被调用');
-
   try {
     const gateways: GatewayEntry[] = [];
     const defaults = readDefaultsRaw();
-    logger.info('[gateway-env-debug] readDefaultsRaw 完成');
 
     if (defaults) gateways.push(...extractEntries(defaults, 'defaults'));
-    logger.info('[gateway-env-debug] extractEntries 完成');
 
     const aids = listAgentAids();
-    logger.info('[gateway-env-debug] listAgentAids 完成, aids:', aids);
 
     for (const aid of aids) {
       const raw = readAgentRaw(aid);
       if (raw) gateways.push(...extractEntries(raw, aid));
     }
-    logger.info('[gateway-env-debug] 所有 agent 的 gateways 提取完成');
 
     // 计算每个 agent 的 effective 配置（含来源标注）
     const effective = computeEffective(defaults, aids);
-    logger.info('[gateway-env-debug] computeEffective 完成');
-
-    console.log('[gateway-env-debug] 准备调用 detectEnvMismatch');
-    logger.info('[gateway-env-debug] 准备调用 detectEnvMismatch');
 
     // 检测环境变量配置与全局配置的差异
     const envMismatch = detectEnvMismatch(defaults, aids);
 
-    console.log('[gateway-env-debug] detectEnvMismatch 返回:', JSON.stringify(envMismatch));
-    logger.info('[gateway-env-debug] detectEnvMismatch 返回:', JSON.stringify(envMismatch));
-
-    const result = { data: { gateways, scopes: ['defaults', ...aids], types: GATEWAY_TYPES, effective, envMismatch } };
-    logger.info('[gateway-env-debug] 准备返回结果, envMismatch.debug 存在:', !!envMismatch.debug);
-
-    return result;
+    return { data: { gateways, scopes: ['defaults', ...aids], types: GATEWAY_TYPES, effective, envMismatch } };
   } catch (e) {
-    logger.error('[gateway-env-debug] gatewayList 执行出错:', e);
-    console.error('[gateway-env-debug] gatewayList 执行出错:', e);
+    logger.error('[gateway] gatewayList 执行出错:', e);
     throw e;
   }
 }
@@ -276,26 +257,9 @@ function detectEnvMismatch(defaults: any, aids: string[]): EnvMismatch {
   const result: EnvMismatch = { hasMismatch: false, mismatches: [] };
   const defaultsBa = defaults?.baseagents || {};
 
-  // 创建调试日志文件
-  const debugLogPath = path.join(resolvePaths().root, 'gateway-env-debug.log');
-  const logLines: string[] = [];
-  const log = (msg: string) => {
-    const timestamp = new Date().toISOString();
-    const line = `[${timestamp}] ${msg}`;
-    logLines.push(line);
-    console.log(`[gateway-env-debug] ${msg}`);
-  };
-
-  log('=== 开始检测环境变量配置 ===');
-
   // 读取全局 .env 文件
   const rootEnvPath = path.join(resolvePaths().root, '.env');
-  log(`全局 .env 路径: ${rootEnvPath}`);
-  log(`全局 .env 是否存在: ${fs.existsSync(rootEnvPath)}`);
-
   const rootEnvVars = parseEnvFileSync(rootEnvPath);
-  log(`全局 .env 中的变量: ${JSON.stringify(Object.keys(rootEnvVars))}`);
-  log(`全局 .env 内容: ${JSON.stringify(rootEnvVars, null, 2)}`);
 
   // 标准环境变量映射
   const standardEnvKeys: Record<string, string> = {
@@ -308,10 +272,6 @@ function detectEnvMismatch(defaults: any, aids: string[]): EnvMismatch {
     ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL || '(未设置)',
     ANTHROPIC_AUTH_TOKEN: process.env.ANTHROPIC_AUTH_TOKEN || '(未设置)',
   };
-  log(`进程环境变量 ANTHROPIC_BASE_URL: ${processEnvDebug.ANTHROPIC_BASE_URL}`);
-  log(`进程环境变量 ANTHROPIC_AUTH_TOKEN: ${processEnvDebug.ANTHROPIC_AUTH_TOKEN}`);
-
-  log(`\ndefaults.baseagents 内容: ${JSON.stringify(defaultsBa, null, 2)}`);
 
   // 收集调试信息返回给前端
   result.debug = {
@@ -323,30 +283,17 @@ function detectEnvMismatch(defaults: any, aids: string[]): EnvMismatch {
   // 检测全局默认配置中的环境变量
   for (const type of GATEWAY_TYPES) {
     const block = defaultsBa[type];
-    if (!block) {
-      log(`跳过类型 ${type}: 配置块不存在`);
-      continue;
-    }
-
-    log(`\n检测类型: ${type}`);
-    log(`配置块内容: ${JSON.stringify(block, null, 2)}`);
+    if (!block) continue;
 
     for (const [field, val] of Object.entries(block)) {
-      log(`  检查字段 ${field}: ${JSON.stringify(val)}`);
-
       // 情况1：配置值是 $ENV 引用
       if (typeof val === 'string' && val.startsWith(ENV_PREFIX)) {
         const envVarName = val.slice(ENV_PREFIX.length);
         const fileValue = rootEnvVars[envVarName];
         const processValue = process.env[envVarName];
 
-        log(`    -> $ENV 引用: ${envVarName}`);
-        log(`    -> .env 文件中的值: ${fileValue || '(未设置)'}`);
-        log(`    -> 进程环境变量值: ${processValue ? '(已设置)' : '(未设置)'}`);
-
         // .env 文件中未设置，但进程环境中有值
         if (!fileValue && processValue) {
-          log(`    -> 检测到不一致: .env 未设置但进程环境有值`);
           result.hasMismatch = true;
           result.mismatches.push({
             aid: 'defaults',
@@ -363,84 +310,47 @@ function detectEnvMismatch(defaults: any, aids: string[]): EnvMismatch {
         const fileValue = rootEnvVars[envVarName];
         const processValue = process.env[envVarName];
 
-        log(`    -> 实际值，对应环境变量: ${envVarName}`);
-        log(`    -> 配置中的值: ${val}`);
-        log(`    -> .env 文件中的值: ${fileValue || '(未设置)'}`);
-        log(`    -> 进程环境变量值: ${processValue || '(未设置)'}`);
-
         // 如果进程环境中有值，但配置中的值与进程环境不一致
         if (processValue && val !== processValue) {
-          log(`    -> 配置值与进程环境不一致`);
           // 同时检查 .env 文件：如果 .env 也没有这个值，说明需要同步
           if (!fileValue || fileValue !== processValue) {
-            log(`    -> 检测到不一致: .env 文件值也不匹配进程环境`);
             result.hasMismatch = true;
             result.mismatches.push({
               aid: 'defaults',
               type,
               field,
               envValue: fileValue || '(.env 中未设置)',
-              configValue: val, // 显示配置文件中的实际值
-              envVarName, // 添加环境变量名
-              processValue, // 添加进程环境的值
+              configValue: val,
+              envVarName,
+              processValue,
             });
-          } else {
-            log(`    -> .env 文件值与进程环境一致，跳过`);
           }
-        } else if (!processValue) {
-          log(`    -> 进程环境变量未设置，跳过`);
-        } else {
-          log(`    -> 配置值与进程环境一致，跳过`);
         }
-      } else {
-        log(`    -> 跳过: 不是字符串或不在标准字段列表中`);
       }
     }
   }
 
   // 检测每个 agent 的配置
-  log(`\n=== 开始检测 Agent 配置 ===`);
-  log(`Agent 列表: ${JSON.stringify(aids)}`);
-
   for (const aid of aids) {
-    log(`\n检测 Agent: ${aid}`);
     const agentRaw = readAgentRaw(aid);
     const agentBa = agentRaw?.baseagents || {};
 
-    log(`Agent ${aid} baseagents 内容: ${JSON.stringify(agentBa, null, 2)}`);
-
     // 读取该 agent 的 .env 文件
     const agentEnvPath = path.join(resolvePaths().agentsDir, aid, '.env');
-    log(`Agent ${aid} .env 路径: ${agentEnvPath}`);
-    log(`Agent ${aid} .env 是否存在: ${fs.existsSync(agentEnvPath)}`);
-
     const agentEnvVars = parseEnvFileSync(agentEnvPath);
-    log(`Agent ${aid} .env 中的变量: ${JSON.stringify(Object.keys(agentEnvVars))}`);
 
     for (const type of GATEWAY_TYPES) {
       const block = agentBa[type];
-      if (!block) {
-        log(`Agent ${aid} 跳过类型 ${type}: 配置块不存在`);
-        continue;
-      }
-
-      log(`Agent ${aid} 检测类型: ${type}`);
+      if (!block) continue;
 
       for (const [field, val] of Object.entries(block)) {
-        log(`  Agent ${aid} 检查字段 ${field}: ${JSON.stringify(val)}`);
-
         // 情况1：配置值是 $ENV 引用
         if (typeof val === 'string' && val.startsWith(ENV_PREFIX)) {
           const envVarName = val.slice(ENV_PREFIX.length);
           const fileValue = agentEnvVars[envVarName];
           const processValue = process.env[envVarName];
 
-          log(`    -> $ENV 引用: ${envVarName}`);
-          log(`    -> Agent .env 文件中的值: ${fileValue || '(未设置)'}`);
-          log(`    -> 进程环境变量值: ${processValue ? '(已设置)' : '(未设置)'}`);
-
           if (!fileValue && processValue) {
-            log(`    -> 检测到不一致`);
             result.hasMismatch = true;
             result.mismatches.push({
               aid,
@@ -457,12 +367,8 @@ function detectEnvMismatch(defaults: any, aids: string[]): EnvMismatch {
           const fileValue = agentEnvVars[envVarName];
           const processValue = process.env[envVarName];
 
-          log(`    -> 实际值，对应环境变量: ${envVarName}`);
-          log(`    -> Agent .env 文件中的值: ${fileValue || '(未设置)'}`);
-
           if (processValue && val !== processValue) {
             if (!fileValue || fileValue !== processValue) {
-              log(`    -> 检测到不一致`);
               result.hasMismatch = true;
               result.mismatches.push({
                 aid,
@@ -476,19 +382,6 @@ function detectEnvMismatch(defaults: any, aids: string[]): EnvMismatch {
         }
       }
     }
-  }
-
-  log(`\n=== 检测完成 ===`);
-  log(`发现不一致: ${result.hasMismatch}`);
-  log(`不一致数量: ${result.mismatches.length}`);
-  log(`不一致详情: ${JSON.stringify(result.mismatches, null, 2)}`);
-
-  // 写入日志文件
-  try {
-    fs.writeFileSync(debugLogPath, logLines.join('\n'), 'utf-8');
-    console.log(`[gateway-env-debug] 日志已写入: ${debugLogPath}`);
-  } catch (e) {
-    console.error(`[gateway-env-debug] 写入日志失败: ${e}`);
   }
 
   return result;

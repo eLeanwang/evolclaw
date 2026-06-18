@@ -310,10 +310,6 @@ export async function cmdStart(opts: { diagnose?: boolean; bindBootstrap?: boole
     }
   }
 
-  // 种入网关配置：从 env / settings.json 导入 baseUrl+apiKey 到 defaults（幂等）
-  const { reconcileBaseagentDefaults } = await import('../core/baseagent-seed.js');
-  reconcileBaseagentDefaults();
-
   // 控制 AID 门禁：缺 aid 且交互式 → 只补全控制 AID + owners（不重走 baseagent 向导）。
   // 非 TTY（restart-monitor/systemd/管道）不补全（无法交互），只提示后继续启动，daemon 侧 warn 兜底。
   const evolclawCfgStart = loadEvolclawConfig();

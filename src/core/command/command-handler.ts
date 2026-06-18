@@ -42,50 +42,43 @@ const CLI_EXEC_MAX_OUTPUT = 128 * 1024;
 
 /**
  * 写入用户级 ~/.claude/settings.json（与 Claude CLI 行为一致）
- *
- * ⚠️ 保护机制：默认禁用写入，避免影响同时使用 claude cli 的用户。
- * 如需启用，设置环境变量 EVOLCLAW_ALLOW_SETTINGS_WRITE=1
+ * ⚠️ 已禁用：按需求不再修改用户的 ~/.claude/settings.json 文件。
+ *    原会把 model/effortLevel 写入 settings.json（仅在找不到 owning agent 的 fallback 路径触发）。
+ *    现直接返回成功且不落盘；如需恢复，取消下方注释即可。
  */
-function writeUserSettings(updates: { model?: string; effortLevel?: string | null }): { success: boolean; error?: string; skipped?: boolean } {
-  // 保护开关：默认禁用 settings.json 写入（属预期行为，非错误）
-  if (process.env.EVOLCLAW_ALLOW_SETTINGS_WRITE !== '1') {
-    logger.warn('[writeUserSettings] 已跳过 settings.json 写入（保护模式）。' +
-      '如需启用，设置环境变量 EVOLCLAW_ALLOW_SETTINGS_WRITE=1');
-    return {
-      success: false,
-      skipped: true,
-      error: 'settings.json 写入已禁用（保护模式）。配置已写入 agent config.json，无需修改 settings.json。'
-    };
-  }
+function writeUserSettings(updates: { model?: string; effortLevel?: string | null }): { success: boolean; error?: string } {
+  void updates;
+  return { success: true };
 
-  try {
-    const settingsPath = path.join(os.homedir(), '.claude', 'settings.json');
-    let settings: any = {};
-
-    if (fs.existsSync(settingsPath)) {
-      settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
-    }
-
-    if (updates.model !== undefined) settings.model = updates.model;
-    if (updates.effortLevel !== undefined) {
-      if (updates.effortLevel === null) {
-        delete settings.effortLevel;
-      } else {
-        settings.effortLevel = updates.effortLevel;
-      }
-    }
-
-    const claudeDir = path.join(os.homedir(), '.claude');
-    if (!fs.existsSync(claudeDir)) {
-      fs.mkdirSync(claudeDir, { recursive: true });
-    }
-
-    fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf-8');
-    logger.info(`[writeUserSettings] 已写入 ~/.claude/settings.json: ${Object.keys(updates).join(', ')}`);
-    return { success: true };
-  } catch (error: any) {
-    return { success: false, error: error.message };
-  }
+  /* eslint-disable no-unreachable */
+  // try {
+  //   const settingsPath = path.join(os.homedir(), '.claude', 'settings.json');
+  //   let settings: any = {};
+  //
+  //   if (fs.existsSync(settingsPath)) {
+  //     settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+  //   }
+  //
+  //   if (updates.model !== undefined) settings.model = updates.model;
+  //   if (updates.effortLevel !== undefined) {
+  //     if (updates.effortLevel === null) {
+  //       delete settings.effortLevel;
+  //     } else {
+  //       settings.effortLevel = updates.effortLevel;
+  //     }
+  //   }
+  //
+  //   const claudeDir = path.join(os.homedir(), '.claude');
+  //   if (!fs.existsSync(claudeDir)) {
+  //     fs.mkdirSync(claudeDir, { recursive: true });
+  //   }
+  //
+  //   fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf-8');
+  //   return { success: true };
+  // } catch (error: any) {
+  //   return { success: false, error: error.message };
+  // }
+  /* eslint-enable no-unreachable */
 }
 
 function isAdminRole(role: string): boolean {
