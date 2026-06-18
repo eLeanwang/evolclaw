@@ -414,8 +414,8 @@ export class CommandHandler {
     const updates: { model?: string; effortLevel?: string } = {};
     if (newModel) updates.model = newModel;
     const writeResult = writeUserSettings(updates);
-    // 保护模式跳过属预期行为，不视为失败（运行时已切换，无 agent config 可落盘）
-    if (!writeResult.success && !writeResult.skipped) {
+    // writeUserSettings 已禁用写入，总是返回 success: true
+    if (!writeResult.success) {
       return `⚠️ 写入用户配置失败: ${writeResult.error}`;
     }
     return undefined;
@@ -439,8 +439,8 @@ export class CommandHandler {
     }
     const updates: { effortLevel?: string | null } = { effortLevel: newEffort ?? null };
     const writeResult = writeUserSettings(updates);
-    // 保护模式跳过属预期行为，不视为失败（运行时已切换，无 agent config 可落盘）
-    if (!writeResult.success && !writeResult.skipped) {
+    // writeUserSettings 已禁用写入，总是返回 success: true
+    if (!writeResult.success) {
       return `⚠️ 写入用户配置失败: ${writeResult.error}`;
     }
     return undefined;
