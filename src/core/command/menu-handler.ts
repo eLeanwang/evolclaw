@@ -1055,7 +1055,16 @@ export async function execMenuUpdate(this: any,
   if (cmdBase === '/effort') {
     if (!isAdmin) return { error: '无权限', code: 'NO_PERMISSION' };
     const agent = this.getAgent(channel, session?.agentId);
-    const currentModel = hasModelSwitcher(agent) ? agent.getModel() : agent.name;
+    const state = resolveCommandModelResolution({
+      agent,
+      session,
+      selfAid: this.getOwningAgent?.(channel)?.aid,
+      channelType: this.resolveChannelType?.(channel),
+      channelId,
+      userId,
+      role: identity.role,
+    });
+    const currentModel = hasModelSwitcher(agent) ? (state.model || agent.getModel()) : agent.name;
     const validEfforts = getAvailableEfforts(agent, currentModel);
     const allValid: string[] = [...validEfforts, 'auto'];
     if (!allValid.includes(arg)) {

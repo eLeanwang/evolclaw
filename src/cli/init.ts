@@ -73,7 +73,24 @@ export async function cmdInit(options?: {
   nonInteractive?: boolean;
   baseagent?: string;
   force?: boolean;
+  owner?: string;
+  projectpath?: string;
+  ecweb?: boolean;
+  format?: string;
 }): Promise<void> {
+  // 云部署非交互式路径：当带 --owner 或 --format json 时走结构化分支，与交互式 tail 完全隔离。
+  // 预留方案 B：当 daemon 支持 Control Plane 无 agent 启动时，可在此分支跳过 agent new 预创建。
+  if (options?.nonInteractive && (options.owner || options.format === 'json')) {
+    return cmdInitNonInteractive({
+      owner: options.owner,
+      baseagent: options.baseagent,
+      projectpath: options.projectpath,
+      ecweb: options.ecweb,
+      force: options.force,
+      format: options.format,
+    });
+  }
+
   const p = resolvePaths();
   ensureDataDirs();
   // config.json → evolclaw.json：init 路径也可能先于 daemon 触发 AID 生成（走 getAidStore），
@@ -392,4 +409,175 @@ export async function selectInstance(
   }
 
   return { action: 'overwrite', index: choiceIndex, name: target.name };
+}
+
+// ==================== Non-Interactive (cloud deploy) ====================
+
+interface NonInteractiveOptions {
+  owner?: string;
+  baseagent?: string;
+  projectpath?: string;
+  ecweb?: boolean;
+  force?: boolean;
+  format?: string;
+}
+
+interface InitResultSuccess {
+  type: 'init.result';
+  success: true;
+  controlAid: string;
+  ownerAid: string;
+  owners: string[];
+  ecwebEnabled: boolean;
+  baseagent: string;
+  projectsDefaultPath: string | null;
+  defaultsPath: string;
+  evolclawPath: string;
+  forced?: boolean;
+  previousOwners?: string[];
+}
+
+interface InitResultFailure {
+  type: 'init.result';
+  success: false;
+  error: { code: string; message: string };
+}
+
+const EXIT_USAGE = 1;
+const EXIT_RUNTIME = 2;
+
+function emitResult(result: InitResultSuccess | InitResultFailure, format?: string): void {
+  if (format === 'json') {
+    process.stdout.write(JSON.stringify(result) + '\n');
+  } else if (result.success) {
+    console.log(`✓ 初始化成功: controlAid=${result.controlAid} ownerAid=${result.ownerAid}`);
+  } else {
+    console.error(`❌ ${result.error.code}: ${result.error.message}`);
+  }
+}
+
+function fail(code: string, message: string, exitCode: number, format?: string): never {
+  emitResult({ type: 'init.result', success: false, error: { code, message } }, format);
+  process.exit(exitCode);
+}
+
+export async function cmdInitNonInteractive(opts: NonInteractiveOptions): Promise<void> {
+  const format = opts.format;
+  const p = resolvePaths();
+  ensureDataDirs();
+  migrateProcessConfigIfNeeded();
+
+  // ── 1. owner 校验 ──
+  if (!opts.owner) {
+    fail('MISSING_OWNER', '--owner is required in non-interactive mode', EXIT_USAGE, format);
+  }
+  if (/[\s,]/.test(opts.owner)) {
+    fail('INVALID_OWNER', '--owner accepts only a single AID (no comma/space lists)', EXIT_USAGE, format);
+  }
+  const { isValidAid } = await import('../aun/aid/index.js');
+  if (!isValidAid(opts.owner)) {
+    fail('INVALID_OWNER', `invalid owner AID: ${opts.owner}`, EXIT_USAGE, format);
+  }
+  const ownerAid = opts.owner;
+
+  // ── 2. 单进程互斥 ──
+  const aliveMains = scanInstances().mains.filter(m => m.alive);
+  if (aliveMains.length > 0) {
+    const pids = aliveMains.map(m => m.record.pid).join(', ');
+    fail('DAEMON_RUNNING', `EvolClaw daemon is running (PID: ${pids}); run 'evolclaw stop' first`, EXIT_USAGE, format);
+  }
+
+  // ── 3. baseagent 探测 + 校验 ──
+  const available = detectAvailable();
+  if (available.length === 0) {
+    fail('BASEAGENT_UNAVAILABLE', 'no baseagent CLI detected (install claude/codex/gemini)', EXIT_USAGE, format);
+  }
+  let chosenBaseagent: Baseagent;
+  if (opts.baseagent) {
+    if (!BASEAGENT_CANDIDATES.includes(opts.baseagent as Baseagent)) {
+      fail('INVALID_BASEAGENT', `invalid baseagent: ${opts.baseagent} (choose: ${BASEAGENT_CANDIDATES.join('/')})`, EXIT_USAGE, format);
+    }
+    if (!available.includes(opts.baseagent as Baseagent)) {
+      const reason = opts.baseagent === 'codex' ? getCodexAppServerAvailability().reason : undefined;
+      fail('BASEAGENT_UNAVAILABLE', `${opts.baseagent} not available${reason ? `: ${reason}` : ''}`, EXIT_USAGE, format);
+    }
+    chosenBaseagent = opts.baseagent as Baseagent;
+  } else {
+    chosenBaseagent = pickDefault(available);
+  }
+
+  // ── 4. projectpath 校验 + 创建 ──
+  let projectsDefaultPath: string | undefined;
+  if (opts.projectpath !== undefined) {
+    if (!path.isAbsolute(opts.projectpath)) {
+      fail('INVALID_PROJECT_PATH', `--projectpath must be absolute: ${opts.projectpath}`, EXIT_USAGE, format);
+    }
+    if (!fs.existsSync(opts.projectpath)) {
+      try {
+        fs.mkdirSync(opts.projectpath, { recursive: true });
+      } catch (e: any) {
+        fail('PROJECT_PATH_CREATE_FAILED', `failed to create ${opts.projectpath}: ${e?.message || e}`, EXIT_RUNTIME, format);
+      }
+    }
+    projectsDefaultPath = opts.projectpath;
+  }
+
+  // ── 5. owner 冲突检测 ──
+  const existingCfg = loadEvolclawConfig();
+  const existingOwners = existingCfg.owners ?? [];
+  const sameOwner = existingOwners.length === 1 && existingOwners[0] === ownerAid;
+  const differentOwner = existingOwners.length > 0 && !sameOwner;
+  if (differentOwner && !opts.force) {
+    fail('OWNER_EXISTS', `owners already set to [${existingOwners.join(', ')}]; use --force to override`, EXIT_USAGE, format);
+  }
+  const forced = differentOwner && !!opts.force;
+  const previousOwners = forced ? [...existingOwners] : undefined;
+
+  // ── 6. 写 defaults.json ──
+  try {
+    saveDefaultsSafe(buildDefaults(chosenBaseagent, available, projectsDefaultPath));
+  } catch (e: any) {
+    fail('IO_ERROR', `failed to write defaults.json: ${e?.message || e}`, EXIT_RUNTIME, format);
+  }
+
+  // ── 7. 控制 AID：缺失则生成 ──
+  let controlAid = existingCfg.aid;
+  if (!controlAid) {
+    try {
+      const { aid } = await generateControlAid();
+      controlAid = aid;
+    } catch (e: any) {
+      fail('CONTROL_AID_CREATE_FAILED', `gateway unreachable: ${e?.message || e}`, EXIT_RUNTIME, format);
+    }
+  }
+
+  // ── 8. 写 evolclaw.json（aid + owners + ecweb）──
+  try {
+    const next = {
+      ...existingCfg,
+      $schema_version: existingCfg.$schema_version ?? 1,
+      aid: controlAid,
+      owners: [ownerAid],
+      ...(opts.ecweb === true ? { ecweb: { ...(existingCfg.ecweb ?? {}), enabled: true } } : {}),
+    };
+    saveEvolclawConfig(next);
+  } catch (e: any) {
+    fail('IO_ERROR', `failed to write evolclaw.json: ${e?.message || e}`, EXIT_RUNTIME, format);
+  }
+
+  // ── 9. 输出 init.result ──
+  const result: InitResultSuccess = {
+    type: 'init.result',
+    success: true,
+    controlAid: controlAid!,
+    ownerAid,
+    owners: [ownerAid],
+    ecwebEnabled: opts.ecweb === true,
+    baseagent: chosenBaseagent,
+    projectsDefaultPath: projectsDefaultPath ?? null,
+    defaultsPath: p.defaultsConfig,
+    evolclawPath: p.evolclawJson,
+    ...(forced ? { forced: true, previousOwners } : {}),
+  };
+  emitResult(result, format);
 }
