@@ -1,54 +1,63 @@
-# Changelog
-
 ## v3.5.0 (2026-06-18)
 
 ### New Features
 
-- **Bind 协议优化** — daemon/agent 响应格式区分：daemon 返回 baseagents 列表 + 进程级信息，agent 返回具体配置；新增 `bind.request` 快速路径，Evol App 绑定请求绕过白名单透传
-- **Trigger 2.0 完整实现** — 完整 trigger 系统：定时任务管理、审计日志、运行统计（fireCount/failCount/lastFiredAt）、交互卡片（立即触发/暂停/关闭）；`/trigger` CLI 支持 list/create/update/delete/pause/resume；新增 `TriggerScheduler`/`TriggerManager` 分层架构
-- **File 菜单目录分页** — 支持 `action=list` 分页浏览目录，每页 20 项，带 prev/next 翻页按钮
-- **Queue 命令与持久化** — 新增 `/queue` 命令查询/管理消息队列；队列状态持久化，支持 mute/unmute、clear、重启恢复
-- **ECWeb 用量统计** — 新增 token 用量统计与计费模块：model-prices.jsonl 定价表、实时用量追踪、成本估算、CNY/USD 双币种支持
-- **Watch 命令增强** — `ec watch logs` 支持多日志类型过滤（session/tool/error/stats/health）；`ec watch msg` 实时监控聊天消息
-- **Config 体系 v2** — ConfigManager 单一合并点，四层配置解析（relation → role → agent → global）；schema SSOT + 自动迁移
-- **Service Proxy** — AUN 服务代理功能，通过控制 AID 暴露本地服务到 AUN 网络
-- **Proactive 模式增强** — 群聊自主响应深度控制（lightweight/deep）、首次工具违规错误注入模型上下文、防系统提示词泄露
-- **统计增强** — 新增 Sys 列（trigger/config/stats 分类）、消息队列状态统计、deepseek-v4 原生 1M context 支持
-- **Non-ASCII 路径修复** — Session 编码对齐 Claude SDK，修复非 ASCII 项目路径导致的"失忆"问题
-- **AUN 加密状态透传** — 入站消息端到端加密状态透传，encrypted 字段贯穿整个处理链
+- **Evol App 扫码绑定** — 新增 Bind 协议（`utils/bind.ts`）：生成二维码绑定任务，校验 Evol App 扫码 token，支持 `append`/`replace` owner 模式；IPC 新增 `bind.begin`/`bind.status`/`bind.cancel`；owner 配置默认走扫码，手动输入兜底；响应区分 daemon（返回 baseagent 列表）/ agent（返回 agentInfo）两种格式
+- **Trigger 系统重构** — 拆分为 types/state/validation/audit/feedback/script-executor 六模块；scheduler 支持脚本执行、并发策略（drop/queue/cancel-running）、miss 策略（skip/fire-once）；运行统计从审计日志按需汇总（不再存 trigger.json）；`/trigger` CLI 支持 list/show/create/update/enable/disable/cancel/run/template
+- **消息队列持久化 + /queue 命令** — `MessageQueue` 任务变更原子写入 `queue-state.json`，重启后恢复未完成消息；新增 `dequeueGreedy()` 合并连续群聊消息；`/queue` 查看各 agent 队列摘要，`/queue <agent>` 看详情，`/queue clear` 清空
+- **Config 体系 v2** — 新增 `config/` 模块（ConfigManager 单一合并点、深合并、schema 注册表、配置快照、启动日志）；两条独立覆盖链：H 链三级（defaults → agent/config → relation/config）、HA 链含角色层（agent/behavior → role → relation/behavior）；`ec config` 命令（show/validate/diff/reset）；新增 `kits/schemas/` JSON Schema；model/effort/permissionMode 独立解析
+- **AUN Service Proxy** — `aun/service-proxy.ts` 通过控制 AID 将本地服务（如 ECWeb）暴露到 AUN 网络，WebSocket 隧道转发 HTTP；ECWeb 支持 `x-forwarded-prefix` 动态适配路径前缀
+- **Proactive 模式策略强化** — runner 新增首次工具调用拦截：proactive 下首个动作非 `ctl send` 时，将违规错误作为 `tool_result` 注入模型（不泄露系统提示词）；新增 `pre_tool_1stmsgchk` / `tool_use_reminder` 配置开关
+- **欢迎消息模块** — 新增 `utils/welcome.ts`，AUN 连接时主动推送、IM 渠道首次交互时发送，内容来自 ECK `welcome` fragment
+- **File 菜单目录分页** — `menu-handler` 新增 `action=list` 目录浏览，每页 20 项 + `prev`/`next` 翻页，分页状态编码在按钮 value
+- **AUN 加密状态透传** — `InboundMessage.encrypted` 经 `MessageBridge` → `Session.metadata.encrypted` 全链路透传
 
 ### Improvements
 
-- **Baseagent 错误处理增强** — `getAgent()` 检测 baseagent runner 不可用时抛明确错误（不再静默 fallback）；`alignSessionBaseagent()` 自动修复 session 绑定的不存在 baseagent；新增 `BaseagentRunnerUnavailableError` 类型和用户友好错误提示
-- **Slash 命令懒加载** — Agent 改为懒加载，避免 session 错配时卡住 `/baseagent` 等恢复命令；新增 `getActiveAgent()`/`getActiveAgentIfAvailable()` 容错机制
-- **Settings.json 保护** — 彻底禁用对 `~/.claude/settings.json` 的写入（不再需要 `EVOLCLAW_ALLOW_SETTINGS_WRITE` 环境变量）；删除 `baseagent-seed.ts` 配置导入机制
-- **通道加载器优化** — `onConnected`/`onFailed` 回调改为非阻塞（Promise.resolve + catch），避免回调异常阻塞连接管线
-- **渠道启动优化** — 渠道后台首连 + AUN gateway 发现交还 SDK；连接失败时优雅降级
-- **Trigger 代码质量** — 消除重复代码、修复 schedulerAid 缺失问题、dedup 失败通知、防御性检查
-- **Permission 增强** — thread permissionMode 作为 per-call 参数；readonly check 增强日志输出
-- **AUN 群管理** — broadcast 群命令强制 mention 过滤；`action_card_reply` 归属精确判定；owner 消息互转发
-- **启动凭证容错** — 移除启动期 anthropic 凭证硬校验，防止缺 key 崩溃
+- **Baseagent 错误处理增强** — runner 不可用时抛明确 `BaseagentRunnerUnavailableError`，不再静默 fallback 到 primary；启动时 `alignSessionBaseagent()` 自动修复 session 绑定的失效 baseagent
+- **Slash 命令容错** — `SlashHandler` 改为懒加载 Agent（`getActiveAgentIfAvailable()` 返回 undefined 而非抛异常），避免 session 错配时卡住 `/baseagent` 等恢复命令
+- **Settings.json 彻底保护** — `writeUserSettings()` 不再落盘；删除 `EVOLCLAW_ALLOW_SETTINGS_WRITE` 环境变量与 `baseagent-seed.ts`（不再从 `~/.claude/settings.json` 导入配置）
+- **渠道启动改为后台非阻塞** — `onConnected`/`onFailed` 回调非阻塞调用；AUN gateway 发现交还 SDK，缩短启动耗时
+- **Trigger 权限与可见性** — `/trigger` 按 channel 解析所属 agent 的 scheduler，不再走 primary 兜底；user 只见自己创建的 trigger，admin 可见全部（`--all`）
+- **Permission 增强** — thread `permissionMode` 改为 per-call 参数实时解析；readonly check 日志增强（记录 channel/session/peer 上下文）
+- **`ec agent list` 新增 Personal 列** — 显示 agent 的 personal name（取自 `channels.aun.name`）
+- **模块路径重构** — `core/stats/*` → `stats/*`、`core/trigger/*` → `trigger/*`、`model-scope.ts` → `config-scope.ts`、`error-dict.json` → `utils/`、`command-handler-gateway-control.ts` → `gateway-config-handler.ts`、`core/bind.ts` → `utils/bind.ts`
+- **showActivities 简化** — 移除 `dm-only`/`owner-dm-only`，简化为 `all`/`none`（旧值自动迁移）
 
 ### Bug Fixes
 
-- **Type 错误修复** — `writeUserSettings` 返回类型统一，移除 `skipped` 字段检查
-- **Trigger 修复** — schedulerAid 字段补全、primary fallback 移除、defensive check 加强
-- **群聊转发修复** — 观察者模式群聊转发问题修复；sender_aid fallback 链完善
-- **统计修复** — context_window_pct 溢出修复、deepseek total_context_tokens 计算修复
-- **路径编码修复** — migrateProject 统一使用 SDK-aligned encodePath
-- **启动门控修复** — gate 直接调 `initTail` 而非完整 `cmdInit`；AID 生成失败时跳过 owners 提示
+- **启动期凭证硬校验移除** — `resolveAnthropicConfig()` 不再在缺 apiKey 时抛异常，改为运行时（首次 API 调用）检测，防止缺 key 时启动崩溃
+- **Trigger 失败通知去重** — 同一 trigger 连续失败只通知一次（`lastNotifyHash`），避免重复 Feishu 告警
+- **Trigger schedulerAid 补全** — `Trigger` 新增 `schedulerAid` 字段，各管理路径入口校验存在性；移除 primary fallback，通过 `targetChannel` 解析所属 agent 的 scheduler
+- **Agent 自重启修复** — `sessionMode` 硬编码规则修复；agent 重启自己时不再误报 "agent busy"，并精确报告哪个 session 在处理哪条消息
+- **AUN 群聊 sender_aid fallback** — 按 `from_aid` → `from` → `peerId` 三级 fallback，修复部分群消息发送方解析为空
+- **统计 System 列** — `ec stats` 新增 System 列，单独统计 trigger/config/stats 类系统调用消耗
+- **Type 错误修复** — `writeUserSettings` 返回类型统一为 `{ success: boolean; error?: string }`（移除 `skipped` 字段）
+
+### Security
+
+- **文件权限加固** — `gateway-config-handler` 写入价格文件时显式用 `0o600`（owner-only），避免受进程 umask 影响对其他用户可读
+- **绑定 Token 强度提升** — `generatePublicToken()` 从 12 字节增加到 16 字节（96 → 128 bits）
 
 ### Breaking Changes
 
-- **删除 baseagent-seed.ts** — 不再从 `~/.claude/settings.json` 导入配置到 evolclaw
-- **Settings.json 写入彻底禁用** — 无法通过任何方式启用（移除了 `EVOLCLAW_ALLOW_SETTINGS_WRITE` 环境变量支持）
-- **Config 体系 v2** — 配置解析逻辑重构，需要重新检查自定义配置
+- **删除 baseagent-seed.ts** — 不再从 `~/.claude/settings.json` 导入 `baseUrl`/`apiKey`；需手动配置 `evolclaw.json` 的 `agents.claude` 字段
+- **Settings.json 写入彻底禁用** — 移除 `EVOLCLAW_ALLOW_SETTINGS_WRITE`；所有 model/effort 配置写入 agent `config.json`
+- **Config 体系 v2** — 两条独立覆盖链：H 链三级（defaults → agent/config → relation/config）、HA 链含角色层（agent/behavior → role → relation/behavior）；`showActivities` 的 `dm-only`/`owner-dm-only` 值废弃（自动迁移为 `all`）
+- **模块路径变更** — `core/stats/*` → `stats/*`、`core/trigger/*` → `trigger/*`、`core/bind` → `utils/bind`、`model-scope` → `config-scope`、`command-handler-gateway-control` → `gateway-config-handler`；外部引用需同步更新
 
 ### Dependency Updates
 
 - `@agentunion/fastaun`: `^0.4.x` → `^0.5.0`
 - `@anthropic-ai/claude-agent-sdk`: 保持 `^0.3.170`
 - 删除 `package-lock.json`（不再提交到仓库）
+
+### Package Changes
+
+- 新增文件（trigger 9、stats 9、config 5、kits/schemas 6、utils 4、cli 3、core 2）
+- 删除/移动 15 个文件（重构移动 12，删除 ecweb-launch/ecweb-pair/baseagent-seed 3 个）
+- 190 个文件 → 218 个文件，净增 28 个
+
 
 ## v3.4.0 (2026-06-12)
 

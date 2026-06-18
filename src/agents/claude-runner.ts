@@ -1283,6 +1283,19 @@ export class AgentRunner {
         };
       }
 
+      // gpt-5.5 等非 Claude 模型调用 Read 时会传 pages:"", SDK 校验器拒绝空字符串
+      if (input.tool_name === 'Read' && toolInput.pages === '') {
+        const cleaned = { ...toolInput };
+        delete cleaned.pages;
+        return {
+          hookSpecificOutput: {
+            hookEventName: 'PreToolUse' as const,
+            permissionDecision: 'allow' as const,
+            updatedInput: cleaned
+          }
+        };
+      }
+
       return {};
     };
 
