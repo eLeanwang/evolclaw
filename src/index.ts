@@ -18,7 +18,7 @@ import { FeishuChannelPlugin } from './channels/feishu.js';
 import { WechatChannelPlugin } from './channels/wechat.js';
 import { AUNChannel, AUNChannelPlugin } from './channels/aun.js';
 import { startServiceProxy } from './aun/service-proxy.js';
-import { BindService, type BindRequestPayload } from './core/bind.js';
+import { BindService, type BindRequestPayload } from './utils/bind.js';
 import { DingtalkChannelPlugin } from './channels/dingtalk.js';
 import { QQBotChannelPlugin } from './channels/qqbot.js';
 import { WecomChannelPlugin } from './channels/wecom.js';
@@ -632,7 +632,7 @@ async function main() {
         receiverAid: evolclawCfg.aid,
         getAvailableBaseagents: detectAvailableBaseagentsForBind,
         getUptimeSeconds: () => Math.floor(process.uptime()),
-        onDaemonOwnersUpdated: owners => { processLevelOwners = owners; },
+        onDaemonOwnersUpdated: (owners: string[]) => { processLevelOwners = owners; },
       })
     : null;
   bindService?.startCleanup();

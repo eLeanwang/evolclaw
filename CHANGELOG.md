@@ -1,5 +1,55 @@
 # Changelog
 
+## v3.5.0 (2026-06-18)
+
+### New Features
+
+- **Bind 协议优化** — daemon/agent 响应格式区分：daemon 返回 baseagents 列表 + 进程级信息，agent 返回具体配置；新增 `bind.request` 快速路径，Evol App 绑定请求绕过白名单透传
+- **Trigger 2.0 完整实现** — 完整 trigger 系统：定时任务管理、审计日志、运行统计（fireCount/failCount/lastFiredAt）、交互卡片（立即触发/暂停/关闭）；`/trigger` CLI 支持 list/create/update/delete/pause/resume；新增 `TriggerScheduler`/`TriggerManager` 分层架构
+- **File 菜单目录分页** — 支持 `action=list` 分页浏览目录，每页 20 项，带 prev/next 翻页按钮
+- **Queue 命令与持久化** — 新增 `/queue` 命令查询/管理消息队列；队列状态持久化，支持 mute/unmute、clear、重启恢复
+- **ECWeb 用量统计** — 新增 token 用量统计与计费模块：model-prices.jsonl 定价表、实时用量追踪、成本估算、CNY/USD 双币种支持
+- **Watch 命令增强** — `ec watch logs` 支持多日志类型过滤（session/tool/error/stats/health）；`ec watch msg` 实时监控聊天消息
+- **Config 体系 v2** — ConfigManager 单一合并点，四层配置解析（relation → role → agent → global）；schema SSOT + 自动迁移
+- **Service Proxy** — AUN 服务代理功能，通过控制 AID 暴露本地服务到 AUN 网络
+- **Proactive 模式增强** — 群聊自主响应深度控制（lightweight/deep）、首次工具违规错误注入模型上下文、防系统提示词泄露
+- **统计增强** — 新增 Sys 列（trigger/config/stats 分类）、消息队列状态统计、deepseek-v4 原生 1M context 支持
+- **Non-ASCII 路径修复** — Session 编码对齐 Claude SDK，修复非 ASCII 项目路径导致的"失忆"问题
+- **AUN 加密状态透传** — 入站消息端到端加密状态透传，encrypted 字段贯穿整个处理链
+
+### Improvements
+
+- **Baseagent 错误处理增强** — `getAgent()` 检测 baseagent runner 不可用时抛明确错误（不再静默 fallback）；`alignSessionBaseagent()` 自动修复 session 绑定的不存在 baseagent；新增 `BaseagentRunnerUnavailableError` 类型和用户友好错误提示
+- **Slash 命令懒加载** — Agent 改为懒加载，避免 session 错配时卡住 `/baseagent` 等恢复命令；新增 `getActiveAgent()`/`getActiveAgentIfAvailable()` 容错机制
+- **Settings.json 保护** — 彻底禁用对 `~/.claude/settings.json` 的写入（不再需要 `EVOLCLAW_ALLOW_SETTINGS_WRITE` 环境变量）；删除 `baseagent-seed.ts` 配置导入机制
+- **通道加载器优化** — `onConnected`/`onFailed` 回调改为非阻塞（Promise.resolve + catch），避免回调异常阻塞连接管线
+- **渠道启动优化** — 渠道后台首连 + AUN gateway 发现交还 SDK；连接失败时优雅降级
+- **Trigger 代码质量** — 消除重复代码、修复 schedulerAid 缺失问题、dedup 失败通知、防御性检查
+- **Permission 增强** — thread permissionMode 作为 per-call 参数；readonly check 增强日志输出
+- **AUN 群管理** — broadcast 群命令强制 mention 过滤；`action_card_reply` 归属精确判定；owner 消息互转发
+- **启动凭证容错** — 移除启动期 anthropic 凭证硬校验，防止缺 key 崩溃
+
+### Bug Fixes
+
+- **Type 错误修复** — `writeUserSettings` 返回类型统一，移除 `skipped` 字段检查
+- **Trigger 修复** — schedulerAid 字段补全、primary fallback 移除、defensive check 加强
+- **群聊转发修复** — 观察者模式群聊转发问题修复；sender_aid fallback 链完善
+- **统计修复** — context_window_pct 溢出修复、deepseek total_context_tokens 计算修复
+- **路径编码修复** — migrateProject 统一使用 SDK-aligned encodePath
+- **启动门控修复** — gate 直接调 `initTail` 而非完整 `cmdInit`；AID 生成失败时跳过 owners 提示
+
+### Breaking Changes
+
+- **删除 baseagent-seed.ts** — 不再从 `~/.claude/settings.json` 导入配置到 evolclaw
+- **Settings.json 写入彻底禁用** — 无法通过任何方式启用（移除了 `EVOLCLAW_ALLOW_SETTINGS_WRITE` 环境变量支持）
+- **Config 体系 v2** — 配置解析逻辑重构，需要重新检查自定义配置
+
+### Dependency Updates
+
+- `@agentunion/fastaun`: `^0.4.x` → `^0.5.0`
+- `@anthropic-ai/claude-agent-sdk`: 保持 `^0.3.170`
+- 删除 `package-lock.json`（不再提交到仓库）
+
 ## v3.4.0 (2026-06-12)
 
 ### New Features

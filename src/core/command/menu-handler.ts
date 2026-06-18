@@ -13,7 +13,7 @@ import type { ParsedTriggerSet } from '../../trigger/parser.js';
 import { checkLatestVersion, getLocalVersion, isLinkedInstall, compareVersions } from '../../utils/npm-ops.js';
 import { loadDefaults, loadEvolclawConfig } from '../../config-store.js';
 import { execAgentAction, execAgentQuery, execAgentOptions, resolveProjectPath } from '../message/command-handler-agent-control.js';
-import { gatewayList, gatewayUpdate, gatewayDelete, gatewayTest, gatewayModels, gatewaySetPrice, gatewaySyncEnv } from '../message/command-handler-gateway-control.js';
+import { gatewayList, gatewayUpdate, gatewayDelete, gatewayTest, gatewayModels, gatewaySetPrice, gatewaySyncEnv } from '../message/gateway-config-handler.js';
 import { displaySessionTitle } from '../session/session-title.js';
 
 export interface MenuNext {
