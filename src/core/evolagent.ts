@@ -200,8 +200,8 @@ export class EvolAgent {
     });
   }
 
-  setBaseagentModel(value: string | undefined): void {
-    const ba = this.baseagent;
+  setBaseagentModel(value: string | undefined, baseagentName?: string): void {
+    const ba = baseagentName || this.baseagent;
     if (!this.merged.baseagents) (this.merged as any).baseagents = {};
     const mBlock = (((this.merged as any).baseagents)[ba] ??= {});
     if (value === undefined) delete mBlock.model; else mBlock.model = value;
@@ -212,8 +212,8 @@ export class EvolAgent {
     });
   }
 
-  setBaseagentEffort(value: string | undefined): void {
-    const ba = this.baseagent;
+  setBaseagentEffort(value: string | undefined, baseagentName?: string): void {
+    const ba = baseagentName || this.baseagent;
     const fieldName = ba === 'codex' ? 'reasoning' : 'effort';
     if (!this.merged.baseagents) (this.merged as any).baseagents = {};
     const mBlock = (((this.merged as any).baseagents)[ba] ??= {});

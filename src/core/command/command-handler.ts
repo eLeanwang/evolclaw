@@ -401,7 +401,7 @@ export class CommandHandler {
     const owning = this.getOwningAgent(channel);
     if (owning) {
       try {
-        owning.setBaseagentModel(newModel);
+        owning.setBaseagentModel(newModel, baseagentName);
       } catch (e: any) {
         return `⚠️ 写入 agent config 失败: ${e?.message || e}`;
       }
@@ -428,7 +428,7 @@ export class CommandHandler {
     const owning = this.getOwningAgent(channel);
     if (owning) {
       try {
-        owning.setBaseagentEffort(newEffort);
+        owning.setBaseagentEffort(newEffort, baseagentName);
       } catch (e: any) {
         return `⚠️ 写入 agent config 失败: ${e?.message || e}`;
       }

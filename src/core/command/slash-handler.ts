@@ -15,6 +15,7 @@ import { isProcessLevelOwner } from './menu-handler.js';
 import { execAgentAction } from '../message/command-handler-agent-control.js';
 import { resolvePermissionMode, writeRelationPermissionMode } from '../model/config-scope.js';
 import { formatPeerKey } from '../relation/peer-identity.js';
+import { modelMatches, resolveCommandModelResolution } from './model-resolve.js';
 import { displaySessionTitle } from '../session/session-title.js';
 import {
   guardIdleCommand,
@@ -638,9 +639,18 @@ export async function handleSlashCommand(this: any,
     const { session: setmodelSession } = setmodelResult;
     const setmodelAgent = this.getAgent(channel, setmodelSession.agentId);
 
-    const currentModel = hasModelSwitcher(setmodelAgent) ? setmodelAgent.getModel() : setmodelAgent.name;
+    const setmodelState = resolveCommandModelResolution({
+      agent: setmodelAgent,
+      session: setmodelSession,
+      selfAid: selfAID ?? this.resolveSelfAID(channel),
+      channelType: this.resolveChannelType(channel),
+      channelId,
+      userId,
+      role: identity.role,
+    });
+    const currentModel = hasModelSwitcher(setmodelAgent) ? (setmodelState.model || setmodelAgent.getModel()) : setmodelAgent.name;
     const efforts = getAvailableEfforts(setmodelAgent, currentModel);
-    const currentEffort = setmodelAgent.getEffort?.() || 'auto';
+    const currentEffort = setmodelState.effort || 'auto';
 
     const now = Math.floor(Date.now() / 1000);
     const modelIds = hasModelSwitcher(setmodelAgent) ? await setmodelAgent.listModels() : [];
@@ -671,13 +681,22 @@ export async function handleSlashCommand(this: any,
     if ('error' in modelResult) return { kind: 'command.result' as const, text: modelResult.error };
     const { session: modelSession } = modelResult;
     const modelAgent = this.getAgent(channel, modelSession.agentId);
+    const modelState = resolveCommandModelResolution({
+      agent: modelAgent,
+      session: modelSession,
+      selfAid: selfAID ?? this.resolveSelfAID(channel),
+      channelType: this.resolveChannelType(channel),
+      channelId,
+      userId,
+      role: identity.role,
+    });
 
     const models = hasModelSwitcher(modelAgent) ? await modelAgent.listModels() : [];
 
     if (!args) {
-      const currentModel = hasModelSwitcher(modelAgent) ? modelAgent.getModel() : modelAgent.name;
+      const currentModel = hasModelSwitcher(modelAgent) ? (modelState.model || modelAgent.getModel()) : modelAgent.name;
       const efforts = getAvailableEfforts(modelAgent, currentModel);
-      const currentEffort = modelAgent.getEffort?.() || 'auto';
+      const currentEffort = modelState.effort || 'auto';
 
       // 尝试发送 CommandCard 卡片
       if (this.interactionRouter && models.length > 0) {
@@ -693,10 +712,10 @@ export async function handleSlashCommand(this: any,
             buttons: models.map((m: string) => {
               const display = modelDisplayLabel(modelAgent, m);
               return {
-                label: m === currentModel ? `✓ ${display}` : display,
+                label: modelMatches(modelAgent, m, currentModel) ? `✓ ${display}` : display,
                 command: `/model ${m}`,
-                style: (m === currentModel ? 'primary' : 'default') as 'primary' | 'default',
-                disabled: m === currentModel,
+                style: (modelMatches(modelAgent, m, currentModel) ? 'primary' : 'default') as 'primary' | 'default',
+                disabled: modelMatches(modelAgent, m, currentModel),
               };
             }),
           },
@@ -709,7 +728,7 @@ export async function handleSlashCommand(this: any,
       }
 
       // 降级：文本
-      const modelList = models.map((m: string) => `  ${m === currentModel ? '✓' : ' '} ${modelDisplayLabel(modelAgent, m)}`).join('\n');
+      const modelList = models.map((m: string) => `  ${modelMatches(modelAgent, m, currentModel) ? '✓' : ' '} ${modelDisplayLabel(modelAgent, m)}`).join('\n');
       const effortHint = efforts.length > 0
         ? `\n推理强度: ${currentEffort === 'auto' ? 'auto (SDK默认)' : currentEffort}  (使用 /effort 调整)`
         : '';
@@ -725,7 +744,7 @@ export async function handleSlashCommand(this: any,
 
     if (parts.length === 1) {
       const arg = parts[0];
-      const currentModel = hasModelSwitcher(modelAgent) ? modelAgent.getModel() : modelAgent.name;
+      const currentModel = hasModelSwitcher(modelAgent) ? (modelState.model || modelAgent.getModel()) : modelAgent.name;
       const efforts = getAvailableEfforts(modelAgent, currentModel);
       // effort 相关参数统一转发到 /effort
       if ((efforts as readonly string[]).includes(arg) || arg === 'auto') {
@@ -740,7 +759,7 @@ export async function handleSlashCommand(this: any,
         } else if (models.includes(arg)) {
           newModel = arg;
         } else {
-          const modelList = models.map((m: string) => `  ${m === currentModel ? '✓' : ' '} ${modelDisplayLabel(modelAgent, m)}`).join('\n');
+          const modelList = models.map((m: string) => `  ${modelMatches(modelAgent, m, currentModel) ? '✓' : ' '} ${modelDisplayLabel(modelAgent, m)}`).join('\n');
           const effortHint = efforts.length > 0 ? `\n\n推理强度请使用 /effort 命令` : '';
           return { kind: 'command.error' as const, text: `❌ 无效参数: ${arg}\n\n可用模型：\n${modelList}${effortHint}` };
         }
@@ -809,10 +828,19 @@ export async function handleSlashCommand(this: any,
     if ('error' in effortResult) return { kind: 'command.result' as const, text: effortResult.error };
     const { session: effortSession } = effortResult;
     const effortAgent = this.getAgent(channel, effortSession.agentId);
+    const effortState = resolveCommandModelResolution({
+      agent: effortAgent,
+      session: effortSession,
+      selfAid: selfAID ?? this.resolveSelfAID(channel),
+      channelType: this.resolveChannelType(channel),
+      channelId,
+      userId,
+      role: identity.role,
+    });
 
-    const currentModel = hasModelSwitcher(effortAgent) ? effortAgent.getModel() : effortAgent.name;
+    const currentModel = hasModelSwitcher(effortAgent) ? (effortState.model || effortAgent.getModel()) : effortAgent.name;
     const efforts = getAvailableEfforts(effortAgent, currentModel);
-    const currentEffort = effortAgent.getEffort?.() || 'auto';
+    const currentEffort = effortState.effort || 'auto';
 
     if (efforts.length === 0) {
       return { kind: 'command.error' as const, text: '⚠️ 当前模型不支持推理强度设置' };

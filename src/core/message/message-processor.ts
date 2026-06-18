@@ -934,7 +934,7 @@ export class MessageProcessor {
               { self: selfAid || undefined, peerKey, role: session.identity?.role || 'anonymous' },
               normalizedBaseagent.canonical,
             );
-            if (resolved.model) {
+            if (resolved.model || resolved.effort) {
               evolclawModelOverride = { model: resolved.model, effort: resolved.effort };
               effectiveModel = resolved.model;
             }

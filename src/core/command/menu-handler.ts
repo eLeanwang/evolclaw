@@ -1,6 +1,7 @@
 import { type Session } from '../../types.js';
 import { resolvePermissionMode } from '../model/config-scope.js';
 import { formatPeerKey } from '../relation/peer-identity.js';
+import { modelMatches, resolveCommandModelResolution } from './model-resolve.js';
 import { type AgentRunnerFull, hasModelSwitcher, hasPermissionController } from '../../agents/runner-types.js';
 import { getCodexEfforts } from '../../agents/codex-runner.js';
 import { resolvePaths, getPackageRoot } from '../../paths.js';
@@ -595,8 +596,17 @@ export async function getSubMenuItems(this: any, cmd: string, channel: string, c
     const agent = this.getAgent(channel, session?.agentId);
     if (hasModelSwitcher(agent) && agent.listModels) {
       const models = await agent.listModels() ?? [];
-      const currentModel = agent.getModel();
-      if (models.length > 0) return models.map((m: string) => ({ value: m, label: modelDisplayLabel(agent, m), selected: m === currentModel }));
+      const state = resolveCommandModelResolution({
+        agent,
+        session,
+        selfAid: this.getOwningAgent?.(channel)?.aid,
+        channelType: this.resolveChannelType?.(channel),
+        channelId,
+        userId,
+        role: (overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId)).role,
+      });
+      const currentModel = state.model || agent.getModel();
+      if (models.length > 0) return models.map((m: string) => ({ value: m, label: modelDisplayLabel(agent, m), selected: modelMatches(agent, m, currentModel) }));
     }
     return null;
   }
@@ -624,9 +634,18 @@ export async function getSubMenuItems(this: any, cmd: string, channel: string, c
 
   if (cmd === '/effort') {
     const agent = this.getAgent(channel, session?.agentId);
-    const currentModel = hasModelSwitcher(agent) ? agent.getModel() : agent.name;
+    const state = resolveCommandModelResolution({
+      agent,
+      session,
+      selfAid: this.getOwningAgent?.(channel)?.aid,
+      channelType: this.resolveChannelType?.(channel),
+      channelId,
+      userId,
+      role: (overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId)).role,
+    });
+    const currentModel = hasModelSwitcher(agent) ? (state.model || agent.getModel()) : agent.name;
     const efforts = getAvailableEfforts(agent, currentModel);
-    const currentEffort = (agent as any).getEffort?.() || 'auto';
+    const currentEffort = state.effort || 'auto';
     const allItems = [...efforts, 'auto'] as string[];
     return allItems.map(e => ({ value: e, label: e === 'auto' ? 'auto (SDK默认)' : e, selected: e === currentEffort }));
   }
@@ -823,7 +842,18 @@ export async function execMenuQuery(this: any,
   if (cmdBase === '/model') {
     if (session) {
       const agent = this.getAgent(channel, session.agentId);
-      if (hasModelSwitcher(agent)) return { data: { model: agent.getModel() ?? null } };
+      if (hasModelSwitcher(agent)) {
+        const state = resolveCommandModelResolution({
+          agent,
+          session,
+          selfAid: this.getOwningAgent?.(channel)?.aid,
+          channelType: this.resolveChannelType?.(channel),
+          channelId,
+          userId,
+          role: this.sessionManager.resolveIdentity(channel, userId).role,
+        });
+        return { data: { model: state.model ?? null, baseagent: state.baseagent, source: state.resolved?.source ?? null } };
+      }
     }
     const ba = evolagent?.config?.active_baseagent;
     const block = ba && evolagent ? (evolagent.config.baseagents as any)?.[ba] : undefined;
@@ -833,8 +863,16 @@ export async function execMenuQuery(this: any,
   if (cmdBase === '/effort') {
     if (session) {
       const agent = this.getAgent(channel, session.agentId);
-      const e = (agent as any).getEffort?.();
-      if (e !== undefined) return { data: { effort: e } };
+      const state = resolveCommandModelResolution({
+        agent,
+        session,
+        selfAid: this.getOwningAgent?.(channel)?.aid,
+        channelType: this.resolveChannelType?.(channel),
+        channelId,
+        userId,
+        role: this.sessionManager.resolveIdentity(channel, userId).role,
+      });
+      if (state.effort !== undefined) return { data: { effort: state.effort, baseagent: state.baseagent, source: state.resolved?.effortSource ?? null } };
     }
     const ba = evolagent?.config?.active_baseagent;
     const block = ba && evolagent ? (evolagent.config.baseagents as any)?.[ba] : undefined;
@@ -1010,7 +1048,7 @@ export async function execMenuUpdate(this: any,
       }
       agent.setModel(arg);
     }
-    if (evolagent) evolagent.setBaseagentModel(arg);
+    if (evolagent) evolagent.setBaseagentModel(arg, session?.agentId || agent.name);
     return { data: { model: arg } };
   }
 
@@ -1026,7 +1064,7 @@ export async function execMenuUpdate(this: any,
     if (typeof (agent as any).setEffort === 'function') {
       (agent as any).setEffort(arg === 'auto' ? undefined : arg);
     }
-    if (evolagent) evolagent.setBaseagentEffort(arg === 'auto' ? undefined : arg);
+    if (evolagent) evolagent.setBaseagentEffort(arg === 'auto' ? undefined : arg, session?.agentId || agent.name);
     return { data: { effort: arg } };
   }
 

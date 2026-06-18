@@ -579,8 +579,8 @@ export interface EvolAgentHandle {
   getShowActivities(channelName: string): 'all' | 'none';
   setShowActivities(channelName: string, mode: 'all' | 'none'): void;
   setActiveBaseagent(value: string | undefined): void;
-  setBaseagentModel(value: string | undefined): void;
-  setBaseagentEffort(value: string | undefined): void;
+  setBaseagentModel(value: string | undefined, baseagentName?: string): void;
+  setBaseagentEffort(value: string | undefined, baseagentName?: string): void;
   setChatmodePrivate(value: 'interactive' | 'proactive' | undefined): void;
   setDispatch(value: 'mention' | 'broadcast' | undefined): void;
   getObservable(): boolean;
