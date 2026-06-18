@@ -71,9 +71,11 @@ export function isRecognizedSlashCommand(content: string): boolean {
 
 export function guardThreadCommand(content: string, threadId?: string): OutboundPayload | undefined {
   if (!threadId) return undefined;
-  const threadBlocked = ['/new', '/slist', '/s', '/session', '/fork', '/del', '/baseagent'];
+  const threadBlocked = ['/new', '/slist', '/s', '/session', '/fork', '/del'];
   const isBlocked = threadBlocked.some(c => content === c || content.startsWith(c + ' '));
-  if (!isBlocked) return undefined;
+  const isBaseagentSwitch = content.startsWith('/baseagent ');
+  const isBaseAliasSwitch = content.startsWith('/base ');
+  if (!isBlocked && !isBaseagentSwitch && !isBaseAliasSwitch) return undefined;
   return { kind: 'command.error', text: '⚠️ 话题中不支持此命令' };
 }
 

@@ -138,32 +138,20 @@ export function reconcileBaseagentDefaults(): ReconcileResult {
     return result;
   }
 
-  // 4. 若来源是 settings.json → 删除已导入的 env key
+  // 4. 若来源是 settings.json → 【已禁用删除】保留 settings.json 以兼容 claude cli
   if (settings && settingsEnv) {
-    const keysToDelete: string[] = [];
+    const keysToMigrate: string[] = [];
 
     if (patch.baseUrl && settingsBaseUrl && !isPlaceholderUrl(settingsBaseUrl)) {
-      keysToDelete.push('ANTHROPIC_BASE_URL');
+      keysToMigrate.push('ANTHROPIC_BASE_URL');
     }
     if (patch.apiKey && settingsApiKey) {
-      keysToDelete.push('ANTHROPIC_AUTH_TOKEN');
+      keysToMigrate.push('ANTHROPIC_AUTH_TOKEN');
     }
 
-    if (keysToDelete.length > 0) {
-      try {
-        for (const k of keysToDelete) {
-          delete settingsEnv[k];
-        }
-        // env 块为空时删除整个 env 字段
-        if (Object.keys(settingsEnv).length === 0) {
-          delete settings.env;
-        }
-        writeClaudeSettings(settings);
-        result.deletedFromSettings = keysToDelete;
-        logger.info(`[baseagent-seed] 已从 ~/.claude/settings.json env 块删除: ${keysToDelete.join(', ')}（消除 #8500 覆盖风险）`);
-      } catch (e) {
-        logger.warn(`[baseagent-seed] 删除 settings.json env key 失败: ${e}`);
-      }
+    if (keysToMigrate.length > 0) {
+      logger.info(`[baseagent-seed] 已从 ~/.claude/settings.json 迁移配置: ${keysToMigrate.join(', ')} → defaults.json (原 settings.json 保留以兼容 claude cli)`);
+      result.deletedFromSettings = []; // 不再删除，返回空数组
     }
   }
 
