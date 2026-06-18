@@ -1,3 +1,10 @@
+## v3.5.1 (2026-06-18)
+
+### Bug Fixes
+
+- **模型命令作用域修复** — `/model`、`/effort`、菜单查询/更新统一按当前会话 baseagent 和配置作用域解析，避免 Claude 会话误用 Codex/GPT 模型配置
+- **Claude Read 参数兼容** — 清理 `Read` 工具输入中的空 `pages` 字段，避免非 Claude 模型透传空字符串触发 SDK 校验错误
+
 ## v3.5.0 (2026-06-18)
 
 ### New Features
