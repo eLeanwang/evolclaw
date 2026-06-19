@@ -1,3 +1,17 @@
+## v3.5.2 (2026-06-19)
+
+### New Features
+
+- **云部署非交互式 init** — `evolclaw init --non-interactive --owner <aid> --format json`，无 TTY 环境完成容器初始化，输出结构化 JSON + 稳定错误码。
+
+### Bug Fixes
+
+- **/effort 命令模型解析** — 修复多 baseagent 切换时取到错误模型的问题。
+
+### Improvements
+
+- **autoCompact 阈值统一 180000** — 移除 1M 模型 900000 的特别处理。
+
 ## v3.5.1 (2026-06-18)
 
 ### Bug Fixes

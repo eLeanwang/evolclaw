@@ -131,6 +131,7 @@ evolclaw init aun
 - 渠道选择（飞书/微信）并扫码登录
 - 默认项目路径
 - 模型选择（sonnet/opus/haiku）
+- owner 配置：默认走 **Evol App 扫码绑定**，若无 Evol App 可手工录入 AID 兜底
 - 自动写入 `EVOLCLAW_HOME` 到 shell profile（Unix）或用户环境变量（Windows）
 
 配置文件生成在 `{EVOLCLAW_HOME}/data/evolclaw.json`（默认 `~/.evolclaw/data/evolclaw.json`）。
@@ -170,7 +171,16 @@ evolclaw status     # 查看状态
 evolclaw logs       # 查看日志（tail -f）
 evolclaw agent      # 管理 EvolAgent（list / show / new / reload）
 evolclaw mv <old> <new>  # 项目搬家（保留全部会话）
+evolclaw queue --agent <aid>   # 查看/操作 agent 消息队列（队列重启后持久化恢复）
 evolclaw diagnose   # 诊断启动环境
+
+# 配置管理（v3.4+）
+evolclaw config show       # 查看某一层文件原始内容
+evolclaw config effective  # 打印合并后的生效配置 + 来源
+evolclaw config get <field>      # 读 effective 值
+evolclaw config set <field> <v>  # 写参数（scope 自动推断）
+evolclaw config validate   # 按 schema 校验
+evolclaw config history    # 配置快照历史
 
 # 开发模式（热重载）
 npm run dev

@@ -67,6 +67,9 @@ conversations/
 *.sh.bak
 scripts/
 
+# Claude Code 终端会话日志（误产物）
+/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]-*.txt
+
 # 备份文件
 *.bak
 *.backup
