@@ -4,7 +4,9 @@
  *   agents/defaults.json                   ← DefaultsConfig
  *   agents/<aid>/config.json               ← AgentConfig（per-agent）
  *
- * 合并规则（mergeForAgent）：
+ * 合并规则：
+ *   - 统一由 ConfigManager.resolveEffective() 处理
+ *   - 覆盖链：defaults → agent/config → relation/config
  *   - 深合并：models / chatmode / aun / baseagents / projects 子字段
  *   - 标量覆盖：active_baseagent / show_activities / flush_delay / debounce
  *   - per-agent only：aid / enabled / owners / admins / channels（不进 defaults）
@@ -27,14 +29,14 @@ import { isValidChannelName } from './core/channel-loader.js';
 import type {
   DefaultsConfig,
   AgentConfig,
-  MergedAgentConfig,
+  EffectiveAgentConfig,
   ChannelInstance,
   ChatmodeBlock,
   ShowActivitiesMode,
   DebugBlock,
 } from './types.js';
 import { CONFIG_SCHEMA_VERSION } from './types.js';
-import { resolveAgentConfig, resolveBehavior } from './config/config-manager.js';
+import { resolveAgentConfig, resolveEffective } from './config/config-manager.js';
 import { expandVars, buildEnvResolver } from './config/merge.js';
 import { logger } from './utils/logger.js';
 
@@ -345,13 +347,12 @@ export function loadAllAgents(): AgentLoadResult {
 
 /**
  * @deprecated 设计目标（config-system-design-v2 §七）是用 ConfigManager 的 ajv schema
- * 校验替代本函数。但**当前 agent config.json 尚未完成 H/HA 物理分离迁移**——现有文件仍
- * 混有 behavior(HA) 字段（active_baseagent/baseagents 等）和 schema 未定义的子字段
- * （projects.autoCreate/list 等）。agent-config schema 是 `additionalProperties:false`，
- * 此刻切到 schema 校验会让所有现存 agent 加载失败。
+ * 校验替代本函数。但**当前 agent config.json 尚未完成完整 schema 定义**——现有文件仍
+ * 包含 schema 未定义的子字段（如 projects.autoCreate/list 等）。agent-config schema
+ * 是 `additionalProperties:false`，此刻切到 schema 校验会让所有现存 agent 加载失败。
  *
- * 因此本函数**暂保留纯业务规则校验**（不接 schema）。待数据迁移（behavior 字段拆出 +
- * schema 补齐 projects 子字段）完成后，再切换到 ConfigManager.validateConfig。
+ * 因此本函数**暂保留纯业务规则校验**（不接 schema）。待 schema 补齐所有字段后，
+ * 再切换到 ConfigManager.validateConfig。
  * 见 docs/config-v2-inconsistencies-analysis.md 问题 B / config-system-v2-implementation-status.md。
  */
 export function validateAgentConfig(cfg: AgentConfig): string[] {
@@ -399,26 +400,7 @@ export function validateAgentConfig(cfg: AgentConfig): string[] {
 
 // ── 合并 ───────────────────────────────────────────────────────────────
 
-/**
- * defaults + per-agent + agent/behavior → MergedAgentConfig（运行时扁平视图）。
- *
- * H 段（defaults → agent/config）+ HA 段（agent/behavior，agent 级快照）平铺合并，
- * 经 ConfigManager（全项目唯一合并实现点）。带 peer/role 的逐消息解析另走
- * ConfigManager.resolveBehavior（见 message-processor / config-scope）。
- *
- * @deprecated 使用 ConfigManager.resolveMerged 替代（配置体系 v2）。
- * 当前保留用于向后兼容，内部已委托 ConfigManager。
- * 计划在 v2.2 移除。见 docs/config-v2-inconsistencies-analysis.md 问题 B。
- */
-export function mergeForAgent(agent: AgentConfig, defaults: DefaultsConfig | null): MergedAgentConfig {
-  void defaults; // defaults 由 ConfigManager 自己从磁盘读取（唯一合并点），参数保留作签名兼容
-  const sel = { self: agent.aid };
-  // H 链合并（从磁盘读 defaults + agent/config）。若磁盘无对应文件，回退到传入 agent。
-  const h = resolveAgentConfig(sel);
-  const behavior = resolveBehavior(sel);
-  const base: AgentConfig = (h && h.aid) ? h : agent;
-  return { ...behavior, ...base } as MergedAgentConfig;
-}
+// 配置合并由 ConfigManager.resolveEffective() 统一处理。
 
 // ── 目录骨架 ───────────────────────────────────────────────────────────
 
@@ -426,9 +408,8 @@ export function mergeForAgent(agent: AgentConfig, defaults: DefaultsConfig | nul
  * 为某个 self-agent 创建文档约定的子目录骨架（personal/、identities/、venues/ 等）。
  * 已存在则跳过，幂等可重复调用。
  *
- * 注：本函数只建**目录骨架**，不碰 config.json/behavior.json——后两者由 saveAgent /
- * saveInitialBehavior（创建路径）或 ConfigManager.ensureFile（设计目标）负责。
- * config-system-design-v2 §七 列的 `ensureAgentDirSkeleton → ensureFile` 仅指配置文件
+ * 注：本函数只建**目录骨架**，不碰 config.json——由 saveAgent（创建路径）
+ * 或 ConfigManager.ensureFile（设计目标）负责。
  * 骨架那部分职责，目录骨架职责保留在此。
  */
 export function ensureAgentDirSkeleton(aid: string): void {

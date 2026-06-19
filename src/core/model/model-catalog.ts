@@ -12,7 +12,7 @@
 
 import { resolveAnthropicConfig, resolveOpenaiConfig } from '../../agents/baseagent.js';
 import { activeBaseagent } from './config-scope.js';
-import { resolveBehavior } from '../../config/config-manager.js';
+import { resolveEffective } from '../../config/config-manager.js';
 import type { BaseagentsBlock } from '../../types.js';
 
 export interface ModelCatalogEntry {
@@ -36,9 +36,9 @@ export interface ModelInfo {
 /** 取指定 baseagent 的 baseUrl + apiKey（复用现有解析链）。 */
 function resolveCreds(self?: string, ba?: string): { baseUrl?: string; apiKey?: string } {
   const baseagent = ba || activeBaseagent(self);
-  // baseagents 是 HA 字段（behavior.json）；经 ConfigManager 合并取得。
-  const behavior = self ? resolveBehavior({ self }, { cache: true }) : { baseagents: {} };
-  const block = (behavior.baseagents || {}) as BaseagentsBlock;
+  // baseagents 现在在 config.json 中
+  const config = self ? resolveEffective({ self }, { cache: true }) : { baseagents: {} };
+  const block = (config.baseagents || {}) as BaseagentsBlock;
 
   try {
     if (baseagent === 'codex') {

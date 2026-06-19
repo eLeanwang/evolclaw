@@ -4,11 +4,10 @@ import { saveAgent } from '../config-store.js';
 import { formatChannelKey, tryParseChannelKey } from './channel-loader.js';
 import { agentPersonalDir } from '../paths.js';
 import { fileCache } from './daemon-file-cache.js';
-import { ConfigTarget, read as cfgRead, write as cfgWrite, ensureFile as cfgEnsure } from '../config/config-manager.js';
-import type { BehaviorConfig } from '../types.js';
+import { ConfigTarget, read as cfgRead, write as cfgWrite, ensureFile as cfgEnsure, resolveEffective } from '../config/config-manager.js';
 import type {
   AgentConfig,
-  MergedAgentConfig,
+  EffectiveAgentConfig,
   ChannelInstance,
   AgentContext,
   AgentStatus,
@@ -26,7 +25,7 @@ type GlobalChatmode = ChatmodeBlock;
 /**
  * EvolAgent —— 一个 self-agent 的运行时表示。
  *
- * 输入：MergedAgentConfig（defaults + per-agent 合并后的 effective 形态）。
+ * 输入：EffectiveAgentConfig（defaults + per-agent 合并后的 effective 形态）。
  * 持有该 agent 的 channels Map、活跃状态、生命周期。
  *
  * 写入永远落到 agents/<aid>/config.json（通过 ConfigStore.saveAgent 走双 rename），
@@ -38,7 +37,7 @@ export class EvolAgent {
   readonly name: string;
 
   /** in-memory effective config（含 defaults 合并结果）；写盘时只回写 per-agent 部分。 */
-  private merged: MergedAgentConfig;
+  private merged: EffectiveAgentConfig;
   /** per-agent 原始配置（写盘真相源） */
   private rawAgent: AgentConfig;
 
@@ -48,7 +47,7 @@ export class EvolAgent {
   status: AgentStatus;
   error?: string;
 
-  constructor(rawAgent: AgentConfig, merged: MergedAgentConfig) {
+  constructor(rawAgent: AgentConfig, merged: EffectiveAgentConfig) {
     if (rawAgent.aid !== merged.aid) {
       throw new Error(`EvolAgent: rawAgent.aid (${rawAgent.aid}) != merged.aid (${merged.aid})`);
     }
@@ -60,7 +59,7 @@ export class EvolAgent {
   }
 
   /** 当前 effective config（合并后的） */
-  get config(): MergedAgentConfig {
+  get config(): EffectiveAgentConfig {
     return this.merged;
   }
 
@@ -70,15 +69,32 @@ export class EvolAgent {
 
   get model(): string | undefined {
     const ba = this.baseagent;
-    const block = this.merged.baseagents?.[ba as keyof typeof this.merged.baseagents] as any;
-    return block?.model;
+    // 动态读取配置（基于 fileCache + mtime），使 ec model 修改后立即体现在显示中
+    try {
+      const effective = resolveEffective({ self: this.aid }, { cache: true });
+      const block = effective.baseagents?.[ba as keyof typeof effective.baseagents] as any;
+      return block?.model;
+    } catch {
+      // 降级：读取快照
+      const block = this.merged.baseagents?.[ba as keyof typeof this.merged.baseagents] as any;
+      return block?.model;
+    }
   }
 
   get effort(): string | undefined {
     const ba = this.baseagent;
-    const block = this.merged.baseagents?.[ba as keyof typeof this.merged.baseagents] as any;
-    if (ba === 'codex') return block?.effort ?? block?.reasoning;
-    return block?.effort;
+    // 动态读取配置（基于 fileCache + mtime），使 ec model 修改后立即体现在显示中
+    try {
+      const effective = resolveEffective({ self: this.aid }, { cache: true });
+      const block = effective.baseagents?.[ba as keyof typeof effective.baseagents] as any;
+      if (ba === 'codex') return block?.effort ?? block?.reasoning;
+      return block?.effort;
+    } catch {
+      // 降级：读取快照
+      const block = this.merged.baseagents?.[ba as keyof typeof this.merged.baseagents] as any;
+      if (ba === 'codex') return block?.effort ?? block?.reasoning;
+      return block?.effort;
+    }
   }
 
   get projectPath(): string {
@@ -189,9 +205,9 @@ export class EvolAgent {
     this.mutateBehavior(b => { b.show_activities = mode; });
   }
 
-  // ── Baseagent 字段写入（HA → behavior.json）────────────────────────────
+  // ── Baseagent 字段写入 ────────────────────────────
 
-  /** 切换当前活跃 baseagent（写 behavior.active_baseagent）。 */
+  /** 切换当前活跃 baseagent（写 config.active_baseagent）。 */
   setActiveBaseagent(value: string | undefined): void {
     this.merged.active_baseagent = value;
     this.mutateBehavior(b => {
@@ -326,7 +342,7 @@ export class EvolAgent {
   // ── Reload 支持：替换 in-memory config 并复用 channels Map ───────────
 
   /** 用新的 raw + merged 替换 in-memory 状态。channels 由调用方决定如何 reconcile。 */
-  swapConfig(rawAgent: AgentConfig, merged: MergedAgentConfig): void {
+  swapConfig(rawAgent: AgentConfig, merged: EffectiveAgentConfig): void {
     if (rawAgent.aid !== this.aid) {
       throw new Error(`EvolAgent.swapConfig: aid mismatch (${rawAgent.aid} vs ${this.aid})`);
     }
@@ -339,8 +355,8 @@ export class EvolAgent {
   /**
    * 找 rawAgent.channels 里的可变实例，用于写入。
    *
-   * merged.channels 是 deep clone 时 raw 跟 merged 的 channels 引用同一份（mergeForAgent
-   * 直接 `agent.channels` 透传），所以 raw 里的实例就等于 merged 里的实例。
+   * merged.channels 是 deep clone 时 raw 跟 merged 的 channels 引用同一份（resolveEffective
+   * 直接透传 agent.channels），所以 raw 里的实例就等于 merged 里的实例。
    */
   private findRawChannelInstance(channelKey: string): ChannelInstance | null {
     return this.rawAgent.channels.find(c => this.effectiveChannelName(c.type, c.name) === channelKey) ?? null;
@@ -350,12 +366,12 @@ export class EvolAgent {
     saveAgent(this.rawAgent);
   }
 
-  /** 读改写 agent 级 behavior.json（HA 字段落点；走 ConfigManager 唯一写入口）。 */
-  private mutateBehavior(fn: (b: BehaviorConfig) => void): void {
+  /** 读改写 agent 级 config.json（走 ConfigManager 唯一写入口）。 */
+  private mutateBehavior(fn: (b: AgentConfig) => void): void {
     const sel = { self: this.aid };
-    const cur = (cfgRead<BehaviorConfig>(ConfigTarget.AgentBehavior, sel) as BehaviorConfig) || {};
+    const cur = (cfgRead<AgentConfig>(ConfigTarget.Agent, sel) as AgentConfig) || {};
     fn(cur);
-    cfgEnsure(ConfigTarget.AgentBehavior, sel);
-    cfgWrite(ConfigTarget.AgentBehavior, cur, sel);
+    cfgEnsure(ConfigTarget.Agent, sel);
+    cfgWrite(ConfigTarget.Agent, cur, sel);
   }
 }

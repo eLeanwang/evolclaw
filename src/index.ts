@@ -3,11 +3,11 @@ import { CodexSessionFileAdapter } from './core/session/adapters/codex-session-f
 import { GeminiSessionFileAdapter } from './core/session/adapters/gemini-session-file-adapter.js';
 import { ensureDataDirs, resolvePaths, agentDir, getPackageRoot, agentMdPath } from './paths.js';
 import { resolveAnthropicConfig } from './agents/baseagent.js';
-import { loadDefaults, loadAllAgents, mergeForAgent, ensureAgentDirSkeleton, migrateIdentitiesIfNeeded, migrateProcessConfigIfNeeded, loadEvolclawConfig } from './config-store.js';
+import { loadDefaults, loadAllAgents, ensureAgentDirSkeleton, migrateIdentitiesIfNeeded, migrateProcessConfigIfNeeded, loadEvolclawConfig } from './config-store.js';
 import { initConfigManager } from './config/config-manager.js';
 import { snapshot as configSnapshot, retentionCleanup, readCurrent, readWVersion, writeWVersion, diffWorkingVsVersion, paramDiff, incrementSuccessCount, collectConfigFiles } from './config/snapshot.js';
 import { appendBootLog, selfDiagnose } from './config/boot-log.js';
-import type { Config, MergedAgentConfig, AgentConfig, DefaultsConfig } from './types.js';
+import type { Config, EffectiveAgentConfig, AgentConfig, DefaultsConfig } from './types.js';
 import { CONFIG_SCHEMA_VERSION } from './types.js';
 import dotenv from 'dotenv';
 import { SessionManager } from './core/session/session-manager.js';
@@ -1424,7 +1424,8 @@ async function main() {
 
   // Full resync handler: scan disk, load new agents, unload removed/disabled, reload changed
   (globalThis as any).__evolclaw_resyncAgents = async () => {
-    const { loadAllAgents: scanAgents, loadDefaults: readDefaults, mergeForAgent: merge } = await import('./config-store.js');
+    const { loadAllAgents: scanAgents, loadDefaults: readDefaults } = await import('./config-store.js');
+    const { resolveEffective } = await import('./config/config-manager.js');
     const freshDefaults = readDefaults();
     const { agents: diskAgents } = scanAgents();
     const diskAidSet = new Set(diskAgents.map(a => a.aid));

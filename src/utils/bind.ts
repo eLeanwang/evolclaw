@@ -3,9 +3,9 @@ import fs from 'fs';
 import path from 'path';
 import { getPackageRoot } from '../paths.js';
 import { loadAgent, loadEvolclawConfig, saveAgent, saveEvolclawConfig } from '../config-store.js';
-import { resolveBehavior } from '../config/config-manager.js';
+import { resolveEffective } from '../config/config-manager.js';
 import { readEvolclawVersion } from '../index.js';
-import type { BaseagentsBlock, BehaviorConfig, ChannelInstance } from '../types.js';
+import type { BaseagentsBlock, AgentConfig, ChannelInstance } from '../types.js';
 
 export type BindType = 'daemon' | 'agent';
 export type BindStatus = 'pending' | 'bound' | 'expired' | 'cancelled';
@@ -298,9 +298,9 @@ export class BindService {
 
   private buildAgentBindDetails(task: BindTask): { baseagent: BindBaseagentInfo; channels: BindChannelInfo[] } {
     const agent = loadAgent(task.targetAid);
-    const behavior = resolveBehavior({ self: task.targetAid }, { expand: true });
+    const config = resolveEffective({ self: task.targetAid }, { expand: true });
     return {
-      baseagent: resolveBaseagentInfo(behavior),
+      baseagent: resolveBaseagentInfo(config),
       channels: summarizeChannels(agent?.channels ?? []),
     };
   }
@@ -378,10 +378,10 @@ function timingSafeTokenEqual(token: string, expectedHash: string): boolean {
   return crypto.timingSafeEqual(actual, expected);
 }
 
-function resolveBaseagentInfo(config: Pick<BehaviorConfig, 'active_baseagent' | 'baseagents'> | null): BindBaseagentInfo {
+function resolveBaseagentInfo(config: Pick<AgentConfig, 'active_baseagent' | 'baseagents'> | null): BindBaseagentInfo {
   const baseagents = (config?.baseagents ?? {}) as BaseagentsBlock;
-  const active_baseagent = ('active_baseagent' in (config ?? {}) && typeof (config as BehaviorConfig)?.active_baseagent === 'string')
-    ? (config as BehaviorConfig).active_baseagent!
+  const active_baseagent = ('active_baseagent' in (config ?? {}) && typeof config?.active_baseagent === 'string')
+    ? config.active_baseagent!
     : pickFirstBaseagent(baseagents);
   const block = active_baseagent ? (baseagents as any)[active_baseagent] : undefined;
   const model = typeof block?.model === 'string' ? block.model : undefined;

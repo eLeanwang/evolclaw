@@ -7,7 +7,7 @@ import { loadDefaults, loadAllAgents, loadAgent, saveAgent, ensureAgentDirSkelet
 import { ConfigTarget, write as cfgWrite, ensureFile as cfgEnsure, read as cfgRead, routeField, initConfigManager } from '../config/config-manager.js';
 import { ipcQuery } from '../ipc.js';
 import { CONFIG_SCHEMA_VERSION } from '../types.js';
-import type { AgentConfig, ChannelInstance, BehaviorConfig } from '../types.js';
+import type { AgentConfig, ChannelInstance } from '../types.js';
 import { isValidChannelName } from '../core/channel-loader.js';
 import { commandExists } from '../utils/cross-platform.js';
 import { getCodexAppServerAvailability, isCodexAppServerAvailable } from '../agents/codex-runner.js';
@@ -22,6 +22,7 @@ export interface AgentListItem {
   channels: string[];
   projectPath: string | null;
   baseagent: string | null;
+  model?: string | null;
   lastActivity: number | null;
 }
 
@@ -160,18 +161,18 @@ const DEFAULT_CHATMODE = { private: 'interactive', group: 'proactive', nothuman:
 const DEFAULT_DISPATCH = 'mention' as const;
 
 /**
- * 写入新 agent 的初始 behavior.json（HA 字段：active_baseagent/baseagents/chatmode/dispatch）。
- * 与 H 配置（config.json，saveAgent）分离——HA 字段不进 config.json（config 体系 v2）。
+ * 写入新 agent 的初始配置（所有字段统一在 config.json）。
  */
 function saveInitialBehavior(aid: string, baseagent: Baseagent): void {
-  const behavior: BehaviorConfig = {
+  const behavior: Partial<AgentConfig> = {
     active_baseagent: baseagent,
     baseagents: buildBaseagentsBlock(baseagent),
     chatmode: { ...DEFAULT_CHATMODE },
     dispatch: DEFAULT_DISPATCH,
   };
-  cfgEnsure(ConfigTarget.AgentBehavior, { self: aid });
-  cfgWrite(ConfigTarget.AgentBehavior, behavior, { self: aid });
+  // 读取现有 config，合并写入
+  const existingConfig = cfgRead(ConfigTarget.Agent, { self: aid }) || {};
+  cfgWrite(ConfigTarget.Agent, { ...existingConfig, ...behavior }, { self: aid });
 }
 
 function deriveAgentProjectPath(rootPath: string, aid: string): string {
@@ -257,6 +258,7 @@ export async function agentList(): Promise<AgentResult<AgentListResult>> {
         channels: info.channels || [],
         projectPath: toPosix(info.projectPath || null),
         baseagent: info.baseagent || null,
+        model: info.model || null,
         lastActivity: info.lastActivity || null,
       }));
       return { ok: true, agents };
@@ -275,6 +277,7 @@ export async function agentList(): Promise<AgentResult<AgentListResult>> {
     channels: info.channels || [],
     projectPath: toPosix(info.projectPath || null),
     baseagent: info.baseagent || null,
+    model: info.model || null,
     lastActivity: info.lastActivity || null,
   }));
   return { ok: true, agents };
@@ -1001,8 +1004,7 @@ async function agentSetEnabled(aid: string, enabled: boolean): Promise<AgentResu
 // ==================== agentGet / agentSet ====================
 //
 // addendum D2：`ec agent get/set <aid> <key>` 是 `ec config get/set --self <aid>` 的
-// 位置参数别名。内部走 ConfigManager，按 schema 自动分流 config(H) / behavior(HA)，
-// 不再直接 fs+setNestedValue+saveAgent（否则迁移后把 HA 字段误写进 config.json）。
+// 位置参数别名。内部走 ConfigManager，统一在 config.json 中。
 
 export async function agentGet(aid: string, key: string): Promise<AgentResult<AgentGetResult>> {
   const p = resolvePaths();
@@ -1039,7 +1041,7 @@ export async function agentSet(aid: string, key: string, rawValue: string): Prom
   try {
     initConfigManager();
     const top = key.split('.')[0];
-    const route = routeField(top, 'agent');  // 按 schema 分流 → config.json 或 behavior.json
+    const route = routeField(top, 'agent');  // 路由到正确的 target
     const cur = cfgRead<Record<string, any>>(route.target, { self: aid }) || {};
     setNestedValue(cur, key, value);
     cfgEnsure(route.target, { self: aid });

@@ -4,12 +4,11 @@
  * schema 文件位于 kits/schemas/，命名 `{逻辑名}.schema.{版本}.json`，随 npm 包分发。
  * 每个字段带：
  *   - 标准 JSON Schema `type`（ajv 校验用）
- *   - `x-merge`：合并语义（scalar / list / dict），覆盖链类型驱动合并的依据（design §三）
+ *   - `x-merge`：合并语义（scalar / list / dict），覆盖链类型驱动合并的依据
  * schema 根带：
- *   - `x-logical-name` / `x-permission`(H|HA) / `x-scope`
+ *   - `x-logical-name` / `x-scope`
  *
- * 「字段 →（类型, 归属文件）」由「字段出现在哪个 schema」决定（design §六物理分离）。
- * 硬约束（构建期/加载期 assert）：agent-config ∩ behavior、relation-config ∩ behavior 字段名严格不相交。
+ * 所有参数统一在 config.json。
  */
 
 import fs from 'fs';
@@ -22,8 +21,7 @@ export type LogicalSchemaName =
   | 'evolclaw'
   | 'defaults'
   | 'agent-config'
-  | 'relation-config'
-  | 'behavior';
+  | 'relation-config';
 
 export type MergeKind = 'scalar' | 'list' | 'dict';
 
@@ -127,26 +125,6 @@ export function loadSchema(name: LogicalSchemaName, version?: number): SchemaEnt
   };
   _cache.set(key, entry);
   return entry;
-}
-
-/**
- * 硬约束校验：同一作用域的 config schema 与 behavior schema 字段名空间必须严格不相交。
- * 只作用在有双文件的作用域（agent / relation）；defaults / evolclaw 是单 H 文件，不参与。
- * 加载期调用一次（ConfigManager 初始化）；失败抛错（开发期暴露手滑）。
- */
-export function assertDisjointFields(): void {
-  const behavior = loadSchema('behavior');
-  const bKeys = new Set(behavior.fields.keys());
-  for (const cfgName of ['agent-config', 'relation-config'] as LogicalSchemaName[]) {
-    const cfg = loadSchema(cfgName);
-    const overlap = [...cfg.fields.keys()].filter(k => bKeys.has(k));
-    if (overlap.length > 0) {
-      throw new Error(
-        `[schema] field-name collision between "${cfgName}" and "behavior": ${overlap.join(', ')} ` +
-        `(每个字段必须唯一归属 config(H) 或 behavior(HA))`,
-      );
-    }
-  }
 }
 
 /** extra_backup 不得指向 .env（构建期校验）——遍历声明里的 pattern。 */

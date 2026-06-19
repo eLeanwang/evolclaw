@@ -2,35 +2,141 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "relation-config.schema.1.json",
   "title": "RelationConfig (agents/{aid}/relations/{peerKey}/config.json)",
-  "description": "对特定对端的人专属配置，H 链最高优先级。机制先行：当前为空骨架（角色字段 + extra_backup）。",
+  "description": "关系级配置——针对特定对端的个性化配置。H 链最高优先级。支持 29 个关系级参数。",
   "x-logical-name": "relation-config",
   "x-permission": "H",
   "x-scope": "relation",
   "type": "object",
   "additionalProperties": false,
   "properties": {
-    "$schema_version": { "type": "number", "default": 1, "x-merge": "scalar" },
-    "owners": {
-      "type": "array",
-      "items": { "type": "string" },
-      "description": "关系级 owner（list，关系级只能往上加角色）",
-      "x-merge": "list"
+    "$schema_version": {
+      "type": "number",
+      "default": 1,
+      "description": "Schema 版本号",
+      "x-merge": "scalar"
     },
-    "admins": {
-      "type": "array",
-      "items": { "type": "string" },
-      "x-merge": "list"
+    "models": {
+      "type": "object",
+      "description": "模型配置覆盖",
+      "x-merge": "dict",
+      "properties": {
+        "default": {
+          "type": "string",
+          "description": "默认模型（对不同用户可不同）"
+        }
+      }
     },
-    "extra_backup": {
-      "type": "array",
-      "description": "快照额外备份文件声明（不得指向 .env）",
-      "x-merge": "list",
-      "items": {
+    "baseagents": {
+      "type": "object",
+      "description": "各 base agent 的 model/effort 等配置",
+      "x-merge": "dict",
+      "properties": {
+        "claude": {
+          "type": "object",
+          "properties": {
+            "model": { "type": "string", "description": "Claude 模型" },
+            "effort": { "type": "string", "enum": ["low", "medium", "high", "xhigh", "max"], "description": "Claude 推理强度" },
+            "agentProgressSummaries": { "type": "boolean", "description": "Agent 进度摘要" },
+            "excludeDynamicSections": { "type": "boolean", "description": "排除动态章节" }
+          }
+        },
+        "codex": {
+          "type": "object",
+          "properties": {
+            "model": { "type": "string", "description": "Codex 模型" },
+            "effort": { "type": "string", "description": "Codex 推理强度" },
+            "reasoning": { "type": "string", "description": "Codex 推理模式" },
+            "enableRequestUserInput": { "type": "boolean", "description": "启用用户输入请求" },
+            "approvalsReviewer": { "type": "string", "enum": ["user", "auto_review", "guardian_subagent"], "description": "审批审查者" }
+          }
+        },
+        "gemini": {
+          "type": "object",
+          "properties": {
+            "model": { "type": "string", "description": "Gemini 模型" },
+            "mode": { "type": "string", "enum": ["cli", "sdk"], "description": "Gemini 模式" },
+            "useVertex": { "type": "boolean", "description": "是否使用 Vertex AI" }
+          }
+        }
+      }
+    },
+    "chatmode": {
+      "type": "object",
+      "description": "对话模式：interactive=直接输出即回复；proactive=须显式发送",
+      "x-merge": "dict",
+      "properties": {
+        "private": { "type": "string", "enum": ["interactive", "proactive"], "description": "私聊对话模式" },
+        "group": { "type": "string", "enum": ["interactive", "proactive"], "description": "群聊对话模式" },
+        "nothuman": { "type": "string", "enum": ["interactive", "proactive"], "description": "非人类对话模式" }
+      }
+    },
+    "flush_delay": {
+      "type": "number",
+      "description": "消息 flush 间隔（秒），对不同用户可调整",
+      "x-merge": "scalar"
+    },
+    "debounce": {
+      "type": "number",
+      "description": "入站消息去抖间隔（秒）",
+      "x-merge": "scalar"
+    },
+    "dispatch": {
+      "type": "string",
+      "enum": ["mention", "broadcast"],
+      "description": "群聊分发策略",
+      "x-merge": "scalar"
+    },
+    "show_activities": {
+      "type": "string",
+      "enum": ["all", "none"],
+      "description": "中间活动可见性（技术用户显示，普通用户隐藏）",
+      "x-merge": "scalar"
+    },
+    "enable_rich_content": {
+      "type": "boolean",
+      "description": "启用富内容渲染（对不同用户可定制）",
+      "x-merge": "scalar"
+    },
+    "proactive": {
+      "type": "object",
+      "description": "Proactive 模式细粒度策略",
+      "x-merge": "dict",
+      "properties": {
+        "pre_tool_1stmsgchk": {
+          "type": "boolean",
+          "description": "Proactive 下首次工具调用前必须先 send/file 表态"
+        },
+        "tool_use_reminder": {
+          "type": "boolean",
+          "description": "Proactive 下启用队列未读提醒和工具汇报提醒"
+        }
+      }
+    },
+    "render": {
+      "type": "object",
+      "description": "各渲染类型当前激活的 modeName",
+      "x-merge": "dict",
+      "properties": {
+        "private": { "type": "string", "description": "私聊渲染模式名称" },
+        "group": { "type": "string", "description": "群聊渲染模式名称" },
+        "inject": { "type": "string", "description": "注入渲染模式名称" }
+      }
+    },
+    "permissionMode": {
+      "type": "string",
+      "description": "执行权限模式（对信任用户 bypass，对陌生用户 readonly）",
+      "x-merge": "scalar"
+    },
+    "roles": {
+      "type": "object",
+      "description": "角色级行为覆盖：role → { baseagents, permissionMode }",
+      "x-merge": "dict",
+      "additionalProperties": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "path": { "type": "string" },
-          "pattern": { "type": "string" }
+          "baseagents": { "type": "object", "description": "角色级 baseagents 覆盖" },
+          "permissionMode": { "type": "string", "description": "角色级 permissionMode 覆盖" }
         }
       }
     }

@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "defaults.schema.1.json",
   "title": "DefaultsConfig (agents/defaults.json)",
-  "description": "全局级人专属基础设施默认值，H 覆盖链最低优先级。只放 H 字段，不含任何 HA（behavior）字段。",
+  "description": "全局默认配置。H 链最低层。",
   "x-logical-name": "defaults",
   "x-permission": "H",
   "x-scope": "defaults",
@@ -13,36 +13,50 @@
     "owners": {
       "type": "array",
       "items": { "type": "string" },
-      "description": "全局基础 owner（AID，沿链并集）",
+      "description": "全局 owner（AID）",
       "x-merge": "list"
     },
     "admins": {
       "type": "array",
       "items": { "type": "string" },
-      "description": "全局基础管理员（AID，沿链并集）",
+      "description": "全局 admin（AID）",
       "x-merge": "list"
     },
     "models": {
       "type": "object",
-      "description": "模型管控（白名单等）",
+      "description": "模型配置",
       "x-merge": "dict",
       "properties": {
-        "default": { "type": "string" },
-        "allowed": { "type": "array", "items": { "type": "string" } }
+        "default": { "type": "string", "description": "全局默认模型" },
+        "allowed": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "全局模型白名单"
+        }
       }
+    },
+    "active_baseagent": {
+      "type": "string",
+      "description": "当前活跃的 base agent（claude/codex/gemini）。暂存于此，待权限体系实现后迁移。",
+      "x-merge": "scalar"
+    },
+    "baseagents": {
+      "type": "object",
+      "description": "各 base agent 配置（model/effort/apiKey/baseUrl 等）。暂存于此，待权限体系实现后迁移。",
+      "x-merge": "dict"
     },
     "projects": {
       "type": "object",
-      "description": "项目路径默认值",
+      "description": "项目路径配置",
       "x-merge": "dict",
       "properties": {
-        "rootPath": { "type": "string" },
-        "defaultPath": { "type": "string" }
+        "rootPath": { "type": "string", "description": "全局项目根路径" },
+        "defaultPath": { "type": "string", "description": "全局默认项目路径" }
       }
     },
     "aun": {
       "type": "object",
-      "description": "AUN 连接默认配置",
+      "description": "全局 AUN 配置",
       "x-merge": "dict",
       "properties": {
         "keystorePath": { "type": "string" },
@@ -50,6 +64,17 @@
         "gatewayUrl": { "type": "string" }
       }
     },
-    "debug": { "type": "object", "x-merge": "dict" }
+    "debug": {
+      "type": "object",
+      "description": "全局调试配置",
+      "x-merge": "dict",
+      "properties": {
+        "logLevel": { "type": "string", "enum": ["DEBUG", "INFO", "WARN", "ERROR"] },
+        "flusherDiag": { "type": "boolean" },
+        "aunTrace": { "type": "boolean" },
+        "aunSdkLog": { "type": "boolean" },
+        "upmsg": { "type": "boolean" }
+      }
+    }
   }
 }

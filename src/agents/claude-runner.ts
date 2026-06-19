@@ -10,7 +10,7 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import { logger } from '../utils/logger.js';
-import { checkBlacklist, checkReadonly, parseEvolclawSendCommand, summarizeToolInput } from '../core/permission.js';
+import { checkBlacklist, checkReadonly, checkHClassWrite, parseEvolclawSendCommand, summarizeToolInput } from '../core/permission.js';
 import { encodePath } from '../utils/cross-platform.js';
 import type { AgentPlugin, AgentInstance, AgentCallbacks } from '../core/baseagent-loader.js';
 import type { AgentEvent, ImageData, PermissionContext, PermissionModeInfo, AgentTokenUsage, AgentContextUsage, AgentLastModelCall, AgentModelCall } from './runner-types.js';
@@ -1245,6 +1245,20 @@ export class AgentRunner {
       const result = await checkBlacklist(input.tool_name, input.tool_input || {});
       if (result.behavior === 'deny') {
         return { decision: 'block' as const, reason: result.message };
+      }
+
+      // H 类文件保护检查（所有权限模式都生效）
+      const permCtx = this.permissionContexts.get(sessionId);
+      const session = sessionManager?.getActiveSession?.(sessionId);
+      const hClassContext = {
+        sessionId,
+        channel: permCtx?.channel,
+        peerId: permCtx?.userId,
+        role: session?.identity?.role
+      };
+      const hResult = checkHClassWrite(input.tool_name, input.tool_input || {}, hClassContext);
+      if (hResult.behavior === 'deny') {
+        return { decision: 'block' as const, reason: hResult.message };
       }
 
       if (callPermissionMode === 'readonly') {

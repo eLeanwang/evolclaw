@@ -1,18 +1,17 @@
 /**
- * `evolclaw config` —— 配置体系底层通用入口（config-system-design-v2.md §十二 + addendum）。
+ * `evolclaw config` —— 配置体系底层通用入口。
  *
  * 16 子命令：get set unset show list validate init effective fields
  *            snapshot prune history diff restore current boots
  * selector：--self / --peer / --default / --process
  *
- * 字段落点由 schema 自动判定（config=H / behavior=HA）；H/HA 权限闸由 EVOLCLAW_SESSION_ID
- * （agent 托管环境）决定。ec model / ec ctl 是高频操作的语义化快捷，最终都经 ConfigManager。
+ * 所有参数统一在 config.json。
  */
 
 import { isHelpFlag, wantsHelp, getArgValue } from './help.js';
 import { normalizePeer, ModelScopeError } from '../core/model/config-scope.js';
 import {
-  ConfigTarget, read, write, ensureFile, resolveEffective, resolveAgentConfig, resolveBehavior,
+  ConfigTarget, read, write, ensureFile, resolveEffective, resolveAgentConfig,
   routeField, listFields, initConfigManager, ConfigError,
   type Selector, type FieldRoute,
 } from '../config/config-manager.js';
@@ -43,12 +42,7 @@ function isAgentEnv(): boolean {
   return !!process.env.EVOLCLAW_SESSION_ID;
 }
 
-/** 某顶层字段是否归属 behavior(HA) schema。 */
-function isBehaviorField(top: string): boolean {
-  return loadSchema('behavior').fields.has(top);
-}
-
-// ── selector 解析（design §十二 + D1 --process）──────────────────────────────
+// ── selector 解析 ──────────────────────────────────────────────────────────
 
 interface ParsedScope {
   scope: Scope;
@@ -89,12 +83,12 @@ function parseScope(args: string[], formatJson: boolean, forWrite: boolean): Par
   return { scope: 'agent', sel: {} }; // 读操作全局视角（无 self → 仅 defaults 可达）
 }
 
-// ── 权限闸（H/HA）────────────────────────────────────────────────────────────
+// ── 权限控制 ────────────────────────────────────────────────────────────
 
 function gateWrite(route: FieldRoute, formatJson: boolean): void {
   if (isAgentEnv() && route.permission === 'H') {
     fail(formatJson, 'FORBIDDEN_H_WRITE',
-      `agent 托管环境不可写 H 字段（落 ${route.schema}）；仅人可改。`);
+      `agent 托管环境不可写此字段（落 ${route.schema}）；仅人可改。`);
   }
 }
 
@@ -150,13 +144,12 @@ function cmdGet(args: string[], formatJson: boolean): void {
   let route: FieldRoute;
   try { route = routeField(top, scope === 'defaults' ? 'defaults' : scope); }
   catch (e) { return failFromConfigErr(e, formatJson); }
-  const value = route.permission === 'HA' ? getNested(eff.behavior, field!) : getNested(eff, field!);
+  const value = getNested(eff, field!);
   emit(formatJson, {
     ok: true, field, value: value ?? null, scope,
     permission: route.permission, file: route.schema,
   }, () => {
-    const tag = route.permission === 'HA' ? '[behavior]' : '[config]';
-    return `${field} = ${JSON.stringify(value ?? null)}  ${tag}`;
+    return `${field} = ${JSON.stringify(value ?? null)}`;
   });
 }
 
@@ -167,13 +160,6 @@ function cmdSet(args: string[], formatJson: boolean): void {
   const { scope, sel } = parseScope(args, formatJson, true);
 
   const top = field!.split('.')[0];
-
-  // D7：--default + behavior 字段 → reject（先于通用路由判定——defaults schema 没有 behavior 字段，
-  // 否则会先抛 UNKNOWN_FIELD 掩盖真实语义）。
-  if (scope === 'defaults' && isBehaviorField(top)) {
-    fail(formatJson, 'DEFAULT_BEHAVIOR_REJECT',
-      'behavior 链无 defaults 层：请逐 agent 设置（--self <aid>），或将该字段上提为 config/H 字段');
-  }
 
   let route: FieldRoute;
   try { route = routeField(top, scope); }
@@ -202,7 +188,7 @@ function cmdSet(args: string[], formatJson: boolean): void {
   } catch (e) { return failFromConfigErr(e, formatJson); }
 
   emit(formatJson, { ok: true, field, value: coerced, scope, permission: route.permission, file: route.schema }, () =>
-    `✓ 已设置 ${field} = ${JSON.stringify(coerced)}  [${route.permission === 'HA' ? 'behavior' : 'config'}/${scope}]\n  生效：该范围所有会话下条消息起。`);
+    `✓ 已设置 ${field} = ${JSON.stringify(coerced)}  [config/${scope}]\n  生效：该范围所有会话下条消息起。`);
 }
 
 function cmdUnset(args: string[], formatJson: boolean): void {
@@ -213,9 +199,6 @@ function cmdUnset(args: string[], formatJson: boolean): void {
   if (scope === 'process') fail(formatJson, 'UNSET_PROCESS_REJECT', 'evolclaw.json 无下层可回落，unset --process 被拒（请直接编辑文件）');
 
   const top = field!.split('.')[0];
-  if (scope === 'defaults' && isBehaviorField(top)) {
-    fail(formatJson, 'DEFAULT_BEHAVIOR_REJECT', 'behavior 链无 defaults 层，无法 unset');
-  }
   let route: FieldRoute;
   try { route = routeField(top, scope); }
   catch (e) { return failFromConfigErr(e, formatJson); }
@@ -239,13 +222,8 @@ function cmdShow(args: string[], formatJson: boolean): void {
     : scope === 'relation' ? ConfigTarget.Relation : ConfigTarget.Agent;
   // show 看单层原始内容，不展开 ${VAR}
   const cfg = read(target, sel) || {};
-  let behavior: any = null;
-  if (scope === 'agent') behavior = read(ConfigTarget.AgentBehavior, sel);
-  if (scope === 'relation') behavior = read(ConfigTarget.RelationBehavior, sel);
-  emit(formatJson, { ok: true, scope, config: cfg, behavior }, () => {
-    const out = [`# ${scope} config (原始，未合并，凭证显示 \${VAR})`, JSON.stringify(cfg, null, 2)];
-    if (behavior) out.push(`# ${scope} behavior`, JSON.stringify(behavior, null, 2));
-    return out.join('\n');
+  emit(formatJson, { ok: true, scope, config: cfg }, () => {
+    return `# ${scope} config (原始，未合并，凭证显示 \${VAR})\n${JSON.stringify(cfg, null, 2)}`;
   });
 }
 
@@ -285,8 +263,8 @@ function cmdValidate(args: string[], formatJson: boolean): void {
   const targets: Array<{ t: ConfigTarget; s?: Selector }> = [];
   if (scope === 'process') targets.push({ t: ConfigTarget.Process });
   else if (scope === 'defaults') targets.push({ t: ConfigTarget.Defaults });
-  else if (scope === 'agent') { targets.push({ t: ConfigTarget.Agent, s: sel }, { t: ConfigTarget.AgentBehavior, s: sel }); }
-  else if (scope === 'relation') { targets.push({ t: ConfigTarget.Relation, s: sel }, { t: ConfigTarget.RelationBehavior, s: sel }); }
+  else if (scope === 'agent') { targets.push({ t: ConfigTarget.Agent, s: sel }); }
+  else if (scope === 'relation') { targets.push({ t: ConfigTarget.Relation, s: sel }); }
 
   const results: Array<{ target: string; ok: boolean; error?: string }> = [];
   for (const { t, s } of targets) {
@@ -308,8 +286,6 @@ function cmdInit(args: string[], formatJson: boolean): void {
     : scope === 'relation' ? ConfigTarget.Relation : ConfigTarget.Agent;
   try {
     ensureFile(target, sel);
-    if (scope === 'agent') ensureFile(ConfigTarget.AgentBehavior, sel);
-    if (scope === 'relation') ensureFile(ConfigTarget.RelationBehavior, sel);
   } catch (e) { return failFromConfigErr(e, formatJson); }
   emit(formatJson, { ok: true, scope }, () => `✓ 已为 ${scope} 作用域物化骨架配置文件`);
 }

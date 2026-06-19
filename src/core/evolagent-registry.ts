@@ -6,15 +6,15 @@ import { agentMdPath, agentPersonalDir } from '../paths.js';
 import {
   loadDefaults,
   loadAllAgents,
-  mergeForAgent,
   ensureAgentDirSkeleton,
   loadAgent,
   validateAgentConfig,
 } from '../config-store.js';
+import { resolveEffective } from '../config/config-manager.js';
 import type {
   AgentInfo,
   AgentConfig,
-  MergedAgentConfig,
+  EffectiveAgentConfig,
   DefaultsConfig,
   ChannelInstance,
 } from '../types.js';
@@ -133,7 +133,7 @@ export class EvolAgentRegistry {
 
     for (const raw of rawAgents) {
       try {
-        const merged = mergeForAgent(raw, defaults);
+        const merged = resolveEffective({ self: raw.aid });
         const agent = new EvolAgent(raw, merged);
         ensureAgentDirSkeleton(raw.aid);
         this.agents.set(agent.aid, agent);
@@ -274,8 +274,7 @@ export class EvolAgentRegistry {
       return null;
     }
 
-    const defaults = loadDefaults();
-    const merged = mergeForAgent(raw, defaults);
+    const merged = resolveEffective({ self: aid });
     const agent = new EvolAgent(raw, merged);
     ensureAgentDirSkeleton(aid);
     this.agents.set(aid, agent);
@@ -300,8 +299,7 @@ export class EvolAgentRegistry {
     const errs = validateAgentConfig(raw);
     if (errs.length > 0) throw new Error(`Invalid config after edit: ${errs.join('; ')}`);
 
-    const defaults = loadDefaults();
-    const merged = mergeForAgent(raw, defaults);
+    const merged = resolveEffective({ self: raw.aid });
 
     // ── disabled → enabled 转换：需要完整启动流程 ──
     if (oldAgent.status === 'disabled' && raw.enabled !== false) {

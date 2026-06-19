@@ -1017,7 +1017,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       logger.info(`${this.logPrefix()} Welcome message sent to owner: ${owner}`);
 
       // Send binding credential for Evol App to persist locally
-      // active_baseagent 是 HA 字段（behavior.json）；经 config-scope 解析。
+      // active_baseagent 经 config-scope 解析。
       await this.sendBindingCredential(owner, agentDisplayName, activeBaseagent(aidName)).catch(e =>
         logger.warn(`${this.logPrefix()} Binding credential failed: ${e}`)
       );

@@ -569,7 +569,7 @@ export interface EvolAgentHandle {
   readonly name: string;
   readonly baseagent: string;
   readonly projectPath: string;
-  readonly config: MergedAgentConfig;
+  readonly config: EffectiveAgentConfig;
   lastActivity?: number;
   getContext(channelName: string, chatType: string, globalChatmode?: { private?: 'interactive' | 'proactive'; group?: 'interactive' | 'proactive' }): AgentContext;
   getOwner(channelName: string): string | undefined;
@@ -811,19 +811,17 @@ export type ChannelInstance =
   | WecomChannelInstance;
 
 // ════════════════════════════════════════════════════════════════════════
-// 配置体系 v2（config-system-design-v2.md + addendum）
+// 配置体系 v3（统一到 config.json）
 //
-// 「1 + 3」四层 + 两条独立覆盖链：
-//   H 链（人专属，仅人可写）：defaults.json → agent/config.json → relation/config.json
-//   HA 链（人+agent 可写）：  agent/behavior.json → role(behavior.roles) → relation/behavior.json
-// 进程级 evolclaw.json 是链外单 H 作用域。
+// 统一覆盖链：defaults.json → agent/config.json → role(config.roles) → relation/config.json
+// 进程级 evolclaw.json 是链外单独作用域。
 //
-// 物理隔离硬约束：「能被 agent 写」⟺「是 HA 字段」⟺「存在 behavior.json 中」。
-// schema 是「字段 →（类型, 归属文件）」唯一事实源（kits/schemas/）。
+// 所有参数统一在 config.json，权限控制在 API 层而非文件层。
+// schema 是「字段 → 类型」唯一事实源（kits/schemas/）。
 // ════════════════════════════════════════════════════════════════════════
 
 /**
- * H 类 · 进程级 evolclaw.json（链外单 H 作用域，不进覆盖链）。
+ * 进程级 evolclaw.json（独立作用域，不进覆盖链）。
  * 与 config-store.ts 的 EvolclawConfig 同构——逐步统一到此。
  */
 export interface ProcessConfig {
@@ -842,8 +840,8 @@ export interface ProcessConfig {
 }
 
 /**
- * H 类 · 全局级 agents/defaults.json —— H 覆盖链最低优先级。
- * 只放 H 字段，不含任何 HA（behavior）字段——HA 链从 agent 级起。
+ * 全局级 agents/defaults.json —— 覆盖链最低优先级。
+ * 提供所有配置参数的默认值，被 agent/config 和 relation/config 覆盖。
  */
 export interface DefaultsConfig {
   $schema_version: number;
@@ -856,8 +854,8 @@ export interface DefaultsConfig {
 }
 
 /**
- * H 类 · agent 级 agents/<aid>/config.json —— H 链中级，覆盖 defaults。
- * 单 agent 的身份、凭证、管控字段。行为参数（model/chatmode/...）不在此，见 BehaviorConfig。
+ * Agent 级 agents/<aid>/config.json —— 覆盖 defaults。
+ * 包含 agent 的所有配置：身份、凭证、管控字段、模型配置、对话模式等。
  *
  * 顶层 owners 是 AUN 渠道（即 agent 自身）的 owner 列表，元素为 AID。
  * channels[] 是该 agent 接入的所有渠道实例（含 AUN）。
@@ -879,29 +877,11 @@ export interface AgentConfig {
   observable?: boolean;
   /** 快照额外备份声明（不得指向 .env）。 */
   extra_backup?: Array<{ path: string; pattern?: string }>;
-}
 
-/**
- * H 类 · 关系级 agents/<aid>/relations/<peerKey>/config.json —— H 链最高优先级。
- * 机制先行：当前为空骨架（角色字段 + extra_backup），将来加"某对端人工判定字段"在此与 schema 同步。
- */
-export interface RelationConfig {
-  $schema_version: number;
-  owners?: string[];   // list，关系级只能往上加角色
-  admins?: string[];
-  extra_backup?: Array<{ path: string; pattern?: string }>;
-}
-
-/**
- * HA 类 · agent 级与关系级 behavior.json 共用（全文唯一定义）。
- * 人和 agent 均可写。HA 链最低层是 agent/behavior.json（无 defaults 层）。
- * roles 块承载角色级 model/effort/permissionMode 覆盖（角色层是 HA 链一环）。
- */
-export interface BehaviorConfig {
-  $schema_version?: number;
-  // 模型
+  // Runtime configuration parameters
+  // 模型配置
   active_baseagent?: string;
-  baseagents?: BaseagentsBlock;        // .claude.model / .codex.reasoning 等
+  baseagents?: BaseagentsBlock;
   // 对话模式
   chatmode?: ChatmodeBlock;
   // 消息合并/节流
@@ -919,13 +899,39 @@ export interface BehaviorConfig {
   enable_rich_content?: boolean;
   // 执行权限模式
   permissionMode?: string;
-  // 角色级覆盖：role → { baseagents, permissionMode }
+  // 角色级覆盖
+  roles?: Record<string, RoleOverride>;
+}
+
+/**
+ * 关系级 agents/<aid>/relations/<peerKey>/config.json —— 覆盖链最高优先级。
+ * 支持针对不同用户的个性化配置（29 个参数）。
+ */
+export interface RelationConfig {
+  $schema_version: number;
+  owners?: string[];
+  admins?: string[];
+  extra_backup?: Array<{ path: string; pattern?: string }>;
+
+  // Relation-level personalization parameters
+  active_baseagent?: string;
+  baseagents?: BaseagentsBlock;
+  chatmode?: ChatmodeBlock;
+  flush_delay?: number;
+  debounce?: number;
+  dispatch?: 'mention' | 'broadcast';
+  show_activities?: ShowActivitiesMode;
+  proactive?: ProactiveBehaviorBlock;
+  render?: { private?: string; group?: string; inject?: string };
+  enable_rich_content?: boolean;
+  permissionMode?: string;
   roles?: Record<string, RoleOverride>;
 }
 
 /**
  * 运行时合并结果（下游统一视图）。
- *   H 段 = resolveAgentConfig 的 H 链结果；behavior 段 = resolveBehavior 的 HA 链结果。
+ * 覆盖链合并：defaults → agent/config → relation/config
+ * 所有参数统一在 config.json。
  * 字段保持 optional——覆盖链全空即 undefined，由消费方按字段语义处理。
  */
 export interface EffectiveAgentConfig {
@@ -942,18 +948,31 @@ export interface EffectiveAgentConfig {
   debug?: DebugBlock;
   observable?: boolean;
   extra_backup?: Array<{ path: string; pattern?: string }>;
-  /** HA 链合并结果（agent/behavior → role → relation/behavior）。 */
-  behavior: BehaviorConfig;
-}
 
-/**
- * MergedAgentConfig —— 运行时**扁平视图**：H 配置 + HA 行为平铺合并。
- * EvolAgent.config 返回此形态，兼容既有 `.config.<field>` 消费方（chatmode/baseagents/...）。
- * 数据由 ConfigManager 的 resolveAgentConfig + resolveBehavior 产出（唯一合并点），
- * 非另起一套合并逻辑——只是把两条链结果平铺给运行时消费方。
- * agent 级（无 peer/role）的快照；带 peer/role 的逐消息解析仍走 resolveBehavior。
- */
-export type MergedAgentConfig = AgentConfig & BehaviorConfig;
+  // Effective runtime configuration (merged from defaults → agent → relation)
+  // 模型配置
+  active_baseagent?: string;
+  baseagents?: BaseagentsBlock;
+  // 对话模式
+  chatmode?: ChatmodeBlock;
+  // 消息合并/节流
+  flush_delay?: number;
+  debounce?: number;
+  // 群聊分发
+  dispatch?: 'mention' | 'broadcast';
+  // 可见性
+  show_activities?: ShowActivitiesMode;
+  // proactive 模式细粒度策略
+  proactive?: ProactiveBehaviorBlock;
+  // 渲染
+  render?: { private?: string; group?: string; inject?: string };
+  // 富内容
+  enable_rich_content?: boolean;
+  // 执行权限模式
+  permissionMode?: string;
+  // 角色级覆盖
+  roles?: Record<string, RoleOverride>;
+}
 
 // ── 出站协议类型（OutboundPayload / OutboundEnvelope / ChannelCapabilities） ──
 

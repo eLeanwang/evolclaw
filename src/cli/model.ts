@@ -17,7 +17,7 @@ import {
   readScope, writeScope, clearScope, resolveEffectiveModel,
   type ScopeSelector, type ModelScope,
 } from '../core/model/config-scope.js';
-import { resolveBehavior } from '../config/config-manager.js';
+import { resolveEffective } from '../config/config-manager.js';
 import { resolveAnthropicConfig } from '../agents/baseagent.js';
 import { getCatalog, getModelInfo } from '../core/model/model-catalog.js';
 
@@ -342,9 +342,9 @@ async function fetchWithTimeout(url: string, opts: RequestInit, timeoutMs: numbe
 /** 解析网关 baseUrl 和 apiKey（复用 resolveCreds 逻辑，但从 CLI 层调用）。 */
 function resolveGatewayCreds(self?: string): { baseUrl?: string; apiKey?: string } {
   try {
-    // baseagents 是 HA 字段（behavior.json）；经 ConfigManager 合并取得。
-    const behavior = self ? resolveBehavior({ self }, { cache: true }) : { baseagents: {} };
-    const block: any = behavior.baseagents || {};
+    // baseagents 现在在 config.json 中
+    const config = self ? resolveEffective({ self }, { cache: true }) : { baseagents: {} };
+    const block: any = config.baseagents || {};
     const claudeCfg = block.claude || {};
     const r = resolveAnthropicConfig({ agents: { claude: claudeCfg } } as any, claudeCfg);
     return { baseUrl: r.baseUrl, apiKey: r.apiKey };

@@ -61,12 +61,6 @@ export function resolvePaths() {
 export function agentRelationConfig(aid: string, peerKey: string): string {
   return path.join(resolveRoot(), 'agents', aid, 'relations', peerKey, 'config.json');
 }
-export function agentBehaviorConfig(aid: string): string {
-  return path.join(resolveRoot(), 'agents', aid, 'behavior.json');
-}
-export function agentRelationBehaviorConfig(aid: string, peerKey: string): string {
-  return path.join(resolveRoot(), 'agents', aid, 'relations', peerKey, 'behavior.json');
-}
 
 // ── AID 路径（agent.md 存放在 $EVOLCLAW_HOME/AIDs/<aid>/）──
 

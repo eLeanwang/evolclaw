@@ -5,7 +5,8 @@ import { spawn, execFileSync, execFile } from 'child_process';
 import { promisify } from 'util';
 import readline from 'readline';
 import { resolveRoot, resolvePaths, ensureDataDirs, getPackageRoot, agentMdPath } from '../paths.js';
-import { loadDefaults, loadAllAgents, mergeForAgent, loadEvolclawConfig, saveEvolclawConfig } from '../config-store.js';
+import { loadDefaults, loadAllAgents, loadEvolclawConfig, saveEvolclawConfig } from '../config-store.js';
+import { resolveEffective } from '../config/config-manager.js';
 import { resolveAnthropicConfig } from '../agents/baseagent.js';
 import { migrateProject } from '../config-store.js';
 import { ipcQuery } from '../ipc.js';
@@ -297,7 +298,6 @@ export async function cmdStart(opts: { diagnose?: boolean; bindBootstrap?: boole
   autoMigrateIfNeeded();
 
   // 未初始化时自动引导：无 defaults 文件且无任何 agent → 视为未初始化
-  // （baseagents 已从 defaults 移入各 agent behavior.json，故改用"有无 agent"判定）
   const defaults = loadDefaults();
   const hasAnyAgent = loadAllAgents().agents.length > 0;
   if (!defaults && !hasAnyAgent) {
@@ -2400,41 +2400,55 @@ async function startEcwebIfEnabled(p: ReturnType<typeof resolvePaths>): Promise<
     return false;
   }
 
-  const child = spawn(launch.command, launch.args, {
-    detached: true,
-    stdio: 'ignore',
-    windowsHide: true,
-  });
-
-  child.unref();
-  const pid = child.pid;
-  if (!pid) {
-    console.log('❌ ECWeb 启动失败（进程创建失败）');
+  // 防御性检查：确保 command 和 args 有效
+  if (!launch.command || !Array.isArray(launch.args)) {
+    console.log('⚠ ECWeb 启动配置无效，跳过启动');
+    console.log(`   command: ${launch.command}, args: ${JSON.stringify(launch.args)}`);
     return false;
   }
 
-  fs.mkdirSync(p.instanceDir, { recursive: true });
-  fs.writeFileSync(
-    path.join(p.instanceDir, `ecweb-${pid}.json`),
-    JSON.stringify({ pid, port, startedAt: Date.now() }, null, 2),
-  );
+  try {
+    const child = spawn(launch.command, launch.args, {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+    });
 
-  // 轮询端口确认 HTTP 服务真正就绪（spawn 成功 ≠ 端口绑定成功），顺便拿配对码
-  let pair: { code: string; expiresAt: number } | null = null;
-  for (let i = 0; i < 20; i++) {
-    pair = await fetchEcwebPairCode(port);
-    if (pair) break;
-    await sleep(250);
-  }
+    child.unref();
+    const pid = child.pid;
+    if (!pid) {
+      console.log('❌ ECWeb 启动失败（进程创建失败）');
+      return false;
+    }
 
-  if (pair) {
-    const mins = Math.max(0, Math.round((pair.expiresAt - Date.now()) / 60000));
-    console.log(`✓ ECWeb 启动成功 (PID: ${pid})  http://localhost:${port}`);
-    console.log(`   配对码: ${pair.code}  (约 ${mins} 分钟内有效，已配对过的浏览器无需重新配对)`);
-    return true;
+    fs.mkdirSync(p.instanceDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(p.instanceDir, `ecweb-${pid}.json`),
+      JSON.stringify({ pid, port, startedAt: Date.now() }, null, 2),
+    );
+
+    // 轮询端口确认 HTTP 服务真正就绪（spawn 成功 ≠ 端口绑定成功），顺便拿配对码
+    let pair: { code: string; expiresAt: number } | null = null;
+    for (let i = 0; i < 20; i++) {
+      pair = await fetchEcwebPairCode(port);
+      if (pair) break;
+      await sleep(250);
+    }
+
+    if (pair) {
+      const mins = Math.max(0, Math.round((pair.expiresAt - Date.now()) / 60000));
+      console.log(`✓ ECWeb 启动成功 (PID: ${pid})  http://localhost:${port}`);
+      console.log(`   配对码: ${pair.code}  (约 ${mins} 分钟内有效，已配对过的浏览器无需重新配对)`);
+      return true;
+    }
+    console.log(`❌ ECWeb 启动失败：端口 ${port} 未就绪（进程 PID ${pid} 可能已退出，查看 logs/watch-web.log）`);
+    return false;
+  } catch (err) {
+    console.log(`⚠ ECWeb 启动失败: ${err instanceof Error ? err.message : String(err)}`);
+    console.log(`   command: ${launch.command}`);
+    console.log(`   args: ${JSON.stringify(launch.args)}`);
+    return false;
   }
-  console.log(`❌ ECWeb 启动失败：端口 ${port} 未就绪（进程 PID ${pid} 可能已退出，查看 logs/watch-web.log）`);
-  return false;
 }
 
 /** 显示 ecweb 访问信息 + 配对码（启动后 ecweb 需要一点时间起 HTTP，故重试几次）。 */
@@ -2576,8 +2590,7 @@ export async function cmdDiagnose() {
     // 3. 检查 Anthropic 配置（用首个 self-agent 的 effective config）
     if (agents.length > 0) {
       try {
-        const defaults = loadDefaults();
-        const merged = mergeForAgent(agents[0], defaults);
+        const merged = resolveEffective({ self: agents[0].aid });
         const syntheticConfig = {
           agents: {
             claude: merged.baseagents?.claude as any,

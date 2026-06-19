@@ -315,6 +315,7 @@ export const SELF_MANAGE_AGENT_ACTIONS = new Set(['update', 'reload']);
 export function isProcessLevelAction(cmdBase: string, action?: string): boolean {
   if (cmdBase === '/system') return true;
   if (cmdBase === '/gateway') return true;  // 网关改 baseagent 凭证，进程级，仅控制 channel
+  if (cmdBase === '/config') return true;  // 配置查询/修改，进程级，仅控制 channel
   if (cmdBase === '/agent') return PROCESS_LEVEL_AGENT_ACTIONS.has(action ?? '');
   return false;
 }
@@ -743,6 +744,49 @@ export async function execMenuQuery(this: any,
     }
     console.log('[gateway-env-debug] 权限检查通过，调用 gatewayList()');
     return gatewayList();
+  }
+
+  // ── /config 查询（只读，查询各层配置） ──
+  if (cmdBase === '/config') {
+    const scope = args?.scope || 'process';
+
+    if (scope === 'process') {
+      // 进程级配置需要 owner 权限
+      if (!fromControlChannel || !isProcessLevelOwner(userId, loadEvolclawConfig().owners)) {
+        return { error: '操作需要 owner 权限', code: 'FORBIDDEN' };
+      }
+      const cfg = loadEvolclawConfig();
+      return { data: { scope: 'process', config: cfg } };
+    }
+
+    if (scope === 'defaults') {
+      // 全局默认配置需要 owner 权限
+      if (!fromControlChannel || !isProcessLevelOwner(userId, loadEvolclawConfig().owners)) {
+        return { error: '操作需要 owner 权限', code: 'FORBIDDEN' };
+      }
+      const { read, ConfigTarget } = await import('../../config/config-manager.js');
+      const cfg = read(ConfigTarget.Defaults, undefined, { cache: true });
+      return { data: { scope: 'defaults', config: cfg } };
+    }
+
+    if (scope === 'agent') {
+      const aid = args?.aid;
+      if (!aid) return { error: '缺少 aid 参数', code: 'MISSING_AID' };
+
+      // 控制 channel 可以查任意 agent，agent channel 只能查自身
+      if (!fromControlChannel) {
+        const selfAid = this.getOwningAgent?.(channel)?.aid;
+        if (selfAid !== aid) {
+          return { error: '只能查询自己的配置', code: 'FORBIDDEN' };
+        }
+      }
+
+      const { read, ConfigTarget } = await import('../../config/config-manager.js');
+      const cfg = read(ConfigTarget.Agent, { self: aid }, { cache: true });
+      return { data: { scope: 'agent', aid, config: cfg } };
+    }
+
+    return { error: '未知的 scope', code: 'INVALID_SCOPE' };
   }
 
   if (cmdBase === '/pwd') {
@@ -1603,7 +1647,7 @@ export async function execMenuForEcweb(this: any, payload: any): Promise<import(
     return { type: 'menu.response', id, name, error: { code: 'NOT_SUPPORTED', message: 'cli 不在 ECWeb 控制范围' } };
   }
 
-  const isProcessLevel = name === 'system' || name === 'agent' || name === 'gateway';
+  const isProcessLevel = name === 'system' || name === 'agent' || name === 'gateway' || name === 'config';
   const owners = loadEvolclawConfig().owners ?? [];
   if (isProcessLevel && owners.length === 0) {
     return { type: 'menu.response', id, name, error: { code: 'FORBIDDEN', message: '请在 evolclaw.json 配置 owners 后使用进程级操作' } };
@@ -1628,6 +1672,7 @@ export async function execMenuForEcweb(this: any, payload: any): Promise<import(
     effort: '/effort', chatmode: '/chatmode', dispatch: '/dispatch',
     permission: '/perm', activity: '/activity', system: '/system',
     agent: '/agent', trigger: '/trigger', file: '/file', gateway: '/gateway',
+    config: '/config',
   };
   const cmd = name ? (nameMap[name] ?? payload.cmd) : payload.cmd;
 
@@ -1695,6 +1740,7 @@ export async function execMenuForControl(this: any, payload: any, peerId: string
     effort: '/effort', chatmode: '/chatmode', dispatch: '/dispatch',
     permission: '/perm', activity: '/activity', system: '/system',
     agent: '/agent', trigger: '/trigger', file: '/file', gateway: '/gateway',
+    config: '/config',
   };
   const cmd = name ? (nameMap[name] ?? payload.cmd) : payload.cmd;
 

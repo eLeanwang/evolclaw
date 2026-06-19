@@ -24,7 +24,7 @@ import type { InteractionRouter } from '../interaction-router.js';
 import { renderActionAsText, renderCommandCardAsText } from '../interaction-router.js';
 import { formatPeerKey } from '../relation/peer-identity.js';
 import { resolveEffectiveModel, resolvePermissionMode } from '../model/config-scope.js';
-import { resolveBehavior } from '../../config/config-manager.js';
+import { resolveEffective } from '../../config/config-manager.js';
 import { insertUsageEvent, insertContextBreakdown, insertModelCalls } from '../../stats/writer.js';
 import { normalizeUsage } from '../../stats/normalizer.js';
 import { resolvePrices } from '../../stats/price-resolver.js';
@@ -658,8 +658,8 @@ export class MessageProcessor {
     const peerRole = session.identity?.role || 'anonymous';
     const proactiveBehavior = (() => {
       try {
-        const behavior = resolveBehavior({ self: selfAid || undefined, peerKey, role: peerRole }, { cache: true });
-        return resolveProactiveBehavior(behavior.proactive);
+        const config = resolveEffective({ self: selfAid || undefined, peerKey, role: peerRole }, { cache: true });
+        return resolveProactiveBehavior(config.proactive);
       } catch (e) {
         logger.warn(`[MessageProcessor] resolve proactive behavior failed, using defaults: ${e instanceof Error ? e.message : String(e)}`);
         return resolveProactiveBehavior();

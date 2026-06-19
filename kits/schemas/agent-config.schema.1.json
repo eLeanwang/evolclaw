@@ -51,16 +51,43 @@
         "allowed": { "type": "array", "items": { "type": "string" } }
       }
     },
+    "active_baseagent": {
+      "type": "string",
+      "description": "当前活跃的 base agent（claude/codex/gemini）。暂存于此，待权限体系实现后迁移。",
+      "x-merge": "scalar"
+    },
+    "baseagents": {
+      "type": "object",
+      "description": "各 base agent 配置（model/effort/apiKey/baseUrl 等）。暂存于此，待权限体系实现后迁移。",
+      "x-merge": "dict"
+    },
     "projects": {
       "type": "object",
-      "description": "项目路径",
+      "description": "项目路径配置",
       "x-merge": "dict",
       "properties": {
-        "rootPath": { "type": "string" },
-        "defaultPath": { "type": "string" }
+        "rootPath": { "type": "string", "description": "项目根路径" },
+        "defaultPath": { "type": "string", "description": "默认项目路径" },
+        "autoCreate": { "type": "boolean", "description": "自动创建项目" },
+        "list": {
+          "type": "object",
+          "description": "项目列表（名称→路径映射）",
+          "additionalProperties": { "type": "string" }
+        }
       }
     },
-    "debug": { "type": "object", "x-merge": "dict" },
+    "debug": {
+      "type": "object",
+      "description": "调试配置",
+      "x-merge": "dict",
+      "properties": {
+        "logLevel": { "type": "string", "enum": ["DEBUG", "INFO", "WARN", "ERROR"] },
+        "flusherDiag": { "type": "boolean" },
+        "aunTrace": { "type": "boolean" },
+        "aunSdkLog": { "type": "boolean" },
+        "upmsg": { "type": "boolean" }
+      }
+    },
     "observable": { "type": "boolean", "description": "观察者模式：入站/出站各转一份给 owners", "x-merge": "scalar" },
     "extra_backup": {
       "type": "array",

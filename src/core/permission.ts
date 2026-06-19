@@ -78,6 +78,87 @@ export function checkReadonly(
 }
 
 /**
+ * H 类文件保护（用于 PreToolUse hook）
+ * H 类文件只有人能改，agent 不可直接写入
+ */
+const H_CLASS_PATTERNS = [
+  /[/\\]evolclaw\.json$/,                                    // 进程级配置
+  /[/\\]agents[/\\]defaults\.json$/,                         // 全局默认配置
+  /[/\\]agents[/\\][^/\\]+[/\\]config\.json$/,               // agent 配置
+  /[/\\]agents[/\\][^/\\]+[/\\]relations[/\\][^/\\]+[/\\]config\.json$/,  // relation 配置
+  /[/\\]backups[/\\]config[/\\]/,                            // 快照目录
+  /[/\\]\.snapshots[/\\]/,                                   // 快照目录（备用）
+  /[/\\]CA[/\\]/,                                            // 证书根目录
+  /[/\\]aids[/\\][^/\\]+[/\\](cert|keys)[/\\]/,              // 证书和密钥
+  /[/\\]\.device_id$/,                                       // 设备标识
+  /[/\\]\.env$/,                                             // 环境变量配置
+  /[/\\]\.seed\./,                                           // seed 文件
+  /[/\\]\.migrated-/,                                        // 迁移标记
+  /\.json_$/,                                                // 备份文件（_ 后缀）
+  /\.json\.migrated$/,                                       // 迁移归档
+  /[/\\]defaults_\d+\.json$/,                                // defaults 历史备份
+];
+
+export function checkHClassWrite(
+  toolName: string,
+  input: Record<string, unknown>,
+  context?: { sessionId?: string; channel?: string; peerId?: string; role?: string }
+): { behavior: 'allow' } | { behavior: 'deny'; message: string } {
+  // 只检查写入类工具
+  if (!['Write', 'Edit', 'NotebookEdit'].includes(toolName)) {
+    return { behavior: 'allow' };
+  }
+
+  // 提取文件路径
+  const filePath = (input.file_path ?? input.notebook_path ?? input.path ?? '') as string;
+  if (!filePath) {
+    return { behavior: 'allow' };
+  }
+
+  // 规范化路径分隔符（统一使用正斜杠）
+  const normalized = filePath.replace(/\\/g, '/');
+
+  // 检查是否匹配 H 类文件模式
+  for (const pattern of H_CLASS_PATTERNS) {
+    if (pattern.test(normalized)) {
+      const fileBasename = path.basename(filePath);
+      logger.warn(
+        `[H-Class Protection] 🔒 Protected file write blocked: tool=${toolName} path=${filePath} ` +
+        `session=${context?.sessionId} channel=${context?.channel} peer=${context?.peerId} role=${context?.role}`
+      );
+
+      // 根据文件类型返回不同的提示信息
+      let suggestion = '';
+      if (fileBasename === 'config.json' || fileBasename === 'defaults.json' || fileBasename === 'evolclaw.json') {
+        suggestion = '\n\n💡 请使用配置命令操作：\n' +
+                     '  • 查看配置：evolclaw config show --self <aid>\n' +
+                     '  • 读取字段：evolclaw config get <field> --self <aid>\n' +
+                     '  • 修改字段：evolclaw config set <field> <value> --self <aid>\n' +
+                     '  • 帮助文档：evolclaw config --help';
+      } else if (normalized.includes('/backups/config/') || normalized.includes('/.snapshots/')) {
+        suggestion = '\n\n💡 快照由系统自动管理，请使用：\n' +
+                     '  • 创建快照：evolclaw config snapshot --desc "说明"\n' +
+                     '  • 查看历史：evolclaw config history\n' +
+                     '  • 恢复快照：evolclaw config restore <version>';
+      } else if (normalized.includes('/cert/') || normalized.includes('/keys/') || normalized.includes('/CA/')) {
+        suggestion = '\n\n💡 证书和密钥由系统自动管理，请使用：\n' +
+                     '  • 查看证书：evolclaw aid cert show <aid>\n' +
+                     '  • 更新证书：evolclaw aid cert renew <aid>';
+      }
+
+      return {
+        behavior: 'deny',
+        message: `🔒 此文件受保护，agent 不可直接写入\n\n` +
+                 `文件：${filePath}\n` +
+                 `类型：配置/快照/证书等系统关键文件${suggestion}`
+      };
+    }
+  }
+
+  return { behavior: 'allow' };
+}
+
+/**
  * 黑名单检查（用于 PreToolUse hook）
  * 检查危险命令模式，非黑名单一律放行
  */

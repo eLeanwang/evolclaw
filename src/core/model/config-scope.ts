@@ -1,27 +1,27 @@
 /**
  * config-scope: 会话配置参数（model/effort/permissionMode）的多作用域读写与解析。
  *
- * 配置体系 v2 后：model/effort/permissionMode/roles 是 HA 字段，落 behavior.json。
+ * 所有参数统一在 config.json。
  * 存储经 ConfigManager（全项目唯一合并实现点）。本模块是面向 CLI / 运行时的薄封装：
- * 把"作用域 + baseagent"语义映射到 behavior 链的读写。
+ * 把"作用域 + baseagent"语义映射到 config 链的读写。
  *
  * 作用域（越具体越优先）：关系 > 角色 > agent。
- *   agent  agents/<self>/behavior.json                          → baseagents.<ba>.{model,effort}
- *   角色   agents/<self>/behavior.json 的 roles.<role> 块         → baseagents / permissionMode（内嵌）
- *   关系   agents/<self>/relations/<peerKey>/behavior.json       → baseagents / permissionMode
- *   global（历史保留）：HA 链无 defaults 层——全局 model 作用域已退场，只读 agent 兜底。
+ *   agent  agents/<self>/config.json                          → baseagents.<ba>.{model,effort}
+ *   角色   agents/<self>/config.json 的 roles.<role> 块         → baseagents / permissionMode（内嵌）
+ *   关系   agents/<self>/relations/<peerKey>/config.json       → baseagents / permissionMode
+ *   global（历史保留）：全局 model 作用域已退场，只读 agent 兜底。
  *
  * 改任一作用域后，对应范围所有会话的下一条消息即时生效（运行时每条消息解析，不缓存）。
  *
- * 详见 docs/config-system-design-v2.md（§七 HA 链 + 角色层）、docs/model-command-design.md。
+ * 详见 docs/config/
  */
 
 import { formatPeerKey, parsePeerKey } from '../relation/peer-identity.js';
 import {
-  ConfigTarget, read, write, ensureFile, resolveBehavior,
+  ConfigTarget, read, write, ensureFile, resolveEffective,
   type Selector,
 } from '../../config/config-manager.js';
-import type { BehaviorConfig, RoleOverride } from '../../types.js';
+import type { AgentConfig, RelationConfig, EffectiveAgentConfig, RoleOverride } from '../../types.js';
 
 export type ModelScope = 'global' | 'agent' | 'role' | 'relation';
 
@@ -88,11 +88,11 @@ export function determineScope(sel: ScopeSelector): ModelScope {
 
 // ── baseagent 解析 ───────────────────────────────────────────────────────
 
-/** 取本端的活跃 baseagent（从 agent/behavior 读 active_baseagent）；缺省 'claude'。 */
+/** 取本端的活跃 baseagent（从 agent/config 读 active_baseagent）；缺省 'claude'。 */
 export function activeBaseagent(self?: string): string {
   try {
     if (self) {
-      const b = read<BehaviorConfig>(ConfigTarget.AgentBehavior, { self }, { cache: true });
+      const b = read<AgentConfig>(ConfigTarget.Agent, { self }, { cache: true });
       if (b?.active_baseagent) return b.active_baseagent;
     }
   } catch { /* fall through */ }
@@ -112,22 +112,22 @@ export function readScope(scope: ModelScope, sel: ScopeSelector, ba: string): Mo
   try {
     switch (scope) {
       case 'global':
-        // HA 链无 defaults 层——全局 model 作用域已退场，返回空。
+        // 全局 model 作用域已退场，返回空。
         return {};
       case 'agent': {
-        const b = sel.self ? read<BehaviorConfig>(ConfigTarget.AgentBehavior, { self: sel.self }, { cache: true }) : null;
+        const b = sel.self ? read<AgentConfig>(ConfigTarget.Agent, { self: sel.self }, { cache: true }) : null;
         const c = ((b?.baseagents || {}) as any)[ba] || {};
         return { model: c.model, effort: c[ef] };
       }
       case 'role': {
-        const b = sel.self ? read<BehaviorConfig>(ConfigTarget.AgentBehavior, { self: sel.self }, { cache: true }) : null;
+        const b = sel.self ? read<AgentConfig>(ConfigTarget.Agent, { self: sel.self }, { cache: true }) : null;
         const ov = (b?.roles || {})[sel.role!] as RoleOverride | undefined;
         const c = ((ov?.baseagents || {}) as any)[ba] || {};
         return { model: c.model, effort: c[ef], permissionMode: ov?.permissionMode };
       }
       case 'relation': {
         const b = (sel.self && sel.peerKey)
-          ? read<BehaviorConfig>(ConfigTarget.RelationBehavior, { self: sel.self, peerKey: sel.peerKey }, { cache: true })
+          ? read<RelationConfig>(ConfigTarget.Relation, { self: sel.self, peerKey: sel.peerKey }, { cache: true })
           : null;
         const c = ((b?.baseagents || {}) as any)[ba] || {};
         return { model: c.model, effort: c[ef], permissionMode: b?.permissionMode };
@@ -149,12 +149,12 @@ export function writeScope(
 ): void {
   const ef = effortField(ba);
   if (scope === 'global') {
-    throw new ModelScopeError('NO_GLOBAL_SCOPE', 'HA 链无 defaults 层：model/effort 请用 --self 逐 agent 设置');
+    throw new ModelScopeError('NO_GLOBAL_SCOPE', '全局 model 作用域已退场：请用 --self 逐 agent 设置');
   }
   if (scope === 'agent') {
     requireSelf(sel);
-    const target = ConfigTarget.AgentBehavior;
-    const cur = (read<BehaviorConfig>(target, { self: sel.self }) as BehaviorConfig) || {};
+    const target = ConfigTarget.Agent;
+    const cur = (read<AgentConfig>(target, { self: sel.self }) as AgentConfig) || {};
     applyBaPatch(cur, ba, ef, patch);
     ensureFile(target, { self: sel.self });
     write(target, cur, { self: sel.self });
@@ -162,8 +162,8 @@ export function writeScope(
   }
   if (scope === 'role') {
     requireSelf(sel);
-    const target = ConfigTarget.AgentBehavior;
-    const cur = (read<BehaviorConfig>(target, { self: sel.self }) as BehaviorConfig) || {};
+    const target = ConfigTarget.Agent;
+    const cur = (read<AgentConfig>(target, { self: sel.self }) as AgentConfig) || {};
     cur.roles = cur.roles || {};
     const ov: RoleOverride = (cur.roles[sel.role!] = cur.roles[sel.role!] || {});
     ov.baseagents = ov.baseagents || {};
@@ -174,15 +174,15 @@ export function writeScope(
   }
   // relation
   requirePeer(sel);
-  const target = ConfigTarget.RelationBehavior;
+  const target = ConfigTarget.Relation;
   const selr: Selector = { self: sel.self, peerKey: sel.peerKey };
-  const cur = (read<BehaviorConfig>(target, selr) as BehaviorConfig) || {};
+  const cur = (read<RelationConfig>(target, selr) as RelationConfig) || {};
   applyBaPatch(cur, ba, ef, patch);
   ensureFile(target, selr);
   write(target, cur, selr);
 }
 
-function applyBaPatch(cfg: BehaviorConfig, ba: string, ef: string, patch: { model?: string | null; effort?: string | null }): void {
+function applyBaPatch(cfg: AgentConfig | RelationConfig, ba: string, ef: string, patch: { model?: string | null; effort?: string | null }): void {
   cfg.baseagents = cfg.baseagents || {};
   applyBaPatchTo(cfg.baseagents as any, ba, ef, patch);
 }
@@ -197,9 +197,9 @@ function applyBaPatchTo(block: Record<string, any>, ba: string, ef: string, patc
 
 /** 写关系级 permissionMode（供 /perm 命令使用）。null 删除字段。 */
 export function writeRelationPermissionMode(self: string, peerKey: string, mode: string | null): void {
-  const target = ConfigTarget.RelationBehavior;
+  const target = ConfigTarget.Relation;
   const sel: Selector = { self, peerKey };
-  const cur = (read<BehaviorConfig>(target, sel) as BehaviorConfig) || {};
+  const cur = (read<RelationConfig>(target, sel) as RelationConfig) || {};
   if (mode === null) delete cur.permissionMode;
   else cur.permissionMode = mode;
   ensureFile(target, sel);
@@ -224,12 +224,12 @@ const FALLBACK_PERMISSION_MODE = 'auto';
 /**
  * 解析实际生效的 permissionMode。不抛出——运行时 per-message 调用。
  * 链：关系 > 角色(roles.<role>) > agent > 出厂默认[role] > 'auto'。
- * 经 ConfigManager.resolveBehavior（含角色层）取合并后的 permissionMode。
+ * 经 ConfigManager.resolveEffective（含角色层）取合并后的 permissionMode。
  */
 export function resolvePermissionMode(sel: ScopeSelector): string {
   try {
-    const beh = resolveBehavior(toSelector(sel), { cache: true });
-    if (beh.permissionMode) return beh.permissionMode;
+    const config = resolveEffective(toSelector(sel), { cache: true });
+    if (config.permissionMode) return config.permissionMode;
     if (sel.role && BUILTIN_PERMISSION_BY_ROLE[sel.role]) return BUILTIN_PERMISSION_BY_ROLE[sel.role];
     return FALLBACK_PERMISSION_MODE;
   } catch {
@@ -257,7 +257,7 @@ export interface ResolvedModel {
 
 /**
  * 按 关系>角色>agent 解析实际生效的 model/effort（model 与 effort 各自独立回退）。
- * 经 ConfigManager.resolveBehavior（HA 链含角色层）取合并后的 baseagents.<ba>。
+ * 经 ConfigManager.resolveEffective（含角色层）取合并后的 baseagents.<ba>。
  * chain 仅就可达作用域逐层展示（用于 CLI 来源标注）。
  */
 export function resolveEffectiveModel(sel: ScopeSelector, ba?: string): ResolvedModel {
@@ -265,8 +265,8 @@ export function resolveEffectiveModel(sel: ScopeSelector, ba?: string): Resolved
   const ef = effortField(baseagent);
 
   // 合并后的最终值（含角色层）
-  const beh = safeResolveBehavior(toSelector(sel));
-  const mergedBa = ((beh.baseagents || {}) as any)[baseagent] || {};
+  const config = safeResolveEffective(toSelector(sel));
+  const mergedBa = ((config.baseagents || {}) as any)[baseagent] || {};
   const finalModel: string | undefined = mergedBa.model;
   const finalEffort: string | undefined = mergedBa[ef];
 
@@ -301,8 +301,8 @@ export function resolveEffectiveModel(sel: ScopeSelector, ba?: string): Resolved
 function toSelector(sel: ScopeSelector): Selector {
   return { self: sel.self, peerKey: sel.peerKey, role: sel.role };
 }
-function safeResolveBehavior(sel: Selector): BehaviorConfig {
-  try { return resolveBehavior(sel, { cache: true }); } catch { return {}; }
+function safeResolveEffective(sel: Selector): EffectiveAgentConfig {
+  try { return resolveEffective(sel, { cache: true }); } catch { return {} as EffectiveAgentConfig; }
 }
 function requireSelf(sel: ScopeSelector): void {
   if (!sel.self) throw new ModelScopeError('AGENT_NOT_FOUND', 'agent 作用域需要 --self');

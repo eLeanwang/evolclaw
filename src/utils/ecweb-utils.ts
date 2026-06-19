@@ -74,6 +74,12 @@ export function resolveEcwebLaunchCommand(
     return { command: nodePath, args: [entry, ...ecwebArgs], entry, source: 'package-bin' };
   }
 
+  // Windows: .cmd/.bat 文件需要通过 cmd.exe 执行
+  const isWindows = opts.isWindows ?? platformIsWindows;
+  if (isWindows && (commandPath.endsWith('.cmd') || commandPath.endsWith('.bat'))) {
+    return { command: 'cmd.exe', args: ['/c', commandPath, ...ecwebArgs], source: 'command' };
+  }
+
   return { command: commandPath, args: ecwebArgs, source: 'command' };
 }
 
