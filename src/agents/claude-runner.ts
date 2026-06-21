@@ -1643,13 +1643,17 @@ export class AgentRunner {
       const stream = this.runSessionCommand('/compact', agentSessionId, projectPath);
       this.activeStreams.set(sessionId, stream);
       try {
+        let receivedBoundary = false;
         for await (const event of stream) {
           if (event.type === 'system' && event.subtype === 'compact_boundary') {
             logger.info(`[AgentRunner] Compact completed, pre_tokens: ${event.compact_metadata?.pre_tokens}`);
-            return true;
+            receivedBoundary = true;
           }
         }
-        return true;
+        if (!receivedBoundary) {
+          logger.warn(`[AgentRunner] Compact stream ended without compact_boundary event`);
+        }
+        return receivedBoundary;
       } finally {
         this.activeStreams.delete(sessionId);
       }
@@ -1668,10 +1672,20 @@ export class AgentRunner {
       const stream = this.runSessionCommand('/clear', agentSessionId, projectPath);
       this.activeStreams.set(sessionId, stream);
       try {
+        let cleared = false;
         for await (const event of stream) {
           logger.debug(`[AgentRunner] Clear event: type=${event.type}, subtype=${(event as any).subtype || 'none'}`);
+          if (event.session_id && event.session_id !== agentSessionId) {
+            cleared = true;
+          }
         }
-        return true;
+        if (cleared) {
+          this.activeSessions.delete(sessionId);
+          this.onSessionIdUpdate?.(sessionId, '');
+        } else {
+          logger.warn('[AgentRunner] Clear stream ended without session reset signal');
+        }
+        return cleared;
       } finally {
         this.activeStreams.delete(sessionId);
       }

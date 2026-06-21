@@ -621,11 +621,12 @@ export async function handleSlashCommand(this: any,
     owningAgent.setActiveBaseagent(args);
     const projectName = this.getProjectName(owningAgent.projectPath);
     const agentSwitchResponse = [
-      `✓ 已设置新会话默认 baseagent: ${args}`,
+      `✓ 已设置默认 baseagent: ${args}`,
       `  Agent: ${owningAgent.name}`,
       `  项目: ${projectName}`,
-      `  当前会话仍使用: ${currentSessionAgent}`,
-      '  新会话/新话题会话将使用新的默认 baseagent',
+      '',
+      `⚠️ 当前会话仍在使用 ${currentSessionAgent}，切换不会立即生效。`,
+      `  发送 /new 创建新会话，或开启新话题，即可用上 ${args}。`,
     ].join('\n');
 
     if (this.shouldSuppressCardTriggerResult(source, channel)) return null;
@@ -1452,7 +1453,24 @@ export async function handleSlashCommand(this: any,
       await previousAgent.closeSession(session.id);
     }
 
-    return { kind: 'command.result' as const, text: `✓ 已创建新会话${sessionName ? `: ${sessionName}` : ''}\n  项目: ${this.getProjectName(projectPath)}\n  之前的对话历史已保留，可通过 /s 查看` };
+    const newAgent = this.agentRegistry?.resolveByChannel(channel);
+    const newBaseagent = newSession.agentId || newAgent?.baseagent || this.parseDefaultBaseagent();
+    // 与 /model 卡片保持一致：按 关系>角色>agent 解析实际生效的 model/effort，
+    // 不直接读 EvolAgent.model（那只是 agent 级静态配置，会无视关系/角色级覆盖）。
+    const newRunner = this.getAgent(channel, newSession.agentId);
+    const newModelState = resolveCommandModelResolution({
+      agent: newRunner,
+      session: newSession,
+      selfAid: selfAID ?? this.resolveSelfAID(channel),
+      channelType: this.resolveChannelType(channel),
+      channelId,
+      userId,
+      role: identity.role,
+    });
+    const backendModel = newModelState.model || newAgent?.model;
+    const backendEffort = newModelState.effort || newAgent?.effort;
+    const backendBits = [newBaseagent, backendModel, backendEffort].filter(Boolean).join(' · ');
+    return { kind: 'command.result' as const, text: `✓ 已创建新会话${sessionName ? `: ${sessionName}` : ''}\n  项目: ${this.getProjectName(projectPath)}\n  后端: ${backendBits}\n  之前的对话历史已保留，可通过 /s 查看` };
   }
 
   // /check 命令：检查渠道状态（guest 可用，详情仅 admin）

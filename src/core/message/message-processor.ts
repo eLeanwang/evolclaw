@@ -2,7 +2,7 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import crypto from 'crypto';
-import { BaseagentRunnerUnavailableError, type AgentRunnerFull, hasCompact, type AgentEvent, type Compactable, type AgentTokenUsage, type AgentContextUsage, type AgentLastModelCall, type AgentModelCall, autoCompactWindowForModel, isClaudeContextUsageModel } from '../../agents/runner-types.js';
+import { BaseagentRunnerUnavailableError, type AgentRunnerFull, hasCompact, hasClearSession, type AgentEvent, type Compactable, type AgentTokenUsage, type AgentContextUsage, type AgentLastModelCall, type AgentModelCall, autoCompactWindowForModel, isClaudeContextUsageModel } from '../../agents/runner-types.js';
 import { SessionManager } from '../session/session-manager.js';
 import { appendMessageLog, buildOutboundEntry } from './message-log.js';
 import { IMRenderer } from './im-renderer.js';
@@ -57,6 +57,20 @@ type ProactiveRuntimeState = {
   chatType: string;
   preTool1stMsgChk: boolean;
   toolUseReminder: boolean;
+};
+
+type ContextRecoveryOptions = {
+  streamKey: string;
+  renderer: IMRenderer;
+  agent: AgentRunnerFull;
+  session: Session;
+  absoluteProjectPath: string;
+  effectiveSystemPrompt: string | undefined;
+  modelOverride: { model?: string; effort?: string; permissionMode?: string } | undefined;
+  resetTimer: () => void;
+  shouldSuppress: () => boolean;
+  proactive: ProactiveRuntimeState | null;
+  isTrigger: boolean;
 };
 
 function resolveProactiveBehavior(block?: ProactiveBehaviorBlock): Required<ProactiveBehaviorBlock> {
@@ -122,6 +136,10 @@ function getContextCompactFailedHint(agent: AgentRunnerFull): string {
 
 function canCompactAgent(agent: AgentRunnerFull): agent is AgentRunnerFull & Compactable {
   return hasCompact(agent) && agent.capabilities?.compact !== false;
+}
+
+function canClearAgent(agent: AgentRunnerFull): boolean {
+  return hasClearSession(agent) && agent.capabilities?.clear !== false;
 }
 
 function autoCompactTokensFromMaxTokens(maxTokens: number | undefined): number | undefined {
@@ -399,6 +417,103 @@ export class MessageProcessor {
     if (this.currentRenderer && !this.shouldSuppressActivities) {
       this.currentRenderer.addNotice('\u23f3 会话压缩中...', 'info', 'compact-start', true);
     }
+  }
+
+  private async retryAfterContextRecovery(
+    prompt: string,
+    opts: ContextRecoveryOptions,
+  ): Promise<StreamRunResult> {
+    const {
+      streamKey,
+      renderer,
+      agent,
+      session,
+      absoluteProjectPath,
+      effectiveSystemPrompt,
+      modelOverride,
+      resetTimer,
+      shouldSuppress,
+      proactive,
+      isTrigger,
+    } = opts;
+
+    if (!session.agentSessionId || !canCompactAgent(agent)) {
+      throw new Error('CONTEXT_COMPACT_FAILED');
+    }
+
+    renderer.addNotice('上下文过长，正在压缩会话...', 'warn', 'compact-trigger', true);
+    await renderer.flush();
+
+    const compacted = await agent.compact(session.id, session.agentSessionId, absoluteProjectPath);
+    if (compacted) {
+      renderer.addNotice('✅ 压缩完成，继续处理...', 'info', 'compact-retry', true);
+      const retryStream = await agent.runQuery(
+        session.id,
+        prompt,
+        absoluteProjectPath,
+        session.agentSessionId,
+        undefined,
+        effectiveSystemPrompt,
+        this.sessionManager,
+        modelOverride
+      );
+      agent.registerStream(streamKey, retryStream);
+      return await this.processEventStream(
+        retryStream,
+        session,
+        agent,
+        renderer,
+        resetTimer,
+        shouldSuppress,
+        proactive,
+        isTrigger
+      );
+    }
+
+    renderer.addNotice('⚠️ 压缩失败，尝试清空会话历史后重试...', 'warn', 'compact-failed-clear', true);
+    await renderer.flush();
+
+    if (!canClearAgent(agent)) {
+      throw new Error('CONTEXT_COMPACT_FAILED');
+    }
+
+    const previousAgentSessionId = session.agentSessionId;
+    let cleared = false;
+    try {
+      cleared = await agent.clearSession(session.id, previousAgentSessionId, absoluteProjectPath);
+    } catch (error) {
+      logger.warn(`[MessageProcessor] clearSession failed after compact failure: ${error}`);
+    }
+
+    if (!cleared) {
+      throw new Error('CONTEXT_COMPACT_FAILED');
+    }
+
+    session.agentSessionId = undefined;
+    await this.sessionManager.updateSession(session.id, { agentSessionId: null });
+    renderer.addNotice('✅ 会话已清空，继续处理...', 'info', 'clear-retry', true);
+
+    const retryStream = await agent.runQuery(
+      session.id,
+      '会话历史已清空，请继续之前未完成的任务。',
+      absoluteProjectPath,
+      undefined,
+      undefined,
+      effectiveSystemPrompt,
+      this.sessionManager,
+      modelOverride
+    );
+    agent.registerStream(streamKey, retryStream);
+    return await this.processEventStream(
+      retryStream,
+      session,
+      agent,
+      renderer,
+      resetTimer,
+      shouldSuppress,
+      proactive,
+      isTrigger
+    );
   }
 
   /**
@@ -1195,41 +1310,22 @@ export class MessageProcessor {
         }
       } catch (error) {
         if (classifyError(error) === ErrorType.CONTEXT_TOO_LONG && session.agentSessionId && canCompactAgent(agent)) {
-          // 尝试 compact 压缩会话
-          renderer.addNotice('上下文过长，正在压缩会话...', 'warn', 'compact-trigger', true);
-          await renderer.flush();
-
-          const compacted = await agent.compact(
-            session.id, session.agentSessionId, absoluteProjectPath
-          );
-
-          if (compacted) {
-            renderer.addNotice('✅ 压缩完成，继续处理...', 'info', 'compact-retry', true);
-            const retryStream = await agent.runQuery(
-              session.id,
-              '上下文已自动压缩，请继续之前未完成的任务。',
-              absoluteProjectPath,
-              session.agentSessionId,
-              undefined,
-              effectiveSystemPrompt,
-              this.sessionManager,
-              modelOverride
-            );
-            agent.registerStream(streamKey, retryStream);
-
-            streamResult = await this.processEventStream(
-              retryStream,
-              session,
-              agent,
+          streamResult = await this.retryAfterContextRecovery(
+            '上下文已自动压缩，请继续之前未完成的任务。',
+            {
+              streamKey,
               renderer,
+              agent,
+              session,
+              absoluteProjectPath,
+              effectiveSystemPrompt,
+              modelOverride,
               resetTimer,
               shouldSuppress,
               proactive,
-              message.source === 'trigger'
-            );
-          } else {
-            throw new Error('CONTEXT_COMPACT_FAILED');
-          }
+              isTrigger: message.source === 'trigger',
+            }
+          );
         } else {
           throw error;
         }
@@ -1246,31 +1342,27 @@ export class MessageProcessor {
       const isPromptTooLong = streamResult.isError && !!session.agentSessionId && !!compactAgent
         && streamHitContextLimit(streamResult);
       if (isPromptTooLong) {
-        renderer.addNotice('上下文过长，正在压缩会话...', 'warn', 'compact-trigger', true);
-        await renderer.flush();
-        const compacted = await compactAgent.compact(session.id, session.agentSessionId!, absoluteProjectPath);
-        if (compacted) {
-          renderer.addNotice('✅ 压缩完成，继续处理...', 'info', 'compact-retry', true);
-          const retryStream = await agent.runQuery(
-            session.id,
-            '上下文已自动压缩，请继续之前未完成的任务。',
+        streamResult = await this.retryAfterContextRecovery(
+          '上下文已自动压缩，请继续之前未完成的任务。',
+          {
+            streamKey,
+            renderer,
+            agent,
+            session,
             absoluteProjectPath,
-            session.agentSessionId!,
-            undefined,
             effectiveSystemPrompt,
-            this.sessionManager,
-            modelOverride
-          );
-          agent.registerStream(streamKey, retryStream);
-          streamResult = await this.processEventStream(retryStream, session, agent, renderer, resetTimer, shouldSuppress, proactive, message.source === 'trigger');
-
-          // 重试后仍然 prompt_too_long：清理 renderer 中可能混入的错误文本，显示友好提示
-          const retryStillTooLong = streamResult.isError && streamHitContextLimit(streamResult);
-          if (retryStillTooLong) {
-            renderer.addNotice(getContextTooLongHint(agent), 'warn', 'context-too-long', true);
+            modelOverride,
+            resetTimer,
+            shouldSuppress,
+            proactive,
+            isTrigger: message.source === 'trigger',
           }
-        } else {
-          throw new Error('CONTEXT_COMPACT_FAILED');
+        );
+
+        // 重试后仍然 prompt_too_long：显示友好提示
+        const retryStillTooLong = streamResult.isError && streamHitContextLimit(streamResult);
+        if (retryStillTooLong) {
+          renderer.addNotice(getContextTooLongHint(agent), 'warn', 'context-too-long', true);
         }
       } else if (streamResult.isError && streamHitContextLimit(streamResult)) {
         // 上下文过长但无法 auto-compact（无 session ID 或 agent 不支持），显示友好提示

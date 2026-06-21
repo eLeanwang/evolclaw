@@ -66,26 +66,33 @@ export class AgentLoader {
     const allAgents = registry.runnableAgents();
 
     for (const agent of allAgents) {
-      for (const [pluginName, plugin] of this.plugins) {
-        if (!plugin.isEnabled(agent)) {
-          logger.debug(`Plugin '${pluginName}' disabled for agent '${agent.name}', skipping`);
-          continue;
-        }
-
-        try {
-          const instance = plugin.createAgent(agent, callbacks);
-          if (!instance) {
-            logger.debug(`Plugin '${pluginName}' returned null for agent '${agent.name}', skipping`);
-            continue;
-          }
-          instances.push(instance);
-          logger.info(`✓ Runner created: agent=${instance.evolagentName} baseagent=${instance.baseagent}`);
-        } catch (error) {
-          logger.error(`✗ Failed to create runner for agent='${agent.name}' baseagent='${pluginName}':`, error);
-        }
-      }
+      instances.push(...this.createForAgent(agent, callbacks));
     }
 
+    return instances;
+  }
+
+  /** Create runners for one EvolAgent, used by runtime hot-load. */
+  createForAgent(agent: EvolAgent, callbacks: AgentCallbacks): AgentInstance[] {
+    const instances: AgentInstance[] = [];
+    for (const [pluginName, plugin] of this.plugins) {
+      if (!plugin.isEnabled(agent)) {
+        logger.debug(`Plugin '${pluginName}' disabled for agent '${agent.name}', skipping`);
+        continue;
+      }
+
+      try {
+        const instance = plugin.createAgent(agent, callbacks);
+        if (!instance) {
+          logger.debug(`Plugin '${pluginName}' returned null for agent '${agent.name}', skipping`);
+          continue;
+        }
+        instances.push(instance);
+        logger.info(`✓ Runner created: agent=${instance.evolagentName} baseagent=${instance.baseagent}`);
+      } catch (error) {
+        logger.error(`✗ Failed to create runner for agent='${agent.name}' baseagent='${pluginName}':`, error);
+      }
+    }
     return instances;
   }
 }

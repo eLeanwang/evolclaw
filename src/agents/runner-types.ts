@@ -194,6 +194,10 @@ export interface Compactable {
   compact(sessionId: string, agentSessionId: string, projectPath: string): Promise<boolean>;
 }
 
+export interface Clearable {
+  clearSession(sessionId: string, agentSessionId: string, projectPath: string): Promise<boolean>;
+}
+
 export interface PermissionController {
   setMode(mode: string): void;
   getMode(): string;
@@ -219,6 +223,10 @@ export function hasPermissionController(agent: any): agent is PermissionControll
 
 export function hasCompact(agent: any): agent is Compactable {
   return typeof agent.compact === 'function';
+}
+
+export function hasClearSession(agent: any): agent is Clearable {
+  return typeof agent.clearSession === 'function';
 }
 
 // ── Token / Context usage types (from aliyun/main merge) ──

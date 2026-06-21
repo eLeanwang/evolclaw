@@ -169,7 +169,7 @@ async function runBindBootstrapDaemon(evolclawCfg: ReturnType<typeof loadEvolcla
     status: (taskId) => bindService.status(taskId),
     cancel: (taskId) => bindService.cancel(taskId),
   });
-  ipcServer.start();
+  await ipcServer.start();
 
   fs.writeFileSync(resolvePaths().readySignal, String(Date.now()));
   logger.info(`✓ Bind bootstrap ready signal written: ${resolvePaths().readySignal}`);
@@ -445,21 +445,23 @@ async function main() {
   agentRegistry.loadAll();
   const agentInfos = agentRegistry.list();
 
-  // 启动期硬约束：必须至少有一个 self-agent
   if (agentInfos.length === 0) {
     const skipped = agentRegistry.getSkipped();
-    printConfigFailure(skipped);
-    process.exit(1);
-  }
-
-  logger.info(`✓ Loaded ${agentInfos.length} self-agent(s)`);
-  for (const info of agentInfos) {
-    if (info.status === 'error') {
-      logger.error(`  ✗ ${info.name}: ${info.error}`);
-    } else if (info.status === 'disabled') {
-      logger.info(`  ○ ${info.name} (disabled)`);
-    } else {
-      logger.info(`  ● ${info.name} ${info.baseagent} @ ${path.basename(info.projectPath)}`);
+    logger.info('✓ No self-agent configured; starting Control Plane only');
+    if (skipped.length > 0) {
+      logger.warn(`[startup] skipped ${skipped.length} agent director${skipped.length === 1 ? 'y' : 'ies'} while starting empty runtime`);
+      for (const s of skipped) logger.warn(`  - ${s.dirName}: ${s.reason}`);
+    }
+  } else {
+    logger.info(`✓ Loaded ${agentInfos.length} self-agent(s)`);
+    for (const info of agentInfos) {
+      if (info.status === 'error') {
+        logger.error(`  ✗ ${info.name}: ${info.error}`);
+      } else if (info.status === 'disabled') {
+        logger.info(`  ○ ${info.name} (disabled)`);
+      } else {
+        logger.info(`  ● ${info.name} ${info.baseagent} @ ${path.basename(info.projectPath)}`);
+      }
     }
   }
 
@@ -472,14 +474,15 @@ async function main() {
     }
   }
 
-  // 选定主 agent（启动期 anthropic resolve 用，配合 IPC `evolagent.list` 显示）
-  // 主 agent 取第一个非 error 非 disabled 的 self-agent。
+  // 选定主 agent（启动期 anthropic resolve 用，配合 IPC `evolagent.list` 显示）。
+  // 空 runtime 下没有 primary agent，Control Plane 仍继续启动。
   const primaryAgent = agentRegistry.runnableAgents()[0];
-  if (!primaryAgent) {
-    const msg = '❌ No runnable self-agent (all are error/disabled). Aborting.';
-    logger.error(msg);
-    console.error(msg);
-    process.exit(1);
+  let agentRuntimeState: 'empty' | 'starting' | 'running' | 'stopped' | 'error' = primaryAgent ? 'starting' : 'empty';
+  let agentRuntimeError: string | undefined;
+  if (!primaryAgent && agentInfos.length > 0) {
+    agentRuntimeState = 'error';
+    agentRuntimeError = 'No runnable self-agent (all are error/disabled).';
+    logger.warn(`[startup] ${agentRuntimeError} Control Plane will remain available.`);
   }
 
   // 进程级设置（从 defaults 取，不属于任何 agent）
@@ -573,13 +576,20 @@ async function main() {
   for (const inst of agentInstances) {
     agentMap.set(`${inst.evolagentName}::${inst.baseagent}`, inst.agent);
   }
-  const primaryBaseagent = primaryAgent.baseagent;
-  const primaryRunnerKey = `${primaryAgent.aid}::${primaryBaseagent}`;
+  const primaryBaseagent = primaryAgent?.baseagent ?? 'claude';
+  let primaryRunnerKey = primaryAgent ? `${primaryAgent.aid}::${primaryBaseagent}` : '<empty>::claude';
   const agentRunner = agentMap.get(primaryRunnerKey) || agentInstances[0]?.agent;
-  if (!agentRunner) {
-    throw new Error('No agent backend available. Check baseagents config (no runners created).');
+  if (primaryAgent && !agentRunner) {
+    agentRuntimeState = 'error';
+    agentRuntimeError = 'No agent backend available. Check baseagents config (no runners created).';
+    primaryAgent.status = 'error';
+    primaryAgent.error = agentRuntimeError;
+    logger.error(agentRuntimeError);
+  } else if (!primaryAgent) {
+    logger.info('✓ Agent Runtime empty; no runners created');
+  } else {
+    logger.info(`✓ Runners ready (primary key: ${primaryRunnerKey}, total: ${agentMap.size}, keys: ${[...agentMap.keys()].join(', ')})`);
   }
-  logger.info(`✓ Runners ready (primary key: ${primaryRunnerKey}, total: ${agentMap.size}, keys: ${[...agentMap.keys()].join(', ')})`);
 
   // 权限审批网关
   const permissionGateway = new PermissionGateway();
@@ -697,7 +707,8 @@ async function main() {
   // 设置中断回调（精确中断正在处理的 agent）
   messageQueue.setInterruptCallback(async (sessionKey, agentId, evolagentName) => {
     const baseagent = agentId || primaryBaseagent;
-    const evol = evolagentName || primaryAgent.aid;
+    const evol = evolagentName || primaryAgent?.aid;
+    if (!evol) return;
     const agent = agentMap.get(`${evol}::${baseagent}`)
       || agentMap.get(primaryRunnerKey);
     if (agent) {
@@ -791,7 +802,10 @@ async function main() {
 
   // ── MessageBridge：Channel ↔ Core 消息桥梁 ──
 
-  const msgBridge = new MessageBridge(primaryAgent.projectPath, sessionManager, processor, messageQueue, cmdHandler, eventBus, primaryAgent.config.debounce);
+  const defaultProjectPath = primaryAgent?.projectPath
+    ?? defaults.projects?.defaultPath
+    ?? path.join(paths.root, 'projects', 'default');
+  const msgBridge = new MessageBridge(defaultProjectPath, sessionManager, processor, messageQueue, cmdHandler, eventBus, primaryAgent?.config.debounce);
   msgBridge.setAgentRegistry(agentRegistry);
 
   // ── Channel instance registration (shared by startup and hot-load) ──
@@ -810,7 +824,7 @@ async function main() {
         // Effective default path: use the agent that owns this channel.
         const owningAgent = agentRegistry.resolveByChannel(inst.adapter.channelKey);
         const effectiveDefault = owningAgent?.projectPath
-          ?? primaryAgent.projectPath;
+          ?? defaultProjectPath;
         const parsedKey = tryParseChannelKey(inst.adapter.channelKey);
         const session = await sessionManager.getOrCreateSession(
           inst.adapter.channelKey, channelId,
@@ -883,15 +897,20 @@ async function main() {
     const agent = agentRegistry.resolveByChannel(inst.adapter.channelKey);
     if (!agent || agent.status === 'error') continue;
     agent.channels.set(inst.adapter.channelKey, inst.adapter);
-    if (agent.status === 'stopped') {
+    const hasRunner = agentInstances.some(runner => runner.evolagentName === agent.aid);
+    if (agent.status === 'stopped' && hasRunner) {
       agent.status = 'running';
     }
   }
-
-  // 写入 ready 信号（核心服务已就绪，channel 连接不阻塞启动判定）
-  const readySignalPath = resolvePaths().readySignal;
-  fs.writeFileSync(readySignalPath, String(Date.now()));
-  logger.info(`✓ Ready signal written: ${readySignalPath}`);
+  if (agentRegistry.list().some((info: any) => info.status === 'running')) {
+    agentRuntimeState = 'running';
+    agentRuntimeError = undefined;
+  } else if (agentRegistry.runnableAgents().length === 0 && agentRegistry.list().length === 0) {
+    agentRuntimeState = 'empty';
+  } else if (agentRuntimeState === 'starting') {
+    agentRuntimeState = 'error';
+    agentRuntimeError = agentRuntimeError ?? 'No runnable self-agent reached running state.';
+  }
 
   // ── 配置快照 + 启动日志（启动完毕锚点，网络无关）──────────────────
   try {
@@ -1300,9 +1319,20 @@ async function main() {
       channelsByType[channelType].push(name);
     }
     const snap = statsCollector.getSnapshot();
+    const agentListForStatus = agentRegistry.list();
     return {
       pid: process.pid,
       uptime: snap.uptimeMs,
+      controlPlane: {
+        ready: true,
+        owned: processLevelOwners.length > 0,
+      },
+      agentRuntime: {
+        state: agentRuntimeState,
+        runnableAgents: agentListForStatus.filter((a: any) => a.status !== 'error' && a.status !== 'disabled').length,
+        runningAgents: agentListForStatus.filter((a: any) => a.status === 'running').length,
+        ...(agentRuntimeError ? { error: agentRuntimeError } : {}),
+      },
       channels,
       channelsByType,
       queue: {
@@ -1401,8 +1431,34 @@ async function main() {
 
   // Hot-load handler: dynamically add a new agent at runtime
   (globalThis as any).__evolclaw_hotLoadAgent = async (aid: string) => {
+    agentRuntimeState = 'starting';
+    agentRuntimeError = undefined;
     const agent = agentRegistry.loadNewAgent(aid);
-    if (!agent) throw new Error(`Failed to load agent ${aid}`);
+    if (!agent) {
+      agentRuntimeState = agentRegistry.runnableAgents().length > 0 ? 'running' : 'error';
+      agentRuntimeError = `Failed to load agent ${aid}`;
+      throw new Error(agentRuntimeError);
+    }
+
+    const newAgentInstances = agentLoader.createForAgent(agent, {
+      onSessionIdUpdate: async (sessionId: string, agentSessionId: string) => {
+        await sessionManager.updateAgentSessionIdBySessionId(sessionId, agentSessionId);
+      },
+    });
+    for (const inst of newAgentInstances) {
+      agentMap.set(`${inst.evolagentName}::${inst.baseagent}`, inst.agent);
+      inst.agent.setPermissionGateway?.(permissionGateway);
+      inst.agent.setCompactStartCallback?.((sessionId: string) => {
+        processor.handleCompactStart(sessionId);
+      });
+    }
+    if (newAgentInstances.length === 0) {
+      agent.status = 'error';
+      agent.error = 'No baseagent runner created for hot-loaded agent';
+      agentRuntimeState = 'error';
+      agentRuntimeError = agent.error;
+      throw new Error(agent.error);
+    }
 
     // 创建 channels
     const instances = await channelLoader.createForAgent(agent);
@@ -1419,6 +1475,9 @@ async function main() {
 
     // 连接
     await channelLoader.connectAll(instances, { onConnected: markChannelConnected });
+    await ensureTriggerSchedulerStarted(agent);
+    agentRuntimeState = 'running';
+    agentRuntimeError = undefined;
     logger.info(`[HotLoad] ✓ Agent ${aid} online with ${instances.length} channel(s)`);
   };
 
@@ -1491,8 +1550,6 @@ async function main() {
     return results;
   };
 
-  // I3: start IPC server LAST, after all hook setup, to eliminate race window
-  ipcServer.start();
   ipcServer.setStatsProvider(() => statsCollector.getSnapshot());
 
   // Queue snapshot & action (for evolclaw queue --agent CLI)
@@ -1586,6 +1643,14 @@ async function main() {
     }
   });
   ipcServer.startCpuTracking();
+
+  // I3: start IPC server after all hooks/executors/providers are registered.
+  await ipcServer.start();
+
+  // 写入 ready 信号（Control Plane 已可通过 IPC 查询；channel 连接不阻塞启动判定）
+  const readySignalPath = resolvePaths().readySignal;
+  fs.writeFileSync(readySignalPath, String(Date.now()));
+  logger.info(`✓ Ready signal written: ${readySignalPath}`);
 
   // 配置 reload 走 IPC `evolagent.reload` 触发，不再用 watchFile。
   // 双 rename 原子写下 watchFile 的语义会被破坏，且新结构有 N 个 config.json 要监控；

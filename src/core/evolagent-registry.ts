@@ -517,6 +517,7 @@ export class EvolAgentRegistry {
       baseagent: agent.baseagent,
       model: agent.model,
       effort: agent.effort,
+      owners: agent.config.owners ?? [],
       lastActivity: agent.lastActivity,
       activeSessions: agent.activeSessions,
       error: agent.error,

@@ -20,6 +20,16 @@ export interface ChannelStatus {
 export interface IpcStatusResponse {
   pid: number;
   uptime: number;
+  controlPlane?: {
+    ready: boolean;
+    owned?: boolean;
+  };
+  agentRuntime?: {
+    state: 'empty' | 'starting' | 'running' | 'stopped' | 'error';
+    runnableAgents: number;
+    runningAgents: number;
+    error?: string;
+  };
   channels: Record<string, ChannelStatus>;
   channelsByType?: Record<string, string[]>;  // channelType → instance names
   queue: { pending: number; processing: number };
@@ -190,42 +200,51 @@ export class IpcServer {
     if (this.cpuTimer) { clearInterval(this.cpuTimer); this.cpuTimer = null; }
   }
 
-  start(): void {
+  start(): Promise<void> {
     // Remove stale socket file (Unix only — named pipes auto-cleanup on process exit)
     if (!isNamedPipe(this.socketPath)) {
       try { fs.unlinkSync(this.socketPath); } catch {}
     }
 
-    this.server = net.createServer((conn) => {
-      let buf = '';
-      conn.on('data', async (data) => {
-        buf += data.toString();
-        // Simple newline-delimited JSON protocol
-        const idx = buf.indexOf('\n');
-        if (idx === -1) return;
-        const line = buf.slice(0, idx);
-        buf = buf.slice(idx + 1);
-        try {
-          const cmd = JSON.parse(line);
-          const response = await this.handleCommand(cmd);
-          conn.end(JSON.stringify(response) + '\n');
-        } catch {
-          conn.end(JSON.stringify({ error: 'invalid request' }) + '\n');
-        }
+    return new Promise((resolve, reject) => {
+      this.server = net.createServer((conn) => {
+        let buf = '';
+        conn.on('data', async (data) => {
+          buf += data.toString();
+          // Simple newline-delimited JSON protocol
+          const idx = buf.indexOf('\n');
+          if (idx === -1) return;
+          const line = buf.slice(0, idx);
+          buf = buf.slice(idx + 1);
+          try {
+            const cmd = JSON.parse(line);
+            const response = await this.handleCommand(cmd);
+            conn.end(JSON.stringify(response) + '\n');
+          } catch {
+            conn.end(JSON.stringify({ error: 'invalid request' }) + '\n');
+          }
+        });
+        conn.on('error', () => {}); // ignore client errors
       });
-      conn.on('error', () => {}); // ignore client errors
-    });
 
-    this.server.on('error', (err) => {
-      logger.error('[IPC] Server error:', err);
-    });
+      const onListenError = (err: Error) => {
+        logger.error('[IPC] Server error:', err);
+        reject(err);
+      };
+      this.server.once('error', onListenError);
 
-    this.server.listen(this.socketPath, () => {
-      // Restrict to current user (Unix only — named pipes use Windows ACLs)
-      if (!isNamedPipe(this.socketPath)) {
-        try { fs.chmodSync(this.socketPath, 0o600); } catch {}
-      }
-      logger.info(`[IPC] Listening on ${this.socketPath}`);
+      this.server.listen(this.socketPath, () => {
+        this.server?.off('error', onListenError);
+        this.server?.on('error', (err) => {
+          logger.error('[IPC] Server error:', err);
+        });
+        // Restrict to current user (Unix only — named pipes use Windows ACLs)
+        if (!isNamedPipe(this.socketPath)) {
+          try { fs.chmodSync(this.socketPath, 0o600); } catch {}
+        }
+        logger.info(`[IPC] Listening on ${this.socketPath}`);
+        resolve();
+      });
     });
   }
 

@@ -96,7 +96,10 @@ export async function main(args: string[]) {
       }
       break;
     case 'start':
-      await cmdStart({ diagnose: args.includes('--diagnose') || args.includes('-d') });
+      await cmdStart({
+        diagnose: args.includes('--diagnose') || args.includes('-d'),
+        foreground: args.includes('--foreground'),
+      });
       break;
     case 'stop':
       await cmdStop();
@@ -220,6 +223,7 @@ Commands:
   init qqbot    QQ 机器人扫码绑定并写入配置
   init wecom    企业微信 AI Bot 配置（手动输入 Bot ID + Secret）
   start         启动服务 (默认)
+                  --foreground  前台运行，适合 systemd/Docker 直接管理进程
   stop          停止服务
   restart       重启服务
                   --clear  顺带 SIGKILL 跨 HOME 残留的 evolclaw 主进程

@@ -554,6 +554,7 @@ export interface AgentInfo {
   baseagent: string;
   model?: string;
   effort?: string;
+  owners?: string[];
   lastActivity?: number;
   activeSessions?: number;
   error?: string;

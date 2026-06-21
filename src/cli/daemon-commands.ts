@@ -24,6 +24,12 @@ import { displaySessionTitle } from '../core/session/session-title.js';
 
 const execFileAsync = promisify(execFile);
 
+type StartOptions = {
+  diagnose?: boolean;
+  bindBootstrap?: boolean;
+  foreground?: boolean;
+};
+
 // 清理 Claude Code 环境变量，防止 SDK 认为是嵌套会话
 export function cleanEnv() {
   for (const key of [
@@ -66,6 +72,19 @@ function rotateStdoutIfNeeded(logDir: string) {
       } catch {}
     }
   } catch {}
+}
+
+function buildDaemonEnv(p: ReturnType<typeof resolvePaths>, opts: StartOptions): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    EVOLCLAW_HOME: p.root,
+    EVOLCLAW_LAUNCHED_BY: 'start',
+    LOG_LEVEL: process.env.LOG_LEVEL || 'INFO',
+    MESSAGE_LOG: process.env.MESSAGE_LOG || 'true',
+    EVENT_LOG: process.env.EVENT_LOG || 'true',
+    ...(opts.diagnose ? { EVOLCLAW_DIAGNOSE: '1' } : {}),
+    ...(opts.bindBootstrap ? { EVOLCLAW_BIND_BOOTSTRAP: '1' } : {}),
+  };
 }
 
 function countLines(pkgRoot: string, logDir: string) {
@@ -286,7 +305,7 @@ function printStartupInfo(opts: { pid?: number; running?: boolean } = {}): void 
   console.log(`  代码时间:   ${latestMtime ? formatLocalTime(latestMtime) : '?'}`);
 }
 
-export async function cmdStart(opts: { diagnose?: boolean; bindBootstrap?: boolean } = {}) {
+export async function cmdStart(opts: StartOptions = {}) {
   const cmdStartedAt = Date.now();
   printStartupInfo();
 
@@ -348,17 +367,12 @@ export async function cmdStart(opts: { diagnose?: boolean; bindBootstrap?: boole
     if (opts.bindBootstrap && evolclawCfgStart.aid) {
       console.log('ℹ 未配置任何 self-agent，绑定 bootstrap 将仅启动控制 AID');
     } else {
-      console.log('❌ 未配置任何 self-agent。');
-      console.log('');
-      console.log('创建方式：');
-      console.log('  1. 下载 Evol App（https://evolai.cn）→ 创建 Agent → 将引导文本输入给 baseagent 执行');
-      console.log('  2. 手动创建：evolclaw agent new <your-aid>.agentid.pub');
-      console.log('');
+      console.log('ℹ 未配置任何 self-agent，将仅启动 Control Plane。');
+      console.log('  可通过控制 AID 远程创建 agent，或稍后运行 evolclaw agent new <aid>.agentid.pub');
       if (skipped.length > 0) {
         console.log(`跳过的目录:`);
         for (const s of skipped) console.log(`  - ${s.dirName}: ${s.reason}`);
       }
-      process.exit(1);
     }
   }
 
@@ -380,8 +394,9 @@ export async function cmdStart(opts: { diagnose?: boolean; bindBootstrap?: boole
         console.log(`    ${symbol} ${aid} — 最后活动 ${ago} (${info.event})`);
       }
     }
+    console.log('  已在运行；部署/脚本可继续轮询 IPC ready，或直接复用当前实例');
     console.log('  使用 evolclaw restart 重启，或 evolclaw stop 先停止');
-    process.exit(1);
+    return;
   }
 
   // 清理残留进程和文件
@@ -403,25 +418,82 @@ export async function cmdStart(opts: { diagnose?: boolean; bindBootstrap?: boole
   // 删除旧的 ready signal
   try { fs.unlinkSync(p.readySignal); } catch {}
 
+  const appMain = path.join(getPackageRoot(), 'dist', 'index.js');
+  const daemonEnv = buildDaemonEnv(p, opts);
+
+  if (opts.foreground) {
+    const child = spawn('node', ['--no-warnings=ExperimentalWarning', appMain], {
+      detached: false,
+      stdio: 'inherit',
+      windowsHide: true,
+      env: daemonEnv,
+    });
+
+    const childPid = child.pid;
+    if (!childPid) {
+      console.error('❌ Failed to start EvolClaw (process creation failed)');
+      process.exit(1);
+      return;
+    }
+
+    let readyHandled = false;
+    const readyTimer = setInterval(() => {
+      if (readyHandled || !fs.existsSync(p.readySignal)) return;
+      readyHandled = true;
+      console.log(`✓ EvolClaw running in foreground (PID: ${childPid})`);
+      console.log(`  EVOLCLAW_HOME: ${resolveRoot()}`);
+      console.log(`  Logs: ${p.logs}/`);
+      console.log(`⏱ ready in ${((Date.now() - cmdStartedAt) / 1000).toFixed(1)}s`);
+      startEcwebIfEnabled(p).catch((err) => {
+        console.error(`⚠ ECWeb 启动检查失败: ${err instanceof Error ? err.message : String(err)}`);
+      });
+    }, 500);
+
+    let forwardingShutdown = false;
+    const forwardSignal = (signal: NodeJS.Signals) => {
+      forwardingShutdown = true;
+      if (child.exitCode === null && !child.killed) child.kill(signal);
+    };
+    const onSigint = () => forwardSignal('SIGINT');
+    const onSigterm = () => forwardSignal('SIGTERM');
+    process.once('SIGINT', onSigint);
+    process.once('SIGTERM', onSigterm);
+
+    await new Promise<void>((resolve) => {
+      child.once('error', (err) => {
+        clearInterval(readyTimer);
+        process.removeListener('SIGINT', onSigint);
+        process.removeListener('SIGTERM', onSigterm);
+        console.error(`❌ Failed to start EvolClaw: ${err instanceof Error ? err.message : String(err)}`);
+        process.exitCode = 1;
+        resolve();
+      });
+      child.once('exit', (code, signal) => {
+        clearInterval(readyTimer);
+        process.removeListener('SIGINT', onSigint);
+        process.removeListener('SIGTERM', onSigterm);
+        if (code !== null) {
+          process.exitCode = code;
+        } else if (forwardingShutdown && (signal === 'SIGINT' || signal === 'SIGTERM')) {
+          process.exitCode = 0;
+        } else {
+          process.exitCode = 1;
+        }
+        resolve();
+      });
+    });
+    return;
+  }
+
   const stdoutLog = path.join(p.logs, 'stdout.log');
   const out = fs.openSync(stdoutLog, 'a');
   const err = fs.openSync(stdoutLog, 'a');
 
-  const appMain = path.join(getPackageRoot(), 'dist', 'index.js');
   const child = spawn('node', ['--no-warnings=ExperimentalWarning', appMain], {
     detached: true,
     stdio: ['ignore', out, err],
     windowsHide: true,
-    env: {
-      ...process.env,
-      EVOLCLAW_HOME: p.root,
-      EVOLCLAW_LAUNCHED_BY: 'start',
-      LOG_LEVEL: process.env.LOG_LEVEL || 'INFO',
-      MESSAGE_LOG: process.env.MESSAGE_LOG || 'true',
-      EVENT_LOG: process.env.EVENT_LOG || 'true',
-      ...(opts.diagnose ? { EVOLCLAW_DIAGNOSE: '1' } : {}),
-      ...(opts.bindBootstrap ? { EVOLCLAW_BIND_BOOTSTRAP: '1' } : {}),
-    }
+    env: daemonEnv,
   });
 
   const childPid = child.pid!;
