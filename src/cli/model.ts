@@ -4,7 +4,7 @@
  * 三级作用域由参数决定：
  *   (无)             → 全局   defaults.json
  *   --self           → agent  config.json
- *   --self --peer    → 关系   relations/<peerKey>/preferences.json
+ *   --self --peer    → 关系   relations/<peerKey>/config.json
  *
  * 改某作用域后，对应范围所有会话的下一条消息即时生效（运行时按 关系>agent>全局 解析）。
  * 与对话内 slash（/model /setmodel /effort /baseagent）互不影响。
@@ -87,7 +87,7 @@ Commands:
 作用域（由参数决定，越具体越优先：关系 > agent > 全局）:
   (无参数)                       全局默认  → defaults.json
   --self <aid>                   agent级   → config.json
-  --self <aid> --peer <X>        关系级    → relations/<peerKey>/preferences.json
+  --self <aid> --peer <X>        关系级    → relations/<peerKey>/config.json
 
 改某作用域后，对应范围所有会话的下一条消息即时生效。
 

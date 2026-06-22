@@ -12,7 +12,7 @@
  * 策略（reload/重启永远全量失效，无视策略；策略只决定"平时每次读怎么检查"）：
  *  - on-reload：平时不检查，直接用缓存（kits 文件、persona）。靠 reload/重启刷新。
  *  - manual：同 on-reload，额外支持显式 invalidate(file) 单刷。
- *  - mtime：每次读 statSync 门控 mtime，变了自动重读（working.md、preferences.json）。
+ *  - mtime：每次读 statSync 门控 mtime，变了自动重读（working.md、config.json）。
  *
  * 容量：项数可无界增长的组（如 relation-prefs，每 peer 一文件）设 LRU 硬上限
  * （见 GROUP_CAPS），命中/写入移到末尾、超限驱逐同组最旧项；无 timer。
