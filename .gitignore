@@ -108,7 +108,6 @@ aun/__MACOSX/
 # 项目文档（不公开）
 CLAUDE.md
 DEPLOYMENT.md
-/docs/
 src/experimental/
 
 # Agent 配置（含私有信息）
