@@ -89,6 +89,22 @@
       }
     },
     "observable": { "type": "boolean", "description": "观察者模式：入站/出站各转一份给 owners", "x-merge": "scalar" },
+    "chatmode": {
+      "type": "object",
+      "description": "聊天模式配置（private/group/nothuman）",
+      "x-merge": "dict",
+      "properties": {
+        "private": { "type": "string", "enum": ["interactive", "proactive"], "description": "私聊模式" },
+        "group": { "type": "string", "enum": ["interactive", "proactive"], "description": "群聊模式" },
+        "nothuman": { "type": "string", "enum": ["interactive", "proactive"], "description": "无人类场景模式" }
+      }
+    },
+    "dispatch": {
+      "type": "string",
+      "enum": ["all", "mention", "none"],
+      "description": "群聊响应策略：all=所有消息, mention=仅@时, none=不响应",
+      "x-merge": "scalar"
+    },
     "extra_backup": {
       "type": "array",
       "description": "快照额外备份文件声明（不得指向 .env）",
