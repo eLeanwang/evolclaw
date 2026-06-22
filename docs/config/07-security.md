@@ -300,7 +300,7 @@ function checkPermission(field: string, caller: 'human' | 'agent') {
 ```
 CLI 命令接收
   ↓
-1. 身份识别（caller: human / agent:aid / eck:user）
+1. 身份识别（caller: human / agent:aid / ecweb:user）
   ↓
 2. 操作类型判定（read / write / snapshot / restore）
   ↓
@@ -317,11 +317,11 @@ CLI 命令接收
 
 ```typescript
 function identifyCaller(context: CommandContext): Caller {
-  // 1. 检查是否是 ECK 请求
-  if (context.source === 'eck') {
+  // 1. 检查是否是 ECWeb 请求
+  if (context.source === 'ecweb') {
     return {
-      type: 'eck',
-      user: context.eckUser,
+      type: 'ecweb',
+      user: context.ecwebUser,
       ip: context.ip
     };
   }

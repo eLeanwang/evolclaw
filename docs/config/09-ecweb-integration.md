@@ -1,13 +1,13 @@
-# ECK (EvolClaw Kit) 配置管理对接
+# ECWeb 配置管理对接
 
 > EvolClaw 配置体系 v3 - 补充文档
 > 相关：[06-cli-commands.md](./06-cli-commands.md)
 
 ---
 
-## 一、ECK 是什么
+## 一、ECWeb 是什么
 
-ECK (EvolClaw Kit) 是 EvolClaw 的 Web 管理控制台，提供配置的图形化管理界面。
+ECWeb 是 EvolClaw 的 Web 管理控制台，提供配置的图形化管理界面。
 
 **访问地址**：`http://localhost:{ecweb.port}/` (默认 8080)
 
@@ -24,7 +24,7 @@ ECK (EvolClaw Kit) 是 EvolClaw 的 Web 管理控制台，提供配置的图形�
 
 ---
 
-## 二、ECK 配置管理功能
+## 二、ECWeb 配置管理功能
 
 ### 2.1 配置浏览
 
@@ -143,12 +143,12 @@ v200 ●━━━━━━━━━━━━━━━━━━━━━━━━
 
 ---
 
-## 三、ECK 与 CLI 的关系
+## 三、ECWeb 与 CLI 的关系
 
 ### 数据流
 
 ```
-ECK Web UI
+ECWeb UI
     ↓ (HTTP API)
 ecweb 后端
     ↓ (调用)
@@ -158,7 +158,7 @@ ConfigManager
 ```
 
 **关键点**：
-- ECK 不直接操作配置文件
+- ECWeb 不直接操作配置文件
 - 所有操作通过 ConfigManager API
 - 与 CLI 共享同一套权限体系
 - 操作结果实时同步（WebSocket）
@@ -188,7 +188,7 @@ ConfigManager
 
 ### WebSocket 通道
 
-ECK 使用 WebSocket 实现配置变更的实时推送：
+ECWeb 使用 WebSocket 实现配置变更的实时推送：
 
 ```
 浏览器 ←━━ WebSocket ━━→ ecweb 后端
@@ -305,10 +305,10 @@ channels[0].appSecret: ${FEISHU_APP_SECRET} 🔒
 
 ### 审计日志集成
 
-所有通过 ECK 的操作都记录到审计日志：
+所有通过 ECWeb 的操作都记录到审计日志：
 
 ```jsonl
-{"timestamp":"2026-06-19T10:30:00Z","source":"eck","user":"admin","ip":"192.168.1.100","action":"config.set","target":"agent/bot1","field":"chatmode.private","oldValue":"interactive","newValue":"proactive"}
+{"timestamp":"2026-06-19T10:30:00Z","source":"ecweb","user":"admin","ip":"192.168.1.100","action":"config.set","target":"agent/bot1","field":"chatmode.private","oldValue":"interactive","newValue":"proactive"}
 ```
 
 ### 权限控制
@@ -392,7 +392,7 @@ ws.on('config:changed', (event) => {
 
 ### 场景 1：快速调整 VIP 用户配置
 
-1. 打开 ECK
+1. 打开 ECWeb
 2. 选择 relation 层级
 3. 选择 agent=bot1, peer=aun#alice
 4. 修改 `baseagents.claude.model` → `opus`
@@ -419,8 +419,8 @@ ws.on('config:changed', (event) => {
 
 ## 十、与 CLI 的对比
 
-| 功 | CLI | ECK |
-|------|-----|-----|
+| 功能 | CLI | ECWeb |
+|------|-----|-------|
 | 配置浏览 | `ec config show/get` | 可视化界面 |
 | 配置编辑 | `ec config set` | 表单编辑 + 实时验证 |
 | 快照管理 | `ec config snapshot/history/restore` | 时间线 + 可视化对比 |
@@ -430,9 +430,9 @@ ws.on('config:changed', (event) => {
 | 学习曲线 | 需熟悉命令 | 直观易用 |
 
 **建议**：
-- 日常管理：优先使用 ECK
+- 日常管理：优先使用 ECWeb
 - 脚本自动化：使用 CLI
-- 故障排查：CLI + ECK 配合
+- 故障排查：CLI + ECWeb 配合
 
 ---
 
@@ -441,3 +441,12 @@ ws.on('config:changed', (event) => {
 - [01-overview.md](./01-overview.md) - 配置体系总体架构
 - [06-cli-commands.md](./06-cli-commands.md) - CLI 命令参考
 - [07-security.md](./07-security.md) - 安全与权限控制
+
+---
+
+## 术语澄清
+
+**ECWeb** = EvolClaw Web Console，Web 管理控制台（本文档描述的系统）  
+**ECK** = EvolClaw Context Kit，上下文组装系统（位于 `$KITS/`，为 base agent 组装身份/关系/环境/渠道层上下文）
+
+两者**完全不同**，请勿混淆。

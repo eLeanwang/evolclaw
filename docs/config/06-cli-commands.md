@@ -333,9 +333,9 @@ configManager.write(
 
 ---
 
-### 方式 4：Web 界面（ECK）
+### 方式 4：Web 界面（ECWeb）
 
-见 [09-eck-integration.md](./09-eck-integration.md)
+见 [09-ecweb-integration.md](./09-ecweb-integration.md)
 
 **优点**：
 - ✅ 可视化
@@ -435,7 +435,7 @@ ec config set flush_delay 5 --self bot1
 
 - `ec config set` 修改配置
 - 直接编辑文件并保存
-- 通过 ECK 修改配置
+- 通过 ECWeb 修改配置
 
 **原因**：
 - ConfigManager 使用 mtime 门控缓存
@@ -569,7 +569,7 @@ ec config set chatmode.private proactive --self prod-bot
 
 ```jsonl
 {"timestamp":"2026-06-19T10:30:00Z","caller":"human","command":"ec config set chatmode.private proactive --self bot1","target":"agent/bot1","field":"chatmode.private","oldValue":"interactive","newValue":"proactive"}
-{"timestamp":"2026-06-19T10:35:00Z","caller":"eck:admin","ip":"192.168.1.100","target":"agent/bot1","field":"baseagents.claude.model","oldValue":"sonnet","newValue":"opus"}
+{"timestamp":"2026-06-19T10:35:00Z","caller":"ecweb:admin","ip":"192.168.1.100","target":"agent/bot1","field":"baseagents.claude.model","oldValue":"sonnet","newValue":"opus"}
 ```
 
 ### 查询审计日志
