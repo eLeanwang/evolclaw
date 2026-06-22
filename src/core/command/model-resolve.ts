@@ -1,6 +1,7 @@
 import type { Session } from '../../types.js';
 import { resolveEffectiveModel, type ResolvedModel, type ScopeSelector } from '../model/config-scope.js';
 import { formatPeerKey } from '../relation/peer-identity.js';
+import { logger } from '../../utils/logger.js';
 
 export interface CommandModelResolution {
   baseagent: string;
@@ -21,7 +22,10 @@ export function resolveCommandModelResolution(opts: {
   userId?: string;
   role?: string;
 }): CommandModelResolution {
-  const baseagent = opts.session?.agentId || opts.agent?.name || 'claude';
+  const effectiveBaseagent = opts.session?.baseagent || opts.agent?.name;
+  if (!effectiveBaseagent) {
+    throw new Error(`[model-resolve] baseagent could not be resolved (session.baseagent=${opts.session?.baseagent}, agent.name=${opts.agent?.name})`);
+  }
   const runnerModel = typeof opts.agent?.getModel === 'function'
     ? opts.agent.getModel()
     : (opts.agent?.name || undefined);
@@ -44,14 +48,14 @@ export function resolveCommandModelResolution(opts: {
   let resolved: ResolvedModel | undefined;
   if (scope.self) {
     try {
-      resolved = resolveEffectiveModel(scope, baseagent);
+      resolved = resolveEffectiveModel(scope, effectiveBaseagent);
     } catch {
       resolved = undefined;
     }
   }
 
   return {
-    baseagent,
+    baseagent: effectiveBaseagent,
     model: resolved?.model || runnerModel,
     effort: resolved?.effort ?? runnerEffort,
     runnerModel,

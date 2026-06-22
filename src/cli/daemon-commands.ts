@@ -1065,8 +1065,12 @@ export async function cmdStatus() {
             const timeAgo = formatTimeAgo(Date.now() - s.updatedAt);
             const dot = s.isActive ? '•' : '○';
             const agentSidLabel = s.agentSessionId ? ` [${s.agentSessionId}]` : '';
-            const agentType = s.agentType || 'claude';
-            console.log(`  ${dot} [${agentType}] ${projectName} / ${sessionName} (${sessionType}, ${chatType})${agentSidLabel} - ${timeAgo}`);
+            const agentType = s.baseagent || (s as any).agentType;
+            if (!agentType) {
+              console.error(`[daemon-commands] baseagent is empty for session ${s.id}`);
+            }
+            const displayType = agentType || 'unknown';
+            console.log(`  ${dot} [${displayType}] ${projectName} / ${sessionName} (${sessionType}, ${chatType})${agentSidLabel} - ${timeAgo}`);
           }
         }
 

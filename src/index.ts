@@ -551,7 +551,7 @@ async function main() {
     (channel, userId) => agentRegistry.isAdmin(channel, userId)
   );
 
-  // sessionMode 已写死在 resolveDefaultSessionMode 中（session-manager.ts），不再读 agent config
+  // chatMode 已写死在 resolveDefaultSessionMode 中（session-manager.ts），不再读 agent config
   logger.info('✓ Database initialized');
 
   // 注册会话文件适配器（Claude / Codex 各自的会话文件操作）
@@ -705,11 +705,11 @@ async function main() {
   });
 
   // 设置中断回调（精确中断正在处理的 agent）
-  messageQueue.setInterruptCallback(async (sessionKey, agentId, evolagentName) => {
-    const baseagent = agentId || primaryBaseagent;
+  messageQueue.setInterruptCallback(async (sessionKey, baseagent, evolagentName) => {
+    const effectiveBaseagent = baseagent || primaryBaseagent;
     const evol = evolagentName || primaryAgent?.aid;
     if (!evol) return;
-    const agent = agentMap.get(`${evol}::${baseagent}`)
+    const agent = agentMap.get(`${evol}::${effectiveBaseagent}`)
       || agentMap.get(primaryRunnerKey);
     if (agent) {
       await agent.interrupt(sessionKey);
@@ -829,7 +829,8 @@ async function main() {
         const session = await sessionManager.getOrCreateSession(
           inst.adapter.channelKey, channelId,
           effectiveDefault,
-          undefined, undefined, undefined, undefined, undefined, undefined,
+          undefined, undefined, undefined, undefined, undefined,
+          owningAgent?.baseagent,
           parsedKey?.selfAID, parsedKey?.type
         );
         return path.isAbsolute(session.projectPath)
@@ -1279,7 +1280,7 @@ async function main() {
         continue;
       }
       const evolName = owningAgent.aid;
-      const baseagentName = session.agentId || primaryBaseagent;
+      const baseagentName = session.baseagent || primaryBaseagent;
       const agent = agentMap.get(`${evolName}::${baseagentName}`) || agentMap.get(primaryRunnerKey);
       if (!agent) {
         sessionManager.clearProcessing(session.id);

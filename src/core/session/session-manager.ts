@@ -48,13 +48,16 @@ export class SessionManager {
     this.adminResolver = resolver;
   }
 
-  private resolveDefaultSessionMode(channel: string, chatType?: string, peerType?: string): 'interactive' | 'proactive' {
+  private resolveDefaultChatMode(channel: string, chatType?: string, peerType?: string): 'interactive' | 'proactive' {
     const ct = chatType || 'private';
 
     // 群聊强制 proactive
     if (ct === 'group') return 'proactive';
 
-    // Agent-to-Agent 强制 proactive
+    // 'system' 类型（触发器等）用 interactive
+    if (peerType === 'system') return 'interactive';
+
+    // Agent-to-Agent 强制 proactive（避免无限循环）
     if (peerType && peerType !== 'human') return 'proactive';
 
     // Human-to-Agent 私聊永远是 interactive（暂不读 agent config，将来可通过前端+配置文件改为 proactive）
@@ -62,12 +65,12 @@ export class SessionManager {
   }
 
   registerFileAdapter(adapter: SessionFileAdapter): void {
-    this.fileAdapters.set(adapter.agentId, adapter);
-    logger.debug(`[SessionManager] Registered file adapter: ${adapter.agentId}`);
+    this.fileAdapters.set(adapter.baseagent, adapter);
+    logger.debug(`[SessionManager] Registered file adapter: ${adapter.baseagent}`);
   }
 
-  private getFileAdapter(agentId: string): SessionFileAdapter | undefined {
-    return this.fileAdapters.get(agentId);
+  private getFileAdapter(baseagent: string): SessionFileAdapter | undefined {
+    return this.fileAdapters.get(baseagent);
   }
 
   private getProjectDirName(projectPath: string): string {
@@ -399,11 +402,13 @@ export class SessionManager {
   private validateSessionFile(session: Session): string | undefined {
     const agentSessionId = session.agentSessionId;
     if (!agentSessionId) return undefined;
-    const agentId = session.agentId || 'claude';
-    const adapter = this.getFileAdapter(agentId);
-    if (!adapter) return agentSessionId;
+    const adapter = this.getFileAdapter(session.baseagent);
+    if (!adapter) {
+      logger.error(`[SessionManager] validateSessionFile: no adapter for baseagent=${session.baseagent}, session=${session.id}`);
+      return agentSessionId;
+    }
     if (adapter.checkExists(session.projectPath, agentSessionId)) return agentSessionId;
-    logger.warn(`Session file not found for ${agentId}: ${agentSessionId}, clearing session ID`);
+    logger.warn(`Session file not found for ${session.baseagent}: ${agentSessionId}, clearing session ID`);
     session.agentSessionId = undefined;
     this.persistSession(session, 'sync');
     return undefined;
@@ -536,7 +541,7 @@ export class SessionManager {
     name?: string,
     userId?: string,
     chatType?: 'private' | 'group',
-    agentId?: string,
+    baseagent?: string,
     selfAID?: string,
     channelType?: string,
     peerType?: string
@@ -548,7 +553,7 @@ export class SessionManager {
       throw new Error(`[SessionManager] getOrCreateSession requires channelType. channel="${channel}" channelId="${channelId}"`);
     }
     if (threadId) {
-      const session = this.getOrCreateThreadSession(channel, channelId, threadId, defaultProjectPath, metadata, name, agentId, selfAID, channelType, peerType, chatType);
+      const session = this.getOrCreateThreadSession(channel, channelId, threadId, defaultProjectPath, metadata, name, baseagent, selfAID, channelType, peerType, chatType);
       session.identity = this.resolveIdentity(channel, userId);
       return session;
     }
@@ -571,14 +576,6 @@ export class SessionManager {
 
       if (session.selfAID !== selfAID) {
         session.selfAID = selfAID;
-        mutated = true;
-      }
-
-      // D2: 存量 session 的 sessionMode 按新规则纠正（存量可能残留旧值如 proactive）
-      const expectedMode = this.resolveDefaultSessionMode(channel, chatType, peerType);
-      if (session.sessionMode !== expectedMode) {
-        logger.info(`[SessionManager] Aligning sessionMode for session ${session.id}: ${session.sessionMode} -> ${expectedMode}`);
-        session.sessionMode = expectedMode;
         mutated = true;
       }
 
@@ -621,12 +618,6 @@ export class SessionManager {
         logger.info(`[SessionManager] Updating chatType for session ${session.id}: ${session.chatType} -> ${chatType}`);
         session.chatType = chatType;
       }
-      // D2: 存量 session 的 sessionMode 按新规则纠正
-      const expectedMode = this.resolveDefaultSessionMode(channel, chatType, peerType);
-      if (session.sessionMode !== expectedMode) {
-        logger.info(`[SessionManager] Aligning sessionMode for session ${session.id}: ${session.sessionMode} -> ${expectedMode}`);
-        session.sessionMode = expectedMode;
-      }
       if (chatType === 'private' && userId && !session.metadata.peerId) {
         session.metadata.peerId = userId;
       }
@@ -641,6 +632,9 @@ export class SessionManager {
     const sessionMetadata: any = { ...(metadata || {}) };
     const newIdentity = this.resolveIdentity(channel, userId);
 
+    if (!baseagent) {
+      throw new Error('[SessionManager] getOrCreateSession: baseagent is empty');
+    }
     const session: Session = {
       id: generateSessionId(),
       channel,
@@ -649,10 +643,10 @@ export class SessionManager {
       selfAID,
       projectPath: defaultProjectPath,
       threadId: '',
-      agentId: agentId || 'claude',
+      baseagent,
       sessionKey: formatSessionKey(channelType, channelId, DEFAULT_THREAD_ID),
       chatType: chatType || 'private',
-      sessionMode: this.resolveDefaultSessionMode(channel, chatType || 'private', peerType),
+      chatMode: this.resolveDefaultChatMode(channel, chatType || 'private', peerType),
       metadata: sessionMetadata,
       name: name || '默认会话',
       createdAt: Date.now(),
@@ -674,15 +668,15 @@ export class SessionManager {
     return session;
   }
 
-  async updateSession(sessionId: string, updates: Partial<Pick<Session, 'agentId' | 'chatType' | 'name' | 'metadata' | 'sessionMode'>> & { agentSessionId?: string | null }): Promise<void> {
+  async updateSession(sessionId: string, updates: Partial<Pick<Session, 'baseagent' | 'chatType' | 'name' | 'metadata' | 'chatMode'>> & { agentSessionId?: string | null }): Promise<void> {
     const loaded = this.loadSessionForUpdate(sessionId);
     if (!loaded) return;
     const { current } = loaded;
 
-    if (updates.agentId !== undefined) current.agentId = updates.agentId;
+    if (updates.baseagent !== undefined) current.baseagent = updates.baseagent;
     if (updates.chatType !== undefined) current.chatType = updates.chatType;
     if (updates.name !== undefined) current.name = updates.name;
-    if (updates.sessionMode !== undefined) current.sessionMode = updates.sessionMode;
+    if (updates.chatMode !== undefined) current.chatMode = updates.chatMode;
     if (updates.metadata !== undefined) current.metadata = updates.metadata;
     if ('agentSessionId' in updates) current.agentSessionId = updates.agentSessionId ?? undefined;
 
@@ -696,7 +690,7 @@ export class SessionManager {
     defaultProjectPath: string,
     metadata?: any,
     name?: string,
-    agentId?: string,
+    baseagent?: string,
     selfAID?: string,
     channelType?: string,
     peerType?: string,
@@ -730,9 +724,14 @@ export class SessionManager {
     const effectiveChannelType = channelType || channel;
     const sessionKey = formatSessionKey(effectiveChannelType, channelId, threadId);
 
-    // 继承主会话的 agentId（话题会话从属于主会话，应沿用相同 backend）
+    // 继承主会话的 baseagent（话题会话从属于主会话，应沿用相同 backend）
     const mainActive = readJsonFile<SessionFile>(path.join(chatDir, 'active.json'));
-    const inheritedAgentId = agentId || mainActive?.agentType || 'claude';
+    // 兼容旧字段名
+    const mainBaseagent = (mainActive as any)?.baseagent || (mainActive as any)?.agentType;
+    const inheritedBaseagent = baseagent || mainBaseagent;
+    if (!inheritedBaseagent) {
+      throw new Error('[SessionManager] getOrCreateThreadSession: baseagent is empty');
+    }
 
     const session: Session = {
       id: generateSessionId(),
@@ -742,10 +741,10 @@ export class SessionManager {
       selfAID: selfAID || '',
       projectPath,
       threadId,
-      agentId: inheritedAgentId,
+      baseagent: inheritedBaseagent,
       sessionKey,
       chatType: effectiveChatType,
-      sessionMode: this.resolveDefaultSessionMode(channel, effectiveChatType, peerType),
+      chatMode: this.resolveDefaultChatMode(channel, effectiveChatType, peerType),
       metadata,
       name: name || '话题会话',
       createdAt: Date.now(),
@@ -772,16 +771,18 @@ export class SessionManager {
     return session;
   }
 
-  async switchProject(channel: string, channelId: string, newProjectPath: string, currentAgentId?: string): Promise<Session> {
-    const agentId = currentAgentId || 'claude';
-    logger.info(`[SessionManager] switchProject: channel=${channel} channelId=${channelId} newPath=${newProjectPath} agent=${agentId}`);
+  async switchProject(channel: string, channelId: string, newProjectPath: string, baseagent?: string): Promise<Session> {
+    if (!baseagent) {
+      throw new Error(`[SessionManager] switchProject: baseagent is empty for channel=${channel} channelId=${channelId}`);
+    }
+    logger.info(`[SessionManager] switchProject: channel=${channel} channelId=${channelId} newPath=${newProjectPath} baseagent=${baseagent}`);
     const inheritedChatType = this.getActiveChatType(channel, channelId);
 
     const identity = this.deriveChannelIdentity(channel, channelId);
     const chatDir = this.ensureResolvedChatDir(channel, channelId, identity.channelType, identity.selfAID);
     const allSessions = this.findAllSessionsInChat(chatDir, false);
     const target = allSessions
-      .filter(s => s.projectPath === newProjectPath && (s.agentId || 'claude') === agentId && !s.threadId)
+      .filter(s => s.projectPath === newProjectPath && s.baseagent === baseagent && !s.threadId)
       .sort((a, b) => b.updatedAt - a.updatedAt)[0];
 
     if (target) {
@@ -804,10 +805,10 @@ export class SessionManager {
       selfAID,
       projectPath: newProjectPath,
       threadId: '',
-      agentId,
+      baseagent: baseagent,
       sessionKey: formatSessionKey(channelType, channelId, DEFAULT_THREAD_ID),
       chatType: inheritedChatType,
-      sessionMode: this.resolveDefaultSessionMode(channel, inheritedChatType),
+      chatMode: this.resolveDefaultChatMode(channel, inheritedChatType),
       metadata: {},
       name: '默认会话',
       createdAt: Date.now(),
@@ -844,7 +845,7 @@ export class SessionManager {
     }
   }
 
-  async switchAgent(channel: string, channelId: string, projectPath: string, newAgentId: string): Promise<Session> {
+  async switchAgent(channel: string, channelId: string, projectPath: string, newBaseagent: string): Promise<Session> {
     const inheritedChatType = this.getActiveChatType(channel, channelId);
     const identity = this.deriveChannelIdentity(channel, channelId);
     // Derive channelType/selfAID from existing sessions; fall back to parsed channel key.
@@ -853,7 +854,7 @@ export class SessionManager {
     const chatDir = this.ensureResolvedChatDir(channel, channelId, channelType, selfAID);
     const allSessions = this.findAllSessionsInChat(chatDir, false);
     const target = allSessions
-      .filter(s => s.projectPath === projectPath && (s.agentId || 'claude') === newAgentId && !s.threadId)
+      .filter(s => s.projectPath === projectPath && s.baseagent === newBaseagent && !s.threadId)
       .sort((a, b) => b.updatedAt - a.updatedAt)[0];
 
     if (target) {
@@ -871,10 +872,10 @@ export class SessionManager {
       selfAID,
       projectPath,
       threadId: '',
-      agentId: newAgentId,
+      baseagent: newBaseagent,
       sessionKey: formatSessionKey(channelType, channelId, DEFAULT_THREAD_ID),
       chatType: inheritedChatType,
-      sessionMode: this.resolveDefaultSessionMode(channel, inheritedChatType),
+      chatMode: this.resolveDefaultChatMode(channel, inheritedChatType),
       metadata: {},
       name: '默认会话',
       createdAt: Date.now(),
@@ -1079,7 +1080,7 @@ export class SessionManager {
     }
   }
 
-  async createNewSession(channel: string, channelId: string, projectPath: string, name?: string, agentId?: string): Promise<Session> {
+  async createNewSession(channel: string, channelId: string, projectPath: string, name?: string, baseagent?: string): Promise<Session> {
     const inheritedChatType = this.getActiveChatType(channel, channelId);
 
     // Derive selfAID and channelType from existing sessions
@@ -1092,8 +1093,14 @@ export class SessionManager {
       if (active) {
         channelType = active.channelType || channel;
         selfAID = active.selfAID || '';
-        if (!agentId && active.agentType) agentId = active.agentType;
+        // 兼容旧字段名
+        const activeBaseagent = (active as any).baseagent || (active as any).agentType;
+        if (!baseagent && activeBaseagent) baseagent = activeBaseagent;
       }
+    }
+
+    if (!baseagent) {
+      throw new Error(`[SessionManager] createNewSession: baseagent is empty for channel=${channel} channelId=${channelId}`);
     }
 
     const session: Session = {
@@ -1104,10 +1111,10 @@ export class SessionManager {
       selfAID,
       projectPath,
       threadId: '',
-      agentId: agentId || 'claude',
+      baseagent,
       sessionKey: formatSessionKey(channelType, channelId, DEFAULT_THREAD_ID),
       chatType: inheritedChatType,
-      sessionMode: this.resolveDefaultSessionMode(channel, inheritedChatType),
+      chatMode: this.resolveDefaultChatMode(channel, inheritedChatType),
       metadata: {},
       name: name || '默认会话',
       createdAt: Date.now(),
@@ -1142,10 +1149,10 @@ export class SessionManager {
       selfAID: sourceSession.selfAID,
       projectPath: sourceSession.projectPath,
       threadId,
-      agentId: sourceSession.agentId || 'claude',
+      baseagent: sourceSession.baseagent,
       sessionKey: formatSessionKey(channelType, sourceSession.channelId, threadId || DEFAULT_THREAD_ID),
       chatType: sourceSession.chatType || 'private',
-      sessionMode: sourceSession.sessionMode || 'interactive',
+      chatMode: sourceSession.chatMode || 'interactive',
       agentSessionId: forkedAgentSessionId,
       metadata: {},
       name: name || `${sourceSession.name || '会话'}-分支`,
@@ -1166,38 +1173,45 @@ export class SessionManager {
     return session;
   }
 
-  async scanCliSessions(projectPath: string, agentId: string): Promise<CliSessionEntry[]> {
-    const adapter = this.getFileAdapter(agentId);
+  async scanCliSessions(projectPath: string, baseagent: string): Promise<CliSessionEntry[]> {
+    const adapter = this.getFileAdapter(baseagent);
     if (!adapter) return [];
     return adapter.scanCliSessions(projectPath);
   }
 
-  checkSessionFileExists(projectPath: string, agentSessionId: string, agentId: string): boolean {
-    const adapter = this.getFileAdapter(agentId);
+  checkSessionFileExists(projectPath: string, agentSessionId: string, baseagent: string): boolean {
+    const adapter = this.getFileAdapter(baseagent);
     if (!adapter) return false;
     return adapter.checkExists(projectPath, agentSessionId);
   }
 
-  readSessionFirstMessage(projectPath: string, agentSessionId: string, agentId: string): string | null {
-    const adapter = this.getFileAdapter(agentId);
+  readSessionFirstMessage(projectPath: string, agentSessionId: string, baseagent: string): string | null {
+    const adapter = this.getFileAdapter(baseagent);
     if (!adapter) return null;
     return adapter.readFirstMessage(projectPath, agentSessionId);
   }
 
-  readSessionLastUserMessage(projectPath: string, agentSessionId: string, agentId: string): string | null {
-    const adapter = this.getFileAdapter(agentId);
+  readSessionLastUserMessage(projectPath: string, agentSessionId: string, baseagent: string): string | null {
+    const adapter = this.getFileAdapter(baseagent);
     if (!adapter) return null;
     return adapter.readLastUserMessage(projectPath, agentSessionId);
   }
 
-  getSessionFileInfo(projectPath: string, agentSessionId: string, agentId: string): SessionFileInfo {
-    const adapter = this.getFileAdapter(agentId);
-    if (!adapter) return { turns: 0 };
+  getSessionFileInfo(projectPath: string, agentSessionId: string, baseagent: string): SessionFileInfo {
+    if (!baseagent) {
+      logger.error(`[SessionManager] getSessionFileInfo: baseagent is empty, returning turns=0. agentSessionId=${agentSessionId}`);
+      return { turns: 0 };
+    }
+    const adapter = this.getFileAdapter(baseagent);
+    if (!adapter) {
+      logger.error(`[SessionManager] getSessionFileInfo: no adapter for baseagent=${baseagent}, returning turns=0`);
+      return { turns: 0 };
+    }
     return adapter.getFileInfo(projectPath, agentSessionId);
   }
 
-  async listSdkSessions(projectPath: string, agentId: string): Promise<SdkSessionEntry[]> {
-    const adapter = this.getFileAdapter(agentId);
+  async listSdkSessions(projectPath: string, baseagent: string): Promise<SdkSessionEntry[]> {
+    const adapter = this.getFileAdapter(baseagent);
     if (!adapter?.listSdkSessions) return [];
     return adapter.listSdkSessions(projectPath);
   }
@@ -1213,10 +1227,10 @@ export class SessionManager {
     return matched[0];
   }
 
-  async importCliSession(channel: string, channelId: string, projectPath: string, agentSessionId: string, agentId: string = 'claude'): Promise<Session> {
+  async importCliSession(channel: string, channelId: string, projectPath: string, agentSessionId: string, baseagent: string = 'claude'): Promise<Session> {
     const inheritedChatType = this.getActiveChatType(channel, channelId);
 
-    const fileInfo = this.getSessionFileInfo(projectPath, agentSessionId, agentId);
+    const fileInfo = this.getSessionFileInfo(projectPath, agentSessionId, baseagent);
     const name = fileInfo.title || `CLI会话-${new Date().toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}`;
 
     // Derive selfAID and channelType from existing sessions
@@ -1240,10 +1254,10 @@ export class SessionManager {
       selfAID,
       projectPath,
       threadId: '',
-      agentId,
+      baseagent,
       sessionKey: formatSessionKey(channelType, channelId, DEFAULT_THREAD_ID),
       chatType: inheritedChatType,
-      sessionMode: this.resolveDefaultSessionMode(channel, inheritedChatType),
+      chatMode: this.resolveDefaultChatMode(channel, inheritedChatType),
       agentSessionId,
       metadata: {},
       name,

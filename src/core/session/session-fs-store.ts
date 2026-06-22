@@ -8,7 +8,7 @@ export interface SessionFile {
   channelId: string;          // 路由键
   sessionKey: string;         // agent 内部会话路由键 (channelType#urlEncode(channelId)#urlEncode(threadId))
   selfAID?: string;           // 本地身份（agent AID）；非 aun 渠道可为空
-  agentType: string;
+  baseagent: string;
   threadId: string;
   chatType: string;
   chatMode: string;
@@ -27,7 +27,7 @@ export interface SessionFile {
 export interface HealthRecord {
   type: 'success' | 'error' | 'reset';
   sessionId: string;
-  agentType?: string;
+  baseagent?: string;
   agentName?: string;
   errorType?: string;
   error?: string;

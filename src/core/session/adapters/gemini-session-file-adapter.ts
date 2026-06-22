@@ -18,7 +18,7 @@ import fs from 'fs';
 import os from 'os';
 
 export class GeminiSessionFileAdapter implements SessionFileAdapter {
-  readonly agentId = 'gemini';
+  readonly baseagent = 'gemini';
 
   private getGeminiHome(): string {
     return path.join(os.homedir(), '.gemini');

@@ -232,11 +232,11 @@ export interface Session {
   channelType?: string;  // 类型（'aun' | 'feishu' | 'wechat' | 'dingtalk' | 'qqbot' | 'wecom'）；缺失时用 channel 做 fallback
   channelId: string;     // 路由键。AUN 私聊=peerAID；AUN 群聊=groupId；其它 channel=原 channelId
   selfAID?: string;        // 本地身份（agent AID）；非 aun 渠道可为空
-  agentId: string;  // 路由维度，默认 'claude'
+  baseagent: string;  // 路由维度，如 'claude'、'codex'、'gemini'
   threadId: string;  // 路由维度，默认 ''
   sessionKey: string;  // agent 内部会话路由键 (channelType#urlEncode(channelId)#urlEncode(threadId))
   chatType: string;  // 'private' | 'group'，由 Channel 填充
-  sessionMode: string;  // 'interactive' | 'proactive'（'autonomous' 预留未实现）
+  chatMode: string;  // 'interactive' | 'proactive'（'autonomous' 预留未实现）
   projectPath: string;
   agentSessionId?: string;
   name?: string;
@@ -287,7 +287,7 @@ export interface Message {
   channelType?: string;     // 类型（aun/feishu/...）
   channelId: string;
   selfAID?: string;  // 本地身份（agent AID）
-  agentId?: string;  // 默认 'claude'
+  baseagent?: string;  // 如 'claude'、'codex'、'gemini'
   threadId?: string;  // 默认 ''
   topicName?: string;  // 话题会话创建时的显示名
   chatType?: 'private' | 'group';  // 由 Channel 层填充
@@ -345,7 +345,7 @@ export interface InboundMessage {
   channelId: string;
   selfAID?: string;  // 本地身份（agent AID）
   groupId?: string;  // 群聊：群 ID（仅 chatType==='group' 时有值）
-  agentId?: string;  // 默认 'claude'
+  baseagent?: string;  // 如 'claude'、'codex'、'gemini'
   threadId?: string;  // 默认 ''
   topicName?: string;  // 话题会话创建时的显示名
   chatType: 'private' | 'group';  // 由 Channel 层填充
@@ -1053,7 +1053,7 @@ export interface Trigger {
   targetChannelType?: string;
   targetThreadId?: string;
   targetSessionStrategy: TriggerSessionStrategy;
-  agentId?: string;
+  baseagent?: string;
   prompt: string;
   createdByPeerId: string;
   createdByChannel: string;

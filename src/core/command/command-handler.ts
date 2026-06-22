@@ -696,9 +696,9 @@ export class CommandHandler {
     };
     if (s.agentSessionId) {
       item.agentSessionId = s.agentSessionId;
-      const fileInfo = this.sessionManager.getSessionFileInfo(s.projectPath, s.agentSessionId, s.agentId);
+      const fileInfo = this.sessionManager.getSessionFileInfo(s.projectPath, s.agentSessionId, s.baseagent);
       if (fileInfo.turns) item.turns = fileInfo.turns;
-      const firstMsg = this.sessionManager.readSessionFirstMessage(s.projectPath, s.agentSessionId, s.agentId);
+      const firstMsg = this.sessionManager.readSessionFirstMessage(s.projectPath, s.agentSessionId, s.baseagent);
       if (firstMsg) item.preview = firstMsg.length > 80 ? firstMsg.slice(0, 80) + '...' : firstMsg;
     }
     if (s.updatedAt) item.lastActive = s.updatedAt;
@@ -1445,7 +1445,7 @@ export class CommandHandler {
    * 从 session 恢复 ReplyContext，用于 ctl send 主动发送文本时的路由
    * - 群聊话题：metadata.replyContext.{threadId,peerId}
    * - 私聊：metadata.peerId
-   * - taskId/chatmode：从 processing_state 和 sessionMode 注入
+   * - taskId/chatmode：从 processing_state 和 chatMode 注入
    */
   private buildCtlReplyContext(session: Session): ReplyContext | undefined {
     const ctx: ReplyContext = {};
@@ -1459,7 +1459,7 @@ export class CommandHandler {
     if (meta?.replyContext?.replyInThread) ctx.replyInThread = meta.replyContext.replyInThread;
 
     const taskId = this.sessionManager.getActiveTaskId(session.id);
-    const chatmode = session.sessionMode || 'interactive';
+    const chatmode = session.chatMode || 'interactive';
     const encrypted = this.sessionManager.getSessionEncrypt(session.id);
 
     // 诊断日志：记录 task_id 解析结果

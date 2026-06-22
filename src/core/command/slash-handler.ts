@@ -93,7 +93,7 @@ export async function handleSlashCommand(this: any,
   const activeSession = await this.sessionManager.getActiveSession(channel, channelId);
   let activeAgent: any | undefined;
   const getActiveAgent = () => {
-    if (!activeAgent) activeAgent = this.getAgent(channel, activeSession?.agentId);
+    if (!activeAgent) activeAgent = this.getAgent(channel, activeSession?.baseagent);
     return activeAgent;
   };
   const getActiveAgentIfAvailable = () => {
@@ -140,7 +140,7 @@ export async function handleSlashCommand(this: any,
     activeAgent: getActiveAgentIfAvailable(),
     sessionManager: this.sessionManager,
     messageQueue: this.messageQueue,
-    getAgentForSession: session => this.getAgent(channel, session.agentId),
+    getAgentForSession: session => this.getAgent(channel, session.baseagent),
   });
   if (idleGuard) return idleGuard;
 
@@ -322,7 +322,7 @@ export async function handleSlashCommand(this: any,
     const permResult = await this.ensureSession(channel, channelId, threadId, chatType);
     if ('error' in permResult) return { kind: 'command.result' as const, text: permResult.error };
     const { session: permSession } = permResult;
-    const permAgent = this.getAgent(channel, permSession.agentId);
+    const permAgent = this.getAgent(channel, permSession.baseagent);
 
     // 关系级 scope 选择器：用于读/写关系级 permissionMode
     const permSelfAid = selfAID ?? this.resolveSelfAID(channel);
@@ -569,7 +569,7 @@ export async function handleSlashCommand(this: any,
 
     if (!args) {
       // currentAgent: 当前 session 的 baseagent，或该 channel 所属 evolagent 的 baseagent
-      const currentAgent = activeSession?.agentId
+      const currentAgent = activeSession?.baseagent
         || this.agentRegistry?.resolveByChannel(channel)?.baseagent
         || this.parseDefaultBaseagent();
       const defaultAgent = owningAgent?.baseagent || this.parseDefaultBaseagent();
@@ -617,7 +617,7 @@ export async function handleSlashCommand(this: any,
       return { kind: 'command.error' as const, text: '❌ 当前 channel 无绑定 agent，无法设置默认 baseagent' };
     }
 
-    const currentSessionAgent = activeSession?.agentId || owningAgent.baseagent || this.parseDefaultBaseagent();
+    const currentSessionAgent = activeSession?.baseagent || owningAgent.baseagent || this.parseDefaultBaseagent();
     owningAgent.setActiveBaseagent(args);
     const projectName = this.getProjectName(owningAgent.projectPath);
     const agentSwitchResponse = [
@@ -638,7 +638,7 @@ export async function handleSlashCommand(this: any,
     const setmodelResult = await this.ensureSession(channel, channelId, threadId, chatType);
     if ('error' in setmodelResult) return { kind: 'command.result' as const, text: setmodelResult.error };
     const { session: setmodelSession } = setmodelResult;
-    const setmodelAgent = this.getAgent(channel, setmodelSession.agentId);
+    const setmodelAgent = this.getAgent(channel, setmodelSession.baseagent);
 
     const setmodelState = resolveCommandModelResolution({
       agent: setmodelAgent,
@@ -681,7 +681,7 @@ export async function handleSlashCommand(this: any,
     const modelResult = await this.ensureSession(channel, channelId, threadId, chatType);
     if ('error' in modelResult) return { kind: 'command.result' as const, text: modelResult.error };
     const { session: modelSession } = modelResult;
-    const modelAgent = this.getAgent(channel, modelSession.agentId);
+    const modelAgent = this.getAgent(channel, modelSession.baseagent);
     const modelState = resolveCommandModelResolution({
       agent: modelAgent,
       session: modelSession,
@@ -828,7 +828,7 @@ export async function handleSlashCommand(this: any,
     const effortResult = await this.ensureSession(channel, channelId, threadId, chatType);
     if ('error' in effortResult) return { kind: 'command.result' as const, text: effortResult.error };
     const { session: effortSession } = effortResult;
-    const effortAgent = this.getAgent(channel, effortSession.agentId);
+    const effortAgent = this.getAgent(channel, effortSession.baseagent);
     const effortState = resolveCommandModelResolution({
       agent: effortAgent,
       session: effortSession,
@@ -965,7 +965,7 @@ export async function handleSlashCommand(this: any,
     if (activityArg && !isAdmin) return { kind: 'command.error' as const, text: '❌ 无权限：此命令仅限管理员使用' };
 
     // proactive 模式下流式输出全部静默，activity 配置无意义
-    if (activeSession?.sessionMode === 'proactive') {
+    if (activeSession?.chatMode === 'proactive') {
       return { kind: 'command.error' as const, text: '❌ 当前会话为 proactive 模式，不支持 activity 配置（流式输出已全部静默）' };
     }
 
@@ -1056,7 +1056,7 @@ export async function handleSlashCommand(this: any,
     const chatmodeSession = chatmodeResult.session;
 
     const arg = normalizedContent.slice(9).trim();
-    const currentMode = chatmodeSession.sessionMode || 'interactive';
+    const currentMode = chatmodeSession.chatMode || 'interactive';
     const chatmodeChatType = chatmodeSession.chatType || activeChatType;
     const isGroup = chatmodeChatType === 'group';
     const canSwitch = !isGroup;
@@ -1120,7 +1120,7 @@ export async function handleSlashCommand(this: any,
     if (threadId) {
       const threadSession = await this.sessionManager.getThreadSession(channel, channelId, threadId);
       if (threadSession) {
-        const threadAgent = this.getAgent(channel, threadSession.agentId);
+        const threadAgent = this.getAgent(channel, threadSession.baseagent);
         if (threadAgent.hasActiveStream(threadSession.id) || this.messageQueue?.isProcessing(threadSession.id)) {
           return { kind: 'command.error' as const, text: '⚠️ 当前正在处理消息，请稍后再试\n使用 /stop 中断当前任务后重试' };
         }
@@ -1129,7 +1129,7 @@ export async function handleSlashCommand(this: any,
       return { kind: 'command.error' as const, text: '⚠️ 当前正在处理消息，请稍后再试\n使用 /stop 中断当前任务后重试' };
     }
 
-    await this.sessionManager.updateSession(chatmodeSession.id, { sessionMode: arg });
+    await this.sessionManager.updateSession(chatmodeSession.id, { chatMode: arg });
     this.eventBus.publish({ type: 'session:chat-mode-changed', sessionId: chatmodeSession.id, mode: arg, timestamp: Date.now() });
     if (this.shouldSuppressCardTriggerResult(source, channel)) return null;
     return { kind: 'command.result' as const, text: `✅ 会话模式已切换: ${arg}` };
@@ -1225,7 +1225,7 @@ export async function handleSlashCommand(this: any,
     const stopResult = await this.ensureSession(channel, channelId, threadId, chatType);
     if ('error' in stopResult) return { kind: 'command.result' as const, text: '当前没有正在处理的任务' };
     const { session: stopSession } = stopResult;
-    const stopAgent = this.getAgent(channel, stopSession.agentId);
+    const stopAgent = this.getAgent(channel, stopSession.baseagent);
     const sessionKey = stopSession.id;
 
     const queueLength = this.messageQueue.getQueueLength(sessionKey);
@@ -1261,7 +1261,7 @@ export async function handleSlashCommand(this: any,
     if ('error' in result) return { kind: 'command.error' as const, text: result.error };
     const { session } = result;
 
-    const sessionAgent = this.getAgent(channel, session.agentId);
+    const sessionAgent = this.getAgent(channel, session.baseagent);
     if (!sessionAgent.capabilities?.compact) {
       return { kind: 'command.error' as const, text: `❌ 当前 Agent (${sessionAgent.name}) 不支持 /compact` };
     }
@@ -1322,7 +1322,7 @@ export async function handleSlashCommand(this: any,
     }
 
     const sessionKey = this.getQueueKey(session, channel, channelId);
-    const sessionAgent = this.getAgent(channel, session.agentId);
+    const sessionAgent = this.getAgent(channel, session.baseagent);
     const isCurrentlyProcessing = this.messageQueue.isProcessing(sessionKey) || sessionAgent.hasActiveStream(sessionKey);
     const queueLength = this.messageQueue.getQueueLength(sessionKey);
 
@@ -1352,7 +1352,7 @@ export async function handleSlashCommand(this: any,
     // 获取会话文件信息并同步 name
     let sessionTurns = 0;
     if (session.agentSessionId) {
-      const fileInfo = this.sessionManager.getSessionFileInfo(session.projectPath, session.agentSessionId, session.agentId);
+      const fileInfo = this.sessionManager.getSessionFileInfo(session.projectPath, session.agentSessionId, session.baseagent);
       sessionTurns = fileInfo.turns;
       if (fileInfo.title && fileInfo.title !== session.name) {
         await this.sessionManager.renameSession(session.id, fileInfo.title);
@@ -1361,9 +1361,9 @@ export async function handleSlashCommand(this: any,
     }
 
     const lines: string[] = [];
-    const sessionMode = session.sessionMode || 'interactive';
+    const chatMode = session.chatMode || 'interactive';
     const dispatchMode = session.metadata?.dispatchModeOverride ?? session.metadata?.dispatchMode ?? '未设置（跟随群设置）';
-    const chatModeLine = `会话模式: ${sessionMode}`;
+    const chatModeLine = `会话模式: ${chatMode}`;
     const dispatchModeLine = session.chatType === 'group' ? `分发模式: ${dispatchMode}` : null;
     if (isAdmin) {
       lines.push(
@@ -1381,14 +1381,14 @@ export async function handleSlashCommand(this: any,
       }
       lines.push(
         `最后成功: ${timeStr}`,
-        `${session.agentId}会话: ${session.agentSessionId || '(未初始化)'}`,
+        `${session.baseagent}会话: ${session.agentSessionId || '(未初始化)'}`,
         `创建时间: ${new Date(session.createdAt).toLocaleString('zh-CN')}`,
         `更新时间: ${new Date(session.updatedAt).toLocaleString('zh-CN')}`
       );
     } else {
       lines.push(
         `📊 ${isThread ? '话题' : '会话'}状态 (Agent: ${agentName})：`,
-        `渠道: ${channel} / 项目: ${projectName} / ${session.agentId}会话`,
+        `渠道: ${channel} / 项目: ${projectName} / ${session.baseagent}会话`,
         `状态: ${sessionStatus}`,
         chatModeLine,
         ...(dispatchModeLine ? [dispatchModeLine] : []),
@@ -1432,7 +1432,7 @@ export async function handleSlashCommand(this: any,
       channelId,
       projectPath,
       sessionName,
-      this.agentRegistry?.resolveByChannel(channel)?.baseagent || session?.agentId || this.parseDefaultBaseagent()
+      this.agentRegistry?.resolveByChannel(channel)?.baseagent || session?.baseagent || this.parseDefaultBaseagent()
     );
 
     this.eventBus.publish({
@@ -1454,10 +1454,10 @@ export async function handleSlashCommand(this: any,
     }
 
     const newAgent = this.agentRegistry?.resolveByChannel(channel);
-    const newBaseagent = newSession.agentId || newAgent?.baseagent || this.parseDefaultBaseagent();
+    const newBaseagent = newSession.baseagent || newAgent?.baseagent || this.parseDefaultBaseagent();
     // 与 /model 卡片保持一致：按 关系>角色>agent 解析实际生效的 model/effort，
     // 不直接读 EvolAgent.model（那只是 agent 级静态配置，会无视关系/角色级覆盖）。
-    const newRunner = this.getAgent(channel, newSession.agentId);
+    const newRunner = this.getAgent(channel, newSession.baseagent);
     const newModelState = resolveCommandModelResolution({
       agent: newRunner,
       session: newSession,
@@ -1929,9 +1929,9 @@ export async function handleSlashCommand(this: any,
         return { kind: 'command.error' as const, text: '❌ 当前无权查看 CLI 会话' };
       }
 
-      const cliSessions = await this.sessionManager.scanCliSessions(session.projectPath, session.agentId);
+      const cliSessions = await this.sessionManager.scanCliSessions(session.projectPath, session.baseagent);
       const sessions = await this.sessionManager.listSessions(channel, channelId);
-      const currentProjectSessions = sessions.filter((s: Session) => s.projectPath === session.projectPath && s.agentId === session.agentId && !s.threadId);
+      const currentProjectSessions = sessions.filter((s: Session) => s.projectPath === session.projectPath && s.baseagent === session.baseagent && !s.threadId);
       const dbSessionIds = new Set(currentProjectSessions.map((s: Session) => s.agentSessionId).filter(Boolean));
       const orphanCliSessions = cliSessions.filter((c: any) => !dbSessionIds.has(c.uuid));
 
@@ -1942,7 +1942,7 @@ export async function handleSlashCommand(this: any,
       // 构建显示数据（复用于卡片和文本）
       const cliDisplayItems = orphanCliSessions.map((c: any) => {
         const time = new Date(c.mtime).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
-        const message = this.sessionManager.readSessionFirstMessage(session.projectPath, c.uuid, session.agentId) || '(无消息)';
+        const message = this.sessionManager.readSessionFirstMessage(session.projectPath, c.uuid, session.baseagent) || '(无消息)';
         const uuid = c.uuid.substring(0, 8);
         return { uuid, fullUuid: c.uuid, time, message };
       });
@@ -1989,11 +1989,11 @@ export async function handleSlashCommand(this: any,
 
     // /slist — 仅显示 EvolClaw 会话
     const sessions = await this.sessionManager.listSessions(channel, channelId);
-    const currentProjectSessions = sessions.filter((s: Session) => s.projectPath === session.projectPath && s.agentId === session.agentId && !s.threadId);
+    const currentProjectSessions = sessions.filter((s: Session) => s.projectPath === session.projectPath && s.baseagent === session.baseagent && !s.threadId);
 
     // 从 SDK 同步会话名称（发现 CLI 改名）
     try {
-      const sdkSessions = await this.sessionManager.listSdkSessions(session.projectPath, session.agentId);
+      const sdkSessions = await this.sessionManager.listSdkSessions(session.projectPath, session.baseagent);
       for (const sdkSession of sdkSessions) {
         if (!sdkSession.title) continue;
         const dbSession = currentProjectSessions.find((s: Session) => s.agentSessionId === sdkSession.sessionId);
@@ -2019,7 +2019,7 @@ export async function handleSlashCommand(this: any,
       displayIndex++;
       const name = displaySessionTitle(s.name, '(未命名)');
       const idleTime = formatIdleTime(Date.now() - s.updatedAt);
-      const fileMissing = !!(s.agentSessionId && !this.sessionManager.checkSessionFileExists(s.projectPath, s.agentSessionId, s.agentId));
+      const fileMissing = !!(s.agentSessionId && !this.sessionManager.checkSessionFileExists(s.projectPath, s.agentSessionId, s.baseagent));
 
       let status = '[空闲]';
       if (fileMissing) {
@@ -2071,7 +2071,7 @@ export async function handleSlashCommand(this: any,
     }
 
     // 降级：文本列表
-    const lines = [`当前项目 ${path.basename(session.projectPath)} 的 [${session.agentId}] 会话列表:`, ''];
+    const lines = [`当前项目 ${path.basename(session.projectPath)} 的 [${session.baseagent}] 会话列表:`, ''];
 
     if (currentProjectSessions.length > 0) {
       for (const ds of displaySessions) {
@@ -2122,7 +2122,7 @@ export async function handleSlashCommand(this: any,
     if (!targetSession && /^\d+$/.test(sessionName) && session) {
       const idx = parseInt(sessionName, 10);
       const allSessions = await this.sessionManager.listSessions(channel, channelId);
-      const visibleSessions = allSessions.filter((s: Session) => s.projectPath === session.projectPath && s.agentId === session.agentId && !s.threadId);
+      const visibleSessions = allSessions.filter((s: Session) => s.projectPath === session.projectPath && s.baseagent === session.baseagent && !s.threadId);
       if (idx >= 1 && idx <= visibleSessions.length) {
         targetSession = visibleSessions[idx - 1];
       } else {
@@ -2147,12 +2147,12 @@ export async function handleSlashCommand(this: any,
       }
 
       for (const projectPath of projectPaths) {
-        const currentAgentId = session?.agentId || this.primaryRunnerKey;
-        const cliSessions = await this.sessionManager.scanCliSessions(projectPath, currentAgentId);
+        const currentBaseagent = session?.baseagent || this.primaryRunnerKey;
+        const cliSessions = await this.sessionManager.scanCliSessions(projectPath, currentBaseagent);
         const cliSession = cliSessions.find((c: any) => c.uuid.startsWith(sessionName));
 
         if (cliSession) {
-          const imported = await this.sessionManager.importCliSession(channel, channelId, projectPath, cliSession.uuid, currentAgentId);
+          const imported = await this.sessionManager.importCliSession(channel, channelId, projectPath, cliSession.uuid, currentBaseagent);
           this.eventBus.publish({ type: 'session:imported', sessionId: imported.id, agentSessionId: cliSession.uuid, projectPath });
           const projectName = this.getProjectName(projectPath);
           return { kind: 'command.result' as const, text: `✓ 已导入 CLI 会话: ${displaySessionTitle(imported.name, '(未命名)')}\n  项目: ${projectName}\n  将继续之前的对话历史` };
@@ -2165,7 +2165,7 @@ export async function handleSlashCommand(this: any,
     }
 
     const lastInput = targetSession.agentSessionId
-      ? this.sessionManager.readSessionLastUserMessage(targetSession.projectPath, targetSession.agentSessionId, targetSession.agentId)
+      ? this.sessionManager.readSessionLastUserMessage(targetSession.projectPath, targetSession.agentSessionId, targetSession.baseagent)
       : null;
     const lastInputLine = lastInput ? `\n  最后输入: "${lastInput}"` : '';
 
@@ -2227,7 +2227,7 @@ export async function handleSlashCommand(this: any,
     const success = await this.sessionManager.renameSession(session.id, newName);
 
     if (success && session.agentSessionId) {
-      const renameAgent = this.getAgent(channel, session.agentId);
+      const renameAgent = this.getAgent(channel, session.baseagent);
       await renameAgent.setSessionName?.(session.agentSessionId, newName).catch((error: any) => {
         logger.debug('[CommandHandler] Backend session rename sync failed:', error);
       });
@@ -2263,7 +2263,7 @@ export async function handleSlashCommand(this: any,
     if (!targetSession && /^\d+$/.test(sessionName)) {
       const idx = parseInt(sessionName, 10);
       const allSessions = await this.sessionManager.listSessions(channel, channelId);
-      const visibleSessions = allSessions.filter((s: Session) => s.projectPath === session.projectPath && s.agentId === session.agentId && !s.threadId);
+      const visibleSessions = allSessions.filter((s: Session) => s.projectPath === session.projectPath && s.baseagent === session.baseagent && !s.threadId);
       if (idx >= 1 && idx <= visibleSessions.length) {
         targetSession = visibleSessions[idx - 1];
       } else {
@@ -2295,7 +2295,7 @@ export async function handleSlashCommand(this: any,
 
     this.eventBus.publish({ type: 'session:deleted', sessionId: targetSession.id });
 
-    const targetAgent = this.getAgent(channel, targetSession.agentId);
+    const targetAgent = this.getAgent(channel, targetSession.baseagent);
     await targetAgent.closeSession(targetSession.id);
 
     return { kind: 'command.result' as const, text: `✓ 已删除会话: ${displaySessionTitle(targetSession.name, sessionName)}\n会话文件已保留，可通过 CLI 访问` };
@@ -2313,7 +2313,7 @@ export async function handleSlashCommand(this: any,
       return { kind: 'command.error' as const, text: `❌ 当前会话尚未初始化对话，无法分支\n\n请先发送一条消息，然后再使用 /fork` };
     }
 
-    const forkAgent = this.getAgent(channel, session.agentId);
+    const forkAgent = this.getAgent(channel, session.baseagent);
     if (!forkAgent.capabilities?.fork) {
       return { kind: 'command.error' as const, text: `❌ 当前 Agent (${forkAgent.name}) 不支持 /fork\n\n可使用 /new 创建新会话替代` };
     }
@@ -2348,7 +2348,7 @@ export async function handleSlashCommand(this: any,
     if ('error' in result) return { kind: 'command.error' as const, text: result.error };
     const { session } = result;
 
-    const rewindAgent = this.getAgent(channel, session.agentId);
+    const rewindAgent = this.getAgent(channel, session.baseagent);
 
     if (!session.agentSessionId) {
       return { kind: 'command.error' as const, text: '❌ 当前会话无历史记录\n\n请先发送一条消息，然后再使用 /rewind' };
@@ -2387,7 +2387,7 @@ export async function handleSlashCommand(this: any,
   if (normalizedContent === '/repair') {
     const repairResult = await this.ensureSession(channel, channelId, threadId, chatType);
     if ('error' in repairResult) return { kind: 'command.result' as const, text: repairResult.error };
-    const { session: repairSession } = repairResult;      const repairAgent = this.getAgent(channel, repairSession.agentId);
+    const { session: repairSession } = repairResult;      const repairAgent = this.getAgent(channel, repairSession.baseagent);
     const { checkSessionFile, backupSessionFile } = await import('../session/session-file-health.js');
 
     try {

@@ -210,7 +210,7 @@ export class MessageProcessor {
    * Get the runner for a given (channel, baseagent) pair.
    *
    * - `channel` is used to look up the owning EvolAgent (via registry).
-   * - `baseagent` (e.g. 'claude') comes from `session.agentId`.
+   * - `baseagent` (e.g. 'claude') comes from `session.baseagent`.
    *
    * Falls back only when the channel is not owned by a known EvolAgent. If the
    * owner is known but its requested baseagent runner is missing, this is a
@@ -254,7 +254,7 @@ export class MessageProcessor {
       channel: channelKey,
       channelId,
       agentName: error.evolagentName,
-      chatmode: session.sessionMode === 'proactive' ? 'proactive' : 'interactive',
+      chatmode: session.chatMode === 'proactive' ? 'proactive' : 'interactive',
       replyContext,
     }), { kind: 'system.error', text, subtype: 'baseagent_unavailable', recoverable: true });
   }
@@ -577,13 +577,13 @@ export class MessageProcessor {
     const chatType = message.chatType || 'private';
     const identityRole = session.identity?.role || 'anonymous';
     const monitorEnabled = this.globalSettings.idleMonitor?.enabled !== false;
-    // 按 session.agentId 选择 agent 后端（idle-kill 路径需要 interrupt）
+    // 按 session.baseagent 选择 agent 后端（idle-kill 路径需要 interrupt）
     let agent: AgentRunnerFull;
     try {
-      agent = this.getAgent(channelKey, session.agentId);
+      agent = this.getAgent(channelKey, session.baseagent);
     } catch (error) {
       if (error instanceof BaseagentRunnerUnavailableError) {
-        logger.error(`[MessageProcessor] baseagent mismatch blocked: session=${session.id} channel=${channelKey} requested=${session.agentId} owner=${error.evolagentName} available=${error.availableBaseagents.join(',') || '<none>'}`);
+        logger.error(`[MessageProcessor] baseagent mismatch blocked: session=${session.id} channel=${channelKey} requested=${session.baseagent} owner=${error.evolagentName} available=${error.availableBaseagents.join(',') || '<none>'}`);
         await this.sendBaseagentMismatch(channelKey, message.channelId, session, error, message.replyContext);
         return;
       }
@@ -715,10 +715,10 @@ export class MessageProcessor {
     const { adapter, options } = channelInfo;
     let agent: AgentRunnerFull;
     try {
-      agent = this.getAgent(channelKey, session.agentId);
+      agent = this.getAgent(channelKey, session.baseagent);
     } catch (error) {
       if (error instanceof BaseagentRunnerUnavailableError) {
-        logger.error(`[MessageProcessor] baseagent mismatch blocked: session=${session.id} channel=${channelKey} requested=${session.agentId} owner=${error.evolagentName} available=${error.availableBaseagents.join(',') || '<none>'}`);
+        logger.error(`[MessageProcessor] baseagent mismatch blocked: session=${session.id} channel=${channelKey} requested=${session.baseagent} owner=${error.evolagentName} available=${error.availableBaseagents.join(',') || '<none>'}`);
         await this.sendBaseagentMismatch(channelKey, message.channelId, session, error, message.replyContext);
         return;
       }
@@ -737,7 +737,7 @@ export class MessageProcessor {
 
     // 为本次任务处理生成唯一 task_id（客户端生成，格式 task-{10hex}）
     const taskId = `task-${crypto.randomUUID().replace(/-/g, '').slice(0, 10)}`;
-    const chatmode = session.sessionMode ?? 'interactive';
+    const chatmode = session.chatMode ?? 'interactive';
 
     // 诊断日志：记录 inbound message_id 和生成的 task_id 的对应关系
     logger.info(`[MessageProcessor] Task created: inboundMsgId=${message.messageId ?? 'none'} taskId=${taskId} sessionId=${session.id} chatmode=${chatmode}`);
@@ -751,8 +751,8 @@ export class MessageProcessor {
       };
     };
 
-    const isProactive = session.sessionMode === 'proactive';
-    const isAutonomous = session.sessionMode === 'autonomous';
+    const isProactive = session.chatMode === 'proactive';
+    const isAutonomous = session.chatMode === 'autonomous';
 
     const currentChannelType = options?.channelType || message.channel;
     const adapterAny = channelInfo.adapter as unknown as {
@@ -844,11 +844,11 @@ export class MessageProcessor {
       const peerId = session.metadata?.peerId ?? message.peerId ?? message.channelId;
       const peerShort = peerId ? peerId.split('.')[0].split(':')[0] : '?';
       const peerLabel = peerName && peerName !== peerShort ? `${peerShort}(${peerName})` : peerShort;
-      logger.info(`[MessageProcessor] session=${session.id} task=${taskId} peer=${peerLabel} chatType=${session.chatType} sessionMode=${session.sessionMode} agentId=${session.agentId} msgChatType=${message.chatType ?? 'n/a'}`);
+      logger.info(`[MessageProcessor] session=${session.id} task=${taskId} peer=${peerLabel} chatType=${session.chatType} chatMode=${session.chatMode} baseagent=${session.baseagent} msgChatType=${message.chatType ?? 'n/a'}`);
 
       // 记录开始处理
       const taskEncrypt = message.replyContext?.metadata?.encrypted != null ? !!(message.replyContext.metadata.encrypted) : undefined;
-      this.eventBus.publish({ type: 'task:started', sessionId: session.id, agentName: agentNameForStats, encrypt: taskEncrypt, chatmode: session.sessionMode || 'interactive' });
+      this.eventBus.publish({ type: 'task:started', sessionId: session.id, agentName: agentNameForStats, encrypt: taskEncrypt, chatmode: session.chatMode || 'interactive' });
       // 触发器消息不发 processing status（无需通知用户）
       if (message.source !== 'trigger') {
         this.touchAgentActivity(channelKey);
@@ -1754,7 +1754,7 @@ export class MessageProcessor {
       }
 
       const isFinallyBackground = this.isBackgroundSession(session, message.channel, message.channelId);
-      if (isFinallyBackground && session.sessionMode !== 'autonomous') {
+      if (isFinallyBackground && session.chatMode !== 'autonomous') {
         const projectName = path.basename(session.projectPath);
         const count = this.messageCache.getCount(session.id);
         await adapter.send(envelope, { kind: 'system.notice', text: `[\u540e\u53f0-${projectName}] \u2713 任务完成 (${count}条消息已缓存)`, subtype: 'background' });
@@ -1859,7 +1859,7 @@ export class MessageProcessor {
             undefined,
             message.peerId,
             message.chatType,
-            undefined,
+            message.baseagent || this.agentRegistry?.resolveByChannel(message.channel)?.baseagent,
             message.selfAID,
             message.channelType,
             message.peerType
@@ -1978,7 +1978,12 @@ export class MessageProcessor {
         }
       : undefined;
 
-    const projectPath = this.agentRegistry?.resolveByChannel(message.channel)?.projectPath || process.cwd();
+    const owningAgent = this.agentRegistry?.resolveByChannel(message.channel);
+    const projectPath = owningAgent?.projectPath || process.cwd();
+    const resolvedBaseagent = message.baseagent || owningAgent?.baseagent;
+    if (!resolvedBaseagent) {
+      throw new Error(`[MessageProcessor] resolveSession: baseagent could not be determined (message.baseagent=${message.baseagent}, owningAgent=${owningAgent?.name || 'none'})`);
+    }
 
     // 话题创建权限守卫已统一移至 MessageBridge.canCreateThreadSession（enqueue 前拦截），
     // 此处不再重复检查——bridge 层拒绝后消息根本不会到达 processMessage。
@@ -2008,17 +2013,17 @@ export class MessageProcessor {
       message.topicName,
       message.peerId,
       message.chatType,
-      undefined,
+      resolvedBaseagent,
       message.selfAID,
       message.channelType,
       message.peerType
     );
 
     // 兜底纠正1：群聊强制 proactive
-    if (message.chatType === 'group' && session.sessionMode !== 'proactive') {
-      logger.info(`[MessageProcessor] group proactive upgrade: sessionId=${session.id} ${session.sessionMode} -> proactive`);
-      session.sessionMode = 'proactive';
-      await this.sessionManager.updateSession(session.id, { sessionMode: 'proactive' });
+    if (message.chatType === 'group' && session.chatMode !== 'proactive') {
+      logger.info(`[MessageProcessor] group proactive upgrade: sessionId=${session.id} ${session.chatMode} -> proactive`);
+      session.chatMode = 'proactive';
+      await this.sessionManager.updateSession(session.id, { chatMode: 'proactive' });
     }
 
     // 群名解析：群会话首次取群显示名（group.get），缓存到 metadata，供信封渲染。
@@ -2041,16 +2046,11 @@ export class MessageProcessor {
       await this.sessionManager.updateSession(session.id, { metadata: session.metadata });
     }
 
-    // 兜底纠正2：旧 session 创建时没传 peerType（建为 interactive），后续非 human 消息进来时升级为 proactive。
-    // 新建场景已由 getOrCreateSession 内部 resolveDefaultSessionMode 处理，这里只兜底历史会话。
-    if (message.peerType && message.peerType !== 'human' && message.peerType !== 'unknown' && session.sessionMode !== 'proactive') {
-      logger.info(`[MessageProcessor] proactive upgrade: sessionId=${session.id} ${session.sessionMode} -> proactive (peerType=${message.peerType})`);
-      session.sessionMode = 'proactive';
-      await this.sessionManager.updateSession(session.id, { sessionMode: 'proactive' });
-    }
+    // chatMode 策略由 SessionManager.resolveDefaultChatMode() 统一决定（创建时）
+    // 此处不再动态修改，保持单一真相源
 
     // Proactive→Interactive 模式切换提示：上一轮 proactive 使用了标志位，本轮已切换为 interactive
-    if (session.sessionMode === 'interactive' && session.metadata?.lastProactiveFlag) {
+    if (session.chatMode === 'interactive' && session.metadata?.lastProactiveFlag) {
       message.content = '本轮会话已切换为 interactive 模式，无需调用工具发送消息。\n\n' + message.content;
       delete session.metadata.lastProactiveFlag;
       await this.sessionManager.updateSession(session.id, { metadata: session.metadata });
@@ -2344,7 +2344,7 @@ export class MessageProcessor {
           }
 
           // 检测 proactive 标志位，设置 lastProactiveFlag 供模式切换提示使用
-          if (session.sessionMode === 'proactive' && lastReplyText) {
+          if (session.chatMode === 'proactive' && lastReplyText) {
             if (/\[PROACTIVE:REPLY_CONFIRMED_(SENT|NONE)\]/.test(lastReplyText)) {
               session.metadata = session.metadata || {};
               session.metadata.lastProactiveFlag = true;

@@ -574,9 +574,9 @@ export async function getSubMenuItems(this: any, cmd: string, channel: string, c
         };
         if (s.agentSessionId) {
           item.agentSessionId = s.agentSessionId;
-          const fileInfo = this.sessionManager.getSessionFileInfo(s.projectPath, s.agentSessionId, s.agentId);
+          const fileInfo = this.sessionManager.getSessionFileInfo(s.projectPath, s.agentSessionId, s.baseagent);
           if (fileInfo.turns) item.turns = fileInfo.turns;
-          const firstMsg = this.sessionManager.readSessionFirstMessage(s.projectPath, s.agentSessionId, s.agentId);
+          const firstMsg = this.sessionManager.readSessionFirstMessage(s.projectPath, s.agentSessionId, s.baseagent);
           if (firstMsg) item.preview = firstMsg.length > 80 ? firstMsg.slice(0, 80) + '…' : firstMsg;
         }
         if (s.updatedAt) item.lastActive = s.updatedAt;
@@ -589,12 +589,12 @@ export async function getSubMenuItems(this: any, cmd: string, channel: string, c
   }
 
   if (cmd === '/baseagent') {
-    const currentAgent = session?.agentId;
+    const currentAgent = session?.baseagent;
     return this.getAvailableBaseagents(channel).map((name: string) => ({ value: name, label: name, selected: name === currentAgent }));
   }
 
   if (cmd === '/model') {
-    const agent = this.getAgent(channel, session?.agentId);
+    const agent = this.getAgent(channel, session?.baseagent);
     if (hasModelSwitcher(agent) && agent.listModels) {
       const models = await agent.listModels() ?? [];
       const state = resolveCommandModelResolution({
@@ -634,7 +634,7 @@ export async function getSubMenuItems(this: any, cmd: string, channel: string, c
   }
 
   if (cmd === '/effort') {
-    const agent = this.getAgent(channel, session?.agentId);
+    const agent = this.getAgent(channel, session?.baseagent);
     const state = resolveCommandModelResolution({
       agent,
       session,
@@ -654,8 +654,8 @@ export async function getSubMenuItems(this: any, cmd: string, channel: string, c
   if (cmd === '/chatmode') {
     // 无活跃会话时，selected 跟随 evolagent.config.chatmode.private 默认值
     let currentMode: string;
-    if (session?.sessionMode) {
-      currentMode = session.sessionMode;
+    if (session?.chatMode) {
+      currentMode = session.chatMode;
     } else {
       const evolagent = this.agentRegistry?.resolveByChannel(channel);
       currentMode = evolagent?.config?.chatmode?.private || 'interactive';
@@ -685,7 +685,7 @@ export async function getSubMenuItems(this: any, cmd: string, channel: string, c
       : undefined;
     const permRole = (overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId)).role;
     const currentMode = resolvePermissionMode({ self: permSelfAid || undefined, peerKey: permPeerKey, role: permRole });
-    const permAgent = this.getAgent(channel, session?.agentId);
+    const permAgent = this.getAgent(channel, session?.baseagent);
     const validModes = hasPermissionController(permAgent)
       ? permAgent.listModes().filter(m => m.available).map(m => m.key)
       : [...PERMISSION_MODE_KEYS];
@@ -802,7 +802,7 @@ export async function execMenuQuery(this: any,
       return { data: { status: 'no-session' } };
     }
     const sessionKey = this.getQueueKey(session, channel, channelId);
-    const sessionAgent = this.getAgent(channel, session.agentId);
+    const sessionAgent = this.getAgent(channel, session.baseagent);
     const isProcessing = this.messageQueue.isProcessing(sessionKey) || sessionAgent.hasActiveStream(sessionKey);
     const queueLength = this.messageQueue.getQueueLength(sessionKey);
     const health = await this.sessionManager.getHealthStatus(session.id);
@@ -815,7 +815,7 @@ export async function execMenuQuery(this: any,
 
     let turns = 0;
     if (session.agentSessionId) {
-      const fileInfo = this.sessionManager.getSessionFileInfo(session.projectPath, session.agentSessionId, session.agentId);
+      const fileInfo = this.sessionManager.getSessionFileInfo(session.projectPath, session.agentSessionId, session.baseagent);
       turns = fileInfo.turns;
     }
 
@@ -845,7 +845,7 @@ export async function execMenuQuery(this: any,
     const topic = await this.sessionManager.getThreadSession(channel, channelId, target);
     if (!topic) return { error: '话题不存在', code: 'NOT_FOUND' };
     const sessionKey = this.getQueueKey(topic, channel, channelId);
-    const sessionAgent = this.getAgent(channel, topic.agentId);
+    const sessionAgent = this.getAgent(channel, topic.baseagent);
     const isProcessing = this.messageQueue.isProcessing(sessionKey) || sessionAgent.hasActiveStream(sessionKey);
     const queueLength = this.messageQueue.getQueueLength(sessionKey);
     const health = await this.sessionManager.getHealthStatus(topic.id);
@@ -858,7 +858,7 @@ export async function execMenuQuery(this: any,
 
     let turns = 0;
     if (topic.agentSessionId) {
-      turns = this.sessionManager.getSessionFileInfo(topic.projectPath, topic.agentSessionId, topic.agentId).turns;
+      turns = this.sessionManager.getSessionFileInfo(topic.projectPath, topic.agentSessionId, topic.baseagent).turns;
     }
 
     const data: Record<string, any> = {
@@ -879,13 +879,13 @@ export async function execMenuQuery(this: any,
   }
 
   if (cmdBase === '/baseagent') {
-    const value = session?.agentId ?? evolagent?.config?.active_baseagent ?? null;
+    const value = session?.baseagent ?? evolagent?.config?.active_baseagent ?? null;
     return { data: { baseagent: value } };
   }
 
   if (cmdBase === '/model') {
     if (session) {
-      const agent = this.getAgent(channel, session.agentId);
+      const agent = this.getAgent(channel, session.baseagent);
       if (hasModelSwitcher(agent)) {
         const state = resolveCommandModelResolution({
           agent,
@@ -906,7 +906,7 @@ export async function execMenuQuery(this: any,
 
   if (cmdBase === '/effort') {
     if (session) {
-      const agent = this.getAgent(channel, session.agentId);
+      const agent = this.getAgent(channel, session.baseagent);
       const state = resolveCommandModelResolution({
         agent,
         session,
@@ -925,9 +925,9 @@ export async function execMenuQuery(this: any,
   }
 
   if (cmdBase === '/chatmode') {
-    const sessionMode = session?.sessionMode;
+    const chatMode = session?.chatMode;
     const fallback = evolagent?.config?.chatmode?.private;
-    return { data: { mode: sessionMode || fallback || 'interactive' } };
+    return { data: { mode: chatMode || fallback || 'interactive' } };
   }
 
   if (cmdBase === '/dispatch') {
@@ -935,9 +935,9 @@ export async function execMenuQuery(this: any,
     if (chatType !== 'group') {
       return { error: 'dispatch 仅在群聊会话中有效', code: 'NOT_APPLICABLE' };
     }
-    const sessionMode = session?.metadata?.dispatchModeOverride ?? session?.metadata?.dispatchMode;
+    const chatMode = session?.metadata?.dispatchModeOverride ?? session?.metadata?.dispatchMode;
     const fallback = evolagent?.config?.dispatch;
-    return { data: { mode: sessionMode ?? fallback ?? null } };
+    return { data: { mode: chatMode ?? fallback ?? null } };
   }
 
   if (cmdBase === '/observable') {
@@ -1079,12 +1079,12 @@ export async function execMenuUpdate(this: any,
       return { error: `无效 baseagent: ${arg}，可选: ${valid.join(' / ')}`, code: 'INVALID_VALUE' };
     }
     evolagent.setActiveBaseagent(arg);
-    return { data: { baseagent: arg, scope: 'default', currentSessionBaseagent: session?.agentId ?? null } };
+    return { data: { baseagent: arg, scope: 'default', currentSessionBaseagent: session?.baseagent ?? null } };
   }
 
   if (cmdBase === '/model') {
     if (!isAdmin) return { error: '无权限', code: 'NO_PERMISSION' };
-    const agent = this.getAgent(channel, session?.agentId);
+    const agent = this.getAgent(channel, session?.baseagent);
     if (hasModelSwitcher(agent)) {
       const models = (await agent.listModels?.()) ?? [];
       if (models.length && !models.includes(arg)) {
@@ -1092,13 +1092,13 @@ export async function execMenuUpdate(this: any,
       }
       agent.setModel(arg);
     }
-    if (evolagent) evolagent.setBaseagentModel(arg, session?.agentId || agent.name);
+    if (evolagent) evolagent.setBaseagentModel(arg, session?.baseagent || agent.name);
     return { data: { model: arg } };
   }
 
   if (cmdBase === '/effort') {
     if (!isAdmin) return { error: '无权限', code: 'NO_PERMISSION' };
-    const agent = this.getAgent(channel, session?.agentId);
+    const agent = this.getAgent(channel, session?.baseagent);
     const state = resolveCommandModelResolution({
       agent,
       session,
@@ -1117,7 +1117,7 @@ export async function execMenuUpdate(this: any,
     if (typeof (agent as any).setEffort === 'function') {
       (agent as any).setEffort(arg === 'auto' ? undefined : arg);
     }
-    if (evolagent) evolagent.setBaseagentEffort(arg === 'auto' ? undefined : arg, session?.agentId || agent.name);
+    if (evolagent) evolagent.setBaseagentEffort(arg === 'auto' ? undefined : arg, session?.baseagent || agent.name);
     return { data: { effort: arg } };
   }
 
@@ -1127,7 +1127,7 @@ export async function execMenuUpdate(this: any,
       return { error: `无效模式: ${arg}`, code: 'INVALID_VALUE' };
     }
     if (session) {
-      await this.sessionManager.updateSession(session.id, { sessionMode: arg });
+      await this.sessionManager.updateSession(session.id, { chatMode: arg });
       this.eventBus.publish({ type: 'session:chat-mode-changed', sessionId: session.id, mode: arg, timestamp: Date.now() });
     } else {
       if (evolagent) evolagent.setChatmodePrivate(arg);
@@ -1160,7 +1160,7 @@ export async function execMenuUpdate(this: any,
     const need = this.requireSession(session);
     if (need) return need;
     if (!isAdmin) return { error: '无权限', code: 'NO_PERMISSION' };
-    const permAgent = this.getAgent(channel, session!.agentId);
+    const permAgent = this.getAgent(channel, session!.baseagent);
     const validModes = hasPermissionController(permAgent)
       ? permAgent.listModes().filter(m => m.available).map(m => m.key)
       : [...PERMISSION_MODE_KEYS];
@@ -1397,7 +1397,7 @@ export async function execMenuAction(this: any,
       if (!success) return { error: '重命名失败', code: 'EXEC_FAILED' };
       if (topic.agentSessionId) {
         try {
-          const targetAgent = this.getAgent(channel, topic.agentId);
+          const targetAgent = this.getAgent(channel, topic.baseagent);
           await targetAgent.setSessionName?.(topic.agentSessionId, newName);
         } catch {}
       }
@@ -1417,7 +1417,7 @@ export async function execMenuAction(this: any,
     const success = await this.sessionManager.unbindSession(topic.id);
     if (!success) return { error: '删除失败', code: 'DELETE_FAILED' };
     this.eventBus.publish({ type: 'session:deleted', sessionId: topic.id });
-    const targetAgent = this.getAgent(channel, topic.agentId);
+    const targetAgent = this.getAgent(channel, topic.baseagent);
     await targetAgent.closeSession?.(topic.id);
     return { data: { deleted: true } };
   }
@@ -1427,7 +1427,7 @@ export async function execMenuAction(this: any,
     if (action === 'stop') {
       if (!session) return { error: '当前无活跃会话', code: 'NO_ACTIVE_SESSION' };
       const sessionKey = this.getQueueKey(session, channel, channelId);
-      const sessionAgent = this.getAgent(channel, session.agentId);
+      const sessionAgent = this.getAgent(channel, session.baseagent);
       const hasActive = sessionAgent.hasActiveStream(sessionKey);
       const queueLength = this.messageQueue.getQueueLength(sessionKey);
       if (queueLength === 0 && !hasActive) {
@@ -1476,7 +1476,7 @@ export async function execMenuAction(this: any,
       if (!success) return { error: '重命名失败', code: 'EXEC_FAILED' };
       if (targetSession.agentSessionId) {
         try {
-          const targetAgent = this.getAgent(channel, targetSession.agentId);
+          const targetAgent = this.getAgent(channel, targetSession.baseagent);
           await targetAgent.setSessionName?.(targetSession.agentSessionId, newName);
         } catch {}
       }

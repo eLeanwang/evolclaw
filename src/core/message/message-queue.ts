@@ -81,10 +81,10 @@ export class MessageQueue {
   private handler: MessageHandler;
   private currentSessionKey?: string;
   private currentProjectPath?: string;
-  private currentAgentId?: string;
+  private currentBaseagent?: string;
   private currentPeerId?: string;  // 当前在途消息的发送者（群聊同人打断判定用）
   private activeMessageIds = new Set<string>();  // 正在执行的消息 ID
-  private interruptCallback?: (sessionKey: string, agentId?: string, evolagentName?: string, reason?: 'new_message') => Promise<void>;
+  private interruptCallback?: (sessionKey: string, baseagent?: string, evolagentName?: string, reason?: 'new_message') => Promise<void>;
   private eventBus?: EventBus;
   private recentMessageIds = new Set<string>();
   private readonly DEDUP_WINDOW = 60_000; // 1 分钟窗口
@@ -100,7 +100,7 @@ export class MessageQueue {
     this.persistencePath = options?.persistencePath;
   }
 
-  setInterruptCallback(callback: (sessionKey: string, agentId?: string, evolagentName?: string, reason?: 'new_message') => Promise<void>): void {
+  setInterruptCallback(callback: (sessionKey: string, baseagent?: string, evolagentName?: string, reason?: 'new_message') => Promise<void>): void {
     this.interruptCallback = callback;
   }
 
@@ -544,7 +544,7 @@ export class MessageQueue {
             agentName: this.processingAgent.get(queueKey),
           });
           if (this.interruptCallback) {
-            this.interruptCallback(sessionKey, this.currentAgentId, this.processingAgent.get(queueKey)).catch(() => {});
+            this.interruptCallback(sessionKey, this.currentBaseagent, this.processingAgent.get(queueKey)).catch(() => {});
           }
         } else {
           // 群聊：FIFO，不打断
@@ -628,7 +628,7 @@ export class MessageQueue {
 
       this.currentSessionKey = queueKey;
       this.currentProjectPath = merged.projectPath;
-      this.currentAgentId = merged.message.agentId;
+      this.currentBaseagent = merged.message.baseagent;
       this.currentPeerId = this.uniquePeerId(rawItems);
       this.processingAgent.set(queueKey, merged.agentName);
 
@@ -911,7 +911,7 @@ export class MessageQueue {
       agentName: this.processingAgent.get(this.currentSessionKey),
     });
     if (this.interruptCallback) {
-      this.interruptCallback(sessionKey, this.currentAgentId, this.processingAgent.get(this.currentSessionKey)).catch(() => {});
+      this.interruptCallback(sessionKey, this.currentBaseagent, this.processingAgent.get(this.currentSessionKey)).catch(() => {});
     }
     return true;
   }
@@ -1058,7 +1058,7 @@ export class MessageQueue {
           agentName: name,
         });
         if (this.interruptCallback) {
-          this.interruptCallback(sessionKey, this.currentAgentId, name).catch(() => {});
+          this.interruptCallback(sessionKey, this.currentBaseagent, name).catch(() => {});
         }
       }
     }
@@ -1286,7 +1286,7 @@ export class MessageQueue {
     });
 
     if (this.interruptCallback) {
-      await this.interruptCallback(sessionKey, this.currentAgentId, targetAgentName);
+      await this.interruptCallback(sessionKey, this.currentBaseagent, targetAgentName);
     }
 
     return true;

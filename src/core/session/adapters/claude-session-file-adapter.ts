@@ -14,7 +14,7 @@ import fs from 'fs';
 import os from 'os';
 
 export class ClaudeSessionFileAdapter implements SessionFileAdapter {
-  readonly agentId = 'claude';
+  readonly baseagent = 'claude';
 
   private getSessionFilePath(projectPath: string, agentSessionId: string): string {
     const homeDir = os.homedir();

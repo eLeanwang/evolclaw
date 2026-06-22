@@ -36,7 +36,7 @@ function loadSqlite(): any | null {
 }
 
 export class CodexSessionFileAdapter implements SessionFileAdapter {
-  readonly agentId = 'codex';
+  readonly baseagent = 'codex';
   private db: any | null = null;
   private dbInitialized = false;
 

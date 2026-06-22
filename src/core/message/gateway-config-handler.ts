@@ -200,8 +200,16 @@ function computeEffective(defaults: any, aids: string[]): EffectiveGateway[] {
     const agentBa = agentRaw?.baseagents || {};
 
     // 该 agent 实际使用的后端
-    const activeRaw = agentRaw?.active_baseagent || defaultsActive || 'claude';
-    const type = (GATEWAY_TYPES as readonly string[]).includes(activeRaw) ? activeRaw as GatewayType : 'claude';
+    const activeRaw = agentRaw?.active_baseagent || defaultsActive;
+    if (!activeRaw) {
+      logger.error(`[GatewayConfig] active_baseagent is empty for aid=${aid}, skipping`);
+      continue;
+    }
+    if (!(GATEWAY_TYPES as readonly string[]).includes(activeRaw)) {
+      logger.error(`[GatewayConfig] unknown baseagent type '${activeRaw}' for aid=${aid}, skipping`);
+      continue;
+    }
+    const type = activeRaw as GatewayType;
     const activeSource: FieldSource = agentRaw?.active_baseagent ? 'agent' : 'defaults';
 
     const dBlock = defaultsBa[type] || {};

@@ -70,14 +70,14 @@ export class MessageBridge {
     const owningAgent = this.agentRegistry?.resolveByChannel(channelName);
     if (!owningAgent) return session;
     const available = this.availableBaseagentsFor(channelName);
-    if (available.length === 0 || available.includes(session.agentId)) return session;
+    if (available.length === 0 || available.includes(session.baseagent)) return session;
 
     const preferred = available.includes(owningAgent.baseagent)
       ? owningAgent.baseagent
       : available[0];
-    logger.warn(`[MessageBridge] Aligning unavailable session baseagent: session=${session.id} ${session.agentId} -> ${preferred} agent=${owningAgent.name} available=${available.join(',')}`);
-    await this.sessionManager.updateSession(session.id, { agentId: preferred, agentSessionId: null });
-    return { ...session, agentId: preferred, agentSessionId: undefined };
+    logger.warn(`[MessageBridge] Aligning unavailable session baseagent: session=${session.id} ${session.baseagent} -> ${preferred} agent=${owningAgent.name} available=${available.join(',')}`);
+    await this.sessionManager.updateSession(session.id, { baseagent: preferred, agentSessionId: null });
+    return { ...session, baseagent: preferred, agentSessionId: undefined };
   }
 
   /**
@@ -196,7 +196,7 @@ export class MessageBridge {
           channelType: msg.channelType || effectiveChannelType,
           channelId: msg.channelId, content,
           selfAID: msg.selfAID,
-          agentId: session.agentId,
+          baseagent: session.baseagent,
           chatType,
           images: msg.images, timestamp: Date.now(),
           peerId: msg.peerId, peerName: msg.peerName,

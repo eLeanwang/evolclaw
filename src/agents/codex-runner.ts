@@ -275,7 +275,7 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
   private sandboxMode: string = 'danger-full-access';
   // per-call/per-session 权限模式：runQuery 按本次解析结果写入，审批回调（异步、按 sessionKey 路由）据此判定。
   // 避免多会话共享 this.currentMode 时的并发污染（与 claude-runner 的 per-call permissionMode 同构）。
-  private sessionModes = new Map<string, string>();
+  private chatModes = new Map<string, string>();
 
   /** 将权限模式映射为 Codex app-server 的 approvalPolicy（纯函数，无副作用，供 per-call 派生用）。 */
   private toApprovalPolicy(mode: string): string {
@@ -345,10 +345,10 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
     const callModel = modelOverride?.model || this.model;
     const callEffort = modelOverride?.effort ?? this.effort;
     // per-call 权限模式：优先 override（message-processor 解析后传入），缺省回落实例级 currentMode。
-    // 写入 sessionModes 供异步审批回调按 sessionKey 读取，并据此派生本次 thread 的 approvalPolicy/sandbox，
+    // 写入 chatModes 供异步审批回调按 sessionKey 读取，并据此派生本次 thread 的 approvalPolicy/sandbox，
     // 不依赖共享的 this.approvalPolicy/this.sandboxMode（多会话并发互不污染）。
     const callMode = modelOverride?.permissionMode || this.currentMode;
-    this.sessionModes.set(sessionId, callMode);
+    this.chatModes.set(sessionId, callMode);
     const callApprovalPolicy = this.toApprovalPolicy(callMode);
     const callSandboxMode = this.toSandboxMode(callMode);
     const appServer = this.getAppServerClient();
@@ -512,7 +512,7 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
   async clearSession(sessionId: string, _agentSessionId: string, _projectPath: string): Promise<boolean> {
     // Codex: 清空会话 = 下次 runQuery 不传 resumeId，自动创建新 thread
     this.activeSessions.delete(sessionId);
-    this.sessionModes.delete(sessionId);
+    this.chatModes.delete(sessionId);
     this.onSessionIdUpdate?.(sessionId, '');
     return true;
   }
@@ -528,7 +528,7 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
         logger.info(`[CodexRunner] Compact thread not loaded, resuming before compact: ${agentSessionId}`);
         const ctx = this.permissionContexts.get(_sessionId);
         // 优先用 per-session 模式派生（与 runQuery 一致），缺省回落实例级
-        const compactMode = this.sessionModes.get(_sessionId) ?? this.currentMode;
+        const compactMode = this.chatModes.get(_sessionId) ?? this.currentMode;
         const compactPolicy = this.toApprovalPolicy(compactMode);
         const compactApprovalPolicy = (ctx?.policyHook && compactPolicy === 'never')
           ? 'on-request'
@@ -951,7 +951,7 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
     }
 
     // per-session 权限模式（runQuery 写入）；缺省回落实例级 currentMode（兼容无 runQuery 上下文的调用）
-    const mode = this.sessionModes.get(sessionKey) ?? this.currentMode;
+    const mode = this.chatModes.get(sessionKey) ?? this.currentMode;
 
     if (mode === 'readonly') {
       const readonly = this.checkCodexReadonly(toolName, blacklist.updatedInput, projectPath, sessionKey);
@@ -1543,7 +1543,7 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
     this.activeSessions.clear();
     this.activeTurns.clear();
     this.permissionContexts.clear();
-    this.sessionModes.clear();
+    this.chatModes.clear();
     await this.appServerClient?.close();
     this.appServerClient = null;
   }

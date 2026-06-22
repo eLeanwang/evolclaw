@@ -64,7 +64,10 @@ export class EvolAgent {
   }
 
   get baseagent(): string {
-    return this.merged.active_baseagent || 'claude';
+    if (!this.merged.active_baseagent) {
+      throw new Error(`[EvolAgent] active_baseagent is empty for agent ${this.name}`);
+    }
+    return this.merged.active_baseagent;
   }
 
   get model(): string | undefined {

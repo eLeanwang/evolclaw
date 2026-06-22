@@ -21,7 +21,7 @@ export interface SdkSessionEntry {
 }
 
 export interface SessionFileAdapter {
-  readonly agentId: string;
+  readonly baseagent: string;
 
   /** 检查会话文件是否存在 */
   checkExists(projectPath: string, agentSessionId: string): boolean;

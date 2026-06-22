@@ -206,7 +206,7 @@ export class TriggerFeedbackDispatcher {
       channelType: target.channelType,
       channelId: target.channelId,
       selfAID: input.trigger.agentAid,
-      agentId: session.agentId || binding.baseagent,
+      baseagent: session.baseagent || binding.baseagent,
       threadId: session.threadId || '',
       chatType: session.chatType === 'group' ? 'group' : 'private',
       peerId: `trigger:${input.trigger.id}`,
