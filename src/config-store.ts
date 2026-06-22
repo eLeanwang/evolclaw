@@ -294,12 +294,25 @@ export interface AgentLoadResult {
   skipped: AgentLoadIssue[];
 }
 
+function isGeneratedControlAid(aid: string): boolean {
+  return /^ec\d{5}\.agentid\.pub$/.test(aid);
+}
+
+function hasLocalAidPrivateKey(aid: string): boolean {
+  return fs.existsSync(path.join(resolvePaths().root, 'AIDs', aid, 'private', 'key.json'));
+}
+
+function isControlAidStateDir(dirName: string, controlAid?: string): boolean {
+  if (dirName === controlAid) return true;
+  return isGeneratedControlAid(dirName) && hasLocalAidPrivateKey(dirName);
+}
+
 /**
  * 扫描 agents/ 目录加载所有 self-agent 配置。
  *
  * 跳过条件（warn-and-skip）：
  *   - 目录名不是合法 AID
- *   - 缺 config.json
+ *   - 缺 config.json（控制 AID 状态目录除外）
  *   - config.json 解析或基础校验失败
  *
  * 不抛错——返回 skipped 列表交调用方决定是否继续。
@@ -307,6 +320,7 @@ export interface AgentLoadResult {
 export function loadAllAgents(): AgentLoadResult {
   const agentsDir = resolvePaths().agentsDir;
   const result: AgentLoadResult = { agents: [], skipped: [] };
+  const controlAid = loadEvolclawConfig().aid;
 
   if (!fs.existsSync(agentsDir)) return result;
 
@@ -314,6 +328,11 @@ export function loadAllAgents(): AgentLoadResult {
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
     const dirName = entry.name;
+    const cfgPath = path.join(agentsDir, dirName, 'config.json');
+    if (!fs.existsSync(cfgPath) && isControlAidStateDir(dirName, controlAid)) {
+      logger.debug(`[config] ignore control AID state dir agents/${dirName}`);
+      continue;
+    }
     const why = checkAgentDir(agentsDir, dirName);
     if (why) {
       result.skipped.push({ dirName, reason: why });

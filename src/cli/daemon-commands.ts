@@ -5,7 +5,7 @@ import { spawn, execFileSync, execFile } from 'child_process';
 import { promisify } from 'util';
 import readline from 'readline';
 import { resolveRoot, resolvePaths, ensureDataDirs, getPackageRoot, agentMdPath } from '../paths.js';
-import { loadDefaults, loadAllAgents, loadEvolclawConfig, saveEvolclawConfig } from '../config-store.js';
+import { loadDefaults, loadAllAgents, loadEvolclawConfig, saveEvolclawConfig, type EvolclawConfig } from '../config-store.js';
 import { resolveEffective } from '../config/config-manager.js';
 import { resolveAnthropicConfig } from '../agents/baseagent.js';
 import { migrateProject } from '../config-store.js';
@@ -85,6 +85,11 @@ function buildDaemonEnv(p: ReturnType<typeof resolvePaths>, opts: StartOptions):
     ...(opts.diagnose ? { EVOLCLAW_DIAGNOSE: '1' } : {}),
     ...(opts.bindBootstrap ? { EVOLCLAW_BIND_BOOTSTRAP: '1' } : {}),
   };
+}
+
+function serviceProxyNeedsEcweb(cfg: EvolclawConfig): boolean {
+  if (!cfg.serviceProxy?.enabled) return false;
+  return (cfg.serviceProxy.services ?? []).some(s => s.enabled !== false && s.source === 'ecweb');
 }
 
 function countLines(pkgRoot: string, logDir: string) {
@@ -415,6 +420,10 @@ export async function cmdStart(opts: StartOptions = {}) {
   rotateStdoutIfNeeded(p.logs);
   cleanEnv();
 
+  const ecwebStartedBeforeDaemon = serviceProxyNeedsEcweb(loadEvolclawConfig())
+    ? await startEcwebIfEnabled(p)
+    : false;
+
   // 删除旧的 ready signal
   try { fs.unlinkSync(p.readySignal); } catch {}
 
@@ -444,9 +453,11 @@ export async function cmdStart(opts: StartOptions = {}) {
       console.log(`  EVOLCLAW_HOME: ${resolveRoot()}`);
       console.log(`  Logs: ${p.logs}/`);
       console.log(`⏱ ready in ${((Date.now() - cmdStartedAt) / 1000).toFixed(1)}s`);
-      startEcwebIfEnabled(p).catch((err) => {
-        console.error(`⚠ ECWeb 启动检查失败: ${err instanceof Error ? err.message : String(err)}`);
-      });
+      if (!ecwebStartedBeforeDaemon) {
+        startEcwebIfEnabled(p).catch((err) => {
+          console.error(`⚠ ECWeb 启动检查失败: ${err instanceof Error ? err.message : String(err)}`);
+        });
+      }
     }, 500);
 
     let forwardingShutdown = false;
@@ -549,7 +560,7 @@ export async function cmdStart(opts: StartOptions = {}) {
       }
       console.log(`⏱ done in ${((Date.now() - cmdStartedAt) / 1000).toFixed(1)}s`);
       // ECWeb 自动后台启动
-      await startEcwebIfEnabled(p);
+      if (!ecwebStartedBeforeDaemon) await startEcwebIfEnabled(p);
       return;
     }
 

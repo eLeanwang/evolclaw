@@ -31,6 +31,13 @@ interface EcwebInstanceRecord {
   port: number;
 }
 
+const ECWEB_DISCOVERY_TIMEOUT_MS = 10_000;
+const ECWEB_DISCOVERY_INTERVAL_MS = 250;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 /**
  * 读 data/instance/ 下存活的 ecweb 实例端口。
  * 取 startedAt 最新的一条（多实例保护下通常只有一条存活）。
@@ -70,14 +77,31 @@ function isProcessAlive(pid: number): boolean {
   }
 }
 
+async function waitForEcwebPort(serviceName: string): Promise<number | null> {
+  const deadline = Date.now() + ECWEB_DISCOVERY_TIMEOUT_MS;
+  let loggedWait = false;
+
+  while (Date.now() <= deadline) {
+    const port = discoverEcwebPort();
+    if (port) return port;
+    if (!loggedWait) {
+      logger.info(`${LOG} 服务 "${serviceName}" source=ecweb，等待 ecweb 实例就绪`);
+      loggedWait = true;
+    }
+    await sleep(ECWEB_DISCOVERY_INTERVAL_MS);
+  }
+
+  return null;
+}
+
 /**
  * 把单个服务配置解析为本地回连 endpoint。无法解析返回 null。
  */
-function resolveEndpoint(svc: ServiceProxyService): string | null {
+async function resolveEndpoint(svc: ServiceProxyService): Promise<string | null> {
   if (svc.source === 'ecweb') {
-    const port = discoverEcwebPort();
+    const port = await waitForEcwebPort(svc.name);
     if (!port) {
-      logger.warn(`${LOG} 服务 "${svc.name}" source=ecweb 但未发现存活的 ecweb 实例，跳过`);
+      logger.warn(`${LOG} 服务 "${svc.name}" source=ecweb 等待 ${ECWEB_DISCOVERY_TIMEOUT_MS}ms 后仍未发现存活的 ecweb 实例，跳过`);
       return null;
     }
     return `http://127.0.0.1:${port}`;
@@ -94,117 +118,129 @@ export interface ServiceProxyHandle {
 
 /**
  * 启动 Service Proxy。挂在控制 AUNChannel 上，常驻反向代理隧道。
- * 返回 handle 供关停；启动失败返回 null（已 warn，不抛异常）。
+ * 返回 handle 供关停；没有启用服务时返回 null。endpoint 发现和隧道启动在后台执行，
+ * 失败只 warn，不抛异常，不阻塞 daemon 主流程。
  */
 export function startServiceProxy(
   controlChannel: AUNChannel,
   providerAid: string,
   config: ServiceProxyConfig,
 ): ServiceProxyHandle | null {
-  try {
-    const services = (config.services ?? []).filter((s) => s.enabled !== false);
-    if (services.length === 0) {
-      logger.info(`${LOG} 无启用的服务，跳过`);
-      return null;
-    }
-
-    // 动态解引用 facade：每次访问都读 channel 当前 client，规避重连换 client 的死引用问题。
-    const aunFacade = {
-      call: (method: string, params?: any) => {
-        const client = controlChannel.getClient() as any;
-        if (!client) return Promise.reject(new Error('AUN control client not connected'));
-        return client.call(method, params ?? {});
-      },
-      authenticate: () => {
-        const client = controlChannel.getClient() as any;
-        if (!client || typeof client.authenticate !== 'function') {
-          return Promise.reject(new Error('AUN control client not connected'));
-        }
-        return client.authenticate();
-      },
-      on: (event: string, handler: (payload: unknown) => void) => {
-        const client = controlChannel.getClient() as any;
-        return client?.on?.(event, handler);
-      },
-      get _tokenStore() {
-        return (controlChannel.getClient() as any)?._tokenStore;
-      },
-      // ServiceProxyClient._resolveCachedAccessToken 依次读取 _identity / _auth /
-      // _tokenStore + deviceId 来复用 AUNChannel 已签发的 access_token。控制 AID 在
-      // connect 时已 authenticate（client 处于 ready 态），若这些字段不透出，
-      // _ensureAccessToken 会回退到 authenticate() 并抛 "authenticate not allowed
-      // in state ready"，导致隧道永远连不上 proxy-server。动态解引用，规避重连换 client。
-      get _identity() {
-        return (controlChannel.getClient() as any)?._identity;
-      },
-      get _auth() {
-        return (controlChannel.getClient() as any)?._auth;
-      },
-      get _deviceId() {
-        return (controlChannel.getClient() as any)?._deviceId;
-      },
-    };
-
-    // endpoint 白名单：只允许回连本机回环（127.0.0.1 / localhost 默认放行）。
-    // logger：把 SDK 内部 _logWarn/_logError 接到 evolclaw logger，
-    // 否则 serveForever() 的隧道失败被静默吞掉（无任何日志），无法排障。
-    const proxyClient = new ServiceProxyClient({
-      providerAid,
-      aunClient: aunFacade as any,
-      endpointPolicy: new EndpointPolicy(),
-      logger: {
-        error: (msg: string, err?: Error) => logger.error(`${LOG} ${msg}${err ? ` ${err.stack || err.message}` : ''}`),
-        warn: (msg: string) => logger.warn(`${LOG} ${msg}`),
-        info: (msg: string) => logger.info(`${LOG} ${msg}`),
-        debug: (msg: string) => logger.debug(`${LOG} ${msg}`),
-      },
-    });
-
-    let registered = 0;
-    for (const svc of services) {
-      const endpoint = resolveEndpoint(svc);
-      if (!endpoint) continue;
-      try {
-        proxyClient.registerService(svc.name, endpoint, {
-          serviceType: svc.serviceType ?? 'http',
-          visibility: svc.visibility ?? 'private',
-          metadata: svc.metadata ?? {},
-        });
-        registered += 1;
-        logger.info(`${LOG} 注册服务 "${svc.name}" → ${endpoint} (visibility=${svc.visibility ?? 'private'})`);
-      } catch (e: any) {
-        logger.warn(`${LOG} 注册服务 "${svc.name}" 失败: ${e?.message || e}`);
-      }
-    }
-
-    if (registered === 0) {
-      logger.warn(`${LOG} 没有成功注册任何服务，不启动隧道`);
-      return null;
-    }
-
-    // 常驻持久隧道（内部自带指数退避重连 + client 缺失时自动等待）。
-    // 不 await：后台运行，不阻塞 daemon 启动。
-    proxyClient
-      .serveForever({ connectionMode: 'persistent' })
-      .then((stats) => {
-        logger.info(`${LOG} serveForever 退出: ${JSON.stringify(stats)}`);
-      })
-      .catch((e: any) => {
-        logger.warn(`${LOG} serveForever 异常退出: ${e?.message || e}`);
-      });
-
-    logger.info(`${LOG} ✓ 已启动，provider=${providerAid}，注册 ${registered} 个服务`);
-    return {
-      stop: () => {
-        try {
-          proxyClient.stop();
-        } catch {
-          /* noop */
-        }
-      },
-    };
-  } catch (e: any) {
-    logger.warn(`${LOG} 启动失败（不影响 daemon 主流程）: ${e?.message || e}`);
+  const services = (config.services ?? []).filter((s) => s.enabled !== false);
+  if (services.length === 0) {
+    logger.info(`${LOG} 无启用的服务，跳过`);
     return null;
   }
+
+  let stopped = false;
+  let proxyClient: ServiceProxyClient | null = null;
+
+  const run = async () => {
+    try {
+      // 动态解引用 facade：每次访问都读 channel 当前 client，规避重连换 client 的死引用问题。
+      const aunFacade = {
+        call: (method: string, params?: any) => {
+          const client = controlChannel.getClient() as any;
+          if (!client) return Promise.reject(new Error('AUN control client not connected'));
+          return client.call(method, params ?? {});
+        },
+        authenticate: () => {
+          const client = controlChannel.getClient() as any;
+          if (!client || typeof client.authenticate !== 'function') {
+            return Promise.reject(new Error('AUN control client not connected'));
+          }
+          return client.authenticate();
+        },
+        on: (event: string, handler: (payload: unknown) => void) => {
+          const client = controlChannel.getClient() as any;
+          return client?.on?.(event, handler);
+        },
+        get _tokenStore() {
+          return (controlChannel.getClient() as any)?._tokenStore;
+        },
+        // ServiceProxyClient._resolveCachedAccessToken 依次读取 _identity / _auth /
+        // _tokenStore + deviceId 来复用 AUNChannel 已签发的 access_token。控制 AID 在
+        // connect 时已 authenticate（client 处于 ready 态），若这些字段不透出，
+        // _ensureAccessToken 会回退到 authenticate() 并抛 "authenticate not allowed
+        // in state ready"，导致隧道永远连不上 proxy-server。动态解引用，规避重连换 client。
+        get _identity() {
+          return (controlChannel.getClient() as any)?._identity;
+        },
+        get _auth() {
+          return (controlChannel.getClient() as any)?._auth;
+        },
+        get _deviceId() {
+          return (controlChannel.getClient() as any)?._deviceId;
+        },
+      };
+
+      // endpoint 白名单：只允许回连本机回环（127.0.0.1 / localhost 默认放行）。
+      // logger：把 SDK 内部 _logWarn/_logError 接到 evolclaw logger，
+      // 否则 serveForever() 的隧道失败被静默吞掉（无任何日志），无法排障。
+      proxyClient = new ServiceProxyClient({
+        providerAid,
+        aunClient: aunFacade as any,
+        endpointPolicy: new EndpointPolicy(),
+        logger: {
+          error: (msg: string, err?: Error) => logger.error(`${LOG} ${msg}${err ? ` ${err.stack || err.message}` : ''}`),
+          warn: (msg: string) => logger.warn(`${LOG} ${msg}`),
+          info: (msg: string) => logger.info(`${LOG} ${msg}`),
+          debug: (msg: string) => logger.debug(`${LOG} ${msg}`),
+        },
+      });
+
+      let registered = 0;
+      for (const svc of services) {
+        if (stopped) return;
+        const endpoint = await resolveEndpoint(svc);
+        if (stopped) return;
+        if (!endpoint) continue;
+        try {
+          proxyClient.registerService(svc.name, endpoint, {
+            serviceType: svc.serviceType ?? 'http',
+            visibility: svc.visibility ?? 'private',
+            metadata: svc.metadata ?? {},
+          });
+          registered += 1;
+          logger.info(`${LOG} 注册服务 "${svc.name}" → ${endpoint} (visibility=${svc.visibility ?? 'private'})`);
+        } catch (e: any) {
+          logger.warn(`${LOG} 注册服务 "${svc.name}" 失败: ${e?.message || e}`);
+        }
+      }
+
+      if (registered === 0) {
+        logger.warn(`${LOG} 没有成功注册任何服务，不启动隧道`);
+        return;
+      }
+      if (stopped) return;
+
+      // 常驻持久隧道（内部自带指数退避重连 + client 缺失时自动等待）。
+      // 不 await：后台运行，不阻塞 daemon 启动。
+      proxyClient
+        .serveForever({ connectionMode: 'persistent' })
+        .then((stats) => {
+          logger.info(`${LOG} serveForever 退出: ${JSON.stringify(stats)}`);
+        })
+        .catch((e: any) => {
+          logger.warn(`${LOG} serveForever 异常退出: ${e?.message || e}`);
+        });
+
+      logger.info(`${LOG} ✓ 已启动，provider=${providerAid}，注册 ${registered} 个服务`);
+    } catch (e: any) {
+      logger.warn(`${LOG} 启动失败（不影响 daemon 主流程）: ${e?.message || e}`);
+    }
+  };
+
+  void run();
+
+  return {
+    stop: () => {
+      stopped = true;
+      try {
+        proxyClient?.stop();
+      } catch {
+        /* noop */
+      }
+    },
+  };
 }

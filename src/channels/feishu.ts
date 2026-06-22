@@ -500,6 +500,8 @@ export class FeishuChannel {
   async sendMessage(chatId: string, content: string, options?: { title?: string; replyToMessageId?: string; forceText?: boolean; mentionUserIds?: string[]; replyInThread?: boolean; onThreadCreated?: (threadId: string) => void }): Promise<void> {
     if (!this.client) return;
 
+    content = exposeLocalMarkdownLinkTargetsForFeishu(content);
+
     if (!content || content.trim() === '') {
       logger.warn('[Feishu] Attempted to send empty message, skipping');
       return;
@@ -1550,6 +1552,28 @@ function convertTablesToText(text: string): string {
     );
     return '```\n' + [headerStr, sepStr, ...rowStrs].join('\n') + '\n```';
   });
+}
+
+function isLocalMarkdownLinkTarget(target: string): boolean {
+  if (/^[A-Za-z]:[\\/]/.test(target)) return true;
+  return !/^[a-z][a-z0-9+.-]*:/i.test(target)
+    && !target.startsWith('#')
+    && (
+      target.startsWith('/') ||
+      target.startsWith('./') ||
+      target.startsWith('../')
+    );
+}
+
+function exposeLocalMarkdownLinksInPlainText(text: string): string {
+  return text.replace(/(?<!!)\[([^\]\n]+)\]\(([^)\s]+)\)/g, (match, _label: string, target: string) => {
+    return isLocalMarkdownLinkTarget(target) ? `[${target}](${target})` : match;
+  });
+}
+
+function exposeLocalMarkdownLinkTargetsForFeishu(markdown: string): string {
+  const parts = markdown.split(/(```[\s\S]*?```|`[^`\n]*`)/g);
+  return parts.map(part => part.startsWith('`') ? part : exposeLocalMarkdownLinksInPlainText(part)).join('');
 }
 
 /**
