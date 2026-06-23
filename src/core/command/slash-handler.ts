@@ -2,7 +2,7 @@ import { type InteractionRequest, type OutboundPayload, type ReplyContext, type 
 import type { PermissionDecision } from '../permission.js';
 import { hasModelSwitcher, hasPermissionController } from '../../agents/runner-types.js';
 import { getCodexEfforts } from '../../agents/codex-runner.js';
-import { buildEnvelope } from '../message/message-processor.js';
+import { buildEnvelope } from '../message/message-utils.js';
 import { resolvePaths, getPackageRoot } from '../../paths.js';
 import { logger } from '../../utils/logger.js';
 import crypto from 'crypto';
@@ -1657,8 +1657,12 @@ export async function handleSlashCommand(this: any,
       return { kind: 'command.error' as const, text: '❌ 无权限：服务重启仅限 daemon owner 使用' };
     }
     const selfAid = this.agentRegistry?.resolveByChannel(channel)?.aid;
-    const busyInfo = getAgentBusyInfo(this, selfAid, activeSession?.id);
+    // 排除当前会话（如果存在）。如果 activeSession 不存在，说明还没建立会话，
+    // 此时检查所有任务；如果有其他会话在处理，仍然阻塞重启。
+    const excludeKey = activeSession?.id;
+    const busyInfo = getAgentBusyInfo(this, selfAid, excludeKey);
     if (busyInfo && busyInfo.count > 0) {
+      // busyInfo.count > 0 说明【除当前会话外】还有其他会话的任务在执行
       const processingLines = busyInfo.processing.map(p => {
         const keyParts = p.queueKey.split('::');
         const sessionId = keyParts[0] || '?';
@@ -1666,7 +1670,7 @@ export async function handleSlashCommand(this: any,
       }).join('\n');
       return {
         kind: 'command.error' as const,
-        text: `❌ 该 Agent 有 ${busyInfo.count} 个任务执行中，无法重启。\n\n处理中的会话：\n${processingLines}\n\n建议：等待这些任务完成后重试。可通过 ec ctl status 查看队列状态；典型等待时间 30-60 秒，群聊大型任务可能更长。`,
+        text: `❌ ${excludeKey ? '其他会话' : '该 Agent'} 有 ${busyInfo.count} 个任务执行中，无法重启。\n\n处理中的会话：\n${processingLines}\n\n建议：等待这些任务完成后重试。可通过 ec ctl status 查看队列状态；典型等待时间 30-60 秒，群聊大型任务可能更长。`,
       };
     }
     const allSessions = await this.sessionManager.listSessions(channel, channelId);

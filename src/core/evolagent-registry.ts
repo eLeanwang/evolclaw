@@ -506,6 +506,12 @@ export class EvolAgentRegistry {
   private toInfo(agent: EvolAgent): AgentInfo {
     const displayName = this.resolveDisplayName(agent.aid);
     const personalName = this.resolvePersonalName(agent.aid);
+
+    // 解析响应模式（从 response_modes 配置中读取，无配置时使用系统默认）
+    const rmConfig = agent.config.response_modes;
+    const responseModePrivate = rmConfig?.default_private || 'interactive';
+    const responseModeGroup = rmConfig?.default_group || 'proactive';
+
     return {
       name: displayName || agent.name || agent.aid,
       displayName,
@@ -521,6 +527,8 @@ export class EvolAgentRegistry {
       lastActivity: agent.lastActivity,
       activeSessions: agent.activeSessions,
       error: agent.error,
+      responseModePrivate,
+      responseModeGroup,
     };
   }
 }

@@ -3,6 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import { logger } from '../../utils/logger.js';
 import type { EventBus } from '../event-bus.js';
+import { LogicalQueueBridge } from './logical-queue-bridge.js';
 
 type MessageHandler = (message: Message) => Promise<void>;
 
@@ -94,10 +95,17 @@ export class MessageQueue {
   private activeBatches = new Map<string, QueuedMessage>();
   private processingStartTime = new Map<string, number>();  // queueKey → 处理开始时间戳
   private queueKeyToSessionKey = new Map<string, string>();  // queueKey → sessionKey（human-readable 格式）
+  /** 逻辑队列桥接：管理出队顺序（响应模式可注入自定义策略，默认 FIFO） */
+  private logicalQueue = new LogicalQueueBridge();
 
   constructor(handler: MessageHandler, options?: MessageQueueOptions) {
     this.handler = handler;
     this.persistencePath = options?.persistencePath;
+  }
+
+  /** 暴露逻辑队列桥接，供响应模式系统注入队列工厂 */
+  getLogicalQueueBridge(): LogicalQueueBridge {
+    return this.logicalQueue;
   }
 
   setInterruptCallback(callback: (sessionKey: string, baseagent?: string, evolagentName?: string, reason?: 'new_message') => Promise<void>): void {
@@ -151,16 +159,26 @@ export class MessageQueue {
   }
 
   /**
-   * 生成项目级别的队列 key
+   * 生成队列键（格式：selfAID::sessionKey::projectPath）
+   * 不同 agent 与同一对端的队列独立，避免冲突。
    */
-  private getQueueKey(sessionKey: string, projectPath: string): string {
+  private getQueueKey(sessionKey: string, projectPath: string, selfAID?: string): string {
     const normalized = projectPath ? path.resolve(projectPath) : '';
-    return `${sessionKey}::${normalized}`;
+    const prefix = selfAID ? `${selfAID}::` : '';
+    return `${prefix}${sessionKey}::${normalized}`;
   }
 
   private sessionKeyFromQueueKey(queueKey: string): string {
-    const idx = queueKey.indexOf('::');
-    return idx >= 0 ? queueKey.slice(0, idx) : queueKey;
+    // 格式：selfAID::sessionKey::projectPath 或 sessionKey::projectPath（旧格式兼容）
+    const parts = queueKey.split('::');
+    if (parts.length >= 3) {
+      // 新格式：selfAID::sessionKey::projectPath
+      return parts[1];
+    } else if (parts.length === 2) {
+      // 旧格式：sessionKey::projectPath
+      return parts[0];
+    }
+    return queueKey;
   }
 
   private partFromItem(item: QueuedMessage): QueuedMessagePart {
@@ -488,7 +506,7 @@ export class MessageQueue {
     return restored;
   }
 
-  async enqueue(sessionKey: string, message: Message, projectPath: string, options?: { interruptible?: boolean; interruptSamePeer?: boolean; agentName?: string; role?: SessionIdentity['role']; sessionKeyField?: string }): Promise<void> {
+  async enqueue(sessionKey: string, message: Message, projectPath: string, options?: { interruptible?: boolean; interruptSamePeer?: boolean; agentName?: string; role?: SessionIdentity['role']; sessionKeyField?: string; selfAID?: string }): Promise<void> {
     // 消息去重检查
     if (!this.shouldProcess(sessionKey, message)) {
       return Promise.resolve();
@@ -503,7 +521,7 @@ export class MessageQueue {
       return Promise.resolve();
     }
 
-    const queueKey = this.getQueueKey(sessionKey, projectPath);
+    const queueKey = this.getQueueKey(sessionKey, projectPath, options?.selfAID);
     // 记录 sessionKey 映射（human-readable 格式，供 getQueueItemsBySession/getQueueItemsByAgent 输出）
     if (options?.sessionKeyField) {
       this.queueKeyToSessionKey.set(queueKey, options.sessionKeyField);
@@ -520,6 +538,7 @@ export class MessageQueue {
 
       const queue = this.queues.get(queueKey)!;
       queue.push({ message, projectPath, agentName, role: options?.role, resolve, reject });
+      this.logicalQueue.enqueue(queueKey, message);  // 通知逻辑队列记录出队顺序
       this.persistQueues();
 
       if (this.processing.has(queueKey)) {
@@ -606,7 +625,9 @@ export class MessageQueue {
         return;
       }
 
-      // FIFO 贪心合并：群聊按完整时间线，旧路径/私聊按 peerId
+      // 逻辑队列重排：让响应模式的出队策略决定队首（默认 FIFO，不改变顺序）
+      this.logicalQueue.reorderPhysical(queueKey, queue);
+      // 贪心合并：群聊按完整时间线，旧路径/私聊按 peerId
       const items = this.dequeueGreedy(queue);
       const merged = items.length === 1 ? items[0] : this.mergeItems(items);
       const rawItems = items.flatMap(item => this.partsOf(item).map(part => this.itemFromPart(part)));

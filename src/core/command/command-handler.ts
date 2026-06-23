@@ -2,14 +2,14 @@ import { ChannelAdapter, Session, ChannelPolicy, InteractionRequest, ReplyContex
 import { SessionManager } from '../session/session-manager.js';
 import { BaseagentRunnerUnavailableError, type AgentRunnerFull } from '../../agents/runner-types.js';
 import { MessageCache } from '../message/message-cache.js';
-import { MessageProcessor } from '../message/message-processor.js';
+import type { IMessageProcessor } from '../message/message-processor-interface.js';
 import { EventBus } from '../event-bus.js';
 import type { StatsCollector } from '../../utils/stats.js';
 import { PermissionGateway } from '../permission.js';
 import { InteractionRouter } from '../interaction-router.js';
 import { MessageQueue } from '../message/message-queue.js';
 import { renderCommandCardAsText } from '../interaction-router.js';
-import { buildEnvelope, sendInteractionPayload } from '../message/message-processor.js';
+import { buildEnvelope, sendInteractionPayload } from '../message/message-utils.js';
 import { resolvePaths, getPackageRoot } from '../../paths.js';
 import { logger } from '../../utils/logger.js';
 import crypto from 'crypto';
@@ -96,7 +96,7 @@ export class CommandHandler {
   private policies = new Map<string, ChannelPolicy>();
   private channelObjects = new Map<string, any>();  // name → actual channel instance (for /check)
   private channelTypeMap = new Map<string, string>();  // name → channelType (for grouping)
-  private processor!: MessageProcessor;
+  private processor!: IMessageProcessor;
   private messageQueue!: MessageQueue;
   private permissionGateway?: PermissionGateway;
   private interactionRouter?: InteractionRouter;
@@ -640,7 +640,7 @@ export class CommandHandler {
     return { session };
   }
 
-  setProcessor(processor: MessageProcessor): void {
+  setProcessor(processor: IMessageProcessor): void {
     this.processor = processor;
   }
 

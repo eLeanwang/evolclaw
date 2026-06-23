@@ -223,7 +223,7 @@ export interface ReplyContext {
 
 export interface SessionIdentity {
   role: 'owner' | 'admin' | 'guest' | 'anonymous';
-  mode: 'interactive' | 'autonomous';
+  mode: 'interactive';
 }
 
 export interface Session {
@@ -236,7 +236,7 @@ export interface Session {
   threadId: string;  // 路由维度，默认 ''
   sessionKey: string;  // agent 内部会话路由键 (channelType#urlEncode(channelId)#urlEncode(threadId))
   chatType: string;  // 'private' | 'group'，由 Channel 填充
-  chatMode: string;  // 'interactive' | 'proactive'（'autonomous' 预留未实现）
+  chatMode: string;  // 'interactive' | 'proactive'
   projectPath: string;
   agentSessionId?: string;
   name?: string;
@@ -307,6 +307,8 @@ export interface Message {
   mentions?: Array<{ userId: string; name?: string; key?: string }>;
   /** 本条被 @ 的全部 AID（含 self；@all 时含字面 "all"）。仅供消息信封渲染。 */
   mentionAids?: string[];
+  /** 是否 @ 了本 agent（群聊场景）。由 Channel 标记，响应模式据此判断是否响应。 */
+  isMentioned?: boolean;
   messageId?: string;
   /** 队列批量合并时的批次 role。仅当批内 role 完全一致时设置；逐条 role 见 SubMessage.peerRole。 */
   batchRole?: SessionIdentity['role'];
@@ -560,6 +562,10 @@ export interface AgentInfo {
   lastActivity?: number;
   activeSessions?: number;
   error?: string;
+  /** 单聊场景下的响应模式 ID（如 'interactive'） */
+  responseModePrivate?: string;
+  /** 群聊场景下的响应模式 ID（如 'proactive'） */
+  responseModeGroup?: string;
 }
 
 /**
@@ -726,6 +732,26 @@ export interface ChatmodeBlock {
   nothuman?: 'interactive' | 'proactive';
 }
 
+/**
+ * 响应模式配置块（响应系统插件化）。
+ *
+ * 解析优先级（高→低）：overrides[peerKey] > default_private/default_group > 系统兜底。
+ * 接入点：src/response-modes/resolver.ts。
+ *
+ * 注：当前与 chatmode/dispatch 并存（过渡期）。Phase 6 真实模式接管后，
+ * chatmode/dispatch 将被删除（D4），届时 interactive/proactive 成为内置响应模式。
+ */
+export interface ResponseModesConfig {
+  /** 单聊默认模式 id（如 'interactive'） */
+  default_private?: string;
+  /** 群聊默认模式 id（如 'proactive'） */
+  default_group?: string;
+  /** 各模式的配置参数（modeId → 该模式的配置对象） */
+  configs?: Record<string, any>;
+  /** 按对端/群覆盖（peerKey → 指定模式 + 该对端专属配置） */
+  overrides?: Record<string, { mode: string; config?: any }>;
+}
+
 export interface AunRuntimeBlock {
   keystorePath?: string;
   encryptionSeed?: string;
@@ -887,6 +913,8 @@ export interface AgentConfig {
   baseagents?: BaseagentsBlock;
   // 对话模式
   chatmode?: ChatmodeBlock;
+  // 响应模式（响应系统插件化；过渡期与 chatmode/dispatch 并存）
+  response_modes?: ResponseModesConfig;
   // 消息合并/节流
   flush_delay?: number;
   debounce?: number;
@@ -920,6 +948,7 @@ export interface RelationConfig {
   active_baseagent?: string;
   baseagents?: BaseagentsBlock;
   chatmode?: ChatmodeBlock;
+  response_modes?: ResponseModesConfig;
   flush_delay?: number;
   debounce?: number;
   dispatch?: 'mention' | 'broadcast';
@@ -958,6 +987,8 @@ export interface EffectiveAgentConfig {
   baseagents?: BaseagentsBlock;
   // 对话模式
   chatmode?: ChatmodeBlock;
+  // 响应模式（响应系统插件化；过渡期与 chatmode/dispatch 并存）
+  response_modes?: ResponseModesConfig;
   // 消息合并/节流
   flush_delay?: number;
   debounce?: number;

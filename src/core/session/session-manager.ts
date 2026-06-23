@@ -318,7 +318,7 @@ export class SessionManager {
    *   3. 按 intent 决定 active.json 行为：
    *      - 'set'  : 无条件让该 session 成为 active（创建/切换主会话）
    *      - 'sync' : 仅当该 session 已是当前 active 时同步缓存（更新自身字段）
-   *      - 'none' : 不碰 active.json（thread 会话 / 后台 autonomous 会话）
+   *      - 'none' : 不碰 active.json（thread 会话 / 后台会话）
    *
    * @param session   要持久化的 session（其 updatedAt 会被刷新）
    * @param intent    active.json 行为意图

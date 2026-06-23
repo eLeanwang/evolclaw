@@ -22,7 +22,9 @@ import { BindService, type BindRequestPayload } from './utils/bind.js';
 import { DingtalkChannelPlugin } from './channels/dingtalk.js';
 import { QQBotChannelPlugin } from './channels/qqbot.js';
 import { WecomChannelPlugin } from './channels/wecom.js';
-import { MessageProcessor, buildEnvelope } from './core/message/message-processor.js';
+import type { IMessageProcessor } from './core/message/message-processor-interface.js';
+import { buildEnvelope } from './core/message/message-utils.js';
+import { ResponseEngine } from './core/message/response-engine.js';
 import { MessageQueue } from './core/message/message-queue.js';
 import { MessageBridge } from './core/message/message-bridge.js';
 import { MessageCache } from './core/message/message-cache.js';
@@ -654,7 +656,9 @@ async function main() {
   cmdHandler.setStatsCollector(statsCollector);
 
   // 创建消息处理器
-  const processor = new MessageProcessor(
+  // 默认使用 ResponseEngine（插件化引擎）。
+  // MessageProcessor（旧引擎）保留为参考真相，不删除但不再使用。
+  const processor = new ResponseEngine(
     agentMap,
     sessionManager,
     globalSettings,
@@ -674,7 +678,7 @@ async function main() {
       return cmdHandler.handle(content, channel, channelId, sendFn, userId, threadId);
     },
     primaryRunnerKey
-  );
+  ) as unknown as IMessageProcessor;
 
   // 回填 processor 和 messageQueue 的引用
   cmdHandler.setProcessor(processor);

@@ -5,7 +5,7 @@ import { modelMatches, resolveCommandModelResolution } from './model-resolve.js'
 import { type AgentRunnerFull, hasModelSwitcher, hasPermissionController } from '../../agents/runner-types.js';
 import { getCodexEfforts } from '../../agents/codex-runner.js';
 import { resolvePaths, getPackageRoot } from '../../paths.js';
-import { buildEnvelope } from '../message/message-processor.js';
+import { buildEnvelope } from '../message/message-utils.js';
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';

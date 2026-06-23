@@ -2,11 +2,11 @@ import { randomBytes } from 'crypto';
 import { logger } from '../../utils/logger.js';
 import { StreamDebouncer } from './stream-debouncer.js';
 import { appendMessageLog, buildInboundEntry } from './message-log.js';
-import { buildEnvelope } from './message-processor.js';
+import { buildEnvelope } from './message-utils.js';
 import { chatDirPath } from '../session/session-fs-store.js';
 import { resolvePaths } from '../../paths.js';
 import type { SessionManager } from '../session/session-manager.js';
-import type { MessageProcessor } from './message-processor.js';
+import type { IMessageProcessor } from './message-processor-interface.js';
 import type { MessageQueue } from './message-queue.js';
 import type { CommandHandler as CmdHandler } from '../command/command-handler.js';
 import type { EventBus } from '../event-bus.js';
@@ -27,7 +27,7 @@ export class MessageBridge {
   constructor(
     private defaultProjectPath: string,
     private sessionManager: SessionManager,
-    private processor: MessageProcessor,
+    private processor: IMessageProcessor,
     private messageQueue: MessageQueue,
     private cmdHandler: CmdHandler,
     private eventBus: EventBus,
@@ -246,6 +246,7 @@ export class MessageBridge {
 
         const isInterrupt = chatType !== 'group';
         const enqueueAgentName = owningAgent?.name ?? '<unknown>';
+        const selfAID = session.selfAID;
         const doEnqueue = async (m: Message) => {
           return this.messageQueue.enqueue(session.id, m, session.projectPath, {
             interruptible: isInterrupt,
@@ -253,6 +254,7 @@ export class MessageBridge {
             agentName: enqueueAgentName,
             role: !isInterrupt ? (session.identity?.role ?? 'anonymous') : undefined,
             sessionKeyField: session.sessionKey,
+            selfAID,  // ← 传递 selfAID，用于队列隔离
           });
         };
 

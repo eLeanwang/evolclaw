@@ -3,7 +3,7 @@ import type { EventBus } from './event-bus.js';
 import type { ChannelAdapter, ReplyContext, InteractionRequest } from '../types.js';
 import type { InteractionRouter } from './interaction-router.js';
 import { renderActionAsText } from './interaction-router.js';
-import { buildEnvelope, sendInteractionPayload } from './message/message-processor.js';
+import { buildEnvelope, sendInteractionPayload } from './message/message-utils.js';
 import { logger } from '../utils/logger.js';
 import { summarizeToolInput } from '../utils/tool-summary.js';
 
