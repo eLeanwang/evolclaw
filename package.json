@@ -1,7 +1,7 @@
 {
   "name": "evolclaw",
-  "version": "3.5.2",
-  "description": "Lightweight AI Agent gateway connecting Claude Agent SDK to messaging channels (Feishu, ACP) with multi-project session management",
+  "version": "3.5.4",
+  "description": "AI Agent gateway connecting multiple backends (Claude, Codex, Gemini) to messaging channels (Feishu, WeChat, AUN, QQ) with multi-project session management",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
