@@ -1606,7 +1606,8 @@ export class MessageProcessor {
           });
         } else {
           if (message.triggerMeta) {
-            this.eventBus.publish({ type: 'trigger:failed', triggerId: message.triggerMeta.triggerId, name: message.triggerMeta.triggerName ?? '', messageId: messageId, error: errorSummary, targetChannel: message.channel, targetChannelId: message.channelId, fireTime: message.triggerMeta.fireTime ?? 0, phase: 'execute' });
+            const triggerRunId = message.triggerMeta.runId ?? message.messageId ?? messageId;
+            this.eventBus.publish({ type: 'trigger:failed', triggerId: message.triggerMeta.triggerId, name: message.triggerMeta.triggerName ?? '', runId: triggerRunId, originTriggerId: message.triggerMeta.triggerId, messageId: messageId, error: errorSummary, targetChannel: message.channel, targetChannelId: message.channelId, fireTime: message.triggerMeta.fireTime ?? 0, phase: 'execute' });
           }
 
           this.eventBus.publish({
@@ -1786,10 +1787,11 @@ export class MessageProcessor {
           }
         }
         if (message.triggerMeta) {
+          const triggerRunId = message.triggerMeta.runId ?? message.messageId ?? messageId;
           if (interruptReason) {
-            this.eventBus.publish({ type: 'trigger:skipped', triggerId: message.triggerMeta.triggerId, name: message.triggerMeta.triggerName ?? '', reason: 'interrupted', targetChannel: message.channel, targetChannelId: message.channelId });
+            this.eventBus.publish({ type: 'trigger:skipped', triggerId: message.triggerMeta.triggerId, name: message.triggerMeta.triggerName ?? '', runId: triggerRunId, originTriggerId: message.triggerMeta.triggerId, reason: 'interrupted', targetChannel: message.channel, targetChannelId: message.channelId, fireTime: message.triggerMeta.fireTime });
           } else {
-            this.eventBus.publish({ type: 'trigger:completed', triggerId: message.triggerMeta.triggerId, name: message.triggerMeta.triggerName ?? '', messageId: messageId, durationMs, targetChannel: message.channel, targetChannelId: message.channelId, fireTime: message.triggerMeta.fireTime ?? 0 });
+            this.eventBus.publish({ type: 'trigger:completed', triggerId: message.triggerMeta.triggerId, name: message.triggerMeta.triggerName ?? '', runId: triggerRunId, originTriggerId: message.triggerMeta.triggerId, messageId: messageId, durationMs, targetChannel: message.channel, targetChannelId: message.channelId, fireTime: message.triggerMeta.fireTime ?? 0 });
           }
         }
         await this.sessionManager.recordSuccess(session.id);

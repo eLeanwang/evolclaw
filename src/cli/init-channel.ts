@@ -69,6 +69,11 @@ export async function runDaemonOwnerQrBindFlow(ownerMode: 'append' | 'replace' =
       console.log('已取消');
       return null;
     }
+    if (result === 'skip') {
+      await ipcQuery(p.socket, { type: 'bind.cancel', taskId: begin.taskId }, 1000);
+      console.log('已跳过扫码');
+      return null;
+    }
     if (!result) {
       console.log('绑定超时，请重新生成二维码');
       return null;
@@ -119,8 +124,8 @@ export async function runAgentOwnerQrBindFlow(
   }
 
   await printQr(begin.qrData);
-  console.log('\n请用 evol app 扫描上方二维码完成 agent owner 绑定');
-  console.log('按 q 取消 | 10 分钟内有效\n');
+  console.log('\n请用 evol app 扫描上方二维码，10 分钟内有效');
+  console.log('按 q 退出 | 按 s 跳过扫码手动输入 agent owner AID\n');
 
   const result = await pollBindStatusWithKeyboard(begin.taskId, begin.expiresAt);
   if (result === 'quit') {
@@ -128,8 +133,13 @@ export async function runAgentOwnerQrBindFlow(
     console.log('已取消');
     return null;
   }
+  if (result === 'skip') {
+    await ipcQuery(p.socket, { type: 'bind.cancel', taskId: begin.taskId }, 1000);
+    console.log('已跳过扫码');
+    return null;
+  }
   if (!result) {
-    console.log('绑定超时，请重新生成二维码');
+    console.log('绑定超时');
     return null;
   }
   await reloadAgentAfterBind(targetAid);
@@ -207,8 +217,9 @@ async function printQr(qrData: Record<string, unknown>): Promise<void> {
 async function pollBindStatusWithKeyboard(
   taskId: string,
   expiresAt: number
-): Promise<{ boundAid: string; boundName?: string } | 'quit' | null> {
+): Promise<{ boundAid: string; boundName?: string } | 'quit' | 'skip' | null> {
   let quit = false;
+  let skip = false;
   const p = resolvePaths();
   const setupKeyListener = () => {
     if (!process.stdin.isTTY) return () => {};
@@ -217,18 +228,20 @@ async function pollBindStatusWithKeyboard(
     process.stdin.setEncoding('utf8');
     const handler = (key: string) => {
       if (key === 'q' || key === '\u0003') quit = true;
+      if (key === 's' || key === 'S') skip = true;
     };
     process.stdin.on('data', handler);
     return () => {
       process.stdin.removeListener('data', handler);
       process.stdin.setRawMode(false);
-      process.stdin.pause();
+      // Don't pause stdin - let the next readline/prompt handle it naturally
     };
   };
   const cleanup = setupKeyListener();
   try {
     while (Date.now() < expiresAt) {
       if (quit) return 'quit';
+      if (skip) return 'skip';
       const status = await ipcQuery<any>(p.socket, { type: 'bind.status', taskId }, 1500);
       if (status?.ok && status.status === 'bound') {
         return { boundAid: status.boundAid, boundName: status.boundName };
@@ -362,7 +375,7 @@ async function runQrRegistrationFlow(): Promise<RegistrationResult | typeof SKIP
     return () => {
       process.stdin.removeListener('data', handler);
       process.stdin.setRawMode(false);
-      process.stdin.pause();
+      // Don't pause stdin - let the next readline/prompt handle it naturally
     };
   };
 
@@ -865,7 +878,7 @@ async function runDingtalkQrFlow(): Promise<DingtalkRegistrationResult | typeof 
     return () => {
       process.stdin.removeListener('data', handler);
       process.stdin.setRawMode(false);
-      process.stdin.pause();
+      // Don't pause stdin - let the next readline/prompt handle it naturally
     };
   };
 
@@ -1096,7 +1109,7 @@ async function runQQBotBindFlow(): Promise<QQBotBindResult | typeof SKIP | typeo
     return () => {
       process.stdin.removeListener('data', handler);
       process.stdin.setRawMode(false);
-      process.stdin.pause();
+      // Don't pause stdin - let the next readline/prompt handle it naturally
     };
   };
 

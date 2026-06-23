@@ -42,6 +42,12 @@
 | AUN 渠道 | `channels/aun.md` | AUN 渠道配置、参数与特有机制（网关发现/E2EE/群 ID/证书链） |
 | 飞书渠道 | `channels/feishu.md` | 飞书渠道配置、参数与特有机制（appId/合并转发/卡片/user_id） |
 
+## 触发器
+
+| 文档 | 路径 | 说明 |
+|------|------|------|
+| EventBus 事件目录 | `triggers/event-catalog.md` | event source 可监听事件、payload、filter 与循环防护规则 |
+
 ## ECK 模板
 
 | 文档 | 路径 | 说明 |

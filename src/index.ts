@@ -1218,11 +1218,18 @@ async function main() {
     // ── Service Proxy：把本地服务（ecweb 等）通过控制 AID 暴露到 AUN 网络 ──
     // 挂在控制 AUNChannel 上，动态解引用其 client（规避重连换 client）。
     // 失败只 warn，不影响 daemon 主流程。
-    if (evolclawCfg.serviceProxy?.enabled) {
-      const proxyHandle = startServiceProxy(controlChannel, evolclawCfg.aid, evolclawCfg.serviceProxy);
-      if (proxyHandle) {
-        onShutdown(() => proxyHandle.stop());
-      }
+    if (evolclawCfg.serviceProxy?.enabled && evolclawCfg.aid) {
+      // 短暂延迟确保控制 channel 完全就绪
+      const channel = controlChannel;
+      const aid = evolclawCfg.aid;
+      const config = evolclawCfg.serviceProxy;
+      setTimeout(() => {
+        if (!channel) return;
+        const proxyHandle = startServiceProxy(channel, aid, config);
+        if (proxyHandle) {
+          onShutdown(() => proxyHandle.stop());
+        }
+      }, 500);
     }
   }
 

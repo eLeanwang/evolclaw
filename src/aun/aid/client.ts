@@ -14,11 +14,29 @@ export function suppressSdkLogs(): void {
   const _origLog = console.log;
   const _origInfo = console.info;
   const _origWarn = console.warn;
+  const _origStderrWrite = process.stderr.write.bind(process.stderr);
   const SDK_LOG_RE = /^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+\]\[(?:DEBUG|INFO|WARN|ERROR)\]/;
+  const KEYSTORE_WARN_RE = /seed migration failed; continuing with legacy \.seed/;
+
   console.log = (...args: any[]) => { if (typeof args[0] === 'string' && SDK_LOG_RE.test(args[0])) return; _origLog(...args); };
   console.info = (...args: any[]) => { if (typeof args[0] === 'string' && SDK_LOG_RE.test(args[0])) return; _origInfo(...args); };
   console.warn = (...args: any[]) => { if (typeof args[0] === 'string' && SDK_LOG_RE.test(args[0])) return; _origWarn(...args); };
   console.error = (...args: any[]) => { if (typeof args[0] === 'string' && SDK_LOG_RE.test(args[0])) return; process.stderr.write(args.map(String).join(' ') + '\n'); };
+
+  // Also intercept direct stderr writes from Rust SDK
+  process.stderr.write = function(chunk: any, encoding?: any, callback?: any): boolean {
+    const str = String(chunk);
+    // Filter out keystore migration warnings and other SDK logs
+    if (SDK_LOG_RE.test(str) || KEYSTORE_WARN_RE.test(str)) {
+      if (typeof encoding === 'function') {
+        encoding(); // callback is in encoding position
+      } else if (callback) {
+        callback();
+      }
+      return true;
+    }
+    return _origStderrWrite(chunk, encoding, callback);
+  } as any;
 }
 
 // ==================== Constants ====================

@@ -1,3 +1,6 @@
+// Suppress AUN SDK logs BEFORE any imports (SDK may initialize during module load)
+process.env.AUN_LOG_INI_DISABLE = '1';
+
 import fs from 'fs';
 import path from 'path';
 import { resolvePaths, getPackageRoot } from '../paths.js';
