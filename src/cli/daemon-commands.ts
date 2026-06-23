@@ -2675,6 +2675,10 @@ async function cmdWatchWeb(): Promise<void> {
   const cfg = loadEvolclawConfig();
   const port = cfg.ecweb?.port ?? 42705;
   saveEvolclawConfig({ ...cfg, ecweb: { ...(cfg.ecweb ?? {}), enabled: true, port } });
+
+  // 自动配置 serviceProxy（如果控制 AID 已配置）
+  ensureServiceProxyConfigBeforeStart(p);
+
   const ok = await startEcwebIfEnabled(p);
   if (!ok) process.exit(1);  // 失败原因已由 startEcwebIfEnabled 打印
   // 启动成功的访问信息已由 startEcwebIfEnabled 打印，无需 printEcwebAccess 重复输出
