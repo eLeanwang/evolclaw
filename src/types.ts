@@ -335,6 +335,8 @@ export interface Message {
     boundSessionId?: string;
     pendingThread?: boolean;
     rootMessageId?: string;
+    silent?: boolean;
+    chatModeOverride?: 'proactive';
   };
 }
 

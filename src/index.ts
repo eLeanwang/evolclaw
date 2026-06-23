@@ -51,7 +51,7 @@ import { TriggerScriptExecutor } from './trigger/script-executor.js';
 import { TriggerFeedbackDispatcher } from './trigger/feedback.js';
 import { TriggerRuntimeScheduler } from './trigger/scheduler.js';
 import { normalizeTriggerDefinition } from './trigger/validation.js';
-import type { TriggerDefinition, TriggerFeedbackAction } from './trigger/types.js';
+import { isScriptFeedbackConfig, type TriggerDefinition, type TriggerFeedbackAction } from './trigger/types.js';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
@@ -729,15 +729,15 @@ async function main() {
   const triggerAudit = new TriggerAuditLogger();
   const triggerScriptExecutor = new TriggerScriptExecutor();
   const triggerStartupAgents = [...agentRegistry.runnableAgents()];
-  const getTriggerChannel = (agentAid: string, channelType: string, channelName?: string) => {
+  const getTriggerChannel = (agentAid: string, channelKey: string) => {
     const agent = agentRegistry.get(agentAid);
     if (!agent) return undefined;
-    const inst = channelInstances.find((candidate) => {
-      const parsed = tryParseChannelKey(candidate.adapter.channelKey);
-      const type = candidate.channelType || parsed?.type || candidate.adapter.channelName;
-      if (channelName && candidate.adapter.channelName !== channelName && candidate.adapter.channelKey !== channelName) return false;
-      return parsed?.selfAID === agentAid && type === channelType;
-    });
+    const inst = channelInstances.find((candidate) => (
+      candidate.adapter.channelKey === channelKey
+      || candidate.adapter.channelName === channelKey
+    ));
+    const parsed = inst ? tryParseChannelKey(inst.adapter.channelKey) : null;
+    if (inst && parsed?.selfAID !== agentAid) return undefined;
     if (!inst) return undefined;
     return {
       adapter: inst.adapter,
@@ -748,17 +748,18 @@ async function main() {
     };
   };
   const validateTriggerFeedbackChannels = (definition: TriggerDefinition) => {
-    const actions: TriggerFeedbackAction[] = [
-      definition.feedback.onSuccess,
-      definition.feedback.onNoop,
-      definition.feedback.onFailure,
-    ].filter((a): a is TriggerFeedbackAction => !!a);
+    if (!getTriggerChannel(definition.agentAid, definition.session.channelKey)) {
+      throw new Error(`agent ${definition.agentAid} has no configured channel ${definition.session.channelKey}`);
+    }
+    const actions: TriggerFeedbackAction[] = isScriptFeedbackConfig(definition.feedback)
+      ? [definition.feedback.onSuccess, definition.feedback.onNoop, definition.feedback.onFailure].filter((a): a is TriggerFeedbackAction => !!a)
+      : [definition.feedback];
     for (const action of actions) {
       if (action.mode === 'none') continue;
       const target = action.target;
       if (!target) throw new Error(`feedback target missing for ${action.mode}`);
-      if (!getTriggerChannel(definition.agentAid, target.channelType, target.channelName)) {
-        throw new Error(`agent ${definition.agentAid} has no configured channel ${target.channelName ?? target.channelType}`);
+      if (!getTriggerChannel(definition.agentAid, target.channelKey)) {
+        throw new Error(`agent ${definition.agentAid} has no configured channel ${target.channelKey}`);
       }
     }
   };
@@ -771,7 +772,7 @@ async function main() {
       sessionManager,
       messageQueue,
     });
-    const scheduler = new TriggerRuntimeScheduler(manager, state, triggerAudit, triggerScriptExecutor, dispatcher);
+    const scheduler = new TriggerRuntimeScheduler(manager, state, triggerAudit, triggerScriptExecutor, dispatcher, eventBus);
     triggerSchedulers.set(agent.aid, scheduler);
     try {
       await scheduler.init();

@@ -13,6 +13,7 @@ import { checkBlacklist, checkReadonly, parseEvolclawSendCommand, type Permissio
 import { CodexAppServerClient, type CodexServerNotification, type CodexServerRequest, type CodexThreadResponse, type CodexTurnItem } from './codex-app-server-client.js';
 import { resolveOpenaiConfig } from './baseagent.js';
 import { logger } from '../utils/logger.js';
+import { isRetryableError } from '../utils/error-utils.js';
 import { renderActionAsText } from '../core/interaction-router.js';
 import { buildEnvelope, sendInteractionPayload } from '../core/message/message-processor.js';
 import { compareVersions } from '../utils/npm-ops.js';
@@ -1306,6 +1307,9 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
         if (turnId) state.completedTurnIds.add(turnId);
         this.activeTurns.delete(sessionId);
         if (turn.status === 'failed' && turn.error?.message) {
+          if (isRetryableError(new Error(turn.error.message))) {
+            throw new Error(turn.error.message);
+          }
           yield { type: 'error', error: turn.error.message, errorType: 'unknown' };
         }
         yield this.mapAppServerTurnComplete(turn, state);

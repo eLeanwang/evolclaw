@@ -14,6 +14,7 @@ import { resolvePaths } from '../../paths.js';
 import path from 'path';
 import { loadAgent, saveAgent } from '../../config-store.js';
 import { CreateStatusWriter, readCreateStatus, type CreatePhase } from './create-status.js';
+import { deriveAgentProjectPath } from '../../utils/project-path.js';
 
 export type ExecResult = { data: any } | { error: string; code: string };
 
@@ -178,7 +179,7 @@ export function resolveProjectPath(
 ): string | undefined {
   if (explicit && explicit.trim()) return explicit;
   const root = defaults?.projects?.rootPath;
-  if (root) return path.join(root, aid.split('.')[0]);
+  if (root) return deriveAgentProjectPath(root, aid);
   return defaults?.projects?.defaultPath;
 }
 

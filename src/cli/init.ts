@@ -7,6 +7,7 @@ import { scanInstances } from '../utils/instance-registry.js';
 import { saveDefaultsSafe, loadAllAgents, migrateProcessConfigIfNeeded, loadEvolclawConfig, saveEvolclawConfig } from '../config-store.js';
 import { generateControlAid } from '../aun/aid/control-aid.js';
 import { getCodexAppServerAvailability, isCodexAppServerAvailable } from '../agents/codex-runner.js';
+import { defaultProjectsRoot } from '../utils/project-path.js';
 
 // ==================== Helpers ====================
 
@@ -65,6 +66,26 @@ export function parseOwnerAids(raw: string, isValid: (aid: string) => boolean): 
     }
   }
   return { valid, invalid };
+}
+
+function installErrorMessage(e: any): string {
+  return String(e?.stderr || e?.message || e).trim();
+}
+
+async function ensureEcwebInstalledForInit(): Promise<boolean> {
+  if (commandExists('evolclaw-web')) return true;
+
+  console.log('  📦 ECWeb 组件未安装，正在安装 evolclaw-web@latest...');
+  try {
+    const { npmInstallGlobal } = await import('../utils/npm-ops.js');
+    await npmInstallGlobal('evolclaw-web@latest');
+    console.log('  ✓ ECWeb 组件安装完成');
+    return true;
+  } catch (e: any) {
+    console.log(`  ⚠ ECWeb 组件安装失败: ${installErrorMessage(e)}`);
+    console.log('  可稍后运行 ec watch web 自动安装并启动，或手动运行 npm install -g evolclaw-web');
+    return false;
+  }
 }
 
 // ==================== Main ====================
@@ -191,7 +212,7 @@ export async function cmdInit(options?: {
     }
 
     async function askProjectsDefaultPath(): Promise<string | undefined> {
-      const defaultDir = path.join(p.root, 'projects', 'default');
+      const defaultDir = path.join(defaultProjectsRoot(p.root), 'default');
       const input = (await ask(rl, `项目默认目录 [${defaultDir}]: `)).trim();
       const resolved = input || defaultDir;
       if (!path.isAbsolute(resolved)) {
@@ -201,7 +222,12 @@ export async function cmdInit(options?: {
       if (!fs.existsSync(resolved)) {
         const create = (await ask(rl, `  目录不存在，是否创建？[Y/n]: `)).trim().toLowerCase();
         if (create === '' || create === 'y' || create === 'yes') {
-          fs.mkdirSync(resolved, { recursive: true });
+          try {
+            fs.mkdirSync(resolved, { recursive: true });
+          } catch (e: any) {
+            console.log(`  ⚠ 创建目录失败: ${e?.message || e}`);
+            return undefined;
+          }
           console.log(`  ✓ 已创建 ${resolved}`);
         } else {
           return undefined;
@@ -308,9 +334,13 @@ export async function initTail(): Promise<void> {
       try {
         const ans = (await ask(rlEcweb, '\n是否在 evolclaw start 时自动启动 ECWeb 控制台？[y/N] ')).trim().toLowerCase();
         if (ans === 'y' || ans === 'yes') {
-          saveEvolclawConfig({ ...loadEvolclawConfig(), ecweb: { enabled: true } });
+          const cfg = loadEvolclawConfig();
+          saveEvolclawConfig({ ...cfg, ecweb: { ...(cfg.ecweb ?? {}), enabled: true } });
           console.log('  ✓ 已启用 ECWeb（evolclaw start 将自动在后台启动）');
-          console.log('  提示：首次访问运行 ec watch web 查看配对码和 URL');
+          const installed = await ensureEcwebInstalledForInit();
+          console.log(installed
+            ? '  提示：首次访问运行 ec watch web 查看配对码和 URL'
+            : '  提示：安装完成后运行 evolclaw start；如需立即打开控制台，运行 ec watch web');
         } else {
           saveEvolclawConfig({ ...loadEvolclawConfig(), ecweb: { enabled: false } });
           console.log('  已跳过（可日后运行 ec watch web 手动启动，或编辑 evolclaw.json）');

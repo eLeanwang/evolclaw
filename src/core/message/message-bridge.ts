@@ -239,7 +239,10 @@ export class MessageBridge {
         //    ACK 在到达时立即做（每条独立 ACK），不等合并
         //    Interrupt 模式（单聊）→ 入队前 debounce 合并
         //    FIFO 模式（群聊）    → 跳过 debouncer，独立入队，出队时贪心合并
-        if (fullMessage.messageId) adapter?.acknowledge?.(fullMessage.messageId).catch(() => {});
+        //    优化：队列空闲时跳过 Pin 表情，直接在开始执行时添加 CheckMark
+        if (fullMessage.messageId && this.messageQueue.getGlobalProcessingCount() > 0) {
+          adapter?.acknowledge?.(fullMessage.messageId).catch(() => {});
+        }
 
         const isInterrupt = chatType !== 'group';
         const enqueueAgentName = owningAgent?.name ?? '<unknown>';

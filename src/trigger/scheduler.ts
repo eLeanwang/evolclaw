@@ -1,27 +1,36 @@
 import crypto from 'crypto';
 import { CronExpressionParser } from 'cron-parser';
 import { logger } from '../utils/logger.js';
+import type { EventBus } from '../core/event-bus.js';
 import type { TriggerDefinitionManager } from './manager.js';
 import type { TriggerRunStateStore } from './state.js';
 import type { TriggerAuditLogger, TriggerRunStats } from './audit.js';
 import type { TriggerScriptExecutor } from './script-executor.js';
 import type { TriggerFeedbackDispatcher } from './feedback.js';
+import { TriggerEventSource } from './sources/event-source.js';
 import {
   definitionRevision,
+  previewText,
+  renderTemplate,
+  sha256,
 } from './validation.js';
 import type {
   TriggerActiveRun,
   TriggerAuditRecord,
   TriggerCreateFile,
   TriggerDefinition,
+  TriggerFeedbackAction,
   TriggerFeedbackBranch,
+  TriggerProcessingAudit,
   TriggerRunPayload,
   TriggerRuntimeResult,
   TriggerScheduleState,
   TriggerScriptResult,
   TriggerSource,
+  TriggerSourceEvent,
   TriggerSourceRunInfo,
 } from './types.js';
+import { isScriptFeedbackConfig } from './types.js';
 
 const MAX_TIMER_MS = 2_147_483_647;
 
@@ -30,9 +39,18 @@ interface RunningRun {
   controller: AbortController;
 }
 
+interface ProcessingRunResult {
+  branch: TriggerFeedbackBranch;
+  script: TriggerScriptResult | null;
+  processing: TriggerProcessingAudit;
+  result?: Record<string, unknown>;
+  error?: { code?: string; message?: string };
+}
+
 export class TriggerRuntimeScheduler {
   private timers = new Map<string, ReturnType<typeof setTimeout>>();
   private running = new Map<string, Map<string, RunningRun>>();
+  private eventSource?: TriggerEventSource;
   private initialized = false;
 
   constructor(
@@ -41,7 +59,14 @@ export class TriggerRuntimeScheduler {
     private audit: TriggerAuditLogger,
     private scriptExecutor: TriggerScriptExecutor,
     private feedback: TriggerFeedbackDispatcher,
-  ) {}
+    eventBus?: EventBus,
+  ) {
+    if (eventBus) {
+      this.eventSource = new TriggerEventSource(eventBus, (triggerId, event) => {
+        void this.fireEventTrigger(triggerId, event);
+      });
+    }
+  }
 
   async init(): Promise<void> {
     this.stop();
@@ -56,6 +81,7 @@ export class TriggerRuntimeScheduler {
   stop(): void {
     for (const timer of this.timers.values()) clearTimeout(timer);
     this.timers.clear();
+    this.eventSource?.stop();
     for (const runs of this.running.values()) {
       for (const runtime of runs.values()) runtime.controller.abort();
     }
@@ -91,6 +117,7 @@ export class TriggerRuntimeScheduler {
   update(triggerId: string, input: unknown, files: TriggerCreateFile[] = []): TriggerDefinition {
     const definition = this.manager.update(triggerId, input, files);
     this.clearTimer(triggerId);
+    this.unregisterEvent(triggerId);
     this.state.clearSchedule(triggerId);
     if (definition.enabled && this.initialized) this.schedule(definition);
     return definition;
@@ -99,6 +126,7 @@ export class TriggerRuntimeScheduler {
   setEnabled(triggerId: string, enabled: boolean): TriggerDefinition {
     const definition = this.manager.setEnabled(triggerId, enabled);
     this.clearTimer(triggerId);
+    this.unregisterEvent(triggerId);
     this.state.clearSchedule(triggerId);
     if (definition.enabled && this.initialized) this.schedule(definition);
     return definition;
@@ -119,6 +147,11 @@ export class TriggerRuntimeScheduler {
 
   private schedule(definition: TriggerDefinition): void {
     this.clearTimer(definition.id);
+    this.unregisterEvent(definition.id);
+    if (definition.source.type === 'event') {
+      this.registerEvent(definition);
+      return;
+    }
     const scheduledAt = this.resolveScheduledAt(definition);
     if (scheduledAt === null) {
       if (this.isOneShot(definition.source) && definition.reliability.missedPolicy === 'skip') {
@@ -210,12 +243,12 @@ export class TriggerRuntimeScheduler {
     }
 
     let script: TriggerScriptResult | null = null;
-    let branch: TriggerFeedbackBranch = 'onSuccess';
-    let result: Record<string, unknown> | undefined;
-    let error: { code?: string; message?: string } | undefined;
+    let processing: TriggerProcessingAudit | null = null;
 
     try {
-      script = await this.runScriptWithRetry(definition, runId, firedAt, source.payload, controller.signal);
+      const processingResult = await this.runProcessing(definition, runId, firedAt, source.payload, controller.signal);
+      script = processingResult.script;
+      processing = processingResult.processing;
       if (!payload.dryRun && !this.isRunning(definition.id, runId)) {
         return {
           ok: false,
@@ -225,19 +258,14 @@ export class TriggerRuntimeScheduler {
           reason: controller.signal.aborted ? 'replaced' : 'cancelled',
         };
       }
-      if (script.error || script.exitCode !== 0) {
-        branch = 'onFailure';
-        error = { code: script.error?.code || 'script_error', message: script.error?.message || 'script failed' };
-      } else {
-        result = script.result ?? {};
-        branch = result.matched === false ? 'onNoop' : 'onSuccess';
-      }
 
       if (!payload.dryRun) {
         this.state.appendEvent(definition.id, runId, {
-          event: script.error ? 'script.failed' : 'script.completed',
+          event: script
+            ? (script.error ? 'script.failed' : 'script.completed')
+            : 'processing.completed',
           ts: Date.now(),
-          exitCode: script.exitCode,
+          ...(script ? { exitCode: script.exitCode } : { mode: definition.processing.mode }),
         });
         this.state.setPhase(definition.id, runId, 'feedback-pending', {
           deadlineAt: Date.now() + 30_000,
@@ -245,21 +273,20 @@ export class TriggerRuntimeScheduler {
         this.state.appendEvent(definition.id, runId, {
           event: 'feedback.pending',
           ts: Date.now(),
-          branch,
+          branch: processingResult.branch,
         });
       }
 
-      const action = branch === 'onNoop'
-        ? (definition.feedback.onNoop ?? { mode: 'none' as const })
-        : definition.feedback[branch];
+      const action = this.selectFeedbackAction(definition, processingResult.branch);
       const feedbackResult = await this.feedback.dispatch({
         trigger: definition,
         runId,
         firedAt,
-        branch,
+        branch: processingResult.branch,
         action,
-        result,
-        error,
+        result: processingResult.result,
+        error: processingResult.error,
+        sourcePayload: source.payload,
         dryRun: payload.dryRun,
       });
 
@@ -270,6 +297,7 @@ export class TriggerRuntimeScheduler {
         status: payload.dryRun ? 'dry-run' : feedbackResult.status,
         reason: feedbackResult.reason,
         source,
+        processing,
         script,
         feedback: feedbackResult.feedback,
         effects: feedbackResult.effects,
@@ -299,6 +327,7 @@ export class TriggerRuntimeScheduler {
         status: 'failed',
         reason: 'daemon_error',
         source,
+        processing,
         script,
         feedback: null,
         effects: [],
@@ -310,6 +339,62 @@ export class TriggerRuntimeScheduler {
       }
       return { ok: false, runId, triggerId: definition.id, status: 'failed', reason: 'daemon_error', audit, error: message };
     }
+  }
+
+  private async runProcessing(
+    definition: TriggerDefinition,
+    runId: string,
+    firedAt: number,
+    sourcePayload: Record<string, unknown>,
+    signal: AbortSignal,
+  ): Promise<ProcessingRunResult> {
+    if (definition.processing.mode === 'script') {
+      const script = await this.runScriptWithRetry(definition, runId, firedAt, sourcePayload, signal);
+      if (script.error || script.exitCode !== 0) {
+        return {
+          branch: 'onFailure',
+          script,
+          processing: { mode: 'script' },
+          error: { code: script.error?.code || 'script_error', message: script.error?.message || 'script failed' },
+        };
+      }
+      const result = script.result ?? {};
+      return {
+        branch: result.matched === false ? 'onNoop' : 'onSuccess',
+        script,
+        processing: { mode: 'script' },
+        result,
+      };
+    }
+
+    const template = definition.processing.mode === 'template'
+      ? definition.processing.template
+      : definition.processing.prompt;
+    const text = renderTemplate(template, {
+      trigger: definition,
+      timestamp: firedAt,
+      event: sourcePayload,
+      source: { type: definition.source.type, payload: sourcePayload },
+    });
+    return {
+      branch: 'single',
+      script: null,
+      processing: {
+        mode: definition.processing.mode,
+        renderedTextHash: sha256(text),
+        renderedTextPreview: previewText(text),
+      },
+      result: { text },
+    };
+  }
+
+  private selectFeedbackAction(definition: TriggerDefinition, branch: TriggerFeedbackBranch): TriggerFeedbackAction {
+    if (isScriptFeedbackConfig(definition.feedback)) {
+      if (branch === 'onNoop') return definition.feedback.onNoop ?? { mode: 'none' };
+      if (branch === 'onSuccess' || branch === 'onFailure') return definition.feedback[branch];
+      throw new Error('script feedback branch is invalid');
+    }
+    return definition.feedback;
   }
 
   private async runScriptWithRetry(
@@ -419,6 +504,8 @@ export class TriggerRuntimeScheduler {
         this.writeScheduleCursor(definition, nextFireAt, signature);
         return nextFireAt;
       }
+      case 'event':
+        return null;
     }
   }
 
@@ -465,12 +552,14 @@ export class TriggerRuntimeScheduler {
       case 'at': return { at: source.at };
       case 'cron': return { expression: source.expression, timezone: source.timezone };
       case 'interval': return { everyMs: source.everyMs };
+      case 'event': return { eventPattern: source.eventPattern };
     }
   }
 
   private buildSourceInfo(source: TriggerSource, firedAt: number, scheduledAt?: number, payload?: Record<string, unknown>): TriggerSourceRunInfo {
     return {
       type: source.type,
+      eventName: source.type === 'event' ? (typeof payload?.type === 'string' ? payload.type : source.eventPattern) : undefined,
       scheduledAt,
       firedAt,
       payload: payload ?? this.sourcePayload(source),
@@ -484,6 +573,7 @@ export class TriggerRuntimeScheduler {
     status: TriggerAuditRecord['status'];
     reason?: string;
     source: TriggerSourceRunInfo;
+    processing?: TriggerProcessingAudit | null;
     script: TriggerScriptResult | null;
     feedback: TriggerAuditRecord['feedback'];
     effects: TriggerAuditRecord['effects'];
@@ -500,11 +590,12 @@ export class TriggerRuntimeScheduler {
       reason: input.reason,
       conflictRunId: input.conflictRunId,
       definition: {
-        schemaVersion: 1,
+        schemaVersion: 2,
         revision: definitionRevision(input.definition),
         name: input.definition.name,
       },
       source: input.source,
+      processing: input.processing ?? null,
       script: input.script,
       feedback: input.feedback,
       effects: input.effects,
@@ -560,6 +651,27 @@ export class TriggerRuntimeScheduler {
     const timer = this.timers.get(triggerId);
     if (timer) clearTimeout(timer);
     this.timers.delete(triggerId);
+  }
+
+  private registerEvent(definition: TriggerDefinition): void {
+    if (!this.eventSource) {
+      logger.warn(`[Trigger] event source disabled; skip ${definition.id}`);
+      return;
+    }
+    this.eventSource.register(definition);
+  }
+
+  private unregisterEvent(triggerId: string): void {
+    this.eventSource?.unregister(triggerId);
+  }
+
+  private async fireEventTrigger(triggerId: string, event: TriggerSourceEvent): Promise<void> {
+    const definition = this.manager.get(triggerId);
+    if (!definition?.enabled || definition.source.type !== 'event') return;
+    await this.startRun(definition, {
+      firedAt: event.firedAt,
+      payload: event.payload,
+    });
   }
 }
 

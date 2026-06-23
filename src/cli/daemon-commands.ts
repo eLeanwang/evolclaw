@@ -2560,18 +2560,19 @@ async function cmdWatchWeb(): Promise<void> {
   // 1. 检查安装
   if (!platform.commandExists('evolclaw-web')) {
     process.stdout.write('📦 evolclaw-web 未安装。');
-    if (!process.stdin.isTTY) {
-      process.stdout.write(' 请手动安装: npm install -g evolclaw-web\n');
-      process.exit(1);
+    if (process.stdin.isTTY) {
+      const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+      const ans = await new Promise<string>(res => rl.question(' 立即安装？[Y/n] ', res));
+      rl.close();
+      if (ans.trim().toLowerCase() === 'n') { process.exit(0); }
+    } else {
+      process.stdout.write(' 当前命令会自动安装。\n');
     }
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    const ans = await new Promise<string>(res => rl.question(' 立即安装？[Y/n] ', res));
-    rl.close();
-    if (ans.trim().toLowerCase() === 'n') { process.exit(0); }
     process.stdout.write('\n');
     const { npmInstallGlobal } = await import('../utils/npm-ops.js');
     try {
       await npmInstallGlobal('evolclaw-web@latest');
+      process.stdout.write('✅ evolclaw-web 安装完成\n');
     } catch (e: any) {
       process.stderr.write(`❌ 安装失败: ${e?.stderr || e?.message || e}\n`);
       process.exit(1);
@@ -2593,19 +2594,7 @@ async function cmdWatchWeb(): Promise<void> {
   // 2. 启动（后台）并同步配置。默认行为是替换旧实例，确保新配置/新版静态资源生效。
   const cfg = loadEvolclawConfig();
   const port = cfg.ecweb?.port ?? 42705;
-  if (cfg.ecweb?.enabled === undefined) {
-    // 首次手动启动时自动写入 enabled:true
-    saveEvolclawConfig({ ...cfg, ecweb: { enabled: true, port } });
-  }
-  if (cfg.ecweb?.enabled === false) {
-    const alive = findAliveEcweb(p);
-    if (alive) {
-      await printEcwebAccess(alive.port);
-      return;
-    }
-    process.stderr.write('❌ ECWeb 已禁用。请在 evolclaw.json 中启用 ecweb.enabled，或删除该字段后重试。\n');
-    process.exit(1);
-  }
+  saveEvolclawConfig({ ...cfg, ecweb: { ...(cfg.ecweb ?? {}), enabled: true, port } });
   const ok = await startEcwebIfEnabled(p);
   if (!ok) process.exit(1);  // 失败原因已由 startEcwebIfEnabled 打印
   // 启动成功的访问信息已由 startEcwebIfEnabled 打印，无需 printEcwebAccess 重复输出

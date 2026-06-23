@@ -7,7 +7,7 @@ import {
   normalizeTriggerDefinition,
   resolveScriptPath,
 } from '../trigger/validation.js';
-import type { TriggerCreateFile, TriggerDefinition } from '../trigger/types.js';
+import { isScriptFeedbackConfig, type TriggerCreateFile, type TriggerDefinition } from '../trigger/types.js';
 
 export async function cmdTrigger(args: string[]): Promise<void> {
   const sub = args[0];
@@ -110,8 +110,12 @@ async function showTrigger(args: string[], json: boolean): Promise<void> {
   console.log(`agent: ${t.agentAid}`);
   console.log(`enabled: ${t.enabled}`);
   console.log(`source: ${sourceLabel(t)}`);
-  if (t.script) console.log(`script: ${t.script.runtime} ${t.script.path}`);
-  console.log(`feedback: success=${t.feedback.onSuccess.mode}, noop=${t.feedback.onNoop?.mode ?? 'none'}, failure=${t.feedback.onFailure.mode}`);
+  if (t.processing.mode === 'script') console.log(`script: ${t.processing.script.runtime} ${t.processing.script.path}`);
+  if (isScriptFeedbackConfig(t.feedback)) {
+    console.log(`feedback: success=${t.feedback.onSuccess.mode}, noop=${t.feedback.onNoop?.mode ?? 'none'}, failure=${t.feedback.onFailure.mode}`);
+  } else {
+    console.log(`feedback: ${t.feedback.mode}`);
+  }
   const active = Array.isArray(res.active) ? res.active : [];
   console.log(`active runs: ${active.length}`);
   const recent = Array.isArray(res.recentRuns) ? res.recentRuns : [];
@@ -152,29 +156,43 @@ async function createTrigger(args: string[], json: boolean): Promise<void> {
   if (!agentAid) {
     throw new Error('flag 模式需要 --agent <aid> 参数');
   }
+  if (!parsed.targetChannel || !parsed.targetChannelId) {
+    throw new Error('flag 模式需要显式指定 --channel <channelKey> --channelid <id>');
+  }
+  if (parsed.targetSessionStrategy === 'current') {
+    throw new Error('flag 模式没有当前会话上下文，不支持 --session current');
+  }
 
   // Build minimal definition from parsed flags (server will normalize)
   const now = Date.now();
+  const session = {
+    channelKey: parsed.targetChannel || '',
+    channelId: parsed.targetChannelId || '',
+    strategy: parsed.targetThreadId ? 'thread' as const : parsed.targetSessionStrategy,
+    ...(parsed.targetThreadId ? { thread: { mode: 'reuse' as const, threadId: parsed.targetThreadId === 'true' ? undefined : parsed.targetThreadId } } : {}),
+  };
+  const script = parsed.scriptPath ? {
+    path: parsed.scriptPath,
+    runtime: parsed.scriptRuntime!,
+    args: parsed.scriptArgs,
+    timeoutMs: 30_000,
+  } : undefined;
+  const mode = parsed.mode === 'agent-runner' ? 'agent-session' : parsed.mode;
   const definition: any = {
-    $schema_version: 1,
+    $schema_version: 2,
     agentAid,
     name: parsed.name || `trigger-${now.toString(36)}`,
     enabled: hasFlag(args, '--enable'),
     createdAt: now,
     updatedAt: now,
     source: sourceFromParsed(parsed),
-    feedback: feedbackFromParsed(parsed),
+    session,
+    processing: script
+      ? { mode: 'script', script }
+      : { mode: 'prompt', prompt: parsed.prompt },
+    feedback: feedbackFromParsed(parsed, mode, script !== undefined),
     reliability: { concurrency: 'forbid', missedPolicy: 'run_once', scriptRetry: { maxAttempts: 0, backoffMs: 30_000 } },
   };
-
-  if (parsed.scriptPath) {
-    definition.script = {
-      path: parsed.scriptPath,
-      runtime: parsed.scriptRuntime!,
-      args: parsed.scriptArgs,
-      timeoutMs: 30_000,
-    };
-  }
 
   const res = await request({
     type: 'trigger.create',
@@ -198,10 +216,12 @@ function sourceFromParsed(parsed: any): any {
   throw new Error(`unsupported scheduleType: ${parsed.scheduleType}`);
 }
 
-function feedbackFromParsed(parsed: any): any {
-  const mode = parsed.mode || (parsed.scriptPath ? 'direct-message' : 'agent-runner');
+function feedbackFromParsed(parsed: any, mode: string | undefined, hasScript: boolean): any {
+  const feedbackMode = mode || (hasScript ? 'direct-message' : 'agent-session');
   const target = parsed.targetChannelId ? {
+    channelKey: parsed.targetChannel || '',
     channelType: 'unknown',  // Will be resolved by server
+    channelName: parsed.targetChannel || '',
     channelId: parsed.targetChannelId,
     sessionStrategy: parsed.targetSessionStrategy,
   } : undefined;
@@ -209,9 +229,16 @@ function feedbackFromParsed(parsed: any): any {
   const onFailureMode = parsed.onFailure || 'notify';
   const onNoopMode = parsed.onNoop || 'silent';
 
+  if (!hasScript) {
+    return {
+      mode: feedbackMode,
+      target,
+    };
+  }
+
   return {
     onSuccess: {
-      mode,
+      mode: feedbackMode,
       target,
       template: parsed.prompt || '{{result.text}}',
     },
@@ -287,8 +314,8 @@ function loadDefinitionWithFiles(inputPath: string): { definition: TriggerDefini
   const jsonPath = stat.isDirectory() ? path.join(inputPath, 'trigger.json') : inputPath;
   const definition = normalizeTriggerDefinition(JSON.parse(fs.readFileSync(jsonPath, 'utf-8')));
   const files: TriggerCreateFile[] = [];
-  if (definition.script?.path) {
-    const scriptAbs = resolveScriptPath(baseDir, definition.script.path);
+  if (definition.processing.mode === 'script') {
+    const scriptAbs = resolveScriptPath(baseDir, definition.processing.script.path);
     const relativePath = path.relative(baseDir, scriptAbs).replace(/\\/g, '/');
     files.push({ relativePath, contentBase64: fs.readFileSync(scriptAbs).toString('base64') });
   }
@@ -301,6 +328,7 @@ function sourceLabel(t: TriggerDefinition): string {
     case 'at': return `at ${t.source.at}`;
     case 'cron': return `cron ${t.source.expression}${t.source.timezone ? ` (${t.source.timezone})` : ''}`;
     case 'interval': return `interval ${t.source.everyMs}ms`;
+    case 'event': return `event ${t.source.eventPattern}`;
   }
 }
 

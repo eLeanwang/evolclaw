@@ -73,6 +73,30 @@ type ContextRecoveryOptions = {
   isTrigger: boolean;
 };
 
+const RETRY_EXHAUSTED_MARK = Symbol('evolclaw.retryExhausted');
+
+function markRetryExhausted(error: unknown, attempts: number): void {
+  if (error && typeof error === 'object') {
+    (error as any)[RETRY_EXHAUSTED_MARK] = attempts;
+    // processEventStream may have already flushed the raw transient error as an
+    // activity notice. The exhausted-retry message is the real terminal state.
+    delete (error as any)._errorAlreadySent;
+  }
+}
+
+function getRetryExhaustedAttempts(error: unknown): number | undefined {
+  const attempts = error && typeof error === 'object'
+    ? (error as any)[RETRY_EXHAUSTED_MARK]
+    : undefined;
+  return typeof attempts === 'number' ? attempts : undefined;
+}
+
+function formatRetryableErrorFinalMessage(error: unknown, attempts: number): string {
+  const raw = error instanceof Error ? error.message : String(error);
+  const firstLine = raw.split('\n')[0]?.trim() || 'API 暂时不可用';
+  return `❌ API 暂时不可用，已自动尝试 ${attempts} 次仍失败，任务已停止。\n原因：${firstLine}`;
+}
+
 function resolveProactiveBehavior(block?: ProactiveBehaviorBlock): Required<ProactiveBehaviorBlock> {
   return {
     pre_tool_1stmsgchk: block?.pre_tool_1stmsgchk ?? true,
@@ -737,7 +761,9 @@ export class MessageProcessor {
 
     // 为本次任务处理生成唯一 task_id（客户端生成，格式 task-{10hex}）
     const taskId = `task-${crypto.randomUUID().replace(/-/g, '').slice(0, 10)}`;
-    const chatmode = session.chatMode ?? 'interactive';
+    const effectiveChatMode = message.triggerMeta?.chatModeOverride ?? session.chatMode ?? 'interactive';
+    const chatmode = effectiveChatMode;
+    const isSilentTrigger = message.source === 'trigger' && message.triggerMeta?.silent === true;
 
     // 诊断日志：记录 inbound message_id 和生成的 task_id 的对应关系
     logger.info(`[MessageProcessor] Task created: inboundMsgId=${message.messageId ?? 'none'} taskId=${taskId} sessionId=${session.id} chatmode=${chatmode}`);
@@ -751,8 +777,8 @@ export class MessageProcessor {
       };
     };
 
-    const isProactive = session.chatMode === 'proactive';
-    const isAutonomous = session.chatMode === 'autonomous';
+    const isProactive = effectiveChatMode === 'proactive';
+    const isAutonomous = effectiveChatMode === 'autonomous';
 
     const currentChannelType = options?.channelType || message.channel;
     const adapterAny = channelInfo.adapter as unknown as {
@@ -830,7 +856,9 @@ export class MessageProcessor {
         if (budgetStatus.hard_blocked) {
           logger.warn(`[MessageProcessor] Budget hard limit reached: agent=${budgetAgentAid} peer=${budgetPeerKey} pct=${budgetStatus.pct_used.toFixed(1)}%`);
           this.touchAgentActivity(channelKey);
-          adapter.send(envelope, { kind: 'status.completed', metadata: { durationMs: 0 } }).catch(() => {});
+          if (!isSilentTrigger) {
+            adapter.send(envelope, { kind: 'status.completed', metadata: { durationMs: 0 } }).catch(() => {});
+          }
           return;
         }
       }
@@ -848,14 +876,14 @@ export class MessageProcessor {
 
       // 记录开始处理
       const taskEncrypt = message.replyContext?.metadata?.encrypted != null ? !!(message.replyContext.metadata.encrypted) : undefined;
-      this.eventBus.publish({ type: 'task:started', sessionId: session.id, agentName: agentNameForStats, encrypt: taskEncrypt, chatmode: session.chatMode || 'interactive' });
+      this.eventBus.publish({ type: 'task:started', sessionId: session.id, agentName: agentNameForStats, encrypt: taskEncrypt, chatmode });
       // 触发器消息不发 processing status（无需通知用户）
       if (message.source !== 'trigger') {
         this.touchAgentActivity(channelKey);
         adapter.send(envelope, { kind: 'status.started' }).catch(() => {});
       }
 
-      await this.runPendingAutoCompactAtTaskStart(session, agent, absoluteProjectPath, adapter, envelope);
+      await this.runPendingAutoCompactAtTaskStart(session, agent, absoluteProjectPath, adapter, envelope, isSilentTrigger);
 
       logger.message({
         msgId: messageId,
@@ -876,7 +904,7 @@ export class MessageProcessor {
         fileMarkerPattern: options?.fileMarkerPattern,
         diagEnabled: this.globalSettings.debug?.flusherDiag,
         send: async (payload) => {
-          if (isAutonomous) return;  // autonomous session: never send to channel
+          if (isAutonomous || isSilentTrigger) return;  // silent trigger/autonomous session: never send renderer output
           // proactive 模式：activity.batch 是 thought 协议内容，只发给支持 thought 的 channel
           // （不支持 thought 的 channel 静默丢弃，避免降级为普通消息）
           if (isProactive && payload.kind === 'activity.batch' && !adapter.capabilities?.thought) return;
@@ -922,6 +950,7 @@ export class MessageProcessor {
 
       // 设置权限审批的消息发送回调（指向当前渠道）
       agent.setSendPrompt(async (text: string) => {
+        if (isSilentTrigger) return;
         await adapter.send({ ...envelope, replyContext: capturedReplyContext }, { kind: 'result.text', text, isFinal: true });
       });
 
@@ -1247,6 +1276,11 @@ export class MessageProcessor {
         for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
           let streamRegistered = false;
           try {
+            if (attempt > 1) {
+              const suffix = attempt === MAX_RETRIES ? '（最后一次）' : '';
+              renderer.addNotice(`正在进行第 ${attempt}/${MAX_RETRIES} 次尝试${suffix}`, 'warn', 'retry', true);
+              await renderer.flush();
+            }
             logger.info(`[MessageProcessor] agent.runQuery start: agent=${agent.name} session=${session.id} task=${taskId} attempt=${attempt}/${MAX_RETRIES} agentSessionId=${session.agentSessionId ?? 'none'}`);
             const stream = await agent.runQuery(
               session.id,
@@ -1300,10 +1334,13 @@ export class MessageProcessor {
             if (attempt < MAX_RETRIES && isRetryableError(retryError)) {
               const delay = Math.pow(2, attempt) * 1000; // 2s, 4s
               logger.warn(`[MessageProcessor] Retryable error (attempt ${attempt}/${MAX_RETRIES}), retrying in ${delay}ms:`, retryError);
-              renderer.addNotice(`API 暂时不可用，${delay / 1000}秒后重试 (${attempt}/${MAX_RETRIES})...`, 'warn', 'retry', true);
+              renderer.addNotice(`API 暂时不可用，第 ${attempt} 次失败，${delay / 1000} 秒后进行第 ${attempt + 1}/${MAX_RETRIES} 次尝试`, 'warn', 'retry', true);
               await renderer.flush();
               await new Promise(resolve => setTimeout(resolve, delay));
               continue;
+            }
+            if (attempt >= MAX_RETRIES && isRetryableError(retryError)) {
+              markRetryExhausted(retryError, MAX_RETRIES);
             }
             throw retryError; // 不可重试或已耗尽重试次数
           }
@@ -1466,7 +1503,7 @@ export class MessageProcessor {
         if (isProactive && !streamResult.hasReceivedText && /^Unknown skill:\s+\S+/i.test(finalReplyText.trim())) {
           // Proactive 模式 + SDK 本地兜底：直接发送绕过 silent renderer
           const isCurrentlyBackground = this.isBackgroundSession(session, message.channel, message.channelId);
-          if (!isCurrentlyBackground) {
+          if (!isCurrentlyBackground && !isSilentTrigger) {
             await adapter.send({ ...envelope, replyContext: capturedReplyContext }, { kind: 'result.text', text: finalReplyText, isFinal: true });
             logger.info(`[MessageProcessor] proactive SDK fallback replied task=${taskId} text="${finalReplyText.slice(0, 60)}"`);
           }
@@ -1754,7 +1791,7 @@ export class MessageProcessor {
       }
 
       const isFinallyBackground = this.isBackgroundSession(session, message.channel, message.channelId);
-      if (isFinallyBackground && session.chatMode !== 'autonomous') {
+      if (isFinallyBackground && session.chatMode !== 'autonomous' && !isSilentTrigger) {
         const projectName = path.basename(session.projectPath);
         const count = this.messageCache.getCount(session.id);
         await adapter.send(envelope, { kind: 'system.notice', text: `[\u540e\u53f0-${projectName}] \u2713 任务完成 (${count}条消息已缓存)`, subtype: 'background' });
@@ -1786,7 +1823,7 @@ export class MessageProcessor {
         : 'error' as const;
 
       // 用户主动中断（新消息打断 或 /stop 命令）时静默，不发送中断/错误提示
-      if (!isUserInterrupt) {
+      if (!isUserInterrupt && !isSilentTrigger) {
         const statusPayload = procStatus === 'timeout'
           ? { kind: 'status.timeout' as const, metadata: { idleSec: getLastIdleSec?.() || undefined } }
           : procStatus === 'interrupted'
@@ -1837,14 +1874,19 @@ export class MessageProcessor {
       // 用户主动中断（新消息打断 或 /stop 命令）时静默，不发送错误提示
       // processEventStream 已通过 renderer 发过错误时也跳过
       const isTimeout = error instanceof Error && error.message === 'SDK_TIMEOUT';
+      const retryExhaustedAttempts = getRetryExhaustedAttempts(error);
       if (isUserInterrupt) {
         logger.info(`[MessageProcessor] User interrupt by new_message, skip sending error message`);
-      } else if ((error as any)?._errorAlreadySent) {
+      } else if (isSilentTrigger) {
+        logger.info(`[MessageProcessor] Silent trigger error output suppressed task=${taskId}`);
+      } else if ((error as any)?._errorAlreadySent && !retryExhaustedAttempts) {
         logger.info(`[MessageProcessor] Error already sent via renderer, skip sending duplicate message`);
       } else {
         // SDK_TIMEOUT：status.timeout 已发结构化状态，此处再补一条用户可见的错误文本（result.error）
         const idleSec = getLastIdleSec?.() || 0;
-        const userMessage = isTimeout
+        const userMessage = retryExhaustedAttempts
+          ? formatRetryableErrorFinalMessage(error, retryExhaustedAttempts)
+          : isTimeout
           ? (idleSec > 0 ? `⚠️ 任务超时（${idleSec}秒无响应），已自动中断` : '⚠️ 任务超时，已自动中断')
           : getErrorMessage(error, undefined);
         // 获取 session 用于话题回复（如果 resolveSession 已执行）
@@ -1874,7 +1916,7 @@ export class MessageProcessor {
         const errorPayload = {
           kind: 'result.error' as const,
           text: userMessage,
-          reason: isTimeout ? 'timeout' : errType,
+          reason: retryExhaustedAttempts ? 'retry_exhausted' : isTimeout ? 'timeout' : errType,
         };
         await adapter.send({ ...envelope, replyContext: sendOpts }, errorPayload);
 
@@ -1889,6 +1931,7 @@ export class MessageProcessor {
     absoluteProjectPath: string,
     adapter: ChannelAdapter,
     envelope: OutboundEnvelope,
+    suppressOutput = false,
   ): Promise<void> {
     if (!session.agentSessionId || !canCompactAgent(agent)) return;
 
@@ -1896,12 +1939,16 @@ export class MessageProcessor {
     if (!ctx || ctx.totalTokens < ctx.autoCompactTokens) return;
 
     logger.info(`[MessageProcessor] Auto compact at task.start: session=${session.id} totalTokens=${ctx.totalTokens} autoCompactTokens=${ctx.autoCompactTokens}`);
-    await adapter.send(envelope, { kind: 'system.notice', text: '上下文接近上限，正在压缩会话...', subtype: 'auto-compact-start' }).catch(() => {});
+    if (!suppressOutput) {
+      await adapter.send(envelope, { kind: 'system.notice', text: '上下文接近上限，正在压缩会话...', subtype: 'auto-compact-start' }).catch(() => {});
+    }
 
     try {
       const compacted = await agent.compact(session.id, session.agentSessionId, absoluteProjectPath);
       if (compacted) {
-        await adapter.send(envelope, { kind: 'system.notice', text: '✅ 上下文压缩完成，继续处理...', subtype: 'auto-compact-complete' }).catch(() => {});
+        if (!suppressOutput) {
+          await adapter.send(envelope, { kind: 'system.notice', text: '✅ 上下文压缩完成，继续处理...', subtype: 'auto-compact-complete' }).catch(() => {});
+        }
       } else {
         logger.warn(`[MessageProcessor] Auto compact at task.start returned false (session=${session.id})`);
       }
@@ -1992,6 +2039,11 @@ export class MessageProcessor {
     if (message.triggerMeta?.boundSessionId) {
       const bound = await this.sessionManager.getSessionById(message.triggerMeta.boundSessionId);
       if (bound) {
+        if (bound.threadId) {
+          const absoluteProjectPath = path.isAbsolute(bound.projectPath)
+            ? bound.projectPath : path.resolve(process.cwd(), bound.projectPath);
+          return { session: bound, absoluteProjectPath };
+        }
         const switched = await this.sessionManager.switchToSession(bound.channel, bound.channelId, bound.id);
         if (switched) {
           const absoluteProjectPath = path.isAbsolute(switched.projectPath)

@@ -40,7 +40,14 @@
       "match": "积分查询超时",
       "action": "retry",
       "type": "api_error",
-      "message": "⚠️ 积分查询超时，正在重试..."
+      "message": "⚠️ 积分查询超时，请稍后重试"
+    },
+    {
+      "id": "capacity-pool-switching-cn",
+      "match": "算力池切换",
+      "action": "retry",
+      "type": "api_error",
+      "message": "⚠️ 当前算力池切换中，请稍后重试"
     },
     {
       "id": "api-error-400",
@@ -54,21 +61,21 @@
       "match": "api error: 403",
       "action": "retry",
       "type": "api_error",
-      "message": "⚠️ API 访问受限，正在重试..."
+      "message": "⚠️ API 访问受限，请稍后重试"
     },
     {
       "id": "api-error-429",
       "match": "api error: 429",
       "action": "retry",
       "type": "api_error",
-      "message": "⚠️ 请求过于频繁，正在重试..."
+      "message": "⚠️ 请求过于频繁，请稍后重试"
     },
     {
       "id": "api-error-500",
       "match": "api error: 500",
       "action": "retry",
       "type": "api_error",
-      "message": "❌ API 服务暂时不可用，正在重试..."
+      "message": "❌ API 服务暂时不可用，请稍后重试"
     },
     {
       "id": "api-error-502",
@@ -93,14 +100,14 @@
       "match": "is not valid json",
       "action": "retry",
       "type": "api_error",
-      "message": "⚠️ API 返回异常响应，正在重试..."
+      "message": "⚠️ API 返回异常响应，请稍后重试"
     },
     {
       "id": "json-parse-error",
       "match": "json parse error",
       "action": "retry",
       "type": "api_error",
-      "message": "⚠️ API 返回 JSON 解析异常，正在重试..."
+      "message": "⚠️ API 返回 JSON 解析异常，请稍后重试"
     },
     {
       "id": "feishu-permission",

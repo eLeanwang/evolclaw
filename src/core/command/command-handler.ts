@@ -19,7 +19,13 @@ import os from 'os';
 import { parseTriggerSet, parseTriggerUpdate } from '../../trigger/parser.js';
 import type { ParsedTriggerSet } from '../../trigger/parser.js';
 import type { TriggerRuntimeScheduler } from '../../trigger/scheduler.js';
-import type { TriggerDefinition, TriggerFeedbackTarget, TriggerSource } from '../../trigger/types.js';
+import {
+  isScriptFeedbackConfig,
+  type TriggerDefinition,
+  type TriggerFeedbackAction,
+  type TriggerFeedbackTarget,
+  type TriggerSource,
+} from '../../trigger/types.js';
 import { tryParseChannelKey } from '../channel-loader.js';
 import { displaySessionTitle } from '../session/session-title.js';
 import { isQuickCommand } from './slash-gate.js';
@@ -205,12 +211,14 @@ export class CommandHandler {
       case 'at': return { scheduleType: 'at', scheduleValue: source.at };
       case 'cron': return { scheduleType: 'cron', scheduleValue: source.expression };
       case 'interval': return { scheduleType: 'interval', scheduleValue: String(source.everyMs) };
+      case 'event': return { scheduleType: 'event', scheduleValue: source.eventPattern };
     }
   }
 
   private nextFireAtForDefinition(scheduler: TriggerRuntimeScheduler | undefined, definition: TriggerDefinition): number | undefined {
     if (definition.source.type === 'delay') return definition.createdAt + definition.source.afterMs;
     if (definition.source.type === 'at') return new Date(definition.source.at).getTime();
+    if (definition.source.type === 'event') return undefined;
     try {
       return scheduler?.show(definition.id).schedule?.nextFireAt;
     } catch {
@@ -219,11 +227,13 @@ export class CommandHandler {
   }
 
   private triggerPrompt(definition: TriggerDefinition): string {
-    return definition.feedback.onSuccess.template ?? '';
+    if (definition.processing.mode === 'prompt') return definition.processing.prompt;
+    if (definition.processing.mode === 'template') return definition.processing.template;
+    return this.primaryFeedbackAction(definition).template ?? '';
   }
 
   private definitionToTriggerView(definition: TriggerDefinition, scheduler?: TriggerRuntimeScheduler): any {
-    const target = definition.feedback.onSuccess.target ?? definition.feedback.onFailure.target;
+    const target = this.primaryFeedbackTarget(definition);
     const schedule = this.scheduleViewFromSource(definition.source);
     // 运行统计（fireCount/failCount/lastFiredAt/lastResult）不再存进 trigger.json
     // （定义是不可变配置），改从审计日志按需汇总。受日志保留期限制，是保留窗口内的统计。
@@ -238,13 +248,13 @@ export class CommandHandler {
       scheduleType: schedule.scheduleType,
       scheduleValue: schedule.scheduleValue,
       nextFireAt: this.nextFireAtForDefinition(scheduler, definition),
-      targetChannel: target?.channelType,
-      targetChannelName: target?.channelName,
+      targetChannel: target?.channelKey,
+      targetChannelName: target?.channelKey,
       targetChannelId: target?.channelId,
       targetChannelType: target?.channelType,
-      targetSessionStrategy: target?.sessionStrategy ?? 'latest',
-      targetThreadId: target?.threadId,
-      boundSessionId: target?.sessionId,
+      targetSessionStrategy: definition.session.strategy,
+      targetThreadId: definition.session.thread?.threadId,
+      boundSessionId: definition.session.sessionId,
       prompt: this.triggerPrompt(definition),
       createdByPeerId: definition.origin?.peerId ?? '',
       createdByChannel: definition.origin?.channel ?? '',
@@ -257,6 +267,33 @@ export class CommandHandler {
       updatedAt: definition.updatedAt,
       status: definition.enabled ? 'active' : 'disabled',
     };
+  }
+
+  private primaryFeedbackAction(definition: TriggerDefinition): TriggerFeedbackAction {
+    return isScriptFeedbackConfig(definition.feedback)
+      ? definition.feedback.onSuccess
+      : definition.feedback;
+  }
+
+  private failureFeedbackAction(definition: TriggerDefinition): TriggerFeedbackAction {
+    return isScriptFeedbackConfig(definition.feedback)
+      ? definition.feedback.onFailure
+      : definition.feedback;
+  }
+
+  private primaryFeedbackTarget(definition: TriggerDefinition): TriggerFeedbackTarget | undefined {
+    return this.primaryFeedbackAction(definition).target
+      ?? this.failureFeedbackAction(definition).target
+      ?? {
+        channelKey: definition.session.channelKey,
+        channelId: definition.session.channelId,
+        channelType: this.resolveChannelType(definition.session.channelKey),
+        channelName: definition.session.channelKey,
+        sessionStrategy: definition.session.strategy,
+        sessionId: definition.session.sessionId,
+        threadId: definition.session.thread?.threadId,
+        threadMode: definition.session.thread?.mode,
+      };
   }
 
   private canAccessTriggerDefinition(definition: TriggerDefinition, peerId: string, channel: string, isAdmin: boolean): boolean {
@@ -308,6 +345,7 @@ export class CommandHandler {
 
     const strategy = parsed.targetThreadId ? 'thread' : parsed.targetSessionStrategy;
     const target: TriggerFeedbackTarget = {
+      channelKey: targetChannelName,
       channelType: targetChannelType,
       channelName: targetChannelName,
       channelId: targetChannelId,
@@ -325,7 +363,8 @@ export class CommandHandler {
       const adapter = this.adapters.get(targetChannelName);
       if (!adapter?.capabilities.thread) return { error: '目标渠道不支持 thread 会话' };
       const explicitThread = typeof parsed.targetThreadId === 'string' && parsed.targetThreadId !== 'true' ? parsed.targetThreadId : undefined;
-      target.threadId = explicitThread || threadId || messageId || `trigger-${id}`;
+      target.threadId = explicitThread || threadId || messageId || `trigger:${id}`;
+      target.threadMode = 'reuse';
     }
 
     const activeSession = this.sessionManager.getActiveSessionSync(channel, channelId);
@@ -344,15 +383,24 @@ export class CommandHandler {
       timeoutMs: 30_000,
     } : undefined;
 
-    // Determine feedback mode (default: agent-runner if no script; direct-message if script present)
-    const feedbackMode = parsed.mode ?? (script ? 'direct-message' : 'agent-runner');
+    const session = {
+      channelKey: target.channelKey,
+      channelId: target.channelId,
+      strategy,
+      ...(target.sessionId ? { sessionId: target.sessionId } : {}),
+      ...(strategy === 'thread' ? { thread: { mode: 'reuse' as const, threadId: target.threadId } } : {}),
+    };
+
+    // Determine feedback mode (default: agent-session if no script; direct-message if script present)
+    const parsedMode = parsed.mode === 'agent-runner' ? 'agent-session' : parsed.mode;
+    const feedbackMode = parsedMode ?? (script ? 'direct-message' : 'agent-session');
 
     // Determine onFailure mode (default: notify if origin present, silent otherwise)
     const onFailureMode = parsed.onFailure ?? (peerId ? 'notify' : 'silent');
     const onNoopMode = parsed.onNoop ?? 'silent';
 
-    const definition = {
-      $schema_version: 1 as const,
+    const definition: TriggerDefinition = {
+      $schema_version: 2,
       id,
       agentAid: schedulerAid,
       enabled: true,
@@ -365,16 +413,24 @@ export class CommandHandler {
         sessionKey: activeSession?.sessionKey,
       },
       source,
-      script,
-      feedback: {
-        onSuccess: {
+      session,
+      processing: script
+        ? { mode: 'script', script }
+        : { mode: 'prompt', prompt: parsed.prompt || '' },
+      feedback: script
+        ? {
+          onSuccess: {
+            mode: feedbackMode,
+            target,
+            template: '{{result.text}}',
+          },
+          onNoop: onNoopMode === 'notify' ? { mode: 'direct-message' as const, target, template: '{{error.message}}' } : { mode: 'none' as const },
+          onFailure: onFailureMode === 'notify' ? { mode: 'direct-message' as const, target, template: '❌ 触发器执行失败：{{error.message}}' } : { mode: 'none' as const },
+        }
+        : {
           mode: feedbackMode,
           target,
-          template: parsed.prompt || '{{result.text}}',
         },
-        onNoop: onNoopMode === 'notify' ? { mode: 'direct-message' as const, target, template: '{{error.message}}' } : { mode: 'none' as const },
-        onFailure: onFailureMode === 'notify' ? { mode: 'direct-message' as const, target, template: '❌ 触发器执行失败：{{error.message}}' } : { mode: 'none' as const },
-      },
       reliability: {
         concurrency: 'forbid' as const,
         missedPolicy: 'run_once' as const,
@@ -1034,9 +1090,10 @@ export class CommandHandler {
       let output = `📋 **${definition.name}** (${definition.id})\n`;
       output += `状态: ${definition.enabled ? 'active' : 'disabled'}\n`;
       output += `调度: ${view.scheduleType} | 下次: ${nextStr}\n`;
-      output += `模式: ${definition.feedback.onSuccess.mode}\n`;
-      output += `失败通知: ${definition.feedback.onFailure.mode === 'none' ? 'silent' : 'notify'}\n`;
-      if (definition.script) output += `脚本: ${definition.script.runtime} ${definition.script.path}\n`;
+      output += `处理: ${definition.processing.mode}\n`;
+      output += `反馈: ${this.primaryFeedbackAction(definition).mode}\n`;
+      output += `失败通知: ${this.failureFeedbackAction(definition).mode === 'none' ? 'silent' : 'notify'}\n`;
+      if (definition.processing.mode === 'script') output += `脚本: ${definition.processing.script.runtime} ${definition.processing.script.path}\n`;
       output += `活跃运行: ${activeRuns}\n`;
       if (recentRuns.length > 0) {
         output += `\n最近运行:\n`;
@@ -1150,11 +1207,18 @@ export class CommandHandler {
     const updated: TriggerDefinition = {
       ...definition,
       source: { ...definition.source } as TriggerSource,
-      feedback: {
-        onSuccess: { ...definition.feedback.onSuccess, target: definition.feedback.onSuccess.target ? { ...definition.feedback.onSuccess.target } : undefined },
-        onNoop: definition.feedback.onNoop ? { ...definition.feedback.onNoop, target: definition.feedback.onNoop.target ? { ...definition.feedback.onNoop.target } : undefined } : undefined,
-        onFailure: { ...definition.feedback.onFailure, target: definition.feedback.onFailure.target ? { ...definition.feedback.onFailure.target } : undefined },
+      session: {
+        ...definition.session,
+        thread: definition.session.thread ? { ...definition.session.thread } : undefined,
       },
+      processing: { ...definition.processing } as TriggerDefinition['processing'],
+      feedback: isScriptFeedbackConfig(definition.feedback)
+        ? {
+          onSuccess: { ...definition.feedback.onSuccess, target: definition.feedback.onSuccess.target ? { ...definition.feedback.onSuccess.target } : undefined },
+          onNoop: definition.feedback.onNoop ? { ...definition.feedback.onNoop, target: definition.feedback.onNoop.target ? { ...definition.feedback.onNoop.target } : undefined } : undefined,
+          onFailure: { ...definition.feedback.onFailure, target: definition.feedback.onFailure.target ? { ...definition.feedback.onFailure.target } : undefined },
+        }
+        : { ...definition.feedback, target: definition.feedback.target ? { ...definition.feedback.target } : undefined },
       reliability: {
         ...definition.reliability,
         scriptRetry: { ...definition.reliability.scriptRetry },
@@ -1162,7 +1226,11 @@ export class CommandHandler {
     };
 
     if (patch.name !== undefined) updated.name = String(patch.name);
-    if (patch.prompt !== undefined) updated.feedback.onSuccess.template = String(patch.prompt);
+    if (patch.prompt !== undefined) {
+      if (updated.processing.mode === 'prompt') updated.processing.prompt = String(patch.prompt);
+      else if (updated.processing.mode === 'template') updated.processing.template = String(patch.prompt);
+      else if (isScriptFeedbackConfig(updated.feedback)) updated.feedback.onSuccess.template = String(patch.prompt);
+    }
     if (patch.scheduleType !== undefined || patch.scheduleValue !== undefined) {
       const current = this.scheduleViewFromSource(definition.source);
       updated.source = this.triggerSourceFromSchedule(
@@ -1177,13 +1245,13 @@ export class CommandHandler {
       || patch.targetSessionStrategy !== undefined
       || patch.targetThreadId !== undefined
     ) {
-      const previousTarget = definition.feedback.onSuccess.target;
+      const previousTarget = this.primaryFeedbackTarget(definition);
       if (!previousTarget) return { ok: false, error: '现有触发器缺少 target，无法更新目标' };
-      const targetChannelName = patch.targetChannel ?? previousTarget.channelType;
+      const targetChannelName = patch.targetChannel ?? previousTarget.channelKey;
       if (patch.targetChannel && !this.adapters.has(patch.targetChannel)) {
         return { ok: false, error: `目标渠道不存在或未启用：${patch.targetChannel}` };
       }
-      const targetChannelType = patch.targetChannel ? this.resolveChannelType(patch.targetChannel) : previousTarget.channelType;
+      const targetChannelType = patch.targetChannel ? this.resolveChannelType(patch.targetChannel) : (previousTarget.channelType ?? this.resolveChannelType(targetChannelName));
       const targetAid = this.getOwningAgent(targetChannelName)?.aid ?? tryParseChannelKey(targetChannelName)?.selfAID ?? definition.agentAid;
       if (targetAid !== definition.agentAid) {
         return { ok: false, error: '暂不支持把 trigger 跨 agent 迁移，请新建触发器' };
@@ -1191,8 +1259,9 @@ export class CommandHandler {
 
       const strategy = patch.targetThreadId ? 'thread' : (patch.targetSessionStrategy ?? previousTarget.sessionStrategy ?? 'latest');
       const target: TriggerFeedbackTarget = {
+        channelKey: targetChannelName,
         channelType: targetChannelType,
-        channelName: patch.targetChannel ? targetChannelName : previousTarget.channelName,
+        channelName: targetChannelName,
         channelId: String(patch.targetChannelId ?? previousTarget.channelId),
         sessionStrategy: strategy,
       };
@@ -1206,9 +1275,23 @@ export class CommandHandler {
       } else if (strategy === 'thread') {
         const adapter = this.getAdapter(targetChannelName);
         if (!adapter?.capabilities.thread) return { ok: false, error: '目标渠道不支持 thread 会话' };
-        target.threadId = String(patch.targetThreadId ?? threadId ?? messageId ?? previousTarget.threadId ?? `trigger-${definition.id}`);
+        target.threadId = String(patch.targetThreadId ?? threadId ?? messageId ?? previousTarget.threadId ?? `trigger:${definition.id}`);
+        target.threadMode = previousTarget.threadMode ?? 'reuse';
       }
-      updated.feedback.onSuccess.target = target;
+      updated.session = {
+        channelKey: target.channelKey,
+        channelId: target.channelId,
+        strategy,
+        sessionId: target.sessionId,
+        thread: strategy === 'thread' ? { mode: target.threadMode ?? 'reuse', threadId: target.threadId } : undefined,
+      };
+      if (isScriptFeedbackConfig(updated.feedback)) {
+        updated.feedback.onSuccess.target = target;
+        if (updated.feedback.onFailure.target) updated.feedback.onFailure.target = { ...target };
+        if (updated.feedback.onNoop?.target) updated.feedback.onNoop.target = { ...target };
+      } else if (updated.feedback.mode !== 'none') {
+        updated.feedback.target = target;
+      }
     }
 
     // Update optional new fields
@@ -1218,22 +1301,41 @@ export class CommandHandler {
 
     if (patch.scriptPath !== undefined || patch.scriptRuntime !== undefined || patch.scriptArgs !== undefined) {
       if (patch.scriptPath && patch.scriptRuntime) {
-        updated.script = {
+        updated.processing = {
+          mode: 'script',
+          script: {
           path: patch.scriptPath,
           runtime: patch.scriptRuntime,
           args: patch.scriptArgs,
-          timeoutMs: updated.script?.timeoutMs ?? 30_000,
+            timeoutMs: updated.processing.mode === 'script' ? updated.processing.script.timeoutMs ?? 30_000 : 30_000,
+          },
         };
+        if (!isScriptFeedbackConfig(updated.feedback)) {
+          const target = this.primaryFeedbackTarget(updated);
+          updated.feedback = {
+            onSuccess: { mode: 'direct-message', target, template: '{{result.text}}' },
+            onNoop: { mode: 'none' },
+            onFailure: { mode: 'none' },
+          };
+        }
       } else if (patch.scriptPath === null || patch.scriptRuntime === null) {
-        updated.script = undefined;
+        updated.processing = { mode: 'prompt', prompt: this.triggerPrompt(definition) };
+        if (isScriptFeedbackConfig(updated.feedback)) {
+          const target = this.primaryFeedbackTarget(updated);
+          updated.feedback = { mode: 'agent-session', target };
+        }
       }
     }
 
     if (patch.mode !== undefined) {
-      updated.feedback.onSuccess.mode = patch.mode;
+      const mode = patch.mode === 'agent-runner' ? 'agent-session' : patch.mode;
+      this.primaryFeedbackAction(updated).mode = mode;
     }
 
     if (patch.onFailure !== undefined) {
+      if (!isScriptFeedbackConfig(updated.feedback)) {
+        return { ok: false, error: 'onFailure 仅适用于 script trigger' };
+      }
       if (patch.onFailure === 'notify') {
         const target = updated.feedback.onSuccess.target;
         if (!target) return { ok: false, error: 'onFailure notify 需要 target，但现有定义缺少 target' };
@@ -1248,6 +1350,9 @@ export class CommandHandler {
     }
 
     if (patch.onNoop !== undefined) {
+      if (!isScriptFeedbackConfig(updated.feedback)) {
+        return { ok: false, error: 'onNoop 仅适用于 script trigger' };
+      }
       if (patch.onNoop === 'notify') {
         const target = updated.feedback.onSuccess.target;
         if (!target) return { ok: false, error: 'onNoop notify 需要 target，但现有定义缺少 target' };

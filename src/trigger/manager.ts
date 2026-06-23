@@ -127,8 +127,8 @@ export class TriggerDefinitionManager {
     const definition = normalizeTriggerDefinition(definitionRaw);
     const files: TriggerCreateFile[] = [];
 
-    if (definition.script?.path) {
-      const scriptAbs = resolveScriptPath(sourceDir, definition.script.path);
+    if (definition.processing.mode === 'script') {
+      const scriptAbs = resolveScriptPath(sourceDir, definition.processing.script.path);
       const rel = path.relative(sourceDir, scriptAbs).replace(/\\/g, '/');
       files.push({
         relativePath: rel,
@@ -164,13 +164,13 @@ export class TriggerDefinitionManager {
   }
 
   private validateScriptFile(definition: TriggerDefinition, dir: string): void {
-    if (!definition.script) return;
-    const scriptAbs = resolveScriptPath(dir, definition.script.path);
+    if (definition.processing.mode !== 'script') return;
+    const scriptAbs = resolveScriptPath(dir, definition.processing.script.path);
     if (!fs.existsSync(scriptAbs)) {
-      throw new Error(`script file not found: ${definition.script.path}`);
+      throw new Error(`script file not found: ${definition.processing.script.path}`);
     }
     const stat = fs.statSync(scriptAbs);
-    if (!stat.isFile()) throw new Error(`script.path is not a file: ${definition.script.path}`);
+    if (!stat.isFile()) throw new Error(`script.path is not a file: ${definition.processing.script.path}`);
   }
 
   private assertAgent(definition: TriggerDefinition): void {
@@ -236,25 +236,29 @@ export class TriggerDefinitionManager {
       return undefined;
     }
 
-    const channelType = legacy.targetChannelType || tryParseChannelKey(String(legacy.targetChannel || ''))?.type || legacy.targetChannel;
+    const channelKey = typeof legacy.targetChannel === 'string' && legacy.targetChannel
+      ? legacy.targetChannel
+      : String(legacy.targetChannelType || '');
+    const channelType = legacy.targetChannelType || tryParseChannelKey(channelKey)?.type || channelKey;
     const channelId = legacy.targetChannelId;
-    if (!channelType || !channelId) return undefined;
+    if (!channelKey || !channelType || !channelId) return undefined;
 
     const sessionStrategy = legacy.targetSessionStrategy || 'latest';
-    const target: any = {
-      channelType: String(channelType),
-      channelName: typeof legacy.targetChannel === 'string' && legacy.targetChannel ? legacy.targetChannel : undefined,
+    const session: any = {
+      channelKey,
       channelId: String(channelId),
-      sessionStrategy,
+      strategy: sessionStrategy,
     };
     if (sessionStrategy === 'current') {
       if (!legacy.boundSessionId) return undefined;
-      target.sessionId = legacy.boundSessionId;
+      session.sessionId = legacy.boundSessionId;
     }
-    if (sessionStrategy === 'thread') target.threadId = legacy.targetThreadId || `trigger-${id}`;
+    if (sessionStrategy === 'thread') {
+      session.thread = { mode: 'reuse', threadId: legacy.targetThreadId || `trigger:${id}` };
+    }
 
     return normalizeTriggerDefinition({
-      $schema_version: 1,
+      $schema_version: 2,
       id,
       agentAid: this.agentAid,
       enabled: true,
@@ -267,14 +271,13 @@ export class TriggerDefinitionManager {
         peerId: legacy.createdByPeerId,
       },
       source,
+      session,
+      processing: {
+        mode: 'prompt',
+        prompt: String(legacy.prompt ?? ''),
+      },
       feedback: {
-        onSuccess: {
-          mode: 'agent-runner',
-          target,
-          template: String(legacy.prompt ?? ''),
-        },
-        onNoop: { mode: 'none' },
-        onFailure: { mode: 'none' },
+        mode: 'agent-session',
       },
       reliability: {
         concurrency: 'forbid',

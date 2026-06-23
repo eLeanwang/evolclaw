@@ -629,7 +629,10 @@ export async function handleSlashCommand(this: any,
       `  发送 /new 创建新会话，或开启新话题，即可用上 ${args}。`,
     ].join('\n');
 
-    if (this.shouldSuppressCardTriggerResult(source, channel)) return null;
+    if (this.shouldSuppressCardTriggerResult(source, channel)) {
+      // 卡片触发时仅返回警告部分（卡片UI已确认成功，不需要重复"✓"提示）
+      return { kind: 'command.result' as const, text: `⚠️ 当前会话仍在使用 ${currentSessionAgent}，切换不会立即生效。\n发送 /new 创建新会话，或开启新话题，即可用上 ${args}。` };
+    }
     return { kind: 'command.result' as const, text: agentSwitchResponse };
   }
 

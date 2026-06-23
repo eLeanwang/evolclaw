@@ -1,6 +1,5 @@
 import fs from 'fs';
 import path from 'path';
-import os from 'os';
 import readline from 'readline';
 import { resolvePaths, agentMdPath as getAgentMdPathFromPaths, aunPath as defaultAunPath } from '../paths.js';
 import { loadDefaults, loadAllAgents, loadAgent, saveAgent, ensureAgentDirSkeleton } from '../config-store.js';
@@ -11,6 +10,7 @@ import type { AgentConfig, ChannelInstance } from '../types.js';
 import { isValidChannelName } from '../core/channel-loader.js';
 import { commandExists } from '../utils/cross-platform.js';
 import { getCodexAppServerAvailability, isCodexAppServerAvailable } from '../agents/codex-runner.js';
+import { agentProjectRootFromDefaults, deriveAgentProjectPath } from '../utils/project-path.js';
 
 // ==================== Types ====================
 
@@ -173,15 +173,6 @@ function saveInitialBehavior(aid: string, baseagent: Baseagent): void {
   // 读取现有 config，合并写入
   const existingConfig = cfgRead(ConfigTarget.Agent, { self: aid }) || {};
   cfgWrite(ConfigTarget.Agent, { ...existingConfig, ...behavior }, { self: aid });
-}
-
-function deriveAgentProjectPath(rootPath: string, aid: string): string {
-  const baseName = aid.split('.')[0];
-  let candidate = path.join(rootPath, baseName);
-  if (!fs.existsSync(candidate)) return candidate;
-  let i = 1;
-  while (fs.existsSync(`${candidate}~${i}`)) i++;
-  return `${candidate}~${i}`;
 }
 
 function readAgentMdIdentity(aid: string): { name: string | null; description: string | null } {
@@ -449,12 +440,10 @@ export async function agentCreateInteractive(opts: AgentCreateInteractiveOpts = 
     let suggestedProjectPath = '';
     try {
       const defaults = loadDefaults();
-      const rootPath = defaults?.projects?.rootPath
-        || (defaults?.projects?.defaultPath && path.dirname(defaults.projects.defaultPath))
-        || resolvePaths().root + '/projects';
+      const rootPath = agentProjectRootFromDefaults(defaults, p.root);
       suggestedProjectPath = deriveAgentProjectPath(rootPath, aid);
     } catch {
-      suggestedProjectPath = deriveAgentProjectPath(resolvePaths().root + '/projects', aid);
+      suggestedProjectPath = deriveAgentProjectPath(agentProjectRootFromDefaults(null, p.root), aid);
     }
     const projectInput = (await ask(`Project path [${suggestedProjectPath}]: `)).trim();
     const projectPath = projectInput || suggestedProjectPath;
@@ -464,7 +453,11 @@ export async function agentCreateInteractive(opts: AgentCreateInteractiveOpts = 
     if (!fs.existsSync(projectPath)) {
       const create = (await ask(`Project path does not exist. Create? [Y/n]: `)).trim().toLowerCase();
       if (create === '' || create === 'y' || create === 'yes') {
-        fs.mkdirSync(projectPath, { recursive: true });
+        try {
+          fs.mkdirSync(projectPath, { recursive: true });
+        } catch (e: any) {
+          return { ok: false, error: `Failed to create project path "${projectPath}": ${e?.message || e}` };
+        }
         console.log(`  ✓ Created ${projectPath}`);
       } else {
         return { ok: false, error: 'Aborted.' };
@@ -882,9 +875,7 @@ export async function agentSyncAids(): Promise<AgentResult<AgentSyncResult>> {
   }
 
   const defaults = loadDefaults();
-  const rootPath = defaults?.projects?.rootPath
-    || (defaults?.projects?.defaultPath && path.dirname(defaults.projects.defaultPath))
-    || resolvePaths().root + '/projects';
+  const rootPath = agentProjectRootFromDefaults(defaults, p.root);
 
   const created: string[] = [];
   for (const aid of localAids) {
