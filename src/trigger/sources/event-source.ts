@@ -25,6 +25,7 @@ export class TriggerEventSource {
     const handler = (event: GatewayEvent) => {
       try {
         if (!this.matchPattern(event.type, eventPattern)) return;
+        if (event.type.startsWith('trigger:') && (event as any).originTriggerId === trigger.id) return;
         if (filter && !this.matchFilter(event, filter)) return;
 
         this.fire(trigger.id, {

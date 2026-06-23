@@ -330,6 +330,7 @@ export interface Message {
   source?: 'user' | 'card-trigger' | 'trigger' | 'owner-inject';
   triggerMeta?: {
     triggerId: string;
+    runId?: string;
     triggerName?: string;
     fireTime?: number;
     boundSessionId?: string;

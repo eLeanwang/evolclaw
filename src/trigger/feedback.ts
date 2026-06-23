@@ -256,6 +256,7 @@ export class TriggerFeedbackDispatcher {
       source: 'trigger',
       triggerMeta: {
         triggerId: input.trigger.id,
+        runId: input.runId,
         triggerName: input.trigger.name,
         fireTime: input.firedAt,
         boundSessionId: session.id,

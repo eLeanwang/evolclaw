@@ -22,22 +22,14 @@ export type SessionEvent =
   | { type: 'session:forked'; sessionId: string; sourceSessionId: string; name?: string }
   | { type: 'session:rewind'; sessionId: string; turnNum: number; mode: string }
   | { type: 'session:imported'; sessionId: string; agentSessionId: string; projectPath: string }
-  | { type: 'session:safe-mode-entered'; sessionId: string; consecutiveErrors?: number; reason?: string }
-  | { type: 'session:safe-mode-exited'; sessionId: string; method?: string }
   | { type: 'session:chat-mode-changed'; sessionId: string; mode: string; timestamp?: number }
   | { type: 'session:dispatch-mode-changed'; sessionId: string; mode: string; timestamp?: number };
-
-// ── 项目事件 ──
-export type ProjectEvent =
-  | { type: 'project:switched'; sessionId: string; channel?: string; channelId?: string; projectPath?: string; fromProject?: string; toProject?: string; timestamp?: number }
-  | { type: 'project:bound'; sessionId: string; channel?: string; channelId?: string; projectPath: string; timestamp?: number };
 
 // ── 消息事件 ──
 export type MessageEvent =
   | { type: 'message:received'; sessionId: string; channel: string; channelName?: string; channelId: string; content: string; userId?: string; agentName?: string; timestamp?: number }
   | { type: 'message:text'; sessionId: string; text: string; isFinal: boolean }
-  | { type: 'message:thought-put'; agentName: string; channelId: string; taskId?: string; text?: string }
-  | { type: 'message:sent-out'; agentName: string; channelId: string; taskId?: string };
+  | { type: 'message:thought-put'; agentName: string; channelId: string; taskId?: string; text?: string };
 
 // ── 任务事件（从 message:* 拆出，语义为任务生命周期） ──
 export type TaskBusEvent =
@@ -56,13 +48,13 @@ export type ToolEvent =
 export type PermissionEvent =
   | { type: 'permission:requested'; sessionId: string; requestId: string; toolName: string; input: string }
   | { type: 'permission:resolved'; sessionId: string; requestId: string; approved: boolean }
-  | { type: 'permission:timeout'; sessionId: string; requestId: string; toolName?: string };
+  | { type: 'permission:cancelled'; sessionId: string; requestId: string; toolName?: string; reason?: string };
 
 // ── Runner 运行事件（AI 后端执行流） ──
 export type RunnerBusEvent =
   | { type: 'runner:compact-start'; sessionId: string }
   | { type: 'runner:compact-complete'; sessionId: string; preTokens: number }
-  | { type: 'runner:model-changed'; sessionId?: string; model?: string; timestamp?: number }
+  | { type: 'runner:model-changed'; sessionId?: string; agentName?: string; baseagent?: string; model?: string; effort?: string; timestamp?: number }
   | { type: 'runner:idle-timeout'; sessionId: string; idleSec: number }
   | { type: 'runner:idle-notify'; sessionId: string; idleSec: number; totalEvents: number; totalToolCalls: number; lastToolName?: string }
   | { type: 'runner:idle-warn'; sessionId: string; idleSec: number; totalEvents: number; totalToolCalls: number; lastToolName?: string }
@@ -76,32 +68,40 @@ export type SelfHealEvent =
   | { type: 'self-heal:attempt'; attemptNumber: number; maxAttempts: number }
   | { type: 'self-heal:completed'; success: boolean; attempts: number };
 
-// ── 配置事件 ──
-export type ConfigEvent =
-  | { type: 'config:corrupted'; backupPath: string; reasons: string[] };
-
 // ── 触发器事件 ──
 export type TriggerEvent =
-  | { type: 'trigger:registered'; triggerId: string; name: string; peerId: string; targetChannel: string; targetChannelId: string; scheduleType: string; scheduleValue: string }
-  | { type: 'trigger:fired'; triggerId: string; name: string; fireTime: number; targetChannel: string; targetChannelId: string; scheduleType: string }
-  | { type: 'trigger:completed'; triggerId: string; name: string; messageId: string; durationMs: number; targetChannel: string; targetChannelId: string; fireTime: number }
-  | { type: 'trigger:failed'; triggerId: string; name: string; messageId: string; error: string; targetChannel: string; targetChannelId: string; fireTime: number; phase: 'enqueue' | 'execute' }
-  | { type: 'trigger:skipped'; triggerId: string; name: string; reason: 'overlap' | 'interrupted'; targetChannel: string; targetChannelId: string }
-  | { type: 'trigger:updated'; triggerId: string; name: string; peerId: string; scheduleType: string; scheduleValue: string }
+  | { type: 'trigger:registered'; triggerId: string; name: string; peerId?: string; targetChannel?: string; targetChannelId?: string; scheduleType: string; scheduleValue: string; timestamp?: number }
+  | { type: 'trigger:fired'; triggerId: string; name: string; runId: string; originTriggerId: string; fireTime: number; targetChannel?: string; targetChannelId?: string; scheduleType: string; timestamp?: number }
+  | { type: 'trigger:updated'; triggerId: string; name: string; peerId?: string; scheduleType: string; scheduleValue: string; timestamp?: number }
+  | { type: 'trigger:completed'; triggerId: string; name: string; runId: string; originTriggerId: string; messageId: string; durationMs: number; targetChannel: string; targetChannelId: string; fireTime: number }
+  | { type: 'trigger:failed'; triggerId: string; name: string; runId: string; originTriggerId: string; messageId: string; error: string; targetChannel: string; targetChannelId: string; fireTime: number; phase: 'enqueue' | 'execute' }
+  | { type: 'trigger:skipped'; triggerId: string; name: string; runId: string; originTriggerId: string; reason: string; targetChannel: string; targetChannelId: string; fireTime?: number }
   | { type: 'trigger:cancelled'; triggerId: string; name: string; by: string };
+
+// ── Agent 生命周期事件 ──
+export type AgentLifecycleEvent =
+  | { type: 'agent:created'; aid: string; name?: string; baseagent?: string; projectPath?: string; owner?: string; timestamp?: number }
+  | { type: 'agent:updated'; aid: string; timestamp?: number }
+  | { type: 'agent:reloaded'; aid: string; timestamp?: number }
+  | { type: 'agent:enabled'; aid: string; reloaded?: boolean; timestamp?: number }
+  | { type: 'agent:disabled'; aid: string; reloaded?: boolean; timestamp?: number }
+  | { type: 'agent:deleted'; aid: string; purged?: boolean; timestamp?: number }
+  | { type: 'agent:started'; aid: string; timestamp?: number }
+  | { type: 'agent:stopped'; aid: string; timestamp?: number }
+  | { type: 'agent:error'; aid: string; action?: string; error: string; timestamp?: number }
+  | { type: 'agent:baseagent-changed'; aid: string; baseagent: string; previousBaseagent?: string; scope: 'default'; timestamp?: number };
 export type GatewayEvent =
   | SystemEvent
   | ChannelEvent
   | SessionEvent
-  | ProjectEvent
   | MessageEvent
   | TaskBusEvent
   | ToolEvent
   | PermissionEvent
   | RunnerBusEvent
   | SelfHealEvent
-  | ConfigEvent
-  | TriggerEvent;
+  | TriggerEvent
+  | AgentLifecycleEvent;
 
 export class EventBus extends EventEmitter {
   publish(event: GatewayEvent): void {

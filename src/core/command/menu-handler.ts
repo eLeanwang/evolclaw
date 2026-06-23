@@ -1078,7 +1078,16 @@ export async function execMenuUpdate(this: any,
     if (valid.length && !valid.includes(arg)) {
       return { error: `无效 baseagent: ${arg}，可选: ${valid.join(' / ')}`, code: 'INVALID_VALUE' };
     }
+    const previousBaseagent = evolagent.baseagent;
     evolagent.setActiveBaseagent(arg);
+    this.eventBus.publish({
+      type: 'agent:baseagent-changed',
+      aid: evolagent.aid,
+      baseagent: arg,
+      previousBaseagent,
+      scope: 'default',
+      timestamp: Date.now(),
+    });
     return { data: { baseagent: arg, scope: 'default', currentSessionBaseagent: session?.baseagent ?? null } };
   }
 
@@ -1093,6 +1102,14 @@ export async function execMenuUpdate(this: any,
       agent.setModel(arg);
     }
     if (evolagent) evolagent.setBaseagentModel(arg, session?.baseagent || agent.name);
+    this.eventBus.publish({
+      type: 'runner:model-changed',
+      sessionId: session?.id,
+      agentName: evolagent?.name,
+      baseagent: session?.baseagent || agent.name,
+      model: arg,
+      timestamp: Date.now(),
+    });
     return { data: { model: arg } };
   }
 
@@ -1118,6 +1135,14 @@ export async function execMenuUpdate(this: any,
       (agent as any).setEffort(arg === 'auto' ? undefined : arg);
     }
     if (evolagent) evolagent.setBaseagentEffort(arg === 'auto' ? undefined : arg, session?.baseagent || agent.name);
+    this.eventBus.publish({
+      type: 'runner:model-changed',
+      sessionId: session?.id,
+      agentName: evolagent?.name,
+      baseagent: session?.baseagent || agent.name,
+      effort: arg,
+      timestamp: Date.now(),
+    });
     return { data: { effort: arg } };
   }
 
@@ -1282,15 +1307,18 @@ export async function execMenuAction(this: any,
         if (action === 'stop') {
           if (!this.agentRegistry?.stopAgent) return { error: 'stopAgent 不可用', code: 'INTERNAL' };
           await this.agentRegistry.stopAgent(a.aid, hooks);
+          this.eventBus.publish({ type: 'agent:stopped', aid: a.aid, timestamp: Date.now() });
           // 中断该 agent 正在执行的大模型调用
           const handle = this.agentRegistry.get(a.aid);
           if (handle) this.messageQueue.interruptByAgent(handle.name);
         } else {
           if (!this.agentRegistry?.startAgent) return { error: 'startAgent 不可用', code: 'INTERNAL' };
           await this.agentRegistry.startAgent(a.aid, hooks);
+          this.eventBus.publish({ type: 'agent:started', aid: a.aid, timestamp: Date.now() });
         }
         return { data: { aid: a.aid, action } };
       } catch (e: any) {
+        this.eventBus.publish({ type: 'agent:error', aid: a.aid, action, error: e?.message || String(e), timestamp: Date.now() });
         return { error: e?.message || String(e), code: 'INTERNAL' };
       }
     }
@@ -1307,7 +1335,7 @@ export async function execMenuAction(this: any,
         }
       }
     }
-    return await execAgentAction(action, a, userId ?? '');
+    return await execAgentAction(action, a, userId ?? '', this.eventBus);
   }
 
   // ── 关系级 /trigger（不走 owners；复用 isAdmin + scoped 逻辑，D4 直调底层） ──

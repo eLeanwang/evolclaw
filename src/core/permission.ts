@@ -400,11 +400,18 @@ export class PermissionGateway {
   }
 
   /** 中断时取消指定会话的所有 pending 权限请求 */
-  cancelAll(sessionId: string): void {
+  cancelAll(sessionId: string, reason = 'cancelled'): void {
     for (const [requestId, pending] of this.pending.entries()) {
       if (pending.sessionId === sessionId) {
         pending.resolve('deny');
         this.pending.delete(requestId);
+        this.eventBus?.publish({
+          type: 'permission:cancelled',
+          sessionId,
+          requestId,
+          toolName: pending.toolName,
+          reason,
+        });
       }
     }
   }
