@@ -38,6 +38,7 @@ import type {
 import { CONFIG_SCHEMA_VERSION } from './types.js';
 import { resolveAgentConfig, resolveEffective } from './config/config-manager.js';
 import { expandVars, buildEnvResolver } from './config/merge.js';
+import { mergeBehaviorIntoEffective } from './config/behavior.js';
 import { logger } from './utils/logger.js';
 
 // ── 进程级配置（{root}/evolclaw.json）─────────────────────────────────────
@@ -419,7 +420,20 @@ export function validateAgentConfig(cfg: AgentConfig): string[] {
 
 // ── 合并 ───────────────────────────────────────────────────────────────
 
-// 配置合并由 ConfigManager.resolveEffective() 统一处理。
+/**
+ * @deprecated Compatibility shim for older callers/tests.
+ *
+ * Runtime merging is owned by ConfigManager.resolveEffective(). This helper keeps
+ * the old direct API alive while also overlaying HA fields from behavior.json.
+ */
+export function mergeForAgent(agent: AgentConfig, defaults: DefaultsConfig | null): AgentConfig {
+  const hMerged = defaults ? deepMergeObject(defaults, agent) as AgentConfig : { ...agent };
+  delete (hMerged as any).owners;
+  delete (hMerged as any).admins;
+  if (agent.owners) hMerged.owners = [...agent.owners];
+  if (agent.admins) hMerged.admins = [...agent.admins];
+  return mergeBehaviorIntoEffective(hMerged, { self: agent.aid }) as AgentConfig;
+}
 
 // ── 目录骨架 ───────────────────────────────────────────────────────────
 

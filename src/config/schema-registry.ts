@@ -21,7 +21,8 @@ export type LogicalSchemaName =
   | 'evolclaw'
   | 'defaults'
   | 'agent-config'
-  | 'relation-config';
+  | 'relation-config'
+  | 'behavior';
 
 export type MergeKind = 'scalar' | 'list' | 'dict';
 

@@ -27,6 +27,7 @@ import {
   type SchemaEntry,
 } from './schema-registry.js';
 import { mergeLayers, expandVars, buildEnvResolver, type EnvScope } from './merge.js';
+import { mergeBehaviorIntoEffective } from './behavior.js';
 import type {
   ProcessConfig,
   DefaultsConfig,
@@ -257,7 +258,7 @@ export function resolveAgentConfig(sel: { self?: string; peerKey?: string }, opt
  */
 export function resolveEffective(sel: Selector, opts: ReadOpts = {}): EffectiveAgentConfig {
   const config = resolveAgentConfig(sel, opts);
-  return {
+  const effective: EffectiveAgentConfig = {
     $schema_version: config.$schema_version ?? currentVersion('agent-config'),
     aid: config.aid ?? sel.self ?? '',
     enabled: config.enabled,
@@ -285,6 +286,7 @@ export function resolveEffective(sel: Selector, opts: ReadOpts = {}): EffectiveA
     permissionMode: config.permissionMode,
     roles: config.roles,
   };
+  return mergeBehaviorIntoEffective(effective, sel, opts);
 }
 
 // ── 字段 → target 路由（按 schema 归属判定）──────────────────────────────────
