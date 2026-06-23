@@ -36,6 +36,7 @@ export function cleanEnv() {
     'CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT',
     'CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS',
     'CLAUDE_CONFIG_DIR',
+    'AUN_LOG_INI_DISABLE', // CLI 命令需要禁用 AUN 日志，但 daemon 需要保留
   ]) {
     delete process.env[key];
   }
@@ -419,6 +420,9 @@ export async function cmdStart(opts: StartOptions = {}) {
   console.log('🚀 Starting EvolClaw...');
   rotateStdoutIfNeeded(p.logs);
   cleanEnv();
+
+  // 在启动前确保 serviceProxy 配置完整（如果 ecweb 启用但 serviceProxy 未配置）
+  ensureServiceProxyConfigBeforeStart(p);
 
   const ecwebStartedBeforeDaemon = serviceProxyNeedsEcweb(loadEvolclawConfig())
     ? await startEcwebIfEnabled(p)
@@ -2474,6 +2478,82 @@ function stopEcwebIfRunning(p: ReturnType<typeof resolvePaths>): boolean {
  * 启动后轮询端口确认 HTTP 服务真正就绪，打印明确的成功/失败结论（而非模糊的「已在后台启动」状态描述）。
  * 返回 true=本次确实启动成功，false=未启用/未安装/启动失败。
  */
+/**
+ * 启动前检查并补全 serviceProxy 配置（如果 ecweb 启用但 serviceProxy 未配置）
+ */
+function ensureServiceProxyConfigBeforeStart(p: ReturnType<typeof resolvePaths>): void {
+  const cfg = loadEvolclawConfig();
+
+  // 仅在 ecweb 启用 + 控制 AID 已配置 + serviceProxy 未配置 ecweb 时自动添加
+  if (!cfg.ecweb?.enabled || !cfg.aid) return;
+
+  const hasEcwebService = (cfg.serviceProxy?.services ?? []).some(
+    s => s.name === 'ecweb' || s.source === 'ecweb'
+  );
+
+  if (!hasEcwebService) {
+    const updatedCfg: EvolclawConfig = {
+      ...cfg,
+      serviceProxy: {
+        enabled: true,
+        ...(cfg.serviceProxy ?? {}),
+        services: [
+          ...(cfg.serviceProxy?.services ?? []),
+          {
+            name: 'ecweb',
+            source: 'ecweb' as const,
+            serviceType: 'http',
+            visibility: 'public',
+            enabled: true,
+            metadata: {
+              label: 'EvolClaw Dashboard',
+            },
+          },
+        ],
+      },
+    };
+    saveEvolclawConfig(updatedCfg);
+    console.log(`✓ 自动配置 Service Proxy: https://${cfg.aid}/proxy/ecweb/`);
+  }
+}
+
+/**
+ * 确保 serviceProxy 配置包含 ecweb 服务（ECWeb 启动成功后自动配置）
+ */
+function ensureServiceProxyConfig(cfg: EvolclawConfig, port: number): void {
+  // 仅在控制 AID 已配置时自动添加 serviceProxy
+  if (!cfg.aid) return;
+
+  const hasEcwebService = (cfg.serviceProxy?.services ?? []).some(
+    s => s.name === 'ecweb' || s.source === 'ecweb'
+  );
+
+  if (!hasEcwebService) {
+    const updatedCfg: EvolclawConfig = {
+      ...cfg,
+      serviceProxy: {
+        enabled: true,
+        ...(cfg.serviceProxy ?? {}),
+        services: [
+          ...(cfg.serviceProxy?.services ?? []),
+          {
+            name: 'ecweb',
+            source: 'ecweb' as const,
+            serviceType: 'http',
+            visibility: 'public',
+            enabled: true,
+            metadata: {
+              label: 'EvolClaw Dashboard',
+            },
+          },
+        ],
+      },
+    };
+    saveEvolclawConfig(updatedCfg);
+    console.log(`   自动配置 Service Proxy: https://${cfg.aid}/proxy/ecweb/`);
+  }
+}
+
 async function startEcwebIfEnabled(p: ReturnType<typeof resolvePaths>): Promise<boolean> {
   const cfg = loadEvolclawConfig();
   if (!cfg.ecweb?.enabled) return false;

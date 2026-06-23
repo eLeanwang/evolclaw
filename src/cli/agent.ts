@@ -491,21 +491,43 @@ export async function agentCreateInteractive(opts: AgentCreateInteractiveOpts = 
       baseagent = chosen;
     }
 
-    // Owner: prefer QR binding after the agent is created. Manual owner remains as a fallback.
+    // Owner: only prompt if daemon (evolclaw.json) has owners configured.
+    // If daemon has no owner, agent owner is meaningless and should be skipped entirely.
+    const { loadEvolclawConfig } = await import('../config-store.js');
+    const daemonCfg = loadEvolclawConfig();
+    const daemonHasOwner = daemonCfg.owners && daemonCfg.owners.length > 0;
+
     let owner: string | undefined;
-    while (true) {
-      const prompt = 'Owner AID (leave empty to bind with evol app QR): ';
-      const ownerInput = (await ask(prompt)).trim();
-      if (!ownerInput) {
-        owner = undefined;
+    let skipQrBinding = false;
+    if (daemonHasOwner) {
+      const defaultOwner = daemonCfg.owners![0];
+      while (true) {
+        const prompt = `Owner AID [${defaultOwner}]: `;
+        const ownerInput = (await ask(prompt)).trim();
+
+        // User pressed Enter - use default owner
+        if (!ownerInput) {
+          owner = defaultOwner;
+          break;
+        }
+
+        // User entered "new" or "qr" - trigger QR binding flow
+        if (ownerInput.toLowerCase() === 'new' || ownerInput.toLowerCase() === 'qr') {
+          owner = undefined;
+          skipQrBinding = false;
+          break;
+        }
+
+        // User entered a specific AID - validate and use it
+        if (!isValidAid(ownerInput)) {
+          console.log(`  ⚠ Invalid Owner AID "${ownerInput}": must be a valid multi-level domain (e.g. alice.agentid.pub)`);
+          console.log(`  提示: 直接回车使用 ${defaultOwner}，输入 "new" 扫码绑定新 AID`);
+          continue;
+        }
+        owner = ownerInput;
+        skipQrBinding = true; // Skip QR if user manually entered an AID
         break;
       }
-      if (!isValidAid(ownerInput)) {
-        console.log(`  ⚠ Invalid Owner AID "${ownerInput}": must be a valid multi-level domain (e.g. alice.agentid.pub)`);
-        continue;
-      }
-      owner = ownerInput;
-      break;
     }
 
     // Name + description for agent.md
@@ -584,8 +606,13 @@ export async function agentCreateInteractive(opts: AgentCreateInteractiveOpts = 
 
     let ownerBoundAid: string | undefined;
     let ownerBindSkipped = false;
-    if (!owner && process.stdin.isTTY) {
-      console.log('\n📡 Agent owner 绑定 — 请用 evol app 扫描二维码\n');
+    // Only prompt for agent owner binding if:
+    // 1. User didn't manually input owner during setup (owner is undefined)
+    // 2. User didn't skip QR binding explicitly (skipQrBinding is false)
+    // 3. We're in an interactive terminal
+    // 4. The daemon (evolclaw.json) has at least one owner configured
+    if (!owner && !skipQrBinding && process.stdin.isTTY && daemonHasOwner) {
+      console.log('\n📡 Agent owner 绑定 — 请用 evol app 扫描二维码，10 分钟内有效\n');
       try {
         const { runAgentOwnerQrBindFlow } = await import('./init-channel.js');
         const bound = await runAgentOwnerQrBindFlow(aid, agentName, 'append');

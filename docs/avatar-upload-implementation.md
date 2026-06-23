@@ -95,7 +95,7 @@ MessageBridge.handleMenuAction()
        -> validate data URL + decoded image
        -> agentmdGet()
        -> storageUpload(..., { isPublic: true, contentType })
-       -> updateAgentMdFrontmatter()
+       -> updateAgentMdFrontmatterAvatar()
        -> agentmdPut()
 ```
 
@@ -106,11 +106,12 @@ src/
 ├── core/message/
 │   └── command-handler-agent-control.ts  # 扩展 execAgentUpdate / execAgentAction
 ├── utils/
-│   ├── avatar-upload.ts                  # 新增：头像上传核心逻辑
-│   └── yaml-frontmatter.ts               # 新增：agent.md frontmatter 更新工具
-└── aun/
-    └── storage/
-        └── upload.ts                     # 扩展 storageUpload(contentType + url)
+│   └── avatar-upload.ts                  # 新增：头像上传核心逻辑
+├── aun/
+│   ├── aid/
+│   │   └── agentmd.ts                    # 扩展：agent.md frontmatter 更新 helper
+│   └── storage/
+│       └── upload.ts                     # 扩展 storageUpload(contentType + url)
 ```
 
 ---
@@ -214,9 +215,9 @@ tags:
 
 ## 6. 实现细节
 
-### 6.1 `utils/yaml-frontmatter.ts`
+### 6.1 `aun/aid/agentmd.ts`
 
-不建议为这个需求新增 `gray-matter` 依赖。当前只需要对 `agent.md` frontmatter 的 `avatar` 字段做保序更新，可以用轻量定制工具实现。
+不新增通用 `yaml-frontmatter.ts`，也不建议为这个需求新增 `gray-matter` 依赖。`agent.md` 本来就是 `src/aun/aid/agentmd.ts` 的职责范围，头像只是在现有 YAML frontmatter 里增加或替换 `avatar` 字段，因此把 helper 放在 `agentmd.ts` 内更符合当前代码边界。
 
 核心函数：
 
@@ -227,16 +228,16 @@ export interface FrontmatterUpdateResult {
 }
 
 export function stripAgentMdSignature(content: string): string;
-export function updateAgentMdFrontmatter(
+export function updateAgentMdFrontmatterAvatar(
   content: string,
-  updates: Record<string, string>
+  avatarUrl: string
 ): FrontmatterUpdateResult;
 ```
 
 实现要点：
 
 - `stripAgentMdSignature()` 只剥离文件尾部合法签名块。
-- `updateAgentMdFrontmatter()` 要求文件以 `---` frontmatter 开头，否则抛错。
+- `updateAgentMdFrontmatterAvatar()` 要求文件以 `---` frontmatter 开头，否则抛错。
 - 已存在 `avatar:` 时原地替换该行。
 - 新增 `avatar:` 时优先插入到 `version` 后；没有 `version` 时插入到 frontmatter 结束前。
 - 保留已有字段顺序、缩进、Markdown body。
@@ -454,8 +455,8 @@ if (action === 'update') {
 ### Phase 1：基础设施
 
 1. 扩展 `storageUpload()`：支持 `contentType`，返回 AID 风格 `url`。
-2. 实现 `utils/yaml-frontmatter.ts`：剥离签名、保序更新 `avatar`。
-3. 实现 `utils/avatar-upload.ts`：校验、上传、更新 agent.md。
+2. 在 `src/aun/aid/agentmd.ts` 中实现 frontmatter helper：剥离签名、保序更新 `avatar`。
+3. 实现 `src/utils/avatar-upload.ts`：校验、上传、更新 agent.md。
 
 ### Phase 2：menu 集成
 
@@ -482,7 +483,7 @@ if (action === 'update') {
 
 ## 10. 测试计划
 
-### 10.1 `yaml-frontmatter.test.ts`
+### 10.1 `agentmd-frontmatter.test.ts`
 
 - 解析标准 YAML frontmatter。
 - 解析带 Markdown body 的 agent.md。
@@ -700,7 +701,7 @@ eventBus.publish({
 ### 代码
 
 - [ ] `src/aun/storage/upload.ts` 支持 `contentType` 和 AID 风格 `url`
-- [ ] `src/utils/yaml-frontmatter.ts`
+- [ ] `src/aun/aid/agentmd.ts` 增加 `avatar` frontmatter helper
 - [ ] `src/utils/avatar-upload.ts`
 - [ ] `src/core/message/command-handler-agent-control.ts` 扩展完成
 - [ ] `src/core/event-bus.ts` 事件类型更新

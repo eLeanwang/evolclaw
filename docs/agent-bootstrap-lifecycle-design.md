@@ -113,8 +113,10 @@
 - WeCom/QQBot：按各自 adapter 能否在连接时主动发送决定；不能主动寻址时走首次入站兜底
 
 **固定模板来源**：
-- 首条消息模板建议放在 `src/utils/bootstrap.ts` 或 `kits/templates/system-fragments/bootstrap-seed.md`
+- 首条消息模板单独放置，不与 `kits/templates/system-fragments/bootstrap.md` 共用
+- 固定路径：`kits/templates/bootstrap-welcome.md`
 - 模板只使用确定性变量渲染：`agentAid`、`agentName`、`ownerName`、`channel`、`baseagent`
+- `kits/templates/system-fragments/bootstrap.md` 只用于 bootstrap 阶段注入给 baseagent 的系统提示词；若把欢迎首条消息也放在同一文件，ECK 会把用户可见文案一起注入系统提示词，容易造成提示词污染和维护歧义
 - 当前 `src/utils/welcome.ts` 可迁移/改名为 bootstrap seed 生成器，避免保留两套欢迎语义
 
 ---
@@ -276,6 +278,7 @@ isBootstrapping: lifecycle === 'bootstrapping',
 | `src/eck/kit-renderer.ts` | debug 参数说明增加 `lifecycle` 和 `isBootstrapping` |
 | `kits/eck_manifest.json` | 新增 bootstrap 专属 section，并给常规 identity/relation/venue/persona/working-memory 段排除 bootstrapping |
 | `kits/templates/system-fragments/bootstrap.md` | 新建 bootstrap 引导提示词模板 |
+| `kits/templates/bootstrap-welcome.md` | 新建系统直接发送给 owner 的固定首条消息模板，不进入 system prompt |
 | `src/cli/agent-command.ts` / `src/cli/agent.ts` | 新增 `ec agent ready <aid>` 子命令，支持 agent 工具调用；写盘后触发 IPC reload |
 | `src/core/event-bus.ts` | 增加 `agent:bootstrap-started` / `agent:bootstrap-complete` 事件类型，字段使用 `aid` |
 | `src/cli/agent.ts` 或新 helper | 新增 profile 更新命令，原子更新 name/description/tags 并调用 `agentmdPut()` |

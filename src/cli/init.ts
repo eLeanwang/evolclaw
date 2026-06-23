@@ -285,68 +285,80 @@ export async function initTail(): Promise<void> {
     }
   }
 
-  // 配置进程级管理者（owners）：仅交互式 + aid 已配置 + owners 未配置时询问
-  const evcForOwners = loadEvolclawConfig();
-  if (process.stdin.isTTY && evcForOwners.aid && (!evcForOwners.owners || evcForOwners.owners.length === 0)) {
-    console.log('\n📡 进程级管理者绑定 — 请用 evol app 扫描二维码\n');
+  // 交互式询问：使用单一 readline 实例避免 stdin 状态混乱
+  if (process.stdin.isTTY) {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
     try {
-      const { runDaemonOwnerQrBindFlow } = await import('./init-channel.js');
-      const result = await runDaemonOwnerQrBindFlow('append');
-      if (result?.boundAid) {
-        console.log(`  ✓ 已配置管理者: ${result.boundAid}`);
-      } else {
-        await promptOwnersManually();
-      }
-    } catch (e: any) {
-      console.log(`  ⚠ 扫码绑定不可用: ${e?.message || e}`);
-      await promptOwnersManually();
+      await handleOwnersPrompt(rl);
+      await handleEcwebPrompt(rl);
+    } finally {
+      try { rl.close(); } catch { /* ignore */ }
     }
   }
 
-  async function promptOwnersManually(): Promise<void> {
-    const { isValidAid } = await import('../aun/aid/index.js');
-    const rlOwners = readline.createInterface({ input: process.stdin, output: process.stdout });
-    try {
-      const raw = (await ask(rlOwners,
-        '\n请输入 EvolClaw 管理者 AID: ')).trim();
-      if (raw) {
-        const { valid, invalid } = parseOwnerAids(raw, isValidAid);
-        if (invalid.length > 0) console.log(`  ⚠ 跳过非法 AID: ${invalid.join(', ')}`);
-        if (valid.length > 0) {
-          saveEvolclawConfig({ ...loadEvolclawConfig(), owners: valid });
-          console.log(`  ✓ 已配置管理者: ${valid.join(', ')}`);
-        } else {
-          console.log('  未输入合法 AID，已跳过 owners 配置');
+  async function handleOwnersPrompt(rl: readline.Interface): Promise<void> {
+    const evcForOwners = loadEvolclawConfig();
+    if (evcForOwners.aid && (!evcForOwners.owners || evcForOwners.owners.length === 0)) {
+      const needOwner = (await ask(rl, '\n是否配置进程级管理者（Owner AID）？[y/N] ')).trim().toLowerCase();
+      if (needOwner === 'y' || needOwner === 'yes') {
+        console.log('\n📡 进程级管理者绑定 — 请用 evol app 扫描二维码\n');
+        // QR 绑定流程需要暂时关闭 rl，因为它会创建自己的输入监听
+        rl.pause();
+        try {
+          const { runDaemonOwnerQrBindFlow } = await import('./init-channel.js');
+          const result = await runDaemonOwnerQrBindFlow('append');
+          if (result?.boundAid) {
+            console.log(`  ✓ 已配置管理者: ${result.boundAid}`);
+          } else {
+            // QR 流程失败，恢复 rl 并提示手动输入
+            rl.resume();
+            await promptOwnersManually(rl);
+          }
+        } catch (e: any) {
+          console.log(`  ⚠ 扫码绑定不可用: ${e?.message || e}`);
+          rl.resume();
+          await promptOwnersManually(rl);
         }
+        // QR 流程成功完成后恢复 rl
+        rl.resume();
       } else {
         console.log('  已跳过 owners 配置（可日后编辑 evolclaw.json 或重跑 evolclaw init）');
       }
-    } finally {
-      try { rlOwners.close(); } catch { /* ignore */ }
     }
   }
 
-  // ECWeb：交互式 + 未配置时询问是否启用
-  if (process.stdin.isTTY) {
+  async function promptOwnersManually(rl: readline.Interface): Promise<void> {
+    const { isValidAid } = await import('../aun/aid/index.js');
+    const raw = (await ask(rl, '\n请输入 EvolClaw 管理者 AID: ')).trim();
+    if (raw) {
+      const { valid, invalid } = parseOwnerAids(raw, isValidAid);
+      if (invalid.length > 0) console.log(`  ⚠ 跳过非法 AID: ${invalid.join(', ')}`);
+      if (valid.length > 0) {
+        saveEvolclawConfig({ ...loadEvolclawConfig(), owners: valid });
+        console.log(`  ✓ 已配置管理者: ${valid.join(', ')}`);
+      } else {
+        console.log('  未输入合法 AID，已跳过 owners 配置');
+      }
+    } else {
+      console.log('  已跳过 owners 配置（可日后编辑 evolclaw.json 或重跑 evolclaw init）');
+    }
+  }
+
+  async function handleEcwebPrompt(rl: readline.Interface): Promise<void> {
     const evcEcweb = loadEvolclawConfig();
     if (evcEcweb.ecweb?.enabled === undefined) {
-      const rlEcweb = readline.createInterface({ input: process.stdin, output: process.stdout });
-      try {
-        const ans = (await ask(rlEcweb, '\n是否在 evolclaw start 时自动启动 ECWeb 控制台？[y/N] ')).trim().toLowerCase();
-        if (ans === 'y' || ans === 'yes') {
-          const cfg = loadEvolclawConfig();
-          saveEvolclawConfig({ ...cfg, ecweb: { ...(cfg.ecweb ?? {}), enabled: true } });
-          console.log('  ✓ 已启用 ECWeb（evolclaw start 将自动在后台启动）');
-          const installed = await ensureEcwebInstalledForInit();
-          console.log(installed
-            ? '  提示：首次访问运行 ec watch web 查看配对码和 URL'
-            : '  提示：安装完成后运行 evolclaw start；如需立即打开控制台，运行 ec watch web');
-        } else {
-          saveEvolclawConfig({ ...loadEvolclawConfig(), ecweb: { enabled: false } });
-          console.log('  已跳过（可日后运行 ec watch web 手动启动，或编辑 evolclaw.json）');
-        }
-      } finally {
-        try { rlEcweb.close(); } catch {}
+      const ans = (await ask(rl, '\n是否在 evolclaw start 时自动启动 ECWeb 控制台？[y/N] ')).trim().toLowerCase();
+      if (ans === 'y' || ans === 'yes') {
+        const cfg = loadEvolclawConfig();
+        saveEvolclawConfig({ ...cfg, ecweb: { ...(cfg.ecweb ?? {}), enabled: true } });
+        console.log('  ✓ 已启用 ECWeb（evolclaw start 将自动在后台启动）');
+        const installed = await ensureEcwebInstalledForInit();
+        console.log(installed
+          ? '  提示：首次访问运行 ec watch web 查看配对码和 URL'
+          : '  提示：安装完成后运行 evolclaw start；如需立即打开控制台，运行 ec watch web');
+      } else {
+        saveEvolclawConfig({ ...loadEvolclawConfig(), ecweb: { enabled: false } });
+        console.log('  已跳过（可日后运行 ec watch web 手动启动，或编辑 evolclaw.json）');
       }
     }
   }
