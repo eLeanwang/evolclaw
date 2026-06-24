@@ -101,9 +101,9 @@
   2. 解析可发送上下文：AUN 可用 owner AID；飞书可用 open_id/chat_id；微信/钉钉等可能需要首次入站缓存的 context token/webhook
   3. 找不到接收者或可发送上下文则保持 `created`，等待 owner 绑定、下次连接或 owner 首次入站重试
   4. 找到接收者和可发送上下文后，将 `lifecycle` 原子翻转为 `bootstrapping`
-  5. 通过当前 channel 发送固定模板首条消息
+  5. 通过当前 channel 以正式文本消息发送固定模板首条消息
   6. 保留现有 onboarding 副作用：发布/同步 agent.md、发送 binding credential（如渠道支持）
-- 首条消息不经 baseagent 生成；后续 owner 回复进入正常消息处理回合，agent 按 bootstrap 提示词运行
+- 首条消息不经 baseagent 生成，不使用 notice/status 类系统消息；后续 owner 回复进入正常消息处理回合，agent 按 bootstrap 提示词运行
 
 **跨渠道寻址约束**：
 - AUN：可在连接成功后直接向 owner AID 发送
@@ -278,10 +278,10 @@ isBootstrapping: lifecycle === 'bootstrapping',
 | `src/eck/kit-renderer.ts` | debug 参数说明增加 `lifecycle` 和 `isBootstrapping` |
 | `kits/eck_manifest.json` | 新增 bootstrap 专属 section，并给常规 identity/relation/venue/persona/working-memory 段排除 bootstrapping |
 | `kits/templates/system-fragments/bootstrap.md` | 新建 bootstrap 引导提示词模板 |
-| `kits/templates/bootstrap-welcome.md` | 新建系统直接发送给 owner 的固定首条消息模板，不进入 system prompt |
+| `kits/templates/bootstrap-welcome.md` | 新建直接发送给 owner 的固定首条文本消息模板，不进入 system prompt |
 | `src/cli/agent-command.ts` / `src/cli/agent.ts` | 新增 `ec agent ready <aid>` 子命令，支持 agent 工具调用；写盘后触发 IPC reload |
 | `src/core/event-bus.ts` | 增加 `agent:bootstrap-started` / `agent:bootstrap-complete` 事件类型，字段使用 `aid` |
-| `src/cli/agent.ts` 或新 helper | 新增 profile 更新命令，原子更新 name/description/tags 并调用 `agentmdPut()` |
+| `src/cli/aun-commands.ts` / `src/aun/aid/agentmd.ts` | 复用 `ec aid agentmd put/get`：agent 编辑本地 agent.md 后签名并发布 |
 
 ---
 

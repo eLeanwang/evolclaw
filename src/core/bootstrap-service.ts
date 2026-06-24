@@ -92,7 +92,7 @@ export class BootstrapService {
           channelId,
           agentName: aid,
         }),
-        { kind: 'system.notice', text, subtype: 'bootstrap-welcome' },
+        { kind: 'result.text', text, isFinal: true },
       );
 
       this.eventBus.publish({ type: 'agent:bootstrap-started', aid, channel: channelType || ctx.channelKey, timestamp: Date.now() });

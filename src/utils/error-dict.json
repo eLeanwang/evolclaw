@@ -50,6 +50,13 @@
       "message": "⚠️ 当前算力池切换中，请稍后重试"
     },
     {
+      "id": "selected-model-at-capacity",
+      "match": "selected model is at capacity",
+      "action": "retry",
+      "type": "api_error",
+      "message": "⚠️ 当前模型繁忙，请稍后重试"
+    },
+    {
       "id": "api-error-400",
       "match": "api error: 400",
       "action": "stop",

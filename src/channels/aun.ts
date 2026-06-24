@@ -121,6 +121,10 @@ type DurablePayloadSendResult = {
   encrypt?: boolean;
 };
 
+function setIfDefined(target: Record<string, any>, key: string, value: unknown): void {
+  if (value !== undefined) target[key] = value;
+}
+
 /**
  * 把 AUNChannel 投递的 opts 映射成渠道无关的 InboundMessage。
  *
@@ -2325,6 +2329,22 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     return result?.message?.message_id ?? result?.message_id ?? null;
   }
 
+  private stripUndefinedDeep<T>(value: T): T {
+    if (Array.isArray(value)) {
+      return value
+        .filter((item) => item !== undefined)
+        .map((item) => this.stripUndefinedDeep(item)) as T;
+    }
+    if (!value || typeof value !== 'object') return value;
+
+    const cleaned: Record<string, any> = {};
+    for (const [key, item] of Object.entries(value as Record<string, any>)) {
+      if (item === undefined) continue;
+      cleaned[key] = this.stripUndefinedDeep(item);
+    }
+    return cleaned as T;
+  }
+
   private payloadLogText(payload: Record<string, any>, contentKind?: outbox.OutboxContentKind): string {
     if (typeof payload.text === 'string' && payload.text) return payload.text;
     switch (contentKind ?? payload.type) {
@@ -2348,7 +2368,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
   }
 
   private applyReplyContextToPayload(payload: Record<string, any>, context?: ReplyContext): Record<string, any> {
-    const finalPayload: Record<string, any> = { ...payload };
+    const finalPayload: Record<string, any> = this.stripUndefinedDeep({ ...payload });
     if (context?.threadId && !finalPayload.thread_id) finalPayload.thread_id = context.threadId;
     if (context?.metadata?.taskId && !finalPayload.task_id) finalPayload.task_id = context.metadata.taskId;
     if (context?.metadata?.chatmode && !finalPayload.chatmode) finalPayload.chatmode = context.metadata.chatmode;
@@ -2629,7 +2649,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     return {
       ...this.buildTaskPayloadBase(envelope, context),
       type: 'activity',
-      item: activityItem,
+      item: this.stripUndefinedDeep(activityItem),
     };
   }
 
@@ -2917,20 +2937,21 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
 
     // 私聊 channelId = 对端 AID（不含 device_id）
     const targetId = channelId;
+    const finalPayload = this.stripUndefinedDeep(payload);
 
     const encrypt = context?.metadata?.encrypted != null
       ? !!(context.metadata.encrypted)
       : this.shouldEncrypt(targetId);
     const params: Record<string, any> = {
       context: { type: 'task', id: taskId },
-      payload,
+      payload: finalPayload,
       encrypt,
     };
 
     try {
-      const items = (payload as any)?.items;
+      const items = (finalPayload as any)?.items;
       const itemCount = Array.isArray(items) ? items.length : 1;
-      const stage = (payload as any)?.stage ?? ((payload as any)?.kind ? `kind=${(payload as any).kind}` : `items=${itemCount}`);
+      const stage = (finalPayload as any)?.stage ?? ((finalPayload as any)?.kind ? `kind=${(finalPayload as any).kind}` : `items=${itemCount}`);
       // 提取 thought 文本：兼容旧 items[] 和新扁平 activity payload。
       let thoughtText: string | undefined;
       if (Array.isArray(items) && items.length > 0) {
@@ -2946,7 +2967,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
           thoughtText = lastItem;
         }
       } else {
-        thoughtText = this.activityLogText(payload);
+        thoughtText = this.activityLogText(finalPayload);
       }
       if (this.isGroupId(channelId)) {
         params.group_id = targetId;
@@ -2992,7 +3013,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       ? !!(context.metadata.encrypted)
       : this.shouldEncrypt(encryptTarget);
 
-    const finalPayload: Record<string, any> = { ...payload };
+    const finalPayload: Record<string, any> = this.stripUndefinedDeep({ ...payload });
     if (context?.threadId && !finalPayload.thread_id) finalPayload.thread_id = context.threadId;
 
     const params: Record<string, any> = { payload: finalPayload, encrypt };
@@ -3283,8 +3304,9 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       session_id: sessionId,
       severity,
       terminal: ['done', 'interrupted', 'error', 'timeout'].includes(status),
-      ...(extraMeta && Object.keys(extraMeta).length > 0 && { metadata: extraMeta }),
     };
+    const metadata = extraMeta ? this.stripUndefinedDeep(extraMeta) as Record<string, unknown> : undefined;
+    if (metadata && Object.keys(metadata).length > 0) statusPayload.metadata = metadata;
     if (context?.threadId) statusPayload.thread_id = context.threadId;
     if (context?.peerId) statusPayload.initiator = context.peerId;
     if (context?.metadata?.chatmode) statusPayload.chatmode = context.metadata.chatmode;
@@ -3594,36 +3616,39 @@ export class AUNChannelPlugin implements ChannelPlugin {
             return;
           }
           case 'system.notice': {
-            await channel.sendReliableStructured(channelId, {
+            const noticePayload: Record<string, any> = {
               type: 'notice',
               ...taskBase(),
-              subtype: payload.subtype,
               text: payload.text,
               severity: 'info',
-            }, replyCtx, payload.text);
+            };
+            setIfDefined(noticePayload, 'subtype', payload.subtype);
+            await channel.sendReliableStructured(channelId, noticePayload, replyCtx, payload.text);
             return;
           }
           case 'system.error': {
-            await channel.sendReliableStructured(channelId, {
+            const errorPayload: Record<string, any> = {
               type: 'error',
               ...taskBase(),
-              subtype: payload.subtype,
               message: payload.text,
               user_message: payload.text,
-              recoverable: payload.recoverable,
               terminal: !payload.recoverable,
-            }, replyCtx, payload.text);
+            };
+            setIfDefined(errorPayload, 'subtype', payload.subtype);
+            setIfDefined(errorPayload, 'recoverable', payload.recoverable);
+            await channel.sendReliableStructured(channelId, errorPayload, replyCtx, payload.text);
             return;
           }
           case 'result.error': {
-            await channel.sendReliableStructured(channelId, {
+            const errorPayload: Record<string, any> = {
               type: 'error',
               ...taskBase(),
-              reason: payload.reason,
               message: payload.text,
               user_message: payload.text,
               terminal: true,
-            }, replyCtx, payload.text);
+            };
+            setIfDefined(errorPayload, 'reason', payload.reason);
+            await channel.sendReliableStructured(channelId, errorPayload, replyCtx, payload.text);
             return;
           }
           case 'result.file': {
@@ -3636,9 +3661,10 @@ export class AUNChannelPlugin implements ChannelPlugin {
           case 'result.image': {
             const buf = payload.data as Buffer;
             const b64 = buf.toString('base64');
-            await channel.sendContentPayload(channelId, {
-              type: 'image', alt: payload.alt, data_base64: b64, mime_type: payload.mimeType,
-            }, {
+            const imagePayload: Record<string, any> = { type: 'image', data_base64: b64 };
+            setIfDefined(imagePayload, 'alt', payload.alt);
+            setIfDefined(imagePayload, 'mime_type', payload.mimeType);
+            await channel.sendContentPayload(channelId, imagePayload, {
               contentKind: 'image',
               context: replyCtx,
               logText: payload.alt ? `[image] ${payload.alt}` : '[image]',
@@ -3649,19 +3675,18 @@ export class AUNChannelPlugin implements ChannelPlugin {
             const items = Array.isArray(payload.items) ? payload.items : [];
             for (const item of items) {
               if (item?.kind === 'progress') {
+                const metadata: Record<string, unknown> = { activityType: 'progress' };
+                setIfDefined(metadata, 'text', item.text);
+                setIfDefined(metadata, 'state', item.state);
+                setIfDefined(metadata, 'toolUses', item.tool_uses);
+                setIfDefined(metadata, 'durationMs', item.duration_ms);
                 channel.sendProcessingStatus(
                   channelId,
                   'progress',
                   envelope.sessionId ?? envelope.taskId,
                   envelope.taskId,
                   replyCtx,
-                  {
-                    activityType: 'progress',
-                    text: item.text,
-                    state: item.state,
-                    toolUses: item.tool_uses,
-                    durationMs: item.duration_ms,
-                  },
+                  metadata,
                 );
                 continue;
               }
@@ -3724,9 +3749,16 @@ export class AUNChannelPlugin implements ChannelPlugin {
               const aunCard: Record<string, any> = {
                 type: 'action_card',
                 title: card.title,
-                actions: (card as CommandCard).buttons.map(btn => ({
-                  label: btn.label, value: btn.command, style: btn.style ?? 'default', behavior: 'reply', disabled: btn.disabled || undefined,
-                })),
+                actions: (card as CommandCard).buttons.map(btn => {
+                  const action: Record<string, any> = {
+                    label: btn.label,
+                    value: btn.command,
+                    style: btn.style ?? 'default',
+                    behavior: 'reply',
+                  };
+                  setIfDefined(action, 'disabled', btn.disabled);
+                  return action;
+                }),
               };
               if (card.body) aunCard.description = card.body;
               if (replyCtx?.threadId) aunCard.thread_id = replyCtx.threadId;

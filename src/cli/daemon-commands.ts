@@ -2557,7 +2557,7 @@ function ensureServiceProxyConfig(cfg: EvolclawConfig, port: number): void {
 async function startEcwebIfEnabled(p: ReturnType<typeof resolvePaths>): Promise<boolean> {
   const cfg = loadEvolclawConfig();
   if (!cfg.ecweb?.enabled) return false;
-  stopEcwebIfRunning(p);  // 先停旧进程（有则停），保证加载最新代码
+  const wasRunning = stopEcwebIfRunning(p);  // 先停旧进程（有则停），保证加载最新代码
 
   const port = cfg.ecweb.port ?? 42705;
   const args = ['--home', p.root, '--port', String(port)];
@@ -2604,7 +2604,8 @@ async function startEcwebIfEnabled(p: ReturnType<typeof resolvePaths>): Promise<
 
     if (pair) {
       const mins = Math.max(0, Math.round((pair.expiresAt - Date.now()) / 60000));
-      console.log(`✓ ECWeb 启动成功 (PID: ${pid})  http://localhost:${port}`);
+      const actionLabel = wasRunning ? '已重启' : '启动成功';
+      console.log(`✓ ECWeb ${actionLabel} (PID: ${pid})  http://localhost:${port}`);
       console.log(`   配对码: ${pair.code}  (约 ${mins} 分钟内有效，已配对过的浏览器无需重新配对)`);
       return true;
     }
