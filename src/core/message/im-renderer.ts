@@ -561,13 +561,14 @@ export class IMRenderer {
 
       case 'tool_use': {
         const desc = summarizeToolInput(event.name, event.input || {});
-        return {
+        const item: any = {
           kind: 'tool_call',
           call_id: event.callId || this.synthCallId(),
           name: event.name,
-          arguments: event.input,
           text: desc,
         };
+        if (event.input !== undefined) item.arguments = event.input;
+        return item;
       }
 
       case 'tool_result':
@@ -604,13 +605,14 @@ export class IMRenderer {
         const text = event.summary
           ? `子任务: ${event.summary}${stats ? ` (${stats})` : ''}`
           : `子任务进行中${stats ? `: ${stats}` : ''}`;
-        return {
+        const item: any = {
           kind: 'progress',
           text,
           state: 'processing',
-          tool_uses: event.toolUses,
-          duration_ms: event.durationMs,
         };
+        if (event.toolUses !== undefined) item.tool_uses = event.toolUses;
+        if (event.durationMs !== undefined) item.duration_ms = event.durationMs;
+        return item;
       }
 
       case 'error': {
@@ -629,21 +631,23 @@ export class IMRenderer {
         }
         if (event.isError) {
           const errText = event.errors?.join('; ') || event.result || '任务失败';
-          return {
+          const item: any = {
             kind: 'summary',
             text: errText,
             is_error: true,
-            subtype: event.subtype,
-            duration_ms: event.durationMs,
           };
+          if (event.subtype !== undefined) item.subtype = event.subtype;
+          if (event.durationMs !== undefined) item.duration_ms = event.durationMs;
+          return item;
         }
         if (event.result) {
-          return {
+          const item: any = {
             kind: 'summary',
             text: event.result,
-            subtype: event.subtype,
-            duration_ms: event.durationMs,
           };
+          if (event.subtype !== undefined) item.subtype = event.subtype;
+          if (event.durationMs !== undefined) item.duration_ms = event.durationMs;
+          return item;
         }
         return null;
       }

@@ -583,6 +583,7 @@ export interface EvolAgentHandle {
   getShowActivities(channelName: string): 'all' | 'none';
   setShowActivities(channelName: string, mode: 'all' | 'none'): void;
   setActiveBaseagent(value: string | undefined): void;
+  setLifecycle(value: AgentLifecycle): void;
   setBaseagentModel(value: string | undefined, baseagentName?: string): void;
   setBaseagentEffort(value: string | undefined, baseagentName?: string): void;
   setChatmodePrivate(value: 'interactive' | 'proactive' | undefined): void;
@@ -660,7 +661,9 @@ export interface AidConnectionState {
 // DefaultsConfig（agents/defaults.json）+ AgentConfig（agents/<aid>/config.json），
 // 由 ConfigStore 加载并算 effective merged 值。
 
-export const CONFIG_SCHEMA_VERSION = 1;
+export const CONFIG_SCHEMA_VERSION = 2;
+
+export type AgentLifecycle = 'created' | 'bootstrapping' | 'active';
 
 export interface BaseagentClaudeConfig {
   apiKey?: string;
@@ -868,6 +871,8 @@ export interface AgentConfig {
   $schema_version: number;
   aid: string;
   enabled?: boolean;
+  /** Agent 生命周期：created → bootstrapping → active。缺失时由 initialized 兼容映射。 */
+  lifecycle?: AgentLifecycle;
   /** 首次连接 AUN 网络后置 true：触发"补全 agent.md + 发欢迎消息"的一次性流程。 */
   initialized?: boolean;
   owners?: string[];
@@ -942,6 +947,7 @@ export interface EffectiveAgentConfig {
   $schema_version: number;
   aid: string;
   enabled?: boolean;
+  lifecycle?: AgentLifecycle;
   initialized?: boolean;
   owners?: string[];
   admins?: string[];

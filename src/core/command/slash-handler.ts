@@ -1524,7 +1524,13 @@ export async function handleSlashCommand(this: any,
 
     // Default: show system health check (non-admin 仅看摘要)
     const checkAgentName = checkOwningAgent?.name ?? 'DefaultAgent';
+    const checkDefaultBaseagent = checkOwningAgent?.baseagent ?? this.parseDefaultBaseagent();
+    const checkBaseagent = activeSession?.baseagent ?? checkDefaultBaseagent;
     const lines: string[] = [`📡 渠道状态 (Agent: ${checkAgentName})：`];
+    lines.push(`  Baseagent: ${checkBaseagent}`);
+    if (checkDefaultBaseagent !== checkBaseagent) {
+      lines.push(`  默认 Baseagent: ${checkDefaultBaseagent}`);
+    }
     // Group by channelType
     const groups = new Map<string, Array<{ name: string; status: string }>>();
     for (const [name] of this.adapters) {
@@ -1669,6 +1675,8 @@ export async function handleSlashCommand(this: any,
         pending: this.messageQueue.getQueueLengthByAgent(currentAgentName),
         processing: this.messageQueue.getProcessingCountByAgent(currentAgentName),
       },
+      baseagent: checkBaseagent,
+      defaultBaseagent: checkDefaultBaseagent,
       uptimeMs,
       lastHour: checkSnap?.lastHour ?? null,
       evolagents,

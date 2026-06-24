@@ -1,5 +1,7 @@
 # Agent 头像上传功能实现方案
 
+> 实现状态（2026-06-24）：后端已完成并通过 `npm run build` 与 `npm test` 验证。前端上传入口和手动 E2E 尚未完成。运行中服务需要 daemon owner 重启后才会加载已构建的 `dist`。
+
 ## 1. 需求概述
 
 ### 1.1 目标
@@ -689,9 +691,9 @@ eventBus.publish({
 
 | 文件 | 更新内容 |
 |-----|---------|
-| `docs/aun-menu-protocol-dev-guide-v2.3.md` | 说明 `agent/update` 支持 `patch.avatar` |
-| `kits/docs/evolclaw/agent.md` | 增加头像上传能力备注（如暴露 CLI 或菜单说明） |
-| `src/core/event-bus.ts` | 新增 `agent:avatar_updated` 事件类型 |
+| `docs/aun-menu-protocol-dev-guide-v2.4.md` | 已说明 `agent/update` 支持 `patch.avatar` |
+| `kits/docs/evolclaw/agent.md` | 已增加头像上传能力备注；该能力通过 menu 协议暴露，不是 CLI 子命令 |
+| `src/core/event-bus.ts` | 已新增 `agent:avatar_updated` 事件类型 |
 | `README.md` | 无需更新，属于管理面内部能力 |
 
 ---
@@ -700,17 +702,17 @@ eventBus.publish({
 
 ### 代码
 
-- [ ] `src/aun/storage/upload.ts` 支持 `contentType` 和 AID 风格 `url`
-- [ ] `src/aun/aid/agentmd.ts` 增加 `avatar` frontmatter helper
-- [ ] `src/utils/avatar-upload.ts`
-- [ ] `src/core/message/command-handler-agent-control.ts` 扩展完成
-- [ ] `src/core/event-bus.ts` 事件类型更新
+- [x] `src/aun/storage/upload.ts` 支持 `contentType` 和 AID 风格 `url`
+- [x] `src/aun/aid/agentmd.ts` 增加 `avatar` frontmatter helper
+- [x] `src/utils/avatar-upload.ts`
+- [x] `src/core/message/command-handler-agent-control.ts` 扩展完成
+- [x] `src/core/event-bus.ts` 事件类型更新
 
 ### 测试
 
-- [ ] 单元测试通过
-- [ ] menu action 权限与错误分支测试通过
-- [ ] `npm run build` 通过
+- [x] 单元测试通过（`npm test`：162 files，1870 passed，25 skipped）
+- [x] menu action 权限与错误分支测试通过
+- [x] `npm run build` 通过
 - [ ] 手动 E2E 验证公开 URL 和 agent.md 新签名
 
 ### 前端

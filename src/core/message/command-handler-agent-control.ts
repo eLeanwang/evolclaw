@@ -10,12 +10,13 @@ import {
 } from '../../cli/agent.js';
 import type { DefaultsConfig } from '../../types.js';
 import { logger } from '../../utils/logger.js';
-import { resolvePaths } from '../../paths.js';
+import { resolvePaths, resolveRoot } from '../../paths.js';
 import path from 'path';
 import { loadAgent, saveAgent } from '../../config-store.js';
 import { CreateStatusWriter, readCreateStatus, type CreatePhase } from './create-status.js';
 import { deriveAgentProjectPath } from '../../utils/project-path.js';
 import type { EventBus } from '../event-bus.js';
+import { uploadAvatar } from '../../utils/avatar-upload.js';
 
 export type ExecResult = { data: any } | { error: string; code: string };
 
@@ -155,6 +156,14 @@ export async function execAgentAction(
   if (action === 'update') {
     const result = await execAgentUpdate(a);
     if (!('error' in result)) {
+      if ((result.data as any)?.avatar) {
+        eventBus?.publish({
+          type: 'agent:avatar_updated',
+          aid: a.aid,
+          avatar: (result.data as any).avatar,
+          timestamp: Date.now(),
+        });
+      }
       eventBus?.publish({ type: 'agent:updated', aid: a.aid, timestamp: Date.now() });
     }
     return result;
@@ -175,11 +184,25 @@ export async function execAgentUpdate(args: Record<string, any> | undefined): Pr
   if (p.aid !== undefined) {
     return { error: 'aid 不可修改（AUN 身份绑定，如需换 AID 请删除后重建）', code: 'INVALID_ARGS' };
   }
+  if (p.avatar !== undefined) {
+    const otherKeys = Object.keys(p).filter(k => k !== 'avatar');
+    if (otherKeys.length > 0) {
+      return { error: 'avatar 不能与其他 patch 字段同时提交，请拆分为两次 update', code: 'INVALID_ARGS' };
+    }
+  }
   if (Array.isArray(p.channels) && p.channels.some((c: any) => c?.type === 'aun')) {
     return { error: 'AUN 渠道不可通过 patch 编辑（由 agent aid 隐式管理）', code: 'INVALID_ARGS' };
   }
   const config = loadAgent(a.aid);
   if (!config) return { error: `Agent "${a.aid}" not found`, code: 'NOT_FOUND' };
+
+  if (p.avatar !== undefined) {
+    const result = await uploadAvatar(a.aid, p.avatar, { aunPath: resolveRoot() });
+    if (!result.ok) {
+      return { error: `头像上传失败: ${result.error}`, code: result.code ?? 'UPLOAD_FAILED' };
+    }
+    return { data: { aid: a.aid, avatar: result.publicUrl, saved: true } };
+  }
 
   let touched = false;
   if (p.baseagents !== undefined) { (config as any).baseagents = p.baseagents; touched = true; }

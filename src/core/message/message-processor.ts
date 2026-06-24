@@ -1031,8 +1031,10 @@ export class MessageProcessor {
 
         // Personal layer
         const owningAgent = this.agentRegistry?.resolveByChannel(channelKey);
-        const persona = (owningAgent as any)?.getPersona?.() || undefined;
-        const working = (owningAgent as any)?.getWorkingMemory?.() || undefined;
+        const lifecycle = owningAgent?.config?.lifecycle ?? 'active';
+        const isBootstrapping = lifecycle === 'bootstrapping';
+        const persona = !isBootstrapping ? ((owningAgent as any)?.getPersona?.() || undefined) : undefined;
+        const working = !isBootstrapping ? ((owningAgent as any)?.getWorkingMemory?.() || undefined) : undefined;
         if (persona) contextParts.push(persona);
         if (working) contextParts.push(`[当前关注]\n${working}`);
 
@@ -1116,6 +1118,8 @@ export class MessageProcessor {
             VENUES_DIR: selfAid ? path.join(resolveRoot(), 'agents', selfAid, 'venues') : undefined,
             selfAid: selfAid || undefined,
             selfName: selfName || undefined,
+            lifecycle,
+            isBootstrapping,
             hasPersona: !!persona,
             hasWorkingMemory: !!working,
             peerId: peerIdRaw || undefined,

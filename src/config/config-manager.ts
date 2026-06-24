@@ -28,6 +28,7 @@ import {
 } from './schema-registry.js';
 import { mergeLayers, expandVars, buildEnvResolver, type EnvScope } from './merge.js';
 import { mergeBehaviorIntoEffective } from './behavior.js';
+import { normalizeAgentLifecycle } from './lifecycle.js';
 import type {
   ProcessConfig,
   DefaultsConfig,
@@ -129,9 +130,12 @@ export function read<T = any>(target: ConfigTarget, sel?: Selector, opts: ReadOp
   if (raw === null) return null;
   // schema 版本迁移（read 时若 $schema_version < current）
   const migrated = migrateIfNeeded(target, raw, file);
-  if (!opts.expand) return migrated;
+  const normalized = target === ConfigTarget.Agent
+    ? normalizeAgentLifecycle(migrated as any) as T
+    : migrated;
+  if (!opts.expand) return normalized;
   const resolver = buildEnvResolver(envScopeFor(sel));
-  return expandVars(migrated, resolver);
+  return expandVars(normalized, resolver);
 }
 
 function groupFor(target: ConfigTarget, sel?: Selector): string {
@@ -229,6 +233,9 @@ function migrateIfNeeded<T>(target: ConfigTarget, raw: T, file: string): T {
   const cur = currentVersion(logical);
   const have = (raw as any)?.$schema_version;
   if (typeof have === 'number' && have < cur) {
+    if (target === ConfigTarget.Agent && have === 1 && cur === 2) {
+      return raw;
+    }
     // P0：迁移函数尚未存在（全 v1）。留 seam：未来在此 require migrations/{logical}.{N}-to-{N+1}.
     console.warn(`[config] ${file}: $schema_version ${have} < current ${cur} for "${logical}" — migration pending (seam)`);
   }
@@ -262,6 +269,7 @@ export function resolveEffective(sel: Selector, opts: ReadOpts = {}): EffectiveA
     $schema_version: config.$schema_version ?? currentVersion('agent-config'),
     aid: config.aid ?? sel.self ?? '',
     enabled: config.enabled,
+    lifecycle: config.lifecycle,
     initialized: config.initialized,
     owners: config.owners,
     admins: config.admins,

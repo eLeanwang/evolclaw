@@ -46,7 +46,7 @@
 }
 ```
 
-字符串由 daemon 侧分词，**尊重单/双引号**，不走 shell。例如 `agent rename bot "My Bot Name"` 会正确切成 4 个 token。
+字符串由 daemon 侧分词，**尊重单/双引号**，不走 shell。例如 `agent set bot.agentid.pub active_baseagent codex` 会正确切成 4 个 token。
 
 **两者同时给时 `argv` 优先。** 能用 `argv` 就别用 `command`——数组无需分词、无歧义。命令行里带空格/特殊字符的参数（路径、名称）尤其应该用 `argv`。
 

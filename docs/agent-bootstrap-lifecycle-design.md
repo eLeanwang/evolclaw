@@ -2,7 +2,7 @@
 
 **版本**: v1.0  
 **日期**: 2026-06-23  
-**状态**: 待实施
+**状态**: 已实施
 
 ---
 
@@ -210,8 +210,8 @@ isBootstrapping: lifecycle === 'bootstrapping',
 
 ### Schema 版本
 
-**当前版本**：`CONFIG_SCHEMA_VERSION = 1`  
-**新版本**：递增 +1
+**旧版本**：`CONFIG_SCHEMA_VERSION = 1`  
+**新版本**：`CONFIG_SCHEMA_VERSION = 2`
 
 **兼容性**：
 - 新版代码读老 schema：按迁移规则映射，无感
@@ -250,9 +250,9 @@ isBootstrapping: lifecycle === 'bootstrapping',
    - "给我贴几个标签吧，比如'客服助手'、'代码审查'等"
 
 3. **Agent 写入**：
-   - agent 在工具调用中执行专用命令更新 `agent.md`，不建议让 agent 直接手写 YAML/frontmatter
-   - 建议新增 `ec agent profile set <aid> --name ... --description ... --tags ...`，内部复用 `agentmdPut()`
-   - 命令负责本地同步更新 `~/.evolclaw/AIDs/<aid>/agent.md` 并发布到 AUN
+   - agent 在工具调用中编辑本地 `~/.evolclaw/AIDs/<aid>/agent.md` 的 YAML frontmatter
+   - 复用既有 `ec aid agentmd put <aid>` 签名并发布到 AUN
+   - 可用 `ec aid agentmd get <aid>` 下载并验签确认发布结果
 
 4. **完成**：
    - Agent 调用 `ec agent ready <aid>`
@@ -261,7 +261,7 @@ isBootstrapping: lifecycle === 'bootstrapping',
 
 ---
 
-## 五、代码改动点（不含具体实现）
+## 五、已实施代码改动点
 
 | 位置 | 改动内容 |
 |------|----------|
@@ -308,4 +308,4 @@ isBootstrapping: lifecycle === 'bootstrapping',
 ---
 
 **文档维护者**：evolai  
-**审批状态**：待 owner 最终确认
+**审批状态**：owner 已确认，已按本方案实施
