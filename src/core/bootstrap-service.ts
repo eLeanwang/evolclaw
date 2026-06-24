@@ -7,7 +7,7 @@ import { loadAgent, saveAgent } from '../config-store.js';
 import { normalizeAgentLifecycle, withLifecycleForWrite } from '../config/lifecycle.js';
 import { renderTemplate } from '../eck/manifest-engine.js';
 import { activeBaseagent } from './model/config-scope.js';
-import { buildEnvelope } from './message/message-processor.js';
+import { buildEnvelope } from './message/message-utils.js';
 import type { EventBus } from './event-bus.js';
 import type { AgentConfig, ChannelAdapter, EvolAgentHandle, EvolAgentRegistryHandle } from '../types.js';
 

@@ -640,7 +640,7 @@ export class CommandHandler {
     return { session };
   }
 
-  setProcessor(processor: MessageProcessor): void {
+  setProcessor(processor: IMessageProcessor): void {
     this.processor = processor;
   }
 

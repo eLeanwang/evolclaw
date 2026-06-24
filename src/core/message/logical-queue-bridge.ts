@@ -45,6 +45,11 @@ export class LogicalQueueBridge {
     this.queues.set(queueKey, queue);
   }
 
+  /** 获取指定会话的逻辑队列（用于同步） */
+  getQueue(queueKey: string): MessageQueueInterface | undefined {
+    return this.queues.get(queueKey);
+  }
+
   /** 入队：记录 messageId 到逻辑队列的顺序索引 */
   enqueue(queueKey: string, message: Message): void {
     const queue = this.getOrCreate(queueKey);
@@ -61,8 +66,16 @@ export class LogicalQueueBridge {
     const queue = this.queues.get(queueKey);
     if (!queue || physical.length <= 1) return false;
 
-    // 逻辑队列给出下一个 messageId
-    const next = queue.dequeueSync();
+    // 逻辑队列给出下一个 messageId（使用 peek 避免提前移除）
+    let next: InboundMessage | undefined;
+    if (queue.size() > 0) {
+      // 直接访问队首元素（FIFOQueue 的 peek 是同步的）
+      next = (queue as any).queue?.[0];
+      if (!next) {
+        // 兜底：如果没有内部 queue 数组，使用 dequeueSync（旧行为）
+        next = queue.dequeueSync();
+      }
+    }
     if (!next?.messageId) return false;
 
     // 在物理数组中定位该消息，前移到队首
@@ -72,6 +85,22 @@ export class LogicalQueueBridge {
     const [picked] = physical.splice(idx, 1);
     physical.unshift(picked);
     return true;
+  }
+
+  /** 移除逻辑队列中已处理的消息（供 dequeueGreedy 合并后调用） */
+  removeProcessed(queueKey: string, messageIds: string[]): void {
+    const queue = this.queues.get(queueKey);
+    if (!queue) return;
+
+    for (const msgId of messageIds) {
+      // 从队首依次匹配并移除
+      if (queue.size() > 0) {
+        const head = (queue as any).queue?.[0];
+        if (head?.messageId === msgId) {
+          queue.dequeueSync();
+        }
+      }
+    }
   }
 
   /** 清空指定会话的逻辑队列 */
