@@ -12,6 +12,7 @@ import fs from 'fs';
 import path from 'path';
 import { resolvePaths } from '../paths.js';
 import { loadAgent, saveAgent } from '../config-store.js';
+import { withLifecycleForWrite } from '../config/lifecycle.js';
 import { logger } from './logger.js';
 
 // ============================================================================
@@ -170,9 +171,8 @@ function getChannelSpecificNote(channelType: string): string {
 export function markAgentInitialized(agentAid: string): void {
   const agentConfig = loadAgent(agentAid);
   if (agentConfig) {
-    agentConfig.initialized = true;
-    saveAgent(agentConfig);
-    logger.info(`[WelcomeManager] Marked ${agentAid} as initialized`);
+    saveAgent(withLifecycleForWrite(agentConfig, 'active'));
+    logger.info(`[WelcomeManager] Marked ${agentAid} lifecycle=active`);
   }
 }
 
@@ -204,7 +204,7 @@ export class FirstInteractionWelcomeManager {
     // 懒加载并缓存 initialized 状态（避免每条消息都读取磁盘）
     if (this.initializedCache === null) {
       const agentConfig = loadAgent(this.agentAid);
-      this.initializedCache = agentConfig?.initialized === true;
+      this.initializedCache = agentConfig?.lifecycle === 'active';
     }
 
     // Agent 已初始化 → 所有用户都不需要欢迎消息
@@ -314,18 +314,10 @@ export async function sendWelcomeIfNeeded(
   sendMessage: (channelId: string, text: string) => Promise<void>,
   channelName: string
 ): Promise<boolean> {
-  if (!welcomeManager?.shouldGreet(userId)) {
-    return false;
-  }
-
-  const welcomeText = welcomeManager.generateWelcomeText();
-  try {
-    await sendMessage(channelId, welcomeText);
-    welcomeManager.markGreeted(userId);
-    logger.info(`[${channelName}] Welcome message sent to user: ${userId}`);
-    return true;
-  } catch (err) {
-    logger.warn(`[${channelName}] Failed to send welcome message:`, err);
-    return false;
-  }
+  void welcomeManager;
+  void userId;
+  void channelId;
+  void sendMessage;
+  void channelName;
+  return false;
 }

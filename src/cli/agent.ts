@@ -7,6 +7,7 @@ import { ConfigTarget, write as cfgWrite, ensureFile as cfgEnsure, read as cfgRe
 import { ipcQuery } from '../ipc.js';
 import { CONFIG_SCHEMA_VERSION } from '../types.js';
 import type { AgentConfig, ChannelInstance } from '../types.js';
+import { withLifecycleForWrite } from '../config/lifecycle.js';
 import { isValidChannelName } from '../core/channel-loader.js';
 import { commandExists } from '../utils/cross-platform.js';
 import { getCodexAppServerAvailability, isCodexAppServerAvailable } from '../agents/codex-runner.js';
@@ -120,11 +121,10 @@ export interface AgentDeleteResult {
   stopped: boolean;
 }
 
-export interface AgentRenameResult {
+export interface AgentReadyResult {
   ok: true;
   aid: string;
-  name: string;
-  uploaded: boolean;
+  reloaded: boolean;
 }
 
 export interface AgentError {
@@ -542,7 +542,7 @@ export async function agentCreateInteractive(opts: AgentCreateInteractiveOpts = 
       $schema_version: CONFIG_SCHEMA_VERSION,
       aid,
       enabled: true,
-      initialized: false,
+      lifecycle: 'created',
       owners: owner ? [owner] : [],
       channels: [],
       projects: { defaultPath: projectPath },
@@ -768,12 +768,12 @@ export async function agentCreateNonInteractive(opts: AgentCreateNonInteractiveO
     return { ok: false, error };
   }
 
-  // Force 模式下若 agent 已存在且已 initialized，保留该状态（避免重复发欢迎）
-  let preservedInitialized = false;
+  // Force 模式下若 agent 已存在，保留生命周期（避免重复 bootstrap/welcome）。
+  let preservedLifecycle: AgentConfig['lifecycle'] = 'created';
   if (configExists) {
     try {
       const existing = loadAgent(opts.aid);
-      if (existing?.initialized === true) preservedInitialized = true;
+      if (existing?.lifecycle) preservedLifecycle = existing.lifecycle;
     } catch { /* ignore */ }
   }
 
@@ -781,7 +781,7 @@ export async function agentCreateNonInteractive(opts: AgentCreateNonInteractiveO
     $schema_version: CONFIG_SCHEMA_VERSION,
     aid: opts.aid,
     enabled: true,
-    initialized: preservedInitialized,
+    lifecycle: preservedLifecycle,
     owners: opts.owner ? [opts.owner] : [],
     channels: [],
     projects: { defaultPath: opts.project },
@@ -1190,39 +1190,20 @@ export async function agentDelete(aid: string, purge: boolean = false): Promise<
 
   return { ok: true, aid, purged: purge, stopped };
 }
-// ==================== agentRename ====================
+// ==================== agentReady ====================
 
-export async function agentRename(aid: string, newName: string): Promise<AgentResult<AgentRenameResult>> {
-  const aunPath = process.env.AUN_HOME || defaultAunPath();
-  const agentMdFilePath = getAgentMdPathFromPaths(aid);
+export async function agentReady(aid: string): Promise<AgentResult<AgentReadyResult>> {
+  const p = resolvePaths();
+  const config = loadAgent(aid);
+  if (!config) return { ok: false, error: `Agent "${aid}" not found` };
 
-  if (!fs.existsSync(agentMdFilePath)) {
-    return { ok: false, error: `agent.md not found for ${aid}. Run: evolclaw aid agentmd put ${aid}` };
-  }
+  saveAgent(withLifecycleForWrite(config, 'active') as AgentConfig);
 
-  let content = fs.readFileSync(agentMdFilePath, 'utf-8');
-  const fmMatch = content.match(/^(---\n)([\s\S]*?)(\n---)/);
-  if (!fmMatch) {
-    return { ok: false, error: `agent.md has no valid frontmatter for ${aid}` };
-  }
-
-  const fm = fmMatch[2];
-  const nameRegex = /^name:\s*["']?.*?["']?\s*$/m;
-  let newFm: string;
-  if (nameRegex.test(fm)) {
-    newFm = fm.replace(nameRegex, `name: "${newName}"`);
-  } else {
-    newFm = `name: "${newName}"\n${fm}`;
-  }
-
-  content = fmMatch[1] + newFm + fmMatch[3] + content.slice(fmMatch[0].length);
-  // agentmdPut 会写本地文件并 publishAgentMd
-  let uploaded = false;
+  let reloaded = false;
   try {
-    const { agentmdPut } = await import('../aun/aid/index.js');
-    await agentmdPut(content, { aid, aunPath });
-    uploaded = true;
-  } catch {}
+    const result = await ipcQuery<any>(p.socket, { type: 'evolagent.bootstrapComplete', aid }, 30_000);
+    reloaded = !!result?.ok;
+  } catch { /* daemon not running */ }
 
-  return { ok: true, aid, name: newName, uploaded };
+  return { ok: true, aid, reloaded };
 }

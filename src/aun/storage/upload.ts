@@ -9,27 +9,48 @@ export interface UploadResult {
   error?: string;
 }
 
-export async function storageUpload(aid: string, localFile: string, remotePath: string, opts?: { isPublic?: boolean; aunPath?: string }): Promise<UploadResult> {
+function rpcErrorToString(error: unknown): string {
+  if (!error) return 'unknown error';
+  if (typeof error === 'string') return error;
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
+}
+
+function pickUrl(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value : undefined;
+}
+
+export async function storageUpload(
+  aid: string,
+  localFile: string,
+  remotePath: string,
+  opts?: { isPublic?: boolean; aunPath?: string; contentType?: string },
+): Promise<UploadResult> {
   const fileBuffer = fs.readFileSync(localFile);
-  const contentType = 'application/octet-stream';
+  const contentType = opts?.contentType ?? 'application/octet-stream';
   const sha256 = crypto.createHash('sha256').update(fileBuffer).digest('hex');
 
   const createResult = await rpcCall(aid, 'storage.create_upload_session', {
     object_key: remotePath,
     content_type: contentType,
-    content_length: fileBuffer.length,
-    is_private: !(opts?.isPublic),
+    size_bytes: fileBuffer.length,
   }, { aunPath: opts?.aunPath });
 
   if (!createResult.ok) {
-    return { ok: false, objectKey: remotePath, error: JSON.stringify(createResult.error) };
+    return { ok: false, objectKey: remotePath, error: rpcErrorToString(createResult.error) };
   }
 
   const uploadUrl = createResult.result.upload_url;
+  if (!uploadUrl) {
+    return { ok: false, objectKey: remotePath, error: 'storage.create_upload_session did not return upload_url' };
+  }
   const putResp = await fetch(uploadUrl, {
     method: 'PUT',
     headers: { 'Content-Type': contentType },
-    body: new Blob([fileBuffer]),
+    body: new Blob([new Uint8Array(fileBuffer)], { type: contentType }),
     redirect: 'follow',
   });
   if (!putResp.ok) {
@@ -39,23 +60,27 @@ export async function storageUpload(aid: string, localFile: string, remotePath: 
   const completeResult = await rpcCall(aid, 'storage.complete_upload', {
     object_key: remotePath,
     sha256,
+    content_type: contentType,
+    size_bytes: fileBuffer.length,
     is_private: !(opts?.isPublic),
   }, { aunPath: opts?.aunPath });
 
   if (!completeResult.ok) {
-    return { ok: false, objectKey: remotePath, error: JSON.stringify(completeResult.error) };
+    return { ok: false, objectKey: remotePath, error: rpcErrorToString(completeResult.error) };
   }
 
-  // 公开上传时获取可访问的 URL
-  let publicUrl: string | undefined;
+  let publicUrl = pickUrl(completeResult.result?.url);
   if (opts?.isPublic) {
-    const ticketResult = await rpcCall(aid, 'storage.create_download_ticket', {
-      object_key: remotePath,
-      expire_in_seconds: 86400 * 30, // 30天
-    }, { aunPath: opts?.aunPath });
-    if (ticketResult.ok) {
-      publicUrl = `https://${aid}/storage/${remotePath}`;
+    if (!publicUrl) {
+      const ticketResult = await rpcCall(aid, 'storage.create_download_ticket', {
+        object_key: remotePath,
+        expire_in_seconds: 86400 * 30, // 30天
+      }, { aunPath: opts?.aunPath });
+      if (ticketResult.ok) {
+        publicUrl = pickUrl(ticketResult.result?.url) ?? pickUrl(ticketResult.result?.download_url);
+      }
     }
+    publicUrl ??= `https://${aid}/${remotePath}`;
   }
 
   return { ok: true, objectKey: remotePath, publicUrl };

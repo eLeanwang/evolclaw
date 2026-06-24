@@ -10,6 +10,7 @@ import type { IMessageProcessor } from './message-processor-interface.js';
 import type { MessageQueue } from './message-queue.js';
 import type { CommandHandler as CmdHandler } from '../command/command-handler.js';
 import type { EventBus } from '../event-bus.js';
+import type { BootstrapService } from '../bootstrap-service.js';
 import type { Message, InboundMessage, ChannelAdapter, ReplyContext, EvolAgentRegistryHandle, OutboundPayload, MenuListRequest, MenuQueryRequest, MenuOptionsRequest, MenuUpdateRequest, MenuActionRequest, MenuResponse } from '../../types.js';
 
 /**
@@ -23,6 +24,7 @@ export class MessageBridge {
   private debouncers = new Map<string, StreamDebouncer>();
   private defaultDebounce: number;
   private agentRegistry?: EvolAgentRegistryHandle;
+  private bootstrapService?: BootstrapService;
 
   constructor(
     private defaultProjectPath: string,
@@ -39,6 +41,10 @@ export class MessageBridge {
   /** Inject EvolAgentRegistry so owner lookups/writes route to agent.json for agent-owned channels. */
   setAgentRegistry(registry: EvolAgentRegistryHandle): void {
     this.agentRegistry = registry;
+  }
+
+  setBootstrapService(service: BootstrapService): void {
+    this.bootstrapService = service;
   }
 
   private getDebouncer(channelName: string, channelType?: string): StreamDebouncer {
@@ -109,6 +115,20 @@ export class MessageBridge {
 
         // 1. owner 绑定（按实例名绑定）
         if (msg.peerId) await this.autoBindOwner(channelName, msg.peerId);
+        const isInboundOwner = msg.peerId && typeof this.agentRegistry?.isOwner === 'function'
+          ? this.agentRegistry.isOwner(channelName, msg.peerId)
+          : false;
+        if (adapter && msg.peerId && isInboundOwner) {
+          await this.bootstrapService?.tryStartBootstrap({
+            adapter,
+            channelKey: adapter.channelKey || channelName,
+            channelType: msg.channelType || effectiveChannelType,
+            channelId: msg.channelId,
+            recipientId: msg.peerId,
+            recipientName: msg.peerName,
+            source: 'inbound',
+          });
+        }
 
         // 2. 命令快速路径（去除引用前缀后检查，兼容话题中引用上文的情况）
         const contentForCmd = content.replace(/^(>[^\n]*\n)+\n?/, '').trim();

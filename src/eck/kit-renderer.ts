@@ -153,6 +153,8 @@ const PARAM_DESCRIPTIONS: Record<string, string> = {
   VENUES_DIR: '当前 agent 环境数据目录',
   selfAid: '当前 agent 的 AID',
   selfName: '当前 agent 的显示名',
+  lifecycle: '当前 agent 生命周期（created/bootstrapping/active）',
+  isBootstrapping: '当前 agent 是否处于 bootstrap 首次设定阶段',
   hasPersona: '是否有 persona 内容',
   hasWorkingMemory: '是否有 working memory',
   peerId: '对端在该渠道的原生 ID',

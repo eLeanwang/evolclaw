@@ -36,7 +36,6 @@ evolclaw agent enable <aid>           启用 agent
 evolclaw agent disable <aid>          停用 agent
 evolclaw agent get <aid> <key>        读取单个配置字段（支持点路径）
 evolclaw agent set <aid> <key> <val>  修改单个配置字段（支持点路径）+ 热重载
-evolclaw agent rename <aid> <name>    修改 agent 名称（更新 agent.md 并重新上传）
 evolclaw agent reload                 全量 resync（扫磁盘，新增上线、删除下线、修改热更新）
 evolclaw agent reload <name>          热重载指定 agent 配置
 evolclaw agent delete <aid>           删除 agent 配置（停止运行中的 agent）

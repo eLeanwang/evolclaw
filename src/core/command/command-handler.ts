@@ -617,30 +617,7 @@ export class CommandHandler {
     return { matched: true, result: '✓ 已回答' };
   }
 
-  /** 获取活跃会话，无会话时自动创建（话题除外） */
-  private async ensureSession(channel: string, channelId: string, threadId?: string, chatType?: string, selfAID?: string): Promise<{ session: Session } | { error: string }> {
-    if (threadId) {
-      // 话题会话：仅查询，不创建
-      const session = await this.sessionManager.getThreadSession(channel, channelId, threadId);
-      if (!session) {
-        return { error: '❌ 话题中尚未创建会话\n发送消息后自动创建' };
-      }
-      return { session };
-    }
-    const ct: 'private' | 'group' | undefined = chatType === 'group' ? 'group' : chatType === 'private' ? 'private' : undefined;
-    const channelType = this.resolveChannelType(channel);
-    const sid = selfAID ?? this.resolveSelfAID(channel);
-    const session = await this.sessionManager.getActiveSession(channel, channelId)
-      ?? await this.sessionManager.getOrCreateSession(channel, channelId, this.getEffectiveDefaultPath(channel), undefined, undefined, undefined, undefined, ct, undefined, sid, channelType);
-    // 如果 session 已存在但 chatType 跟传入的不一致，更新
-    if (ct && session.chatType !== ct) {
-      await this.sessionManager.updateSession(session.id, { chatType: ct });
-      session.chatType = ct;
-    }
-    return { session };
-  }
-
-  setProcessor(processor: IMessageProcessor): void {
+  setProcessor(processor: MessageProcessor): void {
     this.processor = processor;
   }
 
@@ -1612,7 +1589,7 @@ export class CommandHandler {
 
       // 无参数时返回用法
       if (!arg) {
-        return { ok: true, result: `用法:\n  /agent list              列出所有 agent\n  /agent show [name]       查看 agent 详情\n  /agent enable <name>     启用 agent\n  /agent disable <name>    停用 agent\n  /agent get <name> <key>  读取配置字段\n  /agent set <name> <key> <val>  修改配置字段\n  /agent rename <name> <newname> 修改名称\n  /agent reload [name]     热重载配置` };
+        return { ok: true, result: `用法:\n  /agent list              列出所有 agent\n  /agent show [name]       查看 agent 详情\n  /agent enable <name>     启用 agent\n  /agent disable <name>    停用 agent\n  /agent get <name> <key>  读取配置字段\n  /agent set <name> <key> <val>  修改配置字段\n  /agent reload [name]     热重载配置` };
       }
 
       const parts = arg.split(/\s+/);

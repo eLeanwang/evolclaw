@@ -27,9 +27,6 @@ ec agent disable <aid>
 ec agent get <aid> <key>
 ec agent set <aid> <key> <val>
 
-# 改 agent 名称（更新 agent.md 并重新上传）
-ec agent rename <aid> "<name>"
-
 # 热重载配置（无参数 = 全量 resync：扫磁盘，新增上线/删除下线/修改热更新）
 ec agent reload [aid]
 
@@ -42,6 +39,29 @@ ec agent delete <aid> [--purge]
 `ec agent new <aid> --non-interactive` 时：
 - 必填：`--project <absolute path>`
 - 可选：`--baseagent`（默认 PATH 中第一个可用项）、`--owner`、`--name`、`--description`、`--force`（覆盖已有 config.json）
+
+## 头像更新
+
+头像上传通过 menu 协议暴露，不是 `ec agent` CLI 子命令：
+
+```json
+{
+  "type": "menu.action",
+  "name": "agent",
+  "action": "update",
+  "args": {
+    "aid": "mybot.agentid.pub",
+    "patch": {
+      "avatar": "data:image/png;base64,..."
+    }
+  }
+}
+```
+
+约束：
+- `patch.avatar` 必须单独提交，不能和 `chatmode`、`owners`、`channels` 等 config patch 混合。
+- 支持 PNG/JPEG/WebP；后端按解码后图片大小硬限制 500KB。
+- 成功后头像上传到该 agent 自己的 AUN storage，`agent.md` frontmatter 写入 AID 风格 URL，并重新签名发布。
 
 ## 通用约定
 

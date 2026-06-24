@@ -117,6 +117,10 @@ export async function handleSlashCommand(this: any,
   const isOwner = identity.role === 'owner';
   const isAdmin = identity.role === 'owner' || identity.role === 'admin';
   const activeChatType = activeSession?.chatType || 'private';
+  const getExistingSessionForCommand = async (): Promise<Session | undefined> => {
+    if (threadId) return await this.sessionManager.getThreadSession(channel, channelId, threadId);
+    return activeSession;
+  };
 
   const threadGuard = guardThreadCommand(normalizedContent, threadId);
   if (threadGuard) return threadGuard;
@@ -318,10 +322,9 @@ export async function handleSlashCommand(this: any,
   if (normalizedContent.startsWith('/perm')) {
     const args = normalizedContent.slice(5).trim();
 
-    // 先获取正确的 session 和 agent（话题可能用不同 agent）
-    const permResult = await this.ensureSession(channel, channelId, threadId, chatType);
-    if ('error' in permResult) return { kind: 'command.result' as const, text: permResult.error };
-    const { session: permSession } = permResult;
+    // 权限审批和关系级模式依附于现有会话；查询/审批不应隐式创建空会话。
+    const permSession = await getExistingSessionForCommand();
+    if (!permSession) return { kind: 'command.result' as const, text: '当前没有活跃会话' };
     const permAgent = this.getAgent(channel, permSession.baseagent);
 
     // 关系级 scope 选择器：用于读/写关系级 permissionMode
@@ -440,27 +443,25 @@ export async function handleSlashCommand(this: any,
   // /ask 命令：回答 AskUserQuestion / ExitPlanMode 的交互式问题
   if (normalizedContent.startsWith('/ask')) {
     const args = normalizedContent.slice(4).trim();
+    const askSession = await getExistingSessionForCommand();
     if (!args) {
-      const askResult = await this.ensureSession(channel, channelId, threadId, chatType);
-      if ('error' in askResult) return { kind: 'command.result' as const, text: askResult.error };
-      const pendingIds = this.interactionRouter?.getPending(askResult.session.id) || [];
+      if (!askSession) return { kind: 'command.result' as const, text: '当前没有待回答的问题' };
+      const pendingIds = this.interactionRouter?.getPending(askSession.id) || [];
       if (pendingIds.length === 0) return { kind: 'command.result' as const, text: '当前没有待回答的问题' };
       return { kind: 'command.result' as const, text: `当前有 ${pendingIds.length} 个待回答问题，请回复 /ask <选项>` };
     }
 
-    const askResult = await this.ensureSession(channel, channelId, threadId, chatType);
-    if ('error' in askResult) return { kind: 'command.result' as const, text: askResult.error };
+    if (!askSession) return { kind: 'command.error' as const, text: '❌ 当前没有待回答的问题' };
 
-    const fb = await this.handleInteractionFallback('ask', args, askResult.session.id, userId);
+    const fb = await this.handleInteractionFallback('ask', args, askSession.id, userId);
     if (fb.matched) return { kind: 'command.result' as const, text: fb.result ?? '✓ 已回答' };
     return { kind: 'command.error' as const, text: '❌ 当前没有待回答的问题' };
   }
 
   // /resume 命令：返回当前项目的 Claude 会话记录（JSON）
   if (normalizedContent === '/resume' || normalizedContent.startsWith('/resume ')) {
-    const resumeResult = await this.ensureSession(channel, channelId, threadId, chatType);
-    if ('error' in resumeResult) return { kind: 'command.result' as const, text: resumeResult.error };
-    const { session: resumeSession } = resumeResult;
+    const resumeSession = await getExistingSessionForCommand();
+    if (!resumeSession) return { kind: 'command.result' as const, text: '当前没有活跃会话' };
 
     try {
       const { encodePath } = await import('../../utils/cross-platform.js');
@@ -643,10 +644,9 @@ export async function handleSlashCommand(this: any,
 
   // /setmodel 命令：返回 JSON 格式的模型列表（供程序解析）
   if (normalizedContent === '/setmodel' || normalizedContent.startsWith('/setmodel ')) {
-    const setmodelResult = await this.ensureSession(channel, channelId, threadId, chatType);
-    if ('error' in setmodelResult) return { kind: 'command.result' as const, text: setmodelResult.error };
-    const { session: setmodelSession } = setmodelResult;
-    const setmodelAgent = this.getAgent(channel, setmodelSession.baseagent);
+    const setmodelSession = await getExistingSessionForCommand();
+    const fallbackBaseagent = setmodelSession?.baseagent || this.agentRegistry?.resolveByChannel(channel)?.baseagent || this.parseDefaultBaseagent();
+    const setmodelAgent = this.getAgent(channel, fallbackBaseagent);
 
     const setmodelState = resolveCommandModelResolution({
       agent: setmodelAgent,
@@ -685,24 +685,20 @@ export async function handleSlashCommand(this: any,
     // do not mask authorization failures.
     if (args && !isAdmin) return { kind: 'command.error' as const, text: '❌ 无权限：切换模型仅限管理员使用' };
 
-    // 获取当前会话（话题会话可能绑定不同 agent）
-    const modelResult = await this.ensureSession(channel, channelId, threadId, chatType);
-    if ('error' in modelResult) return { kind: 'command.result' as const, text: modelResult.error };
-    const { session: modelSession } = modelResult;
-    const modelAgent = this.getAgent(channel, modelSession.baseagent);
-    const modelState = resolveCommandModelResolution({
-      agent: modelAgent,
-      session: modelSession,
-      selfAid: selfAID ?? this.resolveSelfAID(channel),
-      channelType: this.resolveChannelType(channel),
-      channelId,
-      userId,
-      role: identity.role,
-    });
-
-    const models = hasModelSwitcher(modelAgent) ? await modelAgent.listModels() : [];
-
     if (!args) {
+      const modelSession = await getExistingSessionForCommand();
+      const fallbackBaseagent = modelSession?.baseagent || this.agentRegistry?.resolveByChannel(channel)?.baseagent || this.parseDefaultBaseagent();
+      const modelAgent = this.getAgent(channel, fallbackBaseagent);
+      const modelState = resolveCommandModelResolution({
+        agent: modelAgent,
+        session: modelSession,
+        selfAid: selfAID ?? this.resolveSelfAID(channel),
+        channelType: this.resolveChannelType(channel),
+        channelId,
+        userId,
+        role: identity.role,
+      });
+      const models = hasModelSwitcher(modelAgent) ? await modelAgent.listModels() : [];
       const currentModel = hasModelSwitcher(modelAgent) ? (modelState.model || modelAgent.getModel()) : modelAgent.name;
       const efforts = getAvailableEfforts(modelAgent, currentModel);
       const currentEffort = modelState.effort || 'auto';
@@ -713,7 +709,7 @@ export async function handleSlashCommand(this: any,
           type: 'interaction',
           id: `model-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`,
           channelId,
-          sessionId: modelSession.id,
+          sessionId: modelSession?.id || `model-${Date.now()}`,
           initiatorId: userId,
           kind: {
             kind: 'command-card',
@@ -730,7 +726,7 @@ export async function handleSlashCommand(this: any,
           },
         };
 
-        const replyCtx = this.getReplyContext(modelSession);
+        const replyCtx = modelSession ? this.getReplyContext(modelSession) : undefined;
         const cardResult = await this.sendCommandCard({ channel, channelId, interaction, replyCtx, canWrite: isAdmin });
         if (cardResult === null) return null;
         return { kind: 'command.result' as const, text: cardResult };
@@ -746,6 +742,22 @@ export async function handleSlashCommand(this: any,
       }
       return { kind: 'command.result' as const, text: `当前模型: ${modelDisplayLabel(modelAgent, currentModel)}${effortHint}` };
     }
+
+    // 切换模型写入 agent/baseagent 配置；没有活跃会话时也不应创建空会话。
+    const modelSession = await getExistingSessionForCommand();
+    const fallbackBaseagent = modelSession?.baseagent || this.agentRegistry?.resolveByChannel(channel)?.baseagent || this.parseDefaultBaseagent();
+    const modelAgent = this.getAgent(channel, fallbackBaseagent);
+    const modelState = resolveCommandModelResolution({
+      agent: modelAgent,
+      session: modelSession,
+      selfAid: selfAID ?? this.resolveSelfAID(channel),
+      channelType: this.resolveChannelType(channel),
+      channelId,
+      userId,
+      role: identity.role,
+    });
+
+    const models = hasModelSwitcher(modelAgent) ? await modelAgent.listModels() : [];
 
     const parts = args.split(/\s+/);
     let newModel: string | undefined;
@@ -803,9 +815,9 @@ export async function handleSlashCommand(this: any,
       modelAgent.setModel?.(newModel);
       this.eventBus.publish({
         type: 'runner:model-changed',
-        sessionId: modelSession.id,
+        sessionId: modelSession?.id,
         agentName: this.agentRegistry?.resolveByChannel(channel)?.name,
-        baseagent: modelSession.baseagent,
+        baseagent: modelSession?.baseagent || modelAgent.name,
         model: newModel,
         effort: newEffort,
         timestamp: Date.now()
@@ -818,9 +830,9 @@ export async function handleSlashCommand(this: any,
       if (!newModel) {
         this.eventBus.publish({
           type: 'runner:model-changed',
-          sessionId: modelSession.id,
+          sessionId: modelSession?.id,
           agentName: this.agentRegistry?.resolveByChannel(channel)?.name,
-          baseagent: modelSession.baseagent,
+          baseagent: modelSession?.baseagent || modelAgent.name,
           effort: newEffort,
           timestamp: Date.now(),
         });
@@ -846,10 +858,67 @@ export async function handleSlashCommand(this: any,
   if (normalizedContent.startsWith('/effort')) {
     const args = normalizedContent.slice(7).trim();
 
-    const effortResult = await this.ensureSession(channel, channelId, threadId, chatType);
-    if ('error' in effortResult) return { kind: 'command.result' as const, text: effortResult.error };
-    const { session: effortSession } = effortResult;
-    const effortAgent = this.getAgent(channel, effortSession.baseagent);
+    if (!args) {
+      const effortSession = await getExistingSessionForCommand();
+      const fallbackBaseagent = effortSession?.baseagent || this.agentRegistry?.resolveByChannel(channel)?.baseagent || this.parseDefaultBaseagent();
+      const effortAgent = this.getAgent(channel, fallbackBaseagent);
+      const effortState = resolveCommandModelResolution({
+        agent: effortAgent,
+        session: effortSession,
+        selfAid: selfAID ?? this.resolveSelfAID(channel),
+        channelType: this.resolveChannelType(channel),
+        channelId,
+        userId,
+        role: identity.role,
+      });
+
+      const currentModel = hasModelSwitcher(effortAgent) ? (effortState.model || effortAgent.getModel()) : effortAgent.name;
+      const efforts = getAvailableEfforts(effortAgent, currentModel);
+      const currentEffort = effortState.effort || 'auto';
+
+      if (efforts.length === 0) {
+        return { kind: 'command.error' as const, text: '⚠️ 当前模型不支持推理强度设置' };
+      }
+
+      // /effort（无参数）：显示当前推理强度 + 发送 CommandCard 卡片
+      if (this.interactionRouter) {
+        const allItems = [...efforts, 'auto'];
+        const interaction: InteractionRequest = {
+          type: 'interaction',
+          id: `effort-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`,
+          channelId,
+          sessionId: effortSession?.id || `effort-${Date.now()}`,
+          initiatorId: userId,
+          kind: {
+            kind: 'command-card',
+            title: '⚡ 推理强度',
+            buttons: allItems.map(e => ({
+              label: e === currentEffort ? `✓ ${e}` : e,
+              command: `/effort ${e}`,
+              style: (e === currentEffort ? 'primary' : 'default') as 'primary' | 'default',
+              disabled: e === currentEffort,
+            })),
+          },
+        };
+
+        const replyCtx = effortSession ? this.getReplyContext(effortSession) : undefined;
+        const cardResult = await this.sendCommandCard({ channel, channelId, interaction, replyCtx, canWrite: isAdmin });
+        if (cardResult === null) return null;
+        return { kind: 'command.result' as const, text: cardResult };
+      }
+
+      // 降级：文本
+      const effortDisplay = currentEffort === 'auto' ? 'auto (SDK默认)' : currentEffort;
+      const effortOptions = [...efforts, 'auto'].join(' / ');
+      if (isAdmin) {
+        return { kind: 'command.result' as const, text: `推理强度: ${effortDisplay}  可选: ${effortOptions}  用法: /effort <level>` };
+      }
+      return { kind: 'command.result' as const, text: `推理强度: ${effortDisplay}` };
+    }
+
+    const effortSession = await getExistingSessionForCommand();
+    const fallbackBaseagent = effortSession?.baseagent || this.agentRegistry?.resolveByChannel(channel)?.baseagent || this.parseDefaultBaseagent();
+    const effortAgent = this.getAgent(channel, fallbackBaseagent);
     const effortState = resolveCommandModelResolution({
       agent: effortAgent,
       session: effortSession,
@@ -868,43 +937,6 @@ export async function handleSlashCommand(this: any,
       return { kind: 'command.error' as const, text: '⚠️ 当前模型不支持推理强度设置' };
     }
 
-    if (!args) {
-      // /effort（无参数）：显示当前推理强度 + 发送 CommandCard 卡片
-      if (this.interactionRouter) {
-        const allItems = [...efforts, 'auto'];
-        const interaction: InteractionRequest = {
-          type: 'interaction',
-          id: `effort-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`,
-          channelId,
-          sessionId: effortSession.id,
-          initiatorId: userId,
-          kind: {
-            kind: 'command-card',
-            title: '⚡ 推理强度',
-            buttons: allItems.map(e => ({
-              label: e === currentEffort ? `✓ ${e}` : e,
-              command: `/effort ${e}`,
-              style: (e === currentEffort ? 'primary' : 'default') as 'primary' | 'default',
-              disabled: e === currentEffort,
-            })),
-          },
-        };
-
-        const replyCtx = this.getReplyContext(effortSession);
-        const cardResult = await this.sendCommandCard({ channel, channelId, interaction, replyCtx, canWrite: isAdmin });
-        if (cardResult === null) return null;
-        return { kind: 'command.result' as const, text: cardResult };
-      }
-
-      // 降级：文本
-      const effortDisplay = currentEffort === 'auto' ? 'auto (SDK默认)' : currentEffort;
-      const effortOptions = [...efforts, 'auto'].join(' / ');
-      if (isAdmin) {
-        return { kind: 'command.result' as const, text: `推理强度: ${effortDisplay}  可选: ${effortOptions}  用法: /effort <level>` };
-      }
-      return { kind: 'command.result' as const, text: `推理强度: ${effortDisplay}` };
-    }
-
     // 带参（切换）需 admin+；无参查询已在上方返回
     if (!isAdmin) return { kind: 'command.error' as const, text: '❌ 无权限：切换推理强度仅限管理员使用' };
 
@@ -915,9 +947,9 @@ export async function handleSlashCommand(this: any,
       if (err) return { kind: 'command.result' as const, text: `${err}\n已更新运行时配置，但未持久化` };
       this.eventBus.publish({
         type: 'runner:model-changed',
-        sessionId: effortSession.id,
+        sessionId: effortSession?.id,
         agentName: this.agentRegistry?.resolveByChannel(channel)?.name,
-        baseagent: effortSession.baseagent,
+        baseagent: effortSession?.baseagent || effortAgent.name,
         effort: 'auto',
         timestamp: Date.now(),
       });
@@ -940,9 +972,9 @@ export async function handleSlashCommand(this: any,
     if (err) return { kind: 'command.result' as const, text: `${err}\n已更新运行时配置，但未持久化` };
     this.eventBus.publish({
       type: 'runner:model-changed',
-      sessionId: effortSession.id,
+      sessionId: effortSession?.id,
       agentName: this.agentRegistry?.resolveByChannel(channel)?.name,
-      baseagent: effortSession.baseagent,
+      baseagent: effortSession?.baseagent || effortAgent.name,
       effort: newEffort,
       timestamp: Date.now(),
     });
@@ -1088,57 +1120,56 @@ export async function handleSlashCommand(this: any,
   // - 查看：所有人可用
   // - 设置：单聊任何角色可设置；群聊仅管理员可设置
   if (normalizedContent === '/chatmode' || normalizedContent.startsWith('/chatmode ')) {
-    const chatmodeResult = await this.ensureSession(channel, channelId, threadId, chatType);
-    if ('error' in chatmodeResult) return { kind: 'command.result' as const, text: chatmodeResult.error };
-    const chatmodeSession = chatmodeResult.session;
-
     const arg = normalizedContent.slice(9).trim();
-    const currentMode = chatmodeSession.chatMode || 'interactive';
-    const chatmodeChatType = chatmodeSession.chatType || activeChatType;
-    const isGroup = chatmodeChatType === 'group';
-    const canSwitch = !isGroup;
-
     if (!arg) {
+      const existingChatmodeSession = await getExistingSessionForCommand();
+      const fallbackMode = this.agentRegistry?.resolveByChannel(channel)?.config?.chatmode?.private;
+      const currentMode = existingChatmodeSession?.chatMode || fallbackMode || 'interactive';
+      const chatmodeChatType = existingChatmodeSession?.chatType || activeChatType;
+      const isGroup = chatmodeChatType === 'group';
       if (isGroup) {
         return { kind: 'command.result' as const, text: `📋 会话模式: proactive（群聊强制）` };
       }
       // 尝试发送 CommandCard 卡片
-      if (canSwitch) {
-        const modes = [
-          { key: 'interactive', name: '交互模式', desc: '被动响应：收到消息时才回复，回复直接显示' },
-          { key: 'proactive', name: '主动模式', desc: '主动推进：流式输出静默，由 Agent 自调 ctl send 发声' },
-        ];
-        const interaction: InteractionRequest = {
-          type: 'interaction',
-          id: `chatmode-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`,
-          channelId,
-          sessionId: chatmodeSession.id,
-          initiatorId: userId,
-          kind: {
-            kind: 'command-card',
-            title: '🔄 会话模式',
-            body: modes.map(m => `${m.key === currentMode ? '✓' : '•'} **${m.key}** (${m.name}) - ${m.desc}`).join('\n'),
-            buttons: modes.map(m => ({
-              label: m.key === currentMode ? `✓ ${m.key}` : m.key,
-              command: `/chatmode ${m.key}`,
-              style: (m.key === currentMode ? 'primary' : 'default') as 'primary' | 'default',
-              disabled: m.key === currentMode,
-            })),
-          },
-        };
+      const modes = [
+        { key: 'interactive', name: '交互模式', desc: '被动响应：收到消息时才回复，回复直接显示' },
+        { key: 'proactive', name: '主动模式', desc: '主动推进：流式输出静默，由 Agent 自调 ctl send 发声' },
+      ];
+      const interaction: InteractionRequest = {
+        type: 'interaction',
+        id: `chatmode-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`,
+        channelId,
+        sessionId: existingChatmodeSession?.id || `chatmode-${Date.now()}`,
+        initiatorId: userId,
+        kind: {
+          kind: 'command-card',
+          title: '🔄 会话模式',
+          body: modes.map(m => `${m.key === currentMode ? '✓' : '•'} **${m.key}** (${m.name}) - ${m.desc}`).join('\n'),
+          buttons: modes.map(m => ({
+            label: m.key === currentMode ? `✓ ${m.key}` : m.key,
+            command: `/chatmode ${m.key}`,
+            style: (m.key === currentMode ? 'primary' : 'default') as 'primary' | 'default',
+            disabled: m.key === currentMode,
+          })),
+        },
+      };
 
-        const replyCtx = this.getReplyContext(chatmodeSession);
-        const cardResult = await this.sendCommandCard({ channel, channelId, interaction, replyCtx, canWrite: isAdmin });
-        if (cardResult === null) return null;
-        // 卡片降级：fall through 到下方文本输出
-      }
+      const replyCtx = existingChatmodeSession ? this.getReplyContext(existingChatmodeSession) : undefined;
+      const cardResult = await this.sendCommandCard({ channel, channelId, interaction, replyCtx, canWrite: isAdmin });
+      if (cardResult === null) return null;
+      // 卡片降级：fall through 到下方文本输出
 
       // 降级：文本
-      if (canSwitch) {
-        return { kind: 'command.result' as const, text: `会话模式: ${currentMode}  用法: /chatmode <interactive|proactive>` };
-      }
-      return { kind: 'command.result' as const, text: `会话模式: ${currentMode}` };
+      return { kind: 'command.result' as const, text: `会话模式: ${currentMode}  用法: /chatmode <interactive|proactive>` };
     }
+
+    const chatmodeSession = await getExistingSessionForCommand();
+    if (!chatmodeSession) return { kind: 'command.error' as const, text: '❌ 当前没有活跃会话，无法切换会话模式' };
+
+    const currentMode = chatmodeSession.chatMode || 'interactive';
+    const chatmodeChatType = chatmodeSession.chatType || activeChatType;
+    const isGroup = chatmodeChatType === 'group';
+    const canSwitch = !isGroup;
 
     if (arg !== 'interactive' && arg !== 'proactive') {
       return { kind: 'command.error' as const, text: `❌ 无效模式: ${arg}\n可选: interactive / proactive` };
@@ -1175,9 +1206,8 @@ export async function handleSlashCommand(this: any,
   // /dispatch 命令：查看/切换群聊分发模式（mention | broadcast）
   // 仅群聊可用；群聊中设置需管理员权限
   if (normalizedContent === '/dispatch' || normalizedContent.startsWith('/dispatch ')) {
-    const dispatchResult = await this.ensureSession(channel, channelId, threadId, chatType);
-    if ('error' in dispatchResult) return { kind: 'command.result' as const, text: dispatchResult.error };
-    const dispatchSession = dispatchResult.session;
+    const dispatchSession = await getExistingSessionForCommand();
+    if (!dispatchSession) return { kind: 'command.error' as const, text: '❌ 当前没有活跃会话' };
 
     const dispatchChatType = dispatchSession.chatType || activeChatType;
     if (dispatchChatType !== 'group') {
@@ -1259,9 +1289,8 @@ export async function handleSlashCommand(this: any,
 
   // /stop 命令：中断当前任务
   if (normalizedContent === '/stop') {
-    const stopResult = await this.ensureSession(channel, channelId, threadId, chatType);
-    if ('error' in stopResult) return { kind: 'command.result' as const, text: '当前没有正在处理的任务' };
-    const { session: stopSession } = stopResult;
+    const stopSession = await getExistingSessionForCommand();
+    if (!stopSession) return { kind: 'command.result' as const, text: '当前没有正在处理的任务' };
     const stopAgent = this.getAgent(channel, stopSession.baseagent);
     const sessionKey = stopSession.id;
 
@@ -1294,9 +1323,8 @@ export async function handleSlashCommand(this: any,
 
   // /compact 命令：手动压缩会话上下文
   if (normalizedContent === '/compact') {
-    const result = await this.ensureSession(channel, channelId, threadId, chatType);
-    if ('error' in result) return { kind: 'command.error' as const, text: result.error };
-    const { session } = result;
+    const session = await getExistingSessionForCommand();
+    if (!session) return { kind: 'command.error' as const, text: '❌ 当前没有活跃会话，无需压缩' };
 
     const sessionAgent = this.getAgent(channel, session.baseagent);
     if (!sessionAgent.capabilities?.compact) {
@@ -1331,31 +1359,19 @@ export async function handleSlashCommand(this: any,
     }
   }
 
-  // 尝试获取活跃会话（话题时直接查找话题 session）
+  // 后续命令可读取现有会话，但不应在这里隐式创建新会话。
+  // 真正需要新会话的命令应显式调用 createNewSession()。
   let session: Session | undefined;
-  const resolvedSelfAID = selfAID ?? this.resolveSelfAID(channel);
   if (threadId) {
-    session = await this.sessionManager.getOrCreateSession(channel, channelId, this.getEffectiveDefaultPath(channel), threadId, undefined, undefined, undefined, chatType as 'private' | 'group' | undefined, undefined, resolvedSelfAID, this.resolveChannelType(channel));
+    session = await this.sessionManager.getThreadSession(channel, channelId, threadId);
   } else {
     session = await this.sessionManager.getActiveSession(channel, channelId);
   }
 
-  // 如果没有会话，自动创建（所有后续命令都需要 session）
-  if (!session) {
-    session = await this.sessionManager.getOrCreateSession(
-      channel,
-      channelId,
-      this.getEffectiveDefaultPath(channel),
-      undefined, undefined, undefined, undefined, chatType as 'private' | 'group' | undefined,
-      undefined, resolvedSelfAID, this.resolveChannelType(channel)
-    );
-  }
-
   // /status 命令：显示会话状态
   if (normalizedContent === '/status') {
-    // session 现在总是存在（上面已自动创建）
     if (!session) {
-      return { kind: 'command.error' as const, text: `❌ 无法创建会话，请检查配置` };
+      return { kind: 'command.result' as const, text: `📊 会话状态：当前没有活跃会话\n发送消息或使用 /new [名称] 创建会话` };
     }
 
     const sessionKey = this.getQueueKey(session, channel, channelId);
@@ -1524,7 +1540,13 @@ export async function handleSlashCommand(this: any,
 
     // Default: show system health check (non-admin 仅看摘要)
     const checkAgentName = checkOwningAgent?.name ?? 'DefaultAgent';
+    const checkDefaultBaseagent = checkOwningAgent?.baseagent ?? this.parseDefaultBaseagent();
+    const checkBaseagent = activeSession?.baseagent ?? checkDefaultBaseagent;
     const lines: string[] = [`📡 渠道状态 (Agent: ${checkAgentName})：`];
+    lines.push(`  Baseagent: ${checkBaseagent}`);
+    if (checkDefaultBaseagent !== checkBaseagent) {
+      lines.push(`  默认 Baseagent: ${checkDefaultBaseagent}`);
+    }
     // Group by channelType
     const groups = new Map<string, Array<{ name: string; status: string }>>();
     for (const [name] of this.adapters) {
@@ -1669,6 +1691,8 @@ export async function handleSlashCommand(this: any,
         pending: this.messageQueue.getQueueLengthByAgent(currentAgentName),
         processing: this.messageQueue.getProcessingCountByAgent(currentAgentName),
       },
+      baseagent: checkBaseagent,
+      defaultBaseagent: checkDefaultBaseagent,
       uptimeMs,
       lastHour: checkSnap?.lastHour ?? null,
       evolagents,
@@ -1713,8 +1737,8 @@ export async function handleSlashCommand(this: any,
     const executeRestart = async () => {
       let replyContext: ReplyContext | undefined;
       if (threadId) {
-        const threadSession = await this.sessionManager.getOrCreateSession(channel, channelId, this.getEffectiveDefaultPath(channel), threadId, undefined, undefined, undefined, undefined, undefined, selfAID ?? this.resolveSelfAID(channel), this.resolveChannelType(channel));
-        replyContext = this.getReplyContext(threadSession);
+        const threadSession = await this.sessionManager.getThreadSession(channel, channelId, threadId);
+        if (threadSession) replyContext = this.getReplyContext(threadSession);
       }
       const restartInfo: Record<string, any> = {
         channel,
@@ -1815,7 +1839,12 @@ export async function handleSlashCommand(this: any,
   // /pwd 命令：显示当前项目路径
   if (normalizedContent === '/pwd') {
     if (!session) {
-      return { kind: 'command.error' as const, text: `❌ 无法创建会话，请检查配置` };
+      const defaultProjectPath = this.agentRegistry?.resolveByChannel(channel)?.projectPath || this.getEffectiveDefaultPath(channel);
+      const defaultConfigName = this.getConfiguredProjectName(defaultProjectPath);
+      if (defaultConfigName) {
+        return { kind: 'command.result' as const, text: `当前项目: ${defaultConfigName}\n路径: ${defaultProjectPath}` };
+      }
+      return { kind: 'command.result' as const, text: `当前项目: ${defaultProjectPath}` };
     }
     const configName = this.getConfiguredProjectName(session.projectPath);
     if (configName) {
@@ -1877,10 +1906,8 @@ export async function handleSlashCommand(this: any,
       return { kind: 'command.error' as const, text: `❌ 通道 ${targetLabel} 不支持文件发送` };
     }
 
-    // 获取 session（需要 projectPath）
-    const sendResult = await this.ensureSession(channel, channelId, threadId, chatType);
-    if ('error' in sendResult) return { kind: 'command.result' as const, text: sendResult.error };
-    const sendSession = sendResult.session;
+    const sendSession = await getExistingSessionForCommand();
+    const projectPath = sendSession?.projectPath || this.agentRegistry?.resolveByChannel(channel)?.projectPath || this.getEffectiveDefaultPath(channel);
 
     // 路径安全校验
     if (path.isAbsolute(filePath)) {
@@ -1890,7 +1917,7 @@ export async function handleSlashCommand(this: any,
       return { kind: 'command.error' as const, text: '❌ 不支持 .. 路径穿越' };
     }
 
-    const resolvedPath = path.resolve(sendSession.projectPath, filePath);
+    const resolvedPath = path.resolve(projectPath, filePath);
 
     // 存在性检查
     if (!fs.existsSync(resolvedPath)) {
@@ -1899,7 +1926,7 @@ export async function handleSlashCommand(this: any,
 
     // 符号链接安全：realpath 后验证仍在项目目录内
     const realPath = fs.realpathSync(resolvedPath);
-    const realProjectPath = fs.realpathSync(sendSession.projectPath);
+    const realProjectPath = fs.realpathSync(projectPath);
     if (!realPath.startsWith(realProjectPath + path.sep) && realPath !== realProjectPath) {
       return { kind: 'command.error' as const, text: '❌ 路径不允许: 文件不在项目目录内' };
     }
@@ -1925,7 +1952,7 @@ export async function handleSlashCommand(this: any,
 
     // 发送文件
     try {
-      const replyCtx = isCrossChannel ? undefined : this.getReplyContext(sendSession);
+      const replyCtx = !isCrossChannel && sendSession ? this.getReplyContext(sendSession) : undefined;
       await targetAdapter.send(buildEnvelope({ channel: targetAdapter.channelName, channelId: targetChannelId, replyContext: replyCtx }), { kind: 'result.file', filePath: realPath });
       const sizeStr = stat.size < 1024 ? `${stat.size} B`
         : stat.size < 1024 * 1024 ? `${(stat.size / 1024).toFixed(1)} KB`
@@ -2375,9 +2402,8 @@ export async function handleSlashCommand(this: any,
 
   // /rewind 命令：查看历史 / 回退会话
   if (normalizedContent === '/rewind' || normalizedContent.startsWith('/rewind ')) {
-    const result = await this.ensureSession(channel, channelId, threadId, chatType);
-    if ('error' in result) return { kind: 'command.error' as const, text: result.error };
-    const { session } = result;
+    const session = await getExistingSessionForCommand();
+    if (!session) return { kind: 'command.error' as const, text: '❌ 当前没有活跃会话' };
 
     const rewindAgent = this.getAgent(channel, session.baseagent);
 
@@ -2416,9 +2442,9 @@ export async function handleSlashCommand(this: any,
 
   // /repair 命令：检查并修复会话文件
   if (normalizedContent === '/repair') {
-    const repairResult = await this.ensureSession(channel, channelId, threadId, chatType);
-    if ('error' in repairResult) return { kind: 'command.result' as const, text: repairResult.error };
-    const { session: repairSession } = repairResult;      const repairAgent = this.getAgent(channel, repairSession.baseagent);
+    const repairSession = await getExistingSessionForCommand();
+    if (!repairSession) return { kind: 'command.result' as const, text: '当前没有活跃会话' };
+    const repairAgent = this.getAgent(channel, repairSession.baseagent);
     const { checkSessionFile, backupSessionFile } = await import('../session/session-file-health.js');
 
     try {

@@ -36,7 +36,7 @@ Commands:
   disable <aid>           停用 agent
   get <aid> <key>         读取单个配置字段（支持点路径）
   set <aid> <key> <val>   修改单个配置字段（支持点路径）
-  rename <aid> <name>     修改 agent 名称（更新 agent.md 并重新上传）
+  ready <aid>              标记 bootstrap 完成，进入 active 状态
   reload [aid]            热重载配置（无参数=全量 resync）
   delete <aid> [--purge]  删除 agent
 
@@ -51,7 +51,7 @@ Options:
   evolclaw agent enable mybot.agentid.pub
   evolclaw agent get mybot.agentid.pub active_baseagent
   evolclaw agent set mybot.agentid.pub active_baseagent codex
-  evolclaw agent rename mybot.agentid.pub "My Bot"
+  evolclaw agent ready mybot.agentid.pub
   evolclaw agent delete mybot.agentid.pub --purge`);
     return;
   }
@@ -59,7 +59,7 @@ Options:
   const {
     agentList, agentShow, agentCreateInteractive, agentCreateNonInteractive,
     agentReload, agentEnable, agentDisable,
-    agentGet, agentSet, agentDelete, agentRename,
+    agentGet, agentSet, agentDelete, agentReady,
   } = await import('./agent.js');
 
   // --- list ---
@@ -378,28 +378,24 @@ Options:
     return;
   }
 
-  // --- rename ---
-  if (sub === 'rename') {
+  // --- ready ---
+  if (sub === 'ready') {
     if (wantsHelp(args)) {
-      console.log(`用法: evolclaw agent rename <aid> <name> [--format json]
+      console.log(`用法: evolclaw agent ready <aid> [--format json]
 
-修改 agent 显示名称。同时更新本地 agent.md 并尝试重新上传。
-
-示例:
-  evolclaw agent rename mybot.agentid.pub "My Bot"`);
+标记 agent bootstrap 已完成，将 lifecycle 切换为 active。该命令允许 agent 在工具调用中自报完成。`);
       return;
     }
     const aid = args[1];
-    const newName = args[2];
-    if (!aid || !newName) { console.error('用法: evolclaw agent rename <aid> <name>'); process.exit(1); }
-    const result = await agentRename(aid, newName);
+    if (!aid) { console.error('用法: evolclaw agent ready <aid>'); process.exit(1); }
+    const result = await agentReady(aid);
     if (!result.ok) {
       if (formatJson) { console.log(JSON.stringify(result)); }
       else { console.error(`❌ ${result.error}`); }
       process.exit(1);
     }
     if (formatJson) { console.log(JSON.stringify(result, null, 2)); }
-    else { console.log(`✓ ${aid} renamed to "${newName}"${result.uploaded ? ' (uploaded)' : ' (local only, upload failed)'}`); }
+    else { console.log(`✓ ${aid} lifecycle=active${result.reloaded ? ' (runtime updated)' : ' (daemon offline or not updated)'}`); }
     return;
   }
 
@@ -449,6 +445,13 @@ Options:
     }
     printAgentShowHuman(result);
     return;
+  }
+
+  if (sub === 'rename') {
+    const result = { ok: false, error: 'ec agent rename 已取消；如需更新 agent.md，请编辑本地 agent.md 后使用 ec aid agentmd put <aid> 发布。' };
+    if (formatJson) { console.log(JSON.stringify(result)); }
+    else { console.error(result.error); }
+    process.exit(1);
   }
 
   // --- default: `evolclaw agent <aid>` (shorthand for show) ---

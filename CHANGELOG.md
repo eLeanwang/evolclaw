@@ -1,3 +1,27 @@
+## v3.5.6 (2026-06-24)
+
+### New Features
+
+- **Agent Bootstrap Service** — 新增 `core/bootstrap-service.ts`，统一 agent 初始化流程：发送欢迎消息、上传 agent.md、发送绑定凭证；支持三态生命周期（created → bootstrapping → active）
+- **Agent 配置 Schema v2** — 新增 `lifecycle` 字段（created/bootstrapping/active），替代旧的 `initialized` 布尔值；支持配置版本迁移与向后兼容
+- **命令处理器分离** — 将命令处理分为 Menu Protocol（`menu-handler.ts`）和 Slash Command（`slash-handler.ts`）双轨：Menu 提供结构化协议（query/update/action），Slash 保留文本命令兼容性
+- **Avatar 上传功能** — 新增 `utils/avatar-upload.ts`，支持通过 AUN storage 上传 agent 头像
+- **控制面双轨鉴权** — 新增 `gateControlScope()` 闸门：进程级操作（/system、/gateway、/config）仅控制 channel 可执行；跨 agent 操作仅控制 channel 可执行
+
+### Improvements
+
+- **Lifecycle Hooks** — 新增 `config/lifecycle.ts`，提供配置生命周期转换函数（`normalizeAgentLifecycle`、`withLifecycleForWrite`），解耦配置迁移逻辑
+- **Menu Protocol 增强** — `execMenuForEcweb()` 和 `execMenuForControl()` 分别处理 ECWeb 和控制 AID 的 menu 请求，支持进程级配置查询和修改
+- **Gateway 配置管理** — 新增 `/gateway` 命令支持网关配置的查询、更新、测试、模型列表、价格设置、环境变量同步
+- **AUN Payload 体积优化** — 优化大型响应的传输策略，避免超过 AUN 协议限制
+
+### Documentation
+
+- **Menu Protocol 开发指南 v2.4** — 完整文档化 Menu Protocol 的设计、实现、测试策略
+- **Agent Bootstrap 生命周期设计** — 详细说明 agent 初始化流程和状态转换
+- **Avatar 上传实现文档** — 记录头像上传的技术实现和集成方式
+- **Baseagent 集成研究** — 探索多 baseagent 集成的架构模式
+
 ## v3.5.2 (2026-06-19)
 
 ### New Features

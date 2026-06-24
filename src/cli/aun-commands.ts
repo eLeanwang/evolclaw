@@ -440,7 +440,11 @@ Options:
       }
       const content = fs.readFileSync(localPath, 'utf-8');
       await agentmdPut(content, { aid, aunPath });
-      console.log('✓ agent.md 已发布');
+      if (formatJson) {
+        console.log(JSON.stringify({ ok: true, aid, path: localPath }, null, 2));
+      } else {
+        console.log('✓ agent.md 已发布');
+      }
       return;
     }
 
