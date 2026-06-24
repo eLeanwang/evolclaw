@@ -9,7 +9,7 @@
   "history": [
     { "schema": "evolclaw",        "version": 1, "date": "2026-06-14", "description": "initial: process config (evolclaw.json)" },
     { "schema": "defaults",        "version": 1, "date": "2026-06-14", "description": "initial: global defaults (owners/admins/models.allowed/projects/aun)" },
-    { "schema": "agent-config",    "version": 1, "date": "2026-06-14", "description": "initial: agent config with all parameters unified in config.json" },
+    { "schema": "agent-config",    "version": 1, "date": "2026-06-14", "description": "initial: agent H config" },
     { "schema": "relation-config", "version": 1, "date": "2026-06-14", "description": "initial: relation config (owners/admins/extra_backup)" },
     { "schema": "behavior",        "version": 1, "date": "2026-06-23", "description": "agent-writable behavior fields (HA)" }
   ]

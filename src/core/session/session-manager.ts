@@ -22,21 +22,34 @@ import os from 'os';
 export type OwnerResolver = (channel: string, userId: string) => boolean;
 /** 判定用户是否为指定渠道的 admin */
 export type AdminResolver = (channel: string, userId: string) => boolean;
+export type ChatModeDefaultsProvider = (
+  channel: string,
+  chatType: string,
+  peerType?: string
+) => { private?: 'interactive' | 'proactive'; group?: 'interactive' | 'proactive'; nothuman?: 'interactive' | 'proactive' } | undefined;
 
 export class SessionManager {
   private sessionsDir: string;
   private eventBus: EventBus;
   private ownerResolver?: OwnerResolver;
   private adminResolver?: AdminResolver;
+  private chatModeDefaultsProvider?: ChatModeDefaultsProvider;
   private fileAdapters = new Map<string, SessionFileAdapter>();
   private sessionEncryptState = new Map<string, boolean>();
 
-  constructor(sessionsDir: string, eventBus: EventBus, ownerResolver?: OwnerResolver, adminResolver?: AdminResolver) {
+  constructor(
+    sessionsDir: string,
+    eventBus: EventBus,
+    ownerResolver?: OwnerResolver,
+    adminResolver?: AdminResolver,
+    chatModeDefaultsProvider?: ChatModeDefaultsProvider,
+  ) {
     ensureDir(sessionsDir);
     this.sessionsDir = sessionsDir;
     this.eventBus = eventBus;
     this.ownerResolver = ownerResolver;
     this.adminResolver = adminResolver;
+    this.chatModeDefaultsProvider = chatModeDefaultsProvider;
     this.migrateChannelKeyFormat();
   }
 
@@ -50,6 +63,7 @@ export class SessionManager {
 
   private resolveDefaultChatMode(channel: string, chatType?: string, peerType?: string): 'interactive' | 'proactive' {
     const ct = chatType || 'private';
+    const configured = this.chatModeDefaultsProvider?.(channel, ct, peerType);
 
     // 群聊强制 proactive
     if (ct === 'group') return 'proactive';
@@ -58,10 +72,9 @@ export class SessionManager {
     if (peerType === 'system') return 'interactive';
 
     // Agent-to-Agent 强制 proactive（避免无限循环）
-    if (peerType && peerType !== 'human') return 'proactive';
+    if (peerType && peerType !== 'human') return configured?.nothuman ?? 'proactive';
 
-    // Human-to-Agent 私聊永远是 interactive（暂不读 agent config，将来可通过前端+配置文件改为 proactive）
-    return 'interactive';
+    return configured?.private ?? 'interactive';
   }
 
   registerFileAdapter(adapter: SessionFileAdapter): void {

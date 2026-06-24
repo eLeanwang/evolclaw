@@ -6,6 +6,7 @@ import { logger } from '../utils/logger.js';
 import { sanitizeFileName, saveToUploads, safeFetch, bufferToInboundImage } from '../utils/media-cache.js';
 import { markdownToPlainText } from '../utils/rich-content-renderer.js';
 import type { EventBus } from '../core/event-bus.js';
+import { DEFAULT_FLUSH_DELAY_SECONDS } from '../core/defaults.js';
 import { formatItemsAsText } from '../core/message/items-formatter.js';
 import type { FirstInteractionWelcomeManager } from '../utils/welcome.js';
 import { initWelcomeManager, sendWelcomeIfNeeded } from '../utils/welcome.js';
@@ -928,7 +929,7 @@ export class WechatChannelPlugin implements ChannelPlugin {
     return {
       channelType: 'wechat', adapter, channel,
       policy,
-      options: { fileMarkerPattern: /\[SEND_FILE:(?:(\w+):)?([^\]]+)\]/g, flushDelay: inst.flushDelay ?? 3 },
+      options: { fileMarkerPattern: /\[SEND_FILE:(?:(\w+):)?([^\]]+)\]/g, flushDelay: inst.flushDelay ?? DEFAULT_FLUSH_DELAY_SECONDS },
       connect: () => channel.connect(),
       disconnect: () => channel.disconnect(),
       onProjectPathRequest: () => Promise.resolve(ctx.defaultProjectPath),

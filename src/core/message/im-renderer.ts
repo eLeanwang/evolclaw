@@ -6,6 +6,7 @@ import { CONTEXT_TOO_LONG_PATTERN, isContextTooLongText } from '../../utils/erro
 import fs from 'fs';
 import path from 'path';
 import { resolvePaths } from '../../paths.js';
+import { DEFAULT_FLUSH_DELAY_MS } from '../defaults.js';
 
 let diagStream: fs.WriteStream | null = null;
 function getDiagStream(): fs.WriteStream {
@@ -315,7 +316,7 @@ export class IMRenderer {
       return;
     }
 
-    const interval = this.opts.flushDelay ?? 4000;
+    const interval = this.opts.flushDelay ?? DEFAULT_FLUSH_DELAY_MS;
     let targetDelay: number;
 
     if (this.flushCount === 0) {

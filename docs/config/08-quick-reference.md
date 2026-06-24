@@ -330,21 +330,20 @@ ec config diff v100 v103
 
 ---
 
-## 十二、迁移检查清单
+## 十二、配置检查清单
 
-从旧配置体系迁移到 v3：
+当前 v3 采用 H 配置链 + HA 行为链，检查重点如下：
 
 - [x] 备份所有配置文件
-- [x] 将 behavior.json 的内容合并到 config.json（代码已完成）
-- [ ] 将 preferences.json 的 model 字段迁移到 relation/config.json（如有数据）
+- [x] 保留 `behavior.json`，行为字段通过 ConfigManager 路由写入
+- [ ] 将历史 `preferences.json` 的 model 字段迁移到 relation `behavior.json`（如有数据）
 - [ ] 检查所有凭证已移入 .env
-- [x] 删除 behavior.json 文件（schema 已删除）
 - [ ] 运行 schema 验证：`ec config validate`
-- [ ] 创建迁移后快照：`ec config snapshot --full --desc "迁移到 v3"`
+- [ ] 创建快照：`ec config snapshot --full --desc "配置检查"`
 - [ ] 测试配置读取
 - [ ] 测试配置修改
 
-**注意**：当前系统无历史 behavior.json 数据，无需数据迁移。
+**注意**：不要手工删除 `behavior.json`；它是当前 HA 行为链的正式文件。
 
 ---
 

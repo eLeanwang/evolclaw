@@ -29,6 +29,7 @@ import { insertUsageEvent, insertContextBreakdown, insertModelCalls } from '../.
 import { normalizeUsage } from '../../stats/normalizer.js';
 import { resolvePrices } from '../../stats/price-resolver.js';
 import { getBudgetStatus } from '../../stats/budget.js';
+import { DEFAULT_FLUSH_DELAY_SECONDS } from '../defaults.js';
 
 type StreamRunResult = {
   isError: boolean;
@@ -899,7 +900,7 @@ export class MessageProcessor {
       const renderer = new IMRenderer({
         adapter,
         envelope,
-        flushDelay: (options?.flushDelay ?? this.agentRegistry?.resolveByChannel(channelKey)?.config?.flush_delay ?? 3) * 1000,
+        flushDelay: (options?.flushDelay ?? this.agentRegistry?.resolveByChannel(channelKey)?.config?.flush_delay ?? DEFAULT_FLUSH_DELAY_SECONDS) * 1000,
         suppressActivities: shouldSuppress() || isAutonomous,
         fileMarkerPattern: options?.fileMarkerPattern,
         diagEnabled: this.globalSettings.debug?.flusherDiag,

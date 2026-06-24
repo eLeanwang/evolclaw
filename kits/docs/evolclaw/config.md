@@ -3,7 +3,7 @@
 按作用域读写所有配置参数 + 配置快照/回滚/启动历史。触发词：看配置/改配置/查字段/列配置/校验配置/快照/回滚/历史/对比版本/启动记录。
 
 > `ec config` 是底层通用入口；`ec model` / `ec ctl` 是高频操作的语义化快捷命令，二者最终都经 ConfigManager。
-> 所有参数统一在 config.json，权限控制在 API 层。
+> 字段按 owner 路由：H 字段写 config/defaults/evolclaw，HA 行为字段写 behavior.json。
 
 ## 参数读写
 
@@ -65,8 +65,8 @@ ec config prune [--keep-full N] [--keep-delta N] [--yes]
 
 | 参数 | 作用域 | 落盘 |
 |------|--------|------|
-| `--self <aid>` | agent 级 | `agents/<aid>/config.json` |
-| `--self <aid> --peer <X>` | 关系级 | `agents/<aid>/relations/<peerKey>/config.json` |
+| `--self <aid>` | agent 级 | `agents/<aid>/config.json` 或 `agents/<aid>/behavior.json` |
+| `--self <aid> --peer <X>` | 关系级 | `relations/<peerKey>/config.json` 或 `relations/<peerKey>/behavior.json` |
 | `--default` | 全局默认 | `agents/defaults.json` |
 | `--process` | 进程级 | `~/.evolclaw/evolclaw.json` |
 | 写操作三者全无 | — | **拒绝**（防误写全局） |
@@ -77,9 +77,10 @@ ec config prune [--keep-full N] [--keep-delta N] [--yes]
 
 ```
 defaults → agent/config → relation/config
+agent/behavior → roles.<role> → relation/behavior
 ```
 
-优先级：关系 > agent > defaults。同名字段深合并（对象/数组），标量覆盖。
+运行时先合并 H 链，再叠加 HA 行为链；同名行为字段以 behavior 链为高优先级。同名字段深合并（对象/数组），标量覆盖。
 
 ## 权限控制
 

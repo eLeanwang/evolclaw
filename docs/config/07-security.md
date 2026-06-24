@@ -7,25 +7,26 @@
 
 ## 一、核心原则
 
-**权限控制在 API 层，而非文件级。**
+**直接文件访问一律拦截；参数级权限在 API/CLI 层判断。**
 
 ### 为什么不用文件级权限？
 
-**原设计（已废弃）**：
-- config.json(H) - 人类修改，hook 禁止 agent 写
-- behavior.json(HA) - agent 可修改，hook 允许 agent 写
+**直接文件级写权限的问题**：
+- 只靠文件权限无法表达字段级 owner。
+- 同一命令可能需要根据字段写入 H 文件或 HA `behavior.json`。
+- Agent 直接读写 JSON 会绕过 schema、审计、快照和权限检查。
 
 **问题**：
-- 实际所有配置修改都通过 evolclaw 代码/CLI 完成
-- Hook 可以直接禁止 agent 直接读写**所有**配置文件
-- 文件级权限控制过于粗粒度
-- behavior.json 的存在增加了复杂性
+- 实际配置修改应通过 evolclaw 代码/CLI 完成。
+- Hook 可以禁止 agent 直接读写**所有**配置文件。
+- 文件级权限控制过于粗粒度，必须改成字段 owner + 受控入口。
 
-**新设计（v3）**：
-- 所有参数统一在 config.json（不再有 behavior.json）
+**当前设计（v3，路线 A）**：
+- H 字段写 `evolclaw.json` / `defaults.json` / `config.json`。
+- HA 行为字段写 `behavior.json`。
 - Hook 禁止所有配置文件的直接读写
 - Agent 通过 CLI（`ec model`, `ec ctl`, `ec config`）修改配置
-- CLI 内部根据参数类型和调用方身份判断是否允许
+- CLI 内部根据 schema owner、字段路径和调用方身份判断是否允许
 
 ---
 
@@ -34,7 +35,7 @@
 ### 拦截目标
 
 **禁止 agent 直接读写的文件**：
-- 所有配置文件（evolclaw.json, defaults.json, config.json）
+- 所有配置文件（evolclaw.json, defaults.json, config.json, behavior.json）
 - 所有 `.env` 文件（全局/agent/关系级）
 - 快照目录（backups/config/）
 
@@ -113,9 +114,13 @@ FEISHU_APP_SECRET=yyy
 
 ### 当前状态
 
-**Agent 可以通过 CLI 修改任意配置参数。**
+Agent 托管环境通过 CLI 写入时：
 
-权限体系的具体设计待完善。
+- H 字段拒绝写入。
+- HA 字段允许走受控入口写入，并接受 schema 校验。
+- 快照、恢复、初始化等管理操作仍仅人类可执行。
+
+更细的角色/审批体系仍待完善。
 
 ### 设计方向
 

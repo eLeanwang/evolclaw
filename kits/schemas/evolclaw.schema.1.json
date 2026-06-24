@@ -43,6 +43,15 @@
         "services": { "type": "array", "items": { "type": "object" } }
       }
     },
+    "idleMonitor": {
+      "type": "object",
+      "description": "流式输出空闲监控配置",
+      "x-merge": "dict",
+      "properties": {
+        "enabled": { "type": "boolean", "default": true },
+        "timeout": { "type": "number", "default": 120 }
+      }
+    },
     "ecweb": {
       "type": "object",
       "description": "web 控制台开关/端口",

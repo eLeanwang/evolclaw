@@ -207,8 +207,8 @@ export interface SessionMetadata {
   lastProactiveFlag?: boolean;  // proactive 模式使用标志位后设置，interactive 切换时注入提示后清除
 }
 
-/** Default permission mode applied to new sessions. Change here to affect all roles. */
-export const DEFAULT_PERMISSION_MODE = 'bypass';
+/** Default permission mode applied when no role/relation policy overrides it. */
+export const DEFAULT_PERMISSION_MODE = 'auto';
 
 export interface ReplyContext {
   sessionId?: string;
@@ -814,12 +814,12 @@ export type ChannelInstance =
   | WecomChannelInstance;
 
 // ════════════════════════════════════════════════════════════════════════
-// 配置体系 v3（统一到 config.json）
+// 配置体系 v3（H 配置链 + HA 行为链）
 //
-// 统一覆盖链：defaults.json → agent/config.json → role(config.roles) → relation/config.json
+// H 覆盖链：defaults.json → agent/config.json → relation/config.json。
+// HA 行为链：agent/behavior.json → role(behavior.roles) → relation/behavior.json。
 // 进程级 evolclaw.json 是链外单独作用域。
 //
-// 所有参数统一在 config.json，权限控制在 API 层而非文件层。
 // schema 是「字段 → 类型」唯一事实源（kits/schemas/）。
 // ════════════════════════════════════════════════════════════════════════
 
@@ -838,13 +838,17 @@ export interface ProcessConfig {
     enabled?: boolean;
     services?: Array<Record<string, unknown>>;
   };
+  idleMonitor?: {
+    enabled?: boolean;
+    timeout?: number;
+  };
   ecweb?: { enabled?: boolean; port?: number };
   watch?: { logTypes?: string[] };
 }
 
 /**
  * 全局级 agents/defaults.json —— 覆盖链最低优先级。
- * 提供所有配置参数的默认值，被 agent/config 和 relation/config 覆盖。
+ * 提供 H 链配置参数的默认值，被 agent/config 和 relation/config 覆盖。
  */
 export interface DefaultsConfig {
   $schema_version: number;
@@ -858,7 +862,7 @@ export interface DefaultsConfig {
 
 /**
  * Agent 级 agents/<aid>/config.json —— 覆盖 defaults。
- * 包含 agent 的所有配置：身份、凭证、管控字段、模型配置、对话模式等。
+ * 包含 agent 的身份、凭证、管控字段与基础设施配置。
  *
  * 顶层 owners 是 AUN 渠道（即 agent 自身）的 owner 列表，元素为 AID。
  * channels[] 是该 agent 接入的所有渠道实例（含 AUN）。
@@ -908,7 +912,7 @@ export interface AgentConfig {
 
 /**
  * 关系级 agents/<aid>/relations/<peerKey>/config.json —— 覆盖链最高优先级。
- * 支持针对不同用户的个性化配置（29 个参数）。
+ * 支持针对不同用户的 H 链个性化配置；行为覆盖写 relation behavior.json。
  */
 export interface RelationConfig {
   $schema_version: number;
@@ -933,8 +937,8 @@ export interface RelationConfig {
 
 /**
  * 运行时合并结果（下游统一视图）。
- * 覆盖链合并：defaults → agent/config → relation/config
- * 所有参数统一在 config.json。
+ * 先合并 H 链：defaults → agent/config → relation/config，
+ * 再叠加 HA 行为链：agent behavior → role → relation behavior。
  * 字段保持 optional——覆盖链全空即 undefined，由消费方按字段语义处理。
  */
 export interface EffectiveAgentConfig {

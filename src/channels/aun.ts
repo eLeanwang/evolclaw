@@ -8,6 +8,7 @@ import { logger, localTimestamp } from '../utils/logger.js';
 import { LogWriter } from '../utils/log-writer.js';
 import type { ChannelPlugin, ChannelInstance, ChannelBuildContext, BridgeHookContext } from '../core/channel-loader.js';
 import { resolveShowActivities, showActivitiesPolicy } from '../core/channel-loader.js';
+import { DEFAULT_FLUSH_DELAY_SECONDS } from '../core/defaults.js';
 import type { MessageBridge } from '../core/message/message-bridge.js';
 import type { ReplyContext, AunChannelInstance as AunInst, AidConnectionState, AidStatus, AidKickDetail, InteractionResponse, ActionInteraction, CommandCard, InboundMessage } from '../types.js';
 import { resolvePaths, getPackageRoot, agentMdPath as agentMdPathFn, agentDir as agentDirPath, resolveRoot } from '../paths.js';
@@ -3590,7 +3591,7 @@ export class AUNChannelPlugin implements ChannelPlugin {
     return {
       channelType: 'aun', adapter, channel,
       policy,
-      options: { flushDelay: inst.flushDelay ?? 3, fileMarkerPattern: /\[SEND_FILE:(?:(\w+):)?([^\]]+)\]/g },
+      options: { flushDelay: inst.flushDelay ?? DEFAULT_FLUSH_DELAY_SECONDS, fileMarkerPattern: /\[SEND_FILE:(?:(\w+):)?([^\]]+)\]/g },
       connect: () => channel.connect(),
       disconnect: () => channel.disconnect(),
       onProjectPathRequest: () => Promise.resolve(ctx.defaultProjectPath),

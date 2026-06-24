@@ -5,21 +5,20 @@
  *            snapshot prune history diff restore current boots
  * selector：--self / --peer / --default / --process
  *
- * 所有参数统一在 config.json。
+ * 字段按 owner 路由：H 字段写 config/defaults/evolclaw，HA 行为字段写 behavior.json。
  */
 
 import { isHelpFlag, wantsHelp, getArgValue } from './help.js';
 import { normalizePeer, ModelScopeError } from '../core/model/config-scope.js';
 import {
-  ConfigTarget, read, write, ensureFile, resolveEffective, resolveAgentConfig,
-  routeField, listFields, initConfigManager, ConfigError,
+  ConfigTarget, read, write, ensureFile, resolveEffective,
+  routeFieldPath, listFields, initConfigManager, ConfigError,
   type Selector, type FieldRoute,
 } from '../config/config-manager.js';
 import {
   snapshot, restore, diffVersions, listAllVersions, readCurrent, prune, collectConfigFiles,
 } from '../config/snapshot.js';
 import { readBootLog } from '../config/boot-log.js';
-import { loadSchema } from '../config/schema-registry.js';
 import { resolvePaths } from '../paths.js';
 
 type Scope = 'process' | 'defaults' | 'agent' | 'relation';
@@ -140,9 +139,8 @@ function cmdGet(args: string[], formatJson: boolean): void {
   }
   // effective 值 + 解析链：合并 H + behavior
   const eff = resolveEffective(sel);
-  const top = field!.split('.')[0];
   let route: FieldRoute;
-  try { route = routeField(top, scope === 'defaults' ? 'defaults' : scope); }
+  try { route = routeFieldPath(field!, scope === 'defaults' ? 'defaults' : scope); }
   catch (e) { return failFromConfigErr(e, formatJson); }
   const value = getNested(eff, field!);
   emit(formatJson, {
@@ -159,10 +157,8 @@ function cmdSet(args: string[], formatJson: boolean): void {
   if (!field || value === undefined) fail(formatJson, 'MISSING_ARG', 'set 需要 <field> <value>');
   const { scope, sel } = parseScope(args, formatJson, true);
 
-  const top = field!.split('.')[0];
-
   let route: FieldRoute;
-  try { route = routeField(top, scope); }
+  try { route = routeFieldPath(field!, scope); }
   catch (e) { return failFromConfigErr(e, formatJson); }
 
   gateWrite(route, formatJson);
@@ -198,9 +194,8 @@ function cmdUnset(args: string[], formatJson: boolean): void {
 
   if (scope === 'process') fail(formatJson, 'UNSET_PROCESS_REJECT', 'evolclaw.json 无下层可回落，unset --process 被拒（请直接编辑文件）');
 
-  const top = field!.split('.')[0];
   let route: FieldRoute;
-  try { route = routeField(top, scope); }
+  try { route = routeFieldPath(field!, scope); }
   catch (e) { return failFromConfigErr(e, formatJson); }
   gateWrite(route, formatJson);
 
@@ -217,13 +212,18 @@ function cmdUnset(args: string[], formatJson: boolean): void {
 
 function cmdShow(args: string[], formatJson: boolean): void {
   const { scope, sel } = parseScope(args, formatJson, false);
-  const target = scope === 'process' ? ConfigTarget.Process
-    : scope === 'defaults' ? ConfigTarget.Defaults
-    : scope === 'relation' ? ConfigTarget.Relation : ConfigTarget.Agent;
+  const targets = targetsForScope(scope, sel);
   // show 看单层原始内容，不展开 ${VAR}
-  const cfg = read(target, sel) || {};
-  emit(formatJson, { ok: true, scope, config: cfg }, () => {
-    return `# ${scope} config (原始，未合并，凭证显示 \${VAR})\n${JSON.stringify(cfg, null, 2)}`;
+  const configs: Record<string, unknown> = {};
+  for (const { t, s } of targets) {
+    configs[t] = read(t, s) || {};
+  }
+  emit(formatJson, { ok: true, scope, configs }, () => {
+    const lines = [`# ${scope} config (原始，未合并，凭证显示 \${VAR})`];
+    for (const { t } of targets) {
+      lines.push(`\n## ${t}\n${JSON.stringify(configs[t], null, 2)}`);
+    }
+    return lines.join('\n');
   });
 }
 
@@ -260,11 +260,7 @@ function cmdList(args: string[], formatJson: boolean): void {
 function cmdValidate(args: string[], formatJson: boolean): void {
   // 简化：用 ConfigManager.write 的 schema 校验逻辑——这里只读+逐层校验
   const { scope, sel } = parseScope(args, formatJson, false);
-  const targets: Array<{ t: ConfigTarget; s?: Selector }> = [];
-  if (scope === 'process') targets.push({ t: ConfigTarget.Process });
-  else if (scope === 'defaults') targets.push({ t: ConfigTarget.Defaults });
-  else if (scope === 'agent') { targets.push({ t: ConfigTarget.Agent, s: sel }); }
-  else if (scope === 'relation') { targets.push({ t: ConfigTarget.Relation, s: sel }); }
+  const targets = targetsForScope(scope, sel);
 
   const results: Array<{ target: string; ok: boolean; error?: string }> = [];
   for (const { t, s } of targets) {
@@ -281,11 +277,9 @@ function cmdValidate(args: string[], formatJson: boolean): void {
 function cmdInit(args: string[], formatJson: boolean): void {
   gateHumanOnly('config init', formatJson);
   const { scope, sel } = parseScope(args, formatJson, true);
-  const target = scope === 'process' ? ConfigTarget.Process
-    : scope === 'defaults' ? ConfigTarget.Defaults
-    : scope === 'relation' ? ConfigTarget.Relation : ConfigTarget.Agent;
+  const targets = targetsForScope(scope, sel);
   try {
-    ensureFile(target, sel);
+    for (const { t, s } of targets) ensureFile(t, s);
   } catch (e) { return failFromConfigErr(e, formatJson); }
   emit(formatJson, { ok: true, scope }, () => `✓ 已为 ${scope} 作用域物化骨架配置文件`);
 }
@@ -375,6 +369,19 @@ function numArg(args: string[], flag: string): number | undefined {
   return v !== undefined ? Number(v) : undefined;
 }
 function pad(s: string, n: number): string { return (s || '').padEnd(n); }
+
+function targetsForScope(scope: Scope, sel?: Selector): Array<{ t: ConfigTarget; s?: Selector }> {
+  if (scope === 'process') return [{ t: ConfigTarget.Process }];
+  if (scope === 'defaults') return [{ t: ConfigTarget.Defaults }];
+  if (scope === 'agent') return [
+    { t: ConfigTarget.Agent, s: sel },
+    { t: ConfigTarget.Behavior, s: sel },
+  ];
+  return [
+    { t: ConfigTarget.Relation, s: sel },
+    { t: ConfigTarget.RelationBehavior, s: sel },
+  ];
+}
 
 function failFromConfigErr(e: unknown, formatJson: boolean): never {
   if (e instanceof ConfigError) fail(formatJson, e.code, e.message);

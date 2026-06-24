@@ -3,7 +3,8 @@
  *
  * 不允许散落的 fs.readFileSync 直接操作配置文件。
  *
- * 覆盖链（三级）：defaults.json → agent/config.json → relation/config.json
+ * H 覆盖链：defaults.json → agent/config.json → relation/config.json。
+ * HA 行为链：agent/behavior.json → role → relation/behavior.json。
  * 进程级 evolclaw.json：独立，不参与覆盖链。
  *
  * 详见 docs/config/01-overview.md
@@ -14,7 +15,9 @@ import path from 'path';
 import {
   resolvePaths,
   agentConfig as agentConfigPath,
+  agentBehaviorConfig,
   agentRelationConfig,
+  agentRelationBehaviorConfig,
   agentDir,
   agentRelationsDir,
 } from '../paths.js';
@@ -41,6 +44,8 @@ export enum ConfigTarget {
   Defaults = 'defaults',                // agents/defaults.json
   Agent = 'agent',                      // agents/{aid}/config.json
   Relation = 'relation',                // agents/{aid}/relations/{peerKey}/config.json
+  Behavior = 'behavior',                // agents/{aid}/behavior.json
+  RelationBehavior = 'relation-behavior', // agents/{aid}/relations/{peerKey}/behavior.json
 }
 
 export interface Selector {
@@ -54,6 +59,8 @@ const TARGET_SCHEMA: Record<ConfigTarget, LogicalSchemaName> = {
   [ConfigTarget.Defaults]: 'defaults',
   [ConfigTarget.Agent]: 'agent-config',
   [ConfigTarget.Relation]: 'relation-config',
+  [ConfigTarget.Behavior]: 'behavior',
+  [ConfigTarget.RelationBehavior]: 'behavior',
 };
 
 export class ConfigError extends Error {
@@ -84,6 +91,12 @@ function targetPath(target: ConfigTarget, sel?: Selector): string {
     case ConfigTarget.Relation:
       requirePeer(sel, target);
       return agentRelationConfig(sel!.self!, sel!.peerKey!);
+    case ConfigTarget.Behavior:
+      requireSelf(sel, target);
+      return agentBehaviorConfig(sel!.self!);
+    case ConfigTarget.RelationBehavior:
+      requirePeer(sel, target);
+      return agentRelationBehaviorConfig(sel!.self!, sel!.peerKey!);
   }
 }
 
@@ -138,7 +151,10 @@ function groupFor(target: ConfigTarget, sel?: Selector): string {
   if (sel?.self && target === ConfigTarget.Agent) {
     return `config:${sel.self}`;
   }
-  if (target === ConfigTarget.Relation) {
+  if (sel?.self && target === ConfigTarget.Behavior) {
+    return `behavior:${sel.self}`;
+  }
+  if (target === ConfigTarget.Relation || target === ConfigTarget.RelationBehavior) {
     return 'relation-prefs';
   }
   return 'config';
@@ -253,8 +269,8 @@ export function resolveAgentConfig(sel: { self?: string; peerKey?: string }, opt
 // ── effective（合并视图）────────────────────────────────────────────────────
 
 /**
- * 覆盖链合并：defaults → agent/config → relation/config
- * 所有参数统一在 config.json。
+ * 合并视图：先合并 H 链，再叠加 HA 行为链。
+ * 同名行为字段以 behavior.json 链为高优先级。
  */
 export function resolveEffective(sel: Selector, opts: ReadOpts = {}): EffectiveAgentConfig {
   const config = resolveAgentConfig(sel, opts);
@@ -286,7 +302,14 @@ export function resolveEffective(sel: Selector, opts: ReadOpts = {}): EffectiveA
     permissionMode: config.permissionMode,
     roles: config.roles,
   };
-  return mergeBehaviorIntoEffective(effective, sel, opts);
+  return normalizeEffectiveCompatibility(mergeBehaviorIntoEffective(effective, sel, opts));
+}
+
+function normalizeEffectiveCompatibility<T extends EffectiveAgentConfig>(effective: T): T {
+  if ((effective as any).dispatch === 'all' || (effective as any).dispatch === 'none') {
+    (effective as any).dispatch = 'broadcast';
+  }
+  return effective;
 }
 
 // ── 字段 → target 路由（按 schema 归属判定）──────────────────────────────────
@@ -300,18 +323,74 @@ export interface FieldRoute {
   enum?: string[];
 }
 
+type ConfigScope = 'process' | 'defaults' | 'agent' | 'relation';
+
+const BEHAVIOR_TOP_FIELDS = new Set([
+  'active_baseagent',
+  'chatmode',
+  'flush_delay',
+  'debounce',
+  'dispatch',
+  'show_activities',
+  'proactive',
+  'render',
+  'enable_rich_content',
+  'permissionMode',
+  'roles',
+]);
+
+const BASEAGENT_BEHAVIOR_FIELDS = new Set([
+  'model',
+  'effort',
+  'reasoning',
+  'agentProgressSummaries',
+  'excludeDynamicSections',
+  'enableRequestUserInput',
+  'approvalsReviewer',
+  'mode',
+  'useVertex',
+]);
+
 /**
  * 给定 selector 作用域 + 顶层字段名，判定写入落点。
- * 所有参数统一在 config.json。
+ * 兼容旧调用：仅按顶层字段路由。新写入请优先使用 routeFieldPath()。
  */
 export function routeField(
   topField: string,
-  scope: 'process' | 'defaults' | 'agent' | 'relation',
+  scope: ConfigScope,
 ): FieldRoute {
+  return routeFieldPath(topField, scope);
+}
+
+/**
+ * 给定 selector 作用域 + 完整字段路径，判定 canonical 写入落点。
+ * H 字段写 config/defaults/evolclaw；HA 行为字段写 behavior.json。
+ */
+export function routeFieldPath(
+  fieldPath: string,
+  scope: ConfigScope,
+): FieldRoute {
+  const topField = fieldPath.split('.')[0];
   if (scope === 'process') return routeIn('evolclaw', ConfigTarget.Process, topField);
   if (scope === 'defaults') return routeIn('defaults', ConfigTarget.Defaults, topField);
+
+  if (isBehaviorFieldPath(fieldPath)) {
+    const target = scope === 'relation' ? ConfigTarget.RelationBehavior : ConfigTarget.Behavior;
+    return routeIn('behavior', target, topField);
+  }
+
   if (scope === 'agent') return routeIn('agent-config', ConfigTarget.Agent, topField);
   return routeIn('relation-config', ConfigTarget.Relation, topField);
+}
+
+function isBehaviorFieldPath(fieldPath: string): boolean {
+  const parts = fieldPath.split('.');
+  const top = parts[0];
+  if (top === 'baseagents') {
+    const field = parts[2];
+    return !!field && BASEAGENT_BEHAVIOR_FIELDS.has(field);
+  }
+  return BEHAVIOR_TOP_FIELDS.has(top);
 }
 
 function routeIn(name: LogicalSchemaName, target: ConfigTarget, topField: string): FieldRoute {
@@ -326,7 +405,7 @@ function mkRoute(s: SchemaEntry, target: ConfigTarget, topField: string): FieldR
 }
 
 /** 列出某作用域下所有可设字段（ec config fields 用）。 */
-export function listFields(scope: 'process' | 'defaults' | 'agent' | 'relation'): FieldRoute[] {
+export function listFields(scope: ConfigScope): FieldRoute[] {
   const out: FieldRoute[] = [];
   const add = (name: LogicalSchemaName, target: ConfigTarget) => {
     const s = loadSchema(name);
@@ -334,8 +413,14 @@ export function listFields(scope: 'process' | 'defaults' | 'agent' | 'relation')
   };
   if (scope === 'process') { add('evolclaw', ConfigTarget.Process); return out; }
   if (scope === 'defaults') { add('defaults', ConfigTarget.Defaults); return out; }
-  if (scope === 'agent') { add('agent-config', ConfigTarget.Agent); return out; }
-  add('relation-config', ConfigTarget.Relation); return out;
+  if (scope === 'agent') {
+    add('agent-config', ConfigTarget.Agent);
+    add('behavior', ConfigTarget.Behavior);
+    return out;
+  }
+  add('relation-config', ConfigTarget.Relation);
+  add('behavior', ConfigTarget.RelationBehavior);
+  return out;
 }
 
 export { ConfigTarget as Target };

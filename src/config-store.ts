@@ -88,6 +88,10 @@ export interface EvolclawConfig {
   tunnel?: TunnelConfig;
   aun?: EvolclawAunConfig;   // 从旧 config.json 迁入
   serviceProxy?: ServiceProxyConfig;  // AUN Service Proxy：把本地服务暴露到 AUN 网络
+  idleMonitor?: {
+    enabled?: boolean;
+    timeout?: number;
+  };
   ecweb?: {
     enabled?: boolean;        // true = evolclaw start 时自动后台启动 ecweb
     port?: number;            // 监听端口，默认 42705

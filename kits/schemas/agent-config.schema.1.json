@@ -101,8 +101,8 @@
     },
     "dispatch": {
       "type": "string",
-      "enum": ["all", "mention", "none"],
-      "description": "群聊响应策略：all=所有消息, mention=仅@时, none=不响应",
+      "enum": ["mention", "broadcast"],
+      "description": "群聊响应策略：mention=仅@时, broadcast=广播消息也响应",
       "x-merge": "scalar"
     },
     "extra_backup": {

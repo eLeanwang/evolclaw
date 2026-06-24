@@ -3,7 +3,7 @@ import path from 'path';
 import readline from 'readline';
 import { resolvePaths, agentMdPath as getAgentMdPathFromPaths, aunPath as defaultAunPath } from '../paths.js';
 import { loadDefaults, loadAllAgents, loadAgent, saveAgent, ensureAgentDirSkeleton } from '../config-store.js';
-import { ConfigTarget, write as cfgWrite, ensureFile as cfgEnsure, read as cfgRead, routeField, initConfigManager } from '../config/config-manager.js';
+import { ConfigTarget, write as cfgWrite, ensureFile as cfgEnsure, read as cfgRead, routeFieldPath, resolveEffective, initConfigManager } from '../config/config-manager.js';
 import { ipcQuery } from '../ipc.js';
 import { CONFIG_SCHEMA_VERSION } from '../types.js';
 import type { AgentConfig, ChannelInstance } from '../types.js';
@@ -170,9 +170,10 @@ function saveInitialBehavior(aid: string, baseagent: Baseagent): void {
     chatmode: { ...DEFAULT_CHATMODE },
     dispatch: DEFAULT_DISPATCH,
   };
-  // 读取现有 config，合并写入
-  const existingConfig = cfgRead(ConfigTarget.Agent, { self: aid }) || {};
-  cfgWrite(ConfigTarget.Agent, { ...existingConfig, ...behavior }, { self: aid });
+  const sel = { self: aid };
+  const existingBehavior = cfgRead(ConfigTarget.Behavior, sel) || {};
+  cfgEnsure(ConfigTarget.Behavior, sel);
+  cfgWrite(ConfigTarget.Behavior, { ...existingBehavior, ...behavior }, sel);
 }
 
 function readAgentMdIdentity(aid: string): { name: string | null; description: string | null } {
@@ -995,7 +996,7 @@ async function agentSetEnabled(aid: string, enabled: boolean): Promise<AgentResu
 // ==================== agentGet / agentSet ====================
 //
 // addendum D2：`ec agent get/set <aid> <key>` 是 `ec config get/set --self <aid>` 的
-// 位置参数别名。内部走 ConfigManager，统一在 config.json 中。
+// 位置参数别名。内部走 ConfigManager，按字段 owner 写入 H 或 HA。
 
 export async function agentGet(aid: string, key: string): Promise<AgentResult<AgentGetResult>> {
   const p = resolvePaths();
@@ -1004,10 +1005,8 @@ export async function agentGet(aid: string, key: string): Promise<AgentResult<Ag
   }
   try {
     initConfigManager();
-    const top = key.split('.')[0];
-    const route = routeField(top, 'agent');
-    const cfg = cfgRead<Record<string, any>>(route.target, { self: aid }) || {};
-    const value = getNestedValue(cfg, key);
+    routeFieldPath(key, 'agent');
+    const value = getNestedValue(resolveEffective({ self: aid }) as any, key);
     return { ok: true, aid, key, value };
   } catch (e: any) {
     return { ok: false, error: e?.message || String(e) };
@@ -1031,8 +1030,7 @@ export async function agentSet(aid: string, key: string, rawValue: string): Prom
 
   try {
     initConfigManager();
-    const top = key.split('.')[0];
-    const route = routeField(top, 'agent');  // 路由到正确的 target
+    const route = routeFieldPath(key, 'agent');  // 路由到 canonical target
     const cur = cfgRead<Record<string, any>>(route.target, { self: aid }) || {};
     setNestedValue(cur, key, value);
     cfgEnsure(route.target, { self: aid });

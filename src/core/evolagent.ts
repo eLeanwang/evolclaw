@@ -210,7 +210,7 @@ export class EvolAgent {
 
   // ── Baseagent 字段写入 ────────────────────────────
 
-  /** 切换当前活跃 baseagent（写 config.active_baseagent）。 */
+  /** 切换当前活跃 baseagent（写 behavior.active_baseagent）。 */
   setActiveBaseagent(value: string | undefined): void {
     this.merged.active_baseagent = value;
     this.mutateBehavior(b => {
@@ -369,12 +369,12 @@ export class EvolAgent {
     saveAgent(this.rawAgent);
   }
 
-  /** 读改写 agent 级 config.json（走 ConfigManager 唯一写入口）。 */
+  /** 读改写 agent 级 behavior.json（走 ConfigManager 唯一写入口）。 */
   private mutateBehavior(fn: (b: AgentConfig) => void): void {
     const sel = { self: this.aid };
-    const cur = (cfgRead<AgentConfig>(ConfigTarget.Agent, sel) as AgentConfig) || {};
+    const cur = (cfgRead<AgentConfig>(ConfigTarget.Behavior, sel) as AgentConfig) || {};
     fn(cur);
-    cfgEnsure(ConfigTarget.Agent, sel);
-    cfgWrite(ConfigTarget.Agent, cur, sel);
+    cfgEnsure(ConfigTarget.Behavior, sel);
+    cfgWrite(ConfigTarget.Behavior, cur, sel);
   }
 }

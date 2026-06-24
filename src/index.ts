@@ -485,9 +485,9 @@ async function main() {
     logger.warn(`[startup] ${agentRuntimeError} Control Plane will remain available.`);
   }
 
-  // 进程级设置（从 defaults 取，不属于任何 agent）
+  // 进程级设置：idleMonitor 属于 evolclaw.json；debug 继续沿用 defaults 的现有行为。
   const globalSettings: import('./types.js').GlobalSettings = {
-    idleMonitor: (defaults as any).idleMonitor,
+    idleMonitor: evolclawCfg.idleMonitor,
     debug: (defaults as any).debug,
   };
 
@@ -548,10 +548,11 @@ async function main() {
   // 初始化 SessionManager（文件系统后端）
   const sessionManager = new SessionManager(paths.sessionsDir, eventBus,
     (channel, userId) => agentRegistry.isOwner(channel, userId),
-    (channel, userId) => agentRegistry.isAdmin(channel, userId)
+    (channel, userId) => agentRegistry.isAdmin(channel, userId),
+    (channel) => agentRegistry.resolveByChannel(channel)?.config.chatmode,
   );
 
-  // chatMode 已写死在 resolveDefaultSessionMode 中（session-manager.ts），不再读 agent config
+  // chatMode 作为新 session 初始值读取 owning agent effective config；已有 session 保持自身状态。
   logger.info('✓ Database initialized');
 
   // 注册会话文件适配器（Claude / Codex 各自的会话文件操作）
