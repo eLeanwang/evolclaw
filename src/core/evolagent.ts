@@ -5,8 +5,10 @@ import { formatChannelKey, tryParseChannelKey } from './channel-loader.js';
 import { agentPersonalDir } from '../paths.js';
 import { fileCache } from './daemon-file-cache.js';
 import { ConfigTarget, read as cfgRead, write as cfgWrite, ensureFile as cfgEnsure, resolveEffective } from '../config/config-manager.js';
+import { withLifecycleForWrite } from '../config/lifecycle.js';
 import type {
   AgentConfig,
+  AgentLifecycle,
   EffectiveAgentConfig,
   ChannelInstance,
   AgentContext,
@@ -272,6 +274,14 @@ export class EvolAgent {
     if (value) this.rawAgent.observable = true;
     else delete this.rawAgent.observable;
     this.merged.observable = value;
+    this.persist();
+  }
+
+  setLifecycle(value: AgentLifecycle): void {
+    this.rawAgent = withLifecycleForWrite(this.rawAgent, value) as AgentConfig;
+    this.rawAgent.$schema_version = Math.max(this.rawAgent.$schema_version || 0, this.merged.$schema_version || 0);
+    this.merged.lifecycle = value;
+    delete this.merged.initialized;
     this.persist();
   }
 

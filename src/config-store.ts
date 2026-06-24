@@ -39,6 +39,7 @@ import { CONFIG_SCHEMA_VERSION } from './types.js';
 import { resolveAgentConfig, resolveEffective } from './config/config-manager.js';
 import { expandVars, buildEnvResolver } from './config/merge.js';
 import { mergeBehaviorIntoEffective } from './config/behavior.js';
+import { normalizeAgentLifecycle } from './config/lifecycle.js';
 import { logger } from './utils/logger.js';
 
 // ── 进程级配置（{root}/evolclaw.json）─────────────────────────────────────
@@ -257,7 +258,7 @@ export function loadAgent(aid: string): AgentConfig | null {
   if (raw.aid !== aid) {
     throw new Error(`[config] ${p}: aid field "${raw.aid}" != directory name "${aid}"`);
   }
-  const cfg = expandEnvRefsForAgent(raw, aid);
+  const cfg = normalizeAgentLifecycle(expandEnvRefsForAgent(raw, aid));
   if (cfg.projects?.defaultPath) {
     cfg.projects.defaultPath = cfg.projects.defaultPath.replace(/[/\\]+$/, '');
   }

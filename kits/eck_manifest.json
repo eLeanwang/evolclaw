@@ -11,12 +11,24 @@
       "description": "ECK 核心规则（自动加载）"
     },
     {
+      "id": "bootstrap-guide",
+      "type": "file",
+      "file": "$KITS_FRAGMENTS/bootstrap.md",
+      "order": 15,
+      "needsInjection": true,
+      "when": { "var": "lifecycle", "eq": "bootstrapping" },
+      "description": "Bootstrap 阶段专属引导提示词"
+    },
+    {
       "id": "identity-layer",
       "type": "file",
       "file": "$KITS_FRAGMENTS/identity.md",
       "order": 20,
       "needsInjection": true,
-      "when": { "var": "chatType", "neq": null },
+      "when": { "and": [
+        { "var": "chatType", "neq": null },
+        { "var": "lifecycle", "neq": "bootstrapping" }
+      ] },
       "description": "身份层：我是谁"
     },
     {
@@ -25,7 +37,10 @@
       "file": "$PERSONAL_DIR/persona.md",
       "order": 21,
       "needsInjection": false,
-      "when": { "var": "chatType", "neq": null },
+      "when": { "and": [
+        { "var": "chatType", "neq": null },
+        { "var": "lifecycle", "neq": "bootstrapping" }
+      ] },
       "description": "人格档案（persona.md）"
     },
     {
@@ -34,7 +49,10 @@
       "file": "$PERSONAL_DIR/memory/working.md",
       "order": 22,
       "needsInjection": false,
-      "when": { "var": "chatType", "neq": null },
+      "when": { "and": [
+        { "var": "chatType", "neq": null },
+        { "var": "lifecycle", "neq": "bootstrapping" }
+      ] },
       "description": "当前关注（working memory）"
     },
     {
@@ -43,7 +61,10 @@
       "file": "$KITS_FRAGMENTS/relation.md",
       "order": 30,
       "needsInjection": true,
-      "when": { "var": "chatType", "in": ["private", "group"] },
+      "when": { "and": [
+        { "var": "chatType", "in": ["private", "group"] },
+        { "var": "lifecycle", "neq": "bootstrapping" }
+      ] },
       "description": "关系层：跟我聊天的是谁"
     },
     {
@@ -52,7 +73,10 @@
       "file": "$RELATIONS_DIR/{{peerKey}}/profile.md",
       "order": 35,
       "needsInjection": false,
-      "when": { "var": "peerKey", "neq": null },
+      "when": { "and": [
+        { "var": "peerKey", "neq": null },
+        { "var": "lifecycle", "neq": "bootstrapping" }
+      ] },
       "description": "当前对端的关系档案"
     },
     {
@@ -61,7 +85,10 @@
       "file": "$KITS_FRAGMENTS/venue.md",
       "order": 40,
       "needsInjection": true,
-      "when": { "var": "chatType", "neq": null },
+      "when": { "and": [
+        { "var": "chatType", "neq": null },
+        { "var": "lifecycle", "neq": "bootstrapping" }
+      ] },
       "description": "环境层模板（基础参数）"
     },
     {
@@ -70,7 +97,10 @@
       "file": "$KITS_DOCS/venues/{{chatType}}.md",
       "order": 41,
       "needsInjection": false,
-      "when": { "var": "chatType", "neq": null },
+      "when": { "and": [
+        { "var": "chatType", "neq": null },
+        { "var": "lifecycle", "neq": "bootstrapping" }
+      ] },
       "description": "场景通用文档（private/group）"
     },
     {
@@ -79,7 +109,10 @@
       "file": "$KITS_DOCS/venues/{{channel}}-{{chatType}}.md",
       "order": 42,
       "needsInjection": false,
-      "when": { "var": "chatType", "neq": null },
+      "when": { "and": [
+        { "var": "chatType", "neq": null },
+        { "var": "lifecycle", "neq": "bootstrapping" }
+      ] },
       "description": "渠道+场景文档（如 feishu-group）"
     },
     {
@@ -88,7 +121,10 @@
       "file": "$VENUES_DIR/{{channel}}#{{groupId}}/profile.md",
       "order": 43,
       "needsInjection": false,
-      "when": { "var": "groupId", "neq": null },
+      "when": { "and": [
+        { "var": "groupId", "neq": null },
+        { "var": "lifecycle", "neq": "bootstrapping" }
+      ] },
       "description": "具体群环境文档"
     },
     {
@@ -97,7 +133,10 @@
       "file": "$KITS_DOCS/venues/client-{{clientType}}.md",
       "order": 44,
       "needsInjection": false,
-      "when": { "var": "clientType", "neq": null },
+      "when": { "and": [
+        { "var": "clientType", "neq": null },
+        { "var": "lifecycle", "neq": "bootstrapping" }
+      ] },
       "description": "客户端环境文档"
     },
     {

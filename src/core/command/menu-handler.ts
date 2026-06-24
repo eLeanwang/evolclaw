@@ -988,7 +988,13 @@ export async function execMenuQuery(this: any,
       if (fp2?.version) data.fastaunVersion = fp2.version;
     } catch {}
     const channels = owningAgent?.channelInstanceNames?.() ?? [];
-    if (channels.length) data.channels = channels;
+    if (channels.length) {
+      // 将 channelKey 字符串（如 "feishu#aid#name"）解析为对象 { type, instName }
+      data.channels = channels.map((key: string) => {
+        const parts = key.split('#');
+        return { type: parts[0], instName: parts[2] || parts[0] };
+      });
+    }
     return { data };
   }
 

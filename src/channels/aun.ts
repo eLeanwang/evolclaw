@@ -11,7 +11,7 @@ import { resolveShowActivities, showActivitiesPolicy } from '../core/channel-loa
 import type { MessageBridge } from '../core/message/message-bridge.js';
 import type { ReplyContext, AunChannelInstance as AunInst, AidConnectionState, AidStatus, AidKickDetail, InteractionResponse, ActionInteraction, CommandCard, InboundMessage } from '../types.js';
 import { resolvePaths, getPackageRoot, agentMdPath as agentMdPathFn, agentDir as agentDirPath, resolveRoot } from '../paths.js';
-import { saveToUploads, sanitizeFileName, bufferToInboundImage, type InboundImage } from '../utils/media-cache.js';
+import { saveToUploads, sanitizeFileName, bufferToInboundImage, safeFetch, type InboundImage } from '../utils/media-cache.js';
 import { appendAidEvent } from '../utils/instance-registry.js';
 import { appendMessageLog, buildOutboundEntry, buildInboundEntry } from '../core/message/message-log.js';
 import { chatDirPath } from '../core/session/session-fs-store.js';
@@ -216,7 +216,7 @@ export class AUNChannel {
    * 统一的 RPC 调用包装：自动记录 OUT 发送、.ok 结果、.error 错误（含 trace + evolclaw.log 失败日志）。
    * 所有 client.call() 都应通过此方法调用，保证 aun-trace 里每个 OUT 调用都有"发+收/错"成对记录。
    */
-  private async callAndTrace<T = any>(method: string, params: Record<string, any>, opts?: { silentOk?: boolean }): Promise<T> {
+  private async callAndTrace<T = any>(method: string, params: Record<string, any>, opts?: { silentOk?: boolean; silentError?: boolean }): Promise<T> {
     this.trace('OUT', method, params);
     try {
       const result = await this.client!.call(method, params);
@@ -234,7 +234,9 @@ export class AUNChannel {
         code: e?.code,
         name: e?.name,
       });
-      logger.warn(`${this.logPrefix()} rpc ${method} failed: ${e?.name ?? ''}(${e?.code ?? ''}) ${e?.message ?? e}`);
+      if (!opts?.silentError) {
+        logger.warn(`${this.logPrefix()} rpc ${method} failed: ${e?.name ?? ''}(${e?.code ?? ''}) ${e?.message ?? e}`);
+      }
       throw e;
     }
   }
@@ -1108,10 +1110,10 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
   }
 
   private async downloadAttachment(
-    att: { owner_aid?: string; object_key: string; filename?: string; sha256?: string; url?: string },
+    att: { owner_aid?: string; bucket?: string; object_key: string; filename?: string; sha256?: string; url?: string },
     channelId: string
   ): Promise<string | null> {
-    const ownerAid = att.owner_aid || this._aid || '';
+    const ownerAid = att.owner_aid || (!this.isGroupId(channelId) ? channelId : '') || this._aid || '';
     const objectKey = att.object_key;
 
     if (!objectKey) {
@@ -1120,36 +1122,62 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     }
 
     const filename = att.filename || objectKey.split('/').pop() || 'unknown';
+    const fallbackUrl = this.trustedAttachmentUrl(att, ownerAid, objectKey);
+    const token = fallbackUrl ? this.extractAttachmentUrlToken(fallbackUrl) : '';
 
-    // 安全：始终通过受信任的 ticket 路径获取下载 URL。
-    // 不信任 att.url（来自对端消息 payload，可被构造为内网/元数据地址，SSRF）。
     let downloadUrl = '';
     try {
-      const ticket = await this.callAndTrace<Record<string, unknown>>('storage.create_download_ticket', {
+      const ticketParams: Record<string, unknown> = {
         owner_aid: ownerAid,
         object_key: objectKey,
-      });
+      };
+      if (att.bucket) ticketParams.bucket = att.bucket;
+      if (token) ticketParams.token = token;
+
+      const ticket = await this.callAndTrace<Record<string, unknown>>(
+        'storage.create_download_ticket',
+        ticketParams,
+        { silentError: !!fallbackUrl },
+      );
       downloadUrl = (ticket.download_url as string) || '';
       if (!downloadUrl) {
-        logger.warn(`${this.logPrefix()} No download_url for attachment: ${filename}`);
-        return null;
+        if (fallbackUrl) {
+          logger.debug(`${this.logPrefix()} No download_url for attachment: ${filename}, using payload URL fallback`);
+        } else {
+          logger.warn(`${this.logPrefix()} No download_url for attachment: ${filename}`);
+        }
       }
     } catch (e) {
-      logger.warn(`${this.logPrefix()} create_download_ticket failed for ${filename}: ${e}`);
-      return null;
+      if (fallbackUrl) {
+        logger.debug(`${this.logPrefix()} create_download_ticket failed for ${filename}, using payload URL fallback: ${e}`);
+      } else {
+        logger.warn(`${this.logPrefix()} create_download_ticket failed for ${filename}: ${e}`);
+      }
     }
 
     let buffer: Buffer;
-    try {
-      const res = await fetch(downloadUrl);
-      if (!res.ok) {
-        logger.warn(`${this.logPrefix()} Download failed for ${filename}: HTTP ${res.status}`);
+    if (downloadUrl) {
+      try {
+        const res = await fetch(downloadUrl);
+        if (!res.ok) {
+          logger.warn(`${this.logPrefix()} Download failed for ${filename}: HTTP ${res.status}`);
+          return null;
+        }
+        buffer = Buffer.from(await res.arrayBuffer());
+      } catch (e) {
+        logger.warn(`${this.logPrefix()} Download error for ${filename}: ${e}`);
         return null;
       }
-      buffer = Buffer.from(await res.arrayBuffer());
-    } catch (e) {
-      logger.warn(`${this.logPrefix()} Download error for ${filename}: ${e}`);
-      return null;
+    } else {
+      if (!fallbackUrl) return null;
+      try {
+        const host = new URL(fallbackUrl).hostname;
+        buffer = await safeFetch(fallbackUrl, { allowedHosts: new Set([host]) });
+        logger.info(`${this.logPrefix()} Downloaded attachment via payload URL fallback: ${filename}`);
+      } catch (e) {
+        logger.warn(`${this.logPrefix()} Payload URL fallback failed for ${filename}: ${e}`);
+        return null;
+      }
     }
 
     if (att.sha256) {
@@ -1172,6 +1200,77 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     } catch (e) {
       logger.warn(`${this.logPrefix()} saveToUploads failed for ${filename}: ${e}`);
       return null;
+    }
+  }
+
+  private extractAttachmentUrlToken(url: string): string {
+    try {
+      return new URL(url).searchParams.get('t') || '';
+    } catch {
+      return '';
+    }
+  }
+
+  private trustedAttachmentUrl(
+    att: { url?: string },
+    ownerAid: string,
+    objectKey: string,
+  ): string | null {
+    const rawUrl = typeof att.url === 'string' ? att.url.trim() : '';
+    if (!rawUrl) return null;
+
+    let parsed: URL;
+    try {
+      parsed = new URL(rawUrl);
+    } catch {
+      logger.warn(`${this.logPrefix()} Reject attachment payload URL fallback: invalid URL`);
+      return null;
+    }
+
+    if (parsed.protocol !== 'https:') {
+      logger.warn(`${this.logPrefix()} Reject attachment payload URL fallback: non-https protocol ${parsed.protocol}`);
+      return null;
+    }
+
+    const host = parsed.hostname.toLowerCase();
+    if (host === 'localhost' || host.endsWith('.localhost')) {
+      logger.warn(`${this.logPrefix()} Reject attachment payload URL fallback: local host ${host}`);
+      return null;
+    }
+
+    const normalizedOwner = ownerAid.trim().toLowerCase();
+    const normalizedObjectKey = objectKey.replace(/^\/+/, '');
+    const decodedPath = this.decodeUrlPath(parsed.pathname).replace(/^\/+/, '');
+
+    if (normalizedOwner && host === normalizedOwner) {
+      if (decodedPath === normalizedObjectKey) return rawUrl;
+      logger.warn(`${this.logPrefix()} Reject attachment payload URL fallback: path does not match object_key`);
+      return null;
+    }
+
+    if (this.isTrustedStorageHost(host, normalizedOwner)) {
+      const key = parsed.searchParams.get('key')?.replace(/^\/+/, '') ?? '';
+      if (key && key === normalizedObjectKey) return rawUrl;
+      if (!key && decodedPath.endsWith(`/${normalizedObjectKey}`)) return rawUrl;
+      logger.warn(`${this.logPrefix()} Reject attachment payload URL fallback: storage URL key does not match object_key`);
+      return null;
+    }
+
+    logger.warn(`${this.logPrefix()} Reject attachment payload URL fallback: host ${host} does not match owner ${normalizedOwner || '<empty>'}`);
+    return null;
+  }
+
+  private isTrustedStorageHost(host: string, normalizedOwner: string): boolean {
+    if (host === 'storage.agentid.pub') return true;
+    const issuer = normalizedOwner.includes('.') ? normalizedOwner.split('.').slice(1).join('.') : '';
+    return !!issuer && host === `storage.${issuer}`;
+  }
+
+  private decodeUrlPath(pathname: string): string {
+    try {
+      return decodeURIComponent(pathname);
+    } catch {
+      return pathname;
     }
   }
 
@@ -2294,7 +2393,11 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       ? !!(context.metadata.encrypted)
       : this.shouldEncrypt(encryptTarget);
     const method = isGroup ? 'group.send' : 'message.send';
-    const params: Record<string, any> = { payload, encrypt };
+
+    // Truncate payload if too large (AUN SDK limit: 1MB)
+    const truncatedPayload = this.truncatePayloadIfNeeded(payload, label);
+
+    const params: Record<string, any> = { payload: truncatedPayload, encrypt };
     if (isGroup) params.group_id = channelId;
     else params.to = targetAid;
 
@@ -2439,6 +2542,84 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     if (item?.kind === 'tool_result') return `[tool_result] ${item.name ?? ''} ${item.ok === false ? 'failed' : 'ok'}`.trim();
     if (item?.kind) return `[activity:${item.kind}]`;
     return '[activity]';
+  }
+
+  /**
+   * Truncate payload if it exceeds AUN protocol limits.
+   * AUN SDK enforces MAX_WS_PAYLOAD_SIZE = 1_000_000 bytes (1MB) for the entire JSON-RPC message.
+   * We use a conservative 800KB limit for the payload itself to leave room for RPC envelope.
+   */
+  private truncatePayloadIfNeeded(payload: Record<string, any>, label: string): Record<string, any> {
+    const MAX_PAYLOAD_SIZE = 800 * 1024; // 800KB conservative limit
+    const MAX_FIELD_SIZE = 256 * 1024;   // 256KB per field
+
+    // First check total size
+    const payloadJson = JSON.stringify(payload);
+    const totalSize = Buffer.byteLength(payloadJson, 'utf-8');
+
+    if (totalSize <= MAX_PAYLOAD_SIZE) {
+      return payload; // No truncation needed
+    }
+
+    logger.warn(`${this.logPrefix()} Payload too large (${formatSize(totalSize)}), truncating... label=${label}`);
+
+    // Deep clone to avoid mutating original
+    const truncated = JSON.parse(payloadJson) as Record<string, any>;
+
+    // Truncate large string fields recursively
+    const truncateObject = (obj: any, path: string): boolean => {
+      if (!obj || typeof obj !== 'object') return false;
+
+      let changed = false;
+
+      for (const key of Object.keys(obj)) {
+        const value = obj[key];
+        const fieldPath = path ? `${path}.${key}` : key;
+
+        if (typeof value === 'string') {
+          const fieldSize = Buffer.byteLength(value, 'utf-8');
+          if (fieldSize > MAX_FIELD_SIZE) {
+            const truncatedValue = value.substring(0, MAX_FIELD_SIZE / 4); // Rough estimate, UTF-8 safe
+            const actualTruncatedSize = Buffer.byteLength(truncatedValue, 'utf-8');
+            obj[key] = truncatedValue + `\n\n[截断：原始输出 ${formatSize(fieldSize)}，仅显示前 ${formatSize(actualTruncatedSize)}]`;
+            obj[`${key}_truncated`] = true;
+            logger.info(`${this.logPrefix()} Truncated field ${fieldPath}: ${formatSize(fieldSize)} → ${formatSize(actualTruncatedSize)}`);
+            changed = true;
+          }
+        } else if (Array.isArray(value)) {
+          for (let i = 0; i < value.length; i++) {
+            if (truncateObject(value[i], `${fieldPath}[${i}]`)) {
+              changed = true;
+            }
+          }
+        } else if (typeof value === 'object' && value !== null) {
+          if (truncateObject(value, fieldPath)) {
+            changed = true;
+          }
+        }
+      }
+
+      return changed;
+    };
+
+    truncateObject(truncated, '');
+
+    // Check size again after truncation
+    const newJson = JSON.stringify(truncated);
+    const newSize = Buffer.byteLength(newJson, 'utf-8');
+
+    if (newSize > MAX_PAYLOAD_SIZE) {
+      // Still too large - this shouldn't happen with 256KB field limit, but log it
+      logger.error(`${this.logPrefix()} Payload still too large after truncation: ${formatSize(newSize)}, dropping payload`);
+      return {
+        type: 'error',
+        error: 'Payload too large and could not be truncated safely',
+        original_size: totalSize,
+      };
+    }
+
+    logger.info(`${this.logPrefix()} Payload truncated: ${formatSize(totalSize)} → ${formatSize(newSize)}`);
+    return truncated;
   }
 
   buildActivityPayload(envelope: any, context: ReplyContext | undefined, item: unknown): Record<string, any> {

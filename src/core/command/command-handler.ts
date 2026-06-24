@@ -1612,7 +1612,7 @@ export class CommandHandler {
 
       // 无参数时返回用法
       if (!arg) {
-        return { ok: true, result: `用法:\n  /agent list              列出所有 agent\n  /agent show [name]       查看 agent 详情\n  /agent enable <name>     启用 agent\n  /agent disable <name>    停用 agent\n  /agent get <name> <key>  读取配置字段\n  /agent set <name> <key> <val>  修改配置字段\n  /agent rename <name> <newname> 修改名称\n  /agent reload [name]     热重载配置` };
+        return { ok: true, result: `用法:\n  /agent list              列出所有 agent\n  /agent show [name]       查看 agent 详情\n  /agent enable <name>     启用 agent\n  /agent disable <name>    停用 agent\n  /agent get <name> <key>  读取配置字段\n  /agent set <name> <key> <val>  修改配置字段\n  /agent reload [name]     热重载配置` };
       }
 
       const parts = arg.split(/\s+/);

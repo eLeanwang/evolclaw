@@ -27,6 +27,7 @@ import { buildEnvelope } from './core/message/message-utils.js';
 import { ResponseEngine } from './core/message/response-engine.js';
 import { MessageQueue } from './core/message/message-queue.js';
 import { MessageBridge } from './core/message/message-bridge.js';
+import { BootstrapService } from './core/bootstrap-service.js';
 import { MessageCache } from './core/message/message-cache.js';
 import { CommandHandler, isProcessLevelOwner } from './core/command/command-handler.js';
 import { EventBus, GatewayEvent } from './core/event-bus.js';
@@ -812,6 +813,8 @@ async function main() {
     ?? path.join(paths.root, 'projects', 'default');
   const msgBridge = new MessageBridge(defaultProjectPath, sessionManager, processor, messageQueue, cmdHandler, eventBus, primaryAgent?.config.debounce);
   msgBridge.setAgentRegistry(agentRegistry);
+  const bootstrapService = new BootstrapService(agentRegistry, eventBus);
+  msgBridge.setBootstrapService(bootstrapService);
 
   // ── Channel instance registration (shared by startup and hot-load) ──
 
@@ -1083,6 +1086,12 @@ async function main() {
     // Run async operations in parallel
     const agent = agentRegistry.resolveByChannel(inst.adapter.channelKey) ?? agentRegistry.resolveByChannel(name);
     await Promise.all([
+      bootstrapService.tryStartBootstrap({
+        adapter: inst.adapter,
+        channelKey: inst.adapter.channelKey,
+        channelType: inst.channelType || type,
+        source: 'connected',
+      }),
       agent ? ensureTriggerSchedulerStarted(agent) : Promise.resolve(),
       Promise.resolve().then(() => sendOnlineNoticeForChannel(inst)),
       trySendPendingRestartNotice(),
@@ -1366,6 +1375,7 @@ async function main() {
 
   // M3: direct call (not cast) — wire EvolAgentRegistry into IPC for evolagent.* handlers
   ipcServer.setAgentRegistry(agentRegistry);
+  ipcServer.setEventBus(eventBus);
   ipcServer.setMenuExecutor((payload) => cmdHandler.execMenuForEcweb(payload));
   if (bindService) {
     ipcServer.setBindExecutor({

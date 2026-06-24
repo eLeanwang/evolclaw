@@ -159,7 +159,6 @@ JSON 输出约定：
 | `agent disable <aid>` | `config.json`（写 `enabled: false`）+ IPC reload | 停用 agent | ❌ 缺 |
 | `agent get <aid> <key>` | `config.json`（读单字段） | 读取单个配置字段 | ❌ 缺 |
 | `agent set <aid> <key> <value>` | `config.json`（写单字段）+ IPC reload | 修改单个配置字段 | ❌ 缺 |
-| `agent rename <aid> <new-name>` | `~/.aun/AIDs/<aid>/agent.md`（改 name 字段 + 重新上传） | 修改 agent 名称 | ❌ 缺 |
 
 `agent get/set` 支持点路径，例如：
 ```
@@ -278,7 +277,6 @@ if (formatJson) { console.log(JSON.stringify(result)); return; }
 1. `agent enable / disable` — 改一个字段 + reload
 2. `agent get / set` — 支持点路径读写
 3. `agent delete` — IPC 下线 + 文件删除
-4. `agent rename` — 解析和修改 agent.md frontmatter + 重新上传
 
 ### Phase 4：扩展 `agent show` 输出
 
@@ -318,7 +316,6 @@ evolclaw agent enable <aid>           启用 agent
 evolclaw agent disable <aid>          停用 agent
 evolclaw agent get <aid> <key>        读取单个配置字段（支持点路径）
 evolclaw agent set <aid> <key> <val>  修改单个配置字段（支持点路径）
-evolclaw agent rename <aid> <name>    修改 agent 名称（更新 agent.md 并重新上传）
 
 ### 生命周期
 evolclaw agent reload                 全量 resync

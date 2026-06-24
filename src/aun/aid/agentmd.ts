@@ -9,10 +9,79 @@ export interface AgentmdGetResult {
   verification: { status: 'verified' | 'invalid' | 'unsigned'; reason?: string };
 }
 
+export interface FrontmatterUpdateResult {
+  content: string;
+  changed: boolean;
+}
+
 export function buildInitialAgentMd(opts: { aid: string; type?: string }): string {
   const agentName = opts.aid.split('.')[0];
   const agentType = opts.type || 'ai';
   return `---\naid: "${opts.aid}"\nname: "${agentName}"\ntype: "${agentType}"\nversion: "1.0.0"\ndescription: ""\ntags:\n  - evolclaw\n---\n`;
+}
+
+function ensureTrailingNewline(content: string): string {
+  return content.endsWith('\n') ? content : `${content}\n`;
+}
+
+function lineValue(line: string): string {
+  return line.replace(/\r?\n$/, '');
+}
+
+function lineEnding(line: string, fallback: string): string {
+  return line.match(/\r?\n$/)?.[0] ?? fallback;
+}
+
+function yamlDoubleQuote(value: string): string {
+  return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+}
+
+/**
+ * Remove the SDK-generated trailing signature block before modifying agent.md.
+ * Only a block at EOF is stripped, so body text that mentions AUN-SIGNATURE is preserved.
+ */
+export function stripAgentMdSignature(content: string): string {
+  const signature = content.match(/(?:\r?\n)?<!-- AUN-SIGNATURE[\s\S]*?-->\s*$/);
+  if (!signature || signature.index === undefined) return ensureTrailingNewline(content);
+  return ensureTrailingNewline(content.slice(0, signature.index));
+}
+
+export function updateAgentMdFrontmatterAvatar(content: string, avatarUrl: string): FrontmatterUpdateResult {
+  const original = content;
+  const payload = stripAgentMdSignature(content);
+  const lines = payload.match(/[^\n]*\n|[^\n]+$/g) ?? [];
+  const openLine = lines[0];
+
+  if (!openLine || lineValue(openLine) !== '---') {
+    throw new Error('agent.md has no YAML frontmatter');
+  }
+
+  const closeIndex = lines.findIndex((line, index) => index > 0 && lineValue(line) === '---');
+  if (closeIndex < 0) {
+    throw new Error('agent.md frontmatter is not closed');
+  }
+
+  const defaultEol = lineEnding(openLine, '\n');
+  const fmLines = lines.slice(1, closeIndex);
+  const avatarLine = `avatar: ${yamlDoubleQuote(avatarUrl)}${defaultEol}`;
+  const avatarIndex = fmLines.findIndex(line => /^avatar\s*:/.test(lineValue(line)));
+
+  if (avatarIndex >= 0) {
+    const existingLine = fmLines[avatarIndex] ?? '';
+    fmLines[avatarIndex] = `avatar: ${yamlDoubleQuote(avatarUrl)}${lineEnding(existingLine, defaultEol)}`;
+  } else {
+    const versionIndex = fmLines.findIndex(line => /^version\s*:/.test(lineValue(line)));
+    const insertIndex = versionIndex >= 0 ? versionIndex + 1 : fmLines.length;
+    fmLines.splice(insertIndex, 0, avatarLine);
+  }
+
+  const updated = ensureTrailingNewline([
+    lines[0],
+    ...fmLines,
+    ...lines.slice(closeIndex),
+  ].join(''));
+
+  return { content: updated, changed: updated !== original };
 }
 
 /** Normalize an SDK verification result to the local union type. */
