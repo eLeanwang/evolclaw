@@ -15,6 +15,7 @@ import path from 'path';
 import { loadAgent, saveAgent } from '../../config-store.js';
 import { CreateStatusWriter, readCreateStatus, type CreatePhase } from './create-status.js';
 import { deriveAgentProjectPath } from '../../utils/project-path.js';
+import type { EventBus } from '../event-bus.js';
 
 export type ExecResult = { data: any } | { error: string; code: string };
 
@@ -33,6 +34,7 @@ function classifyError(error: string): string {
 async function runCreateInBackground(opts: {
   aid: string; name: string; baseagent: string; project: string; owner: string;
   model?: string; chatmode?: any;
+  eventBus?: EventBus;
 }): Promise<void> {
   const agentDir = path.join(resolvePaths().agentsDir, opts.aid);
   const w = new CreateStatusWriter(agentDir, opts.aid);
@@ -72,11 +74,21 @@ async function runCreateInBackground(opts: {
       else w.done('applying_config');
     }
     w.finishReady();
+    opts.eventBus?.publish({
+      type: 'agent:created',
+      aid: opts.aid,
+      name: opts.name,
+      baseagent: opts.baseagent,
+      projectPath: opts.project,
+      owner: opts.owner,
+      timestamp: Date.now(),
+    });
     logger.info(`[agent-control] create ${opts.aid} ready`);
   } catch (e: any) {
     const msg = e?.message || String(e);
     logger.warn(`[agent-control] create ${opts.aid} threw at ${curPhase}: ${msg}`);
     w.finishFailed(curPhase, msg);   // 兜底终态，标注真实失败环节
+    opts.eventBus?.publish({ type: 'agent:error', aid: opts.aid, action: 'create', error: msg, timestamp: Date.now() });
   }
 }
 
@@ -87,6 +99,7 @@ export async function execAgentAction(
   action: string,
   args: Record<string, any> | undefined,
   peerId: string,
+  eventBus?: EventBus,
 ): Promise<ExecResult> {
   const a = args ?? {};
 
@@ -105,6 +118,7 @@ export async function execAgentAction(
       aid: a.aid, name: a.name, baseagent: a.baseagent,
       project: a.project, owner: peerId,
       model: a.model, chatmode: a.chatmode,
+      eventBus,
     }).catch(e => logger.error(`[agent-control] runCreateInBackground unhandled ${a.aid}: ${e?.message || e}`));
     return { data: { accepted: true, aid: a.aid } };
   }
@@ -113,6 +127,7 @@ export async function execAgentAction(
     if (!a.aid) return { error: '缺少 aid', code: 'INVALID_ARGS' };
     const res = await agentDelete(a.aid, false);
     if (!('ok' in res) || res.ok !== true) return { error: (res as any).error, code: classifyError((res as any).error) };
+    eventBus?.publish({ type: 'agent:deleted', aid: res.aid, purged: res.purged, timestamp: Date.now() });
     return { data: { aid: res.aid, purged: res.purged } };
   }
 
@@ -120,6 +135,12 @@ export async function execAgentAction(
     if (!a.aid) return { error: '缺少 aid', code: 'INVALID_ARGS' };
     const res = action === 'enable' ? await agentEnable(a.aid) : await agentDisable(a.aid);
     if (!('ok' in res) || res.ok !== true) return { error: (res as any).error, code: classifyError((res as any).error) };
+    eventBus?.publish({
+      type: action === 'enable' ? 'agent:enabled' : 'agent:disabled',
+      aid: res.aid,
+      reloaded: res.reloaded,
+      timestamp: Date.now(),
+    });
     return { data: { aid: res.aid, enabled: res.enabled, reloaded: res.reloaded } };
   }
 
@@ -127,11 +148,16 @@ export async function execAgentAction(
     if (!a.aid) return { error: '缺少 aid', code: 'INVALID_ARGS' };
     const res = await agentReload(a.aid);
     if (!('ok' in res) || res.ok !== true) return { error: (res as any).error, code: classifyError((res as any).error) };
+    eventBus?.publish({ type: 'agent:reloaded', aid: a.aid, timestamp: Date.now() });
     return { data: { aid: a.aid, reloaded: true } };
   }
 
   if (action === 'update') {
-    return await execAgentUpdate(a);
+    const result = await execAgentUpdate(a);
+    if (!('error' in result)) {
+      eventBus?.publish({ type: 'agent:updated', aid: a.aid, timestamp: Date.now() });
+    }
+    return result;
   }
 
   return { error: `不支持的 action: ${action}`, code: 'INVALID_ARGS' };

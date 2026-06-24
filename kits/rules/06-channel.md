@@ -33,21 +33,13 @@
 
 ## 命令集
 
-所有命令以 `ec` 为前缀，以自己的 AID 为发送者。下表是静态总览；
-**运行时按当前场景（有无对端/群、对端角色）注入的精简能力卡由 `commands` fragment 决定**
-（见动态注入的 `[commands]` 段）。完整目录（含触发词与适用场景）：`$KITS_DOCS/evolclaw/INDEX.md`。
-单个命令集的详细用法按需 Read 对应文档。
+**重要**：遇到明确触发词（费用/用量/统计/创建/查群等）时，优先查 `$KITS_DOCS/evolclaw/INDEX.md` 
+或直接试对应 ec 命令。`[commands]` 段仅列常用命令，完整目录在 INDEX.md。
 
-| 命令集 | 用途 | 触发词 | 详细文档 |
-|--------|------|--------|----------|
-| `ec msg` | 私聊收发消息 | 回复/发消息/拉取/撤回 | `$KITS_DOCS/evolclaw/msg.md` |
-| `ec group` | 群聊收发与群管理 | 群发/建群/邀请/踢人 | `$KITS_DOCS/evolclaw/group.md` |
-| `ec agent` | EvolAgent 生命周期 | 创建/启用禁用/热重载/改配置 | `$KITS_DOCS/evolclaw/agent.md` |
-| `ec aid` | AID 身份管理 | 身份/证书/名片/探测对端 | `$KITS_DOCS/evolclaw/aid.md` |
-| `ec storage` | 文件存储 | 上传/下载/配额 | `$KITS_DOCS/evolclaw/storage.md` |
-| `ec ctl` | 会话运行时自管理 | 切模型/推理强度/压缩/重启 | `$KITS_DOCS/evolclaw/ctl.md` |
-| `ec model` | 模型管理（按作用域持久化） | 切模型/列模型/改强度 | `$KITS_DOCS/evolclaw/model.md` |
-| `ec rpc` | 底层 AUN RPC（逃生通道） | 直接调协议方法 | `$KITS_DOCS/evolclaw/rpc.md` |
+所有命令以 `ec` 为前缀，以自己的 AID 为发送者。**运行时按当前场景（有无对端/群、对端角色）注入的精简能力卡由 `commands` fragment 决定**（见动态注入的 `[commands]` 段）。
+
+**完整命令集目录（含分类、触发词、适用场景）**：`$KITS_DOCS/evolclaw/INDEX.md`。
+单个命令集的详细用法按需 Read 对应文档。
 
 共同约定：
 - 以自己的 AID 为发送者

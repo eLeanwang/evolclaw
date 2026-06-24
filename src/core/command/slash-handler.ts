@@ -2,7 +2,7 @@ import { type InteractionRequest, type OutboundPayload, type ReplyContext, type 
 import type { PermissionDecision } from '../permission.js';
 import { hasModelSwitcher, hasPermissionController } from '../../agents/runner-types.js';
 import { getCodexEfforts } from '../../agents/codex-runner.js';
-import { buildEnvelope } from '../message/message-processor.js';
+import { buildEnvelope } from '../message/message-utils.js';
 import { resolvePaths, getPackageRoot } from '../../paths.js';
 import { logger } from '../../utils/logger.js';
 import crypto from 'crypto';
@@ -617,8 +617,17 @@ export async function handleSlashCommand(this: any,
       return { kind: 'command.error' as const, text: '❌ 当前 channel 无绑定 agent，无法设置默认 baseagent' };
     }
 
-    const currentSessionAgent = activeSession?.baseagent || owningAgent.baseagent || this.parseDefaultBaseagent();
+    const previousDefaultBaseagent = owningAgent.baseagent || this.parseDefaultBaseagent();
+    const currentSessionAgent = activeSession?.baseagent || previousDefaultBaseagent;
     owningAgent.setActiveBaseagent(args);
+    this.eventBus.publish({
+      type: 'agent:baseagent-changed',
+      aid: owningAgent.aid,
+      baseagent: args,
+      previousBaseagent: previousDefaultBaseagent,
+      scope: 'default',
+      timestamp: Date.now(),
+    });
     const projectName = this.getProjectName(owningAgent.projectPath);
     const agentSwitchResponse = [
       `✓ 已设置默认 baseagent: ${args}`,
@@ -795,7 +804,10 @@ export async function handleSlashCommand(this: any,
       this.eventBus.publish({
         type: 'runner:model-changed',
         sessionId: modelSession.id,
+        agentName: this.agentRegistry?.resolveByChannel(channel)?.name,
+        baseagent: modelSession.baseagent,
         model: newModel,
+        effort: newEffort,
         timestamp: Date.now()
       });
       changes.push(`模型: ${newModel}`);
@@ -803,6 +815,16 @@ export async function handleSlashCommand(this: any,
 
     if (newEffort) {
       modelAgent.setEffort?.(newEffort);
+      if (!newModel) {
+        this.eventBus.publish({
+          type: 'runner:model-changed',
+          sessionId: modelSession.id,
+          agentName: this.agentRegistry?.resolveByChannel(channel)?.name,
+          baseagent: modelSession.baseagent,
+          effort: newEffort,
+          timestamp: Date.now(),
+        });
+      }
       changes.push(`推理强度: ${newEffort}`);
     }
 
@@ -891,6 +913,14 @@ export async function handleSlashCommand(this: any,
       effortAgent.setEffort?.(undefined);
       const err = this.persistBaseagentEffort(channel, effortAgent.name, undefined);
       if (err) return { kind: 'command.result' as const, text: `${err}\n已更新运行时配置，但未持久化` };
+      this.eventBus.publish({
+        type: 'runner:model-changed',
+        sessionId: effortSession.id,
+        agentName: this.agentRegistry?.resolveByChannel(channel)?.name,
+        baseagent: effortSession.baseagent,
+        effort: 'auto',
+        timestamp: Date.now(),
+      });
       if (this.shouldSuppressCardTriggerResult(source, channel)) return null;
       return { kind: 'command.result' as const, text: '✓ 推理强度已恢复为 auto (SDK默认)' };
     }
@@ -908,6 +938,14 @@ export async function handleSlashCommand(this: any,
 
     const err = this.persistBaseagentEffort(channel, effortAgent.name, newEffort);
     if (err) return { kind: 'command.result' as const, text: `${err}\n已更新运行时配置，但未持久化` };
+    this.eventBus.publish({
+      type: 'runner:model-changed',
+      sessionId: effortSession.id,
+      agentName: this.agentRegistry?.resolveByChannel(channel)?.name,
+      baseagent: effortSession.baseagent,
+      effort: newEffort,
+      timestamp: Date.now(),
+    });
 
     if (this.shouldSuppressCardTriggerResult(source, channel)) return null;
     return { kind: 'command.result' as const, text: `✓ 推理强度: ${newEffort}` };
@@ -944,7 +982,7 @@ export async function handleSlashCommand(this: any,
       return { kind: 'command.error' as const, text: `❌ 该 Agent 有 ${busyInfo.count} 个任务执行中，无法 reload。\n\n处理中：\n${processingLines}\n\n等待任务完成后重试，通常 30-60 秒。` };
     }
 
-    const res = await execAgentAction('reload', { aid: targetAid }, userId ?? '');
+    const res = await execAgentAction('reload', { aid: targetAid }, userId ?? '', this.eventBus);
     if ('error' in res) return { kind: 'command.error' as const, text: `❌ reload 失败：${res.error}` };
     return { kind: 'command.result' as const, text: `✅ Agent ${targetAid} 配置已重载` };
   }
@@ -1434,16 +1472,6 @@ export async function handleSlashCommand(this: any,
       this.agentRegistry?.resolveByChannel(channel)?.baseagent || session?.baseagent || this.parseDefaultBaseagent()
     );
 
-    this.eventBus.publish({
-      type: 'session:created',
-      sessionId: newSession.id,
-      channel,
-      channelId,
-      projectPath,
-      name: sessionName,
-      timestamp: Date.now()
-    });
-
     const previousAgent = getActiveAgentIfAvailable();
     if (session && previousAgent) {
       // Reset agent backend state so the new
@@ -1657,8 +1685,12 @@ export async function handleSlashCommand(this: any,
       return { kind: 'command.error' as const, text: '❌ 无权限：服务重启仅限 daemon owner 使用' };
     }
     const selfAid = this.agentRegistry?.resolveByChannel(channel)?.aid;
-    const busyInfo = getAgentBusyInfo(this, selfAid, activeSession?.id);
+    // 排除当前会话（如果存在）。如果 activeSession 不存在，说明还没建立会话，
+    // 此时检查所有任务；如果有其他会话在处理，仍然阻塞重启。
+    const excludeKey = activeSession?.id;
+    const busyInfo = getAgentBusyInfo(this, selfAid, excludeKey);
     if (busyInfo && busyInfo.count > 0) {
+      // busyInfo.count > 0 说明【除当前会话外】还有其他会话的任务在执行
       const processingLines = busyInfo.processing.map(p => {
         const keyParts = p.queueKey.split('::');
         const sessionId = keyParts[0] || '?';
@@ -1666,7 +1698,7 @@ export async function handleSlashCommand(this: any,
       }).join('\n');
       return {
         kind: 'command.error' as const,
-        text: `❌ 该 Agent 有 ${busyInfo.count} 个任务执行中，无法重启。\n\n处理中的会话：\n${processingLines}\n\n建议：等待这些任务完成后重试。可通过 ec ctl status 查看队列状态；典型等待时间 30-60 秒，群聊大型任务可能更长。`,
+        text: `❌ ${excludeKey ? '其他会话' : '该 Agent'} 有 ${busyInfo.count} 个任务执行中，无法重启。\n\n处理中的会话：\n${processingLines}\n\n建议：等待这些任务完成后重试。可通过 ec ctl status 查看队列状态；典型等待时间 30-60 秒，群聊大型任务可能更长。`,
       };
     }
     const allSessions = await this.sessionManager.listSessions(channel, channelId);

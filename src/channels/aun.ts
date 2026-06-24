@@ -102,6 +102,8 @@ export interface AUNDispatchOptions {
   threadId?: string;
   mentions?: Array<{ userId: string; name?: string }>;
   mentionAids?: string[];
+  /** 是否 @ 了本 agent（群聊场景）。由 Channel 标记，响应模式据此判断是否响应。 */
+  isMentioned?: boolean;
   replyContext?: ReplyContext;
   source?: 'user' | 'card-trigger';
   images?: Array<{ data: string; mimeType: string }>;
@@ -1450,11 +1452,16 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       logger.info(`${this.logPrefix()} Group dropped: echo bomb (already-traced group=${groupId} sender=${senderAid} mid=${messageId})`);
       return;
     } else {
-      // 非 echo 消息：mention 过滤
+      // 非 echo 消息：mention 标记（不再过滤，交给响应模式决定）
       // 命令豁免 broadcast：slash 命令在任何 dispatchMode 下都强制走 mention 语义，
       // 即必须 @ 本 agent（或 @all）才处理，避免广播群里一条命令被全部 agent 各自执行。
       const enforceMention = dispatchMode === 'mention' || isCommandMsg;
-      if (enforceMention && !mentionedSelf && !mentionedAll) {
+      const isMentioned = mentionedSelf || mentionedAll;
+
+      // 过滤逻辑下移到响应层：这里只标记，不过滤
+      // 但为了保持现有行为兼容（避免大量未 @ 消息涌入），暂时保留过滤
+      // TODO: Phase 6 实施 selective-response 模式后，移除此过滤，只保留 isMentioned 标记
+      if (enforceMention && !isMentioned) {
         this.acknowledgeImmediately(messageId, seq);
         logger.info(`${this.logPrefix()} Group dropped: unmentioned (group=${groupId} sender=${senderAid} mid=${messageId} mode=${dispatchMode} isCommand=${isCommandMsg} textPreview=${JSON.stringify(text.slice(0, 80))})`);
         return;
@@ -1534,6 +1541,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       threadId,
       mentions,
       mentionAids: renderMentionAids.length > 0 ? renderMentionAids : undefined,
+      isMentioned: mentionedSelf || mentionedAll,  // ← 新增：标记是否 @ 了本 agent
       encrypted: msgEncrypted,
       replyContext: this.buildGroupReplyContext(threadId, senderAid, msgEncrypted, messageId, msgChatmode),
       dispatchMode: serverDispatchMode,
@@ -1549,6 +1557,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     encrypted?: boolean;
     seq?: number; threadId?: string; mentions?: string[];
     mentionAids?: string[];
+    isMentioned?: boolean;  // ← 新增：是否 @ 了本 agent（群聊场景）
     replyContext?: ReplyContext;
     groupId?: string;
     source?: 'user' | 'card-trigger';
@@ -1627,6 +1636,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       threadId: event.threadId,
       mentions: mentionObjects,
       mentionAids: event.mentionAids,
+      isMentioned: event.isMentioned,  // ← 新增：传递 isMentioned 标记
       replyContext,
       source: event.source,
       dispatchMode: event.dispatchMode,

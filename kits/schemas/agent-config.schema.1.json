@@ -105,6 +105,17 @@
       "description": "群聊响应策略：mention=仅@时, broadcast=广播消息也响应",
       "x-merge": "scalar"
     },
+    "response_modes": {
+      "type": "object",
+      "description": "响应模式配置（响应系统插件化）。default_private/default_group/configs/overrides 按第一层键合并",
+      "x-merge": "dict",
+      "properties": {
+        "default_private": { "type": "string", "description": "单聊默认响应模式 id" },
+        "default_group": { "type": "string", "description": "群聊默认响应模式 id" },
+        "configs": { "type": "object", "description": "各模式配置参数（modeId → 配置对象）" },
+        "overrides": { "type": "object", "description": "按对端/群覆盖（peerKey → {mode, config}）" }
+      }
+    },
     "extra_backup": {
       "type": "array",
       "description": "快照额外备份文件声明（不得指向 .env）",

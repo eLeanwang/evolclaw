@@ -1,3 +1,6 @@
+// Suppress AUN SDK logs BEFORE any imports (SDK may initialize during module load)
+process.env.AUN_LOG_INI_DISABLE = '1';
+
 import fs from 'fs';
 import path from 'path';
 import { resolvePaths, getPackageRoot } from '../paths.js';
@@ -183,6 +186,11 @@ export async function main(args: string[]) {
       await cmdModel(args.slice(1));
       break;
     }
+    case 'response': {
+      const { cmdResponse } = await import('./response.js');
+      await cmdResponse(args.slice(1));
+      break;
+    }
     case 'config': {
       const { cmdConfig } = await import('./config.js');
       await cmdConfig(args.slice(1));
@@ -265,6 +273,14 @@ Commands:
                   model effort <lv>  设置推理强度
                   model reset        清除指定作用域设置，回落上一级
                   model help         查看完整用法
+  response      响应模式管理（查看/切换/配置，作用域：全局/agent/关系）
+                  response list      列出所有响应模式
+                  response current   显示当前作用域生效的默认模式
+                  response info <id> 查看单个模式详情（场景/配置参数）
+                  response set <id>  设置默认模式（--scene private/group）
+                  response config    查看/修改模式配置参数
+                  response reset     清除指定作用域设置
+                  response help      查看完整用法
   aid           AID 身份管理
                   aid list           列出本地所有 AID
                   aid show <aid>     查看本地 AID 详情（证书有效期、私钥状态）

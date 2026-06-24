@@ -292,6 +292,7 @@ export function resolveEffective(sel: Selector, opts: ReadOpts = {}): EffectiveA
     active_baseagent: config.active_baseagent,
     baseagents: config.baseagents,
     chatmode: config.chatmode,
+    response_modes: config.response_modes,
     flush_delay: config.flush_delay,
     debounce: config.debounce,
     dispatch: config.dispatch,

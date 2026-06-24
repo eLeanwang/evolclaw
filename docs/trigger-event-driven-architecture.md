@@ -393,17 +393,59 @@ $AGENT_DIR/state/
 
 ## 五、事件目录
 
-### 5.1 MVP 事件目录（基于当前 `src/core/event-bus.ts`）
+### 5.1 事件目录（基于当前 `src/core/event-bus.ts`）
 
 | 事件名 | 载荷 | 触发时机 |
 |--------|------|---------|
-| `message:received` | `{ sessionId, channel, channelName?, channelId, content, userId?, agentName?, timestamp? }` | 消息到达 |
-| `message:sent-out` | `{ agentName, channelId, taskId? }` | 消息输出完成的轻量事件 |
-| `task:completed` | `{ sessionId, channel, channelName?, channelId, finalText?, durationMs?, terminalReason?, agentName?, numTurns?, timestamp? }` | agent 任务完成，可作为“消息发出/回复完成”的更完整事件 |
-| `session:created` | `{ sessionId, channel, channelName?, channelId, projectPath?, name?, chatType?, threadId?, timestamp? }` | 会话创建 |
-| `session:switched` | `{ sessionId, fromSessionId, toSessionId }` | 会话切换 |
+| `system:started` | `{ channels, timestamp }` | 系统启动完成 |
+| `system:shutdown` | `{ reason?, timestamp? }` | 系统关闭 |
+| `system:restart` | `{ channel, channelId }` | 当前运行时请求重启 |
 | `channel:connected` | `{ channel, channelName?, timestamp? }` | 渠道连接成功 |
 | `channel:disconnected` | `{ channel, channelName?, reason? }` | 渠道断开 |
+| `channel:error` | `{ channel, channelName?, status, message, timestamp? }` | 渠道错误 |
+| `channel:owner-bound` | `{ channel, channelName?, userId }` | 渠道 owner 绑定 |
+| `session:created` | `{ sessionId, channel, channelName?, channelId, projectPath?, name?, chatType?, threadId?, timestamp? }` | 会话创建 |
+| `session:switched` | `{ sessionId, fromSessionId, toSessionId }` | 会话切换 |
+| `session:deleted` | `{ sessionId }` | 会话删除 |
+| `session:renamed` | `{ sessionId, oldName, newName }` | 会话重命名 |
+| `session:forked` | `{ sessionId, sourceSessionId, name? }` | 会话 fork |
+| `session:rewind` | `{ sessionId, turnNum, mode }` | 会话回退 |
+| `session:imported` | `{ sessionId, agentSessionId, projectPath }` | 导入 agent 会话 |
+| `session:chat-mode-changed` | `{ sessionId, mode, timestamp? }` | chat mode 修改 |
+| `session:dispatch-mode-changed` | `{ sessionId, mode, timestamp? }` | dispatch mode 修改 |
+| `message:received` | `{ sessionId, channel, channelName?, channelId, content, userId?, agentName?, timestamp? }` | 消息到达 |
+| `message:text` | `{ sessionId, text, isFinal }` | agent 文本流输出 |
+| `message:thought-put` | `{ agentName, channelId, taskId?, text? }` | agent thought/progress 输出 |
+| `task:started` | `{ sessionId, agentName?, encrypt?, chatmode? }` | agent 任务开始 |
+| `task:queued` | `{ channel, channelId, replyContext? }` | 任务入队 |
+| `task:completed` | `{ sessionId, channel, channelName?, channelId, finalText?, durationMs?, terminalReason?, agentName?, numTurns?, timestamp? }` | agent 任务完成，可作为“消息发出/回复完成”的更完整事件 |
+| `task:error` | `{ sessionId, error, errorType, terminalReason?, agentName? }` | agent 任务失败 |
+| `task:interrupted` | `{ sessionId, reason?, agentName? }` | agent 任务被中断 |
+| `tool:use` | `{ sessionId, toolName, input, timestamp? }` | 工具调用开始 |
+| `tool:result` | `{ sessionId, toolName, isError?, agentName?, timestamp? }` | 工具调用结束 |
+| `permission:requested` | `{ sessionId, requestId, toolName, input }` | 权限请求创建 |
+| `permission:resolved` | `{ sessionId, requestId, approved }` | 权限请求被批准/拒绝 |
+| `permission:cancelled` | `{ sessionId, requestId, toolName?, reason? }` | pending 权限请求被取消 |
+| `runner:compact-start` | `{ sessionId }` | runner 开始压缩 |
+| `runner:compact-complete` | `{ sessionId, preTokens }` | runner 压缩完成 |
+| `runner:model-changed` | `{ sessionId?, agentName?, baseagent?, model?, effort?, timestamp? }` | 模型或推理强度修改 |
+| `runner:idle-timeout` / `runner:idle-notify` / `runner:idle-warn` | `{ sessionId, idleSec, ... }` | runner 空闲监控 |
+| `runner:file-sent` | `{ sessionId, filePath, channel, channelName? }` | 文件发送完成 |
+| `runner:state-changed` | `{ sessionId, state }` | runner 状态变化 |
+| `runner:status` | `{ sessionId, subtype, message, timestamp? }` | runner 状态消息 |
+| `self-heal:started` / `self-heal:attempt` / `self-heal:completed` | `{ ... }` | 自愈流程状态 |
+| `trigger:registered` | `{ triggerId, name, peerId?, targetChannel?, targetChannelId?, scheduleType, scheduleValue, timestamp? }` | trigger 创建 |
+| `trigger:updated` | `{ triggerId, name, peerId?, scheduleType, scheduleValue, timestamp? }` | trigger 更新 |
+| `trigger:fired` | `{ triggerId, name, runId, originTriggerId, fireTime, targetChannel?, targetChannelId?, scheduleType, timestamp? }` | trigger run 开始 |
+| `trigger:completed` | `{ triggerId, name, runId, originTriggerId, messageId, durationMs, targetChannel, targetChannelId, fireTime }` | trigger run 完成 |
+| `trigger:failed` | `{ triggerId, name, runId, originTriggerId, messageId, error, targetChannel, targetChannelId, fireTime, phase }` | trigger run 失败 |
+| `trigger:skipped` | `{ triggerId, name, runId, originTriggerId, reason, targetChannel, targetChannelId, fireTime? }` | trigger run 跳过 |
+| `trigger:cancelled` | `{ triggerId, name, by }` | trigger 被取消 |
+| `agent:created` / `agent:updated` / `agent:reloaded` | `{ aid, ... }` | agent 配置生命周期 |
+| `agent:enabled` / `agent:disabled` / `agent:deleted` | `{ aid, ... }` | agent 启停配置变化 |
+| `agent:started` / `agent:stopped` | `{ aid, timestamp? }` | agent 运行态启动/停止 |
+| `agent:error` | `{ aid, action?, error, timestamp? }` | agent 操作失败 |
+| `agent:baseagent-changed` | `{ aid, baseagent, previousBaseagent?, scope, timestamp? }` | agent 默认 baseagent 修改 |
 
 字段命名以现有事件类型为准：当前代码使用 `channel` 表示渠道类型或 channel key 的业务字段，不使用 `channelType`；`message:received.content` 当前是字符串，不是 `{ text }` 对象。需要更友好的别名时，应先在事件生产端补字段并同步事件目录，不能只在 trigger 文档中假设存在。
 
@@ -411,10 +453,7 @@ $AGENT_DIR/state/
 
 | 事件名 | 载荷 | 触发时机 |
 |--------|------|---------|
-| `agent:started` | `{ agentAid, startedAt }` | agent 启动 |
-| `agent:stopped` | `{ agentAid, stoppedAt }` | agent 停止 |
 | `session:idle` | `{ sessionId, idleMinutes }` | 会话空闲 N 分钟 |
-| `trigger:fired` | `{ triggerId, runId }` | trigger 触发（可再触发其他 trigger，需防环） |
 | `channel:peer-online` | `{ peerId, channel }` | 对端上线（AUN 特有） |
 | `channel:peer-offline` | `{ peerId, channel }` | 对端下线（AUN 特有） |
 | `channel:group-member-added` | `{ groupId, peerId }` | 群成员加入 |
@@ -1090,7 +1129,6 @@ interface TriggerFeedbackDispatchInput {
 5. 扩展 `startRun()` 的 source payload 传递和模板上下文，让 `{{event.*}}` 可用
 6. 对齐并验证现有核心事件：
    - `message:received`
-   - `message:sent-out`
    - `task:completed`
    - `session:created`
    - `session:switched`

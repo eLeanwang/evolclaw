@@ -52,6 +52,7 @@ export class TriggerRuntimeScheduler {
   private running = new Map<string, Map<string, RunningRun>>();
   private eventSource?: TriggerEventSource;
   private initialized = false;
+  private eventBus?: EventBus;
 
   constructor(
     private manager: TriggerDefinitionManager,
@@ -61,6 +62,7 @@ export class TriggerRuntimeScheduler {
     private feedback: TriggerFeedbackDispatcher,
     eventBus?: EventBus,
   ) {
+    this.eventBus = eventBus;
     if (eventBus) {
       this.eventSource = new TriggerEventSource(eventBus, (triggerId, event) => {
         void this.fireEventTrigger(triggerId, event);
@@ -111,6 +113,7 @@ export class TriggerRuntimeScheduler {
     const definition = this.manager.create(input, files, opts);
     this.state.clearSchedule(definition.id);
     if (definition.enabled && this.initialized) this.schedule(definition);
+    this.publishTriggerDefinitionEvent('trigger:registered', definition);
     return definition;
   }
 
@@ -120,6 +123,7 @@ export class TriggerRuntimeScheduler {
     this.unregisterEvent(triggerId);
     this.state.clearSchedule(triggerId);
     if (definition.enabled && this.initialized) this.schedule(definition);
+    this.publishTriggerDefinitionEvent('trigger:updated', definition);
     return definition;
   }
 
@@ -240,6 +244,18 @@ export class TriggerRuntimeScheduler {
     if (!payload.dryRun) {
       this.addRunning(definition.id, runId, { run: activeRun, controller });
       this.state.upsert(definition.id, activeRun);
+      this.eventBus?.publish({
+        type: 'trigger:fired',
+        triggerId: definition.id,
+        name: definition.name,
+        runId,
+        originTriggerId: definition.id,
+        fireTime: firedAt,
+        targetChannel: definition.session.channelKey,
+        targetChannelId: definition.session.channelId,
+        scheduleType: definition.source.type,
+        timestamp: Date.now(),
+      });
     }
 
     let script: TriggerScriptResult | null = null;
@@ -306,6 +322,7 @@ export class TriggerRuntimeScheduler {
 
       if (!payload.dryRun) {
         this.audit.write(audit);
+        this.publishTriggerRunOutcome(definition, audit);
         this.finishRun(definition.id, runId);
       }
 
@@ -335,6 +352,7 @@ export class TriggerRuntimeScheduler {
       });
       if (!payload.dryRun) {
         this.audit.write(audit);
+        this.publishTriggerRunOutcome(definition, audit);
         this.finishRun(definition.id, runId);
       }
       return { ok: false, runId, triggerId: definition.id, status: 'failed', reason: 'daemon_error', audit, error: message };
@@ -429,7 +447,7 @@ export class TriggerRuntimeScheduler {
     const conflictRunId = first?.run.runId;
 
     if (definition.reliability.concurrency === 'forbid') {
-      this.writeSkippedAudit(definition, source.scheduledAt, source.firedAt, 'concurrency_forbid', conflictRunId);
+      this.writeSkippedAudit(definition, source.scheduledAt, source.firedAt, 'concurrency_forbid', conflictRunId, nextRunId);
       return {
         ok: true,
         runId: nextRunId,
@@ -454,6 +472,7 @@ export class TriggerRuntimeScheduler {
         error: { code: 'replaced', message: `run replaced by ${nextRunId}` },
       });
       this.audit.write(audit);
+      this.publishTriggerRunOutcome(definition, audit);
       this.state.remove(definition.id, runId);
     }
     this.running.delete(definition.id);
@@ -603,10 +622,10 @@ export class TriggerRuntimeScheduler {
     };
   }
 
-  private writeSkippedAudit(definition: TriggerDefinition, scheduledAt: number | undefined, firedAt: number, reason: string, conflictRunId?: string): void {
-    this.audit.write(this.buildAudit({
+  private writeSkippedAudit(definition: TriggerDefinition, scheduledAt: number | undefined, firedAt: number, reason: string, conflictRunId?: string, runId = `run_${firedAt}_${crypto.randomBytes(3).toString('hex')}`): void {
+    const audit = this.buildAudit({
       definition,
-      runId: `run_${firedAt}_${crypto.randomBytes(3).toString('hex')}`,
+      runId,
       startedAt: firedAt,
       status: 'skipped',
       reason,
@@ -616,7 +635,9 @@ export class TriggerRuntimeScheduler {
       effects: [],
       error: null,
       conflictRunId,
-    }));
+    });
+    this.audit.write(audit);
+    this.publishTriggerRunOutcome(definition, audit);
   }
 
   private isOneShot(source: TriggerSource): boolean {
@@ -672,6 +693,84 @@ export class TriggerRuntimeScheduler {
       firedAt: event.firedAt,
       payload: event.payload,
     });
+  }
+
+  private publishTriggerDefinitionEvent(type: 'trigger:registered' | 'trigger:updated', definition: TriggerDefinition): void {
+    this.eventBus?.publish({
+      type,
+      triggerId: definition.id,
+      name: definition.name,
+      peerId: definition.origin?.peerId,
+      targetChannel: definition.session.channelKey,
+      targetChannelId: definition.session.channelId,
+      scheduleType: definition.source.type,
+      scheduleValue: this.sourceScheduleValue(definition.source),
+      timestamp: Date.now(),
+    });
+  }
+
+  private publishTriggerRunOutcome(definition: TriggerDefinition, audit: TriggerAuditRecord): void {
+    if (!this.eventBus || audit.status === 'dry-run') return;
+
+    const agentSessionQueued = audit.effects.some(effect =>
+      effect.type === 'agent-session.enqueue' && effect.status === 'success'
+    );
+    if (agentSessionQueued && (audit.status === 'completed' || audit.status === 'noop')) {
+      return;
+    }
+
+    const base = {
+      triggerId: definition.id,
+      name: definition.name,
+      runId: audit.runId,
+      originTriggerId: definition.id,
+      targetChannel: definition.session.channelKey,
+      targetChannelId: definition.session.channelId,
+      fireTime: audit.source.firedAt,
+    };
+
+    if (audit.status === 'completed' || audit.status === 'noop') {
+      this.eventBus.publish({
+        type: 'trigger:completed',
+        ...base,
+        messageId: this.triggerOutcomeMessageId(audit),
+        durationMs: Math.max(0, audit.finishedAt - audit.startedAt),
+      });
+      return;
+    }
+
+    if (audit.status === 'failed') {
+      this.eventBus.publish({
+        type: 'trigger:failed',
+        ...base,
+        messageId: this.triggerOutcomeMessageId(audit),
+        error: audit.error?.message ?? audit.reason ?? 'trigger failed',
+        phase: 'execute',
+      });
+      return;
+    }
+
+    if (audit.status === 'skipped') {
+      this.eventBus.publish({
+        type: 'trigger:skipped',
+        ...base,
+        reason: audit.reason ?? 'skipped',
+      });
+    }
+  }
+
+  private triggerOutcomeMessageId(audit: TriggerAuditRecord): string {
+    return audit.effects.find(effect => effect.messageId)?.messageId ?? audit.runId;
+  }
+
+  private sourceScheduleValue(source: TriggerSource): string {
+    switch (source.type) {
+      case 'cron': return source.expression;
+      case 'interval': return `${source.everyMs}ms`;
+      case 'delay': return `${source.afterMs}ms`;
+      case 'at': return String(source.at);
+      case 'event': return source.eventPattern;
+    }
   }
 }
 

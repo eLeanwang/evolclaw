@@ -4,7 +4,7 @@ import { resolveAnthropicConfig } from './baseagent.js';
 import type { Config, InteractionRequest } from '../types.js';
 import { DEFAULT_PERMISSION_MODE } from '../types.js';
 import { renderActionAsText } from '../core/interaction-router.js';
-import { buildEnvelope, sendInteractionPayload } from '../core/message/message-processor.js';
+import { buildEnvelope, sendInteractionPayload } from '../core/message/message-utils.js';
 import type { PermissionGateway, PermissionDecision } from '../core/permission.js';
 import path from 'path';
 import fs from 'fs';

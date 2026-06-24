@@ -222,7 +222,7 @@ export function startServiceProxy(
           logger.info(`${LOG} serveForever 退出: ${JSON.stringify(stats)}`);
         })
         .catch((e: any) => {
-          logger.warn(`${LOG} serveForever 异常退出: ${e?.message || e}`);
+          logger.error(`${LOG} serveForever 异常退出: ${e?.message || e}`);
         });
 
       logger.info(`${LOG} ✓ 已启动，provider=${providerAid}，注册 ${registered} 个服务`);

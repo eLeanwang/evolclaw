@@ -15,7 +15,7 @@ import { resolveOpenaiConfig } from './baseagent.js';
 import { logger } from '../utils/logger.js';
 import { isRetryableError } from '../utils/error-utils.js';
 import { renderActionAsText } from '../core/interaction-router.js';
-import { buildEnvelope, sendInteractionPayload } from '../core/message/message-processor.js';
+import { buildEnvelope, sendInteractionPayload } from '../core/message/message-utils.js';
 import { compareVersions } from '../utils/npm-ops.js';
 import { resolveRoot } from '../paths.js';
 import { execFileSync } from 'child_process';

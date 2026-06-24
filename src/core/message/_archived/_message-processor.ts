@@ -29,7 +29,7 @@ import { insertUsageEvent, insertContextBreakdown, insertModelCalls } from '../.
 import { normalizeUsage } from '../../stats/normalizer.js';
 import { resolvePrices } from '../../stats/price-resolver.js';
 import { getBudgetStatus } from '../../stats/budget.js';
-import { DEFAULT_FLUSH_DELAY_SECONDS } from '../defaults.js';
+import { snapshot } from './response-snapshot.js';
 
 type StreamRunResult = {
   isError: boolean;
@@ -779,7 +779,6 @@ export class MessageProcessor {
     };
 
     const isProactive = effectiveChatMode === 'proactive';
-    const isAutonomous = effectiveChatMode === 'autonomous';
 
     const currentChannelType = options?.channelType || message.channel;
     const adapterAny = channelInfo.adapter as unknown as {
@@ -818,6 +817,16 @@ export class MessageProcessor {
       preTool1stMsgChk: proactiveBehavior.pre_tool_1stmsgchk,
       toolUseReminder: proactiveBehavior.tool_use_reminder,
     } : null;
+
+    // [迁移探针] 记录 chatMode 判定 + proactiveState 构造（防线 1：行为快照）
+    snapshot.begin(session.id, taskId, 'legacy', message.messageId);
+    snapshot.set(session.id, taskId, {
+      chatMode: effectiveChatMode,
+      proactiveState: proactive
+        ? { preTool1stMsgChk: proactive.preTool1stMsgChk, toolUseReminder: proactive.toolUseReminder, chatType: proactive.chatType }
+        : null,
+    });
+
     const envelope = buildEnvelope({
       taskId,
       sessionId: session.id,
@@ -900,17 +909,23 @@ export class MessageProcessor {
       const renderer = new IMRenderer({
         adapter,
         envelope,
-        flushDelay: (options?.flushDelay ?? this.agentRegistry?.resolveByChannel(channelKey)?.config?.flush_delay ?? DEFAULT_FLUSH_DELAY_SECONDS) * 1000,
-        suppressActivities: shouldSuppress() || isAutonomous,
+        flushDelay: (options?.flushDelay ?? this.agentRegistry?.resolveByChannel(channelKey)?.config?.flush_delay ?? 3) * 1000,
+        suppressActivities: shouldSuppress(),
         fileMarkerPattern: options?.fileMarkerPattern,
         diagEnabled: this.globalSettings.debug?.flusherDiag,
         send: async (payload) => {
-          if (isAutonomous || isSilentTrigger) return;  // silent trigger/autonomous session: never send renderer output
+          if (isSilentTrigger) return;  // silent trigger: never send renderer output
           // proactive 模式：activity.batch 是 thought 协议内容，只发给支持 thought 的 channel
           // （不支持 thought 的 channel 静默丢弃，避免降级为普通消息）
-          if (isProactive && payload.kind === 'activity.batch' && !adapter.capabilities?.thought) return;
+          if (isProactive && payload.kind === 'activity.batch' && !adapter.capabilities?.thought) {
+            snapshot.pushOutbound(session.id, taskId, { kind: payload.kind, decision: 'suppressed-thought' });
+            return;
+          }
           const isCurrentlyBackground = this.isBackgroundSession(session, message.channel, message.channelId);
-          if (isCurrentlyBackground) return;
+          if (isCurrentlyBackground) {
+            snapshot.pushOutbound(session.id, taskId, { kind: payload.kind, decision: 'suppressed-bg' });
+            return;
+          }
 
           const opts: ReplyContext = {};
           const baseReplyCtx = this.getReplyContext(message);
@@ -929,6 +944,7 @@ export class MessageProcessor {
 
           if (payload.kind.startsWith('status.')) this.touchAgentActivity(channelKey);
           const enrichedEnvelope: OutboundEnvelope = { ...envelope, replyContext: opts };
+          snapshot.pushOutbound(session.id, taskId, { kind: payload.kind, decision: 'sent' });
           await adapter.send(enrichedEnvelope, payload);
         },
       });
@@ -984,12 +1000,14 @@ export class MessageProcessor {
           if (!proactive.firstToolDone) {
             proactive.firstToolDone = true;
             if (!isAllowedFirstTool) {
+              snapshot.set(session.id, taskId, { policyHook: { triggered: true, blocked: true, toolName } });
               const cmdHint = proactive.chatType === 'group' ? 'ec group send' : 'ec msg send';
               const errorMsg = `⚠️ proactive 模式违规：收到消息后首次工具调用必须是 ${cmdHint} 向${proactive.chatType === 'group' ? '群里' : '对方'}表态，不要闷头干。请重新执行正确的命令。`;
               // 注入回模型上下文，不发给用户/群
               agent.injectUserMessage?.(session.id, errorMsg);
               return { block: true, reason: `请先用 ${cmdHint} 向${proactive.chatType === 'group' ? '群里' : '对方'}说明你的意图，再执行其他工具` };
             }
+            snapshot.set(session.id, taskId, { policyHook: { triggered: true, blocked: false, toolName } });
           }
         } : undefined,
       });
@@ -1411,12 +1429,14 @@ export class MessageProcessor {
       // 注意：始终扫描全部文本（含中间轮），因为文件标记可能出现在任意轮次
       // suppressed 模式下 renderer 只有最后一轮文本，需要用 streamResult.fullText（SDK 全文）兜底
       // proactive 模式：agent 主动调用 ctl file 发送文件，跳过标记处理
-      if (!isProactive) {
+      // [步骤2 重构] 抽成局部函数，作为 InteractiveMode.afterProcess 的引擎能力；
+      // 函数体逻辑零改动，仅首尾改造 + 文本来源改为参数。步骤4 接入 Coordinator 后改由 mode 驱动。
+      const processFileMarkers = async (scanText: string): Promise<number> => {
         const FILE_MARKER_RE = /\[SEND_FILE:(?:(\w+):)?([^\]]+)\]/g;
         const markerPattern = options?.fileMarkerPattern ?? FILE_MARKER_RE;
-        const flusherText = renderer.getFinalText();
-        const fullText = flusherText.length >= (streamResult.fullText?.length || 0) ? flusherText : streamResult.fullText;
-        const fileMatches = [...fullText.matchAll(markerPattern)];
+        const fileMatches = [...scanText.matchAll(markerPattern)];
+        // [迁移探针] 记录文件标记（防线 1）
+        snapshot.set(session.id, taskId, { fileMarkers: fileMatches.map(m => (m.length >= 3 ? (m[2] ?? m[1]) : m[1]).trim()) });
 
       for (const match of fileMatches) {
         // 兼容旧格式 (1组) 和新格式 (2组)
@@ -1495,7 +1515,16 @@ export class MessageProcessor {
           await adapter.send(envelope, { kind: 'system.error', text: `\u274c 文件发送失败: ${filePath}`, subtype: 'fatal' });
         }
       }
-      }  // end of !isProactive
+        return fileMatches.length;
+      };  // end of processFileMarkers
+
+      // interactive 处理文件标记；proactive 跳过（改用 ctl file 工具）
+      // [步骤2] 守卫仍用 isProactive；步骤4 接入后改由 InteractiveMode.afterProcess 驱动
+      if (!isProactive) {
+        const flusherText = renderer.getFinalText();
+        const fullText = flusherText.length >= (streamResult.fullText?.length || 0) ? flusherText : streamResult.fullText;
+        await processFileMarkers(fullText);
+      }
 
       // 最终回复文本：suppressed 模式或无 text 事件时需要兜底添加
       const finalReplyText = streamResult.lastReplyText || streamResult.fullText;
@@ -1503,6 +1532,7 @@ export class MessageProcessor {
       if (finalReplyText) {
         if (isProactive && !streamResult.hasReceivedText && /^Unknown skill:\s+\S+/i.test(finalReplyText.trim())) {
           // Proactive 模式 + SDK 本地兜底：直接发送绕过 silent renderer
+          snapshot.set(session.id, taskId, { unknownSkillFallback: true });
           const isCurrentlyBackground = this.isBackgroundSession(session, message.channel, message.channelId);
           if (!isCurrentlyBackground && !isSilentTrigger) {
             await adapter.send({ ...envelope, replyContext: capturedReplyContext }, { kind: 'result.text', text: finalReplyText, isFinal: true });
@@ -1576,7 +1606,8 @@ export class MessageProcessor {
           });
         } else {
           if (message.triggerMeta) {
-            this.eventBus.publish({ type: 'trigger:failed', triggerId: message.triggerMeta.triggerId, name: message.triggerMeta.triggerName ?? '', messageId: messageId, error: errorSummary, targetChannel: message.channel, targetChannelId: message.channelId, fireTime: message.triggerMeta.fireTime ?? 0, phase: 'execute' });
+            const triggerRunId = message.triggerMeta.runId ?? message.messageId ?? messageId;
+            this.eventBus.publish({ type: 'trigger:failed', triggerId: message.triggerMeta.triggerId, name: message.triggerMeta.triggerName ?? '', runId: triggerRunId, originTriggerId: message.triggerMeta.triggerId, messageId: messageId, error: errorSummary, targetChannel: message.channel, targetChannelId: message.channelId, fireTime: message.triggerMeta.fireTime ?? 0, phase: 'execute' });
           }
 
           this.eventBus.publish({
@@ -1756,10 +1787,11 @@ export class MessageProcessor {
           }
         }
         if (message.triggerMeta) {
+          const triggerRunId = message.triggerMeta.runId ?? message.messageId ?? messageId;
           if (interruptReason) {
-            this.eventBus.publish({ type: 'trigger:skipped', triggerId: message.triggerMeta.triggerId, name: message.triggerMeta.triggerName ?? '', reason: 'interrupted', targetChannel: message.channel, targetChannelId: message.channelId });
+            this.eventBus.publish({ type: 'trigger:skipped', triggerId: message.triggerMeta.triggerId, name: message.triggerMeta.triggerName ?? '', runId: triggerRunId, originTriggerId: message.triggerMeta.triggerId, reason: 'interrupted', targetChannel: message.channel, targetChannelId: message.channelId, fireTime: message.triggerMeta.fireTime });
           } else {
-            this.eventBus.publish({ type: 'trigger:completed', triggerId: message.triggerMeta.triggerId, name: message.triggerMeta.triggerName ?? '', messageId: messageId, durationMs, targetChannel: message.channel, targetChannelId: message.channelId, fireTime: message.triggerMeta.fireTime ?? 0 });
+            this.eventBus.publish({ type: 'trigger:completed', triggerId: message.triggerMeta.triggerId, name: message.triggerMeta.triggerName ?? '', runId: triggerRunId, originTriggerId: message.triggerMeta.triggerId, messageId: messageId, durationMs, targetChannel: message.channel, targetChannelId: message.channelId, fireTime: message.triggerMeta.fireTime ?? 0 });
           }
         }
         await this.sessionManager.recordSuccess(session.id);
@@ -1792,7 +1824,7 @@ export class MessageProcessor {
       }
 
       const isFinallyBackground = this.isBackgroundSession(session, message.channel, message.channelId);
-      if (isFinallyBackground && session.chatMode !== 'autonomous' && !isSilentTrigger) {
+      if (isFinallyBackground && !isSilentTrigger) {
         const projectName = path.basename(session.projectPath);
         const count = this.messageCache.getCount(session.id);
         await adapter.send(envelope, { kind: 'system.notice', text: `[\u540e\u53f0-${projectName}] \u2713 任务完成 (${count}条消息已缓存)`, subtype: 'background' });
@@ -1923,6 +1955,15 @@ export class MessageProcessor {
 
         // Proactive 可观测：catch 块的基础设施错误也透传为 thought，保证按 task_id 聚合完整
       }
+    }
+
+    // [迁移探针] 任务收尾：记录工具提醒/标志位最终状态并落盘（防线 1）
+    if (snapshot.isEnabled()) {
+      snapshot.set(session.id, taskId, {
+        toolReminder: proactive ? { queueReminders: proactive.lastQueueReminderLen, tenWarning: proactive.toolCount >= 10 } : undefined,
+        flagSet: session.metadata?.lastProactiveFlag === true,
+      });
+      snapshot.end(session.id, taskId);
     }
   }
 

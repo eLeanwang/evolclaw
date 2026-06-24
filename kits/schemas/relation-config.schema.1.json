@@ -86,6 +86,17 @@
       "description": "群聊分发策略",
       "x-merge": "scalar"
     },
+    "response_modes": {
+      "type": "object",
+      "description": "响应模式配置（关系级覆盖）。按第一层键合并",
+      "x-merge": "dict",
+      "properties": {
+        "default_private": { "type": "string", "description": "单聊默认响应模式 id" },
+        "default_group": { "type": "string", "description": "群聊默认响应模式 id" },
+        "configs": { "type": "object", "description": "各模式配置参数" },
+        "overrides": { "type": "object", "description": "按对端/群覆盖" }
+      }
+    },
     "show_activities": {
       "type": "string",
       "enum": ["all", "none"],
