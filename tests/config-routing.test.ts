@@ -67,7 +67,7 @@ describe('config ownership routing', () => {
   it('validates permissionMode and idleMonitor schema ownership', () => {
     expect(DEFAULT_PERMISSION_MODE).toBe('auto');
     expect(resolvePermissionMode({ role: 'owner' })).toBe('bypass');
-    expect(resolvePermissionMode({ role: 'admin' })).toBe('bypass');
+    expect(resolvePermissionMode({ role: 'admin' })).toBe('request');
     expect(resolvePermissionMode({ role: 'guest' })).toBe('readonly');
     expect(resolvePermissionMode({ role: 'anonymous' })).toBe('readonly');
     expect(resolvePermissionMode({ role: 'member' })).toBe('auto');
@@ -102,4 +102,3 @@ describe('config ownership routing', () => {
     expect(read<any>(ConfigTarget.Behavior, sel)?.show_activities).toBe('none');
   });
 });
-

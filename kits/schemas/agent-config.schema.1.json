@@ -26,6 +26,12 @@
       "description": "Agent 管理员（AID，沿链并集）",
       "x-merge": "list"
     },
+    "members": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Team members with basic permissions (AID)",
+      "x-merge": "list"
+    },
     "channels": {
       "type": "array",
       "items": { "type": "object" },

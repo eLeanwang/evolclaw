@@ -199,6 +199,11 @@ export class EvolAgentRegistry {
     return agent?.isAdmin(channelKey, userId) ?? false;
   }
 
+  isMember(channelKey: string, userId: string): boolean {
+    const agent = this.resolveByChannel(channelKey);
+    return agent?.isMember(channelKey, userId) ?? false;
+  }
+
   getOwner(channelKey: string): string | undefined {
     return this.resolveByChannel(channelKey)?.getOwner(channelKey);
   }

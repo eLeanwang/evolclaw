@@ -22,6 +22,8 @@ import os from 'os';
 export type OwnerResolver = (channel: string, userId: string) => boolean;
 /** 判定用户是否为指定渠道的 admin */
 export type AdminResolver = (channel: string, userId: string) => boolean;
+/** 判定用户是否为指定渠道的 member */
+export type MemberResolver = (channel: string, userId: string) => boolean;
 export type ChatModeDefaultsProvider = (
   channel: string,
   chatType: string,
@@ -33,6 +35,7 @@ export class SessionManager {
   private eventBus: EventBus;
   private ownerResolver?: OwnerResolver;
   private adminResolver?: AdminResolver;
+  private memberResolver?: MemberResolver;
   private chatModeDefaultsProvider?: ChatModeDefaultsProvider;
   private fileAdapters = new Map<string, SessionFileAdapter>();
   private sessionEncryptState = new Map<string, boolean>();
@@ -42,6 +45,7 @@ export class SessionManager {
     eventBus: EventBus,
     ownerResolver?: OwnerResolver,
     adminResolver?: AdminResolver,
+    memberResolver?: MemberResolver,
     chatModeDefaultsProvider?: ChatModeDefaultsProvider,
   ) {
     ensureDir(sessionsDir);
@@ -49,6 +53,7 @@ export class SessionManager {
     this.eventBus = eventBus;
     this.ownerResolver = ownerResolver;
     this.adminResolver = adminResolver;
+    this.memberResolver = memberResolver;
     this.chatModeDefaultsProvider = chatModeDefaultsProvider;
     this.migrateChannelKeyFormat();
   }
@@ -100,6 +105,7 @@ export class SessionManager {
     if (!userId) return { role: 'anonymous', mode: 'interactive' };
     if (this.ownerResolver?.(channel, userId)) return { role: 'owner', mode: 'interactive' };
     if (this.adminResolver?.(channel, userId)) return { role: 'admin', mode: 'interactive' };
+    if (this.memberResolver?.(channel, userId)) return { role: 'member', mode: 'interactive' };
     return { role: 'guest', mode: 'interactive' };
   }
 

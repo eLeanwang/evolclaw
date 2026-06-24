@@ -252,6 +252,12 @@ export function kitsSchemasDir(): string {
   return path.join(getPackageRoot(), 'kits', 'schemas');
 }
 
+// ── Role System ──
+
+export function rolesConfig(): string {
+  return path.join(resolveRoot(), 'roles.json');
+}
+
 // ── 调试输出 ──
 
 export function eckDebugDir(): string {

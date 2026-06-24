@@ -222,7 +222,7 @@ export interface ReplyContext {
 }
 
 export interface SessionIdentity {
-  role: 'owner' | 'admin' | 'guest' | 'anonymous';
+  role: 'owner' | 'admin' | 'member' | 'guest' | 'anonymous';
   mode: 'interactive';
 }
 
@@ -788,6 +788,7 @@ interface ChannelInstanceCommon {
   enabled?: boolean;
   owners?: string[];
   admins?: string[];
+  members?: string[];
   flushDelay?: number;
   debounce?: number;
   showActivities?: ShowActivitiesMode;
@@ -902,6 +903,7 @@ export interface AgentConfig {
   initialized?: boolean;
   owners?: string[];
   admins?: string[];
+  members?: string[];  // Team members with basic permissions
   aun?: AunRuntimeBlock;
   channels: ChannelInstance[];
   models?: ModelsBlock;
@@ -978,6 +980,7 @@ export interface EffectiveAgentConfig {
   initialized?: boolean;
   owners?: string[];
   admins?: string[];
+  members?: string[];
   aun?: AunRuntimeBlock;
   channels: ChannelInstance[];
   models?: ModelsBlock;
@@ -1168,4 +1171,46 @@ export interface MenuResponse {
   name?: string;         // 回显 name（menu.list 无 name）
   data?: any;            // 成功（与 error 互斥）
   error?: { code: string; message: string };  // 失败（与 data 互斥）
+}
+
+// ── Role System Types ──
+
+export type BuiltinRole = 'owner' | 'admin' | 'member' | 'guest' | 'anonymous';
+
+export interface RolesConfig {
+  $schema_version: number;
+  roles: Record<string, RoleDefinition>;
+}
+
+export interface RoleDefinition {
+  description: string;
+  permissions: Record<string, FieldPermission>;
+}
+
+export interface FieldPermission<T = any> {
+  default: T;
+  allowOverride: boolean;
+  allowedModels?: string[];    // for baseagents.*.model
+  allowedValues?: T[];         // for enum fields
+  reason?: string;
+}
+
+export interface RoleContext {
+  self: string;
+  peerKey: string;
+  role: BuiltinRole | string;
+}
+
+export interface ConstraintViolation {
+  field: string;
+  reason: 'override_not_allowed' | 'model_not_allowed' | 'value_not_allowed';
+  attempted: any;
+  allowed: any;
+  role: string;
+}
+
+export interface ConstraintCheckResult {
+  valid: boolean;
+  violations: ConstraintViolation[];
+  effectiveConfig: any;  // Will be typed as BehaviorConfig in the implementation
 }

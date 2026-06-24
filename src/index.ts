@@ -551,6 +551,7 @@ async function main() {
   const sessionManager = new SessionManager(paths.sessionsDir, eventBus,
     (channel, userId) => agentRegistry.isOwner(channel, userId),
     (channel, userId) => agentRegistry.isAdmin(channel, userId),
+    (channel, userId) => agentRegistry.isMember(channel, userId),
     (channel) => agentRegistry.resolveByChannel(channel)?.config.chatmode,
   );
 

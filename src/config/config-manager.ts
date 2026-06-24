@@ -31,6 +31,8 @@ import {
 } from './schema-registry.js';
 import { mergeLayers, expandVars, buildEnvResolver, type EnvScope } from './merge.js';
 import { mergeBehaviorIntoEffective } from './behavior.js';
+import { resolveUserRole } from './role-resolver.js';
+import { mergeWithRoleConstraints } from './role-constraints.js';
 import type {
   ProcessConfig,
   DefaultsConfig,
@@ -171,9 +173,32 @@ export interface WriteOpts {
 export function write<T = any>(target: ConfigTarget, value: T, sel?: Selector, opts: WriteOpts = {}): void {
   const schema = loadSchema(TARGET_SCHEMA[target]);
   const withVer = ensureSchemaVersion(value as any, schema.version);
+
+  // 1. Schema 校验
   if (!opts.skipValidate) {
     validateOrThrow(schema, withVer, target);
   }
+
+  // 2. 角色约束校验（仅对 RelationBehavior）
+  if (target === ConfigTarget.RelationBehavior && sel?.self && sel?.peerKey) {
+    try {
+      const validation = validateConfigWrite(target, withVer as any, sel);
+      if (!validation.valid) {
+        console.warn(`[config-manager] Role constraint violations on write:`,
+          validation.violations.map(v => `${v.field}: ${v.reason}`));
+        // 注意：当前为警告模式，不阻止写入
+        // 未来可以通过环境变量启用严格模式：
+        // if (process.env.EVOLCLAW_STRICT_ROLE_MODE === 'true') {
+        //   throw new ConfigError('ROLE_VIOLATION', 'Config violates role constraints');
+        // }
+      }
+    } catch (err) {
+      console.warn('[config-manager] Failed to validate role constraints on write:', err);
+      // 验证失败不阻止写入，只记录警告
+    }
+  }
+
+  // 3. 写入文件
   const file = targetPath(target, sel);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   atomicWriteJson(file, withVer);
@@ -269,7 +294,31 @@ export function resolveAgentConfig(sel: { self?: string; peerKey?: string }, opt
 // ── effective（合并视图）────────────────────────────────────────────────────
 
 /**
- * 合并视图：先合并 H 链，再叠加 HA 行为链。
+ * 深度合并辅助函数
+ * 用于合并角色约束结果，避免覆盖嵌套对象
+ */
+function deepMerge(target: any, source: any): any {
+  if (!source || typeof source !== 'object') return target;
+  if (!target || typeof target !== 'object') return source;
+  if (Array.isArray(source)) return source; // 数组直接替换
+
+  const result = { ...target };
+
+  for (const key in source) {
+    if (Object.prototype.hasOwnProperty.call(source, key)) {
+      if (source[key] && typeof source[key] === 'object' && !Array.isArray(source[key])) {
+        result[key] = deepMerge(result[key], source[key]);
+      } else {
+        result[key] = source[key];
+      }
+    }
+  }
+
+  return result;
+}
+
+/**
+ * 合并视图：先合并 H 链，再叠加 HA 行为链，最后应用角色约束。
  * 同名行为字段以 behavior.json 链为高优先级。
  */
 export function resolveEffective(sel: Selector, opts: ReadOpts = {}): EffectiveAgentConfig {
@@ -281,6 +330,7 @@ export function resolveEffective(sel: Selector, opts: ReadOpts = {}): EffectiveA
     initialized: config.initialized,
     owners: config.owners,
     admins: config.admins,
+    members: config.members,
     aun: config.aun,
     channels: config.channels ?? [],
     models: config.models,
@@ -303,7 +353,106 @@ export function resolveEffective(sel: Selector, opts: ReadOpts = {}): EffectiveA
     permissionMode: config.permissionMode,
     roles: config.roles,
   };
-  return normalizeEffectiveCompatibility(mergeBehaviorIntoEffective(effective, sel, opts));
+
+  // 先合并行为链
+  let result = mergeBehaviorIntoEffective(effective, sel, opts);
+
+  // 如果有 peerKey，应用角色约束（优先使用 sel.role）
+  if (sel.self && sel.peerKey) {
+    try {
+      const role = sel.role || resolveUserRole(sel.self, sel.peerKey);
+
+      // 提取行为字段作为 relationConfig
+      const behaviorFields: Record<string, any> = {};
+      const behaviorFieldNames = [
+        'permissionMode',
+        'active_baseagent',
+        'baseagents.claude.model',
+        'baseagents.claude.effort',
+        'chatmode',
+        'dispatch',
+        'show_activities',
+        'flush_delay',
+        'debounce',
+        'enable_rich_content',
+        'proactive',
+        'render'
+      ];
+
+      for (const field of behaviorFieldNames) {
+        if (field.includes('.')) {
+          // 嵌套字段，提取为扁平键
+          const parts = field.split('.');
+          let value = result as any;
+          for (const part of parts) {
+            if (value && typeof value === 'object') {
+              value = value[part];
+            } else {
+              value = undefined;
+              break;
+            }
+          }
+          if (value !== undefined) {
+            behaviorFields[field] = value;
+          }
+        } else {
+          // 顶层字段
+          if ((result as any)[field] !== undefined) {
+            behaviorFields[field] = (result as any)[field];
+          }
+        }
+      }
+
+      // 应用角色约束
+      const constrained = mergeWithRoleConstraints(role, behaviorFields);
+
+      if (!constrained.valid) {
+        console.warn(`[config-manager] Role constraint violations for ${sel.peerKey} (${role}):`,
+          constrained.violations.map(v => `${v.field}: ${v.reason}`));
+      }
+
+      // 将约束后的配置深度合并回 result（避免覆盖嵌套对象）
+      result = deepMerge(result, constrained.effectiveConfig);
+    } catch (err) {
+      console.warn('[config-manager] Failed to apply role constraints:', err);
+      // 失败时继续，不阻塞配置解析
+    }
+  }
+
+  return normalizeEffectiveCompatibility(result);
+}
+
+/**
+ * 配置写入前的角色约束校验
+ * 仅对 RelationBehavior 进行角色约束检查
+ *
+ * @param target 配置目标
+ * @param config 待写入配置
+ * @param sel 选择器
+ * @returns 约束检查结果
+ */
+export function validateConfigWrite(
+  target: ConfigTarget,
+  config: Record<string, any>,
+  sel: Selector
+): { valid: boolean; violations: any[]; effectiveConfig: any } {
+  // 只对 RelationBehavior 进行角色约束检查
+  if (target !== ConfigTarget.RelationBehavior) {
+    return { valid: true, violations: [], effectiveConfig: config };
+  }
+
+  if (!sel.self || !sel.peerKey) {
+    throw new ConfigError('SELECTOR_REQUIRED', 'RelationBehavior requires self and peerKey');
+  }
+
+  try {
+    const role = resolveUserRole(sel.self, sel.peerKey);
+    return mergeWithRoleConstraints(role, config);
+  } catch (err) {
+    console.warn('[config-manager] Failed to validate config write:', err);
+    // 验证失败时，允许写入但记录警告
+    return { valid: true, violations: [], effectiveConfig: config };
+  }
 }
 
 function normalizeEffectiveCompatibility<T extends EffectiveAgentConfig>(effective: T): T {

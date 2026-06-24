@@ -175,6 +175,16 @@ export class EvolAgent {
     return inst?.admins?.includes(userId) ?? false;
   }
 
+  isMember(channelKey: string, userId: string): boolean {
+    if (this.isOwner(channelKey, userId)) return true;
+    if (this.isAdmin(channelKey, userId)) return true;
+    if (this.isAunChannelKey(channelKey)) {
+      return this.merged.members?.includes(userId) ?? false;
+    }
+    const inst = this.findChannelInstance(channelKey);
+    return inst?.members?.includes(userId) ?? false;
+  }
+
   setOwner(channelKey: string, userId: string): void {
     // AUN：写到 rawAgent 顶层 owners（merged 也指向同一份引用）
     if (this.isAunChannelKey(channelKey)) {

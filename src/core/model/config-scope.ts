@@ -28,6 +28,8 @@ import {
   resolveBehavior,
   type BehaviorConfig,
 } from '../../config/behavior.js';
+import { resolveUserRole } from '../../config/role-resolver.js';
+import { mergeWithRoleConstraints } from '../../config/role-constraints.js';
 import type { AgentConfig, RelationConfig, RoleOverride } from '../../types.js';
 
 export type ModelScope = 'global' | 'agent' | 'role' | 'relation';
@@ -216,18 +218,33 @@ export function clearScope(scope: ModelScope, sel: ScopeSelector, ba: string): v
 // ── permissionMode 解析 ────────────────────────────────────────────────────
 
 const BUILTIN_PERMISSION_BY_ROLE: Record<string, string> = {
-  owner: 'bypass', admin: 'bypass', guest: 'readonly', anonymous: 'readonly',
+  owner: 'bypass', admin: 'request', member: 'auto', guest: 'readonly', anonymous: 'readonly',
 };
 const FALLBACK_PERMISSION_MODE = 'auto';
 
 /**
  * 解析实际生效的 permissionMode。不抛出——运行时 per-message 调用。
  * 链：关系 > 角色(roles.<role>) > 出厂默认[role] > 'auto'。
+ * 应用角色约束（优先使用 sel.role，避免在群聊/非AUN渠道重算角色）。
  */
 export function resolvePermissionMode(sel: ScopeSelector): string {
   try {
     const relation = sel.self && sel.peerKey ? readScope('relation', sel, activeBaseagent(sel.self)) : {};
-    if (relation.permissionMode) return relation.permissionMode;
+    if (relation.permissionMode) {
+      // 应用角色约束（优先使用 sel.role）
+      if (sel.self && sel.peerKey) {
+        try {
+          const role = sel.role || resolveUserRole(sel.self, sel.peerKey);
+          const constrained = mergeWithRoleConstraints(role, {
+            permissionMode: relation.permissionMode
+          });
+          return constrained.effectiveConfig.permissionMode;
+        } catch (err) {
+          console.warn('[config-scope] Failed to apply role constraints to permissionMode:', err);
+        }
+      }
+      return relation.permissionMode;
+    }
     const role = sel.self && sel.role ? readScope('role', sel, activeBaseagent(sel.self)) : {};
     if (role.permissionMode) return role.permissionMode;
     if (sel.role && BUILTIN_PERMISSION_BY_ROLE[sel.role]) return BUILTIN_PERMISSION_BY_ROLE[sel.role];
@@ -259,6 +276,7 @@ export interface ResolvedModel {
  * 按 关系>角色>agent 解析实际生效的 model/effort。
  * final 值遵循 behavior 的 x-merge:dict 语义；chain 逐层展示可见来源。
  * chain 仅就可达作用域逐层展示（用于 CLI 来源标注）。
+ * 应用角色约束（关系级别）。
  */
 export function resolveEffectiveModel(sel: ScopeSelector, ba?: string): ResolvedModel {
   const baseagent = ba || activeBaseagent(sel.self);
@@ -275,22 +293,82 @@ export function resolveEffectiveModel(sel: ScopeSelector, ba?: string): Resolved
   let effortSource: ModelScope | undefined;
   let finalModel: string | undefined;
   let finalEffort: string | undefined;
+
   for (const scope of order) {
     const prefs = readScope(scope, sel, baseagent);
-    const modelHit = !!prefs.model && modelSource === undefined;
+    let scopeModel = prefs.model;
+    let scopeEffort = prefs.effort;
+
+    // 在关系级别应用角色约束（优先使用 sel.role）
+    if (scope === 'relation' && sel.self && sel.peerKey && (scopeModel || scopeEffort)) {
+      try {
+        const role = sel.role || resolveUserRole(sel.self, sel.peerKey);
+        const constraintInput: Record<string, any> = {};
+        if (scopeModel) constraintInput[`baseagents.${baseagent}.model`] = scopeModel;
+        if (scopeEffort) constraintInput[`baseagents.${baseagent}.effort`] = scopeEffort;
+
+        const constrained = mergeWithRoleConstraints(role, constraintInput);
+        scopeModel = constrained.effectiveConfig.baseagents?.[baseagent]?.model || scopeModel;
+        scopeEffort = constrained.effectiveConfig.baseagents?.[baseagent]?.effort || scopeEffort;
+      } catch (err) {
+        console.warn('[config-scope] Failed to apply role constraints to model/effort:', err);
+      }
+    }
+
+    const modelHit = !!scopeModel && modelSource === undefined;
     if (modelHit) modelSource = scope;
-    if (modelHit) finalModel = prefs.model;
-    const effortHit = !!prefs.effort && effortSource === undefined;
+    if (modelHit) finalModel = scopeModel;
+    const effortHit = !!scopeEffort && effortSource === undefined;
     if (effortHit) effortSource = scope;
-    if (effortHit) finalEffort = prefs.effort;
-    chain.push({ scope, model: prefs.model, effort: prefs.effort, hit: modelHit });
+    if (effortHit) finalEffort = scopeEffort;
+    chain.push({ scope, model: scopeModel, effort: scopeEffort, hit: modelHit });
   }
 
   const mergedBehavior = resolveBehavior(toSelector(sel), { cache: true });
   const mergedBa = ((mergedBehavior.baseagents || {}) as any)[baseagent] || {};
   if (mergedBehavior.baseagents && Object.prototype.hasOwnProperty.call(mergedBehavior.baseagents as any, baseagent)) {
-    finalModel = mergedBa.model;
-    finalEffort = mergedBa[ef];
+    let mergedModel = mergedBa.model;
+    let mergedEffort = mergedBa[ef];
+
+    // 如果有 peerKey，应用角色约束到合并后的结果（优先使用 sel.role）
+    if (sel.self && sel.peerKey && (mergedModel || mergedEffort)) {
+      try {
+        const role = sel.role || resolveUserRole(sel.self, sel.peerKey);
+        const constraintInput: Record<string, any> = {};
+        if (mergedModel) constraintInput[`baseagents.${baseagent}.model`] = mergedModel;
+        if (mergedEffort) constraintInput[`baseagents.${baseagent}.effort`] = mergedEffort;
+
+        const constrained = mergeWithRoleConstraints(role, constraintInput);
+        mergedModel = constrained.effectiveConfig.baseagents?.[baseagent]?.model || mergedModel;
+        mergedEffort = constrained.effectiveConfig.baseagents?.[baseagent]?.effort || mergedEffort;
+      } catch (err) {
+        console.warn('[config-scope] Failed to apply role constraints to merged model/effort:', err);
+      }
+    }
+
+    finalModel = mergedModel;
+    finalEffort = mergedEffort;
+  }
+
+  // 如果最终没有值，但有 peerKey，应用角色默认值（确保 guest 等角色总是受限）
+  if (sel.self && sel.peerKey && (!finalModel || !finalEffort)) {
+    try {
+      const role = sel.role || resolveUserRole(sel.self, sel.peerKey);
+      const constraintInput: Record<string, any> = {};
+      // 使用空配置触发角色默认值
+      if (!finalModel) constraintInput[`baseagents.${baseagent}.model`] = finalModel || '';
+      if (!finalEffort) constraintInput[`baseagents.${baseagent}.effort`] = finalEffort || '';
+
+      const constrained = mergeWithRoleConstraints(role, constraintInput);
+      if (!finalModel && constrained.effectiveConfig.baseagents?.[baseagent]?.model) {
+        finalModel = constrained.effectiveConfig.baseagents[baseagent].model;
+      }
+      if (!finalEffort && constrained.effectiveConfig.baseagents?.[baseagent]?.effort) {
+        finalEffort = constrained.effectiveConfig.baseagents[baseagent].effort;
+      }
+    } catch (err) {
+      console.warn('[config-scope] Failed to apply role default model/effort:', err);
+    }
   }
 
   return {

@@ -4,13 +4,15 @@
     "defaults":        { "currentVersion": 1 },
     "agent-config":    { "currentVersion": 1 },
     "relation-config": { "currentVersion": 1 },
-    "behavior":        { "currentVersion": 1 }
+    "behavior":        { "currentVersion": 1 },
+    "roles":           { "currentVersion": 1 }
   },
   "history": [
     { "schema": "evolclaw",        "version": 1, "date": "2026-06-14", "description": "initial: process config (evolclaw.json)" },
     { "schema": "defaults",        "version": 1, "date": "2026-06-14", "description": "initial: global defaults (owners/admins/models.allowed/projects/aun)" },
     { "schema": "agent-config",    "version": 1, "date": "2026-06-14", "description": "initial: agent H config" },
     { "schema": "relation-config", "version": 1, "date": "2026-06-14", "description": "initial: relation config (owners/admins/extra_backup)" },
-    { "schema": "behavior",        "version": 1, "date": "2026-06-23", "description": "agent-writable behavior fields (HA)" }
+    { "schema": "behavior",        "version": 1, "date": "2026-06-23", "description": "agent-writable behavior fields (HA)" },
+    { "schema": "roles",           "version": 1, "date": "2026-06-24", "description": "global role definitions and permissions" }
   ]
 }
