@@ -1506,11 +1506,28 @@ export class ResponseEngine implements IMessageProcessor {
           },
           channelCapabilities: { file: !!adapter.capabilities?.file, thought: !!adapter.capabilities?.thought },
           processFileMarkers: async (scanText: string) => {
-            const fileMatches = [...scanText.matchAll(/(?:^|\n)FILE_MARKER:\s*([^\r\n]+)/g)];
-            if (fileMatches.length === 0) return 0;
-            snapshot.set(session.id, taskId, { fileMarkers: fileMatches.map(m => (m.length >= 3 ? (m[2] ?? m[1]) : m[1]).trim()) });
+            // 支持两种格式：
+            // 1. FILE_MARKER: path (新格式，用于 CLI/工具输出)
+            // 2. [SEND_FILE:path] 或 [SEND_FILE:channel:path] (旧格式，通过 fileMarkerPattern 配置)
+            const FILE_MARKER_RE = /(?:^|\n)FILE_MARKER:\s*([^\r\n]+)/g;
+            const SEND_FILE_RE = options?.fileMarkerPattern ?? /\[SEND_FILE:(?:(\w+):)?([^\]]+)\]/g;
+
+            const fileMarkerMatches = [...scanText.matchAll(FILE_MARKER_RE)];
+            const sendFileMatches = [...scanText.matchAll(SEND_FILE_RE)];
+
+            if (fileMarkerMatches.length === 0 && sendFileMatches.length === 0) return 0;
+
+            // 记录所有文件标记（快照用）
+            const allMarkers = [
+              ...fileMarkerMatches.map(m => (m.length >= 3 ? (m[2] ?? m[1]) : m[1]).trim()),
+              ...sendFileMatches.map(m => (m.length >= 3 ? (m[2] ?? m[1]) : m[1]).trim()),
+            ];
+            snapshot.set(session.id, taskId, { fileMarkers: allMarkers });
+
             let sent = 0;
-            for (const match of fileMatches) {
+
+            // 处理 FILE_MARKER: 格式
+            for (const match of fileMarkerMatches) {
               const rest = match.length >= 3 ? (match[2] ?? match[1]) : match[1];
               const [filePathRaw, ...labelParts] = rest.split(/\s+/);
               const filePath = filePathRaw.trim();
@@ -1527,6 +1544,94 @@ export class ResponseEngine implements IMessageProcessor {
                 }
               }
             }
+
+            // 处理 [SEND_FILE:...] 格式
+            for (const match of sendFileMatches) {
+              const hasChannelGroup = match.length >= 3;
+              let targetSpec = hasChannelGroup ? (match[1] ?? undefined) : undefined;
+              let filePath = (hasChannelGroup ? match[2] : match[1]).trim();
+
+              // 白名单校验：targetSpec 必须是已注册通道，否则视为路径的一部分（如 Windows 盘符 C:）
+              if (targetSpec && !this.channels.has(targetSpec) && !this.channelTypeMap.has(targetSpec)) {
+                filePath = `${targetSpec}:${filePath}`;
+                targetSpec = undefined;
+              }
+
+              // 跳过占位符路径（如 /path/to/file.txt）
+              if (this.isPlaceholderPath(filePath)) {
+                logger.info(`[${adapter.channelName}] Skipped placeholder file marker: [SEND_FILE:${filePath}]`);
+                continue;
+              }
+
+              // 解析目标通道
+              let targetInfo = targetSpec ? this.channels.get(targetSpec) : channelInfo;
+              const targetLabel = targetSpec || message.channel;
+              // 按 channelType 查找首个匹配的实例
+              if (targetSpec && !targetInfo) {
+                const instanceName = this.channelTypeMap.get(targetSpec);
+                if (instanceName) targetInfo = this.channels.get(instanceName);
+              }
+
+              const currentChannelType = channelInfo.options?.channelType || adapter.channelName;
+              const isCrossChannel = targetSpec && targetSpec !== message.channel && targetSpec !== currentChannelType;
+
+              // 跨通道仅限 owner
+              if (isCrossChannel && session.identity?.role !== 'owner') {
+                await adapter.send(envelope, { kind: 'system.error', text: `❌ 跨通道发送仅限管理员`, subtype: 'fatal' });
+                continue;
+              }
+
+              // 解析文件路径
+              const agentProjectPath = session.projectPath || process.cwd();
+              const resolvedPath = path.isAbsolute(filePath) ? filePath : path.resolve(agentProjectPath, filePath);
+
+              if (!fs.existsSync(resolvedPath)) {
+                logger.warn(`[${adapter.channelName}] File not found: ${resolvedPath}`);
+                await adapter.send(envelope, { kind: 'system.error', text: `⚠️ 文件未找到: ${filePath}`, subtype: 'fatal' });
+                continue;
+              }
+
+              // 找目标 adapter
+              if (!targetInfo) {
+                await adapter.send(envelope, { kind: 'system.error', text: `❌ 通道 ${targetLabel} 未启用或不存在`, subtype: 'channel_down' });
+                continue;
+              }
+              if (!targetInfo.adapter.capabilities?.file) {
+                await adapter.send(envelope, { kind: 'system.error', text: `❌ 通道 ${targetLabel} 不支持文件发送`, subtype: 'capability' });
+                continue;
+              }
+
+              // 找目标 channelId
+              let targetChannelId = message.channelId;
+              if (isCrossChannel) {
+                const targetAdapterName = targetInfo.adapter.channelName;
+                const targetChannelType = targetInfo.options?.channelType || targetAdapterName;
+                const ownerPeerId = this.agentRegistry?.getOwner?.(targetAdapterName);
+                targetChannelId = ownerPeerId ? (this.sessionManager.getOwnerChatId(targetChannelType, ownerPeerId) ?? '') : '';
+                if (!targetChannelId) {
+                  await adapter.send(envelope, { kind: 'system.error', text: `❌ 未找到 ${targetLabel} 的私聊会话，请先在该通道发送一条消息`, subtype: 'channel_down' });
+                  continue;
+                }
+              }
+
+              // 发送文件
+              logger.info(`[${adapter.channelName}] Sending file via ${targetInfo.adapter.channelName}: ${resolvedPath}`);
+              try {
+                await targetInfo.adapter.send(
+                  buildEnvelope({ taskId, channel: targetInfo.adapter.channelName, channelId: targetChannelId, agentName: agentNameForStats, replyContext: capturedReplyContext }),
+                  { kind: 'result.file', filePath: resolvedPath }
+                );
+                this.eventBus.publish({ type: 'runner:file-sent', sessionId: session.id, filePath: resolvedPath, channel: targetInfo.adapter.channelName });
+                sent++;
+                if (isCrossChannel) {
+                  await adapter.send(envelope, { kind: 'system.notice', text: `📎 文件已通过 ${targetLabel} 发送`, subtype: 'health' });
+                }
+              } catch (error) {
+                logger.error(`[${adapter.channelName}] Failed to send file: ${resolvedPath}`, error);
+                await adapter.send(envelope, { kind: 'system.error', text: `❌ 文件发送失败: ${filePath}`, subtype: 'fatal' });
+              }
+            }
+
             return sent;
           },
           logger,

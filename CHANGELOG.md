@@ -1,3 +1,21 @@
+## v3.5.7 (2026-06-24)
+
+### Bug Fixes
+
+- **逻辑队列与贪心合并同步** — 修复响应系统重构引入的消息队列 bug：`reorderPhysical` 提前从逻辑队列 dequeue，但 `dequeueGreedy` 会合并多条消息，导致逻辑队列与物理队列不同步、群聊消息错乱。改为 peek 而非 dequeue，并新增 `removeProcessed` 在合并后批量清理逻辑队列。
+- **`[SEND_FILE:...]` 文件标记处理** — 恢复 `ResponseEngine` 中缺失的 `[SEND_FILE:...]` 标记处理逻辑（重构后只剩 `FILE_MARKER:` 格式）：包含 Windows 盘符白名单校验（`C:`/`D:` 不被误认为 channel）、channelType 映射查找、跨通道路由与权限校验。
+- **Trigger 事件字段补齐** — 修复 `trigger:failed`/`trigger:completed`/`trigger:skipped` 事件缺失 `runId`/`originTriggerId` 必填字段导致的类型错误。
+
+### Improvements
+
+- **`selected model is at capacity` 错误识别** — 错误字典新增该匹配项，命中时提示「当前模型繁忙，请稍后重试」。
+- **命令查询不隐式建会话** — `/perm`、`/ask`、`/resume`、`/setmodel` 等命令改为查询现有会话，不再隐式创建空会话。
+- **AUN payload 清理** — 新增 `stripUndefinedDeep` 递归清理出站 payload 中的 `undefined` 字段，避免序列化问题。
+
+### Misc
+
+- **纳入 ecweb 前端监控服务** — 将 ecweb（evolclaw web 管理界面）源码纳入主仓库跟踪。
+
 ## v3.5.6 (2026-06-24)
 
 ### New Features

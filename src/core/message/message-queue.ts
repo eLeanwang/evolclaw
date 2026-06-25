@@ -630,6 +630,13 @@ export class MessageQueue {
       this.logicalQueue.reorderPhysical(queueKey, queue);
       // 贪心合并：群聊按完整时间线，旧路径/私聊按 peerId
       const items = this.dequeueGreedy(queue);
+      // 同步逻辑队列：移除所有被合并处理的消息
+      if (items.length > 0) {
+        const processedIds = items.map(item => item.message.messageId).filter((id): id is string => !!id);
+        if (processedIds.length > 0) {
+          this.logicalQueue.removeProcessed(queueKey, processedIds);
+        }
+      }
       const merged = items.length === 1 ? items[0] : this.mergeItems(items);
       const rawItems = items.flatMap(item => this.partsOf(item).map(part => this.itemFromPart(part)));
       const rawParts = rawItems.map(item => this.partFromItem(item));
