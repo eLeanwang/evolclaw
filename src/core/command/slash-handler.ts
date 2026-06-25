@@ -1587,6 +1587,8 @@ export async function handleSlashCommand(this: any,
 
     // 当前 agent 名（用于 agent 维度 stats / queue 查询）
     const currentAgentName = checkOwningAgent?.name ?? '<unknown>';
+    // ECWeb 全局视图使用全局统计（不按 agent 过滤）
+    const statsAgentName = channel === '__ecweb__' ? undefined : currentAgentName;
 
     // 队列状态（按当前 agent 维度）
     lines.push('', '📬 队列状态：');
@@ -1600,9 +1602,9 @@ export async function handleSlashCommand(this: any,
       : process.uptime() * 1000;
     lines.push(`  运行时间: ${this.formatUptime(uptimeMs)}`);
 
-    // 近 1 小时统计（按当前 agent 维度）
+    // 近 1 小时统计（ECWeb 使用全局统计，agent-owned channel 使用 agent 统计）
     if (this.statsCollector) {
-      const snap = this.statsCollector.getSnapshot(currentAgentName);
+      const snap = this.statsCollector.getSnapshot(statsAgentName);
       const h = snap.lastHour;
       lines.push('', '📊 近 1 小时统计：');
       lines.push(`  收到消息: ${h.received}`);
@@ -1623,7 +1625,7 @@ export async function handleSlashCommand(this: any,
       }
     }
 
-    const checkSnap = this.statsCollector?.getSnapshot(currentAgentName);
+    const checkSnap = this.statsCollector?.getSnapshot(statsAgentName);
 
     // AUN 渠道的 per-AID 连接富状态（reconnect / flap / lastError / kick）
     const aidStateByName = new Map<string, any>();

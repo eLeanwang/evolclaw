@@ -1899,7 +1899,8 @@ function agentHealthCard(ag) {
 function systemBaseagentCards(baseagents) {
   const list = Array.isArray(baseagents) ? baseagents : [];
   return list.map(ba => {
-    const title = `Baseagent · ${ba.active ? '✓ ' : ''}${ba.name || 'unknown'}`;
+    const ver = ba.version ? ` v${ba.version}` : '';
+    const title = `Baseagent · ${ba.active ? '✓ ' : ''}${ba.name || 'unknown'}${ver}`;
     const detail = [ba.model, ba.effort].filter(Boolean).map(esc).join(' · ') || '未指定模型/强度';
     return `<div class="cache-card"><div class="card-label">${esc(title)}</div><div class="card-val">${detail}</div></div>`;
   }).join('');
@@ -1945,11 +1946,13 @@ function renderSystem(data) {
 
   // ③ 健康快照
   if (chk) {
+    // 从 chk.structured 读取数据（后端返回的数据结构）
+    const s = chk.structured || chk;  // 兼容旧版本（如果 chk 本身就是 structured）
     html += '<div class="sys-health">';
     // 队列 + 近 1 小时（数字卡片同一行）
     html += '<div class="cache-cards" style="margin-bottom:8px">';
-    html += `<div class="cache-card"><div class="card-label">队列</div><div class="card-val">${chk.queue?.pending ?? 0} 待 · ${chk.queue?.processing ?? 0} 处理中</div></div>`;
-    const h = chk.lastHour;
+    html += `<div class="cache-card"><div class="card-label">队列</div><div class="card-val">${s.queue?.pending ?? 0} 待 · ${s.queue?.processing ?? 0} 处理中</div></div>`;
+    const h = s.lastHour;
     if (h) {
       const errDetail = h.errors > 0 ? ` (${Object.entries(h.errorsByType || {}).map(([t, c]) => `${t}:${c}`).join(', ')})` : '';
       const avg = h.completed > 0 ? ` · 均 ${(h.avgResponseMs / 1000).toFixed(1)}s` : '';
@@ -1958,15 +1961,21 @@ function renderSystem(data) {
     html += systemBaseagentCards(sys.baseagents);
     html += '</div>';
     // 每个 EvolAgent 一张卡片：后端 + 渠道健康 + 负载
-    if (chk.evolagents?.length) {
+    // 排序：启用的（非 disabled）在前，停用的（disabled）在后
+    if (s.evolagents?.length) {
+      const sortedAgents = s.evolagents.slice().sort((a, b) => {
+        const aDisabled = a.status === 'disabled' ? 1 : 0;
+        const bDisabled = b.status === 'disabled' ? 1 : 0;
+        return aDisabled - bDisabled;
+      });
       html += '<div class="agent-health-grid">';
-      for (const ag of chk.evolagents) html += agentHealthCard(ag);
+      for (const ag of sortedAgents) html += agentHealthCard(ag);
       html += '</div>';
     }
     // 未归属任何 EvolAgent 的渠道（系统级 / DefaultAgent）
-    if (chk.unownedChannels?.length) {
+    if (s.unownedChannels?.length) {
       html += '<div class="cache-card" style="margin-top:8px"><div class="card-label">未归属渠道</div>';
-      for (const c of chk.unownedChannels) html += channelHealthRow(c);
+      for (const c of s.unownedChannels) html += channelHealthRow(c);
       html += '</div>';
     }
     html += '</div>';

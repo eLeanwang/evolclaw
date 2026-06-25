@@ -85,26 +85,26 @@ type ContextRecoveryOptions = {
 
 const RETRY_EXHAUSTED_MARK = Symbol('evolclaw.retryExhausted');
 
-function markRetryExhausted(error: unknown, attempts: number): void {
+function markRetryExhausted(error: unknown, retries: number): void {
   if (error && typeof error === 'object') {
-    (error as any)[RETRY_EXHAUSTED_MARK] = attempts;
+    (error as any)[RETRY_EXHAUSTED_MARK] = retries;
     // processEventStream may have already flushed the raw transient error as an
     // activity notice. The exhausted-retry message is the real terminal state.
     delete (error as any)._errorAlreadySent;
   }
 }
 
-function getRetryExhaustedAttempts(error: unknown): number | undefined {
-  const attempts = error && typeof error === 'object'
+function getRetryExhaustedCount(error: unknown): number | undefined {
+  const retries = error && typeof error === 'object'
     ? (error as any)[RETRY_EXHAUSTED_MARK]
     : undefined;
-  return typeof attempts === 'number' ? attempts : undefined;
+  return typeof retries === 'number' ? retries : undefined;
 }
 
-function formatRetryableErrorFinalMessage(error: unknown, attempts: number): string {
+function formatRetryableErrorFinalMessage(error: unknown, retries: number): string {
   const raw = error instanceof Error ? error.message : String(error);
   const firstLine = raw.split('\n')[0]?.trim() || 'API 暂时不可用';
-  return `❌ API 暂时不可用，已自动尝试 ${attempts} 次仍失败，任务已停止。\n原因：${firstLine}`;
+  return `❌ API 暂时不可用，已自动重试 ${retries} 次仍失败，任务已停止。\n原因：${firstLine}`;
 }
 
 function resolveProactiveBehavior(block?: ProactiveBehaviorBlock): Required<ProactiveBehaviorBlock> {
@@ -1342,21 +1342,24 @@ export class ResponseEngine implements IMessageProcessor {
           }
         }
 
-        // 可重试错误（403/429/5xx）指数退避重试，最多 3 次
-        const MAX_RETRIES = 3;
+        // 可重试错误（403/429/5xx/模型繁忙）按明确退避序列重试。
+        const RETRY_DELAYS_MS = [5_000, 10_000, 30_000];
+        const MAX_RETRIES = RETRY_DELAYS_MS.length;
+        const MAX_ATTEMPTS = MAX_RETRIES + 1;
         // Runner 开始执行前：将 Pin 升级为 CheckMark（表示"正在处理"）
         if (message.messageId && message.source !== 'trigger') {
           adapter.promoteAck?.(message.messageId).catch(() => {});
         }
-        for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+        for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
           let streamRegistered = false;
           try {
             if (attempt > 1) {
-              const suffix = attempt === MAX_RETRIES ? '（最后一次）' : '';
-              renderer.addNotice(`正在进行第 ${attempt}/${MAX_RETRIES} 次尝试${suffix}`, 'warn', 'retry', true);
+              const retryNumber = attempt - 1;
+              const suffix = retryNumber === MAX_RETRIES ? '（最后一次）' : '';
+              renderer.addNotice(`正在进行第 ${retryNumber}/${MAX_RETRIES} 次重试${suffix}`, 'warn', 'retry', true);
               await renderer.flush();
             }
-            logger.info(`[ResponseEngine] agent.runQuery start: agent=${agent.name} session=${session.id} task=${taskId} attempt=${attempt}/${MAX_RETRIES} agentSessionId=${session.agentSessionId ?? 'none'}`);
+            logger.info(`[ResponseEngine] agent.runQuery start: agent=${agent.name} session=${session.id} task=${taskId} attempt=${attempt}/${MAX_ATTEMPTS} agentSessionId=${session.agentSessionId ?? 'none'}`);
             const stream = await agent.runQuery(
               session.id,
               effectivePrompt,
@@ -1407,15 +1410,16 @@ export class ResponseEngine implements IMessageProcessor {
               usedFallback = true;
               continue;
             }
-            if (attempt < MAX_RETRIES && isRetryableError(retryError)) {
-              const delay = Math.pow(2, attempt) * 1000; // 2s, 4s
-              logger.warn(`[ResponseEngine] Retryable error (attempt ${attempt}/${MAX_RETRIES}), retrying in ${delay}ms:`, retryError);
-              renderer.addNotice(`API 暂时不可用，第 ${attempt} 次失败，${delay / 1000} 秒后进行第 ${attempt + 1}/${MAX_RETRIES} 次尝试`, 'warn', 'retry', true);
+            if (attempt < MAX_ATTEMPTS && isRetryableError(retryError)) {
+              const delay = RETRY_DELAYS_MS[attempt - 1];
+              const nextRetryNumber = attempt;
+              logger.warn(`[ResponseEngine] Retryable error (attempt ${attempt}/${MAX_ATTEMPTS}), retrying in ${delay}ms:`, retryError);
+              renderer.addNotice(`API 暂时不可用，第 ${attempt} 次请求失败，${delay / 1000} 秒后进行第 ${nextRetryNumber}/${MAX_RETRIES} 次重试`, 'warn', 'retry', true);
               await renderer.flush();
               await new Promise(resolve => setTimeout(resolve, delay));
               continue;
             }
-            if (attempt >= MAX_RETRIES && isRetryableError(retryError)) {
+            if (attempt >= MAX_ATTEMPTS && isRetryableError(retryError)) {
               markRetryExhausted(retryError, MAX_RETRIES);
             }
             throw retryError; // 不可重试或已耗尽重试次数
@@ -2009,18 +2013,18 @@ export class ResponseEngine implements IMessageProcessor {
       // 用户主动中断（新消息打断 或 /stop 命令）时静默，不发送错误提示
       // processEventStream 已通过 renderer 发过错误时也跳过
       const isTimeout = error instanceof Error && error.message === 'SDK_TIMEOUT';
-      const retryExhaustedAttempts = getRetryExhaustedAttempts(error);
+      const retryExhaustedCount = getRetryExhaustedCount(error);
       if (isUserInterrupt) {
         logger.info(`[ResponseEngine] User interrupt by new_message, skip sending error message`);
       } else if (isSilentTrigger) {
         logger.info(`[ResponseEngine] Silent trigger error output suppressed task=${taskId}`);
-      } else if ((error as any)?._errorAlreadySent && !retryExhaustedAttempts) {
+      } else if ((error as any)?._errorAlreadySent && !retryExhaustedCount) {
         logger.info(`[ResponseEngine] Error already sent via renderer, skip sending duplicate message`);
       } else {
         // SDK_TIMEOUT：status.timeout 已发结构化状态，此处再补一条用户可见的错误文本（result.error）
         const idleSec = getLastIdleSec?.() || 0;
-        const userMessage = retryExhaustedAttempts
-          ? formatRetryableErrorFinalMessage(error, retryExhaustedAttempts)
+        const userMessage = retryExhaustedCount
+          ? formatRetryableErrorFinalMessage(error, retryExhaustedCount)
           : isTimeout
           ? (idleSec > 0 ? `⚠️ 任务超时（${idleSec}秒无响应），已自动中断` : '⚠️ 任务超时，已自动中断')
           : getErrorMessage(error, undefined);
@@ -2051,7 +2055,7 @@ export class ResponseEngine implements IMessageProcessor {
         const errorPayload = {
           kind: 'result.error' as const,
           text: userMessage,
-          reason: retryExhaustedAttempts ? 'retry_exhausted' : isTimeout ? 'timeout' : errType,
+          reason: retryExhaustedCount ? 'retry_exhausted' : isTimeout ? 'timeout' : errType,
         };
         await adapter.send({ ...envelope, replyContext: sendOpts }, errorPayload);
 

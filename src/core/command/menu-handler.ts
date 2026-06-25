@@ -9,13 +9,36 @@ import { buildEnvelope } from '../message/message-utils.js';
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
+import { execSync } from 'child_process';
 import { CronExpressionParser } from 'cron-parser';
 import type { ParsedTriggerSet } from '../../trigger/parser.js';
-import { checkLatestVersion, getLocalVersion, isLinkedInstall, compareVersions } from '../../utils/npm-ops.js';
+import { checkLatestVersion, getLocalVersion, isLinkedInstall, compareVersions, resolveGlobalPkg } from '../../utils/npm-ops.js';
+import { commandExists } from '../../utils/cross-platform.js';
 import { loadDefaults, loadEvolclawConfig } from '../../config-store.js';
 import { execAgentAction, execAgentQuery, execAgentOptions, resolveProjectPath } from '../message/command-handler-agent-control.js';
 import { gatewayList, gatewayUpdate, gatewayDelete, gatewayTest, gatewayModels, gatewaySetPrice, gatewaySyncEnv } from '../message/gateway-config-handler.js';
 import { displaySessionTitle } from '../session/session-title.js';
+
+/**
+ * 获取 baseagent CLI 的版本号（claude/gemini/codex）。
+ * 失败返回 null（命令不存在或执行失败）。
+ */
+function getBaseagentVersion(cmd: string): string | null {
+  try {
+    const output = execSync(`${cmd} --version`, {
+      encoding: 'utf-8',
+      timeout: 3000,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }).trim();
+    // claude: "2.1.187 (Claude Code)" → 提取 "2.1.187"
+    // gemini: "0.38.0" → 直接返回
+    // codex: "codex-cli 0.142.0" → 提取 "0.142.0"
+    const match = output.match(/(\d+\.\d+\.\d+)/);
+    return match ? match[1] : null;
+  } catch {
+    return null;
+  }
+}
 
 export interface MenuNext {
   type: 'select' | 'text';
@@ -971,8 +994,6 @@ export async function execMenuQuery(this: any,
     }
     const owningAgent = this.getOwningAgent(channel);
     const data: Record<string, any> = {
-      agent: owningAgent?.name ?? 'DefaultAgent',
-      channel: this.resolveChannelType(channel),
       pid: process.pid,
       node: process.version,
       uptime: Math.floor(process.uptime()),
@@ -987,6 +1008,9 @@ export async function execMenuQuery(this: any,
       const fp2 = JSON.parse(fs.readFileSync(fp, 'utf-8'));
       if (fp2?.version) data.fastaunVersion = fp2.version;
     } catch {}
+    // ecweb 是独立全局包，读其已装版本（与 /upgrade 一致）
+    const ecwebPkg = resolveGlobalPkg('evolclaw-web');
+    if (ecwebPkg?.version) data.ecwebVersion = ecwebPkg.version;
     const channels = owningAgent?.channelInstanceNames?.() ?? [];
     if (channels.length) {
       // 将 channelKey 字符串（如 "feishu#aid#name"）解析为对象 { type, instName }
@@ -995,6 +1019,14 @@ export async function execMenuQuery(this: any,
         return { type: parts[0], instName: parts[2] || parts[0] };
       });
     }
+    // 收集主机级可用的所有 baseagent 类型（检测已安装的 CLI + 版本）
+    const baseagents: Array<{ name: string; version: string | null }> = [];
+    for (const cmd of ['claude', 'gemini', 'codex']) {
+      if (commandExists(cmd)) {
+        baseagents.push({ name: cmd, version: getBaseagentVersion(cmd) });
+      }
+    }
+    data.baseagents = baseagents;
     return { data };
   }
 
@@ -1568,8 +1600,7 @@ export async function execMenuAction(this: any,
 
     if (action === 'check') {
       const r = await this.delegateAsAction(action, '/check', channel, channelId, userId, { overrideIdentity });
-      const structured = (r as any).data?.structured ?? null;
-      if (structured) return { data: { ...(r as any).data, ...structured } };
+      // delegateAsAction 已经把 structured 放在 data.structured 里了，直接返回
       return r as any;
     }
 
