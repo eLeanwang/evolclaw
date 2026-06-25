@@ -325,26 +325,45 @@ export async function handleRoleAssignmentsApi(req: any, res: any): Promise<void
       req.on('end', () => {
         try {
           const { field, users } = JSON.parse(body);
+          console.log('[role-assignments] Update request:', { aid, field, users });
 
           if (!field || !Array.isArray(users)) {
+            console.error('[role-assignments] Invalid request body:', { field, users });
             res.writeHead(400, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: 'Invalid request body' }));
             return;
           }
 
           if (!['owners', 'admins', 'members'].includes(field)) {
+            console.error('[role-assignments] Invalid field:', field);
             res.writeHead(400, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: 'Invalid field' }));
             return;
           }
 
-          const config = read(ConfigTarget.Agent, { self: aid }) || {};
-          config[field] = users;
-          write(ConfigTarget.Agent, { self: aid }, config);
+          // 读取现有配置（包含完整的 schema 必需字段）
+          const existingConfig = read(ConfigTarget.Agent, { self: aid });
+          console.log('[role-assignments] Existing config:', JSON.stringify(existingConfig, null, 2));
+
+          if (!existingConfig) {
+            console.error('[role-assignments] Agent config not found for:', aid);
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Agent config not found' }));
+            return;
+          }
+
+          // 只更新指定字段，保持其他字段不变
+          const updatedConfig = { ...existingConfig, [field]: users };
+          console.log('[role-assignments] Updated config before write:', JSON.stringify(updatedConfig, null, 2));
+
+          write(ConfigTarget.Agent, updatedConfig, { self: aid });
+          console.log('[role-assignments] Write successful for:', aid);
 
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: true }));
         } catch (err: any) {
+          console.error('[role-assignments] Error processing request:', err);
+          console.error('[role-assignments] Error stack:', err.stack);
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: err.message }));
         }

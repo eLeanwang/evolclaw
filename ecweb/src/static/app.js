@@ -4072,24 +4072,34 @@ function renderRelationsTable(data, filterAid = null) {
 
 async function updateAgentRoles(aid, field, users) {
   try {
+    console.log('[updateAgentRoles] Called with:', { aid, field, users });
     const token = localStorage.getItem(TOKEN_KEY);
+    const payload = { field, users };
+    console.log('[updateAgentRoles] Sending payload:', JSON.stringify(payload));
+
     const res = await fetch(`/api/roles/agent/${encodeURIComponent(aid)}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${token}`
       },
-      body: JSON.stringify({ field, users })
+      body: JSON.stringify(payload)
     });
+
+    console.log('[updateAgentRoles] Response status:', res.status);
 
     if (!res.ok) {
       const err = await res.json();
+      console.error('[updateAgentRoles] Error response:', err);
       alert(t('common.operating') + ' ' + t('pair.error.failed') + ': ' + (err.error || 'unknown'));
       return false;
     }
 
+    const result = await res.json();
+    console.log('[updateAgentRoles] Success response:', result);
     return true;
   } catch (err) {
+    console.error('[updateAgentRoles] Exception:', err);
     alert(t('pair.error.network') + ': ' + err.message);
     return false;
   }

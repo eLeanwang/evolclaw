@@ -2166,6 +2166,7 @@ tr.ag-disabled .ag-name { color: var(--dim); }
   align-items: center;
   justify-content: center;
   z-index: 1000;
+  overflow-y: auto;
 }
 
 .modal-content {
@@ -2177,6 +2178,7 @@ tr.ag-disabled .ag-name { color: var(--dim); }
   display: flex;
   flex-direction: column;
   box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+  margin: auto;
 }
 
 .modal-header {
@@ -2247,13 +2249,15 @@ tr.ag-disabled .ag-name { color: var(--dim); }
 }
 
 /* 角色编辑弹窗的保存按钮：黑色边框 + 黑色字体（非白色填充） */
-#role-edit-save.btn-primary {
+#role-edit-save.btn-primary,
+#peer-role-save.btn-primary {
   background: var(--bg);
   color: var(--fg);
   border: 1px solid var(--fg);
 }
 
-#role-edit-save.btn-primary:hover {
+#role-edit-save.btn-primary:hover,
+#peer-role-save.btn-primary:hover {
   background: var(--bg2);
 }
 
