@@ -23,7 +23,8 @@ export type LogicalSchemaName =
   | 'defaults'
   | 'agent-config'
   | 'relation-config'
-  | 'behavior';
+  | 'behavior'
+  | 'roles';
 
 export type MergeKind = 'scalar' | 'list' | 'dict';
 

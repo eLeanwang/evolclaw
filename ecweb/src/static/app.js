@@ -18,6 +18,76 @@ const translations = {
     'tab.gateway': '智能体网关',
     'tab.usage': '用量',
     'tab.monitor': '监控',
+    'tab.roles': '角色分配',
+    'tab.roleDefinitions': '角色定义',
+
+    // Role Definitions view
+    'roleDefs.title': '角色定义管理',
+    'roleDefs.owner': '所有者',
+    'roleDefs.admin': '管理员',
+    'roleDefs.member': '成员',
+    'roleDefs.guest': '访客',
+    'roleDefs.anonymous': '匿名',
+    'roleDefs.viewDetails': '查看详情',
+    'roleDefs.edit': '编辑',
+    'roleDefs.reset': '重置',
+    'roleDefs.save': '保存',
+    'roleDefs.cancel': '取消',
+    'roleDefs.permissionMode': '权限模式',
+    'roleDefs.model': '模型',
+    'roleDefs.dispatch': '分发模式',
+    'roleDefs.allowOverride': '允许覆盖',
+    'roleDefs.allowedModels': '允许的模型',
+    'roleDefs.description': '描述',
+    'roleDefs.resetConfirm': '确定要将 {role} 重置为默认配置吗？',
+    'roleDefs.saveSuccess': '保存成功',
+    'roleDefs.saveFailed': '保存失败',
+
+    // Role permission values
+    'roleDefs.effort.low': '低 (low)',
+    'roleDefs.effort.medium': '中 (medium)',
+    'roleDefs.effort.high': '高 (high)',
+    'roleDefs.showActivities.true': '显示 (true)',
+    'roleDefs.showActivities.false': '不显示 (false)',
+    'roleDefs.permMode.bypass': '绕过 (bypass)',
+    'roleDefs.permMode.request': '请求 (request)',
+    'roleDefs.permMode.auto': '自动 (auto)',
+    'roleDefs.permMode.readonly': '只读 (readonly)',
+    'roleDefs.dispatch.broadcast': '广播 (broadcast)',
+    'roleDefs.dispatch.mention': '提及 (mention)',
+
+    // Roles view
+    'roles.selectAgent': '选择智能体:',
+    'roles.selectAgentPlaceholder': '-- 请选择智能体 --',
+    'roles.owners': '所有者',
+    'roles.admins': '管理员',
+    'roles.members': '成员',
+    'roles.addOwner': '+ 添加所有者',
+    'roles.addAdmin': '+ 添加管理员',
+    'roles.addMember': '+ 添加成员',
+    'roles.relations': '关系列表',
+    'roles.removeConfirm': '确定要移除 {user} 的 {role} 角色吗？',
+    'roles.addPrompt': '请输入要添加为 {role} 的 AID:\n\n格式: username.aid.pub 或 username.agentid.pub',
+    'roles.invalidFormat': '无效的 AID 格式\n\n期望格式: username.aid.pub 或 username.agentid.pub\n\n示例: alice.aid.pub',
+    'roles.alreadyExists': '用户 {user} 已经是 {role}',
+    'roles.selectFirst': '请先选择一个智能体',
+    'roles.directAssignments': '👤 直接角色分配',
+    'roles.peerAssignments': '对端角色分配',
+    'roles.owners': '所有者',
+    'roles.admins': '管理员',
+    'roles.members': '成员',
+    'roles.addOwner': '+ 添加所有者',
+    'roles.addAdmin': '+ 添加管理员',
+    'roles.addMember': '+ 添加成员',
+    'roles.peerKey': 'Peer Key',
+    'roles.channel': '渠道',
+    'roles.effectiveRole': '有效角色',
+    'roles.source': '来源',
+    'roles.actions': '操作',
+    'roles.editPeerRole': '编辑对端角色',
+    'roles.currentRole': '当前角色',
+    'roles.noOverride': '不覆盖（使用 agent 级别角色）',
+    'roles.setOverride': '设置 relation 级别角色：',
 
     // Status
     'status.connecting': '连接中…',
@@ -293,6 +363,76 @@ const translations = {
     'tab.gateway': 'Agent Gateway',
     'tab.usage': 'Usage',
     'tab.monitor': 'Monitor',
+    'tab.roles': 'Role Assignment',
+    'tab.roleDefinitions': 'Roles',
+
+    // Role Definitions view
+    'roleDefs.title': 'Role Definitions',
+    'roleDefs.owner': 'Owner',
+    'roleDefs.admin': 'Admin',
+    'roleDefs.member': 'Member',
+    'roleDefs.guest': 'Guest',
+    'roleDefs.anonymous': 'Anonymous',
+    'roleDefs.viewDetails': 'View Details',
+    'roleDefs.edit': 'Edit',
+    'roleDefs.reset': 'Reset',
+    'roleDefs.save': 'Save',
+    'roleDefs.cancel': 'Cancel',
+    'roleDefs.permissionMode': 'Permission Mode',
+    'roleDefs.model': 'Model',
+    'roleDefs.dispatch': 'Dispatch',
+    'roleDefs.allowOverride': 'Allow Override',
+    'roleDefs.allowedModels': 'Allowed Models',
+    'roleDefs.description': 'Description',
+    'roleDefs.resetConfirm': 'Reset {role} to default configuration?',
+    'roleDefs.saveSuccess': 'Saved successfully',
+    'roleDefs.saveFailed': 'Save failed',
+
+    // Role permission values
+    'roleDefs.effort.low': 'Low (low)',
+    'roleDefs.effort.medium': 'Medium (medium)',
+    'roleDefs.effort.high': 'High (high)',
+    'roleDefs.showActivities.true': 'Show (true)',
+    'roleDefs.showActivities.false': 'Hide (false)',
+    'roleDefs.permMode.bypass': 'Bypass (bypass)',
+    'roleDefs.permMode.request': 'Request (request)',
+    'roleDefs.permMode.auto': 'Auto (auto)',
+    'roleDefs.permMode.readonly': 'Readonly (readonly)',
+    'roleDefs.dispatch.broadcast': 'Broadcast (broadcast)',
+    'roleDefs.dispatch.mention': 'Mention (mention)',
+
+    // Roles view
+    'roles.selectAgent': 'Select Agent:',
+    'roles.selectAgentPlaceholder': '-- Select an Agent --',
+    'roles.owners': 'Owners',
+    'roles.admins': 'Admins',
+    'roles.members': 'Members',
+    'roles.addOwner': '+ Add Owner',
+    'roles.addAdmin': '+ Add Admin',
+    'roles.addMember': '+ Add Member',
+    'roles.relations': 'Relations',
+    'roles.removeConfirm': 'Remove {user} from {role}?',
+    'roles.addPrompt': 'Enter AID to add as {role}:\n\nFormat: username.aid.pub or username.agentid.pub',
+    'roles.invalidFormat': 'Invalid AID format.\n\nExpected: username.aid.pub or username.agentid.pub\n\nExample: alice.aid.pub',
+    'roles.alreadyExists': 'User {user} is already in {role}',
+    'roles.selectFirst': 'Please select an agent first',
+    'roles.directAssignments': '👤 Direct Role Assignments',
+    'roles.peerAssignments': 'Peer Role Assignments',
+    'roles.owners': 'Owners',
+    'roles.admins': 'Admins',
+    'roles.members': 'Members',
+    'roles.addOwner': '+ Add Owner',
+    'roles.addAdmin': '+ Add Admin',
+    'roles.addMember': '+ Add Member',
+    'roles.peerKey': 'Peer Key',
+    'roles.channel': 'Channel',
+    'roles.effectiveRole': 'Effective Role',
+    'roles.source': 'Source',
+    'roles.actions': 'Actions',
+    'roles.editPeerRole': 'Edit Peer Role',
+    'roles.currentRole': 'Current Role',
+    'roles.noOverride': 'No override (use agent-level role)',
+    'roles.setOverride': 'Set relation-level role:',
 
     // Status
     'status.connecting': 'Connecting…',
@@ -670,7 +810,7 @@ let ws = null;
 let reconnectDelay = 1000;
 let currentView = localStorage.getItem(VIEW_KEY) || 'agents';
 let pendingSub = null;        // 重连后要恢复的订阅
-const state = { agents: null, msg: null, session: null, cache: null, system: null, triggers: null, monitor: null, gateway: null };
+const state = { agents: null, msg: null, session: null, cache: null, system: null, triggers: null, monitor: null, gateway: null, roles: null, roleDefinitions: null };
 
 function setConnStatus(text, cls) {
   const el = $('#conn-status');
@@ -701,6 +841,11 @@ function connect() {
       return;
     }
     if (msg.type === 'snapshot' || msg.type === 'delta') {
+      // 增加日志：记录收到的消息
+      if (msg.view === 'roleDefinitions') {
+        console.log(`[WS] Received ${msg.type} for roleDefinitions:`, msg.data);
+      }
+
       // system 视图保留客户端写入的 check/upgrade，防止 3s 轮询覆盖
       if (msg.view === 'system' && state.system) {
         state.system = {
@@ -732,6 +877,7 @@ function connect() {
 function subscribe(view, params) {
   pendingSub = params;
   if (ws && ws.readyState === WebSocket.OPEN) {
+    console.log(`[WS] Subscribing to view: ${view}`, params);
     ws.send(JSON.stringify({ type: 'subscribe', view, ...params }));
   }
 }
@@ -767,6 +913,7 @@ let sessChatMode = false;   // false=完整视图，true=对话视图（折叠�
 let monRange = '2m';        // Monitor 时间窗口：2m / 10m / 1h
 
 function switchView(view) {
+  console.log('[switchView] Switching to view:', view);
   currentView = view;
   localStorage.setItem(VIEW_KEY, view);
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.view === view));
@@ -779,6 +926,8 @@ function switchView(view) {
   else if (view === 'triggers') subscribe('triggers', { agent: trigSel.agent });
   else if (view === 'monitor') subscribe('monitor', { range: monRange });
   else if (view === 'gateway') subscribe('gateway', {});
+  else if (view === 'roleDefinitions') subscribe('roleDefinitions', {});
+  else if (view === 'roles') subscribe('roles', {});
   else subscribe('agents', {});
   if (state[view]) renderView(view);
 }
@@ -790,6 +939,7 @@ function initTabs() {
 }
 
 function renderView(view) {
+  console.log('[renderView] Rendering view:', view, 'with state:', state[view]);
   if (view === 'agents') renderAgents(state.agents);
   else if (view === 'msg') renderMsg(state.msg);
   else if (view === 'session') renderSession(state.session);
@@ -798,6 +948,8 @@ function renderView(view) {
   else if (view === 'triggers') renderTriggers(state.triggers);
   else if (view === 'monitor') renderMonitor(state.monitor);
   else if (view === 'gateway') renderGateway(state.gateway);
+  else if (view === 'roleDefinitions') renderRoleDefinitions(state.roleDefinitions);
+  else if (view === 'roles') renderRoleAssignments(state.roles);
 }
 
 // ── 工具 ──
@@ -3645,7 +3797,949 @@ window.addEventListener('DOMContentLoaded', async () => {
     showApp();
     startApp();
     initUsageSubtabs();
+    initRolesTab();
+    initRoleDefinitionsTab();
   } else {
     showPairPage();
   }
 });
+
+// ========== Roles Tab ==========
+let rolesCurrentAgent = null;
+
+function renderRoles(data) {
+  if (!data) return;
+
+  const agentSelect = $('#roles-agent-select');
+  const management = $('#roles-management');
+
+  if (!agentSelect || !management) return;
+
+  // 填充 agent 选择器
+  const placeholder = agentSelect.querySelector('option[value=""]');
+  agentSelect.innerHTML = '';
+
+  // 重新创建占位符选项（支持国际化）
+  const placeholderOption = document.createElement('option');
+  placeholderOption.value = '';
+  placeholderOption.setAttribute('data-i18n', 'roles.selectAgentPlaceholder');
+  placeholderOption.textContent = t('roles.selectAgentPlaceholder');
+  agentSelect.appendChild(placeholderOption);
+
+  // 添加 agent 选项
+  data.agents.forEach(agent => {
+    const opt = document.createElement('option');
+    opt.value = agent.aid;
+    opt.textContent = agent.aid;
+    agentSelect.appendChild(opt);
+  });
+
+  // 恢复当前选择
+  if (rolesCurrentAgent && data.agents.find(a => a.aid === rolesCurrentAgent)) {
+    agentSelect.value = rolesCurrentAgent;
+    renderAgentRoles(data, rolesCurrentAgent);
+    management.style.display = 'block';
+  } else {
+    management.style.display = 'none';
+  }
+
+  // 渲染关系列表
+  renderRelationsTable(data);
+}
+
+function renderAgentRoles(data, aid) {
+  const agent = data.agents.find(a => a.aid === aid);
+  if (!agent) return;
+
+  ['owners', 'admins', 'members'].forEach(field => {
+    const list = $(`#${field}-list`);
+    if (!list) return;
+
+    list.innerHTML = '';
+
+    if (agent[field].length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'role-empty';
+      empty.textContent = t('common.empty');
+      list.appendChild(empty);
+      return;
+    }
+
+    agent[field].forEach(userId => {
+      const item = document.createElement('div');
+      item.className = 'role-item';
+      item.innerHTML = `
+        <span class="role-user-id">${esc(userId)}</span>
+        <button class="remove-btn" data-field="${field}" data-user="${esc(userId)}">×</button>
+      `;
+      list.appendChild(item);
+    });
+  });
+}
+
+function renderRelationsTable(data) {
+  const tbody = document.querySelector('#relations-table tbody');
+  if (!tbody) return;
+
+  tbody.innerHTML = '';
+
+  if (data.relations.length === 0) {
+    const row = tbody.insertRow();
+    const cell = row.insertCell();
+    cell.colSpan = 4;
+    cell.textContent = t('common.empty');
+    cell.style.textAlign = 'center';
+    cell.style.color = 'var(--dim)';
+    return;
+  }
+
+  data.relations.forEach(rel => {
+    const row = tbody.insertRow();
+    row.innerHTML = `
+      <td><code>${esc(rel.self)}</code></td>
+      <td><code>${esc(rel.peerKey)}</code></td>
+      <td><span class="role-badge role-${rel.role}">${esc(rel.role)}</span></td>
+      <td><span class="role-source">${esc(rel.source)}</span></td>
+    `;
+  });
+}
+
+async function updateAgentRoles(aid, field, users) {
+  try {
+    const token = localStorage.getItem(TOKEN_KEY);
+    const res = await fetch(`/api/roles/agent/${encodeURIComponent(aid)}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      },
+      body: JSON.stringify({ field, users })
+    });
+
+    if (!res.ok) {
+      const err = await res.json();
+      alert(t('common.operating') + ' ' + t('pair.error.failed') + ': ' + (err.error || 'unknown'));
+      return false;
+    }
+
+    return true;
+  } catch (err) {
+    alert(t('pair.error.network') + ': ' + err.message);
+    return false;
+  }
+}
+
+function initRolesTab() {
+  // Agent 选择器事件
+  const agentSelect = $('#roles-agent-select');
+  if (agentSelect) {
+    agentSelect.addEventListener('change', (e) => {
+      rolesCurrentAgent = e.target.value;
+      const management = $('#roles-management');
+      if (management) {
+        management.style.display = rolesCurrentAgent ? 'block' : 'none';
+      }
+      if (rolesCurrentAgent && state.roles) {
+        renderAgentRoles(state.roles, rolesCurrentAgent);
+      }
+    });
+  }
+
+  // 添加角色按钮事件
+  document.querySelectorAll('.add-role-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const field = btn.dataset.field;
+      if (!rolesCurrentAgent) {
+        alert('Please select an agent first');
+        return;
+      }
+
+      const userId = prompt(`Enter AID to add as ${field}:\n\nFormat: username.aid.pub or username.agentid.pub`);
+      if (!userId) return;
+
+      // 验证 AID 格式
+      if (!/^[a-z0-9_-]+\.(aid|agentid)\.pub$/i.test(userId)) {
+        alert('Invalid AID format.\n\nExpected: username.aid.pub or username.agentid.pub\n\nExample: alice.aid.pub');
+        return;
+      }
+
+      if (!state.roles) return;
+      const agent = state.roles.agents.find(a => a.aid === rolesCurrentAgent);
+      if (!agent) return;
+
+      if (agent[field].includes(userId)) {
+        alert(`User ${userId} is already in ${field}`);
+        return;
+      }
+
+      const newUsers = [...agent[field], userId];
+      const success = await updateAgentRoles(rolesCurrentAgent, field, newUsers);
+
+      if (success) {
+        // 数据会通过 WebSocket 自动更新
+      }
+    });
+  });
+
+  // 删除角色按钮事件（事件委托）
+  document.addEventListener('click', async (e) => {
+    if (e.target.classList.contains('remove-btn')) {
+      const { field, user } = e.target.dataset;
+      if (!rolesCurrentAgent) return;
+
+      if (!confirm(`Remove ${user} from ${field}?`)) return;
+
+      if (!state.roles) return;
+      const agent = state.roles.agents.find(a => a.aid === rolesCurrentAgent);
+      if (!agent) return;
+
+      const newUsers = agent[field].filter(u => u !== user);
+      const success = await updateAgentRoles(rolesCurrentAgent, field, newUsers);
+
+      if (success) {
+        // 数据会通过 WebSocket 自动更新
+      }
+    }
+  });
+}
+
+// ========== Role Definitions Tab ==========
+const ROLE_ICONS = {
+  owner: '👑',
+  admin: '🛡️',
+  member: '👥',
+  guest: '👤',
+  anonymous: '🚫'
+};
+
+const ROLE_NAMES = {
+  owner: 'roleDefs.owner',
+  admin: 'roleDefs.admin',
+  member: 'roleDefs.member',
+  guest: 'roleDefs.guest',
+  anonymous: 'roleDefs.anonymous'
+};
+
+function renderRoleDefinitions(data) {
+  console.log('[roleDefinitions] renderRoleDefinitions called with data:', data);
+
+  const grid = $('#role-cards-grid');
+  if (!grid) {
+    console.error('[roleDefinitions] Grid element not found (#role-cards-grid)');
+    return;
+  }
+
+  if (!data) {
+    console.warn('[roleDefinitions] No data received');
+    grid.innerHTML = '<div class="role-error">❌ 未收到角色定义数据</div>';
+    return;
+  }
+
+  if (!data.roles) {
+    console.warn('[roleDefinitions] Data received but no roles field:', data);
+    grid.innerHTML = '<div class="role-error">❌ 角色定义数据格式错误（缺少 roles 字段）</div>';
+    return;
+  }
+
+  if (Object.keys(data.roles).length === 0) {
+    console.warn('[roleDefinitions] Roles object is empty');
+    grid.innerHTML = '<div class="role-error">⚠️ 暂无角色定义</div>';
+    return;
+  }
+
+  console.log('[roleDefinitions] Rendering', Object.keys(data.roles).length, 'roles');
+  grid.innerHTML = '';
+
+  Object.entries(data.roles).forEach(([roleName, roleDef]) => {
+    try {
+      const card = createRoleCard(roleName, roleDef);
+      grid.appendChild(card);
+    } catch (err) {
+      console.error(`[roleDefinitions] Failed to create card for role ${roleName}:`, err);
+    }
+  });
+}
+
+function createRoleCard(roleName, roleDef) {
+  const card = document.createElement('div');
+  card.className = `role-card role-${roleName}`;
+
+  const icon = ROLE_ICONS[roleName] || '📋';
+  const nameKey = ROLE_NAMES[roleName] || roleName;
+  const permMode = roleDef.permissions?.permissionMode?.default || '—';
+  const model = roleDef.permissions?.['baseagents.claude.model']?.default || '—';
+
+  // 判断是否为内置角色
+  const builtinRoles = ['owner', 'admin', 'member', 'guest', 'anonymous'];
+  const isBuiltin = builtinRoles.includes(roleName);
+
+  card.innerHTML = `
+    <div class="role-card-header">
+      <span class="role-icon">${icon}</span>
+      <h3 class="role-name" data-i18n="${nameKey}">${t(nameKey)}</h3>
+      ${!isBuiltin ? '<span class="role-custom-badge">自定义</span>' : ''}
+    </div>
+    <p class="role-description">${esc(roleDef.description || '')}</p>
+    <div class="role-preview">
+      <div class="role-preview-item">
+        <span class="label">${t('roleDefs.permissionMode')}:</span>
+        <span class="value">${esc(permMode)}</span>
+      </div>
+      <div class="role-preview-item">
+        <span class="label">${t('roleDefs.model')}:</span>
+        <span class="value">${esc(model)}</span>
+      </div>
+    </div>
+    <div class="role-card-actions">
+      <button class="btn-view-role" data-role="${roleName}">${t('roleDefs.viewDetails')}</button>
+      <button class="btn-edit-role" data-role="${roleName}">${t('roleDefs.edit')}</button>
+      ${isBuiltin ? `<button class="btn-reset-role" data-role="${roleName}">${t('roleDefs.reset')}</button>` :
+                    `<button class="btn-delete-role" data-role="${roleName}">删除</button>`}
+    </div>
+  `;
+
+  return card;
+}
+
+function initRoleDefinitionsTab() {
+  // 新增角色按钮
+  $('#btn-new-role')?.addEventListener('click', () => {
+    showNewRoleModal();
+  });
+
+  // View Details 按钮
+  document.addEventListener('click', (e) => {
+    if (e.target.classList.contains('btn-view-role')) {
+      const roleName = e.target.dataset.role;
+      if (state.roleDefinitions?.roles[roleName]) {
+        showRoleDetailsModal(roleName, state.roleDefinitions.roles[roleName]);
+      }
+    }
+  });
+
+  // Edit 按钮
+  document.addEventListener('click', (e) => {
+    if (e.target.classList.contains('btn-edit-role')) {
+      const roleName = e.target.dataset.role;
+      if (state.roleDefinitions?.roles[roleName]) {
+        showRoleEditModal(roleName, state.roleDefinitions.roles[roleName]);
+      }
+    }
+  });
+
+  // Reset 按钮
+  document.addEventListener('click', async (e) => {
+    if (e.target.classList.contains('btn-reset-role')) {
+      const roleName = e.target.dataset.role;
+      const confirmMsg = t('roleDefs.resetConfirm').replace('{role}', roleName);
+
+      if (!confirm(confirmMsg)) return;
+
+      try {
+        const token = localStorage.getItem(TOKEN_KEY);
+        const res = await fetch(`/api/role-definitions/${roleName}/reset`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${token}` }
+        });
+
+        if (!res.ok) {
+          alert(t('roleDefs.saveFailed'));
+        } else {
+          alert(t('roleDefs.saveSuccess'));
+        }
+      } catch (err) {
+        alert(t('pair.error.network'));
+      }
+    }
+  });
+
+  // 删除角色按钮
+  document.addEventListener('click', async (e) => {
+    if (e.target.classList.contains('btn-delete-role')) {
+      const roleName = e.target.dataset.role;
+
+      if (!confirm(`确定要删除角色 "${roleName}" 吗？\n\n注意：内置角色（owner/admin/member/guest/anonymous）不能删除。`)) return;
+
+      try {
+        const token = localStorage.getItem(TOKEN_KEY);
+        const res = await fetch(`/api/role-definitions/${roleName}`, {
+          method: 'DELETE',
+          headers: { 'Authorization': `Bearer ${token}` }
+        });
+
+        if (!res.ok) {
+          const err = await res.json();
+          alert(t('roleDefs.saveFailed') + ': ' + (err.error || 'unknown'));
+        } else {
+          alert('角色已删除');
+        }
+      } catch (err) {
+        alert(t('pair.error.network'));
+      }
+    }
+  });
+
+  // 关闭弹窗
+  $('#role-edit-close')?.addEventListener('click', () => {
+    $('#role-edit-modal').style.display = 'none';
+  });
+
+  $('#role-edit-cancel')?.addEventListener('click', () => {
+    $('#role-edit-modal').style.display = 'none';
+  });
+
+  // 保存按钮
+  $('#role-edit-save')?.addEventListener('click', async () => {
+    await saveRoleDefinition();
+  });
+}
+
+function showNewRoleModal() {
+  const modal = $('#role-edit-modal');
+  const title = $('#role-edit-title');
+  const body = $('#role-edit-body');
+  const saveBtn = $('#role-edit-save');
+
+  if (!modal || !title || !body) return;
+
+  title.textContent = '新增自定义角色';
+  saveBtn.style.display = 'inline-block';
+  saveBtn.dataset.role = '__new__';
+
+  // 基于 member 角色的默认配置
+  const defaultDef = state.roleDefinitions?.roles?.member || {
+    description: '',
+    permissions: {
+      permissionMode: { default: 'request', allowOverride: false },
+      'baseagents.claude.model': { default: 'claude-sonnet-4', allowOverride: false },
+      dispatch: { default: 'mention', allowOverride: false }
+    }
+  };
+
+  body.innerHTML = `
+    <div class="role-edit-form">
+      <div class="form-section">
+        <h4>角色名称</h4>
+        <input type="text"
+               id="new-role-name"
+               class="form-input"
+               placeholder="输入角色名称（如：developer, viewer 等）"
+               pattern="[a-z0-9_-]+"
+               required>
+        <small style="color: var(--dim);">只能包含小写字母、数字、下划线和连字符</small>
+      </div>
+
+      <div class="form-section">
+        <h4>${t('roleDefs.description')}</h4>
+        <textarea id="edit-description" rows="3" class="form-textarea">${esc(defaultDef.description)}</textarea>
+      </div>
+
+      <div class="form-section">
+        <h4>权限配置</h4>
+  `;
+
+  const permissions = defaultDef.permissions;
+  const permissionMeta = {
+    permissionMode: {
+      label: t('roleDefs.permissionMode'),
+      type: 'select',
+      options: [
+        { value: 'bypass', label: 'roleDefs.permMode.bypass' },
+        { value: 'request', label: 'roleDefs.permMode.request' },
+        { value: 'auto', label: 'roleDefs.permMode.auto' },
+        { value: 'readonly', label: 'roleDefs.permMode.readonly' }
+      ]
+    },
+    'baseagents.claude.model': {
+      label: t('roleDefs.model'),
+      type: 'text'
+    },
+    'baseagents.claude.effort': {
+      label: currentLang === 'zh-CN' ? '推理强度 (effort)' : 'Reasoning Effort (effort)',
+      type: 'select',
+      options: [
+        { value: 'low', label: 'roleDefs.effort.low' },
+        { value: 'medium', label: 'roleDefs.effort.medium' },
+        { value: 'high', label: 'roleDefs.effort.high' }
+      ]
+    },
+    dispatch: {
+      label: t('roleDefs.dispatch'),
+      type: 'select',
+      options: [
+        { value: 'broadcast', label: 'roleDefs.dispatch.broadcast' },
+        { value: 'mention', label: 'roleDefs.dispatch.mention' }
+      ]
+    },
+    'baseagents.claude.allowedModels': {
+      label: t('roleDefs.allowedModels'),
+      type: 'tags',
+      placeholder: '按回车添加模型'
+    },
+    'baseagents.claude.show_activities': {
+      label: currentLang === 'zh-CN' ? '显示活动 (show_activities)' : 'Show Activities (show_activities)',
+      type: 'select',
+      options: [
+        { value: 'true', label: 'roleDefs.showActivities.true' },
+        { value: 'false', label: 'roleDefs.showActivities.false' }
+      ]
+    }
+  };
+
+  Object.keys(permissions).forEach(permKey => {
+    const perm = permissions[permKey];
+    const meta = permissionMeta[permKey] || { label: permKey, type: 'text' };
+
+    body.innerHTML += `
+      <div class="form-group perm-group">
+        <div class="perm-header">
+          <label class="perm-label">${esc(meta.label)}</label>
+          <label class="perm-override">
+            <input type="checkbox"
+                   data-perm="${esc(permKey)}"
+                   data-field="allowOverride"
+                   ${perm.allowOverride ? 'checked' : ''}>
+            <span>${t('roleDefs.allowOverride')}</span>
+          </label>
+        </div>
+    `;
+
+    if (meta.type === 'select') {
+      body.innerHTML += `<select data-perm="${esc(permKey)}" data-field="default" class="form-select">`;
+      meta.options.forEach(opt => {
+        const optValue = typeof opt === 'string' ? opt : opt.value;
+        const optLabel = typeof opt === 'string' ? opt : t(opt.label);
+        const selected = perm.default === optValue ? 'selected' : '';
+        body.innerHTML += `<option value="${esc(optValue)}" ${selected}>${esc(optLabel)}</option>`;
+      });
+      body.innerHTML += `</select>`;
+    } else if (meta.type === 'tags') {
+      const values = Array.isArray(perm.default) ? perm.default : [];
+      body.innerHTML += `
+        <div class="tags-input-container" data-perm="${esc(permKey)}">
+          <div class="tags-list">
+            ${values.map(v => `
+              <span class="tag">
+                ${esc(v)}
+                <button type="button" class="tag-remove" data-value="${esc(v)}">×</button>
+              </span>
+            `).join('')}
+          </div>
+          <input type="text"
+                 class="tags-input"
+                 placeholder="${esc(meta.placeholder || '')}"
+                 data-perm="${esc(permKey)}"
+                 data-field="default">
+        </div>
+      `;
+    } else {
+      const value = perm.default || '';
+      body.innerHTML += `
+        <input type="text"
+               data-perm="${esc(permKey)}"
+               data-field="default"
+               value="${esc(value)}"
+               class="form-input">
+      `;
+    }
+
+    body.innerHTML += `</div>`;
+  });
+
+  body.innerHTML += `</div></div>`;
+
+  bindTagsInputEvents(body);
+
+  modal.style.display = 'flex';
+
+  // 聚焦到角色名称输入框
+  setTimeout(() => $('#new-role-name')?.focus(), 100);
+}
+
+function showRoleDetailsModal(roleName, roleDef) {
+  const modal = $('#role-edit-modal');
+  const title = $('#role-edit-title');
+  const body = $('#role-edit-body');
+  const saveBtn = $('#role-edit-save');
+
+  if (!modal || !title || !body) return;
+
+  title.textContent = `${t(ROLE_NAMES[roleName] || roleName)} - ${t('roleDefs.viewDetails')}`;
+  saveBtn.style.display = 'none'; // 只读模式隐藏保存按钮
+
+  body.innerHTML = `
+    <div class="role-edit-form">
+      <h4>${t('roleDefs.description')}</h4>
+      <p>${esc(roleDef.description)}</p>
+
+      <h4>${t('common.operating')}</h4>
+      <pre>${JSON.stringify(roleDef.permissions, null, 2)}</pre>
+    </div>
+  `;
+
+  modal.style.display = 'flex';
+}
+
+function bindTagsInputEvents(container) {
+  // 标签输入：按回车添加
+  container.querySelectorAll('.tags-input').forEach(input => {
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        const value = input.value.trim();
+        if (!value) return;
+
+        const tagsContainer = input.closest('.tags-input-container');
+        const tagsList = tagsContainer.querySelector('.tags-list');
+
+        // 检查是否已存在
+        const existing = Array.from(tagsList.querySelectorAll('.tag')).map(t => t.textContent.trim().replace('×', ''));
+        if (existing.includes(value)) {
+          input.value = '';
+          return;
+        }
+
+        // 添加标签
+        const tag = document.createElement('span');
+        tag.className = 'tag';
+        tag.innerHTML = `
+          ${esc(value)}
+          <button type="button" class="tag-remove" data-value="${esc(value)}">×</button>
+        `;
+        tagsList.appendChild(tag);
+        input.value = '';
+      }
+    });
+  });
+
+  // 标签删除
+  container.addEventListener('click', (e) => {
+    if (e.target.classList.contains('tag-remove')) {
+      e.target.closest('.tag').remove();
+    }
+  });
+}
+
+async function saveRoleDefinition() {
+  const saveBtn = $('#role-edit-save');
+  const roleName = saveBtn?.dataset.role;
+
+  if (!roleName) return;
+
+  const body = $('#role-edit-body');
+  const isNew = roleName === '__new__';
+
+  let actualRoleName = roleName;
+
+  // 如果是新增角色，获取角色名称
+  if (isNew) {
+    const nameInput = $('#new-role-name');
+    actualRoleName = nameInput?.value.trim();
+
+    if (!actualRoleName) {
+      alert('请输入角色名称');
+      nameInput?.focus();
+      return;
+    }
+
+    // 验证角色名称格式
+    if (!/^[a-z0-9_-]+$/.test(actualRoleName)) {
+      alert('角色名称只能包含小写字母、数字、下划线和连字符');
+      nameInput?.focus();
+      return;
+    }
+
+    // 检查是否与内置角色重名
+    const builtinRoles = ['owner', 'admin', 'member', 'guest', 'anonymous'];
+    if (builtinRoles.includes(actualRoleName)) {
+      alert('角色名称不能与内置角色重名');
+      nameInput?.focus();
+      return;
+    }
+
+    // 检查是否已存在
+    if (state.roleDefinitions?.roles[actualRoleName]) {
+      alert(`角色 "${actualRoleName}" 已存在`);
+      nameInput?.focus();
+      return;
+    }
+  }
+
+  const currentDef = isNew ? {} : (state.roleDefinitions?.roles[actualRoleName] || {});
+
+  // 收集描述
+  const description = $('#edit-description')?.value;
+
+  // 收集所有权限配置
+  const permissions = {};
+
+  // 获取所有权限项的键
+  const permKeys = new Set();
+  body.querySelectorAll('[data-perm]').forEach(el => {
+    permKeys.add(el.dataset.perm);
+  });
+
+  permKeys.forEach(permKey => {
+    const defaultInput = body.querySelector(`[data-perm="${permKey}"][data-field="default"]`);
+    const overrideInput = body.querySelector(`[data-perm="${permKey}"][data-field="allowOverride"]`);
+
+    let defaultValue = currentDef.permissions?.[permKey]?.default;
+
+    // 根据输入类型获取值
+    if (defaultInput) {
+      if (defaultInput.classList.contains('tags-input')) {
+        // 标签输入：收集所有标签
+        const tagsContainer = defaultInput.closest('.tags-input-container');
+        const tags = Array.from(tagsContainer.querySelectorAll('.tag')).map(tag => {
+          return tag.textContent.trim().replace('×', '');
+        });
+        defaultValue = tags;
+      } else {
+        defaultValue = defaultInput.value;
+      }
+    }
+
+    permissions[permKey] = {
+      default: defaultValue,
+      allowOverride: overrideInput ? overrideInput.checked : false
+    };
+  });
+
+  const updates = {
+    description,
+    permissions
+  };
+
+  try {
+    const token = localStorage.getItem(TOKEN_KEY);
+    const method = isNew ? 'POST' : 'PUT';
+    const url = isNew ? '/api/role-definitions' : `/api/role-definitions/${actualRoleName}`;
+
+    const res = await fetch(url, {
+      method,
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      },
+      body: JSON.stringify(isNew ? { name: actualRoleName, ...updates } : updates)
+    });
+
+    if (!res.ok) {
+      const err = await res.json();
+      alert(t('roleDefs.saveFailed') + ': ' + (err.error || 'unknown'));
+    } else {
+      alert(isNew ? '角色创建成功' : t('roleDefs.saveSuccess'));
+      $('#role-edit-modal').style.display = 'none';
+    }
+  } catch (err) {
+    alert(t('pair.error.network'));
+  }
+}
+
+function showRoleEditModal(roleName, roleDef) {
+  const modal = $('#role-edit-modal');
+  const title = $('#role-edit-title');
+  const body = $('#role-edit-body');
+  const saveBtn = $('#role-edit-save');
+
+  if (!modal || !title || !body) return;
+
+  title.textContent = `${t(ROLE_NAMES[roleName] || roleName)} - ${t('roleDefs.edit')}`;
+  saveBtn.style.display = 'inline-block';
+  saveBtn.dataset.role = roleName;
+
+  // 构建完整的编辑表单
+  let formHtml = `<div class="role-edit-form">`;
+
+  // 1. 描述
+  formHtml += `
+    <div class="form-section">
+      <h4>${t('roleDefs.description')}</h4>
+      <textarea id="edit-description" rows="3" class="form-textarea">${esc(roleDef.description || '')}</textarea>
+    </div>
+  `;
+
+  // 2. 权限配置
+  formHtml += `<div class="form-section">
+    <h4>权限配置</h4>
+  `;
+
+  const permissions = roleDef.permissions || {};
+
+  // 权限项的元数据：定义每个权限的类型和可选值
+  const permissionMeta = {
+    permissionMode: {
+      label: t('roleDefs.permissionMode'),
+      type: 'select',
+      options: [
+        { value: 'bypass', label: 'roleDefs.permMode.bypass' },
+        { value: 'request', label: 'roleDefs.permMode.request' },
+        { value: 'auto', label: 'roleDefs.permMode.auto' },
+        { value: 'readonly', label: 'roleDefs.permMode.readonly' }
+      ]
+    },
+    'baseagents.claude.model': {
+      label: t('roleDefs.model'),
+      type: 'text'
+    },
+    'baseagents.claude.effort': {
+      label: currentLang === 'zh-CN' ? '推理强度 (effort)' : 'Reasoning Effort (effort)',
+      type: 'select',
+      options: [
+        { value: 'low', label: 'roleDefs.effort.low' },
+        { value: 'medium', label: 'roleDefs.effort.medium' },
+        { value: 'high', label: 'roleDefs.effort.high' }
+      ]
+    },
+    dispatch: {
+      label: t('roleDefs.dispatch'),
+      type: 'select',
+      options: [
+        { value: 'broadcast', label: 'roleDefs.dispatch.broadcast' },
+        { value: 'mention', label: 'roleDefs.dispatch.mention' }
+      ]
+    },
+    'baseagents.claude.allowedModels': {
+      label: t('roleDefs.allowedModels'),
+      type: 'tags',
+      placeholder: '按回车添加模型'
+    },
+    'baseagents.claude.show_activities': {
+      label: currentLang === 'zh-CN' ? '显示活动 (show_activities)' : 'Show Activities (show_activities)',
+      type: 'select',
+      options: [
+        { value: 'true', label: 'roleDefs.showActivities.true' },
+        { value: 'false', label: 'roleDefs.showActivities.false' }
+      ]
+    }
+  };
+
+  // 遍历所有权限项
+  Object.keys(permissions).forEach(permKey => {
+    const perm = permissions[permKey];
+    const meta = permissionMeta[permKey] || { label: permKey, type: 'text' };
+
+    formHtml += `
+      <div class="form-group perm-group">
+        <div class="perm-header">
+          <label class="perm-label">${esc(meta.label)}</label>
+          <label class="perm-override">
+            <input type="checkbox"
+                   data-perm="${esc(permKey)}"
+                   data-field="allowOverride"
+                   ${perm.allowOverride ? 'checked' : ''}>
+            <span>${t('roleDefs.allowOverride')}</span>
+          </label>
+        </div>
+    `;
+
+    // 根据类型渲染不同的输入控件
+    if (meta.type === 'select') {
+      formHtml += `
+        <select data-perm="${esc(permKey)}" data-field="default" class="form-select">
+      `;
+      meta.options.forEach(opt => {
+        const optValue = typeof opt === 'string' ? opt : opt.value;
+        const optLabel = typeof opt === 'string' ? opt : t(opt.label);
+        const selected = perm.default === optValue ? 'selected' : '';
+        formHtml += `<option value="${esc(optValue)}" ${selected}>${esc(optLabel)}</option>`;
+      });
+      formHtml += `</select>`;
+    } else if (meta.type === 'tags') {
+      // 标签输入（用于数组值）
+      const values = Array.isArray(perm.default) ? perm.default : [];
+      formHtml += `
+        <div class="tags-input-container" data-perm="${esc(permKey)}">
+          <div class="tags-list">
+            ${values.map(v => `
+              <span class="tag">
+                ${esc(v)}
+                <button type="button" class="tag-remove" data-value="${esc(v)}">×</button>
+              </span>
+            `).join('')}
+          </div>
+          <input type="text"
+                 class="tags-input"
+                 placeholder="${esc(meta.placeholder || '')}"
+                 data-perm="${esc(permKey)}"
+                 data-field="default">
+        </div>
+      `;
+    } else {
+      // 文本输入
+      const value = perm.default || '';
+      formHtml += `
+        <input type="text"
+               data-perm="${esc(permKey)}"
+               data-field="default"
+               value="${esc(value)}"
+               class="form-input">
+      `;
+    }
+
+    formHtml += `</div>`;
+  });
+
+  formHtml += `</div></div>`;
+
+  body.innerHTML = formHtml;
+
+  // 绑定标签输入事件
+  bindTagsInputEvents(body);
+
+  modal.style.display = 'flex';
+}
+
+async function saveRoleDefinition() {
+  const saveBtn = $('#role-edit-save');
+  const roleName = saveBtn?.dataset.role;
+
+  if (!roleName || !state.roleDefinitions?.roles[roleName]) return;
+
+  const description = $('#edit-description')?.value;
+  const permMode = $('#edit-permissionMode')?.value;
+  const model = $('#edit-model')?.value;
+  const dispatch = $('#edit-dispatch')?.value;
+
+  const currentDef = state.roleDefinitions.roles[roleName];
+
+  const updates = {
+    description,
+    permissions: {
+      ...currentDef.permissions,
+      permissionMode: {
+        ...currentDef.permissions.permissionMode,
+        default: permMode
+      },
+      'baseagents.claude.model': {
+        ...currentDef.permissions['baseagents.claude.model'],
+        default: model
+      },
+      dispatch: {
+        ...currentDef.permissions.dispatch,
+        default: dispatch
+      }
+    }
+  };
+
+  try {
+    const token = localStorage.getItem(TOKEN_KEY);
+    const res = await fetch(`/api/role-definitions/${roleName}`, {
+      method: 'PUT',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(updates)
+    });
+
+    if (!res.ok) {
+      alert(t('roleDefs.saveFailed'));
+    } else {
+      alert(t('roleDefs.saveSuccess'));
+      $('#role-edit-modal').style.display = 'none';
+    }
+  } catch (err) {
+    alert(t('pair.error.network'));
+  }
+}

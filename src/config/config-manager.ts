@@ -20,6 +20,7 @@ import {
   agentRelationBehaviorConfig,
   agentDir,
   agentRelationsDir,
+  rolesConfig,
 } from '../paths.js';
 import { atomicReadJson, atomicWriteJson } from '../utils/atomic-write.js';
 import { fileCache } from '../core/daemon-file-cache.js';
@@ -34,12 +35,15 @@ import { mergeBehaviorIntoEffective } from './behavior.js';
 import { normalizeAgentLifecycle } from './lifecycle.js';
 import { resolveUserRole } from './role-resolver.js';
 import { mergeWithRoleConstraints } from './role-constraints.js';
+import { mergeRolesConfig, diffRolesConfig } from './roles-merge.js';
+import { getBuiltinRolesConfig, clearRolesCache } from './roles.js';
 import type {
   ProcessConfig,
   DefaultsConfig,
   AgentConfig,
   RelationConfig,
   EffectiveAgentConfig,
+  RolesConfig,
 } from '../types.js';
 
 export enum ConfigTarget {
@@ -49,6 +53,7 @@ export enum ConfigTarget {
   Relation = 'relation',                // agents/{aid}/relations/{peerKey}/config.json
   Behavior = 'behavior',                // agents/{aid}/behavior.json
   RelationBehavior = 'relation-behavior', // agents/{aid}/relations/{peerKey}/behavior.json
+  Roles = 'roles',                      // roles.json（全局角色定义，overlay 模型）
 }
 
 export interface Selector {
@@ -64,6 +69,7 @@ const TARGET_SCHEMA: Record<ConfigTarget, LogicalSchemaName> = {
   [ConfigTarget.Relation]: 'relation-config',
   [ConfigTarget.Behavior]: 'behavior',
   [ConfigTarget.RelationBehavior]: 'behavior',
+  [ConfigTarget.Roles]: 'roles',
 };
 
 export class ConfigError extends Error {
@@ -88,6 +94,7 @@ function targetPath(target: ConfigTarget, sel?: Selector): string {
   switch (target) {
     case ConfigTarget.Process: return p.evolclawJson;
     case ConfigTarget.Defaults: return p.defaultsConfig;
+    case ConfigTarget.Roles: return rolesConfig();
     case ConfigTarget.Agent:
       requireSelf(sel, target);
       return agentConfigPath(sel!.self!);
@@ -216,6 +223,32 @@ function ensureSchemaVersion(value: any, version: number): any {
   return value;
 }
 
+// ── roles（overlay 模型）─────────────────────────────────────────────────────
+//
+// roles.json 存的是相对内置基线的 diff（overlay）。读取时与 getBuiltinRolesConfig()
+// 深合并（per-FieldPermission），写入时算 diff 只落改动。跨进程一致性靠 read 的
+// 'mtime' 缓存策略（ecweb 写后 daemon statSync 自动感知）。
+
+/**
+ * 读取并合并 roles 配置：内置基线 + 用户 overlay。
+ * - 内置新增字段自动补全；用户未改字段跟随内置最新；用户改过的保留；自定义角色保留。
+ */
+export function resolveRoles(opts: ReadOpts = {}): RolesConfig {
+  const base = getBuiltinRolesConfig();
+  const overlay = read<RolesConfig>(ConfigTarget.Roles, undefined, opts);
+  return mergeRolesConfig(base, overlay);
+}
+
+/**
+ * 写入 roles 配置：传入完整视图，内部算 diff 后只落改动。
+ * 自动 schema 校验 + 原子写 + fileCache 失效 + 清本进程 ROLES_CACHE。
+ */
+export function writeRoles(full: RolesConfig, opts: WriteOpts = {}): void {
+  const diff = diffRolesConfig(getBuiltinRolesConfig(), full);
+  write(ConfigTarget.Roles, diff, undefined, opts);
+  clearRolesCache();
+}
+
 function validateOrThrow(schema: SchemaEntry, value: unknown, target: ConfigTarget): void {
   const ok = schema.validate(value);
   if (!ok) {
@@ -270,6 +303,11 @@ export function ensureFile(target: ConfigTarget, sel?: Selector): void {
 // 当前所有 schema 均为 v1，无迁移函数——此处仅在版本落后时 warn，留 seam。
 
 function migrateIfNeeded<T>(target: ConfigTarget, raw: T, file: string): T {
+  // roles：格式迁移（全量 → overlay），与版本号无关（均为 v1）
+  if (target === ConfigTarget.Roles) {
+    return migrateRolesToOverlay(raw as any, file) as T;
+  }
+
   const logical = TARGET_SCHEMA[target];
   const cur = currentVersion(logical);
   const have = (raw as any)?.$schema_version;
@@ -281,6 +319,56 @@ function migrateIfNeeded<T>(target: ConfigTarget, raw: T, file: string): T {
     console.warn(`[config] ${file}: $schema_version ${have} < current ${cur} for "${logical}" — migration pending (seam)`);
   }
   return raw;
+}
+
+/**
+ * roles.json 格式迁移：旧的全量格式 → overlay（diff）格式。
+ *
+ * 启发式检测全量：某内置 role 的 permission 字段数 ≥ 内置该 role 字段数的 80% → 判为全量。
+ * 全量则与内置 diff，备份原文件后写回精简 overlay。已是 overlay 则原样返回。
+ * 直接 atomicWriteJson 写回（绕过 ConfigManager.write 避免递归）。
+ */
+function migrateRolesToOverlay(raw: RolesConfig, file: string): RolesConfig {
+  if (!raw || !raw.roles) return raw;
+
+  const builtin = getBuiltinRolesConfig();
+  let looksFull = false;
+  for (const roleName of Object.keys(builtin.roles)) {
+    const userRole = raw.roles[roleName];
+    const builtinRole = builtin.roles[roleName];
+    if (userRole?.permissions && builtinRole?.permissions) {
+      const userCount = Object.keys(userRole.permissions).length;
+      const builtinCount = Object.keys(builtinRole.permissions).length;
+      if (builtinCount > 0 && userCount >= builtinCount * 0.8) {
+        looksFull = true;
+        break;
+      }
+    }
+  }
+
+  if (!looksFull) return raw;
+
+  const overlay = diffRolesConfig(builtin, raw);
+
+  // 备份原全量文件
+  try {
+    const backup = `${file}.pre-overlay.${Date.now()}`;
+    fs.copyFileSync(file, backup);
+    console.log(`[config] roles.json 全量→overlay 迁移：备份 ${backup}`);
+  } catch (err) {
+    console.warn(`[config] roles.json 迁移备份失败:`, err);
+  }
+
+  // 直接写回 overlay（绕过 write 避免递归触发 migrateIfNeeded）
+  try {
+    atomicWriteJson(file, overlay);
+    if (fileCacheAvailable()) fileCache.invalidate(file);
+    console.log(`[config] roles.json 已转为 overlay 格式（${Object.keys(overlay.roles).length} 个角色含改动）`);
+  } catch (err) {
+    console.warn(`[config] roles.json overlay 写回失败:`, err);
+  }
+
+  return overlay;
 }
 
 // ── H 链解析（resolveAgentConfig，三级）──────────────────────────────────────

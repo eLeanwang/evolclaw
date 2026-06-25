@@ -31,6 +31,8 @@ import { gatewaySource } from './sources/gateway.js';
 import { queryStatsForDashboard, queryStatsExplorer, queryStatsByPeer, queryStatsByAgent, queryStatsOverview, queryUsageDetail, queryUsedModels } from './sources/stats.js';
 import { getSessionsAunDir, listLocalAids, listPeers, readMessages } from './fs-utils.js';
 import { ccProjectsDir } from './paths.js';
+import { roleAssignmentsSource, handleRoleAssignmentsApi, handlePeerRoleApi } from './sources/role-assignments.js';
+import { roleDefinitionsSource, handleRoleDefinitionsApi } from './sources/role-definitions.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const STATIC_DIR = path.join(__dirname, 'static');
@@ -40,7 +42,7 @@ const PAIRING_TTL_MS = 5 * 60 * 1000;       // 5min
 const DEFAULT_PORT = 42705;
 const PROTOCOL_VERSION = 1;                  // 与 evolclaw ping response 对齐的软校验版本
 
-const SOURCES: Record<ViewKind, WatchSource> = { agents: aidSource, msg: msgSource, session: sessionSource, cache: cacheSource, system: systemSource, triggers: triggersSource, monitor: monitorSource, gateway: gatewaySource };
+const SOURCES: Record<ViewKind, WatchSource> = { agents: aidSource, msg: msgSource, session: sessionSource, cache: cacheSource, system: systemSource, triggers: triggersSource, monitor: monitorSource, gateway: gatewaySource, roles: roleAssignmentsSource, roleDefinitions: roleDefinitionsSource };
 
 // ECWeb 自身版本：渲染 System 页时随快照下发（不走 daemon IPC，ECWeb 就是这个进程）。
 function readEcwebVersion(): string {
@@ -599,6 +601,28 @@ export async function startWatchWebServer(opts: { port?: number; log?: (s: strin
         return;
       }
       handleStatsApi(req, res);
+    } else if ((req.url || '').startsWith('/api/roles/')) {
+      // Roles API — 与 Stats API 相同鉴权逻辑
+      const authHeader = req.headers.authorization || '';
+      const bearerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
+      const { query } = parseUrl(req.url || '');
+      let token = bearerToken || query.token || '';
+      if (!token) {
+        const autoToken = issueLocalDirectToken(req, log);
+        if (autoToken) token = autoToken;
+      }
+      if (!token || !validateAndRenew(token, Date.now())) {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'unauthorized' }));
+        return;
+      }
+      handleRoleAssignmentsApi(req, res);
+    } else if ((req.url || '').startsWith('/api/role-definitions/')) {
+      // Role Definitions API
+      handleRoleDefinitionsApi(req, res);
+    } else if ((req.url || '').startsWith('/api/assignments/peer/')) {
+      // Peer Role API
+      handlePeerRoleApi(req, res);
     } else {
       serveStatic(req, res);
     }

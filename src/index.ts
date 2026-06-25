@@ -1377,7 +1377,6 @@ async function main() {
 
   // M3: direct call (not cast) — wire EvolAgentRegistry into IPC for evolagent.* handlers
   ipcServer.setAgentRegistry(agentRegistry);
-  ipcServer.setEventBus(eventBus);
   ipcServer.setMenuExecutor((payload) => cmdHandler.execMenuForEcweb(payload));
   if (bindService) {
     ipcServer.setBindExecutor({

@@ -617,7 +617,7 @@ export class CommandHandler {
     return { matched: true, result: '✓ 已回答' };
   }
 
-  setProcessor(processor: MessageProcessor): void {
+  setProcessor(processor: IMessageProcessor): void {
     this.processor = processor;
   }
 

@@ -5,31 +5,18 @@
  * 如果 roles.json 不存在，返回内置的五种角色配置。
  */
 
-import fs from 'fs';
-import { atomicReadJson } from '../utils/atomic-write.js';
-import { rolesConfig } from '../paths.js';
+import { resolveRoles } from './config-manager.js';
 import type { RolesConfig, RoleDefinition, FieldPermission } from '../types.js';
 
 // 角色定义缓存
 const ROLES_CACHE = new Map<string, RoleDefinition>();
 
 /**
- * 读取全局角色配置
- * 如果文件不存在，返回内置默认配置
+ * 读取全局角色配置（overlay 模型：内置基线 + 用户 roles.json diff）。
+ * 走 ConfigManager.resolveRoles，自动获得深合并、schema 迁移、mtime 缓存。
  */
 export function readRolesConfig(): RolesConfig {
-  const file = rolesConfig();
-
-  if (fs.existsSync(file)) {
-    try {
-      const config = atomicReadJson<RolesConfig>(file);
-      if (config) return config;
-    } catch (err) {
-      console.warn('[roles] Failed to read roles.json, using builtin:', err);
-    }
-  }
-
-  return getBuiltinRolesConfig();
+  return resolveRoles({ cache: true });
 }
 
 /**

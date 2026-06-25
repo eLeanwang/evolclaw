@@ -2,7 +2,6 @@ import net from 'net';
 import fs from 'fs';
 import os from 'os';
 import { logger } from './utils/logger.js';
-import type { EventBus } from './core/event-bus.js';
 import type { EvolAgentRegistryHandle, AidConnectionState } from './types.js';
 import type { AidStatsSnapshot, StatsSnapshot } from './utils/stats.js';
 import { fileCache } from './core/daemon-file-cache.js';
@@ -93,7 +92,6 @@ export class IpcServer {
   private queueActionExecutor?: QueueActionExecutor;
   private triggerExecutor?: TriggerExecutor;
   private bindExecutor?: BindExecutor;
-  private eventBus?: EventBus;
 
   // CPU 占用追踪：IPC handler 是一次性同步调用，无法在响应里做 200ms 异步采样，
   // 故用后台 1s interval 累积 process.cpuUsage() 增量，handler 直接读最近值。
@@ -115,11 +113,6 @@ export class IpcServer {
   /** Inject EvolAgentRegistry for evolagent.* IPC handlers */
   setAgentRegistry(registry: EvolAgentRegistryHandle): void {
     this.agentRegistry = registry;
-  }
-
-  /** Inject EventBus for lifecycle events emitted by IPC-triggered actions. */
-  setEventBus(eventBus: EventBus): void {
-    this.eventBus = eventBus;
   }
 
   /** Inject menu.* executor (ECWeb Control proxies menu requests through this) */
@@ -384,20 +377,6 @@ export class IpcServer {
           return { ok: false, error: e?.message || String(e) };
         }
       }
-      case 'evolagent.bootstrapComplete': {
-        if (!this.agentRegistry) return { ok: false, error: 'EvolAgentRegistry not available' };
-        const aid = cmd.aid;
-        if (!aid || typeof aid !== 'string') return { ok: false, error: 'missing aid' };
-        const agent = this.agentRegistry.get(aid);
-        if (!agent) return { ok: false, error: `Agent "${aid}" not found` };
-        try {
-          agent.setLifecycle('active');
-          this.eventBus?.publish({ type: 'agent:bootstrap-complete', aid, timestamp: Date.now() });
-          return { ok: true, result: `Agent "${aid}" bootstrap complete` };
-        } catch (e: any) {
-          return { ok: false, error: e?.message || String(e) };
-        }
-      }
       case 'evolagent.load': {
         if (!this.agentRegistry) return { ok: false, error: 'EvolAgentRegistry not available' };
         const aid = cmd.aid;
@@ -471,119 +450,6 @@ export class IpcServer {
             })),
           },
         };
-      }
-      case 'roles.get-agent': {
-        // 获取 agent 的角色配置
-        if (!cmd.self || typeof cmd.self !== 'string') {
-          return { ok: false, error: 'missing self parameter' };
-        }
-        try {
-          const { read, ConfigTarget } = await import('./config/config-manager.js');
-          const config = read(ConfigTarget.Agent, { self: cmd.self });
-          return {
-            ok: true,
-            self: cmd.self,
-            owners: config?.owners ?? [],
-            admins: config?.admins ?? [],
-            members: config?.members ?? [],
-          };
-        } catch (e: any) {
-          return { ok: false, error: e?.message || String(e) };
-        }
-      }
-      case 'roles.update-agent': {
-        // 更新 agent 角色配置
-        if (!cmd.self || typeof cmd.self !== 'string') {
-          return { ok: false, error: 'missing self parameter' };
-        }
-        if (!cmd.role || !['owners', 'admins', 'members'].includes(cmd.role)) {
-          return { ok: false, error: 'invalid role (must be owners, admins, or members)' };
-        }
-        if (!Array.isArray(cmd.userIds)) {
-          return { ok: false, error: 'userIds must be an array' };
-        }
-        try {
-          const { read, write, ConfigTarget } = await import('./config/config-manager.js');
-          const config = read(ConfigTarget.Agent, { self: cmd.self }) || {};
-          config[cmd.role] = cmd.userIds;
-          write(ConfigTarget.Agent, { self: cmd.self }, config);
-          return { ok: true };
-        } catch (e: any) {
-          return { ok: false, error: e?.message || String(e) };
-        }
-      }
-      case 'roles.list-relations': {
-        // 列出所有关系及其角色
-        if (!cmd.self || typeof cmd.self !== 'string') {
-          return { ok: false, error: 'missing self parameter' };
-        }
-        try {
-          const { agentRelationsDir } = await import('./paths.js');
-          const { resolveUserRole } = await import('./config/role-resolver.js');
-          const { read, ConfigTarget } = await import('./config/config-manager.js');
-          const relDir = agentRelationsDir(cmd.self);
-
-          if (!fs.existsSync(relDir)) {
-            return { ok: true, self: cmd.self, relations: [] };
-          }
-
-          const relations = [];
-          const entries = fs.readdirSync(relDir);
-
-          for (const peerKey of entries) {
-            const configPath = `${relDir}/${peerKey}/config.json`;
-            if (!fs.existsSync(configPath)) continue;
-
-            try {
-              const relConfig = read(ConfigTarget.Relation, { self: cmd.self, peerKey });
-              const effectiveRole = resolveUserRole(cmd.self, peerKey);
-
-              relations.push({
-                peerKey,
-                role: effectiveRole,
-                roleSource: relConfig?.role ? 'relation' : 'agent',
-                explicitRole: relConfig?.role,
-                channel: peerKey.split('#')[0],
-              });
-            } catch (err) {
-              logger.warn(`[IPC roles] Failed to read relation ${peerKey}:`, err);
-            }
-          }
-
-          return { ok: true, self: cmd.self, relations };
-        } catch (e: any) {
-          return { ok: false, error: e?.message || String(e) };
-        }
-      }
-      case 'roles.get-peer': {
-        // 获取对端详情（有效角色 + 权限预览）
-        if (!cmd.self || typeof cmd.self !== 'string') {
-          return { ok: false, error: 'missing self parameter' };
-        }
-        if (!cmd.peerKey || typeof cmd.peerKey !== 'string') {
-          return { ok: false, error: 'missing peerKey parameter' };
-        }
-        try {
-          const { read, ConfigTarget } = await import('./config/config-manager.js');
-          const { resolveUserRole } = await import('./config/role-resolver.js');
-          const { getRoleDefinition } = await import('./config/roles.js');
-
-          const relConfig = read(ConfigTarget.Relation, { self: cmd.self, peerKey: cmd.peerKey });
-          const effectiveRole = resolveUserRole(cmd.self, cmd.peerKey);
-          const roleDef = getRoleDefinition(effectiveRole);
-
-          return {
-            ok: true,
-            self: cmd.self,
-            peerKey: cmd.peerKey,
-            effectiveRole,
-            explicitRole: relConfig?.role,
-            roleDefinition: roleDef,
-            permissions: roleDef?.permissions ?? {},
-          };
-        } catch (e: any) {
-          return { ok: false, error: e?.message || String(e) };
-        }
       }
       default:
         return { error: `unknown command: ${cmd.type}` };
