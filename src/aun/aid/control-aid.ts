@@ -5,10 +5,34 @@ import { logger } from '../../utils/logger.js';
 
 const MAX_ATTEMPTS = 5;
 
-/** 生成候选控制 AID：ec + 5位随机数字 + .agentid.pub */
-export function candidateAid(): string {
+/** 解析控制 AID 的 issuer：环境变量 EVOLCLAW_ISSUER → 兜底 agentid.pub */
+export function resolveControlIssuer(): string {
+  const env = process.env.EVOLCLAW_ISSUER?.trim();
+  if (env) {
+    // Validate issuer format: must be valid domain-like structure
+    if (!/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/i.test(env)) {
+      logger.error(`[control-aid] Invalid EVOLCLAW_ISSUER format: ${env}, using default`);
+      return 'agentid.pub';
+    }
+    // Prevent localhost/local domains
+    if (env === 'localhost' || env.endsWith('.localhost') || env.startsWith('127.') || env.startsWith('0.')) {
+      logger.error(`[control-aid] EVOLCLAW_ISSUER cannot be localhost/local: ${env}, using default`);
+      return 'agentid.pub';
+    }
+    // Length limit
+    if (env.length > 253) {
+      logger.error(`[control-aid] EVOLCLAW_ISSUER too long: ${env.length} chars, using default`);
+      return 'agentid.pub';
+    }
+  }
+  return env || 'agentid.pub';
+}
+
+/** 生成候选控制 AID：ec + 5位随机数字 + .{issuer} */
+export function candidateAid(issuer?: string): string {
   const n = crypto.randomInt(10000, 100000); // 5 位：10000-99999
-  return `ec${n}.agentid.pub`;
+  const finalIssuer = issuer || resolveControlIssuer();
+  return `ec${n}.${finalIssuer}`;
 }
 
 export interface ControlAidResult {
@@ -44,10 +68,11 @@ async function candidateExists(
  * - agent.md 不上传：aidCreate 仅注册身份 + 写私钥，不调 agentmdPut
  */
 export async function generateControlAid(): Promise<ControlAidResult> {
+  const issuer = resolveControlIssuer();
   const store = await getAidStore({ slotId: SLOT.cli });
   try {
     for (let i = 0; i < MAX_ATTEMPTS; i++) {
-      const candidate = candidateAid();
+      const candidate = candidateAid(issuer);
       if (await candidateExists(store, candidate)) {
         logger.info(`[control-aid] ${candidate} 已注册，重试 (${i + 1}/${MAX_ATTEMPTS})`);
         continue;

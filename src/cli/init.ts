@@ -5,7 +5,7 @@ import { resolvePaths, ensureDataDirs } from '../paths.js';
 import { commandExists } from '../utils/cross-platform.js';
 import { scanInstances } from '../utils/instance-registry.js';
 import { saveDefaultsSafe, loadAllAgents, migrateProcessConfigIfNeeded, loadEvolclawConfig, saveEvolclawConfig } from '../config-store.js';
-import { generateControlAid } from '../aun/aid/control-aid.js';
+import { generateControlAid, resolveControlIssuer } from '../aun/aid/control-aid.js';
 import { getCodexAppServerAvailability, isCodexAppServerAvailable } from '../agents/codex-runner.js';
 import { defaultProjectsRoot } from '../utils/project-path.js';
 
@@ -274,6 +274,12 @@ export async function initTail(): Promise<void> {
   // 控制 AID：daemon 进程身份。缺失则生成并写回 evolclaw.json（幂等：已存在则跳过）。
   const evc = loadEvolclawConfig();
   if (evc.aid) {
+    const targetIssuer = resolveControlIssuer();
+    const currentIssuer = evc.aid.split('.').slice(1).join('.');
+    if (currentIssuer !== targetIssuer) {
+      console.log(`⚠️  控制 AID issuer (${currentIssuer}) 与目标 issuer (${targetIssuer}) 不一致`);
+      console.log(`    如需切换，请删除 evolclaw.json 中的 aid 字段后重新运行 init`);
+    }
     console.log(`✓ 控制 AID 已存在: ${evc.aid}`);
   } else {
     try {

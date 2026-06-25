@@ -1311,10 +1311,11 @@ async function main() {
       }
       logger.info(`[Resume] Resuming session: ${session.id} (agent: ${evolName}::${baseagentName})`);
       const parsedResumeKey = tryParseChannelKey(session.channel);
+      const resumeSelfAID = session.selfAID || parsedResumeKey?.selfAID;
       const resumeMessage: Message = {
         channel: session.channel,
         channelType: session.channelType || parsedResumeKey?.type,
-        selfAID: parsedResumeKey?.selfAID,
+        selfAID: resumeSelfAID,
         channelId: session.channelId,
         content: '服务已重启，请继续之前未完成的任务。',
         timestamp: Date.now(),
@@ -1324,7 +1325,7 @@ async function main() {
       };
       // 清除状态后入队（processMessage 会重新标记）
       sessionManager.clearProcessing(session.id);
-      messageQueue.enqueue(session.id, resumeMessage, session.projectPath, { sessionKeyField: session.sessionKey }).catch(err => {
+      messageQueue.enqueue(session.id, resumeMessage, session.projectPath, { sessionKeyField: session.sessionKey, selfAID: resumeSelfAID }).catch(err => {
         logger.error(`[Resume] Failed to resume session ${session.id}:`, err);
       });
     }

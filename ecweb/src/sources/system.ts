@@ -45,14 +45,26 @@ async function menuExec(payload: any): Promise<any> {
 }
 
 async function buildSnapshot(): Promise<any> {
-  const [listResp, sysResp] = await Promise.all([
+  const [listResp, sysResp, checkResp] = await Promise.all([
     menuExec({ type: 'menu.list', id: 'sys-list' }),
     menuExec({ type: 'menu.query', id: 'sys-q', name: 'system' }),
+    menuExec({ type: 'menu.action', id: 'sys-check', name: 'system', action: 'check' }),
   ]);
   const daemonRunning = listResp !== null;
   // sysResp 形如 { type:'menu.response', id, name, data | error }
   const system = sysResp?.data ?? null;
-  return { daemonRunning, system: system ? { ...system, baseagents: readDefaultBaseagents() } : system, upgrade: null, check: null };
+  // baseagents：以 defaults.json 的 active/model/effort 为主，
+  // 再从后端返回的 baseagents（[{name,version}]）按 name 补上 CLI 版本号。
+  let baseagents = readDefaultBaseagents();
+  if (system && Array.isArray(system.baseagents)) {
+    const verByName = new Map<string, string | null>(
+      system.baseagents.map((b: any) => [b.name, b.version ?? null]),
+    );
+    baseagents = baseagents.map((b: any) => ({ ...b, version: verByName.get(b.name) ?? null }));
+  }
+  // checkResp 包含 evolagents 等健康检查数据
+  const check = checkResp?.data ?? null;
+  return { daemonRunning, system: system ? { ...system, baseagents } : system, upgrade: null, check };
 }
 
 export const systemSource: WatchSource = {

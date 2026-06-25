@@ -84,27 +84,49 @@ type ContextRecoveryOptions = {
 };
 
 const RETRY_EXHAUSTED_MARK = Symbol('evolclaw.retryExhausted');
+const RETRY_MADE_PROGRESS_MARK = Symbol('evolclaw.retryMadeProgress');
+const RETRY_HEALTH_RECORDED_MARK = Symbol('evolclaw.retryHealthRecorded');
 
-function markRetryExhausted(error: unknown, attempts: number): void {
+function markRetryExhausted(error: unknown, retries: number): void {
   if (error && typeof error === 'object') {
-    (error as any)[RETRY_EXHAUSTED_MARK] = attempts;
+    (error as any)[RETRY_EXHAUSTED_MARK] = retries;
     // processEventStream may have already flushed the raw transient error as an
     // activity notice. The exhausted-retry message is the real terminal state.
     delete (error as any)._errorAlreadySent;
   }
 }
 
-function getRetryExhaustedAttempts(error: unknown): number | undefined {
-  const attempts = error && typeof error === 'object'
+function getRetryExhaustedCount(error: unknown): number | undefined {
+  const retries = error && typeof error === 'object'
     ? (error as any)[RETRY_EXHAUSTED_MARK]
     : undefined;
-  return typeof attempts === 'number' ? attempts : undefined;
+  return typeof retries === 'number' ? retries : undefined;
 }
 
-function formatRetryableErrorFinalMessage(error: unknown, attempts: number): string {
+function markRetryMadeProgress(error: unknown): void {
+  if (error && typeof error === 'object') {
+    (error as any)[RETRY_MADE_PROGRESS_MARK] = true;
+  }
+}
+
+function didRetryMakeProgress(error: unknown): boolean {
+  return !!(error && typeof error === 'object' && (error as any)[RETRY_MADE_PROGRESS_MARK] === true);
+}
+
+function markRetryHealthRecorded(error: unknown): void {
+  if (error && typeof error === 'object') {
+    (error as any)[RETRY_HEALTH_RECORDED_MARK] = true;
+  }
+}
+
+function wasRetryHealthRecorded(error: unknown): boolean {
+  return !!(error && typeof error === 'object' && (error as any)[RETRY_HEALTH_RECORDED_MARK] === true);
+}
+
+function formatRetryableErrorFinalMessage(error: unknown, retries: number): string {
   const raw = error instanceof Error ? error.message : String(error);
   const firstLine = raw.split('\n')[0]?.trim() || 'API 暂时不可用';
-  return `❌ API 暂时不可用，已自动尝试 ${attempts} 次仍失败，任务已停止。\n原因：${firstLine}`;
+  return `❌ API 暂时不可用，已自动重试 ${retries} 次仍失败，任务已停止。\n原因：${firstLine}`;
 }
 
 function resolveProactiveBehavior(block?: ProactiveBehaviorBlock): Required<ProactiveBehaviorBlock> {
@@ -721,9 +743,9 @@ export class ResponseEngine implements IMessageProcessor {
           // 认证错误（401 / Invalid API Key）不是会话问题，不累计
           } else if (errorType === ErrorType.AUTH_ERROR) {
             logger.info(`[ResponseEngine] Auth error (invalid API key), skipping error accumulation`);
-          // API 错误（5xx / 算力池切换等）是平台暂时性问题，不累计
-          } else if (errorType === ErrorType.API_ERROR) {
-            logger.info(`[ResponseEngine] API error, skipping error accumulation`);
+          // API 临时错误如果走过重试链路，已按每次失败计数；不要在最终 catch 再重复加 1。
+          } else if (errorType === ErrorType.API_ERROR && wasRetryHealthRecorded(error)) {
+            logger.info(`[ResponseEngine] API retry health already recorded, skipping duplicate accumulation`);
           } else if (!policy.accumulateErrors(chatType, identityRole)) {
             logger.info(`[ResponseEngine] Non-accumulating error (chatType=${chatType}, identity=${identityRole}), skipping error accumulation`);
           } else {
@@ -768,7 +790,9 @@ export class ResponseEngine implements IMessageProcessor {
       return;
     }
 
-    const { adapter, options } = channelInfo;
+    const { adapter, options, policy } = channelInfo;
+    const chatType = message.chatType || 'private';
+    const identityRole = session.identity?.role || 'anonymous';
     let agent: AgentRunnerFull;
     try {
       agent = this.getAgent(channelKey, session.baseagent);
@@ -821,8 +845,6 @@ export class ResponseEngine implements IMessageProcessor {
         return undefined;
       }
     })();
-
-    const chatType = message.chatType || 'private';
 
     // ─── 响应模式解析（插件化机制中枢）───
     // trigger override 绝对优先（与响应模式正交）；否则由 Coordinator 解析（config > session.chatMode > 兜底）
@@ -1376,21 +1398,30 @@ export class ResponseEngine implements IMessageProcessor {
           }
         }
 
-        // 可重试错误（403/429/5xx）指数退避重试，最多 3 次
-        const MAX_RETRIES = 3;
+        // 可重试错误（403/429/5xx/模型繁忙）按明确退避序列重试。
+        const RETRY_DELAYS_MS = [5_000, 10_000, 30_000];
+        const MAX_RETRIES = RETRY_DELAYS_MS.length;
+        let runAttempt = 1;
+        let consecutiveRetryFailures = 0;
+        const recordRetryHealthError = async (retryError: unknown) => {
+          if (!policy.accumulateErrors(chatType, identityRole)) return;
+          const retryErrorMessage = retryError instanceof Error ? retryError.message : String(retryError);
+          const retryErrorType = prefixErrorType(ERROR_PREFIX.INFRA, classifyError(retryError));
+          try {
+            await this.sessionManager.recordError(session.id, retryErrorType, retryErrorMessage);
+            markRetryHealthRecorded(retryError);
+          } catch (statusError) {
+            logger.error('[ResponseEngine] Failed to record retry health status:', statusError);
+          }
+        };
         // Runner 开始执行前：将 Pin 升级为 CheckMark（表示"正在处理"）
         if (message.messageId && message.source !== 'trigger') {
           adapter.promoteAck?.(message.messageId).catch(() => {});
         }
-        for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+        while (true) {
           let streamRegistered = false;
           try {
-            if (attempt > 1) {
-              const suffix = attempt === MAX_RETRIES ? '（最后一次）' : '';
-              renderer.addNotice(`正在进行第 ${attempt}/${MAX_RETRIES} 次尝试${suffix}`, 'warn', 'retry', true);
-              await renderer.flush();
-            }
-            logger.info(`[ResponseEngine] agent.runQuery start: agent=${agent.name} session=${session.id} task=${taskId} attempt=${attempt}/${MAX_RETRIES} agentSessionId=${session.agentSessionId ?? 'none'}`);
+            logger.info(`[ResponseEngine] agent.runQuery start: agent=${agent.name} session=${session.id} task=${taskId} attempt=${runAttempt} consecutiveFailures=${consecutiveRetryFailures} agentSessionId=${session.agentSessionId ?? 'none'}`);
             const stream = await agent.runQuery(
               session.id,
               effectivePrompt,
@@ -1439,17 +1470,25 @@ export class ResponseEngine implements IMessageProcessor {
               // 保留 permissionMode —— 它与模型无关，不能因模型降级而丢失）
               modelOverride = { permissionMode: effectivePermissionMode };
               usedFallback = true;
+              runAttempt++;
               continue;
             }
-            if (attempt < MAX_RETRIES && isRetryableError(retryError)) {
-              const delay = Math.pow(2, attempt) * 1000; // 2s, 4s
-              logger.warn(`[ResponseEngine] Retryable error (attempt ${attempt}/${MAX_RETRIES}), retrying in ${delay}ms:`, retryError);
-              renderer.addNotice(`API 暂时不可用，第 ${attempt} 次失败，${delay / 1000} 秒后进行第 ${attempt + 1}/${MAX_RETRIES} 次尝试`, 'warn', 'retry', true);
-              await renderer.flush();
-              await new Promise(resolve => setTimeout(resolve, delay));
-              continue;
-            }
-            if (attempt >= MAX_RETRIES && isRetryableError(retryError)) {
+            if (isRetryableError(retryError)) {
+              if (didRetryMakeProgress(retryError)) {
+                consecutiveRetryFailures = 0;
+              }
+              await recordRetryHealthError(retryError);
+              if (consecutiveRetryFailures < MAX_RETRIES) {
+                const delay = RETRY_DELAYS_MS[consecutiveRetryFailures];
+                const nextRetryNumber = consecutiveRetryFailures + 1;
+                consecutiveRetryFailures++;
+                logger.warn(`[ResponseEngine] Retryable error (attempt ${runAttempt}, consecutive ${consecutiveRetryFailures}/${MAX_RETRIES}), retrying in ${delay}ms:`, retryError);
+                renderer.addNotice(`API 不可用，${delay / 1000}秒后重试 ${nextRetryNumber}/${MAX_RETRIES}`, 'warn', 'retry', true);
+                await renderer.flush();
+                await new Promise(resolve => setTimeout(resolve, delay));
+                runAttempt++;
+                continue;
+              }
               markRetryExhausted(retryError, MAX_RETRIES);
             }
             throw retryError; // 不可重试或已耗尽重试次数
@@ -2045,18 +2084,18 @@ export class ResponseEngine implements IMessageProcessor {
       // 用户主动中断（新消息打断 或 /stop 命令）时静默，不发送错误提示
       // processEventStream 已通过 renderer 发过错误时也跳过
       const isTimeout = error instanceof Error && error.message === 'SDK_TIMEOUT';
-      const retryExhaustedAttempts = getRetryExhaustedAttempts(error);
+      const retryExhaustedCount = getRetryExhaustedCount(error);
       if (isUserInterrupt) {
         logger.info(`[ResponseEngine] User interrupt by new_message, skip sending error message`);
       } else if (isSilentTrigger) {
         logger.info(`[ResponseEngine] Silent trigger error output suppressed task=${taskId}`);
-      } else if ((error as any)?._errorAlreadySent && !retryExhaustedAttempts) {
+      } else if ((error as any)?._errorAlreadySent && !retryExhaustedCount) {
         logger.info(`[ResponseEngine] Error already sent via renderer, skip sending duplicate message`);
       } else {
         // SDK_TIMEOUT：status.timeout 已发结构化状态，此处再补一条用户可见的错误文本（result.error）
         const idleSec = getLastIdleSec?.() || 0;
-        const userMessage = retryExhaustedAttempts
-          ? formatRetryableErrorFinalMessage(error, retryExhaustedAttempts)
+        const userMessage = retryExhaustedCount
+          ? formatRetryableErrorFinalMessage(error, retryExhaustedCount)
           : isTimeout
           ? (idleSec > 0 ? `⚠️ 任务超时（${idleSec}秒无响应），已自动中断` : '⚠️ 任务超时，已自动中断')
           : getErrorMessage(error, undefined);
@@ -2087,7 +2126,7 @@ export class ResponseEngine implements IMessageProcessor {
         const errorPayload = {
           kind: 'result.error' as const,
           text: userMessage,
-          reason: retryExhaustedAttempts ? 'retry_exhausted' : isTimeout ? 'timeout' : errType,
+          reason: retryExhaustedCount ? 'retry_exhausted' : isTimeout ? 'timeout' : errType,
         };
         await adapter.send({ ...envelope, replyContext: sendOpts }, errorPayload);
 
@@ -2320,6 +2359,7 @@ export class ResponseEngine implements IMessageProcessor {
     const agentNameForStats = this.agentRegistry?.resolveByChannel(session.metadata?.channelKey || session.channel)?.name ?? '<unknown>';
     let hasReceivedText = false;
     let hasErrorResult = false;  // 是否已有 tool_result/error 事件输出过错误
+    let madeProgress = false;
     let completeResult: StreamRunResult = { isError: false, lastReplyText: '', fullText: '', hasReceivedText: false };
 
     // 追踪最后一轮 assistant 回复文本（tool_use 之后的纯文本）
@@ -2398,6 +2438,7 @@ export class ResponseEngine implements IMessageProcessor {
         // 流式文本
         if (event.type === 'text') {
           hasReceivedText = true;
+          if (event.text.trim()) madeProgress = true;
           lastReplyText += event.text;
           this.eventBus.publish({ type: 'message:text', sessionId: session.id, text: event.text, isFinal: false });
           if (!shouldSuppress()) {
@@ -2407,6 +2448,7 @@ export class ResponseEngine implements IMessageProcessor {
 
         // compact 完成
         if (event.type === 'compact') {
+          madeProgress = true;
           this.eventBus.publish({ type: 'runner:compact-complete', sessionId: session.id, preTokens: event.preTokens });
           if (!shouldSuppress()) {
             renderer.addNotice(`\ud83d\udca1 会话压缩完成，继续执行...）`, 'info', 'compact');
@@ -2418,6 +2460,7 @@ export class ResponseEngine implements IMessageProcessor {
           const tools = event.toolUses ?? 0;
           const duration = event.durationMs ? `${Math.round(event.durationMs / 1000)}s` : '';
           const stats = [tools > 0 ? `${tools}\u6b21\u5de5\u5177\u8c03\u7528` : '', duration].filter(Boolean).join(', ');
+          if (event.summary || tools > 0) madeProgress = true;
 
           if (event.summary && !shouldSuppress()) {
             renderer.addProgress(`\u5b50\u4efb\u52a1: ${event.summary}${stats ? ` (${stats})` : ''}`, { state: 'processing', toolUses: event.toolUses, durationMs: event.durationMs });
@@ -2428,6 +2471,7 @@ export class ResponseEngine implements IMessageProcessor {
 
         // 工具调用
         if (event.type === 'tool_use') {
+          madeProgress = true;
           // 工具调用意味着当前 turn 结束，flush 已累积的文本作为独立消息
           if (renderer.hasTextPending()) {
             await renderer.flushText();
@@ -2468,6 +2512,7 @@ export class ResponseEngine implements IMessageProcessor {
 
         // 工具结果
         if (event.type === 'tool_result') {
+          if (!event.isError) madeProgress = true;
           if (event.callId && ctlQueueReadCallIds.delete(event.callId) && !event.isError) {
             try {
               const clearResult = await this.commandHandler?.handleCtl?.('/queue --clear', session.id);
@@ -2511,7 +2556,8 @@ export class ResponseEngine implements IMessageProcessor {
 
           // 上下文过长的错误不在此处输出 notice，留给外层 isPromptTooLong 触发 auto-compact
           const isContextError = isContextTooLongText(event.error || '');
-          if (!isContextError && !hasErrorResult && !shouldSuppress()) {
+          const isRetryableRuntimeError = isRetryableError(new Error(event.error || ''));
+          if (!isContextError && !isRetryableRuntimeError && !hasErrorResult && !shouldSuppress()) {
             hasErrorResult = true;
             renderer.addNotice(`${event.error}`, 'warn', 'runtime-error', true);
           }
@@ -2532,6 +2578,7 @@ export class ResponseEngine implements IMessageProcessor {
 
           // 记录完成状态 + 最后一轮回复文本（后续 complete 覆盖前序）
           completeResult = { isError: !!event.isError, subtype: event.subtype, errors: event.errors, terminalReason: event.terminalReason, lastReplyText, fullText: event.result || '', hasReceivedText, numTurns: event.numTurns, ttftMs: event.ttftMs, tokenUsage: event.tokenUsage, contextUsage: event.contextUsage, lastModelCall: event.lastModelCall, modelCalls: event.modelCalls };
+          if (!event.isError) madeProgress = true;
 
           // thought jsonl 写入已下沉到 aun.ts:sendThought 成功后，
           // 由那里按 LLM 输出的每个 text item 单独写一条，此处不再写。
@@ -2584,8 +2631,10 @@ export class ResponseEngine implements IMessageProcessor {
 
       // === 后台任务：追踪最后回复文本，但只处理 complete 事件 ===
       if (event.type === 'text') {
+        if (event.text.trim()) madeProgress = true;
         lastReplyText += event.text;
       } else if (event.type === 'tool_use') {
+        madeProgress = true;
         lastReplyText = '';
       }
       if (event.type !== 'complete') {
@@ -2602,6 +2651,7 @@ export class ResponseEngine implements IMessageProcessor {
       completeResult = { isError: !!event.isError, subtype: event.subtype, errors: event.errors, terminalReason: event.terminalReason, lastReplyText, fullText: event.result || '', hasReceivedText, numTurns: event.numTurns, ttftMs: event.ttftMs, tokenUsage: event.tokenUsage, contextUsage: event.contextUsage, lastModelCall: event.lastModelCall };
 
       if (event.subtype === 'success') {
+        madeProgress = true;
         this.messageCache.addEvent(session.id, {
           type: 'completed',
           message: lastReplyText || event.result || '',
@@ -2671,6 +2721,9 @@ export class ResponseEngine implements IMessageProcessor {
       }
       if (error instanceof Error && error.message.includes('process exited')) {
         renderer.addNotice('Claude Code 进程异常退出，请重试', 'warn', 'process-exit', true);
+      }
+      if (isRetryableError(error) && madeProgress) {
+        markRetryMadeProgress(error);
       }
       // Flush any pending error activities before re-throwing,
       // and mark the error so outer catch won't send a duplicate message

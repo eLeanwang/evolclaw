@@ -5,6 +5,7 @@ import os from 'os';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { aidList, aidCreate } from '../aun/aid/identity.js';
+import { resolveControlIssuer } from '../aun/aid/control-aid.js';
 import { msgSend, msgPull } from '../aun/msg/index.js';
 import type { MsgError } from '../aun/msg/p2p.js';
 import { getPackageRoot, aunPath as defaultAunPath } from '../paths.js';
@@ -572,9 +573,10 @@ Options:
     aids.push(...usableAids);
     const need = numAids - usableAids.length;
     if (!formatJson) console.log(warn(`仅 ${usableAids.length} 个可用，需创建 ${need} 个新 AID`));
+    const issuer = resolveControlIssuer();
     for (let i = 0; i < need; i++) {
       const hex = crypto.randomBytes(4).toString('hex');
-      const newAid = `bench-${hex}.agentid.pub`;
+      const newAid = `bench-${hex}.${issuer}`;
       try {
         await aidCreate(newAid, { aunPath });
         aids.push(newAid);

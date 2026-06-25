@@ -96,6 +96,7 @@ export class CodexAppServerClient {
   private notificationHandlers = new Set<CodexServerNotificationHandler>();
   private nextId = 1;
   private initialized = false;
+  private initializing: Promise<void> | null = null;
   private stderrBuffer: string[] = [];
 
   constructor(private readonly options: CodexAppServerClientOptions) {}
@@ -269,6 +270,7 @@ export class CodexAppServerClient {
     const proc = this.proc;
     this.proc = null;
     this.initialized = false;
+    this.initializing = null;
     for (const pending of this.pending.values()) {
       pending.reject(new Error('Codex app-server closed'));
     }
@@ -298,17 +300,28 @@ export class CodexAppServerClient {
 
   private async ensureStarted(): Promise<void> {
     if (this.initialized) return;
+    if (this.initializing) {
+      await this.initializing;
+      return;
+    }
     if (!this.proc) this.startProcess();
-    await this.request('initialize', {
-      clientInfo: {
-        name: 'evolclaw_codex_app_server',
-        title: 'EvolClaw Codex App Server Client',
-        version: '1.0.0',
-      },
-      capabilities: { experimentalApi: true },
-    });
-    this.notify('initialized');
-    this.initialized = true;
+    this.initializing = (async () => {
+      await this.request('initialize', {
+        clientInfo: {
+          name: 'evolclaw_codex_app_server',
+          title: 'EvolClaw Codex App Server Client',
+          version: '1.0.0',
+        },
+        capabilities: { experimentalApi: true },
+      });
+      this.notify('initialized');
+      this.initialized = true;
+    })();
+    try {
+      await this.initializing;
+    } finally {
+      this.initializing = null;
+    }
   }
 
   private startProcess(): void {

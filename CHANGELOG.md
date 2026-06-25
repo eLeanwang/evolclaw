@@ -1,3 +1,16 @@
+## v3.5.9 (2026-06-25)
+
+### Security Fixes
+
+- **EVOLCLAW_ISSUER 环境变量校验** — `resolveControlIssuer()` 新增严格校验：域名格式正则、禁止 localhost/本地域名（`localhost`/`.localhost`/`127.*`/`0.*`）、长度上限 253，非法值降级回 `agentid.pub`。防止环境变量注入污染控制 AID 的 issuer。
+- **AUN topicName 输入净化** — AUN channel 提取话题名时新增净化处理：去首尾空白、剔除控制字符（`\x00-\x1F\x7F`）、长度上限 200，非法值丢弃。新增 `sanitizeTopicName()` helper 统一 P2P 与群聊两处提取逻辑，防止不可信 payload 经 metadata 透传。
+
+## v3.5.8 (2026-06-25)
+
+### Bug Fixes
+
+- **Thread session 创建时 topicName 提取** — 修复 AUN channel 在首条消息被动创建 thread session 时，未从 `payload.topicName` 提取话题显示名的问题（之前用写死的兜底文案「话题会话」）。现在按协议 v2.4 §6.4/§12.1 正确提取：优先 `payload.topicName`，兼容 `replyContext.title`/`replyContext.metadata.topicName`。影响范围：AUN 群聊和私聊的话题会话创建。
+
 ## v3.5.7 (2026-06-24)
 
 ### Bug Fixes

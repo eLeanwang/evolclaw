@@ -547,11 +547,24 @@ export class AUNChannel {
     return out;
   }
 
-  private buildGroupReplyContext(threadId: string | undefined, senderAid: string, encrypted: boolean, messageId?: string, chatmode?: string): ReplyContext {
+  /** Sanitize a raw topicName from untrusted payload: trim, strip control chars, enforce length. */
+  private sanitizeTopicName(raw: unknown): string | undefined {
+    if (typeof raw !== 'string') return undefined;
+    const sanitized = raw.trim().replace(/[\x00-\x1F\x7F]/g, '');
+    if (sanitized.length > 0 && sanitized.length <= 200) return sanitized;
+    return undefined;
+  }
+
+  private buildGroupReplyContext(threadId: string | undefined, senderAid: string, encrypted: boolean, messageId?: string, chatmode?: string, topicName?: string): ReplyContext {
     const replyContext: ReplyContext = { metadata: { encrypted, chatmode } };
     if (threadId) replyContext.threadId = threadId;
     replyContext.peerId = senderAid;
     if (messageId) replyContext.replyToMessageId = messageId;
+    // 协议 v2.4 §6.4/§12.1: 话题会话创建时传入 topicName
+    if (topicName && threadId) {
+      if (!replyContext.metadata) replyContext.metadata = {};
+      replyContext.metadata.topicName = topicName;
+    }
     return replyContext;
   }
 
@@ -1266,9 +1279,27 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
   }
 
   private isTrustedStorageHost(host: string, normalizedOwner: string): boolean {
-    if (host === 'storage.agentid.pub') return true;
-    const issuer = normalizedOwner.includes('.') ? normalizedOwner.split('.').slice(1).join('.') : '';
-    return !!issuer && host === `storage.${issuer}`;
+    const trustedIssuers = new Set<string>();
+
+    // 对端 issuer（文件所有者 owner_aid）
+    const peerIssuer = this.extractIssuer(normalizedOwner);
+    if (peerIssuer) trustedIssuers.add(peerIssuer);
+
+    // 本端 issuer（自己的 AID）
+    const selfIssuer = this.extractIssuer((this.getAid() || '').toLowerCase());
+    if (selfIssuer) trustedIssuers.add(selfIssuer);
+
+    // 校验 host 是否为任一可信 issuer 的存储域名
+    for (const issuer of trustedIssuers) {
+      if (host === `storage.${issuer}`) return true;
+    }
+    return false;
+  }
+
+  /** 从 AID 提取 issuer（去掉首段 label）。`mybot.agentid.pub` → `agentid.pub` */
+  private extractIssuer(aid: string): string {
+    if (!aid || !aid.includes('.')) return '';
+    return aid.split('.').slice(1).join('.');
   }
 
   private decodeUrlPath(pathname: string): string {
@@ -1290,6 +1321,12 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     const payload = msg.payload ?? '';
     const text = this.extractTextPayload(payload, fromAid, fromAid);
     const threadId = typeof payload === 'object' && payload !== null ? (payload as any).thread_id : undefined;
+
+    // Extract and validate topicName from untrusted payload
+    const topicName = (typeof payload === 'object' && payload !== null)
+      ? this.sanitizeTopicName((payload as any).topicName)
+      : undefined;
+
     const messageId = msg.message_id ?? '';
     const seq = msg.seq;
 
@@ -1389,6 +1426,11 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     if (threadId) replyContext.threadId = threadId;
     replyContext.peerId = fromAid;
     if (messageId) replyContext.replyToMessageId = messageId;
+    // 协议 v2.4 §6.4/§12.1: 话题会话创建时传入 topicName
+    if (topicName && threadId) {
+      if (!replyContext.metadata) replyContext.metadata = {};
+      replyContext.metadata.topicName = topicName;
+    }
     this.dispatchMessage({
       channelId: chatId,
       userId: fromAid,
@@ -1421,6 +1463,9 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     const payload = msg.payload ?? '';
     const text = this.extractTextPayload(payload, groupId, senderAid);
     const threadId = typeof payload === 'object' && payload !== null ? (payload as any).thread_id : undefined;
+    const topicName = (typeof payload === 'object' && payload !== null)
+      ? this.sanitizeTopicName((payload as any).topicName)
+      : undefined;
     const messageId = msg.message_id ?? '';
 
     const seq = msg.seq;
@@ -1470,7 +1515,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
           peerName: displayName,
           peerType: peerInfo?.type || 'unknown',
           seq,
-          replyContext: this.buildGroupReplyContext(undefined, senderAid, msgEncryptedFast, messageId, msgChatmodeFast),
+          replyContext: this.buildGroupReplyContext(undefined, senderAid, msgEncryptedFast, messageId, msgChatmodeFast, undefined),
           createdAt,
         });
         return;
@@ -1545,7 +1590,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       this.pendingEchoMessages.set(messageId, {
         text: echoText,
         channelId: groupId,
-        context: this.buildGroupReplyContext(undefined, senderAid, msgEncrypted, messageId, msgChatmodeEcho),
+        context: this.buildGroupReplyContext(undefined, senderAid, msgEncrypted, messageId, msgChatmodeEcho, undefined),
         receiveTs: Date.now(),
       });
       // 继续走正常 Agent 流程（下面的代码会 dispatch）
@@ -1646,7 +1691,7 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       mentionAids: renderMentionAids.length > 0 ? renderMentionAids : undefined,
       isMentioned: mentionedSelf || mentionedAll,  // ← 新增：标记是否 @ 了本 agent
       encrypted: msgEncrypted,
-      replyContext: this.buildGroupReplyContext(threadId, senderAid, msgEncrypted, messageId, msgChatmode),
+      replyContext: this.buildGroupReplyContext(threadId, senderAid, msgEncrypted, messageId, msgChatmode, topicName),
       dispatchMode: serverDispatchMode,
       images: inboundImages.length > 0 ? inboundImages : undefined,
     });

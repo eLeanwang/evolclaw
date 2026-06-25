@@ -155,7 +155,7 @@ export class MessageQueue {
    * 检查队列 key 是否属于指定 sessionKey
    */
   private matchesSession(key: string, sessionKey: string): boolean {
-    return key.startsWith(sessionKey + '::');
+    return this.sessionKeyFromQueueKey(key) === sessionKey;
   }
 
   /**
