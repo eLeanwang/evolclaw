@@ -331,10 +331,18 @@ export function loadAllAgents(): AgentLoadResult {
     if (!entry.isDirectory()) continue;
     const dirName = entry.name;
     const cfgPath = path.join(agentsDir, dirName, 'config.json');
-    if (!fs.existsSync(cfgPath) && isControlAidStateDir(dirName, controlAid)) {
-      logger.debug(`[config] ignore control AID state dir agents/${dirName}`);
+
+    // Skip directories without config.json (could be utility dirs like response-modes, templates, etc.)
+    if (!fs.existsSync(cfgPath)) {
+      if (isControlAidStateDir(dirName, controlAid)) {
+        logger.debug(`[config] ignore control AID state dir agents/${dirName}`);
+      } else {
+        logger.debug(`[config] ignore non-agent dir agents/${dirName} (no config.json)`);
+      }
       continue;
     }
+
+    // Now validate AID format since config.json exists
     const why = checkAgentDir(agentsDir, dirName);
     if (why) {
       result.skipped.push({ dirName, reason: why });

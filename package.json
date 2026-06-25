@@ -1,6 +1,6 @@
 {
   "name": "evolclaw",
-  "version": "3.5.7",
+  "version": "3.5.8",
   "description": "AI Agent gateway connecting multiple backends (Claude, Codex, Gemini) to messaging channels (Feishu, WeChat, AUN, QQ) with multi-project session management",
   "type": "module",
   "main": "dist/index.js",

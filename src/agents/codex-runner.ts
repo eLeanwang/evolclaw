@@ -1322,6 +1322,9 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
           logger.debug(`[CodexRunner] app-server SSE reconnect (no message)`);
           break;
         }
+        if (isRetryableError(new Error(params.message))) {
+          throw new Error(params.message);
+        }
         yield { type: 'error', error: params.message, errorType: 'unknown' };
         break;
       }

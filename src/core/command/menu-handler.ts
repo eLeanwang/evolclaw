@@ -9,7 +9,7 @@ import { buildEnvelope } from '../message/message-utils.js';
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
-import { execSync } from 'child_process';
+import { execFileSync } from 'child_process';
 import { CronExpressionParser } from 'cron-parser';
 import type { ParsedTriggerSet } from '../../trigger/parser.js';
 import { checkLatestVersion, getLocalVersion, isLinkedInstall, compareVersions, resolveGlobalPkg } from '../../utils/npm-ops.js';
@@ -25,7 +25,7 @@ import { displaySessionTitle } from '../session/session-title.js';
  */
 function getBaseagentVersion(cmd: string): string | null {
   try {
-    const output = execSync(`${cmd} --version`, {
+    const output = execFileSync(cmd, ['--version'], {
       encoding: 'utf-8',
       timeout: 3000,
       stdio: ['ignore', 'pipe', 'pipe'],

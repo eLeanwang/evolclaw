@@ -1899,8 +1899,8 @@ function agentHealthCard(ag) {
 function systemBaseagentCards(baseagents) {
   const list = Array.isArray(baseagents) ? baseagents : [];
   return list.map(ba => {
-    const ver = ba.version ? ` v${ba.version}` : '';
-    const title = `Baseagent · ${ba.active ? '✓ ' : ''}${ba.name || 'unknown'}${ver}`;
+    const ver = ba.version ? `・${ba.version}` : '';
+    const title = `Baseagent・${ba.active ? '✓ ' : ''}${ba.name || 'unknown'}${ver}`;
     const detail = [ba.model, ba.effort].filter(Boolean).map(esc).join(' · ') || '未指定模型/强度';
     return `<div class="cache-card"><div class="card-label">${esc(title)}</div><div class="card-val">${detail}</div></div>`;
   }).join('');

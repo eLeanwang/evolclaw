@@ -1,3 +1,9 @@
+## v3.5.8 (2026-06-25)
+
+### Bug Fixes
+
+- **Thread session 创建时 topicName 提取** — 修复 AUN channel 在首条消息被动创建 thread session 时，未从 `payload.topicName` 提取话题显示名的问题（之前用写死的兜底文案「话题会话」）。现在按协议 v2.4 §6.4/§12.1 正确提取：优先 `payload.topicName`，兼容 `replyContext.title`/`replyContext.metadata.topicName`。影响范围：AUN 群聊和私聊的话题会话创建。
+
 ## v3.5.7 (2026-06-24)
 
 ### Bug Fixes
