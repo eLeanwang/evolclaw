@@ -59,6 +59,8 @@ async function getRoleResolver() {
 interface RolesSnapshot {
   agents: Array<{
     aid: string;
+    displayName?: string;
+    name?: string;
     owners: string[];
     admins: string[];
     members: string[];
@@ -66,6 +68,12 @@ interface RolesSnapshot {
   relations: Array<{
     self: string;
     peerKey: string;
+    peerAid: string;          // 裸对端 AID（私聊）或 groupId（群聊）
+    peerName?: string;        // 对端昵称 / 群名称
+    peerType?: string;        // ai/human/unknown
+    isAgent?: boolean;        // 是否是 agent
+    verifyStatus?: string;    // verified/invalid/agentmd-unverified/unknown
+    chatType?: 'private' | 'group';  // 会话类型
     role: string;
     source: 'agent' | 'relation';
   }>;
@@ -80,52 +88,45 @@ async function buildSnapshot(): Promise<RolesSnapshot> {
     const { resolveUserRole } = await getRoleResolver();
     const p = resolvePaths();
 
-    // 扫描所有 agents - 使用 .evolclaw 的 agents 目录
-    const evolclawDir = path.join(p.instanceDir, '..');
-    const agentsDir = path.join(evolclawDir, 'agents');
+    // 从 IPC 获取 agents 列表（与 agents tab 一致）
+    const { ipcQuery } = await import('../ipc-client.js');
+    const agentsResp = await ipcQuery<{ ok: boolean; agents: any[] }>(
+      p.socket,
+      { type: 'evolagent.list' },
+      3000
+    );
 
-    console.log('[roles] Looking for agents in:', agentsDir);
+    const agentList = agentsResp?.agents ?? [];
+    console.log('[roles] Retrieved agents from IPC:', agentList.length);
 
-    if (!fs.existsSync(agentsDir)) {
-      console.warn('[roles] Agents directory does not exist:', agentsDir);
-      return { agents, relations };
-    }
-
-    const aids = fs.readdirSync(agentsDir);
-    console.log('[roles] Found agent directories:', aids.length);
-
-    for (const aid of aids) {
-      const agentPath = path.join(agentsDir, aid);
-
-      try {
-        const stat = fs.statSync(agentPath);
-        if (!stat.isDirectory()) continue;
-      } catch {
-        continue;
-      }
-
-      const configPath = path.join(agentPath, 'config.json');
-      if (!fs.existsSync(configPath)) {
-        console.log('[roles] No config.json for:', aid);
-        continue;
-      }
+    // 使用 IPC 返回的 agents 列表
+    for (const agentInfo of agentList) {
+      const aid = agentInfo.aid;
+      if (!aid) continue;
 
       try {
         const config = read(ConfigTarget.Agent, { self: aid });
         agents.push({
           aid,
+          // 昵称：与 agents tab 一致，优先 displayName / name
+          displayName: agentInfo.displayName ?? agentInfo.personalName,
+          name: agentInfo.name,
           owners: config?.owners ?? [],
           admins: config?.admins ?? [],
           members: config?.members ?? []
         });
 
-        // 扫描该 agent 的所有关系
-        const relationsDir = path.join(agentPath, 'relations');
-        if (fs.existsSync(relationsDir)) {
-          const peers = fs.readdirSync(relationsDir);
+        // 扫描该 agent 的所有会话（从 sessions 目录）
+        const sessionsDir = path.join(p.root, 'data', 'sessions', 'aun', aid);
 
-          for (const peerKey of peers) {
-            const peerPath = path.join(relationsDir, peerKey);
+        if (fs.existsSync(sessionsDir)) {
+          const peers = fs.readdirSync(sessionsDir);
+
+          for (const peerDirName of peers) {
+            // 跳过系统目录
+            if (peerDirName.startsWith('_')) continue;
+
+            const peerPath = path.join(sessionsDir, peerDirName);
 
             try {
               const peerStat = fs.statSync(peerPath);
@@ -134,21 +135,97 @@ async function buildSnapshot(): Promise<RolesSnapshot> {
               continue;
             }
 
-            try {
-              const role = resolveUserRole(aid, peerKey);
-              const relationConfig = read(ConfigTarget.Relation, {
-                self: aid,
-                peerKey
-              });
+            // 读取 active.json 获取会话元信息（权威数据源）
+            const activeJsonPath = path.join(peerPath, 'active.json');
+            let activeMeta: any = null;
+            if (fs.existsSync(activeJsonPath)) {
+              try {
+                activeMeta = JSON.parse(fs.readFileSync(activeJsonPath, 'utf-8'));
+              } catch (err) {
+                console.warn(`[roles] Failed to read active.json for ${peerDirName}:`, err);
+              }
+            }
 
-              relations.push({
-                self: aid,
-                peerKey,
-                role,
-                source: relationConfig?.role ? 'relation' : 'agent'
-              });
+            // 判断会话类型（私聊/群聊）
+            const chatType: 'private' | 'group' = activeMeta?.chatType === 'group' ? 'group' : 'private';
+
+            try {
+              if (chatType === 'group') {
+                // ── 群聊处理 ──
+                const groupId = activeMeta?.metadata?.groupId || decodeURIComponent(peerDirName);
+                const groupName = activeMeta?.metadata?.groupName || groupId;
+
+                // 群聊用 peerKey 解析角色（channelId = groupId）
+                const peerKey = `aun#${groupId}`;
+                const role = resolveUserRole(aid, groupId);
+                const relationConfig = read(ConfigTarget.Relation, { self: aid, peerKey });
+
+                relations.push({
+                  self: aid,
+                  peerKey,
+                  peerAid: groupId,
+                  peerName: groupName,
+                  peerType: 'group',
+                  isAgent: false,
+                  verifyStatus: 'group', // 群聊无验签概念
+                  chatType: 'group',
+                  role,
+                  source: relationConfig?.role ? 'relation' : 'agent'
+                });
+              } else {
+                // ── 私聊处理 ──
+                const peerAid = activeMeta?.channelId || decodeURIComponent(peerDirName);
+
+                // 优先用 active.json 的 peerName，否则从 agent.md 读取
+                let finalType = 'unknown';
+                let finalName: string | undefined = activeMeta?.metadata?.peerName;
+                let verifyStatus = 'unknown';
+
+                const localAgentMdPath = path.join(p.root, 'AIDs', peerAid, 'agent.md');
+                const agentmdJsonPath = path.join(p.root, 'AIDs', peerAid, 'agentmd.json');
+
+                // 读取 agent.md 获取 type 和 name
+                if (fs.existsSync(localAgentMdPath)) {
+                  try {
+                    const agentMdContent = fs.readFileSync(localAgentMdPath, 'utf-8');
+                    const typeMatch = agentMdContent.match(/^type:\s*["']?([^"'\n]+?)["']?\s*$/m);
+                    const nameMatch = agentMdContent.match(/^name:\s*["']?(.+?)["']?\s*$/m);
+                    if (typeMatch?.[1]) finalType = typeMatch[1];
+                    if (!finalName && nameMatch?.[1]) finalName = nameMatch[1]?.trim();
+                  } catch (err) {
+                    console.warn(`[roles] Failed to read agent.md for ${peerAid}:`, err);
+                  }
+                }
+
+                // 读取验签状态
+                if (fs.existsSync(agentmdJsonPath)) {
+                  try {
+                    const agentmdMeta = JSON.parse(fs.readFileSync(agentmdJsonPath, 'utf-8'));
+                    verifyStatus = agentmdMeta.verify_status || 'unknown';
+                  } catch (err) {
+                    console.warn(`[roles] Failed to read agentmd.json for ${peerAid}:`, err);
+                  }
+                }
+
+                const role = resolveUserRole(aid, peerAid);
+                const peerKey = `aun#${peerAid}`;
+                const relationConfig = read(ConfigTarget.Relation, { self: aid, peerKey });
+
+                relations.push({
+                  self: aid,
+                  peerKey,
+                  peerAid,
+                  peerName: finalName,
+                  peerType: finalType,
+                  isAgent: finalType !== 'human',
+                  verifyStatus,
+                  chatType: 'private',
+                  role,
+                  source: relationConfig?.role ? 'relation' : 'agent'
+                });
+              }
             } catch (err) {
-              // 跳过无法解析的关系
+              console.warn(`[roles] Failed to process peer ${peerDirName}:`, err);
             }
           }
         }

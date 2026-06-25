@@ -1185,11 +1185,13 @@ export type BuiltinRole = 'owner' | 'admin' | 'member' | 'guest' | 'anonymous';
 
 export interface RolesConfig {
   $schema_version: number;
+  defaultRole?: string;  // 全局默认角色（未在名单用户的兜底角色），默认 'anonymous'
   roles: Record<string, RoleDefinition>;
 }
 
 export interface RoleDefinition {
   description: string;
+  allowAccess?: boolean;  // 该角色是否允许访问，默认 true（anonymous 默认 false）
   permissions: Record<string, FieldPermission>;
 }
 

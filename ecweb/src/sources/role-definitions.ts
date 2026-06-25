@@ -108,6 +108,40 @@ export async function handleRoleDefinitionsApi(req: any, res: any): Promise<void
       return;
     }
 
+    // PUT /api/role-definitions - 更新全局配置（如 defaultRole）。传入完整配置，内部算 diff。
+    if (req.method === 'PUT' && req.url === '/api/role-definitions') {
+      let body = '';
+      req.on('data', (chunk: Buffer) => {
+        body += chunk.toString();
+      });
+
+      req.on('end', () => {
+        try {
+          const incoming = JSON.parse(body);
+
+          // 以当前配置为基线，仅覆盖传入的顶层字段（defaultRole）与 roles（若提供）
+          const config = readRolesConfig();
+          if (typeof incoming.defaultRole === 'string') {
+            config.defaultRole = incoming.defaultRole;
+          }
+          if (incoming.roles && typeof incoming.roles === 'object') {
+            config.roles = incoming.roles;
+          }
+
+          // 通过 ConfigManager 写入（内部算 diff，自动 schema 校验）
+          writeRoles(config);
+
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true }));
+        } catch (err: any) {
+          console.error('[role-definitions] Failed to update global config:', err);
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      });
+      return;
+    }
+
     // POST /api/role-definitions - 创建新角色
     if (req.method === 'POST' && req.url === '/api/role-definitions') {
       let body = '';

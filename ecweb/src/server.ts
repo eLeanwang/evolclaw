@@ -617,8 +617,8 @@ export async function startWatchWebServer(opts: { port?: number; log?: (s: strin
         return;
       }
       handleRoleAssignmentsApi(req, res);
-    } else if ((req.url || '').startsWith('/api/role-definitions/')) {
-      // Role Definitions API
+    } else if ((req.url || '') === '/api/role-definitions' || (req.url || '').startsWith('/api/role-definitions/') || (req.url || '').startsWith('/api/role-definitions?')) {
+      // Role Definitions API（含集合端点 /api/role-definitions 与 /api/role-definitions/:role）
       handleRoleDefinitionsApi(req, res);
     } else if ((req.url || '').startsWith('/api/assignments/peer/')) {
       // Peer Role API

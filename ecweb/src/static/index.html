@@ -241,6 +241,18 @@
             <h2 data-i18n="roleDefs.title">角色定义管理</h2>
             <button class="btn-new-role" id="btn-new-role">+ 新增角色</button>
           </div>
+
+          <!-- 全局默认角色选择器 -->
+          <div class="role-default-selector" id="role-default-selector">
+            <label class="role-default-label">
+              <span>默认角色 (Default Role):</span>
+              <select id="default-role-select" class="form-select">
+                <!-- 动态填充 -->
+              </select>
+            </label>
+            <small style="color: var(--dim);">未在 owners/admins/members 名单中的用户将使用此角色</small>
+          </div>
+
           <div class="role-cards-grid" id="role-cards-grid">
             <!-- 动态渲染角色卡片 -->
           </div>
@@ -266,7 +278,7 @@
 
       <section id="view-roles" class="view">
         <div class="role-assign-layout">
-          <!-- Agent 选择器 -->
+          <!-- Agent 选择器 + 搜索 + 筛选 -->
           <div class="assign-header">
             <label>
               <span data-i18n="roles.selectAgent">Select Agent:</span>
@@ -274,70 +286,39 @@
                 <option value="" data-i18n="roles.selectAgentPlaceholder">-- Select an Agent --</option>
               </select>
             </label>
-          </div>
-
-          <!-- Agent 概览统计（新增） -->
-          <div id="assign-overview" class="assign-overview" style="display:none;">
-            <!-- 动态渲染 -->
-          </div>
-
-          <!-- Agent 级别角色 -->
-          <div id="roles-management" class="roles-management" style="display:none;">
-            <h3 data-i18n="roles.directAssignments">👤 Direct Role Assignments</h3>
-            <div class="roles-grid">
-              <div class="role-column">
-                <h4>👑 Owners</h4>
-                <div id="owners-list" class="role-list"></div>
-                <button class="add-role-btn" data-field="owners">+ Add Owner</button>
-              </div>
-              <div class="role-column">
-                <h4>🛡️ Admins</h4>
-                <div id="admins-list" class="role-list"></div>
-                <button class="add-role-btn" data-field="admins">+ Add Admin</button>
-              </div>
-              <div class="role-column">
-                <h4>👥 Members</h4>
-                <div id="members-list" class="role-list"></div>
-                <button class="add-role-btn" data-field="members">+ Add Member</button>
-              </div>
+            <select id="filter-chattype">
+              <option value="" data-i18n="roles.filter.allChatType">全部会话</option>
+              <option value="private" data-i18n="roles.filter.private">💬 私聊</option>
+              <option value="group" data-i18n="roles.filter.group">👥 群聊</option>
+            </select>
+            <select id="filter-verify">
+              <option value="" data-i18n="roles.filter.allVerify">全部状态</option>
+              <option value="verified" data-i18n="roles.filter.verified">✅ 已验证</option>
+              <option value="invalid" data-i18n="roles.filter.invalid">⚠️ 验证失败</option>
+              <option value="agentmd-unverified" data-i18n="roles.filter.unverified">⚠️ 未验证</option>
+              <option value="unknown" data-i18n="roles.filter.unknown">❓ 未知</option>
+            </select>
+            <div class="search-box">
+              <input type="search" id="peer-search" placeholder="Search peer key..." data-i18n="roles.searchPlaceholder">
             </div>
           </div>
 
-          <!-- 对端关系列表（增强） -->
+          <!-- 对端关系列表 -->
           <div class="assign-peer-roles">
-            <h3>🔗 <span data-i18n="roles.peerAssignments">Peer Role Assignments</span></h3>
-
-            <!-- 筛选器（新增） -->
-            <div class="peer-filters">
-              <select id="filter-channel">
-                <option value="">All Channels</option>
-              </select>
-              <select id="filter-role">
-                <option value="">All Roles</option>
-                <option value="owner">Owner</option>
-                <option value="admin">Admin</option>
-                <option value="member">Member</option>
-                <option value="guest">Guest</option>
-                <option value="anonymous">Anonymous</option>
-              </select>
-              <input type="search" id="filter-search" placeholder="Search peer key...">
-            </div>
-
-            <!-- 关系表格 -->
-            <div class="relations-section">
-              <table id="relations-table" class="relations-table">
-                <thead>
-                  <tr>
-                    <th>Peer Key</th>
-                    <th>Channel</th>
-                    <th>Effective Role</th>
-                    <th>Source</th>
-                    <th>Actions</th>
-                  </tr>
-                </thead>
-                <tbody></tbody>
-              </table>
-            </div>
+            <table id="relations-table" class="relations-table">
+              <thead>
+                <tr>
+                  <th data-i18n="roles.table.chatType">会话</th>
+                  <th data-i18n="roles.table.peerName">昵称</th>
+                  <th data-i18n="roles.table.peerAid">对端AID</th>
+                  <th data-i18n="roles.table.peerType">类型</th>
+                  <th data-i18n="roles.table.role">角色</th>
+                  <th data-i18n="roles.table.source">来源</th>
+                  <th data-i18n="roles.table.actions">操作</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
           </div>
         </div>
 

@@ -69,6 +69,39 @@ const translations = {
     'roles.removeConfirm': '确定要移除 {user} 的 {role} 角色吗？',
     'roles.addPrompt': '请输入要添加为 {role} 的 AID:\n\n格式: username.aid.pub 或 username.agentid.pub',
     'roles.invalidFormat': '无效的 AID 格式\n\n期望格式: username.aid.pub 或 username.agentid.pub\n\n示例: alice.aid.pub',
+    'roles.directAssignments': '👤 直接角色分配',
+    'roles.peerAssignments': '对端角色分配',
+    'roles.noPeerRelations': '该智能体没有对端关系',
+    'roles.table.peerKey': '对端密钥',
+    'roles.table.peerName': '昵称',
+    'roles.table.peerAid': '对端AID',
+    'roles.table.peerType': '类型',
+    'roles.peerType.unknown': '未知',
+    'roles.verify.invalid': '签名验证失败，身份不可信',
+    'roles.verify.invalidShort': '未验证',
+    'roles.verify.unknown': '无法获取身份信息',
+    'roles.verify.unverified': '身份未验证',
+    'roles.filter.allVerify': '全部状态',
+    'roles.filter.verified': '✅ 已验证',
+    'roles.filter.invalid': '⚠️ 验证失败',
+    'roles.filter.unverified': '⚠️ 未验证',
+    'roles.filter.unknown': '❓ 未知',
+    'roles.filter.allChatType': '全部会话',
+    'roles.filter.private': '💬 私聊',
+    'roles.filter.group': '👥 群聊',
+    'roles.chatType.private': '私聊',
+    'roles.chatType.group': '群聊',
+    'roles.peerType.group': '群组',
+    'roles.table.chatType': '会话',
+    'roles.editPeerRole': '编辑对端角色',
+    'roles.selectRole': '选择角色',
+    'roles.editHint': '角色修改会更新此智能体的 owners/admins/members 配置',
+    'roles.agentNotFound': '智能体未找到',
+    'roles.table.channel': '频道',
+    'roles.table.role': '有效角色',
+    'roles.table.source': '来源',
+    'roles.table.actions': '操作',
+    'roles.searchPlaceholder': '搜索对端 AID...',
     'roles.alreadyExists': '用户 {user} 已经是 {role}',
     'roles.selectFirst': '请先选择一个智能体',
     'roles.directAssignments': '👤 直接角色分配',
@@ -125,6 +158,7 @@ const translations = {
     'common.loading': '加载中…',
     'common.empty': '暂无数据',
     'common.noData': '暂无',
+    'common.noResults': '无匹配结果',
     'common.operating': '操作中…',
     'common.buildTime': '构建时间',
 
@@ -414,6 +448,39 @@ const translations = {
     'roles.removeConfirm': 'Remove {user} from {role}?',
     'roles.addPrompt': 'Enter AID to add as {role}:\n\nFormat: username.aid.pub or username.agentid.pub',
     'roles.invalidFormat': 'Invalid AID format.\n\nExpected: username.aid.pub or username.agentid.pub\n\nExample: alice.aid.pub',
+    'roles.directAssignments': '👤 Direct Role Assignments',
+    'roles.peerAssignments': 'Peer Role Assignments',
+    'roles.noPeerRelations': 'This agent has no peer relations',
+    'roles.table.peerKey': 'Peer Key',
+    'roles.table.peerName': 'Name',
+    'roles.table.peerAid': 'Peer AID',
+    'roles.table.peerType': 'Type',
+    'roles.peerType.unknown': 'Unknown',
+    'roles.verify.invalid': 'Signature verification failed, identity untrusted',
+    'roles.verify.invalidShort': 'Unverified',
+    'roles.verify.unknown': 'Unable to obtain identity information',
+    'roles.verify.unverified': 'Identity unverified',
+    'roles.filter.allVerify': 'All Status',
+    'roles.filter.verified': '✅ Verified',
+    'roles.filter.invalid': '⚠️ Verification Failed',
+    'roles.filter.unverified': '⚠️ Unverified',
+    'roles.filter.unknown': '❓ Unknown',
+    'roles.filter.allChatType': 'All Chats',
+    'roles.filter.private': '💬 Private',
+    'roles.filter.group': '👥 Group',
+    'roles.chatType.private': 'Private',
+    'roles.chatType.group': 'Group',
+    'roles.peerType.group': 'Group',
+    'roles.table.chatType': 'Chat',
+    'roles.editPeerRole': 'Edit Peer Role',
+    'roles.selectRole': 'Select Role',
+    'roles.editHint': 'Role changes will update this agent\'s owners/admins/members configuration',
+    'roles.agentNotFound': 'Agent not found',
+    'roles.table.channel': 'Channel',
+    'roles.table.role': 'Effective Role',
+    'roles.table.source': 'Source',
+    'roles.table.actions': 'Actions',
+    'roles.searchPlaceholder': 'Search peer AID...',
     'roles.alreadyExists': 'User {user} is already in {role}',
     'roles.selectFirst': 'Please select an agent first',
     'roles.directAssignments': '👤 Direct Role Assignments',
@@ -470,6 +537,7 @@ const translations = {
     'common.loading': 'Loading…',
     'common.empty': 'No data',
     'common.noData': 'N/A',
+    'common.noResults': 'No matching results',
     'common.operating': 'Operating…',
     'common.buildTime': 'Build Time',
 
@@ -949,7 +1017,7 @@ function renderView(view) {
   else if (view === 'monitor') renderMonitor(state.monitor);
   else if (view === 'gateway') renderGateway(state.gateway);
   else if (view === 'roleDefinitions') renderRoleDefinitions(state.roleDefinitions);
-  else if (view === 'roles') renderRoleAssignments(state.roles);
+  else if (view === 'roles') renderRoles(state.roles);
 }
 
 // ── 工具 ──
@@ -3806,17 +3874,17 @@ window.addEventListener('DOMContentLoaded', async () => {
 
 // ========== Roles Tab ==========
 let rolesCurrentAgent = null;
+let rolesSearchTerm = '';
+let rolesVerifyFilter = ''; // 验签状态筛选
+let rolesChatTypeFilter = ''; // 会话类型筛选（private/group）
 
 function renderRoles(data) {
   if (!data) return;
 
   const agentSelect = $('#roles-agent-select');
-  const management = $('#roles-management');
+  if (!agentSelect) return;
 
-  if (!agentSelect || !management) return;
-
-  // 填充 agent 选择器
-  const placeholder = agentSelect.querySelector('option[value=""]');
+  // 填充 agent 选择器 - 使用 roles 数据中的昵称（已从后端带来）
   agentSelect.innerHTML = '';
 
   // 重新创建占位符选项（支持国际化）
@@ -3826,80 +3894,169 @@ function renderRoles(data) {
   placeholderOption.textContent = t('roles.selectAgentPlaceholder');
   agentSelect.appendChild(placeholderOption);
 
-  // 添加 agent 选项
-  data.agents.forEach(agent => {
+  // agent 列表以 roles 数据为准
+  const agentList = data.agents || [];
+
+  // 添加 agent 选项：显示「昵称 (shortAid)」
+  // 昵称优先级：displayName || name || shortAid
+  agentList.forEach(agent => {
     const opt = document.createElement('option');
     opt.value = agent.aid;
-    opt.textContent = agent.aid;
+    const name = agent.displayName || agent.name || shortAid(agent.aid);
+    const sa = shortAid(agent.aid);
+    // 如果昵称与 shortAid 不同，显示「昵称 (shortAid)」，否则只显示 shortAid
+    opt.textContent = (name && name !== sa && name !== agent.aid) ? `${name} (${sa})` : sa;
     agentSelect.appendChild(opt);
   });
 
-  // 恢复当前选择
-  if (rolesCurrentAgent && data.agents.find(a => a.aid === rolesCurrentAgent)) {
-    agentSelect.value = rolesCurrentAgent;
-    renderAgentRoles(data, rolesCurrentAgent);
-    management.style.display = 'block';
-  } else {
-    management.style.display = 'none';
-  }
-
-  // 渲染关系列表
-  renderRelationsTable(data);
-}
-
-function renderAgentRoles(data, aid) {
-  const agent = data.agents.find(a => a.aid === aid);
-  if (!agent) return;
-
-  ['owners', 'admins', 'members'].forEach(field => {
-    const list = $(`#${field}-list`);
-    if (!list) return;
-
-    list.innerHTML = '';
-
-    if (agent[field].length === 0) {
-      const empty = document.createElement('div');
-      empty.className = 'role-empty';
-      empty.textContent = t('common.empty');
-      list.appendChild(empty);
-      return;
+  // 默认选择第一个智能体
+  if (agentList.length > 0) {
+    // 如果之前有选择，保持选择；否则选第一个
+    if (!rolesCurrentAgent || !agentList.find(a => a.aid === rolesCurrentAgent)) {
+      rolesCurrentAgent = agentList[0].aid;
     }
-
-    agent[field].forEach(userId => {
-      const item = document.createElement('div');
-      item.className = 'role-item';
-      item.innerHTML = `
-        <span class="role-user-id">${esc(userId)}</span>
-        <button class="remove-btn" data-field="${field}" data-user="${esc(userId)}">×</button>
-      `;
-      list.appendChild(item);
-    });
-  });
+    agentSelect.value = rolesCurrentAgent;
+    renderAgentPeerRelations(data, rolesCurrentAgent);
+  } else {
+    rolesCurrentAgent = null;
+    renderRelationsTable(data, null);
+  }
 }
 
-function renderRelationsTable(data) {
+function renderAgentPeerRelations(data, aid) {
+  // 渲染选中 agent 的对端关系表格
+  renderRelationsTable(data, aid);
+}
+
+function renderRelationsTable(data, filterAid = null) {
   const tbody = document.querySelector('#relations-table tbody');
   if (!tbody) return;
 
   tbody.innerHTML = '';
 
-  if (data.relations.length === 0) {
+  // 如果指定了 filterAid，只显示该 agent 的关系
+  let relationsToShow = data.relations || [];
+  if (filterAid) {
+    relationsToShow = relationsToShow.filter(rel => rel.self === filterAid);
+  }
+
+  // 应用搜索过滤（同时匹配昵称和 AID）
+  if (rolesSearchTerm) {
+    const searchLower = rolesSearchTerm.toLowerCase();
+    relationsToShow = relationsToShow.filter(rel =>
+      (rel.peerName && rel.peerName.toLowerCase().includes(searchLower)) ||
+      (rel.peerAid && rel.peerAid.toLowerCase().includes(searchLower)) ||
+      rel.peerKey.toLowerCase().includes(searchLower)
+    );
+  }
+
+  // 应用验签状态筛选
+  if (rolesVerifyFilter) {
+    relationsToShow = relationsToShow.filter(rel => {
+      const status = rel.verifyStatus || 'unknown';
+      // agentmd 或 verified 都算 verified
+      if (rolesVerifyFilter === 'verified') {
+        return status === 'verified' || status === 'agentmd';
+      }
+      return status === rolesVerifyFilter;
+    });
+  }
+
+  // 应用会话类型筛选（private/group）
+  if (rolesChatTypeFilter) {
+    relationsToShow = relationsToShow.filter(rel =>
+      (rel.chatType || 'private') === rolesChatTypeFilter
+    );
+  }
+
+  // 排序：群聊优先，然后 verified → invalid → agentmd-unverified → unknown
+  const statusOrder = { 'verified': 0, 'agentmd': 0, 'invalid': 1, 'agentmd-unverified': 2, 'unknown': 3, 'group': -1 };
+  relationsToShow.sort((a, b) => {
+    const aStatus = statusOrder[a.verifyStatus] ?? 3;
+    const bStatus = statusOrder[b.verifyStatus] ?? 3;
+    if (aStatus !== bStatus) return aStatus - bStatus;
+    // 同级别按昵称排序
+    const aName = (a.peerName || a.peerAid || '').toLowerCase();
+    const bName = (b.peerName || b.peerAid || '').toLowerCase();
+    return aName.localeCompare(bName);
+  });
+
+  if (relationsToShow.length === 0) {
     const row = tbody.insertRow();
     const cell = row.insertCell();
-    cell.colSpan = 4;
-    cell.textContent = t('common.empty');
+    cell.colSpan = 7;
+    if (rolesSearchTerm || rolesVerifyFilter || rolesChatTypeFilter) {
+      cell.textContent = t('common.noResults') || 'No matching results';
+    } else if (filterAid) {
+      cell.textContent = t('roles.noPeerRelations') || 'No peer relations for this agent';
+    } else {
+      cell.textContent = t('common.empty');
+    }
     cell.style.textAlign = 'center';
     cell.style.color = 'var(--dim)';
+    cell.style.padding = '40px';
     return;
   }
 
-  data.relations.forEach(rel => {
+  relationsToShow.forEach(rel => {
+    const isGroup = (rel.chatType === 'group');
+    const peerNameDisplay = rel.peerName || shortAid(rel.peerAid || rel.peerKey);
+    const peerAidDisplay = rel.peerAid || rel.peerKey;
+
+    // 会话类型标签
+    const chatTypeTag = isGroup
+      ? `<span class="chat-tag chat-tag-group">👥 ${t('roles.chatType.group') || '群聊'}</span>`
+      : `<span class="chat-tag chat-tag-private">💬 ${t('roles.chatType.private') || '私聊'}</span>`;
+
+    // 类型图标和显示
+    let peerTypeIcon, peerTypeText, peerTypeClass = '';
+    if (isGroup) {
+      peerTypeIcon = '👥';
+      peerTypeText = t('roles.peerType.group') || 'Group';
+    } else if (rel.peerType === 'ai') {
+      peerTypeIcon = '🤖';
+      peerTypeText = 'AI';
+    } else if (rel.peerType === 'human') {
+      peerTypeIcon = '👤';
+      peerTypeText = 'Human';
+    } else {
+      peerTypeIcon = '❓';
+      peerTypeText = t('roles.peerType.unknown') || 'Unknown';
+    }
+
+    // 验签状态标识（群聊不显示验签）
+    let verifyBadge = '';
+    if (!isGroup) {
+      const status = rel.verifyStatus || 'unknown';
+      if (status === 'invalid') {
+        verifyBadge = ` <span class="verify-badge verify-invalid" title="${t('roles.verify.invalid') || '签名验证失败，身份不可信'}">⚠️ ${t('roles.verify.invalidShort') || '未验证'}</span>`;
+        peerTypeClass = ' peer-unverified';
+      } else if (status === 'unknown') {
+        verifyBadge = ` <span class="verify-badge verify-unknown" title="${t('roles.verify.unknown') || '无法获取身份信息'}">❓</span>`;
+        peerTypeClass = ' peer-unknown';
+      } else if (status === 'agentmd-unverified') {
+        verifyBadge = ` <span class="verify-badge verify-unverified" title="${t('roles.verify.unverified') || '身份未验证'}">⚠️</span>`;
+        peerTypeClass = ' peer-unverified';
+      }
+      // verified 或 agentmd 不显示任何标识（默认可信）
+    }
+
     const row = tbody.insertRow();
     row.innerHTML = `
-      <td><code>${esc(rel.self)}</code></td>
-      <td><code>${esc(rel.peerKey)}</code></td>
+      <td>${chatTypeTag}</td>
+      <td><strong>${esc(peerNameDisplay)}</strong>${verifyBadge}</td>
+      <td><code>${esc(peerAidDisplay)}</code></td>
+      <td class="${peerTypeClass}">${peerTypeIcon} ${esc(peerTypeText)}</td>
       <td><span class="role-badge role-${rel.role}">${esc(rel.role)}</span></td>
       <td><span class="role-source">${esc(rel.source)}</span></td>
+      <td>
+        <button class="edit-peer-role-btn"
+                data-aid="${esc(rel.self)}"
+                data-peer="${esc(rel.peerAid || rel.peerKey)}"
+                data-role="${esc(rel.role)}">
+          ${t('action.edit') || 'Edit'}
+        </button>
+      </td>
     `;
   });
 }
@@ -3935,72 +4092,177 @@ function initRolesTab() {
   if (agentSelect) {
     agentSelect.addEventListener('change', (e) => {
       rolesCurrentAgent = e.target.value;
-      const management = $('#roles-management');
-      if (management) {
-        management.style.display = rolesCurrentAgent ? 'block' : 'none';
-      }
       if (rolesCurrentAgent && state.roles) {
-        renderAgentRoles(state.roles, rolesCurrentAgent);
+        renderAgentPeerRelations(state.roles, rolesCurrentAgent);
+      } else if (state.roles) {
+        // 没有选中 agent 时，显示所有关系
+        renderRelationsTable(state.roles, null);
       }
     });
   }
 
-  // 添加角色按钮事件
-  document.querySelectorAll('.add-role-btn').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      const field = btn.dataset.field;
-      if (!rolesCurrentAgent) {
-        alert('Please select an agent first');
-        return;
-      }
-
-      const userId = prompt(`Enter AID to add as ${field}:\n\nFormat: username.aid.pub or username.agentid.pub`);
-      if (!userId) return;
-
-      // 验证 AID 格式
-      if (!/^[a-z0-9_-]+\.(aid|agentid)\.pub$/i.test(userId)) {
-        alert('Invalid AID format.\n\nExpected: username.aid.pub or username.agentid.pub\n\nExample: alice.aid.pub');
-        return;
-      }
-
-      if (!state.roles) return;
-      const agent = state.roles.agents.find(a => a.aid === rolesCurrentAgent);
-      if (!agent) return;
-
-      if (agent[field].includes(userId)) {
-        alert(`User ${userId} is already in ${field}`);
-        return;
-      }
-
-      const newUsers = [...agent[field], userId];
-      const success = await updateAgentRoles(rolesCurrentAgent, field, newUsers);
-
-      if (success) {
-        // 数据会通过 WebSocket 自动更新
+  // 搜索框事件
+  const searchInput = $('#peer-search');
+  if (searchInput) {
+    searchInput.addEventListener('input', (e) => {
+      rolesSearchTerm = e.target.value.trim();
+      if (state.roles && rolesCurrentAgent) {
+        renderAgentPeerRelations(state.roles, rolesCurrentAgent);
       }
     });
-  });
+  }
 
-  // 删除角色按钮事件（事件委托）
-  document.addEventListener('click', async (e) => {
-    if (e.target.classList.contains('remove-btn')) {
-      const { field, user } = e.target.dataset;
-      if (!rolesCurrentAgent) return;
-
-      if (!confirm(`Remove ${user} from ${field}?`)) return;
-
-      if (!state.roles) return;
-      const agent = state.roles.agents.find(a => a.aid === rolesCurrentAgent);
-      if (!agent) return;
-
-      const newUsers = agent[field].filter(u => u !== user);
-      const success = await updateAgentRoles(rolesCurrentAgent, field, newUsers);
-
-      if (success) {
-        // 数据会通过 WebSocket 自动更新
+  // 验签状态筛选器事件
+  const verifyFilter = $('#filter-verify');
+  if (verifyFilter) {
+    verifyFilter.addEventListener('change', (e) => {
+      rolesVerifyFilter = e.target.value;
+      if (state.roles && rolesCurrentAgent) {
+        renderAgentPeerRelations(state.roles, rolesCurrentAgent);
       }
-    }
-  });
+    });
+  }
+
+  // 会话类型筛选器事件
+  const chatTypeFilter = $('#filter-chattype');
+  if (chatTypeFilter) {
+    chatTypeFilter.addEventListener('change', (e) => {
+      rolesChatTypeFilter = e.target.value;
+      if (state.roles && rolesCurrentAgent) {
+        renderAgentPeerRelations(state.roles, rolesCurrentAgent);
+      }
+    });
+  }
+
+  // 编辑按钮点击事件（事件委托）
+  const relationsTable = $('#relations-table');
+  if (relationsTable) {
+    relationsTable.addEventListener('click', (e) => {
+      const btn = e.target.closest('.edit-peer-role-btn');
+      if (btn) {
+        const agentAid = btn.dataset.aid;
+        const peerAid = btn.dataset.peer;
+        const currentRole = btn.dataset.role;
+        openPeerRoleModal(agentAid, peerAid, currentRole);
+      }
+    });
+  }
+
+  // 弹窗关闭事件
+  const modal = $('#peer-role-modal');
+  const closeBtn = $('#peer-role-close');
+  const cancelBtn = $('#peer-role-cancel');
+  if (closeBtn) closeBtn.addEventListener('click', closePeerRoleModal);
+  if (cancelBtn) cancelBtn.addEventListener('click', closePeerRoleModal);
+  if (modal) {
+    modal.addEventListener('click', (e) => {
+      if (e.target === modal) closePeerRoleModal();
+    });
+  }
+
+  // 保存按钮
+  const saveBtn = $('#peer-role-save');
+  if (saveBtn) {
+    saveBtn.addEventListener('click', savePeerRole);
+  }
+}
+
+// 打开编辑对端角色弹窗
+function openPeerRoleModal(agentAid, peerAid, currentRole) {
+  const modal = $('#peer-role-modal');
+  const title = $('#peer-role-title');
+  const body = $('#peer-role-body');
+  if (!modal || !body) return;
+
+  // 设置标题
+  if (title) title.textContent = `${t('roles.editPeerRole') || 'Edit Peer Role'}: ${shortAid(peerAid)}`;
+
+  // 渲染角色选择
+  const roles = ['owner', 'admin', 'member', 'anonymous'];
+  body.innerHTML = `
+    <div style="margin-bottom: 16px;">
+      <label style="display: block; margin-bottom: 8px; font-weight: 500;">
+        ${t('roles.selectRole') || 'Select Role'}:
+      </label>
+      <select id="peer-role-select" style="width: 100%; padding: 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg); color: var(--ink);">
+        ${roles.map(r => `<option value="${r}" ${r === currentRole ? 'selected' : ''}>${r}</option>`).join('')}
+      </select>
+    </div>
+    <p style="font-size: 12px; color: var(--dim); margin-top: 12px;">
+      ${t('roles.editHint') || '角色修改会更新此智能体的 owners/admins/members 配置'}
+    </p>
+  `;
+
+  // 保存当前编辑的对端信息
+  modal.dataset.agentAid = agentAid;
+  modal.dataset.peerAid = peerAid;
+  modal.dataset.currentRole = currentRole;
+
+  modal.style.display = 'flex';
+}
+
+// 关闭弹窗
+function closePeerRoleModal() {
+  const modal = $('#peer-role-modal');
+  if (modal) modal.style.display = 'none';
+}
+
+// 保存对端角色
+async function savePeerRole() {
+  const modal = $('#peer-role-modal');
+  const select = $('#peer-role-select');
+  if (!modal || !select) return;
+
+  const agentAid = modal.dataset.agentAid;
+  const peerAid = modal.dataset.peerAid;
+  const currentRole = modal.dataset.currentRole;
+  const newRole = select.value;
+
+  if (newRole === currentRole) {
+    closePeerRoleModal();
+    return;
+  }
+
+  // 获取当前 agent 的完整配置
+  const agent = state.roles?.agents?.find(a => a.aid === agentAid);
+  if (!agent) {
+    alert(t('roles.agentNotFound') || 'Agent not found');
+    return;
+  }
+
+  // 更新逻辑：从旧角色列表移除，添加到新角色列表
+  const owners = [...(agent.owners || [])];
+  const admins = [...(agent.admins || [])];
+  const members = [...(agent.members || [])];
+
+  // 移除旧角色
+  const removeFrom = (list) => list.filter(id => id !== peerAid);
+  const newOwners = removeFrom(owners);
+  const newAdmins = removeFrom(admins);
+  const newMembers = removeFrom(members);
+
+  // 添加新角色
+  if (newRole === 'owner') newOwners.push(peerAid);
+  else if (newRole === 'admin') newAdmins.push(peerAid);
+  else if (newRole === 'member') newMembers.push(peerAid);
+  // anonymous 不需要加入任何列表
+
+  try {
+    // 调用API更新三个字段
+    await updateAgentRoles(agentAid, 'owners', newOwners);
+    await updateAgentRoles(agentAid, 'admins', newAdmins);
+    await updateAgentRoles(agentAid, 'members', newMembers);
+
+    closePeerRoleModal();
+    // 等待后端推送更新
+    setTimeout(() => {
+      if (state.roles && rolesCurrentAgent) {
+        renderAgentPeerRelations(state.roles, rolesCurrentAgent);
+      }
+    }, 500);
+  } catch (err) {
+    alert(t('common.error') + ': ' + err.message);
+  }
 }
 
 // ========== Role Definitions Tab ==========
@@ -4047,6 +4309,9 @@ function renderRoleDefinitions(data) {
     return;
   }
 
+  // 渲染全局默认角色选择器
+  renderDefaultRoleSelector(data);
+
   console.log('[roleDefinitions] Rendering', Object.keys(data.roles).length, 'roles');
   grid.innerHTML = '';
 
@@ -4058,6 +4323,53 @@ function renderRoleDefinitions(data) {
       console.error(`[roleDefinitions] Failed to create card for role ${roleName}:`, err);
     }
   });
+}
+
+function renderDefaultRoleSelector(data) {
+  const select = $('#default-role-select');
+  if (!select) return;
+
+  const currentDefault = data.defaultRole || 'anonymous';
+  select.innerHTML = '';
+
+  // 填充所有角色为选项
+  Object.keys(data.roles).forEach(roleName => {
+    const opt = document.createElement('option');
+    opt.value = roleName;
+    opt.textContent = ROLE_NAMES[roleName] ? t(ROLE_NAMES[roleName]) : roleName;
+    opt.selected = roleName === currentDefault;
+    select.appendChild(opt);
+  });
+
+  // 绑定保存逻辑（change 时自动保存）
+  select.onchange = async () => {
+    const newDefault = select.value;
+    const prevDefault = currentDefault;
+    try {
+      const token = localStorage.getItem(TOKEN_KEY);
+      // 只提交 defaultRole，后端以当前配置为基线合并
+      const writeRes = await fetch('/api/role-definitions', {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({ defaultRole: newDefault })
+      });
+
+      if (!writeRes.ok) {
+        let detail = '';
+        try { detail = (await writeRes.json()).error || ''; } catch {}
+        alert('保存默认角色失败' + (detail ? ': ' + detail : ''));
+        select.value = prevDefault; // 回滚选择
+      } else {
+        console.log(`[roleDefinitions] Default role updated to: ${newDefault}`);
+      }
+    } catch (err) {
+      console.error('[roleDefinitions] Failed to save defaultRole:', err);
+      alert('网络错误');
+    }
+  };
 }
 
 function createRoleCard(roleName, roleDef) {
@@ -4235,6 +4547,15 @@ function showNewRoleModal() {
       </div>
 
       <div class="form-section">
+        <h4>${currentLang === 'zh-CN' ? '是否允许访问' : 'Allow Access'}</h4>
+        <select id="edit-allowAccess" data-value-type="boolean" class="form-select">
+          <option value="true" ${(defaultDef.allowAccess ?? true) ? 'selected' : ''}>${currentLang === 'zh-CN' ? '允许 (true)' : 'Allow (true)'}</option>
+          <option value="false" ${(defaultDef.allowAccess ?? true) ? '' : 'selected'}>${currentLang === 'zh-CN' ? '拒绝 (false)' : 'Deny (false)'}</option>
+        </select>
+        <small style="color: var(--dim);">${currentLang === 'zh-CN' ? '拒绝时，该角色用户访问将收到"暂无权限"提示' : 'When denied, users with this role will receive "no permission" message'}</small>
+      </div>
+
+      <div class="form-section">
         <h4>权限配置</h4>
   `;
 
@@ -4283,6 +4604,40 @@ function showNewRoleModal() {
         { value: 'true', label: 'roleDefs.showActivities.true' },
         { value: 'false', label: 'roleDefs.showActivities.false' }
       ]
+    },
+    chatmode: {
+      label: currentLang === 'zh-CN' ? '聊天模式 (chatmode)' : 'Chat Mode (chatmode)',
+      type: 'chatmode',
+      // 聊天模式按场景配置，可选值固定（放在默认配置里，非用户自由填写）
+      scenes: [
+        { key: 'private', label: currentLang === 'zh-CN' ? '私聊' : 'Private' },
+        { key: 'group', label: currentLang === 'zh-CN' ? '群聊' : 'Group' },
+        { key: 'nothuman', label: currentLang === 'zh-CN' ? '非人类(机器对端)' : 'Non-human' }
+      ],
+      options: [
+        { value: 'interactive', label: currentLang === 'zh-CN' ? '交互式 (interactive)' : 'Interactive (interactive)' },
+        { value: 'proactive', label: currentLang === 'zh-CN' ? '主动式 (proactive)' : 'Proactive (proactive)' }
+      ]
+    },
+    show_activities: {
+      label: currentLang === 'zh-CN' ? '显示活动 (show_activities)' : 'Show Activities (show_activities)',
+      type: 'select',
+      options: [
+        { value: 'all', label: currentLang === 'zh-CN' ? '全部 (all)' : 'All (all)' },
+        { value: 'none', label: currentLang === 'zh-CN' ? '不显示 (none)' : 'None (none)' }
+      ]
+    },
+    flush_delay: {
+      label: currentLang === 'zh-CN' ? '刷新延迟 (flush_delay)' : 'Flush Delay (flush_delay)',
+      type: 'number'
+    },
+    debounce: {
+      label: currentLang === 'zh-CN' ? '防抖延迟 (debounce)' : 'Debounce (debounce)',
+      type: 'number'
+    },
+    enable_rich_content: {
+      label: currentLang === 'zh-CN' ? '富文本内容 (enable_rich_content)' : 'Rich Content (enable_rich_content)',
+      type: 'boolean'
     }
   };
 
@@ -4313,6 +4668,32 @@ function showNewRoleModal() {
         body.innerHTML += `<option value="${esc(optValue)}" ${selected}>${esc(optLabel)}</option>`;
       });
       body.innerHTML += `</select>`;
+    } else if (meta.type === 'chatmode') {
+      // 聊天模式：按场景（私聊/群聊/非人类）各一个下拉，选项来自默认配置
+      const cm = (perm.default && typeof perm.default === 'object') ? perm.default : {};
+      body.innerHTML += `<div class="chatmode-grid" data-perm="${esc(permKey)}" data-field="default">`;
+      meta.scenes.forEach(scene => {
+        body.innerHTML += `<div class="chatmode-scene"><label class="chatmode-scene-label">${esc(scene.label)}</label><select data-scene="${esc(scene.key)}" class="form-select">`;
+        meta.options.forEach(opt => {
+          const selected = cm[scene.key] === opt.value ? 'selected' : '';
+          body.innerHTML += `<option value="${esc(opt.value)}" ${selected}>${esc(opt.label)}</option>`;
+        });
+        body.innerHTML += `</select></div>`;
+      });
+      body.innerHTML += `</div>`;
+    } else if (meta.type === 'boolean') {
+      // 布尔开关：true / false 下拉
+      body.innerHTML += `<select data-perm="${esc(permKey)}" data-field="default" data-value-type="boolean" class="form-select">`;
+      [{ v: 'true', l: currentLang === 'zh-CN' ? '是 (true)' : 'True (true)' },
+       { v: 'false', l: currentLang === 'zh-CN' ? '否 (false)' : 'False (false)' }].forEach(o => {
+        const selected = String(perm.default) === o.v ? 'selected' : '';
+        body.innerHTML += `<option value="${o.v}" ${selected}>${o.l}</option>`;
+      });
+      body.innerHTML += `</select>`;
+    } else if (meta.type === 'number') {
+      // 数值输入
+      const value = perm.default ?? '';
+      body.innerHTML += `<input type="number" data-perm="${esc(permKey)}" data-field="default" data-value-type="number" value="${esc(String(value))}" class="form-input">`;
     } else if (meta.type === 'tags') {
       const values = Array.isArray(perm.default) ? perm.default : [];
       body.innerHTML += `
@@ -4470,6 +4851,10 @@ async function saveRoleDefinition() {
   // 收集描述
   const description = $('#edit-description')?.value;
 
+  // 收集是否允许访问
+  const allowAccessSelect = $('#edit-allowAccess');
+  const allowAccess = allowAccessSelect ? (allowAccessSelect.value === 'true') : true;
+
   // 收集所有权限配置
   const permissions = {};
 
@@ -4487,7 +4872,14 @@ async function saveRoleDefinition() {
 
     // 根据输入类型获取值
     if (defaultInput) {
-      if (defaultInput.classList.contains('tags-input')) {
+      if (defaultInput.classList.contains('chatmode-grid')) {
+        // 聊天模式：按场景收集为对象 { private, group, nothuman }
+        const obj = {};
+        defaultInput.querySelectorAll('select[data-scene]').forEach(sel => {
+          obj[sel.dataset.scene] = sel.value;
+        });
+        defaultValue = obj;
+      } else if (defaultInput.classList.contains('tags-input')) {
         // 标签输入：收集所有标签
         const tagsContainer = defaultInput.closest('.tags-input-container');
         const tags = Array.from(tagsContainer.querySelectorAll('.tag')).map(tag => {
@@ -4496,6 +4888,14 @@ async function saveRoleDefinition() {
         defaultValue = tags;
       } else {
         defaultValue = defaultInput.value;
+        // 按声明的值类型转换：布尔/数值不能存成字符串
+        const valueType = defaultInput.dataset.valueType;
+        if (valueType === 'boolean') {
+          defaultValue = defaultValue === 'true';
+        } else if (valueType === 'number') {
+          const n = Number(defaultValue);
+          defaultValue = Number.isFinite(n) ? n : 0;
+        }
       }
     }
 
@@ -4507,6 +4907,7 @@ async function saveRoleDefinition() {
 
   const updates = {
     description,
+    allowAccess,
     permissions
   };
 
@@ -4556,6 +4957,19 @@ function showRoleEditModal(roleName, roleDef) {
     <div class="form-section">
       <h4>${t('roleDefs.description')}</h4>
       <textarea id="edit-description" rows="3" class="form-textarea">${esc(roleDef.description || '')}</textarea>
+    </div>
+  `;
+
+  // 1.5. 是否允许访问
+  const allowAccess = roleDef.allowAccess ?? true;
+  formHtml += `
+    <div class="form-section">
+      <h4>${currentLang === 'zh-CN' ? '是否允许访问' : 'Allow Access'}</h4>
+      <select id="edit-allowAccess" data-value-type="boolean" class="form-select">
+        <option value="true" ${allowAccess ? 'selected' : ''}>${currentLang === 'zh-CN' ? '允许 (true)' : 'Allow (true)'}</option>
+        <option value="false" ${allowAccess ? '' : 'selected'}>${currentLang === 'zh-CN' ? '拒绝 (false)' : 'Deny (false)'}</option>
+      </select>
+      <small style="color: var(--dim);">${currentLang === 'zh-CN' ? '拒绝时，该角色用户访问将收到"暂无权限"提示' : 'When denied, users with this role will receive "no permission" message'}</small>
     </div>
   `;
 
@@ -4611,6 +5025,40 @@ function showRoleEditModal(roleName, roleDef) {
         { value: 'true', label: 'roleDefs.showActivities.true' },
         { value: 'false', label: 'roleDefs.showActivities.false' }
       ]
+    },
+    chatmode: {
+      label: currentLang === 'zh-CN' ? '聊天模式 (chatmode)' : 'Chat Mode (chatmode)',
+      type: 'chatmode',
+      // 聊天模式按场景配置，可选值固定（放在默认配置里，非用户自由填写）
+      scenes: [
+        { key: 'private', label: currentLang === 'zh-CN' ? '私聊' : 'Private' },
+        { key: 'group', label: currentLang === 'zh-CN' ? '群聊' : 'Group' },
+        { key: 'nothuman', label: currentLang === 'zh-CN' ? '非人类(机器对端)' : 'Non-human' }
+      ],
+      options: [
+        { value: 'interactive', label: currentLang === 'zh-CN' ? '交互式 (interactive)' : 'Interactive (interactive)' },
+        { value: 'proactive', label: currentLang === 'zh-CN' ? '主动式 (proactive)' : 'Proactive (proactive)' }
+      ]
+    },
+    show_activities: {
+      label: currentLang === 'zh-CN' ? '显示活动 (show_activities)' : 'Show Activities (show_activities)',
+      type: 'select',
+      options: [
+        { value: 'all', label: currentLang === 'zh-CN' ? '全部 (all)' : 'All (all)' },
+        { value: 'none', label: currentLang === 'zh-CN' ? '不显示 (none)' : 'None (none)' }
+      ]
+    },
+    flush_delay: {
+      label: currentLang === 'zh-CN' ? '刷新延迟 (flush_delay)' : 'Flush Delay (flush_delay)',
+      type: 'number'
+    },
+    debounce: {
+      label: currentLang === 'zh-CN' ? '防抖延迟 (debounce)' : 'Debounce (debounce)',
+      type: 'number'
+    },
+    enable_rich_content: {
+      label: currentLang === 'zh-CN' ? '富文本内容 (enable_rich_content)' : 'Rich Content (enable_rich_content)',
+      type: 'boolean'
     }
   };
 
@@ -4645,6 +5093,32 @@ function showRoleEditModal(roleName, roleDef) {
         formHtml += `<option value="${esc(optValue)}" ${selected}>${esc(optLabel)}</option>`;
       });
       formHtml += `</select>`;
+    } else if (meta.type === 'chatmode') {
+      // 聊天模式：按场景（私聊/群聊/非人类）各一个下拉，选项来自默认配置
+      const cm = (perm.default && typeof perm.default === 'object') ? perm.default : {};
+      formHtml += `<div class="chatmode-grid" data-perm="${esc(permKey)}" data-field="default">`;
+      meta.scenes.forEach(scene => {
+        formHtml += `<div class="chatmode-scene"><label class="chatmode-scene-label">${esc(scene.label)}</label><select data-scene="${esc(scene.key)}" class="form-select">`;
+        meta.options.forEach(opt => {
+          const selected = cm[scene.key] === opt.value ? 'selected' : '';
+          formHtml += `<option value="${esc(opt.value)}" ${selected}>${esc(opt.label)}</option>`;
+        });
+        formHtml += `</select></div>`;
+      });
+      formHtml += `</div>`;
+    } else if (meta.type === 'boolean') {
+      // 布尔开关：true / false 下拉
+      formHtml += `<select data-perm="${esc(permKey)}" data-field="default" data-value-type="boolean" class="form-select">`;
+      [{ v: 'true', l: currentLang === 'zh-CN' ? '是 (true)' : 'True (true)' },
+       { v: 'false', l: currentLang === 'zh-CN' ? '否 (false)' : 'False (false)' }].forEach(o => {
+        const selected = String(perm.default) === o.v ? 'selected' : '';
+        formHtml += `<option value="${o.v}" ${selected}>${o.l}</option>`;
+      });
+      formHtml += `</select>`;
+    } else if (meta.type === 'number') {
+      // 数值输入
+      const value = perm.default ?? '';
+      formHtml += `<input type="number" data-perm="${esc(permKey)}" data-field="default" data-value-type="number" value="${esc(String(value))}" class="form-input">`;
     } else if (meta.type === 'tags') {
       // 标签输入（用于数组值）
       const values = Array.isArray(perm.default) ? perm.default : [];
@@ -4688,58 +5162,4 @@ function showRoleEditModal(roleName, roleDef) {
   bindTagsInputEvents(body);
 
   modal.style.display = 'flex';
-}
-
-async function saveRoleDefinition() {
-  const saveBtn = $('#role-edit-save');
-  const roleName = saveBtn?.dataset.role;
-
-  if (!roleName || !state.roleDefinitions?.roles[roleName]) return;
-
-  const description = $('#edit-description')?.value;
-  const permMode = $('#edit-permissionMode')?.value;
-  const model = $('#edit-model')?.value;
-  const dispatch = $('#edit-dispatch')?.value;
-
-  const currentDef = state.roleDefinitions.roles[roleName];
-
-  const updates = {
-    description,
-    permissions: {
-      ...currentDef.permissions,
-      permissionMode: {
-        ...currentDef.permissions.permissionMode,
-        default: permMode
-      },
-      'baseagents.claude.model': {
-        ...currentDef.permissions['baseagents.claude.model'],
-        default: model
-      },
-      dispatch: {
-        ...currentDef.permissions.dispatch,
-        default: dispatch
-      }
-    }
-  };
-
-  try {
-    const token = localStorage.getItem(TOKEN_KEY);
-    const res = await fetch(`/api/role-definitions/${roleName}`, {
-      method: 'PUT',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(updates)
-    });
-
-    if (!res.ok) {
-      alert(t('roleDefs.saveFailed'));
-    } else {
-      alert(t('roleDefs.saveSuccess'));
-      $('#role-edit-modal').style.display = 'none';
-    }
-  } catch (err) {
-    alert(t('pair.error.network'));
-  }
 }

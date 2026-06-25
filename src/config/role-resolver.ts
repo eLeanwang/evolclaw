@@ -2,10 +2,10 @@
  * Role Resolver - 角色解析器
  *
  * 根据用户标识和 agent 配置，解析用户在该 agent 中的角色。
- * 优先级：owners > admins > members > 已认证用户(guest) > 匿名(anonymous)
+ * 优先级：owners > admins > members > defaultRole（全局兜底角色，默认 anonymous）
  */
 
-import { read, ConfigTarget } from './config-manager.js';
+import { read, ConfigTarget, resolveRoles } from './config-manager.js';
 import { parsePeerKey } from '../core/relation/peer-identity.js';
 import type { AgentConfig, BuiltinRole } from '../types.js';
 
@@ -19,12 +19,12 @@ import type { AgentConfig, BuiltinRole } from '../types.js';
 export function resolveUserRole(
   self: string,
   peerKey: string
-): BuiltinRole | 'guest' {
+): string {
   try {
     const config = read<AgentConfig>(ConfigTarget.Agent, { self });
     if (!config) {
-      console.warn(`[role-resolver] Agent config not found for ${self}, defaulting to anonymous`);
-      return 'anonymous';
+      console.warn(`[role-resolver] Agent config not found for ${self}, using global defaultRole`);
+      return getDefaultRole();
     }
 
     // 提取裸 ID（从 channel#encodedId 格式中提取 channelId）
@@ -52,29 +52,45 @@ export function resolveUserRole(
       return 'member';
     }
 
-    // 已认证但未授权 -> guest
-    if (isAuthenticated(peerId)) {
-      return 'guest';
-    }
-
-    // 完全未认证 -> anonymous
-    return 'anonymous';
+    // 未在名单 -> 使用全局默认角色
+    return getDefaultRole();
   } catch (err) {
     console.warn(`[role-resolver] Failed to resolve role for ${peerKey}:`, err);
-    return 'anonymous'; // 安全降级
+    return getDefaultRole(); // 安全降级
   }
 }
 
 /**
- * 检查用户是否已认证
- * 判断裸 ID 是否符合 AID 格式
- *
- * @param peerId 裸用户 ID（已从 peerKey 中提取）
- * @returns 是否已认证
+ * 获取全局默认角色（从 roles.json 读取，兜底为 'anonymous'）
  */
-export function isAuthenticated(peerId: string): boolean {
-  // AID 格式：xxx.aid.pub 或 xxx.agentid.pub
-  return /^[a-z0-9_-]+\.(aid|agentid)\.pub$/i.test(peerId);
+function getDefaultRole(): string {
+  try {
+    const rolesConfig = resolveRoles({ cache: true });
+    return rolesConfig.defaultRole || 'anonymous';
+  } catch {
+    return 'anonymous';
+  }
+}
+
+/**
+ * 检查角色是否允许访问（从 roles.json 读取该角色的 allowAccess 配置）
+ * @param role 角色名称
+ * @returns 是否允许访问，默认 true（anonymous 默认 false）
+ */
+export function checkRoleAccess(role: string): boolean {
+  try {
+    const rolesConfig = resolveRoles({ cache: true });
+    const roleDef = rolesConfig.roles[role];
+    if (!roleDef) {
+      // 未定义的角色，默认允许（安全兜底）
+      return true;
+    }
+    // 读取 allowAccess，未配置时默认 true（anonymous 内置为 false）
+    return roleDef.allowAccess ?? true;
+  } catch (err) {
+    console.warn(`[role-resolver] Failed to check access for role ${role}:`, err);
+    return true; // 读取失败时默认允许，避免误拦截
+  }
 }
 
 /**
@@ -87,8 +103,8 @@ export function isAuthenticated(peerId: string): boolean {
 export function resolveUserRoles(
   self: string,
   peerKeys: string[]
-): Map<string, BuiltinRole | 'guest'> {
-  const result = new Map<string, BuiltinRole | 'guest'>();
+): Map<string, string> {
+  const result = new Map<string, string>();
   for (const peerKey of peerKeys) {
     result.set(peerKey, resolveUserRole(self, peerKey));
   }

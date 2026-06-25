@@ -76,10 +76,12 @@ export function clearRolesCache(): void {
  */
 export function getBuiltinRolesConfig(): RolesConfig {
   return {
-    $schema_version: 1,
+    $schema_version: 2,
+    defaultRole: 'anonymous',
     roles: {
       owner: {
         description: 'Agent 所有者，完全控制权限',
+        allowAccess: true,
         permissions: {
           permissionMode: {
             default: 'bypass',
@@ -129,6 +131,7 @@ export function getBuiltinRolesConfig(): RolesConfig {
       },
       admin: {
         description: '管理员，需要确认敏感操作',
+        allowAccess: true,
         permissions: {
           permissionMode: {
             default: 'request',
@@ -179,6 +182,7 @@ export function getBuiltinRolesConfig(): RolesConfig {
       },
       member: {
         description: '团队成员，有基本使用权限',
+        allowAccess: true,
         permissions: {
           permissionMode: {
             default: 'auto',
@@ -228,6 +232,7 @@ export function getBuiltinRolesConfig(): RolesConfig {
       },
       guest: {
         description: '访客，只读权限，有身份但未授权',
+        allowAccess: true,
         permissions: {
           permissionMode: {
             default: 'readonly',
@@ -280,6 +285,7 @@ export function getBuiltinRolesConfig(): RolesConfig {
       },
       anonymous: {
         description: '匿名用户，完全未认证，极度受限',
+        allowAccess: false,
         permissions: {
           permissionMode: {
             default: 'readonly',

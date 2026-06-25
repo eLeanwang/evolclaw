@@ -1525,8 +1525,166 @@ tr.ag-disabled .ag-name { color: var(--dim); }
   min-width: 300px;
 }
 
-.roles-management {
-  margin-bottom: 40px;
+/* ========== Roles Assignment View ========== */
+.role-assign-layout {
+  padding: 24px;
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.assign-header {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  margin-bottom: 24px;
+  padding: 20px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.assign-header label {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 14px;
+  font-weight: 500;
+  flex: 1;
+}
+
+.assign-header select {
+  flex: 1;
+  max-width: 400px;
+  padding: 10px 12px;
+  font-size: 14px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+  cursor: pointer;
+  transition: border-color 0.2s;
+}
+
+.assign-header select:hover {
+  border-color: var(--accent);
+}
+
+.assign-header select:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(52, 168, 83, 0.1);
+}
+
+#filter-verify {
+  flex: 0 0 auto;
+  min-width: 160px;
+  max-width: 180px;
+  padding: 10px 12px;
+  font-size: 14px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+  cursor: pointer;
+  transition: border-color 0.2s;
+}
+
+#filter-verify:hover {
+  border-color: var(--accent);
+}
+
+#filter-verify:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(52, 168, 83, 0.1);
+}
+
+.search-box {
+  flex: 1;
+  max-width: 300px;
+}
+
+.search-box input {
+  width: 100%;
+  padding: 10px 12px;
+  font-size: 14px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+  transition: border-color 0.2s;
+}
+
+.search-box input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(52, 168, 83, 0.1);
+}
+
+/* 会话类型标签 */
+.chat-tag {
+  display: inline-block;
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.chat-tag-private {
+  background: rgba(59, 130, 246, 0.12);
+  color: #2563eb;
+  border: 1px solid rgba(59, 130, 246, 0.25);
+}
+
+.chat-tag-group {
+  background: rgba(168, 85, 247, 0.12);
+  color: #9333ea;
+  border: 1px solid rgba(168, 85, 247, 0.25);
+}
+
+/* 验签状态徽章 */
+.verify-badge {
+  display: inline-block;
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  margin-left: 6px;
+  font-weight: 500;
+  vertical-align: middle;
+}
+
+.verify-badge.verify-invalid {
+  background: rgba(239, 68, 68, 0.15);
+  color: #dc2626;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
+.verify-badge.verify-unknown {
+  background: rgba(156, 163, 175, 0.15);
+  color: #6b7280;
+  border: 1px solid rgba(156, 163, 175, 0.3);
+}
+
+.verify-badge.verify-unverified {
+  background: rgba(251, 146, 60, 0.15);
+  color: #ea580c;
+  border: 1px solid rgba(251, 146, 60, 0.3);
+}
+
+/* 未验证对端的类型单元格样式 */
+.peer-unverified {
+  opacity: 0.7;
+  font-style: italic;
+}
+
+.peer-unknown {
+  opacity: 0.6;
+  color: var(--dim);
+}
+
+.assign-peer-roles {
+  margin-top: 0;
 }
 
 .roles-grid {
@@ -1622,8 +1780,19 @@ tr.ag-disabled .ag-name { color: var(--dim); }
   transform: translateY(-1px);
 }
 
+.assign-peer-roles {
+  margin-top: 32px;
+}
+
+.assign-peer-roles > h3 {
+  margin: 0 0 20px 0;
+  font-size: 18px;
+  color: var(--fg);
+  font-weight: 600;
+}
+
 .relations-section {
-  margin-top: 40px;
+  margin-top: 20px;
 }
 
 .relations-section h3 {
@@ -1705,6 +1874,40 @@ tr.ag-disabled .ag-name { color: var(--dim); }
 
 .role-guest {
   background: #f3f4f6;
+  color: #4b5563;
+}
+
+.role-anonymous {
+  background: #fef2f2;
+  color: #991b1b;
+}
+
+.role-source {
+  font-size: 12px;
+  color: var(--dim);
+  font-style: italic;
+}
+
+.edit-peer-role-btn {
+  padding: 6px 12px;
+  background: var(--bg);
+  color: var(--ink);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  transition: all 0.2s;
+}
+
+.edit-peer-role-btn:hover {
+  background: var(--bg-surface);
+  border-color: var(--accent);
+  transform: translateY(-1px);
+}
+
+.role-guest {
+  background: #f3f4f6;
   color: #374151;
 }
 
@@ -1756,6 +1959,32 @@ tr.ag-disabled .ag-name { color: var(--dim); }
   margin: 0 0 24px 0;
   font-size: 24px;
   color: var(--fg);
+}
+
+/* 全局默认角色选择器 */
+.role-default-selector {
+  margin-bottom: 24px;
+  padding: 16px;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.role-default-label {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--fg);
+}
+
+.role-default-label span {
+  min-width: 180px;
+}
+
+.role-default-label .form-select {
+  max-width: 240px;
 }
 
 .role-cards-grid {
@@ -1835,6 +2064,26 @@ tr.ag-disabled .ag-name { color: var(--dim); }
   font-family: 'Consolas', monospace;
 }
 
+/* 聊天模式：按场景（私聊/群聊/非人类）分栏的下拉选择 */
+.chatmode-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.chatmode-scene {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+  min-width: 120px;
+}
+
+.chatmode-scene-label {
+  font-size: 12px;
+  color: var(--dim);
+}
+
 .role-card-actions {
   display: flex;
   gap: 8px;
@@ -1871,15 +2120,14 @@ tr.ag-disabled .ag-name { color: var(--dim); }
 }
 
 .btn-edit-role {
-  background: var(--primary) !important;
-  color: white !important;
-  border-color: var(--primary) !important;
+  background: var(--bg) !important;
+  color: var(--fg) !important;
+  border-color: var(--fg) !important;
 }
 
 .btn-edit-role:hover {
-  background: var(--primary-hover) !important;
-  border-color: var(--primary-hover) !important;
-  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.3) !important;
+  background: var(--bg2) !important;
+  border-color: var(--fg) !important;
 }
 
 .btn-reset-role {
@@ -1996,6 +2244,17 @@ tr.ag-disabled .ag-name { color: var(--dim); }
 
 .btn-primary:hover {
   background: var(--primary-hover);
+}
+
+/* 角色编辑弹窗的保存按钮：黑色边框 + 黑色字体（非白色填充） */
+#role-edit-save.btn-primary {
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--fg);
+}
+
+#role-edit-save.btn-primary:hover {
+  background: var(--bg2);
 }
 
 .btn-secondary {

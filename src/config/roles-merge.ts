@@ -69,6 +69,8 @@ export function mergeRolesConfig(base: RolesConfig, overlay: RolesConfig | null 
 
   const merged: RolesConfig = {
     $schema_version: base.$schema_version,
+    // defaultRole: overlay 有则用 overlay，否则用 base（支持用户改全局默认角色）
+    defaultRole: overlay.defaultRole ?? base.defaultRole,
     roles: {},
   };
 
@@ -92,6 +94,8 @@ export function mergeRolesConfig(base: RolesConfig, overlay: RolesConfig | null 
 
     merged.roles[roleName] = {
       description: overlayDef.description ?? baseDef.description,
+      // allowAccess: overlay 有则用 overlay，否则用 base（支持用户改该角色是否允许访问）
+      allowAccess: overlayDef.allowAccess ?? baseDef.allowAccess,
       permissions: mergedPerms,
     };
   }
@@ -125,6 +129,11 @@ export function diffRolesConfig(builtin: RolesConfig, full: RolesConfig): RolesC
     roles: {},
   };
 
+  // 全局 defaultRole：与内置不同才写入 diff
+  if (full.defaultRole !== builtin.defaultRole) {
+    diff.defaultRole = full.defaultRole;
+  }
+
   for (const [roleName, fullDef] of Object.entries(full.roles)) {
     const builtinDef = builtin.roles[roleName];
 
@@ -144,9 +153,10 @@ export function diffRolesConfig(builtin: RolesConfig, full: RolesConfig): RolesC
     }
 
     const descDiff = fullDef.description !== builtinDef.description;
+    const accessDiff = fullDef.allowAccess !== builtinDef.allowAccess;
     const hasPermDiff = Object.keys(permDiff).length > 0;
 
-    if (!hasPermDiff && !descDiff) {
+    if (!hasPermDiff && !descDiff && !accessDiff) {
       // 与内置完全一致 → 不写此 role（恢复继承内置）
       continue;
     }
@@ -156,6 +166,10 @@ export function diffRolesConfig(builtin: RolesConfig, full: RolesConfig): RolesC
       description: descDiff ? fullDef.description : builtinDef.description,
       permissions: permDiff,
     };
+    // allowAccess 不同才写入 diff（相同时省略，继承 builtin）
+    if (accessDiff) {
+      roleDiff.allowAccess = fullDef.allowAccess;
+    }
     diff.roles[roleName] = roleDiff;
   }
 

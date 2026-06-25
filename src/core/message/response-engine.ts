@@ -577,6 +577,40 @@ export class ResponseEngine implements IMessageProcessor {
     // message.channel 现在存实例名（channelName），可直接用于精确路由
     const { session, absoluteProjectPath } = await this.resolveSession(message);
 
+    // ── 角色访问控制检查：读取该用户角色的 allowAccess 配置，false 则拦截并回复权限不足 ──
+    const userRole = session.identity?.role || 'anonymous';
+    const { checkRoleAccess } = await import('../../config/role-resolver.js');
+    if (!checkRoleAccess(userRole)) {
+      logger.warn(`[ResponseEngine] Access denied: role=${userRole} peerKey=${message.channelId} session=${session.id}`);
+      const channelKey = session.metadata?.channelKey || message.channel;
+      const channelInfo = this.resolveChannelInfo(channelKey);
+      if (channelInfo) {
+        try {
+          await channelInfo.adapter.send(
+            {
+              taskId: `access-denied-${Date.now()}`,
+              sessionId: session.id,
+              channel: channelKey,
+              channelId: message.channelId,
+              agentName: 'evolclaw',
+              chatmode: 'interactive',
+              replyContext: message.replyContext,
+              timestamp: Date.now(),
+            },
+            {
+              kind: 'system.error',
+              text: '暂无权限访问本 agent，请联系 agent 管理员授权访问',
+              subtype: 'access_denied',
+              recoverable: false,
+            }
+          );
+        } catch (err) {
+          logger.error(`[ResponseEngine] Failed to send access-denied message:`, err);
+        }
+      }
+      return;
+    }
+
     // thread(feishu) pending strategy: inject replyContext so first reply creates the thread
     if (message.triggerMeta?.pendingThread && message.triggerMeta?.rootMessageId) {
       message.replyContext = {
