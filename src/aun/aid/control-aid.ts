@@ -8,6 +8,23 @@ const MAX_ATTEMPTS = 5;
 /** 解析控制 AID 的 issuer：环境变量 EVOLCLAW_ISSUER → 兜底 agentid.pub */
 export function resolveControlIssuer(): string {
   const env = process.env.EVOLCLAW_ISSUER?.trim();
+  if (env) {
+    // Validate issuer format: must be valid domain-like structure
+    if (!/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/i.test(env)) {
+      logger.error(`[control-aid] Invalid EVOLCLAW_ISSUER format: ${env}, using default`);
+      return 'agentid.pub';
+    }
+    // Prevent localhost/local domains
+    if (env === 'localhost' || env.endsWith('.localhost') || env.startsWith('127.') || env.startsWith('0.')) {
+      logger.error(`[control-aid] EVOLCLAW_ISSUER cannot be localhost/local: ${env}, using default`);
+      return 'agentid.pub';
+    }
+    // Length limit
+    if (env.length > 253) {
+      logger.error(`[control-aid] EVOLCLAW_ISSUER too long: ${env.length} chars, using default`);
+      return 'agentid.pub';
+    }
+  }
   return env || 'agentid.pub';
 }
 

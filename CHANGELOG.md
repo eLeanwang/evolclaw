@@ -1,3 +1,10 @@
+## v3.5.9 (2026-06-25)
+
+### Security Fixes
+
+- **EVOLCLAW_ISSUER 环境变量校验** — `resolveControlIssuer()` 新增严格校验：域名格式正则、禁止 localhost/本地域名（`localhost`/`.localhost`/`127.*`/`0.*`）、长度上限 253，非法值降级回 `agentid.pub`。防止环境变量注入污染控制 AID 的 issuer。
+- **AUN topicName 输入净化** — AUN channel 提取话题名时新增净化处理：去首尾空白、剔除控制字符（`\x00-\x1F\x7F`）、长度上限 200，非法值丢弃。新增 `sanitizeTopicName()` helper 统一 P2P 与群聊两处提取逻辑，防止不可信 payload 经 metadata 透传。
+
 ## v3.5.8 (2026-06-25)
 
 ### Bug Fixes

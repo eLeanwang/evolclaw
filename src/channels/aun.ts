@@ -546,6 +546,14 @@ export class AUNChannel {
     return out;
   }
 
+  /** Sanitize a raw topicName from untrusted payload: trim, strip control chars, enforce length. */
+  private sanitizeTopicName(raw: unknown): string | undefined {
+    if (typeof raw !== 'string') return undefined;
+    const sanitized = raw.trim().replace(/[\x00-\x1F\x7F]/g, '');
+    if (sanitized.length > 0 && sanitized.length <= 200) return sanitized;
+    return undefined;
+  }
+
   private buildGroupReplyContext(threadId: string | undefined, senderAid: string, encrypted: boolean, messageId?: string, chatmode?: string, topicName?: string): ReplyContext {
     const replyContext: ReplyContext = { metadata: { encrypted, chatmode } };
     if (threadId) replyContext.threadId = threadId;
@@ -1312,7 +1320,12 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     const payload = msg.payload ?? '';
     const text = this.extractTextPayload(payload, fromAid, fromAid);
     const threadId = typeof payload === 'object' && payload !== null ? (payload as any).thread_id : undefined;
-    const topicName = typeof payload === 'object' && payload !== null ? (payload as any).topicName : undefined;
+
+    // Extract and validate topicName from untrusted payload
+    const topicName = (typeof payload === 'object' && payload !== null)
+      ? this.sanitizeTopicName((payload as any).topicName)
+      : undefined;
+
     const messageId = msg.message_id ?? '';
     const seq = msg.seq;
 
@@ -1449,7 +1462,9 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
     const payload = msg.payload ?? '';
     const text = this.extractTextPayload(payload, groupId, senderAid);
     const threadId = typeof payload === 'object' && payload !== null ? (payload as any).thread_id : undefined;
-    const topicName = typeof payload === 'object' && payload !== null ? (payload as any).topicName : undefined;
+    const topicName = (typeof payload === 'object' && payload !== null)
+      ? this.sanitizeTopicName((payload as any).topicName)
+      : undefined;
     const messageId = msg.message_id ?? '';
 
     const seq = msg.seq;
