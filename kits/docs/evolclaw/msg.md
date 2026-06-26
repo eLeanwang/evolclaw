@@ -10,6 +10,9 @@
 # 文本（明文）
 ec msg send <from> <to> "<text>"
 
+# 从文件读取文本内容（用于超长消息或避免 Shell 转义）
+ec msg send <from> <to> --text-from-file <path>
+
 # 文本（密文 E2EE）
 ec msg send <from> <to> "<text>" --encrypt
 
@@ -24,6 +27,7 @@ ec msg send <from> <to> --payload '<json>'
 ```
 
 发送相关选项：
+- `--text-from-file <path>` — 从文件读取文本（UTF-8），用于超长消息或避免 Shell 转义
 - `--encrypt` — 端到端加密
 - `--thread <id>` — 指定话题 ID（多话题路由）
 - `--content-type <mime>` — 显式覆盖 MIME（仅 `--file`）

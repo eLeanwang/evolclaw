@@ -1369,6 +1369,13 @@ export class ResponseEngine implements IMessageProcessor {
           }
         }
 
+        // 空消息防护：在 agent 调用之前检查 prompt 是否为空
+        // 防止空消息（或纯空格消息）浪费 API 调用
+        if (!effectivePrompt.trim()) {
+          logger.info(`[ResponseEngine] Skip agent call: empty prompt after render. session=${session.id} task=${taskId}`);
+          return;
+        }
+
         // 可重试错误（403/429/5xx/模型繁忙）按明确退避序列重试。
         const RETRY_DELAYS_MS = [5_000, 10_000, 30_000];
         const MAX_RETRIES = RETRY_DELAYS_MS.length;
@@ -2088,11 +2095,10 @@ export class ResponseEngine implements IMessageProcessor {
       }
     }
 
-    // [迁移探针] 任务收尾：记录工具提醒/标志位最终状态并落盘（防线 1）
+    // [迁移探针] 任务收尾：记录工具提醒最终状态并落盘（防线 1）
     if (snapshot.isEnabled()) {
       snapshot.set(session.id, taskId, {
         toolReminder: proactive ? { queueReminders: proactive.lastQueueReminderLen, tenWarning: proactive.toolCount >= 10 } : undefined,
-        flagSet: session.metadata?.lastProactiveFlag === true,
       });
       snapshot.end(session.id, taskId);
     }
@@ -2273,14 +2279,6 @@ export class ResponseEngine implements IMessageProcessor {
 
     // chatMode 策略由 SessionManager.resolveDefaultChatMode() 统一决定（创建时）
     // 此处不再动态修改，保持单一真相源
-
-    // Proactive→Interactive 模式切换提示：上一轮 proactive 使用了标志位，本轮已切换为 interactive
-    if (session.chatMode === 'interactive' && session.metadata?.lastProactiveFlag) {
-      message.content = '本轮会话已切换为 interactive 模式，无需调用工具发送消息。\n\n' + message.content;
-      delete session.metadata.lastProactiveFlag;
-      await this.sessionManager.updateSession(session.id, { metadata: session.metadata });
-      logger.info(`[ResponseEngine] Injected interactive mode hint for session ${session.id}`);
-    }
 
     // replyContext 不再写入 session.metadata（跟着 message 走，避免群聊多人覆盖）
 

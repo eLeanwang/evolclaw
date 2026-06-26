@@ -204,7 +204,6 @@ export interface SessionMetadata {
   dispatchMode?: string;           // 群聊分发模式缓存（服务器下发值，per-session）: mention | broadcast
   dispatchModeOverride?: string;   // 用户 /dispatch 命令写入的显式覆盖；undefined = 跟随服务器
   resumeAt?: string;  // /rewind chat 标记的回退点（assistant message uuid）
-  lastProactiveFlag?: boolean;  // proactive 模式使用标志位后设置，interactive 切换时注入提示后清除
 }
 
 /** Default permission mode applied to new sessions. Change here to affect all roles. */
