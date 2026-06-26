@@ -63,6 +63,8 @@ import os from 'os';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import readline from 'readline';
+import { spawn } from 'child_process';
+import * as platform from './utils/cross-platform.js';
 
 /** 出站 payload 摘要（用于 channel-out.log） */
 function summarizeOutboundPayload(payload: any): Record<string, any> {
@@ -1147,6 +1149,8 @@ async function main() {
   const connectedChannels = new Set<string>();
   const onlineNoticeSent = new Set<string>();
   const pendingFile = path.join(resolvePaths().dataDir, 'restart-pending.json');
+  let pendingRestartNoticeInFlight: Promise<void> | null = null;
+  let pendingRestartNoticeSent = false;
 
   const sendOnlineNoticeForChannel = (inst: ChannelInstance): void => {
     const name = inst.adapter.channelName;
@@ -1186,8 +1190,21 @@ async function main() {
   };
 
   const trySendPendingRestartNotice = async (): Promise<void> => {
+    if (pendingRestartNoticeSent) return;
+    if (pendingRestartNoticeInFlight) {
+      try {
+        await pendingRestartNoticeInFlight;
+      } catch {
+        // The first caller logs the actual send/read error.
+      }
+      return;
+    }
     if (!fs.existsSync(pendingFile)) return;
-    try {
+
+    pendingRestartNoticeInFlight = (async () => {
+      if (pendingRestartNoticeSent) return;
+      if (!fs.existsSync(pendingFile)) return;
+
       const pending = JSON.parse(fs.readFileSync(pendingFile, 'utf-8'));
       const adapter = cmdHandler.getAdapter(pending.channel)
         ?? channelInstances.find(inst => inst.adapter.channelKey === pending.channel)?.adapter;
@@ -1214,10 +1231,17 @@ async function main() {
         text: '✅ 服务重启成功！',
         subtype: 'restarted',
       });
-      fs.unlinkSync(pendingFile);
+      pendingRestartNoticeSent = true;
+      fs.rmSync(pendingFile, { force: true });
       logger.info(`[Restart] Notification sent via ${pending.channel}`);
+    })();
+
+    try {
+      await pendingRestartNoticeInFlight;
     } catch (e) {
       logger.error('[Restart] Failed to send restart notification:', e);
+    } finally {
+      pendingRestartNoticeInFlight = null;
     }
   };
 
@@ -1340,6 +1364,35 @@ async function main() {
       logger.info(`✓ 控制 AID 已连接: ${evolclawCfg.aid}`);
     } catch (e: any) {
       logger.warn(`控制 AID 首连失败（后台自动重连，不影响 daemon 主流程）: ${e?.message || e}`);
+    }
+
+    // ── ECWeb 自动启动 ──
+    // 如果 config.ecweb.enabled，自动拉起 ecweb 服务
+    if (evolclawCfg.ecweb?.enabled) {
+      const ecwebPath = path.join(resolvePaths().root, 'ecweb');
+      const ecwebEntry = path.join(ecwebPath, 'dist', 'index.js');
+      if (fs.existsSync(ecwebEntry)) {
+        try {
+          const ecwebProc = spawn('node', [ecwebEntry], {
+            cwd: ecwebPath,
+            detached: true,
+            stdio: 'ignore',
+            env: { ...process.env, EVOLCLAW_HOME: resolvePaths().root }
+          });
+          ecwebProc.unref();
+          logger.info(`✓ ECWeb 已启动 (PID: ${ecwebProc.pid})`);
+          onShutdown(() => {
+            try {
+              if (ecwebProc.pid) platform.killProcess(ecwebProc.pid, true);
+              logger.info(`✓ ECWeb 已停止`);
+            } catch {}
+          });
+        } catch (e: any) {
+          logger.warn(`ECWeb 启动失败: ${e?.message || e}`);
+        }
+      } else {
+        logger.warn(`ECWeb 配置已启用但未找到 ${ecwebEntry}`);
+      }
     }
 
     // 控制 AID 接收 owner 指令：
@@ -1570,7 +1623,17 @@ async function main() {
       if (inst.channelType !== 'aun') continue;
       const ch = inst.channel as any;
       if (typeof ch?.getAidState === 'function') {
-        try { out.push(ch.getAidState()); } catch { /* ignore */ }
+        try {
+          const aidState = ch.getAidState();
+          // 增强：添加队列状态
+          const agentName = aidState.agentName || aidState.aid;
+          const processing = messageQueue.getProcessingCountByAgent(agentName);
+          const queued = messageQueue.getQueueLengthByAgent(agentName);
+          out.push({
+            ...aidState,
+            queueStatus: { processing, queued }
+          });
+        } catch { /* ignore */ }
       }
     }
     return out;

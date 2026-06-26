@@ -97,7 +97,8 @@ export class ProactiveMode implements ResponseMode {
     const state = ctx.state.get(STATE_KEY) as ProactiveState | undefined;
     if (!state || !state.preTool1stMsgChk) return undefined;
 
-    // trigger 来源豁免（cron 是静默执行）
+    // Trigger execution is routed by trigger feedback disposition, so it should
+    // not be forced to send a human-facing first message in proactive mode.
     const isTrigger = ctx.message.source === 'trigger';
 
     return {

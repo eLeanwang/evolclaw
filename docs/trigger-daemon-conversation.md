@@ -88,6 +88,7 @@ interface TriggerDefinitionV3 {
       channelId?: string;          // strategy=main 时必填；thread 时可选，默认 trigger:{id}
       sessionId?: string;          // strategy=main 可绑定具体主会话
       threadId?: string;           // strategy=thread 可复用固定 thread
+      name?: string;               // session 可选名称（用于 UI 展示）
     };
     onError?: 'fail' | 'retry';   // 默认 'fail'
     noopSentinel?: string;        // 默认 '[[NOOP]]'
@@ -517,8 +518,8 @@ write(definition: TriggerDefinition): void {
 ### Phase 1：地基（types + DaemonChannel）
 
 **任务**：
-1. 定义 V3 schema 类型（`src/trigger/types.ts`）
-2. 实现 `DaemonChannel`（`src/channels/daemon.ts`）
+1. ~~定义 V3 schema 类型（`src/trigger/types.ts`）~~ ✅ 已完成
+2. 实现 `DaemonChannel`（`src/channels/daemon.ts`）——**新增文件**
 3. 解除 response-engine 的 trigger 消息 status 抑制，并删除 `triggerMeta.silent` 路径
 
 **验证**：单测覆盖 DaemonChannel 的回复捕获（mock OutboundPayload 流 → 验证 TriggerReply）
@@ -526,26 +527,28 @@ write(definition: TriggerDefinition): void {
 ### Phase 2：执行腿改造
 
 **任务**：
-1. 改 `scheduler.ts` 的 `runProcessing`：`mode: 'agent'` 时调 `DaemonChannel.converse`
-2. 按 `reply.outcome` 判定 branch（onReply / onNoop）
-3. `execution.onError='retry'` 复用 `reliability.retry` 重试逻辑
-4. 修掉 `publishTriggerRunOutcome` 在 `enqueue` 成功就 return 的 bug
+1. ~~改 `scheduler.ts` 的 `runExecutionAttempt`：`mode: 'agent'` 时调 `DaemonChannel.converse`~~ ✅ 已完成（L438-450）
+2. ~~按 `reply.outcome` 判定 branch（onReply / onNoop）~~ ✅ 已完成（`branchFromReply` L911-915）
+3. ~~`execution.onError='retry'` 复用 `reliability.retry` 重试逻辑~~ ✅ 已完成（L372-380）
+4. ~~验证 `publishTriggerRunOutcome` 在 feedback 完成后才调用~~ ✅ 已完成（L326 在 feedback.dispatch 后）
 
 **验证**：集成测试覆盖 agent 模式执行 + noop 判定 + 错误重试
 
 ### Phase 3：反馈腿改造
 
 **任务**：
-1. 改 `feedback.ts`：实现 `forward`（direct/inbound）、`reply-origin`、`silent` 三个动作
-2. 扩展模板上下文（`{{reply.*}}`）
-3. 更新 audit 结构（加 `reply` 段存回复摘要）
+1. ~~改 `feedback.ts`：实现 `forward`（direct/inbound）、`reply-origin`、`silent` 三个动作~~ ✅ 已完成（dispatch L56-102）
+2. ~~扩展模板上下文（`{{reply.*}}`）~~ ✅ 已完成（renderTemplate L58-65）
+3. ~~更新 audit 结构（加 `reply` 段存回复摘要）~~ ✅ 已完成（types.ts L236-246）
+
+**当前状态**：feedback.ts 已实现完整 V3 逻辑，需验证与 DaemonChannel 的集成。
 
 **验证**：单测覆盖三种 disposition + 两种 delivery
 
 ### Phase 4：V3 收尾
 
 **任务**：
-1. 改 `validation.ts`：只接受 v3 schema，并删除运行时 V2 迁移逻辑
+1. ~~改 `validation.ts`：只接受 v3 schema~~ ✅ 已完成（L24-27）+ ✅ 错误信息已改进（明确提示 `$schema_version` 缺失）
 2. 更新 CLI/parser（`trigger-command.ts`）支持新字段
 3. 改 `index.ts` wiring（注册 DaemonChannel）
 4. 补齐所有单测 + 集成测试

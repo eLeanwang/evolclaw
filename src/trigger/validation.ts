@@ -22,8 +22,9 @@ export function normalizeTriggerDefinition(input: unknown, opts: { now?: number 
   if (!isObject(input)) throw new Error('trigger definition must be an object');
   const raw = input as Record<string, unknown>;
   const version = raw.$schema_version;
-  if (version === 3) return normalizeV3(raw, opts);
-  throw new Error(`trigger schema version 3 is required; got ${String(version)}`);
+  if (version === undefined) throw new Error('trigger definition missing required field: $schema_version');
+  if (version !== 3) throw new Error(`trigger schema version 3 is required; got ${version}`);
+  return normalizeV3(raw, opts);
 }
 
 export function validateTriggerDefinition(definition: TriggerDefinition): void {

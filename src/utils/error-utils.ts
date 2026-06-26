@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { resolvePaths } from '../paths.js';
+import { getPackageRoot, resolvePaths } from '../paths.js';
 import { logger } from './logger.js';
 import type { ErrorRule } from '../types.js';
 
@@ -79,20 +79,36 @@ export function prefixErrorType(prefix: string, errorType: string): string {
 const VALID_ACTIONS = new Set(['retry', 'stop', 'ignore']);
 
 let _dictPath: string | null = null;
+let _dictPathExplicit = false;
 let _rules: ErrorRule[] = [];
 let _lastMtime = 0;
 
 function getDictPath(): string {
   if (!_dictPath) {
-    const userDict = path.join(resolvePaths().dataDir, 'error-dict.json');
-    if (fs.existsSync(userDict)) {
-      _dictPath = userDict;
-    } else {
-      // Bundled default: 与本文件同目录（src/utils/ 或 dist/utils/）
-      _dictPath = path.resolve(import.meta.dirname, 'error-dict.json');
-    }
+    _dictPath = resolveBestDictPath();
+    _dictPathExplicit = false;
   }
   return _dictPath;
+}
+
+function resolveBestDictPath(excludePath?: string): string {
+  const candidates = [
+    path.join(resolvePaths().dataDir, 'error-dict.json'),
+    // Bundled default: 与本文件同目录（src/utils/ 或 dist/utils/）
+    path.resolve(import.meta.dirname, 'error-dict.json'),
+    // Dev-mode fallback: dist may be rebuilt while the daemon is running.
+    path.join(getPackageRoot(), 'src', 'utils', 'error-dict.json'),
+  ];
+
+  const seen = new Set<string>();
+  const normalizedExclude = excludePath ? path.resolve(excludePath) : undefined;
+  for (const candidate of candidates) {
+    const normalized = path.resolve(candidate);
+    if (seen.has(normalized) || normalized === normalizedExclude) continue;
+    seen.add(normalized);
+    if (fs.existsSync(normalized)) return normalized;
+  }
+  return path.resolve(candidates[1]);
 }
 
 /** 校验单条规则，返回错误原因（null = 合法） */
@@ -117,10 +133,20 @@ function refreshDict(): void {
   try {
     stat = fs.statSync(dictPath);
   } catch {
-    // 文件不存在 → 清空规则（首次）或保持不变（之前有数据且文件被删）
+    if (!_dictPathExplicit) {
+      const fallbackPath = resolveBestDictPath(dictPath);
+      if (fallbackPath !== path.resolve(dictPath) && fs.existsSync(fallbackPath)) {
+        logger.warn('[error-dict] 字典文件不可用，切换到备用字典: %s → %s', dictPath, fallbackPath);
+        _dictPath = fallbackPath;
+        _lastMtime = 0;
+        refreshDict();
+        return;
+      }
+    }
+
+    // 文件短暂不可用时保留已加载规则，避免构建窗口把重试规则清空。
     if (_rules.length > 0) {
-      logger.warn('[error-dict] 字典文件已删除，清空规则: %s', dictPath);
-      _rules = [];
+      logger.warn('[error-dict] 字典文件不可用，保留已加载规则: %s', dictPath);
       _lastMtime = 0;
     }
     return;
@@ -195,11 +221,13 @@ export function _resetDict(): void {
   _rules = [];
   _lastMtime = 0;
   _dictPath = null;
+  _dictPathExplicit = false;
 }
 
 /** 设置字典文件路径（仅供测试使用） */
 export function _setDictPath(p: string): void {
   _dictPath = p;
+  _dictPathExplicit = true;
   _lastMtime = 0;  // 强制下次刷新
 }
 
@@ -222,6 +250,13 @@ export function isContextTooLongText(text: string | null | undefined): boolean {
 }
 
 // ── 错误分类 / 重试 / 消息 ──────────────────────────────────────────
+
+const RETRYABLE_HTTP_STATUS_PATTERN =
+  /\b(?:api error|http|status|last status|status code)\s*:?\s*(?:429|5\d{2})\b|\b429\b[^.\n\r]*(?:too many requests|rate limit)|(?:too many requests|rate limit)[^.\n\r]*\b429\b/i;
+
+function hasRetryableHttpStatus(text: string): boolean {
+  return RETRYABLE_HTTP_STATUS_PATTERN.test(text);
+}
 
 export function classifyError(error: any): ErrorType {
   const msg = (error?.message || '').toLowerCase();
@@ -248,6 +283,10 @@ export function classifyError(error: any): ErrorType {
 
   if (msg.includes('401') || msg.includes('authentication_error')) {
     return ErrorType.AUTH_ERROR;
+  }
+
+  if (hasRetryableHttpStatus(msg)) {
+    return ErrorType.API_ERROR;
   }
 
   if (msg.includes('timeout') || msg.includes('etimedout')) {
@@ -283,8 +322,9 @@ export function isRetryableError(error: any): boolean {
     return false;  // 认证错误不可重试
   }
 
-  // HTTP 5xx / 429 — 标准可重试状态码
-  if (/api error: (429|5\d{2})\b/.test(lower)) return true;
+  // HTTP 5xx / 429 — 标准可重试状态码。Codex SDK 可能把上游内部重试耗尽
+  // 包成 "exceeded retry limit, last status: 429 Too Many Requests"。
+  if (hasRetryableHttpStatus(lower)) return true;
 
   return false;
 }

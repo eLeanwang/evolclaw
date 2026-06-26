@@ -13,7 +13,6 @@ import { cmdAid, cmdRpc, cmdStorage, cmdMsg, cmdGroup } from './aun-commands.js'
 import { cmdAgent } from './agent-command.js';
 import { cmdCtl } from './ctl-command.js';
 import { cmdQueue } from './queue-command.js';
-import { cmdTrigger } from './trigger-command.js';
 import { cmdStart, cmdStop, cmdRestart, cmdStatus, cmdLogs, cmdWatchCommand, cmdDev, cmdMv, cmdDiagnose } from './daemon-commands.js';
 
 // Suppress Node.js ExperimentalWarning (e.g. SQLite) from cluttering CLI output
@@ -143,7 +142,10 @@ export async function main(args: string[]) {
       await cmdQueue(args.slice(1));
       break;
     case 'trigger':
-      await cmdTrigger(args.slice(1));
+      {
+        const { cmdTrigger } = await import('./trigger-command.js');
+        await cmdTrigger(args.slice(1));
+      }
       break;
     case 'agent': {
       const { suppressSdkLogs } = await import('../aun/aid/index.js');

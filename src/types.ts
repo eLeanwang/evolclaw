@@ -338,7 +338,6 @@ export interface Message {
     boundSessionId?: string;
     pendingThread?: boolean;
     rootMessageId?: string;
-    silent?: boolean;
     chatModeOverride?: 'proactive';
   };
 }
@@ -658,6 +657,10 @@ export interface AidConnectionState {
     pid: number;
     evolclawHome: string;
     agentName?: string;
+  };
+  queueStatus?: {               // 队列状态（IPC provider 注入）
+    processing: number;         // 正在处理的消息数
+    queued: number;             // 排队等待的消息数
   };
 }
 

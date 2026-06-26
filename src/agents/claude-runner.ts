@@ -10,7 +10,7 @@ import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import { logger } from '../utils/logger.js';
-import { checkBlacklist, checkReadonly, checkHClassWrite, parseEvolclawSendCommand, summarizeToolInput } from '../core/permission.js';
+import { checkBlacklist, checkReadonly, checkHClassWrite, parseEvolclawSendCommand, summarizeToolInput, checkDangerousCommand } from '../core/permission.js';
 import { encodePath } from '../utils/cross-platform.js';
 import type { AgentPlugin, AgentInstance, AgentCallbacks } from '../core/baseagent-loader.js';
 import type { AgentEvent, ImageData, PermissionContext, PermissionModeInfo, AgentTokenUsage, AgentContextUsage, AgentLastModelCall, AgentModelCall } from './runner-types.js';
@@ -1329,7 +1329,7 @@ export class AgentRunner {
     };
 
     // SDK-level canUseTool 回调：接入 PermissionGateway 的用户审批入口
-    // 只在 SDK 认为此工具需要用户确认时触发（黑名单已在 PreToolUse hook 拦截）
+    // 黑名单已在 PreToolUse hook 拦截，危险命令在此处进入审批流程
     const canUseToolCallback = async (
       toolName: string,
       input: Record<string, unknown>,
@@ -1357,6 +1357,38 @@ export class AgentRunner {
         const cmd = typeof input.command === 'string' ? input.command : '';
         if (parseEvolclawSendCommand(cmd)?.scope === 'ctl') {
           return { behavior: 'allow' as const, updatedInput: input, decisionClassification: 'user_permanent' as const };
+        }
+      }
+
+      // 危险命令检测：需要用户审批的高风险操作（rm -rf, sudo 等）
+      const dangerCheck = checkDangerousCommand(toolName, input);
+      if (dangerCheck.isDangerous) {
+        // 检查 always-allow 缓存
+        const cacheKey = `dangerous:${toolName}`;
+        if (this.permissionGateway?.isAlwaysAllowed(cacheKey)) {
+          return { behavior: 'allow' as const, updatedInput: input, decisionClassification: 'user_permanent' as const };
+        }
+
+        // 需要用户审批
+        if (this.permissionGateway && this.sendPromptFn) {
+          const decision: PermissionDecision = await this.permissionGateway.requestPermission(
+            sessionId,
+            cacheKey,
+            input,
+            this.sendPromptFn,
+            this.permissionContexts.get(sessionId),
+            `⚠️ ${dangerCheck.command}`,
+            dangerCheck.reason
+          );
+
+          if (decision === 'deny') {
+            return { behavior: 'deny' as const, message: '用户拒绝了危险操作', decisionClassification: 'user_reject' as const };
+          }
+          return {
+            behavior: 'allow' as const,
+            updatedInput: input,
+            decisionClassification: decision === 'always' ? 'user_permanent' as const : 'user_temporary' as const
+          };
         }
       }
 

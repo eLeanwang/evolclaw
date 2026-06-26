@@ -198,6 +198,7 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
   private activeStreams = new Map<string, AsyncIterable<any>>();
   private activeSessions = new Map<string, string>(); // sessionId → threadId
   private activeTurns = new Map<string, { threadId: string; turnId: string }>();
+  private pendingInterrupts = new Map<string, number>();
   private appServerClient: CodexAppServerClient | null = null;
   private onSessionIdUpdate?: (sessionId: string, agentSessionId: string) => void;
   private onCompactStart?: (sessionId: string) => void;
@@ -205,6 +206,7 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
   private sendPromptFn?: (text: string) => Promise<void>;
   private permissionContexts = new Map<string, PermissionContext>();
   private resolvedConfig: { apiKey: string; baseUrl?: string; model: string; effort?: string; enableRequestUserInput?: boolean; approvalsReviewer?: string };
+  private readonly pendingInterruptTtlMs = 30_000;
 
   constructor(config: Config, callbacks: AgentCallbacks) {
     this.resolvedConfig = resolveOpenaiConfig(config);
@@ -324,6 +326,7 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
   cleanupStream(key: string): void {
     this.activeStreams.delete(key);
     this.activeAbortControllers.delete(key);
+    this.pendingInterrupts.delete(key);
   }
 
   hasActiveStream(key: string): boolean {
@@ -353,6 +356,7 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
     const callApprovalPolicy = this.toApprovalPolicy(callMode);
     const callSandboxMode = this.toSandboxMode(callMode);
     const appServer = this.getAppServerClient();
+    this.dropExpiredPendingInterrupt(sessionId);
 
     // policyHook 需要审批回调才能生效；关闭 proactive pre-tool policy 时不额外升级。
     const context = this.permissionContexts.get(sessionId);
@@ -410,6 +414,10 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
         if (startedTurnId && !state.turnId) {
           state.turnId = startedTurnId;
           this.activeTurns.set(sessionId, { threadId, turnId: startedTurnId });
+          if (this.consumePendingInterrupt(sessionId)) {
+            this.interruptAppServerTurn(threadId, startedTurnId).catch(() => {});
+            this.activeTurns.delete(sessionId);
+          }
         }
       }
       if (!this.isAppServerTurnNotification(notification, state)) return;
@@ -417,6 +425,14 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
       // 仅在已锁定 turnId 后才允许 turn/completed 结束队列，避免残留的旧 turn/completed 误关
       if (notification.method === 'turn/completed' && state.turnId) queue.end();
     });
+
+    if (this.consumePendingInterrupt(sessionId)) {
+      controller.abort('User interrupt');
+      this.activeAbortControllers.delete(sessionId);
+      this.activeStreams.delete(sessionId);
+      logger.info(`[CodexRunner] Applied pending interrupt before turn start: ${sessionId}`);
+      return this.transformAppServerStream(queue, sessionId, state, unsubscribe, tempFiles);
+    }
 
     try {
       const turnResponse = await appServer.turnStart(threadId, input, {
@@ -431,6 +447,13 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
         state.turnId = turnId;
         this.activeTurns.set(sessionId, { threadId, turnId });
       }
+      if (turnId && this.consumePendingInterrupt(sessionId)) {
+        await this.interruptAppServerTurn(threadId, turnId);
+        controller.abort('User interrupt');
+        this.activeAbortControllers.delete(sessionId);
+        this.activeStreams.delete(sessionId);
+        this.activeTurns.delete(sessionId);
+      }
       const status = turnResponse.turn?.status;
       if (status === 'completed' || status === 'failed') {
         queue.push({ method: 'turn/completed', params: { threadId, turn: turnResponse.turn as any } });
@@ -440,6 +463,7 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
       unsubscribe();
       this.activeAbortControllers.delete(sessionId);
       this.activeTurns.delete(sessionId);
+      this.pendingInterrupts.delete(sessionId);
       this.cleanupTempFiles(tempFiles);
       throw error;
     }
@@ -454,11 +478,10 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
     const activeTurn = this.activeTurns.get(sessionKey);
     const hadActiveState = !!controller || !!activeTurn || this.activeStreams.has(sessionKey);
     const interruptTurn = activeTurn
-      ? this.getAppServerClient().turnInterrupt(activeTurn.threadId, activeTurn.turnId).catch(error => {
-        logger.debug(`[CodexRunner] app-server turn interrupt failed: ${error}`);
-      })
+      ? this.interruptAppServerTurn(activeTurn.threadId, activeTurn.turnId)
       : Promise.resolve();
 
+    if (!activeTurn) this.rememberPendingInterrupt(sessionKey);
     if (controller) controller.abort('User interrupt');
 
     if (hadActiveState) {
@@ -468,6 +491,32 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
       logger.info(`[CodexRunner] Interrupted session: ${sessionKey}`);
     }
     await interruptTurn;
+  }
+
+  private rememberPendingInterrupt(sessionId: string): void {
+    this.pendingInterrupts.set(sessionId, Date.now());
+  }
+
+  private consumePendingInterrupt(sessionId: string): boolean {
+    if (!this.pendingInterrupts.has(sessionId)) return false;
+    const requestedAt = this.pendingInterrupts.get(sessionId)!;
+    this.pendingInterrupts.delete(sessionId);
+    return Date.now() - requestedAt <= this.pendingInterruptTtlMs;
+  }
+
+  private dropExpiredPendingInterrupt(sessionId: string): void {
+    const requestedAt = this.pendingInterrupts.get(sessionId);
+    if (requestedAt !== undefined && Date.now() - requestedAt > this.pendingInterruptTtlMs) {
+      this.pendingInterrupts.delete(sessionId);
+    }
+  }
+
+  private async interruptAppServerTurn(threadId: string, turnId: string): Promise<void> {
+    try {
+      await this.getAppServerClient().turnInterrupt(threadId, turnId);
+    } catch (error) {
+      logger.debug(`[CodexRunner] app-server turn interrupt failed: ${error}`);
+    }
   }
 
   // ── Session commands ──
@@ -486,6 +535,7 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
     this.activeStreams.delete(sessionId);
     this.activeAbortControllers.delete(sessionId);
     this.activeTurns.delete(sessionId);
+    this.pendingInterrupts.delete(sessionId);
     this.permissionContexts.delete(sessionId);
   }
 
@@ -1549,6 +1599,7 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
     this.activeStreams.clear();
     this.activeSessions.clear();
     this.activeTurns.clear();
+    this.pendingInterrupts.clear();
     this.permissionContexts.clear();
     this.chatModes.clear();
     await this.appServerClient?.close();

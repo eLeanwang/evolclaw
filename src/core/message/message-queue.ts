@@ -71,6 +71,12 @@ interface MessageQueueOptions {
   persistencePath?: string;
 }
 
+interface ActiveQueueState {
+  baseagent?: string;
+  peerId?: string;
+  messageIds: Set<string>;
+}
+
 const DEFAULT_AGENT_NAME = '<unknown>';
 const RESTART_RESUME_CONTENT = 'evolclaw 服务已重启，请继续之前未完成的任务。';
 
@@ -80,11 +86,7 @@ export class MessageQueue {
   private processingAgent = new Map<string, string>();  // queueKey → agentName（处理中项目的 agent）
   private externalLocks = new Map<string, Promise<void>>();
   private handler: MessageHandler;
-  private currentSessionKey?: string;
-  private currentProjectPath?: string;
-  private currentBaseagent?: string;
-  private currentPeerId?: string;  // 当前在途消息的发送者（群聊同人打断判定用）
-  private activeMessageIds = new Set<string>();  // 正在执行的消息 ID
+  private activeStates = new Map<string, ActiveQueueState>();  // queueKey → active task state
   private interruptCallback?: (sessionKey: string, baseagent?: string, evolagentName?: string, reason?: 'new_message') => Promise<void>;
   private eventBus?: EventBus;
   private recentMessageIds = new Set<string>();
@@ -547,11 +549,12 @@ export class MessageQueue {
         //  - 群聊（interruptible === false）+ interruptSamePeer：仅当「同一发送者连发」
         //    且队列里没有其他人的消息时打断，避免抢占群里他人的排队消息
         const interruptSingle = options?.interruptible !== false;
+        const activeState = this.activeStates.get(queueKey);
         const interruptGroupSamePeer =
           options?.interruptible === false &&
           options?.interruptSamePeer === true &&
           !!message.peerId &&
-          this.currentPeerId === message.peerId &&
+          activeState?.peerId === message.peerId &&
           !this.hasOtherPeerQueued(queueKey, message.peerId);
 
         if (interruptSingle || interruptGroupSamePeer) {
@@ -563,7 +566,7 @@ export class MessageQueue {
             agentName: this.processingAgent.get(queueKey),
           });
           if (this.interruptCallback) {
-            this.interruptCallback(sessionKey, this.currentBaseagent, this.processingAgent.get(queueKey)).catch(() => {});
+            this.interruptCallback(sessionKey, activeState?.baseagent, this.processingAgent.get(queueKey)).catch(() => {});
           }
         } else {
           // 群聊：FIFO，不打断
@@ -609,10 +612,7 @@ export class MessageQueue {
         logger.info(`[Queue] processNext: queue empty, releasing key=${queueKey}`);
         this.processing.delete(queueKey);
         this.processingAgent.delete(queueKey);
-        this.currentSessionKey = undefined;
-        this.currentProjectPath = undefined;
-        this.currentPeerId = undefined;
-        this.activeMessageIds.clear();
+        this.activeStates.delete(queueKey);
         return;
       }
 
@@ -622,6 +622,7 @@ export class MessageQueue {
         logger.info(`[Queue] processNext: agent ${headAgent} muted, pausing key=${queueKey} (${queue.length} pending, ${this.queueRawMessageCount(queue)} raw)`);
         this.processing.delete(queueKey);
         this.processingAgent.delete(queueKey);
+        this.activeStates.delete(queueKey);
         return;
       }
 
@@ -654,17 +655,19 @@ export class MessageQueue {
       const batchRole = this.commonRole(rawItems);
       if (batchRole && !merged.message.batchRole) merged.message.batchRole = batchRole;
 
-      this.currentSessionKey = queueKey;
-      this.currentProjectPath = merged.projectPath;
-      this.currentBaseagent = merged.message.baseagent;
-      this.currentPeerId = this.uniquePeerId(rawItems);
       this.processingAgent.set(queueKey, merged.agentName);
 
       // 记录正在执行的 messageId（用于撤回中断）
-      this.activeMessageIds.clear();
+      const activeMessageIds = new Set<string>();
       for (const item of rawItems) {
-        if (item.message.messageId) this.activeMessageIds.add(item.message.messageId);
+        if (item.message.messageId) activeMessageIds.add(item.message.messageId);
       }
+      const activeState: ActiveQueueState = {
+        baseagent: merged.message.baseagent,
+        peerId: this.uniquePeerId(rawItems),
+        messageIds: activeMessageIds,
+      };
+      this.activeStates.set(queueKey, activeState);
 
       const resolves = rawItems.map(i => i.resolve);
       const rejects = rawItems.map(i => i.reject);
@@ -673,7 +676,7 @@ export class MessageQueue {
       this.processingStartTime.set(queueKey, Date.now());
       this.persistQueuesImmediate();
 
-      logger.info(`[Queue] processing batch: key=${queueKey} items=${rawItems.length} pending=${queue.length} rawPending=${this.queueRawMessageCount(queue)} batchRole=${merged.message.batchRole ?? '<mixed>'} peer=${this.currentPeerId ?? '<multi>'} msg=${merged.message.messageId ?? '<none>'}`);
+      logger.info(`[Queue] processing batch: key=${queueKey} items=${rawItems.length} pending=${queue.length} rawPending=${this.queueRawMessageCount(queue)} batchRole=${merged.message.batchRole ?? '<mixed>'} peer=${activeState.peerId ?? '<multi>'} msg=${merged.message.messageId ?? '<none>'}`);
       try {
         await this.handler(merged.message);
         logger.debug(`[Queue] Message processed successfully`);
@@ -684,6 +687,7 @@ export class MessageQueue {
       } finally {
         this.activeBatches.delete(queueKey);
         this.processingStartTime.delete(queueKey);
+        this.activeStates.delete(queueKey);
         this.persistQueuesImmediate();
       }
     }
@@ -913,35 +917,43 @@ export class MessageQueue {
    * @returns true 如果找到并触发了中断
    */
   cancelActive(messageId: string): boolean {
-    if (!this.activeMessageIds.has(messageId)) return false;
-    if (!this.currentSessionKey) return false;
+    for (const [queueKey, activeState] of this.activeStates.entries()) {
+      if (!activeState.messageIds.has(messageId)) continue;
 
-    const active = this.activeBatches.get(this.currentSessionKey);
-    if (active && this.messageIdsFor(active).includes(messageId)) {
-      const parts = this.partsOf(active);
-      const remaining = parts.filter(part => part.message.messageId !== messageId);
-      if (remaining.length === 0) {
-        this.activeBatches.delete(this.currentSessionKey);
-        this.processingStartTime.delete(this.currentSessionKey);
-      } else {
-        this.activeBatches.set(this.currentSessionKey, this.buildCoalescedItem(remaining));
+      const active = this.activeBatches.get(queueKey);
+      if (active && this.messageIdsFor(active).includes(messageId)) {
+        const parts = this.partsOf(active);
+        const remaining = parts.filter(part => part.message.messageId !== messageId);
+        if (remaining.length === 0) {
+          this.activeBatches.delete(queueKey);
+          this.processingStartTime.delete(queueKey);
+          activeState.messageIds.clear();
+        } else {
+          this.activeBatches.set(queueKey, this.buildCoalescedItem(remaining));
+          activeState.messageIds = new Set(
+            remaining
+              .map(part => part.message.messageId)
+              .filter((id): id is string => !!id)
+          );
+        }
+        this.persistQueuesImmediate();
       }
-      this.persistQueuesImmediate();
-    }
 
-    // 从 queueKey 提取 sessionKey
-    const sessionKey = this.currentSessionKey.split('::')[0];
-    logger.info(`[Queue] Recalled active message ${messageId}, interrupting session ${sessionKey}`);
-    this.eventBus?.publish({
-      type: 'task:interrupted',
-      sessionId: sessionKey,
-      reason: 'recalled',
-      agentName: this.processingAgent.get(this.currentSessionKey),
-    });
-    if (this.interruptCallback) {
-      this.interruptCallback(sessionKey, this.currentBaseagent, this.processingAgent.get(this.currentSessionKey)).catch(() => {});
+      const sessionKey = this.sessionKeyFromQueueKey(queueKey);
+      const agentName = this.processingAgent.get(queueKey);
+      logger.info(`[Queue] Recalled active message ${messageId}, interrupting session ${sessionKey}`);
+      this.eventBus?.publish({
+        type: 'task:interrupted',
+        sessionId: sessionKey,
+        reason: 'recalled',
+        agentName,
+      });
+      if (this.interruptCallback) {
+        this.interruptCallback(sessionKey, activeState.baseagent, agentName).catch(() => {});
+      }
+      return true;
     }
-    return true;
+    return false;
   }
 
   /**
@@ -992,7 +1004,7 @@ export class MessageQueue {
   getQueueLengthByAgent(agentName: string, excludeSessionKey?: string): number {
     let total = 0;
     for (const [key, queue] of this.queues.entries()) {
-      if (excludeSessionKey && key.startsWith(`${excludeSessionKey}::`)) continue;
+      if (excludeSessionKey && this.matchesSession(key, excludeSessionKey)) continue;
       for (const item of queue) {
         if ((item.agentName || DEFAULT_AGENT_NAME) === agentName) total++;
       }
@@ -1007,7 +1019,7 @@ export class MessageQueue {
   getProcessingCountByAgent(agentName: string, excludeSessionKey?: string): number {
     let total = 0;
     for (const [key, a] of this.processingAgent.entries()) {
-      if (excludeSessionKey && key.startsWith(`${excludeSessionKey}::`)) continue;
+      if (excludeSessionKey && this.matchesSession(key, excludeSessionKey)) continue;
       if ((a || DEFAULT_AGENT_NAME) === agentName) total++;
     }
     return total;
@@ -1020,7 +1032,7 @@ export class MessageQueue {
   getProcessingDetailsByAgent(agentName: string, excludeSessionKey?: string): Array<{ queueKey: string; agentName: string }> {
     const results: Array<{ queueKey: string; agentName: string }> = [];
     for (const [key, a] of this.processingAgent.entries()) {
-      if (excludeSessionKey && key.startsWith(`${excludeSessionKey}::`)) continue;
+      if (excludeSessionKey && this.matchesSession(key, excludeSessionKey)) continue;
       if ((a || DEFAULT_AGENT_NAME) === agentName) {
         results.push({ queueKey: key, agentName: a || DEFAULT_AGENT_NAME });
       }
@@ -1077,7 +1089,8 @@ export class MessageQueue {
   interruptByAgent(agentName: string): void {
     for (const [queueKey, name] of this.processingAgent) {
       if ((name || DEFAULT_AGENT_NAME) === agentName) {
-        const sessionKey = queueKey.split('::')[0];
+        const sessionKey = this.sessionKeyFromQueueKey(queueKey);
+        const activeState = this.activeStates.get(queueKey);
         logger.info(`[Queue] Interrupting session ${sessionKey} for stopped agent ${agentName}`);
         this.eventBus?.publish({
           type: 'task:interrupted',
@@ -1086,7 +1099,7 @@ export class MessageQueue {
           agentName: name,
         });
         if (this.interruptCallback) {
-          this.interruptCallback(sessionKey, this.currentBaseagent, name).catch(() => {});
+          this.interruptCallback(sessionKey, activeState?.baseagent, name).catch(() => {});
         }
       }
     }
@@ -1110,8 +1123,10 @@ export class MessageQueue {
 
   /** 从 queueKey 提取 projectPath */
   private projectPathFromQueueKey(queueKey: string): string {
-    const idx = queueKey.indexOf('::');
-    return idx >= 0 ? queueKey.slice(idx + 2) : queueKey;
+    const parts = queueKey.split('::');
+    if (parts.length >= 3) return parts.slice(2).join('::');
+    if (parts.length === 2) return parts[1];
+    return queueKey;
   }
 
   /** 截断消息内容用于预览 */
@@ -1314,7 +1329,7 @@ export class MessageQueue {
     });
 
     if (this.interruptCallback) {
-      await this.interruptCallback(sessionKey, this.currentBaseagent, targetAgentName);
+      await this.interruptCallback(sessionKey, this.activeStates.get(targetQueueKey)?.baseagent, targetAgentName);
     }
 
     return true;
