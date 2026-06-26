@@ -30,6 +30,8 @@ import { buildEnvelope, sendInteractionPayload } from './message-utils.js';
 export { buildEnvelope, sendInteractionPayload } from './message-utils.js';
 import { resolveEffectiveModel, resolvePermissionMode } from '../model/config-scope.js';
 import { resolveEffective } from '../../config/config-manager.js';
+import { getFirstRoleAssignment } from '../../config/role-assignments.js';
+import { checkRoleAccess } from '../../config/peer-role-resolver.js';
 import { insertUsageEvent, insertContextBreakdown, insertModelCalls } from '../../stats/writer.js';
 import { normalizeUsage } from '../../stats/normalizer.js';
 import { resolvePrices } from '../../stats/price-resolver.js';
@@ -601,7 +603,6 @@ export class ResponseEngine implements IMessageProcessor {
 
     // ── 角色访问控制检查：读取该用户角色的 allowAccess 配置，false 则拦截并回复权限不足 ──
     const userRole = session.identity?.role || 'anonymous';
-    const { checkRoleAccess } = await import('../../config/role-resolver.js');
     if (!checkRoleAccess(userRole)) {
       logger.warn(`[ResponseEngine] Access denied: role=${userRole} peerKey=${message.channelId} session=${session.id}`);
       const channelKey = session.metadata?.channelKey || message.channel;
@@ -1679,7 +1680,11 @@ export class ResponseEngine implements IMessageProcessor {
               if (isCrossChannel) {
                 const targetAdapterName = targetInfo.adapter.channelName;
                 const targetChannelType = targetInfo.options?.channelType || targetAdapterName;
-                const ownerPeerId = this.agentRegistry?.getOwner?.(targetAdapterName);
+                const targetChannelKey = targetInfo.adapter.channelKey || targetAdapterName;
+                const targetAgent = this.agentRegistry?.resolveByChannel(targetChannelKey);
+                const ownerPeerId = targetAgent
+                  ? getFirstRoleAssignment(targetAgent.aid, targetChannelKey, 'owner')?.peerId
+                  : undefined;
                 targetChannelId = ownerPeerId ? (this.sessionManager.getOwnerChatId(targetChannelType, ownerPeerId) ?? '') : '';
                 if (!targetChannelId) {
                   await adapter.send(envelope, { kind: 'system.error', text: `❌ 未找到 ${targetLabel} 的私聊会话，请先在该通道发送一条消息`, subtype: 'channel_down' });

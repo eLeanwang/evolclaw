@@ -12,6 +12,7 @@ import { isValidChannelName } from '../core/channel-loader.js';
 import { commandExists } from '../utils/cross-platform.js';
 import { getCodexAppServerAvailability, isCodexAppServerAvailable } from '../agents/codex-runner.js';
 import { agentProjectRootFromDefaults, deriveAgentProjectPath } from '../utils/project-path.js';
+import { setRoleAssignment } from '../config/role-assignments.js';
 
 // ==================== Types ====================
 
@@ -50,7 +51,6 @@ export interface AgentShowResult {
     model: string | null;
     effort: string | null;
     chatmode: { private: string; group: string } | null;
-    owners: string[];
     channels: string[];
   };
   connection: AgentConnectionInfo | null;
@@ -344,7 +344,6 @@ export async function agentShow(aid: string): Promise<AgentResult<AgentShowResul
       lastActivity: agent.lastActivity || null,
       error: agent.error,
       chatmode: agent.config?.chatmode || null,
-      owners: agent.config?.owners || [],
     };
   }
   const identity = readAgentMdIdentity(aid);
@@ -360,7 +359,6 @@ export async function agentShow(aid: string): Promise<AgentResult<AgentShowResul
       model: agentInfo.model || null,
       effort: agentInfo.effort || null,
       chatmode: agentInfo.chatmode || null,
-      owners: agentInfo.owners || [],
       channels: agentInfo.channels || [],
     },
     connection: connectionInfo,
@@ -543,12 +541,12 @@ export async function agentCreateInteractive(opts: AgentCreateInteractiveOpts = 
       aid,
       enabled: true,
       lifecycle: 'created',
-      owners: owner ? [owner] : [],
       channels: [],
       projects: { defaultPath: projectPath },
     };
 
     saveAgent(agentConfig);
+    if (owner) setRoleAssignment(aid, `aun#${aid}#main`, owner, 'owner', { note: 'created by cli agent wizard' });
     saveInitialBehavior(aid, baseagent);
     ensureAgentDirSkeleton(aid);
 
@@ -667,8 +665,7 @@ async function promptAgentOwnerManually(aid: string): Promise<string | undefined
         console.log(`  ⚠ 无法加载 agent 配置: ${aid}`);
         return undefined;
       }
-      const owners = [owner, ...(agent.owners || []).filter(o => o !== owner)];
-      saveAgent({ ...agent, owners });
+      setRoleAssignment(aid, `aun#${aid}#main`, owner, 'owner', { note: 'set manually by cli' });
       try {
         const result = await ipcQuery<any>(resolvePaths().socket, { type: 'evolagent.reload', name: aid }, 30_000);
         if (result?.ok) console.log('  ✓ agent owner 已热重载');
@@ -782,13 +779,13 @@ export async function agentCreateNonInteractive(opts: AgentCreateNonInteractiveO
     aid: opts.aid,
     enabled: true,
     lifecycle: preservedLifecycle,
-    owners: opts.owner ? [opts.owner] : [],
     channels: [],
     projects: { defaultPath: opts.project },
   };
 
   opts.onPhase?.('config_saved', 'begin');
   saveAgent(agentConfig);
+  if (opts.owner) setRoleAssignment(opts.aid, `aun#${opts.aid}#main`, opts.owner, 'owner', { note: 'created by cli agent' });
   saveInitialBehavior(opts.aid, baseagent);
   ensureAgentDirSkeleton(opts.aid);
   opts.onPhase?.('config_saved', 'done');

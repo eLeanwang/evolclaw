@@ -240,7 +240,7 @@ export function getBuiltinRolesConfig(): RolesConfig {
             reason: '访客只能查询，不能执行'
           },
           'baseagents.claude.model': {
-            default: 'claude-haiku-4-5',
+            default: 'claude-haiku-4-5-20251001',
             allowOverride: false,
             allowedModels: ['claude-haiku-*'],
             reason: '访客只能使用最低成本模型'
@@ -293,7 +293,7 @@ export function getBuiltinRolesConfig(): RolesConfig {
             reason: '匿名用户只读'
           },
           'baseagents.claude.model': {
-            default: 'claude-haiku-4-5',
+            default: 'claude-haiku-4-5-20251001',
             allowOverride: false,
             allowedModels: ['claude-haiku-*'],
             reason: '匿名只能使用最低成本模型'

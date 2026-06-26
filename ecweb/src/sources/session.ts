@@ -192,13 +192,13 @@ export function buildBindMap(): Map<string, BindInfo> {
 const PRICING: Record<string, [number, number, number, number]> = {
   'claude-opus-4-8': [5, 6.25, 0.5, 25], 'claude-opus-4': [5, 6.25, 0.5, 25],
   'claude-sonnet-4-6': [3, 3.75, 0.3, 15], 'claude-sonnet-4': [3, 3.75, 0.3, 15],
-  'claude-haiku-4-5': [0.8, 1, 0.08, 4],
+  'claude-haiku-4-5-20251001': [0.8, 1, 0.08, 4],
 };
 
 function pricingFor(model: string): [number, number, number, number] {
   for (const key of Object.keys(PRICING)) if (model.startsWith(key)) return PRICING[key];
   if (model.includes('sonnet')) return PRICING['claude-sonnet-4-6'];
-  if (model.includes('haiku')) return PRICING['claude-haiku-4-5'];
+  if (model.includes('haiku')) return PRICING['claude-haiku-4-5-20251001'];
   return PRICING['claude-opus-4-8'];
 }
 

@@ -502,7 +502,7 @@ export function isModelAllowed(
 
 // 示例
 isModelAllowed('guest', 'claude-opus-4-8');  // => false
-isModelAllowed('guest', 'claude-haiku-4-5'); // => true
+isModelAllowed('guest', 'claude-haiku-4-5-20251001'); // => true
 isModelAllowed('owner', 'claude-opus-4-8');  // => true
 ```
 
@@ -886,7 +886,7 @@ function getBuiltinRolesConfig(): RolesConfig {
             allowOverride: false
           },
           'baseagents.claude.model': {
-            default: 'claude-haiku-4-5',
+            default: 'claude-haiku-4-5-20251001',
             allowOverride: false,
             allowedModels: ['claude-haiku-*']
           },
@@ -904,7 +904,7 @@ function getBuiltinRolesConfig(): RolesConfig {
             allowOverride: false
           },
           'baseagents.claude.model': {
-            default: 'claude-haiku-4-5',
+            default: 'claude-haiku-4-5-20251001',
             allowOverride: false,
             allowedModels: ['claude-haiku-*']
           },

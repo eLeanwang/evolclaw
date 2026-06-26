@@ -10,18 +10,6 @@
   "additionalProperties": false,
   "properties": {
     "$schema_version": { "type": "number", "default": 1, "x-merge": "scalar" },
-    "owners": {
-      "type": "array",
-      "items": { "type": "string" },
-      "description": "全局 owner（AID）",
-      "x-merge": "list"
-    },
-    "admins": {
-      "type": "array",
-      "items": { "type": "string" },
-      "description": "全局 admin（AID）",
-      "x-merge": "list"
-    },
     "models": {
       "type": "object",
       "description": "模型配置",

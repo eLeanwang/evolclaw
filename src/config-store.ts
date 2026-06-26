@@ -9,7 +9,7 @@
  *   - 覆盖链：defaults → agent/config → relation/config
  *   - 深合并：models / chatmode / aun / baseagents / projects 子字段
  *   - 标量覆盖：active_baseagent / show_activities / flush_delay / debounce
- *   - per-agent only：aid / enabled / owners / admins / channels（不进 defaults）
+ *   - per-agent only：aid / enabled / channels（不进 defaults）
  *
  * 写入：通过 atomic-write 双 rename，避免崩溃损坏。
  *
@@ -273,20 +273,6 @@ export function saveAgent(value: AgentConfig): void {
   if (!isValidAid(value.aid)) {
     throw new Error(`[config] saveAgent: invalid aid "${value.aid}" (must be a valid multi-level domain like mybot.agentid.pub)`);
   }
-  if (value.owners) {
-    for (const o of value.owners) {
-      if (!isValidAid(o)) {
-        throw new Error(`[config] saveAgent: invalid owner AID "${o}" in ${value.aid} (must be a valid multi-level domain like alice.agentid.pub)`);
-      }
-    }
-  }
-  if (value.admins) {
-    for (const a of value.admins) {
-      if (!isValidAid(a)) {
-        throw new Error(`[config] saveAgent: invalid admin AID "${a}" in ${value.aid} (must be a valid multi-level domain like alice.agentid.pub)`);
-      }
-    }
-  }
   atomicWriteJson(agentConfigPath(value.aid), value);
 }
 
@@ -441,10 +427,6 @@ export function validateAgentConfig(cfg: AgentConfig): string[] {
  */
 export function mergeForAgent(agent: AgentConfig, defaults: DefaultsConfig | null): AgentConfig {
   const hMerged = defaults ? deepMergeObject(defaults, agent) as AgentConfig : { ...agent };
-  delete (hMerged as any).owners;
-  delete (hMerged as any).admins;
-  if (agent.owners) hMerged.owners = [...agent.owners];
-  if (agent.admins) hMerged.admins = [...agent.admins];
   return mergeBehaviorIntoEffective(hMerged, { self: agent.aid }) as AgentConfig;
 }
 

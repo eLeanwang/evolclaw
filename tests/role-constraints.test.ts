@@ -75,7 +75,7 @@ describe('Role Constraints', () => {
       expect(result.valid).toBe(false);
       expect(result.violations[0].reason).toBe('override_not_allowed');
       expect(result.violations[0].field).toBe('baseagents.claude.model');
-      expect(result.effectiveConfig.baseagents?.claude?.model).toBe('claude-haiku-4-5');
+      expect(result.effectiveConfig.baseagents?.claude?.model).toBe('claude-haiku-4-5-20251001');
     });
 
     it('should prevent guest from using sonnet', () => {
@@ -89,7 +89,7 @@ describe('Role Constraints', () => {
 
     it('should allow guest to use haiku', () => {
       const result = mergeWithRoleConstraints('guest', {
-        'baseagents.claude.model': 'claude-haiku-4-5'
+        'baseagents.claude.model': 'claude-haiku-4-5-20251001'
       });
 
       expect(result.valid).toBe(true);
@@ -116,7 +116,7 @@ describe('Role Constraints', () => {
 
     it('should allow member to use haiku', () => {
       const result = mergeWithRoleConstraints('member', {
-        'baseagents.claude.model': 'claude-haiku-4-5'
+        'baseagents.claude.model': 'claude-haiku-4-5-20251001'
       });
 
       expect(result.valid).toBe(true);
@@ -265,7 +265,7 @@ describe('Role Constraints', () => {
       });
 
       expect(result.effectiveConfig.permissionMode).toBe('readonly');
-      expect(result.effectiveConfig.baseagents?.claude?.model).toBe('claude-haiku-4-5');
+      expect(result.effectiveConfig.baseagents?.claude?.model).toBe('claude-haiku-4-5-20251001');
     });
   });
 
@@ -296,19 +296,19 @@ describe('Role Constraints', () => {
     it('should check admin can use opus/sonnet/haiku', () => {
       expect(isModelAllowedForRole('admin', 'claude-opus-4-8')).toBe(true);
       expect(isModelAllowedForRole('admin', 'claude-sonnet-4-6')).toBe(true);
-      expect(isModelAllowedForRole('admin', 'claude-haiku-4-5')).toBe(true);
+      expect(isModelAllowedForRole('admin', 'claude-haiku-4-5-20251001')).toBe(true);
     });
 
     it('should check member can only use sonnet/haiku', () => {
       expect(isModelAllowedForRole('member', 'claude-opus-4-8')).toBe(false);
       expect(isModelAllowedForRole('member', 'claude-sonnet-4-6')).toBe(true);
-      expect(isModelAllowedForRole('member', 'claude-haiku-4-5')).toBe(true);
+      expect(isModelAllowedForRole('member', 'claude-haiku-4-5-20251001')).toBe(true);
     });
 
     it('should check guest can only use haiku', () => {
       expect(isModelAllowedForRole('guest', 'claude-opus-4-8')).toBe(false);
       expect(isModelAllowedForRole('guest', 'claude-sonnet-4-6')).toBe(false);
-      expect(isModelAllowedForRole('guest', 'claude-haiku-4-5')).toBe(true);
+      expect(isModelAllowedForRole('guest', 'claude-haiku-4-5-20251001')).toBe(true);
     });
   });
 

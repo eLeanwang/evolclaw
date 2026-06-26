@@ -28,7 +28,6 @@ import {
   resolveBehavior,
   type BehaviorConfig,
 } from '../../config/behavior.js';
-import { resolveUserRole } from '../../config/role-resolver.js';
 import { mergeWithRoleConstraints } from '../../config/role-constraints.js';
 import type { AgentConfig, RelationConfig, RoleOverride } from '../../types.js';
 
@@ -232,9 +231,9 @@ export function resolvePermissionMode(sel: ScopeSelector): string {
     const relation = sel.self && sel.peerKey ? readScope('relation', sel, activeBaseagent(sel.self)) : {};
     if (relation.permissionMode) {
       // 应用角色约束（优先使用 sel.role）
-      if (sel.self && sel.peerKey) {
+      if (sel.self && sel.peerKey && sel.role) {
         try {
-          const role = sel.role || resolveUserRole(sel.self, sel.peerKey);
+          const role = sel.role;
           const constrained = mergeWithRoleConstraints(role, {
             permissionMode: relation.permissionMode
           });
@@ -300,9 +299,9 @@ export function resolveEffectiveModel(sel: ScopeSelector, ba?: string): Resolved
     let scopeEffort = prefs.effort;
 
     // 在关系级别应用角色约束（优先使用 sel.role）
-    if (scope === 'relation' && sel.self && sel.peerKey && (scopeModel || scopeEffort)) {
+    if (scope === 'relation' && sel.self && sel.peerKey && sel.role && (scopeModel || scopeEffort)) {
       try {
-        const role = sel.role || resolveUserRole(sel.self, sel.peerKey);
+        const role = sel.role;
         const constraintInput: Record<string, any> = {};
         if (scopeModel) constraintInput[`baseagents.${baseagent}.model`] = scopeModel;
         if (scopeEffort) constraintInput[`baseagents.${baseagent}.effort`] = scopeEffort;
@@ -331,9 +330,9 @@ export function resolveEffectiveModel(sel: ScopeSelector, ba?: string): Resolved
     let mergedEffort = mergedBa[ef];
 
     // 如果有 peerKey，应用角色约束到合并后的结果（优先使用 sel.role）
-    if (sel.self && sel.peerKey && (mergedModel || mergedEffort)) {
+    if (sel.self && sel.peerKey && sel.role && (mergedModel || mergedEffort)) {
       try {
-        const role = sel.role || resolveUserRole(sel.self, sel.peerKey);
+        const role = sel.role;
         const constraintInput: Record<string, any> = {};
         if (mergedModel) constraintInput[`baseagents.${baseagent}.model`] = mergedModel;
         if (mergedEffort) constraintInput[`baseagents.${baseagent}.effort`] = mergedEffort;
@@ -351,9 +350,9 @@ export function resolveEffectiveModel(sel: ScopeSelector, ba?: string): Resolved
   }
 
   // 如果最终没有值，但有 peerKey，应用角色默认值（确保 guest 等角色总是受限）
-  if (sel.self && sel.peerKey && (!finalModel || !finalEffort)) {
+  if (sel.self && sel.peerKey && sel.role && (!finalModel || !finalEffort)) {
     try {
-      const role = sel.role || resolveUserRole(sel.self, sel.peerKey);
+      const role = sel.role;
       const constraintInput: Record<string, any> = {};
       // 使用空配置触发角色默认值
       if (!finalModel) constraintInput[`baseagents.${baseagent}.model`] = finalModel || '';

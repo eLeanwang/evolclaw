@@ -4,14 +4,17 @@ import { StreamDebouncer } from './stream-debouncer.js';
 import { appendMessageLog, buildInboundEntry } from './message-log.js';
 import { buildEnvelope } from './message-utils.js';
 import { chatDirPath } from '../session/session-fs-store.js';
+import { tryParseChannelKey } from '../channel-loader.js';
 import { resolvePaths } from '../../paths.js';
+import { resolvePeerRoleDetail, roleToSessionIdentity, type ResolvedPeerRole } from '../../config/peer-role-resolver.js';
+import { hasRoleAssignment, setRoleAssignment } from '../../config/role-assignments.js';
 import type { SessionManager } from '../session/session-manager.js';
 import type { IMessageProcessor } from './message-processor-interface.js';
 import type { MessageQueue } from './message-queue.js';
 import type { CommandHandler as CmdHandler } from '../command/command-handler.js';
 import type { EventBus } from '../event-bus.js';
 import type { BootstrapService } from '../bootstrap-service.js';
-import type { Message, InboundMessage, ChannelAdapter, ReplyContext, EvolAgentRegistryHandle, OutboundPayload, MenuListRequest, MenuQueryRequest, MenuOptionsRequest, MenuUpdateRequest, MenuActionRequest, MenuResponse } from '../../types.js';
+import type { Message, InboundMessage, ChannelAdapter, ReplyContext, EvolAgentRegistryHandle, OutboundPayload, MenuListRequest, MenuQueryRequest, MenuOptionsRequest, MenuUpdateRequest, MenuActionRequest, MenuResponse, SessionIdentity } from '../../types.js';
 
 /**
  * MessageBridge — Channel 与 Core 之间的消息桥梁
@@ -106,25 +109,42 @@ export class MessageBridge {
     onMessage(async (msg) => {
       try {
         let content = msg.content.trim();
+        const channelKey = adapter?.channelKey || channelName;
+        const owningAgent = this.agentRegistry?.resolveByChannel(channelKey)
+          ?? this.agentRegistry?.resolveByChannel(channelName);
+        const parsedChannelKey = tryParseChannelKey(channelKey);
+        const chatType = msg.chatType || 'private';
+        const actorId = msg.peerId;
+        const conversationId = chatType === 'group' ? (msg.groupId || msg.channelId) : msg.peerId;
+        const selfAid = msg.selfAID || owningAgent?.aid || parsedChannelKey?.selfAID;
+        if (selfAid && actorId) {
+          await this.autoBindOwner(selfAid, channelKey, actorId);
+        }
+        const roleDetail = this.resolveInboundRole({
+          selfAid,
+          channelKey,
+          channelType: msg.channelType || parsedChannelKey?.type || effectiveChannelType,
+          chatType,
+          actorId,
+          conversationId,
+          peerType: msg.peerType,
+        });
+        const identity = roleToSessionIdentity(roleDetail.effectiveRole);
 
         // 渠道入站日志
         logger.channelIn({ channel: channelName, channelId: msg.channelId, peerId: msg.peerId, peerName: msg.peerName, chatType: msg.chatType, msgId: msg.messageId, threadId: msg.threadId, content, images: msg.images?.length ?? 0, mentions: msg.mentions, replyContext: msg.replyContext });
 
         // 0. 自定义消息快速路径（menu.query 等）
-        if (await this.handleCustomPayload(content, channelName, msg, sendReply, adapter)) return;
+        if (await this.handleCustomPayload(content, channelName, msg, sendReply, adapter, identity)) return;
 
         // 1. owner 绑定（按实例名绑定）
-        if (msg.peerId) await this.autoBindOwner(channelName, msg.peerId);
-        const isInboundOwner = msg.peerId && typeof this.agentRegistry?.isOwner === 'function'
-          ? this.agentRegistry.isOwner(channelName, msg.peerId)
-          : false;
-        if (adapter && msg.peerId && isInboundOwner) {
+        if (adapter && actorId && roleDetail.effectiveRole === 'owner') {
           await this.bootstrapService?.tryStartBootstrap({
             adapter,
-            channelKey: adapter.channelKey || channelName,
+            channelKey,
             channelType: msg.channelType || effectiveChannelType,
             channelId: msg.channelId,
-            recipientId: msg.peerId,
+            recipientId: actorId,
             recipientName: msg.peerName,
             source: 'inbound',
           });
@@ -164,11 +184,10 @@ export class MessageBridge {
             return sendReply(msg.channelId, text, msg.replyContext);
           },
           msg.peerId, msg.threadId, msg.chatType, msg.source,
-          msg.replyContext, msg.messageId, msg.selfAID
+          msg.replyContext, msg.messageId, msg.selfAID, identity
         )) return;
 
         // 3. session 解析（使用 Channel 层填充的 chatType）
-        const chatType = msg.chatType || 'private';
         if (!(await this.canCreateThreadSession(channelName, msg, chatType))) {
           // 静默丢弃：绝不向群里注入回复。
           // 拒绝消息本身会带原 thread_id（AUN replyContext 透传），变成一条新群消息；
@@ -181,7 +200,7 @@ export class MessageBridge {
         // 话题会话创建时写入 replyContext（用于 threadId 路由）；主会话不写（避免群聊覆盖）
         if (msg.threadId && msg.replyContext) metadata.replyContext = msg.replyContext;
         // 写入实例名（审计 + 精确出站路由）
-        metadata.channelKey = channelName;
+        metadata.channelKey = channelKey;
         if (chatType === 'private' && msg.peerId) {
           metadata.peerId = msg.peerId;
           if (msg.peerName) metadata.peerName = msg.peerName;
@@ -194,7 +213,6 @@ export class MessageBridge {
         }
         // Resolve effective project path: 用通道所属 agent 的 projectPath；
         // 通道找不到归属时退回到 globalConfig（一般是测试场景）
-        const owningAgent = this.agentRegistry?.resolveByChannel(channelName);
         const effectiveProjectPath = owningAgent?.projectPath
           ?? this.defaultProjectPath;
 
@@ -203,7 +221,7 @@ export class MessageBridge {
           effectiveProjectPath,
           msg.threadId, Object.keys(metadata).length ? metadata : undefined, this.extractTopicName(msg), msg.peerId, chatType,
           owningAgent?.baseagent, msg.selfAID, msg.channelType || effectiveChannelType,
-          msg.peerType
+          msg.peerType, identity
         );
         session = await this.alignSessionBaseagent(channelName, session);
 
@@ -352,7 +370,8 @@ export class MessageBridge {
   private async handleCustomPayload(
     content: string, channel: string, msg: InboundMessage,
     sendReply: (channelId: string, text: string, replyContext?: ReplyContext) => Promise<void>,
-    adapter?: ChannelAdapter
+    adapter: ChannelAdapter | undefined,
+    identity: SessionIdentity
   ): Promise<boolean> {
     let parsed: any;
     try { parsed = JSON.parse(content); } catch { return false; }
@@ -360,19 +379,19 @@ export class MessageBridge {
 
     switch (parsed.type) {
       case 'menu.list':
-        await this.handleMenuList(parsed, channel, msg, adapter, sendReply);
+        await this.handleMenuList(parsed, channel, msg, adapter, sendReply, identity);
         return true;
       case 'menu.query':
-        await this.handleMenuQuery(parsed, channel, msg, adapter, sendReply);
+        await this.handleMenuQuery(parsed, channel, msg, adapter, sendReply, identity);
         return true;
       case 'menu.options':
-        await this.handleMenuOptions(parsed, channel, msg, adapter, sendReply);
+        await this.handleMenuOptions(parsed, channel, msg, adapter, sendReply, identity);
         return true;
       case 'menu.update':
-        await this.handleMenuUpdate(parsed, channel, msg, adapter, sendReply);
+        await this.handleMenuUpdate(parsed, channel, msg, adapter, sendReply, identity);
         return true;
       case 'menu.action':
-        await this.handleMenuAction(parsed, channel, msg, adapter, sendReply);
+        await this.handleMenuAction(parsed, channel, msg, adapter, sendReply, identity);
         return true;
       default:
         return false;
@@ -382,11 +401,11 @@ export class MessageBridge {
   private async handleMenuList(
     req: MenuListRequest, channel: string, msg: InboundMessage,
     adapter: ChannelAdapter | undefined,
-    sendReply: (channelId: string, text: string, replyContext?: ReplyContext) => Promise<void>
+    sendReply: (channelId: string, text: string, replyContext?: ReplyContext) => Promise<void>,
+    identity: SessionIdentity
   ): Promise<void> {
     const { id } = req;
     try {
-      const identity = this.sessionManager.resolveIdentity(channel, msg.peerId);
       const data = this.cmdHandler.getMenuItems(identity.role, msg.chatType || 'private', msg.isControlChannel ? 'control' : 'agent');
       await this.sendMenuResponse(adapter, channel, msg.channelId,
         { type: 'menu.response', id, data }, sendReply);
@@ -401,12 +420,13 @@ export class MessageBridge {
   private async handleMenuQuery(
     req: MenuQueryRequest, channel: string, msg: InboundMessage,
     adapter: ChannelAdapter | undefined,
-    sendReply: (channelId: string, text: string, replyContext?: ReplyContext) => Promise<void>
+    sendReply: (channelId: string, text: string, replyContext?: ReplyContext) => Promise<void>,
+    identity: SessionIdentity
   ): Promise<void> {
     const { id, name, cmd } = req;
     try {
       const resolvedCmd = this.resolveCmd(name, cmd);
-      const result = await this.cmdHandler.execMenuQuery(resolvedCmd, channel, msg.channelId, msg.peerId, (req as any).args, msg.chatType, msg.isControlChannel ?? false);
+      const result = await this.cmdHandler.execMenuQuery(resolvedCmd, channel, msg.channelId, msg.peerId, (req as any).args, msg.chatType, msg.isControlChannel ?? false, identity);
       if ('error' in result) throw { code: result.code || 'EXEC_FAILED', message: result.error };
       await this.sendMenuResponse(adapter, channel, msg.channelId,
         { type: 'menu.response', id, name, data: result.data }, sendReply);
@@ -421,12 +441,13 @@ export class MessageBridge {
   private async handleMenuOptions(
     req: MenuOptionsRequest, channel: string, msg: InboundMessage,
     adapter: ChannelAdapter | undefined,
-    sendReply: (channelId: string, text: string, replyContext?: ReplyContext) => Promise<void>
+    sendReply: (channelId: string, text: string, replyContext?: ReplyContext) => Promise<void>,
+    identity: SessionIdentity
   ): Promise<void> {
     const { id, name, cmd } = req;
     try {
       const resolvedCmd = this.resolveCmd(name, cmd);
-      const data = await this.cmdHandler.getSubMenuItems(resolvedCmd, channel, msg.channelId, msg.peerId, (req as any).args, undefined, msg.chatType, msg.isControlChannel ?? false) ?? [];
+      const data = await this.cmdHandler.getSubMenuItems(resolvedCmd, channel, msg.channelId, msg.peerId, (req as any).args, identity, msg.chatType, msg.isControlChannel ?? false) ?? [];
       await this.sendMenuResponse(adapter, channel, msg.channelId,
         { type: 'menu.response', id, name, data }, sendReply);
     } catch (err: any) {
@@ -440,13 +461,14 @@ export class MessageBridge {
   private async handleMenuUpdate(
     req: MenuUpdateRequest, channel: string, msg: InboundMessage,
     adapter: ChannelAdapter | undefined,
-    sendReply: (channelId: string, text: string, replyContext?: ReplyContext) => Promise<void>
+    sendReply: (channelId: string, text: string, replyContext?: ReplyContext) => Promise<void>,
+    identity: SessionIdentity
   ): Promise<void> {
     const { id, name, cmd, value, args } = req;
     try {
       if (!value) throw { code: 'MISSING_VALUE', message: '缺少 value 参数' };
       const resolvedCmd = this.resolveCmd(name, cmd);
-      const result = await this.cmdHandler.execMenuUpdate(resolvedCmd, value, channel, msg.channelId, msg.peerId, undefined, msg.isControlChannel ?? false, args);
+      const result = await this.cmdHandler.execMenuUpdate(resolvedCmd, value, channel, msg.channelId, msg.peerId, identity, msg.isControlChannel ?? false, args);
       if ('error' in result) throw { code: result.code || 'EXEC_FAILED', message: result.error };
       await this.sendMenuResponse(adapter, channel, msg.channelId,
         { type: 'menu.response', id, name, data: result.data }, sendReply);
@@ -461,13 +483,14 @@ export class MessageBridge {
   private async handleMenuAction(
     req: MenuActionRequest, channel: string, msg: InboundMessage,
     adapter: ChannelAdapter | undefined,
-    sendReply: (channelId: string, text: string, replyContext?: ReplyContext) => Promise<void>
+    sendReply: (channelId: string, text: string, replyContext?: ReplyContext) => Promise<void>,
+    identity: SessionIdentity
   ): Promise<void> {
     const { id, name, cmd, action, args } = req;
     try {
       if (!action) throw { code: 'MISSING_VALUE', message: '缺少 action 参数' };
       const resolvedCmd = this.resolveCmd(name, cmd);
-      const result = await this.cmdHandler.execMenuAction(resolvedCmd, action, args, channel, msg.channelId, msg.peerId, undefined, msg.chatType, id, msg.isControlChannel ?? false);
+      const result = await this.cmdHandler.execMenuAction(resolvedCmd, action, args, channel, msg.channelId, msg.peerId, identity, msg.chatType, id, msg.isControlChannel ?? false);
       if ('error' in result) throw { code: result.code || 'EXEC_FAILED', message: result.error };
       await this.sendMenuResponse(adapter, channel, msg.channelId,
         { type: 'menu.response', id, name, data: result.data }, sendReply);
@@ -510,18 +533,40 @@ export class MessageBridge {
   }
 
   /** 首次交互自动绑定 owner —— 通过 channel-routed self-agent 完成 */
-  private async autoBindOwner(channel: string, userId: string): Promise<void> {
-    const currentOwner = this.agentRegistry?.getOwner?.(channel);
-    if (currentOwner === undefined) {
-      if (this.agentRegistry?.setChannelOwner) {
-        this.agentRegistry.setChannelOwner(channel, userId);
-      } else {
-        logger.warn(`[Owner] no agentRegistry; skip auto-bind for ${channel}`);
-        return;
-      }
-      logger.info(`[Owner] Auto-bound ${channel} owner: ${userId}`);
-      this.eventBus.publish({ type: 'channel:owner-bound', channel, userId });
+  private async autoBindOwner(selfAid: string, channelKey: string, userId: string): Promise<void> {
+    if (hasRoleAssignment(selfAid, channelKey, 'owner')) return;
+    setRoleAssignment(selfAid, channelKey, userId, 'owner', { note: 'auto-bound first inbound peer' });
+    logger.info(`[Owner] Auto-bound ${channelKey} owner: ${userId}`);
+    this.eventBus.publish({ type: 'channel:owner-bound', channel: channelKey, userId });
+  }
+
+  private resolveInboundRole(ctx: {
+    selfAid?: string;
+    channelKey: string;
+    channelType: string;
+    chatType: 'private' | 'group';
+    actorId?: string;
+    conversationId?: string;
+    peerType?: string;
+  }): ResolvedPeerRole {
+    if (!ctx.selfAid || !ctx.actorId || !ctx.conversationId) {
+      return {
+        effectiveRole: 'anonymous',
+        source: 'default',
+        isAuthenticated: false,
+        allowAccess: false,
+        roleExists: true,
+      };
     }
+    return resolvePeerRoleDetail({
+      selfAid: ctx.selfAid,
+      channelKey: ctx.channelKey,
+      channelType: ctx.channelType,
+      chatType: ctx.chatType,
+      actorId: ctx.actorId,
+      conversationId: ctx.conversationId,
+      peerType: ctx.peerType,
+    });
   }
 
   /** 命令快速路径：返回 true 表示已处理 */
@@ -530,12 +575,13 @@ export class MessageBridge {
     sendReply: (text: string) => Promise<void>,
     userId?: string, threadId?: string, chatType?: string, source?: 'user' | 'card-trigger',
     replyContext?: ReplyContext, messageId?: string, selfAID?: string,
+    identity?: SessionIdentity,
   ): Promise<boolean> {
     if (!this.cmdHandler.isCommand(content)) return false;
     logger.info(`[${channel}] ${channelId}: ${content}${source === 'card-trigger' ? ' [card]' : ''}`);
     const cmdResult = await this.cmdHandler.handle(content, channel, channelId,
       (_cid, text, opts) => sendReply(text),
-      userId, threadId, chatType, source, messageId, selfAID);
+      userId, threadId, chatType, source, messageId, selfAID, identity);
     logger.debug(`[MessageBridge] handleCommand: result type=${typeof cmdResult}`);
     if (cmdResult === undefined) return false;
     if (cmdResult) {

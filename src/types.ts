@@ -7,8 +7,6 @@ export interface FeishuChannelConfig {
   enabled?: boolean;
   appId: string;
   appSecret: string;
-  owner?: string;
-  admins?: string[];
   flushDelay?: number;  // flush 间隔(秒)，默认使用全局值
   debounce?: number;    // 入站消息去抖间隔(秒)，覆盖全局 debounce
   showActivities?: 'all' | 'none';  // 覆盖全局 showActivities
@@ -23,8 +21,6 @@ export interface WechatChannelConfig {
   enabled?: boolean;
   baseUrl?: string;
   token?: string;
-  owner?: string;
-  admins?: string[];
   flushDelay?: number;  // flush 间隔(秒)，默认 3
   debounce?: number;    // 入站消息去抖间隔(秒)，覆盖全局 debounce
   showActivities?: 'all' | 'none';  // 覆盖全局 showActivities
@@ -41,8 +37,6 @@ export interface AunChannelConfig {
   keystorePath?: string;  // AUN keystore 路径，默认 ~/.aun
   gatewayUrl?: string;    // Gateway WebSocket URL（well-known 自动发现失败时的 fallback）
   accessToken?: string;   // 认证 access token（降级 fallback）
-  owner?: string;
-  admins?: string[];
   flushDelay?: number;  // flush 间隔(秒)，默认 3
   pythonBin?: string;   // Python 可执行路径（仅 evolclaw tui 命令使用），默认 python3
   encryptionSeed?: string; // FileSecretStore 加密种子，留空时 SDK 自动从 {aun_path}/.seed 派生
@@ -57,8 +51,6 @@ export interface DingtalkChannelConfig {
   enabled?: boolean;
   clientId: string;
   clientSecret: string;
-  owner?: string;
-  admins?: string[];
   flushDelay?: number;
   debounce?: number;
   showActivities?: 'all' | 'none';
@@ -75,8 +67,6 @@ export interface QQBotChannelConfig {
   enabled?: boolean;
   appId: string;
   clientSecret: string;
-  owner?: string;
-  admins?: string[];
   flushDelay?: number;
   debounce?: number;
   showActivities?: 'all' | 'none';
@@ -91,8 +81,6 @@ export interface WecomChannelConfig {
   enabled?: boolean;
   botId: string;
   secret: string;
-  owner?: string;
-  admins?: string[];
   flushDelay?: number;
   debounce?: number;
   showActivities?: 'all' | 'none';
@@ -222,7 +210,7 @@ export interface ReplyContext {
 }
 
 export interface SessionIdentity {
-  role: 'owner' | 'admin' | 'member' | 'guest' | 'anonymous';
+  role: string;
   mode: 'interactive';
 }
 
@@ -559,7 +547,6 @@ export interface AgentInfo {
   baseagent: string;
   model?: string;
   effort?: string;
-  owners?: string[];
   lastActivity?: number;
   activeSessions?: number;
   error?: string;
@@ -582,10 +569,6 @@ export interface EvolAgentHandle {
   readonly config: EffectiveAgentConfig;
   lastActivity?: number;
   getContext(channelName: string, chatType: string, globalChatmode?: { private?: 'interactive' | 'proactive'; group?: 'interactive' | 'proactive' }): AgentContext;
-  getOwner(channelName: string): string | undefined;
-  isOwner(channelName: string, userId: string): boolean;
-  isAdmin(channelName: string, userId: string): boolean;
-  setOwner(channelName: string, userId: string): void;
   getShowActivities(channelName: string): 'all' | 'none';
   setShowActivities(channelName: string, mode: 'all' | 'none'): void;
   setActiveBaseagent(value: string | undefined): void;
@@ -611,10 +594,6 @@ export interface EvolAgentRegistryHandle {
   reload?(name: string, hooks: unknown): Promise<void>;
   stopAgent?(name: string, hooks: unknown): Promise<void>;
   startAgent?(name: string, hooks: unknown): Promise<void>;
-  isOwner(channelName: string, userId: string): boolean;
-  isAdmin(channelName: string, userId: string): boolean;
-  getOwner(channelName: string): string | undefined;
-  setChannelOwner(channelName: string, userId: string): void;
   getShowActivities(channelName: string): 'all' | 'none';
   setShowActivities(channelName: string, mode: 'all' | 'none'): void;
 }
@@ -783,15 +762,10 @@ export interface ProactiveBehaviorBlock {
 // 元素必带 type + name，name 是该 agent 内 channel 类型下的本地标识（不含 '#'）。
 // AUN 类型一个 agent 只允许一个实例，name 通常约定 'main'。
 //
-// owners/admins 用该 channel 的原生 ID（飞书 user_id、钉钉 unionId 等），不要求 AID。
-
 interface ChannelInstanceCommon {
   type: string;
   name: string;
   enabled?: boolean;
-  owners?: string[];
-  admins?: string[];
-  members?: string[];
   flushDelay?: number;
   debounce?: number;
   showActivities?: ShowActivitiesMode;
@@ -883,8 +857,6 @@ export interface ProcessConfig {
  */
 export interface DefaultsConfig {
   $schema_version: number;
-  owners?: string[];     // list，与 agent/relation 并集
-  admins?: string[];     // list，同上
   models?: ModelsBlock;
   projects?: ProjectsBlock;
   aun?: AunRuntimeBlock;
@@ -895,7 +867,6 @@ export interface DefaultsConfig {
  * Agent 级 agents/<aid>/config.json —— 覆盖 defaults。
  * 包含 agent 的身份、凭证、管控字段与基础设施配置。
  *
- * 顶层 owners 是 AUN 渠道（即 agent 自身）的 owner 列表，元素为 AID。
  * channels[] 是该 agent 接入的所有渠道实例（含 AUN）。
  */
 export interface AgentConfig {
@@ -906,15 +877,12 @@ export interface AgentConfig {
   lifecycle?: AgentLifecycle;
   /** 首次连接 AUN 网络后置 true：触发"补全 agent.md + 发欢迎消息"的一次性流程。 */
   initialized?: boolean;
-  owners?: string[];
-  admins?: string[];
-  members?: string[];  // Team members with basic permissions
   aun?: AunRuntimeBlock;
   channels: ChannelInstance[];
   models?: ModelsBlock;
   projects?: ProjectsBlock;
   debug?: DebugBlock;
-  /** 观察者模式：开启后入站/出站消息各转发一份给顶层 owners[]。默认 false。 */
+  /** 观察者模式：开启后入站/出站各转发一份给 owner 角色对端。默认 false。 */
   observable?: boolean;
   /** 快照额外备份声明（不得指向 .env）。 */
   extra_backup?: Array<{ path: string; pattern?: string }>;
@@ -952,9 +920,6 @@ export interface AgentConfig {
  */
 export interface RelationConfig {
   $schema_version: number;
-  role?: string;
-  owners?: string[];
-  admins?: string[];
   extra_backup?: Array<{ path: string; pattern?: string }>;
 
   // Relation-level personalization parameters
@@ -985,9 +950,6 @@ export interface EffectiveAgentConfig {
   enabled?: boolean;
   lifecycle?: AgentLifecycle;
   initialized?: boolean;
-  owners?: string[];
-  admins?: string[];
-  members?: string[];
   aun?: AunRuntimeBlock;
   channels: ChannelInstance[];
   models?: ModelsBlock;
@@ -1196,6 +1158,20 @@ export interface RoleDefinition {
   permissions: Record<string, FieldPermission>;
 }
 
+export interface RoleAssignment {
+  channelKey: string;
+  peerId: string;
+  role: string;
+  note?: string;
+  createdAt?: number;
+  updatedAt?: number;
+}
+
+export interface RoleAssignmentsConfig {
+  $schema_version: number;
+  assignments: Record<string, RoleAssignment>;
+}
+
 export interface FieldPermission<T = any> {
   default: T;
   allowOverride: boolean;
@@ -1207,7 +1183,7 @@ export interface FieldPermission<T = any> {
 export interface RoleContext {
   self: string;
   peerKey: string;
-  role: BuiltinRole | string;
+  role: string;
 }
 
 export interface ConstraintViolation {

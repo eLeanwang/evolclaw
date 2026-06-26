@@ -213,7 +213,7 @@ const resolved = resolveEffectiveModel({
   role: 'guest'
 }, 'claude');
 // Before: 可能是 'claude-opus-4-8' (agent fallback)
-// After: 'claude-haiku-4-5' (角色默认)
+// After: 'claude-haiku-4-5-20251001' (角色默认)
 ```
 
 ---

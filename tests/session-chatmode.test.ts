@@ -1,14 +1,13 @@
 import path from 'path';
 import { describe, expect, it } from 'vitest';
 import { EventBus } from '../src/core/event-bus.js';
-import { SessionManager } from '../src/core/session/session-manager.js';
+import { SessionManager, type ChatModeDefaultsProvider } from '../src/core/session/session-manager.js';
 import { resolvePaths } from '../src/paths.js';
 
-function createManager(provider: ConstructorParameters<typeof SessionManager>[4]) {
+function createManager(provider: ChatModeDefaultsProvider) {
   return new SessionManager(
     path.join(resolvePaths().root, 'data', 'sessions'),
     new EventBus(),
-    undefined,
     undefined,
     provider,
   );
@@ -90,4 +89,3 @@ describe('SessionManager chatmode defaults', () => {
     expect(bot.chatMode).toBe('interactive');
   });
 });
-

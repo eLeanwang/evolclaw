@@ -6,6 +6,7 @@ import { loadAgent, loadEvolclawConfig, saveAgent, saveEvolclawConfig } from '..
 import { resolveEffective } from '../config/config-manager.js';
 import { readEvolclawVersion } from '../index.js';
 import type { BaseagentsBlock, AgentConfig, ChannelInstance } from '../types.js';
+import { setRoleAssignment } from '../config/role-assignments.js';
 
 export type BindType = 'daemon' | 'agent';
 export type BindStatus = 'pending' | 'bound' | 'expired' | 'cancelled';
@@ -319,11 +320,7 @@ export class BindService {
 
     const agent = loadAgent(task.targetAid);
     if (!agent) throw new Error(`agent not found: ${task.targetAid}`);
-    const current = agent.owners ?? [];
-    const owners = task.ownerMode === 'replace'
-      ? [ownerAid]
-      : [ownerAid, ...current.filter(o => o !== ownerAid)];
-    saveAgent({ ...agent, owners });
+    setRoleAssignment(task.targetAid, `aun#${task.targetAid}#main`, ownerAid, 'owner', { note: `bind:${task.ownerMode}` });
   }
 
   private cleanup(): void {

@@ -180,7 +180,7 @@ const resolved = resolveEffectiveModel({
   self: 'agent',
   peerKey: 'aun#guest.aid.pub'
 }, 'claude');
-// => model: 'claude-haiku-4-5' (被降级)
+// => model: 'claude-haiku-4-5-20251001' (被降级)
 ```
 
 **结果**: ✅ 所有配置都被强制降级

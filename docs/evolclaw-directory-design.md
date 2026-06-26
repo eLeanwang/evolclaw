@@ -615,7 +615,7 @@ agent 根目录下的默认配置文件，为所有 agent 提供字段级 fallba
   "models": {
     "default": "claude-sonnet-4-6",
     "allowed": [
-      "claude-haiku-4-5",
+      "claude-haiku-4-5-20251001",
       "claude-sonnet-4-6",
       "claude-opus-4-7"
     ],

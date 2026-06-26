@@ -125,7 +125,6 @@ export class ChannelLoader {
       name: aunEffName,
       aid: agent.aid,
       enabled: true,
-      owner: agent.config.owners?.[0],
     } as any;
 
     const configInsts: ChannelInstanceConfig[] = [aunInst];
@@ -330,7 +329,7 @@ export function buildReloadHooks(deps: ReloadHooksDeps): ReloadHooks {
 
       // Find config instance: implicit AUN gets a synthetic entry; others scan channels[].
       const cfgInst: any = isImplicitAun
-        ? { type: 'aun', name: aunEffName, aid, enabled: true, owner: agent.config?.owners?.[0] }
+        ? { type: 'aun', name: aunEffName, aid, enabled: true }
         : (() => {
             const agentChannels: any[] = agent.config?.channels ?? [];
             return agentChannels.find((i: any) => {

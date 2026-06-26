@@ -766,9 +766,9 @@ export class CommandHandler {
 
   /** menu.query — 查询当前值。 */
   async execMenuQuery(
-    cmd: string, channel: string, channelId: string, userId?: string, args?: Record<string, any>, explicitChatType?: MenuChatType, fromControlChannel = false
+    cmd: string, channel: string, channelId: string, userId?: string, args?: Record<string, any>, explicitChatType?: MenuChatType, fromControlChannel = false, overrideIdentity?: import('../../types.js').SessionIdentity
   ): Promise<{ data: any } | { error: string; code?: string }> {
-    return await menuExecMenuQuery.call(this, cmd, channel, channelId, userId, args, explicitChatType, fromControlChannel);
+    return await menuExecMenuQuery.call(this, cmd, channel, channelId, userId, args, explicitChatType, fromControlChannel, overrideIdentity);
   }
 
   /** menu.update — 写入新值。 */
@@ -954,9 +954,10 @@ export class CommandHandler {
     source?: 'user' | 'card-trigger',
     messageId?: string,
     selfAID?: string,
+    overrideIdentity?: import('../../types.js').SessionIdentity,
   ): Promise<OutboundPayload | string | null | undefined> {
     try {
-      const result = await this._handleInternal(content, channel, channelId, sendMessage, userId, threadId, chatType, source, messageId, selfAID);
+      const result = await this._handleInternal(content, channel, channelId, sendMessage, userId, threadId, chatType, source, messageId, selfAID, overrideIdentity);
       return result;
     } catch (error) {
       if (error instanceof BaseagentRunnerUnavailableError) {

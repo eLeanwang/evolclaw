@@ -16,6 +16,7 @@ import {
   resolvePaths,
   agentConfig as agentConfigPath,
   agentBehaviorConfig,
+  agentRoleAssignmentsConfig,
   agentRelationConfig,
   agentRelationBehaviorConfig,
   agentDir,
@@ -33,7 +34,6 @@ import {
 import { mergeLayers, expandVars, buildEnvResolver, type EnvScope } from './merge.js';
 import { mergeBehaviorIntoEffective } from './behavior.js';
 import { normalizeAgentLifecycle } from './lifecycle.js';
-import { resolveUserRole } from './role-resolver.js';
 import { mergeWithRoleConstraints } from './role-constraints.js';
 import { mergeRolesConfig, diffRolesConfig } from './roles-merge.js';
 import { getBuiltinRolesConfig, clearRolesCache } from './roles.js';
@@ -54,6 +54,7 @@ export enum ConfigTarget {
   Behavior = 'behavior',                // agents/{aid}/behavior.json
   RelationBehavior = 'relation-behavior', // agents/{aid}/relations/{peerKey}/behavior.json
   Roles = 'roles',                      // roles.json（全局角色定义，overlay 模型）
+  RoleAssignments = 'role-assignments',  // agents/{aid}/role-assignments.json
 }
 
 export interface Selector {
@@ -70,6 +71,7 @@ const TARGET_SCHEMA: Record<ConfigTarget, LogicalSchemaName> = {
   [ConfigTarget.Behavior]: 'behavior',
   [ConfigTarget.RelationBehavior]: 'behavior',
   [ConfigTarget.Roles]: 'roles',
+  [ConfigTarget.RoleAssignments]: 'role-assignments',
 };
 
 export class ConfigError extends Error {
@@ -95,6 +97,9 @@ function targetPath(target: ConfigTarget, sel?: Selector): string {
     case ConfigTarget.Process: return p.evolclawJson;
     case ConfigTarget.Defaults: return p.defaultsConfig;
     case ConfigTarget.Roles: return rolesConfig();
+    case ConfigTarget.RoleAssignments:
+      requireSelf(sel, target);
+      return agentRoleAssignmentsConfig(sel!.self!);
     case ConfigTarget.Agent:
       requireSelf(sel, target);
       return agentConfigPath(sel!.self!);
@@ -318,9 +323,6 @@ function migrateIfNeeded<T>(target: ConfigTarget, raw: T, file: string): T {
   const cur = currentVersion(logical);
   const have = (raw as any)?.$schema_version;
   if (typeof have === 'number' && have < cur) {
-    if (target === ConfigTarget.Agent && have === 1 && cur === 2) {
-      return raw;
-    }
     // P0：迁移函数尚未存在（全 v1）。留 seam：未来在此 require migrations/{logical}.{N}-to-{N+1}.
     console.warn(`[config] ${file}: $schema_version ${have} < current ${cur} for "${logical}" — migration pending (seam)`);
   }
@@ -452,9 +454,6 @@ export function resolveEffective(sel: Selector, opts: ReadOpts = {}): EffectiveA
     enabled: config.enabled,
     lifecycle: config.lifecycle,
     initialized: config.initialized,
-    owners: config.owners,
-    admins: config.admins,
-    members: config.members,
     aun: config.aun,
     channels: config.channels ?? [],
     models: config.models,
@@ -482,9 +481,9 @@ export function resolveEffective(sel: Selector, opts: ReadOpts = {}): EffectiveA
   let result = mergeBehaviorIntoEffective(effective, sel, opts);
 
   // 如果有 peerKey，应用角色约束（优先使用 sel.role）
-  if (sel.self && sel.peerKey) {
+  if (sel.self && sel.peerKey && sel.role) {
     try {
-      const role = sel.role || resolveUserRole(sel.self, sel.peerKey);
+      const role = sel.role;
 
       // 提取行为字段作为 relationConfig
       const behaviorFields: Record<string, any> = {};
@@ -570,7 +569,7 @@ export function validateConfigWrite(
   }
 
   try {
-    const role = resolveUserRole(sel.self, sel.peerKey);
+    const role = sel.role || 'guest';
     return mergeWithRoleConstraints(role, config);
   } catch (err) {
     console.warn('[config-manager] Failed to validate config write:', err);

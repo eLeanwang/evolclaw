@@ -54,7 +54,7 @@ Role Assignment (角色分配)    →  管理 Agent 和对端的角色分配
 | | Basic permissions         |  | Read-only                 |  |
 | |                           |  |                           |  |
 | | permissionMode: auto      |  | permissionMode: readonly  |  |
-| | model: claude-sonnet-4-6  |  | model: claude-haiku-4-5   |  |
+| | model: claude-sonnet-4-6  |  | model: claude-haiku-4-5-20251001   |  |
 | | dispatch: mention         |  | dispatch: mention         |  |
 | |                           |  |                           |  |
 | | [View Details] [Edit]     |  | [View Details] [Edit]     |  |
@@ -65,7 +65,7 @@ Role Assignment (角色分配)    →  管理 Agent 和对端的角色分配
 | | Not authenticated         |                                 |
 | |                           |                                 |
 | | permissionMode: readonly  |                                 |
-| | model: claude-haiku-4-5   |                                 |
+| | model: claude-haiku-4-5-20251001   |                                 |
 | | dispatch: mention         |                                 |
 | |                           |                                 |
 | | [View Details] [Edit]     |                                 |

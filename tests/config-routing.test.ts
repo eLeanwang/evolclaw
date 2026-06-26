@@ -12,6 +12,7 @@ import {
   write,
 } from '../src/config/config-manager.js';
 import { collectConfigFiles } from '../src/config/snapshot.js';
+import { setRoleAssignment } from '../src/config/role-assignments.js';
 import { resolvePermissionMode } from '../src/core/model/config-scope.js';
 import { DEFAULT_PERMISSION_MODE } from '../src/types.js';
 import { DEFAULT_FLUSH_DELAY_MS, DEFAULT_FLUSH_DELAY_SECONDS } from '../src/core/defaults.js';
@@ -77,34 +78,25 @@ describe('config ownership routing', () => {
     expect(validateConfig(ConfigTarget.Process, { idleMonitor: { enabled: false, timeout: 10 } })).toEqual([]);
   });
 
-  it('accepts members in agent-config v2 for role assignment writes', () => {
-    const sel = { self: 'member-schema.agentid.pub' };
-
+  it('rejects old role assignment fields from agent and relation config', () => {
     expect(validateConfig(ConfigTarget.Agent, {
-      aid: sel.self,
+      aid: 'member-schema.agentid.pub',
       channels: [],
       members: ['peer.agentid.pub'],
-    })).toEqual([]);
-
-    write(ConfigTarget.Agent, {
-      aid: sel.self,
-      channels: [],
-      members: ['peer.agentid.pub'],
-    }, sel);
-
-    expect(read<any>(ConfigTarget.Agent, sel)?.members).toEqual(['peer.agentid.pub']);
-  });
-
-  it('accepts relation-level role overrides', () => {
-    const sel = { self: 'relation-role.agentid.pub', peerKey: 'aun#peer.agentid.pub' };
+    })).not.toEqual([]);
 
     expect(validateConfig(ConfigTarget.Relation, {
       role: 'guest',
-    })).toEqual([]);
+    })).not.toEqual([]);
+  });
 
-    write(ConfigTarget.Relation, { role: 'guest' }, sel);
+  it('writes role assignments to the dedicated per-agent config file', () => {
+    const aid = 'assignments-route.agentid.pub';
+    const channelKey = 'aun#assignments-route.agentid.pub#main';
+    setRoleAssignment(aid, channelKey, 'peer.agentid.pub', 'owner');
 
-    expect(read<any>(ConfigTarget.Relation, sel)?.role).toBe('guest');
+    expect(read<any>(ConfigTarget.RoleAssignments, { self: aid })?.assignments[`${channelKey}::peer.agentid.pub`].role).toBe('owner');
+    expect(fs.existsSync(path.join(resolvePaths().agentsDir, aid, 'role-assignments.json'))).toBe(true);
   });
 
   it('uses one flush delay default constant for seconds and milliseconds', () => {

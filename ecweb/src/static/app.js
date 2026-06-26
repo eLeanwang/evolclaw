@@ -95,7 +95,7 @@ const translations = {
     'roles.table.chatType': '会话',
     'roles.editPeerRole': '编辑对端角色',
     'roles.selectRole': '选择角色',
-    'roles.editHint': '角色修改会更新此智能体的 owners/admins/members 配置',
+    'roles.editHint': '角色修改会更新此智能体的 role-assignments 配置',
     'roles.agentNotFound': '智能体未找到',
     'roles.table.channel': '频道',
     'roles.table.role': '有效角色',
@@ -474,7 +474,7 @@ const translations = {
     'roles.table.chatType': 'Chat',
     'roles.editPeerRole': 'Edit Peer Role',
     'roles.selectRole': 'Select Role',
-    'roles.editHint': 'Role changes will update this agent\'s owners/admins/members configuration',
+    'roles.editHint': 'Role changes will update this agent\'s role-assignments configuration',
     'roles.agentNotFound': 'Agent not found',
     'roles.table.channel': 'Channel',
     'roles.table.role': 'Effective Role',
@@ -499,7 +499,7 @@ const translations = {
     'roles.editPeerRole': 'Edit Peer Role',
     'roles.currentRole': 'Current Role',
     'roles.noOverride': 'No override (use agent-level role)',
-    'roles.setOverride': 'Set relation-level role:',
+    'roles.setOverride': 'Set peer role assignment:',
 
     // Status
     'status.connecting': 'Connecting…',
@@ -2068,10 +2068,8 @@ async function agentOpEdit(aid) {
     const cfg = q.data;
     setAgentOp(aid, null); // 查询完毕先恢复，等用户填完 prompt
     const projectRaw = prompt('项目路径：', cfg.config?.projects?.defaultPath || '');
-    const ownersRaw = prompt('Owners（逗号分隔 AID）：', (cfg.config?.owners || []).join(', '));
     const patch = {};
     if (projectRaw !== null) patch.projects = { defaultPath: projectRaw };
-    if (ownersRaw !== null) patch.owners = ownersRaw.split(',').map(s => s.trim()).filter(Boolean);
     if (!Object.keys(patch).length) return;
     setAgentOp(aid, t('common.operating'));
     const r = mResp(await menuSend({ type: 'menu.action', name: 'agent', action: 'update', args: { aid, patch } }));
@@ -4061,8 +4059,8 @@ function renderRelationsTable(data, filterAid = null) {
       <td>
         <button class="edit-peer-role-btn"
                 data-aid="${esc(rel.self)}"
-                data-peer="${esc(rel.peerAid || rel.peerKey)}"
-                data-peer-key="${esc(rel.peerKey)}"
+                data-peer-id="${esc(rel.peerId || rel.peerAid || rel.peerKey)}"
+                data-channel-key="${esc(rel.channelKey || '')}"
                 data-role="${esc(rel.role)}"
                 data-chat-type="${esc(rel.chatType || 'private')}">
           ${t('action.edit') || 'Edit'}
@@ -4072,51 +4070,16 @@ function renderRelationsTable(data, filterAid = null) {
   });
 }
 
-async function updateAgentRoles(aid, field, users) {
-  try {
-    console.log('[updateAgentRoles] Called with:', { aid, field, users });
-    const token = localStorage.getItem(TOKEN_KEY);
-    const payload = { field, users };
-    console.log('[updateAgentRoles] Sending payload:', JSON.stringify(payload));
-
-    const res = await fetch(apiUrl(`api/roles/agent/${encodeURIComponent(aid)}`), {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${token}`
-      },
-      body: JSON.stringify(payload)
-    });
-
-    console.log('[updateAgentRoles] Response status:', res.status);
-
-    if (!res.ok) {
-      const err = await res.json();
-      console.error('[updateAgentRoles] Error response:', err);
-      alert(t('common.operating') + ' ' + t('pair.error.failed') + ': ' + (err.error || 'unknown'));
-      return false;
-    }
-
-    const result = await res.json();
-    console.log('[updateAgentRoles] Success response:', result);
-    return true;
-  } catch (err) {
-    console.error('[updateAgentRoles] Exception:', err);
-    alert(t('pair.error.network') + ': ' + err.message);
-    return false;
-  }
-}
-
-async function updatePeerRoleOverride(agentAid, peerKey, role) {
+async function updatePeerRoleOverride(agentAid, channelKey, peerId, role) {
   try {
     const token = localStorage.getItem(TOKEN_KEY);
-    const res = await fetch(apiUrl(`api/assignments/peer/${encodeURIComponent(agentAid)}/${encodeURIComponent(peerKey)}`), {
+    const res = await fetch(apiUrl(`api/assignments/peer/${encodeURIComponent(agentAid)}/${encodeURIComponent(peerId)}`), {
       method: role ? 'PUT' : 'DELETE',
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${token}`
       },
-      body: role ? JSON.stringify({ role }) : undefined
+      body: JSON.stringify(role ? { channelKey, role } : { channelKey })
     });
 
     if (!res.ok) {
@@ -4187,11 +4150,11 @@ function initRolesTab() {
       const btn = e.target.closest('.edit-peer-role-btn');
       if (btn) {
         const agentAid = btn.dataset.aid;
-        const peerAid = btn.dataset.peer;
-        const peerKey = btn.dataset.peerKey;
+        const peerId = btn.dataset.peerId;
+        const channelKey = btn.dataset.channelKey;
         const currentRole = btn.dataset.role;
         const chatType = btn.dataset.chatType || 'private';
-        openPeerRoleModal(agentAid, peerAid, peerKey, currentRole, chatType);
+        openPeerRoleModal(agentAid, channelKey, peerId, currentRole, chatType);
       }
     });
   }
@@ -4216,14 +4179,14 @@ function initRolesTab() {
 }
 
 // 打开编辑对端角色弹窗
-function openPeerRoleModal(agentAid, peerAid, peerKey, currentRole, chatType = 'private') {
+function openPeerRoleModal(agentAid, channelKey, peerId, currentRole, chatType = 'private') {
   const modal = $('#peer-role-modal');
   const title = $('#peer-role-title');
   const body = $('#peer-role-body');
   if (!modal || !body) return;
 
   // 设置标题
-  if (title) title.textContent = `${t('roles.editPeerRole') || 'Edit Peer Role'}: ${shortAid(peerAid)}`;
+  if (title) title.textContent = `${t('roles.editPeerRole') || 'Edit Peer Role'}: ${shortAid(peerId)}`;
 
   // 渲染角色选择
   const builtinRoles = ['owner', 'admin', 'member', 'guest', 'anonymous'];
@@ -4241,14 +4204,14 @@ function openPeerRoleModal(agentAid, peerAid, peerKey, currentRole, chatType = '
       </select>
     </div>
     <p style="font-size: 12px; color: var(--dim); margin-top: 12px;">
-      ${t('roles.editHint') || '角色修改会更新此智能体的 owners/admins/members 配置'}
+      ${t('roles.editHint') || '角色修改会更新此智能体的 role-assignments 配置'}
     </p>
   `;
 
   // 保存当前编辑的对端信息
   modal.dataset.agentAid = agentAid;
-  modal.dataset.peerAid = peerAid;
-  modal.dataset.peerKey = peerKey || `aun#${peerAid}`;
+  modal.dataset.channelKey = channelKey || '';
+  modal.dataset.peerId = peerId;
   modal.dataset.currentRole = currentRole;
   modal.dataset.chatType = chatType || 'private';
 
@@ -4268,62 +4231,24 @@ async function savePeerRole() {
   if (!modal || !select) return;
 
   const agentAid = modal.dataset.agentAid;
-  const peerAid = modal.dataset.peerAid;
-  const peerKey = modal.dataset.peerKey || `aun#${peerAid}`;
+  const channelKey = modal.dataset.channelKey;
+  const peerId = modal.dataset.peerId;
   const currentRole = modal.dataset.currentRole;
-  const isGroup = modal.dataset.chatType === 'group';
   const newRole = select.value;
 
-  if (!isGroup && newRole === currentRole) {
+  if (!channelKey || !peerId) {
+    alert(t('pair.error.failed') + ': missing channelKey or peerId');
+    return;
+  }
+
+  if (newRole === currentRole) {
     closePeerRoleModal();
     return;
   }
 
-  // 获取当前 agent 的完整配置
-  const agent = state.roles?.agents?.find(a => a.aid === agentAid);
-  if (!agent) {
-    alert(t('roles.agentNotFound') || 'Agent not found');
-    return;
-  }
-
-  // 更新逻辑：从旧角色列表移除，添加到新角色列表
-  const owners = [...(agent.owners || [])];
-  const admins = [...(agent.admins || [])];
-  const members = [...(agent.members || [])];
-
-  // 移除旧角色
-  const removeFrom = (list) => list.filter(id => id !== peerAid);
-  const newOwners = removeFrom(owners);
-  const newAdmins = removeFrom(admins);
-  const newMembers = removeFrom(members);
-
-  // 添加新角色
-  const listBacked = ['owner', 'admin', 'member'].includes(newRole);
-  const roleOverride = isGroup || !listBacked ? newRole : null;
-
-  if (!isGroup) {
-    if (newRole === 'owner') newOwners.push(peerAid);
-    else if (newRole === 'admin') newAdmins.push(peerAid);
-    else if (newRole === 'member') newMembers.push(peerAid);
-  }
-  // anonymous 不需要加入任何列表
-
   try {
-    // 调用API更新三个字段
-    if (!isGroup) {
-      const okOwners = await updateAgentRoles(agentAid, 'owners', newOwners);
-      const okAdmins = await updateAgentRoles(agentAid, 'admins', newAdmins);
-      const okMembers = await updateAgentRoles(agentAid, 'members', newMembers);
-      if (!okOwners || !okAdmins || !okMembers) return;
-    } else if (owners.includes(peerAid) || admins.includes(peerAid) || members.includes(peerAid)) {
-      const okOwners = await updateAgentRoles(agentAid, 'owners', newOwners);
-      const okAdmins = await updateAgentRoles(agentAid, 'admins', newAdmins);
-      const okMembers = await updateAgentRoles(agentAid, 'members', newMembers);
-      if (!okOwners || !okAdmins || !okMembers) return;
-    }
-
-    const okOverride = await updatePeerRoleOverride(agentAid, peerKey, roleOverride);
-    if (!okOverride) return;
+    const ok = await updatePeerRoleOverride(agentAid, channelKey, peerId, newRole);
+    if (!ok) return;
 
     closePeerRoleModal();
     // 等待后端推送更新

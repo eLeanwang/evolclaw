@@ -730,13 +730,14 @@ export async function getSubMenuItems(this: any, cmd: string, channel: string, c
 
 /** menu.query — 查询当前值。 */
 export async function execMenuQuery(this: any,
-  cmd: string, channel: string, channelId: string, userId?: string, args?: Record<string, any>, _explicitChatType?: MenuChatType, fromControlChannel = false
+  cmd: string, channel: string, channelId: string, userId?: string, args?: Record<string, any>, _explicitChatType?: MenuChatType, fromControlChannel = false, overrideIdentity?: import('../../types.js').SessionIdentity
 ): Promise<{ data: any } | { error: string; code?: string }> {
   const cmdBase = cmd.trim().split(' ')[0];
   if (!cmdBase) return { error: '缺少命令', code: 'MISSING_CMD' };
   const gated = gateControlScope.call(this, { cmdBase, args, channel, fromControlChannel });
   if (gated) return gated;
   const { session, evolagent } = await this.loadMenuContext(channel, channelId);
+  const identity = overrideIdentity ?? this.sessionManager.resolveIdentity(channel, userId);
 
   // ── /agent 查询（只读） ──
   // 控制 channel：验 owners，按 args.aid 查任意 agent；agent channel：强制查自身。
@@ -859,7 +860,6 @@ export async function execMenuQuery(this: any,
   }
 
   if (cmdBase === '/topic') {
-    const identity = this.sessionManager.resolveIdentity(channel, userId);
     if (!this.canReadTopics(identity.role)) {
       return { error: '无权限查看话题', code: 'FORBIDDEN' };
     }
@@ -917,7 +917,7 @@ export async function execMenuQuery(this: any,
           channelType: this.resolveChannelType?.(channel),
           channelId,
           userId,
-          role: this.sessionManager.resolveIdentity(channel, userId).role,
+          role: identity.role,
         });
         return { data: { model: state.model ?? null, baseagent: state.baseagent, source: state.resolved?.source ?? null } };
       }
@@ -937,7 +937,7 @@ export async function execMenuQuery(this: any,
         channelType: this.resolveChannelType?.(channel),
         channelId,
         userId,
-        role: this.sessionManager.resolveIdentity(channel, userId).role,
+        role: identity.role,
       });
       if (state.effort !== undefined) return { data: { effort: state.effort, baseagent: state.baseagent, source: state.resolved?.effortSource ?? null } };
     }
@@ -978,7 +978,7 @@ export async function execMenuQuery(this: any,
     const pmPeerKey = (pmChannelType && pmPeerKeyId)
       ? formatPeerKey(pmChannelType, pmPeerKeyId)
       : undefined;
-    const pmRole = this.sessionManager.resolveIdentity(channel, userId).role;
+    const pmRole = identity.role;
     const currentMode = resolvePermissionMode({ self: pmSelfAid || undefined, peerKey: pmPeerKey, role: pmRole });
     return { data: { mode: currentMode } };
   }
@@ -1033,7 +1033,7 @@ export async function execMenuQuery(this: any,
   // ── name=file：文件元信息（§5.1） ──
   // 权限（§6.3）：agent owner/admin 或 aid channel owner。项目外文件仅 owner 可取（§6.2，由 resolveMenuFilePath 校验）。
   if (cmdBase === '/file') {
-    const role = (this.sessionManager.resolveIdentity(channel, userId)).role;
+    const role = identity.role;
     if (role !== 'owner' && role !== 'admin') {
       return { error: '无权限', code: 'NO_PERMISSION' };
     }

@@ -176,7 +176,7 @@ export async function execAgentAction(
  *  直接 loadAgent + saveAgent（不走 agentSet，避免其内部自动 evolagent.reload）——
  *  重载由用户在 Agents 页操作列手动触发（带任务执行检查）。
  *  AUN 渠道绑定 agent 顶层 aid，不可通过 patch 编辑：拒绝改 aid、拒绝 channels 数组里出现 aun 条目。
- *  可写字段：baseagents / projects / owners / chatmode / channels（非 aun）。 */
+ *  可写字段：baseagents / projects / chatmode / channels（非 aun）。 */
 export async function execAgentUpdate(args: Record<string, any> | undefined): Promise<ExecResult> {
   const a = args ?? {};
   if (!a.aid) return { error: '缺少 aid', code: 'INVALID_ARGS' };
@@ -207,7 +207,6 @@ export async function execAgentUpdate(args: Record<string, any> | undefined): Pr
   let touched = false;
   if (p.baseagents !== undefined) { (config as any).baseagents = p.baseagents; touched = true; }
   if (p.projects !== undefined)   { (config as any).projects = p.projects; touched = true; }
-  if (p.owners !== undefined)     { (config as any).owners = p.owners; touched = true; }
   if (p.chatmode !== undefined)   { (config as any).chatmode = p.chatmode; touched = true; }
   if (p.channels !== undefined)   { (config as any).channels = p.channels; touched = true; }
   if (!touched) return { error: 'patch 为空，无可写字段', code: 'INVALID_ARGS' };

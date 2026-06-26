@@ -5,9 +5,11 @@ import { ensureDataDirs, resolvePaths, agentDir, getPackageRoot, agentMdPath } f
 import { resolveAnthropicConfig } from './agents/baseagent.js';
 import { loadDefaults, loadAllAgents, ensureAgentDirSkeleton, migrateIdentitiesIfNeeded, migrateProcessConfigIfNeeded, loadEvolclawConfig } from './config-store.js';
 import { initConfigManager } from './config/config-manager.js';
+import { resolvePeerRoleDetail, roleToSessionIdentity } from './config/peer-role-resolver.js';
+import { getFirstRoleAssignment, listRoleAssignments } from './config/role-assignments.js';
 import { snapshot as configSnapshot, retentionCleanup, readCurrent, readWVersion, writeWVersion, diffWorkingVsVersion, paramDiff, incrementSuccessCount, collectConfigFiles } from './config/snapshot.js';
 import { appendBootLog, selfDiagnose } from './config/boot-log.js';
-import type { Config, EffectiveAgentConfig, AgentConfig, DefaultsConfig } from './types.js';
+import type { Config, EffectiveAgentConfig, AgentConfig, DefaultsConfig, SessionIdentity } from './types.js';
 import { CONFIG_SCHEMA_VERSION } from './types.js';
 import dotenv from 'dotenv';
 import { SessionManager } from './core/session/session-manager.js';
@@ -549,10 +551,24 @@ async function main() {
   }).catch(() => {});
 
   // 初始化 SessionManager（文件系统后端）
+  const resolveSessionIdentity = (channel: string, userId?: string): SessionIdentity => {
+    const parsed = tryParseChannelKey(channel);
+    const owningAgent = agentRegistry.resolveByChannel(channel);
+    const selfAid = owningAgent?.aid ?? parsed?.selfAID;
+    if (!selfAid || !userId) return { role: 'anonymous', mode: 'interactive' };
+    const detail = resolvePeerRoleDetail({
+      selfAid,
+      channelKey: channel,
+      channelType: parsed?.type || channel,
+      chatType: 'private',
+      actorId: userId,
+      conversationId: userId,
+    });
+    return roleToSessionIdentity(detail.effectiveRole);
+  };
+
   const sessionManager = new SessionManager(paths.sessionsDir, eventBus,
-    (channel, userId) => agentRegistry.isOwner(channel, userId),
-    (channel, userId) => agentRegistry.isAdmin(channel, userId),
-    (channel, userId) => agentRegistry.isMember(channel, userId),
+    resolveSessionIdentity,
     (channel) => agentRegistry.resolveByChannel(channel)?.config.chatmode,
   );
 
@@ -887,7 +903,7 @@ async function main() {
         const owningAgent = agentRegistry.resolveByChannel(channelKey);
         return {
           observable: owningAgent?.getObservable() ?? false,
-          owners: owningAgent?.config.owners ?? [],
+          owners: owningAgent ? listRoleAssignments(owningAgent.aid, channelKey, 'owner').map(a => a.peerId) : [],
         };
       });
     }
@@ -981,7 +997,7 @@ async function main() {
     const agent = agentRegistry.resolveByChannel(inst.adapter.channelKey) ?? agentRegistry.resolveByChannel(name);
     if (!agent) return;
     if (!agent.config.debug?.upmsg) return;
-    const ownerAid = agent.config.owners?.[0];
+    const ownerAid = getFirstRoleAssignment(agent.aid, inst.adapter.channelKey, 'owner')?.peerId;
     if (!ownerAid) return;
     const noticeKey = `${agent.aid}#${name}`;
     if (onlineNoticeSent.has(noticeKey)) return;
@@ -1258,10 +1274,12 @@ async function main() {
       const otherType = other.channelType || other.adapter.channelName;
       if (otherType === sourceChannelType) continue;  // 跳过同类型通道
       if (notified.has(otherType)) continue;  // 同类型已通知过
-      const ownerId = agentRegistry.getOwner(other.adapter.channelKey);
+      const owningAgent = agentRegistry.resolveByChannel(other.adapter.channelKey);
+      const ownerId = owningAgent
+        ? getFirstRoleAssignment(owningAgent.aid, other.adapter.channelKey, 'owner')?.peerId
+        : undefined;
       if (!ownerId) continue;
       notified.add(otherType);
-      const owningAgent = agentRegistry.resolveByChannel(other.adapter.channelKey);
       const envelope = buildEnvelope({
         taskId: `system-channel-down-${crypto.randomBytes(5).toString('hex')}`,
         channel: other.adapter.channelKey,

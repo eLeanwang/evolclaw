@@ -1,4 +1,4 @@
-import fs from 'fs';
+﻿import fs from 'fs';
 import path from 'path';
 import { EvolAgent } from './evolagent.js';
 import { logger } from '../utils/logger.js';
@@ -19,13 +19,13 @@ import type {
   ChannelInstance,
 } from '../types.js';
 
-// ── Channel Fingerprint ────────────────────────────────────────────────────
-// 用于检测多 agent 之间复用同一外部凭证的冲突（appId、aid、token 等）。
-// 格式：{type}:{primaryKey}
+// 鈹€鈹€ Channel Fingerprint 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+// 鐢ㄤ簬妫€娴嬪 agent 涔嬮棿澶嶇敤鍚屼竴澶栭儴鍑瘉鐨勫啿绐侊紙appId銆乤id銆乼oken 绛夛級銆?
+// 鏍煎紡锛歿type}:{primaryKey}
 
 const PRIMARY_KEY_MAP: Record<string, string> = {
   feishu: 'appId',
-  aun: '__aid__', // AUN 实例的"凭证"就是 agent 自身 aid
+  aun: '__aid__', // AUN 瀹炰緥鐨?鍑瘉"灏辨槸 agent 鑷韩 aid
   wechat: 'token',
   wecom: 'botId',
   dingtalk: 'clientId',
@@ -52,7 +52,7 @@ export interface DuplicateReport {
 }
 
 /**
- * 跨 agent 检查同一外部凭证是否被多次声明（飞书 appId、AUN aid 等）。
+ * 璺?agent 妫€鏌ュ悓涓€澶栭儴鍑瘉鏄惁琚娆″０鏄庯紙椋炰功 appId銆丄UN aid 绛夛級銆?
  */
 export function detectDuplicates(agents: EvolAgent[]): DuplicateReport[] {
   const seen = new Map<string, DuplicateReport['agents']>();
@@ -77,7 +77,7 @@ export function detectDuplicates(agents: EvolAgent[]): DuplicateReport[] {
   return out;
 }
 
-// ── Reload hooks（unchanged 接口，hooks 调用方还没切到新结构）──
+// 鈹€鈹€ Reload hooks锛坲nchanged 鎺ュ彛锛宧ooks 璋冪敤鏂硅繕娌″垏鍒版柊缁撴瀯锛夆攢鈹€
 
 export interface ReloadHooks {
   drainChannel(channelName: string): Promise<void>;
@@ -86,40 +86,27 @@ export interface ReloadHooks {
 }
 
 /**
- * 历史接口——新结构下所有写入都直接落到 agents/<aid>/config.json，不再需要
- * globalWriter。本接口保留至阶段 2c 删除；当前实现：no-op + warning。
+ * 鍘嗗彶鎺ュ彛鈥斺€旀柊缁撴瀯涓嬫墍鏈夊啓鍏ラ兘鐩存帴钀藉埌 agents/<aid>/config.json锛屼笉鍐嶉渶瑕?
  */
-export interface GlobalConfigWriter {
-  setOwner(channelName: string, userId: string): void;
-  setShowActivities?(channelName: string, mode: 'all' | 'none'): void;
-}
-
-// ── Registry ───────────────────────────────────────────────────────────────
+// 鈹€鈹€ Registry 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 export class EvolAgentRegistry {
   private agents: Map<string, EvolAgent> = new Map();
-  /** channel key (`<type>#<selfAID>#<name>`) → agent aid */
+  /** channel key (`<type>#<selfAID>#<name>`) 鈫?agent aid */
   private channelIndex: Map<string, string> = new Map();
-  /** 启动期被 ConfigStore 跳过的目录（命名非法 / 缺 config.json / 校验失败等） */
+  /** 鍚姩鏈熻 ConfigStore 璺宠繃鐨勭洰褰曪紙鍛藉悕闈炴硶 / 缂?config.json / 鏍￠獙澶辫触绛夛級 */
   private skipped: Array<{ dirName: string; reason: string }> = [];
 
   /**
-   * agentsDir 参数保留作 ctor 兼容，但实际加载走 ConfigStore（基于 paths.ts）。
-   * globalWriter 已废弃——构造期接受但忽略，阶段 2c 删除。
+   * agentsDir 鍙傛暟淇濈暀浣?ctor 鍏煎锛屼絾瀹為檯鍔犺浇璧?ConfigStore锛堝熀浜?paths.ts锛夈€?
    */
-  constructor(private _agentsDir: string, _globalWriter?: GlobalConfigWriter) {
-    void _globalWriter;
-  }
-
-  setGlobalWriter(_writer: GlobalConfigWriter): void {
-    void _writer; // no-op，废弃 API
-  }
+  constructor(private _agentsDir: string) {}
 
   /**
-   * 扫描 agents/ 目录加载所有 self-agent 配置（合并 defaults），构造 EvolAgent
-   * 实例并建立 channel 路由索引。
+   * 鎵弿 agents/ 鐩綍鍔犺浇鎵€鏈?self-agent 閰嶇疆锛堝悎骞?defaults锛夛紝鏋勯€?EvolAgent
+   * 瀹炰緥骞跺缓绔?channel 璺敱绱㈠紩銆?
    *
-   * `globalConfig` 参数保留作签名兼容，但被忽略——defaults 由 ConfigStore 自己加载。
+   * `globalConfig` 鍙傛暟淇濈暀浣滅鍚嶅吋瀹癸紝浣嗚蹇界暐鈥斺€攄efaults 鐢?ConfigStore 鑷繁鍔犺浇銆?
    */
   loadAll(_globalConfig?: unknown): void {
     void _globalConfig;
@@ -152,7 +139,7 @@ export class EvolAgentRegistry {
       const owners = d.agents.map(o => `${o.aid}(${o.channelName})`).join(', ');
       const msg = `Channel conflict: ${d.fingerprint} claimed by ${owners}`;
       logger.error(`[EvolAgentRegistry] ${msg}`);
-      // 把所有涉及的 agent 标 error；首个保留为 active 也不安全——直接全部 error
+      // 鎶婃墍鏈夋秹鍙婄殑 agent 鏍?error锛涢涓繚鐣欎负 active 涔熶笉瀹夊叏鈥斺€旂洿鎺ュ叏閮?error
       for (const o of d.agents) {
         const a = this.agents.get(o.aid);
         if (a && a.status !== 'error') {
@@ -176,7 +163,7 @@ export class EvolAgentRegistry {
     }
   }
 
-  // ── Lookup / Routing ─────────────────────────────────────────────────
+  // 鈹€鈹€ Lookup / Routing 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
   resolveByChannel(channelKey: string): EvolAgent | null {
     const aid = this.channelIndex.get(channelKey);
@@ -185,38 +172,8 @@ export class EvolAgentRegistry {
   }
 
   /**
-   * `globalFallback` 参数保留作签名兼容（EvolAgentRegistryHandle），新结构下不再使用。
+   * `globalFallback` 鍙傛暟淇濈暀浣滅鍚嶅吋瀹癸紙EvolAgentRegistryHandle锛夛紝鏂扮粨鏋勪笅涓嶅啀浣跨敤銆?
    */
-  isOwner(channelKey: string, userId: string, _globalFallback?: (ch: string, uid: string) => boolean): boolean {
-    void _globalFallback;
-    const agent = this.resolveByChannel(channelKey);
-    return agent?.isOwner(channelKey, userId) ?? false;
-  }
-
-  isAdmin(channelKey: string, userId: string, _globalFallback?: (ch: string, uid: string) => boolean): boolean {
-    void _globalFallback;
-    const agent = this.resolveByChannel(channelKey);
-    return agent?.isAdmin(channelKey, userId) ?? false;
-  }
-
-  isMember(channelKey: string, userId: string): boolean {
-    const agent = this.resolveByChannel(channelKey);
-    return agent?.isMember(channelKey, userId) ?? false;
-  }
-
-  getOwner(channelKey: string): string | undefined {
-    return this.resolveByChannel(channelKey)?.getOwner(channelKey);
-  }
-
-  setChannelOwner(channelKey: string, userId: string): void {
-    const agent = this.resolveByChannel(channelKey);
-    if (!agent) {
-      logger.warn(`[EvolAgentRegistry] setChannelOwner: channel "${channelKey}" not found`);
-      return;
-    }
-    agent.setOwner(channelKey, userId);
-  }
-
   getShowActivities(channelKey: string): 'all' | 'none' {
     return this.resolveByChannel(channelKey)?.getShowActivities(channelKey) ?? 'all';
   }
@@ -230,7 +187,7 @@ export class EvolAgentRegistry {
     agent.setShowActivities(channelKey, mode);
   }
 
-  // ── Agent enumeration ────────────────────────────────────────────────
+  // 鈹€鈹€ Agent enumeration 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
   get(aidOrName: string): EvolAgent | null {
     return this.agents.get(aidOrName) ?? null;
@@ -240,7 +197,7 @@ export class EvolAgentRegistry {
     return [...this.agents.values()].map(a => this.toInfo(a));
   }
 
-  /** 启动后还能跑（status === 'stopped'）的 agents——给 AgentLoader 起 runner 用。 */
+  /** 鍚姩鍚庤繕鑳借窇锛坰tatus === 'stopped'锛夌殑 agents鈥斺€旂粰 AgentLoader 璧?runner 鐢ㄣ€?*/
   runnableAgents(): EvolAgent[] {
     return [...this.agents.values()].filter(a => a.status === 'stopped');
   }
@@ -249,11 +206,11 @@ export class EvolAgentRegistry {
     return [...this.skipped];
   }
 
-  // ── 热加载新 agent ──────────────────────────────────────────────────
+  // 鈹€鈹€ 鐑姞杞芥柊 agent 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
   /**
-   * 动态加载一个新 agent（磁盘上已有 config.json 但运行时还没加载）。
-   * 返回新创建的 EvolAgent，或 null（已存在 / 校验失败）。
+   * 鍔ㄦ€佸姞杞戒竴涓柊 agent锛堢鐩樹笂宸叉湁 config.json 浣嗚繍琛屾椂杩樻病鍔犺浇锛夈€?
+   * 杩斿洖鏂板垱寤虹殑 EvolAgent锛屾垨 null锛堝凡瀛樺湪 / 鏍￠獙澶辫触锛夈€?
    */
   loadNewAgent(aid: string): EvolAgent | null {
     if (this.agents.has(aid)) {
@@ -272,7 +229,7 @@ export class EvolAgentRegistry {
       return null;
     }
 
-    // Channel fingerprint 冲突检测（防止新 agent 复用已有 agent 的凭证）
+    // Channel fingerprint 鍐茬獊妫€娴嬶紙闃叉鏂?agent 澶嶇敤宸叉湁 agent 鐨勫嚟璇侊級
     const conflict = this.checkConflictForReload(raw, aid);
     if (conflict) {
       logger.warn(`[EvolAgentRegistry] loadNewAgent ${aid}: ${conflict}`);
@@ -284,16 +241,16 @@ export class EvolAgentRegistry {
     ensureAgentDirSkeleton(aid);
     this.agents.set(aid, agent);
 
-    // 重建 channel index
+    // 閲嶅缓 channel index
     for (const key of agent.channelInstanceNames()) {
       this.channelIndex.set(key, aid);
     }
 
-    logger.info(`[EvolAgentRegistry] ✓ Hot-loaded agent: ${aid}`);
+    logger.info(`[EvolAgentRegistry] 鉁?Hot-loaded agent: ${aid}`);
     return agent;
   }
 
-  // ── Reload ───────────────────────────────────────────────────────────
+  // 鈹€鈹€ Reload 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
   async reload(aidOrName: string, hooks: ReloadHooks): Promise<void> {
     const oldAgent = this.agents.get(aidOrName);
@@ -306,21 +263,21 @@ export class EvolAgentRegistry {
 
     const merged = resolveEffective({ self: raw.aid });
 
-    // ── disabled → enabled 转换：需要完整启动流程 ──
+    // 鈹€鈹€ disabled 鈫?enabled 杞崲锛氶渶瑕佸畬鏁村惎鍔ㄦ祦绋?鈹€鈹€
     if (oldAgent.status === 'disabled' && raw.enabled !== false) {
       oldAgent.swapConfig(raw, merged);
       const hotLoad = (globalThis as any).__evolclaw_hotLoadAgent;
       if (!hotLoad) throw new Error(`Cannot enable agent "${aidOrName}": hot-load handler not initialized`);
-      // 从 registry 中移除旧的 disabled 实例，hotLoad 会重新创建
+      // 浠?registry 涓Щ闄ゆ棫鐨?disabled 瀹炰緥锛宧otLoad 浼氶噸鏂板垱寤?
       this.agents.delete(oldAgent.aid);
       this.channelIndex.clear();
       this.buildChannelIndex();
       await hotLoad(oldAgent.aid);
-      logger.info(`[Reload] Agent "${aidOrName}" transitioned from disabled → enabled (full startup)`);
+      logger.info(`[Reload] Agent "${aidOrName}" transitioned from disabled 鈫?enabled (full startup)`);
       return;
     }
 
-    // ── enabled → disabled 转换：断开所有 channel ──
+    // 鈹€鈹€ enabled 鈫?disabled 杞崲锛氭柇寮€鎵€鏈?channel 鈹€鈹€
     if (oldAgent.status !== 'disabled' && raw.enabled === false) {
       for (const ch of oldAgent.channelInstanceNames()) {
         try { await hooks.drainChannel(ch); } catch {}
@@ -338,7 +295,7 @@ export class EvolAgentRegistry {
     if (conflict) throw new Error(`Channel conflict: ${conflict}`);
 
     const oldChannels = new Set(oldAgent.channelInstanceNames());
-    // 计算新 channel keys：隐式 AUN + 显式非 AUN channels（与 channelInstanceNames 逻辑一致）
+    // 璁＄畻鏂?channel keys锛氶殣寮?AUN + 鏄惧紡闈?AUN channels锛堜笌 channelInstanceNames 閫昏緫涓€鑷达級
     const aunKey = oldAgent.effectiveChannelName('aun', 'main');
     const otherKeys = raw.channels.filter(c => c.type !== 'aun').map(c => oldAgent.effectiveChannelName(c.type, c.name));
     const newChannels = new Set([aunKey, ...otherKeys]);
@@ -346,7 +303,7 @@ export class EvolAgentRegistry {
     const toAdd = [...newChannels].filter(c => !oldChannels.has(c));
     const kept = [...oldChannels].filter(c => newChannels.has(c));
 
-    // 凭证变化的 kept channel 当 remove+add 处理（强制重建以使用新凭证）
+    // 鍑瘉鍙樺寲鐨?kept channel 褰?remove+add 澶勭悊锛堝己鍒堕噸寤轰互浣跨敤鏂板嚟璇侊級
     const credentialsChanged: string[] = [];
     const trulyKept: string[] = [];
     for (const ch of kept) {
@@ -371,11 +328,11 @@ export class EvolAgentRegistry {
         removedSuccessfully.push(ch);
       }
 
-      // swap config 后再起新 channel —— startChannel hook 需要看到新 config
+      // swap config 鍚庡啀璧锋柊 channel 鈥斺€?startChannel hook 闇€瑕佺湅鍒版柊 config
       oldAgent.swapConfig(raw, merged);
 
-      // 热重载也刷新身份层缓存（persona / working 等 fileCache 'agent-files:<aid>' 组），
-      // 使 personal 文件改动经 reload 即时生效，不必重启。
+      // 鐑噸杞戒篃鍒锋柊韬唤灞傜紦瀛橈紙persona / working 绛?fileCache 'agent-files:<aid>' 缁勶級锛?
+      // 浣?personal 鏂囦欢鏀瑰姩缁?reload 鍗虫椂鐢熸晥锛屼笉蹇呴噸鍚€?
       oldAgent.invalidatePersonaCache();
 
       for (const ch of toAdd) {
@@ -383,7 +340,7 @@ export class EvolAgentRegistry {
         addedSuccessfully.push(ch);
       }
 
-      // truly kept 的 adapter 实例已经在 oldAgent.channels 里，无需迁移
+      // truly kept 鐨?adapter 瀹炰緥宸茬粡鍦?oldAgent.channels 閲岋紝鏃犻渶杩佺Щ
 
       oldAgent.status = 'running';
 
@@ -394,22 +351,22 @@ export class EvolAgentRegistry {
       for (const ch of addedSuccessfully) {
         try { await hooks.disconnectChannel(ch); } catch { /* best effort */ }
       }
-      // 这里没法 rollback 到旧 raw（已经被 swapConfig 覆盖）——记录错误，让 oldAgent 进 error 态
+      // 杩欓噷娌℃硶 rollback 鍒版棫 raw锛堝凡缁忚 swapConfig 瑕嗙洊锛夆€斺€旇褰曢敊璇紝璁?oldAgent 杩?error 鎬?
       oldAgent.status = 'error';
       oldAgent.error = `Reload failed (rollback partial): ${err instanceof Error ? err.message : String(err)}`;
       throw err;
     }
   }
 
-  // ── Stop / Start（运行时断连/重连，不改 config.enabled）──────────────────
+  // 鈹€鈹€ Stop / Start锛堣繍琛屾椂鏂繛/閲嶈繛锛屼笉鏀?config.enabled锛夆攢鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
   async stopAgent(aidOrName: string, hooks: ReloadHooks): Promise<void> {
     const agent = this.agents.get(aidOrName);
     if (!agent) throw new Error(`Agent "${aidOrName}" not found`);
     if (agent.status === 'disabled') throw new Error(`Agent is disabled; use enable/disable instead`);
     if (agent.status === 'stopped') return;
-    // 先断开 AID 连接（下线），让未送达的消息保留在云端；
-    // 然后中断正在执行的大模型调用（不等它跑完）。
+    // 鍏堟柇寮€ AID 杩炴帴锛堜笅绾匡級锛岃鏈€佽揪鐨勬秷鎭繚鐣欏湪浜戠锛?
+    // 鐒跺悗涓柇姝ｅ湪鎵ц鐨勫ぇ妯″瀷璋冪敤锛堜笉绛夊畠璺戝畬锛夈€?
     for (const ch of agent.channelInstanceNames()) {
       try { await hooks.disconnectChannel(ch); } catch {}
     }
@@ -450,7 +407,7 @@ export class EvolAgentRegistry {
     return null;
   }
 
-  // ── 友好名缓存（从本地 agent.md 解析，缺失时异步从网络拉取）──
+  // 鈹€鈹€ 鍙嬪ソ鍚嶇紦瀛橈紙浠庢湰鍦?agent.md 瑙ｆ瀽锛岀己澶辨椂寮傛浠庣綉缁滄媺鍙栵級鈹€鈹€
   private displayNameCache = new Map<string, string>();
   private displayNamePending = new Set<string>();
 
@@ -468,7 +425,7 @@ export class EvolAgentRegistry {
         }
       }
     } catch { /* ignore */ }
-    // 异步从网络拉取（仅一次，不阻塞）
+    // 寮傛浠庣綉缁滄媺鍙栵紙浠呬竴娆★紝涓嶉樆濉烇級
     if (!this.displayNamePending.has(aid)) {
       this.displayNamePending.add(aid);
       import('../aun/aid/index.js').then(({ agentmdGet }) => {
@@ -486,7 +443,7 @@ export class EvolAgentRegistry {
     return undefined;
   }
 
-  // ── personal 名缓存（从 personal/persona.md 解析 "我叫**名字**"）──
+  // 鈹€鈹€ personal 鍚嶇紦瀛橈紙浠?personal/persona.md 瑙ｆ瀽 "鎴戝彨**鍚嶅瓧**"锛夆攢鈹€
   private personalNameCache = new Map<string, string | undefined>();
 
   private resolvePersonalName(aid: string): string | undefined {
@@ -496,11 +453,11 @@ export class EvolAgentRegistry {
       const personaPath = path.join(agentPersonalDir(aid), 'persona.md');
       if (fs.existsSync(personaPath)) {
         const content = fs.readFileSync(personaPath, 'utf-8');
-        // 1) 加粗格式: "我叫**名字**" 或 "我是**名字**"
-        const bold = content.match(/我[叫是]\s*\*{1,2}(.+?)\*{1,2}/);
+        // 1) 鍔犵矖鏍煎紡: "鎴戝彨**鍚嶅瓧**" 鎴?"鎴戞槸**鍚嶅瓧**"
+        const bold = content.match(/鎴慬鍙槸]\s*\*{1,2}(.+?)\*{1,2}/);
         if (bold?.[1]) { this.personalNameCache.set(aid, bold[1]); return bold[1]; }
-        // 2) 无加粗格式: "我是栖梧，" → 取到第一个分隔符（逗号/句号/括号/空格）前
-        const plain = content.match(/(?:我是|我叫)\s*([^\s（(，,。.)]+)/);
+        // 2) 鏃犲姞绮楁牸寮? "鎴戞槸鏍栨ⅶ锛? 鈫?鍙栧埌绗竴涓垎闅旂锛堥€楀彿/鍙ュ彿/鎷彿/绌烘牸锛夊墠
+        const plain = content.match(/(?:鎴戞槸|鎴戝彨)\s*([^\s锛?锛?銆?)]+)/);
         if (plain?.[1]) { this.personalNameCache.set(aid, plain[1]); return plain[1]; }
       }
     } catch { /* ignore */ }
@@ -512,7 +469,7 @@ export class EvolAgentRegistry {
     const displayName = this.resolveDisplayName(agent.aid);
     const personalName = this.resolvePersonalName(agent.aid);
 
-    // 解析响应模式（从 response_modes 配置中读取，无配置时使用系统默认）
+    // 瑙ｆ瀽鍝嶅簲妯″紡锛堜粠 response_modes 閰嶇疆涓鍙栵紝鏃犻厤缃椂浣跨敤绯荤粺榛樿锛?
     const rmConfig = agent.config.response_modes;
     const responseModePrivate = rmConfig?.default_private || 'interactive';
     const responseModeGroup = rmConfig?.default_group || 'proactive';
@@ -528,7 +485,6 @@ export class EvolAgentRegistry {
       baseagent: agent.baseagent,
       model: agent.model,
       effort: agent.effort,
-      owners: agent.config.owners ?? [],
       lastActivity: agent.lastActivity,
       activeSessions: agent.activeSessions,
       error: agent.error,

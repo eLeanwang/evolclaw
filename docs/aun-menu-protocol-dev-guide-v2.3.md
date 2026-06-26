@@ -505,7 +505,7 @@ interface MenuItem {
 { "data": [
     { "value": "claude-opus-4-7",   "label": "claude-opus-4-7",   "selected": true },
     { "value": "claude-sonnet-4-6", "label": "claude-sonnet-4-6", "selected": false },
-    { "value": "claude-haiku-4-5",  "label": "claude-haiku-4-5",  "selected": false }
+    { "value": "claude-haiku-4-5-20251001",  "label": "claude-haiku-4-5-20251001",  "selected": false }
 ]}
 ```
 

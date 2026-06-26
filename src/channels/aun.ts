@@ -27,6 +27,7 @@ import { getProcessStartTime } from '../utils/process-introspect.js';
 import * as outbox from '../aun/outbox.js';
 import { guessMime, formatSize } from '../utils/media-cache.js';
 import { PeerIdentityCache } from '../core/relation/peer-identity.js';
+import { getFirstRoleAssignment } from '../config/role-assignments.js';
 
 /**
  * 构造 connect extra_info：自描述本进程身份。
@@ -76,7 +77,6 @@ export interface AUNConfig {
   flushDelay?: number;
   aunTrace?: boolean;     // 启用数据追踪日志
   aunSdkLog?: boolean;    // 启用 AUN SDK 内部日志（写入 ~/.aun/logs/ts-sdk-YYYYMMDD.log）
-  owner?: string;         // Owner AID，用于发送欢迎消息
   agentName?: string;     // self-agent 的 AID（用于 status 表格识别归属）
   channelName?: string;   // channel 实例名（用于日志/状态聚合）
   pureIdentity?: boolean;  // 纯身份模式：跳过 evolagent onboarding（welcome / agent.md 上传 / 自身 agent.md 拉取 / group 监听）
@@ -944,7 +944,7 @@ export class AUNChannel {
         return;
       }
 
-      const owner = agentConfig.owners?.[0] ?? this.config.owner;
+      const owner = getFirstRoleAssignment(aidName, `aun#${aidName}#main`, 'owner')?.peerId;
       if (!owner) {
         logger.info(`${this.logPrefix()} No owner configured, skipping welcome message (will retry after auto-bind)`);
         return;
@@ -3638,7 +3638,6 @@ export class AUNChannelPlugin implements ChannelPlugin {
       gatewayUrl: inst.gatewayUrl,
       accessToken: inst.accessToken,
       flushDelay: inst.flushDelay,
-      owner: (inst as any).owner ?? inst.owners?.[0],
       agentName: ctx.agentName,
       channelName: inst.name,
       aunTrace: ctx.debug?.aunTrace,

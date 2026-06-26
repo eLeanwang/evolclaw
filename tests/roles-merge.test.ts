@@ -78,13 +78,13 @@ describe('mergeRolesConfig', () => {
         member: {
           description: '团队成员',
           permissions: {
-            'baseagents.claude.model': { default: 'claude-haiku-4-5', allowOverride: true, allowedModels: ['claude-haiku-*'] },
+            'baseagents.claude.model': { default: 'claude-haiku-4-5-20251001', allowOverride: true, allowedModels: ['claude-haiku-*'] },
           },
         },
       },
     };
     const merged = mergeRolesConfig(base, overlay);
-    expect(merged.roles.member.permissions['baseagents.claude.model'].default).toBe('claude-haiku-4-5');
+    expect(merged.roles.member.permissions['baseagents.claude.model'].default).toBe('claude-haiku-4-5-20251001');
   });
 
   it('用户自定义角色完整保留', () => {

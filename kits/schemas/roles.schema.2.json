@@ -18,7 +18,7 @@
     "defaultRole": {
       "type": "string",
       "default": "anonymous",
-      "description": "Default role for users not in owners/admins/members list (fallback role for first access)"
+      "description": "Default role for unauthenticated users without an explicit role assignment"
     },
     "roles": {
       "type": "object",

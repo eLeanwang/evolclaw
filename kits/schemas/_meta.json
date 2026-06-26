@@ -5,16 +5,18 @@
     "agent-config":    { "currentVersion": 2 },
     "relation-config": { "currentVersion": 1 },
     "behavior":        { "currentVersion": 1 },
-    "roles":           { "currentVersion": 2 }
+    "roles":           { "currentVersion": 2 },
+    "role-assignments": { "currentVersion": 1 }
   },
   "history": [
     { "schema": "evolclaw",        "version": 1, "date": "2026-06-14", "description": "initial: process config (evolclaw.json)" },
-    { "schema": "defaults",        "version": 1, "date": "2026-06-14", "description": "initial: global defaults (owners/admins/models.allowed/projects/aun)" },
+    { "schema": "defaults",        "version": 1, "date": "2026-06-14", "description": "initial: global defaults (models.allowed/projects/aun)" },
     { "schema": "agent-config",    "version": 1, "date": "2026-06-14", "description": "initial: agent config with all parameters unified in config.json" },
     { "schema": "agent-config",    "version": 2, "date": "2026-06-23", "description": "add lifecycle state for bootstrap flow; initialized retained for compatibility" },
-    { "schema": "relation-config", "version": 1, "date": "2026-06-14", "description": "initial: relation config (owners/admins/extra_backup)" },
+    { "schema": "relation-config", "version": 1, "date": "2026-06-14", "description": "initial: relation config" },
     { "schema": "behavior",        "version": 1, "date": "2026-06-23", "description": "agent-writable behavior fields (HA)" },
     { "schema": "roles",           "version": 1, "date": "2026-06-24", "description": "global role definitions and permissions" },
-    { "schema": "roles",           "version": 2, "date": "2026-06-25", "description": "add defaultRole (global fallback) + allowAccess (per-role access control)" }
+    { "schema": "roles",           "version": 2, "date": "2026-06-25", "description": "add defaultRole (global fallback) + allowAccess (per-role access control)" },
+    { "schema": "role-assignments", "version": 1, "date": "2026-06-26", "description": "per-agent peer role assignment source of truth" }
   ]
 }
