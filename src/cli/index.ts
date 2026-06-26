@@ -169,6 +169,13 @@ export async function main(args: string[]) {
       await cmdStorage(args.slice(1));
       break;
     }
+    case 'fs': {
+      const { suppressSdkLogs } = await import('../aun/aid/index.js');
+      suppressSdkLogs();
+      const { cmdFs } = await import('./fs-command.js');
+      await cmdFs(args.slice(1));
+      break;
+    }
     case 'msg': {
       const { suppressSdkLogs } = await import('../aun/aid/index.js');
       suppressSdkLogs();
@@ -292,6 +299,18 @@ Commands:
                   aid delete --orphan          清理无私钥的外部 AID 缓存
                   aid delete --unrecoverable   清理云端公钥已变更、不可恢复的 AID
                                                  默认 dry-run，加 --yes 执行
+  fs            AUN 文件系统统一入口
+                  fs ls|stat|cat|find <AID>:/path
+                  fs cp <src> <dst>      上传/下载/远程复制
+                  fs mv <src> <dst>      移动/改名（同后端）
+                  fs rm [-r] <AID>:/path
+                  fs mkdir [-p] <AID>:/path
+                  fs ln -s <target> <AID>:/path
+                  fs chmod +r|o-r <AID>:/path
+                  fs setfacl|getfacl <AID>:/path
+                  fs token issue|revoke|ls <AID>:/path
+                  fs df <AID>:
+                  fs mount <target> --volume <id>|--source <src>
   net           网络链路诊断
                   net check [<aid>]  10 步链路检测（DNS→Discovery→TCP→TLS→WSS→Auth→Ping→Echo）
                   net help           查看详细帮助
