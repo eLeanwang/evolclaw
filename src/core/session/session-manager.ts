@@ -587,6 +587,7 @@ export class SessionManager {
         if (!session.metadata) session.metadata = {};
         if (!session.metadata.peerId) { session.metadata.peerId = userId; mutated = true; }
         if (!session.metadata.peerName && metadata?.peerName) { session.metadata.peerName = metadata.peerName; mutated = true; }
+        if (metadata?.peerType && (session.metadata as any).peerType !== metadata.peerType) { (session.metadata as any).peerType = metadata.peerType; mutated = true; }
         if (metadata?.channelKey && session.metadata.channelKey !== metadata.channelKey) { session.metadata.channelKey = metadata.channelKey; mutated = true; }
       }
       if (metadata?.channelKey && chatType !== 'private') {
@@ -595,6 +596,11 @@ export class SessionManager {
           session.metadata.channelKey = metadata.channelKey;
           mutated = true;
         }
+      }
+      if (metadata?.peerType && (session.metadata as any)?.peerType !== metadata.peerType) {
+        if (!session.metadata) session.metadata = {};
+        (session.metadata as any).peerType = metadata.peerType;
+        mutated = true;
       }
       if (mutated) {
         this.persistSession(session, 'sync');
@@ -627,6 +633,9 @@ export class SessionManager {
       }
       if (chatType === 'private' && metadata?.peerName && !session.metadata.peerName) {
         session.metadata.peerName = metadata.peerName;
+      }
+      if (metadata?.peerType) {
+        (session.metadata as any).peerType = metadata.peerType;
       }
       this.persistSession(session, 'sync');
       return session;

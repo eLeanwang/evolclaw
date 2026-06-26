@@ -1906,6 +1906,38 @@ tr.ag-disabled .ag-name { color: var(--dim); }
   transform: translateY(-1px);
 }
 
+.group-expand-btn {
+  width: 22px;
+  height: 22px;
+  margin-right: 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--fg);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.group-conversation-row {
+  background: var(--bg-surface);
+}
+
+.group-member-row td {
+  background: var(--bg);
+}
+
+.group-member-indent {
+  display: inline-block;
+  padding-left: 24px;
+  color: var(--fg);
+}
+
+.group-member-empty td {
+  color: var(--dim);
+  font-size: 13px;
+}
+
 .role-guest {
   background: #f3f4f6;
   color: #374151;
@@ -1968,6 +2000,9 @@ tr.ag-disabled .ag-name { color: var(--dim); }
   background: var(--bg3);
   border: 1px solid var(--border);
   border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
 .role-default-label {

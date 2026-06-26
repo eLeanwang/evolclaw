@@ -1148,7 +1148,10 @@ export type BuiltinRole = 'owner' | 'admin' | 'member' | 'guest' | 'anonymous';
 
 export interface RolesConfig {
   $schema_version: number;
-  defaultRole?: string;  // 全局默认角色（未在名单用户的兜底角色），默认 'anonymous'
+  defaultRoles?: {
+    private: string;
+    group: string;
+  };
   roles: Record<string, RoleDefinition>;
 }
 
@@ -1158,9 +1161,12 @@ export interface RoleDefinition {
   permissions: Record<string, FieldPermission>;
 }
 
+export type RoleAssignmentScope = 'private' | 'group' | 'group-member';
+
 export interface RoleAssignment {
-  channelKey: string;
-  peerId: string;
+  scope: RoleAssignmentScope;
+  peerId?: string;
+  groupId?: string;
   role: string;
   note?: string;
   createdAt?: number;

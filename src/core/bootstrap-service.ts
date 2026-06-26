@@ -127,7 +127,7 @@ export class BootstrapService {
   }
 
   private resolveConfiguredRecipient(config: AgentConfig, channelKey: string, _channelType?: string): string | undefined {
-    return getFirstRoleAssignment(config.aid, channelKey, 'owner')?.peerId;
+    return getFirstRoleAssignment(config.aid, { scope: 'private', role: 'owner' })?.peerId;
   }
 
   private defaultChannelIdForConnection(channelType: string | undefined, recipientId: string): string | undefined {

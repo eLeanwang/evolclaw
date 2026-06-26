@@ -76,8 +76,11 @@ export function clearRolesCache(): void {
  */
 export function getBuiltinRolesConfig(): RolesConfig {
   return {
-    $schema_version: 2,
-    defaultRole: 'anonymous',
+    $schema_version: 3,
+    defaultRoles: {
+      private: 'anonymous',
+      group: 'guest',
+    },
     roles: {
       owner: {
         description: 'Agent 所有者，完全控制权限',

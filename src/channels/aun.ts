@@ -944,7 +944,7 @@ export class AUNChannel {
         return;
       }
 
-      const owner = getFirstRoleAssignment(aidName, `aun#${aidName}#main`, 'owner')?.peerId;
+      const owner = getFirstRoleAssignment(aidName, { scope: 'private', role: 'owner' })?.peerId;
       if (!owner) {
         logger.info(`${this.logPrefix()} No owner configured, skipping welcome message (will retry after auto-bind)`);
         return;

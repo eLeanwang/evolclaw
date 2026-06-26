@@ -1683,7 +1683,7 @@ export class ResponseEngine implements IMessageProcessor {
                 const targetChannelKey = targetInfo.adapter.channelKey || targetAdapterName;
                 const targetAgent = this.agentRegistry?.resolveByChannel(targetChannelKey);
                 const ownerPeerId = targetAgent
-                  ? getFirstRoleAssignment(targetAgent.aid, targetChannelKey, 'owner')?.peerId
+                  ? getFirstRoleAssignment(targetAgent.aid, { scope: 'private', role: 'owner' })?.peerId
                   : undefined;
                 targetChannelId = ownerPeerId ? (this.sessionManager.getOwnerChatId(targetChannelType, ownerPeerId) ?? '') : '';
                 if (!targetChannelId) {

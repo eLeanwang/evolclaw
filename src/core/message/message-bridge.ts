@@ -7,7 +7,7 @@ import { chatDirPath } from '../session/session-fs-store.js';
 import { tryParseChannelKey } from '../channel-loader.js';
 import { resolvePaths } from '../../paths.js';
 import { resolvePeerRoleDetail, roleToSessionIdentity, type ResolvedPeerRole } from '../../config/peer-role-resolver.js';
-import { hasRoleAssignment, setRoleAssignment } from '../../config/role-assignments.js';
+import { hasRoleAssignment, setPrivateRoleAssignment } from '../../config/role-assignments.js';
 import type { SessionManager } from '../session/session-manager.js';
 import type { IMessageProcessor } from './message-processor-interface.js';
 import type { MessageQueue } from './message-queue.js';
@@ -173,6 +173,8 @@ export class MessageBridge {
               timestamp: Date.now(),
               encrypt: inboundEncrypt,
               chatmode: inboundChatmode,
+              peerName: msg.peerName,
+              peerType: msg.peerType,
             }));
           } catch (e) {
             logger.debug(`[MessageBridge] Failed to log inbound command: ${e}`);
@@ -204,11 +206,13 @@ export class MessageBridge {
         if (chatType === 'private' && msg.peerId) {
           metadata.peerId = msg.peerId;
           if (msg.peerName) metadata.peerName = msg.peerName;
+          if (msg.peerType) metadata.peerType = msg.peerType;
         }
         if (chatType === 'group') {
           // 群聊：peerId 是当前消息发送者；groupId 在 channel 提供时存到 metadata
           if (msg.peerId) metadata.peerId = msg.peerId;
           if (msg.peerName) metadata.peerName = msg.peerName;
+          if (msg.peerType) metadata.peerType = msg.peerType;
           if (msg.groupId) metadata.groupId = msg.groupId;
         }
         // Resolve effective project path: 用通道所属 agent 的 projectPath；
@@ -270,6 +274,8 @@ export class MessageBridge {
             timestamp: fullMessage.timestamp,
             encrypt: inboundEncrypt,
             chatmode: inboundChatmode,
+            peerName: msg.peerName,
+            peerType: msg.peerType,
           }));
         }
 
@@ -534,8 +540,8 @@ export class MessageBridge {
 
   /** 首次交互自动绑定 owner —— 通过 channel-routed self-agent 完成 */
   private async autoBindOwner(selfAid: string, channelKey: string, userId: string): Promise<void> {
-    if (hasRoleAssignment(selfAid, channelKey, 'owner')) return;
-    setRoleAssignment(selfAid, channelKey, userId, 'owner', { note: 'auto-bound first inbound peer' });
+    if (hasRoleAssignment(selfAid, { scope: 'private', role: 'owner' })) return;
+    setPrivateRoleAssignment(selfAid, userId, 'owner', { note: 'auto-bound first inbound peer' });
     logger.info(`[Owner] Auto-bound ${channelKey} owner: ${userId}`);
     this.eventBus.publish({ type: 'channel:owner-bound', channel: channelKey, userId });
   }
@@ -560,7 +566,6 @@ export class MessageBridge {
     }
     return resolvePeerRoleDetail({
       selfAid: ctx.selfAid,
-      channelKey: ctx.channelKey,
       channelType: ctx.channelType,
       chatType: ctx.chatType,
       actorId: ctx.actorId,

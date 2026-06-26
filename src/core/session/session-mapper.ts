@@ -9,12 +9,13 @@ export function sessionToFile(session: Session): SessionFile {
   if (session.metadata) {
     if (session.metadata.peerId) metadata.peerId = session.metadata.peerId;
     if (session.metadata.peerName) metadata.peerName = session.metadata.peerName;
+    if ((session.metadata as any).peerType) metadata.peerType = (session.metadata as any).peerType;
     if (session.metadata.groupId) metadata.groupId = session.metadata.groupId;
     if (session.metadata.replyContext) metadata.replyContext = session.metadata.replyContext;
     if (session.metadata.agentSessions) metadata.agentSessions = session.metadata.agentSessions;
     if (session.metadata.resumeAt) metadata.resumeAt = session.metadata.resumeAt;
     for (const [k, v] of Object.entries(session.metadata)) {
-      if (['isActive', 'channelKey', 'channelName', 'permissionMode', 'peerId', 'peerName', 'groupId', 'replyContext', 'agentSessions', 'resumeAt'].includes(k)) continue;
+      if (['isActive', 'channelKey', 'channelName', 'permissionMode', 'peerId', 'peerName', 'peerType', 'groupId', 'replyContext', 'agentSessions', 'resumeAt'].includes(k)) continue;
       if (v !== undefined) metadata[k] = v;
     }
   }
@@ -61,6 +62,7 @@ export function fileToSession(file: SessionFile): Session {
 
   if (file.metadata.peerId) metadata.peerId = file.metadata.peerId;
   if (file.metadata.peerName) metadata.peerName = file.metadata.peerName;
+  if (file.metadata.peerType) (metadata as any).peerType = file.metadata.peerType;
   if (file.metadata.groupId) metadata.groupId = file.metadata.groupId;
   if (file.metadata.replyContext) metadata.replyContext = file.metadata.replyContext;
   if (file.metadata.agentSessions) metadata.agentSessions = file.metadata.agentSessions;
@@ -68,7 +70,7 @@ export function fileToSession(file: SessionFile): Session {
   // permissionMode 不再从文件还原到 metadata（运行时 per-message 解析）
 
   for (const [k, v] of Object.entries(file.metadata)) {
-    if (['peerId', 'peerName', 'groupId', 'replyContext', 'agentSessions', 'resumeAt', 'permissionMode'].includes(k)) continue;
+    if (['peerId', 'peerName', 'peerType', 'groupId', 'replyContext', 'agentSessions', 'resumeAt', 'permissionMode'].includes(k)) continue;
     if (v !== undefined) (metadata as any)[k] = v;
   }
 

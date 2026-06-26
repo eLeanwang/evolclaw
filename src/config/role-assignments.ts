@@ -1,14 +1,48 @@
 import { ConfigTarget, ensureFile, read, write } from './config-manager.js';
 import { readRolesConfig } from './roles.js';
-import type { RoleAssignment, RoleAssignmentsConfig } from '../types.js';
+import type { RoleAssignment, RoleAssignmentsConfig, RoleAssignmentScope } from '../types.js';
 
-export function assignmentKey(channelKey: string, peerId: string): string {
-  return `${channelKey}::${peerId}`;
+export interface RoleAssignmentFilter {
+  scope?: RoleAssignmentScope;
+  role?: string;
+  peerId?: string;
+  groupId?: string;
+}
+
+function keyPart(value: string): string {
+  return encodeURIComponent(value);
+}
+
+export function privateAssignmentKey(peerId: string): string {
+  return `private::${keyPart(peerId)}`;
+}
+
+export function groupAssignmentKey(groupId: string): string {
+  return `group::${keyPart(groupId)}`;
+}
+
+export function groupMemberAssignmentKey(groupId: string, peerId: string): string {
+  return `group-member::${keyPart(groupId)}::${keyPart(peerId)}`;
+}
+
+export function assignmentKey(assignment: Pick<RoleAssignment, 'scope' | 'peerId' | 'groupId'>): string {
+  if (assignment.scope === 'private') {
+    if (!assignment.peerId) throw new Error('private role assignment requires peerId');
+    return privateAssignmentKey(assignment.peerId);
+  }
+  if (assignment.scope === 'group') {
+    if (!assignment.groupId) throw new Error('group role assignment requires groupId');
+    return groupAssignmentKey(assignment.groupId);
+  }
+  if (!assignment.groupId || !assignment.peerId) {
+    throw new Error('group-member role assignment requires groupId and peerId');
+  }
+  return groupMemberAssignmentKey(assignment.groupId, assignment.peerId);
 }
 
 export function readRoleAssignments(aid: string): RoleAssignmentsConfig {
   const config = read<RoleAssignmentsConfig>(ConfigTarget.RoleAssignments, { self: aid }, { cache: true });
-  return config ?? { $schema_version: 1, assignments: {} };
+  return config ?? { $schema_version: 2, assignments: {} };
 }
 
 export function writeRoleAssignments(aid: string, config: RoleAssignmentsConfig): void {
@@ -17,31 +51,21 @@ export function writeRoleAssignments(aid: string, config: RoleAssignmentsConfig)
   write(ConfigTarget.RoleAssignments, config, { self: aid });
 }
 
-export function getRoleAssignment(
+function setScopedRoleAssignment(
   aid: string,
-  channelKey: string,
-  peerId: string
-): RoleAssignment | undefined {
-  return readRoleAssignments(aid).assignments[assignmentKey(channelKey, peerId)];
-}
-
-export function setRoleAssignment(
-  aid: string,
-  channelKey: string,
-  peerId: string,
+  identity: Pick<RoleAssignment, 'scope' | 'peerId' | 'groupId'>,
   role: string,
-  patch: Partial<Omit<RoleAssignment, 'channelKey' | 'peerId' | 'role'>> = {}
+  patch: Partial<Omit<RoleAssignment, 'scope' | 'peerId' | 'groupId' | 'role'>> = {},
 ): RoleAssignment {
   validateRole(role);
   const now = Date.now();
   const config = readRoleAssignments(aid);
-  const key = assignmentKey(channelKey, peerId);
+  const key = assignmentKey(identity);
   const existing = config.assignments[key];
   const next: RoleAssignment = {
     ...existing,
     ...patch,
-    channelKey,
-    peerId,
+    ...identity,
     role,
     createdAt: existing?.createdAt ?? patch.createdAt ?? now,
     updatedAt: patch.updatedAt ?? now,
@@ -51,45 +75,90 @@ export function setRoleAssignment(
   return next;
 }
 
-export function deleteRoleAssignment(aid: string, channelKey: string, peerId: string): boolean {
+export function setPrivateRoleAssignment(
+  aid: string,
+  peerId: string,
+  role: string,
+  patch: Partial<Omit<RoleAssignment, 'scope' | 'peerId' | 'groupId' | 'role'>> = {},
+): RoleAssignment {
+  return setScopedRoleAssignment(aid, { scope: 'private', peerId }, role, patch);
+}
+
+export function setGroupRoleAssignment(
+  aid: string,
+  groupId: string,
+  role: string,
+  patch: Partial<Omit<RoleAssignment, 'scope' | 'peerId' | 'groupId' | 'role'>> = {},
+): RoleAssignment {
+  return setScopedRoleAssignment(aid, { scope: 'group', groupId }, role, patch);
+}
+
+export function setGroupMemberRoleAssignment(
+  aid: string,
+  groupId: string,
+  peerId: string,
+  role: string,
+  patch: Partial<Omit<RoleAssignment, 'scope' | 'peerId' | 'groupId' | 'role'>> = {},
+): RoleAssignment {
+  return setScopedRoleAssignment(aid, { scope: 'group-member', groupId, peerId }, role, patch);
+}
+
+export function getPrivateRoleAssignment(aid: string, peerId: string): RoleAssignment | undefined {
+  return readRoleAssignments(aid).assignments[privateAssignmentKey(peerId)];
+}
+
+export function getGroupRoleAssignment(aid: string, groupId: string): RoleAssignment | undefined {
+  return readRoleAssignments(aid).assignments[groupAssignmentKey(groupId)];
+}
+
+export function getGroupMemberRoleAssignment(aid: string, groupId: string, peerId: string): RoleAssignment | undefined {
+  return readRoleAssignments(aid).assignments[groupMemberAssignmentKey(groupId, peerId)];
+}
+
+export function deletePrivateRoleAssignment(aid: string, peerId: string): boolean {
+  return deleteRoleAssignmentByKey(aid, privateAssignmentKey(peerId));
+}
+
+export function deleteGroupRoleAssignment(aid: string, groupId: string): boolean {
+  return deleteRoleAssignmentByKey(aid, groupAssignmentKey(groupId));
+}
+
+export function deleteGroupMemberRoleAssignment(aid: string, groupId: string, peerId: string): boolean {
+  return deleteRoleAssignmentByKey(aid, groupMemberAssignmentKey(groupId, peerId));
+}
+
+function deleteRoleAssignmentByKey(aid: string, key: string): boolean {
   const config = readRoleAssignments(aid);
-  const key = assignmentKey(channelKey, peerId);
   if (!config.assignments[key]) return false;
   delete config.assignments[key];
   writeRoleAssignments(aid, config);
   return true;
 }
 
-export function hasRoleAssignment(aid: string, channelKey: string, role: string): boolean {
-  const config = readRoleAssignments(aid);
-  return Object.values(config.assignments).some(a => a.channelKey === channelKey && a.role === role);
-}
-
-export function listRoleAssignments(
-  aid: string,
-  channelKey?: string,
-  role?: string
-): RoleAssignment[] {
+export function listRoleAssignments(aid: string, filter: RoleAssignmentFilter = {}): RoleAssignment[] {
   const config = readRoleAssignments(aid);
   return Object.values(config.assignments).filter(assignment => {
-    if (channelKey && assignment.channelKey !== channelKey) return false;
-    if (role && assignment.role !== role) return false;
+    if (filter.scope && assignment.scope !== filter.scope) return false;
+    if (filter.role && assignment.role !== filter.role) return false;
+    if (filter.peerId && assignment.peerId !== filter.peerId) return false;
+    if (filter.groupId && assignment.groupId !== filter.groupId) return false;
     return true;
   });
 }
 
-export function getFirstRoleAssignment(
-  aid: string,
-  channelKey: string,
-  role: string
-): RoleAssignment | undefined {
-  return listRoleAssignments(aid, channelKey, role)[0];
+export function getFirstRoleAssignment(aid: string, filter: RoleAssignmentFilter): RoleAssignment | undefined {
+  return listRoleAssignments(aid, filter)[0];
+}
+
+export function hasRoleAssignment(aid: string, filter: RoleAssignmentFilter): boolean {
+  return listRoleAssignments(aid, filter).length > 0;
 }
 
 function validateAssignments(config: RoleAssignmentsConfig): void {
   for (const [key, assignment] of Object.entries(config.assignments || {})) {
-    if (key !== assignmentKey(assignment.channelKey, assignment.peerId)) {
-      throw new Error(`Invalid role assignment key "${key}", expected "${assignmentKey(assignment.channelKey, assignment.peerId)}"`);
+    const expected = assignmentKey(assignment);
+    if (key !== expected) {
+      throw new Error(`Invalid role assignment key "${key}", expected "${expected}"`);
     }
     validateRole(assignment.role);
   }

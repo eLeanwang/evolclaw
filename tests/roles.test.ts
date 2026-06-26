@@ -21,8 +21,8 @@ describe('Role Configuration', () => {
     it('should return builtin config when file does not exist', () => {
       const config = readRolesConfig();
       expect(config).toBeDefined();
-      expect(config.$schema_version).toBe(2);
-      expect(config.defaultRole).toBe('anonymous');
+      expect(config.$schema_version).toBe(3);
+      expect(config.defaultRoles).toEqual({ private: 'anonymous', group: 'guest' });
       expect(config.roles).toBeDefined();
     });
 
@@ -228,8 +228,8 @@ describe('Role Configuration', () => {
   describe('getBuiltinRolesConfig', () => {
     it('should return valid config', () => {
       const config = getBuiltinRolesConfig();
-      expect(config.$schema_version).toBe(2);
-      expect(config.defaultRole).toBe('anonymous');
+      expect(config.$schema_version).toBe(3);
+      expect(config.defaultRoles).toEqual({ private: 'anonymous', group: 'guest' });
       expect(Object.keys(config.roles)).toHaveLength(5);
     });
 

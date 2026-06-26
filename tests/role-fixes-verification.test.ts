@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ConfigTarget, read, validateConfig } from '../src/config/config-manager.js';
-import { setRoleAssignment, writeRoleAssignments } from '../src/config/role-assignments.js';
+import { privateAssignmentKey, setPrivateRoleAssignment, writeRoleAssignments } from '../src/config/role-assignments.js';
 
 describe('role source cleanup verification', () => {
   it('rejects old agent-level role assignment lists', () => {
@@ -31,21 +31,20 @@ describe('role source cleanup verification', () => {
 
   it('accepts role-assignments config as the assignment source', () => {
     const aid = 'clean.agentid.pub';
-    const channelKey = 'aun#clean.agentid.pub#main';
     const peerId = 'alice.aid.pub';
 
-    setRoleAssignment(aid, channelKey, peerId, 'owner');
+    setPrivateRoleAssignment(aid, peerId, 'owner');
     const config = read<any>(ConfigTarget.RoleAssignments, { self: aid });
 
     expect(validateConfig(ConfigTarget.RoleAssignments, config)).toEqual([]);
-    expect(config.assignments[`${channelKey}::${peerId}`].role).toBe('owner');
+    expect(config.assignments[privateAssignmentKey(peerId)].role).toBe('owner');
   });
 
   it('rejects malformed role assignment keys through role assignment writes', () => {
     expect(() => writeRoleAssignments('bad.agentid.pub', {
-      $schema_version: 1,
+      $schema_version: 2,
       assignments: {
-        wrong: { channelKey: 'aun#x#main', peerId: 'alice.aid.pub', role: 'owner' },
+        wrong: { scope: 'private', peerId: 'alice.aid.pub', role: 'owner' },
       },
     })).toThrow('Invalid role assignment key');
   });

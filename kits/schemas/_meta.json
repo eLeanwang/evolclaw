@@ -5,8 +5,8 @@
     "agent-config":    { "currentVersion": 2 },
     "relation-config": { "currentVersion": 1 },
     "behavior":        { "currentVersion": 1 },
-    "roles":           { "currentVersion": 2 },
-    "role-assignments": { "currentVersion": 1 }
+    "roles":           { "currentVersion": 3 },
+    "role-assignments": { "currentVersion": 2 }
   },
   "history": [
     { "schema": "evolclaw",        "version": 1, "date": "2026-06-14", "description": "initial: process config (evolclaw.json)" },
@@ -17,6 +17,8 @@
     { "schema": "behavior",        "version": 1, "date": "2026-06-23", "description": "agent-writable behavior fields (HA)" },
     { "schema": "roles",           "version": 1, "date": "2026-06-24", "description": "global role definitions and permissions" },
     { "schema": "roles",           "version": 2, "date": "2026-06-25", "description": "add defaultRole (global fallback) + allowAccess (per-role access control)" },
-    { "schema": "role-assignments", "version": 1, "date": "2026-06-26", "description": "per-agent peer role assignment source of truth" }
+    { "schema": "role-assignments", "version": 1, "date": "2026-06-26", "description": "per-agent peer role assignment source of truth" },
+    { "schema": "roles",           "version": 3, "date": "2026-06-26", "description": "split default roles for private and group conversations" },
+    { "schema": "role-assignments", "version": 2, "date": "2026-06-26", "description": "scope role assignments by private, group, and group-member" }
   ]
 }

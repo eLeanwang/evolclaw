@@ -313,8 +313,8 @@ function migrateIfNeeded<T>(target: ConfigTarget, raw: T, file: string): T {
     let migrated = migrateRolesToOverlay(raw as any, file) as T;
     // v1 → v2 schema 版本迁移（添加 defaultRole / allowAccess 字段）
     const have = (migrated as any)?.$schema_version;
-    if (typeof have === 'number' && have === 1) {
-      migrated = migrateRolesV1toV2(migrated as any, file) as T;
+    if (typeof have === 'number' && have < 3) {
+      migrated = migrateRolesToV3(migrated as any, file) as T;
     }
     return migrated;
   }
@@ -384,26 +384,20 @@ function migrateRolesToOverlay(raw: RolesConfig, file: string): RolesConfig {
  * v1 缺失这两个字段，v2 schema 为其提供默认值：defaultRole='anonymous'，allowAccess 按角色（anonymous=false 其他=true）。
  * 迁移策略：overlay 里只存用户改动，未改的字段继承内置。所以只需升 $schema_version，字段留空让合并时从 builtin 补全。
  */
-function migrateRolesV1toV2(raw: RolesConfig, file: string): RolesConfig {
-  const have = raw.$schema_version;
-  if (have !== 1) return raw; // 非 v1 不迁移
-
-  console.log(`[config] roles.json v1 → v2 迁移：${file}`);
-
-  // 直接升版本号即可。defaultRole 和 allowAccess 由 mergeRolesConfig 从 builtin 补全。
-  // 若用户在 v1 已改过 description（overlay 有该 role），保留改动；新字段自动继承 builtin。
+function migrateRolesToV3(raw: any, file: string): RolesConfig {
+  console.log(`[config] roles.json -> v3 migration: ${file}`);
   const migrated: RolesConfig = {
     ...raw,
-    $schema_version: 2,
+    $schema_version: 3,
+    defaultRoles: {
+      private: raw.defaultRoles?.private || 'anonymous',
+      group: raw.defaultRoles?.group || 'guest',
+    },
   };
-
+  delete (migrated as any).defaultRole;
   return migrated;
 }
 
-
-// ── H 链解析（resolveAgentConfig，三级）──────────────────────────────────────
-
-/** H 链合并：defaults → agent/config → relation/config（逐级类型驱动深合并）。 */
 export function resolveAgentConfig(sel: { self?: string; peerKey?: string }, opts: ReadOpts = {}): AgentConfig {
   // 字段表用 agent-config（H 链主 schema；relation-config 字段是其子集 owners/admins/extra_backup，merge 语义一致）
   const fields = loadSchema('agent-config').fields;

@@ -156,8 +156,15 @@ export async function handleRoleDefinitionsApi(req: any, res: any, auth: RoleWri
 
           // 以当前配置为基线，仅覆盖传入的顶层字段（defaultRole）与 roles（若提供）
           const config = readRolesConfig();
-          if (typeof incoming.defaultRole === 'string') {
-            config.defaultRole = incoming.defaultRole;
+          if (incoming.defaultRoles && typeof incoming.defaultRoles === 'object') {
+            config.defaultRoles = {
+              private: typeof incoming.defaultRoles.private === 'string'
+                ? incoming.defaultRoles.private
+                : (config.defaultRoles?.private || 'anonymous'),
+              group: typeof incoming.defaultRoles.group === 'string'
+                ? incoming.defaultRoles.group
+                : (config.defaultRoles?.group || 'guest'),
+            };
           }
           if (incoming.roles && typeof incoming.roles === 'object') {
             config.roles = incoming.roles;

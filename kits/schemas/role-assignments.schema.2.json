@@ -1,0 +1,42 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "role-assignments.schema.2.json",
+  "title": "RoleAssignmentsConfig (agents/{aid}/role-assignments.json)",
+  "description": "Per-agent source of truth for scoped role assignments.",
+  "x-logical-name": "role-assignments",
+  "x-permission": "H",
+  "x-scope": "role-assignments",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["$schema_version", "assignments"],
+  "properties": {
+    "$schema_version": {
+      "type": "number",
+      "const": 2,
+      "description": "Schema version",
+      "x-merge": "scalar"
+    },
+    "assignments": {
+      "type": "object",
+      "description": "Map keyed by scoped role assignment key.",
+      "x-merge": "dict",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["scope", "role"],
+        "properties": {
+          "scope": {
+            "type": "string",
+            "enum": ["private", "group", "group-member"]
+          },
+          "peerId": { "type": "string" },
+          "groupId": { "type": "string" },
+          "role": { "type": "string" },
+          "note": { "type": "string" },
+          "createdAt": { "type": "number" },
+          "updatedAt": { "type": "number" }
+        }
+      }
+    }
+  }
+}

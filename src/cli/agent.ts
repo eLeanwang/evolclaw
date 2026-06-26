@@ -12,7 +12,7 @@ import { isValidChannelName } from '../core/channel-loader.js';
 import { commandExists } from '../utils/cross-platform.js';
 import { getCodexAppServerAvailability, isCodexAppServerAvailable } from '../agents/codex-runner.js';
 import { agentProjectRootFromDefaults, deriveAgentProjectPath } from '../utils/project-path.js';
-import { setRoleAssignment } from '../config/role-assignments.js';
+import { setPrivateRoleAssignment } from '../config/role-assignments.js';
 
 // ==================== Types ====================
 
@@ -546,7 +546,7 @@ export async function agentCreateInteractive(opts: AgentCreateInteractiveOpts = 
     };
 
     saveAgent(agentConfig);
-    if (owner) setRoleAssignment(aid, `aun#${aid}#main`, owner, 'owner', { note: 'created by cli agent wizard' });
+    if (owner) setPrivateRoleAssignment(aid, owner, 'owner', { note: 'created by cli agent wizard' });
     saveInitialBehavior(aid, baseagent);
     ensureAgentDirSkeleton(aid);
 
@@ -665,7 +665,7 @@ async function promptAgentOwnerManually(aid: string): Promise<string | undefined
         console.log(`  ⚠ 无法加载 agent 配置: ${aid}`);
         return undefined;
       }
-      setRoleAssignment(aid, `aun#${aid}#main`, owner, 'owner', { note: 'set manually by cli' });
+      setPrivateRoleAssignment(aid, owner, 'owner', { note: 'set manually by cli' });
       try {
         const result = await ipcQuery<any>(resolvePaths().socket, { type: 'evolagent.reload', name: aid }, 30_000);
         if (result?.ok) console.log('  ✓ agent owner 已热重载');
@@ -785,7 +785,7 @@ export async function agentCreateNonInteractive(opts: AgentCreateNonInteractiveO
 
   opts.onPhase?.('config_saved', 'begin');
   saveAgent(agentConfig);
-  if (opts.owner) setRoleAssignment(opts.aid, `aun#${opts.aid}#main`, opts.owner, 'owner', { note: 'created by cli agent' });
+  if (opts.owner) setPrivateRoleAssignment(opts.aid, opts.owner, 'owner', { note: 'created by cli agent' });
   saveInitialBehavior(opts.aid, baseagent);
   ensureAgentDirSkeleton(opts.aid);
   opts.onPhase?.('config_saved', 'done');

@@ -558,7 +558,6 @@ async function main() {
     if (!selfAid || !userId) return { role: 'anonymous', mode: 'interactive' };
     const detail = resolvePeerRoleDetail({
       selfAid,
-      channelKey: channel,
       channelType: parsed?.type || channel,
       chatType: 'private',
       actorId: userId,
@@ -903,7 +902,7 @@ async function main() {
         const owningAgent = agentRegistry.resolveByChannel(channelKey);
         return {
           observable: owningAgent?.getObservable() ?? false,
-          owners: owningAgent ? listRoleAssignments(owningAgent.aid, channelKey, 'owner').map(a => a.peerId) : [],
+          owners: owningAgent ? listRoleAssignments(owningAgent.aid, { scope: 'private', role: 'owner' }).map(a => a.peerId).filter((peerId): peerId is string => !!peerId) : [],
         };
       });
     }
@@ -997,7 +996,7 @@ async function main() {
     const agent = agentRegistry.resolveByChannel(inst.adapter.channelKey) ?? agentRegistry.resolveByChannel(name);
     if (!agent) return;
     if (!agent.config.debug?.upmsg) return;
-    const ownerAid = getFirstRoleAssignment(agent.aid, inst.adapter.channelKey, 'owner')?.peerId;
+    const ownerAid = getFirstRoleAssignment(agent.aid, { scope: 'private', role: 'owner' })?.peerId;
     if (!ownerAid) return;
     const noticeKey = `${agent.aid}#${name}`;
     if (onlineNoticeSent.has(noticeKey)) return;
@@ -1276,7 +1275,7 @@ async function main() {
       if (notified.has(otherType)) continue;  // 同类型已通知过
       const owningAgent = agentRegistry.resolveByChannel(other.adapter.channelKey);
       const ownerId = owningAgent
-        ? getFirstRoleAssignment(owningAgent.aid, other.adapter.channelKey, 'owner')?.peerId
+        ? getFirstRoleAssignment(owningAgent.aid, { scope: 'private', role: 'owner' })?.peerId
         : undefined;
       if (!ownerId) continue;
       notified.add(otherType);
