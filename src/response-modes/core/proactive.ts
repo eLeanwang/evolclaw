@@ -147,6 +147,13 @@ export class ProactiveMode implements ResponseMode {
     }
   }
 
+  // ─── onComplete（迁移点 5：标志位检查）───
+  async onComplete(ctx: CompleteContext): Promise<void> {
+    if (/\[PROACTIVE:REPLY_CONFIRMED_(SENT|NONE)\]/.test(ctx.lastReplyText)) {
+      await ctx.updateSessionMeta({ lastProactiveFlag: true });
+    }
+  }
+
   // ─── afterProcess（迁移点 6：Unknown skill 兜底）───
   async afterProcess(ctx: AfterProcessContext): Promise<void> {
     if (!ctx.streamResult.hasReceivedText && /^Unknown skill:\s+\S+/i.test(ctx.fullText.trim())) {
