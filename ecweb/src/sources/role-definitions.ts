@@ -37,16 +37,35 @@ async function getRolesModule() {
     if (!rolesMod.readRolesConfig) throw new Error('readRolesConfig not found in roles.js');
     if (!rolesMod.getBuiltinRolesConfig) throw new Error('getBuiltinRolesConfig not found in roles.js');
     if (!cmMod.writeRoles) throw new Error('writeRoles not found in config-manager.js');
+    if (!cmMod.read) throw new Error('read not found in config-manager.js');
+    if (!cmMod.ConfigTarget) throw new Error('ConfigTarget not found in config-manager.js');
 
     return {
       readRolesConfig: rolesMod.readRolesConfig as () => any,
       getBuiltinRolesConfig: rolesMod.getBuiltinRolesConfig as () => any,
       writeRoles: cmMod.writeRoles as (full: any) => void,
+      read: cmMod.read as (target: any, sel?: any) => any,
+      ConfigTarget: cmMod.ConfigTarget as any,
     };
   } catch (err) {
     console.error('[role-definitions] Failed to import roles modules:', err);
     throw err;
   }
+}
+
+interface RoleWriteAuth {
+  localDirect?: boolean;
+  actorAid?: string | null;
+}
+
+function isWriteMethod(method: string | undefined): boolean {
+  return method === 'PUT' || method === 'POST' || method === 'DELETE';
+}
+
+function canManageRoleDefinitions(processConfig: any, auth: RoleWriteAuth): boolean {
+  if (auth.localDirect) return true;
+  const actor = auth.actorAid || '';
+  return !!actor && Array.isArray(processConfig?.owners) && processConfig.owners.includes(actor);
 }
 
 async function buildSnapshot(): Promise<any> {
@@ -96,12 +115,28 @@ export const roleDefinitionsSource: WatchSource = {
 };
 
 // HTTP API 处理器
-export async function handleRoleDefinitionsApi(req: any, res: any): Promise<void> {
+export async function handleRoleDefinitionsApi(req: any, res: any, auth: RoleWriteAuth = {}): Promise<void> {
   try {
-    const { readRolesConfig, getBuiltinRolesConfig, writeRoles } = await getRolesModule();
+    const { readRolesConfig, getBuiltinRolesConfig, writeRoles, read, ConfigTarget } = await getRolesModule();
+    const urlPath = (req.url || '').split('?')[0];
+
+    if (isWriteMethod(req.method)) {
+      const processConfig = read(ConfigTarget.Process) || {};
+      if (!canManageRoleDefinitions(processConfig, auth)) {
+        console.warn('[role-definitions] Write forbidden:', {
+          method: req.method,
+          url: req.url,
+          actorAid: auth.actorAid,
+          localDirect: !!auth.localDirect
+        });
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'forbidden: process owner required' }));
+        return;
+      }
+    }
 
     // GET /api/role-definitions - 获取所有角色定义
-    if (req.method === 'GET' && req.url === '/api/role-definitions') {
+    if (req.method === 'GET' && urlPath === '/api/role-definitions') {
       const config = readRolesConfig();
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(config));
@@ -109,7 +144,7 @@ export async function handleRoleDefinitionsApi(req: any, res: any): Promise<void
     }
 
     // PUT /api/role-definitions - 更新全局配置（如 defaultRole）。传入完整配置，内部算 diff。
-    if (req.method === 'PUT' && req.url === '/api/role-definitions') {
+    if (req.method === 'PUT' && urlPath === '/api/role-definitions') {
       let body = '';
       req.on('data', (chunk: Buffer) => {
         body += chunk.toString();
@@ -143,7 +178,7 @@ export async function handleRoleDefinitionsApi(req: any, res: any): Promise<void
     }
 
     // POST /api/role-definitions - 创建新角色
-    if (req.method === 'POST' && req.url === '/api/role-definitions') {
+    if (req.method === 'POST' && urlPath === '/api/role-definitions') {
       let body = '';
       req.on('data', (chunk: Buffer) => {
         body += chunk.toString();
@@ -191,8 +226,8 @@ export async function handleRoleDefinitionsApi(req: any, res: any): Promise<void
     }
 
     // GET /api/role-definitions/:role - 获取单个角色定义
-    if (req.method === 'GET' && req.url?.startsWith('/api/role-definitions/')) {
-      const roleName = req.url.split('/').pop();
+    if (req.method === 'GET' && urlPath.startsWith('/api/role-definitions/')) {
+      const roleName = urlPath.split('/').pop();
       if (!roleName) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Missing role name' }));
@@ -214,8 +249,8 @@ export async function handleRoleDefinitionsApi(req: any, res: any): Promise<void
     }
 
     // DELETE /api/role-definitions/:role - 删除角色
-    if (req.method === 'DELETE' && req.url?.startsWith('/api/role-definitions/')) {
-      const roleName = req.url.split('/').pop();
+    if (req.method === 'DELETE' && urlPath.startsWith('/api/role-definitions/')) {
+      const roleName = urlPath.split('/').pop();
       if (!roleName) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Missing role name' }));
@@ -250,8 +285,8 @@ export async function handleRoleDefinitionsApi(req: any, res: any): Promise<void
     }
 
     // PUT /api/role-definitions/:role - 更新角色定义
-    if (req.method === 'PUT' && req.url?.startsWith('/api/role-definitions/')) {
-      const parts = req.url.split('/');
+    if (req.method === 'PUT' && urlPath.startsWith('/api/role-definitions/')) {
+      const parts = urlPath.split('/');
       const roleName = parts[parts.length - 1];
 
       if (!roleName) {
@@ -299,8 +334,8 @@ export async function handleRoleDefinitionsApi(req: any, res: any): Promise<void
     }
 
     // POST /api/role-definitions/:role/reset - 重置为默认配置
-    if (req.method === 'POST' && req.url?.match(/\/api\/role-definitions\/[^/]+\/reset$/)) {
-      const parts = req.url.split('/');
+    if (req.method === 'POST' && urlPath.match(/\/api\/role-definitions\/[^/]+\/reset$/)) {
+      const parts = urlPath.split('/');
       const roleName = parts[parts.length - 2];
 
       if (!roleName) {
@@ -339,4 +374,3 @@ export async function handleRoleDefinitionsApi(req: any, res: any): Promise<void
     res.end(JSON.stringify({ error: err.message }));
   }
 }
-

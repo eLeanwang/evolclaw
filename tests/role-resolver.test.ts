@@ -112,6 +112,43 @@ describe('Role Resolver', () => {
       const role = resolveUserRole(testAgent, 'member.aid.pub');
       expect(role).toBe('member'); // members 优先于 guest
     });
+
+    it('should use relation-level role override for non-list roles', () => {
+      write(ConfigTarget.Relation, { role: 'guest' }, {
+        self: testAgent,
+        peerKey: 'aun#relation-guest.aid.pub'
+      });
+
+      const role = resolveUserRole(testAgent, 'relation-guest.aid.pub');
+      expect(role).toBe('guest');
+    });
+
+    it('should find relation role overrides written with raw peer keys when resolving encoded keys', () => {
+      write(ConfigTarget.Relation, { role: 'anonymous' }, {
+        self: testAgent,
+        peerKey: 'aun#encoded+peer.aid.pub'
+      });
+
+      const role = resolveUserRole(testAgent, 'aun#encoded%2Bpeer.aid.pub');
+      expect(role).toBe('anonymous');
+    });
+
+    it('should keep agent role lists above relation-level overrides', () => {
+      write(ConfigTarget.Agent, {
+        aid: testAgent,
+        channels: [],
+        owners: ['priority.aid.pub'],
+        admins: [],
+        members: []
+      }, { self: testAgent });
+      write(ConfigTarget.Relation, { role: 'guest' }, {
+        self: testAgent,
+        peerKey: 'aun#priority.aid.pub'
+      });
+
+      const role = resolveUserRole(testAgent, 'priority.aid.pub');
+      expect(role).toBe('owner');
+    });
   });
 
   describe('isAuthenticated', () => {

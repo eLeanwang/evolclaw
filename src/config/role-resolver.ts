@@ -7,7 +7,30 @@
 
 import { read, ConfigTarget, resolveRoles } from './config-manager.js';
 import { parsePeerKey } from '../core/relation/peer-identity.js';
-import type { AgentConfig, BuiltinRole } from '../types.js';
+import type { AgentConfig, RelationConfig } from '../types.js';
+
+function relationKeysFor(peerKey: string, peerId: string): string[] {
+  const keys = [peerKey];
+  const rawAunKey = `aun#${peerId}`;
+  const aunKey = `aun#${encodeURIComponent(peerId)}`;
+  if (!keys.includes(rawAunKey)) keys.push(rawAunKey);
+  if (!keys.includes(aunKey)) keys.push(aunKey);
+  return keys;
+}
+
+function readRelationRole(self: string, peerKey: string, peerId: string): string | undefined {
+  for (const key of relationKeysFor(peerKey, peerId)) {
+    const relation = read<RelationConfig>(ConfigTarget.Relation, { self, peerKey: key });
+    if (typeof relation?.role === 'string' && relation.role.trim()) {
+      return relation.role.trim();
+    }
+  }
+  return undefined;
+}
+
+export function isAuthenticated(userId: string): boolean {
+  return /^[a-z0-9_-]+\.(aid|agentid)\.pub$/i.test(userId);
+}
 
 /**
  * 解析用户角色
@@ -52,7 +75,16 @@ export function resolveUserRole(
       return 'member';
     }
 
+    const relationRole = readRelationRole(self, peerKey, peerId);
+    if (relationRole) {
+      return relationRole;
+    }
+
     // 未在名单 -> 使用全局默认角色
+    if (isAuthenticated(peerId)) {
+      return 'guest';
+    }
+
     return getDefaultRole();
   } catch (err) {
     console.warn(`[role-resolver] Failed to resolve role for ${peerKey}:`, err);

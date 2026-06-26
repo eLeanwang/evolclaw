@@ -350,6 +350,28 @@ function isLocalDirect(req: http.IncomingMessage): boolean {
   return !providerAid || (Array.isArray(providerAid) ? providerAid.length === 0 : !providerAid.trim());
 }
 
+function headerValue(req: http.IncomingMessage, name: string): string {
+  const raw = req.headers[name.toLowerCase()];
+  return (Array.isArray(raw) ? raw[0] : raw || '').trim();
+}
+
+function trustedActorAid(req: http.IncomingMessage): string | null {
+  if (!isLocalhost(req) || !headerValue(req, 'x-aun-provider-aid')) return null;
+  const actor = headerValue(req, 'x-aun-visitor-aid')
+    || headerValue(req, 'x-aun-actor-aid')
+    || headerValue(req, 'x-aun-user-aid')
+    || headerValue(req, 'x-evolclaw-actor-aid');
+  if (!/^[a-z0-9_-]+\.(aid|agentid)\.pub$/i.test(actor)) return null;
+  return actor;
+}
+
+function roleWriteAuth(req: http.IncomingMessage): { localDirect: boolean; actorAid: string | null } {
+  return {
+    localDirect: isLocalDirect(req),
+    actorAid: trustedActorAid(req),
+  };
+}
+
 function genPairingCode(): string {
   return String(crypto.randomInt(0, 1000000)).padStart(6, '0');
 }
@@ -616,13 +638,38 @@ export async function startWatchWebServer(opts: { port?: number; log?: (s: strin
         res.end(JSON.stringify({ error: 'unauthorized' }));
         return;
       }
-      handleRoleAssignmentsApi(req, res);
+      handleRoleAssignmentsApi(req, res, roleWriteAuth(req));
     } else if ((req.url || '') === '/api/role-definitions' || (req.url || '').startsWith('/api/role-definitions/') || (req.url || '').startsWith('/api/role-definitions?')) {
       // Role Definitions API（含集合端点 /api/role-definitions 与 /api/role-definitions/:role）
-      handleRoleDefinitionsApi(req, res);
+      const authHeader = req.headers.authorization || '';
+      const bearerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
+      const { query } = parseUrl(req.url || '');
+      let token = bearerToken || query.token || '';
+      if (!token) {
+        const autoToken = issueLocalDirectToken(req, log);
+        if (autoToken) token = autoToken;
+      }
+      if (!token || !validateAndRenew(token, Date.now())) {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'unauthorized' }));
+        return;
+      }
+      handleRoleDefinitionsApi(req, res, roleWriteAuth(req));
     } else if ((req.url || '').startsWith('/api/assignments/peer/')) {
-      // Peer Role API
-      handlePeerRoleApi(req, res);
+      const authHeader = req.headers.authorization || '';
+      const bearerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
+      const { query } = parseUrl(req.url || '');
+      let token = bearerToken || query.token || '';
+      if (!token) {
+        const autoToken = issueLocalDirectToken(req, log);
+        if (autoToken) token = autoToken;
+      }
+      if (!token || !validateAndRenew(token, Date.now())) {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'unauthorized' }));
+        return;
+      }
+      handlePeerRoleApi(req, res, roleWriteAuth(req));
     } else {
       serveStatic(req, res);
     }

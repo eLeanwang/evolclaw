@@ -77,6 +77,36 @@ describe('config ownership routing', () => {
     expect(validateConfig(ConfigTarget.Process, { idleMonitor: { enabled: false, timeout: 10 } })).toEqual([]);
   });
 
+  it('accepts members in agent-config v2 for role assignment writes', () => {
+    const sel = { self: 'member-schema.agentid.pub' };
+
+    expect(validateConfig(ConfigTarget.Agent, {
+      aid: sel.self,
+      channels: [],
+      members: ['peer.agentid.pub'],
+    })).toEqual([]);
+
+    write(ConfigTarget.Agent, {
+      aid: sel.self,
+      channels: [],
+      members: ['peer.agentid.pub'],
+    }, sel);
+
+    expect(read<any>(ConfigTarget.Agent, sel)?.members).toEqual(['peer.agentid.pub']);
+  });
+
+  it('accepts relation-level role overrides', () => {
+    const sel = { self: 'relation-role.agentid.pub', peerKey: 'aun#peer.agentid.pub' };
+
+    expect(validateConfig(ConfigTarget.Relation, {
+      role: 'guest',
+    })).toEqual([]);
+
+    write(ConfigTarget.Relation, { role: 'guest' }, sel);
+
+    expect(read<any>(ConfigTarget.Relation, sel)?.role).toBe('guest');
+  });
+
   it('uses one flush delay default constant for seconds and milliseconds', () => {
     expect(DEFAULT_FLUSH_DELAY_SECONDS).toBe(3);
     expect(DEFAULT_FLUSH_DELAY_MS).toBe(3000);

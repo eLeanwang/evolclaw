@@ -952,6 +952,7 @@ export interface AgentConfig {
  */
 export interface RelationConfig {
   $schema_version: number;
+  role?: string;
   owners?: string[];
   admins?: string[];
   extra_backup?: Array<{ path: string; pattern?: string }>;

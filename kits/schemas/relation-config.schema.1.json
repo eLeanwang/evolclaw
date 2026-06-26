@@ -15,6 +15,11 @@
       "description": "Schema 版本号",
       "x-merge": "scalar"
     },
+    "role": {
+      "type": "string",
+      "description": "Relation-level role override for this peer",
+      "x-merge": "scalar"
+    },
     "models": {
       "type": "object",
       "description": "模型配置覆盖",

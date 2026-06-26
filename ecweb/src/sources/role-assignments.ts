@@ -17,6 +17,87 @@ import path from 'path';
 import { resolvePaths } from '../paths.js';
 import type { WatchSource } from './types.js';
 
+function formatAunPeerKey(peerId: string): string {
+  return `aun#${encodeURIComponent(peerId)}`;
+}
+
+function relationKeysFor(peerKey: string, peerId: string): string[] {
+  const keys = [peerKey];
+  const rawAunKey = `aun#${peerId}`;
+  const encodedAunKey = formatAunPeerKey(peerId);
+  if (!keys.includes(rawAunKey)) keys.push(rawAunKey);
+  if (!keys.includes(encodedAunKey)) keys.push(encodedAunKey);
+  return keys;
+}
+
+function readRelationConfig(read: any, ConfigTarget: any, aid: string, peerKey: string, peerId: string): any {
+  for (const key of relationKeysFor(peerKey, peerId)) {
+    const config = read(ConfigTarget.Relation, { self: aid, peerKey: key });
+    if (config) return config;
+  }
+  return null;
+}
+
+function allowedAgentFields(): string[] {
+  try {
+    const schema = JSON.parse(fs.readFileSync(path.join(process.cwd(), 'kits', 'schemas', 'agent-config.schema.2.json'), 'utf-8'));
+    return Object.keys(schema.properties || {});
+  } catch {
+    return [
+      '$schema_version', 'aid', 'enabled', 'lifecycle', 'initialized',
+      'owners', 'admins', 'members', 'channels', 'aun', 'models',
+      'active_baseagent', 'baseagents', 'projects', 'debug',
+      'observable', 'chatmode', 'dispatch', 'extra_backup'
+    ];
+  }
+}
+
+function roleDebugLog(event: string, data: Record<string, any> = {}): void {
+  try {
+    const p = resolvePaths();
+    fs.mkdirSync(p.logs, { recursive: true });
+    const entry = {
+      ts: new Date().toISOString(),
+      event,
+      ...data
+    };
+    fs.appendFileSync(
+      path.join(p.logs, 'role-assignments-debug.jsonl'),
+      JSON.stringify(entry) + '\n',
+      'utf-8'
+    );
+  } catch {
+    // Debug logging must never affect role assignment behavior.
+  }
+}
+
+function roleDebugError(err: any): Record<string, any> {
+  return {
+    name: err?.name,
+    message: err?.message ?? String(err),
+    code: err?.code,
+    stack: typeof err?.stack === 'string' ? err.stack.split('\n').slice(0, 6) : undefined
+  };
+}
+
+interface RoleWriteAuth {
+  localDirect?: boolean;
+  actorAid?: string | null;
+}
+
+function canManageAgentRoles(config: any, auth: RoleWriteAuth): boolean {
+  if (auth.localDirect) return true;
+  const actor = auth.actorAid || '';
+  if (!actor) return false;
+  return (config?.owners ?? []).includes(actor) || (config?.admins ?? []).includes(actor);
+}
+
+function denyRoleWrite(res: any, event: string, data: Record<string, any>): void {
+  roleDebugLog(event, data);
+  res.writeHead(403, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ error: 'forbidden: owner/admin required' }));
+}
+
 // 动态导入 evolclaw 主项目的配置模块
 // 注意：ecweb 是 evolclaw 的 peerDependency，运行时 resolves 到父项目
 async function getConfigManager() {
@@ -54,6 +135,23 @@ async function getRoleResolver() {
   }
 
   throw new Error('RoleResolver not found. Is evolclaw built?');
+}
+
+async function getRolesReader() {
+  try {
+    const parentPath = path.join(process.cwd(), 'dist', 'config', 'roles.js');
+    if (fs.existsSync(parentPath)) {
+      const moduleUrl = process.platform === 'win32'
+        ? new URL('file:///' + parentPath.replace(/\\/g, '/')).href
+        : parentPath;
+      const mod = await import(moduleUrl);
+      return { readRolesConfig: mod.readRolesConfig as () => any };
+    }
+  } catch (err) {
+    console.warn('[role-assignments] Failed to import roles reader from parent:', err);
+  }
+
+  throw new Error('Roles reader not found. Is evolclaw built?');
 }
 
 interface RolesSnapshot {
@@ -156,9 +254,9 @@ async function buildSnapshot(): Promise<RolesSnapshot> {
                 const groupName = activeMeta?.metadata?.groupName || groupId;
 
                 // 群聊用 peerKey 解析角色（channelId = groupId）
-                const peerKey = `aun#${groupId}`;
-                const role = resolveUserRole(aid, groupId);
-                const relationConfig = read(ConfigTarget.Relation, { self: aid, peerKey });
+                const peerKey = formatAunPeerKey(groupId);
+                const relationConfig = readRelationConfig(read, ConfigTarget, aid, peerKey, groupId);
+                const role = relationConfig?.role || resolveUserRole(aid, groupId);
 
                 relations.push({
                   self: aid,
@@ -207,9 +305,9 @@ async function buildSnapshot(): Promise<RolesSnapshot> {
                   }
                 }
 
-                const role = resolveUserRole(aid, peerAid);
-                const peerKey = `aun#${peerAid}`;
-                const relationConfig = read(ConfigTarget.Relation, { self: aid, peerKey });
+                const peerKey = formatAunPeerKey(peerAid);
+                const relationConfig = readRelationConfig(read, ConfigTarget, aid, peerKey, peerAid);
+                const role = relationConfig?.role || resolveUserRole(aid, peerAid);
 
                 relations.push({
                   self: aid,
@@ -280,13 +378,14 @@ export const roleAssignmentsSource: WatchSource = {
 };
 
 // HTTP API 处理器
-export async function handleRoleAssignmentsApi(req: any, res: any): Promise<void> {
+export async function handleRoleAssignmentsApi(req: any, res: any, auth: RoleWriteAuth = {}): Promise<void> {
   try {
     const { read, write, ConfigTarget } = await getConfigManager();
+    const urlPath = (req.url || '').split('?')[0];
 
-    if (req.method === 'GET' && req.url?.startsWith('/api/roles/agent/')) {
+    if (req.method === 'GET' && urlPath.startsWith('/api/roles/agent/')) {
       // GET /api/roles/agent/{aid}
-      const parts = req.url.split('/');
+      const parts = urlPath.split('/');
       const aid = parts[parts.length - 1] || parts[parts.length - 2];
 
       if (!aid) {
@@ -305,10 +404,10 @@ export async function handleRoleAssignmentsApi(req: any, res: any): Promise<void
       return;
     }
 
-    if (req.method === 'POST' && req.url?.startsWith('/api/roles/agent/')) {
+    if (req.method === 'POST' && urlPath.startsWith('/api/roles/agent/')) {
       // POST /api/roles/agent/{aid}
       // Body: { field: 'owners'|'admins'|'members', users: string[] }
-      const parts = req.url.split('/');
+      const parts = urlPath.split('/');
       const aid = parts[parts.length - 1] || parts[parts.length - 2];
 
       if (!aid) {
@@ -326,9 +425,21 @@ export async function handleRoleAssignmentsApi(req: any, res: any): Promise<void
         try {
           const { field, users } = JSON.parse(body);
           console.log('[role-assignments] Update request:', { aid, field, users });
+          roleDebugLog('agent-role-update-request', {
+            aid,
+            field,
+            users,
+            actorAid: auth.actorAid,
+            localDirect: !!auth.localDirect
+          });
 
           if (!field || !Array.isArray(users)) {
             console.error('[role-assignments] Invalid request body:', { field, users });
+            roleDebugLog('agent-role-update-invalid-body', {
+              aid,
+              field,
+              usersType: Array.isArray(users) ? 'array' : typeof users
+            });
             res.writeHead(400, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: 'Invalid request body' }));
             return;
@@ -336,6 +447,7 @@ export async function handleRoleAssignmentsApi(req: any, res: any): Promise<void
 
           if (!['owners', 'admins', 'members'].includes(field)) {
             console.error('[role-assignments] Invalid field:', field);
+            roleDebugLog('agent-role-update-invalid-field', { aid, field });
             res.writeHead(400, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: 'Invalid field' }));
             return;
@@ -344,26 +456,76 @@ export async function handleRoleAssignmentsApi(req: any, res: any): Promise<void
           // 读取现有配置（包含完整的 schema 必需字段）
           const existingConfig = read(ConfigTarget.Agent, { self: aid });
           console.log('[role-assignments] Existing config:', JSON.stringify(existingConfig, null, 2));
+          roleDebugLog('agent-role-update-existing-config', {
+            aid,
+            field,
+            configKeys: existingConfig ? Object.keys(existingConfig) : [],
+            ownersCount: existingConfig?.owners?.length ?? 0,
+            adminsCount: existingConfig?.admins?.length ?? 0,
+            membersCount: existingConfig?.members?.length ?? 0
+          });
 
           if (!existingConfig) {
             console.error('[role-assignments] Agent config not found for:', aid);
+            roleDebugLog('agent-role-update-agent-not-found', { aid, field });
             res.writeHead(404, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: 'Agent config not found' }));
             return;
           }
 
-          // 只更新指定字段，保持其他字段不变
-          const updatedConfig = { ...existingConfig, [field]: users };
-          console.log('[role-assignments] Updated config before write:', JSON.stringify(updatedConfig, null, 2));
+          if (!canManageAgentRoles(existingConfig, auth)) {
+            denyRoleWrite(res, 'agent-role-update-forbidden', {
+              aid,
+              field,
+              actorAid: auth.actorAid,
+              localDirect: !!auth.localDirect
+            });
+            return;
+          }
 
-          write(ConfigTarget.Agent, updatedConfig, { self: aid });
+          // 只保留 schema 定义的字段，避免 additionalProperties: false 错误
+          const allowedFields = allowedAgentFields();
+          const cleanConfig: any = {};
+          for (const key of allowedFields) {
+            if (key in existingConfig) {
+              cleanConfig[key] = (existingConfig as any)[key];
+            }
+          }
+          const droppedKeys = Object.keys(existingConfig).filter(key => !allowedFields.includes(key));
+
+          // 更新指定字段
+          cleanConfig[field] = users;
+          console.log('[role-assignments] Updated config before write:', JSON.stringify(cleanConfig, null, 2));
+          roleDebugLog('agent-role-update-before-write', {
+            aid,
+            field,
+            users,
+            cleanConfigKeys: Object.keys(cleanConfig),
+            droppedKeys,
+            ownersCount: cleanConfig.owners?.length ?? 0,
+            adminsCount: cleanConfig.admins?.length ?? 0,
+            membersCount: cleanConfig.members?.length ?? 0
+          });
+
+          write(ConfigTarget.Agent, cleanConfig, { self: aid });
           console.log('[role-assignments] Write successful for:', aid);
+          roleDebugLog('agent-role-update-success', {
+            aid,
+            field,
+            ownersCount: cleanConfig.owners?.length ?? 0,
+            adminsCount: cleanConfig.admins?.length ?? 0,
+            membersCount: cleanConfig.members?.length ?? 0
+          });
 
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ ok: true }));
         } catch (err: any) {
           console.error('[role-assignments] Error processing request:', err);
           console.error('[role-assignments] Error stack:', err.stack);
+          roleDebugLog('agent-role-update-error', {
+            aid,
+            error: roleDebugError(err)
+          });
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: err.message }));
         }
@@ -379,23 +541,60 @@ export async function handleRoleAssignmentsApi(req: any, res: any): Promise<void
   }
 }
 
-// 新增：对端角色管理 API
-export async function handlePeerRoleApi(req: any, res: any): Promise<void> {
+export async function handlePeerRoleApi(req: any, res: any, auth: RoleWriteAuth = {}): Promise<void> {
   try {
     const { read, write, ConfigTarget } = await getConfigManager();
+    const { readRolesConfig } = await getRolesReader();
+    const urlPath = (req.url || '').split('?')[0];
 
-    // PUT /api/assignments/peer/:aid/:peerKey - 设置 relation 级别角色
-    if (req.method === 'PUT' && req.url?.startsWith('/api/assignments/peer/')) {
-      const parts = req.url.split('/').filter(Boolean);
-      // parts: ['api', 'assignments', 'peer', aid, peerKey]
+    if ((req.method === 'PUT' || req.method === 'DELETE') && urlPath.startsWith('/api/assignments/peer/')) {
+      const parts = urlPath.split('/').filter(Boolean);
       if (parts.length < 5) {
+        roleDebugLog('peer-role-update-missing-path', { method: req.method, url: req.url });
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Missing aid or peerKey' }));
         return;
       }
 
       const aid = decodeURIComponent(parts[3]);
-      const peerKey = decodeURIComponent(parts[4]);
+      const peerKey = decodeURIComponent(parts.slice(4).join('/'));
+      const agentConfig = read(ConfigTarget.Agent, { self: aid });
+
+      if (!agentConfig) {
+        roleDebugLog('peer-role-update-agent-not-found', { aid, peerKey });
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Agent config not found' }));
+        return;
+      }
+
+      if (!canManageAgentRoles(agentConfig, auth)) {
+        denyRoleWrite(res, 'peer-role-update-forbidden', {
+          aid,
+          peerKey,
+          method: req.method,
+          actorAid: auth.actorAid,
+          localDirect: !!auth.localDirect
+        });
+        return;
+      }
+
+      const writeRelationRole = (role: string | null) => {
+        const config = read(ConfigTarget.Relation, { self: aid, peerKey }) || {};
+        if (role) {
+          config.role = role;
+        } else {
+          delete config.role;
+        }
+        write(ConfigTarget.Relation, config, { self: aid, peerKey });
+        roleDebugLog('peer-role-update-success', { aid, peerKey, role });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+      };
+
+      if (req.method === 'DELETE') {
+        writeRelationRole(null);
+        return;
+      }
 
       let body = '';
       req.on('data', (chunk: Buffer) => {
@@ -405,29 +604,37 @@ export async function handlePeerRoleApi(req: any, res: any): Promise<void> {
       req.on('end', () => {
         try {
           const { role } = JSON.parse(body);
-
-          // 读取 relation config
-          const config = read(ConfigTarget.Relation, { self: aid, peerKey }) || {};
+          roleDebugLog('peer-role-update-request', {
+            aid,
+            peerKey,
+            role,
+            actorAid: auth.actorAid,
+            localDirect: !!auth.localDirect
+          });
 
           if (role === null || role === '') {
-            // 移除覆盖
-            delete config.role;
-          } else {
-            // 设置覆盖
-            if (!['owner', 'admin', 'member'].includes(role)) {
-              res.writeHead(400, { 'Content-Type': 'application/json' });
-              res.end(JSON.stringify({ error: 'Invalid role' }));
-              return;
-            }
-            config.role = role;
+            writeRelationRole(null);
+            return;
           }
 
-          // 保存
-          write(ConfigTarget.Relation, { self: aid, peerKey }, config);
+          if (typeof role !== 'string') {
+            roleDebugLog('peer-role-update-invalid-role', { aid, peerKey, roleType: typeof role });
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Invalid role' }));
+            return;
+          }
 
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: true }));
+          const rolesConfig = readRolesConfig();
+          if (!rolesConfig.roles?.[role]) {
+            roleDebugLog('peer-role-update-unknown-role', { aid, peerKey, role });
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: `Unknown role: ${role}` }));
+            return;
+          }
+
+          writeRelationRole(role);
         } catch (err: any) {
+          roleDebugLog('peer-role-update-error', { aid, peerKey, error: roleDebugError(err) });
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: err.message }));
         }
@@ -435,33 +642,10 @@ export async function handlePeerRoleApi(req: any, res: any): Promise<void> {
       return;
     }
 
-    // DELETE /api/assignments/peer/:aid/:peerKey - 移除 relation 级别角色覆盖
-    if (req.method === 'DELETE' && req.url?.startsWith('/api/assignments/peer/')) {
-      const parts = req.url.split('/').filter(Boolean);
-      if (parts.length < 5) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Missing aid or peerKey' }));
-        return;
-      }
-
-      const aid = decodeURIComponent(parts[3]);
-      const peerKey = decodeURIComponent(parts[4]);
-
-      // 读取 relation config
-      const config = read(ConfigTarget.Relation, { self: aid, peerKey }) || {};
-      delete config.role;
-
-      // 保存
-      write(ConfigTarget.Relation, { self: aid, peerKey }, config);
-
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: true }));
-      return;
-    }
-
     res.writeHead(404, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Not found' }));
   } catch (err: any) {
+    roleDebugLog('peer-role-api-error', { error: roleDebugError(err) });
     res.writeHead(500, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: err.message }));
   }

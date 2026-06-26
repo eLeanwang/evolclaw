@@ -4062,7 +4062,9 @@ function renderRelationsTable(data, filterAid = null) {
         <button class="edit-peer-role-btn"
                 data-aid="${esc(rel.self)}"
                 data-peer="${esc(rel.peerAid || rel.peerKey)}"
-                data-role="${esc(rel.role)}">
+                data-peer-key="${esc(rel.peerKey)}"
+                data-role="${esc(rel.role)}"
+                data-chat-type="${esc(rel.chatType || 'private')}">
           ${t('action.edit') || 'Edit'}
         </button>
       </td>
@@ -4077,7 +4079,7 @@ async function updateAgentRoles(aid, field, users) {
     const payload = { field, users };
     console.log('[updateAgentRoles] Sending payload:', JSON.stringify(payload));
 
-    const res = await fetch(`/api/roles/agent/${encodeURIComponent(aid)}`, {
+    const res = await fetch(apiUrl(`api/roles/agent/${encodeURIComponent(aid)}`), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -4100,6 +4102,31 @@ async function updateAgentRoles(aid, field, users) {
     return true;
   } catch (err) {
     console.error('[updateAgentRoles] Exception:', err);
+    alert(t('pair.error.network') + ': ' + err.message);
+    return false;
+  }
+}
+
+async function updatePeerRoleOverride(agentAid, peerKey, role) {
+  try {
+    const token = localStorage.getItem(TOKEN_KEY);
+    const res = await fetch(apiUrl(`api/assignments/peer/${encodeURIComponent(agentAid)}/${encodeURIComponent(peerKey)}`), {
+      method: role ? 'PUT' : 'DELETE',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      },
+      body: role ? JSON.stringify({ role }) : undefined
+    });
+
+    if (!res.ok) {
+      const err = await res.json();
+      alert(t('common.operating') + ' ' + t('pair.error.failed') + ': ' + (err.error || 'unknown'));
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.error('[updatePeerRoleOverride] Exception:', err);
     alert(t('pair.error.network') + ': ' + err.message);
     return false;
   }
@@ -4161,8 +4188,10 @@ function initRolesTab() {
       if (btn) {
         const agentAid = btn.dataset.aid;
         const peerAid = btn.dataset.peer;
+        const peerKey = btn.dataset.peerKey;
         const currentRole = btn.dataset.role;
-        openPeerRoleModal(agentAid, peerAid, currentRole);
+        const chatType = btn.dataset.chatType || 'private';
+        openPeerRoleModal(agentAid, peerAid, peerKey, currentRole, chatType);
       }
     });
   }
@@ -4187,7 +4216,7 @@ function initRolesTab() {
 }
 
 // 打开编辑对端角色弹窗
-function openPeerRoleModal(agentAid, peerAid, currentRole) {
+function openPeerRoleModal(agentAid, peerAid, peerKey, currentRole, chatType = 'private') {
   const modal = $('#peer-role-modal');
   const title = $('#peer-role-title');
   const body = $('#peer-role-body');
@@ -4197,14 +4226,18 @@ function openPeerRoleModal(agentAid, peerAid, currentRole) {
   if (title) title.textContent = `${t('roles.editPeerRole') || 'Edit Peer Role'}: ${shortAid(peerAid)}`;
 
   // 渲染角色选择
-  const roles = ['owner', 'admin', 'member', 'anonymous'];
+  const builtinRoles = ['owner', 'admin', 'member', 'guest', 'anonymous'];
+  const definedRoles = state.roleDefinitions?.roles
+    ? Object.keys(state.roleDefinitions.roles)
+    : [];
+  const roles = Array.from(new Set([...builtinRoles, ...definedRoles]));
   body.innerHTML = `
     <div style="margin-bottom: 16px;">
       <label style="display: block; margin-bottom: 8px; font-weight: 500;">
         ${t('roles.selectRole') || 'Select Role'}:
       </label>
       <select id="peer-role-select" style="width: 100%; padding: 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg); color: var(--ink);">
-        ${roles.map(r => `<option value="${r}" ${r === currentRole ? 'selected' : ''}>${r}</option>`).join('')}
+        ${roles.map(r => `<option value="${esc(r)}" ${r === currentRole ? 'selected' : ''}>${esc(t(ROLE_NAMES[r] || r) || r)}</option>`).join('')}
       </select>
     </div>
     <p style="font-size: 12px; color: var(--dim); margin-top: 12px;">
@@ -4215,7 +4248,9 @@ function openPeerRoleModal(agentAid, peerAid, currentRole) {
   // 保存当前编辑的对端信息
   modal.dataset.agentAid = agentAid;
   modal.dataset.peerAid = peerAid;
+  modal.dataset.peerKey = peerKey || `aun#${peerAid}`;
   modal.dataset.currentRole = currentRole;
+  modal.dataset.chatType = chatType || 'private';
 
   modal.style.display = 'flex';
 }
@@ -4234,10 +4269,12 @@ async function savePeerRole() {
 
   const agentAid = modal.dataset.agentAid;
   const peerAid = modal.dataset.peerAid;
+  const peerKey = modal.dataset.peerKey || `aun#${peerAid}`;
   const currentRole = modal.dataset.currentRole;
+  const isGroup = modal.dataset.chatType === 'group';
   const newRole = select.value;
 
-  if (newRole === currentRole) {
+  if (!isGroup && newRole === currentRole) {
     closePeerRoleModal();
     return;
   }
@@ -4261,16 +4298,32 @@ async function savePeerRole() {
   const newMembers = removeFrom(members);
 
   // 添加新角色
-  if (newRole === 'owner') newOwners.push(peerAid);
-  else if (newRole === 'admin') newAdmins.push(peerAid);
-  else if (newRole === 'member') newMembers.push(peerAid);
+  const listBacked = ['owner', 'admin', 'member'].includes(newRole);
+  const roleOverride = isGroup || !listBacked ? newRole : null;
+
+  if (!isGroup) {
+    if (newRole === 'owner') newOwners.push(peerAid);
+    else if (newRole === 'admin') newAdmins.push(peerAid);
+    else if (newRole === 'member') newMembers.push(peerAid);
+  }
   // anonymous 不需要加入任何列表
 
   try {
     // 调用API更新三个字段
-    await updateAgentRoles(agentAid, 'owners', newOwners);
-    await updateAgentRoles(agentAid, 'admins', newAdmins);
-    await updateAgentRoles(agentAid, 'members', newMembers);
+    if (!isGroup) {
+      const okOwners = await updateAgentRoles(agentAid, 'owners', newOwners);
+      const okAdmins = await updateAgentRoles(agentAid, 'admins', newAdmins);
+      const okMembers = await updateAgentRoles(agentAid, 'members', newMembers);
+      if (!okOwners || !okAdmins || !okMembers) return;
+    } else if (owners.includes(peerAid) || admins.includes(peerAid) || members.includes(peerAid)) {
+      const okOwners = await updateAgentRoles(agentAid, 'owners', newOwners);
+      const okAdmins = await updateAgentRoles(agentAid, 'admins', newAdmins);
+      const okMembers = await updateAgentRoles(agentAid, 'members', newMembers);
+      if (!okOwners || !okAdmins || !okMembers) return;
+    }
+
+    const okOverride = await updatePeerRoleOverride(agentAid, peerKey, roleOverride);
+    if (!okOverride) return;
 
     closePeerRoleModal();
     // 等待后端推送更新
@@ -4367,7 +4420,7 @@ function renderDefaultRoleSelector(data) {
     try {
       const token = localStorage.getItem(TOKEN_KEY);
       // 只提交 defaultRole，后端以当前配置为基线合并
-      const writeRes = await fetch('/api/role-definitions', {
+      const writeRes = await fetch(apiUrl('api/role-definitions'), {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
@@ -4468,7 +4521,7 @@ function initRoleDefinitionsTab() {
 
       try {
         const token = localStorage.getItem(TOKEN_KEY);
-        const res = await fetch(`/api/role-definitions/${roleName}/reset`, {
+        const res = await fetch(apiUrl(`api/role-definitions/${roleName}/reset`), {
           method: 'POST',
           headers: { 'Authorization': `Bearer ${token}` }
         });
@@ -4493,7 +4546,7 @@ function initRoleDefinitionsTab() {
 
       try {
         const token = localStorage.getItem(TOKEN_KEY);
-        const res = await fetch(`/api/role-definitions/${roleName}`, {
+        const res = await fetch(apiUrl(`api/role-definitions/${roleName}`), {
           method: 'DELETE',
           headers: { 'Authorization': `Bearer ${token}` }
         });
@@ -4933,7 +4986,7 @@ async function saveRoleDefinition() {
   try {
     const token = localStorage.getItem(TOKEN_KEY);
     const method = isNew ? 'POST' : 'PUT';
-    const url = isNew ? '/api/role-definitions' : `/api/role-definitions/${actualRoleName}`;
+    const url = isNew ? apiUrl('api/role-definitions') : apiUrl(`api/role-definitions/${actualRoleName}`);
 
     const res = await fetch(url, {
       method,
