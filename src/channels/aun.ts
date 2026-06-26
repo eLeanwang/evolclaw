@@ -2994,6 +2994,12 @@ EvolClaw AI Agent 网关，支持多项目会话管理和多 AI 后端切换。
       encrypt,
     };
 
+    // 补齐 chatmode（与 deliverTextEntry/applyReplyContextToPayload 对齐）
+    // 前端强依赖此字段用于消息过滤（proactive 模式的 thought 不显示在聊天流）
+    if (context?.metadata?.chatmode && !params.payload.chatmode) {
+      params.payload.chatmode = context.metadata.chatmode;
+    }
+
     try {
       const items = (finalPayload as any)?.items;
       const itemCount = Array.isArray(items) ? items.length : 1;
