@@ -7,7 +7,7 @@ import {
   normalizeTriggerDefinition,
   resolveScriptPath,
 } from '../trigger/validation.js';
-import { isScriptFeedbackConfig, type TriggerCreateFile, type TriggerDefinition } from '../trigger/types.js';
+import { type TriggerCreateFile, type TriggerDefinition } from '../trigger/types.js';
 
 export async function cmdTrigger(args: string[]): Promise<void> {
   const sub = args[0];
@@ -110,12 +110,8 @@ async function showTrigger(args: string[], json: boolean): Promise<void> {
   console.log(`agent: ${t.agentAid}`);
   console.log(`enabled: ${t.enabled}`);
   console.log(`source: ${sourceLabel(t)}`);
-  if (t.processing.mode === 'script') console.log(`script: ${t.processing.script.runtime} ${t.processing.script.path}`);
-  if (isScriptFeedbackConfig(t.feedback)) {
-    console.log(`feedback: success=${t.feedback.onSuccess.mode}, noop=${t.feedback.onNoop?.mode ?? 'none'}, failure=${t.feedback.onFailure.mode}`);
-  } else {
-    console.log(`feedback: ${t.feedback.mode}`);
-  }
+  if (t.execution.mode === 'script') console.log(`script: ${t.execution.script!.runtime} ${t.execution.script!.path}`);
+  console.log(`feedback: reply=${t.feedback.onReply.kind}, noop=${t.feedback.onNoop.kind}, default=${t.feedback.default.kind}`);
   const active = Array.isArray(res.active) ? res.active : [];
   console.log(`active runs: ${active.length}`);
   const recent = Array.isArray(res.recentRuns) ? res.recentRuns : [];
@@ -163,13 +159,15 @@ async function createTrigger(args: string[], json: boolean): Promise<void> {
     throw new Error('flag 模式没有当前会话上下文，不支持 --session current');
   }
 
-  // Build minimal definition from parsed flags (server will normalize)
+  // Build V3 definition directly. File mode still normalizes imported
+  // definitions, but persisted trigger definitions should be V3.
   const now = Date.now();
+  const strategy = parsed.targetThreadId ? 'thread' : parsed.targetSessionStrategy;
   const session = {
+    strategy: strategy === 'thread' ? 'thread' : 'isolated',
     channelKey: parsed.targetChannel || '',
     channelId: parsed.targetChannelId || '',
-    strategy: parsed.targetThreadId ? 'thread' as const : parsed.targetSessionStrategy,
-    ...(parsed.targetThreadId ? { thread: { mode: 'reuse' as const, threadId: parsed.targetThreadId === 'true' ? undefined : parsed.targetThreadId } } : {}),
+    ...(parsed.targetThreadId && parsed.targetThreadId !== 'true' ? { threadId: parsed.targetThreadId } : {}),
   };
   const script = parsed.scriptPath ? {
     path: parsed.scriptPath,
@@ -178,20 +176,31 @@ async function createTrigger(args: string[], json: boolean): Promise<void> {
     timeoutMs: 30_000,
   } : undefined;
   const mode = parsed.mode === 'agent-runner' ? 'agent-session' : parsed.mode;
+  const target = {
+    channelKey: parsed.targetChannel,
+    channelId: parsed.targetChannelId,
+    delivery: script || mode === 'direct-message' ? 'direct' : 'inbound',
+    ...(session.threadId ? { threadId: session.threadId } : {}),
+  };
+  const onFailureMode = parsed.onFailure || 'notify';
+  const onNoopMode = parsed.onNoop || 'silent';
   const definition: any = {
-    $schema_version: 2,
+    $schema_version: 3,
     agentAid,
     name: parsed.name || `trigger-${now.toString(36)}`,
     enabled: hasFlag(args, '--enable'),
     createdAt: now,
     updatedAt: now,
     source: sourceFromParsed(parsed),
-    session,
-    processing: script
-      ? { mode: 'script', script }
-      : { mode: 'prompt', prompt: parsed.prompt },
-    feedback: feedbackFromParsed(parsed, mode, script !== undefined),
-    reliability: { concurrency: 'forbid', missedPolicy: 'run_once', scriptRetry: { maxAttempts: 0, backoffMs: 30_000 } },
+    execution: {
+      mode: script ? 'script' : 'agent',
+      ...(script ? { script } : { prompt: parsed.prompt }),
+      session,
+      onError: 'retry',
+      noopSentinel: '[[NOOP]]',
+    },
+    feedback: feedbackFromParsed(parsed, mode, script !== undefined, target),
+    reliability: { concurrency: 'forbid', missedPolicy: 'run_once', retry: { maxAttempts: 0, backoffMs: 30_000 } },
   };
 
   const res = await request({
@@ -216,34 +225,22 @@ function sourceFromParsed(parsed: any): any {
   throw new Error(`unsupported scheduleType: ${parsed.scheduleType}`);
 }
 
-function feedbackFromParsed(parsed: any, mode: string | undefined, hasScript: boolean): any {
-  const feedbackMode = mode || (hasScript ? 'direct-message' : 'agent-session');
-  const target = parsed.targetChannelId ? {
-    channelKey: parsed.targetChannel || '',
-    channelType: 'unknown',  // Will be resolved by server
-    channelName: parsed.targetChannel || '',
-    channelId: parsed.targetChannelId,
-    sessionStrategy: parsed.targetSessionStrategy,
-  } : undefined;
-
+function feedbackFromParsed(parsed: any, _mode: string | undefined, hasScript: boolean, target: any): any {
   const onFailureMode = parsed.onFailure || 'notify';
   const onNoopMode = parsed.onNoop || 'silent';
 
-  if (!hasScript) {
-    return {
-      mode: feedbackMode,
-      target,
-    };
-  }
-
   return {
-    onSuccess: {
-      mode: feedbackMode,
-      target,
-      template: parsed.prompt || '{{result.text}}',
+    onReply: {
+      kind: 'forward',
+      targets: [target],
+      template: hasScript ? (parsed.prompt || '{{reply.text}}') : undefined,
     },
-    onNoop: onNoopMode === 'notify' && target ? { mode: 'direct-message', target, template: '{{error.message}}' } : { mode: 'none' },
-    onFailure: onFailureMode === 'notify' && target ? { mode: 'direct-message', target, template: '❌ 触发器执行失败：{{error.message}}' } : { mode: 'none' },
+    onNoop: onNoopMode === 'notify'
+      ? { kind: 'forward', targets: [target], template: '{{reply.text}}' }
+      : { kind: 'silent' },
+    default: onFailureMode === 'notify'
+      ? { kind: 'forward', targets: [target], template: '❌ 触发器执行失败：{{error.message}}' }
+      : { kind: 'silent' },
   };
 }
 
@@ -314,8 +311,8 @@ function loadDefinitionWithFiles(inputPath: string): { definition: TriggerDefini
   const jsonPath = stat.isDirectory() ? path.join(inputPath, 'trigger.json') : inputPath;
   const definition = normalizeTriggerDefinition(JSON.parse(fs.readFileSync(jsonPath, 'utf-8')));
   const files: TriggerCreateFile[] = [];
-  if (definition.processing.mode === 'script') {
-    const scriptAbs = resolveScriptPath(baseDir, definition.processing.script.path);
+  if (definition.execution.mode === 'script') {
+    const scriptAbs = resolveScriptPath(baseDir, definition.execution.script!.path);
     const relativePath = path.relative(baseDir, scriptAbs).replace(/\\/g, '/');
     files.push({ relativePath, contentBase64: fs.readFileSync(scriptAbs).toString('base64') });
   }

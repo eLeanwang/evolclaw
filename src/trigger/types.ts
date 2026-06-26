@@ -31,13 +31,13 @@ export type TriggerSource =
   | { type: 'interval'; everyMs: number }
   | TriggerEventSource;
 
-export type TriggerFeedbackMode = 'none' | 'direct-message' | 'agent-session';
-export type TriggerLegacyFeedbackMode = TriggerFeedbackMode | 'agent-runner';
-export type TriggerSessionStrategy = 'latest' | 'current' | 'thread';
-export type TriggerThreadMode = 'reuse' | 'once';
-export type TriggerProcessingMode = 'script' | 'template' | 'prompt';
+export type TriggerExecutionMode = 'agent' | 'script';
+export type TriggerExecutionSessionStrategy = 'isolated' | 'thread' | 'main';
 export type TriggerConcurrency = 'forbid' | 'replace' | 'allow';
 export type TriggerMissedPolicy = 'skip' | 'run_once' | 'run_all';
+export type TriggerFeedbackBranch = 'onReply' | 'onNoop' | 'default';
+export type TriggerRunPhase = 'running' | 'feedback-pending';
+export type TriggerRunStatus = 'completed' | 'noop' | 'skipped' | 'failed' | 'dry-run';
 
 export interface TriggerOrigin {
   channel?: string;
@@ -52,67 +52,56 @@ export interface TriggerScriptConfig {
   timeoutMs?: number;
 }
 
-export interface TriggerThreadSession {
-  mode: TriggerThreadMode;
+export interface TriggerExecutionSession {
+  strategy: TriggerExecutionSessionStrategy;
+  baseagent?: string;
+  channelKey?: string;
+  channelId?: string;
+  sessionId?: string;
   threadId?: string;
   name?: string;
 }
 
-export interface TriggerSession {
-  channelKey: string;
-  channelId: string;
-  strategy: TriggerSessionStrategy;
-  sessionId?: string;
-  thread?: TriggerThreadSession;
+export interface TriggerExecution {
+  mode: TriggerExecutionMode;
+  prompt?: string;
+  script?: TriggerScriptConfig;
+  session: TriggerExecutionSession;
+  onError: 'fail' | 'retry';
+  noopSentinel: string;
 }
 
-export type TriggerProcessing =
-  | { mode: 'script'; script: TriggerScriptConfig }
-  | { mode: 'template'; template: string }
-  | { mode: 'prompt'; prompt: string };
+export type FeedbackDelivery = 'direct' | 'inbound';
 
-export interface TriggerFeedbackTarget {
+export interface FeedbackTarget {
   channelKey: string;
   channelId: string;
-
-  /** Compatibility fields derived from channelKey / legacy definitions. */
-  channelType?: string;
-  channelName?: string;
-  sessionStrategy?: TriggerSessionStrategy;
-  sessionId?: string;
+  delivery: FeedbackDelivery;
   threadId?: string;
-  threadMode?: TriggerThreadMode;
 }
 
-export interface TriggerFeedbackAction {
-  mode: TriggerFeedbackMode;
-  target?: TriggerFeedbackTarget;
-  template?: string;
-}
+export type FeedbackDisposition =
+  | { kind: 'forward'; targets: FeedbackTarget[]; template?: string }
+  | { kind: 'reply-origin'; template?: string }
+  | { kind: 'silent' };
 
-export interface TriggerScriptFeedbackConfig {
-  onSuccess: TriggerFeedbackAction;
-  onNoop?: TriggerFeedbackAction;
-  onFailure: TriggerFeedbackAction;
-}
-
-export type TriggerFeedbackConfig = TriggerFeedbackAction | TriggerScriptFeedbackConfig;
-
-export function isScriptFeedbackConfig(feedback: TriggerFeedbackConfig): feedback is TriggerScriptFeedbackConfig {
-  return 'onSuccess' in feedback;
+export interface TriggerFeedbackConfig {
+  onReply: FeedbackDisposition;
+  onNoop: FeedbackDisposition;
+  default: FeedbackDisposition;
 }
 
 export interface TriggerReliability {
   concurrency: TriggerConcurrency;
   missedPolicy: TriggerMissedPolicy;
-  scriptRetry: {
+  retry: {
     maxAttempts: number;
     backoffMs: number;
   };
 }
 
 export interface TriggerDefinition {
-  $schema_version: 2;
+  $schema_version: 3;
   id: string;
   agentAid: string;
   enabled: boolean;
@@ -122,8 +111,7 @@ export interface TriggerDefinition {
   updatedAt: number;
   origin?: TriggerOrigin;
   source: TriggerSource;
-  session: TriggerSession;
-  processing: TriggerProcessing;
+  execution: TriggerExecution;
   feedback: TriggerFeedbackConfig;
   reliability: TriggerReliability;
 }
@@ -132,10 +120,6 @@ export interface TriggerCreateFile {
   relativePath: string;
   contentBase64: string;
 }
-
-export type TriggerFeedbackBranch = 'single' | 'onSuccess' | 'onNoop' | 'onFailure';
-export type TriggerRunPhase = 'running' | 'feedback-pending';
-export type TriggerRunStatus = 'completed' | 'noop' | 'skipped' | 'failed' | 'dry-run';
 
 export interface TriggerRunEvent {
   seq: number;
@@ -190,14 +174,37 @@ export interface TriggerScriptResult {
   };
 }
 
+export interface AgentTokenUsage {
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_read_input_tokens?: number;
+  cache_creation_input_tokens?: number;
+  [key: string]: unknown;
+}
+
+export interface TriggerReply {
+  outcome: 'success' | 'noop' | 'error' | 'interrupted' | 'timeout';
+  text: string;
+  files: { path: string; name?: string }[];
+  error?: { reason?: string; text: string };
+  meta: {
+    runId: string;
+    durationMs: number;
+    numTurns?: number;
+    tokenUsage?: AgentTokenUsage;
+    contextUsage?: unknown;
+    toolCallCount: number;
+  };
+}
+
 export interface TriggerProcessingAudit {
-  mode: TriggerProcessingMode;
+  mode: TriggerExecutionMode;
   renderedTextHash?: string;
   renderedTextPreview?: string;
 }
 
 export interface TriggerEffectRecord {
-  type: 'message.send' | 'agent-session.enqueue' | 'agent-runner.enqueue';
+  type: 'message.send' | 'message.inbound' | 'agent.conversation';
   status: 'success' | 'failed' | 'skipped';
   channelKey?: string;
   channelType?: string;
@@ -220,17 +227,27 @@ export interface TriggerAuditRecord {
   reason?: string;
   conflictRunId?: string;
   definition: {
-    schemaVersion: 2;
+    schemaVersion: 3;
     revision: string;
     name: string;
   };
   source: TriggerSourceRunInfo;
   processing?: TriggerProcessingAudit | null;
   script?: TriggerScriptResult | null;
+  reply?: {
+    outcome: TriggerReply['outcome'];
+    textHash?: string;
+    textPreview?: string;
+    fileCount: number;
+    durationMs: number;
+    numTurns?: number;
+    tokenUsage?: AgentTokenUsage;
+    toolCallCount: number;
+  } | null;
   feedback?: {
     branch: TriggerFeedbackBranch;
-    mode: TriggerFeedbackMode;
-    target?: TriggerFeedbackTarget;
+    disposition: FeedbackDisposition['kind'];
+    target?: FeedbackTarget | FeedbackTarget[];
     renderedTextHash?: string;
     renderedTextPreview?: string;
   } | null;

@@ -20,10 +20,9 @@ import { parseTriggerSet, parseTriggerUpdate } from '../../trigger/parser.js';
 import type { ParsedTriggerSet } from '../../trigger/parser.js';
 import type { TriggerRuntimeScheduler } from '../../trigger/scheduler.js';
 import {
-  isScriptFeedbackConfig,
   type TriggerDefinition,
-  type TriggerFeedbackAction,
-  type TriggerFeedbackTarget,
+  type FeedbackDisposition,
+  type FeedbackTarget,
   type TriggerSource,
 } from '../../trigger/types.js';
 import { tryParseChannelKey } from '../channel-loader.js';
@@ -227,9 +226,9 @@ export class CommandHandler {
   }
 
   private triggerPrompt(definition: TriggerDefinition): string {
-    if (definition.processing.mode === 'prompt') return definition.processing.prompt;
-    if (definition.processing.mode === 'template') return definition.processing.template;
-    return this.primaryFeedbackAction(definition).template ?? '';
+    if (definition.execution.mode === 'agent') return definition.execution.prompt ?? '';
+    const primary = this.primaryFeedbackDisposition(definition);
+    return primary.kind === 'forward' || primary.kind === 'reply-origin' ? (primary.template ?? '') : '';
   }
 
   private definitionToTriggerView(definition: TriggerDefinition, scheduler?: TriggerRuntimeScheduler): any {
@@ -251,10 +250,10 @@ export class CommandHandler {
       targetChannel: target?.channelKey,
       targetChannelName: target?.channelKey,
       targetChannelId: target?.channelId,
-      targetChannelType: target?.channelType,
-      targetSessionStrategy: definition.session.strategy,
-      targetThreadId: definition.session.thread?.threadId,
-      boundSessionId: definition.session.sessionId,
+      targetChannelType: target ? this.resolveChannelType(target.channelKey) : undefined,
+      targetSessionStrategy: definition.execution.session.strategy,
+      targetThreadId: definition.execution.session.threadId,
+      boundSessionId: definition.execution.session.sessionId,
       prompt: this.triggerPrompt(definition),
       createdByPeerId: definition.origin?.peerId ?? '',
       createdByChannel: definition.origin?.channel ?? '',
@@ -269,31 +268,39 @@ export class CommandHandler {
     };
   }
 
-  private primaryFeedbackAction(definition: TriggerDefinition): TriggerFeedbackAction {
-    return isScriptFeedbackConfig(definition.feedback)
-      ? definition.feedback.onSuccess
-      : definition.feedback;
+  private primaryFeedbackDisposition(definition: TriggerDefinition): FeedbackDisposition {
+    return definition.feedback.onReply;
   }
 
-  private failureFeedbackAction(definition: TriggerDefinition): TriggerFeedbackAction {
-    return isScriptFeedbackConfig(definition.feedback)
-      ? definition.feedback.onFailure
-      : definition.feedback;
+  private failureFeedbackDisposition(definition: TriggerDefinition): FeedbackDisposition {
+    return definition.feedback.default;
   }
 
-  private primaryFeedbackTarget(definition: TriggerDefinition): TriggerFeedbackTarget | undefined {
-    return this.primaryFeedbackAction(definition).target
-      ?? this.failureFeedbackAction(definition).target
-      ?? {
-        channelKey: definition.session.channelKey,
-        channelId: definition.session.channelId,
-        channelType: this.resolveChannelType(definition.session.channelKey),
-        channelName: definition.session.channelKey,
-        sessionStrategy: definition.session.strategy,
-        sessionId: definition.session.sessionId,
-        threadId: definition.session.thread?.threadId,
-        threadMode: definition.session.thread?.mode,
+  private cloneDisposition(disp: FeedbackDisposition): FeedbackDisposition {
+    if (disp.kind === 'silent') return { kind: 'silent' };
+    if (disp.kind === 'reply-origin') return { kind: 'reply-origin', template: disp.template };
+    return { kind: 'forward', targets: disp.targets.map(t => ({ ...t })), template: disp.template };
+  }
+
+  private primaryFeedbackTarget(definition: TriggerDefinition): FeedbackTarget | undefined {
+    const primary = this.primaryFeedbackDisposition(definition);
+    const fallback = this.failureFeedbackDisposition(definition);
+
+    if (primary.kind === 'forward' && primary.targets.length > 0) return primary.targets[0];
+    if (fallback.kind === 'forward' && fallback.targets.length > 0) return fallback.targets[0];
+
+    // Fallback to execution session if available
+    const session = definition.execution.session;
+    if (session.channelKey && session.channelId) {
+      return {
+        channelKey: session.channelKey,
+        channelId: session.channelId,
+        delivery: 'inbound',
+        threadId: session.threadId,
       };
+    }
+
+    return undefined;
   }
 
   private canAccessTriggerDefinition(definition: TriggerDefinition, peerId: string, channel: string, isAdmin: boolean): boolean {
@@ -344,12 +351,11 @@ export class CommandHandler {
     }
 
     const strategy = parsed.targetThreadId ? 'thread' : parsed.targetSessionStrategy;
-    const target: TriggerFeedbackTarget = {
+    const target: FeedbackTarget = {
       channelKey: targetChannelName,
-      channelType: targetChannelType,
-      channelName: targetChannelName,
       channelId: targetChannelId,
-      sessionStrategy: strategy,
+      delivery: 'inbound',
+      threadId: parsed.targetThreadId,
     };
 
     if (strategy === 'current') {
@@ -358,13 +364,12 @@ export class CommandHandler {
       }
       const active = await this.sessionManager.getActiveSession(channel, channelId);
       if (!active) return { error: '当前没有活跃会话，改用 --session latest 或 thread' };
-      target.sessionId = active.id;
+      // sessionId stored in execution.session, not in target
     } else if (strategy === 'thread') {
       const adapter = this.adapters.get(targetChannelName);
       if (!adapter?.capabilities.thread) return { error: '目标渠道不支持 thread 会话' };
       const explicitThread = typeof parsed.targetThreadId === 'string' && parsed.targetThreadId !== 'true' ? parsed.targetThreadId : undefined;
       target.threadId = explicitThread || threadId || messageId || `trigger:${id}`;
-      target.threadMode = 'reuse';
     }
 
     const activeSession = this.sessionManager.getActiveSessionSync(channel, channelId);
@@ -383,24 +388,22 @@ export class CommandHandler {
       timeoutMs: 30_000,
     } : undefined;
 
-    const session = {
-      channelKey: target.channelKey,
-      channelId: target.channelId,
-      strategy,
-      ...(target.sessionId ? { sessionId: target.sessionId } : {}),
-      ...(strategy === 'thread' ? { thread: { mode: 'reuse' as const, threadId: target.threadId } } : {}),
-    };
+    // Determine feedback delivery (default: inbound for agent mode, direct for script)
+    const delivery: 'direct' | 'inbound' = parsed.mode === 'direct-message' ? 'direct' : 'inbound';
 
-    // Determine feedback mode (default: agent-session if no script; direct-message if script present)
-    const parsedMode = parsed.mode === 'agent-runner' ? 'agent-session' : parsed.mode;
-    const feedbackMode = parsedMode ?? (script ? 'direct-message' : 'agent-session');
-
-    // Determine onFailure mode (default: notify if origin present, silent otherwise)
+    // Determine onFailure/onNoop mode (default: notify if origin present, silent otherwise)
     const onFailureMode = parsed.onFailure ?? (peerId ? 'notify' : 'silent');
     const onNoopMode = parsed.onNoop ?? 'silent';
 
+    const feedbackTarget: FeedbackTarget = {
+      channelKey: target.channelKey,
+      channelId: target.channelId,
+      delivery: script ? 'direct' : delivery,
+      threadId: target.threadId,
+    };
+
     const definition: TriggerDefinition = {
-      $schema_version: 2,
+      $schema_version: 3,
       id,
       agentAid: schedulerAid,
       enabled: true,
@@ -413,28 +416,40 @@ export class CommandHandler {
         sessionKey: activeSession?.sessionKey,
       },
       source,
-      session,
-      processing: script
-        ? { mode: 'script', script }
-        : { mode: 'prompt', prompt: parsed.prompt || '' },
-      feedback: script
-        ? {
-          onSuccess: {
-            mode: feedbackMode,
-            target,
-            template: '{{result.text}}',
-          },
-          onNoop: onNoopMode === 'notify' ? { mode: 'direct-message' as const, target, template: '{{error.message}}' } : { mode: 'none' as const },
-          onFailure: onFailureMode === 'notify' ? { mode: 'direct-message' as const, target, template: '❌ 触发器执行失败：{{error.message}}' } : { mode: 'none' as const },
-        }
-        : {
-          mode: feedbackMode,
-          target,
+      execution: {
+        mode: script ? 'script' : 'agent',
+        ...(script ? { script } : { prompt: parsed.prompt || '' }),
+        session: {
+          strategy: strategy === 'current' ? 'main' : (strategy === 'thread' ? 'thread' : 'isolated'),
+          channelKey: target.channelKey,
+          channelId: target.channelId,
+          ...(strategy === 'current' && activeSession ? { sessionId: activeSession.id } : {}),
+          ...(strategy === 'thread' ? { threadId: target.threadId } : {}),
         },
+        onError: 'retry',
+        noopSentinel: '[[NOOP]]',
+      },
+      feedback: {
+        onReply: {
+          kind: 'forward',
+          targets: [feedbackTarget],
+          template: script ? '{{reply.text}}' : undefined,
+        },
+        onNoop: onNoopMode === 'notify' ? {
+          kind: 'forward',
+          targets: [feedbackTarget],
+          template: '{{error.message}}',
+        } : { kind: 'silent' },
+        default: onFailureMode === 'notify' ? {
+          kind: 'forward',
+          targets: [feedbackTarget],
+          template: '❌ 触发器执行失败：{{error.message}}',
+        } : { kind: 'silent' },
+      },
       reliability: {
         concurrency: 'forbid' as const,
         missedPolicy: 'run_once' as const,
-        scriptRetry: { maxAttempts: 0, backoffMs: 30_000 },
+        retry: { maxAttempts: 0, backoffMs: 30_000 },
       },
     };
 
@@ -1090,10 +1105,10 @@ export class CommandHandler {
       let output = `📋 **${definition.name}** (${definition.id})\n`;
       output += `状态: ${definition.enabled ? 'active' : 'disabled'}\n`;
       output += `调度: ${view.scheduleType} | 下次: ${nextStr}\n`;
-      output += `处理: ${definition.processing.mode}\n`;
-      output += `反馈: ${this.primaryFeedbackAction(definition).mode}\n`;
-      output += `失败通知: ${this.failureFeedbackAction(definition).mode === 'none' ? 'silent' : 'notify'}\n`;
-      if (definition.processing.mode === 'script') output += `脚本: ${definition.processing.script.runtime} ${definition.processing.script.path}\n`;
+      output += `处理: ${definition.execution.mode}\n`;
+      output += `反馈: ${this.primaryFeedbackDisposition(definition).kind}\n`;
+      output += `失败通知: ${this.failureFeedbackDisposition(definition).kind === 'silent' ? 'silent' : 'notify'}\n`;
+      if (definition.execution.mode === 'script') output += `脚本: ${definition.execution.script!.runtime} ${definition.execution.script!.path}\n`;
       output += `活跃运行: ${activeRuns}\n`;
       if (recentRuns.length > 0) {
         output += `\n最近运行:\n`;
@@ -1207,29 +1222,32 @@ export class CommandHandler {
     const updated: TriggerDefinition = {
       ...definition,
       source: { ...definition.source } as TriggerSource,
-      session: {
-        ...definition.session,
-        thread: definition.session.thread ? { ...definition.session.thread } : undefined,
+      execution: {
+        ...definition.execution,
+        session: { ...definition.execution.session },
+        script: definition.execution.script ? { ...definition.execution.script } : undefined,
       },
-      processing: { ...definition.processing } as TriggerDefinition['processing'],
-      feedback: isScriptFeedbackConfig(definition.feedback)
-        ? {
-          onSuccess: { ...definition.feedback.onSuccess, target: definition.feedback.onSuccess.target ? { ...definition.feedback.onSuccess.target } : undefined },
-          onNoop: definition.feedback.onNoop ? { ...definition.feedback.onNoop, target: definition.feedback.onNoop.target ? { ...definition.feedback.onNoop.target } : undefined } : undefined,
-          onFailure: { ...definition.feedback.onFailure, target: definition.feedback.onFailure.target ? { ...definition.feedback.onFailure.target } : undefined },
-        }
-        : { ...definition.feedback, target: definition.feedback.target ? { ...definition.feedback.target } : undefined },
+      feedback: {
+        onReply: this.cloneDisposition(definition.feedback.onReply),
+        onNoop: this.cloneDisposition(definition.feedback.onNoop),
+        default: this.cloneDisposition(definition.feedback.default),
+      },
       reliability: {
         ...definition.reliability,
-        scriptRetry: { ...definition.reliability.scriptRetry },
+        retry: { ...definition.reliability.retry },
       },
     };
 
     if (patch.name !== undefined) updated.name = String(patch.name);
     if (patch.prompt !== undefined) {
-      if (updated.processing.mode === 'prompt') updated.processing.prompt = String(patch.prompt);
-      else if (updated.processing.mode === 'template') updated.processing.template = String(patch.prompt);
-      else if (isScriptFeedbackConfig(updated.feedback)) updated.feedback.onSuccess.template = String(patch.prompt);
+      if (updated.execution.mode === 'agent') {
+        updated.execution.prompt = String(patch.prompt);
+      } else {
+        // For script mode, update the onReply template
+        if (updated.feedback.onReply.kind === 'forward') {
+          updated.feedback.onReply.template = String(patch.prompt);
+        }
+      }
     }
     if (patch.scheduleType !== undefined || patch.scheduleValue !== undefined) {
       const current = this.scheduleViewFromSource(definition.source);
@@ -1251,46 +1269,45 @@ export class CommandHandler {
       if (patch.targetChannel && !this.adapters.has(patch.targetChannel)) {
         return { ok: false, error: `目标渠道不存在或未启用：${patch.targetChannel}` };
       }
-      const targetChannelType = patch.targetChannel ? this.resolveChannelType(patch.targetChannel) : (previousTarget.channelType ?? this.resolveChannelType(targetChannelName));
       const targetAid = this.getOwningAgent(targetChannelName)?.aid ?? tryParseChannelKey(targetChannelName)?.selfAID ?? definition.agentAid;
       if (targetAid !== definition.agentAid) {
         return { ok: false, error: '暂不支持把 trigger 跨 agent 迁移，请新建触发器' };
       }
 
-      const strategy = patch.targetThreadId ? 'thread' : (patch.targetSessionStrategy ?? previousTarget.sessionStrategy ?? 'latest');
-      const target: TriggerFeedbackTarget = {
+      const strategy = patch.targetThreadId ? 'thread' : (patch.targetSessionStrategy ?? 'isolated');
+      const newTarget: FeedbackTarget = {
         channelKey: targetChannelName,
-        channelType: targetChannelType,
-        channelName: targetChannelName,
         channelId: String(patch.targetChannelId ?? previousTarget.channelId),
-        sessionStrategy: strategy,
+        delivery: previousTarget.delivery,
+        threadId: strategy === 'thread' ? String(patch.targetThreadId ?? threadId ?? messageId ?? previousTarget.threadId ?? `trigger:${definition.id}`) : undefined,
       };
+
       if (strategy === 'current') {
         if (patch.targetChannel && patch.targetChannel !== channel) {
           return { ok: false, error: '跨渠道不支持 --session current，请改用 latest 或 thread' };
         }
         const active = await this.sessionManager.getActiveSession(channel, channelId);
         if (!active) return { ok: false, error: '目标渠道当前没有活跃会话，改用 latest 或先在该渠道发一条消息' };
-        target.sessionId = active.id;
-      } else if (strategy === 'thread') {
-        const adapter = this.getAdapter(targetChannelName);
-        if (!adapter?.capabilities.thread) return { ok: false, error: '目标渠道不支持 thread 会话' };
-        target.threadId = String(patch.targetThreadId ?? threadId ?? messageId ?? previousTarget.threadId ?? `trigger:${definition.id}`);
-        target.threadMode = previousTarget.threadMode ?? 'reuse';
+        updated.execution.session.sessionId = active.id;
       }
-      updated.session = {
-        channelKey: target.channelKey,
-        channelId: target.channelId,
-        strategy,
-        sessionId: target.sessionId,
-        thread: strategy === 'thread' ? { mode: target.threadMode ?? 'reuse', threadId: target.threadId } : undefined,
+
+      updated.execution.session = {
+        strategy: strategy === 'current' ? 'main' : (strategy === 'thread' ? 'thread' : 'isolated'),
+        channelKey: newTarget.channelKey,
+        channelId: newTarget.channelId,
+        sessionId: strategy === 'current' ? updated.execution.session.sessionId : undefined,
+        threadId: newTarget.threadId,
       };
-      if (isScriptFeedbackConfig(updated.feedback)) {
-        updated.feedback.onSuccess.target = target;
-        if (updated.feedback.onFailure.target) updated.feedback.onFailure.target = { ...target };
-        if (updated.feedback.onNoop?.target) updated.feedback.onNoop.target = { ...target };
-      } else if (updated.feedback.mode !== 'none') {
-        updated.feedback.target = target;
+
+      // Update all feedback targets
+      if (updated.feedback.onReply.kind === 'forward') {
+        updated.feedback.onReply.targets = [newTarget];
+      }
+      if (updated.feedback.default.kind === 'forward') {
+        updated.feedback.default.targets = [newTarget];
+      }
+      if (updated.feedback.onNoop.kind === 'forward') {
+        updated.feedback.onNoop.targets = [newTarget];
       }
     }
 
@@ -1301,68 +1318,80 @@ export class CommandHandler {
 
     if (patch.scriptPath !== undefined || patch.scriptRuntime !== undefined || patch.scriptArgs !== undefined) {
       if (patch.scriptPath && patch.scriptRuntime) {
-        updated.processing = {
+        const target = this.primaryFeedbackTarget(updated);
+        updated.execution = {
           mode: 'script',
           script: {
-          path: patch.scriptPath,
-          runtime: patch.scriptRuntime,
-          args: patch.scriptArgs,
-            timeoutMs: updated.processing.mode === 'script' ? updated.processing.script.timeoutMs ?? 30_000 : 30_000,
+            path: patch.scriptPath,
+            runtime: patch.scriptRuntime,
+            args: patch.scriptArgs,
+            timeoutMs: updated.execution.mode === 'script' ? updated.execution.script!.timeoutMs ?? 30_000 : 30_000,
           },
+          session: updated.execution.session,
+          onError: 'retry',
+          noopSentinel: '[[NOOP]]',
         };
-        if (!isScriptFeedbackConfig(updated.feedback)) {
-          const target = this.primaryFeedbackTarget(updated);
-          updated.feedback = {
-            onSuccess: { mode: 'direct-message', target, template: '{{result.text}}' },
-            onNoop: { mode: 'none' },
-            onFailure: { mode: 'none' },
-          };
+        // Ensure feedback has proper targets for script mode
+        if (target && updated.feedback.onReply.kind !== 'forward') {
+          updated.feedback.onReply = { kind: 'forward', targets: [target], template: '{{reply.text}}' };
         }
       } else if (patch.scriptPath === null || patch.scriptRuntime === null) {
-        updated.processing = { mode: 'prompt', prompt: this.triggerPrompt(definition) };
-        if (isScriptFeedbackConfig(updated.feedback)) {
-          const target = this.primaryFeedbackTarget(updated);
-          updated.feedback = { mode: 'agent-session', target };
-        }
+        // Convert script mode back to agent mode
+        updated.execution = {
+          mode: 'agent',
+          prompt: this.triggerPrompt(definition),
+          session: updated.execution.session,
+          onError: 'retry',
+          noopSentinel: '[[NOOP]]',
+        };
       }
     }
 
     if (patch.mode !== undefined) {
-      const mode = patch.mode === 'agent-runner' ? 'agent-session' : patch.mode;
-      this.primaryFeedbackAction(updated).mode = mode;
+      const delivery: 'direct' | 'inbound' = patch.mode === 'direct-message' || patch.mode === 'direct' ? 'direct' : 'inbound';
+      // Update delivery mode for all forward targets
+      if (updated.feedback.onReply.kind === 'forward') {
+        updated.feedback.onReply.targets = updated.feedback.onReply.targets.map(t => ({ ...t, delivery }));
+      }
+      if (updated.feedback.default.kind === 'forward') {
+        updated.feedback.default.targets = updated.feedback.default.targets.map(t => ({ ...t, delivery }));
+      }
+      if (updated.feedback.onNoop.kind === 'forward') {
+        updated.feedback.onNoop.targets = updated.feedback.onNoop.targets.map(t => ({ ...t, delivery }));
+      }
     }
 
     if (patch.onFailure !== undefined) {
-      if (!isScriptFeedbackConfig(updated.feedback)) {
+      if (updated.execution.mode !== 'script') {
         return { ok: false, error: 'onFailure 仅适用于 script trigger' };
       }
+      const primaryTarget = this.primaryFeedbackTarget(updated);
       if (patch.onFailure === 'notify') {
-        const target = updated.feedback.onSuccess.target;
-        if (!target) return { ok: false, error: 'onFailure notify 需要 target，但现有定义缺少 target' };
-        updated.feedback.onFailure = {
-          mode: 'direct-message',
-          target: { ...target },
+        if (!primaryTarget) return { ok: false, error: 'onFailure notify 需要 target，但现有定义缺少 target' };
+        updated.feedback.default = {
+          kind: 'forward',
+          targets: [{ ...primaryTarget }],
           template: '❌ 触发器执行失败：{{error.message}}',
         };
       } else {
-        updated.feedback.onFailure = { mode: 'none' };
+        updated.feedback.default = { kind: 'silent' };
       }
     }
 
     if (patch.onNoop !== undefined) {
-      if (!isScriptFeedbackConfig(updated.feedback)) {
+      if (updated.execution.mode !== 'script') {
         return { ok: false, error: 'onNoop 仅适用于 script trigger' };
       }
+      const primaryTarget = this.primaryFeedbackTarget(updated);
       if (patch.onNoop === 'notify') {
-        const target = updated.feedback.onSuccess.target;
-        if (!target) return { ok: false, error: 'onNoop notify 需要 target，但现有定义缺少 target' };
+        if (!primaryTarget) return { ok: false, error: 'onNoop notify 需要 target，但现有定义缺少 target' };
         updated.feedback.onNoop = {
-          mode: 'direct-message',
-          target: { ...target },
+          kind: 'forward',
+          targets: [{ ...primaryTarget }],
           template: '{{error.message}}',
         };
       } else {
-        updated.feedback.onNoop = { mode: 'none' };
+        updated.feedback.onNoop = { kind: 'silent' };
       }
     }
 

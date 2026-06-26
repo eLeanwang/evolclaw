@@ -17,8 +17,8 @@ export interface ScriptExecutionInput {
 
 export class TriggerScriptExecutor {
   async execute(input: ScriptExecutionInput): Promise<TriggerScriptResult> {
-    const script = input.trigger.processing.mode === 'script'
-      ? input.trigger.processing.script
+    const script = input.trigger.execution.mode === 'script'
+      ? input.trigger.execution.script
       : undefined;
     if (!script) {
       return {
@@ -27,9 +27,10 @@ export class TriggerScriptExecutor {
         stdoutBytes: 0,
         stderrBytes: 0,
         result: {
-          matched: true,
+          outcome: 'success',
           text: '',
-          data: { source: input.sourcePayload },
+          files: [],
+          meta: { source: input.sourcePayload },
         },
       };
     }
