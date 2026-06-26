@@ -18,7 +18,7 @@ import { FeishuChannelPlugin } from './channels/feishu.js';
 import { WechatChannelPlugin } from './channels/wechat.js';
 import { AUNChannel, AUNChannelPlugin } from './channels/aun.js';
 import { startServiceProxy } from './aun/service-proxy.js';
-import { BindService, type BindRequestPayload } from './utils/bind.js';
+import { BindService, type BindRequestPayload } from './utils/aid-bind.js';
 import { DingtalkChannelPlugin } from './channels/dingtalk.js';
 import { QQBotChannelPlugin } from './channels/qqbot.js';
 import { WecomChannelPlugin } from './channels/wecom.js';

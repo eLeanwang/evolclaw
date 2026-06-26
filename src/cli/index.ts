@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 // Suppress AUN SDK logs BEFORE any imports (SDK may initialize during module load)
 process.env.AUN_LOG_INI_DISABLE = '1';
 

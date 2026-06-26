@@ -16,7 +16,7 @@ import { checkLatestVersion, getLocalVersion, isLinkedInstall, compareVersions, 
 import { commandExists } from '../../utils/cross-platform.js';
 import { loadDefaults, loadEvolclawConfig } from '../../config-store.js';
 import { execAgentAction, execAgentQuery, execAgentOptions, resolveProjectPath } from '../message/command-handler-agent-control.js';
-import { gatewayList, gatewayUpdate, gatewayDelete, gatewayTest, gatewayModels, gatewaySetPrice, gatewaySyncEnv } from '../message/gateway-config-handler.js';
+import { gatewayList, gatewayUpdate, gatewayDelete, gatewayTest, gatewayModels, gatewaySetPrice, gatewaySyncEnv } from '../../config/gateway-config.js';
 import { displaySessionTitle } from '../session/session-title.js';
 
 /**
