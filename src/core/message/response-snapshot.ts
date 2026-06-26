@@ -43,8 +43,6 @@ export interface BehaviorSnapshot {
   policyHook?: { triggered: boolean; blocked: boolean; toolName?: string };
   /** 工具汇报提醒：触发次数 + 是否发了 10 次警告 */
   toolReminder?: { queueReminders: number; tenWarning: boolean };
-  /** 标志位检查：是否设置了 lastProactiveFlag */
-  flagSet?: boolean;
   /** Unknown skill 兜底：是否触发 */
   unknownSkillFallback?: boolean;
   /** 文件标记处理：处理了哪些文件路径（仅 interactive） */
@@ -55,7 +53,10 @@ export interface BehaviorSnapshot {
   outbound?: Array<{ kind: string; decision: 'sent' | 'suppressed-thought' | 'suppressed-bg' }>;
 }
 
-const ENABLED = process.env.RESPONSE_SNAPSHOT === '1';
+// 动态检查环境变量（而非模块级常量）
+function isEnabled(): boolean {
+  return process.env.RESPONSE_SNAPSHOT === '1';
+}
 
 class SnapshotRecorder {
   /** (sessionId::taskId) → 进行中的快照 */
@@ -77,7 +78,7 @@ class SnapshotRecorder {
 
   /** 开始一条快照（beforeProcess 阶段调用） */
   begin(sessionId: string, taskId: string, source: BehaviorSnapshot['source'], msgId?: string): void {
-    if (!ENABLED) return;
+    if (!isEnabled()) return;
     this.active.set(this.key(sessionId, taskId), {
       ts: Date.now(), sessionId, taskId, source, msgId,
     });
@@ -85,14 +86,14 @@ class SnapshotRecorder {
 
   /** 填充字段（处理过程中逐步调用） */
   set(sessionId: string, taskId: string, patch: Partial<BehaviorSnapshot>): void {
-    if (!ENABLED) return;
+    if (!isEnabled()) return;
     const snap = this.active.get(this.key(sessionId, taskId));
     if (snap) Object.assign(snap, patch);
   }
 
   /** 向数组字段追加（outbound 等） */
   pushOutbound(sessionId: string, taskId: string, entry: NonNullable<BehaviorSnapshot['outbound']>[number]): void {
-    if (!ENABLED) return;
+    if (!isEnabled()) return;
     const snap = this.active.get(this.key(sessionId, taskId));
     if (!snap) return;
     if (!snap.outbound) snap.outbound = [];
@@ -101,7 +102,7 @@ class SnapshotRecorder {
 
   /** 结束并落盘（任务收尾时调用） */
   end(sessionId: string, taskId: string): void {
-    if (!ENABLED) return;
+    if (!isEnabled()) return;
     const k = this.key(sessionId, taskId);
     const snap = this.active.get(k);
     if (!snap) return;
@@ -114,7 +115,7 @@ class SnapshotRecorder {
   }
 
   isEnabled(): boolean {
-    return ENABLED;
+    return isEnabled();
   }
 }
 

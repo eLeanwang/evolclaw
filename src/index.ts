@@ -1,7 +1,18 @@
+// 【重要】最先加载环境变量，确保后续模块初始化时可用
+import dotenv from 'dotenv';
+import path from 'path';
+import { ensureDataDirs, resolvePaths, agentDir, getPackageRoot, agentMdPath } from './paths.js';
+
+// 立即加载 .env 文件（在其他模块导入之前）
+try {
+  dotenv.config({ path: path.join(resolvePaths().root, '.env') });
+} catch {
+  // 首次运行时 .env 可能不存在，忽略错误
+}
+
 import { ClaudeSessionFileAdapter } from './core/session/adapters/claude-session-file-adapter.js';
 import { CodexSessionFileAdapter } from './core/session/adapters/codex-session-file-adapter.js';
 import { GeminiSessionFileAdapter } from './core/session/adapters/gemini-session-file-adapter.js';
-import { ensureDataDirs, resolvePaths, agentDir, getPackageRoot, agentMdPath } from './paths.js';
 import { resolveAnthropicConfig } from './agents/baseagent.js';
 import { loadDefaults, loadAllAgents, ensureAgentDirSkeleton, migrateIdentitiesIfNeeded, migrateProcessConfigIfNeeded, loadEvolclawConfig } from './config-store.js';
 import { initConfigManager } from './config/config-manager.js';
@@ -9,7 +20,6 @@ import { snapshot as configSnapshot, retentionCleanup, readCurrent, readWVersion
 import { appendBootLog, selfDiagnose } from './config/boot-log.js';
 import type { Config, EffectiveAgentConfig, AgentConfig, DefaultsConfig } from './types.js';
 import { CONFIG_SCHEMA_VERSION } from './types.js';
-import dotenv from 'dotenv';
 import { SessionManager } from './core/session/session-manager.js';
 import { ClaudeAgentPlugin } from './agents/claude-runner.js';
 import { CodexAgentPlugin } from './agents/codex-runner.js';
@@ -55,7 +65,6 @@ import { TriggerFeedbackDispatcher } from './trigger/feedback.js';
 import { TriggerRuntimeScheduler } from './trigger/scheduler.js';
 import { normalizeTriggerDefinition } from './trigger/validation.js';
 import { isScriptFeedbackConfig, type TriggerDefinition, type TriggerFeedbackAction } from './trigger/types.js';
-import path from 'path';
 import fs from 'fs';
 import os from 'os';
 import crypto from 'crypto';
@@ -347,8 +356,7 @@ async function main() {
   // 确保数据目录存在
   ensureDataDirs();
 
-  // 加载 $EVOLCLAW_HOME/.env 到 process.env（不覆盖已存在的变量）
-  dotenv.config({ path: path.join(resolvePaths().root, '.env') });
+  // .env 文件已在模块顶部加载，此处不再重复加载
 
   // ── 单实例保护（pre-check + post-write self-check）──
   // pre-check：发现已有活 main 直接退出，避免起任何副作用

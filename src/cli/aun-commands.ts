@@ -748,6 +748,7 @@ export async function cmdMsg(args: string[]): Promise<void> {
 
 Commands:
   send <from> <to> <text>                              发送文本
+  send <from> <to> --text-from-file <path>             从文件读取文本内容
   send <from> <to> --file <path> [--as <type>]         发送文件（image|video|voice|file）
   send <from> <to> --link <url> [--title T]            发送链接卡片
   send <from> <to> --payload <json>                    发送自定义 payload
@@ -757,6 +758,7 @@ Commands:
   online <from> <target-aid> [<target-aid>...]         查询在线状态
 
 Options:
+  --text-from-file <path>  从文件读取文本（UTF-8），用于超长消息或避免 Shell 转义
   --app <name>          指定应用 slot（独立消费通道，不影响 daemon）
   --format json         输出 JSON 格式
   --encrypt             启用端到端加密（密文发送）
@@ -770,6 +772,7 @@ Options:
 
 示例:
   evolclaw msg send alice.agentid.pub bob.agentid.pub "hello"
+  evolclaw msg send alice.agentid.pub bob.agentid.pub --text-from-file long-message.txt
   evolclaw msg send alice.agentid.pub bob.agentid.pub "讨论项目A" --thread "project-A"
   evolclaw msg send alice.agentid.pub bob.agentid.pub --file ./pic.png
   evolclaw msg send alice.agentid.pub bob.agentid.pub --file ./demo.mp4 --as video
@@ -807,9 +810,17 @@ Options:
     }
 
     const fileVal = getArgValue(args, '--file');
+    const textFromFileVal = getArgValue(args, '--text-from-file');
     const linkVal = getArgValue(args, '--link');
     const payloadVal = getArgValue(args, '--payload');
     let body: any;
+
+    // 检查互斥参数
+    const exclusiveModes = [fileVal, textFromFileVal, linkVal, payloadVal].filter(Boolean);
+    if (exclusiveModes.length > 1) {
+      console.error('❌ --file, --text-from-file, --link, --payload 互斥，只能指定一个');
+      process.exit(1);
+    }
 
     if (fileVal) {
       body = {
@@ -820,6 +831,24 @@ Options:
         text: getArgValue(args, '--text'),
         transcript: getArgValue(args, '--transcript'),
       };
+    } else if (textFromFileVal) {
+      // 从文件读取文本内容
+      if (!fs.existsSync(textFromFileVal)) {
+        console.error(`❌ 文件不存在: ${textFromFileVal}`);
+        process.exit(1);
+      }
+      let text: string;
+      try {
+        text = fs.readFileSync(textFromFileVal, 'utf-8');
+      } catch (e: any) {
+        console.error(`❌ 读取文件失败: ${e.message}`);
+        process.exit(1);
+      }
+      if (!text) {
+        console.error('❌ 文件内容为空');
+        process.exit(1);
+      }
+      body = { mode: 'text', text };
     } else if (linkVal) {
       body = {
         mode: 'link',
@@ -838,7 +867,7 @@ Options:
     } else {
       const text = collectPositional(args, 3).join(' ');
       if (!text) {
-        console.error('❌ 缺少消息内容（文本或 --file/--link/--payload）');
+        console.error('❌ 缺少消息内容（文本或 --file/--text-from-file/--link/--payload）');
         process.exit(1);
       }
       body = { mode: 'text', text };
