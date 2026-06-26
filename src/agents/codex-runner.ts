@@ -9,7 +9,7 @@
 import type { Config, InteractionRequest } from '../types.js';
 import type { AgentPlugin, AgentInstance, AgentCallbacks } from '../core/baseagent-loader.js';
 import type { AgentEvent, AgentRunnerFull, ModelSwitcher, PermissionContext, PermissionModeInfo } from './runner-types.js';
-import { checkBlacklist, checkReadonly, parseEvolclawSendCommand, type PermissionGateway } from '../core/permission.js';
+import { checkBlacklist, checkReadonly, checkDangerousCommand, parseEvolclawSendCommand, type PermissionGateway } from '../core/permission.js';
 import { CodexAppServerClient, type CodexServerNotification, type CodexServerRequest, type CodexThreadResponse, type CodexTurnItem } from './codex-app-server-client.js';
 import { resolveOpenaiConfig } from './baseagent.js';
 import { logger } from '../utils/logger.js';
@@ -1010,7 +1010,14 @@ export class CodexRunner implements AgentRunnerFull, ModelSwitcher {
       return 'allow';
     }
 
-    if (mode === 'bypass' || mode === 'auto') return 'allow';
+    // auto 模式下检查危险命令，危险命令自动拒绝
+    if (mode === 'auto') {
+      const dangerous = checkDangerousCommand(toolName, toolInput);
+      if (dangerous.isDangerous) return 'deny';
+      return 'allow';
+    }
+
+    if (mode === 'bypass') return 'allow';
     if (mode === 'noask') return 'deny';
     if (!this.permissionGateway || !this.sendPromptFn) return 'allow';
     if (this.permissionGateway.isAlwaysAllowed(toolName)) return 'always';
