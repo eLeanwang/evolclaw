@@ -1,6 +1,6 @@
 {
   "name": "evolclaw",
-  "version": "3.5.9",
+  "version": "3.6.0",
   "description": "AI Agent gateway connecting multiple backends (Claude, Codex, Gemini) to messaging channels (Feishu, WeChat, AUN, QQ) with multi-project session management",
   "type": "module",
   "main": "dist/index.js",
@@ -24,7 +24,7 @@
   ],
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc && node -e \"const f='dist/cli/index.js',c=require('fs').readFileSync(f,'utf8');if(!c.startsWith('#!'))require('fs').writeFileSync(f,'#!/usr/bin/env node\\n'+c)\" && node -e \"try{require('child_process').execFileSync('chmod',['+x','dist/cli/index.js'])}catch{}\" && node -e \"require('fs').copyFileSync('src/utils/error-dict.json','dist/utils/error-dict.json');require('fs').cpSync('src/data/stats','dist/data/stats',{recursive:true})\"",
+    "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc && node -e \"const f='dist/cli/index.js',c=require('fs').readFileSync(f,'utf8');if(!c.startsWith('#!'))require('fs').writeFileSync(f,'#!/usr/bin/env node\\n'+c)\" && node -e \"try{require('child_process').execFileSync('chmod',['+x','dist/cli/index.js'])}catch{}\" && node -e \"require('fs').copyFileSync('src/utils/error-dict.json','dist/utils/error-dict.json');require('fs').copyFileSync('src/utils/model-prices.jsonl','dist/utils/model-prices.jsonl')\"",
     "start": "node dist/index.js",
     "test": "vitest run",
     "test:watch": "vitest",

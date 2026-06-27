@@ -1,14 +1,16 @@
 import type { ChannelAdapter, Message, Session } from '../types.js';
 import type { MessageQueue } from '../core/message/message-queue.js';
 import type { SessionManager } from '../core/session/session-manager.js';
+import { buildEnvelope } from '../core/message/message-utils.js';
 import { renderTemplate, previewText, sha256 } from './validation.js';
 import type {
+  FeedbackDisposition,
+  FeedbackTarget,
   TriggerAuditRecord,
   TriggerDefinition,
   TriggerEffectRecord,
-  TriggerFeedbackAction,
   TriggerFeedbackBranch,
-  TriggerFeedbackTarget,
+  TriggerReply,
   TriggerRunStatus,
 } from './types.js';
 
@@ -23,7 +25,7 @@ export interface TriggerChannelBinding {
 }
 
 export interface TriggerFeedbackDependencies {
-  getChannel(agentAid: string, channelKey: string, channelName?: string): TriggerChannelBinding | undefined;
+  getChannel(agentAid: string, channelKey: string): TriggerChannelBinding | undefined;
   sessionManager: SessionManager;
   messageQueue: MessageQueue;
 }
@@ -33,9 +35,8 @@ export interface TriggerFeedbackDispatchInput {
   runId: string;
   firedAt: number;
   branch: TriggerFeedbackBranch;
-  action: TriggerFeedbackAction;
-  result?: Record<string, unknown>;
-  error?: { code?: string; message?: string };
+  disposition: FeedbackDisposition;
+  reply: TriggerReply;
   sourcePayload?: Record<string, unknown>;
   dryRun?: boolean;
 }
@@ -53,55 +54,32 @@ export class TriggerFeedbackDispatcher {
   constructor(private deps: TriggerFeedbackDependencies) {}
 
   async dispatch(input: TriggerFeedbackDispatchInput): Promise<TriggerFeedbackDispatchResult> {
-    const renderedText = renderTemplate(input.action.template, {
+    const template = input.disposition.kind === 'silent' ? undefined : input.disposition.template;
+    const renderedText = template ? renderTemplate(template, {
       trigger: input.trigger,
-      result: input.result,
-      error: input.error,
+      reply: replyTemplateObject(input.reply),
+      error: input.reply.error ? { code: input.reply.error.reason, message: input.reply.error.text } : undefined,
       event: input.sourcePayload,
       source: input.sourcePayload ? { type: input.trigger.source.type, payload: input.sourcePayload } : undefined,
       timestamp: input.firedAt,
-    });
-    const feedback = {
+    }) : '';
+    const feedback: NonNullable<TriggerAuditRecord['feedback']> = {
       branch: input.branch,
-      mode: input.action.mode,
-      target: input.action.target,
+      disposition: input.disposition.kind,
+      target: dispositionTarget(input.disposition),
       renderedTextHash: sha256(renderedText),
       renderedTextPreview: previewText(renderedText),
     };
 
-    if (input.action.mode === 'none') {
-      const shouldRunSilently = input.trigger.processing.mode === 'prompt'
-        && input.trigger.session.strategy === 'thread';
-      if (shouldRunSilently) {
-        const action: TriggerFeedbackAction = {
-          mode: 'agent-session',
-          target: targetFromTriggerSession(input.trigger),
-        };
-        if (input.dryRun) {
-          return {
-            status: 'dry-run',
-            feedback,
-            effects: [],
-            error: null,
-            dryRunText: this.markTriggerMessage(input.trigger, renderedText),
-          };
-        }
-        return await this.dispatchAgentSession(input, feedback, renderedText, action, { silent: true });
-      }
-
-      const noop = input.branch === 'onNoop';
+    if (input.disposition.kind === 'silent') {
       return {
-        status: noop ? 'noop' : 'completed',
-        reason: noop ? 'matched_false' : undefined,
+        status: statusFromReply(input.reply, input.branch),
+        reason: reasonFromReply(input.reply, input.branch),
         feedback,
         effects: [],
-        error: null,
+        error: errorFromReply(input.reply),
         dryRunText: renderedText,
       };
-    }
-
-    if (!input.action.target) {
-      return this.failed(feedback, [], 'feedback_target_missing', 'feedback target is required');
     }
 
     if (input.dryRun) {
@@ -110,27 +88,49 @@ export class TriggerFeedbackDispatcher {
         feedback,
         effects: [],
         error: null,
-        dryRunText: input.action.mode === 'agent-session' ? this.markTriggerMessage(input.trigger, renderedText) : renderedText,
+        dryRunText: renderedText,
       };
     }
 
-    if (input.action.mode === 'direct-message') {
-      return await this.dispatchDirectMessage(input, feedback, renderedText);
+    if (input.disposition.kind === 'reply-origin') {
+      const target = this.originTarget(input.trigger);
+      if (!target) return this.failed(feedback, [], 'origin_missing', 'trigger.origin does not contain a reply target');
+      return await this.dispatchForwardTargets(input, feedback, renderedText, [target]);
     }
-    return await this.dispatchAgentSession(input, feedback, renderedText, input.action);
+
+    return await this.dispatchForwardTargets(input, feedback, renderedText, input.disposition.targets);
   }
 
-  private async dispatchDirectMessage(
+  private async dispatchForwardTargets(
     input: TriggerFeedbackDispatchInput,
     feedback: NonNullable<TriggerAuditRecord['feedback']>,
     text: string,
+    targets: FeedbackTarget[],
   ): Promise<TriggerFeedbackDispatchResult> {
-    const target = input.action.target!;
-    const channelKey = targetChannelKey(target);
-    const binding = this.resolveBinding(input.trigger.agentAid, target);
-    if (!binding) {
-      return this.failed(feedback, [], 'channel_not_configured', `agent ${input.trigger.agentAid} has no channel ${channelKey}`);
+    const effects: TriggerEffectRecord[] = [];
+    for (const target of targets) {
+      const result = target.delivery === 'inbound'
+        ? await this.dispatchInbound(input, text, target)
+        : await this.dispatchDirect(input, text, target);
+      effects.push(...result.effects);
+      if (result.error) return { status: 'failed', reason: result.error.code, feedback, effects, error: result.error };
     }
+    return {
+      status: statusFromReply(input.reply, input.branch),
+      reason: reasonFromReply(input.reply, input.branch),
+      feedback,
+      effects,
+      error: errorFromReply(input.reply),
+    };
+  }
+
+  private async dispatchDirect(
+    input: TriggerFeedbackDispatchInput,
+    text: string,
+    target: FeedbackTarget,
+  ): Promise<{ effects: TriggerEffectRecord[]; error: TriggerAuditRecord['error'] }> {
+    const binding = this.deps.getChannel(input.trigger.agentAid, target.channelKey);
+    if (!binding) return { effects: [], error: { code: 'channel_not_configured', message: `agent ${input.trigger.agentAid} has no channel ${target.channelKey}` } };
 
     const effects: TriggerEffectRecord[] = [];
     const deadline = Date.now() + FEEDBACK_DEADLINE_MS;
@@ -141,14 +141,12 @@ export class TriggerFeedbackDispatcher {
       attempt += 1;
       const startedAt = Date.now();
       try {
-        await binding.adapter.send({
+        await binding.adapter.send(buildEnvelope({
           taskId: `trigger:${input.runId}`,
           channel: binding.adapter.channelKey,
           channelId: target.channelId,
           agentName: binding.agentName,
-          chatmode: 'interactive',
-          timestamp: Date.now(),
-        }, {
+        }), {
           kind: 'result.text',
           text,
           isFinal: true,
@@ -157,14 +155,14 @@ export class TriggerFeedbackDispatcher {
         effects.push({
           type: 'message.send',
           status: 'success',
-          channelKey,
-          channelType: target.channelType ?? channelTypeFromKey(channelKey),
+          channelKey: target.channelKey,
+          channelType: channelTypeFromKey(target.channelKey),
           channelId: target.channelId,
           attempt,
           startedAt,
           finishedAt: Date.now(),
         });
-        return { status: 'completed', feedback, effects, error: null };
+        return { effects, error: null };
       } catch (err: any) {
         const classified = this.classifySendError(err);
         lastError = classified.message;
@@ -172,76 +170,54 @@ export class TriggerFeedbackDispatcher {
         effects.push({
           type: 'message.send',
           status: 'failed',
-          channelKey,
-          channelType: target.channelType ?? channelTypeFromKey(channelKey),
+          channelKey: target.channelKey,
+          channelType: channelTypeFromKey(target.channelKey),
           channelId: target.channelId,
           attempt,
           startedAt,
           finishedAt: Date.now(),
           error: lastError,
         });
-        if (!classified.retryable) {
-          return this.failed(feedback, effects, classified.code, classified.message);
-        }
+        if (!classified.retryable) return { effects, error: { code: classified.code, message: classified.message } };
         if (Date.now() + 1_000 >= deadline) break;
         await sleep(1_000);
       }
     }
-    return this.failed(feedback, effects, lastCode === 'send_permanent_error' ? 'send_error' : lastCode, lastError || 'direct-message deadline reached');
+    return { effects, error: { code: lastCode, message: lastError || 'direct feedback deadline reached' } };
   }
 
-  private async dispatchAgentSession(
+  private async dispatchInbound(
     input: TriggerFeedbackDispatchInput,
-    feedback: NonNullable<TriggerAuditRecord['feedback']>,
     text: string,
-    action: TriggerFeedbackAction,
-    opts: { silent?: boolean } = {},
-  ): Promise<TriggerFeedbackDispatchResult> {
-    const target = action.target!;
-    const channelKey = targetChannelKey(target);
-    const binding = this.resolveBinding(input.trigger.agentAid, target);
-    if (!binding) {
-      return this.failed(feedback, [], 'channel_not_configured', `agent ${input.trigger.agentAid} has no channel ${channelKey}`);
-    }
-
-    const session = await this.resolveSession(input.trigger, target, binding, input.runId);
-    if (!session) {
-      return this.failed(feedback, [], 'session_not_found', `session not found for ${channelKey}:${target.channelId}`);
-    }
-
-    const effects: TriggerEffectRecord[] = [];
-    const isThread = !!session.threadId;
-    const canWaitForIdle = !isThread;
-    const deadline = Date.now() + FEEDBACK_DEADLINE_MS;
-    while (canWaitForIdle && (this.deps.messageQueue.isProcessing(session.id) || this.deps.messageQueue.getQueueLength(session.id) > 0)) {
-      if (Date.now() >= deadline) {
-        effects.push({
-          type: 'agent-session.enqueue',
-          status: 'skipped',
-          channelKey,
-          channelType: target.channelType ?? channelTypeFromKey(channelKey),
-          channelId: target.channelId,
-          sessionId: session.id,
-          attempt: 1,
-          startedAt: deadline - FEEDBACK_DEADLINE_MS,
-          finishedAt: Date.now(),
-          error: 'queue_busy_timeout',
-        });
-        return {
-          status: 'skipped',
-          reason: 'queue_busy_timeout',
-          feedback,
-          effects,
-          error: null,
-        };
-      }
-      await sleep(250);
-    }
-
+    target: FeedbackTarget,
+  ): Promise<{ effects: TriggerEffectRecord[]; error: TriggerAuditRecord['error'] }> {
+    const binding = this.deps.getChannel(input.trigger.agentAid, target.channelKey);
+    if (!binding) return { effects: [], error: { code: 'channel_not_configured', message: `agent ${input.trigger.agentAid} has no channel ${target.channelKey}` } };
     const startedAt = Date.now();
+    const channelType = channelTypeFromKey(target.channelKey);
+    let session: Session;
+    try {
+      session = await this.deps.sessionManager.getOrCreateSession(
+        target.channelKey,
+        target.channelId,
+        binding.projectPath,
+        target.threadId,
+        { channelKey: target.channelKey, peerId: `trigger:${input.trigger.id}`, peerName: input.trigger.name },
+        input.trigger.name,
+        undefined,
+        'private',
+        binding.baseagent,
+        input.trigger.agentAid,
+        channelType,
+        'system',
+      );
+    } catch (err: any) {
+      return { effects: [], error: { code: 'session_error', message: err?.message || String(err) } };
+    }
+
     const message: Message = {
-      channel: binding.adapter.channelKey,
-      channelType: target.channelType,
+      channel: target.channelKey,
+      channelType,
       channelId: target.channelId,
       selfAID: input.trigger.agentAid,
       baseagent: session.baseagent || binding.baseagent,
@@ -250,7 +226,7 @@ export class TriggerFeedbackDispatcher {
       peerId: `trigger:${input.trigger.id}`,
       peerName: input.trigger.name,
       peerType: 'system',
-      content: this.markTriggerMessage(input.trigger, text),
+      content: text,
       messageId: input.runId,
       timestamp: Date.now(),
       source: 'trigger',
@@ -260,94 +236,53 @@ export class TriggerFeedbackDispatcher {
         triggerName: input.trigger.name,
         fireTime: input.firedAt,
         boundSessionId: session.id,
-        silent: opts.silent === true,
-        chatModeOverride: opts.silent ? 'proactive' : undefined,
       },
     };
-    this.deps.messageQueue.enqueue(session.id, message, session.projectPath, {
-      interruptible: false,
-      agentName: binding.agentName,
-      sessionKeyField: session.sessionKey,
-    }).catch(() => {});
-    effects.push({
-      type: 'agent-session.enqueue',
-      status: 'success',
-      channelKey,
-      channelType: target.channelType ?? channelTypeFromKey(channelKey),
-      channelId: target.channelId,
-      sessionId: session.id,
-      attempt: 1,
-      startedAt,
-      finishedAt: Date.now(),
-    });
-    return { status: 'completed', feedback, effects, error: null };
-  }
-
-  private async resolveSession(
-    trigger: TriggerDefinition,
-    target: TriggerFeedbackTarget,
-    binding: TriggerChannelBinding,
-    runId: string,
-  ): Promise<Session | undefined> {
-    const strategy = target.sessionStrategy ?? trigger.session.strategy;
-    if (strategy === 'current') {
-      if (!target.sessionId) return undefined;
-      const session = await this.deps.sessionManager.getSessionById(target.sessionId);
-      return session && session.channelId === target.channelId ? session : undefined;
+    try {
+      await this.deps.messageQueue.enqueue(session.id, message, session.projectPath, {
+        interruptible: false,
+        agentName: binding.agentName,
+        sessionKeyField: session.sessionKey,
+        selfAID: input.trigger.agentAid,
+      });
+      return {
+        effects: [{
+          type: 'message.inbound',
+          status: 'success',
+          channelKey: target.channelKey,
+          channelType,
+          channelId: target.channelId,
+          sessionId: session.id,
+          attempt: 1,
+          startedAt,
+          finishedAt: Date.now(),
+        }],
+        error: null,
+      };
+    } catch (err: any) {
+      return {
+        effects: [{
+          type: 'message.inbound',
+          status: 'failed',
+          channelKey: target.channelKey,
+          channelType,
+          channelId: target.channelId,
+          sessionId: session.id,
+          attempt: 1,
+          startedAt,
+          finishedAt: Date.now(),
+          error: err?.message || String(err),
+        }],
+        error: { code: 'enqueue_error', message: err?.message || String(err) },
+      };
     }
-
-    const channelKey = targetChannelKey(target) || binding.adapter.channelKey;
-    const channelType = target.channelType || channelTypeFromKey(channelKey);
-    if (strategy === 'thread') {
-      const threadMode = target.threadMode ?? trigger.session.thread?.mode ?? 'reuse';
-      const threadId = threadMode === 'once'
-        ? `trigger:${trigger.id}:${runId}`
-        : (target.threadId ?? trigger.session.thread?.threadId ?? `trigger:${trigger.id}`);
-      return await this.deps.sessionManager.getOrCreateSession(
-        channelKey,
-        target.channelId,
-        binding.projectPath,
-        threadId,
-        { channelKey },
-        trigger.session.thread?.name || trigger.name,
-        undefined,
-        undefined,
-        binding.baseagent,
-        trigger.agentAid,
-        channelType,
-        'system',
-      );
-    }
-
-    const sessions = await this.deps.sessionManager.listSessions(channelKey, target.channelId);
-    const latestMain = sessions
-      .filter(session => !session.threadId)
-      .sort((a, b) => b.updatedAt - a.updatedAt)[0];
-    if (latestMain) return latestMain;
-
-    return await this.deps.sessionManager.getOrCreateSession(
-      channelKey,
-      target.channelId,
-      binding.projectPath,
-      undefined,
-      { channelKey },
-      undefined,
-      undefined,
-      undefined,
-      binding.baseagent,
-      trigger.agentAid,
-      channelType,
-      'system',
-    );
   }
 
-  private resolveBinding(agentAid: string, target: TriggerFeedbackTarget): TriggerChannelBinding | undefined {
-    const channelKey = targetChannelKey(target);
-    return this.deps.getChannel(agentAid, channelKey, channelKey);
-  }
-
-  private markTriggerMessage(trigger: TriggerDefinition, text: string): string {
-    return `这是触发器结果，不是用户直接消息。\n触发器：${trigger.name}\n\n${text}`;
+  private originTarget(trigger: TriggerDefinition): FeedbackTarget | undefined {
+    const channelKey = trigger.origin?.channel || trigger.execution.session.channelKey;
+    const channelId = trigger.origin?.peerId || trigger.execution.session.channelId;
+    if (!channelKey || !channelId) return undefined;
+    return { channelKey, channelId, delivery: 'direct' };
   }
 
   private failed(
@@ -379,43 +314,19 @@ export class TriggerFeedbackDispatcher {
     }
 
     const retryablePatterns = [
-      'timeout',
-      'timed out',
-      'rate limit',
-      'too many requests',
-      'temporarily',
-      'temporary',
-      'network',
-      'disconnect',
-      'disconnected',
-      'not connected',
-      'econnreset',
-      'econnrefused',
-      'etimedout',
-      'eai_again',
-      'socket hang up',
-      'gateway',
-      'service unavailable',
+      'timeout', 'timed out', 'rate limit', 'too many requests', 'temporarily',
+      'temporary', 'network', 'disconnect', 'disconnected', 'not connected',
+      'econnreset', 'econnrefused', 'etimedout', 'eai_again', 'socket hang up',
+      'gateway', 'service unavailable',
     ];
     if (retryablePatterns.some(pattern => lower.includes(pattern))) {
       return { retryable: true, code: 'send_retryable_error', message };
     }
 
     const permanentPatterns = [
-      'auth',
-      'unauthorized',
-      'forbidden',
-      'permission',
-      'invalid',
-      'bad request',
-      'not found',
-      'unknown receiver',
-      'user not found',
-      'chat not found',
-      'peer not found',
-      'target not found',
-      'not configured',
-      'unsupported',
+      'auth', 'unauthorized', 'forbidden', 'permission', 'invalid', 'bad request',
+      'not found', 'unknown receiver', 'user not found', 'chat not found',
+      'peer not found', 'target not found', 'not configured', 'unsupported',
     ];
     if (permanentPatterns.some(pattern => lower.includes(pattern))) {
       return { retryable: false, code: 'send_permanent_error', message };
@@ -425,26 +336,47 @@ export class TriggerFeedbackDispatcher {
   }
 }
 
-function targetFromTriggerSession(trigger: TriggerDefinition): TriggerFeedbackTarget {
+function replyTemplateObject(reply: TriggerReply): Record<string, unknown> {
   return {
-    channelKey: trigger.session.channelKey,
-    channelId: trigger.session.channelId,
-    channelType: channelTypeFromKey(trigger.session.channelKey),
-    channelName: trigger.session.channelKey,
-    sessionStrategy: trigger.session.strategy,
-    sessionId: trigger.session.sessionId,
-    threadId: trigger.session.thread?.threadId,
-    threadMode: trigger.session.thread?.mode,
+    outcome: reply.outcome,
+    text: reply.text,
+    files: reply.files,
+    meta: reply.meta,
+    error: reply.error,
+  };
+}
+
+function dispositionTarget(disposition: FeedbackDisposition): FeedbackTarget | FeedbackTarget[] | undefined {
+  if (disposition.kind === 'forward') return disposition.targets;
+  return undefined;
+}
+
+function statusFromReply(reply: TriggerReply, branch: TriggerFeedbackBranch): TriggerRunStatus {
+  if (reply.outcome === 'success') return 'completed';
+  if (reply.outcome === 'noop') return 'noop';
+  if (reply.outcome === 'timeout' || reply.outcome === 'interrupted' || reply.outcome === 'error') return 'failed';
+  return branch === 'onNoop' ? 'noop' : 'completed';
+}
+
+function reasonFromReply(reply: TriggerReply, branch: TriggerFeedbackBranch): string | undefined {
+  if (reply.outcome === 'noop' || branch === 'onNoop') return 'noop';
+  if (reply.outcome === 'timeout') return 'timeout';
+  if (reply.outcome === 'interrupted') return 'interrupted';
+  if (reply.outcome === 'error') return reply.error?.reason ?? 'reply_error';
+  return undefined;
+}
+
+function errorFromReply(reply: TriggerReply): TriggerAuditRecord['error'] {
+  if (reply.outcome !== 'error' && reply.outcome !== 'timeout' && reply.outcome !== 'interrupted') return null;
+  return {
+    code: reply.error?.reason ?? reply.outcome,
+    message: reply.error?.text ?? reply.outcome,
   };
 }
 
 function channelTypeFromKey(channelKey: string): string {
   const idx = channelKey.indexOf('#');
   return idx > 0 ? channelKey.slice(0, idx) : channelKey;
-}
-
-function targetChannelKey(target: TriggerFeedbackTarget): string {
-  return target.channelKey || target.channelName || target.channelType || '';
 }
 
 function sleep(ms: number): Promise<void> {

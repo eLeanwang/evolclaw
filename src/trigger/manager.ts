@@ -1,8 +1,6 @@
 import fs from 'fs';
 import path from 'path';
 import { agentTriggersDir } from '../paths.js';
-import { tryParseChannelKey } from '../core/channel-loader.js';
-import { logger } from '../utils/logger.js';
 import {
   normalizeTriggerDefinition,
   resolveScriptPath,
@@ -24,7 +22,6 @@ export class TriggerDefinitionManager {
     readonly rootDir = agentTriggersDir(agentAid),
   ) {
     fs.mkdirSync(this.rootDir, { recursive: true });
-    this.migrateLegacyTriggers();
   }
 
   list(opts: TriggerListOptions = {}): TriggerDefinition[] {
@@ -127,8 +124,8 @@ export class TriggerDefinitionManager {
     const definition = normalizeTriggerDefinition(definitionRaw);
     const files: TriggerCreateFile[] = [];
 
-    if (definition.processing.mode === 'script') {
-      const scriptAbs = resolveScriptPath(sourceDir, definition.processing.script.path);
+    if (definition.execution.mode === 'script') {
+      const scriptAbs = resolveScriptPath(sourceDir, definition.execution.script!.path);
       const rel = path.relative(sourceDir, scriptAbs).replace(/\\/g, '/');
       files.push({
         relativePath: rel,
@@ -164,13 +161,13 @@ export class TriggerDefinitionManager {
   }
 
   private validateScriptFile(definition: TriggerDefinition, dir: string): void {
-    if (definition.processing.mode !== 'script') return;
-    const scriptAbs = resolveScriptPath(dir, definition.processing.script.path);
+    if (definition.execution.mode !== 'script') return;
+    const scriptAbs = resolveScriptPath(dir, definition.execution.script!.path);
     if (!fs.existsSync(scriptAbs)) {
-      throw new Error(`script file not found: ${definition.processing.script.path}`);
+      throw new Error(`script file not found: ${definition.execution.script!.path}`);
     }
     const stat = fs.statSync(scriptAbs);
-    if (!stat.isFile()) throw new Error(`script.path is not a file: ${definition.processing.script.path}`);
+    if (!stat.isFile()) throw new Error(`script.path is not a file: ${definition.execution.script!.path}`);
   }
 
   private assertAgent(definition: TriggerDefinition): void {
@@ -187,103 +184,4 @@ export class TriggerDefinitionManager {
     }
   }
 
-  private migrateLegacyTriggers(): void {
-    const legacyPath = path.join(this.rootDir, 'triggers.json');
-    if (!fs.existsSync(legacyPath)) return;
-    let migrated = 0;
-    let skipped = 0;
-    try {
-      const raw = JSON.parse(fs.readFileSync(legacyPath, 'utf-8')) as { triggers?: Record<string, any> };
-      for (const legacy of Object.values(raw.triggers ?? {})) {
-        try {
-          const definition = this.legacyToDefinition(legacy);
-          if (!definition) { skipped += 1; continue; }
-          if (fs.existsSync(this.definitionPath(definition.id))) { skipped += 1; continue; }
-          if (this.list({ all: true }).some(other => other.name === definition.name)) { skipped += 1; continue; }
-          this.writeDefinition(definition);
-          migrated += 1;
-        } catch {
-          skipped += 1;
-        }
-      }
-      const backup = path.join(this.rootDir, `triggers.legacy.migrated.${Date.now()}.json`);
-      fs.renameSync(legacyPath, backup);
-      if (migrated > 0 || skipped > 0) {
-        logger.info(`[Trigger] migrated legacy triggers for ${this.agentAid}: migrated=${migrated}, skipped=${skipped}, backup=${backup}`);
-      }
-    } catch (err) {
-      logger.warn(`[Trigger] failed to migrate legacy triggers for ${this.agentAid}: ${err}`);
-    }
-  }
-
-  private legacyToDefinition(legacy: any): TriggerDefinition | undefined {
-    if (!legacy || typeof legacy !== 'object') return undefined;
-    const id = typeof legacy.id === 'string' && legacy.id ? legacy.id : undefined;
-    const name = typeof legacy.name === 'string' && legacy.name ? legacy.name : undefined;
-    if (!id || !name) return undefined;
-    if (legacy.schedulerAid && legacy.schedulerAid !== this.agentAid) return undefined;
-
-    let source: any;
-    if (legacy.scheduleType === 'delay') {
-      const afterMs = Number(legacy.scheduleValue);
-      if (!Number.isFinite(afterMs) || afterMs <= 0) return undefined;
-      source = { type: 'delay', afterMs };
-    } else if (legacy.scheduleType === 'at') {
-      source = { type: 'at', at: String(legacy.scheduleValue) };
-    } else if (legacy.scheduleType === 'cron') {
-      source = { type: 'cron', expression: String(legacy.scheduleValue) };
-    } else {
-      return undefined;
-    }
-
-    const channelKey = typeof legacy.targetChannel === 'string' && legacy.targetChannel
-      ? legacy.targetChannel
-      : String(legacy.targetChannelType || '');
-    const channelType = legacy.targetChannelType || tryParseChannelKey(channelKey)?.type || channelKey;
-    const channelId = legacy.targetChannelId;
-    if (!channelKey || !channelType || !channelId) return undefined;
-
-    const sessionStrategy = legacy.targetSessionStrategy || 'latest';
-    const session: any = {
-      channelKey,
-      channelId: String(channelId),
-      strategy: sessionStrategy,
-    };
-    if (sessionStrategy === 'current') {
-      if (!legacy.boundSessionId) return undefined;
-      session.sessionId = legacy.boundSessionId;
-    }
-    if (sessionStrategy === 'thread') {
-      session.thread = { mode: 'reuse', threadId: legacy.targetThreadId || `trigger:${id}` };
-    }
-
-    return normalizeTriggerDefinition({
-      $schema_version: 2,
-      id,
-      agentAid: this.agentAid,
-      enabled: true,
-      name,
-      description: legacy.description,
-      createdAt: legacy.createdAt,
-      updatedAt: legacy.updatedAt,
-      origin: {
-        channel: legacy.createdByChannel,
-        peerId: legacy.createdByPeerId,
-      },
-      source,
-      session,
-      processing: {
-        mode: 'prompt',
-        prompt: String(legacy.prompt ?? ''),
-      },
-      feedback: {
-        mode: 'agent-session',
-      },
-      reliability: {
-        concurrency: 'forbid',
-        missedPolicy: 'run_once',
-        scriptRetry: { maxAttempts: 0, backoffMs: 30_000 },
-      },
-    });
-  }
 }

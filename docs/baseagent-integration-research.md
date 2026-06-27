@@ -1,7 +1,7 @@
-# BaseAgent 集成研究：OpenCode / WorkBuddy / Qoder
+# BaseAgent 集成研究：OpenCode / WorkBuddy / Qoder / Kimi Code / ZCode
 
-研究日期：2026-06-23（OpenCode/WorkBuddy）、2026-06-24（Qoder 增补）  
-研究目的：评估 OpenCode、WorkBuddy、Qoder 作为 EvolClaw baseagent 的可行性
+研究日期：2026-06-23（OpenCode/WorkBuddy）、2026-06-24（Qoder 增补）、2026-06-25（Kimi/ZCode 增补）  
+研究目的：评估 OpenCode、WorkBuddy、Qoder、Kimi Code、ZCode 作为 EvolClaw baseagent 的可行性
 
 ---
 
@@ -11,9 +11,11 @@
 |------|-----------|----------|------|
 | **Qoder** | ✅✅ **极高** | 🔥🔥 **最高** | SDK 接口与 Claude Agent SDK 几乎同构，可直接复用 claude-runner 模式；原生 session/resume/abort |
 | **OpenCode** | ✅ **高度可行** | 🔥 **高优先级** | 完整的 headless HTTP API + 多语言 SDK + 成熟的 session 管理 |
+| **Kimi Code** | ❌ **不可集成** | — | GUI 桌面工具，无 CLI/API/headless 模式 |
+| **ZCode** | ❌ **不可集成** | — | GUI 桌面工具，自研 Agent 内核不开放 |
 | **WorkBuddy** | ⚠️ **部分可行** | ⏸️ **暂缓** | Node.js SDK 不够成熟，缺少 HTTP API 文档，集成成本高 |
 
-> **2026-06-24 更新**：Qoder 研究后，集成优先级排序为 **Qoder > OpenCode > WorkBuddy**。Qoder 的 TypeScript SDK（`@qoder-ai/qoder-agent-sdk`）与 Claude Agent SDK 在 `query()` 签名、`Options` 字段、消息事件类型上高度一致，是迄今为止**集成成本最低**的候选。详见文末「四、Qoder 集成评估」。
+> **2026-06-25 更新**：Kimi Code 和 ZCode 确认为 GUI 桌面产品，无编程接口，无法作为 baseagent 集成。实际可集成的只有 Qoder 和 OpenCode 两个。
 
 ---
 
@@ -710,7 +712,109 @@ for await (const m of query({ prompt: 'say hi', options: { auth: accessTokenFrom
 
 ---
 
-**总研究结论**（2026-06-24）：
+## 五、Kimi Code 与 ZCode 集成评估（2026-06-25 增补）
+
+### 5.1 研究结论：两者均为 GUI 工具，无法集成
+
+| 产品 | 形态 | 集成可行性 | 理由 |
+|------|------|:---:|------|
+| **Kimi Code** | GUI 桌面工具 | ❌ | 月之暗面出品的 Agentic IDE，无 CLI/API/headless 模式 |
+| **ZCode** | GUI 桌面工具 | ❌ | 智谱 GLM 的 Agentic Development Environment，自研 Agent 内核不开放 |
+
+### 5.2 Kimi Code
+
+**产品定位**：月之暗面推出的 AI 编程 GUI 工具，类似 Cursor/Windsurf。
+
+**关键事实**：
+- **没有 CLI 版本** — 纯桌面应用，无命令行接口
+- **没有编程 SDK** — 无法通过代码驱动
+- **没有 headless 模式** — 无法在服务器环境运行
+
+**集成障碍**：和 QoderWork 同类——GUI 产品没有编程入口，无法作为 EvolClaw 的 baseagent。
+
+**注意**：Kimi Code **不是** Moonshot API（后者提供 Anthropic 兼容端点，可以通过配置 `ANTHROPIC_BASE_URL=https://api.moonshot.ai/anthropic` 接入）。如果目标是使用 Kimi 模型能力，应该走 API 端点而不是集成 GUI 工具。
+
+### 5.3 ZCode
+
+**产品定位**：智谱 GLM 的 Agentic Development Environment，对标 Cursor/Qoder Work。
+
+**演进历史**：
+- **1.0**（2025-12）— 多 CLI Agent 的命令行壳子（集成 Claude Code/Codex/Gemini）
+- **3.0**（2026-06-13）— 完全重写，切换到 **自研 ZCode Agent 内核** + 桌面 GUI
+
+**关键事实**（官方声明，2026-06-13）：
+- "全面切换自研 ZCode Agent 内核"
+- "针对满血 GLM-5.2 深度优化"
+- "**后续版本将聚焦自研 Agent 体验，不再内置或维护其他 Agent 适配**"
+
+**集成障碍**：
+- ZCode Agent 内核 **只在 ZCode GUI 内部使用**，不对外提供 SDK/API
+- 官方明确放弃了对外部 Agent 的适配支持
+- 无独立 CLI 工具、无编程接口、无 headless 模式
+
+**注意**：ZCode 不是 GLM API。如果目标是使用 GLM 模型能力，应该：
+1. 使用 GLM Coding Plan API（提供 Anthropic 兼容端点）
+2. 或者等待官方 MIT 协议的开源 API 版本（计划 2026-06 下旬上线）
+
+### 5.4 与 Qoder/OpenCode 的本质区别
+
+| 维度 | Qoder / OpenCode | Kimi Code / ZCode |
+|------|-----------------|-------------------|
+| **产品形态** | CLI Agent + SDK/API | GUI Agentic IDE |
+| **编程入口** | ✅ TypeScript SDK / HTTP API | ❌ 无 |
+| **Headless 运行** | ✅ 支持 | ❌ 必须 GUI |
+| **集成方式** | 新 runner（3-5 天） | 不可集成 |
+
+**结论**：Qoder 和 OpenCode 的"可集成性"来自它们提供了**编程驱动的后端服务**（SDK 或 HTTP API），而 Kimi Code 和 ZCode 是**桌面产品**——两者根本不在同一层。
+
+### 5.5 如果想用 Kimi/GLM 模型怎么办？
+
+**正确路径**：使用 API 端点，而不是集成 GUI 工具。
+
+```json
+// Kimi 模型（通过 Moonshot API）
+{
+  "agents": {
+    "claude": {
+      "baseUrl": "https://api.moonshot.ai/anthropic",
+      "model": "moonshot-v1-32k",
+      "apiKey": "<moonshot-key>"
+    }
+  }
+}
+
+// GLM 模型（通过智谱 API）
+{
+  "agents": {
+    "claude": {
+      "baseUrl": "https://open.bigmodel.cn/api/paas/v4/",  // 待验证 Anthropic 兼容性
+      "model": "glm-5.2",
+      "apiKey": "<zhipu-key>"
+    }
+  }
+}
+```
+
+**集成成本**：~0 行代码（复用现有 `claude-runner`，仅需填配置）。
+
+**注意**：Anthropic 兼容端点的兼容度需要实测验证（thinking、prompt caching、tool behavior、session resume 等）。
+
+---
+
+## 六、最终集成优先级（5 个产品修正版）
+
+| 排序 | 产品 | 集成方式 | 成本 | 推荐理由 |
+|:---:|------|---------|:---:|----------|
+| 1 | **Qoder** | 新 runner（SDK 同构） | 3-4 天 | SDK 与 claude-runner 同构，session/中断/流式全支持 |
+| 2 | **OpenCode** | 新 runner（HTTP） | 3-5 天 | HTTP API 成熟，provider 无关，社区验证 |
+| — | **Kimi Code** | ❌ 不可集成 | N/A | GUI 工具，无编程接口；想用 Kimi 模型走 Moonshot API |
+| — | **ZCode** | ❌ 不可集成 | N/A | GUI 工具，自研内核不开放；想用 GLM 模型走智谱 API |
+| — | **WorkBuddy** | 暂缓 | 高 | Node.js SDK 受限，无 HTTP API，集成成本高 |
+
+---
+
+**总研究结论**（2026-06-25 修正）：
 - **Qoder** — 集成成本最低（SDK 同构 claude-runner），能力最完整，**最高优先级**
 - **OpenCode** — 接口成熟，HTTP 模式适合自托管，**次优先级**
+- **Kimi Code / ZCode** — GUI 桌面产品，无编程接口，**不可集成**
 - **WorkBuddy** — SDK 受限（无 session/中断），**继续暂缓**

@@ -1,3 +1,34 @@
+## v3.6.0 (2026-06-26)
+
+### New Features
+
+- **ec fs 统一文件入口** — 新增 `ec fs` 命令，统一个人空间和群空间文件访问入口；对齐 Python aun fs / aun group fs 已实现能力，补齐 mv、mkdir、rm -r、ln、chmod、mount、find 等命令；按 AID 的 agent.md type 自动路由 personal storage 或 group fs，group 缺失能力明确返回 UNSUPPORTED
+- **Trigger V3 Daemon 级升级** — 引入 DaemonChannel 捕获 trigger 执行回复，切换到 V3 execution/feedback schema；将 `__upgrade-check` 创建到 daemon/control AID 下；启动时覆盖 daemon 级系统触发器并删除旧 agent 级系统触发器
+
+### Improvements
+
+- **权限系统重构** — 区分绝对禁止命令（shutdown、mkfs、dd、reboot 等系统级破坏操作）和危险操作（rm -rf、sudo、chmod 777、reg delete 等）；`checkBlacklist` 仅拒绝绝对禁止命令，`checkDangerousCommand` 标记危险操作需用户审批；auto 模式下危险命令自动拒绝
+- **错误处理增强** — 错误字典支持路径自动回退（`src/utils/error-dict.json` → `dist/utils/error-dict.json`），避免构建窗口丢失重试规则；Claude/Codex runner 完善错误处理流程
+- **消息队列状态管理** — 重构队列状态管理，支持多队列并发状态隔离；优化 proactive 模式响应处理
+
+### Code Refactoring
+
+- **目录结构优化** — 移动 `gateway-config-handler.ts` 到 `config/gateway-config.ts`（配置管理不应在 message/ 目录下）；重命名 `bind.ts` 为 `aid-bind.ts`（更清晰地表达 AID 绑定用途）；移动 `model-prices.jsonl` 到 `utils/`（统一工具文件位置）
+- **文档清理** — 删除源码中的 6 个 README.md（不应发布到 npm 包）；移动 `gateway-env-sync-feature.md` 到 `docs/`；更新 package.json files 字段，仅包含 README.md、LICENSE、CHANGELOG.md
+
+### Documentation
+
+- **Baseagent 集成研究** — 新增 OpenCode (Claude Code) 与 Codex 的特性对比、集成方案研究、验证结果文档
+- **Trigger Daemon 迁移** — 记录 Trigger 系统从 agent 级迁移到 daemon 级的完整对话过程
+- **ec fs 实现计划** — 详细设计文档覆盖命令路由、能力对齐、错误处理
+
+### Testing
+
+- **权限测试更新** — 更新 162 个测试文件以反映新的权限系统设计；修复 `auto` 模式下危险命令检查；更新 vitest.config.ts 排除外部项目目录（openclaw/、hermes-agent/）
+
+### Internal
+
+- **npm 包优化** — 文件数 257（从 3.5.9 的 255 增加 2 个），大小 816.5 KB（解压 3.2 MB）；不含 TypeScript 源文件、测试文件、实验性功能
 ## v3.5.9 (2026-06-25)
 
 ### Security Fixes

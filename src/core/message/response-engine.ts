@@ -82,7 +82,6 @@ type ContextRecoveryOptions = {
   resetTimer: () => void;
   shouldSuppress: () => boolean;
   proactive: ProactiveRuntimeState | null;
-  isTrigger: boolean;
 };
 
 const RETRY_EXHAUSTED_MARK = Symbol('evolclaw.retryExhausted');
@@ -255,7 +254,11 @@ export class ResponseEngine implements IMessageProcessor {
    * owner is known but its requested baseagent runner is missing, this is a
    * session/config mismatch and must not silently route to a different backend.
    */
-  getAgent(channel?: string, baseagent?: string): AgentRunnerFull {
+  getAgent(channel?: string, baseagent?: string, selfAID?: string): AgentRunnerFull {
+    if (selfAID && baseagent) {
+      const key = `${selfAID}::${baseagent}`;
+      if (this.agentMap.has(key)) return this.agentMap.get(key)!;
+    }
     if (channel && baseagent) {
       const owner = this.agentRegistry?.resolveByChannel(channel);
       const evolName = owner?.name || '<unknown>';
@@ -478,7 +481,6 @@ export class ResponseEngine implements IMessageProcessor {
       resetTimer,
       shouldSuppress,
       proactive,
-      isTrigger,
     } = opts;
 
     if (!session.agentSessionId || !canCompactAgent(agent)) {
@@ -510,7 +512,6 @@ export class ResponseEngine implements IMessageProcessor {
         resetTimer,
         shouldSuppress,
         proactive,
-        isTrigger,
         undefined  // 重试分支不调插件钩子
       );
     }
@@ -557,7 +558,6 @@ export class ResponseEngine implements IMessageProcessor {
       resetTimer,
       shouldSuppress,
       proactive,
-      isTrigger,
       undefined  // 重试分支不调插件钩子
     );
   }
@@ -574,6 +574,12 @@ export class ResponseEngine implements IMessageProcessor {
     const instanceName = this.channelTypeMap.get(channel);
     if (instanceName) info = this.channels.get(instanceName);
     return info;
+  }
+
+  private messageChannelKey(message: Message, session: Session): string {
+    return message.channel === 'daemon'
+      ? message.channel
+      : (session.metadata?.channelKey || message.channel);
   }
 
   // 命令前缀列表（与 CommandHandler.quickCommandPrefixes 保持同步）
@@ -643,7 +649,7 @@ export class ResponseEngine implements IMessageProcessor {
       };
     }
 
-    const channelKey = session.metadata?.channelKey || message.channel;
+    const channelKey = this.messageChannelKey(message, session);
     const channelInfo = this.resolveChannelInfo(channelKey);
 
     if (!channelInfo) {
@@ -659,7 +665,7 @@ export class ResponseEngine implements IMessageProcessor {
     // 按 session.baseagent 选择 agent 后端（idle-kill 路径需要 interrupt）
     let agent: AgentRunnerFull;
     try {
-      agent = this.getAgent(channelKey, session.baseagent);
+      agent = this.getAgent(channelKey, session.baseagent, session.selfAID || message.selfAID);
     } catch (error) {
       if (error instanceof BaseagentRunnerUnavailableError) {
         logger.error(`[ResponseEngine] baseagent mismatch blocked: session=${session.id} channel=${channelKey} requested=${session.baseagent} owner=${error.evolagentName} available=${error.availableBaseagents.join(',') || '<none>'}`);
@@ -773,7 +779,7 @@ export class ResponseEngine implements IMessageProcessor {
   /** 自动安全模式已禁用：仅保留错误计数，不再自动切换状态 */
   private async _processMessageInternal(message: Message, session: Session, absoluteProjectPath: string, resetTimer: (eventType?: string, toolName?: string) => void, shouldSuppress: () => boolean, getLastIdleSec?: () => number): Promise<void> {
     const messageId = `${message.channel}_${message.channelId}_${message.timestamp || Date.now()}`;
-    const channelKey = session.metadata?.channelKey || message.channel;
+    const channelKey = this.messageChannelKey(message, session);
     const channelInfo = this.resolveChannelInfo(channelKey);
     // Per-method agent name for stats bucketing (agent.name or '<unknown>')
     const agentNameForStats = this.agentRegistry?.resolveByChannel(channelKey)?.name ?? '<unknown>';
@@ -796,7 +802,7 @@ export class ResponseEngine implements IMessageProcessor {
     const identityRole = session.identity?.role || 'anonymous';
     let agent: AgentRunnerFull;
     try {
-      agent = this.getAgent(channelKey, session.baseagent);
+      agent = this.getAgent(channelKey, session.baseagent, session.selfAID || message.selfAID);
     } catch (error) {
       if (error instanceof BaseagentRunnerUnavailableError) {
         logger.error(`[ResponseEngine] baseagent mismatch blocked: session=${session.id} channel=${channelKey} requested=${session.baseagent} owner=${error.evolagentName} available=${error.availableBaseagents.join(',') || '<none>'}`);
@@ -818,7 +824,13 @@ export class ResponseEngine implements IMessageProcessor {
 
     // 为本次任务处理生成唯一 task_id（客户端生成，格式 task-{10hex}）
     const taskId = `task-${crypto.randomUUID().replace(/-/g, '').slice(0, 10)}`;
-    const isSilentTrigger = message.source === 'trigger' && message.triggerMeta?.silent === true;
+    const triggerRunId = message.triggerMeta?.runId;
+    const withTaskMetadata = (metadata?: Record<string, any>): Record<string, any> => ({
+      ...(metadata ?? {}),
+      taskId,
+      chatmode,
+      ...(triggerRunId ? { triggerRunId } : {}),
+    });
 
     // ─── 解析 self/peer/config（响应模式解析的输入）───
     const currentChannelType = options?.channelType || message.channel;
@@ -892,7 +904,7 @@ export class ResponseEngine implements IMessageProcessor {
       const base = this.getReplyContext(message);
       return {
         ...(base ?? {}),
-        metadata: { ...(base?.metadata ?? {}), taskId, chatmode },
+        metadata: withTaskMetadata(base?.metadata),
       };
     };
 
@@ -965,9 +977,7 @@ export class ResponseEngine implements IMessageProcessor {
         if (budgetStatus.hard_blocked) {
           logger.warn(`[ResponseEngine] Budget hard limit reached: agent=${budgetAgentAid} peer=${budgetPeerKey} pct=${budgetStatus.pct_used.toFixed(1)}%`);
           this.touchAgentActivity(channelKey);
-          if (!isSilentTrigger) {
-            adapter.send(envelope, { kind: 'status.completed', metadata: { durationMs: 0 } }).catch(() => {});
-          }
+          adapter.send(envelope, { kind: 'status.completed', metadata: { durationMs: 0 } }).catch(() => {});
           return;
         }
       }
@@ -986,13 +996,10 @@ export class ResponseEngine implements IMessageProcessor {
       // 记录开始处理
       const taskEncrypt = message.replyContext?.metadata?.encrypted != null ? !!(message.replyContext.metadata.encrypted) : undefined;
       this.eventBus.publish({ type: 'task:started', sessionId: session.id, agentName: agentNameForStats, encrypt: taskEncrypt, chatmode });
-      // 触发器消息不发 processing status（无需通知用户）
-      if (message.source !== 'trigger') {
-        this.touchAgentActivity(channelKey);
-        adapter.send(envelope, { kind: 'status.started' }).catch(() => {});
-      }
+      this.touchAgentActivity(channelKey);
+      adapter.send(envelope, { kind: 'status.started' }).catch(() => {});
 
-      await this.runPendingAutoCompactAtTaskStart(session, agent, absoluteProjectPath, adapter, envelope, isSilentTrigger);
+      await this.runPendingAutoCompactAtTaskStart(session, agent, absoluteProjectPath, adapter, envelope, false);
 
       logger.message({
         msgId: messageId,
@@ -1013,7 +1020,6 @@ export class ResponseEngine implements IMessageProcessor {
         fileMarkerPattern: options?.fileMarkerPattern,
         diagEnabled: this.globalSettings.debug?.flusherDiag,
         send: async (payload) => {
-          if (isSilentTrigger) return;  // silent trigger: never send renderer output
           // proactive 模式：activity.batch 是 thought 协议内容，只发给支持 thought 的 channel
           // （不支持 thought 的 channel 静默丢弃，避免降级为普通消息）
           if (isProactive && payload.kind === 'activity.batch' && !adapter.capabilities?.thought) {
@@ -1030,6 +1036,8 @@ export class ResponseEngine implements IMessageProcessor {
           const baseReplyCtx = this.getReplyContext(message);
           if (baseReplyCtx) {
             Object.assign(opts, baseReplyCtx);
+          // Trigger messageId is the internal runId, not an external channel
+          // message id. Do not use it as replyToMessageId.
           } else if (firstReply && message.messageId && message.source !== 'trigger') {
             if (payload.kind === 'result.text' && payload.text) {
               opts.replyToMessageId = message.messageId;
@@ -1039,7 +1047,7 @@ export class ResponseEngine implements IMessageProcessor {
           if (payload.kind === 'result.text' && payload.isFinal) {
             opts.title = '\u2705 \u6700\u7ec8\u56de\u590d:';
           }
-          opts.metadata = { ...(opts.metadata ?? {}), taskId, chatmode };
+          opts.metadata = withTaskMetadata(opts.metadata);
 
           if (payload.kind.startsWith('status.')) this.touchAgentActivity(channelKey);
           const enrichedEnvelope: OutboundEnvelope = { ...envelope, replyContext: opts };
@@ -1050,9 +1058,7 @@ export class ResponseEngine implements IMessageProcessor {
 
       this.currentRenderer = renderer;
 
-      if (message.source !== 'trigger') {
-        renderer.addLifecycle('started');
-      }
+      renderer.addLifecycle('started');
 
       if (isProactive) {
         logger.info(`[ResponseEngine] proactive mode: outputs via thought.put task=${taskId}`);
@@ -1066,7 +1072,6 @@ export class ResponseEngine implements IMessageProcessor {
 
       // 设置权限审批的消息发送回调（指向当前渠道）
       agent.setSendPrompt(async (text: string) => {
-        if (isSilentTrigger) return;
         await adapter.send({ ...envelope, replyContext: capturedReplyContext }, { kind: 'result.text', text, isFinal: true });
       });
 
@@ -1422,7 +1427,8 @@ export class ResponseEngine implements IMessageProcessor {
             logger.error('[ResponseEngine] Failed to record retry health status:', statusError);
           }
         };
-        // Runner 开始执行前：将 Pin 升级为 CheckMark（表示"正在处理"）
+        // Runner 开始执行前：将 Pin 升级为 CheckMark（表示"正在处理"）。
+        // Trigger messageId is an internal runId, so there is no channel ack to promote.
         if (message.messageId && message.source !== 'trigger') {
           adapter.promoteAck?.(message.messageId).catch(() => {});
         }
@@ -1451,7 +1457,6 @@ export class ResponseEngine implements IMessageProcessor {
               resetTimer,
               shouldSuppress,
               proactive,
-              message.source === 'trigger',
               resolvedMode ? { mode: resolvedMode.mode, state: modeState } : undefined
             );
             // 探测成功（退避期内到达探测点且用的是 evolclaw 模型）→ 清零降级状态
@@ -1517,7 +1522,6 @@ export class ResponseEngine implements IMessageProcessor {
               resetTimer,
               shouldSuppress,
               proactive,
-              isTrigger: message.source === 'trigger',
             }
           );
         } else {
@@ -1549,7 +1553,6 @@ export class ResponseEngine implements IMessageProcessor {
             resetTimer,
             shouldSuppress,
             proactive,
-            isTrigger: message.source === 'trigger',
           }
         );
 
@@ -1578,7 +1581,7 @@ export class ResponseEngine implements IMessageProcessor {
           streamResult,
           send: async (payload) => {
             const isCurrentlyBackground = this.isBackgroundSession(session, message.channel, message.channelId);
-            if (!isCurrentlyBackground && !isSilentTrigger) {
+            if (!isCurrentlyBackground) {
               await adapter.send({ ...envelope, replyContext: capturedReplyContext }, payload);
               if (payload.kind === 'result.text') {
                 logger.info(`[ResponseEngine] afterProcess sent: task=${taskId} text="${payload.text.slice(0, 60)}"`);
@@ -1774,7 +1777,7 @@ export class ResponseEngine implements IMessageProcessor {
         // 末尾 result message 形状异常并被标记为 error（含 SDK 内部 ede_diagnostic 串）。
         // 这不是真正的失败，不应把诊断串暴露给用户，也不计入错误统计。
         const isUserInterrupt = interruptReason === 'new_message' || interruptReason === 'stop' || interruptReason === 'recalled';
-        if (message.source !== 'trigger' && !isUserInterrupt) {
+        if (!isUserInterrupt) {
           await adapter.send(envelope, { kind: 'result.error', text: errorSummary, reason: rawSubtype }).catch(() => {});
           adapter.send(envelope, { kind: 'status.error', metadata: { errorType: rawSubtype } }).catch(() => {});
           this.touchAgentActivity(channelKey);
@@ -1920,7 +1923,7 @@ export class ResponseEngine implements IMessageProcessor {
           }
         } catch { /* non-fatal */ }
 
-        if (message.source !== 'trigger') {
+        {
           this.touchAgentActivity(channelKey);
           if (interruptReason) {
             adapter.send(envelope, { kind: 'status.interrupted', metadata: { reason: interruptReason } }).catch(() => {});
@@ -2013,7 +2016,7 @@ export class ResponseEngine implements IMessageProcessor {
       }
 
       const isFinallyBackground = this.isBackgroundSession(session, message.channel, message.channelId);
-      if (isFinallyBackground && !isSilentTrigger) {
+      if (isFinallyBackground) {
         const projectName = path.basename(session.projectPath);
         const count = this.messageCache.getCount(session.id);
         await adapter.send(envelope, { kind: 'system.notice', text: `[\u540e\u53f0-${projectName}] \u2713 任务完成 (${count}条消息已缓存)`, subtype: 'background' });
@@ -2045,7 +2048,7 @@ export class ResponseEngine implements IMessageProcessor {
         : 'error' as const;
 
       // 用户主动中断（新消息打断 或 /stop 命令）时静默，不发送中断/错误提示
-      if (!isUserInterrupt && !isSilentTrigger) {
+      if (!isUserInterrupt) {
         const statusPayload = procStatus === 'timeout'
           ? { kind: 'status.timeout' as const, metadata: { idleSec: getLastIdleSec?.() || undefined } }
           : procStatus === 'interrupted'
@@ -2099,8 +2102,6 @@ export class ResponseEngine implements IMessageProcessor {
       const retryExhaustedCount = getRetryExhaustedCount(error);
       if (isUserInterrupt) {
         logger.info(`[ResponseEngine] User interrupt by new_message, skip sending error message`);
-      } else if (isSilentTrigger) {
-        logger.info(`[ResponseEngine] Silent trigger error output suppressed task=${taskId}`);
       } else if ((error as any)?._errorAlreadySent && !retryExhaustedCount) {
         logger.info(`[ResponseEngine] Error already sent via renderer, skip sending duplicate message`);
       } else {
@@ -2133,7 +2134,7 @@ export class ResponseEngine implements IMessageProcessor {
         // 注入 taskId / chatmode（与任务主流程保持一致）
         sendOpts = {
           ...(sendOpts ?? {}),
-          metadata: { ...(sendOpts?.metadata ?? {}), taskId, chatmode },
+          metadata: withTaskMetadata(sendOpts?.metadata),
         };
         const errorPayload = {
           kind: 'result.error' as const,
@@ -2354,12 +2355,12 @@ export class ResponseEngine implements IMessageProcessor {
     resetTimer: (eventType?: string, toolName?: string) => void,
     shouldSuppress: () => boolean,
     proactive?: ProactiveRuntimeState | null,
-    isTrigger?: boolean,
     /** [迁移点4/5] 响应模式插件 + 状态，用于调 onToolUse/onComplete 钩子 */
     modeHooks?: { mode: import('../../response-modes/types.js').ResponseMode; state: Map<string, any> }
   ): Promise<StreamRunResult> {
     // Per-session agent name for stats bucketing
-    const agentNameForStats = this.agentRegistry?.resolveByChannel(session.metadata?.channelKey || session.channel)?.name ?? '<unknown>';
+    const statsChannelKey = session.channel === 'daemon' ? session.channel : (session.metadata?.channelKey || session.channel);
+    const agentNameForStats = this.agentRegistry?.resolveByChannel(statsChannelKey)?.name ?? '<unknown>';
     let hasReceivedText = false;
     let hasErrorResult = false;  // 是否已有 tool_result/error 事件输出过错误
     let madeProgress = false;
@@ -2499,7 +2500,7 @@ export class ResponseEngine implements IMessageProcessor {
             ctlQueueReadCallIds.add(event.callId);
           }
           // [迁移点4] 工具汇报提醒：由 ProactiveMode.onToolUse 实现
-          if (modeHooks?.mode.onToolUse) {
+          if (modeHooks?.mode?.onToolUse) {
             modeHooks.mode.onToolUse({
               session,
               state: modeHooks.state,
@@ -2594,7 +2595,7 @@ export class ResponseEngine implements IMessageProcessor {
           const isContextTooLong = event.terminalReason === 'prompt_too_long'
             || isContextTooLongText(event.errors?.join(' ') || '')
             || isContextTooLongText(lastReplyText);
-          if (event.isError && !hasErrorResult && !shouldSuppress() && !isUserInterrupt && !isContextTooLong && !isTrigger) {
+          if (event.isError && !hasErrorResult && !shouldSuppress() && !isUserInterrupt && !isContextTooLong) {
             const errorSummary = event.errors?.join('; ') || '任务执行失败';
             // 使用 terminalReason 提供更友好的错误提示（不带 emoji，由 formatter 统一加）
             const userFriendlyMessage = event.terminalReason === 'prompt_too_long'
@@ -2613,8 +2614,9 @@ export class ResponseEngine implements IMessageProcessor {
             await renderer.flushActivitiesOnly();
           }
 
-          // [迁移点5] onComplete 钩子：由 ProactiveMode.onComplete 实现
-          if (modeHooks?.mode.onComplete && lastReplyText) {
+          // 检测 proactive 标志位，设置 lastProactiveFlag 供模式切换提示使用
+          // [迁移点5] 标志位检查：由 ProactiveMode.onComplete 实现
+          if (modeHooks?.mode?.onComplete && lastReplyText) {
             await modeHooks.mode.onComplete({
               session,
               state: modeHooks.state,

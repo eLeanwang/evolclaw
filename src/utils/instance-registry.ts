@@ -398,6 +398,9 @@ export function findOrphanProcesses(): OrphanProcess[] {
     // 二次验证：确实是 evolclaw 的 dist/index.js
     if (!/dist[\\/]index\.js/.test(cmdline)) continue;
 
+    // 三次验证：排除 ecweb（/ecweb/dist/index.js）
+    if (/[\\/]ecweb[\\/]dist[\\/]index\.js/.test(cmdline)) continue;
+
     orphans.push({
       pid,
       evolclawHome: readEvolclawHome(pid),

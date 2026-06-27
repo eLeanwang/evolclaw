@@ -10,23 +10,29 @@ import { summarizeToolInput } from '../utils/tool-summary.js';
 // 工具摘要/Edit diff 预览已迁至 utils/tool-summary.ts；此处再导出以保持既有引用路径兼容。
 export { summarizeToolInput };
 
-// 危险命令黑名单（正则表达式）
-const DANGEROUS_PATTERNS = [
-  // Unix
-  /\brm\s+-\w*r\w*f/,        // rm -rf
-  /\bsudo\b/,                 // sudo
-  /\bmkfs\b/,                 // mkfs (格式化文件系统)
-  /\bdd\s+if=/,               // dd (磁盘操作)
-  /\bchmod\s+777/,            // chmod 777 (危险权限)
-  />\s*\/dev\/(?!null\b)/,    // 重定向到设备文件（排除 /dev/null）
+// 绝对禁止命令（所有角色、所有权限模式下都禁止，不可授权）
+// 这些是系统级破坏操作，任何情况下都不应该允许
+const ABSOLUTE_FORBIDDEN = [
   /\bshutdown\b/,             // 关机
   /\breboot\b/,               // 重启
-  // Windows
+  /\bmkfs\b/,                 // mkfs (格式化文件系统)
   /\bformat\s+[a-zA-Z]:/i,   // format C: (格式化磁盘)
-  /\brd\s+\/s/i,              // rd /s (递归删除目录)
-  /\bdel\s+\/[sfq]/i,        // del /f, /s, /q (强制删除)
-  /\breg\s+delete/i,          // reg delete (删除注册表)
+  /\bdd\s+if=.*of=\/dev/,     // dd 写入磁盘设备（读取操作允许）
+];
+
+// 危险操作（需要用户审批才能执行）
+// 这些操作有合理使用场景，但需要用户明确授权
+const DANGEROUS_PATTERNS = [
+  /\brm\s+-\w*r\w*f/,        // rm -rf (递归删除)
+  /\bsudo\b/,                 // sudo (提权执行)
+  /\bchmod\s+777/,            // chmod 777 (危险权限)
+  />\s*\/dev\/(?!null\b)/,    // 重定向到设备文件（排除 /dev/null）
+  /\brd\s+\/s/i,              // rd /s (Windows 递归删除目录)
+  /\bdel\s+\/[sfq]/i,        // del /f, /s, /q (Windows 强制删除)
+  /\breg\s+delete/i,          // reg delete (Windows 删除注册表)
   /\bnet\s+stop/i,            // net stop (停止服务)
+  /\bpkill\b/,                // pkill (批量终止进程)
+  /\bkillall\b/,              // killall (批量终止进程)
 ];
 
 // 只读模式写入命令黑名单
@@ -159,8 +165,8 @@ export function checkHClassWrite(
 }
 
 /**
- * 黑名单检查（用于 PreToolUse hook）
- * 检查危险命令模式，非黑名单一律放行
+ * 绝对禁止检查（用于 PreToolUse hook）
+ * 检查系统级破坏操作，这些命令任何情况下都不允许执行
  */
 export async function checkBlacklist(
   toolName: string,
@@ -176,12 +182,13 @@ export async function checkBlacklist(
       return { behavior: 'allow', updatedInput: input };
     }
 
-    // 检查黑名单
-    for (const pattern of DANGEROUS_PATTERNS) {
+    // 检查绝对禁止命令（系统级破坏操作）
+    for (const pattern of ABSOLUTE_FORBIDDEN) {
       if (pattern.test(cmd)) {
+        const cmdPreview = cmd.length > 60 ? cmd.substring(0, 60) + '...' : cmd;
         return {
           behavior: 'deny',
-          message: `⛔ 危险命令被拦截: ${cmd.substring(0, 80)}`
+          message: `🚫 系统级危险操作已拦截\n命令：${cmdPreview}\n\n此类操作可能导致系统损坏，任何权限模式下都不允许执行。`
         };
       }
     }
@@ -189,6 +196,55 @@ export async function checkBlacklist(
 
   // 默认允许
   return { behavior: 'allow', updatedInput: input };
+}
+
+/**
+ * 危险命令检测（用于 canUseTool callback）
+ * 检测需要用户审批的危险操作，返回是否匹配及风险说明
+ */
+export function checkDangerousCommand(
+  toolName: string,
+  input: Record<string, unknown>
+): { isDangerous: false } | { isDangerous: true; command: string; reason: string } {
+  if (toolName !== 'Bash') {
+    return { isDangerous: false };
+  }
+
+  const cmd = (input.command as string) || '';
+  if (!cmd || cmd.trim() === '') {
+    return { isDangerous: false };
+  }
+
+  // 检查危险操作模式
+  for (const pattern of DANGEROUS_PATTERNS) {
+    if (pattern.test(cmd)) {
+      const cmdPreview = cmd.length > 80 ? cmd.substring(0, 80) + '...' : cmd;
+      let reason = '此操作有潜在风险';
+
+      // 根据匹配的模式给出具体的风险说明
+      if (/\brm\s+-\w*r\w*f/.test(cmd)) {
+        reason = '递归删除文件/目录，操作不可逆';
+      } else if (/\bsudo\b/.test(cmd)) {
+        reason = '以超级用户权限执行命令';
+      } else if (/\bchmod\s+777/.test(cmd)) {
+        reason = '设置文件为完全开放权限（安全风险）';
+      } else if (/>\s*\/dev\/(?!null\b)/.test(cmd)) {
+        reason = '写入设备文件（可能影响系统）';
+      } else if (/\b(pkill|killall)\b/.test(cmd)) {
+        reason = '批量终止进程（可能影响系统稳定性）';
+      } else if (/\breg\s+delete/i.test(cmd)) {
+        reason = '删除注册表项（Windows 系统配置）';
+      }
+
+      return {
+        isDangerous: true,
+        command: cmdPreview,
+        reason
+      };
+    }
+  }
+
+  return { isDangerous: false };
 }
 
 export interface EvolclawSendCommand {

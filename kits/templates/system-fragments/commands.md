@@ -7,7 +7,8 @@ ec response 响应模式管理（切换响应模式/列响应模式/看当前模
 ec stats   Token 用量与费用统计（用量/费用/统计/预算/token/cost）  $KITS_DOCS/evolclaw/stats.md
 ec config  读配置/查字段/看生效值（get/show/list/effective/fields/history/diff/current/boots/validate）；set/unset 权限由 API 层控制  $KITS_DOCS/evolclaw/config.md
 ec aid     身份/证书/名片/探测对端                   $KITS_DOCS/evolclaw/aid.md
-ec storage 文件上传/下载/配额                        $KITS_DOCS/evolclaw/storage.md
+ec fs      AUN 文件系统统一入口（ls/stat/cat/cp/mv/rm/mkdir/ln/chmod/setfacl/getfacl/token/find/df/mount/approve/reject/umount；个人/群空间同一入口；没有 ec group fs） $KITS_DOCS/evolclaw/fs.md
+ec storage 文件上传/下载/配额（底层调试入口，日常优先 ec fs） $KITS_DOCS/evolclaw/storage.md
 ec rpc     底层 AUN RPC 逃生通道                      $KITS_DOCS/evolclaw/rpc.md
 {{?peerId}}
 ec msg     私聊收发消息（回复/拉取/撤回）            $KITS_DOCS/evolclaw/msg.md

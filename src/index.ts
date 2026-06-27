@@ -30,7 +30,7 @@ import { FeishuChannelPlugin } from './channels/feishu.js';
 import { WechatChannelPlugin } from './channels/wechat.js';
 import { AUNChannel, AUNChannelPlugin } from './channels/aun.js';
 import { startServiceProxy } from './aun/service-proxy.js';
-import { BindService, type BindRequestPayload } from './utils/bind.js';
+import { BindService, type BindRequestPayload } from './utils/aid-bind.js';
 import { DingtalkChannelPlugin } from './channels/dingtalk.js';
 import { QQBotChannelPlugin } from './channels/qqbot.js';
 import { WecomChannelPlugin } from './channels/wecom.js';
@@ -65,13 +65,17 @@ import { TriggerAuditLogger } from './trigger/audit.js';
 import { TriggerScriptExecutor } from './trigger/script-executor.js';
 import { TriggerFeedbackDispatcher } from './trigger/feedback.js';
 import { TriggerRuntimeScheduler } from './trigger/scheduler.js';
+import { DaemonChannel } from './channels/daemon.js';
 import { normalizeTriggerDefinition } from './trigger/validation.js';
-import { isScriptFeedbackConfig, type TriggerDefinition, type TriggerFeedbackAction } from './trigger/types.js';
+import type { FeedbackDisposition, TriggerDefinition } from './trigger/types.js';
+import { atomicWriteJson } from './core/session/session-fs-store.js';
 import fs from 'fs';
 import os from 'os';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import readline from 'readline';
+import { spawn } from 'child_process';
+import * as platform from './utils/cross-platform.js';
 
 /** 出站 payload 摘要（用于 channel-out.log） */
 function summarizeOutboundPayload(payload: any): Record<string, any> {
@@ -114,6 +118,139 @@ function summarizeOutboundPayload(payload: any): Record<string, any> {
       break;
   }
   return s;
+}
+
+function seedUpgradeCheckTrigger(manager: TriggerDefinitionManager, owner: { aid: string; originPeerId?: string; baseagent: string }): void {
+  const now = Date.now();
+  const scriptName = 'upgrade-check.sh';
+  const definition = normalizeTriggerDefinition({
+    $schema_version: 3,
+    id: '__upgrade-check',
+    agentAid: owner.aid,
+    enabled: true,
+    name: '__upgrade-check',
+    description: 'System trigger: check EvolClaw upgrades after install or upgrade.',
+    createdAt: now,
+    updatedAt: now,
+    origin: {
+      channel: 'daemon',
+      peerId: owner.originPeerId || owner.aid,
+      sessionKey: `daemon#${owner.originPeerId || owner.aid}#__system__`,
+    },
+    source: {
+      type: 'cron',
+      expression: '59 3 * * *',
+      timezone: 'Asia/Shanghai',
+    },
+    execution: {
+      mode: 'script',
+      script: {
+        path: scriptName,
+        runtime: 'bash',
+        timeoutMs: 60_000,
+      },
+      session: {
+        strategy: 'isolated',
+        name: '__upgrade-check',
+      },
+      onError: 'fail',
+      noopSentinel: '[[NOOP]]',
+    },
+    feedback: {
+      onReply: { kind: 'silent' },
+      onNoop: { kind: 'silent' },
+      default: { kind: 'silent' },
+    },
+    reliability: {
+      concurrency: 'forbid',
+      missedPolicy: 'run_once',
+      retry: {
+        maxAttempts: 0,
+        backoffMs: 30_000,
+      },
+    },
+  });
+  const dir = manager.triggerDir(definition.id);
+  fs.mkdirSync(dir, { recursive: true });
+  const scriptPath = path.join(dir, scriptName);
+  const packageRoot = getPackageRoot();
+  const cliPath = path.join(packageRoot, 'dist', 'cli', 'index.js');
+  const packageJsonPath = path.join(packageRoot, 'package.json');
+  const devMode = fs.existsSync(path.join(packageRoot, 'src', 'index.ts'));
+  fs.writeFileSync(scriptPath, [
+    '#!/usr/bin/env bash',
+    'set -euo pipefail',
+    '',
+    `CLI_PATH=${JSON.stringify(cliPath)}`,
+    `PACKAGE_JSON=${JSON.stringify(packageJsonPath)}`,
+    `DEV_MODE=${devMode ? '1' : '0'}`,
+    '',
+    'json() {',
+    '  local outcome="$1"',
+    '  local text="$2"',
+    '  node -e \'console.log(JSON.stringify({ outcome: process.argv[1], text: process.argv[2], files: [] }))\' "$outcome" "$text"',
+    '}',
+    '',
+    'if [ "$DEV_MODE" = "1" ]; then',
+    '  json "noop" "upgrade check skipped in dev mode"',
+    '  exit 0',
+    'fi',
+    '',
+    'local_version="$(node -e \'try { console.log(require(process.argv[1]).version || "") } catch { process.exit(0) }\' "$PACKAGE_JSON")"',
+    'remote_version="$(npm view evolclaw version 2>/dev/null || true)"',
+    '',
+    'if [ -z "$remote_version" ]; then',
+    '  json "error" "failed to check evolclaw latest version"',
+    '  exit 0',
+    'fi',
+    '',
+    'if [ -z "$local_version" ]; then',
+    '  json "error" "failed to read local evolclaw version"',
+    '  exit 0',
+    'fi',
+    '',
+    'version_cmp="$(node -e \'',
+    'const [a, b] = process.argv.slice(1);',
+    'const pa = a.split("-")[0].split(".").map(Number);',
+    'const pb = b.split("-")[0].split(".").map(Number);',
+    'const n = Math.max(pa.length, pb.length);',
+    'let out = 0;',
+    'for (let i = 0; i < n; i++) {',
+    '  const av = Number.isFinite(pa[i]) ? pa[i] : 0;',
+    '  const bv = Number.isFinite(pb[i]) ? pb[i] : 0;',
+    '  if (av < bv) { out = -1; break; }',
+    '  if (av > bv) { out = 1; break; }',
+    '}',
+    'console.log(out);',
+    '\' "$local_version" "$remote_version")"',
+    '',
+    'if [ "$version_cmp" != "-1" ]; then',
+    '  json "noop" "evolclaw is already up to date ($local_version; latest $remote_version)"',
+    '  exit 0',
+    'fi',
+    '',
+    'if [ ! -f "$CLI_PATH" ]; then',
+    '  json "error" "restart-monitor entry not found: $CLI_PATH"',
+    '  exit 0',
+    'fi',
+    '',
+    'nohup node "$CLI_PATH" restart-monitor >/dev/null 2>&1 &',
+    'json "success" "evolclaw upgrade available: ${local_version:-unknown} -> $remote_version; restart-monitor started"',
+    '',
+  ].join('\n'));
+  fs.chmodSync(scriptPath, 0o755);
+  atomicWriteJson(manager.definitionPath(definition.id), definition);
+  fs.rmSync(manager.activePath(definition.id), { force: true });
+}
+
+function removeLegacyAgentUpgradeCheck(manager: TriggerDefinitionManager): void {
+  const existing = manager.get('__upgrade-check');
+  if (!existing) return;
+  const isLegacySystemOrigin = existing.origin?.channel === '__system__' || existing.origin?.channel === 'daemon';
+  const isUpgradeScript = existing.execution.mode === 'script'
+    && existing.execution.script?.path === 'upgrade-check.sh';
+  if (!isLegacySystemOrigin || !isUpgradeScript) return;
+  fs.rmSync(manager.triggerDir('__upgrade-check'), { recursive: true, force: true });
 }
 
 /**
@@ -758,8 +895,25 @@ async function main() {
   const triggerSchedulers = new Map<string, TriggerRuntimeScheduler>();
   const triggerAudit = new TriggerAuditLogger();
   const triggerScriptExecutor = new TriggerScriptExecutor();
+  const daemonChannel = new DaemonChannel(sessionManager, messageQueue);
   const triggerStartupAgents = [...agentRegistry.runnableAgents()];
+  const controlAid = evolclawCfg.aid || '__daemon__';
+  const daemonTriggerOwner = {
+    aid: triggerStartupAgents.some(agent => agent.aid === controlAid) ? `${controlAid}#daemon` : controlAid,
+    originPeerId: controlAid,
+    baseagent: primaryAgent?.baseagent || 'codex',
+    projectPath: primaryAgent?.projectPath || process.cwd(),
+  };
   const getTriggerChannel = (agentAid: string, channelKey: string) => {
+    if (agentAid === daemonTriggerOwner.aid && channelKey === daemonChannel.channelKey) {
+      return {
+        adapter: daemonChannel,
+        agentAid,
+        agentName: daemonTriggerOwner.aid,
+        projectPath: daemonTriggerOwner.projectPath,
+        baseagent: daemonTriggerOwner.baseagent,
+      };
+    }
     const agent = agentRegistry.get(agentAid);
     if (!agent) return undefined;
     const inst = channelInstances.find((candidate) => (
@@ -778,36 +932,49 @@ async function main() {
     };
   };
   const validateTriggerFeedbackChannels = (definition: TriggerDefinition) => {
-    if (!getTriggerChannel(definition.agentAid, definition.session.channelKey)) {
-      throw new Error(`agent ${definition.agentAid} has no configured channel ${definition.session.channelKey}`);
-    }
-    const actions: TriggerFeedbackAction[] = isScriptFeedbackConfig(definition.feedback)
-      ? [definition.feedback.onSuccess, definition.feedback.onNoop, definition.feedback.onFailure].filter((a): a is TriggerFeedbackAction => !!a)
-      : [definition.feedback];
-    for (const action of actions) {
-      if (action.mode === 'none') continue;
-      const target = action.target;
-      if (!target) throw new Error(`feedback target missing for ${action.mode}`);
-      if (!getTriggerChannel(definition.agentAid, target.channelKey)) {
-        throw new Error(`agent ${definition.agentAid} has no configured channel ${target.channelKey}`);
+    const dispositions: FeedbackDisposition[] = [
+      definition.feedback.onReply,
+      definition.feedback.onNoop,
+      definition.feedback.default,
+    ];
+    for (const disposition of dispositions) {
+      if (disposition.kind !== 'forward') continue;
+      for (const target of disposition.targets) {
+        if (!getTriggerChannel(definition.agentAid, target.channelKey)) {
+          throw new Error(`agent ${definition.agentAid} has no configured channel ${target.channelKey}`);
+        }
       }
     }
   };
-  const startTriggerScheduler = async (agent: typeof triggerStartupAgents[number]) => {
-    triggerSchedulers.get(agent.aid)?.stop();
-    const manager = new TriggerDefinitionManager(agent.aid);
+  const startTriggerScheduler = async (owner: { aid: string; baseagent: string; projectPath: string }, opts: { seedUpgradeCheck?: boolean } = {}) => {
+    triggerSchedulers.get(owner.aid)?.stop();
+    const manager = new TriggerDefinitionManager(owner.aid);
+    if (opts.seedUpgradeCheck) {
+      seedUpgradeCheckTrigger(manager, owner);
+    } else {
+      removeLegacyAgentUpgradeCheck(manager);
+    }
     const state = new TriggerRunStateStore(manager);
     const dispatcher = new TriggerFeedbackDispatcher({
       getChannel: getTriggerChannel,
       sessionManager,
       messageQueue,
     });
-    const scheduler = new TriggerRuntimeScheduler(manager, state, triggerAudit, triggerScriptExecutor, dispatcher, eventBus);
-    triggerSchedulers.set(agent.aid, scheduler);
+    const scheduler = new TriggerRuntimeScheduler(
+      manager,
+      state,
+      triggerAudit,
+      triggerScriptExecutor,
+      dispatcher,
+      daemonChannel,
+      { projectPath: owner.projectPath, baseagent: owner.baseagent },
+      eventBus,
+    );
+    triggerSchedulers.set(owner.aid, scheduler);
     try {
       await scheduler.init();
     } catch (err) {
-      logger.error(`[Trigger] Scheduler init failed for ${agent.aid}: ${err}`);
+      logger.error(`[Trigger] Scheduler init failed for ${owner.aid}: ${err}`);
     }
   };
   cmdHandler.setTriggerSchedulerResolver((agentAid) => triggerSchedulers.get(agentAid));
@@ -816,6 +983,11 @@ async function main() {
     if (startedTriggerAgents.has(agent.aid)) return;
     startedTriggerAgents.add(agent.aid);
     await startTriggerScheduler(agent);
+  };
+  const ensureDaemonTriggerSchedulerStarted = async () => {
+    if (startedTriggerAgents.has(daemonTriggerOwner.aid)) return;
+    startedTriggerAgents.add(daemonTriggerOwner.aid);
+    await startTriggerScheduler(daemonTriggerOwner, { seedUpgradeCheck: true });
   };
 
   // 默认策略
@@ -830,6 +1002,10 @@ async function main() {
     showIdleMonitor: () => true,
     accumulateErrors: () => true,
   };
+
+  processor.registerChannel(daemonChannel, defaultPolicy, { channelType: 'daemon' });
+  cmdHandler.registerAdapter(daemonChannel);
+  cmdHandler.registerChannel(daemonChannel.channelName, daemonChannel, 'daemon');
 
   // ── MessageBridge：Channel ↔ Core 消息桥梁 ──
 
@@ -998,6 +1174,8 @@ async function main() {
   const connectedChannels = new Set<string>();
   const onlineNoticeSent = new Set<string>();
   const pendingFile = path.join(resolvePaths().dataDir, 'restart-pending.json');
+  let pendingRestartNoticeInFlight: Promise<void> | null = null;
+  let pendingRestartNoticeSent = false;
 
   const sendOnlineNoticeForChannel = (inst: ChannelInstance): void => {
     const name = inst.adapter.channelName;
@@ -1037,8 +1215,21 @@ async function main() {
   };
 
   const trySendPendingRestartNotice = async (): Promise<void> => {
+    if (pendingRestartNoticeSent) return;
+    if (pendingRestartNoticeInFlight) {
+      try {
+        await pendingRestartNoticeInFlight;
+      } catch {
+        // The first caller logs the actual send/read error.
+      }
+      return;
+    }
     if (!fs.existsSync(pendingFile)) return;
-    try {
+
+    pendingRestartNoticeInFlight = (async () => {
+      if (pendingRestartNoticeSent) return;
+      if (!fs.existsSync(pendingFile)) return;
+
       const pending = JSON.parse(fs.readFileSync(pendingFile, 'utf-8'));
       const adapter = cmdHandler.getAdapter(pending.channel)
         ?? channelInstances.find(inst => inst.adapter.channelKey === pending.channel)?.adapter;
@@ -1065,10 +1256,17 @@ async function main() {
         text: '✅ 服务重启成功！',
         subtype: 'restarted',
       });
-      fs.unlinkSync(pendingFile);
+      pendingRestartNoticeSent = true;
+      fs.rmSync(pendingFile, { force: true });
       logger.info(`[Restart] Notification sent via ${pending.channel}`);
+    })();
+
+    try {
+      await pendingRestartNoticeInFlight;
     } catch (e) {
       logger.error('[Restart] Failed to send restart notification:', e);
+    } finally {
+      pendingRestartNoticeInFlight = null;
     }
   };
 
@@ -1154,6 +1352,9 @@ async function main() {
   // （触发时若渠道未连，发送侧自行排队/重试）。markChannelConnected 里的
   // ensureTriggerSchedulerStarted 仅作"尽早启动"优化，此处保证即使渠道首连
   // 全部失败（如 gateway 宕机），trigger 仍无条件启动。Set 去重，不会重复。
+  ensureDaemonTriggerSchedulerStarted().catch((e) => {
+    logger.warn(`[startup] daemon trigger scheduler start failed for ${daemonTriggerOwner.aid}: ${e}`);
+  });
   for (const agent of triggerStartupAgents) {
     ensureTriggerSchedulerStarted(agent).catch((e) => {
       logger.warn(`[startup] trigger scheduler start failed for ${agent.aid}: ${e}`);
@@ -1188,6 +1389,35 @@ async function main() {
       logger.info(`✓ 控制 AID 已连接: ${evolclawCfg.aid}`);
     } catch (e: any) {
       logger.warn(`控制 AID 首连失败（后台自动重连，不影响 daemon 主流程）: ${e?.message || e}`);
+    }
+
+    // ── ECWeb 自动启动 ──
+    // 如果 config.ecweb.enabled，自动拉起 ecweb 服务
+    if (evolclawCfg.ecweb?.enabled) {
+      const ecwebPath = path.join(resolvePaths().root, 'ecweb');
+      const ecwebEntry = path.join(ecwebPath, 'dist', 'index.js');
+      if (fs.existsSync(ecwebEntry)) {
+        try {
+          const ecwebProc = spawn('node', [ecwebEntry], {
+            cwd: ecwebPath,
+            detached: true,
+            stdio: 'ignore',
+            env: { ...process.env, EVOLCLAW_HOME: resolvePaths().root }
+          });
+          ecwebProc.unref();
+          logger.info(`✓ ECWeb 已启动 (PID: ${ecwebProc.pid})`);
+          onShutdown(() => {
+            try {
+              if (ecwebProc.pid) platform.killProcess(ecwebProc.pid, true);
+              logger.info(`✓ ECWeb 已停止`);
+            } catch {}
+          });
+        } catch (e: any) {
+          logger.warn(`ECWeb 启动失败: ${e?.message || e}`);
+        }
+      } else {
+        logger.warn(`ECWeb 配置已启用但未找到 ${ecwebEntry}`);
+      }
     }
 
     // 控制 AID 接收 owner 指令：
@@ -1419,7 +1649,17 @@ async function main() {
       if (inst.channelType !== 'aun') continue;
       const ch = inst.channel as any;
       if (typeof ch?.getAidState === 'function') {
-        try { out.push(ch.getAidState()); } catch { /* ignore */ }
+        try {
+          const aidState = ch.getAidState();
+          // 增强：添加队列状态
+          const agentName = aidState.agentName || aidState.aid;
+          const processing = messageQueue.getProcessingCountByAgent(agentName);
+          const queued = messageQueue.getQueueLengthByAgent(agentName);
+          out.push({
+            ...aidState,
+            queueStatus: { processing, queued }
+          });
+        } catch { /* ignore */ }
       }
     }
     return out;
@@ -1639,6 +1879,7 @@ async function main() {
     };
     const requireAgent = (agentAid: unknown): string => {
       if (typeof agentAid !== 'string' || !agentAid) throw new Error('missing agentAid');
+      if (agentAid === daemonTriggerOwner.aid) return agentAid;
       if (!agentRegistry.get(agentAid)) throw new Error(`agent not found: ${agentAid}`);
       return agentAid;
     };

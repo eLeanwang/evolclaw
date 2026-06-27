@@ -97,7 +97,8 @@ export class ProactiveMode implements ResponseMode {
     const state = ctx.state.get(STATE_KEY) as ProactiveState | undefined;
     if (!state || !state.preTool1stMsgChk) return undefined;
 
-    // trigger 来源豁免（cron 是静默执行）
+    // Trigger execution is routed by trigger feedback disposition, so it should
+    // not be forced to send a human-facing first message in proactive mode.
     const isTrigger = ctx.message.source === 'trigger';
 
     return {
@@ -143,6 +144,13 @@ export class ProactiveMode implements ResponseMode {
       const cmdHint = state.chatType === 'group' ? 'ec group send' : 'ec msg send';
       const target = state.chatType === 'group' ? '群里' : '对方';
       ctx.injectToModel(`⚠️ 工具调用已超过 10 次，请立即用 ${cmdHint} 向${target}汇报当前情况和下一步意图。`);
+    }
+  }
+
+  // ─── onComplete（迁移点 5：标志位检查）───
+  async onComplete(ctx: CompleteContext): Promise<void> {
+    if (/\[PROACTIVE:REPLY_CONFIRMED_(SENT|NONE)\]/.test(ctx.lastReplyText)) {
+      await ctx.updateSessionMeta({ lastProactiveFlag: true });
     }
   }
 

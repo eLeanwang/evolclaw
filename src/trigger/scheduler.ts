@@ -7,6 +7,7 @@ import type { TriggerRunStateStore } from './state.js';
 import type { TriggerAuditLogger, TriggerRunStats } from './audit.js';
 import type { TriggerScriptExecutor } from './script-executor.js';
 import type { TriggerFeedbackDispatcher } from './feedback.js';
+import type { DaemonChannel } from '../channels/daemon.js';
 import { TriggerEventSource } from './sources/event-source.js';
 import {
   definitionRevision,
@@ -15,13 +16,15 @@ import {
   sha256,
 } from './validation.js';
 import type {
+  FeedbackDisposition,
+  FeedbackTarget,
   TriggerActiveRun,
   TriggerAuditRecord,
   TriggerCreateFile,
   TriggerDefinition,
-  TriggerFeedbackAction,
   TriggerFeedbackBranch,
   TriggerProcessingAudit,
+  TriggerReply,
   TriggerRunPayload,
   TriggerRuntimeResult,
   TriggerScheduleState,
@@ -30,7 +33,6 @@ import type {
   TriggerSourceEvent,
   TriggerSourceRunInfo,
 } from './types.js';
-import { isScriptFeedbackConfig } from './types.js';
 
 const MAX_TIMER_MS = 2_147_483_647;
 
@@ -39,12 +41,16 @@ interface RunningRun {
   controller: AbortController;
 }
 
-interface ProcessingRunResult {
+interface TriggerRuntimeConfig {
+  projectPath: string;
+  baseagent: string;
+}
+
+interface ExecutionRunResult {
   branch: TriggerFeedbackBranch;
   script: TriggerScriptResult | null;
   processing: TriggerProcessingAudit;
-  result?: Record<string, unknown>;
-  error?: { code?: string; message?: string };
+  reply: TriggerReply;
 }
 
 export class TriggerRuntimeScheduler {
@@ -52,7 +58,6 @@ export class TriggerRuntimeScheduler {
   private running = new Map<string, Map<string, RunningRun>>();
   private eventSource?: TriggerEventSource;
   private initialized = false;
-  private eventBus?: EventBus;
 
   constructor(
     private manager: TriggerDefinitionManager,
@@ -60,9 +65,10 @@ export class TriggerRuntimeScheduler {
     private audit: TriggerAuditLogger,
     private scriptExecutor: TriggerScriptExecutor,
     private feedback: TriggerFeedbackDispatcher,
-    eventBus?: EventBus,
+    private daemonChannel: DaemonChannel,
+    private runtime: TriggerRuntimeConfig,
+    private eventBus?: EventBus,
   ) {
-    this.eventBus = eventBus;
     if (eventBus) {
       this.eventSource = new TriggerEventSource(eventBus, (triggerId, event) => {
         void this.fireEventTrigger(triggerId, event);
@@ -104,7 +110,6 @@ export class TriggerRuntimeScheduler {
     };
   }
 
-  /** 运行统计（保留窗口内）：fireCount / failCount / lastFiredAt / lastResult。 */
   stats(triggerId: string): TriggerRunStats {
     return this.audit.stats(triggerId);
   }
@@ -156,6 +161,7 @@ export class TriggerRuntimeScheduler {
       this.registerEvent(definition);
       return;
     }
+
     const scheduledAt = this.resolveScheduledAt(definition);
     if (scheduledAt === null) {
       if (this.isOneShot(definition.source) && definition.reliability.missedPolicy === 'skip') {
@@ -164,6 +170,7 @@ export class TriggerRuntimeScheduler {
       }
       return;
     }
+
     const now = Date.now();
     if (this.isPeriodic(definition.source) && scheduledAt < now - 1000 && definition.reliability.missedPolicy === 'skip') {
       this.writeSkippedAudit(definition, scheduledAt, now, 'missed_skip');
@@ -171,8 +178,8 @@ export class TriggerRuntimeScheduler {
       this.schedule(definition);
       return;
     }
+
     const rawDelay = Math.max(0, scheduledAt - Date.now());
-    const delay = Math.min(MAX_TIMER_MS, rawDelay);
     const timer = setTimeout(() => {
       this.timers.delete(definition.id);
       if (scheduledAt - Date.now() > 1000) {
@@ -180,7 +187,7 @@ export class TriggerRuntimeScheduler {
         return;
       }
       void this.handleScheduledFire(definition.id, scheduledAt);
-    }, delay);
+    }, Math.min(MAX_TIMER_MS, rawDelay));
     timer.unref?.();
     this.timers.set(definition.id, timer);
   }
@@ -189,11 +196,13 @@ export class TriggerRuntimeScheduler {
     const definition = this.manager.get(triggerId);
     if (!definition?.enabled) return;
     const firedAt = Date.now();
+
     if (this.isOneShot(definition.source) && scheduledAt < firedAt - 1000 && definition.reliability.missedPolicy === 'skip') {
       this.writeSkippedAudit(definition, scheduledAt, firedAt, 'missed_skip');
       this.setEnabled(definition.id, false);
       return;
     }
+
     if (this.isPeriodic(definition.source)) {
       if (scheduledAt < firedAt - 1000 && definition.reliability.missedPolicy === 'skip') {
         this.writeSkippedAudit(definition, scheduledAt, firedAt, 'missed_skip');
@@ -244,27 +253,19 @@ export class TriggerRuntimeScheduler {
     if (!payload.dryRun) {
       this.addRunning(definition.id, runId, { run: activeRun, controller });
       this.state.upsert(definition.id, activeRun);
-      this.eventBus?.publish({
-        type: 'trigger:fired',
-        triggerId: definition.id,
-        name: definition.name,
-        runId,
-        originTriggerId: definition.id,
-        fireTime: firedAt,
-        targetChannel: definition.session.channelKey,
-        targetChannelId: definition.session.channelId,
-        scheduleType: definition.source.type,
-        timestamp: Date.now(),
-      });
+      this.publishTriggerFired(definition, runId, firedAt);
     }
 
     let script: TriggerScriptResult | null = null;
     let processing: TriggerProcessingAudit | null = null;
+    let reply: TriggerReply | null = null;
 
     try {
-      const processingResult = await this.runProcessing(definition, runId, firedAt, source.payload, controller.signal);
-      script = processingResult.script;
-      processing = processingResult.processing;
+      const execution = await this.runExecution(definition, runId, firedAt, source.payload, controller.signal, payload.dryRun === true);
+      script = execution.script;
+      processing = execution.processing;
+      reply = execution.reply ?? null;
+
       if (!payload.dryRun && !this.isRunning(definition.id, runId)) {
         return {
           ok: false,
@@ -277,11 +278,11 @@ export class TriggerRuntimeScheduler {
 
       if (!payload.dryRun) {
         this.state.appendEvent(definition.id, runId, {
-          event: script
-            ? (script.error ? 'script.failed' : 'script.completed')
-            : 'processing.completed',
+          event: shouldRetryExecution(execution.reply) ? 'execution.failed' : 'execution.completed',
           ts: Date.now(),
-          ...(script ? { exitCode: script.exitCode } : { mode: definition.processing.mode }),
+          mode: definition.execution.mode,
+          outcome: execution.reply.outcome,
+          ...(script ? { exitCode: script.exitCode } : {}),
         });
         this.state.setPhase(definition.id, runId, 'feedback-pending', {
           deadlineAt: Date.now() + 30_000,
@@ -289,19 +290,18 @@ export class TriggerRuntimeScheduler {
         this.state.appendEvent(definition.id, runId, {
           event: 'feedback.pending',
           ts: Date.now(),
-          branch: processingResult.branch,
+          branch: execution.branch,
         });
       }
 
-      const action = this.selectFeedbackAction(definition, processingResult.branch);
+      const disposition = this.selectDisposition(definition, execution.branch);
       const feedbackResult = await this.feedback.dispatch({
         trigger: definition,
         runId,
         firedAt,
-        branch: processingResult.branch,
-        action,
-        result: processingResult.result,
-        error: processingResult.error,
+        branch: execution.branch,
+        disposition,
+        reply: execution.reply,
         sourcePayload: source.payload,
         dryRun: payload.dryRun,
       });
@@ -315,6 +315,7 @@ export class TriggerRuntimeScheduler {
         source,
         processing,
         script,
+        reply,
         feedback: feedbackResult.feedback,
         effects: feedbackResult.effects,
         error: feedbackResult.error,
@@ -346,6 +347,7 @@ export class TriggerRuntimeScheduler {
         source,
         processing,
         script,
+        reply,
         feedback: null,
         effects: [],
         error: { code: 'daemon_error', message },
@@ -359,85 +361,137 @@ export class TriggerRuntimeScheduler {
     }
   }
 
-  private async runProcessing(
+  private async runExecution(
     definition: TriggerDefinition,
     runId: string,
     firedAt: number,
     sourcePayload: Record<string, unknown>,
     signal: AbortSignal,
-  ): Promise<ProcessingRunResult> {
-    if (definition.processing.mode === 'script') {
-      const script = await this.runScriptWithRetry(definition, runId, firedAt, sourcePayload, signal);
+    dryRun: boolean,
+  ): Promise<ExecutionRunResult> {
+    const maxAttempts = !dryRun && definition.execution.onError === 'retry'
+      ? definition.reliability.retry.maxAttempts
+      : 0;
+    let execution = await this.runExecutionAttempt(definition, runId, firedAt, sourcePayload, signal, dryRun);
+    for (let attempt = 0; shouldRetryExecution(execution.reply) && attempt < maxAttempts && !signal.aborted; attempt++) {
+      await sleep(definition.reliability.retry.backoffMs);
+      execution = await this.runExecutionAttempt(definition, runId, firedAt, sourcePayload, signal, dryRun);
+    }
+    return execution;
+  }
+
+  private async runExecutionAttempt(
+    definition: TriggerDefinition,
+    runId: string,
+    firedAt: number,
+    sourcePayload: Record<string, unknown>,
+    signal: AbortSignal,
+    dryRun: boolean,
+  ): Promise<ExecutionRunResult> {
+    if (definition.execution.mode === 'script') {
+      const script = await this.runScriptOnce(definition, runId, firedAt, sourcePayload, signal);
       if (script.error || script.exitCode !== 0) {
+        const reply = errorReply(runId, script.durationMs, script.error?.code || 'script_error', script.error?.message || 'script failed');
         return {
-          branch: 'onFailure',
+          branch: 'default',
           script,
           processing: { mode: 'script' },
-          error: { code: script.error?.code || 'script_error', message: script.error?.message || 'script failed' },
+          reply,
         };
       }
-      const result = script.result ?? {};
+      const reply = replyFromScriptResult(script, runId);
       return {
-        branch: result.matched === false ? 'onNoop' : 'onSuccess',
+        branch: branchFromReply(reply),
         script,
         processing: { mode: 'script' },
-        result,
+        reply,
       };
     }
 
-    const template = definition.processing.mode === 'template'
-      ? definition.processing.template
-      : definition.processing.prompt;
-    const text = renderTemplate(template, {
+    const prompt = renderTemplate(definition.execution.prompt ?? '', {
       trigger: definition,
       timestamp: firedAt,
       event: sourcePayload,
       source: { type: definition.source.type, payload: sourcePayload },
     });
-    return {
-      branch: 'single',
-      script: null,
-      processing: {
-        mode: definition.processing.mode,
-        renderedTextHash: sha256(text),
-        renderedTextPreview: previewText(text),
-      },
-      result: { text },
+    const processing = {
+      mode: 'agent' as const,
+      renderedTextHash: sha256(prompt),
+      renderedTextPreview: previewText(prompt),
     };
-  }
 
-  private selectFeedbackAction(definition: TriggerDefinition, branch: TriggerFeedbackBranch): TriggerFeedbackAction {
-    if (isScriptFeedbackConfig(definition.feedback)) {
-      if (branch === 'onNoop') return definition.feedback.onNoop ?? { mode: 'none' };
-      if (branch === 'onSuccess' || branch === 'onFailure') return definition.feedback[branch];
-      throw new Error('script feedback branch is invalid');
+    if (dryRun) {
+      const reply: TriggerReply = {
+        outcome: prompt.trim() ? 'success' : 'noop',
+        text: prompt,
+        files: [],
+        meta: {
+          runId,
+          durationMs: 0,
+          toolCallCount: 0,
+        },
+      };
+      return { branch: branchFromReply(reply), script: null, processing, reply };
     }
-    return definition.feedback;
+
+    try {
+      const executionSession = await this.daemonChannel.getOrCreateConversationSession(
+        definition,
+        this.runtime.projectPath,
+        definition.execution.session.baseagent || this.runtime.baseagent,
+      );
+      const daemonReply = await this.daemonChannel.converse(prompt, {
+        trigger: definition,
+        runId,
+        firedAt,
+        projectPath: this.runtime.projectPath,
+        baseagent: definition.execution.session.baseagent || this.runtime.baseagent,
+        session: executionSession,
+      });
+      const sentinel = definition.execution.noopSentinel ?? '[[NOOP]]';
+      const reply: TriggerReply = {
+        ...daemonReply,
+        outcome: daemonReply.outcome === 'success' && daemonReply.text.trim() === sentinel ? 'noop' : daemonReply.outcome,
+        text: daemonReply.text.trim() === sentinel ? '' : daemonReply.text,
+      };
+      return {
+        branch: branchFromReply(reply),
+        script: null,
+        processing,
+        reply,
+      };
+    } catch (err: any) {
+      const reply = errorReply(runId, 0, 'agent_execution_error', err?.message || String(err));
+      return {
+        branch: 'default',
+        script: null,
+        processing,
+        reply,
+      };
+    }
   }
 
-  private async runScriptWithRetry(
+  private selectDisposition(definition: TriggerDefinition, branch: TriggerFeedbackBranch): FeedbackDisposition {
+    if (branch === 'onReply') return definition.feedback.onReply;
+    if (branch === 'onNoop') return definition.feedback.onNoop;
+    return definition.feedback.default;
+  }
+
+  private async runScriptOnce(
     definition: TriggerDefinition,
     runId: string,
     firedAt: number,
     sourcePayload: Record<string, unknown>,
     signal: AbortSignal,
   ): Promise<TriggerScriptResult> {
-    const maxAttempts = definition.reliability.scriptRetry.maxAttempts;
-    const backoffMs = definition.reliability.scriptRetry.backoffMs;
-    let last: TriggerScriptResult | undefined;
-    for (let attempt = 0; attempt <= maxAttempts; attempt++) {
-      last = await this.scriptExecutor.execute({
-        trigger: definition,
-        triggerDir: this.manager.triggerDir(definition.id),
-        runId,
-        firedAt,
-        sourcePayload,
-        signal,
-      });
-      if (!last.error && last.exitCode === 0) return last;
-      if (attempt < maxAttempts && !signal.aborted) await sleep(backoffMs);
-    }
-    return last!;
+    return await this.scriptExecutor.execute({
+      trigger: definition,
+      triggerDir: this.manager.triggerDir(definition.id),
+      runId,
+      firedAt,
+      sourcePayload,
+      signal,
+    });
   }
 
   private checkConcurrency(definition: TriggerDefinition, nextRunId: string, source: TriggerSourceRunInfo): TriggerRuntimeResult | undefined {
@@ -467,6 +521,7 @@ export class TriggerRuntimeScheduler {
         reason: 'replaced',
         source,
         script: null,
+        reply: null,
         feedback: null,
         effects: [],
         error: { code: 'replaced', message: `run replaced by ${nextRunId}` },
@@ -493,6 +548,7 @@ export class TriggerRuntimeScheduler {
           reason: 'daemon_restart',
           source: this.buildSourceInfo(definition.source, run.startedAt, run.startedAt, this.sourcePayload(definition.source)),
           script: null,
+          reply: null,
           feedback: null,
           effects: [],
           error: status === 'failed' ? { code: 'daemon_restart', message: 'daemon restarted while run was open' } : null,
@@ -594,6 +650,7 @@ export class TriggerRuntimeScheduler {
     source: TriggerSourceRunInfo;
     processing?: TriggerProcessingAudit | null;
     script: TriggerScriptResult | null;
+    reply?: TriggerReply | null;
     feedback: TriggerAuditRecord['feedback'];
     effects: TriggerAuditRecord['effects'];
     error: TriggerAuditRecord['error'];
@@ -609,13 +666,14 @@ export class TriggerRuntimeScheduler {
       reason: input.reason,
       conflictRunId: input.conflictRunId,
       definition: {
-        schemaVersion: 2,
+        schemaVersion: 3,
         revision: definitionRevision(input.definition),
         name: input.definition.name,
       },
       source: input.source,
       processing: input.processing ?? null,
       script: input.script,
+      reply: summarizeReply(input.reply),
       feedback: input.feedback,
       effects: input.effects,
       error: input.error,
@@ -631,6 +689,7 @@ export class TriggerRuntimeScheduler {
       reason,
       source: this.buildSourceInfo(definition.source, firedAt, scheduledAt, this.sourcePayload(definition.source)),
       script: null,
+      reply: null,
       feedback: null,
       effects: [],
       error: null,
@@ -696,36 +755,48 @@ export class TriggerRuntimeScheduler {
   }
 
   private publishTriggerDefinitionEvent(type: 'trigger:registered' | 'trigger:updated', definition: TriggerDefinition): void {
+    const target = primaryTarget(definition);
     this.eventBus?.publish({
       type,
       triggerId: definition.id,
       name: definition.name,
       peerId: definition.origin?.peerId,
-      targetChannel: definition.session.channelKey,
-      targetChannelId: definition.session.channelId,
+      targetChannel: target?.channelKey,
+      targetChannelId: target?.channelId,
       scheduleType: definition.source.type,
       scheduleValue: this.sourceScheduleValue(definition.source),
       timestamp: Date.now(),
     });
   }
 
+  private publishTriggerFired(definition: TriggerDefinition, runId: string, firedAt: number): void {
+    const target = primaryTarget(definition);
+    this.eventBus?.publish({
+      type: 'trigger:fired',
+      triggerId: definition.id,
+      name: definition.name,
+      runId,
+      originTriggerId: definition.id,
+      fireTime: firedAt,
+      targetChannel: target?.channelKey,
+      targetChannelId: target?.channelId,
+      scheduleType: definition.source.type,
+      timestamp: Date.now(),
+    });
+  }
+
   private publishTriggerRunOutcome(definition: TriggerDefinition, audit: TriggerAuditRecord): void {
     if (!this.eventBus || audit.status === 'dry-run') return;
-
-    const agentSessionQueued = audit.effects.some(effect =>
-      effect.type === 'agent-session.enqueue' && effect.status === 'success'
-    );
-    if (agentSessionQueued && (audit.status === 'completed' || audit.status === 'noop')) {
-      return;
-    }
-
+    const target = primaryTarget(definition);
+    const targetChannel = target?.channelKey ?? 'daemon';
+    const targetChannelId = target?.channelId ?? definition.agentAid;
     const base = {
       triggerId: definition.id,
       name: definition.name,
       runId: audit.runId,
       originTriggerId: definition.id,
-      targetChannel: definition.session.channelKey,
-      targetChannelId: definition.session.channelId,
+      targetChannel,
+      targetChannelId,
       fireTime: audit.source.firedAt,
     };
 
@@ -772,6 +843,121 @@ export class TriggerRuntimeScheduler {
       case 'event': return source.eventPattern;
     }
   }
+}
+
+function replyFromScriptResult(script: TriggerScriptResult, runId: string): TriggerReply {
+  const result = script.result ?? {};
+  const outcomeRaw = typeof result.outcome === 'string' ? result.outcome : undefined;
+  const outcome = normalizeReplyOutcome(outcomeRaw);
+  const text = result.text === undefined || result.text === null ? '' : String(result.text);
+  if (!outcome) {
+    return invalidScriptReply(
+      script,
+      runId,
+      'script_reply_invalid',
+      'script stdout must be a V3 TriggerReply object with outcome: success | noop | error | interrupted | timeout',
+    );
+  }
+  const files = Array.isArray(result.files)
+    ? result.files
+        .filter((file): file is Record<string, unknown> => isRecord(file) && typeof file.path === 'string')
+        .map(file => ({
+          path: String(file.path),
+          name: typeof file.name === 'string' ? file.name : undefined,
+        }))
+    : [];
+  const error = isRecord(result.error)
+    ? {
+      reason: typeof result.error.reason === 'string' ? result.error.reason : undefined,
+      text: typeof result.error.text === 'string' ? result.error.text : text || 'script returned error',
+    }
+    : outcome === 'error'
+      ? { text: text || 'script returned error' }
+      : undefined;
+  return {
+    outcome,
+    text,
+    files,
+    error,
+    meta: {
+      runId,
+      durationMs: script.durationMs,
+      toolCallCount: 0,
+    },
+  };
+}
+
+function normalizeReplyOutcome(value: string | undefined): TriggerReply['outcome'] | undefined {
+  if (value === 'success' || value === 'noop' || value === 'error' || value === 'interrupted' || value === 'timeout') {
+    return value;
+  }
+  return undefined;
+}
+
+function invalidScriptReply(script: TriggerScriptResult, runId: string, reason: string, text: string): TriggerReply {
+  return {
+    outcome: 'error',
+    text: '',
+    files: [],
+    error: { reason, text },
+    meta: {
+      runId,
+      durationMs: script.durationMs,
+      toolCallCount: 0,
+    },
+  };
+}
+
+function branchFromReply(reply: TriggerReply): TriggerFeedbackBranch {
+  if (reply.outcome === 'success') return 'onReply';
+  if (reply.outcome === 'noop') return 'onNoop';
+  return 'default';
+}
+
+function shouldRetryExecution(reply: TriggerReply): boolean {
+  return reply.outcome === 'error' || reply.outcome === 'timeout' || reply.outcome === 'interrupted';
+}
+
+function errorReply(runId: string, durationMs: number, reason: string, text: string): TriggerReply {
+  return {
+    outcome: 'error',
+    text: '',
+    files: [],
+    error: { reason, text },
+    meta: {
+      runId,
+      durationMs,
+      toolCallCount: 0,
+    },
+  };
+}
+
+function summarizeReply(reply: TriggerReply | null | undefined): TriggerAuditRecord['reply'] {
+  if (!reply) return null;
+  return {
+    outcome: reply.outcome,
+    textHash: reply.text ? sha256(reply.text) : undefined,
+    textPreview: reply.text ? previewText(reply.text) : undefined,
+    fileCount: reply.files.length,
+    durationMs: reply.meta.durationMs,
+    numTurns: reply.meta.numTurns,
+    tokenUsage: reply.meta.tokenUsage,
+    toolCallCount: reply.meta.toolCallCount,
+  };
+}
+
+function primaryTarget(definition: TriggerDefinition): FeedbackTarget | undefined {
+  for (const disposition of [definition.feedback.onReply, definition.feedback.default, definition.feedback.onNoop]) {
+    if (disposition.kind === 'forward' && disposition.targets.length > 0) return disposition.targets[0];
+  }
+  if (definition.origin?.channel && definition.origin.peerId) {
+    return { channelKey: definition.origin.channel, channelId: definition.origin.peerId, delivery: 'direct' };
+  }
+  return undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
 function sleep(ms: number): Promise<void> {

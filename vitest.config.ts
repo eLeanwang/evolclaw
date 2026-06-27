@@ -36,7 +36,7 @@ export default defineConfig({
     setupFiles: ['./tests/setup.ts'],
     testTimeout: 30000,
     teardownTimeout: 5000,
-    exclude: ['**/node_modules/**', '**/dist/**', 'aun/**', 'projects/**', '**/worktrees/**'],
+    exclude: ['**/node_modules/**', '**/dist/**', 'aun/**', 'projects/**', '**/worktrees/**', 'openclaw/**', 'hermes-agent/**'],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json', 'html'],

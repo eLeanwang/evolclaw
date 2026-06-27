@@ -736,7 +736,23 @@ export async function cmdRestart(opts: { clear?: boolean; diagnose?: boolean } =
   }
 
   console.log(`⏱ restart prep done in ${((Date.now() - cmdStartedAt) / 1000).toFixed(1)}s, starting...`);
-  setTimeout(() => cmdStart(), 1000);
+
+  // 通过 restart-monitor 启动，避免在 agent 内调用时自杀
+  const appCli = path.join(getPackageRoot(), 'dist', 'cli', 'index.js');
+  spawn('node', [appCli, 'restart-monitor'], {
+    detached: true,
+    stdio: 'ignore',
+    env: { ...process.env, EVOLCLAW_HOME: resolvePaths().root }
+  }).unref();
+
+  console.log('🔄 Restart monitor started, waiting for service to come back online...');
+  await sleep(2000);
+
+  // 代码统计（开发环境）
+  if (resolveRoot() === getPackageRoot()) {
+    console.log('');
+    countLines(getPackageRoot(), resolvePaths().logs);
+  }
 }
 
 export async function cmdDev(args: string[]) {
@@ -913,6 +929,7 @@ function renderAunAidsTable(aids: any[]): void {
   const COL_AGENT = Math.max(5, ...agentNames.map(n => n.length)) + 2;
   const COL_AID = 32;
   const COL_STATUS = 16;
+  const COL_QUEUE = 12;
   const COL_RECONN = 8;
   const COL_LAST = 14;
 
@@ -922,6 +939,7 @@ function renderAunAidsTable(aids: any[]): void {
     padRight('AGENT', COL_AGENT) +
     padRight('AID', COL_AID) +
     padRight('STATUS', COL_STATUS) +
+    padRight('QUEUE', COL_QUEUE) +
     padRight('RECONN', COL_RECONN) +
     padRight('LAST ATTEMPT', COL_LAST) +
     'NOTE'
@@ -931,7 +949,21 @@ function renderAunAidsTable(aids: any[]): void {
     const a = aids[i];
     const agent = agentNames[i];
     const aid = (a.aid || '?').slice(0, COL_AID - 1);
-    const statusLabel = AID_STATUS_LABELS[a.status] || a.status || '?';
+
+    // 队列状态
+    const queueStatus = a.queueStatus || { processing: 0, queued: 0 };
+    const hasActiveTask = queueStatus.processing > 0;
+
+    // STATUS：如果有任务执行则显示 ✓ Working
+    const statusLabel = (a.status === 'connected' && hasActiveTask)
+      ? '✓ Working'
+      : (AID_STATUS_LABELS[a.status] || a.status || '?');
+
+    // QUEUE：显示 "处理中/排队中"，空闲时显示 "—"
+    const queueLabel = (queueStatus.processing === 0 && queueStatus.queued === 0)
+      ? '—'
+      : `${queueStatus.processing}/${queueStatus.queued}`;
+
     const reconn = String(a.reconnectCount ?? 0);
     const lastAttempt = a.lastAttemptAt
       ? formatTimeAgo(Date.now() - a.lastAttemptAt)
@@ -953,6 +985,7 @@ function renderAunAidsTable(aids: any[]): void {
       padRight(agent, COL_AGENT) +
       padRight(aid, COL_AID) +
       padRight(statusLabel, COL_STATUS) +
+      padRight(queueLabel, COL_QUEUE) +
       padRight(reconn, COL_RECONN) +
       padRight(lastAttempt, COL_LAST) +
       note

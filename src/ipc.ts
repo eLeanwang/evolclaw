@@ -6,7 +6,7 @@ import type { EvolAgentRegistryHandle, AidConnectionState } from './types.js';
 import type { AidStatsSnapshot, StatsSnapshot } from './utils/stats.js';
 import { fileCache } from './core/daemon-file-cache.js';
 import type { FileCacheStats } from './core/daemon-file-cache.js';
-import type { BindBeginRequest, BindBeginResponse, BindErrorResponse, BindStatusResponse } from './utils/bind.js';
+import type { BindBeginRequest, BindBeginResponse, BindErrorResponse, BindStatusResponse } from './utils/aid-bind.js';
 
 const isWindows = process.platform === 'win32';
 const isNamedPipe = (p: string) => isWindows && p.startsWith('\\\\.\\pipe\\');
