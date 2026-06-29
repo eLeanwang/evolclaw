@@ -15,6 +15,7 @@
 import fs from 'fs';
 import path from 'path';
 import type { WatchSource } from './types.js';
+import { getModelCatalogSnapshot, type ModelCatalogApiEntry } from './models.js';
 
 // 动态导入 evolclaw 主项目的角色配置模块
 async function getRolesModule() {
@@ -53,6 +54,24 @@ async function getRolesModule() {
   }
 }
 
+async function getRoleConstraintsModule() {
+  const constraintsPath = path.join(process.cwd(), 'dist', 'config', 'role-constraints.js');
+
+  if (!fs.existsSync(constraintsPath)) {
+    throw new Error(`Role constraints module not found. Is evolclaw built? cwd=${process.cwd()}`);
+  }
+
+  const toUrl = (p: string) => process.platform === 'win32'
+    ? new URL('file:///' + p.replace(/\\/g, '/')).href
+    : p;
+
+  const mod = await import(toUrl(constraintsPath));
+  if (!mod.isModelAllowedByPatterns) throw new Error('isModelAllowedByPatterns not found in role-constraints.js');
+  return {
+    isModelAllowedByPatterns: mod.isModelAllowedByPatterns as (model: string, allowedModels: string[]) => boolean,
+  };
+}
+
 interface RoleWriteAuth {
   localDirect?: boolean;
   actorAid?: string | null;
@@ -66,6 +85,162 @@ function canManageRoleDefinitions(processConfig: any, auth: RoleWriteAuth): bool
   if (auth.localDirect) return true;
   const actor = auth.actorAid || '';
   return !!actor && Array.isArray(processConfig?.owners) && processConfig.owners.includes(actor);
+}
+
+const MODEL_PERMISSION_FIELD = 'baseagents.claude.model';
+const MODEL_PATTERN_OPTIONS = ['*', 'claude-opus-*', 'claude-sonnet-*', 'claude-haiku-*'];
+
+type SelectionMode = 'pattern' | 'explicit' | 'mixed';
+
+function sendJson(res: any, status: number, payload: any): void {
+  res.writeHead(status, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify(payload));
+}
+
+function readJsonBody(req: any): Promise<any> {
+  return new Promise((resolve, reject) => {
+    let body = '';
+    req.on('data', (chunk: Buffer) => {
+      body += chunk.toString();
+      if (body.length > 1024 * 1024) {
+        reject(new Error('Request body too large'));
+        req.destroy();
+      }
+    });
+    req.on('end', () => {
+      if (!body.trim()) {
+        resolve({});
+        return;
+      }
+      try {
+        resolve(JSON.parse(body));
+      } catch (err) {
+        reject(err);
+      }
+    });
+    req.on('error', reject);
+  });
+}
+
+function inferSelectionMode(allowedModels: string[] = []): SelectionMode {
+  if (allowedModels.length === 0) return 'explicit';
+  const patternCount = allowedModels.filter(m => m === '*' || m.endsWith('*')).length;
+  if (patternCount === allowedModels.length) return 'pattern';
+  if (patternCount === 0) return 'explicit';
+  return 'mixed';
+}
+
+function normalizeStringList(value: any): string[] | null {
+  if (!Array.isArray(value)) return null;
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    if (typeof item !== 'string') return null;
+    const trimmed = item.trim();
+    if (!trimmed) return null;
+    if (!seen.has(trimmed)) {
+      seen.add(trimmed);
+      out.push(trimmed);
+    }
+  }
+  return out;
+}
+
+function getModelPermission(roleDef: any): any {
+  const permissions = roleDef?.permissions;
+  if (!permissions || typeof permissions !== 'object') return {};
+  const perm = permissions[MODEL_PERMISSION_FIELD];
+  return perm && typeof perm === 'object' ? perm : {};
+}
+
+function stripSelectionModeFromPermission(perm: any): any {
+  if (!perm || typeof perm !== 'object') return perm;
+  const { selectionMode: _selectionMode, ...rest } = perm;
+  return rest;
+}
+
+function extractModelPermissionPayload(payload: any, currentPerm: any): { defaultModel: any; allowOverride: any; allowedModels: any } {
+  const source = payload?.modelPermission && typeof payload.modelPermission === 'object'
+    ? payload.modelPermission
+    : payload;
+
+  return {
+    defaultModel: source.defaultModel ?? source.default ?? currentPerm.default,
+    allowOverride: source.allowOverride ?? currentPerm.allowOverride ?? false,
+    allowedModels: source.allowedModels ?? currentPerm.allowedModels,
+  };
+}
+
+async function validateModelPermissionInput(input: { defaultModel: any; allowOverride: any; allowedModels: any }): Promise<{ ok: boolean; errors: string[]; value?: { defaultModel: string; allowOverride: boolean; allowedModels: string[] } }> {
+  const errors: string[] = [];
+  const defaultModel = typeof input.defaultModel === 'string' ? input.defaultModel.trim() : '';
+  const allowedModels = normalizeStringList(input.allowedModels);
+  const allowOverride = input.allowOverride;
+
+  if (!defaultModel) errors.push('defaultModel must be a non-empty string');
+  if (typeof allowOverride !== 'boolean') errors.push('allowOverride must be a boolean');
+  if (!allowedModels || allowedModels.length === 0) errors.push('allowedModels must be a non-empty string array');
+
+  if (defaultModel && allowedModels && allowedModels.length > 0) {
+    const { isModelAllowedByPatterns } = await getRoleConstraintsModule();
+    if (!isModelAllowedByPatterns(defaultModel, allowedModels)) {
+      errors.push('defaultModel must be allowed by allowedModels');
+    }
+  }
+
+  if (errors.length > 0 || !allowedModels) {
+    return { ok: false, errors };
+  }
+
+  return { ok: true, errors: [], value: { defaultModel, allowOverride, allowedModels } };
+}
+
+async function validateRoleModelPermission(roleDef: any): Promise<{ ok: boolean; errors: string[] }> {
+  const permissions = roleDef?.permissions;
+  if (!permissions || typeof permissions !== 'object') return { ok: true, errors: [] };
+
+  const perm = permissions[MODEL_PERMISSION_FIELD];
+  if (!perm || typeof perm !== 'object') return { ok: true, errors: [] };
+  permissions[MODEL_PERMISSION_FIELD] = stripSelectionModeFromPermission(perm);
+
+  const result = await validateModelPermissionInput({
+    defaultModel: permissions[MODEL_PERMISSION_FIELD].default,
+    allowOverride: permissions[MODEL_PERMISSION_FIELD].allowOverride,
+    allowedModels: permissions[MODEL_PERMISSION_FIELD].allowedModels,
+  });
+  return { ok: result.ok, errors: result.errors };
+}
+
+async function filterAllowedCatalogModels(models: ModelCatalogApiEntry[], allowedModels: string[]): Promise<ModelCatalogApiEntry[]> {
+  const { isModelAllowedByPatterns } = await getRoleConstraintsModule();
+  return models.filter(model => !model.isAlias && isModelAllowedByPatterns(model.id, allowedModels));
+}
+
+async function buildModelPermissionResponse(roleName: string, roleDef: any, override?: { defaultModel: string; allowOverride: boolean; allowedModels: string[] }): Promise<any> {
+  const currentPerm = getModelPermission(roleDef);
+  const defaultModel = override?.defaultModel ?? currentPerm.default ?? '';
+  const allowOverride = override?.allowOverride ?? currentPerm.allowOverride ?? false;
+  const allowedModels = override?.allowedModels ?? (Array.isArray(currentPerm.allowedModels) ? currentPerm.allowedModels : []);
+  const catalog = await getModelCatalogSnapshot('claude');
+  const matchingModels = await filterAllowedCatalogModels(catalog.models, allowedModels);
+
+  return {
+    role: roleName,
+    field: MODEL_PERMISSION_FIELD,
+    permission: {
+      default: defaultModel,
+      allowOverride,
+      allowedModels,
+    },
+    selectionMode: inferSelectionMode(allowedModels),
+    patternOptions: MODEL_PATTERN_OPTIONS,
+    catalog,
+    matchingModels,
+    stats: {
+      catalogTotal: catalog.models.filter(model => !model.isAlias).length,
+      matchedTotal: matchingModels.length,
+    }
+  };
 }
 
 async function buildSnapshot(): Promise<any> {
@@ -114,11 +289,20 @@ export const roleDefinitionsSource: WatchSource = {
   }
 };
 
-// HTTP API 处理器
+// HTTP API handler
 export async function handleRoleDefinitionsApi(req: any, res: any, auth: RoleWriteAuth = {}): Promise<void> {
   try {
     const { readRolesConfig, getBuiltinRolesConfig, writeRoles, read, ConfigTarget } = await getRolesModule();
     const urlPath = (req.url || '').split('?')[0];
+    const roleRoute = urlPath.match(/^\/api\/role-definitions\/([^/]+)$/);
+    const roleNestedRoute = urlPath.match(/^\/api\/role-definitions\/([^/]+)\/([^/]+)$/);
+    const decodeRoleName = (raw: string) => {
+      try {
+        return decodeURIComponent(raw);
+      } catch {
+        return raw;
+      }
+    };
 
     if (isWriteMethod(req.method)) {
       const processConfig = read(ConfigTarget.Process) || {};
@@ -129,255 +313,266 @@ export async function handleRoleDefinitionsApi(req: any, res: any, auth: RoleWri
           actorAid: auth.actorAid,
           localDirect: !!auth.localDirect
         });
-        res.writeHead(403, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'forbidden: process owner required' }));
+        sendJson(res, 403, { error: 'forbidden: process owner required' });
         return;
       }
     }
 
-    // GET /api/role-definitions - 获取所有角色定义
     if (req.method === 'GET' && urlPath === '/api/role-definitions') {
-      const config = readRolesConfig();
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(config));
+      sendJson(res, 200, readRolesConfig());
       return;
     }
 
-    // PUT /api/role-definitions - 更新全局配置（如 defaultRole）。传入完整配置，内部算 diff。
     if (req.method === 'PUT' && urlPath === '/api/role-definitions') {
-      let body = '';
-      req.on('data', (chunk: Buffer) => {
-        body += chunk.toString();
-      });
+      try {
+        const incoming = await readJsonBody(req);
+        const config = readRolesConfig();
 
-      req.on('end', () => {
-        try {
-          const incoming = JSON.parse(body);
-
-          // 以当前配置为基线，仅覆盖传入的顶层字段（defaultRole）与 roles（若提供）
-          const config = readRolesConfig();
-          if (incoming.defaultRoles && typeof incoming.defaultRoles === 'object') {
-            config.defaultRoles = {
-              private: typeof incoming.defaultRoles.private === 'string'
-                ? incoming.defaultRoles.private
-                : (config.defaultRoles?.private || 'anonymous'),
-              group: typeof incoming.defaultRoles.group === 'string'
-                ? incoming.defaultRoles.group
-                : (config.defaultRoles?.group || 'guest'),
-            };
-          }
-          if (incoming.roles && typeof incoming.roles === 'object') {
-            config.roles = incoming.roles;
-          }
-
-          // 通过 ConfigManager 写入（内部算 diff，自动 schema 校验）
-          writeRoles(config);
-
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: true }));
-        } catch (err: any) {
-          console.error('[role-definitions] Failed to update global config:', err);
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: err.message }));
-        }
-      });
-      return;
-    }
-
-    // POST /api/role-definitions - 创建新角色
-    if (req.method === 'POST' && urlPath === '/api/role-definitions') {
-      let body = '';
-      req.on('data', (chunk: Buffer) => {
-        body += chunk.toString();
-      });
-
-      req.on('end', () => {
-        try {
-          const data = JSON.parse(body);
-          const { name, description, permissions } = data;
-
-          if (!name || !/^[a-z0-9_-]+$/.test(name)) {
-            res.writeHead(400, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'Invalid role name' }));
-            return;
-          }
-
-          // 读取当前配置
-          const config = readRolesConfig();
-
-          // 检查是否已存在
-          if (config.roles[name]) {
-            res.writeHead(409, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'Role already exists' }));
-            return;
-          }
-
-          // 创建新角色
-          config.roles[name] = {
-            description: description || '',
-            permissions: permissions || {}
+        if (incoming.defaultRoles && typeof incoming.defaultRoles === 'object') {
+          config.defaultRoles = {
+            private: typeof incoming.defaultRoles.private === 'string'
+              ? incoming.defaultRoles.private
+              : (config.defaultRoles?.private || 'anonymous'),
+            group: typeof incoming.defaultRoles.group === 'string'
+              ? incoming.defaultRoles.group
+              : (config.defaultRoles?.group || 'guest'),
           };
-
-          // 通过 ConfigManager 写入（内部算 diff，自动 schema 校验）
-          writeRoles(config);
-
-          res.writeHead(201, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: true, role: config.roles[name] }));
-        } catch (err: any) {
-          console.error('[role-definitions] Failed to create role:', err);
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: err.message }));
         }
-      });
+
+        if (incoming.roles && typeof incoming.roles === 'object') {
+          for (const [roleName, roleDef] of Object.entries(incoming.roles)) {
+            const validation = await validateRoleModelPermission(roleDef);
+            if (!validation.ok) {
+              sendJson(res, 400, {
+                error: `Invalid model permissions for role ${roleName}`,
+                errors: validation.errors
+              });
+              return;
+            }
+          }
+          config.roles = incoming.roles;
+        }
+
+        writeRoles(config);
+        sendJson(res, 200, { ok: true });
+      } catch (err: any) {
+        console.error('[role-definitions] Failed to update global config:', err);
+        sendJson(res, 400, { error: err.message });
+      }
       return;
     }
 
-    // GET /api/role-definitions/:role - 获取单个角色定义
-    if (req.method === 'GET' && urlPath.startsWith('/api/role-definitions/')) {
-      const roleName = urlPath.split('/').pop();
-      if (!roleName) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Missing role name' }));
-        return;
-      }
+    if (req.method === 'POST' && urlPath === '/api/role-definitions') {
+      try {
+        const data = await readJsonBody(req);
+        const { name, description, permissions } = data;
 
+        if (!name || !/^[a-z0-9_-]+$/.test(name)) {
+          sendJson(res, 400, { error: 'Invalid role name' });
+          return;
+        }
+
+        const config = readRolesConfig();
+        if (config.roles[name]) {
+          sendJson(res, 409, { error: 'Role already exists' });
+          return;
+        }
+
+        const newRole = {
+          description: typeof description === 'string' ? description : '',
+          allowAccess: typeof data.allowAccess === 'boolean' ? data.allowAccess : true,
+          permissions: permissions && typeof permissions === 'object' ? permissions : {}
+        };
+        const validation = await validateRoleModelPermission(newRole);
+        if (!validation.ok) {
+          sendJson(res, 400, { error: 'Invalid model permissions', errors: validation.errors });
+          return;
+        }
+
+        config.roles[name] = newRole;
+        writeRoles(config);
+
+        sendJson(res, 201, { ok: true, role: config.roles[name] });
+      } catch (err: any) {
+        console.error('[role-definitions] Failed to create role:', err);
+        sendJson(res, 400, { error: err.message });
+      }
+      return;
+    }
+
+    if (req.method === 'GET' && roleNestedRoute?.[2] === 'configurable-models') {
+      const roleName = decodeRoleName(roleNestedRoute[1]);
       const config = readRolesConfig();
       const roleDef = config.roles[roleName];
-
       if (!roleDef) {
-        res.writeHead(404, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Role not found' }));
+        sendJson(res, 404, { success: false, error: 'Role not found' });
         return;
       }
 
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify(roleDef));
+      const data = await buildModelPermissionResponse(roleName, roleDef);
+      sendJson(res, 200, { success: true, data });
       return;
     }
 
-    // DELETE /api/role-definitions/:role - 删除角色
-    if (req.method === 'DELETE' && urlPath.startsWith('/api/role-definitions/')) {
-      const roleName = urlPath.split('/').pop();
-      if (!roleName) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Missing role name' }));
-        return;
-      }
-
-      // 不允许删除内置角色
-      const builtinRoles = ['owner', 'admin', 'member', 'guest', 'anonymous'];
-      if (builtinRoles.includes(roleName)) {
-        res.writeHead(403, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Cannot delete builtin role' }));
-        return;
-      }
-
+    if (req.method === 'POST' && roleNestedRoute?.[2] === 'preview-models') {
+      const roleName = decodeRoleName(roleNestedRoute[1]);
       const config = readRolesConfig();
-
-      if (!config.roles[roleName]) {
-        res.writeHead(404, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Role not found' }));
+      const roleDef = config.roles[roleName];
+      if (!roleDef) {
+        sendJson(res, 404, { success: false, error: 'Role not found' });
         return;
       }
 
-      // 删除角色
-      delete config.roles[roleName];
+      const payload = await readJsonBody(req);
+      const currentPerm = getModelPermission(roleDef);
+      const validation = await validateModelPermissionInput(extractModelPermissionPayload(payload, currentPerm));
+      if (!validation.ok || !validation.value) {
+        sendJson(res, 400, { success: false, error: 'Invalid model permissions', errors: validation.errors });
+        return;
+      }
 
-      // 通过 ConfigManager 写入
+      const data = await buildModelPermissionResponse(roleName, roleDef, validation.value);
+      sendJson(res, 200, { success: true, data });
+      return;
+    }
+
+    if (req.method === 'PUT' && roleNestedRoute?.[2] === 'model-permissions') {
+      const roleName = decodeRoleName(roleNestedRoute[1]);
+      const config = readRolesConfig();
+      const roleDef = config.roles[roleName];
+      if (!roleDef) {
+        sendJson(res, 404, { success: false, error: 'Role not found' });
+        return;
+      }
+
+      const payload = await readJsonBody(req);
+      const currentPerm = getModelPermission(roleDef);
+      const validation = await validateModelPermissionInput(extractModelPermissionPayload(payload, currentPerm));
+      if (!validation.ok || !validation.value) {
+        sendJson(res, 400, { success: false, error: 'Invalid model permissions', errors: validation.errors });
+        return;
+      }
+
+      roleDef.permissions = roleDef.permissions && typeof roleDef.permissions === 'object'
+        ? roleDef.permissions
+        : {};
+      const existingPerm = stripSelectionModeFromPermission(getModelPermission(roleDef));
+      roleDef.permissions[MODEL_PERMISSION_FIELD] = {
+        ...existingPerm,
+        default: validation.value.defaultModel,
+        allowOverride: validation.value.allowOverride,
+        allowedModels: validation.value.allowedModels,
+      };
+
       writeRoles(config);
-
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: true }));
+      const data = await buildModelPermissionResponse(roleName, roleDef, validation.value);
+      sendJson(res, 200, { success: true, data });
       return;
     }
 
-    // PUT /api/role-definitions/:role - 更新角色定义
-    if (req.method === 'PUT' && urlPath.startsWith('/api/role-definitions/')) {
-      const parts = urlPath.split('/');
-      const roleName = parts[parts.length - 1];
-
-      if (!roleName) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Missing role name' }));
-        return;
-      }
-
-      let body = '';
-      req.on('data', (chunk: Buffer) => {
-        body += chunk.toString();
-      });
-
-      req.on('end', () => {
-        try {
-          const updates = JSON.parse(body);
-
-          // 读取当前配置
-          const config = readRolesConfig();
-
-          if (!config.roles[roleName]) {
-            res.writeHead(404, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'Role not found' }));
-            return;
-          }
-
-          // 更新角色定义
-          config.roles[roleName] = {
-            ...config.roles[roleName],
-            ...updates
-          };
-
-          // 通过 ConfigManager 写入（内部算 diff）
-          writeRoles(config);
-
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ ok: true }));
-        } catch (err: any) {
-          console.error('[role-definitions] Failed to update role:', err);
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: err.message }));
-        }
-      });
-      return;
-    }
-
-    // POST /api/role-definitions/:role/reset - 重置为默认配置
-    if (req.method === 'POST' && urlPath.match(/\/api\/role-definitions\/[^/]+\/reset$/)) {
-      const parts = urlPath.split('/');
-      const roleName = parts[parts.length - 2];
-
-      if (!roleName) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Missing role name' }));
-        return;
-      }
-
-      // 获取内置默认配置
+    if (req.method === 'POST' && roleNestedRoute?.[2] === 'reset') {
+      const roleName = decodeRoleName(roleNestedRoute[1]);
       const builtinConfig = getBuiltinRolesConfig();
       const builtinRole = builtinConfig.roles[roleName];
-
       if (!builtinRole) {
-        res.writeHead(404, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Role not found in builtin config' }));
+        sendJson(res, 404, { error: 'Role not found in builtin config' });
         return;
       }
 
-      // 读取当前配置，将该角色设为内置默认（diff 后会从 roles.json 移除，恢复继承内置）
       const config = readRolesConfig();
       config.roles[roleName] = builtinRole;
-
-      // 通过 ConfigManager 写入
       writeRoles(config);
 
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ ok: true, role: builtinRole }));
+      sendJson(res, 200, { ok: true, role: builtinRole });
       return;
     }
 
-    res.writeHead(404, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'Not found' }));
+    if (req.method === 'GET' && roleRoute) {
+      const roleName = decodeRoleName(roleRoute[1]);
+      const config = readRolesConfig();
+      const roleDef = config.roles[roleName];
+      if (!roleDef) {
+        sendJson(res, 404, { error: 'Role not found' });
+        return;
+      }
+
+      sendJson(res, 200, roleDef);
+      return;
+    }
+
+    if (req.method === 'DELETE' && roleRoute) {
+      const roleName = decodeRoleName(roleRoute[1]);
+      const builtinRoles = ['owner', 'admin', 'member', 'guest', 'anonymous'];
+      if (builtinRoles.includes(roleName)) {
+        sendJson(res, 403, { error: 'Cannot delete builtin role' });
+        return;
+      }
+
+      const config = readRolesConfig();
+      if (!config.roles[roleName]) {
+        sendJson(res, 404, { error: 'Role not found' });
+        return;
+      }
+
+      delete config.roles[roleName];
+      writeRoles(config);
+
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+
+    if (req.method === 'PUT' && roleRoute) {
+      try {
+        const roleName = decodeRoleName(roleRoute[1]);
+        const updates = await readJsonBody(req);
+        const config = readRolesConfig();
+        const currentRole = config.roles[roleName];
+        if (!currentRole) {
+          sendJson(res, 404, { error: 'Role not found' });
+          return;
+        }
+
+        const nextRole = {
+          ...currentRole,
+          ...updates
+        };
+
+        if (updates.permissions && typeof updates.permissions === 'object') {
+          const mergedPermissions: Record<string, any> = { ...(currentRole.permissions || {}) };
+          for (const [permKey, permValue] of Object.entries(updates.permissions)) {
+            const currentPerm = mergedPermissions[permKey];
+            if (
+              currentPerm && typeof currentPerm === 'object' && !Array.isArray(currentPerm) &&
+              permValue && typeof permValue === 'object' && !Array.isArray(permValue)
+            ) {
+              mergedPermissions[permKey] = { ...currentPerm, ...permValue };
+            } else {
+              mergedPermissions[permKey] = permValue;
+            }
+          }
+          nextRole.permissions = mergedPermissions;
+        }
+
+        const validation = await validateRoleModelPermission(nextRole);
+        if (!validation.ok) {
+          sendJson(res, 400, { error: 'Invalid model permissions', errors: validation.errors });
+          return;
+        }
+
+        config.roles[roleName] = nextRole;
+        writeRoles(config);
+
+        sendJson(res, 200, { ok: true });
+      } catch (err: any) {
+        console.error('[role-definitions] Failed to update role:', err);
+        sendJson(res, 400, { error: err.message });
+      }
+      return;
+    }
+
+    sendJson(res, 404, { error: 'Not found' });
   } catch (err: any) {
     console.error('[role-definitions] API error:', err);
-    res.writeHead(500, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: err.message }));
+    sendJson(res, 500, { error: err.message });
   }
 }

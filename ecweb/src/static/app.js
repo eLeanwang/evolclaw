@@ -4544,6 +4544,311 @@ function initRoleDefinitionsTab() {
   });
 }
 
+const CLAUDE_MODEL_PERMISSION_KEY = 'baseagents.claude.model';
+const CLAUDE_ALLOWED_MODELS_LEGACY_KEY = 'baseagents.claude.allowedModels';
+const DEFAULT_MODEL_PATTERN_OPTIONS = ['*', 'claude-opus-*', 'claude-sonnet-*', 'claude-haiku-*'];
+
+function getClaudeModelPermission(roleDef) {
+  const perm = roleDef?.permissions?.[CLAUDE_MODEL_PERMISSION_KEY];
+  return perm && typeof perm === 'object' ? perm : null;
+}
+
+function normalizeAllowedModels(value) {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set();
+  const out = [];
+  value.forEach(item => {
+    if (typeof item !== 'string') return;
+    const trimmed = item.trim();
+    if (!trimmed || seen.has(trimmed)) return;
+    seen.add(trimmed);
+    out.push(trimmed);
+  });
+  return out;
+}
+
+function inferModelSelectionMode(allowedModels) {
+  const list = normalizeAllowedModels(allowedModels);
+  if (!list.length) return 'explicit';
+  const patternCount = list.filter(m => m === '*' || m.endsWith('*')).length;
+  if (patternCount === list.length) return 'pattern';
+  if (patternCount === 0) return 'explicit';
+  return 'mixed';
+}
+
+function modelAllowedByPatterns(model, allowedModels) {
+  const list = normalizeAllowedModels(allowedModels);
+  if (list.includes('*')) return true;
+  return list.some(pattern => {
+    if (pattern.endsWith('*')) return model.startsWith(pattern.slice(0, -1));
+    return model === pattern;
+  });
+}
+
+function renderRoleModelPermissionSection(roleDef) {
+  const perm = getClaudeModelPermission(roleDef);
+  if (!perm) return '';
+
+  const allowedModels = normalizeAllowedModels(perm.allowedModels);
+  const selectionMode = inferModelSelectionMode(allowedModels);
+  const patternOptions = DEFAULT_MODEL_PATTERN_OPTIONS;
+
+  return `
+    <div class="form-group perm-group model-permissions-panel" data-model-permissions>
+      <div class="perm-header">
+        <label class="perm-label">${esc(t('roleDefs.model'))}</label>
+        <label class="perm-override">
+          <input type="checkbox"
+                 data-model-field="allowOverride"
+                 ${perm.allowOverride ? 'checked' : ''}>
+          <span>${t('roleDefs.allowOverride')}</span>
+        </label>
+      </div>
+
+      <label class="model-field-label">Default model</label>
+      <input type="text"
+             data-model-field="default"
+             value="${esc(perm.default || '')}"
+             list="role-model-options"
+             class="form-input">
+      <datalist id="role-model-options"></datalist>
+
+      <div class="model-mode-tabs">
+        ${['pattern', 'explicit', 'mixed'].map(mode => `
+          <label class="model-mode-option">
+            <input type="radio"
+                   name="role-model-selection-mode"
+                   value="${mode}"
+                   ${selectionMode === mode ? 'checked' : ''}>
+            <span>${mode}</span>
+          </label>
+        `).join('')}
+        <span class="model-mode-note">derived from allowedModels</span>
+      </div>
+
+      <div class="model-mode-panel" data-model-panel="pattern">
+        <div class="model-option-grid">
+          ${patternOptions.map(pattern => `
+            <label class="model-option">
+              <input type="checkbox"
+                     class="model-pattern-checkbox"
+                     value="${esc(pattern)}"
+                     ${allowedModels.includes(pattern) ? 'checked' : ''}>
+              <span>${esc(pattern)}</span>
+            </label>
+          `).join('')}
+        </div>
+      </div>
+
+      <div class="model-mode-panel" data-model-panel="explicit">
+        <div class="model-explicit-list" data-loading="true">Loading models...</div>
+      </div>
+
+      <div class="model-preview" data-model-preview>Loading preview...</div>
+    </div>
+  `;
+}
+
+async function fetchRoleModelPermissionData(roleName) {
+  const token = localStorage.getItem(TOKEN_KEY);
+  const res = await fetch(apiUrl(`api/role-definitions/${encodeURIComponent(roleName)}/configurable-models`), {
+    headers: { 'Authorization': `Bearer ${token}` }
+  });
+  if (!res.ok) throw new Error('Failed to load role model permissions');
+  const json = await res.json();
+  return json.data;
+}
+
+async function fetchModelCatalogData() {
+  const token = localStorage.getItem(TOKEN_KEY);
+  const res = await fetch(apiUrl('api/models/catalog?baseagent=claude'), {
+    headers: { 'Authorization': `Bearer ${token}` }
+  });
+  if (!res.ok) throw new Error('Failed to load model catalog');
+  const json = await res.json();
+  return json.data;
+}
+
+function renderModelCatalogControls(section, models, allowedModels) {
+  const realModels = (models || []).filter(model => !model.isAlias);
+  const datalist = section.querySelector('#role-model-options');
+  if (datalist) {
+    datalist.innerHTML = realModels
+      .map(model => `<option value="${esc(model.id)}"></option>`)
+      .join('');
+  }
+
+  const explicitList = section.querySelector('.model-explicit-list');
+  if (!explicitList) return;
+
+  if (!realModels.length) {
+    explicitList.innerHTML = '<div class="model-empty">No catalog models available.</div>';
+    return;
+  }
+
+  explicitList.innerHTML = realModels.map(model => `
+    <label class="model-option model-option-row">
+      <input type="checkbox"
+             class="model-explicit-checkbox"
+             value="${esc(model.id)}"
+             ${allowedModels.includes(model.id) ? 'checked' : ''}>
+      <span>${esc(model.id)}</span>
+      <small>${esc(model.family || model.owned_by || '')}</small>
+    </label>
+  `).join('');
+}
+
+function collectRoleModelPermission(container) {
+  const section = container.matches?.('[data-model-permissions]')
+    ? container
+    : container.querySelector('[data-model-permissions]');
+  if (!section) return null;
+
+  const mode = section.querySelector('input[name="role-model-selection-mode"]:checked')?.value || 'explicit';
+  const defaultInput = section.querySelector('[data-model-field="default"]');
+  const overrideInput = section.querySelector('[data-model-field="allowOverride"]');
+  const allowedModels = [];
+  const explicitCheckboxes = Array.from(section.querySelectorAll('.model-explicit-checkbox'));
+
+  if (mode === 'pattern' || mode === 'mixed') {
+    section.querySelectorAll('.model-pattern-checkbox:checked').forEach(input => {
+      allowedModels.push(input.value);
+    });
+  }
+
+  if (mode === 'explicit' || mode === 'mixed') {
+    explicitCheckboxes.filter(input => input.checked).forEach(input => {
+      allowedModels.push(input.value);
+    });
+    if (explicitCheckboxes.length === 0) {
+      normalizeAllowedModels(section._initialAllowedModels)
+        .filter(model => model !== '*' && !model.endsWith('*'))
+        .forEach(model => allowedModels.push(model));
+    }
+  }
+
+  return {
+    default: defaultInput?.value.trim() || '',
+    allowOverride: !!overrideInput?.checked,
+    allowedModels: normalizeAllowedModels(allowedModels)
+  };
+}
+
+function validateRoleModelPermissionClient(permission) {
+  if (!permission.default) return 'Default model is required.';
+  if (!permission.allowedModels.length) return 'At least one allowed model or pattern is required.';
+  if (!modelAllowedByPatterns(permission.default, permission.allowedModels)) {
+    return 'Default model must be allowed by allowedModels.';
+  }
+  return '';
+}
+
+function renderModelPreview(section, models, errorMessage) {
+  const preview = section.querySelector('[data-model-preview]');
+  if (!preview) return;
+
+  if (errorMessage) {
+    preview.innerHTML = `<span class="model-preview-error">${esc(errorMessage)}</span>`;
+    return;
+  }
+
+  const shown = (models || []).slice(0, 12);
+  const rest = Math.max(0, (models || []).length - shown.length);
+  preview.innerHTML = `
+    <div class="model-preview-count">${(models || []).length} matched model(s)</div>
+    <div class="model-preview-list">
+      ${shown.map(model => `<span class="model-chip">${esc(model.id || model)}</span>`).join('')}
+      ${rest ? `<span class="model-chip">+${rest}</span>` : ''}
+    </div>
+  `;
+}
+
+async function updateRoleModelPreview(section, roleName) {
+  const permission = collectRoleModelPermission(section);
+  if (!permission) return;
+
+  const validationError = validateRoleModelPermissionClient(permission);
+  if (validationError) {
+    renderModelPreview(section, [], validationError);
+    return;
+  }
+
+  const catalogModels = section._modelCatalog || [];
+  const localMatches = catalogModels
+    .filter(model => !model.isAlias && modelAllowedByPatterns(model.id, permission.allowedModels));
+  renderModelPreview(section, localMatches);
+
+  if (!roleName || roleName === '__new__') return;
+
+  clearTimeout(section._previewTimer);
+  section._previewTimer = setTimeout(async () => {
+    try {
+      const token = localStorage.getItem(TOKEN_KEY);
+      const res = await fetch(apiUrl(`api/role-definitions/${encodeURIComponent(roleName)}/preview-models`), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          defaultModel: permission.default,
+          allowOverride: permission.allowOverride,
+          allowedModels: permission.allowedModels
+        })
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        renderModelPreview(section, localMatches, err.error || 'Preview failed');
+        return;
+      }
+      const json = await res.json();
+      renderModelPreview(section, json.data?.matchingModels || localMatches);
+    } catch (err) {
+      renderModelPreview(section, localMatches);
+    }
+  }, 250);
+}
+
+function updateModelModeVisibility(section) {
+  const mode = section.querySelector('input[name="role-model-selection-mode"]:checked')?.value || 'explicit';
+  section.querySelectorAll('[data-model-panel]').forEach(panel => {
+    const panelMode = panel.dataset.modelPanel;
+    panel.style.display = (mode === 'mixed' || mode === panelMode) ? '' : 'none';
+  });
+}
+
+async function initRoleModelPermissionEditor(container, roleName, roleDef) {
+  const section = container.querySelector('[data-model-permissions]');
+  if (!section) return;
+
+  const initialAllowed = normalizeAllowedModels(getClaudeModelPermission(roleDef)?.allowedModels);
+  let catalogModels = [];
+  section._initialAllowedModels = initialAllowed;
+
+  try {
+    const data = roleName && roleName !== '__new__'
+      ? await fetchRoleModelPermissionData(roleName)
+      : await fetchModelCatalogData();
+    catalogModels = data?.catalog?.models || data?.models || [];
+  } catch (err) {
+    console.warn('[roleDefinitions] Failed to load model catalog:', err);
+  }
+
+  section._modelCatalog = catalogModels;
+  renderModelCatalogControls(section, catalogModels, initialAllowed);
+  updateModelModeVisibility(section);
+
+  section.addEventListener('change', () => {
+    updateModelModeVisibility(section);
+    updateRoleModelPreview(section, roleName);
+  });
+  section.addEventListener('input', () => {
+    updateRoleModelPreview(section, roleName);
+  });
+
+  updateRoleModelPreview(section, roleName);
+}
+
 function showNewRoleModal() {
   const modal = $('#role-edit-modal');
   const title = $('#role-edit-title');
@@ -4561,7 +4866,7 @@ function showNewRoleModal() {
     description: '',
     permissions: {
       permissionMode: { default: 'request', allowOverride: false },
-      'baseagents.claude.model': { default: 'claude-sonnet-4', allowOverride: false },
+      'baseagents.claude.model': { default: 'claude-sonnet-4', allowOverride: false, allowedModels: ['claude-sonnet-*', 'claude-haiku-*'] },
       dispatch: { default: 'mention', allowOverride: false }
     }
   };
@@ -4679,7 +4984,10 @@ function showNewRoleModal() {
     }
   };
 
+  body.innerHTML += renderRoleModelPermissionSection(defaultDef);
+
   Object.keys(permissions).forEach(permKey => {
+    if (permKey === CLAUDE_MODEL_PERMISSION_KEY || permKey === CLAUDE_ALLOWED_MODELS_LEGACY_KEY) return;
     const perm = permissions[permKey];
     const meta = permissionMeta[permKey] || { label: permKey, type: 'text' };
 
@@ -4768,6 +5076,7 @@ function showNewRoleModal() {
   body.innerHTML += `</div></div>`;
 
   bindTagsInputEvents(body);
+  initRoleModelPermissionEditor(body, '__new__', defaultDef);
 
   modal.style.display = 'flex';
 
@@ -4884,7 +5193,16 @@ async function saveRoleDefinition() {
     }
   }
 
-  const currentDef = isNew ? {} : (state.roleDefinitions?.roles[actualRoleName] || {});
+  const currentDef = isNew
+    ? (state.roleDefinitions?.roles?.member || {
+      description: '',
+      permissions: {
+        permissionMode: { default: 'request', allowOverride: false },
+        [CLAUDE_MODEL_PERMISSION_KEY]: { default: 'claude-sonnet-4', allowOverride: false, allowedModels: ['claude-sonnet-*', 'claude-haiku-*'] },
+        dispatch: { default: 'mention', allowOverride: false }
+      }
+    })
+    : (state.roleDefinitions?.roles[actualRoleName] || {});
 
   // 收集描述
   const description = $('#edit-description')?.value;
@@ -4938,10 +5256,28 @@ async function saveRoleDefinition() {
     }
 
     permissions[permKey] = {
+      ...(currentDef.permissions?.[permKey] || {}),
       default: defaultValue,
       allowOverride: overrideInput ? overrideInput.checked : false
     };
+    delete permissions[permKey].selectionMode;
   });
+
+  const modelPermission = collectRoleModelPermission(body);
+  if (modelPermission) {
+    const modelValidationError = validateRoleModelPermissionClient(modelPermission);
+    if (modelValidationError) {
+      alert(modelValidationError);
+      return;
+    }
+    permissions[CLAUDE_MODEL_PERMISSION_KEY] = {
+      ...(currentDef.permissions?.[CLAUDE_MODEL_PERMISSION_KEY] || {}),
+      default: modelPermission.default,
+      allowOverride: modelPermission.allowOverride,
+      allowedModels: modelPermission.allowedModels
+    };
+    delete permissions[CLAUDE_MODEL_PERMISSION_KEY].selectionMode;
+  }
 
   const updates = {
     description,
@@ -4952,7 +5288,7 @@ async function saveRoleDefinition() {
   try {
     const token = localStorage.getItem(TOKEN_KEY);
     const method = isNew ? 'POST' : 'PUT';
-    const url = isNew ? apiUrl('api/role-definitions') : apiUrl(`api/role-definitions/${actualRoleName}`);
+    const url = isNew ? apiUrl('api/role-definitions') : apiUrl(`api/role-definitions/${encodeURIComponent(actualRoleName)}`);
 
     const res = await fetch(url, {
       method,
@@ -4965,7 +5301,8 @@ async function saveRoleDefinition() {
 
     if (!res.ok) {
       const err = await res.json();
-      alert(t('roleDefs.saveFailed') + ': ' + (err.error || 'unknown'));
+      const details = Array.isArray(err.errors) && err.errors.length ? ` (${err.errors.join(', ')})` : '';
+      alert(t('roleDefs.saveFailed') + ': ' + (err.error || 'unknown') + details);
     } else {
       alert(isNew ? '角色创建成功' : t('roleDefs.saveSuccess'));
       $('#role-edit-modal').style.display = 'none';
@@ -5100,8 +5437,11 @@ function showRoleEditModal(roleName, roleDef) {
     }
   };
 
+  formHtml += renderRoleModelPermissionSection(roleDef);
+
   // 遍历所有权限项
   Object.keys(permissions).forEach(permKey => {
+    if (permKey === CLAUDE_MODEL_PERMISSION_KEY || permKey === CLAUDE_ALLOWED_MODELS_LEGACY_KEY) return;
     const perm = permissions[permKey];
     const meta = permissionMeta[permKey] || { label: permKey, type: 'text' };
 
@@ -5198,6 +5538,7 @@ function showRoleEditModal(roleName, roleDef) {
 
   // 绑定标签输入事件
   bindTagsInputEvents(body);
+  initRoleModelPermissionEditor(body, roleName, roleDef);
 
   modal.style.display = 'flex';
 }

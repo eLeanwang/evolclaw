@@ -33,6 +33,7 @@ import { getSessionsAunDir, listLocalAids, listPeers, readMessages } from './fs-
 import { ccProjectsDir } from './paths.js';
 import { roleAssignmentsSource, handleRoleAssignmentsApi, handlePeerRoleApi } from './sources/role-assignments.js';
 import { roleDefinitionsSource, handleRoleDefinitionsApi } from './sources/role-definitions.js';
+import { handleModelsApi } from './sources/models.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const STATIC_DIR = path.join(__dirname, 'static');
@@ -623,6 +624,21 @@ export async function startWatchWebServer(opts: { port?: number; log?: (s: strin
         return;
       }
       handleStatsApi(req, res);
+    } else if ((req.url || '') === '/api/models/catalog' || (req.url || '').startsWith('/api/models/catalog?')) {
+      const authHeader = req.headers.authorization || '';
+      const bearerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
+      const { query } = parseUrl(req.url || '');
+      let token = bearerToken || query.token || '';
+      if (!token) {
+        const autoToken = issueLocalDirectToken(req, log);
+        if (autoToken) token = autoToken;
+      }
+      if (!token || !validateAndRenew(token, Date.now())) {
+        res.writeHead(401, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'unauthorized' }));
+        return;
+      }
+      handleModelsApi(req, res);
     } else if ((req.url || '').startsWith('/api/roles/')) {
       // Roles API — 与 Stats API 相同鉴权逻辑
       const authHeader = req.headers.authorization || '';

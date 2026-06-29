@@ -68,7 +68,7 @@ export function mergeWithRoleConstraints(
       if (relationValue !== undefined) {
         // 检查模型白名单
         if (field.includes('.model') && permission.allowedModels) {
-          if (!isModelAllowed(relationValue, permission.allowedModels)) {
+          if (!isModelAllowedByPatterns(relationValue, permission.allowedModels)) {
             violations.push({
               field,
               reason: 'model_not_allowed',
@@ -162,7 +162,7 @@ export function isModelAllowedForRole(role: string, model: string): boolean {
   if (!perm || !perm.allowedModels) {
     return false;
   }
-  return isModelAllowed(model, perm.allowedModels);
+  return isModelAllowedByPatterns(model, perm.allowedModels);
 }
 
 /**
@@ -173,7 +173,7 @@ export function isModelAllowedForRole(role: string, model: string): boolean {
  * @param allowedModels 允许的模型列表
  * @returns 是否允许
  */
-function isModelAllowed(model: string, allowedModels: string[]): boolean {
+export function isModelAllowedByPatterns(model: string, allowedModels: string[]): boolean {
   if (allowedModels.includes('*')) {
     return true;
   }

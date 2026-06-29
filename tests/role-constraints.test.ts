@@ -6,7 +6,8 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
   mergeWithRoleConstraints,
-  isModelAllowedForRole
+  isModelAllowedForRole,
+  isModelAllowedByPatterns
 } from '../src/config/role-constraints.js';
 import { clearRolesCache } from '../src/config/roles.js';
 
@@ -309,6 +310,15 @@ describe('Role Constraints', () => {
       expect(isModelAllowedForRole('guest', 'claude-opus-4-8')).toBe(false);
       expect(isModelAllowedForRole('guest', 'claude-sonnet-4-6')).toBe(false);
       expect(isModelAllowedForRole('guest', 'claude-haiku-4-5-20251001')).toBe(true);
+    });
+  });
+
+  describe('isModelAllowedByPatterns', () => {
+    it('should match wildcard, prefix patterns, and exact model ids', () => {
+      expect(isModelAllowedByPatterns('future-model', ['*'])).toBe(true);
+      expect(isModelAllowedByPatterns('claude-sonnet-4-6', ['claude-sonnet-*'])).toBe(true);
+      expect(isModelAllowedByPatterns('claude-opus-4-8', ['claude-sonnet-*'])).toBe(false);
+      expect(isModelAllowedByPatterns('claude-haiku-4-5-20251001', ['claude-haiku-4-5-20251001'])).toBe(true);
     });
   });
 
