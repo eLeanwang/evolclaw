@@ -68,60 +68,68 @@ function getAgentBusyCount(handler: any, aid: string | undefined, excludeSession
   return getAgentBusyInfo(handler, aid, excludeSessionKey)?.count ?? null;
 }
 
-async function getCurrentWorktreeInfo(projectPath: string): Promise<string | null> {
+async function getGitWorkingDirInfo(projectPath: string): Promise<string | null> {
   try {
     const { execFileSync } = await import('child_process');
 
-    // 使用 --porcelain 格式获取详细信息
-    const output = execFileSync('git', ['worktree', 'list', '--porcelain'], {
+    // 获取分支名
+    const branchOutput = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
       cwd: projectPath,
       encoding: 'utf8',
-      timeout: 5000
+      timeout: 1000
+    });
+    const branch = branchOutput.trim();
+    if (!branch) return null;
+
+    // 检查文件状态
+    const statusOutput = execFileSync('git', ['--no-optional-locks', 'status', '--porcelain'], {
+      cwd: projectPath,
+      encoding: 'utf8',
+      timeout: 1000
     });
 
-    const lines = output.trim().split('\n');
-    const worktrees: Array<{
-      path: string;
-      head: string;
-      branch: string;
-      locked?: string;
-    }> = [];
+    // 解析文件状态统计
+    const stats = { modified: 0, added: 0, deleted: 0, untracked: 0 };
+    const lines = statusOutput.trim().split('\n').filter(Boolean);
 
-    let current: any = {};
     for (const line of lines) {
-      if (line.startsWith('worktree ')) {
-        if (current.path) worktrees.push(current);
-        current = { path: line.slice(9) };
-      } else if (line.startsWith('HEAD ')) {
-        current.head = line.slice(5).substring(0, 7);
-      } else if (line.startsWith('branch ')) {
-        current.branch = line.slice(7).replace('refs/heads/', '');
-      } else if (line.startsWith('locked ')) {
-        current.locked = line.slice(7);
+      if (line.length < 2) continue;
+
+      const index = line[0];    // staged status
+      const worktree = line[1]; // unstaged status
+
+      if (line.startsWith('??')) {
+        stats.untracked++;
+      } else if (index === 'A') {
+        stats.added++;
+      } else if (index === 'D' || worktree === 'D') {
+        stats.deleted++;
+      } else if (index === 'M' || worktree === 'M' || index === 'R' || index === 'C') {
+        stats.modified++;
       }
     }
-    if (current.path) worktrees.push(current);
 
-    // 找到当前工作目录对应的 worktree
-    const normalizedProjectPath = path.resolve(projectPath);
-    const currentWorktree = worktrees.find(w => path.resolve(w.path) === normalizedProjectPath);
+    // 组装显示信息
+    const parts: string[] = [branch];
 
-    if (!currentWorktree) return null;
+    const isDirty = lines.length > 0;
+    if (isDirty) {
+      parts[0] = branch + '*'; // 分支名后加 * 表示有修改
 
-    // 如果是主仓库（main/master 分支且不在 .claude/worktrees 下）
-    const isMainRepo = !currentWorktree.path.includes('.claude/worktrees');
-    if (isMainRepo) return null;
+      const fileParts: string[] = [];
+      if (stats.modified > 0) fileParts.push(`!${stats.modified}`);
+      if (stats.added > 0) fileParts.push(`+${stats.added}`);
+      if (stats.deleted > 0) fileParts.push(`-${stats.deleted}`);
+      if (stats.untracked > 0) fileParts.push(`?${stats.untracked}`);
 
-    // 返回当前 worktree 信息
-    const parts = [currentWorktree.branch];
-    if (currentWorktree.locked) {
-      parts.push('🔒');
+      if (fileParts.length > 0) {
+        parts.push(`[${fileParts.join(' ')}]`);
+      }
     }
-    parts.push(`@${currentWorktree.head}`);
 
     return parts.join(' ');
   } catch (err) {
-    return null; // git worktree 不可用或出错时静默失败
+    return null; // git 命令失败时静默返回 null
   }
 }
 
@@ -1470,8 +1478,8 @@ export async function handleSlashCommand(this: any,
       }
     }
 
-    // 获取当前 worktree 信息
-    const worktreeInfo = await getCurrentWorktreeInfo(session.projectPath);
+    // 获取 git 工作目录信息
+    const gitInfo = await getGitWorkingDirInfo(session.projectPath);
 
     const lines: string[] = [];
     const chatMode = session.chatMode || 'interactive';
@@ -1485,8 +1493,8 @@ export async function handleSlashCommand(this: any,
         `会话ID: ${session.id}`,
         `项目路径: ${session.projectPath}`,
       );
-      if (worktreeInfo) {
-        lines.push(`Worktree: ${worktreeInfo}`);
+      if (gitInfo) {
+        lines.push(`Git: ${gitInfo}`);
       }
       lines.push(
         `会话状态: ${sessionStatus} / 轮数: ${sessionTurns}`,
@@ -1507,8 +1515,8 @@ export async function handleSlashCommand(this: any,
         `📊 ${isThread ? '话题' : '会话'}状态 (Agent: ${agentName})：`,
         `渠道: ${channel} / 项目: ${projectName} / ${session.baseagent}会话`,
       );
-      if (worktreeInfo) {
-        lines.push(`Worktree: ${worktreeInfo}`);
+      if (gitInfo) {
+        lines.push(`Git: ${gitInfo}`);
       }
       lines.push(
         `状态: ${sessionStatus} / 轮数: ${sessionTurns}`,
