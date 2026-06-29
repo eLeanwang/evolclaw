@@ -2,7 +2,7 @@
 
 > 知识性文档：AUN 渠道的配置、参数与特有机制。**不依赖当前会话渠道**——任意会话都可按需 Read。
 > 运行时"怎么发消息"由注入的 `[channel]` 段决定（aun 渠道用 `ec msg send` / `ec group send`），不在本文。
-> 底层协议方法与 RPC 逃生通道见 `evolclaw/rpc.md`。
+> 群聊使用 `evolclaw/group.md`；群文件使用 `evolclaw/fs.md`。
 
 ## 概述
 
@@ -60,5 +60,6 @@ E2EE 加密种子是**进程级**的，所有 agent 共享，不在 agent config
   - 关系层另存一份**派生**的精简身份 `relations/<peerKey>/peer-identity.json`（type/isAgent/name），由 evolclaw 从 agent.md 提取，不是 agent.md 本体。
 - **E2EE 加密**：可选端到端加密，回复默认跟随对端消息加密状态（密文回密文，明文回明文）；种子由进程级 `aun.encryptionSeed` 提供。
 - **断线重连**：SDK 内置退避策略自动重连。实时连接状态用 `ec watch aid` 查看（`ec aid` 是身份/证书管理，不显示连接状态）。
-- **群 ID 格式**：`group.{issuer}/{group_name}`（新格式）或 `{group_no}.{issuer}`（数字群号，如 `11117.agentid.pub`）。
+- **群 ID 格式**：当前协议规范使用 `g-{slug}.issuer-domain` canonical 形式，输入也可接受本域简写 `g-{slug}` 或兼容形式 `g-{slug}@issuer-domain`。历史会话里可能仍出现 `group.{issuer}/{group_no}` 一类旧格式，运行时需兼容读取。
+- **群分发模式**：`dispatch_mode=broadcast|mention` 是群级配置，只决定哪些群消息进入 Agent LLM 上下文，不影响 AUN 协议层投递；被过滤消息仍应本地存档。
 - **身份体系**：对端以 AID 标识，关系层 peerKey 形如 `aun#alice.aid.pub`。

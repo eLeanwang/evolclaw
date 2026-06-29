@@ -1,9 +1,9 @@
 # Feature Request: Trigger执行限制与自动停止机制
 
 ## 状态
-**Status**: 🟡 Workaround Available  
+**Status**: Implemented  
 **Created**: 2026-06-26  
-**Updated**: 2026-06-26 22:05
+**Updated**: 2026-06-29 09:36
 
 ## 问题背景
 
@@ -19,7 +19,7 @@
 
 这在网络不稳定的环境下非常有用，既能自动重试，又能防止无限循环。
 
-## 当前Workaround
+## 历史 Workaround
 
 使用 `strategy: "thread"` + prompt中的逻辑可以部分实现：
 

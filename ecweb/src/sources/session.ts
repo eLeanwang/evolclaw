@@ -1,15 +1,14 @@
 /**
- * 会话数据源 — CC（Claude Code / Agent SDK）transcript 历史展示。
+ * 会话数据源 — 多 baseagent 支持（Claude / Codex）。
  *
- * 列表数据源：~/.claude/projects/<encodedProject>/*.jsonl
- * 绑定状态交叉标注：evolclaw active.json 中的 agentSessionId。
+ * 根据 params.baseagent 参数路由到对应的实现：
+ * - claude: ~/.claude/projects/<encodedProject>/*.jsonl
+ * - codex: ~/.codex/state_*.sqlite + ~/.codex/sessions/YYYY/MM/DD/*.jsonl
  *
  * snapshot:
  *   - 无 sessionId: 项目列表 + 选中项目的全部 transcript 概要
  *   - 有 sessionId: 该 transcript 的结构化轮次 + 会话头统计
- * subscribe: 监听选中项目的 CC 目录 .jsonl 变化 + evolclaw sessionsDir active.json 变化，防抖 150ms。
- *
- * 注：完整复制 evolclaw session source 逻辑（含两层缓存、费用计算、ec msg send 检测）。
+ * subscribe: 监听对应目录的文件变化 + evolclaw sessionsDir active.json 变化，防抖 150ms。
  */
 
 import fs from 'fs';
@@ -17,10 +16,14 @@ import path from 'path';
 import { resolvePaths, ccProjectsDir } from '../paths.js';
 import { encodePath, scanChatDirs, readJsonFile, type SessionFile } from '../fs-utils.js';
 import type { WatchSource } from './types.js';
+import { snapshotCodex, subscribeCodex, setDebugLog as setCodexDebugLog } from './session-codex.js';
 
 type LogFn = (line: string) => void;
 let _dlog: LogFn | null = null;
-export function setDebugLog(log: LogFn | null): void { _dlog = log; }
+export function setDebugLog(log: LogFn | null): void {
+  _dlog = log;
+  setCodexDebugLog(log); // 同步传递给 Codex 模块
+}
 function dlog(line: string): void { if (_dlog) try { _dlog(line); } catch {} }
 
 // ── transcript 概要缓存（内存 + 磁盘双层，按 mtime 失效）──
@@ -274,7 +277,7 @@ function buildSnapshot(params: Record<string, any>): any {
   const projects = listProjects();
   const bindMap = buildBindMap();
   const project = resolveProject(params, projects);
-  if (!project) return { projects: [], project: null, transcripts: [], turns: [], sessionId: null };
+  if (!project) return { baseagent: 'claude', projects: [], project: null, transcripts: [], turns: [], sessionId: null };
   const metas = listTranscripts(project.encoded);
   const transcripts = metas.map(m => {
     const bind = bindMap.get(m.id);
@@ -282,17 +285,28 @@ function buildSnapshot(params: Record<string, any>): any {
   });
   const projList = projects.map(p => ({ encoded: p.encoded, label: p.label, cwd: p.cwd, count: p.count }));
   const sessionId: string | null = params.sessionId || null;
-  if (!sessionId) return { projects: projList, project: project.encoded, transcripts, turns: [], sessionId: null };
+  if (!sessionId) return { baseagent: 'claude', projects: projList, project: project.encoded, transcripts, turns: [], sessionId: null };
   const detail = readTranscriptFile(path.join(ccProjectsDir(), project.encoded, `${sessionId}.jsonl`));
   const bind = bindMap.get(sessionId);
   const header = { sessionId, title: detail.title, model: detail.model, gitBranch: detail.gitBranch, version: detail.version, cwd: detail.cwd || project.cwd, totalTurns: detail.totalTurns, userMsgs: detail.userMsgs, totalMsgs: detail.totalMsgs, counts: detail.counts, inputTokens: detail.inputTokens, outputTokens: detail.outputTokens, contextTokens: detail.contextTokens, costUsd: detail.costUsd, bound: !!bind, boundChannel: bind?.channelType ?? null, boundPeer: bind ? (bind.peerName || bind.channelId) : null, online: bind ? (Date.now() - bind.updatedAt < 5 * 60 * 1000) : false };
-  return { projects: projList, project: project.encoded, transcripts, turns: detail.turns, sessionId, header };
+  return { baseagent: 'claude', projects: projList, project: project.encoded, transcripts, turns: detail.turns, sessionId, header };
 }
 
 export const sessionSource: WatchSource = {
   kind: 'session',
-  async snapshot(params: Record<string, any> = {}): Promise<any> { return buildSnapshot(params); },
+  async snapshot(params: Record<string, any> = {}): Promise<any> {
+    const baseagent = params.baseagent || 'claude';
+    if (baseagent === 'codex') {
+      return snapshotCodex(params);
+    }
+    return buildSnapshot(params);
+  },
   subscribe(params: Record<string, any>, push: (data: any) => void): () => void {
+    const baseagent = params.baseagent || 'claude';
+    if (baseagent === 'codex') {
+      return subscribeCodex(params, push);
+    }
+
     const p = resolvePaths();
     let projectWatcher: fs.FSWatcher | null = null, sessionWatcher: fs.FSWatcher | null = null, debounce: NodeJS.Timeout | null = null;
     const fire = () => { if (debounce) clearTimeout(debounce); debounce = setTimeout(() => { try { push(buildSnapshot(params)); } catch {} }, 150); };

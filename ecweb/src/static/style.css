@@ -680,6 +680,7 @@ tr.ag-disabled .ag-name { color: var(--dim); }
 
 /* 队列数列 */
 .ag-queue-num { color: var(--orange); font-weight: 600; font-variant-numeric: tabular-nums; }
+.ag-queue-empty { color: var(--dim); }
 
 /* 子标签栏 */
 .ag-subtabs { display: inline-flex; gap: 2px; }

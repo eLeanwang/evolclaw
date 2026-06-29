@@ -25,6 +25,7 @@ export interface StatsSnapshot {
   uptimeMs: number;
   lastHour: {
     received: number;
+    sent: number;
     completed: number;
     errors: number;
     errorsByType: Record<string, number>;
@@ -50,6 +51,11 @@ export class StatsCollector {
     eventBus.subscribe('message:received', (event) => {
       const e = event as { timestamp?: number; agentName?: string };
       this.recordEvent({ type: 'received', timestamp: e.timestamp || Date.now(), agentName: e.agentName });
+    });
+
+    eventBus.subscribe('message:sent', (event) => {
+      const e = event as { timestamp?: number; agentName?: string };
+      this.recordEvent({ type: 'sent', timestamp: e.timestamp || Date.now(), agentName: e.agentName });
     });
 
     eventBus.subscribe('task:completed', (event) => {
@@ -118,6 +124,7 @@ export class StatsCollector {
       : this.events.filter(e => (e.agentName ?? '<unknown>') === agentName);
 
     let received = 0;
+    let sent = 0;
     let completed = 0;
     let errors = 0;
     const errorsByType: Record<string, number> = {};
@@ -131,6 +138,9 @@ export class StatsCollector {
       switch (event.type) {
         case 'received':
           received++;
+          break;
+        case 'sent':
+          sent++;
           break;
         case 'completed':
           completed++;
@@ -167,6 +177,7 @@ export class StatsCollector {
       uptimeMs: now - this.startTime,
       lastHour: {
         received,
+        sent,
         completed,
         errors,
         errorsByType,

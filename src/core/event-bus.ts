@@ -28,6 +28,7 @@ export type SessionEvent =
 // ── 消息事件 ──
 export type MessageEvent =
   | { type: 'message:received'; sessionId: string; channel: string; channelName?: string; channelId: string; content: string; userId?: string; agentName?: string; timestamp?: number }
+  | { type: 'message:sent'; sessionId: string; channel: string; channelName?: string; channelId: string; agentName?: string; payloadKind?: string; timestamp?: number }
   | { type: 'message:text'; sessionId: string; text: string; isFinal: boolean }
   | { type: 'message:thought-put'; agentName: string; channelId: string; taskId?: string; text?: string };
 

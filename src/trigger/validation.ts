@@ -6,8 +6,10 @@ import type {
   TriggerDefinition,
   TriggerEventFilter,
   TriggerExecution,
+  TriggerPermissionMode,
   TriggerExecutionSession,
   TriggerExecutionSessionStrategy,
+  TriggerLimits,
   TriggerMatchValue,
   TriggerOrigin,
   TriggerReliability,
@@ -17,6 +19,16 @@ import type {
 
 const MAX_SCRIPT_TIMEOUT_MS = 900_000;
 const DEFAULT_NOOP_SENTINEL = '[[NOOP]]';
+const LIMIT_DURATION_RE = /^[1-9]\d*(m|h|d)$/;
+const PERMISSION_MODES = new Set<TriggerPermissionMode>([
+  'auto',
+  'bypass',
+  'readonly',
+  'plan',
+  'edit',
+  'request',
+  'noask',
+]);
 
 export function normalizeTriggerDefinition(input: unknown, opts: { now?: number } = {}): TriggerDefinition {
   if (!isObject(input)) throw new Error('trigger definition must be an object');
@@ -73,6 +85,16 @@ export function safeRelativePath(input: string): string {
   return resolved;
 }
 
+export function parseDurationMs(value: string): number {
+  if (!LIMIT_DURATION_RE.test(value)) {
+    throw new Error('limits.maxDuration must match ^[1-9]\\d*(m|h|d)$');
+  }
+  const amount = Number(value.slice(0, -1));
+  const unit = value.slice(-1);
+  const multiplier = unit === 'd' ? 86_400_000 : unit === 'h' ? 3_600_000 : 60_000;
+  return amount * multiplier;
+}
+
 export function renderTemplate(
   template: string | undefined,
   ctx: {
@@ -112,8 +134,10 @@ export function renderTemplate(
 }
 
 function defaultTemplate(ctx: { reply?: Record<string, unknown>; result?: Record<string, unknown>; error?: { message?: string } }): string {
-  if (ctx.reply?.text !== undefined) return String(ctx.reply.text);
-  if (ctx.result?.text !== undefined) return String(ctx.result.text);
+  const replyText = ctx.reply?.text === undefined || ctx.reply.text === null ? '' : String(ctx.reply.text);
+  if (replyText.trim()) return replyText;
+  const resultText = ctx.result?.text === undefined || ctx.result.text === null ? '' : String(ctx.result.text);
+  if (resultText.trim()) return resultText;
   if (ctx.error?.message) return ctx.error.message;
   return '';
 }
@@ -139,6 +163,7 @@ function normalizeV3(raw: Record<string, unknown>, opts: { now?: number }): Trig
     execution: normalizeExecution(raw.execution, { id }),
     feedback: normalizeFeedback(raw.feedback, raw.origin),
     reliability: normalizeReliability(raw.reliability),
+    limits: normalizeLimits(raw.limits),
   };
   validateTriggerSemantics(definition);
   return definition;
@@ -274,10 +299,20 @@ function normalizeExecution(value: unknown, opts: { id: string }): TriggerExecut
     prompt: mode === 'agent' ? requiredString(raw.prompt, 'execution.prompt') : optionalString(raw.prompt),
     script: mode === 'script' ? normalizeScript(raw.script) : undefined,
     session: normalizeExecutionSession(raw.session, opts),
+    permissionMode: normalizePermissionMode(raw.permissionMode),
     onError: normalizeOnError(raw.onError),
     noopSentinel: optionalString(raw.noopSentinel) ?? DEFAULT_NOOP_SENTINEL,
   };
   return execution;
+}
+
+function normalizePermissionMode(value: unknown): TriggerPermissionMode | undefined {
+  const mode = optionalString(value);
+  if (mode === undefined) return undefined;
+  if (!PERMISSION_MODES.has(mode as TriggerPermissionMode)) {
+    throw new Error('execution.permissionMode must be one of auto, bypass, readonly, plan, edit, request, noask');
+  }
+  return mode as TriggerPermissionMode;
 }
 
 function normalizeExecutionSession(value: unknown, opts: { id: string }): TriggerExecutionSession {
@@ -339,7 +374,7 @@ function normalizeDisposition(value: unknown, label: string, opts?: { fallback: 
   const raw = value as Record<string, unknown>;
   const kind = requiredString(raw.kind, `${label}.kind`);
   if (kind === 'silent') return { kind };
-  if (kind === 'reply-origin') return { kind, template: optionalString(raw.template) };
+  if (kind === 'reply-origin') return { kind, template: optionalTemplate(raw.template) };
   if (kind === 'forward') {
     if (!Array.isArray(raw.targets) || raw.targets.length === 0) {
       throw new Error(`${label}.targets must be a non-empty array`);
@@ -347,7 +382,7 @@ function normalizeDisposition(value: unknown, label: string, opts?: { fallback: 
     return {
       kind,
       targets: raw.targets.map((target, i) => normalizeTarget(target, `${label}.targets[${i}]`)),
-      template: optionalString(raw.template),
+      template: optionalTemplate(raw.template),
     };
   }
   throw new Error(`${label}.kind must be forward, reply-origin, or silent`);
@@ -403,6 +438,29 @@ function normalizeReliability(value: unknown): TriggerReliability {
   return { concurrency, missedPolicy, retry: { maxAttempts, backoffMs } };
 }
 
+function normalizeLimits(value: unknown): TriggerLimits | undefined {
+  if (value === undefined) return undefined;
+  if (!isObject(value)) throw new Error('limits must be an object');
+  const raw = value as Record<string, unknown>;
+  const limits: TriggerLimits = {};
+
+  if (raw.maxRuns !== undefined) {
+    const maxRuns = optionalNumber(raw.maxRuns);
+    if (maxRuns === undefined || !Number.isInteger(maxRuns) || maxRuns <= 0) {
+      throw new Error('limits.maxRuns must be a positive integer');
+    }
+    limits.maxRuns = maxRuns;
+  }
+
+  if (raw.maxDuration !== undefined) {
+    const maxDuration = requiredString(raw.maxDuration, 'limits.maxDuration');
+    parseDurationMs(maxDuration);
+    limits.maxDuration = maxDuration;
+  }
+
+  return limits.maxRuns === undefined && limits.maxDuration === undefined ? undefined : limits;
+}
+
 function normalizeOnError(value: unknown): 'fail' | 'retry' {
   const onError = optionalString(value) ?? 'fail';
   if (onError !== 'fail' && onError !== 'retry') throw new Error('execution.onError must be fail or retry');
@@ -432,6 +490,12 @@ function requiredString(value: unknown, label: string): string {
 
 function optionalString(value: unknown): string | undefined {
   return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function optionalTemplate(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'string') throw new Error('feedback template must be a string when provided');
+  return value.trim() ? value : undefined;
 }
 
 function optionalNumber(value: unknown): number | undefined {

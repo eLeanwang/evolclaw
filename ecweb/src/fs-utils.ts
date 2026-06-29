@@ -114,7 +114,8 @@ export interface MessageLogEntry {
   permMode: string | null; durationMs: number | null;
   numTurns?: number | null;
   usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } | null;
-  encrypt?: boolean; chatmode?: string;
+  encrypt?: boolean; chatmode?: string; source?: string;
+  channelType?: string; selfAID?: string; peerName?: string | null; groupName?: string | null;
 }
 
 export interface PeerInfo {

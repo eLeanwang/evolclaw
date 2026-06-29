@@ -3,6 +3,7 @@ import { atomicWriteJson } from '../core/session/session-fs-store.js';
 import type {
   TriggerActiveFile,
   TriggerActiveRun,
+  TriggerLimitState,
   TriggerRunEvent,
   TriggerScheduleState,
 } from './types.js';
@@ -19,7 +20,8 @@ export class TriggerRunStateStore {
       if (!parsed || typeof parsed !== 'object') return { runs: {} };
       const runs = parsed.runs && typeof parsed.runs === 'object' ? parsed.runs : {};
       const schedule = isValidSchedule(parsed.schedule) ? parsed.schedule : undefined;
-      return schedule ? { runs, schedule } : { runs };
+      const limits = isValidLimitState(parsed.limits) ? parsed.limits : undefined;
+      return { runs, ...(schedule ? { schedule } : {}), ...(limits ? { limits } : {}) };
     } catch {
       return { runs: {} };
     }
@@ -81,8 +83,57 @@ export class TriggerRunStateStore {
     this.write(triggerId, active);
   }
 
+  readLimitState(triggerId: string): TriggerLimitState | undefined {
+    return this.read(triggerId).limits;
+  }
+
+  ensureLimitState(triggerId: string, startedAt = Date.now()): TriggerLimitState {
+    const active = this.read(triggerId);
+    if (!active.limits) {
+      active.limits = { startedAt, runCount: 0 };
+      this.write(triggerId, active);
+    }
+    return active.limits;
+  }
+
+  resetLimitState(triggerId: string, startedAt = Date.now()): TriggerLimitState {
+    const active = this.read(triggerId);
+    active.limits = { startedAt, runCount: 0 };
+    this.write(triggerId, active);
+    return active.limits;
+  }
+
+  incrementLimitRunCount(triggerId: string, startedAt = Date.now()): TriggerLimitState {
+    const active = this.read(triggerId);
+    const current = active.limits ?? { startedAt, runCount: 0 };
+    active.limits = {
+      startedAt: current.startedAt,
+      runCount: current.runCount + 1,
+    };
+    this.write(triggerId, active);
+    return active.limits;
+  }
+
+  markLimitDisabled(triggerId: string, reason: TriggerLimitState['disabledReason']): TriggerLimitState {
+    const active = this.read(triggerId);
+    const current = active.limits ?? { startedAt: Date.now(), runCount: 0 };
+    active.limits = {
+      startedAt: current.startedAt,
+      runCount: current.runCount,
+      disabledReason: reason,
+    };
+    this.write(triggerId, active);
+    return active.limits;
+  }
+
+  clearLimitState(triggerId: string): void {
+    const active = this.read(triggerId);
+    delete active.limits;
+    this.write(triggerId, active);
+  }
+
   private write(triggerId: string, active: TriggerActiveFile): void {
-    if (Object.keys(active.runs).length === 0 && !active.schedule) {
+    if (Object.keys(active.runs).length === 0 && !active.schedule && !active.limits) {
       this.manager.clearActive(triggerId);
       return;
     }
@@ -96,4 +147,17 @@ function isValidSchedule(value: unknown): value is TriggerScheduleState {
   return Number.isFinite(schedule.nextFireAt)
     && Number.isFinite(schedule.updatedAt)
     && typeof schedule.sourceSignature === 'string';
+}
+
+function isValidLimitState(value: unknown): value is TriggerLimitState {
+  if (!value || typeof value !== 'object') return false;
+  const limits = value as TriggerLimitState;
+  return Number.isFinite(limits.startedAt)
+    && Number.isInteger(limits.runCount)
+    && limits.runCount >= 0
+    && (
+      limits.disabledReason === undefined
+      || limits.disabledReason === 'max_runs'
+      || limits.disabledReason === 'max_duration'
+    );
 }

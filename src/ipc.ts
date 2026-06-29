@@ -3,7 +3,7 @@ import fs from 'fs';
 import os from 'os';
 import { logger } from './utils/logger.js';
 import type { EventBus } from './core/event-bus.js';
-import type { EvolAgentRegistryHandle, AidConnectionState } from './types.js';
+import type { AgentInfo, EvolAgentRegistryHandle, AidConnectionState } from './types.js';
 import type { AidStatsSnapshot, StatsSnapshot } from './utils/stats.js';
 import { fileCache } from './core/daemon-file-cache.js';
 import type { FileCacheStats } from './core/daemon-file-cache.js';
@@ -36,6 +36,7 @@ export interface IpcStatusResponse {
   queue: { pending: number; processing: number };
   stats?: {
     received: number;
+    sent?: number;
     completed: number;
     errors: number;
     avgResponseMs: number;
@@ -72,6 +73,19 @@ type AunAidStatsProvider = () => AidStatsSnapshot[];
 type AunAidStatsRecorder = (params: { aid: string; toPeer: string; text: string; encrypt?: boolean; chatmode?: string }) => void;
 type MenuExecutor = (payload: any) => Promise<any>;
 type StatsSnapshotProvider = () => StatsSnapshot;
+type AgentStatsSnapshot = {
+  aid: string;
+  received: number;
+  sent: number;
+  completed: number;
+  errors: number;
+  interrupts: number;
+  avgResponseMs: number;
+  processing: number;
+  queued: number;
+  muted: boolean;
+};
+type AgentStatsProvider = () => AgentStatsSnapshot[];
 type QueueSnapshotProvider = (params: { agent: string }) => Array<{ status: string; sessionKey: string; channelType: string; channelId: string; projectPath: string; peerName?: string; preview: string; messageId?: string; elapsedMs?: number }>;
 type QueueActionExecutor = (params: { agent: string; action: 'clear' | 'cancel' | 'interrupt'; messageId?: string; sessionKey?: string }) => Promise<{ ok: boolean; cleared?: number; cancelled?: boolean; interrupted?: boolean; error?: string }>;
 type TriggerExecutor = (cmd: { type: string; [key: string]: any }) => Promise<any>;
@@ -89,6 +103,7 @@ export class IpcServer {
   private aunAidStatsRecorder?: AunAidStatsRecorder;
   private menuExecutor?: MenuExecutor;
   private statsProvider?: StatsSnapshotProvider;
+  private agentStatsProvider?: AgentStatsProvider;
   private queueSnapshotProvider?: QueueSnapshotProvider;
   private queueActionExecutor?: QueueActionExecutor;
   private triggerExecutor?: TriggerExecutor;
@@ -145,6 +160,11 @@ export class IpcServer {
   /** Inject global StatsSnapshot provider for monitor-snapshot IPC handler */
   setStatsProvider(provider: StatsSnapshotProvider): void {
     this.statsProvider = provider;
+  }
+
+  /** Inject per-agent rolling stats provider for ECWeb Agents page. */
+  setAgentStatsProvider(provider: AgentStatsProvider): void {
+    this.agentStatsProvider = provider;
   }
 
   /** Inject queue snapshot provider for queue-snapshot IPC handler (query mode) */
@@ -297,6 +317,10 @@ export class IpcServer {
         const stats = this.aunAidStatsProvider ? this.aunAidStatsProvider() : [];
         return { ok: true, stats };
       }
+      case 'agent-stats': {
+        const stats = this.agentStatsProvider ? this.agentStatsProvider() : [];
+        return { ok: true, stats };
+      }
       case 'cache-stats': {
         // daemon 统一 FileCache 的只读运行统计（watch web Cache 页用）。
         // 直接读单例，无需 provider 注入（与 manifest-engine 等 import 单例同款）。
@@ -345,6 +369,7 @@ export class IpcServer {
       case 'trigger.update':
       case 'trigger.setEnabled':
       case 'trigger.cancel':
+      case 'trigger.delete':
       case 'trigger.run': {
         if (!this.triggerExecutor) return { ok: false, error: 'trigger executor not configured' };
         try {
@@ -439,6 +464,9 @@ export class IpcServer {
         const aids = this.aunAidProvider ? this.aunAidProvider() : [];
         const aidStats = this.aunAidStatsProvider ? this.aunAidStatsProvider() : [];
         const statsMap = new Map(aidStats.map((s) => [s.aid, s]));
+        const agentInfos: AgentInfo[] = this.agentRegistry ? this.agentRegistry.list() : [];
+        const agentRuntimeStats = this.agentStatsProvider ? this.agentStatsProvider() : [];
+        const agentRuntimeStatsMap = new Map(agentRuntimeStats.map((s) => [s.aid, s]));
         return {
           ok: true,
           snapshot: {
@@ -462,12 +490,12 @@ export class IpcServer {
               loadAvg: os.loadavg(),   // [1m, 5m, 15m]（Windows 恒 0）
             },
             stats: this.statsProvider ? this.statsProvider() : null,
-            agents: aids.map((a) => ({
+            agents: agentInfos.map((a) => ({
               aid: a.aid,
-              agentName: a.agentName,
-              channelName: a.channelName,
+              agentName: a.name,
               status: a.status,
               stats: statsMap.get(a.aid) ?? null,
+              runtimeStats: agentRuntimeStatsMap.get(a.aid) ?? null,
             })),
           },
         };

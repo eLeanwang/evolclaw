@@ -90,6 +90,7 @@ interface TriggerDefinitionV3 {
       threadId?: string;           // strategy=thread 可复用固定 thread
       name?: string;               // session 可选名称（用于 UI 展示）
     };
+    permissionMode?: 'auto' | 'bypass' | 'readonly' | 'plan' | 'edit' | 'request' | 'noask';
     onError?: 'fail' | 'retry';   // 默认 'fail'
     noopSentinel?: string;        // 默认 '[[NOOP]]'
   };
@@ -136,6 +137,25 @@ interface FeedbackTarget {
 |------|------|
 | `fail`（默认） | 记 audit（status=failed）+ 发 `trigger:failed`，不重试 |
 | `retry` | 按 `reliability.retry` 重试 N 次，仍失败 → 退化为 `fail` |
+
+#### execution.permissionMode
+
+Trigger 执行腿不依赖 daemon 会话的对端身份来推导权限。daemon trigger 的执行消息会带 `triggerMeta.permissionModeOverride`，response-engine 优先使用该值；未配置时才回退到普通关系/角色权限解析。
+
+推荐策略：
+
+| 模式 | 适用场景 |
+|------|----------|
+| `bypass` | owner/admin 创建的后台维护任务，例如 git 更新、重启、自我取消 trigger |
+| `readonly` | 只读巡检、报告生成 |
+| `auto` / `request` / `edit` | 需要人工参与或接受 runner 自身审批策略的任务；无人值守 trigger 不推荐 `request` |
+
+说明：
+
+- `/trigger set` 由 owner/admin 创建时默认写入 `execution.permissionMode: "bypass"`。
+- 非 admin 创建时默认 `readonly`，且不能创建或更新为 `bypass`。
+- `script` 模式由 daemon 直接执行脚本，不经过 base agent 的 permission hook；该字段主要约束 `agent` 执行腿。
+- 系统 `__upgrade-check` 显式使用 `bypass`，避免未来从 script 改为 agent 执行时回落到 daemon anonymous 的 `readonly`。
 
 #### feedback.delivery
 

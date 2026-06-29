@@ -11,6 +11,7 @@ import type { DaemonChannel } from '../channels/daemon.js';
 import { TriggerEventSource } from './sources/event-source.js';
 import {
   definitionRevision,
+  parseDurationMs,
   previewText,
   renderTemplate,
   sha256,
@@ -23,6 +24,7 @@ import type {
   TriggerCreateFile,
   TriggerDefinition,
   TriggerFeedbackBranch,
+  TriggerLimitState,
   TriggerProcessingAudit,
   TriggerReply,
   TriggerRunPayload,
@@ -52,6 +54,8 @@ interface ExecutionRunResult {
   processing: TriggerProcessingAudit;
   reply: TriggerReply;
 }
+
+type TriggerLimitDisabledReason = NonNullable<TriggerLimitState['disabledReason']>;
 
 export class TriggerRuntimeScheduler {
   private timers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -101,11 +105,12 @@ export class TriggerRuntimeScheduler {
     return this.manager.list(opts);
   }
 
-  show(triggerId: string): { definition: TriggerDefinition; active: TriggerActiveRun[]; schedule?: TriggerScheduleState; recentRuns: TriggerAuditRecord[] } {
+  show(triggerId: string): { definition: TriggerDefinition; active: TriggerActiveRun[]; schedule?: TriggerScheduleState; limitState?: TriggerLimitState; recentRuns: TriggerAuditRecord[] } {
     return {
       definition: this.manager.require(triggerId),
       active: this.state.list(triggerId),
       schedule: this.state.readSchedule(triggerId),
+      limitState: this.state.readLimitState(triggerId),
       recentRuns: this.audit.recent(triggerId, 10),
     };
   }
@@ -117,16 +122,25 @@ export class TriggerRuntimeScheduler {
   create(input: unknown, files: TriggerCreateFile[] = [], opts: { enable?: boolean } = {}): TriggerDefinition {
     const definition = this.manager.create(input, files, opts);
     this.state.clearSchedule(definition.id);
+    if (!definition.limits) this.state.clearLimitState(definition.id);
     if (definition.enabled && this.initialized) this.schedule(definition);
     this.publishTriggerDefinitionEvent('trigger:registered', definition);
     return definition;
   }
 
   update(triggerId: string, input: unknown, files: TriggerCreateFile[] = []): TriggerDefinition {
+    const previous = this.manager.get(triggerId);
     const definition = this.manager.update(triggerId, input, files);
     this.clearTimer(triggerId);
     this.unregisterEvent(triggerId);
     this.state.clearSchedule(triggerId);
+    if (!definition.limits) {
+      this.state.clearLimitState(triggerId);
+    } else if (definition.enabled && limitsSignature(previous?.limits) !== limitsSignature(definition.limits)) {
+      this.state.resetLimitState(triggerId);
+    } else if (definition.enabled) {
+      this.state.ensureLimitState(triggerId);
+    }
     if (definition.enabled && this.initialized) this.schedule(definition);
     this.publishTriggerDefinitionEvent('trigger:updated', definition);
     return definition;
@@ -137,6 +151,8 @@ export class TriggerRuntimeScheduler {
     this.clearTimer(triggerId);
     this.unregisterEvent(triggerId);
     this.state.clearSchedule(triggerId);
+    if (enabled && definition.limits) this.state.resetLimitState(triggerId);
+    if (!definition.limits) this.state.clearLimitState(triggerId);
     if (definition.enabled && this.initialized) this.schedule(definition);
     return definition;
   }
@@ -145,10 +161,34 @@ export class TriggerRuntimeScheduler {
     return this.setEnabled(triggerId, false);
   }
 
+  delete(triggerId: string): TriggerDefinition {
+    const definition = this.manager.require(triggerId);
+    this.clearTimer(triggerId);
+    this.unregisterEvent(triggerId);
+    this.state.clearSchedule(triggerId);
+    this.state.clearLimitState(triggerId);
+    return this.manager.delete(triggerId);
+  }
+
   async run(triggerId: string, opts: { dryRun?: boolean } = {}): Promise<TriggerRuntimeResult> {
     const definition = this.manager.require(triggerId);
+    const firedAt = Date.now();
+    if (!opts.dryRun) {
+      const disabledReason = this.limitDisabledReason(definition, firedAt);
+      if (disabledReason) {
+        const audit = this.disableForLimit(definition, undefined, firedAt, disabledReason);
+        return {
+          ok: true,
+          runId: audit.runId,
+          triggerId: definition.id,
+          status: 'skipped',
+          reason: audit.reason,
+          audit,
+        };
+      }
+    }
     return await this.startRun(definition, {
-      firedAt: Date.now(),
+      firedAt,
       payload: this.sourcePayload(definition.source),
       dryRun: opts.dryRun,
     });
@@ -157,6 +197,8 @@ export class TriggerRuntimeScheduler {
   private schedule(definition: TriggerDefinition): void {
     this.clearTimer(definition.id);
     this.unregisterEvent(definition.id);
+    if (definition.limits) this.state.ensureLimitState(definition.id);
+    else this.state.clearLimitState(definition.id);
     if (definition.source.type === 'event') {
       this.registerEvent(definition);
       return;
@@ -210,7 +252,18 @@ export class TriggerRuntimeScheduler {
         this.schedule(definition);
         return;
       }
+      const disabledReason = this.limitDisabledReason(definition, firedAt);
+      if (disabledReason) {
+        this.disableForLimit(definition, scheduledAt, firedAt, disabledReason);
+        return;
+      }
       this.advancePeriodicSchedule(definition, scheduledAt, firedAt);
+    } else {
+      const disabledReason = this.limitDisabledReason(definition, firedAt);
+      if (disabledReason) {
+        this.disableForLimit(definition, scheduledAt, firedAt, disabledReason);
+        return;
+      }
     }
 
     const runPromise = this.startRun(definition, {
@@ -238,6 +291,7 @@ export class TriggerRuntimeScheduler {
     if (!payload.dryRun) {
       const conflict = this.checkConcurrency(definition, runId, source);
       if (conflict) return conflict;
+      if (definition.limits) this.state.incrementLimitRunCount(definition.id);
     }
 
     const startedAt = Date.now();
@@ -680,7 +734,7 @@ export class TriggerRuntimeScheduler {
     };
   }
 
-  private writeSkippedAudit(definition: TriggerDefinition, scheduledAt: number | undefined, firedAt: number, reason: string, conflictRunId?: string, runId = `run_${firedAt}_${crypto.randomBytes(3).toString('hex')}`): void {
+  private writeSkippedAudit(definition: TriggerDefinition, scheduledAt: number | undefined, firedAt: number, reason: string, conflictRunId?: string, runId = `run_${firedAt}_${crypto.randomBytes(3).toString('hex')}`): TriggerAuditRecord {
     const audit = this.buildAudit({
       definition,
       runId,
@@ -697,6 +751,36 @@ export class TriggerRuntimeScheduler {
     });
     this.audit.write(audit);
     this.publishTriggerRunOutcome(definition, audit);
+    return audit;
+  }
+
+  private limitDisabledReason(definition: TriggerDefinition, firedAt: number): TriggerLimitDisabledReason | undefined {
+    if (!definition.limits) return undefined;
+    const limitState = this.state.ensureLimitState(definition.id);
+    if (definition.limits.maxRuns !== undefined && limitState.runCount >= definition.limits.maxRuns) {
+      return 'max_runs';
+    }
+    if (definition.limits.maxDuration !== undefined) {
+      const durationMs = parseDurationMs(definition.limits.maxDuration);
+      if (firedAt - limitState.startedAt >= durationMs) return 'max_duration';
+    }
+    return undefined;
+  }
+
+  private disableForLimit(
+    definition: TriggerDefinition,
+    scheduledAt: number | undefined,
+    firedAt: number,
+    reason: TriggerLimitDisabledReason,
+  ): TriggerAuditRecord {
+    this.state.markLimitDisabled(definition.id, reason);
+    this.setEnabled(definition.id, false);
+    return this.writeSkippedAudit(
+      definition,
+      scheduledAt,
+      firedAt,
+      reason === 'max_runs' ? 'max_runs_reached' : 'max_duration_reached',
+    );
   }
 
   private isOneShot(source: TriggerSource): boolean {
@@ -748,6 +832,11 @@ export class TriggerRuntimeScheduler {
   private async fireEventTrigger(triggerId: string, event: TriggerSourceEvent): Promise<void> {
     const definition = this.manager.get(triggerId);
     if (!definition?.enabled || definition.source.type !== 'event') return;
+    const disabledReason = this.limitDisabledReason(definition, event.firedAt);
+    if (disabledReason) {
+      this.disableForLimit(definition, undefined, event.firedAt, disabledReason);
+      return;
+    }
     await this.startRun(definition, {
       firedAt: event.firedAt,
       payload: event.payload,
@@ -962,4 +1051,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function limitsSignature(limits: TriggerDefinition['limits']): string {
+  return JSON.stringify(limits ?? null);
 }

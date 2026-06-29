@@ -1,5 +1,6 @@
 import { CronExpressionParser } from 'cron-parser';
 import type { TriggerScheduleType, TriggerSessionStrategy } from '../types.js';
+import type { TriggerPermissionMode } from './types.js';
 
 export interface ParsedTriggerSet {
   scheduleType: TriggerScheduleType;
@@ -18,6 +19,9 @@ export interface ParsedTriggerSet {
   mode?: 'agent-runner' | 'direct-message';
   onFailure?: 'notify' | 'silent';
   onNoop?: 'notify' | 'silent';
+  maxRuns?: number;
+  maxDuration?: string;
+  permissionMode?: TriggerPermissionMode;
 }
 
 export type ParseResult =
@@ -70,6 +74,43 @@ export function validateCronExpr(expr: string): boolean {
   }
 }
 
+function parsePositiveIntegerFlag(flags: Map<string, string | true>, name: string, label: string): { ok: true; value?: number } | { ok: false; error: string } {
+  if (!flags.has(name)) return { ok: true };
+  const raw = flags.get(name);
+  if (!raw || raw === true) return { ok: false, error: `${label} 不能为空` };
+  if (!/^[1-9]\d*$/.test(raw)) return { ok: false, error: `${label} 必须是正整数` };
+  const value = Number(raw);
+  return { ok: true, value };
+}
+
+function parseLimitDurationFlag(flags: Map<string, string | true>, name: string, label: string): { ok: true; value?: string } | { ok: false; error: string } {
+  if (!flags.has(name)) return { ok: true };
+  const raw = flags.get(name);
+  if (!raw || raw === true) return { ok: false, error: `${label} 不能为空` };
+  if (!/^[1-9]\d*(m|h|d)$/.test(raw)) return { ok: false, error: `${label} 支持格式：30m、12h、3d` };
+  return { ok: true, value: raw };
+}
+
+const PERMISSION_MODES = new Set<TriggerPermissionMode>([
+  'auto',
+  'bypass',
+  'readonly',
+  'plan',
+  'edit',
+  'request',
+  'noask',
+]);
+
+function parsePermissionModeFlag(flags: Map<string, string | true>): { ok: true; value?: TriggerPermissionMode } | { ok: false; error: string } {
+  if (!flags.has('permission')) return { ok: true };
+  const raw = flags.get('permission');
+  if (!raw || raw === true) return { ok: false, error: '--permission 不能为空' };
+  if (!PERMISSION_MODES.has(raw as TriggerPermissionMode)) {
+    return { ok: false, error: '--permission 只接受 auto、bypass、readonly、plan、edit、request 或 noask' };
+  }
+  return { ok: true, value: raw as TriggerPermissionMode };
+}
+
 export interface ParsedTriggerUpdate {
   scheduleType?: TriggerScheduleType;
   scheduleValue?: string;
@@ -90,6 +131,9 @@ export interface ParsedTriggerUpdate {
   mode?: 'agent-runner' | 'direct-message';
   onFailure?: 'notify' | 'silent';
   onNoop?: 'notify' | 'silent';
+  maxRuns?: number;
+  maxDuration?: string;
+  permissionMode?: TriggerPermissionMode;
 }
 
 export type UpdateParseResult =
@@ -267,6 +311,18 @@ export function parseTriggerUpdate(args: string): UpdateParseResult {
     result.onNoop = n;
   }
 
+  const maxRuns = parsePositiveIntegerFlag(flags, 'max-runs', '--max-runs');
+  if (!maxRuns.ok) return maxRuns;
+  if (maxRuns.value !== undefined) result.maxRuns = maxRuns.value;
+
+  const maxDuration = parseLimitDurationFlag(flags, 'max-duration', '--max-duration');
+  if (!maxDuration.ok) return maxDuration;
+  if (maxDuration.value !== undefined) result.maxDuration = maxDuration.value;
+
+  const permissionMode = parsePermissionModeFlag(flags);
+  if (!permissionMode.ok) return permissionMode;
+  if (permissionMode.value !== undefined) result.permissionMode = permissionMode.value;
+
   return { ok: true, nameOrId, value: result };
 }
 
@@ -431,6 +487,15 @@ export function parseTriggerSet(args: string): ParseResult {
     onNoop = n;
   }
 
+  const maxRuns = parsePositiveIntegerFlag(flags, 'max-runs', '--max-runs');
+  if (!maxRuns.ok) return maxRuns;
+
+  const maxDuration = parseLimitDurationFlag(flags, 'max-duration', '--max-duration');
+  if (!maxDuration.ok) return maxDuration;
+
+  const permissionMode = parsePermissionModeFlag(flags);
+  if (!permissionMode.ok) return permissionMode;
+
   return {
     ok: true,
     value: {
@@ -450,6 +515,9 @@ export function parseTriggerSet(args: string): ParseResult {
       mode,
       onFailure,
       onNoop,
+      maxRuns: maxRuns.value,
+      maxDuration: maxDuration.value,
+      permissionMode: permissionMode.value,
     },
   };
 }

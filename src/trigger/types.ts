@@ -1,3 +1,5 @@
+import type { PermissionMode } from '../types.js';
+
 export type TriggerMatchValue =
   | string
   | number
@@ -38,6 +40,7 @@ export type TriggerMissedPolicy = 'skip' | 'run_once' | 'run_all';
 export type TriggerFeedbackBranch = 'onReply' | 'onNoop' | 'default';
 export type TriggerRunPhase = 'running' | 'feedback-pending';
 export type TriggerRunStatus = 'completed' | 'noop' | 'skipped' | 'failed' | 'dry-run';
+export type TriggerPermissionMode = PermissionMode;
 
 export interface TriggerOrigin {
   channel?: string;
@@ -67,6 +70,7 @@ export interface TriggerExecution {
   prompt?: string;
   script?: TriggerScriptConfig;
   session: TriggerExecutionSession;
+  permissionMode?: TriggerPermissionMode;
   onError: 'fail' | 'retry';
   noopSentinel: string;
 }
@@ -100,6 +104,11 @@ export interface TriggerReliability {
   };
 }
 
+export interface TriggerLimits {
+  maxRuns?: number;
+  maxDuration?: string;
+}
+
 export interface TriggerDefinition {
   $schema_version: 3;
   id: string;
@@ -114,6 +123,7 @@ export interface TriggerDefinition {
   execution: TriggerExecution;
   feedback: TriggerFeedbackConfig;
   reliability: TriggerReliability;
+  limits?: TriggerLimits;
 }
 
 export interface TriggerCreateFile {
@@ -137,9 +147,16 @@ export interface TriggerActiveRun {
   events: TriggerRunEvent[];
 }
 
+export interface TriggerLimitState {
+  startedAt: number;
+  runCount: number;
+  disabledReason?: 'max_runs' | 'max_duration';
+}
+
 export interface TriggerActiveFile {
   runs: Record<string, TriggerActiveRun>;
   schedule?: TriggerScheduleState;
+  limits?: TriggerLimitState;
 }
 
 export interface TriggerScheduleState {

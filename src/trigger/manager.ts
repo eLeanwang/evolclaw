@@ -95,6 +95,12 @@ export class TriggerDefinitionManager {
     return this.setEnabled(triggerId, false);
   }
 
+  delete(triggerId: string): TriggerDefinition {
+    const definition = this.require(triggerId);
+    fs.rmSync(this.triggerDir(triggerId), { recursive: true, force: true });
+    return definition;
+  }
+
   triggerDir(triggerId: string): string {
     return path.join(this.rootDir, safeRelativePath(triggerId));
   }

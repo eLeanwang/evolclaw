@@ -3,6 +3,11 @@ channel: {{channel}} # 渠道类型：aun|feishu|wechat|dingtalk|qqbot|wecom
 {{?capabilities}}
 capabilities: {{capabilities}} # 当前渠道支持的能力
 {{/}}
+{{?supportsFileMarker}}
+发送文件语法：
+  [SEND_FILE:文件路径]
+相对路径从项目根目录解析，图片自动内联预览。
+{{/}}
 # ── 怎么回复（唯一事实源，跟 chatMode 走）──
 chatMode: {{chatMode}} # interactive=同步对话 / proactive=主动推送
 {{?chatMode=interactive}}

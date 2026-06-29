@@ -174,6 +174,17 @@ export class IMRenderer {
     return this.allText;
   }
 
+  /** 丢弃当前 attempt 的未发送内容；用于命中可重试错误后避免把瞬时错误文本发给用户。 */
+  discardPending(): void {
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = undefined;
+    }
+    this.itemsQueue = [];
+    this.textBuffer = '';
+    this.allText = '';
+  }
+
   /** 当前 buffer 中尚未 flush 的文本 */
   getRemainingText(): string {
     return this.textBuffer;

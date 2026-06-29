@@ -468,7 +468,7 @@ export function getMenuItems(this: any, role: string, chatType: string = 'privat
       commands: [
         { cmd: '/perm', label: '权限模式管理', desc: '控制工具调用的审批策略', next: { type: 'select', items: [
           { value: 'auto', label: '自动模式', desc: '根据风险等级自动决定是否审批' },
-          { value: 'bypass', label: '免审批模式', desc: '跳过所有工具审批确认' },
+          { value: 'bypass', label: '免审批模式', desc: '普通操作自动放行，危险操作仍需确认' },
           { value: 'readonly', label: '只读模式', desc: '允许读取和临时目录写入，拒绝项目文件修改' },
           { value: 'plan', label: '计划模式', desc: '仅允许只读操作，写操作需审批' },
           { value: 'edit', label: '编辑模式', desc: '允许文件编辑，其他操作需审批' },
@@ -1406,6 +1406,7 @@ export async function execMenuAction(this: any,
         targetThreadId: args.targetThreadId,
         targetSessionStrategy: strategy,
         agentId: args.agentId,
+        permissionMode: args.permissionMode,
       };
       const r = await this.registerTriggerFromParsed(
         parsed,
@@ -1413,7 +1414,9 @@ export async function execMenuAction(this: any,
         channelId,
         userId ?? '',
         undefined,
-        this.resolveMenuChatType(channel, channelId, explicitChatType)
+        this.resolveMenuChatType(channel, channelId, explicitChatType),
+        undefined,
+        isAdmin
       );
       if (!r.ok) return { error: r.error, code: /已存在|exists|重复/.test(r.error) ? 'CONFLICT' : 'INVALID_ARGS' };
       return { data: { id: r.trigger.id, name: r.trigger.name, nextFireAt: r.trigger.nextFireAt } };

@@ -70,7 +70,6 @@ const translations = {
     'agents.stats.online': '在线',
     'agents.stats.offline': '离线',
     'agents.stats.messages': 'Messages',
-    'agents.stats.traffic': 'Traffic',
     'agents.stats.version': 'Version',
     'agents.stats.pid': 'PID',
     'agents.stats.uptime': 'Uptime',
@@ -84,9 +83,9 @@ const translations = {
     'agents.th.runtime': '运行',
     'agents.th.received': '收',
     'agents.th.sent': '发',
-    'agents.th.bytesIn': '入字节',
-    'agents.th.bytesOut': '出字节',
-    'agents.th.peerCount': '对端数量',
+    'agents.th.completed': '完',
+    'agents.th.errors': '错',
+    'agents.th.interrupts': '断',
     'agents.th.lastActivity': '最后活动',
     'agents.th.operations': '操作',
     'agents.th.projectPath': '项目路径',
@@ -114,11 +113,11 @@ const translations = {
     'agents.op.viewAgentMd': '查看 agent.md ↗',
 
     // Messages view
-    'messages.colTitle.aid': 'AID',
-    'messages.colTitle.peers': 'Peers',
+    'messages.colTitle.aid': 'Agent',
+    'messages.colTitle.peers': 'Chats',
     'messages.colTitle.all': 'All',
-    'messages.empty.selectAid': '← 选择一个 AID',
-    'messages.empty.selectToView': '选择 AID 查看消息',
+    'messages.empty.selectAid': '← 选择一个 Agent',
+    'messages.empty.selectToView': '选择 Agent 查看消息',
     'messages.empty.noMessages': '暂无消息',
     'messages.tag.group': '群聊',
     'messages.tag.encrypted': '🔒密文',
@@ -345,7 +344,6 @@ const translations = {
     'agents.stats.online': 'online',
     'agents.stats.offline': 'offline',
     'agents.stats.messages': 'Messages',
-    'agents.stats.traffic': 'Traffic',
     'agents.stats.version': 'Version',
     'agents.stats.pid': 'PID',
     'agents.stats.uptime': 'Uptime',
@@ -359,9 +357,9 @@ const translations = {
     'agents.th.runtime': 'Runtime',
     'agents.th.received': 'Recv',
     'agents.th.sent': 'Sent',
-    'agents.th.bytesIn': 'Bytes In',
-    'agents.th.bytesOut': 'Bytes Out',
-    'agents.th.peerCount': 'Peers',
+    'agents.th.completed': 'Done',
+    'agents.th.errors': 'Err',
+    'agents.th.interrupts': 'Int',
     'agents.th.lastActivity': 'Last Activity',
     'agents.th.operations': 'Operations',
     'agents.th.projectPath': 'Project Path',
@@ -389,11 +387,11 @@ const translations = {
     'agents.op.viewAgentMd': 'View agent.md ↗',
 
     // Messages view
-    'messages.colTitle.aid': 'AID',
-    'messages.colTitle.peers': 'Peers',
+    'messages.colTitle.aid': 'Agent',
+    'messages.colTitle.peers': 'Chats',
     'messages.colTitle.all': 'All',
-    'messages.empty.selectAid': '← Select an AID',
-    'messages.empty.selectToView': 'Select AID to view messages',
+    'messages.empty.selectAid': '← Select Agent',
+    'messages.empty.selectToView': 'Select Agent to view messages',
     'messages.empty.noMessages': 'No messages',
     'messages.tag.group': 'Group',
     'messages.tag.encrypted': '🔒Encrypted',
@@ -687,20 +685,44 @@ function connect() {
   ws.onopen = () => {
     setConnStatus('● ' + t('status.connected'), 'ok');
     reconnectDelay = 1000;
-    subscribe(currentView, pendingSub || {});
+    // 获取可用的 baseagent
+    fetch(`${BASE}api/available-baseagents`)
+      .then(r => r.json())
+      .then(data => {
+        availableBaseagents = data;
+        // 如果当前没有选中 baseagent，默认选第一个可用的
+        if (!sessSel.baseagent) {
+          sessSel.baseagent = data.claude ? 'claude' : (data.codex ? 'codex' : null);
+        }
+        console.log('[ecweb] Available baseagents:', availableBaseagents, 'Selected:', sessSel.baseagent);
+        // 重新订阅当前视图（带上正确的参数）
+        if (currentView === 'session') {
+          subscribe('session', { sessionId: sessSel.sessionId, project: sessSel.project, baseagent: sessSel.baseagent });
+        } else {
+          subscribe(currentView, pendingSub || {});
+        }
+      })
+      .catch(err => {
+        console.warn('[ecweb] Failed to fetch available-baseagents:', err);
+        // 失败时默认使用 claude
+        availableBaseagents = { claude: true, codex: false };
+        if (!sessSel.baseagent) sessSel.baseagent = 'claude';
+        subscribe(currentView, pendingSub || {});
+      });
   };
 
   ws.onmessage = (ev) => {
     let msg;
     try { msg = JSON.parse(ev.data); } catch { return; }
     if (msg.type === 'pong') return;
-    if (msg.type === 'error') { console.warn('server error:', msg.message); return; }
+    if (msg.type === 'error') { console.warn('[ecweb] Server error:', msg.message); return; }
     if (msg.type === 'menu.response') {
       const pend = _menuPending[msg.requestId];
       if (pend) { delete _menuPending[msg.requestId]; pend.resolve(msg.data); }
       return;
     }
     if (msg.type === 'snapshot' || msg.type === 'delta') {
+      console.log('[ecweb] Received', msg.type, 'for view:', msg.view, 'currentView:', currentView);
       // system 视图保留客户端写入的 check/upgrade，防止 3s 轮询覆盖
       if (msg.view === 'system' && state.system) {
         state.system = {
@@ -711,7 +733,10 @@ function connect() {
       } else {
         state[msg.view] = msg.data;
       }
-      if (msg.view === currentView) renderView(currentView);
+      if (msg.view === currentView) {
+        console.log('[ecweb] Rendering view:', currentView, 'with data:', msg.data);
+        renderView(currentView);
+      }
     }
   };
 
@@ -732,7 +757,14 @@ function connect() {
 function subscribe(view, params) {
   pendingSub = params;
   if (ws && ws.readyState === WebSocket.OPEN) {
+    // session 视图添加 baseagent 参数
+    if (view === 'session' && sessSel.baseagent) {
+      params = { ...params, baseagent: sessSel.baseagent };
+    }
+    console.log('[ecweb] Subscribing:', view, params);
     ws.send(JSON.stringify({ type: 'subscribe', view, ...params }));
+  } else {
+    console.warn('[ecweb] WebSocket not ready, subscription pending');
   }
 }
 
@@ -759,12 +791,13 @@ setInterval(() => {
 
 // ── Tab 切换 ──
 let msgSel = { aid: null, peer: null };
-let sessSel = { sessionId: null, project: null };
+let sessSel = { sessionId: null, project: null, baseagent: null };
 let trigSel = { agent: null };
 let sessSearch = '';
 let sessFilterNormal = false; // true=只显示有效会话（userMsgs >= 2）
 let sessChatMode = false;   // false=完整视图，true=对话视图（折叠处理过程）
 let monRange = '2m';        // Monitor 时间窗口：2m / 10m / 1h
+let availableBaseagents = { claude: false, codex: false }; // 可用的 baseagent
 
 function switchView(view) {
   currentView = view;
@@ -773,7 +806,7 @@ function switchView(view) {
   document.querySelectorAll('.view').forEach(v => v.classList.toggle('active', v.id === 'view-' + view));
   // 切换时按当前选择恢复订阅
   if (view === 'msg') subscribe('msg', { aid: msgSel.aid, peer: msgSel.peer });
-  else if (view === 'session') subscribe('session', { sessionId: sessSel.sessionId, project: sessSel.project });
+  else if (view === 'session') subscribe('session', { sessionId: sessSel.sessionId, project: sessSel.project, baseagent: sessSel.baseagent });
   else if (view === 'cache') subscribe('cache', {});
   else if (view === 'system') subscribe('system', {});
   else if (view === 'triggers') subscribe('triggers', { agent: trigSel.agent });
@@ -805,6 +838,11 @@ function esc(s) {
   return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 }
 function shortAid(aid) { return String(aid || '').split('.')[0]; }
+function shortId(id) {
+  const s = String(id || '');
+  if (!s) return 'unknown';
+  return s.includes('.') ? shortAid(s) : (s.length > 18 ? s.slice(0, 10) + '…' + s.slice(-5) : s);
+}
 function fmtBytes(b) {
   if (!b) return '0';
   const u = ['B', 'KB', 'MB', 'GB']; let i = Math.min(Math.floor(Math.log(b) / Math.log(1024)), 3);
@@ -867,7 +905,8 @@ function agentStateBadge(s, agStatus, connStatus) {
   if ((s.processing || 0) > 0)
     return `<span class="state-badge working">${t('status.working')}</span>`;
   // 收到过消息 → 永远是 idle，不再回到 connected
-  if ((s.messagesReceived || 0) > 0 || (s.messagesSent || 0) > 0)
+  if ((s.received || 0) > 0 || (s.sent || 0) > 0 || (s.completed || 0) > 0 || (s.errors || 0) > 0 || (s.interrupts || 0) > 0 ||
+      (s.messagesReceived || 0) > 0 || (s.messagesSent || 0) > 0)
     return `<span class="state-badge idle">${t('status.idle')}</span>`;
   return `<span class="state-badge connected">${t('status.connected')}</span>`;
 }
@@ -1005,14 +1044,17 @@ function initMsgTipFloat() {
   window.addEventListener('scroll', hideNow, true);
 }
 
-// 顶部统计条：Gateway / AIDs total·connected·offline / Messages ↓↑ / Traffic ↓↑ / Version·PID·Uptime
-function agentsStatsBar(data, aids, stats) {
+// 顶部统计条：Gateway / AIDs total·connected·offline / Messages / Version·PID·Uptime
+function agentsStatsBar(data, aids, agentStats) {
   const connected = aids.filter(a => (a.status || 'connected') === 'connected').length;
   const offline = aids.length - connected;
-  let recv = 0, sent = 0, bin = 0, bout = 0;
-  for (const s of stats) {
-    recv += s.messagesReceived || 0; sent += s.messagesSent || 0;
-    bin += s.bytesReceived || 0; bout += s.bytesSent || 0;
+  let recv = 0, sent = 0, done = 0, errors = 0, interrupts = 0;
+  for (const s of agentStats) {
+    recv += s.received || 0;
+    sent += s.sent || 0;
+    done += s.completed || 0;
+    errors += s.errors || 0;
+    interrupts += s.interrupts || 0;
   }
   const gws = [...new Set(aids.filter(a => a.gatewayUrl).map(a => a.gatewayUrl))];
   const gw = gws.length ? gws.map(esc).join(', ') : '—';
@@ -1025,11 +1067,17 @@ function agentsStatsBar(data, aids, stats) {
   h += `<span class="sg"><span class="sg-k">${t('agents.stats.gateway')}</span><span class="sg-gw">${gw}</span></span>`;
   h += `<span class="sg"><span class="sg-k">${t('agents.stats.aids')}</span>${aids.length} ${t('agents.stats.total')} · <span class="num-on">${connected} ${t('agents.stats.online')}</span>` +
     `${offline ? ` · <span class="num-off">${offline} ${t('agents.stats.offline')}</span>` : ''}</span>`;
-  h += `<span class="sg"><span class="sg-k">${t('agents.stats.messages')}</span><span class="in">↓${recv}</span> <span class="out">↑${sent}</span></span>`;
-  h += `<span class="sg"><span class="sg-k">${t('agents.stats.traffic')}</span><span class="in">↓${fmtBytes(bin)}</span> <span class="out">↑${fmtBytes(bout)}</span></span>`;
+  h += `<span class="sg"><span class="sg-k">${t('agents.stats.messages')}</span>收 ${recv} · 发 ${sent} · 错 ${errors} · 断 ${interrupts} · 完 ${done}</span>`;
   h += `<span class="sg"><span class="sg-k">${t('agents.stats.version')}</span>${esc(ver)} · <span class="sg-k">${t('agents.stats.pid')}</span>${pid} · <span class="sg-k">${t('agents.stats.uptime')}</span>${uptime}</span>`;
   h += '</div>';
   return h;
+}
+
+function agentQueueHtml(s) {
+  const processing = s.processing || 0;
+  const queued = s.queued || 0;
+  if (processing === 0 && queued === 0) return '<span class="ag-queue-empty">-</span>';
+  return `<span class="ag-queue-num">${processing}/${queued}</span>`;
 }
 
 // 操作列 HTML（启用页）：停止/启动 + 清空队列(conditional) + ···(禁用/重载/编辑/md/删除)
@@ -1064,6 +1112,8 @@ function renderAgents(data) {
   const aids = data.aids || [];
   const statsByAid = {};
   for (const s of (data.stats || [])) statsByAid[s.aid] = s;
+  const agentStatsByAid = {};
+  for (const s of (data.agentStats || [])) agentStatsByAid[s.aid] = s;
   const aidConnByAid = {};
   for (const a of aids) aidConnByAid[a.aid] = a;
 
@@ -1107,13 +1157,13 @@ function renderAgents(data) {
   }
 
   // ── 启用页 ──
-  // 按收发消息总数降序排序（活跃的排前面）
-  const totalMsgs = (ag) => {
-    const s = statsByAid[ag.aid] || {};
-    return (s.messagesReceived || 0) + (s.messagesSent || 0);
+  // 按全渠道任务活动降序排序（活跃的排前面）
+  const totalActivity = (ag) => {
+    const s = agentStatsByAid[ag.aid] || {};
+    return (s.received || 0) + (s.sent || 0) + (s.completed || 0) + (s.errors || 0) + (s.interrupts || 0);
   };
   const enabledAgents = allAgents.filter(ag => ag.status !== 'disabled')
-    .sort((a, b) => totalMsgs(b) - totalMsgs(a));
+    .sort((a, b) => totalActivity(b) - totalActivity(a));
   if (!enabledAgents.length) {
     html += `<div class="empty">${t('agents.empty.enabled')}</div>`;
     el.innerHTML = html;
@@ -1122,12 +1172,14 @@ function renderAgents(data) {
   }
 
   html += '<table><thead><tr>' +
-    `<th>${t('agents.th.aid')}</th><th>${t('agents.th.work')}</th><th>${t('agents.th.queue')}</th><th>${t('agents.th.model')}</th><th>${t('agents.th.runtime')}</th><th>${t('agents.th.received')}</th><th>${t('agents.th.sent')}</th>` +
-    `<th>${t('agents.th.bytesIn')}</th><th>${t('agents.th.bytesOut')}</th><th>${t('agents.th.peerCount')}</th><th>${t('agents.th.lastActivity')}</th><th>${t('agents.th.operations')}</th>` +
+    `<th>${t('agents.th.aid')}</th><th>${t('agents.th.work')}</th><th>${t('agents.th.queue')}</th><th>${t('agents.th.model')}</th><th>${t('agents.th.runtime')}</th>` +
+    `<th>${t('agents.th.received')}</th><th>${t('agents.th.sent')}</th><th>${t('agents.th.errors')}</th><th>${t('agents.th.interrupts')}</th><th>${t('agents.th.completed')}</th>` +
+    `<th>${t('agents.th.lastActivity')}</th><th>${t('agents.th.operations')}</th>` +
     '</tr></thead><tbody>';
 
   for (const ag of enabledAgents) {
     const s = statsByAid[ag.aid] || {};
+    const runStats = agentStatsByAid[ag.aid] || {};
     const conn = aidConnByAid[ag.aid] || {};
     const connStatus = conn.status || (ag.status === 'running' ? 'connected' : 'disconnected');
     const dotCls = connStatus === 'connected' ? 'on' : (connStatus === 'reconnecting' ? 'idle' : 'off');
@@ -1135,10 +1187,7 @@ function renderAgents(data) {
     const uptime = (connStatus === 'connected' && conn.lastConnectedAt) ? fmtDur((Date.now() - conn.lastConnectedAt) / 1000) : '—';
     const lastTs = Math.max(s.lastReceivedAt || 0, s.lastSentAt || 0, ag.lastActivity || 0);
     const preview = agentPreviewHtml(s);
-    // 队列数：不含正在处理的那条
-    const rawQueued = s.queued || 0;
-    const queued = rawQueued;
-    const queueCell = queued > 0 ? `<span class="ag-queue-num">${queued}</span>` : '<span style="color:var(--dim)">0</span>';
+    const queueCell = agentQueueHtml(runStats);
     const model = ag.model || ag.baseagent || '—';
 
     const idCell = `<div class="ag-id"><span class="dot ${dotCls}" title="${esc(connStatus)}"></span>` +
@@ -1147,15 +1196,17 @@ function renderAgents(data) {
 
     html += `<tr class="ag-main">` +
       `<td>${idCell}</td>` +
-      `<td>${agentStateBadge(s, ag.status, connStatus)}</td>` +
+      `<td>${agentStateBadge({ ...s, ...runStats }, ag.status, connStatus)}</td>` +
       `<td>${queueCell}</td>` +
       `<td style="font-size:11px;color:var(--dim)">${esc(model)}</td>` +
       `<td>${uptime}</td>` +
-      `<td>${s.messagesReceived ?? 0}</td><td>${s.messagesSent ?? 0}</td>` +
-      `<td>${fmtBytes(s.bytesReceived)}</td><td>${fmtBytes(s.bytesSent)}</td>` +
-      `<td>${s.uniquePeerCount ?? conn.peerCount ?? 0}</td>` +
+      `<td>${runStats.received || 0}</td>` +
+      `<td>${runStats.sent || 0}</td>` +
+      `<td>${runStats.errors || 0}</td>` +
+      `<td>${runStats.interrupts || 0}</td>` +
+      `<td>${runStats.completed || 0}</td>` +
       `<td>${fmtAgo(lastTs)}</td>` +
-      `<td class="agent-ops-cell">${agentOpsHtml(ag.aid, ag, s)}</td>` +
+      `<td class="agent-ops-cell">${agentOpsHtml(ag.aid, ag, runStats)}</td>` +
       '</tr>';
     // 自定义 tooltip（HTML，hover 显示）
     const recent = (s.recentMessages || []);
@@ -1168,7 +1219,7 @@ function renderAgents(data) {
   }
   html += '</tbody></table>';
   if (data.daemonRunning) {
-    html += agentsStatsBar(data, aids, data.stats || []);
+    html += agentsStatsBar(data, aids, data.agentStats || []);
   }
   el.innerHTML = html;
   bindAgentsEvents(el);
@@ -1301,17 +1352,20 @@ function card(label, value, valCls, sub) {
 // ── Messages 视图 ──
 function renderMsg(data) {
   if (!data) return;
-  const aids = data.aids || [];
+  const aids = data.scopes || data.aids || [];
   const peers = data.peers || [];
   const messages = data.messages || [];
+  if (data.scope && data.scope !== msgSel.aid) msgSel.aid = data.scope;
 
   // 左：AID 列表
   let aidsHtml = `<div class="col-title">${t('messages.colTitle.aid')}</div>`;
   for (const a of aids) {
     const sel = a.aid === msgSel.aid ? ' sel' : '';
+    const name = a.selfAID && a.selfAID !== 'unknown' ? shortAid(a.selfAID) : 'unknown';
+    const groupBit = a.groupCount ? ` · 群 ${a.groupCount}` : '';
     aidsHtml += `<div class="list-item${sel}" data-aid="${esc(a.aid)}">` +
-      `<div class="name">${esc(shortAid(a.aid))}</div>` +
-      `<div class="sub">↓${a.totalIn} ↑${a.totalOut} · ${a.peerCount} peers</div></div>`;
+      `<div class="name">${esc(name)}</div>` +
+      `<div class="sub">↓${a.totalIn} ↑${a.totalOut} · ${a.peerCount} chats${groupBit} · ${fmtAgo(a.lastAt)}</div></div>`;
   }
   $('#msg-aids').innerHTML = aidsHtml;
   $('#msg-aids').querySelectorAll('.list-item').forEach(item => {
@@ -1323,11 +1377,16 @@ function renderMsg(data) {
   if (msgSel.aid) {
     const allSel = msgSel.peer === null ? ' sel' : '';
     peersHtml += `<div class="list-item${allSel}" data-peer=""><div class="name">${t('messages.colTitle.all')}</div>` +
-      `<div class="sub">${peers.length} peers</div></div>`;
+      `<div class="sub">${peers.length} chats</div></div>`;
     for (const p of peers) {
       const sel = p.peerId === msgSel.peer ? ' sel' : '';
+      const displayName = p.chatType === 'group'
+        ? (p.groupName || p.peerName || p.groupId || p.peerId)
+        : (p.peerName || p.peerId);
+      const channelLabel = p.channelName && p.channelName !== 'main' ? `${p.channelType}/${p.channelName}` : (p.channelType || '');
+      const typeLabel = p.chatType === 'group' ? `${channelLabel} · ${t('messages.tag.group')}` : channelLabel;
       peersHtml += `<div class="list-item${sel}" data-peer="${esc(p.peerId)}">` +
-        `<div class="name">${esc(p.peerName || shortAid(p.peerId))}</div>` +
+        `<div class="name">${esc(shortId(displayName))} <span class="tag">${esc(typeLabel)}</span></div>` +
         `<div class="sub">↓${p.inbound} ↑${p.outbound} · ${fmtAgo(p.lastAt)}</div></div>`;
     }
   } else {
@@ -1346,8 +1405,9 @@ function renderMsg(data) {
   for (const m of messages) {
     const cls = m.dir === 'in' ? 'in' : 'out';
     const arrow = m.dir === 'in' ? '↓' : '↑';
-    const from = shortAid(m.from), to = shortAid(m.to);
+    const from = shortId(m.from), to = shortId(m.to);
     const tags = [];
+    if (m.channelType) tags.push(m.channelType);
     if (m.chatType === 'group') tags.push(t('messages.tag.group'));
     // 消息详情流的 kind 来自 jsonl 的 msgType（text/thought/image/file/command），
     // 与 agents 页内存态的 MsgKind（send/thought/inject/notify）不是同一套词汇。
@@ -1388,8 +1448,19 @@ function renderSession(data) {
   const projOpts = projects.map(p =>
     `<option value="${esc(p.encoded)}"${p.encoded === sessSel.project ? ' selected' : ''}>${esc(p.label)} (${p.count})</option>`
   ).join('');
+
+  // baseagent 下拉选择器（只显示可用的）
+  let baseagentOpts = '';
+  if (availableBaseagents.claude) {
+    baseagentOpts += `<option value="claude"${sessSel.baseagent === 'claude' ? ' selected' : ''}>Claude</option>`;
+  }
+  if (availableBaseagents.codex) {
+    baseagentOpts += `<option value="codex"${sessSel.baseagent === 'codex' ? ' selected' : ''}>Codex</option>`;
+  }
+
   const normalCount = transcripts.filter(t => (t.userMsgs || 0) >= 2).length;
   let listHtml = '<div class="sess-filter">' +
+    `<select id="sess-baseagent" title="Base Agent">${baseagentOpts}</select>` +
     `<select id="sess-project">${projOpts}</select>` +
     `<input id="sess-search" type="text" placeholder="搜索标题/首条消息…" value="${esc(sessSearch)}">` +
     `<button id="sess-filter-btn" class="ctrl-btn${sessFilterNormal ? ' active' : ''}" title="只显示有效会话（≥2 条用户消息）">有效 ${normalCount}</button>` +
@@ -1417,11 +1488,19 @@ function renderSession(data) {
   $('#sess-list').innerHTML = listHtml;
 
   // 绑定交互（注意保持搜索框焦点）
+  const baseagentSel = $('#sess-baseagent');
+  if (baseagentSel) baseagentSel.onchange = () => {
+    console.log('[ecweb] Baseagent changed to:', baseagentSel.value);
+    sessSel = { sessionId: null, project: null, baseagent: baseagentSel.value };
+    sessSearch = '';
+    console.log('[ecweb] Subscribing to session with baseagent:', sessSel.baseagent);
+    subscribe('session', { baseagent: sessSel.baseagent });
+  };
   const projSel = $('#sess-project');
   if (projSel) projSel.onchange = () => {
-    sessSel = { sessionId: null, project: projSel.value };
+    sessSel = { sessionId: null, project: projSel.value, baseagent: sessSel.baseagent };
     sessSearch = '';
-    subscribe('session', { project: sessSel.project });
+    subscribe('session', { project: sessSel.project, baseagent: sessSel.baseagent });
   };
   const filterBtn = $('#sess-filter-btn');
   if (filterBtn) filterBtn.onclick = () => { sessFilterNormal = !sessFilterNormal; renderSession(state.session); };
@@ -1431,7 +1510,7 @@ function renderSession(data) {
     if (q) { searchEl.focus(); searchEl.setSelectionRange(searchEl.value.length, searchEl.value.length); }
   }
   $('#sess-list').querySelectorAll('.list-item').forEach(item => {
-    item.onclick = () => { sessSel = { sessionId: item.dataset.sid, project: sessSel.project }; subscribe('session', sessSel); };
+    item.onclick = () => { sessSel = { sessionId: item.dataset.sid, project: sessSel.project, baseagent: sessSel.baseagent }; subscribe('session', sessSel); };
   });
 
   // 右：transcript 详情
@@ -3553,21 +3632,21 @@ function renderMonitor(data) {
   $('#mon-agent-table-wrap').innerHTML =
     '<div class="mon-section-title">各 Agent 运行状态</div>' +
     '<table class="usage-table"><thead><tr>' +
-    '<th>Agent</th><th>状态</th><th>收</th><th>发</th><th>流入</th><th>流出</th><th>对端</th><th>队列</th><th>处理中</th>' +
+    '<th>Agent</th><th>状态</th><th>收</th><th>发</th><th>错</th><th>断</th><th>完</th><th>队列</th><th>处理中</th>' +
     '</tr></thead><tbody>' +
     (agents.length ? agents.map(function (a) {
-      var st = a.stats || {};
+      var st = a.runtimeStats || {};
       var dot = dotMap[a.status] || 'off';
       return '<tr>' +
         '<td title="' + esc(a.aid) + '">' + esc(a.agentName || shortAid(a.aid)) + '</td>' +
         '<td><span class="dot ' + dot + '"></span>' + esc(a.status) + '</td>' +
-        '<td>' + (st.messagesReceived || 0) + '</td>' +
-        '<td>' + (st.messagesSent || 0) + '</td>' +
-        '<td>' + fmtBytes(st.bytesReceived || 0) + '</td>' +
-        '<td>' + fmtBytes(st.bytesSent || 0) + '</td>' +
-        '<td>' + (st.uniquePeerCount || 0) + '</td>' +
+        '<td>' + (st.received || 0) + '</td>' +
+        '<td>' + (st.sent || 0) + '</td>' +
+        '<td>' + (st.errors || 0) + '</td>' +
+        '<td>' + (st.interrupts || 0) + '</td>' +
+        '<td>' + (st.completed || 0) + '</td>' +
         '<td>' + (st.queued || 0) + '</td>' +
-        '<td>' + (st.processing ? '⚙ ' + st.processing : 0) + '</td>' +
+        '<td>' + (st.processing || 0) + '</td>' +
         '</tr>';
     }).join('') : '<tr><td colspan="9" style="text-align:center;color:var(--dim)">暂无 Agent</td></tr>') +
     '</tbody></table>';
